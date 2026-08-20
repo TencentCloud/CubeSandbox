@@ -418,7 +418,11 @@ pub struct ListedSandbox {
     pub end_at: Option<DateTime<Utc>>,
     #[serde(rename = "cpuCount")]
     pub cpu_count: i32,
+    /// Exact CPU allocation in millicores. Optional for compatibility with older responses.
+    #[serde(rename = "cpuMilli", skip_serializing_if = "Option::is_none")]
+    pub cpu_milli: Option<i32>,
     #[serde(rename = "memoryMB")]
+    /// Historical field name; the value is memory in MiB.
     pub memory_mb: i32,
     #[serde(rename = "diskSizeMB", skip_serializing_if = "Option::is_none")]
     pub disk_size_mb: Option<i32>,
@@ -456,7 +460,11 @@ pub struct SandboxDetail {
     pub domain: Option<String>,
     #[serde(rename = "cpuCount")]
     pub cpu_count: i32,
+    /// Exact CPU allocation in millicores. Optional for compatibility with older responses.
+    #[serde(rename = "cpuMilli", skip_serializing_if = "Option::is_none")]
+    pub cpu_milli: Option<i32>,
     #[serde(rename = "memoryMB")]
+    /// Historical field name; the value is memory in MiB.
     pub memory_mb: i32,
     #[serde(rename = "diskSizeMB", skip_serializing_if = "Option::is_none")]
     pub disk_size_mb: Option<i32>,
@@ -1244,6 +1252,7 @@ pub struct NodeResourcesView {
     #[serde(rename = "cpuMilli")]
     pub cpu_milli: i64,
     #[serde(rename = "memoryMB")]
+    /// Memory in MiB. The MB suffix is retained for API compatibility.
     pub memory_mb: i64,
 }
 

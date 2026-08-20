@@ -143,6 +143,7 @@ impl SandboxService {
             envd_access_token: None,
             domain: Some(self.sandbox_domain.clone()),
             cpu_count: d.cpu_count,
+            cpu_milli: (d.cpu_milli > 0).then_some(d.cpu_milli),
             memory_mb: d.memory_mb,
             disk_size_mb: Some(d.disk_size_mb),
             metadata: optional_metadata(d.labels),
@@ -853,8 +854,17 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
         client_id: s.host_id,
         started_at,
         end_at: s.end_at,
-        cpu_count: s.cpu_count,
-        memory_mb: s.memory_mb,
+        cpu_count: if s.cpu_milli > 0 {
+            s.cpu_milli / 1000
+        } else {
+            s.cpu_count
+        },
+        cpu_milli: (s.cpu_milli > 0).then_some(s.cpu_milli),
+        memory_mb: if s.memory_mib > 0 {
+            s.memory_mib
+        } else {
+            s.memory_mb
+        },
         disk_size_mb: Some(0),
         metadata: optional_metadata(s.labels),
         state: sandbox_state_from_str(&s.status),
@@ -1689,6 +1699,8 @@ mod tests {
             end_at: None,
             cpu_count: 2,
             memory_mb: 2048,
+            cpu_milli: 0,
+            memory_mib: 0,
             template_id: "tpl-1".to_string(),
             annotations: HashMap::new(),
             labels: HashMap::new(),
@@ -1696,8 +1708,33 @@ mod tests {
         });
 
         assert_eq!(listed.cpu_count, 2);
+        assert_eq!(listed.cpu_milli, None);
         assert_eq!(listed.memory_mb, 2048);
         assert_eq!(listed.template_id, "tpl-1");
+    }
+
+    #[test]
+    fn listed_sandbox_prefers_exact_resource_units_from_cubemaster() {
+        let listed = from_cubemaster_info(SandboxInfo {
+            sandbox_id: "sb-small".to_string(),
+            host_id: "host-1".to_string(),
+            status: "running".to_string(),
+            started_at: None,
+            create_at: 0,
+            end_at: None,
+            cpu_count: 0,
+            memory_mb: 537,
+            cpu_milli: 500,
+            memory_mib: 512,
+            template_id: "tpl-1".to_string(),
+            annotations: HashMap::new(),
+            labels: HashMap::new(),
+            volume_mounts: vec![],
+        });
+
+        assert_eq!(listed.cpu_count, 0);
+        assert_eq!(listed.cpu_milli, Some(500));
+        assert_eq!(listed.memory_mb, 512);
     }
 
     #[test]

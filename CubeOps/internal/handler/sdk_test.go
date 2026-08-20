@@ -48,9 +48,11 @@ func TestSDK_ListSandboxes_Success(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("len(items) = %d, want 1", len(items))
 	}
-	// cpuCount is converted to millicores string "2000m".
-	if items[0]["cpuCount"] != "2000m" {
-		t.Errorf("cpuCount = %v, want 2000m", items[0]["cpuCount"])
+	if items[0]["cpuCount"] != float64(2) {
+		t.Errorf("cpuCount = %v, want 2", items[0]["cpuCount"])
+	}
+	if items[0]["cpuMilli"] != float64(2000) {
+		t.Errorf("cpuMilli = %v, want 2000", items[0]["cpuMilli"])
 	}
 	if items[0]["sandboxID"] != "sb-1" {
 		t.Errorf("sandboxID = %v, want sb-1", items[0]["sandboxID"])
@@ -61,6 +63,44 @@ func TestSDK_ListSandboxes_Success(t *testing.T) {
 	// Labels should be promoted to "metadata".
 	if meta, ok := items[0]["metadata"].(map[string]interface{}); !ok || meta["owner"] != "alice" {
 		t.Errorf("metadata = %v, want {owner:alice}", items[0]["metadata"])
+	}
+}
+
+func TestSDK_ListSandboxes_PrefersExactResourceUnits(t *testing.T) {
+	cm := &fakeCM{
+		listSandboxesWithBody: func(_ context.Context, _ interface{}) (json.RawMessage, error) {
+			return raw(`{
+				"ret": {"ret_code": 0},
+				"data": [{
+					"sandbox_id": "sb-small", "host_id": "node-a",
+					"cpu_count": 0, "memory_mb": 525,
+					"cpu_milli": 100, "memory_mib": 500,
+					"annotations": {}, "labels": {}
+				}]
+			}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/sandboxes")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var items []map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &items); err != nil {
+		t.Fatalf("unmarshal array: %v body=%s", err, w.Body.String())
+	}
+	if len(items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(items))
+	}
+	if items[0]["cpuCount"] != float64(0) {
+		t.Errorf("cpuCount = %v, want 0", items[0]["cpuCount"])
+	}
+	if items[0]["cpuMilli"] != float64(100) {
+		t.Errorf("cpuMilli = %v, want 100", items[0]["cpuMilli"])
+	}
+	if items[0]["memoryMB"] != float64(500) {
+		t.Errorf("memoryMB = %v, want 500", items[0]["memoryMB"])
 	}
 }
 
@@ -110,9 +150,11 @@ func TestSDK_GetSandbox_Success(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
 		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
 	}
-	// cpuCount is passed through as-is ("2000m") from container spec.
-	if detail["cpuCount"] != "2000m" {
-		t.Errorf("cpuCount = %v, want 2000m", detail["cpuCount"])
+	if detail["cpuCount"] != float64(2) {
+		t.Errorf("cpuCount = %v, want 2", detail["cpuCount"])
+	}
+	if detail["cpuMilli"] != float64(2000) {
+		t.Errorf("cpuMilli = %v, want 2000", detail["cpuMilli"])
 	}
 	if detail["memoryMB"] != float64(2048) {
 		t.Errorf("memoryMB = %v, want 2048", detail["memoryMB"])

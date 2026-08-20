@@ -1498,6 +1498,11 @@ components:
         cpuCount:
           type: integer
           format: int32
+          description: Legacy whole-vCPU count. Use cpuMilli for fractional CPU values.
+        cpuMilli:
+          type: integer
+          format: int32
+          description: Exact CPU allocation in millicores, e.g. 100 or 500.
         diskSizeMB:
           type:
           - integer
@@ -1516,6 +1521,7 @@ components:
         memoryMB:
           type: integer
           format: int32
+          description: Memory in MiB. The MB suffix is retained for API compatibility.
         metadata:
           oneOf:
           - type: 'null'
@@ -1774,6 +1780,11 @@ components:
         cpuCount:
           type: integer
           format: int32
+          description: Legacy whole-vCPU count. Use cpuMilli for fractional CPU values.
+        cpuMilli:
+          type: integer
+          format: int32
+          description: Exact CPU allocation in millicores, e.g. 100 or 500.
         diskSizeMB:
           type:
           - integer
@@ -1800,6 +1811,7 @@ components:
         memoryMB:
           type: integer
           format: int32
+          description: Memory in MiB. The MB suffix is retained for API compatibility.
         metadata:
           oneOf:
           - type: 'null'

@@ -48,6 +48,8 @@ type CMSandboxListItem struct {
 	EndAt       json.RawMessage   `json:"end_at"`
 	CPUCount    int               `json:"cpu_count"`
 	MemoryMB    int               `json:"memory_mb"`
+	CPUMilli    int               `json:"cpu_milli"`
+	MemoryMiB   int               `json:"memory_mib"`
 	TemplateID  string            `json:"template_id"`
 	Annotations map[string]string `json:"annotations"`
 	Labels      map[string]string `json:"labels"`
@@ -184,7 +186,8 @@ func SandboxStateFromRaw(raw json.RawMessage) string {
 	return "unknown"
 }
 
-// ParseMemoryMB converts "2048Mi" → 2048, "2048MB" → 2048, "2G" → 2048.
+// ParseMemoryMB converts memory quantities to MiB. The function name is kept
+// for compatibility with existing callers and the legacy memoryMB field.
 func ParseMemoryMB(s string) int {
 	s = strings.TrimSpace(s)
 	s = strings.TrimSuffix(s, "Mi")
@@ -196,6 +199,26 @@ func ParseMemoryMB(s string) int {
 		return 0
 	}
 	return n
+}
+
+// ParseCPUMilli converts a Kubernetes-style CPU quantity to millicores.
+func ParseCPUMilli(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	if strings.HasSuffix(s, "m") {
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "m"))
+		if err != nil || n < 0 {
+			return 0
+		}
+		return n
+	}
+	cores, err := strconv.ParseFloat(s, 64)
+	if err != nil || cores < 0 {
+		return 0
+	}
+	return int(cores*1000 + 0.5)
 }
 
 // NanosToISO converts Unix nanoseconds to RFC 3339 string.
@@ -282,11 +305,24 @@ func TransformSandboxList(raw json.RawMessage) interface{} {
 		if startedAt == "" && item.CreateAt > 0 {
 			startedAt = NanosToISO(item.CreateAt)
 		}
+		cpuMilli := item.CPUMilli
+		if cpuMilli == 0 {
+			cpuMilli = item.CPUCount * 1000
+		}
+		cpuCount := item.CPUCount
+		if cpuCount == 0 && cpuMilli > 0 {
+			cpuCount = cpuMilli / 1000
+		}
+		memoryMiB := item.MemoryMiB
+		if memoryMiB == 0 {
+			memoryMiB = item.MemoryMB
+		}
 		entry := map[string]interface{}{
 			"sandboxID":   item.SandboxID,
 			"clientID":    item.HostID,
-			"cpuCount":    fmt.Sprintf("%dm", item.CPUCount*1000), // int cores → K8s millicores string
-			"memoryMB":    item.MemoryMB,
+			"cpuCount":    cpuCount,
+			"cpuMilli":    cpuMilli,
+			"memoryMB":    memoryMiB,
 			"startedAt":   startedAt,
 			"endAt":       RawToISO(item.EndAt),
 			"state":       SandboxStateFromRaw(item.Status),
@@ -331,11 +367,13 @@ func TransformSandboxDetail(raw json.RawMessage) interface{} {
 		primary = &item.Containers[0]
 	}
 
-	cpuCount := ""
+	cpuCount := 0
+	cpuMilli := 0
 	memoryMB := 0
 	startedAt := ""
 	if primary != nil {
-		cpuCount = primary.CPU // pass through K8s-style millicores string (e.g. "2000m", "128m")
+		cpuMilli = ParseCPUMilli(primary.CPU)
+		cpuCount = cpuMilli / 1000
 		memoryMB = ParseMemoryMB(primary.Mem)
 		startedAt = NanosToISO(primary.CreateAt)
 	}
@@ -349,6 +387,7 @@ func TransformSandboxDetail(raw json.RawMessage) interface{} {
 		"sandboxID":   item.SandboxID,
 		"clientID":    item.HostID,
 		"cpuCount":    cpuCount,
+		"cpuMilli":    cpuMilli,
 		"memoryMB":    memoryMB,
 		"startedAt":   startedAt,
 		"endAt":       RawToISO(item.EndAt),

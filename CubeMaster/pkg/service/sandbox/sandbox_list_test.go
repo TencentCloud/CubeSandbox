@@ -55,3 +55,50 @@ func TestParseMemoryMB(t *testing.T) {
 		})
 	}
 }
+
+func TestParseCPUMilli(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  int32
+	}{
+		{name: "empty", input: "", want: 0},
+		{name: "millicores", input: "2000m", want: 2000},
+		{name: "sub core", input: "100m", want: 100},
+		{name: "whole cores", input: "2", want: 2000},
+		{name: "invalid", input: "bad", want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseCPUMilli(tt.input); got != tt.want {
+				t.Fatalf("parseCPUMilli(%q)=%d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseMemoryMiB(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  int32
+	}{
+		{name: "empty", input: "", want: 0},
+		{name: "list detail regression", input: "500Mi", want: 500},
+		{name: "webui regression", input: "4096Mi", want: 4096},
+		{name: "gibibytes", input: "2Gi", want: 2048},
+		{name: "gigabytes", input: "2G", want: 1908},
+		{name: "plain bytes round up", input: "1024", want: 1},
+		{name: "overflow", input: "2147483648Mi", want: 2147483647},
+		{name: "invalid", input: "bad", want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseMemoryMiB(tt.input); got != tt.want {
+				t.Fatalf("parseMemoryMiB(%q)=%d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}

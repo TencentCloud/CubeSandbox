@@ -14,6 +14,14 @@ export function formatBytes(mib: number | undefined | null): string {
   return `${(mib / 1024).toFixed(1)} GiB`;
 }
 
+export function formatCpu(cpuMilli?: number | null, cpuCount?: number | null): string {
+  if (cpuMilli == null && cpuCount == null) return '—';
+  const milli = cpuMilli && cpuMilli > 0 ? cpuMilli : (cpuCount ?? 0) * 1000;
+  if (milli <= 0) return '0';
+  if (milli % 1000 === 0) return `${milli / 1000}C`;
+  return `${milli}m`;
+}
+
 export function formatRelative(ts?: string | number | null, locale?: string): string {
   if (!ts) return '—';
   const d = new Date(ts);

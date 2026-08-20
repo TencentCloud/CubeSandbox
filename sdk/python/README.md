@@ -404,7 +404,7 @@ lookup remains supported.
 | `.started_at` | `datetime \| None` | Start time (raw `startedAt` string) |
 | `.end_at` | `datetime \| None` | Expiry time (raw `endAt` string) |
 | `.cpu_count` | `int \| None` | vCPU count (raw `cpuCount`) |
-| `.memory_mb` | `int \| None` | Memory in MB (raw `memoryMB`) |
+| `.memory_mb` | `int \| None` | Memory in MiB (raw `memoryMB`; the historical field name is retained) |
 | `.disk_size_mb` | `int \| None` | Disk size in MB (raw `diskSizeMB`) |
 | `.envd_version` | `str` | envd version (raw `envdVersion`) |
 | `.state` | `SandboxState \| str \| None` | Lifecycle state; unknown values fall back to the raw string |

@@ -13,7 +13,7 @@ import { Badge } from '@/components/ui/badge';
 
 import { Skeleton } from '@/components/ui/skeleton';
 import { ArrowLeft, Pause, Play, Trash2, RefreshCw } from 'lucide-react';
-import { cn, formatBytes, formatRelative } from '@/lib/utils';
+import { cn, formatBytes, formatCpu, formatRelative } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
 
@@ -253,7 +253,7 @@ export default function SandboxDetailPage() {
             <Skeleton className="h-20 w-full" />
           ) : (
             <dl className="grid grid-cols-2 gap-3 text-sm">
-              <Field label={t('fields.vcpu')} value={`${data?.cpuCount ?? '—'}`} />
+              <Field label={t('fields.vcpu')} value={formatCpu(data?.cpuMilli, data?.cpuCount)} />
               <Field label={t('fields.memory')} value={formatBytes(data?.memoryMB)} />
               <Field label={t('fields.client')} value={data?.clientID ?? '—'} />
               <Field label={t('fields.alias')} value={data?.alias ?? '—'} />

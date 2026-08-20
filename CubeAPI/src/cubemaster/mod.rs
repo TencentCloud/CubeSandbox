@@ -1095,6 +1095,10 @@ pub struct SandboxInfo {
     #[serde(default, alias = "memoryMB")]
     pub memory_mb: i32,
     #[serde(default)]
+    pub cpu_milli: i32,
+    #[serde(default)]
+    pub memory_mib: i32,
+    #[serde(default)]
     pub template_id: String,
     #[serde(default)]
     pub annotations: HashMap<String, String>,
@@ -1177,6 +1181,7 @@ pub struct SandboxDetail {
     pub started_at: Option<DateTime<Utc>>,
     pub end_at: Option<DateTime<Utc>>,
     pub cpu_count: i32,
+    pub cpu_milli: i32,
     pub memory_mb: i32,
     pub disk_size_mb: i32,
     pub annotations: HashMap<String, String>,
@@ -1185,17 +1190,61 @@ pub struct SandboxDetail {
 }
 
 fn parse_cpu_millicores(s: &str) -> i32 {
-    let s = s.trim().trim_end_matches('m');
-    s.parse::<i32>().unwrap_or(0) / 1000
+    let value = s.trim();
+    if value.is_empty() {
+        return 0;
+    }
+    if let Some(milli) = value.strip_suffix('m') {
+        return milli
+            .parse::<i64>()
+            .ok()
+            .and_then(|value| i32::try_from(value).ok())
+            .filter(|value| *value >= 0)
+            .unwrap_or(0);
+    }
+
+    let cores = value.parse::<f64>().unwrap_or(0.0);
+    if !cores.is_finite() || cores < 0.0 {
+        return 0;
+    }
+    (cores * 1000.0).round().min(i32::MAX as f64) as i32
 }
 
-fn parse_mem_mb(s: &str) -> i32 {
-    let s = s
-        .trim()
-        .trim_end_matches("Mi")
-        .trim_end_matches("MB")
-        .trim_end_matches('M');
-    s.parse::<i32>().unwrap_or(0)
+fn parse_mem_mib(s: &str) -> i32 {
+    let value = s.trim();
+    let (number, multiplier) = if let Some(number) = value.strip_suffix("Ki") {
+        (number, 1024.0)
+    } else if let Some(number) = value.strip_suffix("Mi") {
+        (number, 1024.0 * 1024.0)
+    } else if let Some(number) = value.strip_suffix("Gi") {
+        (number, 1024.0 * 1024.0 * 1024.0)
+    } else if let Some(number) = value.strip_suffix("Ti") {
+        (number, 1024.0 * 1024.0 * 1024.0 * 1024.0)
+    } else if let Some(number) = value.strip_suffix("KB") {
+        (number, 1000.0)
+    } else if let Some(number) = value.strip_suffix("MB") {
+        (number, 1_000_000.0)
+    } else if let Some(number) = value.strip_suffix("GB") {
+        (number, 1_000_000_000.0)
+    } else if let Some(number) = value.strip_suffix("TB") {
+        (number, 1_000_000_000_000.0)
+    } else if let Some(number) = value.strip_suffix('K') {
+        (number, 1000.0)
+    } else if let Some(number) = value.strip_suffix('M') {
+        (number, 1_000_000.0)
+    } else if let Some(number) = value.strip_suffix('G') {
+        (number, 1_000_000_000.0)
+    } else if let Some(number) = value.strip_suffix('T') {
+        (number, 1_000_000_000_000.0)
+    } else {
+        (value, 1.0)
+    };
+
+    let bytes = number.parse::<f64>().unwrap_or(0.0) * multiplier;
+    if !bytes.is_finite() || bytes <= 0.0 {
+        return 0;
+    }
+    (bytes / (1024.0 * 1024.0)).ceil().min(i32::MAX as f64) as i32
 }
 
 pub(crate) fn datetime_from_unix_nanos(value: i64) -> Option<DateTime<Utc>> {
@@ -1333,8 +1382,8 @@ impl GetSandboxResponse {
             .iter()
             .find(|c| c.kind == "sandbox" || c.container_id == item.sandbox_id)
             .or_else(|| item.containers.first());
-        let (cpu_count, memory_mb) = primary_container
-            .map(|c| (parse_cpu_millicores(&c.cpu), parse_mem_mb(&c.mem)))
+        let (cpu_milli, memory_mb) = primary_container
+            .map(|c| (parse_cpu_millicores(&c.cpu), parse_mem_mib(&c.mem)))
             .unwrap_or((0, 0));
         let status = match item.status {
             0 => SandboxStatus::Unknown, // CONTAINER_CREATED
@@ -1355,7 +1404,8 @@ impl GetSandboxResponse {
             template_id,
             started_at: primary_container.and_then(|c| datetime_from_unix_nanos(c.create_at)),
             end_at: item.end_at,
-            cpu_count,
+            cpu_count: cpu_milli / 1000,
+            cpu_milli,
             memory_mb,
             disk_size_mb: 0,
             annotations: item.annotations,
@@ -2086,6 +2136,8 @@ pub struct TemplateBuildStatusResponse {
 
 #[cfg(test)]
 mod tests {
+    use super::{parse_cpu_millicores, parse_mem_mib};
+
     use super::{
         non_empty_str, validate_path_segment, validate_volume_id, CubeMasterError,
         GetSandboxResponse, SandboxInfo, TemplateResponse, TemplateSummaryItem,
@@ -2222,6 +2274,31 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_info_deserializes_exact_resource_fields() {
+        let payload = serde_json::json!({
+            "sandbox_id": "sb-small",
+            "cpu_count": 0,
+            "memory_mb": 537,
+            "cpu_milli": 500,
+            "memory_mib": 512
+        });
+
+        let info: SandboxInfo =
+            serde_json::from_value(payload).expect("exact resource fields should deserialize");
+        assert_eq!(info.cpu_milli, 500);
+        assert_eq!(info.memory_mib, 512);
+    }
+
+    #[test]
+    fn quantity_parsers_preserve_millicores_and_mib() {
+        assert_eq!(parse_cpu_millicores("100m"), 100);
+        assert_eq!(parse_cpu_millicores("0.5"), 500);
+        assert_eq!(parse_mem_mib("512Mi"), 512);
+        assert_eq!(parse_mem_mib("2Gi"), 2048);
+        assert_eq!(parse_mem_mib("537M"), 513);
+    }
+
+    #[test]
     fn template_summary_item_deserializes_display_name() {
         let item: TemplateSummaryItem = serde_json::from_value(serde_json::json!({
             "template_id": "tpl-1",
@@ -2285,6 +2362,7 @@ mod tests {
 
         assert_eq!(detail.host_id, "host-1");
         assert_eq!(detail.cpu_count, 2);
+        assert_eq!(detail.cpu_milli, 2000);
         assert_eq!(detail.memory_mb, 2048);
         assert_eq!(
             detail

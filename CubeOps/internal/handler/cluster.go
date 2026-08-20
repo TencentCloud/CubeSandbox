@@ -188,18 +188,32 @@ func (h *ClusterHandler) fetchUsedResources(ctx context.Context) map[string]stru
 			continue
 		}
 		entry := used[sb.HostIP]
-		entry.CPUMilli += int64(sb.CPUCount) * 1000
-		entry.MemoryMB += int64(sb.MemoryMB)
+		// Prefer CubeMaster's exact millicore/MiB values; fall back to the
+		// lossy cpu_count/memory_mb for older responses, so sub-core CPU
+		// (e.g. 500m) and binary memory (e.g. 2Gi) are counted correctly in
+		// cluster usage too — same exact-units invariant as the list path.
+		cpuMilli := sb.CPUMilli
+		if cpuMilli == 0 {
+			cpuMilli = sb.CPUCount * 1000
+		}
+		memoryMiB := sb.MemoryMiB
+		if memoryMiB == 0 {
+			memoryMiB = sb.MemoryMB
+		}
+		entry.CPUMilli += int64(cpuMilli)
+		entry.MemoryMB += int64(memoryMiB)
 		used[sb.HostIP] = entry
 	}
 	return used
 }
 
 type cmSandboxItem struct {
-	HostIP   string `json:"host_ip"`
-	Status   int    `json:"status"`
-	CPUCount int    `json:"cpu_count"`
-	MemoryMB int    `json:"memory_mb"`
+	HostIP    string `json:"host_ip"`
+	Status    int    `json:"status"`
+	CPUCount  int    `json:"cpu_count"`
+	MemoryMB  int    `json:"memory_mb"`
+	CPUMilli  int    `json:"cpu_milli"`
+	MemoryMiB int    `json:"memory_mib"`
 }
 
 type cmSandboxListResponse struct {

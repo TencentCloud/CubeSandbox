@@ -101,6 +101,46 @@ func TestCluster_Overview_Success(t *testing.T) {
 	}
 }
 
+func TestCluster_Overview_UsesExactSandboxResources(t *testing.T) {
+	cm := &fakeCM{
+		listSandboxes: func(_ context.Context) (json.RawMessage, error) {
+			return raw(`{"data": [{
+				"host_ip": "10.0.0.1", "status": 1,
+				"cpu_count": 0, "memory_mb": 525,
+				"cpu_milli": 100, "memory_mib": 500
+			}]}`), nil
+		},
+	}
+	svc := &fakeClusterNodeService{
+		listNodes: func(_ context.Context) ([]*model.NodeSnapshot, error) {
+			return []*model.NodeSnapshot{{
+				NodeID: "n-1", HostIP: "10.0.0.1", InstanceType: "cubebox", Healthy: true,
+				Capacity:  model.ResourceSnapshot{MilliCPU: 4000, MemoryMB: 8192},
+				MaxMvmNum: 10,
+			}}, nil
+		},
+	}
+	r := newClusterRouter(t, cm, svc)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/cluster/overview")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var ov map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &ov); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	// fetchUsedResources must prefer the exact cpu_milli/memory_mib fields
+	// (100 / 500) over the lossy cpu_count*1000 (0) / memory_mb (525), so
+	// sub-core CPU and binary memory are counted correctly in cluster usage.
+	if ov["allocatableCpuMilli"] != float64(3900) {
+		t.Errorf("allocatableCpuMilli = %v, want 3900", ov["allocatableCpuMilli"])
+	}
+	if ov["allocatableMemoryMB"] != float64(7692) {
+		t.Errorf("allocatableMemoryMB = %v, want 7692", ov["allocatableMemoryMB"])
+	}
+}
+
 func TestCluster_Overview_ServiceError(t *testing.T) {
 	cm := &fakeCM{}
 	svc := &fakeClusterNodeService{

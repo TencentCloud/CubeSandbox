@@ -22,15 +22,16 @@ type Sandbox struct {
 
 // SandboxInfo is returned by list and get-info endpoints.
 type SandboxInfo struct {
-	TemplateID   string            `json:"templateID"`
-	Alias        string            `json:"alias,omitempty"`
-	SandboxID    string            `json:"sandboxID"`
-	ClientID     string            `json:"clientID"`
-	StartedAt    time.Time         `json:"startedAt"`
-	EndAt        *time.Time        `json:"endAt,omitempty"`
-	EnvdVersion  string            `json:"envdVersion"`
-	Domain       string            `json:"domain,omitempty"`
-	CPUCount     int               `json:"cpuCount"`
+	TemplateID  string     `json:"templateID"`
+	Alias       string     `json:"alias,omitempty"`
+	SandboxID   string     `json:"sandboxID"`
+	ClientID    string     `json:"clientID"`
+	StartedAt   time.Time  `json:"startedAt"`
+	EndAt       *time.Time `json:"endAt,omitempty"`
+	EnvdVersion string     `json:"envdVersion"`
+	Domain      string     `json:"domain,omitempty"`
+	CPUCount    int        `json:"cpuCount"`
+	// MemoryMB is memory in MiB; the historical field name is retained.
 	MemoryMB     int               `json:"memoryMB"`
 	DiskSizeMB   *int              `json:"diskSizeMB,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`

@@ -346,6 +346,8 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 					TemplateID:  templateID,
 					CpuCount:    parseCPUCount(container.GetResources().GetCpu()),
 					MemoryMB:    parseMemoryMB(container.GetResources().GetMem()),
+					CPUMilli:    parseCPUMilli(container.GetResources().GetCpu()),
+					MemoryMiB:   parseMemoryMiB(container.GetResources().GetMem()),
 					Annotations: buildAnnotationsFromLabels(labels),
 					Labels:      labels,
 					NameSpace:   sandbox.GetNamespace(),
@@ -411,4 +413,53 @@ func parseMemoryMB(raw string) int32 {
 		return int32(maxInt32)
 	}
 	return int32(memoryMB)
+}
+
+func parseCPUMilli(raw string) int32 {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0
+	}
+
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return 0
+	}
+	cpuMilli := quantity.MilliValue()
+	if cpuMilli <= 0 {
+		return 0
+	}
+	const maxInt32 = int64(1<<31 - 1)
+	if cpuMilli > maxInt32 {
+		return int32(maxInt32)
+	}
+	return int32(cpuMilli)
+}
+
+func parseMemoryMiB(raw string) int32 {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0
+	}
+
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return 0
+	}
+	bytes := quantity.Value()
+	if bytes <= 0 {
+		return 0
+	}
+	const (
+		bytesPerMiB = int64(1024 * 1024)
+		maxInt32    = int64(1<<31 - 1)
+	)
+	memoryMiB := bytes / bytesPerMiB
+	if bytes%bytesPerMiB != 0 {
+		memoryMiB++
+	}
+	if memoryMiB > maxInt32 {
+		return int32(maxInt32)
+	}
+	return int32(memoryMiB)
 }
