@@ -176,6 +176,99 @@ export SDK_E2E_BACKENDS=e2b,cubesandbox
 pytest --run-e2e
 ```
 
+## E2B SDK Compatibility
+
+A single environment can only hold one version of a package, so any run above
+validates whichever E2B SDK version happens to be installed. `e2b-versions.txt`
+records the versions this suite is known to have been run against, so a consumer
+reading it can tell which SDK versions are expected to work with a given
+CubeSandbox release instead of discovering it by outage.
+
+To check one version, install it and run the suite normally. The commands below
+assume the E2B backend environment from "Quick Start" is already exported —
+arriving here straight from `e2b-versions.txt`, set it first, or preflight ends
+the session before a single sandbox is created (`e2b backend requires
+E2B_API_KEY`, exit code 2):
+
+```bash
+export E2B_API_KEY=<your-e2b-api-key>
+# Self-hosted HTTPS endpoints also need the local CA:
+export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
+
+# Full coverage: pair the interpreter package, because the run_code cases need it.
+# Pick a pairing plain pip can resolve: `e2b-code-interpreter` declares
+# `e2b>=2.26.0,<3.0.0`, so the 2.21.0 row in `e2b-versions.txt` installs only
+# under a constraint override (that row documents it) and is the wrong thing to
+# paste into a first run.
+pip install 'e2b==2.26.0' 'e2b-code-interpreter==2.8.1'
+pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
+
+# Core SDK only: the interpreter-dependent cases MUST be deselected. The e2b
+# backend declares the run_code capability unconditionally, so without the
+# deselect they are collected, call Sandbox.run_code on the plain SDK, and fail
+# for a missing package rather than a real incompatibility.
+#
+# Mind the scope, because it decides whether the deselect does anything. Inside
+# `smoke or p0` the only interpreter-dependent cases are in cases/run_code/,
+# which carry both markers, so the two spellings select the same set there and
+# the choice is free. (No count here on purpose — run the diff below at this
+# scope if you want the current one.) It stops being free the moment the
+# selection widens — a core-only `p0 or p1` run (the dual-backend regression
+# documented above) collects the p1 lifecycle cases, and only
+# `requires_code_interpreter` deselects them.
+#
+# Deselect on `requires_code_interpreter`, not on the `run_code` marker. The
+# run_code marker lives only in cases/run_code/, while interpreter-dependent
+# cases also sit in cases/lifecycle/ (test_pause_resume.py, test_auto_lifecycle.py
+# and test_rollback_clone.py at the time of writing) carrying the capability
+# marker but not the run_code one. `requires_code_interpreter` is the lever that
+# does not depend on which file a case happens to live in — which is the point,
+# since new cases keep arriving. (It is a dedicated marker gated on the
+# CODE_INTERPRETER capability, which the suite prefers over the generic
+# `requires_capability(CODE_INTERPRETER)` — that spelling would gate identically,
+# but the dedicated one gives a clearer skip message and is what the -m
+# expressions here select on.)
+#
+# To see the current gap between the two spellings rather than trusting a number
+# written here (that number rots — this note previously carried a stale one):
+#
+#   diff <(pytest --collect-only -q -m "(p0 or p1) and not run_code") \
+#        <(pytest --collect-only -q -m "(p0 or p1) and not requires_code_interpreter")
+#
+# Not every case in that gap would actually fail on a missing package: for the
+# e2b backend the auto_lifecycle ones need the platform_lifecycle capability and
+# the rollback_clone ones need rollback_clone, neither of which the backend
+# declares, so the fixture skips them first. Deselecting on
+# `requires_code_interpreter`
+# covers all of them regardless.
+pip install 'e2b==2.29.5'
+pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not requires_code_interpreter"
+```
+
+Repeat per version in a fresh virtualenv, and record the outcome in
+`e2b-versions.txt` when cutting a release.
+
+Notes that make the matrix more than a version list:
+
+- **A version string is not a compatibility signal.** `e2b` 2.26/2.29
+  `commands.run` hung silently against envd on v0.5.1-rc5 (the SDK's own timeout
+  did not fire), and worked on the v0.5.1 release — while envd self-reported
+  `0.5.11` on both builds. Compatibility therefore has to be stated per
+  CubeSandbox release, not derived from envd's version.
+- **`e2b-code-interpreter` versions its own way.** Its 2.9.0 requires
+  `e2b>=2.26.0,<3.0.0`, so a row pinning an older `e2b` cannot also take the
+  current interpreter package — the `run_code` cases are unavailable there.
+- **Cases that need the interpreter.** Lines without `e2b-code-interpreter`
+  should deselect on `requires_code_interpreter`
+  (`-m "(smoke or p0) and not requires_code_interpreter"`) rather than report
+  failures that are really a missing package. The `run_code` marker is not
+  enough — it only covers `cases/run_code/`, while `cases/lifecycle/` has
+  interpreter-dependent cases that carry `requires_code_interpreter` but not the
+  `run_code` one. Note the suite gates this through the dedicated
+  `requires_code_interpreter` marker rather than the generic
+  `requires_capability(CODE_INTERPRETER)`, which is why the `-m` expressions
+  select on the former.
+
 ## Environment
 
 The suite automatically loads `tests/e2e/sdk_compat/.env` if the file exists.
@@ -375,6 +468,7 @@ tests/e2e/sdk_compat/
   framework/     # config, preflight, capability flags, cleanup, reporting
   cases/         # backend-neutral cases split by capability domain
   reports/       # local JSONL events, ignored except reports/.gitignore
+  e2b-versions.txt  # E2B SDK versions this suite has been validated against
 ```
 
 Current capability domains:

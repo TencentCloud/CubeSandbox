@@ -50,3 +50,5 @@ lang: en-US
 | --- |------------| --- | --- |
 | [trpc-agent-go: A Secure Code Execution Backend Powered by Cube Sandbox](./trpc-agent-go.md) | joeyczheng | 2026-06-03 | agent, code-execution, e2b, golang |
 | [Lexmount AI: Putting the Browser Runtime Inside the Agent Sandbox](./lexmount-browser-agent.md) | Xiong Xiuzhang | 2026-08-13 | agent, browser, browser-runtime, production |
+| [Hermes Agent: Running a Resident Agent Platform in CubeSandbox](./hermes-agent.md) | Chen Jinbo | 2026-08-20 | agent, persistence, skills, host-mount |
+| [Lenovo Cloud Agent: Sandbox Migration from Daytona to CubeSandbox](./lenovo-cloud-agent.md) | Li Jian | 2026-08-20 | agent, migration, daytona, e2b-compat |

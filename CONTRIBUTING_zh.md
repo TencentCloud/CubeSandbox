@@ -59,6 +59,9 @@ make cubemaster
 make cubelet
 make agent
 make shim
+
+# 清理本地 Go/Rust 编译产物（不清全局缓存）
+make clean
 ```
 
 完整的构建目标列表请参见 [Makefile](./Makefile)。

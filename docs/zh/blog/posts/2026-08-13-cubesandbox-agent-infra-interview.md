@@ -3,8 +3,7 @@ title: "从亚百毫秒级启动到生产级部署，腾讯云为何重构 Agent
 date: 2026-08-13
 author: InfoQ
 description: "2026 年初，OpenClaw 以一己之力掀起了本地终端 Agent 热潮，人们开始习惯把文件系统、浏览器、邮件、终端，以及各种账号权限交给 Agent。但「养虾」的背后，潜藏着比模型幻觉更直接的风险。本文系 InfoQ 对腾讯云 IaaS 前沿技术团队负责人金峰的独家采访，从 Cube 的 Serverless 技术起源出发，探讨了 Agent 沙箱从「能运行」到「生产级可用」的演进路径。"
-featured: true
-weight: 1
+featured: false
 ---
 
 # 从亚百毫秒级启动到生产级部署，腾讯云为何重构 Agent 沙箱？

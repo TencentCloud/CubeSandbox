@@ -52,3 +52,4 @@ lang: en-US
 | [LangChain Integration Guide](./langchain.md) | peerless-hero | 2026-07-07 | integration, langchain, agent |
 | [Tigris Volume Integration Guide](./tigris.md) | davidmyriel | 2026-07-31 | integration, tigris, volume, storage, s3 |
 | [MiMo Code Dual-Fork Rollout Integration Guide](./mimo-code.md) | Young-Allen | 2026-07-22 | integration, mimo-code, coding-agent, agent, snapshot|
+| [OpenAI Agents SDK Integration Guide](./openai-agents-sdk.md) | ZedingZhang | 2026-08-19 | integration, openai-agents-sdk, agent |

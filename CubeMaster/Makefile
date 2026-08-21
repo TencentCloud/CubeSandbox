@@ -120,7 +120,7 @@ lint:
 
 
 clean:
-	@rm -rf docker/cubemaster
+	@rm -rf docker/cubemaster $(BUILD_DIR)
 
 .PHONY: test
 test:

@@ -5,6 +5,9 @@ requests>=2
 
 # Optional backends:
 # - cubesandbox is loaded from ../../../../sdk/python by default.
-# - Install e2b-code-interpreter or e2b when running the e2b backend.
+# - Install e2b-code-interpreter or e2b when running the e2b backend. Deliberately
+#   left unpinned here: one environment can hold only one version, so the
+#   validated E2B range is recorded in e2b-versions.txt and checked one version
+#   per virtualenv (see "E2B SDK Compatibility" in the README).
 # e2b-code-interpreter
 # e2b

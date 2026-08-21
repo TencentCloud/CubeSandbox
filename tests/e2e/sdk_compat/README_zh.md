@@ -161,6 +161,78 @@ export SDK_E2E_BACKENDS=e2b,cubesandbox
 pytest --run-e2e
 ```
 
+## E2B SDK 兼容性
+
+同一个环境里同一个包只能装一个版本，因此上面任何一种执行方式验证的都只是"当前恰好装
+着的那个"版本。`e2b-versions.txt` 记录本套件实际验证过的版本，使用者读它即可判断某个
+CubeSandbox 版本预期能配合哪些 SDK 版本，而不必等线上故障才发现。
+
+验证某个版本时，装上它再照常执行。下面的命令假定"快速开始"里那套 E2B 后端环境变量已经
+导出——如果是从 `e2b-versions.txt` 直接跳到这一节，请先设置，否则 preflight 会在创建任何
+沙箱之前直接结束整个 session（`e2b backend requires E2B_API_KEY`，退出码 2）：
+
+```bash
+export E2B_API_KEY=<e2b-api-key>
+# 自建 HTTPS 端点还需要本地 CA：
+export SSL_CERT_FILE=/root/.local/share/mkcert/rootCA.pem
+
+# 完整覆盖：配对安装 interpreter 包，run_code 用例依赖它。
+# 挑一个 pip 能直接解出来的组合：`e2b-code-interpreter` 声明 `e2b>=2.26.0,<3.0.0`，
+# 因此 `e2b-versions.txt` 里 2.21.0 那一行只有覆盖约束才装得上（该行自己有说明），
+# 不适合作为第一次执行时照抄的命令。
+pip install 'e2b==2.26.0' 'e2b-code-interpreter==2.8.1'
+pytest --run-e2e --sdk-e2e-backends=e2b -m "smoke or p0"
+
+# 只装核心 SDK 时**必须**排除依赖 interpreter 的用例：e2b 后端无条件声明了
+# run_code capability，不排除就会被收集、在纯 SDK 上调用 Sandbox.run_code，
+# 最终报成失败——而那只是缺包，不是真的不兼容。
+#
+# 注意选择范围，它决定这个排除条件到底起不起作用：在 `smoke or p0` 之内，依赖 interpreter
+# 的用例只在 cases/run_code/ 下，而它们两个 marker 都带，所以两种写法选出的是同一组用例，
+# 怎么写都一样。（这里刻意不写具体数量——想知道当前值，就在这个范围上跑下面那条 diff。）
+# 一旦范围放宽就不一样了——只装核心 SDK 跑 `p0 or p1`（也就是上
+# 面那套双后端回归）会收集到 p1 的 lifecycle 用例，只有 `requires_code_interpreter` 排得掉。
+#
+# 要按 `requires_code_interpreter` 排除，而不是按 `run_code` marker。后者只存在于
+# cases/run_code/ 下，而依赖 interpreter 的用例在 cases/lifecycle/ 里同样有（写作时是
+# test_pause_resume.py、test_auto_lifecycle.py 与 test_rollback_clone.py），它们带
+# `requires_code_interpreter` 但没有 run_code marker。`requires_code_interpreter`
+# 才是不依赖"用例放在哪个文件"的那个开关——这正是关键，因为用例还在不断新增。
+#（它是由 CODE_INTERPRETER capability 控制的专用 marker。写成通用的
+# `requires_capability(CODE_INTERPRETER)` 效果等价，但本套件统一用专用的那个：
+# skip 信息更清楚，上面的 -m 表达式也是按它来选的。）
+#
+# 想知道两种写法当前差多少，请自己跑，而不要相信这里写死的数字（数字会腐烂，本注释
+# 之前就带过一个过期的）：
+#
+#   diff <(pytest --collect-only -q -m "(p0 or p1) and not run_code") \
+#        <(pytest --collect-only -q -m "(p0 or p1) and not requires_code_interpreter")
+#
+# 差集里也不是每个都会因缺包而失败：对 e2b 后端，auto_lifecycle 那几个还要求
+# platform_lifecycle capability、rollback_clone 那两个要求 rollback_clone，而后端都没有
+# 声明，fixture 会先跳过。按 `requires_code_interpreter` 排除则一次覆盖全部。
+pip install 'e2b==2.29.5'
+pytest --run-e2e --sdk-e2e-backends=e2b -m "(smoke or p0) and not requires_code_interpreter"
+```
+
+每个版本在独立虚拟环境中重复一次，发版时把结果记入 `e2b-versions.txt`。
+
+几条让这份清单不只是版本号的说明：
+
+- **版本号本身不是兼容性信号。** `e2b` 2.26/2.29 的 `commands.run` 在 v0.5.1-rc5 的
+  envd 上静默挂死（SDK 自带的 timeout 不生效），在 v0.5.1 正式版上正常——而两个构建里
+  envd 自报的版本都是 `0.5.11`。所以兼容性必须按 CubeSandbox 版本声明，不能从 envd
+  版本推导。
+- **`e2b-code-interpreter` 有自己的版本序列。** 它的 2.9.0 要求
+  `e2b>=2.26.0,<3.0.0`，因此固定较低 `e2b` 版本的组合无法同时使用当前的 interpreter
+  包，该组合下 `run_code` 用例不可用。
+- **依赖 interpreter 的用例。** 未安装 `e2b-code-interpreter` 的组合应按 capability
+  marker 排除（`-m "(smoke or p0) and not requires_code_interpreter"`），而不是把
+  "缺包"报成失败。只排除 `run_code` marker 不够：它仅覆盖 `cases/run_code/`，而
+  `cases/lifecycle/` 下也有带 `requires_code_interpreter`、但没有 `run_code` marker 的依赖
+  interpreter 用例。注意本套件用的是专用的 `requires_code_interpreter`，而不是通用的
+  `requires_capability(CODE_INTERPRETER)`——两者等价，`-m` 表达式按前者来写。
+
 ## 环境变量
 
 测试会自动加载 `tests/e2e/sdk_compat/.env`。已经在 shell 中导出的变量
@@ -359,6 +431,7 @@ tests/e2e/sdk_compat/
   cases/          按 capability domain 划分的后端无关用例
   docs/           框架设计、用例编写、覆盖盘点与优化建议
   reports/        本地 JSONL 报告
+  e2b-versions.txt  本套件已验证过的 E2B SDK 版本
   README.md
   README_zh.md
 ```

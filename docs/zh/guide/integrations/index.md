@@ -52,3 +52,4 @@ lang: zh-CN
 | [LangChain 集成指南](./langchain.md) | peerless-hero | 2026-07-07 | integration, langchain, agent |
 | [Tigris Volume 集成指南](./tigris.md) | davidmyriel | 2026-07-31 | integration, tigris, volume, storage, s3 |
 | [MiMo Code 双分叉 Rollout 集成指南](./mimo-code.md) | Young-Allen | 2026-07-22 | integration, mimo-code, coding-agent, agent, snapshot|
+| [OpenAI Agents SDK 集成指南](./openai-agents-sdk.md) | ZedingZhang | 2026-08-19 | integration, openai-agents-sdk, agent |

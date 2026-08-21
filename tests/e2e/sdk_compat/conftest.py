@@ -356,6 +356,16 @@ def sdk_e2e_preflight(pytestconfig: pytest.Config, sdk_e2e_config: SdkE2EConfig,
         pytest.exit(str(exc), returncode=2)
 
 
+@pytest.fixture(autouse=True)
+def gate_internet_tests(request: pytest.FixtureRequest) -> None:
+    if request.node.get_closest_marker("requires_internet") and _env_true(
+        "SDK_E2E_SKIP_INTERNET_TESTS"
+    ):
+        pytest.skip(
+            "internet-dependent SDK E2E tests disabled by SDK_E2E_SKIP_INTERNET_TESTS"
+        )
+
+
 @pytest.fixture()
 def sdk_sandbox(
     request: pytest.FixtureRequest,
@@ -374,11 +384,6 @@ def sdk_sandbox(
             pytest.skip(
                 f"backend {sdk_backend!r} does not support stateful Code Interpreter"
             )
-
-    if request.node.get_closest_marker("requires_internet") and _env_true(
-        "SDK_E2E_SKIP_INTERNET_TESTS"
-    ):
-        pytest.skip("internet-dependent SDK E2E tests disabled by SDK_E2E_SKIP_INTERNET_TESTS")
 
     if request.node.get_closest_marker("requires_cubeproxy") and not sdk_e2e_config.platform_lifecycle_enabled:
         pytest.skip(
