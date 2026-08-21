@@ -12,8 +12,8 @@ CubeSandbox is installed.
 Release: {{ .Release.Name }}
 Namespace: {{ .Release.Namespace }}
 
-Persistence (CubeMaster / MySQL / Redis):
-{{- if or .Values.controlPlane.master.persistence.hostPath .Values.mysql.persistence.hostPath .Values.redis.persistence.hostPath }}
+Persistence (CubeMaster / MySQL / Redis / MinIO):
+{{- if or .Values.controlPlane.master.persistence.hostPath .Values.mysql.persistence.hostPath .Values.redis.persistence.hostPath ((.Values.minio).persistence.hostPath) }}
   mode: hostPath (at least one component)
 {{- else }}
 {{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" .Values.controlPlane.master.persistence) }}
@@ -77,6 +77,12 @@ Cube Proxy Deployment:
 Status:
 {{- if .Values.cubeNode.enabled }}
   Cubevs CIDR: {{ .Values.cubeNode.network.cidr | default "packaged Cubelet default" }} (preflight already ran this install/upgrade)
+{{- end }}
+{{- if eq (include "cube.minioBuiltinEnabled" .) "true" }}
+  MinIO: chart-managed {{ include "cube.minioName" . }}:{{ .Values.minio.port | default 9000 }}
+  S3 volume plugin: {{ include "cube.volumeS3EffectiveEndpoint" . }} (filled from MinIO)
+{{- else if eq (include "cube.volumeS3Enabled" .) "true" }}
+  S3 volume plugin: {{ include "cube.volumeS3EffectiveEndpoint" . | default "existing Secret" }}
 {{- end }}
 {{- if eq (include "cube.startupGateEnabled" .) "true" }}
   PVM startup gate: on

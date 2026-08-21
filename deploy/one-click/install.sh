@@ -8,12 +8,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 # Install mode and upgrade-related flags (M3-1/M3-2/M3-3).
-#   --mode=install   full reinstall (default; existing config is reset)
+#   --mode=install   full reinstall (existing config is reset)
 #   --mode=upgrade   config-preserving upgrade (requires an existing install)
 #   --mode=auto      upgrade when an existing install is detected, else install
 # When --mode is omitted and an existing install is detected, the installer
-# prompts on a TTY and falls back to a full reinstall (with a warning) when
-# running non-interactively.
+# defaults to a config-preserving upgrade (TTY prompt [Y/n]; non-interactive
+# proceeds with upgrade). Use --mode=install to wipe and reinstall.
 ONE_CLICK_MODE="${ONE_CLICK_MODE:-}"
 ONE_CLICK_ASSUME_YES="${ONE_CLICK_ASSUME_YES:-0}"
 ONE_CLICK_ALLOW_DOWNGRADE="${ONE_CLICK_ALLOW_DOWNGRADE:-0}"
@@ -80,6 +80,21 @@ init_external_dep_defaults() {
   CUBE_EXTERNAL_REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
   CUBE_EXTERNAL_REDIS_SENTINEL_NODES="${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}"
   CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD="${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD:-}"
+
+  # CUBE_SANDBOX_MINIO_* only deploys the MinIO container. The S3 volume plugin
+  # always reads CUBE_S3_*. When MinIO is enabled, install.sh fills CUBE_S3_*
+  # from the local MinIO after generating credentials.
+  CUBE_SANDBOX_MINIO_ENABLED="${CUBE_SANDBOX_MINIO_ENABLED:-1}"
+  CUBE_SANDBOX_MINIO_ROOT_USER="${CUBE_SANDBOX_MINIO_ROOT_USER:-cubeminio}"
+  CUBE_SANDBOX_MINIO_ROOT_PASSWORD="${CUBE_SANDBOX_MINIO_ROOT_PASSWORD:-}"
+  CUBE_SANDBOX_MINIO_BUCKET="${CUBE_SANDBOX_MINIO_BUCKET:-cube-volumes}"
+  CUBE_SANDBOX_MINIO_API_PORT="${CUBE_SANDBOX_MINIO_API_PORT:-9000}"
+  CUBE_S3_ENDPOINT="${CUBE_S3_ENDPOINT:-}"
+  CUBE_S3_ACCESS_KEY_ID="${CUBE_S3_ACCESS_KEY_ID:-}"
+  CUBE_S3_SECRET_ACCESS_KEY="${CUBE_S3_SECRET_ACCESS_KEY:-}"
+  CUBE_S3_BUCKET="${CUBE_S3_BUCKET:-cube-volumes}"
+  CUBE_S3_REGION="${CUBE_S3_REGION:-us-east-1}"
+  CUBE_S3_S3FS_EXTRA_OPTS="${CUBE_S3_S3FS_EXTRA_OPTS:-}"
 }
 
 # Guard against shipping the example/default credentials to a real external
@@ -106,6 +121,41 @@ warn_default_external_credentials() {
     log "INFO: CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD equals master password (valid if intentional)."
     log "INFO: if Sentinel has no requirepass, leave CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD empty."
   fi
+  if [[ -n "${CUBE_S3_ENDPOINT}" && -z "${CUBE_S3_ACCESS_KEY_ID}" ]]; then
+    die "CUBE_S3_ENDPOINT is set but CUBE_S3_ACCESS_KEY_ID is empty"
+  fi
+  if [[ -n "${CUBE_S3_ENDPOINT}" && -z "${CUBE_S3_SECRET_ACCESS_KEY}" ]]; then
+    die "CUBE_S3_ENDPOINT is set but CUBE_S3_SECRET_ACCESS_KEY is empty"
+  fi
+}
+
+ensure_minio_init_credentials() {
+  validate_bool_01 "${CUBE_SANDBOX_MINIO_ENABLED}" "CUBE_SANDBOX_MINIO_ENABLED"
+  [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "1" ]] || return 0
+  if [[ -z "${CUBE_SANDBOX_MINIO_ROOT_USER}" ]]; then
+    CUBE_SANDBOX_MINIO_ROOT_USER="cubeminio"
+  fi
+  if [[ -z "${CUBE_SANDBOX_MINIO_ROOT_PASSWORD}" ]]; then
+    CUBE_SANDBOX_MINIO_ROOT_PASSWORD="$(generate_alnum_secret 24)"
+    log "generated CUBE_SANDBOX_MINIO_ROOT_PASSWORD (24 chars); it will be saved to .one-click.env"
+  fi
+  if [[ ${#CUBE_SANDBOX_MINIO_ROOT_PASSWORD} -lt 8 ]]; then
+    die "CUBE_SANDBOX_MINIO_ROOT_PASSWORD must be at least 8 characters (MinIO requirement)"
+  fi
+}
+
+# Volume plugin always reads CUBE_S3_*. After local MinIO credentials exist,
+# publish them as the S3 client config (endpoint / keys / bucket).
+fill_s3_from_local_minio() {
+  [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "1" ]] || return 0
+  CUBE_SANDBOX_MINIO_API_BIND="${CUBE_SANDBOX_MINIO_API_BIND:-${CUBE_SANDBOX_NODE_IP:-127.0.0.1}}"
+  CUBE_S3_ENDPOINT="$(local_minio_s3_endpoint)"
+  CUBE_S3_ACCESS_KEY_ID="${CUBE_SANDBOX_MINIO_ROOT_USER}"
+  CUBE_S3_SECRET_ACCESS_KEY="${CUBE_SANDBOX_MINIO_ROOT_PASSWORD}"
+  CUBE_S3_BUCKET="${CUBE_SANDBOX_MINIO_BUCKET:-cube-volumes}"
+  CUBE_S3_REGION="${CUBE_S3_REGION:-us-east-1}"
+  CUBE_S3_S3FS_EXTRA_OPTS="${CUBE_S3_S3FS_EXTRA_OPTS:--ouse_path_request_style}"
+  log "filled CUBE_S3_* from local MinIO (${CUBE_S3_ENDPOINT} bucket=${CUBE_S3_BUCKET})"
 }
 
 INSTALL_PREFIX="${CUBE_SANDBOX_INSTALL_ROOT}"
@@ -165,6 +215,14 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
 fi
 
 init_external_dep_defaults
+if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
+  if [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "1" ]]; then
+    log "compute role does not deploy MinIO; ignoring CUBE_SANDBOX_MINIO_ENABLED (volume plugin uses CUBE_S3_*)"
+  fi
+  CUBE_SANDBOX_MINIO_ENABLED=0
+fi
+check_minio_not_combined_with_user_s3
+ensure_minio_init_credentials
 
 CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-0}"
 case "${CUBE_PVM_ENABLE}" in
@@ -1352,6 +1410,17 @@ mask_external_dep_services() {
     systemctl unmask cube-sandbox-redis.service >/dev/null 2>&1 || true
   fi
 
+  if [[ "${CUBE_SANDBOX_MINIO_ENABLED}" != "1" || "${DEPLOY_ROLE}" == "compute" ]]; then
+    if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
+      log "masking local MinIO service (compute role does not run MinIO)"
+    else
+      log "masking local MinIO service (CUBE_SANDBOX_MINIO_ENABLED=${CUBE_SANDBOX_MINIO_ENABLED})"
+    fi
+    mask_local_dep_service cube-sandbox-minio.service
+  else
+    systemctl unmask cube-sandbox-minio.service >/dev/null 2>&1 || true
+  fi
+
   systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
@@ -1364,10 +1433,12 @@ check_cgroup_cpu_preflight
 check_bpf_fs_preflight
 check_glibc_preflight
 check_compute_control_plane_preflight
+check_compute_s3_required
 
 CUBE_SANDBOX_NODE_IP="$(detect_node_ip)"
 export CUBE_SANDBOX_NODE_IP
 log "using node IP: ${CUBE_SANDBOX_NODE_IP}"
+fill_s3_from_local_minio
 CUBE_SANDBOX_ETH_NAME="${CUBE_SANDBOX_ETH_NAME:-$(detect_primary_interface || true)}"
 if [[ -n "${CUBE_SANDBOX_ETH_NAME}" ]]; then
   export CUBE_SANDBOX_ETH_NAME
@@ -1680,6 +1751,33 @@ else
   remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_IP"
   remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PORT"
   remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PASSWORD"
+fi
+
+# Persist MinIO deploy settings (control node) independently from CUBE_S3_*
+# (volume plugin). Local MinIO fills CUBE_S3_* before this block.
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_ENABLED" "${CUBE_SANDBOX_MINIO_ENABLED}"
+if [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "1" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_ROOT_USER" "${CUBE_SANDBOX_MINIO_ROOT_USER}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_ROOT_PASSWORD" "${CUBE_SANDBOX_MINIO_ROOT_PASSWORD}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_BUCKET" "${CUBE_SANDBOX_MINIO_BUCKET}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_API_PORT" "${CUBE_SANDBOX_MINIO_API_PORT}"
+  minio_bind="${CUBE_SANDBOX_MINIO_API_BIND:-${CUBE_SANDBOX_NODE_IP:-127.0.0.1}}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_API_BIND" "${minio_bind}"
+fi
+if [[ -n "${CUBE_S3_ENDPOINT}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_ENDPOINT" "${CUBE_S3_ENDPOINT}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_ACCESS_KEY_ID" "${CUBE_S3_ACCESS_KEY_ID}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_SECRET_ACCESS_KEY" "${CUBE_S3_SECRET_ACCESS_KEY}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_BUCKET" "${CUBE_S3_BUCKET}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_REGION" "${CUBE_S3_REGION}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_S3FS_EXTRA_OPTS" "${CUBE_S3_S3FS_EXTRA_OPTS}"
+else
+  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_ENDPOINT"
+  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_ACCESS_KEY_ID"
+  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_SECRET_ACCESS_KEY"
+  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_BUCKET"
+  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_REGION"
+  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_S3FS_EXTRA_OPTS"
 fi
 
 chmod +x "${INSTALL_PREFIX}/Cubelet/bin/"*

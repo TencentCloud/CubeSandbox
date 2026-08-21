@@ -234,9 +234,12 @@ sudo ./down.sh
 
 This stops all host processes (cubelet, cubemaster, cube-api), Docker containers (CubeProxy, CoreDNS, MySQL, Redis), and rolls back the `cube.app` DNS routing configuration.
 
-### Reinstall
+### Upgrade or reinstall
 
-To reinstall over an existing deployment, simply run `install.sh` again. The script automatically stops the existing deployment before installing.
+On a machine that already has CubeSandbox, running `install.sh` again defaults
+to a **config-preserving upgrade** (it keeps `/usr/local/services/cubetoolbox/.one-click.env`).
+On a TTY the installer asks `[Y/n]`; non-interactive runs upgrade without prompting.
+To wipe the existing configuration and fully reinstall, pass `--mode=install`.
 
 ### View Logs
 

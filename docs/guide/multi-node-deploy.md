@@ -29,7 +29,7 @@ You must have a working control node deployed via the [Self-Build Deployment Gui
 └────────────┘└────────────┘└────────────┘
 ```
 
-- The **control node** runs the full stack: orchestration (CubeMaster), API gateway (cube-api), proxy (CubeProxy + CoreDNS), databases (MySQL + Redis), and also acts as a compute node itself.
+- The **control node** runs the full stack: orchestration (CubeMaster), API gateway (cube-api), proxy (CubeProxy + CoreDNS), databases (MySQL + Redis), the bundled MinIO S3 volume store, and also acts as a compute node itself.
 - Each **compute node** runs only `Cubelet` with its embedded network runtime. It registers to the control-plane `CubeMaster` and receives sandbox scheduling requests.
 
 ## Prerequisites
@@ -39,7 +39,7 @@ Each compute node must meet the same hardware and software requirements as the c
 - **Physical machine or bare-metal server** (nested virtualization is not supported)
 - **x86_64** or **aarch64** (ARM64) architecture with **KVM enabled** (`ls /dev/kvm`)
 - **Docker** installed and running
-- **Network connectivity** to the control node (specifically to `CubeMaster` on port `8089` by default)
+- **Network connectivity** to the control node (specifically to `CubeMaster` on port `8089` by default, and to the S3 endpoint — port `9000` with the bundled MinIO)
 
 For the full requirements list, see [Self-Build Deployment — Prerequisites](./self-build-deploy.md#prerequisites).
 
@@ -64,6 +64,16 @@ Edit `.env` and set the following variables:
 ONE_CLICK_DEPLOY_ROLE=compute
 CUBE_SANDBOX_NODE_IP=<current-node-ip>
 ONE_CLICK_CONTROL_PLANE_IP=<control-plane-ip>
+
+# CUBE_S3_* is required — the volume plugin hard-depends on S3. Compute nodes
+# never deploy MinIO, so copy these values from the control node's .one-click.env
+# (they must match exactly so the plugin resolves the same store). With the
+# bundled MinIO the block looks like:
+CUBE_S3_ENDPOINT=http://<control-plane-ip>:9000
+CUBE_S3_ACCESS_KEY_ID=<from control .one-click.env>
+CUBE_S3_SECRET_ACCESS_KEY=<from control .one-click.env>
+CUBE_S3_BUCKET=cube-volumes
+CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
 ```
 
 | Variable | Description |
@@ -71,6 +81,11 @@ ONE_CLICK_CONTROL_PLANE_IP=<control-plane-ip>
 | `ONE_CLICK_DEPLOY_ROLE` | Must be set to `compute` for compute-only nodes |
 | `CUBE_SANDBOX_NODE_IP` | This node's primary network interface IP |
 | `ONE_CLICK_CONTROL_PLANE_IP` | The control node's IP; automatically expanded to `<ip>:8089` for CubeMaster |
+| `CUBE_S3_*` | **Required.** The volume plugin hard-depends on S3. Compute nodes never deploy MinIO, so copy these from the control node's `.one-click.env` (or point them at your own S3-compatible store). With the bundled MinIO, also allow TCP 9000 from compute to the control node. |
+
+::: tip Enforced at install time
+`install-compute.sh` validates `CUBE_S3_ENDPOINT` before touching any local configuration and aborts if it is missing, instructing you to copy `CUBE_S3_*` from the control node. Set these variables before running the installer.
+:::
 
 You can also specify the CubeMaster endpoint explicitly if it uses a non-default port:
 
@@ -190,6 +205,7 @@ Compute nodes use the same `.env` file format. The following variables are speci
 | `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` (from `config.toml`) | cubevs local network CIDR. Should match the control-plane value. IPv4 CIDR format (e.g., `10.100.0.0/18`), mask range /16–/24. Auto-detected for host network conflicts at install time. |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | Set to `1` to skip CIDR conflict detection (not recommended). |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | Run health check after installation |
+| `CUBE_S3_*` | empty / filled by control MinIO | **Required.** Volume plugin is an S3 hard dependency. Copy from the control node's `.one-click.env`; `ENDPOINT` / `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY` / `BUCKET` have no usable default. |
 
 For the full configuration reference (build-time options, database, proxy, etc.), see [Self-Build Deployment — Configuration Reference](./self-build-deploy.md#configuration-reference).
 

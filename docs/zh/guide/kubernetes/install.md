@@ -249,7 +249,7 @@ kubectl delete namespace cube-system
 
 ### 8.1 控制面 PVC 配置
 
-- 默认：CubeMaster / MySQL / Redis 走集群 **default StorageClass**
+- 默认：CubeMaster / MySQL / Redis / MinIO 走集群 **default StorageClass**
 - 指定 SC：在 `runtime-values.yaml` 修改 `persistence.storageClassName: <name>`
 - 单节点 / 无 CSI：可改用 hostPath（见 `runtime-values.example.yaml` 注释）
 

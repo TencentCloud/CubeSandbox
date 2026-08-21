@@ -12,6 +12,8 @@
 # Installs:
 #   cosfs  — Cubelet Attach/Detach (FUSE)
 #   coscmd — CubeMaster Create/Destroy (binary plugin)
+#   s3fs   — Cubelet Attach/Detach for S3-compatible backends (FUSE)
+#   awscli — CubeMaster Create/Destroy for the S3 volume plugin
 #   jq     — binary plugin JSON parsing
 #
 # Run as root during image build. Not a substitute for
@@ -113,17 +115,69 @@ install_coscmd() {
   coscmd --version | head -1
 }
 
+install_s3fs() {
+  log "install s3fs"
+  # s3fs pulls the right fuse package; installing "fuse" explicitly breaks on
+  # fuse3-only distros (same as examples/volume/s3/install-deps.sh).
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends s3fs
+  command -v s3fs >/dev/null 2>&1 || {
+    echo "ERROR: s3fs not on PATH after package install" >&2
+    exit 1
+  }
+  s3fs --version | head -1
+}
+
+install_awscli() {
+  # Ubuntu 24.04 no longer ships the awscli apt package. Prefer pip (same
+  # pattern as coscmd); fall back to the official AWS CLI v2 zip.
+  log "install awscli"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    python3 python3-pip unzip curl ca-certificates
+  if python3 -m pip install -q --upgrade --break-system-packages awscli \
+    || python3 -m pip install -q --upgrade awscli; then
+    command -v aws >/dev/null 2>&1 || {
+      echo "ERROR: aws not on PATH after pip install" >&2
+      exit 1
+    }
+    aws --version
+    return 0
+  fi
+  local arch url tmp
+  arch="$(uname -m)"
+  case "${arch}" in
+    x86_64|amd64)  url="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" ;;
+    aarch64|arm64) url="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" ;;
+    *)
+      echo "ERROR: unsupported architecture for AWS CLI: ${arch}" >&2
+      exit 1
+      ;;
+  esac
+  tmp="$(mktemp -d)"
+  log "downloading ${url}"
+  curl -fsSL "$url" -o "${tmp}/awscliv2.zip"
+  unzip -q "${tmp}/awscliv2.zip" -d "${tmp}"
+  "${tmp}/aws/install" --update
+  rm -rf "${tmp}"
+  command -v aws >/dev/null 2>&1 || {
+    echo "ERROR: aws not on PATH after AWS CLI v2 install" >&2
+    exit 1
+  }
+  aws --version
+}
+
 main() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   install_jq
   install_cosfs
   install_coscmd
+  install_s3fs
+  install_awscli
   apt-get clean
   rm -rf /var/lib/apt/lists/*
   local cosfs_path
   cosfs_path="$(command -v cosfs 2>/dev/null || echo '(skipped)')"
-  log "installed: $(command -v jq) ${cosfs_path} $(command -v coscmd)"
+  log "installed: $(command -v jq) ${cosfs_path} $(command -v coscmd) $(command -v s3fs) $(command -v aws)"
 }
 
 main "$@"

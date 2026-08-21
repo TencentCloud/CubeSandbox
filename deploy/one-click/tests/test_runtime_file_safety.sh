@@ -135,6 +135,7 @@ test_render_template_rejects_non_empty_directory() {
 test_unit_prepare_hooks_are_wired() {
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-mysql.service" "/usr/local/services/cubetoolbox/scripts/systemd/mysql-prepare.sh"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-redis.service" "/usr/local/services/cubetoolbox/scripts/systemd/redis-prepare.sh"
+  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-minio.service" "/usr/local/services/cubetoolbox/scripts/systemd/minio-prepare.sh"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-coredns.service" "/usr/local/services/cubetoolbox/scripts/systemd/coredns-prepare.sh"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-coredns.service" "/usr/local/services/cubetoolbox/scripts/systemd/coredns-postcheck.sh"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-cube-proxy.service" "/usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-prepare.sh"
@@ -870,6 +871,9 @@ test_postcheck_skips_when_external_host_set() {
   CUBE_EXTERNAL_REDIS_MASTER_NAME=mymaster \
     bash "${ONE_CLICK_DIR}/scripts/systemd/redis-postcheck.sh" \
     || fail "redis-postcheck must exit 0 when CUBE_EXTERNAL_REDIS_MASTER_NAME is set"
+  CUBE_SANDBOX_MINIO_ENABLED=0 \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/minio-postcheck.sh" \
+    || fail "minio-postcheck must exit 0 when CUBE_SANDBOX_MINIO_ENABLED=0"
 }
 
 test_external_redis_sentinel_wiring() {
@@ -890,8 +894,54 @@ test_external_redis_sentinel_wiring() {
 
   assert_contains "${env_example}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
   assert_contains "${env_example}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES"
+  assert_contains "${env_example}" "CUBE_S3_ENDPOINT"
+  assert_contains "${env_example}" "CUBE_SANDBOX_MINIO_ENABLED"
+  assert_contains "${env_example}" "CUBE_SANDBOX_MINIO_IMAGE"
+  assert_contains "${env_example}" "minio:RELEASE.2025-09-07T16-13-09Z"
+  assert_contains "${up_support}" "minio:RELEASE.2025-09-07T16-13-09Z"
+  assert_contains "${install_sh}" "fill_s3_from_local_minio"
+  assert_contains "${install_sh}" "local_minio_s3_endpoint"
+  assert_contains "${install_sh}" "check_minio_not_combined_with_user_s3"
+  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" "local_minio_s3_endpoint"
+  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" "s3_config_is_local_minio_fill"
+  assert_contains "${install_sh}" "compute role does not deploy MinIO"
+  if grep -A80 '^write_volume_s3_conf()' "${ONE_CLICK_DIR}/lib/common.sh" | grep -q 'CUBE_SANDBOX_MINIO_'; then
+    fail "write_volume_s3_conf must read only CUBE_S3_* (not CUBE_SANDBOX_MINIO_*)"
+  fi
+  local volume_s3_plugin="${ONE_CLICK_DIR}/../../examples/volume/s3/binary/cube-volume-s3.sh"
+  assert_contains "${volume_s3_plugin}" "empty=\"\$(mktemp)\""
+  assert_contains "${volume_s3_plugin}" "--body \"\$empty\""
+  if grep -Fq -- '--body /dev/null' "${volume_s3_plugin}"; then
+    fail "cube-volume-s3 must not use --body /dev/null (AWS CLI 2.36 rejects character devices)"
+  fi
+  if ! grep -A30 '^s3_create_dir()' "${volume_s3_plugin}" | grep -Fq 'key="$(s3_subdir "$volume_id")/"'; then
+    fail "s3_create_dir must PUT the trailing-slash directory object s3fs stats on mount"
+  fi
+  if grep -A40 '^s3fs_mount_volume()' "${volume_s3_plugin}" | grep -Fq -- '"-ocompat_dir"'; then
+    fail "s3fs_mount_volume must not hardcode -ocompat_dir (unknown on s3fs 1.90; create writes dir/ instead)"
+  fi
+  if ! grep -A50 '^s3_ensure_bucket()' "${volume_s3_plugin}" | grep -q 'BucketAlreadyOwnedByYou'; then
+    fail "s3_ensure_bucket must treat BucketAlreadyOwnedByYou as success"
+  fi
+  if ! grep -A50 '^s3_ensure_bucket()' "${volume_s3_plugin}" | grep -q 'BucketAlreadyExists'; then
+    fail "s3_ensure_bucket must treat BucketAlreadyExists as success"
+  fi
+  if ! grep -A50 '^s3_ensure_bucket()' "${volume_s3_plugin}" | grep -Fq 'LocationConstraint'; then
+    fail "s3_ensure_bucket must pass LocationConstraint for non-us-east-1 regions"
+  fi
+  if ! grep -A50 '^s3_ensure_bucket()' "${volume_s3_plugin}" | grep -Fq 'us-east-1'; then
+    fail "s3_ensure_bucket must skip LocationConstraint for us-east-1"
+  fi
+  if ! grep -A50 '^s3_ensure_bucket()' "${volume_s3_plugin}" | grep -Fq '"auto"'; then
+    fail "s3_ensure_bucket must skip LocationConstraint for region=auto"
+  fi
   assert_contains "${postcheck}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
   assert_contains "${up_support}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
+  assert_contains "${up_support}" "CUBE_SANDBOX_MINIO_ENABLED"
+  assert_contains "${up_support}" "minio"
+  assert_contains "${up_support}" "SUPPORT_SERVICES:-mysql redis minio"
+  assert_contains "${up_support}" "do not run compose down"
+  assert_not_contains "${up_support}" "down --remove-orphans"
   assert_contains "${up_deps}" "CUBE_PROXY_REDIS_MASTER_NAME"
   assert_contains "${up_deps}" "CUBE_LCM_REDIS_MASTER_NAME"
   assert_contains "${up_deps}" "CUBE_PROXY_REDIS_SENTINEL_NODES"
@@ -952,6 +1002,7 @@ test_mask_external_dep_services_remove_then_mask() {
   # Both local dependency units are routed through the shared masking helper.
   assert_contains "${path}" "mask_local_dep_service cube-sandbox-mysql.service"
   assert_contains "${path}" "mask_local_dep_service cube-sandbox-redis.service"
+  assert_contains "${path}" "mask_local_dep_service cube-sandbox-minio.service"
   # Core fix: remove the installed regular file BEFORE masking, otherwise plain
   # `systemctl mask` fails to overlay its /dev/null symlink on an existing file.
   assert_contains "${path}" "rm -f \"\${unit_dir}/\${unit}\""
@@ -960,6 +1011,7 @@ test_mask_external_dep_services_remove_then_mask() {
   # follows so the new (un)masked state is picked up before the target starts.
   assert_contains "${path}" "systemctl unmask cube-sandbox-mysql.service"
   assert_contains "${path}" "systemctl unmask cube-sandbox-redis.service"
+  assert_contains "${path}" "systemctl unmask cube-sandbox-minio.service"
   assert_contains "${path}" "systemctl daemon-reload"
 }
 

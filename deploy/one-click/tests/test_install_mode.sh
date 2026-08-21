@@ -82,13 +82,15 @@ test_default_fresh_is_install() {
   [[ "${got}" == "install" ]] || fail "default+fresh should be install (got ${got})"
 }
 
-test_default_existing_non_interactive_is_install() {
+test_default_existing_non_interactive_is_upgrade() {
   local d="${TMP_DIR}/f"
   make_install_dir "${d}"
   local got
-  got="$(resolve_install_mode "" "${d}" 0 < /dev/null 2>/dev/null)"
-  [[ "${got}" == "install" ]] \
-    || fail "default+existing+non-interactive should default to install (got ${got})"
+  local err="${TMP_DIR}/f.err"
+  got="$(resolve_install_mode "" "${d}" 0 < /dev/null 2>"${err}")"
+  [[ "${got}" == "upgrade" ]] \
+    || fail "default+existing+non-interactive should default to upgrade (got ${got})"
+  assert_contains "${err}" "defaulting to config-preserving upgrade"
 }
 
 test_assume_yes_existing_is_upgrade() {
@@ -546,6 +548,8 @@ test_install_sh_wires_upgrade_flow() {
   assert_contains "${f}" "backup_before_upgrade"
   assert_contains "${f}" "merge_env_three_way"
   assert_contains "${f}" "patch_cubelet_config_template"
+  assert_contains "${f}" "check_minio_not_combined_with_user_s3"
+  assert_contains "${f}" "local_minio_s3_endpoint"
   # CLI parsing is delegated to one_click_parse_args (supports --mode/--node-ip
   # in both = and space forms) and CLI values are re-applied after .env load.
   assert_contains "${f}" 'one_click_parse_args "$@"'
@@ -577,7 +581,7 @@ test_explicit_upgrade_requires_existing
 test_explicit_upgrade_with_existing
 test_auto_mode
 test_default_fresh_is_install
-test_default_existing_non_interactive_is_install
+test_default_existing_non_interactive_is_upgrade
 test_assume_yes_existing_is_upgrade
 test_parse_args_space_and_equals_forms
 test_parse_args_missing_value_fails

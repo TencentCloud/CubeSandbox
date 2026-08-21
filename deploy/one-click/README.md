@@ -10,7 +10,7 @@ This directory is used to build and deliver the single-machine one-click release
 - `build-agent-ext4.sh`: Builds independent `cube-agent/cube-agent.ext4` (+ `version`) for virtio-pmem1.
 - `build-release-bundle.sh`: Low-level packaging entry point. Consumes either the source tree or `ONE_CLICK_*_BIN` pre-built artifacts, assembles `sandbox-package`, and produces the final release package.
 - `config-cube.toml`: Default one-click runtime configuration template.
-- `support/`: `docker compose` templates for MySQL/Redis, installed to `/usr/local/services/cubetoolbox/support/` on the target machine; `support/bin/mkcert` is the bundled mkcert binary.
+- `support/`: `docker compose` templates for MySQL/Redis/MinIO, installed to `/usr/local/services/cubetoolbox/support/` on the target machine; `support/bin/mkcert` is the bundled mkcert binary.
 - `cubeproxy/`: Compose template, `global.conf` template, and CoreDNS template for `cube proxy`.
 - `webui/`: Nginx runtime files for the dashboard, installed to `/usr/local/services/cubetoolbox/webui/` on the target machine.
 - `install.sh`: Entry point for installing and starting the control node on the target machine (defaults to all-in-one mode).
@@ -247,6 +247,11 @@ ONE_CLICK_DEPLOY_ROLE=compute
 ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
 ```
 
+If the control node runs bundled MinIO (or any S3 backend), also copy `CUBE_S3_*`
+from that node's `.one-click.env` so the volume plugin can reach the same store.
+Compute nodes never deploy MinIO; they only consume `CUBE_S3_*`. Allow TCP 9000
+from compute to the control node when using bundled MinIO.
+
 If you need to explicitly specify the compute node IP, or if the default NIC on the target machine is not `eth0`, also set:
 
 ```bash
@@ -271,7 +276,7 @@ Notes:
 
 - All compute nodes must have `Cubelet` listening on the same gRPC port as configured on the control node (default `9999`).
 - `CUBE_SANDBOX_NODE_IP` is used both as the one-click configuration value and as the `Cubelet` node registration IP.
-- The control node must be able to reach port `9999/tcp` on all compute nodes; compute nodes must be able to reach port `8089/tcp` on the control node.
+- The control node must be able to reach port `9999/tcp` on all compute nodes; compute nodes must be able to reach port `8089/tcp` on the control node (and `9000/tcp` when using bundled MinIO as the S3 volume backend).
 
 MySQL/Redis dependencies are deployed by default to:
 
@@ -283,6 +288,7 @@ During installation, runtime files are prepared in this directory and the follow
 
 - `mysql:8.0`
 - `redis:7-alpine`
+- `minio` (S3-compatible volume backend; explicit via `CUBE_SANDBOX_MINIO_ENABLED`, default on)
 
 ### Using an external MySQL / Redis
 
@@ -313,6 +319,71 @@ When `CUBE_EXTERNAL_MYSQL_HOST` (and/or `CUBE_EXTERNAL_REDIS_HOST`) is set, `ins
 
 The external MySQL must already grant the configured user access to the target
 database. CubeMaster runs its own embedded schema migrations on first start.
+
+### Bundled MinIO vs the S3 volume plugin
+
+`CUBE_SANDBOX_MINIO_*` only deploys the MinIO container. The S3 volume plugin
+always reads `CUBE_S3_*` and writes `volume-s3.conf` from those values.
+
+The bundled MinIO occupies two host ports (both overridable via environment
+variables):
+
+| Port | In container | Host mapping | Bind address |
+| ---- | ------------ | ------------ | ------------ |
+| S3 API | `9000` | `CUBE_SANDBOX_MINIO_API_PORT` (default `9000`) | `CUBE_SANDBOX_MINIO_API_BIND`, default `CUBE_SANDBOX_NODE_IP` (falls back to `127.0.0.1` when no node IP is detected) |
+| Web console | `9001` | `CUBE_SANDBOX_MINIO_CONSOLE_PORT` (default `9001`) | always `127.0.0.1`, localhost only |
+
+The S3 API is published on the node IP by default so compute-node Cubelets can
+reach it directly. To keep S3 local-only, set
+`CUBE_SANDBOX_MINIO_API_BIND=127.0.0.1` — at the cost of compute nodes losing
+access to the bundled MinIO (use an external S3 store instead). The console
+port is always bound to `127.0.0.1` and is never exposed.
+
+On a control node with `CUBE_SANDBOX_MINIO_ENABLED=1` (default), `install.sh`
+starts MinIO, generates a 24-character random password if you left it empty,
+then **fills `CUBE_S3_*`** from that MinIO (`http://<node-ip>:9000`, the MinIO
+user/password, path-style s3fs options) and persists both families in
+`.one-click.env`. Do not set `CUBE_S3_ENDPOINT` yourself while MinIO is
+enabled. A later upgrade may reload that filled local endpoint from
+`.one-click.env`; that is expected and allowed. Only a different,
+operator-supplied external store requires `CUBE_SANDBOX_MINIO_ENABLED=0`.
+
+Other MinIO deployment parameters: default user `cubeminio`
+(`CUBE_SANDBOX_MINIO_ROOT_USER`; the password must be at least 8 characters or
+MinIO refuses to start), bucket `cube-volumes` (`CUBE_SANDBOX_MINIO_BUCKET`),
+data volume `cube-sandbox-minio-data` (`CUBE_SANDBOX_MINIO_VOLUME`, mounted at
+`/data`), container name `cube-sandbox-minio` (`CUBE_SANDBOX_MINIO_CONTAINER`),
+and image `CUBE_SANDBOX_MINIO_IMAGE` (default selected by `MIRROR=cn|int`).
+MinIO runs under `cube-sandbox-minio.service`; after startup, readiness is
+verified via `curl http://<node-ip>:9000/minio/health/live` (a `200` response
+means it is healthy).
+
+To use an existing S3-compatible store instead, set
+`CUBE_SANDBOX_MINIO_ENABLED=0` and `CUBE_S3_*` before `install.sh`:
+
+```bash
+CUBE_SANDBOX_MINIO_ENABLED=0
+CUBE_S3_ENDPOINT=https://s3.example.com
+CUBE_S3_ACCESS_KEY_ID=...
+CUBE_S3_SECRET_ACCESS_KEY=...
+CUBE_S3_BUCKET=cube-volumes
+# CUBE_S3_REGION=us-east-1
+# CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
+```
+
+Compute nodes never run MinIO. Copy the filled `CUBE_S3_*` values from the
+control node's `.one-click.env` into the compute `.env` (and allow TCP 9000
+from compute to the control node if you are using bundled MinIO):
+
+```bash
+ONE_CLICK_DEPLOY_ROLE=compute
+ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
+CUBE_S3_ENDPOINT=http://10.0.0.11:9000
+CUBE_S3_ACCESS_KEY_ID=cubeminio
+CUBE_S3_SECRET_ACCESS_KEY=<from control .one-click.env>
+CUBE_S3_BUCKET=cube-volumes
+CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
+```
 
 `cube proxy` and its DNS resolution are mandatory capabilities in one-click. The following two values in `.env` must remain `1`:
 

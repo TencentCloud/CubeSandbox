@@ -7,7 +7,7 @@
 #
 # What this file does compared to values.yaml defaults:
 #   1. Provisions a chart-owned CBS StorageClass named "cube-cbs-wffc" and
-#      pins every CubeMaster / MySQL / Redis PVC to it.
+#      pins every CubeMaster / MySQL / Redis / MinIO PVC to it.
 #   2. Uses WaitForFirstConsumer volume binding so multi-AZ TKE clusters
 #      create CBS disks in the same AZ as the scheduled Pod.
 #   3. Exposes CubeProxy via a TKE CLB (LoadBalancer Service) and disables
@@ -42,6 +42,10 @@ mysql:
     storageClassName: cube-cbs-wffc
 
 redis:
+  persistence:
+    storageClassName: cube-cbs-wffc
+
+minio:
   persistence:
     storageClassName: cube-cbs-wffc
 

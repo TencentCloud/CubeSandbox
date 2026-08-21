@@ -29,7 +29,7 @@
 └────────────┘└────────────┘└────────────┘
 ```
 
-- **控制节点**运行完整技术栈：编排调度（CubeMaster）、API 网关（cube-api）、代理（CubeProxy + CoreDNS）、数据库（MySQL + Redis），同时自身也作为计算节点。
+- **控制节点**运行完整技术栈：编排调度（CubeMaster）、API 网关（cube-api）、代理（CubeProxy + CoreDNS）、数据库（MySQL + Redis）、内置 MinIO S3 存储（供 volume 使用），同时自身也作为计算节点。
 - 每个**计算节点**只运行内置 network runtime 的 `Cubelet`，向控制面 `CubeMaster` 注册并接收沙箱调度请求。
 
 ## 前置条件
@@ -39,7 +39,7 @@
 - **物理机或裸金属服务器**（不支持嵌套虚拟化）
 - **x86_64** 或 **aarch64**（ARM64）架构，**已启用 KVM**（`ls /dev/kvm`）
 - **Docker** 已安装并运行
-- 到控制节点的**网络连通性**（默认需访问 `CubeMaster` 的 `8089` 端口）
+- 到控制节点的**网络连通性**（默认需访问 `CubeMaster` 的 `8089` 端口；使用内置 MinIO 时还需访问 `9000` 端口）
 
 完整要求列表请参阅[本地构建部署 — 前置条件](./self-build-deploy.md#前置条件)。
 
@@ -64,6 +64,15 @@ cp env.example .env
 ONE_CLICK_DEPLOY_ROLE=compute
 CUBE_SANDBOX_NODE_IP=<当前节点IP>
 ONE_CLICK_CONTROL_PLANE_IP=<控制节点IP>
+
+# CUBE_S3_* 必填——Volume 插件强制依赖 S3。计算节点不部署 MinIO，
+# 请把控制节点 .one-click.env 中的 CUBE_S3_* 原样拷贝（必须与控制节点一致，
+# 插件才能解析到同一个存储）。内置 MinIO 时形如：
+CUBE_S3_ENDPOINT=http://<控制节点IP>:9000
+CUBE_S3_ACCESS_KEY_ID=<取自控制节点 .one-click.env>
+CUBE_S3_SECRET_ACCESS_KEY=<取自控制节点 .one-click.env>
+CUBE_S3_BUCKET=cube-volumes
+CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
 ```
 
 | 变量 | 说明 |
@@ -71,6 +80,11 @@ ONE_CLICK_CONTROL_PLANE_IP=<控制节点IP>
 | `ONE_CLICK_DEPLOY_ROLE` | 计算节点必须设为 `compute` |
 | `CUBE_SANDBOX_NODE_IP` | 当前节点主网卡 IP |
 | `ONE_CLICK_CONTROL_PLANE_IP` | 控制节点 IP，自动拼接为 `<ip>:8089` 作为 CubeMaster 地址 |
+| `CUBE_S3_*` | **必填。** Volume 插件强制依赖 S3。计算节点不部署 MinIO，从控制节点 `.one-click.env` 拷贝（或指向自有 S3）。内置 MinIO 还需放行计算节点到控制面 TCP 9000。 |
+
+::: tip 安装时会校验
+`install-compute.sh` 会在修改任何本地配置之前校验 `CUBE_S3_ENDPOINT`；缺失时直接中止，并提示从控制节点拷贝 `CUBE_S3_*`。请先补齐上述变量再运行安装。
+:::
 
 如果 CubeMaster 使用非默认端口，也可以显式指定：
 
@@ -190,6 +204,7 @@ sudo ./down.sh
 | `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18`（取自 `config.toml`） | cubevs 本地网络 CIDR。需与控制节点一致。格式为 IPv4 CIDR（如 `10.100.0.0/18`），掩码范围 /16~/24。安装时自动检测宿主机冲突。 |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | 设为 `1` 跳过冲突检测（不推荐）。 |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | 安装后是否执行健康检查 |
+| `CUBE_S3_*` | 空 / 由控制面 MinIO 填入 | **必填。** Volume 插件强制依赖 S3。从控制节点 `.one-click.env` 拷贝；`ENDPOINT` / `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY` / `BUCKET` 无可用默认值。 |
 
 完整配置参考（构建选项、数据库、代理等）请参阅[本地构建部署 — 配置参考](./self-build-deploy.md#配置参考）。
 

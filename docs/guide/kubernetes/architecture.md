@@ -17,7 +17,7 @@ For install steps, see [Helm Install](./install.md). For compute image upgrades,
 | Ops backend | CubeOps | Deployment + Service | JWT ops API + WebUI SDK; listens on `0.0.0.0:3010`; reads/writes MySQL; talks to CubeMaster |
 | Admin entry | WebUI | Deployment + Service + ConfigMap | Static console; reverse-proxies `/opsapi/` and `/cubeapi/v1/` to CubeOps (depends on `cubeOps.enabled`) |
 | Ops entry | cubemastercli | Deployment | CLI for `kubectl exec`; injects this Release’s CubeMaster endpoint |
-| Dependent storage | MySQL / Redis | Built-in StatefulSet or third-party | Business data / Proxy and lifecycle state |
+| Dependent storage | MySQL / Redis / MinIO | Built-in StatefulSet or third-party | Business data / Proxy and lifecycle state / S3 volume backend |
 | Compute · runtime | `cube-node` (Big Pod) | Native `apps/v1` DaemonSet | `wait-node-prep` init + cubelet with embedded network runtime + optional egress |
 | Compute · artifacts | `cube-node-installer` | Native `apps/v1` DaemonSet | Installs shim / kernel / guest into the host toolbox |
 | Compute · node bootstrap | `cube-node-bootstrap` | Native `apps/v1` DaemonSet | `wait-pvm-host`, `cube-node-init`, writes `node-prep-ready` |
@@ -37,6 +37,7 @@ flowchart TB
     CLI["cubemastercli"]
     MYSQL[("MySQL")]
     REDIS[("Redis")]
+    MINIO[("MinIO")]
     PROXY["cube-proxy"]
   end
 
@@ -74,6 +75,8 @@ flowchart TB
   API --> MYSQL
   CM --> MYSQL
   CM --> REDIS
+  CM --> MINIO
+  RUN --> MINIO
   PROXY --> REDIS
   PROXY --> CM
   KDNS --> PROXY
@@ -101,10 +104,11 @@ flowchart TB
 | `cube-ops` | `templates/ops.yaml` | `images.ops`; ClusterIP; bind `0.0.0.0:3010` |
 | `cubemastercli` | `templates/cubemastercli.yaml` | `images.cubemastercli` |
 | `cube-webui` | `templates/webui.yaml` | `images.webui` + nginx ConfigMap (upstream CubeOps) |
-| `cube-secret` | `templates/secret.yaml` | MySQL / Redis / Proxy passwords, etc. |
+| `cube-secret` | `templates/secret.yaml` | MySQL / Redis / Proxy / MinIO passwords, etc. |
 | `volume-cos` (optional) | `templates/volume-cos-secret.yaml` | COS credentials (`volume-cos.conf`); mounted on Master + Cubelet when `volumeCos.enabled` |
+| `volume-s3` | `templates/secret.yaml` (auto-filled from the built-in MinIO) / `templates/volume-s3-secret.yaml` (operator-set `volumeS3.*`) | S3 credentials (`volume-s3.conf`); mounted on Master + Cubelet when the built-in MinIO is enabled or `volumeS3.endpoint` / `existingSecret` is set |
 
-### 2.2 MySQL / Redis
+### 2.2 MySQL / Redis / MinIO
 
 | Mode | Behavior |
 | --- | --- |
@@ -112,12 +116,14 @@ flowchart TB
 | Third-party MySQL | Non-empty `mysql.host` → do not install built-in MySQL |
 | Built-in Redis | `redis.host=""` and control plane or Proxy needs it → install |
 | Third-party Redis | Non-empty `redis.host` → do not install built-in Redis |
+| Built-in MinIO | `minio.enabled=true` → deploy StatefulSet + Headless Service (`minio.*` only deploys MinIO itself; an empty `rootPassword` is auto-generated). If `volumeS3.endpoint` / `existingSecret` are not set, the chart derives the S3 config from the built-in MinIO and writes `volume-s3.conf` |
+| External S3 | `minio.enabled=false` plus `volumeS3.endpoint` / `volumeS3.existingSecret` → do not deploy the built-in MinIO; `volume-s3.conf` is generated from `volumeS3.*` |
 
 ### 2.3 Compute plane: four DaemonSets
 
 `cube-node` / `cube-node-installer` / `cube-node-bootstrap` use `placement.compute` (**without** `allow-pvm-bootstrap`). `cube-node-pvm` uses `placement.pvm` (includes `allow-pvm-bootstrap`), so non-PVM nodes do not pull the large `cube-pvm-host-bootstrap` image.
 
-All four compute lines (Big Pod / installer / bootstrap / PVM) are native `apps/v1` DaemonSets. Stateless control plane (master/api/ops/webui/proxy/lifecycle/cubemastercli) uses native Deployments; MySQL/Redis continue to use native StatefulSets.
+All four compute lines (Big Pod / installer / bootstrap / PVM) are native `apps/v1` DaemonSets. Stateless control plane (master/api/ops/webui/proxy/lifecycle/cubemastercli) uses native Deployments; MySQL/Redis/MinIO continue to use native StatefulSets.
 
 #### Big Pod: `cube-node`
 
@@ -219,7 +225,7 @@ flowchart TD
   B --> C{"values valid?"}
   C -- no --> X["fail render"]
   C -- yes --> D["Secret / ConfigMap / persistence"]
-  D --> E["MySQL / Redis or external"]
+  D --> E["MySQL / Redis / MinIO or external"]
   E --> F["Control-plane Deployment"]
   F --> G["Proxy / cluster-dns"]
   G --> H["cube-node + installer + bootstrap + pvm"]
@@ -378,7 +384,7 @@ externalControlPlane:
   apiEndpoint: http://<external-api>:3000  # optional, for helm test
 ```
 
-Does not install built-in Master / API / MySQL / Redis / WebUI; by default does not install Proxy (to avoid inconsistency with an external data plane). When `apiEndpoint` is set, helm test validates the external API and node registration.
+Does not install built-in Master / API / MySQL / Redis / MinIO / WebUI; by default does not install Proxy (to avoid inconsistency with an external data plane). When `apiEndpoint` is set, helm test validates the external API and node registration.
 
 ## 7. Key values toggles
 
@@ -386,8 +392,8 @@ Does not install built-in Master / API / MySQL / Redis / WebUI; by default does 
 | --- | --- | --- |
 | `global.timezone` | `Asia/Shanghai` | Injects `TZ` into Chart-managed containers |
 | `storageClass.create` / `name` / `provisioner` | `create=false` | Whether the chart creates a StorageClass; default is no (PVCs use cluster default SC; TKE uses `values-tke.yaml`) |
-| `persistence.storageClassName` | `""` | Shared SC for the three PVCs; `""` → cluster default |
-| `*.persistence.storageClassName` (master/mysql/redis) | `""` | Per-component override; non-empty wins over top-level |
+| `persistence.storageClassName` | `""` | Shared SC for the four PVCs; `""` → cluster default |
+| `*.persistence.storageClassName` (master/mysql/redis/minio) | `""` | Per-component override; non-empty wins over top-level |
 | `controlPlane.enabled` | `true` | Built-in control plane |
 | `externalControlPlane.enabled` | `false` | External CubeMaster |
 | `placement.controlPlane.nodeSelector` | `cube-control=true` | Control-plane scheduling |
@@ -402,6 +408,7 @@ Does not install built-in Master / API / MySQL / Redis / WebUI; by default does 
 | `bootstrap.pvmHostKernel.bootArgs` | `nopti pti=off` | Current `kvm_pvm` does not support host KPTI |
 | `bootstrap.nodeInit.*` | several | Preflight, XFS, KVM, CIDR |
 | `mysql.host` / `redis.host` | `""` | Non-empty → use third-party |
+| `volumeS3.endpoint` / `existingSecret` | `""` | S3 config source: auto-filled from the built-in MinIO when both are empty and `minio.enabled=true`; setting either explicitly requires `minio.enabled=false` (pick one, mutually exclusive) |
 | `cubeProxy.enabled` / `ingress.enabled` | `true` | Proxy / Ingress |
 | `lifecycleManager.enabled` | `true` | Required when Proxy is enabled |
 | `cubeEgress.enabled` | `true` | Big Pod egress sidecar |
@@ -424,7 +431,7 @@ helm test <release> -n <namespace> --timeout 20m --logs
 
 ## 9. Ownership and uninstall boundaries
 
-The Chart manages and removes with the release: control- and compute-plane workloads, built-in MySQL/Redis, Proxy, CA/TLS/config Secrets, Helm test RBAC, diagnostics ConfigMap, etc.
+The Chart manages and removes with the release: control- and compute-plane workloads, built-in MySQL/Redis/MinIO, Proxy, CA/TLS/config Secrets, Helm test RBAC, diagnostics ConfigMap, etc.
 
 The Chart **does not** manage: node labels/taints, third-party DBs, external DNS/LB, hostPath data, host kernel / GRUB / udev / fstab / XFS and other node-level persistent changes. After uninstall, clean host leftovers per platform runbook.
 

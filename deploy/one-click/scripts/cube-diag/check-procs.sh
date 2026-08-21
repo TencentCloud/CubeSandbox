@@ -43,6 +43,7 @@ Processes / components checked:
   infrastructure       Docker containers for storage / metadata:
                          cube-sandbox-redis  session state, port 6379
                          cube-sandbox-mysql  metadata DB, port 3306
+                         cube-sandbox-minio  S3 volume backend, port 9000
   cube-kernel          vmlinux / vmlinux-pvm kernel image files;
                        PVM variant checked against host environment
 
@@ -56,6 +57,8 @@ Environment variables:
   ONE_CLICK_RUNTIME_DIR              PID file directory (default: /var/run/cube-sandbox-one-click)
   CUBE_API_HEALTH_ADDR               cube-api health address (default: 127.0.0.1:3000)
   CUBEMASTER_ADDR                    cubemaster address (default: 127.0.0.1:8089)
+  CUBE_SANDBOX_MINIO_ENABLED         1 (default) checks the bundled MinIO
+                                     container; 0 skips it (no local MinIO)
   ONE_CLICK_CONTROL_PLANE_IP         Control plane IP for compute role
   ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR  Full cubemaster address for compute role
 
@@ -384,6 +387,13 @@ check_cube_infra() {
 
   # ── cube-sandbox-mysql ── persistent metadata store, port 3306
   _check_container "cube-sandbox-mysql" "running" "healthy" "3306"
+
+  # ── cube-sandbox-minio ── S3 volume backend, port 9000
+  if [[ "${CUBE_SANDBOX_MINIO_ENABLED:-1}" != "1" ]]; then
+    pass "cube-sandbox-minio" "skipped (CUBE_SANDBOX_MINIO_ENABLED=${CUBE_SANDBOX_MINIO_ENABLED:-1})"
+  else
+    _check_container "cube-sandbox-minio" "running" "healthy" "9000"
+  fi
 }
 
 check_cube_kernel() {

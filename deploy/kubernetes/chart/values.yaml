@@ -7,7 +7,7 @@ fullnameOverride: ""
 global:
   timezone: Asia/Shanghai
   # Cluster DNS domain used to build in-cluster Service FQDNs (mysql, redis,
-  # cube-master, cube-api). Override when the cluster is configured with
+  # minio, cube-master, cube-api). Override when the cluster is configured with
   # kubelet --cluster-domain=<non-default>. Empty falls back to
   # cubeNode.dns.clusterDomain, then "cluster.local".
   clusterDomain: ""
@@ -19,7 +19,7 @@ global:
   # / api / ops / cubemastercli / proxy / lifecycleManager / cubeEgress /
   # cubeEgressNet / webui / cubelet / cubeShim / cubeKernel /
   # cubeGuest / cubeAgent / waitNodePrep / kubectl (alpine-k8s mirror) entries but not to
-  # third-party images such as mysql / redis.
+  # third-party images such as mysql / redis / minio.
   imageRegistry: ""
 
 images:
@@ -148,11 +148,11 @@ storageClass:
   # parameters:
   #   type: cbs
 
-# Convenience: pin CubeMaster / MySQL / Redis PVCs to one StorageClass name
+# Convenience: pin CubeMaster / MySQL / Redis / MinIO PVCs to one StorageClass name
 # when the component-level storageClassName is empty. Empty (default) means
 # omit storageClassName on the PVC → cluster default SC. Component-level
 # non-empty values always win (used by values-tke.yaml). Mix different SCs
-# by setting the three component fields explicitly instead of this key.
+# by setting the four component fields explicitly instead of this key.
 persistence:
   storageClassName: ""
 
@@ -497,6 +497,33 @@ redis:
     # Empty falls back to persistence.storageClassName, then the cluster's
     # default StorageClass. Override to bind the Redis data PVC to a specific
     # provisioner.
+    storageClassName: ""
+    accessModes:
+      - ReadWriteOnce
+  resources: {}
+
+minio:
+  # Install chart-managed MinIO only. Does not write volume-s3.conf by itself.
+  # When enabled and volumeS3.endpoint/existingSecret are empty, the chart
+  # fills effective S3 plugin fields from this MinIO (endpoint/keys/bucket)
+  # and then writes volume-s3.conf from those S3 fields.
+  # Mutually exclusive with operator-supplied volumeS3.endpoint / existingSecret.
+  enabled: true
+  image:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/minio
+    tag: "RELEASE.2025-09-07T16-13-09Z"
+    pullPolicy: IfNotPresent
+  port: 9000
+  rootUser: cubeminio
+  # Empty → generated on first install and reused from the existing Secret
+  # on upgrade. When set, must be at least 8 characters.
+  rootPassword: ""
+  bucket: cube-volumes
+  persistence:
+    enabled: true
+    existingClaim: ""
+    hostPath: ""
+    size: 20Gi
     storageClassName: ""
     accessModes:
       - ReadWriteOnce
@@ -1010,6 +1037,26 @@ volumeCos:
   secretKey: ""
   bucket: ""
   region: ap-guangzhou
+
+# S3 volume plugin source of truth (volume-s3.conf). The plugin only reads
+# these fields (or the filled equivalent when MinIO is enabled).
+# Operator-supplied endpoint/existingSecret is mutually exclusive with
+# minio.enabled=true. Leave empty to let the chart fill from MinIO.
+volumeS3:
+  # Use an existing Secret that contains key "volume-s3.conf". When set,
+  # the chart does not create a Secret. Requires minio.enabled=false.
+  existingSecret: ""
+  # Name for the chart-created Secret when existingSecret is empty.
+  # Empty → <release>-volume-s3.
+  secretName: ""
+  # Written into volume-s3.conf. Leave empty when minio.enabled=true (filled
+  # from chart MinIO). Set only with minio.enabled=false for an external store.
+  endpoint: ""
+  accessKeyId: ""
+  secretAccessKey: ""
+  bucket: ""
+  region: us-east-1
+  extraOpts: ""
 
 serviceAccount:
   create: true

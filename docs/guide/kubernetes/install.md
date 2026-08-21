@@ -251,7 +251,7 @@ Uninstall **does not** automatically clean up:
 
 ### 8.1 Control-plane PVC configuration
 
-- Default: CubeMaster / MySQL / Redis use the cluster **default StorageClass**
+- Default: CubeMaster / MySQL / Redis / MinIO use the cluster **default StorageClass**
 - To specify an SC: set `persistence.storageClassName: <name>` in `runtime-values.yaml`
 - Single-node / no CSI: switch to hostPath (see comments in `runtime-values.example.yaml`)
 

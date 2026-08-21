@@ -233,3 +233,13 @@
 {{- fail "volumeCos.enabled=true requires volumeCos.existingSecret or volumeCos.secretId/secretKey/bucket" }}
 {{- end }}
 {{- end }}
+{{- $volumeS3 := default dict .Values.volumeS3 -}}
+{{- if and (eq (include "cube.minioBuiltinEnabled" .) "true") (eq (include "cube.volumeS3UserProvided" .) "true") }}
+{{- fail "minio.enabled and volumeS3.endpoint/existingSecret are mutually exclusive; set minio.enabled=false to use an external S3 backend (volumeS3 is the plugin source of truth)" }}
+{{- end }}
+{{- if and (eq (include "cube.volumeS3UserProvided" .) "true") (not $volumeS3.existingSecret) (or (not $volumeS3.accessKeyId) (not $volumeS3.secretAccessKey) (not $volumeS3.bucket)) }}
+{{- fail "volumeS3.endpoint requires volumeS3.existingSecret or volumeS3.accessKeyId/secretAccessKey/bucket" }}
+{{- end }}
+{{- if and (eq (include "cube.minioBuiltinEnabled" .) "true") .Values.minio.rootPassword (lt (len (printf "%s" .Values.minio.rootPassword)) 8) }}
+{{- fail "minio.rootPassword must be at least 8 characters when set (leave empty to generate one)" }}
+{{- end }}

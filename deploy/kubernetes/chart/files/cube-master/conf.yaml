@@ -78,9 +78,13 @@ scheduler:
       - "template_locality"
       - "realtime_create_num"
 
-# Volume plugin (COS binary). Credentials: Secret-mounted volume-cos.conf
-# next to the binary (see values.volumeCos).
+# Volume plugin (S3 / COS binary). Credentials: Secret-mounted.
+# List order sets the default driver when Volume.create() omits `driver`;
+# S3 is first so the default install (bundled MinIO) works out of the box.
 volume_plugins:
+  - name: s3
+    type: binary
+    binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3
   - name: cos
     type: binary
     binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos

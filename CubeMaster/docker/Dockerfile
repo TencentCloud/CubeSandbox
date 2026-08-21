@@ -95,7 +95,12 @@ COPY examples/volume/cos/binary/cube-volume-cos.sh \
     /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos
 COPY examples/volume/cos/volume-cos.conf.example \
     /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-cos.conf.example
-RUN chmod +x /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos
+COPY examples/volume/s3/binary/cube-volume-s3.sh \
+    /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3
+COPY examples/volume/s3/volume-s3.conf.example \
+    /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-s3.conf.example
+RUN chmod +x /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos \
+    /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3
 
 RUN ["/usr/local/services/cubetoolbox/CubeMaster/bin/cubemaster", "--version"]
 

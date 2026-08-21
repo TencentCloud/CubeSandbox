@@ -69,6 +69,8 @@ ONE_CLICK_DEPLOY_ROLE=compute
 ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
 ```
 
+若要使用 S3 Volume，再从控制节点 `.one-click.env` 拷贝 `CUBE_S3_*`（计算节点不部署 MinIO）。
+
 如果要显式指定当前计算节点 IP，再补充：
 
 ```bash
@@ -179,6 +181,7 @@ sudo systemctl status \
   cube-sandbox-cube-api.service \
   cube-sandbox-mysql.service \
   cube-sandbox-redis.service \
+  cube-sandbox-minio.service \
   cube-sandbox-cube-proxy.service \
   cube-sandbox-coredns.service \
   cube-sandbox-dns.service

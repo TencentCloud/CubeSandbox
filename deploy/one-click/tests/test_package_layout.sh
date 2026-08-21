@@ -61,6 +61,14 @@ test_component_build_inputs_exist() {
   if ! grep -q -F 'examples/volume/cos/install-deps.sh' "${BUNDLE_SH}"; then
     fail "build-release-bundle.sh must copy examples/volume/cos/install-deps.sh into CubeMaster/plugin and Cubelet/plugin"
   fi
+  require_file "${ROOT_DIR}/examples/volume/s3/install-deps.sh" \
+    "S3 volume install-deps.sh (examples source)"
+  if ! grep -q -F 'examples/volume/s3/install-deps.sh' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must copy examples/volume/s3/install-deps.sh into CubeMaster/plugin and Cubelet/plugin"
+  fi
+  if ! grep -q -F 'cube-volume-s3' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must copy examples/volume/s3 plugin into CubeMaster/plugin and Cubelet/plugin"
+  fi
 }
 
 # 2) The component image base names must match between what build_images.sh

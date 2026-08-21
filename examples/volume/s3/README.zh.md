@@ -1,41 +1,35 @@
-# S3 兼容 Volume 插件 —— 完整指引
+# S3 兼容 Volume 插件
 
-使用任意 S3 兼容对象存储作为 CubeSandbox Volume 的持久化存储：创建 Volume → 在沙箱中挂载 → 读写 → 卸载 → 删除。
+把任意 S3 兼容对象存储（AWS S3、Tigris、Cloudflare R2、MinIO……）接入 CubeSandbox，作为沙箱的**跨生命周期持久卷**：创建 Volume → 挂到沙箱里读写 → 沙箱销毁后数据仍在 → 再挂回来继续用。
 
-插件完全基于通用工具构建 —— 挂载使用 **s3fs**，控制面使用 **AWS CLI**。插件本身不绑定任何厂商：存储后端只是配置文件中的 `ENDPOINT` 地址，因此可对接任意 S3 兼容 Endpoint —— 例如 AWS S3、[Tigris](https://www.tigrisdata.com/)、MinIO、Cloudflare R2 等。
-
-> **版本要求：** Cube 平台 **≥ 0.6.0**，Python SDK **`cubesandbox` ≥ 0.6.0**。
-> 协议与 Hook 细节：[Volume 插件开发框架](../../../docs/zh/guide/volume-plugin.md)。
+> **本页是"操作参考"**：面向需要**手动部署插件 / 接入外部 S3** 的运维人员。
+>
+> **如果你用的是默认安装（one-click 或 Helm 默认值）** —— 安装脚本已经自动起好 MinIO、装好插件、写好凭证，你**不需要看本页**，直接看用户教程：[S3 持久卷](../../../docs/zh/guide/s3-volume.md)。
 
 English: [README.md](README.md)
 
 ---
 
-## 为什么需要这个插件
+## 这是什么
 
-| | COS 插件 | S3 插件 |
-|---|---|---|
-| 后端 | 腾讯云 COS | 任意 S3 兼容 Endpoint |
-| 挂载驱动 | cosfs（仅 `amd64`） | s3fs（`amd64` **和** `arm64`） |
-| 安装方式 | 手动下载 `.rpm`/`.deb` | `apt install s3fs` / `yum install s3fs-fuse` |
-| 控制面 | coscmd | AWS CLI v2 |
+CubeSandbox 的沙箱默认是临时的，销毁即丢数据。Volume 插件给沙箱一个**用户级持久卷**：通过 e2b 兼容的 `/volumes` API 创建/挂载/卸载/删除，后端是对象存储。本插件是 S3 兼容后端的实现。
 
-本插件填补两个空缺。其一，在腾讯云之外自建 CubeSandbox 时，COS 示例需要腾讯云账号 —— 本插件可对接你已有的任意 S3 兼容存储。其二，**ARM64 集群目前无法通过 cosfs 获得可用的 Volume 后端**：[`deploy/scripts/docker-install-volume-deps.sh`](../../../deploy/scripts/docker-install-volume-deps.sh) 在 `arm64` 上会跳过 cosfs（上游未提供 ARM 包），而 Debian/Ubuntu 与 EPEL 均为 `arm64` 打包了 s3fs。
+插件完全基于通用工具：挂载用 **s3fs**，控制面用 **AWS CLI**，不绑定任何厂商——后端只是配置文件里的一个 `ENDPOINT`。
+
+**与 COS 插件的关系：** 本插件参照 COS 插件实现，区别是后端从腾讯云 COS 换成任意 S3 兼容 Endpoint，且挂载驱动 s3fs 同时支持 `amd64` 和 `arm64`（cosfs 仅 `amd64`）。两者可在同一集群并存（默认安装就同时注册了 `cos` 和 `s3`）。
+
+> **版本要求：** Cube 平台 **≥ 0.6.0**，Python SDK **`cubesandbox` ≥ 0.6.0**。
+> 协议与 Hook 细节：[Volume 插件开发框架](../../../docs/zh/guide/volume-plugin.md)。
 
 ---
 
-## 选择 Endpoint
+## 我需要看本页吗？
 
-无论选择哪家存储，下文所有步骤完全相同 —— 只有 `volume-s3.conf` 不同：
-
-| 存储提供方 | `ENDPOINT` | `REGION` |
-|-----------|-----------|----------|
-| AWS S3 | `https://s3.<region>.amazonaws.com` | 存储桶所在地域 |
-| Tigris | `https://t3.storage.dev` | `auto` |
-| Cloudflare R2 | `https://<account-id>.r2.cloudflarestorage.com` | `auto` |
-| MinIO | `http://<minio-host>:9000` | 任意值 |
-
-需要包含开通账号、创建存储桶与密钥的厂商级端到端指引，见 [Tigris 集成指南](../../../docs/zh/guide/integrations/tigris.md)。
+| 你的情况 | 去哪 |
+|----------|------|
+| 默认安装（one-click / Helm 默认），想用 S3 Volume | [用户教程](../../../docs/zh/guide/s3-volume.md) —— 直接用 SDK，无需配置 |
+| 想把后端从捆绑 MinIO 换成外部 S3 | 本页 [§2](#2-安装插件与凭证) 起，改 `volume-s3.conf` 即可 |
+| 从零手动部署 S3 Volume 插件 | 本页全文 |
 
 ---
 
@@ -45,7 +39,7 @@ English: [README.md](README.md)
 |------|------|
 | 运行中的 Cube 集群 | 至少包含 **CubeMaster**、**Cubelet**、**CubeAPI**（端口通常为 `3000`） |
 | 沙箱模板 | 一个 `templateID`（见 [§7](#7-使用-sdk-验证)） |
-| S3 兼容存储 | 一个存储桶，以及对该桶具备读写权限的访问密钥对 |
+| S3 兼容存储 | 一个存储桶，以及对该桶具备读写权限的访问密钥对（桶不存在时可自动创建） |
 | 本地权限 | 在 CubeMaster / Cubelet 主机上具备 `sudo`，用于安装软件、修改配置、重启服务 |
 
 **单机开发：** CubeMaster 与 Cubelet 在同一台主机，只需安装一次依赖。
@@ -143,9 +137,18 @@ sudo install -m 0600 volume-s3.conf.example \
 | `ACCESS_KEY_ID` | 访问密钥 ID | 是 |
 | `SECRET_ACCESS_KEY` | 密钥 | 是 |
 | `BUCKET` | 存放所有 Volume 的存储桶 | 是 |
-| `ENDPOINT` | S3 兼容 Endpoint 地址（见[选择 Endpoint](#选择-endpoint)） | 是 |
+| `ENDPOINT` | S3 兼容 Endpoint 地址（见下表） | 是 |
 | `REGION` | SigV4 签名地域，默认 `us-east-1` | 否 |
-| `S3FS_EXTRA_OPTS` | 额外的 s3fs 挂载选项，空格分隔（如 MinIO 需要的 `-ouse_path_request_style`） | 否 |
+| `S3FS_EXTRA_OPTS` | 额外的 s3fs 挂载选项，空格分隔（如 MinIO 需要的 `-ouse_path_request_style`）。多选项值会被自动加引号，可安全 `source`。 | 否 |
+
+常见后端：
+
+| 存储提供方 | `ENDPOINT` | `REGION` |
+|-----------|-----------|----------|
+| AWS S3 | `https://s3.<region>.amazonaws.com` | 存储桶所在地域 |
+| Tigris | `https://t3.storage.dev` | `auto` |
+| Cloudflare R2 | `https://<account-id>.r2.cloudflarestorage.com` | `auto` |
+| MinIO | `http://<minio-host>:9000` | 任意值 |
 
 该配置文件必须为 root 所有、权限 `600` —— 其中以明文保存密钥，且会被插件 `source` 执行：
 
@@ -169,7 +172,7 @@ volume_plugins:
     binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3
 ```
 
-`name: s3` 即 API/SDK 中的 **`driver`**。当 `Volume.create("x")` 未指定 driver 时，使用列表中的**第一项**。
+`name: s3` 即 API/SDK 中的 **`driver`**。当 `Volume.create("x")` 未指定 driver 时，使用列表中的**第一项**——默认安装现已把 `s3` 排在第一，所以省略 driver 即走 S3。
 
 ---
 
@@ -271,7 +274,7 @@ export CUBE_PROXY_NODE_IP=<cubeproxy-or-cubelet-node-ip>
 ```python
 from cubesandbox import Sandbox, Volume
 
-# ① 创建 Volume（存储桶中生成 volumes/<id>/.keep）
+# ① 创建 Volume（存储桶中生成 s3fs 目录对象 volumes/<id>/）
 vol = Volume.create("my-data", driver="s3")
 print("volume_id:", vol.volume_id)
 
@@ -328,10 +331,12 @@ python3 verify_volume.py
 | `unknown driver: s3` | CubeMaster `volume_plugins` 未配置，或未重启 |
 | `no plugin registered for driver "s3"` | Cubelet 缺少同名插件，或未重启 |
 | attach 失败，提示 `s3fs mount failed` | 检查 `ls /dev/fuse`、`volume-s3.conf` 中的凭证与 `ENDPOINT`；执行 [§5](#5-重启服务并验证) 的手动 attach 查看 s3fs 报错 |
+| attach 失败，s3fs 日志对 `volumes/<id>/` 报 `NoSuchKey` | Create 必须 PUT 带尾斜杠的目录对象（等同 s3fs mkdir）。前缀下的 `.keep` 是另一个 key。若机器上还是旧插件（只写 `.keep`），需要升级 |
+| `put-object` 失败，报 `--body` 不是文件 | AWS CLI 2.x 不接受 `--body /dev/null`（字符设备）。插件已改用 0 字节临时文件；若仍失败，需要升级插件 |
 | `InvalidAccessKeyId` / `SignatureDoesNotMatch` | 密钥对错误、缺少桶权限，或 `REGION` 与 Endpoint 期望的 SigV4 地域不匹配 |
 | 存储桶名包含点号 | s3fs 默认使用 virtual-hosted 风格寻址，带点号的桶名会导致 TLS 校验失败。请改用不含点号的桶名，或在 `volume-s3.conf` 中设置 `S3FS_EXTRA_OPTS=-ouse_path_request_style`（MinIO 通常也需要该选项） |
 | SDK 写入失败 | 未设置 `CUBE_PROXY_NODE_IP`；CubeAPI 或模板未就绪 |
-| `Volume.create` 未指定 driver 时没有走 s3 | `volume_plugins` 的**第一项**才是默认 driver |
+| `Volume.create` 未指定 driver 时没有走 s3 | 默认安装下 `s3` 是 `volume_plugins` 第一项（即默认 driver），省略 driver 即走 s3；若不走 s3，请检查 `volume_plugins` 顺序 |
 
 更多内容：[框架 §8 调试与排障](../../../docs/zh/guide/volume-plugin.md)。
 
@@ -349,7 +354,7 @@ attach 时用 s3fs 把 `BUCKET:/volumes/<volumeID>` 挂载到宿主机的 `/data
 
 | Hook | 角色 | refCount | 行为 |
 |------|------|----------|------|
-| Create | Controller | — | `aws s3api put-object` 写入 `volumes/<id>/.keep` |
+| Create | Controller | — | 若桶不存在则创建，然后 `aws s3api put-object` 写入 `volumes/<id>/`（s3fs 目录对象） |
 | Destroy | Controller | — | `aws s3 rm --recursive` 删除该前缀 |
 | Attach | Node | `0` | 执行 `s3fs` 挂载并返回 `host_path` |
 | Attach | Node | `> 0` | 返回已有 `host_path`，不重复挂载 |
@@ -359,6 +364,7 @@ attach 时用 s3fs 把 `BUCKET:/volumes/<volumeID>` 挂载到宿主机的 `/data
 ### 设计说明
 
 - **单桶、每 Volume 一个前缀。** 与 COS 示例保持一致。多桶场景通常部署多个插件实例并使用不同 `driver` 名，或扩展 `Create` 使其接受桶名。框架只要求 Hook 协议与 `driver` 命名一致。
+- **自动建桶。** Create 会先 `head-bucket`。桶已存在时**不需要** `s3:CreateBucket`；只有桶还不存在时插件才会创建（内置 MinIO 的典型情况）。
 - **凭证不会进入沙箱。** 凭证保存在 CubeMaster/Cubelet 上 root 所有、权限 `600` 的配置文件中，microVM 只看到一个文件系统。
 - **`private_data` 把对象前缀从 Create 传递到 Attach**（上限 1024 字节，不会返回给 SDK 客户端）。
 - **并发控制。** 按 Volume 粒度的 `flock` 串行化同一节点上同一 Volume 的 attach/detach，避免两个沙箱同时启动导致重复挂载。
@@ -378,6 +384,7 @@ examples/volume/s3/
 
 | 文档 | 内容 |
 |------|------|
+| [S3 持久卷（用户教程）](../../../docs/zh/guide/s3-volume.md) | 面向最终用户的快速上手 |
 | [Volume 插件开发框架](../../../docs/zh/guide/volume-plugin.md) | 协议、RefCount、Hook 语义 |
 | [Tigris 集成指南](../../../docs/zh/guide/integrations/tigris.md) | 基于本插件的厂商级端到端指引 |
 | [COS 示例](../cos/README.zh.md) | 本插件所参照的参考实现 |

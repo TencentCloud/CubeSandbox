@@ -86,6 +86,18 @@ load_config() {
     [[ -n "${BUCKET:-}"            ]] || die "config: BUCKET is empty"
     [[ -n "${ENDPOINT:-}"          ]] || die "config: ENDPOINT is empty (set your S3-compatible endpoint URL)"
     REGION="${REGION:-$DEFAULT_REGION}"
+    # MinIO and other path-style endpoints need AWS CLI path-style addressing
+    # (virtual-hosted-style breaks against http://minio:9000). Also disable
+    # default CRC32 checksums that AWS CLI v2.23+ sends and older MinIO rejects.
+    if [[ "${ADDRESSING_STYLE:-}" == "path" || "${S3FS_EXTRA_OPTS:-}" == *path_request_style* ]]; then
+        mkdir -p /etc/cube
+        AWS_CONFIG_FILE="${CUBE_S3_AWS_CONFIG:-/etc/cube/aws-config-volume-s3-${BUCKET}}"
+        printf '[default]\ns3 =\n  addressing_style = path\n' > "${AWS_CONFIG_FILE}"
+        chmod 600 "${AWS_CONFIG_FILE}"
+        export AWS_CONFIG_FILE
+    fi
+    export AWS_REQUEST_CHECKSUM_CALCULATION="${AWS_REQUEST_CHECKSUM_CALCULATION:-WHEN_REQUIRED}"
+    export AWS_RESPONSE_CHECKSUM_VALIDATION="${AWS_RESPONSE_CHECKSUM_VALIDATION:-WHEN_REQUIRED}"
 }
 
 # Write the s3fs credential file: BUCKET:AccessKeyId:SecretAccessKey (mode 600).
@@ -161,22 +173,62 @@ aws_run() {
     aws --endpoint-url "$ENDPOINT" "$@"
 }
 
-# Upload a tiny .keep object so the volume folder exists before first mount.
-# Object storage has no real directories; the .keep marker makes the prefix
-# visible to s3fs and to bucket browsers.
-s3_create_dir() {
-    local volume_id="$1"
-    log "aws: create $(s3_subdir "$volume_id")/.keep"
+# Create the bucket on first use when the S3-compatible store does not have it
+# yet (typical for bundled MinIO). Existing buckets are left untouched.
+s3_ensure_bucket() {
     local out rc=0
+    local region="${REGION:-$DEFAULT_REGION}"
     set +e
-    # --body /dev/null uploads a real zero-byte body; some S3-compatible
-    # gateways reject body-less zero-length PUTs.
-    out="$(aws_run s3api put-object \
-        --bucket "$BUCKET" \
-        --key "$(s3_subdir "$volume_id")/.keep" \
-        --body /dev/null 2>&1)"
+    out="$(aws_run s3api head-bucket --bucket "$BUCKET" 2>&1)"
     rc=$?
     set -e
+    if [[ "$rc" -eq 0 ]]; then
+        return 0
+    fi
+    log "aws: creating bucket ${BUCKET}"
+    local create_args=(s3api create-bucket --bucket "$BUCKET")
+    # AWS us-east-1 rejects LocationConstraint; Tigris uses REGION=auto.
+    if [[ -n "$region" && "$region" != "us-east-1" && "$region" != "auto" ]]; then
+        create_args+=(--create-bucket-configuration "LocationConstraint=${region}")
+    fi
+    set +e
+    out="$(aws_run "${create_args[@]}" 2>&1)"
+    rc=$?
+    set -e
+    if [[ "$rc" -ne 0 ]]; then
+        # Concurrent first creates: the loser sees already-exists, not a real failure.
+        if printf '%s' "$out" | grep -qiE 'BucketAlreadyOwnedByYou|BucketAlreadyExists'; then
+            log "aws: bucket ${BUCKET} already exists"
+            return 0
+        fi
+        log "ERROR: aws create-bucket failed for ${BUCKET}: ${out}"
+        return 1
+    fi
+    return 0
+}
+
+# PUT the trailing-slash directory object s3fs uses for mkdir (key "dir/").
+# Object storage has no real directories; s3fs 1.91+ stats this key on mount
+# of bucket:/volumes/<id>. A sibling ".keep" file is not that key.
+s3_create_dir() {
+    local volume_id="$1"
+    local key empty out rc=0
+    key="$(s3_subdir "$volume_id")/"
+    log "aws: create ${key}"
+    # AWS CLI 2.36+ requires --body to be a regular file (/dev/null is a
+    # character device and is rejected). A 0-byte temp file still sends an
+    # empty HTTP body, which some S3-compatible gateways require instead of
+    # a body-less PUT.
+    empty="$(mktemp)"
+    : > "$empty"
+    set +e
+    out="$(aws_run s3api put-object \
+        --bucket "$BUCKET" \
+        --key "$key" \
+        --body "$empty" 2>&1)"
+    rc=$?
+    set -e
+    rm -f "$empty"
     if [[ "$rc" -ne 0 ]]; then
         log "ERROR: aws put-object failed for ${volume_id}: ${out}"
         return 1
@@ -241,6 +293,7 @@ s3fs_mount_volume() {
     # -o allow_other   : Cubelet (a different user) must traverse the mount to
     #                    bind it into the microVM via virtiofs
     # -o nonempty      : mountpoint may already hold a stale dir entry
+    # Create already PUT volumes/<id>/ (the same object s3fs mkdir would write).
     out="$(s3fs "${BUCKET}:/$(s3_subdir "$volume_id")" "$mnt" \
         "-ourl=${ENDPOINT}"             \
         "-oendpoint=${REGION}"          \
@@ -294,7 +347,8 @@ do_create() {
     log "create volumeID=${volume_id} name=${name}"
 
     load_config
-    # Step 1: create volumes/<volume_id>/ in the bucket
+    # Step 1: ensure the bucket exists, then create volumes/<volume_id>/
+    s3_ensure_bucket || { err_json "aws create bucket failed for ${BUCKET}"; exit 1; }
     s3_create_dir "$volume_id" || { err_json "aws create dir failed for ${volume_id}"; exit 1; }
 
     # Step 2: return success; private_data carries the key prefix for Attach

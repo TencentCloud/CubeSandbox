@@ -1,41 +1,35 @@
-# S3-Compatible Volume Plugin — Walkthrough
+# S3-Compatible Volume Plugin
 
-Use any S3-compatible object storage as persistent storage for CubeSandbox volumes: create a Volume → mount it in a sandbox → read/write → unmount → delete.
+Bring any S3-compatible object store (AWS S3, Tigris, Cloudflare R2, MinIO, …) into CubeSandbox as a **lifecycle-persistent volume** for sandboxes: create a Volume → mount it in a sandbox → read/write → destroy the sandbox, the data stays → remount it next time.
 
-The plugin is built entirely on standard tooling — **s3fs** for the mount and the **AWS CLI** for the control plane. Nothing in it is vendor-specific: the storage provider is just the `ENDPOINT` URL in the config file, so it targets any S3-compatible endpoint — AWS S3, [Tigris](https://www.tigrisdata.com/), MinIO, Cloudflare R2, and the like.
-
-> **Version requirement:** Cube platform **≥ 0.6.0**, Python SDK **`cubesandbox` ≥ 0.6.0**.
-> Protocol and Hook details: [Volume Plugin framework](../../../docs/guide/volume-plugin.md).
+> **This page is an operator reference** for those who need to **deploy the plugin manually / connect external S3**.
+>
+> **If you're on the default install (one-click or Helm defaults)** — the installer already started MinIO, installed the plugin, and wrote the credentials. **You don't need this page** — see the user tutorial: [S3 Volumes](../../../docs/guide/s3-volume.md).
 
 中文文档：[README.zh.md](README.zh.md)
 
 ---
 
-## Why this plugin exists
+## What this is
 
-| | COS plugin | S3 plugin |
-|---|---|---|
-| Backend | Tencent Cloud COS | any S3-compatible endpoint |
-| Mount driver | cosfs (`amd64` only) | s3fs (`amd64` **and** `arm64`) |
-| Install | manual `.rpm`/`.deb` download | `apt install s3fs` / `yum install s3fs-fuse` |
-| Control plane | coscmd | AWS CLI v2 |
+CubeSandbox sandboxes are ephemeral by default — data is lost when they're killed. The Volume plugin gives a sandbox a **user-scoped persistent volume**: created/mounted/unmounted/deleted via the e2b-compatible `/volumes` API, backed by object storage. This plugin is the S3-compatible backend implementation.
 
-Two gaps this closes. First, if you self-host CubeSandbox outside Tencent Cloud, the COS example requires a Tencent Cloud account — this plugin works with whatever S3-compatible storage you already have. Second, **ARM64 clusters have no working Volume backend via cosfs**: [`deploy/scripts/docker-install-volume-deps.sh`](../../../deploy/scripts/docker-install-volume-deps.sh) skips cosfs on `arm64` because upstream ships no ARM package, while s3fs is packaged for `arm64` by both Debian/Ubuntu and EPEL.
+The plugin is built entirely on standard tooling — **s3fs** for the mount and the **AWS CLI** for the control plane. Nothing is vendor-specific: the backend is just an `ENDPOINT` in the config file.
+
+**Relationship to the COS plugin:** modelled on the COS plugin, but the backend is any S3-compatible endpoint instead of Tencent Cloud COS, and the mount driver s3fs supports both `amd64` and `arm64` (cosfs is `amd64`-only). The two can coexist in one cluster (the default install registers both `cos` and `s3`).
+
+> **Version requirement:** Cube platform **≥ 0.6.0**, Python SDK **`cubesandbox` ≥ 0.6.0**.
+> Protocol and Hook details: [Volume Plugin framework](../../../docs/guide/volume-plugin.md).
 
 ---
 
-## Choosing an endpoint
+## Do you need this page?
 
-Everything below is identical regardless of provider — only `volume-s3.conf` changes:
-
-| Provider | `ENDPOINT` | `REGION` |
-|----------|-----------|----------|
-| AWS S3 | `https://s3.<region>.amazonaws.com` | the bucket's region |
-| Tigris | `https://t3.storage.dev` | `auto` |
-| Cloudflare R2 | `https://<account-id>.r2.cloudflarestorage.com` | `auto` |
-| MinIO | `http://<minio-host>:9000` | any value |
-
-For an end-to-end vendor walkthrough (account, bucket, and access-key setup included), see the [Tigris integration guide](../../../docs/guide/integrations/tigris.md).
+| Your situation | Go to |
+|----------------|-------|
+| Default install (one-click / Helm defaults), want to use S3 Volume | [User tutorial](../../../docs/guide/s3-volume.md) — just use the SDK, no config |
+| Want to swap the bundled MinIO for external S3 | This page from [§2](#2-install-plugin-and-credentials) — just edit `volume-s3.conf` |
+| Deploying the S3 Volume plugin from scratch | This whole page |
 
 ---
 
@@ -45,7 +39,7 @@ For an end-to-end vendor walkthrough (account, bucket, and access-key setup incl
 |------|-------------|
 | Running Cube cluster | At least **CubeMaster**, **Cubelet**, **CubeAPI** (port usually `3000`) |
 | Sandbox template | A `templateID` (see [§7](#7-verify-with-the-sdk)) |
-| S3-compatible storage | A bucket, and an access key pair with read/write permission on it |
+| S3-compatible storage | A bucket, and an access key pair with read/write permission on it (auto-created if missing) |
 | Local access | `sudo` on CubeMaster / Cubelet hosts to install software, edit config, restart services |
 
 **Single-machine dev:** CubeMaster and Cubelet on one host — install deps once.
@@ -143,9 +137,18 @@ Then edit `volume-s3.conf` on each node:
 | `ACCESS_KEY_ID` | Access key ID | yes |
 | `SECRET_ACCESS_KEY` | Secret access key | yes |
 | `BUCKET` | Bucket holding all volumes | yes |
-| `ENDPOINT` | S3-compatible endpoint URL (see [Choosing an endpoint](#choosing-an-endpoint)) | yes |
+| `ENDPOINT` | S3-compatible endpoint URL (see table below) | yes |
 | `REGION` | SigV4 signing region; default `us-east-1` | no |
-| `S3FS_EXTRA_OPTS` | Extra s3fs mount options, whitespace-separated (e.g. `-ouse_path_request_style` for MinIO) | no |
+| `S3FS_EXTRA_OPTS` | Extra s3fs mount options, whitespace-separated (e.g. `-ouse_path_request_style` for MinIO). Multi-option values are auto-quoted and safe to `source`. | no |
+
+Common backends:
+
+| Provider | `ENDPOINT` | `REGION` |
+|----------|-----------|----------|
+| AWS S3 | `https://s3.<region>.amazonaws.com` | the bucket's region |
+| Tigris | `https://t3.storage.dev` | `auto` |
+| Cloudflare R2 | `https://<account-id>.r2.cloudflarestorage.com` | `auto` |
+| MinIO | `http://<minio-host>:9000` | any value |
 
 The config must be root-owned and mode `600` — it holds a secret in plaintext and is `source`d by the plugin:
 
@@ -169,7 +172,7 @@ volume_plugins:
     binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3
 ```
 
-`name: s3` is the API/SDK **`driver`**. When `Volume.create("x")` omits the driver, the **first** entry in the list is used.
+`name: s3` is the API/SDK **`driver`**. When `Volume.create("x")` omits the driver, the **first** entry in the list is used — the default install now lists `s3` first, so omitting driver routes to S3.
 
 ---
 
@@ -271,7 +274,7 @@ export CUBE_PROXY_NODE_IP=<cubeproxy-or-cubelet-node-ip>
 ```python
 from cubesandbox import Sandbox, Volume
 
-# ① Create Volume (bucket gets volumes/<id>/.keep)
+# ① Create Volume (bucket gets the s3fs directory object volumes/<id>/)
 vol = Volume.create("my-data", driver="s3")
 print("volume_id:", vol.volume_id)
 
@@ -328,10 +331,12 @@ python3 verify_volume.py
 | `unknown driver: s3` | CubeMaster `volume_plugins` missing the entry, or not restarted |
 | `no plugin registered for driver "s3"` | Cubelet missing the same-name plugin, or not restarted |
 | Attach fails, `s3fs mount failed` | `ls /dev/fuse`; credentials and `ENDPOINT` in `volume-s3.conf`; run the manual attach in [§5](#5-restart-services-and-verify) to see the s3fs error |
+| Attach fails, s3fs log `NoSuchKey` for `volumes/<id>/` | Create must PUT the trailing-slash directory object (s3fs mkdir). A `.keep` file under the prefix is a different key. Upgrade the plugin if an older copy still writes `.keep`. |
+| `put-object` fails: `--body` is not a file | AWS CLI 2.x rejects `--body /dev/null` (character device). The plugin uploads a 0-byte temp file instead; upgrade the plugin if an older copy is still installed |
 | `InvalidAccessKeyId` / `SignatureDoesNotMatch` | Key pair wrong, lacks bucket permission, or `REGION` doesn't match what the endpoint expects for SigV4 |
 | Bucket name contains dots | s3fs uses virtual-hosted-style addressing by default, which breaks TLS for dotted names. Use a bucket without dots, or set `S3FS_EXTRA_OPTS=-ouse_path_request_style` in `volume-s3.conf` (MinIO usually needs it too) |
 | SDK write fails | `CUBE_PROXY_NODE_IP` unset; CubeAPI or template not READY |
-| `Volume.create` without driver not using s3 | The **first** entry in `volume_plugins` is the default driver |
+| `Volume.create` without driver not using s3 | In the default install `s3` is the first `volume_plugins` entry (the default driver), so omitting driver routes to s3; if it doesn't, check the `volume_plugins` order |
 
 More: [Framework §8 Troubleshooting](../../../docs/guide/volume-plugin.md).
 
@@ -349,7 +354,7 @@ Attach mounts `BUCKET:/volumes/<volumeID>` with s3fs at `/data/cube-shared/volum
 
 | Hook | Side | refCount | Behavior |
 |------|------|----------|----------|
-| Create | Controller | — | `aws s3api put-object` writes `volumes/<id>/.keep` |
+| Create | Controller | — | ensure bucket exists (create if missing), then `aws s3api put-object` writes `volumes/<id>/` (s3fs directory object) |
 | Destroy | Controller | — | `aws s3 rm --recursive` removes the prefix |
 | Attach | Node | `0` | `s3fs` mount → return `host_path` |
 | Attach | Node | `> 0` | Return the existing `host_path`; no second mount |
@@ -359,6 +364,7 @@ Attach mounts `BUCKET:/volumes/<volumeID>` with s3fs at `/data/cube-shared/volum
 ### Design notes
 
 - **One bucket, one prefix per volume.** Matches the COS example. Multi-bucket setups typically run several plugin instances with different `driver` names, or extend `Create` to accept a bucket. The framework only requires Hook protocol and `driver` consistency.
+- **Bucket auto-create.** Create runs `head-bucket` first. An existing bucket does **not** need `s3:CreateBucket`; the plugin only creates the bucket when it is missing (typical for bundled MinIO).
 - **Credentials never enter the sandbox.** They live in the root-owned, mode-`600` config on CubeMaster/Cubelet; the microVM sees only a filesystem.
 - **`private_data` carries the key prefix** from Create to Attach (max 1024 bytes, never returned to SDK clients).
 - **Concurrency.** A per-volume `flock` serialises attach/detach for the same volume on a node, so two sandboxes starting at once cannot double-mount.
@@ -378,6 +384,7 @@ examples/volume/s3/
 
 | Doc | Content |
 |-----|---------|
+| [S3 Volumes (user tutorial)](../../../docs/guide/s3-volume.md) | End-user quick start |
 | [Volume Plugin framework](../../../docs/guide/volume-plugin.md) | Protocol, RefCount, Hook semantics |
 | [Tigris integration guide](../../../docs/guide/integrations/tigris.md) | End-to-end vendor walkthrough using this plugin |
 | [COS example](../cos/README.md) | The reference plugin this one is modelled on |

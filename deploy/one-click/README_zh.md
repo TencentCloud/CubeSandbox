@@ -10,7 +10,7 @@
 - `build-agent-ext4.sh`：构建独立 `cube-agent/cube-agent.ext4`（+ `version`），供 virtio-pmem1 注入。
 - `build-release-bundle.sh`：底层打包入口；消费源码树或 `ONE_CLICK_*_BIN` 预编译产物，组装 `sandbox-package` 并生成最终发布包。
 - `config-cube.toml`：one-click 默认 runtime 配置模板。
-- `support/`：MySQL/Redis 的 `docker compose` 模板，安装后落到 `/usr/local/services/cubetoolbox/support/`；`support/bin/mkcert` 为内置的 mkcert 二进制。
+- `support/`：MySQL/Redis/MinIO 的 `docker compose` 模板，安装后落到 `/usr/local/services/cubetoolbox/support/`；`support/bin/mkcert` 为内置的 mkcert 二进制。
 - `cubeproxy/`：`cube proxy` 的 compose 模板、`global.conf` 模板与 CoreDNS 模板。
 - `webui/`：Dashboard 的 Nginx 运行时文件，安装后落到 `/usr/local/services/cubetoolbox/webui/`。
 - `install.sh`：目标机控制节点安装与启动入口（默认 all-in-one）。
@@ -236,6 +236,10 @@ ONE_CLICK_DEPLOY_ROLE=compute
 ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
 ```
 
+若控制节点用了内置 MinIO（或任何 S3 后端），再把该节点 `.one-click.env` 里的
+`CUBE_S3_*` 拷过来。计算节点不部署 MinIO，只消费 `CUBE_S3_*`。用内置 MinIO 时
+还需放行计算节点到控制面的 TCP 9000。
+
 如需显式指定计算节点 IP，或目标机默认网卡不是 `eth0`，再额外设置：
 
 ```bash
@@ -260,7 +264,7 @@ sudo ./install-compute.sh
 
 - 所有计算节点都需要让 `Cubelet` 监听和主节点配置一致的 gRPC 端口，默认是 `9999`
 - `CUBE_SANDBOX_NODE_IP` 会同时作为 one-click 配置值和 `Cubelet` 节点注册 IP
-- 主节点必须能访问计算节点的 `9999/tcp`，计算节点必须能访问主节点的 `8089/tcp`
+- 主节点必须能访问计算节点的 `9999/tcp`，计算节点必须能访问主节点的 `8089/tcp`（使用内置 MinIO 作 S3 Volume 后端时还需 `9000/tcp`）
 
 MySQL/Redis 依赖默认会部署到：
 
@@ -272,6 +276,7 @@ MySQL/Redis 依赖默认会部署到：
 
 - `mysql:8.0`
 - `redis:7-alpine`
+- `minio`（S3 兼容 Volume 后端；由 `CUBE_SANDBOX_MINIO_ENABLED` 显式开关，默认开启）
 
 ### 使用外部 MySQL / Redis
 
@@ -300,6 +305,61 @@ CUBE_EXTERNAL_REDIS_PASSWORD=ceuhvu123
 - 让 `quickcheck.sh` 和 `up-support.sh` 跳过对已外置依赖的本地生命周期管理（`down-support.sh` 未感知外部依赖，仍会执行 `docker compose down`，但由于本地容器从未被启动，这是无害的空操作）。
 
 外部 MySQL 需要预先授予所配置用户对目标库的访问权限；CubeMaster 首次启动会自行执行内置 schema 迁移。
+
+### 内置 MinIO 与 S3 Volume 插件
+
+`CUBE_SANDBOX_MINIO_*` **只负责部署 MinIO 容器**。S3 Volume 插件始终读取
+`CUBE_S3_*`，并用它写入 `volume-s3.conf`。
+
+MinIO 容器在宿主机上占用两个端口（均可通过环境变量覆盖）：
+
+| 用途 | 容器内端口 | 宿主机映射 | 绑定地址 |
+| ---- | ---------- | ---------- | -------- |
+| S3 API | `9000` | `CUBE_SANDBOX_MINIO_API_PORT`（默认 `9000`） | `CUBE_SANDBOX_MINIO_API_BIND`，默认 `CUBE_SANDBOX_NODE_IP`（未探测到时回退 `127.0.0.1`） |
+| Web 控制台 | `9001` | `CUBE_SANDBOX_MINIO_CONSOLE_PORT`（默认 `9001`） | 固定 `127.0.0.1`，仅本机可访问 |
+
+S3 API 默认发布在节点 IP 上，目的是让计算节点的 Cubelet 能直连；若希望 S3 只对
+本机开放，设 `CUBE_SANDBOX_MINIO_API_BIND=127.0.0.1`——代价是计算节点将无法访问
+内置 MinIO，需改用外部 S3。控制台端口始终只绑定 `127.0.0.1`，不会对外暴露。
+
+控制节点默认 `CUBE_SANDBOX_MINIO_ENABLED=1`：`install.sh` 启动 MinIO，密码留空
+则生成 24 位随机密码，然后**用这套 MinIO 填好 `CUBE_S3_*`**（`http://<节点IP>:9000`、用户/
+密码、path-style），两套都写入 `.one-click.env`。MinIO 开启时不要自己再设
+`CUBE_S3_ENDPOINT`。后续升级会从 `.one-click.env` 读回这份本机地址，这是合法
+的；只有另配外部桶时才需要 `CUBE_SANDBOX_MINIO_ENABLED=0`。
+
+其它 MinIO 部署参数：默认用户 `cubeminio`（`CUBE_SANDBOX_MINIO_ROOT_USER`，密码
+至少 8 位，否则 MinIO 拒绝启动）、桶名 `cube-volumes`（`CUBE_SANDBOX_MINIO_BUCKET`）、
+数据卷 `cube-sandbox-minio-data`（`CUBE_SANDBOX_MINIO_VOLUME`，容器内挂载到
+`/data`）、容器名 `cube-sandbox-minio`（`CUBE_SANDBOX_MINIO_CONTAINER`）、镜像
+`CUBE_SANDBOX_MINIO_IMAGE`（默认按 `MIRROR=cn|int` 选择）。MinIO 运行态由
+`cube-sandbox-minio.service` 托管，启动后校验通过
+`curl http://<节点IP>:9000/minio/health/live`（返回 `200` 即正常）。
+
+改用已有 S3 时，设 `CUBE_SANDBOX_MINIO_ENABLED=0` 并填写 `CUBE_S3_*`：
+
+```bash
+CUBE_SANDBOX_MINIO_ENABLED=0
+CUBE_S3_ENDPOINT=https://s3.example.com
+CUBE_S3_ACCESS_KEY_ID=...
+CUBE_S3_SECRET_ACCESS_KEY=...
+CUBE_S3_BUCKET=cube-volumes
+# CUBE_S3_REGION=us-east-1
+# CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
+```
+
+计算节点从不部署 MinIO。把控制节点 `.one-click.env` 里填好的 `CUBE_S3_*` 拷到
+计算节点 `.env`（若用内置 MinIO，还需放行控制面 TCP 9000）：
+
+```bash
+ONE_CLICK_DEPLOY_ROLE=compute
+ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
+CUBE_S3_ENDPOINT=http://10.0.0.11:9000
+CUBE_S3_ACCESS_KEY_ID=cubeminio
+CUBE_S3_SECRET_ACCESS_KEY=<控制面 .one-click.env 里的值>
+CUBE_S3_BUCKET=cube-volumes
+CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
+```
 
 `cube proxy` 和它的 DNS 解析在 one-click 里是必选能力，`.env` 中这两个值必须保持为 `1`：
 

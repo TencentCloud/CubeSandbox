@@ -23,9 +23,12 @@ Cube Sandbox 的控制面与管理类服务为了便于本地快速体验，部�
 | WebUI | `0.0.0.0` | 12088 | `.env` 中的 `WEB_UI_HOST_PORT`（仅端口） | 控制台 |
 | MySQL | `127.0.0.1` | 3306 | compose 模板中硬编码 | 已仅绑回环 |
 | Redis | `127.0.0.1` | 6379 | compose 模板中硬编码 | 已仅绑回环 |
+| MinIO API | 节点 IP | 9000 | `CUBE_SANDBOX_MINIO_API_BIND`（默认 `CUBE_SANDBOX_NODE_IP`） | 计算节点 Cubelet 需经 s3fs 挂载 Volume，不能只绑回环 |
+| MinIO 控制台 | `127.0.0.1` | 9001 | compose 模板中硬编码 | 已仅绑回环 |
 
-MySQL 与 Redis 已由内置 compose 模板绑定到回环地址，网络上不可达。需要重点关注
-的是表中默认为 `0.0.0.0` 的其余服务。
+MySQL、Redis 以及 MinIO 控制台已由内置 compose 模板绑定到回环地址。MinIO S3 API
+发布在节点 IP 上，供计算节点访问——请用防火墙将 TCP 9000 限制在内网。需要重点
+关注的是表中默认为 `0.0.0.0` 的其余服务。
 
 ## 各服务绑定地址配置
 
@@ -115,6 +118,14 @@ CUBE_PROXY_HTTPS_PORT=443
 
 内置容器已通过 compose 模板绑定到 `127.0.0.1`，无需额外配置。若使用外部
 MySQL/Redis（`CUBE_EXTERNAL_MYSQL_HOST`），请在网络层做好访问控制。
+
+### MinIO
+
+MinIO 控制台绑定 `127.0.0.1:9001`，仅本机可访问。S3 API 发布在
+`CUBE_SANDBOX_MINIO_API_BIND`（默认 `CUBE_SANDBOX_NODE_IP`，端口 9000）——计算节点
+的 Cubelet 需要经 s3fs 挂载 Volume，因此**有计算节点时不能将 API 绑到回环**。
+请用防火墙将 TCP 9000 限制在内网。若使用外部 S3 后端，设置
+`CUBE_SANDBOX_MINIO_ENABLED=0` 即可不启动本地 MinIO。
 
 ## 加固方案
 

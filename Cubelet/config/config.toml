@@ -110,6 +110,11 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     volume_plugin_base_dir = "/data/cube-shared/volume"
 
     [[plugins."io.cubelet.internal.v1.storage".volume_plugins]]
+      name        = "s3"
+      type        = "binary"
+      binary_path = "/usr/local/services/cubetoolbox/Cubelet/plugin/cube-volume-s3"
+
+    [[plugins."io.cubelet.internal.v1.storage".volume_plugins]]
       name        = "cos"
       type        = "binary"
       binary_path = "/usr/local/services/cubetoolbox/Cubelet/plugin/cube-volume-cos"

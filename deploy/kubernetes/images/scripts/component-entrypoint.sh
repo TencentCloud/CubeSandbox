@@ -206,15 +206,99 @@ wait_sentinel() {
   fail "timeout waiting for sentinel ${name} at ${path}"
 }
 
+# Absolute mountpoints at dst or under it (from this mount namespace).
+# mountinfo field 5 is the mountpoint; optional fields follow mount options.
+list_mounts_under() {
+  local dst="$1"
+  local canon=""
+  canon="$(readlink -f "${dst}" 2>/dev/null || true)"
+  [[ -n "${canon}" ]] || return 0
+  awk -v p="${canon}" '
+    {
+      mp = $5
+      gsub(/\\040/, " ", mp)
+      gsub(/\\011/, "\t", mp)
+      gsub(/\\012/, "\n", mp)
+      gsub(/\\134/, "\\", mp)
+      if (mp == p || index(mp, p "/") == 1) print mp
+    }
+  ' /proc/self/mountinfo
+}
+
+path_is_exact_mount() {
+  local path="$1"
+  local m
+  for m in "${_CUBE_PRESERVE_MOUNTS[@]}"; do
+    [[ "${path}" == "${m}" ]] && return 0
+  done
+  return 1
+}
+
+# True when path is a preserved mount or an ancestor directory of one.
+# Never unlink/rename these: kubelet file binds follow the dentry.
+path_is_mount_or_ancestor() {
+  local path="$1"
+  local m
+  for m in "${_CUBE_PRESERVE_MOUNTS[@]}"; do
+    [[ "${path}" == "${m}" || "${m}" == "${path}"/* ]] && return 0
+  done
+  return 1
+}
+
+# Overlay src onto dst without renaming dst (keeps bind mounts on live paths).
+overlay_dir_preserving_mounts() {
+  local src="$1"
+  local dst="$2"
+  local rel path_src path_dst
+
+  while IFS= read -r -d '' rel; do
+    rel="${rel#./}"
+    [[ -n "${rel}" ]] || continue
+    path_src="${src}/${rel}"
+    path_dst="${dst}/${rel}"
+    if path_is_exact_mount "${path_dst}"; then
+      continue
+    fi
+    if [[ -d "${path_src}" && ! -L "${path_src}" ]]; then
+      mkdir -p "${path_dst}"
+      chmod --reference="${path_src}" "${path_dst}" 2>/dev/null || true
+      continue
+    fi
+    mkdir -p "$(dirname "${path_dst}")"
+    cp -a "${path_src}" "${path_dst}"
+  done < <(cd "${src}" && find . -mindepth 1 -print0)
+
+  while IFS= read -r -d '' rel; do
+    rel="${rel#./}"
+    [[ -n "${rel}" ]] || continue
+    path_dst="${dst}/${rel}"
+    path_src="${src}/${rel}"
+    [[ -e "${path_dst}" || -L "${path_dst}" ]] || continue
+    if path_is_mount_or_ancestor "${path_dst}"; then
+      continue
+    fi
+    if [[ -e "${path_src}" || -L "${path_src}" ]]; then
+      continue
+    fi
+    rm -rf "${path_dst}"
+  done < <(cd "${dst}" && find . -mindepth 1 -depth -print0)
+}
+
 # Promote a staged tree into place without rm -rf of the live directory.
 # Rename-aside then rename-in leaves a brief ENOENT window; we keep a
 # ".staging-<component>" marker for the whole window so the collector marks
 # inventory_incomplete (and Master will not hard-delete). Requires src/dst on
 # the same filesystem.
+#
+# If kubelet (or anything else) has bind-mounted files under dst — typically
+# Cubelet/plugin/volume-s3.conf / volume-cos.conf — renaming dst would move
+# those mounts onto Cubelet.legacy.* and rm -rf would EBUSY, while the new
+# tree would lose the Secret. Overlay in place instead and skip mountpoints.
 atomic_replace_dir() {
   local src="$1"
   local dst="$2"
-  local parent new legacy recovered=""
+  local parent new legacy recovered="" canon=""
+  local -a _CUBE_PRESERVE_MOUNTS=()
   parent="$(dirname "${dst}")"
   mkdir -p "${parent}"
 
@@ -238,6 +322,20 @@ atomic_replace_dir() {
     mv "${new}" "${dst}"
     return 0
   fi
+
+  mapfile -t _CUBE_PRESERVE_MOUNTS < <(list_mounts_under "${dst}")
+  if ((${#_CUBE_PRESERVE_MOUNTS[@]} > 0)); then
+    canon="$(readlink -f "${dst}" 2>/dev/null || printf '%s' "${dst}")"
+    if path_is_exact_mount "${canon}"; then
+      rm -rf "${new}"
+      fail "cannot replace ${dst}: destination is a mount point"
+    fi
+    log "preserving ${#_CUBE_PRESERVE_MOUNTS[@]} bind mount(s) under ${dst}; overlay instead of rename-aside"
+    overlay_dir_preserving_mounts "${new}" "${dst}"
+    rm -rf "${new}"
+    return 0
+  fi
+
   if mv -T "${dst}" "${legacy}" 2>/dev/null || mv "${dst}" "${legacy}"; then
     if mv -T "${new}" "${dst}" 2>/dev/null || mv "${new}" "${dst}"; then
       rm -rf "${legacy}"

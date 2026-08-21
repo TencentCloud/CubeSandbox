@@ -79,6 +79,12 @@ spec:
               subPath: volume-cos.conf
               readOnly: true
           {{- end }}
+          {{- if eq (include "cube.volumeS3Enabled" .) "true" }}
+            - name: volume-s3-conf
+              mountPath: /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-s3.conf
+              subPath: volume-s3.conf
+              readOnly: true
+          {{- end }}
           {{- if .Values.cubeEgress.enabled }}
             - name: cube-egress-ca
               mountPath: /etc/cube/ca
@@ -100,6 +106,12 @@ spec:
         - name: volume-cos-conf
           secret:
             secretName: {{ include "cube.volumeCosSecretName" . }}
+            defaultMode: 0400
+      {{- end }}
+      {{- if eq (include "cube.volumeS3Enabled" .) "true" }}
+        - name: volume-s3-conf
+          secret:
+            secretName: {{ include "cube.volumeS3SecretName" . }}
             defaultMode: 0400
       {{- end }}
       {{- if .Values.cubeEgress.enabled }}

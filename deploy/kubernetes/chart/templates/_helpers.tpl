@@ -408,6 +408,10 @@ http {
 {{- printf "%s-redis" (include "cube.fullname" .) -}}
 {{- end -}}
 
+{{- define "cube.minioName" -}}
+{{- printf "%s-minio" (include "cube.fullname" .) -}}
+{{- end -}}
+
 {{- define "cube.secretName" -}}
 {{- printf "%s-secret" (include "cube.fullname" .) -}}
 {{- end -}}
@@ -440,8 +444,16 @@ http {
 {{- end -}}
 {{- end -}}
 
+{{- define "cube.minioPVCName" -}}
+{{- if .Values.minio.persistence.existingClaim -}}
+{{- .Values.minio.persistence.existingClaim -}}
+{{- else -}}
+{{- printf "%s-minio-data" (include "cube.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
-Resolve PVC storageClassName for a stateful component (master / mysql / redis).
+Resolve PVC storageClassName for a stateful component (master / mysql / redis / minio).
 
 Call as:
   include "cube.persistenceStorageClassName" (dict "root" . "component" .Values.mysql.persistence)
@@ -494,6 +506,71 @@ chart-owned StorageClass). This helper only picks which SC name a PVC binds to.
 {{- else -}}
 {{- printf "%s-volume-cos" (include "cube.fullname" .) -}}
 {{- end -}}
+{{- end -}}
+
+{{- define "cube.volumeS3SecretName" -}}
+{{- if ((.Values.volumeS3).existingSecret) -}}
+{{- .Values.volumeS3.existingSecret -}}
+{{- else if ((.Values.volumeS3).secretName) -}}
+{{- .Values.volumeS3.secretName -}}
+{{- else -}}
+{{- printf "%s-volume-s3" (include "cube.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Chart MinIO is explicit: minio.enabled. Only deploys MinIO. */}}
+{{- define "cube.minioBuiltinEnabled" -}}
+{{- $minio := default dict .Values.minio -}}
+{{- if and .Values.controlPlane.enabled (dig "enabled" true $minio) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{/* Operator-supplied S3 plugin config (not the MinIO bootstrap fill). */}}
+{{- define "cube.volumeS3UserProvided" -}}
+{{- $volumeS3 := default dict .Values.volumeS3 -}}
+{{- if or (ne (($volumeS3.endpoint) | default "") "") (ne (($volumeS3.existingSecret) | default "") "") -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- define "cube.volumeS3ExternalEnabled" -}}
+{{- include "cube.volumeS3UserProvided" . -}}
+{{- end -}}
+
+{{- define "cube.volumeS3Enabled" -}}
+{{- if or (eq (include "cube.minioBuiltinEnabled" .) "true") (eq (include "cube.volumeS3UserProvided" .) "true") -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- define "cube.minioEndpoint" -}}
+{{- printf "http://%s.%s.svc.%s:%v" (include "cube.minioName" .) .Release.Namespace (include "cube.clusterDomain" .) (.Values.minio.port | default 9000) -}}
+{{- end -}}
+
+{{/*
+Effective S3 plugin endpoint. volumeS3.* is the source of truth; when MinIO is
+enabled and the operator left volumeS3.endpoint empty, fill from chart MinIO
+(same as one-click filling CUBE_S3_* after deploying MinIO).
+*/}}
+{{- define "cube.volumeS3EffectiveEndpoint" -}}
+{{- $volumeS3 := default dict .Values.volumeS3 -}}
+{{- if ne (($volumeS3.endpoint) | default "") "" -}}
+{{- $volumeS3.endpoint -}}
+{{- else if eq (include "cube.minioBuiltinEnabled" .) "true" -}}
+{{- include "cube.minioEndpoint" . -}}
+{{- end -}}
+{{- end -}}
+
+{{/* KEY='value' with ' escaped as '"'"' so bash source of volume-s3.conf is safe. */}}
+{{- define "cube.volumeS3ConfAssign" -}}
+{{- $sq := "'\"'\"'" -}}
+{{ .key }}='{{ .value | toString | replace "'" $sq }}'
+{{- end -}}
+
+{{- define "cube.volumeS3ConfBody" -}}
+{{- include "cube.volumeS3ConfAssign" (dict "key" "ACCESS_KEY_ID" "value" .accessKeyId) }}
+{{ include "cube.volumeS3ConfAssign" (dict "key" "SECRET_ACCESS_KEY" "value" .secretAccessKey) }}
+{{ include "cube.volumeS3ConfAssign" (dict "key" "BUCKET" "value" .bucket) }}
+{{ include "cube.volumeS3ConfAssign" (dict "key" "ENDPOINT" "value" .endpoint) }}
+{{ include "cube.volumeS3ConfAssign" (dict "key" "REGION" "value" .region) }}
+{{- if .extraOpts }}
+{{ include "cube.volumeS3ConfAssign" (dict "key" "S3FS_EXTRA_OPTS" "value" .extraOpts) }}
+{{- end }}
 {{- end -}}
 
 {{- define "cube.masterEndpoint" -}}
@@ -669,7 +746,7 @@ iptables -t mangle -S "${chain}" | grep -q -- "--dport 443"
 {{- end -}}
 
 {{- define "cube.secretEnabled" -}}
-{{- if or (and .Values.controlPlane.enabled (or .Values.controlPlane.master.enabled .Values.controlPlane.api.enabled (eq (include "cube.opsEnabled" .) "true"))) (eq (include "cube.proxyEnabled" .) "true") (eq (include "cube.mysqlBuiltinEnabled" .) "true") (eq (include "cube.redisBuiltinEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
+{{- if or (and .Values.controlPlane.enabled (or .Values.controlPlane.master.enabled .Values.controlPlane.api.enabled (eq (include "cube.opsEnabled" .) "true"))) (eq (include "cube.proxyEnabled" .) "true") (eq (include "cube.mysqlBuiltinEnabled" .) "true") (eq (include "cube.redisBuiltinEnabled" .) "true") (eq (include "cube.minioBuiltinEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
 {{/*

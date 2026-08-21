@@ -22,8 +22,9 @@ ENDPOINT=https://<your-s3-endpoint>
 # REGION=us-east-1
 
 # Optional. Extra s3fs mount options, whitespace-separated, appended verbatim.
+# Quote the value so bash `source` keeps multiple options as one assignment.
 # MinIO (and bucket names containing dots) usually need path-style addressing:
-# S3FS_EXTRA_OPTS=-ouse_path_request_style
+# S3FS_EXTRA_OPTS='-ouse_path_request_style'
 
 # FUSE mount base is passed by Cubelet on attach (--volume-base-dir,
 # default /data/cube-shared/volume). host_path must be under it, e.g.

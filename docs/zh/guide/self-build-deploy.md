@@ -234,9 +234,12 @@ sudo ./down.sh
 
 该命令会停止所有宿主机进程（cubelet、cubemaster、cube-api）、Docker 容器（CubeProxy、CoreDNS、MySQL、Redis），并回滚 `cube.app` 的 DNS 路由配置。
 
-### 重新安装
+### 升级或重新安装
 
-直接再次运行 `install.sh` 即可。安装脚本会自动停止已有部署再进行安装。
+机器上已有 CubeSandbox 时，再次运行 `install.sh` 默认执行**保留配置的升级**，不会
+覆盖已有配置。交互式运行会先询问是否升级（默认升级，输入 `n` 则改为整机重装）；
+脚本、CI 等非交互运行会直接升级。要丢弃现有配置并整机重装，请显式加上
+`--mode=install`。
 
 ### 查看日志
 

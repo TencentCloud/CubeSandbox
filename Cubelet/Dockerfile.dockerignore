@@ -26,3 +26,7 @@
 !examples/volume/cos/binary
 !examples/volume/cos/binary/**
 !examples/volume/cos/volume-cos.conf.example
+!examples/volume/s3
+!examples/volume/s3/binary
+!examples/volume/s3/binary/**
+!examples/volume/s3/volume-s3.conf.example

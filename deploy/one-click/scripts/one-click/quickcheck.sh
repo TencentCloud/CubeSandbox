@@ -340,6 +340,11 @@ quickcheck_main() {
     else
       check_unit_active cube-sandbox-redis.service
     fi
+    if [[ "${CUBE_SANDBOX_MINIO_ENABLED:-1}" != "1" ]]; then
+      echo "[quickcheck] bundled MinIO disabled (CUBE_SANDBOX_MINIO_ENABLED=${CUBE_SANDBOX_MINIO_ENABLED:-1}); skipping local minio unit check"
+    else
+      check_unit_active cube-sandbox-minio.service
+    fi
     check_unit_active cube-sandbox-cubemaster.service
     check_unit_active cube-sandbox-cube-api.service
     check_unit_active cube-sandbox-cubeops.service
@@ -355,6 +360,7 @@ quickcheck_main() {
     echo "[quickcheck] check container runtime state"
     [[ -n "${EXTERNAL_MYSQL_HOST}" ]] || check_container_ready "${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}"
     [[ -n "${EXTERNAL_REDIS_HOST}" || -n "${EXTERNAL_REDIS_MASTER_NAME}" ]] || check_container_ready "${CUBE_SANDBOX_REDIS_CONTAINER:-cube-sandbox-redis}"
+    [[ "${CUBE_SANDBOX_MINIO_ENABLED:-1}" == "1" ]] && check_container_ready "${CUBE_SANDBOX_MINIO_CONTAINER:-cube-sandbox-minio}"
     check_container_ready "${CUBE_PROXY_CONTAINER_NAME:-cube-proxy}"
     check_container_ready "${CUBE_PROXY_COREDNS_CONTAINER:-cube-proxy-coredns}"
     if [[ "${WEB_UI_ENABLE:-1}" == "1" ]]; then

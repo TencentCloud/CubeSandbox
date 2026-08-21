@@ -127,9 +127,20 @@ is ahead of it.
 | --- | --- |
 | Plugin binary `cube-volume-cos` | Baked into `cube-master` (`…/CubeMaster/plugin/`) and `cubelet` (`…/Cubelet/plugin/`). Images also ship `volume-cos.conf.example` for reference only — **not** runtime credentials. |
 | Plugin registration `volume_plugins` | Chart renders into `files/cube-master/conf.yaml` (mounted as the Master config Secret). Cubelet `config.toml` already registers the Node-side plugin from the staged image. |
-| Credentials `volume-cos.conf` | Chart `volumeCos` Secret mount (default off). Mount paths: Master `…/CubeMaster/plugin/volume-cos.conf`, Cubelet `…/Cubelet/plugin/volume-cos.conf` (file overlay on the hostPath toolbox). Enable with `volumeCos.enabled=true` and either `existingSecret` or inline `secretId` / `secretKey` / `bucket` / `region`. |
+| Credentials `volume-cos.conf` | Chart `volumeCos` Secret mount (default off). Mount paths: Master `…/CubeMaster/plugin/volume-cos.conf`, Cubelet `…/Cubelet/plugin/volume-cos.conf` (file overlay on the hostPath toolbox). Cubelet staging (`atomic_replace_dir`) overlays the live tree in place so kubelet file binds are not renamed aside with `Cubelet/`. Enable with `volumeCos.enabled=true` and either `existingSecret` or inline `secretId` / `secretKey` / `bucket` / `region`. |
 
 Do **not** bake `SECRET_ID` / `SECRET_KEY` into images.
+
+### S3 volume plugin and chart MinIO
+
+| Content | Delivery |
+| --- | --- |
+| Plugin binary `cube-volume-s3` | Baked into `cube-master` (`…/CubeMaster/plugin/`) and `cubelet` (`…/Cubelet/plugin/`). Images also ship `volume-s3.conf.example` for reference only — **not** runtime credentials. |
+| Plugin registration `volume_plugins` | Chart renders `s3` next to `cos` in `files/cube-master/conf.yaml`. Cubelet `config.toml` registers the Node-side plugin from the staged image. |
+| Credentials `volume-s3.conf` | Chart Secret mount. Always rendered from effective S3 fields (`volumeS3.*`, or filled from chart MinIO when `minio.enabled=true` and the operator left `endpoint` / `existingSecret` empty). `minio.*` only installs MinIO. The two operator-supplied families are mutually exclusive. On Cubelet, this is a kubelet file bind on the hostPath toolbox; `atomic_replace_dir` overlays `Cubelet/` in place and keeps the bind on the live path (it must not rename the directory). |
+| Host tools | `deploy/scripts/docker-install-volume-deps.sh` installs `s3fs` and `awscli` into cube-master / cubelet images. |
+
+Do **not** bake access keys into images.
 
 To build from the current worktree instead (typically for development), set
 `SOURCE_REF=""`:
