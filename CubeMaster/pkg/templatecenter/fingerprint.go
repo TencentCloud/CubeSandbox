@@ -68,6 +68,19 @@ func buildArtifactID(fingerprint string) string {
 	return "rfs-" + fingerprint[:24]
 }
 
+// BuildTemplateSpecFingerprintWithEnvdSHA exports the fingerprint builder so
+// the standalone CubeTemplateCenter process computes the exact same value
+// during remote builds (keeping artifact dedup compatible with local mode).
+func BuildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageReq, sourceImageDigest, cubeEgressCAFingerprint, envdSHA string) string {
+	return buildTemplateSpecFingerprintWithEnvdSHA(req, sourceImageDigest, cubeEgressCAFingerprint, envdSHA)
+}
+
+// BuildArtifactID exports buildArtifactID for CubeTemplateCenter (remote
+// build mode), so artifact IDs are derived identically in both modes.
+func BuildArtifactID(fingerprint string) string {
+	return buildArtifactID(fingerprint)
+}
+
 func marshalTemplateImageJobRequest(req *types.CreateTemplateFromImageReq) (string, error) {
 	if req == nil {
 		return "", errors.New("request is nil")

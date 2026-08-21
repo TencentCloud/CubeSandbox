@@ -1,0 +1,9 @@
+# Build artifacts (root output dir only — must not ignore pkg/build)
+/build/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store

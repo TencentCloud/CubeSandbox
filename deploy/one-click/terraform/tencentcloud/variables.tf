@@ -299,6 +299,49 @@ variable "cubeapi_image" {
   default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-api:v0.6.0"
 }
 
+variable "cubetemplatecenter_image" {
+  description = "Full cube-templatecenter image override."
+  type        = string
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-templatecenter:v0.6.0"
+}
+
+variable "deploy_templatecenter" {
+  description = <<-EOT
+    Not supported by this Terraform module. Kept only so an existing tfvars file
+    fails with this explanation instead of "unsupported argument".
+
+    CubeTemplateCenter must be deployed with the Helm chart
+    (deploy/kubernetes/chart, controlPlane.templateCenter.enabled=true).
+
+    Terraform support was removed because getting it right needs guardrails this
+    module cannot express as cheaply as the chart does: TC has to be a single
+    replica pinned to the node holding CubeMaster's artifact volume, and
+    CubeMaster has to be switched on (templatecenter_enabled=true, with
+    CUBE_TEMPLATE_CENTER_ADDR pointing at TC) in the same change. Deploying only
+    one half leaves a silently broken template pipeline.
+  EOT
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = var.deploy_templatecenter == false
+    error_message = "deploy_templatecenter is not supported by this Terraform module. Deploy CubeTemplateCenter with the Helm chart instead: helm upgrade --install cube deploy/kubernetes/chart --set controlPlane.templateCenter.enabled=true. Leave this false (or remove it) to continue with cube-master building template images in-process."
+  }
+}
+
+variable "templatecenter_serve_public_api" {
+  description = <<-EOT
+    Let CubeTemplateCenter serve the public /cube/template* API itself
+    (CUBE_TEMPLATE_CENTER_SERVE_TEMPLATE_API).
+
+    Default false: cube-master owns the control plane and drives distribution
+    after TC reports BUILT. Enabling this also makes TC load the node view, which
+    it needs for distribution and otherwise skips entirely.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "cubeops_image" {
   description = "Full cube-ops image override."
   type        = string

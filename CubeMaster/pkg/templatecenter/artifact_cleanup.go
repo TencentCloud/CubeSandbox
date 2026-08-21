@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
@@ -56,6 +57,21 @@ func cleanupLocalRootfsArtifact(artifactID, ext4Path string) error {
 	// surfaced as an error for manual handling rather than risking deletion of
 	// an arbitrary host file.
 	if dir, ok := managedArtifactDir(artifactID, ext4Path); ok {
+		// Never delete a directory a build is actively writing. The per-artifact
+		// build lock only covers this process, but CubeTemplateCenter builds in
+		// a separate process while sharing this disk, and the native exporter
+		// keeps its layer prefetch dir inside this very directory. Deleting it
+		// mid-build surfaced as
+		//   native export failed to open prefetched layer 0: ... no such file
+		// in a sibling job. Refusing here is safe: the artifact keeps its
+		// FAILED/ORPHANED row and the GC pass retries once the build is done.
+		if inProgress, age := image.ArtifactBuildInProgress(dir); inProgress {
+			log.G(context.Background()).Warnf(
+				"deferring cleanup of rootfs artifact %s: %s (marker age %s)",
+				artifactID, image.DescribeArtifactBuildMarker(dir), age.Truncate(time.Second))
+			return fmt.Errorf("rootfs artifact %s is being built (%s); cleanup deferred",
+				artifactID, image.DescribeArtifactBuildMarker(dir))
+		}
 		return os.RemoveAll(dir) // NOCC:Path Traversal()
 	}
 	log.G(context.Background()).Errorf(

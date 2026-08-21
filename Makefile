@@ -133,6 +133,7 @@ help:
 	@printf "  builder-shell  Start interactive shell with persisted HOME (%s)\n" "$(BUILDER_HOME)"
 	@printf "  builder-run    Run command inside builder image (BUILDER_CMD=...)\n"
 	@printf "  cubemaster    Build cubemaster and cubemastercli in Docker\n"
+	@printf "  cubetemplatecenter Build templatecenter in Docker\n"
 	@printf "  cubelet       Build cubelet and cubecli in Docker\n"
 	@printf "  cubevsmapdump Build CubeVS eBPF business map dump tool in Docker\n"
 	@printf "  cubecow-sdk   Build cubecow static library for Cubelet\n"
@@ -151,6 +152,7 @@ help:
 	@printf "  cubeops-test  Run CubeOps unit tests in Docker\n"
 	@printf "  shim          Build containerd-shim-cube-rs and cube-runtime in Docker\n"
 	@printf "  cubemaster-test Run CubeMaster unit tests in Docker\n"
+	@printf "  cubetemplatecenter-test Run CubeTemplateCenter unit tests in Docker\n"
 	@printf "  cubelet-test  Run Cubelet unit tests in Docker\n"
 	@printf "  cube-proxy-test Run CubeProxy unit tests locally\n"
 	@printf "  cube-api-test Run CubeAPI unit tests in Docker\n"
@@ -312,6 +314,14 @@ cubemaster: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && make proto && CGO_ENABLED=0 make build && mkdir -p /workspace/_output/bin && cp build/cubemaster build/cubemastercli /workspace/_output/bin/'
 
+# CubeTemplateCenter is a separate module whose go.mod replaces CubeMaster,
+# CubeDB, Cubelet and cubelog with local paths, so it builds inside the same
+# builder image as every other Go component.
+.PHONY: cubetemplatecenter
+cubetemplatecenter: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeTemplateCenter && go mod download && make build && mkdir -p /workspace/_output/bin && cp build/templatecenter /workspace/_output/bin/'
+
 .PHONY: cubelet
 cubelet: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
@@ -380,6 +390,13 @@ cubeops-test: builder-image
 .PHONY: cubemaster-test
 cubemaster-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make test'
+
+# CubeTemplateCenter shares CubeMaster's pkg/templatecenter/image, which uses
+# Linux-only syscall constants, so its tests cannot run on a macOS host and go
+# through the builder like every other Go component.
+.PHONY: cubetemplatecenter-test
+cubetemplatecenter-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeTemplateCenter && go mod download && go test ./... -count=1'
 
 .PHONY: cubelet-test
 cubelet-test: builder-image

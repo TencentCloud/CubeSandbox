@@ -178,6 +178,13 @@ func updateTemplateImageJobTx(tx *gorm.DB, jobID string, values map[string]any) 
 	return nil
 }
 
+// UpdateTemplateImageJob exports updateTemplateImageJob for the internal
+// status-callback handler used by the remote build mode (CubeTemplateCenter
+// reports job progress back to CubeMaster).
+func UpdateTemplateImageJob(ctx context.Context, jobID string, values map[string]any) error {
+	return updateTemplateImageJob(ctx, jobID, values)
+}
+
 func updateRootfsArtifact(ctx context.Context, artifactID string, values map[string]any) error {
 	values["updated_at"] = time.Now()
 	tx := store.db.WithContext(ctx).Table(constants.RootfsArtifactTableName).

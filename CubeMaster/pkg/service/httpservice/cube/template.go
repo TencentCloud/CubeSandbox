@@ -18,7 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
-var deleteTemplateFn = templatecenter.DeleteTemplate
+var deleteTemplateFn = templatecenter.DeleteTemplateWithOptions
 var getTemplateInfoFn = templatecenter.GetTemplateInfo
 var getTemplateRequestFn = templatecenter.GetTemplateRequest
 var resolveTemplateIdentifierFn = templatecenter.ResolveTemplateIdentifier
@@ -64,6 +64,11 @@ type deleteTemplateRequest struct {
 	TemplateID   string `json:"template_id,omitempty"`
 	InstanceType string `json:"instance_type,omitempty"`
 	Sync         bool   `json:"sync,omitempty"`
+	// Force unsticks a template whose build job or definition build is still
+	// marked active, by failing that work before cleaning up. It does NOT
+	// override the in-use check: a template a live sandbox still depends on
+	// stays undeletable.
+	Force bool `json:"force,omitempty"`
 }
 
 func createTemplateGinHandler(c *gin.Context) {
@@ -264,7 +269,9 @@ func deleteTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 			TemplateID: req.TemplateID,
 		}
 	}
-	err = deleteTemplateFn(ctx, resolvedTemplateID, req.InstanceType)
+	err = deleteTemplateFn(ctx, resolvedTemplateID, req.InstanceType, templatecenter.DeleteTemplateOptions{
+		Force: req.Force,
+	})
 	if err != nil {
 		code := int(errorcode.ErrorCode_MasterInternalError)
 		switch {

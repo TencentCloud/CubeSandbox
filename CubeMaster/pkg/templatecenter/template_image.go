@@ -97,6 +97,19 @@ func SubmitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromI
 }
 
 func SubmitTemplateFromImageWithEnvdPayload(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdPayload *EnvdInjectionPayload) (*types.TemplateImageJobInfo, error) {
+	return submitTemplateFromImage(ctx, req, downloadBaseURL, envdPayload, true)
+}
+
+// SubmitTemplateFromImageWithoutBuild validates the request and persists the
+// image_jobs record (PENDING) but does NOT start the in-process build
+// goroutine. It is the entry point of the remote build mode: the caller
+// (HTTP handler) forwards the job to CubeTemplateCenter, which builds the
+// artifact and reports status back via the internal callback.
+func SubmitTemplateFromImageWithoutBuild(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string) (*types.TemplateImageJobInfo, error) {
+	return submitTemplateFromImage(ctx, req, downloadBaseURL, nil, false)
+}
+
+func submitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdPayload *EnvdInjectionPayload, startBuild bool) (*types.TemplateImageJobInfo, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
 	}
@@ -170,13 +183,15 @@ func SubmitTemplateFromImageWithEnvdPayload(ctx context.Context, req *types.Crea
 	if reusedExistingJob {
 		return GetTemplateImageJobInfo(ctx, jobID)
 	}
-	go runTemplateImageJob(detachTemplateImageJobContext(ctx, "template_image_create", map[string]any{
-		"job_id":          jobID,
-		"template_id":     normalized.TemplateID,
-		"attempt_no":      attemptNo,
-		"retry_of_job_id": retryOfJobID,
-		"image":           normalized.SourceImageRef,
-	}), jobID, normalized, downloadBaseURL, envdPayload)
+	if startBuild {
+		go runTemplateImageJob(detachTemplateImageJobContext(ctx, "template_image_create", map[string]any{
+			"job_id":          jobID,
+			"template_id":     normalized.TemplateID,
+			"attempt_no":      attemptNo,
+			"retry_of_job_id": retryOfJobID,
+			"image":           normalized.SourceImageRef,
+		}), jobID, normalized, downloadBaseURL, envdPayload)
+	}
 	return GetTemplateImageJobInfo(ctx, jobID)
 }
 
@@ -261,6 +276,12 @@ func GetTemplateImageJobInfo(ctx context.Context, jobID string) (*types.Template
 	record := &models.TemplateImageJob{}
 	if err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
 		Where("job_id = ?", jobID).First(record).Error; err != nil {
+		// Translate the driver-level miss into a domain error. Leaking
+		// gorm.ErrRecordNotFound made every handler classify "this job does not
+		// exist" as an internal error and answer 500 instead of NotFound.
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("%w: job_id=%s", ErrTemplateImageJobNotFound, jobID)
+		}
 		return nil, err
 	}
 	info, err := jobModelToInfo(ctx, record)
@@ -312,6 +333,20 @@ func OpenRootfsArtifact(ctx context.Context, artifactID, token string) (*models.
 	f, err := os.Open(record.Ext4Path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			// This is where the row/file drift is usually discovered: the row is
+			// READY, distribution accepted it, and a cubelet is pulling right now.
+			//
+			// resolveMissingArtifact decides whether it is safe to demote. If this
+			// node owns the artifact the row is demoted so the next create
+			// rebuilds it, instead of every retry taking the reuse path and dying
+			// on this same line forever (issue #852). If the artifact belongs to
+			// another CubeMaster the row is left alone and the error says so:
+			// the pull was routed to a node that never had the file (issue #1005),
+			// and demoting here would destroy an artifact that is perfectly fine
+			// elsewhere.
+			if verdict := resolveMissingArtifact(ctx, record); verdict != artifactMissingVerdictNone {
+				return nil, nil, fmt.Errorf("artifact source missing: %w", missingArtifactError(record, verdict))
+			}
 			return nil, nil, fmt.Errorf("artifact source missing: %w", err)
 		}
 		return nil, nil, err
