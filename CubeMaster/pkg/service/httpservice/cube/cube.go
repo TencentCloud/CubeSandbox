@@ -18,6 +18,7 @@ const (
 	SandboxPreviewAction                   = "/sandbox/preview"
 	ImageAction                            = "/image"
 	SandboxListAction                      = "/sandbox/list"
+	SandboxInventoryAction                 = "/sandbox/inventory"
 	SandboxInfoAction                      = "/sandbox/info"
 	SandboxExecAction                      = "/sandbox/exec"
 	SandboxUpdateAction                    = "/sandbox/update"

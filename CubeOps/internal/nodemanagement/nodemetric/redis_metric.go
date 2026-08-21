@@ -41,11 +41,11 @@ func SetWriteNodeMetricHook(hook func(*NodeMetric) error) func() {
 	return func() { writeNodeMetricHook = prev }
 }
 
-// Init initializes the Redis pool. No-op when Redis is not configured.
+// Init initializes the Redis pool and verifies connectivity. Redis is required.
 // Supports standalone (REDIS_URL/HOST) and Sentinel (MASTER_NAME) modes.
 func Init(cfg *config.Config) error {
 	if cfg == nil {
-		return nil
+		return errors.New("nodemetric: config is nil; redis is required")
 	}
 	sentinel := cfg.RedisMasterName != ""
 	url := cfg.RedisURL
@@ -53,7 +53,7 @@ func Init(cfg *config.Config) error {
 		url = buildRedisURL(cfg.RedisHost, cfg.RedisPort, cfg.RedisPassword)
 	}
 	if !sentinel && url == "" {
-		return nil
+		return errors.New("nodemetric: redis is not configured (set REDIS_URL or REDIS_HOST/REDIS_MASTER_NAME)")
 	}
 	poolOnce.Do(func() {
 		pool = &redis.Pool{
@@ -281,4 +281,26 @@ func DeleteNodeMetric(nodeID string) error {
 		return err
 	}
 	return nil
+}
+
+// Ping checks Redis connectivity with a 1s timeout.
+func Ping(ctx context.Context) error {
+	if pool == nil {
+		return errors.New("redis pool not initialized")
+	}
+	connCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		c := pool.Get()
+		defer c.Close()
+		_, err := c.Do("PING")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-connCtx.Done():
+		return connCtx.Err()
+	}
 }

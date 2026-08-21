@@ -173,6 +173,12 @@ func (f *fakeNodeStore) ListComponentVersions(_ context.Context) ([]store.NodeCo
 	return out, nil
 }
 
+func (f *fakeNodeStore) ListComponentVersionsByNode(_ context.Context, nodeID string) ([]store.NodeComponentVersion, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]store.NodeComponentVersion(nil), f.versions[nodeID]...), nil
+}
+
 func (f *fakeNodeStore) CreateOperation(_ context.Context, op *store.NodeOperation) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

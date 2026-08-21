@@ -4,9 +4,12 @@
 package nodemetric
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/gomodule/redigo/redis"
 )
 
 func TestWriteNodeMetric_NilPool(t *testing.T) {
@@ -87,5 +90,31 @@ func TestParseRedisAddrs(t *testing.T) {
 	addrs := parseRedisAddrs("10.0.0.1")
 	if addrs[0] != "10.0.0.1:26379" {
 		t.Errorf("bare host should default to :26379, got %s", addrs[0])
+	}
+}
+
+func TestPing_NilPool(t *testing.T) {
+	saved := pool
+	pool = nil
+	defer func() { pool = saved }()
+
+	if err := Ping(context.Background()); err == nil {
+		t.Error("expected error for nil pool")
+	}
+}
+
+func TestPing_UnreachablePool(t *testing.T) {
+	saved := pool
+	pool = &redis.Pool{
+		Dial: func() (redis.Conn, error) {
+			return redis.Dial("tcp", "127.0.0.1:1", // unused port
+				redis.DialConnectTimeout(100*time.Millisecond),
+			)
+		},
+	}
+	defer func() { pool = saved }()
+
+	if err := Ping(context.Background()); err == nil {
+		t.Error("expected error for unreachable redis")
 	}
 }

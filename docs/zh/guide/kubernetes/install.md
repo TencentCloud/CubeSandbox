@@ -208,7 +208,7 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
 # 1) Pod 是否 Ready
 kubectl get pods -n cube-system -o wide
 
-# 2) 计算节点是否已注册到 CubeMaster
+# 2) 计算节点是否已注册到 CubeOps
 kubectl exec -n cube-system deploy/cube-cubemastercli -- \
   sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
 

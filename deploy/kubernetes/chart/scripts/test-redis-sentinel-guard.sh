@@ -153,4 +153,14 @@ grep -q 'key: redis-sentinel-password' "$TMP_DIR/proxy.yaml" || {
   exit 1
 }
 
+# CubeOps gets REDIS_MASTER_NAME / SENTINEL_NODES / SENTINEL_PASSWORD too.
+grep -q 'name: REDIS_SENTINEL_NODES' "$TMP_DIR/proxy.yaml" || {
+  echo "CubeOps missing REDIS_SENTINEL_NODES" >&2
+  exit 1
+}
+grep -q 'name: REDIS_SENTINEL_PASSWORD' "$TMP_DIR/proxy.yaml" || {
+  echo "CubeOps missing REDIS_SENTINEL_PASSWORD" >&2
+  exit 1
+}
+
 echo "redis sentinel guard OK"

@@ -474,28 +474,20 @@ func TestCountNodeSandboxes(t *testing.T) {
 		wantErr string // non-empty substring expected when an error is wanted
 		isCM    bool   // error must be *CMError
 	}{
-		// Array shape.
+		// Array shape (v2 contract).
 		{"array empty", `{"ret":{"ret_code":0},"data":[]}`, 0, "", false},
 		{"array one", `{"ret":{"ret_code":0},"data":[{"id":"sb-1"}]}`, 1, "", false},
-		// data key omitted (CubeMaster omits an empty list via omitempty) = no sandboxes.
-		{"data key omitted", `{"ret":{"ret_code":200},"size":1,"total":2}`, 0, "", false},
-		// data=null means cubelet unreachable; must error, not return 0.
-		{"null data", `{"ret":{"ret_code":0},"data":null}`, 0, "data=null", false},
-		// { "list": [...] } shape.
-		{"list empty", `{"ret":{"ret_code":0},"data":{"list":[]}}`, 0, "", false},
-		{"list one", `{"ret":{"ret_code":0},"data":{"list":[{"id":"sb-1"}]}}`, 1, "", false},
-		// { "sandboxes": [...] } shape.
-		{"sandboxes one", `{"ret":{"ret_code":0},"data":{"sandboxes":[{"id":"sb-1"}]}}`, 1, "", false},
-		// list + sandboxes counts add up.
-		{"list and sandboxes", `{"ret":{"ret_code":0},"data":{"list":[{"id":"a"}],"sandboxes":[{"id":"b"},{"id":"c"}]}}`, 3, "", false},
+		// data missing or null means list did not complete; fail closed.
+		{"data key omitted", `{"ret":{"ret_code":200},"size":1,"total":2}`, 0, "data missing or null", false},
+		{"null data", `{"ret":{"ret_code":0},"data":null}`, 0, "data missing or null", false},
+		// Cubelet list failure: inventory endpoint surfaces non-zero ret_code.
+		{"cubelet list failed", `{"ret":{"ret_code":130512,"ret_msg":"list sandbox failed: cubelet unreachable"}}`, 0, "list sandbox failed", true},
 		// Business error.
 		{"ret_code non-zero", `{"ret":{"ret_code":130404,"ret_msg":"not found"},"data":null}`, 0, "not found", true},
 		// Unrecognised shapes must fail closed.
 		{"string data", `{"ret":{"ret_code":0},"data":"foo"}`, 0, "unexpected data shape", false},
 		{"number data", `{"ret":{"ret_code":0},"data":123}`, 0, "unexpected data shape", false},
-		{"object without list", `{"ret":{"ret_code":0},"data":{"foo":1}}`, 0, "unexpected data shape", false},
-		// list key with a non-array value must surface a decode error.
-		{"list not array", `{"ret":{"ret_code":0},"data":{"list":1}}`, 0, "unmarshal list", false},
+		{"object data", `{"ret":{"ret_code":0},"data":{"foo":1}}`, 0, "unexpected data shape", false},
 		// Malformed envelope.
 		{"malformed envelope", `not json`, 0, "unmarshal envelope", false},
 	}
@@ -503,6 +495,9 @@ func TestCountNodeSandboxes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/cube/sandbox/inventory" {
+					t.Errorf("path = %q, want /cube/sandbox/inventory", r.URL.Path)
+				}
 				if got := r.URL.Query().Get("host_id"); got != "10.0.0.1" {
 					t.Errorf("host_id query = %q, want 10.0.0.1", got)
 				}

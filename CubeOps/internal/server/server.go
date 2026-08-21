@@ -103,9 +103,12 @@ func (s *Server) buildRouter() *gin.Engine {
 	r.Use(requestLogger())
 	r.Use(cubeopsRecovery())
 
-	// Health check (no auth) — defined at the root rather than under /api/v1
-	// because external load balancers and k8s probes hit it without a prefix.
+	// Health check (no auth); pings Redis so an outage surfaces as 503.
 	r.GET("/health", func(c *gin.Context) {
+		if err := nodemetric.Ping(c.Request.Context()); err != nil {
+			c.String(http.StatusServiceUnavailable, "redis: %v", err)
+			return
+		}
 		c.String(http.StatusOK, "ok")
 	})
 

@@ -33,6 +33,7 @@ type NodeStore interface {
 
 	WriteComponentVersions(ctx context.Context, nodeID string, versions []model.ComponentVersion, inventoryIncomplete bool) error
 	ListComponentVersions(ctx context.Context) ([]NodeComponentVersion, error)
+	ListComponentVersionsByNode(ctx context.Context, nodeID string) ([]NodeComponentVersion, error)
 
 	CreateOperation(ctx context.Context, op *NodeOperation) error
 	ListOperations(ctx context.Context, nodeID string, limit int) ([]NodeOperation, error)
@@ -176,6 +177,14 @@ func (s *gormNodeStore) WriteComponentVersions(ctx context.Context, nodeID strin
 func (s *gormNodeStore) ListComponentVersions(ctx context.Context) ([]NodeComponentVersion, error) {
 	var rows []NodeComponentVersion
 	if err := s.db.WithContext(ctx).Model(&NodeComponentVersion{}).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (s *gormNodeStore) ListComponentVersionsByNode(ctx context.Context, nodeID string) ([]NodeComponentVersion, error) {
+	var rows []NodeComponentVersion
+	if err := s.db.WithContext(ctx).Where("node_id = ?", nodeID).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil

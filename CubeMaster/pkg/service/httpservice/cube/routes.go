@@ -33,6 +33,7 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.POST(SandboxInfoAction, handleInfoAction)
 	g.GET(SandboxListAction, handleListAction)
 	g.POST(SandboxListAction, handleListAction)
+	g.GET(SandboxInventoryAction, handleInventoryAction)
 	g.GET(SandboxLogsAction, handleSandboxLogsAction)
 	g.POST(SandboxLogsAction, handleSandboxLogsAction)
 

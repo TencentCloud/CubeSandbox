@@ -145,7 +145,7 @@ type NodeSnapshot struct {
 	Versions            []ComponentVersion `json:"versions,omitempty"`
 	HeartbeatTime       time.Time          `json:"heartbeat_time,omitempty"`
 	HostFacts           *HostFacts         `json:"host_facts,omitempty"`
-	ReportedReady       bool               `json:"-"`
+	ReportedReady       bool               `json:"reported_ready,omitempty"`
 	Healthy             bool               `json:"healthy"`
 	UnhealthyReason     string             `json:"unhealthy_reason,omitempty"`
 	SchedulingDisabled  bool               `json:"scheduling_disabled"`
@@ -164,8 +164,8 @@ type NodeSnapshot struct {
 	SysDiskUsagePer     float64 `json:"sys_disk_usage_per,omitempty"`
 	NicQueues           int64   `json:"nic_queues,omitempty"`
 
-	VersionsHash      string `json:"-"`
-	LabelsJSONCorrupt bool   `json:"-"`
+	VersionsHash      string `json:"versions_hash,omitempty"`
+	LabelsJSONCorrupt bool   `json:"labels_json_corrupt,omitempty"`
 }
 
 // UpdateNodeLabelsRequest is used by the admin label API.

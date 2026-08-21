@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,6 +34,16 @@ import (
 )
 
 func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types.ListCubeSandboxRes) {
+	return listSandbox(ctx, req, false)
+}
+
+// ListSandboxWithFailOnError surfaces cubelet list failures as a non-success
+// ret_code instead of silently returning an empty list.
+func ListSandboxWithFailOnError(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types.ListCubeSandboxRes) {
+	return listSandbox(ctx, req, true)
+}
+
+func listSandbox(ctx context.Context, req *types.ListCubeSandboxReq, failOnCubeletError bool) (rsp *types.ListCubeSandboxRes) {
 	if req.RequestID == "" {
 		req.RequestID = uuid.New().String()
 	}
@@ -55,6 +66,11 @@ func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types
 		},
 
 		Total: localcache.GetHealthyNodesByInstanceType(-1, req.InstanceType).Len(),
+	}
+	// Inventory path: always emit data (even empty []) so callers can
+	// distinguish "0 sandboxes" from "list did not complete".
+	if failOnCubeletError {
+		rsp.Data = []*types.SandboxBriefData{}
 	}
 
 	var nodeList []*node.Node
@@ -88,6 +104,7 @@ func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types
 
 	var resChan = make(chan *types.SandboxBriefData, 1000*len(nodeList))
 	done := make(chan struct{})
+	var listFailed atomic.Bool
 
 	dealRspData(ctx, done, resChan, rsp)
 
@@ -96,7 +113,7 @@ func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types
 	for _, tmpNode := range nodeList {
 		tmpNode := tmpNode
 		recov.GoWithWaitGroup(&wg, func() {
-			doOneList(ctx, req, tmpNode, resChan)
+			doOneList(ctx, req, tmpNode, resChan, &listFailed)
 		}, func(panicError interface{}) {
 			log.G(ctx).Fatalf("panic:%v", string(debug.Stack()))
 		})
@@ -104,6 +121,11 @@ func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types
 	wg.Wait()
 	close(resChan)
 	<-done
+
+	if failOnCubeletError && listFailed.Load() {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
+		rsp.Ret.RetMsg = "list sandbox failed: cubelet unreachable"
+	}
 
 	// Results arrive over resChan in goroutine-completion order, which varies
 	// between calls and across nodes, so rsp.Data would otherwise be reshuffled
@@ -265,7 +287,7 @@ func dealRspData(ctx context.Context, done chan struct{}, resChan chan *types.Sa
 	})
 }
 
-func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node.Node, resChan chan *types.SandboxBriefData) {
+func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node.Node, resChan chan *types.SandboxBriefData, listFailed *atomic.Bool) {
 	start := time.Now()
 	rt := CubeLog.GetTraceInfo(ctx).DeepCopy()
 	rt.Callee = constants.CubeLet
@@ -297,6 +319,7 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 	cubeRsp, err := cubelet.List(ctx, rt.CalleeEndpoint, cubeletReq)
 	if err != nil {
 		rt.RetCode = int64(errorcode.ErrorCode_ReqCubeAPIFailed)
+		listFailed.Store(true)
 		log.G(ctx).WithFields(map[string]interface{}{
 			"CalleeEndpoint": rt.CalleeEndpoint,
 		}).Errorf("List sandbox error:%v", err)

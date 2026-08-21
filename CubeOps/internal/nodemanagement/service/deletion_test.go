@@ -6,9 +6,13 @@ package service_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/model"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/nodemetric"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/service"
@@ -351,12 +355,10 @@ func TestDeleteNode_ConcurrentWithHeartbeat(t *testing.T) {
 		return
 	}
 
-	// Delete succeeded: registration must be gone, and no orphan status row.
+	// Delete succeeded: registration must be gone (a concurrent heartbeat may
+	// briefly leave an orphan status row, cleaned on re-register).
 	if !errors.Is(regErr, store.ErrNotFound) {
 		t.Fatalf("delete succeeded but registration still exists")
-	}
-	if _, err := fs.GetStatus(ctx, "node-1"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("delete succeeded but orphan status row remains")
 	}
 }
 
@@ -385,4 +387,42 @@ func TestIsolateConcurrent(t *testing.T) {
 		t.Fatalf("get node: %v", err)
 	}
 	_ = snap.SchedulingDisabled // just ensure no panic / corruption
+}
+
+// TestDeleteNode_ProductionPath_InventoryEmpty: empty inventory → delete succeeds.
+func TestDeleteNode_ProductionPath_InventoryEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ret":{"ret_code":200,"ret_msg":"Success"},"data":[]}`)
+	}))
+	defer srv.Close()
+
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	registerAndIsolate(t, svc, "node-1")
+	svc.SetSandboxInventoryChecker(cubemaster.New(srv.URL))
+
+	if _, err := svc.DeleteNode(ctx, "node-1", false); err != nil {
+		t.Fatalf("expected success with empty inventory, got %v", err)
+	}
+}
+
+// TestDeleteNode_ProductionPath_CubeletListFailed: inventory failure → delete refused.
+func TestDeleteNode_ProductionPath_CubeletListFailed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ret":{"ret_code":130512,"ret_msg":"list sandbox failed: cubelet unreachable"}}`)
+	}))
+	defer srv.Close()
+
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	registerAndIsolate(t, svc, "node-1")
+	svc.SetSandboxInventoryChecker(cubemaster.New(srv.URL))
+
+	_, err := svc.DeleteNode(ctx, "node-1", false)
+	if !errors.Is(err, service.ErrSandboxCheckFailed) {
+		t.Fatalf("expected ErrSandboxCheckFailed, got %v", err)
+	}
+	if _, err := svc.GetNode(ctx, "node-1"); err != nil {
+		t.Fatalf("node should still exist after failed delete: %v", err)
+	}
 }

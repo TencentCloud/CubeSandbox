@@ -70,6 +70,7 @@ jobs:
             make_target: cubeops
             expected_bins: |
               _output/bin/cubeops
+              _output/bin/cubeopscli
           - component: CubeMaster
             make_target: cubemaster
             expected_bins: |

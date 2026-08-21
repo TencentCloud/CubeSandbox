@@ -132,7 +132,7 @@ func (l *local) dealEvent(ctx context.Context) {
 				}
 				if DEL == e.Type {
 					for _, nodeID := range e.InsIDs {
-						l.delNodeCache(&node.Node{
+						l.delNodeCache(ctx, &node.Node{
 							InsID: nodeID,
 						})
 						CubeLog.WithContext(context.Background()).Warnf("Host delete:%v", nodeID)
@@ -167,14 +167,14 @@ func (l *local) dealEvent(ctx context.Context) {
 	}
 }
 
-func (l *local) checkDirty(allFromDb map[string]struct{}) {
+func (l *local) checkDirty(ctx context.Context, allFromDb map[string]struct{}) {
 	elems := l.cache.Items()
 	for _, v := range elems {
 		h, ok := v.Object.(*node.Node)
 		if ok {
 			if _, ok := allFromDb[h.InsID]; !ok {
 				CubeLog.WithContext(context.Background()).Errorf("node %s is dirty", h.InsID)
-				l.delNodeCache(h)
+				l.delNodeCache(ctx, h)
 			}
 		}
 	}
@@ -189,13 +189,13 @@ func (l *local) addNodeCache(n *node.Node) {
 	l.appendSortedNodes(n)
 }
 
-func (l *local) delNodeCache(n *node.Node) {
+func (l *local) delNodeCache(ctx context.Context, n *node.Node) {
 	if n == nil {
 		CubeLog.WithContext(context.Background()).Warnf("node is nil")
 		return
 	}
 	// Clean template locality: empty list deregisters all replicas.
-	SyncNodeTemplates(context.Background(), n.ID(), nil)
+	SyncNodeTemplates(ctx, n.ID(), nil)
 	if l.templateNodeCache != nil {
 		l.templateNodeCache.Delete(n.ID())
 	}

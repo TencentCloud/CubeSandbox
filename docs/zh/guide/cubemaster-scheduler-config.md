@@ -109,7 +109,7 @@ Cubelet 会通过 CubeOps 的 `/internal/v1/node-agent` 接口注册节点并持
 | 变量 / 配置 | 影响 |
 |-------------|------|
 | `ONE_CLICK_DEPLOY_ROLE=compute` | 安装计算节点，只运行 Cubelet 等运行时服务，并向控制面注册。 |
-| `CUBE_SANDBOX_NODE_IP` | 当前节点注册到 CubeMaster 的可路由地址。配置错误会导致节点不可达或不出现。 |
+| `CUBE_SANDBOX_NODE_IP` | 当前节点注册到 CubeOps 的可路由地址。配置错误会导致节点不可达或不出现。 |
 | `ONE_CLICK_CONTROL_PLANE_IP` / `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` | Cubelet 注册和上报使用的 CubeOps 地址（端口 3010）。CubeMaster 单独监听 8089。 |
 | `Cubelet/config/config.toml` 中的 `node_status_update_frequency` | 节点状态和资源上报周期。默认 `1s`，不要配置到 dynamicconf。 |
 | `Cubelet/dynamicconf/conf.yaml` 中的 `host.scheduler_label` | 节点池标签，用于 affinity 和隔离。 |

@@ -71,7 +71,7 @@ func (l *local) syncAllFromDB(ctx context.Context, update bool) error {
 			allFromDb[n.InsID] = struct{}{}
 		}
 		if update {
-			l.checkDirty(allFromDb)
+			l.checkDirty(ctx, allFromDb)
 		}
 		return nil
 	}
@@ -136,7 +136,7 @@ func (l *local) syncAllFromDB(ctx context.Context, update bool) error {
 	}
 
 	if update {
-		l.checkDirty(allFromDb)
+		l.checkDirty(ctx, allFromDb)
 	}
 	return nil
 }

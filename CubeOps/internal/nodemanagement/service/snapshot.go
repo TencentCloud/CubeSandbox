@@ -65,6 +65,17 @@ func buildSnapshotFromStore(reg *store.NodeRegistration, st *store.NodeStatus, v
 	return snap
 }
 
+func cloneSnapshotWithCurrentHealth(in *model.NodeSnapshot) *model.NodeSnapshot {
+	return cloneSnapshotWithCurrentHealthAt(in, time.Now())
+}
+
+func cloneSnapshotWithCurrentHealthAt(in *model.NodeSnapshot, now time.Time) *model.NodeSnapshot {
+	out := cloneSnapshot(in)
+	applyCurrentHealth(out, now)
+	out.SchedulingDisabled = snapSchedulingDisabled(out)
+	return out
+}
+
 func applyCurrentHealth(snap *model.NodeSnapshot, now time.Time) {
 	if snap == nil {
 		return

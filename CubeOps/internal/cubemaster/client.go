@@ -434,13 +434,13 @@ func setTraceHeaders(req *http.Request, rid string) {
 }
 
 // CountNodeSandboxes returns how many sandboxes CubeMaster reports on hostID.
-// size=1 is requested; only the count matters. JSON null and unrecognised
-// shapes error (fail-closed) — see service.ErrSandboxCheckFailed.
+// Uses /cube/sandbox/inventory which surfaces cubelet list failures as a
+// non-success ret_code (fail-closed) — see service.ErrSandboxCheckFailed.
 func (c *Client) CountNodeSandboxes(ctx context.Context, hostID string) (int, error) {
 	if hostID == "" {
 		return 0, errors.New("CountNodeSandboxes: host_id is required")
 	}
-	raw, err := c.getWithQuery(ctx, "/cube/sandbox/list", map[string]string{
+	raw, err := c.getWithQuery(ctx, "/cube/sandbox/inventory", map[string]string{
 		"host_id":   hostID,
 		"start_idx": "1",
 		"size":      "1",
@@ -461,41 +461,13 @@ func (c *Client) CountNodeSandboxes(ctx context.Context, hostID string) (int, er
 	if env.Ret.RetCode != 0 && env.Ret.RetCode != 200 {
 		return 0, &CMError{RetCode: env.Ret.RetCode, RetMsg: env.Ret.RetMsg}
 	}
-	// data:null means CubeMaster could not reach the cubelet; fail closed.
-	if bytes.Equal(bytes.TrimSpace(env.Data), []byte("null")) {
-		return 0, errors.New("count node sandboxes: data=null (cubelet may be unreachable)")
+	trimmed := bytes.TrimSpace(env.Data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return 0, errors.New("count node sandboxes: data missing or null (cubelet may be unreachable)")
 	}
-	// data key omitted (CubeMaster omits an empty list via omitempty) = no sandboxes.
-	if len(env.Data) == 0 {
-		return 0, nil
-	}
-	// Array shape; "[]" decodes to a nil slice (count 0) with err == nil.
 	var items []json.RawMessage
-	if err := json.Unmarshal(env.Data, &items); err == nil {
-		return len(items), nil
+	if err := json.Unmarshal(env.Data, &items); err != nil {
+		return 0, fmt.Errorf("count node sandboxes: unexpected data shape: %s", string(env.Data))
 	}
-	// { "list": [...] } / { "sandboxes": [...] } shape. A raw map lets an
-	// object without either key fall through to the fail-closed branch.
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(env.Data, &obj); err == nil {
-		var total int
-		seen := false
-		for _, key := range []string{"list", "sandboxes"} {
-			raw, ok := obj[key]
-			if !ok {
-				continue
-			}
-			var arr []json.RawMessage
-			if err := json.Unmarshal(raw, &arr); err != nil {
-				return 0, fmt.Errorf("count node sandboxes: unmarshal %s: %w", key, err)
-			}
-			total += len(arr)
-			seen = true
-		}
-		if seen {
-			return total, nil
-		}
-	}
-	// Unrecognised shape: fail closed so DeleteNode refuses to proceed.
-	return 0, fmt.Errorf("count node sandboxes: unexpected data shape: %s", string(env.Data))
+	return len(items), nil
 }

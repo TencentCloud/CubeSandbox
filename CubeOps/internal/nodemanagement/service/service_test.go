@@ -270,6 +270,110 @@ func TestListSchedulerNodes(t *testing.T) {
 	}
 }
 
+func TestListNodes_AuthoritativeFromDB(t *testing.T) {
+	// Regression: ListNodes must be DB-driven even when no snapshot exists.
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+
+	for i := 1; i <= 3; i++ {
+		if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+			NodeID: fmt.Sprintf("node-%d", i),
+			HostIP: fmt.Sprintf("10.0.0.%d", i),
+		}); err != nil {
+			t.Fatalf("register node-%d: %v", i, err)
+		}
+	}
+	// Isolate one node; it must still appear in the list with the flag set.
+	if _, err := svc.SetNodeSchedulingDisabled(ctx, "node-2", true, "admin", ""); err != nil {
+		t.Fatalf("isolate node-2: %v", err)
+	}
+
+	nodes, err := svc.ListNodes(ctx)
+	if err != nil {
+		t.Fatalf("list nodes: %v", err)
+	}
+	if len(nodes) != 3 {
+		t.Fatalf("len = %d, want 3", len(nodes))
+	}
+	byID := map[string]*model.NodeSnapshot{}
+	for _, n := range nodes {
+		byID[n.NodeID] = n
+	}
+	if _, ok := byID["node-1"]; !ok {
+		t.Error("node-1 missing from list")
+	}
+	if n2, ok := byID["node-2"]; !ok {
+		t.Error("node-2 missing from list")
+	} else if !n2.SchedulingDisabled {
+		t.Error("node-2 scheduling_disabled should be true")
+	}
+	if _, ok := byID["node-3"]; !ok {
+		t.Error("node-3 missing from list")
+	}
+}
+
+func TestListNodes_NoRedisPool(t *testing.T) {
+	// With no Redis available, ListNodes must still return the full set and
+	// must not error out (falls back to rebuilding from DB).
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	for i := 1; i <= 2; i++ {
+		if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+			NodeID: fmt.Sprintf("n%d", i),
+		}); err != nil {
+			t.Fatalf("register n%d: %v", i, err)
+		}
+	}
+	nodes, err := svc.ListNodes(ctx)
+	if err != nil {
+		t.Fatalf("list nodes: %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("len = %d, want 2", len(nodes))
+	}
+}
+
+func TestListNodes_PartialRedisSnapshotBackfilled(t *testing.T) {
+	// Regression: a node absent from Redis (TTL expired) must be backfilled
+	// from DB.
+	cleanup := nodemetric.SetScanNodeSnapshotsHook(func() ([]*model.NodeSnapshot, error) {
+		// Simulate node-1 and node-3 having live snapshots; node-2's expired.
+		return []*model.NodeSnapshot{
+			{NodeID: "node-1", HostIP: "10.0.0.1"},
+			{NodeID: "node-3", HostIP: "10.0.0.3"},
+		}, nil
+	})
+	defer cleanup()
+
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	for i := 1; i <= 3; i++ {
+		if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+			NodeID: fmt.Sprintf("node-%d", i),
+			HostIP: fmt.Sprintf("10.0.0.%d", i),
+		}); err != nil {
+			t.Fatalf("register node-%d: %v", i, err)
+		}
+	}
+
+	nodes, err := svc.ListNodes(ctx)
+	if err != nil {
+		t.Fatalf("list nodes: %v", err)
+	}
+	if len(nodes) != 3 {
+		t.Fatalf("len = %d, want 3 (node-2 must be backfilled from DB)", len(nodes))
+	}
+	seen := map[string]bool{}
+	for _, n := range nodes {
+		seen[n.NodeID] = true
+	}
+	for i := 1; i <= 3; i++ {
+		if !seen[fmt.Sprintf("node-%d", i)] {
+			t.Errorf("node-%d missing from list", i)
+		}
+	}
+}
+
 func TestGetNode_NotFound(t *testing.T) {
 	svc, _ := newTestService(t)
 	_, err := svc.GetNode(context.Background(), "missing")
@@ -840,7 +944,7 @@ func TestRegisterNode_LabelLimitBoundary(t *testing.T) {
 
 	// 64 labels should succeed.
 	labels := make(map[string]string, 64)
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		labels[fmt.Sprintf("key-%d", i)] = "v"
 	}
 	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-64", Labels: labels}); err != nil {
