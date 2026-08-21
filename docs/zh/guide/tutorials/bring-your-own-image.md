@@ -1,30 +1,23 @@
 # 自带镜像接入 (envd)
 
-本教程介绍如何用**最少的改动**把你自己的应用或容器镜像接入 Cube-Sandbox
-模板体系。
+本教程介绍如何为**你自己的应用或容器镜像**加入 `envd`，以便通过 CubeSandbox SDK 和 E2B SDK 操作沙箱。
 
-想全面了解 OCI 镜像如何变成模板，请继续阅读
-[从 OCI 镜像制作模板](./template-from-image.md)。本教程是那篇文档的
-**前置步骤**：保证你的镜像满足它所要求的探活 (readiness probe) 条件。
+从 OCI 镜像创建模板以及配置应用端口和 readiness probe 的通用流程，请参阅[从 OCI 镜像制作模板](./template-from-image.md)。
 
 ---
 
-## 1. 为什么我的镜像需要 `envd`？
+## 1. 我的镜像什么时候需要 `envd`？
 
-Cube-Sandbox 与沙箱容器之间的所有通信都是通过容器内的 `envd` 守护进程
-完成的。它是 Cube Master、Cube SDK 以及 `cubemastercli` 唯一识别的协议
-端点：
+`envd` 是 CubeSandbox SDK 和 E2B SDK 执行命令、读写文件和建立 PTY 等沙箱操作所使用的数据面服务：
 
-| Cube 能力                         | 沙箱内端点                    | 没有 `envd` 会怎样             |
-| --------------------------------- | ----------------------------- | ------------------------------ |
-| 模板探活                          | `GET :49983/health` → 204     | 模板创建因探活失败而 FAILED    |
-| `Sandbox.commands.run()`          | `POST :49983/process`         | SDK 命令调用全部 404           |
-| `Sandbox.files.read/write()`      | `POST :49983/files`           | 文件操作不可用                 |
-| Sandbox 初始化（env、时间同步等） | `POST :49983/init`            | Sandbox 永远无法 Ready         |
+| 能力 | 沙箱内的 `envd` 接口 | 没有 `envd` 会怎样 |
+| --- | --- | --- |
+| `envd` 健康检查（可作为模板 probe） | `GET :49983/health` → 204 | 该探活端点不可用 |
+| `Sandbox.commands.run()` | `:49983` 上的 Process API | 命令 API 不可用 |
+| `Sandbox.files.read/write()` | `:49983` 上的 Files API | 文件 API 不可用 |
+| 创建时环境变量初始化 | `POST :49983/init` | 传入创建时环境变量时，沙箱创建失败 |
 
-换句话说：**任何要用作 Cube 模板的镜像，启动时都必须有 `envd` 在
-`:49983` 上监听**。最简单的方式就是直接基于官方 `cubesandbox-base`
-构建——下一节就是完整流程。
+对于交互式开发或代码执行沙箱，建议保留 `envd`，便于通过 SDK 执行命令、读写文件和排障。仅提供自有业务服务且不使用上述能力的镜像可以不包含 `envd`，此时应将模板 probe 配置为应用自己的 HTTP 健康检查端点。
 
 ---
 
@@ -82,9 +75,7 @@ cubemastercli tpl create-from-image \
   --probe-path  /health
 ```
 
-拿到 `template_id` 就可以用 Cube SDK / `cubemastercli` 去创建沙箱了，
-完整 SDK 用法见
-[从 OCI 镜像制作模板](./template-from-image.md)。
+拿到 `template_id` 后，可以通过 CubeSandbox SDK 或 E2B SDK 创建沙箱，示例见[从 OCI 镜像制作模板](./template-from-image.md)。
 
 ### 可用的基础镜像 tag
 

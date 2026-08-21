@@ -29,7 +29,7 @@ ls ~/.local/share/mkcert/rootCA.pem
 
 ### Step 1：写 Dockerfile
 
-所有 Cube 镜像必须包含 `envd`（负责沙箱内的通信协议），推荐基于官方 `cubesandbox-base` 构建，`envd` 已预装。
+本教程通过 CubeSandbox SDK 和 E2B SDK 操作沙箱，并将 `envd` 的 `49983/health` 作为模板 probe，因此示例基于预装 `envd` 的官方 `cubesandbox-base` 构建。
 
 ```dockerfile
 FROM ghcr.io/tencentcloud/cubesandbox-base:latest

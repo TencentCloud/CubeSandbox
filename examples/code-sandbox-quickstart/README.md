@@ -9,8 +9,8 @@ and execute shell commands — all from your local machine using the E2B Python 
 
 **Cube Sandbox** is a lightweight MicroVM platform fully compatible with the [E2B SDK](https://e2b.dev). Its architecture is split into two planes:
 
-- **Control Plane**: Manages the sandbox lifecycle. Each `Sandbox.create()` call boots a new KVM MicroVM from a template snapshot in under 50ms. Commands flow through CubeAPI/Master to Cubelet, which uses `cube-agent` (PID 1) inside the VM to start the `envd` service.
-- **Data Plane**: Handles high-frequency code execution and file interaction. Traffic is routed via CubeProxy directly to the `envd` agent inside the sandbox, allowing for the execution of Python or Shell scripts in a secured environment. The sandbox is fully isolated with its own kernel, filesystem, and network.
+- **Control Plane**: Manages the sandbox lifecycle. Each `Sandbox.create()` call boots a new KVM MicroVM from a template snapshot in under 50ms. In the official `sandbox-code` image used in this example, the create request reaches Cubelet, which uses `cube-agent` (PID 1) inside the VM to start `envd`.
+- **Data Plane**: Handles code execution through the sandbox's code interpreter, while requests such as `commands.run` and `files.read/write` are routed via CubeProxy directly to `envd` inside the sandbox. The sandbox is fully isolated with its own kernel, filesystem, and network.
 
 When the `with` block exits, the sandbox is automatically deleted.
 
@@ -21,7 +21,7 @@ When the `with` block exits, the sandbox is automatically deleted.
         ┌─────────────────────────────┴─────────────────────────────┐
         │                                                           │
  [ 1. Control Plane ]                                     [ 2. Data Plane ]
-(e.g., Sandbox.create)                                  (e.g., run_code, commands.run)
+(e.g., Sandbox.create)                       (e.g., run_code, commands.run, files.read/write)
         │                                                           │
         ▼  REST API (Port 3000)                                     ▼  WSS / HTTP
      CubeAPI                                                    CubeProxy
@@ -34,7 +34,7 @@ When the `with` block exits, the sandbox is automatically deleted.
      Cubelet ──────────────┼──► cube-agent ──► envd  ◄──────────┼───┘
                            │     (PID 1)         │              │
                            │                     ▼              │
-                           │                Python / Shell      │
+                           │          Code Interpreter / envd   │
                            └────────────────────────────────────┘
 ```
 
