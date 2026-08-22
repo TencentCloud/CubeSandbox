@@ -1354,6 +1354,24 @@ components:
           - string
           - 'null'
           description: Writable layer size for the rootfs, e.g. "1G".
+    E2BNetworkRule:
+      type: object
+      properties:
+        transform:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/E2BNetworkTransform'
+      additionalProperties: false
+    E2BNetworkTransform:
+      type: object
+      properties:
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          propertyNames:
+            type: string
+      additionalProperties: false
     EgressRule:
       type: object
       description: 'L7 egress rule: match conditions + action (allow/deny, audit, credential injection).'
@@ -1908,12 +1926,31 @@ components:
             Host authority forwarded to user services by CubeProxy. `${PORT}` is
             expanded to the requested sandbox port; envd traffic is exempt.
         rules:
-          type:
-          - array
-          - 'null'
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxNetworkRulesInput'
+            description: |-
+              L7 egress rules. Accepts CubeSandbox's ordered rule array and E2B's
+              host-keyed transform map for compatibility. Both are normalized to the
+              ordered internal rule model.
+    SandboxNetworkRulesInput:
+      oneOf:
+      - type: array
+        items:
+          $ref: '#/components/schemas/EgressRule'
+      - type: object
+        additionalProperties:
+          type: array
           items:
-            $ref: '#/components/schemas/EgressRule'
-          description: L7 egress rules, evaluated first-match-wins in list order.
+            $ref: '#/components/schemas/E2BNetworkRule'
+        propertyNames:
+          type: string
+      description: |-
+        Accepted wire shapes for `SandboxNetworkConfig.rules`.
+
+        CubeSandbox clients use the ordered rule array. E2B clients use a
+        host-keyed map whose values are request transforms. CubeAPI normalizes both
+        shapes into the internal ordered egress-rule model.
     SandboxOnTimeout:
       type: string
       enum:
