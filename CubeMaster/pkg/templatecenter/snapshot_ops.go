@@ -129,10 +129,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 	} else {
 		originReq.Request.RequestID = requestID
 	}
-	createReq, storedReq, err := buildSnapshotRequests(originReq, "")
-	if err != nil {
-		return nil, err
-	}
+
 	var jobID string
 	reusedExistingJob := false
 	if err := withSnapshotWriteLocks([]string{
@@ -142,6 +139,10 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 		if existing, err := getTemplateImageJobByRequestID(ctx, requestID); err == nil {
 			if existing.Operation != JobOperationSnapshotCreate {
 				return fmt.Errorf("%w: request %s is already bound to %s", ErrTemplateAttemptInProgress, requestID, existing.Operation)
+			}
+			_, storedReq, err := buildSnapshotRequests(originReq, existing.TemplateID)
+			if err != nil {
+				return err
 			}
 			if !snapshotCreateRequestMatches(existing.RequestJSON, requestID, sandboxID, nodeID, nodeIP, displayName, storedReq) {
 				return fmt.Errorf("%w: request %s payload does not match existing snapshot create job", ErrTemplateAttemptInProgress, requestID)
@@ -164,8 +165,10 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 		}
 
 		snapshotID := generateSnapshotID()
-		createReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = snapshotID
-		storedReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = snapshotID
+		createReq, storedReq, err := buildSnapshotRequests(originReq, snapshotID)
+		if err != nil {
+			return err
+		}
 		fingerprint := buildCommitTemplateSpecFingerprint(storedReq)
 		requestJSON, err := marshalSnapshotCreateRequest(snapshotCreateJobRequest{
 			RequestID:       requestID,
