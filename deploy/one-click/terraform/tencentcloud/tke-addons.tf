@@ -269,7 +269,7 @@ resource "kubernetes_secret" "cubemaster_conf" {
         http_writetimeout                  = 360
         http_idletimeout                   = 360
         cube_ops_addr                      = local.cubeops_url
-        sync_meta_data_interval            = "5s"
+        sync_meta_data_interval            = "1s"
         sync_metric_data_interval          = "1s"
         collect_metric_interval            = "1s"
         default_headless_service_nodes_num = local.cubemaster_replicas

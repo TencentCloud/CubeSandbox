@@ -1014,3 +1014,123 @@ func TestListOperations(t *testing.T) {
 		t.Fatal("expected at least one operation")
 	}
 }
+
+// TestGetNode_DBRebuildRestoresMetricFromRedis verifies a DB rebuild (Redis
+// snapshot miss) overlays real-time metric from the Redis metric hash.
+func TestGetNode_DBRebuildRestoresMetricFromRedis(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+
+	// Register a node.
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+		NodeID:       "node-metric",
+		HostIP:       "10.0.0.1",
+		InstanceType: "cubebox",
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// Simulate a heartbeat that carries allocated + disk metrics.
+	if _, err := svc.UpdateNodeStatus(ctx, "node-metric", &model.UpdateNodeStatusRequest{
+		HeartbeatTime: time.Now(),
+		Conditions:    []model.NodeCondition{{Type: "Ready", Status: "True"}},
+		Allocated: &model.AllocatedResources{
+			MilliCPU:  2000,
+			MemoryMB:  2048,
+			MvmNum:    1,
+			NicQueues: 2,
+		},
+		DiskUsage: &model.DiskUsage{
+			DataDiskUsagePer:    55.5,
+			StorageDiskUsagePer: 66.6,
+			SysDiskUsagePer:     77.7,
+		},
+	}); err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+
+	// Inject a metric-hash read returning the live metric.
+	cleanup := nodemetric.SetReadNodeMetricHook(func(nodeID string) (*nodemetric.NodeMetric, error) {
+		if nodeID != "node-metric" {
+			t.Errorf("metric hook nodeID = %q, want node-metric", nodeID)
+		}
+		return &nodemetric.NodeMetric{
+			NodeID:              nodeID,
+			MetricTime:          time.Now(),
+			HasAllocated:        true,
+			MilliCPUUsage:       2000,
+			MemoryMBUsage:       2048,
+			MvmNum:              1,
+			NicQueues:           2,
+			HasDisk:             true,
+			DataDiskUsagePer:    55.5,
+			StorageDiskUsagePer: 66.6,
+			SysDiskUsagePer:     77.7,
+		}, nil
+	})
+	defer cleanup()
+
+	// fakeNodeStore has no Redis snapshot, so GetNode does a DB rebuild.
+	snap, err := svc.GetNode(ctx, "node-metric")
+	if err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+	if snap == nil {
+		t.Fatal("expected non-nil snapshot")
+	}
+
+	// Verify the metric fields were restored from the metric hash.
+	if snap.MvmNum != 1 {
+		t.Errorf("MvmNum = %d, want 1", snap.MvmNum)
+	}
+	if snap.QuotaCpuUsage != 2000 {
+		t.Errorf("QuotaCpuUsage = %d, want 2000", snap.QuotaCpuUsage)
+	}
+	if snap.QuotaMemUsage != 2048 {
+		t.Errorf("QuotaMemUsage = %d, want 2048", snap.QuotaMemUsage)
+	}
+	if snap.DataDiskUsagePer != 55.5 {
+		t.Errorf("DataDiskUsagePer = %f, want 55.5", snap.DataDiskUsagePer)
+	}
+	if snap.SysDiskUsagePer != 77.7 {
+		t.Errorf("SysDiskUsagePer = %f, want 77.7", snap.SysDiskUsagePer)
+	}
+	if snap.MetricUpdate.IsZero() {
+		t.Error("MetricUpdate should be non-zero after restore")
+	}
+}
+
+// TestGetNode_DBRebuildMetricMissLeavesZeroMetric verifies a DB rebuild with
+// both snapshot and metric hash missing stays valid with zero metrics.
+func TestGetNode_DBRebuildMetricMissLeavesZeroMetric(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+		NodeID:       "node-nometric",
+		HostIP:       "10.0.0.2",
+		InstanceType: "cubebox",
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// Metric hash also misses.
+	cleanup := nodemetric.SetReadNodeMetricHook(func(nodeID string) (*nodemetric.NodeMetric, error) {
+		return nil, nil // miss
+	})
+	defer cleanup()
+
+	snap, err := svc.GetNode(ctx, "node-nometric")
+	if err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+	if snap == nil {
+		t.Fatal("expected non-nil snapshot")
+	}
+	if snap.MvmNum != 0 {
+		t.Errorf("MvmNum = %d, want 0 on metric miss", snap.MvmNum)
+	}
+	if !snap.MetricUpdate.IsZero() {
+		t.Error("MetricUpdate should be zero on metric miss")
+	}
+}

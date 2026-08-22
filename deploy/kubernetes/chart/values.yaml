@@ -342,9 +342,8 @@ cubeOps:
   # Stateful ops/admin backend (JWT) + WebUI SDK proxy to CubeMaster.
   # Required when webui.enabled=true.
   enabled: true
-  # MUST be 1: node metadata lives in process memory; replicas > 1 diverges
-  # on heartbeat/isolate/delete and loses state on restart.
-  replicas: 1
+  # Shared MySQL/Redis state; two replicas for availability.
+  replicas: 2
   podAnnotations: {}
   bind: "0.0.0.0:3010"
   # Empty uses cubeProxy.domain for CUBE_API_SANDBOX_DOMAIN.

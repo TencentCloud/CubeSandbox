@@ -22,7 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"gorm.io/gorm"
 )
 
@@ -168,6 +168,10 @@ func (l *local) dealEvent(ctx context.Context) {
 }
 
 func (l *local) checkDirty(ctx context.Context, allFromDb map[string]struct{}) {
+	if len(allFromDb) == 0 {
+		CubeLog.WithContext(ctx).Warnf("checkDirty allFromDb is empty, skip cleanup")
+		return
+	}
 	elems := l.cache.Items()
 	for _, v := range elems {
 		h, ok := v.Object.(*node.Node)

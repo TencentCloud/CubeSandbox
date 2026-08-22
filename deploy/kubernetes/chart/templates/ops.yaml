@@ -8,9 +8,6 @@ metadata:
     {{- include "cube.labels" . | nindent 4 }}
     app.kubernetes.io/component: ops
 spec:
-  {{- if gt (int .Values.cubeOps.replicas) 1 }}
-  {{- fail "cubeOps.replicas must be 1; node metadata is in-process. See values.yaml." }}
-  {{- end }}
   replicas: {{ .Values.cubeOps.replicas }}
   {{- include "cube.deploymentStrategy" . | nindent 2 }}
   selector:

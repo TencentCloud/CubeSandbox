@@ -118,3 +118,84 @@ func TestPing_UnreachablePool(t *testing.T) {
 		t.Error("expected error for unreachable redis")
 	}
 }
+
+func TestReadNodeMetric_EmptyNodeID(t *testing.T) {
+	if _, err := ReadNodeMetric(""); err == nil {
+		t.Error("expected error for empty node id")
+	}
+}
+
+func TestReadNodeMetric_NilPool(t *testing.T) {
+	saved := pool
+	pool = nil
+	defer func() { pool = saved }()
+
+	m, err := ReadNodeMetric("node-1")
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if m != nil {
+		t.Errorf("expected nil metric for nil pool, got %+v", m)
+	}
+}
+
+func TestReadNodeMetric_Hook(t *testing.T) {
+	want := &NodeMetric{
+		NodeID:              "node-1",
+		MetricTime:          time.Now().Truncate(time.Second),
+		HasAllocated:        true,
+		MilliCPUUsage:       2000,
+		MemoryMBUsage:       2048,
+		MvmNum:              3,
+		NicQueues:           4,
+		HasDisk:             true,
+		DataDiskUsagePer:    55.5,
+		StorageDiskUsagePer: 66.6,
+		SysDiskUsagePer:     77.7,
+	}
+	cleanup := SetReadNodeMetricHook(func(nodeID string) (*NodeMetric, error) {
+		if nodeID != "node-1" {
+			t.Errorf("nodeID = %q, want node-1", nodeID)
+		}
+		return want, nil
+	})
+	defer cleanup()
+
+	got, err := ReadNodeMetric("node-1")
+	if err != nil {
+		t.Fatalf("ReadNodeMetric: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil metric")
+	}
+	if got.MvmNum != 3 || got.MilliCPUUsage != 2000 || got.DataDiskUsagePer != 55.5 {
+		t.Errorf("metric = %+v, want %+v", got, want)
+	}
+}
+
+func TestReadNodeMetric_HookErrorPropagated(t *testing.T) {
+	wantErr := errors.New("redis read failed")
+	cleanup := SetReadNodeMetricHook(func(nodeID string) (*NodeMetric, error) {
+		return nil, wantErr
+	})
+	defer cleanup()
+
+	if _, err := ReadNodeMetric("node-1"); err != wantErr {
+		t.Errorf("err = %v, want %v", err, wantErr)
+	}
+}
+
+func TestReadNodeMetric_HookMiss(t *testing.T) {
+	cleanup := SetReadNodeMetricHook(func(nodeID string) (*NodeMetric, error) {
+		return nil, nil // Redis miss
+	})
+	defer cleanup()
+
+	m, err := ReadNodeMetric("node-1")
+	if err != nil {
+		t.Fatalf("expected nil err on miss, got %v", err)
+	}
+	if m != nil {
+		t.Errorf("expected nil metric on miss, got %+v", m)
+	}
+}

@@ -6,7 +6,7 @@ common:
   {{- if or .Values.cubeOps.enabled .Values.externalControlPlane.enabled }}
   cube_ops_addr: "http://{{ include "cube.opsEndpoint" . }}"
   {{- end }}
-  sync_meta_data_interval: 5s
+  sync_meta_data_interval: 1s
   sync_metric_data_interval: 1s
   collect_metric_interval: 1s
   default_headless_service_nodes_num: 1

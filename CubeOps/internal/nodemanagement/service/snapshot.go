@@ -4,11 +4,14 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"sort"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/model"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/nodemetric"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/store"
 )
 
@@ -60,9 +63,38 @@ func buildSnapshotFromStore(reg *store.NodeRegistration, st *store.NodeStatus, v
 		})
 	}
 	snap.VersionsHash = VersionsHash(snap.Versions)
+	restoreMetricFromRedis(snap)
 	applyCurrentHealth(snap, time.Now())
 	snap.SchedulingDisabled = snapSchedulingDisabled(snap)
 	return snap
+}
+
+// restoreMetricFromRedis overlays real-time metric from the Redis metric hash
+// on a DB-rebuilt snapshot, so a rebuild cannot overwrite the live metrics.
+func restoreMetricFromRedis(snap *model.NodeSnapshot) {
+	if snap == nil || snap.NodeID == "" {
+		return
+	}
+	m, err := nodemetric.ReadNodeMetric(snap.NodeID)
+	if err != nil {
+		logging.G(context.Background()).Warnf("nodemgmt: restore metric from redis failed: node=%s: %v", snap.NodeID, err)
+		return
+	}
+	if m == nil {
+		return // metric miss; leave snapshot metrics at zero
+	}
+	snap.MetricUpdate = m.MetricTime
+	if m.HasAllocated {
+		snap.QuotaCpuUsage = m.MilliCPUUsage
+		snap.QuotaMemUsage = m.MemoryMBUsage
+		snap.MvmNum = m.MvmNum
+		snap.NicQueues = m.NicQueues
+	}
+	if m.HasDisk {
+		snap.DataDiskUsagePer = m.DataDiskUsagePer
+		snap.StorageDiskUsagePer = m.StorageDiskUsagePer
+		snap.SysDiskUsagePer = m.SysDiskUsagePer
+	}
 }
 
 func cloneSnapshotWithCurrentHealth(in *model.NodeSnapshot) *model.NodeSnapshot {

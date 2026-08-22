@@ -298,31 +298,28 @@ func TestGetNodeTrustsCubeOpsHealthVerdict(t *testing.T) {
 	}
 }
 
-func TestGetNodeDegradesOnStaleSync(t *testing.T) {
+func TestGetNodeTrustsCubeOpsHealthOnStaleSync(t *testing.T) {
 	origCache := l.cache
 	defer func() {
 		l.cache = origCache
 	}()
 
 	l.cache = cache.New(0, 0)
-	// CubeOps says healthy, but sync is stale (CubeOps unreachable) → degrade.
+	// Trust CubeOps Healthy verdict even when CubeOps sync is stale.
 	l.cache.SetDefault("node-stale-sync", &node.Node{
 		InsID:            "node-stale-sync",
 		IP:               "10.0.0.1",
 		ReportedReady:    true,
 		Healthy:          true,
-		MetaDataUpdateAt: time.Now().Add(-(metadataHealthTimeout() + time.Second)),
+		MetaDataUpdateAt: time.Now().Add(-time.Hour), // long-stale sync
 	})
 
 	got, ok := GetNode("node-stale-sync")
 	if !ok || got == nil {
 		t.Fatal("expected node to exist")
 	}
-	if got.Healthy {
-		t.Fatal("stale sync should degrade to unhealthy")
-	}
-	if got.UnhealthyReason != nodehealth.ReasonHeartbeatExpired {
-		t.Fatalf("UnhealthyReason=%s want %s", got.UnhealthyReason, nodehealth.ReasonHeartbeatExpired)
+	if !got.Healthy {
+		t.Fatal("should keep CubeOps Healthy verdict even on stale sync")
 	}
 }
 

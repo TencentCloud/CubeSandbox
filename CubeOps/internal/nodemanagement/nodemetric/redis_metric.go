@@ -283,6 +283,74 @@ func DeleteNodeMetric(nodeID string) error {
 	return nil
 }
 
+// readNodeMetricHook is set by tests to intercept Redis metric reads.
+var readNodeMetricHook func(nodeID string) (*NodeMetric, error)
+
+// SetReadNodeMetricHook registers a test hook; cleanup restores the prior one.
+func SetReadNodeMetricHook(hook func(nodeID string) (*NodeMetric, error)) func() {
+	prev := readNodeMetricHook
+	readNodeMetricHook = hook
+	return func() { readNodeMetricHook = prev }
+}
+
+// ReadNodeMetric reads the per-node metric hash from Redis. (nil, nil) on miss.
+func ReadNodeMetric(nodeID string) (*NodeMetric, error) {
+	if nodeID == "" {
+		return nil, errors.New("ReadNodeMetric: node id required")
+	}
+	if readNodeMetricHook != nil {
+		return readNodeMetricHook(nodeID)
+	}
+	if pool == nil {
+		return nil, nil
+	}
+	conn := pool.Get()
+	defer conn.Close()
+	v, err := redis.Values(conn.Do("HGETALL", nodeMetricKeyPrefix+nodeID))
+	if err != nil {
+		return nil, fmt.Errorf("nodemetric: redis HGETALL failed: node=%s: %w", nodeID, err)
+	}
+	if len(v) == 0 {
+		return nil, nil // miss
+	}
+	m, err := redis.StringMap(v, nil)
+	if err != nil {
+		return nil, fmt.Errorf("nodemetric: redis StringMap failed: node=%s: %w", nodeID, err)
+	}
+	nm := &NodeMetric{NodeID: nodeID}
+	if raw, ok := m["update_at"]; ok {
+		_ = nm.MetricTime.UnmarshalText([]byte(raw))
+	}
+	if _, ok := m["quota_cpu_usage"]; ok {
+		nm.HasAllocated = true
+		nm.MilliCPUUsage = atoi64(m["quota_cpu_usage"])
+		nm.MemoryMBUsage = atoi64(m["quota_mem_mb_usage"])
+		nm.MvmNum = atoi64(m["mvm_num"])
+		nm.NicQueues = atoi64(m["nic_queues"])
+	}
+	if _, ok := m["data_disk_usage_per"]; ok {
+		nm.HasDisk = true
+		nm.DataDiskUsagePer = atof64(m["data_disk_usage_per"])
+		nm.StorageDiskUsagePer = atof64(m["storage_disk_usage_per"])
+		nm.SysDiskUsagePer = atof64(m["sys_disk_usage_per"])
+	}
+	return nm, nil
+}
+
+// atoi64 parses s as int64; 0 on error.
+func atoi64(s string) int64 {
+	var n int64
+	_, _ = fmt.Sscanf(s, "%d", &n)
+	return n
+}
+
+// atof64 parses s as float64; 0 on error.
+func atof64(s string) float64 {
+	var f float64
+	_, _ = fmt.Sscanf(s, "%g", &f)
+	return f
+}
+
 // Ping checks Redis connectivity with a 1s timeout.
 func Ping(ctx context.Context) error {
 	if pool == nil {

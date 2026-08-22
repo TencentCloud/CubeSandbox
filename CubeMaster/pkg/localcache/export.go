@@ -21,7 +21,6 @@ import (
 	fwk "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/framework"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/nodehealth"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/rediskey"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
@@ -179,25 +178,13 @@ func GetNode(id string) (*node.Node, bool) {
 	return nil, false
 }
 
-// metadataHealthTimeout is the staleness window after which a node degrades
-// to unhealthy when CubeOps sync has stopped.
-func metadataHealthTimeout() time.Duration {
-	return nodehealth.MetadataTimeout(config.GetConfig().Common.SyncMetaDataInterval)
-}
-
-// cloneNodeWithCurrentHealth returns a defensive copy of n. It trusts the
-// CubeOps Healthy verdict while sync is fresh; degrades to unhealthy when
-// MetaDataUpdateAt is stale (CubeOps unreachable).
-func cloneNodeWithCurrentHealth(n *node.Node, now time.Time) *node.Node {
+// cloneNodeWithCurrentHealth returns a defensive copy of n; CubeMaster trusts
+// the CubeOps Healthy verdict without overriding it on sync staleness.
+func cloneNodeWithCurrentHealth(n *node.Node, _ time.Time) *node.Node {
 	if n == nil {
 		return nil
 	}
-	current := n.Clone()
-	if !n.MetaDataUpdateAt.IsZero() && now.Sub(n.MetaDataUpdateAt) > metadataHealthTimeout() {
-		current.Healthy = false
-		current.UnhealthyReason = nodehealth.ReasonHeartbeatExpired
-	}
-	return current
+	return n.Clone()
 }
 
 func GetNodesByIp(ip string) (*node.Node, bool) {

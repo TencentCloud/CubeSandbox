@@ -356,14 +356,9 @@ variable "cube_api_replicas" {
 }
 
 variable "cube_ops_replicas" {
-  description = "cube-ops Deployment replica count. Must be 1: node metadata is in-process; replicas > 1 diverge on heartbeat/isolate/delete and lose state on restart."
+  description = "cube-ops Deployment replica count. Node state lives in shared MySQL/Redis, so replicas may scale beyond 1."
   type        = number
-  default     = 1
-
-  validation {
-    condition     = var.cube_ops_replicas == 1
-    error_message = "cube_ops_replicas must be 1 until CubeOps node state moves out of process memory."
-  }
+  default     = 2
 }
 
 variable "cube_proxy_replicas" {

@@ -24,7 +24,7 @@ CubeOps exposes two API groups:
    snapshot CRUD. These endpoints call CubeMaster HTTP REST API directly
    (replacing the former CubeAPI reverse proxy).
 
-> **Single-replica**: CubeOps keeps node state in an in-process map alongside the DB. Multi-replica concurrent writes are not supported yet.
+> **Multi-replica**: CubeOps node state lives in shared MySQL/Redis, so it can be scaled beyond one replica for availability.
 
 ## Quick Start
 

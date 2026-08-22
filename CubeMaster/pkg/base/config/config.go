@@ -861,8 +861,8 @@ func preComHandleConf(config *Config) error {
 	}
 
 	if config.Common.SyncMetaDataInterval == time.Duration(0) {
-		// Node changes must converge within seconds, not the legacy 30s.
-		config.Common.SyncMetaDataInterval = 5 * time.Second
+		// Node changes must converge within ~1s for fast scheduling reaction.
+		config.Common.SyncMetaDataInterval = 1 * time.Second
 	}
 
 	if config.Common.SyncMetricDataInterval == time.Duration(0) {
