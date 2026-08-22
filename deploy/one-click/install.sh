@@ -154,6 +154,20 @@ validate_external_db_exclusive() {
   Supported engines: mysql, postgres."
         ;;
     esac
+
+    # Validate CUBE_EXTERNAL_DB_SSLMODE against libpq's known modes. A typo
+    # (e.g. "verfy-full") passes install but only breaks at CubeMaster/CubeOps
+    # startup with an opaque libpq error. Fail fast here with a clear message.
+    # MySQL ignores sslmode entirely, so validation is postgres-only.
+    if [[ "${CUBE_EXTERNAL_DB_DRIVER}" == "postgres" ]]; then
+      case "${CUBE_EXTERNAL_DB_SSLMODE}" in
+        disable | allow | prefer | require | verify-ca | verify-full) ;;
+        *)
+          die "unsupported CUBE_EXTERNAL_DB_SSLMODE '${CUBE_EXTERNAL_DB_SSLMODE}' for postgres.
+  Supported modes: disable, allow, prefer, require, verify-ca, verify-full."
+          ;;
+      esac
+    fi
   fi
 
   # Reject the legacy MySQL alias combined with a non-mysql driver. The legacy
@@ -598,23 +612,49 @@ patch_cubemaster_external_deps() {
 
     # 2) Guarantee instance_db_config has `postgres:` with `sslmode:` inside it
     #    (only when driver is postgres). If the section already has `postgres:`
-    #    but no `sslmode:`, append sslmode into the existing block (avoids
-    #    duplicate `postgres:` keys).
+    #    but no `sslmode:`, insert sslmode immediately after the `postgres:` line.
+    #    If there is no `postgres:` block at all, append one at the end of
+    #    instance_db_config.
     if [[ "${db_driver}" == "postgres" ]]; then
       awk '
-        function inject_missing() {
-          if (!in_section || has_sslmode) return
-          if (!has_postgres) printf "  postgres:\n"
-          printf "    sslmode: \"disable\"\n"
+        function flush_pg() {
+          # Called when leaving the postgres: sub-block. If sslmode was not
+          # found, inject it right after the postgres: header we already printed.
+          if (in_pg && !has_sslmode) {
+            printf "    sslmode: \"disable\"\n"
+          }
+          in_pg=0
         }
-        /^instance_db_config:[[:space:]]*$/ { inject_missing(); in_section=1; has_postgres=0; has_sslmode=0 }
-        in_section && /^  postgres:[[:space:]]*$/ { has_postgres=1 }
-        in_section && /^    sslmode:/ { has_sslmode=1 }
+        /^instance_db_config:[[:space:]]*$/ {
+          in_section=1; has_postgres=0; has_sslmode=0; in_pg=0
+        }
+        # Entering postgres: sub-block (2-space indent child of instance_db_config)
+        in_section && /^  postgres:[[:space:]]*$/ { has_postgres=1; in_pg=1; print; next }
+        # Inside postgres: block (4-space indent lines)
+        in_section && in_pg && /^    / {
+          if (/^    sslmode:/) has_sslmode=1
+          print; next
+        }
+        # Leaving postgres: block (next line is not 4-space indented)
+        in_section && in_pg { flush_pg() }
+        # Leaving instance_db_config section (next top-level key)
         in_section && /^[a-z_]+:[[:space:]]*$/ && !/^instance_db_config:/ {
-          inject_missing(); in_section=0
+          # If there was no postgres: block at all, append one now
+          if (!has_postgres) {
+            printf "  postgres:\n"
+            printf "    sslmode: \"disable\"\n"
+          }
+          in_section=0
         }
         { print }
-        END { inject_missing() }
+        END {
+          # Handle EOF while still inside instance_db_config
+          if (in_pg) flush_pg()
+          if (in_section && !has_postgres) {
+            printf "  postgres:\n"
+            printf "    sslmode: \"disable\"\n"
+          }
+        }
       ' "${cfg}" > "${cfg}.tmp" && mv "${cfg}.tmp" "${cfg}"
     fi
 
