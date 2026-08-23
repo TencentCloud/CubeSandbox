@@ -308,6 +308,15 @@ func initCubeVS(cfg Config, device *systemnet.HostDevice, cubeDev *systemnet.Cub
 	if err := os.WriteFile("/proc/sys/net/ipv4/ip_local_port_range", []byte("10000\t19999"), 0644); err != nil {
 		return nil, fmt.Errorf("set ip_local_port_range failed: %w", err)
 	}
+	// Direct mode (no cube-router): the datapath resolves on-link neighbors via
+	// fib and reports into direct_neigh; this scanner drives the kernel's
+	// neighbor learning so fib resolves them. Route-aware mode does not attach
+	// the direct on-link path, so there is nothing to scan.
+	if params.EgressRedirectFlags == 0 {
+		if err := cubevs.StartDirectNeighScanner(params.NodeIP); err != nil {
+			return nil, fmt.Errorf("start direct neighbor scanner failed: %w", err)
+		}
+	}
 	return cubeRouter, nil
 }
 

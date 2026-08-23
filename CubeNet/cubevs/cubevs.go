@@ -224,6 +224,7 @@ const (
 	MapNameDNSAllow      = "dns_allow"    // legacy 8-byte DNS value
 	MapNameDNSAllowV2    = "dns_allow_v2" // current 40-byte DNS value
 	MapNameDNSQueryTrack = "dns_query_track"
+	MapNameDirectNeigh   = "direct_neigh" // direct-mode on-link neighbor trigger/cache
 	// constants referenced by BPF programs.
 	globalNameMVMInnerIP           = "mvm_inner_ip"
 	globalNameMVMMacaddrP1         = "mvm_macaddr_p1"

@@ -120,80 +120,22 @@ static __always_inline bool direct_neighbor_is_zero(const struct direct_neighbor
 	return macaddr->p1 == 0 && macaddr->p2 == 0;
 }
 
-#define DIRECT_ARP_PRESERVED_LEN	96
-#define DIRECT_ARP_HEADROOM	32
-#define DIRECT_ARP_FRAME_LEN		(DIRECT_ARP_PRESERVED_LEN + DIRECT_ARP_HEADROOM)
-#define DIRECT_ARP_ZERO_CHUNK_LEN	32
-
-static __always_inline long direct_egress_clear_arp_padding(struct __sk_buff *skb)
-{
-	unsigned char zeroes[DIRECT_ARP_ZERO_CHUNK_LEN] = {};
-	long err;
-
-	err = bpf_skb_store_bytes(skb, sizeof(struct arp_packet),
-				  zeroes, sizeof(zeroes), 0);
-	if (err)
-		return err;
-	err = bpf_skb_store_bytes(skb,
-				  sizeof(struct arp_packet) + DIRECT_ARP_ZERO_CHUNK_LEN,
-				  zeroes, sizeof(zeroes), 0);
-	if (err)
-		return err;
-	return bpf_skb_store_bytes(skb,
-				   sizeof(struct arp_packet) + 2 * DIRECT_ARP_ZERO_CHUNK_LEN,
-				   zeroes,
-				   DIRECT_ARP_FRAME_LEN - sizeof(struct arp_packet) -
-				   2 * DIRECT_ARP_ZERO_CHUNK_LEN, 0);
-}
-
-static __always_inline long direct_egress_arp_request(struct __sk_buff *skb, __u32 daddr)
-{
-	struct arp_packet packet = {};
-	union macaddr *macaddr;
-	long err;
-
-	__builtin_memset(packet.eth.h_dest, 0xff, ETH_ALEN);
-	macaddr = (union macaddr *)packet.eth.h_source;
-	macaddr->p1 = nodenic_macaddr_p1;
-	macaddr->p2 = nodenic_macaddr_p2;
-	packet.eth.h_proto = bpf_htons(ETH_P_ARP);
-
-	packet.arp.ar_hrd = bpf_htons(ARPHRD_ETHER);
-	packet.arp.ar_pro = bpf_htons(ETH_P_IP);
-	packet.arp.ar_hln = ETH_ALEN;
-	packet.arp.ar_pln = sizeof(__be32);
-	packet.arp.ar_op = bpf_htons(ARPOP_REQUEST);
-	macaddr = (union macaddr *)packet.arp.ar_sha;
-	macaddr->p1 = nodenic_macaddr_p1;
-	macaddr->p2 = nodenic_macaddr_p2;
-	packet.arp.ar_sip = nodenic_ip;
-	packet.arp.ar_tip = daddr;
-
-	/* CHECKSUM_PARTIAL can write L4 csum after we return.
-	 * change_tail will not shrink below that write (min_len).
-	 * change_head(32) moves it past ARP. Then store ARP and zero the rest.
-	 */
-	err = bpf_skb_change_tail(skb, DIRECT_ARP_PRESERVED_LEN, 0);
-	if (err)
-		return TC_ACT_SHOT;
-	err = bpf_skb_change_head(skb, DIRECT_ARP_HEADROOM, 0);
-	if (err)
-		return TC_ACT_SHOT;
-	err = bpf_skb_store_bytes(skb, 0, &packet, sizeof(packet), 0);
-	if (err)
-		return TC_ACT_SHOT;
-	err = direct_egress_clear_arp_padding(skb);
-	if (err)
-		return TC_ACT_SHOT;
-
-	return 0;
-}
-
-#define EGRESS_MAC_DROP		(-1)
 #define EGRESS_MAC_READY	0
-#define EGRESS_MAC_PROBE	1
 
-/* READY: L2 rewritten. PROBE: skb is now an ARP request. DROP: wait. */
+/* Resolve the external L2 addresses for an on-link direct-egress destination.
+ *
+ * The kernel neighbor table is the only source of truth for the MAC:
+ *   - a fresh positive entry in direct_neigh is used as-is (no fib lookup);
+ *   - a fresh negative entry (recent fib failure) skips fib and falls back;
+ *   - otherwise bpf_fib_lookup() refreshes the cache, and on failure the cache
+ *     is invalidated and the gateway MAC is used as a fallback.
+ *
+ * There is no packet drop or packet-into-ARP conversion: an unresolved on-link
+ * destination is forwarded to the gateway (zero loss on hairpin networks; a
+ * bounded blackhole elsewhere until the scanner's trigger makes the kernel ARP
+ * resolve and the next fib refresh caches the MAC). Always returns
+ * EGRESS_MAC_READY.
+ */
 static __always_inline int prepare_egress_l2(struct __sk_buff *skb,
 					     struct ethhdr *l2, __u32 daddr)
 {
@@ -205,9 +147,7 @@ static __always_inline int prepare_egress_l2(struct __sk_buff *skb,
 	};
 	struct direct_neighbor pending = {};
 	struct direct_neighbor *neighbor;
-	union macaddr *neighbor_mac;
-	const union macaddr *dmac;
-	const union macaddr *smac;
+	union macaddr *mac;
 	__u64 now;
 	long err;
 
@@ -217,41 +157,65 @@ static __always_inline int prepare_egress_l2(struct __sk_buff *skb,
 		return EGRESS_MAC_READY;
 	}
 
-	err = bpf_fib_lookup(skb, &fib, sizeof(fib),
-			     BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_OUTPUT);
-	if (err == BPF_FIB_LKUP_RET_SUCCESS && fib.ifindex == nodenic_ifindex) {
-		smac = (const union macaddr *)fib.smac;
-		dmac = (const union macaddr *)fib.dmac;
-		set_mac_pair(l2, smac->p1, smac->p2, dmac->p1, dmac->p2);
+	now = bpf_ktime_get_ns();
+	neighbor = bpf_map_lookup_elem(&direct_neigh, &daddr);
+	if (!neighbor) {
+		/* Untracked destination: only register for the scanner, never
+		 * disturb its scheduling fields. */
+		bpf_map_update_elem(&direct_neigh, &daddr, &pending, BPF_NOEXIST);
+		neighbor = bpf_map_lookup_elem(&direct_neigh, &daddr);
+	}
+	if (!neighbor) {
+		/* Map full or vanished: untracked, pure gateway fallback. */
+		set_mac_pair(l2, egress_smacaddr_p1, egress_smacaddr_p2,
+			     egress_dmacaddr_p1, egress_dmacaddr_p2);
 		return EGRESS_MAC_READY;
 	}
 
-	now = bpf_ktime_get_ns();
-	neighbor = bpf_map_lookup_elem(&direct_neigh, &daddr);
-	if (neighbor) {
-		if (neighbor->next_probe_at_ns > now) {
-			if (!direct_neighbor_is_zero(neighbor))
-				goto set_neighbor;
-			return EGRESS_MAC_DROP;
+	if (now < neighbor->valid_until_ns) {
+		if (!direct_neighbor_is_zero(neighbor)) {
+			/* Positive cache hit: use the cached MAC, no fib. */
+			mac = (union macaddr *)neighbor->addr;
+			set_mac_pair(l2, nodenic_macaddr_p1, nodenic_macaddr_p2,
+				     mac->p1, mac->p2);
+		} else {
+			/* Negative cache hit (recent fib failure): skip fib. */
+			set_mac_pair(l2, egress_smacaddr_p1, egress_smacaddr_p2,
+				     egress_dmacaddr_p1, egress_dmacaddr_p2);
 		}
-
-		/* A concurrent learn may make this probe redundant, which is harmless. */
-		neighbor->next_probe_at_ns = now + DIRECT_NEIGH_PROBE_INTERVAL_NS;
 	} else {
-		pending.next_probe_at_ns = now + DIRECT_NEIGH_PROBE_INTERVAL_NS;
-		err = bpf_map_update_elem(&direct_neigh, &daddr, &pending, BPF_NOEXIST);
-		if (err)
-			return EGRESS_MAC_DROP;
+		err = bpf_fib_lookup(skb, &fib, sizeof(fib),
+				     BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_OUTPUT);
+		if (err == BPF_FIB_LKUP_RET_SUCCESS &&
+		    fib.ifindex == nodenic_ifindex) {
+			const union macaddr *dmac = (const union macaddr *)fib.dmac;
+			const union macaddr *smac = (const union macaddr *)fib.smac;
+
+			/* Cache the MAC; valid_until is written ONLY on a fib
+			 * result, never renewed on a cache hit. */
+			mac = (union macaddr *)neighbor->addr;
+			mac->p1 = dmac->p1;
+			mac->p2 = dmac->p2;
+			neighbor->valid_until_ns = now + DIRECT_NEIGH_CACHE_TTL_NS;
+			neighbor->fib_ok = 1;
+			set_mac_pair(l2, smac->p1, smac->p2, dmac->p1, dmac->p2);
+		} else {
+			/* Invalidate the cache and fall back to the gateway. A
+			 * short negative TTL keeps a dead destination from
+			 * triggering a fib lookup on every packet. */
+			mac = (union macaddr *)neighbor->addr;
+			mac->p1 = 0;
+			mac->p2 = 0;
+			neighbor->valid_until_ns = now + DIRECT_NEIGH_NEG_TTL_NS;
+			neighbor->fib_ok = 0;
+			set_mac_pair(l2, egress_smacaddr_p1, egress_smacaddr_p2,
+				     egress_dmacaddr_p1, egress_dmacaddr_p2);
+		}
 	}
 
-	if (direct_egress_arp_request(skb, daddr))
-		return EGRESS_MAC_DROP;
-	return EGRESS_MAC_PROBE;
-
-set_neighbor:
-	neighbor_mac = (union macaddr *)neighbor->addr;
-	set_mac_pair(l2, nodenic_macaddr_p1, nodenic_macaddr_p2,
-		     neighbor_mac->p1, neighbor_mac->p2);
+	/* Throttle last_used writes to 1s granularity; never renew valid_until. */
+	if (now > neighbor->last_used_ns + DIRECT_NEIGH_TOUCH_THROTTLE_NS)
+		neighbor->last_used_ns = now;
 	return EGRESS_MAC_READY;
 }
 
@@ -264,7 +228,6 @@ set_neighbor:
 enum tcp_nat_result {
 	TCP_NAT_DROP = 0,
 	TCP_NAT_OK,
-	TCP_NAT_PROBE,
 	TCP_NAT_RESET,
 	TCP_L7PROXY_OK,
 };
@@ -843,7 +806,6 @@ static __always_inline __u64 do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *
 	__u8 l7_scheme = L7_SCHEME_NONE;
 	__u8 verdict = FLOW_SNAT;
 	bool create_snat = false;
-	int mac_result;
 	long err;
 	bool ok;
 
@@ -972,14 +934,9 @@ do_update:
 
 prepare_snat:
 	/* Resolve external L2 before allocating or mutating TCP session state.
-	 * A cold miss consumes this packet as an ARP probe, so the original TCP
-	 * packet must remain untouched and a new session must not be installed.
-	 */
-	mac_result = prepare_egress_l2(skb, l2, key.dst_ip);
-	if (mac_result == EGRESS_MAC_DROP)
-		return TCP_NAT_DROP;
-	if (mac_result == EGRESS_MAC_PROBE)
-		return TCP_NAT_PACK(nodenic_ifindex, TCP_NAT_PROBE);
+	 * prepare_egress_l2 never drops the packet (unresolved on-link falls back
+	 * to the gateway MAC), so session state can be installed right after. */
+	prepare_egress_l2(skb, l2, key.dst_ip);
 
 	if (create_snat) {
 		snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_port);
@@ -1173,7 +1130,6 @@ int from_cube(struct __sk_buff *skb)
 	struct iphdr *l3;
 	struct tcphdr *l4;
 	struct udphdr *udp;
-	int mac_result;
 	__u16 *host_port;
 	__u32 dns_off;
 	__u8 proto;
@@ -1281,8 +1237,6 @@ int from_cube(struct __sk_buff *skb)
 		tcp_ret = do_tcp_nat(skb, mvm_meta);
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_OK)
 			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), egress_redirect_flags);
-		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_PROBE)
-			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), 0);
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_L7PROXY_OK)
 			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), BPF_F_INGRESS);
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_RESET)
@@ -1290,11 +1244,9 @@ int from_cube(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	mac_result = prepare_egress_l2(skb, l2, daddr);
-	if (mac_result == EGRESS_MAC_DROP)
-		return TC_ACT_SHOT;
-	if (mac_result == EGRESS_MAC_PROBE)
-		return bpf_redirect(nodenic_ifindex, 0);
+	/* Unresolved on-link destinations fall back to the gateway MAC inside
+	 * prepare_egress_l2 (no drop/probe), so the packet always forwards. */
+	prepare_egress_l2(skb, l2, daddr);
 
 	if (proto == IPPROTO_UDP) {
 		if (!__pull_headers_udp(skb, &l2, &l3, &udp))

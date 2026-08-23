@@ -79,8 +79,16 @@ const volatile __u32 cube_l7_mark_mask = 0xFFFF0000u;
 const volatile __u32 cube_l7_mark_http = 0xCE010000u;
 const volatile __u32 cube_l7_mark_https = 0xCE020000u;
 #define DNS_QUERY_TRACK_TTL_NS		(10ULL * NSEC_PER_SEC)
-#define DIRECT_NEIGH_PROBE_INTERVAL_NS		(1ULL * NSEC_PER_SEC)
-#define DIRECT_NEIGH_REVALIDATE_INTERVAL_NS	(5ULL * 60 * NSEC_PER_SEC)
+/* Positive cache lifetime for a fib-learned neighbor MAC. Must be well below
+ * the userspace keepalive period (16s) so the cache is re-validated against the
+ * kernel neighbor table at least once per keepalive cycle. */
+#define DIRECT_NEIGH_CACHE_TTL_NS		(4ULL * NSEC_PER_SEC)
+/* Negative cache lifetime after a fib failure, so a dead destination does not
+ * trigger a fib lookup on every packet. */
+#define DIRECT_NEIGH_NEG_TTL_NS			(1ULL * NSEC_PER_SEC)
+/* Minimum interval between last_used_ns writes, bounding map-write pressure on
+ * high-pps flows. */
+#define DIRECT_NEIGH_TOUCH_THROTTLE_NS		(1ULL * NSEC_PER_SEC)
 
 /* https://en.wikipedia.org/wiki/IPv4#Header
  *
@@ -173,15 +181,24 @@ struct arphdr_eth {
 	__be32 ar_tip;			/* target IP address */
 } __attribute__((packed));
 
-struct arp_packet {
-	struct ethhdr eth;
-	struct arphdr_eth arp;
-} __attribute__((packed));
-
+/* Direct-egress on-link neighbor trigger/cache entry.
+ *
+ * The kernel neighbor table is the only source of truth for the MAC; this entry
+ * is a TTL-bounded cache of the last bpf_fib_lookup() result plus the trigger
+ * state the userspace scanner schedules against. Field ownership:
+ *   BPF datapath writes: addr, fib_ok, valid_until_ns, last_used_ns
+ *   userspace scanner writes: step, next_attempt_ns, next_refresh_ns
+ */
 struct direct_neighbor {
-	unsigned char addr[ETH_ALEN];
-	__u16 reserved;
-	__u64 next_probe_at_ns;
+	unsigned char addr[ETH_ALEN];	/* cached MAC; all-zero = no valid cache */
+	__u8	fib_ok;			/* last fib lookup result (1=learned) */
+	__u8	step;			/* scanner: backoff level */
+	__u16	flags;
+	__u32	reserved;
+	__u64	valid_until_ns;	/* cache expiry; written only on fib success/failure, never renewed on hit */
+	__u64	last_used_ns;		/* last packet time (1s write throttle) */
+	__u64	next_attempt_ns;	/* scanner: next learning-trigger time */
+	__u64	next_refresh_ns;	/* scanner: next keepalive-trigger time */
 };
 
 union macaddr {
