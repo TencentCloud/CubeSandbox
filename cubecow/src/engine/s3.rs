@@ -1296,9 +1296,17 @@ impl JsonRpcClient {
                     if attempt < 2
                         && matches!(
                             e.kind(),
-                            ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
+                            ErrorKind::BrokenPipe
+                                | ErrorKind::ConnectionReset
+                                | ErrorKind::Interrupted
                         ) =>
                 {
+                    // BrokenPipe / ConnectionReset: peer closed the socket.
+                    // Interrupted (EINTR): the write was aborted by a signal
+                    // before any bytes were committed to the peer; the socket
+                    // itself is still healthy but we cannot know how much of
+                    // `framed` was buffered, so drop the connection and
+                    // redial to guarantee a clean request boundary.
                     *guard = None;
                     continue;
                 }
@@ -1318,8 +1326,16 @@ impl JsonRpcClient {
                             ErrorKind::BrokenPipe
                                 | ErrorKind::ConnectionReset
                                 | ErrorKind::UnexpectedEof
+                                | ErrorKind::Interrupted
                         ) =>
                 {
+                    // `read_line` already retries EINTR in place, so seeing
+                    // `Interrupted` here means the retry loop itself was
+                    // interrupted repeatedly or that a nested reader bubbled
+                    // EINTR up unchanged. Either way the framing on the
+                    // current connection is no longer trustworthy (part of a
+                    // response may still be queued in the kernel buffer), so
+                    // drop the socket and redial before retrying the RPC.
                     *guard = None;
                     continue;
                 }
@@ -1333,6 +1349,23 @@ impl JsonRpcClient {
             let resp: serde_json::Value = serde_json::from_slice(&response_bytes).map_err(|e| {
                 CubecowError::PreconditionFailed(format!("s3lvol rpc: decode {method}: {e}"))
             })?;
+
+            // Depth-in-defence against frame desync on a long-lived
+            // connection: JSON-RPC 2.0 mandates that the response `id`
+            // equals the request `id`. If it does not, a stale response
+            // from a previously interrupted RPC is still sitting in the
+            // socket buffer, so we drop the connection and retry once on
+            // a fresh one instead of returning the wrong result.
+            let resp_id = resp.get("id").and_then(|v| v.as_u64());
+            if resp_id != Some(id) {
+                *guard = None;
+                if attempt < 2 {
+                    continue;
+                }
+                return Err(CubecowError::PreconditionFailed(format!(
+                    "s3lvol rpc: id mismatch on {method}: expected {id}, got {resp_id:?}"
+                )));
+            }
 
             if let Some(err) = resp.get("error") {
                 let msg = err
@@ -1379,11 +1412,25 @@ impl JsonRpcClient {
 
 /// Read a single `\n`-terminated JSON line from the stream. The line
 /// terminator itself is discarded.
+///
+/// `read(2)` on the underlying `UnixStream` may return `EINTR`
+/// (`ErrorKind::Interrupted`) whenever the process is delivered a
+/// signal before any byte has been transferred — this is expected
+/// under runtimes that use signals for preemption (e.g. Go's SIGURG,
+/// GDB attach, cgroup freeze/thaw, SIGALRM based timers). Per the
+/// standard I/O convention we treat `Interrupted` as "try the syscall
+/// again", so a single-byte read that was interrupted mid-frame does
+/// not fail the whole RPC and, crucially, does not desynchronise the
+/// JSON-RPC framing on the shared connection.
 fn read_line(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::with_capacity(256);
     let mut buf = [0u8; 1];
     loop {
-        let n = stream.read(&mut buf)?;
+        let n = match stream.read(&mut buf) {
+            Ok(n) => n,
+            Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
         if n == 0 {
             return Err(std::io::Error::new(
                 ErrorKind::UnexpectedEof,
