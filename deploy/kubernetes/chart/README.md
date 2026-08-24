@@ -50,6 +50,7 @@ See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) gu
 | `cubemastercli` | Operational CLI for exec-based ops. |
 | `cube-proxy` | Data-plane proxy (control-plane placement when enabled). |
 | `cube-lifecycle-manager` | Sandbox auto-pause / auto-resume; discovered via Service DNS and Redis. |
+| `eviction-webhook` | Optional ValidatingWebhook; denies sandbox Pod evictions and pauses/resumes MicroVMs via CubeMaster. |
 | `cube-egress` / `cube-egress-net` | Transparent outbound proxy + host TPROXY helper (Big Pod sidecars). |
 | `cube-webui` | WebUI static assets and OpenResty. |
 
@@ -549,6 +550,49 @@ cubeEgress:
 ```
 
 Do not rotate the CubeEgress CA casually: templates baked with the old CA and sandboxes trusting the old CA must be considered during rotation.
+
+## Eviction Webhook
+
+`evictionWebhook.enabled=true` installs the optional `eviction-webhook`
+ValidatingWebhook. It intercepts `pods/eviction` requests for sandbox Pods
+(labeled `cube.master.instance.type`), denies kubelet evictions so the MicroVM
+is not destroyed, cordons the pressured node via CubeMaster, pauses the MicroVM,
+and resumes it when the node's `MemoryPressure` condition clears. It is disabled
+by default and only needs the chart-managed CubeMaster endpoint.
+
+Enable it:
+
+```bash
+helm upgrade --install cube ./deploy/kubernetes/chart -n cube-system \
+  --set evictionWebhook.enabled=true
+```
+
+Key values:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `evictionWebhook.enabled` | `false` | Install the webhook component. |
+| `evictionWebhook.cubeMasterURL` | `""` | Empty = chart-managed CubeMaster (`http://<controlPlane.master or externalControlPlane.masterEndpoint>`). |
+| `evictionWebhook.eventReportEnabled` | `false` | Forward interception events to CubeMaster `/event/eviction` (requires a CubeMaster build with the event route). |
+| `evictionWebhook.auth.enabled` | `false` | HMAC-sign CubeMaster calls; must match CubeMaster `auth.enable`. Empty credentials are auto-generated and persisted in a release Secret. |
+| `evictionWebhook.tls.mode` | `selfSigned` | `existingSecret` / `certManager` / `selfSigned` / `inline`. See below. |
+| `evictionWebhook.webhook.failurePolicy` | `Ignore` | Fail open: an unavailable webhook does not block cluster evictions. |
+| `evictionWebhook.persistence.enabled` | `true` | Persist `recovery-state.json` on a PVC so paused sandboxes are resumed after a Pod restart. |
+
+TLS modes behave like `cubeProxy.tls`:
+
+- `existingSecret` — provide a Secret in the release namespace with `tls.crt`,
+  `tls.key`, and `ca.crt`; the VWC `caBundle` is taken from `ca.crt`.
+- `certManager` — the chart creates a `Certificate`; the VWC `caBundle` is
+  injected via the `cert-manager.io/inject-ca-from` annotation (requires
+  `evictionWebhook.tls.certManager.issuerRef.name`).
+- `selfSigned` — chart generates a self-signed CA + serving certificate
+  (test only).
+- `inline` — chart creates a Secret from `evictionWebhook.tls.inline.cert/key/ca`.
+
+The webhook runs on control-plane nodes (`placement.controlPlane`), watches Pods
+and Nodes cluster-wide (ClusterRole, release-scoped name), and serves
+`/webhook/eviction` + `/healthz` over TLS on port 8443 with `/metrics` on 8888.
 
 ## Render and lint
 

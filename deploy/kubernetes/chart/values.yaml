@@ -16,10 +16,10 @@ global:
   # exactly as declared. Set to e.g. "my-registry.example.com/cubesandbox"
   # to mirror all images into a private registry without editing each entry
   # individually. Applies to the pvmHostBootstrap / nodeInit / node / master
-  # / api / ops / cubemastercli / proxy / lifecycleManager / cubeEgress /
-  # cubeEgressNet / webui / cubelet / cubeShim / cubeKernel /
-  # cubeGuest / cubeAgent / waitNodePrep / kubectl (alpine-k8s mirror) entries but not to
-  # third-party images such as mysql / redis.
+  # / api / ops / cubemastercli / proxy / lifecycleManager / evictionWebhook /
+  # cubeEgress / cubeEgressNet / webui / cubelet / cubeShim / cubeKernel /
+  # cubeGuest / cubeAgent / waitNodePrep / kubectl (alpine-k8s mirror) entries
+  # but not to third-party images such as mysql / redis.
   imageRegistry: ""
 
 images:
@@ -94,6 +94,11 @@ images:
 
   lifecycleManager:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager
+    tag: v0.6.0
+    pullPolicy: IfNotPresent
+
+  evictionWebhook:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/eviction-webhook
     tag: v0.6.0
     pullPolicy: IfNotPresent
 
@@ -884,6 +889,151 @@ cubeEgress:
       memory: "64Mi"
     limits:
       memory: "128Mi"
+
+evictionWebhook:
+  # Optional ValidatingWebhook that intercepts sandbox Pod eviction requests.
+  # It denies kubelet evictions so the MicroVM is not destroyed, cordons the
+  # pressured node, pauses the MicroVM via CubeMaster, and resumes it when the
+  # node's MemoryPressure condition clears. Disabled by default — enable only
+  # on clusters where the chart-managed CubeMaster exposes the node isolation
+  # API (present in the default cube-master image).
+  enabled: false
+  replicas: 1
+  podAnnotations: {}
+  # The recovery-state PVC is ReadWriteOnce: Recreate deletes the old Pod
+  # first so the RWO volume can remount cleanly during upgrades (same reason
+  # cube-master uses Recreate). Fail-open (failurePolicy=Ignore) makes the
+  # brief downtime safe.
+  deploymentStrategy:
+    type: Recreate
+  # ServiceAccount used by the webhook (watches pods/nodes). Empty creates a
+  # release-scoped account <release>-eviction-webhook.
+  serviceAccountName: ""
+  serviceAccountAnnotations: {}
+  # Empty uses the chart-managed CubeMaster (controlPlane.master or
+  # externalControlPlane.masterEndpoint) as http://<endpoint>.
+  cubeMasterURL: ""
+  # Forward interception events to CubeMaster /event/eviction. Requires a
+  # CubeMaster build with the event route registered; keep false otherwise.
+  eventReportEnabled: false
+  # When true (default), an intercepted eviction also cordons the node and
+  # pauses the sandbox via CubeMaster. Set to false to only deny the eviction
+  # (protect the MicroVM) without the automatic cordon/pause/resume side effect.
+  recoveryEnabled: true
+  # HMAC request signing for CubeMaster calls. Must match CubeMaster's auth
+  # config (files/cube-master/conf.yaml auth.enable). Prefer an existing Secret
+  # shared with CubeMaster; credentials are never generated automatically.
+  auth:
+    enabled: false
+    existingSecret: ""
+    userIDKey: user_id
+    secretKeyKey: secret_key
+    # Inline values are supported for compatibility. Both are required when
+    # existingSecret is empty and must exactly match CubeMaster's credentials.
+    userID: ""
+    secretKey: ""
+  listenAddr: ":8443"
+  metricsAddr: ":8888"
+  debug: false
+  # Extra env vars appended to the webhook container.
+  env: []
+  service:
+    type: ClusterIP
+    port: 443
+    annotations: {}
+  tls:
+    # TLS the webhook serves to the API server; the VWC caBundle is derived
+    # from the same material.
+    # Supported modes:
+    #   existingSecret - production. Operator provides a TLS Secret with
+    #                    tls.crt / tls.key (and ca.crt for the VWC caBundle).
+    #   certManager    - chart creates a cert-manager.io/v1 Certificate; the
+    #                    VWC caBundle is injected via cert-manager annotation.
+    #   selfSigned     - chart creates a self-signed CA + serving certificate
+    #                    (test only).
+    #   inline         - chart creates a Secret from tls.inline.cert/key/ca.
+    mode: selfSigned
+    # Optional for certManager/selfSigned/inline. Defaults to
+    # <release>-eviction-webhook-tls. For existingSecret this is ignored
+    # (existingSecret wins).
+    secretName: ""
+    existingSecret: ""
+    certSecretKey: tls.crt
+    keySecretKey: tls.key
+    caSecretKey: ca.crt
+    certManager:
+      issuerRef:
+        group: cert-manager.io
+        kind: ClusterIssuer
+        name: ""
+      commonName: ""
+      dnsNames: []
+      duration: ""
+      renewBefore: ""
+      usages:
+        - digital signature
+        - key encipherment
+        - server auth
+    selfSigned:
+      commonName: ""
+      dnsNames: []
+      caValidityDays: 3650
+      certValidityDays: 3650
+    inline:
+      cert: ""
+      key: ""
+      ca: ""
+  webhook:
+    # ValidatingWebhookConfiguration settings. failurePolicy=Ignore keeps
+    # cluster-wide evictions working (fail open) if the webhook is unavailable.
+    failurePolicy: Ignore
+    timeoutSeconds: 5
+    sideEffects: NoneOnDryRun
+    rules:
+      - apiGroups: ["policy", ""]
+        apiVersions: ["v1"]
+        resources: ["pods/eviction"]
+        operations: ["CREATE", "DELETE"]
+    # Intercept only sandbox Pods (labeled cube.master.instance.type by
+    # CubeMaster/Cubelet). Empty selector would intercept every eviction.
+    objectSelector:
+      matchExpressions:
+        - key: cube.master.instance.type
+          operator: Exists
+    namespaceSelector: {}
+  # recovery-state.json persistence. A PVC survives Pod restarts so the webhook
+  # can resume sandboxes it paused before a restart; emptyDir loses that state
+  # (paused sandboxes would stay paused). The audit NDJSON log always uses an
+  # emptyDir.
+  persistence:
+    enabled: true
+    existingClaim: ""
+    storageClassName: ""
+    size: 1Gi
+    accessModes:
+      - ReadWriteOnce
+  probes:
+    readiness:
+      enabled: true
+      path: /healthz
+      port: 8443
+      initialDelaySeconds: 3
+      periodSeconds: 5
+      failureThreshold: 3
+    liveness:
+      enabled: true
+      path: /healthz
+      port: 8443
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 3
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
 
 bootstrap:
   pvmHostKernel:

@@ -233,3 +233,41 @@
 {{- fail "volumeCos.enabled=true requires volumeCos.existingSecret or volumeCos.secretId/secretKey/bucket" }}
 {{- end }}
 {{- end }}
+{{- if .Values.evictionWebhook.enabled }}
+{{- if ne (int .Values.evictionWebhook.replicas) 1 }}
+{{- fail "evictionWebhook.replicas must be 1 because recovery uses local state and leader election is not implemented" }}
+{{- end }}
+{{- if ne (.Values.evictionWebhook.webhook.sideEffects | default "") "NoneOnDryRun" }}
+{{- fail "evictionWebhook.webhook.sideEffects must be NoneOnDryRun because normal requests have recovery side effects while dry-run requests do not" }}
+{{- end }}
+{{- $evictionAuth := default dict .Values.evictionWebhook.auth -}}
+{{- if $evictionAuth.enabled }}
+{{- if and $evictionAuth.existingSecret (or $evictionAuth.userID $evictionAuth.secretKey) }}
+{{- fail "evictionWebhook.auth.existingSecret cannot be combined with inline userID/secretKey" }}
+{{- end }}
+{{- if and (not $evictionAuth.existingSecret) (or (not $evictionAuth.userID) (not $evictionAuth.secretKey)) }}
+{{- fail "evictionWebhook.auth.enabled=true requires auth.existingSecret or both auth.userID and auth.secretKey; credentials must match CubeMaster" }}
+{{- end }}
+{{- if and $evictionAuth.existingSecret (or (not $evictionAuth.userIDKey) (not $evictionAuth.secretKeyKey)) }}
+{{- fail "evictionWebhook.auth.existingSecret requires auth.userIDKey and auth.secretKeyKey" }}
+{{- end }}
+{{- end }}
+{{- if not (include "cube.masterEndpoint" .) }}
+{{- fail "evictionWebhook.enabled=true requires a CubeMaster endpoint (controlPlane.master or externalControlPlane.masterEndpoint)" }}
+{{- end }}
+{{- if not (has .Values.evictionWebhook.tls.mode (list "existingSecret" "certManager" "selfSigned" "inline")) }}
+{{- fail "evictionWebhook.tls.mode must be one of: existingSecret, certManager, selfSigned, inline" }}
+{{- end }}
+{{- if and (eq .Values.evictionWebhook.tls.mode "existingSecret") (not .Values.evictionWebhook.tls.existingSecret) }}
+{{- fail "evictionWebhook.tls.mode=existingSecret requires evictionWebhook.tls.existingSecret" }}
+{{- end }}
+{{- if and (eq .Values.evictionWebhook.tls.mode "inline") (or (not .Values.evictionWebhook.tls.inline.cert) (not .Values.evictionWebhook.tls.inline.key) (not .Values.evictionWebhook.tls.inline.ca)) }}
+{{- fail "evictionWebhook.tls.mode=inline requires evictionWebhook.tls.inline.cert/key/ca" }}
+{{- end }}
+{{- if and (eq .Values.evictionWebhook.tls.mode "certManager") (not .Values.evictionWebhook.tls.certManager.issuerRef.name) }}
+{{- fail "evictionWebhook.tls.mode=certManager requires evictionWebhook.tls.certManager.issuerRef.name" }}
+{{- end }}
+{{- if not .Values.images.evictionWebhook.repository }}
+{{- fail "evictionWebhook.enabled=true requires images.evictionWebhook.repository" }}
+{{- end }}
+{{- end }}
