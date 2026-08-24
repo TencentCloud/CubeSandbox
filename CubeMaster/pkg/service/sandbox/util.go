@@ -670,6 +670,9 @@ func checkAndGetProbe(c *cubebox.ContainerConfig, cnt *types.Container) error {
 	}
 	handlePrestop(&c.Prestop, cnt.Prestop)
 	handlePoststop(&c.Poststop, cnt.Poststop)
+	if err := handleLifecycleHooks(&c.LifecycleHooks, cnt.LifecycleHooks); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -748,6 +751,102 @@ func handlePrestop(dst **cubebox.PreStop, src *types.PreStop) {
 			}
 		}
 	}
+}
+
+// handleLifecycleHooks converts the template-side LifecycleHooks into the
+// cubebox wire type, validating config at create time so a bad template fails
+// fast instead of blocking the first pause/resume at runtime. nil src is a no-op.
+func handleLifecycleHooks(dst **cubebox.LifecycleHooks, src *types.LifecycleHooks) error {
+	if src == nil {
+		return nil
+	}
+	if err := validateLifecycleHook("pre_pause", src.PrePause); err != nil {
+		return err
+	}
+	if err := validateLifecycleHook("post_resume", src.PostResume); err != nil {
+		return err
+	}
+	*dst = &cubebox.LifecycleHooks{
+		PrePause:   toCubeboxLifecycleHook(src.PrePause),
+		PostResume: toCubeboxLifecycleHook(src.PostResume),
+	}
+	return nil
+}
+
+// lifecycleHookMaxTimeoutMs mirrors Cubelet's cap (services/cubebox/lifecycle_hooks.go).
+// Kept as a literal here to avoid a cross-component import.
+const lifecycleHookMaxTimeoutMs = 30000
+
+// validateLifecycleHook rejects malformed hook config at create time.
+func validateLifecycleHook(name string, h *types.LifecycleHook) error {
+	if h == nil || h.Handler == nil {
+		return nil
+	}
+	if h.TimeoutMs <= 0 || h.TimeoutMs > lifecycleHookMaxTimeoutMs {
+		return fmt.Errorf("%s: invalid timeout_ms %d (must be 1..%d)",
+			name, h.TimeoutMs, lifecycleHookMaxTimeoutMs)
+	}
+	hasExec, hasHTTP := h.Handler.Exec != nil, h.Handler.HttpGet != nil
+	// Proto contract: exactly one of exec / http_get must be set.
+	if !hasExec && !hasHTTP {
+		return fmt.Errorf("%s: handler has neither exec nor http_get", name)
+	}
+	if hasExec && hasHTTP {
+		return fmt.Errorf("%s: handler has both exec and http_get (exactly one required)", name)
+	}
+	if hasExec && len(h.Handler.Exec.Command) == 0 {
+		return fmt.Errorf("%s: exec handler command is empty", name)
+	}
+	if hasHTTP && h.Handler.HttpGet.Port <= 0 {
+		return fmt.Errorf("%s: http_get port must be > 0", name)
+	}
+	return nil
+}
+
+func toCubeboxLifecycleHook(src *types.LifecycleHook) *cubebox.LifecycleHook {
+	if src == nil || src.Handler == nil {
+		return nil
+	}
+	return &cubebox.LifecycleHook{
+		TimeoutMs:     src.TimeoutMs,
+		FailurePolicy: toCubeboxFailurePolicy(src.FailurePolicy),
+		Handler: &cubebox.LifecycleHookHandler{
+			Exec:    toCubeboxExecAction(src.Handler.Exec),
+			HttpGet: toCubeboxHTTPGetAction(src.Handler.HttpGet),
+		},
+	}
+}
+
+// toCubeboxFailurePolicy maps the policy case-insensitively so a template typo
+// like "ignore" cannot silently turn a non-blocking hook into a blocking one.
+// Any unrecognized value maps to ABORT (the safe, explicit default).
+func toCubeboxFailurePolicy(p types.HookFailurePolicy) cubebox.HookFailurePolicy {
+	if strings.EqualFold(string(p), string(types.HookFailurePolicyIgnore)) {
+		return cubebox.HookFailurePolicy_HOOK_FAILURE_POLICY_IGNORE
+	}
+	return cubebox.HookFailurePolicy_HOOK_FAILURE_POLICY_ABORT
+}
+
+func toCubeboxExecAction(src *types.ExecAction) *cubebox.ExecAction {
+	if src == nil || len(src.Command) == 0 {
+		return nil
+	}
+	return &cubebox.ExecAction{Command: src.Command, WorkingDir: src.WorkingDir}
+}
+
+func toCubeboxHTTPGetAction(src *types.HTTPGetAction) *cubebox.HTTPGetAction {
+	if src == nil {
+		return nil
+	}
+	dst := &cubebox.HTTPGetAction{
+		Port: src.Port,
+		Host: src.Host,
+		Path: src.Path,
+	}
+	for _, h := range src.HttpHeaders {
+		dst.HttpHeaders = append(dst.HttpHeaders, &cubebox.HTTPHeader{Name: h.Name, Value: h.Value})
+	}
+	return dst
 }
 func checkAndGetVolumes(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandboxRequest) error {
 	// Build a set of plugin volume names from the plugin-volume-mounts annotation.

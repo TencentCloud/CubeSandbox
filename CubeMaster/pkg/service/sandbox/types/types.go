@@ -343,10 +343,11 @@ type Container struct {
 
 	DnsConfig *DNSConfig `json:"dns_config,omitempty"`
 
-	Annotations map[string]string `json:"annotations,omitempty" `
-	HostAliases []*HostAlias      `json:"host_aliases,omitempty"`
-	Prestop     *PreStop          `json:"prestop,omitempty"`
-	Poststop    *PostStop         `json:"poststop,omitempty"`
+	Annotations    map[string]string `json:"annotations,omitempty" `
+	HostAliases    []*HostAlias      `json:"host_aliases,omitempty"`
+	Prestop        *PreStop          `json:"prestop,omitempty"`
+	Poststop       *PostStop         `json:"poststop,omitempty"`
+	LifecycleHooks *LifecycleHooks   `json:"lifecycle_hooks,omitempty"`
 
 	Id    string `json:"id,omitempty"`
 	Hooks *Hooks `json:"hooks,omitempty"`
@@ -378,6 +379,41 @@ type PostStop struct {
 type LifecycleHandler struct {
 	HttpGet *HTTPGetAction `json:"http_get,omitempty"`
 }
+
+// LifecycleHooks groups in-sandbox pause/resume hooks (issue #1308).
+type LifecycleHooks struct {
+	PrePause   *LifecycleHook `json:"pre_pause,omitempty"`
+	PostResume *LifecycleHook `json:"post_resume,omitempty"`
+}
+
+// LifecycleHook describes one in-sandbox hook Cubelet runs around a transition.
+type LifecycleHook struct {
+	Handler       *LifecycleHookHandler `json:"handler,omitempty"`
+	TimeoutMs     int32                 `json:"timeout_ms,omitempty"`
+	FailurePolicy HookFailurePolicy     `json:"failure_policy,omitempty"`
+}
+
+// LifecycleHookHandler selects how the hook executes. Exactly one of Exec/HttpGet.
+type LifecycleHookHandler struct {
+	Exec    *ExecAction    `json:"exec,omitempty"`
+	HttpGet *HTTPGetAction `json:"http_get,omitempty"`
+}
+
+// ExecAction runs argv inside the sandbox guest via containerd task.Exec.
+type ExecAction struct {
+	Command    []string `json:"command,omitempty"`
+	WorkingDir *string  `json:"working_dir,omitempty"`
+}
+
+// HookFailurePolicy decides what happens when a hook fails.
+type HookFailurePolicy string
+
+const (
+	// HookFailurePolicyAbort blocks the transition on hook failure (default).
+	HookFailurePolicyAbort HookFailurePolicy = "ABORT"
+	// HookFailurePolicyIgnore logs the failure and proceeds.
+	HookFailurePolicyIgnore HookFailurePolicy = "IGNORE"
+)
 
 type HostAlias struct {
 	Hostnames []string `json:"hostnames,omitempty"`

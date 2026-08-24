@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -440,4 +441,156 @@ func TestCheckAndGetPoststop(t *testing.T) {
 			assert.Equal(t, tt.expectedProbe, c.Poststop)
 		})
 	}
+}
+
+func TestHandleLifecycleHooks(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+
+	t.Run("nil source is no-op", func(t *testing.T) {
+		var dst *cubebox.LifecycleHooks
+		require.NoError(t, handleLifecycleHooks(&dst, nil))
+		assert.Nil(t, dst)
+	})
+
+	t.Run("exec hook maps command and ABORT default policy", func(t *testing.T) {
+		var dst *cubebox.LifecycleHooks
+		require.NoError(t, handleLifecycleHooks(&dst, &types.LifecycleHooks{
+			PrePause: &types.LifecycleHook{
+				TimeoutMs: 5000,
+				Handler: &types.LifecycleHookHandler{
+					Exec: &types.ExecAction{Command: []string{"/usr/bin/flush", "--now"}, WorkingDir: strPtr("/app")},
+				},
+				// FailurePolicy empty → must default to ABORT.
+			},
+		}))
+		require.NotNil(t, dst)
+		require.NotNil(t, dst.PrePause)
+		assert.Equal(t, int32(5000), dst.PrePause.TimeoutMs)
+		assert.Equal(t, cubebox.HookFailurePolicy_HOOK_FAILURE_POLICY_ABORT, dst.PrePause.FailurePolicy)
+		require.NotNil(t, dst.PrePause.Handler.Exec)
+		assert.Equal(t, []string{"/usr/bin/flush", "--now"}, dst.PrePause.Handler.Exec.Command)
+		assert.Equal(t, "/app", *dst.PrePause.Handler.Exec.WorkingDir)
+		assert.Nil(t, dst.PrePause.Handler.HttpGet)
+		assert.Nil(t, dst.PostResume)
+	})
+
+	t.Run("http hook maps port/path/headers and IGNORE policy", func(t *testing.T) {
+		var dst *cubebox.LifecycleHooks
+		require.NoError(t, handleLifecycleHooks(&dst, &types.LifecycleHooks{
+			PostResume: &types.LifecycleHook{
+				TimeoutMs:     2000,
+				FailurePolicy: types.HookFailurePolicyIgnore,
+				Handler: &types.LifecycleHookHandler{
+					HttpGet: &types.HTTPGetAction{
+						Path: strPtr("/ready"),
+						Port: 49983,
+						HttpHeaders: []*types.HTTPHeader{
+							{Name: strPtr("X-Custom"), Value: strPtr("v")},
+						},
+					},
+				},
+			},
+		}))
+		require.NotNil(t, dst)
+		require.NotNil(t, dst.PostResume)
+		assert.Equal(t, cubebox.HookFailurePolicy_HOOK_FAILURE_POLICY_IGNORE, dst.PostResume.FailurePolicy)
+		require.NotNil(t, dst.PostResume.Handler.HttpGet)
+		assert.Equal(t, int32(49983), dst.PostResume.Handler.HttpGet.Port)
+		assert.Equal(t, "/ready", *dst.PostResume.Handler.HttpGet.Path)
+		require.Len(t, dst.PostResume.Handler.HttpGet.HttpHeaders, 1)
+		assert.Nil(t, dst.PostResume.Handler.Exec)
+	})
+
+	t.Run("failure policy is case-insensitive", func(t *testing.T) {
+		var dst *cubebox.LifecycleHooks
+		require.NoError(t, handleLifecycleHooks(&dst, &types.LifecycleHooks{
+			PrePause: &types.LifecycleHook{
+				TimeoutMs: 1000, FailurePolicy: "ignore",
+				Handler: &types.LifecycleHookHandler{Exec: &types.ExecAction{Command: []string{"true"}}},
+			},
+		}))
+		require.NotNil(t, dst.PrePause)
+		assert.Equal(t, cubebox.HookFailurePolicy_HOOK_FAILURE_POLICY_IGNORE, dst.PrePause.FailurePolicy,
+			"lowercase \"ignore\" must map to IGNORE, not silently become blocking ABORT")
+	})
+
+	t.Run("hook with nil handler is dropped", func(t *testing.T) {
+		var dst *cubebox.LifecycleHooks
+		require.NoError(t, handleLifecycleHooks(&dst, &types.LifecycleHooks{
+			PrePause: &types.LifecycleHook{TimeoutMs: 1000},
+		}))
+		require.NotNil(t, dst)
+		assert.Nil(t, dst.PrePause, "a hook with no handler must not produce a wire hook")
+	})
+
+	t.Run("rejects invalid timeout_ms at create time", func(t *testing.T) {
+		for _, ms := range []int32{0, -1, 30001} {
+			var dst *cubebox.LifecycleHooks
+			err := handleLifecycleHooks(&dst, &types.LifecycleHooks{
+				PrePause: &types.LifecycleHook{
+					TimeoutMs: ms,
+					Handler:   &types.LifecycleHookHandler{Exec: &types.ExecAction{Command: []string{"true"}}},
+				},
+			})
+			require.Error(t, err, "timeout_ms=%d must be rejected", ms)
+			assert.Contains(t, err.Error(), "timeout_ms")
+		}
+	})
+
+	t.Run("rejects empty exec command at create time", func(t *testing.T) {
+		var dst *cubebox.LifecycleHooks
+		err := handleLifecycleHooks(&dst, &types.LifecycleHooks{
+			PrePause: &types.LifecycleHook{
+				TimeoutMs: 1000,
+				Handler:   &types.LifecycleHookHandler{Exec: &types.ExecAction{Command: []string{}}},
+			},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "command is empty")
+	})
+
+	t.Run("rejects handler with both exec and http_get", func(t *testing.T) {
+		var dst *cubebox.LifecycleHooks
+		err := handleLifecycleHooks(&dst, &types.LifecycleHooks{
+			PrePause: &types.LifecycleHook{
+				TimeoutMs: 1000,
+				Handler: &types.LifecycleHookHandler{
+					Exec:    &types.ExecAction{Command: []string{"true"}},
+					HttpGet: &types.HTTPGetAction{Port: 49983},
+				},
+			},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "both exec and http_get")
+	})
+
+	t.Run("rejects http_get with non-positive port", func(t *testing.T) {
+		var dst *cubebox.LifecycleHooks
+		err := handleLifecycleHooks(&dst, &types.LifecycleHooks{
+			PostResume: &types.LifecycleHook{
+				TimeoutMs: 1000,
+				Handler:   &types.LifecycleHookHandler{HttpGet: &types.HTTPGetAction{Port: 0}},
+			},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "port must be > 0")
+	})
+
+	t.Run("wired through checkAndGetProbe", func(t *testing.T) {
+		c := &cubebox.ContainerConfig{}
+		err := checkAndGetProbe(c, &types.Container{
+			LifecycleHooks: &types.LifecycleHooks{
+				PrePause: &types.LifecycleHook{
+					TimeoutMs: 1000,
+					Handler: &types.LifecycleHookHandler{
+						Exec: &types.ExecAction{Command: []string{"true"}},
+					},
+				},
+			},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, c.LifecycleHooks)
+		require.NotNil(t, c.LifecycleHooks.PrePause)
+		require.NotNil(t, c.LifecycleHooks.PrePause.Handler.Exec)
+	})
 }

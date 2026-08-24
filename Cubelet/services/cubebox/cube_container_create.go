@@ -447,6 +447,15 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		return err
 	}
 
+	// postResume lifecycle hook (issue #1308): when this Create is a resume
+	// from pause (carries the pause-snapshot annotation), run the postResume
+	// hook now that the guest and envd are available, before the sandbox is
+	// reported ready. Best-effort: a failure is logged and stamped into the
+	// status message rather than failing the create (the VM is already up).
+	if strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID]) != "" {
+		l.runPostResumeHookForCreate(ctx, sandBox, realReq.RequestID)
+	}
+
 	pid := sandBox.Endpoint.Pid
 
 	if cgSet {
