@@ -38,6 +38,9 @@ type local struct {
 
 	sortedNodesByClusters map[string]node.NodeList
 	totalSelfNodes        int64
+
+	// emptySyncStreak counts consecutive empty CubeOps responses before eviction.
+	emptySyncStreak atomic.Int32
 }
 
 // The node/image stores exist from package load so nodemeta query APIs
@@ -175,13 +178,17 @@ func (l *local) dealEvent(ctx context.Context) {
 	}
 }
 
-func (l *local) checkDirty(ctx context.Context, allFromDb map[string]struct{}) {
+// checkDirty removes cached nodes absent from allFromDb. quiet skips the
+// per-node "is dirty" ERROR for expected bulk evictions.
+func (l *local) checkDirty(ctx context.Context, allFromDb map[string]struct{}, quiet bool) {
 	elems := l.cache.Items()
 	for _, v := range elems {
 		h, ok := v.Object.(*node.Node)
 		if ok {
 			if _, ok := allFromDb[h.InsID]; !ok {
-				CubeLog.WithContext(context.Background()).Errorf("node %s is dirty", h.InsID)
+				if !quiet {
+					CubeLog.WithContext(context.Background()).Errorf("node %s is dirty", h.InsID)
+				}
 				l.delNodeCache(ctx, h)
 			}
 		}
