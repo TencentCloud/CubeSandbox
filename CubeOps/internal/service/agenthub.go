@@ -426,7 +426,6 @@ type CreateInstanceResult struct {
 	Instance *store.AgentInstance
 }
 
-// defaultTemplateID picks the template CreateInstance uses when the caller
 // templateOrigin says where a defaulted template identifier came from, which is
 // what decides how to report a CubeMaster not-found for it: whether nothing is
 // registered, whether what was registered vanished under us, or whether we
@@ -445,6 +444,7 @@ const (
 	templateFallbackRegistryUnknown
 )
 
+// defaultTemplateID picks the template CreateInstance uses when the caller
 // omits templateId: the template an operator marked recommended if there is
 // one, otherwise the most recently registered one.
 //
@@ -528,10 +528,6 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 	snapshotID := strings.TrimSpace(req.SnapshotID)
 	rootfsSourceType := "template"
 	rootfsSourceID := ""
-	// Set when the request named no template and the registry was read and
-	// found empty, so the unprovisioned defaultAgentTemplateID was used; lets
-	// the CreateSandbox error below name the real problem. Deliberately not
-	// set when the registry could not be read — see defaultTemplateID.
 	// Set whenever the template was chosen for the caller rather than named by
 	// them — including when a real registered template was picked. Either way
 	// the identifier is not one the caller can be told about usefully, so a
@@ -664,19 +660,23 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 				}
 			}
 			// The registry did hold a template when we read it, and CubeMaster
-			// could not find it moments later — a delete that landed in between,
-			// or infra removed underneath it. Retrying re-resolves and may well
-			// pick a different one, so this is a conflict rather than a bad
-			// request, and it is not the 502 naming an identifier the caller
-			// never chose.
-			logging.G(ctx).Warnf("agenthub: the default template resolved from the registry was gone by "+
-				"create time; cubemaster said: %v", err)
+			// could not resolve what we built from it. Which resource it means is
+			// not knowable here — CubeMaster does not say, and by this point the
+			// published-template fast-path above may have swapped the source to
+			// that template's rootfs snapshot — so the message states the
+			// observable fact and lists the causes rather than picking one. It
+			// stays a conflict rather than a bad request because the request was
+			// fine and the state is not, and it is not the 502 naming an
+			// identifier the caller never chose.
+			logging.G(ctx).Warnf("agenthub: cubemaster could not resolve the default template "+
+				"selected from the registry; cubemaster said: %v", err)
 			return nil, &Error{
 				Status: http.StatusConflict,
 				Code:   "conflict",
-				Message: "the agent template selected by default is no longer available — it was registered " +
-					"when the request started and gone by the time the sandbox was created. Retry, or pass " +
-					"templateId explicitly to choose one yourself",
+				Message: "the agent template selected by default could not be resolved: it may have been " +
+					"deleted, its registration may be invalid, or the snapshot it publishes may be gone. " +
+					"Pass templateId explicitly to choose one yourself, or retry to pick up another " +
+					"registered template",
 				Cause: err,
 			}
 		}
