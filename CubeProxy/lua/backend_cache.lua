@@ -5,8 +5,14 @@
 
 local _M = {}
 
+-- Fixed per-sandbox route metadata mirrored from Redis. The per-port host-port
+-- mappings ({sid}:{container_port}) are also served from the cache but are
+-- gated by HostIP/SandboxIP and overwritten on the next fill, so invalidation
+-- only needs to drop these fixed keys.
+-- There is deliberately no "meta_cached" completion flag: the read gate (see
+-- sandbox_backend.lua) checks the presence of every served field, so a flag
+-- would be redundant.
 local ROUTE_CACHE_SUFFIXES = {
-    "meta_cached",
     "HostIP",
     "SandboxIP",
     "CreatedAt",
@@ -19,10 +25,11 @@ local function cache_dict()
     return ngx.shared.local_cache
 end
 
--- Invalidate the cache-hit sentinel first, then remove the fixed route metadata
--- mirrored from Redis. Dynamic per-port entries are intentionally left to their
--- existing TTL so invalidation stays bounded and never scans the shared dict.
--- Returns the number of fixed keys that existed. Safe when the dict is missing.
+-- Invalidate this sandbox's cached route by deleting the fixed route metadata
+-- mirrored from Redis. The next read misses (HostIP/SandboxIP gone) and a
+-- single fill rewrites every port's mapping at once, so all ports converge on
+-- fresh data from one reload. Returns the number of fixed keys that existed.
+-- Safe when the dict is missing.
 function _M.invalidate_sandbox(sandbox_id)
     if type(sandbox_id) ~= "string" or sandbox_id == "" then
         return 0
@@ -32,8 +39,9 @@ function _M.invalidate_sandbox(sandbox_id)
         return 0
     end
 
-    local deleted = 0
     local prefix = sandbox_id .. ":"
+
+    local deleted = 0
     for _, suffix in ipairs(ROUTE_CACHE_SUFFIXES) do
         local key = prefix .. suffix
         if cache:get(key) ~= nil then

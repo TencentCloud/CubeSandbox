@@ -31,25 +31,22 @@ ngx = {
 
 local backend_cache = require "backend_cache"
 
-store["sb-1:meta_cached"] = "1"
 store["sb-1:HostIP"] = "10.0.0.1"
 store["sb-1:SandboxIP"] = "192.168.0.10"
 store["sb-1:CreatedAt"] = "1786900000000000000"
 store["sb-1:AllowPublicTraffic"] = "false"
 store["sb-1:TrafficAccessToken"] = false
 store["sb-1:MaskRequestHost"] = false
-store["sb-1:49999:backend_ip"] = "192.168.0.10"
-store["sb-1:49999:backend_port"] = "49999"
-store["sb-2:meta_cached"] = "1"
+-- The raw per-port host-port mapping is gated by the fixed keys (HostIP /
+-- SandboxIP) and overwritten on the next fill, so invalidate need not delete it.
+store["sb-1:49999"] = "30001"
+store["sb-2:HostIP"] = "10.0.0.5"
 store["cube_proxy_heartbeat_last_pushed_ms"] = "1"
 
 local deleted = backend_cache.invalidate_sandbox("sb-1")
-assert(deleted == 7, "deleted=" .. tostring(deleted))
-assert(deleted_keys[1] == "sb-1:meta_cached",
-    "meta_cached must be invalidated first")
+assert(deleted == 6, "deleted=" .. tostring(deleted))
 
 local fixed_suffixes = {
-    "meta_cached",
     "HostIP",
     "SandboxIP",
     "CreatedAt",
@@ -62,9 +59,12 @@ for _, suffix in ipairs(fixed_suffixes) do
         "fixed route key must be deleted: " .. suffix)
 end
 
-assert(store["sb-1:49999:backend_ip"] == "192.168.0.10")
-assert(store["sb-1:49999:backend_port"] == "49999")
-assert(store["sb-2:meta_cached"] == "1")
+-- The per-port mapping is intentionally left in place: with the fixed keys
+-- gone the read path misses regardless, and the next fill rewrites it. Other
+-- sandboxes and unrelated keys are untouched, and invalidate never scans.
+assert(store["sb-1:49999"] == "30001",
+    "per-port mapping is gated by the fixed keys, not deleted")
+assert(store["sb-2:HostIP"] == "10.0.0.5", "other sandbox untouched")
 assert(store["cube_proxy_heartbeat_last_pushed_ms"] == "1")
 
 assert(backend_cache.invalidate_sandbox("") == 0)

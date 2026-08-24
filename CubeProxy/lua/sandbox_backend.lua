@@ -121,6 +121,71 @@ local function load_sandbox_proxy_metadata(ins_id)
     return nil, nil
 end
 
+-- Read path. Returns host_ip, host_port, mask_request_host on a valid hit,
+-- nil on a miss. The completeness gate is the presence of EVERY served field
+-- (false is a valid negative-cache sentinel; only nil means missing): a
+-- partial fill or a field lost to TTL skew / LRU eviction leaves a nil and
+-- forces a reload instead of serving an incomplete entry or silently skipping
+-- the traffic-token check. There is no separate meta_cached flag — checking
+-- the fields directly makes one redundant.
+--
+-- The serving backend is computed from the raw route fields the fill mirrors
+-- for the whole sandbox (HostIP / SandboxIP / the per-port host-port mapping),
+-- resolved for the caller's host. A single fill writes every port's mapping at
+-- once, so after an invalidate all ports converge on fresh data from one
+-- reload — no per-port reload, no route epoch. On a hit the TTLs are refreshed.
+local function read_cached_backend(cache, ins_id, container_port, caller_host_ip, timeout)
+    -- The presence of every served field is the completeness gate; there is no
+    -- separate meta_cached flag. A partial fill or a field lost to TTL skew /
+    -- LRU eviction leaves a nil here and forces a reload instead of serving an
+    -- incomplete entry (or skipping the traffic-token check).
+    local target_host_ip = cache:get(ins_id .. ":HostIP")
+    local target_sandbox_ip = cache:get(ins_id .. ":SandboxIP")
+    local mapped_port = cache:get(ins_id .. ":" .. container_port)
+    local allow_public = cache:get(ins_id .. ":AllowPublicTraffic")
+    local traffic_token = cache:get(ins_id .. ":TrafficAccessToken")
+    local mask_request_host = cache:get(ins_id .. ":MaskRequestHost")
+
+    if not (target_host_ip and target_sandbox_ip
+            and allow_public ~= nil and traffic_token ~= nil
+            and mask_request_host ~= nil) then
+        return nil
+    end
+
+    -- Same-host callers dial the sandbox IP + container port directly; only a
+    -- cross-host caller needs the mapped host port.
+    local same_host = not utils:is_null(caller_host_ip) and caller_host_ip == target_host_ip
+    if not same_host and mapped_port == nil then
+        return nil
+    end
+
+    -- The cache-hit path must still enforce the per-sandbox traffic token,
+    -- otherwise a single warm entry would let unauthenticated callers bypass
+    -- the gate for the whole cache TTL.
+    enforce_traffic_token(decode_optional_cache_value(allow_public),
+                          decode_optional_cache_value(traffic_token), ins_id)
+
+    local host_ip, host_port
+    if same_host then
+        host_ip = target_sandbox_ip
+        host_port = container_port
+    else
+        host_ip = target_host_ip
+        host_port = mapped_port
+    end
+
+    cache:set(ins_id .. ":HostIP", target_host_ip, timeout)
+    cache:set(ins_id .. ":SandboxIP", target_sandbox_ip, timeout)
+    if not same_host then
+        cache:set(ins_id .. ":" .. container_port, mapped_port, timeout)
+    end
+    cache:set(ins_id .. ":AllowPublicTraffic", allow_public, timeout)
+    cache:set(ins_id .. ":TrafficAccessToken", traffic_token, timeout)
+    cache:set(ins_id .. ":MaskRequestHost", mask_request_host, timeout)
+
+    return host_ip, host_port, decode_optional_cache_value(mask_request_host)
+end
+
 --[[
     Resolve the upstream backend for a sandbox + container port.
 
@@ -138,32 +203,10 @@ function _M.resolve_backend(ins_id, container_port)
     local caller_host_ip = get_caller_host_ip()
     local cache = ngx.shared.local_cache
     local timeout = get_cache_timeout()
-    local cache_backend_ip_key = string.format("%s:%s:%s", ins_id, container_port, "backend_ip")
-    local cache_backend_port_key = string.format("%s:%s:%s", ins_id, container_port, "backend_port")
-    local host_ip = cache:get(cache_backend_ip_key)
-    local host_port = cache:get(cache_backend_port_key)
-    local cached_allow_public = cache:get(ins_id .. ":AllowPublicTraffic")
-    local cached_traffic_token = cache:get(ins_id .. ":TrafficAccessToken")
-    local cached_mask_request_host = cache:get(ins_id .. ":MaskRequestHost")
-    -- Read meta_cached last. It is written first on fill/refresh (before the
-    -- dependent keys) with the same TTL, so its lifetime contains theirs: while
-    -- meta_cached is still present the later-written keys should not have expired.
-    local meta_cached = cache:get(ins_id .. ":meta_cached")
-    if host_ip and host_port and meta_cached then
-        -- Cache-hit path must still enforce the per-sandbox traffic token,
-        -- otherwise a single warm entry would let unauthenticated callers
-        -- bypass the gate for the whole cache TTL.
-        local allow_public = decode_optional_cache_value(cached_allow_public)
-        local traffic_token = decode_optional_cache_value(cached_traffic_token)
-        local mask_request_host = decode_optional_cache_value(cached_mask_request_host)
-        enforce_traffic_token(allow_public, traffic_token, ins_id)
 
-        cache:set(ins_id .. ":meta_cached", "1", timeout)
-        cache:set(cache_backend_ip_key, host_ip, timeout)
-        cache:set(cache_backend_port_key, host_port, timeout)
-        cache:set(ins_id .. ":AllowPublicTraffic", cached_allow_public, timeout)
-        cache:set(ins_id .. ":TrafficAccessToken", cached_traffic_token, timeout)
-        cache:set(ins_id .. ":MaskRequestHost", cached_mask_request_host, timeout)
+    local host_ip, host_port, mask_request_host =
+        read_cached_backend(cache, ins_id, container_port, caller_host_ip, timeout)
+    if host_ip then
         return host_ip, host_port, mask_request_host
     end
 
@@ -179,7 +222,9 @@ function _M.resolve_backend(ins_id, container_port)
         utils:respond_not_found()
     end
 
-    cache:set(ins_id .. ":meta_cached", "1", timeout)
+    -- Fill path: mirror every metadata key (including every port's host-port
+    -- mapping), so one fill refreshes the whole sandbox's route. The read gate
+    -- then sees every served field present, which is the completeness signal.
     local metadata_map = {}
     for i = 1, #metadata, 2 do
         local k = metadata[i]
@@ -235,8 +280,8 @@ function _M.resolve_backend(ins_id, container_port)
         end
     end
 
-    cache:set(cache_backend_ip_key, host_ip, timeout)
-    cache:set(cache_backend_port_key, host_port, timeout)
+    -- The serving backend is recomputed from the mirrored raw fields on the
+    -- read path, so there is no separate resolved-backend key to write here.
     return host_ip, host_port, mask_request_host
 end
 
