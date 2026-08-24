@@ -31,6 +31,10 @@ type SandboxInfo struct {
 	EnvdVersion string     `json:"envdVersion"`
 	Domain      string     `json:"domain,omitempty"`
 	CPUCount    int        `json:"cpuCount"`
+	// CPUMilli is the exact CPU allocation in millicores (e.g. 500 for 0.5
+	// vCPU). It is nil when the server omits it; CPUCount truncates sub-core
+	// values to 0, so prefer CPUMilli for fractional CPU.
+	CPUMilli *int `json:"cpuMilli,omitempty"`
 	// MemoryMB is memory in MiB; the historical field name is retained.
 	MemoryMB     int               `json:"memoryMB"`
 	DiskSizeMB   *int              `json:"diskSizeMB,omitempty"`

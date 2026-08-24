@@ -312,6 +312,7 @@ class SandboxInfo(dict[str, Any]):
     end_at: datetime | None = None
     state: SandboxState | str | None = None
     cpu_count: int | None = None
+    cpu_milli: int | None = None
     memory_mb: int | None = None
     envd_version: str = ""
     _envd_access_token: str | None = field(default=None, repr=False)
@@ -331,6 +332,7 @@ class SandboxInfo(dict[str, Any]):
             "endAt": self.end_at.isoformat() if self.end_at else None,
             "state": self.state.value if isinstance(self.state, SandboxState) else self.state,
             "cpuCount": self.cpu_count,
+            "cpuMilli": self.cpu_milli,
             "memoryMB": self.memory_mb,
             "envdVersion": self.envd_version,
             "diskSizeMB": self.disk_size_mb,
@@ -351,6 +353,7 @@ class SandboxInfo(dict[str, Any]):
             end_at=_parse_timestamp(data.get("endAt")),
             state=_normalize_state(data.get("state")),
             cpu_count=data.get("cpuCount"),
+            cpu_milli=data.get("cpuMilli"),
             memory_mb=data.get("memoryMB"),
             envd_version=data.get("envdVersion", ""),
             _envd_access_token=data.get("envdAccessToken"),

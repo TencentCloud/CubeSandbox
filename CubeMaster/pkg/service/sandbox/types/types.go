@@ -634,6 +634,8 @@ type ContainerInfo struct {
 	CreateAt    int64  `json:"create_at,omitempty"`
 	Cpu         string `json:"cpu,omitempty"`
 	Mem         string `json:"mem,omitempty"`
+	CpuMilli    int32  `json:"cpu_milli,omitempty"`
+	MemoryMiB   int32  `json:"memory_mib,omitempty"`
 	Type        string `json:"type,omitempty"`
 	PauseAt     int64  `json:"pause_at,omitempty"`
 }

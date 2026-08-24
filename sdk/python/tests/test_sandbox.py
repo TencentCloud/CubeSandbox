@@ -808,6 +808,7 @@ FULL_INFO_DATA = {
     "endAt": "2026-05-14T01:00:00Z",
     "envdVersion": "0.0.1",
     "cpuCount": 2,
+    "cpuMilli": 2000,
     "memoryMB": 512,
     "diskSizeMB": 1024,
     "metadata": {"team": "core"},
@@ -853,6 +854,7 @@ class TestGetInfo:
         assert info.template_id == "tpl-test"
         assert info.sandbox_domain == DOMAIN
         assert info.cpu_count == 2
+        assert info.cpu_milli == 2000
         assert info.memory_mb == 512
         assert info.disk_size_mb == 1024
         assert info.envd_version == "0.0.1"
@@ -936,6 +938,7 @@ class TestGetInfo:
         assert info.started_at is None
         assert info.end_at is None
         assert info.cpu_count is None
+        assert info.cpu_milli is None
         assert info.metadata == {}
         assert info.state is None
 

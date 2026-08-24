@@ -134,7 +134,7 @@ func TestSDK_GetSandbox_Success(t *testing.T) {
 				"data": [{
 					"sandbox_id": "sb-42", "host_id": "node-a", "status": 1,
 					"template_id": "tpl-1", "namespace": "default",
-					"containers": [{"container_id": "c-1", "cpu": "2000m", "mem": "2048Mi", "create_at": 1700000000000000000, "type": "sandbox"}],
+					"containers": [{"container_id": "c-1", "cpu": "2000m", "mem": "2048Mi", "cpu_milli": 2000, "memory_mib": 2048, "create_at": 1700000000000000000, "type": "sandbox"}],
 					"annotations": {}, "labels": {}
 				}]
 			}`), nil
@@ -188,6 +188,76 @@ func TestSDK_GetSandbox_UnknownStateIsNotReportedAsRunning(t *testing.T) {
 	}
 	if detail["state"] != "unknown" {
 		t.Errorf("state = %v, want unknown (CubeMaster status 3)", detail["state"])
+	}
+}
+
+func TestSDK_GetSandbox_PrefersExactResourceUnits(t *testing.T) {
+	cm := &fakeCM{
+		getSandbox: func(_ context.Context, _, _ string) (json.RawMessage, error) {
+			return raw(`{
+				"ret": {"ret_code": 0},
+				"data": [{
+					"sandbox_id": "sb-small", "host_id": "node-a", "status": 1,
+					"containers": [{"container_id": "c-1", "cpu": "500m", "mem": "2Gi", "cpu_milli": 500, "memory_mib": 2048, "type": "sandbox"}],
+					"annotations": {}, "labels": {}
+				}]
+			}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/sandboxes/sb-small")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var detail map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	// A 2Gi / 500m sandbox must report exact units, not the 0 the old lossy
+	// detail parser returned for sub-core CPU and Gi-suffixed memory.
+	if detail["cpuCount"] != float64(0) {
+		t.Errorf("cpuCount = %v, want 0 (sub-core truncates)", detail["cpuCount"])
+	}
+	if detail["cpuMilli"] != float64(500) {
+		t.Errorf("cpuMilli = %v, want 500", detail["cpuMilli"])
+	}
+	if detail["memoryMB"] != float64(2048) {
+		t.Errorf("memoryMB = %v, want 2048", detail["memoryMB"])
+	}
+}
+
+func TestSDK_GetSandbox_FallbackParsesRawSpec(t *testing.T) {
+	// Older CubeMaster responses carry only the raw cpu/mem strings, without
+	// the exact cpu_milli/memory_mib fields. The detail path must still parse
+	// Gi-suffixed memory (and sub-core CPU) correctly via the fallback parsers.
+	cm := &fakeCM{
+		getSandbox: func(_ context.Context, _, _ string) (json.RawMessage, error) {
+			return raw(`{
+				"ret": {"ret_code": 0},
+				"data": [{
+					"sandbox_id": "sb-legacy", "host_id": "node-a", "status": 1,
+					"containers": [{"container_id": "c-1", "cpu": "500m", "mem": "2Gi", "type": "sandbox"}],
+					"annotations": {}, "labels": {}
+				}]
+			}`), nil
+		},
+	}
+	r := newSDKRouter(t, cm)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/sdk/sandboxes/sb-legacy")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var detail map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	if detail["cpuMilli"] != float64(500) {
+		t.Errorf("cpuMilli = %v, want 500", detail["cpuMilli"])
+	}
+	if detail["memoryMB"] != float64(2048) {
+		t.Errorf("memoryMB = %v, want 2048 (2Gi must not parse to 0)", detail["memoryMB"])
 	}
 }
 

@@ -987,6 +987,30 @@ func TestGetInfoDecodesVolumeMounts(t *testing.T) {
 	}
 }
 
+func TestGetInfoDecodesCPUMilli(t *testing.T) {
+	const sandboxID = "sb-subcore"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"sandboxID":"sb-subcore","templateID":"tpl-test","clientID":"c-1","startedAt":"2026-05-14T00:00:00Z","envdVersion":"0.0.1","cpuCount":0,"cpuMilli":500,"memoryMB":512,"state":"running"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-test"})
+	sb := &Sandbox{client: client, SandboxID: sandboxID}
+	info, err := sb.GetInfo(context.Background())
+	if err != nil {
+		t.Fatalf("GetInfo: %v", err)
+	}
+	if info.CPUCount != 0 {
+		t.Errorf("CPUCount = %d, want 0 (sub-core truncates)", info.CPUCount)
+	}
+	if info.CPUMilli == nil {
+		t.Fatalf("CPUMilli is nil, want pointer to 500")
+	}
+	if *info.CPUMilli != 500 {
+		t.Errorf("CPUMilli = %d, want 500", *info.CPUMilli)
+	}
+}
+
 func TestListDecodesVolumeMounts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/sandboxes" {

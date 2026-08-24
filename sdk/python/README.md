@@ -403,7 +403,8 @@ lookup remains supported.
 | `.sandbox_domain` | `str \| None` | Sandbox domain (raw `domain`) |
 | `.started_at` | `datetime \| None` | Start time (raw `startedAt` string) |
 | `.end_at` | `datetime \| None` | Expiry time (raw `endAt` string) |
-| `.cpu_count` | `int \| None` | vCPU count (raw `cpuCount`) |
+| `.cpu_count` | `int \| None` | vCPU count, truncates sub-core to 0 (raw `cpuCount`) |
+| `.cpu_milli` | `int \| None` | Exact CPU allocation in millicores, e.g. 500 for 0.5 vCPU (raw `cpuMilli`) |
 | `.memory_mb` | `int \| None` | Memory in MiB (raw `memoryMB`; the historical field name is retained) |
 | `.disk_size_mb` | `int \| None` | Disk size in MB (raw `diskSizeMB`) |
 | `.envd_version` | `str` | envd version (raw `envdVersion`) |

@@ -14,6 +14,7 @@ package translator
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -76,6 +77,8 @@ type CMSandboxContainer struct {
 	CreateAt    int64  `json:"create_at"` // nanoseconds
 	CPU         string `json:"cpu"`       // e.g. "2000m"
 	Mem         string `json:"mem"`       // e.g. "2048Mi"
+	CPUMilli    int    `json:"cpu_milli"`
+	MemoryMiB   int    `json:"memory_mib"`
 	Type        string `json:"type"`
 	PauseAt     int64  `json:"pause_at"`
 }
@@ -186,19 +189,62 @@ func SandboxStateFromRaw(raw json.RawMessage) string {
 	return "unknown"
 }
 
-// ParseMemoryMB converts memory quantities to MiB. The function name is kept
-// for compatibility with existing callers and the legacy memoryMB field.
+// ParseMemoryMB converts a Kubernetes-style memory quantity to MiB. The
+// function name and the legacy memoryMB wire field are retained for
+// compatibility with existing callers; the value is always MiB regardless of
+// the input suffix (Mi, Gi, M, G, …). Mirrors CubeAPI's parse_mem_mib so the
+// list and detail paths report identical memory for the same quantity.
 func ParseMemoryMB(s string) int {
-	s = strings.TrimSpace(s)
-	s = strings.TrimSuffix(s, "Mi")
-	s = strings.TrimSuffix(s, "MI")
-	s = strings.TrimSuffix(s, "MB")
-	s = strings.TrimSuffix(s, "M")
-	n, err := strconv.Atoi(s)
-	if err != nil {
+	value := strings.TrimSpace(s)
+	if value == "" {
 		return 0
 	}
-	return n
+
+	// Two-letter suffixes must be matched before bare SI letters (Mi vs M).
+	number, multiplier := value, 0.0
+	switch {
+	case strings.HasSuffix(value, "Ki"):
+		number, multiplier = strings.TrimSuffix(value, "Ki"), 1024.0
+	case strings.HasSuffix(value, "Mi"):
+		number, multiplier = strings.TrimSuffix(value, "Mi"), 1024.0*1024.0
+	case strings.HasSuffix(value, "Gi"):
+		number, multiplier = strings.TrimSuffix(value, "Gi"), 1024.0*1024.0*1024.0
+	case strings.HasSuffix(value, "Ti"):
+		number, multiplier = strings.TrimSuffix(value, "Ti"), 1024.0*1024.0*1024.0*1024.0
+	case strings.HasSuffix(value, "KB"):
+		number, multiplier = strings.TrimSuffix(value, "KB"), 1000.0
+	case strings.HasSuffix(value, "MB"):
+		number, multiplier = strings.TrimSuffix(value, "MB"), 1_000_000.0
+	case strings.HasSuffix(value, "GB"):
+		number, multiplier = strings.TrimSuffix(value, "GB"), 1_000_000_000.0
+	case strings.HasSuffix(value, "TB"):
+		number, multiplier = strings.TrimSuffix(value, "TB"), 1_000_000_000_000.0
+	case strings.HasSuffix(value, "K"):
+		number, multiplier = strings.TrimSuffix(value, "K"), 1000.0
+	case strings.HasSuffix(value, "M"):
+		number, multiplier = strings.TrimSuffix(value, "M"), 1_000_000.0
+	case strings.HasSuffix(value, "G"):
+		number, multiplier = strings.TrimSuffix(value, "G"), 1_000_000_000.0
+	case strings.HasSuffix(value, "T"):
+		number, multiplier = strings.TrimSuffix(value, "T"), 1_000_000_000_000.0
+	default:
+		number, multiplier = value, 1.0
+	}
+
+	n, err := strconv.ParseFloat(number, 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	bytes := n * multiplier
+	mib := int(math.Ceil(bytes / (1024.0 * 1024.0)))
+	if mib <= 0 {
+		return 0
+	}
+	const maxInt32 = 2_147_483_647
+	if mib > maxInt32 {
+		return maxInt32
+	}
+	return mib
 }
 
 // ParseCPUMilli converts a Kubernetes-style CPU quantity to millicores.
@@ -372,9 +418,17 @@ func TransformSandboxDetail(raw json.RawMessage) interface{} {
 	memoryMB := 0
 	startedAt := ""
 	if primary != nil {
-		cpuMilli = ParseCPUMilli(primary.CPU)
+		// Prefer CubeMaster's exact millicore/MiB values; fall back to parsing
+		// the raw container spec strings for older CubeMaster responses.
+		cpuMilli = primary.CPUMilli
+		if cpuMilli == 0 {
+			cpuMilli = ParseCPUMilli(primary.CPU)
+		}
 		cpuCount = cpuMilli / 1000
-		memoryMB = ParseMemoryMB(primary.Mem)
+		memoryMB = primary.MemoryMiB
+		if memoryMB == 0 {
+			memoryMB = ParseMemoryMB(primary.Mem)
+		}
 		startedAt = NanosToISO(primary.CreateAt)
 	}
 

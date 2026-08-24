@@ -1163,6 +1163,10 @@ pub struct GetSandboxContainerItem {
     pub cpu: String,
     #[serde(default)]
     pub mem: String,
+    #[serde(default)]
+    pub cpu_milli: i32,
+    #[serde(default)]
+    pub memory_mib: i32,
     #[serde(rename = "type", default)]
     pub kind: String,
     #[serde(default)]
@@ -1195,12 +1199,10 @@ fn parse_cpu_millicores(s: &str) -> i32 {
         return 0;
     }
     if let Some(milli) = value.strip_suffix('m') {
-        return milli
-            .parse::<i64>()
-            .ok()
-            .and_then(|value| i32::try_from(value).ok())
-            .filter(|value| *value >= 0)
-            .unwrap_or(0);
+        // Clamp on overflow to match the decimal branch and CubeMaster's Go
+        // parser, instead of silently truncating to 0.
+        let value: i64 = milli.parse().unwrap_or(0).max(0);
+        return value.min(i32::MAX as i64) as i32;
     }
 
     let cores = value.parse::<f64>().unwrap_or(0.0);
@@ -1382,9 +1384,22 @@ impl GetSandboxResponse {
             .iter()
             .find(|c| c.kind == "sandbox" || c.container_id == item.sandbox_id)
             .or_else(|| item.containers.first());
-        let (cpu_milli, memory_mb) = primary_container
-            .map(|c| (parse_cpu_millicores(&c.cpu), parse_mem_mib(&c.mem)))
-            .unwrap_or((0, 0));
+        // Prefer CubeMaster's exact millicore/MiB values; fall back to parsing
+        // the raw container spec strings for older CubeMaster responses.
+        let cpu_milli = primary_container.map_or(0, |c| {
+            if c.cpu_milli > 0 {
+                c.cpu_milli
+            } else {
+                parse_cpu_millicores(&c.cpu)
+            }
+        });
+        let memory_mb = primary_container.map_or(0, |c| {
+            if c.memory_mib > 0 {
+                c.memory_mib
+            } else {
+                parse_mem_mib(&c.mem)
+            }
+        });
         let status = match item.status {
             0 => SandboxStatus::Unknown, // CONTAINER_CREATED
             1 => SandboxStatus::Running, // CONTAINER_RUNNING
@@ -2293,6 +2308,10 @@ mod tests {
     fn quantity_parsers_preserve_millicores_and_mib() {
         assert_eq!(parse_cpu_millicores("100m"), 100);
         assert_eq!(parse_cpu_millicores("0.5"), 500);
+        // Overflow clamps to i32::MAX in both the m-suffix and decimal branches
+        // instead of silently returning 0.
+        assert_eq!(parse_cpu_millicores("9999999999999m"), i32::MAX);
+        assert_eq!(parse_cpu_millicores("9999999999999"), i32::MAX);
         assert_eq!(parse_mem_mib("512Mi"), 512);
         assert_eq!(parse_mem_mib("2Gi"), 2048);
         assert_eq!(parse_mem_mib("537M"), 513);
@@ -2371,6 +2390,69 @@ mod tests {
                 .timestamp_nanos_opt(),
             Some(1713953785140309977)
         );
+    }
+
+    #[test]
+    fn get_sandbox_prefers_exact_container_resource_fields() {
+        // CubeMaster now emits cpu_milli/memory_mib per container. The detail
+        // path must consume those instead of re-parsing the raw spec strings,
+        // which fail on fractional millicores such as "250.5m".
+        let payload = serde_json::json!({
+            "requestID": "req-1",
+            "ret": { "ret_code": 0, "ret_msg": "ok" },
+            "data": [{
+                "sandbox_id": "sb-frac",
+                "host_id": "host-1",
+                "status": 1,
+                "containers": [{
+                    "container_id": "sb-frac",
+                    "type": "sandbox",
+                    "cpu": "250.5m",
+                    "mem": "2Gi",
+                    "cpu_milli": 250,
+                    "memory_mib": 2048
+                }]
+            }]
+        });
+
+        let response: GetSandboxResponse =
+            serde_json::from_value(payload).expect("response should deserialize");
+        let detail = response
+            .into_first_sandbox("cubebox")
+            .expect("detail should exist");
+
+        assert_eq!(detail.cpu_count, 0);
+        assert_eq!(detail.cpu_milli, 250);
+        assert_eq!(detail.memory_mb, 2048);
+    }
+
+    #[test]
+    fn get_sandbox_falls_back_to_raw_spec_strings() {
+        // Older CubeMaster responses carry only the raw cpu/mem strings.
+        let payload = serde_json::json!({
+            "requestID": "req-1",
+            "ret": { "ret_code": 0, "ret_msg": "ok" },
+            "data": [{
+                "sandbox_id": "sb-legacy",
+                "host_id": "host-1",
+                "status": 1,
+                "containers": [{
+                    "container_id": "sb-legacy",
+                    "type": "sandbox",
+                    "cpu": "500m",
+                    "mem": "2Gi"
+                }]
+            }]
+        });
+
+        let response: GetSandboxResponse =
+            serde_json::from_value(payload).expect("response should deserialize");
+        let detail = response
+            .into_first_sandbox("cubebox")
+            .expect("detail should exist");
+
+        assert_eq!(detail.cpu_milli, 500);
+        assert_eq!(detail.memory_mb, 2048);
     }
 }
 

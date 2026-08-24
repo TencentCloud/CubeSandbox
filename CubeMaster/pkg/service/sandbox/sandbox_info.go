@@ -176,6 +176,8 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 				CreateAt:    container.GetCreatedAt(),
 				Cpu:         container.GetResources().GetCpu(),
 				Mem:         container.GetResources().GetMem(),
+				CpuMilli:    parseCPUMilli(container.GetResources().GetCpu()),
+				MemoryMiB:   parseMemoryMiB(container.GetResources().GetMem()),
 				Type:        container.GetType(),
 				PauseAt:     container.GetPausedAt(),
 			}
