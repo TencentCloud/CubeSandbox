@@ -1,6 +1,6 @@
 # S3-Compatible Volume Plugin
 
-Bring any S3-compatible object store (AWS S3, Tigris, Cloudflare R2, MinIO, …) into CubeSandbox as a **lifecycle-persistent volume** for sandboxes: create a Volume → mount it in a sandbox → read/write → destroy the sandbox, the data stays → remount it next time.
+Bring any S3-compatible object store (AWS S3, Tencent Cloud COS, Cloudflare R2, MinIO, …) into CubeSandbox as a **lifecycle-persistent volume** for sandboxes: create a Volume → mount it in a sandbox → read/write → destroy the sandbox, the data stays → remount it next time.
 
 > **This page is an operator reference** for those who need to **deploy the plugin manually / connect external S3**.
 >
@@ -146,7 +146,7 @@ Common backends:
 | Provider | `ENDPOINT` | `REGION` |
 |----------|-----------|----------|
 | AWS S3 | `https://s3.<region>.amazonaws.com` | the bucket's region |
-| Tigris | `https://t3.storage.dev` | `auto` |
+| Tencent Cloud COS | `https://cos.<region>.myqcloud.com` | the bucket's region (e.g. `ap-guangzhou`) |
 | Cloudflare R2 | `https://<account-id>.r2.cloudflarestorage.com` | `auto` |
 | MinIO | `http://<minio-host>:9000` | any value |
 
@@ -386,6 +386,5 @@ examples/volume/s3/
 |-----|---------|
 | [S3 Volumes (user tutorial)](../../../docs/guide/s3-volume.md) | End-user quick start |
 | [Volume Plugin framework](../../../docs/guide/volume-plugin.md) | Protocol, RefCount, Hook semantics |
-| [Tigris integration guide](../../../docs/guide/integrations/tigris.md) | End-to-end vendor walkthrough using this plugin |
 | [COS example](../cos/README.md) | The reference plugin this one is modelled on |
 | [s3fs-fuse](https://github.com/s3fs-fuse/s3fs-fuse) | Mount driver options and behavior |

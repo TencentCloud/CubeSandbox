@@ -641,7 +641,7 @@ rpc 插件实现 [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSand
 | [`examples/volume/cos/binary/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/binary/README.zh.md) | binary 插件脚本细节 |
 | [`examples/volume/cos/rpc/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.zh.md) | rpc 插件构建与部署 |
 | [`examples/volume/cos/verify_volume.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/verify_volume.py) | Python SDK 验证脚本 |
-| [`examples/volume/s3/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.zh.md) | 通用 S3 兼容后端完整体验（s3fs + AWS CLI；AWS S3、Tigris、MinIO、R2；支持 `arm64`） |
+| [`examples/volume/s3/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.zh.md) | 通用 S3 兼容后端完整体验（s3fs + AWS CLI；AWS S3、腾讯云 COS、MinIO、R2；支持 `arm64`） |
 
 各后端专属的 Hook 行为、对象布局、实现取舍与排障说明均在上述 example 文档中，本文不再重复。
 

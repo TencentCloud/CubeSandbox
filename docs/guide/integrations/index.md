@@ -50,5 +50,4 @@ lang: en-US
 | [Pi Agent Integration Guide](./pi-agent.md) | chaojixinren | 2026-07-01 | integration, pi-agent, coding-agent, agent |
 | [Claude Code Integration Guide](./claude-code.md) | shsaihdsaiudh | 2026-07-06 | integration, claude-code, coding-agent |
 | [LangChain Integration Guide](./langchain.md) | peerless-hero | 2026-07-07 | integration, langchain, agent |
-| [Tigris Volume Integration Guide](./tigris.md) | davidmyriel | 2026-07-31 | integration, tigris, volume, storage, s3 |
 | [OpenAI Agents SDK Integration Guide](./openai-agents-sdk.md) | ZedingZhang | 2026-08-19 | integration, openai-agents-sdk, agent |

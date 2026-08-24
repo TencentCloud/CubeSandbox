@@ -1,10 +1,10 @@
 # S3 Volumes
 
-Give a sandbox storage that **survives its lifecycle**: create a Volume → mount it in a sandbox → read/write → destroy the sandbox, the data stays → remount it next time. The backend is any S3-compatible object store (AWS S3, Tigris, Cloudflare R2, MinIO, …), and the default CubeSandbox install ships a bundled MinIO as that backend.
+Give a sandbox storage that **survives its lifecycle**: create a Volume → mount it in a sandbox → read/write → destroy the sandbox, the data stays → remount it next time. The backend is any S3-compatible object store (AWS S3, Tencent Cloud COS, Cloudflare R2, MinIO, …), and the default CubeSandbox install ships a bundled MinIO as that backend.
 
 > **The default install (one-click / Helm defaults) is already set up.** The installer starts a MinIO and wires the S3 Volume plugin, credentials, and CubeMaster/Cubelet config for you. **You don't need to edit `volume-s3.conf` or install the plugin** — jump straight to [Usage](#usage).
 >
-> Only if you want to point the backend at **external S3** (AWS S3, Tigris, R2, a self-hosted MinIO, …) do you need [Connecting external S3](#connecting-external-s3).
+> Only if you want to point the backend at **external S3** (AWS S3, Tencent Cloud COS, R2, a self-hosted MinIO, …) do you need [Connecting external S3](#connecting-external-s3).
 
 ---
 
@@ -15,7 +15,7 @@ Give a sandbox storage that **survives its lifecycle**: create a Volume → moun
 | Survives sandbox teardown | Volume data stays after the sandbox is killed; remount it next time |
 | Shared across sandboxes | One Volume can be mounted by several sandboxes at once |
 | Read-only mounts | Each mount can be independently read-only — ideal for sharing models/datasets |
-| Any S3-compatible backend | Bundled MinIO by default; swap to AWS S3, Tigris, Cloudflare R2, … |
+| Any S3-compatible backend | Bundled MinIO by default; swap to AWS S3, Tencent Cloud COS, Cloudflare R2, … |
 | Credentials stay on the host | Secrets live only on CubeMaster/Cubelet; the sandbox sees just a filesystem |
 
 ---
@@ -85,7 +85,7 @@ with Sandbox.create(volume_mounts={"/data": VolumeMount(vol, read_only=True)}) a
 
 ## Connecting external S3
 
-The default install uses bundled MinIO. To switch to external S3 (AWS S3, Tigris, R2, a self-hosted MinIO, …), change the "source" for your deploy method — the installer generates `volume-s3.conf` for you, so **do not edit that file by hand** (it gets rewritten).
+The default install uses bundled MinIO. To switch to external S3 (AWS S3, Tencent Cloud COS, R2, a self-hosted MinIO, …), change the "source" for your deploy method — the installer generates `volume-s3.conf` for you, so **do not edit that file by hand** (it gets rewritten).
 
 ### one-click deploy
 
@@ -123,14 +123,14 @@ See the `volumeS3` section of the chart `values.yaml`.
 
 ### Manual deploy from scratch (not one-click / not Helm)
 
-For manually deploying the plugin and hand-writing `volume-s3.conf`, see [`examples/volume/s3/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md); for a vendor end-to-end (account, bucket, access keys), see the [Tigris integration guide](./integrations/tigris.md).
+For manually deploying the plugin and hand-writing `volume-s3.conf`, see [`examples/volume/s3/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md); for a Tencent Cloud COS walkthrough (bucket, access keys) — using the dedicated `cos` driver plugin, not this one — see [`examples/volume/cos/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md).
 
 ### Common backends
 
 | Provider | `ENDPOINT` | `REGION` |
 |----------|-----------|----------|
 | AWS S3 | `https://s3.<region>.amazonaws.com` | the bucket's region |
-| Tigris | `https://t3.storage.dev` | `auto` |
+| Tencent Cloud COS | `https://cos.<region>.myqcloud.com` | the bucket's region (e.g. `ap-guangzhou`) |
 | Cloudflare R2 | `https://<account-id>.r2.cloudflarestorage.com` | `auto` |
 | MinIO | `http://<minio-host>:9000` | any value |
 

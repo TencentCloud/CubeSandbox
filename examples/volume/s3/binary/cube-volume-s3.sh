@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # cube-volume-s3 — CubeSandbox VolumePlugin for any S3-compatible object storage
-# (AWS S3, Tigris, MinIO, Cloudflare R2, Ceph RGW, ...)
+# (AWS S3, Tencent Cloud COS, MinIO, Cloudflare R2, Ceph RGW, ...)
 #
 # What this script does (one sentence per hook):
 #   create  — make an empty folder for this volume in the bucket (control plane)
@@ -187,7 +187,7 @@ s3_ensure_bucket() {
     fi
     log "aws: creating bucket ${BUCKET}"
     local create_args=(s3api create-bucket --bucket "$BUCKET")
-    # AWS us-east-1 rejects LocationConstraint; Tigris uses REGION=auto.
+    # AWS us-east-1 rejects LocationConstraint; R2 uses REGION=auto.
     if [[ -n "$region" && "$region" != "us-east-1" && "$region" != "auto" ]]; then
         create_args+=(--create-bucket-configuration "LocationConstraint=${region}")
     fi

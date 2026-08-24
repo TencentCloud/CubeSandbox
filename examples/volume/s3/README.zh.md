@@ -1,6 +1,6 @@
 # S3 兼容 Volume 插件
 
-把任意 S3 兼容对象存储（AWS S3、Tigris、Cloudflare R2、MinIO……）接入 CubeSandbox，作为沙箱的**跨生命周期持久卷**：创建 Volume → 挂到沙箱里读写 → 沙箱销毁后数据仍在 → 再挂回来继续用。
+把任意 S3 兼容对象存储（AWS S3、腾讯云 COS、Cloudflare R2、MinIO……）接入 CubeSandbox，作为沙箱的**跨生命周期持久卷**：创建 Volume → 挂到沙箱里读写 → 沙箱销毁后数据仍在 → 再挂回来继续用。
 
 > **本页是"操作参考"**：面向需要**手动部署插件 / 接入外部 S3** 的运维人员。
 >
@@ -146,7 +146,7 @@ sudo install -m 0600 volume-s3.conf.example \
 | 存储提供方 | `ENDPOINT` | `REGION` |
 |-----------|-----------|----------|
 | AWS S3 | `https://s3.<region>.amazonaws.com` | 存储桶所在地域 |
-| Tigris | `https://t3.storage.dev` | `auto` |
+| 腾讯云 COS | `https://cos.<region>.myqcloud.com` | 存储桶所在地域（如 `ap-guangzhou`） |
 | Cloudflare R2 | `https://<account-id>.r2.cloudflarestorage.com` | `auto` |
 | MinIO | `http://<minio-host>:9000` | 任意值 |
 
@@ -386,6 +386,5 @@ examples/volume/s3/
 |------|------|
 | [S3 持久卷（用户教程）](../../../docs/zh/guide/s3-volume.md) | 面向最终用户的快速上手 |
 | [Volume 插件开发框架](../../../docs/zh/guide/volume-plugin.md) | 协议、RefCount、Hook 语义 |
-| [Tigris 集成指南](../../../docs/zh/guide/integrations/tigris.md) | 基于本插件的厂商级端到端指引 |
 | [COS 示例](../cos/README.zh.md) | 本插件所参照的参考实现 |
 | [s3fs-fuse](https://github.com/s3fs-fuse/s3fs-fuse) | 挂载驱动选项与行为 |

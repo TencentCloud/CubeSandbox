@@ -1,10 +1,10 @@
 # S3 持久卷（S3 Volume）
 
-给沙箱一个**跨生命周期持久化**的存储：创建一个 Volume → 挂到沙箱里读写 → 沙箱销毁后数据仍在 → 下次再挂回来继续用。后端是任意 S3 兼容对象存储（AWS S3、Tigris、Cloudflare R2、MinIO……），CubeSandbox 默认安装已自带一个 MinIO 作为后端。
+给沙箱一个**跨生命周期持久化**的存储：创建一个 Volume → 挂到沙箱里读写 → 沙箱销毁后数据仍在 → 下次再挂回来继续用。后端是任意 S3 兼容对象存储（AWS S3、腾讯云 COS、Cloudflare R2、MinIO……），CubeSandbox 默认安装已自带一个 MinIO 作为后端。
 
 > **默认安装（one-click / Helm 默认值）已经配好了。** 安装脚本会自动起一个 MinIO，并把 S3 Volume 插件、凭证、CubeMaster/Cubelet 配置全部接好。**你不需要手动编辑 `volume-s3.conf`，也不需要装插件** —— 直接跳到 [用法](#用法) 即可。
 >
-> 只有当你想把后端换成**外部 S3**（AWS S3、Tigris、R2、自建 MinIO 等）时，才需要看 [接入外部 S3](#接入外部-s3)。
+> 只有当你想把后端换成**外部 S3**（AWS S3、腾讯云 COS、R2、自建 MinIO 等）时，才需要看 [接入外部 S3](#接入外部-s3)。
 
 ---
 
@@ -15,7 +15,7 @@
 | 跨沙箱持久化 | 沙箱销毁后 Volume 数据保留，下次创建沙箱再挂回来继续读写 |
 | 多沙箱共享 | 同一个 Volume 可被多个沙箱同时挂载 |
 | 只读挂载 | 每个挂载可单独设只读，适合共享模型/数据集 |
-| 任意 S3 兼容后端 | 默认捆绑 MinIO；也可换 AWS S3、Tigris、Cloudflare R2 等 |
+| 任意 S3 兼容后端 | 默认捆绑 MinIO；也可换 AWS S3、腾讯云 COS、Cloudflare R2 等 |
 | 凭证不进沙箱 | 凭证只在宿主机上，沙箱内只看到一个文件系统 |
 
 ---
@@ -85,7 +85,7 @@ with Sandbox.create(volume_mounts={"/data": VolumeMount(vol, read_only=True)}) a
 
 ## 接入外部 S3
 
-默认安装用内置 MinIO。想换成外部 S3（AWS S3、Tigris、R2、自建 MinIO 等），按你的部署方式改对应的"源"——安装器会自动生成 `volume-s3.conf`，**不要手动编辑该文件**（它会被重写）。
+默认安装用内置 MinIO。想换成外部 S3（AWS S3、腾讯云 COS、R2、自建 MinIO 等），按你的部署方式改对应的"源"——安装器会自动生成 `volume-s3.conf`，**不要手动编辑该文件**（它会被重写）。
 
 ### one-click 部署
 
@@ -123,14 +123,14 @@ volumeS3:
 
 ### 从零手动部署（非 one-click / 非 Helm）
 
-手动部署插件、手写 `volume-s3.conf` 的完整步骤见 [`examples/volume/s3/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.zh.md)；厂商级端到端（开通账号、建桶、取密钥）见 [Tigris 集成指南](./integrations/tigris.md)。
+手动部署插件、手写 `volume-s3.conf` 的完整步骤见 [`examples/volume/s3/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.zh.md)；腾讯云 COS 的建桶、取密钥指引(基于独立的 `cos` 驱动插件,而非本插件)见 [`examples/volume/cos/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.zh.md)。
 
 ### 常见后端
 
 | 提供方 | `ENDPOINT` | `REGION` |
 |--------|-----------|----------|
 | AWS S3 | `https://s3.<region>.amazonaws.com` | 桶所在地域 |
-| Tigris | `https://t3.storage.dev` | `auto` |
+| 腾讯云 COS | `https://cos.<region>.myqcloud.com` | 桶所在地域（如 `ap-guangzhou`） |
 | Cloudflare R2 | `https://<account-id>.r2.cloudflarestorage.com` | `auto` |
 | MinIO | `http://<minio-host>:9000` | 任意值 |
 

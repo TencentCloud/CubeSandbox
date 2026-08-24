@@ -12,13 +12,13 @@ BUCKET=my-cube-volumes
 
 # Required. The S3-compatible endpoint URL of your storage provider:
 #   AWS S3           https://s3.<region>.amazonaws.com
-#   Tigris           https://t3.storage.dev
+#   Tencent COS      https://cos.<region>.myqcloud.com
 #   Cloudflare R2    https://<account-id>.r2.cloudflarestorage.com
 #   MinIO            http://<minio-host>:9000
 ENDPOINT=https://<your-s3-endpoint>
 
 # Optional. Region used for SigV4 signing; default us-east-1.
-# AWS: the bucket's region. Tigris/R2: auto. MinIO: any value.
+# AWS/COS: the bucket's region. R2: auto. MinIO: any value.
 # REGION=us-east-1
 
 # Optional. Extra s3fs mount options, whitespace-separated, appended verbatim.
