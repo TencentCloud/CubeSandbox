@@ -1,0 +1,138 @@
+name: CubeS3lvol Test
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'CubeS3lvol/**'
+      - 'docker/Dockerfile.builder'
+      - '.github/workflows/cube-s3lvol-test.yml'
+  pull_request:
+    paths:
+      - 'CubeS3lvol/**'
+      - 'docker/Dockerfile.builder'
+      - '.github/workflows/cube-s3lvol-test.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: cube-s3lvol-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: CubeS3lvol offline tests
+    # Explicit 24.04 rather than ubuntu-latest so the toolchain stays
+    # predictable (gcc-13, python3.12, meson 1.3); the pinned SPDK baseline
+    # supports it.
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # SPDK / DPDK build dependencies. This mirrors the SPDK toolchain that
+      # docker/Dockerfile.builder installs (its apt list plus the Python
+      # pieces), reduced to what an ubuntu-24.04 runner provides natively:
+      # python >= 3.9 (genrpc.py uses argparse.BooleanOptionalAction) and
+      # meson >= 0.57.2 are both satisfied by the distro packages here, so no
+      # python3.9 shadowing or pip toolchain is needed, unlike in the builder
+      # image.
+      #
+      # The tool set is explicit on purpose: setup_dep.sh checks
+      # git/make/gcc/pkg-config/python3/patch and, for the CRT, cmake/ar/g++.
+      # Most of those are preinstalled on the runner, but patch is not, and
+      # relying on the image instead of declaring them makes the workflow
+      # silently dependent on the runner's package set.
+      #
+      # The Python modules are for SPDK's genrpc.py, which runs at the very
+      # start of `make` and fails the build if it cannot import jinja2 /
+      # tabulate (pyelftools is used by the DPDK build). The builder image
+      # installs the same trio via pip. ubuntu-24.04's python3 is
+      # externally-managed (PEP 668), hence --break-system-packages.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends \
+            git \
+            make \
+            gcc \
+            g++ \
+            cmake \
+            patch \
+            binutils \
+            libaio-dev \
+            libnuma-dev \
+            libssl-dev \
+            libpixman-1-dev \
+            uuid-dev \
+            libjson-c-dev \
+            libkeyutils-dev \
+            libcap-dev \
+            libpciaccess-dev \
+            libncurses-dev \
+            libcunit1-dev \
+            libcmocka-dev \
+            pkg-config \
+            python3 \
+            python3-pip \
+            python3-pyelftools \
+            meson \
+            ninja-build
+          python3 -m pip install --break-system-packages \
+            jinja2 \
+            tabulate \
+            pyelftools
+
+      # The SPDK build (with its pinned DPDK submodule) is ten to thirty
+      # minutes, so cache the whole deps/ tree. setup_dep.sh is "build what is
+      # missing": when the cache hits, spdk_is_built() and the AWS prefix
+      # checks make every step a no-op.
+      #
+      # The key is tied to the dependency recipes and the patches; a new SPDK
+      # pin or a patch change invalidates it. The runner arch is part of the
+      # key because DPDK's build products are not portable across arches.
+      - name: Cache SPDK and AWS CRT build
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            CubeS3lvol/deps/spdk
+            CubeS3lvol/deps/aws
+            CubeS3lvol/deps/aws-src
+          key: s3lvol-deps-${{ runner.arch }}-${{ hashFiles('CubeS3lvol/setup_dep.sh', 'CubeS3lvol/patches/**') }}
+
+      # setup_dep.sh's own --check reports "patches applied: no" even when
+      # they are applied (it calls patches/apply.sh --check without passing
+      # SPDK_ROOT, and apply.sh defaults to ../spdk), so do not run it here:
+      # the setup step itself failing is the signal.
+      - name: Set up build dependencies
+        working-directory: CubeS3lvol
+        run: |
+          ./setup_dep.sh --jobs "$(nproc)"
+
+      - name: Check layering rules
+        working-directory: CubeS3lvol
+        run: make check-rules
+
+      - name: Build the target binary
+        working-directory: CubeS3lvol
+        run: make
+
+      # The journal / wal / cache / local_dev tests hardcode their aio backing
+      # file under /data (e.g. /data/s3lvol_journal_test.aio), which the runner
+      # does not have. A sparse file there is all they need, so create it.
+      - name: Prepare test scratch directory
+        run: |
+          sudo mkdir -p /data
+          sudo chmod 1777 /data
+
+      # The 10 suites in test/integration/Makefile's `check` need no S3
+      # credentials and no root, so they are the CI gate. The credential-backed
+      # s3_client_test / s3_bs_dev_test and the dataplane suites (root + nvme
+      # + a real or emulated backend) are skipped here; run_all.sh reports
+      # those as skipped and exits 0 rather than pretending they passed.
+      - name: Offline integration tests
+        working-directory: CubeS3lvol
+        run: make check-offline
