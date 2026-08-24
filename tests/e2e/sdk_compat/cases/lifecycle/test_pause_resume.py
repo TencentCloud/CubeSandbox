@@ -79,6 +79,96 @@ def test_pause_and_connect_resume_preserves_env_vars(sdk_sandbox, sdk_e2e_config
         resumed.close()
 
 
+def test_resume_accepts_never_timeout(sdk_sandbox, sdk_e2e_config):
+    sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
+
+    sdk_sandbox.resume(timeout=-1)
+    assert wait_until_running(
+        sdk_sandbox,
+        timeout=sdk_e2e_config.default_timeout,
+    ) == "running"
+
+    wait_until_data_plane_ready(
+        sdk_sandbox,
+        timeout=sdk_e2e_config.default_timeout,
+        command_timeout=sdk_e2e_config.command_timeout,
+    )
+
+    result = sdk_sandbox.run_command(
+        "printf never-timeout-resume",
+        timeout=sdk_e2e_config.command_timeout,
+    )
+    assert_command_ok(result)
+    assert result.stdout == "never-timeout-resume"
+
+
+@pytest.mark.parametrize(
+    ("timeout", "stdout"),
+    [
+        (0, "zero-timeout-resume"),
+        (60, "positive-timeout-resume"),
+    ],
+)
+def test_resume_accepts_zero_and_positive_timeout(
+    sdk_sandbox,
+    sdk_e2e_config,
+    timeout,
+    stdout,
+):
+    sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
+
+    sdk_sandbox.resume(timeout=timeout)
+    assert wait_until_running(
+        sdk_sandbox,
+        timeout=sdk_e2e_config.default_timeout,
+    ) == "running"
+
+    wait_until_data_plane_ready(
+        sdk_sandbox,
+        timeout=sdk_e2e_config.default_timeout,
+        command_timeout=sdk_e2e_config.command_timeout,
+    )
+
+    result = sdk_sandbox.run_command(
+        f"printf {stdout}",
+        timeout=sdk_e2e_config.command_timeout,
+    )
+    assert_command_ok(result)
+    assert result.stdout == stdout
+
+
+def test_resume_rejects_invalid_negative_timeout(sdk_sandbox, sdk_e2e_config):
+    sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
+
+    with pytest.raises(
+        Exception,  # noqa: B017 - SDKs wrap API errors differently
+    ) as exc_info:
+        sdk_sandbox.resume(timeout=-2)
+
+    _assert_invalid_timeout_error(exc_info.value)
+
+
+def _assert_invalid_timeout_error(exc: Exception) -> None:
+    status_code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    if status_code is None and response is not None:
+        status_code = getattr(response, "status_code", None)
+    if status_code is None:
+        # E2B's SandboxException has no status_code attribute. Instead, its
+        # message starts with the HTTP status, for example "400: timeout: ...",
+        # so extract that number for the assertion below.
+        prefix, separator, _ = str(exc).partition(":")
+        if separator and prefix.strip().isdigit():
+            status_code = int(prefix)
+    assert status_code == 400, (
+        f"expected HTTP 400 timeout validation error, got "
+        f"{type(exc).__name__}: {exc}"
+    )
+
+    message = str(exc).lower()
+    assert "timeout" in message
+
+
 @pytest.mark.requires_capability(RUN_CODE)
 @pytest.mark.requires_code_interpreter
 def test_pause_and_connect_resume_preserves_run_code_state(sdk_sandbox, sdk_e2e_config):

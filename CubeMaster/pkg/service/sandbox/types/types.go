@@ -557,20 +557,21 @@ type ListCubeSandboxRes struct {
 }
 
 type SandboxBriefData struct {
-	SandboxID    string             `json:"sandbox_id,omitempty"`
-	Status       int32              `json:"status,omitempty"`
-	HostID       string             `json:"host_id,omitempty"`
-	HostIP       string             `json:"host_ip,omitempty"`
-	TemplateID   string             `json:"template_id,omitempty"`
-	CpuCount     int32              `json:"cpu_count,omitempty"`
-	MemoryMB     int32              `json:"memory_mb,omitempty"`
-	Annotations  map[string]string  `json:"annotations,omitempty"`
-	Labels       map[string]string  `json:"labels,omitempty"`
-	NameSpace    string             `json:"namespace,omitempty"`
-	CreateAt     int64              `json:"create_at,omitempty"`
-	PauseAt      int64              `json:"pause_at,omitempty"`
-	EndAt        int64              `json:"end_at,omitempty"`
-	VolumeMounts []*VolumeMountInfo `json:"volume_mounts,omitempty"`
+	SandboxID      string             `json:"sandbox_id,omitempty"`
+	Status         int32              `json:"status,omitempty"`
+	HostID         string             `json:"host_id,omitempty"`
+	HostIP         string             `json:"host_ip,omitempty"`
+	TemplateID     string             `json:"template_id,omitempty"`
+	CpuCount       int32              `json:"cpu_count,omitempty"`
+	MemoryMB       int32              `json:"memory_mb,omitempty"`
+	Annotations    map[string]string  `json:"annotations,omitempty"`
+	Labels         map[string]string  `json:"labels,omitempty"`
+	NameSpace      string             `json:"namespace,omitempty"`
+	CreateAt       int64              `json:"create_at,omitempty"`
+	PauseAt        int64              `json:"pause_at,omitempty"`
+	EndAt          int64              `json:"end_at,omitempty"`
+	TimeoutSeconds *int               `json:"timeout_seconds,omitempty"`
+	VolumeMounts   []*VolumeMountInfo `json:"volume_mounts,omitempty"`
 }
 
 type GetCubeSandboxReq struct {
@@ -602,6 +603,7 @@ type SandboxData struct {
 	ExposedPortMode        string             `json:"exposed_port_mode,omitempty"`
 	RequestedContainerPort int32              `json:"requested_container_port,omitempty"`
 	EndAt                  int64              `json:"end_at,omitempty"`
+	TimeoutSeconds         *int               `json:"timeout_seconds,omitempty"`
 	VolumeMounts           []*VolumeMountInfo `json:"volume_mounts,omitempty"`
 }
 
@@ -806,6 +808,10 @@ type UpdateRequest struct {
 	SandboxID    string `json:"sandbox_id"`
 	InstanceType string `json:"instance_type"`
 	Action       string `json:"action"`
+	// Timeout is the optional idle TTL in seconds for "resume" actions.
+	// nil or 0 preserves the existing timeout and starts a new idle-timeout
+	// window. -1 sets never-timeout; positive values set a new TTL.
+	Timeout *int `json:"timeout,omitempty"`
 }
 
 // SetTimeoutRequest is the wire shape for POST /cube/sandbox/timeout.
@@ -833,15 +839,14 @@ type SetTimeoutRes struct {
 	Ret       *Ret   `json:"ret,omitempty"`
 }
 
-// RefreshSandboxRequest extends the sandbox idle window by `duration`
-// seconds. Semantically `refresh(d)` is identical to `set_timeout(d)` in
-// this implementation: both rebase CreatedAt to "now" and set the new
-// TimeoutSeconds. Mirrors e2b's refresh-then-set-timeout convergence.
+// RefreshSandboxRequest refreshes the sandbox idle timeout. nil Duration uses
+// the cluster default timeout; -1 sets never-timeout; positive values set a new
+// TTL. Explicit 0 is rejected because immediate timeout belongs to set_timeout(0).
 type RefreshSandboxRequest struct {
 	RequestID    string `json:"requestID"`
 	SandboxID    string `json:"sandboxID"`
 	InstanceType string `json:"instanceType"`
-	Duration     int32  `json:"duration"`
+	Duration     *int32 `json:"duration,omitempty"`
 }
 
 // RefreshSandboxRes mirrors SetTimeoutRes.

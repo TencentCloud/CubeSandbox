@@ -45,6 +45,11 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		rsp.Ret.RetMsg = "action should be pause or resume"
 		return
 	}
+	if req.Action == "resume" && req.Timeout != nil && *req.Timeout < types.NeverTimeout {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+		rsp.Ret.RetMsg = "timeout must be >= -1 (use -1 for never timeout)"
+		return
+	}
 	if ret := normalizeSandboxIDInReq(ctx, &req.SandboxID); ret != nil {
 		rsp.Ret = ret
 		return
@@ -94,6 +99,28 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		applyLifecycleLockError(rsp, err)
 	}
 	return
+}
+
+// publishUpdateTimeout starts a new lifecycle timeout window after a successful
+// sandbox resume. A non-zero Timeout replaces the stored timeout; nil or 0
+// preserves the stored timeout while moving its CreatedAt and EndAt forward
+// from the resume time. Metadata updates are best effort and never change the
+// resume response.
+func publishUpdateTimeout(ctx context.Context, req *types.UpdateRequest) {
+	if req == nil || req.Action != "resume" {
+		return
+	}
+	if req.Timeout == nil || *req.Timeout == 0 {
+		if p := getTimeoutProvider(); p != nil {
+			if _, err := p.RebaseTimeoutWindow(ctx, req.SandboxID); err != nil {
+				log.G(ctx).Warnf("lifecycle: RebaseTimeoutWindow sandbox=%s failed: %v", req.SandboxID, err)
+			}
+		}
+		return
+	}
+	// refreshTimeoutMeta updates lifecycle metadata through the timeout provider.
+	// Resume does not return endAt, so the computed value is intentionally ignored.
+	refreshTimeoutMeta(ctx, req.SandboxID, *req.Timeout)
 }
 
 func applyLifecycleLockError(rsp *types.Res, err error) {

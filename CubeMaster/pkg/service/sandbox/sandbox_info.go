@@ -185,7 +185,7 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 		one.TemplateID = templateID
 		one.Annotations = buildAnnotationsFromLabels(sandboxLabels)
 		one.Labels = sandboxLabels
-		one.EndAt = LookupSandboxEndAt(ctx, sandbox.GetId())
+		one.EndAt, one.TimeoutSeconds = LookupSandboxTimeout(ctx, sandbox.GetId())
 		one.VolumeMounts = volumeMountsToContainerInfo(collectVolumeMountsFromContainers(sandbox.GetContainers()))
 		rsp.Data = append(rsp.Data, one)
 	}
@@ -288,12 +288,18 @@ func fillPauseBindingInfoFromMaster(ctx context.Context, req *types.GetCubeSandb
 	default:
 		return false
 	}
+	// The pause binding replaces Cubelet's normal info payload with a synthetic
+	// paused view. Carry the lifecycle fields into that replacement so clients
+	// do not lose endAt or the explicit never-timeout signal while paused.
+	endAt, timeoutSeconds := LookupSandboxTimeout(ctx, req.SandboxID)
 	one := &types.SandboxData{
-		SandboxID:   req.SandboxID,
-		Status:      st,
-		HostIP:      proxyMap.HostIP,
-		SandboxIP:   proxyMap.SandboxIP,
-		Annotations: ann,
+		SandboxID:      req.SandboxID,
+		Status:         st,
+		HostIP:         proxyMap.HostIP,
+		SandboxIP:      proxyMap.SandboxIP,
+		Annotations:    ann,
+		EndAt:          endAt,
+		TimeoutSeconds: timeoutSeconds,
 		Containers: []*types.ContainerInfo{
 			{
 				ContainerID: req.SandboxID,

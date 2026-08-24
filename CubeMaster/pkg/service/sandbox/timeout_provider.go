@@ -9,12 +9,13 @@ import (
 	"sync"
 )
 
-// TimeoutProvider is the contract sandbox_timeout.go uses to mutate the
-// lifecycle metadata channel without taking a hard build-time dependency on
-// pkg/lifecycle. lifecycle.Init() injects a concrete implementation at startup;
+// TimeoutProvider lets sandbox services read and update lifecycle metadata
+// without taking a hard build-time dependency on pkg/lifecycle.
+// lifecycle.Init() injects a concrete implementation at startup.
 type TimeoutProvider interface {
 	RefreshTimeout(ctx context.Context, sandboxID string, timeoutSeconds int) (endAtMs int64, err error)
-	LookupEndAt(ctx context.Context, sandboxID string) (endAtMs int64, err error)
+	RebaseTimeoutWindow(ctx context.Context, sandboxID string) (endAtMs int64, err error)
+	LookupTimeout(ctx context.Context, sandboxID string) (endAtMs int64, timeoutSeconds *int, err error)
 }
 
 var (
@@ -36,16 +37,17 @@ func getTimeoutProvider() TimeoutProvider {
 	return timeoutProvider
 }
 
-// LookupSandboxEndAt is a thin convenience wrapper around the installed
-// TimeoutProvider's LookupEndAt.
-func LookupSandboxEndAt(ctx context.Context, sandboxID string) int64 {
+// LookupSandboxTimeout returns the projected endAt and configured timeout from
+// one lifecycle metadata lookup. A nil timeout means that the metadata could
+// not be resolved; NeverTimeout (-1) explicitly identifies no deadline.
+func LookupSandboxTimeout(ctx context.Context, sandboxID string) (int64, *int) {
 	p := getTimeoutProvider()
 	if p == nil || sandboxID == "" {
-		return 0
+		return 0, nil
 	}
-	endAt, err := p.LookupEndAt(ctx, sandboxID)
+	endAt, timeoutSeconds, err := p.LookupTimeout(ctx, sandboxID)
 	if err != nil {
-		return 0
+		return 0, nil
 	}
-	return endAt
+	return endAt, timeoutSeconds
 }

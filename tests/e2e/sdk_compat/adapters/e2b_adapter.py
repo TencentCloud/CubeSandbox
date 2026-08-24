@@ -435,6 +435,13 @@ class E2BAdapter(SandboxAdapter):
             timeout=timeout,
         )
 
+    def resume(self, *, timeout: int | None = None) -> None:
+        config = self._e2e_config or SdkE2EConfig.from_env()
+        resumed = self.resume_or_connect(
+            timeout=timeout if timeout is not None else config.default_timeout,
+        )
+        self._sandbox = resumed.raw_sandbox
+
     def set_timeout(self, timeout: int) -> None:
         method = getattr(self._sandbox, "set_timeout", None)
         if not callable(method):

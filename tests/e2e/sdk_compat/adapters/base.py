@@ -88,6 +88,9 @@ class SandboxAdapter(ABC):
     def resume_or_connect(self, *, timeout: int = 60) -> "SandboxAdapter":
         raise UnsupportedCapability(self.backend, "pause_resume")
 
+    def resume(self, *, timeout: int | None = None) -> None:
+        raise UnsupportedCapability(self.backend, "pause_resume")
+
     def set_timeout(self, timeout: int) -> None:
         raise UnsupportedCapability(self.backend, "set_timeout")
 

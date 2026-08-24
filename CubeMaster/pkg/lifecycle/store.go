@@ -7,12 +7,64 @@ package lifecycle
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"sync/atomic"
 	"time"
 
+	"github.com/gomodule/redigo/redis"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 )
+
+// updateTimeoutWindowScript atomically reads the latest lifecycle snapshot,
+// optionally replaces timeout_seconds, moves the timeout window to now, and
+// publishes the matching update event. ARGV[9] is empty when resume must
+// preserve the stored timeout, or contains the explicit timeout supplied by
+// set_timeout, refresh, or resume.
+const updateTimeoutWindowScript = `
+local raw = redis.call("HGET", KEYS[1], ARGV[1])
+if not raw then
+    return {-1, 0}
+end
+
+local meta = cjson.decode(raw)
+local timeout
+if ARGV[9] == "" then
+    timeout = meta["timeout_seconds"]
+    if type(timeout) ~= "number" then
+        return {-2, 0}
+    end
+else
+    timeout = tonumber(ARGV[9])
+    if not timeout then
+        return {-3, 0}
+    end
+    meta["timeout_seconds"] = timeout
+end
+
+local now = tonumber(ARGV[2])
+meta["created_at"] = now
+
+local end_at = 0
+if timeout >= 0 then
+    end_at = now + timeout * 1000
+    meta["end_at"] = end_at
+else
+    meta["end_at"] = nil
+end
+
+local payload = cjson.encode(meta)
+redis.call("HSET", KEYS[1], ARGV[1], payload)
+redis.call(
+    "XADD", KEYS[2], "MAXLEN", "~", ARGV[3], "*",
+    ARGV[4], ARGV[5],
+    ARGV[6], ARGV[1],
+    ARGV[7], ARGV[2],
+    ARGV[8], payload
+)
+
+return {1, end_at}
+`
 
 // redisDoer is the minimal redigo-shaped surface the writer needs. wrapredis's
 // *RedisWrap satisfies it; tests substitute a fake.
@@ -20,9 +72,10 @@ type redisDoer interface {
 	Do(cmd string, args ...interface{}) (interface{}, error)
 }
 
-// Store performs the actual Redis writes. It is intentionally tiny and never
-// returns errors to its callers — every error is logged at warn level and
-// swallowed so a Redis hiccup cannot fail a sandbox create/destroy.
+// Store performs the actual Redis writes. Fire-and-forget lifecycle publishing
+// logs and swallows Redis errors so create/destroy can continue. Operations
+// whose callers need to distinguish a completed metadata mutation, such as
+// RebaseTimeoutWindow, return their Redis error.
 type Store struct {
 	doer    redisDoer
 	enabled atomic.Bool
@@ -119,26 +172,66 @@ func (s *Store) PublishState(ctx context.Context, sandboxID, state, source strin
 	}
 }
 
-// PublishUpdate refreshes the snapshot for an already-existing sandbox: HSET
-// the new meta JSON, then XADD an OpUpdate event. Used by set_timeout /
-// refresh when only mutable fields (TimeoutSeconds, CreatedAt, EndAt) change.
-func (s *Store) PublishUpdate(ctx context.Context, meta *SandboxLifecycleMeta) {
-	if s == nil || !s.enabled.Load() || s.doer == nil || meta == nil || meta.SandboxID == "" {
-		return
+// RebaseTimeoutWindow atomically preserves the timeout currently stored for a
+// sandbox, restarts its timeout window at nowMs, and emits the corresponding
+// update event. It returns the new absolute endAt in Unix milliseconds; 0
+// means the stored timeout is NeverTimeout.
+func (s *Store) RebaseTimeoutWindow(ctx context.Context, sandboxID string, nowMs int64) (int64, error) {
+	return s.updateTimeoutWindow(ctx, sandboxID, nowMs, nil)
+}
+
+// SetTimeoutWindow atomically replaces the stored timeout, starts its new
+// window at nowMs, and emits an update event containing that same snapshot.
+func (s *Store) SetTimeoutWindow(ctx context.Context, sandboxID string, nowMs int64, timeoutSeconds int) (int64, error) {
+	return s.updateTimeoutWindow(ctx, sandboxID, nowMs, &timeoutSeconds)
+}
+
+func (s *Store) updateTimeoutWindow(_ context.Context, sandboxID string, nowMs int64, timeoutSeconds *int) (int64, error) {
+	if s == nil || !s.enabled.Load() || s.doer == nil {
+		return 0, nil
+	}
+	if sandboxID == "" {
+		return 0, fmt.Errorf("sandboxID is required")
+	}
+	requestedTimeout := ""
+	if timeoutSeconds != nil {
+		requestedTimeout = strconv.Itoa(*timeoutSeconds)
 	}
 
-	payload, err := json.Marshal(meta)
+	values, err := redis.Int64s(s.doer.Do(
+		"EVAL",
+		updateTimeoutWindowScript,
+		2,
+		MetaKey,
+		EventStreamKey,
+		sandboxID,
+		nowMs,
+		EventStreamMaxLen,
+		FieldOp,
+		OpUpdate,
+		FieldSandboxID,
+		FieldTimestamp,
+		FieldPayload,
+		requestedTimeout,
+	))
 	if err != nil {
-		log.G(ctx).Warnf("lifecycle: marshal update meta sandbox=%s: %v", meta.SandboxID, err)
-		return
+		return 0, fmt.Errorf("update lifecycle timeout for sandbox %s: %w", sandboxID, err)
+	}
+	if len(values) != 2 {
+		return 0, fmt.Errorf("update lifecycle timeout for sandbox %s returned %d values", sandboxID, len(values))
 	}
 
-	if _, err := s.doer.Do("HSET", MetaKey, meta.SandboxID, payload); err != nil {
-		log.G(ctx).Warnf("lifecycle: HSET (update) %s %s failed: %v", MetaKey, meta.SandboxID, err)
-	}
-
-	if _, err := s.xadd(OpUpdate, meta.SandboxID, payload); err != nil {
-		log.G(ctx).Warnf("lifecycle: XADD update %s failed: %v", meta.SandboxID, err)
+	switch values[0] {
+	case 1:
+		return values[1], nil
+	case -1:
+		return 0, fmt.Errorf("lifecycle metadata for sandbox %s was not found", sandboxID)
+	case -2:
+		return 0, fmt.Errorf("lifecycle metadata for sandbox %s has no timeout", sandboxID)
+	case -3:
+		return 0, fmt.Errorf("invalid timeout for sandbox %s", sandboxID)
+	default:
+		return 0, fmt.Errorf("update lifecycle timeout for sandbox %s returned status %d", sandboxID, values[0])
 	}
 }
 

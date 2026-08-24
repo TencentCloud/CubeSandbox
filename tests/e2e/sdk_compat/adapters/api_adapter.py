@@ -57,6 +57,15 @@ class ApiClient:
         resp.raise_for_status()
         return resp.json()
 
+    def refresh_sandbox(self, sandbox_id: str, *, duration: int | None = None) -> None:
+        payload = {} if duration is None else {"duration": duration}
+        resp = self._session.post(
+            f"{self._config.cube_api_url}/sandboxes/{sandbox_id}/refreshes",
+            json=payload,
+            timeout=self._config.api_timeout,
+        )
+        resp.raise_for_status()
+
     def list_sandboxes(self) -> list[dict]:
         resp = self._session.get(
             f"{self._config.cube_api_url}/sandboxes",

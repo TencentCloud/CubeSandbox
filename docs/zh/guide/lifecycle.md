@@ -90,7 +90,11 @@ print(info)
 # }
 ```
 
-`endAt` 表示按当前 `timeout` 估算的下一次超时时间。每次接收到新请求或调用 `set_timeout`（若有），`endAt` 会被刷新。对于**永不超时**的沙箱没有截止时间，因此响应中会**省略** `endAt`，而不是把它渲染成等于 `startedAt`。
+`endAt` 表示按当前 `timeout` 估算的下一次超时时间。每次接收到新请求或调用 `set_timeout`（若有），`endAt` 会被刷新。对于**永不超时**的沙箱没有截止时间，因此 Cube 原生响应中会**省略** `endAt`，而不是把它渲染成等于 `startedAt`。
+
+为了兼容 E2B SDK，当请求来自 E2B SDK 时，CubeAPI 会对永不超时的沙箱信息做特殊处理。如果沙箱通过 `timeout=-1` 创建或恢复，CubeMaster 会存储 `end_at=0`，CubeAPI 内部会把它视为 `None`；但 E2B SDK 的模型要求 `endAt` 必须是合法 datetime。因此在面向 E2B SDK 的响应路径里，CubeAPI 会返回远未来哨兵值 `9999-12-31T23:59:59Z`，而不是省略 `endAt`。请求不会被拒绝；`-1` 仍然表示永不超时。
+
+该兼容路径目前仅识别 `User-Agent` 中包含 `e2b-python-sdk/`、`e2b-js-sdk/` 或 `e2b-code-interpreter/` 的请求（不区分大小写）。缺少 `User-Agent` 或使用其他标识的请求——包括 curl、Cube SDK、`e2b-cli/` 以及使用其他标识的 E2B SDK——仍保留 Cube 原生行为，即永不超时时省略 `endAt`。若要支持新的 E2B 客户端，需要同时增加其稳定的 `User-Agent` 标识、单元测试和 SDK 兼容 E2E 测试。
 
 ## 列出运行中的沙箱
 
@@ -217,7 +221,26 @@ python examples/code-sandbox-quickstart/auto-kill.py
 
 仓库默认**不配置集群级空闲超时**（`default_timeout_insec: -1`）。若希望集群自动回收未显式传 `timeout` 的沙箱，可改为正数（例如 `300`）。修改后需重启 `cube-sandbox-cubemaster.service`。
 
+::: warning Refresh 省略 duration
+`POST /sandboxes/{sandboxID}/refreshes` 省略 `duration` 时会使用 `default_timeout_insec`，不会保留沙箱当前的 timeout。在仓库默认值 `-1`（或任何不大于 `0` 的配置）下，省略 `duration` 会把沙箱改为永不超时。如果刷新后仍需保持有限的空闲 TTL，请显式传入正数 `duration`。
+:::
+
 同一段里的 `create_timeout_insec` 与空闲 TTL 无关，仅限制创建/调度 RPC 的截止时间。更多 CubeMaster 配置项见[服务管理 — CubeMaster 配置项](service-management.md#cubemaster-settings)。
+
+### 各 API 的 timeout 取值行为
+
+处理结果由 API 和传入值共同决定。表中的“重新计时”表示操作成功后重新开始空闲倒计时。
+
+| API | `< -1` | `-1` | `0` | 缺省 | 正数 `N` |
+|---|---|---|---|---|---|
+| `create_sandbox` | 按 `-1` 处理：永不超时 | 永不超时 | 立即到期 | 使用 `default_timeout_insec`；默认值非正数时永不超时 | timeout 设为 `N` 秒；创建成功后开始计时 |
+| `set_timeout` | 拒绝（400） | 改为永不超时 | 立即到期 | 不允许缺省；`timeout` 必填 | timeout 改为 `N` 秒；重新计时 |
+| `refresh` | 拒绝（400） | 改为永不超时 | 拒绝（400） | 使用 `default_timeout_insec`；仓库默认配置下永不超时 | timeout 改为 `N` 秒；重新计时；无 `3600` 秒上限 |
+| `resume` | 拒绝（400） | 恢复；改为永不超时 | 恢复；保留原 timeout，重新计时 | 恢复；保留原 timeout，重新计时 | 恢复；timeout 改为 `N` 秒，重新计时 |
+| `connect`（已暂停） | 拒绝（400） | 恢复；改为永不超时 | 恢复；保留原 timeout，重新计时 | 恢复；保留原 timeout，重新计时 | 恢复；timeout 改为 `N` 秒，重新计时 |
+| `connect`（运行中） | 拒绝（400） | 直接返回运行中的沙箱；timeout 不变 | 直接返回运行中的沙箱；timeout 不变 | 直接返回运行中的沙箱；timeout 不变 | 直接返回运行中的沙箱；timeout 不变 |
+
+### 运行时行为与故障排查
 
 - **暂停的状态保真度**：CPU 寄存器、进程内存、TCP 连接（无外部对端）、文件系统改动都会随快照保留；面向外部的连接（如 sandbox 主动建立的 outbound socket）会在暂停时断开，恢复后由应用层自行重连。
 - **集群一致性**：自动暂停由部署在 control 节点上的 `cube-lifecycle-manager` 服务统一协调；它消费 CubeMaster 通过 Redis stream 发布的生命周期事件，通过 Redis 注册表实时发现所有在线的 CubeProxy 副本并广播状态。多副本环境下用 Redis SETNX 互斥锁确保同一沙箱不会被并发暂停或恢复。

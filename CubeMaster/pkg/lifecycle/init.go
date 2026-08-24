@@ -58,29 +58,25 @@ type storeTimeoutProvider struct {
 	store *Store
 }
 
-// RefreshTimeout reads the existing meta (preserving fields the request
-// doesn't carry: AutoPause / AutoResume / TemplateID / HostID / HostIP /
-// InstanceType), rewrites CreatedAt + TimeoutSeconds + EndAt, and publishes
-// an OpUpdate event so every sidecar replica converges on the new view.
+// RefreshTimeout atomically replaces TimeoutSeconds, starts a new timeout
+// window, and publishes the matching snapshot so Redis and every lifecycle
+// consumer observe the same update order.
 func (p *storeTimeoutProvider) RefreshTimeout(ctx context.Context, sandboxID string, timeoutSeconds int) (int64, error) {
 	if p == nil || p.store == nil {
 		return 0, nil
 	}
-	meta, err := p.store.LoadMeta(ctx, sandboxID)
-	if err != nil {
-		return 0, err
-	}
-	if meta == nil {
+	return p.store.SetTimeoutWindow(ctx, sandboxID, time.Now().UnixMilli(), timeoutSeconds)
+}
+
+// RebaseTimeoutWindow preserves the timeout already stored in lifecycle
+// metadata, but starts its idle-timeout window again from now. Resume uses
+// this when no replacement timeout is supplied (nil or 0), so CreatedAt and
+// EndAt stay consistent with the newly resumed sandbox.
+func (p *storeTimeoutProvider) RebaseTimeoutWindow(ctx context.Context, sandboxID string) (int64, error) {
+	if p == nil || p.store == nil {
 		return 0, nil
 	}
-
-	now := time.Now().UnixMilli()
-	ts := timeoutSeconds
-	meta.TimeoutSeconds = &ts
-	meta.CreatedAt = now
-	meta.EndAt = projectedEndAt(now, timeoutSeconds)
-	p.store.PublishUpdate(ctx, meta)
-	return meta.EndAt, nil
+	return p.store.RebaseTimeoutWindow(ctx, sandboxID, time.Now().UnixMilli())
 }
 
 // projectedEndAt maps idle TTL to EndAt (unix ms). See docs/guide/lifecycle.md.
@@ -91,25 +87,33 @@ func projectedEndAt(nowMs int64, timeoutSeconds int) int64 {
 	return nowMs + int64(timeoutSeconds)*1000
 }
 
-// LookupEndAt reads the latest meta.EndAt straight from the lifecycle snapshot in Redis.
-func (p *storeTimeoutProvider) LookupEndAt(ctx context.Context, sandboxID string) (int64, error) {
+// LookupTimeout reads a sandbox's lifecycle metadata from Redis once and returns:
+//   - endAtMs: the absolute expiration time in Unix milliseconds, or 0 when the
+//     sandbox has no deadline or the expiration time is unavailable;
+//   - timeoutSeconds: the configured timeout, where -1 means never-timeout and
+//     nil means the metadata does not contain a timeout;
+//   - err: the Redis read error, if the metadata could not be read.
+func (p *storeTimeoutProvider) LookupTimeout(ctx context.Context, sandboxID string) (endAtMs int64, timeoutSeconds *int, err error) {
 	if p == nil || p.store == nil {
-		return 0, nil
+		return 0, nil, nil
 	}
 	meta, err := p.store.LoadMeta(ctx, sandboxID)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	if meta == nil {
-		return 0, nil
+		return 0, nil, nil
+	}
+	if meta.TimeoutSeconds != nil && *meta.TimeoutSeconds == sandboxtypes.NeverTimeout {
+		return 0, meta.TimeoutSeconds, nil
 	}
 	if meta.EndAt > 0 {
-		return meta.EndAt, nil
+		return meta.EndAt, meta.TimeoutSeconds, nil
 	}
 	if meta.CreatedAt > 0 && meta.TimeoutSeconds != nil && *meta.TimeoutSeconds > 0 {
-		return meta.CreatedAt + int64(*meta.TimeoutSeconds)*1000, nil
+		return meta.CreatedAt + int64(*meta.TimeoutSeconds)*1000, meta.TimeoutSeconds, nil
 	}
-	return 0, nil
+	return 0, meta.TimeoutSeconds, nil
 }
 
 // isNilPool guards against wrapredis.GetRedis returning a typed-nil

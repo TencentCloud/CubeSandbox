@@ -204,11 +204,28 @@ class TracingSandboxAdapter(SandboxAdapter):
         )
         return wrap_adapter(resumed, self._trace)
 
+    def resume(self, *, timeout: int | None = None) -> None:
+        return self._trace.capture(
+            "resume",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "timeout": timeout,
+            },
+            lambda: self._wrapped.resume(timeout=timeout),
+            output=lambda _: {"resumed": True},
+        )
+
     def set_timeout(self, timeout: int) -> None:
         return self._trace.capture(
             "set_timeout",
-            {"backend": self.backend, "sandbox_id": self.sandbox_id, "timeout": timeout},
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "timeout": timeout,
+            },
             lambda: self._wrapped.set_timeout(timeout),
+            output=lambda _: {"timeout": timeout},
         )
 
     def create_snapshot(self) -> str:

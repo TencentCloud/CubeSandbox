@@ -382,6 +382,9 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	if err := pausesnap.Delete(ctx, snapID); err != nil {
 		log.G(ctx).Warnf("resume: delete pause snap meta %s: %v", snapID, err)
 	}
+	// Keep the lifecycle timeout view in sync with the resumed sandbox before
+	// publishing the running-state event to lifecycle consumers.
+	publishUpdateTimeout(ctx, req)
 	runAfterUpdateSandboxSuccessHook(ctx, req.SandboxID, req.InstanceType, "resume", req.RequestID)
 	return rsp
 }
