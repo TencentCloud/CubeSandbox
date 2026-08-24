@@ -67,7 +67,7 @@ MAC itself.
 | Scenario | Behavior |
 |---|---|
 | New on-link dest, hairpin network | Gateway fallback delivers immediately (zero loss); switch to direct MAC once learned. |
-| New on-link dest, non-hairpin | Bounded blackhole (≤ scan interval + ARP RTT), then converges. |
+| New on-link dest, non-hairpin | Bounded blackhole (≤ scan interval + ARP RTT + NEG_TTL — a fresh negative cache can suppress the fib refresh for up to NEG_TTL after the kernel learns the neighbor), then converges. |
 | Learned dest, MAC changes silently | Keepalive (≤16s) → kernel NUD re-validates → fib serves the new MAC; cache staleness ≤ CACHE_TTL. |
 | Dest dead | fib keeps failing → negative cache (1s) + gateway fallback; scanner backs off to 1 probe/16s. |
 | Scanner process restarts | No persisted state to restore; the map is rebuilt fresh; the datapath keeps serving via fib + fallback. |

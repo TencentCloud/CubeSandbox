@@ -96,11 +96,14 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } snat_iplist SEC(".maps");
 
-/* Direct-egress on-link neighbor cache.
+/* Direct-egress on-link neighbor trigger/cache.
  *
  * key:   destination IPv4 address in packet-byte layout
- * value: destination MAC plus probe deadline; an all-zero MAC means initial
- *        resolution is pending
+ * value: struct direct_neighbor — a TTL-bounded cache of the last
+ *        bpf_fib_lookup() result (MAC + valid_until + fib_ok + last_used) plus
+ *        the userspace scanner's trigger scheduling fields (step +
+ *        next_attempt/next_refresh). The MAC always comes from fib; this map
+ *        only caches it briefly and drives scanner scheduling.
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);

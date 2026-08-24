@@ -120,8 +120,6 @@ static __always_inline bool direct_neighbor_is_zero(const struct direct_neighbor
 	return macaddr->p1 == 0 && macaddr->p2 == 0;
 }
 
-#define EGRESS_MAC_READY	0
-
 /* Resolve the external L2 addresses for an on-link direct-egress destination.
  *
  * The kernel neighbor table is the only source of truth for the MAC:
@@ -133,11 +131,11 @@ static __always_inline bool direct_neighbor_is_zero(const struct direct_neighbor
  * There is no packet drop or packet-into-ARP conversion: an unresolved on-link
  * destination is forwarded to the gateway (zero loss on hairpin networks; a
  * bounded blackhole elsewhere until the scanner's trigger makes the kernel ARP
- * resolve and the next fib refresh caches the MAC). Always returns
- * EGRESS_MAC_READY.
+ * resolve and the next fib refresh caches the MAC). It only rewrites the skb's
+ * L2 addresses; the packet is always forwarded.
  */
-static __always_inline int prepare_egress_l2(struct __sk_buff *skb,
-					     struct ethhdr *l2, __u32 daddr)
+static __always_inline void prepare_egress_l2(struct __sk_buff *skb,
+					      struct ethhdr *l2, __u32 daddr)
 {
 	struct bpf_fib_lookup fib = {
 		.family = AF_INET,
@@ -154,7 +152,7 @@ static __always_inline int prepare_egress_l2(struct __sk_buff *skb,
 	if (!direct_egress_is_onlink(daddr)) {
 		set_mac_pair(l2, egress_smacaddr_p1, egress_smacaddr_p2,
 			     egress_dmacaddr_p1, egress_dmacaddr_p2);
-		return EGRESS_MAC_READY;
+		return;
 	}
 
 	now = bpf_ktime_get_ns();
@@ -173,7 +171,7 @@ static __always_inline int prepare_egress_l2(struct __sk_buff *skb,
 		/* Map full or vanished: untracked, pure gateway fallback. */
 		set_mac_pair(l2, egress_smacaddr_p1, egress_smacaddr_p2,
 			     egress_dmacaddr_p1, egress_dmacaddr_p2);
-		return EGRESS_MAC_READY;
+		return;
 	}
 
 	if (now < neighbor->valid_until_ns) {
@@ -220,7 +218,6 @@ static __always_inline int prepare_egress_l2(struct __sk_buff *skb,
 	/* Throttle last_used writes to 1s granularity; never renew valid_until. */
 	if (now > neighbor->last_used_ns + DIRECT_NEIGH_TOUCH_THROTTLE_NS)
 		neighbor->last_used_ns = now;
-	return EGRESS_MAC_READY;
 }
 
 /* Egress flow classification now lives in classify_egress_flow() (session.h),

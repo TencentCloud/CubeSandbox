@@ -15,8 +15,13 @@ package cubevs
 // Field ownership in the shared map entry (see cubevs.h struct direct_neighbor):
 // the datapath writes addr/fib_ok/valid_until_ns/last_used_ns; this scanner
 // writes step/next_attempt_ns/next_refresh_ns. A lost read-modify-write race on
-// either side only delays a trigger or an activity timestamp by one scan cycle;
-// it can never produce a wrong MAC, so it is benign and self-healing.
+// either side is bounded and self-healing: it can delay a trigger or an
+// activity timestamp by a scan cycle, and — because this scanner writes back
+// the whole value — it can transiently resurrect a MAC the datapath had just
+// invalidated (for at most the leftover valid_until, ≤ CACHE_TTL), before the
+// next datapath fib refresh corrects it. That stays within the documented
+// "cache staleness ≤ CACHE_TTL" failure model, so it is accepted, but it is not
+// strictly "never a wrong MAC".
 
 import (
 	"fmt"
@@ -39,10 +44,6 @@ type directNeighbor struct {
 	LastUsedNs    uint64
 	NextAttemptNs uint64
 	NextRefreshNs uint64
-}
-
-func (n *directNeighbor) macZero() bool {
-	return n.Addr == ([6]uint8{})
 }
 
 // Scanner tuning. All durations are in nanoseconds to match the datapath's
@@ -191,21 +192,21 @@ func (s *ebpfDirectNeighStore) delete(key uint32) error {
 	return s.m.Delete(&key)
 }
 
-// sendUDPTrigger sends a single UDP datagram from the node NIC's source IP to
-// the target. The learning event is the kernel's ARP resolution for the target
-// (and its reply); the L4 payload is irrelevant and no reply is awaited.
-func sendUDPTrigger(nodeIP net.IP) func(uint32) error {
+// sendUDPTrigger returns a trigger sender that shares one long-lived UDP socket
+// bound to the node NIC's source IP, using WriteToUDP per target. This avoids a
+// DialUDP+Close cycle per trigger at the token-bucket ceiling. The learning
+// event is the kernel's ARP resolution for the target (and its reply); the L4
+// payload is irrelevant and no reply is awaited.
+func sendUDPTrigger(nodeIP net.IP) (func(uint32) error, error) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: nodeIP, Port: 0})
+	if err != nil {
+		return nil, err
+	}
 	return func(targetIP uint32) error {
 		dst := &net.UDPAddr{IP: uint32ToIP(targetIP), Port: directNeighTriggerPort}
-		src := &net.UDPAddr{IP: nodeIP, Port: 0}
-		conn, err := net.DialUDP("udp4", src, dst)
-		if err != nil {
-			return err
-		}
-		defer conn.Close()
-		_, err = conn.Write([]byte{0})
+		_, err := conn.WriteToUDP([]byte{0}, dst)
 		return err
-	}
+	}, nil
 }
 
 // StartDirectNeighScanner starts the periodic scanner for direct-mode on-link
@@ -219,7 +220,11 @@ func StartDirectNeighScanner(nodeIP net.IP) error {
 	if err != nil {
 		return fmt.Errorf("loadPinnedMap %s: %w", MapNameDirectNeigh, err)
 	}
-	scanner := newDirectNeighScanner(&ebpfDirectNeighStore{m: m}, sendUDPTrigger(nodeIP), mustCurrentNS)
+	trigger, err := sendUDPTrigger(nodeIP)
+	if err != nil {
+		return fmt.Errorf("sendUDPTrigger: %w", err)
+	}
+	scanner := newDirectNeighScanner(&ebpfDirectNeighStore{m: m}, trigger, mustCurrentNS)
 	go scanner.run(make(chan struct{})) // never closed: runs for the process lifetime
 	return nil
 }
