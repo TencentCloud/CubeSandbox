@@ -17,7 +17,7 @@
 # Update these after publishing dedicated Releases, for example:
 #   git tag kernel-release-v1.0.0 && git push origin kernel-release-v1.0.0
 #   git tag guest-image-v1.0.0 && git push origin guest-image-v1.0.0
-kernel_bm_amd64: kernel-release-v1.0.0
-kernel_bm_arm64: kernel-release-v1.0.0
-kernel_pvm: kernel-release-v1.0.0
-guest_image: guest-image-v1.0.0
+kernel_bm_amd64: kernel-release-260812-1
+kernel_bm_arm64: kernel-release-260812-1
+kernel_pvm: kernel-release-260812-1
+guest_image: guest-image-260820-1
