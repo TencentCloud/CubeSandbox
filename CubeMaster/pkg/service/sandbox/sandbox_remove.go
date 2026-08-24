@@ -225,10 +225,23 @@ func callCubelet(ctx context.Context, callEp string, req *cubebox.DestroyCubeSan
 			return ret.Errorf(errorcode.ErrorCode_MasterInternalError, "DeleteSandboxProxyMap failed: %s", err.Error())
 		}
 		localcache.DeleteSandboxCache(req.GetSandboxID())
-		if err := runAfterDestroySandboxSuccessHook(ctx, req.GetSandboxID()); err != nil {
+		if err := runAfterDestroySandboxSuccessHook(ctx, req.GetSandboxID(), destroyReason(req)); err != nil {
 			log.G(ctx).Warnf("afterDestroySandboxSuccess hook failed: %v", err)
 		}
 
 		return nil
 	})
+}
+
+// destroyReason recovers the kill reason recorded on the destroy request
+// (set by DestroySandbox from req.KillReason, defaulting to "request").
+func destroyReason(req *cubebox.DestroyCubeSandboxRequest) string {
+	if req == nil {
+		return "request"
+	}
+	reason := req.GetAnnotations()[constants.CubeAnnotationsKillReason]
+	if reason == "" {
+		return "request"
+	}
+	return reason
 }

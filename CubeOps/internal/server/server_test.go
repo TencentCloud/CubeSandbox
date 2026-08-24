@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/config"
 	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -275,5 +276,43 @@ func TestCubeopsRecovery_NoDoubleWriteWhenHandlerAlreadyWrote(t *testing.T) {
 	}
 	if !strings.Contains(oc.buf.String(), "panic recovered") {
 		t.Errorf("expected cubelog to record \"panic recovered\"; got:\n%s", oc.buf.String())
+	}
+}
+
+func TestWebhookHealthz_Disabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	s := &Server{cfg: &config.Config{}}
+	r := gin.New()
+	r.GET("/webhook/healthz", s.webhookHealthz)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/webhook/healthz", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("disabled healthz status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "disabled") {
+		t.Fatalf("disabled body = %s", w.Body.String())
+	}
+}
+
+func TestWebhookHealthz_ToleranceWindow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	// Enabled but no runtime attached → not ready. The probe must tolerate
+	// the first two failures (200 degraded) and only then flip to 503.
+	s := &Server{cfg: &config.Config{Webhook: config.WebhookConfig{Enabled: true}}}
+	r := gin.New()
+	r.GET("/webhook/healthz", s.webhookHealthz)
+
+	for i := 0; i < 2; i++ {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/webhook/healthz", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("failure %d status = %d, want 200 within tolerance", i+1, w.Code)
+		}
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/webhook/healthz", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("3rd failure status = %d, want 503", w.Code)
 	}
 }

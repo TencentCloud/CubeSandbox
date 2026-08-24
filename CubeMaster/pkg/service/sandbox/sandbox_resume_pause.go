@@ -114,7 +114,7 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 		rsp.Ret.RetMsg = fmt.Sprintf("pause ok on cubelet but master meta failed: %v", err)
 		return rsp
 	}
-	runAfterUpdateSandboxSuccessHook(ctx, req.SandboxID, req.InstanceType, "pause", req.RequestID)
+	runAfterUpdateSandboxSuccessHook(ctx, req.SandboxID, req.InstanceType, "pause", req.RequestID, req.Source)
 	return rsp
 }
 
@@ -382,7 +382,7 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	if err := pausesnap.Delete(ctx, snapID); err != nil {
 		log.G(ctx).Warnf("resume: delete pause snap meta %s: %v", snapID, err)
 	}
-	runAfterUpdateSandboxSuccessHook(ctx, req.SandboxID, req.InstanceType, "resume", req.RequestID)
+	runAfterUpdateSandboxSuccessHook(ctx, req.SandboxID, req.InstanceType, "resume", req.RequestID, req.Source)
 	return rsp
 }
 

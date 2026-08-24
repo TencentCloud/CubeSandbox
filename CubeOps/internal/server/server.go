@@ -9,19 +9,28 @@ import (
 	"regexp"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/auth"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/config"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/handler"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/httputil"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/service"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
 	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
+
+// WebhookStatus is the webhook subsystem health surface consumed by probes.
+type WebhookStatus interface {
+	Started() bool
+	Healthy(ctx context.Context) bool
+}
 
 // Server is the CubeOps HTTP server.
 type Server struct {
@@ -30,6 +39,10 @@ type Server struct {
 	jm      *auth.JWTManager
 	httpSrv *http.Server
 	cm      *cubemaster.Client
+	webhook WebhookStatus
+
+	whMu       sync.Mutex
+	whFailures int
 }
 
 // New creates a new CubeOps server.
@@ -43,6 +56,10 @@ func New(cfg *config.Config, s *store.Store) *Server {
 		cm:    cm,
 	}
 }
+
+// SetWebhookStatus attaches the webhook subsystem (nil when disabled) so the
+// readiness and health endpoints can report it.
+func (s *Server) SetWebhookStatus(w WebhookStatus) { s.webhook = w }
 
 // Start begins listening for HTTP requests.
 func (s *Server) Start() error {
@@ -89,6 +106,16 @@ func (s *Server) buildRouter() *gin.Engine {
 	r.GET("/health", func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
 	})
+	// Prometheus scrape endpoint (no auth, same port).
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
+	// Readiness: the HTTP status is driven ONLY by DB connectivity so a
+	// webhook subsystem fault cannot take the management API off the load
+	// balancer; webhook state is reported in the body for monitors / smart
+	// gateways.
+	r.GET("/readyz", s.readyz)
+	// Dedicated webhook health probe (no auth, alert-only semantics).
+	r.GET("/webhook/healthz", s.webhookHealthz)
 
 	// Wire up service layer + handlers.
 	authSvc := service.NewAuthService(s.store, s.jm)
@@ -97,6 +124,7 @@ func (s *Server) buildRouter() *gin.Engine {
 	storeH := handler.NewStoreHandler(handler.DefaultRegistryClient())
 	configH := handler.NewConfigHandler(s.cfg.Bind, 100, s.cfg.JWTSecret != "", s.cfg.SandboxDomain, "cubebox")
 	agenthubH := handler.NewAgentHubHandler(s.store, s.cm)
+	webhookH := handler.NewWebhookHandler(service.NewWebhookService(s.store), s.cfg.Webhook.Enabled)
 	// SDK handler gets the AgentHubService so that E2B template/snapshot
 	// deletions can reverse-sync AgentHub registrations
 	sdkH := handler.NewSDKHandler(s.cm).WithAgentHubService(agenthubH.AgentHubService())
@@ -114,6 +142,7 @@ func (s *Server) buildRouter() *gin.Engine {
 	configH.Register(authed)
 	storeH.Register(authed)
 	agenthubH.Register(authed)
+	webhookH.Register(authed)
 
 	// SDK routes — mounted at both /api/v1/sdk and /api/v1/sdk/v2 because
 	// the WebUI and the E2B-compatible clients hit different prefixes.
@@ -124,6 +153,62 @@ func (s *Server) buildRouter() *gin.Engine {
 	sdkV2Group.GET("/sandboxes/:id/logs", sdkH.GetSandboxLogs)
 
 	return r
+}
+
+// readyz reports DB connectivity as the authoritative status and includes the
+// webhook subsystem state as a JSON field (monitor-only, does not gate LB).
+func (s *Server) readyz(c *gin.Context) {
+	ctx := c.Request.Context()
+	dbOK := s.store.DB().WithContext(ctx).Exec("SELECT 1").Error == nil
+	status := http.StatusOK
+	if !dbOK {
+		status = http.StatusServiceUnavailable
+	}
+	webhookReady := false
+	if s.webhook != nil {
+		webhookReady = s.webhook.Healthy(ctx)
+	}
+	httputil.WriteJSON(c, status, gin.H{
+		"db":            map[string]string{"status": readyStatus(dbOK)},
+		"webhook_ready": webhookReady,
+	})
+}
+
+// webhookHealthz is an alert-only probe: it returns 200 with a "degraded"
+// body during a short tolerance window (3 consecutive failures) and only
+// flips to 503 after the window. It is deliberately NOT wired to k8s probes
+// (see chart comments) so a Redis blip never restarts or drains the pod.
+func (s *Server) webhookHealthz(c *gin.Context) {
+	ctx := c.Request.Context()
+	if !s.cfg.Webhook.Enabled {
+		httputil.WriteJSON(c, http.StatusOK, gin.H{"webhook": "disabled"})
+		return
+	}
+	ready := s.webhook != nil && s.webhook.Healthy(ctx)
+	s.whMu.Lock()
+	defer s.whMu.Unlock()
+	if !ready {
+		s.whFailures++
+		if s.whFailures < 3 {
+			httputil.WriteJSON(c, http.StatusOK, gin.H{
+				"webhook": "degraded", "consecutive_failures": s.whFailures,
+			})
+			return
+		}
+		httputil.WriteJSON(c, http.StatusServiceUnavailable, gin.H{
+			"webhook": "not_ready", "consecutive_failures": s.whFailures,
+		})
+		return
+	}
+	s.whFailures = 0
+	httputil.WriteJSON(c, http.StatusOK, gin.H{"webhook": "ready"})
+}
+
+func readyStatus(ok bool) string {
+	if ok {
+		return "ok"
+	}
+	return "unavailable"
 }
 
 // requestLogger emits request traces to the stat log.

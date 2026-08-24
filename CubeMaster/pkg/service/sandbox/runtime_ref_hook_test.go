@@ -19,24 +19,24 @@ func TestDestroyHookChain_FIFOAndContinueOnError(t *testing.T) {
 	var order []string
 	wantErr := errors.New("h2 boom")
 
-	RegisterAfterDestroySandboxSuccessHook(func(_ context.Context, id string) error {
-		order = append(order, "h1:"+id)
+	RegisterAfterDestroySandboxSuccessHook(func(_ context.Context, id, reason string) error {
+		order = append(order, "h1:"+id+":"+reason)
 		return nil
 	})
-	RegisterAfterDestroySandboxSuccessHook(func(_ context.Context, id string) error {
-		order = append(order, "h2:"+id)
+	RegisterAfterDestroySandboxSuccessHook(func(_ context.Context, id, reason string) error {
+		order = append(order, "h2:"+id+":"+reason)
 		return wantErr
 	})
-	RegisterAfterDestroySandboxSuccessHook(func(_ context.Context, id string) error {
-		order = append(order, "h3:"+id)
+	RegisterAfterDestroySandboxSuccessHook(func(_ context.Context, id, reason string) error {
+		order = append(order, "h3:"+id+":"+reason)
 		return nil
 	})
 
-	err := runAfterDestroySandboxSuccessHook(context.Background(), "sbx-x")
+	err := runAfterDestroySandboxSuccessHook(context.Background(), "sbx-x", "orphaned")
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("first error must propagate, got %v", err)
 	}
-	if got := order; len(got) != 3 || got[0] != "h1:sbx-x" || got[1] != "h2:sbx-x" || got[2] != "h3:sbx-x" {
+	if got := order; len(got) != 3 || got[0] != "h1:sbx-x:orphaned" || got[1] != "h2:sbx-x:orphaned" || got[2] != "h3:sbx-x:orphaned" {
 		t.Fatalf("hooks ran out of order or stopped early: %v", got)
 	}
 }
@@ -68,7 +68,7 @@ func TestNilHookIgnored(t *testing.T) {
 	defer ResetAfterDestroySandboxSuccessHooks()
 
 	RegisterAfterDestroySandboxSuccessHook(nil)
-	if err := runAfterDestroySandboxSuccessHook(context.Background(), "x"); err != nil {
+	if err := runAfterDestroySandboxSuccessHook(context.Background(), "x", "request"); err != nil {
 		t.Fatalf("nil hook must be skipped silently, got %v", err)
 	}
 }
@@ -82,21 +82,22 @@ func TestUpdateHookChain_FIFO(t *testing.T) {
 		instanceType string
 		action       string
 		requestID    string
+		source       string
 	}
 	var calls []call
-	RegisterAfterUpdateSandboxSuccessHook(func(_ context.Context, sid, it, action, rid string) {
-		calls = append(calls, call{sid, it, action, rid})
+	RegisterAfterUpdateSandboxSuccessHook(func(_ context.Context, sid, it, action, rid, source string) {
+		calls = append(calls, call{sid, it, action, rid, source})
 	})
-	RegisterAfterUpdateSandboxSuccessHook(func(_ context.Context, sid, _, _, _ string) {
+	RegisterAfterUpdateSandboxSuccessHook(func(_ context.Context, sid, _, _, _, _ string) {
 		calls = append(calls, call{sandboxID: "second:" + sid})
 	})
 
-	runAfterUpdateSandboxSuccessHook(context.Background(), "sbx-z", "cubebox", "pause", "req-1")
+	runAfterUpdateSandboxSuccessHook(context.Background(), "sbx-z", "cubebox", "pause", "req-1", "auto_pause")
 	if len(calls) != 2 {
 		t.Fatalf("want 2 hook calls, got %d", len(calls))
 	}
 	if calls[0].sandboxID != "sbx-z" || calls[0].instanceType != "cubebox" ||
-		calls[0].action != "pause" || calls[0].requestID != "req-1" {
+		calls[0].action != "pause" || calls[0].requestID != "req-1" || calls[0].source != "auto_pause" {
 		t.Fatalf("first hook received wrong args: %+v", calls[0])
 	}
 	if calls[1].sandboxID != "second:sbx-z" {
@@ -108,16 +109,16 @@ func TestUpdateHook_PanicRecovered(t *testing.T) {
 	ResetAfterUpdateSandboxSuccessHooks()
 	defer ResetAfterUpdateSandboxSuccessHooks()
 
-	RegisterAfterUpdateSandboxSuccessHook(func(_ context.Context, _, _, _, _ string) {
+	RegisterAfterUpdateSandboxSuccessHook(func(_ context.Context, _, _, _, _, _ string) {
 		panic("boom")
 	})
 	var reached bool
-	RegisterAfterUpdateSandboxSuccessHook(func(_ context.Context, _, _, _, _ string) {
+	RegisterAfterUpdateSandboxSuccessHook(func(_ context.Context, _, _, _, _, _ string) {
 		reached = true
 	})
 
 	// Must not panic; must still run subsequent hooks.
-	runAfterUpdateSandboxSuccessHook(context.Background(), "sbx-z", "cubebox", "resume", "req-2")
+	runAfterUpdateSandboxSuccessHook(context.Background(), "sbx-z", "cubebox", "resume", "req-2", "auto_resume")
 	if !reached {
 		t.Fatalf("panicking hook must not prevent later hooks from running")
 	}
@@ -128,5 +129,5 @@ func TestUpdateHook_NilIgnored(t *testing.T) {
 	defer ResetAfterUpdateSandboxSuccessHooks()
 
 	RegisterAfterUpdateSandboxSuccessHook(nil)
-	runAfterUpdateSandboxSuccessHook(context.Background(), "x", "cubebox", "pause", "")
+	runAfterUpdateSandboxSuccessHook(context.Background(), "x", "cubebox", "pause", "", "")
 }

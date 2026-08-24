@@ -131,3 +131,16 @@ type StatePayload struct {
 	// Purely informational; not consumed by the CLM's decision logic.
 	Source string `json:"source,omitempty"`
 }
+
+// DeletePayload is the JSON body of an OpDelete stream entry. OpDelete
+// entries historically carried no payload; the fields are informational for
+// webhook consumers and are omitted when unknown. Reason is sanitized by the
+// publisher (bounded length, control characters stripped).
+type DeletePayload struct {
+	// TemplateID is recovered from the lifecycle meta snapshot before HDEL;
+	// omitted when the meta is missing or unreadable.
+	TemplateID string `json:"template_id,omitempty"`
+	// Reason mirrors the destroy KillReason (request / timeout / orphaned /
+	// extended values). Defaults to "request" when the caller did not set one.
+	Reason string `json:"reason,omitempty"`
+}

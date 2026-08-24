@@ -87,6 +87,36 @@ func TestKill_HTTPError(t *testing.T) {
 	}
 }
 
+func TestPauseResume_CarrySource(t *testing.T) {
+	var captured []updateRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var req updateRequest
+		_ = json.Unmarshal(raw, &req)
+		captured = append(captured, req)
+		_, _ = w.Write([]byte(`{"ret":{"ret_code":200,"ret_msg":"ok"}}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, time.Second)
+	if err := c.Pause(context.Background(), "sbx-1", "cubebox"); err != nil {
+		t.Fatalf("Pause returned err: %v", err)
+	}
+	if err := c.Resume(context.Background(), "sbx-1", "cubebox"); err != nil {
+		t.Fatalf("Resume returned err: %v", err)
+	}
+	if len(captured) != 2 {
+		t.Fatalf("want 2 update requests, got %d", len(captured))
+	}
+	if captured[0].Action != "pause" || captured[0].Source != "auto_pause" {
+		t.Fatalf("pause request wrong: %+v", captured[0])
+	}
+	if captured[1].Action != "resume" || captured[1].Source != "auto_resume" {
+		t.Fatalf("resume request wrong: %+v", captured[1])
+	}
+}
+
 func TestKill_RequiresArgs(t *testing.T) {
 	c := New("http://unused", time.Second)
 	if err := c.Kill(context.Background(), "", "cubebox", ""); err == nil {

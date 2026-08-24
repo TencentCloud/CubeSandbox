@@ -64,6 +64,12 @@ spec:
             {{- end }}
             - name: CUBE_API_SANDBOX_DOMAIN
               value: {{ default .Values.cubeProxy.domain .Values.cubeOps.sandboxDomain | quote }}
+            - name: CUBE_OPS_WEBHOOK_ENABLED
+              value: {{ .Values.cubeOps.webhook.enabled | quote }}
+            {{- if .Values.cubeOps.webhook.redisUrl }}
+            - name: REDIS_URL
+              value: {{ .Values.cubeOps.webhook.redisUrl | quote }}
+            {{- end }}
             # Shared CubeDB with CubeMaster; skip fingerprint so chart upgrades
             # do not fail when Master already applied the same migrations.
             - name: CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK

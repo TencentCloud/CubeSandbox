@@ -58,4 +58,17 @@ if [[ -z "${REDIS_URL:-}" && -n "${CUBE_SANDBOX_REDIS_HOST:-}" ]]; then
   export REDIS_URL="redis://${redis_auth}${CUBE_SANDBOX_REDIS_HOST}:${CUBE_SANDBOX_REDIS_PORT:-6379}"
 fi
 
+# Webhook delivery worker (issue #642). Disabled by default so existing
+# deployments are unaffected; enable only when the lifecycle Redis stream is
+# reachable and webhook subscriptions have been registered.
+export CUBE_OPS_WEBHOOK_ENABLED="${CUBE_OPS_WEBHOOK_ENABLED:-false}"
+# Pass-through knobs (all optional; defaults live in CubeOps config).
+export CUBE_OPS_WEBHOOK_CONSUMER_GROUP="${CUBE_OPS_WEBHOOK_CONSUMER_GROUP:-cube-webhook}"
+export CUBE_OPS_WEBHOOK_HTTP_TIMEOUT="${CUBE_OPS_WEBHOOK_HTTP_TIMEOUT:-10s}"
+export CUBE_OPS_WEBHOOK_SHUTDOWN_TIMEOUT="${CUBE_OPS_WEBHOOK_SHUTDOWN_TIMEOUT:-30s}"
+export CUBE_OPS_WEBHOOK_WORKER_CONCURRENCY="${CUBE_OPS_WEBHOOK_WORKER_CONCURRENCY:-8}"
+export CUBE_OPS_WEBHOOK_PER_SUBSCRIPTION_CONCURRENCY="${CUBE_OPS_WEBHOOK_PER_SUBSCRIPTION_CONCURRENCY:-2}"
+export CUBE_OPS_WEBHOOK_KEEP_PENDING_MAX_RETRY_WINDOW="${CUBE_OPS_WEBHOOK_KEEP_PENDING_MAX_RETRY_WINDOW:-168h}"
+export CUBE_OPS_WEBHOOK_ALLOW_PRIVATE_NETWORKS="${CUBE_OPS_WEBHOOK_ALLOW_PRIVATE_NETWORKS:-false}"
+
 exec "${CUBE_OPS_BIN}"

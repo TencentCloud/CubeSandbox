@@ -8,6 +8,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/wrapredis"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
@@ -143,9 +144,13 @@ func onAfterCreate(ctx context.Context, sandboxID, hostID, hostIP string, req *s
 		EndAt:          projectedEndAt(now, timeoutSeconds),
 	}
 	if req.Annotations != nil {
-		// Template ID is conventionally carried via annotations from CubeAPI;
-		// the field is informational so we tolerate it being absent.
+		// Template ID is conventionally carried via annotations from CubeAPI.
+		// Prefer the plain "template_id" key and fall back to the app-snapshot
+		// annotation so both historical and current producers populate it.
+		// The field is informational, so we tolerate it being absent.
 		if v, ok := req.Annotations["template_id"]; ok {
+			meta.TemplateID = v
+		} else if v, ok := req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]; ok {
 			meta.TemplateID = v
 		}
 	}
@@ -153,9 +158,9 @@ func onAfterCreate(ctx context.Context, sandboxID, hostID, hostIP string, req *s
 	return nil
 }
 
-func onAfterDestroy(ctx context.Context, sandboxID string) error {
+func onAfterDestroy(ctx context.Context, sandboxID, reason string) error {
 	if store := getDefaultStore(); store != nil {
-		store.PublishDelete(ctx, sandboxID)
+		store.PublishDelete(ctx, sandboxID, reason)
 	}
 	return nil
 }
@@ -177,7 +182,7 @@ func PublishStateDefault(ctx context.Context, sandboxID, state, source string) {
 // Unknown actions are ignored (the update handler already validates that
 // action ∈ {"pause","resume"}; this is defence-in-depth against future
 // action codes reaching the hook chain without a schema update here).
-func onAfterUpdate(ctx context.Context, sandboxID, _ /*instanceType*/, action, _ /*requestID*/ string) {
+func onAfterUpdate(ctx context.Context, sandboxID, _ /*instanceType*/, action, _ /*requestID*/, source string) {
 	var state string
 	switch action {
 	case "pause":
@@ -187,5 +192,10 @@ func onAfterUpdate(ctx context.Context, sandboxID, _ /*instanceType*/, action, _
 	default:
 		return
 	}
-	PublishStateDefault(ctx, sandboxID, state, "api")
+	// Callers (CubeAPI) may omit the source; keep the historical default so
+	// public API-driven transitions remain labelled "api".
+	if source == "" {
+		source = "api"
+	}
+	PublishStateDefault(ctx, sandboxID, state, source)
 }

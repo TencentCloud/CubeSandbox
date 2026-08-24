@@ -8,11 +8,24 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 )
+
+// xaddFailuresTotal counts every failed XADD of a lifecycle event. It is the
+// single source of truth for producer-side event loss (no outbox is kept):
+// alerts watch this counter, and the delete path recovers template_id before
+// HDEL so a Redis fault cannot strand a delete without its context.
+var xaddFailuresTotal = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "cubemaster_lifecycle_xadd_failures_total",
+	Help: "Total failures publishing lifecycle events to the Redis stream (XADD).",
+})
 
 // redisDoer is the minimal redigo-shaped surface the writer needs. wrapredis's
 // *RedisWrap satisfies it; tests substitute a fake.
@@ -68,20 +81,68 @@ func (s *Store) PublishCreate(ctx context.Context, meta *SandboxLifecycleMeta) {
 	}
 }
 
-// PublishDelete drops the registry entry. Stream payload is empty; sidecars
-// only need the sandbox ID to evict.
-func (s *Store) PublishDelete(ctx context.Context, sandboxID string) {
+// PublishDelete drops the registry entry and emits an OpDelete event. The
+// payload carries the destroy reason (sanitized) plus, when recoverable, the
+// deleted sandbox's template_id read from the meta snapshot before HDEL.
+//
+// Redis faults are deliberately non-fatal: if HGET fails (or the meta is
+// absent / unparseable) the delete event is still published with template_id
+// omitted, so a temporary Redis hiccup can never swallow a delete.
+func (s *Store) PublishDelete(ctx context.Context, sandboxID, reason string) {
 	if s == nil || !s.enabled.Load() || s.doer == nil || sandboxID == "" {
 		return
+	}
+
+	payload := deletePayloadJSON("", sanitizeReason(reason))
+	// Best-effort template_id recovery before HDEL removes the snapshot.
+	// HGET errors and nil are treated the same for publishing: continue.
+	meta, err := s.LoadMeta(ctx, sandboxID)
+	if err != nil {
+		log.G(ctx).Warnf("lifecycle: HGET %s %s failed: %v (delete published without template_id)",
+			MetaKey, sandboxID, err)
+	} else if meta != nil && meta.TemplateID != "" {
+		payload = deletePayloadJSON(meta.TemplateID, sanitizeReason(reason))
 	}
 
 	if _, err := s.doer.Do("HDEL", MetaKey, sandboxID); err != nil {
 		log.G(ctx).Warnf("lifecycle: HDEL %s %s failed: %v", MetaKey, sandboxID, err)
 	}
 
-	if _, err := s.xadd(OpDelete, sandboxID, nil); err != nil {
+	if _, err := s.xadd(OpDelete, sandboxID, payload); err != nil {
 		log.G(ctx).Warnf("lifecycle: XADD delete %s failed: %v", sandboxID, err)
 	}
+}
+
+// deletePayloadJSON marshals the delete event payload. The concrete type can
+// never fail to marshal, so a nil return (payload omitted) is unreachable.
+func deletePayloadJSON(templateID, reason string) []byte {
+	b, err := json.Marshal(DeletePayload{TemplateID: templateID, Reason: reason})
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// sanitizeReason bounds the destroy reason forwarded into the delete payload:
+// control characters are stripped and the result is truncated to 256 bytes so
+// an arbitrarily large or binary KillReason cannot pollute the event stream,
+// logs, or receiver-side JSON parsing.
+func sanitizeReason(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range reason {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	s := b.String()
+	if len(s) > 256 {
+		s = s[:256]
+	}
+	return strings.ToValidUTF8(s, "")
 }
 
 // PublishState emits an OpState event announcing that the sandbox has
@@ -195,7 +256,11 @@ func (s *Store) xadd(op, sandboxID string, payload []byte) (interface{}, error) 
 	if len(payload) > 0 {
 		args = append(args, FieldPayload, payload)
 	}
-	return s.doer.Do("XADD", args...)
+	res, err := s.doer.Do("XADD", args...)
+	if err != nil {
+		xaddFailuresTotal.Inc()
+	}
+	return res, err
 }
 
 // defaultStore is the package-level singleton wired by Init(). Hooks call into

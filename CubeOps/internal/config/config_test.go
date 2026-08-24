@@ -104,3 +104,64 @@ func TestLoad_MissingDB_Fails(t *testing.T) {
 		t.Error("Load with no DB config = nil err, want error")
 	}
 }
+
+// TestLoad_WebhookEnabledEnv proves the webhook feature switch honours
+// CUBE_OPS_WEBHOOK_ENABLED and defaults to disabled.
+func TestLoad_WebhookEnabledEnv(t *testing.T) {
+	t.Setenv("CUBE_OPS_CONFIG", "/nonexistent/path/ops.yaml")
+	t.Setenv("DATABASE_URL", "mysql://root:pass@127.0.0.1:3306/webhookdb")
+	t.Setenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+
+	t.Setenv("CUBE_OPS_WEBHOOK_ENABLED", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(enabled=true): %v", err)
+	}
+	if !cfg.Webhook.Enabled {
+		t.Error("webhook.enabled should be true when CUBE_OPS_WEBHOOK_ENABLED=true")
+	}
+
+	t.Setenv("CUBE_OPS_WEBHOOK_ENABLED", "false")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load(enabled=false): %v", err)
+	}
+	if cfg.Webhook.Enabled {
+		t.Error("webhook.enabled should be false when CUBE_OPS_WEBHOOK_ENABLED=false")
+	}
+}
+
+// TestLoad_WebhookValidation proves enabled-webhook misconfiguration fails
+// startup instead of degrading silently.
+func TestLoad_WebhookValidation(t *testing.T) {
+	t.Setenv("CUBE_OPS_CONFIG", "/nonexistent/path/ops.yaml")
+	t.Setenv("DATABASE_URL", "mysql://root:pass@127.0.0.1:3306/webhookdb")
+	t.Setenv("CUBE_OPS_WEBHOOK_ENABLED", "true")
+
+	// Missing Redis URL.
+	t.Setenv("REDIS_URL", "")
+	if _, err := Load(); err == nil {
+		t.Error("webhook.enabled without redis_url should fail")
+	}
+
+	// Reserved consumer group.
+	t.Setenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+	t.Setenv("CUBE_OPS_WEBHOOK_CONSUMER_GROUP", "cube-proxy-sidecar")
+	if _, err := Load(); err == nil {
+		t.Error("cube-proxy-sidecar consumer group should fail")
+	}
+
+	// claim_batch_size < worker_concurrency.
+	t.Setenv("CUBE_OPS_WEBHOOK_CONSUMER_GROUP", "cube-webhook")
+	t.Setenv("CUBE_OPS_WEBHOOK_CLAIM_BATCH_SIZE", "2")
+	t.Setenv("CUBE_OPS_WEBHOOK_WORKER_CONCURRENCY", "8")
+	if _, err := Load(); err == nil {
+		t.Error("claim_batch_size < worker_concurrency should fail")
+	}
+
+	// Valid config passes.
+	t.Setenv("CUBE_OPS_WEBHOOK_CLAIM_BATCH_SIZE", "16")
+	if _, err := Load(); err != nil {
+		t.Errorf("valid webhook config should pass: %v", err)
+	}
+}

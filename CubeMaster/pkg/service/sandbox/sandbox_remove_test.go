@@ -22,7 +22,7 @@ func TestDestroySandboxMissingSandboxReturnsNotFound(t *testing.T) {
 	defer ResetAfterDestroySandboxSuccessHooks()
 
 	hookCalled := false
-	RegisterAfterDestroySandboxSuccessHook(func(_ context.Context, _ string) error {
+	RegisterAfterDestroySandboxSuccessHook(func(_ context.Context, _, _ string) error {
 		hookCalled = true
 		return nil
 	})

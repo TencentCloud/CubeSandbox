@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/server"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/webhook"
 )
 
 func main() {
@@ -76,7 +77,18 @@ func main() {
 	}
 	cfg.JWTSecret = jwtSecret
 
+	// Start the webhook delivery worker when enabled (default off).
+	webhookRT, err := webhook.NewRuntime(cfg, s)
+	if err != nil {
+		logging.G(ctx).Errorf("failed to initialise webhook worker: err=%q", err.Error())
+		os.Exit(1)
+	}
+	if webhookRT != nil {
+		webhookRT.Start(ctx)
+	}
+
 	srv := server.New(cfg, s)
+	srv.SetWebhookStatus(webhookRT)
 
 	// Graceful shutdown
 	go func() {
@@ -86,6 +98,11 @@ func main() {
 		logging.G(context.Background()).Info("received shutdown signal")
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
+		// Stop the webhook worker first: in-flight sends finish within the
+		// grace window without being cancelled, then the HTTP server drains.
+		if webhookRT != nil {
+			webhookRT.Shutdown(shutdownCtx)
+		}
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			logging.G(shutdownCtx).Errorf("server shutdown error: err=%q", err.Error())
 		}

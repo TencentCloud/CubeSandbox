@@ -42,7 +42,7 @@ cubemaster_addr: "http://127.0.0.1:8089"
 # --- CubeAPI (deprecated SDK proxy) ---
 cubeapi_url: "http://127.0.0.1:3000"
 
-# --- Redis (optional, only needed if you add rate-limiting later) ---
+# --- Redis (required when webhook.enabled=true) ---
 redis_url: ""
 
 # --- Sandbox domain exposed to SDK clients via /config ---
@@ -57,3 +57,31 @@ soft_delete_purge:
   dry_run: false      # count-only first rollout (no DELETE issued)
   retention: "168h"   # rows with deleted_at older than now-retention are purged
   interval: "1h"      # time between purge passes
+
+# --- Webhook delivery worker (issue #642) ---
+# Disabled by default. When enabled, CubeOps consumes the lifecycle stream
+# and POSTs sandbox events to subscribed endpoints.
+webhook:
+  enabled: false              # CUBE_OPS_WEBHOOK_ENABLED; requires redis_url
+  consumer_group: "cube-webhook"   # must not equal CLM's cube-proxy-sidecar
+  consumer_name: ""                # default <hostname>-<random suffix>
+  read_block: "5s"
+  consumer_batch_size: 10          # XREADGROUP COUNT == per-cycle materialization cap
+  retry_poll_interval: "1s"
+  claim_batch_size: 32             # >= worker_concurrency
+  backlog_watermark: 10000         # global actionable backlog that pauses reads
+  per_subscription_backlog_limit: 1000  # soft send limit per subscription
+  keep_pending_max_retry_window: "168h" # keep-pending retry window; 0 = infinite retries only via env CUBE_OPS_WEBHOOK_KEEP_PENDING_MAX_RETRY_WINDOW=0 (a bare 0 in YAML fails to parse for a duration)
+  max_subscriptions_per_event: 200      # materialization chunk size
+  lease_duration: "60s"                 # floor; effective = max(this, 2*http_timeout)
+  http_timeout: "10s"
+  shutdown_timeout: "30s"               # in-flight sends are NOT cancelled during this window
+  max_attempts: 5
+  worker_concurrency: 8
+  per_subscription_concurrency: 2       # per-replica; total = replicas * value
+  dead_letter_mode: "keep-pending"      # keep-pending | dead-letter
+  allow_private_networks: false         # dev/test only: allow loopback + RFC1918
+  cleanup:
+    succeeded_retention: "720h"         # 30 days
+    terminal_failure_retention: "2160h" # permanent_failed/dead/materialization failures: 90 days
+    interval: "24h"
