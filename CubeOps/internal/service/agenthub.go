@@ -459,8 +459,13 @@ const (
 // successful empty listing rules out both — while a failed listing returns
 // none=false, because the caller must not report "nothing is registered" on the
 // strength of a query that never completed. Either way the returned id is then
-// defaultAgentTemplateID, which the caller still passes to CubeMaster so
-// installs carrying that alias keep working.
+// defaultAgentTemplateID, which the caller still passes to CubeMaster — kept as
+// a last resort for the install that has claimed that alias, not as a default.
+// This does change behaviour for one corner install: where the alias is claimed
+// AND templates are registered, the registered one now wins. That is the point
+// of the fix — a template an operator actually registered beats a hand-claimed
+// identifier — but "installs carrying the alias are unaffected" only holds while
+// their registry is empty.
 //
 // A failed recommended-flag read is not fatal: the flag expresses which
 // registered template to prefer, not whether one exists, so losing it falls
@@ -668,6 +673,15 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 			// stays a conflict rather than a bad request because the request was
 			// fine and the state is not, and it is not the 502 naming an
 			// identifier the caller never chose.
+			//
+			// One assumption is worth stating because it is not enforced by
+			// construction: that a 130404 out of CreateSandbox concerns the
+			// template. It holds in this tree — sandbox_create.go raises it only
+			// for ErrTemplateNotFound, and the run phase propagates cubelet ret
+			// codes verbatim (sandbox_run.go, setMasterRsp) from an enum that
+			// contains no 130404 — but it is a property of the codes CubeMaster
+			// happens to use, not a guarantee, which is the other reason the
+			// message stays neutral and the original stays in the log.
 			logging.G(ctx).Warnf("agenthub: cubemaster could not resolve the default template "+
 				"selected from the registry; cubemaster said: %v", err)
 			return nil, &Error{
@@ -675,8 +689,8 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 				Code:   "conflict",
 				Message: "the agent template selected by default could not be resolved: it may have been " +
 					"deleted, its registration may be invalid, or the snapshot it publishes may be gone. " +
-					"Pass templateId explicitly to choose one yourself, or retry to pick up another " +
-					"registered template",
+					"Pass templateId explicitly to choose one yourself — retrying re-runs the same " +
+					"selection and picks the same template until the registry changes",
 				Cause: err,
 			}
 		}
