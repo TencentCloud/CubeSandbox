@@ -774,21 +774,22 @@ EOF
         fi
         ;;
       postgres)
-        # Prefer psql (verifies credentials + database) and fall back to
-        # pg_isready (reachability only). Best-effort: if neither client is
-        # installed we skip rather than block. PGPASSWORD is passed inline to the
-        # command only, never exported.
+        # Prefer psql (verifies credentials + database + sslmode) and fall
+        # back to pg_isready (reachability only). Best-effort: if neither
+        # client is installed we skip rather than block. PGPASSWORD/PGSSLMODE
+        # are passed inline to the command only, never exported.
         if command -v psql >/dev/null 2>&1; then
-          log "checking connectivity to external PostgreSQL ${CUBE_EXTERNAL_DB_HOST}:${CUBE_EXTERNAL_DB_PORT}"
+          log "checking connectivity to external PostgreSQL ${CUBE_EXTERNAL_DB_HOST}:${CUBE_EXTERNAL_DB_PORT} (sslmode=${CUBE_EXTERNAL_DB_SSLMODE})"
           if ! PGPASSWORD="${CUBE_EXTERNAL_DB_PASSWORD}" \
               PGCONNECT_TIMEOUT="${connect_timeout}" \
+              PGSSLMODE="${CUBE_EXTERNAL_DB_SSLMODE}" \
               psql -h "${CUBE_EXTERNAL_DB_HOST}" \
                    -p "${CUBE_EXTERNAL_DB_PORT}" \
                    -U "${CUBE_EXTERNAL_DB_USER}" \
                    -d "${CUBE_EXTERNAL_DB_NAME}" \
                    -w -tAc 'SELECT 1' >/dev/null 2>&1; then
-            die "cannot reach external PostgreSQL at ${CUBE_EXTERNAL_DB_HOST}:${CUBE_EXTERNAL_DB_PORT} as user '${CUBE_EXTERNAL_DB_USER}' (db '${CUBE_EXTERNAL_DB_NAME}').
-  Verify CUBE_EXTERNAL_DB_HOST / _PORT / _USER / _PASSWORD / _NAME and that the server is reachable from this host."
+            die "cannot reach external PostgreSQL at ${CUBE_EXTERNAL_DB_HOST}:${CUBE_EXTERNAL_DB_PORT} as user '${CUBE_EXTERNAL_DB_USER}' (db '${CUBE_EXTERNAL_DB_NAME}', sslmode '${CUBE_EXTERNAL_DB_SSLMODE}').
+  Verify CUBE_EXTERNAL_DB_HOST / _PORT / _USER / _PASSWORD / _NAME / _SSLMODE and that the server is reachable from this host."
           fi
           log "external PostgreSQL connectivity OK"
         elif command -v pg_isready >/dev/null 2>&1; then
