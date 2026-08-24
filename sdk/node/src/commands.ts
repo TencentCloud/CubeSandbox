@@ -238,7 +238,15 @@ export class Commands {
       ...this.sandbox.trafficTokenHeaders(),
       ...userHeaders(user),
     };
-    if (idleMs !== undefined) {
+    // Only a positive deadline is sent. envd reads Connect-Timeout-Ms as a hard
+    // wall-clock deadline, so a zero or negative one has already passed and the
+    // request never gets an answer — it hangs until the HTTP client gives up on
+    // headers, and reports a transport error that says nothing about the cause.
+    //
+    // Both non-positive values arrive in ordinary use: `0` is how the e2b SDK
+    // spells "no deadline", and NEVER_TIMEOUT is how this one does. `pty.ts`
+    // and the Go SDK already guard this way.
+    if (idleMs !== undefined && idleMs > 0) {
       headers["Connect-Timeout-Ms"] = String(Math.trunc(idleMs));
     }
     const accessToken = this.sandbox.envdAccessToken;

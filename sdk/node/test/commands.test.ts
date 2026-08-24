@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { Config } from "../src/config.js";
-import { Sandbox } from "../src/index.js";
+import { NEVER_TIMEOUT, Sandbox } from "../src/index.js";
 
 const SANDBOX_ID = "sb-test-001";
 const DOMAIN = "cube.app";
@@ -141,6 +141,49 @@ describe("Commands.run", () => {
     const result = await sb.commands.run("echo hello", { cwd: "/work", envs: { A: "B" } });
     expect(result.stdout).toBe("hello\nworld\n");
     expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    sb.close();
+  });
+
+  // envd reads Connect-Timeout-Ms as a hard wall-clock deadline, so a
+  // non-positive one has already passed and the request is never answered.
+  // Both values below arrive in ordinary use: 0 is how the e2b SDK spells "no
+  // deadline", and NEVER_TIMEOUT is how this one does.
+  it.each([
+    ["zero", 0],
+    ["NEVER_TIMEOUT", NEVER_TIMEOUT],
+  ])("sends no Connect-Timeout-Ms for a %s timeout", async (_label, timeoutMs) => {
+    const sb = await createSandbox();
+    handler = (req) => {
+      expect(req.headers["connect-timeout-ms"]).toBeUndefined();
+      return {
+        status: 200,
+        buffer: Buffer.concat([
+          connectFrame(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+          connectFrame(0x02, "{}"),
+        ]),
+      };
+    };
+
+    const result = await sb.commands.run("echo hi", { timeoutMs });
+    expect(result.exitCode).toBe(0);
+    sb.close();
+  });
+
+  it("still sends Connect-Timeout-Ms for a positive timeout", async () => {
+    const sb = await createSandbox();
+    handler = (req) => {
+      expect(req.headers["connect-timeout-ms"]).toBe("30000");
+      return {
+        status: 200,
+        buffer: Buffer.concat([
+          connectFrame(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+          connectFrame(0x02, "{}"),
+        ]),
+      };
+    };
+
+    const result = await sb.commands.run("echo hi", { timeoutMs: 30_000 });
     expect(result.exitCode).toBe(0);
     sb.close();
   });

@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from cubesandbox import CommandResult, Template
+from cubesandbox import NEVER_TIMEOUT, CommandResult, Template
 from cubesandbox._template import TemplateInfo
 from cubesandbox._commands import Commands, _collect_process_events
 from cubesandbox._config import Config
@@ -77,6 +77,23 @@ def mock_response(body=None, status: int = 200):
 def make_sandbox(**data_overrides) -> Sandbox:
     d = {**SANDBOX_DATA, **data_overrides}
     return Sandbox(d, config=make_config())
+
+
+def _recording_client(transport: httpx.MockTransport, seen: dict) -> httpx.Client:
+    """An httpx client that records the timeout each request was given.
+
+    MockTransport answers synchronously and enforces no timeouts at all, so the
+    value a caller passes is only observable by recording it here.
+    """
+    client = httpx.Client(transport=transport)
+    stream = client.stream
+
+    def recording_stream(*args, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        return stream(*args, **kwargs)
+
+    client.stream = recording_stream
+    return client
 
 
 def connect_envelope(flags: int, payload: str) -> bytes:
@@ -1396,6 +1413,68 @@ class TestCommands:
         assert seen["payload"]["process"]["cwd"] == "/work"
         assert seen["payload"]["process"]["envs"] == {"A": "B"}
         assert seen["payload"]["process"]["args"] == ["-l", "-c", "echo hello"]
+
+    # envd reads Connect-Timeout-Ms as a hard wall-clock deadline, so a
+    # non-positive one has already passed and the request is never answered.
+    # Both values below arrive in ordinary use: 0 is how the e2b SDK spells
+    # "no deadline", and NEVER_TIMEOUT is how this one does.
+    #
+    # The client-side deadline is asserted as well as the header. httpx reads
+    # the same number, and only None disables it there -- 0 times out every
+    # socket operation at once and -1 is rejected -- so forwarding the raw
+    # value would trade the hang for an immediate failure. MockTransport
+    # enforces no timeouts at all, which is why what was passed is inspected
+    # rather than its effect.
+    @pytest.mark.parametrize("timeout", [0, NEVER_TIMEOUT])
+    def test_run_omits_non_positive_timeout_header(self, timeout):
+        sb = make_sandbox()
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["headers"] = request.headers
+            body = b"".join(
+                [
+                    connect_envelope(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+                    connect_envelope(0x02, "{}"),
+                ]
+            )
+            return httpx.Response(200, stream=httpx.ByteStream(body))
+
+        client = _recording_client(httpx.MockTransport(handler), seen)
+        with (
+            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
+            patch.object(sb, "_build_data_client", return_value=client),
+        ):
+            result = sb.commands.run("echo hi", timeout=timeout)
+
+        assert result.exit_code == 0
+        assert "connect-timeout-ms" not in seen["headers"]
+        assert seen["timeout"] is None
+
+    def test_run_sends_positive_timeout_header(self):
+        sb = make_sandbox()
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["headers"] = request.headers
+            body = b"".join(
+                [
+                    connect_envelope(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+                    connect_envelope(0x02, "{}"),
+                ]
+            )
+            return httpx.Response(200, stream=httpx.ByteStream(body))
+
+        client = _recording_client(httpx.MockTransport(handler), seen)
+        with (
+            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
+            patch.object(sb, "_build_data_client", return_value=client),
+        ):
+            result = sb.commands.run("echo hi", timeout=30)
+
+        assert result.exit_code == 0
+        assert seen["headers"]["connect-timeout-ms"] == "30000"
+        assert seen["timeout"] == 30
 
     def test_run_stderr_event(self):
         sb = make_sandbox()

@@ -146,8 +146,27 @@ class Commands:
             "Connect-Protocol-Version": CONNECT_PROTOCOL_VERSION,
             "Connect-Content-Encoding": "identity",
         }
-        if timeout is not None:
-            headers["Connect-Timeout-Ms"] = str(int(timeout * 1000))
+        # The timeout has two readers that spell "no deadline" differently, so
+        # it is normalised once here.
+        #
+        # envd reads Connect-Timeout-Ms as a hard wall-clock deadline, so a zero
+        # or negative one has already passed and the request never gets an
+        # answer -- it hangs until the HTTP client gives up on headers, and
+        # reports a transport error that says nothing about the cause. The
+        # header is therefore omitted rather than sent as zero.
+        #
+        # httpx reads the same number as a client-side deadline, where only None
+        # means "no deadline": 0 makes every socket operation time out at once,
+        # and -1 is rejected outright. Forwarding the raw value would trade the
+        # hang for an immediate failure, which is not what either value asks
+        # for.
+        #
+        # Both non-positive values arrive in ordinary use: 0 is how the e2b SDK
+        # spells "no deadline", and NEVER_TIMEOUT is how this one does. _pty.py
+        # and the Go SDK already guard this way.
+        effective_timeout = timeout if timeout is not None and timeout > 0 else None
+        if effective_timeout is not None:
+            headers["Connect-Timeout-Ms"] = str(int(effective_timeout * 1000))
         access_token = self._sandbox._data.get("envdAccessToken")
         if access_token:
             headers["X-Access-Token"] = access_token
@@ -159,7 +178,7 @@ class Commands:
             url,
             content=_encode_connect_envelope(json.dumps(payload).encode("utf-8")),
             headers=headers,
-            timeout=timeout,
+            timeout=effective_timeout,
         ) as resp:
             if resp.status_code >= 400:
                 detail = _http_error_detail(resp)
