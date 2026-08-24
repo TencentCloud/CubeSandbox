@@ -225,6 +225,62 @@ func (s *gormNodeStore) DeleteRegistration(ctx context.Context, nodeID string) e
 	return nil
 }
 
+// HostMetaLoader reads the legacy host registry tables (read-only) to recover
+// the scheduler fields the cubelet heartbeat does not carry.
+type HostMetaLoader interface {
+	// LoadHostMetas returns all host_info rows, keyed by InsID.
+	LoadHostMetas(ctx context.Context) (map[string]*HostInfo, error)
+	// LoadHostTypes returns the instance_type→cpu_type mapping.
+	LoadHostTypes(ctx context.Context) (map[string]*HostTypeInfo, error)
+	// LoadSubHostMetas returns all sub_host_info rows, keyed by InsID.
+	LoadSubHostMetas(ctx context.Context) (map[string]*SubHostInfo, error)
+}
+
+type gormHostMetaLoader struct {
+	db *gorm.DB
+}
+
+// NewHostMetaLoader returns a HostMetaLoader backed by the given *gorm.DB.
+func NewHostMetaLoader(db *gorm.DB) HostMetaLoader {
+	return &gormHostMetaLoader{db: db}
+}
+
+func (l *gormHostMetaLoader) LoadHostMetas(ctx context.Context) (map[string]*HostInfo, error) {
+	rows := make([]HostInfo, 0)
+	if err := l.db.WithContext(ctx).Table((&HostInfo{}).TableName()).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]*HostInfo, len(rows))
+	for i := range rows {
+		out[rows[i].InsID] = &rows[i]
+	}
+	return out, nil
+}
+
+func (l *gormHostMetaLoader) LoadHostTypes(ctx context.Context) (map[string]*HostTypeInfo, error) {
+	rows := make([]HostTypeInfo, 0)
+	if err := l.db.WithContext(ctx).Table((&HostTypeInfo{}).TableName()).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]*HostTypeInfo, len(rows))
+	for i := range rows {
+		out[rows[i].InstanceType] = &rows[i]
+	}
+	return out, nil
+}
+
+func (l *gormHostMetaLoader) LoadSubHostMetas(ctx context.Context) (map[string]*SubHostInfo, error) {
+	rows := make([]SubHostInfo, 0)
+	if err := l.db.WithContext(ctx).Table((&SubHostInfo{}).TableName()).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]*SubHostInfo, len(rows))
+	for i := range rows {
+		out[rows[i].InsID] = &rows[i]
+	}
+	return out, nil
+}
+
 // DeleteNode removes the node's registration, status, and component
 // versions in a single transaction. Operations rows are preserved as
 // an audit trail of past operator actions. A row-level UPDATE lock is

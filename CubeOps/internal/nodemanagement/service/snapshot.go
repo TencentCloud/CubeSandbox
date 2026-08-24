@@ -134,6 +134,7 @@ func cloneSnapshot(in *model.NodeSnapshot) *model.NodeSnapshot {
 	out.Images = append([]model.ContainerImage(nil), in.Images...)
 	out.LocalTemplates = append([]model.LocalTemplate(nil), in.LocalTemplates...)
 	out.Versions = append([]model.ComponentVersion(nil), in.Versions...)
+	out.VirtualNodeQuotaArray = append([]int64(nil), in.VirtualNodeQuotaArray...)
 	if in.HostFacts != nil {
 		hf := *in.HostFacts
 		out.HostFacts = &hf
@@ -157,6 +158,53 @@ func cloneStringMap(in map[string]string) map[string]string {
 
 func sortSnapshots(snaps []*model.NodeSnapshot) {
 	sort.Slice(snaps, func(i, j int) bool { return snaps[i].NodeID < snaps[j].NodeID })
+}
+
+// applyHostMetaToSnapshot overlays the legacy static scheduler fields from the
+// host registry, mirroring CubeMaster's localcache.db_cache join.
+func applyHostMetaToSnapshot(
+	snap *model.NodeSnapshot,
+	hosts map[string]*store.HostInfo,
+	hostTypes map[string]*store.HostTypeInfo,
+	subHosts map[string]*store.SubHostInfo,
+) {
+	if snap == nil {
+		return
+	}
+	if h, ok := hosts[snap.NodeID]; ok {
+		snap.Zone = h.Zone
+		snap.Region = h.Region
+		snap.SystemDiskSize = h.SysDiskGB
+		snap.DataDiskSize = h.DataDiskGB
+		if snap.InstanceType == "" {
+			snap.InstanceType = h.InstanceType
+		}
+		if snap.ClusterLabel == "" {
+			snap.ClusterLabel = h.ClusterLabel
+		}
+		if snap.QuotaCPU == 0 {
+			snap.QuotaCPU = h.QuotaCPU
+		}
+		if snap.QuotaMemMB == 0 {
+			snap.QuotaMemMB = h.QuotaMemMB
+		}
+	}
+	if t, ok := hostTypes[snap.InstanceType]; ok {
+		snap.CPUType = t.CPUType
+	}
+	if m, ok := subHosts[snap.NodeID]; ok {
+		snap.DeviceClass = m.DeviceClass
+		snap.DeviceID = m.DeviceID
+		snap.MachineHostIP = m.HostIP
+		snap.InstanceFamily = m.InstanceFamily
+		snap.DedicatedClusterID = m.DedicatedClusterID
+		if m.VirtualNodeQuota != "" && m.VirtualNodeQuota != "[]" {
+			var arr []int64
+			if err := json.Unmarshal([]byte(m.VirtualNodeQuota), &arr); err == nil {
+				snap.VirtualNodeQuotaArray = arr
+			}
+		}
+	}
 }
 
 func ToSchedulerNode(snap *model.NodeSnapshot) *model.SchedulerNode {
@@ -186,37 +234,46 @@ func ToSchedulerNode(snap *model.NodeSnapshot) *model.SchedulerNode {
 		}
 	}
 	return &model.SchedulerNode{
-		InsID:               snap.NodeID,
-		UUID:                snap.NodeID,
-		IP:                  hostIP,
-		CpuTotal:            int(snap.Capacity.MilliCPU / 1000),
-		MemMBTotal:          snap.Capacity.MemoryMB,
-		QuotaCpu:            quotaCPU,
-		QuotaMem:            quotaMem,
-		ClusterLabel:        snap.ClusterLabel,
-		OssClusterLabel:     snap.ClusterLabel,
-		InstanceType:        instanceType,
-		HostStatus:          model.HostStatusRunning,
-		ReportedReady:       snap.ReportedReady,
-		Healthy:             snap.Healthy,
-		UnhealthyReason:     snap.UnhealthyReason,
-		CreateConcurrentNum: snap.CreateConcurrentNum,
-		MaxMvmLimit:         snap.MaxMvmNum,
-		MetaDataUpdateAt:    snap.HeartbeatTime,
-		MetricUpdate:        snap.MetricUpdate,
-		MetricLocalUpdateAt: snap.MetricLocalUpdateAt,
-		QuotaCpuUsage:       snap.QuotaCpuUsage,
-		QuotaMemUsage:       snap.QuotaMemUsage,
-		MvmNum:              snap.MvmNum,
-		DataDiskUsagePer:    snap.DataDiskUsagePer,
-		StorageDiskUsagePer: snap.StorageDiskUsagePer,
-		SysDiskUsagePer:     snap.SysDiskUsagePer,
-		NicQueues:           snap.NicQueues,
-		NodeLabels:          cloneStringMap(snap.Labels),
-		SchedulingDisabled:  snapSchedulingDisabled(snap),
-		LocalTemplates:      localTemplates,
-		Versions:            snap.Versions,
-		HostFacts:           cloneHostFacts(snap.HostFacts),
+		InsID:                 snap.NodeID,
+		UUID:                  snap.NodeID,
+		IP:                    hostIP,
+		CpuTotal:              int(snap.Capacity.MilliCPU / 1000),
+		MemMBTotal:            snap.Capacity.MemoryMB,
+		SystemDiskSize:        snap.SystemDiskSize,
+		DataDiskSize:          snap.DataDiskSize,
+		Zone:                  snap.Zone,
+		Region:                snap.Region,
+		CPUType:               snap.CPUType,
+		DeviceClass:           snap.DeviceClass,
+		DeviceID:              snap.DeviceID,
+		MachineHostIP:         snap.MachineHostIP,
+		InstanceFamily:        snap.InstanceFamily,
+		DedicatedClusterId:    snap.DedicatedClusterID,
+		VirtualNodeQuotaArray: append([]int64(nil), snap.VirtualNodeQuotaArray...),
+		ClusterLabel:          snap.ClusterLabel,
+		OssClusterLabel:       snap.ClusterLabel,
+		InstanceType:          instanceType,
+		HostStatus:            model.HostStatusRunning,
+		ReportedReady:         snap.ReportedReady,
+		Healthy:               snap.Healthy,
+		UnhealthyReason:       snap.UnhealthyReason,
+		CreateConcurrentNum:   snap.CreateConcurrentNum,
+		MaxMvmLimit:           snap.MaxMvmNum,
+		MetaDataUpdateAt:      snap.HeartbeatTime,
+		MetricUpdate:          snap.MetricUpdate,
+		MetricLocalUpdateAt:   snap.MetricLocalUpdateAt,
+		QuotaCpuUsage:         snap.QuotaCpuUsage,
+		QuotaMemUsage:         snap.QuotaMemUsage,
+		MvmNum:                snap.MvmNum,
+		DataDiskUsagePer:      snap.DataDiskUsagePer,
+		StorageDiskUsagePer:   snap.StorageDiskUsagePer,
+		SysDiskUsagePer:       snap.SysDiskUsagePer,
+		NicQueues:             snap.NicQueues,
+		NodeLabels:            cloneStringMap(snap.Labels),
+		SchedulingDisabled:    snapSchedulingDisabled(snap),
+		LocalTemplates:        localTemplates,
+		Versions:              snap.Versions,
+		HostFacts:             cloneHostFacts(snap.HostFacts),
 	}
 }
 

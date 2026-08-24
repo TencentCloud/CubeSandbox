@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/model"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/store"
 )
 
 func TestToSchedulerNode_LocalTemplatesIncluded(t *testing.T) {
@@ -194,4 +195,135 @@ func TestMarshalHostFactsClearsScanned(t *testing.T) {
 	var decoded model.HostFacts
 	_ = json.Unmarshal([]byte(raw), &decoded)
 	assert.False(t, decoded.KVMModuleScanned, "Scanned must not reach DB JSON")
+}
+
+func TestToSchedulerNode_PreservesSchedulingFields(t *testing.T) {
+	snap := &model.NodeSnapshot{
+		NodeID:                "node-1",
+		HostIP:                "10.0.0.1",
+		Capacity:              model.ResourceSnapshot{MilliCPU: 4000, MemoryMB: 8192},
+		Allocatable:           model.ResourceSnapshot{MilliCPU: 4000, MemoryMB: 8192},
+		Zone:                  "gz-3",
+		Region:                "gz",
+		CPUType:               "intel-ice-lake",
+		DeviceClass:           "GPU",
+		DeviceID:              42,
+		MachineHostIP:         "10.0.0.10",
+		InstanceFamily:        "CVM.S5",
+		DedicatedClusterID:    "cluster-1",
+		VirtualNodeQuotaArray: []int64{4, 8},
+		SystemDiskSize:        100,
+		DataDiskSize:          200,
+	}
+	n := ToSchedulerNode(snap)
+	if n == nil {
+		t.Fatal("expected node")
+	}
+	if n.Zone != "gz-3" {
+		t.Errorf("Zone = %s, want gz-3", n.Zone)
+	}
+	if n.Region != "gz" {
+		t.Errorf("Region = %s, want gz", n.Region)
+	}
+	if n.CPUType != "intel-ice-lake" {
+		t.Errorf("CPUType = %s, want intel-ice-lake", n.CPUType)
+	}
+	if n.DeviceClass != "GPU" {
+		t.Errorf("DeviceClass = %s, want GPU", n.DeviceClass)
+	}
+	if n.DeviceID != 42 {
+		t.Errorf("DeviceID = %d, want 42", n.DeviceID)
+	}
+	if n.MachineHostIP != "10.0.0.10" {
+		t.Errorf("MachineHostIP = %s, want 10.0.0.10", n.MachineHostIP)
+	}
+	if n.InstanceFamily != "CVM.S5" {
+		t.Errorf("InstanceFamily = %s, want CVM.S5", n.InstanceFamily)
+	}
+	if n.DedicatedClusterId != "cluster-1" {
+		t.Errorf("DedicatedClusterId = %s, want cluster-1", n.DedicatedClusterId)
+	}
+	if len(n.VirtualNodeQuotaArray) != 2 || n.VirtualNodeQuotaArray[0] != 4 || n.VirtualNodeQuotaArray[1] != 8 {
+		t.Errorf("VirtualNodeQuotaArray = %v, want [4 8]", n.VirtualNodeQuotaArray)
+	}
+	if n.SystemDiskSize != 100 || n.DataDiskSize != 200 {
+		t.Errorf("disk sizes = %d/%d, want 100/200", n.SystemDiskSize, n.DataDiskSize)
+	}
+}
+
+func TestApplyHostMetaToSnapshot(t *testing.T) {
+	hosts := map[string]*store.HostInfo{
+		"node-1": {
+			InsID:           "node-1",
+			Zone:            "gz-3",
+			Region:          "gz",
+			InstanceType:    "CVM.S5",
+			ClusterLabel:    "default",
+			QuotaCPU:        4000,
+			QuotaMemMB:      8192,
+			OssClusterLabel: "oss-1",
+			SysDiskGB:       100,
+			DataDiskGB:      200,
+		},
+	}
+	hostTypes := map[string]*store.HostTypeInfo{
+		"CVM.S5": {InstanceType: "CVM.S5", CPUType: "intel-ice-lake"},
+	}
+	subHosts := map[string]*store.SubHostInfo{
+		"node-1": {
+			InsID:              "node-1",
+			HostIP:             "10.0.0.10",
+			DeviceClass:        "GPU",
+			DeviceID:           7,
+			InstanceFamily:     "CVM.S5",
+			DedicatedClusterID: "cluster-1",
+			VirtualNodeQuota:   "[2,4]",
+		},
+	}
+
+	snap := &model.NodeSnapshot{NodeID: "node-1"}
+	applyHostMetaToSnapshot(snap, hosts, hostTypes, subHosts)
+
+	if snap.Zone != "gz-3" || snap.Region != "gz" {
+		t.Errorf("zone/region = %s/%s, want gz-3/gz", snap.Zone, snap.Region)
+	}
+	if snap.InstanceType != "CVM.S5" {
+		t.Errorf("InstanceType = %s, want CVM.S5", snap.InstanceType)
+	}
+	if snap.CPUType != "intel-ice-lake" {
+		t.Errorf("CPUType = %s, want intel-ice-lake", snap.CPUType)
+	}
+	if snap.DeviceClass != "GPU" || snap.DeviceID != 7 {
+		t.Errorf("device = %s/%d, want GPU/7", snap.DeviceClass, snap.DeviceID)
+	}
+	if snap.MachineHostIP != "10.0.0.10" {
+		t.Errorf("MachineHostIP = %s, want 10.0.0.10", snap.MachineHostIP)
+	}
+	if snap.InstanceFamily != "CVM.S5" {
+		t.Errorf("InstanceFamily = %s, want CVM.S5", snap.InstanceFamily)
+	}
+	if snap.DedicatedClusterID != "cluster-1" {
+		t.Errorf("DedicatedClusterID = %s, want cluster-1", snap.DedicatedClusterID)
+	}
+	if len(snap.VirtualNodeQuotaArray) != 2 || snap.VirtualNodeQuotaArray[0] != 2 || snap.VirtualNodeQuotaArray[1] != 4 {
+		t.Errorf("VirtualNodeQuotaArray = %v, want [2 4]", snap.VirtualNodeQuotaArray)
+	}
+	if snap.SystemDiskSize != 100 || snap.DataDiskSize != 200 {
+		t.Errorf("disk sizes = %d/%d, want 100/200", snap.SystemDiskSize, snap.DataDiskSize)
+	}
+}
+
+func TestApplyHostMetaToSnapshot_EmptyQuota(t *testing.T) {
+	hosts := map[string]*store.HostInfo{"node-1": {InsID: "node-1", Zone: "gz-3"}}
+	subHosts := map[string]*store.SubHostInfo{
+		"node-1": {InsID: "node-1", VirtualNodeQuota: "[]"},
+	}
+	snap := &model.NodeSnapshot{NodeID: "node-1"}
+	applyHostMetaToSnapshot(snap, hosts, nil, subHosts)
+	if snap.Zone != "gz-3" {
+		t.Errorf("Zone = %s, want gz-3", snap.Zone)
+	}
+	if len(snap.VirtualNodeQuotaArray) != 0 {
+		t.Errorf("VirtualNodeQuotaArray = %v, want empty", snap.VirtualNodeQuotaArray)
+	}
 }

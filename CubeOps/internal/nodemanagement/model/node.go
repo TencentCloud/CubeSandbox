@@ -153,6 +153,19 @@ type NodeSnapshot struct {
 	MetricUpdate        time.Time          `json:"metric_update,omitempty"`
 	MetricLocalUpdateAt time.Time          `json:"metric_local_update_at,omitempty"`
 
+	// Static scheduler fields recovered from the legacy host registry tables.
+	Zone                  string  `json:"zone,omitempty"`
+	Region                string  `json:"region,omitempty"`
+	CPUType               string  `json:"cpu_type,omitempty"`
+	DeviceClass           string  `json:"device_class,omitempty"`
+	DeviceID              int64   `json:"device_id,omitempty"`
+	MachineHostIP         string  `json:"machine_host_ip,omitempty"`
+	InstanceFamily        string  `json:"instance_family,omitempty"`
+	DedicatedClusterID    string  `json:"dedicated_cluster_id,omitempty"`
+	VirtualNodeQuotaArray []int64 `json:"virtual_node_quota_array,omitempty"`
+	SystemDiskSize        int64   `json:"system_disk_size,omitempty"`
+	DataDiskSize          int64   `json:"data_disk_size,omitempty"`
+
 	// Resource usage observed by cubelet and mirrored into the snapshot so that
 	// the node view API exposes the same values as CubeMaster's Redis-driven
 	// metric path.

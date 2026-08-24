@@ -32,6 +32,7 @@ type DeclaredVersionInfo struct {
 
 type NodeService struct {
 	store               store.NodeStore
+	hostMeta            store.HostMetaLoader
 	declaredVersions    map[string]string
 	declaredVersionSets map[string]map[string]struct{}
 
@@ -39,6 +40,12 @@ type NodeService struct {
 }
 
 func NewNodeService(s store.NodeStore, declared DeclaredVersionInfo) *NodeService {
+	return NewNodeServiceWithHostMeta(s, nil, declared)
+}
+
+// NewNodeServiceWithHostMeta optionally injects a HostMetaLoader to recover
+// the legacy static scheduler fields; when nil they stay empty.
+func NewNodeServiceWithHostMeta(s store.NodeStore, hostMeta store.HostMetaLoader, declared DeclaredVersionInfo) *NodeService {
 	if declared.Primary == nil {
 		declared.Primary = map[string]string{}
 	}
@@ -47,6 +54,7 @@ func NewNodeService(s store.NodeStore, declared DeclaredVersionInfo) *NodeServic
 	}
 	return &NodeService{
 		store:               s,
+		hostMeta:            hostMeta,
 		declaredVersions:    declared.Primary,
 		declaredVersionSets: declared.Sets,
 	}
@@ -244,7 +252,12 @@ func fanOutResourceMetric(ctx context.Context, nodeID string, req *model.UpdateN
 }
 
 func (svc *NodeService) GetNode(ctx context.Context, nodeID string) (*model.NodeSnapshot, error) {
-	return svc.getNodeFromRedisOrDB(ctx, nodeID)
+	snap, err := svc.getNodeFromRedisOrDB(ctx, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	svc.applyHostMeta(ctx, []*model.NodeSnapshot{snap})
+	return snap, nil
 }
 
 func (svc *NodeService) ListNodes(ctx context.Context) ([]*model.NodeSnapshot, error) {
@@ -292,6 +305,7 @@ func (svc *NodeService) ListNodes(ctx context.Context) ([]*model.NodeSnapshot, e
 		out = append(out, snap)
 	}
 	sortSnapshots(out)
+	svc.applyHostMeta(ctx, out)
 	return out, nil
 }
 
@@ -584,4 +598,33 @@ func (svc *NodeService) LoadDeclaredVersions(declared DeclaredVersionInfo) {
 	}
 	svc.declaredVersions = declared.Primary
 	svc.declaredVersionSets = declared.Sets
+}
+
+// applyHostMeta overlays the legacy static scheduler fields onto snapshots
+// (three SELECTs total). Read failures degrade to a warning.
+func (svc *NodeService) applyHostMeta(ctx context.Context, snaps []*model.NodeSnapshot) {
+	if svc.hostMeta == nil || len(snaps) == 0 {
+		return
+	}
+	hosts, err := svc.hostMeta.LoadHostMetas(ctx)
+	if err != nil {
+		logging.G(ctx).Warnf("nodemgmt: load host_info for scheduling fields failed: %v", err)
+		hosts = nil
+	}
+	hostTypes, err := svc.hostMeta.LoadHostTypes(ctx)
+	if err != nil {
+		logging.G(ctx).Warnf("nodemgmt: load host_type for scheduling fields failed: %v", err)
+		hostTypes = nil
+	}
+	subHosts, err := svc.hostMeta.LoadSubHostMetas(ctx)
+	if err != nil {
+		logging.G(ctx).Warnf("nodemgmt: load sub_host_info for scheduling fields failed: %v", err)
+		subHosts = nil
+	}
+	for _, s := range snaps {
+		if s == nil {
+			continue
+		}
+		applyHostMetaToSnapshot(s, hosts, hostTypes, subHosts)
+	}
 }

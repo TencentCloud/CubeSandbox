@@ -31,7 +31,11 @@ func DefaultDeclaredVersionInfo() DeclaredVersionInfo {
 
 // New creates and initialises the node domain service.
 func New(ctx context.Context, db *gorm.DB, declared DeclaredVersionInfo) (*Service, error) {
-	svc := service.NewNodeService(store.NewNodeStore(db), declared)
+	svc := service.NewNodeServiceWithHostMeta(
+		store.NewNodeStore(db),
+		store.NewHostMetaLoader(db),
+		declared,
+	)
 	if err := svc.Init(ctx); err != nil {
 		return nil, err
 	}
