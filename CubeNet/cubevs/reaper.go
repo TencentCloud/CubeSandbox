@@ -168,7 +168,8 @@ type natSession struct {
 	PacketClass   uint8
 	L7Scheme      uint8
 	PolicyVersion uint32
-	Reserved      [28]uint8
+	Gen           uint32
+	Reserved      [24]uint8
 }
 
 // timeout returns the timeout for the session in nanoseconds.

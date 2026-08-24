@@ -370,7 +370,9 @@ struct nat_session {
 	__u8 packet_class;	/* SNAT_PACKET or L7PROXY_PACKET */
 	__u8 l7_scheme;		/* L7_SCHEME_*; NONE for non-L7 sessions */
 	__u32 policy_version;	/* mvm_meta.policy_version at create / last re-check */
-	__u8 reserved[28];
+	__u32 gen;		/* mvm_meta->version at creation; a sandbox rollback
+				 * bumps it, so a gen != current session is stale */
+	__u8 reserved[24];
 };
 
 struct ingress_session {

@@ -109,3 +109,53 @@ func TestDeleteTAPDeviceMetadataEntriesLookupErrorDoesNotPartiallyDelete(t *test
 		t.Fatal("ifindex metadata was deleted after reverse lookup failed")
 	}
 }
+
+// fakeMvmMetadataMap is an in-memory mvmVersionMapOps for bumpMvmVersion tests.
+type fakeMvmMetadataMap struct {
+	entries map[uint32]mvmMetadata
+}
+
+func (m *fakeMvmMetadataMap) Lookup(key, valueOut interface{}) error {
+	v, ok := m.entries[*key.(*uint32)]
+	if !ok {
+		return ebpf.ErrKeyNotExist
+	}
+	*valueOut.(*mvmMetadata) = v
+	return nil
+}
+
+func (m *fakeMvmMetadataMap) Update(key, value any, _ ebpf.MapUpdateFlags) error {
+	m.entries[*key.(*uint32)] = *value.(*mvmMetadata)
+	return nil
+}
+
+func TestBumpMvmVersionIncrementsAndPreservesFields(t *testing.T) {
+	const ifindex = uint32(42)
+	orig := mvmMetadata{
+		Version:        5,
+		IP:             0x0a000002,
+		DNSPolicyFlags: 3,
+	}
+	orig.UUID[0] = 'a'
+	orig.Reserved[0] = 0x7f
+	m := &fakeMvmMetadataMap{entries: map[uint32]mvmMetadata{ifindex: orig}}
+
+	if err := bumpMvmVersion(m, ifindex); err != nil {
+		t.Fatal(err)
+	}
+	got := m.entries[ifindex]
+	if got.Version != 6 {
+		t.Fatalf("version = %d, want 6 (map RMW +1, immune to a reset counter)", got.Version)
+	}
+	if got.IP != orig.IP || got.DNSPolicyFlags != orig.DNSPolicyFlags ||
+		got.UUID != orig.UUID || got.Reserved != orig.Reserved {
+		t.Fatal("bump must preserve IP/UUID/DNSPolicyFlags/Reserved")
+	}
+}
+
+func TestBumpMvmVersionMissingEntry(t *testing.T) {
+	m := &fakeMvmMetadataMap{entries: map[uint32]mvmMetadata{}}
+	if err := bumpMvmVersion(m, 99); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Fatalf("err = %v, want ErrKeyNotExist", err)
+	}
+}

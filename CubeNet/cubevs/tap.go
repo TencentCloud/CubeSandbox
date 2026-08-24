@@ -140,6 +140,45 @@ func UpsertTAPDeviceMetadata(ifindex uint32, ip net.IP, id string, version uint3
 	return nil
 }
 
+// BumpMvmVersion increments the sandbox's rollback generation
+// (ifindex_to_mvmmeta[ifindex].version) via a read-modify-write of the map
+// value, preserving IP/UUID/DNSPolicyFlags/Reserved. A sandbox rollback calls
+// this after the guest has been restored and resumed; the dataplane then treats
+// a session whose stamped gen differs from the current version as stale and
+// resets it. This is a map RMW (not the process-local registration counter) so
+// it stays monotonic per ifindex even across a Cubelet restart that reset that
+// counter — otherwise a bump could write a value equal to the registration
+// version and make the rollback invisible.
+func BumpMvmVersion(ifindex uint32) error {
+	m, err := loadPinnedMap(MapNameIfindexToMVMMetadata)
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+	return bumpMvmVersion(m, ifindex)
+}
+
+// mvmVersionMapOps is the subset of the metadata map used to bump the version;
+// it is an interface so the read-modify-write can be unit-tested against a fake.
+type mvmVersionMapOps interface {
+	Lookup(key, valueOut interface{}) error
+	Update(key, value any, flags ebpf.MapUpdateFlags) error
+}
+
+// bumpMvmVersion does the read-modify-write on the metadata map value. It
+// preserves IP/UUID/DNSPolicyFlags/Reserved and only increments Version.
+func bumpMvmVersion(m mvmVersionMapOps, ifindex uint32) error {
+	var meta mvmMetadata
+	if err := m.Lookup(&ifindex, &meta); err != nil {
+		return fmt.Errorf("map.Lookup failed: %w, name: %s", err, MapNameIfindexToMVMMetadata)
+	}
+	meta.Version++
+	if err := m.Update(&ifindex, &meta, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("map.Update failed: %w, name: %s", err, MapNameIfindexToMVMMetadata)
+	}
+	return nil
+}
+
 // UpsertTAPDevice registers a TAP device and replaces its desired policy state.
 func UpsertTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVMOptions) error {
 	if err := UpsertTAPDeviceMetadata(ifindex, ip, id, version); err != nil {

@@ -10,6 +10,12 @@
 enum packet_class {
 	SNAT_PACKET = 0,
 	L7PROXY_PACKET,
+	/* PORT_MAPPING_PACKET marks sessions for statically port-mapped (inbound)
+	 * connections. They have no ingress_sessions entry and their key version is
+	 * fixed at 0; the rollback generation is carried in nat_session.gen so an
+	 * aged (reaped) connection misses and is rebuilt while a stale (rolled-back)
+	 * one is found and reset. */
+	PORT_MAPPING_PACKET,
 };
 
 /* Lazy refresh threshold: 1 second in nanoseconds */
@@ -68,6 +74,67 @@ static __always_inline struct nat_session *lookup_session(const struct session_k
 	ekey.protocol = ikey->protocol;
 
 	return bpf_map_lookup_elem(&egress_sessions, &ekey);
+}
+
+/* current_gen returns the VM's current rollback generation (mvm_meta->version),
+ * or 0 when the metadata is missing. */
+static __always_inline __u32 current_gen(__u32 vm_ifindex)
+{
+	struct mvm_meta *meta = bpf_map_lookup_elem(&ifindex_to_mvmmeta, &vm_ifindex);
+
+	return meta ? meta->version : 0;
+}
+
+/* current_gen_by_ip returns the current rollback generation for the sandbox
+ * owning vm_ip, resolved via mvmip_to_ifindex. Used when only the VM's IP is
+ * available (e.g. an ingress_session value, which has no ifindex). */
+static __always_inline __u32 current_gen_by_ip(__be32 vm_ip)
+{
+	__u32 *ifindex = bpf_map_lookup_elem(&mvmip_to_ifindex, &vm_ip);
+
+	return ifindex ? current_gen(*ifindex) : 0;
+}
+
+/* session_is_stale reports whether the session was created in a previous
+ * rollback generation: its stamped gen differs from the VM's current version.
+ * A sandbox rollback bumps mvm_meta->version, orphaning older sessions. */
+static __always_inline bool session_is_stale(const struct nat_session *sess)
+{
+	return sess->gen != current_gen(sess->vm_ifindex);
+}
+
+/* port_mapping_key builds the egress_sessions key for a port_mapping
+ * connection. The guest is the server, so the key is the guest-side tuple
+ * (mvm_inner_ip:listen_port -> peer:peer_port) with a fixed key version of 0;
+ * the rollback generation is carried in the session value's gen field. */
+static __always_inline void port_mapping_key(struct session_key *key, __be32 peer_ip,
+					     __be16 peer_port, __be16 listen_port)
+{
+	key->src_ip = mvm_inner_ip;
+	key->src_port = listen_port;
+	key->dst_ip = peer_ip;
+	key->dst_port = peer_port;
+	key->version = 0;
+	key->protocol = IPPROTO_TCP;
+}
+
+/* delete_session_pair removes a stale session's egress entry and its ingress
+ * entry (ingress keys use version 0) so the tuple is freed for an immediate
+ * reconnect. Only used for SNAT/L7 sessions, which have an ingress entry. */
+static __always_inline void delete_session_pair(struct session_key *ikey,
+						struct nat_session *sess)
+{
+	struct session_key ekey = {};
+
+	ekey.src_ip = sess->vm_ip;
+	ekey.dst_ip = ikey->src_ip;
+	ekey.src_port = sess->vm_port;
+	ekey.dst_port = ikey->src_port;
+	ekey.version = sess->gen;
+	ekey.protocol = ikey->protocol;
+
+	bpf_map_delete_elem(&egress_sessions, &ekey);
+	bpf_map_delete_elem(&ingress_sessions, ikey);
 }
 
 /* Unified egress policy verdict for a candidate flow.
@@ -309,6 +376,17 @@ static __always_inline bool create_nat_session(struct __sk_buff *skb,
 	 * mvm_meta is what schedules this flow's next re-check.
 	 */
 	sess.policy_version = policy_version;
+
+	/* Stamp the creation generation (the VM's current mvm_meta->version) so a
+	 * reverse-path reader can tell a stale (pre-rollback) session from a
+	 * merely reaped one. For SNAT/L7 this equals ekey->version; for
+	 * port_mapping the key version is fixed at 0 while gen tracks rollback. */
+	{
+		struct mvm_meta *meta = bpf_map_lookup_elem(&ifindex_to_mvmmeta, &vm_ifindex);
+
+		if (meta)
+			sess.gen = meta->version;
+	}
 	err = bpf_map_update_elem(&egress_sessions, ekey, &sess, BPF_NOEXIST);
 	if (err) {
 		/* on failure, clean up the ingress slot we reserved earlier */

@@ -21,6 +21,8 @@ import (
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
+
+	"github.com/tencentcloud/CubeSandbox/CubeNet/cubevs"
 )
 
 const (
@@ -229,6 +231,14 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	// Pid/StartedAt against the live shim once RollingBack clears.
 	resetSandboxStatusAfterRollback(cb)
 
+	// The rollback restored and resumed the guest. Bump its network generation
+	// so the dataplane resets now-stale TCP sessions instead of letting them
+	// hang. Warn-only: the guest is already running, so failing the RPC over a
+	// dataplane bump would diverge master/cubelet state for a non-fatal issue.
+	if err := bumpRollbackNetworkGeneration(req.GetSandboxID()); err != nil {
+		stepLog.Warnf("rollback succeeded but failed to bump network generation for sandbox %s: %v", req.GetSandboxID(), err)
+	}
+
 	newRootfs.MountName = currentRootfs.MountName
 	if err := storage.PersistSandboxRootfs(ctx, req.GetSandboxID(), newRootfs); err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
@@ -333,6 +343,22 @@ func resolveRollbackTargets(ctx context.Context, backend string, req *cubebox.Ro
 		return "", "", "", "", fmt.Errorf("rollback: local snapshot catalog lookup for %s failed: %w", req.GetSnapshotID(), err)
 	}
 	return entry.RootfsVol, entry.MemoryVol, entry.MemoryKind, entry.MetaDir, nil
+}
+
+// bumpRollbackNetworkGeneration bumps the sandbox's network generation so the
+// dataplane resets now-stale TCP sessions after a rollback. Best effort; the
+// caller logs a warning on failure.
+func bumpRollbackNetworkGeneration(sandboxID string) error {
+	taps, err := cubevs.ListTAPDevices()
+	if err != nil {
+		return err
+	}
+	for _, tap := range taps {
+		if tap.ID == sandboxID {
+			return cubevs.BumpMvmVersion(uint32(tap.Ifindex))
+		}
+	}
+	return fmt.Errorf("no TAP device found for sandbox %s", sandboxID)
 }
 
 func (s *service) buildRollbackRestoreConfig(ctx context.Context, sandboxID, metaDir string, currentRootfs, newRootfs, memory *storage.CowSnapshotObject) (string, error) {

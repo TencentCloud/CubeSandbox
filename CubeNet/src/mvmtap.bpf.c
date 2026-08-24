@@ -14,6 +14,7 @@
 #include "map.h"
 #include "skb.h"
 #include "tcp.h"
+#include "tcp_reset.h"
 #include "udp.h"
 #include "dns_query.h"
 
@@ -243,101 +244,6 @@ enum tcp_nat_result {
 #define TCP_NAT_STATUS(ret)	((enum tcp_nat_result)((__u32)(ret)))
 #define TCP_NAT_IFINDEX(ret)	((__u32)((__u64)(ret) >> 32))
 
-static __always_inline bool tcp_segment_len(const struct iphdr *l3, const struct tcphdr *l4,
-					    __u32 *seg_len)
-{
-	__u16 ip_hlen, tcp_hlen, total_len;
-
-	ip_hlen = BPF_CORE_READ_BITFIELD(l3, ihl);
-	ip_hlen <<= 2;
-	tcp_hlen = BPF_CORE_READ_BITFIELD(l4, doff);
-	tcp_hlen <<= 2;
-	total_len = bpf_ntohs(l3->tot_len);
-	if (ip_hlen < sizeof(struct iphdr) || tcp_hlen < sizeof(struct tcphdr) ||
-	    total_len < ip_hlen + tcp_hlen)
-		return false;
-
-	*seg_len = total_len - ip_hlen - tcp_hlen;
-	if (l4->syn)
-		(*seg_len)++;
-	if (l4->fin)
-		(*seg_len)++;
-
-	return true;
-}
-
-/* Update the IP tot_len field together with the IP header checksum.
- * Uses bpf_l3_csum_replace for the incremental csum update and
- * bpf_skb_store_bytes to write the new value, instead of touching the
- * packet pointer directly.
- */
-static __always_inline int rewrite_l3_tot_len(struct __sk_buff *skb,
-					      __be16 old_tot_len, __be16 new_tot_len)
-{
-	long err;
-
-	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_tot_len, new_tot_len,
-				  sizeof(new_tot_len));
-	if (err)
-		return err;
-
-	return bpf_skb_store_bytes(skb, IP_TOT_LEN_OFF, &new_tot_len,
-				   sizeof(new_tot_len), 0);
-}
-
-/* Set the TCP checksum field of a freshly written TCP header.
- *
- * Pre-condition: the TCP header at @tcp_csum_off..+sizeof(*tcp) is already
- * present in skb with the check field cleared to 0. This helper folds the
- * IPv4 pseudo-header (saddr, daddr, proto, length) and the on-wire TCP
- * header bytes into the checksum via bpf_l4_csum_replace.
- *
- * Per the bpf-helpers(7) man page, calling bpf_l4_csum_replace with
- * from = 0 makes the helper recompute the csum against `to` only — i.e.
- * accumulates `to` into the existing in-place checksum. We start from a
- * zeroed check field and add each 32-bit word in turn.
- */
-static __always_inline int tcp_ipv4_set_checksum(struct __sk_buff *skb,
-						 __u32 tcp_csum_off,
-						 __be32 saddr, __be32 daddr,
-						 const struct tcphdr *tcp)
-{
-	const __u32 *words = (const __u32 *)tcp;
-	/* zero | proto | length, in network byte order */
-	__be32 proto_len = bpf_htonl(((__u32)IPPROTO_TCP << 16) | sizeof(*tcp));
-	__u64 ph_flags = BPF_F_PSEUDO_HDR | sizeof(__u32);
-	__u64 hdr_flags = sizeof(__u32);
-	long err;
-
-	/* Pseudo-header words */
-	err = bpf_l4_csum_replace(skb, tcp_csum_off, 0, saddr, ph_flags);
-	if (err)
-		return err;
-	err = bpf_l4_csum_replace(skb, tcp_csum_off, 0, daddr, ph_flags);
-	if (err)
-		return err;
-	err = bpf_l4_csum_replace(skb, tcp_csum_off, 0, proto_len, ph_flags);
-	if (err)
-		return err;
-
-	/* TCP header words: source|dest, seq, ack_seq, doff/flags/window,
-	 * check|urg_ptr. The check word currently contains 0 (caller wrote
-	 * a zeroed check field), so adding it is a no-op for the csum.
-	 */
-	err = bpf_l4_csum_replace(skb, tcp_csum_off, 0, words[0], hdr_flags);
-	if (err)
-		return err;
-	err = bpf_l4_csum_replace(skb, tcp_csum_off, 0, words[1], hdr_flags);
-	if (err)
-		return err;
-	err = bpf_l4_csum_replace(skb, tcp_csum_off, 0, words[2], hdr_flags);
-	if (err)
-		return err;
-	err = bpf_l4_csum_replace(skb, tcp_csum_off, 0, words[3], hdr_flags);
-	if (err)
-		return err;
-	return bpf_l4_csum_replace(skb, tcp_csum_off, 0, words[4], hdr_flags);
-}
 
 static __always_inline int tcp_reply_reset(struct __sk_buff *skb, __u32 ifindex)
 {
@@ -1144,6 +1050,8 @@ int from_cube(struct __sk_buff *skb)
 	__u32 daddr, ifindex, dst_ifindex;
 	__u64 tcp_ret;
 	struct mvm_port mvm_port = {};
+	struct nat_session *sess;
+	struct session_key pmkey = {};
 	struct mvm_meta *mvm_meta;
 	struct ethhdr *l2;
 	struct iphdr *l3;
@@ -1219,6 +1127,18 @@ int from_cube(struct __sk_buff *skb)
 		if (host_port) {
 			if (l4->syn && !l4->ack)
 				return TC_ACT_SHOT;
+
+			/* A port_mapping session whose gen differs from the VM's current
+			 * mvm_meta->version is stale (the sandbox was rolled back); reset
+			 * the guest side so the application unblocks. A miss forwards
+			 * statelessly (today's behaviour). port_mapping sessions have no
+			 * ingress entry. */
+			port_mapping_key(&pmkey, l3->daddr, l4->dest, l4->source);
+			sess = bpf_map_lookup_elem(&egress_sessions, &pmkey);
+			if (sess && session_is_stale(sess)) {
+				bpf_map_delete_elem(&egress_sessions, &pmkey);
+				return tcp_reply_reset(skb, ifindex);
+			}
 
 			err = snat_tcp(skb, ifindex, l2, l3, l4, l4->source, *host_port);
 			if (err)
