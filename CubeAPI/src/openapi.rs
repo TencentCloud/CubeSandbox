@@ -12,14 +12,15 @@ use utoipa::{
 use crate::{
     handlers,
     models::{
-        ApiError, ConnectSandbox, CreateSnapshotRequest, CreateTemplateRequest, NewSandbox,
-        NewVolume, RebuildTemplateRequest, RefreshRequest, ResumedSandbox, RollbackRequest,
-        RollbackResponse, Sandbox, SandboxDetail, SandboxLogEntry, SandboxLogs,
-        SandboxLogsV2Response, SandboxState, SandboxVolumeMount, SetTemplateAliasRequest,
-        SetTimeoutRequest, SnapshotInfo, SnapshotListItem, TemplateAliasLookupResponse,
-        TemplateBuildJob, TemplateBuildStatus, TemplateCompatAdoptResponseView,
-        TemplateCompatMatrixView, TemplateCompatRowView, TemplateCompatSummaryView, TemplateDetail,
-        TemplateNodeCompatView, TemplateSummary, Volume, VolumeAndToken,
+        ApiError, BlockIoQosConfig, ConnectSandbox, CreateSnapshotRequest, CreateTemplateRequest,
+        NetworkQosConfig, NewSandbox, NewVolume, QosConfig, RebuildTemplateRequest, RefreshRequest,
+        ResumedSandbox, RollbackRequest, RollbackResponse, Sandbox, SandboxDetail, SandboxLogEntry,
+        SandboxLogs, SandboxLogsV2Response, SandboxState, SandboxVolumeMount,
+        SetTemplateAliasRequest, SetTimeoutRequest, SnapshotInfo, SnapshotListItem,
+        TemplateAliasLookupResponse, TemplateBuildJob, TemplateBuildStatus,
+        TemplateCompatAdoptResponseView, TemplateCompatMatrixView, TemplateCompatRowView,
+        TemplateCompatSummaryView, TemplateDetail, TemplateNodeCompatView, TemplateSummary, Volume,
+        VolumeAndToken,
     },
 };
 
@@ -95,6 +96,9 @@ impl Modify for SecurityAddon {
         TemplateBuildJob,
         TemplateBuildStatus,
         CreateTemplateRequest,
+        QosConfig,
+        NetworkQosConfig,
+        BlockIoQosConfig,
         RebuildTemplateRequest,
         SetTemplateAliasRequest,
         TemplateCompatSummaryView,

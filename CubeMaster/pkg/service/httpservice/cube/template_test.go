@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
@@ -52,6 +53,38 @@ func TestConstructCreateReqPreservesDistributionScope(t *testing.T) {
 		t.Fatalf("constructCreateReq failed: %v", err)
 	}
 	assert.Equal(t, []string{"node-a", "10.0.0.2"}, got.DistributionScope)
+}
+
+func TestCreateTemplateRejectsCallerSuppliedNetworkQosAnnotation(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/cube/template", strings.NewReader(`{
+		"requestID":"req-qos",
+		"annotations":{"cube.master.net":"{}"}
+	}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := createTemplate(req, rt)
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.Contains(t, got.Ret.RetMsg, "template-managed")
+}
+
+func TestCreateTemplateRejectsCallerSuppliedBlockIOQosAnnotation(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/cube/template", strings.NewReader(`{
+		"requestID":"req-qos",
+		"annotations":{"cube.master.blk.qos":"{}"}
+	}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := createTemplate(req, rt)
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.Contains(t, got.Ret.RetMsg, "template-managed")
 }
 
 func TestDeleteTemplateMapsAttemptInProgressToConflict(t *testing.T) {
@@ -170,6 +203,10 @@ func TestGetTemplateIncludeRequest(t *testing.T) {
 			InstanceType: "cubebox",
 			Version:      "v2",
 			Status:       "READY",
+			ConfiguredQos: &qos.Config{
+				Network: &qos.NetworkConfig{BandwidthMbps: 100, PacketsPerSecond: 5000},
+				BlockIO: &qos.BlockIOConfig{ThroughputMiBps: 64, IOPS: 1000},
+			},
 		}, nil
 	}
 	getTemplateRequestFn = func(ctx context.Context, templateID string) (*types.CreateCubeSandboxReq, error) {
@@ -177,6 +214,8 @@ func TestGetTemplateIncludeRequest(t *testing.T) {
 			Request: &types.Request{RequestID: "req-preview"},
 			Annotations: map[string]string{
 				constants.CubeAnnotationAppSnapshotTemplateID: templateID,
+				constants.CubeAnnotationsNetWork:              `{"Qos":{"BandWidth":{"Size":1250000,"RefillTime":100}}}`,
+				constants.CubeAnnotationsBlkQos:               `{"bandwidth":{"size":67108864,"refill_time":1000}}`,
 			},
 		}, nil
 	}
@@ -192,7 +231,13 @@ func TestGetTemplateIncludeRequest(t *testing.T) {
 	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
 	if assert.NotNil(t, got.CreateRequest) {
 		assert.Equal(t, "tpl-include", got.CreateRequest.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+		assert.NotContains(t, got.CreateRequest.Annotations, constants.CubeAnnotationsNetWork)
+		assert.NotContains(t, got.CreateRequest.Annotations, constants.CubeAnnotationsBlkQos)
 	}
+	assert.Equal(t, uint32(100), got.ConfiguredQos.Network.BandwidthMbps)
+	assert.Equal(t, uint32(5000), got.ConfiguredQos.Network.PacketsPerSecond)
+	assert.Equal(t, uint32(64), got.ConfiguredQos.BlockIO.ThroughputMiBps)
+	assert.Equal(t, uint32(1000), got.ConfiguredQos.BlockIO.IOPS)
 	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
 }
 

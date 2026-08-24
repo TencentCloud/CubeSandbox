@@ -148,6 +148,8 @@ impl SandboxService {
             metadata: optional_metadata(d.labels),
             state: sandbox_state_from_status(d.status),
             volume_mounts: map_volume_mounts(&d.volume_mounts),
+            configured_qos: d.configured_qos.map(Into::into),
+            qos_applied: d.qos_applied,
         })
     }
 

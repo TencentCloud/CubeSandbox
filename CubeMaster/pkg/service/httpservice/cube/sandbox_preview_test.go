@@ -37,12 +37,17 @@ func TestPreviewSandboxReturnsResolvedRequests(t *testing.T) {
 			Name: "main",
 		})
 		req.Volumes = append(req.Volumes, &types.Volume{Name: "work"})
+		req.Annotations[constants.CubeAnnotationsNetWork] = `{"Qos":{"BandWidth":{"Size":1250000,"RefillTime":100}}}`
 		return nil
 	}
 	previewConstructCubeletReqFn = func(ctx context.Context, req *types.CreateCubeSandboxReq) (*cubeboxv1.RunCubeSandboxRequest, error) {
+		assert.Contains(t, req.Annotations, constants.CubeAnnotationsNetWork)
 		return &cubeboxv1.RunCubeSandboxRequest{
 			RequestID: req.RequestID,
 			Namespace: req.Namespace,
+			Annotations: map[string]string{
+				constants.CubeAnnotationsNetWork: req.Annotations[constants.CubeAnnotationsNetWork],
+			},
 			Containers: []*cubeboxv1.ContainerConfig{
 				{Name: "main"},
 			},
@@ -73,12 +78,30 @@ func TestPreviewSandboxReturnsResolvedRequests(t *testing.T) {
 	if assert.NotNil(t, got.MergedRequest) {
 		assert.Equal(t, "resolved-ns", got.MergedRequest.Namespace)
 		assert.Len(t, got.MergedRequest.Containers, 1)
+		assert.NotContains(t, got.MergedRequest.Annotations, constants.CubeAnnotationsNetWork)
 	}
 	if assert.NotNil(t, got.CubeletRequest) {
 		assert.Equal(t, "resolved-ns", got.CubeletRequest.Namespace)
 		assert.Len(t, got.CubeletRequest.Containers, 1)
+		assert.NotContains(t, got.CubeletRequest.Annotations, constants.CubeAnnotationsNetWork)
 	}
 	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
+}
+
+func TestPreviewSandboxRejectsCallerSuppliedNetworkQos(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/cube/sandbox/preview", strings.NewReader(`{
+		"requestID":"req-qos",
+		"annotations":{"cube.master.net":"{}"}
+	}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := previewSandbox(req, rt)
+
+	got, ok := resp.(*sandboxPreviewResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.Contains(t, got.Ret.RetMsg, "template-managed")
 }
 
 func TestHandleSandboxPreviewRejectsGet(t *testing.T) {

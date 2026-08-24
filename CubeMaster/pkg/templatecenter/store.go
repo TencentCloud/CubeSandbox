@@ -28,6 +28,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -140,6 +141,7 @@ type TemplateInfo struct {
 	ImageInfo                 string          `json:"image_info,omitempty"`
 	JobID                     string          `json:"job_id,omitempty"`
 	Replicas                  []ReplicaStatus `json:"replicas,omitempty"`
+	ConfiguredQos             *qos.Config     `json:"configured_qos,omitempty"`
 
 	// CubeEgress CA bake metadata, surfaced for ops triage. Populated
 	// from the RootfsArtifact row pointed to by the first replica.
@@ -152,7 +154,7 @@ type TemplateInfo struct {
 }
 
 func templateInfoFromDefinition(def models.TemplateDefinition) TemplateInfo {
-	return TemplateInfo{
+	info := TemplateInfo{
 		TemplateID:                def.TemplateID,
 		InstanceType:              def.InstanceType,
 		Version:                   def.Version,
@@ -167,6 +169,8 @@ func templateInfoFromDefinition(def models.TemplateDefinition) TemplateInfo {
 		RootfsSizeBytesAtSnapshot: def.RootfsSizeBytesAtSnapshot,
 		LastError:                 def.LastError,
 	}
+	info.ConfiguredQos = configuredQosFromCreateRequestJSON(def.RequestJSON)
+	return info
 }
 
 type replicaRunOptions struct {
@@ -298,6 +302,16 @@ func configureSandboxSpecHooks() {
 			HostID: hostID,
 			HostIP: hostIP,
 		})
+	})
+	sandbox.SetTemplateQosLookupHook(func(ctx context.Context, templateID string) (*qos.Config, error) {
+		req, err := GetTemplateRequest(ctx, templateID)
+		if err != nil {
+			return nil, err
+		}
+		return qos.ParseAnnotations(
+			req.Annotations[constants.CubeAnnotationsNetWork],
+			req.Annotations[constants.CubeAnnotationsBlkQos],
+		)
 	})
 }
 
@@ -843,7 +857,7 @@ func templateInfoFromJob(job *models.TemplateImageJob) TemplateInfo {
 	if status == "" {
 		status = JobStatusPending
 	}
-	return TemplateInfo{
+	info := TemplateInfo{
 		TemplateID:   job.TemplateID,
 		InstanceType: job.InstanceType,
 		Version:      DefaultTemplateVersion,
@@ -853,6 +867,31 @@ func templateInfoFromJob(job *models.TemplateImageJob) TemplateInfo {
 		ImageInfo:    composeImageInfo(job.SourceImageRef, job.SourceImageDigest),
 		JobID:        latestJobIDFromJob(job),
 	}
+	if job.RequestJSON != "" {
+		request := &sandboxtypes.CreateTemplateFromImageReq{}
+		if err := json.Unmarshal([]byte(job.RequestJSON), request); err == nil {
+			info.ConfiguredQos = qos.Clone(request.Qos)
+		}
+	}
+	return info
+}
+
+func configuredQosFromCreateRequestJSON(raw string) *qos.Config {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	request := &sandboxtypes.CreateCubeSandboxReq{}
+	if err := json.Unmarshal([]byte(raw), request); err != nil || request.Annotations == nil {
+		return nil
+	}
+	configured, err := qos.ParseAnnotations(
+		request.Annotations[constants.CubeAnnotationsNetWork],
+		request.Annotations[constants.CubeAnnotationsBlkQos],
+	)
+	if err != nil {
+		return nil
+	}
+	return configured
 }
 
 func formatUTCRFC3339(ts time.Time) string {

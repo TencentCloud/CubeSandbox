@@ -12,10 +12,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/urfave/cli"
 )
@@ -315,6 +317,103 @@ func TestApplyCreateFromImageIvshmemFlag(t *testing.T) {
 	applyCreateFromImageIvshmemFlag(newCreateFromImageContext(t, []string{"--enable-ivshmem"}), withFlag)
 	if withFlag.EnableIvshmem == nil || !*withFlag.EnableIvshmem {
 		t.Fatalf("EnableIvshmem=%v, want true", withFlag.EnableIvshmem)
+	}
+}
+
+func TestParseCreateFromImageQosReadsFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "qos.json")
+	if err := os.WriteFile(path, []byte(`{"network":{"bandwidthMbps":100}}`), 0o600); err != nil {
+		t.Fatalf("write qos file: %v", err)
+	}
+
+	got, err := parseCreateFromImageQos(newCreateFromImageContext(t, []string{"--qos", "@" + path}))
+	if err != nil {
+		t.Fatalf("parseCreateFromImageQos error=%v", err)
+	}
+	if got == nil || got.Network == nil || got.Network.BandwidthMbps != 100 {
+		t.Fatalf("qos=%+v, want 100 Mbps", got)
+	}
+}
+
+func TestParseCreateFromImageQosRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "qos.json")
+	if err := os.WriteFile(path, bytes.Repeat([]byte(" "), maxCreateFromImageQosBytes+1), 0o600); err != nil {
+		t.Fatalf("write qos file: %v", err)
+	}
+	_, err := parseCreateFromImageQos(newCreateFromImageContext(t, []string{"--qos", "@" + path}))
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("parseCreateFromImageQos error=%v, want size limit error", err)
+	}
+}
+
+func TestParseCreateFromImageQosReadsInlineJSON(t *testing.T) {
+	got, err := parseCreateFromImageQos(newCreateFromImageContext(t, []string{"--qos", `{"network":{"bandwidthMbps":200}}`}))
+	if err != nil {
+		t.Fatalf("parseCreateFromImageQos error=%v", err)
+	}
+	if got == nil || got.Network == nil || got.Network.BandwidthMbps != 200 {
+		t.Fatalf("qos=%+v, want 200 Mbps", got)
+	}
+}
+
+func TestParseCreateFromImageQosReadsPacketsPerSecond(t *testing.T) {
+	got, err := parseCreateFromImageQos(newCreateFromImageContext(t, []string{"--qos", `{"network":{"packetsPerSecond":5000}}`}))
+	if err != nil {
+		t.Fatalf("parseCreateFromImageQos error=%v", err)
+	}
+	if got == nil || got.Network == nil || got.Network.PacketsPerSecond != 5000 {
+		t.Fatalf("qos=%+v, want 5000 packets per second", got)
+	}
+}
+
+func TestParseCreateFromImageQosReadsBlockIO(t *testing.T) {
+	got, err := parseCreateFromImageQos(newCreateFromImageContext(t, []string{"--qos", `{"blockIo":{"throughputMiBps":64,"iops":1000}}`}))
+	if err != nil {
+		t.Fatalf("parseCreateFromImageQos error=%v", err)
+	}
+	if got == nil || got.BlockIO == nil || got.BlockIO.ThroughputMiBps != 64 || got.BlockIO.IOPS != 1000 {
+		t.Fatalf("qos=%+v, want 64 MiB/s and 1000 IOPS", got)
+	}
+}
+
+func TestFormatNetworkQosLimits(t *testing.T) {
+	tests := []struct {
+		name             string
+		bandwidthMbps    uint32
+		packetsPerSecond uint32
+		want             string
+	}{
+		{name: "bandwidth only", bandwidthMbps: 100, want: "100 Mbit/s per direction"},
+		{name: "packets only", packetsPerSecond: 5000, want: "5000 packets/s per direction"},
+		{name: "combined", bandwidthMbps: 100, packetsPerSecond: 5000, want: "100 Mbit/s per direction, 5000 packets/s per direction"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatNetworkQosLimits(tt.bandwidthMbps, tt.packetsPerSecond); got != tt.want {
+				t.Fatalf("formatNetworkQosLimits()=%q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatBlockIOQosLimits(t *testing.T) {
+	if got := formatBlockIOQosLimits(64, 1000); got != "64 MiB/s per block device, 1000 IOPS per block device" {
+		t.Fatalf("formatBlockIOQosLimits()=%q", got)
+	}
+}
+
+func TestParseCreateFromImageQosRejectsUnknownField(t *testing.T) {
+	_, err := parseCreateFromImageQos(newCreateFromImageContext(t, []string{"--qos", `{"network":{"bandwidth_mbps":100}}`}))
+	if err == nil {
+		t.Fatal("expected unknown qos field error")
+	}
+}
+
+func TestParseCreateFromImageQosRejectsNonJSONValue(t *testing.T) {
+	_, err := parseCreateFromImageQos(newCreateFromImageContext(t, []string{"--qos", "qos.json"}))
+	if err == nil {
+		t.Fatal("expected inline JSON or @path error")
 	}
 }
 
@@ -689,6 +788,10 @@ func TestPrintTemplateSummaryIncludesOptionalMetadata(t *testing.T) {
 			Status:       "READY",
 			CreatedAt:    "2026-06-17 12:00:00",
 			ImageInfo:    "docker.io/library/python:3.12",
+			ConfiguredQos: &qos.Config{
+				Network: &qos.NetworkConfig{BandwidthMbps: 100, PacketsPerSecond: 5000},
+				BlockIO: &qos.BlockIOConfig{ThroughputMiBps: 64, IOPS: 1000},
+			},
 		})
 	})
 
@@ -698,6 +801,8 @@ func TestPrintTemplateSummaryIncludesOptionalMetadata(t *testing.T) {
 		"alias: python-template",
 		"created_at: 2026-06-17 12:00:00",
 		"image_info: docker.io/library/python:3.12",
+		"network_qos: 100 Mbit/s per direction, 5000 packets/s per direction",
+		"block_io_qos: 64 MiB/s per block device, 1000 IOPS per block device",
 	} {
 		if !strings.Contains(logOutput, want) {
 			t.Fatalf("log output=%q, missing %q", logOutput, want)

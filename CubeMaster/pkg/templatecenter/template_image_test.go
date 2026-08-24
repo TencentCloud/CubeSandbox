@@ -26,6 +26,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
 	"gorm.io/gorm"
@@ -92,6 +93,51 @@ func TestNormalizeTemplateImageRequestRejectsInvalidSourceImageRef(t *testing.T)
 				t.Fatalf("normalizeTemplateImageRequest(%q) error=%v, want source_image_ref validation error", imageRef, err)
 			}
 		})
+	}
+}
+
+func TestNormalizeTemplateImageRequestClonesQos(t *testing.T) {
+	inputQos := &qos.Config{Network: &qos.NetworkConfig{BandwidthMbps: 100, PacketsPerSecond: 5000}}
+	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		Qos:               inputQos,
+	})
+	if err != nil {
+		t.Fatalf("normalizeTemplateImageRequest failed: %v", err)
+	}
+
+	inputQos.Network.BandwidthMbps = 200
+	if got := req.Qos.Network.BandwidthMbps; got != 100 {
+		t.Fatalf("normalized bandwidth=%d, want 100", got)
+	}
+	inputQos.Network.PacketsPerSecond = 9000
+	if got := req.Qos.Network.PacketsPerSecond; got != 5000 {
+		t.Fatalf("normalized packets per second=%d, want 5000", got)
+	}
+}
+
+func TestNormalizeTemplateImageRequestKeepsDefaultForOmittedResourceFields(t *testing.T) {
+	resources := templateResources(&types.CreateTemplateFromImageReq{
+		ContainerOverrides: &types.ContainerOverrides{Resources: &types.Resource{
+			Cpu: "500m",
+		}},
+	})
+	if resources.CPU != "500m" || resources.Memory != defaultTemplateMemory {
+		t.Fatalf("resources=%+v, want explicit CPU and default memory", resources)
+	}
+}
+
+func TestNormalizeTemplateImageRequestRejectsInvalidQos(t *testing.T) {
+	_, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		Qos:               &qos.Config{},
+	})
+	if err == nil {
+		t.Fatal("expected invalid qos error")
 	}
 }
 
@@ -399,6 +445,23 @@ func TestBuildTemplateSpecFingerprintUsesExposedPorts(t *testing.T) {
 	}
 }
 
+func TestBuildTemplateSpecFingerprintIgnoresRuntimeQos(t *testing.T) {
+	reqA := &types.CreateTemplateFromImageReq{
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+	}
+	reqB := *reqA
+	reqB.Qos = &qos.Config{Network: &qos.NetworkConfig{BandwidthMbps: 200}}
+
+	gotA := buildTemplateSpecFingerprint(reqA, "repo@sha256:aaa")
+	gotB := buildTemplateSpecFingerprint(&reqB, "repo@sha256:aaa")
+	if gotA != gotB {
+		t.Fatalf("runtime qos must not change rootfs artifact fingerprint: %q vs %q", gotA, gotB)
+	}
+}
+
 func TestBuildTemplateSpecFingerprintUsesDNSConfig(t *testing.T) {
 	reqA := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-1"},
@@ -603,6 +666,72 @@ func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.
 	if got.Annotations[constants.AnnotationsExposedPort] != "80:8080" {
 		t.Fatalf("unexpected exposed ports annotation: %q", got.Annotations[constants.AnnotationsExposedPort])
 	}
+	if _, ok := got.Annotations[constants.CubeAnnotationsNetWork]; ok {
+		t.Fatalf("opt-out template unexpectedly has network qos annotation: %q", got.Annotations[constants.CubeAnnotationsNetWork])
+	}
+	if _, ok := got.Annotations[constants.CubeAnnotationsBlkQos]; ok {
+		t.Fatalf("opt-out template unexpectedly has block io qos annotation: %q", got.Annotations[constants.CubeAnnotationsBlkQos])
+	}
+	if got.Annotations[constants.CubeAnnotationWritableLayerSize] != "20Gi" {
+		t.Fatalf("system annotation was overridden: %q", got.Annotations[constants.CubeAnnotationWritableLayerSize])
+	}
+}
+
+func TestGenerateTemplateCreateRequestInjectsBlockIOQos(t *testing.T) {
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-qos"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-qos",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+		Qos:               &qos.Config{BlockIO: &qos.BlockIOConfig{ThroughputMiBps: 64, IOPS: 1000}},
+	}
+	artifact := &models.RootfsArtifact{
+		ArtifactID:              "artifact-qos",
+		TemplateSpecFingerprint: "fingerprint-qos",
+		Ext4SHA256:              "sha256-qos",
+		Ext4SizeBytes:           1024,
+		DownloadToken:           "token-qos",
+	}
+	got, err := generateTemplateCreateRequest(req, artifact, image.DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	want := `{"bandwidth":{"size":67108864,"refill_time":1000},"ops":{"size":1000,"refill_time":1000}}`
+	if got.Annotations[constants.CubeAnnotationsBlkQos] != want {
+		t.Fatalf("block io qos annotation=%q, want %q", got.Annotations[constants.CubeAnnotationsBlkQos], want)
+	}
+	if _, ok := got.Annotations[constants.CubeAnnotationsNetWork]; ok {
+		t.Fatal("block-io-only qos unexpectedly emitted network annotation")
+	}
+}
+
+func TestGenerateTemplateCreateRequestInjectsNetworkQos(t *testing.T) {
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-qos"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-qos",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+		Qos:               &qos.Config{Network: &qos.NetworkConfig{BandwidthMbps: 100, PacketsPerSecond: 5000}},
+	}
+	artifact := &models.RootfsArtifact{
+		ArtifactID:              "artifact-qos",
+		TemplateSpecFingerprint: "fingerprint-qos",
+		Ext4SHA256:              "sha256-qos",
+		Ext4SizeBytes:           1024,
+		DownloadToken:           "token-qos",
+	}
+	got, err := generateTemplateCreateRequest(req, artifact, image.DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	want := `{"Qos":{"BandWidth":{"Size":1250000,"OneTimeBurst":0,"RefillTime":100},"OPS":{"Size":5000,"OneTimeBurst":0,"RefillTime":1000}},"Version":1}`
+	if got.Annotations[constants.CubeAnnotationsNetWork] != want {
+		t.Fatalf("network qos annotation=%q, want %q", got.Annotations[constants.CubeAnnotationsNetWork], want)
+	}
 }
 
 func TestGenerateTemplateCreateRequestAppliesDNSConfigOverride(t *testing.T) {
@@ -787,6 +916,7 @@ func TestMarshalTemplateImageJobRequestIgnoresRequestIDAndPassword(t *testing.T)
 		InstanceType:       cubeboxv1.InstanceType_cubebox.String(),
 		NetworkType:        cubeboxv1.NetworkType_tap.String(),
 		ContainerOverrides: &types.ContainerOverrides{Command: []string{"echo", "ok"}},
+		Qos:                &qos.Config{Network: &qos.NetworkConfig{BandwidthMbps: 100, PacketsPerSecond: 5000}},
 	}
 	reqB := &types.CreateTemplateFromImageReq{
 		Request:            &types.Request{RequestID: "req-b"},
@@ -797,6 +927,7 @@ func TestMarshalTemplateImageJobRequestIgnoresRequestIDAndPassword(t *testing.T)
 		InstanceType:       reqA.InstanceType,
 		NetworkType:        reqA.NetworkType,
 		ContainerOverrides: reqA.ContainerOverrides,
+		Qos:                &qos.Config{Network: &qos.NetworkConfig{BandwidthMbps: 100, PacketsPerSecond: 5000}},
 	}
 	payloadA, err := marshalTemplateImageJobRequest(reqA)
 	if err != nil {
@@ -811,6 +942,41 @@ func TestMarshalTemplateImageJobRequestIgnoresRequestIDAndPassword(t *testing.T)
 	}
 	if strings.Contains(payloadA, "req-a") || strings.Contains(payloadA, "secret-a") {
 		t.Fatalf("stable payload leaked request-specific data: %q", payloadA)
+	}
+	if !strings.Contains(payloadA, `"qos":{"network":{"bandwidthMbps":100,"packetsPerSecond":5000}}`) {
+		t.Fatalf("stable payload dropped template qos: %q", payloadA)
+	}
+}
+
+func TestMarshalTemplateImageJobRequestIncludesRuntimeQos(t *testing.T) {
+	reqA := &types.CreateTemplateFromImageReq{
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "1Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+		Qos:               &qos.Config{Network: &qos.NetworkConfig{BandwidthMbps: 100}},
+	}
+	reqB := *reqA
+	reqB.Qos = &qos.Config{Network: &qos.NetworkConfig{BandwidthMbps: 200}}
+
+	payloadA, err := marshalTemplateImageJobRequest(reqA)
+	if err != nil {
+		t.Fatalf("marshalTemplateImageJobRequest(reqA) failed: %v", err)
+	}
+	payloadB, err := marshalTemplateImageJobRequest(&reqB)
+	if err != nil {
+		t.Fatalf("marshalTemplateImageJobRequest(reqB) failed: %v", err)
+	}
+	if payloadA == payloadB {
+		t.Fatal("runtime request snapshot must change when qos changes")
+	}
+}
+
+func TestConfiguredQosFromCreateRequestJSON(t *testing.T) {
+	raw := `{"annotations":{"cube.master.net":"{\"Qos\":{\"BandWidth\":{\"Size\":1250000,\"RefillTime\":100},\"OPS\":{\"Size\":5000,\"RefillTime\":1000}},\"Version\":1}","cube.master.blk.qos":"{\"bandwidth\":{\"size\":67108864,\"refill_time\":1000},\"ops\":{\"size\":1000,\"refill_time\":1000}}"}}`
+	got := configuredQosFromCreateRequestJSON(raw)
+	if got == nil || got.Network == nil || got.Network.BandwidthMbps != 100 || got.Network.PacketsPerSecond != 5000 || got.BlockIO == nil || got.BlockIO.ThroughputMiBps != 64 || got.BlockIO.IOPS != 1000 {
+		t.Fatalf("configured qos=%+v, want network and block io limits", got)
 	}
 }
 

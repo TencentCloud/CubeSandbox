@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net"
@@ -23,6 +24,7 @@ import (
 	api "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	commands "github.com/tencentcloud/CubeSandbox/CubeMaster/cmd/cubemastercli/commands"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/urfave/cli"
 )
@@ -52,6 +54,7 @@ type templateResponse struct {
 	JobID                      string                      `json:"job_id,omitempty"`
 	Replicas                   []templateReplicaStatus     `json:"replicas,omitempty"`
 	CreateRequest              *types.CreateCubeSandboxReq `json:"create_request,omitempty"`
+	ConfiguredQos              *qos.Config                 `json:"configured_qos,omitempty"`
 	CubeEgressCABaked          bool                        `json:"cube_egress_ca_baked,omitempty"`
 	CubeEgressCAFingerprint    string                      `json:"cube_egress_ca_fingerprint,omitempty"`
 	CubeEgressCATargetsWritten int                         `json:"cube_egress_ca_targets_written,omitempty"`
@@ -854,6 +857,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.BoolFlag{Name: "allow-internet-access", Usage: "set allowInternetAccess on the network config for the generated template request"},
 		cli.StringSliceFlag{Name: "allow-out-cidr", Usage: "append an allowed egress CIDR to cube_network_config; repeat the flag to specify multiple CIDRs"},
 		cli.StringSliceFlag{Name: "deny-out-cidr", Usage: "append a denied egress CIDR to cube_network_config; repeat the flag to specify multiple CIDRs"},
+		cli.StringFlag{Name: "qos", Usage: "template QoS JSON or @path to a JSON file, e.g. '{\"network\":{\"bandwidthMbps\":100,\"packetsPerSecond\":5000},\"blockIo\":{\"throughputMiBps\":64,\"iops\":1000}}'"},
 		cli.StringFlag{Name: "registry-username", Usage: "registry username"},
 		cli.StringFlag{Name: "registry-password", Usage: "registry password"},
 		cli.BoolFlag{Name: "enable-ivshmem", Usage: "boot the template build sandbox with ivshmem enabled"},
@@ -894,6 +898,10 @@ var TemplateCreateFromImageCommand = cli.Command{
 		if err != nil {
 			return err
 		}
+		qos, err := parseCreateFromImageQos(c)
+		if err != nil {
+			return err
+		}
 		req := &types.CreateTemplateFromImageReq{
 			Request:        &types.Request{RequestID: uuid.New().String()},
 			SourceImageRef: c.String("image"),
@@ -906,6 +914,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 			NetworkType:        c.String("network-type"),
 			RegistryUsername:   c.String("registry-username"),
 			RegistryPassword:   c.String("registry-password"),
+			Qos:                qos,
 			ContainerOverrides: containerOverrides,
 		}
 		// --with-cube-ca defaults true (BoolTFlag). We always materialise
@@ -1192,6 +1201,16 @@ func printTemplateSummary(rsp *templateResponse) {
 	if jobID := strings.TrimSpace(rsp.JobID); jobID != "" {
 		log.Printf("job_id: %s\n", jobID)
 	}
+	if rsp.ConfiguredQos == nil || rsp.ConfiguredQos.Network == nil {
+		log.Printf("network_qos: disabled\n")
+	} else {
+		log.Printf("network_qos: %s\n", formatNetworkQosLimits(rsp.ConfiguredQos.Network.BandwidthMbps, rsp.ConfiguredQos.Network.PacketsPerSecond))
+	}
+	if rsp.ConfiguredQos == nil || rsp.ConfiguredQos.BlockIO == nil {
+		log.Printf("block_io_qos: disabled\n")
+	} else {
+		log.Printf("block_io_qos: %s\n", formatBlockIOQosLimits(rsp.ConfiguredQos.BlockIO.ThroughputMiBps, rsp.ConfiguredQos.BlockIO.IOPS))
+	}
 	// CubeEgress CA bake status. Always print so an operator can tell
 	// at a glance whether sandboxes from this template will trust
 	// CubeEgress's MITM certs. baked=false on a deployment that ships
@@ -1209,6 +1228,28 @@ func printTemplateSummary(rsp *templateResponse) {
 			replica.NodeID, replica.NodeIP, replica.Status, replica.Phase, replica.Spec, replica.ErrorMessage)
 	}
 	_ = w.Flush()
+}
+
+func formatNetworkQosLimits(bandwidthMbps, packetsPerSecond uint32) string {
+	var limits []string
+	if bandwidthMbps > 0 {
+		limits = append(limits, fmt.Sprintf("%d Mbit/s per direction", bandwidthMbps))
+	}
+	if packetsPerSecond > 0 {
+		limits = append(limits, fmt.Sprintf("%d packets/s per direction", packetsPerSecond))
+	}
+	return strings.Join(limits, ", ")
+}
+
+func formatBlockIOQosLimits(throughputMiBps, iops uint32) string {
+	var limits []string
+	if throughputMiBps > 0 {
+		limits = append(limits, fmt.Sprintf("%d MiB/s per block device", throughputMiBps))
+	}
+	if iops > 0 {
+		limits = append(limits, fmt.Sprintf("%d IOPS per block device", iops))
+	}
+	return strings.Join(limits, ", ")
 }
 
 // fingerprintShortOrEmpty trims a sha256 hex fingerprint to the first
@@ -1467,6 +1508,50 @@ func parseExposePortFlags(values []string) ([]int32, error) {
 		out = append(out, int32(port))
 	}
 	return out, nil
+}
+
+const maxCreateFromImageQosBytes = 64 << 10
+
+func parseCreateFromImageQos(c *cli.Context) (*qos.Config, error) {
+	raw := strings.TrimSpace(c.String("qos"))
+	if raw == "" {
+		return nil, nil
+	}
+	var payload []byte
+	if strings.HasPrefix(raw, "@") {
+		path := strings.TrimSpace(strings.TrimPrefix(raw, "@"))
+		if path == "" {
+			return nil, errors.New("invalid qos value: @ must be followed by a file path")
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("read qos file %q: %w", path, err)
+		}
+		defer file.Close()
+		payload, err = io.ReadAll(io.LimitReader(file, maxCreateFromImageQosBytes+1))
+		if err != nil {
+			return nil, fmt.Errorf("read qos file %q: %w", path, err)
+		}
+	} else {
+		if !strings.HasPrefix(raw, "{") {
+			return nil, errors.New("invalid qos value: expected inline JSON object or @path")
+		}
+		payload = []byte(raw)
+	}
+	if len(payload) == 0 {
+		return nil, errors.New("qos configuration must not be empty")
+	}
+	if len(payload) > maxCreateFromImageQosBytes {
+		return nil, fmt.Errorf("qos configuration exceeds %d bytes", maxCreateFromImageQosBytes)
+	}
+	configured := &qos.Config{}
+	if err := jsoniter.Unmarshal(payload, configured); err != nil {
+		return nil, fmt.Errorf("parse qos configuration: %w", err)
+	}
+	if err := configured.Validate(); err != nil {
+		return nil, err
+	}
+	return configured, nil
 }
 
 func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) {

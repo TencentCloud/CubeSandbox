@@ -880,8 +880,12 @@ func checkAndGetAnnotation(req *types.CreateCubeSandboxReq, out *cubebox.RunCube
 		out.Annotations[constants.CubeAnnotationsVIPs] = v
 	}
 
-	out.Annotations[constants.CubeAnnotationsBlkQos] = getBlkQosAnnotation(req)
-	out.Annotations[constants.CubeAnnotationsFSQos] = getFsQosAnnotation(req)
+	if _, configured := req.Annotations[constants.CubeAnnotationsBlkQos]; !configured {
+		out.Annotations[constants.CubeAnnotationsBlkQos] = getBlkQosAnnotation(req)
+	}
+	if _, configured := req.Annotations[constants.CubeAnnotationsFSQos]; !configured {
+		out.Annotations[constants.CubeAnnotationsFSQos] = getFsQosAnnotation(req)
+	}
 	for k, v := range req.Annotations {
 
 		if strings.HasPrefix(k, constants.CubeAnnotationsPrefix) ||

@@ -9,8 +9,8 @@ use crate::{
     cubemaster::{
         CreateTemplateContainerOverrides, CreateTemplateCubeNetworkConfig, CreateTemplateEnv,
         CreateTemplateFromImageReq, CreateTemplateResources, CubeMasterClient, CubeMasterError,
-        DnsConfig, HttpGetAction, Probe, ProbeHandler, RedoTemplateReq, TemplateCompatAdoptRequest,
-        TemplateDeleteRequest, TemplateJob, TemplateJobResponse,
+        CubeQosConfig, DnsConfig, HttpGetAction, Probe, ProbeHandler, RedoTemplateReq,
+        TemplateCompatAdoptRequest, TemplateDeleteRequest, TemplateJob, TemplateJobResponse,
     },
     error::{AppError, AppResult},
     models::{
@@ -137,6 +137,7 @@ impl TemplateService {
         let container_overrides = build_template_container_overrides(&body, dns_servers.as_deref());
         let cube_network_config = build_template_cube_network_config(&body)?;
         let alias = template_alias_from_request(&body);
+        let qos = build_template_qos(&body)?;
 
         let req = CreateTemplateFromImageReq {
             request_id: new_request_id(),
@@ -158,6 +159,7 @@ impl TemplateService {
             container_overrides,
             cube_network_config,
             enable_ivshmem: body.enable_ivshmem,
+            qos,
             with_cube_ca: body.with_cube_ca,
         };
 
@@ -356,7 +358,8 @@ fn template_detail_from_cubemaster(
         last_error: non_empty(resp.last_error),
         created_at: non_empty(resp.created_at),
         replicas: resp.replicas,
-        create_request: resp.create_request,
+        create_request: sanitize_template_create_request(resp.create_request),
+        configured_qos: resp.configured_qos.map(Into::into),
         network_type,
         allow_internet_access,
         job_id: non_empty(resp.job_id),
@@ -656,6 +659,67 @@ fn build_template_cube_network_config(
     }))
 }
 
+fn build_template_qos(body: &CreateTemplateRequest) -> AppResult<Option<CubeQosConfig>> {
+    let Some(qos) = body.qos.as_ref() else {
+        return Ok(None);
+    };
+    if qos.network.is_none() && qos.block_io.is_none() {
+        return Err(AppError::BadRequest(
+            "qos must configure network or blockIo".to_string(),
+        ));
+    }
+    if let Some(network) = qos.network.as_ref() {
+        if network.bandwidth_mbps == Some(0) {
+            return Err(AppError::BadRequest(
+                "qos.network.bandwidthMbps must be at least 1".to_string(),
+            ));
+        }
+        if network.packets_per_second == Some(0) {
+            return Err(AppError::BadRequest(
+                "qos.network.packetsPerSecond must be at least 1".to_string(),
+            ));
+        }
+        if network.bandwidth_mbps.is_none() && network.packets_per_second.is_none() {
+            return Err(AppError::BadRequest(
+                "qos.network must configure bandwidthMbps or packetsPerSecond".to_string(),
+            ));
+        }
+    }
+    if let Some(block_io) = qos.block_io.as_ref() {
+        if block_io.throughput_mibps == Some(0) {
+            return Err(AppError::BadRequest(
+                "qos.blockIo.throughputMiBps must be at least 1".to_string(),
+            ));
+        }
+        if block_io.iops == Some(0) {
+            return Err(AppError::BadRequest(
+                "qos.blockIo.iops must be at least 1".to_string(),
+            ));
+        }
+        if block_io.throughput_mibps.is_none() && block_io.iops.is_none() {
+            return Err(AppError::BadRequest(
+                "qos.blockIo must configure throughputMiBps or iops".to_string(),
+            ));
+        }
+    }
+    Ok(Some(qos.into()))
+}
+
+fn sanitize_template_create_request(
+    mut create_request: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    if let Some(annotations) = create_request
+        .as_mut()
+        .and_then(|value| value.get_mut("annotations"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        annotations.remove("cube.master.net");
+        annotations.remove("cube.master.blk.qos");
+        annotations.remove("cube.master.fs.qos");
+    }
+    create_request
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,6 +760,7 @@ mod tests {
             allow_out: Some(vec!["172.67.0.0/16".to_string()]),
             deny_out: Some(vec!["10.0.0.0/8".to_string()]),
             enable_ivshmem: Some(true),
+            qos: None,
             with_cube_ca: Some(false),
         }
     }

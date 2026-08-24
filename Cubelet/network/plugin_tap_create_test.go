@@ -326,6 +326,34 @@ func TestTapCreateWithNetworkRuntimeAddsDNSAllowOutCIDRsForDomainAllow(t *testin
 	}
 }
 
+func TestTapCreateWithNetworkRuntimeForwardsQosToShim(t *testing.T) {
+	fakeClient := &fakeNetworkRuntime{}
+	l := &local{
+		Config:         &Config{MvmGwDestIP: "169.254.68.5", MVMInnerIP: "169.254.68.6", MvmMask: 30},
+		networkRuntime: fakeClient,
+	}
+	opts := &workflow.CreateContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "sandbox-qos"},
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			RequestID: "qos-request",
+			Annotations: map[string]string{
+				"cube.master.net": `{"Version":1,"Qos":{"BandWidth":{"Size":1250000,"RefillTime":100},"OPS":{"Size":5000,"RefillTime":1000}}}`,
+			},
+		},
+	}
+	if err := l.Create(context.Background(), opts); err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	shimReq, ok := opts.NetworkInfo.(*networktypes.ShimNetReq)
+	if !ok || shimReq == nil || len(shimReq.Interfaces) != 1 || shimReq.Interfaces[0].Qos == nil {
+		t.Fatalf("shim request missing qos: %#v", opts.NetworkInfo)
+	}
+	got := shimReq.Interfaces[0].Qos
+	if got.BwSize != 1250000 || got.BwRefillTime != 100 || got.OpsSize != 5000 || got.OpsRefillTime != 1000 {
+		t.Fatalf("shim qos=%+v, want bandwidth and packet buckets", got)
+	}
+}
+
 func TestWaitForNetworkRuntimeReadyReturnsHealthError(t *testing.T) {
 	fakeClient := &fakeNetworkRuntime{
 		healthErrs: []error{errors.New("runtime not ready")},

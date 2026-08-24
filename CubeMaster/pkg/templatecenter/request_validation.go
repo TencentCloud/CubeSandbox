@@ -14,6 +14,7 @@ import (
 
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
 )
@@ -86,6 +87,12 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	}
 	cloned := *req
 	cloned.SourceImageRef = sourceImageRef
+	resources := templateResources(req)
+	resolvedQos, err := qos.ResolveTemplate(req.Qos, resources)
+	if err != nil {
+		return nil, err
+	}
+	cloned.Qos = resolvedQos
 	exposedPorts, err := normalizeTemplateExposedPorts(req.ExposedPorts)
 	if err != nil {
 		return nil, err
@@ -111,6 +118,19 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 		return nil, err
 	}
 	return &cloned, nil
+}
+
+func templateResources(req *types.CreateTemplateFromImageReq) qos.TemplateResources {
+	resources := qos.TemplateResources{CPU: defaultTemplateCPU, Memory: defaultTemplateMemory}
+	if req.ContainerOverrides != nil && req.ContainerOverrides.Resources != nil {
+		if req.ContainerOverrides.Resources.Cpu != "" {
+			resources.CPU = req.ContainerOverrides.Resources.Cpu
+		}
+		if req.ContainerOverrides.Resources.Mem != "" {
+			resources.Memory = req.ContainerOverrides.Resources.Mem
+		}
+	}
+	return resources
 }
 
 // aliasValidationRe matches the allowed alias charset: lowercase alphanumeric

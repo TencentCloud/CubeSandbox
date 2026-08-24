@@ -154,6 +154,7 @@ def pytest_configure(config: pytest.Config):
         "requires_capability(name): current SDK backend must support this capability",
         "sandbox_create_options(**kwargs): SDK sandbox create options for this test",
         "sandbox_template_id(template_id): override template ID for this test or module",
+        "self_managed_template: test provisions and cleans up its own template",
         "requires_code_interpreter: test requires a stateful Code Interpreter kernel",
         "requires_internet: test requires public internet access from the sandbox",
         "requires_cubeproxy: test requires CubeProxy routing to the sandbox",
@@ -202,7 +203,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         if (template_id := _template_id_for_node(item)) is not None
     }
     config._sdk_e2e_default_template_needed = any(
-        _template_id_for_node(item) is None for item in items
+        _template_id_for_node(item) is None
+        and item.get_closest_marker("self_managed_template") is None
+        for item in items
     )
     volume_skip = None
     if not _env_true("SDK_E2E_VOLUME_PLUGIN"):

@@ -361,6 +361,10 @@ pub struct SandboxDetail {
     pub state: SandboxState,
     #[serde(rename = "volumeMounts", skip_serializing_if = "Option::is_none")]
     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
+    #[serde(rename = "configuredQos", skip_serializing_if = "Option::is_none")]
+    pub configured_qos: Option<QosConfig>,
+    #[serde(rename = "qosApplied")]
+    pub qos_applied: bool,
 }
 
 // ─── Sandbox — pause/resume/connect/snapshot ──────────────────────────────
@@ -706,6 +710,85 @@ mod tests {
         assert_eq!(json["templateID"], "tpl-abc");
         assert_eq!(json["public"], true);
     }
+
+    #[test]
+    fn create_template_accepts_canonical_qos_shape() {
+        let req: CreateTemplateRequest = serde_json::from_value(serde_json::json!({
+            "image": "example.invalid/sandbox:latest",
+            "qos": {
+                "network": {
+                    "bandwidthMbps": 100,
+                    "packetsPerSecond": 5000
+                }
+            }
+        }))
+        .expect("template qos should deserialize");
+
+        let qos = req.qos.expect("qos");
+        let network = qos.network.expect("network qos");
+        assert_eq!(network.bandwidth_mbps, Some(100));
+        assert_eq!(network.packets_per_second, Some(5000));
+    }
+
+    #[test]
+    fn create_template_accepts_packets_only_qos_shape() {
+        let req: CreateTemplateRequest = serde_json::from_value(serde_json::json!({
+            "image": "example.invalid/sandbox:latest",
+            "qos": {
+                "network": {
+                    "packetsPerSecond": 5000
+                }
+            }
+        }))
+        .expect("packets-only template qos should deserialize");
+
+        let qos = req.qos.expect("qos");
+        let network = qos.network.as_ref().expect("network qos");
+        assert_eq!(network.bandwidth_mbps, None);
+        assert_eq!(network.packets_per_second, Some(5000));
+        let serialized = serde_json::to_value(qos).expect("qos should serialize");
+        assert_eq!(
+            serialized,
+            serde_json::json!({
+                "network": {"packetsPerSecond": 5000}
+            })
+        );
+    }
+
+    #[test]
+    fn create_template_accepts_block_io_only_qos_shape() {
+        let req: CreateTemplateRequest = serde_json::from_value(serde_json::json!({
+            "image": "example.invalid/sandbox:latest",
+            "qos": {
+                "blockIo": {
+                    "throughputMiBps": 64,
+                    "iops": 1000
+                }
+            }
+        }))
+        .expect("block-io-only template qos should deserialize");
+
+        let qos = req.qos.expect("qos");
+        assert!(qos.network.is_none());
+        let block_io = qos.block_io.expect("block io qos");
+        assert_eq!(block_io.throughput_mibps, Some(64));
+        assert_eq!(block_io.iops, Some(1000));
+    }
+
+    #[test]
+    fn create_template_rejects_unknown_qos_fields() {
+        let err = serde_json::from_value::<CreateTemplateRequest>(serde_json::json!({
+            "image": "example.invalid/sandbox:latest",
+            "qos": {
+                "network": {
+                    "bandwidth_mbps": 100
+                }
+            }
+        }))
+        .expect_err("unknown qos fields must be rejected");
+
+        assert!(err.to_string().contains("bandwidth_mbps"));
+    }
 }
 
 // ─── Templates ─────────────────────────────────────────────────────────────
@@ -772,6 +855,8 @@ pub struct TemplateDetail {
         skip_serializing_if = "Option::is_none"
     )]
     pub allow_internet_access: Option<bool>,
+    #[serde(rename = "configuredQos", skip_serializing_if = "Option::is_none")]
+    pub configured_qos: Option<QosConfig>,
     /// Latest create/rebuild job id for the template.
     #[serde(rename = "jobID", skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
@@ -854,10 +939,57 @@ pub struct CreateTemplateRequest {
     /// Enable ivshmem when building the template snapshot.
     #[serde(rename = "enableIvshmem", default)]
     pub enable_ivshmem: Option<bool>,
+    /// Optional template-level QoS. Every sandbox created from this template
+    /// receives the same independent ingress and egress network ceilings.
+    #[serde(default)]
+    pub qos: Option<QosConfig>,
     /// Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
     /// Omitted or null defaults to true on CubeMaster.
     #[serde(rename = "with_cube_ca", default)]
     pub with_cube_ca: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QosConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkQosConfig>,
+    #[serde(rename = "blockIo", default, skip_serializing_if = "Option::is_none")]
+    pub block_io: Option<BlockIoQosConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkQosConfig {
+    #[schema(minimum = 1)]
+    #[serde(
+        rename = "bandwidthMbps",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub bandwidth_mbps: Option<u32>,
+    #[schema(minimum = 1)]
+    #[serde(
+        rename = "packetsPerSecond",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub packets_per_second: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BlockIoQosConfig {
+    #[schema(minimum = 1)]
+    #[serde(
+        rename = "throughputMiBps",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub throughput_mibps: Option<u32>,
+    #[schema(minimum = 1)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops: Option<u32>,
 }
 
 /// Body for POST /templates/:id (rebuild).

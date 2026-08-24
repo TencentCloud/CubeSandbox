@@ -255,6 +255,25 @@ func TestGetSnapshotListSupportsFiltersAndPagination(t *testing.T) {
 	}
 }
 
+func TestSnapshotResourceHidesInternalNetworkQosAnnotation(t *testing.T) {
+	annotations := map[string]string{
+		constants.CubeAnnotationsNetWork:              `{"Qos":{"BandWidth":{"Size":1250000,"RefillTime":100}}}`,
+		constants.CubeAnnotationAppSnapshotTemplateID: "tpl-1",
+	}
+	resource := snapshotResourceFromInfo(&templatecenter.SnapshotInfo{
+		SnapshotID: "snap-1",
+		CreateRequest: &types.CreateCubeSandboxReq{
+			Annotations: annotations,
+		},
+	})
+
+	if assert.NotNil(t, resource.CreateRequest) {
+		assert.NotContains(t, resource.CreateRequest.Annotations, constants.CubeAnnotationsNetWork)
+		assert.Equal(t, "tpl-1", resource.CreateRequest.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+	}
+	assert.Contains(t, annotations, constants.CubeAnnotationsNetWork)
+}
+
 func TestHandleSandboxRollbackActionUsesPathSandboxID(t *testing.T) {
 	registerKnownSandboxTestID(t)
 
