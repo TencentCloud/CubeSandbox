@@ -161,7 +161,11 @@ static __always_inline int prepare_egress_l2(struct __sk_buff *skb,
 	neighbor = bpf_map_lookup_elem(&direct_neigh, &daddr);
 	if (!neighbor) {
 		/* Untracked destination: only register for the scanner, never
-		 * disturb its scheduling fields. */
+		 * disturb its scheduling fields. Seed last_used_ns so the
+		 * scanner's GC (idle > GC_AFTER) never reclaims a freshly
+		 * created entry in the window before the end-of-function
+		 * touch, while the datapath still holds its pointer. */
+		pending.last_used_ns = now;
 		bpf_map_update_elem(&direct_neigh, &daddr, &pending, BPF_NOEXIST);
 		neighbor = bpf_map_lookup_elem(&direct_neigh, &daddr);
 	}
