@@ -12,6 +12,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
@@ -28,8 +29,11 @@ type SnapshotInfo struct {
 	DisplayName               string                             `json:"display_name,omitempty"`
 	OriginSandboxID           string                             `json:"origin_sandbox_id,omitempty"`
 	OriginNodeID              string                             `json:"origin_node_id,omitempty"`
+	OriginNodeIP              string                             `json:"origin_node_ip,omitempty"`
 	OriginHostFactsJSON       string                             `json:"origin_host_facts_json,omitempty"`
 	StorageBackend            string                             `json:"storage_backend,omitempty"`
+	Backend                   string                             `json:"backend,omitempty"`
+	RemoteStatus              string                             `json:"remote_status,omitempty"`
 	Retain                    bool                               `json:"retain,omitempty"`
 	RootfsSizeBytesAtSnapshot uint64                             `json:"rootfs_size_bytes_at_snapshot,omitempty"`
 	LastError                 string                             `json:"last_error,omitempty"`
@@ -61,27 +65,28 @@ type ListSnapshotsOptions struct {
 	SandboxID  string
 	Name       string
 	Status     string
+	Backend    string
 	Limit      int
 	NextToken  string
 }
 
 func ListSnapshots(ctx context.Context, opts *ListSnapshotsOptions) ([]SnapshotInfo, string, error) {
-	infos, err := ListTemplates(ctx)
+	rows, err := listSnapshotRecords(ctx)
 	if err != nil {
 		return nil, "", err
 	}
 	normalized := normalizeListSnapshotsOptions(opts)
-	filtered := make([]SnapshotInfo, 0, len(infos))
-	for _, info := range infos {
-		// Pause snaps share snap-* IDs but Kind=pause_snapshot; never list them
-		// as user-visible normal snapshots.
-		if !strings.EqualFold(strings.TrimSpace(info.Kind), TemplateKindSnapshot) {
+	filtered := make([]SnapshotInfo, 0, len(rows))
+	for i := range rows {
+		rec := &rows[i]
+		if !matchesSnapshotRecordListOptions(rec, normalized) {
 			continue
 		}
-		if !matchesSnapshotListOptions(&info, normalized) {
-			continue
+		replicas, err := snapshotReplicasFromRecord(ctx, rec)
+		if err != nil {
+			return nil, "", err
 		}
-		item := snapshotInfoFromTemplateInfo(&info, nil)
+		item := snapshotInfoFromRecord(rec, replicas, nil)
 		if err := populateSnapshotRuntimeRefSummary(ctx, &item); err != nil {
 			return nil, "", err
 		}
@@ -106,27 +111,26 @@ func ListSnapshots(ctx context.Context, opts *ListSnapshotsOptions) ([]SnapshotI
 }
 
 func GetSnapshotInfo(ctx context.Context, snapshotID string, includeRequest bool) (*SnapshotInfo, error) {
-	info, err := GetTemplateInfo(ctx, strings.TrimSpace(snapshotID))
+	rec, err := getSnapshotRecord(ctx, strings.TrimSpace(snapshotID))
 	if err != nil {
 		if errors.Is(err, ErrTemplateNotFound) {
 			return nil, ErrSnapshotNotFound
 		}
 		return nil, err
 	}
-	if !strings.EqualFold(strings.TrimSpace(info.Kind), TemplateKindSnapshot) {
-		return nil, ErrSnapshotNotFound
-	}
 	var createReq *sandboxtypes.CreateCubeSandboxReq
 	if includeRequest {
-		createReq, err = GetTemplateRequest(ctx, snapshotID)
+		createReq, err = requestFromSnapshotJSON(rec.RequestJSON)
 		if err != nil {
-			if errors.Is(err, ErrTemplateNotFound) {
-				return nil, ErrSnapshotNotFound
-			}
 			return nil, err
 		}
+		ensureSnapshotTemplateRequestAnnotation(createReq, rec.SnapshotID)
 	}
-	result := snapshotInfoFromTemplateInfo(info, createReq)
+	replicas, err := snapshotReplicasFromRecord(ctx, rec)
+	if err != nil {
+		return nil, err
+	}
+	result := snapshotInfoFromRecord(rec, replicas, createReq)
 	if err := populateSnapshotRuntimeRefSummary(ctx, &result); err != nil {
 		return nil, err
 	}
@@ -156,6 +160,18 @@ func GetTemplateKind(ctx context.Context, templateID string) (string, error) {
 	}
 	if kind, ok := getCachedTemplateKind(id); ok {
 		return kind, nil
+	}
+	if rec, err := getSnapshotRecord(ctx, id); err == nil && rec != nil {
+		setTemplateKindCache(id, TemplateKindSnapshot)
+		return TemplateKindSnapshot, nil
+	} else if err != nil && !errors.Is(err, ErrSnapshotNotFound) && !errors.Is(err, ErrTemplateStoreNotInitialized) {
+		return "", err
+	}
+	if rec, err := pausesnap.GetBySnapshotID(ctx, id); err == nil && rec != nil {
+		setTemplateKindCache(id, pausesnap.KindPauseSnapshot)
+		return pausesnap.KindPauseSnapshot, nil
+	} else if err != nil && !errors.Is(err, pausesnap.ErrNotFound) && !errors.Is(err, pausesnap.ErrNotReady) {
+		return "", err
 	}
 	def, err := GetDefinition(ctx, id)
 	if err != nil {
@@ -188,29 +204,6 @@ func ResolveSnapshotReadyNodeScope(ctx context.Context, snapshotID string) ([]st
 
 func ResolveSnapshotReadyReplica(ctx context.Context, snapshotID, preferredNodeID string) (ReplicaStatus, error) {
 	return getSnapshotReadyReplica(ctx, strings.TrimSpace(snapshotID), strings.TrimSpace(preferredNodeID))
-}
-
-func snapshotInfoFromTemplateInfo(info *TemplateInfo, createReq *sandboxtypes.CreateCubeSandboxReq) SnapshotInfo {
-	if info == nil {
-		return SnapshotInfo{}
-	}
-	return SnapshotInfo{
-		SnapshotID:                info.TemplateID,
-		InstanceType:              info.InstanceType,
-		Version:                   info.Version,
-		Status:                    info.Status,
-		DisplayName:               info.DisplayName,
-		OriginSandboxID:           info.OriginSandboxID,
-		OriginNodeID:              info.OriginNodeID,
-		OriginHostFactsJSON:       info.OriginHostFactsJSON,
-		StorageBackend:            info.StorageBackend,
-		Retain:                    info.Retain,
-		RootfsSizeBytesAtSnapshot: info.RootfsSizeBytesAtSnapshot,
-		LastError:                 info.LastError,
-		CreatedAt:                 info.CreatedAt,
-		Replicas:                  append([]ReplicaStatus(nil), info.Replicas...),
-		CreateRequest:             createReq,
-	}
 }
 
 func populateSnapshotRuntimeRefSummary(ctx context.Context, info *SnapshotInfo) error {
@@ -322,6 +315,7 @@ func normalizeListSnapshotsOptions(opts *ListSnapshotsOptions) ListSnapshotsOpti
 	normalized.SandboxID = strings.TrimSpace(opts.SandboxID)
 	normalized.Name = strings.TrimSpace(opts.Name)
 	normalized.Status = strings.TrimSpace(opts.Status)
+	normalized.Backend = strings.TrimSpace(opts.Backend)
 	normalized.NextToken = strings.TrimSpace(opts.NextToken)
 	if opts.Limit > 0 {
 		normalized.Limit = opts.Limit
@@ -332,24 +326,27 @@ func normalizeListSnapshotsOptions(opts *ListSnapshotsOptions) ListSnapshotsOpti
 	return normalized
 }
 
-func matchesSnapshotListOptions(info *TemplateInfo, opts ListSnapshotsOptions) bool {
-	if info == nil {
+func matchesSnapshotRecordListOptions(rec *models.SnapshotRecord, opts ListSnapshotsOptions) bool {
+	if rec == nil {
 		return false
 	}
-	if opts.SnapshotID != "" && !strings.EqualFold(strings.TrimSpace(info.TemplateID), opts.SnapshotID) {
+	if opts.SnapshotID != "" && !strings.EqualFold(strings.TrimSpace(rec.SnapshotID), opts.SnapshotID) {
 		return false
 	}
-	if opts.SandboxID != "" && !strings.EqualFold(strings.TrimSpace(info.OriginSandboxID), opts.SandboxID) {
+	if opts.SandboxID != "" && !strings.EqualFold(strings.TrimSpace(rec.OriginSandboxID), opts.SandboxID) {
 		return false
 	}
-	if opts.Name != "" && !strings.EqualFold(strings.TrimSpace(info.DisplayName), opts.Name) {
+	if opts.Name != "" && !strings.EqualFold(strings.TrimSpace(rec.DisplayName), opts.Name) {
+		return false
+	}
+	if opts.Backend != "" && !strings.EqualFold(strings.TrimSpace(rec.Backend), opts.Backend) {
 		return false
 	}
 	if opts.Status != "" {
-		if !strings.EqualFold(strings.TrimSpace(info.Status), opts.Status) {
+		if !strings.EqualFold(strings.TrimSpace(rec.Status), opts.Status) {
 			return false
 		}
-	} else if strings.EqualFold(strings.TrimSpace(info.Status), StatusDeleting) {
+	} else if strings.EqualFold(strings.TrimSpace(rec.Status), StatusDeleting) {
 		return false
 	}
 	return true

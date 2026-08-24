@@ -61,13 +61,22 @@ func IsCowBackend() bool {
 	return localStorage != nil && localStorage.useCowStorage()
 }
 
-// ActiveCowStore returns the process-wide CoW Store (xfscow today), or nil
-// when storage is not initialized / not using a CoW backend.
+// ActiveCowStore returns the default (XFS) CoW Store, or nil when storage is
+// not initialized / not using a CoW backend. Prefer [StoreFor] when the request
+// carries an explicit backend type (xfs｜s3).
 func ActiveCowStore() cow.Store {
 	if localStorage == nil {
 		return nil
 	}
 	return localStorage.cowManager
+}
+
+// ActiveS3CowStore returns the S3 CoW Store, or nil when unset.
+func ActiveS3CowStore() cow.Store {
+	if localStorage == nil {
+		return nil
+	}
+	return localStorage.s3CowManager
 }
 
 // Compatibility aliases — prefer GetSandboxRootfs / CommitRootfs / CreateMemoryVolume /
@@ -98,8 +107,47 @@ func DefaultTemplateObjectRefs(templateID string) []CowObjectRef {
 	return []CowObjectRef{
 		{Name: cowTemplateRootfsName(templateID), Kind: cowKindSnapshot, Role: "rootfs"},
 		{Name: cowTemplateMemoryName(templateID), Kind: cowKindVolume, Role: "memory"},
+		{Name: cowTemplateMemoryName(templateID) + "-snap", Kind: cowKindSnapshot, Role: "memory"},
 		{Name: cowTemplateBuildRootfsName(templateID), Kind: cowKindVolume, Role: "build_rootfs"},
+		{Name: S3MetadataVolumeName(templateID), Kind: cowKindVolume, Role: "metadata"},
+		{Name: S3MetadataSnapshotName(templateID), Kind: cowKindSnapshot, Role: "metadata"},
 	}
+}
+
+// AppendS3SealedPackageCleanupRefs adds the sealed package names that
+// Finalize leaves behind (memory-snap, metadata work／snap). Catalog entries
+// often list only the live MemoryVol and miss the -snap after umount.
+func AppendS3SealedPackageCleanupRefs(templateID string, refs []CowObjectRef) []CowObjectRef {
+	templateID = strings.TrimSpace(templateID)
+	if templateID == "" {
+		return refs
+	}
+	seen := make(map[string]struct{}, len(refs)+4)
+	out := make([]CowObjectRef, 0, len(refs)+4)
+	for _, ref := range refs {
+		name := strings.TrimSpace(ref.Name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, ref)
+	}
+	for _, extra := range []CowObjectRef{
+		{Name: cowTemplateMemoryName(templateID) + "-snap", Kind: cowKindSnapshot, Role: "memory"},
+		{Name: cowTemplateMemoryName(templateID), Kind: cowKindVolume, Role: "memory"},
+		{Name: S3MetadataVolumeName(templateID), Kind: cowKindVolume, Role: "metadata"},
+		{Name: S3MetadataSnapshotName(templateID), Kind: cowKindSnapshot, Role: "metadata"},
+	} {
+		if _, ok := seen[extra.Name]; ok {
+			continue
+		}
+		seen[extra.Name] = struct{}{}
+		out = append(out, extra)
+	}
+	return out
 }
 
 // TemplateBuildRootfsName returns the deterministic cubecow volume name used
@@ -290,6 +338,16 @@ func normalizeCowKind(kind string) (string, error) {
 	}
 }
 
+// normalizeCowKindForCleanup prefers snapshot when the object name is a
+// sealed *-snap (template memory-snap, metadata snap). Empty kind + role
+// memory would otherwise default to volume and miss the activated snap.
+func normalizeCowKindForCleanup(kind, role, name string) (string, error) {
+	if strings.TrimSpace(kind) == "" && strings.HasSuffix(strings.TrimSpace(name), "-snap") {
+		return cowKindSnapshot, nil
+	}
+	return normalizeCowKindForRole(kind, role)
+}
+
 // normalizeCowKindForRole resolves a cubecow kind, defaulting an empty/blank
 // kind from the object role instead of failing. CubeMaster catalog entries do
 // not always carry an explicit kind; defaulting keeps cleanup from aborting,
@@ -298,6 +356,8 @@ func normalizeCowKindForRole(kind, role string) (string, error) {
 	if strings.TrimSpace(kind) == "" {
 		switch strings.ToLower(strings.TrimSpace(role)) {
 		case "rootfs":
+			return cowKindSnapshot, nil
+		case "metadata":
 			return cowKindSnapshot, nil
 		default:
 			// memory / build_rootfs / unknown -> volume (matches rollback path)

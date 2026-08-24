@@ -84,6 +84,8 @@ func TestIsDuplicateKeyErrorClassifiesMySQLAndGormErrors(t *testing.T) {
 		{"raw mysql 1062 text", errors.New("Error 1062 (23000): Duplicate entry '' for key 'idx_x'"), true},
 		{"just contains 1062", errors.New("driver: 1062 conflict"), true},
 		{"contains Duplicate entry", errors.New("Duplicate entry 'x' for key 'idx_y'"), true},
+		{"postgres unique constraint", errors.New("ERROR: duplicate key value violates unique constraint \"uniq_cube_snapshot_id\" (SQLSTATE 23505)"), true},
+		{"sqlite UNIQUE constraint", errors.New("UNIQUE constraint failed: t_cube_snapshot.snapshot_id"), true},
 		{"unrelated error", errors.New("some other failure"), false},
 	}
 	for _, tc := range tests {

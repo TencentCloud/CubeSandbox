@@ -6,6 +6,8 @@ package storage
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -19,6 +21,180 @@ func TestXfsCowName(t *testing.T) {
 	require.Equal(t, xfscow.Name, (&XfsCow{}).Name())
 	require.Equal(t, cow.NameXfsCow, xfscow.Name)
 	require.Equal(t, cow.NameS3, "s3")
+}
+
+func TestS3CowName(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, cow.NameS3, (&S3Cow{}).Name())
+}
+
+func TestRefuseS3PackageObjectDelete(t *testing.T) {
+	t.Parallel()
+	const sandboxID = "b1c1d1e1f1"
+	const snapshotID = "snap-4c0c3e1f"
+
+	for _, tc := range []struct {
+		name    string
+		backend string
+		object  string
+		refuse  bool
+	}{
+		{name: "own rootfs generation", backend: cow.BackendS3, object: SandboxRootfsName(sandboxID, 3)},
+		{name: "own imported memory", backend: cow.BackendS3, object: SandboxMemoryName(sandboxID)},
+		{name: "own metadata disk", backend: cow.BackendS3, object: S3MetadataVolumeName(sandboxID)},
+		{name: "own rollback metadata copy", backend: cow.BackendS3, object: S3MetadataVolumeName(RollbackMetadataOwnerID(sandboxID))},
+		{name: "package rootfs snapshot", backend: cow.BackendS3, object: "tpl-" + snapshotID + "-rootfs", refuse: true},
+		{name: "package memory snapshot", backend: cow.BackendS3, object: "tpl-" + snapshotID + "-memory-snap", refuse: true},
+		{name: "package metadata snapshot", backend: cow.BackendS3, object: S3MetadataSnapshotName(snapshotID), refuse: true},
+		{name: "template rootfs", backend: cow.BackendS3, object: "tpl-tpl-a8862a17-rootfs", refuse: true},
+		// A package named after the sandbox it was captured from is still a
+		// package: a substring test would have let this one through.
+		{name: "package captured from this sandbox", backend: cow.BackendS3, object: "tpl-snap-" + sandboxID + "-rootfs", refuse: true},
+		{name: "xfs is never refused", backend: cow.BackendXFS, object: "tpl-" + snapshotID + "-rootfs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.refuse, refuseS3PackageObjectDelete(tc.backend, tc.object, sandboxID))
+		})
+	}
+
+	require.False(t, refuseS3PackageObjectDelete(cow.BackendS3, "", sandboxID))
+	require.False(t, refuseS3PackageObjectDelete(cow.BackendS3, "tpl-x-rootfs", ""))
+}
+
+func TestStoreForSelectsXfsAndS3(t *testing.T) {
+	engine := &fakeCowEngine{}
+	useTestCowStorage(t, engine)
+
+	xfs, err := StoreFor(cow.BackendXFS)
+	require.NoError(t, err)
+	require.Equal(t, cow.NameXfsCow, xfs.Name())
+
+	s3Store, err := StoreFor(cow.BackendS3)
+	require.NoError(t, err)
+	require.Equal(t, cow.NameS3, s3Store.Name())
+
+	// Both coexist; selecting one does not replace the other.
+	require.Equal(t, cow.NameXfsCow, ActiveCowStore().Name())
+	require.Equal(t, cow.NameS3, ActiveS3CowStore().Name())
+}
+
+func TestCommitRootfsForUsesS3Store(t *testing.T) {
+	engine := &fakeCowEngine{
+		createSnapshotPath: "/dev/mapper/tpl-snap-s3-rootfs",
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-snap-s3-rootfs": {DevicePath: "/dev/mapper/tpl-snap-s3-rootfs", SizeBytes: 1 << 20},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	source := &CowSnapshotObject{Name: "sb-1-rootfs-gen0", Kind: cow.KindSnapshot}
+	obj, err := CommitRootfsFor(context.Background(), cow.BackendS3, source, "snap-s3")
+	require.NoError(t, err)
+	require.Equal(t, "tpl-snap-s3-rootfs", obj.Name)
+	require.Equal(t, [][2]string{{"sb-1-rootfs-gen0", "tpl-snap-s3-rootfs"}}, engine.createSnapshots)
+}
+
+func TestUploadSnapshotExportsRealUUIDs(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-snap-1-rootfs": {SizeBytes: 1 << 20},
+			"tpl-snap-1-memory": {SizeBytes: 64 << 20},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	st, err := SnapshotUploadStatus(context.Background(), cow.BackendS3, "snap-1")
+	require.NoError(t, err)
+	require.Equal(t, cow.RemoteStateRunning, st.State)
+
+	uuids, err := UploadSnapshot(context.Background(), cow.BackendS3, "snap-1")
+	require.NoError(t, err)
+	require.False(t, uuids.Empty())
+	require.Equal(t, "export-tpl-snap-1-rootfs", uuids.Rootfs)
+	require.Equal(t, "export-tpl-snap-1-memory", uuids.Memory)
+	require.Equal(t, []string{"tpl-snap-1-rootfs", "tpl-snap-1-memory"}, engine.exportSnapshots)
+
+	st, err = SnapshotUploadStatus(context.Background(), cow.BackendS3, "snap-1")
+	require.NoError(t, err)
+	// Volumes exist but export_status is empty → still running until DONE.
+	require.Equal(t, cow.RemoteStateRunning, st.State)
+	require.Equal(t, "snap-1", st.SnapshotID)
+	require.Equal(t, uuids.Rootfs, st.RemoteUUIDs.Rootfs)
+
+	_, err = UploadSnapshot(context.Background(), cow.BackendXFS, "snap-1")
+	require.NoError(t, err)
+	st, err = SnapshotUploadStatus(context.Background(), cow.BackendXFS, "snap-1")
+	require.NoError(t, err)
+	require.Equal(t, cow.RemoteStateReady, st.State)
+}
+
+func TestUploadSnapshotFailsWithoutMintingUUID(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-snap-1-rootfs": {SizeBytes: 1 << 20},
+			"tpl-snap-1-memory": {SizeBytes: 64 << 20},
+		},
+		exportErr: fmt.Errorf("export denied"),
+	}
+	useTestCowStorage(t, engine)
+
+	uuids, err := UploadSnapshot(context.Background(), cow.BackendS3, "snap-1")
+	require.Error(t, err)
+	require.Nil(t, uuids)
+	require.Contains(t, err.Error(), "export denied")
+
+	st, err := SnapshotUploadStatus(context.Background(), cow.BackendS3, "snap-1")
+	require.NoError(t, err)
+	require.Equal(t, cow.RemoteStateFailed, st.State)
+}
+
+func TestActivateSnapshotActivatesLocalObjects(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-snap-1-rootfs": {SizeBytes: 1 << 20},
+			"tpl-snap-1-memory": {SizeBytes: 64 << 20},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	require.NoError(t, ActivateSnapshot(context.Background(), cow.BackendS3, "snap-1"))
+	require.Equal(t, []string{"tpl-snap-1-rootfs", "tpl-snap-1-memory"}, engine.activatedVolumes)
+}
+
+func TestActivateSnapshotSkipsMetadataSnap(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-snap-1-rootfs":              {SizeBytes: 1 << 20},
+			"tpl-snap-1-memory":              {SizeBytes: 64 << 20},
+			S3MetadataSnapshotName("snap-1"): {SizeBytes: 8 << 20},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	require.NoError(t, ActivateSnapshot(context.Background(), cow.BackendS3, "snap-1"))
+	require.Equal(t, []string{"tpl-snap-1-rootfs", "tpl-snap-1-memory"}, engine.activatedVolumes)
+	require.NotContains(t, engine.activatedVolumes, S3MetadataSnapshotName("snap-1"))
+}
+
+func TestActivateSnapshotFailsWhenMissing(t *testing.T) {
+	useTestCowStorage(t, &fakeCowEngine{})
+
+	err := ActivateSnapshot(context.Background(), cow.BackendS3, "snap-missing")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCowObjectMissing)
+}
+
+func TestActivateSnapshotWorksOnXFS(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-snap-1-rootfs": {SizeBytes: 1 << 20},
+			"tpl-snap-1-memory": {SizeBytes: 64 << 20},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	require.NoError(t, ActivateSnapshot(context.Background(), cow.BackendXFS, "snap-1"))
+	require.Equal(t, []string{"tpl-snap-1-rootfs", "tpl-snap-1-memory"}, engine.activatedVolumes)
 }
 
 func TestRequireCowStoreNotInitialized(t *testing.T) {
@@ -177,4 +353,45 @@ func TestGetSandboxRootfsFromStorageInfo(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "sb-sb1-rootfs-gen0", obj.Name)
 	require.Equal(t, uint64(8192), obj.SizeBytes)
+}
+
+func TestReleaseRollbackReplacedVolumesDeletesOldRootfs(t *testing.T) {
+	engine := &fakeCowEngine{}
+	useTestCowStorage(t, engine)
+
+	sandboxID := "aaaa"
+	old := SandboxRootfsName(sandboxID, 0)
+	err := ReleaseRollbackReplacedVolumes(context.Background(), cow.BackendS3, sandboxID, &CowSnapshotObject{
+		Name: old,
+		Kind: cow.KindVolume,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{old}, engine.deactivatedVolumes)
+	require.Equal(t, []string{old}, engine.deletedVolumes)
+	require.Empty(t, engine.deletedSnapshots)
+}
+
+func TestReleaseRollbackReplacedVolumesDefersDeleteFailure(t *testing.T) {
+	engine := &fakeCowEngine{
+		deleteErrByName: map[string]error{
+			"sb-aaaa-rootfs-gen0": errors.New("device busy"),
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	err := ReleaseRollbackReplacedVolumes(context.Background(), cow.BackendS3, "aaaa", &CowSnapshotObject{
+		Name: SandboxRootfsName("aaaa", 0),
+		Kind: cow.KindVolume,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{SandboxRootfsName("aaaa", 0)}, engine.deletedVolumes)
+}
+
+func TestReleaseRollbackReplacedVolumesSkipsNilRootfs(t *testing.T) {
+	engine := &fakeCowEngine{}
+	useTestCowStorage(t, engine)
+
+	require.NoError(t, ReleaseRollbackReplacedVolumes(context.Background(), cow.BackendS3, "sb-1", nil))
+	require.Empty(t, engine.deletedVolumes)
+	require.Empty(t, engine.deactivatedVolumes)
 }

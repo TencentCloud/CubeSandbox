@@ -100,6 +100,42 @@ func containerConfigForPause(c *cubeboxstore.Container) *cubebox.ContainerConfig
 	return cloned
 }
 
+func pauseSpecDir(entry *storage.SnapshotCatalogEntry) string {
+	if entry == nil {
+		return ""
+	}
+	if d := strings.TrimSpace(entry.MetaDir); d != "" {
+		return d
+	}
+	return strings.TrimSpace(entry.SnapshotPath)
+}
+
+// pauseSpecDirFor is where this Resume reads sandbox_spec.json from, with the
+// disk holding it mounted.
+//
+// Same-node that is the pause package, found through the catalog and mounted
+// on demand because Finalize seals and unmounts it after Pause. Cross-node
+// there is no package to look up: the Create entry already imported a copy of
+// the very same disk under the sandbox's own name, so the spec is read from
+// there and the catalog is never consulted.
+func pauseSpecDirFor(ctx context.Context, req *cubebox.RunCubeSandboxRequest, backend, snapID string) (string, error) {
+	if imp := storage.CrossNodeSandboxImport(req.GetAnnotations()); imp != nil {
+		return imp.EnsureMetadata(ctx)
+	}
+	entry, err := storage.GetLocalSnapshotFor(ctx, backend, snapID)
+	if err != nil {
+		return "", fmt.Errorf("load pause snapshot catalog %s: %w", snapID, err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(entry.Kind), storage.CatalogKindPauseSnapshot) {
+		return "", fmt.Errorf("snapshot %s kind=%q is not pause_snapshot", snapID, entry.Kind)
+	}
+	specDir := pauseSpecDir(entry)
+	if err := storage.MountS3MetadataAt(ctx, backend, snapID, specDir); err != nil {
+		return "", fmt.Errorf("mount pause metadata for sandbox_spec: %w", err)
+	}
+	return specDir, nil
+}
+
 func writePauseSandboxSpec(snapshotPath string, runReq *cubebox.RunCubeSandboxRequest) error {
 	if runReq == nil {
 		return fmt.Errorf("nil sandbox_spec")
@@ -127,6 +163,72 @@ func loadPauseSandboxSpec(snapshotPath string) (*cubebox.RunCubeSandboxRequest, 
 	return runReq, nil
 }
 
+// pauseRestoreBinding is the part of a Resume that only the Master-sent thin
+// Create knows. The packed sandbox_spec describes the sandbox as it ran, so
+// it says nothing about which package this Resume restores from, nor where
+// that package's bytes come from — and expanding the request overwrites
+// everything the thin Create carried.
+type pauseRestoreBinding struct {
+	snapshotID       string
+	backend          string
+	requestID        string
+	desiredSandboxID string
+	attachedAt       string
+	remoteUUIDs      string
+	crossNode        bool
+}
+
+func pauseRestoreBindingFrom(req *cubebox.RunCubeSandboxRequest, snapshotID, backend string) pauseRestoreBinding {
+	ann := req.GetAnnotations()
+	return pauseRestoreBinding{
+		snapshotID:       snapshotID,
+		backend:          backend,
+		requestID:        req.GetRequestID(),
+		desiredSandboxID: strings.TrimSpace(ann[constants.MasterAnnotationDesiredSandboxID]),
+		attachedAt:       strings.TrimSpace(ann[constants.MasterAnnotationRuntimeSnapshotAttachedAt]),
+		remoteUUIDs:      strings.TrimSpace(ann[constants.MasterAnnotationSnapshotRemoteUUIDs]),
+		crossNode:        isCrossNodeRestore(ann),
+	}
+}
+
+// applyTo stamps the binding back onto the request the packed spec replaced.
+// Losing remoteUUIDs here sends the rootfs path down the clone branch instead
+// of using the volume imported from S3, and on a node that never held the
+// package there is no snapshot to clone from.
+func (b pauseRestoreBinding) applyTo(req *cubebox.RunCubeSandboxRequest) {
+	if req.Annotations == nil {
+		req.Annotations = map[string]string{}
+	}
+	if b.requestID != "" {
+		req.RequestID = b.requestID
+	}
+	if b.desiredSandboxID != "" {
+		req.Annotations[constants.MasterAnnotationDesiredSandboxID] = b.desiredSandboxID
+	}
+	req.Annotations[constants.MasterAnnotationRuntimeSnapshotID] = b.snapshotID
+	req.Annotations[constants.MasterAnnotationPauseSnapshotID] = b.snapshotID
+	attachedAt := b.attachedAt
+	if attachedAt == "" {
+		attachedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	req.Annotations[constants.MasterAnnotationRuntimeSnapshotAttachedAt] = attachedAt
+	req.Annotations[constants.MasterAnnotationStorageBackend] = b.backend
+	if strings.TrimSpace(req.GetBackend()) == "" {
+		req.Backend = b.backend
+	}
+	if b.remoteUUIDs != "" {
+		req.Annotations[constants.MasterAnnotationSnapshotRemoteUUIDs] = b.remoteUUIDs
+	}
+	if b.crossNode {
+		req.Annotations[constants.MasterAnnotationSnapshotCrossNode] = "true"
+	}
+	delete(req.Annotations, constants.MasterAnnotationsAppSnapshotCreate)
+	// Keep appsnapshot.template.id=tpl-* so Resume can EnsureCubeRunTemplate
+	// the original template (kernel／image). GetSnapshotTemplateID still
+	// prefers runtime.snapshot.id=snap-* while pause.snapshot.id is set, so
+	// storage restore stays on the pause catalog.
+}
+
 // expandPauseSnapshotPackage fills a Master-thin Create request from the
 // sandbox_spec.json packed inside the pause snapshot directory.
 func expandPauseSnapshotPackage(req *cubebox.RunCubeSandboxRequest) error {
@@ -144,22 +246,21 @@ func expandPauseSnapshotPackage(req *cubebox.RunCubeSandboxRequest) error {
 	if err := pathutil.ValidateSafeID(snapID); err != nil {
 		return fmt.Errorf("invalid pause snapshot id: %w", err)
 	}
-	entry, err := storage.GetLocalSnapshot(context.Background(), snapID)
+	backend, berr := storageBackendFromAnnotations(req.GetAnnotations())
+	if berr != nil {
+		return fmt.Errorf("pause snapshot backend: %w", berr)
+	}
+	ctx := context.Background()
+	specDir, err := pauseSpecDirFor(ctx, req, backend, snapID)
 	if err != nil {
-		return fmt.Errorf("load pause snapshot catalog %s: %w", snapID, err)
+		return err
 	}
-	if !strings.EqualFold(strings.TrimSpace(entry.Kind), storage.CatalogKindPauseSnapshot) {
-		return fmt.Errorf("snapshot %s kind=%q is not pause_snapshot", snapID, entry.Kind)
-	}
-	packed, err := loadPauseSandboxSpec(entry.SnapshotPath)
+	packed, err := loadPauseSandboxSpec(specDir)
 	if err != nil {
 		return fmt.Errorf("load pause sandbox_spec: %w", err)
 	}
 
-	// Preserve Master-owned identity / snapshot binding from the thin request.
-	desiredID := strings.TrimSpace(ann[constants.MasterAnnotationDesiredSandboxID])
-	attachedAt := strings.TrimSpace(ann[constants.MasterAnnotationRuntimeSnapshotAttachedAt])
-	requestID := req.GetRequestID()
+	binding := pauseRestoreBindingFrom(req, snapID, backend)
 	// Thin Create may carry recreate-needed network fields from Master
 	// sandboxspec (legacy pause packages omit them in sandbox_spec.json).
 	thinNetwork := req.GetCubeNetworkConfig()
@@ -168,26 +269,7 @@ func expandPauseSnapshotPackage(req *cubebox.RunCubeSandboxRequest) error {
 	thinExposedPorts := append([]int64(nil), req.GetExposedPorts()...)
 
 	*req = *packed
-	if req.Annotations == nil {
-		req.Annotations = map[string]string{}
-	}
-	if requestID != "" {
-		req.RequestID = requestID
-	}
-	if desiredID != "" {
-		req.Annotations[constants.MasterAnnotationDesiredSandboxID] = desiredID
-	}
-	req.Annotations[constants.MasterAnnotationRuntimeSnapshotID] = snapID
-	req.Annotations[constants.MasterAnnotationPauseSnapshotID] = snapID
-	if attachedAt == "" {
-		attachedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	}
-	req.Annotations[constants.MasterAnnotationRuntimeSnapshotAttachedAt] = attachedAt
-	delete(req.Annotations, constants.MasterAnnotationsAppSnapshotCreate)
-	// Packed Create-from-template still carries appsnapshot.template.id=tpl-*.
-	// GetSnapshotTemplateID prefers that over runtime.snapshot.id, which would
-	// restore template snapshot_base with pause memory and panic the guest.
-	delete(req.Annotations, constants.MasterAnnotationAppSnapshotTemplateID)
+	binding.applyTo(req)
 
 	// Prefer packed values; fall back to thin Create for older pause snaps.
 	if req.GetCubeNetworkConfig() == nil {

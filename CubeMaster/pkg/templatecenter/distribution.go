@@ -107,7 +107,7 @@ func destroyArtifactOnNode(ctx context.Context, artifactID, instanceType string,
 	return false, nil
 }
 
-func cleanupTemplateReplicasOnNodes(ctx context.Context, templateID string, replicas []models.TemplateReplica, targets []*node.Node) error {
+func cleanupTemplateReplicasOnNodes(ctx context.Context, templateID string, replicas []models.TemplateReplica, targets []*node.Node, backend string) error {
 	if len(replicas) == 0 || len(targets) == 0 {
 		return nil
 	}
@@ -136,7 +136,7 @@ func cleanupTemplateReplicasOnNodes(ctx context.Context, templateID string, repl
 	if len(locators) == 0 {
 		return nil
 	}
-	return cleanupTemplateReplicasWithLocators(ctx, templateID, locators)
+	return cleanupTemplateReplicasWithLocators(ctx, templateID, locators, backend)
 }
 
 func distributeRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {

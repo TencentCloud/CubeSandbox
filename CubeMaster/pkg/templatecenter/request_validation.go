@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
@@ -106,6 +107,13 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	}
 	if cloned.EnableIvshmem != nil && !*cloned.EnableIvshmem {
 		cloned.EnableIvshmem = nil
+	}
+	if strings.TrimSpace(cloned.Backend) != "" {
+		backend, err := constants.NormalizeSnapshotBackend(cloned.Backend)
+		if err != nil {
+			return nil, err
+		}
+		cloned.Backend = backend
 	}
 	if err := validateTemplateCubeNetworkConfig(cloned.CubeNetworkConfig); err != nil {
 		return nil, err

@@ -13,6 +13,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxid"
 )
 
@@ -44,7 +45,7 @@ func ResolveSandboxID(ctx context.Context, input string) (string, error) {
 		return "", err
 	}
 
-	entries := collectClusterSandboxIDs(ctx)
+	entries := append(collectClusterSandboxIDs(ctx), collectPausedSandboxIDs(ctx)...)
 	cacheCollectedSandboxEntries(entries)
 	clusterIDs := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -76,11 +77,39 @@ func mergeSandboxIDs(base, extra []string) []string {
 
 func cacheCollectedSandboxEntries(entries []clusterSandboxEntry) {
 	for _, entry := range entries {
+		if entry.SandboxID == "" || entry.HostIP == "" {
+			continue
+		}
 		localcache.SetSandboxCache(entry.SandboxID, &localcache.SandboxCache{
 			SandboxID: entry.SandboxID,
 			HostIP:    entry.HostIP,
 		})
 	}
+}
+
+// collectPausedSandboxIDs adds paused sandboxes to the candidate set. They
+// have no shim, so the node scan above cannot see them and a short ID would
+// resolve to "not found" whenever the local cache misses — after a Master
+// restart, that is every paused sandbox in the cluster.
+func collectPausedSandboxIDs(ctx context.Context) []clusterSandboxEntry {
+	records, err := pausesnap.List(ctx, pausesnap.ListOptions{})
+	if err != nil {
+		if !errors.Is(err, pausesnap.ErrNotReady) {
+			log.G(ctx).Warnf("collect paused sandbox ids: %v", err)
+		}
+		return nil
+	}
+	entries := make([]clusterSandboxEntry, 0, len(records))
+	for _, rec := range records {
+		if rec == nil || rec.SandboxID == "" {
+			continue
+		}
+		entries = append(entries, clusterSandboxEntry{
+			SandboxID: rec.SandboxID,
+			HostIP:    rec.NodeIP,
+		})
+	}
+	return entries
 }
 
 func collectClusterSandboxIDs(ctx context.Context) []clusterSandboxEntry {

@@ -19,6 +19,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/restoreplace"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 )
@@ -27,6 +30,8 @@ var (
 	resolveSnapshotReadyNodeScopeFn = templatecenter.ResolveSnapshotReadyNodeScope
 	resolveSnapshotReadyReplicaFn   = templatecenter.ResolveSnapshotReadyReplica
 	resolveTemplateReadyReplicaFn   = templatecenter.ResolveTemplateReadyReplica
+	getSnapshotRestoreSourceFn      = templatecenter.GetSnapshotRestoreSource
+	decideRestorePlacementFn        = restoreplace.Decide
 )
 
 func getCubeboxReqTemplate() (*types.CreateCubeSandboxReq, error) {
@@ -445,10 +450,14 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	}
 	constants.NormalizeAppSnapshotAnnotations(templateReq.Annotations)
 	stageStart = time.Now()
-	err = templatecenter.EnsureTemplateLocalityReady(ctx, templateID, reqInOut.InstanceType)
-	templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveLocality, time.Since(stageStart))
-	if err != nil {
-		return fmt.Errorf("template %s is not ready on any healthy node: %w", templateID, err)
+	if !skipTemplateLocalityReady(ctx, templateID) {
+		err = templatecenter.EnsureTemplateLocalityReady(ctx, templateID, reqInOut.InstanceType)
+		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveLocality, time.Since(stageStart))
+		if err != nil {
+			return fmt.Errorf("template %s is not ready on any healthy node: %w", templateID, err)
+		}
+	} else {
+		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveLocality, time.Since(stageStart))
 	}
 	stageStart = time.Now()
 	templateKind, err := templatecenter.GetTemplateKind(ctx, templateID)
@@ -481,6 +490,9 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	}
 
 	applyTemplateAnnotationsAndLabels(templateReq, reqInOut)
+	if err := templatecenter.InheritCreateBackendFromTemplate(reqInOut, templateReq); err != nil {
+		return err
+	}
 	if !strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
 		if err := bindAppSnapshotTemplateReplica(ctx, templateID, reqInOut); err != nil {
 			return err
@@ -523,6 +535,14 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	return nil
 }
 
+func skipTemplateLocalityReady(ctx context.Context, templateID string) bool {
+	src, err := getSnapshotRestoreSourceFn(ctx, templateID)
+	if err != nil || src == nil {
+		return false
+	}
+	return restoreplace.CanCrossNode(src.Backend, src.RemoteStatus)
+}
+
 func constrainSnapshotCreateScope(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq) error {
 	readyScope, err := resolveSnapshotReadyNodeScopeFn(ctx, snapshotID)
 	if err != nil {
@@ -563,6 +583,127 @@ func constrainSnapshotCreateScope(ctx context.Context, snapshotID string, reqInO
 // keys are explicitly deleted so any stale value supplied by the caller
 // cannot reach the cubelet.
 func bindSnapshotCreateReplica(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq) error {
+	if src, err := getSnapshotRestoreSourceFn(ctx, snapshotID); err == nil && src != nil {
+		return bindSnapshotCreateReplicaWithPlacement(ctx, snapshotID, reqInOut, src)
+	} else if err != nil && !errors.Is(err, templatecenter.ErrSnapshotNotFound) &&
+		!errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized) {
+		return err
+	}
+	return bindSnapshotCreateReplicaLocal(ctx, snapshotID, reqInOut)
+}
+
+// fromSnapshotPlacement pins FromSnap to the snapshot origin unless the
+// package is S3 remote-ready and may leave that node. XFS / not-ready S3
+// must not call Decide: after a Master restart the heartbeat cache is
+// empty and Decide would fail even though the snapshot row already has
+// OriginNodeIP.
+func fromSnapshotPlacement(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq, src *templatecenter.RestoreSource, instanceType string, reqRes *selctx.RequestResource) (*restoreplace.Placement, error) {
+	if src == nil {
+		return nil, fmt.Errorf("snapshot %s: restore source is nil", snapshotID)
+	}
+	if !restoreplace.CanCrossNode(src.Backend, src.RemoteStatus) {
+		home := &restoreplace.Placement{
+			NodeID: strings.TrimSpace(src.OriginNodeID),
+			NodeIP: strings.TrimSpace(src.OriginNodeIP),
+		}
+		if home.NodeID == "" && home.NodeIP == "" {
+			return nil, fmt.Errorf("snapshot %s: origin node unknown and snapshot cannot restore cross-node", snapshotID)
+		}
+		return home, nil
+	}
+	requestedScope := []string(nil)
+	if reqInOut != nil {
+		requestedScope = append([]string(nil), reqInOut.DistributionScope...)
+	}
+	return decideRestorePlacementFn(ctx, restoreplace.Input{
+		SnapshotID:          src.SnapshotID,
+		Backend:             src.Backend,
+		RemoteStatus:        src.RemoteStatus,
+		OriginNodeID:        src.OriginNodeID,
+		OriginNodeIP:        src.OriginNodeIP,
+		OriginHostFactsJSON: src.OriginHostFactsJSON,
+		InstanceType:        instanceType,
+		ReqRes:              reqRes,
+		RequestedScope:      requestedScope,
+	})
+}
+
+func bindSnapshotCreateReplicaWithPlacement(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq, src *templatecenter.RestoreSource) error {
+	var reqRes *selctx.RequestResource
+	if config.GetConfig() != nil {
+		if r, err := sandbox.RequestResources(reqInOut); err == nil {
+			reqRes = r
+		}
+	}
+	instanceType := strings.TrimSpace(reqInOut.InstanceType)
+	if instanceType == "" {
+		instanceType = src.InstanceType
+	}
+	placement, err := fromSnapshotPlacement(ctx, snapshotID, reqInOut, src, instanceType, reqRes)
+	if err != nil {
+		return err
+	}
+	if placement == nil || (strings.TrimSpace(placement.NodeID) == "" && strings.TrimSpace(placement.NodeIP) == "") {
+		return fmt.Errorf("snapshot %s: restore placement returned no node", snapshotID)
+	}
+
+	selectedNodeID := strings.TrimSpace(placement.NodeID)
+	if selectedNodeID == "" {
+		selectedNodeID = strings.TrimSpace(placement.NodeIP)
+	}
+	reqInOut.DistributionScope = []string{selectedNodeID}
+
+	if reqInOut.Annotations == nil {
+		reqInOut.Annotations = map[string]string{}
+	}
+	reqInOut.Annotations[constants.CubeAnnotationRuntimeSnapshotID] = strings.TrimSpace(snapshotID)
+	reqInOut.Annotations[constants.CubeAnnotationRuntimeSnapshotAttachedAt] = time.Now().UTC().Format(time.RFC3339Nano)
+	if b := strings.TrimSpace(src.Backend); b != "" {
+		reqInOut.Annotations[constants.CubeAnnotationStorageBackend] = b
+	}
+	if constants.IsS3Backend(src.Backend) {
+		if raw := strings.TrimSpace(src.ExportUUIDs); raw != "" {
+			reqInOut.Annotations[constants.CubeAnnotationSnapshotRemoteUUIDs] = raw
+		}
+	}
+
+	if placement.CrossNode {
+		reqInOut.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal] = "true"
+		reqInOut.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
+		if resolved := templateResolveResultFromContext(ctx); resolved != nil {
+			resolved.ChosenReplica = templatecenter.ReplicaStatus{
+				NodeID:       placement.NodeID,
+				NodeIP:       placement.NodeIP,
+				InstanceType: instanceType,
+				Status:       templatecenter.ReplicaStatusReady,
+				Phase:        templatecenter.ReplicaPhaseReady,
+			}
+			resolved.HasChosenReplica = true
+		}
+		log.G(ctx).Infof("from-snapshot create: cross-node snapshot=%s origin=%s target=%s/%s",
+			snapshotID, src.OriginNodeID, placement.NodeID, placement.NodeIP)
+		return nil
+	}
+
+	replica, err := resolveSnapshotReadyReplicaFn(ctx, snapshotID, selectedNodeID)
+	if err != nil {
+		// Origin was chosen by placement; still stamp runtime annotations even
+		// if the replica cache is cold.
+		log.G(ctx).Warnf("from-snapshot create: origin replica lookup failed snapshot=%s node=%s: %v",
+			snapshotID, selectedNodeID, err)
+		return nil
+	}
+	if resolved := templateResolveResultFromContext(ctx); resolved != nil {
+		resolved.ChosenReplica = replica
+		resolved.HasChosenReplica = true
+	}
+	injectReplicaComponentVersionAnnotations(reqInOut.Annotations, replica)
+	return nil
+}
+
+// bindSnapshotCreateReplicaLocal is the origin-only pin used when the snapshot
+// row is unavailable (tests / pre-migration). It does not attempt cross-node.
+func bindSnapshotCreateReplicaLocal(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq) error {
 	if err := constrainSnapshotCreateScope(ctx, snapshotID, reqInOut); err != nil {
 		return err
 	}

@@ -56,7 +56,11 @@ func (e *Engine) ListVolumes(uint64, string) (*ListVolumesResult, error) {
 	return nil, fmt.Errorf(nativeBuildHint)
 }
 
-func (e *Engine) CreateSnapshot(string, string, bool) (string, error) {
+func (e *Engine) CreateSnapshotFromVolume(string, string, bool) (string, error) {
+	return "", fmt.Errorf(nativeBuildHint)
+}
+
+func (e *Engine) CreateVolumeFromSnapshot(string, string) (string, error) {
 	return "", fmt.Errorf(nativeBuildHint)
 }
 
@@ -74,6 +78,14 @@ func (e *Engine) DeleteSnapshot(string) error {
 
 func (e *Engine) ListSnapshots(string, uint64, string) (*ListSnapshotsResult, error) {
 	return nil, fmt.Errorf(nativeBuildHint)
+}
+
+func (e *Engine) ExportSnapshot(string) (string, error) {
+	return "", fmt.Errorf(nativeBuildHint)
+}
+
+func (e *Engine) ImportLvol(string, string) (string, error) {
+	return "", fmt.Errorf(nativeBuildHint)
 }
 
 func (e *Engine) GetMetrics() (map[string]uint64, error) {

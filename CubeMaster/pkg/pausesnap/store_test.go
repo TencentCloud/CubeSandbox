@@ -10,17 +10,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPluginVolumeIDsFromRequestJSON(t *testing.T) {
+func TestPluginVolumeIDsFromJSON(t *testing.T) {
 	t.Parallel()
 
-	require.Nil(t, pluginVolumeIDsFromRequestJSON(""))
-	require.Nil(t, pluginVolumeIDsFromRequestJSON("   "))
-	require.Nil(t, pluginVolumeIDsFromRequestJSON("{not-json"))
-	require.Nil(t, pluginVolumeIDsFromRequestJSON(`{"plugin_volume_ids":[]}`))
+	require.Nil(t, pluginVolumeIDsFromJSON(""))
+	require.Nil(t, pluginVolumeIDsFromJSON("   "))
+	require.Nil(t, pluginVolumeIDsFromJSON("{not-json"))
+	require.Nil(t, pluginVolumeIDsFromJSON(`[]`))
 
-	raw, err := json.Marshal(pauseRequestJSON{PluginVolumeIDs: []string{" vol-a ", "", "vol-a", "vol-b"}})
+	raw, err := json.Marshal([]string{" vol-a ", "", "vol-a", "vol-b"})
 	require.NoError(t, err)
-	require.Equal(t, []string{"vol-a", "vol-b"}, pluginVolumeIDsFromRequestJSON(string(raw)))
+	require.Equal(t, []string{"vol-a", "vol-b"}, pluginVolumeIDsFromJSON(string(raw)))
 }
 
 func TestUniqueNonEmpty(t *testing.T) {
@@ -40,12 +40,13 @@ func TestGenerateSnapshotIDFormat(t *testing.T) {
 	require.Equal(t, snapshotIDPrefix, id[:len(snapshotIDPrefix)])
 }
 
-func TestIsReadyPauseSnapshot(t *testing.T) {
+func TestIsShimGonePauseSnapshot(t *testing.T) {
 	t.Parallel()
 
-	require.True(t, isReadyPauseSnapshot("READY"))
-	require.True(t, isReadyPauseSnapshot(" ready "))
-	require.False(t, isReadyPauseSnapshot(statusFailed))
-	require.False(t, isReadyPauseSnapshot(statusCreating))
-	require.False(t, isReadyPauseSnapshot(""))
+	require.True(t, isShimGonePauseSnapshot("READY"))
+	require.True(t, isShimGonePauseSnapshot(" ready "))
+	require.True(t, isShimGonePauseSnapshot(statusDeleteFailed))
+	require.False(t, isShimGonePauseSnapshot(statusFailed))
+	require.False(t, isShimGonePauseSnapshot(statusCreating))
+	require.False(t, isShimGonePauseSnapshot(""))
 }

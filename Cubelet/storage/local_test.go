@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -31,6 +33,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
 func makeTestConfig(t *testing.T) *Config {
@@ -47,6 +50,25 @@ func makeTestConfig(t *testing.T) *Config {
 		PoolWorkers:               2,
 		PoolTriggerIntervalInMs:   1,
 	}
+}
+
+// probeReflink returns nil when the filesystem under dir supports cp --reflink=always.
+func probeReflink(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	src := filepath.Join(dir, ".reflink-probe-src")
+	dst := filepath.Join(dir, ".reflink-probe-dst")
+	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+		return err
+	}
+	defer os.Remove(src)
+	defer os.Remove(dst)
+	cmd := exec.Command("cp", "--reflink=always", src, dst)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func TestParam(t *testing.T) {
@@ -610,6 +632,11 @@ func TestPollImmediateInfiniteWithContext(t *testing.T) {
 
 func TestSnapCreateCubebox(t *testing.T) {
 	cfg := makeTestConfig(t)
+	// Template Create→Destroy promotes tmpPool→poolFormat only for reflink pools.
+	cfg.PoolType = cp_reflink_type
+	if err := probeReflink(cfg.DataPath); err != nil {
+		t.Skipf("reflink not available under %s: %v", cfg.DataPath, err)
+	}
 
 	s := &local{}
 	s.config = cfg
@@ -804,7 +831,7 @@ func TestInitResetsCowStorageAndReinitializesEngine(t *testing.T) {
 	cfg.StorageBackend = "cubecow"
 	// cubelet derives reflink root_dir from data_path, so put data_path
 	// somewhere we can also pre-seed stale state in.
-	rootDir := filepath.Join(cfg.DataPath, "cubecow-reflink")
+	rootDir := defaultReflinkAutoRootDir(cfg.DataPath)
 
 	s := &local{config: cfg, cowEngine: &cubecow.Engine{}}
 	require.NoError(t, os.MkdirAll(cfg.RootPath, 0o755))
@@ -818,13 +845,19 @@ func TestInitResetsCowStorageAndReinitializesEngine(t *testing.T) {
 
 	oldReset := cowResetNodeStorage
 	oldInit := initCowEngine
+	oldS3Init := initS3CowEngine
+	oldMeta := ensureS3MetadataReadyFn
 	t.Cleanup(func() {
 		cowResetNodeStorage = oldReset
 		initCowEngine = oldInit
+		initS3CowEngine = oldS3Init
+		ensureS3MetadataReadyFn = oldMeta
+		s.stopS3CowInitLoop()
 	})
 
 	resetCalls := 0
 	newEngine := &cubecow.Engine{}
+	newS3Engine := &cubecow.Engine{}
 	cowResetNodeStorage = func(engine *cubecow.Engine) error {
 		resetCalls++
 		assert.Same(t, oldEngine, engine)
@@ -834,11 +867,20 @@ func TestInitResetsCowStorageAndReinitializesEngine(t *testing.T) {
 		assert.Same(t, cfg, got)
 		return newEngine, "test-config", nil
 	}
+	initS3CowEngine = func(got *Config) (*cubecow.Engine, string, error) {
+		assert.Same(t, cfg, got)
+		return newS3Engine, "test-s3-config", nil
+	}
+	ensureS3MetadataReadyFn = func(context.Context) error { return nil }
 
 	require.NoError(t, s.Init(context.Background(), nil))
 	assert.Equal(t, 1, resetCalls)
 	assert.Same(t, newEngine, s.cowEngine)
 	assert.NotNil(t, s.cowManager)
+
+	require.Eventually(t, func() bool {
+		return s.s3CowEngine == newS3Engine && s.s3CowManager != nil
+	}, 2*time.Second, 20*time.Millisecond)
 
 	_, err := os.Stat(staleVolumes)
 	assert.True(t, os.IsNotExist(err))
@@ -1095,15 +1137,18 @@ func TestRestoreFromTemplateSkipsMemoryPrefetchWithoutMemoryRef(t *testing.T) {
 	require.Len(t, fakeManager.createDefaultCalls, 1)
 }
 
-func TestRestoreFromTemplateKeepsExistingMemoryVolURL(t *testing.T) {
+func TestRestoreFromTemplateIgnoresStaleMemoryVolURL(t *testing.T) {
 	cfg := makeTestConfig(t)
 	cfg.StorageBackend = "cubecow"
-	fakeManager := &fakeCowVolumeManager{}
+	fakeManager := &fakeCowVolumeManager{
+		resolvePaths: map[string]string{"tpl-memory": "/dev/mapper/fresh"},
+	}
 
 	s := &local{config: cfg, cowManager: fakeManager}
 	assert.NoError(t, s.init(&plugin.InitContext{Context: context.Background()}))
 
 	templateID := "tpl-" + uuid.NewString()
+	seedTestSnapshotCatalog(t, templateID, "tpl-memory", CowKindVolume)
 	ctx := namespaces.WithNamespace(context.Background(), namespaces.Default)
 	req := &cubebox.RunCubeSandboxRequest{
 		Volumes: []*cubebox.Volume{{
@@ -1112,9 +1157,7 @@ func TestRestoreFromTemplateKeepsExistingMemoryVolURL(t *testing.T) {
 		}},
 		Annotations: map[string]string{
 			constants.MasterAnnotationAppSnapshotTemplateID: templateID,
-			// Pre-resolved URL short-circuits the catalog lookup entirely;
-			// no catalog seeding is required.
-			constants.AnnotationVMSnapshotMemoryVolURL: "file:///dev/mapper/already",
+			constants.AnnotationVMSnapshotMemoryVolURL:      "file:///dev/mapper/already",
 		},
 		InstanceType: cubebox.InstanceType_cubebox.String(),
 	}
@@ -1125,8 +1168,9 @@ func TestRestoreFromTemplateKeepsExistingMemoryVolURL(t *testing.T) {
 
 	require.NoError(t, s.Create(ctx, opts))
 	res := opts.StorageInfo.(*StorageInfo)
-	assert.Equal(t, "file:///dev/mapper/already", res.RestoreMemoryVolURL)
-	assert.Empty(t, fakeManager.resolveCalls)
+	assert.Equal(t, "file:///dev/mapper/fresh", res.RestoreMemoryVolURL)
+	require.Len(t, fakeManager.resolveCalls, 1)
+	assert.Equal(t, fakeCowResolveCall{name: "tpl-memory", kind: CowKindVolume}, fakeManager.resolveCalls[0])
 	require.Len(t, fakeManager.createSnapshotCalls, 1)
 }
 
@@ -1288,6 +1332,13 @@ func TestCleanupCreateResultRemovesHostDirSandboxPath(t *testing.T) {
 	err := s.cleanupCreateResult(context.Background(), &StorageInfo{
 		SandboxID: "hostdir-sb",
 		Volumes:   map[string]*BackendFileInfo{},
+		HostDirBackendInfos: map[string]*HostDirBackendInfo{
+			"volume/hostdir-0": {
+				VolumeName: "volume",
+				ShareDir:   filepath.Join(hostDirBasePath, "hostdir-sb"),
+				BindPath:   sandboxDir,
+			},
+		},
 	})
 	require.NoError(t, err)
 	require.NoDirExists(t, filepath.Join(hostDirBasePath, "hostdir-sb"))
@@ -1566,6 +1617,7 @@ func TestCowTemplateBuildAndRestoreShareComparableRootfsSize(t *testing.T) {
 	assert.NoError(t, s.init(&plugin.InitContext{Context: context.Background()}))
 
 	templateID := "tpl-" + uuid.NewString()
+	seedTestSnapshotCatalog(t, templateID, "", "")
 	ctx := namespaces.WithNamespace(context.Background(), namespaces.Default)
 
 	buildReq := &cubebox.RunCubeSandboxRequest{
@@ -1842,6 +1894,38 @@ func TestRecoverStorageStateRefreshesAndPersistsCowPaths(t *testing.T) {
 	require.Equal(t, "/dev/mapper/refreshed", loaded.Volumes["test"].FilePath)
 }
 
+func TestRecoverStorageStateSkipsS3Entries(t *testing.T) {
+	cfg := makeTestConfig(t)
+	cfg.StorageBackend = "cubecow"
+	s := &local{config: cfg, cowManager: &fakeCowVolumeManager{}}
+	assert.NoError(t, s.init(&plugin.InitContext{Context: context.Background()}))
+
+	ctx := namespaces.WithNamespace(context.Background(), namespaces.Default)
+	info := &StorageInfo{
+		Namespace: "default",
+		SandboxID: "s3-recover-test",
+		Backend:   cow.BackendS3,
+		Volumes: map[string]*BackendFileInfo{
+			"test": {
+				Name:       "test",
+				FilePath:   "/dev/mapper/stale",
+				VolumeName: "sb-s3-recover-test",
+				Kind:       cowKindVolume,
+			},
+		},
+	}
+	require.NoError(t, s.writeBackendFileInfo(ctx, "s3-recover-test", info))
+
+	// Boot does nothing for an S3 sandbox: it neither talks to s3lvol (the
+	// handle is published asynchronously and may not exist yet) nor rewrites
+	// the entry. The recorded device path is dropped when the entry is read.
+	require.NoError(t, s.RecoverStorageState(ctx))
+
+	loaded, err := s.readBackendFileInfoRaw(ctx, "s3-recover-test")
+	require.NoError(t, err)
+	require.Equal(t, "/dev/mapper/stale", loaded.Volumes["test"].FilePath)
+}
+
 func TestRecoverSandboxStorageIgnoresMissingStorageInfo(t *testing.T) {
 	cfg := makeTestConfig(t)
 	cfg.StorageBackend = "cubecow"
@@ -1881,6 +1965,41 @@ func TestDestroyCowTreatsNotFoundAsSuccess(t *testing.T) {
 	assert.NoError(t, s.Destroy(ctx, &workflow.DestroyContext{BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "test"}}))
 
 	_, err := s.readBackendFileInfo(ctx, "test")
+	assert.True(t, errors.Is(err, utils.ErrorKeyNotFound) || errors.Is(err, utils.ErrorBucketNotFound))
+}
+
+func TestDestroyCowVolumeDeleteFailureIsDeferred(t *testing.T) {
+	cfg := makeTestConfig(t)
+	cfg.StorageBackend = "cubecow"
+	fakeManager := &fakeCowVolumeManager{
+		resolvePaths: map[string]string{"sb-busy-test": "/dev/mapper/sb-busy-test"},
+		deleteErrs: map[string]error{
+			"sb-busy-test|volume": errors.New("precondition failed: Device or resource busy"),
+		},
+	}
+
+	s := &local{config: cfg, cowManager: fakeManager}
+	assert.NoError(t, s.init(&plugin.InitContext{Context: context.Background()}))
+
+	ctx := namespaces.WithNamespace(context.Background(), namespaces.Default)
+	info := &StorageInfo{
+		Namespace: "default",
+		SandboxID: "busy-test",
+		Volumes: map[string]*BackendFileInfo{
+			"test": {
+				Name:       "test",
+				FilePath:   "/dev/mapper/stale",
+				VolumeName: "sb-busy-test",
+				Kind:       cowKindVolume,
+			},
+		},
+	}
+	require.NoError(t, s.writeBackendFileInfo(ctx, "busy-test", info))
+	assert.NoError(t, s.Destroy(ctx, &workflow.DestroyContext{BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "busy-test"}}))
+	require.Len(t, fakeManager.deleteCalls, 1)
+	assert.Equal(t, fakeCowDeleteCall{name: "sb-busy-test", kind: cowKindVolume}, fakeManager.deleteCalls[0])
+
+	_, err := s.readBackendFileInfo(ctx, "busy-test")
 	assert.True(t, errors.Is(err, utils.ErrorKeyNotFound) || errors.Is(err, utils.ErrorBucketNotFound))
 }
 
@@ -1976,6 +2095,49 @@ func TestValidateCowStartupDepsReportsMissingCommands(t *testing.T) {
 	assert.Contains(t, err.Error(), "losetup")
 }
 
+func TestBuildS3CowInitJSONUsesS3Kind(t *testing.T) {
+	cfg := &Config{
+		DataPath: "/var/lib/cubelet/io.cubelet.internal.v1.storage",
+		Cow: CowInlineConfig{
+			Log: CowLogConfig{Level: stringPtr("debug")},
+			S3: CowS3UserConfig{
+				SocketPath: stringPtr("/tmp/s3lvol.sock"),
+			},
+		},
+	}
+
+	raw, err := cfg.BuildS3CowInitJSON()
+	require.NoError(t, err)
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(raw, &payload))
+	backendCfg, ok := payload["backend"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, cowBackendS3, backendCfg["kind"])
+	s3Cfg, ok := backendCfg["s3"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "/tmp/s3lvol.sock", s3Cfg["socket_path"])
+	assert.Equal(t, "/var/lib/cubelet/s3", s3Cfg["state_dir"])
+}
+
+func TestEnsureCowManagerBindsSeparateHandles(t *testing.T) {
+	xfsEng := &cubecow.Engine{}
+	s3Eng := &cubecow.Engine{}
+	s := &local{
+		config:      &Config{StorageBackend: StorageBackendCow},
+		cowEngine:   xfsEng,
+		s3CowEngine: s3Eng,
+	}
+	require.NoError(t, s.ensureCowManager())
+	xfs, ok := s.cowManager.(*XfsCow)
+	require.True(t, ok)
+	assert.Same(t, xfsEng, xfs.engine)
+	s3, ok := s.s3CowManager.(*S3Cow)
+	require.True(t, ok)
+	assert.Same(t, s3Eng, s3.engine)
+	assert.NotSame(t, xfs.engine, s3.engine)
+}
+
 func TestPrepareCowInlineConfigStampsBackendDefaults(t *testing.T) {
 	cfg := &Config{
 		DataPath: "/var/lib/cubelet/io.cubelet.internal.v1.storage",
@@ -1983,7 +2145,204 @@ func TestPrepareCowInlineConfigStampsBackendDefaults(t *testing.T) {
 	require.NoError(t, cfg.PrepareCowInlineConfig())
 	assert.Equal(t, cowBackendReflink, cfg.Cow.Backend.Kind)
 	require.NotNil(t, cfg.Cow.Backend.Reflink.RootDir)
-	assert.Equal(t, "/var/lib/cubelet/cubecow-reflink", *cfg.Cow.Backend.Reflink.RootDir)
+	assert.Equal(t, "/var/lib/cubelet/xfs/objects", *cfg.Cow.Backend.Reflink.RootDir)
+}
+
+func TestDefaultReflinkAutoRootDirUsesXfsObjects(t *testing.T) {
+	work := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(work, "cubecow-reflink", "volumes"), 0o755))
+	got := defaultReflinkAutoRootDir(work)
+	assert.Equal(t, filepath.Join(work, "xfs", SnapshotObjectsDir), got)
+}
+
+func TestCreateDestroyDefaultMediumUsesS3Store(t *testing.T) {
+	cfg := makeTestConfig(t)
+	cfg.StorageBackend = "cubecow"
+	xfs := &fakeCowVolumeManager{}
+	s3 := &fakeCowVolumeManager{}
+
+	s := &local{config: cfg, cowManager: xfs, s3CowManager: s3}
+	assert.NoError(t, s.init(&plugin.InitContext{Context: context.Background()}))
+
+	ctx := namespaces.WithNamespace(context.Background(), namespaces.Default)
+	req := &cubebox.RunCubeSandboxRequest{
+		Backend: cow.BackendS3,
+		Volumes: []*cubebox.Volume{{
+			Name:         "data",
+			VolumeSource: &cubebox.VolumeSource{EmptyDir: &cubebox.EmptyDirVolumeSource{SizeLimit: "1Mi"}},
+		}},
+	}
+	opts := &workflow.CreateContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "s3-data"},
+		ReqInfo:          req,
+	}
+
+	require.NoError(t, s.Create(ctx, opts))
+	res := opts.StorageInfo.(*StorageInfo)
+	assert.Equal(t, cow.BackendS3, res.Backend)
+	require.Len(t, s3.createDefaultCalls, 1)
+	assert.Equal(t, "s3-data", s3.createDefaultCalls[0].sandboxID)
+	assert.Equal(t, "data", s3.createDefaultCalls[0].volumeName)
+	assert.Empty(t, xfs.createDefaultCalls)
+
+	require.NoError(t, s.Destroy(ctx, &workflow.DestroyContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "s3-data"},
+	}))
+	require.Len(t, s3.deleteCalls, 1)
+	assert.Equal(t, fakeCowDeleteCall{name: "sb-s3-data-data", kind: cowKindVolume}, s3.deleteCalls[0])
+	assert.Empty(t, xfs.deleteCalls)
+}
+
+func TestCreateSnapshotBuildRootfsUsesS3Store(t *testing.T) {
+	cfg := makeTestConfig(t)
+	cfg.StorageBackend = "cubecow"
+	xfs := &fakeCowVolumeManager{}
+	s3 := &fakeCowVolumeManager{}
+
+	s := &local{config: cfg, cowManager: xfs, s3CowManager: s3}
+	assert.NoError(t, s.init(&plugin.InitContext{Context: context.Background()}))
+
+	templateID := "tpl-" + uuid.NewString()
+	ctx := namespaces.WithNamespace(context.Background(), namespaces.Default)
+	req := &cubebox.RunCubeSandboxRequest{
+		Backend: cow.BackendS3,
+		Volumes: []*cubebox.Volume{{
+			Name:         "cube_rootfs_rw",
+			VolumeSource: &cubebox.VolumeSource{EmptyDir: &cubebox.EmptyDirVolumeSource{SizeLimit: "1Mi"}},
+		}},
+		Annotations: map[string]string{
+			constants.MasterAnnotationsAppSnapshotCreate:    "true",
+			constants.MasterAnnotationAppSnapshotTemplateID: templateID,
+			constants.MasterAnnotationAppSnapshotVersion:    "v2",
+		},
+		InstanceType: cubebox.InstanceType_cubebox.String(),
+	}
+	opts := &workflow.CreateContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: templateID + "_0"},
+		ReqInfo:          req,
+	}
+
+	require.NoError(t, s.Create(ctx, opts))
+	res := opts.StorageInfo.(*StorageInfo)
+	assert.Equal(t, cow.BackendS3, res.Backend)
+	require.Len(t, s3.createBuildCalls, 1)
+	assert.Equal(t, templateID, s3.createBuildCalls[0].templateID)
+	assert.Empty(t, xfs.createBuildCalls)
+}
+
+func TestDestroyUsesAnnotationBackendWhenStorageInfoBackendEmpty(t *testing.T) {
+	cfg := makeTestConfig(t)
+	cfg.StorageBackend = "cubecow"
+	xfs := &fakeCowVolumeManager{}
+	s3 := &fakeCowVolumeManager{}
+
+	s := &local{config: cfg, cowManager: xfs, s3CowManager: s3}
+	assert.NoError(t, s.init(&plugin.InitContext{Context: context.Background()}))
+
+	ctx := namespaces.WithNamespace(context.Background(), namespaces.Default)
+	info := &StorageInfo{
+		Namespace: "default",
+		SandboxID: "legacy-s3",
+		Volumes: map[string]*BackendFileInfo{
+			"data": {Name: "data", VolumeName: "sb-legacy-s3-data", Kind: cowKindVolume},
+		},
+	}
+	require.NoError(t, s.writeBackendFileInfo(ctx, "legacy-s3", info))
+
+	require.NoError(t, s.Destroy(ctx, &workflow.DestroyContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "legacy-s3"},
+		DestroyInfo: &cubebox.DestroyCubeSandboxRequest{
+			SandboxID: "legacy-s3",
+			Annotations: map[string]string{
+				constants.MasterAnnotationStorageBackend: cow.BackendS3,
+			},
+		},
+	}))
+	require.Len(t, s3.deleteCalls, 1)
+	assert.Equal(t, fakeCowDeleteCall{name: "sb-legacy-s3-data", kind: cowKindVolume}, s3.deleteCalls[0])
+	assert.Empty(t, xfs.deleteCalls)
+}
+
+func TestRefreshCowPathsDropsRecordedS3DevPath(t *testing.T) {
+	cfg := makeTestConfig(t)
+	cfg.StorageBackend = "cubecow"
+	xfs := &fakeCowVolumeManager{resolvePaths: map[string]string{"sb-s3-vol": "/dev/mapper/xfs"}}
+	s3 := &fakeCowVolumeManager{resolvePaths: map[string]string{"sb-s3-vol": "/dev/mapper/s3"}}
+
+	s := &local{config: cfg, cowManager: xfs, s3CowManager: s3}
+	info := &StorageInfo{
+		Backend: cow.BackendS3,
+		Volumes: map[string]*BackendFileInfo{
+			"data": {Name: "data", VolumeName: "sb-s3-vol", Kind: cowKindVolume, FilePath: "/dev/mapper/stale"},
+		},
+	}
+	// s3lvol hands out a different device on every activate, so a recorded
+	// path is not just stale but pointing at somebody else's disk. Resolving
+	// one here would attach the volume outside any request.
+	require.NoError(t, s.refreshCowPaths(info))
+	assert.Empty(t, info.Volumes["data"].FilePath)
+	assert.Empty(t, s3.resolveCalls)
+	assert.Empty(t, xfs.resolveCalls)
+}
+
+func TestPrefetchMemoryVolURLUsesS3Store(t *testing.T) {
+	cfg := makeTestConfig(t)
+	cfg.StorageBackend = "cubecow"
+	xfs := &fakeCowVolumeManager{resolvePaths: map[string]string{"tpl-memory": "/dev/mapper/xfs-mem"}}
+	s3 := &fakeCowVolumeManager{resolvePaths: map[string]string{"tpl-memory": "/dev/mapper/s3-mem"}}
+
+	s := &local{config: cfg, cowManager: xfs, s3CowManager: s3}
+	assert.NoError(t, s.init(&plugin.InitContext{Context: context.Background()}))
+
+	templateID := "tpl-" + uuid.NewString()
+	seedTestSnapshotCatalogFor(t, cow.BackendS3, templateID, "tpl-memory", CowKindVolume)
+
+	ctx := namespaces.WithNamespace(context.Background(), namespaces.Default)
+	req := &cubebox.RunCubeSandboxRequest{
+		Backend: cow.BackendS3,
+		Volumes: []*cubebox.Volume{{
+			Name:         "cube_rootfs_rw",
+			VolumeSource: &cubebox.VolumeSource{EmptyDir: &cubebox.EmptyDirVolumeSource{SizeLimit: "1Mi"}},
+		}},
+		Annotations: map[string]string{
+			constants.MasterAnnotationAppSnapshotTemplateID: templateID,
+			constants.MasterAnnotationAppSnapshotVersion:    "v2",
+		},
+		InstanceType: cubebox.InstanceType_cubebox.String(),
+	}
+	opts := &workflow.CreateContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "s3-restore-sb"},
+		ReqInfo:          req,
+	}
+
+	require.NoError(t, s.Create(ctx, opts))
+	res := opts.StorageInfo.(*StorageInfo)
+	assert.Equal(t, "file:///dev/mapper/s3-mem", res.RestoreMemoryVolURL)
+	require.Len(t, s3.resolveCalls, 1)
+	assert.Equal(t, fakeCowResolveCall{name: "tpl-memory", kind: CowKindVolume}, s3.resolveCalls[0])
+	assert.Empty(t, xfs.resolveCalls)
+	require.Len(t, s3.createSnapshotCalls, 1)
+	assert.Empty(t, xfs.createSnapshotCalls)
+}
+
+func seedTestSnapshotCatalogFor(t *testing.T, backend, id, memoryVol, memoryKind string) {
+	t.Helper()
+	snapDir := filepath.Join(t.TempDir(), "snap-"+id)
+	entry := &SnapshotCatalogEntry{
+		SnapshotID:   id,
+		InstanceType: "cubebox",
+		SpecDir:      "1C1M",
+		SnapshotPath: snapDir,
+		MetaDir:      snapDir,
+		RootfsVol:    "tpl-" + id + "-rootfs",
+		RootfsKind:   CowKindSnapshot,
+		MemoryVol:    memoryVol,
+		MemoryKind:   memoryKind,
+		Kind:         CatalogKindTemplate,
+		Backend:      backend,
+	}
+	require.NoError(t, WriteSnapshotCatalogFor(backend, entry))
+	t.Cleanup(func() { DeleteSnapshotCatalogFor(backend, id) })
 }
 
 func uint32Ptr(v uint32) *uint32 {

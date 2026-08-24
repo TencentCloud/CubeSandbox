@@ -102,7 +102,7 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     storage_backend = "cubecow"
 
     # Working directory for the cubelet storage plugin. cubecow reflink volumes land at
-    # <data_path>/cubecow-reflink, so the filesystem backing data_path must support
+    # <data_path>/xfs/objects, so the filesystem backing data_path must support
     # FICLONE (e.g. xfs with `-m reflink=1` or btrfs).
     data_path = "/data/cubelet/storage"
 

@@ -60,11 +60,11 @@ func main() {
 	okf("ResizeVolume", stepStart, "old=%d new=%d", oldSize, newSize)
 
 	stepStart = time.Now()
-	snapDevice, err := engine.CreateSnapshot(*volumeName, snapshotName, true)
+	snapDevice, err := engine.CreateSnapshotFromVolume(*volumeName, snapshotName, true)
 	if err != nil {
-		fatalf("CreateSnapshot", stepStart, err)
+		fatalf("CreateSnapshotFromVolume", stepStart, err)
 	}
-	okf("CreateSnapshot", stepStart, "name=%s device=%s", snapshotName, snapDevice)
+	okf("CreateSnapshotFromVolume", stepStart, "name=%s device=%s", snapshotName, snapDevice)
 	defer func() { _ = engine.DeleteSnapshot(snapshotName) }()
 
 	stepStart = time.Now()

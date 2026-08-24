@@ -36,7 +36,7 @@ func setupPauseDeleteTest(t *testing.T) *gorm.DB {
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&models.TemplateDefinition{}, &models.TemplateReplica{}))
+	require.NoError(t, db.AutoMigrate(&models.PauseSnapshotRecord{}))
 
 	origDB := getDB()
 	origDestroy := destroyOnCubelet
@@ -55,26 +55,14 @@ func setupPauseDeleteTest(t *testing.T) *gorm.DB {
 
 func seedPauseBinding(t *testing.T, db *gorm.DB, sandboxID, snapID, status, nodeIP string) {
 	t.Helper()
-	require.NoError(t, db.Table(constants.TemplateDefinitionTableName).Create(&models.TemplateDefinition{
-		TemplateID:      snapID,
-		InstanceType:    cubebox.InstanceType_cubebox.String(),
-		Version:         "v1",
-		Status:          status,
-		Kind:            KindPauseSnapshot,
-		OriginSandboxID: sandboxID,
-		OriginNodeID:    "node-1",
-		StorageBackend:  "cubecow",
-	}).Error)
-	if nodeIP == "" {
-		return
-	}
-	require.NoError(t, db.Table(constants.TemplateReplicaTableName).Create(&models.TemplateReplica{
-		TemplateID:   snapID,
+	require.NoError(t, db.Table(constants.PauseSnapshotTableName).Create(&models.PauseSnapshotRecord{
+		SnapshotID:   snapID,
+		SandboxID:    sandboxID,
 		NodeID:       "node-1",
 		NodeIP:       nodeIP,
 		InstanceType: cubebox.InstanceType_cubebox.String(),
-		Status:       replicaReady,
-		Phase:        replicaPhaseReady,
+		Status:       status,
+		Backend:      constants.SnapshotBackendXFS,
 	}).Error)
 }
 
@@ -104,6 +92,43 @@ func mockCubeletOK(t *testing.T) (*[]destroyCall, *[]cleanupCall) {
 	return &destroys, &cleans
 }
 
+func TestBeginCompletePersistsBackendAndRemoteStatus(t *testing.T) {
+	setupPauseDeleteTest(t)
+	ctx := context.Background()
+
+	snapID, err := Begin(ctx, "sb-s3", "node-1", "10.0.0.9", "cubebox", "s3")
+	require.NoError(t, err)
+	require.NotEmpty(t, snapID)
+
+	creating, err := GetBySandbox(ctx, "sb-s3")
+	require.NoError(t, err)
+	require.Equal(t, statusCreating, creating.Status)
+	require.Equal(t, constants.SnapshotBackendS3, creating.Backend)
+	require.Equal(t, constants.RemoteStatusPending, creating.RemoteStatus)
+	require.Equal(t, "10.0.0.9", creating.NodeIP)
+
+	require.NoError(t, Complete(ctx, "sb-s3", snapID, "node-1", "10.0.0.9", "cubebox", []string{"vol-a", "vol-a"}, `{"rootfs":"export-a"}`))
+	ready, err := GetBySnapshotID(ctx, snapID)
+	require.NoError(t, err)
+	require.Equal(t, statusReady, ready.Status)
+	require.Equal(t, []string{"vol-a"}, ready.PluginVolumeIDs)
+	require.Equal(t, constants.SnapshotBackendS3, ready.Backend)
+	require.Equal(t, `{"rootfs":"export-a"}`, ready.ExportUUIDs)
+	require.Equal(t, constants.RemoteStatusInProgress, ready.RemoteStatus)
+
+	snapID2, err := Begin(ctx, "sb-s3-noexport", "node-1", "10.0.0.9", "cubebox", "s3")
+	require.NoError(t, err)
+	require.NoError(t, Complete(ctx, "sb-s3-noexport", snapID2, "node-1", "10.0.0.9", "cubebox", nil, ""))
+	ready2, err := GetBySnapshotID(ctx, snapID2)
+	require.NoError(t, err)
+	require.Equal(t, statusReady, ready2.Status)
+	require.Equal(t, constants.RemoteStatusFailed, ready2.RemoteStatus)
+	require.Empty(t, ready2.ExportUUIDs)
+
+	_, err = Begin(ctx, "sb-bad", "node-1", "10.0.0.9", "cubebox", "nfs")
+	require.Error(t, err)
+}
+
 func TestTryDeletePausedNoBinding(t *testing.T) {
 	setupPauseDeleteTest(t)
 	destroys, cleans := mockCubeletOK(t)
@@ -128,6 +153,7 @@ func TestTryDeletePausedReadyUsesTombstone(t *testing.T) {
 	require.Equal(t, "true", (*destroys)[0].req.Annotations[constants.CubeAnnotationPauseDeleteTombstone])
 	require.Len(t, *cleans, 1)
 	require.Equal(t, "snap-ready000000000000000001", (*cleans)[0].req.TemplateID)
+	require.Equal(t, constants.SnapshotBackendXFS, (*cleans)[0].req.Backend)
 
 	_, err = GetBySandbox(context.Background(), "sb-ready")
 	require.ErrorIs(t, err, ErrNotFound)
@@ -244,6 +270,26 @@ func TestTryDeletePausedCleanupErrorKeepsBinding(t *testing.T) {
 	rec, getErr := GetBySandbox(context.Background(), "sb-cleanup")
 	require.NoError(t, getErr)
 	require.Equal(t, "snap-cleanup0000000000000001", rec.SnapshotID)
+	require.Equal(t, statusDeleteFailed, rec.Status)
+	require.Contains(t, rec.LastError, "cubelet unreachable")
+}
+
+func TestTryDeletePausedRetriesDeleteFailedWithTombstone(t *testing.T) {
+	db := setupPauseDeleteTest(t)
+	seedPauseBinding(t, db, "sb-retry", "snap-retry0000000000000000001", statusDeleteFailed, "10.0.0.7")
+	destroys, cleans := mockCubeletOK(t)
+
+	handled, err := TryDeletePaused(context.Background(), "req-retry", "sb-retry", "10.0.0.1")
+	require.NoError(t, err)
+	require.True(t, handled)
+	require.Len(t, *destroys, 1)
+	require.Equal(t, "true", (*destroys)[0].req.Annotations[constants.CubeAnnotationPauseDeleteTombstone],
+		"a delete that already reaped the shim must not try to kill it again")
+	require.Len(t, *cleans, 1)
+	require.Equal(t, "snap-retry0000000000000000001", (*cleans)[0].req.TemplateID)
+
+	_, err = GetBySandbox(context.Background(), "sb-retry")
+	require.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestCheckDestroyRet(t *testing.T) {

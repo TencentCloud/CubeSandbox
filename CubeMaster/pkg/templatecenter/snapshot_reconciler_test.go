@@ -6,16 +6,23 @@ package templatecenter
 
 import (
 	"context"
+	"database/sql"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/stretchr/testify/require"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	errorcodev1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	gormmysql "gorm.io/driver/mysql"
+	"gorm.io/gorm"
 )
 
 // resetSnapshotStorageCachesForTest clears the in-process snapshotStorageCache
@@ -186,4 +193,135 @@ func TestRefreshSnapshotStorageMetricsRetriesCachedUnknown(t *testing.T) {
 	if cached.Mode != string(snapshotStorageModeHealthy) {
 		t.Fatalf("expected cached mode to be healthy after refresh, got %q (lastError=%q)", cached.Mode, cached.LastError)
 	}
+}
+
+// stubReconcilerDB drives reconcileSnapshotReplicaPresence without a live
+// database. The repo has no in-memory driver (see TestGetTemplateByAlias...),
+// so a DryRun gorm.DB serves the snapshot row and its replica from memory via
+// a replaced query callback, and records every UPDATE instead of running it.
+func stubReconcilerDB(t *testing.T, rec models.SnapshotRecord, replica models.TemplateReplica) *[]string {
+	t.Helper()
+	sqlDB, err := sql.Open("mysql", "root:root@tcp(127.0.0.1:3306)/unused?parseTime=true")
+	require.NoError(t, err)
+	db, err := gorm.Open(gormmysql.New(gormmysql.Config{
+		Conn:                      sqlDB,
+		SkipInitializeWithVersion: true,
+	}), &gorm.Config{DryRun: true, DisableAutomaticPing: true})
+	require.NoError(t, err)
+
+	require.NoError(t, db.Callback().Query().Replace("gorm:query", func(tx *gorm.DB) {
+		switch dest := tx.Statement.Dest.(type) {
+		case *[]models.SnapshotRecord:
+			*dest = []models.SnapshotRecord{rec}
+		case *[]models.TemplateReplica:
+			*dest = []models.TemplateReplica{replica}
+		}
+	}))
+	updatedTables := make([]string, 0, 2)
+	require.NoError(t, db.Callback().Update().Replace("gorm:update", func(tx *gorm.DB) {
+		updatedTables = append(updatedTables, tx.Statement.Table)
+	}))
+
+	old := store.db
+	store.db = db
+	t.Cleanup(func() { store.db = old })
+	return &updatedTables
+}
+
+// TestReconcileSnapshotReplicaPresenceSendsBackend pins the snapshot's backend
+// onto the catalog probe. Cubelet reads one backend namespace per call and
+// resolves an empty value to xfs, so an s3 snapshot probed without it comes
+// back PreConditionFailed: the reconciler then treats a healthy snapshot as an
+// orphan, stamps it FAILED and re-runs CleanupTemplate on every pass.
+func TestReconcileSnapshotReplicaPresenceSendsBackend(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		backend string
+		want    string
+	}{
+		{name: "xfs", backend: constants.SnapshotBackendXFS, want: constants.SnapshotBackendXFS},
+		{name: "historical cubecow stays empty", backend: "cubecow", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			patches := gomonkey.NewPatches()
+			t.Cleanup(patches.Reset)
+			patches.ApplyFunc(cubelet.GetCubeletAddr, func(hostIP string) string {
+				return hostIP
+			})
+
+			updated := stubReconcilerDB(t,
+				models.SnapshotRecord{
+					SnapshotID:   "snap-1",
+					Status:       StatusReady,
+					Backend:      tc.backend,
+					InstanceType: "cubebox",
+					OriginNodeID: "node-a",
+					OriginNodeIP: "10.0.0.8",
+				},
+				models.TemplateReplica{
+					TemplateID:   "snap-1",
+					NodeID:       "node-a",
+					NodeIP:       "10.0.0.8",
+					InstanceType: "cubebox",
+					Status:       ReplicaStatusReady,
+					Phase:        ReplicaPhaseReady,
+				})
+
+			origProbe := getLocalSnapshotOnCubelet
+			t.Cleanup(func() { getLocalSnapshotOnCubelet = origProbe })
+			gotBackend := ""
+			probes := 0
+			getLocalSnapshotOnCubelet = func(ctx context.Context, addr string,
+				req *cubeboxv1.GetLocalSnapshotRequest) (*cubeboxv1.GetLocalSnapshotResponse, error) {
+				probes++
+				gotBackend = req.GetBackend()
+				return &cubeboxv1.GetLocalSnapshotResponse{
+					Ret:      &errorcodev1.Ret{RetCode: errorcodev1.ErrorCode_Success},
+					Snapshot: &cubeboxv1.LocalSnapshotInfo{SnapshotID: req.GetSnapshotID()},
+				}, nil
+			}
+
+			require.NoError(t, reconcileSnapshotReplicaPresence(context.Background()))
+			require.Equal(t, 1, probes, "the replica must be probed exactly once")
+			require.Equal(t, tc.want, gotBackend)
+			require.Empty(t, *updated, "a snapshot the node reports as present must not be stamped FAILED")
+		})
+	}
+}
+
+// TestReconcileSnapshotReplicaPresenceSkipsS3: S3 existence is remote_status,
+// not a per-node catalog probe. Probing (and CleanupTemplate) would treat a
+// normal Finalize unmount as an orphan and delete cluster-shared objects.
+func TestReconcileSnapshotReplicaPresenceSkipsS3(t *testing.T) {
+	updated := stubReconcilerDB(t,
+		models.SnapshotRecord{
+			SnapshotID:   "snap-s3",
+			Status:       StatusReady,
+			Backend:      constants.SnapshotBackendS3,
+			InstanceType: "cubebox",
+			OriginNodeID: "node-a",
+			OriginNodeIP: "10.0.0.8",
+		},
+		models.TemplateReplica{
+			TemplateID:   "snap-s3",
+			NodeID:       "node-a",
+			NodeIP:       "10.0.0.8",
+			InstanceType: "cubebox",
+			Status:       ReplicaStatusReady,
+			Phase:        ReplicaPhaseReady,
+		})
+
+	origProbe := getLocalSnapshotOnCubelet
+	t.Cleanup(func() { getLocalSnapshotOnCubelet = origProbe })
+	probes := 0
+	getLocalSnapshotOnCubelet = func(ctx context.Context, addr string,
+		req *cubeboxv1.GetLocalSnapshotRequest) (*cubeboxv1.GetLocalSnapshotResponse, error) {
+		probes++
+		t.Fatalf("S3 snapshot must not be catalog-probed, got backend=%q snapshot=%q", req.GetBackend(), req.GetSnapshotID())
+		return nil, nil
+	}
+
+	require.NoError(t, reconcileSnapshotReplicaPresence(context.Background()))
+	require.Equal(t, 0, probes)
+	require.Empty(t, *updated)
 }

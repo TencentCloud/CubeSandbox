@@ -107,6 +107,10 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	if constants.IsCollectMemory(ctx) {
 		l.collectSandboxMaxMemoryUsage(ctx, sb)
 	}
+	// Snapshot pids before Kill/DeleteTask. TaskExit and ttrpc close return
+	// while the shim process may still hold the guest disks; storage Destroy
+	// is the next workflow step and must not delete those volumes yet.
+	runtimePIDs := l.collectSandboxRuntimePIDs(ctx, sb)
 	err = l.cbriManager.DestroySandbox(ctx, sb.SandboxID)
 	if err != nil {
 		log.G(ctx).Errorf("faild to destroy cbri sandbox %s", err.Error())
@@ -187,6 +191,9 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 
 	if er := runc.Clean(ctx, opts.SandboxID); er != nil {
 		result = multierror.Append(result, fmt.Errorf("destroy runc files [%s] fail: %w", sandBoxID, er))
+	}
+	if er := waitSandboxRuntimeGone(ctx, sandBoxID, runtimePIDs); er != nil {
+		result = multierror.Append(result, fmt.Errorf("wait sandbox runtime exit [%s] fail: %w", sandBoxID, er))
 	}
 	if er := result.ErrorOrNil(); er != nil {
 		return ret.Errorf(errorcode.ErrorCode_RemoveContainerFailed, "%s", er.Error())

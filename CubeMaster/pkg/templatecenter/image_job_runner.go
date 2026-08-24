@@ -167,7 +167,9 @@ func runTemplateImageJob(ctx context.Context, jobID string, req *types.CreateTem
 		})
 		return
 	}
-	if _, err := ensureTemplateDefinitionWithOptions(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{}); err != nil {
+	if _, err := ensureTemplateDefinitionWithOptions(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{
+		StorageBackend: req.Backend,
+	}); err != nil {
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,
 			"phase":           JobPhaseCreatingTemplate,

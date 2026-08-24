@@ -5,11 +5,13 @@
 package cubeboxcbri
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
@@ -220,5 +222,115 @@ func TestSnapshotRestoreContainerIDFallsBackToSnapshotID(t *testing.T) {
 	got := snapshotRestoreContainerID("snap-123", t.TempDir())
 	if got != "snap-123_0" {
 		t.Fatalf("snapshotRestoreContainerID=%q, want %q", got, "snap-123_0")
+	}
+}
+
+func TestResolveSnapshotPathsAcceptsMetadataHome(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	meta := filepath.Join(home, "metadata")
+	if err := os.MkdirAll(filepath.Join(meta, "snapshot"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(meta, "snapshot", "config.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(meta, "metadata.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	p := &cubeboxInstancePlugin{}
+	req := &cubebox.RunCubeSandboxRequest{
+		Containers: []*cubebox.ContainerConfig{{
+			Resources: &cubebox.Resource{Cpu: "2000m", Mem: "2000Mi"},
+		}},
+	}
+	paths, err := p.resolveSnapshotPaths("snap-1", meta, req)
+	if err != nil {
+		t.Fatalf("resolveSnapshotPaths: %v", err)
+	}
+	if paths.Spec != meta {
+		t.Fatalf("Spec=%q want metadata home %q", paths.Spec, meta)
+	}
+	if paths.Base != home {
+		t.Fatalf("Base=%q want snapshot home %q", paths.Base, home)
+	}
+	if paths.ResDir != "2C2000M" {
+		t.Fatalf("ResDir=%q", paths.ResDir)
+	}
+}
+
+func TestSnapshotRestoreRawPathPauseResumeUsesCatalogMetaDir(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	meta := filepath.Join(home, "metadata")
+	if err := os.MkdirAll(filepath.Join(meta, "snapshot"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	entry := &storage.SnapshotCatalogEntry{
+		SnapshotID:   "snap-pause-1",
+		SnapshotPath: home,
+		MetaDir:      meta,
+		Kind:         storage.CatalogKindPauseSnapshot,
+		Backend:      "xfs",
+	}
+	if err := storage.WriteSnapshotCatalogFor("xfs", entry); err != nil {
+		t.Fatalf("WriteSnapshotCatalogFor: %v", err)
+	}
+
+	tplPath := filepath.Join(t.TempDir(), "tpl-990ea6", "2C2000M")
+	flowOpts := &workflow.CreateContext{
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			InstanceType: cubebox.InstanceType_cubebox.String(),
+			Annotations: map[string]string{
+				constants.MasterAnnotationPauseSnapshotID:       "snap-pause-1",
+				constants.MasterAnnotationRuntimeSnapshotID:     "snap-pause-1",
+				constants.MasterAnnotationAppSnapshotTemplateID: "tpl-990ea6",
+				constants.MasterAnnotationStorageBackend:        "xfs",
+			},
+		},
+		LocalRunTemplate: &templatetypes.LocalRunTemplate{
+			Snapshot: templatetypes.LocalSnapshot{
+				Snapshot: templatetypes.Snapshot{Path: tplPath},
+			},
+		},
+	}
+	got := snapshotRestoreRawPath(context.Background(), flowOpts)
+	if got != meta {
+		t.Fatalf("snapshotRestoreRawPath=%q want pause meta %q (not template %q)", got, meta, tplPath)
+	}
+
+	fromTpl := &workflow.CreateContext{
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: "tpl-990ea6",
+			},
+		},
+		LocalRunTemplate: flowOpts.LocalRunTemplate,
+	}
+	if got := snapshotRestoreRawPath(context.Background(), fromTpl); got != tplPath {
+		t.Fatalf("non-pause snapshotRestoreRawPath=%q want template path %q", got, tplPath)
+	}
+}
+
+func TestRestorePathsFromMetadataMountUsesReturnedDir(t *testing.T) {
+	t.Parallel()
+	paths := &snapshotPaths{
+		Base:   "/data/cubelet/storage/s3/snapshots/tpl-parent",
+		Spec:   "/data/cubelet/storage/s3/snapshots/tpl-parent/2C2048M",
+		ResDir: "2C2048M",
+	}
+	mounted := "/data/cubelet/storage/s3/snapshots/sb-child/metadata"
+	base, spec := restorePathsFromMetadataMount(mounted, paths)
+	if base != "/data/cubelet/storage/s3/snapshots/sb-child" {
+		t.Fatalf("base=%q", base)
+	}
+	if spec != "/data/cubelet/storage/s3/snapshots/sb-child/2C2048M" {
+		t.Fatalf("spec=%q", spec)
+	}
+
+	fallbackBase, fallbackSpec := restorePathsFromMetadataMount("", paths)
+	if fallbackBase != paths.Base || fallbackSpec != paths.Spec {
+		t.Fatalf("empty mount must keep template paths, got %q %q", fallbackBase, fallbackSpec)
 	}
 }

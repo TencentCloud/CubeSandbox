@@ -7,6 +7,7 @@ package appsnapshot
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
@@ -14,8 +15,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 )
 
 func init() {
@@ -66,7 +69,34 @@ func (l *appsnapshotCompleter) Create(ctx context.Context, opts *workflow.Create
 		return nil
 	}
 
+	ann := opts.ReqInfo.GetAnnotations()
+	// A restore carries the same kernel／image metadata the template would
+	// have, so whatever holds that metadata on this node can stand in for a
+	// template that was never built here.
+	fallbackID := strings.TrimSpace(ann[constants.MasterAnnotationRuntimeSnapshotID])
+	if imp := storage.CrossNodeSandboxImport(ann); imp != nil {
+		// Cross-node there is no package here to stand in: the description
+		// arrived on the sandbox's own metadata disk, mounted under its home
+		// by the Create entry. Recovery reads whichever id owns that home.
+		fallbackID = imp.SandboxID
+	}
+	// Pause snaps are storage catalogs, not Cube run templates, so Resume
+	// asks for the original tpl-* first.
+	if opts.IsPauseResume() {
+		if orig := strings.TrimSpace(ann[constants.MasterAnnotationAppSnapshotTemplateID]); orig != "" {
+			templateID = orig
+		}
+	}
+
 	lrt, err := l.runtemplateManager.EnsureCubeRunTemplate(ctx, templateID)
+	if err != nil && fallbackID != "" && fallbackID != templateID {
+		fallback, fallbackErr := l.runtemplateManager.EnsureCubeRunTemplate(ctx, fallbackID)
+		if fallbackErr == nil {
+			log.G(ctx).Infof("run template %s is not on this node; restoring from %s instead",
+				templateID, fallbackID)
+			lrt, err = fallback, nil
+		}
+	}
 	if err != nil {
 		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "ensure cube run template %s failed: %v", templateID, err)
 	}

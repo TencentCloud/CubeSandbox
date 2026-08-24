@@ -6,6 +6,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -24,6 +25,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -112,7 +115,130 @@ func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types
 		}
 		return rsp.Data[i].SandboxID < rsp.Data[j].SandboxID
 	})
+	enrichSandboxListBackends(ctx, rsp.Data)
+	mergePauseBindings(ctx, req, rsp)
 	return
+}
+
+// mergePauseBindings adds Master's pause state to the node-scan result.
+//
+// A paused sandbox has no shim, so the node scan cannot be trusted to report
+// it, and t_cube_pause_snapshot is the source of truth. Bindings are therefore
+// read in full rather than per scanned node: the (StartIdx, Size) window only
+// paginates node scanning. An explicit --hostid is still honoured, because it
+// selects one node on purpose and `list --hostid X --quiet --delete` must not
+// reach a sandbox parked on another node.
+func mergePauseBindings(ctx context.Context, req *types.ListCubeSandboxReq, rsp *types.ListCubeSandboxRes) {
+	records, err := pausesnap.List(ctx, pausesnap.ListOptions{
+		HostID:       req.HostID,
+		InstanceType: req.InstanceType,
+	})
+	if err != nil {
+		if !errors.Is(err, pausesnap.ErrNotReady) {
+			log.G(ctx).Warnf("ListSandbox: read pause bindings: %v", err)
+		}
+		return
+	}
+	rsp.Data = applyPauseBindings(rsp.Data, records, req.Filter != nil && len(req.Filter.LabelSelector) > 0)
+}
+
+func applyPauseBindings(items []*types.SandboxBriefData, records []*pausesnap.Record,
+	labelFiltered bool) []*types.SandboxBriefData {
+	known := make(map[string]*types.SandboxBriefData, len(items))
+	for _, item := range items {
+		if item != nil && item.SandboxID != "" {
+			known[item.SandboxID] = item
+		}
+	}
+	for _, rec := range records {
+		if rec == nil || rec.SandboxID == "" {
+			continue
+		}
+		if item, ok := known[rec.SandboxID]; ok {
+			applyPauseBinding(item, rec)
+			continue
+		}
+		// CREATING / FAILED leave the sandbox running, so the node scan owns
+		// that row and its absence here means the sandbox is gone.
+		// DELETE_FAILED has no shim either and its leftover package is exactly
+		// what an operator needs to see, so it is rendered like READY.
+		if !isShimlessPauseStatus(rec.Status) {
+			continue
+		}
+		// Labels only exist on the node, so a label-filtered list cannot tell
+		// whether this binding would have matched.
+		if labelFiltered {
+			continue
+		}
+		item := pauseBindingRow(rec)
+		known[rec.SandboxID] = item
+		items = append(items, item)
+	}
+	return items
+}
+
+func applyPauseBinding(item *types.SandboxBriefData, rec *pausesnap.Record) {
+	if item == nil || rec == nil {
+		return
+	}
+	item.PauseSnapshotID = rec.SnapshotID
+	item.RemoteStatus = rec.RemoteStatus
+	item.PauseStatus = strings.TrimSpace(rec.Status)
+	if strings.TrimSpace(item.Backend) == "" {
+		item.Backend = strings.TrimSpace(rec.Backend)
+	}
+}
+
+// isShimlessPauseStatus reports whether the binding, not a node scan, is the
+// only remaining evidence of the sandbox.
+func isShimlessPauseStatus(status string) bool {
+	status = strings.TrimSpace(status)
+	return strings.EqualFold(status, pausesnap.StatusReady) ||
+		strings.EqualFold(status, pausesnap.StatusDeleteFailed)
+}
+
+// pauseBindingRow renders a binding the node did not report. CreateAt stays
+// empty: the binding only knows when the pause happened, not when the sandbox
+// was created, and a wrong creation time is worse than none.
+func pauseBindingRow(rec *pausesnap.Record) *types.SandboxBriefData {
+	item := &types.SandboxBriefData{
+		SandboxID:       rec.SandboxID,
+		Status:          int32(cubebox.ContainerState_CONTAINER_PAUSED),
+		HostID:          rec.NodeID,
+		HostIP:          rec.NodeIP,
+		Backend:         strings.TrimSpace(rec.Backend),
+		PauseSnapshotID: rec.SnapshotID,
+		RemoteStatus:    rec.RemoteStatus,
+		PauseStatus:     strings.TrimSpace(rec.Status),
+	}
+	if !rec.UpdatedAt.IsZero() {
+		item.PauseAt = rec.UpdatedAt.UnixNano()
+	}
+	return item
+}
+
+// enrichSandboxListBackends fills Backend from t_cube_sandbox_spec (DB source of
+// truth for create-time xfs|s3). Missing specs leave Backend empty.
+func enrichSandboxListBackends(ctx context.Context, items []*types.SandboxBriefData) {
+	for _, item := range items {
+		if item == nil || item.SandboxID == "" {
+			continue
+		}
+		if b := strings.TrimSpace(item.Backend); b != "" {
+			continue
+		}
+		if item.Annotations != nil {
+			if b := strings.TrimSpace(item.Annotations[constants.CubeAnnotationStorageBackend]); b != "" {
+				item.Backend = b
+				continue
+			}
+		}
+		spec, err := sandboxspec.Get(ctx, item.SandboxID)
+		if err != nil || spec == nil {
+			continue
+		}
+		item.Backend = strings.TrimSpace(spec.Backend)
+	}
 }
 
 func dealRspData(ctx context.Context, done chan struct{}, resChan chan *types.SandboxBriefData,

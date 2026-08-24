@@ -32,7 +32,12 @@ impl SnapshotService {
 
     // ── POST /sandboxes/{sandboxID}/snapshots ──────────────────────────────
 
-    pub async fn create(&self, sandbox_id: &str, name: Option<String>) -> AppResult<SnapshotInfo> {
+    pub async fn create(
+        &self,
+        sandbox_id: &str,
+        name: Option<String>,
+        backend: Option<String>,
+    ) -> AppResult<SnapshotInfo> {
         let request_id = new_request_id();
         let create_request = self
             .build_create_request_payload(sandbox_id, &request_id)
@@ -42,6 +47,7 @@ impl SnapshotService {
             sandbox_id: sandbox_id.to_string(),
             display_name: name,
             create_request,
+            backend,
         };
 
         match self.cubemaster.create_snapshot(&req).await {
@@ -170,12 +176,14 @@ impl SnapshotService {
         &self,
         sandbox_id: &str,
         snapshot_id: &str,
+        backend: Option<String>,
     ) -> AppResult<RollbackResponse> {
         let req_id = new_request_id();
         let req = MasterRollbackRequest {
             request_id: req_id.clone(),
             snapshot_id: snapshot_id.to_string(),
             instance_type: self.instance_type.clone(),
+            backend,
         };
 
         match self.cubemaster.rollback_sandbox(sandbox_id, &req).await {
@@ -360,9 +368,13 @@ fn rollback_conflict(sandbox_id: &str, snapshot_id: &str) -> AppError {
 
 fn snapshot_resource_to_info(r: SnapshotResource) -> SnapshotInfo {
     let names = snapshot_names(&r);
+    let backend = snapshot_backend(&r);
+    let remote_status = optional_backend(&r.remote_status);
     SnapshotInfo {
         snapshot_id: r.snapshot_id,
         names,
+        backend,
+        remote_status,
     }
 }
 
@@ -406,6 +418,8 @@ fn normalized_status(status: Option<&str>) -> String {
 
 fn snapshot_resource_to_list_item(r: SnapshotResource) -> SnapshotListItem {
     let names = snapshot_names(&r);
+    let backend = snapshot_backend(&r);
+    let remote_status = optional_backend(&r.remote_status);
     SnapshotListItem {
         snapshot_id: r.snapshot_id,
         names,
@@ -417,6 +431,24 @@ fn snapshot_resource_to_list_item(r: SnapshotResource) -> SnapshotListItem {
         },
         created_at: r.created_at,
         updated_at: r.updated_at,
+        backend,
+        remote_status,
+    }
+}
+
+fn snapshot_backend(r: &SnapshotResource) -> Option<String> {
+    if let Some(b) = optional_backend(&r.backend) {
+        return Some(b);
+    }
+    optional_backend(&r.storage_backend)
+}
+
+fn optional_backend(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -483,6 +515,8 @@ mod tests {
             origin_node_id: "node-a".into(),
             instance_type: "cubebox".into(),
             storage_backend: String::new(),
+            backend: String::new(),
+            remote_status: String::new(),
             created_at: None,
             updated_at: None,
         }

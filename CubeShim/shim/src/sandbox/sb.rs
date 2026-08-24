@@ -131,10 +131,25 @@ impl SandBox {
     /// True when Cubelet recreates the same sandbox from a pause snapshot.
     /// Guest mounts (virtiofs + binds) are already in restored memory.
     pub fn pause_resume(&self) -> bool {
+        self.annotation_present(config::ANNO_PAUSE_SNAPSHOT_ID)
+    }
+
+    /// True when Cubelet creates a new sandbox from a runtime snapshot.
+    /// Guest mounts are already in restored memory, same as pause_resume.
+    pub fn from_snapshot(&self) -> bool {
+        self.annotation_present(config::ANNO_RUNTIME_SNAPSHOT_ID)
+    }
+
+    /// Pause resume or FromSnap: reconnect host virtiofs, do not remount guest.
+    pub fn guest_mount_restore(&self) -> bool {
+        self.pause_resume() || self.from_snapshot()
+    }
+
+    fn annotation_present(&self, key: &str) -> bool {
         self.spec
             .annotations()
             .as_ref()
-            .and_then(|anno| anno.get(config::ANNO_PAUSE_SNAPSHOT_ID))
+            .and_then(|anno| anno.get(key))
             .map(|v| !v.trim().is_empty())
             .unwrap_or(false)
     }
@@ -291,9 +306,9 @@ impl SandBox {
                 storages.push(virtiofs);
             }
         }
-        // Pause resume: keep virtiofs devices (restore_virtiofs_configs) but do
-        // not ask the agent to remount — guest mountpoints are already live.
-        let skip_virtiofs_guest_mount = self.app_snapshot_restore() && self.pause_resume();
+        // Pause / FromSnap: keep virtiofs devices (restore_virtiofs_configs)
+        // but do not ask the agent to remount — guest mountpoints are already live.
+        let skip_virtiofs_guest_mount = self.app_snapshot_restore() && self.guest_mount_restore();
         if !self.app_snapshot_create() && !skip_virtiofs_guest_mount {
             for fs in self.conf.virtiofs.iter() {
                 debugf!(self.log, "add virtiofs: {:?}", fs.id.clone());
@@ -316,7 +331,7 @@ impl SandBox {
         } else if skip_virtiofs_guest_mount {
             infof!(
                 self.log,
-                "pause resume: skip virtio-fs storages for agent (guest mounts kept)"
+                "memory restore: skip virtio-fs storages for agent (guest mounts kept)"
             );
         }
 
@@ -1604,6 +1619,7 @@ mod tests {
     use crate::container::container_mgr::ContainerInfo;
     use crate::container::{Container, ANNO_APP_SNAPSHOT_CONTAINER_ID};
 
+    use super::agent;
     use super::agent_ttrpc;
     use super::config;
     use super::normalize_dns_for_agent;
@@ -1727,5 +1743,72 @@ mod tests {
 
         let got = normalize_dns_for_agent(" options  ndots:5  timeout:2 ").unwrap();
         assert_eq!(got, "options ndots:5 timeout:2");
+    }
+
+    fn sandbox_with_restore_annos(annos: HashMap<String, String>) -> SandBox {
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(8);
+        let mut sb = SandBox::new("ut".to_string(), Log::default(), false, tx);
+        sb.spec = SpecBuilder::default().annotations(annos).build().unwrap();
+        sb.conf.app_snapshot_restore = true;
+        sb.conf.virtiofs = vec![config::VirtioFs {
+            id: "virtio_rw".to_string(),
+            propagation_mount_name: "virtio_rw".to_string(),
+            ..Default::default()
+        }];
+        sb
+    }
+
+    fn virtiofs_sources(storages: &[agent::Storage]) -> Vec<String> {
+        storages
+            .iter()
+            .filter(|s| s.driver == "virtio-fs")
+            .map(|s| s.source.clone())
+            .collect()
+    }
+
+    #[test]
+    fn guest_mount_restore_matches_pause_and_fromsnap() {
+        let pause = sandbox_with_restore_annos(HashMap::from([(
+            config::ANNO_PAUSE_SNAPSHOT_ID.to_string(),
+            "snap-pause1".to_string(),
+        )]));
+        assert!(pause.pause_resume());
+        assert!(pause.guest_mount_restore());
+
+        let from_snap = sandbox_with_restore_annos(HashMap::from([(
+            config::ANNO_RUNTIME_SNAPSHOT_ID.to_string(),
+            "snap-runtime1".to_string(),
+        )]));
+        assert!(!from_snap.pause_resume());
+        assert!(from_snap.from_snapshot());
+        assert!(from_snap.guest_mount_restore());
+
+        let from_tpl = sandbox_with_restore_annos(HashMap::new());
+        assert!(!from_tpl.pause_resume());
+        assert!(!from_tpl.from_snapshot());
+        assert!(!from_tpl.guest_mount_restore());
+    }
+
+    #[test]
+    fn get_storages_skips_virtiofs_on_memory_restore() {
+        let mut pause = sandbox_with_restore_annos(HashMap::from([(
+            config::ANNO_PAUSE_SNAPSHOT_ID.to_string(),
+            "snap-pause1".to_string(),
+        )]));
+        assert!(
+            !virtiofs_sources(&pause.get_storages().unwrap()).contains(&"virtio_rw".to_string())
+        );
+
+        let mut from_snap = sandbox_with_restore_annos(HashMap::from([(
+            config::ANNO_RUNTIME_SNAPSHOT_ID.to_string(),
+            "snap-runtime1".to_string(),
+        )]));
+        assert!(!virtiofs_sources(&from_snap.get_storages().unwrap())
+            .contains(&"virtio_rw".to_string()));
+
+        let mut from_tpl = sandbox_with_restore_annos(HashMap::new());
+        assert!(
+            virtiofs_sources(&from_tpl.get_storages().unwrap()).contains(&"virtio_rw".to_string())
+        );
     }
 }

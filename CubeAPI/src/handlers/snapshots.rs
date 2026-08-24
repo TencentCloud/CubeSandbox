@@ -40,7 +40,7 @@ pub async fn create_snapshot(
     let info: SnapshotInfo = state
         .services
         .snapshots
-        .create(&sandbox_id, body.name)
+        .create(&sandbox_id, body.name, body.backend)
         .await?;
 
     tracing::info!(
@@ -134,7 +134,7 @@ pub async fn rollback_sandbox(
     let resp = state
         .services
         .snapshots
-        .rollback(&sandbox_id, &body.snapshot_id)
+        .rollback(&sandbox_id, &body.snapshot_id, body.backend)
         .await?;
 
     tracing::info!(

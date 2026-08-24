@@ -182,7 +182,7 @@ var ListCommand = cli.Command{
 		fmt.Fprintf(w, "NODES_SCANNED\t%d/%d\n", summary.NodesScanned, summary.NodesTotal)
 		fmt.Fprintf(w, "SANDBOX_COUNT\t%d\n", summary.SandboxCount)
 		fmt.Fprintln(w)
-		tabHeader := "sandbox_id\tstatus\thost_id\tcreate_at\tpause_at"
+		tabHeader := "sandbox_id\tstatus\tbackend\tremote\tpause_snap\thost_id\tcreate_at\tpause_at"
 		if c.Bool("wide") {
 			tabHeader += "\ttemplate_id\tnamespace\thost_ip\tlabels"
 		}
@@ -191,11 +191,14 @@ var ListCommand = cli.Command{
 		})
 		fmt.Fprintln(w, tabHeader)
 		for _, sandbox := range rsp.Data {
-			row := fmt.Sprintf("%s\t%s\t%s\t%s\t%s", sandbox.SandboxID,
-				getStatus(sandbox.Status), sandbox.HostID, formatTime(sandbox.CreateAt), formatTime(sandbox.PauseAt))
+			row := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s", sandbox.SandboxID,
+				statusWithPauseState(sandbox.Status, sandbox.PauseStatus),
+				dashIfEmpty(sandbox.Backend), dashIfEmpty(sandbox.RemoteStatus),
+				dashIfEmpty(sandbox.PauseSnapshotID), sandbox.HostID,
+				formatTime(sandbox.CreateAt), formatTime(sandbox.PauseAt))
 			if c.Bool("wide") {
-				row += fmt.Sprintf("\t%s\t%s\t%s\t%s", sandbox.TemplateID, sandbox.NameSpace, sandbox.HostIP,
-					utils.InterfaceToString(sandbox.Labels))
+				row += fmt.Sprintf("\t%s\t%s\t%s\t%s", sandbox.TemplateID,
+					sandbox.NameSpace, sandbox.HostIP, utils.InterfaceToString(sandbox.Labels))
 			}
 			if _, err := fmt.Fprintln(w, row); err != nil {
 				return err
@@ -233,6 +236,7 @@ func runListQueryAllPages(c *cli.Context, host string, req *types.ListCubeSandbo
 		RequestID: req.RequestID,
 		Ret:       &types.Ret{RetCode: 200, RetMsg: "OK"},
 	}
+	seen := map[string]bool{}
 	for {
 		rsp, err := doListRequest(c, host, &pageReq, filterList)
 		if err != nil {
@@ -248,7 +252,15 @@ func runListQueryAllPages(c *cli.Context, host string, req *types.ListCubeSandbo
 		aggregated.Total = rsp.Total
 		aggregated.EndIdx = rsp.EndIdx
 		aggregated.Size += rsp.Size
-		aggregated.Data = append(aggregated.Data, rsp.Data...)
+		// Paused sandboxes come from Master's pause table, so every page
+		// carries them regardless of which nodes it scanned.
+		for _, item := range rsp.Data {
+			if item == nil || seen[item.SandboxID] {
+				continue
+			}
+			seen[item.SandboxID] = true
+			aggregated.Data = append(aggregated.Data, item)
+		}
 
 		if rsp.Total == 0 || rsp.Size == 0 || rsp.EndIdx == 0 || rsp.EndIdx >= rsp.Total {
 			break
@@ -341,6 +353,25 @@ func buildListSummary(req *types.ListCubeSandboxReq, rsp *types.ListCubeSandboxR
 		summary.NodeScope = fmt.Sprintf("%d-%d", start, end)
 	}
 	return summary
+}
+
+func dashIfEmpty(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
+}
+
+// statusWithPauseState appends the pause binding state when it is something
+// the operator has to act on, e.g. paused(delete_failed) for a pause package
+// the node could not sweep. A plain READY binding adds nothing to "paused".
+func statusWithPauseState(status int32, pauseStatus string) string {
+	base := getStatus(status)
+	pauseStatus = strings.TrimSpace(pauseStatus)
+	if pauseStatus == "" || strings.EqualFold(pauseStatus, "READY") {
+		return base
+	}
+	return fmt.Sprintf("%s(%s)", base, strings.ToLower(pauseStatus))
 }
 
 func getStatus(s int32) string {

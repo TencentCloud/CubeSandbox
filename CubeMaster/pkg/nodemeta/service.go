@@ -80,6 +80,31 @@ func (f *HostFacts) IsZero() bool {
 		f.KVMModuleFingerprint == "" && f.KVMModuleTaint == ""
 }
 
+// RestoreMatchFactsJSON freezes only the two fields used for cross-node
+// restore matching: cpuid_hash and host_kernel_release. Vendor/model/KVM
+// extras stay on the live node heartbeat and are not written to snapshot
+// or pause-snapshot rows.
+func RestoreMatchFactsJSON(facts *HostFacts) string {
+	if facts == nil {
+		return ""
+	}
+	slim := struct {
+		CPUIDHash         string `json:"cpuid_hash,omitempty"`
+		HostKernelRelease string `json:"host_kernel_release,omitempty"`
+	}{
+		CPUIDHash:         strings.TrimSpace(facts.CPUIDHash),
+		HostKernelRelease: strings.TrimSpace(facts.HostKernelRelease),
+	}
+	if slim.CPUIDHash == "" && slim.HostKernelRelease == "" {
+		return ""
+	}
+	raw, err := json.Marshal(slim)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
 type ContainerImage struct {
 	Names     []string `json:"names,omitempty"`
 	SizeBytes int64    `json:"size_bytes,omitempty"`
@@ -852,6 +877,9 @@ func GetNodeHostFacts(ctx context.Context, nodeID string) (*HostFacts, bool) {
 func GetPersistedNodeHostFacts(ctx context.Context, nodeID string) (*HostFacts, bool) {
 	nodeID = strings.TrimSpace(nodeID)
 	if nodeID == "" {
+		return nil, false
+	}
+	if global.db == nil {
 		return nil, false
 	}
 	var row struct {

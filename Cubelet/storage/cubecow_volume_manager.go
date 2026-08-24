@@ -55,7 +55,8 @@ type cowVolumeManager = cow.Store
 
 type cowEngine interface {
 	CreateVolume(name string, sizeBytes uint64) (string, error)
-	CreateSnapshot(sourceName, snapshotName string, activate bool) (string, error)
+	CreateSnapshotFromVolume(sourceName, snapshotName string, activate bool) (string, error)
+	CreateVolumeFromSnapshot(sourceSnapshot, volumeName string) (string, error)
 	ActivateVolume(name string) (string, error)
 	DeactivateVolume(name string) error
 	DeleteVolume(name string) error
@@ -214,8 +215,8 @@ func (m *XfsCow) CreateMemoryVolume(ctx context.Context, templateID string, size
 }
 
 // CommitTemplateMemory clones an existing memory object (sourceName) into the
-// canonical template memory name for templateID via cubecow's reflink-backed
-// CreateSnapshot. Unlike CreateMemoryVolume which produces an empty volume,
+// canonical template memory name for templateID via cubecow's
+// CreateSnapshotFromVolume. Unlike CreateMemoryVolume which produces an empty volume,
 // this preserves the source memory bytes so the hypervisor can perform an
 // incremental (pagemap_anon) snapshot that only overwrites CoW anonymous
 // pages while keeping the rest of the base memory intact.
@@ -225,7 +226,7 @@ func (m *XfsCow) CreateMemoryVolume(ctx context.Context, templateID string, size
 // (snapshots are addressable via their filesystem path).
 func (m *XfsCow) CommitTemplateMemory(ctx context.Context, sourceName, templateID string, sizeBytes uint64) (*cowVolume, error) {
 	snapshotName := cowTemplateMemoryName(templateID)
-	devPath, err := m.engine.CreateSnapshot(sourceName, snapshotName, true)
+	devPath, err := m.engine.CreateSnapshotFromVolume(sourceName, snapshotName, true)
 	if err != nil {
 		if isCowSemantic(err, cubecow.SemAlreadyExists) {
 			return nil, fmt.Errorf("%w: name=%s kind=%s", ErrCowObjectAlreadyExists, snapshotName, cowKindSnapshot)
@@ -285,7 +286,7 @@ func (m *XfsCow) createTemplateVolumePath(name string, sizeBytes uint64) (string
 }
 
 func (m *XfsCow) createTemplateSnapshotPath(sourceName, snapshotName string) (string, error) {
-	devPath, err := m.engine.CreateSnapshot(sourceName, snapshotName, false)
+	devPath, err := m.engine.CreateSnapshotFromVolume(sourceName, snapshotName, false)
 	if err != nil {
 		if isCowSemantic(err, cubecow.SemAlreadyExists) {
 			return "", fmt.Errorf("%w: name=%s kind=%s", ErrCowObjectAlreadyExists, snapshotName, cowKindSnapshot)
@@ -329,7 +330,7 @@ func newCowVolume(name, kind string, gen uint32, devPath string) *cowVolume {
 }
 
 func (m *XfsCow) createOrResolveSnapshotPathFromSource(ctx context.Context, sourceName, snapshotName string) (string, error) {
-	devPath, err := m.engine.CreateSnapshot(sourceName, snapshotName, true)
+	devPath, err := m.engine.CreateSnapshotFromVolume(sourceName, snapshotName, true)
 	if err != nil {
 		if !isCowSemantic(err, cubecow.SemAlreadyExists) {
 			return "", err

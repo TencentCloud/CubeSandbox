@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	snapshotv1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/snapshot/v1"
 )
 
 func Destroy(ctx context.Context, calleeEp string,
@@ -130,6 +131,19 @@ func GetLocalSnapshot(ctx context.Context, calleeEp string,
 	defer conn.Close()
 	c := cubebox.NewCubeboxMgrClient(conn.Value())
 	return c.GetLocalSnapshot(ctx, req)
+}
+
+// SnapshotStatus is Cubelet's upload query. CubeMaster calls this from the
+// background inprogress reconciler, not on the Pause／Commit hot path.
+func SnapshotStatus(ctx context.Context, calleeEp string,
+	req *snapshotv1.StatusRequest) (*snapshotv1.StatusResponse, error) {
+	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
+	if err != nil {
+		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
+	}
+	defer conn.Close()
+	c := snapshotv1.NewSnapshotClient(conn.Value())
+	return c.Status(ctx, req)
 }
 
 func GetStorageMetrics(ctx context.Context, calleeEp string,

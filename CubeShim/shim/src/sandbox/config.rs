@@ -36,6 +36,9 @@ pub const ANNO_APP_SNAPSHOT_RESTORE: &str = "cube.appsnapshot.restore";
 /// live in restored memory; shim must reconnect host virtiofs devices but must
 /// not replay virtio-fs storages to the agent (remount → EBUSY).
 pub const ANNO_PAUSE_SNAPSHOT_ID: &str = "cube.master.pause.snapshot.id";
+/// Present on create-from-runtime-snapshot (FromSnap). Same guest-mount
+/// contract as pause resume: reconnect host virtiofs, do not remount in-guest.
+pub const ANNO_RUNTIME_SNAPSHOT_ID: &str = "cube.master.runtime.snapshot.id";
 
 pub const SHARE_CACHE_ALWAYS: u8 = 1;
 pub const SHARE_CACHE_NEVER: u8 = 2;

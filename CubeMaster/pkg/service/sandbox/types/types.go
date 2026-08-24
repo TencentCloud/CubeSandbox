@@ -65,6 +65,9 @@ type CreateCubeSandboxReq struct {
 	DistributionScope []string          `json:"distribution_scope,omitempty"`
 	InstanceType      string            `json:"instance_type,omitempty"`
 	NetworkType       string            `json:"network_type,omitempty"`
+	// Backend is the CoW store (xfs｜s3) for snapshot restore / create-from-snap.
+	// Empty means xfs.
+	Backend string `json:"backend,omitempty"`
 
 	RuntimeHandler string `json:"runtime_handler,omitempty"`
 	Namespace      string `json:"namespace,omitempty"`
@@ -557,20 +560,29 @@ type ListCubeSandboxRes struct {
 }
 
 type SandboxBriefData struct {
-	SandboxID    string             `json:"sandbox_id,omitempty"`
-	Status       int32              `json:"status,omitempty"`
-	HostID       string             `json:"host_id,omitempty"`
-	HostIP       string             `json:"host_ip,omitempty"`
-	TemplateID   string             `json:"template_id,omitempty"`
-	CpuCount     int32              `json:"cpu_count,omitempty"`
-	MemoryMB     int32              `json:"memory_mb,omitempty"`
-	Annotations  map[string]string  `json:"annotations,omitempty"`
-	Labels       map[string]string  `json:"labels,omitempty"`
-	NameSpace    string             `json:"namespace,omitempty"`
-	CreateAt     int64              `json:"create_at,omitempty"`
-	PauseAt      int64              `json:"pause_at,omitempty"`
-	EndAt        int64              `json:"end_at,omitempty"`
-	VolumeMounts []*VolumeMountInfo `json:"volume_mounts,omitempty"`
+	SandboxID  string `json:"sandbox_id,omitempty"`
+	Status     int32  `json:"status,omitempty"`
+	HostID     string `json:"host_id,omitempty"`
+	HostIP     string `json:"host_ip,omitempty"`
+	TemplateID string `json:"template_id,omitempty"`
+	Backend    string `json:"backend,omitempty"`
+	// PauseSnapshotID / RemoteStatus / PauseStatus come from the Master pause
+	// binding, not from the node. RemoteStatus is the S3 upload state of the
+	// pause snapshot (empty on xfs); cross-node Resume needs "ready".
+	// PauseStatus is only worth showing when it is not READY, e.g.
+	// DELETE_FAILED for a package the node could not sweep.
+	PauseSnapshotID string             `json:"pause_snapshot_id,omitempty"`
+	RemoteStatus    string             `json:"remote_status,omitempty"`
+	PauseStatus     string             `json:"pause_status,omitempty"`
+	CpuCount        int32              `json:"cpu_count,omitempty"`
+	MemoryMB        int32              `json:"memory_mb,omitempty"`
+	Annotations     map[string]string  `json:"annotations,omitempty"`
+	Labels          map[string]string  `json:"labels,omitempty"`
+	NameSpace       string             `json:"namespace,omitempty"`
+	CreateAt        int64              `json:"create_at,omitempty"`
+	PauseAt         int64              `json:"pause_at,omitempty"`
+	EndAt           int64              `json:"end_at,omitempty"`
+	VolumeMounts    []*VolumeMountInfo `json:"volume_mounts,omitempty"`
 }
 
 type GetCubeSandboxReq struct {
@@ -685,6 +697,10 @@ type CreateTemplateFromImageReq struct {
 	// with ivshmem enabled so the captured snapshot already contains the
 	// device topology.
 	EnableIvshmem *bool `json:"enable_ivshmem,omitempty"`
+
+	// Backend is the CoW store (xfs｜s3) for this template and every
+	// sandbox / pause-snap / commit snapshot created from it. Empty means xfs.
+	Backend string `json:"backend,omitempty"`
 }
 
 type RedoTemplateFromImageReq struct {
@@ -806,6 +822,9 @@ type UpdateRequest struct {
 	SandboxID    string `json:"sandbox_id"`
 	InstanceType string `json:"instance_type"`
 	Action       string `json:"action"`
+	// Backend is the CoW store (xfs｜s3) forwarded to Cubelet as
+	// cube.master.storage.backend. Empty means xfs.
+	Backend string `json:"backend,omitempty"`
 }
 
 // SetTimeoutRequest is the wire shape for POST /cube/sandbox/timeout.

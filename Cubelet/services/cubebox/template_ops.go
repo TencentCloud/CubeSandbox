@@ -24,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -75,6 +76,13 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		rsp.Ret.RetMsg = "CommitSandbox requires storage_backend=cubecow"
 		return rsp, nil
 	}
+	backend, err := resolveRequestStorageBackend(req.GetBackend())
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	stepLog = stepLog.WithFields(CubeLog.Fields{"backend": backend})
 
 	unlock := s.sandboxLifecycleLocks.Lock(rsp.SandboxID)
 	defer unlock()
@@ -111,33 +119,25 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		return rsp, nil
 	}
 
-	snapshotDir := req.GetSnapshotDir()
-	if snapshotDir == "" {
-		snapshotDir = DefaultSnapshotDir
-	}
 	specDir := fmt.Sprintf("%dC%dM", resourceSpec.CPU, resourceSpec.Memory)
-	snapshotPath := filepath.Join(snapshotDir, "cubebox", rsp.TemplateID, specDir)
-	if _, err := pathutil.ValidatePathUnderBase(snapshotDir, snapshotPath); err != nil {
+	layout, err := prepareSnapshotWorkLayout(backend, storage.SnapshotKindNormal, rsp.TemplateID, req.GetSnapshotDir(), specDir)
+	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		rsp.Ret.RetMsg = fmt.Sprintf("invalid snapshot path: %v", err)
 		return rsp, nil
 	}
+	snapshotPath := layout.Home
 	rsp.SnapshotPath = snapshotPath
-	tmpSnapshotPath := snapshotPath + ".tmp"
-	if _, err := pathutil.ValidatePathUnderBase(snapshotDir, tmpSnapshotPath); err != nil {
-		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
-		rsp.Ret.RetMsg = fmt.Sprintf("invalid tmp snapshot path: %v", err)
-		return rsp, nil
-	}
+	tmpSnapshotPath := layout.TmpHome
 	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
 
-	sourceRootfs, err := storage.GetSandboxRootfs(ctx, rsp.SandboxID, rootVolumeName)
+	sourceRootfs, err := storage.GetSandboxRootfsFor(ctx, backend, rsp.SandboxID, rootVolumeName)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve sandbox rootfs: %v", err)
 		return rsp, nil
 	}
-	rootfsObject, err := storage.CommitRootfs(ctx, sourceRootfs, rsp.TemplateID)
+	rootfsObject, err := storage.CommitRootfsFor(ctx, backend, sourceRootfs, rsp.TemplateID)
 	if err != nil {
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
@@ -155,9 +155,9 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	//   - otherwise (lineage broken: missing/purged catalog or upstream
 	//     volume gone) create a fresh empty volume and fall back to a full
 	//     snapshot.
-	memoryObject, snapshotTypeForCmd, err := prepareCommitMemoryArtifact(ctx, stepLog, cb, rsp.TemplateID, memorySizeBytes)
+	memoryObject, snapshotTypeForCmd, err := prepareCommitMemoryArtifact(ctx, stepLog, cb, rsp.TemplateID, memorySizeBytes, backend)
 	if err != nil {
-		if cleanupErr := storage.DeleteObject(ctx, rootfsObject.Name, rootfsObject.Kind); cleanupErr != nil {
+		if cleanupErr := storage.DeleteObjectFor(ctx, backend, rootfsObject.Name, rootfsObject.Kind); cleanupErr != nil {
 			stepLog.Warnf("failed to cleanup rootfs snapshot after memory artifact failure: %v", cleanupErr)
 		}
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
@@ -170,25 +170,35 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		return rsp, nil
 	}
 	if err := validateSnapshotMemoryObject(memoryObject, memorySizeBytes); err != nil {
-		cleanupCowSnapshotObjects(ctx, stepLog, memoryObject, rootfsObject)
+		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
 
 	cleanupArtifacts := func() {
-		cleanupCowSnapshotObjects(ctx, stepLog, memoryObject, rootfsObject)
+		layout.releaseMetadata(ctx)
+		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
+		layout.discardTmpDir()
+		if !layout.usesTmpRename() {
+			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
+		}
 	}
 
-	_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
+	layout.resetTmpDir()
+	if err := layout.prepareWork(ctx); err != nil {
+		cleanupArtifacts()
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to create snapshot dir: %v", err)
+		return rsp, nil
+	}
 	// CommitSandbox snapshots a running sandbox whose memory artifact has
 	// just been prepared above. snapshotTypeForCmd carries the right type
 	// for the path we took: soft-dirty when reflink-cloning a base, or full
 	// when degrading because no base could be resolved. AppSnapshot keeps
 	// using the default full type via its own call site.
 	stepLog = stepLog.WithFields(CubeLog.Fields{"snapshotType": snapshotTypeForCmd})
-	if err := s.executeCubeRuntimeSnapshot(ctx, rsp.SandboxID, spec, tmpSnapshotPath, memoryObject.DevPath, snapshotTypeForCmd); err != nil {
-		_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
+	if err := s.executeCubeRuntimeSnapshot(ctx, rsp.SandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeForCmd); err != nil {
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to execute cube-runtime snapshot: %v", err)
@@ -206,29 +216,33 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	// binding routes the next commit through the fallback-to-full branch
 	// in prepareCommitMemoryArtifact, which is self-contained and safe.
 	setRuntimeSnapshotBindingLabels(cb, rsp.TemplateID, time.Now().UTC())
-	if err := writeMemoryDevFile(tmpSnapshotPath, memoryObject.DevPath); err != nil {
-		_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
-		cleanupArtifacts()
-		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to write memory.dev: %v", err)
-		return rsp, nil
-	}
-	if err := deactivateCowSnapshotObjects(ctx, stepLog, memoryObject, rootfsObject); err != nil {
-		_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
+	// Do not write memory.dev — restore uses catalog vol name + ResolveDevPath.
+	if err := deactivateCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject); err != nil {
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to deactivate snapshot objects: %v", err)
 		return rsp, nil
 	}
-	// NOCC:Path Traversal()
-	if err := os.RemoveAll(snapshotPath); err != nil {
-		stepLog.Warnf("failed to remove existing snapshot path: %v", err)
+	if layout.usesTmpRename() {
+		// NOCC:Path Traversal()
+		if err := os.RemoveAll(snapshotPath); err != nil {
+			stepLog.Warnf("failed to remove existing snapshot path: %v", err)
+		}
+		if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
+			_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
+			cleanupArtifacts()
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to move snapshot: %v", err)
+			return rsp, nil
+		}
 	}
-	if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
-		_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
+	if err := storage.EnsureShimSpecDirLink(layout.Home, specDir); err != nil {
 		cleanupArtifacts()
+		if layout.usesTmpRename() {
+			_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
+		}
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to move snapshot: %v", err)
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to expose shim spec dir: %v", err)
 		return rsp, nil
 	}
 	if err := writeSnapshotFlag(stepLog); err != nil {
@@ -252,25 +266,35 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	// The source sandbox stays running through commit, so probe its real envd
 	// version in-guest after the memory snapshot. Best-effort: empty on failure.
 	rsp.EnvdVersion = s.collectEnvdVersion(ctx, rsp.SandboxID)
-	if err := storage.WriteSnapshotCatalog(&storage.SnapshotCatalogEntry{
+	if err := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
 		SnapshotID:        rsp.TemplateID,
 		InstanceType:      "cubebox",
 		SpecDir:           specDir,
-		SnapshotPath:      snapshotPath,
-		MetaDir:           snapshotPath,
+		SnapshotPath:      layout.Home,
+		MetaDir:           layout.MetaDir,
 		RootfsVol:         rootfsObject.Name,
 		RootfsKind:        rootfsObject.Kind,
 		MemoryVol:         memoryObject.Name,
 		MemoryKind:        memoryObject.Kind,
+		MetadataVol:       storage.S3MetadataCatalogVol(backend, rsp.TemplateID),
+		MetadataKind:      storage.S3MetadataCatalogKind(backend),
 		RootfsSizeBytes:   rootfsObject.SizeBytes,
 		ComponentVersions: cloneStringMap(cb.ComponentVersions),
 		Kind:              storage.CatalogKindRuntimeSnapshot,
+		Backend:           backend,
 	}); err != nil {
 		// Catalog write failures do not invalidate the snapshot: master will
 		// still receive the physical references in the response and rollback
 		// path keeps the legacy fallback. Log loudly so operators notice
 		// drift between master and cubelet local view.
 		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", rsp.TemplateID, err)
+	}
+	// S3: seal memory／metadata work volumes to RO snapshots, then Upload.
+	if err := storage.FinalizeS3PackageSnapshots(ctx, backend, rsp.TemplateID); err != nil {
+		stepLog.Warnf("failed to seal s3 package snapshots for %s: %v", rsp.TemplateID, err)
+	}
+	if raw := uploadRemoteUUIDsIfS3(ctx, backend, rsp.TemplateID); raw != "" {
+		rsp.RemoteUuids = raw
 	}
 	// Persist the runtime-snapshot binding update we did in-memory after
 	// cube-runtime returned. Mirrors the rollback flow's SyncByID call so
@@ -287,8 +311,8 @@ func validateCommitSandboxTarget(cb *cubeboxstore.CubeBox) (string, error) {
 }
 
 // validatePauseSandboxTarget is the Pause/CoW gate: running + writable rootfs.
-// Unlike CommitSandbox, host-mount / host_dir / sandbox_path binds are allowed —
-// Cubelet re-binds the same hostdir path on Resume (same sandboxID).
+// Unlike CommitSandbox, host-mount / host_dir / sandbox_path / plugin_volume
+// binds are allowed — Cubelet re-binds the same host path on Resume (same sandboxID).
 func validatePauseSandboxTarget(cb *cubeboxstore.CubeBox) (string, error) {
 	return validateSnapshotSandboxTarget(cb, false /* rejectHostDeps */)
 }
@@ -374,6 +398,9 @@ func validateCommitVolumeSources(cb *cubeboxstore.CubeBox) error {
 		if source == nil {
 			continue
 		}
+		if source.GetPluginVolume() != nil {
+			return fmt.Errorf("plugin_volume %s is not supported by CommitSandbox", volume.GetName())
+		}
 		if hostDirs := source.GetHostDirVolumes(); hostDirs != nil {
 			for _, hostDir := range hostDirs.GetVolumeSources() {
 				if hostDir != nil && hostDir.GetHostPath() != "" {
@@ -388,7 +415,37 @@ func validateCommitVolumeSources(cb *cubeboxstore.CubeBox) error {
 			}
 		}
 	}
+	for name := range usedVolumes {
+		if commitPluginVolumeListed(cb.Annotations, name) {
+			return fmt.Errorf("plugin_volume %s is not supported by CommitSandbox", name)
+		}
+	}
 	return nil
+}
+
+// commitPluginVolumeListed reports whether volumeName is in the
+// plugin-volume-sources annotation (mixed-version path when VolumeSource
+// has no plugin_volume field).
+func commitPluginVolumeListed(annotations map[string]string, volumeName string) bool {
+	if annotations == nil || volumeName == "" {
+		return false
+	}
+	raw := strings.TrimSpace(annotations["plugin-volume-sources"])
+	if raw == "" {
+		return false
+	}
+	var entries []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.Name == volumeName {
+			return true
+		}
+	}
+	return false
 }
 
 func validateNoHostPathVolumes(config *cubebox.ContainerConfig) error {
@@ -429,14 +486,37 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 			return rsp, nil
 		}
 	}
-	refs, snapshotPath, err := resolveCleanupRefs(ctx, rsp.TemplateID, req.GetObjects(), req.GetSnapshotPath())
+	backend, err := resolveRequestStorageBackend(req.GetBackend())
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
+	if _, catErr := storage.GetLocalSnapshotFor(ctx, backend, rsp.TemplateID); errors.Is(catErr, storage.ErrSnapshotCatalogNotFound) {
+		if other := otherCowBackend(backend); other != backend {
+			if _, altErr := storage.GetLocalSnapshotFor(ctx, other, rsp.TemplateID); altErr == nil {
+				backend = other
+			}
+		}
+	}
+	refs, snapshotPath, err := resolveCleanupRefs(ctx, backend, rsp.TemplateID, req.GetObjects(), req.GetSnapshotPath())
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	// The on-disk package (S3 pause-snapshots/snapshots home) and its catalog
+	// are the only record of which cubecow objects are still out there, so
+	// they outlive a failed object sweep and a retry can pick up where this
+	// one stopped. Objects already gone count as cleaned, so a Resume that
+	// consumed the pause package still drops the dir here.
 	if storage.IsCowBackend() {
-		if err := storage.CleanupObjects(ctx, refs); err != nil {
+		if err := storage.ReleaseS3MetadataVolume(ctx, backend, rsp.TemplateID); err != nil {
+			log.G(ctx).Warnf("CleanupTemplate %s: s3 metadata umount: %v", rsp.TemplateID, err)
+		}
+		if err := storage.CleanupObjectsFor(ctx, backend, refs); err != nil {
+			log.G(ctx).Warnf("CleanupTemplate %s: cubecow object cleanup, keeping package for retry: %v",
+				rsp.TemplateID, err)
 			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 			rsp.Ret.RetMsg = fmt.Sprintf("failed to cleanup cubecow objects: %v", err)
 			return rsp, nil
@@ -452,7 +532,7 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 		rsp.Ret.RetCode = rerr.Code()
 		rsp.Ret.RetMsg = rerr.Message()
 	}
-	storage.DeleteSnapshotCatalog(rsp.TemplateID)
+	storage.DeleteSnapshotCatalogFor(backend, rsp.TemplateID)
 	return rsp, nil
 }
 
@@ -466,39 +546,55 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 //
 // snapshotPath returned is what CleanupTemplateLocalData should remove on disk;
 // catalog entry SnapshotPath wins over caller-supplied path when both exist.
-func resolveCleanupRefs(ctx context.Context, templateID string, objects []*cubebox.CowObjectRef, callerSnapshotPath string) ([]storage.CowObjectRef, string, error) {
+func resolveCleanupRefs(ctx context.Context, backend, templateID string, objects []*cubebox.CowObjectRef, callerSnapshotPath string) ([]storage.CowObjectRef, string, error) {
 	if len(objects) > 0 {
 		refs, err := parseCowObjectRefs(objects)
 		if err != nil {
 			return nil, "", err
 		}
-		return refs, ensureSnapshotCleanupPath(ctx, templateID, callerSnapshotPath), nil
+		return finalizeCleanupRefs(backend, templateID, refs), ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
 	}
-	entry, err := storage.GetLocalSnapshot(ctx, templateID)
+	entry, err := storage.GetLocalSnapshotFor(ctx, backend, templateID)
+	if err != nil || entry == nil {
+		if other := otherCowBackend(backend); other != backend {
+			if alt, altErr := storage.GetLocalSnapshotFor(ctx, other, templateID); altErr == nil && alt != nil {
+				entry, err, backend = alt, nil, other
+			}
+		}
+	}
 	if err == nil && entry != nil {
 		refs := cubecowRefsFromCatalogEntry(templateID, entry)
 		snapshotPath := strings.TrimSpace(entry.SnapshotPath)
 		if snapshotPath == "" {
 			snapshotPath = callerSnapshotPath
 		}
-		return refs, ensureSnapshotCleanupPath(ctx, templateID, snapshotPath), nil
+		return finalizeCleanupRefs(backend, templateID, refs), ensureSnapshotCleanupPath(ctx, backend, templateID, snapshotPath), nil
 	}
 	if err != nil && !errors.Is(err, storage.ErrSnapshotCatalogNotFound) {
 		log.G(ctx).Warnf("CleanupTemplate %s: catalog lookup failed (%v); falling back to deterministic refs", templateID, err)
 	} else {
 		log.G(ctx).Warnf("CleanupTemplate %s: catalog miss; falling back to deterministic refs", templateID)
 	}
-	return storage.DefaultTemplateObjectRefs(templateID), ensureSnapshotCleanupPath(ctx, templateID, callerSnapshotPath), nil
+	return finalizeCleanupRefs(backend, templateID, storage.DefaultTemplateObjectRefs(templateID)), ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
 }
 
-// ensureSnapshotCleanupPath implements FIX-4: when neither the caller nor the
-// local catalog supplies a snapshot path (catalog miss / legacy master), derive
-// the deterministic snapshot directory used by CommitSandbox so the on-disk
-// snapshot is not orphaned (L11). The derived path is the templateID-level dir
-// (`<DefaultSnapshotDir>/cubebox/<templateID>`) which contains every spec
-// variant, and is bounded by ValidatePathUnderBase (S3). On any validation
-// failure we return the original (empty) path rather than an unsafe guess.
-func ensureSnapshotCleanupPath(ctx context.Context, templateID, snapshotPath string) string {
+func finalizeCleanupRefs(backend, templateID string, refs []storage.CowObjectRef) []storage.CowObjectRef {
+	normalized, err := cow.NormalizeBackend(backend)
+	if err != nil || normalized != cow.BackendS3 {
+		return refs
+	}
+	return storage.AppendS3SealedPackageCleanupRefs(templateID, refs)
+}
+
+func otherCowBackend(backend string) string {
+	normalized, err := resolveRequestStorageBackend(backend)
+	if err == nil && normalized == cow.BackendS3 {
+		return cow.BackendXFS
+	}
+	return cow.BackendS3
+}
+
+func ensureSnapshotCleanupPath(ctx context.Context, backend, templateID, snapshotPath string) string {
 	if strings.TrimSpace(snapshotPath) != "" {
 		return snapshotPath
 	}
@@ -506,8 +602,22 @@ func ensureSnapshotCleanupPath(ctx context.Context, templateID, snapshotPath str
 		log.G(ctx).Warnf("CleanupTemplate %s: cannot derive snapshot dir, unsafe templateID: %v", templateID, err)
 		return snapshotPath
 	}
-	guessed := filepath.Join(DefaultSnapshotDir, "cubebox", templateID)
-	if _, err := pathutil.ValidatePathUnderBase(DefaultSnapshotDir, guessed); err != nil {
+	for _, kind := range []string{storage.SnapshotKindPause, storage.SnapshotKindNormal} {
+		home := storage.SnapshotHome(backend, kind, templateID)
+		if home == "" {
+			continue
+		}
+		if _, err := os.Stat(home); err == nil {
+			log.G(ctx).Infof("CleanupTemplate %s: using existing snapshot dir %q", templateID, home)
+			return home
+		}
+	}
+	root := snapshotRootForBackend(backend)
+	guessed := filepath.Join(root, "cubebox", templateID)
+	if b, berr := resolveRequestStorageBackend(backend); berr == nil && b == cow.BackendS3 {
+		guessed = storage.SnapshotHome(backend, storage.SnapshotKindNormal, templateID)
+	}
+	if _, err := pathutil.ValidatePathUnderBase(root, guessed); err != nil {
 		log.G(ctx).Warnf("CleanupTemplate %s: derived snapshot dir %q rejected: %v", templateID, guessed, err)
 		return snapshotPath
 	}
@@ -528,6 +638,13 @@ func cubecowRefsFromCatalogEntry(templateID string, entry *storage.SnapshotCatal
 	}
 	if name := strings.TrimSpace(entry.BuildRootfsVol); name != "" {
 		refs = append(refs, storage.CowObjectRef{Name: name, Kind: entry.BuildRootfsKind, Role: "build_rootfs"})
+	}
+	if name := strings.TrimSpace(entry.MetadataVol); name != "" && !storage.IsS3MetadataBaseName(name) {
+		kind := strings.TrimSpace(entry.MetadataKind)
+		if kind == "" {
+			kind = storage.CowKindSnapshot
+		}
+		refs = append(refs, storage.CowObjectRef{Name: name, Kind: kind, Role: "metadata"})
 	}
 	if len(refs) == 0 {
 		return storage.DefaultTemplateObjectRefs(templateID)

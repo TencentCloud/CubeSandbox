@@ -10,10 +10,12 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	basetypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
@@ -109,4 +111,28 @@ func TestSetSyncDestroyFailureKeepsTypedConnectionFailureInternal(t *testing.T) 
 
 	assert.Equal(t, int(errorcode.ErrorCode_MasterInternalError), rsp.Ret.RetCode)
 	assert.Equal(t, "cubelet connection reset", rsp.Ret.RetMsg)
+}
+
+func TestStampDestroyStorageBackendFromSpec(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(sandboxspec.Get, func(_ context.Context, sandboxID string) (*types.CreateCubeSandboxReq, error) {
+		assert.Equal(t, "sb-s3", sandboxID)
+		return &types.CreateCubeSandboxReq{Backend: constants.SnapshotBackendS3}, nil
+	})
+
+	req := &cubebox.DestroyCubeSandboxRequest{SandboxID: "sb-s3"}
+	stampDestroyStorageBackend(context.Background(), "sb-s3", req)
+	assert.Equal(t, constants.SnapshotBackendS3, req.Annotations[constants.CubeAnnotationStorageBackend])
+}
+
+func TestStampDestroyStorageBackendKeepsExistingAnnotation(t *testing.T) {
+	req := &cubebox.DestroyCubeSandboxRequest{
+		SandboxID: "sb-s3",
+		Annotations: map[string]string{
+			constants.CubeAnnotationStorageBackend: constants.SnapshotBackendS3,
+		},
+	}
+	stampDestroyStorageBackend(context.Background(), "sb-s3", req)
+	assert.Equal(t, constants.SnapshotBackendS3, req.Annotations[constants.CubeAnnotationStorageBackend])
 }

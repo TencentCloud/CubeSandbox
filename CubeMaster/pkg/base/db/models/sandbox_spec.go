@@ -23,6 +23,7 @@ type SandboxSpec struct {
 	HostID       string `json:"host_id" gorm:"column:host_id"`
 	HostIP       string `json:"host_ip" gorm:"column:host_ip"`
 	RequestJSON  string `json:"request_json" gorm:"column:request_json"`
+	Backend      string `json:"backend" gorm:"column:backend"`
 	Backfilled   bool   `json:"backfilled" gorm:"column:backfilled"`
 }
 

@@ -281,7 +281,8 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		// deleted.
 		setRuntimeRestoreBaseLabels(sandBox, snapshotID, now)
 		// Resume-from-pause stamps pause snapshot id so Destroy can GC a
-		// leftover pause catalog if Resume-time CleanupTemplate missed it.
+		// leftover pause catalog if Pause-time CleanupTemplate of the
+		// previous live snap missed it.
 		if pauseID := strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID]); pauseID != "" {
 			if sandBox.Labels == nil {
 				sandBox.Labels = map[string]string{}

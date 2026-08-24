@@ -122,7 +122,7 @@ func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifa
 		Probe:           probeOrNil(req.ContainerOverrides),
 		Annotations:     containerAnnotations,
 	}
-	return &types.CreateCubeSandboxReq{
+	out := &types.CreateCubeSandboxReq{
 		Request:           &types.Request{RequestID: req.RequestID},
 		Volumes:           []*types.Volume{rootVolume},
 		Containers:        []*types.Container{container},
@@ -130,7 +130,12 @@ func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifa
 		InstanceType:      req.InstanceType,
 		NetworkType:       req.NetworkType,
 		CubeNetworkConfig: cloneCubeNetworkConfig(req.CubeNetworkConfig),
-	}, nil
+		Backend:           req.Backend,
+	}
+	if err := stampCreateRequestBackend(out, req.Backend); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func cloneCubeNetworkConfig(in *types.CubeNetworkConfig) *types.CubeNetworkConfig {

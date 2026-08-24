@@ -33,6 +33,9 @@ var (
 // tombstone — full Destroy kills the shim, then CleanupTemplate drops the
 // half-finished pause snap.
 //
+// DELETE_FAILED: an earlier Delete already reaped the shim and only the node
+// package cleanup failed, so this is a retry of that cleanup.
+//
 // Returns handled=false when there is no pause binding (caller should Destroy).
 func TryDeletePaused(ctx context.Context, requestID, sandboxID, hostIP string) (handled bool, err error) {
 	sandboxID = strings.TrimSpace(sandboxID)
@@ -58,7 +61,7 @@ func TryDeletePaused(ctx context.Context, requestID, sandboxID, hostIP string) (
 	}
 
 	addr := cubeletAddr(hostIP)
-	if isReadyPauseSnapshot(rec.Status) {
+	if isShimGonePauseSnapshot(rec.Status) {
 		if err := destroyPausedTombstone(ctx, addr, requestID, sandboxID, hostIP); err != nil {
 			return true, err
 		}
@@ -66,7 +69,11 @@ func TryDeletePaused(ctx context.Context, requestID, sandboxID, hostIP string) (
 		return true, err
 	}
 
-	if err := cleanupPauseSnapshotOnCubelet(ctx, addr, requestID, rec.SnapshotID); err != nil {
+	if err := cleanupPauseSnapshotOnCubelet(ctx, addr, requestID, rec.SnapshotID, rec.Backend); err != nil {
+		// The shim is gone but the package survived. Dropping the binding here
+		// would leave an unnamed package on the node that nothing points at,
+		// so keep it and say why in the row.
+		MarkDeleteFailed(ctx, sandboxID, rec.SnapshotID, err.Error())
 		return true, err
 	}
 	if err := Delete(ctx, rec.SnapshotID); err != nil {
@@ -75,9 +82,32 @@ func TryDeletePaused(ctx context.Context, requestID, sandboxID, hostIP string) (
 	return true, nil
 }
 
-// isReadyPauseSnapshot is the only case where the shim is already gone.
-func isReadyPauseSnapshot(status string) bool {
-	return strings.EqualFold(strings.TrimSpace(status), statusReady)
+// isShimGonePauseSnapshot reports whether the sandbox process is already
+// reaped, i.e. Delete only has a CubeBox tombstone to remove. That is true
+// after a completed Pause and after a Delete that got past Destroy and only
+// failed on node cleanup.
+func isShimGonePauseSnapshot(status string) bool {
+	status = strings.TrimSpace(status)
+	return strings.EqualFold(status, statusReady) || strings.EqualFold(status, statusDeleteFailed)
+}
+
+// DropOriginTombstone removes the PAUSED CubeBox row Pause left on originIP
+// after the sandbox came back up on a different node. Same-node Resume has
+// no use for this: there, target Create replaces the row in place.
+//
+// Only the row goes. The pause package and its cubecow objects stay, exactly
+// as they do after a same-node Resume.
+//
+// This talks to Cubelet directly rather than going through Master's
+// DestroySandbox, which would publish a lifecycle delete event and make the
+// CLM stop managing a sandbox that is very much alive on the target node.
+func DropOriginTombstone(ctx context.Context, requestID, sandboxID, originIP string) error {
+	sandboxID = strings.TrimSpace(sandboxID)
+	originIP = strings.TrimSpace(originIP)
+	if sandboxID == "" || originIP == "" {
+		return nil
+	}
+	return destroyPausedTombstone(ctx, cubeletAddr(originIP), requestID, sandboxID, originIP)
 }
 
 func destroyPausedTombstone(ctx context.Context, addr, requestID, sandboxID, hostIP string) error {
@@ -130,10 +160,16 @@ func checkDestroyRet(destroyRsp *cubebox.DestroyCubeSandboxResponse, sandboxID, 
 	return fmt.Errorf("%s %s ret=%v msg=%s", what, sandboxID, code, msg)
 }
 
-func cleanupPauseSnapshotOnCubelet(ctx context.Context, addr, requestID, snapshotID string) error {
+func cleanupPauseSnapshotOnCubelet(ctx context.Context, addr, requestID, snapshotID, backend string) error {
+	if normalized, ok, err := constants.OptionalSnapshotBackend(backend); err == nil && ok {
+		backend = normalized
+	} else {
+		backend = ""
+	}
 	rsp, err := cleanupTemplateOnCubelet(ctx, addr, &cubebox.CleanupTemplateRequest{
 		RequestID:  requestID,
 		TemplateID: snapshotID,
+		Backend:    backend,
 	})
 	if err != nil {
 		return fmt.Errorf("cleanup pause snap %s: %w", snapshotID, err)

@@ -45,6 +45,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/refcount"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -67,7 +68,10 @@ type local struct {
 	cubeboxAPI           cubes.CubeboxAPI
 	multiLock            *multilock.MultiLock
 	cowEngine            *cubecow.Engine
-	cowManager           cowVolumeManager
+	s3CowEngine          *cubecow.Engine
+	cowManager           cowVolumeManager // XFS / xfscow Store (reflink handle)
+	s3CowManager         cowVolumeManager // S3 Store (s3 cubecow handle)
+	s3InitCancel         context.CancelFunc
 
 	// rcDB is the dedicated bbolt DB for the plugin-volume reference-count store.
 	// It is a sibling file to meta.db in the same db directory.
@@ -123,6 +127,13 @@ var (
 				Describe: "storage plugin db",
 			},
 		},
+		{
+			BucketDefine: &multimetadb.BucketDefine{
+				Name:     s3MetadataBucket,
+				DbName:   "storage",
+				Describe: "s3 node-local metadata base volume",
+			},
+		},
 	}
 	nfsBucketName  = "nfs/v1"
 	failoverNfsDir = "nfsfailoverdir"
@@ -141,16 +152,24 @@ func (l *local) useCowStorage() bool {
 }
 
 func (l *local) ensureCowManager() error {
-	if l.cowManager != nil {
-		return nil
-	}
-	if l.cowEngine == nil {
+	if l.cowEngine == nil && l.s3CowEngine == nil {
+		// Tests inject Stores without a live cubecow engine. Production
+		// plugin init always sets the engines before this runs.
+		if l.cowManager != nil || l.s3CowManager != nil {
+			return nil
+		}
 		if l.useCowStorage() {
 			return fmt.Errorf("cubecow engine not initialized")
 		}
 		return nil
 	}
-	l.cowManager = newCowVolumeManager(l.cowEngine)
+	// Each Store is bound to its own cubecow handle (kind=reflink vs kind=s3).
+	if l.cowManager == nil && l.cowEngine != nil {
+		l.cowManager = newCowVolumeManager(l.cowEngine)
+	}
+	if l.s3CowManager == nil && l.s3CowEngine != nil {
+		l.s3CowManager = newS3CowVolumeManager(l.s3CowEngine)
+	}
 	return nil
 }
 
@@ -158,11 +177,18 @@ func (l *local) resetCowNodeStorage() error {
 	if !l.useCowStorage() {
 		return nil
 	}
-	if l.cowEngine == nil {
+	if l.cowEngine == nil && l.s3CowEngine == nil {
 		return fmt.Errorf("cubecow engine not initialized")
 	}
-	if err := cowResetNodeStorage(l.cowEngine); err != nil {
-		return fmt.Errorf("reset cubecow node storage: %w", err)
+	if l.cowEngine != nil {
+		if err := cowResetNodeStorage(l.cowEngine); err != nil {
+			return fmt.Errorf("reset cubecow xfs storage: %w", err)
+		}
+	}
+	if l.s3CowEngine != nil {
+		if err := cowResetNodeStorage(l.s3CowEngine); err != nil {
+			return fmt.Errorf("reset cubecow s3 storage: %w", err)
+		}
 	}
 	l.Close()
 	return nil
@@ -189,15 +215,19 @@ func (l *local) cleanupCowStateOnDisk() error {
 }
 
 func (l *local) reinitCowEngine() error {
-	if !l.useCowStorage() || l.cowEngine != nil {
+	if !l.useCowStorage() {
 		return nil
 	}
-	engine, initSource, err := initCowEngine(l.config)
-	if err != nil {
-		return err
+	if l.cowEngine == nil {
+		engine, initSource, err := initCowEngine(l.config)
+		if err != nil {
+			return err
+		}
+		l.cowEngine = engine
+		CubeLog.Infof("cubecow xfs handle initialized from %s", initSource)
 	}
-	l.cowEngine = engine
-	CubeLog.Infof("cubecow engine initialized from %s", initSource)
+	// S3 handle is published only by startS3CowInitLoop after metadata base
+	// succeeds; do not bind it synchronously here.
 	return nil
 }
 
@@ -205,13 +235,29 @@ func (l *local) refreshCowPaths(info *StorageInfo) error {
 	if info == nil || len(info.Volumes) == 0 {
 		return nil
 	}
-	if err := l.ensureCowManager(); err != nil {
+	backend := storageBackendFromInfo(info)
+	if IsS3Backend(backend) {
+		// On S3 a recorded device path is worse than none: s3lvol hands out a
+		// different /dev/nvmeXn1 on every activate, so a stale one points at
+		// another object's disk. Resolving it here is not an option either —
+		// that would activate every volume this node ever recorded, live or
+		// dead, outside any request. Drop it and let the request that needs a
+		// device resolve it (ResolveDevPath always activates on S3).
+		for _, volume := range info.Volumes {
+			if volume != nil && strings.TrimSpace(volume.VolumeName) != "" {
+				volume.FilePath = ""
+			}
+		}
+		return nil
+	}
+	store, err := l.storeForBackend(backend)
+	if err != nil {
 		if !l.useCowStorage() {
 			return nil
 		}
 		return err
 	}
-	return refreshStorageInfoPathsWithManager(context.Background(), info, l.cowManager)
+	return refreshStorageInfoPathsWithManager(context.Background(), info, store)
 }
 
 type StateRecoverer interface {
@@ -220,7 +266,9 @@ type StateRecoverer interface {
 }
 
 func (l *local) RecoverStorageState(ctx context.Context) error {
-	if !l.useCowStorage() {
+	// The S3 init loop can re-enter this before storage init opened the db;
+	// nothing is recorded yet in that case.
+	if !l.useCowStorage() || l.db == nil {
 		return nil
 	}
 
@@ -257,6 +305,15 @@ func (l *local) RecoverStorageState(ctx context.Context) error {
 				_ = atomicDelete(filepath.Join(l.failoverDir(), id))
 				continue
 			}
+			// S3 entries are skipped above, so this should be unreachable.
+			// It stays as a guard: the S3 handle is published asynchronously
+			// by the init loop, and a node must never refuse to start
+			// because one of its sandboxes lives on a backend that is still
+			// coming up.
+			if errors.Is(err, ErrS3NotReady) {
+				CubeLog.Warnf("storage recover: skipping id=%s while s3 storage is initializing: %v", id, err)
+				continue
+			}
 			return err
 		}
 	}
@@ -280,6 +337,15 @@ func (l *local) RecoverSandboxStorage(ctx context.Context, sandboxID string) err
 
 func (l *local) recoverStorageInfo(ctx context.Context, id string, info *StorageInfo) error {
 	if info == nil {
+		return nil
+	}
+	if IsS3Backend(storageBackendFromInfo(info)) {
+		// Boot does nothing for an S3 sandbox. Every disk it needs is resolved
+		// and attached by the request that uses it, and a restarted Cubelet
+		// cannot tell a leftover from a disk a live sandbox is reading: acting
+		// on that guess is what used to pull the memory snapshot out from
+		// under a resumed VM. Reading this entry later drops the stale device
+		// path (see refreshCowPaths), so there is nothing to persist here.
 		return nil
 	}
 	if err := l.refreshCowPaths(info); err != nil {
@@ -383,10 +449,12 @@ func (l *local) loopUpdateStatus(context context.Context) {
 }
 
 func (l *local) Close() error {
+	l.stopS3CowInitLoop()
 	if l.cowEngine != nil {
 		l.cowEngine.Close()
 		l.cowEngine = nil
 	}
+	l.clearS3Cow()
 	l.cowManager = nil
 	return nil
 }
@@ -662,6 +730,7 @@ func (l *local) Init(ctx context.Context, opts *workflow.InitInfo) error {
 		if err := l.ensureCowManager(); err != nil {
 			return err
 		}
+		l.startS3CowInitLoop(ctx)
 	} else {
 		if err := l.initEmptyDir(); err != nil {
 			return err
@@ -688,7 +757,7 @@ func (l *local) CreateCubeboxBaseStorage(ctx context.Context, opts *workflow.Cre
 	}
 
 	result := &StorageInfo{Namespace: ns, SandboxID: opts.GetSandboxID(), Volumes: make(map[string]*BackendFileInfo),
-		TemplateID: templateID, InstanceType: opts.GetInstanceType()}
+		TemplateID: templateID, InstanceType: opts.GetInstanceType(), Backend: optionalCreateContextBackend(opts)}
 	defer func() {
 		start := time.Now()
 		var errs error
@@ -788,7 +857,8 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (retEr
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
 	}
 
-	result := &StorageInfo{Namespace: ns, SandboxID: opts.SandboxID, Volumes: make(map[string]*BackendFileInfo)}
+	result := &StorageInfo{Namespace: ns, SandboxID: opts.SandboxID, Volumes: make(map[string]*BackendFileInfo),
+		Backend: optionalCreateContextBackend(opts)}
 	defer func() {
 		if retErr == nil {
 			return
@@ -801,7 +871,7 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (retEr
 		log.G(ctx).Fatalf("Create panic info:%s, stack:%s", panicError, string(debug.Stack()))
 		retErr = ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "%s", panicError)
 	})
-	var restoreMemoryVolURL string
+	var restoreMemoryVolURL, importedMemoryVol string
 	eg, groupCtx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
 		var err error
@@ -820,17 +890,19 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (retEr
 		return err
 	})
 	eg.Go(func() error {
-		url, err := l.prefetchRestoreMemoryVolURL(groupCtx, opts)
+		url, imported, err := l.prefetchRestoreMemoryVolURL(groupCtx, opts)
 		if err != nil {
 			return err
 		}
 		restoreMemoryVolURL = url
+		importedMemoryVol = imported
 		return nil
 	})
 	if err = eg.Wait(); err != nil {
 		return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
 	}
 	result.RestoreMemoryVolURL = restoreMemoryVolURL
+	result.ImportedMemoryVol = importedMemoryVol
 
 	start := time.Now()
 	err = l.writeBackendFileInfo(ctx, opts.SandboxID, result)
@@ -900,46 +972,77 @@ func (l *local) cleanupCreateResult(ctx context.Context, result *StorageInfo) er
 	return errs
 }
 
-func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.CreateContext) (string, error) {
+// prefetchRestoreMemoryVolURL resolves the memory image the shim restores
+// from, and reports the name of the disk when this create imported one of
+// its own (cross-node) rather than pointing at the package's shared image.
+func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.CreateContext) (string, string, error) {
 	if opts == nil || opts.ReqInfo == nil || opts.IsCreateSnapshot() {
-		return "", nil
+		return "", "", nil
+	}
+	// Emptydir / file pools do not use the cubecow snapshot catalog.
+	if !l.useCowStorage() {
+		return "", "", nil
 	}
 	if _, ok := opts.GetSnapshotTemplateID(); !ok {
-		return "", nil
+		return "", "", nil
 	}
 	annotations := opts.ReqInfo.GetAnnotations()
-	if existingURL := strings.TrimSpace(annotations[constants.AnnotationVMSnapshotMemoryVolURL]); existingURL != "" {
-		return existingURL, nil
+	// Do not trust AnnotationVMSnapshotMemoryVolURL: it may be a stale
+	// file:///dev/nvmeXn1 from a previous activate on this or another node.
+	// Always resolve the catalog vol name and Activate for the live path.
+	backend := createContextStorageBackend(opts)
+	// Cross-node: the package's memory image is not on this node, so the
+	// sandbox imports its own. Same-node falls through and points at the
+	// package's shared snapshot, which outlives every sandbox using it.
+	if imp := CrossNodeSandboxImport(annotations); imp != nil {
+		name, devPath, err := imp.Memory(ctx)
+		if err != nil {
+			return "", "", err
+		}
+		if name != "" {
+			return cowFileURLFromPath(devPath), name, nil
+		}
 	}
-	// v4: cubelet is the sole physical authority for snapshot/template memory
-	// volumes. Master passes only logical ids in annotations; we resolve the
-	// vol name + kind from the local snapshot catalog. Master-supplied vol
-	// annotations (MasterAnnotation{App,Runtime}SnapshotMemoryVol/Kind) are no
-	// longer trusted - they may be stale or empty after the master-thin
-	// refactor. fail-fast on catalog miss so create-from-snapshot does not
-	// silently degrade to a cold start.
-	volumeName, volumeKind, err := l.resolveSnapshotMemoryVolFromCatalog(ctx, annotations)
+	volumeName, volumeKind, err := l.resolveSnapshotMemoryVolFromCatalog(ctx, backend, annotations)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if volumeName == "" {
-		return "", nil
+		return "", "", nil
 	}
 	normalizedKind, err := normalizeCowKind(volumeKind)
 	if err != nil {
-		return "", fmt.Errorf("invalid snapshot memory volume kind %q: %w", volumeKind, err)
+		return "", "", fmt.Errorf("invalid snapshot memory volume kind %q: %w", volumeKind, err)
 	}
-	if err := l.ensureCowManager(); err != nil {
-		return "", err
-	}
-	if l.cowManager == nil {
-		return "", fmt.Errorf("cubecow manager not initialized for snapshot memory volume %s", volumeName)
-	}
-	devPath, err := l.cowManager.ResolveDevPath(ctx, volumeName, normalizedKind)
+	store, err := l.storeForBackend(backend)
 	if err != nil {
-		return "", fmt.Errorf("resolve snapshot memory volume %s: %w", volumeName, err)
+		return "", "", err
 	}
-	return cowFileURLFromPath(devPath), nil
+	devPath, err := store.ResolveDevPath(ctx, volumeName, normalizedKind)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve snapshot memory volume %s: %w", volumeName, err)
+	}
+	return cowFileURLFromPath(devPath), "", nil
+}
+
+// releaseImportedMemoryVol deletes the memory disk this sandbox imported.
+// Driven by what Create recorded rather than by the naming convention, so a
+// same-node restore — whose memory is the package's snapshot — is untouched.
+func (l *local) releaseImportedMemoryVol(ctx context.Context, backend string, info *StorageInfo) {
+	name := strings.TrimSpace(info.ImportedMemoryVol)
+	if name == "" || backend != cow.BackendS3 {
+		return
+	}
+	store, err := l.storeForBackend(backend)
+	if err != nil || store == nil {
+		return
+	}
+	if err := store.DeactivateByKind(ctx, name, cowKindVolume); err != nil {
+		log.G(ctx).Warnf("destroy sandbox %s: deactivate imported memory %s: %v", info.SandboxID, name, err)
+	}
+	if err := store.DeleteByKind(ctx, name, cowKindVolume); err != nil {
+		warnVolumeDeleteDeferred(ctx, name, cowKindVolume, err)
+	}
 }
 
 // resolveSnapshotMemoryVolFromCatalog returns the (memory_vol, memory_kind)
@@ -956,7 +1059,7 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 //     the snapshot/template legitimately has no memory image (e.g. rootfs-only
 //     template), so memory prefetch is correctly a no-op.
 //   - Logical id present, catalog hit with memory_vol -> normal restore.
-func (l *local) resolveSnapshotMemoryVolFromCatalog(ctx context.Context, annotations map[string]string) (string, string, error) {
+func (l *local) resolveSnapshotMemoryVolFromCatalog(ctx context.Context, backend string, annotations map[string]string) (string, string, error) {
 	logicalID := strings.TrimSpace(annotations[constants.MasterAnnotationRuntimeSnapshotID])
 	if logicalID == "" {
 		logicalID = strings.TrimSpace(annotations[constants.MasterAnnotationAppSnapshotTemplateID])
@@ -964,7 +1067,10 @@ func (l *local) resolveSnapshotMemoryVolFromCatalog(ctx context.Context, annotat
 	if logicalID == "" {
 		return "", "", nil
 	}
-	entry, err := GetLocalSnapshot(ctx, logicalID)
+	if strings.TrimSpace(backend) == "" {
+		backend = annotations[constants.MasterAnnotationStorageBackend]
+	}
+	entry, err := GetLocalSnapshotFor(ctx, backend, logicalID)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve snapshot %s from local catalog: %w", logicalID, err)
 	}
@@ -1007,18 +1113,18 @@ func (l *local) prepareDefaultMedium(ctx context.Context, opts *workflow.CreateC
 
 	templateID, hasSnapshotTemplate := opts.GetSnapshotTemplateID()
 	if hasSnapshotTemplate && opts.IsCreateSnapshot() && l.useCowStorage() {
-		if err := l.dealCowTemplateBuildRootfs(ctx, templateID, v.Name, sizeLimit, result); err != nil {
+		if err := l.dealCowTemplateBuildRootfs(ctx, opts, templateID, v.Name, sizeLimit, result); err != nil {
 			return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
 		}
 	} else if hasSnapshotTemplate && !opts.IsCubeboxV2() {
-		if err := l.dealCubeboxSnapV1Medium(ctx, opts.SandboxID, templateID, v.Name, sizeLimit, result); err != nil {
+		if err := l.dealCubeboxSnapV1Medium(ctx, opts, opts.SandboxID, templateID, v.Name, sizeLimit, result); err != nil {
 			return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
 		}
 	} else if hasSnapshotTemplate && opts.IsCubeboxV2() && l.useCowStorage() {
-		if err := l.dealCowV2SandboxDefaultMedium(ctx, opts.SandboxID, templateID, v.Name, sizeLimit, result); err != nil {
+		if err := l.dealCowV2SandboxDefaultMedium(ctx, opts, opts.SandboxID, templateID, v.Name, sizeLimit, result); err != nil {
 			return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
 		}
-	} else if err := l.dealDefaultMedium(ctx, opts.SandboxID, v.Name, sizeLimit, result); err != nil {
+	} else if err := l.dealDefaultMedium(ctx, opts, opts.SandboxID, v.Name, sizeLimit, result); err != nil {
 		return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
 	}
 	return nil
@@ -1071,18 +1177,19 @@ func newDefaultMediumBackendInfo(name, filePath string, requested resource.Quant
 	return info
 }
 
-func (l *local) dealCowTemplateBuildRootfs(ctx context.Context, templateID, name, sizeStr string, result *StorageInfo) error {
+func (l *local) dealCowTemplateBuildRootfs(ctx context.Context, opts *workflow.CreateContext, templateID, name, sizeStr string, result *StorageInfo) error {
 	size, err := resource.ParseQuantity(sizeStr)
 	log.G(ctx).Debugf("req GetEmptyDir:%+v,vName:%s", sizeStr, name)
 	if err != nil {
 		log.G(ctx).Errorf("invalid EmptyDir SizeLimit: %s", sizeStr)
 		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid EmptyDir SizeLimit:%v", size)
 	}
-	if err := l.ensureCowManager(); err != nil {
+	store, err := l.storeForBackend(createContextStorageBackend(opts))
+	if err != nil {
 		return err
 	}
 	sizes := normalizeRootfsSizes(size)
-	volume, err := l.cowManager.CreateTemplateBuildRootfs(ctx, templateID, uint64(sizes.backendAllocSize.Value()))
+	volume, err := store.CreateTemplateBuildRootfs(ctx, templateID, uint64(sizes.backendAllocSize.Value()))
 	if err != nil {
 		log.G(ctx).Errorf("allocate cubecow template build rootfs fail:%v", err)
 		return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "allocate cubecow template build rootfs fail:%v", err)
@@ -1091,18 +1198,15 @@ func (l *local) dealCowTemplateBuildRootfs(ctx context.Context, templateID, name
 	return nil
 }
 
-func (l *local) dealCowV2SandboxDefaultMedium(ctx context.Context, sandboxID, templateID, name, sizeStr string, result *StorageInfo) error {
+func (l *local) dealCowV2SandboxDefaultMedium(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID, name, sizeStr string, result *StorageInfo) error {
 	size, err := resource.ParseQuantity(sizeStr)
 	log.G(ctx).Debugf("req GetEmptyDir:%+v,vName:%s", sizeStr, name)
 	if err != nil {
 		log.G(ctx).Errorf("invalid EmptyDir SizeLimit: %s", sizeStr)
 		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid EmptyDir SizeLimit:%v", size)
 	}
-	if err := l.ensureCowManager(); err != nil {
-		return err
-	}
 	sizes := normalizeRootfsSizes(size)
-	volume, err := l.cowManager.CreateSandboxRootfsFromTemplate(ctx, sandboxID, templateID, 0, uint64(sizes.backendAllocSize.Value()))
+	volume, err := l.allocateSnapshotRootfs(ctx, opts, sandboxID, templateID, uint64(sizes.backendAllocSize.Value()))
 	if err != nil {
 		log.G(ctx).Errorf("derive v2 default-medium from template fail: %v", err)
 		return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "derive v2 default-medium from template fail: %v", err)
@@ -1111,7 +1215,120 @@ func (l *local) dealCowV2SandboxDefaultMedium(ctx context.Context, sandboxID, te
 	return nil
 }
 
-func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, sandboxID, templateID, name, sizeStr string, result *StorageInfo) error {
+func createContextStorageBackend(opts *workflow.CreateContext) string {
+	if backend := optionalCreateContextBackend(opts); backend != "" {
+		return backend
+	}
+	return cow.BackendXFS
+}
+
+// storeForBackend returns this node's XFS or S3 Store for the request /
+// persisted backend. Empty / unknown aliases normalize to XFS.
+func (l *local) storeForBackend(backend string) (cow.Store, error) {
+	if l == nil {
+		return nil, fmt.Errorf("storage is not initialized")
+	}
+	normalized, err := cow.NormalizeBackend(backend)
+	if err != nil {
+		return nil, err
+	}
+	switch normalized {
+	case cow.BackendS3:
+		if l.s3CowManager != nil {
+			return l.s3CowManager, nil
+		}
+		return nil, ErrS3NotReady
+	default:
+		if l.cowManager != nil {
+			return l.cowManager, nil
+		}
+	}
+	if err := l.ensureCowManager(); err != nil {
+		return nil, err
+	}
+	switch normalized {
+	case cow.BackendS3:
+		if l.s3CowManager == nil {
+			return nil, ErrS3NotReady
+		}
+		return l.s3CowManager, nil
+	default:
+		if l.cowManager == nil {
+			return nil, fmt.Errorf("xfs cow store is not initialized")
+		}
+		return l.cowManager, nil
+	}
+}
+
+func storageBackendFromInfo(info *StorageInfo) string {
+	if info == nil || strings.TrimSpace(info.Backend) == "" {
+		return cow.BackendXFS
+	}
+	backend, err := cow.NormalizeBackend(info.Backend)
+	if err != nil {
+		return cow.BackendXFS
+	}
+	return backend
+}
+
+func destroyStorageBackend(info *StorageInfo, opts *workflow.DestroyContext) string {
+	if info != nil && strings.TrimSpace(info.Backend) != "" {
+		return storageBackendFromInfo(info)
+	}
+	if opts != nil && opts.DestroyInfo != nil {
+		raw := strings.TrimSpace(opts.DestroyInfo.GetAnnotations()[constants.MasterAnnotationStorageBackend])
+		if raw != "" {
+			if backend, err := cow.NormalizeBackend(raw); err == nil {
+				return backend
+			}
+		}
+	}
+	return cow.BackendXFS
+}
+
+func optionalCreateContextBackend(opts *workflow.CreateContext) string {
+	if opts == nil || opts.ReqInfo == nil {
+		return ""
+	}
+	if raw := strings.TrimSpace(opts.ReqInfo.GetBackend()); raw != "" {
+		if backend, err := cow.NormalizeBackend(raw); err == nil {
+			return backend
+		}
+	}
+	raw := strings.TrimSpace(opts.ReqInfo.GetAnnotations()[constants.MasterAnnotationStorageBackend])
+	if raw == "" {
+		return ""
+	}
+	backend, err := cow.NormalizeBackend(raw)
+	if err != nil {
+		return ""
+	}
+	return backend
+}
+
+func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID string, desiredSizeBytes uint64) (*cowVolume, error) {
+	backend := createContextStorageBackend(opts)
+	store, err := l.storeForBackend(backend)
+	if err != nil {
+		return nil, err
+	}
+	// Cross-node: no package here to clone from, so the sandbox imports the
+	// rootfs straight onto the name a clone would have produced.
+	if imp := CrossNodeSandboxImport(opts.ReqInfo.GetAnnotations()); imp != nil {
+		name, dev, err := imp.Rootfs(ctx, 0)
+		if err != nil {
+			return nil, err
+		}
+		return newCowVolume(name, cowKindVolume, 0, dev), nil
+	}
+	// Cold start and same-node Pause Resume: always clone the package rootfs
+	// snapshot into a sandbox-private RW volume (sb-<id>-rootfs-genN). Do not
+	// attach the package snap as the live disk — S3 snaps are RO and Commit
+	// requires a volume source (volume follows sandbox lifecycle).
+	return store.CreateSandboxRootfsFromTemplate(ctx, sandboxID, templateID, 0, desiredSizeBytes)
+}
+
+func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID, name, sizeStr string, result *StorageInfo) error {
 	if l.useCowStorage() {
 		size, err := resource.ParseQuantity(sizeStr)
 		log.G(ctx).Debugf("req GetEmptyDir:%+v,vName:%s", sizeStr, name)
@@ -1123,7 +1340,7 @@ func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, sandboxID, template
 			return err
 		}
 		sizes := normalizeRootfsSizes(size)
-		volume, err := l.cowManager.CreateSandboxRootfsFromTemplate(ctx, sandboxID, templateID, 0, uint64(sizes.backendAllocSize.Value()))
+		volume, err := l.allocateSnapshotRootfs(ctx, opts, sandboxID, templateID, uint64(sizes.backendAllocSize.Value()))
 		if err != nil {
 			log.G(ctx).Errorf("allocate cubebox storage fail:%v", err)
 			return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "allocate cubebox storage fail:%v", err)
@@ -1144,6 +1361,11 @@ func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, sandboxID, template
 	}
 
 	p, ok := l.poolFormat.Load(templateID)
+	if !ok {
+		// Template may still be in the create-time tmp pool until the
+		// creating sandbox is Destroy'd and promoted into poolFormat.
+		p, ok = l.tmpPoolFormat.Load(templateID)
+	}
 	if !ok {
 		return fmt.Errorf("failed to get v1 template storage pool for templateID %s", templateID)
 	}
@@ -1167,7 +1389,7 @@ func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, sandboxID, template
 	}
 }
 
-func (l *local) dealDefaultMedium(ctx context.Context, sandboxID, name, sizeStr string, result *StorageInfo) error {
+func (l *local) dealDefaultMedium(ctx context.Context, opts *workflow.CreateContext, sandboxID, name, sizeStr string, result *StorageInfo) error {
 	size, err := resource.ParseQuantity(sizeStr)
 	log.G(ctx).Debugf("req GetEmptyDir:%+v,vName:%s", sizeStr, name)
 	if err != nil {
@@ -1177,10 +1399,11 @@ func (l *local) dealDefaultMedium(ctx context.Context, sandboxID, name, sizeStr 
 	sizes := normalizeRootfsSizes(size)
 
 	if l.useCowStorage() {
-		if err := l.ensureCowManager(); err != nil {
+		store, err := l.storeForBackend(createContextStorageBackend(opts))
+		if err != nil {
 			return err
 		}
-		volume, err := l.cowManager.CreateDefaultMediumVolume(ctx, sandboxID, name, uint64(sizes.backendAllocSize.Value()))
+		volume, err := store.CreateDefaultMediumVolume(ctx, sandboxID, name, uint64(sizes.backendAllocSize.Value()))
 		if err != nil {
 			log.G(ctx).Errorf("allocate storage fail:%v", err)
 			return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "allocate storage fail:%v", err)
@@ -1272,8 +1495,29 @@ func (l *local) destroy(ctx context.Context, info *StorageInfo, opts *workflow.D
 		errs = errors.Join(errs, err)
 	}
 
-	if err := l.destroyDefaultMediumVolumes(ctx, info); err != nil {
+	if err := l.destroyDefaultMediumVolumes(ctx, info, opts); err != nil {
 		errs = errors.Join(errs, err)
+	}
+
+	// Private S3 metadata volume (s3-meta-<sandboxID>) is not always listed in
+	// info.Volumes; release by sandbox id. Also drop the sandbox-owned package
+	// dir used as the cold-start metadata mount point.
+	if l.useCowStorage() && info != nil && strings.TrimSpace(info.SandboxID) != "" {
+		backend := destroyStorageBackend(info, opts)
+		if err := ReleaseS3MetadataVolume(ctx, backend, info.SandboxID); err != nil {
+			log.G(ctx).Warnf("destroy sandbox %s: release s3 metadata: %v", info.SandboxID, err)
+		}
+		// A rollback that was killed mid-flight leaves its copy of the
+		// snapshot metadata behind. It is this sandbox's disk, so it goes here.
+		if err := ReleaseRollbackSnapshotMetadata(ctx, backend, info.SandboxID); err != nil {
+			log.G(ctx).Warnf("destroy sandbox %s: release rollback metadata: %v", info.SandboxID, err)
+		}
+		l.releaseImportedMemoryVol(ctx, backend, info)
+		if home := SnapshotHome(backend, SnapshotKindNormal, info.SandboxID); home != "" {
+			if err := os.RemoveAll(home); err != nil && !os.IsNotExist(err) {
+				log.G(ctx).Warnf("destroy sandbox %s: remove package dir %s: %v", info.SandboxID, home, err)
+			}
+		}
 	}
 
 	// plugin_volume: unmount all volumes that were provisioned via VolumePlugin.
@@ -1291,32 +1535,45 @@ func (l *local) destroy(ctx context.Context, info *StorageInfo, opts *workflow.D
 	return nil
 }
 
-func (l *local) destroyDefaultMediumVolumes(ctx context.Context, info *StorageInfo) error {
+func (l *local) destroyDefaultMediumVolumes(ctx context.Context, info *StorageInfo, opts *workflow.DestroyContext) error {
 	var errs error
+	var store cow.Store
 	for _, v := range info.Volumes {
 		if v == nil {
 			continue
 		}
 		if v.VolumeName != "" {
-			if err := l.ensureCowManager(); err != nil {
-				errs = errors.Join(errs, err)
+			if refuseS3PackageObjectDelete(destroyStorageBackend(info, opts), v.VolumeName, info.SandboxID) {
+				// On S3, package objects are removed by the snapshot delete
+				// flow only. A sandbox that recorded one as its own is a
+				// create-path bug: leaking it here is the correct outcome, so
+				// name it loudly instead of destroying a package another
+				// sandbox may still restore from.
+				log.G(ctx).Errorf("destroy sandbox %s: refusing to delete %s kind %s: not minted for this sandbox",
+					info.SandboxID, v.VolumeName, v.Kind)
 				continue
 			}
-			if l.cowManager == nil {
-				errs = errors.Join(errs, fmt.Errorf("cubecow manager not initialized for volume %s", v.VolumeName))
-				continue
+			if store == nil {
+				selected, err := l.storeForBackend(destroyStorageBackend(info, opts))
+				if err != nil {
+					errs = errors.Join(errs, err)
+					continue
+				}
+				store = selected
 			}
-			err := l.cowManager.DeleteByKind(ctx, v.VolumeName, v.Kind)
+			err := store.DeleteByKind(ctx, v.VolumeName, v.Kind)
 			if err != nil {
-				errs = errors.Join(errs, err)
-				log.G(ctx).Fatalf("delete cubecow object:%s kind:%s fail:%v", v.VolumeName, v.Kind, err)
+				// Busy / in-flight export is not a Cubelet leak. The
+				// backend collects the object; leak detection greps
+				// volumeDeleteDeferredLog and ignores this name.
+				warnVolumeDeleteDeferred(ctx, v.VolumeName, v.Kind, err)
 			}
 			continue
 		}
 		err := atomicDelete(v.FilePath)
 		if err != nil {
 			errs = errors.Join(errs, err)
-			log.G(ctx).Fatalf("delete:%s,fail:%v", v.FilePath, err)
+			log.G(ctx).Errorf("delete:%s,fail:%v", v.FilePath, err)
 		} else {
 			l.DecrSize(v.SizeLimit)
 		}
@@ -1358,6 +1615,15 @@ func (l *local) destroyCubeBoxTemplateBase(ctx context.Context, info *StorageInf
 		return err
 	}
 	l.poolFormat.Store(templateID, p)
+	// The creating sandbox's EmptyDir volume points at the template base.
+	// Keep that file for the pool; do not let destroyDefaultMediumVolumes
+	// atomicDelete it afterward.
+	for name, v := range info.Volumes {
+		if v == nil || v.VolumeName != "" {
+			continue
+		}
+		delete(info.Volumes, name)
+	}
 	return nil
 }
 
@@ -1594,12 +1860,20 @@ type StorageInfo struct {
 
 	InstanceType string    `json:"instanceType,omitempty"`
 	TemplateID   string    `json:"templateId,omitempty"`
+	Backend      string    `json:"backend,omitempty"`
 	CreateAt     time.Time `json:"createAt,omitempty"`
 	UpdateAt     time.Time `json:"updateAt,omitempty"`
 
 	HostDirBackendInfos map[string]*HostDirBackendInfo `json:"hostDirBackendInfos,omitempty"`
 
 	RestoreMemoryVolURL string `json:"-"`
+
+	// ImportedMemoryVol is the memory disk a cross-node restore imported for
+	// this sandbox, and the only memory disk destroy may delete. Same-node
+	// restores leave it empty: they read the package's own memory snapshot,
+	// which outlives every sandbox started from it. Persisted, so a cubelet
+	// restart does not turn it into a leak.
+	ImportedMemoryVol string `json:"importedMemoryVol,omitempty"`
 
 	// PluginVolumeBackendInfos records the result of every plugin_volume attach.
 	// Keyed by Volume.name (the RunCubeSandboxRequest name, not volumeID).

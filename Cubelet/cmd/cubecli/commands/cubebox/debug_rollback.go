@@ -70,6 +70,10 @@ Examples:
 			Name:  "desired-size",
 			Usage: "minimum rootfs size after deriving the new generation; defaults to debug-commit rootfs_size_bytes when --from-commit-result is used",
 		},
+		&cli.StringFlag{
+			Name:  "backend",
+			Usage: "CoW backend (xfs|s3); empty uses catalog or xfs",
+		},
 		&cli.BoolFlag{
 			Name:  "json",
 			Usage: "output result in JSON format",
@@ -90,6 +94,7 @@ type debugRollbackSandboxInput struct {
 	RootfsSizeBytes uint64 `json:"rootfs_size_bytes"`
 	SnapshotPath    string `json:"snapshot_path"`
 	TemplateID      string `json:"template_id"`
+	Backend         string `json:"backend,omitempty"`
 }
 
 type debugRollbackSandboxResult struct {
@@ -162,6 +167,7 @@ func debugRollbackSandboxAction(cliCtx *cli.Context) error {
 		MetaDir:     input.MetaDir,
 		NewGen:      input.NewGen,
 		DesiredSize: input.DesiredSize,
+		Backend:     input.Backend,
 	})
 	duration := time.Since(startTime)
 	if err != nil {
@@ -244,6 +250,7 @@ func readDebugRollbackInput(cliCtx *cli.Context) (*debugRollbackSandboxInput, er
 	input.RootfsVol = firstNonEmpty(cliCtx.String("rootfs-vol"), input.RootfsVol)
 	input.MemoryVol = firstNonEmpty(cliCtx.String("memory-vol"), input.MemoryVol)
 	input.MetaDir = firstNonEmpty(cliCtx.String("meta-dir"), input.MetaDir)
+	input.Backend = firstNonEmpty(cliCtx.String("backend"), input.Backend)
 	if cliCtx.IsSet("new-gen") {
 		input.NewGen = uint32(cliCtx.Uint("new-gen"))
 	}

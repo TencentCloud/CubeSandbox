@@ -32,6 +32,7 @@ type snapshotCreateRequest struct {
 	RequestID   string `json:"requestID,omitempty"`
 	SandboxID   string `json:"sandbox_id,omitempty"`
 	DisplayName string `json:"display_name,omitempty"`
+	Backend     string `json:"backend,omitempty"`
 }
 
 type snapshotResponse struct {
@@ -53,7 +54,10 @@ type snapshotResource struct {
 	DisplayName               string                      `json:"display_name,omitempty"`
 	OriginSandboxID           string                      `json:"origin_sandbox_id,omitempty"`
 	OriginNodeID              string                      `json:"origin_node_id,omitempty"`
+	OriginNodeIP              string                      `json:"origin_node_ip,omitempty"`
 	StorageBackend            string                      `json:"storage_backend,omitempty"`
+	Backend                   string                      `json:"backend,omitempty"`
+	RemoteStatus              string                      `json:"remote_status,omitempty"`
 	Retain                    bool                        `json:"retain,omitempty"`
 	RootfsSizeBytesAtSnapshot uint64                      `json:"rootfs_size_bytes_at_snapshot,omitempty"`
 	LastError                 string                      `json:"last_error,omitempty"`
@@ -188,20 +192,23 @@ var SnapshotListCommand = cli.Command{
 		}
 		wideOutput := strings.EqualFold(strings.TrimSpace(c.String("output")), "wide")
 		w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
-		header := "SNAPSHOT_ID\tSTATUS\tSANDBOX_ID\tNODE_ID\tCREATED_AT"
+		header := "SNAPSHOT_ID\tSTATUS\tSANDBOX_ID\tNODE_ID\tBACKEND\tREMOTE_STATUS\tCREATED_AT"
 		if wideOutput {
-			header = "SNAPSHOT_ID\tSTATUS\tDISPLAY_NAME\tSANDBOX_ID\tNODE_ID\tRUNTIME_REFS\tBACKEND\tLAST_ERROR"
+			header = "SNAPSHOT_ID\tSTATUS\tDISPLAY_NAME\tSANDBOX_ID\tNODE_ID\tRUNTIME_REFS\tBACKEND\tREMOTE_STATUS\tLAST_ERROR"
 		}
 		fmt.Fprintln(w, header)
 		for _, item := range rsp.Data {
 			originNode := item.OriginNodeID
+			backend := firstNonEmptyCLI(item.Backend, item.StorageBackend)
+			var row string
 			if wideOutput {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
-					item.SnapshotID, item.Status, item.DisplayName, item.OriginSandboxID, originNode, item.RuntimeRefCount, item.StorageBackend, item.LastError)
-				continue
+				row = fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s",
+					item.SnapshotID, item.Status, item.DisplayName, item.OriginSandboxID, originNode, item.RuntimeRefCount, backend, item.RemoteStatus, item.LastError)
+			} else {
+				row = fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s",
+					item.SnapshotID, item.Status, item.OriginSandboxID, originNode, backend, item.RemoteStatus, item.CreatedAt)
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-				item.SnapshotID, item.Status, item.OriginSandboxID, originNode, item.CreatedAt)
+			fmt.Fprintln(w, row)
 		}
 		return w.Flush()
 	},
@@ -477,7 +484,8 @@ func printSnapshotResponse(rsp *snapshotResponse) {
 	log.Printf("display_name: %s\n", rsp.Snapshot.DisplayName)
 	log.Printf("origin_sandbox_id: %s\n", rsp.Snapshot.OriginSandboxID)
 	log.Printf("origin_node_id: %s\n", rsp.Snapshot.OriginNodeID)
-	log.Printf("storage_backend: %s\n", rsp.Snapshot.StorageBackend)
+	log.Printf("backend: %s\n", firstNonEmptyCLI(rsp.Snapshot.Backend, rsp.Snapshot.StorageBackend))
+	log.Printf("remote_status: %s\n", rsp.Snapshot.RemoteStatus)
 	log.Printf("runtime_ref_count: %d\n", rsp.Snapshot.RuntimeRefCount)
 	if len(rsp.Snapshot.RuntimeRefSandboxes) > 0 {
 		log.Printf("runtime_ref_sandboxes: %s\n", strings.Join(rsp.Snapshot.RuntimeRefSandboxes, ","))
@@ -495,6 +503,15 @@ func printSnapshotResponse(rsp *snapshotResponse) {
 			replica.NodeID, replica.NodeIP, replica.Status, replica.Phase, replica.Spec, replica.ErrorMessage)
 	}
 	_ = w.Flush()
+}
+
+func firstNonEmptyCLI(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func printOperationResponse(info *operationResource) {

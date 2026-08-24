@@ -53,6 +53,36 @@ func TestNormalizeTemplateImageRequestDefaults(t *testing.T) {
 	if !strings.HasPrefix(req.TemplateID, "tpl-") {
 		t.Fatalf("unexpected generated TemplateID: %q", req.TemplateID)
 	}
+	if req.Backend != "" {
+		t.Fatalf("Backend=%q, omit must stay empty for historical create-from-image", req.Backend)
+	}
+}
+
+func TestNormalizeTemplateImageRequestBackendS3(t *testing.T) {
+	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		Backend:           "S3",
+	})
+	if err != nil {
+		t.Fatalf("normalizeTemplateImageRequest failed: %v", err)
+	}
+	if req.Backend != "s3" {
+		t.Fatalf("Backend=%q, want s3", req.Backend)
+	}
+}
+
+func TestNormalizeTemplateImageRequestRejectsUnknownBackend(t *testing.T) {
+	_, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		WritableLayerSize: "20Gi",
+		Backend:           "nfs",
+	})
+	if err == nil {
+		t.Fatal("expected unsupported backend error")
+	}
 }
 
 func TestNormalizeTemplateImageRequestTrimsAndValidatesSourceImageRef(t *testing.T) {
@@ -602,6 +632,12 @@ func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.
 	}
 	if got.Annotations[constants.AnnotationsExposedPort] != "80:8080" {
 		t.Fatalf("unexpected exposed ports annotation: %q", got.Annotations[constants.AnnotationsExposedPort])
+	}
+	if got.Backend != "" {
+		t.Fatalf("Backend=%q, omit must not invent a backend", got.Backend)
+	}
+	if _, ok := got.Annotations[constants.CubeAnnotationStorageBackend]; ok {
+		t.Fatal("omitted backend must not inject cube.master.storage.backend")
 	}
 }
 
@@ -2043,7 +2079,7 @@ func TestRunRedoTemplateImageJobRegeneratesRequestForRedoTemplateID(t *testing.T
 			Status:                  ArtifactStatusReady,
 		}, nil
 	})
-	patches.ApplyFunc(cleanupTemplateReplicasOnNodes, func(ctx context.Context, templateID string, replicas []models.TemplateReplica, targets []*node.Node) error {
+	patches.ApplyFunc(cleanupTemplateReplicasOnNodes, func(ctx context.Context, templateID string, replicas []models.TemplateReplica, targets []*node.Node, _ string) error {
 		if templateID != redoTemplateID {
 			t.Fatalf("cleanup templateID = %q, want %q", templateID, redoTemplateID)
 		}

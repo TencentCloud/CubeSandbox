@@ -88,6 +88,16 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		rsp.Ret.RetMsg = "AppSnapshot requires storage_backend=cubecow"
 		return rsp, nil
 	}
+	backendRaw := req.GetBackend()
+	if strings.TrimSpace(backendRaw) == "" {
+		backendRaw = createReq.GetAnnotations()[constants.MasterAnnotationStorageBackend]
+	}
+	backend, err := resolveRequestStorageBackend(backendRaw)
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
 
 	rt := &CubeLog.RequestTrace{
 		Action:       "AppSnapshot",
@@ -202,7 +212,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	}()
 
 	cleanupSnapshotObjects := func() {
-		cleanupCowSnapshotObjects(ctx, stepLog, memoryObject, rootfsObject)
+		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
 	}
 
 	stepLog.Info("Step 2: Getting cubebox spec...")
@@ -230,38 +240,42 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 
-	snapshotDir := req.GetSnapshotDir()
-	if snapshotDir == "" {
-		snapshotDir = DefaultSnapshotDir
-	}
 	specDir := fmt.Sprintf("%dC%dM", resourceSpec.CPU, resourceSpec.Memory)
-	snapshotPath := filepath.Join(snapshotDir, "cubebox", templateID, specDir)
-	if _, err := pathutil.ValidatePathUnderBase(snapshotDir, snapshotPath); err != nil {
+	layout, err := prepareSnapshotWorkLayout(backend, storage.SnapshotKindNormal, templateID, req.GetSnapshotDir(), specDir)
+	if err != nil {
 		stepLog.Errorf("Invalid snapshot path: %v", err)
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		rsp.Ret.RetMsg = fmt.Sprintf("invalid snapshot path: %v", err)
 		return rsp, nil
 	}
+	snapshotPath := layout.Home
 	rsp.SnapshotPath = snapshotPath
-
-	tmpSnapshotPath := snapshotPath + ".tmp"
-	if _, err := pathutil.ValidatePathUnderBase(snapshotDir, tmpSnapshotPath); err != nil {
-		stepLog.Errorf("Invalid tmp snapshot path: %v", err)
-		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
-		rsp.Ret.RetMsg = fmt.Sprintf("invalid tmp snapshot path: %v", err)
-		return rsp, nil
+	tmpSnapshotPath := layout.TmpHome
+	prevCleanupSnapshotObjects := cleanupSnapshotObjects
+	cleanupSnapshotObjects = func() {
+		layout.releaseMetadata(ctx)
+		prevCleanupSnapshotObjects()
+		layout.discardTmpDir()
+		if !layout.usesTmpRename() {
+			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
+		}
 	}
 	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
-	stepLog.Infof("Step 3: Creating snapshot at temporary path: %s", tmpSnapshotPath)
+	stepLog.Infof("Step 3: Creating snapshot at path: %s", layout.Home)
 
-	// NOCC:Path Traversal()
-	if err := os.RemoveAll(tmpSnapshotPath); err != nil {
-		stepLog.Warnf("Failed to remove existing temp directory: %v", err)
+	layout.resetTmpDir()
+	if err := layout.prepareWork(ctx); err != nil {
+		stepLog.Errorf("Failed to create snapshot dir: %v", err)
+		cleanupSnapshotObjects()
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to create snapshot dir: %v", err)
+		return rsp, nil
 	}
 
-	memoryObject, err = storage.CreateMemoryVolume(ctx, templateID, memorySizeBytes)
+	memoryObject, err = storage.CreateMemoryVolumeFor(ctx, backend, templateID, memorySizeBytes)
 	if err != nil {
 		stepLog.Errorf("Failed to create template memory volume: %v", err)
+		cleanupSnapshotObjects()
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 			rsp.Ret.RetMsg = fmt.Sprintf("template memory volume already exists: %v", err)
@@ -287,31 +301,24 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	// no base memory blob to overlay onto, so we always ask for a full memory
 	// snapshot. Incremental is reserved for CommitSandbox where the running
 	// sandbox is bound to a prior snapshot whose memory file we can clone.
-	if err := s.executeCubeRuntimeSnapshot(ctx, sandboxID, spec, tmpSnapshotPath, memoryObject.DevPath, snapshotTypeFull); err != nil {
+	if err := s.executeCubeRuntimeSnapshot(ctx, sandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeFull); err != nil {
 		stepLog.Errorf("Failed to execute cube-runtime snapshot: %v", err)
 
-		os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
 		cleanupSnapshotObjects()
+		layout.discardTmpDir()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to execute cube-runtime snapshot: %v", err)
 		return rsp, nil
 	}
 	stepLog.Info("cube-runtime snapshot executed successfully")
+	// Do not write memory.dev: host-local /dev paths must not be baked into
+	// packages. Restore resolves memory via catalog vol name + ResolveDevPath.
 
-	if err := writeMemoryDevFile(tmpSnapshotPath, memoryObject.DevPath); err != nil {
-		stepLog.Errorf("Failed to write memory.dev: %v", err)
-		os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
-		cleanupSnapshotObjects()
-		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to write memory.dev: %v", err)
-		return rsp, nil
-	}
-
-	rootfsObject, err = storage.CommitRootfsFromBuild(ctx, templateID)
+	rootfsObject, err = storage.CommitRootfsFromBuildFor(ctx, backend, templateID)
 	if err != nil {
 		stepLog.Errorf("Failed to create template rootfs snapshot: %v", err)
-		os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
 		cleanupSnapshotObjects()
+		layout.discardTmpDir()
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 			rsp.Ret.RetMsg = fmt.Sprintf("template rootfs already exists: %v", err)
@@ -337,8 +344,8 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	failTemporaryDestroy := func(retCode errorcode.ErrorCode, retMsg string) (*cubebox.AppSnapshotResponse, error) {
 		stepLog.Warn("Fallback: trying force destroy...")
 		forceDestroyCubebox()
-		os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
 		cleanupSnapshotObjects()
+		layout.discardTmpDir()
 		rsp.Ret.RetCode = retCode
 		rsp.Ret.RetMsg = retMsg
 		return rsp, nil
@@ -355,27 +362,37 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	}
 	temporaryCubeboxDestroyed = true
 
-	if err := deactivateCowSnapshotObjects(ctx, stepLog, memoryObject, rootfsObject); err != nil {
-		os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
+	if err := deactivateCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject); err != nil {
 		cleanupSnapshotObjects()
+		layout.discardTmpDir()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to deactivate snapshot objects: %v", err)
 		return rsp, nil
 	}
 
-	stepLog.Info("Step 6: Moving snapshot to final path...")
+	if layout.usesTmpRename() {
+		stepLog.Info("Step 6: Moving snapshot to final path...")
 
-	// NOCC:Path Traversal()
-	if err := os.RemoveAll(snapshotPath); err != nil {
-		stepLog.Warnf("Failed to remove existing snapshot directory: %v", err)
+		// NOCC:Path Traversal()
+		if err := os.RemoveAll(snapshotPath); err != nil {
+			stepLog.Warnf("Failed to remove existing snapshot directory: %v", err)
+		}
+
+		if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
+			stepLog.Errorf("Failed to move snapshot to final path: %v", err)
+			os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
+			cleanupSnapshotObjects()
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to move snapshot: %v", err)
+			return rsp, nil
+		}
 	}
-
-	if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
-		stepLog.Errorf("Failed to move snapshot to final path: %v", err)
-		os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
+	if err := storage.EnsureShimSpecDirLink(layout.Home, specDir); err != nil {
+		stepLog.Errorf("Failed to expose shim spec dir: %v", err)
 		cleanupSnapshotObjects()
+		os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to move snapshot: %v", err)
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to expose shim spec dir: %v", err)
 		return rsp, nil
 	}
 
@@ -404,16 +421,18 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	// CleanupTemplate calls can resolve physical refs locally. The build
 	// rootfs name is deterministic on cubelet side; we record it so cleanup
 	// works even if the live volume has already been removed by other paths.
-	if err := storage.WriteSnapshotCatalog(&storage.SnapshotCatalogEntry{
+	if err := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
 		SnapshotID:        templateID,
 		InstanceType:      "cubebox",
 		SpecDir:           specDir,
-		SnapshotPath:      snapshotPath,
-		MetaDir:           snapshotPath,
+		SnapshotPath:      layout.Home,
+		MetaDir:           layout.MetaDir,
 		RootfsVol:         rootfsObject.Name,
 		RootfsKind:        rootfsObject.Kind,
 		MemoryVol:         memoryObject.Name,
 		MemoryKind:        memoryObject.Kind,
+		MetadataVol:       storage.S3MetadataCatalogVol(backend, templateID),
+		MetadataKind:      storage.S3MetadataCatalogKind(backend),
 		BuildRootfsVol:    storage.TemplateBuildRootfsName(templateID),
 		BuildRootfsKind:   storage.CowKindVolume,
 		RootfsSizeBytes:   rootfsObject.SizeBytes,
@@ -425,6 +444,23 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		// deterministic-name cleanup fallback keeps working. Log loudly so
 		// operators notice drift between master and cubelet local view.
 		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", templateID, err)
+	}
+	if err := storage.FinalizeS3PackageSnapshots(ctx, backend, templateID); err != nil {
+		stepLog.Warnf("s3 finalize package snapshots %s failed: %v", templateID, err)
+	}
+
+	// Export the rootfs snapshot only. Every sandbox rootfs is a child of
+	// it, and a child's export references only chunks that already have a
+	// committed S3 object — the parent's are silently skipped, so without
+	// this a cross-node restore imports a rootfs with no ext4 metadata at
+	// all (measured: 17 objects／7.2MB instead of 80／74.9MB; the imported
+	// disk has no root inode). Memory and metadata of a template are not in
+	// that chain and stay node-local. Best-effort: a template that fails to
+	// export still works on this node.
+	if uuid, err := storage.UploadTemplateRootfs(ctx, backend, templateID); err != nil {
+		stepLog.Warnf("s3 export template rootfs %s failed: %v", templateID, err)
+	} else if uuid != "" {
+		stepLog.Infof("s3 exported template rootfs %s uuid=%s", templateID, uuid)
 	}
 
 	stepLog.Infof("AppSnapshot completed successfully: snapshotPath=%s", snapshotPath)
@@ -773,39 +809,52 @@ func alignUp(value, alignment uint64) uint64 {
 	return value + alignment - value%alignment
 }
 
-func writeMemoryDevFile(snapshotPath, memoryDev string) error {
-	if memoryDev == "" {
-		return fmt.Errorf("memory dev path is empty")
-	}
-	return os.WriteFile(filepath.Join(snapshotPath, "memory.dev"), []byte(memoryDev+"\n"), 0644)
-}
-
 func cleanupCowSnapshotObjects(ctx context.Context, stepLog *log.CubeWrapperLogEntry, memoryObject, rootfsObject *storage.CowSnapshotObject) {
-	cleanupCowSnapshotObject(ctx, stepLog, "memory volume", memoryObject)
-	cleanupCowSnapshotObject(ctx, stepLog, "rootfs snapshot", rootfsObject)
+	cleanupCowSnapshotObjectsOn(ctx, stepLog, "", memoryObject, rootfsObject)
 }
 
-func cleanupCowSnapshotObject(ctx context.Context, stepLog *log.CubeWrapperLogEntry, objectLabel string, object *storage.CowSnapshotObject) {
+func cleanupCowSnapshotObjectsOn(ctx context.Context, stepLog *log.CubeWrapperLogEntry, backend string, memoryObject, rootfsObject *storage.CowSnapshotObject) {
+	cleanupCowSnapshotObjectOn(ctx, stepLog, backend, "memory volume", memoryObject)
+	cleanupCowSnapshotObjectOn(ctx, stepLog, backend, "rootfs snapshot", rootfsObject)
+}
+
+func cleanupCowSnapshotObjectOn(ctx context.Context, stepLog *log.CubeWrapperLogEntry, backend, objectLabel string, object *storage.CowSnapshotObject) {
 	if object == nil || object.Name == "" {
 		return
 	}
-	if cleanupErr := storage.DeleteObject(ctx, object.Name, object.Kind); cleanupErr != nil {
+	var cleanupErr error
+	if strings.TrimSpace(backend) == "" {
+		cleanupErr = storage.DeleteObject(ctx, object.Name, object.Kind)
+	} else {
+		cleanupErr = storage.DeleteObjectFor(ctx, backend, object.Name, object.Kind)
+	}
+	if cleanupErr != nil {
 		stepLog.Warnf("failed to cleanup %s %s: %v", objectLabel, object.Name, cleanupErr)
 	}
 }
 
 func deactivateCowSnapshotObjects(ctx context.Context, stepLog *log.CubeWrapperLogEntry, memoryObject, rootfsObject *storage.CowSnapshotObject) error {
-	if err := deactivateCowSnapshotObject(ctx, stepLog, "rootfs snapshot", rootfsObject); err != nil {
-		return err
-	}
-	return deactivateCowSnapshotObject(ctx, stepLog, "memory volume", memoryObject)
+	return deactivateCowSnapshotObjectsOn(ctx, stepLog, "", memoryObject, rootfsObject)
 }
 
-func deactivateCowSnapshotObject(ctx context.Context, stepLog *log.CubeWrapperLogEntry, objectLabel string, object *storage.CowSnapshotObject) error {
+func deactivateCowSnapshotObjectsOn(ctx context.Context, stepLog *log.CubeWrapperLogEntry, backend string, memoryObject, rootfsObject *storage.CowSnapshotObject) error {
+	if err := deactivateCowSnapshotObjectOn(ctx, stepLog, backend, "rootfs snapshot", rootfsObject); err != nil {
+		return err
+	}
+	return deactivateCowSnapshotObjectOn(ctx, stepLog, backend, "memory volume", memoryObject)
+}
+
+func deactivateCowSnapshotObjectOn(ctx context.Context, stepLog *log.CubeWrapperLogEntry, backend, objectLabel string, object *storage.CowSnapshotObject) error {
 	if object == nil || object.Name == "" {
 		return nil
 	}
-	if err := storage.DeactivateObject(ctx, object.Name, object.Kind); err != nil {
+	var err error
+	if strings.TrimSpace(backend) == "" {
+		err = storage.DeactivateObject(ctx, object.Name, object.Kind)
+	} else {
+		err = storage.DeactivateObjectFor(ctx, backend, object.Name, object.Kind)
+	}
+	if err != nil {
 		return fmt.Errorf("deactivate %s %s: %w", objectLabel, object.Name, err)
 	}
 	stepLog.Infof("deactivated %s %s", objectLabel, object.Name)

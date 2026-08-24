@@ -16,7 +16,8 @@
 //     the thread-local last_error constraint internally.
 //
 // Lifecycle:
-//   - A Cubelet process should hold exactly one *Engine instance.
+//   - Cubelet holds one *Engine handle per cubecow backend.kind
+//     (reflink for xfs, s3 for S3). Each handle is a separate cubecow_init.
 //   - Initialization supports either a TOML config path (Init / InitWithoutLogging)
 //     or a JSON config string (InitFromJSON / InitWithoutLoggingFromJSON).
 //   - Repeated Init calls are not supported as a normal pattern; storage/plugin.go

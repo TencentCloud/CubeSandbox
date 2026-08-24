@@ -226,6 +226,7 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		SandboxID:   sandboxID,
 		TemplateID:  templateID,
 		SnapshotDir: createReq.SnapshotDir,
+		Backend:     storageBackendFromCreate(createReq),
 	})
 	commitCancel()
 	if err != nil {
@@ -280,6 +281,7 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		_, cleanupErr := cubelet.CleanupTemplate(cleanupCtx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CleanupTemplateRequest{
 			RequestID:  uuid.NewString(),
 			TemplateID: templateID,
+			Backend:    pinnedCleanupBackend(storageBackendFromCreate(createReq)),
 		})
 		cleanupCancel()
 		if cleanupErr != nil {
@@ -420,6 +422,9 @@ func isDuplicateKeyError(err error) bool {
 	if errors.Is(err, gorm.ErrDuplicatedKey) {
 		return true
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "Duplicate entry") || strings.Contains(msg, "1062")
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "1062") ||
+		strings.Contains(msg, "duplicate entry") ||
+		strings.Contains(msg, "unique constraint") ||
+		strings.Contains(msg, "duplicate key")
 }

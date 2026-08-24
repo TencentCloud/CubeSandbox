@@ -31,6 +31,9 @@ const (
 	shimUpdatePauseToSnapshotAction     = "PauseToSnapshot"
 )
 
+// Indirection so tests can observe which package objects rollback detaches.
+var deactivateRollbackObject = storage.DeactivateObjectFor
+
 type rollbackRestoreConfig struct {
 	SourceURL    string               `json:"source_url"`
 	MemoryVolURL string               `json:"memory_vol_url,omitempty"`
@@ -97,7 +100,46 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
-	currentRootfs, err := storage.GetSandboxRootfs(ctx, req.GetSandboxID(), rootVolumeName)
+
+	backend, err := resolveRequestStorageBackend(req.GetBackend())
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	stepLog = stepLog.WithFields(CubeLog.Fields{"backend": backend})
+
+	rootfsVol, memoryVol, memoryKind, metaDir, err := resolveRollbackTargets(ctx, backend, req)
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+
+	// S3 Finalize unmounts package metadata. Restore reads
+	// <meta>/snapshot/{config,state}.json from that disk, so clone the sealed
+	// snap into a disk this sandbox owns and read the config from there. XFS
+	// is a no-op and keeps the catalog MetaDir.
+	// Same-node only: catalog miss (no local package) already failed above.
+	rollbackMetaDir, err := storage.MountRollbackSnapshotMetadata(ctx, backend, req.GetSnapshotID(), req.GetSandboxID())
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to mount snapshot metadata: %v", err)
+		return rsp, nil
+	}
+	if rollbackMetaDir != "" {
+		metaDir = rollbackMetaDir
+		defer func() {
+			// Only the copy this read created goes away. The package's sealed
+			// metadata snap stays: it belongs to the snapshot, which outlives
+			// this rollback.
+			if relErr := storage.ReleaseRollbackSnapshotMetadata(ctx, backend, req.GetSandboxID()); relErr != nil {
+				stepLog.Warnf("rollback: release snapshot metadata copy: %v", relErr)
+			}
+		}()
+	}
+
+	currentRootfs, err := storage.GetSandboxRootfsFor(ctx, backend, req.GetSandboxID(), rootVolumeName)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve current rootfs: %v", err)
@@ -110,21 +152,16 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	}
 	rsp.OldRootfsVol = currentRootfs.Name
 
-	rootfsVol, memoryVol, memoryKind, metaDir, err := resolveRollbackTargets(ctx, req)
-	if err != nil {
-		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
-		rsp.Ret.RetMsg = err.Error()
-		return rsp, nil
-	}
-
-	refs, err := storage.ResolveRollbackRefs(ctx, rootfsVol, memoryVol, memoryKind)
+	refs, err := storage.ResolveRollbackRefsFor(ctx, backend, rootfsVol, memoryVol, memoryKind)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve snapshot objects: %v", err)
 		return rsp, nil
 	}
+	restored := false
+	defer func() { deactivateRollbackPackageObjects(ctx, backend, refs, restored) }()
 
-	newRootfs, err := storage.DeriveRollbackRootfs(ctx, req.GetSandboxID(), refs.Rootfs.Name, req.GetNewGen(), req.GetDesiredSize())
+	newRootfs, err := storage.DeriveRollbackRootfsFor(ctx, backend, req.GetSandboxID(), refs.Rootfs.Name, req.GetNewGen(), req.GetDesiredSize())
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to derive rollback rootfs: %v", err)
@@ -133,7 +170,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	cleanupNewRootfs := true
 	defer func() {
 		if cleanupNewRootfs {
-			if cleanupErr := storage.DeleteObject(ctx, newRootfs.Name, newRootfs.Kind); cleanupErr != nil {
+			if cleanupErr := storage.DeleteObjectFor(ctx, backend, newRootfs.Name, newRootfs.Kind); cleanupErr != nil {
 				stepLog.Warnf("failed to cleanup derived rollback rootfs %s: %v", newRootfs.Name, cleanupErr)
 			}
 		}
@@ -181,6 +218,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		return rsp, nil
 	}
 	cleanupNewRootfs = false
+	restored = true
 
 	// Scrub any "terminated" markers a concurrent path may have stamped
 	// onto the in-memory Status while shim's delete_vm + resume_vm_with_config
@@ -212,10 +250,10 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	); err != nil {
 		stepLog.Warnf("rollback succeeded but guest metrics epoch remains pending or prepared: %v", err)
 	}
-	if err := storage.DeleteObject(ctx, currentRootfs.Name, currentRootfs.Kind); err != nil {
+	if err := storage.ReleaseRollbackReplacedVolumes(ctx, backend, req.GetSandboxID(), currentRootfs); err != nil {
 		rsp.OldRootfsDeleted = false
-		rsp.Ret.RetMsg = fmt.Sprintf("rollback succeeded; old rootfs cleanup deferred: %v", err)
-		stepLog.Warnf("rollback succeeded but failed to delete old rootfs %s: %v", currentRootfs.Name, err)
+		rsp.Ret.RetMsg = fmt.Sprintf("rollback succeeded; old volume cleanup deferred: %v", err)
+		stepLog.Warnf("rollback succeeded but failed to delete replaced sandbox volumes: %v", err)
 	} else {
 		rsp.OldRootfsDeleted = true
 	}
@@ -275,7 +313,7 @@ func validateRollbackSandboxRequest(req *cubebox.RollbackSandboxRequest) error {
 // request they win (backward compatible); when they are empty cubelet looks
 // up its local snapshot catalog keyed by snapshot_id. Mixed input is rejected
 // because the partial state is almost always a master-side bug.
-func resolveRollbackTargets(ctx context.Context, req *cubebox.RollbackSandboxRequest) (string, string, string, string, error) {
+func resolveRollbackTargets(ctx context.Context, backend string, req *cubebox.RollbackSandboxRequest) (string, string, string, string, error) {
 	rootfsVol := strings.TrimSpace(req.GetRootfsVol())
 	memoryVol := strings.TrimSpace(req.GetMemoryVol())
 	metaDir := strings.TrimSpace(req.GetMetaDir())
@@ -290,7 +328,7 @@ func resolveRollbackTargets(ctx context.Context, req *cubebox.RollbackSandboxReq
 	if rootfsVol != "" || memoryVol != "" || metaDir != "" {
 		return "", "", "", "", fmt.Errorf("rollback: rootfs_vol/memory_vol/meta_dir must be all-set or all-empty; got rootfs_vol=%q memory_vol=%q meta_dir=%q", rootfsVol, memoryVol, metaDir)
 	}
-	entry, err := storage.GetLocalSnapshot(ctx, req.GetSnapshotID())
+	entry, err := storage.GetLocalSnapshotFor(ctx, backend, req.GetSnapshotID())
 	if err != nil {
 		return "", "", "", "", fmt.Errorf("rollback: local snapshot catalog lookup for %s failed: %w", req.GetSnapshotID(), err)
 	}
@@ -372,6 +410,29 @@ func snapshotStateDir(metaDir string) string {
 		return clean
 	}
 	return filepath.Join(clean, "snapshot")
+}
+
+// deactivateRollbackPackageObjects drops host activation of the package
+// rootfs/memory snaps rollback opened for restore. Both are read-only
+// snapshots owned by the package, so nothing here deletes them.
+//
+// On S3 a successful restore must leave the memory snap attached: the VM reads
+// its pages from that NVMe device for the rest of its life, and detaching it
+// makes the guest fail I/O and die within a second. Its attachment goes away
+// with the package, which master refuses to delete while the sandbox holds a
+// runtime reference on the snapshot. The rootfs snap is only needed while
+// deriving the new generation from it, so it is released either way.
+func deactivateRollbackPackageObjects(ctx context.Context, backend string, refs *storage.CowRollbackSnapshotRefs, restored bool) {
+	if refs == nil {
+		return
+	}
+	keepMemoryAttached := restored && storage.IsS3Backend(backend)
+	if !keepMemoryAttached && refs.Memory != nil && refs.Memory.Name != "" {
+		_ = deactivateRollbackObject(ctx, backend, refs.Memory.Name, refs.Memory.Kind)
+	}
+	if refs.Rootfs != nil && refs.Rootfs.Name != "" {
+		_ = deactivateRollbackObject(ctx, backend, refs.Rootfs.Name, refs.Rootfs.Kind)
+	}
 }
 
 // resetSandboxStatusAfterRollback wipes any "terminated" markers that a
