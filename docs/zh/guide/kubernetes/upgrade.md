@@ -85,6 +85,21 @@ kubectl rollout status deploy/cube-master -n cube-system
 
 ---
 
+## 升级顺序
+
+在 cube-master → cube-ops 迁移过程中，各组件的目标端点不同
+按以下顺序升级，避免切流期集群出现不一致：
+
+1. **先起 CubeOps（保证可达）。** 新 cubelet 把 `meta_server_endpoint` 指向
+   cube-ops，如果地址不可达会 fail-fast，所以必须先把 CubeOps 起好。
+2. **CubeOps 起来后再起 CubeMaster。** CubeMaster 启动时如果配了
+   `cube_ops_addr` 且 CubeOps 不通，会 fail-fast。
+3. **切流期不要新老 cubelet 同集群混跑。** 旧 cubelet 向 cube-master `:8089`
+   上报，新 cubelet 向 cube-ops `:3010` 上报；混跑会导致节点状态不一致。
+   逐节点滚动升级，或先把整个计算面停了再升。
+4. **以上就绪后**，再按需滚动 `cube-master`、`cube-api`、计算节点。
+
+
 ## 红线：这些操作也会 recreate Big Pod
 
 下面任一操作都会让 Big Pod **recreate** → PodIP / netns 变 → 存量沙箱中断。只在明确安排的维护窗口做。

@@ -112,7 +112,7 @@ func applyCurrentHealth(snap *model.NodeSnapshot, now time.Time) {
 	if snap == nil {
 		return
 	}
-	h := EvaluateHealth(snap.ReportedReady, snap.HeartbeatTime, now, MetadataTimeout(0))
+	h := EvaluateHealth(snap.ReportedReady, snap.HeartbeatTime, now, MetadataTimeout())
 	snap.Healthy = h.Healthy
 	snap.UnhealthyReason = h.UnhealthyReason
 }

@@ -32,7 +32,7 @@ func TestReadyConditionTrue(t *testing.T) {
 
 func TestEvaluateHealth(t *testing.T) {
 	now := time.Now()
-	timeout := 15 * time.Second // MetadataTimeout(0) = 5s + 10s
+	timeout := 15 * time.Second // MetadataTimeout() = 15s cubelet heartbeat window
 	cases := []struct {
 		name       string
 		ready      bool
@@ -56,14 +56,8 @@ func TestEvaluateHealth(t *testing.T) {
 }
 
 func TestMetadataTimeout(t *testing.T) {
-	// Default (syncInterval <= 0) aligns with CubeMaster's SyncMetaDataInterval=5s.
-	if got := service.MetadataTimeout(0); got != 15*time.Second {
-		t.Errorf("MetadataTimeout(0) = %v, want 15s", got)
-	}
-	if got := service.MetadataTimeout(5 * time.Second); got != 15*time.Second {
-		t.Errorf("MetadataTimeout(5s) = %v, want 15s", got)
-	}
-	if got := service.MetadataTimeout(30 * time.Second); got != 40*time.Second {
-		t.Errorf("MetadataTimeout(30s) = %v, want 40s", got)
+	// 15s cubelet heartbeat expiry window; independent of CubeMaster sync interval.
+	if got := service.MetadataTimeout(); got != 15*time.Second {
+		t.Errorf("MetadataTimeout() = %v, want 15s", got)
 	}
 }

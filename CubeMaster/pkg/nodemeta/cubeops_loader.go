@@ -109,8 +109,6 @@ func (l *CubeOpsLoader) loadOnce(ctx context.Context) ([]*node.Node, error) {
 		return nil, fmt.Errorf("unmarshal cubeops nodes: %w", err)
 	}
 
-	// Stamp each node with the sync time so cloneNodeWithCurrentHealth can
-	// degrade to unhealthy when CubeOps becomes unreachable (no sync → stale).
 	now := time.Now()
 	for _, n := range nodes {
 		if n != nil {

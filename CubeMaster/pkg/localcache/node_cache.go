@@ -168,10 +168,6 @@ func (l *local) dealEvent(ctx context.Context) {
 }
 
 func (l *local) checkDirty(ctx context.Context, allFromDb map[string]struct{}) {
-	if len(allFromDb) == 0 {
-		CubeLog.WithContext(ctx).Warnf("checkDirty allFromDb is empty, skip cleanup")
-		return
-	}
 	elems := l.cache.Items()
 	for _, v := range elems {
 		h, ok := v.Object.(*node.Node)

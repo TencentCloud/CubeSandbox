@@ -33,11 +33,8 @@ func EvaluateHealth(reportedReady bool, heartbeatTime, now time.Time, timeout ti
 	return HealthStatus{Healthy: true}
 }
 
-// MetadataTimeout returns the health-check timeout (syncInterval + 10s slack).
-// Default 5s aligns with CubeMaster's SyncMetaDataInterval → 15s window.
-func MetadataTimeout(syncInterval time.Duration) time.Duration {
-	if syncInterval <= 0 {
-		syncInterval = 5 * time.Second
-	}
-	return syncInterval + 10*time.Second
+// MetadataTimeout returns the cubelet heartbeat expiry window (15s),
+// independent of CubeMaster's sync interval.
+func MetadataTimeout() time.Duration {
+	return 15 * time.Second
 }

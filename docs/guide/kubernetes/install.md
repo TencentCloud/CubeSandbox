@@ -211,7 +211,7 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
 kubectl get pods -n cube-system -o wide
 
 # 2) Have compute nodes registered with CubeOps?
-kubectl exec -n cube-system deploy/cube-cubeopscli -- \
+kubectl exec -n cube-system deploy/cube-cubemastercli -- \
   sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
 
 # 3) Built-in end-to-end tests (a few minutes)

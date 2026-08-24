@@ -65,12 +65,15 @@ func (l *local) syncAllFromDB(ctx context.Context, update bool) error {
 				l.addNodeCache(n)
 			}
 			if n.InsID != "" {
-				log.G(ctx).Infof("syncAllFromDB: node=%s LocalTemplates=%v", n.InsID, n.LocalTemplates)
+				log.G(ctx).Debugf("syncAllFromDB: node=%s LocalTemplates=%v", n.InsID, n.LocalTemplates)
 				SyncNodeTemplates(ctx, n.InsID, n.LocalTemplates)
 			}
 			allFromDb[n.InsID] = struct{}{}
 		}
 		if update {
+			if len(allFromDb) == 0 {
+				log.G(ctx).Warnf("syncAllFromDB: CubeOps returned 0 nodes, cache will be cleared")
+			}
 			l.checkDirty(ctx, allFromDb)
 		}
 		return nil
