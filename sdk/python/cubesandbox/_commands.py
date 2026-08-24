@@ -10,8 +10,6 @@ import struct
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ._config import _auth_headers
-
 if TYPE_CHECKING:
     from .sandbox import Sandbox
 
@@ -49,9 +47,8 @@ class Commands:
     ) -> CommandResult:
         """Run a shell command inside the sandbox through envd's process API.
 
-        This mirrors E2B's SDK path by using the generated envd ProcessClient
-        when the E2B protocol package is available. The hand-written Connect
-        fallback is kept for source-tree usage without the optional dependency.
+        Uses the handwritten Connect RPC path — no dependency on the E2B
+        protocol package.
 
         Args:
             env: Alias for envs, matching the E2B SDK command API.
@@ -61,64 +58,15 @@ class Commands:
         """
         process_envs = envs if envs is not None else (env or {})
         effective_user = user or DEFAULT_ENVD_USER
-        try:
-            return self._run_with_e2b_connect(
-                cmd,
-                timeout=timeout,
-                cwd=cwd,
-                envs=process_envs,
-                user=effective_user,
-            )
-        except ImportError:
-            return self._run_with_connect_fallback(
-                cmd,
-                timeout=timeout,
-                cwd=cwd,
-                envs=process_envs,
-                user=effective_user,
-            )
+        return self._run(
+            cmd,
+            timeout=timeout,
+            cwd=cwd,
+            envs=process_envs,
+            user=effective_user,
+        )
 
-    def _run_with_e2b_connect(
-        self,
-        cmd: str,
-        *,
-        timeout: float | None,
-        cwd: str | None,
-        envs: dict[str, str],
-        user: str | None,
-    ) -> CommandResult:
-        from httpcore import ConnectionPool
-        from e2b.envd.process import process_connect, process_pb2
-
-        base_url, headers = _envd_rpc_base_url_and_headers(self._sandbox)
-        pool = ConnectionPool()
-        try:
-            rpc = process_connect.ProcessClient(
-                base_url,
-                pool=pool,
-                json=True,
-                headers=headers,
-            )
-            request = process_pb2.StartRequest(
-                process=process_pb2.ProcessConfig(
-                    cmd="/bin/bash",
-                    args=["-l", "-c", cmd],
-                    envs=envs,
-                    cwd=cwd or "",
-                ),
-                stdin=False,
-            )
-            events = rpc.start(
-                request,
-                headers=_user_headers(user),
-                timeout=timeout,
-                request_timeout=self._sandbox._config.request_timeout,
-            )
-            return _collect_process_events(events)
-        finally:
-            pool.close()
-
-    def _run_with_connect_fallback(
+    def _run(
         self,
         cmd: str,
         *,
@@ -138,8 +86,10 @@ class Commands:
             },
             "stdin": False,
         }
-        if cwd:
-            payload["process"]["cwd"] = cwd
+        # Default to / — the user's home directory may not exist (e.g.
+        # nobody → /nonexistent on some images), which causes envd to
+        # reject the request with "cwd does not exist".
+        payload["process"]["cwd"] = cwd or "/"
 
         headers = {
             "Content-Type": CONNECT_CONTENT_TYPE,
@@ -166,51 +116,6 @@ class Commands:
                 suffix = f": {detail}" if detail else ""
                 raise RuntimeError(f"command failed: HTTP {resp.status_code}{suffix}")
             return _parse_process_start_stream(resp.iter_raw())
-
-
-def _envd_rpc_base_url_and_headers(sandbox: "Sandbox") -> tuple[str, dict[str, str]]:
-    # The e2b-connect path uses its own httpcore pool (not sandbox._client),
-    # so it does not inherit the client's default headers. Attach the API key
-    # here so CubeAPI's auth middleware accepts the request. No-op when unset.
-    headers: dict[str, str] = _auth_headers(sandbox._config)
-    access_token = sandbox._data.get("envdAccessToken")
-    if access_token:
-        headers["X-Access-Token"] = access_token
-    traffic_token = sandbox.traffic_access_token
-    if traffic_token:
-        headers["e2b-traffic-access-token"] = traffic_token
-
-    if sandbox._config.proxy_node_ip:
-        headers["Host"] = sandbox.get_host(ENVD_PORT)
-        return f"http://{sandbox._config.proxy_node_ip}:{sandbox._config.proxy_port}", headers
-
-    return f"http://{sandbox.get_host(ENVD_PORT)}", headers
-
-
-def _collect_process_events(events) -> CommandResult:
-    stdout: list[str] = []
-    stderr: list[str] = []
-    exit_code: int | None = None
-
-    for response in events:
-        if not response.HasField("event"):
-            continue
-        event = response.event
-        if event.HasField("data"):
-            if event.data.stdout:
-                stdout.append(event.data.stdout.decode("utf-8", "replace"))
-            if event.data.stderr:
-                stderr.append(event.data.stderr.decode("utf-8", "replace"))
-        if event.HasField("end"):
-            exit_code = _exit_code_from_end_event(event.end)
-            if exit_code is None:
-                if event.end.error:
-                    raise RuntimeError(f"process failed: {event.end.error}")
-                raise RuntimeError("process EndEvent missing exit code")
-
-    if exit_code is None:
-        raise RuntimeError("process stream ended without EndEvent")
-    return CommandResult(stdout="".join(stdout), stderr="".join(stderr), exit_code=exit_code)
 
 
 def _parse_process_start_stream(chunks) -> CommandResult:
@@ -324,31 +229,6 @@ def _exit_code_from_status(status: object) -> int | None:
     if status == "exited":
         return 0
     return None
-
-
-def _exit_code_from_end_event(end) -> int | None:
-    if _has_proto_field(end, "exit_code"):
-        return int(end.exit_code)
-
-    parsed = _exit_code_from_status(end.status)
-    if parsed is not None:
-        return parsed
-
-    # Some generated proto3 bindings do not expose scalar field presence.
-    # Preserve the legacy non-zero path while still allowing status strings to
-    # override an unset default value of 0.
-    if getattr(end, "exit_code", 0) != 0:
-        return int(end.exit_code)
-    if end.exited:
-        return 0
-    return None
-
-
-def _has_proto_field(message, field_name: str) -> bool:
-    try:
-        return bool(message.HasField(field_name))
-    except (AttributeError, ValueError):
-        return False
 
 
 def _basic_auth_user(user: str) -> str:

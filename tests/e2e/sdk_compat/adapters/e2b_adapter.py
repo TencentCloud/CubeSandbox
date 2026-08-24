@@ -254,11 +254,18 @@ class E2BAdapter(SandboxAdapter):
         if commands is None:
             raise RuntimeError("E2B sandbox object does not expose commands")
         command_exit_exception = _import_e2b_command_exit_exception()
+        # Pass cwd="/" so non-root users with /nonexistent home (e.g. nobody
+        # on the e2b template) do not trip the "cwd does not exist" check
+        # in envd. Mirrors the cubesandbox SDK's default in _commands.py.
+        supports_user = _accepts_keyword(commands.run, "user")
+        supports_cwd = _accepts_keyword(commands.run, "cwd")
         try:
-            if _accepts_keyword(commands.run, "user"):
-                result = commands.run(command, timeout=timeout, user=user)
-            else:
-                result = commands.run(command, timeout=timeout)
+            kwargs: dict[str, Any] = {"timeout": timeout}
+            if supports_user:
+                kwargs["user"] = user
+            if supports_cwd:
+                kwargs["cwd"] = "/"
+            result = commands.run(command, **kwargs)
         except Exception as exc:  # E2B raises on non-zero command exits.
             if command_exit_exception is None or not isinstance(exc, command_exit_exception):
                 raise
@@ -448,6 +455,58 @@ class E2BAdapter(SandboxAdapter):
                 method()
                 return
         raise RuntimeError("E2B sandbox object does not expose kill/delete/close")
+
+    # ── filesystem metadata ops ────────────────────────────────────────────
+
+    def _files_or_raise(self):
+        files = getattr(self._sandbox, "files", None)
+        if files is None:
+            raise RuntimeError("E2B sandbox object does not expose files")
+        return files
+
+    def make_dir(self, path: str, *, user: str = "root") -> None:
+        files = self._files_or_raise()
+        fn = getattr(files, "make_dir", None)
+        if not callable(fn):
+            raise RuntimeError("E2B files object does not expose make_dir")
+        fn(path)
+
+    def list_dir(self, path: str, *, user: str = "root") -> list[str]:
+        files = self._files_or_raise()
+        fn = getattr(files, "list", None) or getattr(files, "list_dir", None)
+        if not callable(fn):
+            raise RuntimeError("E2B files object does not expose list/list_dir")
+        entries = fn(path)
+        result: list[str] = []
+        for e in entries or []:
+            if isinstance(e, str):
+                result.append(e)
+            elif hasattr(e, "name"):
+                result.append(str(e.name))
+            elif isinstance(e, dict):
+                result.append(str(e.get("name", e)))
+        return result
+
+    def file_exists(self, path: str, *, user: str = "root") -> bool:
+        files = self._files_or_raise()
+        fn = getattr(files, "exists", None)
+        if not callable(fn):
+            raise RuntimeError("E2B files object does not expose exists")
+        return bool(fn(path))
+
+    def remove_file(self, path: str, *, user: str = "root") -> None:
+        files = self._files_or_raise()
+        fn = getattr(files, "remove", None) or getattr(files, "delete", None)
+        if not callable(fn):
+            raise RuntimeError("E2B files object does not expose remove/delete")
+        fn(path)
+
+    def rename_file(self, old_path: str, new_path: str, *, user: str = "root") -> None:
+        files = self._files_or_raise()
+        fn = getattr(files, "rename", None) or getattr(files, "move", None)
+        if not callable(fn):
+            raise RuntimeError("E2B files object does not expose rename/move")
+        fn(old_path, new_path)
 
     @classmethod
     def list_sandboxes(cls, config: SdkE2EConfig) -> list[dict[str, Any]]:

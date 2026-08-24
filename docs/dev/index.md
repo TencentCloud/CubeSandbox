@@ -8,6 +8,10 @@ If you are *using* CubeSandbox (deploying it, building templates, calling the AP
 
 - [Redis Key Convention](./redis-key-spec) — the unified namespace every service must use for the shared Redis instance: naming format, scope ownership, the registered key catalog, TTL policy, and the per-service key-builder modules.
 
+## Tracked gaps
+
+- [Pending envd Fixes](./pending-envd-fixes) — server-side gaps in envd that the Python SDK has already adapted to but cannot fully verify until envd implements the corresponding behavior. Each entry names the symptom, the SDK-side workaround, and the verification path.
+
 ## What belongs here
 
 - Cross-service data contracts and naming conventions (keys, topics, schemas)
