@@ -138,6 +138,26 @@ test:
 			$$pkg || exit 1 ;\
 	done )
 
+.PHONY: test-race
+test-race:
+	$(call msg,Run race-enabled unit tests)
+	$(Q)go clean -testcache
+	@( for pkg in ${COVERAGE_PACKAGES}; do \
+		CI=true CGO_ENABLED=1 go test -short -v -race -count=1 \
+			-gcflags=all=-l -timeout=20m $$pkg || exit 1 ;\
+	done )
+
+DOCKER_TEST_PATTERN=^(TestAliasStoreMySQL|TestAliasStorePostgreSQL|TestUpsertReplicaPostgreSQLUpdatePath|TestTrySessionLockPostgreSQL|TestArtifactGCSessionLockMySQL|TestInitReturnsDaoDefaultOnPostgreSQL)$$
+
+.PHONY: test-docker
+test-docker:
+	$(call msg,Run Docker-backed database tests)
+	@command -v docker >/dev/null 2>&1 || { echo "error: docker is not installed"; exit 1; }
+	@docker info >/dev/null 2>&1 || { echo "error: docker daemon is not reachable"; exit 1; }
+	$(Q)CI=true CUBEMASTER_REQUIRE_DOCKER_TESTS=1 go test -v -count=1 \
+		-gcflags=all=-l -timeout=20m -run '$(DOCKER_TEST_PATTERN)' \
+		./pkg/base/db ./pkg/templatecenter
+
 .PHONY: coverage
 coverage:
 	$(Q)echo 'mode: set' > ./coverage/cubemaster.cov
