@@ -40,7 +40,15 @@ type local struct {
 	totalSelfNodes        int64
 }
 
-var l = &local{}
+// The node/image stores exist from package load so nodemeta query APIs
+// (GetNodeHostFacts / GetPersistedNodeHostFacts) are fail-closed before
+// localcache.Init, matching the pre-migration global.nodes empty map.
+var l = &local{
+	cache:                 cache.New(0, 0),
+	imageCache:            cache.New(0, 0),
+	templateNodeCache:     cache.New(0, 0),
+	sortedNodesByClusters: make(map[string]node.NodeList),
+}
 
 func (l *local) loopSelfNodes(ctx context.Context) {
 	loadNum := func() int64 {
