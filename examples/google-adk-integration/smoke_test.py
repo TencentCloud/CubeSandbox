@@ -53,6 +53,17 @@ def main() -> None:
     assert result["stdout"] == "hello\nworld\n"
     assert result["text"] == "hello world"
     assert result["error"] is None
+
+    class EmptyLogs:
+        stdout: list[str] = []
+
+    class EmptyLogExecution:
+        logs = EmptyLogs()
+        text = ""
+        error = None
+
+    fallback = cube_code_tool._execution_to_dict(EmptyLogExecution(), ["callback\n"])
+    assert fallback["stdout"] == "callback\n"
     print("GOOGLE_ADK_CUBE_SMOKE_OK")
 
 
