@@ -176,6 +176,9 @@ func TestTerminalRemoteStatusRunningStaysOpen(t *testing.T) {
 	if next, ok := terminalRemoteStatus(constants.RemoteStatusPending, false); ok {
 		t.Fatalf("pending must not be terminal, got %q", next)
 	}
+	if next, ok := terminalRemoteStatus("", false); ok {
+		t.Fatalf("empty state must not be terminal, got %q", next)
+	}
 	next, ok := terminalRemoteStatus(constants.RemoteStatusReady, true)
 	if !ok || next != constants.RemoteStatusReady {
 		t.Fatalf("ready terminal=%v %q", ok, next)

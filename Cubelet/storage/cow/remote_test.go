@@ -22,3 +22,17 @@ func TestRemoteUUIDsJSONRoundTrip(t *testing.T) {
 		t.Fatal("empty json must parse as nil")
 	}
 }
+
+func TestExportStatusIsFailed(t *testing.T) {
+	t.Parallel()
+	for _, status := range []string{"FAILED", "failed", "ERROR", "FAIL"} {
+		if !ExportStatusIsFailed(status) {
+			t.Fatalf("%q should be a confirmed s3lvol failure", status)
+		}
+	}
+	for _, status := range []string{"", ExportStatusNone, ExportStatusInProgress, ExportStatusDone, "WAT"} {
+		if ExportStatusIsFailed(status) {
+			t.Fatalf("%q must not be treated as s3lvol failure", status)
+		}
+	}
+}

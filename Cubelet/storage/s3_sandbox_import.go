@@ -92,10 +92,8 @@ func SandboxRootfsName(sandboxID string, gen uint32) string {
 	return fmt.Sprintf("%srootfs-gen%d", SandboxObjectNamePrefix(sandboxID), gen)
 }
 
-// SandboxMemoryName is the private memory image a cross-node restore imports.
-// A same-node restore reads the package's own memory snapshot instead and
-// must never be given one of these: that disk belongs to the template or
-// snapshot and outlives every sandbox started from it.
+// SandboxMemoryName is the private memory image a restore owns: imported
+// cross-node, or cloned from the pause package on a same-node Resume.
 func SandboxMemoryName(sandboxID string) string {
 	return SandboxObjectNamePrefix(sandboxID) + "memory"
 }

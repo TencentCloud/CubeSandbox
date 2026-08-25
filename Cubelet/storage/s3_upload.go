@@ -263,7 +263,7 @@ func (m *S3Cow) UploadStatus(ctx context.Context, snapshotID string) (*cow.Remot
 		allDone      = true
 		anyProgress  bool
 		anyNone      bool
-		anyDead      bool
+		anyFailed    bool
 		localVolumes []cow.VolumeRemoteInfo
 		messages     []string
 	)
@@ -274,9 +274,9 @@ func (m *S3Cow) UploadStatus(ctx context.Context, snapshotID string) (*cow.Remot
 		info, infoErr := m.GetVolumeInfo(ctx, ref.Name)
 		exists, existsErr := cowObjectPresent(info, infoErr)
 		if existsErr != nil {
-			st.State = cow.RemoteStateFailed
-			st.Message = existsErr.Error()
-			return st, nil
+			// Lookup/RPC errors are not an s3lvol export failure. Bubble
+			// them so Status leaves State unset and Master stays inprogress.
+			return nil, existsErr
 		}
 		vol := cow.VolumeRemoteInfo{Name: ref.Name, Role: ref.Role, Exists: exists}
 		if info != nil {
@@ -324,18 +324,13 @@ func (m *S3Cow) UploadStatus(ctx context.Context, snapshotID string) (*cow.Remot
 		switch {
 		case status == cow.ExportStatusDone:
 			// ok
-		case status == "" && uuid != "":
-			// A recorded uuid that reports no status at all is a dead
-			// export: s3lvol hands the uuid back before the transfer can
-			// fail, then records nothing under it, so every later lookup
-			// says no such export and cubecow leaves the status empty.
-			// Waiting cannot fix it — only exporting again can — so this
-			// is a terminal failure rather than an upload still in flight.
+		case cow.ExportStatusIsFailed(status):
 			allDone = false
-			anyDead = true
-			messages = append(messages, fmt.Sprintf("%s export %s no longer exists", ref.Name, uuid))
+			anyFailed = true
+			messages = append(messages, fmt.Sprintf("%s=%s", ref.Name, status))
 		case status == cow.ExportStatusInProgress, status == "":
-			// Empty without a uuid means cubecow has not reported yet.
+			// Empty status (with or without a uuid) is not a confirmed
+			// s3lvol failure. Keep polling; Master must not stamp failed.
 			allDone = false
 			anyProgress = true
 		case status == cow.ExportStatusNone:
@@ -356,10 +351,7 @@ func (m *S3Cow) UploadStatus(ctx context.Context, snapshotID string) (*cow.Remot
 	}
 
 	switch {
-	case anyDead:
-		// Terminal: report it now so Master stops polling a package that
-		// can never become usable and surfaces it as failed instead of
-		// leaving it inprogress forever.
+	case anyFailed:
 		st.State = cow.RemoteStateFailed
 		st.Message = strings.Join(messages, "; ")
 	case allDone:

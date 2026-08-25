@@ -973,8 +973,9 @@ func (l *local) cleanupCreateResult(ctx context.Context, result *StorageInfo) er
 }
 
 // prefetchRestoreMemoryVolURL resolves the memory image the shim restores
-// from, and reports the name of the disk when this create imported one of
-// its own (cross-node) rather than pointing at the package's shared image.
+// from, and reports the name of the disk when this create minted one of
+// its own (cross-node import or same-node pause-resume clone) rather than
+// pointing at the package's shared image.
 func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.CreateContext) (string, string, error) {
 	if opts == nil || opts.ReqInfo == nil || opts.IsCreateSnapshot() {
 		return "", "", nil
@@ -991,9 +992,10 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 	// file:///dev/nvmeXn1 from a previous activate on this or another node.
 	// Always resolve the catalog vol name and Activate for the live path.
 	backend := createContextStorageBackend(opts)
-	// Cross-node: the package's memory image is not on this node, so the
-	// sandbox imports its own. Same-node falls through and points at the
-	// package's shared snapshot, which outlives every sandbox using it.
+	// Cross-node imports a sandbox-private memory volume. Same-node pause
+	// resume clones the package memory snap onto sb-<id>-memory so the
+	// pause package can be deleted after Create. Other restores still
+	// attach the package snapshot (templates / customer snaps stay).
 	if imp := CrossNodeSandboxImport(annotations); imp != nil {
 		name, devPath, err := imp.Memory(ctx)
 		if err != nil {
@@ -1003,12 +1005,35 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 			return cowFileURLFromPath(devPath), name, nil
 		}
 	}
+	pauseOwner := ""
+	if opts.IsPauseResume() && CrossNodeSandboxImport(annotations) == nil {
+		pauseOwner = pauseResumeMemoryOwnerID(opts)
+		if pauseOwner == "" {
+			// Attaching the package then letting Master delete it would
+			// pull the disk out from under the restored VM.
+			return "", "", fmt.Errorf("pause resume requires sandbox id to clone memory off the package")
+		}
+	}
 	volumeName, volumeKind, err := l.resolveSnapshotMemoryVolFromCatalog(ctx, backend, annotations)
 	if err != nil {
 		return "", "", err
 	}
 	if volumeName == "" {
 		return "", "", nil
+	}
+	if pauseOwner != "" {
+		store, err := l.storeForBackend(backend)
+		if err != nil {
+			return "", "", err
+		}
+		cloned, err := store.CloneSandboxMemory(ctx, pauseOwner, volumeName)
+		if err != nil {
+			return "", "", fmt.Errorf("clone pause memory %s for sandbox %s: %w", volumeName, pauseOwner, err)
+		}
+		if cloned == nil || strings.TrimSpace(cloned.FilePath) == "" {
+			return "", "", fmt.Errorf("clone pause memory %s for sandbox %s: empty device path", volumeName, pauseOwner)
+		}
+		return cowFileURLFromPath(cloned.FilePath), cloned.VolumeName, nil
 	}
 	normalizedKind, err := normalizeCowKind(volumeKind)
 	if err != nil {
@@ -1025,12 +1050,35 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 	return cowFileURLFromPath(devPath), "", nil
 }
 
-// releaseImportedMemoryVol deletes the memory disk this sandbox imported.
-// Driven by what Create recorded rather than by the naming convention, so a
-// same-node restore — whose memory is the package's snapshot — is untouched.
+// pauseResumeMemoryOwnerID is the sandbox that must own a private copy of the
+// pause package's memory. Empty means this is not a same-node pause resume
+// (cross-node already imported one, or this is a template／FromSnap create).
+// A same-node pause resume that still returns empty is missing its sandbox
+// id; the caller must fail rather than attach the package snapshot.
+func pauseResumeMemoryOwnerID(opts *workflow.CreateContext) string {
+	if opts == nil || !opts.IsPauseResume() {
+		return ""
+	}
+	ann := map[string]string{}
+	if opts.ReqInfo != nil {
+		ann = opts.ReqInfo.GetAnnotations()
+	}
+	if CrossNodeSandboxImport(ann) != nil {
+		return ""
+	}
+	if id := strings.TrimSpace(opts.GetSandboxID()); id != "" {
+		return id
+	}
+	return strings.TrimSpace(ann[constants.MasterAnnotationDesiredSandboxID])
+}
+
+// releaseImportedMemoryVol deletes the memory disk this sandbox cloned or
+// imported. Driven by what Create recorded rather than by the naming
+// convention, so a restore that still reads a package snapshot (empty field)
+// is untouched.
 func (l *local) releaseImportedMemoryVol(ctx context.Context, backend string, info *StorageInfo) {
 	name := strings.TrimSpace(info.ImportedMemoryVol)
-	if name == "" || backend != cow.BackendS3 {
+	if name == "" {
 		return
 	}
 	store, err := l.storeForBackend(backend)
@@ -1038,7 +1086,7 @@ func (l *local) releaseImportedMemoryVol(ctx context.Context, backend string, in
 		return
 	}
 	if err := store.DeactivateByKind(ctx, name, cowKindVolume); err != nil {
-		log.G(ctx).Warnf("destroy sandbox %s: deactivate imported memory %s: %v", info.SandboxID, name, err)
+		log.G(ctx).Warnf("destroy sandbox %s: deactivate sandbox memory %s: %v", info.SandboxID, name, err)
 	}
 	if err := store.DeleteByKind(ctx, name, cowKindVolume); err != nil {
 		warnVolumeDeleteDeferred(ctx, name, cowKindVolume, err)
@@ -1868,11 +1916,9 @@ type StorageInfo struct {
 
 	RestoreMemoryVolURL string `json:"-"`
 
-	// ImportedMemoryVol is the memory disk a cross-node restore imported for
-	// this sandbox, and the only memory disk destroy may delete. Same-node
-	// restores leave it empty: they read the package's own memory snapshot,
-	// which outlives every sandbox started from it. Persisted, so a cubelet
-	// restart does not turn it into a leak.
+	// ImportedMemoryVol is the sandbox-private memory disk Create minted
+	// (cross-node import or same-node pause-resume clone). Destroy deletes
+	// it. Empty means this restore still reads a package memory snapshot.
 	ImportedMemoryVol string `json:"importedMemoryVol,omitempty"`
 
 	// PluginVolumeBackendInfos records the result of every plugin_volume attach.

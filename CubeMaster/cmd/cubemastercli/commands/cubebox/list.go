@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -186,9 +185,7 @@ var ListCommand = cli.Command{
 		if c.Bool("wide") {
 			tabHeader += "\ttemplate_id\tnamespace\thost_ip\tlabels"
 		}
-		sort.Slice(rsp.Data, func(i, j int) bool {
-			return rsp.Data[i].CreateAt < rsp.Data[j].CreateAt
-		})
+		types.SortSandboxList(rsp.Data)
 		fmt.Fprintln(w, tabHeader)
 		for _, sandbox := range rsp.Data {
 			row := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s", sandbox.SandboxID,
@@ -252,8 +249,9 @@ func runListQueryAllPages(c *cli.Context, host string, req *types.ListCubeSandbo
 		aggregated.Total = rsp.Total
 		aggregated.EndIdx = rsp.EndIdx
 		aggregated.Size += rsp.Size
-		// Paused sandboxes come from Master's pause table, so every page
-		// carries them regardless of which nodes it scanned.
+		// Shimless paused rows are appended only on the last node page.
+		// Dedup still matters: a tombstone the origin node reported on an
+		// earlier page would otherwise reappear when the last page invents it.
 		for _, item := range rsp.Data {
 			if item == nil || seen[item.SandboxID] {
 				continue

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
@@ -261,6 +262,47 @@ func (m *XfsCow) CommitTemplateMemory(ctx context.Context, sourceName, templateI
 		devPath = resolvedPath
 	}
 	return newCowVolume(snapshotName, cowKindSnapshot, 0, devPath), nil
+}
+
+func (m *XfsCow) CloneSandboxMemory(ctx context.Context, sandboxID, sourceName string) (*cowVolume, error) {
+	return cloneSandboxMemory(ctx, m, sandboxID, sourceName)
+}
+
+type sandboxMemoryCloner interface {
+	createOrResolveVolumeFromSnapshot(ctx context.Context, sourceSnapshot, volumeName string) (string, error)
+	ResolveDevPath(ctx context.Context, name, kind string) (string, error)
+}
+
+func cloneSandboxMemory(ctx context.Context, m sandboxMemoryCloner, sandboxID, sourceName string) (*cowVolume, error) {
+	sandboxID = strings.TrimSpace(sandboxID)
+	sourceName = strings.TrimSpace(sourceName)
+	if sandboxID == "" || sourceName == "" {
+		return nil, fmt.Errorf("sandbox id and source memory name are required")
+	}
+	volumeName := SandboxMemoryName(sandboxID)
+	devPath, err := m.createOrResolveVolumeFromSnapshot(ctx, sourceName, volumeName)
+	if err != nil {
+		return nil, err
+	}
+	if resolved, err := m.ResolveDevPath(ctx, volumeName, cowKindVolume); err == nil && resolved != "" {
+		devPath = resolved
+	}
+	return newCowVolume(volumeName, cowKindVolume, 0, devPath), nil
+}
+
+func (m *XfsCow) createOrResolveVolumeFromSnapshot(ctx context.Context, sourceSnapshot, volumeName string) (string, error) {
+	devPath, err := m.engine.CreateVolumeFromSnapshot(sourceSnapshot, volumeName)
+	if err != nil {
+		if !isCowSemantic(err, cubecow.SemAlreadyExists) {
+			return "", err
+		}
+		devPath, err = m.ResolveDevPath(ctx, volumeName, cowKindVolume)
+		if err != nil {
+			return "", err
+		}
+		return devPath, nil
+	}
+	return devPath, nil
 }
 
 func (m *XfsCow) createInitializedTemplateVolume(ctx context.Context, name string, sizeBytes uint64) (*cowVolume, error) {

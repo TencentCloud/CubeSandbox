@@ -211,6 +211,10 @@ func (m *S3Cow) CommitTemplateMemory(ctx context.Context, sourceName, templateID
 	return newCowVolume(volumeName, cowKindVolume, 0, devPath), nil
 }
 
+func (m *S3Cow) CloneSandboxMemory(ctx context.Context, sandboxID, sourceName string) (*cowVolume, error) {
+	return cloneSandboxMemory(ctx, m, sandboxID, sourceName)
+}
+
 func (m *S3Cow) createInitializedTemplateVolume(ctx context.Context, name string, sizeBytes uint64) (*cowVolume, error) {
 	devPath, err := m.createTemplateVolumePath(name, sizeBytes)
 	if err != nil {

@@ -59,7 +59,7 @@ func TestBatchStatusPreservesOrderAndSkipsNil(t *testing.T) {
 	}
 }
 
-func TestStatusS3WithoutStoreReportsFailedOrPending(t *testing.T) {
+func TestStatusS3WithoutStoreLeavesStateUnset(t *testing.T) {
 	t.Parallel()
 	s := &service{}
 	rsp, err := s.Status(context.Background(), &api.StatusRequest{
@@ -73,11 +73,32 @@ func TestStatusS3WithoutStoreReportsFailedOrPending(t *testing.T) {
 	if rsp.GetBackend() != cow.BackendS3 {
 		t.Fatalf("backend=%q", rsp.GetBackend())
 	}
-	// Without an initialized S3 store the query fails closed.
 	if rsp.GetRemoteReady() {
 		t.Fatal("s3 without store must not be remote_ready")
 	}
-	if rsp.GetState() != cow.RemoteStateFailed && rsp.GetState() != cow.RemoteStatePending {
-		t.Fatalf("state=%q", rsp.GetState())
+	if rsp.GetState() != "" {
+		t.Fatalf("store error must leave state unset, got %q", rsp.GetState())
+	}
+	if rsp.GetMessage() == "" {
+		t.Fatal("expected an error message")
+	}
+}
+
+func TestStatusUnsupportedBackendLeavesStateUnset(t *testing.T) {
+	t.Parallel()
+	s := &service{}
+	rsp, err := s.Status(context.Background(), &api.StatusRequest{
+		RequestId:  "r1",
+		SnapshotId: "snap-1",
+		Backend:    "bogus",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rsp.GetState() != "" {
+		t.Fatalf("unsupported backend must leave state unset, got %q", rsp.GetState())
+	}
+	if rsp.GetRemoteReady() {
+		t.Fatal("unsupported backend must not be remote_ready")
 	}
 }

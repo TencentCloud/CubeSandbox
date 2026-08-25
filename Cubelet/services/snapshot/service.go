@@ -72,13 +72,9 @@ func (s *service) BatchStatus(ctx context.Context, req *api.BatchStatusRequest) 
 func (s *service) statusOne(ctx context.Context, requestID, snapshotID, rawBackend string) *api.StatusResponse {
 	backend, err := normalizeStatusBackend(rawBackend)
 	if err != nil {
-		return &api.StatusResponse{
-			RequestId:  requestID,
-			SnapshotId: snapshotID,
-			Backend:    strings.TrimSpace(rawBackend),
-			State:      cow.RemoteStateFailed,
-			Message:    err.Error(),
-		}
+		// Unknown backend is not an s3lvol export failure; leave State unset
+		// so Master keeps remote_status=inprogress.
+		return unsetStatus(requestID, snapshotID, strings.TrimSpace(rawBackend), err.Error())
 	}
 	rsp := &api.StatusResponse{
 		RequestId:  requestID,
@@ -93,13 +89,12 @@ func (s *service) statusOne(ctx context.Context, requestID, snapshotID, rawBacke
 
 	st, err := storage.SnapshotUploadStatus(ctx, backend, snapshotID)
 	if err != nil {
-		rsp.State = cow.RemoteStateFailed
-		rsp.Message = err.Error()
-		return rsp
+		// Store-not-ready / lookup errors are transient. Empty State means
+		// the remotestatus poller must not stamp failed.
+		return unsetStatus(requestID, snapshotID, backend, err.Error())
 	}
 	if st == nil {
-		rsp.Message = "empty upload status"
-		return rsp
+		return unsetStatus(requestID, snapshotID, backend, "empty upload status")
 	}
 	rsp.State = strings.TrimSpace(st.State)
 	if rsp.State == "" {
@@ -118,6 +113,15 @@ func (s *service) statusOne(ctx context.Context, requestID, snapshotID, rawBacke
 		}
 	}
 	return rsp
+}
+
+func unsetStatus(requestID, snapshotID, backend, message string) *api.StatusResponse {
+	return &api.StatusResponse{
+		RequestId:  requestID,
+		SnapshotId: snapshotID,
+		Backend:    backend,
+		Message:    message,
+	}
 }
 
 func normalizeStatusBackend(raw string) (string, error) {

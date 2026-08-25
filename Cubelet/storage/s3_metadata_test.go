@@ -258,12 +258,9 @@ func TestUploadStatusEmptyExportStatusWithoutUUIDIsRunning(t *testing.T) {
 	require.Equal(t, cow.RemoteStateRunning, st.State)
 }
 
-// s3lvol returns a uuid before it can tell whether the transfer will run,
-// and on failure records nothing under it: every later lookup then says no
-// such export and cubecow leaves the status empty. Reporting that as still
-// uploading leaves the package inprogress forever, because only a fresh
-// export can ever change the answer.
-func TestUploadStatusDeadExportUUIDIsFailed(t *testing.T) {
+// A recorded uuid with empty export_status is not an s3lvol-confirmed
+// failure. Status must stay non-terminal so Master keeps inprogress.
+func TestUploadStatusEmptyExportStatusWithUUIDIsRunning(t *testing.T) {
 	engine := &fakeCowEngine{
 		volumeInfos: map[string]*cubecow.Volume{
 			"tpl-snap-1-rootfs": {
@@ -278,10 +275,30 @@ func TestUploadStatusDeadExportUUIDIsFailed(t *testing.T) {
 
 	st, err := SnapshotUploadStatus(context.Background(), cow.BackendS3, "snap-1")
 	require.NoError(t, err)
+	require.Equal(t, cow.RemoteStateRunning, st.State)
+}
+
+func TestUploadStatusExportStatusFailedIsFailed(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-snap-1-rootfs": {
+				SizeBytes:    1 << 20,
+				ExportUUID:   "uuid-root",
+				ExportStatus: cow.ExportStatusDone,
+			},
+			"tpl-snap-1-memory": {
+				SizeBytes:    64 << 20,
+				ExportUUID:   "uuid-mem",
+				ExportStatus: cow.ExportStatusFailed,
+			},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	st, err := SnapshotUploadStatus(context.Background(), cow.BackendS3, "snap-1")
+	require.NoError(t, err)
 	require.Equal(t, cow.RemoteStateFailed, st.State)
-	// Name the dead uuid: re-exporting is the only fix, and the operator
-	// needs to know which role to re-export.
-	require.Contains(t, st.Message, "uuid-mem")
+	require.Contains(t, st.Message, "tpl-snap-1-memory")
 }
 
 func TestUploadSkipsMetadataBaseAndUploadsDerived(t *testing.T) {

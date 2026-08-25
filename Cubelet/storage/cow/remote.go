@@ -23,7 +23,22 @@ const (
 	ExportStatusNone       = "NONE"
 	ExportStatusInProgress = "INPROGRESS"
 	ExportStatusDone       = "DONE"
+	// s3lvol may report these when an export has actually failed.
+	ExportStatusFailed = "FAILED"
+	ExportStatusError  = "ERROR"
 )
+
+// ExportStatusIsFailed reports whether cubecow/s3lvol marked the export as
+// a terminal failure. Anything else (empty, NONE, INPROGRESS, lookup errors)
+// is not a failure.
+func ExportStatusIsFailed(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case ExportStatusFailed, ExportStatusError, "FAIL":
+		return true
+	default:
+		return false
+	}
+}
 
 // RemoteUUIDs is the JSON blob Master stores so another node can Fetch.
 // One cubecow uuid per disk that exists today: rootfs / memory / metadata.

@@ -91,23 +91,37 @@ func isShimGonePauseSnapshot(status string) bool {
 	return strings.EqualFold(status, statusReady) || strings.EqualFold(status, statusDeleteFailed)
 }
 
-// DropOriginTombstone removes the PAUSED CubeBox row Pause left on originIP
-// after the sandbox came back up on a different node. Same-node Resume has
-// no use for this: there, target Create replaces the row in place.
-//
-// Only the row goes. The pause package and its cubecow objects stay, exactly
-// as they do after a same-node Resume.
+// DropOriginTombstone removes origin leftovers after a cross-node Resume:
+// the PAUSED CubeBox row, then the pause package. Same-node Resume must not
+// call this — Create already replaced the tombstone; it uses
+// CleanupPauseSnapshot instead.
 //
 // This talks to Cubelet directly rather than going through Master's
 // DestroySandbox, which would publish a lifecycle delete event and make the
 // CLM stop managing a sandbox that is very much alive on the target node.
-func DropOriginTombstone(ctx context.Context, requestID, sandboxID, originIP string) error {
+func DropOriginTombstone(ctx context.Context, requestID, sandboxID, originIP, snapshotID, backend string) error {
 	sandboxID = strings.TrimSpace(sandboxID)
 	originIP = strings.TrimSpace(originIP)
 	if sandboxID == "" || originIP == "" {
 		return nil
 	}
-	return destroyPausedTombstone(ctx, cubeletAddr(originIP), requestID, sandboxID, originIP)
+	addr := cubeletAddr(originIP)
+	tombErr := destroyPausedTombstone(ctx, addr, requestID, sandboxID, originIP)
+	packErr := CleanupPauseSnapshot(ctx, requestID, originIP, snapshotID, backend)
+	return errors.Join(tombErr, packErr)
+}
+
+// CleanupPauseSnapshot removes a pause package from nodeIP. Resume calls this
+// after the sandbox has its own disks: same-node on the resume host, cross-node
+// on origin (via DropOriginTombstone). Missing objects are Cubelet's problem
+// to treat as cleaned.
+func CleanupPauseSnapshot(ctx context.Context, requestID, nodeIP, snapshotID, backend string) error {
+	nodeIP = strings.TrimSpace(nodeIP)
+	snapshotID = strings.TrimSpace(snapshotID)
+	if nodeIP == "" || snapshotID == "" {
+		return nil
+	}
+	return cleanupPauseSnapshotOnCubelet(ctx, cubeletAddr(nodeIP), requestID, snapshotID, backend)
 }
 
 func destroyPausedTombstone(ctx context.Context, addr, requestID, sandboxID, hostIP string) error {

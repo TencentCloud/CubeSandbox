@@ -197,14 +197,32 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 			}
 			backend := pauseResumeCatalogBackend(flowOpts)
 			if flowOpts.IsPauseResume() {
-				// Resume: clone sealed metadata snap → RW volume, then mount
-				// (MountS3MetadataAt never activates the package snap for IO).
+				// Same-node S3: clone package metadata onto s3-meta-<sandbox>
+				// under the sandbox home so CleanupTemplate can drop the pause
+				// package. XFS still reads the package directory in place;
+				// Master deletes that package after Create returns.
+				childID := strings.TrimSpace(flowOpts.GetSandboxID())
+				if childID == "" && flowOpts.ReqInfo != nil {
+					childID = strings.TrimSpace(flowOpts.ReqInfo.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+				}
+				if childID == "" {
+					return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, "pause resume requires sandbox id to clone metadata off the package")
+				}
 				metaMount := filepath.Join(paths.Base, storage.SnapshotMetadataDir)
+				if isS3CatalogCreateBackend(backend) {
+					sandboxHome := storage.SnapshotHome(backend, storage.SnapshotKindNormal, childID)
+					metaMount = filepath.Join(sandboxHome, storage.SnapshotMetadataDir)
+				}
 				mounted, err := mountRestoreMetadata(ctx, flowOpts, backend, templateID, metaMount)
 				if err != nil {
 					return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
 				}
 				snapBasePath, snapSpecPath = restorePathsFromMetadataMount(mounted, paths)
+				if isS3CatalogCreateBackend(backend) && snapBasePath != paths.Base {
+					if err := storage.EnsureShimSpecDirLink(snapBasePath, paths.ResDir); err != nil {
+						return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
+					}
+				}
 			} else {
 				// Create from template／snapshot: private metadata volume
 				// mounted under the sandbox-owned package path — never on
@@ -598,15 +616,6 @@ func isS3CatalogCreateBackend(backend string) bool {
 	return err == nil && normalized == cow.BackendS3
 }
 
-// mountRestoreMetadata puts the metadata disk this sandbox reads its
-// description from in place, and reports where it landed.
-//
-// Cross-node it is the sandbox's own imported copy, mounted under the sandbox
-// home by whichever step first knew the sandbox id — the Create entry for a
-// Resume, this call for a create from a template or snapshot. Same-node a
-// Resume mounts the pause package's sealed disk, and a create clones the
-// parent's into a private volume so a child never writes on a parent's
-// metadata.
 // restorePathsFromMetadataMount turns the directory mountRestoreMetadata
 // returned (the metadata mount) into the snapshot home + spec paths the
 // hypervisor annotations use. Cross-node that directory is the sandbox's
@@ -630,18 +639,31 @@ func restorePathsFromMetadataMount(mounted string, paths *snapshotPaths) (base, 
 	return base, spec
 }
 
+// mountRestoreMetadata puts the metadata disk this sandbox reads its
+// description from in place, and reports where it landed.
+//
+// Cross-node it is the sandbox's own imported copy, mounted under the sandbox
+// home by whichever step first knew the sandbox id — the Create entry for a
+// Resume, this call for a create from a template or snapshot. Same-node
+// Resume and create-from-snapshot both clone the parent into a private
+// volume so the pause／template package can be dropped afterwards.
 func mountRestoreMetadata(ctx context.Context, flowOpts *workflow.CreateContext,
 	backend, packageID, mountPath string) (string, error) {
 	if imp := storage.CrossNodeSandboxImport(flowOpts.ReqInfo.GetAnnotations()); imp != nil {
 		return imp.EnsureMetadata(ctx)
 	}
-	if flowOpts.IsPauseResume() {
-		return mountPath, storage.MountS3MetadataAt(ctx, backend, packageID, mountPath)
-	}
 	sandboxID := strings.TrimSpace(flowOpts.GetSandboxID())
+	if sandboxID == "" && flowOpts.ReqInfo != nil {
+		sandboxID = strings.TrimSpace(flowOpts.ReqInfo.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+	}
 	if sandboxID == "" {
+		if flowOpts.IsPauseResume() {
+			return "", fmt.Errorf("pause resume requires sandbox id to clone metadata off the package")
+		}
 		sandboxID = packageID
 	}
+	// Pause resume and create-from-snapshot both clone into a sandbox-owned
+	// volume. XFS CloneS3MetadataFromParent is a no-op (plain package dir).
 	return mountPath, storage.CloneS3MetadataFromParent(ctx, backend, packageID, sandboxID, mountPath)
 }
 

@@ -378,6 +378,11 @@ func CleanupObjectsFor(ctx context.Context, backend string, refs []CowObjectRef)
 			}
 			continue
 		}
+		if isXFSCleanupBackend(backend) {
+			if err := removeLegacyXfsCowObjectIfGone(ctx, name); err != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup legacy cubecow object %q: %w", name, err))
+			}
+		}
 	}
 	return cleanupErr
 }
@@ -621,10 +626,6 @@ func ReleaseRollbackReplacedVolumes(ctx context.Context, backend, sandboxID stri
 }
 
 func releaseImportedMemoryAfterRollback(ctx context.Context, backend, sandboxID string) error {
-	// Only a cross-node S3 restore imports a memory disk of its own.
-	if !isS3CatalogBackend(backend) {
-		return nil
-	}
 	if localStorage == nil || localStorage.db == nil {
 		return nil
 	}

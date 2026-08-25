@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
 type fakeCowEngine struct {
@@ -414,6 +415,63 @@ func TestCreateMemoryVolumeUsesVolumeKind(t *testing.T) {
 	assert.Equal(t, "tpl-snap-memory", volume.VolumeName)
 	assert.Equal(t, cowKindVolume, volume.Kind)
 	assert.Equal(t, "/dev/mapper/tpl-snap-memory", volume.FilePath)
+}
+
+func TestCloneSandboxMemory(t *testing.T) {
+	source := "tpl-snap-pause-memory-snap"
+	dest := SandboxMemoryName("sb1")
+	stores := []struct {
+		name string
+		new  func(*fakeCowEngine) cow.Store
+	}{
+		{"xfs", func(e *fakeCowEngine) cow.Store { return &XfsCow{engine: e} }},
+		{"s3", func(e *fakeCowEngine) cow.Store { return &S3Cow{engine: e} }},
+	}
+	for _, tc := range stores {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := &fakeCowEngine{}
+			store := tc.new(engine)
+			volume, err := store.CloneSandboxMemory(context.Background(), "sb1", source)
+			require.NoError(t, err)
+			require.NotNil(t, volume)
+			assert.Equal(t, dest, volume.VolumeName)
+			assert.Equal(t, cowKindVolume, volume.Kind)
+			assert.Equal(t, [][2]string{{source, dest}}, engine.createVolumeFromSnapshots)
+			assert.NotEmpty(t, volume.FilePath)
+		})
+		t.Run(tc.name+"/already exists", func(t *testing.T) {
+			engine := &fakeCowEngine{
+				createVolumeFromSnapshotErr: &cubecow.CowError{Code: cubecow.SemAlreadyExists, RawRC: int32(cubecow.SemAlreadyExists)},
+				volumeInfos:                 map[string]*cubecow.Volume{dest: {}},
+				activatePaths:               map[string]string{dest: "/dev/mapper/" + dest},
+			}
+			store := tc.new(engine)
+			volume, err := store.CloneSandboxMemory(context.Background(), "sb1", source)
+			require.NoError(t, err)
+			require.Equal(t, dest, volume.VolumeName)
+			assert.Equal(t, cowKindVolume, volume.Kind)
+			assert.Equal(t, "/dev/mapper/"+dest, volume.FilePath)
+		})
+		t.Run(tc.name+"/empty ids", func(t *testing.T) {
+			store := tc.new(&fakeCowEngine{})
+			_, err := store.CloneSandboxMemory(context.Background(), "", source)
+			require.Error(t, err)
+			_, err = store.CloneSandboxMemory(context.Background(), "sb1", "")
+			require.Error(t, err)
+		})
+		t.Run(tc.name+"/volume source", func(t *testing.T) {
+			volSrc := "tpl-snap-pause-memory"
+			engine := &fakeCowEngine{}
+			store := tc.new(engine)
+			volume, err := store.CloneSandboxMemory(context.Background(), "sb1", volSrc)
+			require.NoError(t, err)
+			require.Equal(t, dest, volume.VolumeName)
+			assert.Equal(t, cowKindVolume, volume.Kind)
+			assert.Equal(t, [][2]string{{volSrc, dest}}, engine.createVolumeFromSnapshots)
+			assert.Empty(t, engine.createSnapshots)
+			assert.Empty(t, engine.deletedSnapshots)
+		})
+	}
 }
 
 func TestTemplateArtifactsRejectAlreadyExists(t *testing.T) {

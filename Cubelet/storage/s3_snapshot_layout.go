@@ -28,6 +28,10 @@ const (
 	SnapshotDiskDir = "disk"
 	// SnapshotObjectsDir is the XFS cubecow object pool (files, not metadata).
 	SnapshotObjectsDir = "objects"
+	// legacyReflinkDirName is the pre-refactor cubecow reflink pool
+	// (<work>/cubecow-reflink). Current objects live under xfs/objects.
+	legacyReflinkDirName  = "cubecow-reflink"
+	reflinkVolumesDirName = "volumes"
 
 	// Deprecated aliases kept so existing S3 helpers keep compiling.
 	S3SnapshotRootName    = "s3"

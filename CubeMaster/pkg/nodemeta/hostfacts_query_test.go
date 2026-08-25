@@ -41,6 +41,28 @@ func TestFilterHostFactCandidates(t *testing.T) {
 			wantIDs:   []string{"node-a"},
 		},
 		{
+			name: "same kernel different cpuid_hash is rejected",
+			nodes: node.NodeList{
+				nodeA,
+				&node.Node{InsID: "node-other-cpu", IP: "10.0.0.7", Healthy: true, HostFacts: &node.HostFacts{CPUIDHash: "hash-other", HostKernelRelease: "5.15.0"}},
+			},
+			cpuidHash: "hash-x",
+			kernelRel: "5.15.0",
+			matchAll:  false,
+			wantIDs:   []string{"node-a"},
+		},
+		{
+			name: "same cpuid_hash different kernel is rejected",
+			nodes: node.NodeList{
+				nodeA,
+				&node.Node{InsID: "node-other-kernel", IP: "10.0.0.8", Healthy: true, HostFacts: &node.HostFacts{CPUIDHash: "hash-x", HostKernelRelease: "6.1.0"}},
+			},
+			cpuidHash: "hash-x",
+			kernelRel: "5.15.0",
+			matchAll:  false,
+			wantIDs:   []string{"node-a"},
+		},
+		{
 			name:      "ARM node filtered by its own CPUIDHash",
 			nodes:     node.NodeList{nodeA, armNode},
 			cpuidHash: "sha256:arm-a78",

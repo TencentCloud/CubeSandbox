@@ -55,6 +55,9 @@ type Store interface {
 	CommitTemplateRootfs(ctx context.Context, sourceName, templateID string) (*Object, error)
 	CreateMemoryVolume(ctx context.Context, templateID string, sizeBytes uint64) (*Object, error)
 	CommitTemplateMemory(ctx context.Context, sourceName, templateID string, sizeBytes uint64) (*Object, error)
+	// CloneSandboxMemory copies package memory into sb-<id>-memory
+	// so Resume can drop the pause package afterwards.
+	CloneSandboxMemory(ctx context.Context, sandboxID, sourceName string) (*Object, error)
 	DeleteByKind(ctx context.Context, name, kind string) error
 	DeactivateByKind(ctx context.Context, name, kind string) error
 	ResolveDevPath(ctx context.Context, name, kind string) (string, error)

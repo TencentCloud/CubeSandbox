@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"runtime/debug"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -96,60 +95,48 @@ func listSandbox(ctx context.Context, req *types.ListCubeSandboxReq, failOnCubel
 		nodeList, rsp.EndIdx = localcache.RangeDBHost(req.StartIdx, req.Size, req.InstanceType)
 	}
 
-	if len(nodeList) == 0 {
-		return
-	}
-
 	rsp.Size = len(nodeList)
+	if len(nodeList) > 0 {
+		var resChan = make(chan *types.SandboxBriefData, 1000*len(nodeList))
+		done := make(chan struct{})
+		var listFailed atomic.Bool
 
-	var resChan = make(chan *types.SandboxBriefData, 1000*len(nodeList))
-	done := make(chan struct{})
-	var listFailed atomic.Bool
+		dealRspData(ctx, done, resChan, rsp)
 
-	dealRspData(ctx, done, resChan, rsp)
-
-	var wg sync.WaitGroup
-
-	for _, tmpNode := range nodeList {
-		tmpNode := tmpNode
-		recov.GoWithWaitGroup(&wg, func() {
-			doOneList(ctx, req, tmpNode, resChan, &listFailed)
-		}, func(panicError interface{}) {
-			log.G(ctx).Fatalf("panic:%v", string(debug.Stack()))
-		})
-	}
-	wg.Wait()
-	close(resChan)
-	<-done
-
-	if failOnCubeletError && listFailed.Load() {
-		rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
-		rsp.Ret.RetMsg = "list sandbox failed: cubelet unreachable"
-	}
-
-	// Results arrive over resChan in goroutine-completion order, which varies
-	// between calls and across nodes, so rsp.Data would otherwise be reshuffled
-	// on every list request. Sort by creation time descending (newest first),
-	// falling back to SandboxID for a deterministic, stable order.
-	sort.Slice(rsp.Data, func(i, j int) bool {
-		if rsp.Data[i].CreateAt != rsp.Data[j].CreateAt {
-			return rsp.Data[i].CreateAt > rsp.Data[j].CreateAt
+		var wg sync.WaitGroup
+		for _, tmpNode := range nodeList {
+			tmpNode := tmpNode
+			recov.GoWithWaitGroup(&wg, func() {
+				doOneList(ctx, req, tmpNode, resChan, &listFailed)
+			}, func(panicError interface{}) {
+				log.G(ctx).Fatalf("panic:%v", string(debug.Stack()))
+			})
 		}
-		return rsp.Data[i].SandboxID < rsp.Data[j].SandboxID
-	})
+		wg.Wait()
+		close(resChan)
+		<-done
+
+		if failOnCubeletError && listFailed.Load() {
+			rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
+			rsp.Ret.RetMsg = "list sandbox failed: cubelet unreachable"
+		}
+	}
+
 	enrichSandboxListBackends(ctx, rsp.Data)
 	mergePauseBindings(ctx, req, rsp)
+	types.SortSandboxList(rsp.Data)
 	return
 }
 
 // mergePauseBindings adds Master's pause state to the node-scan result.
 //
 // A paused sandbox has no shim, so the node scan cannot be trusted to report
-// it, and t_cube_pause_snapshot is the source of truth. Bindings are therefore
-// read in full rather than per scanned node: the (StartIdx, Size) window only
-// paginates node scanning. An explicit --hostid is still honoured, because it
-// selects one node on purpose and `list --hostid X --quiet --delete` must not
-// reach a sandbox parked on another node.
+// it, and t_cube_pause_snapshot is the source of truth. Scanned rows are
+// always enriched with pause_snap／remote. Shimless READY／DELETE_FAILED
+// rows that the scan missed are appended only on the last node page (or
+// when --hostid selects one node), so they sit after running sandboxes
+// instead of repeating on every page. Label-filtered lists still do not
+// invent rows (labels only exist on the node).
 func mergePauseBindings(ctx context.Context, req *types.ListCubeSandboxReq, rsp *types.ListCubeSandboxRes) {
 	records, err := pausesnap.List(ctx, pausesnap.ListOptions{
 		HostID:       req.HostID,
@@ -161,11 +148,28 @@ func mergePauseBindings(ctx context.Context, req *types.ListCubeSandboxReq, rsp 
 		}
 		return
 	}
-	rsp.Data = applyPauseBindings(rsp.Data, records, req.Filter != nil && len(req.Filter.LabelSelector) > 0)
+	labelFiltered := req.Filter != nil && len(req.Filter.LabelSelector) > 0
+	rsp.Data = applyPauseBindings(rsp.Data, records, labelFiltered, shouldAppendShimlessPauseRows(req, rsp))
+}
+
+// shouldAppendShimlessPauseRows is true for a single-host list and for the
+// last node-window page. Intermediate pages only decorate rows the scan
+// already returned.
+func shouldAppendShimlessPauseRows(req *types.ListCubeSandboxReq, rsp *types.ListCubeSandboxRes) bool {
+	if req != nil && strings.TrimSpace(req.HostID) != "" {
+		return true
+	}
+	if rsp == nil {
+		return false
+	}
+	if rsp.Total <= 0 || rsp.Size == 0 {
+		return true
+	}
+	return rsp.EndIdx >= rsp.Total
 }
 
 func applyPauseBindings(items []*types.SandboxBriefData, records []*pausesnap.Record,
-	labelFiltered bool) []*types.SandboxBriefData {
+	labelFiltered, appendMissing bool) []*types.SandboxBriefData {
 	known := make(map[string]*types.SandboxBriefData, len(items))
 	for _, item := range items {
 		if item != nil && item.SandboxID != "" {
@@ -189,7 +193,7 @@ func applyPauseBindings(items []*types.SandboxBriefData, records []*pausesnap.Re
 		}
 		// Labels only exist on the node, so a label-filtered list cannot tell
 		// whether this binding would have matched.
-		if labelFiltered {
+		if labelFiltered || !appendMissing {
 			continue
 		}
 		item := pauseBindingRow(rec)

@@ -319,8 +319,8 @@ func PrepareS3MetadataMount(ctx context.Context, backend, snapshotID, mountPath 
 // CloneS3MetadataFromParent creates the child package／sandbox metadata disk
 // as a snapshot of the parent's metadata volume (template / snapshot /
 // pause). If the parent volume is missing, falls back to cloning the
-// node-local base. Resume should call MountS3MetadataAt on the pause id
-// instead — that disk already exists from Pause.
+// node-local base. Pause resume uses this with childID=sandboxID so the
+// pause package can be deleted afterwards.
 func CloneS3MetadataFromParent(ctx context.Context, backend, parentID, childID, mountPath string) error {
 	if !isS3CatalogBackend(backend) {
 		return nil

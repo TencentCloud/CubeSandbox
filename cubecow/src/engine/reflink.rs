@@ -755,9 +755,8 @@ impl Engine for ReflinkEngine {
         // the moment FICLONE returns.
         Self::validate_name(volume_name, "volume")?;
 
-        // Resolve source: must be an existing snapshot. Cloning from
-        // another volume is rejected — callers should snapshot first
-        // and then clone, mirroring the s3 backend contract.
+        // XFS: volume and snapshot are both independent FICLONE files.
+        // Clone from either. (S3 keeps a real snapshot vs volume split.)
         let source_path = {
             let idx = self
                 .name_index
@@ -767,12 +766,7 @@ impl Engine for ReflinkEngine {
                 Some(NameKind::Snapshot { origin_volume }) => {
                     self.snap_file(origin_volume, source_snapshot)
                 }
-                Some(NameKind::Volume) => {
-                    return Err(CubecowError::InvalidArg(format!(
-                        "'{source_snapshot}' is a volume; \
-                         create_volume_from_snapshot requires a snapshot as source"
-                    )));
-                }
+                Some(NameKind::Volume) => self.vol_main_file(source_snapshot),
                 None => {
                     return Err(CubecowError::NotFound(format!(
                         "snapshot '{source_snapshot}'"
@@ -1490,6 +1484,39 @@ mod tests {
             engine.delete_volume("vol"),
             Err(CubecowError::NotFound(_))
         ));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_volume_from_volume_source() {
+        let root = unique_root("vol-from-vol");
+        if !fs_supports_ficlone(&root.join("volumes")) {
+            eprintln!("[skip] tmpdir does not support FICLONE");
+            return;
+        }
+        let engine = make_engine(&root);
+
+        engine.create_volume("src-vol", 1024 * 1024).unwrap();
+        let cloned = engine
+            .create_volume_from_snapshot("src-vol", "dst-vol")
+            .unwrap();
+        assert_eq!(cloned.name, "dst-vol");
+        assert!(cloned.device_path.ends_with("/volumes/dst-vol/dst-vol"));
+        assert!(root
+            .join("volumes")
+            .join("dst-vol")
+            .join("dst-vol")
+            .exists());
+
+        engine.delete_volume("src-vol").unwrap();
+        assert!(
+            root.join("volumes")
+                .join("dst-vol")
+                .join("dst-vol")
+                .exists(),
+            "clone is independent of the source volume"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

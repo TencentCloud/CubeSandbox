@@ -446,24 +446,22 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	// describes a sandbox that is by now running whatever the proxy thinks.
 	purgeErr := cubeproxy.InvalidateBackendCache(ctx, req.SandboxID, targetIP)
 
-	// The sandbox now lives on the target, but the origin still holds the
-	// PAUSED CubeBox row Pause left behind. Same-node Resume replaces that
-	// row as part of Create; cross-node has to say so explicitly, or the
-	// origin keeps reporting a paused sandbox that no longer exists there —
-	// which shows up as a duplicate row in List and, worse, lets ID
-	// resolution send a later Destroy to the origin and leak the live one.
+	// After Create the sandbox runs on private disks. Drop the pause package
+	// on the node that still holds it: origin when this was cross-node
+	// (also the PAUSED tombstone), otherwise this node.
 	if placement != nil && placement.CrossNode {
 		if origin := strings.TrimSpace(rec.NodeIP); origin != "" && origin != targetIP {
-			if err := pausesnap.DropOriginTombstone(ctx, req.RequestID, req.SandboxID, origin); err != nil {
-				log.G(ctx).Errorf("resume: sandbox %s runs on %s but origin %s still reports it paused: %v",
+			if err := pausesnap.DropOriginTombstone(ctx, req.RequestID, req.SandboxID, origin, rec.SnapshotID, rec.Backend); err != nil {
+				log.G(ctx).Errorf("resume: sandbox %s runs on %s but origin %s still has pause leftovers: %v",
 					req.SandboxID, targetIP, origin, err)
 			}
 		}
+	} else if err := pausesnap.CleanupPauseSnapshot(ctx, req.RequestID, targetIP, rec.SnapshotID, rec.Backend); err != nil {
+		log.G(ctx).Errorf("resume: sandbox %s is running but pause package %s on %s was not deleted: %v",
+			req.SandboxID, rec.SnapshotID, targetIP, err)
 	}
 
-	// Pause snap stays on disk for Resume. Cubelet drops the previous live
-	// pause snap after the next Pause succeeds. Master only deletes the
-	// pause-snap binding so the next Pause can allocate a new id.
+	// Binding must go so the next Pause can allocate a new id.
 	if err := pausesnap.Delete(ctx, snapID); err != nil {
 		log.G(ctx).Warnf("resume: delete pause snap meta %s: %v", snapID, err)
 	}
