@@ -92,9 +92,12 @@ if [ "${RCOW_LAYOUT}" = "package" ]; then
 		export PYTHONPATH
 	fi
 else
+	# Each fallback prints at most one line. && and || have equal precedence,
+	# so an ungrouped `echo /opt && pwd` would still run pwd in the current
+	# directory and bake a two-line SPDK_ROOT.
 	SPDK_ROOT="${SPDK_ROOT:-$(cd "${RCOW_REPO_ROOT}/deps/spdk" 2>/dev/null && pwd \
 		|| { [ -f /opt/s3lvol-spdk/scripts/rpc.py ] && echo /opt/s3lvol-spdk; } \
-		|| cd "${RCOW_REPO_ROOT}/../spdk" 2>/dev/null && pwd \
+		|| { cd "${RCOW_REPO_ROOT}/../spdk" 2>/dev/null && pwd; } \
 		|| echo /data/home/cow/spdk)}"
 
 	RCOW_TGT_BIN="${RCOW_TGT_BIN:-${RCOW_REPO_ROOT}/app/s3lvol_tgt/s3lvol_tgt}"
