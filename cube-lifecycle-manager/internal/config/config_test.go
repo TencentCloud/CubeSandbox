@@ -114,6 +114,21 @@ func TestLoadHABadDuration(t *testing.T) {
 	assert.Contains(t, err.Error(), "CUBE_LCM_LEADER_TTL")
 }
 
+func TestLoadHAEnabledParsing(t *testing.T) {
+	// Mixed-case bools are accepted (ParseBool semantics)...
+	t.Setenv("CUBE_LCM_HA_ENABLED", "True")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.HAEnabled)
+
+	// ...but a value that merely *looks* truthy must fail loudly instead of
+	// silently disabling HA.
+	t.Setenv("CUBE_LCM_HA_ENABLED", "yes")
+	_, err = Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CUBE_LCM_HA_ENABLED")
+}
+
 func TestValidateHA(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.InstanceID = cfg.ConsumerName
@@ -146,9 +161,16 @@ func TestValidateHA(t *testing.T) {
 	bad.ReconcileInterval = bad.LeaderTTL
 	require.NoError(t, bad.Validate())
 
-	// With HA disabled the HA fields are not validated at all: a
-	// single-replica deployment must not have to care about them.
+	// ReconcileInterval is validated in both modes: the reconciler and
+	// claimStalePending tickers run in single-replica deployments too.
 	off := testConfig(t)
+	off.HAEnabled = false
+	off.ReconcileInterval = 0
+	assert.ErrorContains(t, off.Validate(), "reconcile interval")
+
+	// With HA disabled the remaining HA fields are not validated: a
+	// single-replica deployment must not have to care about them.
+	off = testConfig(t)
 	off.HAEnabled = false
 	off.InstanceID = ""
 	off.LeaderKey = ""

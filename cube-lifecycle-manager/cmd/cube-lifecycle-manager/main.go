@@ -10,12 +10,13 @@
 // Active-standby HA (issue #1211): when CUBE_LCM_HA_ENABLED=1, replicas
 // elect a leader through a Redis lease (internal/leaderelect). Only the
 // leader runs the stateful loops (stream consumer, sweeper, last-active
-// poller, reconciler); standbys keep the HTTP server up — gated to 503 on
-// /readyz so the Service routes resume traffic to the leader — and can
-// still serve /internal/resume through the meta-hash fallback. A crashed
-// leader is replaced within one leader TTL; the new leader bootstraps from
-// the meta hash, claims the dead consumer's pending stream entries, and
-// the reconciler converges whatever drift remains.
+// poller, reconciler); standbys keep the HTTP server up but report 503 on
+// /readyz so the Service routes resume traffic to the leader (resume
+// requests therefore fail during the failover window and clients retry).
+// A crashed leader is replaced within one leader TTL; the new leader
+// bootstraps from the meta hash, claims the dead consumer's pending stream
+// entries, serves resume through the meta-hash fallback while its bootstrap
+// lands, and the reconciler converges whatever drift remains.
 package main
 
 import (
@@ -172,9 +173,10 @@ func run() error {
 		CubeMaster:   masterClient,
 		ProxyPush:    pushClient,
 		StateLockTTL: cfg.StateLockTTL,
-		// MetaLookup lets a standby (or a freshly promoted leader whose
-		// bootstrap hasn't landed yet) serve resume requests straight from
-		// the authoritative meta hash.
+		// MetaLookup lets a freshly promoted leader whose bootstrap hasn't
+		// landed yet (or a standby reached directly, e.g. via pod IP — the
+		// Service only routes to the leader) serve resume requests straight
+		// from the authoritative meta hash.
 		MetaLookup: stream,
 		Log:        logger.Named("resumer"),
 		EventBus:   bus,
@@ -454,23 +456,34 @@ func consumeStream(ctx context.Context, stream *redisstream.Client, push *proxyp
 	}
 }
 
-// claimStalePending is the failover half of stream consumption: it
-// periodically takes over entries that were delivered to a consumer which
+// claimStalePending is the failover half of stream consumption: right after
+// a promotion it takes over entries that were delivered to a consumer which
 // has since died or been demoted (in HA mode, typically the previous
 // leader) and feeds them through the same handler as live deliveries.
 // Without it those events would sit in the pending-entries list until the
 // stream's MAXLEN trim drops them, leaving registry/proxy state diverged.
+//
+// The loop drains the predecessor's backlog and then parks for the rest of
+// the stint: XAUTOCLAIM cannot exclude entries owned by the calling
+// consumer, so a claim pass that runs for the whole leadership would
+// eventually steal this leader's own in-flight consumeStream entries — a
+// slow 100-event batch (each handleEvent bounded by the 10s proxy push
+// timeout) can exceed minIdle — and double-process them. A live leader
+// never accumulates stale entries of its own; anything a wedged or demoted
+// stint leaves behind is taken over by the *next* leader's drain.
 func claimStalePending(ctx context.Context, stream *redisstream.Client, push *proxypush.Client,
 	reg *registry.Registry, cfg *config.Config, ssDeps statesync.Deps, log *zap.Logger) error {
 
 	t := time.NewTicker(cfg.ReconcileInterval)
 	defer t.Stop()
 
+	start := time.Now()
 	for {
-		// minIdle == ReconcileInterval: comfortably longer than a slow
-		// handleEvent batch, so a live consumer's in-flight entries are
-		// never stolen, while a dead leader's leftovers are taken over
-		// within one reconcile interval of a promotion.
+		// minIdle == ReconcileInterval (≥ leader TTL in HA mode, enforced by
+		// config validation): entries a merely partitioned — still alive —
+		// old leader is working on are never stolen, while a dead leader's
+		// leftovers are taken over within one interval of their aging past
+		// minIdle.
 		events, err := stream.ClaimPending(ctx, cfg.ConsumerGroup, cfg.ConsumerName,
 			cfg.ReconcileInterval, 100)
 		if err != nil {
@@ -485,6 +498,14 @@ func claimStalePending(ctx context.Context, stream *redisstream.Client, push *pr
 			}
 			if len(events) > 0 {
 				log.Info("claimed stale pending events", zap.Int("count", len(events)))
+			} else if time.Since(start) >= cfg.ReconcileInterval {
+				// Empty pass once every entry the predecessor read just
+				// before dying has aged past minIdle: the takeover is
+				// complete and there is nothing left this loop may
+				// legitimately claim. Park until leadership ends.
+				log.Info("pending-entry takeover complete; parking for the rest of the stint")
+				<-ctx.Done()
+				return ctx.Err()
 			}
 		}
 		select {

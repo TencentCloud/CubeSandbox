@@ -109,6 +109,13 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) {
 			adopted++
 		case !reflect.DeepEqual(cur.Meta, meta):
 			r.o.Registry.Upsert(meta)
+			// Mirror the stream OpUpdate path (main.go handleEvent): an
+			// update refreshes the activity baseline, otherwise an extended
+			// TimeoutSeconds applied only through this loop — e.g. the
+			// update event was lost in a failover — leaves the old
+			// LastActiveMs in place and the sweeper can pause the sandbox
+			// on the next pass.
+			r.o.Registry.ResetLastActive(sid)
 			r.pushUpsert(ctx, sid, meta)
 			updated++
 		}

@@ -272,12 +272,15 @@ func Load() (*Config, error) {
 		}
 	}
 	if v := os.Getenv("CUBE_LCM_HA_ENABLED"); v != "" {
-		// Same truthy set as CUBE_LCM_USE_STATIC_FLEET.
-		switch v {
-		case "1", "true", "TRUE", "yes":
-			c.HAEnabled = true
-		default:
-			c.HAEnabled = false
+		// ParseBool (like CUBE_LCM_EVENTBUS_ENABLED): a value that *looks*
+		// enabled but isn't recognized ("True", "yes", "on", ...) must fail
+		// loudly at startup, not silently disable HA and revert to the
+		// split-brain single-replica behavior.
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			addErr("CUBE_LCM_HA_ENABLED", err)
+		} else {
+			c.HAEnabled = enabled
 		}
 	}
 	if v := os.Getenv("CUBE_LCM_INSTANCE_ID"); v != "" {
@@ -356,6 +359,12 @@ func (c *Config) Validate() error {
 	if c.LastActivePoll <= 0 {
 		return errors.New("last active poll must be > 0")
 	}
+	// ReconcileInterval drives the reconciler and claimStalePending tickers,
+	// which run in single-replica mode too — validate it unconditionally
+	// (a zero/negative value would panic time.NewTicker at startup).
+	if c.ReconcileInterval <= 0 {
+		return errors.New("reconcile interval must be > 0")
+	}
 	if c.HAEnabled {
 		if c.InstanceID == "" {
 			return errors.New("instance id is empty")
@@ -368,9 +377,6 @@ func (c *Config) Validate() error {
 		}
 		if c.LeaderRenewInterval <= 0 || c.LeaderRenewInterval >= c.LeaderTTL {
 			return errors.New("leader renew interval must be > 0 and < leader TTL")
-		}
-		if c.ReconcileInterval <= 0 {
-			return errors.New("reconcile interval must be > 0")
 		}
 		// ReconcileInterval doubles as the XAUTOCLAIM min-idle when a new
 		// leader takes over a dead predecessor's pending stream entries

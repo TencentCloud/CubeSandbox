@@ -84,10 +84,19 @@ type Callbacks struct {
 	// ctx.Done(). OnElected must be safe to invoke repeatedly across
 	// lose-then-regain cycles.
 	OnElected func(ctx context.Context)
-	// OnLost runs synchronously after the OnElected context is cancelled.
-	// Optional.
+	// OnLost runs synchronously after the OnElected context is cancelled and
+	// the previous OnElected goroutine has drained (bounded by
+	// stintDrainTimeout), so teardown here never races an in-flight leader
+	// loop from the demoted stint. Optional.
 	OnLost func()
 }
+
+// stintDrainTimeout bounds how long loseLeadership waits for the demoted
+// stint's OnElected goroutine to return before invoking OnLost. A healthy
+// stint drains almost immediately after cancellation (in-flight HTTP pushes
+// and stream reads carry the cancelled context); the bound only guards
+// against a wedged leader loop blocking re-election forever.
+const stintDrainTimeout = 30 * time.Second
 
 // Elector maintains the leader lease. Construct with New, then call Run.
 type Elector struct {
@@ -101,6 +110,9 @@ type Elector struct {
 	// cancelLeader cancels the context handed to the current OnElected
 	// stint. Only the Run goroutine reads/writes it.
 	cancelLeader context.CancelFunc
+	// stintDone is closed when the current OnElected goroutine returns; nil
+	// between stints. Only the Run goroutine reads/writes it.
+	stintDone chan struct{}
 }
 
 // New builds an Elector over a go-redis client.
@@ -161,6 +173,19 @@ func (e *Elector) Run(ctx context.Context, cb Callbacks) error {
 			e.cancelLeader()
 			e.cancelLeader = nil
 		}
+		if e.stintDone != nil {
+			// Drain the demoted stint before OnLost: teardown (e.g. the
+			// registry reset) must not race a leader loop that is still
+			// mid-handleEvent, and a re-elected stint must not start while
+			// the old one is still writing. Bounded so a wedged loop can't
+			// block re-election forever.
+			select {
+			case <-e.stintDone:
+			case <-time.After(stintDrainTimeout):
+				e.log.Warn("timed out waiting for leader loops to drain; proceeding with OnLost")
+			}
+			e.stintDone = nil
+		}
 		if release {
 			// Bounded context independent of ctx: on shutdown ctx is already
 			// cancelled, but the release must still reach Redis so the
@@ -202,11 +227,18 @@ func (e *Elector) Run(ctx context.Context, cb Callbacks) error {
 			lastRenewOK = time.Now()
 			var leaderCtx context.Context
 			leaderCtx, e.cancelLeader = context.WithCancel(ctx)
+			e.stintDone = make(chan struct{})
+			stintDone := e.stintDone
 			e.log.Info("acquired leadership",
 				zap.String("key", e.cfg.Key),
 				zap.String("instance_id", e.cfg.InstanceID))
 			if cb.OnElected != nil {
-				go cb.OnElected(leaderCtx)
+				go func() {
+					defer close(stintDone)
+					cb.OnElected(leaderCtx)
+				}()
+			} else {
+				close(stintDone)
 			}
 			continue
 		}

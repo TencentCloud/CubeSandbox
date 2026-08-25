@@ -56,9 +56,14 @@ the same Redis in active-standby mode:
   stream consumer, idle sweeper, last-active poller, and the periodic
   reconciler.
 - Standbys keep serving HTTP: `/readyz` returns 503 so the Kubernetes
-  Service routes `/internal/resume` only to the leader, but a standby can
-  still answer a resume that reaches it by looking the sandbox up directly
-  in the authoritative meta hash (registry-miss fallback).
+  Service routes `/internal/resume` only to the leader. Note the failover
+  window consequence: between the leader's death and the new leader
+  becoming ready, the Service has no ready endpoints and resume requests
+  fail (CubeProxy surfaces 503 + `Retry-After` and clients retry). The
+  registry-miss fallback — answering a resume straight from the
+  authoritative meta hash — covers the freshly-promoted leader whose
+  bootstrap hasn't landed yet, plus any request that reaches a standby
+  directly (e.g. via pod IP).
 - On failover (lease expiry, at most one `CUBE_LCM_LEADER_TTL`) the new
   leader re-bootstraps from the meta hash, replays the snapshot to every
   CubeProxy, claims the dead consumer's pending stream entries via

@@ -276,3 +276,45 @@ func TestElectorReleasesOnShutdown(t *testing.T) {
 	assert.Equal(t, 1, releases, "shutdown must release the lease so standbys promote fast")
 	assert.False(t, store.hasKey)
 }
+
+func TestElectorDrainsStintBeforeOnLost(t *testing.T) {
+	store := &fakeLockStore{}
+	el, err := NewWithStore(store, testConfig(), zap.NewNop())
+	require.NoError(t, err)
+
+	stintReturned := make(chan struct{})
+	onLostSawDrain := make(chan bool, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- el.Run(ctx, Callbacks{
+			OnElected: func(c context.Context) {
+				<-c.Done()
+				// Simulate a leader loop finishing in-flight work after
+				// cancellation.
+				time.Sleep(100 * time.Millisecond)
+				close(stintReturned)
+			},
+			OnLost: func() {
+				select {
+				case <-stintReturned:
+					onLostSawDrain <- true
+				default:
+					onLostSawDrain <- false
+				}
+			},
+		})
+	}()
+
+	require.True(t, pollTrue(2*time.Second, el.IsLeader))
+	store.steal("inst-b")
+	select {
+	case saw := <-onLostSawDrain:
+		assert.True(t, saw, "OnLost must run after the demoted stint has drained")
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnLost not invoked")
+	}
+	cancel()
+	<-done
+}

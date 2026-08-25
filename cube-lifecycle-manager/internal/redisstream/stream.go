@@ -88,9 +88,10 @@ func (c *Client) Bootstrap(ctx context.Context) (map[string]lifecycle.SandboxLif
 
 // LookupMeta returns the meta for a single sandbox from the meta HSet.
 // (nil, nil) means the field is absent — CubeMaster doesn't know the sandbox
-// (anymore). Used by the resumer's registry-miss fallback so a standby (or a
-// freshly-promoted leader whose bootstrap hasn't landed yet) can still serve
-// resume requests without waiting for the stream consumer to catch up.
+// (anymore). Used by the resumer's registry-miss fallback so a
+// freshly-promoted leader whose bootstrap hasn't landed yet (or a standby
+// reached directly via pod IP) can still serve resume requests without
+// waiting for the stream consumer to catch up.
 func (c *Client) LookupMeta(ctx context.Context, sandboxID string) (*lifecycle.SandboxLifecycleMeta, error) {
 	payload, err := c.rdb.HGet(ctx, lifecycle.MetaKey, sandboxID).Result()
 	if errors.Is(err, redis.Nil) {
@@ -183,45 +184,61 @@ func (c *Client) Ack(ctx context.Context, group, id string) error {
 	return c.rdb.XAck(ctx, lifecycle.EventStreamKey, group, id).Err()
 }
 
-// ClaimPending transfers up to `count` stream entries that have been pending
-// for longer than minIdle — i.e. stuck on a dead or demoted consumer — to
-// `consumer`, returning them for processing. In active-standby mode the new
-// leader uses this to take over the previous leader's pending-entries list
+// ClaimPending transfers stream entries that have been pending for longer
+// than minIdle — i.e. stuck on a dead or demoted consumer — to `consumer`,
+// returning them for processing. In active-standby mode the new leader uses
+// this to take over the previous leader's pending-entries list
 // (issue #1211); minIdle must be ≥ the leader lease TTL (enforced by config
 // validation when set through CUBE_LCM_*) so entries a live consumer is
 // actively working on are never stolen. The caller must handle
 // and Ack the returned events just like ReadGroup output. Requires Redis
 // 6.2+ (XAUTOCLAIM).
+//
+// One call drains the entire backlog: XAUTOCLAIM scans the PEL in batches
+// of `count` and returns a cursor, which we thread across passes until
+// Redis reports the scan complete. Restarting every pass at "0-0" would
+// drain a large failover backlog at only `count` entries per call.
 func (c *Client) ClaimPending(ctx context.Context, group, consumer string, minIdle time.Duration, count int64) ([]Event, error) {
-	msgs, _, err := c.rdb.XAutoClaim(ctx, &redis.XAutoClaimArgs{
-		Stream:   lifecycle.EventStreamKey,
-		Group:    group,
-		Consumer: consumer,
-		MinIdle:  minIdle,
-		Start:    "0-0",
-		Count:    count,
-	}).Result()
-	if err != nil {
-		return nil, fmt.Errorf("xautoclaim: %w", err)
-	}
 	var out []Event
-	for _, msg := range msgs {
-		// Entries the stream's MAXLEN trim has since deleted come back with
-		// no values; nothing to decode, nothing to ack (XAUTOCLAIM already
-		// dropped them from the PEL on Redis ≥ 7).
-		if len(msg.Values) == 0 {
-			continue
+	start := "0-0"
+	for {
+		msgs, cursor, err := c.rdb.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+			Stream:   lifecycle.EventStreamKey,
+			Group:    group,
+			Consumer: consumer,
+			MinIdle:  minIdle,
+			Start:    start,
+			Count:    count,
+		}).Result()
+		if err != nil {
+			return nil, fmt.Errorf("xautoclaim: %w", err)
 		}
-		ev := decodeEvent(msg)
-		if ev != nil {
-			out = append(out, *ev)
-		} else {
-			c.log.Warn("redisstream: dropping unparseable claimed event",
-				zap.String("id", msg.ID), zap.Any("values", msg.Values))
-			_ = c.Ack(ctx, group, msg.ID)
+		for _, msg := range msgs {
+			// Entries the stream's MAXLEN trim has since deleted come back
+			// with no values. Redis ≥ 7 drops them from the PEL on claim,
+			// but on 6.2 they stay pending and resurface on every pass —
+			// ack them explicitly (a no-op where Redis already removed
+			// them) so the PEL can't leak.
+			if len(msg.Values) == 0 {
+				_ = c.Ack(ctx, group, msg.ID)
+				continue
+			}
+			ev := decodeEvent(msg)
+			if ev != nil {
+				out = append(out, *ev)
+			} else {
+				c.log.Warn("redisstream: dropping unparseable claimed event",
+					zap.String("id", msg.ID), zap.Any("values", msg.Values))
+				_ = c.Ack(ctx, group, msg.ID)
+			}
 		}
+		// Redis signals a completed scan with a "0-0" cursor ("0" seen in
+		// the wild from some proxies); anything else means more batches.
+		if cursor == "0-0" || cursor == "0" {
+			return out, nil
+		}
+		start = cursor
 	}
-	return out, nil
 }
 
 // AcquireState performs a SET NX EX on the per-sandbox lifecycle state key with

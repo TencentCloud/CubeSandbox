@@ -376,6 +376,10 @@ lifecycleManager:
   # Two replicas run in active-standby mode (see ha below): only the leader
   # drives pause/resume decisions, and a crashed leader is replaced within
   # one leaderTTL. Set replicas: 1 to run a single instance.
+  # WARNING: replicas and ha.enabled must move together — replicas > 1 with
+  # ha.enabled: false silently reverts to the pre-HA split-brain (two
+  # replicas consuming the same consumer group and sweeping concurrently),
+  # and the chart rejects that combination at render time.
   replicas: 2
   # Active-standby HA (issue #1211). Replicas elect a leader through a
   # Redis lease; standbys report not-ready on /readyz so the Service routes

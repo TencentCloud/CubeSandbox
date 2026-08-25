@@ -91,6 +91,7 @@ func TestReconcileAdoptsMissingEntry(t *testing.T) {
 func TestReconcileRefreshesStaleMeta(t *testing.T) {
 	reg := registry.New()
 	reg.Upsert(meta("sbx-1", 300))
+	reg.MergeLastActive("sbx-1", 1700000123456)
 	store := &fakeMetaStore{metas: map[string]lifecycle.SandboxLifecycleMeta{
 		"sbx-1": meta("sbx-1", 600), // timeout changed on CubeMaster
 	}}
@@ -102,6 +103,8 @@ func TestReconcileRefreshesStaleMeta(t *testing.T) {
 	require.NotNil(t, e)
 	assert.Equal(t, 600, *e.Meta.TimeoutSeconds, "registry must converge to the hash value")
 	require.Len(t, push.upserted, 1, "the updated meta must be re-pushed to proxies")
+	assert.Zero(t, e.LastActiveMs,
+		"an applied update must reset the activity baseline, mirroring the stream OpUpdate path")
 }
 
 func TestReconcileNoDriftIsQuiet(t *testing.T) {
