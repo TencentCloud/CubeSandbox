@@ -974,8 +974,8 @@ func (l *local) cleanupCreateResult(ctx context.Context, result *StorageInfo) er
 
 // prefetchRestoreMemoryVolURL resolves the memory image the shim restores
 // from, and reports the name of the disk when this create minted one of
-// its own (cross-node import or same-node pause-resume clone) rather than
-// pointing at the package's shared image.
+// its own (cross-node import or same-node S3 pause-resume clone) rather
+// than pointing at the package's shared image.
 func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.CreateContext) (string, string, error) {
 	if opts == nil || opts.ReqInfo == nil || opts.IsCreateSnapshot() {
 		return "", "", nil
@@ -992,10 +992,12 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 	// file:///dev/nvmeXn1 from a previous activate on this or another node.
 	// Always resolve the catalog vol name and Activate for the live path.
 	backend := createContextStorageBackend(opts)
-	// Cross-node imports a sandbox-private memory volume. Same-node pause
-	// resume clones the package memory snap onto sb-<id>-memory so the
-	// pause package can be deleted after Create. Other restores still
-	// attach the package snapshot (templates / customer snaps stay).
+	// Cross-node imports a sandbox-private memory volume. XFS template
+	// start / pause resume / FromSnap mmap the original snapshot file
+	// MAP_PRIVATE; CH keeps it open so later unlink of the package is
+	// safe and a clone would only duplicate bytes. Same-node S3 pause
+	// resume still clones onto sb-<id>-memory: deactivate of an NVMe
+	// lvol would yank the live disk, unlike an unlinked XFS file.
 	if imp := CrossNodeSandboxImport(annotations); imp != nil {
 		name, devPath, err := imp.Memory(ctx)
 		if err != nil {
@@ -1006,11 +1008,11 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 		}
 	}
 	pauseOwner := ""
-	if opts.IsPauseResume() && CrossNodeSandboxImport(annotations) == nil {
+	if pauseResumeClonesLiveMemory(backend) && opts.IsPauseResume() && CrossNodeSandboxImport(annotations) == nil {
 		pauseOwner = pauseResumeMemoryOwnerID(opts)
 		if pauseOwner == "" {
-			// Attaching the package then letting Master delete it would
-			// pull the disk out from under the restored VM.
+			// Attaching the S3 package then letting Master delete it
+			// would pull the NVMe out from under the restored VM.
 			return "", "", fmt.Errorf("pause resume requires sandbox id to clone memory off the package")
 		}
 	}
@@ -1050,11 +1052,21 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 	return cowFileURLFromPath(devPath), "", nil
 }
 
+// pauseResumeClonesLiveMemory is true when same-node pause resume must
+// copy package memory onto a sandbox-private volume before Create
+// returns. XFS is false: the original snapshot file is the restore
+// image. S3 is true because the live disk is an NVMe lvol.
+func pauseResumeClonesLiveMemory(backend string) bool {
+	normalized, err := cow.NormalizeBackend(backend)
+	return err == nil && normalized != cow.BackendXFS
+}
+
 // pauseResumeMemoryOwnerID is the sandbox that must own a private copy of the
-// pause package's memory. Empty means this is not a same-node pause resume
-// (cross-node already imported one, or this is a template／FromSnap create).
-// A same-node pause resume that still returns empty is missing its sandbox
-// id; the caller must fail rather than attach the package snapshot.
+// pause package's memory on backends that clone (S3). Empty means this is
+// not a same-node pause resume that clones (XFS attach, cross-node import,
+// or a template／FromSnap create). A same-node S3 pause resume that still
+// returns empty is missing its sandbox id; the caller must fail rather
+// than attach the package snapshot.
 func pauseResumeMemoryOwnerID(opts *workflow.CreateContext) string {
 	if opts == nil || !opts.IsPauseResume() {
 		return ""
@@ -1917,8 +1929,9 @@ type StorageInfo struct {
 	RestoreMemoryVolURL string `json:"-"`
 
 	// ImportedMemoryVol is the sandbox-private memory disk Create minted
-	// (cross-node import or same-node pause-resume clone). Destroy deletes
-	// it. Empty means this restore still reads a package memory snapshot.
+	// (cross-node import or same-node S3 pause-resume clone). Destroy
+	// deletes it. Empty means this restore still reads a package memory
+	// snapshot (XFS template / resume / FromSnap always leave this empty).
 	ImportedMemoryVol string `json:"importedMemoryVol,omitempty"`
 
 	// PluginVolumeBackendInfos records the result of every plugin_volume attach.

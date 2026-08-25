@@ -264,6 +264,9 @@ func (m *XfsCow) CommitTemplateMemory(ctx context.Context, sourceName, templateI
 	return newCowVolume(snapshotName, cowKindSnapshot, 0, devPath), nil
 }
 
+// CloneSandboxMemory is kept on the Store interface. XFS restore no
+// longer calls it (see prefetchRestoreMemoryVolURL); S3 pause resume
+// still does via S3Cow.
 func (m *XfsCow) CloneSandboxMemory(ctx context.Context, sandboxID, sourceName string) (*cowVolume, error) {
 	return cloneSandboxMemory(ctx, m, sandboxID, sourceName)
 }
