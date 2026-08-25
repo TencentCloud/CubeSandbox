@@ -16,6 +16,8 @@
 #    ./setup_dep.sh spdk            # just that one (spdk, aws)
 #    ./setup_dep.sh --force aws     # rebuild even if it looks done
 #    ./setup_dep.sh --jobs 8        # default is nproc
+#    ./setup_dep.sh --print-stamp spdk|aws
+#    ./setup_dep.sh --emit-builder-prebuilt   # image build only
 #
 #  Environment, for when the defaults are wrong:
 #    AWS_BUILD_TYPE        CMake build type for the CRT. Debug by default,
@@ -24,9 +26,10 @@
 #    SPDK_CONFIGURE_ARGS   replaces SPDK's ./configure arguments outright
 #    SPDK_COMMIT           the pinned upstream baseline
 #
-#  Two dependencies, both installed under deps/:
-#    spdk  cloned at a pinned commit, patched from patches/, configured, built
-#    aws   ten AWS CRT projects at pinned tags, built and merged into libaws.a
+#  Two dependencies, installed under deps/ unless the builder image has a
+#  matching prebuilt (stamped by pin + patches / CRT tags):
+#    spdk  pinned commit, patched, configured, built -> /opt/s3lvol-spdk
+#    aws   ten AWS CRT projects at pinned tags -> /opt/s3lvol-aws-{debug,relwithdebinfo}
 #
 #  === Why deps/ rather than a sibling directory ===
 #
@@ -65,7 +68,9 @@ DEPS_DIR="${SCRIPT_DIR}/deps"
 # commit behind. So this is not the value `git describe` will print afterwards.
 # ---------------------------------------------------------------------------
 SPDK_REPO="${SPDK_REPO:-https://github.com/spdk/spdk.git}"
-SPDK_COMMIT="${SPDK_COMMIT:-d64c4fa89}"
+# Full SHA: GitHub will not fetch an abbreviated commit as a remote ref
+# (`git fetch --depth 1 origin d64c4fa89` -> "couldn't find remote ref").
+SPDK_COMMIT="${SPDK_COMMIT:-d64c4fa89233397460e2e4ff55a1c69b8e498598}"
 
 # What ./configure was given. Deliberately short:
 #
@@ -85,6 +90,11 @@ JOBS="$(nproc 2>/dev/null || echo 4)"
 MODE="setup"
 FORCE=0
 WANTED=""
+PRINT_STAMP=""
+
+S3LVOL_SPDK_PREBUILT="${S3LVOL_SPDK_PREBUILT:-/opt/s3lvol-spdk}"
+S3LVOL_AWS_PREBUILT_DEBUG="${S3LVOL_AWS_PREBUILT_DEBUG:-/opt/s3lvol-aws-debug}"
+S3LVOL_AWS_PREBUILT_RELWITHDEBINFO="${S3LVOL_AWS_PREBUILT_RELWITHDEBINFO:-/opt/s3lvol-aws-relwithdebinfo}"
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -92,6 +102,18 @@ while [ $# -gt 0 ]; do
 	--force)   FORCE=1 ;;
 	--jobs)    shift; JOBS="${1:-}" ;;
 	--jobs=*)  JOBS="${1#*=}" ;;
+	--print-stamp)
+		shift
+		PRINT_STAMP="${1:-}"
+		MODE="print-stamp"
+		;;
+	--print-stamp=*)
+		PRINT_STAMP="${1#*=}"
+		MODE="print-stamp"
+		;;
+	--emit-builder-prebuilt)
+		MODE="emit-builder-prebuilt"
+		;;
 	-h|--help)
 		sed -n '2,/^set -u/p' "${BASH_SOURCE[0]}" | sed 's/^#//;s/^ //'
 		exit 0
@@ -173,7 +195,63 @@ check_tools()
 # ---------------------------------------------------------------------------
 # spdk
 # ---------------------------------------------------------------------------
-SPDK_DIR="${DEPS_DIR}/spdk"
+SPDK_DIR="${SPDK_DIR:-${DEPS_DIR}/spdk}"
+
+digest_sha256()
+{
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum | awk '{print $1}'
+	else
+		openssl dgst -sha256 | awk '{print $NF}'
+	fi
+}
+
+# Hash file contents only. `sha256sum FILE` / `openssl dgst FILE` embed the
+# absolute path, and the stamp is computed from three directories that never
+# agree (image build /tmp/s3lvol-dep, CI /workspace/CubeS3lvol, a developer
+# checkout). Hashing the path made the prebuilt SPDK look stale everywhere.
+file_content_digest()
+{
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum < "$1"
+	else
+		openssl dgst -sha256 < "$1"
+	fi
+}
+
+spdk_patches_hash()
+{
+	local f
+	{
+		if [ -f "${SCRIPT_DIR}/patches/apply.sh" ]; then
+			file_content_digest "${SCRIPT_DIR}/patches/apply.sh"
+		fi
+		for f in "${SCRIPT_DIR}"/patches/[0-9]*.patch; do
+			[ -f "${f}" ] || continue
+			file_content_digest "${f}"
+		done
+	} | digest_sha256
+}
+
+spdk_recipe_stamp()
+{
+	printf 'commit=%s\nconfigure=%s\npatches=%s\n' \
+		"${SPDK_COMMIT}" "${SPDK_CONFIGURE_ARGS}" "$(spdk_patches_hash)" \
+		| digest_sha256
+}
+
+spdk_stamp_file()
+{
+	echo "${1:-${SPDK_DIR}}/.s3lvol-spdk-stamp"
+}
+
+spdk_write_stamp()
+{
+	local dir="${1:-${SPDK_DIR}}"
+	printf '%s\n' "$(spdk_recipe_stamp)" >"$(spdk_stamp_file "${dir}")" || return 1
+	# slim_spdk_tree drops .git, so make_release.sh reads this pin instead.
+	printf '%s\n' "${SPDK_COMMIT}" >"${dir}/.s3lvol-spdk-commit" || return 1
+}
 
 # Being "done" means the libraries this repository links are actually there, not
 # that the directory exists. A checkout interrupted halfway, or configured but
@@ -181,32 +259,55 @@ SPDK_DIR="${DEPS_DIR}/spdk"
 # with a message about aws-c-s3 or spdk_bdev that says nothing about the cause.
 spdk_is_built()
 {
-	[ -f "${SPDK_DIR}/build/lib/libspdk_bdev.a" ] &&
-	[ -f "${SPDK_DIR}/build/lib/libspdk_env_dpdk.a" ] &&
-	[ -f "${SPDK_DIR}/dpdk/build/lib/librte_eal.a" ] &&
-	[ -f "${SPDK_DIR}/include/spdk/blob.h" ]
+	local dir="${1:-${SPDK_DIR}}"
+	[ -f "${dir}/build/lib/libspdk_bdev.a" ] &&
+	[ -f "${dir}/build/lib/libspdk_env_dpdk.a" ] &&
+	[ -f "${dir}/dpdk/build/lib/librte_eal.a" ] &&
+	[ -f "${dir}/include/spdk/blob.h" ]
+}
+
+spdk_tree_ready()
+{
+	local dir="${1:-${SPDK_DIR}}" stamp
+
+	spdk_is_built "${dir}" || return 1
+	if [ -f "$(spdk_stamp_file "${dir}")" ]; then
+		stamp="$(tr -d '[:space:]' <"$(spdk_stamp_file "${dir}")")"
+		[ "${stamp}" = "$(spdk_recipe_stamp)" ]
+		return $?
+	fi
+	# Legacy checkout from before stamps existed: require a git worktree
+	# whose patches still apply.
+	[ -d "${dir}/.git" ] || return 1
+	SPDK_ROOT="${dir}" "${SCRIPT_DIR}/patches/apply.sh" --check >/dev/null 2>&1
+}
+
+prebuilt_spdk_usable()
+{
+	[ "${FORCE}" -eq 0 ] || return 1
+	spdk_tree_ready "${S3LVOL_SPDK_PREBUILT}"
 }
 
 spdk_check()
 {
-	if [ ! -d "${SPDK_DIR}/.git" ]; then
-		echo "  spdk: absent (will clone ${SPDK_REPO} at ${SPDK_COMMIT})"
+	if spdk_tree_ready "${SPDK_DIR}"; then
+		echo "  spdk: built (${SPDK_DIR})"
+		return 0
+	fi
+	if prebuilt_spdk_usable; then
+		echo "  spdk: prebuilt (${S3LVOL_SPDK_PREBUILT}, stamp match)"
+		return 0
+	fi
+	if [ -d "${SPDK_DIR}/.git" ]; then
+		local head patched=no
+		head="$(git -C "${SPDK_DIR}" rev-parse --short HEAD 2>/dev/null || echo '?')"
+		if SPDK_ROOT="${SPDK_DIR}" "${SCRIPT_DIR}/patches/apply.sh" --check >/dev/null 2>&1; then
+			patched=yes
+		fi
+		echo "  spdk: present but not ready (HEAD ${head}, patches applied: ${patched})"
 		return 1
 	fi
-
-	local head patched=no
-	head="$(git -C "${SPDK_DIR}" rev-parse --short HEAD 2>/dev/null || echo '?')"
-	if SPDK_ROOT="${SPDK_DIR}" "${SCRIPT_DIR}/patches/apply.sh" --check >/dev/null 2>&1; then
-		patched=yes
-	fi
-
-	if spdk_is_built; then
-		echo "  spdk: built (HEAD ${head}, patches applied: ${patched})"
-		[ "${patched}" = yes ] && return 0
-		echo "        but the patches are NOT applied -- rerun without --check"
-		return 1
-	fi
-	echo "  spdk: present but not built (HEAD ${head}, patches applied: ${patched})"
+	echo "  spdk: absent (will clone ${SPDK_REPO} at ${SPDK_COMMIT})"
 	return 1
 }
 
@@ -219,22 +320,43 @@ spdk_fetch()
 	if [ -d "${SPDK_DIR}/.git" ]; then
 		log "spdk: reusing ${SPDK_DIR}"
 	else
-		mkdir -p "${DEPS_DIR}" || return 1
-		log "spdk: cloning ${SPDK_REPO} (this takes a while; full history is"
-		log "      needed because the pin is a commit, not a tag)"
-		git clone "${SPDK_REPO}" "${SPDK_DIR}" || return 1
+		if [ -d "${SPDK_DIR}" ] && [ -z "$(ls -A "${SPDK_DIR}" 2>/dev/null)" ]; then
+			rmdir "${SPDK_DIR}" || return 1
+		elif [ -e "${SPDK_DIR}" ]; then
+			err "spdk: ${SPDK_DIR} exists but is not a git checkout."
+			err "      Remove it and rerun, or set SPDK_DIR to a new path."
+			return 1
+		fi
+		mkdir -p "$(dirname "${SPDK_DIR}")" || return 1
+		# Prefer a one-commit fetch. That needs a ref the remote will
+		# advertise -- a full SHA on GitHub, a tag, or a branch. An
+		# abbreviated hash is not a remote ref and fails here; then
+		# fall back to a normal clone (the pin is on master).
+		log "spdk: fetching ${SPDK_REPO} at ${SPDK_COMMIT}"
+		git init --quiet "${SPDK_DIR}" || return 1
+		git -C "${SPDK_DIR}" remote add origin "${SPDK_REPO}" || return 1
+		if git -C "${SPDK_DIR}" fetch --depth 1 origin "${SPDK_COMMIT}"; then
+			git -C "${SPDK_DIR}" checkout --quiet --detach FETCH_HEAD || return 1
+		else
+			log "spdk: remote has no ref ${SPDK_COMMIT}; cloning"
+			rm -rf "${SPDK_DIR}"
+			git clone "${SPDK_REPO}" "${SPDK_DIR}" || return 1
+		fi
 	fi
 
 	# Fetched only when the pinned commit is not already present, so that
 	# re-running this offline works once the clone exists.
 	if ! git -C "${SPDK_DIR}" cat-file -e "${SPDK_COMMIT}^{commit}" 2>/dev/null; then
 		log "spdk: fetching ${SPDK_COMMIT}"
-		git -C "${SPDK_DIR}" fetch --tags origin || return 1
+		git -C "${SPDK_DIR}" fetch --depth 1 origin "${SPDK_COMMIT}" || \
+			git -C "${SPDK_DIR}" fetch origin "${SPDK_COMMIT}" || \
+			git -C "${SPDK_DIR}" fetch --tags origin || return 1
 	fi
 
-	local head
+	local head want
 	head="$(git -C "${SPDK_DIR}" rev-parse HEAD 2>/dev/null || true)"
-	if [ "${head}" != "$(git -C "${SPDK_DIR}" rev-parse "${SPDK_COMMIT}" 2>/dev/null)" ]; then
+	want="$(git -C "${SPDK_DIR}" rev-parse "${SPDK_COMMIT}^{commit}" 2>/dev/null || true)"
+	if [ -n "${want}" ] && [ "${head}" != "${want}" ]; then
 		# Refuse to throw away local work. Someone may be carrying a fix
 		# they have not upstreamed, and `git checkout --force` would take
 		# it away silently.
@@ -265,6 +387,14 @@ spdk_patch()
 
 spdk_build()
 {
+	# Ubuntu 20.04's gcc-9 on aarch64 does not ship arm_sve.h; ISA-L's SVE
+	# sources include it. gcc-10 does. Leave CC/CXX alone if the caller set them.
+	if [ "$(uname -m)" = aarch64 ] && command -v gcc-10 >/dev/null 2>&1; then
+		export CC="${CC:-gcc-10}"
+		export CXX="${CXX:-g++-10}"
+		log "spdk: using ${CC} (ISA-L SVE needs arm_sve.h)"
+	fi
+
 	if [ ! -f "${SPDK_DIR}/mk/config.mk" ] || [ "${FORCE}" -eq 1 ]; then
 		log "spdk: ./configure ${SPDK_CONFIGURE_ARGS}"
 		# Not word-split by accident: the arguments are a list, and the
@@ -295,20 +425,26 @@ spdk_build()
 
 setup_spdk()
 {
-	if spdk_is_built && [ "${FORCE}" -eq 0 ]; then
-		if SPDK_ROOT="${SPDK_DIR}" "${SCRIPT_DIR}/patches/apply.sh" --check >/dev/null 2>&1; then
-			log "spdk: already set up, nothing to do (--force to rebuild)"
+	if [ "${FORCE}" -eq 0 ]; then
+		if spdk_tree_ready "${SPDK_DIR}"; then
+			log "spdk: already set up at ${SPDK_DIR}, nothing to do (--force to rebuild)"
 			return 0
 		fi
-		# Patches missing from an otherwise complete build: apply and rebuild,
-		# rather than reporting "done". Headers and libraries would disagree,
-		# which surfaces as an undefined symbol when linking this project.
-		warn "spdk: built, but patches/ are not applied -- applying and rebuilding"
+		# Image prebuilt is only a substitute when we would otherwise
+		# populate deps/spdk. An explicit SPDK_DIR is left alone.
+		if [ "${SPDK_DIR}" = "${DEPS_DIR}/spdk" ] && prebuilt_spdk_usable; then
+			log "spdk: using builder prebuilt at ${S3LVOL_SPDK_PREBUILT}"
+			return 0
+		fi
+		if spdk_is_built "${SPDK_DIR}"; then
+			warn "spdk: built, but stamp/patches do not match -- applying and rebuilding"
+		fi
 	fi
 
 	spdk_fetch  || return 1
 	spdk_patch  || return 1
 	spdk_build  || return 1
+	spdk_write_stamp "${SPDK_DIR}" || return 1
 	log "spdk: ready at ${SPDK_DIR}"
 	return 0
 }
@@ -336,8 +472,8 @@ setup_spdk()
 # lib64/libaws.a when it is there. `ar -M` is what merges them: it can ADDLIB
 # whole archives, which plain `ar q` cannot.
 # ---------------------------------------------------------------------------
-AWS_DIR="${DEPS_DIR}/aws"          # prefix: include/, lib64/
-AWS_SRC="${DEPS_DIR}/aws-src"      # the ten checkouts
+AWS_DIR="${AWS_DIR:-${DEPS_DIR}/aws}"          # prefix: include/, lib64/
+AWS_SRC="${AWS_SRC:-${DEPS_DIR}/aws-src}"      # the ten checkouts
 
 # How the CRT is compiled.
 #
@@ -357,13 +493,6 @@ AWS_SRC="${DEPS_DIR}/aws-src"      # the ten checkouts
 # default, so an unset value silently means "no optimisation and no symbols" --
 # the worst of both. That was what the hand-written script did.
 AWS_BUILD_TYPE="${AWS_BUILD_TYPE:-Debug}"
-
-# Which build type the installed prefix was produced with. Recorded because
-# nothing in libaws.a says so, and "what is actually linked in here" is exactly
-# the question this repository has already paid to answer once (see the AWS
-# section of mk/s3lvol.common.mk). Without it, changing AWS_BUILD_TYPE would do
-# nothing at all: the prefix is complete, so every build step gets skipped.
-AWS_STAMP="${AWS_DIR}/.build_type"
 
 # Checked here rather than left to CMake, because CMake accepts an unknown build
 # type without a word and then compiles with CMAKE_C_FLAGS_<TYPO> -- which does
@@ -399,6 +528,34 @@ aws-c-auth|v0.9.1|https://github.com/awslabs/aws-c-auth.git|
 aws-c-s3|v0.8.7|https://github.com/awslabs/aws-c-s3.git|
 "
 
+# CMake flags that are always passed. Part of the AWS recipe stamp so a change
+# here invalidates the builder prebuilt the same way a tag bump does.
+AWS_CMAKE_FIXED_FLAGS="BUILD_SHARED_LIBS=OFF
+CMAKE_POSITION_INDEPENDENT_CODE=ON
+BUILD_TESTING=OFF"
+
+aws_recipe_stamp()
+{
+	{
+		printf '%s\n' "${AWS_COMPONENTS}" | awk -F'|' 'NF && $1 != "" { print $1 "|" $2 "|" $4 }'
+		printf '%s\n' "${AWS_CMAKE_FIXED_FLAGS}"
+	} | digest_sha256
+}
+
+aws_prefix_stamp()
+{
+	printf 'type=%s\nrecipe=%s\n' "${AWS_BUILD_TYPE}" "$(aws_recipe_stamp)" | digest_sha256
+}
+
+aws_prebuilt_dir()
+{
+	case "$(printf '%s' "${AWS_BUILD_TYPE}" | tr 'A-Z' 'a-z')" in
+	debug) echo "${S3LVOL_AWS_PREBUILT_DEBUG}" ;;
+	relwithdebinfo) echo "${S3LVOL_AWS_PREBUILT_RELWITHDEBINFO}" ;;
+	*) echo "" ;;
+	esac
+}
+
 # The order ar.sh used. Not the build order and it does not need to be: ar -M
 # merges object files, and the linker resolves between them afterwards.
 AWS_ARCHIVE_LIBS="aws-c-auth aws-c-cal aws-c-common aws-c-compression \
@@ -410,10 +567,11 @@ aws-checksums aws-c-http aws-c-io aws-c-s3 aws-c-sdkutils s2n"
 # and a link failure that says nothing about the cause.
 aws_libdir()
 {
-	if [ -d "${AWS_DIR}/lib64" ] && ls "${AWS_DIR}"/lib64/*.a >/dev/null 2>&1; then
-		echo "${AWS_DIR}/lib64"
-	elif [ -d "${AWS_DIR}/lib" ] && ls "${AWS_DIR}"/lib/*.a >/dev/null 2>&1; then
-		echo "${AWS_DIR}/lib"
+	local dir="${1:-${AWS_DIR}}"
+	if [ -d "${dir}/lib64" ] && ls "${dir}"/lib64/*.a >/dev/null 2>&1; then
+		echo "${dir}/lib64"
+	elif [ -d "${dir}/lib" ] && ls "${dir}"/lib/*.a >/dev/null 2>&1; then
+		echo "${dir}/lib"
 	else
 		echo ""
 	fi
@@ -425,8 +583,53 @@ aws_libdir()
 # because of a missing file would be a poor trade for a guess.
 aws_stamp_read()
 {
-	[ -f "${AWS_STAMP}" ] || { echo ""; return 0; }
-	head -1 "${AWS_STAMP}" 2>/dev/null | tr -d '[:space:]'
+	local dir="${1:-${AWS_DIR}}"
+	[ -f "${dir}/.build_type" ] || { echo ""; return 0; }
+	head -1 "${dir}/.build_type" 2>/dev/null | tr -d '[:space:]'
+}
+
+aws_write_stamps()
+{
+	local dir="${1:-${AWS_DIR}}"
+	printf '%s\n' "${AWS_BUILD_TYPE}" >"${dir}/.build_type" || return 1
+	printf '%s\n' "$(aws_prefix_stamp)" >"${dir}/.s3lvol-aws-stamp" || return 1
+	# slim_aws_prefix drops aws-src/.git; make_release.sh reads the pins here.
+	printf '%s\n' "${AWS_COMPONENTS}" | awk -F'|' 'NF && $1 != "" { printf "%s %s\n", $1, $2 }' \
+		>"${dir}/.aws-components" || return 1
+}
+
+aws_prefix_ready()
+{
+	local dir="$1" stamp how
+
+	aws_is_built "${dir}" || return 1
+	if [ -f "${dir}/.s3lvol-aws-stamp" ]; then
+		stamp="$(tr -d '[:space:]' <"${dir}/.s3lvol-aws-stamp")"
+		[ "${stamp}" = "$(aws_prefix_stamp)" ]
+		return $?
+	fi
+	how="$(aws_stamp_read "${dir}")"
+	[ -z "${how}" ] || [ "${how}" = "${AWS_BUILD_TYPE}" ]
+}
+
+prebuilt_aws_usable()
+{
+	local dir
+
+	[ "${FORCE}" -eq 0 ] || return 1
+	dir="$(aws_prebuilt_dir)"
+	[ -n "${dir}" ] || return 1
+	aws_prefix_ready "${dir}"
+}
+
+aws_path_is_managed()
+{
+	case "$1" in
+	"${DEPS_DIR}/aws"|"${DEPS_DIR}/aws-src") return 0 ;;
+	"${S3LVOL_AWS_PREBUILT_DEBUG}"|"${S3LVOL_AWS_PREBUILT_RELWITHDEBINFO}") return 0 ;;
+	/tmp/s3lvol-aws-src) return 0 ;;
+	esac
+	return 1
 }
 
 # Undo the install so that "is this component's .a present" is once again the
@@ -441,10 +644,10 @@ aws_clear_prefix()
 {
 	local libdir name
 
-	# Both paths are derived from SCRIPT_DIR and neither is allowed to be
-	# bare, because what follows is rm -rf.
-	case "${AWS_DIR}" in */deps/aws) ;; *) die "refusing to clear '${AWS_DIR}'" ;; esac
-	case "${AWS_SRC}" in */deps/aws-src) ;; *) die "refusing to clear '${AWS_SRC}'" ;; esac
+	# Both paths are derived from known prefixes and neither is allowed to
+	# be bare, because what follows is rm -rf.
+	aws_path_is_managed "${AWS_DIR}" || die "refusing to clear '${AWS_DIR}'"
+	aws_path_is_managed "${AWS_SRC}" || die "refusing to clear '${AWS_SRC}'"
 
 	libdir="$(aws_libdir)"
 	if [ -n "${libdir}" ]; then
@@ -455,7 +658,7 @@ aws_clear_prefix()
 		[ -n "${name}" ] || continue
 		rm -rf "${AWS_SRC}/${name}/build" || return 1
 	done
-	rm -f "${AWS_STAMP}"
+	rm -f "${AWS_DIR}/.build_type" "${AWS_DIR}/.s3lvol-aws-stamp"
 	return 0
 }
 
@@ -464,26 +667,37 @@ aws_clear_prefix()
 # otherwise be reported ready.
 aws_is_built()
 {
-	local libdir
-	libdir="$(aws_libdir)"
+	local dir="${1:-${AWS_DIR}}" libdir
+	libdir="$(aws_libdir "${dir}")"
 	[ -n "${libdir}" ] &&
 	[ -f "${libdir}/libaws.a" ] &&
-	[ -f "${AWS_DIR}/include/aws/s3/s3_client.h" ]
+	[ -f "${dir}/include/aws/s3/s3_client.h" ]
 }
 
 aws_check()
 {
-	local libdir n how
-	if aws_is_built; then
-		libdir="$(aws_libdir)"
+	local libdir n how dir
+	if aws_prefix_ready "${AWS_DIR}"; then
+		libdir="$(aws_libdir "${AWS_DIR}")"
 		n="$(ar t "${libdir}/libaws.a" 2>/dev/null | wc -l)"
-		how="$(aws_stamp_read)"
+		how="$(aws_stamp_read "${AWS_DIR}")"
 		echo "  aws:  built (${libdir}/libaws.a, ${n} objects, ${how:-build type unrecorded})"
-		if [ -n "${how}" ] && [ "${how}" != "${AWS_BUILD_TYPE}" ]; then
-			echo "        wanted ${AWS_BUILD_TYPE}; ./setup_dep.sh aws rebuilds it"
-			return 1
-		fi
 		return 0
+	fi
+	if prebuilt_aws_usable; then
+		dir="$(aws_prebuilt_dir)"
+		libdir="$(aws_libdir "${dir}")"
+		n="$(ar t "${libdir}/libaws.a" 2>/dev/null | wc -l)"
+		echo "  aws:  prebuilt (${dir}, ${n} objects, ${AWS_BUILD_TYPE})"
+		return 0
+	fi
+	if aws_is_built "${AWS_DIR}"; then
+		libdir="$(aws_libdir "${AWS_DIR}")"
+		n="$(ar t "${libdir}/libaws.a" 2>/dev/null | wc -l)"
+		how="$(aws_stamp_read "${AWS_DIR}")"
+		echo "  aws:  built (${libdir}/libaws.a, ${n} objects, ${how:-build type unrecorded})"
+		echo "        wanted ${AWS_BUILD_TYPE}; ./setup_dep.sh aws rebuilds it"
+		return 1
 	fi
 	if [ -d "${AWS_SRC}" ]; then
 		echo "  aws:  present but not finished (sources at ${AWS_SRC})"
@@ -639,24 +853,28 @@ aws_archive()
 
 setup_aws()
 {
-	local line name tag repo extra libdir n installed
+	local line name tag repo extra libdir n installed prebuilt
 
-	installed="$(aws_stamp_read)"
-
-	if aws_is_built && [ "${FORCE}" -eq 0 ]; then
-		if [ -z "${installed}" ]; then
-			log "aws: already set up, nothing to do (--force to rebuild)"
-			warn "aws: this prefix does not say which build type it was built"
-			warn "     with, so it is kept as it is. AWS_BUILD_TYPE=${AWS_BUILD_TYPE}"
-			warn "     takes effect on the next --force."
+	if [ "${FORCE}" -eq 0 ]; then
+		if aws_prefix_ready "${AWS_DIR}"; then
+			installed="$(aws_stamp_read "${AWS_DIR}")"
+			log "aws: already set up at ${AWS_DIR} (${installed:-unrecorded}), nothing to do (--force to rebuild)"
 			return 0
 		fi
-		if [ "${installed}" = "${AWS_BUILD_TYPE}" ]; then
-			log "aws: already set up (${installed}), nothing to do (--force to rebuild)"
+		if [ "${AWS_DIR}" = "${DEPS_DIR}/aws" ] && prebuilt_aws_usable; then
+			prebuilt="$(aws_prebuilt_dir)"
+			log "aws: using builder prebuilt at ${prebuilt} (${AWS_BUILD_TYPE})"
 			return 0
 		fi
-		log "aws: installed as ${installed}, wanted ${AWS_BUILD_TYPE} -- rebuilding"
-		aws_clear_prefix || return 1
+		if aws_is_built "${AWS_DIR}"; then
+			installed="$(aws_stamp_read "${AWS_DIR}")"
+			log "aws: installed as ${installed:-unrecorded}, wanted ${AWS_BUILD_TYPE} -- rebuilding"
+			aws_clear_prefix || return 1
+		fi
+	else
+		if aws_is_built "${AWS_DIR}" || [ -d "${AWS_SRC}" ]; then
+			aws_clear_prefix || return 1
+		fi
 	fi
 
 	mkdir -p "${AWS_SRC}" || return 1
@@ -673,17 +891,119 @@ setup_aws()
 	# Last, so that an interrupted run leaves no stamp rather than a wrong one:
 	# absent means "unknown, keep what is there", which is recoverable, while a
 	# wrong value would make a half-rebuilt prefix look settled.
-	printf '%s\n' "${AWS_BUILD_TYPE}" >"${AWS_STAMP}" || return 1
+	aws_write_stamps "${AWS_DIR}" || return 1
 
-	libdir="$(aws_libdir)"
+	libdir="$(aws_libdir "${AWS_DIR}")"
 	n="$(ar t "${libdir}/libaws.a" 2>/dev/null | wc -l)"
 	log "aws: ready at ${AWS_DIR} (libaws.a, ${n} objects, ${AWS_BUILD_TYPE})"
 	return 0
 }
 
 # ---------------------------------------------------------------------------
+# Builder-image install: compile into /opt, then drop VCS, objects and docs.
+# ---------------------------------------------------------------------------
+slim_spdk_tree()
+{
+	local root="$1" gitpath
+
+	[ -n "${root}" ] && [ -d "${root}" ] || return 1
+	find "${root}" -name .git -print0 2>/dev/null |
+		while IFS= read -r -d '' gitpath; do
+			rm -rf "${gitpath}"
+		done
+	find "${root}" -type f -name '*.o' -delete 2>/dev/null || true
+	find "${root}" -type f \( -name '*.so' -o -name '*.so.*' \) -delete 2>/dev/null || true
+	rm -rf "${root}/test" "${root}/doc" "${root}/docs" "${root}/examples" \
+		"${root}/app" "${root}/build/examples" 2>/dev/null || true
+	if [ -d "${root}/dpdk" ]; then
+		find "${root}/dpdk" -mindepth 1 -maxdepth 1 ! -name build \
+			-exec rm -rf {} + 2>/dev/null || true
+		if [ -d "${root}/dpdk/build" ]; then
+			find "${root}/dpdk/build" -mindepth 1 -maxdepth 1 ! -name lib \
+				-exec rm -rf {} + 2>/dev/null || true
+		fi
+	fi
+	return 0
+}
+
+slim_aws_prefix()
+{
+	local root="$1"
+
+	[ -n "${root}" ] && [ -d "${root}" ] || return 1
+	# Keep include/, lib or lib64 with libaws.a, and the stamps.
+	find "${root}" -mindepth 1 -maxdepth 1 \
+		! -name include ! -name lib ! -name lib64 \
+		! -name .build_type ! -name .s3lvol-aws-stamp \
+		! -name .aws-components \
+		-exec rm -rf {} + 2>/dev/null || true
+	return 0
+}
+
+emit_builder_prebuilt()
+{
+	local saved_force="${FORCE}"
+
+	FORCE=0
+	SPDK_DIR="${S3LVOL_SPDK_PREBUILT}"
+	mkdir -p "${S3LVOL_SPDK_PREBUILT}" || return 1
+	setup_spdk || return 1
+	slim_spdk_tree "${S3LVOL_SPDK_PREBUILT}" || return 1
+	spdk_write_stamp "${S3LVOL_SPDK_PREBUILT}" || return 1
+	chmod -R a+rX "${S3LVOL_SPDK_PREBUILT}" || return 1
+
+	AWS_SRC=/tmp/s3lvol-aws-src
+	mkdir -p "${AWS_SRC}" || return 1
+
+	AWS_DIR="${S3LVOL_AWS_PREBUILT_DEBUG}"
+	AWS_BUILD_TYPE=Debug
+	mkdir -p "${AWS_DIR}" || return 1
+	setup_aws || return 1
+	slim_aws_prefix "${AWS_DIR}" || return 1
+	chmod -R a+rX "${AWS_DIR}" || return 1
+
+	# Reconfigure the shared source tree for the second prefix. The Debug
+	# cmake caches would otherwise keep CMAKE_INSTALL_PREFIX and flags.
+	find "${AWS_SRC}" -mindepth 2 -maxdepth 2 -type d -name build \
+		-exec rm -rf {} + 2>/dev/null || true
+
+	AWS_DIR="${S3LVOL_AWS_PREBUILT_RELWITHDEBINFO}"
+	AWS_BUILD_TYPE=RelWithDebInfo
+	mkdir -p "${AWS_DIR}" || return 1
+	setup_aws || return 1
+	slim_aws_prefix "${AWS_DIR}" || return 1
+	chmod -R a+rX "${AWS_DIR}" || return 1
+
+	rm -rf "${AWS_SRC}"
+	FORCE="${saved_force}"
+	log "builder prebuilt ready:"
+	log "    ${S3LVOL_SPDK_PREBUILT}"
+	log "    ${S3LVOL_AWS_PREBUILT_DEBUG}"
+	log "    ${S3LVOL_AWS_PREBUILT_RELWITHDEBINFO}"
+	return 0
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
+if [ "${MODE}" = "print-stamp" ]; then
+	case "${PRINT_STAMP}" in
+	spdk) printf '%s\n' "$(spdk_recipe_stamp)" ;;
+	aws)  printf '%s\n' "$(aws_recipe_stamp)" ;;
+	*)
+		echo "error: --print-stamp wants 'spdk' or 'aws', got '${PRINT_STAMP}'" >&2
+		exit 1
+		;;
+	esac
+	exit 0
+fi
+
+if [ "${MODE}" = "emit-builder-prebuilt" ]; then
+	check_tools || exit 1
+	emit_builder_prebuilt || exit 1
+	exit 0
+fi
+
 if [ "${MODE}" = "check" ]; then
 	echo "dependencies under ${DEPS_DIR}:"
 	rc=0

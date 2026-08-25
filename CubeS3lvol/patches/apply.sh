@@ -9,7 +9,7 @@
 #  from a build script or by hand, as often as you like.
 #
 #  Usage:
-#    patches/apply.sh                # SPDK at ../spdk
+#    patches/apply.sh                # SPDK at deps/spdk, else ../spdk
 #    SPDK_ROOT=/path/to/spdk patches/apply.sh
 #    patches/apply.sh --check            # report only, change nothing, non-zero if
 #                                        # anything is missing
@@ -19,7 +19,13 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-SPDK_ROOT="${SPDK_ROOT:-$(cd "${REPO_ROOT}/../spdk" 2>/dev/null && pwd || true)}"
+if [ -z "${SPDK_ROOT:-}" ]; then
+	if [ -f "${REPO_ROOT}/deps/spdk/include/spdk/blob.h" ]; then
+		SPDK_ROOT="${REPO_ROOT}/deps/spdk"
+	else
+		SPDK_ROOT="$(cd "${REPO_ROOT}/../spdk" 2>/dev/null && pwd || true)"
+	fi
+fi
 
 MODE="apply"
 case "${1:-}" in

@@ -21,8 +21,8 @@ ARG RUSTUP_DIST_SERVER=https://rsproxy.cn
 ARG RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
 # Base URL of a China-reachable LLVM apt mirror (e.g. set via `make builder-image
 # MIRROR=cn`). When set, the llvm.sh installer script and the clang-14 apt packages
-# are sourced from this mirror; empty uses upstream apt.llvm.org. The LLVM GPG
-# signing key is always fetched from apt.llvm.org regardless of this value.
+# are sourced from this mirror; empty uses upstream apt.llvm.org. The GPG signing
+# key is copied from docker/llvm-snapshot.gpg.key so llvm.sh does not wget it.
 ARG LLVM_MIRROR_BASE=
 ARG TARGETARCH
 
@@ -161,7 +161,7 @@ RUN . /etc/buildenv \
     fi \
     && rm -rf /var/lib/apt/lists/*
 
-# Python build-deps for CubeS3lvol's SPDK/DPDK (populated by setup_dep.sh).
+# Python build-deps for CubeS3lvol's SPDK/DPDK.
 # The pinned SPDK needs python >= 3.9 (genrpc.py uses
 # argparse.BooleanOptionalAction) and DPDK needs meson >= 0.57.2, neither of
 # which ubuntu 20.04's stock python3.8 / apt meson (0.53.2) provides. Install
@@ -178,9 +178,10 @@ RUN /usr/bin/python3.9 -m venv /opt/s3lvol-tools \
 
 # Install clang-14. With LLVM_MIRROR_BASE set, fetch llvm.sh from the mirror and
 # pass `-m` so the apt repo/packages resolve to the mirror too (the upstream
-# script otherwise hardcodes BASE_URL=apt.llvm.org). Note: llvm.sh always fetches
-# the GPG signing key from apt.llvm.org (that URL is hardcoded and the mirror does
-# not serve the key), so apt.llvm.org must remain reachable for the key request.
+# script otherwise hardcodes BASE_URL=apt.llvm.org). The GPG key is vendored:
+# llvm.sh skips download_key when /etc/apt/trusted.gpg.d/apt.llvm.org.asc exists.
+# Fingerprint: 6084 F3CF 814B 57C1 CF12 EFD5 15CF 4D18 AF4F 7421
+COPY docker/llvm-snapshot.gpg.key /etc/apt/trusted.gpg.d/apt.llvm.org.asc
 RUN set -eux; \
     if [ -n "${LLVM_MIRROR_BASE}" ]; then \
         script_url="${LLVM_MIRROR_BASE}/llvm.sh"; set -- 14 -m "${LLVM_MIRROR_BASE}"; \
@@ -247,6 +248,28 @@ RUN . /etc/buildenv \
     && if [ -n "${openssl_dir}" ] && [ -f "${openssl_dir}/opensslconf.h" ] && [ ! -f /usr/include/openssl/opensslconf.h ]; then \
         cp "${openssl_dir}/opensslconf.h" /usr/include/openssl/opensslconf.h; \
     fi
+
+# ISA-L SVE sources on aarch64 need arm_sve.h, which Ubuntu 20.04's gcc-9
+# does not ship. gcc-10 does. Keep this off the earlier apt layer so LLVM
+# and rustup stay cacheable when only this changes.
+RUN . /etc/buildenv \
+    && if [ "$(uname -m)" = aarch64 ]; then \
+        apt-get update -o Acquire::Retries=3 \
+        && apt-get install -y --no-install-recommends gcc-10 g++-10 \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# CubeS3lvol prebuilt SPDK + AWS CRT (stamp-driven; trimmed after compile).
+COPY CubeS3lvol/setup_dep.sh /tmp/s3lvol-dep/setup_dep.sh
+COPY CubeS3lvol/patches /tmp/s3lvol-dep/patches
+RUN chmod +x /tmp/s3lvol-dep/setup_dep.sh \
+    && /tmp/s3lvol-dep/setup_dep.sh --jobs "$(nproc)" --emit-builder-prebuilt \
+    && rm -rf /tmp/s3lvol-dep
+
+ARG S3LVOL_SPDK_STAMP=unknown
+ARG S3LVOL_AWS_STAMP=unknown
+LABEL org.cubesandbox.s3lvol.spdk-stamp="${S3LVOL_SPDK_STAMP}" \
+      org.cubesandbox.s3lvol.aws-stamp="${S3LVOL_AWS_STAMP}"
 
 WORKDIR /workspace
 

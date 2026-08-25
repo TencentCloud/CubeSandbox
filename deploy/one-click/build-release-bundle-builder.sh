@@ -378,23 +378,18 @@ track_shim() {
 }
 
 track_s3lvol() {
-  # CubeS3lvol (s3lvol): remote COW on S3/COS fronted by an NVMe/TCP target,
-  # statically linked against SPDK/DPDK/AWS CRT. setup_dep.sh populates
-  # deps/spdk + deps/aws-* at pinned commits/tags (network on first run; the
-  # shared /workspace mount keeps the checkouts and object files across
-  # rebuilds, so only the first build pays the full SPDK/CRT compile).
-  # make_release.sh --skip-smoke defers the DPDK EAL runtime smoke test to
-  # deployment-time verification -- the EAL needs a real CPU affinity mask
-  # that the builder container cannot guarantee -- while the static
-  # self-contained gate (verify_binary: readelf/ldd) still runs inside it.
+  # CubeS3lvol: NVMe/TCP target over S3/COS, statically linked against
+  # SPDK/DPDK/AWS CRT. setup_dep.sh reuses /opt/s3lvol-* from the builder when
+  # stamps match, else populates deps/.
+  # --skip-smoke defers the DPDK EAL runtime check to deployment (the EAL needs
+  # a real CPU affinity mask the builder cannot guarantee); the static
+  # verify_binary gate (readelf/ldd) still runs.
   local s3lvol_jobs="${ONE_CLICK_S3LVOL_JOBS:-$(nproc)}"
   local stage="${PREBUILT_DIR}/s3lvol-stage"
-  # Release-quality AWS CRT for a fresh checkout; an already-populated
-  # deps/aws is reused as-is (setup_dep.sh skips existing builds).
   ( cd /workspace/CubeS3lvol && AWS_BUILD_TYPE=RelWithDebInfo ./setup_dep.sh --jobs "${s3lvol_jobs}" ) >&2
-  ( cd /workspace/CubeS3lvol && make S3LVOL_BUILD_TYPE=release -j"${s3lvol_jobs}" ) >&2
+  ( cd /workspace/CubeS3lvol && AWS_BUILD_TYPE=RelWithDebInfo make S3LVOL_BUILD_TYPE=release -j"${s3lvol_jobs}" ) >&2
   rm -rf "${stage}" "${PREBUILT_DIR}/s3lvol"
-  ( cd /workspace/CubeS3lvol && ./make_release.sh --no-tar --skip-smoke --version "${CUBE_VERSION}" --outdir "${stage}" ) >&2
+  ( cd /workspace/CubeS3lvol && AWS_BUILD_TYPE=RelWithDebInfo ./make_release.sh --no-tar --skip-smoke --version "${CUBE_VERSION}" --outdir "${stage}" ) >&2
   mv "${stage}"/s3lvol-* "${PREBUILT_DIR}/s3lvol"
   rm -rf "${stage}"
   [[ -x "${PREBUILT_DIR}/s3lvol/bin/s3lvol_tgt" ]] || {

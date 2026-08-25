@@ -110,7 +110,7 @@ check-env:
 	@grep -m1 '^CONFIG_DEBUG' "$(SPDK_ROOT)/mk/config.mk" 2>/dev/null | cut -d= -f2 \
 		|| echo "(cannot read $(SPDK_ROOT)/mk/config.mk; SPDK may not have been configured)"
 	@printf "  AWS CRT AWS_BUILD_TYPE   = "
-	@cat "$(S3LVOL_ROOT)/deps/aws/.build_type" 2>/dev/null \
+	@cat "$(if $(AWS_INSTALL_DIR),$(AWS_INSTALL_DIR)/.build_type,$(S3LVOL_ROOT)/deps/aws/.build_type)" 2>/dev/null \
 		|| echo "(not recorded; see setup_dep.sh)"
 	@echo ""
 	@echo "=== SPDK source tree ==="

@@ -120,6 +120,8 @@ PKG_DIR="${OUTDIR}/${PKG_NAME}"
 if [ -z "${SPDK_ROOT:-}" ]; then
 	if [ -f "${REPO_ROOT}/deps/spdk/scripts/rpc.py" ]; then
 		SPDK_ROOT="${REPO_ROOT}/deps/spdk"
+	elif [ -f /opt/s3lvol-spdk/scripts/rpc.py ]; then
+		SPDK_ROOT=/opt/s3lvol-spdk
 	elif [ -f "${REPO_ROOT}/../spdk/scripts/rpc.py" ]; then
 		SPDK_ROOT="$(cd "${REPO_ROOT}/../spdk" && pwd)"
 	else
@@ -136,10 +138,30 @@ TGT_BIN="${REPO_ROOT}/app/s3lvol_tgt/s3lvol_tgt"
 # right default there and the wrong one here, and the binary is static, so once
 # it is on another machine there is nothing left to inspect.
 AWS_BUILT_AS="unknown"
-if [ -f "${REPO_ROOT}/deps/aws/.build_type" ]; then
+AWS_BUILD_TYPE="${AWS_BUILD_TYPE:-Debug}"
+_aws_bt="$(printf '%s' "${AWS_BUILD_TYPE}" | tr 'A-Z' 'a-z')"
+_aws_prebuilt=""
+case "${_aws_bt}" in
+debug) _aws_prebuilt=/opt/s3lvol-aws-debug ;;
+relwithdebinfo) _aws_prebuilt=/opt/s3lvol-aws-relwithdebinfo ;;
+esac
+if [ -n "${AWS_INSTALL_DIR:-}" ] && [ -f "${AWS_INSTALL_DIR}/.build_type" ]; then
+	AWS_BUILT_AS="$(head -1 "${AWS_INSTALL_DIR}/.build_type" | tr -d '[:space:]')"
+elif [ -f "${REPO_ROOT}/deps/aws/.build_type" ]; then
 	AWS_BUILT_AS="$(head -1 "${REPO_ROOT}/deps/aws/.build_type" | tr -d '[:space:]')"
-	[ -n "${AWS_BUILT_AS}" ] || AWS_BUILT_AS="unknown"
+elif [ -n "${_aws_prebuilt}" ] && [ -f "${_aws_prebuilt}/.build_type" ]; then
+	AWS_BUILT_AS="$(head -1 "${_aws_prebuilt}/.build_type" | tr -d '[:space:]')"
 fi
+[ -n "${AWS_BUILT_AS}" ] || AWS_BUILT_AS="unknown"
+AWS_COMPONENTS_FILE=""
+if [ -n "${AWS_INSTALL_DIR:-}" ] && [ -f "${AWS_INSTALL_DIR}/.aws-components" ]; then
+	AWS_COMPONENTS_FILE="${AWS_INSTALL_DIR}/.aws-components"
+elif [ -f "${REPO_ROOT}/deps/aws/.aws-components" ]; then
+	AWS_COMPONENTS_FILE="${REPO_ROOT}/deps/aws/.aws-components"
+elif [ -n "${_aws_prebuilt}" ] && [ -f "${_aws_prebuilt}/.aws-components" ]; then
+	AWS_COMPONENTS_FILE="${_aws_prebuilt}/.aws-components"
+fi
+unset _aws_bt _aws_prebuilt
 
 # And how this repository's own code was compiled. Same reasoning, and the same
 # default: S3LVOL_BUILD_TYPE is debug, which means -O0 on the whole data path.
@@ -268,16 +290,29 @@ find "${PKG_DIR}/scripts/python" -name '__pycache__' -type d -prune -exec rm -rf
 	echo "s3lvol_git:  $(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
 	echo "s3lvol_build_type: ${S3LVOL_BUILT_AS}"
 	echo "spdk_root:   ${SPDK_ROOT}"
-	echo "spdk_git:    $(git -C "${SPDK_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
-	echo "spdk_describe: $(git -C "${SPDK_ROOT}" describe --tags 2>/dev/null || echo unknown)"
+	spdk_git="$(git -C "${SPDK_ROOT}" rev-parse HEAD 2>/dev/null || true)"
+	if [ -z "${spdk_git}" ] && [ -f "${SPDK_ROOT}/.s3lvol-spdk-commit" ]; then
+		spdk_git="$(head -1 "${SPDK_ROOT}/.s3lvol-spdk-commit" | tr -d '[:space:]')"
+	fi
+	[ -n "${spdk_git}" ] || spdk_git="unknown"
+	spdk_describe="$(git -C "${SPDK_ROOT}" describe --tags 2>/dev/null || true)"
+	[ -n "${spdk_describe}" ] || spdk_describe="${spdk_git}"
+	echo "spdk_git:    ${spdk_git}"
+	echo "spdk_describe: ${spdk_describe}"
+	echo "aws_crt_build_type: ${AWS_BUILT_AS}"
 	if [ -d "${REPO_ROOT}/deps/aws-src" ]; then
-		echo "aws_crt_build_type: ${AWS_BUILT_AS}"
 		echo "aws_crt:"
 		for d in "${REPO_ROOT}"/deps/aws-src/*; do
 			[ -d "${d}/.git" ] || continue
 			printf '  %-20s %s\n' "$(basename "${d}")" \
 				"$(git -C "${d}" describe --tags 2>/dev/null || echo unknown)"
 		done
+	elif [ -n "${AWS_COMPONENTS_FILE}" ]; then
+		echo "aws_crt:"
+		while read -r name tag; do
+			[ -n "${name}" ] || continue
+			printf '  %-20s %s\n' "${name}" "${tag}"
+		done < "${AWS_COMPONENTS_FILE}"
 	fi
 	echo "glibc_built_against: $(ldd --version 2>/dev/null | head -1)"
 } > "${PKG_DIR}/VERSION"

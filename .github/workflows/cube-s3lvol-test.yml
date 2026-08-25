@@ -26,9 +26,8 @@ env:
 jobs:
   test:
     name: CubeS3lvol offline tests
-    # Build and test run inside the published Ubuntu 20.04 builder image
-    # (python3.9 venv at /opt/s3lvol-tools, SPDK/DPDK apt deps). The runner
-    # only needs Docker.
+    # Build and test run inside the published builder image, which carries
+    # prebuilt SPDK/AWS CRT under /opt/s3lvol-*. The runner only needs Docker.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -53,30 +52,9 @@ jobs:
       - name: Pull builder image
         run: docker pull "${BUILDER_IMAGE}"
 
-      # The SPDK build (with its pinned DPDK submodule) is ten to thirty
-      # minutes, so cache the whole deps/ tree. setup_dep.sh is "build what is
-      # missing": when the cache hits, spdk_is_built() and the AWS prefix
-      # checks make every step a no-op.
-      #
-      # The key is tied to the dependency recipes and the patches; a new SPDK
-      # pin or a patch change invalidates it. The runner arch is part of the
-      # key because DPDK's build products are not portable across arches.
-      # builder-run mounts the repo at /workspace, so these paths stay on the
-      # runner and the cache still applies.
-      - name: Cache SPDK and AWS CRT build
-        id: cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            CubeS3lvol/deps/spdk
-            CubeS3lvol/deps/aws
-            CubeS3lvol/deps/aws-src
-          key: s3lvol-deps-${{ runner.arch }}-${{ hashFiles('CubeS3lvol/setup_dep.sh', 'CubeS3lvol/patches/**') }}
-
-      # setup_dep.sh's own --check reports "patches applied: no" even when
-      # they are applied (it calls patches/apply.sh --check without passing
-      # SPDK_ROOT, and apply.sh defaults to ../spdk), so do not run it here:
-      # the setup step itself failing is the signal.
+      # setup_dep.sh reuses /opt/s3lvol-* from the published builder when stamps
+      # match; a pin/patch change on this PR falls back to deps/ once, and the
+      # next published builder after merge carries the new prebuilt.
       #
       # cube-s3lvol-test runs check-rules + debug make + check-offline inside
       # the builder. /data is a tmpfs; DPDK EAL tests need --privileged.

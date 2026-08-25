@@ -93,6 +93,7 @@ if [ "${RCOW_LAYOUT}" = "package" ]; then
 	fi
 else
 	SPDK_ROOT="${SPDK_ROOT:-$(cd "${RCOW_REPO_ROOT}/deps/spdk" 2>/dev/null && pwd \
+		|| { [ -f /opt/s3lvol-spdk/scripts/rpc.py ] && echo /opt/s3lvol-spdk; } \
 		|| cd "${RCOW_REPO_ROOT}/../spdk" 2>/dev/null && pwd \
 		|| echo /data/home/cow/spdk)}"
 

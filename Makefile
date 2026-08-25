@@ -109,11 +109,10 @@ endif
 # mirrors: the ubuntu apt archive (amd64 -> $(APT_MIRROR_BASE)/ubuntu, arm64 ->
 # $(APT_MIRROR_BASE)/ubuntu-ports) plus the llvm.sh installer script and clang-14
 # apt packages (override the LLVM mirror host with LLVM_MIRROR_BASE=...). Unset
-# builds against upstream archive.ubuntu.com/ports.ubuntu.com and apt.llvm.org. The
-# LLVM GPG signing key is always fetched from apt.llvm.org -- llvm.sh hardcodes that
-# URL and the mirror does not serve the key -- but that is a small request that
-# usually succeeds even when bulk package downloads from apt.llvm.org are slow. This
-# build-time MIRROR is unrelated to the runtime MIRROR=cn used by deploy/one-click.
+# builds against upstream archive.ubuntu.com/ports.ubuntu.com and apt.llvm.org.
+# The LLVM GPG signing key is vendored at docker/llvm-snapshot.gpg.key so the
+# image build does not wget it from apt.llvm.org. This build-time MIRROR is
+# unrelated to the runtime MIRROR=cn used by deploy/one-click.
 APT_MIRROR_BASE ?= http://mirrors.tencent.com
 LLVM_MIRROR_BASE ?= https://mirrors.zju.edu.cn/llvm-apt
 BUILDER_BUILD_ARGS ?=
@@ -189,14 +188,33 @@ help:
 	@printf "  - Run 'make builder-image' first if image %s is missing\n" "$(BUILDER_IMAGE)"
 
 .PHONY: builder-image
-# BUILDER_FORCE_REBUILD rebuilds even when the image is present, and adds
-# --no-cache so a stale image is refreshed from scratch rather than reproduced
-# from the Docker layer cache. A plain first build (image missing) stays cached.
+# Context is the repo root (Dockerfile COPYs CubeS3lvol/setup_dep.sh + patches/).
+# Rebuilds when the image's s3lvol SPDK/AWS stamps no longer match the current
+# pin + patches (toolchain layers stay cached). BUILDER_FORCE_REBUILD=1 forces it.
 builder-image:
-	@if [ -z "$(BUILDER_FORCE_REBUILD)" ] && docker image inspect $(BUILDER_IMAGE) >/dev/null 2>&1; then \
-		printf 'Builder image %s already present, skipping build (set BUILDER_FORCE_REBUILD=1 to rebuild)\n' "$(BUILDER_IMAGE)"; \
+	@expected_spdk="$$($(CUBES3LVOL_DIR)/setup_dep.sh --print-stamp spdk)"; \
+	expected_aws="$$($(CUBES3LVOL_DIR)/setup_dep.sh --print-stamp aws)"; \
+	need_build=0; \
+	if [ -n "$(BUILDER_FORCE_REBUILD)" ]; then \
+		need_build=1; \
+	elif ! docker image inspect $(BUILDER_IMAGE) >/dev/null 2>&1; then \
+		need_build=1; \
 	else \
-		docker build $(if $(filter-out 0,$(BUILDER_FORCE_REBUILD)),--no-cache) $(BUILDER_BUILD_ARGS) -t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) ./docker; \
+		actual_spdk="$$(docker image inspect -f '{{index .Config.Labels "org.cubesandbox.s3lvol.spdk-stamp"}}' $(BUILDER_IMAGE) 2>/dev/null || true)"; \
+		actual_aws="$$(docker image inspect -f '{{index .Config.Labels "org.cubesandbox.s3lvol.aws-stamp"}}' $(BUILDER_IMAGE) 2>/dev/null || true)"; \
+		if [ "$$actual_spdk" != "$$expected_spdk" ] || [ "$$actual_aws" != "$$expected_aws" ]; then \
+			printf 'Builder image %s s3lvol stamps stale (spdk %s -> %s, aws %s -> %s), rebuilding\n' \
+				"$(BUILDER_IMAGE)" "$${actual_spdk:-none}" "$$expected_spdk" "$${actual_aws:-none}" "$$expected_aws"; \
+			need_build=1; \
+		fi; \
+	fi; \
+	if [ "$$need_build" -eq 0 ]; then \
+		printf 'Builder image %s already present and s3lvol stamps match, skipping build (set BUILDER_FORCE_REBUILD=1 to rebuild)\n' "$(BUILDER_IMAGE)"; \
+	else \
+		docker build $(if $(filter-out 0,$(BUILDER_FORCE_REBUILD)),--no-cache) $(BUILDER_BUILD_ARGS) \
+			--build-arg S3LVOL_SPDK_STAMP="$$expected_spdk" \
+			--build-arg S3LVOL_AWS_STAMP="$$expected_aws" \
+			-t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) .; \
 	fi
 
 .PHONY: prepare-builder-home
@@ -272,18 +290,15 @@ else
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk'
 endif
 
-# cube-s3lvol: developer entrypoint for building the CubeS3lvol (s3lvol)
-# self-contained release -- the same steps as the one-click track_s3lvol,
-# but producing _output/CubeS3lvol/s3lvol-<version>/ for local iteration.
-# setup_dep.sh only pays the full SPDK/DPDK/AWS CRT compile on first run;
-# later builds reuse the builder container's persistent workspace.
+# cube-s3lvol: build the CubeS3lvol release in Docker, mirroring track_s3lvol.
+# setup_dep.sh reuses /opt/s3lvol-* from the builder when stamps match.
 .PHONY: cube-s3lvol
 cube-s3lvol:
 ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@mkdir -p "$(OUTPUT_DIR)/CubeS3lvol"
 	cd "$(CUBES3LVOL_DIR)" && AWS_BUILD_TYPE=RelWithDebInfo ./setup_dep.sh --jobs "$$(nproc)"
-	cd "$(CUBES3LVOL_DIR)" && make S3LVOL_BUILD_TYPE=release -j"$$(nproc)"
-	cd "$(CUBES3LVOL_DIR)" && ./make_release.sh --no-tar --skip-smoke --version "$(CUBE_VERSION)" --outdir "$(OUTPUT_DIR)/CubeS3lvol"
+	cd "$(CUBES3LVOL_DIR)" && AWS_BUILD_TYPE=RelWithDebInfo make S3LVOL_BUILD_TYPE=release -j"$$(nproc)"
+	cd "$(CUBES3LVOL_DIR)" && AWS_BUILD_TYPE=RelWithDebInfo ./make_release.sh --no-tar --skip-smoke --version "$(CUBE_VERSION)" --outdir "$(OUTPUT_DIR)/CubeS3lvol"
 	@printf 'CubeS3lvol release: %s/CubeS3lvol/s3lvol-*/ (bin/s3lvol_tgt + scripts/ + VERSION)\n' "$(OUTPUT_DIR)"
 else
 	$(MAKE) builder-image
@@ -296,8 +311,7 @@ endif
 # /sys cgroup/cpu topology, and a writable runtime dir; a non-root docker
 # process cannot initialise the EAL (spdk_env_init -> exit 77). Same privileged
 # root pattern as cubevs-test. Incremental setup_dep.sh / make do not rewrite
-# existing 1000-owned deps. setup_dep.sh is incremental: a populated
-# CubeS3lvol/deps/ is a no-op.
+# existing 1000-owned deps. setup_dep.sh is incremental.
 .PHONY: cube-s3lvol-test
 cube-s3lvol-test:
 ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)

@@ -44,8 +44,7 @@ Cube Sandbox 提供了基于 Docker 的构建镜像，以确保一致的构建�
 # 构建构建镜像
 make builder-image
 
-# 中国大陆用户可通过镜像源获取 apt 软件包：包括 Ubuntu apt 仓库，以及 llvm.sh
-# 安装脚本与 clang-14 软件包（LLVM GPG 签名密钥仍从 apt.llvm.org 获取）
+# 中国大陆用户可通过镜像源获取 apt 软件包
 make builder-image MIRROR=cn
 
 # 进入构建容器的交互式 Shell

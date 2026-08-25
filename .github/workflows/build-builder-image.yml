@@ -6,10 +6,14 @@ on:
     paths:
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
+      - 'CubeS3lvol/setup_dep.sh'
+      - 'CubeS3lvol/patches/**'
   pull_request:
     paths:
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
+      - 'CubeS3lvol/setup_dep.sh'
+      - 'CubeS3lvol/patches/**'
   workflow_dispatch:
 
 concurrency:
@@ -76,6 +80,14 @@ jobs:
             echo "EOF"
           } >> "${GITHUB_OUTPUT}"
 
+      - name: Compute s3lvol dependency stamps
+        id: s3lvol_stamps
+        run: |
+          {
+            echo "spdk=$(CubeS3lvol/setup_dep.sh --print-stamp spdk)"
+            echo "aws=$(CubeS3lvol/setup_dep.sh --print-stamp aws)"
+          } >> "${GITHUB_OUTPUT}"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -89,6 +101,8 @@ jobs:
             GITHUB_ACTIONS=true
             RUSTUP_DIST_SERVER=https://static.rust-lang.org
             RUSTUP_UPDATE_ROOT=https://static.rust-lang.org/rustup
+            S3LVOL_SPDK_STAMP=${{ steps.s3lvol_stamps.outputs.spdk }}
+            S3LVOL_AWS_STAMP=${{ steps.s3lvol_stamps.outputs.aws }}
           cache-from: type=gha,scope=builder-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=builder-${{ matrix.arch }}
 

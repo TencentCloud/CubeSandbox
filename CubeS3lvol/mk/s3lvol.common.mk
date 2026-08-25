@@ -6,7 +6,8 @@
 #  SPDK is located in this order:
 #    1. SPDK_ROOT=...        explicit, always wins
 #    2. <repo>/deps/spdk     what ./setup_dep.sh builds
-#    3. <repo>/../spdk       sibling layout, the historical default
+#    3. /opt/s3lvol-spdk     builder-image prebuilt (stamp-matched by setup_dep.sh)
+#    4. <repo>/../spdk       sibling layout, the historical default
 #
 #  If SPDK is not anywhere above:
 #    ./setup_dep.sh          downloads, patches and builds it into deps/spdk
@@ -25,6 +26,8 @@ S3LVOL_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 ifeq ($(origin SPDK_ROOT),undefined)
 ifneq ($(wildcard $(S3LVOL_ROOT)/deps/spdk/include/spdk/blob.h),)
 SPDK_ROOT := $(S3LVOL_ROOT)/deps/spdk
+else ifneq ($(wildcard /opt/s3lvol-spdk/include/spdk/blob.h),)
+SPDK_ROOT := /opt/s3lvol-spdk
 else
 SPDK_ROOT := $(abspath $(S3LVOL_ROOT)/../spdk)
 endif
@@ -77,8 +80,7 @@ VFIO_LIB_DIR        ?= $(SPDK_ROOT)/build/libvfio-user/usr/local/lib
 # ---------------------------------------------------------------------------
 # aws-c-s3 (AWS CRT)
 #
-# Default to deps/aws only -- the copy ./setup_dep.sh builds itself -- and do
-# not fall back to a system prefix such as /usr/local/aws.
+# Default to deps/aws or the builder prebuilt; never a system prefix.
 #
 # === Why no fallback ===
 #
@@ -95,31 +97,48 @@ VFIO_LIB_DIR        ?= $(SPDK_ROOT)/build/libvfio-user/usr/local/lib
 # what this fallback costs: "what is actually linked" turns into an
 # archaeological question.
 #
-# So now: deps/aws or an explicit AWS_INSTALL_DIR, nothing else. If it cannot
-# be found, stop and say what to do rather than picking something similar and
-# building on.
-#
-# An explicit override still works fully (AWS_INSTALL_DIR=/usr/local/aws is
-# fine); the escape hatch is just that it has to be stated.
-#
-# The criterion is the header, not the directory: setup_dep.sh interrupted
-# halfway leaves an empty directory, and pointing -I at a useless path only
-# makes the errors harder to read.
+# An explicit AWS_INSTALL_DIR override still works (e.g. /usr/local/aws); it
+# just has to be stated. The criterion is the header, not the directory:
+# setup_dep.sh interrupted halfway leaves an empty directory, and pointing -I
+# at a useless path only makes the errors harder to read.
 # ---------------------------------------------------------------------------
+AWS_BUILD_TYPE ?= Debug
+aws_bt := $(shell printf '%s' '$(AWS_BUILD_TYPE)' | tr 'A-Z' 'a-z')
+ifeq ($(aws_bt),debug)
+S3LVOL_AWS_PREBUILT := /opt/s3lvol-aws-debug
+else ifeq ($(aws_bt),relwithdebinfo)
+S3LVOL_AWS_PREBUILT := /opt/s3lvol-aws-relwithdebinfo
+else
+S3LVOL_AWS_PREBUILT :=
+endif
+
 ifeq ($(origin AWS_INSTALL_DIR),undefined)
-# strip: $(if) leaves a leading space from the line continuation, and this
-# value is joined into -I/-L and .a paths.
-AWS_INSTALL_DIR := $(strip \
-                $(if $(wildcard $(S3LVOL_ROOT)/deps/aws/include/aws/s3/s3_client.h),\
-                       $(S3LVOL_ROOT)/deps/aws,))
+# Prefer a local deps/aws only when it exists and was built for this
+# AWS_BUILD_TYPE (or has no stamp, the legacy "keep as-is" case).
+ifneq ($(wildcard $(S3LVOL_ROOT)/deps/aws/include/aws/s3/s3_client.h),)
+deps_aws_type := $(strip $(shell cat $(S3LVOL_ROOT)/deps/aws/.build_type 2>/dev/null))
+ifeq ($(deps_aws_type),)
+AWS_INSTALL_DIR := $(S3LVOL_ROOT)/deps/aws
+else ifeq ($(deps_aws_type),$(AWS_BUILD_TYPE))
+AWS_INSTALL_DIR := $(S3LVOL_ROOT)/deps/aws
+endif
+endif
+ifeq ($(AWS_INSTALL_DIR),)
+ifneq ($(S3LVOL_AWS_PREBUILT),)
+ifneq ($(wildcard $(S3LVOL_AWS_PREBUILT)/include/aws/s3/s3_client.h),)
+AWS_INSTALL_DIR := $(S3LVOL_AWS_PREBUILT)
+endif
+endif
+endif
 ifeq ($(filter clean help,$(MAKECMDGOALS)),)
 ifeq ($(AWS_INSTALL_DIR),)
-$(error No AWS CRT at $(S3LVOL_ROOT)/deps/aws. Run './setup_dep.sh aws' to build \
-        one (ten CMake projects, a few minutes). A prefix installed by something \
-        else is deliberately not picked up: this machine has one whose aws-c-s3 \
-        carries a local modification, and choosing between them silently is how \
-        the same commit ends up behaving differently on two machines. To use one \
-        anyway, say so: make AWS_INSTALL_DIR=/usr/local/aws)
+$(error No AWS CRT at $(S3LVOL_ROOT)/deps/aws or $(S3LVOL_AWS_PREBUILT). Run \
+        './setup_dep.sh aws' to build one (ten CMake projects, a few minutes). \
+        A prefix installed by something else is deliberately not picked up: \
+        this machine has one whose aws-c-s3 carries a local modification, and \
+        choosing between them silently is how the same commit ends up behaving \
+        differently on two machines. To use one anyway, say so: \
+        make AWS_INSTALL_DIR=/usr/local/aws)
 endif
 endif
 endif

@@ -12,10 +12,26 @@ only this file and `.gitkeep` are tracked.
 
 | Dependency | Status | Installed to |
 |---|---|---|
-| SPDK (with DPDK and other submodules) | automatic via `setup_dep.sh` | `deps/spdk` |
-| aws-c-s3 (AWS CRT, ten projects) | automatic via `setup_dep.sh` | `deps/aws` (sources in `deps/aws-src`) |
+| SPDK (with DPDK and other submodules) | automatic via `setup_dep.sh` | `deps/spdk`, or `/opt/s3lvol-spdk` |
+| aws-c-s3 (AWS CRT, ten projects) | automatic via `setup_dep.sh` | `deps/aws` (sources in `deps/aws-src`), or `/opt/s3lvol-aws-{debug,relwithdebinfo}` |
 
-Disk usage: `deps/aws` about 60 MB, `deps/aws-src` about 155 MB, `deps/spdk` 1 GB and up.
+Local builds use `deps/`; the builder image ships prebuilt trees under `/opt/s3lvol-*` that `setup_dep.sh` reuses when their stamps match the current pin + patches + CRT tags.
+
+## Builder-image prebuilts
+
+`cube-sandbox-builder:ubuntu2004` ships:
+
+- `/opt/s3lvol-spdk` — patched SPDK, `--enable-debug`
+- `/opt/s3lvol-aws-debug` / `/opt/s3lvol-aws-relwithdebinfo` — AWS CRT per build type
+
+Each carries a stamp file. `setup_dep.sh` recomputes the hash from the pin, patches, and CRT tags; a match skips clone/build, a mismatch falls back to `deps/`. `make builder-image` compares those hashes to the image labels `org.cubesandbox.s3lvol.{spdk,aws}-stamp` and rebuilds only when they differ.
+
+```sh
+./setup_dep.sh --print-stamp spdk
+./setup_dep.sh --print-stamp aws
+```
+
+SPDK is a shallow fetch of the pinned commit (submodules `--depth 1`).
 
 ## Why this directory exists
 
@@ -54,12 +70,13 @@ comes with a regression run.
 ## What about an existing `../spdk`
 
 It still works. `mk/s3lvol.common.mk` probes `SPDK_ROOT` (explicit) ->
-`deps/spdk` -> `../spdk`, so this mechanism **removes a manual step rather than
-retiring anyone's existing setup**.
+`deps/spdk` -> `/opt/s3lvol-spdk` -> `../spdk`, so this mechanism **removes a
+manual step rather than retiring anyone's existing setup**.
 
-AWS, by contrast, **only accepts `deps/aws`**: `AWS_INSTALL_DIR` (explicit) ->
-`deps/aws`, and nothing else. It does not fall back to a system prefix such as
-`/usr/local/aws`; the reason is below.
+AWS still **does not fall back to a system prefix** such as `/usr/local/aws`.
+The lookup is `AWS_INSTALL_DIR` (explicit) -> `deps/aws` (when `.build_type`
+matches `AWS_BUILD_TYPE`) -> `/opt/s3lvol-aws-<type>`. The reason system
+prefixes stay out is below.
 
 ## AWS: why no fallback to a system prefix
 
