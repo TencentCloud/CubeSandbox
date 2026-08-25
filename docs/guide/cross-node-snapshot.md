@@ -256,13 +256,9 @@ Earlier bare-metal XFS-only numbers: [Performance Benchmark](./performance-bench
 
 ## Known limitations
 
-1. **Deleting an S3 snapshot may report success while objects are still busy.** Snapshot-object delete that the data plane rejects as `busy` is currently treated as success; S3lvol finishes cleanup asynchronously. A successful delete RPC does not mean the objects are gone immediately. Sandbox **volume** delete failures are still surfaced.
+1. **S3lvol deletes snapshot objects asynchronously.** After you delete an S3 snapshot, CubeS3lvol finishes removing the objects in the background. The delete RPC returning does not mean the objects are gone from S3 immediately.
 
 2. **DB / filesystem layout changed vs pre-0.7.0; migration is tested from 0.6.0 only.** Table and on-disk layout differ from versions before 0.7.0. The new release adapts older data for cleanup, but that path is **tested against 0.6.0**. If adaptation fails, delete leftover snapshot files and the matching DB rows by hand.
-
-3. **Snapshots of sandboxes with a volume or host-mount are not supported.** Commit / snapshot of a sandbox that mounts a plugin volume or host-mount fails in this version. A host-mount sandbox that is paused still resumes only on the origin.
-
-4. **A sandbox that just resumed cross-node, or was just created from a snapshot, cannot immediately Pause or Snapshot.** For a short window after cross-node Resume / FromSnap the S3 objects may still be decoupling; creating another snapshot fails until that settles. This is still being iterated in S3lvol.
 
 ---
 
