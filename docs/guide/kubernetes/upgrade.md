@@ -16,6 +16,8 @@ The compute plane uses native `apps/v1` DaemonSets: image / resource / template 
 
 CubeSandbox’s network (cubevs) hooks attach to the Pod’s network interface, and sandbox tap devices live in the same netns as the Pod. Recreating the Pod destroys that netns and breaks sandbox networking. Compute upgrades are therefore **disruptive** and need a maintenance window plus node isolation.
 
+Deploying `cube-node` with `hostNetwork: true` at install time avoids the netns change: sandbox network devices then live in the host netns and survive Pod recreation. See [Install · cube-node networking and Pod recreation](./install.md#_8-3-cube-node-networking-and-pod-recreation) for details and caveats, and [PR #1189](https://github.com/TencentCloud/CubeSandbox/pull/1189) for the full in-place replacement design (not yet merged).
+
 ## What are you upgrading, and which workload do you change?
 
 The compute plane is split into four lines. For day-to-day upgrades, **only change the image tags of the matching components**—avoid casually changing Big Pod env / volumeMount / container lists (those also recreate the Pod).

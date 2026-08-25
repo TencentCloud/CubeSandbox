@@ -251,6 +251,17 @@ kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node -c cubelet 
 
 A common cause is inability to reach CubeMaster (network / DNS).
 
+### All sandboxes on one node lost network at the same time
+
+Most likely the `cube-node` Pod on that node was recreated (manual deletion, DaemonSet template change, node drain). Sandbox TAP devices live in the Pod's netns; Pod recreation destroys it, and **all sandbox networking on the node breaks — inbound and outbound — and does not self-heal**. Confirm by comparing Pod age / UID with the incident time:
+
+```bash
+kubectl get pods -n cube-system -l app.kubernetes.io/component=cube-node -o wide
+```
+
+- **Recovery**: destroy and recreate the affected sandboxes.
+- **Prevention**: deploy `cube-node` with `hostNetwork: true` so Pod recreation no longer changes the netns; see [Install · cube-node networking and Pod recreation](./install.md#_8-3-cube-node-networking-and-pod-recreation). If you also need NetworkPolicy over sandbox traffic to cluster Services, see the same section.
+
 ### How do I run `cubecli` in a Kubernetes deployment?
 
 `cubecli` accesses the local Cubelet and containerd sockets of a single compute node. First find the `cube-node` Pod corresponding to the target node, then use `kubectl exec` to run commands inside that Pod:

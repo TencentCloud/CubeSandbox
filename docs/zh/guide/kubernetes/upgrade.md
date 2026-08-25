@@ -16,6 +16,8 @@
 
 CubeSandbox 的网络（cubevs）钩子挂在 Pod 的网卡上，沙箱的 tap 设备也与 Pod 处于同一 netns。Pod 重建会销毁 netns，导致沙箱网络中断。因此计算面升级属于**有中断**操作，需要维护窗口与节点隔离、销毁存量沙箱。
 
+若在部署时为 `cube-node` 启用 `hostNetwork: true`，可避免 netns 变化：沙箱网络设备位于宿主机 netns 中，Pod 重建后依然保留。详细说明与注意事项见[安装 · cube-node 网络与 Pod 重建](./install.md#_8-3-cube-node-网络与-pod-重建)；完整的原地替换设计可参考 [PR #1189](https://github.com/TencentCloud/CubeSandbox/pull/1189)（尚未合入）。
+
 ## 升什么，动哪条工作负载？
 
 计算面拆成四条线，**日常升级只改对应组件的镜像 tag**，避免顺手改 Big Pod 的 env / volumeMount / 容器列表（这些同样会 recreate）。
