@@ -68,8 +68,9 @@ temporary sandbox when the tool call finishes.
 - `CUBE_SANDBOX_TIMEOUT` controls the temporary sandbox lifetime.
   `CUBE_RUN_CODE_TIMEOUT` controls each `run_code` execution.
 - For local development without wildcard DNS, set `CUBE_USE_DEV_SIDECAR=true`
-  and configure the `CUBE_REMOTE_PROXY_*` variables documented in
-  `examples/e2b-dev-sidecar`.
+  and set the `CUBE_REMOTE_PROXY_*` variables in this example's `.env`, or
+  export them in the ADK process environment. Do not rely on
+  `examples/e2b-dev-sidecar/.env`; this example does not load that file.
 - If your CubeAPI uses a self-signed certificate, set `CUBE_SSL_CERT_FILE`.
   This exports `SSL_CERT_FILE` process-wide, so use a CA bundle that preserves
   trust for your model provider as well.

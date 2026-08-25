@@ -85,6 +85,7 @@ Configure `.env`:
 | `CUBE_SANDBOX_TIMEOUT` | Optional sandbox lifetime bound in seconds, passed to `Sandbox.create(timeout=...)`; defaults to `300` |
 | `CUBE_RUN_CODE_TIMEOUT` | Optional per-call execution timeout in seconds, passed to `sandbox.run_code(timeout=...)`; defaults to `60` |
 | `CUBE_USE_DEV_SIDECAR` | Optional local-development switch. Set to `true` to call the E2B dev-sidecar before sandbox creation |
+| `CUBE_REMOTE_PROXY_BASE` | Required when `CUBE_USE_DEV_SIDECAR=true`; CubeProxy data-plane endpoint for the sidecar, for example `https://127.0.0.1:11443` in dev-env |
 | `CUBE_SSL_CERT_FILE` | Optional CubeSandbox CA bundle for self-signed deployments |
 
 ## Integration Snippet
@@ -133,7 +134,9 @@ The runnable example also supports `CUBE_USE_DEV_SIDECAR=true` for local
 development without wildcard DNS. That mode calls the sidecar setup from
 [`examples/e2b-dev-sidecar`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar)
 before sandbox creation, so configure that example's `CUBE_REMOTE_PROXY_*`
-variables as well.
+variables in this example's `.env` file or export them in the ADK process
+environment. Do not rely on `examples/e2b-dev-sidecar/.env`; this example does
+not load that file.
 
 ### Migrating a local ADK code tool
 

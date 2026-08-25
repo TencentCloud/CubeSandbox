@@ -104,7 +104,12 @@ def run_python_in_cube(code: str) -> dict[str, Any]:
     load_environment()
 
     if not code or not code.strip():
-        return {"stdout": "", "text": "", "error": "code must not be empty"}
+        return {
+            "stdout": "",
+            "text": None,
+            "error": "code must not be empty",
+            "results_count": 0,
+        }
 
     template_id = _read_required_env("CUBE_TEMPLATE_ID")
     sandbox_timeout = _read_int_env("CUBE_SANDBOX_TIMEOUT", 300)
