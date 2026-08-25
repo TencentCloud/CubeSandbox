@@ -205,9 +205,6 @@ Two identical Tencent Cloud CVM nodes (nested KVM), one control+compute and one 
 | CPU | AMD EPYC 9K65, 16 vCPU, 1 thread/core |
 | Memory | 30 GiB |
 | Data disk | ~1 TB virtio, XFS on `/data` |
-| Cubelet | `070f4235` |
-| CubeMaster | `aa41f662` |
-| S3lvol | `815ed36` (debug build) |
 
 ### Template
 

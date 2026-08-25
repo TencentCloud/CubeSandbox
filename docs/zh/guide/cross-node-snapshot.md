@@ -242,9 +242,6 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
 | CPU | AMD EPYC 9K65，16 vCPU，1 thread/core |
 | 内存 | 30 GiB |
 | 数据盘 | 约 1 TB virtio，`/data` 为 XFS |
-| Cubelet | `070f4235` |
-| CubeMaster | `aa41f662` |
-| S3lvol | `815ed36`（debug 构建） |
 
 ### 模版
 
