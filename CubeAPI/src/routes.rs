@@ -99,6 +99,10 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
             get(sandboxes::get_sandbox_logs_v2),
         )
         .route(
+            "/sandboxes/:sandboxID/network",
+            put(sandboxes::update_sandbox_network),
+        )
+        .route(
             "/sandboxes/:sandboxID/timeout",
             post(sandboxes::set_sandbox_timeout),
         )

@@ -444,7 +444,8 @@ tests/e2e/sdk_compat/
   输出和缺失命令；
 - `cases/filesystem/`：读写、覆盖、多行内容、文件 API 与 shell 互操作；
 - `cases/run_code/`：表达式结果、stdout、kernel 状态和 Python 错误；
-- `cases/network/`：创建时的 allow/deny 和公网出站策略；
+- `cases/network/`：创建时的 allow/deny 和公网出站策略，以及运行中沙箱的策略原地
+  更新（含存量连接重判，见 `test_policy_update.py`，仅 CubeSandbox）；
 - `cases/concurrency/`：同时运行多个 sandbox 时的数据隔离；
 - `cases/host-mount/`：宿主目录挂载扩展——happy path，以及创建时校验、
   运行期 bind-mount 失败和跨 sandbox 共享等边界用例。

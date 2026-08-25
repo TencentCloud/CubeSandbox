@@ -99,22 +99,29 @@ func checkParam(req *types.CreateCubeSandboxReq) error {
 		return ret.Err(errorcode.ErrorCode_MasterParamsError, "containers param is nil")
 	}
 
-	if req.CubeNetworkConfig != nil {
-		if req.CubeNetworkConfig.MaskRequestHost != nil {
-			if err := validateMaskRequestHost(*req.CubeNetworkConfig.MaskRequestHost); err != nil {
-				return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
-			}
-		}
-		for i, rule := range req.CubeNetworkConfig.Rules {
-			if rule == nil {
-				continue
-			}
-			if err := validateEgressRuleMatch(rule.Match, i); err != nil {
-				return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
-			}
+	return validateCubeNetworkConfig(req.CubeNetworkConfig)
+}
+
+// validateCubeNetworkConfig runs the server-side egress policy checks shared by
+// sandbox creation and in-place network updates, so the update path cannot
+// accept a policy that creation would have rejected.
+func validateCubeNetworkConfig(cfg *types.CubeNetworkConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.MaskRequestHost != nil {
+		if err := validateMaskRequestHost(*cfg.MaskRequestHost); err != nil {
+			return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
 		}
 	}
-
+	for i, rule := range cfg.Rules {
+		if rule == nil {
+			continue
+		}
+		if err := validateEgressRuleMatch(rule.Match, i); err != nil {
+			return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
+		}
+	}
 	return nil
 }
 

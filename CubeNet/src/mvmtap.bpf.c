@@ -590,6 +590,7 @@ static __always_inline __u32 do_icmp_nat(struct __sk_buff *skb, struct mvm_meta 
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct icmphdr *l4;
+	__u32 policy_version;
 	__u16 ip_hlen;
 	__u16 snat_id;
 	__u64 flags;
@@ -605,6 +606,11 @@ static __always_inline __u32 do_icmp_nat(struct __sk_buff *skb, struct mvm_meta 
 		return 0;
 
 	now = bpf_ktime_get_ns();
+	/* Read the generation once, before any classification: userspace can bump
+	 * it mid-packet, and judging under one generation while stamping another
+	 * would retire the re-check that the newer generation is owed.
+	 */
+	policy_version = mvm_meta->policy_version;
 	/* Use ICMP identifier as the "port" identifier in the session key */
 	key.src_ip = mvm_meta->ip;
 	key.dst_ip = l3->daddr;
@@ -615,6 +621,14 @@ static __always_inline __u32 do_icmp_nat(struct __sk_buff *skb, struct mvm_meta 
 
 	sess = bpf_map_lookup_elem(&egress_sessions, &key);
 	if (sess) {
+		/* revoked by a policy update: retire the pair and drop, since
+		 * there is nothing to reset on ICMP
+		 */
+		if (session_policy_revoked(sess, policy_version, skb->ingress_ifindex,
+					   key.dst_ip, key.dst_port)) {
+			del_session(&key, sess);
+			return 0;
+		}
 		update_icmp_session(IP_CT_DIR_ORIGINAL, sess, now);
 		goto do_nat;
 	}
@@ -626,7 +640,8 @@ static __always_inline __u32 do_icmp_nat(struct __sk_buff *skb, struct mvm_meta 
 	snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_id);
 	if (!snat_ip || !snat_ip->ip || !snat_id)
 		return 0;
-	ok = create_icmp_sessions(skb, &key, now, skb->ingress_ifindex, snat_ip, snat_id);
+	ok = create_icmp_sessions(skb, &key, now, skb->ingress_ifindex, snat_ip, snat_id,
+				  policy_version);
 	if (!ok)
 		return 0;
 	sess = bpf_map_lookup_elem(&egress_sessions, &key);
@@ -692,6 +707,7 @@ static __always_inline __u32 do_udp_nat_inline(struct __sk_buff *skb,
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct udphdr *l4;
+	__u32 policy_version;
 	__u16 ip_hlen;
 	__u16 snat_port;
 	__u64 flags;
@@ -703,6 +719,8 @@ static __always_inline __u32 do_udp_nat_inline(struct __sk_buff *skb,
 		return 0;
 
 	now = bpf_ktime_get_ns();
+	/* See do_icmp_nat(): one read per packet, taken before any classification. */
+	policy_version = mvm_meta->policy_version;
 	key.src_ip = mvm_meta->ip;
 	key.dst_ip = l3->daddr;
 	key.src_port = l4->source;
@@ -712,6 +730,14 @@ static __always_inline __u32 do_udp_nat_inline(struct __sk_buff *skb,
 
 	sess = bpf_map_lookup_elem(&egress_sessions, &key);
 	if (sess) {
+		/* revoked by a policy update: retire the pair and drop, since
+		 * there is nothing to reset on UDP
+		 */
+		if (session_policy_revoked(sess, policy_version, skb->ingress_ifindex,
+					   key.dst_ip, key.dst_port)) {
+			del_session(&key, sess);
+			return 0;
+		}
 		update_udp_session(IP_CT_DIR_ORIGINAL, sess, now);
 		goto do_nat;
 	}
@@ -723,7 +749,8 @@ static __always_inline __u32 do_udp_nat_inline(struct __sk_buff *skb,
 	snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_port);
 	if (!snat_ip || !snat_ip->ip || !snat_port)
 		return 0;
-	ok = create_udp_sessions(skb, &key, now, skb->ingress_ifindex, snat_ip, snat_port);
+	ok = create_udp_sessions(skb, &key, now, skb->ingress_ifindex, snat_ip, snat_port,
+				 policy_version);
 	if (!ok)
 		return 0;
 	sess = bpf_map_lookup_elem(&egress_sessions, &key);
@@ -834,6 +861,7 @@ static __always_inline __u64 do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct tcphdr *l4;
+	__u32 policy_version;
 	__u16 ip_hlen;
 	__u16 snat_port;
 	__u64 flags;
@@ -851,6 +879,8 @@ static __always_inline __u64 do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *
 		return TCP_NAT_DROP;
 
 	now = bpf_ktime_get_ns();
+	/* See do_icmp_nat(): one read per packet, taken before any classification. */
+	policy_version = mvm_meta->policy_version;
 	syn = l4->syn;
 	ack = l4->ack;
 	fin = l4->fin;
@@ -915,7 +945,8 @@ do_create:
 	}
 create_session:
 	ok = create_new_sessions(skb, &key, now, skb->ingress_ifindex,
-				 snat_ip, snat_port, packet_class, l7_scheme);
+				 snat_ip, snat_port, packet_class, l7_scheme,
+				 policy_version);
 	if (!ok)
 		return TCP_NAT_DROP;
 	sess = bpf_map_lookup_elem(&egress_sessions, &key);
@@ -926,47 +957,34 @@ create_session:
 		/* lookup existing session */
 		sess = bpf_map_lookup_elem(&egress_sessions, &key);
 		if (!sess) {
-			/* Legacy default-port (80/443) connection drain: the eBPF session
-			 * entry was lost (agent restart, map eviction, or expiry) AND the
-			 * allow_out_v3 /48 entry for this (ip, port) has aged out, so
-			 * classify_egress_flow would return FLOW_REJECT. But the proxy
-			 * still holds an established TPROXY socket for this 4-tuple — the
-			 * connection was legitimately opened when the policy allowed it.
-			 * Re-stamp the mark so iptables TPROXY steers the packet to the
-			 * proxy, keeping the connection alive instead of resetting it.
-			 * Custom-port connections are intentionally excluded: they should
-			 * respect the current policy when their allow_out_v3 entry expires.
-			 * No session is re-created, so each packet on the drained flow
-			 * re-enters this path (per-packet socket lookup — acceptable for
-			 * draining connections that will eventually close).
+			/* No session: the flow was never authorized, or it was retired
+			 * (reaped, or revoked by a policy update). Either way there is no
+			 * record that this connection is allowed, so answer like every
+			 * other unreachable TCP packet here instead of trusting that a
+			 * live proxy socket implies a past authorization.
 			 */
-			if (l4->dest == bpf_htons(80) || l4->dest == bpf_htons(443)) {
-				struct bpf_sock *sk;
-				struct bpf_sock_tuple tuple = {};
-				tuple.ipv4.saddr = key.src_ip;
-				tuple.ipv4.daddr = key.dst_ip;
-				tuple.ipv4.sport = l4->source;
-				tuple.ipv4.dport = l4->dest;
-				sk = bpf_skc_lookup_tcp(skb, &tuple, sizeof(tuple.ipv4), BPF_F_CURRENT_NETNS, 0);
-				if (sk) {
-					__u32 state = sk->state;
-
-					bpf_sk_release(sk);
-					if (state == BPF_TCP_ESTABLISHED) {
-						if (l4->dest == bpf_htons(80)) {
-							skb->mark = (skb->mark & ~cube_l7_mark_mask) | cube_l7_mark_http;
-						} else {
-							skb->mark = (skb->mark & ~cube_l7_mark_mask) | cube_l7_mark_https;
-						}
-						return TCP_NAT_PACK(cubegw0_ifindex, TCP_L7PROXY_OK);
-					}
-				}
-			}
 			return rst ? TCP_NAT_DROP : TCP_NAT_RESET;
 		}
 	}
 
 do_update:
+	/* A policy update revoked this flow: retire the session pair so the tuple is
+	 * free for an immediate reconnect, and answer with an RST like every other
+	 * unreachable TCP packet here, so the guest learns now instead of stalling
+	 * until its retransmit timer gives up. Never RST an RST, or two peers that
+	 * both consider the flow dead would trade resets forever.
+	 *
+	 * Taken before the L7 branch below so proxied flows are revocable too, and
+	 * before prepare_egress_l2() because resolving L2 for a flow that is about to
+	 * be retired is wasted work -- and a cold ARP miss would consume this packet
+	 * as a probe, deferring the revocation by one more packet.
+	 */
+	if (session_policy_revoked(sess, policy_version, skb->ingress_ifindex,
+				   key.dst_ip, key.dst_port)) {
+		del_session(&key, sess);
+		return rst ? TCP_NAT_DROP : TCP_NAT_RESET;
+	}
+
 	if (sess->packet_class == L7PROXY_PACKET)
 		goto update_existing;
 

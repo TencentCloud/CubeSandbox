@@ -2,6 +2,7 @@ package cubevs
 
 import (
 	"fmt"
+	"net"
 	"reflect"
 	"strings"
 	"testing"
@@ -1226,4 +1227,339 @@ func TestPopulateAllowOutPlainStaticOverwritesLearnedUnconditionally(t *testing.
 	if got.Scheme != L7SchemeNone {
 		t.Fatalf("scheme=%d, want NONE", got.Scheme)
 	}
+}
+
+// pinPolicyMaps mounts a scratch bpffs and pins the outer maps the update path
+// loads by name, then creates this ifindex's inner maps. It leaves the TAP with
+// the same map shape a freshly registered sandbox has.
+func pinPolicyMaps(t *testing.T, ifindex uint32) {
+	t.Helper()
+	mountBpffs(t)
+
+	allowOut := newAllowOutV3OuterMap(t)
+	if err := allowOut.Pin(pinPath(MapNameAllowOutV3)); err != nil {
+		t.Fatalf("pin %s: %v", MapNameAllowOutV3, err)
+	}
+	denyOut := newDenyOutOuterMap(t)
+	if err := denyOut.Pin(pinPath(MapNameDenyOut)); err != nil {
+		t.Fatalf("pin %s: %v", MapNameDenyOut, err)
+	}
+	dnsAllow := newDNSAllowOuterMap(t)
+	if err := dnsAllow.Pin(pinPath(MapNameDNSAllowV2)); err != nil {
+		t.Fatalf("pin %s: %v", MapNameDNSAllowV2, err)
+	}
+	if err := initNetPolicy(ifindex); err != nil {
+		t.Fatalf("initNetPolicy: %v", err)
+	}
+}
+
+// newDenyOutOuterMap builds a deny_out outer map with the production shape.
+func newDenyOutOuterMap(t *testing.T) *ebpf.Map {
+	t.Helper()
+	outer, err := ebpf.NewMap(&ebpf.MapSpec{
+		Type:       ebpf.HashOfMaps,
+		KeySize:    uint32(unsafe.Sizeof(uint32(0))),
+		ValueSize:  uint32(unsafe.Sizeof(uint32(0))),
+		MaxEntries: maxNetPolicyEntries,
+		InnerMap: &ebpf.MapSpec{
+			Type:       ebpf.LPMTrie,
+			KeySize:    uint32(unsafe.Sizeof(lpmKey{})),
+			ValueSize:  uint32(unsafe.Sizeof(uint32(0))),
+			MaxEntries: maxNetPolicyEntries,
+			Flags:      unix.BPF_F_NO_PREALLOC,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create deny_out outer map: %v", err)
+	}
+	t.Cleanup(func() { outer.Close() })
+	return outer
+}
+
+// pinTAPMetadataMaps pins the two maps UpsertTAPDeviceMetadata writes.
+func pinTAPMetadataMaps(t *testing.T) {
+	t.Helper()
+	pin := func(name string, valueSize uint32) {
+		m, err := ebpf.NewMap(&ebpf.MapSpec{
+			Type:       ebpf.Hash,
+			KeySize:    uint32(unsafe.Sizeof(uint32(0))),
+			ValueSize:  valueSize,
+			MaxEntries: maxNetPolicyEntries,
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		t.Cleanup(func() { m.Close() })
+		if err := m.Pin(pinPath(name)); err != nil {
+			t.Fatalf("pin %s: %v", name, err)
+		}
+	}
+	pin(MapNameIfindexToMVMMetadata, uint32(unsafe.Sizeof(mvmMetadata{})))
+	pin(MapNameMVMIPToIfindex, uint32(unsafe.Sizeof(uint32(0))))
+}
+
+func mustInner(t *testing.T, mapName string, ifindex uint32) *ebpf.Map {
+	t.Helper()
+	outer, err := loadPinnedMap(mapName)
+	if err != nil {
+		t.Fatalf("load %s: %v", mapName, err)
+	}
+	defer outer.Close()
+	inner, err := lookupInnerMap(outer, ifindex, mapName)
+	if err != nil {
+		t.Fatalf("lookup %s inner for ifindex %d: %v", mapName, ifindex, err)
+	}
+	return inner
+}
+
+// TestSyncAllowOutInnerRevokesStaticKeepsLearned is the core of the update
+// contract on allow_out_v3: static rows the new policy dropped go away, static
+// rows it still names stay, and DNS-learned rows are never touched.
+func TestSyncAllowOutInnerRevokesStaticKeepsLearned(t *testing.T) {
+	ifindex := uint32(401)
+	pinPolicyMaps(t, ifindex)
+	inner := mustInner(t, MapNameAllowOutV3, ifindex)
+
+	kept := mustParseCIDRForTest(t, "192.0.2.10").IP
+	revoked := mustParseCIDRForTest(t, "192.0.2.11").IP
+	learned := mustParseCIDRForTest(t, "192.0.2.12").IP
+
+	seed := []allowOutPolicyEntry{
+		{key: lpmKey{Prefixlen: 32, IP: kept}},
+		{key: lpmKey{Prefixlen: 32, IP: revoked}},
+	}
+	if err := populateAllowOutInner(inner, seed); err != nil {
+		t.Fatalf("seed static entries: %v", err)
+	}
+	learnedKey := lpmKeyV3{Prefixlen: 32, IP: learned}
+	if err := inner.Update(&learnedKey, &netPolicyValueV3{
+		ExpiresAtNS: 1 << 40, KeyPrefixlen: 32,
+	}, ebpf.UpdateAny); err != nil {
+		t.Fatalf("seed learned entry: %v", err)
+	}
+
+	desired := []allowOutPolicyEntry{{key: lpmKey{Prefixlen: 32, IP: kept}}}
+	if err := syncAllowOutInner(ifindex, desired); err != nil {
+		t.Fatalf("syncAllowOutInner: %v", err)
+	}
+
+	assertV3Present(t, inner, lpmKeyV3{Prefixlen: 32, IP: kept}, true, "still-desired static entry")
+	assertV3Present(t, inner, lpmKeyV3{Prefixlen: 32, IP: revoked}, false, "revoked static entry")
+	assertV3Present(t, inner, learnedKey, true, "DNS-learned entry")
+}
+
+// TestSyncAllowOutInnerRevokesExpandedL7Ports covers the expansion path: an L7
+// rule occupies one /48 per port, so narrowing its port set must delete exactly
+// the rows for the ports that are gone.
+func TestSyncAllowOutInnerRevokesExpandedL7Ports(t *testing.T) {
+	ifindex := uint32(402)
+	pinPolicyMaps(t, ifindex)
+	inner := mustInner(t, MapNameAllowOutV3, ifindex)
+	ip := mustParseCIDRForTest(t, "192.0.2.20").IP
+
+	l7Entry := func(ports ...uint16) []allowOutPolicyEntry {
+		set := make([]l7PortEntry, 0, len(ports))
+		for _, p := range ports {
+			set = append(set, l7PortEntry{Port: htonsPort(p), Scheme: L7SchemeHTTPS})
+		}
+		return []allowOutPolicyEntry{{
+			key:   lpmKey{Prefixlen: 32, IP: ip},
+			flags: netPolicyFlagL7Required,
+			ports: set,
+		}}
+	}
+
+	if err := populateAllowOutInner(inner, l7Entry(443, 8443)); err != nil {
+		t.Fatalf("seed L7 entry: %v", err)
+	}
+	if err := syncAllowOutInner(ifindex, l7Entry(443)); err != nil {
+		t.Fatalf("syncAllowOutInner: %v", err)
+	}
+
+	assertV3Present(t, inner, lpmKeyV3{Prefixlen: 48, IP: ip, Port: htonsPort(443)}, true, "kept L7 port row")
+	assertV3Present(t, inner, lpmKeyV3{Prefixlen: 48, IP: ip, Port: htonsPort(8443)}, false, "revoked L7 port row")
+}
+
+// TestSyncDenyOutInnerConvergesOnDesired pins that deny_out is fully managed:
+// every row the caller did not ask for is removed. Callers are responsible for
+// including the always-denied ranges, which UpdateTAPDevicePolicy does via
+// effectiveDenyOutEntriesForReplace.
+func TestSyncDenyOutInnerConvergesOnDesired(t *testing.T) {
+	ifindex := uint32(403)
+	pinPolicyMaps(t, ifindex)
+	inner := mustInner(t, MapNameDenyOut, ifindex)
+
+	seed, err := buildDenyOutPolicyEntries([]string{"198.51.100.0/24", "203.0.113.0/24"})
+	if err != nil {
+		t.Fatalf("build seed: %v", err)
+	}
+	if err := populateDenyOutInner(inner, seed); err != nil {
+		t.Fatalf("seed deny_out: %v", err)
+	}
+
+	desired, err := buildDenyOutPolicyEntries([]string{"203.0.113.0/24", "192.0.2.0/24"})
+	if err != nil {
+		t.Fatalf("build desired: %v", err)
+	}
+	if err := syncDenyOutInner(ifindex, desired); err != nil {
+		t.Fatalf("syncDenyOutInner: %v", err)
+	}
+
+	var val uint32
+	for _, tc := range []struct {
+		cidr string
+		want bool
+	}{
+		{"198.51.100.0/24", false},
+		{"203.0.113.0/24", true},
+		{"192.0.2.0/24", true},
+	} {
+		key, perr := parseCIDR(tc.cidr)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", tc.cidr, perr)
+		}
+		if got := inner.Lookup(&key, &val) == nil; got != tc.want {
+			t.Errorf("deny_out %s present=%v, want %v", tc.cidr, got, tc.want)
+		}
+	}
+}
+
+// TestSyncDNSAllowInnerReplacesPortSet pins the one place the update path must
+// NOT reuse the create path's merge: shrinking a domain's port set has to
+// actually shrink it, or the removed ports keep being learned into allow_out.
+func TestSyncDNSAllowInnerReplacesPortSet(t *testing.T) {
+	ifindex := uint32(405)
+	pinPolicyMaps(t, ifindex)
+	inner := mustInner(t, MapNameDNSAllowV2, ifindex)
+
+	rule := func(ports ...uint16) dnsAllowRule {
+		key, value, err := makeDNSAllowRule("api.example.com", uint8(netPolicyFlagL7Required))
+		if err != nil {
+			t.Fatalf("makeDNSAllowRule: %v", err)
+		}
+		set := make([]l7PortEntry, 0, len(ports))
+		for _, p := range ports {
+			set = append(set, l7PortEntry{Port: htonsPort(p), Scheme: L7SchemeHTTPS})
+		}
+		applyPortsToDNSAllowValue(&value, set)
+		return dnsAllowRule{domain: "api.example.com", key: key, value: value}
+	}
+
+	wide := rule(443, 8443)
+	if err := populateDNSAllowInnerMap(inner, []dnsAllowRule{wide}); err != nil {
+		t.Fatalf("seed dns allow: %v", err)
+	}
+	if err := syncDNSAllowInner(ifindex, []dnsAllowRule{rule(443)}); err != nil {
+		t.Fatalf("syncDNSAllowInner: %v", err)
+	}
+
+	var got dnsAllowValue
+	if err := inner.Lookup(&wide.key, &got); err != nil {
+		t.Fatalf("lookup dns allow: %v", err)
+	}
+	if got.PortCount != 1 || got.Ports[0].Port != htonsPort(443) {
+		t.Fatalf("port set not replaced: count=%d ports=%+v", got.PortCount, got.Ports[:got.PortCount])
+	}
+}
+
+// TestSyncDNSAllowInnerRevokesDomain covers removing a domain rule outright.
+func TestSyncDNSAllowInnerRevokesDomain(t *testing.T) {
+	ifindex := uint32(406)
+	pinPolicyMaps(t, ifindex)
+	inner := mustInner(t, MapNameDNSAllowV2, ifindex)
+
+	keptKey, keptVal, err := makeDNSAllowRule("kept.example.com", 0)
+	if err != nil {
+		t.Fatalf("makeDNSAllowRule: %v", err)
+	}
+	revokedKey, revokedVal, err := makeDNSAllowRule("gone.example.com", 0)
+	if err != nil {
+		t.Fatalf("makeDNSAllowRule: %v", err)
+	}
+	seed := []dnsAllowRule{
+		{domain: "kept.example.com", key: keptKey, value: keptVal},
+		{domain: "gone.example.com", key: revokedKey, value: revokedVal},
+	}
+	if err := populateDNSAllowInnerMap(inner, seed); err != nil {
+		t.Fatalf("seed dns allow: %v", err)
+	}
+	if err := syncDNSAllowInner(ifindex, seed[:1]); err != nil {
+		t.Fatalf("syncDNSAllowInner: %v", err)
+	}
+
+	var val dnsAllowValue
+	if err := inner.Lookup(&keptKey, &val); err != nil {
+		t.Errorf("still-desired domain was deleted: %v", err)
+	}
+	if err := inner.Lookup(&revokedKey, &val); err == nil {
+		t.Error("revoked domain survived the update")
+	}
+}
+
+// TestBumpPolicyVersionAdvancesGeneration checks the one signal the datapath
+// uses to notice an update at all, plus the invariant that a metadata rewrite
+// must not reset it.
+func TestBumpPolicyVersionAdvancesGeneration(t *testing.T) {
+	mountBpffs(t)
+	pinTAPMetadataMaps(t)
+	ifindex := uint32(404)
+	ip := net.ParseIP("10.0.0.5")
+	if err := UpsertTAPDeviceMetadata(ifindex, ip, "sandbox-404", 7); err != nil {
+		t.Fatalf("UpsertTAPDeviceMetadata: %v", err)
+	}
+
+	// A fresh TAP shares generation 0 with pre-upgrade metadata and sessions, so
+	// nothing looks stale until a policy actually changes.
+	if got := mustReadPolicyVersion(t, ifindex); got != 0 {
+		t.Fatalf("fresh TAP policy_version=%d, want 0", got)
+	}
+
+	// The upgrade path: metadata written before this field existed reads 0, and a
+	// rewrite has to leave it there. Moving it off 0 would make every live
+	// session stale and retire the ones whose DNS-learned allow entry has since
+	// aged out, all without any policy having changed.
+	if err := UpsertTAPDeviceMetadata(ifindex, ip, "sandbox-404", 8); err != nil {
+		t.Fatalf("re-upsert metadata at generation 0: %v", err)
+	}
+	if got := mustReadPolicyVersion(t, ifindex); got != 0 {
+		t.Fatalf("metadata rewrite moved policy_version off 0 to %d", got)
+	}
+
+	if err := bumpPolicyVersion(ifindex); err != nil {
+		t.Fatalf("bumpPolicyVersion: %v", err)
+	}
+	if got := mustReadPolicyVersion(t, ifindex); got != 1 {
+		t.Fatalf("policy_version=%d, want 1", got)
+	}
+
+	// Recovery bumps Version on every restart; that must not reset the policy
+	// generation, or every live session would look stale at once.
+	if err := UpsertTAPDeviceMetadata(ifindex, ip, "sandbox-404", 9); err != nil {
+		t.Fatalf("re-upsert metadata: %v", err)
+	}
+	if got := mustReadPolicyVersion(t, ifindex); got != 1 {
+		t.Fatalf("metadata rewrite reset policy_version to %d, want 1", got)
+	}
+}
+
+func assertV3Present(t *testing.T, inner *ebpf.Map, key lpmKeyV3, want bool, what string) {
+	t.Helper()
+	var val netPolicyValueV3
+	if got := inner.Lookup(&key, &val) == nil; got != want {
+		t.Errorf("%s present=%v, want %v", what, got, want)
+	}
+}
+
+func mustReadPolicyVersion(t *testing.T, ifindex uint32) uint32 {
+	t.Helper()
+	m, err := loadPinnedMap(MapNameIfindexToMVMMetadata)
+	if err != nil {
+		t.Fatalf("load %s: %v", MapNameIfindexToMVMMetadata, err)
+	}
+	defer m.Close()
+	var meta mvmMetadata
+	if err := m.Lookup(&ifindex, &meta); err != nil {
+		t.Fatalf("lookup metadata for ifindex %d: %v", ifindex, err)
+	}
+	return meta.PolicyVersion
 }

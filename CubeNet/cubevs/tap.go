@@ -79,10 +79,18 @@ func UpsertTAPDeviceMetadata(ifindex uint32, ip net.IP, id string, version uint3
 	}
 
 	mvmIP := ipToUint32(ip)
+	// A fresh TAP starts at generation 0, which is also what metadata and
+	// sessions written before this field existed carry. Matching them keeps an
+	// upgrade from re-checking anything: those flows were admitted under the
+	// policy the sandbox still has, so the only thing a forced re-check could
+	// find is a DNS-learned allow entry that has since aged out -- and it would
+	// drop the flow for it. The first real update bumps the generation and makes
+	// them stale, which is when a re-check is actually owed.
 	mvmID := mvmMetadata{
-		IP:      mvmIP,
-		UUID:    stringToByteArray(id),
-		Version: version,
+		IP:            mvmIP,
+		UUID:          stringToByteArray(id),
+		Version:       version,
+		PolicyVersion: 0,
 	}
 
 	// ifindex <-> MVM metadata (IP, ID and tunnels)
@@ -98,6 +106,10 @@ func UpsertTAPDeviceMetadata(ifindex uint32, ip net.IP, id string, version uint3
 		oldMVMIP = oldMVMID.IP
 		mvmID.DNSPolicyFlags = oldMVMID.DNSPolicyFlags
 		mvmID.Reserved = oldMVMID.Reserved
+		// Carry the policy generation across metadata rewrites (recovery bumps
+		// Version on every restart). Resetting it would make every live session
+		// look stale and force a re-check storm on a dense node.
+		mvmID.PolicyVersion = oldMVMID.PolicyVersion
 	} else if !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("map.Lookup failed: %w, name: %s", err, MapNameIfindexToMVMMetadata)
 	}

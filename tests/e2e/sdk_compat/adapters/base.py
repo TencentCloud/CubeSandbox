@@ -112,6 +112,14 @@ class SandboxAdapter(ABC):
     def traffic_access_token(self) -> str | None:
         raise UnsupportedCapability(self.backend, "network_public_access")
 
+    def update_network(self, network: dict | None = None) -> None:
+        """Replace the egress policy of the running sandbox.
+
+        Takes the whole policy as one object, ``allow_internet_access``
+        included, so the signature matches E2B's ``update_network``.
+        """
+        raise UnsupportedCapability(self.backend, "network_dynamic_update")
+
     @abstractmethod
     def kill(self) -> None:
         raise NotImplementedError

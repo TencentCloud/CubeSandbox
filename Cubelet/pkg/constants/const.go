@@ -350,6 +350,7 @@ const (
 	UpdateActionRemoveDevice = "removeDevice"
 	UpdateActionPause        = "pause"
 	UpdateActionResume       = "resume"
+	UpdateActionNetwork      = "network"
 	PreStopTypePause         = "pause"
 	PreStopTypeDestroy       = "destroy"
 )

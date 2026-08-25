@@ -16,9 +16,8 @@ from ._filesystem import Filesystem
 from ._models import Execution, ExecutionError, OutputMessage, Result, SandboxInfo, SnapshotInfo
 from ._policy import (
     Rule,
-    _normalize_rules_arg,
-    _serialize_rule,
-    _validate_allow_out_domains_require_deny_all,
+    _build_network_payload,
+    _build_network_update_body,
 )
 from ._pty import Pty
 from ._stream import _parse_line
@@ -287,28 +286,7 @@ class Sandbox:
         if not allow_internet_access:
             payload["allow_internet_access"] = False
         if network:
-            _validate_allow_out_domains_require_deny_all(
-                network.get("allow_out"),
-                network.get("deny_out"),
-                default_deny_all=not allow_internet_access,
-            )
-            net: dict = {}
-            if "allow_out" in network:
-                net["allowOut"] = network["allow_out"]
-            if "deny_out" in network:
-                net["denyOut"] = network["deny_out"]
-            if "allow_public_traffic" in network:
-                net["allowPublicTraffic"] = network["allow_public_traffic"]
-            if "mask_request_host" in network:
-                net["maskRequestHost"] = network["mask_request_host"]
-            if "rules" in network and network["rules"]:
-                # ``rules`` accepts either CubeEgress's list-of-Rule shape or
-                # E2B's per-host transform mapping (``{host: [{transform: {...}}]}``).
-                # ``_normalize_rules_arg`` collapses both into a list of rule
-                # dicts that ``_serialize_rule`` understands.
-                normalized_rules = _normalize_rules_arg(network["rules"])
-                if normalized_rules:
-                    net["rules"] = [_serialize_rule(r) for r in normalized_rules]
+            net = _build_network_payload(network, allow_internet_access=allow_internet_access)
             if net:
                 payload["network"] = net
         # Lifecycle: opt-in. Wire shape mirrors e2b
@@ -545,6 +523,39 @@ class Sandbox:
         resp = self._session.post(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/timeout",
             json={"timeout": timeout},
+        )
+        _check_response(resp)
+
+    def update_network(self, network: Dict[str, Any] | None = None) -> None:
+        """PUT /sandboxes/:sandboxID/network - Replace the egress policy.
+
+        Takes the whole policy as one object, including
+        ``allow_internet_access``, matching E2B's ``SandboxNetworkUpdate``. The
+        create path keeps ``allow_internet_access`` as a separate argument
+        because E2B's create does too; the asymmetry is upstream's, and matching
+        it is what lets code written against either SDK work unchanged.
+
+        Takes effect on established connections too, not just new ones: a
+        connection the new policy no longer allows is reset rather than left
+        running until it closes.
+
+        Args:
+            network: The complete desired policy. A replacement, not a patch —
+                an omitted key is cleared, and ``None`` clears everything.
+                Accepts ``allow_out``, ``deny_out``, ``rules``,
+                ``allow_internet_access``, plus the CubeSandbox extensions
+                ``allow_public_traffic`` and ``mask_request_host``. ``rules``
+                takes either CubeEgress's list of rules or E2B's
+                ``{host: [{transform: ...}]}`` mapping.
+
+        Raises:
+            SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
+            ApiError: If the policy is invalid (HTTP 400), the sandbox is not
+                running (HTTP 409), or on unexpected backend error.
+        """
+        resp = self._session.put(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}/network",
+            json=_build_network_update_body(network or {}),
         )
         _check_response(resp)
 

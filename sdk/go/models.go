@@ -78,6 +78,23 @@ type CreateOptions struct {
 	Extra        map[string]any
 }
 
+// UpdateNetworkOptions is the desired egress policy for Sandbox.UpdateNetwork.
+//
+// It embeds NetworkOptions and carries AllowInternetAccess alongside it rather
+// than beside it, mirroring E2B's SandboxNetworkUpdate so code written against
+// either SDK works unchanged. CreateOptions keeps the flag as a sibling of
+// Network because E2B's create draws the same line.
+//
+// The whole struct is the desired state, not a patch: a zero-valued field is
+// cleared rather than left as it was. AllowInternetAccess is presence-based —
+// nil is not the same as pointing at true.
+type UpdateNetworkOptions struct {
+	NetworkOptions
+	// AllowInternetAccess gates traffic outside the allow list; nil leaves the
+	// field off the request entirely, so the server applies its default.
+	AllowInternetAccess *bool
+}
+
 // DurationPtr returns a pointer to d. It is a convenience for optional
 // duration fields such as CreateOptions.Timeout and Sandbox.Resume, where nil
 // means "not provided; let the server decide".

@@ -761,6 +761,10 @@ message UpdateCubeSandboxRequest {
   // and the CRI). Whenever possible, however, runtime authors SHOULD
   // consider proposing new typed fields for any new features instead.
   map<string, string> annotations = 3;
+  // Replacement egress policy for a running sandbox. Absent means "leave the
+  // network alone"; present means the complete desired state, so an omitted or
+  // empty field inside it clears whatever is currently installed.
+  optional CubeNetworkConfig cube_network_config = 4;
 }
 
 message UpdateCubeSandboxResponse {

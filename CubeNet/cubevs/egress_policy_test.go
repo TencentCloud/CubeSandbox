@@ -19,6 +19,7 @@ const (
 
 type egressPolicyTestEnv struct {
 	program        *ebpf.Program
+	recheckProgram *ebpf.Program
 	allowOut       *ebpf.Map
 	denyOut        *ebpf.Map
 	allowInnerSpec *ebpf.MapSpec
@@ -60,12 +61,13 @@ func loadEgressPolicyTestEnv(t *testing.T) *egressPolicyTestEnv {
 
 	env := &egressPolicyTestEnv{
 		program:        coll.Programs["test_classify_egress_flow"],
+		recheckProgram: coll.Programs["test_session_policy_revoked"],
 		allowOut:       coll.Maps["allow_out_v3"],
 		denyOut:        coll.Maps["deny_out"],
 		allowInnerSpec: allowInnerSpec,
 		denyInnerSpec:  denyInnerSpec,
 	}
-	if env.program == nil || env.allowOut == nil || env.denyOut == nil {
+	if env.program == nil || env.recheckProgram == nil || env.allowOut == nil || env.denyOut == nil {
 		t.Fatal("loaded egress policy program or maps missing")
 	}
 	return env
@@ -303,6 +305,202 @@ func TestClassifyEgressFlowExpiredAllow(t *testing.T) {
 			got := runEgressPolicyCase(t, env.program, ifindex, daddr, dport)
 			if got != flowVerdictReject {
 				t.Fatalf("verdict=%d, want FLOW_REJECT", got)
+			}
+		})
+	}
+}
+
+const sessionRecheckCaseLen = 28
+
+// sessionRecheckCase mirrors struct session_recheck_case in
+// egress_policy_test.bpf.c.
+type sessionRecheckCase struct {
+	ifindex           uint32
+	daddr             uint32
+	sessPolicyVersion uint32
+	metaPolicyVersion uint32
+	dport             uint16
+	packetClass       uint8
+	l7Scheme          uint8
+}
+
+type sessionRecheckResult struct {
+	revoked           bool
+	sessPolicyVersion uint32
+}
+
+func runSessionRecheckCase(t *testing.T, prog *ebpf.Program, tc sessionRecheckCase) sessionRecheckResult {
+	t.Helper()
+
+	data := make([]byte, sessionRecheckCaseLen)
+	binary.LittleEndian.PutUint32(data[0:4], tc.ifindex)
+	binary.LittleEndian.PutUint32(data[4:8], tc.daddr)
+	binary.LittleEndian.PutUint32(data[8:12], tc.sessPolicyVersion)
+	binary.LittleEndian.PutUint32(data[12:16], tc.metaPolicyVersion)
+	binary.LittleEndian.PutUint16(data[20:22], tc.dport)
+	data[22] = tc.packetClass
+	data[23] = tc.l7Scheme
+
+	ret, out, err := prog.Test(data)
+	if err != nil {
+		if bpfTestUnavailable(err) {
+			t.Skipf("kernel BPF policy test-run unavailable: %v", err)
+		}
+		t.Fatalf("run session recheck test: %v", err)
+	}
+	if ret != 0 {
+		t.Fatalf("test_session_policy_revoked returned %d, want TC_ACT_OK", ret)
+	}
+	if len(out) < sessionRecheckCaseLen {
+		t.Fatalf("test output length=%d, want >=%d", len(out), sessionRecheckCaseLen)
+	}
+	return sessionRecheckResult{
+		revoked:           out[24] != 0,
+		sessPolicyVersion: binary.LittleEndian.Uint32(out[16:20]),
+	}
+}
+
+// TestSessionPolicyRevoked exercises the datapath re-check an update relies on:
+// an established flow is judged against the current policy the first time it is
+// seen under a new generation, and the decision is then cached.
+func TestSessionPolicyRevoked(t *testing.T) {
+	const (
+		ifindex     = uint32(700)
+		snatPort    = uint16(0x5000) // 80, network byte order on little-endian
+		otherPort   = uint16(0xBB01) // 443
+		packetSNAT  = uint8(0)
+		packetL7    = uint8(1)
+		schemeNone  = uint8(0)
+		schemeHTTP  = uint8(1)
+		schemeHTTPS = uint8(2)
+	)
+
+	env := loadEgressPolicyTestEnv(t)
+	allowInner, denyInner := env.attachInnerMaps(t, ifindex)
+
+	allowed := mustParseCIDRForTest(t, "192.0.2.30")
+	l7Host := mustParseCIDRForTest(t, "192.0.2.31")
+	denied := mustParseCIDRForTest(t, "192.0.2.32")
+
+	// classify_egress_flow defaults to SNAT, so "no longer allowed" has to be
+	// expressed as an explicit deny rather than the absence of an allow.
+	denyKey := lpmKey{Prefixlen: 32, IP: denied.IP}
+	denyVal := uint32(netPolicyValueStatic)
+	if err := denyInner.Update(&denyKey, &denyVal, ebpf.UpdateAny); err != nil {
+		t.Fatalf("seed deny: %v", err)
+	}
+
+	// A plain allow for one host, and an HTTPS-only L7 rule for another.
+	plainKey := lpmKeyV3{Prefixlen: 32, IP: allowed.IP}
+	if err := allowInner.Update(&plainKey, &netPolicyValueV3{KeyPrefixlen: 32}, ebpf.UpdateAny); err != nil {
+		t.Fatalf("seed plain allow: %v", err)
+	}
+	l7Key := lpmKeyV3{Prefixlen: 48, IP: l7Host.IP, Port: otherPort}
+	if err := allowInner.Update(&l7Key, &netPolicyValueV3{
+		Flags: netPolicyFlagL7Required, Scheme: L7SchemeHTTPS, KeyPrefixlen: 48,
+	}, ebpf.UpdateAny); err != nil {
+		t.Fatalf("seed L7 allow: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		tc          sessionRecheckCase
+		wantRevoked bool
+		wantVersion uint32
+	}{
+		{
+			// Denied by the current policy, but the generation matches, so the
+			// flow keeps running on its cached verdict.
+			name: "same generation is not re-evaluated",
+			tc: sessionRecheckCase{
+				ifindex: ifindex, daddr: denied.IP, dport: snatPort,
+				sessPolicyVersion: 5, metaPolicyVersion: 5,
+			},
+			wantRevoked: false,
+			wantVersion: 5,
+		},
+		{
+			name: "still allowed under the new generation is restamped",
+			tc: sessionRecheckCase{
+				ifindex: ifindex, daddr: allowed.IP, dport: snatPort,
+				sessPolicyVersion: 5, metaPolicyVersion: 6,
+			},
+			wantRevoked: false,
+			wantVersion: 6,
+		},
+		{
+			name: "no longer allowed is revoked",
+			tc: sessionRecheckCase{
+				ifindex: ifindex, daddr: denied.IP, dport: snatPort,
+				sessPolicyVersion: 5, metaPolicyVersion: 6,
+			},
+			wantRevoked: true,
+			wantVersion: 5,
+		},
+		{
+			// SNAT and L7 disagree on the reply tuple and on who terminates
+			// the connection, so a flow cannot migrate between them.
+			name: "verdict change SNAT to L7 is revoked",
+			tc: sessionRecheckCase{
+				ifindex: ifindex, daddr: l7Host.IP, dport: otherPort,
+				packetClass: packetSNAT, l7Scheme: schemeNone,
+				sessPolicyVersion: 5, metaPolicyVersion: 6,
+			},
+			wantRevoked: true,
+			wantVersion: 5,
+		},
+		{
+			name: "verdict change L7 scheme is revoked",
+			tc: sessionRecheckCase{
+				ifindex: ifindex, daddr: l7Host.IP, dport: otherPort,
+				packetClass: packetL7, l7Scheme: schemeHTTP,
+				sessPolicyVersion: 5, metaPolicyVersion: 6,
+			},
+			wantRevoked: true,
+			wantVersion: 5,
+		},
+		{
+			name: "unchanged L7 verdict is restamped",
+			tc: sessionRecheckCase{
+				ifindex: ifindex, daddr: l7Host.IP, dport: otherPort,
+				packetClass: packetL7, l7Scheme: schemeHTTPS,
+				sessPolicyVersion: 5, metaPolicyVersion: 6,
+			},
+			wantRevoked: false,
+			wantVersion: 6,
+		},
+		{
+			// 0 is an ordinary generation, not a sentinel. A fresh TAP and the
+			// sessions it stamps both sit at 0, as does everything written before
+			// the field existed, so an upgrade must re-evaluate none of it: this
+			// destination is denied by the current policy and still survives.
+			name: "generation 0 on both sides is not re-evaluated",
+			tc: sessionRecheckCase{
+				ifindex: ifindex, daddr: denied.IP, dport: snatPort,
+				sessPolicyVersion: 0, metaPolicyVersion: 0,
+			},
+			wantRevoked: false,
+			wantVersion: 0,
+		},
+		{
+			name: "generation 0 against a newer one is re-evaluated",
+			tc: sessionRecheckCase{
+				ifindex: ifindex, daddr: allowed.IP, dport: snatPort,
+				sessPolicyVersion: 0, metaPolicyVersion: 1,
+			},
+			wantRevoked: false,
+			wantVersion: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := runSessionRecheckCase(t, env.recheckProgram, tt.tc)
+			if got.revoked != tt.wantRevoked {
+				t.Errorf("revoked=%v, want %v", got.revoked, tt.wantRevoked)
+			}
+			if got.sessPolicyVersion != tt.wantVersion {
+				t.Errorf("session policy_version=%d, want %d", got.sessPolicyVersion, tt.wantVersion)
 			}
 		})
 	}

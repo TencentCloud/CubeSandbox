@@ -55,12 +55,19 @@ type TAPDevice struct {
 
 // mvmMetadata is used to retrieve BPF map values.
 // The struct layout should be exactly the same as BPF side.
+// mvmMetadata mirrors struct mvm_meta on the BPF side. PolicyVersion is the
+// per-sandbox network-policy generation; the datapath compares it against the
+// copy cached in each nat_session to decide whether an established flow needs
+// re-evaluating. Version is a different thing entirely (TAP generation, part of
+// session_key) and must not be reused for it.
 type mvmMetadata struct {
 	Version        uint32
 	IP             uint32
 	UUID           [64]byte
 	DNSPolicyFlags uint8
-	Reserved       [55]uint8
+	Reserved0      [3]uint8
+	PolicyVersion  uint32
+	Reserved       [48]uint8
 }
 
 // TCDirection is used to specified attach point of a TC filter.

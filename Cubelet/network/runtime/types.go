@@ -14,7 +14,11 @@ type EnsureNetworkRequest struct {
 	ARPNeighbors      []ARPNeighbor      `json:"arpNeighbors,omitempty"`
 	PortMappings      []PortMapping      `json:"portMappings,omitempty"`
 	CubeNetworkConfig *CubeNetworkConfig `json:"cubeNetworkConfig,omitempty"`
-	PersistMetadata   map[string]string  `json:"persistMetadata,omitempty"`
+	// DNSAllowOutCIDRs are the resolver /32s the caller already folded into
+	// CubeNetworkConfig.AllowOut. Recorded so a later policy update, which only
+	// carries user-authored targets, can fold the same resolvers back in.
+	DNSAllowOutCIDRs []string          `json:"dnsAllowOutCIDRs,omitempty"`
+	PersistMetadata  map[string]string `json:"persistMetadata,omitempty"`
 }
 
 // EnsureNetworkResponse is the concrete network shape assigned by the runtime.
@@ -36,6 +40,18 @@ type ReleaseNetworkRequest struct {
 	NetworkHandle   string            `json:"networkHandle,omitempty"`
 	IdempotencyKey  string            `json:"idempotencyKey,omitempty"`
 	PersistMetadata map[string]string `json:"persistMetadata,omitempty"`
+}
+
+// UpdateNetworkPolicyRequest replaces the egress policy of a running sandbox.
+// CubeNetworkConfig is the complete desired state, not a patch: an omitted or
+// empty field clears whatever is currently installed.
+type UpdateNetworkPolicyRequest struct {
+	SandboxID         string             `json:"sandboxID,omitempty"`
+	CubeNetworkConfig *CubeNetworkConfig `json:"cubeNetworkConfig,omitempty"`
+	// DNSAllowOutCIDRs is a fallback resolver list, used only for sandboxes
+	// created before the runtime started recording its own. See
+	// NetworkController.UpdateNetworkPolicy.
+	DNSAllowOutCIDRs []string `json:"dnsAllowOutCIDRs,omitempty"`
 }
 
 // ReleaseNetworkResponse confirms the release handoff and returns the metadata

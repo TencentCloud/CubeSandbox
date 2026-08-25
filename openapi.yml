@@ -239,6 +239,51 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /sandboxes/{sandboxID}/network:
+    put:
+      tags:
+      - handlers::sandboxes
+      operationId: update_sandbox_network
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox identifier
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSandboxNetworkRequest'
+        required: true
+      responses:
+        '204':
+          description: Network policy updated
+        '400':
+          description: Invalid network policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Sandbox is not running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /sandboxes/{sandboxID}/pause:
     post:
       tags:
@@ -800,7 +845,7 @@ paths:
         required: true
       responses:
         '200':
-          description: Alias set or cleared; returns the updated template detail
+          description: Alias updated
           content:
             application/json:
               schema:
@@ -1436,6 +1481,11 @@ components:
 
         Multi-field semantics: AND across fields, OR within `method`.
         Comparisons on sni/host/scheme are case-insensitive.
+
+        `port` + `scheme` together pin the (host, port) tuple CubeEgress intercepts.
+        Both nil keeps the legacy default {80/http, 443/https}. When `port` is set,
+        `scheme` MUST also be set — same-`(host, port)` rules across the policy
+        must agree on `scheme` (the server rejects the whole policy on mismatch).
       properties:
         host:
           type:
@@ -1451,6 +1501,11 @@ components:
           type:
           - string
           - 'null'
+        port:
+          type:
+          - integer
+          - 'null'
+          format: int32
         scheme:
           type:
           - string
@@ -1660,18 +1715,6 @@ components:
           - integer
           - 'null'
           format: int32
-    SetTemplateAliasRequest:
-      type: object
-      description: Body for PUT /templates/{id}/alias (set, reassign, or clear alias).
-      properties:
-        alias:
-          type:
-          - string
-          - 'null'
-          description: |-
-            New alias for the template. Validated against `^[a-z0-9][a-z0-9-]{0,63}$`
-            with `tpl-`/`snap-` prefixes rejected. Omitted, null, or empty string
-            clears the alias.
     ResumedSandbox:
       type: object
       description: Request body for POST /sandboxes/{id}/resume (deprecated).
@@ -1992,6 +2035,19 @@ components:
           description: |-
             CubeSandbox extension: mount this volume read-only for this sandbox
             attachment. Defaults to false when omitted.
+    SetTemplateAliasRequest:
+      type: object
+      description: |-
+        Body for PUT /templates/:id/alias (set / modify / clear alias).
+
+        `alias` is `None` / null / empty string ⇒ clear the current alias.
+        A non-empty value is validated by CubeMaster's `validateTemplateAlias`
+        (the single source of truth; CubeAPI does not re-validate).
+      properties:
+        alias:
+          type:
+          - string
+          - 'null'
     SetTimeoutRequest:
       type: object
       description: Request body for POST /sandboxes/{id}/timeout
@@ -2304,6 +2360,23 @@ components:
           type:
           - string
           - 'null'
+    UpdateSandboxNetworkRequest:
+      type: object
+      description: |-
+        Request body for PUT /sandboxes/{id}/network.
+
+        The body is the complete desired egress policy, not a patch: any field left
+        out clears what the sandbox currently has. This mirrors how `network` is
+        interpreted at create time, so the same object can be sent to either.
+      properties:
+        allowInternetAccess:
+          type:
+          - boolean
+          - 'null'
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxNetworkConfig'
     Volume:
       type: object
       description: Volume descriptor returned in list responses (no token).

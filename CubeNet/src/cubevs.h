@@ -151,12 +151,29 @@ const volatile __u16 nodenic_macaddr_p2 = 0x16dd;
 const volatile __u32 nodegw_macaddr_p1  = 0x4732eefe;	/* fe:ee:32:47:6b:93 */
 const volatile __u16 nodegw_macaddr_p2  = 0x936b;
 
+/* policy_version is the per-sandbox network-policy generation. It is bumped by
+ * userspace after a policy update has been fully applied, and every packet on
+ * an established flow compares it against the generation cached in nat_session
+ * to decide whether the flow must be re-evaluated.
+ *
+ * No value is reserved: this is a plain counter compared for equality. A fresh
+ * TAP starts at 0, which is also what metadata and sessions written before this
+ * field existed carry, so an upgrade finds them in agreement and re-checks
+ * nothing -- those flows were admitted under a policy that has not changed.
+ * Wrapping takes 2^32 updates to one sandbox and would at worst let a session
+ * that outlived all of them skip one re-check, so it is not special-cased.
+ *
+ * Do NOT reuse the `version` field above for this: it is part of session_key,
+ * so bumping it would orphan every live session for this TAP.
+ */
 struct mvm_meta {
 	__u32 version;
 	__u32 ip;
 	__u8 uuid[64];
 	__u8 dns_policy_flags;
-	__u8 reserved[55];
+	__u8 reserved0[3];	/* aligns policy_version; reserved starts at an odd offset */
+	__u32 policy_version;
+	__u8 reserved[48];
 };
 
 /* https://elixir.bootlin.com/linux/v5.4.217/source/include/uapi/linux/if_arp.h#L144 */
@@ -335,7 +352,8 @@ struct nat_session {
 	__u8 active_close;
 	__u8 packet_class;	/* SNAT_PACKET or L7PROXY_PACKET */
 	__u8 l7_scheme;		/* L7_SCHEME_*; NONE for non-L7 sessions */
-	__u8 reserved[32];
+	__u32 policy_version;	/* mvm_meta.policy_version at create / last re-check */
+	__u8 reserved[28];
 };
 
 struct ingress_session {

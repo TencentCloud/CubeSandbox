@@ -140,35 +140,9 @@ func (c *Client) createPayload(opts CreateOptions) (map[string]any, error) {
 		payload["allowInternetAccess"] = false
 	}
 
-	// Mirror the server-side contract: domain allowOut requires either
-	// allowInternetAccess=false or an explicit deny-all CIDR in denyOut.
-	if err := validateAllowOutDomainsRequireDenyAll(opts.Network.AllowOut, opts.Network.DenyOut, internetAccessDisabled); err != nil {
+	network, err := buildNetworkPayload(opts.Network, internetAccessDisabled)
+	if err != nil {
 		return nil, err
-	}
-
-	network := map[string]any{}
-	if opts.Network.AllowPublicTraffic != nil {
-		network["allowPublicTraffic"] = *opts.Network.AllowPublicTraffic
-	}
-	if opts.Network.MaskRequestHost != nil {
-		network["maskRequestHost"] = *opts.Network.MaskRequestHost
-	}
-	if len(opts.Network.AllowOut) > 0 {
-		network["allowOut"] = opts.Network.AllowOut
-	}
-	if len(opts.Network.DenyOut) > 0 {
-		network["denyOut"] = opts.Network.DenyOut
-	}
-	if len(opts.Network.Rules) > 0 {
-		rules := make([]Rule, len(opts.Network.Rules))
-		for i, rule := range opts.Network.Rules {
-			if err := rule.Match.validate(); err != nil {
-				return nil, fmt.Errorf("network.rules[%d] %q: %w", i, rule.Name, err)
-			}
-			rule.Match = rule.Match.normalized()
-			rules[i] = rule
-		}
-		network["rules"] = rules
 	}
 	if len(network) > 0 {
 		payload["network"] = network

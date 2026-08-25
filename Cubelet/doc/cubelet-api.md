@@ -177,6 +177,15 @@
   
     - [CubeLet](#cubelet-services-cubebox-v1-CubeLet)
   
+- [api/services/snapshot/v1/snapshot.proto](#api_services_snapshot_v1_snapshot-proto)
+    - [BatchStatusRequest](#cubelet-services-snapshot-v1-BatchStatusRequest)
+    - [BatchStatusResponse](#cubelet-services-snapshot-v1-BatchStatusResponse)
+    - [StatusQuery](#cubelet-services-snapshot-v1-StatusQuery)
+    - [StatusRequest](#cubelet-services-snapshot-v1-StatusRequest)
+    - [StatusResponse](#cubelet-services-snapshot-v1-StatusResponse)
+  
+    - [Snapshot](#cubelet-services-snapshot-v1-Snapshot)
+  
 - [api/services/version/v1/version.proto](#api_services_version_v1_version-proto)
     - [VersionResponse](#cubelet-services-version-v1-VersionResponse)
   
@@ -233,6 +242,7 @@ and then destroys the cubebox.
 | ----- | ---- | ----- | ----------- |
 | create_request | [RunCubeSandboxRequest](#cubelet-services-cubebox-v1-RunCubeSandboxRequest) |  | The RunCubeSandboxRequest to create the cubebox. Required annotations: - cube.master.appsnapshot.create: &#34;true&#34; - cube.master.appsnapshot.template.id: &#34;&lt;template_id&gt;&#34; |
 | snapshot_dir | [string](#string) |  | Custom snapshot directory path. If empty, uses default path. |
+| backend | [string](#string) |  | CoW backend from Master (xfs｜s3). Empty means xfs. |
 
 
 
@@ -262,6 +272,7 @@ AppSnapshotResponse is the response for app snapshot creation.
 | kernel_version | [string](#string) |  | Guest kernel artifact identity bound when this snapshot was created. |
 | envd_version | [string](#string) |  | envd semantic version collected in-guest at snapshot time (best-effort). |
 | shim_version | [string](#string) |  | cube-shim (and sibling cube-runtime) version bound when this snapshot was created. |
+| remote_uuids | [string](#string) |  | S3: cubecow_export_snapshot uuids JSON (rootfs/memory/metadata). Filled before this RPC returns. Empty on xfs. |
 
 
 
@@ -347,6 +358,7 @@ Capability contains the container capabilities to add or drop
 | templateID | [string](#string) |  | Logical template ID. |
 | snapshotPath | [string](#string) |  | Snapshot path recorded on this node, if any. DEPRECATED in v4: cubelet resolves this from local catalog; legacy masters may still send it for backward compatibility but new masters MUST send empty. |
 | objects | [CowObjectRef](#cubelet-services-cubebox-v1-CowObjectRef) | repeated | cubecow objects that should be removed on this node. DEPRECATED in v4: cubelet derives objects from local catalog; legacy masters may still populate this for backward compatibility but new masters MUST send empty. |
+| backend | [string](#string) |  | CoW backend from Master (xfs｜s3). Empty means xfs. |
 
 
 
@@ -383,6 +395,7 @@ Capability contains the container capabilities to add or drop
 | sandboxID | [string](#string) |  | ID of the running sandbox to snapshot. |
 | templateID | [string](#string) |  | Logical template ID. |
 | snapshot_dir | [string](#string) |  | Custom snapshot directory path. If empty, uses default path. |
+| backend | [string](#string) |  | CoW backend from Master (xfs｜s3). Empty means xfs. |
 
 
 
@@ -414,6 +427,7 @@ Capability contains the container capabilities to add or drop
 | kernel_version | [string](#string) |  | Guest kernel artifact identity bound when this snapshot was created. |
 | envd_version | [string](#string) |  | envd semantic version collected in-guest at commit time (best-effort). |
 | shim_version | [string](#string) |  | cube-shim (and sibling cube-runtime) version bound when this snapshot was created. |
+| remote_uuids | [string](#string) |  | S3: cubecow_export_snapshot uuids JSON (rootfs/memory/metadata). Filled before this RPC returns. Empty on xfs. |
 
 
 
@@ -930,6 +944,7 @@ EmptyDirVolumeSource represents an empty directory for a sandbox.
 | ----- | ---- | ----- | ----------- |
 | requestID | [string](#string) |  | requestID reqID |
 | snapshotID | [string](#string) |  | Logical snapshot ID to look up. |
+| backend | [string](#string) |  | Optional. When set, must match the catalog backend. |
 
 
 
@@ -962,6 +977,7 @@ EmptyDirVolumeSource represents an empty directory for a sandbox.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | requestID | [string](#string) |  | requestID reqID |
+| backend | [string](#string) |  | CoW backend to read metrics from (xfs｜s3). Empty means xfs. |
 
 
 
@@ -1290,6 +1306,7 @@ LifecycleHandler defines a specific action that should be taken in a lifecycle h
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | requestID | [string](#string) |  | requestID reqID |
+| backend | [string](#string) |  | Optional filter. Empty returns all backends. |
 
 
 
@@ -1325,6 +1342,7 @@ LifecycleHandler defines a specific action that should be taken in a lifecycle h
 | sandboxID | [string](#string) |  | Logical sandbox ID for logging / correlation. |
 | objects | [CowObjectRef](#cubelet-services-cubebox-v1-CowObjectRef) | repeated | cubecow objects that should be inspected on this node. |
 | meta_dir | [string](#string) |  | Snapshot metadata directory that must remain restorable. |
+| backend | [string](#string) |  | CoW backend from Master (xfs｜s3). Empty means xfs. |
 
 
 
@@ -1375,6 +1393,7 @@ LifecycleHandler defines a specific action that should be taken in a lifecycle h
 | build_rootfs_vol | [string](#string) |  | Build rootfs object name (template-build path only). Used to clean up the temporary writable layer during CleanupTemplate. |
 | build_rootfs_kind | [string](#string) |  | Build rootfs object kind. |
 | kind | [string](#string) |  | Catalog entry kind: &#34;template&#34; (AppSnapshot) or &#34;runtime_snapshot&#34; (CommitSandbox). Empty for pre-v4 legacy entries. |
+| backend | [string](#string) |  | CoW backend that produced this snapshot (xfs｜s3). Empty means xfs. |
 
 
 
@@ -1551,6 +1570,7 @@ ref by https://kubernetes.io/zh-cn/docs/reference/kubernetes-api/common-definiti
 | meta_dir | [string](#string) |  | Optional snapshot metadata directory. Empty means &#34;resolve from local catalog using snapshotID&#34;. |
 | new_gen | [uint32](#uint32) |  | New sandbox rootfs generation to derive. |
 | desired_size | [uint64](#uint64) |  | Minimum rootfs size after deriving the new generation. |
+| backend | [string](#string) |  | CoW backend from Master (xfs｜s3). Empty means: use catalog, else xfs. |
 
 
 
@@ -1601,6 +1621,7 @@ ref by https://kubernetes.io/zh-cn/docs/reference/kubernetes-api/common-definiti
 | network_type | [string](#string) |  | NetworkType default to tap |
 | namespace | [string](#string) |  | user define namespace |
 | cube_network_config | [CubeNetworkConfig](#cubelet-services-cubebox-v1-CubeNetworkConfig) | optional | Egress network policy for the sandbox template/runtime. |
+| backend | [string](#string) |  | CoW backend from Master (xfs｜s3). Empty means xfs. Used when Create restores from a snapshot / pause-snap. |
 
 
 
@@ -1812,6 +1833,7 @@ TCPSocketAction describes an action based on opening a socket.
 | requestID | [string](#string) |  | requestID reqID |
 | sandboxID | [string](#string) |  | ID of the Sandbox. |
 | annotations | [UpdateCubeSandboxRequest.AnnotationsEntry](#cubelet-services-cubebox-v1-UpdateCubeSandboxRequest-AnnotationsEntry) | repeated | Annotations can also be useful for runtime authors to experiment with new features that are opaque to the Kubernetes APIs (both user-facing and the CRI). Whenever possible, however, runtime authors SHOULD consider proposing new typed fields for any new features instead. |
+| cube_network_config | [CubeNetworkConfig](#cubelet-services-cubebox-v1-CubeNetworkConfig) | optional | Replacement egress policy for a running sandbox. Absent means &#34;leave the network alone&#34;; present means the complete desired state, so an omitted or empty field inside it clears whatever is currently installed. |
 
 
 
@@ -1845,6 +1867,7 @@ TCPSocketAction describes an action based on opening a socket.
 | requestID | [string](#string) |  | requestID reqID |
 | ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  | Ret. |
 | ext_info | [UpdateCubeSandboxResponse.ExtInfoEntry](#cubelet-services-cubebox-v1-UpdateCubeSandboxResponse-ExtInfoEntry) | repeated | Same shape as DestroyCubeSandboxResponse.ext_info. Pause returns volume ref-count events after in-process keep_tombstone cleanup. |
+| remote_uuids | [string](#string) |  | S3 Pause: cubecow_export_snapshot uuids JSON (rootfs/memory/metadata). Filled before this RPC returns. Empty on xfs. |
 
 
 
@@ -2568,6 +2591,7 @@ CubeVMImageService is used by cube image converter service in vm.
 | DestroyImageFailed | 130569 |  |
 | TaskPauseFailed | 130588 |  |
 | TaskResumeFailed | 130589 |  |
+| UpdateNetworkFailed | 130590 |  |
 | InitCommandPathError | 130445 |  |
 | ContainerStateExitedByUser | 130451 |  |
 | PullImageFailed | 130456 |  |
@@ -3033,6 +3057,124 @@ Service for machine level operations.
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
 | InitHost | [InitRequest](#cubelet-services-cubebox-v1-InitRequest) | [InitResponse](#cubelet-services-cubebox-v1-InitResponse) | Initialize the host, destroy all of the container and initialize metadata. This is a dangerous operation. |
+
+ 
+
+
+
+<a name="api_services_snapshot_v1_snapshot-proto"></a>
+<p align="right"><a href="#top">Top</a></p>
+
+## api/services/snapshot/v1/snapshot.proto
+
+
+
+<a name="cubelet-services-snapshot-v1-BatchStatusRequest"></a>
+
+### BatchStatusRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| request_id | [string](#string) |  |  |
+| items | [StatusQuery](#cubelet-services-snapshot-v1-StatusQuery) | repeated |  |
+
+
+
+
+
+
+<a name="cubelet-services-snapshot-v1-BatchStatusResponse"></a>
+
+### BatchStatusResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| request_id | [string](#string) |  |  |
+| items | [StatusResponse](#cubelet-services-snapshot-v1-StatusResponse) | repeated |  |
+
+
+
+
+
+
+<a name="cubelet-services-snapshot-v1-StatusQuery"></a>
+
+### StatusQuery
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| snapshot_id | [string](#string) |  |  |
+| backend | [string](#string) |  | xfs | s3; empty defaults to xfs. |
+
+
+
+
+
+
+<a name="cubelet-services-snapshot-v1-StatusRequest"></a>
+
+### StatusRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| request_id | [string](#string) |  |  |
+| snapshot_id | [string](#string) |  |  |
+| backend | [string](#string) |  | xfs | s3; empty defaults to xfs. |
+
+
+
+
+
+
+<a name="cubelet-services-snapshot-v1-StatusResponse"></a>
+
+### StatusResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| request_id | [string](#string) |  |  |
+| snapshot_id | [string](#string) |  |  |
+| backend | [string](#string) |  |  |
+| state | [string](#string) |  | pending | running | ready | failed (upload state) |
+| message | [string](#string) |  | Human message; may include remote_uuids JSON when ready. |
+| remote_ready | [bool](#bool) |  |  |
+| rootfs_deletable | [string](#string) |  | Rootfs snapshot cubecow deletable: &#34;true&#34; | &#34;false&#34; | &#34;&#34; (unknown / N/A). |
+
+
+
+
+
+ 
+
+ 
+
+ 
+
+
+<a name="cubelet-services-snapshot-v1-Snapshot"></a>
+
+### Snapshot
+Snapshot is Cubelet&#39;s snapshot control-plane service.
+Status is the upload query CubeMaster polls for remote_status.
+State comes from cubecow_get_volume_info export_status
+(NONE→pending, INPROGRESS→running, DONE→ready).
+BatchStatus is for ops tooling (e.g. cubemastercli --s3 list) to query
+many snapshot packages on one node in a single RPC.
+
+| Method Name | Request Type | Response Type | Description |
+| ----------- | ------------ | ------------- | ------------|
+| Status | [StatusRequest](#cubelet-services-snapshot-v1-StatusRequest) | [StatusResponse](#cubelet-services-snapshot-v1-StatusResponse) |  |
+| BatchStatus | [BatchStatusRequest](#cubelet-services-snapshot-v1-BatchStatusRequest) | [BatchStatusResponse](#cubelet-services-snapshot-v1-BatchStatusResponse) |  |
 
  
 

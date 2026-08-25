@@ -158,6 +158,22 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
+    /// POST /cube/sandbox/network — replace a running sandbox's egress policy.
+    pub async fn update_sandbox_network(
+        &self,
+        req: &SandboxNetworkRequest,
+    ) -> Result<SandboxNetworkResponse, CubeMasterError> {
+        let url = format!("{}/cube/sandbox/network", self.base_url);
+        let resp = self
+            .inner
+            .post(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
     /// POST /cube/sandbox/refresh — extend TTL by a delta (seconds).
     /// ❌ New API required on CubeMaster.
     pub async fn refresh_sandbox(
@@ -1457,6 +1473,32 @@ pub struct SandboxUpdateRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct SandboxUpdateResponse {
+    pub ret: RetCode,
+}
+
+// ─── Update sandbox network policy ────────────────────────────────────────
+// ✅ Implemented: POST /cube/sandbox/network
+
+#[derive(Debug, Serialize)]
+pub struct SandboxNetworkRequest {
+    #[serde(rename = "RequestID", alias = "requestID")]
+    pub request_id: String,
+    #[serde(rename = "sandboxID")]
+    pub sandbox_id: String,
+    #[serde(rename = "instanceType")]
+    pub instance_type: String,
+    /// Complete desired policy. Always sent, even when empty, because an empty
+    /// policy is a meaningful request: it clears every egress rule.
+    pub cube_network_config: CubeNetworkConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct SandboxNetworkResponse {
+    #[serde(rename = "RequestID", alias = "requestID")]
+    pub request_id: String,
+    #[serde(rename = "sandboxID", default)]
+    pub sandbox_id: String,
     pub ret: RetCode,
 }
 

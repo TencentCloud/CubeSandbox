@@ -116,6 +116,35 @@ These scenarios require Code Interpreter support and validate normalized
   `e2b-traffic-access-token` and `cube-traffic-access-token` both work with the
   correct token.
 
+`cases/network/test_policy_update.py` covers in-place policy replacement on a
+running sandbox (`network_dynamic_update`, CubeSandbox only):
+
+- granting a destination that was blocked at create time;
+- revoking every destination, since the update replaces rather than patches;
+- swapping the allow list so access moves instead of accumulating;
+- **tearing down an established connection whose policy was revoked** — the case
+  that distinguishes this feature from create-time policy, because without
+  datapath re-evaluation an open channel would keep its create-time verdict;
+- **leaving an established connection alone when the update still permits it** —
+  the necessary counterpart, since a datapath that killed every session on any
+  update would otherwise pass the case above;
+- keeping DNS working after a domain-policy update, guarding the control-plane
+  resolver allowance that the caller never authors and could silently lose;
+- **a clone inheriting the updated policy rather than the create-time one**, which
+  also covers read-your-writes: clone snapshots immediately after the update
+  returns, so it fails if the spec write lagged the response;
+- **a clone of a narrowed policy not being more permissive** — the direction where
+  a stale spec would silently widen access for every descendant;
+- **the updated policy surviving pause/resume**, since pause packages the sandbox
+  from Cubelet's own store rather than from the network runtime state file;
+- converging under repeated updates, guarding the incremental map diff against
+  leaked or double-freed entries.
+
+The established-connection cases use the guest-side holder in
+`framework/network_probe.py`, which keeps poking the peer on purpose: a revoked
+flow is re-evaluated when the guest next sends, so nothing would be observed on
+an idle socket.
+
 `cases/lifecycle/test_pause_resume_network.py` covers the same create-time
 policies after an SDK pause + connect resume:
 

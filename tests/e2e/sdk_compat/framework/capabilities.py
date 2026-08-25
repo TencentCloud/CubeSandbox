@@ -13,6 +13,9 @@ PAUSE_RESUME = "pause_resume"
 SET_TIMEOUT = "set_timeout"
 ROLLBACK_CLONE = "rollback_clone"
 NETWORK_ALLOW_DENY = "network_allow_deny"
+# In-place egress policy replacement on a running sandbox, including
+# re-evaluation of already-established connections.
+NETWORK_DYNAMIC_UPDATE = "network_dynamic_update"
 NETWORK_PUBLIC_ACCESS = "network_public_access"
 NETWORK_MASK_REQUEST_HOST = "network_mask_request_host"
 NETWORK_L7_CUSTOM_PORT = "network_l7_custom_port"
@@ -59,6 +62,7 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         NETWORK_ALWAYS_DENIED,
         NETWORK_L7_EGRESS,
         NETWORK_TEMPLATE_MERGE,
+        NETWORK_DYNAMIC_UPDATE,
         PLATFORM_LIFECYCLE,
         HOST_MOUNT,
         VOLUME_PLUGIN,

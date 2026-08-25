@@ -478,7 +478,9 @@ Current capability domains:
 - `cases/commands/`: stdout, stderr, exit code, env, special characters, multiline output, missing command.
 - `cases/filesystem/`: read/write, overwrite, multiline content, file API and shell interoperability.
 - `cases/run_code/`: expression text, stdout, kernel state, Python error reporting.
-- `cases/network/`: create-time network policy for allow/deny and public egress access.
+- `cases/network/`: create-time network policy for allow/deny and public egress access,
+  plus in-place policy updates on a running sandbox including re-evaluation of
+  already-established connections (`test_policy_update.py`, CubeSandbox only).
 - `cases/concurrency/`: simultaneous multi-sandbox isolation.
 - `cases/host-mount/`: host-directory mount extension — happy path plus create-time
   validation, runtime bind-mount failures, and cross-sandbox sharing boundary cases.

@@ -831,6 +831,23 @@ type UpdateRequest struct {
 	Backend string `json:"backend,omitempty"`
 }
 
+// UpdateNetworkRequest is the wire shape for POST /cube/sandbox/network. The
+// config is the complete desired egress policy, not a patch: an omitted or
+// empty field clears whatever the sandbox currently has.
+type UpdateNetworkRequest struct {
+	RequestID         string             `json:"requestID"`
+	SandboxID         string             `json:"sandboxID"`
+	InstanceType      string             `json:"instanceType"`
+	CubeNetworkConfig *CubeNetworkConfig `json:"cube_network_config"`
+}
+
+// UpdateNetworkRes is the master-side response for /cube/sandbox/network.
+type UpdateNetworkRes struct {
+	RequestID string `json:"requestID,omitempty"`
+	SandboxID string `json:"sandboxID,omitempty"`
+	Ret       *Ret   `json:"ret,omitempty"`
+}
+
 // SetTimeoutRequest is the wire shape for POST /cube/sandbox/timeout.
 // Mirrors CubeAPI's SandboxTimeoutRequest field-for-field. `timeout` is the
 // new idle TTL in seconds counted from "now": the master refreshes the

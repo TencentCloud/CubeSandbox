@@ -256,6 +256,44 @@ Cubelet 内置 network runtime 最终把不同来源写入不同 map：
 
 如果同一个 IP/CIDR 既来自普通 `allow_out`，又来自 L7 规则，CubeVS 会保留 `L7_REQUIRED` 标记。静态 `allow_out` 条目不过期；DNS 学习出的条目带 `expires_at_ns`，会按 TTL 过期。
 
+## 更新运行中沙箱的策略
+
+`PUT /sandboxes/{sandboxID}/network` 用于替换正在运行的沙箱的出站策略。请求体就是创建时那个 `network` 对象，且语义是**整体替换而不是增量打补丁**：没传的字段会被清空。
+
+```bash
+curl -X PUT "$CUBE_API/sandboxes/$SANDBOX_ID/network" \
+  -H 'Content-Type: application/json' \
+  -d '{"allowInternetAccess": false, "allowOut": ["api.example.com"], "denyOut": ["0.0.0.0/0"]}'
+```
+
+::: warning 省略 `allowInternetAccess` 会恢复公网访问
+「没传就清空」这条规则作用在这个开关上时比其他字段更容易踩到：清空意味着回到「未显式设置」，而它的默认值是允许出网，于是 `0.0.0.0/0` 的 deny-all 会被撤掉。也就是说，一个创建时带 `allow_internet_access=false` 的沙箱，只要有一次更新没有重新写上这个字段，就会重新能访问公网 —— 即使这次更新本来只想改 `allowOut`。（内置的内部网段保护仍然生效，恢复的只是公网出网。）
+
+这里没有更省事的写法：`denyOut` 同样是没传就清空，所以改用显式的 `"denyOut": ["0.0.0.0/0"]` 也一样得每次都带上。要让沙箱保持隔离，每次更新都必须发送完整的期望策略，其中包括 `"allowInternetAccess": false`。
+:::
+
+注意这里策略字段在**顶层**，而不是像创建沙箱那样嵌在 `network` 里。这是为了和 E2B 的更新接口一致，让按任一 SDK 写的客户端都能命中同一个线上格式；E2B 自己的创建接口和我们一样是嵌套的，所以这处不一致来自上游而非我们。`allowPublicTraffic` 和 `maskRequestHost` 是 CubeSandbox 扩展，E2B 的更新 schema 里没有。
+
+`rules` 两种形状都接受：CubeEgress 的规则数组，或 E2B 的 `{host: [{transform: {headers: {...}}}]}` 映射。数组是规范形式，因为 E2B 的映射表达不了拒绝判决、审计级别，以及除 host 之外的任何匹配条件 —— 把我们的规则塞成那个形状会静默丢掉它们。E2B 的映射会被转换成等价的放行加注入规则，命名为 `e2b-transform-<host>`。
+
+各 SDK 分别暴露为 `sandbox.update_network(...)`（Python）、`sandbox.updateNetwork(...)`（Node）和 `sandbox.UpdateNetwork(...)`（Go），三者都把整份策略作为**一个对象**传入、`allow_internet_access` 包含在其中 —— 和 E2B 的 `update_network` 形状一致。
+
+### 已经建立的连接会怎样
+
+和单纯重写 map 不同，更新也会作用到已有流量。每个沙箱带一个策略代际（`mvm_meta.policy_version`），在 CubeEgress 和 CubeVS map 都写入新策略之后才递增。每条 session 会缓存自己被放行时的代际，因此每次更新后，存量流的下一个包会被重新判定一次，且只判定一次：
+
+- **仍然放行且判决不变** —— session 被重新盖上新代际后照常继续。这是常见情况，每条流每次更新只多付一次策略查表。
+- **不再放行，或判决发生变化**（例如某个 host 在普通 SNAT 和 L7 代理之间切换）—— session 立即作废：出入两个方向的连接跟踪记录都被删掉，因此回包不再投递，该 4 元组也立刻空出来可供重连。TCP 会收到 RST，与这里对其他所有不可达 TCP 报文的处理方式一致，让 guest 立即失败而不是卡在重传上；UDP 和 ICMP 没有可 reset 的东西，直接丢弃。
+
+判决发生变化时选择作废而不是迁移这条流，是因为 SNAT 路径和 L7 路径对回包元组、以及由谁来终结这条 TCP 连接这两件事的理解并不一致。随后的重连会像任何新流一样按新策略判定。
+
+重判是由流量驱动的，不是主动推送的：一条空闲的存量连接要等沙箱下一次在它上面发包时才会被判定。因此一条打开但一直不说话的连接会留在 session 表里，直到它再次发包或按正常超时被回收。
+
+有两点需要提前规划：
+
+- **已经学到的 DNS IP 会比产生它的域名规则活得更久。** 从 `allow_out` 里删掉一个域名后，新的 IP 会立刻停止被学习，但此前已为它学到的 IP 会一直放行到 DNS TTL 过期。要想及时收回对某个域名的访问，需要配合 `allow_internet_access=false` 的策略和较短的解析 TTL。
+- **更新在多个平面之间不是事务性的。** 先更新 CubeEgress，再更新 CubeVS，最后才写持久化状态，因此中途失败时沙箱所处的状态不会比「新旧策略的并集」更宽松。重放同一个请求即可收敛；Cubelet 重启后会重新应用最后一次成功持久化的策略。
+
 ## `from_cube` 如何判断和转发
 
 `from_cube` 是挂在沙箱 TAP ingress 上的 TC eBPF 程序。每个沙箱发出的包都会先进入这里。处理顺序可以理解为下面几个阶段。

@@ -171,6 +171,78 @@ static __always_inline __u8 classify_egress_flow(__u32 ifindex, __u32 daddr,
 }
 
 /**
+ * session_verdict - the flow verdict this session was created under
+ * @sess: pointer to the NAT session
+ *
+ * Reconstructed from packet_class + l7_scheme so a re-check can compare the
+ * fresh verdict against the cached one. An L7 session with an unknown scheme
+ * is a corrupt value; report REJECT so it fails closed, matching
+ * classify_egress_flow().
+ */
+static __always_inline __u8 session_verdict(const struct nat_session *sess)
+{
+	if (sess->packet_class != L7PROXY_PACKET)
+		return FLOW_SNAT;
+	if (sess->l7_scheme == L7_SCHEME_HTTP)
+		return FLOW_HTTP;
+	if (sess->l7_scheme == L7_SCHEME_HTTPS)
+		return FLOW_HTTPS;
+	return FLOW_REJECT;
+}
+
+/**
+ * session_policy_revoked - re-evaluate an established flow after a policy update
+ * @sess:      pointer to the NAT session
+ * @policy_version: policy generation this packet is judged under, read once by
+ *                  the caller before any classification
+ * @ifindex:   TAP ifindex of the originating MVM
+ * @daddr:     destination IP in network byte order
+ * @dport:     destination port in network byte order (0 for ICMP)
+ *
+ * Returns true when this flow may no longer carry traffic. Callers retire the
+ * session pair with del_session() and reject the packet: TCP answers with an RST
+ * like every other unreachable packet here, so the guest fails fast instead of
+ * stalling on retransmits; UDP and ICMP have nothing to reset and simply drop.
+ *
+ * Deleting rather than flagging keeps the retirement self-enforcing. A later
+ * non-SYN packet on the same tuple finds no session and is reset, so a revoked
+ * flow cannot resume even if a subsequent update re-allows the destination,
+ * while a SYN legitimately opens a fresh connection under the current policy.
+ *
+ * A verdict *change* counts as revocation, not just FLOW_REJECT. Once a flow
+ * must switch between plain SNAT and L7 interception there is no way to migrate
+ * it -- the two paths disagree on both the reply tuple and who terminates the
+ * TCP connection -- so the flow is retired and the client reconnects.
+ *
+ * Called before update_session(): there is no point advancing the conntrack
+ * state of a flow that is about to be deleted.
+ *
+ * Takes the generation by value rather than re-reading mvm_meta, because
+ * userspace can bump it while classify_egress_flow() runs. Re-reading would
+ * stamp the flow with a generation newer than the maps it was judged against,
+ * and since the stamp is what schedules the next re-check, the flow would never
+ * be judged under that generation at all -- silently outliving its revocation.
+ * A generation only ever moves forward, so a stale value costs one extra
+ * re-check, which is the direction we want to err in.
+ */
+static __always_inline bool session_policy_revoked(struct nat_session *sess,
+						   __u32 policy_version,
+						   __u32 ifindex, __u32 daddr,
+						   __u16 dport)
+{
+	__u8 verdict;
+
+	if (sess->policy_version == policy_version)
+		return false;
+
+	verdict = classify_egress_flow(ifindex, daddr, dport);
+	if (verdict == FLOW_REJECT || verdict != session_verdict(sess))
+		return true;
+	sess->policy_version = policy_version;
+	return false;
+}
+
+/**
  * create_nat_session - create egress session with rollback on failure
  * @skb:           packet skb, used to signal deny reason via skb->cb[]
  * @ekey:          egress session key
@@ -181,6 +253,7 @@ static __always_inline __u8 classify_egress_flow(__u32 ifindex, __u32 daddr,
  * @initial_state: protocol-specific initial conntrack state
  * @packet_class:  SNAT_PACKET or L7PROXY_PACKET
  * @l7_scheme:     L7_SCHEME_*; NONE for non-L7 sessions
+ * @policy_version: generation the caller classified this flow under
  *
  * packet_class and l7_scheme are initialized in the stack value before the
  * single BPF_NOEXIST insertion. This prevents another CPU from observing a
@@ -191,6 +264,11 @@ static __always_inline __u8 classify_egress_flow(__u32 ifindex, __u32 daddr,
  * skb->cb with NAT_CB_DENIED_BY_POLICY) before reaching this point. This
  * keeps the policy verdict a single decision taken once per new flow.
  *
+ * policy_version comes from the caller for the same reason: it has to be the
+ * generation read *before* that classification. Reading mvm_meta here would let
+ * a concurrent bump stamp the new flow as already judged under a generation it
+ * never saw, and the stamp is what schedules its next re-check.
+ *
  * Returns true on success, false otherwise (ingress session cleaned up).
  */
 static __always_inline bool create_nat_session(struct __sk_buff *skb,
@@ -198,7 +276,7 @@ static __always_inline bool create_nat_session(struct __sk_buff *skb,
 					       __u64 now_ns, __u32 vm_ifindex,
 					       struct snat_ip *snat_ip, __u16 snat_port,
 					       __u8 initial_state, __u8 packet_class,
-					       __u8 l7_scheme)
+					       __u8 l7_scheme, __u32 policy_version)
 {
 	struct nat_session sess = {};
 	struct session_key ikey = {};
@@ -227,6 +305,10 @@ static __always_inline bool create_nat_session(struct __sk_buff *skb,
 	sess.state = initial_state;
 	sess.packet_class = packet_class;
 	sess.l7_scheme = l7_scheme;
+	/* Stamp the generation this verdict was taken under; comparing it against
+	 * mvm_meta is what schedules this flow's next re-check.
+	 */
+	sess.policy_version = policy_version;
 	err = bpf_map_update_elem(&egress_sessions, ekey, &sess, BPF_NOEXIST);
 	if (err) {
 		/* on failure, clean up the ingress slot we reserved earlier */

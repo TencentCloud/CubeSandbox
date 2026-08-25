@@ -22,7 +22,16 @@ type fakeCubeVSAdapter struct {
 	cleanupPolicyErr       error
 	deleteMetadataErr      error
 	deletePortMappingErr   error
+	updatedPolicies        []updatedPolicy
+	updateTAPPolicyErr     error
 	recorder               *createOrderRecorder
+}
+
+// updatedPolicy records one UpdateTAPPolicy call so tests can assert both that
+// the policy update reached CubeVS and what it carried.
+type updatedPolicy struct {
+	ifindex uint32
+	opts    cubevs.MVMOptions
 }
 
 func (f *fakeCubeVSAdapter) AddTAPDevice(_ uint32, _ net.IP, _ string, _ uint32, _ cubevs.MVMOptions) error {
@@ -39,6 +48,11 @@ func (f *fakeCubeVSAdapter) UpsertTAPDevice(ifindex uint32, _ net.IP, _ string, 
 
 func (f *fakeCubeVSAdapter) UpsertTAPDeviceMetadata(_ uint32, _ net.IP, _ string, _ uint32) error {
 	return nil
+}
+
+func (f *fakeCubeVSAdapter) UpdateTAPPolicy(ifindex uint32, opts cubevs.MVMOptions) error {
+	f.updatedPolicies = append(f.updatedPolicies, updatedPolicy{ifindex: ifindex, opts: opts})
+	return f.updateTAPPolicyErr
 }
 
 func (f *fakeCubeVSAdapter) GetTAPDevice(ifindex uint32) (*cubevs.TAPDevice, error) {

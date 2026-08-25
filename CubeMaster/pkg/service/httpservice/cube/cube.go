@@ -22,6 +22,7 @@ const (
 	SandboxInfoAction                      = "/sandbox/info"
 	SandboxExecAction                      = "/sandbox/exec"
 	SandboxUpdateAction                    = "/sandbox/update"
+	SandboxNetworkAction                   = "/sandbox/network"
 	SandboxTimeoutAction                   = "/sandbox/timeout"
 	SandboxRefreshAction                   = "/sandbox/refresh"
 	SandboxCommitAction                    = "/sandbox/commit"

@@ -19,7 +19,8 @@ use crate::{
         SetTimeoutRequest, SnapshotInfo, SnapshotListItem, TemplateAliasLookupResponse,
         TemplateBuildJob, TemplateBuildStatus, TemplateCompatAdoptResponseView,
         TemplateCompatMatrixView, TemplateCompatRowView, TemplateCompatSummaryView, TemplateDetail,
-        TemplateNodeCompatView, TemplateSummary, Volume, VolumeAndToken,
+        TemplateNodeCompatView, TemplateSummary, UpdateSandboxNetworkRequest, Volume,
+        VolumeAndToken,
     },
 };
 
@@ -77,6 +78,7 @@ impl Modify for SecurityAddon {
         handlers::sandboxes::get_sandbox_logs,
         handlers::sandboxes::get_sandbox_logs_v2,
         handlers::sandboxes::set_sandbox_timeout,
+        handlers::sandboxes::update_sandbox_network,
         handlers::sandboxes::refresh_sandbox,
         handlers::snapshots::create_snapshot,
         handlers::snapshots::list_snapshots,
@@ -111,6 +113,7 @@ impl Modify for SecurityAddon {
         ConnectSandbox,
         ResumedSandbox,
         SetTimeoutRequest,
+        UpdateSandboxNetworkRequest,
         RefreshRequest,
         SandboxLogEntry,
         SandboxLogs,

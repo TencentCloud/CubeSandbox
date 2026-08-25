@@ -12,8 +12,8 @@ use crate::{
         datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeEgressRule,
         CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
         CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
-        SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
-        SandboxUpdateRequest, VolumeSpec,
+        SandboxLogsRequest, SandboxNetworkRequest, SandboxRefreshRequest, SandboxStatus,
+        SandboxTimeoutRequest, SandboxUpdateRequest, VolumeSpec,
     },
     error::{AppError, AppResult},
     models::{
@@ -486,6 +486,42 @@ impl SandboxService {
         let resp = self
             .cubemaster
             .set_sandbox_timeout(&req)
+            .await
+            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
+
+        resp.ret
+            .into_result()
+            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
+
+        Ok(())
+    }
+
+    /// Replace a running sandbox's egress policy.
+    ///
+    /// The policy is validated and mapped by the same code as sandbox creation,
+    /// so an update cannot install anything create would have rejected. An
+    /// all-empty body is legal and clears the policy, which is why the mapper's
+    /// "nothing set" `None` is turned back into a default config rather than
+    /// treated as "no change".
+    pub async fn update_network(
+        &self,
+        sandbox_id: &str,
+        allow_internet_access: Option<bool>,
+        network: Option<&SandboxNetworkConfig>,
+    ) -> AppResult<()> {
+        let cube_network_config =
+            build_cube_network_config(allow_internet_access, network)?.unwrap_or_default();
+
+        let req = SandboxNetworkRequest {
+            request_id: new_request_id(),
+            sandbox_id: sandbox_id.to_string(),
+            instance_type: self.instance_type.clone(),
+            cube_network_config,
+        };
+
+        let resp = self
+            .cubemaster
+            .update_sandbox_network(&req)
             .await
             .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
 

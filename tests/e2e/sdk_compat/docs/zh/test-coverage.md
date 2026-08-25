@@ -105,6 +105,29 @@ pytest --run-e2e -m "lifecycle and slow"
 - 限制公网 URL 访问时，缺失/错误 token 返回 403，`e2b-traffic-access-token`
   与 `cube-traffic-access-token` 携带正确 token 时均可访问。
 
+`cases/network/test_policy_update.py` 覆盖运行中沙箱的策略原地替换
+（`network_dynamic_update`，仅 CubeSandbox）：
+
+- 放通创建时被阻断的目标；
+- 传空策略即撤销全部——更新是整体替换而不是增量打补丁；
+- 替换 allow list 时访问权限是「转移」而不是「叠加」；
+- **被撤销的存量连接会被拆掉**——这一条是本功能与创建时策略的分界线：没有数据面
+  重判的话，已经打开的通道会一直沿用创建时的判决；
+- **更新后仍放行的存量连接不受影响**——上一条的必要配套，否则一个「任何更新都
+  杀光所有 session」的实现也能通过上一条；
+- 域名策略更新后 DNS 仍可用，守住那批由控制面注入、调用方从不书写、因而可能被
+  静默丢掉的 resolver 放行条目；
+- **clone 继承的是更新后的策略而不是创建时的策略**，这条同时覆盖 read-your-writes：
+  clone 在 update 返回后立刻做快照，spec 写入慢于响应就会失败；
+- **收紧型 update 之后的 clone 不会更宽松** —— 这是 spec 落后时会静默放大权限的方向；
+- **更新后的策略能扛过 pause/resume**，因为 pause 打包读的是 Cubelet 自己的 store，
+  不是 network runtime 的 state file；
+- 反复更新可收敛，守住增量 map diff 不漏删、不重复删。
+
+存量连接相关用例使用 `framework/network_probe.py` 里的 guest 侧 holder，它会
+刻意持续向对端发包：被撤销的流是在 guest 下一次发包时才被重判的，光挂着一个
+空闲 socket 观察不到任何现象。
+
 `cases/lifecycle/test_pause_resume_network.py` 覆盖 SDK pause + connect resume
 后同一批创建时策略仍生效：
 

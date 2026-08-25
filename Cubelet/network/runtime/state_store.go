@@ -32,7 +32,13 @@ type persistedState struct {
 	ARPNeighbors      []ARPNeighbor      `json:"arpNeighbors"`
 	PortMappings      []PortMapping      `json:"portMappings"`
 	CubeNetworkConfig *CubeNetworkConfig `json:"-"`
-	PersistMetadata   map[string]string  `json:"persistMetadata"`
+	// DNSAllowOutCIDRs are the resolver /32s already folded into
+	// CubeNetworkConfig.AllowOut so domain rules can be resolved at all. They
+	// are kept separately because a policy update replaces AllowOut wholesale
+	// and has to fold the same resolvers back in — the caller only knows the
+	// user-authored targets.
+	DNSAllowOutCIDRs []string          `json:"dnsAllowOutCIDRs,omitempty"`
+	PersistMetadata  map[string]string `json:"persistMetadata"`
 }
 
 // persistedStateOnDisk is the JSON compatibility layer. CubeNetworkConfig is
@@ -50,6 +56,7 @@ type persistedStateOnDisk struct {
 	PortMappings        []PortMapping      `json:"portMappings"`
 	CubeNetworkConfig   *CubeNetworkConfig `json:"cubeNetworkConfig,omitempty"`
 	LegacyCubeVSContext *CubeNetworkConfig `json:"cubevsContext,omitempty"`
+	DNSAllowOutCIDRs    []string           `json:"dnsAllowOutCIDRs,omitempty"`
 	PersistMetadata     map[string]string  `json:"persistMetadata"`
 }
 
@@ -69,6 +76,7 @@ func (s *persistedState) MarshalJSON() ([]byte, error) {
 		PortMappings:        s.PortMappings,
 		CubeNetworkConfig:   s.CubeNetworkConfig,
 		LegacyCubeVSContext: s.CubeNetworkConfig,
+		DNSAllowOutCIDRs:    s.DNSAllowOutCIDRs,
 		PersistMetadata:     s.PersistMetadata,
 	}
 	return json.Marshal(&disk)
@@ -95,6 +103,7 @@ func (s *persistedState) UnmarshalJSON(data []byte) error {
 	} else {
 		s.CubeNetworkConfig = disk.LegacyCubeVSContext
 	}
+	s.DNSAllowOutCIDRs = disk.DNSAllowOutCIDRs
 	s.PersistMetadata = disk.PersistMetadata
 	return nil
 }
@@ -243,6 +252,44 @@ func (s *stateStore) CommitCreating(sandboxID string) error {
 // CommitSuccess atomically marks the sandbox network active.
 func (s *stateStore) CommitSuccess(sandboxID string) error {
 	return s.rename(sandboxID, StateFileCreating, StateFileSuccess)
+}
+
+// RewriteSuccess replaces the committed state of an already-active sandbox. The
+// policy update path uses it to persist a new CubeNetworkConfig without moving
+// the sandbox out of the success stage.
+//
+// The new bytes land in a scratch file and are renamed over the success file, so
+// a crash leaves either the old state or the new one, never a torn mix. The
+// scratch suffix is deliberately not a state-file kind: parseStateFileName
+// rejects it, so a leftover is invisible to Load/LoadAny/Scan rather than being
+// mistaken for an interrupted create.
+func (s *stateStore) RewriteSuccess(state *persistedState) error {
+	if state == nil {
+		return fmt.Errorf("state is nil")
+	}
+	if err := validateStateForStore(state); err != nil {
+		return err
+	}
+	p, err := s.path(state.SandboxID, StateFileSuccess)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(p); err != nil {
+		return fmt.Errorf("sandbox %s has no committed network state: %w", state.SandboxID, err)
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	scratch := p + ".new"
+	if err := s.writeStateFile(scratch, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(scratch, p); err != nil {
+		_ = os.Remove(scratch)
+		return err
+	}
+	return s.maybeSyncDir(filepath.Dir(p))
 }
 
 // MarkDeleting atomically transfers ownership from active runtime state to the

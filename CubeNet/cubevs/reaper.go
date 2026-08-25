@@ -156,18 +156,19 @@ type sessionKey struct {
 }
 
 type natSession struct {
-	AccessTime  uint64
-	NodeIfindex uint32
-	NodeIP      uint32
-	VMIfindex   uint32
-	VMIP        uint32
-	NodePort    uint16
-	VMPort      uint16
-	State       uint8
-	ActiveClose uint8
-	PacketClass uint8
-	L7Scheme    uint8
-	Reserved    [32]uint8
+	AccessTime    uint64
+	NodeIfindex   uint32
+	NodeIP        uint32
+	VMIfindex     uint32
+	VMIP          uint32
+	NodePort      uint16
+	VMPort        uint16
+	State         uint8
+	ActiveClose   uint8
+	PacketClass   uint8
+	L7Scheme      uint8
+	PolicyVersion uint32
+	Reserved      [28]uint8
 }
 
 // timeout returns the timeout for the session in nanoseconds.

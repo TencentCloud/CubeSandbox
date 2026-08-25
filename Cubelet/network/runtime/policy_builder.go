@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/CubeNet/cubevs"
@@ -123,6 +124,48 @@ func formatCubeNetworkConfig(in *CubeNetworkConfig) string {
 // allow_internet_access / allow_out / deny_out, and it also receives network
 // targets extracted from L7 rules as L7 allow targets. The complete L7 rules
 // are still pushed to CubeEgress separately.
+// withDNSResolverAllowOut folds the sandbox's resolver CIDRs back into cfg.
+//
+// An update request carries only user-authored targets, but the create path
+// appended the resolver /32s so domain rules could be resolved at all. Without
+// this the first update of a domain-based policy would revoke DNS itself and
+// black-hole every domain rule it just installed.
+//
+// Same condition as the create path: only a policy that still names a domain
+// keeps the resolver exception, so an update that drops every domain also drops
+// the implicit DNS access.
+func withDNSResolverAllowOut(cfg *CubeNetworkConfig, resolverCIDRs []string) *CubeNetworkConfig {
+	if cfg == nil || len(resolverCIDRs) == 0 || !needsDNSResolution(cfg) {
+		return cfg
+	}
+	for _, cidr := range resolverCIDRs {
+		if !slices.Contains(cfg.AllowOut, cidr) {
+			cfg.AllowOut = append(cfg.AllowOut, cidr)
+		}
+	}
+	return cfg
+}
+
+// needsDNSResolution reports whether any allow_out target or L7 rule host is a
+// domain. It asks the predicate that mirrors where cubevs actually installs a
+// target, so a bare IPv4 literal does not read as a domain -- a name-shape check
+// accepts "10.0.0.1" because digits are valid DNS label characters, and folding
+// the resolver in for an IP-only policy would grant access nobody asked for.
+func needsDNSResolution(cfg *CubeNetworkConfig) bool {
+	if slices.ContainsFunc(cfg.AllowOut, cubevs.IsAllowOutDomainTarget) {
+		return true
+	}
+	targets, err := extractL7AllowOutTargetsFromRules(cfg.Rules)
+	if err != nil {
+		// Malformed rules are rejected later with a precise error. Assume DNS is
+		// needed so a bad request cannot silently strip resolver access.
+		return true
+	}
+	return slices.ContainsFunc(targets, func(t cubevs.L7Target) bool {
+		return cubevs.IsAllowOutDomainTarget(t.Host)
+	})
+}
+
 func cubeVSTapRegistration(cfg *CubeNetworkConfig) (cubevs.MVMOptions, error) {
 	if cfg == nil {
 		allowInternetAccess := true

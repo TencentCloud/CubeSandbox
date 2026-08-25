@@ -1,7 +1,8 @@
 # Network Policy
 
-Control outbound network access for a Cube Sandbox at creation time.
-Three modes are provided: fully air-gapped, CIDR allowlist, and CIDR denylist.
+Control outbound network access for a Cube Sandbox. Three modes are set at
+creation time — fully air-gapped, CIDR allowlist, CIDR denylist — and a fourth
+example changes the policy of a sandbox that is already running.
 
 ## 1. Background
 
@@ -66,6 +67,41 @@ Sandbox.create(
 )
 ```
 
+### Mode 4 — Update a running sandbox (`network_dynamic_update.py`)
+
+Replace the egress policy of a sandbox that is already running, without losing
+its filesystem or process state. Use this when an agent must be granted a
+destination partway through a task, or must lose one as soon as a step finishes.
+
+```python
+sandbox.update_network(
+    network={"allow_out": ["8.8.8.8/32"], "allow_internet_access": False}
+)
+```
+
+It takes the whole policy as one object, `allow_internet_access` included,
+matching E2B's `update_network`. `Sandbox.create` keeps that flag as a separate
+argument because E2B's create does the same — the asymmetry is upstream's, and
+following it is what lets code written against either SDK work unchanged.
+
+Two things set this apart from the create-time modes:
+
+- **It is a replacement, not a patch.** A key you leave out is cleared, so
+  `sandbox.update_network(network={"allow_internet_access": False})` revokes
+  everything.
+- **It reaches connections that are already open.** A connection the new policy
+  no longer permits is reset, rather than surviving until the peer closes it.
+  This is what makes revocation take effect rather than merely apply to future
+  connections.
+
+This is a CubeSandbox extension, so the example uses the `cubesandbox` SDK
+(`sandbox.updateNetwork(...)` in Node, `sandbox.UpdateNetwork(...)` in Go).
+
+The script walks four scenarios, in order: an IP allow list, a live connection
+carried across a revoking update, a domain allow list, and switching on L7
+interception mid-run. Unlike E2B — where `network.rules` is create-only — L7
+rules can be changed on a running sandbox.
+
 ## 3. Policy Summary
 
 | Mode | `allow_internet_access` | `network` key | Effect |
@@ -73,6 +109,7 @@ Sandbox.create(
 | No internet | `False` | _(none)_ | All outbound traffic blocked |
 | Allowlist | `False` | `allow_out` | Only listed CIDRs reachable |
 | Denylist | `True` | `deny_out` | Listed CIDRs blocked, rest allowed |
+| Dynamic update | either | any of the above | Replaces the policy of a running sandbox, resetting connections it no longer permits |
 
 ## 4. Prerequisites
 
@@ -127,6 +164,9 @@ python network_allowlist.py
 
 # Denylist: block specific CIDRs, allow everything else
 python network_denylist.py
+
+# Grant, then revoke, a destination on a running sandbox
+python network_dynamic_update.py
 ```
 
 Expected output for `network_no_internet.py`:
@@ -154,6 +194,7 @@ that is passed to Cubelet when the VM is created:
 | `allow_internet_access=False` | `AllowInternetAccess=false` | Drop all public-IP traffic |
 | `network.allow_out` | `AllowOut` (CIDR list) | Forward only matching destinations |
 | `network.deny_out` | `DenyOut` (CIDR list) | Drop matching destinations |
+| `update_network(...)` | `UpdateNetworkPolicy` | Converge the live policy maps, then re-evaluate established connections |
 
 All enforcement happens in the tap network device of the KVM MicroVM, so
 policies are applied at the kernel level and cannot be bypassed from inside
@@ -167,6 +208,8 @@ the sandbox.
 | Metadata endpoint still reachable | CIDR not in denylist | Add `169.254.0.0/16` to `deny_out` |
 | `Template not found` | Wrong template ID | Run `cubemastercli tpl list` |
 | `Connection refused` | CubeAPI not reachable | Check `E2B_API_URL` and port 3000 |
+| `update_network` returns 409 | Sandbox is paused or already gone | Resume it first; a paused sandbox has no live policy to update |
+| Update succeeded but a domain stopped resolving | Every domain was dropped from the policy, which also withdraws the implicit DNS-resolver allowance | Keep at least one domain target, or add the resolver IP to `allow_out` |
 
 ## 8. Directory Structure
 
@@ -176,6 +219,7 @@ network-policy/
 ├── network_no_internet.py     # Mode 1: fully air-gapped sandbox
 ├── network_allowlist.py       # Mode 2: outbound CIDR allowlist
 ├── network_denylist.py        # Mode 3: outbound CIDR denylist
+├── network_dynamic_update.py  # Mode 4: change the policy of a running sandbox
 ├── env_utils.py               # .env loader utility
 ├── requirements.txt           # Python dependencies
 └── .env.example               # Environment variable template

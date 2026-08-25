@@ -16,7 +16,7 @@ use crate::{
     models::{
         ApiError, ConnectSandbox, ListSandboxesQuery, ListSandboxesV2Query, NewSandbox,
         RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
-        SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest,
+        SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest, UpdateSandboxNetworkRequest,
     },
     state::AppState,
 };
@@ -514,6 +514,56 @@ pub async fn set_sandbox_timeout(
             LogEvent::new(LogLevel::Info, "sandbox.timeout.updated")
                 .field("sandbox_id", &sandbox_id)
                 .field_value("timeout", body.timeout),
+        )
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── PUT /sandboxes/:sandboxID/network ────────────────────────────────────────
+
+#[utoipa::path(
+    put,
+    path = "/sandboxes/{sandboxID}/network",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier")
+    ),
+    request_body = UpdateSandboxNetworkRequest,
+    responses(
+        (status = 204, description = "Network policy updated"),
+        (status = 400, description = "Invalid network policy", body = ApiError),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 409, description = "Sandbox is not running", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn update_sandbox_network(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    Json(body): Json<UpdateSandboxNetworkRequest>,
+) -> AppResult<impl IntoResponse> {
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "update_sandbox_network")
+                .field("sandbox_id", &sandbox_id),
+        )
+        .await;
+
+    let (allow_internet_access, network) = body.into_parts().map_err(AppError::BadRequest)?;
+
+    state
+        .services
+        .sandboxes
+        .update_network(&sandbox_id, allow_internet_access, network.as_ref())
+        .await?;
+
+    tracing::info!(sandbox_id = %sandbox_id, "update_sandbox_network: success");
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "sandbox.network.updated")
+                .field("sandbox_id", &sandbox_id),
         )
         .await;
     Ok(StatusCode::NO_CONTENT)
