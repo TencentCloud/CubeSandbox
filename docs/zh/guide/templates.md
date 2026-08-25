@@ -53,4 +53,5 @@ cubemastercli tpl commit \
 ## 下一步
 
 - [从 OCI 镜像制作模板](./tutorials/template-from-image.md) — 完整的 CLI 指南，包括探针配置、进度监控和故障排查。
+- [跨机快照](./cross-node-snapshot.md) — `--backend s3`，以及 Resume / FromSnap 落到其他节点的条件。
 - [模板检查与请求预览](./template-inspection-and-preview.md) — 如何查看模板状态并预览最终生效的请求。

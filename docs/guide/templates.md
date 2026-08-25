@@ -53,4 +53,5 @@ CubeMaster generates the resulting `tpl-...` ID and creates its initial replica 
 ## Next Steps
 
 - [Creating Templates from OCI Images](./tutorials/template-from-image.md) — step-by-step CLI guide with probe configuration, progress monitoring, and troubleshooting.
+- [Cross-Node Snapshots](./cross-node-snapshot.md) — `--backend s3` and the conditions for Resume / FromSnap on another node.
 - [Template Inspection and Request Preview](./template-inspection-and-preview.md) — how to inspect template status and preview the effective request.

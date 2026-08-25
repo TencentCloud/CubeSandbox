@@ -82,6 +82,8 @@ cubemastercli tpl create-from-image \
   --probe-path /
 ```
 
+Pass `--backend s3` to store the template (and every sandbox / snapshot derived from it) on the cluster-shared S3 CoW backend. That is required for [cross-node Pause / Resume / FromSnap](../cross-node-snapshot.md). Omit the flag to keep the historical `xfs` path.
+
 > **Image registry:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest` instead.
 
 On success the CLI immediately prints a `job_id` and a generated

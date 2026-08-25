@@ -193,6 +193,7 @@ Security is enforced at multiple levels:
 - [CubeVS Network Model](./network.md) — deep dive into CubeVS, traffic flows, session tracking, and the policy engine.
 - [Sandbox Lifecycle](../guide/lifecycle.md) — state model, auto-pause, and auto-resume.
 - [Snapshot, Rollback & Clone](../guide/snapshot-rollback-clone.md) — CubeCoW-powered advanced APIs.
+- [Cross-Node Snapshots](../guide/cross-node-snapshot.md) — S3 Pause / Resume / FromSnap on another node.
 - [Security Proxy](../guide/security-proxy.md) — CubeEgress domain filtering and credential injection.
 - [Performance Benchmark](../guide/performance-benchmark.md) — cold-start, snapshot, and density numbers.
 - [Templates Overview](../guide/templates.md) — the three-step template lifecycle.

@@ -146,5 +146,6 @@ with Sandbox.create(template=new_snap.snapshot_id) as forked:
 
 ## 参考
 
+- [跨机快照](./cross-node-snapshot.md) —— S3 后端、`remote_status=ready`，以及 Resume / FromSnap 落到其他节点的调度规则
 - 示例代码：[`examples/snapshot-rollback-clone/`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/snapshot-rollback-clone)
 - SDK 源码：[`sdk/python/`](https://github.com/TencentCloud/CubeSandbox/tree/master/sdk/python)

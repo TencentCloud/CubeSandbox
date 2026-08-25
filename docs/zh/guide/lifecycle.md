@@ -138,7 +138,7 @@ sandbox.connect()                     # 从快照恢复
 sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 ```
 
-可参考示例：[`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py)。
+可参考示例：[`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py)。跨机 Resume（S3 后端且 `remote_status=ready`）见 [跨机快照](./cross-node-snapshot.md)。
 
 ### Resume 后的 CubeProxy 缓存
 

@@ -59,6 +59,8 @@ cubemastercli tpl create-from-image \
   --probe-path /
 ```
 
+加上 `--backend s3` 后，模板及其派生的沙箱 / 快照会走集群共享的 S3 CoW 后端，这是 [跨机 Pause / Resume / FromSnap](../cross-node-snapshot.md) 的前提。省略该标志则沿用历史 `xfs` 路径。
+
 > **镜像仓库说明：** 国内优先使用 `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest`；境外访问推荐使用 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest`。
 
 命令成功后立即返回 `job_id` 和自动生成的 `template_id` 并退出，构建任务在集群后台继续执行：

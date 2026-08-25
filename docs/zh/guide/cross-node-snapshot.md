@@ -1,0 +1,283 @@
+# 跨机快照（Pause / Resume / Snapshot）
+
+CubeSandbox 通过一份可持久化的「包对象」（rootfs / memory / metadata）实现沙箱的
+**暂停（Pause）**、**恢复（Resume）** 与 **快照（Snapshot）**：
+
+- **Pause / Resume**：把运行中沙箱的完整状态（内存 + 文件系统）冻结为一份暂停包，之后可原地或异地恢复。
+- **Snapshot**：把状态持久化为一份可复用的镜像，既可用于从快照新建沙箱（FromSnap），也可用于回滚（Rollback）。
+
+在默认的 `xfs` 后端下，这份包对象只落在**创建它的那一个节点**的本地磁盘上，因此
+Resume / FromSnap **必须回到同一个节点**（节点亲和）。一旦该节点下线、被隔离或资源不足，
+已暂停的沙箱无法被调度恢复，快照也无法在别处拉起。
+
+引入 `s3` 后端后，包对象被上传到**集群共享的 S3**（由 [CubeS3lvol](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md) 服务管理），
+**任意兼容节点都能按需拉取并恢复**，从而实现跨机的 Pause / Resume 与 FromSnap。
+注意：XFS 根盘本身始终留在本地，跨机迁移的是「快照 / 暂停包」，而不是整个虚拟机磁盘。
+
+SDK 侧的快照、回滚、克隆用法见 [快照、回滚与克隆](./snapshot-rollback-clone.md)；本文说明跨机恢复的条件、调度规则与 CLI 字段。
+
+---
+
+## 跨机的条件
+
+跨机恢复（Resume / FromSnap 落到非源节点）不是默认行为，必须同时满足以下条件。
+
+### 必须基于 S3 后端（制作模板时指定）
+
+跨机操作的前提是**沙箱本身运行在 S3 后端之上**。目前 S3 后端**不可在事后切换**，
+必须在「制作模板」阶段就显式声明；一旦确定，该模板及其后续所有派生产物
+（暂停包、快照、从快照创建的子沙箱）都会**继承并锁定为 S3 后端，不可修改**。
+
+- 只有 `backend=s3` 的模板 / 沙箱，其 Pause / Snapshot 才会把包对象上传到共享 S3，
+  从而获得跨机能力；`xfs` 模板天然无法跨机。
+- 派生链路：`模板(s3)` → `沙箱(s3)` → `暂停包(s3)` / `快照(s3)` → `从快照新建的沙箱(s3)`，
+  整条链路后端随模板锁定，无法中途改成 `xfs`，也无法把 `xfs` 产物改成 `s3`。
+
+> 后续会提供 **xfs ↔ S3 转换工具**，用于在已存在的 xfs 模板 / 沙箱与 S3 之间迁移；
+> 当前版本请务必在模板创建阶段就选好后端。
+
+制作模板时指定 S3 后端：
+
+```bash
+# 省略 --backend 则沿用历史 xfs 路径
+cubemastercli tpl create-from-image \
+  --image <img> \
+  --writable-layer-size 4Gi \
+  --backend s3 \
+  --expose-port 49983 \
+  --probe 49983 \
+  --probe-path /health
+```
+
+创建后可用 `cubemastercli cubebox template list` 确认 `BACKEND` 列显示为 `s3`，其下新建的沙箱与
+快照也会自动继承 `s3`（见 [CLI 字段](#cubemastercli-跨机相关的子命令与新显示字段)）。
+
+### 本机优先调度，本机无法调度才跨机
+
+调度器（`restoreplace`）**优先把恢复任务放回源节点**。只有源节点无法被调度时，
+才会在条件满足的前提下跨机：
+
+```
+┌─────────────────┐   ┌──────────────────┐  是  ┌──────────────────┐
+│Resume/FromSnap  │──▶│ 源节点可调度?     │─────▶│ 本机恢复(源节点) │
+└─────────────────┘   └────────┬─────────┘      └──────────────────┘
+                               │ 否
+                               ▼
+                      ┌──────────────────┐  是  ┌──────────────────┐
+                      │ CanCrossNode?    │─────▶│ 跨机恢复         │
+                      │ backend=s3 ∧    │      │ (任意兼容节点)   │
+                      │ remote=ready ∧  │      └──────────────────┘
+                      │ kernel/cpu 一致 │  否
+                      └────────┬─────────┘
+                               ▼
+                      ┌──────────────────┐
+                      │ 报错: cannot     │
+                      │ restore cross-   │
+                      │ node             │
+                      └──────────────────┘
+```
+
+即：源节点在、且能调度 → 永远本机；源节点不在或不可调度，且快照满足跨机条件 → 跨机；
+否则直接报错，不会盲目落到不兼容的节点。
+
+源节点被 [隔离](./node-isolation.md) 时视为不可调度，因此隔离是验证跨机 Resume 的常用手段。
+带 **host-mount** 的沙箱会钉在源节点（`PinToOrigin`），即使 `remote_status=ready` 也不会跨机。
+
+### 快照必须在云端「就绪」
+
+跨机的硬性门槛由 Master 依据 DB 持久化状态强制（非客户端输入）：
+
+> `CanCrossNode(backend, remote_status)` 仅在 **`backend == s3` 且 `remote_status == ready`** 时返回 `true`。
+
+- `backend` 必须为 `s3`（对象在共享 S3 上，别的节点才拉得到）。
+- `remote_status` 必须为 `ready`：表示 Pause / Commit / AppSnapshot 已把
+  rootfs / memory / metadata 三份对象成功导出并同步完成。状态机为
+  `pending → inprogress → ready / failed`。**只有 `ready` 才允许跨机**。
+
+> **未就绪也能用，只是不能跨机**：当 `remote_status` 不为 `ready`（包括 `pending` / `inprogress` /
+> `failed`，以及 `xfs` 后端的空值）时，用户**仍然可以 resume，或基于该快照创建新沙箱**，
+> 但 `CanCrossNode` 返回 `false`，调度器只会把它放回**源节点（本机）**执行，不会落到别的机器。
+> 只有在 `remote_status` 变为 `ready` 后，才解锁跨机恢复。
+
+`xfs` 后端的 `remote_status` 始终为空，因此 `CanCrossNode` 对其恒为 `false`——**xfs 快照只能本机恢复**。
+
+### 跨机目标必须与源机 kernel / CPU 信息一致
+
+跨机恢复的目标节点，其 **kernel 与 CPU 信息必须与源节点一致**，否则内存态（含 CPU 寄存器 /
+特性位）无法正确还原，恢复会失败或不稳定。
+
+> **当前匹配范围**：跨机兼容性判定**目前仅以 `cpuid_hash` 与 `host_kernel_release` 两个维度做相等匹配**。
+> 其余字段（`cpu_vendor`、`host_kernel_fingerprint`、`kvm_api_version`）目前只是采集并展示、
+> **尚未纳入相等匹配门禁**。目标节点若带非空的 `kvm_module_taint`（强制 / 树外 / 未签名的 `kvm.ko`），
+> 会被拒绝作为跨机目标。后续版本可能收紧匹配维度，请以实际版本为准。
+
+用 `cubeopscli node list --json` 查看节点的 `HostFacts`：
+
+| JSON 字段 | 含义 | 当前是否参与匹配 |
+|-----------|------|------------------|
+| `cpuid_hash` | CPU 特征哈希（CPU 特性指纹） | 是（相等匹配） |
+| `host_kernel_release` | 宿主机内核版本（`uname -r`） | 是（相等匹配） |
+| `host_kernel_fingerprint` | 宿主机内核指纹哈希（release + 规范化 cmdline） | 暂仅展示，后续可能加入 |
+| `cpu_vendor` | CPU 厂商（如 Intel / AMD / 鲲鹏） | 暂仅展示，后续可能加入 |
+| `kvm_api_version` | KVM API 版本 | 暂仅展示，后续可能加入 |
+| `kvm_module_taint` | KVM 模块 taint；空表示干净，非空表示加载了强制 / 树外 `kvm.ko` | 目标侧非空则拒绝跨机 |
+
+> 因为多数展示字段当前未自动做相等校验，跨机前仍建议用 `cubeopscli node list --json`
+> **人工比对全部 HostFacts**，确认目标节点与源节点一致。
+
+#### `cpuid_hash` 是如何计算的
+
+`cpuid_hash` 由 Cubelet 读取节点的 `/proc/cpuinfo`，
+将 CPU 身份与特性集经确定性 SHA-256 摘要得到（前缀 `sha256:`），
+两台机器只有「身份 + 特性」完全一致时摘要才会相等。参与计算的字段如下：
+
+- **x86**：`vendor_id`（厂商）、`cpu family`（家族）、`model`（型号）、`stepping`（步进）、`flags`（特性标志位，如 `vmx`/`avx2`/`smep`/`nx` 等）
+- **ARM**：`CPU implementer`（实现者）、`CPU architecture`（架构）、`CPU variant`（变体）、`CPU part`（部件号）、`CPU revision`（修订）、`Features`（特性列表）
+
+> 只取第一颗逻辑 CPU，默认整机同构；`flags` / `Features` 会先做字母序排序再哈希，
+> 因此内核导出顺序不同不影响结果。混合架构（big.LITTLE、Intel P+E 核心）可能误判为兼容。
+
+---
+
+## 如何配置后端 S3 服务
+
+跨机能力依赖的 S3 后端**主流程默认是开启的**，只要 **S3lvol 服务就绪**即可，无需额外打开开关。
+
+S3lvol 需要配置自己的 S3 接入信息（endpoint、bucket、access key 等）。
+凭证与节点本地状态见 [CubeS3lvol README](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md)：
+每台计算节点读取 `/data/cubelet/cos.cfg`，WAL / journal 镜像位于 `/data/cubelet/rcow/wal_bdev.img`。
+一键安装会按默认尺寸创建该镜像；不要在节点之间拷贝这份镜像。
+
+---
+
+## cubemastercli 跨机相关的子命令与新显示字段
+
+为支持跨机能力，`cubemastercli` 在多个子命令中新增了 `backend` / `remote_status` /
+`origin_node` 等显示列，并在模板创建时提供 `--backend` 标志。下面按子命令说明。
+
+节点列表与隔离已迁到 `cubeopscli`（CubeOps，默认端口 `3010`），见 [隔离节点](./node-isolation.md) 与 [命令行工具](./cli-tools.md)。
+
+### `cubebox list`（沙箱列表）
+
+沙箱列表新增两列，用于一眼看出某个沙箱是否走 S3、以及其暂停包在云端的同步状态：
+
+| 列 | 含义 |
+|----|------|
+| `backend` | 该沙箱关联的 CoW 后端（`xfs` / `s3`）；`xfs` 显示为 `-` |
+| `remote` | 暂停包的云端同步状态 `remote_status`（`pending` / `inprogress` / `ready` / `failed`）；非 S3 显示为 `-` |
+
+```bash
+cubemastercli cubebox list --all
+```
+
+非 paused 行按创建时间倒序；paused 行排在最后，并带 `pause_snap`。Resume 成功后这两列恢复为 `-`。
+
+### `cubebox snapshot list` / `snapshot info`（快照）
+
+快照资源中的跨机相关字段：
+
+| 字段 | 含义 |
+|------|------|
+| `backend` | CoW 后端（`xfs` / `s3`）；打印时优先用 `backend`，为空回退历史字段 `storage_backend` |
+| `remote_status` | S3 同步状态；`xfs` 为空 |
+| `origin_node_id` / `origin_node_ip` | **创建该快照的源节点**（跨机恢复时的「本机」参照） |
+| `replicas` 表（`NODE_ID` / `NODE_IP` / `STATUS` / `PHASE` / `SPEC` / `ERROR`） | 每个节点副本的状态，用于观察快照在各节点的就绪情况 |
+
+```bash
+cubemastercli cubebox snapshot list
+cubemastercli cubebox snapshot info --snapshot-id <snapshot-id>
+```
+
+### `cubebox template list` / `template info`（模板）
+
+模板列表新增 `BACKEND` 列；`template info` 会打印 `backend: <xfs|s3>`。
+模板的 `backend` 决定其下沙箱与快照默认使用的 CoW 后端。
+
+```bash
+cubemastercli cubebox template list
+cubemastercli cubebox template info <template-id>
+```
+
+### `tpl create-from-image --backend xfs|s3`
+
+```bash
+# 创建模板时声明后端；省略则沿用历史 xfs 路径
+cubemastercli tpl create-from-image \
+  --image <img> \
+  --writable-layer-size 4Gi \
+  --backend s3
+```
+
+> 后端在**模板 / 沙箱创建**时确定；快照创建命令本身**不接受** backend 选择，
+> 永远使用沙箱 / 模板已持久化的后端。
+
+### `cubeopscli node list`（校验跨机兼容性）
+
+默认表格显示节点健康与隔离状态。HostFacts 在 JSON 里：
+
+```bash
+cubeopscli --address 127.0.0.1 --port 3010 node list
+cubeopscli --address 127.0.0.1 --port 3010 node list --json
+```
+
+`--json` 中每个节点的 `HostFacts` 字段含义见 [跨机目标必须与源机 kernel / CPU 信息一致](#跨机目标必须与源机-kernel--cpu-信息一致)。
+跨机前请确认目标节点与源节点的 `cpuid_hash` / `host_kernel_release` 一致，并核对其余 HostFacts。
+
+---
+
+## 基准性能测试
+
+> 单位：ms。下列数值为占位，待填入实测结果。
+
+### 冷启动（Cold Start）
+
+**测试方法**：累计启动 50 个沙箱，每轮测试完成后清理，统计单实例冷启动耗时。
+
+| 并发 | xfs avg | xfs p95 | s3 avg | s3 p95 |
+|------|---------|---------|--------|--------|
+| 1    | —       | —       | —      | —      |
+| 5    | —       | —       | —      | —      |
+
+### 快照 / 暂停 / 恢复（Snapshot / Pause / Resume）
+
+- **制作快照 / 快照共享**：各测试 10 次，取 avg 与 p95。
+- **快照创建**：分 1 并发、5 并发两种档位；每种档位累积启动 50 次，每轮测试完成后清理沙箱。
+
+| 操作 | xfs avg | xfs p95 | s3 本地 avg | s3 本地 p95 | s3 跨机 avg | s3 跨机 p95 |
+|------|---------|---------|-------------|-------------|-------------|-------------|
+| 制作快照 | — | — | — | — | N/A | N/A |
+| 快照共享（推送至共享 S3，xfs 无此步骤） | N/A | N/A | — | — | N/A | N/A |
+| 快照创建（1 并发） | — | — | — | — | — | — |
+| 快照创建（5 并发） | — | — | — | — | — | — |
+
+既有 XFS 冷启动与快照数字见 [性能测试](./performance-benchmark.md)。
+
+---
+
+## 已知问题
+
+1. **基于 S3 的 snapshot，volume 删除可能失败但被视作成功**：删除操作当前流程把 snapshot 对象删除
+   失败（例如底层回报 `busy`）也按成功处理，真正清理由 S3lvol 后台异步完成。因此删除接口的返回成功并不等于对象已即时清除，
+   依赖「删完即释放」语义的场景需注意这一异步延迟。沙箱自己的 **volume** 删除失败不会被吞掉。
+
+2. **DB / FS 结构相较 0.7.0 之前版本变化较大，老数据适配仅覆盖 0.6.0**：本版本相比 0.7.0 之前的版本，
+   DB 表结构与文件系统目录结构均有较大调整。新版本会对老版本的数据结构做适配，用于用户清理老数据的场景，
+   但适配测试目前**只覆盖到 0.6.0 版本**。若遇到未被覆盖、适配失败的环境，需要用户**手动清理老的
+   snapshot 文件与对应的 DB 数据**。
+
+3. **不支持携带 volume / host-mount 的沙箱制作 snapshot**：当前版本无法对挂载了 volume 或
+   host-mount 的沙箱制作快照，相关能力将在后续版本支持。host-mount 沙箱即使 Pause 成功，Resume 也会钉在源节点。
+
+4. **刚跨机 resume 或基于 snapshot 新创建的沙箱，短时间内无法再次 pause 或制作 snapshot**：
+   跨机恢复 / 从快照新建的沙箱在创建后的一段时间内，其 S3 对象尚未完全就绪（底层可能仍在 decouple），不能立即再次
+   pause 或打快照。该能力仍在 S3lvol 的迭代中，后续版本会补齐。
+
+---
+
+## 参考
+
+- [快照、回滚与克隆](./snapshot-rollback-clone.md)
+- [沙箱生命周期](./lifecycle.md)
+- [从 OCI 镜像制作模板](./tutorials/template-from-image.md)
+- [隔离节点](./node-isolation.md)
+- [CubeS3lvol README](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md)

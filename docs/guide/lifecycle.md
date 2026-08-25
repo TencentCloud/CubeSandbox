@@ -138,7 +138,7 @@ sandbox.connect()                     # restore from snapshot
 sandbox.run_code("print('back!')")    # carry on as if never paused
 ```
 
-See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py) for a full demo.
+See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py) for a full demo. Cross-node Resume (S3 backend, `remote_status=ready`) is documented in [Cross-Node Snapshots](./cross-node-snapshot.md).
 
 ### CubeProxy cache after Resume
 
