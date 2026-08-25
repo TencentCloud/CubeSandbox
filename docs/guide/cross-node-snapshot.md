@@ -190,30 +190,67 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
 
 ## Benchmarks
 
-> Times in ms. Values below are placeholders pending measured results.
+Times are **milliseconds**. **avg** / **p95** are **per-sandbox** create latency (when that sandbox became `running`), not batch wall time divided by concurrency.
+
+Figures below were measured on 2026-08-25. Numbers depend on hardware, image, and dirty-page load; treat them as a same-cluster xfs vs s3 comparison, not a SLA.
+
+### Environment
+
+Two identical Tencent Cloud CVM nodes (nested KVM), one control+compute and one compute-only.
+
+| Item | Value |
+|------|--------|
+| OS | TencentOS Server 4.4 |
+| Kernel | `6.6.69-opencloudos9.cubesandbox.pvm.host` |
+| CPU | AMD EPYC 9K65, 16 vCPU, 1 thread/core |
+| Memory | 30 GiB |
+| Data disk | ~1 TB virtio, XFS on `/data` |
+| Cubelet | `070f4235` |
+| CubeMaster | `aa41f662` |
+| S3lvol | `815ed36` (debug build) |
+
+### Template
+
+Both backends use the **same** image and sandbox spec. Each template has a replica on **one** compute node (the origin). Local runs isolate the peer so jobs stay on the origin; cross-node FromSnap isolates the origin.
+
+| Item | Value |
+|------|--------|
+| Image | `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` |
+| vCPU / memory | 2000 millicores (2 vCPU) / 2048 MiB |
+| Writable layer | 4Gi |
+| Probe | port `49983`, path `/health` |
+| Backends | `xfs` and `s3`, created with `tpl create-from-image --backend …` |
+
+### Method
+
+Keep this method if you re-measure. Do not change table columns or round semantics.
+
+1. **Round cleanup:** start `concurrency` sandboxes, **then kill all of them**, then start the next round. Do not pipeline the next round while the previous sandboxes are still up.
+2. **Cold start and create-from-snapshot:** 50 sandbox starts per `(backend, concurrency)` cell. Concurrency 1 → 50 rounds of 1. Concurrency 5 → 10 rounds of 5. Discard one warmup round before measuring.
+3. **Create snapshot:** 10 serial runs (create sandbox → `create_snapshot` → kill). S3 **must not** overlap two export requests.
+4. **Share snapshot (S3 only):** after `create_snapshot` returns, poll until `remote_status=ready`. That wait is the share time; it is **not** included in “create snapshot”.
+5. **Create from snapshot (S3 local):** isolate the peer; origin still has the replica. **S3 cross-node:** wait until the snapshot is `ready`, isolate the origin, create on the peer.
+6. XFS has no share step and cannot restore cross-node.
 
 ### Cold start
 
-**Method:** start 50 sandboxes in total, clean up after each round, report per-instance cold-start latency.
+Create from the **template** (`Sandbox.create(template=tpl-…)`).
 
 | Concurrency | xfs avg | xfs p95 | s3 avg | s3 p95 |
 |-------------|---------|---------|--------|--------|
-| 1           | —       | —       | —      | —      |
-| 5           | —       | —       | —      | —      |
+| 1           | 50.9    | 57.2    | 430.6  | 471.4  |
+| 5           | 59.5    | 81.2    | 747.4  | 885.8  |
 
 ### Snapshot / Pause / Resume
 
-- **Create snapshot / share snapshot:** 10 runs each; report avg and p95.
-- **Create from snapshot:** concurrency 1 and 5; 50 starts per tier; clean up after each round.
-
 | Operation | xfs avg | xfs p95 | s3 local avg | s3 local p95 | s3 cross-node avg | s3 cross-node p95 |
 |-----------|---------|---------|--------------|--------------|-------------------|-------------------|
-| Create snapshot | — | — | — | — | N/A | N/A |
-| Share snapshot (upload to shared S3; xfs has no step) | N/A | N/A | — | — | N/A | N/A |
-| Create from snapshot (concurrency 1) | — | — | — | — | — | — |
-| Create from snapshot (concurrency 5) | — | — | — | — | — | — |
+| Create snapshot | 105.9 | 129.8 | 2314.9 | 2524.9 | N/A | N/A |
+| Share snapshot (upload to shared S3; xfs has no step) | N/A | N/A | 5579.0 | 5740.4 | N/A | N/A |
+| Create from snapshot (concurrency 1) | 64.5 | 74.3 | 439.0 | 473.3 | 6495.5 | 7322.8 |
+| Create from snapshot (concurrency 5) | 80.3 | 94.7 | 732.7 | 902.8 | 12285.1 | 14703.1 |
 
-Existing XFS cold-start and snapshot numbers: [Performance Benchmark](./performance-benchmark.md).
+Earlier bare-metal XFS-only numbers: [Performance Benchmark](./performance-benchmark.md).
 
 ---
 
