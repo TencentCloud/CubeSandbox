@@ -111,6 +111,11 @@ install_s3fs() {
 }
 
 install_aws() {
+    if command -v aws >/dev/null 2>&1 && aws --version >/dev/null 2>&1; then
+        log "AWS CLI already installed: $(aws --version 2>&1)"
+        return 0
+    fi
+
     log "install AWS CLI v2"
     local awszip url tmp
     case "$ARCH" in
