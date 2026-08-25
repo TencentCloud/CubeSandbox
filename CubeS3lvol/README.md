@@ -242,3 +242,98 @@ request header and the canonical string of the SigV4 signature.
 
 `[ERROR] ... response status=404` is **normal**: s3lvol uses a GET's 404 to
 determine whether an object exists.
+
+## Environment Requirements
+
+### NVMe kernel driver / NVMe-oF support
+
+s3lvol exposes volumes over NVMe-oF (nvmf-tcp): the SPDK-backed `s3lvol_tgt`
+is the user-space *target*, but the *host* side that attaches the volumes needs
+the kernel NVMe fabric support:
+
+- the `nvme-fabrics` and `nvme-tcp` kernel modules must be loadable/loaded
+  (`modprobe nvme-tcp`), so that `nvme connect` produces a block device under
+  `/dev/nvme*n*`;
+- the kernel must be built with `CONFIG_NVME_TCP` / `CONFIG_NVME_FABRICS`
+  (a 5.x+ distro kernel normally is);
+- the target itself does **not** need the in-kernel `nvmet`: SPDK's user-space
+  nvmf target provides it.
+
+The dataplane regression suite (`make check`) actually attaches loopback
+NVMe-oF devices, so it only runs on a host with this support (and it needs
+`root`).
+
+### nvme-cli
+
+The `nvme` command-line tool (package `nvme-cli`) is a hard dependency of the
+test scripts: `nvme connect/disconnect/list` are used to attach and detach
+volumes. Install it with:
+
+```sh
+# Debian/Ubuntu
+apt-get install nvme-cli
+# RHEL/CentOS
+yum install nvme-cli
+```
+
+### Preflight: is the NVMe fabric stack loaded?
+
+Before running the suite (or attaching any volume), confirm the host side of
+the fabric is actually available:
+
+```sh
+# 1. kernel NVMe-over-TCP driver (produces /dev/nvme*n* block devices)
+modprobe nvme-tcp                 # idempotent; fails if the module is missing
+lsmod | grep nvme                 # should list nvme_tcp / nvme_fabrics
+
+# 2. nvme-cli (used by the test scripts / attach tooling)
+which nvme                        # must resolve, e.g. /usr/sbin/nvme
+```
+
+If `modprobe nvme-tcp` fails, the kernel was built without NVMe-over-TCP
+(`CONFIG_NVME_TCP` missing), the host cannot attach any volume, and the
+dataplane regression suite cannot run here — check the kernel config before
+proceeding.
+
+### Object store
+
+A COS- or MinIO-compatible bucket is required at runtime; the credentials,
+endpoint and bucket are read from the COS config file (see the config section).
+For a local MinIO the config must also set `path_style = "true"` and
+`no_tls = "true"` so the S3 client talks plain HTTP with path-style URLs.
+
+### Busy-polling threads and CPU affinity
+
+`s3lvol_tgt` runs SPDK reactor threads in busy-poll mode: they spin at 100% of
+the cores they are pinned to and never sleep. The current deployment starts
+with **2 reactors on 2 dedicated cores** (e.g. `-m 0x3` pins them to CPU 0 and
+CPU 1). Those two cores are fully consumed by the target, so **other
+(application/business) processes must be kept off them** — pin them elsewhere
+with `taskset`/`numactl` (or a cpuset/cgroup) so the target's request latency
+is not disturbed by scheduler contention.
+
+## LIMITATIONS and TODOs
+
+### Deleting snapshots / lvols
+
+- A snapshot that is **behind an export** cannot be deleted while the export is
+  alive: `s3lvol_lvol_destroy` refuses with *"the snapshot behind export
+  \<uuid\>, which another node may be reading through. Release that export, or
+  wait for it to expire, before deleting this."* — call `rcow_release_export`
+  first (or wait for the export TTL to lapse).
+- An **active** (attached) lvol cannot be deleted; deactivate it first
+  (`rcow_deactive_bdev`).
+- The delete-time cluster-count log line needs the blob to still be open: if
+  the lvol was deactivated before deletion the blob is closed and the *"Deleted
+  lvol ..."* log line simply omits the counts (they are not recoverable once
+  the blob is gone).
+
+### Snapshotting / cloning an imported lvol
+
+- An lvol that was **imported from an export** cannot be snapshotted or cloned
+  while it is still queued for decoupling: `derive_check` refuses with *"is
+  queued to be decoupled; a snapshot or clone would take its external snapshot
+  while the decouple still reads through it"*. Wait for the decouple to finish
+  (`rcow_get_decouple` status -- its list emptying is the signal) before taking
+  the snapshot or clone.
+
