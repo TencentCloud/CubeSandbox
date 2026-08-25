@@ -158,6 +158,23 @@ func BumpMvmVersion(ifindex uint32) error {
 	return bumpMvmVersion(m, ifindex)
 }
 
+// LookupIfindexByIP resolves a sandbox's TAP ifindex from its IP via the
+// mvmip_to_ifindex map. O(1), unlike listing and scanning every TAP device.
+func LookupIfindexByIP(ip net.IP) (uint32, error) {
+	m, err := loadPinnedMap(MapNameMVMIPToIfindex)
+	if err != nil {
+		return 0, err
+	}
+	defer m.Close()
+
+	key := ipToUint32(ip)
+	var ifindex uint32
+	if err := m.Lookup(&key, &ifindex); err != nil {
+		return 0, fmt.Errorf("map.Lookup failed: %w, name: %s", err, MapNameMVMIPToIfindex)
+	}
+	return ifindex, nil
+}
+
 // mvmVersionMapOps is the subset of the metadata map used to bump the version;
 // it is an interface so the read-modify-write can be unit-tested against a fake.
 type mvmVersionMapOps interface {

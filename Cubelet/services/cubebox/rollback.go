@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"path/filepath"
 	"strings"
 	"time"
@@ -235,7 +236,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	// so the dataplane resets now-stale TCP sessions instead of letting them
 	// hang. Warn-only: the guest is already running, so failing the RPC over a
 	// dataplane bump would diverge master/cubelet state for a non-fatal issue.
-	if err := bumpRollbackNetworkGeneration(req.GetSandboxID()); err != nil {
+	if err := bumpRollbackNetworkGeneration(cb.IP); err != nil {
 		stepLog.Warnf("rollback succeeded but failed to bump network generation for sandbox %s: %v", req.GetSandboxID(), err)
 	}
 
@@ -347,18 +348,19 @@ func resolveRollbackTargets(ctx context.Context, backend string, req *cubebox.Ro
 
 // bumpRollbackNetworkGeneration bumps the sandbox's network generation so the
 // dataplane resets now-stale TCP sessions after a rollback. Best effort; the
-// caller logs a warning on failure.
-func bumpRollbackNetworkGeneration(sandboxID string) error {
-	taps, err := cubevs.ListTAPDevices()
+// caller logs a warning on failure. It resolves the TAP ifindex from the
+// sandbox IP in O(1) via the mvmip_to_ifindex map rather than scanning every
+// TAP device.
+func bumpRollbackNetworkGeneration(sandboxIP string) error {
+	ip := net.ParseIP(sandboxIP).To4()
+	if ip == nil {
+		return fmt.Errorf("invalid sandbox IP %q", sandboxIP)
+	}
+	ifindex, err := cubevs.LookupIfindexByIP(ip)
 	if err != nil {
 		return err
 	}
-	for _, tap := range taps {
-		if tap.ID == sandboxID {
-			return cubevs.BumpMvmVersion(uint32(tap.Ifindex))
-		}
-	}
-	return fmt.Errorf("no TAP device found for sandbox %s", sandboxID)
+	return cubevs.BumpMvmVersion(ifindex)
 }
 
 func (s *service) buildRollbackRestoreConfig(ctx context.Context, sandboxID, metaDir string, currentRootfs, newRootfs, memory *storage.CowSnapshotObject) (string, error) {

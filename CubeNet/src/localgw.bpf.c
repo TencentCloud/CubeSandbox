@@ -52,7 +52,7 @@ static __always_inline int update_l7_session_from_cubedev(struct __sk_buff *skb)
 
 	if (session_is_stale(sess)) {
 		delete_session_pair(&key, sess);
-		return tcp_reflect_reset(skb, skb->ingress_ifindex);
+		return tcp_send_reset(skb, skb->ingress_ifindex, l3->saddr);
 	}
 
 	now = bpf_ktime_get_ns();

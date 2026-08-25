@@ -244,121 +244,6 @@ enum tcp_nat_result {
 #define TCP_NAT_STATUS(ret)	((enum tcp_nat_result)((__u32)(ret)))
 #define TCP_NAT_IFINDEX(ret)	((__u32)((__u64)(ret) >> 32))
 
-
-static __always_inline int tcp_reply_reset(struct __sk_buff *skb, __u32 ifindex)
-{
-	struct tcphdr new_tcp = {};
-	struct ethhdr *l2;
-	struct iphdr *l3;
-	struct tcphdr *l4;
-	__be32 old_saddr, old_daddr, new_saddr, new_daddr;
-	__be16 old_tot_len, new_tot_len;
-	__u32 seq, ack_seq, new_skb_len;
-	__u32 seg_len, tcp_off, tcp_csum_off;
-	__u16 ip_hlen, new_ip_len;
-	long err;
-
-	/* bpf_skb_change_tail() may fail on GSO skbs or leave segmentation
-	 * state inconsistent. Fall back to drop instead of sending RST.
-	 */
-	if (skb->gso_segs)
-		return TC_ACT_SHOT;
-
-	if (!__pull_headers(skb, &l2, &l3, &l4))
-		return TC_ACT_SHOT;
-
-	if ((l3->frag_off & IP_FLAG_MF) || (l3->frag_off & IP_FRAG_OFF_MASK))
-		return TC_ACT_SHOT;
-
-	/* Never send a reset in response to a reset. */
-	if (l4->rst)
-		return TC_ACT_SHOT;
-
-	ip_hlen = BPF_CORE_READ_BITFIELD(l3, ihl);
-	ip_hlen <<= 2;
-	seq = l4->seq;
-	ack_seq = l4->ack_seq;
-	if (!tcp_segment_len(l3, l4, &seg_len))
-		return TC_ACT_SHOT;
-
-	new_saddr = l3->daddr;
-	new_daddr = mvm_inner_ip;
-	new_tcp.source = l4->dest;
-	new_tcp.dest = l4->source;
-	new_tcp.doff = sizeof(new_tcp) >> 2;
-	new_tcp.rst = 1;
-	if (l4->ack) {
-		new_tcp.seq = ack_seq;
-	} else {
-		new_tcp.ack_seq = bpf_htonl(bpf_ntohl(seq) + seg_len);
-		new_tcp.ack = 1;
-	}
-	/* Build the new TCP header with check = 0; tcp_ipv4_set_checksum()
-	 * folds the pseudo-header and TCP header words into the checksum
-	 * incrementally via bpf_l4_csum_replace.
-	 */
-
-	new_ip_len = ip_hlen + sizeof(new_tcp);
-	new_skb_len = sizeof(struct ethhdr) + new_ip_len;
-	if (bpf_skb_change_tail(skb, new_skb_len, 0))
-		return TC_ACT_SHOT;
-
-	/* bpf_skb_change_tail invalidates all packet pointers. */
-	if (!__pull_headers(skb, &l2, &l3, &l4))
-		return TC_ACT_SHOT;
-
-	/* Snapshot old IP header fields and rewrite the L2 MAC pair before
-	 * touching the packet via BPF helpers — bpf_skb_store_bytes() and
-	 * bpf_l{3,4}_csum_replace() invalidate l2/l3/l4 pointers.
-	 */
-	old_saddr = l3->saddr;
-	old_daddr = l3->daddr;
-	old_tot_len = l3->tot_len;
-	new_tot_len = bpf_htons(new_ip_len);
-	tcp_off = sizeof(struct ethhdr) + ip_hlen;
-	tcp_csum_off = TCP_CSUM_OFF(ip_hlen);
-	set_mac_pair(l2, cubegw0_macaddr_p1, cubegw0_macaddr_p2,
-		     mvm_macaddr_p1, mvm_macaddr_p2);
-
-	/* Write the new TCP header (with check = 0). */
-	err = bpf_skb_store_bytes(skb, tcp_off, &new_tcp, sizeof(new_tcp), 0);
-	if (err)
-		return TC_ACT_SHOT;
-
-	/* Update IP tot_len + IP csum. */
-	err = rewrite_l3_tot_len(skb, old_tot_len, new_tot_len);
-	if (err)
-		return TC_ACT_SHOT;
-
-	/* Update IP saddr + IP csum. */
-	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_saddr, new_saddr,
-				  sizeof(new_saddr));
-	if (err)
-		return TC_ACT_SHOT;
-	err = bpf_skb_store_bytes(skb, IP_SADDR_OFF, &new_saddr,
-				  sizeof(new_saddr), 0);
-	if (err)
-		return TC_ACT_SHOT;
-
-	/* Update IP daddr + IP csum. */
-	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_daddr, new_daddr,
-				  sizeof(new_daddr));
-	if (err)
-		return TC_ACT_SHOT;
-	err = bpf_skb_store_bytes(skb, IP_DADDR_OFF, &new_daddr,
-				  sizeof(new_daddr), 0);
-	if (err)
-		return TC_ACT_SHOT;
-
-	/* Compute the TCP checksum into the (currently zero) check field. */
-	err = tcp_ipv4_set_checksum(skb, tcp_csum_off, new_saddr, new_daddr,
-				    &new_tcp);
-	if (err)
-		return TC_ACT_SHOT;
-
-	return bpf_redirect(ifindex, 0);
-}
-
 static __always_inline struct snat_ip *pick_snat_ip_port(__u32 mvm_ip, const struct session_key *ekey,
 							 __u16 *selected_port)
 {
@@ -1137,7 +1022,7 @@ int from_cube(struct __sk_buff *skb)
 			sess = bpf_map_lookup_elem(&egress_sessions, &pmkey);
 			if (sess && session_is_stale(sess)) {
 				bpf_map_delete_elem(&egress_sessions, &pmkey);
-				return tcp_reply_reset(skb, ifindex);
+				return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
 			}
 
 			err = snat_tcp(skb, ifindex, l2, l3, l4, l4->source, *host_port);
@@ -1165,7 +1050,7 @@ int from_cube(struct __sk_buff *skb)
 		switch (classify_egress_flow(ifindex, daddr, 0)) {
 		case FLOW_REJECT:
 			if (proto == IPPROTO_TCP)
-				return tcp_reply_reset(skb, ifindex);
+				return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
 			return TC_ACT_SHOT;
 		default:
 			return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
@@ -1179,7 +1064,7 @@ int from_cube(struct __sk_buff *skb)
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_L7PROXY_OK)
 			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), BPF_F_INGRESS);
 		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_RESET)
-			return tcp_reply_reset(skb, ifindex);
+			return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
 		return TC_ACT_SHOT;
 	}
 

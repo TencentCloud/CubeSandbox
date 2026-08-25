@@ -73,7 +73,7 @@ static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr 
 		 * entry so a reconnect starts clean. port_mapping sessions have no
 		 * ingress entry. */
 		bpf_map_delete_elem(&egress_sessions, &pkey);
-		return tcp_reflect_reset(skb, skb->ingress_ifindex);
+		return tcp_send_reset(skb, skb->ingress_ifindex, l3->saddr);
 	}
 	if (!sess) {
 		/* New connection (SYN) or a rebuilt aged one (non-SYN). */
@@ -174,7 +174,7 @@ static int tcp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphd
 	if (isess->version != current_gen_by_ip(isess->vm_ip)) {
 		bpf_map_delete_elem(&egress_sessions, &ekey);
 		bpf_map_delete_elem(&ingress_sessions, &key);
-		return tcp_reflect_reset(skb, skb->ingress_ifindex);
+		return tcp_send_reset(skb, skb->ingress_ifindex, l3->saddr);
 	}
 
 	sess = bpf_map_lookup_elem(&egress_sessions, &ekey);

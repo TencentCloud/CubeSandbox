@@ -93,25 +93,32 @@ static __always_inline int rewrite_l3_tot_len(struct __sk_buff *skb,
 				   sizeof(new_tot_len), 0);
 }
 
-/* tcp_reflect_reset reflects a TCP RST back toward the sender of the
- * triggering packet, redirected out the interface it arrived on.
+/* tcp_send_reset builds a TCP RST from the triggering packet and redirects it
+ * out out_ifindex.
  *
- * The reply is a pure mirror of the trigger: source/destination IP, ports, and
- * MACs are swapped, so it works unchanged for guest-facing (mvmtap) and
- * peer/proxy-facing (nodenic/localgw) callers. Sequence numbers follow
+ * The reply mirrors the trigger except for its destination: new_saddr is the
+ * address the sender talked to (the trigger's destination), ports and MACs are
+ * swapped, and new_daddr is supplied by the caller. Sequence numbers follow
  * RFC 793/5961: if the trigger had ACK set, the RST's seq is that ack value
  * (which the sender accepts as within its window); otherwise the RST carries
  * ACK = trigger.seq + seg_len. Returns the bpf_redirect action, or TC_ACT_SHOT
  * when the packet can't be safely rewritten (GSO, fragmented, or a RST).
+ *
+ * Callers pick new_daddr per direction: peer/proxy-facing paths (nodenic /
+ * localgw) pass the trigger's source (l3->saddr, i.e. back to the sender);
+ * guest-facing paths (mvmtap) pass mvm_inner_ip, because from_cube rewrites the
+ * source to the sandbox's real IP before the reset, so the trigger's source is
+ * no longer the guest's TAP-side address.
  */
-static __always_inline int tcp_reflect_reset(struct __sk_buff *skb, __u32 out_ifindex)
+static __always_inline int tcp_send_reset(struct __sk_buff *skb, __u32 out_ifindex,
+					  __be32 new_daddr)
 {
 	struct tcphdr new_tcp = {};
 	union macaddr old_smac, old_dmac;
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct tcphdr *l4;
-	__be32 old_saddr, old_daddr, new_saddr, new_daddr;
+	__be32 old_saddr, old_daddr, new_saddr;
 	__be16 old_tot_len, new_tot_len;
 	__u32 seq, ack_seq, new_skb_len;
 	__u32 seg_len, tcp_off, tcp_csum_off;
@@ -140,10 +147,9 @@ static __always_inline int tcp_reflect_reset(struct __sk_buff *skb, __u32 out_if
 	if (!tcp_segment_len(l3, l4, &seg_len))
 		return TC_ACT_SHOT;
 
-	/* Mirror: the reply comes from the address the sender talked to, back
-	 * to the sender. */
+	/* The reply comes from the address the sender talked to; new_daddr is the
+	 * caller-chosen destination. */
 	new_saddr = l3->daddr;
-	new_daddr = l3->saddr;
 	new_tcp.source = l4->dest;
 	new_tcp.dest = l4->source;
 	new_tcp.doff = sizeof(new_tcp) >> 2;
