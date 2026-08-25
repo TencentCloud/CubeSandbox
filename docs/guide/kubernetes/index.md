@@ -10,8 +10,7 @@ This is the **native K8s path**: components run in the cluster and are managed b
 The current K8s deployment is a **preview** release. Known issues:
 
 1. When compute nodes are under resource pressure, Pods may be incorrectly evicted by the K8s control plane, interrupting sandboxes. This is being fixed.
-2. Compute-plane upgrades **recreate the `cube-node` Big Pod** (native DaemonSet) and **will interrupt existing sandboxes on that node**. Before upgrading, call CubeMaster’s isolate API, isolate the node for at least 60 seconds, and destroy the sandboxes on that node.
-3. Because sandbox networking on compute nodes is bound to the Pod’s network interface, recreating `cube-node` interrupts existing sandbox networks. To address this, you may use a Kubernetes plugin you are familiar with to achieve “in-place upgrade” — update container images without recreating the Pod. After deploying the current version, carefully evaluate changes and test before upgrading further.
+2. Compute-node upgrades currently have known issues: an upgrade recreates `cube-node` and interrupts existing sandbox networking on that node. Read the [Upgrade guide](./upgrade.md) **before you deploy**.
 
 **These issues will be addressed in later versions. You are welcome to try the K8s deployment path and report issues and suggestions via Issues.**
 :::
