@@ -9,8 +9,9 @@ Marked ``framework`` so they run on every gate without a live environment
 
 from __future__ import annotations
 
-import pytest
+from unittest import mock
 
+import pytest
 from framework.build_throttle import _concurrency, template_build_slot
 from framework.parallel import (
     apply_worker_count,
@@ -109,9 +110,8 @@ def test_current_worker_count_falls_back_when_count_unusable(monkeypatch, bad_co
 
 @pytest.mark.parametrize("worker_name", ["gw0", "gw1", "gw3"])
 def test_current_worker_count_fallback_is_worker_agnostic(monkeypatch, worker_name):
-    # When the authoritative count is missing, every worker must resolve the SAME
-    # count so timeout/retry scaling and the throttle-skip condition stay in sync.
-    # Deriving ``gwN + 1`` would make gw0 skip the build lock while peers hold it.
+    # When the authoritative count is missing, every worker must resolve the same
+    # count so timeout and retry scaling stay in sync.
     _clear_xdist_env(monkeypatch)
     monkeypatch.setenv("PYTEST_XDIST_WORKER", worker_name)
     monkeypatch.setattr("framework.parallel.os.cpu_count", lambda: 6)
@@ -253,7 +253,6 @@ def test_apply_worker_count_raises_on_malformed_env(monkeypatch):
 
 
 def _force_throttle_active(monkeypatch):
-    # Make template_build_slot take the locking path: >1 worker, concurrency 1.
     monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
     monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", "4")
     monkeypatch.delenv("SDK_E2E_TEMPLATE_BUILD_CONCURRENCY", raising=False)
@@ -290,17 +289,21 @@ def test_template_build_slot_degrades_on_timeout(monkeypatch):
     assert entered
 
 
-def test_template_build_slot_serial_is_noop(monkeypatch):
-    # A serial run (1 worker) never touches the lock dir at all.
+def test_template_build_slot_serial_uses_acquire_path(monkeypatch, tmp_path):
+    pytest.importorskip("fcntl")
     monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
     monkeypatch.delenv("PYTEST_XDIST_WORKER_COUNT", raising=False)
+    monkeypatch.setattr("framework.build_throttle._LOCK_DIR", tmp_path / "locks")
+    handle = mock.Mock()
+    handle.fileno.return_value = -1
 
-    def _should_not_run(_slots, _timeout):
-        raise AssertionError("serial run must not acquire a slot")
+    def _acquire(_slots, _timeout):
+        return handle, 0
 
-    monkeypatch.setattr("framework.build_throttle._acquire_any_slot", _should_not_run)
+    monkeypatch.setattr("framework.build_throttle._acquire_any_slot", _acquire)
     with template_build_slot(label="unit"):
-        pass
+        handle.close.assert_not_called()
+    handle.close.assert_called_once_with()
 
 
 def test_slot_wait_timeout_scales_with_workers(monkeypatch):

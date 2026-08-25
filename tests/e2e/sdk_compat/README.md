@@ -358,9 +358,9 @@ Optional:
   `--run-e2e`, so the hermetic `framework` gate stays serial.
 - `SDK_E2E_TEMPLATE_BUILD_CONCURRENCY`: max concurrent live template builds
   across xdist workers. Defaults to `1` (builds fully serialized so results match
-  a serial run); values `< 1` or non-integer fall back to `1`. When the value is
-  at least the worker count the throttle is skipped. POSIX-only (a no-op without
-  `fcntl`). The throttle is namespaced per-UID, not per-run: two concurrent
+  a serial run); values `< 1` or non-integer fall back to `1`. POSIX-only (a
+  no-op without `fcntl`). The throttle is namespaced per-UID, not per-run: two
+  concurrent
   `--run-e2e` jobs of the same user on one host share the slots and serialize
   their builds against each other. This is intentional -- both jobs contend on
   the one shared build host -- and the `SDK_E2E_TEMPLATE_BUILD_WAIT` ceiling

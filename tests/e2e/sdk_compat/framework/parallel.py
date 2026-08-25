@@ -16,8 +16,8 @@ import os
 # ``PYTEST_XDIST_WORKER_COUNT`` is missing. The fallback multiplies timeout and
 # capacity-retry budgets, so an uncapped ``os.cpu_count()`` on a many-core box
 # would inflate a 300s READY budget into hours. Cap it to a sane ceiling: still
-# large enough to keep the throttle engaged and the budgets generous, but not
-# absurd. The authoritative count (when present) is trusted as-is because the
+# large enough to keep timeout and retry budgets generous, but not absurd. The
+# authoritative count (when present) is trusted as-is because the
 # operator chose it explicitly via ``-n``/``SDK_E2E_WORKERS``.
 _MAX_FALLBACK_WORKERS = 8
 
@@ -64,14 +64,13 @@ def current_worker_count() -> int:
     (present since well before the pinned ``>=3.0``). It reflects the operator's
     chosen ``-n``, so it is trusted as-is with no cap. If it is somehow absent we
     cannot know the true count -- deriving ``gwN + 1`` from ``PYTEST_XDIST_WORKER``
-    would return a *different* value on every worker (``gw0``->1, ``gw1``->2, ...),
-    which would desync ``scale_timeout_for_xdist``/``_scale_capacity_retries_for_xdist``
-    across workers and, worse, let ``gw0`` evaluate ``slots >= 1`` and skip the
-    build throttle entirely while its peers serialize. So when the authoritative
-    count is missing, fall back to a value every worker agrees on: ``os.cpu_count()``
-    (a host constant) capped at ``_MAX_FALLBACK_WORKERS`` -- biased high enough to
-    keep the throttle engaged, but bounded so timeout/retry budgets are not
-    inflated into hours on a many-core box. If we are not under xdist at all, the
+    would return a *different* value on every worker (``gw0``->1, ``gw1``->2, ...)
+    and desync ``scale_timeout_for_xdist`` and
+    ``_scale_capacity_retries_for_xdist`` across workers. Fall back to a value
+    every worker agrees on: ``os.cpu_count()`` (a host constant) capped at
+    ``_MAX_FALLBACK_WORKERS`` -- biased high enough to keep timeout/retry budgets
+    generous, but bounded so they are not inflated into hours on a many-core box.
+    If we are not under xdist at all, the
     run is serial, so return ``1``.
     """
     count = os.environ.get("PYTEST_XDIST_WORKER_COUNT")
