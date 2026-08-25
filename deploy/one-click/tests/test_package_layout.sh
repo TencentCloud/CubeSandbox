@@ -69,6 +69,25 @@ test_component_build_inputs_exist() {
   if ! grep -q -F 'cube-volume-s3' "${BUNDLE_SH}"; then
     fail "build-release-bundle.sh must copy examples/volume/s3 plugin into CubeMaster/plugin and Cubelet/plugin"
   fi
+  require_file "${ONE_CLICK_DIR}/lib/awscli-bundle.sh" "AWS CLI bundle helper"
+  require_file "${ONE_CLICK_DIR}/assets/vendor/awscli/VERSION" "AWS CLI pin version"
+  require_file "${ONE_CLICK_DIR}/assets/vendor/awscli/SHA256SUMS" "AWS CLI sha256 pins"
+  require_file "${ONE_CLICK_DIR}/assets/vendor/awscli/.gitignore" "AWS CLI zip gitignore"
+  if ! grep -q -F '*.zip' "${ONE_CLICK_DIR}/assets/vendor/awscli/.gitignore"; then
+    fail "assets/vendor/awscli/.gitignore must ignore *.zip"
+  fi
+  if ! grep -q -F 'lib/awscli-bundle.sh' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must source lib/awscli-bundle.sh"
+  fi
+  if ! grep -q -F 'stage_awscli_bundle_into_package' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must stage AWS CLI into support/vendor/awscli/"
+  fi
+  if ! grep -q -F '${PACKAGE_ROOT}/support/vendor/awscli' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must mention \${PACKAGE_ROOT}/support/vendor/awscli"
+  fi
+  if grep -E 'awscli-exe-linux-(x86_64|aarch64)\.zip"' "${ROOT_DIR}/examples/volume/s3/install-deps.sh" >/dev/null; then
+    fail "install-deps.sh must not use an unversioned AWS CLI download URL"
+  fi
 }
 
 # 2) The component image base names must match between what build_images.sh
@@ -286,6 +305,12 @@ test_env_templates_are_split() {
     || fail "build.env.example missing ONE_CLICK_CUBEMASTER_BIN"
   grep -q 'ONE_CLICK_MKCERT_BIN=' "${build_example}" \
     || fail "build.env.example missing ONE_CLICK_MKCERT_BIN"
+  grep -q 'ONE_CLICK_AWSCLI_VERSION=' "${build_example}" \
+    || fail "build.env.example missing ONE_CLICK_AWSCLI_VERSION"
+  grep -q 'ONE_CLICK_AWSCLI_ZIP=' "${build_example}" \
+    || fail "build.env.example missing ONE_CLICK_AWSCLI_ZIP"
+  grep -q 'assets/vendor/awscli' "${build_example}" \
+    || fail "build.env.example must document the AWS CLI cache directory"
   grep -q 'ONE_CLICK_WEB_DIST_DIR=' "${build_example}" \
     || fail "build.env.example missing ONE_CLICK_WEB_DIST_DIR"
 
@@ -302,6 +327,8 @@ test_env_templates_are_split() {
 test_build_scripts_parse() {
   local f
   for f in "${BUNDLE_SH}" "${BUILD_IMAGES_SH}" \
+    "${ONE_CLICK_DIR}/lib/awscli-bundle.sh" \
+    "${ROOT_DIR}/examples/volume/s3/install-deps.sh" \
     "${TF_DIR}/create.sh" "${TF_DIR}/destroy.sh" \
     "${TF_DIR}/lib-phases.sh" "${TF_DIR}/lib-state-sync.sh" "${TF_DIR}/validate.sh"; do
     bash -n "${f}" || fail "syntax error in ${f}"

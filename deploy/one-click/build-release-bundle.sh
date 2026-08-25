@@ -6,6 +6,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
+# shellcheck source=./lib/awscli-bundle.sh
+source "${SCRIPT_DIR}/lib/awscli-bundle.sh"
 
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 load_build_env
@@ -817,6 +819,10 @@ copy_dir_contents "${CUBE_LCM_TEMPLATE_DIR}" "${PACKAGE_ROOT}/cube-lifecycle-man
 build_web_dist "${PACKAGE_ROOT}/webui/dist"
 copy_dir_contents "${CUBE_SUPPORT_TEMPLATE_DIR}" "${PACKAGE_ROOT}/support"
 copy_file "${MKCERT_BIN_ASSET}" "${PACKAGE_ROOT}/support/bin/mkcert"
+# Pin AWS CLI v2 next to mkcert so control-node install uses
+# ${PACKAGE_ROOT}/support/vendor/awscli/ and does not download from
+# awscli.amazonaws.com. Cache hits under assets/vendor/awscli/ skip the fetch.
+stage_awscli_bundle_into_package "${PACKAGE_ROOT}"
 
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-shim" "${PACKAGE_ROOT}/cube-shim"
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf" "${PACKAGE_ROOT}/cube-kernel-scf"

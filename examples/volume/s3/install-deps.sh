@@ -9,6 +9,7 @@
 #   --jq     JSON parsing               (both; binary plugin stdout)
 #   --all    everything above           (single-host deployments)
 #   --check-only   verify, install nothing
+#   --print-aws-source  print zip source (bundle path or download URL) and exit
 #
 # All three tools ship for amd64 and arm64, so this script works unchanged on
 # ARM64 Cube clusters.
@@ -18,6 +19,7 @@
 #   sudo ./install-deps.sh --aws --jq         # CubeMaster node
 #   sudo ./install-deps.sh --all              # both roles on one host
 #   ./install-deps.sh --all --check-only      # no root needed
+#   AWSCLI_BUNDLE_ZIP=/path/to.zip ./install-deps.sh --print-aws-source
 
 set -euo pipefail
 
@@ -25,6 +27,10 @@ WANT_S3FS=0
 WANT_AWS=0
 WANT_JQ=0
 CHECK_ONLY=0
+PRINT_AWS_SOURCE=0
+
+# Keep in sync with deploy/one-click/assets/vendor/awscli/VERSION.
+AWSCLI_VERSION="${AWSCLI_VERSION:-2.36.30}"
 
 log()  { printf '[s3-deps] %s\n' "$*"; }
 die()  { printf '[s3-deps] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -36,16 +42,17 @@ while [[ $# -gt 0 ]]; do
         --jq)         WANT_JQ=1;   shift ;;
         --all)        WANT_S3FS=1; WANT_AWS=1; WANT_JQ=1; shift ;;
         --check-only) CHECK_ONLY=1; shift ;;
-        -h|--help)    sed -n '4,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --print-aws-source) PRINT_AWS_SOURCE=1; shift ;;
+        -h|--help)    sed -n '4,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)            die "unknown argument: $1" ;;
     esac
 done
 
-if [[ "$WANT_S3FS$WANT_AWS$WANT_JQ" == "000" ]]; then
+if [[ "$WANT_S3FS$WANT_AWS$WANT_JQ" == "000" && "$PRINT_AWS_SOURCE" -eq 0 ]]; then
     die "nothing selected; pass --s3fs / --aws / --jq / --all (see --help)"
 fi
 
-if [[ "$CHECK_ONLY" -eq 0 && "$(id -u)" -ne 0 ]]; then
+if [[ "$CHECK_ONLY" -eq 0 && "$PRINT_AWS_SOURCE" -eq 0 && "$(id -u)" -ne 0 ]]; then
     die "must run as root to install (or pass --check-only)"
 fi
 
@@ -63,7 +70,42 @@ elif command -v yum >/dev/null 2>&1; then
 fi
 
 ARCH="$(uname -m)"
-log "host arch: ${ARCH}, package manager: ${PKG:-none}"
+if [[ "$PRINT_AWS_SOURCE" -eq 0 ]]; then
+    log "host arch: ${ARCH}, package manager: ${PKG:-none}"
+fi
+
+aws_linux_arch() {
+    case "$ARCH" in
+        x86_64|amd64)  printf '%s\n' "x86_64" ;;
+        aarch64|arm64) printf '%s\n' "aarch64" ;;
+        *)             die "unsupported architecture for AWS CLI: ${ARCH}" ;;
+    esac
+}
+
+# Prints "bundle<TAB>path" or "download<TAB>url". Prefers a packaged zip so
+# one-click control nodes never hit awscli.amazonaws.com.
+resolve_aws_zip() {
+    local arch zip script_dir
+    arch="$(aws_linux_arch)"
+    if [[ -n "${AWSCLI_BUNDLE_ZIP:-}" ]]; then
+        [[ -f "${AWSCLI_BUNDLE_ZIP}" ]] || die "AWSCLI_BUNDLE_ZIP not found: ${AWSCLI_BUNDLE_ZIP}"
+        printf 'bundle\t%s\n' "${AWSCLI_BUNDLE_ZIP}"
+        return 0
+    fi
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    zip="${script_dir}/../../support/vendor/awscli/awscli-exe-linux-${arch}.zip"
+    if [[ -f "${zip}" ]]; then
+        printf 'bundle\t%s\n' "$(cd "$(dirname "${zip}")" && pwd)/$(basename "${zip}")"
+        return 0
+    fi
+    printf 'download\thttps://awscli.amazonaws.com/awscli-exe-linux-%s-%s.zip\n' \
+        "${arch}" "${AWSCLI_VERSION}"
+}
+
+if [[ "$PRINT_AWS_SOURCE" -eq 1 ]]; then
+    resolve_aws_zip
+    exit 0
+fi
 
 pkg_install() {
     case "$PKG" in
@@ -117,23 +159,23 @@ install_aws() {
     fi
 
     log "install AWS CLI v2"
-    local awszip url tmp
-    case "$ARCH" in
-        x86_64|amd64)  url="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" ;;
-        aarch64|arm64) url="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" ;;
-        *)             die "unsupported architecture for AWS CLI: ${ARCH}" ;;
-    esac
+    local kind src tmp
+    IFS=$'\t' read -r kind src < <(resolve_aws_zip)
 
     command -v unzip >/dev/null 2>&1 || { pkg_refresh; pkg_install unzip; }
-    command -v curl  >/dev/null 2>&1 || { pkg_refresh; pkg_install curl; }
 
     tmp="$(mktemp -d)"
-    awszip="${tmp}/awscliv2.zip"
-    log "downloading ${url}"
-    curl -fsSL "$url" -o "$awszip"
-    unzip -q "$awszip" -d "$tmp"
+    if [[ "${kind}" == "bundle" ]]; then
+        log "using bundled zip ${src}"
+        unzip -q "${src}" -d "${tmp}"
+    else
+        command -v curl >/dev/null 2>&1 || { pkg_refresh; pkg_install curl; }
+        log "downloading ${src}"
+        curl -fsSL "${src}" -o "${tmp}/awscliv2.zip"
+        unzip -q "${tmp}/awscliv2.zip" -d "${tmp}"
+    fi
     "${tmp}/aws/install" --update
-    rm -rf "$tmp"
+    rm -rf "${tmp}"
 }
 
 # ---------------------------------------------------------------------------
