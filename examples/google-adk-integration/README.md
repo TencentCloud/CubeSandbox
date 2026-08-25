@@ -62,6 +62,7 @@ temporary sandbox when the tool call finishes.
 ## Notes
 
 - Use a template that supports the E2B code interpreter `run_code` path.
-- For production use, pin the resolved `google-adk` and `e2b-code-interpreter`
-  versions after validating them with your CubeSandbox release.
+- The E2B packages are pinned to a pair that plain `pip` can install and that is
+  listed in the repository's SDK compatibility notes. Revalidate before changing
+  either package version.
 - If your CubeAPI uses a self-signed certificate, set `CUBE_SSL_CERT_FILE`.

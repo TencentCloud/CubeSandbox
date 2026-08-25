@@ -30,11 +30,11 @@ tool's code execution crosses into CubeSandbox.
 | Google ADK | Python package `google-adk>=2.0.0` |
 | Python | 3.10+ |
 | CubeSandbox | E2B-compatible CubeAPI and a template that supports `run_code` |
-| SDK path | `e2b-code-interpreter` pointed at CubeAPI through `E2B_API_URL` |
+| SDK path | `e2b==2.26.0` and `e2b-code-interpreter==2.8.1`, pointed at CubeAPI through `E2B_API_URL` |
 
-Google ADK is evolving quickly. Pin the resolved `google-adk` and
-`e2b-code-interpreter` versions after validating them against your CubeSandbox
-deployment.
+Google ADK is evolving quickly. The example pins the E2B packages to a pair
+that plain `pip` can install and that is recorded in the repository's SDK
+compatibility notes. Revalidate before changing either package version.
 
 ## Prerequisites
 
@@ -97,14 +97,18 @@ root_agent = Agent(
 The tool itself keeps the Cube-specific logic in one place:
 
 ```python
+import os
+
 from e2b_code_interpreter import Sandbox
 
 def run_python_in_cube(code: str) -> dict:
     template_id = os.environ["CUBE_TEMPLATE_ID"]
     with Sandbox.create(template=template_id, timeout=300) as sandbox:
         execution = sandbox.run_code(code)
+        stdout = "".join(str(item) for item in execution.logs.stdout)
         return {
-            "stdout": execution.text,
+            "stdout": stdout,
+            "text": execution.text,
             "error": str(execution.error) if execution.error else None,
         }
 ```

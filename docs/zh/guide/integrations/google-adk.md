@@ -25,9 +25,9 @@ lang: zh-CN
 | Google ADK | Python package `google-adk>=2.0.0` |
 | Python | 3.10+ |
 | CubeSandbox | E2B-compatible CubeAPI，以及支持 `run_code` 的模板 |
-| SDK 路径 | 通过 `E2B_API_URL` 指向 CubeAPI 的 `e2b-code-interpreter` |
+| SDK 路径 | 通过 `E2B_API_URL` 指向 CubeAPI 的 `e2b==2.26.0` 和 `e2b-code-interpreter==2.8.1` |
 
-Google ADK 仍在快速演进。生产使用前，应在你的 CubeSandbox 部署上验证并固定 `google-adk` 与 `e2b-code-interpreter` 的具体版本。
+Google ADK 仍在快速演进。示例把 E2B 相关包固定到一个 plain `pip` 可直接安装、且已记录在仓库 SDK compatibility notes 中的组合。修改任一版本前请重新验证。
 
 ## 前置条件
 
@@ -86,14 +86,18 @@ root_agent = Agent(
 工具函数把 Cube 相关逻辑集中在一处：
 
 ```python
+import os
+
 from e2b_code_interpreter import Sandbox
 
 def run_python_in_cube(code: str) -> dict:
     template_id = os.environ["CUBE_TEMPLATE_ID"]
     with Sandbox.create(template=template_id, timeout=300) as sandbox:
         execution = sandbox.run_code(code)
+        stdout = "".join(str(item) for item in execution.logs.stdout)
         return {
-            "stdout": execution.text,
+            "stdout": stdout,
+            "text": execution.text,
             "error": str(execution.error) if execution.error else None,
         }
 ```
