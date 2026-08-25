@@ -71,6 +71,7 @@ cp .env.example .env
 | `CUBE_SANDBOX_TIMEOUT` | 可选的沙箱生命周期上限，单位秒，会传给 `Sandbox.create(timeout=...)`；默认值为 `300` |
 | `CUBE_RUN_CODE_TIMEOUT` | 可选的单次代码执行超时，单位秒，会传给 `sandbox.run_code(timeout=...)`；默认值为 `60` |
 | `CUBE_USE_DEV_SIDECAR` | 可选的本地开发开关。设为 `true` 时，会在创建沙箱前调用 E2B dev-sidecar |
+| `CUBE_REMOTE_PROXY_BASE` | `CUBE_USE_DEV_SIDECAR=true` 时必需；sidecar 使用的 CubeProxy 数据面地址，dev-env 中通常是 `https://127.0.0.1:11443` |
 | `CUBE_SSL_CERT_FILE` | 自签部署可选的 CubeSandbox CA bundle |
 
 ## 集成代码片段
@@ -116,7 +117,8 @@ def run_python_in_cube(code: str) -> dict:
 
 可运行示例也支持 `CUBE_USE_DEV_SIDECAR=true`，用于没有泛域名 DNS 的本地开发环境。该模式会在创建沙箱前调用
 [`examples/e2b-dev-sidecar`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar)
-中的 sidecar setup，因此也需要配置该示例使用的 `CUBE_REMOTE_PROXY_*` 变量。
+中的 sidecar setup，因此也需要在本示例的 `.env` 文件中配置 `CUBE_REMOTE_PROXY_*` 变量，或把它们导出到
+ADK 进程环境中。不要只修改 `examples/e2b-dev-sidecar/.env`；本示例不会加载那个文件。
 
 ### 迁移已有本地代码执行工具
 

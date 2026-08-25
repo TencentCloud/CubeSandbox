@@ -64,6 +64,14 @@ def main() -> None:
 
     fallback = cube_code_tool._execution_to_dict(EmptyLogExecution(), ["callback\n"])
     assert fallback["stdout"] == "callback\n"
+
+    empty_code = cube_code_tool.run_python_in_cube("  ")
+    assert empty_code == {
+        "stdout": "",
+        "text": None,
+        "error": "code must not be empty",
+        "results_count": 0,
+    }
     print("GOOGLE_ADK_CUBE_SMOKE_OK")
 
 

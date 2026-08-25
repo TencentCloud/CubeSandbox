@@ -58,7 +58,8 @@ agent 应调用 `run_python_in_cube`，基于 `CUBE_TEMPLATE_ID` 创建 CubeSand
 - 请使用支持 E2B code interpreter `run_code` 路径的模板。
 - E2B 相关包已固定到一个 plain `pip` 可直接安装、且记录在仓库 SDK compatibility notes 中的组合。修改任一版本前请重新验证。
 - `CUBE_SANDBOX_TIMEOUT` 控制临时沙箱生命周期，`CUBE_RUN_CODE_TIMEOUT` 控制每次 `run_code` 执行。
-- 本地开发没有泛域名 DNS 时，可以设置 `CUBE_USE_DEV_SIDECAR=true`，并配置
-  `examples/e2b-dev-sidecar` 文档中的 `CUBE_REMOTE_PROXY_*` 变量。
+- 本地开发没有泛域名 DNS 时，可以设置 `CUBE_USE_DEV_SIDECAR=true`，并在本示例的 `.env`
+  中配置 `CUBE_REMOTE_PROXY_*` 变量，或把它们导出到 ADK 进程环境中。不要只修改
+  `examples/e2b-dev-sidecar/.env`；本示例不会加载那个文件。
 - 如果 CubeAPI 使用自签证书，请设置 `CUBE_SSL_CERT_FILE`。这会在进程级导出 `SSL_CERT_FILE`，
   因此 CA bundle 也需要保留模型提供商的 TLS 信任。
