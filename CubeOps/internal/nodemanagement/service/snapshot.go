@@ -260,6 +260,8 @@ func ToSchedulerNode(snap *model.NodeSnapshot) *model.SchedulerNode {
 		CreateConcurrentNum:   snap.CreateConcurrentNum,
 		MaxMvmLimit:           snap.MaxMvmNum,
 		MetaDataUpdateAt:      snap.HeartbeatTime,
+		QuotaCpu:              quotaCPU,
+		QuotaMem:              quotaMem,
 		MetricUpdate:          snap.MetricUpdate,
 		MetricLocalUpdateAt:   snap.MetricLocalUpdateAt,
 		QuotaCpuUsage:         snap.QuotaCpuUsage,

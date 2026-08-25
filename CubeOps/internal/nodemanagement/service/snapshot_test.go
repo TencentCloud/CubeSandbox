@@ -249,6 +249,26 @@ func TestToSchedulerNode_PreservesSchedulingFields(t *testing.T) {
 	if n.SystemDiskSize != 100 || n.DataDiskSize != 200 {
 		t.Errorf("disk sizes = %d/%d, want 100/200", n.SystemDiskSize, n.DataDiskSize)
 	}
+	// QuotaCpu/QuotaMem must be propagated so CubeMaster can schedule
+	// sandboxes. Without them the scheduler sees 0 quota -> "no more resource".
+	if n.QuotaCpu != 4000 {
+		t.Errorf("QuotaCpu = %d, want 4000 (fallback to Allocatable.MilliCPU)", n.QuotaCpu)
+	}
+	if n.QuotaMem != 8192 {
+		t.Errorf("QuotaMem = %d, want 8192 (fallback to Allocatable.MemoryMB)", n.QuotaMem)
+	}
+}
+
+func TestToSchedulerNode_QuotaFromSnapshot(t *testing.T) {
+	snap := &model.NodeSnapshot{
+		NodeID:     "node-1",
+		QuotaCPU:   6000,
+		QuotaMemMB: 12288,
+	}
+	n := ToSchedulerNode(snap)
+	if n.QuotaCpu != 6000 || n.QuotaMem != 12288 {
+		t.Errorf("quota = %d/%d, want 6000/12288 (from snap.QuotaCPU/QuotaMemMB)", n.QuotaCpu, n.QuotaMem)
+	}
 }
 
 func TestApplyHostMetaToSnapshot(t *testing.T) {
