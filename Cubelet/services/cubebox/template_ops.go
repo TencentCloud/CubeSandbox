@@ -263,9 +263,11 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	rsp.AgentVersion = versions.Agent
 	rsp.KernelVersion = versions.Kernel
 	rsp.ShimVersion = versions.Shim
-	// The source sandbox stays running through commit, so probe its real envd
-	// version in-guest after the memory snapshot. Best-effort: empty on failure.
-	rsp.EnvdVersion = s.collectEnvdVersion(ctx, rsp.SandboxID)
+	// The template's envd version is propagated on Create and retained in the
+	// CubeBox annotations. Reuse it here instead of synchronously entering the
+	// guest after every snapshot; legacy templates without the annotation keep
+	// the previous best-effort behavior of returning an empty version.
+	rsp.EnvdVersion = envdVersionFromCubeBox(cb)
 	if err := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
 		SnapshotID:        rsp.TemplateID,
 		InstanceType:      "cubebox",
