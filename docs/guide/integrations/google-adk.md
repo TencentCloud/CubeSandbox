@@ -27,14 +27,17 @@ tool's code execution crosses into CubeSandbox.
 
 | Component | Baseline |
 | --- | --- |
-| Google ADK | Python package `google-adk>=2.0.0` |
+| Google ADK | Python package `google-adk==2.7.1` |
 | Python | 3.10+ |
 | CubeSandbox | E2B-compatible CubeAPI, a reachable CubeProxy data plane, and a template that supports `run_code` |
 | SDK path | `e2b==2.26.0` and `e2b-code-interpreter==2.8.1`, pointed at CubeAPI through `E2B_API_URL` |
 
-Google ADK is evolving quickly. The example pins the E2B packages to a pair
-that plain `pip` can install and that is recorded in the repository's SDK
-compatibility notes. Revalidate before changing either package version.
+Google ADK is evolving quickly, so the runnable example pins the ADK package.
+The E2B packages are pinned to a pair that plain `pip` can install and that is
+recorded in the repository's SDK compatibility notes. This PR does not include
+a live `run_code` validation against that exact pair and a real CubeSandbox
+deployment, so revalidate the live path before changing package versions or
+using this example as a production baseline.
 
 ## Prerequisites
 
@@ -108,7 +111,9 @@ root_agent = Agent(
 )
 ```
 
-The tool itself keeps the Cube-specific logic in one place:
+The simplified tool shape keeps the Cube-specific logic in one place. The
+runnable example includes additional environment loading, stderr handling,
+sidecar setup, and cross-version output normalization:
 
 ```python
 import os
@@ -120,8 +125,10 @@ def run_python_in_cube(code: str) -> dict:
     with Sandbox.create(template=template_id, timeout=300) as sandbox:
         execution = sandbox.run_code(code, timeout=60)
         stdout = "".join(str(item) for item in execution.logs.stdout)
+        stderr = "".join(str(item) for item in execution.logs.stderr)
         return {
             "stdout": stdout,
+            "stderr": stderr,
             "text": execution.text,
             "error": str(execution.error) if execution.error else None,
         }
@@ -151,7 +158,8 @@ not load that file.
 The agent definition can remain unchanged if it already references the original
 code execution tool. Update prompts or result handling if they depend on fields
 that differ from this example's `stdout`, `text`, `error`, and `results_count`
-shape.
+shape. The runnable example also returns `stderr` so the agent can inspect
+tracebacks and diagnostic output from failed runs.
 
 ## Runnable Demo
 
@@ -207,6 +215,9 @@ and deletes the temporary sandbox when the tool call finishes.
 
 - The example validates imports and wiring offline. A full live run requires a
   reachable CubeSandbox deployment and a `run_code`-capable template.
+- The E2B package pair is selected for plain-pip install compatibility recorded
+  in the repository. This PR does not verify `run_code` against a live
+  CubeSandbox deployment for that exact pair.
 - Google ADK's native Agent Runtime Code Execution tool targets Google Cloud
   Agent Runtime. This guide uses a custom ADK function tool so CubeSandbox can
   provide the execution backend.

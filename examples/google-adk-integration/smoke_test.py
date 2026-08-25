@@ -42,6 +42,7 @@ def main() -> None:
 
     class Logs:
         stdout = [LogItem(), "world\n"]
+        stderr = ["warning\n"]
 
     class Execution:
         logs = Logs()
@@ -49,25 +50,33 @@ def main() -> None:
         error = None
         results = []
 
-    result = cube_code_tool._execution_to_dict(Execution(), [])
+    result = cube_code_tool._execution_to_dict(Execution(), [], [])
     assert result["stdout"] == "hello\nworld\n"
+    assert result["stderr"] == "warning\n"
     assert result["text"] == "hello world"
     assert result["error"] is None
 
     class EmptyLogs:
         stdout: list[str] = []
+        stderr: list[str] = []
 
     class EmptyLogExecution:
         logs = EmptyLogs()
         text = ""
         error = None
 
-    fallback = cube_code_tool._execution_to_dict(EmptyLogExecution(), ["callback\n"])
+    fallback = cube_code_tool._execution_to_dict(
+        EmptyLogExecution(),
+        ["callback\n"],
+        ["callback error\n"],
+    )
     assert fallback["stdout"] == "callback\n"
+    assert fallback["stderr"] == "callback error\n"
 
     empty_code = cube_code_tool.run_python_in_cube("  ")
     assert empty_code == {
         "stdout": "",
+        "stderr": "",
         "text": None,
         "error": "code must not be empty",
         "results_count": 0,
