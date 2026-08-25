@@ -81,6 +81,7 @@ RUN . /etc/buildenv \
         build-essential \
         ca-certificates \
         clang \
+        cmake \
         cpio \
         curl \
         dmsetup \
@@ -93,29 +94,49 @@ RUN . /etc/buildenv \
         git \
         git-lfs \
         jq \
+        libaio-dev \
         libcap-dev \
         libcap-ng-dev \
+        libcmocka-dev \
+        libcunit1-dev \
         libdevmapper-dev \
         libelf-dev \
         libbpf-dev \
+        libfuse3-dev \
         libglib2.0-dev \
-        libiberty-dev \
+        libiscsi-dev \
+        libjson-c-dev \
+        libkeyutils-dev \
+        libncurses5-dev \
+        libncursesw5-dev \
+        libnuma-dev \
         libpixman-1-dev \
         libseccomp-dev \
         libssl-dev \
         libtool \
         llvm \
         make \
+        meson \
         mtools \
         musl-tools \
         docker.io \
+        nasm \
+        ninja-build \
         ntfs-3g \
+        patchelf \
         pkg-config \
+        procps \
         python-is-python3 \
         python3 \
+        python3-dev \
         python3-distutils \
         python3-pip \
+        python3-pyelftools \
         python3-setuptools \
+        python3-venv \
+        python3.9 \
+        python3.9-distutils \
+        python3.9-venv \
         qemu-utils \
         socat \
         sudo \
@@ -125,6 +146,9 @@ RUN . /etc/buildenv \
         xz-utils \
         zip \
         zlib1g-dev \
+        autoconf \
+        automake \
+        help2man \
         gnupg \
         lsb-release \
         software-properties-common \
@@ -136,6 +160,22 @@ RUN . /etc/buildenv \
        apt-get install -y gcc-x86-64-linux-gnu; \
     fi \
     && rm -rf /var/lib/apt/lists/*
+
+# Python build-deps for CubeS3lvol's SPDK/DPDK (populated by setup_dep.sh).
+# The pinned SPDK needs python >= 3.9 (genrpc.py uses
+# argparse.BooleanOptionalAction) and DPDK needs meson >= 0.57.2, neither of
+# which ubuntu 20.04's stock python3.8 / apt meson (0.53.2) provides. Install
+# python3.9 and keep its toolchain in a venv that setup_dep.sh puts on its own
+# PATH, so the shared builder's /usr/bin/python3 and apt meson stay untouched
+# for the Go/Rust/kernel tracks.
+RUN /usr/bin/python3.9 -m venv /opt/s3lvol-tools \
+    && /opt/s3lvol-tools/bin/pip install --no-cache-dir \
+        meson==1.10.0 \
+        ninja==1.11.1 \
+        jinja2==3.1.4 \
+        tabulate==0.9.0 \
+        pyelftools==0.31
+
 # Install clang-14. With LLVM_MIRROR_BASE set, fetch llvm.sh from the mirror and
 # pass `-m` so the apt repo/packages resolve to the mirror too (the upstream
 # script otherwise hardcodes BASE_URL=apt.llvm.org). Note: llvm.sh always fetches
