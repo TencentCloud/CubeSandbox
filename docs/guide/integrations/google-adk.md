@@ -56,7 +56,9 @@ Configure wildcard DNS for production deployments, or use the
 [E2B development sidecar](/guide/connect-existing-cluster) for local
 development without wildcard DNS. If your deployment uses TLS with a self-signed
 certificate, set `CUBE_SSL_CERT_FILE` so the example can export `SSL_CERT_FILE`
-before opening the sandbox.
+before opening the sandbox. `SSL_CERT_FILE` is process-global; use a CA bundle
+that also preserves model-provider TLS trust, or leave it unset when CubeAPI is
+served with a public certificate.
 :::
 
 ## Setup
@@ -81,6 +83,8 @@ Configure `.env`:
 | `GOOGLE_API_KEY` | Google model API key used by ADK |
 | `GOOGLE_ADK_MODEL` | ADK model name, for example `gemini-2.5-flash` |
 | `CUBE_SANDBOX_TIMEOUT` | Optional sandbox lifetime bound in seconds, passed to `Sandbox.create(timeout=...)`; defaults to `300` |
+| `CUBE_RUN_CODE_TIMEOUT` | Optional per-call execution timeout in seconds, passed to `sandbox.run_code(timeout=...)`; defaults to `60` |
+| `CUBE_USE_DEV_SIDECAR` | Optional local-development switch. Set to `true` to call the E2B dev-sidecar before sandbox creation |
 | `CUBE_SSL_CERT_FILE` | Optional CubeSandbox CA bundle for self-signed deployments |
 
 ## Integration Snippet
@@ -113,7 +117,7 @@ from e2b_code_interpreter import Sandbox
 def run_python_in_cube(code: str) -> dict:
     template_id = os.environ["CUBE_TEMPLATE_ID"]
     with Sandbox.create(template=template_id, timeout=300) as sandbox:
-        execution = sandbox.run_code(code)
+        execution = sandbox.run_code(code, timeout=60)
         stdout = "".join(str(item) for item in execution.logs.stdout)
         return {
             "stdout": stdout,
@@ -125,6 +129,12 @@ def run_python_in_cube(code: str) -> dict:
 Compared with a host-side Python tool, only the tool body changes. The ADK agent
 still sees a regular function tool with structured inputs and outputs.
 
+The runnable example also supports `CUBE_USE_DEV_SIDECAR=true` for local
+development without wildcard DNS. That mode calls the sidecar setup from
+[`examples/e2b-dev-sidecar`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar)
+before sandbox creation, so configure that example's `CUBE_REMOTE_PROXY_*`
+variables as well.
+
 ### Migrating a local ADK code tool
 
 ```diff
@@ -135,8 +145,10 @@ still sees a regular function tool with structured inputs and outputs.
 +     return run_python_in_cube(code)
 ```
 
-The agent definition and prompts can remain unchanged if they already reference
-the original code execution tool.
+The agent definition can remain unchanged if it already references the original
+code execution tool. Update prompts or result handling if they depend on fields
+that differ from this example's `stdout`, `text`, `error`, and `results_count`
+shape.
 
 ## Runnable Demo
 
@@ -176,8 +188,9 @@ and deletes the temporary sandbox when the tool call finishes.
   tool call for simplicity. For multi-step notebooks, keep a sandbox handle in a
   session-scoped service and delete it when the ADK session ends.
 - **Timeouts:** set `CUBE_SANDBOX_TIMEOUT` or pass a fixed timeout to
-  `Sandbox.create(...)` for the sandbox lifetime. This does not set a per-call
-  `run_code` execution timeout.
+  `Sandbox.create(...)` for the sandbox lifetime. Set `CUBE_RUN_CODE_TIMEOUT`
+  or pass `timeout=...` to `sandbox.run_code(...)` for the per-call execution
+  limit.
 - **Network policy:** create sandboxes with Cube-specific egress controls when
   generated code must only reach approved hosts. See
   [network policy](/guide/network-policy).

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import os
 
-from dotenv import load_dotenv
 from google.adk import Agent
 
-from cube_code_tool import run_python_in_cube
+from cube_code_tool import load_environment, run_python_in_cube
 
 
-load_dotenv(override=False)
+load_environment()
 
 root_agent = Agent(
     name="cube_code_agent",

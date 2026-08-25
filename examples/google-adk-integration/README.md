@@ -65,4 +65,11 @@ temporary sandbox when the tool call finishes.
 - The E2B packages are pinned to a pair that plain `pip` can install and that is
   listed in the repository's SDK compatibility notes. Revalidate before changing
   either package version.
+- `CUBE_SANDBOX_TIMEOUT` controls the temporary sandbox lifetime.
+  `CUBE_RUN_CODE_TIMEOUT` controls each `run_code` execution.
+- For local development without wildcard DNS, set `CUBE_USE_DEV_SIDECAR=true`
+  and configure the `CUBE_REMOTE_PROXY_*` variables documented in
+  `examples/e2b-dev-sidecar`.
 - If your CubeAPI uses a self-signed certificate, set `CUBE_SSL_CERT_FILE`.
+  This exports `SSL_CERT_FILE` process-wide, so use a CA bundle that preserves
+  trust for your model provider as well.

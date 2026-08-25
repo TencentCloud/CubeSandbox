@@ -43,7 +43,8 @@ Google ADK 仍在快速演进。示例把 E2B 相关包固定到一个 plain `pi
 `E2B_API_URL` 用于选择 CubeAPI 控制平面端点。官方 E2B SDK 在执行 `run_code` 时还会访问每个沙箱的数据面域名。
 生产环境应配置泛域名 DNS；本地开发若没有泛域名 DNS，可以使用
 [E2B 开发 sidecar](/zh/guide/connect-existing-cluster)。如果你的部署使用自签 TLS 证书，请设置
-`CUBE_SSL_CERT_FILE`，示例会在打开沙箱前导出 `SSL_CERT_FILE`。
+`CUBE_SSL_CERT_FILE`，示例会在打开沙箱前导出 `SSL_CERT_FILE`。`SSL_CERT_FILE` 是进程级全局设置；
+请使用同时保留模型提供商 TLS 信任的 CA bundle，或在 CubeAPI 使用公开证书时不要设置它。
 :::
 
 ## 配置步骤
@@ -68,6 +69,8 @@ cp .env.example .env
 | `GOOGLE_API_KEY` | ADK 使用的 Google 模型 API key |
 | `GOOGLE_ADK_MODEL` | ADK 模型名，例如 `gemini-2.5-flash` |
 | `CUBE_SANDBOX_TIMEOUT` | 可选的沙箱生命周期上限，单位秒，会传给 `Sandbox.create(timeout=...)`；默认值为 `300` |
+| `CUBE_RUN_CODE_TIMEOUT` | 可选的单次代码执行超时，单位秒，会传给 `sandbox.run_code(timeout=...)`；默认值为 `60` |
+| `CUBE_USE_DEV_SIDECAR` | 可选的本地开发开关。设为 `true` 时，会在创建沙箱前调用 E2B dev-sidecar |
 | `CUBE_SSL_CERT_FILE` | 自签部署可选的 CubeSandbox CA bundle |
 
 ## 集成代码片段
@@ -100,7 +103,7 @@ from e2b_code_interpreter import Sandbox
 def run_python_in_cube(code: str) -> dict:
     template_id = os.environ["CUBE_TEMPLATE_ID"]
     with Sandbox.create(template=template_id, timeout=300) as sandbox:
-        execution = sandbox.run_code(code)
+        execution = sandbox.run_code(code, timeout=60)
         stdout = "".join(str(item) for item in execution.logs.stdout)
         return {
             "stdout": stdout,
@@ -110,6 +113,10 @@ def run_python_in_cube(code: str) -> dict:
 ```
 
 与宿主机本地 Python 工具相比，只有工具函数内部实现发生变化。ADK agent 看到的仍是一个普通的结构化函数工具。
+
+可运行示例也支持 `CUBE_USE_DEV_SIDECAR=true`，用于没有泛域名 DNS 的本地开发环境。该模式会在创建沙箱前调用
+[`examples/e2b-dev-sidecar`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar)
+中的 sidecar setup，因此也需要配置该示例使用的 `CUBE_REMOTE_PROXY_*` 变量。
 
 ### 迁移已有本地代码执行工具
 
@@ -121,7 +128,8 @@ def run_python_in_cube(code: str) -> dict:
 +     return run_python_in_cube(code)
 ```
 
-如果原 agent 已经引用这个代码执行工具，agent 定义和 prompt 可以保持不变。
+如果原 agent 已经引用这个代码执行工具，agent 定义可以保持不变。若原 prompt 或结果处理依赖特定字段，
+请按本示例返回的 `stdout`、`text`、`error`、`results_count` 结构调整。
 
 ## 可运行 Demo
 
@@ -157,7 +165,7 @@ agent 会调用 `run_python_in_cube`，基于 `CUBE_TEMPLATE_ID` 创建临时 Cu
 
 - **按会话复用沙箱：** 示例为了便于 review，每次工具调用创建一个临时沙箱。多轮 notebook 类任务可以把 sandbox handle 放入会话级服务，并在 ADK session 结束时删除。
 - **超时：** 可设置 `CUBE_SANDBOX_TIMEOUT`，或在 `Sandbox.create(...)` 中传入固定 timeout，控制沙箱生命周期。
-  这个值不是单次 `run_code` 调用的执行超时。
+  可设置 `CUBE_RUN_CODE_TIMEOUT`，或给 `sandbox.run_code(...)` 传入 `timeout=...`，控制单次执行上限。
 - **网络策略：** 如果生成代码只能访问指定主机，请在创建沙箱时配置 Cube 的出站控制。参见[网络策略](/zh/guide/network-policy)。
 - **凭证处理：** 模型提供商 key 应保留在宿主机。如果沙箱内代码必须调用外部 API，优先使用 Cube 的 security proxy 和凭证注入流程，不要把原始密钥写入 VM。
 - **模板：** 把重依赖预装进模板镜像，让每次 ADK 工具调用都能从 ready snapshot 快速启动。
