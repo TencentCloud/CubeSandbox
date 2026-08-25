@@ -447,14 +447,15 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	purgeErr := cubeproxy.InvalidateBackendCache(ctx, req.SandboxID, targetIP)
 
 	// After Create the sandbox runs on private disks. Drop the pause package
-	// on the node that still holds it: origin when this was cross-node
-	// (also the PAUSED tombstone), otherwise this node.
-	if placement != nil && placement.CrossNode {
-		if origin := strings.TrimSpace(rec.NodeIP); origin != "" && origin != targetIP {
-			if err := pausesnap.DropOriginTombstone(ctx, req.RequestID, req.SandboxID, origin, rec.SnapshotID, rec.Backend); err != nil {
-				log.G(ctx).Errorf("resume: sandbox %s runs on %s but origin %s still has pause leftovers: %v",
-					req.SandboxID, targetIP, origin, err)
-			}
+	// on the node that still holds it: origin when that IP is known and not
+	// the target (also the PAUSED tombstone), otherwise this node. Do not
+	// key this off CrossNode — a cross-node placement with a blank origin
+	// would otherwise skip both cleanup paths and leak the package.
+	origin := strings.TrimSpace(rec.NodeIP)
+	if origin != "" && origin != targetIP {
+		if err := pausesnap.DropOriginTombstone(ctx, req.RequestID, req.SandboxID, origin, rec.SnapshotID, rec.Backend); err != nil {
+			log.G(ctx).Errorf("resume: sandbox %s runs on %s but origin %s still has pause leftovers: %v",
+				req.SandboxID, targetIP, origin, err)
 		}
 	} else if err := pausesnap.CleanupPauseSnapshot(ctx, req.RequestID, targetIP, rec.SnapshotID, rec.Backend); err != nil {
 		log.G(ctx).Errorf("resume: sandbox %s is running but pause package %s on %s was not deleted: %v",

@@ -152,10 +152,10 @@ func TestShouldAppendShimlessPauseRows(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "empty window",
+			name: "empty window is not last page",
 			req:  &types.ListCubeSandboxReq{},
-			rsp:  &types.ListCubeSandboxRes{Total: 2, Size: 0},
-			want: true,
+			rsp:  &types.ListCubeSandboxRes{Total: 2, Size: 0, EndIdx: -1},
+			want: false,
 		},
 		{
 			name: "no healthy nodes",

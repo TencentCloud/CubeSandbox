@@ -153,8 +153,9 @@ func mergePauseBindings(ctx context.Context, req *types.ListCubeSandboxReq, rsp 
 }
 
 // shouldAppendShimlessPauseRows is true for a single-host list and for the
-// last node-window page. Intermediate pages only decorate rows the scan
-// already returned.
+// last node-window page (EndIdx >= Total, or no healthy nodes). Intermediate
+// pages — including an empty window past the last node — only decorate rows
+// the scan already returned.
 func shouldAppendShimlessPauseRows(req *types.ListCubeSandboxReq, rsp *types.ListCubeSandboxRes) bool {
 	if req != nil && strings.TrimSpace(req.HostID) != "" {
 		return true
@@ -162,7 +163,7 @@ func shouldAppendShimlessPauseRows(req *types.ListCubeSandboxReq, rsp *types.Lis
 	if rsp == nil {
 		return false
 	}
-	if rsp.Total <= 0 || rsp.Size == 0 {
+	if rsp.Total <= 0 {
 		return true
 	}
 	return rsp.EndIdx >= rsp.Total
