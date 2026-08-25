@@ -26,7 +26,8 @@
 !examples/volume/cos/binary
 !examples/volume/cos/binary/**
 !examples/volume/cos/volume-cos.conf.example
+# S3 volume plugin: a Go module compiled in the builder stage, so the whole
+# module (not just a script) has to be in the context.
 !examples/volume/s3
-!examples/volume/s3/binary
-!examples/volume/s3/binary/**
-!examples/volume/s3/volume-s3.conf.example
+!examples/volume/s3/**
+examples/volume/s3/bin

@@ -349,6 +349,16 @@ track_cubeops() {
   go build -ldflags "${CUBEOPS_LDFLAGS}" -o "${PREBUILT_DIR}/cubeops" ./cmd/cubeops
 }
 
+track_volume_s3() {
+  # S3 Volume plugin (examples/volume/s3): standalone Go module, statically
+  # linked so it runs on one-click hosts (Ubuntu 20.04 / glibc 2.31). Built in
+  # the builder like every other Go component so the host needs no go.
+  cd /workspace/examples/volume/s3
+  go mod download
+  CGO_ENABLED=0 GOOS=linux GOARCH="$(go env GOARCH)" \
+    go build -trimpath -ldflags '-s -w' -o "${PREBUILT_DIR}/cube-volume-s3" ./cmd/cube-volume-s3
+}
+
 track_netstack() {
   # cubevs BPF bindings are generated in the serial pre-launch step because
   # track_cubelet also links CubeNet/cubevs after the network runtime embed.
@@ -433,6 +443,7 @@ queue_track cubelet    track_cubelet
 queue_track cubemaster track_cubemaster
 queue_track netstack   track_netstack
 queue_track cubeops    track_cubeops
+queue_track volume-s3 track_volume_s3
 
 echo "[one-click] building cubeopscli in builder" >&2
 (cd /workspace/CubeOps && go build -ldflags "-s -w" -o "${PREBUILT_DIR}/cubeopscli" ./cmd/cubeopscli)
@@ -487,5 +498,6 @@ ONE_CLICK_CUBE_AGENT_BIN="${PREBUILT_DIR}/cube-agent" \
 ONE_CLICK_CUBE_INIT_BIN="${PREBUILT_DIR}/cube-init" \
 ONE_CLICK_CUBESHIM_BIN="${PREBUILT_DIR}/containerd-shim-cube-rs" \
 ONE_CLICK_CUBE_RUNTIME_BIN="${PREBUILT_DIR}/cube-runtime" \
+ONE_CLICK_VOLUME_S3_BIN="${PREBUILT_DIR}/cube-volume-s3" \
 ONE_CLICK_S3LVOL_DIR="${PREBUILT_DIR}/s3lvol" \
   "${SCRIPT_DIR}/build-release-bundle.sh" "$@"

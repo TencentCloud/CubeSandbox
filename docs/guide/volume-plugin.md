@@ -643,7 +643,7 @@ The repo ships a **Tencent Cloud COS** reference plugin (binary Shell + rpc Go) 
 | [`examples/volume/cos/binary/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/binary/README.md) | binary plugin script details |
 | [`examples/volume/cos/rpc/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.md) | rpc plugin build and deploy |
 | [`examples/volume/cos/verify_volume.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/verify_volume.py) | Python SDK verification script |
-| [`examples/volume/s3/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md) | Generic S3-compatible walkthrough (s3fs + AWS CLI; AWS S3, Tencent Cloud COS, MinIO, R2; runs on `arm64`) |
+| [`examples/volume/s3/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md) | Generic S3-compatible walkthrough (Go binary with a built-in S3 client + s3fs; AWS S3, Tencent Cloud COS, MinIO, R2; runs on `arm64`) |
 
 Backend-specific Hook behavior, object layout, trade-offs, and troubleshooting live in those example docs — not duplicated here.
 

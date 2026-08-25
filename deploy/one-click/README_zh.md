@@ -10,7 +10,7 @@
 - `build-agent-ext4.sh`：构建独立 `cube-agent/cube-agent.ext4`（+ `version`），供 virtio-pmem1 注入。
 - `build-release-bundle.sh`：底层打包入口；消费源码树或 `ONE_CLICK_*_BIN` 预编译产物，组装 `sandbox-package` 并生成最终发布包。
 - `config-cube.toml`：one-click 默认 runtime 配置模板。
-- `support/`：MySQL/Redis/MinIO 的 `docker compose` 模板，安装后落到 `/usr/local/services/cubetoolbox/support/`；`support/bin/mkcert` 为内置的 mkcert 二进制；`support/vendor/awscli/` 为内置的 AWS CLI v2 zip。
+- `support/`：MySQL/Redis/MinIO 的 `docker compose` 模板，安装后落到 `/usr/local/services/cubetoolbox/support/`；`support/bin/mkcert` 为内置的 mkcert 二进制。
 - `cubeproxy/`：`cube proxy` 的 compose 模板、`global.conf` 模板与 CoreDNS 模板。
 - `webui/`：Dashboard 的 Nginx 运行时文件，安装后落到 `/usr/local/services/cubetoolbox/webui/`。
 - `install.sh`：目标机控制节点安装与启动入口（默认 all-in-one）。
@@ -536,12 +536,12 @@ sudo yum install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11
 - 目标机优先使用 `systemd-resolved` / `resolvectl` 做 `cube.app` 的 split DNS；当前实现会创建专用 dummy link（默认 `cube-dns0`）并为其添加本地 `/32` 地址，`CoreDNS` 默认绑定到 `169.254.254.53`，再把该地址和 `~cube.app` 绑定到该链路。若该能力不可用，则安装脚本会回退到 `NetworkManager + dnsmasq`：同样创建该 dummy link，并通过 `listen-address` / `bind-interfaces` 让 `dnsmasq` 同时绑定 `127.0.0.1` 和 `169.254.254.53`；随后安装器自己写 `/etc/resolv.conf`（NetworkManager 切到 `rc-manager=unmanaged`），把 nameserver 指向 `169.254.254.53`，让宿主应用和 Docker 容器看到同一个非 loopback 解析器。当 NetworkManager 会加载其 `dnsmasq` 插件但从不拉起子进程（例如通过 `ifcfg` + `assume` 管理的 bond 网卡）时，可在 `.one-click.env` 中设置 `CUBE_PROXY_DNSMASQ_MODE=standalone`，让 DNS 脚本直接拉起并管理 `dnsmasq`。
 - 目标机默认联网拉取 `mysql:8.0` 和 `redis:7-alpine`。
 - `mkcert` 二进制已内置在发布包中（`support/bin/mkcert`），安装时若系统未预装 `mkcert`，会自动从包内复制到 `/usr/local/bin/mkcert`，无需联网下载。
-- AWS CLI v2 已内置在发布包中（`support/vendor/awscli/`）。控制节点安装使用包内 zip，不再从 `awscli.amazonaws.com` 下载。构建机把官方 zip 缓存在 `assets/vendor/awscli/`（zip 不入库）；sha256 命中则后续打包不再下载。可用 `ONE_CLICK_AWSCLI_ZIP` 覆盖。
+- S3 Volume 插件（`{CubeMaster,Cubelet}/plugin/cube-volume-s3`）是内置 S3 客户端的静态 Go 二进制，打包时从 `examples/volume/s3` 编译。控制节点无需任何 S3 命令行工具；挂载 Volume 的节点仍需 `s3fs`。可用 `ONE_CLICK_VOLUME_S3_BIN` 指定预编译二进制。
 - `cube proxy` 的 TLS 证书和私钥保存在宿主机 `CUBE_PROXY_CERT_DIR`，并通过 `docker compose` 以只读方式挂载进容器；更新证书后无需重建镜像，只需重启 `cube-proxy` 或在容器内 reload nginx。
 - 推荐入口 `build-release-bundle-builder.sh` 需要宿主机具备 `docker` / `make` / `tar` / `python3` / `truncate` / `ldd` / `mkfs.ext4` 等工具。
 - 推荐入口只把组件编译放进 builder；guest image 与最终打包仍在宿主机执行。
 - 若直接执行底层入口 `build-release-bundle.sh`，构建机还需要根据 build mode 自行准备 `go` / `cargo` / `make` 等本地工具链。
-- 若直接执行底层入口或首次使用推荐入口，构建机还需要能联网下载 Go modules；受限网络环境建议预先配置可用的 `GOPROXY`。首次打包还会把钉死版本的 AWS CLI v2 zip 拉到 `assets/vendor/awscli/`；缓存 sha256 已命中或设置了 `ONE_CLICK_AWSCLI_ZIP` 时不会再下载。
+- 若直接执行底层入口或首次使用推荐入口，构建机还需要能联网下载 Go modules；受限网络环境建议预先配置可用的 `GOPROXY`。
 - 若启用 VM 路径，目标机仍需满足 `Cubelet` 内置 network runtime、tap、路由等运行权限要求。
 
 ## 已知限制

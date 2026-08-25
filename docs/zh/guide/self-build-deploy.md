@@ -48,7 +48,7 @@
 
 - 需要联网拉取 `mysql:8.0` 和 `redis:7-alpine` Docker 镜像。
 - `mkcert` 二进制文件已内置在发布包中，安装时若系统尚未安装 `mkcert`，会自动从包内复制到 `/usr/local/bin/mkcert`，无需联网下载。
-- AWS CLI v2 已内置在发布包中（`support/vendor/awscli/`）。控制节点安装使用包内 zip，不再从 `awscli.amazonaws.com` 下载。构建机把官方 zip 缓存在 `deploy/one-click/assets/vendor/awscli/`（zip 不入库）；sha256 命中则后续打包不再下载。可用 `ONE_CLICK_AWSCLI_ZIP` 覆盖。
+- S3 Volume 插件是内置 S3 客户端的静态 Go 二进制，打包时从 `examples/volume/s3` 编译。控制节点无需任何 S3 命令行工具；挂载 Volume 的节点仍需 `s3fs`。可用 `ONE_CLICK_VOLUME_S3_BIN` 指定预编译二进制。
 - CubeProxy 镜像构建使用 Alpine 和 PyPI 软件源（可配置）。
 
 ## 第一步：构建部署包
@@ -99,7 +99,7 @@ deploy/one-click/dist/cube-sandbox-one-click-<version>.tar.gz
 - 内核包（`cube-kernel-scf.zip`）
 - CubeProxy 和 CoreDNS 的 Docker Compose 模板
 - MySQL/Redis 的 Docker Compose 模板
-- 内置 AWS CLI v2 zip（`support/vendor/awscli/`），供控制节点 Volume 创建/销毁使用
+- S3 Volume 插件二进制（`{CubeMaster,Cubelet}/plugin/cube-volume-s3`），供 Volume 创建/销毁与挂载/卸载使用
 - 安装脚本（`install.sh`、`install-compute.sh`、`down.sh`、`smoke.sh`）
 - 环境变量模板（`env.example`）
 
@@ -290,8 +290,8 @@ sudo ./down.sh
 | `ONE_CLICK_CUBESHIM_BIN` | 预编译 containerd-shim-cube-rs 路径 |
 | `ONE_CLICK_CUBE_RUNTIME_BIN` | 预编译 cube-runtime 路径 |
 | `ONE_CLICK_MKCERT_BIN` | 构建时自定义 mkcert 二进制路径（默认：内置 `assets/bin/mkcert`） |
-| `ONE_CLICK_AWSCLI_VERSION` | 打进发布包的官方 AWS CLI v2 zip 版本（默认：`assets/vendor/awscli/VERSION`） |
-| `ONE_CLICK_AWSCLI_ZIP` | 覆盖为已下载的官方 AWS CLI v2 zip；sha256 匹配时打包阶段不再下载 |
+| `ONE_CLICK_VOLUME_S3_BUILD_MODE` | S3 Volume 插件的构建模式（默认 `local`） |
+| `ONE_CLICK_VOLUME_S3_BIN` | 覆盖为预编译的 `cube-volume-s3`；设置后打包阶段不再编译 |
 
 构建性能选项（均为可选）：
 
@@ -383,7 +383,7 @@ sudo ./down.sh
 ├── cube-kernel-scf/                  # 内核制品
 ├── cubeproxy/                        # CubeProxy Docker Compose 与配置
 ├── coredns/                          # CoreDNS Docker Compose
-├── support/                          # MySQL/Redis Docker Compose + 内置 mkcert 与 AWS CLI v2
+├── support/                          # MySQL/Redis Docker Compose + 内置 mkcert
 ├── sql/                              # 数据库初始化 SQL
 ├── scripts/one-click/                # 运行时管理脚本
 └── .one-click.env                    # 当前生效的环境配置

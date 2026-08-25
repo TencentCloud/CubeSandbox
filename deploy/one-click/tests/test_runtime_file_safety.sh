@@ -943,32 +943,80 @@ test_external_redis_sentinel_wiring() {
   if grep -A80 '^write_volume_s3_conf()' "${ONE_CLICK_DIR}/lib/common.sh" | grep -q 'CUBE_SANDBOX_MINIO_'; then
     fail "write_volume_s3_conf must read only CUBE_S3_* (not CUBE_SANDBOX_MINIO_*)"
   fi
-  local volume_s3_plugin="${ONE_CLICK_DIR}/../../examples/volume/s3/binary/cube-volume-s3.sh"
-  assert_contains "${volume_s3_plugin}" "empty=\"\$(mktemp)\""
-  assert_contains "${volume_s3_plugin}" "--body \"\$empty\""
-  if grep -Fq -- '--body /dev/null' "${volume_s3_plugin}"; then
-    fail "cube-volume-s3 must not use --body /dev/null (AWS CLI 2.36 rejects character devices)"
+  # The S3 volume plugin is a Go binary (examples/volume/s3). These are static
+  # guards on the invariants that are easy to break by refactoring; the
+  # behavioural assertions live in the module's own Go unit tests.
+  local volume_s3_dir="${ONE_CLICK_DIR}/../../examples/volume/s3"
+  local volume_s3_main="${volume_s3_dir}/cmd/cube-volume-s3/main.go"
+  local volume_s3_api="${volume_s3_dir}/internal/s3api/client.go"
+  local volume_s3_mount="${volume_s3_dir}/internal/s3fsmnt/mount.go"
+  local volume_s3_lock="${volume_s3_dir}/internal/lockfile/lockfile.go"
+  local volume_s3_config="${volume_s3_dir}/internal/config/config.go"
+  assert_file "${volume_s3_main}"
+  assert_file "${volume_s3_api}"
+  assert_file "${volume_s3_mount}"
+  assert_file "${volume_s3_lock}"
+  assert_file "${volume_s3_config}"
+  assert_file "${volume_s3_dir}/go.mod"
+
+  # The control plane must not shell out to an S3 command line tool: dropping
+  # the AWS CLI dependency is the whole point of the Go rewrite.
+  if grep -rE 'exec\.Command\("aws"' "${volume_s3_dir}" --include='*.go' >/dev/null; then
+    fail "cube-volume-s3 must not exec the aws CLI; use the minio-go client"
   fi
-  if ! grep -A30 '^s3_create_dir()' "${volume_s3_plugin}" | grep -Fq 'key="$(s3_subdir "$volume_id")/"'; then
-    fail "s3_create_dir must PUT the trailing-slash directory object s3fs stats on mount"
+
+  # One process per hook, so the attach/detach lock has to be a file lock. A
+  # sync.Mutex would silently stop serialising anything and let two sandboxes
+  # double-mount the same volume.
+  if ! grep -Fq 'syscall.Flock' "${volume_s3_lock}"; then
+    fail "lockfile must use syscall.Flock (binary plugins get one process per op)"
   fi
-  if grep -A40 '^s3fs_mount_volume()' "${volume_s3_plugin}" | grep -Fq -- '"-ocompat_dir"'; then
-    fail "s3fs_mount_volume must not hardcode -ocompat_dir (unknown on s3fs 1.90; create writes dir/ instead)"
+  # LOCK_EX only appears on the acquire path, so this catches an acquire that
+  # stops locking while Release still mentions Flock.
+  if ! grep -Fq 'syscall.LOCK_EX' "${volume_s3_lock}"; then
+    fail "lockfile must take an exclusive flock (syscall.LOCK_EX)"
   fi
-  if ! grep -A50 '^s3_ensure_bucket()' "${volume_s3_plugin}" | grep -q 'BucketAlreadyOwnedByYou'; then
-    fail "s3_ensure_bucket must treat BucketAlreadyOwnedByYou as success"
+  # Guard on the import rather than on "sync.Mutex", so the comment in
+  # lockfile.go explaining why a mutex is wrong does not trip this check.
+  if grep -rn '"sync"' "${volume_s3_dir}" --include='*.go' \
+      | grep -v '_test\.go' >/dev/null; then
+    fail "cube-volume-s3 must not import sync; attach/detach needs a cross-process flock"
   fi
-  if ! grep -A50 '^s3_ensure_bucket()' "${volume_s3_plugin}" | grep -q 'BucketAlreadyExists'; then
-    fail "s3_ensure_bucket must treat BucketAlreadyExists as success"
+  if ! grep -Fq 'lockfile.Acquire' "${volume_s3_main}"; then
+    fail "attach/detach must acquire the per-volume lock"
   fi
-  if ! grep -A50 '^s3_ensure_bucket()' "${volume_s3_plugin}" | grep -Fq 'LocationConstraint'; then
-    fail "s3_ensure_bucket must pass LocationConstraint for non-us-east-1 regions"
+
+  # s3fs 1.91+ stats the trailing-slash directory object when mounting a subdir,
+  # so create must PUT "volumes/<id>/" (not a .keep file).
+  if ! grep -Fq 'return "volumes/" + volumeID + "/"' "${volume_s3_config}"; then
+    fail "VolumePrefix must be the trailing-slash directory object key"
   fi
-  if ! grep -A50 '^s3_ensure_bucket()' "${volume_s3_plugin}" | grep -Fq 'us-east-1'; then
-    fail "s3_ensure_bucket must skip LocationConstraint for us-east-1"
+  if ! grep -Fq 'config.VolumePrefix(volumeID)' "${volume_s3_api}"; then
+    fail "CreateVolumeDir must PUT the trailing-slash directory object"
   fi
-  if ! grep -A50 '^s3_ensure_bucket()' "${volume_s3_plugin}" | grep -Fq '"auto"'; then
-    fail "s3_ensure_bucket must skip LocationConstraint for region=auto"
+  if grep -Fq -- '-ocompat_dir' "${volume_s3_mount}"; then
+    fail "s3fs mount must not hardcode -ocompat_dir (unknown on s3fs 1.90; create writes dir/ instead)"
+  fi
+
+  # Concurrent first creates race on MakeBucket; the loser must not fail.
+  if ! grep -Fq 'BucketAlreadyOwnedByYou' "${volume_s3_api}"; then
+    fail "EnsureBucket must treat BucketAlreadyOwnedByYou as success"
+  fi
+  if ! grep -Fq 'BucketAlreadyExists' "${volume_s3_api}"; then
+    fail "EnsureBucket must treat BucketAlreadyExists as success"
+  fi
+  # AWS rejects LocationConstraint for us-east-1 and R2 (region=auto) rejects it
+  # outright; minio-go omits it exactly when the location is us-east-1.
+  if ! grep -A12 '^func BucketCreateRegion' "${volume_s3_api}" | grep -Fq '"us-east-1", "auto"'; then
+    fail "BucketCreateRegion must map both us-east-1 and auto onto us-east-1"
+  fi
+  # destroy may only swallow not-found; anything else has to propagate so
+  # CubeMaster does not drop the volume record while objects remain.
+  if ! grep -A8 '^func IsNotFound' "${volume_s3_api}" | grep -Fq 'NoSuchBucket'; then
+    fail "IsNotFound must treat NoSuchBucket as already gone"
+  fi
+  if ! grep -A8 '^func IsNotFound' "${volume_s3_api}" | grep -Fq 'NoSuchKey'; then
+    fail "IsNotFound must treat NoSuchKey as already gone"
   fi
   assert_contains "${postcheck}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
   assert_contains "${up_support}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"

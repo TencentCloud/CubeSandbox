@@ -1769,26 +1769,29 @@ write_volume_s3_conf() {
   done
 }
 
+# install_s3_volume_host_deps: install s3fs for the S3 volume plugin.
+#
+# The plugin binary has a built-in S3 client, so create/destroy need no host
+# tool. Only the mount path needs s3fs, and a control node runs Cubelet too in
+# single-node deployments, so both roles get it.
 install_s3_volume_host_deps() {
   local install_prefix="$1"
   local deploy_role="$2"
-  local script args=()
+  local script
 
   if [[ "${deploy_role}" == "compute" ]]; then
     script="${install_prefix}/Cubelet/plugin/install-s3-deps.sh"
-    args=(--s3fs --jq)
   else
     script="${install_prefix}/CubeMaster/plugin/install-s3-deps.sh"
     [[ -f "${script}" ]] || script="${install_prefix}/Cubelet/plugin/install-s3-deps.sh"
-    args=(--all)
   fi
   [[ -f "${script}" ]] || {
     log "WARNING: S3 volume install-s3-deps.sh not found; skip host tool install"
     return 0
   }
   chmod +x "${script}"
-  if ! "${script}" "${args[@]}"; then
-    log "WARNING: S3 volume host deps install failed; s3fs/aws may be missing (volume attach/create will fail until they are installed)"
+  if ! "${script}" --s3fs --jq; then
+    log "WARNING: S3 volume host deps install failed; s3fs may be missing (volume attach will fail until it is installed)"
   fi
 }
 

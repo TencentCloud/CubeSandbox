@@ -48,7 +48,7 @@ The release bundle is built **natively** for the build machine's architecture �
 
 - Internet access is required to pull `mysql:8.0` and `redis:7-alpine` Docker images.
 - `mkcert` binary is bundled inside the release package and installed automatically when not already present on the target machine.
-- AWS CLI v2 is bundled in the release package (`support/vendor/awscli/`). Control-node install uses the packaged zip and does not download from `awscli.amazonaws.com`. The build machine caches the official zip under `deploy/one-click/assets/vendor/awscli/` (gitignored); a matching sha256 skips the download on later packs. Override with `ONE_CLICK_AWSCLI_ZIP`.
+- The S3 volume plugin is a static Go binary with a built-in S3 client, compiled at pack time from `examples/volume/s3`. Control nodes need no S3 command line tool; nodes that mount volumes still need `s3fs`. Ship a prebuilt binary with `ONE_CLICK_VOLUME_S3_BIN`.
 - CubeProxy image build uses Alpine and PyPI mirrors (configurable).
 
 ## Step 1: Build the Release Bundle
@@ -99,7 +99,7 @@ The bundle contains:
 - Kernel package (`cube-kernel-scf.zip`)
 - CubeProxy and CoreDNS Docker Compose templates
 - MySQL/Redis Docker Compose templates
-- Bundled AWS CLI v2 zip (`support/vendor/awscli/`) for control-node Volume create/destroy
+- S3 volume plugin binary (`{CubeMaster,Cubelet}/plugin/cube-volume-s3`) for Volume create/destroy and attach/detach
 - Installation scripts (`install.sh`, `install-compute.sh`, `down.sh`, `smoke.sh`)
 - Environment template (`env.example`)
 
@@ -290,8 +290,8 @@ You can also point to prebuilt binaries to skip compilation:
 | `ONE_CLICK_CUBESHIM_BIN` | Path to prebuilt containerd-shim-cube-rs binary |
 | `ONE_CLICK_CUBE_RUNTIME_BIN` | Path to prebuilt cube-runtime binary |
 | `ONE_CLICK_MKCERT_BIN` | Override path to mkcert binary at build time (default: bundled `assets/bin/mkcert`) |
-| `ONE_CLICK_AWSCLI_VERSION` | Pin for the official AWS CLI v2 zip bundled into the package (default: `assets/vendor/awscli/VERSION`) |
-| `ONE_CLICK_AWSCLI_ZIP` | Override path to a pre-downloaded official AWS CLI v2 zip; skips the pack-time download when sha256 matches |
+| `ONE_CLICK_VOLUME_S3_BUILD_MODE` | Build mode for the S3 volume plugin (default `local`) |
+| `ONE_CLICK_VOLUME_S3_BIN` | Override path to a prebuilt `cube-volume-s3`; skips the pack-time build |
 
 Build-performance knobs (all optional):
 
@@ -383,7 +383,7 @@ After installation, the deployment is located at `/usr/local/services/cubetoolbo
 ├── cube-kernel-scf/                  # Kernel artifacts
 ├── cubeproxy/                        # CubeProxy Docker Compose and configs
 ├── coredns/                          # CoreDNS Docker Compose
-├── support/                          # MySQL/Redis Docker Compose + bundled mkcert and AWS CLI v2
+├── support/                          # MySQL/Redis Docker Compose + bundled mkcert
 ├── sql/                              # Database schema and seed data
 ├── scripts/one-click/                # Runtime management scripts
 └── .one-click.env                    # Active environment configuration

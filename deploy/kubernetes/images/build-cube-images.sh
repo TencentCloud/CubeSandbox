@@ -633,8 +633,10 @@ build_cube_master_image() {
     || fail "missing deploy/scripts/docker-install-volume-deps.sh in ${REPO_ROOT}"
   [[ -f "${REPO_ROOT}/examples/volume/cos/binary/cube-volume-cos.sh" ]] \
     || fail "missing examples/volume/cos/binary/cube-volume-cos.sh in ${REPO_ROOT}"
-  [[ -f "${REPO_ROOT}/examples/volume/s3/binary/cube-volume-s3.sh" ]] \
-    || fail "missing examples/volume/s3/binary/cube-volume-s3.sh in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/examples/volume/s3/go.mod" ]] \
+    || fail "missing examples/volume/s3 Go module in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/examples/volume/s3/cmd/cube-volume-s3/main.go" ]] \
+    || fail "missing examples/volume/s3/cmd/cube-volume-s3/main.go in ${REPO_ROOT}"
   build_image cube-master "${REPO_ROOT}" "${REPO_ROOT}/CubeMaster/docker/Dockerfile" \
     --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
     --build-arg "CUBE_COMMIT=${CUBE_COMMIT}" \
@@ -674,8 +676,10 @@ build_cubelet_image() {
     || fail "missing component-entrypoint.sh in ${REPO_ROOT}"
   [[ -f "${REPO_ROOT}/examples/volume/cos/binary/cube-volume-cos.sh" ]] \
     || fail "missing examples/volume/cos/binary/cube-volume-cos.sh in ${REPO_ROOT}"
-  [[ -f "${REPO_ROOT}/examples/volume/s3/binary/cube-volume-s3.sh" ]] \
-    || fail "missing examples/volume/s3/binary/cube-volume-s3.sh in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/examples/volume/s3/go.mod" ]] \
+    || fail "missing examples/volume/s3 Go module in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/examples/volume/s3/cmd/cube-volume-s3/main.go" ]] \
+    || fail "missing examples/volume/s3/cmd/cube-volume-s3/main.go in ${REPO_ROOT}"
   build_image cubelet "${REPO_ROOT}" "${REPO_ROOT}/Cubelet/Dockerfile" \
     --build-arg "CUBE_BUILDER_IMAGE=${CUBE_BUILDER_IMAGE}" \
     --build-arg "CUBE_VERSION=${IMAGE_TAG}" \

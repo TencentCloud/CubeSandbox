@@ -63,30 +63,71 @@ test_component_build_inputs_exist() {
   fi
   require_file "${ROOT_DIR}/examples/volume/s3/install-deps.sh" \
     "S3 volume install-deps.sh (examples source)"
-  if ! grep -q -F 'examples/volume/s3/install-deps.sh' "${BUNDLE_SH}"; then
-    fail "build-release-bundle.sh must copy examples/volume/s3/install-deps.sh into CubeMaster/plugin and Cubelet/plugin"
+  if ! grep -q -F 'install-s3-deps.sh' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must copy the S3 install-deps.sh into CubeMaster/plugin and Cubelet/plugin as install-s3-deps.sh"
   fi
-  if ! grep -q -F 'cube-volume-s3' "${BUNDLE_SH}"; then
-    fail "build-release-bundle.sh must copy examples/volume/s3 plugin into CubeMaster/plugin and Cubelet/plugin"
+  # The S3 plugin is a Go binary compiled at pack time, not a copied script.
+  require_file "${ROOT_DIR}/examples/volume/s3/go.mod" "S3 volume plugin Go module"
+  require_file "${ROOT_DIR}/examples/volume/s3/cmd/cube-volume-s3/main.go" \
+    "S3 volume plugin entry point"
+  if [[ -e "${ROOT_DIR}/examples/volume/s3/binary" ]]; then
+    fail "examples/volume/s3/binary must be gone; the plugin is built from cmd/cube-volume-s3"
   fi
-  require_file "${ONE_CLICK_DIR}/lib/awscli-bundle.sh" "AWS CLI bundle helper"
-  require_file "${ONE_CLICK_DIR}/assets/vendor/awscli/VERSION" "AWS CLI pin version"
-  require_file "${ONE_CLICK_DIR}/assets/vendor/awscli/SHA256SUMS" "AWS CLI sha256 pins"
-  require_file "${ONE_CLICK_DIR}/assets/vendor/awscli/.gitignore" "AWS CLI zip gitignore"
-  if ! grep -q -F '*.zip' "${ONE_CLICK_DIR}/assets/vendor/awscli/.gitignore"; then
-    fail "assets/vendor/awscli/.gitignore must ignore *.zip"
+  if ! grep -q -F 'build_or_copy_go_binary' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must build Go binaries via build_or_copy_go_binary"
   fi
-  if ! grep -q -F 'lib/awscli-bundle.sh' "${BUNDLE_SH}"; then
-    fail "build-release-bundle.sh must source lib/awscli-bundle.sh"
+  if ! grep -q -F './cmd/cube-volume-s3' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must compile ./cmd/cube-volume-s3"
   fi
-  if ! grep -q -F 'stage_awscli_bundle_into_package' "${BUNDLE_SH}"; then
-    fail "build-release-bundle.sh must stage AWS CLI into support/vendor/awscli/"
+  if ! grep -q -F '${PACKAGE_ROOT}/CubeMaster/plugin/cube-volume-s3' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must install cube-volume-s3 into CubeMaster/plugin"
   fi
-  if ! grep -q -F '${PACKAGE_ROOT}/support/vendor/awscli' "${BUNDLE_SH}"; then
-    fail "build-release-bundle.sh must mention \${PACKAGE_ROOT}/support/vendor/awscli"
+  if ! grep -q -F '${PACKAGE_ROOT}/Cubelet/plugin/cube-volume-s3' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must install cube-volume-s3 into Cubelet/plugin"
   fi
-  if grep -E 'awscli-exe-linux-(x86_64|aarch64)\.zip"' "${ROOT_DIR}/examples/volume/s3/install-deps.sh" >/dev/null; then
-    fail "install-deps.sh must not use an unversioned AWS CLI download URL"
+
+  # cube-volume-s3 must be statically linked (one-click hosts are Ubuntu 20.04 /
+  # glibc 2.31). A global CGO_ENABLED=0 on build_go_binary would compile cubelet
+  # without cubecow / nsenter.
+  local helper
+  helper="$(awk '/^build_go_binary\(\)/ {flag=1} flag {print} /^}$/ && flag {exit}' "${BUNDLE_SH}")"
+  if ! printf '%s\n' "${helper}" | grep -E 'go build -trimpath' | grep -v 'CGO_ENABLED=0' >/dev/null; then
+    fail "build_go_binary default path must not set CGO_ENABLED=0 (cubelet needs cgo)"
+  fi
+  if ! printf '%s\n' "${helper}" | grep -q 'CGO_ENABLED=0'; then
+    fail "build_go_binary static_linux path must set CGO_ENABLED=0"
+  fi
+  if ! grep -A12 './cmd/cube-volume-s3' "${BUNDLE_SH}" | grep -q 'static_linux'; then
+    fail "cube-volume-s3 must be built with static_linux (CGO_ENABLED=0)"
+  fi
+  if ! grep -q 'CGO_ENABLED=0.*go build' "${BUNDLE_SH}"; then
+    fail "cube-volume-s3 compile must use CGO_ENABLED=0 (build_go_binary static_linux branch)"
+  fi
+  if ! grep -B2 './cmd/cube-volume-s3' \
+        "${ROOT_DIR}/CubeMaster/docker/Dockerfile" | grep -q 'CGO_ENABLED=0'; then
+    fail "CubeMaster Dockerfile must compile cube-volume-s3 with CGO_ENABLED=0"
+  fi
+  if ! grep -B2 './cmd/cube-volume-s3' \
+        "${ROOT_DIR}/Cubelet/Dockerfile" | grep -q 'CGO_ENABLED=0'; then
+    fail "Cubelet Dockerfile must compile cube-volume-s3 with CGO_ENABLED=0"
+  fi
+
+  # The plugin has a built-in S3 client, so nothing may reintroduce the AWS CLI:
+  # it was ~100MB installed and ~60MB of zip inside the release bundle.
+  if [[ -e "${ONE_CLICK_DIR}/lib/awscli-bundle.sh" ]]; then
+    fail "lib/awscli-bundle.sh must be gone; the S3 plugin no longer needs the AWS CLI"
+  fi
+  if [[ -e "${ONE_CLICK_DIR}/assets/vendor/awscli" ]]; then
+    fail "assets/vendor/awscli must be gone; the S3 plugin no longer needs the AWS CLI"
+  fi
+  if grep -qi 'awscli' "${BUNDLE_SH}"; then
+    fail "build-release-bundle.sh must not reference the AWS CLI"
+  fi
+  if grep -qi 'awscli' "${ROOT_DIR}/deploy/scripts/docker-install-volume-deps.sh"; then
+    fail "docker-install-volume-deps.sh must not install the AWS CLI"
+  fi
+  if grep -q -- '--aws' "${ROOT_DIR}/examples/volume/s3/install-deps.sh"; then
+    fail "S3 install-deps.sh must not offer --aws"
   fi
 }
 
@@ -305,14 +346,13 @@ test_env_templates_are_split() {
     || fail "build.env.example missing ONE_CLICK_CUBEMASTER_BIN"
   grep -q 'ONE_CLICK_MKCERT_BIN=' "${build_example}" \
     || fail "build.env.example missing ONE_CLICK_MKCERT_BIN"
-  grep -q 'ONE_CLICK_AWSCLI_VERSION=' "${build_example}" \
-    || fail "build.env.example missing ONE_CLICK_AWSCLI_VERSION"
-  grep -q 'ONE_CLICK_AWSCLI_ZIP=' "${build_example}" \
-    || fail "build.env.example missing ONE_CLICK_AWSCLI_ZIP"
-  grep -q 'assets/vendor/awscli' "${build_example}" \
-    || fail "build.env.example must document the AWS CLI cache directory"
+  grep -q 'ONE_CLICK_VOLUME_S3_BIN=' "${build_example}" \
+    || fail "build.env.example missing ONE_CLICK_VOLUME_S3_BIN"
   grep -q 'ONE_CLICK_WEB_DIST_DIR=' "${build_example}" \
     || fail "build.env.example missing ONE_CLICK_WEB_DIST_DIR"
+  if grep -qi 'awscli' "${build_example}"; then
+    fail "build.env.example must not reference the AWS CLI"
+  fi
 
   grep -q 'copy_file "${SCRIPT_DIR}/env.example"' "${BUNDLE_SH}" \
     || fail "build-release-bundle.sh must copy env.example into DIST_ROOT"
@@ -327,7 +367,6 @@ test_env_templates_are_split() {
 test_build_scripts_parse() {
   local f
   for f in "${BUNDLE_SH}" "${BUILD_IMAGES_SH}" \
-    "${ONE_CLICK_DIR}/lib/awscli-bundle.sh" \
     "${ROOT_DIR}/examples/volume/s3/install-deps.sh" \
     "${TF_DIR}/create.sh" "${TF_DIR}/destroy.sh" \
     "${TF_DIR}/lib-phases.sh" "${TF_DIR}/lib-state-sync.sh" "${TF_DIR}/validate.sh"; do

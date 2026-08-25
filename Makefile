@@ -72,6 +72,7 @@ GO_BUILD_ARTIFACT_DIRS := \
 	$(ROOT_DIR)/CubeProxy/bin \
 	$(ROOT_DIR)/cube-lifecycle-manager/bin \
 	$(ROOT_DIR)/examples/cube-bench/bin \
+	$(ROOT_DIR)/examples/volume/s3/bin \
 	$(CUBELET_COW_THIRD_PARTY_DIR) \
 	$(OUTPUT_DIR) \
 	$(AGENT_EXT4_OUTPUT_DIR)
@@ -82,6 +83,7 @@ GO_BUILD_ARTIFACT_FILES := \
 BINARIES := \
 	agent \
 	cube-init \
+	cube-volume-s3 \
 	cubeapi \
 	cubelet \
 	cubemaster \
@@ -141,6 +143,8 @@ help:
 	@printf "  cubecow-smoke Build cubecow smoke test CLI in Docker\n"
 	@printf "  cubecow-test-native Build SDK artifacts and run native tests in Docker\n"
 	@printf "  cube-proxy-sidecar Build cube-proxy-sidecar (developer-only; not in 'all')\n"
+	@printf "  cube-volume-s3 Build the S3-compatible Volume plugin in Docker\n"
+	@printf "  cube-volume-s3-test Run S3 Volume plugin unit tests in Docker\n"
 	@printf "  agent         Build cube-agent in Docker\n"
 	@printf "  cube-init     Build cube-init (guest PID1) in Docker (alias: guest-init)\n"
 	@printf "  guest-init    Alias for cube-init (source dir guest-init/)\n"
@@ -389,6 +393,13 @@ cubevsmapdump: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeNet/cubevs && make gen && go build -o /workspace/_output/bin/cubevsmapdump ./cmd/cubevsmapdump'
 
+# S3-compatible Volume plugin. CubeMaster/Cubelet fork it once per hook, so it
+# ships as a standalone static binary next to the component binaries.
+.PHONY: cube-volume-s3
+cube-volume-s3: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/examples/volume/s3 && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -trimpath -ldflags '-s -w' -o /workspace/_output/bin/cube-volume-s3 ./cmd/cube-volume-s3"
+
 .PHONY: cube-proxy-sidecar
 cube-proxy-sidecar: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
@@ -441,6 +452,12 @@ cubeops: builder-image
 .PHONY: cubeops-test
 cubeops-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeOps && go mod download && go test ./...'
+
+# The plugin's tests need no cloud access; the s3fs helpers skip themselves when
+# mountpoint(1) is unavailable.
+.PHONY: cube-volume-s3-test
+cube-volume-s3-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/examples/volume/s3 && go mod download && go vet ./... && go test ./...'
 
 .PHONY: cubemaster-test
 cubemaster-test: builder-image
@@ -616,6 +633,8 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C sdk/go fmt
 	@printf '  %-8s %s\n' "FMT" "examples/cube-bench"
 	@$(MAKE) -C examples/cube-bench fmt
+	@printf '  %-8s %s\n' "FMT" "examples/volume/s3"
+	@$(MAKE) -C examples/volume/s3 fmt
 else
 	@$(MAKE) builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make fmt'

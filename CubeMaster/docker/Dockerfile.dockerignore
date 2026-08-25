@@ -19,14 +19,15 @@
 !deploy
 !deploy/scripts
 !deploy/scripts/docker-install-volume-deps.sh
-# COS volume Controller plugin binary + example conf (credentials via chart Secret).
+# COS volume Controller plugin script + example conf (credentials via chart Secret).
 !examples
 !examples/volume
 !examples/volume/cos
 !examples/volume/cos/binary
 !examples/volume/cos/binary/**
 !examples/volume/cos/volume-cos.conf.example
+# S3 volume Controller plugin: a Go module compiled in the builder stage, so the
+# whole module (not just a script) has to be in the context.
 !examples/volume/s3
-!examples/volume/s3/binary
-!examples/volume/s3/binary/**
-!examples/volume/s3/volume-s3.conf.example
+!examples/volume/s3/**
+examples/volume/s3/bin

@@ -28,6 +28,7 @@ COPY cubecow/ /workspace/cubecow/
 COPY cubelog/ /workspace/cubelog/
 COPY CubeNet/ /workspace/CubeNet/
 COPY Cubelet/ /workspace/Cubelet/
+COPY examples/volume/s3/ /workspace/volume-s3/
 
 # cubecow static library (same as root `make cubecow-sdk` inside the builder).
 RUN set -eux; \
@@ -61,7 +62,11 @@ RUN set -eux; \
     GOOS=linux GOARCH="${goarch}" go build -ldflags "${ldflags}" \
       -o /out/bin/cubelet ./cmd/cubelet; \
     GOOS=linux GOARCH="${goarch}" go build -ldflags "${ldflags}" \
-      -o /out/bin/cubecli ./cmd/cubecli
+      -o /out/bin/cubecli ./cmd/cubecli; \
+    cd /workspace/volume-s3; \
+    go mod download; \
+    CGO_ENABLED=0 GOOS=linux GOARCH="${goarch}" go build -trimpath -ldflags '-s -w' \
+      -o /out/bin/cube-volume-s3 ./cmd/cube-volume-s3
 
 # Assemble one-click-compatible Cubelet tree for the runtime stage.
 RUN set -eux; \
@@ -69,6 +74,7 @@ RUN set -eux; \
              /out/cube-vs/network/bin; \
     cp /out/bin/cubelet /out/bin/cubecli /out/Cubelet/bin/; \
     cp /out/bin/cubevsmapdump /out/cube-vs/network/bin/; \
+    install -m 0755 /out/bin/cube-volume-s3 /out/Cubelet/plugin/cube-volume-s3; \
     cp -a /workspace/Cubelet/config/. /out/Cubelet/config/; \
     cp -a /workspace/Cubelet/dynamicconf/. /out/Cubelet/dynamicconf/; \
     if [ -f /workspace/Cubelet/contrib/nicl ]; then \
@@ -119,7 +125,6 @@ COPY --from=builder /out/Cubelet ${IMAGE_ROOT}/Cubelet
 COPY --from=builder /out/cube-vs ${IMAGE_ROOT}/cube-vs
 COPY examples/volume/cos/binary/cube-volume-cos.sh ${IMAGE_ROOT}/Cubelet/plugin/cube-volume-cos
 COPY examples/volume/cos/volume-cos.conf.example ${IMAGE_ROOT}/Cubelet/plugin/volume-cos.conf.example
-COPY examples/volume/s3/binary/cube-volume-s3.sh ${IMAGE_ROOT}/Cubelet/plugin/cube-volume-s3
 COPY examples/volume/s3/volume-s3.conf.example ${IMAGE_ROOT}/Cubelet/plugin/volume-s3.conf.example
 COPY deploy/kubernetes/images/scripts/component-entrypoint.sh /usr/local/bin/component-entrypoint.sh
 

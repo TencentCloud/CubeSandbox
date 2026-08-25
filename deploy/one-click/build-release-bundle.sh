@@ -6,8 +6,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
-# shellcheck source=./lib/awscli-bundle.sh
-source "${SCRIPT_DIR}/lib/awscli-bundle.sh"
 
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 load_build_env
@@ -77,6 +75,7 @@ CUBELET_BUILD_MODE="${ONE_CLICK_CUBELET_BUILD_MODE:-local}"
 API_BUILD_MODE="${ONE_CLICK_CUBE_API_BUILD_MODE:-local}"
 CUBE_OPS_BUILD_MODE="${ONE_CLICK_CUBE_OPS_BUILD_MODE:-local}"
 CUBEVSMAPDUMP_BUILD_MODE="${ONE_CLICK_CUBEVSMAPDUMP_BUILD_MODE:-local}"
+VOLUME_S3_BUILD_MODE="${ONE_CLICK_VOLUME_S3_BUILD_MODE:-local}"
 
 CUBEMASTER_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTER_BIN:-}"
 CUBEMASTERCLI_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTERCLI_BIN:-}"
@@ -86,6 +85,7 @@ API_BIN_OVERRIDE="${ONE_CLICK_CUBE_API_BIN:-}"
 CUBE_OPS_BIN_OVERRIDE="${ONE_CLICK_CUBE_OPS_BIN:-}"
 CUBE_OPS_CLI_BIN_OVERRIDE="${ONE_CLICK_CUBE_OPS_CLI_BIN:-}"
 CUBEVSMAPDUMP_BIN_OVERRIDE="${ONE_CLICK_CUBEVSMAPDUMP_BIN:-}"
+VOLUME_S3_BIN_OVERRIDE="${ONE_CLICK_VOLUME_S3_BIN:-}"
 S3LVOL_DIR="${ONE_CLICK_S3LVOL_DIR:-}"
 
 go_version_ldflags() {
@@ -101,7 +101,8 @@ build_go_binary() {
   local mode="$2"
   local output="$3"
   local version_pkg="$4"
-  shift 4
+  local static_linux="${5:-}"
+  shift 5
 
   local ldflags="-s -w"
   if [[ -n "${version_pkg}" ]]; then
@@ -111,7 +112,16 @@ build_go_binary() {
   case "${mode}" in
     local)
       require_cmd go
-      (cd "${workdir}" && go mod download && go build -ldflags "${ldflags}" -o "${output}" "$@") >&2
+
+      # cube-volume-s3 must be statically linked: one-click hosts are Ubuntu
+      # 20.04 / glibc 2.31. cubelet and cubecli need cgo (nsenter, cubecow).
+      if [[ "${static_linux}" == "static_linux" ]]; then
+        (cd "${workdir}" && go mod download && \
+          CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "${ldflags}" -o "${output}" "$@") >&2
+      else
+        (cd "${workdir}" && go mod download && \
+          go build -trimpath -ldflags "${ldflags}" -o "${output}" "$@") >&2
+      fi
       ;;
     *)
       die "unsupported build mode: ${mode}"
@@ -145,6 +155,7 @@ build_or_copy_go_binary() {
   local output="$5"
   local package="$6"
   local version_pkg="${7:-}"  # optional: Go import path for ldflags injection
+  local static_linux="${8:-}"  # optional: "static_linux" → CGO_ENABLED=0 GOOS=linux
 
   if [[ -n "${override_path}" ]]; then
     log "using prebuilt ${name}: ${override_path}"
@@ -153,7 +164,7 @@ build_or_copy_go_binary() {
   fi
 
   log "building ${name}"
-  build_go_binary "${workdir}" "${mode}" "${output}" "${version_pkg}" "${package}"
+  build_go_binary "${workdir}" "${mode}" "${output}" "${version_pkg}" "${static_linux}" "${package}"
 }
 
 build_or_copy_rust_binary() {
@@ -799,14 +810,26 @@ copy_file "${VOLUME_COS_INSTALL_DEPS}" "${PACKAGE_ROOT}/CubeMaster/plugin/instal
 copy_file "${VOLUME_COS_INSTALL_DEPS}" "${PACKAGE_ROOT}/Cubelet/plugin/install-deps.sh"
 chmod +x "${PACKAGE_ROOT}/CubeMaster/plugin/install-deps.sh" "${PACKAGE_ROOT}/Cubelet/plugin/install-deps.sh"
 
-VOLUME_S3_PLUGIN_SRC="${ROOT_DIR}/examples/volume/s3/binary/cube-volume-s3.sh"
-VOLUME_S3_CONF_EXAMPLE="${ROOT_DIR}/examples/volume/s3/volume-s3.conf.example"
-VOLUME_S3_INSTALL_DEPS="${ROOT_DIR}/examples/volume/s3/install-deps.sh"
-ensure_file "${VOLUME_S3_PLUGIN_SRC}"
+# The S3 plugin is a Go binary: it talks to the endpoint over HTTP, so control
+# nodes need no S3 command line tool. Build once and install into both plugin
+# directories.
+VOLUME_S3_SRC_DIR="${ROOT_DIR}/examples/volume/s3"
+VOLUME_S3_CONF_EXAMPLE="${VOLUME_S3_SRC_DIR}/volume-s3.conf.example"
+VOLUME_S3_INSTALL_DEPS="${VOLUME_S3_SRC_DIR}/install-deps.sh"
+ensure_file "${VOLUME_S3_SRC_DIR}/cmd/cube-volume-s3/main.go"
 ensure_file "${VOLUME_S3_CONF_EXAMPLE}"
 ensure_file "${VOLUME_S3_INSTALL_DEPS}"
-copy_file "${VOLUME_S3_PLUGIN_SRC}" "${PACKAGE_ROOT}/CubeMaster/plugin/cube-volume-s3"
-copy_file "${VOLUME_S3_PLUGIN_SRC}" "${PACKAGE_ROOT}/Cubelet/plugin/cube-volume-s3"
+# CGO_ENABLED=0 GOOS=linux: one-click hosts are Ubuntu 20.04 / glibc 2.31.
+build_or_copy_go_binary \
+  "cube-volume-s3" \
+  "${VOLUME_S3_BIN_OVERRIDE}" \
+  "${VOLUME_S3_SRC_DIR}" \
+  "${VOLUME_S3_BUILD_MODE}" \
+  "${PACKAGE_ROOT}/CubeMaster/plugin/cube-volume-s3" \
+  "./cmd/cube-volume-s3" \
+  "" \
+  "static_linux"
+copy_file "${PACKAGE_ROOT}/CubeMaster/plugin/cube-volume-s3" "${PACKAGE_ROOT}/Cubelet/plugin/cube-volume-s3"
 chmod +x "${PACKAGE_ROOT}/CubeMaster/plugin/cube-volume-s3" "${PACKAGE_ROOT}/Cubelet/plugin/cube-volume-s3"
 copy_file "${VOLUME_S3_CONF_EXAMPLE}" "${PACKAGE_ROOT}/CubeMaster/plugin/volume-s3.conf.example"
 copy_file "${VOLUME_S3_CONF_EXAMPLE}" "${PACKAGE_ROOT}/Cubelet/plugin/volume-s3.conf.example"
@@ -837,10 +860,6 @@ copy_dir_contents "${CUBE_LCM_TEMPLATE_DIR}" "${PACKAGE_ROOT}/cube-lifecycle-man
 build_web_dist "${PACKAGE_ROOT}/webui/dist"
 copy_dir_contents "${CUBE_SUPPORT_TEMPLATE_DIR}" "${PACKAGE_ROOT}/support"
 copy_file "${MKCERT_BIN_ASSET}" "${PACKAGE_ROOT}/support/bin/mkcert"
-# Pin AWS CLI v2 next to mkcert so control-node install uses
-# ${PACKAGE_ROOT}/support/vendor/awscli/ and does not download from
-# awscli.amazonaws.com. Cache hits under assets/vendor/awscli/ skip the fetch.
-stage_awscli_bundle_into_package "${PACKAGE_ROOT}"
 
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-shim" "${PACKAGE_ROOT}/cube-shim"
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf" "${PACKAGE_ROOT}/cube-kernel-scf"

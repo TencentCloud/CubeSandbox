@@ -42,6 +42,22 @@ RUN set -eux; \
         -X 'github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.BuildTime=${CUBE_BUILD_TIME}'" \
       ./cmd/cubemaster
 
+# S3 Volume plugin: a standalone module that speaks S3 over HTTP, so the runtime
+# image needs no S3 command line tool for the Controller hooks. Copied after the
+# cubemaster build so plugin edits do not invalidate that layer.
+COPY examples/volume/s3/go.mod examples/volume/s3/go.sum /volume-s3/
+RUN cd /volume-s3 && go mod download
+COPY examples/volume/s3/ /volume-s3/
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) goarch=amd64 ;; \
+      arm64) goarch=arm64 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    cd /volume-s3; \
+    CGO_ENABLED=0 GOOS=linux GOARCH="${goarch}" go build -trimpath -ldflags '-s -w' \
+      -o /out/cube-volume-s3 ./cmd/cube-volume-s3
+
 # ── Runtime stage ──────────────────────────────────────────────────────────────
 FROM ubuntu:24.04
 
@@ -95,12 +111,11 @@ COPY examples/volume/cos/binary/cube-volume-cos.sh \
     /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos
 COPY examples/volume/cos/volume-cos.conf.example \
     /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-cos.conf.example
-COPY examples/volume/s3/binary/cube-volume-s3.sh \
+COPY --from=builder --chmod=0755 /out/cube-volume-s3 \
     /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3
 COPY examples/volume/s3/volume-s3.conf.example \
     /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-s3.conf.example
-RUN chmod +x /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos \
-    /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3
+RUN chmod +x /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos
 
 RUN ["/usr/local/services/cubetoolbox/CubeMaster/bin/cubemaster", "--version"]
 

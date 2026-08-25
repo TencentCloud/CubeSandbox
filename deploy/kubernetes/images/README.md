@@ -138,7 +138,7 @@ Do **not** bake `SECRET_ID` / `SECRET_KEY` into images.
 | Plugin binary `cube-volume-s3` | Baked into `cube-master` (`…/CubeMaster/plugin/`) and `cubelet` (`…/Cubelet/plugin/`). Images also ship `volume-s3.conf.example` for reference only — **not** runtime credentials. |
 | Plugin registration `volume_plugins` | Chart renders `s3` next to `cos` in `files/cube-master/conf.yaml`. Cubelet `config.toml` registers the Node-side plugin from the staged image. |
 | Credentials `volume-s3.conf` | Chart Secret mount. Always rendered from effective S3 fields (`volumeS3.*`, or filled from chart MinIO when `minio.enabled=true` and the operator left `endpoint` / `existingSecret` empty). `minio.*` only installs MinIO. The two operator-supplied families are mutually exclusive. On Cubelet, this is a kubelet file bind on the hostPath toolbox; `atomic_replace_dir` overlays `Cubelet/` in place and keeps the bind on the live path (it must not rename the directory). |
-| Host tools | `deploy/scripts/docker-install-volume-deps.sh` installs `s3fs` and `awscli` into cube-master / cubelet images. |
+| Host tools | `deploy/scripts/docker-install-volume-deps.sh` installs `s3fs` (plus the COS tools) into cube-master / cubelet images. The S3 volume plugin binary is compiled in each image's builder stage and needs no S3 command line tool. |
 
 Do **not** bake access keys into images.
 

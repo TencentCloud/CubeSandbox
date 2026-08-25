@@ -11,6 +11,7 @@ on:
       - 'Cubelet/**'
       - 'CubeShim/**'
       - 'agent/**'
+      - 'examples/volume/s3/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/build-check.yml'
@@ -24,6 +25,7 @@ on:
       - 'Cubelet/**'
       - 'CubeShim/**'
       - 'agent/**'
+      - 'examples/volume/s3/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/build-check.yml'
@@ -55,7 +57,7 @@ jobs:
         # make target + expected binaries. Architecture coverage catches
         # arch-specific regressions (e.g. cfg(target_arch) code in the shim /
         # hypervisor) that an amd64-only build would miss.
-        component: [CubeAPI, CubeOps, CubeMaster, Cubelet, agent, CubeShim]
+        component: [CubeAPI, CubeOps, CubeMaster, Cubelet, agent, CubeShim, volume-s3]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -90,6 +92,12 @@ jobs:
             expected_bins: |
               _output/bin/containerd-shim-cube-rs
               _output/bin/cube-runtime
+          # S3 Volume plugin (examples/volume/s3): its own Go module, so it is
+          # not covered by any component build above.
+          - component: volume-s3
+            make_target: cube-volume-s3
+            expected_bins: |
+              _output/bin/cube-volume-s3
 
     steps:
       - name: Checkout
