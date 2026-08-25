@@ -196,7 +196,7 @@ spdk_check()
 
 	local head patched=no
 	head="$(git -C "${SPDK_DIR}" rev-parse --short HEAD 2>/dev/null || echo '?')"
-	if "${SCRIPT_DIR}/patches/apply.sh" --check >/dev/null 2>&1; then
+	if SPDK_ROOT="${SPDK_DIR}" "${SCRIPT_DIR}/patches/apply.sh" --check >/dev/null 2>&1; then
 		patched=yes
 	fi
 
@@ -296,7 +296,7 @@ spdk_build()
 setup_spdk()
 {
 	if spdk_is_built && [ "${FORCE}" -eq 0 ]; then
-		if "${SCRIPT_DIR}/patches/apply.sh" --check >/dev/null 2>&1; then
+		if SPDK_ROOT="${SPDK_DIR}" "${SCRIPT_DIR}/patches/apply.sh" --check >/dev/null 2>&1; then
 			log "spdk: already set up, nothing to do (--force to rebuild)"
 			return 0
 		fi
