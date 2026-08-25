@@ -29,7 +29,7 @@ tool's code execution crosses into CubeSandbox.
 | --- | --- |
 | Google ADK | Python package `google-adk>=2.0.0` |
 | Python | 3.10+ |
-| CubeSandbox | E2B-compatible CubeAPI and a template that supports `run_code` |
+| CubeSandbox | E2B-compatible CubeAPI, a reachable CubeProxy data plane, and a template that supports `run_code` |
 | SDK path | `e2b==2.26.0` and `e2b-code-interpreter==2.8.1`, pointed at CubeAPI through `E2B_API_URL` |
 
 Google ADK is evolving quickly. The example pins the E2B packages to a pair
@@ -40,15 +40,23 @@ compatibility notes. Revalidate before changing either package version.
 
 - A running [CubeSandbox deployment](/guide/quickstart) with CubeAPI reachable,
   normally at `http://<cube-host>:3000`.
+- Data-plane reachability for the official E2B SDK. A one-click local
+  deployment includes CoreDNS; production deployments should configure wildcard
+  DNS, and local setups without wildcard DNS can use the
+  [E2B development sidecar](/guide/connect-existing-cluster).
 - A CubeSandbox template ID. Use a template that supports the E2B code
   interpreter `run_code` path.
 - Python 3.10+ on the machine running the ADK agent.
 - A Google API key or another ADK-supported model configuration.
 
 ::: warning Control plane and data plane
-`E2B_API_URL` points the E2B-compatible SDK at CubeAPI. If your deployment uses
-TLS with a self-signed certificate, set `CUBE_SSL_CERT_FILE` so the example can
-export `SSL_CERT_FILE` before opening the sandbox.
+`E2B_API_URL` selects the CubeAPI control-plane endpoint. The official E2B SDK
+also connects to per-sandbox data-plane hostnames when `run_code` executes.
+Configure wildcard DNS for production deployments, or use the
+[E2B development sidecar](/guide/connect-existing-cluster) for local
+development without wildcard DNS. If your deployment uses TLS with a self-signed
+certificate, set `CUBE_SSL_CERT_FILE` so the example can export `SSL_CERT_FILE`
+before opening the sandbox.
 :::
 
 ## Setup
@@ -72,6 +80,7 @@ Configure `.env`:
 | `CUBE_TEMPLATE_ID` | CubeSandbox template ID used for temporary tool sandboxes |
 | `GOOGLE_API_KEY` | Google model API key used by ADK |
 | `GOOGLE_ADK_MODEL` | ADK model name, for example `gemini-2.5-flash` |
+| `CUBE_SANDBOX_TIMEOUT` | Optional sandbox lifetime bound in seconds, passed to `Sandbox.create(timeout=...)`; defaults to `300` |
 | `CUBE_SSL_CERT_FILE` | Optional CubeSandbox CA bundle for self-signed deployments |
 
 ## Integration Snippet
@@ -167,7 +176,8 @@ and deletes the temporary sandbox when the tool call finishes.
   tool call for simplicity. For multi-step notebooks, keep a sandbox handle in a
   session-scoped service and delete it when the ADK session ends.
 - **Timeouts:** set `CUBE_SANDBOX_TIMEOUT` or pass a fixed timeout to
-  `Sandbox.create(...)` for longer analysis tasks.
+  `Sandbox.create(...)` for the sandbox lifetime. This does not set a per-call
+  `run_code` execution timeout.
 - **Network policy:** create sandboxes with Cube-specific egress controls when
   generated code must only reach approved hosts. See
   [network policy](/guide/network-policy).
