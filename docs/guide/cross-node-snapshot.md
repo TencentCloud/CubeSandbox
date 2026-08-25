@@ -247,8 +247,6 @@ Create from the **template** (`Sandbox.create(template=tpl-…)`).
 | Create from snapshot (concurrency 1) | 64.5 | 74.3 | 439.0 | 473.3 | 6495.5 | 7322.8 |
 | Create from snapshot (concurrency 5) | 80.3 | 94.7 | 732.7 | 902.8 | 12285.1 | 14703.1 |
 
-Earlier bare-metal XFS-only numbers: [Performance Benchmark](./performance-benchmark.md).
-
 ---
 
 ## Known limitations
