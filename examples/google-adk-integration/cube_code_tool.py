@@ -29,10 +29,21 @@ def _read_required_env(name: str) -> str:
     return value
 
 
-def _execution_to_dict(execution: Any, stdout: list[str]) -> dict[str, Any]:
+def _stringify_log_item(item: Any) -> str:
+    line = getattr(item, "line", None)
+    if line is not None:
+        return str(line)
+    return str(item)
+
+
+def _execution_to_dict(execution: Any, stdout: list[Any]) -> dict[str, Any]:
     """Return a JSON-serializable result across E2B SDK versions."""
+    logs = getattr(execution, "logs", None)
+    captured_stdout = getattr(logs, "stdout", None) if logs else None
+    stdout_items = captured_stdout if captured_stdout is not None else stdout
+
     result: dict[str, Any] = {
-        "stdout": "".join(stdout),
+        "stdout": "".join(_stringify_log_item(item) for item in stdout_items),
         "text": getattr(execution, "text", None),
         "error": None,
     }
@@ -65,7 +76,7 @@ def run_python_in_cube(code: str) -> dict[str, Any]:
     template_id = _read_required_env("CUBE_TEMPLATE_ID")
     timeout = int(os.environ.get("CUBE_SANDBOX_TIMEOUT", "300"))
 
-    stdout: list[str] = []
+    stdout: list[Any] = []
     with Sandbox.create(template=template_id, timeout=timeout) as sandbox:
         execution = sandbox.run_code(code, on_stdout=stdout.append)
         return _execution_to_dict(execution, stdout)

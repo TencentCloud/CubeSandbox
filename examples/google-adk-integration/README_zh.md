@@ -56,5 +56,5 @@ agent 应调用 `run_python_in_cube`，基于 `CUBE_TEMPLATE_ID` 创建 CubeSand
 ## 注意事项
 
 - 请使用支持 E2B code interpreter `run_code` 路径的模板。
-- 生产使用前，应在你的 CubeSandbox 版本上验证并固定 `google-adk` 和 `e2b-code-interpreter` 的具体版本。
+- E2B 相关包已固定到一个 plain `pip` 可直接安装、且记录在仓库 SDK compatibility notes 中的组合。修改任一版本前请重新验证。
 - 如果 CubeAPI 使用自签证书，请设置 `CUBE_SSL_CERT_FILE`。
