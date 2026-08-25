@@ -1564,6 +1564,94 @@ SPDK_RPC_REGISTER("rcow_get_lvstores", rpc_rcow_get_lvstores,
 		  SPDK_RPC_RUNTIME)
 
 /* ==========================================================================
+ * rcow_get_lvol
+ *
+ * Report an lvol's cluster geometry and how much of it is actually allocated.
+ * The answer is synchronous: the lvol is looked up among the loaded (attached)
+ * lvols, so a name that is not loaded is an error, not an empty reply.
+ *
+ * allocated_clusters is the blob's own allocation bitmap -- for a volume that
+ * reads through an export (esnap clone) it can be 0 until decoupled; the
+ * export/import logs report the reference count instead.
+ * ========================================================================== */
+
+static const struct spdk_json_object_decoder rpc_get_lvol_decoders[] = {
+	/* lvs_name is optional so rpc_lookup_lvol()'s scan-all-lvstores path
+	 * stays reachable; lvol_name is required -- without it the lookup has
+	 * nothing to find, so it fails at decode time. */
+	{"lvs_name",  offsetof(struct rpc_lvol_name, lvs_name),
+	 spdk_json_decode_string, true},
+	{"lvol_name", offsetof(struct rpc_lvol_name, lvol_name),
+	 spdk_json_decode_string, false},
+};
+
+static void
+rpc_rcow_get_lvol(struct spdk_jsonrpc_request *request,
+		  const struct spdk_json_val *params)
+{
+	struct rpc_lvol_name req = {0};
+	struct rpc_json_buf buf;
+	struct spdk_lvol *lvol;
+	struct s3lvol_lvstore *lvs;
+	struct spdk_lvol_store *store;
+	struct spdk_json_write_ctx *w;
+
+	if (spdk_json_decode_object(params, rpc_get_lvol_decoders,
+				    SPDK_COUNTOF(rpc_get_lvol_decoders), &req)) {
+		rpc_lvol_respond_err(request, 0, "Invalid parameters");
+		goto cleanup;
+	}
+
+	lvol = rpc_lookup_lvol(request, &req);
+	if (!lvol) {
+		goto cleanup;
+	}
+
+	/* rpc_lookup_lvol() resolved the lvol through the named lvstore, so the
+	 * wrapper around that store is guaranteed to be loaded; assert rather
+	 * than keep a branch that can never fire. */
+	lvs = s3lvol_lvstore_find_by_lvs(lvol->lvol_store);
+	assert(lvs != NULL);
+
+	store = s3lvol_lvstore_get_lvs(lvs);
+
+	/* Structured answer, serialised into string_value like every other
+	 * external RPC in this file -- see the envelope contract at the top. */
+	w = rpc_json_buf_begin(&buf);
+	if (!w) {
+		rpc_lvol_respond_err(request, -ENOMEM, NULL);
+		goto cleanup;
+	}
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_string(w, "lvs_name", s3lvol_lvstore_get_name(lvs));
+	spdk_json_write_named_string(w, "name", lvol->name);
+	if (lvol->bdev) {
+		spdk_json_write_named_string(w, "bdev_name", lvol->bdev->name);
+	}
+	spdk_json_write_named_uuid(w, "uuid", &lvol->uuid);
+	spdk_json_write_named_uint64(w, "cluster_size",
+				     spdk_bs_get_cluster_size(store->blobstore));
+	if (lvol->blob != NULL) {
+		spdk_json_write_named_uint64(w, "total_clusters",
+					     spdk_blob_get_num_clusters(lvol->blob));
+		spdk_json_write_named_uint64(w, "allocated_clusters",
+					     spdk_blob_get_num_allocated_clusters(lvol->blob));
+	} else {
+		/* Not open (never attached, or closed by deactivate): the blob's
+		 * allocation bitmap is not readable without reopening it. */
+		spdk_json_write_named_uint64(w, "total_clusters", 0);
+		spdk_json_write_named_uint64(w, "allocated_clusters", 0);
+	}
+	spdk_json_write_object_end(w);
+	rpc_json_buf_respond(request, w, &buf);
+
+cleanup:
+	free(req.lvs_name);
+	free(req.lvol_name);
+}
+SPDK_RPC_REGISTER("rcow_get_lvol", rpc_rcow_get_lvol, SPDK_RPC_RUNTIME)
+
+/* ==========================================================================
  * Cross-node transfer: export / import / release
  *
  * The pause and resume entry points of a sandbox. Naming follows the rest of

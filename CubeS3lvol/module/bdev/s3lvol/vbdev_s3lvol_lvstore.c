@@ -2595,6 +2595,13 @@ struct lvol_destroy_ctx {
 	char                     name[SPDK_LVOL_NAME_MAX];
 	char                     esnap_uuid[SPDK_UUID_STRING_LEN];
 
+	/* Cluster counts read before the destroy: the blob must still be open
+	 * to read them, and is gone by the time the success callback runs, so
+	 * the reclaimed counts can only be reported from there. */
+	uint64_t                 allocated_clusters;
+	uint64_t                 total_clusters;
+	bool                     have_cluster_counts;
+
 	spdk_lvol_op_complete    cb_fn;
 	void                    *cb_arg;
 };
@@ -2613,10 +2620,20 @@ s3lvol_lvol_destroyed(void *cb_arg, int lvolerrno)
 		 * that follow are fire-and-forget and log only their failures, and the
 		 * RPC answer travels to the caller, not the log. So "did the delete
 		 * actually go through" was previously answerable only by asking again
-		 * or counting objects; a production post-mortem needs better. */
-		SPDK_NOTICELOG("Deleted lvol '%s/%s'\n",
-			       ctx->owner ? s3lvol_lvstore_get_name(ctx->owner) : "(null)",
-			       ctx->name);
+		 * or counting objects; a production post-mortem needs better. The
+		 * reclaimed cluster counts are printed here, not before the delete,
+		 * so the claim only ever accompanies an actual success. */
+		if (ctx->have_cluster_counts) {
+			SPDK_NOTICELOG("Deleted lvol '%s/%s', reclaimed %" PRIu64
+				       " of %" PRIu64 " clusters\n",
+				       ctx->owner ? s3lvol_lvstore_get_name(ctx->owner) : "(null)",
+				       ctx->name,
+				       ctx->allocated_clusters, ctx->total_clusters);
+		} else {
+			SPDK_NOTICELOG("Deleted lvol '%s/%s'\n",
+				       ctx->owner ? s3lvol_lvstore_get_name(ctx->owner) : "(null)",
+				       ctx->name);
+		}
 
 		if (ctx->esnap_uuid[0] != '\0') {
 			s3lvol_imports_recheck(ctx->owner, ctx->esnap_uuid);
@@ -2842,6 +2859,18 @@ s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 			memcpy(ctx->esnap_uuid, esnap_id, id_len);
 			ctx->esnap_uuid[id_len] = '\0';
 		}
+	}
+
+	/* Capture the cluster counts before the destroy: the blob must still be
+	 * open to read them, and is gone by the time s3lvol_lvol_destroyed()
+	 * runs. Printing them from the success callback (rather than here) keeps
+	 * "reclaimed" honest when an asynchronous destroy fails. */
+	if (lvol->blob != NULL) {
+		ctx->allocated_clusters =
+			spdk_blob_get_num_allocated_clusters(lvol->blob);
+		ctx->total_clusters =
+			spdk_blob_get_num_clusters(lvol->blob);
+		ctx->have_cluster_counts = true;
 	}
 
 	if (lvol->bdev) {
