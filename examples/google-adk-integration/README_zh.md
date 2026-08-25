@@ -51,12 +51,14 @@ adk run google-adk-integration
 Run Python in the sandbox to calculate the first 10 Fibonacci numbers.
 ```
 
-agent 应调用 `run_python_in_cube`，基于 `CUBE_TEMPLATE_ID` 创建 CubeSandbox，执行 Python 代码，返回 stdout，并在工具调用结束后删除临时沙箱。
+agent 应调用 `run_python_in_cube`，基于 `CUBE_TEMPLATE_ID` 创建 CubeSandbox，执行 Python 代码，返回 stdout 和 stderr，并在工具调用结束后删除临时沙箱。
 
 ## 注意事项
 
 - 请使用支持 E2B code interpreter `run_code` 路径的模板。
-- E2B 相关包已固定到一个 plain `pip` 可直接安装、且记录在仓库 SDK compatibility notes 中的组合。修改任一版本前请重新验证。
+- E2B 相关包已固定到一个 plain `pip` 可直接安装、且记录在仓库 SDK compatibility notes 中的组合。
+  本示例的离线 smoke test 不会验证该精确组合连接真实 CubeSandbox 部署后的 live `run_code` 路径；
+  修改版本或作为生产基线使用前，请重新验证。
 - `CUBE_SANDBOX_TIMEOUT` 控制临时沙箱生命周期，`CUBE_RUN_CODE_TIMEOUT` 控制每次 `run_code` 执行。
 - 本地开发没有泛域名 DNS 时，可以设置 `CUBE_USE_DEV_SIDECAR=true`，并在本示例的 `.env`
   中配置 `CUBE_REMOTE_PROXY_*` 变量，或把它们导出到 ADK 进程环境中。不要只修改

@@ -69,14 +69,21 @@ def _stringify_log_item(item: Any) -> str:
     return str(item)
 
 
-def _execution_to_dict(execution: Any, stdout: list[Any]) -> dict[str, Any]:
+def _execution_to_dict(
+    execution: Any,
+    stdout: list[Any],
+    stderr: list[Any],
+) -> dict[str, Any]:
     """Return a JSON-serializable result across E2B SDK versions."""
     logs = getattr(execution, "logs", None)
     captured_stdout = getattr(logs, "stdout", None) if logs else None
+    captured_stderr = getattr(logs, "stderr", None) if logs else None
     stdout_items = captured_stdout or stdout
+    stderr_items = captured_stderr or stderr
 
     result: dict[str, Any] = {
         "stdout": "".join(_stringify_log_item(item) for item in stdout_items),
+        "stderr": "".join(_stringify_log_item(item) for item in stderr_items),
         "text": getattr(execution, "text", None),
         "error": None,
     }
@@ -106,6 +113,7 @@ def run_python_in_cube(code: str) -> dict[str, Any]:
     if not code or not code.strip():
         return {
             "stdout": "",
+            "stderr": "",
             "text": None,
             "error": "code must not be empty",
             "results_count": 0,
@@ -116,11 +124,13 @@ def run_python_in_cube(code: str) -> dict[str, Any]:
     run_code_timeout = _read_int_env("CUBE_RUN_CODE_TIMEOUT", 60)
 
     stdout: list[Any] = []
+    stderr: list[Any] = []
     _setup_optional_dev_sidecar()
     with Sandbox.create(template=template_id, timeout=sandbox_timeout) as sandbox:
         execution = sandbox.run_code(
             code,
             on_stdout=stdout.append,
+            on_stderr=stderr.append,
             timeout=run_code_timeout,
         )
-        return _execution_to_dict(execution, stdout)
+        return _execution_to_dict(execution, stdout, stderr)

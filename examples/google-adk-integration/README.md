@@ -56,15 +56,17 @@ Run Python in the sandbox to calculate the first 10 Fibonacci numbers.
 ```
 
 The agent should call `run_python_in_cube`, create a CubeSandbox from
-`CUBE_TEMPLATE_ID`, execute the Python code, return stdout, and delete the
-temporary sandbox when the tool call finishes.
+`CUBE_TEMPLATE_ID`, execute the Python code, return stdout and stderr, and
+delete the temporary sandbox when the tool call finishes.
 
 ## Notes
 
 - Use a template that supports the E2B code interpreter `run_code` path.
 - The E2B packages are pinned to a pair that plain `pip` can install and that is
-  listed in the repository's SDK compatibility notes. Revalidate before changing
-  either package version.
+  listed in the repository's SDK compatibility notes. This example's offline
+  smoke test does not validate the live `run_code` path against that exact pair,
+  so revalidate against a real CubeSandbox deployment before changing package
+  versions or using this as a production baseline.
 - `CUBE_SANDBOX_TIMEOUT` controls the temporary sandbox lifetime.
   `CUBE_RUN_CODE_TIMEOUT` controls each `run_code` execution.
 - For local development without wildcard DNS, set `CUBE_USE_DEV_SIDECAR=true`

@@ -22,12 +22,14 @@ lang: zh-CN
 
 | 组件 | 基线 |
 | --- | --- |
-| Google ADK | Python package `google-adk>=2.0.0` |
+| Google ADK | Python package `google-adk==2.7.1` |
 | Python | 3.10+ |
 | CubeSandbox | E2B-compatible CubeAPI、可访问的 CubeProxy 数据面，以及支持 `run_code` 的模板 |
 | SDK 路径 | 通过 `E2B_API_URL` 指向 CubeAPI 的 `e2b==2.26.0` 和 `e2b-code-interpreter==2.8.1` |
 
-Google ADK 仍在快速演进。示例把 E2B 相关包固定到一个 plain `pip` 可直接安装、且已记录在仓库 SDK compatibility notes 中的组合。修改任一版本前请重新验证。
+Google ADK 仍在快速演进，因此可运行示例固定了 ADK 包版本。E2B 相关包固定到一个 plain `pip`
+可直接安装、且已记录在仓库 SDK compatibility notes 中的组合。本 PR 没有把这个精确组合连接真实
+CubeSandbox 部署做 live `run_code` 验证；修改版本或把该示例作为生产基线前，请重新验证 live 路径。
 
 ## 前置条件
 
@@ -94,7 +96,8 @@ root_agent = Agent(
 )
 ```
 
-工具函数把 Cube 相关逻辑集中在一处：
+这个简化工具形态把 Cube 相关逻辑集中在一处。可运行示例还包含环境加载、stderr 处理、sidecar setup
+和跨版本输出归一化：
 
 ```python
 import os
@@ -106,8 +109,10 @@ def run_python_in_cube(code: str) -> dict:
     with Sandbox.create(template=template_id, timeout=300) as sandbox:
         execution = sandbox.run_code(code, timeout=60)
         stdout = "".join(str(item) for item in execution.logs.stdout)
+        stderr = "".join(str(item) for item in execution.logs.stderr)
         return {
             "stdout": stdout,
+            "stderr": stderr,
             "text": execution.text,
             "error": str(execution.error) if execution.error else None,
         }
@@ -131,7 +136,7 @@ ADK 进程环境中。不要只修改 `examples/e2b-dev-sidecar/.env`；本示�
 ```
 
 如果原 agent 已经引用这个代码执行工具，agent 定义可以保持不变。若原 prompt 或结果处理依赖特定字段，
-请按本示例返回的 `stdout`、`text`、`error`、`results_count` 结构调整。
+请按本示例返回的 `stdout`、`stderr`、`text`、`error`、`results_count` 结构调整。
 
 ## 可运行 Demo
 
@@ -175,6 +180,8 @@ agent 会调用 `run_python_in_cube`，基于 `CUBE_TEMPLATE_ID` 创建临时 Cu
 ## 注意事项
 
 - 示例离线验证导入和接线。完整 live run 需要可访问的 CubeSandbox 部署和支持 `run_code` 的模板。
+- E2B 包组合是基于仓库记录的 plain-pip 安装兼容性选择。本 PR 没有针对这个精确组合连接真实
+  CubeSandbox 部署验证 `run_code`。
 - Google ADK 原生 Agent Runtime Code Execution tool 面向 Google Cloud Agent Runtime。本文使用自定义 ADK 函数工具，让 CubeSandbox 提供执行后端。
 - 默认示例每次工具调用创建并删除一个沙箱，便于 review，但不是长多步任务的最低延迟形态。
 
