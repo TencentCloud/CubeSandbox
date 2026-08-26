@@ -127,6 +127,9 @@ hello cube
 | `network_denylist.py` | `deny_out` — 黑名单 CIDR，其余放行 |
 | `restrict_public_access.py` | `network={"allow_public_traffic": False}` — 公网 URL 必须携带 per-sandbox token 才可访问 |
 
+宿主机 argv 工具白名单（BYOI 模板 + 演示）见
+[`../agent-tool-allowlist-sandbox/`](../agent-tool-allowlist-sandbox/)。
+
 ### exec_code.py — 运行 Python 代码
 
 ```python
@@ -222,6 +225,12 @@ python network_allowlist.py
 # 黑名单：屏蔽指定 CIDR，其余放行
 python network_denylist.py
 ```
+
+### 宿主机 argv 工具白名单
+
+已迁至独立示例
+[`../agent-tool-allowlist-sandbox/`](../agent-tool-allowlist-sandbox/)
+（BYOI 模板、宿主机门控、deny/allow/loop 演示与单测）。
 
 ### restrict_public_access.py — 限制公网 URL 访问
 

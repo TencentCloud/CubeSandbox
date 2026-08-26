@@ -1,0 +1,12 @@
+#!/bin/sh
+# Copyright (c) 2024 Tencent Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Perceptible workload inside the BYOI image. Listed in tool-profile.txt so
+# guests run it only via: cube-tool toolbox-hello
+
+set -eu
+
+mkdir -p /workspace/out
+echo "toolbox-hello-ok" > /workspace/out/hello.txt
+echo "WORKLOAD_OK"

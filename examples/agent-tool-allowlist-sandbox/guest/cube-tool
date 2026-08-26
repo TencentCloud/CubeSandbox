@@ -1,0 +1,58 @@
+#!/bin/sh
+# Copyright (c) 2024 Tencent Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
+# In-guest tool runner: only exec binaries listed in tool-profile.txt.
+# Complements the host argv gate — host should allow "cube-tool" and let
+# this wrapper re-check the real tool name inside the MicroVM.
+#
+# Not a kernel jail: callers that bypass cube-tool (raw bash, path binaries)
+# are out of scope for this wrapper.
+
+set -eu
+
+PROFILE="${CUBE_TOOL_PROFILE:-/etc/cube-sandbox/tool-profile.txt}"
+
+usage() {
+  echo "usage: cube-tool <tool> [args...]" >&2
+  echo "profile: ${PROFILE}" >&2
+  exit 2
+}
+
+[ "$#" -ge 1 ] || usage
+
+tool=$1
+shift
+
+case "$tool" in
+  ''|*[!A-Za-z0-9._-]*|.*|*/*|*\\*)
+    echo "cube-tool: refusing unsafe tool name: ${tool}" >&2
+    exit 1
+    ;;
+esac
+
+if [ ! -f "$PROFILE" ]; then
+  echo "cube-tool: missing profile ${PROFILE}" >&2
+  exit 1
+fi
+
+# Exact line match against the profile (no substrings).
+if ! grep -qxF -- "$tool" "$PROFILE"; then
+  echo "cube-tool: tool not in profile: ${tool}" >&2
+  exit 1
+fi
+
+bin=$(command -v "$tool" 2>/dev/null || true)
+if [ -z "$bin" ]; then
+  echo "cube-tool: tool not installed: ${tool}" >&2
+  exit 127
+fi
+
+# Refuse path hijacks if command -v returned something unexpected.
+base=$(basename "$bin")
+if [ "$base" != "$tool" ]; then
+  echo "cube-tool: resolved binary basename mismatch: ${bin}" >&2
+  exit 1
+fi
+
+exec "$bin" "$@"

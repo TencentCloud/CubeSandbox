@@ -132,6 +132,9 @@ hello cube
 | `network_denylist.py` | `deny_out` — block specific CIDRs, allow the rest |
 | `restrict_public_access.py` | `network={"allow_public_traffic": False}` — require a per-sandbox token on every public-URL request |
 
+Host argv tool allowlist (BYOI template + demos) lives in
+[`../agent-tool-allowlist-sandbox/`](../agent-tool-allowlist-sandbox/).
+
 ### exec_code.py — Run Python Code
 
 ```python
@@ -230,6 +233,12 @@ python network_allowlist.py
 # Denylist: block specific CIDRs, allow the rest
 python network_denylist.py
 ```
+
+### Host argv tool allowlist
+
+Moved to the standalone example
+[`../agent-tool-allowlist-sandbox/`](../agent-tool-allowlist-sandbox/)
+(BYOI template, host gate, deny/allow/loop demos, unit tests).
 
 ### restrict_public_access.py — Require a Token on Every Public-URL Request
 
