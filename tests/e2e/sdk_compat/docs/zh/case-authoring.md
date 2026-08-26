@@ -341,6 +341,20 @@ def test_isolation(sdk_sandbox, sdk_backend, sdk_e2e_config):
 真正并发的用例还应设置可控并发数、超时和资源上限，并确保异常路径回收所有
 future/peer sandbox。
 
+### 6.7 Volume
+
+Volume Plugin 用例使用 `volume` marker，随 `--run-e2e` 执行（默认 driver
+`s3`）。无插件的环境设置 `SDK_E2E_VOLUME_PLUGIN=false` 即可跳过。先创建
+volume，再通过 `create_adapter(..., create_options=...)` 传入动态
+`volumeMounts`，不要在 `sandbox_create_options` 里写死 volume ID。默认安装
+已接好 S3 插件 + MinIO：
+https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md
+（`cubesandbox` >= 0.6.0）。
+
+```bash
+pytest --run-e2e -m volume --sdk-e2e-backends=cubesandbox
+```
+
 ## 7. 清理、保留和额外 adapter
 
 `sdk_sandbox` 默认负责主 sandbox 清理。不要在测试体中对它额外调用 `kill()`，

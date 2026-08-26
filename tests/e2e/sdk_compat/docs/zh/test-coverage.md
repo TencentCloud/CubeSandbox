@@ -157,7 +157,7 @@ pytest --run-e2e -m "lifecycle and slow"
 
 ### 2.8 Volume
 
-`cases/volume/` 覆盖 Volume Plugin CRUD、sandbox 绑定/解绑和绑定期间禁止删除。它还验证同一个 Volume 可以在一个沙箱中保持读写，同时在另一个沙箱中以只读方式挂载，包括正常读取，以及 create、write、rename、delete 均被拒绝。这些用例仅适用于 CubeSandbox，只有通过 `SDK_E2E_VOLUME_PLUGIN=true` 明确确认部署已配置 Volume Plugin 后才会执行，否则保持 skip。
+`cases/volume/` 覆盖 Volume Plugin CRUD、sandbox 绑定/解绑和绑定期间禁止删除。它还验证同一个 Volume 可以在一个沙箱中保持读写，同时在另一个沙箱中以只读方式挂载，包括正常读取，以及 create、write、rename、delete 均被拒绝。这些用例仅适用于 CubeSandbox，默认使用 S3 driver，随 `--run-e2e` 执行，除非设置 `SDK_E2E_VOLUME_PLUGIN=false`。
 
 ## 3. 覆盖边界
 

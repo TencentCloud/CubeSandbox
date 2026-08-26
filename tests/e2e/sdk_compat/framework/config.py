@@ -19,6 +19,10 @@ def _bool_env(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def volume_plugin_enabled_from_env() -> bool:
+    return _bool_env("SDK_E2E_VOLUME_PLUGIN", default=True)
+
+
 @dataclass(frozen=True)
 class SdkE2EConfig:
     backends: tuple[str, ...]
@@ -92,8 +96,8 @@ class SdkE2EConfig:
                 os.environ.get("SDK_E2E_PLATFORM_LIFECYCLE_POLL_TIMEOUT", "45")
             ),
             cube_proxy_admin_port=int(os.environ.get("CUBE_PROXY_ADMIN_PORT", "8082")),
-            volume_plugin_enabled=_bool_env("SDK_E2E_VOLUME_PLUGIN"),
-            volume_driver=os.environ.get("SDK_E2E_VOLUME_DRIVER", "cos").strip() or "cos",
+            volume_plugin_enabled=volume_plugin_enabled_from_env(),
+            volume_driver=os.environ.get("SDK_E2E_VOLUME_DRIVER", "s3").strip() or "s3",
             volume_refcount_wait=int(os.environ.get("SDK_E2E_VOLUME_REFCOUNT_WAIT", "60")),
             create_capacity_retries=int(
                 os.environ.get("SDK_E2E_CREATE_CAPACITY_RETRIES", "5")

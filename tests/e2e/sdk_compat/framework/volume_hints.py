@@ -6,13 +6,11 @@
 from __future__ import annotations
 
 VOLUME_MOUNT_PATH = "/mnt/vol-data"
-# COS reference plugin install / config guide (manual deploy).
 VOLUME_PLUGIN_GUIDE_URL = (
-    "https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md"
+    "https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md"
 )
 VOLUME_PLUGIN_SKIP_REASON = (
-    "volume plugin tests require SDK_E2E_VOLUME_PLUGIN=true "
-    "(CubeAPI + CubeMaster + Cubelet + a configured volume plugin). "
+    "volume plugin tests skipped because SDK_E2E_VOLUME_PLUGIN=false. "
     f"See {VOLUME_PLUGIN_GUIDE_URL}"
 )
 

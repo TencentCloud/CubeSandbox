@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """sdk_compat Volume Plugin cases.
 
-Requires a manually deployed and configured Volume Plugin on the cluster, and
-``cubesandbox`` >= 0.6.0. See module docstrings in ``test_*.py`` for details.
+Default install uses the S3 plugin plus MinIO. ``SDK_E2E_VOLUME_DRIVER``
+defaults to ``s3``; set ``SDK_E2E_VOLUME_PLUGIN=false`` to skip.
 
 Plugin guide:
-https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md
+https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md
 """

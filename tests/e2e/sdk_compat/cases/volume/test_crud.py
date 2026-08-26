@@ -2,13 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Volume CRUD cases (create / list / get / delete).
 
-Prerequisites (manual; not provisioned by this suite):
-- Deploy and configure a Volume Plugin on CubeMaster (Controller) and Cubelet
-  (Node), e.g. COS binary/rpc under ``volume_plugins``, with credentials.
-  Guide: https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md
-- Platform Volume API available (CubeAPI / CubeMaster / Cubelet >= 0.6.0).
-- Python SDK ``cubesandbox`` >= 0.6.0 (Volume / volume_mounts support).
-- Opt-in: ``SDK_E2E_VOLUME_PLUGIN=true`` (and usually ``SDK_E2E_VOLUME_DRIVER``).
+Prerequisites:
+- Default install S3 Volume plugin + MinIO (CubeMaster / Cubelet ``volume_plugins``).
+  Guide: https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md
+- Platform Volume API and Python SDK ``cubesandbox`` >= 0.6.0.
+- ``SDK_E2E_VOLUME_DRIVER`` defaults to ``s3``; set ``SDK_E2E_VOLUME_PLUGIN=false`` to skip.
 """
 
 from __future__ import annotations

@@ -136,16 +136,15 @@ SDK_E2E_PLATFORM_LIFECYCLE=true \
 pytest --run-e2e --sdk-e2e-trace cases/lifecycle/test_auto_lifecycle.py
 ```
 
-Volume Plugin cases use the `volume` marker and stay skipped unless
-`SDK_E2E_VOLUME_PLUGIN=true`. Create the volume first, then pass dynamic
-`volumeMounts` through `create_adapter(..., create_options=...)` — do not
-hard-code a volume ID in `sandbox_create_options`. Deploy and configure the
-plugin manually first:
-https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md
+Volume Plugin cases use the `volume` marker and run with `--run-e2e` (default
+driver `s3`). Set `SDK_E2E_VOLUME_PLUGIN=false` to skip. Create the volume
+first, then pass dynamic `volumeMounts` through
+`create_adapter(..., create_options=...)` — do not hard-code a volume ID in
+`sandbox_create_options`. Default install wires the S3 plugin + MinIO:
+https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md
 (`cubesandbox` >= 0.6.0).
 
 ```bash
-SDK_E2E_VOLUME_PLUGIN=true \
 pytest --run-e2e -m volume --sdk-e2e-backends=cubesandbox
 ```
 

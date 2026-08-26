@@ -22,7 +22,7 @@ from framework.capabilities import (  # noqa: E402
     capabilities_for_backend,
 )
 from framework.cleanup import safe_kill  # noqa: E402
-from framework.config import SdkE2EConfig  # noqa: E402
+from framework.config import SdkE2EConfig, volume_plugin_enabled_from_env  # noqa: E402
 from framework.parallel import (  # noqa: E402
     apply_worker_count,
     current_worker_count,
@@ -205,7 +205,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         _template_id_for_node(item) is None for item in items
     )
     volume_skip = None
-    if not _env_true("SDK_E2E_VOLUME_PLUGIN"):
+    if not volume_plugin_enabled_from_env():
         from framework.volume import VOLUME_PLUGIN_SKIP_REASON  # noqa: E402
 
         volume_skip = pytest.mark.skip(reason=VOLUME_PLUGIN_SKIP_REASON)

@@ -179,7 +179,7 @@ resource contention test or multi-worker safety validation.
 
 ### 2.8 Volume
 
-`cases/volume/` covers Volume Plugin CRUD, sandbox bind/unbind and delete-while-bound behavior. It also verifies that one Volume can remain writable in one sandbox while a concurrent attachment is read-only in another sandbox, including read access and rejected create, write, rename and delete operations. These cases are CubeSandbox-only and remain skipped unless `SDK_E2E_VOLUME_PLUGIN=true` explicitly confirms that the deployment has a configured Volume Plugin.
+`cases/volume/` covers Volume Plugin CRUD, sandbox bind/unbind and delete-while-bound behavior. It also verifies that one Volume can remain writable in one sandbox while a concurrent attachment is read-only in another sandbox, including read access and rejected create, write, rename and delete operations. These cases are CubeSandbox-only, default to the S3 driver, and run with `--run-e2e` unless `SDK_E2E_VOLUME_PLUGIN=false`.
 
 ## 3. Coverage Boundaries
 
