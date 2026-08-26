@@ -71,6 +71,7 @@ pub async fn list_snapshots(
         sandbox_id = ?params.sandbox_id,
         limit = ?params.limit,
         next_token = ?params.next_token,
+        backend = ?params.backend,
         "list_snapshots"
     );
 
