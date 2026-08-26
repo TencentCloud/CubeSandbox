@@ -18,6 +18,15 @@ const (
 	HOUR
 )
 
+// Defaults match CubeMaster's shipped 10 files / 100MB. Cubelet applies its
+// own 500MB default before calling this constructor. NewRollFileWriter used
+// to treat 0 as "never rename", so a missing file_num/file_size left a single
+// unbounded .log (seen as multi-GB cubemaster-req.log files).
+const (
+	defaultRollFileNum    = 10
+	defaultRollFileSizeMB = 100
+)
+
 type ConsoleWriter struct {
 }
 
@@ -74,9 +83,26 @@ func (w *RollFileWriter) Write(v []byte) (int, error) {
 	}
 	n, _ := w.currFile.Write(v)
 	w.currSize += int64(n)
-	if w.currSize >= w.size {
-		w.currSize = 0
-		for i := w.num; i >= 1; i-- {
+	if w.size > 0 && w.num >= 1 && w.currSize >= w.size {
+		// file_num is total retained files (live + numbered backups), matching
+		// Cubelet config.toml. Shift only through `.log.(num-1)` so we do
+		// not keep an extra `.log.num` after dropping the racy async delete.
+		live := filepath.Join(w.logpath, fmt.Sprintf("%s.log", w.name))
+		if w.num == 1 {
+			if w.currFile != nil {
+				_ = w.currFile.Close()
+				w.currFile = nil
+			}
+			if err := os.Truncate(live, 0); err != nil && !os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "cubelog: failed to truncate %s: %v\n", live, err)
+				return n, nil
+			}
+			w.currSize = 0
+			reOpenFile(live, &w.currFile, &w.openTime)
+			return n, nil
+		}
+		var liveRenameErr error
+		for i := w.num - 1; i >= 1; i-- {
 			var n1, n2 string
 			if i > 1 {
 				n1 = strconv.Itoa(i - 1)
@@ -85,23 +111,52 @@ func (w *RollFileWriter) Write(v []byte) (int, error) {
 			p1 := filepath.Join(w.logpath, fmt.Sprintf("%s.log.%s", w.name, n1))
 			p2 := filepath.Join(w.logpath, fmt.Sprintf("%s.log.%s", w.name, n2))
 			if n1 == "" {
-				p1 = filepath.Join(w.logpath, fmt.Sprintf("%s.log", w.name))
+				p1 = live
 			}
-			if _, err := os.Stat(p1); !os.IsNotExist(err) {
-				os.Rename(p1, p2)
+			err := os.Rename(p1, p2)
+			if i == 1 {
+				liveRenameErr = err
+			}
+			if err != nil && !os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "cubelog: failed to rotate %s to %s: %v\n", p1, p2, err)
 			}
 		}
-		go func() {
-			os.Remove(filepath.Join(w.logpath, fmt.Sprintf("%s.log.%d", w.name, w.num)))
-		}()
-		fullPath := filepath.Join(w.logpath, fmt.Sprintf("%s.log", w.name))
-		reOpenFile(fullPath, &w.currFile, &w.openTime)
+		if liveRenameErr != nil && !os.IsNotExist(liveRenameErr) {
+			// Keep currSize so a failed live rename cannot restart the
+			// unbounded-append path this PR is closing. ENOENT means the
+			// live path is gone (e.g. operator deleted it); fall through
+			// and reopen so later writes are not lost on the unlinked inode.
+			// This guard only fires when `.log.1` itself cannot be replaced
+			// (typical num==2). For num>=3 a blocker at `.log.1` is shifted
+			// to `.log.2` first, so the live rename usually succeeds.
+			return n, nil
+		}
+		w.currSize = 0
+		reOpenFile(live, &w.currFile, &w.openTime)
 	}
 
 	return n, nil
 }
 
+func normalizeRollArgs(num, sizeMB int) (int, int) {
+	// 0 is the YAML zero value for unset fields, not a misconfiguration.
+	if num < 0 {
+		fmt.Fprintf(os.Stderr, "cubelog: invalid roll file_num=%d, defaulting to %d\n", num, defaultRollFileNum)
+		num = defaultRollFileNum
+	} else if num == 0 {
+		num = defaultRollFileNum
+	}
+	if sizeMB < 0 {
+		fmt.Fprintf(os.Stderr, "cubelog: invalid roll file_size=%d, defaulting to %d MB\n", sizeMB, defaultRollFileSizeMB)
+		sizeMB = defaultRollFileSizeMB
+	} else if sizeMB == 0 {
+		sizeMB = defaultRollFileSizeMB
+	}
+	return num, sizeMB
+}
+
 func NewRollFileWriter(logpath, name string, num, sizeMB int) *RollFileWriter {
+	num, sizeMB = normalizeRollArgs(num, sizeMB)
 	w := &RollFileWriter{
 		logpath: logpath,
 		name:    name,
