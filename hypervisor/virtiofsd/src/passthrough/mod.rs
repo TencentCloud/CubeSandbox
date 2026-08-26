@@ -397,7 +397,7 @@ impl Default for Config {
             proc_mountinfo_rawfd: None,
             announce_submounts: false,
             inode_file_handles: Default::default(),
-            readdirplus: true,
+            readdirplus: false,
             allow_direct_io: false,
             killpriv_v2: false,
             posix_acl: false,
@@ -1362,6 +1362,10 @@ impl FileSystem for PassthroughFs {
         let st = statx(&path_fd, None)?;
 
         Ok(st.st.st_ino)
+    }
+
+    fn readdirplus_enabled(&self) -> bool {
+        self.cfg.readdirplus
     }
 
     fn init(&self, capable: FsOptions) -> io::Result<FsOptions> {
