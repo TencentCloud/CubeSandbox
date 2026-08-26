@@ -51,6 +51,7 @@ type snapshotCreateRequest struct {
 	LegacyRequestID string `json:"requestID,omitempty"`
 	SandboxID       string `json:"sandbox_id,omitempty"`
 	DisplayName     string `json:"display_name,omitempty"`
+	Backend         string `json:"backend,omitempty"`
 }
 
 type snapshotRollbackRequest struct {
@@ -59,12 +60,14 @@ type snapshotRollbackRequest struct {
 	SandboxID       string `json:"sandbox_id,omitempty"`
 	SnapshotID      string `json:"snapshot_id,omitempty"`
 	InstanceType    string `json:"instance_type,omitempty"`
+	Backend         string `json:"backend,omitempty"`
 }
 
 type snapshotDeleteRequest struct {
 	RequestID       string `json:"request_id,omitempty"`
 	LegacyRequestID string `json:"requestID,omitempty"`
 	InstanceType    string `json:"instance_type,omitempty"`
+	Backend         string `json:"backend,omitempty"`
 }
 
 type snapshotResponse struct {
@@ -116,7 +119,10 @@ type snapshotResource struct {
 	DisplayName               string                         `json:"display_name,omitempty"`
 	OriginSandboxID           string                         `json:"origin_sandbox_id,omitempty"`
 	OriginNodeID              string                         `json:"origin_node_id,omitempty"`
+	OriginNodeIP              string                         `json:"origin_node_ip,omitempty"`
 	StorageBackend            string                         `json:"storage_backend,omitempty"`
+	Backend                   string                         `json:"backend,omitempty"`
+	RemoteStatus              string                         `json:"remote_status,omitempty"`
 	Retain                    bool                           `json:"retain,omitempty"`
 	RootfsSizeBytesAtSnapshot uint64                         `json:"rootfs_size_bytes_at_snapshot,omitempty"`
 	LastError                 string                         `json:"last_error,omitempty"`
@@ -408,7 +414,7 @@ func handleSandboxRollbackAction(c *gin.Context) {
 		"SandboxID":  req.SandboxID,
 	})
 	defer cancel()
-	info, err := rollbackSnapshotFn(ctx, requestID, req.SandboxID, req.SnapshotID, req.InstanceType)
+	info, err := rollbackSnapshotFn(ctx, requestID, req.SandboxID, req.SnapshotID, req.InstanceType, req.Backend)
 	if err != nil {
 		code := snapshotErrorCode(err)
 		rt.RetCode = int64(code)
@@ -526,7 +532,7 @@ func createSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		"RequestId":   requestID,
 		"SandboxHost": hostIP,
 	}))
-	info, err := createSnapshotFn(ctx, requestID, req.SandboxID, hostID, hostIP, req.DisplayName)
+	info, err := createSnapshotFn(ctx, requestID, req.SandboxID, hostID, hostIP, req.DisplayName, req.Backend)
 	if err != nil {
 		code := snapshotErrorCode(err)
 		rt.RetCode = int64(code)
@@ -568,6 +574,7 @@ func getSnapshot(r *http.Request, rt *CubeLog.RequestTrace, snapshotID string) i
 			SandboxID:  strings.TrimSpace(r.URL.Query().Get("sandbox_id")),
 			Name:       strings.TrimSpace(r.URL.Query().Get("name")),
 			Status:     strings.TrimSpace(r.URL.Query().Get("status")),
+			Backend:    strings.TrimSpace(r.URL.Query().Get("backend")),
 			Limit:      parsePositiveIntQuery(r, "limit"),
 			NextToken:  strings.TrimSpace(r.URL.Query().Get("next_token")),
 		})
@@ -789,7 +796,10 @@ func snapshotResourceFromInfo(info *templatecenter.SnapshotInfo) *snapshotResour
 		DisplayName:               info.DisplayName,
 		OriginSandboxID:           info.OriginSandboxID,
 		OriginNodeID:              info.OriginNodeID,
-		StorageBackend:            info.StorageBackend,
+		OriginNodeIP:              info.OriginNodeIP,
+		StorageBackend:            firstNonEmptyTrimmed(info.Backend, info.StorageBackend),
+		Backend:                   firstNonEmptyTrimmed(info.Backend, info.StorageBackend),
+		RemoteStatus:              info.RemoteStatus,
 		Retain:                    info.Retain,
 		RootfsSizeBytesAtSnapshot: info.RootfsSizeBytesAtSnapshot,
 		LastError:                 info.LastError,

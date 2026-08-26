@@ -58,7 +58,6 @@ func New() *cli.App {
 		cubebox.SnapshotCommand,
 		cubebox.StorageCommand,
 		cubebox.OperationCommand,
-		cubebox.NodeCommand,
 		cubebox.TemplateCommand,
 		cubebox.VolumeCommand,
 		cubebox.ListInventoryCommand,

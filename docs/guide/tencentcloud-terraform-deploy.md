@@ -310,7 +310,7 @@ export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=1
 | `TENCENTCLOUD_TKE_WORKER_INSTANCE_TYPE` | `SA9.LARGE8` | TKE worker instance type (4C8G) |
 | `TENCENTCLOUD_COMPUTE_NODE_COUNT` | `2` | **PVM compute nodes** (run Cubelet / sandboxes) |
 | `TENCENTCLOUD_COMPUTE_DATA_DISK_SIZE` | `200` | CBS data disk size per compute node (GB, XFS, mounted at `/data/cubelet`). Sandbox image templates, snapshots and runtime data on the compute node all live under this directory — size it to your actual needs |
-| `TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY` | `1s` | Cubelet node status/resource reporting interval to CubeMaster. `create.sh` patches `Cubelet/config/config.toml` on each compute node |
+| `TENCENTCLOUD_CUBELET_NODE_STATUS_UPDATE_FREQUENCY` | `1s` | Cubelet node status/resource reporting interval to CubeOps. `create.sh` patches `Cubelet/config/config.toml` on each compute node |
 | `TENCENTCLOUD_TKE_NODE_COUNT` | `2` | **TKE workers** (run control-plane Pods; maps to `worker_config.count`) |
 | `TENCENTCLOUD_USE_TCR` | `false` | When `true`, create TCR and build/push images on the jumpserver; when `false`, use public pre-built images |
 | `TENCENTCLOUD_USE_CFS` | `false` | When `true` and cubemaster has multiple replicas, create CFS NFS shared storage |
@@ -320,7 +320,7 @@ export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=1
 | `TENCENTCLOUD_CUBE_DB` / `TENCENTCLOUD_CUBE_USER` / `TENCENTCLOUD_CUBE_PASSWORD` | `cube_mvp` / `cube` / demo | Application DB name / account / password |
 | `TENCENTCLOUD_CUBEMASTER_REPLICAS` | `1` | cube-master replica count |
 | `TENCENTCLOUD_CUBE_API_REPLICAS` | `1` | cube-api replica count |
-| `TENCENTCLOUD_CUBE_OPS_REPLICAS` | `1` | cube-ops replica count. cube-webui routes `/opsapi/` and `/cubeapi/v1/` through this internal service |
+| `TENCENTCLOUD_CUBE_OPS_REPLICAS` | `2` | cube-ops replica count. cube-webui routes `/opsapi/` and `/cubeapi/v1/` through this internal service |
 | `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy replica count. Values greater than `1` are supported; each replica registers in Redis for cube-lifecycle-manager discovery |
 | `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS` | `1` | cube-lifecycle-manager replica count. Keep `1` unless CLM HA behavior has been validated for your deployment |
 | `TENCENTCLOUD_CUBE_WEBUI_REPLICAS` | `1` | cube-webui replica count |

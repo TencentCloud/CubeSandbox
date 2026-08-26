@@ -26,6 +26,11 @@ func ipToUint32(ip net.IP) uint32 {
 	return uint32(ip[0]) | uint32(ip[1])<<8 | uint32(ip[2])<<16 | uint32(ip[3])<<24
 }
 
+// ipMaskToUint32 converts an IPv4 mask to the same byte layout as ipToUint32.
+func ipMaskToUint32(mask net.IPMask) uint32 {
+	return uint32(mask[0]) | uint32(mask[1])<<8 | uint32(mask[2])<<16 | uint32(mask[3])<<24
+}
+
 // hardwareAddrToUint32 converts the first 4 bytes of MAC address to a uint32.
 func hardwareAddrToUint32(addr net.HardwareAddr) uint32 {
 	return uint32(addr[0]) | uint32(addr[1])<<8 | uint32(addr[2])<<16 | uint32(addr[3])<<24

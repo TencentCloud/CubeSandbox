@@ -152,6 +152,17 @@ check_unit_active() {
   done
 }
 
+# s3lvol_recovery_verify_ok: the authoritative layout check for the s3lvol
+# data plane. rcow_recovery.sh --verify-only never starts or attaches
+# anything -- it only reports -- and exits non-zero when the target is not
+# running, a replay plan is pending, or the active registry does not match
+# the attached namespaces. Retried like every other probe so a unit that is
+# still settling after (re)start is not a false negative.
+s3lvol_recovery_verify_ok() {
+  "${TOOLBOX_ROOT}/CubeS3lvol/scripts/rcow_recovery.sh" --verify-only \
+    >/dev/null 2>&1
+}
+
 http_ok() {
   curl -fsS \
     --connect-timeout "${QUICKCHECK_CURL_CONNECT_TIMEOUT}" \
@@ -263,36 +274,36 @@ check_bind_mount_source_file() {
   check_file "${path}" "expected bind mount source file not ready: ${path}"
 }
 
-# Wait for the node to register with cubemaster. A dedicated loop (rather than
+# Wait for the node to register with CubeOps. A dedicated loop (rather than
 # the generic wait_until) so the final failure preserves the distinction between
-# "could not reach cubemaster" and "registered but missing host_ip", which is
+# "could not reach CubeOps" and "registered but missing IP", which is
 # the difference between a connectivity problem and a cubelet/identity problem.
-# Once cubemaster has been reached at least once the more diagnostic
-# "missing host_ip" reason is kept sticky, so a momentary connectivity blip on
+# Once CubeOps has been reached at least once the more diagnostic
+# "missing IP" reason is kept sticky, so a momentary connectivity blip on
 # the final attempt does not mask the real (registration) problem.
 check_node_registration() {
   local node_id="$1"
-  local master_addr="$2"
+  local ops_addr="$2"
   local registration
   local reached=0
-  local last_reason="failed to query cubemaster node registration for ${node_id}"
+  local last_reason="failed to query CubeOps node registration for ${node_id}"
   while :; do
     if registration="$(curl -fsS \
         --connect-timeout "${QUICKCHECK_CURL_CONNECT_TIMEOUT}" \
         --max-time "${QUICKCHECK_CURL_MAX_TIME}" \
         --max-filesize "${QUICKCHECK_CURL_MAX_FILESIZE}" \
-        "http://${master_addr}/internal/meta/nodes/${node_id}" 2>/dev/null)"; then
-      if grep -Fq "\"host_ip\":\"${node_id}\"" <<<"${registration}"; then
+        "http://${ops_addr}/internal/v1/nodes/${node_id}" 2>/dev/null)"; then
+      if grep -Fq "\"IP\":\"${node_id}\"" <<<"${registration}"; then
         return 0
       fi
-      if grep -Fq '"host_ip":"' <<<"${registration}"; then
+      if grep -Fq '"IP":"' <<<"${registration}"; then
         reached=1
-        last_reason="cubemaster node registration missing host_ip=${node_id}"
+        last_reason="CubeOps node registration missing IP=${node_id}"
       elif (( reached == 0 )); then
-        last_reason="cubemaster node registration response missing host_ip field for ${node_id}"
+        last_reason="CubeOps node registration response missing IP field for ${node_id}"
       fi
     elif (( reached == 0 )); then
-      last_reason="failed to query cubemaster node registration for ${node_id}"
+      last_reason="failed to query CubeOps node registration for ${node_id}"
     fi
     if (( $(date +%s) >= QUICKCHECK_DEADLINE )); then
       die "${last_reason} (not ready within ${QUICKCHECK_READY_TIMEOUT}s)"
@@ -317,6 +328,13 @@ quickcheck_main() {
   ROLE="$(one_click_deploy_role)"
   local NODE_ID="${CUBE_SANDBOX_NODE_IP:-}"
 
+  # CubeOps address for node-registration check (compute role only). Control
+  # nodes hit the local cube-ops via CUBE_OPS_HEALTH_ADDR instead.
+  local OPS_ADDR=""
+  if [[ "${ROLE}" == "compute" ]]; then
+    OPS_ADDR="$(resolve_control_plane_cubeops_addr)"
+  fi
+
   # When external MySQL/Redis is configured the local container + systemd unit do
   # not exist, so the corresponding checks must be skipped.
   local EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
@@ -329,6 +347,9 @@ quickcheck_main() {
   # health-endpoint overrides reach curl unchecked otherwise.
   validate_host_port "${MASTER_ADDR}" "cubemaster address"
   validate_http_url "${CUBELET_EGRESS_DUMP_URL}" "CUBELET_EGRESS_DUMP_URL"
+  if [[ "${ROLE}" == "compute" ]]; then
+    validate_host_port "${OPS_ADDR}" "cubeops address"
+  fi
   if [[ "${ROLE}" != "compute" ]]; then
     validate_host_port "${CUBE_API_HEALTH_ADDR}" "CUBE_API_HEALTH_ADDR"
     validate_host_port "${CUBE_OPS_HEALTH_ADDR}" "CUBE_OPS_HEALTH_ADDR"
@@ -339,6 +360,9 @@ quickcheck_main() {
   echo "[quickcheck] role=${ROLE}"
   echo "[quickcheck] cubemaster=${MASTER_ADDR}"
   echo "[quickcheck] cubelet-egress-dump=${CUBELET_EGRESS_DUMP_URL}"
+  if [[ "${ROLE}" == "compute" ]]; then
+    echo "[quickcheck] cubeops=${OPS_ADDR}"
+  fi
   if [[ "${ROLE}" != "compute" ]]; then
     echo "[quickcheck] cube-api-health=${CUBE_API_HEALTH_ADDR}"
     echo "[quickcheck] cubeops-health=${CUBE_OPS_HEALTH_ADDR}"
@@ -346,6 +370,18 @@ quickcheck_main() {
 
   echo "[quickcheck] check systemd units"
   check_unit_active cube-sandbox-cubelet.service
+  # CubeS3lvol (s3lvol) is role-agnostic: either deployment role may flip
+  # ONE_CLICK_ENABLE_S3LVOL=1. When enabled, the unit must be active AND
+  # the data-plane layout must be consistent (rcow_recovery.sh --verify-only
+  # is the authoritative check: target running + no pending replay + active
+  # registry matches attached namespaces).
+  if [[ "${ONE_CLICK_ENABLE_S3LVOL:-0}" == "1" \
+        && -x "${TOOLBOX_ROOT}/CubeS3lvol/scripts/rcow_recovery.sh" ]]; then
+    echo "[quickcheck] check cube-sandbox-s3lvol.service + data-plane layout"
+    check_unit_active cube-sandbox-s3lvol.service
+    wait_until "s3lvol data-plane layout mismatch (rcow_recovery.sh --verify-only failed)" \
+      s3lvol_recovery_verify_ok
+  fi
   if [[ "${ROLE}" != "compute" ]]; then
     if [[ -n "${EXTERNAL_MYSQL_HOST}" ]]; then
       echo "[quickcheck] external MySQL (${EXTERNAL_MYSQL_HOST}); skipping local mysql unit check"
@@ -360,6 +396,11 @@ quickcheck_main() {
       fi
     else
       check_unit_active cube-sandbox-redis.service
+    fi
+    if [[ "${CUBE_SANDBOX_MINIO_ENABLED:-1}" != "1" ]]; then
+      echo "[quickcheck] bundled MinIO disabled (CUBE_SANDBOX_MINIO_ENABLED=${CUBE_SANDBOX_MINIO_ENABLED:-1}); skipping local minio unit check"
+    else
+      check_unit_active cube-sandbox-minio.service
     fi
     check_unit_active cube-sandbox-cubemaster.service
     check_unit_active cube-sandbox-cube-api.service
@@ -376,6 +417,7 @@ quickcheck_main() {
     echo "[quickcheck] check container runtime state"
     [[ -n "${EXTERNAL_MYSQL_HOST}" ]] || check_container_ready "${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}"
     [[ -n "${EXTERNAL_REDIS_HOST}" || -n "${EXTERNAL_REDIS_MASTER_NAME}" ]] || check_container_ready "${CUBE_SANDBOX_REDIS_CONTAINER:-cube-sandbox-redis}"
+    [[ "${CUBE_SANDBOX_MINIO_ENABLED:-1}" == "1" ]] && check_container_ready "${CUBE_SANDBOX_MINIO_CONTAINER:-cube-sandbox-minio}"
     check_container_ready "${CUBE_PROXY_CONTAINER_NAME:-cube-proxy}"
     check_container_ready "${CUBE_PROXY_COREDNS_CONTAINER:-cube-proxy-coredns}"
     if [[ "${WEB_UI_ENABLE:-1}" == "1" ]]; then
@@ -392,8 +434,8 @@ quickcheck_main() {
   if [[ "${ROLE}" == "compute" ]]; then
     [[ -n "${NODE_ID}" ]] || die "CUBE_SANDBOX_NODE_IP is required for compute quickcheck"
     validate_ipv4_literal "${NODE_ID}" "CUBE_SANDBOX_NODE_IP"
-    echo "[quickcheck] 3/4 check cubemaster node registration"
-    check_node_registration "${NODE_ID}" "${MASTER_ADDR}"
+    echo "[quickcheck] 3/4 check CubeOps node registration"
+    check_node_registration "${NODE_ID}" "${OPS_ADDR}"
 
     echo "[quickcheck] 4/4 check essential sockets and runtime assets"
     check_socket "/data/cubelet/cubelet.sock"

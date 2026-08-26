@@ -1,2 +1,5 @@
 e2b-code-interpreter>=2.4.1
 python-dotenv
+# network_dynamic_update.py only: updating a running sandbox's policy is a
+# CubeSandbox extension, so it uses the CubeSandbox SDK rather than the E2B one.
+cubesandbox

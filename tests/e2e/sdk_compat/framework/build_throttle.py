@@ -20,8 +20,8 @@ build *and* the wait for READY, so the number of in-flight builds never exceeds
 
 The lock is a POSIX ``fcntl`` advisory lock over a small set of slot files in a
 per-UID temp dir. It degrades to a no-op if ``fcntl`` is unavailable (non-POSIX),
-the configured concurrency already covers every worker, or the lock dir cannot be
-created/trusted, so it never blocks a run it cannot coordinate.
+or the lock dir cannot be created/trusted, so it never blocks a run it cannot
+coordinate.
 """
 
 from __future__ import annotations
@@ -57,9 +57,7 @@ except ImportError:  # pragma: no cover - non-POSIX fallback
 # the contention the throttle prevents. The bounded ``_slot_wait_timeout`` still
 # caps how long such cross-run waiting can last before degrading to unthrottled.
 _UID = getattr(os, "getuid", lambda: "shared")()
-_LOCK_DIR = (
-    Path(tempfile.gettempdir()) / f"cube-sdk-e2e-template-build.locks-{_UID}"
-)
+_LOCK_DIR = Path(tempfile.gettempdir()) / f"cube-sdk-e2e-template-build.locks-{_UID}"
 
 _DEFAULT_CONCURRENCY = 1
 _POLL_INTERVAL = 0.5
@@ -67,14 +65,20 @@ _POLL_INTERVAL = 0.5
 # stall every other template-building worker forever. The holder keeps the slot
 # across ``Template.build`` *and* the worker-count-scaled READY wait, so size the
 # ceiling generously (per-worker, since up to N-1 peers may build ahead of us),
-# but keep it finite. Overridable via env for slow control planes.
+# but keep it finite. A serial run can wait this full base behind another same-UID
+# run because the per-UID namespace intentionally coordinates across runs.
+# Overridable via env for slow control planes.
 _DEFAULT_SLOT_WAIT_BASE = 1800  # 30 min per potential predecessor build
 
 
 def _log(message: str) -> None:
     worker = os.environ.get("PYTEST_XDIST_WORKER", "-")
     timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
-    print(f"[sdk-e2e][{timestamp}][{worker}] build-throttle {message}", file=sys.stderr, flush=True)
+    print(
+        f"[sdk-e2e][{timestamp}][{worker}] build-throttle {message}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _slot_wait_timeout() -> float:
@@ -114,19 +118,15 @@ def template_build_slot(label: str = "") -> Iterator[None]:
 
     Acquire before ``Template.build`` and keep the context open until the
     template has reached READY (or failed), so concurrent in-flight builds stay
-    bounded. A no-op when the lock cannot help or is unnecessary: ``fcntl`` is
-    unavailable (non-POSIX), the allowed build concurrency already covers every
-    worker (so the lock could never block), or the lock dir cannot be created.
+    bounded. A no-op when the lock cannot help: ``fcntl`` is unavailable
+    (non-POSIX), or the lock dir cannot be created.
 
     ``label`` names the build site (e.g. ``alias_rebuild_a``) and is logged on
     slot wait/acquire/release so throttle contention is diagnosable when a
     parallel run stalls on the shared build host.
     """
     slots = _concurrency()
-    # If the operator allows at least as many concurrent builds as there are
-    # workers, the lock would never block, so skip it. A serial run has one
-    # worker, so the default concurrency of 1 already covers it.
-    if fcntl is None or slots >= current_worker_count():
+    if fcntl is None:
         yield
         return
     try:
@@ -143,7 +143,9 @@ def template_build_slot(label: str = "") -> Iterator[None]:
         return
 
     timeout = _slot_wait_timeout()
-    _log(f"waiting for a build slot ({slots} slot(s), timeout={timeout}s) label={label!r}")
+    _log(
+        f"waiting for a build slot ({slots} slot(s), timeout={timeout}s) label={label!r}"
+    )
     try:
         acquired = _acquire_any_slot(slots, timeout)
     except OSError as exc:
@@ -152,7 +154,9 @@ def template_build_slot(label: str = "") -> Iterator[None]:
         # The throttle promises never to block a run it cannot coordinate, so
         # degrade to serial (yield through) rather than failing the build with
         # an error unrelated to what the test is exercising.
-        _log(f"could not acquire a slot ({exc}); proceeding unthrottled label={label!r}")
+        _log(
+            f"could not acquire a slot ({exc}); proceeding unthrottled label={label!r}"
+        )
         yield
         return
 
@@ -161,7 +165,9 @@ def template_build_slot(label: str = "") -> Iterator[None]:
         # wedged. Proceed unthrottled rather than stalling this worker forever;
         # the OS releases the peer's flock on process death, so this is a
         # last-resort escape, not a silent disable of the throttle.
-        _log(f"timed out after {timeout}s waiting for a slot; proceeding unthrottled label={label!r}")
+        _log(
+            f"timed out after {timeout}s waiting for a slot; proceeding unthrottled label={label!r}"
+        )
         yield
         return
 
@@ -192,7 +198,7 @@ def _acquire_any_slot(slots: int, timeout: float = float("inf")):
             # O_NOFOLLOW + owner-only perms: never follow a symlink someone may
             # have planted at a predictable slot path on a shared host.
             fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-            handles.append((index, os.fdopen(fd, "w")))  # noqa: SIM115 - closed by caller
+            handles.append((index, os.fdopen(fd, "w")))
         while True:
             for index, handle in handles:
                 try:

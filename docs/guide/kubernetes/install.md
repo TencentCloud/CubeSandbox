@@ -155,6 +155,12 @@ Cube writes data to the host at `/data/cubelet`, which must be an **XFS** filesy
 
 For production deployments, or to adjust related configuration, see [8.2 Compute node data disk configuration](#_8-2-compute-node-data-disk-configuration).
 
+**Compute node networking**
+
+::: warning Decide before you deploy
+Once sandboxes are running, the `cube-node` Pod on a compute node **must not be recreated**: recreation destroys the network namespace that sandbox network devices live in, and **all sandbox networking on that node breaks — inbound and outbound**. For production, deploy `cube-node` with `hostNetwork` so Pod recreation no longer changes the netns. Details and caveats (including NetworkPolicy): [8.3 cube-node networking and Pod recreation](#_8-3-cube-node-networking-and-pod-recreation).
+:::
+
 
 ## 5. Helm install
 
@@ -210,9 +216,9 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
 # 1) Are Pods Ready?
 kubectl get pods -n cube-system -o wide
 
-# 2) Have compute nodes registered with CubeMaster?
+# 2) Have compute nodes registered with CubeOps?
 kubectl exec -n cube-system deploy/cube-cubemastercli -- \
-  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
 
 # 3) Built-in end-to-end tests (a few minutes)
 helm test cube -n cube-system --timeout 20m --logs
@@ -251,7 +257,7 @@ Uninstall **does not** automatically clean up:
 
 ### 8.1 Control-plane PVC configuration
 
-- Default: CubeMaster / MySQL / Redis use the cluster **default StorageClass**
+- Default: CubeMaster / MySQL / Redis / MinIO use the cluster **default StorageClass**
 - To specify an SC: set `persistence.storageClassName: <name>` in `runtime-values.yaml`
 - Single-node / no CSI: switch to hostPath (see comments in `runtime-values.example.yaml`)
 
@@ -290,6 +296,51 @@ bootstrap:
         enabled: true
         size: 200G   # Size to capacity plan; must be less than free space on the filesystem holding the image
 ```
+
+
+### 8.3 cube-node networking and Pod recreation
+
+::: warning In one sentence
+While sandboxes are running, the `cube-node` Pod **must not be recreated** — recreation breaks network connectivity for **all sandboxes on the node (inbound and outbound) with no self-healing**. For production, enable `hostNetwork` at deploy time to avoid this; the trade-off is that NetworkPolicy needs extra handling (see below).
+:::
+
+#### Why the cube-node Pod must not be recreated
+
+Sandbox network devices (TAP devices) and the cubevs hooks live in the network namespace of the `cube-node` Pod; recreating the Pod destroys that netns:
+
+| Item | Description |
+| --- | --- |
+| Trigger | Anything that recreates the Pod: DaemonSet template change, image bump, manual `kubectl delete pod`, … |
+| Impact | **All sandboxes on the node** lose network connectivity — **both inbound and outbound** |
+| Self-healing | **None.** The only recovery is to destroy and recreate the affected sandboxes |
+
+Compute-plane upgrades are affected for the same reason; see [Upgrade](./upgrade.md).
+
+#### Recommendation: enable hostNetwork at deploy time
+
+::: tip Recommended
+Run `cube-node` with `hostNetwork: true` **before any sandbox is created**: the Pod then shares the host netns, which does not change across Pod recreation, so sandbox network devices survive a `cube-node` rebuild.
+:::
+
+What to check when enabling it:
+
+| Item | Description |
+| --- | --- |
+| How to enable | The Chart has no values toggle (`security.hostNetwork` is rejected by validation); patch the DaemonSet via a Helm post-renderer / Kustomize / a fork of the Chart |
+| DNS | Also set `dnsPolicy: ClusterFirstWithHostNet` so in-cluster DNS keeps resolving |
+| Port conflicts | Ensure cubelet's ports (9998 / 9999 / 9966) do not conflict with other services on the host |
+| Monitoring / firewalls | Re-point anything keyed on the Pod IP / Pod CIDR at the node IP instead |
+
+#### Trade-off: NetworkPolicy no longer applies
+
+With hostNetwork, `cube-node` loses its CNI-assigned Pod identity, so Kubernetes NetworkPolicy (e.g. "can sandboxes access this Service") **cannot govern sandbox traffic directly**.
+
+::: info Reference implementation: PR #1189 (not yet merged; for reference only)
+If you need NetworkPolicy over sandbox traffic to in-cluster Services / Pods, see [PR #1189](https://github.com/TencentCloud/CubeSandbox/pull/1189):
+
+- Only traffic destined for the cluster CIDRs is forwarded through a node-local **EgressProxy Pod** and SNAT'd to the Proxy Pod IP, so it is governed by your own NetworkPolicies; all other traffic keeps the normal route.
+- The PR also makes hostNetwork the default and implements the full in-place `cube-node` replacement design.
+:::
 
 
 ---

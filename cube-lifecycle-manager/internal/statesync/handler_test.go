@@ -51,6 +51,13 @@ func (f *fakeRedis) SetState(_ context.Context, sid, state string, _ time.Durati
 	return nil
 }
 
+// WriteState is the notify-emitting equivalent of SetState. statesync
+// tests don't inspect the StateNotify payload; forward to SetState so
+// setCalls / setErr semantics stay unchanged.
+func (f *fakeRedis) WriteState(ctx context.Context, sid, state string, ttl time.Duration) error {
+	return f.SetState(ctx, sid, state, ttl)
+}
+
 type fakeProxy struct {
 	mu    sync.Mutex
 	calls []string // "sid=state"

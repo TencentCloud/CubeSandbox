@@ -106,11 +106,21 @@ export interface ClusterNodeView {
   memorySaturationPct: number;
   heartbeatTime?: string | null;
   healthy: boolean;
+  schedulingDisabled: boolean;
   localTemplates: string[];
   versions: ComponentVersionDto[];
 }
 
 export interface ClusterOverview extends ClusterOverviewDto {}
+
+export interface NodeOperationDto {
+  id: number;
+  node_id: string;
+  type: string;
+  operator?: string;
+  detail?: string;
+  created_at: string;
+}
 
 function mapSandbox(dto: ListedSandboxDto): RunningSandbox {
   return dto;
@@ -187,6 +197,8 @@ function mapNode(dto: ApiNodeView): ClusterNodeView {
     memorySaturationPct: Math.round(dto.memorySaturation),
     heartbeatTime: dto.heartbeatTime,
     healthy: dto.healthy,
+    schedulingDisabled:
+      (dto as unknown as { schedulingDisabled?: boolean }).schedulingDisabled ?? false,
     localTemplates: dto.localTemplates ?? [],
     versions: dto.versions ?? [],
   };
@@ -279,6 +291,17 @@ export const clusterApi = {
   overview: () => ops<ClusterOverviewDto>('/cluster/overview'),
   nodes: () => ops<ApiNodeView[]>('/nodes').then((items) => items.map(mapNode)),
   node: (id: string) => ops<ApiNodeView>(`/nodes/${id}`).then(mapNode),
+  isolate: (id: string, detail?: string) =>
+    ops<void>(`/nodes/${id}/isolation`, {
+      method: 'PUT',
+      body: detail ? JSON.stringify({ detail }) : undefined,
+    }),
+  unisolate: (id: string, detail?: string) =>
+    ops<void>(`/nodes/${id}/isolation`, {
+      method: 'DELETE',
+      body: detail ? JSON.stringify({ detail }) : undefined,
+    }),
+  nodeOperations: (id: string) => ops<NodeOperationDto[]>(`/nodes/${id}/operations`),
   config: () =>
     ops<{
       apiEndpoint: string;

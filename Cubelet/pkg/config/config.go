@@ -24,6 +24,8 @@ var cfg *Config
 type MetaServerConfig struct {
 	MetaServerEndpoint  string `yaml:"meta_server_endpoint,omitempty"`
 	NodeStatusMaxImages int32  `yaml:"node_status_max_images,omitempty"`
+	// CubeMasterHTTPAddr is the CubeMaster HTTP address for artifact downloads.
+	CubeMasterHTTPAddr string `yaml:"cubemaster_http_addr,omitempty"`
 }
 
 type Config struct {
@@ -282,7 +284,10 @@ func preHandle(config *Config) (*Config, error) {
 		config.MetaServerConfig = &MetaServerConfig{}
 	}
 	if config.MetaServerConfig.MetaServerEndpoint == "" {
-		config.MetaServerConfig.MetaServerEndpoint = "cube-meta-server.cube.com"
+		config.MetaServerConfig.MetaServerEndpoint = "127.0.0.1:3010"
+	}
+	if config.MetaServerConfig.CubeMasterHTTPAddr == "" {
+		config.MetaServerConfig.CubeMasterHTTPAddr = "127.0.0.1:8089"
 	}
 	if config.MetaServerConfig.NodeStatusMaxImages == 0 {
 		config.MetaServerConfig.NodeStatusMaxImages = 40000

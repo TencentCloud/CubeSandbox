@@ -5,13 +5,123 @@
 package redisstream
 
 import (
+	"context"
 	"encoding/json"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 )
+
+// stubRedis implements the Set/Del/Publish subset WriteState and
+// ClearStateNotify need. Other UniversalClient methods panic if called.
+type stubRedis struct {
+	redis.UniversalClient
+	publishCh chan publishCall
+}
+
+type publishCall struct {
+	ctx     context.Context
+	channel string
+	payload string
+}
+
+func (s *stubRedis) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd {
+	cmd := redis.NewStatusCmd(ctx)
+	cmd.SetVal("OK")
+	return cmd
+}
+
+func (s *stubRedis) Del(ctx context.Context, keys ...string) *redis.IntCmd {
+	cmd := redis.NewIntCmd(ctx)
+	cmd.SetVal(1)
+	return cmd
+}
+
+func (s *stubRedis) Publish(ctx context.Context, channel string, message interface{}) *redis.IntCmd {
+	var payload string
+	switch v := message.(type) {
+	case string:
+		payload = v
+	case []byte:
+		payload = string(v)
+	default:
+		payload = ""
+	}
+	s.publishCh <- publishCall{ctx: ctx, channel: channel, payload: payload}
+	cmd := redis.NewIntCmd(ctx)
+	cmd.SetVal(1)
+	return cmd
+}
+
+type recordingBus struct {
+	mu   sync.Mutex
+	ids  []string
+	done chan struct{}
+}
+
+func (b *recordingBus) Publish(sandboxID string) {
+	b.mu.Lock()
+	b.ids = append(b.ids, sandboxID)
+	b.mu.Unlock()
+	select {
+	case <-b.done:
+	default:
+		close(b.done)
+	}
+}
+
+func TestWriteState_PublishDetachedAndNonBlocking(t *testing.T) {
+	rdb := &stubRedis{publishCh: make(chan publishCall)}
+	bus := &recordingBus{done: make(chan struct{})}
+	c := New(rdb, zap.NewNop())
+	c.SetNotifyEnabled(true)
+	c.SetLocalBus(bus)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	started := time.Now()
+	if err := c.WriteState(ctx, "sbx", "running", time.Second); err != nil {
+		t.Fatalf("WriteState: %v", err)
+	}
+	if time.Since(started) > 50*time.Millisecond {
+		t.Fatal("WriteState blocked on Redis PUBLISH")
+	}
+
+	select {
+	case <-bus.done:
+	case <-time.After(time.Second):
+		t.Fatal("local bus was not published synchronously")
+	}
+
+	select {
+	case call := <-rdb.publishCh:
+		if call.channel != lifecycle.EventChannel {
+			t.Fatalf("channel = %q", call.channel)
+		}
+		if call.payload != `{"sandbox_id":"sbx"}` {
+			t.Fatalf("payload = %q", call.payload)
+		}
+		if call.ctx == ctx {
+			t.Fatal("PUBLISH used the cancelled caller context")
+		}
+		deadline, ok := call.ctx.Deadline()
+		if !ok {
+			t.Fatal("PUBLISH context has no timeout")
+		}
+		remain := time.Until(deadline)
+		if remain <= 0 || remain > notifyPublishTimeout+50*time.Millisecond {
+			t.Fatalf("PUBLISH timeout remaining = %v, want (0, %v]", remain, notifyPublishTimeout)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Redis PUBLISH was not issued")
+	}
+}
 
 func metaEntry(t *testing.T, op, sid string, meta lifecycle.SandboxLifecycleMeta) redis.XMessage {
 	t.Helper()

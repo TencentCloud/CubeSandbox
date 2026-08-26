@@ -5,13 +5,32 @@
 
 local _M = {}
 
+-- Fixed per-sandbox route metadata mirrored from Redis. The per-port host-port
+-- mappings ({sid}:{container_port}) are also served from the cache but are
+-- gated by HostIP/SandboxIP and overwritten on the next fill, so invalidation
+-- only needs to drop these fixed keys.
+-- There is deliberately no "meta_cached" completion flag: the read gate (see
+-- sandbox_backend.lua) checks the presence of every served field, so a flag
+-- would be redundant.
+local ROUTE_CACHE_SUFFIXES = {
+    "HostIP",
+    "SandboxIP",
+    "CreatedAt",
+    "AllowPublicTraffic",
+    "TrafficAccessToken",
+    "MaskRequestHost",
+}
+
 local function cache_dict()
     return ngx.shared.local_cache
 end
 
--- delete_sandbox removes every local_cache entry belonging to sandbox_id.
--- Returns the number of keys deleted. Safe when the dict is missing.
-function _M.delete_sandbox(sandbox_id)
+-- Invalidate this sandbox's cached route by deleting the fixed route metadata
+-- mirrored from Redis. The next read misses (HostIP/SandboxIP gone) and a
+-- single fill rewrites every port's mapping at once, so all ports converge on
+-- fresh data from one reload. Returns the number of fixed keys that existed.
+-- Safe when the dict is missing.
+function _M.invalidate_sandbox(sandbox_id)
     if type(sandbox_id) ~= "string" or sandbox_id == "" then
         return 0
     end
@@ -21,22 +40,14 @@ function _M.delete_sandbox(sandbox_id)
     end
 
     local prefix = sandbox_id .. ":"
+
     local deleted = 0
-    -- get_keys(0) returns at most 1024 keys; loop until a pass finds none
-    -- matching this sandbox so large dicts still converge.
-    for _ = 1, 32 do
-        local keys = cache:get_keys(0)
-        local n = 0
-        for _, k in ipairs(keys) do
-            if type(k) == "string" and k:sub(1, #prefix) == prefix then
-                cache:delete(k)
-                deleted = deleted + 1
-                n = n + 1
-            end
+    for _, suffix in ipairs(ROUTE_CACHE_SUFFIXES) do
+        local key = prefix .. suffix
+        if cache:get(key) ~= nil then
+            deleted = deleted + 1
         end
-        if n == 0 then
-            break
-        end
+        cache:delete(key)
     end
     return deleted
 end

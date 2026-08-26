@@ -21,6 +21,7 @@ on:
       - 'hypervisor/Makefile'
       - 'sdk/go/Makefile'
       - 'examples/cube-bench/Makefile'
+      - 'examples/volume/s3/Makefile'
       - 'web/**'
       - '.github/workflows/fmt-check.yml'
   workflow_dispatch:

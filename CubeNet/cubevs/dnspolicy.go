@@ -196,6 +196,46 @@ func cleanupDNSAllow(ifindex uint32) error {
 	return flushDNSAllowInnerMap(inner)
 }
 
+// syncDNSAllowInner converges dns_allow_v2 for one TAP on the desired rules.
+//
+// Values are written as-is rather than through updateDNSAllowRule: that helper
+// unions the installed flags and port tuples into the new value, which is right
+// when several rules of one apply share a key, but on an update it would keep
+// ports the caller just removed. buildNetPolicyPlan already merges same-key
+// rules in userspace, so rules holds exactly the desired state.
+func syncDNSAllowInner(ifindex uint32, rules []dnsAllowRule) error {
+	dnsAllow, err := loadPinnedMap(MapNameDNSAllowV2)
+	if err != nil {
+		return err
+	}
+	defer dnsAllow.Close()
+
+	inner, err := acquireInnerMap(dnsAllow, ifindex, MapNameDNSAllowV2, newInnerDNSAllowMap)
+	if err != nil {
+		return err
+	}
+
+	desired := make(map[dnsAllowKey]struct{}, len(rules))
+	for _, rule := range rules {
+		desired[rule.key] = struct{}{}
+	}
+
+	stale, err := staleKeys(inner, desired, func(*dnsAllowValue) bool { return true })
+	if err != nil {
+		return err
+	}
+	if err := deleteKeys(inner, stale); err != nil {
+		return err
+	}
+
+	for _, rule := range rules {
+		if err := inner.Update(&rule.key, &rule.value, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("dns allow update failed: %w, domain: %s", err, rule.domain)
+		}
+	}
+	return nil
+}
+
 // applyDNSAllow installs DNS allow rules parsed from MVMOptions.
 func applyDNSAllow(ifindex uint32, rules []dnsAllowRule, replace bool) error {
 	if len(rules) == 0 && !replace {

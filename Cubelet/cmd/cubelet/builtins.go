@@ -81,6 +81,7 @@ import (
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/services/gc"
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/services/images"
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/services/nbi"
+	_ "github.com/tencentcloud/CubeSandbox/Cubelet/services/snapshot"
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/services/version"
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 )

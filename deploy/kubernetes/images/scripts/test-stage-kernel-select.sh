@@ -114,6 +114,76 @@ assert_eq "$(cat "${dst}/f")" "live" "atomic_replace recovers then promotes new 
 [[ ! -e "${dst}.legacy.111" ]] || { echo "FAIL: orphan legacy not cleaned"; exit 1; }
 printf 'ok: orphan legacy cleaned after successful replace\n'
 
+# Existing dst, no mounts: rename-aside still replaces and leaves no legacy.
+src="${TMP}/src5b"
+dst="${TOOLBOX_ROOT}/comp5b"
+mkdir -p "${src}" "${dst}"
+echo old >"${dst}/f"
+echo stale >"${dst}/gone"
+echo live >"${src}/f"
+echo extra >"${src}/n"
+atomic_replace_dir "${src}" "${dst}"
+assert_eq "$(cat "${dst}/f")" "live" "atomic_replace promotes over existing dst"
+assert_eq "$(cat "${dst}/n")" "extra" "atomic_replace copies new files"
+[[ ! -e "${dst}/gone" ]] || { echo "FAIL: stale file survived replace"; exit 1; }
+shopt -s nullglob
+legacy_left=("${dst}".legacy.*)
+shopt -u nullglob
+((${#legacy_left[@]} == 0)) || { echo "FAIL: leftover legacy after no-mount replace"; exit 1; }
+printf 'ok: no-mount replace is rename-aside without leftover legacy\n'
+
+# Bind-mounted plugin conf must stay on the live path (kubelet Secret subPath).
+# Prefer unshare (no root). This host may block unprivileged user namespaces;
+# fall back to a privileged Docker mount namespace using a local image.
+bind_test_script() {
+  cat <<'BINDTEST'
+set -euo pipefail
+# shellcheck disable=SC1090
+source <(sed '/^main "$@"/d' "${ENTRY}")
+work="$(mktemp -d)"
+src="${work}/bind-src"
+dst="${work}/bind-dst"
+secret="${work}/bind-secret"
+mkdir -p "${src}/bin" "${src}/plugin" "${dst}/bin" "${dst}/plugin"
+printf 'old-bin\n' >"${dst}/bin/cubelet"
+printf 'stale\n' >"${dst}/stale.txt"
+printf 'old-conf\n' >"${dst}/plugin/volume-s3.conf"
+printf 'secret-conf\n' >"${secret}"
+mount --bind "${secret}" "${dst}/plugin/volume-s3.conf"
+printf 'new-bin\n' >"${src}/bin/cubelet"
+printf 'image-conf\n' >"${src}/plugin/volume-s3.conf"
+printf 'plugin-sh\n' >"${src}/plugin/other.sh"
+atomic_replace_dir "${src}" "${dst}"
+[[ "$(cat "${dst}/bin/cubelet")" == "new-bin" ]] || { echo "FAIL: bind overlay did not update non-mount files"; exit 1; }
+[[ "$(cat "${dst}/plugin/other.sh")" == "plugin-sh" ]] || { echo "FAIL: bind overlay missed new plugin file"; exit 1; }
+[[ ! -e "${dst}/stale.txt" ]] || { echo "FAIL: stale file survived bind overlay"; exit 1; }
+[[ "$(cat "${dst}/plugin/volume-s3.conf")" == "secret-conf" ]] || { echo "FAIL: bind overlay overwrote volume-s3.conf"; exit 1; }
+findmnt --mountpoint "${dst}/plugin/volume-s3.conf" >/dev/null \
+  || { echo "FAIL: volume-s3.conf is no longer a mountpoint"; exit 1; }
+shopt -s nullglob
+left=("${dst}".legacy.* "${dst}".new.*)
+shopt -u nullglob
+((${#left[@]} == 0)) || { echo "FAIL: leftover new/legacy after bind overlay"; exit 1; }
+BINDTEST
+}
+
+if unshare --user --map-root-user --mount true >/dev/null 2>&1; then
+  ENTRY="${ENTRY}" TMP="${TMP}" unshare --user --map-root-user --mount /bin/bash -s <<<"$(bind_test_script)"
+elif docker info >/dev/null 2>&1; then
+  bind_docker_img="${BIND_TEST_DOCKER_IMAGE:-ubuntu:22.04}"
+  docker image inspect "${bind_docker_img}" >/dev/null 2>&1 \
+    || docker pull "${bind_docker_img}"
+  ENTRY="${ENTRY}" docker run --rm -i --privileged --entrypoint bash \
+    -v "${ENTRY}:${ENTRY}:ro" \
+    -e ENTRY \
+    "${bind_docker_img}" \
+    -s <<<"$(bind_test_script)"
+else
+  echo "FAIL: need unshare user+mount or docker to test bind-mount preserve" >&2
+  exit 1
+fi
+printf 'ok: bind-mounted volume-s3.conf stays on live path during overlay\n'
+
 # --- staging marker: no EXIT trap; only success clears ---
 # Simulate mid-stage: write marker, then "fail" without success cleanup.
 # Entrypoint must not register trap ... EXIT that would rm the marker.

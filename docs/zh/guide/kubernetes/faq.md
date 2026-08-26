@@ -191,7 +191,7 @@ FLUSH PRIVILEGES;
 ```bash
 # 进入交互 shell（镜像内 bashrc 会自动补 --address / --port）
 kubectl -n cube-system exec -it -l app.kubernetes.io/component=cubemastercli -- bash
-cubemastercli node list
+cubeopscli node list
 cubemastercli sandbox list
 ```
 
@@ -199,7 +199,7 @@ cubemastercli sandbox list
 
 ```bash
 kubectl -n cube-system exec deploy/cube-cubemastercli -- \
-  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
 ```
 
 ---
@@ -239,7 +239,7 @@ lsmod | grep kvm
 
 ```bash
 kubectl -n cube-system exec -l app.kubernetes.io/component=cubemastercli -- \
-  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
 ```
 
 - `healthy: true` → 可创建沙箱
@@ -250,6 +250,17 @@ kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node -c cubelet 
 ```
 
 常见原因是连不上 CubeMaster（网络 / DNS）。
+
+### 某个节点上所有沙箱同时断网
+
+大概率是该节点上的 `cube-node` Pod 被重建过（手工删除、DaemonSet template 变更、节点 drain 等）。沙箱的 TAP 设备位于该 Pod 的 netns 中，Pod 重建会销毁它，**节点上所有沙箱的网络随之全部中断（入站、出站均中断），且不会自愈**。可对比 Pod 的 AGE / UID 与故障时间确认：
+
+```bash
+kubectl get pods -n cube-system -l app.kubernetes.io/component=cube-node -o wide
+```
+
+- **恢复**：销毁并重建受影响的沙箱。
+- **预防**：部署时为 `cube-node` 启用 `hostNetwork: true`，使 Pod 重建不再引起 netns 变化；详见[安装 · cube-node 网络与 Pod 重建](./install.md#_8-3-cube-node-网络与-pod-重建)。若还需要用 NetworkPolicy 管控沙箱访问集群内 Service 的流量，也请参考同一节。
 
 ### 如何在 Kubernetes 部署中运行 `cubecli`？
 

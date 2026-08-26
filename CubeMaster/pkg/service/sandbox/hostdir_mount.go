@@ -34,6 +34,39 @@ type HostDirMountOption struct {
 	ReadOnly bool `json:"readOnly,omitempty"`
 }
 
+// createRequestHasHostMount reports whether the persisted create spec binds a
+// host directory. Resume uses this to pin placement to the origin node.
+func createRequestHasHostMount(req *types.CreateCubeSandboxReq) bool {
+	if req == nil {
+		return false
+	}
+	if req.Annotations != nil {
+		raw := strings.TrimSpace(req.Annotations[AnnotationHostDirMount])
+		if raw != "" && raw != "[]" && !strings.EqualFold(raw, "null") {
+			var opts []HostDirMountOption
+			if err := json.Unmarshal([]byte(raw), &opts); err != nil {
+				return true
+			}
+			for _, o := range opts {
+				if strings.TrimSpace(o.HostPath) != "" || strings.TrimSpace(o.MountPath) != "" {
+					return true
+				}
+			}
+		}
+	}
+	for _, vol := range req.Volumes {
+		if vol == nil || vol.VolumeSource == nil || vol.VolumeSource.HostDirVolumeSources == nil {
+			continue
+		}
+		for _, src := range vol.VolumeSource.HostDirVolumeSources.VolumeSources {
+			if src != nil && strings.TrimSpace(src.HostPath) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func injectHostDirMounts(ctx context.Context, req *types.CreateCubeSandboxReq) error {
 	if req.Annotations == nil {
 		log.G(ctx).Infof("[hostdir] no annotations, skip")

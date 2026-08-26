@@ -9,8 +9,8 @@
 // is the home for future xfscow-only helpers without pulling S3 concerns into
 // the storage facade.
 //
-// A future S3-backed Store will live under storage/cow/s3 and implement the
-// same [cow.Store] interface.
+// The S3 Store ([storage.S3Cow]) coexists in the same storage package and is
+// selected by request backend type.
 package xfscow
 
 import "github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"

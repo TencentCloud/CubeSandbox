@@ -96,6 +96,23 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } snat_iplist SEC(".maps");
 
+/* Direct-egress on-link neighbor trigger/cache.
+ *
+ * key:   destination IPv4 address in packet-byte layout
+ * value: struct direct_neighbor — a TTL-bounded cache of the last
+ *        bpf_fib_lookup() result (MAC + valid_until + fib_ok + last_used) plus
+ *        the userspace scanner's trigger scheduling fields (step +
+ *        next_attempt/next_refresh). The MAC always comes from fib; this map
+ *        only caches it briefly and drives scanner scheduling.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, MAX_ENTRIES);
+	__type(key, __u32);
+	__type(value, struct direct_neighbor);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} direct_neigh SEC(".maps");
+
 /* Egress allow list v3 (hash of maps)
  *
  * key:   ifindex of the TAP device

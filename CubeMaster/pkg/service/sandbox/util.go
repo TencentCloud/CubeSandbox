@@ -73,9 +73,21 @@ func checkAndGetReqResource(req *types.CreateCubeSandboxReq) (*selctx.RequestRes
 				res.EnforceSnapshotStorage = true
 			}
 		}
+		if strings.EqualFold(strings.TrimSpace(req.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal]), "true") {
+			res.AllowNonLocalTemplate = true
+			res.EnforceSnapshotStorage = false
+			if len(req.DistributionScope) > 0 && len(res.TemplateNodeScope) == 0 {
+				res.TemplateNodeScope = append([]string(nil), req.DistributionScope...)
+			}
+		}
 	}
 
 	return res, nil
+}
+
+// RequestResources exposes checkAndGetReqResource for restore placement.
+func RequestResources(req *types.CreateCubeSandboxReq) (*selctx.RequestResource, error) {
+	return checkAndGetReqResource(req)
 }
 
 func checkParam(req *types.CreateCubeSandboxReq) error {
@@ -87,22 +99,29 @@ func checkParam(req *types.CreateCubeSandboxReq) error {
 		return ret.Err(errorcode.ErrorCode_MasterParamsError, "containers param is nil")
 	}
 
-	if req.CubeNetworkConfig != nil {
-		if req.CubeNetworkConfig.MaskRequestHost != nil {
-			if err := validateMaskRequestHost(*req.CubeNetworkConfig.MaskRequestHost); err != nil {
-				return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
-			}
-		}
-		for i, rule := range req.CubeNetworkConfig.Rules {
-			if rule == nil {
-				continue
-			}
-			if err := validateEgressRuleMatch(rule.Match, i); err != nil {
-				return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
-			}
+	return validateCubeNetworkConfig(req.CubeNetworkConfig)
+}
+
+// validateCubeNetworkConfig runs the server-side egress policy checks shared by
+// sandbox creation and in-place network updates, so the update path cannot
+// accept a policy that creation would have rejected.
+func validateCubeNetworkConfig(cfg *types.CubeNetworkConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.MaskRequestHost != nil {
+		if err := validateMaskRequestHost(*cfg.MaskRequestHost); err != nil {
+			return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
 		}
 	}
-
+	for i, rule := range cfg.Rules {
+		if rule == nil {
+			continue
+		}
+		if err := validateEgressRuleMatch(rule.Match, i); err != nil {
+			return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
+		}
+	}
 	return nil
 }
 
@@ -269,6 +288,10 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 		RuntimeHandler:    req.RuntimeHandler,
 		Namespace:         req.Namespace,
 		CubeNetworkConfig: mapCubeNetworkConfig(req.CubeNetworkConfig),
+	}
+	if b, ok, err := constants.OptionalSnapshotBackend(req.Backend); err == nil && ok {
+		out.Backend = b
+		out.Annotations[constants.CubeAnnotationStorageBackend] = b
 	}
 	log.G(ctx).Infof(
 		"ConstructCubeletReq: instance_type=%s network_type=%s cube_network_config=%s",

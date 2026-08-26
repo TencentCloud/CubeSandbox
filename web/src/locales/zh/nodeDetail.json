@@ -21,7 +21,33 @@
     "address": "地址",
     "heartbeat": "最近心跳"
   },
+  "status": {
+    "notIsolated": "未隔离",
+    "isolated": "已隔离"
+  },
+  "actions": {
+    "isolate": "隔离",
+    "unisolate": "解除隔离"
+  },
+  "dialog": {
+    "isolateDesc": "隔离后，该节点将不再接收新的沙箱调度。已有沙箱不受影响。",
+    "unisolateDesc": "解除隔离后，该节点将恢复接收新的沙箱调度。",
+    "detailLabel": "备注（可选）",
+    "detailPlaceholder": "请输入操作原因，如：磁盘满，维护隔离",
+    "cancel": "取消"
+  },
+  "toast": {
+    "isolated": "节点已隔离。",
+    "unisolated": "节点已解除隔离。",
+    "isolationFailed": "操作失败。"
+  },
   "empty": {
     "sandboxes": "该节点上暂无运行中的沙箱。"
+  },
+  "operations": {
+    "title": "最近操作记录",
+    "typeIsolate": "隔离",
+    "typeUnisolate": "解除隔离",
+    "empty": "暂无操作记录。"
   }
 }

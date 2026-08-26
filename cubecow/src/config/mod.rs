@@ -38,6 +38,9 @@ pub struct BackendConfig {
     /// Settings for the xfs-reflink backend.
     #[serde(default)]
     pub reflink: ReflinkConfig,
+    /// Settings for the S3 (S3LVOL / RCOW) backend.
+    #[serde(default)]
+    pub s3: S3Config,
 }
 
 /// Configuration for the xfs-reflink backend.
@@ -72,6 +75,54 @@ fn default_reflink_root_dir() -> PathBuf {
     PathBuf::from("/var/lib/cubecow/reflink")
 }
 
+/// Configuration for the S3 (S3LVOL / RCOW) backend.
+#[derive(Debug, Clone, Deserialize)]
+pub struct S3Config {
+    /// Path to the s3lvol JSON-RPC Unix socket. Default:
+    /// `/var/run/s3lvol.sock`.
+    #[serde(default = "default_s3_socket_path")]
+    pub socket_path: PathBuf,
+
+    /// Directory holding the cubecow-side metadata (`index.json`).
+    /// Default: `/var/lib/cubecow/s3`.
+    #[serde(default = "default_s3_state_dir")]
+    pub state_dir: PathBuf,
+
+    /// Per-RPC timeout in milliseconds. Default: 10000.
+    #[serde(default = "default_s3_rpc_timeout_ms")]
+    pub rpc_timeout_ms: u64,
+
+    /// How the `size_bytes → size_gib` conversion is handled at the
+    /// boundary with s3lvol (which is GiB-granular): `"round_up"`
+    /// (default) or `"strict"`.
+    #[serde(default = "default_s3_size_policy")]
+    pub size_policy: String,
+}
+
+impl Default for S3Config {
+    fn default() -> Self {
+        Self {
+            socket_path: default_s3_socket_path(),
+            state_dir: default_s3_state_dir(),
+            rpc_timeout_ms: default_s3_rpc_timeout_ms(),
+            size_policy: default_s3_size_policy(),
+        }
+    }
+}
+
+fn default_s3_socket_path() -> PathBuf {
+    PathBuf::from("/var/run/s3lvol.sock")
+}
+fn default_s3_state_dir() -> PathBuf {
+    PathBuf::from("/var/lib/cubecow/s3")
+}
+fn default_s3_rpc_timeout_ms() -> u64 {
+    10_000
+}
+fn default_s3_size_policy() -> String {
+    "round_up".to_string()
+}
+
 /// Available storage backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -80,6 +131,8 @@ pub enum BackendKind {
     /// and currently the only shipping backend.
     #[default]
     Reflink,
+    /// S3 backend delegating to an external S3LVOL / RCOW service.
+    S3,
 }
 
 /// Logging configuration.
@@ -196,6 +249,7 @@ impl AppConfig {
         // ---- Backend-specific required fields ----------------------------
         match self.backend.kind {
             BackendKind::Reflink => self.validate_reflink_requirements(),
+            BackendKind::S3 => self.validate_s3_requirements(),
         }
     }
 
@@ -218,6 +272,43 @@ impl AppConfig {
                 "[backend.reflink] root_dir = \"{}\" must be an absolute path",
                 root_dir.display()
             )));
+        }
+        Ok(())
+    }
+
+    /// Field-level validation for the S3 backend.
+    fn validate_s3_requirements(&self) -> CubecowResult<()> {
+        let s3 = &self.backend.s3;
+        if s3.socket_path.as_os_str().is_empty() {
+            return Err(CubecowError::ConfigError(
+                "[backend.s3] socket_path must not be empty when backend.kind = \"s3\"".to_string(),
+            ));
+        }
+        if !s3.socket_path.is_absolute() {
+            return Err(CubecowError::ConfigError(format!(
+                "[backend.s3] socket_path = \"{}\" must be an absolute path",
+                s3.socket_path.display()
+            )));
+        }
+        if s3.state_dir.as_os_str().is_empty() {
+            return Err(CubecowError::ConfigError(
+                "[backend.s3] state_dir must not be empty when backend.kind = \"s3\"".to_string(),
+            ));
+        }
+        if !s3.state_dir.is_absolute() {
+            return Err(CubecowError::ConfigError(format!(
+                "[backend.s3] state_dir = \"{}\" must be an absolute path",
+                s3.state_dir.display()
+            )));
+        }
+        match s3.size_policy.as_str() {
+            "round_up" | "strict" => {}
+            other => {
+                return Err(CubecowError::ConfigError(format!(
+                    "[backend.s3] size_policy = \"{other}\" is invalid; expected one of \
+                     \"round_up\", \"strict\""
+                )));
+            }
         }
         Ok(())
     }

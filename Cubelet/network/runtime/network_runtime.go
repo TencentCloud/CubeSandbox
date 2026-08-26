@@ -16,6 +16,11 @@ import (
 // another retry may already have started after EnsureNetwork released its lock.
 var ErrEnsureNetworkCommitted = errors.New("network ensure success is already committed")
 
+// ErrNetworkNotActive reports that a sandbox has no active network, so its
+// policy cannot be updated. Distinct from a generic failure because callers
+// surface it as a client-side conflict rather than a server error.
+var ErrNetworkNotActive = errors.New("sandbox network is not active")
+
 // NetworkRuntime is the in-process network runtime interface used by Cubelet.
 // Implementations must make EnsureNetwork and ReleaseNetwork idempotent for the
 // same sandbox so Cubelet can safely retry after process or RPC failures.
@@ -26,6 +31,10 @@ type NetworkRuntime interface {
 	// ownership has been handed to the runtime, not necessarily after every kernel
 	// side effect has completed.
 	ReleaseNetwork(ctx context.Context, req *ReleaseNetworkRequest) (*ReleaseNetworkResponse, error)
+	// UpdateNetworkPolicy replaces the egress policy of a running sandbox. It
+	// returns ErrNetworkNotActive when the sandbox has no active network, which
+	// callers map to a "not running" client error.
+	UpdateNetworkPolicy(ctx context.Context, req *UpdateNetworkPolicyRequest) error
 	// ListTaps returns the TAP pool state machine snapshot used by diagnostics.
 	ListTaps(ctx context.Context, req *ListTapsRequest) (*ListTapsResponse, error)
 	// Health reports whether the runtime process can still serve requests.

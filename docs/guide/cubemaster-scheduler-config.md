@@ -15,7 +15,7 @@ CubeMaster scheduler configuration is stored in CubeMaster's `conf.yaml`:
 | Tencent Cloud Terraform / TKE | `deploy/one-click/terraform/tencentcloud/tke-addons.tf` (`kubernetes_secret.cubemaster_conf`) | Update the Terraform-generated `yamlencode` configuration, re-apply Terraform, and restart or roll cube-master Pods |
 | Kubernetes / Helm chart | `deploy/kubernetes/chart/files/cube-master/conf.yaml`, rendered by `deploy/kubernetes/chart/templates/master-config-secret.yaml` | Update the chart file or rendered Secret and restart or roll cube-master Pods |
 
-Cubelet node metadata and quota are not configured in CubeMaster. Each Cubelet reports them to CubeMaster. In one-click deployments, the main inputs are:
+Cubelet node metadata and quota are not configured in CubeMaster. Each Cubelet reports them to CubeOps (port 3010). In one-click deployments, the main inputs are:
 
 | Config | Location | Notes |
 |--------|----------|-------|
@@ -88,7 +88,7 @@ scheduler:
 
 ## How node metadata affects scheduling
 
-Cubelet registers nodes and continuously reports status through CubeMaster's `/internal/meta` API. CubeMaster stores this metadata and keeps local cache snapshots for scheduling.
+Cubelet registers nodes and continuously reports status through CubeOps's `/internal/v1/node-agent` API. CubeOps persists this metadata to MySQL/Redis; CubeMaster syncs the node view from CubeOps every few seconds and keeps local cache snapshots for scheduling.
 
 | Cubelet-reported field | Source | Scheduling effect |
 |------------------------|--------|-------------------|
@@ -110,7 +110,7 @@ These values are configured and reported per compute node. Heterogeneous cluster
 |-------------------|--------|
 | `ONE_CLICK_DEPLOY_ROLE=compute` | Installs a compute node, runs Cubelet/runtime services, and registers to the control plane. |
 | `CUBE_SANDBOX_NODE_IP` | Routable address registered for this node. Incorrect values can make the node unreachable or invisible. |
-| `ONE_CLICK_CONTROL_PLANE_IP` / `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | CubeMaster endpoint used by Cubelet for registration and reports. |
+| `ONE_CLICK_CONTROL_PLANE_IP` / `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` | CubeOps endpoint used by Cubelet for registration and reports (port 3010). CubeMaster is reachable separately on 8089. |
 | `node_status_update_frequency` in `Cubelet/config/config.toml` | Node status/resource report interval. Default is `1s`; do not put this in dynamic config. |
 | `host.scheduler_label` in `Cubelet/dynamicconf/conf.yaml` | Node-pool label for affinity and isolation. |
 | `host.quota.*` in `Cubelet/dynamicconf/conf.yaml` | CPU, memory, MVM count, and create-concurrency scheduling capacity. |
@@ -222,7 +222,7 @@ Check:
 Useful entry points:
 
 ```bash
-curl http://127.0.0.1:8089/internal/meta/nodes
+curl http://127.0.0.1:3010/internal/v1/nodes
 sudo tail -F /data/log/CubeMaster/cubemaster-req.log
 sudo tail -F /data/log/Cubelet/Cubelet-req.log
 ```
@@ -232,7 +232,7 @@ sudo tail -F /data/log/Cubelet/Cubelet-req.log
 If CubeMaster logs mention metric update timeouts:
 
 - Confirm `cube-sandbox-cubelet.service` is running on the compute node.
-- Confirm `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` or the Terraform-generated CubeMaster endpoint is reachable.
+- Confirm `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` or the Terraform-generated CubeOps endpoint is reachable from the compute node.
 - Check whether `node_status_update_frequency` was accidentally set too high.
 - Ensure `metric_update_timeout` is much larger than the report interval.
 

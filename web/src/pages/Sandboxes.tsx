@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Pause, Play, Trash2, Search, Plus } from 'lucide-react';
-import { formatBytes, formatRelative, short } from '@/lib/utils';
+import { formatBytes, formatCpu, formatRelative, short } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
@@ -231,7 +231,9 @@ function Row({
         )}
       </div>
       <div className="truncate text-xs text-muted-foreground">{sb.templateID ?? '—'}</div>
-      <div className="text-xs text-muted-foreground text-num">{sb.cpuCount ?? '—'}</div>
+      <div className="text-xs text-muted-foreground text-num">
+        {formatCpu(sb.cpuMilli, sb.cpuCount)}
+      </div>
       <div className="text-xs text-muted-foreground text-num">{formatBytes(sb.memoryMB)}</div>
       <div className="text-xs text-muted-foreground/80 text-num">{sb.clientID || '—'}</div>
       <div className="text-xs text-muted-foreground">{formatRelative(sb.startedAt)}</div>

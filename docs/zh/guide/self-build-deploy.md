@@ -48,6 +48,7 @@
 
 - 需要联网拉取 `mysql:8.0` 和 `redis:7-alpine` Docker 镜像。
 - `mkcert` 二进制文件已内置在发布包中，安装时若系统尚未安装 `mkcert`，会自动从包内复制到 `/usr/local/bin/mkcert`，无需联网下载。
+- S3 Volume 插件是内置 S3 客户端的静态 Go 二进制，打包时从 `examples/volume/s3` 编译。控制节点无需任何 S3 命令行工具；挂载 Volume 的节点仍需 `s3fs`。可用 `ONE_CLICK_VOLUME_S3_BIN` 指定预编译二进制。
 - CubeProxy 镜像构建使用 Alpine 和 PyPI 软件源（可配置）。
 
 ## 第一步：构建部署包
@@ -98,6 +99,7 @@ deploy/one-click/dist/cube-sandbox-one-click-<version>.tar.gz
 - 内核包（`cube-kernel-scf.zip`）
 - CubeProxy 和 CoreDNS 的 Docker Compose 模板
 - MySQL/Redis 的 Docker Compose 模板
+- S3 Volume 插件二进制（`{CubeMaster,Cubelet}/plugin/cube-volume-s3`），供 Volume 创建/销毁与挂载/卸载使用
 - 安装脚本（`install.sh`、`install-compute.sh`、`down.sh`、`smoke.sh`）
 - 环境变量模板（`env.example`）
 
@@ -234,9 +236,12 @@ sudo ./down.sh
 
 该命令会停止所有宿主机进程（cubelet、cubemaster、cube-api）、Docker 容器（CubeProxy、CoreDNS、MySQL、Redis），并回滚 `cube.app` 的 DNS 路由配置。
 
-### 重新安装
+### 升级或重新安装
 
-直接再次运行 `install.sh` 即可。安装脚本会自动停止已有部署再进行安装。
+机器上已有 CubeSandbox 时，再次运行 `install.sh` 默认执行**保留配置的升级**，不会
+覆盖已有配置。交互式运行会先询问是否升级（默认升级，输入 `n` 则改为整机重装）；
+脚本、CI 等非交互运行会直接升级。要丢弃现有配置并整机重装，请显式加上
+`--mode=install`。
 
 ### 查看日志
 
@@ -285,6 +290,8 @@ sudo ./down.sh
 | `ONE_CLICK_CUBESHIM_BIN` | 预编译 containerd-shim-cube-rs 路径 |
 | `ONE_CLICK_CUBE_RUNTIME_BIN` | 预编译 cube-runtime 路径 |
 | `ONE_CLICK_MKCERT_BIN` | 构建时自定义 mkcert 二进制路径（默认：内置 `assets/bin/mkcert`） |
+| `ONE_CLICK_VOLUME_S3_BUILD_MODE` | S3 Volume 插件的构建模式（默认 `local`） |
+| `ONE_CLICK_VOLUME_S3_BIN` | 覆盖为预编译的 `cube-volume-s3`；设置后打包阶段不再编译 |
 
 构建性能选项（均为可选）：
 
@@ -301,7 +308,7 @@ sudo ./down.sh
 |------|--------|------|
 | `ONE_CLICK_DEPLOY_ROLE` | `control` | 部署角色：`control` 为单机部署（默认）。计算节点请参阅[多机集群部署](./multi-node-deploy.md) |
 | `ONE_CLICK_CONTROL_PLANE_IP` | 空 | 仅计算节点模式使用。详见[多机集群部署 — 配置环境变量](./multi-node-deploy.md#第二步配置环境变量) |
-| `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | 空 | 仅计算节点模式使用。详见[多机集群部署 — 配置环境变量](./multi-node-deploy.md#第二步配置环境变量) |
+| `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` | 空 | 仅计算节点模式使用。Cubelet 向 CubeOps注册，端口 3010。详见[多机集群部署 — 配置环境变量](./multi-node-deploy.md#第二步配置环境变量) |
 | `CUBE_SANDBOX_NODE_IP` | 自动从 `eth0` 探测 | 节点主网卡 IP 地址。未设置时自动探测；若网卡名称不同请显式指定。 |
 | `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` | cubevs 本地网络 CIDR，用于沙箱 IP 分配。格式为 IPv4 CIDR（如 `10.100.0.0/18`），掩码范围 /16~/24。若与宿主机网卡、路由或 DNS 解析器地址冲突，安装前置检测会直接中止安装。未设置时使用固定默认值。 |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | 设为 `1` 可跳过默认或自定义沙箱 CIDR 的冲突检测（不推荐）。 |

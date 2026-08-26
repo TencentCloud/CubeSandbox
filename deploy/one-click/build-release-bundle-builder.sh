@@ -73,6 +73,7 @@ rm -f \
   "${PREBUILT_DIR}/cubecli" \
   "${PREBUILT_DIR}/cube-api" \
   "${PREBUILT_DIR}/cubeops" \
+  "${PREBUILT_DIR}/cubeopscli" \
   "${PREBUILT_DIR}/cubevsmapdump" \
   "${PREBUILT_DIR}/cube-agent" \
   "${PREBUILT_DIR}/cube-init" \
@@ -348,6 +349,16 @@ track_cubeops() {
   go build -ldflags "${CUBEOPS_LDFLAGS}" -o "${PREBUILT_DIR}/cubeops" ./cmd/cubeops
 }
 
+track_volume_s3() {
+  # S3 Volume plugin (examples/volume/s3): standalone Go module, statically
+  # linked so it runs on one-click hosts (Ubuntu 20.04 / glibc 2.31). Built in
+  # the builder like every other Go component so the host needs no go.
+  cd /workspace/examples/volume/s3
+  go mod download
+  CGO_ENABLED=0 GOOS=linux GOARCH="$(go env GOARCH)" \
+    go build -trimpath -ldflags '-s -w' -o "${PREBUILT_DIR}/cube-volume-s3" ./cmd/cube-volume-s3
+}
+
 track_netstack() {
   # cubevs BPF bindings are generated in the serial pre-launch step because
   # track_cubelet also links CubeNet/cubevs after the network runtime embed.
@@ -376,6 +387,27 @@ track_shim() {
   install -m 0755 /workspace/CubeShim/target/release/cube-runtime "${PREBUILT_DIR}/cube-runtime"
 }
 
+track_s3lvol() {
+  # CubeS3lvol: NVMe/TCP target over S3/COS, statically linked against
+  # SPDK/DPDK/AWS CRT. setup_dep.sh reuses /opt/s3lvol-* from the builder when
+  # stamps match, else populates deps/.
+  # --skip-smoke defers the DPDK EAL runtime check to deployment (the EAL needs
+  # a real CPU affinity mask the builder cannot guarantee); the static
+  # verify_binary gate (readelf/ldd) still runs.
+  local s3lvol_jobs="${ONE_CLICK_S3LVOL_JOBS:-$(nproc)}"
+  local stage="${PREBUILT_DIR}/s3lvol-stage"
+  ( cd /workspace/CubeS3lvol && AWS_BUILD_TYPE=RelWithDebInfo ./setup_dep.sh --jobs "${s3lvol_jobs}" ) >&2
+  ( cd /workspace/CubeS3lvol && AWS_BUILD_TYPE=RelWithDebInfo make S3LVOL_BUILD_TYPE=release -j"${s3lvol_jobs}" ) >&2
+  rm -rf "${stage}" "${PREBUILT_DIR}/s3lvol"
+  ( cd /workspace/CubeS3lvol && AWS_BUILD_TYPE=RelWithDebInfo ./make_release.sh --no-tar --skip-smoke --version "${CUBE_VERSION}" --outdir "${stage}" ) >&2
+  mv "${stage}"/s3lvol-* "${PREBUILT_DIR}/s3lvol"
+  rm -rf "${stage}"
+  [[ -x "${PREBUILT_DIR}/s3lvol/bin/s3lvol_tgt" ]] || {
+    echo "[one-click] CubeS3lvol release missing bin/s3lvol_tgt" >&2
+    exit 1
+  }
+}
+
 # Serial pre-launch step: build cubemastercli with the client-supplied envd
 # payload when present. The envd payload must be embedded into the
 # cubemastercli binary before packaging, but that build cannot safely share the
@@ -402,6 +434,7 @@ echo "[one-click] building one-click components in parallel tracks" >&2
 # Queue order matters under a low concurrency cap: front-load the slowest,
 # LTO-heavy tracks (cube-api fat-LTO, shim, cube-agent) so they start first and
 # overlap the lighter Go tracks instead of tailing the build.
+queue_track s3lvol     track_s3lvol
 queue_track cube-api   track_cube_api
 queue_track shim       track_shim
 queue_track agent      track_agent
@@ -410,6 +443,10 @@ queue_track cubelet    track_cubelet
 queue_track cubemaster track_cubemaster
 queue_track netstack   track_netstack
 queue_track cubeops    track_cubeops
+queue_track volume-s3 track_volume_s3
+
+echo "[one-click] building cubeopscli in builder" >&2
+(cd /workspace/CubeOps && go build -ldflags "-s -w" -o "${PREBUILT_DIR}/cubeopscli" ./cmd/cubeopscli)
 
 run_tracks
 SCRIPT_EOF
@@ -433,6 +470,7 @@ for artifact in \
   cubecli \
   cube-api \
   cubeops \
+  cubeopscli \
   cubevsmapdump \
   cube-agent \
   cube-init \
@@ -442,6 +480,11 @@ do
   ensure_file "${PREBUILT_DIR}/${artifact}"
 done
 
+# CubeS3lvol produces a release *directory* (bin/ + scripts/ + VERSION)
+# rather than a single binary, so verify it separately.
+ensure_dir "${PREBUILT_DIR}/s3lvol"
+ensure_file "${PREBUILT_DIR}/s3lvol/bin/s3lvol_tgt"
+
 log "packaging one-click release bundle on host with prebuilt artifacts"
 ONE_CLICK_CUBEMASTER_BIN="${PREBUILT_DIR}/cubemaster" \
 ONE_CLICK_CUBEMASTERCLI_BIN="${PREBUILT_DIR}/cubemastercli" \
@@ -449,9 +492,12 @@ ONE_CLICK_CUBELET_BIN="${PREBUILT_DIR}/cubelet" \
 ONE_CLICK_CUBECLI_BIN="${PREBUILT_DIR}/cubecli" \
 ONE_CLICK_CUBE_API_BIN="${PREBUILT_DIR}/cube-api" \
 ONE_CLICK_CUBE_OPS_BIN="${PREBUILT_DIR}/cubeops" \
+ONE_CLICK_CUBE_OPS_CLI_BIN="${PREBUILT_DIR}/cubeopscli" \
 ONE_CLICK_CUBEVSMAPDUMP_BIN="${PREBUILT_DIR}/cubevsmapdump" \
 ONE_CLICK_CUBE_AGENT_BIN="${PREBUILT_DIR}/cube-agent" \
 ONE_CLICK_CUBE_INIT_BIN="${PREBUILT_DIR}/cube-init" \
 ONE_CLICK_CUBESHIM_BIN="${PREBUILT_DIR}/containerd-shim-cube-rs" \
 ONE_CLICK_CUBE_RUNTIME_BIN="${PREBUILT_DIR}/cube-runtime" \
+ONE_CLICK_VOLUME_S3_BIN="${PREBUILT_DIR}/cube-volume-s3" \
+ONE_CLICK_S3LVOL_DIR="${PREBUILT_DIR}/s3lvol" \
   "${SCRIPT_DIR}/build-release-bundle.sh" "$@"

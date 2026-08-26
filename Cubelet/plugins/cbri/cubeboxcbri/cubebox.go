@@ -33,6 +33,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -81,8 +82,9 @@ type snapshotConfig struct {
 }
 
 type snapshotPaths struct {
-	Base string
-	Spec string
+	Base   string
+	Spec   string
+	ResDir string
 }
 
 type cubeboxInstancePlugin struct {
@@ -186,12 +188,69 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 				logEntry.Errorf("check snapshot path failed: %s", "local run template is nil")
 				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, "local snapshot not exist")
 			}
-			paths, err := e.resolveSnapshotPaths(templateID, flowOpts.LocalRunTemplate.Snapshot.Snapshot.Path, flowOpts.ReqInfo)
+			paths, err := e.resolveSnapshotPaths(templateID, snapshotRestoreRawPath(ctx, flowOpts), flowOpts.ReqInfo)
 			if err != nil {
 				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
 			}
-			snapBasePath = paths.Base
-			snapSpecPath = paths.Spec
+			if err := storage.EnsureShimSpecDirLink(paths.Base, paths.ResDir); err != nil {
+				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
+			}
+			backend := pauseResumeCatalogBackend(flowOpts)
+			if flowOpts.IsPauseResume() {
+				// Same-node S3: clone package metadata onto s3-meta-<sandbox>
+				// under the sandbox home so CleanupTemplate can drop the pause
+				// package. XFS still reads the package directory in place;
+				// Master deletes that package after Create returns.
+				childID := strings.TrimSpace(flowOpts.GetSandboxID())
+				if childID == "" && flowOpts.ReqInfo != nil {
+					childID = strings.TrimSpace(flowOpts.ReqInfo.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+				}
+				if childID == "" {
+					return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, "pause resume requires sandbox id to clone metadata off the package")
+				}
+				metaMount := filepath.Join(paths.Base, storage.SnapshotMetadataDir)
+				if isS3CatalogCreateBackend(backend) {
+					sandboxHome := storage.SnapshotHome(backend, storage.SnapshotKindNormal, childID)
+					metaMount = filepath.Join(sandboxHome, storage.SnapshotMetadataDir)
+				}
+				mounted, err := mountRestoreMetadata(ctx, flowOpts, backend, templateID, metaMount)
+				if err != nil {
+					return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
+				}
+				snapBasePath, snapSpecPath = restorePathsFromMetadataMount(mounted, paths)
+				if isS3CatalogCreateBackend(backend) && snapBasePath != paths.Base {
+					if err := storage.EnsureShimSpecDirLink(snapBasePath, paths.ResDir); err != nil {
+						return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
+					}
+				}
+			} else {
+				// Create from template／snapshot: private metadata volume
+				// mounted under the sandbox-owned package path — never on
+				// the parent template metadata/ mount.
+				childID := strings.TrimSpace(flowOpts.GetSandboxID())
+				if childID == "" {
+					childID = templateID
+				}
+				snapBasePath = paths.Base
+				snapSpecPath = paths.Spec
+				if isS3CatalogCreateBackend(backend) {
+					sandboxHome := storage.SnapshotHome(backend, storage.SnapshotKindNormal, childID)
+					metaMount := filepath.Join(sandboxHome, storage.SnapshotMetadataDir)
+					mounted, err := mountRestoreMetadata(ctx, flowOpts, backend, templateID, metaMount)
+					if err != nil {
+						return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
+					}
+					snapBasePath, snapSpecPath = restorePathsFromMetadataMount(mounted, paths)
+					if err := storage.EnsureShimSpecDirLink(snapBasePath, paths.ResDir); err != nil {
+						return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
+					}
+				} else {
+					metaMount := filepath.Join(paths.Base, storage.SnapshotMetadataDir)
+					if err := storage.CloneS3MetadataFromParent(ctx, backend, templateID, childID, metaMount); err != nil {
+						return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
+					}
+				}
+			}
 
 			kernelPath, imagePath, err := e.resolveSnapshotRuntimeArtifacts(snapSpecPath, flowOpts.LocalRunTemplate)
 			if err != nil {
@@ -233,20 +292,24 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 
 		annotations[constants.AnnotationAppSnapshotContainerID] = snapshotRestoreContainerID(templateID, snapSpecPath)
 
-		// Pause resume: guest virtiofs + container binds are already live in the
-		// restored memory. Tell the shim (via pause.snapshot.id on the sandbox
-		// OCI annotations) not to replay virtio-fs storages to the agent, and
-		// do not emit PropagationExecMounts. Still emit AnnotationVirtiofs so
-		// the hypervisor reconnects the same hostdir share devices.
-		if flowOpts.IsPauseResume() {
-			if pauseID := strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID]); pauseID != "" {
+		// Pause / FromSnap: guest virtiofs + container binds are already live
+		// in restored memory. Stamp pause.snapshot.id on the sandbox OCI spec
+		// so shim skips replaying virtio-fs storages to the agent (same signal
+		// Pause uses). Do not emit PropagationExecMounts. Still emit
+		// AnnotationVirtiofs so the hypervisor reconnects host paths.
+		if flowOpts.IsGuestMountRestore() {
+			pauseID := strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID])
+			if pauseID == "" {
+				pauseID = strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationRuntimeSnapshotID])
+			}
+			if pauseID != "" {
 				annotations[constants.MasterAnnotationPauseSnapshotID] = pauseID
 			}
 		}
 
 		sandbox := cubeboxstore.GetCubeBox(ctx)
 		if sandbox != nil && sandbox.FirstContainer() != nil {
-			if !flowOpts.IsPauseResume() {
+			if !flowOpts.IsGuestMountRestore() {
 				opts, err := generateRestoreVirtiofsOpt(ctx, flowOpts, sandbox.FirstContainer().Config)
 				if err != nil {
 					return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
@@ -313,9 +376,9 @@ func (e *cubeboxInstancePlugin) CreateContainer(ctx context.Context, cubeBox *cu
 			specOpts = append(specOpts, oci.WithAnnotations(map[string]string{
 				constants.AnnotationAppSnapshotContainerID: snapshotContainerID,
 			}))
-			// Pause resume keeps existing container mounts; only new-start-from-snap
-			// needs propagation exec.mount annotations for do_exec_mount.
-			if !flowOpts.IsPauseResume() {
+			// Pause / FromSnap keep existing container mounts; only create-from-
+			// template needs propagation exec.mount annotations for do_exec_mount.
+			if !flowOpts.IsGuestMountRestore() {
 				opts, err := generateRestoreVirtiofsOpt(ctx, flowOpts, c.Config)
 				if err != nil {
 					return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
@@ -499,6 +562,136 @@ func resolveTemplateComponentPath(localTemplate *templatetypes.LocalRunTemplate,
 	return strings.TrimSpace(component.Component.Path)
 }
 
+// snapshotRestoreRawPath is the hypervisor snapshot package Cubelet hands
+// the shim. Pause resume must use the pause catalog metadata home even
+// though LocalRunTemplate is the original tpl-* (needed for kernel／image
+// EnsureCubeRunTemplate). Using the template 2C2000M path with pause
+// memory hangs shim Task.Create.
+func snapshotRestoreRawPath(ctx context.Context, flowOpts *workflow.CreateContext) string {
+	raw := ""
+	if flowOpts != nil && flowOpts.LocalRunTemplate != nil {
+		raw = strings.TrimSpace(flowOpts.LocalRunTemplate.Snapshot.Snapshot.Path)
+	}
+	if flowOpts == nil || !flowOpts.IsPauseResume() {
+		return raw
+	}
+	// Cross-node there is no package to look up, and the run template was
+	// recovered from the sandbox's own imported metadata, so raw already
+	// points at it.
+	if storage.CrossNodeSandboxImport(flowOpts.ReqInfo.GetAnnotations()) != nil {
+		return raw
+	}
+	snapID, ok := flowOpts.GetSnapshotTemplateID()
+	if !ok {
+		return raw
+	}
+	if meta := pauseCatalogMetaDir(ctx, snapID, pauseResumeCatalogBackend(flowOpts)); meta != "" {
+		return meta
+	}
+	return raw
+}
+
+func pauseResumeCatalogBackend(flowOpts *workflow.CreateContext) string {
+	if flowOpts == nil || flowOpts.ReqInfo == nil {
+		return cow.BackendXFS
+	}
+	if raw := strings.TrimSpace(flowOpts.ReqInfo.GetBackend()); raw != "" {
+		if b, err := cow.NormalizeBackend(raw); err == nil {
+			return b
+		}
+	}
+	raw := strings.TrimSpace(flowOpts.ReqInfo.GetAnnotations()[constants.MasterAnnotationStorageBackend])
+	if raw == "" {
+		return cow.BackendXFS
+	}
+	b, err := cow.NormalizeBackend(raw)
+	if err != nil {
+		return cow.BackendXFS
+	}
+	return b
+}
+
+func isS3CatalogCreateBackend(backend string) bool {
+	normalized, err := cow.NormalizeBackend(backend)
+	return err == nil && normalized == cow.BackendS3
+}
+
+// restorePathsFromMetadataMount turns the directory mountRestoreMetadata
+// returned (the metadata mount) into the snapshot home + spec paths the
+// hypervisor annotations use. Cross-node that directory is the sandbox's
+// imported copy, not the template package.
+func restorePathsFromMetadataMount(mounted string, paths *snapshotPaths) (base, spec string) {
+	if paths == nil {
+		return "", ""
+	}
+	mounted = strings.TrimSpace(mounted)
+	if mounted == "" {
+		return paths.Base, paths.Spec
+	}
+	base = filepath.Clean(filepath.Dir(mounted))
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return paths.Base, paths.Spec
+	}
+	spec = paths.Spec
+	if paths.ResDir != "" {
+		spec = filepath.Join(base, paths.ResDir)
+	}
+	return base, spec
+}
+
+// mountRestoreMetadata puts the metadata disk this sandbox reads its
+// description from in place, and reports where it landed.
+//
+// Cross-node it is the sandbox's own imported copy, mounted under the sandbox
+// home by whichever step first knew the sandbox id — the Create entry for a
+// Resume, this call for a create from a template or snapshot. Same-node
+// Resume and create-from-snapshot both clone the parent into a private
+// volume so the pause／template package can be dropped afterwards.
+func mountRestoreMetadata(ctx context.Context, flowOpts *workflow.CreateContext,
+	backend, packageID, mountPath string) (string, error) {
+	if imp := storage.CrossNodeSandboxImport(flowOpts.ReqInfo.GetAnnotations()); imp != nil {
+		return imp.EnsureMetadata(ctx)
+	}
+	sandboxID := strings.TrimSpace(flowOpts.GetSandboxID())
+	if sandboxID == "" && flowOpts.ReqInfo != nil {
+		sandboxID = strings.TrimSpace(flowOpts.ReqInfo.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+	}
+	if sandboxID == "" {
+		if flowOpts.IsPauseResume() {
+			return "", fmt.Errorf("pause resume requires sandbox id to clone metadata off the package")
+		}
+		sandboxID = packageID
+	}
+	// Pause resume and create-from-snapshot both clone into a sandbox-owned
+	// volume. XFS CloneS3MetadataFromParent is a no-op (plain package dir).
+	return mountPath, storage.CloneS3MetadataFromParent(ctx, backend, packageID, sandboxID, mountPath)
+}
+
+func pauseCatalogMetaDir(ctx context.Context, snapID, preferred string) string {
+	seen := map[string]struct{}{}
+	for _, backend := range []string{preferred, cow.BackendXFS, cow.BackendS3} {
+		backend = strings.TrimSpace(backend)
+		if backend == "" {
+			continue
+		}
+		if _, ok := seen[backend]; ok {
+			continue
+		}
+		seen[backend] = struct{}{}
+		entry, err := storage.GetLocalSnapshotFor(ctx, backend, snapID)
+		if err != nil || entry == nil {
+			continue
+		}
+		if meta := strings.TrimSpace(entry.MetaDir); meta != "" {
+			return meta
+		}
+		if home := strings.TrimSpace(entry.SnapshotPath); home != "" {
+			return filepath.Join(home, storage.SnapshotMetadataDir)
+		}
+	}
+	return ""
+}
+
 func (e *cubeboxInstancePlugin) resolveSnapshotPaths(templateID, rawPath string, req *cubebox.RunCubeSandboxRequest) (*snapshotPaths, error) {
 	resDir, err := inferSnapshotResDirFromRequest(req)
 	if err != nil {
@@ -509,21 +702,24 @@ func (e *cubeboxInstancePlugin) resolveSnapshotPaths(templateID, rawPath string,
 	if path == "" {
 		base := e.getSnapShotFilePath(templateID)
 		return &snapshotPaths{
-			Base: base,
-			Spec: filepath.Join(base, resDir),
+			Base:   base,
+			Spec:   filepath.Join(base, resDir),
+			ResDir: resDir,
 		}, nil
 	}
 
 	if looksLikeSnapshotSpecPath(path) || looksLikeSnapshotSpecDir(path) {
 		return &snapshotPaths{
-			Base: filepath.Dir(path),
-			Spec: path,
+			Base:   filepath.Dir(path),
+			Spec:   path,
+			ResDir: resDir,
 		}, nil
 	}
 
 	return &snapshotPaths{
-		Base: path,
-		Spec: filepath.Join(path, resDir),
+		Base:   path,
+		Spec:   filepath.Join(path, resDir),
+		ResDir: resDir,
 	}, nil
 }
 
@@ -606,11 +802,15 @@ func looksLikeSnapshotSpecPath(path string) bool {
 }
 
 func looksLikeSnapshotSpecDir(path string) bool {
-	base := filepath.Base(filepath.Clean(path))
-	if !strings.HasSuffix(base, "M") || !strings.Contains(base, "C") {
-		return false
+	clean := filepath.Clean(path)
+	base := filepath.Base(clean)
+	if strings.HasSuffix(base, "M") && strings.Contains(base, "C") {
+		return true
 	}
-	return true
+	if _, err := os.Stat(filepath.Join(clean, "snapshot", "config.json")); err == nil {
+		return true
+	}
+	return false
 }
 
 var _ cbri.API = &cubeboxInstancePlugin{}

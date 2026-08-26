@@ -108,6 +108,43 @@ const (
 // allowing specific domains is meaningful only when all other egress is denied,
 // either by allowInternetAccess=false (defaultDenyAll) or by listing
 // 0.0.0.0/0 in denyOut. Returns nil when allowOut carries no domain target.
+// buildNetworkPayload translates NetworkOptions into the API's camelCase
+// network object, validating it the same way the server will. Shared by sandbox
+// creation and Sandbox.UpdateNetwork so both accept identical input.
+func buildNetworkPayload(opts NetworkOptions, internetAccessDisabled bool) (map[string]any, error) {
+	// Mirror the server-side contract: domain allowOut requires either
+	// allowInternetAccess=false or an explicit deny-all CIDR in denyOut.
+	if err := validateAllowOutDomainsRequireDenyAll(opts.AllowOut, opts.DenyOut, internetAccessDisabled); err != nil {
+		return nil, err
+	}
+
+	network := map[string]any{}
+	if opts.AllowPublicTraffic != nil {
+		network["allowPublicTraffic"] = *opts.AllowPublicTraffic
+	}
+	if opts.MaskRequestHost != nil {
+		network["maskRequestHost"] = *opts.MaskRequestHost
+	}
+	if len(opts.AllowOut) > 0 {
+		network["allowOut"] = opts.AllowOut
+	}
+	if len(opts.DenyOut) > 0 {
+		network["denyOut"] = opts.DenyOut
+	}
+	if len(opts.Rules) > 0 {
+		rules := make([]Rule, len(opts.Rules))
+		for i, rule := range opts.Rules {
+			if err := rule.Match.validate(); err != nil {
+				return nil, fmt.Errorf("network.rules[%d] %q: %w", i, rule.Name, err)
+			}
+			rule.Match = rule.Match.normalized()
+			rules[i] = rule
+		}
+		network["rules"] = rules
+	}
+	return network, nil
+}
+
 func validateAllowOutDomainsRequireDenyAll(allowOut, denyOut []string, defaultDenyAll bool) error {
 	hasDomain := false
 	for _, target := range allowOut {

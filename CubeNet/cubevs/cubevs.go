@@ -34,6 +34,7 @@ type Params struct {
 	// Ifindex, IP and MAC address of Node itself
 	NodeIfindex uint32
 	NodeIP      net.IP
+	NodeIPMask  net.IPMask
 	NodeMacAddr net.HardwareAddr
 	// MAC address of the Node gateway (next hop)
 	NodeGatewayMacAddr net.HardwareAddr
@@ -54,12 +55,19 @@ type TAPDevice struct {
 
 // mvmMetadata is used to retrieve BPF map values.
 // The struct layout should be exactly the same as BPF side.
+// mvmMetadata mirrors struct mvm_meta on the BPF side. PolicyVersion is the
+// per-sandbox network-policy generation; the datapath compares it against the
+// copy cached in each nat_session to decide whether an established flow needs
+// re-evaluating. Version is a different thing entirely (TAP generation, part of
+// session_key) and must not be reused for it.
 type mvmMetadata struct {
 	Version        uint32
 	IP             uint32
 	UUID           [64]byte
 	DNSPolicyFlags uint8
-	Reserved       [55]uint8
+	Reserved0      [3]uint8
+	PolicyVersion  uint32
+	Reserved       [48]uint8
 }
 
 // TCDirection is used to specified attach point of a TC filter.
@@ -223,6 +231,7 @@ const (
 	MapNameDNSAllow      = "dns_allow"    // legacy 8-byte DNS value
 	MapNameDNSAllowV2    = "dns_allow_v2" // current 40-byte DNS value
 	MapNameDNSQueryTrack = "dns_query_track"
+	MapNameDirectNeigh   = "direct_neigh" // direct-mode on-link neighbor trigger/cache
 	// constants referenced by BPF programs.
 	globalNameMVMInnerIP           = "mvm_inner_ip"
 	globalNameMVMMacaddrP1         = "mvm_macaddr_p1"
@@ -238,6 +247,7 @@ const (
 	globalNameEgressDMacaddrP2     = "egress_dmacaddr_p2"
 	globalNameEgressRedirectFlags  = "egress_redirect_flags"
 	globalNameNodeIP               = "nodenic_ip"
+	globalNameNodeNetmask          = "nodenic_netmask"
 	globalNameNodeIfindex          = "nodenic_ifindex"
 	globalNameNodeMacaddrP1        = "nodenic_macaddr_p1"
 	globalNameNodeMacaddrP2        = "nodenic_macaddr_p2"

@@ -65,6 +65,7 @@ type HostDevice struct {
 	Index      int
 	Name       string
 	IP         net.IP
+	IPMask     net.IPMask
 	Mac        net.HardwareAddr
 	GatewayMac net.HardwareAddr
 }
@@ -95,6 +96,7 @@ func GetHostDevice(ifName string) (*HostDevice, error) {
 		Index:      link.Attrs().Index,
 		Name:       link.Attrs().Name,
 		IP:         addrs[0].IP,
+		IPMask:     addrs[0].Mask,
 		Mac:        link.Attrs().HardwareAddr,
 		GatewayMac: gatewayMac,
 	}, nil

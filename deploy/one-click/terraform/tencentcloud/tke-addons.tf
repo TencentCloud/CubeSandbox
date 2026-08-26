@@ -32,6 +32,7 @@ locals {
   # cube-master URL: in-cluster Service DNS (cube-api / cube-proxy reach
   # cube-master over the cluster network, so the internal CLB IP is not needed).
   cubemaster_url = "http://cubemaster.cubesandbox.svc.cluster.local:8089"
+  cubeops_url    = "http://cube-ops.cubesandbox.svc.cluster.local:3010"
 
   # cube-master runs as an HA Deployment backed by the shared CFS store. The
   # replica count is the single source of truth for BOTH spec.replicas AND the
@@ -267,7 +268,8 @@ resource "kubernetes_secret" "cubemaster_conf" {
         http_readtimeout                   = 120
         http_writetimeout                  = 360
         http_idletimeout                   = 360
-        sync_meta_data_interval            = "30s"
+        cube_ops_addr                      = local.cubeops_url
+        sync_meta_data_interval            = "1s"
         sync_metric_data_interval          = "1s"
         collect_metric_interval            = "1s"
         default_headless_service_nodes_num = local.cubemaster_replicas
@@ -631,8 +633,21 @@ resource "kubernetes_service" "cube_api" {
 }
 
 # ---------------------------------------------------------------
-# cube-ops: Deployment -> ClusterIP Service
+# cube-ops: Deployment → CLB Service (private network)
 # ---------------------------------------------------------------
+
+resource "kubernetes_secret" "cube_ops_conf" {
+  count = local.deploy_addons ? 1 : 0
+  type  = "Opaque"
+  metadata {
+    name      = "cube-ops-conf"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+  }
+
+  data = {
+    "redis-password" = var.redis_password
+  }
+}
 
 resource "kubernetes_deployment" "cube_ops" {
   count = local.deploy_addons ? 1 : 0
@@ -692,6 +707,23 @@ resource "kubernetes_deployment" "cube_ops" {
             name  = "CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK"
             value = "true"
           }
+          env {
+            name  = "REDIS_HOST"
+            value = tencentcloud_redis_instance.redis.ip
+          }
+          env {
+            name  = "REDIS_PORT"
+            value = "6379"
+          }
+          env {
+            name = "REDIS_PASSWORD"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.cube_ops_conf[0].metadata[0].name
+                key  = "redis-password"
+              }
+            }
+          }
 
           port {
             name           = "http"
@@ -718,17 +750,33 @@ resource "kubernetes_deployment" "cube_ops" {
   ]
 }
 
+# cube-ops private-network CLB Service
+# NOTE: cube-ops always stays VPC-internal regardless of enable_public_network,
+# so it does NOT use replace_triggered_by — its CLB type never changes. Compute
+# nodes (outside the TKE cluster) reach cube-ops:3010 via this CLB for node
+# registration / heartbeat.
 resource "kubernetes_service" "cube_ops" {
   count = local.deploy_addons ? 1 : 0
-
   metadata {
     name      = "cube-ops"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
     labels    = { app = "cube-ops" }
+    annotations = {
+      "service.kubernetes.io/qcloud-loadbalancer-internal-subnetid" = tencentcloud_subnet.cluster.id
+      "service.cloud.tencent.com/modification-protection"           = "false"
+      "service.cloud.tencent.com/pass-to-target"                    = "true"
+      "service.cloud.tencent.com/security-groups"                   = tencentcloud_security_group.clb.id
+    }
+  }
+  lifecycle {
+    # TKE controller-manager injects runtime annotations; ignore to avoid drift.
+    ignore_changes = [
+      metadata[0].annotations,
+    ]
   }
 
   spec {
-    type     = "ClusterIP"
+    type     = "LoadBalancer"
     selector = { app = "cube-ops" }
 
     port {
@@ -1419,6 +1467,10 @@ output "tke_cubemaster_clb_ip" {
 
 output "tke_cube_api_clb_ip" {
   value = local.deploy_addons ? kubernetes_service.cube_api[0].status[0].load_balancer[0].ingress[0].ip : ""
+}
+
+output "tke_cube_ops_clb_ip" {
+  value = local.deploy_addons ? kubernetes_service.cube_ops[0].status[0].load_balancer[0].ingress[0].ip : ""
 }
 
 output "tke_cube_proxy_clb_ip" {

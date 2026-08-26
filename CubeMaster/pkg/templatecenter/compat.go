@@ -55,23 +55,13 @@ type TemplateCompatMatrix struct {
 	Templates []TemplateCompatRow   `json:"templates"`
 }
 
-func configureCompatHooks() {
-	nodemeta.OnGuestAgentVersionChanged = func(nodeID string) {
-		ScheduleCompatScanForNode(nodeID)
-	}
-}
-
 func scheduleInitialCompatScan(ctx context.Context) {
-	nodes, err := nodemeta.ListNodes(ctx)
-	if err != nil {
-		log.G(ctx).Warnf("template compat initial scan: list nodes failed: %v", err)
-		return
-	}
-	for _, node := range nodes {
-		if node == nil || !node.Healthy {
+	nodes := localcache.GetNodes(-1)
+	for _, n := range nodes {
+		if n == nil || !n.Healthy {
 			continue
 		}
-		ScheduleCompatScanForNode(node.NodeID)
+		ScheduleCompatScanForNode(n.ID())
 	}
 }
 
@@ -258,15 +248,12 @@ func GetCompatMatrix(ctx context.Context) (*TemplateCompatMatrix, error) {
 
 func RescanCompat(ctx context.Context, nodeIDs []string) error {
 	if len(nodeIDs) == 0 {
-		nodes, err := nodemeta.ListNodes(ctx)
-		if err != nil {
-			return err
-		}
-		for _, node := range nodes {
-			if node == nil || !node.Healthy {
+		nodes := localcache.GetNodes(-1)
+		for _, n := range nodes {
+			if n == nil || !n.Healthy {
 				continue
 			}
-			if err := ScanNodeCompat(ctx, node.NodeID); err != nil {
+			if err := ScanNodeCompat(ctx, n.ID()); err != nil {
 				return err
 			}
 		}

@@ -7,9 +7,9 @@
 // What this bench measures (cf. `src/engine/reflink.rs`):
 //
 //   1. **Single-source serial fanout** — same origin volume, N
-//      back-to-back `create_snapshot` calls. The reflink backend has
-//      no per-origin rate limit, so this exercises the FICLONE hot
-//      path under pure metadata pressure.
+//      back-to-back `create_snapshot_from_volume` calls. The reflink
+//      backend has no per-origin rate limit, so this exercises the
+//      FICLONE hot path under pure metadata pressure.
 //
 //   2. **Chained snapshots** — snap_i = snap(snap_{i-1}) at depth D.
 //      All clones land flattened in the same volume directory (the
@@ -21,14 +21,14 @@
 //   3. **Multi-worker concurrent fanout** — M workers create M·N
 //      snapshots of the same origin in parallel. This is where the
 //      backend's `RwLock<name_index>` (write-locked around the name
-//      reservation step in `create_snapshot`) and the per-volume
+//      reservation step in `create_snapshot_from_volume`) and the per-volume
 //      `fsync_dir` contend with each other. A reasonable backend
 //      should scale near-linearly until disk fsync becomes the
 //      bottleneck; the bench reports both per-op latency p50/p99 and
 //      aggregate throughput so degradation is visible from either
 //      angle.
 //
-//   4. **Dirty-IO interleave** — between every `create_snapshot`
+//   4. **Dirty-IO interleave** — between every `create_snapshot_from_volume`
 //      invocation we issue a small random pwrite() against the source
 //      volume's main file. This is the regression / jitter test the
 //      caller asked for: FICLONE on a file whose pages have been
@@ -434,7 +434,7 @@ fn pseudo_offset(seed: u64, block: u64, vol_size: u64) -> u64 {
 /// "ideal world" baseline against which scenarios 3 and 4 are compared.
 ///
 /// Implementation note: reflink has no per-origin rate limit (cf.
-/// `src/engine/reflink.rs::create_snapshot`), so we don't need any
+/// `src/engine/reflink.rs::create_snapshot_from_volume`), so we don't need any
 /// "fresh origin per iteration" workaround.
 fn bench_single_source_serial(bench: &ReflinkBench, n: usize) {
     let engine = bench.engine();
@@ -448,8 +448,8 @@ fn bench_single_source_serial(bench: &ReflinkBench, n: usize) {
     for i in 0..16 {
         let snap = format!("single-src-warm-{i}");
         engine
-            .create_snapshot(origin, &snap, false)
-            .expect("scenario 1 warm-up create_snapshot");
+            .create_snapshot_from_volume(origin, &snap, false)
+            .expect("scenario 1 warm-up create_snapshot_from_volume");
     }
 
     let mut create_samples = Vec::with_capacity(n);
@@ -457,12 +457,12 @@ fn bench_single_source_serial(bench: &ReflinkBench, n: usize) {
         let snap = format!("single-src-snap-{i}");
         let t = Instant::now();
         engine
-            .create_snapshot(origin, &snap, false)
-            .expect("scenario 1 create_snapshot");
+            .create_snapshot_from_volume(origin, &snap, false)
+            .expect("scenario 1 create_snapshot_from_volume");
         create_samples.push(t.elapsed());
     }
     report(
-        "create_snapshot single-source serial (clean)",
+        "create_snapshot_from_volume single-source serial (clean)",
         &create_samples,
     );
 
@@ -514,13 +514,13 @@ fn bench_chained(bench: &ReflinkBench, depth: usize) {
         let name = format!("chain-{i}");
         let t = Instant::now();
         engine
-            .create_snapshot(&prev, &name, false)
-            .expect("scenario 2 create_snapshot");
+            .create_snapshot_from_volume(&prev, &name, false)
+            .expect("scenario 2 create_snapshot_from_volume");
         samples.push(t.elapsed());
         prev = name;
     }
     report(
-        &format!("create_snapshot chained (depth={depth})"),
+        &format!("create_snapshot_from_volume chained (depth={depth})"),
         &samples,
     );
 
@@ -591,8 +591,8 @@ fn run_concurrent_fanout(
                 let snap = format!("conc-{threads}-t{tid}-s{i}");
                 let t = Instant::now();
                 engine
-                    .create_snapshot(&origin, &snap, false)
-                    .expect("scenario 3 create_snapshot");
+                    .create_snapshot_from_volume(&origin, &snap, false)
+                    .expect("scenario 3 create_snapshot_from_volume");
                 local.push(t.elapsed());
             }
             samples_shared.lock().unwrap().extend(local);
@@ -629,7 +629,9 @@ fn bench_concurrent_sweep(bench: &ReflinkBench, sweep: &[usize], per_worker: usi
     }
     let mut summary: Vec<(usize, Duration, Duration, f64)> = Vec::new(); // (threads, p50, p99, ops_per_s)
     for &threads in sweep {
-        let label = format!("create_snapshot concurrent threads={threads} per_worker={per_worker}");
+        let label = format!(
+            "create_snapshot_from_volume concurrent threads={threads} per_worker={per_worker}"
+        );
         let (samples, wall) = run_concurrent_fanout(bench, threads, per_worker);
         report(&label, &samples);
         let total_ops = samples.len() as f64;
@@ -679,7 +681,7 @@ fn bench_concurrent_sweep(bench: &ReflinkBench, sweep: &[usize], per_worker: usi
 // Scenario 4 — dirty-IO interleave (jitter / regression detector)
 // ---------------------------------------------------------------------------
 
-/// Between each `create_snapshot`, write `dirty_bytes` of pseudo-random
+/// Between each `create_snapshot_from_volume`, write `dirty_bytes` of pseudo-random
 /// pwrite()s to the source volume's main file. This dirties FICLONE-
 /// shared extents from prior snapshots, so the next FICLONE may have
 /// to flush dirty extents before re-sharing them — exactly the
@@ -715,8 +717,8 @@ fn bench_dirty_io_interleave(bench: &ReflinkBench, n: usize, dirty_bytes: u64, b
     // page-cache state are stable before measurement.
     for i in 0..8 {
         engine
-            .create_snapshot(origin, &format!("dirty-warm-{i}"), false)
-            .expect("scenario 4 warm create_snapshot");
+            .create_snapshot_from_volume(origin, &format!("dirty-warm-{i}"), false)
+            .expect("scenario 4 warm create_snapshot_from_volume");
     }
 
     let mut samples = Vec::with_capacity(n);
@@ -743,14 +745,14 @@ fn bench_dirty_io_interleave(bench: &ReflinkBench, n: usize, dirty_bytes: u64, b
         let snap = format!("dirty-snap-{i}");
         let t = Instant::now();
         engine
-            .create_snapshot(origin, &snap, false)
-            .expect("scenario 4 create_snapshot");
+            .create_snapshot_from_volume(origin, &snap, false)
+            .expect("scenario 4 create_snapshot_from_volume");
         samples.push(t.elapsed());
     }
 
     report(
         &format!(
-            "create_snapshot dirty-interleave (dirty={} KiB block={} KiB)",
+            "create_snapshot_from_volume dirty-interleave (dirty={} KiB block={} KiB)",
             dirty_bytes / 1024,
             block / 1024,
         ),

@@ -13,3 +13,5 @@
 !CubeDB/**
 !Cubelet
 !Cubelet/**
+!CubeOps
+!CubeOps/**

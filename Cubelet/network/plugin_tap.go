@@ -190,7 +190,11 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 		formatCubeNetworkAllowInternetAccess(cubeNetworkConfig), lenCubeNetworkList(cubeNetworkConfig, true), lenCubeNetworkList(cubeNetworkConfig, false),
 		resolvedDNSServers, dnsAllowOutCIDRs, formatNetworkRuntimeCubeNetworkConfig(cubeNetworkConfigBeforeDNS), formatNetworkRuntimeCubeNetworkConfig(cubeNetworkConfig))
 
-	ensureReq := l.buildEnsureNetworkRequestFromIntent(opts.SandboxID, request.GetRequestID(), request.ExposedPorts, req, cubeNetworkConfig)
+	// Record the sandbox's resolvers even when they were not merged into the
+	// policy: this create had no domain target, but a later update may add one,
+	// and by then the resolver list is not recoverable from anywhere else.
+	ensureReq := l.buildEnsureNetworkRequestFromIntent(opts.SandboxID, request.GetRequestID(), request.ExposedPorts, req, cubeNetworkConfig,
+		dnsServersToAllowOutCIDRs(ctx, resolvedDNSServers))
 	log.G(ctx).Infof("tap create ensure request: sandbox_id=%s interfaces=%d routes=%d arps=%d port_mappings=%d resolved_dns_servers=%v dns_allow_out_cidrs=%v cube_network_config=%s persist_metadata=%s",
 		ensureReq.SandboxID, len(ensureReq.Interfaces), len(ensureReq.Routes), len(ensureReq.ARPNeighbors),
 		len(ensureReq.PortMappings), resolvedDNSServers, dnsAllowOutCIDRs, formatNetworkRuntimeCubeNetworkConfig(ensureReq.CubeNetworkConfig), utils.InterfaceToString(ensureReq.PersistMetadata))

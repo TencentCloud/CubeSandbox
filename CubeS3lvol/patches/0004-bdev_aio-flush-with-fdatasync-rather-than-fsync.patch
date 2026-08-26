@@ -1,0 +1,72 @@
+From fbdebfdd27d5b4e61ecb052af9d3876605c37ee0 Mon Sep 17 00:00:00 2001
+From: Changpeng Liu <changpeliu@tencent.com>
+Date: Wed, 12 Aug 2026 17:31:29 +0800
+Subject: [PATCH] bdev/aio: flush with fdatasync rather than fsync
+
+A bdev flush has to make the written blocks readable after a crash, and
+nothing more. fdatasync covers exactly that -- including the block
+allocation and the unwritten-extent conversion needed to read the data
+back -- while fsync additionally commits the inode timestamps, which are
+not part of the bdev abstraction at all: a bdev's size never changes
+after it is created, and no caller can observe an aio bdev's mtime
+through the bdev API.
+
+The cost of the difference is not marginal. Measured on ext4 over a
+write-through virtio disk, 4 KiB O_DIRECT writes to already-written
+extents:
+
+    write only            647 us
+    write + fdatasync     674 us
+    write + fsync        2177 us
+
+The 1.5 ms is a jbd2 commit for the timestamp update. It is paid on every
+flush, so a caller that treats write+flush as one commit unit -- a
+write-ahead log, typically -- pays it per commit. Worse, FLUSH is served
+by a synchronous syscall here rather than through the aio ring, so it is
+paid by blocking the calling reactor: an SPDK poller sits in the kernel
+for the duration.
+
+For a WAL on an aio bdev this is the whole difference between roughly 440
+and 1480 commits per second, without giving up any durability the caller
+had.
+
+Signed-off-by: Changpeng Liu <changpeliu@tencent.com>
+Assisted-by: CodeBuddy
+---
+ module/bdev/aio/bdev_aio.c | 20 +++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/module/bdev/aio/bdev_aio.c b/module/bdev/aio/bdev_aio.c
+index 23a0dc609..5680ead75 100644
+--- a/module/bdev/aio/bdev_aio.c
++++ b/module/bdev/aio/bdev_aio.c
+@@ -308,7 +308,25 @@ bdev_aio_rw(enum spdk_bdev_io_type type, struct file_disk *fdisk,
+ static void
+ bdev_aio_flush(struct file_disk *fdisk, struct bdev_aio_task *aio_task)
+ {
+-	int rc = fsync(fdisk->fd);
++	/* fdatasync, not fsync: a bdev flush has to make the written blocks
++	 * readable after a crash, and nothing more. fdatasync covers exactly
++	 * that, including the block allocation and unwritten-extent conversion
++	 * needed to read the data back. What it leaves out -- the inode
++	 * timestamps -- is not part of the bdev abstraction: a bdev's size never
++	 * changes after it is created, and no caller can observe an aio bdev's
++	 * mtime through the bdev API.
++	 *
++	 * The difference is not small. Measured on ext4 over a write-through
++	 * virtio disk, 4 KiB O_DIRECT writes to already-written extents: 674 us
++	 * per write with fdatasync against 2177 us with fsync, where the write
++	 * alone is 647 us. The 1.5 ms is a jbd2 commit for the timestamp update,
++	 * and it is paid on every flush. Callers that treat write+flush as one
++	 * commit unit -- a write-ahead log, typically -- pay it per commit, and
++	 * because SPDK_BDEV_IO_TYPE_FLUSH is served by a synchronous syscall
++	 * here rather than through the aio ring, it is paid by blocking the
++	 * calling reactor.
++	 */
++	int rc = fdatasync(fdisk->fd);
+ 
+ 	if (rc == 0) {
+ 		spdk_bdev_io_complete(spdk_bdev_io_from_ctx(aio_task), SPDK_BDEV_IO_STATUS_SUCCESS);
+-- 
+2.43.5
+

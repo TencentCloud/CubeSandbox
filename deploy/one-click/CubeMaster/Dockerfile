@@ -75,12 +75,16 @@ RUN chmod +x /tmp/docker-install-volume-deps.sh \
 COPY --chmod=0755 bin/cubemaster \
     /usr/local/services/cubetoolbox/CubeMaster/bin/cubemaster
 
-# COS volume Controller plugin shipped in the package (credentials stay out of
-# the image; operators mount volume-cos.conf at deploy time when needed).
+# COS / S3 volume Controller plugins shipped in the package (credentials stay
+# out of the image; operators mount volume-*.conf at deploy time when needed).
 COPY --chmod=0755 plugin/cube-volume-cos \
     /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos
 COPY plugin/volume-cos.conf.example \
     /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-cos.conf.example
+COPY --chmod=0755 plugin/cube-volume-s3 \
+    /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3
+COPY plugin/volume-s3.conf.example \
+    /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-s3.conf.example
 
 # Fail the build early if the binary cannot exec in this image (wrong arch, or a
 # missing/incompatible ELF interpreter / shared library) instead of only

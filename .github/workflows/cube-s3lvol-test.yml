@@ -1,0 +1,62 @@
+name: CubeS3lvol Test
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'CubeS3lvol/**'
+      - '.github/workflows/cube-s3lvol-test.yml'
+  pull_request:
+    paths:
+      - 'CubeS3lvol/**'
+      - '.github/workflows/cube-s3lvol-test.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: cube-s3lvol-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  BUILDER_IMAGE: ghcr.io/tencentcloud/cubesandbox-builder:ubuntu2004
+
+jobs:
+  test:
+    name: CubeS3lvol offline tests
+    # Build and test run inside the published builder image, which carries
+    # prebuilt SPDK/AWS CRT under /opt/s3lvol-*. The runner only needs Docker.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Log in to GitHub Container Registry
+        id: ghcr_login
+        continue-on-error: true
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Warn about GHCR login failure
+        if: steps.ghcr_login.outcome == 'failure'
+        run: echo "::warning::GHCR login failed - will attempt pull as anonymous"
+
+      # Always use the published builder. Do not docker-build Dockerfile.builder
+      # here: a local rebuild hits apt.llvm.org and is what the builder-image
+      # workflow already publishes after merge to master.
+      - name: Pull builder image
+        run: docker pull "${BUILDER_IMAGE}"
+
+      # setup_dep.sh reuses /opt/s3lvol-* from the published builder when stamps
+      # match; a pin/patch change on this PR falls back to deps/ once, and the
+      # next published builder after merge carries the new prebuilt.
+      #
+      # cube-s3lvol-test runs check-rules + debug make + check-offline inside
+      # the builder. /data is a tmpfs; DPDK EAL tests need --privileged.
+      - name: Build and test in builder
+        run: make cube-s3lvol-test BUILDER_IMAGE="${BUILDER_IMAGE}"

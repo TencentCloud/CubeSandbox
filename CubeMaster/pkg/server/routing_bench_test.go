@@ -49,10 +49,6 @@ func setupGinEngine() *gin.Engine {
 	r.POST("/cube/listinventory", noop)
 	r.GET("/internal/node", noop)
 	r.GET("/internal/query", noop)
-	r.GET("/internal/meta/readyz", noop)
-	r.POST("/internal/meta/nodes/register", noop)
-	r.GET("/internal/meta/nodes/:node_id", noop)
-	r.POST("/internal/meta/nodes/:node_id/status", noop)
 	return r
 }
 

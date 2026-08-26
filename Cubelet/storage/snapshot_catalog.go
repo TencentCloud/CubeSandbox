@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
 // SnapshotCatalogEntry captures everything cubelet needs in order to roll back
@@ -22,11 +24,16 @@ import (
 // underlying cubecow artifacts, without requiring master to carry physical
 // cubecow/path references in its tables.
 //
-// Persisted as <snapshot_path>/catalog.json by CommitSandbox (Kind=KindRuntimeSnapshot)
-// and AppSnapshot (Kind=KindTemplate). Dev paths are re-resolved from cubecow on
-// demand because they can change across activations. Unknown JSON fields are
-// tolerated and missing fields decode as zero values so old catalog files keep
-// working after schema extensions.
+// Persisted as catalog.json under <home>/metadata/. XFS and S3 both use
+// that layout; the CoW backend is selected by the request, never by a
+// field in this file.
+//
+// Written by CommitSandbox (Kind=KindRuntimeSnapshot), AppSnapshot
+// (Kind=KindTemplate), and Pause (Kind=pause_snapshot). Dev paths are
+// re-resolved from cubecow on demand because they can change across
+// activations. Unknown JSON fields are tolerated and missing fields
+// decode as zero values so old catalog files keep working after schema
+// extensions.
 //
 // Runtime artifact identity belongs here, not in the rootfs artifact cache. In
 // particular, future "redo snapshot" checks should compare the node's active
@@ -43,6 +50,12 @@ type SnapshotCatalogEntry struct {
 	RootfsKind   string `json:"rootfs_kind"`
 	MemoryVol    string `json:"memory_vol"`
 	MemoryKind   string `json:"memory_kind"`
+	// MetadataVol/Kind is the S3 package metadata volume (cloned from the
+	// node-local base snapshot or a parent package metadata volume).
+	// Empty on XFS (plain directory). The node-local base volume/snapshot
+	// itself is never recorded here and is never exported.
+	MetadataVol  string `json:"metadata_vol,omitempty"`
+	MetadataKind string `json:"metadata_kind,omitempty"`
 	// BuildRootfsVol/Kind track the temporary writable working layer created
 	// during template build (AppSnapshot path). They must be cleaned up at
 	// template delete time. Empty for runtime snapshots (CommitSandbox), which
@@ -58,7 +71,18 @@ type SnapshotCatalogEntry struct {
 	// snapshot for backward compatibility.
 	Kind      string `json:"kind,omitempty"`
 	CreatedAt string `json:"created_at,omitempty"`
+	// Backend is xfs|s3. Empty on legacy catalog.json means xfs.
+	Backend string `json:"backend,omitempty"`
+	// No remote_uuids here. Export ids are node-local and are only known
+	// after the package is sealed, when this catalog lives on a read-only
+	// metadata snapshot: writing them would land a second, divergent copy
+	// on the host under the unmounted mount point. cubecow records the id
+	// on the object itself (GetVolumeInfo.ExportUUID), which is the one
+	// place that survives both sealing and a restart.
 }
+
+// ExtInfoRemoteUUIDs is the Update/Pause ext_info key carrying remote_uuids JSON.
+const ExtInfoRemoteUUIDs = "remote_uuids"
 
 // Catalog entry kinds. See SnapshotCatalogEntry.Kind.
 const (
@@ -88,22 +112,44 @@ const snapshotCatalogFileName = "catalog.json"
 // given snapshot id under any registered snapshot root.
 var ErrSnapshotCatalogNotFound = errors.New("snapshot catalog not found")
 
+type snapshotCatalogNS struct {
+	roots []string
+	index map[string]*SnapshotCatalogEntry
+}
+
 var (
 	snapshotCatalogMu sync.RWMutex
-	// snapshotCatalogRoots is the list of snapshot directories cubelet should
-	// scan/index for local snapshot catalogs. The cubelet boot path can extend
-	// it; by default it contains DefaultSnapshotDir (registered lazily below).
-	snapshotCatalogRoots = []string{}
-	// snapshotCatalogIndex is a best-effort in-memory cache keyed by snapshotID.
-	// Lookups go through the filesystem if the in-memory cache misses.
-	snapshotCatalogIndex = map[string]*SnapshotCatalogEntry{}
+	// snapshotCatalogs keeps XFS and S3 catalogs in separate namespaces.
+	// Backend is chosen by the request (or which root was registered), never
+	// by a field inside catalog.json.
+	snapshotCatalogs = map[string]*snapshotCatalogNS{
+		cow.BackendXFS: {index: map[string]*SnapshotCatalogEntry{}},
+		cow.BackendS3:  {index: map[string]*SnapshotCatalogEntry{}},
+	}
 )
 
-// SetSnapshotCatalogRoots replaces the configured set of snapshot root
-// directories. Each root must point at the same parent that CommitSandbox
-// uses for snapshot output (e.g. DefaultSnapshotDir). Duplicates are removed
-// while preserving order.
-func SetSnapshotCatalogRoots(roots ...string) {
+func catalogBackendKey(backend string) string {
+	normalized, err := cow.NormalizeBackend(backend)
+	if err != nil {
+		return cow.BackendXFS
+	}
+	return normalized
+}
+
+func catalogNSLocked(backend string) *snapshotCatalogNS {
+	key := catalogBackendKey(backend)
+	ns := snapshotCatalogs[key]
+	if ns == nil {
+		ns = &snapshotCatalogNS{index: map[string]*SnapshotCatalogEntry{}}
+		snapshotCatalogs[key] = ns
+	}
+	if ns.index == nil {
+		ns.index = map[string]*SnapshotCatalogEntry{}
+	}
+	return ns
+}
+
+func uniqueCleanRoots(roots []string) []string {
 	cleaned := make([]string, 0, len(roots))
 	seen := map[string]struct{}{}
 	for _, r := range roots {
@@ -118,14 +164,31 @@ func SetSnapshotCatalogRoots(roots ...string) {
 		seen[clean] = struct{}{}
 		cleaned = append(cleaned, clean)
 	}
-	snapshotCatalogMu.Lock()
-	snapshotCatalogRoots = cleaned
-	snapshotCatalogIndex = map[string]*SnapshotCatalogEntry{}
-	snapshotCatalogMu.Unlock()
+	return cleaned
 }
 
-// AddSnapshotCatalogRoot adds a snapshot root if not already present.
+// SetSnapshotCatalogRoots replaces XFS snapshot catalog roots.
+func SetSnapshotCatalogRoots(roots ...string) {
+	SetSnapshotCatalogRootsFor(cow.BackendXFS, roots...)
+}
+
+// SetSnapshotCatalogRootsFor replaces catalog roots for one CoW backend.
+func SetSnapshotCatalogRootsFor(backend string, roots ...string) {
+	cleaned := uniqueCleanRoots(roots)
+	snapshotCatalogMu.Lock()
+	defer snapshotCatalogMu.Unlock()
+	ns := catalogNSLocked(backend)
+	ns.roots = cleaned
+	ns.index = map[string]*SnapshotCatalogEntry{}
+}
+
+// AddSnapshotCatalogRoot adds an XFS snapshot root if not already present.
 func AddSnapshotCatalogRoot(root string) {
+	AddSnapshotCatalogRootFor(cow.BackendXFS, root)
+}
+
+// AddSnapshotCatalogRootFor adds a snapshot root to one CoW backend.
+func AddSnapshotCatalogRootFor(backend, root string) {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		return
@@ -133,25 +196,35 @@ func AddSnapshotCatalogRoot(root string) {
 	clean := filepath.Clean(root)
 	snapshotCatalogMu.Lock()
 	defer snapshotCatalogMu.Unlock()
-	for _, existing := range snapshotCatalogRoots {
+	ns := catalogNSLocked(backend)
+	for _, existing := range ns.roots {
 		if existing == clean {
 			return
 		}
 	}
-	snapshotCatalogRoots = append(snapshotCatalogRoots, clean)
+	ns.roots = append(ns.roots, clean)
 }
 
-func snapshotCatalogRootsSnapshot() []string {
+func snapshotCatalogRootsSnapshot(backend string) []string {
 	snapshotCatalogMu.RLock()
 	defer snapshotCatalogMu.RUnlock()
-	out := make([]string, len(snapshotCatalogRoots))
-	copy(out, snapshotCatalogRoots)
+	ns := snapshotCatalogs[catalogBackendKey(backend)]
+	if ns == nil {
+		return nil
+	}
+	out := make([]string, len(ns.roots))
+	copy(out, ns.roots)
 	return out
 }
 
-// WriteSnapshotCatalog persists entry under <SnapshotPath>/catalog.json.
-// Existing files are overwritten.
+// WriteSnapshotCatalog persists entry under <SnapshotPath>/catalog.json in the
+// XFS catalog namespace.
 func WriteSnapshotCatalog(entry *SnapshotCatalogEntry) error {
+	return WriteSnapshotCatalogFor(cow.BackendXFS, entry)
+}
+
+// WriteSnapshotCatalogFor persists catalog.json in the given backend namespace.
+func WriteSnapshotCatalogFor(backend string, entry *SnapshotCatalogEntry) error {
 	if entry == nil {
 		return errors.New("nil snapshot catalog entry")
 	}
@@ -162,15 +235,21 @@ func WriteSnapshotCatalog(entry *SnapshotCatalogEntry) error {
 		return errors.New("snapshot_path is required")
 	}
 	if entry.MetaDir == "" {
-		entry.MetaDir = entry.SnapshotPath
+		entry.MetaDir = filepath.Join(entry.SnapshotPath, SnapshotMetadataDir)
 	}
+	catalogDir := entry.MetaDir
 	if entry.CreatedAt == "" {
 		entry.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
-	if err := os.MkdirAll(entry.SnapshotPath, 0o755); err != nil {
+	if strings.TrimSpace(entry.Backend) == "" {
+		entry.Backend = catalogBackendKey(backend)
+	} else if normalized, err := cow.NormalizeBackend(entry.Backend); err == nil {
+		entry.Backend = normalized
+	}
+	if err := os.MkdirAll(catalogDir, 0o755); err != nil {
 		return fmt.Errorf("ensure snapshot dir: %w", err)
 	}
-	path := filepath.Join(entry.SnapshotPath, snapshotCatalogFileName)
+	path := filepath.Join(catalogDir, snapshotCatalogFileName)
 	tmp := path + ".tmp"
 	body, err := json.MarshalIndent(entry, "", "  ")
 	if err != nil {
@@ -184,57 +263,89 @@ func WriteSnapshotCatalog(entry *SnapshotCatalogEntry) error {
 		return err
 	}
 	snapshotCatalogMu.Lock()
-	snapshotCatalogIndex[entry.SnapshotID] = cloneCatalogEntry(entry)
+	catalogNSLocked(backend).index[entry.SnapshotID] = cloneCatalogEntry(entry)
 	snapshotCatalogMu.Unlock()
 	return nil
 }
 
-// DeleteSnapshotCatalog removes the in-memory cache entry for snapshotID.
-// The on-disk file is cleared by CleanupTemplateLocalData which removes the
-// entire snapshot directory; calling this directly is only useful when
-// deletion happens out-of-band.
+// DeleteSnapshotCatalog removes the in-memory cache entry for snapshotID from
+// every backend namespace.
 func DeleteSnapshotCatalog(snapshotID string) {
 	snapshotID = strings.TrimSpace(snapshotID)
 	if snapshotID == "" {
 		return
 	}
 	snapshotCatalogMu.Lock()
-	delete(snapshotCatalogIndex, snapshotID)
+	for _, ns := range snapshotCatalogs {
+		if ns != nil && ns.index != nil {
+			delete(ns.index, snapshotID)
+		}
+	}
 	snapshotCatalogMu.Unlock()
 }
 
-// GetLocalSnapshot looks up the catalog for snapshotID. The cache is consulted
-// first; on miss the on-disk roots are scanned. Returns ErrSnapshotCatalogNotFound
-// if no record exists.
+// DeleteSnapshotCatalogFor removes the in-memory cache entry from one backend.
+func DeleteSnapshotCatalogFor(backend, snapshotID string) {
+	snapshotID = strings.TrimSpace(snapshotID)
+	if snapshotID == "" {
+		return
+	}
+	snapshotCatalogMu.Lock()
+	delete(catalogNSLocked(backend).index, snapshotID)
+	snapshotCatalogMu.Unlock()
+}
+
+// GetLocalSnapshot looks up the catalog for snapshotID in the XFS namespace.
 func GetLocalSnapshot(ctx context.Context, snapshotID string) (*SnapshotCatalogEntry, error) {
+	return GetLocalSnapshotFor(ctx, cow.BackendXFS, snapshotID)
+}
+
+// GetLocalSnapshotFor looks up catalog.json in one CoW backend namespace.
+func GetLocalSnapshotFor(ctx context.Context, backend, snapshotID string) (*SnapshotCatalogEntry, error) {
 	snapshotID = strings.TrimSpace(snapshotID)
 	if snapshotID == "" {
 		return nil, errors.New("snapshot_id is required")
 	}
+	key := catalogBackendKey(backend)
 	snapshotCatalogMu.RLock()
-	if cached, ok := snapshotCatalogIndex[snapshotID]; ok {
-		out := cloneCatalogEntry(cached)
-		snapshotCatalogMu.RUnlock()
-		return out, nil
+	if ns := snapshotCatalogs[key]; ns != nil && ns.index != nil {
+		if cached, ok := ns.index[snapshotID]; ok {
+			out := cloneCatalogEntry(cached)
+			snapshotCatalogMu.RUnlock()
+			return out, nil
+		}
 	}
 	snapshotCatalogMu.RUnlock()
-	entry, err := findSnapshotCatalogOnDisk(snapshotID)
+	entry, err := findSnapshotCatalogOnDisk(key, snapshotID)
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, ErrSnapshotCatalogNotFound) || !isS3CatalogBackend(key) {
+			return nil, err
+		}
+		// A sealed S3 package keeps catalog.json on its unmounted metadata
+		// disk, so the miss says nothing about whether the package is here.
+		// Rebuild what the object names prove and do not cache it: the real
+		// catalog carries spec_dir／component_versions and must win once it
+		// is readable again.
+		return deriveS3CatalogEntry(ctx, snapshotID)
 	}
 	snapshotCatalogMu.Lock()
-	snapshotCatalogIndex[snapshotID] = cloneCatalogEntry(entry)
+	catalogNSLocked(key).index[snapshotID] = cloneCatalogEntry(entry)
 	snapshotCatalogMu.Unlock()
 	return entry, nil
 }
 
-// ListLocalSnapshots returns every catalog entry discoverable under the
-// configured roots. The in-memory cache is refreshed as a side effect.
+// ListLocalSnapshots returns every XFS catalog entry.
 func ListLocalSnapshots(ctx context.Context) ([]*SnapshotCatalogEntry, error) {
-	roots := snapshotCatalogRootsSnapshot()
+	return ListLocalSnapshotsFor(ctx, cow.BackendXFS)
+}
+
+// ListLocalSnapshotsFor returns catalog entries under one backend's roots.
+func ListLocalSnapshotsFor(ctx context.Context, backend string) ([]*SnapshotCatalogEntry, error) {
+	key := catalogBackendKey(backend)
+	roots := snapshotCatalogRootsSnapshot(key)
 	collected := map[string]*SnapshotCatalogEntry{}
 	for _, root := range roots {
-		entries, err := scanSnapshotCatalogsUnderRoot(root)
+		entries, err := scanSnapshotCatalogsUnderRoot(key, root)
 		if err != nil {
 			return nil, err
 		}
@@ -246,8 +357,9 @@ func ListLocalSnapshots(ctx context.Context) ([]*SnapshotCatalogEntry, error) {
 		}
 	}
 	snapshotCatalogMu.Lock()
+	ns := catalogNSLocked(key)
 	for id, e := range collected {
-		snapshotCatalogIndex[id] = cloneCatalogEntry(e)
+		ns.index[id] = cloneCatalogEntry(e)
 	}
 	snapshotCatalogMu.Unlock()
 	out := make([]*SnapshotCatalogEntry, 0, len(collected))
@@ -257,20 +369,23 @@ func ListLocalSnapshots(ctx context.Context) ([]*SnapshotCatalogEntry, error) {
 	return out, nil
 }
 
-// ResolveLocalSnapshot returns the catalog entry plus freshly re-resolved
-// device paths (rootfs/memory) via cubecow. Useful for callers that immediately
-// need to feed the dev paths into a cubecow operation.
+// ResolveLocalSnapshot returns the XFS catalog entry plus re-resolved device paths.
 func ResolveLocalSnapshot(ctx context.Context, snapshotID string) (*SnapshotCatalogEntryResolved, error) {
-	entry, err := GetLocalSnapshot(ctx, snapshotID)
+	return ResolveLocalSnapshotFor(ctx, cow.BackendXFS, snapshotID)
+}
+
+// ResolveLocalSnapshotFor resolves device paths on the Store for backend.
+func ResolveLocalSnapshotFor(ctx context.Context, backend, snapshotID string) (*SnapshotCatalogEntryResolved, error) {
+	entry, err := GetLocalSnapshotFor(ctx, backend, snapshotID)
 	if err != nil {
 		return nil, err
 	}
 	out := &SnapshotCatalogEntryResolved{SnapshotCatalogEntry: *entry}
-	rootfsDev, err := ResolveObjectPath(ctx, entry.RootfsVol, entry.RootfsKind)
+	rootfsDev, err := ResolveObjectPathFor(ctx, backend, entry.RootfsVol, entry.RootfsKind)
 	if err != nil {
 		return nil, fmt.Errorf("resolve rootfs dev: %w", err)
 	}
-	memoryDev, err := ResolveObjectPath(ctx, entry.MemoryVol, entry.MemoryKind)
+	memoryDev, err := ResolveObjectPathFor(ctx, backend, entry.MemoryVol, entry.MemoryKind)
 	if err != nil {
 		return nil, fmt.Errorf("resolve memory dev: %w", err)
 	}
@@ -279,11 +394,49 @@ func ResolveLocalSnapshot(ctx context.Context, snapshotID string) (*SnapshotCata
 	return out, nil
 }
 
-func findSnapshotCatalogOnDisk(snapshotID string) (*SnapshotCatalogEntry, error) {
-	roots := snapshotCatalogRootsSnapshot()
+func catalogFilePatterns(backend, root, snapshotID string) []string {
+	root = filepath.Clean(root)
+	id := "*"
+	if snapshotID != "" {
+		id = snapshotID
+	}
+	patterns := []string{filepath.Join(root, id, SnapshotMetadataDir, snapshotCatalogFileName)}
+	if !isS3CatalogBackend(backend) {
+		// Legacy XFS: <root>/cubebox/<id>/<specDir>/catalog.json
+		if snapshotID != "" {
+			patterns = append(patterns, filepath.Join(root, "*", snapshotID, "*", snapshotCatalogFileName))
+		} else {
+			patterns = append(patterns, filepath.Join(root, "*", "*", "*", snapshotCatalogFileName))
+		}
+	}
+	return patterns
+}
+
+func findSnapshotCatalogOnDisk(backend, snapshotID string) (*SnapshotCatalogEntry, error) {
+	roots := snapshotCatalogRootsSnapshot(backend)
 	for _, root := range roots {
-		// Layout: <root>/<instance_type>/<snapshotID>/<specDir>/catalog.json
-		pattern := filepath.Join(root, "*", snapshotID, "*", snapshotCatalogFileName)
+		for _, pattern := range catalogFilePatterns(backend, root, snapshotID) {
+			matches, err := filepath.Glob(pattern)
+			if err != nil {
+				return nil, err
+			}
+			for _, m := range matches {
+				entry, err := readSnapshotCatalogFile(m)
+				if err != nil {
+					continue
+				}
+				if entry.SnapshotID == snapshotID {
+					return entry, nil
+				}
+			}
+		}
+	}
+	return nil, ErrSnapshotCatalogNotFound
+}
+
+func scanSnapshotCatalogsUnderRoot(backend, root string) ([]*SnapshotCatalogEntry, error) {
+	out := make([]*SnapshotCatalogEntry, 0)
+	for _, pattern := range catalogFilePatterns(backend, root, "") {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
 			return nil, err
@@ -293,27 +446,8 @@ func findSnapshotCatalogOnDisk(snapshotID string) (*SnapshotCatalogEntry, error)
 			if err != nil {
 				continue
 			}
-			if entry.SnapshotID == snapshotID {
-				return entry, nil
-			}
+			out = append(out, entry)
 		}
-	}
-	return nil, ErrSnapshotCatalogNotFound
-}
-
-func scanSnapshotCatalogsUnderRoot(root string) ([]*SnapshotCatalogEntry, error) {
-	pattern := filepath.Join(root, "*", "*", "*", snapshotCatalogFileName)
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*SnapshotCatalogEntry, 0, len(matches))
-	for _, m := range matches {
-		entry, err := readSnapshotCatalogFile(m)
-		if err != nil {
-			continue
-		}
-		out = append(out, entry)
 	}
 	return out, nil
 }
@@ -330,22 +464,42 @@ func readSnapshotCatalogFile(path string) (*SnapshotCatalogEntry, error) {
 	if err := json.Unmarshal(body, entry); err != nil {
 		return nil, fmt.Errorf("decode %s: %w", path, err)
 	}
-	if entry.SnapshotPath == "" {
-		entry.SnapshotPath = filepath.Dir(path)
-	}
-	if entry.MetaDir == "" {
-		entry.MetaDir = entry.SnapshotPath
+	if entry.SnapshotPath == "" || entry.MetaDir == "" {
+		catalogDir := filepath.Dir(path)
+		if filepath.Base(catalogDir) == S3SnapshotMetadataDir {
+			home := filepath.Dir(catalogDir)
+			if entry.SnapshotPath == "" {
+				entry.SnapshotPath = home
+			}
+			if entry.MetaDir == "" {
+				entry.MetaDir = catalogDir
+			}
+		} else {
+			if entry.SnapshotPath == "" {
+				entry.SnapshotPath = catalogDir
+			}
+			if entry.MetaDir == "" {
+				entry.MetaDir = entry.SnapshotPath
+			}
+		}
 	}
 	return entry, nil
 }
 
 // ReadSnapshotCatalogAt loads catalog.json under snapshotPath when present.
+// S3 packages store it in metadata/; this also looks there when the home
+// directory is passed.
 func ReadSnapshotCatalogAt(snapshotPath string) (*SnapshotCatalogEntry, error) {
 	snapshotPath = strings.TrimSpace(snapshotPath)
 	if snapshotPath == "" {
 		return nil, ErrSnapshotCatalogNotFound
 	}
-	return readSnapshotCatalogFile(filepath.Join(filepath.Clean(snapshotPath), snapshotCatalogFileName))
+	clean := filepath.Clean(snapshotPath)
+	entry, err := readSnapshotCatalogFile(filepath.Join(clean, snapshotCatalogFileName))
+	if err == nil {
+		return entry, nil
+	}
+	return readSnapshotCatalogFile(filepath.Join(clean, S3SnapshotMetadataDir, snapshotCatalogFileName))
 }
 
 func cloneCatalogEntry(in *SnapshotCatalogEntry) *SnapshotCatalogEntry {

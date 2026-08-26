@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -68,12 +69,57 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 
 	// Use context.Background() for cleanup so it runs even after request cancellation.
 	cleanupCtx := context.Background()
+	var loopDevice string
+	var mounted bool
+	var mountStuck bool
 	var unmountOnce sync.Once
 	var detachOnce sync.Once
-	cleanup := func() {
-		unmountOnce.Do(func() {
-			_ = runCommand(cleanupCtx, "", "umount", "--", mountPoint)
+	detachLoop := func() {
+		if loopDevice == "" {
+			return
+		}
+		detachOnce.Do(func() {
+			// A lazy umount releases the mount asynchronously, so the detach can fail
+			// EBUSY for a short window afterwards; retry briefly. When even the lazy
+			// umount failed the mount is still there and every attempt is guaranteed to
+			// fail, so don't spend the budget.
+			attempts := 5
+			if mountStuck {
+				attempts = 1
+			}
+			var err error
+			for attempt := 0; attempt < attempts; attempt++ {
+				if attempt > 0 {
+					time.Sleep(200 * time.Millisecond)
+				}
+				if err = runCommand(cleanupCtx, "", "losetup", "--detach", "--", loopDevice); err == nil {
+					return
+				}
+			}
+			// Be precise about how narrow recovery is from here: reclaim only picks a
+			// device up once its backing file has been unlinked — which happens on the
+			// build's failure path only — and the mount is gone. On the success path the
+			// image stays, so the device stays attached until the host reboots.
+			log.G(ctx).Warnf("losetup --detach %s failed; device stays attached, reclaimable later only if its backing file is unlinked and the mount released: %v", loopDevice, err)
 		})
+	}
+	// A single cleanup closure, so the detach always runs *after* the umount:
+	// detaching a still-mounted device fails EBUSY and pins the loop device — and,
+	// once the backing file is unlinked, its disk space too — until the host
+	// reboots. Two separate defers would run in LIFO order and get this backwards.
+	cleanup := func() {
+		if mounted {
+			unmountOnce.Do(func() {
+				if err := runCommand(cleanupCtx, "", "umount", "--", mountPoint); err != nil {
+					log.G(ctx).Warnf("umount %s failed, retrying lazily: %v", mountPoint, err)
+					if lazyErr := runCommand(cleanupCtx, "", "umount", "-l", "--", mountPoint); lazyErr != nil {
+						mountStuck = true
+						log.G(ctx).Warnf("lazy umount %s also failed, loop device will leak: %v", mountPoint, lazyErr)
+					}
+				}
+			})
+		}
+		detachLoop()
 		if err := os.RemoveAll(mountPoint); err != nil {
 			log.G(ctx).Warnf("cleanup mount point %s failed: %v", mountPoint, err)
 		}
@@ -86,25 +132,47 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 	// parsed device path — corrupting the loopDevice string so every later mount
 	// and detach receives a garbage argument (mount fails "bad option", detach
 	// fails → loop device leaks).
-	losetupCmd := exec.CommandContext(ctx, "losetup", "--find", "--show", "--", ext4Path)
-	var losetupErr bytes.Buffer
-	losetupCmd.Stderr = &losetupErr
-	loopOut, err := losetupCmd.Output()
+	findLoop := func() ([]byte, error) {
+		cmd := exec.CommandContext(ctx, "losetup", "--find", "--show", "--", ext4Path)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("losetup --find --show %s failed: %w: %s", ext4Path, err, strings.TrimSpace(stderr.String()))
+		}
+		return out, nil
+	}
+	loopOut, err := findLoop()
 	if err != nil {
-		return fmt.Errorf("losetup --find --show %s failed: %w: %s", ext4Path, err, strings.TrimSpace(losetupErr.String()))
+		// Running out of loop devices can be self-inflicted: a detach that could not
+		// be completed (e.g. the umount above only succeeded lazily) keeps one pinned
+		// for the lifetime of the host, so the fast path would be lost permanently
+		// once enough builds have leaked. Reclaim devices whose backing file is
+		// already gone and retry before degrading to the much slower phase-1 build.
+		// This is best-effort and only meaningful for exhaustion; losetup reports
+		// every failure the same way, so other causes (cancellation, permissions)
+		// pay one extra `losetup --list` and then fail the retry as they should.
+		// It also only frees devices this process managed to attach, i.e. ones whose
+		// /dev node exists here — it cannot create the node that LOOP_CTL_GET_FREE
+		// returned, so a container whose /dev tmpfs is short of loop nodes and has no
+		// orphans to reclaim still degrades to phase-1 (see the deployment note).
+		if n := reclaimOrphanLoopDevices(cleanupCtx, artifactStoreDirOf(ext4Path)); n > 0 {
+			log.G(ctx).Warnf("loop device allocation failed (%v); reclaimed %d orphaned loop device(s), retrying", err, n)
+			retryOut, retryErr := findLoop()
+			if retryErr != nil {
+				return fmt.Errorf("%w (retry after reclaiming %d device(s) also failed: %v)", err, n, retryErr)
+			}
+			loopOut = retryOut
+		} else {
+			return err
+		}
 	}
-	loopDevice := strings.TrimSpace(string(loopOut))
-	detachLoop := func() {
-		detachOnce.Do(func() {
-			_ = runCommand(cleanupCtx, "", "losetup", "--detach", "--", loopDevice)
-		})
-	}
-	defer detachLoop()
+	loopDevice = strings.TrimSpace(string(loopOut))
 
 	if err := runCommand(ctx, "", "mount", "-o", "nosuid,noexec,nodev,noatime", "--", loopDevice, mountPoint); err != nil {
-		detachLoop() // explicit detach on mount failure (defer will be a no-op via sync.Once)
 		return fmt.Errorf("mount loop device %s: %w", loopDevice, err)
 	}
+	mounted = true
 
 	// 4. Stream export directly into the mounted ext4.
 	if source.ExportMode == ExportModeNative {
@@ -133,7 +201,7 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 		}
 	}
 
-	// 5. Unmount (via cleanup).
+	// 5. Unmount and detach (via cleanup).
 	cleanup()
 
 	// 6. Shrink the ext4 filesystem to minimum size (best-effort).
@@ -174,6 +242,74 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 	}
 
 	return nil
+}
+
+// artifactStoreDirOf returns the artifact store root for an ext4 image path,
+// mirroring the <store>/<artifact>/<artifact>.ext4 layout BuildExt4 constructs
+// (including when it falls back to ArtifactFallbackStoreRootDir, so a fallback
+// build only ever reclaims fallback-store orphans). A path of another shape just
+// yields a prefix that matches nothing in orphanLoopCandidates, i.e. reclaim
+// no-ops rather than reaching outside the store. Nested store roots are the one
+// case where the scope is wider than the build's own store: the shallower root's
+// prefix also covers the deeper one's orphans, still bounded to devices whose
+// backing file is already gone.
+func artifactStoreDirOf(ext4Path string) string {
+	return filepath.Dir(filepath.Dir(ext4Path))
+}
+
+// orphanLoopCandidates parses the output of
+// `losetup --list --noheadings --raw --output NAME,BACK-FILE` and returns the
+// devices whose backing file lives under storeDir and has already been unlinked
+// (losetup marks those with a trailing " (deleted)").
+//
+// Requiring the unlink is what makes the reclaim safe against a build running
+// concurrently: the image file is only unlinked once a build has given up on it,
+// so a live build's device can never become a candidate — not even in the
+// attach→mount window, where the device is not yet in the mount table and the
+// kernel's EBUSY refusal would not protect it either.
+func orphanLoopCandidates(losetupList, storeDir string) []string {
+	if storeDir == "" || storeDir == "/" {
+		return nil
+	}
+	prefix := strings.TrimSuffix(storeDir, "/") + "/"
+	var names []string
+	for _, line := range strings.Split(losetupList, "\n") {
+		name, backing, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok || name == "" {
+			continue
+		}
+		backing = strings.TrimSpace(backing)
+		if !strings.HasSuffix(backing, " (deleted)") {
+			continue
+		}
+		backing = strings.TrimSpace(strings.TrimSuffix(backing, " (deleted)"))
+		if strings.HasPrefix(backing, prefix) {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// reclaimOrphanLoopDevices detaches loop devices whose backing file under
+// storeDir has already been unlinked, i.e. devices no build can still be using.
+// Returns how many were freed.
+func reclaimOrphanLoopDevices(ctx context.Context, storeDir string) int {
+	out, err := exec.CommandContext(ctx, "losetup", "--list", "--noheadings", "--raw",
+		"--output", "NAME,BACK-FILE").Output()
+	if err != nil {
+		log.G(ctx).Warnf("losetup --list for orphan reclaim failed: %v", err)
+		return 0
+	}
+	reclaimed := 0
+	for _, name := range orphanLoopCandidates(string(out), storeDir) {
+		if err := runCommand(ctx, "", "losetup", "--detach", "--", name); err != nil {
+			log.G(ctx).Debugf("orphan loop device %s not reclaimable (likely still in use): %v", name, err)
+			continue
+		}
+		log.G(ctx).Debugf("reclaimed orphaned loop device %s", name)
+		reclaimed++
+	}
+	return reclaimed
 }
 
 // pipeExportToDir streams the docker export of a container directly into a target

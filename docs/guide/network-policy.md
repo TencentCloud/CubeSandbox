@@ -256,6 +256,44 @@ Cubelet embedded network runtime finally programs different sources into differe
 
 If the same IP/CIDR appears in both plain `allow_out` and an L7 rule target, CubeVS preserves the `L7_REQUIRED` flag. Static `allow_out` entries do not expire; DNS-learned entries have `expires_at_ns` and expire according to DNS TTL.
 
+## Updating the policy of a running sandbox
+
+`PUT /sandboxes/{sandboxID}/network` replaces the egress policy of a sandbox that is already running. The body is the same `network` object accepted at create time, and it is a **replacement, not a patch**: a field you leave out is cleared.
+
+```bash
+curl -X PUT "$CUBE_API/sandboxes/$SANDBOX_ID/network" \
+  -H 'Content-Type: application/json' \
+  -d '{"allowInternetAccess": false, "allowOut": ["api.example.com"], "denyOut": ["0.0.0.0/0"]}'
+```
+
+::: warning Leaving out `allowInternetAccess` restores internet access
+The "a field you leave out is cleared" rule is easier to trip over on this flag than on the others: clearing it returns the sandbox to "not explicitly set", whose default is to allow egress, which withdraws the `0.0.0.0/0` deny-all. A sandbox created with `allow_internet_access=false` therefore regains public internet access after any update that does not restate the field — even an update meant only to change `allowOut`. (The built-in internal-subnet protection still applies; only public egress comes back.)
+
+There is no shorter way around this: `denyOut` is cleared on omission too, so switching to an explicit `"denyOut": ["0.0.0.0/0"]` still has to be sent every time. Keeping a sandbox isolated means sending the complete desired policy on every update, `"allowInternetAccess": false` included.
+:::
+
+The policy fields sit at the top level here, not under `network` as they do when creating a sandbox. That matches E2B's update endpoint, so a client written against either SDK reaches the same wire format; E2B's own create nests them the same way ours does, so the asymmetry is upstream's rather than ours. `allowPublicTraffic` and `maskRequestHost` are CubeSandbox extensions that E2B's update schema does not carry.
+
+`rules` accepts either shape: CubeEgress's list of rules, or E2B's `{host: [{transform: {headers: {...}}}]}` mapping. The list stays canonical, because E2B's mapping cannot express a deny verdict, an audit level, or any match beyond the host — sending our rules in that shape would silently drop them. An E2B mapping is converted to equivalent allow-and-inject rules named `e2b-transform-<host>`.
+
+The SDKs expose it as `sandbox.update_network(...)` (Python), `sandbox.updateNetwork(...)` (Node) and `sandbox.UpdateNetwork(...)` (Go), each taking the whole policy as one object with `allow_internet_access` inside it — the same shape as E2B's `update_network`.
+
+### What happens to connections that are already open
+
+Unlike a plain map rewrite, an update also reaches traffic that already exists. Each sandbox carries a policy generation (`mvm_meta.policy_version`) that the update bumps once both CubeEgress and the CubeVS maps hold the new policy. Every session caches the generation it was admitted under, so the next packet on an established flow is re-evaluated exactly once per update:
+
+- **Still allowed with the same verdict** — the session is restamped with the new generation and continues untouched. This is the common case and costs one policy lookup per flow per update.
+- **No longer allowed, or its verdict changed** (for example a host that moved between plain SNAT and L7 interception) — the session is retired immediately: both directions of its conntrack state are deleted, so replies stop being delivered and the 4-tuple is free for a reconnect. TCP is answered with an RST, matching how every other unreachable TCP packet is handled, so the guest fails fast instead of stalling on retransmits; UDP and ICMP have nothing to reset and are dropped.
+
+A verdict *change* retires the flow rather than migrating it, because the SNAT and L7 paths disagree about both the reply tuple and which side terminates the TCP connection. The reconnect that follows is evaluated against the new policy like any new flow.
+
+Re-evaluation is driven by traffic, not pushed: an idle established connection is only judged when the sandbox next sends on it. A connection that is open but silent therefore stays in the session table until it either sends again or times out normally.
+
+Two consequences worth planning for:
+
+- **Existing DNS-learned IPs outlive the domain rule that created them.** Removing a domain from `allow_out` stops new IPs from being learned immediately, but IPs already learned for it remain allowed until their DNS TTL expires. Revoking access to a domain promptly requires an `allow_internet_access=false` policy plus a short resolver TTL.
+- **The update is not transactional across planes.** CubeEgress is updated before CubeVS, and the durable state is written last, so a failure leaves the sandbox on a state no more permissive than the old and new policies combined. Replaying the same request converges; a Cubelet restart re-applies the last policy that was successfully persisted.
+
 ## How `from_cube` decides and forwards
 
 `from_cube` is the TC eBPF program attached to sandbox TAP ingress. Every packet sent by the sandbox enters this program first. You can think of it in these stages:

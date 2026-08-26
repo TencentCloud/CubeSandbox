@@ -12,8 +12,8 @@ use crate::{
         datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeEgressRule,
         CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
         CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
-        SandboxLogsRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
-        SandboxUpdateRequest, VolumeSpec,
+        SandboxLogsRequest, SandboxNetworkRequest, SandboxRefreshRequest, SandboxStatus,
+        SandboxTimeoutRequest, SandboxUpdateRequest, VolumeSpec,
     },
     error::{AppError, AppResult},
     models::{
@@ -143,6 +143,7 @@ impl SandboxService {
             envd_access_token: None,
             domain: Some(self.sandbox_domain.clone()),
             cpu_count: d.cpu_count,
+            cpu_milli: (d.cpu_milli > 0).then_some(d.cpu_milli),
             memory_mb: d.memory_mb,
             disk_size_mb: Some(d.disk_size_mb),
             metadata: optional_metadata(d.labels),
@@ -164,6 +165,7 @@ impl SandboxService {
             distribution_scope,
             env_vars,
             volume_mounts,
+            backend,
             ..
         } = body;
         if let Some(env_vars) = env_vars.as_ref() {
@@ -268,6 +270,7 @@ impl SandboxService {
             cube_network_config,
             auto_pause,
             auto_resume,
+            backend,
         };
 
         let resp = self
@@ -483,6 +486,42 @@ impl SandboxService {
         let resp = self
             .cubemaster
             .set_sandbox_timeout(&req)
+            .await
+            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
+
+        resp.ret
+            .into_result()
+            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
+
+        Ok(())
+    }
+
+    /// Replace a running sandbox's egress policy.
+    ///
+    /// The policy is validated and mapped by the same code as sandbox creation,
+    /// so an update cannot install anything create would have rejected. An
+    /// all-empty body is legal and clears the policy, which is why the mapper's
+    /// "nothing set" `None` is turned back into a default config rather than
+    /// treated as "no change".
+    pub async fn update_network(
+        &self,
+        sandbox_id: &str,
+        allow_internet_access: Option<bool>,
+        network: Option<&SandboxNetworkConfig>,
+    ) -> AppResult<()> {
+        let cube_network_config =
+            build_cube_network_config(allow_internet_access, network)?.unwrap_or_default();
+
+        let req = SandboxNetworkRequest {
+            request_id: new_request_id(),
+            sandbox_id: sandbox_id.to_string(),
+            instance_type: self.instance_type.clone(),
+            cube_network_config,
+        };
+
+        let resp = self
+            .cubemaster
+            .update_sandbox_network(&req)
             .await
             .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
 
@@ -851,8 +890,17 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
         client_id: s.host_id,
         started_at,
         end_at: s.end_at,
-        cpu_count: s.cpu_count,
-        memory_mb: s.memory_mb,
+        cpu_count: if s.cpu_milli > 0 {
+            s.cpu_milli / 1000
+        } else {
+            s.cpu_count
+        },
+        cpu_milli: (s.cpu_milli > 0).then_some(s.cpu_milli),
+        memory_mb: if s.memory_mib > 0 {
+            s.memory_mib
+        } else {
+            s.memory_mb
+        },
         disk_size_mb: Some(0),
         metadata: optional_metadata(s.labels),
         state: sandbox_state_from_str(&s.status),
@@ -1221,6 +1269,7 @@ mod tests {
             env_vars: None,
             mcp: None,
             volume_mounts: None,
+            backend: None,
         }
     }
 
@@ -1686,6 +1735,8 @@ mod tests {
             end_at: None,
             cpu_count: 2,
             memory_mb: 2048,
+            cpu_milli: 0,
+            memory_mib: 0,
             template_id: "tpl-1".to_string(),
             annotations: HashMap::new(),
             labels: HashMap::new(),
@@ -1693,8 +1744,33 @@ mod tests {
         });
 
         assert_eq!(listed.cpu_count, 2);
+        assert_eq!(listed.cpu_milli, None);
         assert_eq!(listed.memory_mb, 2048);
         assert_eq!(listed.template_id, "tpl-1");
+    }
+
+    #[test]
+    fn listed_sandbox_prefers_exact_resource_units_from_cubemaster() {
+        let listed = from_cubemaster_info(SandboxInfo {
+            sandbox_id: "sb-small".to_string(),
+            host_id: "host-1".to_string(),
+            status: "running".to_string(),
+            started_at: None,
+            create_at: 0,
+            end_at: None,
+            cpu_count: 0,
+            memory_mb: 537,
+            cpu_milli: 500,
+            memory_mib: 512,
+            template_id: "tpl-1".to_string(),
+            annotations: HashMap::new(),
+            labels: HashMap::new(),
+            volume_mounts: vec![],
+        });
+
+        assert_eq!(listed.cpu_count, 0);
+        assert_eq!(listed.cpu_milli, Some(500));
+        assert_eq!(listed.memory_mb, 512);
     }
 
     #[test]
@@ -1750,6 +1826,7 @@ mod tests {
             cube_network_config: None,
             auto_pause: false,
             auto_resume: false,
+            backend: None,
         };
 
         // Both false → both fields are omitted (skip_serializing_if = Not::not).
@@ -1871,6 +1948,7 @@ mod tests {
             cube_network_config: None,
             auto_pause: false,
             auto_resume: false,
+            backend: None,
         }
     }
 
@@ -2080,6 +2158,7 @@ mod tests {
                 env_vars: None,
                 mcp: None,
                 volume_mounts: None,
+                backend: None,
             })
             .await
             .expect("sandbox create should succeed");
@@ -2166,6 +2245,7 @@ mod tests {
                 env_vars: Some(env_vars),
                 mcp: None,
                 volume_mounts: None,
+                backend: None,
             })
             .await
             .expect("sandbox create should succeed");
@@ -2243,6 +2323,7 @@ mod tests {
                 env_vars: None,
                 mcp: None,
                 volume_mounts: None,
+                backend: None,
             })
             .await
             .expect("sandbox create should succeed");
@@ -2323,6 +2404,7 @@ mod tests {
                         read_only: false,
                     },
                 ]),
+                backend: None,
             })
             .await
             .expect("sandbox create should succeed");

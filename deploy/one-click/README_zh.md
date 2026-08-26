@@ -10,7 +10,7 @@
 - `build-agent-ext4.sh`：构建独立 `cube-agent/cube-agent.ext4`（+ `version`），供 virtio-pmem1 注入。
 - `build-release-bundle.sh`：底层打包入口；消费源码树或 `ONE_CLICK_*_BIN` 预编译产物，组装 `sandbox-package` 并生成最终发布包。
 - `config-cube.toml`：one-click 默认 runtime 配置模板。
-- `support/`：MySQL/Redis 的 `docker compose` 模板，安装后落到 `/usr/local/services/cubetoolbox/support/`；`support/bin/mkcert` 为内置的 mkcert 二进制。
+- `support/`：MySQL/Redis/MinIO 的 `docker compose` 模板，安装后落到 `/usr/local/services/cubetoolbox/support/`；`support/bin/mkcert` 为内置的 mkcert 二进制。
 - `cubeproxy/`：`cube proxy` 的 compose 模板、`global.conf` 模板与 CoreDNS 模板。
 - `webui/`：Dashboard 的 Nginx 运行时文件，安装后落到 `/usr/local/services/cubetoolbox/webui/`。
 - `install.sh`：目标机控制节点安装与启动入口（默认 all-in-one）。
@@ -195,6 +195,14 @@ sudo ./smoke.sh
 sudo ./down.sh
 ```
 
+### CubeS3lvol 的停止与升级语义
+
+CubeS3lvol（s3lvol）作为 `cube-sandbox-*` 角色 target 的 `Wants=` 成员被统一管理：
+
+- **停止（`down.sh` / `systemctl stop cube-sandbox-{control,compute}.target`）**：s3lvol 单元会走 `cube-s3lvol-stop.sh` 的**条件卸载**——target 进程存活时完整执行 `rcow_stop.sh`（断开 initiator → 卸载 lvstore/回刷 → 终止 target），target 已崩溃时只清理 target 侧残留、绝不断开 NVMf initiator。`down.sh` 只停止服务，**不删除任何数据**（`/data/cubelet/rcow/wal_bdev.img` 与 bstore 元数据保留），再次启动走 attach/replay 恢复。
+- **升级（`install.sh` 升级模式）**：旧 `CubeS3lvol/` 目录被替换（新二进制自动生效），随后 target 随角色 target 重启。`wal_bdev.img` **永不覆盖**（仅首次安装创建，其尺寸固定 journal/WAL 布局），`.one-click.env` 中 `RCOW_*` 配置经升级合并保留。
+- **启停开关**：`.env` 里 `ONE_CLICK_ENABLE_S3LVOL` 翻转为 1/0 后重跑 `install.sh`（或直接 `systemctl enable/disable cube-sandbox-s3lvol.service`）即可。
+
 控制节点安装完成后，可以打开 Dashboard：
 
 ```bash
@@ -237,6 +245,10 @@ ONE_CLICK_DEPLOY_ROLE=compute
 ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
 ```
 
+若控制节点用了内置 MinIO（或任何 S3 后端），再把该节点 `.one-click.env` 里的
+`CUBE_S3_*` 拷过来。计算节点不部署 MinIO，只消费 `CUBE_S3_*`。用内置 MinIO 时
+还需放行计算节点到控制面的 TCP 9000。
+
 如需显式指定计算节点 IP，或目标机默认网卡不是 `eth0`，再额外设置：
 
 ```bash
@@ -254,14 +266,14 @@ sudo ./install-compute.sh
 - 安装内置 network runtime 的 `Cubelet`、`cube-shim`、`cube-image`、`cube-kernel-scf`、`cube-egress` 和运行所需脚本，并安装 `docker`
 - 启动 `cubelet`，并通过 `cube-sandbox-compute.target` 拉起 `cube-egress`（透明出网 MITM 代理，以 docker 容器运行，用于强制执行沙箱出网策略）
 - `cube-egress` 启动前会通过主节点的 `/cube/ca/<file>` 接口拉取与模板一致的 MITM 根 CA（含私钥），保证模板信任 compute 节点上 `cube-egress` 签发的叶子证书
-- 将 `Cubelet` 的 `meta_server_endpoint` 指向 `ONE_CLICK_CONTROL_PLANE_IP:8089`
-- 通过主节点的 `/internal/meta` 接口自动注册节点
+- 将 `Cubelet` 的 `meta_server_endpoint` 指向 `ONE_CLICK_CONTROL_PLANE_IP:3010`（CubeOps node-agent）
+- 通过主节点的 `/internal/v1/node-agent` 接口自动注册节点
 
 注意事项：
 
 - 所有计算节点都需要让 `Cubelet` 监听和主节点配置一致的 gRPC 端口，默认是 `9999`
 - `CUBE_SANDBOX_NODE_IP` 会同时作为 one-click 配置值和 `Cubelet` 节点注册 IP
-- 主节点必须能访问计算节点的 `9999/tcp`，计算节点必须能访问主节点的 `8089/tcp`
+- 主节点必须能访问计算节点的 `9999/tcp`，计算节点必须能访问主节点的 `8089/tcp`（使用内置 MinIO 作 S3 Volume 后端时还需 `9000/tcp`）
 
 MySQL/Redis 依赖默认会部署到：
 
@@ -273,6 +285,7 @@ MySQL/Redis 依赖默认会部署到：
 
 - `mysql:8.0`
 - `redis:7-alpine`
+- `minio`（S3 兼容 Volume 后端；由 `CUBE_SANDBOX_MINIO_ENABLED` 显式开关，默认开启）
 
 ### 使用外部 MySQL / Redis
 
@@ -301,6 +314,61 @@ CUBE_EXTERNAL_REDIS_PASSWORD=ceuhvu123
 - 让 `quickcheck.sh` 和 `up-support.sh` 跳过对已外置依赖的本地生命周期管理（`down-support.sh` 未感知外部依赖，仍会执行 `docker compose down`，但由于本地容器从未被启动，这是无害的空操作）。
 
 外部 MySQL 需要预先授予所配置用户对目标库的访问权限；CubeMaster 首次启动会自行执行内置 schema 迁移。
+
+### 内置 MinIO 与 S3 Volume 插件
+
+`CUBE_SANDBOX_MINIO_*` **只负责部署 MinIO 容器**。S3 Volume 插件始终读取
+`CUBE_S3_*`，并用它写入 `volume-s3.conf`。
+
+MinIO 容器在宿主机上占用两个端口（均可通过环境变量覆盖）：
+
+| 用途 | 容器内端口 | 宿主机映射 | 绑定地址 |
+| ---- | ---------- | ---------- | -------- |
+| S3 API | `9000` | `CUBE_SANDBOX_MINIO_API_PORT`（默认 `9000`） | `CUBE_SANDBOX_MINIO_API_BIND`，默认 `CUBE_SANDBOX_NODE_IP`（未探测到时回退 `127.0.0.1`） |
+| Web 控制台 | `9001` | `CUBE_SANDBOX_MINIO_CONSOLE_PORT`（默认 `9001`） | 固定 `127.0.0.1`，仅本机可访问 |
+
+S3 API 默认发布在节点 IP 上，目的是让计算节点的 Cubelet 能直连；若希望 S3 只对
+本机开放，设 `CUBE_SANDBOX_MINIO_API_BIND=127.0.0.1`——代价是计算节点将无法访问
+内置 MinIO，需改用外部 S3。控制台端口始终只绑定 `127.0.0.1`，不会对外暴露。
+
+控制节点默认 `CUBE_SANDBOX_MINIO_ENABLED=1`：`install.sh` 启动 MinIO，密码留空
+则生成 24 位随机密码，然后**用这套 MinIO 填好 `CUBE_S3_*`**（`http://<节点IP>:9000`、用户/
+密码、path-style），两套都写入 `.one-click.env`。MinIO 开启时不要自己再设
+`CUBE_S3_ENDPOINT`。后续升级会从 `.one-click.env` 读回这份本机地址，这是合法
+的；只有另配外部桶时才需要 `CUBE_SANDBOX_MINIO_ENABLED=0`。
+
+其它 MinIO 部署参数：默认用户 `cubeminio`（`CUBE_SANDBOX_MINIO_ROOT_USER`，密码
+至少 8 位，否则 MinIO 拒绝启动）、桶名 `cube-volumes`（`CUBE_SANDBOX_MINIO_BUCKET`）、
+数据卷 `cube-sandbox-minio-data`（`CUBE_SANDBOX_MINIO_VOLUME`，容器内挂载到
+`/data`）、容器名 `cube-sandbox-minio`（`CUBE_SANDBOX_MINIO_CONTAINER`）、镜像
+`CUBE_SANDBOX_MINIO_IMAGE`（默认按 `MIRROR=cn|int` 选择）。MinIO 运行态由
+`cube-sandbox-minio.service` 托管，启动后校验通过
+`curl http://<节点IP>:9000/minio/health/live`（返回 `200` 即正常）。
+
+改用已有 S3 时，设 `CUBE_SANDBOX_MINIO_ENABLED=0` 并填写 `CUBE_S3_*`：
+
+```bash
+CUBE_SANDBOX_MINIO_ENABLED=0
+CUBE_S3_ENDPOINT=https://s3.example.com
+CUBE_S3_ACCESS_KEY_ID=...
+CUBE_S3_SECRET_ACCESS_KEY=...
+CUBE_S3_BUCKET=cube-volumes
+# CUBE_S3_REGION=us-east-1
+# CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
+```
+
+计算节点从不部署 MinIO。把控制节点 `.one-click.env` 里填好的 `CUBE_S3_*` 拷到
+计算节点 `.env`（若用内置 MinIO，还需放行控制面 TCP 9000）：
+
+```bash
+ONE_CLICK_DEPLOY_ROLE=compute
+ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
+CUBE_S3_ENDPOINT=http://10.0.0.11:9000
+CUBE_S3_ACCESS_KEY_ID=cubeminio
+CUBE_S3_SECRET_ACCESS_KEY=<控制面 .one-click.env 里的值>
+CUBE_S3_BUCKET=cube-volumes
+CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
+```
 
 `cube proxy` 和它的 DNS 解析在 one-click 里是必选能力，`.env` 中这两个值必须保持为 `1`：
 
@@ -371,6 +439,8 @@ export E2B_API_KEY=e2b_000000
 - 若启用 `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` 且 `/etc/docker/daemon.json` 已存在，需要 `python3`
 - 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
   `mkfs.ext4`、`mount`、`umount`、`losetup`
+- 若 `ONE_CLICK_ENABLE_S3LVOL=1` 且包内存在 `CubeS3lvol/bin/s3lvol_tgt`，还会额外检查：
+  `nvme`（nvme-cli）、`python3`、`truncate`，以及 `s3lvol_tgt` 动态链接的共享库（`ldd` 探测；重点：`libssl.so.1.1` / `libcrypto.so.1.1` 属于 OpenSSL 1.1 分支）
 
 推荐安装包（覆盖上述 `cubecow` 依赖）：
 
@@ -386,6 +456,17 @@ sudo apt-get install -y e2fsprogs util-linux
 # OpenCloudOS / RHEL / CentOS
 sudo dnf install -y e2fsprogs util-linux || \
 sudo yum install -y e2fsprogs util-linux
+```
+
+启用 `ONE_CLICK_ENABLE_S3LVOL=1` 时额外安装包：
+
+```bash
+# Debian / Ubuntu（openssl 1.1 通常已满足；缺库时用 ldd 确认）
+sudo apt-get install -y nvme-cli python3 libaio1 libnuma1 uuid-runtime
+
+# OpenCloudOS / RHEL / CentOS（openssl 3 需 compat-openssl11）
+sudo dnf install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11 || \
+sudo yum install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11
 ```
 
 ### control 角色（`install.sh`，默认）
@@ -415,6 +496,8 @@ sudo yum install -y e2fsprogs util-linux
 - 若启用 `ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=1` 且 `/etc/docker/daemon.json` 已存在，需要 `python3`
 - 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
   `mkfs.ext4`、`mount`、`umount`、`losetup`
+- 若 `ONE_CLICK_ENABLE_S3LVOL=1` 且包内存在 `CubeS3lvol/bin/s3lvol_tgt`，还会额外检查：
+  `nvme`（nvme-cli）、`python3`、`truncate`，以及 `s3lvol_tgt` 动态链接的共享库（`ldd` 探测；重点：`libssl.so.1.1` / `libcrypto.so.1.1` 属于 OpenSSL 1.1 分支）
 
 推荐安装包（覆盖上述 `cubecow` 依赖）：
 
@@ -432,6 +515,17 @@ sudo dnf install -y e2fsprogs util-linux || \
 sudo yum install -y e2fsprogs util-linux
 ```
 
+启用 `ONE_CLICK_ENABLE_S3LVOL=1` 时额外安装包：
+
+```bash
+# Debian / Ubuntu（openssl 1.1 通常已满足；缺库时用 ldd 确认）
+sudo apt-get install -y nvme-cli python3 libaio1 libnuma1 uuid-runtime
+
+# OpenCloudOS / RHEL / CentOS（openssl 3 需 compat-openssl11）
+sudo dnf install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11 || \
+sudo yum install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11
+```
+
 ## 前置条件
 
 > **安全提示**：所有核心服务默认绑定 `0.0.0.0`。在将部署放到可被不可信网络访问的
@@ -442,6 +536,7 @@ sudo yum install -y e2fsprogs util-linux
 - 目标机优先使用 `systemd-resolved` / `resolvectl` 做 `cube.app` 的 split DNS；当前实现会创建专用 dummy link（默认 `cube-dns0`）并为其添加本地 `/32` 地址，`CoreDNS` 默认绑定到 `169.254.254.53`，再把该地址和 `~cube.app` 绑定到该链路。若该能力不可用，则安装脚本会回退到 `NetworkManager + dnsmasq`：同样创建该 dummy link，并通过 `listen-address` / `bind-interfaces` 让 `dnsmasq` 同时绑定 `127.0.0.1` 和 `169.254.254.53`；随后安装器自己写 `/etc/resolv.conf`（NetworkManager 切到 `rc-manager=unmanaged`），把 nameserver 指向 `169.254.254.53`，让宿主应用和 Docker 容器看到同一个非 loopback 解析器。当 NetworkManager 会加载其 `dnsmasq` 插件但从不拉起子进程（例如通过 `ifcfg` + `assume` 管理的 bond 网卡）时，可在 `.one-click.env` 中设置 `CUBE_PROXY_DNSMASQ_MODE=standalone`，让 DNS 脚本直接拉起并管理 `dnsmasq`。
 - 目标机默认联网拉取 `mysql:8.0` 和 `redis:7-alpine`。
 - `mkcert` 二进制已内置在发布包中（`support/bin/mkcert`），安装时若系统未预装 `mkcert`，会自动从包内复制到 `/usr/local/bin/mkcert`，无需联网下载。
+- S3 Volume 插件（`{CubeMaster,Cubelet}/plugin/cube-volume-s3`）是内置 S3 客户端的静态 Go 二进制，打包时从 `examples/volume/s3` 编译。控制节点无需任何 S3 命令行工具；挂载 Volume 的节点仍需 `s3fs`。可用 `ONE_CLICK_VOLUME_S3_BIN` 指定预编译二进制。
 - `cube proxy` 的 TLS 证书和私钥保存在宿主机 `CUBE_PROXY_CERT_DIR`，并通过 `docker compose` 以只读方式挂载进容器；更新证书后无需重建镜像，只需重启 `cube-proxy` 或在容器内 reload nginx。
 - 推荐入口 `build-release-bundle-builder.sh` 需要宿主机具备 `docker` / `make` / `tar` / `python3` / `truncate` / `ldd` / `mkfs.ext4` 等工具。
 - 推荐入口只把组件编译放进 builder；guest image 与最终打包仍在宿主机执行。

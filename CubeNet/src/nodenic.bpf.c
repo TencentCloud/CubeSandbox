@@ -13,18 +13,81 @@
 #include "map.h"
 #include "skb.h"
 #include "tcp.h"
+#include "tcp_reset.h"
 #include "udp.h"
 #include "dns_query.h"
 #include "dns_response.h"
+
+/* create_port_mapping_session installs an egress_sessions entry for a
+ * port_mapping connection. Called on the inbound path (SYN for a new
+ * connection, or a non-SYN packet whose session was reaped and is being
+ * rebuilt). */
+static __always_inline void create_port_mapping_session(__be32 peer_ip, __be16 peer_port,
+							struct mvm_port *mvm_port,
+							__be32 node_ip, __be16 host_port,
+							__u32 node_ifindex, __u64 now_ns,
+							__u8 initial_state)
+{
+	struct nat_session sess = {};
+	struct session_key pkey = {};
+
+	port_mapping_key(&pkey, peer_ip, peer_port, mvm_port->listen_port);
+
+	sess.access_time = now_ns;
+	sess.node_ifindex = node_ifindex;
+	sess.node_ip = node_ip;
+	sess.node_port = host_port;
+	sess.vm_ifindex = mvm_port->ifindex;
+	sess.vm_ip = mvm_inner_ip;
+	sess.vm_port = mvm_port->listen_port;
+	sess.state = initial_state;
+	sess.packet_class = PORT_MAPPING_PACKET;
+	{
+		struct mvm_meta *meta = bpf_map_lookup_elem(&ifindex_to_mvmmeta, &mvm_port->ifindex);
+
+		if (meta)
+			sess.gen = meta->version;
+	}
+	bpf_map_update_elem(&egress_sessions, &pkey, &sess, BPF_ANY);
+}
 
 static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct tcphdr *l4,
 			 struct mvm_port *mvm_port)
 {
 	__u32 old_daddr, new_daddr, tcp_csum_off;
+	struct nat_session *sess;
+	struct session_key pkey = {};
 	__u16 old_dport, new_dport;
 	__u16 ip_hlen;
+	__u64 now;
 	__u64 flags;
 	long err;
+
+	/* Track the port_mapping connection's generation so a rollback can reset
+	 * it while an aged (reaped) one is rebuilt. */
+	now = bpf_ktime_get_ns();
+	port_mapping_key(&pkey, l3->saddr, l4->source, mvm_port->listen_port);
+	sess = bpf_map_lookup_elem(&egress_sessions, &pkey);
+	if (sess && sess->gen != current_gen(sess->vm_ifindex)) {
+		/* Stale: the sandbox was rolled back. Reset the peer and drop the
+		 * entry so a reconnect starts clean. port_mapping sessions have no
+		 * ingress entry. */
+		bpf_map_delete_elem(&egress_sessions, &pkey);
+		return tcp_send_reset(skb, skb->ingress_ifindex, l3->saddr);
+	}
+	if (!sess) {
+		/* New connection (SYN) or a rebuilt aged one (non-SYN). */
+		if (l4->syn && !l4->ack)
+			create_port_mapping_session(l3->saddr, l4->source, mvm_port,
+						    l3->daddr, l4->dest, skb->ingress_ifindex,
+						    now, TCP_CONNTRACK_SYN_RECV);
+		else
+			create_port_mapping_session(l3->saddr, l4->source, mvm_port,
+						    l3->daddr, l4->dest, skb->ingress_ifindex,
+						    now, TCP_CONNTRACK_ESTABLISHED);
+	} else {
+		sess->access_time = now;
+	}
 
 	old_daddr = l3->daddr;
 	new_daddr = mvm_inner_ip;
@@ -71,9 +134,11 @@ static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr 
 static int tcp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct tcphdr *l4)
 {
 	__u32 old_daddr, new_daddr, tcp_csum_off;
-	__u16 old_dport, new_dport;
-	struct session_key key = {};
+	struct ingress_session *isess;
 	struct nat_session *sess;
+	struct session_key key = {};
+	struct session_key ekey = {};
+	__u16 old_dport, new_dport;
 	bool syn, ack, fin, rst;
 	__u16 ip_hlen;
 	__u64 flags;
@@ -86,7 +151,33 @@ static int tcp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphd
 	key.dst_port = l4->dest;
 	key.version = 0;
 	key.protocol = l3->protocol;
-	sess = lookup_session(&key);
+
+	/* The ingress key version is always 0, so a tracked sandbox connection's
+	 * ingress entry is found regardless of rollback. Its presence marks this
+	 * packet as sandbox traffic; host-bound traffic (e.g. external SSH to the
+	 * node) has no ingress entry and must never be reset here. */
+	isess = bpf_map_lookup_elem(&ingress_sessions, &key);
+	if (!isess)
+		return TC_ACT_OK;
+
+	/* Sandbox traffic. The ingress value records the creation generation in
+	 * its version field; a mismatch against the VM's current mvm_meta->version
+	 * means the connection is stale after a rollback. Build the egress key
+	 * (the ingress value carries the VM tuple and the recorded generation),
+	 * drop the pair, and reset the peer. */
+	ekey.src_ip = isess->vm_ip;
+	ekey.dst_ip = key.src_ip;
+	ekey.src_port = isess->vm_port;
+	ekey.dst_port = key.src_port;
+	ekey.version = isess->version;
+	ekey.protocol = key.protocol;
+	if (isess->version != current_gen_by_ip(isess->vm_ip)) {
+		bpf_map_delete_elem(&egress_sessions, &ekey);
+		bpf_map_delete_elem(&ingress_sessions, &key);
+		return tcp_send_reset(skb, skb->ingress_ifindex, l3->saddr);
+	}
+
+	sess = bpf_map_lookup_elem(&egress_sessions, &ekey);
 	if (!sess)
 		return TC_ACT_OK;
 
@@ -332,7 +423,8 @@ static int icmp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iph
 	return bpf_redirect(sess->vm_ifindex, 0);
 }
 
-static int do_icmp_nat(struct __sk_buff *skb)
+/* Linux 5.4 rejects tail calls from programs with BPF subcalls. */
+static __always_inline int do_icmp_nat(struct __sk_buff *skb)
 {
 	struct ethhdr *l2;
 	struct iphdr *l3;
@@ -344,7 +436,7 @@ static int do_icmp_nat(struct __sk_buff *skb)
 	return icmp_nat_session(skb, l2, l3, l4);
 }
 
-static int do_udp_nat(struct __sk_buff *skb)
+static __always_inline int do_udp_nat(struct __sk_buff *skb)
 {
 	struct ethhdr *l2;
 	struct iphdr *l3;
@@ -356,7 +448,7 @@ static int do_udp_nat(struct __sk_buff *skb)
 	return udp_nat_session(skb, l2, l3, l4);
 }
 
-static int do_tcp_nat(struct __sk_buff *skb)
+static __always_inline int do_tcp_nat(struct __sk_buff *skb)
 {
 	struct mvm_port *mvm_port;
 	struct ethhdr *l2;

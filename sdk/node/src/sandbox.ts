@@ -44,6 +44,23 @@ export interface LifecycleOptions {
 }
 
 /** Options for {@link Sandbox.create}. */
+/**
+ * Desired egress policy for {@link Sandbox.updateNetwork}, carrying
+ * `allowInternetAccess` alongside the rest rather than beside the object.
+ *
+ * This mirrors E2B's `SandboxNetworkUpdate` so code written against either SDK
+ * works unchanged. It differs from {@link CreateOptions}, where the flag is a
+ * sibling of `network` — E2B's create draws the same line, and following it
+ * matters more than being internally symmetric.
+ *
+ * The whole object is the desired state, not a patch: an omitted field is
+ * cleared rather than left as it was. `allowInternetAccess` is presence-based —
+ * omitting it is not the same as sending `true`.
+ */
+export interface UpdateNetworkOptions extends NetworkOptions {
+  allowInternetAccess?: boolean;
+}
+
 export interface CreateOptions {
   template?: string;
   /** Alias for {@link CreateOptions.template}, matching the Issue #760 / E2B shape. */
@@ -188,6 +205,34 @@ async function checkControlResponse(resp: {
     throw new SandboxNotFoundError(msg, code);
   }
   throw new ApiError(msg, code);
+}
+
+/**
+ * Translate NetworkOptions into the API's camelCase network object, running the
+ * same client-side validation the server applies. Shared by sandbox creation
+ * and `Sandbox.updateNetwork` so both accept identical input.
+ */
+function buildNetworkPayload(
+  net: NetworkOptions,
+  internetAccessDisabled: boolean,
+): Record<string, unknown> {
+  validateAllowOutDomainsRequireDenyAll(net.allowOut, net.denyOut, internetAccessDisabled);
+  const wire: Record<string, unknown> = {};
+  if (net.allowOut !== undefined) wire.allowOut = net.allowOut;
+  if (net.denyOut !== undefined) wire.denyOut = net.denyOut;
+  if (net.allowPublicTraffic !== undefined) {
+    wire.allowPublicTraffic = net.allowPublicTraffic;
+  }
+  if (net.maskRequestHost !== undefined) {
+    wire.maskRequestHost = net.maskRequestHost;
+  }
+  if (net.rules) {
+    const normalized = normalizeRulesArg(net.rules);
+    if (normalized.length > 0) {
+      wire.rules = normalized.map(serializeRule);
+    }
+  }
+  return wire;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -377,27 +422,7 @@ export class Sandbox {
       payload.allow_internet_access = false;
     }
     if (options.network) {
-      const net = options.network;
-      validateAllowOutDomainsRequireDenyAll(
-        net.allowOut,
-        net.denyOut,
-        options.allowInternetAccess === false,
-      );
-      const wire: Record<string, unknown> = {};
-      if (net.allowOut !== undefined) wire.allowOut = net.allowOut;
-      if (net.denyOut !== undefined) wire.denyOut = net.denyOut;
-      if (net.allowPublicTraffic !== undefined) {
-        wire.allowPublicTraffic = net.allowPublicTraffic;
-      }
-      if (net.maskRequestHost !== undefined) {
-        wire.maskRequestHost = net.maskRequestHost;
-      }
-      if (net.rules) {
-        const normalized = normalizeRulesArg(net.rules);
-        if (normalized.length > 0) {
-          wire.rules = normalized.map(serializeRule);
-        }
-      }
+      const wire = buildNetworkPayload(options.network, options.allowInternetAccess === false);
       if (Object.keys(wire).length > 0) {
         payload.network = wire;
       }
@@ -614,6 +639,34 @@ export class Sandbox {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ timeout: seconds }),
+      },
+    );
+    await checkControlResponse(resp);
+  }
+
+  /**
+   * PUT /sandboxes/:id/network — replace the sandbox's egress policy.
+   *
+   * `network` is the complete desired policy, not a patch: an omitted field
+   * clears whatever the sandbox currently has. The new policy also applies to
+   * established connections, which are reset if it no longer permits them.
+   */
+  async updateNetwork(network: UpdateNetworkOptions = {}): Promise<void> {
+    const { allowInternetAccess, ...policy } = network;
+    const payload: Record<string, unknown> = buildNetworkPayload(
+      policy,
+      allowInternetAccess === false,
+    );
+    if (allowInternetAccess !== undefined) {
+      payload.allowInternetAccess = allowInternetAccess;
+    }
+    const resp = await controlFetch(
+      this.config,
+      `${this.config.apiUrl}/sandboxes/${this.sandboxId}/network`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
       },
     );
     await checkControlResponse(resp);

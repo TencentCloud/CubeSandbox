@@ -69,8 +69,8 @@ func resolveBaseSnapshotID(cb *cubeboxstore.CubeBox) string {
 // previous incarnations of CommitSandbox hard-failed instead, but with the
 // soft-dirty path live we prefer "produce a slightly larger but correct
 // snapshot" over "fail the user-facing commit when the lineage breaks".
-func resolveBaseMemoryObject(ctx context.Context, cb *cubeboxstore.CubeBox) (*storage.CowSnapshotObject, error) {
-	return resolveMemoryObjectFromSnapshotID(ctx, resolveBaseSnapshotID(cb))
+func resolveBaseMemoryObject(ctx context.Context, cb *cubeboxstore.CubeBox, backend string) (*storage.CowSnapshotObject, error) {
+	return resolveMemoryObjectFromSnapshotID(ctx, backend, resolveBaseSnapshotID(cb))
 }
 
 // resolveRestoreBaseSnapshotID returns the snapshot id whose memory image
@@ -111,18 +111,15 @@ func resolveRestoreBaseSnapshotID(cb *cubeboxstore.CubeBox) string {
 // resolveRestoreBaseMemoryObject is the pagemap_anon fallback's analogue
 // of resolveBaseMemoryObject: resolves the cubecow memory object for the
 // snapshot the VM was last restored from. Same sentinel-error contract.
-func resolveRestoreBaseMemoryObject(ctx context.Context, cb *cubeboxstore.CubeBox) (*storage.CowSnapshotObject, error) {
-	return resolveMemoryObjectFromSnapshotID(ctx, resolveRestoreBaseSnapshotID(cb))
+func resolveRestoreBaseMemoryObject(ctx context.Context, cb *cubeboxstore.CubeBox, backend string) (*storage.CowSnapshotObject, error) {
+	return resolveMemoryObjectFromSnapshotID(ctx, backend, resolveRestoreBaseSnapshotID(cb))
 }
 
-// resolveMemoryObjectFromSnapshotID is shared by both resolution paths:
-// catalog lookup + memory_vol/kind extraction + cubecow dev-path resolution.
-// Empty snapshotID yields the standard "not bound" sentinel.
-func resolveMemoryObjectFromSnapshotID(ctx context.Context, snapshotID string) (*storage.CowSnapshotObject, error) {
+func resolveMemoryObjectFromSnapshotID(ctx context.Context, backend, snapshotID string) (*storage.CowSnapshotObject, error) {
 	if snapshotID == "" {
 		return nil, fmt.Errorf("%w: sandbox is not bound to any snapshot or template", ErrNoBaseMemoryForIncremental)
 	}
-	entry, err := storage.GetLocalSnapshot(ctx, snapshotID)
+	entry, err := storage.GetLocalSnapshotFor(ctx, backend, snapshotID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: catalog lookup for %s: %v", ErrNoBaseMemoryForIncremental, snapshotID, err)
 	}
@@ -134,7 +131,7 @@ func resolveMemoryObjectFromSnapshotID(ctx context.Context, snapshotID string) (
 	if memoryKind == "" {
 		memoryKind = storage.CowKindVolume
 	}
-	devPath, err := storage.ResolveObjectPath(ctx, memoryVol, memoryKind)
+	devPath, err := storage.ResolveObjectPathFor(ctx, backend, memoryVol, memoryKind)
 	if err != nil {
 		return nil, fmt.Errorf("%w: resolve %s/%s: %v", ErrNoBaseMemoryForIncremental, memoryVol, memoryKind, err)
 	}
@@ -191,11 +188,12 @@ func prepareCommitMemoryArtifact(
 	cb *cubeboxstore.CubeBox,
 	templateID string,
 	memorySizeBytes uint64,
+	backend string,
 ) (*storage.CowSnapshotObject, string, error) {
 	// ─── Tier 1: soft-dirty over previous-snapshot base ───────────────
-	baseMemoryObject, baseErr := resolveBaseMemoryObject(ctx, cb)
+	baseMemoryObject, baseErr := resolveBaseMemoryObject(ctx, cb, backend)
 	if baseErr == nil {
-		memoryObject, err := storage.CommitMemoryFromBase(ctx, baseMemoryObject, templateID, memorySizeBytes)
+		memoryObject, err := storage.CommitMemoryFromBaseFor(ctx, backend, baseMemoryObject, templateID, memorySizeBytes)
 		if err != nil {
 			return nil, "", err
 		}
@@ -214,9 +212,9 @@ func prepareCommitMemoryArtifact(
 	// hand, was last reset at the VM's last restore — exactly the moment
 	// captured by the snapshot id stored in the restore-base label —
 	// which makes its bitmap consistent with this base.
-	restoreBase, restoreErr := resolveRestoreBaseMemoryObject(ctx, cb)
+	restoreBase, restoreErr := resolveRestoreBaseMemoryObject(ctx, cb, backend)
 	if restoreErr == nil {
-		memoryObject, err := storage.CommitMemoryFromBase(ctx, restoreBase, templateID, memorySizeBytes)
+		memoryObject, err := storage.CommitMemoryFromBaseFor(ctx, backend, restoreBase, templateID, memorySizeBytes)
 		if err != nil {
 			return nil, "", err
 		}
@@ -232,7 +230,7 @@ func prepareCommitMemoryArtifact(
 	// ─── Tier 3: full + fresh empty volume ────────────────────────────
 	stepLog.Warnf("CommitSandbox: both previous-snapshot base (%v) and last-restore base (%v) "+
 		"unavailable; falling back to full snapshot", baseErr, restoreErr)
-	memoryObject, err := storage.CreateMemoryVolume(ctx, templateID, memorySizeBytes)
+	memoryObject, err := storage.CreateMemoryVolumeFor(ctx, backend, templateID, memorySizeBytes)
 	if err != nil {
 		return nil, "", err
 	}

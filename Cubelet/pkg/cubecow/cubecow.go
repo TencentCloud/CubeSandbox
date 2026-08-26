@@ -12,14 +12,14 @@ package cubecow
 #include "cubecow.h"
 #include <stdlib.h>
 
-static inline int32_t cubecow_create_snapshot_go(
+static inline int32_t cubecow_create_snapshot_from_volume_go(
     CubecowEngineHandle engine,
     const char* source_name,
     const char* snapshot_name,
     int activate,
     char** out_device_path
 ) {
-    return cubecow_create_snapshot(engine, source_name, snapshot_name, activate != 0, out_device_path);
+    return cubecow_create_snapshot_from_volume(engine, source_name, snapshot_name, activate != 0, out_device_path);
 }
 */
 import "C"
@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"strings"
 	"unsafe"
 )
 
@@ -193,23 +194,20 @@ func (e *Engine) GetVolumeInfo(name string) (*Volume, error) {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 
-	var sizeBytes C.uint64_t
-	var cDevicePath *C.char
-	var snapCount C.int32_t
-	var cCreatedAt *C.char
-
-	rc := C.cubecow_get_volume_info(C.CubecowEngineHandle(ptr), cName, &sizeBytes, &cDevicePath, &snapCount, &cCreatedAt)
+	var cJSON *C.char
+	rc := C.cubecow_get_volume_info(C.CubecowEngineHandle(ptr), cName, &cJSON)
 	if rc != 0 {
 		return nil, makeError(rc)
 	}
-
-	return &Volume{
-		Name:          name,
-		SizeBytes:     uint64(sizeBytes),
-		DevicePath:    takeCString(cDevicePath),
-		SnapshotCount: int32(snapCount),
-		CreatedAt:     takeCString(cCreatedAt),
-	}, nil
+	raw := takeCString(cJSON)
+	var vol Volume
+	if err := json.Unmarshal([]byte(raw), &vol); err != nil {
+		return nil, fmt.Errorf("unmarshal cubecow_get_volume_info: %w", err)
+	}
+	if strings.TrimSpace(vol.Name) == "" {
+		vol.Name = name
+	}
+	return &vol, nil
 }
 
 func (e *Engine) GetVolumeBlockInfo(name string) (*VolumeBlockInfo, error) {
@@ -272,7 +270,7 @@ func (e *Engine) ListVolumes(pageSize uint64, pageToken string) (*ListVolumesRes
 	return result, nil
 }
 
-func (e *Engine) CreateSnapshot(sourceName, snapshotName string, activate bool) (string, error) {
+func (e *Engine) CreateSnapshotFromVolume(sourceName, snapshotName string, activate bool) (string, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -288,7 +286,30 @@ func (e *Engine) CreateSnapshot(sourceName, snapshotName string, activate bool) 
 	defer C.free(unsafe.Pointer(cSnapshotName))
 
 	var cDevicePath *C.char
-	rc := C.cubecow_create_snapshot_go(C.CubecowEngineHandle(ptr), cSourceName, cSnapshotName, cBoolInt(activate), &cDevicePath)
+	rc := C.cubecow_create_snapshot_from_volume_go(C.CubecowEngineHandle(ptr), cSourceName, cSnapshotName, cBoolInt(activate), &cDevicePath)
+	if rc != 0 {
+		return "", makeError(rc)
+	}
+	return takeCString(cDevicePath), nil
+}
+
+func (e *Engine) CreateVolumeFromSnapshot(sourceSnapshot, volumeName string) (string, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	ptr, err := e.openHandle()
+	if err != nil {
+		return "", err
+	}
+	defer e.mu.RUnlock()
+
+	cSource := C.CString(sourceSnapshot)
+	defer C.free(unsafe.Pointer(cSource))
+	cVolume := C.CString(volumeName)
+	defer C.free(unsafe.Pointer(cVolume))
+
+	var cDevicePath *C.char
+	rc := C.cubecow_create_volume_from_snapshot(C.CubecowEngineHandle(ptr), cSource, cVolume, &cDevicePath)
 	if rc != 0 {
 		return "", makeError(rc)
 	}
@@ -391,6 +412,50 @@ func (e *Engine) ListSnapshots(volumeName string, pageSize uint64, pageToken str
 	}
 	result.NextPageToken = takeCString(cNextToken)
 	return result, nil
+}
+
+func (e *Engine) ExportSnapshot(snapshotName string) (string, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	ptr, err := e.openHandle()
+	if err != nil {
+		return "", err
+	}
+	defer e.mu.RUnlock()
+
+	cName := C.CString(snapshotName)
+	defer C.free(unsafe.Pointer(cName))
+
+	var cUUID *C.char
+	rc := C.cubecow_export_snapshot(C.CubecowEngineHandle(ptr), cName, &cUUID)
+	if rc != 0 {
+		return "", makeError(rc)
+	}
+	return takeCString(cUUID), nil
+}
+
+func (e *Engine) ImportLvol(lvolName, exportUUID string) (string, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	ptr, err := e.openHandle()
+	if err != nil {
+		return "", err
+	}
+	defer e.mu.RUnlock()
+
+	cName := C.CString(lvolName)
+	defer C.free(unsafe.Pointer(cName))
+	cUUID := C.CString(exportUUID)
+	defer C.free(unsafe.Pointer(cUUID))
+
+	var cDevicePath *C.char
+	rc := C.cubecow_import_lvol(C.CubecowEngineHandle(ptr), cName, cUUID, &cDevicePath)
+	if rc != 0 {
+		return "", makeError(rc)
+	}
+	return takeCString(cDevicePath), nil
 }
 
 func (e *Engine) GetMetrics() (map[string]uint64, error) {

@@ -48,6 +48,7 @@ The release bundle is built **natively** for the build machine's architecture â€
 
 - Internet access is required to pull `mysql:8.0` and `redis:7-alpine` Docker images.
 - `mkcert` binary is bundled inside the release package and installed automatically when not already present on the target machine.
+- The S3 volume plugin is a static Go binary with a built-in S3 client, compiled at pack time from `examples/volume/s3`. Control nodes need no S3 command line tool; nodes that mount volumes still need `s3fs`. Ship a prebuilt binary with `ONE_CLICK_VOLUME_S3_BIN`.
 - CubeProxy image build uses Alpine and PyPI mirrors (configurable).
 
 ## Step 1: Build the Release Bundle
@@ -98,6 +99,7 @@ The bundle contains:
 - Kernel package (`cube-kernel-scf.zip`)
 - CubeProxy and CoreDNS Docker Compose templates
 - MySQL/Redis Docker Compose templates
+- S3 volume plugin binary (`{CubeMaster,Cubelet}/plugin/cube-volume-s3`) for Volume create/destroy and attach/detach
 - Installation scripts (`install.sh`, `install-compute.sh`, `down.sh`, `smoke.sh`)
 - Environment template (`env.example`)
 
@@ -234,9 +236,12 @@ sudo ./down.sh
 
 This stops all host processes (cubelet, cubemaster, cube-api), Docker containers (CubeProxy, CoreDNS, MySQL, Redis), and rolls back the `cube.app` DNS routing configuration.
 
-### Reinstall
+### Upgrade or reinstall
 
-To reinstall over an existing deployment, simply run `install.sh` again. The script automatically stops the existing deployment before installing.
+On a machine that already has CubeSandbox, running `install.sh` again defaults
+to a **config-preserving upgrade** (it keeps `/usr/local/services/cubetoolbox/.one-click.env`).
+On a TTY the installer asks `[Y/n]`; non-interactive runs upgrade without prompting.
+To wipe the existing configuration and fully reinstall, pass `--mode=install`.
 
 ### View Logs
 
@@ -285,6 +290,8 @@ You can also point to prebuilt binaries to skip compilation:
 | `ONE_CLICK_CUBESHIM_BIN` | Path to prebuilt containerd-shim-cube-rs binary |
 | `ONE_CLICK_CUBE_RUNTIME_BIN` | Path to prebuilt cube-runtime binary |
 | `ONE_CLICK_MKCERT_BIN` | Override path to mkcert binary at build time (default: bundled `assets/bin/mkcert`) |
+| `ONE_CLICK_VOLUME_S3_BUILD_MODE` | Build mode for the S3 volume plugin (default `local`) |
+| `ONE_CLICK_VOLUME_S3_BIN` | Override path to a prebuilt `cube-volume-s3`; skips the pack-time build |
 
 Build-performance knobs (all optional):
 
@@ -301,7 +308,7 @@ Build-performance knobs (all optional):
 |----------|---------|-------------|
 | `ONE_CLICK_DEPLOY_ROLE` | `control` | Deployment role: `control` for single-node (default). For compute-only nodes, see [Multi-Node Cluster Deployment](./multi-node-deploy.md) |
 | `ONE_CLICK_CONTROL_PLANE_IP` | empty | Compute-node mode only. See [Multi-Node Cluster Deployment](./multi-node-deploy.md#step-2-configure-environment-variables) |
-| `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | empty | Compute-node mode only. See [Multi-Node Cluster Deployment](./multi-node-deploy.md#step-2-configure-environment-variables) |
+| `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` | empty | Compute-node mode only. Cubelet registers against CubeOps on port 3010. See [Multi-Node Cluster Deployment](./multi-node-deploy.md#step-2-configure-environment-variables) |
 | `CUBE_SANDBOX_NODE_IP` | auto-detected from `eth0` | Node's primary network interface IP. Auto-detected if unset; set explicitly if your interface differs. |
 | `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18` | cubevs local network CIDR for sandbox IP allocation. IPv4 CIDR format (e.g., `10.100.0.0/18`), mask range /16â€“/24. Conflicts with host interfaces, routes, or resolver nameservers abort installation during preflight. Uses the fixed default when unset. |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | Set to `1` to skip CIDR conflict detection for the default or custom sandbox CIDR (not recommended). |

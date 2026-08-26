@@ -5,7 +5,9 @@ Dockerfiles used by CubeSandbox CI.
 ## `Dockerfile.builder`
 
 Toolchain image used to compile CubeSandbox components (Go, Rust, kernel
-tooling, etc.). Published as `ghcr.io/tencentcloud/cubesandbox-builder`
+tooling, etc.). Also prebuilds CubeS3lvol's SPDK + AWS CRT under `/opt/s3lvol-*`
+(see [`CubeS3lvol/deps/README.md`](../CubeS3lvol/deps/README.md)). Published as
+`ghcr.io/tencentcloud/cubesandbox-builder`
 by [`.github/workflows/build-builder-image.yml`](../.github/workflows/build-builder-image.yml).
 
 ## `Dockerfile.cube-base` (+ `cube-entrypoint.sh`)

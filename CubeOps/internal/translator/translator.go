@@ -14,6 +14,7 @@ package translator
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -48,6 +49,8 @@ type CMSandboxListItem struct {
 	EndAt       json.RawMessage   `json:"end_at"`
 	CPUCount    int               `json:"cpu_count"`
 	MemoryMB    int               `json:"memory_mb"`
+	CPUMilli    int               `json:"cpu_milli"`
+	MemoryMiB   int               `json:"memory_mib"`
 	TemplateID  string            `json:"template_id"`
 	Annotations map[string]string `json:"annotations"`
 	Labels      map[string]string `json:"labels"`
@@ -74,6 +77,8 @@ type CMSandboxContainer struct {
 	CreateAt    int64  `json:"create_at"` // nanoseconds
 	CPU         string `json:"cpu"`       // e.g. "2000m"
 	Mem         string `json:"mem"`       // e.g. "2048Mi"
+	CPUMilli    int    `json:"cpu_milli"`
+	MemoryMiB   int    `json:"memory_mib"`
 	Type        string `json:"type"`
 	PauseAt     int64  `json:"pause_at"`
 }
@@ -142,15 +147,17 @@ func SnakeToCamel(s string) string {
 
 // SandboxStateFromInt converts CubeMaster integer status to frontend state string.
 // CubeMaster: 0=created, 1=running, 2=exited/stopped, 3=unknown, 4=pausing, 5=paused
-// Frontend enum: "running" | "paused" | "pausing"
+// Frontend enum: "running" | "paused" | "pausing" | "unknown"
 func SandboxStateFromInt(s int) string {
 	switch s {
+	case 1:
+		return "running"
 	case 4:
 		return "pausing"
 	case 5:
 		return "paused"
 	default:
-		return "running"
+		return "unknown"
 	}
 }
 
@@ -164,16 +171,14 @@ func SandboxStateFromRaw(raw json.RawMessage) string {
 			return "paused"
 		case "pausing":
 			return "pausing"
-		case "1":
-			return "running"
-		case "2":
+		case "running", "1":
 			return "running"
 		case "4":
 			return "pausing"
 		case "5":
 			return "paused"
 		default:
-			return "running"
+			return "unknown"
 		}
 	}
 	// Try int.
@@ -181,21 +186,85 @@ func SandboxStateFromRaw(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &n) == nil {
 		return SandboxStateFromInt(n)
 	}
-	return "running"
+	return "unknown"
 }
 
-// ParseMemoryMB converts "2048Mi" → 2048, "2048MB" → 2048, "2G" → 2048.
+// ParseMemoryMB converts a Kubernetes-style memory quantity to MiB. The
+// function name and the legacy memoryMB wire field are retained for
+// compatibility with existing callers; the value is always MiB regardless of
+// the input suffix (Mi, Gi, M, G, …). Mirrors CubeAPI's parse_mem_mib so the
+// list and detail paths report identical memory for the same quantity.
 func ParseMemoryMB(s string) int {
-	s = strings.TrimSpace(s)
-	s = strings.TrimSuffix(s, "Mi")
-	s = strings.TrimSuffix(s, "MI")
-	s = strings.TrimSuffix(s, "MB")
-	s = strings.TrimSuffix(s, "M")
-	n, err := strconv.Atoi(s)
-	if err != nil {
+	value := strings.TrimSpace(s)
+	if value == "" {
 		return 0
 	}
-	return n
+
+	// Two-letter suffixes must be matched before bare SI letters (Mi vs M).
+	number, multiplier := value, 0.0
+	switch {
+	case strings.HasSuffix(value, "Ki"):
+		number, multiplier = strings.TrimSuffix(value, "Ki"), 1024.0
+	case strings.HasSuffix(value, "Mi"):
+		number, multiplier = strings.TrimSuffix(value, "Mi"), 1024.0*1024.0
+	case strings.HasSuffix(value, "Gi"):
+		number, multiplier = strings.TrimSuffix(value, "Gi"), 1024.0*1024.0*1024.0
+	case strings.HasSuffix(value, "Ti"):
+		number, multiplier = strings.TrimSuffix(value, "Ti"), 1024.0*1024.0*1024.0*1024.0
+	case strings.HasSuffix(value, "KB"):
+		number, multiplier = strings.TrimSuffix(value, "KB"), 1000.0
+	case strings.HasSuffix(value, "MB"):
+		number, multiplier = strings.TrimSuffix(value, "MB"), 1_000_000.0
+	case strings.HasSuffix(value, "GB"):
+		number, multiplier = strings.TrimSuffix(value, "GB"), 1_000_000_000.0
+	case strings.HasSuffix(value, "TB"):
+		number, multiplier = strings.TrimSuffix(value, "TB"), 1_000_000_000_000.0
+	case strings.HasSuffix(value, "K"):
+		number, multiplier = strings.TrimSuffix(value, "K"), 1000.0
+	case strings.HasSuffix(value, "M"):
+		number, multiplier = strings.TrimSuffix(value, "M"), 1_000_000.0
+	case strings.HasSuffix(value, "G"):
+		number, multiplier = strings.TrimSuffix(value, "G"), 1_000_000_000.0
+	case strings.HasSuffix(value, "T"):
+		number, multiplier = strings.TrimSuffix(value, "T"), 1_000_000_000_000.0
+	default:
+		number, multiplier = value, 1.0
+	}
+
+	n, err := strconv.ParseFloat(number, 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	bytes := n * multiplier
+	mib := int(math.Ceil(bytes / (1024.0 * 1024.0)))
+	if mib <= 0 {
+		return 0
+	}
+	const maxInt32 = 2_147_483_647
+	if mib > maxInt32 {
+		return maxInt32
+	}
+	return mib
+}
+
+// ParseCPUMilli converts a Kubernetes-style CPU quantity to millicores.
+func ParseCPUMilli(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	if strings.HasSuffix(s, "m") {
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "m"))
+		if err != nil || n < 0 {
+			return 0
+		}
+		return n
+	}
+	cores, err := strconv.ParseFloat(s, 64)
+	if err != nil || cores < 0 {
+		return 0
+	}
+	return int(cores*1000 + 0.5)
 }
 
 // NanosToISO converts Unix nanoseconds to RFC 3339 string.
@@ -282,11 +351,24 @@ func TransformSandboxList(raw json.RawMessage) interface{} {
 		if startedAt == "" && item.CreateAt > 0 {
 			startedAt = NanosToISO(item.CreateAt)
 		}
+		cpuMilli := item.CPUMilli
+		if cpuMilli == 0 {
+			cpuMilli = item.CPUCount * 1000
+		}
+		cpuCount := item.CPUCount
+		if cpuCount == 0 && cpuMilli > 0 {
+			cpuCount = cpuMilli / 1000
+		}
+		memoryMiB := item.MemoryMiB
+		if memoryMiB == 0 {
+			memoryMiB = item.MemoryMB
+		}
 		entry := map[string]interface{}{
 			"sandboxID":   item.SandboxID,
 			"clientID":    item.HostID,
-			"cpuCount":    fmt.Sprintf("%dm", item.CPUCount*1000), // int cores → K8s millicores string
-			"memoryMB":    item.MemoryMB,
+			"cpuCount":    cpuCount,
+			"cpuMilli":    cpuMilli,
+			"memoryMB":    memoryMiB,
 			"startedAt":   startedAt,
 			"endAt":       RawToISO(item.EndAt),
 			"state":       SandboxStateFromRaw(item.Status),
@@ -331,12 +413,22 @@ func TransformSandboxDetail(raw json.RawMessage) interface{} {
 		primary = &item.Containers[0]
 	}
 
-	cpuCount := ""
+	cpuCount := 0
+	cpuMilli := 0
 	memoryMB := 0
 	startedAt := ""
 	if primary != nil {
-		cpuCount = primary.CPU // pass through K8s-style millicores string (e.g. "2000m", "128m")
-		memoryMB = ParseMemoryMB(primary.Mem)
+		// Prefer CubeMaster's exact millicore/MiB values; fall back to parsing
+		// the raw container spec strings for older CubeMaster responses.
+		cpuMilli = primary.CPUMilli
+		if cpuMilli == 0 {
+			cpuMilli = ParseCPUMilli(primary.CPU)
+		}
+		cpuCount = cpuMilli / 1000
+		memoryMB = primary.MemoryMiB
+		if memoryMB == 0 {
+			memoryMB = ParseMemoryMB(primary.Mem)
+		}
 		startedAt = NanosToISO(primary.CreateAt)
 	}
 
@@ -349,6 +441,7 @@ func TransformSandboxDetail(raw json.RawMessage) interface{} {
 		"sandboxID":   item.SandboxID,
 		"clientID":    item.HostID,
 		"cpuCount":    cpuCount,
+		"cpuMilli":    cpuMilli,
 		"memoryMB":    memoryMB,
 		"startedAt":   startedAt,
 		"endAt":       RawToISO(item.EndAt),

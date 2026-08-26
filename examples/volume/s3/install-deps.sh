@@ -4,25 +4,24 @@
 #
 # install-deps.sh — install host tools for the S3 Volume Plugin.
 #
-#   --s3fs   FUSE mount driver          (Cubelet nodes; attach/detach)
-#   --aws    AWS CLI v2                 (CubeMaster nodes; create/destroy)
-#   --jq     JSON parsing               (both; binary plugin stdout)
-#   --all    everything above           (single-host deployments)
+#   --s3fs   FUSE mount driver   (nodes that mount volumes; attach/detach)
+#   --jq     JSON parsing        (optional; for reading plugin output by hand)
+#   --all    everything above
 #   --check-only   verify, install nothing
 #
-# All three tools ship for amd64 and arm64, so this script works unchanged on
-# ARM64 Cube clusters.
+# The plugin itself is a static Go binary with a built-in S3 client, so
+# create/destroy need no command line tool and a control-only node needs nothing
+# from this script. Both tools ship for amd64 and arm64, so this script works
+# unchanged on ARM64 Cube clusters.
 #
 # Usage:
-#   sudo ./install-deps.sh --s3fs --jq        # Cubelet node
-#   sudo ./install-deps.sh --aws --jq         # CubeMaster node
-#   sudo ./install-deps.sh --all              # both roles on one host
-#   ./install-deps.sh --all --check-only      # no root needed
+#   sudo ./install-deps.sh --s3fs            # node that mounts volumes
+#   sudo ./install-deps.sh --all             # plus jq for manual debugging
+#   ./install-deps.sh --all --check-only     # no root needed
 
 set -euo pipefail
 
 WANT_S3FS=0
-WANT_AWS=0
 WANT_JQ=0
 CHECK_ONLY=0
 
@@ -32,17 +31,16 @@ die()  { printf '[s3-deps] ERROR: %s\n' "$*" >&2; exit 1; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --s3fs)       WANT_S3FS=1; shift ;;
-        --aws)        WANT_AWS=1;  shift ;;
         --jq)         WANT_JQ=1;   shift ;;
-        --all)        WANT_S3FS=1; WANT_AWS=1; WANT_JQ=1; shift ;;
+        --all)        WANT_S3FS=1; WANT_JQ=1; shift ;;
         --check-only) CHECK_ONLY=1; shift ;;
         -h|--help)    sed -n '4,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)            die "unknown argument: $1" ;;
     esac
 done
 
-if [[ "$WANT_S3FS$WANT_AWS$WANT_JQ" == "000" ]]; then
-    die "nothing selected; pass --s3fs / --aws / --jq / --all (see --help)"
+if [[ "$WANT_S3FS$WANT_JQ" == "00" ]]; then
+    die "nothing selected; pass --s3fs / --jq / --all (see --help)"
 fi
 
 if [[ "$CHECK_ONLY" -eq 0 && "$(id -u)" -ne 0 ]]; then
@@ -110,27 +108,6 @@ install_s3fs() {
     esac
 }
 
-install_aws() {
-    log "install AWS CLI v2"
-    local awszip url tmp
-    case "$ARCH" in
-        x86_64|amd64)  url="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" ;;
-        aarch64|arm64) url="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" ;;
-        *)             die "unsupported architecture for AWS CLI: ${ARCH}" ;;
-    esac
-
-    command -v unzip >/dev/null 2>&1 || { pkg_refresh; pkg_install unzip; }
-    command -v curl  >/dev/null 2>&1 || { pkg_refresh; pkg_install curl; }
-
-    tmp="$(mktemp -d)"
-    awszip="${tmp}/awscliv2.zip"
-    log "downloading ${url}"
-    curl -fsSL "$url" -o "$awszip"
-    unzip -q "$awszip" -d "$tmp"
-    "${tmp}/aws/install" --update
-    rm -rf "$tmp"
-}
-
 # ---------------------------------------------------------------------------
 # Checks — run on the node that needs the tool
 # ---------------------------------------------------------------------------
@@ -159,14 +136,6 @@ check_s3fs() {
     fi
 }
 
-check_aws() {
-    if command -v aws >/dev/null 2>&1; then
-        log "OK  aws       $(aws --version 2>&1)"
-    else
-        log "MISSING aws"; FAILED=1
-    fi
-}
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -174,13 +143,11 @@ check_aws() {
 if [[ "$CHECK_ONLY" -eq 0 ]]; then
     if [[ "$WANT_JQ"   -eq 1 ]]; then install_jq;   fi
     if [[ "$WANT_S3FS" -eq 1 ]]; then install_s3fs; fi
-    if [[ "$WANT_AWS"  -eq 1 ]]; then install_aws;  fi
 fi
 
 log "--- verification ---"
 if [[ "$WANT_JQ"   -eq 1 ]]; then check_jq;   fi
 if [[ "$WANT_S3FS" -eq 1 ]]; then check_s3fs; fi
-if [[ "$WANT_AWS"  -eq 1 ]]; then check_aws;  fi
 
 if [[ "$FAILED" -ne 0 ]]; then
     die "some dependencies are missing (see above)"

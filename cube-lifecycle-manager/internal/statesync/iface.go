@@ -14,6 +14,9 @@ import (
 type stateStore interface {
 	GetState(ctx context.Context, sandboxID string) (string, bool, error)
 	SetState(ctx context.Context, sandboxID, state string, ttl time.Duration) error
+	// WriteState is the notify-emitting equivalent of SetState. See
+	// internal/resumer/iface.go for the contract.
+	WriteState(ctx context.Context, sandboxID, state string, ttl time.Duration) error
 }
 
 // stateNotifier is the subset of proxypush.Client we use.

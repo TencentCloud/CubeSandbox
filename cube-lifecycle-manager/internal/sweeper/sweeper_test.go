@@ -69,6 +69,17 @@ func (f *fakeStore) ClearState(_ context.Context, sid string) error {
 	return nil
 }
 
+// WriteState / ClearStateNotify are the notify-emitting equivalents. The
+// sweeper tests don't inspect notify payloads yet, so we simply forward
+// to the legacy SetState / ClearState behaviour.
+func (f *fakeStore) WriteState(ctx context.Context, sid, state string, ttl time.Duration) error {
+	return f.SetState(ctx, sid, state, ttl)
+}
+
+func (f *fakeStore) ClearStateNotify(ctx context.Context, sid string) error {
+	return f.ClearState(ctx, sid)
+}
+
 func (f *fakeStore) state(sid string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()

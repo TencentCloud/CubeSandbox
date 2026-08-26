@@ -290,6 +290,21 @@ class TracingSandboxAdapter(SandboxAdapter):
             output=lambda token: {"token_present": bool(token)},
         )
 
+    def update_network(self, network: dict | None = None) -> None:
+        return self._trace.capture(
+            "update_network",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                # The policy itself, not just its keys: when a case asserts that
+                # a connection was or was not torn down, the trace has to show
+                # which policy caused it.
+                "network": network,
+            },
+            lambda: self._wrapped.update_network(network),
+            output=lambda _: {"updated": True},
+        )
+
     def kill(self) -> None:
         return self._trace.capture(
             "kill",

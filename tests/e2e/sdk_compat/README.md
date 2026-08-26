@@ -358,9 +358,9 @@ Optional:
   `--run-e2e`, so the hermetic `framework` gate stays serial.
 - `SDK_E2E_TEMPLATE_BUILD_CONCURRENCY`: max concurrent live template builds
   across xdist workers. Defaults to `1` (builds fully serialized so results match
-  a serial run); values `< 1` or non-integer fall back to `1`. When the value is
-  at least the worker count the throttle is skipped. POSIX-only (a no-op without
-  `fcntl`). The throttle is namespaced per-UID, not per-run: two concurrent
+  a serial run); values `< 1` or non-integer fall back to `1`. POSIX-only (a
+  no-op without `fcntl`). The throttle is namespaced per-UID, not per-run: two
+  concurrent
   `--run-e2e` jobs of the same user on one host share the slots and serialize
   their builds against each other. This is intentional -- both jobs contend on
   the one shared build host -- and the `SDK_E2E_TEMPLATE_BUILD_WAIT` ceiling
@@ -478,7 +478,9 @@ Current capability domains:
 - `cases/commands/`: stdout, stderr, exit code, env, special characters, multiline output, missing command.
 - `cases/filesystem/`: read/write, overwrite, multiline content, file API and shell interoperability.
 - `cases/run_code/`: expression text, stdout, kernel state, Python error reporting.
-- `cases/network/`: create-time network policy for allow/deny and public egress access.
+- `cases/network/`: create-time network policy for allow/deny and public egress access,
+  plus in-place policy updates on a running sandbox including re-evaluation of
+  already-established connections (`test_policy_update.py`, CubeSandbox only).
 - `cases/concurrency/`: simultaneous multi-sandbox isolation.
 - `cases/host-mount/`: host-directory mount extension — happy path plus create-time
   validation, runtime bind-mount failures, and cross-sandbox sharing boundary cases.

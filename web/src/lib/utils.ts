@@ -14,6 +14,29 @@ export function formatBytes(mib: number | undefined | null): string {
   return `${(mib / 1024).toFixed(1)} GiB`;
 }
 
+export function formatCpu(cpuMilli?: number | null, cpuCount?: number | string | null): string {
+  if (cpuMilli == null && cpuCount == null) return '—';
+  // Prefer the exact millicore value; fall back to cpuCount. The fallback
+  // tolerates the legacy K8s-style string ("2000m") older CubeOps returned,
+  // which would otherwise render as "NaNm" through arithmetic.
+  let milli = cpuMilli && cpuMilli > 0 ? cpuMilli : 0;
+  if (milli <= 0 && cpuCount != null) {
+    milli = cpuCountToMilli(cpuCount);
+  }
+  if (milli <= 0) return '0';
+  if (milli % 1000 === 0) return `${milli / 1000}C`;
+  return `${milli}m`;
+}
+
+function cpuCountToMilli(cpuCount: number | string): number {
+  if (typeof cpuCount === 'string') {
+    const s = cpuCount.trim();
+    if (s.endsWith('m')) return Number(s.slice(0, -1)) || 0;
+    return Number(s) * 1000 || 0;
+  }
+  return cpuCount * 1000;
+}
+
 export function formatRelative(ts?: string | number | null, locale?: string): string {
   if (!ts) return '—';
   const d = new Date(ts);

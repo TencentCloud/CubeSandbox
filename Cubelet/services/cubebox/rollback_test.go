@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 )
 
 func TestRollbackDisksFromSnapshotSpecReplacesCurrentRootfs(t *testing.T) {
@@ -63,6 +64,43 @@ func TestSnapshotStateDirUsesSnapshotSubdir(t *testing.T) {
 	assert.Equal(t, "/snapshots/s1/snapshot", snapshotStateDir("/snapshots/s1"))
 	assert.Equal(t, "/snapshots/s1/snapshot", snapshotStateDir("/snapshots/s1/snapshot"))
 	assert.Equal(t, "file:///snapshots/s1", snapshotStateDir("file:///snapshots/s1"))
+}
+
+func TestDeactivateRollbackPackageObjectsHandlesNil(t *testing.T) {
+	require.NotPanics(t, func() {
+		deactivateRollbackPackageObjects(context.Background(), "s3", nil, false)
+	})
+}
+
+func TestDeactivateRollbackPackageObjectsKeepsMemoryAfterRestore(t *testing.T) {
+	refs := &storage.CowRollbackSnapshotRefs{
+		Rootfs: &storage.CowSnapshotObject{Name: "tpl-snap-1-rootfs", Kind: "snapshot"},
+		Memory: &storage.CowSnapshotObject{Name: "tpl-snap-1-memory-snap", Kind: "snapshot"},
+	}
+
+	for _, tc := range []struct {
+		name     string
+		backend  string
+		restored bool
+		want     []string
+	}{
+		{name: "s3 restore succeeded keeps memory attached", backend: "s3", restored: true, want: []string{"tpl-snap-1-rootfs"}},
+		{name: "s3 restore failed releases both", backend: "s3", restored: false, want: []string{"tpl-snap-1-memory-snap", "tpl-snap-1-rootfs"}},
+		{name: "xfs releases both as before", backend: "xfs", restored: true, want: []string{"tpl-snap-1-memory-snap", "tpl-snap-1-rootfs"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			original := deactivateRollbackObject
+			deactivateRollbackObject = func(_ context.Context, _, name, _ string) error {
+				got = append(got, name)
+				return nil
+			}
+			defer func() { deactivateRollbackObject = original }()
+
+			deactivateRollbackPackageObjects(context.Background(), tc.backend, refs, tc.restored)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
 
 func newCubeboxWithStatusForTest(id string, status cubeboxstore.Status) *cubeboxstore.CubeBox {

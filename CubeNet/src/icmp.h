@@ -37,10 +37,12 @@ static __always_inline void update_icmp_session(enum ip_conntrack_dir dir,
 static __always_inline bool create_icmp_sessions(struct __sk_buff *skb,
 						 struct session_key *ekey,
 						 __u64 now_ns, __u32 vm_ifindex,
-						 struct snat_ip *snat_ip, __u16 snat_id)
+						 struct snat_ip *snat_ip, __u16 snat_id,
+						 __u32 policy_version)
 {
 	return create_nat_session(skb, ekey, now_ns, vm_ifindex, snat_ip, snat_id,
-				  ICMP_CT_UNREPLIED, SNAT_PACKET, L7_SCHEME_NONE);
+				  ICMP_CT_UNREPLIED, SNAT_PACKET, L7_SCHEME_NONE,
+				  policy_version);
 }
 
 #endif /* __ICMP_H */

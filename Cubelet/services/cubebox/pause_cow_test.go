@@ -66,6 +66,22 @@ func TestStampPauseSnapshotID(t *testing.T) {
 	if sb.Annotations[constants.MasterAnnotationPauseSnapshotID] != "snap-abc123def456abc123def456" {
 		t.Fatalf("annotations=%v", sb.Annotations)
 	}
+	if got := stampedPauseSnapshotID(sb); got != "snap-abc123def456abc123def456" {
+		t.Fatalf("stampedPauseSnapshotID=%q", got)
+	}
+}
+
+func TestReplacedLivePauseSnapshotID(t *testing.T) {
+	t.Parallel()
+	if got := replacedLivePauseSnapshotID("", "snap-b00000000000000000000000001"); got != "" {
+		t.Fatalf("first pause has no previous live snap, got %q", got)
+	}
+	if got := replacedLivePauseSnapshotID("snap-a00000000000000000000000001", "snap-a00000000000000000000000001"); got != "" {
+		t.Fatalf("same id is not a replacement, got %q", got)
+	}
+	if got := replacedLivePauseSnapshotID("snap-a00000000000000000000000001", "snap-b00000000000000000000000001"); got != "snap-a00000000000000000000000001" {
+		t.Fatalf("resume leftover should GC after next pause, got %q", got)
+	}
 }
 
 func TestPauseSnapshotIDForGCCatalogMissUsesPauseLabel(t *testing.T) {
@@ -148,5 +164,21 @@ func TestPauseSnapIDToGCOnDestroyPausingAndRunning(t *testing.T) {
 	stampPauseSnapshotID(running, "snap-leftover0000000000000001")
 	if got := pauseSnapIDToGCOnDestroy(&cubebox.DestroyCubeSandboxRequest{SandboxID: running.ID}, running); got != "snap-leftover0000000000000001" {
 		t.Fatalf("RUNNING leftover pause snap should still GC, got %q", got)
+	}
+}
+
+func TestPauseCatalogBackendPrefersAnnotationThenLabel(t *testing.T) {
+	t.Parallel()
+	sb := newCubeboxWithStatusForTest("sb-be", cubeboxstore.Status{})
+	if got := pauseCatalogBackend(sb); got != "" {
+		t.Fatalf("empty backend=%q", got)
+	}
+	sb.AddLabels(map[string]string{constants.MasterAnnotationStorageBackend: "s3"})
+	if got := pauseCatalogBackend(sb); got != "s3" {
+		t.Fatalf("label backend=%q", got)
+	}
+	sb.AddAnnotations(map[string]string{constants.MasterAnnotationStorageBackend: "xfs"})
+	if got := pauseCatalogBackend(sb); got != "xfs" {
+		t.Fatalf("annotation should win, got %q", got)
 	}
 }

@@ -305,22 +305,15 @@ func TestGenerateRestoreVirtiofsOptOrdersParentBeforeNestedChildForAllAccessMode
 	}
 }
 
-func TestGenerateRestoreVirtiofsOptSkipsPauseResume(t *testing.T) {
+func TestGenerateRestoreVirtiofsOptSkipsGuestMountRestore(t *testing.T) {
 	t.Parallel()
 
-	flowOpts := &workflow.CreateContext{
-		ReqInfo: &cubebox.RunCubeSandboxRequest{
-			Annotations: map[string]string{
-				constants.MasterAnnotationPauseSnapshotID:   "snap-pause1",
-				constants.MasterAnnotationRuntimeSnapshotID: "snap-pause1",
-			},
-		},
-		StorageInfo: &storage.StorageInfo{
-			HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{
-				"writable": {
-					VolumeName: "writable",
-					BindPath:   "/data/cubelet/hostdir/sandbox/writable",
-				},
+	storageInfo := &storage.StorageInfo{
+		HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{
+			"writable": {
+				VolumeName: "writable",
+				BindPath:   "/data/cubelet/hostdir/sandbox/writable",
+				ShareDir:   "/data/cube-shared",
 			},
 		},
 	}
@@ -329,8 +322,39 @@ func TestGenerateRestoreVirtiofsOptSkipsPauseResume(t *testing.T) {
 			{Name: "writable", ContainerPath: "/mnt/data"},
 		},
 	}
+	cases := []struct {
+		name        string
+		annotations map[string]string
+	}{
+		{
+			name: "pause resume",
+			annotations: map[string]string{
+				constants.MasterAnnotationPauseSnapshotID:   "snap-pause1",
+				constants.MasterAnnotationRuntimeSnapshotID: "snap-pause1",
+			},
+		},
+		{
+			name: "fromsnap",
+			annotations: map[string]string{
+				constants.MasterAnnotationRuntimeSnapshotID: "snap-runtime1",
+			},
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			flowOpts := &workflow.CreateContext{
+				ReqInfo:     &cubebox.RunCubeSandboxRequest{Annotations: tt.annotations},
+				StorageInfo: storageInfo,
+			}
+			specOpts, err := generateRestoreVirtiofsOpt(context.Background(), flowOpts, containerReq)
+			require.NoError(t, err)
+			require.Empty(t, specOpts)
 
-	specOpts, err := generateRestoreVirtiofsOpt(context.Background(), flowOpts, containerReq)
-	require.NoError(t, err)
-	require.Empty(t, specOpts)
+			sandboxOpts, err := generateSandboxVirtiofsOpt(context.Background(), flowOpts, false)
+			require.NoError(t, err)
+			spec := applySpecOpts(t, context.Background(), sandboxOpts)
+			require.NotEmpty(t, spec.Annotations[constants.AnnotationVirtiofs])
+		})
+	}
 }

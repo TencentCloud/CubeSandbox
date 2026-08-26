@@ -12,8 +12,8 @@ CubeSandbox is installed.
 Release: {{ .Release.Name }}
 Namespace: {{ .Release.Namespace }}
 
-Persistence (CubeMaster / MySQL / Redis):
-{{- if or .Values.controlPlane.master.persistence.hostPath .Values.mysql.persistence.hostPath .Values.redis.persistence.hostPath }}
+Persistence (CubeMaster / MySQL / Redis / MinIO):
+{{- if or .Values.controlPlane.master.persistence.hostPath .Values.mysql.persistence.hostPath .Values.redis.persistence.hostPath ((.Values.minio).persistence.hostPath) }}
   mode: hostPath (at least one component)
 {{- else }}
 {{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" .Values.controlPlane.master.persistence) }}
@@ -78,6 +78,12 @@ Status:
 {{- if .Values.cubeNode.enabled }}
   Cubevs CIDR: {{ .Values.cubeNode.network.cidr | default "packaged Cubelet default" }} (preflight already ran this install/upgrade)
 {{- end }}
+{{- if eq (include "cube.minioBuiltinEnabled" .) "true" }}
+  MinIO: chart-managed {{ include "cube.minioName" . }}:{{ .Values.minio.port | default 9000 }}
+  S3 volume plugin: {{ include "cube.volumeS3EffectiveEndpoint" . }} (filled from MinIO)
+{{- else if eq (include "cube.volumeS3Enabled" .) "true" }}
+  S3 volume plugin: {{ include "cube.volumeS3EffectiveEndpoint" . | default "existing Secret" }}
+{{- end }}
 {{- if eq (include "cube.startupGateEnabled" .) "true" }}
   PVM startup gate: on
 {{- end }}
@@ -110,7 +116,11 @@ Useful commands:
   kubectl exec -n {{ .Release.Namespace }} <cube-node-pod> -- cubecli ls
 {{- if eq (include "cube.cubemastercliEnabled" .) "true" }}
   kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- cubemastercli --help
-  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" cubebox list'
+{{- end }}
+{{- if eq (include "cube.cubeopscliEnabled" .) "true" }}
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- cubeopscli --help
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "cube.cubemastercliName" . }} -- sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
 {{- end }}
   helm test {{ .Release.Name }} -n {{ .Release.Namespace }} --timeout 20m
 {{- if .Values.diagnostics.enabled }}

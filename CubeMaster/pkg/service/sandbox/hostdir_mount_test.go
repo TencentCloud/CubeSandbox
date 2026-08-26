@@ -233,3 +233,41 @@ func TestInjectHostDirMountsSetsHostPathOnVolumeMount(t *testing.T) {
 		t.Fatalf("unexpected mount: %+v", mount)
 	}
 }
+
+func TestCreateRequestHasHostMount(t *testing.T) {
+	t.Parallel()
+	if createRequestHasHostMount(nil) {
+		t.Fatal("nil spec must not pin")
+	}
+	if createRequestHasHostMount(&types.CreateCubeSandboxReq{}) {
+		t.Fatal("empty spec must not pin")
+	}
+	if createRequestHasHostMount(&types.CreateCubeSandboxReq{
+		Annotations: map[string]string{AnnotationHostDirMount: "[]"},
+	}) {
+		t.Fatal("empty host-mount list must not pin")
+	}
+	if !createRequestHasHostMount(&types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			AnnotationHostDirMount: `[{"hostPath":"/data/shared/a","mountPath":"/mnt"}]`,
+		},
+	}) {
+		t.Fatal("host-mount annotation must pin")
+	}
+	if !createRequestHasHostMount(&types.CreateCubeSandboxReq{
+		Annotations: map[string]string{AnnotationHostDirMount: `not-json`},
+	}) {
+		t.Fatal("malformed host-mount annotation must pin")
+	}
+	if !createRequestHasHostMount(&types.CreateCubeSandboxReq{
+		Volumes: []*types.Volume{{
+			VolumeSource: &types.VolumeSource{
+				HostDirVolumeSources: &types.HostDirVolumeSources{
+					VolumeSources: []*types.HostDirSource{{HostPath: "/data/shared/a"}},
+				},
+			},
+		}},
+	}) {
+		t.Fatal("HostDir volume must pin")
+	}
+}

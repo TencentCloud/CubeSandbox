@@ -3,7 +3,10 @@ common:
   http_readtimeout: 120
   http_writetimeout: 360
   http_idletimeout: 360
-  sync_meta_data_interval: 30s
+  {{- if or .Values.cubeOps.enabled .Values.externalControlPlane.enabled }}
+  cube_ops_addr: "http://{{ include "cube.opsEndpoint" . }}"
+  {{- end }}
+  sync_meta_data_interval: 1s
   sync_metric_data_interval: 1s
   collect_metric_interval: 1s
   default_headless_service_nodes_num: 1
@@ -78,9 +81,13 @@ scheduler:
       - "template_locality"
       - "realtime_create_num"
 
-# Volume plugin (COS binary). Credentials: Secret-mounted volume-cos.conf
-# next to the binary (see values.volumeCos).
+# Volume plugin (S3 / COS binary). Credentials: Secret-mounted.
+# List order sets the default driver when Volume.create() omits `driver`;
+# S3 is first so the default install (bundled MinIO) works out of the box.
 volume_plugins:
+  - name: s3
+    type: binary
+    binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3
   - name: cos
     type: binary
     binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos

@@ -26,7 +26,10 @@ import (
 	"gorm.io/gorm"
 )
 
-var getSnapshotReconcilerNodes = localcache.GetHealthyNodesByInstanceType
+var (
+	getSnapshotReconcilerNodes = localcache.GetHealthyNodesByInstanceType
+	getLocalSnapshotOnCubelet  = cubelet.GetLocalSnapshot
+)
 
 const (
 	snapshotReconcilerInterval  = 5 * time.Minute
@@ -171,22 +174,22 @@ func getOrRefreshSnapshotStorageState(ctx context.Context, nodeID, nodeIP string
 }
 
 func reconcileSnapshotDefinitionTimeouts(ctx context.Context) error {
-	var defs []models.TemplateDefinition
-	if err := store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
-		Where("kind = ? AND status IN ? AND updated_at < ?", TemplateKindSnapshot, []string{StatusCreating, StatusDeleting}, time.Now().Add(-snapshotOperationTimeout)).
-		Find(&defs).Error; err != nil {
+	var rows []models.SnapshotRecord
+	if err := store.db.WithContext(ctx).Table(constants.SnapshotTableName).
+		Where("status IN ? AND updated_at < ?", []string{StatusCreating, StatusDeleting}, time.Now().Add(-snapshotOperationTimeout)).
+		Find(&rows).Error; err != nil {
 		return err
 	}
-	for _, def := range defs {
-		active, err := getActiveSnapshotJobByResourceID(ctx, def.TemplateID)
+	for _, rec := range rows {
+		active, err := getActiveSnapshotJobByResourceID(ctx, rec.SnapshotID)
 		if err == nil && active != nil {
 			continue
 		}
 		if err != nil && !errorsIsRecordNotFound(err) {
 			return err
 		}
-		lastError := fmt.Sprintf("snapshot %s remained in %s beyond %s", def.TemplateID, def.Status, snapshotOperationTimeout)
-		if err := updateDefinitionFields(ctx, def.TemplateID, map[string]any{
+		lastError := fmt.Sprintf("snapshot %s remained in %s beyond %s", rec.SnapshotID, rec.Status, snapshotOperationTimeout)
+		if err := updateSnapshotFields(ctx, rec.SnapshotID, map[string]any{
 			"status":     StatusFailed,
 			"last_error": lastError,
 		}); err != nil {
@@ -200,31 +203,54 @@ func reconcileSnapshotReplicaPresence(ctx context.Context) error {
 	var reconcileErr error
 	orphanCount := 0
 	defer setSnapshotOrphanGauge(orphanCount)
-	var defs []models.TemplateDefinition
-	if err := store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
-		Where("kind = ? AND status IN ?", TemplateKindSnapshot, []string{StatusReady, StatusFailed, StatusDeleting}).
-		Find(&defs).Error; err != nil {
+	var rows []models.SnapshotRecord
+	if err := store.db.WithContext(ctx).Table(constants.SnapshotTableName).
+		Where("status IN ?", []string{StatusReady, StatusFailed, StatusDeleting}).
+		Find(&rows).Error; err != nil {
 		return err
 	}
-	for _, def := range defs {
-		replicas, err := ListReplicas(ctx, def.TemplateID)
+	for _, rec := range rows {
+		// S3 packages are cluster-shared. A node catalog miss after Finalize
+		// is normal (metadata is unmounted), and CleanupTemplate(s3) would
+		// delete objects every node still needs. Existence is remote_status
+		// plus the remotestatus poller — not this XFS replica-presence walk.
+		if constants.IsS3Backend(rec.Backend) {
+			continue
+		}
+		snapshotBackend := pinnedCleanupBackend(rec.Backend)
+		replicas, err := ListReplicas(ctx, rec.SnapshotID)
 		if err != nil {
 			return err
+		}
+		if len(replicas) == 0 {
+			replicas = []models.TemplateReplica{{
+				TemplateID:   rec.SnapshotID,
+				NodeID:       rec.OriginNodeID,
+				NodeIP:       rec.OriginNodeIP,
+				InstanceType: rec.InstanceType,
+				Status:       ReplicaStatusReady,
+				Phase:        ReplicaPhaseReady,
+			}}
 		}
 		for _, model := range replicas {
 			replica := replicaModelToStatus(model)
 			hostIP := resolveNodeIP(replica.NodeID, replica.NodeIP)
 			if hostIP == "" {
-				err := fmt.Errorf("snapshot %s replica on node %s has no reachable node address", def.TemplateID, firstNonEmpty(replica.NodeID, replica.NodeIP))
+				err := fmt.Errorf("snapshot %s replica on node %s has no reachable node address", rec.SnapshotID, firstNonEmpty(replica.NodeID, replica.NodeIP))
 				reconcileErr = errors.Join(reconcileErr, err)
 				continue
 			}
 			// Authoritative existence check now happens via cubelet's local
 			// snapshot catalog. Master no longer carries physical refs on
 			// snapshot replicas, so we ask the node directly.
-			rsp, err := cubelet.GetLocalSnapshot(ctx, cubelet.GetCubeletAddr(hostIP), &cubeboxv1.GetLocalSnapshotRequest{
+			//
+			// Backend must be sent: cubelet reads one backend namespace per
+			// call and an empty value means xfs, so omitting it reports every
+			// s3 package as missing and stamps a healthy snapshot FAILED.
+			rsp, err := getLocalSnapshotOnCubelet(ctx, cubelet.GetCubeletAddr(hostIP), &cubeboxv1.GetLocalSnapshotRequest{
 				RequestID:  uuid.NewString(),
-				SnapshotID: def.TemplateID,
+				SnapshotID: rec.SnapshotID,
+				Backend:    snapshotBackend,
 			})
 			if err != nil {
 				msg := "get local snapshot failed"
@@ -238,7 +264,7 @@ func reconcileSnapshotReplicaPresence(ctx context.Context) error {
 					LastError:     msg,
 					LastUpdatedAt: time.Now(),
 				})
-				reconcileErr = errors.Join(reconcileErr, fmt.Errorf("snapshot %s reconcile on node %s failed: %s", def.TemplateID, firstNonEmpty(replica.NodeID, hostIP), msg))
+				reconcileErr = errors.Join(reconcileErr, fmt.Errorf("snapshot %s reconcile on node %s failed: %s", rec.SnapshotID, firstNonEmpty(replica.NodeID, hostIP), msg))
 				continue
 			}
 			retCode := cubeleterrorcode.ErrorCode_Success
@@ -251,27 +277,27 @@ func reconcileSnapshotReplicaPresence(ctx context.Context) error {
 			case cubeleterrorcode.ErrorCode_Success:
 				if rsp.GetSnapshot() == nil || strings.TrimSpace(rsp.GetSnapshot().GetSnapshotID()) == "" {
 					orphanCount++
-					msg := fmt.Sprintf("snapshot %s missing from local catalog on node %s", def.TemplateID, firstNonEmpty(replica.NodeID, hostIP))
-					_ = UpsertReplica(ctx, def.TemplateID, model.InstanceType, failedReplicaStatus(model, msg))
-					_ = updateDefinitionFields(ctx, def.TemplateID, map[string]any{
+					msg := fmt.Sprintf("snapshot %s missing from local catalog on node %s", rec.SnapshotID, firstNonEmpty(replica.NodeID, hostIP))
+					_ = UpsertReplica(ctx, rec.SnapshotID, model.InstanceType, failedReplicaStatus(model, msg))
+					_ = updateSnapshotFields(ctx, rec.SnapshotID, map[string]any{
 						"status":     StatusFailed,
 						"last_error": msg,
 					})
 				}
 			case cubeleterrorcode.ErrorCode_PreConditionFailed:
 				orphanCount++
-				msg := fmt.Sprintf("snapshot %s missing from local catalog on node %s: %s", def.TemplateID, firstNonEmpty(replica.NodeID, hostIP), retMsg)
-				_ = cleanupTemplateReplicasWithLocators(ctx, def.TemplateID, []templateCleanupLocator{{
+				msg := fmt.Sprintf("snapshot %s missing from local catalog on node %s: %s", rec.SnapshotID, firstNonEmpty(replica.NodeID, hostIP), retMsg)
+				_ = cleanupTemplateReplicasWithLocators(ctx, rec.SnapshotID, []templateCleanupLocator{{
 					NodeID: model.NodeID,
 					NodeIP: model.NodeIP,
-				}})
-				_ = UpsertReplica(ctx, def.TemplateID, model.InstanceType, failedReplicaStatus(model, msg))
-				_ = updateDefinitionFields(ctx, def.TemplateID, map[string]any{
+				}}, snapshotBackend)
+				_ = UpsertReplica(ctx, rec.SnapshotID, model.InstanceType, failedReplicaStatus(model, msg))
+				_ = updateSnapshotFields(ctx, rec.SnapshotID, map[string]any{
 					"status":     StatusFailed,
 					"last_error": msg,
 				})
 			default:
-				reconcileErr = errors.Join(reconcileErr, fmt.Errorf("snapshot %s reconcile on node %s returned ret=%d %s", def.TemplateID, firstNonEmpty(replica.NodeID, hostIP), retCode, retMsg))
+				reconcileErr = errors.Join(reconcileErr, fmt.Errorf("snapshot %s reconcile on node %s returned ret=%d %s", rec.SnapshotID, firstNonEmpty(replica.NodeID, hostIP), retCode, retMsg))
 			}
 		}
 	}

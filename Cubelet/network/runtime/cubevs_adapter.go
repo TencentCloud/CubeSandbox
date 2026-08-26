@@ -21,6 +21,7 @@ type CubeVSAdapter interface {
 	AddTAPDevice(ifindex uint32, ip net.IP, sandboxID string, version uint32, opts cubevs.MVMOptions) error
 	UpsertTAPDevice(ifindex uint32, ip net.IP, sandboxID string, version uint32, opts cubevs.MVMOptions) error
 	UpsertTAPDeviceMetadata(ifindex uint32, ip net.IP, sandboxID string, version uint32) error
+	UpdateTAPPolicy(ifindex uint32, opts cubevs.MVMOptions) error
 	GetTAPDevice(ifindex uint32) (*cubevs.TAPDevice, error)
 	CleanupTAPPolicy(ifindex uint32) error
 	DeleteTAPDeviceMetadata(ifindex uint32, ip net.IP) error
@@ -50,6 +51,10 @@ func (realCubeVSAdapter) UpsertTAPDevice(ifindex uint32, ip net.IP, sandboxID st
 
 func (realCubeVSAdapter) UpsertTAPDeviceMetadata(ifindex uint32, ip net.IP, sandboxID string, version uint32) error {
 	return cubevs.UpsertTAPDeviceMetadata(ifindex, ip, sandboxID, version)
+}
+
+func (realCubeVSAdapter) UpdateTAPPolicy(ifindex uint32, opts cubevs.MVMOptions) error {
+	return cubevs.UpdateTAPDevicePolicy(ifindex, opts)
 }
 
 func (realCubeVSAdapter) GetTAPDevice(ifindex uint32) (*cubevs.TAPDevice, error) {
@@ -117,6 +122,22 @@ func (s *NetworkController) registerCubeVSTap(ifindex int, ip net.IP, sandboxID 
 	}()
 	err = s.cubevsAdapter.AddTAPDevice(uint32(ifindex), ip, sandboxID, atomic.AddUint32(&s.version, 1), opts)
 	return err
+}
+
+// updateCubeVSTapPolicy converges an active sandbox's CubeVS policy on cfg and
+// bumps its policy generation so established flows are re-evaluated. Unlike
+// register/replace it neither touches TAP metadata nor flushes the policy maps,
+// because the sandbox is live and must not lose its policy mid-update.
+func (s *NetworkController) updateCubeVSTapPolicy(ifindex int, sandboxID string, cfg *CubeNetworkConfig) error {
+	opts, err := cubeVSTapRegistration(cfg)
+	if err != nil {
+		return err
+	}
+	CubeLog.WithContext(context.Background()).Infof(
+		"network runtime update cubevs policy: sandbox_id=%s ifindex=%d cube_network_config=%s",
+		sandboxID, ifindex, formatCubeNetworkConfig(cfg),
+	)
+	return s.cubevsAdapter.UpdateTAPPolicy(uint32(ifindex), opts)
 }
 
 // replaceCubeVSTap rewrites TAP metadata and the complete desired CubeVS policy.

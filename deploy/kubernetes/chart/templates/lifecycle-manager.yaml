@@ -76,6 +76,8 @@ spec:
               value: {{ .Values.lifecycleManager.bootstrapWarmup | quote }}
             - name: CUBE_LCM_STATE_LOCK_TTL
               value: {{ .Values.lifecycleManager.stateLockTTL | quote }}
+            - name: CUBE_LCM_EVENTBUS_ENABLED
+              value: {{ .Values.lifecycleManager.eventBusEnabled | quote }}
             - name: CUBE_LCM_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:

@@ -25,6 +25,11 @@ import (
 const (
 	backendCacheDeletePath = "/admin/backend_cache/delete"
 	defaultAdminTimeout    = 3 * time.Second
+	// purgeAttempts covers a replica reloading or a blipped connection.
+	// Past that the endpoint is not going to answer and waiting only
+	// delays telling the caller.
+	purgeAttempts = 3
+	purgeBackoff  = 500 * time.Millisecond
 )
 
 // Endpoint mirrors CubeProxy's registry Hash value / CLM discovery.Endpoint.
@@ -42,51 +47,68 @@ var (
 )
 
 // InvalidateBackendCache asks every live CubeProxy to drop local_cache routing
-// entries for sandboxID. Best-effort: logs failures and never returns a hard
-// error that should abort Resume (Redis is already rewritten).
-func InvalidateBackendCache(ctx context.Context, sandboxID, fallbackHostIP string) {
+// entries for sandboxID, retrying the replicas that refuse.
+//
+// The error is not advisory. A cache hit renews the entry's TTL, so a mapping
+// we fail to purge never expires on its own: every later request keeps landing
+// on the pre-resume backend and the sandbox is unreachable, not slower. One
+// replica left holding a stale entry is enough, so a partial purge is a
+// failure too.
+func InvalidateBackendCache(ctx context.Context, sandboxID, fallbackHostIP string) error {
 	sandboxID = strings.TrimSpace(sandboxID)
 	if sandboxID == "" {
-		return
+		return nil
 	}
 	urls := listAdminURLsFn(ctx, fallbackHostIP)
 	if len(urls) == 0 {
-		log.G(ctx).Warnf("cubeproxy: no admin URLs to invalidate backend cache sandbox=%s", sandboxID)
-		return
+		return fmt.Errorf("no CubeProxy admin endpoint known for sandbox %s", sandboxID)
 	}
 
+	pending := urls
+	var reasons []string
+	for attempt := 1; attempt <= purgeAttempts; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(purgeBackoff):
+			}
+		}
+		pending, reasons = purgeOnce(ctx, pending, sandboxID)
+		if len(pending) == 0 {
+			log.G(ctx).Infof("cubeproxy: backend_cache deleted sandbox=%s replicas=%d attempt=%d",
+				sandboxID, len(urls), attempt)
+			return nil
+		}
+	}
+	return fmt.Errorf("%d of %d CubeProxy replica(s) still hold sandbox %s: %s",
+		len(pending), len(urls), sandboxID, strings.Join(reasons, "; "))
+}
+
+// purgeOnce broadcasts to every url and returns the ones still to convince,
+// alongside why each refused.
+func purgeOnce(ctx context.Context, urls []string, sandboxID string) (pending, reasons []string) {
 	var (
-		wg   sync.WaitGroup
-		mu   sync.Mutex
-		okN  int
-		errs []string
+		wg sync.WaitGroup
+		mu sync.Mutex
 	)
 	for _, u := range urls {
 		wg.Add(1)
 		url := u
 		go func() {
 			defer wg.Done()
-			if err := doDeleteFn(ctx, url, sandboxID); err != nil {
-				mu.Lock()
-				errs = append(errs, fmt.Sprintf("%s: %v", url, err))
-				mu.Unlock()
+			err := doDeleteFn(ctx, url, sandboxID)
+			if err == nil {
 				return
 			}
 			mu.Lock()
-			okN++
+			pending = append(pending, url)
+			reasons = append(reasons, fmt.Sprintf("%s: %v", url, err))
 			mu.Unlock()
 		}()
 	}
 	wg.Wait()
-	if okN == 0 && len(errs) > 0 {
-		log.G(ctx).Warnf("cubeproxy: backend_cache delete all failed sandbox=%s errs=%v", sandboxID, errs)
-		return
-	}
-	if len(errs) > 0 {
-		log.G(ctx).Warnf("cubeproxy: backend_cache delete partial sandbox=%s ok=%d errs=%v", sandboxID, okN, errs)
-		return
-	}
-	log.G(ctx).Infof("cubeproxy: backend_cache deleted sandbox=%s replicas=%d", sandboxID, okN)
+	return pending, reasons
 }
 
 func listAdminURLs(ctx context.Context, fallbackHostIP string) []string {
@@ -219,6 +241,13 @@ func postBackendCacheDelete(ctx context.Context, adminURL, sandboxID string) err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusNotFound {
+		// The replica answered, it just has no such route. Say so: a
+		// CubeProxy predating the admin endpoint looks exactly like a
+		// healthy one until a resumed sandbox turns out unreachable.
+		return fmt.Errorf("no %s route; this CubeProxy is too old to purge its routing cache",
+			backendCacheDeletePath)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}

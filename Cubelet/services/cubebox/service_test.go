@@ -6,8 +6,6 @@ package cubebox
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"sort"
 	"testing"
 	"time"
@@ -17,6 +15,7 @@ import (
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	imagesv1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
+	volpluginv1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/volumeplugin/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/numa"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -411,6 +410,64 @@ func TestValidateCommitSandboxTargetRejectsSandboxPathHostBind(t *testing.T) {
 	}
 }
 
+func TestValidateCommitSandboxTargetRejectsPluginVolume(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name: "data",
+		VolumeSource: &cubeboxv1.VolumeSource{
+			PluginVolume: &volpluginv1.PluginVolumeSource{Driver: "cos-rpc"},
+		},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "data",
+		ContainerPath: "/data/vol",
+	}})
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plugin_volume")
+}
+
+func TestValidateCommitSandboxTargetRejectsPluginVolumeAnnotation(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name:         "data",
+		VolumeSource: &cubeboxv1.VolumeSource{},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "data",
+		ContainerPath: "/data/vol",
+	}})
+	cb.Annotations = map[string]string{
+		"plugin-volume-sources": `[{"name":"data","driver":"cos-rpc"}]`,
+	}
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plugin_volume")
+}
+
+func TestValidatePauseSandboxTargetAllowsPluginVolume(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name: "data",
+		VolumeSource: &cubeboxv1.VolumeSource{
+			PluginVolume: &volpluginv1.PluginVolumeSource{Driver: "cos-rpc"},
+		},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "data",
+		ContainerPath: "/data/vol",
+	}})
+
+	root, err := validatePauseSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", root)
+}
+
 func TestValidateCommitSandboxTargetRejectsUnknownLegacyVolumeSources(t *testing.T) {
 	cb := newRunningCommitSandboxForTest(nil, []*cubeboxv1.VolumeMounts{{
 		Name:          "root",
@@ -464,16 +521,6 @@ func newRunningCommitSandboxForTest(volumes []*cubeboxv1.Volume, mounts []*cubeb
 		IsPod:  true,
 	})
 	return cb
-}
-
-func TestWriteMemoryDevFile(t *testing.T) {
-	dir := t.TempDir()
-
-	require.NoError(t, writeMemoryDevFile(dir, "/dev/mapper/tpl-snapshot-memory"))
-
-	got, err := os.ReadFile(filepath.Join(dir, "memory.dev"))
-	require.NoError(t, err)
-	assert.Equal(t, "/dev/mapper/tpl-snapshot-memory\n", string(got))
 }
 
 func TestAppSnapshotRequiresCowBeforeCreate(t *testing.T) {

@@ -58,15 +58,29 @@ def _wait_for_ready(template_id, config, timeout=None):
     if timeout is None:
         timeout = scale_timeout_for_xdist(120)
     deadline = time.time() + timeout
+    last_info = None
     while time.time() < deadline:
         try:
-            info = Template.get(template_id, config=config)
-            if info.status in ("READY", "FAILED"):
-                return info
+            last_info = Template.get(template_id, config=config)
+            if last_info.status == "READY":
+                return last_info
+            if last_info.status == "FAILED":
+                pytest.fail(
+                    f"template {template_id} build failed; "
+                    f"last_error={last_info.last_error!r}"
+                )
         except TemplateNotFoundError:
             pass
         time.sleep(2)
-    pytest.fail(f"template {template_id} did not reach READY within {timeout}s")
+    if last_info is None:
+        pytest.fail(
+            f"template {template_id} did not reach READY within {timeout}s; "
+            "template was never observed"
+        )
+    pytest.fail(
+        f"template {template_id} did not reach READY within {timeout}s; "
+        f"last_status={last_info.status!r} last_error={last_info.last_error!r}"
+    )
 
 
 def _delete_with_retry(identifier, cfg, timeout=180):
@@ -103,7 +117,11 @@ def test_template_create_from_image_and_cleanup(sdk_backend, sdk_e2e_config):
     created_id = None
     try:
         with template_build_slot(label="alias_create_from_image"):
-            job = Template.build(image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
+            job = Template.build(
+                image=DEFAULT_IMAGE,
+                writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE,
+                config=cfg,
+            )
             assert job.template_id.startswith("tpl-")
             created_id = job.template_id
             _wait_for_ready(created_id, cfg)
@@ -124,20 +142,18 @@ def test_template_build_preserves_advanced_create_options(
     cfg = _cfg(sdk_e2e_config)
     created_id = None
     try:
-        job = Template.build(
-            image=DEFAULT_IMAGE,
-            writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE,
-            exposed_ports=[49983, 49999],
-            probe_port=49999,
-            probe_path="/",
-            envs={"SDK_TEMPLATE_E2E": "advanced"},
-            config=cfg,
-        )
-        created_id = job.template_id
-        info = _wait_for_ready(created_id, cfg)
-        assert info.status == "READY", (
-            f"advanced template build failed: id={created_id} status={info.status!r}"
-        )
+        with template_build_slot(label="alias_advanced_options"):
+            job = Template.build(
+                image=DEFAULT_IMAGE,
+                writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE,
+                exposed_ports=[49983, 49999],
+                probe_port=49999,
+                probe_path="/",
+                envs={"SDK_TEMPLATE_E2E": "advanced"},
+                config=cfg,
+            )
+            created_id = job.template_id
+            _wait_for_ready(created_id, cfg)
         detail = Template.get(created_id, config=cfg)
         request = detail.create_request or {}
         annotations = request.get("annotations") or {}
@@ -153,9 +169,9 @@ def test_template_build_preserves_advanced_create_options(
         assert container.get("envs") == [
             {"key": "SDK_TEMPLATE_E2E", "value": "advanced"}
         ], request
-        http_get = (
-            (container.get("probe") or {}).get("probe_handler") or {}
-        ).get("http_get") or {}
+        http_get = ((container.get("probe") or {}).get("probe_handler") or {}).get(
+            "http_get"
+        ) or {}
         assert http_get.get("port") == 49999, request
         assert http_get.get("path") == "/", request
 
@@ -194,7 +210,12 @@ def test_template_alias_create_get_and_delete(sdk_backend, sdk_e2e_config):
     created_id = None
     try:
         with template_build_slot(label="alias_create_get_delete"):
-            job = Template.build(name=alias, image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
+            job = Template.build(
+                name=alias,
+                image=DEFAULT_IMAGE,
+                writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE,
+                config=cfg,
+            )
             created_id = job.template_id
             _wait_for_ready(created_id, cfg)
         assert Template.get(alias, config=cfg).template_id == created_id
@@ -220,7 +241,12 @@ def test_template_alias_dedicated_lookup_endpoint(sdk_backend, sdk_e2e_config):
     created_id = None
     try:
         with template_build_slot(label="alias_dedicated_lookup"):
-            job = Template.build(name=alias, image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
+            job = Template.build(
+                name=alias,
+                image=DEFAULT_IMAGE,
+                writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE,
+                config=cfg,
+            )
             created_id = job.template_id
             _wait_for_ready(created_id, cfg)
         resp = requests.get(
@@ -246,17 +272,29 @@ def test_template_alias_rebuild_reassignment(sdk_backend, sdk_e2e_config):
     template_ids = []
     try:
         with template_build_slot(label="alias_rebuild_a"):
-            job_a = Template.build(name=alias, image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
+            job_a = Template.build(
+                name=alias,
+                image=DEFAULT_IMAGE,
+                writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE,
+                config=cfg,
+            )
             template_ids.append(job_a.template_id)
             _wait_for_ready(job_a.template_id, cfg)
         assert Template.get(alias, config=cfg).template_id == job_a.template_id
 
         with template_build_slot(label="alias_rebuild_b"):
-            job_b = Template.build(name=alias, image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
+            job_b = Template.build(
+                name=alias,
+                image=DEFAULT_IMAGE,
+                writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE,
+                config=cfg,
+            )
             template_ids.append(job_b.template_id)
             _wait_for_ready(job_b.template_id, cfg)
         assert Template.get(alias, config=cfg).template_id == job_b.template_id
-        assert Template.get(job_a.template_id, config=cfg).template_id == job_a.template_id
+        assert (
+            Template.get(job_a.template_id, config=cfg).template_id == job_a.template_id
+        )
     finally:
         time.sleep(1)
         for tid in template_ids:
@@ -274,9 +312,14 @@ def test_template_alias_set_on_existing_template(sdk_backend, sdk_e2e_config):
     created_id = None
     try:
         # 1. Create WITHOUT an alias.
-        job = Template.build(image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
-        created_id = job.template_id
-        _wait_for_ready(created_id, cfg)
+        with template_build_slot(label="alias_set_existing"):
+            job = Template.build(
+                image=DEFAULT_IMAGE,
+                writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE,
+                config=cfg,
+            )
+            created_id = job.template_id
+            _wait_for_ready(created_id, cfg)
 
         with pytest.raises(ApiError) as exc:
             Template.set_alias(created_id, "My-Alias", config=cfg)
@@ -314,14 +357,25 @@ def test_template_alias_set_reassign_between_templates(sdk_backend, sdk_e2e_conf
     template_ids = []
     try:
         # 1. Create T1 WITH alias A.
-        job_a = Template.build(name=alias, image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
-        template_ids.append(job_a.template_id)
-        _wait_for_ready(job_a.template_id, cfg)
+        with template_build_slot(label="alias_set_reassign_a"):
+            job_a = Template.build(
+                name=alias,
+                image=DEFAULT_IMAGE,
+                writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE,
+                config=cfg,
+            )
+            template_ids.append(job_a.template_id)
+            _wait_for_ready(job_a.template_id, cfg)
 
         # 2. Create T2 WITHOUT alias.
-        job_b = Template.build(image=DEFAULT_IMAGE, writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE, config=cfg)
-        template_ids.append(job_b.template_id)
-        _wait_for_ready(job_b.template_id, cfg)
+        with template_build_slot(label="alias_set_reassign_b"):
+            job_b = Template.build(
+                image=DEFAULT_IMAGE,
+                writable_layer_size=DEFAULT_WRITABLE_LAYER_SIZE,
+                config=cfg,
+            )
+            template_ids.append(job_b.template_id)
+            _wait_for_ready(job_b.template_id, cfg)
 
         # 3. set_alias(T2, A) should release A from T1 and claim for T2.
         Template.set_alias(job_b.template_id, alias, config=cfg)

@@ -191,7 +191,7 @@ FLUSH PRIVILEGES;
 ```bash
 # Interactive shell (bashrc in the image auto-fills --address / --port)
 kubectl -n cube-system exec -it -l app.kubernetes.io/component=cubemastercli -- bash
-cubemastercli node list
+cubeopscli node list
 cubemastercli sandbox list
 ```
 
@@ -199,7 +199,7 @@ Or one-liner (same as Chart `NOTES.txt`):
 
 ```bash
 kubectl -n cube-system exec deploy/cube-cubemastercli -- \
-  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
 ```
 
 ---
@@ -239,7 +239,7 @@ Cloud VMs need PVM installed; physical machines need VT-x / AMD-V enabled.
 
 ```bash
 kubectl -n cube-system exec -l app.kubernetes.io/component=cubemastercli -- \
-  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
 ```
 
 - `healthy: true` → you can create sandboxes
@@ -250,6 +250,17 @@ kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node -c cubelet 
 ```
 
 A common cause is inability to reach CubeMaster (network / DNS).
+
+### All sandboxes on one node lost network at the same time
+
+Most likely the `cube-node` Pod on that node was recreated (manual deletion, DaemonSet template change, node drain). Sandbox TAP devices live in the Pod's netns; Pod recreation destroys it, and **all sandbox networking on the node breaks — inbound and outbound — and does not self-heal**. Confirm by comparing Pod age / UID with the incident time:
+
+```bash
+kubectl get pods -n cube-system -l app.kubernetes.io/component=cube-node -o wide
+```
+
+- **Recovery**: destroy and recreate the affected sandboxes.
+- **Prevention**: deploy `cube-node` with `hostNetwork: true` so Pod recreation no longer changes the netns; see [Install · cube-node networking and Pod recreation](./install.md#_8-3-cube-node-networking-and-pod-recreation). If you also need NetworkPolicy over sandbox traffic to cluster Services, see the same section.
 
 ### How do I run `cubecli` in a Kubernetes deployment?
 

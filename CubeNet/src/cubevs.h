@@ -25,6 +25,9 @@
 /* ARP hardware types */
 #define ARPHRD_ETHER			1	/* Ethernet */
 
+/* https://elixir.bootlin.com/linux/v5.4.217/source/include/linux/socket.h#L172 */
+#define AF_INET				2
+
 #define MAX_ENTRIES			8192
 #define MAX_IP_RULE_ENTRIES		8192
 #define MAX_DOMAIN_RULE_ENTRIES		1024
@@ -76,6 +79,16 @@ const volatile __u32 cube_l7_mark_mask = 0xFFFF0000u;
 const volatile __u32 cube_l7_mark_http = 0xCE010000u;
 const volatile __u32 cube_l7_mark_https = 0xCE020000u;
 #define DNS_QUERY_TRACK_TTL_NS		(10ULL * NSEC_PER_SEC)
+/* Positive cache lifetime for a fib-learned neighbor MAC. Must be well below
+ * the userspace keepalive period (16s) so the cache is re-validated against the
+ * kernel neighbor table at least once per keepalive cycle. */
+#define DIRECT_NEIGH_CACHE_TTL_NS		(4ULL * NSEC_PER_SEC)
+/* Negative cache lifetime after a fib failure, so a dead destination does not
+ * trigger a fib lookup on every packet. */
+#define DIRECT_NEIGH_NEG_TTL_NS			(1ULL * NSEC_PER_SEC)
+/* Minimum interval between last_used_ns writes, bounding map-write pressure on
+ * high-pps flows. */
+#define DIRECT_NEIGH_TOUCH_THROTTLE_NS		(1ULL * NSEC_PER_SEC)
 
 /* https://en.wikipedia.org/wiki/IPv4#Header
  *
@@ -137,6 +150,7 @@ const volatile __u64 egress_redirect_flags  = BPF_F_INGRESS;
 
 /* Ifindex, IP and MAC address of Node itself */
 const volatile __u32 nodenic_ip         = 0x020a8709;	/* 9.135.10.2, network byte order */
+const volatile __u32 nodenic_netmask    = 0x00ffffff;	/* 255.255.255.0, packet-byte layout */
 const volatile __u32 nodenic_ifindex    = 2;
 const volatile __u32 nodenic_macaddr_p1 = 0x68005452;	/* 52:54:00:68:dd:16 */
 const volatile __u16 nodenic_macaddr_p2 = 0x16dd;
@@ -145,12 +159,29 @@ const volatile __u16 nodenic_macaddr_p2 = 0x16dd;
 const volatile __u32 nodegw_macaddr_p1  = 0x4732eefe;	/* fe:ee:32:47:6b:93 */
 const volatile __u16 nodegw_macaddr_p2  = 0x936b;
 
+/* policy_version is the per-sandbox network-policy generation. It is bumped by
+ * userspace after a policy update has been fully applied, and every packet on
+ * an established flow compares it against the generation cached in nat_session
+ * to decide whether the flow must be re-evaluated.
+ *
+ * No value is reserved: this is a plain counter compared for equality. A fresh
+ * TAP starts at 0, which is also what metadata and sessions written before this
+ * field existed carry, so an upgrade finds them in agreement and re-checks
+ * nothing -- those flows were admitted under a policy that has not changed.
+ * Wrapping takes 2^32 updates to one sandbox and would at worst let a session
+ * that outlived all of them skip one re-check, so it is not special-cased.
+ *
+ * Do NOT reuse the `version` field above for this: it is part of session_key,
+ * so bumping it would orphan every live session for this TAP.
+ */
 struct mvm_meta {
 	__u32 version;
 	__u32 ip;
 	__u8 uuid[64];
 	__u8 dns_policy_flags;
-	__u8 reserved[55];
+	__u8 reserved0[3];	/* aligns policy_version; reserved starts at an odd offset */
+	__u32 policy_version;
+	__u8 reserved[48];
 };
 
 /* https://elixir.bootlin.com/linux/v5.4.217/source/include/uapi/linux/if_arp.h#L144 */
@@ -166,6 +197,26 @@ struct arphdr_eth {
 	unsigned char ar_tha[ETH_ALEN];	/* target hardware address */
 	__be32 ar_tip;			/* target IP address */
 } __attribute__((packed));
+
+/* Direct-egress on-link neighbor trigger/cache entry.
+ *
+ * The kernel neighbor table is the only source of truth for the MAC; this entry
+ * is a TTL-bounded cache of the last bpf_fib_lookup() result plus the trigger
+ * state the userspace scanner schedules against. Field ownership:
+ *   BPF datapath writes: addr, fib_ok, valid_until_ns, last_used_ns
+ *   userspace scanner writes: step, next_attempt_ns, next_refresh_ns
+ */
+struct direct_neighbor {
+	unsigned char addr[ETH_ALEN];	/* cached MAC; all-zero = no valid cache */
+	__u8	fib_ok;			/* last fib lookup result (1=learned) */
+	__u8	step;			/* scanner: backoff level */
+	__u16	flags;
+	__u32	reserved;
+	__u64	valid_until_ns;	/* cache expiry; written only on fib success/failure, never renewed on hit */
+	__u64	last_used_ns;		/* last packet time (1s write throttle) */
+	__u64	next_attempt_ns;	/* scanner: next learning-trigger time */
+	__u64	next_refresh_ns;	/* scanner: next keepalive-trigger time */
+};
 
 union macaddr {
 	struct {
@@ -318,7 +369,10 @@ struct nat_session {
 	__u8 active_close;
 	__u8 packet_class;	/* SNAT_PACKET or L7PROXY_PACKET */
 	__u8 l7_scheme;		/* L7_SCHEME_*; NONE for non-L7 sessions */
-	__u8 reserved[32];
+	__u32 policy_version;	/* mvm_meta.policy_version at create / last re-check */
+	__u32 gen;		/* mvm_meta->version at creation; a sandbox rollback
+				 * bumps it, so a gen != current session is stale */
+	__u8 reserved[24];
 };
 
 struct ingress_session {

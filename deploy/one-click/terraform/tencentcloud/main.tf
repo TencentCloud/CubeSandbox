@@ -412,6 +412,16 @@ resource "tencentcloud_security_group_rule_set" "clb" {
     description = "Allow cube-master CLB (VPC-internal only)"
   }
 
+  # cube-ops is exposed through an INTERNAL (VPC-only) CLB so compute nodes
+  # (outside the TKE cluster) can reach it for node registration / heartbeat.
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = "10.0.0.0/16"
+    protocol    = "TCP"
+    port        = "3010"
+    description = "Allow cube-ops CLB (VPC-internal only)"
+  }
+
   egress {
     action      = "ACCEPT"
     cidr_block  = "0.0.0.0/0"

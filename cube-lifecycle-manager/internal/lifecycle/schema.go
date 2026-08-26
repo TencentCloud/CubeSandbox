@@ -28,11 +28,25 @@ const (
 	// EventStreamMaxLen caps the stream so an offline sidecar cannot drive
 	// unbounded Redis growth.
 	EventStreamMaxLen = 100000
+
+	// EventChannel carries best-effort state-change wakeup hints. Redis
+	// state keys remain the source of truth.
+	EventChannel = "cube:v1:shared:sandbox:lifecycle:notify"
 )
 
-// StateKey returns the per-sandbox pause/resume coordination key. Values are
-// "running" | "pausing" | "paused" | "resuming". The sidecar uses SETNX with
-// TTL to coordinate concurrent pause/resume across replicas.
+// StateKilled is a state-key marker for a sandbox killed by the sweeper. It is
+// intentionally not part of the {paused, running} terminal set emitted on the
+// events stream.
+const StateKilled = "killed"
+
+// StateNotify is a best-effort wakeup hint. Consumers must read the state key
+// after receiving it instead of trusting the payload as current truth.
+type StateNotify struct {
+	SandboxID string `json:"sandbox_id"`
+}
+
+// StateKey returns the per-sandbox coordination key. Values include running,
+// pausing, paused, resuming, killing, and killed.
 func StateKey(sandboxID string) string {
 	return "cube:v1:shared:sandbox:lifecycle:state:" + sandboxID
 }

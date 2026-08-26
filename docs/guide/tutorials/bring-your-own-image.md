@@ -1,32 +1,23 @@
 # Bring Your Own Image (envd)
 
-This tutorial shows how to take **your own application or container image**
-and turn it into a Cube-Sandbox template with the minimum amount of work.
+This tutorial shows how to add `envd` to **your own application or container image** for use with the CubeSandbox SDK and E2B SDK.
 
-If you want the whole story about how OCI images become templates, read
-[Create Templates from OCI Image](./template-from-image.md) next. This
-tutorial is the prerequisite that gets your image **ready for the readiness
-probe** that tutorial requires.
+For the general workflow to create templates from OCI images and configure application ports and readiness probes, see [Create Templates from OCI Image](./template-from-image.md).
 
 ---
 
-## 1. Why does my image need `envd`?
+## 1. When does my image need `envd`?
 
-Cube-Sandbox talks to every running sandbox through an in-container daemon
-called `envd`. It is the only protocol endpoint that Cube Master, Cube
-SDKs and `cubemastercli` understand:
+`envd` is the data-plane service that the CubeSandbox SDK and E2B SDK use for sandbox operations such as running commands, reading and writing files, and opening PTY sessions:
 
-| Cube capability                     | Endpoint inside the sandbox | If `envd` is missing              |
-| ----------------------------------- | --------------------------- | --------------------------------- |
-| Template readiness probe            | `GET :49983/health` → 204   | Template creation fails the probe |
-| `Sandbox.commands.run()`            | `POST :49983/process`       | Every SDK command returns 404     |
-| `Sandbox.files.read/write()`        | `POST :49983/files`         | File APIs are unusable            |
-| Sandbox init (env vars, time sync)  | `POST :49983/init`          | Sandbox never reaches Ready       |
+| Capability | `envd` interface inside the sandbox | Without `envd` |
+| --- | --- | --- |
+| `envd` health check (can be used as the template probe) | `GET :49983/health` → 204 | This probe endpoint is unavailable |
+| `Sandbox.commands.run()` | Process API on `:49983` | Command APIs are unavailable |
+| `Sandbox.files.read/write()` | Files API on `:49983` | File APIs are unavailable |
+| Create-time environment variable initialization | `POST :49983/init` | Sandbox creation with environment variables fails |
 
-In other words: **any image you want to use as a Cube template must have
-`envd` listening on `:49983` at startup.** The easiest way to satisfy
-that is to build `FROM` the official `cubesandbox-base` image — the next
-section walks through the full happy path.
+For interactive development and code-execution sandboxes, keeping `envd` is recommended so you can use the SDK to run commands, work with files, and troubleshoot the sandbox. An image that only serves its own application and does not use these capabilities can omit `envd`; configure its template probe to use the application's own HTTP health endpoint.
 
 ---
 
@@ -87,9 +78,7 @@ cubemastercli tpl create-from-image \
   --probe-path  /health
 ```
 
-Once you have a `template_id` you can boot sandboxes from it with the
-Cube SDK or `cubemastercli`; the full SDK usage is covered in
-[Create Templates from OCI Image](./template-from-image.md).
+Once you have a `template_id`, you can use the CubeSandbox SDK or E2B SDK to create sandboxes from it. See [Create Templates from OCI Image](./template-from-image.md) for an example.
 
 ### Available base image tags
 

@@ -30,6 +30,16 @@ type HostFacts struct {
 	KVMModuleTaint        string `json:"kvm_module_taint,omitempty"`
 }
 
+// IsZero reports whether no meaningful host fact was collected.
+func (f *HostFacts) IsZero() bool {
+	if f == nil {
+		return true
+	}
+	return f.CPUVendor == "" && f.CPUModel == "" && f.CPUIDHash == "" &&
+		f.HostKernelRelease == "" && f.HostKernelFingerprint == "" && f.KVMAPIVersion == 0 &&
+		f.KVMModuleFingerprint == "" && f.KVMModuleTaint == ""
+}
+
 type Node struct {
 	Index int    `json:"Index,omitempty"`
 	InsID string `json:"InstanceID,omitempty"`
@@ -69,7 +79,7 @@ type Node struct {
 
 	MetaDataUpdateAt time.Time `json:"MetaDataUpdateAt,omitempty"`
 
-	ReportedReady bool `json:"-"`
+	ReportedReady bool `json:"ReportedReady,omitempty"`
 
 	Healthy bool `json:"Healthy"`
 
@@ -102,7 +112,13 @@ type Node struct {
 	LocalCreateNum int64 `json:"LocalCreateNum,omitempty"`
 	NicQueues      int64 `json:"nic_queues,omitempty"`
 
-	NodeLabels map[string]string `json:"NodeLabels,omitempty"`
+	NodeLabels     map[string]string `json:"NodeLabels,omitempty"`
+	LocalTemplates []string          `json:"LocalTemplates,omitempty"`
+
+	// Versions carries the real version of each component installed on the
+	// node. Populated by CubeOps /internal/v1/nodes; consumed by templatecenter
+	// compat scan via localcache.GetNode.
+	Versions []ComponentVersion `json:"Versions,omitempty"`
 
 	// HostFacts carries the host-level identity (CPU feature set, host kernel,
 	// KVM ABI) used for cross-node snapshot restore compatibility. A local copy
@@ -212,6 +228,9 @@ func (n *Node) Clone() *Node {
 	if n.HostFacts != nil {
 		hf := *n.HostFacts
 		cloned.HostFacts = &hf
+	}
+	if n.Versions != nil {
+		cloned.Versions = append([]ComponentVersion(nil), n.Versions...)
 	}
 	return &cloned
 }
@@ -435,4 +454,17 @@ func (l NodeScoreList) AllSortByScore() NodeScoreList {
 		return l[i].Score > l[j].Score
 	})
 	return l
+}
+
+// ComponentVersion carries the real version of one component installed on a
+// node. Mirrors CubeOps model.ComponentVersion and Cubelet-side
+// masterclient.ComponentVersion. JSON tags match CubeOps SchedulerNode.Versions
+// so data flows CubeOps → localcache without translation.
+type ComponentVersion struct {
+	Component string `json:"component"`
+	Version   string `json:"version,omitempty"`
+	Commit    string `json:"commit,omitempty"`
+	BuildTime string `json:"build_time,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Variant   string `json:"variant,omitempty"`
 }

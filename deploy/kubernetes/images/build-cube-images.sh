@@ -374,7 +374,9 @@ ensure_source_tree() {
   SOURCE_TREE_STAMP="${SOURCE_TREE_DIR}/.exported-sha"
   # CubeOps is post-v0.5.1; only export when building cube-ops so older release
   # tags still work for cube-api / cube-proxy / webui / etc. cube-master /
-  # cubemastercli need cubelog / CubeDB / Cubelet; cube-master also needs
+  # cubemastercli need cubelog / CubeDB / Cubelet; cubemastercli also needs
+  # CubeOps (the image bundles both cubemastercli and cubeopscli binaries).
+  # cube-master also needs
   # deploy/scripts for volume-deps. cubelet needs Cubelet / CubeNet / cubelog /
   # cubecow / deploy scripts + volume plugin examples.
   # cube-shim needs CubeShim / hypervisor / config-cube.toml + entrypoint.
@@ -382,11 +384,14 @@ ensure_source_tree() {
   if should_build cube-master || should_build cubemastercli; then
     SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} cubelog CubeDB Cubelet"
   fi
+  if should_build cubemastercli; then
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeOps"
+  fi
   if should_build cube-master; then
-    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} deploy/scripts examples/volume/cos"
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} deploy/scripts examples/volume/cos examples/volume/s3"
   fi
   if should_build cubelet; then
-    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} Cubelet CubeNet cubelog cubecow deploy/scripts deploy/kubernetes/images/scripts examples/volume/cos"
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} Cubelet CubeNet cubelog cubecow deploy/scripts deploy/kubernetes/images/scripts examples/volume/cos examples/volume/s3"
   fi
   if should_build cube-shim; then
     SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeShim hypervisor deploy/one-click/config-cube.toml deploy/kubernetes/images/scripts"
@@ -448,6 +453,7 @@ make_hint_for_bin() {
   case "$1" in
     cubelet|cubecli) printf 'make cubelet' ;;
     cubemaster|cubemastercli) printf 'make cubemaster' ;;
+    cubeops) printf 'cd CubeOps && go build' ;;
     *) printf 'make <component>' ;;
   esac
 }
@@ -627,6 +633,10 @@ build_cube_master_image() {
     || fail "missing deploy/scripts/docker-install-volume-deps.sh in ${REPO_ROOT}"
   [[ -f "${REPO_ROOT}/examples/volume/cos/binary/cube-volume-cos.sh" ]] \
     || fail "missing examples/volume/cos/binary/cube-volume-cos.sh in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/examples/volume/s3/go.mod" ]] \
+    || fail "missing examples/volume/s3 Go module in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/examples/volume/s3/cmd/cube-volume-s3/main.go" ]] \
+    || fail "missing examples/volume/s3/cmd/cube-volume-s3/main.go in ${REPO_ROOT}"
   build_image cube-master "${REPO_ROOT}" "${REPO_ROOT}/CubeMaster/docker/Dockerfile" \
     --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
     --build-arg "CUBE_COMMIT=${CUBE_COMMIT}" \
@@ -636,10 +646,12 @@ build_cube_master_image() {
 
 # Same as .github/workflows/release-docker-images.yml for component "cubemastercli":
 # context=., file=CubeMaster/docker/Dockerfile.cubemastercli, CUBE_* build-args.
+# The image bundles both cubemastercli (CubeMaster) and cubeopscli (CubeOps).
 build_cubemastercli_image() {
   [[ -f "${REPO_ROOT}/CubeMaster/docker/Dockerfile.cubemastercli" ]] \
     || fail "missing CubeMaster/docker/Dockerfile.cubemastercli in ${REPO_ROOT}"
   [[ -f "${REPO_ROOT}/CubeMaster/go.mod" ]] || fail "missing CubeMaster go.mod in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/CubeOps/go.mod" ]] || fail "missing CubeOps go.mod in ${REPO_ROOT}"
   [[ -d "${REPO_ROOT}/cubelog" ]] || fail "missing cubelog sibling module in ${REPO_ROOT}"
   [[ -d "${REPO_ROOT}/CubeDB" ]] || fail "missing CubeDB sibling module in ${REPO_ROOT}"
   [[ -d "${REPO_ROOT}/Cubelet" ]] || fail "missing Cubelet sibling module in ${REPO_ROOT}"
@@ -664,6 +676,10 @@ build_cubelet_image() {
     || fail "missing component-entrypoint.sh in ${REPO_ROOT}"
   [[ -f "${REPO_ROOT}/examples/volume/cos/binary/cube-volume-cos.sh" ]] \
     || fail "missing examples/volume/cos/binary/cube-volume-cos.sh in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/examples/volume/s3/go.mod" ]] \
+    || fail "missing examples/volume/s3 Go module in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/examples/volume/s3/cmd/cube-volume-s3/main.go" ]] \
+    || fail "missing examples/volume/s3/cmd/cube-volume-s3/main.go in ${REPO_ROOT}"
   build_image cubelet "${REPO_ROOT}" "${REPO_ROOT}/Cubelet/Dockerfile" \
     --build-arg "CUBE_BUILDER_IMAGE=${CUBE_BUILDER_IMAGE}" \
     --build-arg "CUBE_VERSION=${IMAGE_TAG}" \

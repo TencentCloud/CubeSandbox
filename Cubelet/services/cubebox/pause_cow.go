@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -25,6 +24,7 @@ import (
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -68,6 +68,28 @@ func stampPauseSnapshotID(sb *cubeboxstore.CubeBox, snapID string) {
 	sb.AddAnnotations(map[string]string{constants.MasterAnnotationPauseSnapshotID: snapID})
 }
 
+func stampedPauseSnapshotID(sb *cubeboxstore.CubeBox) string {
+	if sb == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(sb.Labels[constants.MasterAnnotationPauseSnapshotID]); id != "" {
+		return id
+	}
+	return strings.TrimSpace(sb.Annotations[constants.MasterAnnotationPauseSnapshotID])
+}
+
+// replacedLivePauseSnapshotID is the pause snap Resume left as live. After a
+// new Pause succeeds, Cubelet CleanupTemplate's it (keep_tombstone already
+// tore down the running overlay). Empty on the first Pause from a template.
+func replacedLivePauseSnapshotID(prev, newID string) string {
+	prev = strings.TrimSpace(prev)
+	newID = strings.TrimSpace(newID)
+	if prev == "" || prev == newID {
+		return ""
+	}
+	return prev
+}
+
 // updateWithPauseCow pauses a running sandbox into a CubeCow-backed catalog
 // snapshot (same layout as CommitSandbox), packs sandbox_spec.json beside the
 // snapshot files, asks the shim to exit, then fully destroys the live sandbox.
@@ -92,11 +114,20 @@ func (s *service) updateWithPauseCow(
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
+	backend, err := storageBackendFromAnnotations(req.GetAnnotations())
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	stepLog = stepLog.WithFields(CubeLog.Fields{"backend": backend})
+	prevLiveSnap := stampedPauseSnapshotID(sb)
 	stampPauseSnapshotID(sb, snapID)
 	_ = s.cubeboxMgr.cubeboxManger.SyncByID(ctx, sb.ID)
 
-	// Pause allows host-mount / host_dir (same hostdir is re-bound on Resume).
-	// User snapshot CommitSandbox still rejects those via validateCommitSandboxTarget.
+	// Pause allows host-mount / host_dir / plugin_volume (same host path is
+	// re-bound on Resume). User snapshot CommitSandbox still rejects those
+	// via validateCommitSandboxTarget.
 	rootVolumeName, err := validatePauseSandboxTarget(sb)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
@@ -123,30 +154,25 @@ func (s *service) updateWithPauseCow(
 	}
 
 	specDir := fmt.Sprintf("%dC%dM", resourceSpec.CPU, resourceSpec.Memory)
-	// Same layout as CommitSandbox: .../cubebox/<snapID>/<specDir>/
-	snapshotPath := filepath.Join(DefaultSnapshotDir, "cubebox", snapID, specDir)
-	if _, err := pathutil.ValidatePathUnderBase(DefaultSnapshotDir, snapshotPath); err != nil {
+	layout, err := prepareSnapshotWorkLayout(backend, storage.SnapshotKindPause, snapID, "", specDir)
+	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		rsp.Ret.RetMsg = fmt.Sprintf("invalid pause snapshot path: %v", err)
 		return rsp, nil
 	}
-	tmpSnapshotPath := snapshotPath + ".tmp"
-	if _, err := pathutil.ValidatePathUnderBase(DefaultSnapshotDir, tmpSnapshotPath); err != nil {
-		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
-		rsp.Ret.RetMsg = fmt.Sprintf("invalid pause tmp snapshot path: %v", err)
-		return rsp, nil
-	}
+	snapshotPath := layout.Home
+	tmpSnapshotPath := layout.TmpHome
 
 	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
 	// Resolve live rootfs now; CommitRootfs runs *after* PauseToSnapshot so the
 	// disk snapshot matches the frozen memory (guest cannot write after pause).
-	sourceRootfs, err := storage.GetSandboxRootfs(ctx, req.SandboxID, rootVolumeName)
+	sourceRootfs, err := storage.GetSandboxRootfsFor(ctx, backend, req.SandboxID, rootVolumeName)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve sandbox rootfs: %v", err)
 		return rsp, nil
 	}
-	memoryObject, err := storage.CreateMemoryVolume(ctx, snapID, memorySizeBytes)
+	memoryObject, err := storage.CreateMemoryVolumeFor(ctx, backend, snapID, memorySizeBytes)
 	if err != nil {
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
@@ -154,14 +180,14 @@ func (s *service) updateWithPauseCow(
 			return rsp, nil
 		}
 		// cubecow may have left a partial tpl-<snapID>-memory after ENOSPC.
-		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, snapID)
+		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, snapID, backend)
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to create pause memory volume: %v", err)
 		return rsp, nil
 	}
 	if err := validateSnapshotMemoryObject(memoryObject, memorySizeBytes); err != nil {
-		cleanupCowSnapshotObjects(ctx, stepLog, memoryObject, nil)
-		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, snapID)
+		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, nil)
+		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, snapID, backend)
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
@@ -169,13 +195,17 @@ func (s *service) updateWithPauseCow(
 
 	var rootfsObject *storage.CowSnapshotObject
 	cleanupArtifacts := func() {
-		cleanupCowSnapshotObjects(ctx, stepLog, memoryObject, rootfsObject)
-		_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
-		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, snapID)
+		layout.releaseMetadata(ctx)
+		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
+		layout.discardTmpDir()
+		if !layout.usesTmpRename() {
+			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
+		}
+		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, snapID, backend)
 	}
 
-	_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
-	if err := os.MkdirAll(tmpSnapshotPath, 0o755); err != nil {
+	layout.resetTmpDir()
+	if err := layout.prepareWork(ctx); err != nil {
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to create pause snapshot dir: %v", err)
@@ -237,7 +267,7 @@ func (s *service) updateWithPauseCow(
 
 	memURL := snapshotMemoryVolURL(memoryObject.DevPath)
 	pauseCfg := pauseSnapshotConfig{
-		DestinationURL: tmpSnapshotPath,
+		DestinationURL: layout.MetaWork,
 		MemoryVolURL:   &memURL,
 	}
 	cfgJSON, err := json.Marshal(pauseCfg)
@@ -245,7 +275,7 @@ func (s *service) updateWithPauseCow(
 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("marshal pause snapshot config: %v", err))
 	}
 
-	stepLog.Infof("PauseToSnapshot destination=%s memory_vol=%s snapID=%s", tmpSnapshotPath, memURL, snapID)
+	stepLog.Infof("PauseToSnapshot destination=%s memory_vol=%s snapID=%s", layout.MetaWork, memURL, snapID)
 	// Shim returns Update OK and stays alive (Paused). Any error is Pause
 	// failure — do not treat ttrpc closed as success (shim no longer self-exits
 	// on PauseToSnapshot). Cubelet reaps the shim via keep_tombstone Delete below.
@@ -264,7 +294,7 @@ func (s *service) updateWithPauseCow(
 	// Disk after memory freeze: live rootfs volume is still present until
 	// keep_tombstone Destroy. If this fails the MicroVM is already gone —
 	// Pause fails and the sandbox is not Resume-able (delete only).
-	rootfsObject, err = storage.CommitRootfs(workCtx, sourceRootfs, snapID)
+	rootfsObject, err = storage.CommitRootfsFor(workCtx, backend, sourceRootfs, snapID)
 	if err != nil {
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
 			return failPause(errorcode.ErrorCode_PreConditionFailed,
@@ -274,39 +304,52 @@ func (s *service) updateWithPauseCow(
 			fmt.Sprintf("failed to create pause rootfs snapshot: %v", err))
 	}
 
-	if err := writePauseSandboxSpec(tmpSnapshotPath, pauseSpec); err != nil {
+	if err := writePauseSandboxSpec(layout.MetaWork, pauseSpec); err != nil {
 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to write pause sandbox_spec: %v", err))
 	}
-
-	if err := writeMemoryDevFile(tmpSnapshotPath, memoryObject.DevPath); err != nil {
-		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to write memory.dev: %v", err))
-	}
-	if err := deactivateCowSnapshotObjects(workCtx, stepLog, memoryObject, rootfsObject); err != nil {
+	// Do not write memory.dev — restore uses catalog vol name + ResolveDevPath.
+	if err := deactivateCowSnapshotObjectsOn(workCtx, stepLog, backend, memoryObject, rootfsObject); err != nil {
 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to deactivate pause snapshot objects: %v", err))
 	}
-	_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
-	if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
-		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to move pause snapshot: %v", err))
+	if layout.usesTmpRename() {
+		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
+		if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
+			return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to move pause snapshot: %v", err))
+		}
+	}
+	if err := storage.EnsureShimSpecDirLink(layout.Home, specDir); err != nil {
+		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to expose shim spec dir: %v", err))
 	}
 
-	if err := storage.WriteSnapshotCatalog(&storage.SnapshotCatalogEntry{
+	if err := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
 		SnapshotID:      snapID,
 		InstanceType:    "cubebox",
 		SpecDir:         specDir,
-		SnapshotPath:    snapshotPath,
-		MetaDir:         snapshotPath,
+		SnapshotPath:    layout.Home,
+		MetaDir:         layout.MetaDir,
 		RootfsVol:       rootfsObject.Name,
 		RootfsKind:      rootfsObject.Kind,
 		MemoryVol:       memoryObject.Name,
 		MemoryKind:      memoryObject.Kind,
+		MetadataVol:     storage.S3MetadataCatalogVol(backend, snapID),
+		MetadataKind:    storage.S3MetadataCatalogKind(backend),
 		RootfsSizeBytes: rootfsObject.SizeBytes,
 		Kind:            storage.CatalogKindPauseSnapshot,
+		Backend:         backend,
 	}); err != nil {
 		// catalog.json is required for Resume / List / cross-node; do not mark
-		// PAUSED without it (sandbox_spec / memory.dev already fail hard above).
+		// PAUSED without it (sandbox_spec already fails hard above).
+		_ = storage.UnmountS3Metadata(layout.MetaDir)
 		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
 		return failPause(errorcode.ErrorCode_Unknown,
 			fmt.Sprintf("failed to persist pause snapshot catalog for %s: %v", snapID, err))
+	}
+	// S3: seal memory／metadata work volumes to RO snapshots before Upload.
+	if err := storage.FinalizeS3PackageSnapshots(workCtx, backend, snapID); err != nil {
+		_ = storage.UnmountS3Metadata(layout.MetaDir)
+		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
+		return failPause(errorcode.ErrorCode_Unknown,
+			fmt.Sprintf("failed to seal s3 pause package snapshots for %s: %v", snapID, err))
 	}
 
 	// Mark PAUSED before keep_tombstone Destroy so the destroy path takes the
@@ -325,12 +368,21 @@ func (s *service) updateWithPauseCow(
 	}
 	_ = s.cubeboxMgr.cubeboxManger.SyncByID(workCtx, sb.ID)
 
+	remoteUUIDsJSON := uploadRemoteUUIDsIfS3(workCtx, backend, snapID)
+
 	stepLog.Infof("PauseToSnapshot completed: snapID=%s path=%s; running in-process keep_tombstone Destroy", snapID, snapshotPath)
 	extInfo, err := s.destroyLiveAfterPause(workCtx, req, sb)
 	// Always attach whatever volume ref events were observed — Detach may have
 	// succeeded (node 1→0) even when later cleanup fails. Master still needs
 	// to apply those deltas on an explicit Pause failure.
+	if remoteUUIDsJSON != "" {
+		if extInfo == nil {
+			extInfo = map[string][]byte{}
+		}
+		extInfo[storage.ExtInfoRemoteUUIDs] = []byte(remoteUUIDsJSON)
+	}
 	rsp.ExtInfo = extInfo
+	rsp.RemoteUuids = remoteUUIDsJSON
 	if err != nil {
 		// Snapshot is on disk; do not wipe it. Master records FAILED (no Resume).
 		markLocalPauseFailed(sb, err)
@@ -338,6 +390,10 @@ func (s *service) updateWithPauseCow(
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
+	}
+	if prev := replacedLivePauseSnapshotID(prevLiveSnap, snapID); prev != "" {
+		stepLog.Infof("pause replaced live snap %s with %s; CleanupTemplate previous", prev, snapID)
+		s.bestEffortCleanupPauseSnapshot(workCtx, req.RequestID, prev, cleanupBackendForPauseSnap(backend, prev))
 	}
 	return rsp, nil
 }
@@ -439,27 +495,40 @@ func pauseSnapshotIDForGC(sb *cubeboxstore.CubeBox) string {
 	if sb == nil {
 		return ""
 	}
+	backend := pauseCatalogBackend(sb)
 	pauseIDs := []string{
 		strings.TrimSpace(sb.Labels[constants.MasterAnnotationPauseSnapshotID]),
 		strings.TrimSpace(sb.Annotations[constants.MasterAnnotationPauseSnapshotID]),
 	}
-	if id := firstPauseSnapshotID(pauseIDs, true); id != "" {
+	if id := firstPauseSnapshotID(pauseIDs, true, backend); id != "" {
 		return id
 	}
 	runtimeIDs := []string{
 		strings.TrimSpace(sb.Labels[constants.MasterAnnotationRuntimeSnapshotID]),
 		strings.TrimSpace(sb.Annotations[constants.MasterAnnotationRuntimeSnapshotID]),
 	}
-	return firstPauseSnapshotID(runtimeIDs, false)
+	return firstPauseSnapshotID(runtimeIDs, false, backend)
 }
 
-func firstPauseSnapshotID(candidates []string, allowCatalogMiss bool) string {
+func pauseCatalogBackend(sb *cubeboxstore.CubeBox) string {
+	if sb == nil {
+		return ""
+	}
+	if backend, err := storageBackendFromAnnotations(sb.Annotations); err == nil && strings.TrimSpace(sb.Annotations[constants.MasterAnnotationStorageBackend]) != "" {
+		return backend
+	}
+	if backend, err := storageBackendFromAnnotations(sb.Labels); err == nil && strings.TrimSpace(sb.Labels[constants.MasterAnnotationStorageBackend]) != "" {
+		return backend
+	}
+	return ""
+}
+
+func firstPauseSnapshotID(candidates []string, allowCatalogMiss bool, backend string) string {
 	for _, id := range candidates {
 		if id == "" {
 			continue
 		}
-		entry, err := storage.GetLocalSnapshot(context.Background(), id)
-		if err == nil && entry != nil {
+		if entry, _ := lookupPauseCatalog(id, backend); entry != nil {
 			if strings.EqualFold(strings.TrimSpace(entry.Kind), storage.CatalogKindPauseSnapshot) {
 				return id
 			}
@@ -472,11 +541,42 @@ func firstPauseSnapshotID(candidates []string, allowCatalogMiss bool) string {
 	return ""
 }
 
+func lookupPauseCatalog(id, preferred string) (*storage.SnapshotCatalogEntry, string) {
+	seen := map[string]struct{}{}
+	for _, backend := range []string{preferred, cow.BackendS3, cow.BackendXFS} {
+		backend = strings.TrimSpace(backend)
+		if backend == "" {
+			continue
+		}
+		if _, ok := seen[backend]; ok {
+			continue
+		}
+		seen[backend] = struct{}{}
+		entry, err := storage.GetLocalSnapshotFor(context.Background(), backend, id)
+		if err == nil && entry != nil {
+			return entry, backend
+		}
+	}
+	return nil, preferred
+}
+
+func cleanupBackendForPauseSnap(preferred, snapID string) string {
+	if _, used := lookupPauseCatalog(snapID, preferred); strings.TrimSpace(used) != "" {
+		return used
+	}
+	if strings.TrimSpace(preferred) != "" {
+		return preferred
+	}
+	return cow.BackendXFS
+}
+
 // pauseSnapIDToGCOnDestroy is the Destroy-time pause-snap GC decision.
-// keep_tombstone / delete_tombstone still own the snap (Master CleanupTemplate).
-// PAUSED without those flags is not expected on the user Destroy path; skip GC
-// so we cannot drop a live pause snap if someone cubecli-destroys a tombstone.
-// UNKNOWN / FAILED / RUNNING / PAUSING may hold half-finished or leftover snaps.
+// keep_tombstone / delete_tombstone still own the new pause snap. Cubelet
+// CleanupTemplate's the previous live pause snap after Pause succeeds.
+// PAUSED without those flags is not expected on the user Destroy path; skip
+// GC so we cannot drop a live pause snap if someone cubecli-destroys a
+// tombstone. UNKNOWN / FAILED / RUNNING / PAUSING may hold half-finished
+// or leftover snaps.
 func pauseSnapIDToGCOnDestroy(req *cubebox.DestroyCubeSandboxRequest, sb *cubeboxstore.CubeBox) string {
 	if sb == nil || isPauseKeepTombstone(req) || isPauseDeleteTombstone(req) {
 		return ""
@@ -487,9 +587,10 @@ func pauseSnapIDToGCOnDestroy(req *cubebox.DestroyCubeSandboxRequest, sb *cubebo
 	return pauseSnapshotIDForGC(sb)
 }
 
-// bestEffortCleanupPauseSnapshot removes a leftover pause catalog (primary GC
-// is Master CleanupTemplate right after Resume; this is a destroy-time fallback).
-func (s *service) bestEffortCleanupPauseSnapshot(ctx context.Context, requestID, snapID string) {
+// bestEffortCleanupPauseSnapshot removes a pause catalog. After Pause
+// succeeds Cubelet GCs the previous live pause snap here; Destroy is the
+// leftover / failed-pause fallback. Master is not in this path.
+func (s *service) bestEffortCleanupPauseSnapshot(ctx context.Context, requestID, snapID, backend string) {
 	snapID = strings.TrimSpace(snapID)
 	if snapID == "" {
 		return
@@ -497,6 +598,7 @@ func (s *service) bestEffortCleanupPauseSnapshot(ctx context.Context, requestID,
 	cleanupRsp, err := s.CleanupTemplate(ctx, &cubebox.CleanupTemplateRequest{
 		RequestID:  requestID,
 		TemplateID: snapID,
+		Backend:    backend,
 	})
 	if err != nil {
 		log.G(ctx).Warnf("pause-snap GC after destroy failed snap=%s: %v", snapID, err)

@@ -28,7 +28,7 @@ func TestDeleteTemplateWithTargetsAllowsJobOnlyCleanup(t *testing.T) {
 	})
 
 	var replicaCalled, artifactCalled, metadataCalled, jobCalled bool
-	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator) error {
+	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator, _ string) error {
 		replicaCalled = true
 		// v4: locators are deduplicated by (NodeID|NodeIP); SnapshotPath is
 		// no longer part of the identity or the cleanup payload.
@@ -137,7 +137,7 @@ func TestDeleteTemplateWithTargetsAllowsOrphanedJobCleanup(t *testing.T) {
 	})
 
 	var metadataCalled, jobCalled bool
-	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator) error {
+	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator, _ string) error {
 		if len(locators) != 0 {
 			t.Fatalf("expected no locators for orphaned job, got %+v", locators)
 		}
@@ -184,7 +184,7 @@ func TestDeleteTemplateWithTargetsAllowsArtifactOnlyCleanupWithoutLocator(t *tes
 	})
 
 	var artifactCalled, metadataCalled, jobCalled bool
-	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator) error {
+	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator, _ string) error {
 		if len(locators) != 0 {
 			t.Fatalf("expected no locators, got %+v", locators)
 		}
@@ -238,7 +238,7 @@ func TestDeleteTemplateWithTargetsPreservesJobsAfterPartialFailure(t *testing.T)
 
 	replicaErr := errors.New("cubelet temporarily unavailable")
 	var metadataCalled, jobCalled, invalidated bool
-	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator) error {
+	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator, _ string) error {
 		return replicaErr
 	}
 	runArtifactCleanup = func(ctx context.Context, templateID string, targets *templateCleanupTargets) error {
@@ -292,7 +292,7 @@ func TestDeleteTemplateWithTargetsPreservesMetadataAfterArtifactFailure(t *testi
 
 	artifactErr := errors.New("artifact delete failed")
 	var metadataCalled, jobCalled, invalidated bool
-	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator) error {
+	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator, _ string) error {
 		return nil
 	}
 	runArtifactCleanup = func(ctx context.Context, templateID string, targets *templateCleanupTargets) error {
@@ -349,6 +349,9 @@ func TestCleanupTemplateReplicasWithLocatorsIgnoresNotFound(t *testing.T) {
 		if got := req.GetSnapshotPath(); got != "" {
 			t.Fatalf("v4: cleanup request must not carry SnapshotPath; got %q", got)
 		}
+		if got := req.GetBackend(); got != "" {
+			t.Fatalf("empty cleanup must not inject backend; got %q", got)
+		}
 		return &cubeboxv1.CleanupTemplateResponse{
 			Ret: &errorcodev1.Ret{
 				RetCode: errorcodev1.ErrorCode_Unknown,
@@ -357,8 +360,39 @@ func TestCleanupTemplateReplicasWithLocatorsIgnoresNotFound(t *testing.T) {
 		}, nil
 	}
 
-	if err := cleanupTemplateReplicasWithLocators(context.Background(), "tpl-1", []templateCleanupLocator{{NodeIP: "10.0.0.8"}}); err != nil {
+	if err := cleanupTemplateReplicasWithLocators(context.Background(), "tpl-1", []templateCleanupLocator{{NodeIP: "10.0.0.8"}}, ""); err != nil {
 		t.Fatalf("expected not-found cleanup to be ignored, got %v", err)
+	}
+}
+
+func TestCleanupTemplateReplicasWithLocatorsForwardsPinnedBackend(t *testing.T) {
+	origCleanupTemplateOnCubelet := cleanupTemplateOnCubelet
+	origGetCubeletAddrForDelete := getCubeletAddrForDelete
+	t.Cleanup(func() {
+		cleanupTemplateOnCubelet = origCleanupTemplateOnCubelet
+		getCubeletAddrForDelete = origGetCubeletAddrForDelete
+	})
+
+	getCubeletAddrForDelete = func(hostIP string) string { return hostIP + ":9000" }
+	gotBackend := ""
+	cleanupTemplateOnCubelet = func(ctx context.Context, calleeEp string, req *cubeboxv1.CleanupTemplateRequest) (*cubeboxv1.CleanupTemplateResponse, error) {
+		gotBackend = req.GetBackend()
+		return &cubeboxv1.CleanupTemplateResponse{
+			Ret: &errorcodev1.Ret{RetCode: errorcodev1.ErrorCode_Success},
+		}, nil
+	}
+
+	if err := cleanupTemplateReplicasWithLocators(context.Background(), "tpl-s3", []templateCleanupLocator{{NodeIP: "10.0.0.8"}}, "s3"); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if gotBackend != "s3" {
+		t.Fatalf("cleanup backend=%q, want s3", gotBackend)
+	}
+	if err := cleanupTemplateReplicasWithLocators(context.Background(), "tpl-legacy", []templateCleanupLocator{{NodeIP: "10.0.0.8"}}, "cubecow"); err != nil {
+		t.Fatalf("legacy cleanup: %v", err)
+	}
+	if gotBackend != "" {
+		t.Fatalf("historical cubecow must stay empty on cleanup, got %q", gotBackend)
 	}
 }
 

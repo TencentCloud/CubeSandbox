@@ -95,7 +95,7 @@ func TestTryUpdateNodeStatusReportsPeriodicallyWithoutNodeChanges(t *testing.T) 
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&reqCount, 1)
-		if r.URL.Path != "/internal/meta/nodes/node-a/status" {
+		if r.URL.Path != "/internal/v1/node-agent/nodes/node-a/status" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {

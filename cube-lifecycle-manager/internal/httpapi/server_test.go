@@ -49,6 +49,15 @@ func (f *fakeStore) GetState(_ context.Context, sid string) (string, bool, error
 	return v, ok, nil
 }
 
+// WriteState / ClearStateNotify are the notify-emitting equivalents.
+// The httpapi tests only assert on state values, not notify payloads.
+func (f *fakeStore) WriteState(ctx context.Context, sid, state string, ttl time.Duration) error {
+	return f.SetState(ctx, sid, state, ttl)
+}
+func (f *fakeStore) ClearStateNotify(ctx context.Context, sid string) error {
+	return f.ClearState(ctx, sid)
+}
+
 type fakeMaster struct {
 	calls    int32
 	failNext bool

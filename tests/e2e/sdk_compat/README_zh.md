@@ -308,7 +308,7 @@ cp env.example .env
   优先。不带 `--run-e2e` 时忽略，因此 hermetic `framework` gate 仍为串行；
 - `SDK_E2E_TEMPLATE_BUILD_CONCURRENCY`：xdist 各 worker 间并发的 live template
   build 上限，默认 `1`（完全串行，使结果与串行运行一致）；小于 `1` 或非整数回退
-  为 `1`；当取值不小于 worker 数时跳过节流；仅 POSIX（无 `fcntl` 时为 no-op）；
+  为 `1`；仅 POSIX（无 `fcntl` 时为 no-op）；
   节流按 UID 而非按 run 命名：同一用户在同一主机上并发的两个 `--run-e2e` 任务会
   共享 slot 并相互串行化其构建。这是有意为之——两个任务都在争用同一台共享构建
   主机——且 `SDK_E2E_TEMPLATE_BUILD_WAIT` 上限会限制任务在降级为不节流前的等待
@@ -444,7 +444,8 @@ tests/e2e/sdk_compat/
   输出和缺失命令；
 - `cases/filesystem/`：读写、覆盖、多行内容、文件 API 与 shell 互操作；
 - `cases/run_code/`：表达式结果、stdout、kernel 状态和 Python 错误；
-- `cases/network/`：创建时的 allow/deny 和公网出站策略；
+- `cases/network/`：创建时的 allow/deny 和公网出站策略，以及运行中沙箱的策略原地
+  更新（含存量连接重判，见 `test_policy_update.py`，仅 CubeSandbox）；
 - `cases/concurrency/`：同时运行多个 sandbox 时的数据隔离；
 - `cases/host-mount/`：宿主目录挂载扩展——happy path，以及创建时校验、
   运行期 bind-mount 失败和跨 sandbox 共享等边界用例。

@@ -14,33 +14,47 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
-// ListLocalSnapshots returns every snapshot catalog entry this cubelet knows
-// about. It is intended to let master rebuild its view of which snapshots
-// physically exist on the node without having to persist vol/dev/path on its
-// own side.
+// ListLocalSnapshots returns catalog entries for the requested backend.
+// Empty backend lists XFS then S3 as two separate namespaces (never mixed
+// by reading catalog.json).
 func (s *service) ListLocalSnapshots(ctx context.Context, req *cubebox.ListLocalSnapshotsRequest) (*cubebox.ListLocalSnapshotsResponse, error) {
 	rsp := &cubebox.ListLocalSnapshotsResponse{
 		RequestID: req.GetRequestID(),
 		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
 	}
-	entries, err := storage.ListLocalSnapshots(ctx)
-	if err != nil {
-		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("list local snapshots failed: %v", err)
-		return rsp, nil
+	filter := strings.TrimSpace(req.GetBackend())
+	backends := []string{cow.BackendXFS, cow.BackendS3}
+	if filter != "" {
+		normalized, err := resolveRequestStorageBackend(filter)
+		if err != nil {
+			rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+			rsp.Ret.RetMsg = err.Error()
+			return rsp, nil
+		}
+		backends = []string{normalized}
 	}
-	rsp.Snapshots = make([]*cubebox.LocalSnapshotInfo, 0, len(entries))
-	for _, e := range entries {
-		rsp.Snapshots = append(rsp.Snapshots, localSnapshotEntryToProto(e))
+	rsp.Snapshots = make([]*cubebox.LocalSnapshotInfo, 0)
+	for _, backend := range backends {
+		entries, err := storage.ListLocalSnapshotsFor(ctx, backend)
+		if err != nil {
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.Ret.RetMsg = fmt.Sprintf("list local snapshots failed: %v", err)
+			return rsp, nil
+		}
+		for _, e := range entries {
+			info := localSnapshotEntryToProto(e)
+			info.Backend = backend
+			rsp.Snapshots = append(rsp.Snapshots, info)
+		}
 	}
 	return rsp, nil
 }
 
-// GetLocalSnapshot returns the catalog entry for a single snapshot id. Missing
-// records produce PreConditionFailed with a clear message; callers should
-// treat that as authoritative "not on this node".
+// GetLocalSnapshot returns the catalog entry for a single snapshot id in the
+// requested backend namespace (empty backend = xfs).
 func (s *service) GetLocalSnapshot(ctx context.Context, req *cubebox.GetLocalSnapshotRequest) (*cubebox.GetLocalSnapshotResponse, error) {
 	rsp := &cubebox.GetLocalSnapshotResponse{
 		RequestID: req.GetRequestID(),
@@ -57,7 +71,13 @@ func (s *service) GetLocalSnapshot(ctx context.Context, req *cubebox.GetLocalSna
 		rsp.Ret.RetMsg = fmt.Sprintf("invalid snapshotID: %v", err)
 		return rsp, nil
 	}
-	entry, err := storage.GetLocalSnapshot(ctx, id)
+	backend, err := resolveRequestStorageBackend(req.GetBackend())
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	entry, err := storage.GetLocalSnapshotFor(ctx, backend, id)
 	if err != nil {
 		if errors.Is(err, storage.ErrSnapshotCatalogNotFound) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
@@ -68,7 +88,9 @@ func (s *service) GetLocalSnapshot(ctx context.Context, req *cubebox.GetLocalSna
 		rsp.Ret.RetMsg = fmt.Sprintf("get local snapshot failed: %v", err)
 		return rsp, nil
 	}
-	rsp.Snapshot = localSnapshotEntryToProto(entry)
+	info := localSnapshotEntryToProto(entry)
+	info.Backend = backend
+	rsp.Snapshot = info
 	return rsp, nil
 }
 

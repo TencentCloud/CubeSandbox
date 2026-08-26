@@ -135,7 +135,7 @@ let vol = engine.create_volume("my-vol", 10 * 1024 * 1024 * 1024)?;
 println!("device path: {}", vol.device_path);
 
 // Create a snapshot (metadata-only; do not activate immediately)
-let snap = engine.create_snapshot("my-vol", "my-snap", false)?;
+let snap = engine.create_snapshot_from_volume("my-vol", "my-snap", false)?;
 
 // List snapshots
 let (snaps, _next) = engine.list_snapshots("my-vol", 10, None);

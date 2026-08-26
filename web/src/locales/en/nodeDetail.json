@@ -21,7 +21,33 @@
     "address": "Address",
     "heartbeat": "Last Heartbeat"
   },
+  "status": {
+    "notIsolated": "Not Isolated",
+    "isolated": "Isolated"
+  },
+  "actions": {
+    "isolate": "Isolate",
+    "unisolate": "Unisolate"
+  },
+  "dialog": {
+    "isolateDesc": "Once isolated, this node will no longer receive new sandbox scheduling. Existing sandboxes are unaffected.",
+    "unisolateDesc": "Once unisolated, this node will resume receiving new sandbox scheduling.",
+    "detailLabel": "Note (optional)",
+    "detailPlaceholder": "Enter a reason, e.g. disk full, maintenance",
+    "cancel": "Cancel"
+  },
+  "toast": {
+    "isolated": "Node isolated.",
+    "unisolated": "Node unisolated.",
+    "isolationFailed": "Operation failed."
+  },
   "empty": {
     "sandboxes": "No sandboxes running on this node."
+  },
+  "operations": {
+    "title": "Recent Operations",
+    "typeIsolate": "Isolate",
+    "typeUnisolate": "Unisolate",
+    "empty": "No operations yet."
   }
 }

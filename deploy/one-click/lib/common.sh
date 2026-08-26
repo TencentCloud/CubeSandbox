@@ -292,6 +292,73 @@ validate_cubelet_cow_startup_deps() {
   log "cubelet cubecow startup dependencies OK: ${cmds[*]}"
 }
 
+one_click_s3lvol_required_commands() {
+  printf '%s\n' \
+    nvme \
+    python3 \
+    truncate
+}
+
+# validate_cubelet_s3lvol_startup_deps: check the runtime deps of the
+# installed s3lvol_tgt binary. The binary statically links SPDK/DPDK/AWS
+# CRT, so `ldd` on it is the authoritative probe for exactly the system
+# libraries the target machine must provide (glibc is assumed present).
+# Runs only when ONE_CLICK_ENABLE_S3LVOL=1 and the binary is actually in
+# the package.
+validate_cubelet_s3lvol_startup_deps() {
+  local s3lvol_bin="$1" # <prefix>/CubeS3lvol/bin/s3lvol_tgt
+  [[ -n "${s3lvol_bin}" && -f "${s3lvol_bin}" ]] || return 0
+  [[ "${ONE_CLICK_ENABLE_S3LVOL:-0}" == "1" ]] || return 0
+
+  require_cmd ldd
+
+  local cmds=()
+  local cmd
+  while IFS= read -r cmd; do
+    [[ -n "${cmd}" ]] && cmds+=("${cmd}")
+  done < <(one_click_s3lvol_required_commands)
+
+  local missing=()
+  for cmd in "${cmds[@]}"; do
+    if ! command -v "${cmd}" >/dev/null 2>&1; then
+      missing+=("${cmd}")
+    fi
+  done
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    die "CubeS3lvol startup dependency check failed for ${s3lvol_bin}; missing commands in PATH: ${missing[*]} (required commands: ${cmds[*]})"
+  fi
+
+  local missing_libs=()
+  while IFS= read -r lib; do
+    [[ -n "${lib}" ]] && missing_libs+=("${lib}")
+  done < <(ldd "${s3lvol_bin}" 2>/dev/null | awk '/=> not found/{print $1}')
+
+  if [[ "${#missing_libs[@]}" -gt 0 ]]; then
+    die "CubeS3lvol startup dependency check failed for ${s3lvol_bin}; missing shared libraries: ${missing_libs[*]} (the binary links against OpenSSL 1.1 -- on distros shipping OpenSSL 3 install the compat package, e.g. compat-openssl11 on RHEL/CentOS/OpenCloudOS)"
+  fi
+
+  # A missing COS config makes the target fail on first connect, the unit
+  # hits StartLimitBurst and the role target gives up. Fail here instead,
+  # with the fix spelled out.
+  local cos_cfg="${RCOW_COS_CFG:-/data/cubelet/cos.cfg}"
+  if [[ ! -f "${cos_cfg}" ]]; then
+    die "CubeS3lvol is enabled but its COS config is missing: ${cos_cfg}. Create it from the template in deploy/one-click/env.example (or point RCOW_COS_CFG at an existing file) and re-run install.sh"
+  fi
+
+  # The subsystem grid is exported with -a (allow_any_host), so the listener
+  # must stay on loopback; anywhere else the target is an unauthenticated
+  # block device on the network. Fail closed rather than ship that.
+  local listen_addr="${RCOW_LISTEN_ADDR:-127.0.0.1}"
+  case "${listen_addr}" in
+    127.*|localhost|::1) ;;
+    *)
+      die "CubeS3lvol listens on non-loopback ${listen_addr} but exports subsystems with allow_any_host (-a); refusing to expose an unauthenticated block device. Keep RCOW_LISTEN_ADDR on 127.0.0.1 (or add a hostnqn allowlist to the export path first)"
+      ;;
+  esac
+
+  log "CubeS3lvol startup dependencies OK: ${cmds[*]} + $(ldd "${s3lvol_bin}" 2>/dev/null | awk '/=> \//{n++} END{print n+0}') shared libs resolved; COS config at ${cos_cfg}"
+}
+
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     die "this script must run as root"
@@ -771,6 +838,24 @@ validate_bool_01() {
     0|1) ;;
     *) die "${name} must be 0 or 1 (got: '${value}')" ;;
   esac
+}
+
+# generate_alnum_secret: print a random ${1:-24}-char alphanumeric secret.
+# Uses `openssl rand -hex` when available: hex output is shell-safe, and
+# truncating in bash (instead of `head -c`) avoids a SIGPIPE under pipefail.
+# Falls back to /dev/urandom when openssl is absent.
+generate_alnum_secret() {
+  local length="${1:-24}"
+  local pass=""
+  if command -v openssl >/dev/null 2>&1; then
+    pass="$(openssl rand -hex "$(( (length + 1) / 2 ))" | tr -d '\n')"
+    pass="${pass:0:${length}}"
+  elif [[ -r /dev/urandom ]]; then
+    pass="$(tr -dc 'A-Za-z0-9' </dev/urandom | dd bs="${length}" count=1 2>/dev/null || true)"
+    pass="${pass:0:${length}}"
+  fi
+  [[ ${#pass} -eq "${length}" ]] || die "failed to generate a ${length}-character secret"
+  printf '%s' "${pass}"
 }
 
 patch_cubelet_config_template() {
@@ -1300,8 +1385,9 @@ PY
 #   resolve_install_mode REQUESTED_MODE INSTALL_PREFIX ASSUME_YES
 #
 # REQUESTED_MODE is one of "", install, upgrade, auto. When empty and an
-# existing install is detected, prompts on a TTY (default: upgrade) and falls
-# back to a full reinstall (with a loud warning) when non-interactive.
+# existing install is detected, defaults to upgrade: prompts on a TTY
+# (default: Y) and proceeds with upgrade when non-interactive. Use
+# --mode=install to wipe and reinstall.
 resolve_install_mode() {
   local requested="$1"
   local install_prefix="$2"
@@ -1332,7 +1418,7 @@ resolve_install_mode() {
       ;;
   esac
 
-  # Unset mode: default to install, but protect an existing install.
+  # Unset mode: fresh install if nothing is present; otherwise preserve config.
   if [[ "${existing}" != "yes" ]]; then
     printf 'install\n'
     return 0
@@ -1362,10 +1448,9 @@ resolve_install_mode() {
     return 0
   fi
 
-  log "WARNING: existing installation detected but running non-interactively without --mode."
-  log "WARNING: defaulting to a full REINSTALL; your .one-click.env customizations WILL be reset."
-  log "WARNING: to preserve configuration, re-run with --mode=upgrade (or --yes)."
-  printf 'install\n'
+  log "existing installation detected; running non-interactively without --mode, defaulting to config-preserving upgrade."
+  log "to wipe and reinstall, re-run with --mode=install."
+  printf 'upgrade\n'
   return 0
 }
 
@@ -1471,8 +1556,10 @@ backup_before_upgrade() {
     "release-manifest.json" \
     "CubeMaster/conf.yaml" \
     "CubeMaster/plugin/volume-cos.conf" \
+    "CubeMaster/plugin/volume-s3.conf" \
     "Cubelet/config/config.toml" \
     "Cubelet/plugin/volume-cos.conf" \
+    "Cubelet/plugin/volume-s3.conf" \
     "cube-shim/conf/config-cube.toml" \
     "network-agent/network-agent.yaml" \
     "cubeproxy/global.conf" \
@@ -1504,6 +1591,7 @@ backup_before_upgrade() {
 
 # restore_volume_plugin_config_from_upgrade_backup: on upgrade, put operator-edited
 # volume-cos.conf back after the packaged CubeMaster/Cubelet trees are replaced.
+# volume-s3.conf is rewritten from CUBE_S3_* so it is not restored.
 restore_volume_plugin_config_from_upgrade_backup() {
   local install_prefix="$1"
   local install_mode="$2"
@@ -1550,6 +1638,163 @@ seed_volume_plugin_config() {
   done
 }
 
+# local_minio_s3_endpoint: the CUBE_S3_ENDPOINT install.sh fills from the
+# bundled MinIO. Single source of truth so the MinIO/S3 exclusivity check and
+# the fill cannot drift apart.
+local_minio_s3_endpoint() {
+  local bind port
+  bind="${CUBE_SANDBOX_MINIO_API_BIND:-${CUBE_SANDBOX_NODE_IP:-127.0.0.1}}"
+  port="${CUBE_SANDBOX_MINIO_API_PORT:-9000}"
+  printf 'http://%s:%s' "${bind}" "${port}"
+}
+
+# True when CUBE_S3_* is the leftover fill from a previous local-MinIO install
+# (not an operator-supplied external store). After a bind/IP change the endpoint
+# may still point at the old node IP; matching MinIO root credentials is enough,
+# because fill_s3_from_local_minio rewrites CUBE_S3_*.
+s3_config_is_local_minio_fill() {
+  local expected
+  expected="$(local_minio_s3_endpoint)"
+  [[ "${CUBE_S3_ENDPOINT:-}" == "${expected}" ]] && return 0
+  [[ -n "${CUBE_S3_ACCESS_KEY_ID:-}" \
+     && -n "${CUBE_S3_SECRET_ACCESS_KEY:-}" \
+     && -n "${CUBE_SANDBOX_MINIO_ROOT_USER:-}" \
+     && -n "${CUBE_SANDBOX_MINIO_ROOT_PASSWORD:-}" \
+     && "${CUBE_S3_ACCESS_KEY_ID}" == "${CUBE_SANDBOX_MINIO_ROOT_USER}" \
+     && "${CUBE_S3_SECRET_ACCESS_KEY}" == "${CUBE_SANDBOX_MINIO_ROOT_PASSWORD}" ]] && return 0
+  return 1
+}
+
+# A user-supplied CUBE_S3_ENDPOINT means an external store, which cannot be
+# combined with installing local MinIO. A previous install's filled local
+# endpoint (or matching MinIO credentials after an IP/bind change) is allowed so
+# upgrades can re-run; fill_s3_from_local_minio then rewrites CUBE_S3_*.
+check_minio_not_combined_with_user_s3() {
+  [[ "${CUBE_SANDBOX_MINIO_ENABLED:-}" == "1" ]] || return 0
+  [[ -n "${CUBE_S3_ENDPOINT:-}" ]] || return 0
+  if s3_config_is_local_minio_fill; then
+    return 0
+  fi
+  die "CUBE_SANDBOX_MINIO_ENABLED=1 cannot be combined with CUBE_S3_ENDPOINT; set CUBE_SANDBOX_MINIO_ENABLED=0 to use an external S3 backend"
+}
+
+# check_compute_s3_required: fail fast when a compute node has no S3 backend
+# configured. Compute nodes never deploy MinIO (install.sh forces
+# CUBE_SANDBOX_MINIO_ENABLED=0), so the volume plugin resolves the S3 store
+# solely from CUBE_S3_*. Those values must be copied verbatim from the control
+# node's .one-click.env (or point at an operator-managed S3-compatible store);
+# an empty endpoint leaves the volume plugin with no backend at runtime.
+check_compute_s3_required() {
+  [[ "$(one_click_deploy_role)" == "compute" ]] || return 0
+  [[ -n "${CUBE_S3_ENDPOINT:-}" ]] && return 0
+  die "compute node requires CUBE_S3_ENDPOINT (the volume plugin hard-depends on S3): copy CUBE_S3_* from the control node's .one-click.env, or set CUBE_S3_ENDPOINT to an S3-compatible store"
+}
+
+# Print KEY='value' so bash `source` of volume-s3.conf is safe. Apostrophes in
+# value become '"'"' (close quote, literal ', reopen). Do not use printf %q:
+# Helm emits the same quoting, and $'...' forms would not match.
+shell_assign() {
+  local key="$1"
+  local value="$2"
+  printf "%s='%s'\n" "${key}" "${value//\'/\'\"\'\"\'}"
+}
+
+# write_volume_s3_conf is always rendered from CUBE_S3_* (never from MinIO
+# deploy vars). Local MinIO fills CUBE_S3_* in install.sh before this runs.
+write_volume_s3_conf_file() {
+  local conf="$1"
+  local access_key="$2"
+  local secret_key="$3"
+  local bucket="$4"
+  local endpoint="$5"
+  local region="$6"
+  local extra_opts="$7"
+
+  mkdir -p "$(dirname "${conf}")"
+  {
+    shell_assign ACCESS_KEY_ID "${access_key}"
+    shell_assign SECRET_ACCESS_KEY "${secret_key}"
+    shell_assign BUCKET "${bucket}"
+    shell_assign ENDPOINT "${endpoint}"
+    shell_assign REGION "${region}"
+    if [[ -n "${extra_opts}" ]]; then
+      shell_assign S3FS_EXTRA_OPTS "${extra_opts}"
+    fi
+  } > "${conf}"
+  chmod 600 "${conf}"
+}
+
+remove_volume_s3_conf() {
+  local install_prefix="$1"
+  local deploy_role="$2"
+  local plugin_dir conf
+  for plugin_dir in \
+    "CubeMaster/plugin" \
+    "Cubelet/plugin"
+  do
+    [[ "${deploy_role}" == "compute" && "${plugin_dir}" == CubeMaster/plugin ]] && continue
+    conf="${install_prefix}/${plugin_dir}/volume-s3.conf"
+    [[ -f "${conf}" ]] || continue
+    rm -f "${conf}"
+    log "removed ${plugin_dir}/volume-s3.conf (no S3 backend configured)"
+  done
+}
+
+write_volume_s3_conf() {
+  local install_prefix="$1"
+  local deploy_role="$2"
+  local plugin_dir conf
+
+  if [[ -z "${CUBE_S3_ENDPOINT:-}" ]]; then
+    remove_volume_s3_conf "${install_prefix}" "${deploy_role}"
+    return 0
+  fi
+
+  for plugin_dir in \
+    "CubeMaster/plugin" \
+    "Cubelet/plugin"
+  do
+    [[ "${deploy_role}" == "compute" && "${plugin_dir}" == CubeMaster/plugin ]] && continue
+    [[ -d "${install_prefix}/${plugin_dir}" ]] || continue
+    conf="${install_prefix}/${plugin_dir}/volume-s3.conf"
+    write_volume_s3_conf_file \
+      "${conf}" \
+      "${CUBE_S3_ACCESS_KEY_ID:-}" \
+      "${CUBE_S3_SECRET_ACCESS_KEY:-}" \
+      "${CUBE_S3_BUCKET:-cube-volumes}" \
+      "${CUBE_S3_ENDPOINT}" \
+      "${CUBE_S3_REGION:-us-east-1}" \
+      "${CUBE_S3_S3FS_EXTRA_OPTS:-}"
+    log "wrote ${plugin_dir}/volume-s3.conf endpoint=${CUBE_S3_ENDPOINT} bucket=${CUBE_S3_BUCKET:-cube-volumes}"
+  done
+}
+
+# install_s3_volume_host_deps: install s3fs for the S3 volume plugin.
+#
+# The plugin binary has a built-in S3 client, so create/destroy need no host
+# tool. Only the mount path needs s3fs, and a control node runs Cubelet too in
+# single-node deployments, so both roles get it.
+install_s3_volume_host_deps() {
+  local install_prefix="$1"
+  local deploy_role="$2"
+  local script
+
+  if [[ "${deploy_role}" == "compute" ]]; then
+    script="${install_prefix}/Cubelet/plugin/install-s3-deps.sh"
+  else
+    script="${install_prefix}/CubeMaster/plugin/install-s3-deps.sh"
+    [[ -f "${script}" ]] || script="${install_prefix}/Cubelet/plugin/install-s3-deps.sh"
+  fi
+  [[ -f "${script}" ]] || {
+    log "WARNING: S3 volume install-s3-deps.sh not found; skip host tool install"
+    return 0
+  }
+  chmod +x "${script}"
+  if ! "${script}" --s3fs --jq; then
+    log "WARNING: S3 volume host deps install failed; s3fs may be missing (volume attach will fail until it is installed)"
+  fi
+}
+
 # prepare_volume_plugin_install: restore/seed config and ensure plugin binaries
 # are executable under CubeMaster/Cubelet plugin directories.
 prepare_volume_plugin_install() {
@@ -1562,16 +1807,23 @@ prepare_volume_plugin_install() {
   restore_volume_plugin_config_from_upgrade_backup \
     "${install_prefix}" "${install_mode}" "${backup_dir}"
   seed_volume_plugin_config "${install_prefix}" "${deploy_role}"
+  write_volume_s3_conf "${install_prefix}" "${deploy_role}"
 
   for plugin_bin in \
     "${install_prefix}/CubeMaster/plugin/cube-volume-cos" \
     "${install_prefix}/Cubelet/plugin/cube-volume-cos" \
+    "${install_prefix}/CubeMaster/plugin/cube-volume-s3" \
+    "${install_prefix}/Cubelet/plugin/cube-volume-s3" \
     "${install_prefix}/CubeMaster/plugin/install-deps.sh" \
-    "${install_prefix}/Cubelet/plugin/install-deps.sh"
+    "${install_prefix}/Cubelet/plugin/install-deps.sh" \
+    "${install_prefix}/CubeMaster/plugin/install-s3-deps.sh" \
+    "${install_prefix}/Cubelet/plugin/install-s3-deps.sh"
   do
     [[ -f "${plugin_bin}" ]] || continue
     chmod +x "${plugin_bin}"
   done
+
+  install_s3_volume_host_deps "${install_prefix}" "${deploy_role}"
 }
 
 detect_pkg_manager() {
@@ -2154,11 +2406,8 @@ EOF
 }
 
 # check_compute_control_plane_preflight: fail fast when a compute node is
-# missing the mandatory control plane address. This mirrors the resolution
-# logic in resolve_control_plane_cubemaster_addr() (both scripts/one-click/
-# and scripts/systemd/) and must run before package extraction or dependency
-# installation so the user gets a friendly, actionable error before any
-# destructive change.
+# missing the mandatory control plane address (CubeMaster + CubeOps).
+# Mirrors resolve_control_plane_cubemaster_addr / resolve_control_plane_cubeops_addr.
 check_compute_control_plane_preflight() {
   local role
   role="$(one_click_deploy_role)"
@@ -2167,14 +2416,11 @@ check_compute_control_plane_preflight() {
 
   local addr="${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}"
   local ip="${ONE_CLICK_CONTROL_PLANE_IP:-}"
-  # 8089 is the cubemaster protocol port (a fixed constant); do not derive it
-  # from CUBEMASTER_ADDR, which is the control node's local listen address.
+  local cubeops_addr="${ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR:-}"
   local cubemaster_port=8089
+  local cubeops_port=3010
 
   # Guard: when both variables are set they MUST resolve to the same address.
-  # ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR takes priority at runtime; silently
-  # ignoring a conflicting ONE_CLICK_CONTROL_PLANE_IP would be a configuration
-  # trap — the user would believe they are connecting to IP when they are not.
   if [[ -n "${addr}" && -n "${ip}" ]]; then
     local ip_resolved="${ip}:${cubemaster_port}"
     if [[ "${addr}" != "${ip_resolved}" ]]; then
@@ -2185,17 +2431,12 @@ check_compute_control_plane_preflight() {
   if [[ -n "${addr}" ]]; then
     validate_host_port "${addr}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR"
     log "control plane cubemaster address preflight OK: ${addr}"
-    return 0
-  fi
-
-  if [[ -n "${ip}" ]]; then
+  elif [[ -n "${ip}" ]]; then
     validate_ipv4_literal "${ip}" "ONE_CLICK_CONTROL_PLANE_IP"
     validate_host_port "${ip}:${cubemaster_port}" "ONE_CLICK_CONTROL_PLANE_IP-derived cubemaster address"
     log "control plane IP preflight OK: ${ip} (cubemaster port ${cubemaster_port})"
-    return 0
-  fi
-
-  cat >&2 <<'EOF'
+  else
+    cat >&2 <<'EOF'
 
 ╔══════════════════════════════════════════════════════════════════╗
 ║  [!!] CONTROL PLANE ADDRESS NOT CONFIGURED                     ║
@@ -2218,5 +2459,22 @@ check_compute_control_plane_preflight() {
 ╚══════════════════════════════════════════════════════════════════╝
 
 EOF
-  die "ONE_CLICK_CONTROL_PLANE_IP or ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR is required for compute role"
+    die "ONE_CLICK_CONTROL_PLANE_IP or ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR is required for compute role"
+  fi
+
+  # CubeOps address: prefer explicit, otherwise derive from the control
+  # plane IP or the CubeMaster addr host (port 3010).
+  if [[ -n "${cubeops_addr}" ]]; then
+    validate_host_port "${cubeops_addr}" "ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR"
+    log "control plane cubeops address preflight OK: ${cubeops_addr}"
+  elif [[ -n "${ip}" ]]; then
+    validate_host_port "${ip}:${cubeops_port}" "ONE_CLICK_CONTROL_PLANE_IP-derived cubeops address"
+    log "control plane cubeops address preflight OK: ${ip}:${cubeops_port} (derived)"
+  elif [[ -n "${addr}" ]]; then
+    local cubeops_host="${addr%%:*}"
+    validate_host_port "${cubeops_host}:${cubeops_port}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR-derived cubeops address"
+    log "control plane cubeops address preflight OK: ${cubeops_host}:${cubeops_port} (derived from cubemaster addr)"
+  else
+    die "ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR or ONE_CLICK_CONTROL_PLANE_IP is required for CubeOps registration"
+  fi
 }

@@ -12,7 +12,12 @@
 # Installs:
 #   cosfs  — Cubelet Attach/Detach (FUSE)
 #   coscmd — CubeMaster Create/Destroy (binary plugin)
-#   jq     — binary plugin JSON parsing
+#   s3fs   — Cubelet Attach/Detach for S3-compatible backends (FUSE)
+#   jq     — COS binary plugin JSON parsing
+#
+# The S3 volume plugin needs no command line tool for Create/Destroy: it is a Go
+# binary that talks to the endpoint over HTTP. Only s3fs is required, on nodes
+# that mount volumes.
 #
 # Run as root during image build. Not a substitute for
 # examples/volume/cos/install-deps.sh on bare-metal hosts.
@@ -113,17 +118,30 @@ install_coscmd() {
   coscmd --version | head -1
 }
 
+install_s3fs() {
+  log "install s3fs"
+  # s3fs pulls the right fuse package; installing "fuse" explicitly breaks on
+  # fuse3-only distros (same as examples/volume/s3/install-deps.sh).
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends s3fs
+  command -v s3fs >/dev/null 2>&1 || {
+    echo "ERROR: s3fs not on PATH after package install" >&2
+    exit 1
+  }
+  s3fs --version | head -1
+}
+
 main() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   install_jq
   install_cosfs
   install_coscmd
+  install_s3fs
   apt-get clean
   rm -rf /var/lib/apt/lists/*
   local cosfs_path
   cosfs_path="$(command -v cosfs 2>/dev/null || echo '(skipped)')"
-  log "installed: $(command -v jq) ${cosfs_path} $(command -v coscmd)"
+  log "installed: $(command -v jq) ${cosfs_path} $(command -v coscmd) $(command -v s3fs)"
 }
 
 main "$@"

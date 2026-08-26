@@ -426,6 +426,80 @@ def _validate_allow_out_domains_require_deny_all(
     raise ApiError(ALLOW_OUT_DOMAIN_REQUIRES_DENY_ALL, 400)
 
 
+def _build_network_update_body(network: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate ``Sandbox.update_network``'s single argument into the API body.
+
+    The update endpoint takes the policy at the top level and carries
+    ``allow_internet_access`` alongside it, so this flattens what
+    :func:`_build_network_payload` nests. Only keys the caller actually supplied
+    are emitted: the flag is presence-based, matching E2B, so omitting it is
+    distinct from sending ``true``.
+    """
+    unknown = set(network) - _NETWORK_UPDATE_KEYS
+    if unknown:
+        raise ValueError(
+            f"network has unsupported keys: {sorted(unknown)!r}; "
+            f"supported keys are {sorted(_NETWORK_UPDATE_KEYS)!r}"
+        )
+    allow_internet_access = network.get("allow_internet_access", True)
+    if not isinstance(allow_internet_access, bool):
+        raise ValueError(
+            "network.allow_internet_access must be a bool, got "
+            f"{type(allow_internet_access).__name__}"
+        )
+    body = _build_network_payload(network, allow_internet_access=allow_internet_access)
+    if "allow_internet_access" in network:
+        body["allowInternetAccess"] = allow_internet_access
+    return body
+
+
+_NETWORK_UPDATE_KEYS = frozenset(
+    {
+        "allow_out",
+        "deny_out",
+        "rules",
+        "allow_internet_access",
+        "allow_public_traffic",
+        "mask_request_host",
+    }
+)
+
+
+def _build_network_payload(
+    network: Dict[str, Any],
+    *,
+    allow_internet_access: bool = True,
+) -> Dict[str, Any]:
+    """Translate the SDK's snake_case ``network`` argument into the API body.
+
+    Shared by sandbox creation and :meth:`Sandbox.update_network` so both accept
+    exactly the same argument shape and run the same client-side validation.
+    """
+    _validate_allow_out_domains_require_deny_all(
+        network.get("allow_out"),
+        network.get("deny_out"),
+        default_deny_all=not allow_internet_access,
+    )
+    net: Dict[str, Any] = {}
+    if "allow_out" in network:
+        net["allowOut"] = network["allow_out"]
+    if "deny_out" in network:
+        net["denyOut"] = network["deny_out"]
+    if "allow_public_traffic" in network:
+        net["allowPublicTraffic"] = network["allow_public_traffic"]
+    if "mask_request_host" in network:
+        net["maskRequestHost"] = network["mask_request_host"]
+    if network.get("rules"):
+        # ``rules`` accepts either CubeEgress's list-of-Rule shape or E2B's
+        # per-host transform mapping (``{host: [{transform: {...}}]}``).
+        # ``_normalize_rules_arg`` collapses both into a list of rule dicts
+        # that ``_serialize_rule`` understands.
+        normalized_rules = _normalize_rules_arg(network["rules"])
+        if normalized_rules:
+            net["rules"] = [_serialize_rule(r) for r in normalized_rules]
+    return net
+
+
 def _is_domain_allow_out_target(target: object) -> bool:
     import ipaddress
 

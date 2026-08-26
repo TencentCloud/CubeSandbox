@@ -72,11 +72,11 @@ redis:
   # password: "replace-me-redis-master-password"
 
 # --- Persistence (optional) ---
-# Default: leave unset → CubeMaster / MySQL / Redis PVCs use the cluster's
+# Default: leave unset → CubeMaster / MySQL / Redis / MinIO PVCs use the cluster's
 # default StorageClass. Chart does NOT create a StorageClass unless you merge
 # values-tke.yaml (or set storageClass.create=true yourself).
 #
-# Pin all three PVCs to one existing SC (e.g. local-path / gp3 / premium-rwo):
+# Pin all four PVCs to one existing SC (e.g. local-path / gp3 / premium-rwo):
 # persistence:
 #   storageClassName: local-path
 #
@@ -91,6 +91,9 @@ redis:
 # redis:
 #   persistence:
 #     storageClassName: gp3
+# minio:
+#   persistence:
+#     storageClassName: gp3
 #
 # Single-node / no CSI: use hostPath instead of PVC
 # controlPlane:
@@ -103,6 +106,9 @@ redis:
 # redis:
 #   persistence:
 #     hostPath: /data/redis
+# minio:
+#   persistence:
+#     hostPath: /data/minio
 
 # Optional: cubevs/sandbox CIDR (Chart default is 172.16.0.0/18).
 # Override when it collides with your VPC; keep tproxyOnIP as the CIDR gateway.

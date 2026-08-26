@@ -2,24 +2,24 @@
 
 本指南介绍如何将单机 Cube Sandbox 部署扩展为多机集群，通过添加**计算节点**来实现。计算节点只运行沙箱运行时组件（内置 network runtime 的 `Cubelet`、`CubeShim`），并向第一台机器上的控制面注册。
 
-::: warning 生产环境注意
+:::: warning 生产环境注意
 如果您计划在生产环境中使用 Cube Sandbox，请参阅[网络加固](./network-hardening.md)指南，在将服务暴露到不可信网络之前完成安全加固。
-:::
+::::
 
-::: tip 前置条件
+:::: tip 前置条件
 添加计算节点前，你必须先通过[本地构建部署指南](./self-build-deploy.md)完成控制节点的部署。
-:::
+::::
 
 ## 架构概览
 
 ```
 ┌─────────────────────────────────────────┐
 │              控制节点                    │
-│  CubeMaster, cube-api, CubeProxy,       │
-│  CoreDNS, MySQL, Redis,                 │
+│  CubeMaster, CubeOps, cube-api,         │
+│  CubeProxy, CoreDNS, MySQL, Redis,      │
 │  Cubelet (network runtime)              │
 └──────────────────┬──────────────────────┘
-                   │  /internal/meta API
+                   │  /internal/v1/node-agent API
        ┌───────────┼───────────┐
        ▼           ▼           ▼
 ┌────────────┐┌────────────┐┌────────────┐
@@ -29,8 +29,8 @@
 └────────────┘└────────────┘└────────────┘
 ```
 
-- **控制节点**运行完整技术栈：编排调度（CubeMaster）、API 网关（cube-api）、代理（CubeProxy + CoreDNS）、数据库（MySQL + Redis），同时自身也作为计算节点。
-- 每个**计算节点**只运行内置 network runtime 的 `Cubelet`，向控制面 `CubeMaster` 注册并接收沙箱调度请求。
+- **控制节点**运行完整技术栈：编排调度（CubeMaster）、节点管理（CubeOps）、API 网关（cube-api）、代理（CubeProxy + CoreDNS）、数据库（MySQL + Redis）、内置 MinIO S3 存储（供 volume 使用），同时自身也作为计算节点。
+- 每个**计算节点**只运行内置 network runtime 的 `Cubelet`，向控制面 `CubeOps` 注册并接收来自 `CubeMaster` 的沙箱调度请求。
 
 ## 前置条件
 
@@ -39,7 +39,7 @@
 - **物理机或裸金属服务器**（不支持嵌套虚拟化）
 - **x86_64** 或 **aarch64**（ARM64）架构，**已启用 KVM**（`ls /dev/kvm`）
 - **Docker** 已安装并运行
-- 到控制节点的**网络连通性**（默认需访问 `CubeMaster` 的 `8089` 端口）
+- 到控制节点的**网络连通性**（默认需访问 `CubeOps` 的 `3010` 端口进行节点注册；使用内置 MinIO 时还需访问 `9000` 端口）
 
 完整要求列表请参阅[本地构建部署 — 前置条件](./self-build-deploy.md#前置条件)。
 
@@ -64,21 +64,35 @@ cp env.example .env
 ONE_CLICK_DEPLOY_ROLE=compute
 CUBE_SANDBOX_NODE_IP=<当前节点IP>
 ONE_CLICK_CONTROL_PLANE_IP=<控制节点IP>
+
+# CUBE_S3_* 必填——Volume 插件强制依赖 S3。计算节点不部署 MinIO，
+# 请把控制节点 .one-click.env 中的 CUBE_S3_* 原样拷贝（必须与控制节点一致，
+# 插件才能解析到同一个存储）。内置 MinIO 时形如：
+CUBE_S3_ENDPOINT=http://<控制节点IP>:9000
+CUBE_S3_ACCESS_KEY_ID=<取自控制节点 .one-click.env>
+CUBE_S3_SECRET_ACCESS_KEY=<取自控制节点 .one-click.env>
+CUBE_S3_BUCKET=cube-volumes
+CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
 ```
 
 | 变量 | 说明 |
 |------|------|
 | `ONE_CLICK_DEPLOY_ROLE` | 计算节点必须设为 `compute` |
 | `CUBE_SANDBOX_NODE_IP` | 当前节点主网卡 IP |
-| `ONE_CLICK_CONTROL_PLANE_IP` | 控制节点 IP，自动拼接为 `<ip>:8089` 作为 CubeMaster 地址 |
+| `ONE_CLICK_CONTROL_PLANE_IP` | 控制节点 IP，自动拼接为 `<ip>:3010` 作为 CubeOps 节点注册地址 |
+| `CUBE_S3_*` | **必填。** Volume 插件强制依赖 S3。计算节点不部署 MinIO，从控制节点 `.one-click.env` 拷贝（或指向自有 S3）。内置 MinIO 还需放行计算节点到控制面 TCP 9000。 |
 
-如果 CubeMaster 使用非默认端口，也可以显式指定：
+::: tip 安装时会校验
+`install-compute.sh` 会在修改任何本地配置之前校验 `CUBE_S3_ENDPOINT`；缺失时直接中止，并提示从控制节点拷贝 `CUBE_S3_*`。请先补齐上述变量再运行安装。
+:::
+
+如果 CubeOps 使用非默认端口，也可以显式指定：
 
 ```bash
-ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR=<控制节点IP>:8089
+ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR=<控制节点IP>:3010
 ```
 
-同时设置时，`ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` 优先级高于 `ONE_CLICK_CONTROL_PLANE_IP`。
+同时设置时，`ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` 优先级高于 `ONE_CLICK_CONTROL_PLANE_IP`。
 
 ## 第三步：安装
 
@@ -90,8 +104,8 @@ sudo ./install-compute.sh
 
 1. 只安装内置 network runtime 的 `Cubelet`、`cube-shim`、`cube-image`、`cube-kernel-scf` 和运行时脚本
 2. 只启动宿主机进程：`cubelet`
-3. 自动把 `Cubelet` 的 `meta_server_endpoint` 指向控制面 `CubeMaster`
-4. 通过控制面的 `/internal/meta` 接口注册节点并上报状态
+3. 自动把 `Cubelet` 的 `meta_server_endpoint` 指向控制面 `CubeOps`
+4. 通过控制面的 `/internal/v1/node-agent` 接口向 CubeOps 注册节点并上报状态
 
 ## 验证部署
 
@@ -104,15 +118,15 @@ sudo ./smoke.sh
 计算节点模式下，`quickcheck.sh` 会验证：
 
 - 本机 `Cubelet` 及其内置 network runtime 健康状态
-- 控制面 `CubeMaster` 可达
-- 当前节点已出现在控制面的 `/internal/meta/nodes/{node_id}` 中
+- 控制面 `CubeOps` 可达
+- 当前节点已出现在控制面的 `/internal/v1/nodes/{node_id}` 中
 
 ### 从控制节点验证
 
 在控制节点上确认计算节点已注册：
 
 ```bash
-curl http://127.0.0.1:8089/internal/meta/nodes
+curl http://127.0.0.1:3010/internal/v1/nodes
 ```
 
 返回结果中应包含计算节点的 IP 和健康状态。
@@ -184,35 +198,36 @@ sudo ./down.sh
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `ONE_CLICK_DEPLOY_ROLE` | `control` | 计算节点必须设为 `compute` |
-| `ONE_CLICK_CONTROL_PLANE_IP` | 空 | 控制节点 IP，默认拼接为 `<ip>:8089` |
-| `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | 空 | 显式指定 CubeMaster 地址，优先级高于 `ONE_CLICK_CONTROL_PLANE_IP` |
+| `ONE_CLICK_CONTROL_PLANE_IP` | 空 | 控制节点 IP，默认拼接为 `<ip>:3010` |
+| `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` | 空 | 显式指定 CubeOps 地址，优先级高于 `ONE_CLICK_CONTROL_PLANE_IP` |
 | `CUBE_SANDBOX_NODE_IP` | `10.0.0.10` | **必须修改。** 当前节点主网卡 IP |
 | `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18`（取自 `config.toml`） | cubevs 本地网络 CIDR。需与控制节点一致。格式为 IPv4 CIDR（如 `10.100.0.0/18`），掩码范围 /16~/24。安装时自动检测宿主机冲突。 |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | 设为 `1` 跳过冲突检测（不推荐）。 |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | 安装后是否执行健康检查 |
+| `CUBE_S3_*` | 空 / 由控制面 MinIO 填入 | **必填。** Volume 插件强制依赖 S3。从控制节点 `.one-click.env` 拷贝；`ENDPOINT` / `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY` / `BUCKET` 无可用默认值。 |
 
 完整配置参考（构建选项、数据库、代理等）请参阅[本地构建部署 — 配置参考](./self-build-deploy.md#配置参考）。
 
 ## 故障排查
 
-### 计算节点无法连接 CubeMaster
+### 计算节点无法连接 CubeOps
 
 检查网络连通性：
 
 ```bash
-curl http://<控制节点IP>:8089/internal/meta/nodes
+curl http://<控制节点IP>:3010/internal/v1/nodes
 ```
 
 如果失败，请检查：
-- 控制节点的防火墙规则（`8089` 端口需可访问）
-- `.env` 中 `ONE_CLICK_CONTROL_PLANE_IP` 或 `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` 的值
+- 控制节点的防火墙规则（`3010` 端口需可访问）
+- `.env` 中 `ONE_CLICK_CONTROL_PLANE_IP` 或 `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` 的值
 
 ### 节点未出现在控制面
 
 如果 `smoke.sh` 本地通过但控制面上看不到该节点：
 
 1. 检查 Cubelet 日志：`/data/log/Cubelet/`
-2. 确认 Cubelet 配置中的 `meta_server_endpoint` 指向正确的 CubeMaster 地址
+2. 确认 Cubelet 配置中的 `meta_server_endpoint` 指向正确的 CubeOps 地址
 3. 确保 `CUBE_SANDBOX_NODE_IP` 设为可路由的 IP（不是 `127.0.0.1`）
 
 通用故障排查（Docker、KVM、DNS 等）请参阅[本地构建部署 — 故障排查](./self-build-deploy.md#故障排查)。

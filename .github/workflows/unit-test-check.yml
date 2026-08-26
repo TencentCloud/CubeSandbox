@@ -16,6 +16,7 @@ on:
       - 'Cubelet/**'
       - 'agent/**'
       - 'hypervisor/**'
+      - 'examples/volume/s3/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/unit-test-check.yml'
@@ -34,6 +35,7 @@ on:
       - 'Cubelet/**'
       - 'agent/**'
       - 'hypervisor/**'
+      - 'examples/volume/s3/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/unit-test-check.yml'
@@ -59,6 +61,7 @@ on:
           - cubelet
           - agent
           - hypervisor
+          - volume-s3
 
 concurrency:
   group: unit-test-${{ github.event.pull_request.number || github.ref }}
@@ -115,6 +118,7 @@ jobs:
             add_component "cubelet"
             add_component "agent"
             add_component "hypervisor"
+            add_component "volume-s3"
           }
 
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
@@ -133,6 +137,7 @@ jobs:
               cubelet) add_component "cubelet" ;;
               agent) add_component "agent" ;;
               hypervisor) add_component "hypervisor" ;;
+              volume-s3) add_component "volume-s3" ;;
               *)
                 echo "::error::unsupported component input: ${selected_component}"
                 exit 1
@@ -211,6 +216,10 @@ jobs:
                 hypervisor/*)
                   add_component "hypervisor"
                   ;;
+                examples/volume/s3/*)
+                  # Standalone Go module, not covered by any component above.
+                  add_component "volume-s3"
+                  ;;
               esac
             done <<< "${changed_files}"
           fi
@@ -240,6 +249,7 @@ jobs:
                     elif . == "cubevs" then "CubeVS"
                     elif . == "agent" then "Agent"
                     elif . == "hypervisor" then "Hypervisor"
+                    elif . == "volume-s3" then "S3 Volume Plugin"
                     else error("unsupported component: " + .)
                     end
                   ),
@@ -257,6 +267,7 @@ jobs:
                     elif . == "cubevs" then "cubevs-test"
                     elif . == "agent" then "agent-test"
                     elif . == "hypervisor" then "hypervisor-test"
+                    elif . == "volume-s3" then "cube-volume-s3-test"
                     else error("unsupported component: " + .)
                     end
                   ),

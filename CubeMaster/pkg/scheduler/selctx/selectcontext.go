@@ -47,6 +47,10 @@ type RequestResource struct {
 	TemplateID             string
 	TemplateNodeScope      []string
 	EnforceSnapshotStorage bool
+	// AllowNonLocalTemplate skips the "template／snapshot must already be
+	// local on the node" check. Used for S3 remote_ready cross-node restore
+	// where CubeCow loads objects on demand.
+	AllowNonLocalTemplate bool
 }
 
 type ImageSpec struct {

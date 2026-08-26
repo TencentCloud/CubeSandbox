@@ -85,6 +85,12 @@ type Config struct {
 	HeartbeatTTL time.Duration
 	// DiscoveryRefresh: cadence of the Redis heartbeat scan.
 	DiscoveryRefresh time.Duration
+
+	// EventBusEnabled toggles Pub/Sub wakeup hints for cross-replica resume
+	// waiters. When false, state writes stay on the legacy Redis Set/Del
+	// path and resumer.waitForRunning uses its 100ms polling ticker.
+	// Set CUBE_LCM_EVENTBUS_ENABLED=false as a kill switch.
+	EventBusEnabled bool
 }
 
 // Default returns a config populated with safe defaults; callers then override
@@ -112,6 +118,7 @@ func Default() *Config {
 		UseStaticFleet:   false,
 		HeartbeatTTL:     15 * time.Second,
 		DiscoveryRefresh: 3 * time.Second,
+		EventBusEnabled:  true,
 	}
 }
 
@@ -222,7 +229,14 @@ func Load() (*Config, error) {
 			c.DiscoveryRefresh = d
 		}
 	}
-
+	if v := os.Getenv("CUBE_LCM_EVENTBUS_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			addErr("CUBE_LCM_EVENTBUS_ENABLED", err)
+		} else {
+			c.EventBusEnabled = enabled
+		}
+	}
 	if c.ConsumerName == "" {
 		host, err := os.Hostname()
 		if err != nil {

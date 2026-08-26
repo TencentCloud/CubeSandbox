@@ -48,6 +48,30 @@ services:
     volumes:
       - __REDIS_VOLUME__:/data
 
+  minio:
+    image: __MINIO_IMAGE__
+    container_name: __MINIO_CONTAINER__
+    restart: unless-stopped
+    command:
+      - server
+      - /data
+      - --console-address
+      - ":9001"
+    environment:
+      MINIO_ROOT_USER: "__MINIO_ROOT_USER__"
+      MINIO_ROOT_PASSWORD: "__MINIO_ROOT_PASSWORD__"
+    ports:
+      - "__MINIO_API_BIND__:__MINIO_API_PORT__:9000"
+      - "127.0.0.1:__MINIO_CONSOLE_PORT__:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - __MINIO_VOLUME__:/data
+
 volumes:
   __MYSQL_VOLUME__:
   __REDIS_VOLUME__:
+  __MINIO_VOLUME__:

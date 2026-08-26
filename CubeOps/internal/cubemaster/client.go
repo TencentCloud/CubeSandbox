@@ -7,10 +7,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 
 	"github.com/google/uuid"
 	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
@@ -92,21 +92,6 @@ func New(baseURL string) *Client {
 	}
 }
 
-// GetNodes fetches cluster node information from CubeMaster.
-func (c *Client) GetNodes(ctx context.Context) (json.RawMessage, error) {
-	return c.get(ctx, "/internal/meta/nodes")
-}
-
-// ClusterOverview fetches cluster overview from CubeMaster.
-func (c *Client) ClusterOverview(ctx context.Context) (json.RawMessage, error) {
-	return c.get(ctx, "/internal/meta/cluster/overview")
-}
-
-// ClusterVersions fetches version information from CubeMaster.
-func (c *Client) ClusterVersions(ctx context.Context) (json.RawMessage, error) {
-	return c.get(ctx, "/internal/meta/version-matrix")
-}
-
 // GetSandbox fetches sandbox detail from CubeMaster.
 //
 // sandboxID and instanceType are passed via query parameters using net/url
@@ -119,15 +104,6 @@ func (c *Client) GetSandbox(ctx context.Context, sandboxID, instanceType string)
 		"sandbox_id":    sandboxID,
 		"instance_type": instanceType,
 	})
-}
-
-// GetNode fetches a single node's detail from CubeMaster.
-//
-// nodeID is appended to the path; values.QueryEscape handles any character
-// that would otherwise be reserved in the URL path.
-func (c *Client) GetNode(ctx context.Context, nodeID string) (json.RawMessage, error) {
-	escaped := url.PathEscape(nodeID)
-	return c.get(ctx, fmt.Sprintf("/internal/meta/nodes/%s", escaped))
 }
 
 // ListSandboxes fetches the sandbox list from CubeMaster.
@@ -455,4 +431,43 @@ func setTraceHeaders(req *http.Request, rid string) {
 	if rid != "" {
 		req.Header.Set("X-RequestID", rid)
 	}
+}
+
+// CountNodeSandboxes returns how many sandboxes CubeMaster reports on hostID.
+// Uses /cube/sandbox/inventory which surfaces cubelet list failures as a
+// non-success ret_code (fail-closed) — see service.ErrSandboxCheckFailed.
+func (c *Client) CountNodeSandboxes(ctx context.Context, hostID string) (int, error) {
+	if hostID == "" {
+		return 0, errors.New("CountNodeSandboxes: host_id is required")
+	}
+	raw, err := c.getWithQuery(ctx, "/cube/sandbox/inventory", map[string]string{
+		"host_id":   hostID,
+		"start_idx": "1",
+		"size":      "1",
+	})
+	if err != nil {
+		return 0, err
+	}
+	var env struct {
+		Ret struct {
+			RetCode int    `json:"ret_code"`
+			RetMsg  string `json:"ret_msg"`
+		} `json:"ret"`
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return 0, fmt.Errorf("count node sandboxes: unmarshal envelope: %w", err)
+	}
+	if env.Ret.RetCode != 0 && env.Ret.RetCode != 200 {
+		return 0, &CMError{RetCode: env.Ret.RetCode, RetMsg: env.Ret.RetMsg}
+	}
+	trimmed := bytes.TrimSpace(env.Data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return 0, errors.New("count node sandboxes: data missing or null (cubelet may be unreachable)")
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(env.Data, &items); err != nil {
+		return 0, fmt.Errorf("count node sandboxes: unexpected data shape: %s", string(env.Data))
+	}
+	return len(items), nil
 }

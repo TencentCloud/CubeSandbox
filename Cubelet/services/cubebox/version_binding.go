@@ -7,6 +7,7 @@ package cubebox
 import (
 	"strings"
 
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 )
@@ -16,6 +17,17 @@ type guestEnvironmentVersions struct {
 	Agent      string
 	Kernel     string
 	Shim       string
+}
+
+// envdVersionFromCubeBox returns the template envd version propagated by
+// CubeMaster when the sandbox was created. CubeBox annotations are persisted
+// with the sandbox, so snapshot commits can reuse the value without a guest
+// Exec on their latency-sensitive success path.
+func envdVersionFromCubeBox(cb *cubeboxstore.CubeBox) string {
+	if cb == nil {
+		return ""
+	}
+	return strings.TrimSpace(cb.Annotations[constants.MasterAnnotationComponentEnvdVersion])
 }
 
 // collectGuestEnvironmentVersions reads the live toolbox once via the same

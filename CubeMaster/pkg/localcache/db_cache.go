@@ -18,6 +18,10 @@ import (
 	"gorm.io/gorm"
 )
 
+// Evict the cache only after this many consecutive empty responses,
+// absorbing transient jitter.
+const emptySyncEvictThreshold = 15
+
 func (l *local) DB() *gorm.DB {
 	if l.db.Error == nil || errors.Is(l.db.Error, gorm.ErrRecordNotFound) {
 		return l.db
@@ -32,11 +36,11 @@ func (l *local) DB() *gorm.DB {
 	return l.db
 }
 
-func (l *local) loadAllFromDB() error {
-	return l.syncAllFromDB(false)
+func (l *local) loadAllFromDB(ctx context.Context) error {
+	return l.syncAllFromDB(ctx, false)
 }
 
-func (l *local) syncAllFromDB(update bool) error {
+func (l *local) syncAllFromDB(ctx context.Context, update bool) error {
 	startTime := time.Now()
 	retCode := 200
 	defer func() {
@@ -44,11 +48,16 @@ func (l *local) syncAllFromDB(update bool) error {
 	}()
 
 	if externalNodeLoader != nil {
-		nodes, err := externalNodeLoader(context.Background())
+		nodes, err := externalNodeLoader(ctx)
 		if err != nil {
 			retCode = 500
+			// A load failure is not a valid empty view; it must not count
+			// toward the empty-response streak or clear the cache.
+			l.emptySyncStreak.Store(0)
 			return err
 		}
+
+		log.G(ctx).Infof("syncAllFromDB: externalNodeLoader returned %d nodes", len(nodes))
 
 		allFromDb := make(map[string]struct{}, len(nodes))
 		for _, n := range nodes {
@@ -62,10 +71,35 @@ func (l *local) syncAllFromDB(update bool) error {
 			} else {
 				l.addNodeCache(n)
 			}
+			if n.InsID != "" {
+				log.G(ctx).Debugf("syncAllFromDB: node=%s LocalTemplates=%v", n.InsID, n.LocalTemplates)
+				SyncNodeTemplates(ctx, n.InsID, n.LocalTemplates)
+			}
 			allFromDb[n.InsID] = struct{}{}
 		}
 		if update {
-			l.checkDirty(allFromDb)
+			if len(allFromDb) == 0 {
+				cur := l.emptySyncStreak.Add(1)
+				if cur < emptySyncEvictThreshold {
+					// Not yet actionable; DEBUG avoids spam on a transient or empty cluster.
+					log.G(ctx).Debugf("syncAllFromDB: CubeOps returned 0 nodes (streak=%d/%d), skip eviction",
+						cur, emptySyncEvictThreshold)
+					return nil
+				}
+				l.emptySyncStreak.Store(0)
+				if len(l.cache.Items()) > 0 {
+					// Expected eviction (threshold reached); WARN for visibility without alerting.
+					log.G(ctx).Warnf("syncAllFromDB: CubeOps returned 0 nodes for %d consecutive syncs, evicting cache",
+						cur)
+				} else {
+					log.G(ctx).Infof("syncAllFromDB: CubeOps returned 0 nodes for %d consecutive syncs, cache already empty",
+						cur)
+				}
+			} else {
+				l.emptySyncStreak.Store(0)
+			}
+			// quiet when the DB view is empty (expected wipe); else keep per-node ERRORs.
+			l.checkDirty(ctx, allFromDb, len(allFromDb) == 0)
 		}
 		return nil
 	}
@@ -130,7 +164,7 @@ func (l *local) syncAllFromDB(update bool) error {
 	}
 
 	if update {
-		l.checkDirty(allFromDb)
+		l.checkDirty(ctx, allFromDb, false)
 	}
 	return nil
 }

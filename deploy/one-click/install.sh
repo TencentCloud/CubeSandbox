@@ -8,12 +8,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 # Install mode and upgrade-related flags (M3-1/M3-2/M3-3).
-#   --mode=install   full reinstall (default; existing config is reset)
+#   --mode=install   full reinstall (existing config is reset)
 #   --mode=upgrade   config-preserving upgrade (requires an existing install)
 #   --mode=auto      upgrade when an existing install is detected, else install
 # When --mode is omitted and an existing install is detected, the installer
-# prompts on a TTY and falls back to a full reinstall (with a warning) when
-# running non-interactively.
+# defaults to a config-preserving upgrade (TTY prompt [Y/n]; non-interactive
+# proceeds with upgrade). Use --mode=install to wipe and reinstall.
 ONE_CLICK_MODE="${ONE_CLICK_MODE:-}"
 ONE_CLICK_ASSUME_YES="${ONE_CLICK_ASSUME_YES:-0}"
 ONE_CLICK_ALLOW_DOWNGRADE="${ONE_CLICK_ALLOW_DOWNGRADE:-0}"
@@ -80,6 +80,21 @@ init_external_dep_defaults() {
   CUBE_EXTERNAL_REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
   CUBE_EXTERNAL_REDIS_SENTINEL_NODES="${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}"
   CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD="${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD:-}"
+
+  # CUBE_SANDBOX_MINIO_* only deploys the MinIO container. The S3 volume plugin
+  # always reads CUBE_S3_*. When MinIO is enabled, install.sh fills CUBE_S3_*
+  # from the local MinIO after generating credentials.
+  CUBE_SANDBOX_MINIO_ENABLED="${CUBE_SANDBOX_MINIO_ENABLED:-1}"
+  CUBE_SANDBOX_MINIO_ROOT_USER="${CUBE_SANDBOX_MINIO_ROOT_USER:-cubeminio}"
+  CUBE_SANDBOX_MINIO_ROOT_PASSWORD="${CUBE_SANDBOX_MINIO_ROOT_PASSWORD:-}"
+  CUBE_SANDBOX_MINIO_BUCKET="${CUBE_SANDBOX_MINIO_BUCKET:-cube-volumes}"
+  CUBE_SANDBOX_MINIO_API_PORT="${CUBE_SANDBOX_MINIO_API_PORT:-9000}"
+  CUBE_S3_ENDPOINT="${CUBE_S3_ENDPOINT:-}"
+  CUBE_S3_ACCESS_KEY_ID="${CUBE_S3_ACCESS_KEY_ID:-}"
+  CUBE_S3_SECRET_ACCESS_KEY="${CUBE_S3_SECRET_ACCESS_KEY:-}"
+  CUBE_S3_BUCKET="${CUBE_S3_BUCKET:-cube-volumes}"
+  CUBE_S3_REGION="${CUBE_S3_REGION:-us-east-1}"
+  CUBE_S3_S3FS_EXTRA_OPTS="${CUBE_S3_S3FS_EXTRA_OPTS:-}"
 }
 
 # Guard against shipping the example/default credentials to a real external
@@ -106,6 +121,41 @@ warn_default_external_credentials() {
     log "INFO: CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD equals master password (valid if intentional)."
     log "INFO: if Sentinel has no requirepass, leave CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD empty."
   fi
+  if [[ -n "${CUBE_S3_ENDPOINT}" && -z "${CUBE_S3_ACCESS_KEY_ID}" ]]; then
+    die "CUBE_S3_ENDPOINT is set but CUBE_S3_ACCESS_KEY_ID is empty"
+  fi
+  if [[ -n "${CUBE_S3_ENDPOINT}" && -z "${CUBE_S3_SECRET_ACCESS_KEY}" ]]; then
+    die "CUBE_S3_ENDPOINT is set but CUBE_S3_SECRET_ACCESS_KEY is empty"
+  fi
+}
+
+ensure_minio_init_credentials() {
+  validate_bool_01 "${CUBE_SANDBOX_MINIO_ENABLED}" "CUBE_SANDBOX_MINIO_ENABLED"
+  [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "1" ]] || return 0
+  if [[ -z "${CUBE_SANDBOX_MINIO_ROOT_USER}" ]]; then
+    CUBE_SANDBOX_MINIO_ROOT_USER="cubeminio"
+  fi
+  if [[ -z "${CUBE_SANDBOX_MINIO_ROOT_PASSWORD}" ]]; then
+    CUBE_SANDBOX_MINIO_ROOT_PASSWORD="$(generate_alnum_secret 24)"
+    log "generated CUBE_SANDBOX_MINIO_ROOT_PASSWORD (24 chars); it will be saved to .one-click.env"
+  fi
+  if [[ ${#CUBE_SANDBOX_MINIO_ROOT_PASSWORD} -lt 8 ]]; then
+    die "CUBE_SANDBOX_MINIO_ROOT_PASSWORD must be at least 8 characters (MinIO requirement)"
+  fi
+}
+
+# Volume plugin always reads CUBE_S3_*. After local MinIO credentials exist,
+# publish them as the S3 client config (endpoint / keys / bucket).
+fill_s3_from_local_minio() {
+  [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "1" ]] || return 0
+  CUBE_SANDBOX_MINIO_API_BIND="${CUBE_SANDBOX_MINIO_API_BIND:-${CUBE_SANDBOX_NODE_IP:-127.0.0.1}}"
+  CUBE_S3_ENDPOINT="$(local_minio_s3_endpoint)"
+  CUBE_S3_ACCESS_KEY_ID="${CUBE_SANDBOX_MINIO_ROOT_USER}"
+  CUBE_S3_SECRET_ACCESS_KEY="${CUBE_SANDBOX_MINIO_ROOT_PASSWORD}"
+  CUBE_S3_BUCKET="${CUBE_SANDBOX_MINIO_BUCKET:-cube-volumes}"
+  CUBE_S3_REGION="${CUBE_S3_REGION:-us-east-1}"
+  CUBE_S3_S3FS_EXTRA_OPTS="${CUBE_S3_S3FS_EXTRA_OPTS:--ouse_path_request_style}"
+  log "filled CUBE_S3_* from local MinIO (${CUBE_S3_ENDPOINT} bucket=${CUBE_S3_BUCKET})"
 }
 
 # Write /etc/cubeegress/l7-marks.conf so the L7 skb->mark values used by the
@@ -196,6 +246,14 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
 fi
 
 init_external_dep_defaults
+if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
+  if [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "1" ]]; then
+    log "compute role does not deploy MinIO; ignoring CUBE_SANDBOX_MINIO_ENABLED (volume plugin uses CUBE_S3_*)"
+  fi
+  CUBE_SANDBOX_MINIO_ENABLED=0
+fi
+check_minio_not_combined_with_user_s3
+ensure_minio_init_credentials
 
 CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-0}"
 case "${CUBE_PVM_ENABLE}" in
@@ -213,6 +271,7 @@ print_path_hint() {
     echo "[one-click]   cubevsmapdump"
     if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
       echo "[one-click]   cubemastercli"
+      echo "[one-click]   cubeopscli"
     fi
     echo
   } >&2
@@ -359,6 +418,9 @@ generate_cubemaster_config_ports() {
   # here. Defaults to 0.0.0.0 to stay reachable from compute nodes / host-net
   # cube-proxy; set CUBEMASTER_HTTP_BIND=127.0.0.1 to harden a lone node.
   local http_bind="${CUBEMASTER_HTTP_BIND:-0.0.0.0}"
+  # CubeOps base URL for node management (list/isolate/unisolate).
+  # Defaults to localhost:3010; CubeOps runs on the same control node.
+  local cube_ops_addr="${CUBEMASTER_CUBE_OPS_ADDR:-http://127.0.0.1:3010}"
 
   ensure_file "${cfg}"
   sed -i \
@@ -369,6 +431,7 @@ generate_cubemaster_config_ports() {
     -e "s|__CUBE_SANDBOX_REDIS_PORT__|${redis_port}|g" \
     -e "s|__CUBE_SANDBOX_REDIS_PASSWORD__|$(escape_sed "${redis_password}")|g" \
     -e "s|__CUBEMASTER_HTTP_BIND__|$(escape_sed "${http_bind}")|g" \
+    -e "s|__CUBEMASTER_CUBE_OPS_ADDR__|$(escape_sed "${cube_ops_addr}")|g" \
     "${cfg}"
 }
 
@@ -1325,6 +1388,22 @@ start_systemd_target() {
   systemctl disable --now \
     cube-sandbox-control.target \
     cube-sandbox-compute.target >/dev/null 2>&1 || true
+
+  # CubeS3lvol is NOT listed in the static Wants= of either target: its
+  # unit is always shipped, but enabling is gated on
+  # ONE_CLICK_ENABLE_S3LVOL. `systemctl enable` creates
+  # <target>.wants/cube-sandbox-s3lvol.service symlinks, which is exactly
+  # what makes `systemctl start <target>` pull the service up (and
+  # multi-user.target -> <target> chain makes it start on boot); the
+  # disable branch removes the symlinks on a downgrade so a reinstall
+  # with the switch off does not leave the service running.
+  if [[ "${ONE_CLICK_ENABLE_S3LVOL}" == "1" ]]; then
+    systemctl enable cube-sandbox-s3lvol.service >/dev/null 2>&1 \
+      || log "WARN: could not enable cube-sandbox-s3lvol.service"
+  else
+    systemctl disable cube-sandbox-s3lvol.service >/dev/null 2>&1 || true
+  fi
+
   systemctl enable --now "${target}"
 }
 
@@ -1383,6 +1462,17 @@ mask_external_dep_services() {
     systemctl unmask cube-sandbox-redis.service >/dev/null 2>&1 || true
   fi
 
+  if [[ "${CUBE_SANDBOX_MINIO_ENABLED}" != "1" || "${DEPLOY_ROLE}" == "compute" ]]; then
+    if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
+      log "masking local MinIO service (compute role does not run MinIO)"
+    else
+      log "masking local MinIO service (CUBE_SANDBOX_MINIO_ENABLED=${CUBE_SANDBOX_MINIO_ENABLED})"
+    fi
+    mask_local_dep_service cube-sandbox-minio.service
+  else
+    systemctl unmask cube-sandbox-minio.service >/dev/null 2>&1 || true
+  fi
+
   systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
@@ -1395,10 +1485,12 @@ check_cgroup_cpu_preflight
 check_bpf_fs_preflight
 check_glibc_preflight
 check_compute_control_plane_preflight
+check_compute_s3_required
 
 CUBE_SANDBOX_NODE_IP="$(detect_node_ip)"
 export CUBE_SANDBOX_NODE_IP
 log "using node IP: ${CUBE_SANDBOX_NODE_IP}"
+fill_s3_from_local_minio
 CUBE_SANDBOX_ETH_NAME="${CUBE_SANDBOX_ETH_NAME:-$(detect_primary_interface || true)}"
 if [[ -n "${CUBE_SANDBOX_ETH_NAME}" ]]; then
   export CUBE_SANDBOX_ETH_NAME
@@ -1456,6 +1548,38 @@ case "${CUBE_EGRESS_ADMIN_PORT}" in
     ;;
 esac
 
+# CubeS3lvol (s3lvol) options. Defaults mirror rcow_common.sh so the data
+# plane behaves out of the box. ONE_CLICK_ENABLE_S3LVOL only records the
+# intent here; the systemd unit wiring is done by install-units.sh when the
+# switch is 1 (the unit itself is always shipped).
+ONE_CLICK_ENABLE_S3LVOL="${ONE_CLICK_ENABLE_S3LVOL:-0}"
+case "${ONE_CLICK_ENABLE_S3LVOL}" in
+  0|1) ;;
+  *) die "ONE_CLICK_ENABLE_S3LVOL must be 0 or 1 (got: '${ONE_CLICK_ENABLE_S3LVOL}')" ;;
+esac
+RCOW_WAL_MB="${RCOW_WAL_MB:-32768}"
+RCOW_JOURNAL_MB="${RCOW_JOURNAL_MB:-1024}"
+# Chunk cache region on the WAL image. The image is created once, its total
+# size fixes the journal/WAL layout forever, so the default mirrors the README
+# contract: journal + WAL (32768 + 1024 MiB) plus a 479 GiB cache, 512 GiB
+# total. Tuning RCOW_CACHE_MB only matters before the first start.
+RCOW_CACHE_MB="${RCOW_CACHE_MB:-490496}"
+RCOW_CAPACITY_GB="${RCOW_CAPACITY_GB:-16384}"
+RCOW_TGT_CPUMASK="${RCOW_TGT_CPUMASK:-0x3}"
+RCOW_TGT_MEM_MB="${RCOW_TGT_MEM_MB:-16384}"
+RCOW_LISTEN_ADDR="${RCOW_LISTEN_ADDR:-127.0.0.1}"
+RCOW_LISTEN_PORT="${RCOW_LISTEN_PORT:-4420}"
+case "${RCOW_LISTEN_PORT}" in
+  *[!0-9]*|"")
+    die "invalid RCOW_LISTEN_PORT: ${RCOW_LISTEN_PORT}"
+    ;;
+esac
+
+# CubeS3lvol runtime deps (nvme-cli, python3, truncate, and the shared
+# libraries s3lvol_tgt needs -- notably libssl.so.1.1) are validated once
+# here, fail-fast, before the installer touches the system.
+validate_cubelet_s3lvol_startup_deps "${PKG_ROOT}/CubeS3lvol/bin/s3lvol_tgt"
+
 patch_cubelet_config_template \
   "${PKG_ROOT}/Cubelet/config/config.toml" \
   "${CUBE_SANDBOX_ETH_NAME:-}" \
@@ -1495,6 +1619,7 @@ rm -rf \
   "${INSTALL_PREFIX}/CubeOps" \
   "${INSTALL_PREFIX}/CubeMaster" \
   "${INSTALL_PREFIX}/Cubelet" \
+  "${INSTALL_PREFIX}/CubeS3lvol" \
   "${INSTALL_PREFIX}/cubeproxy" \
   "${INSTALL_PREFIX}/coredns" \
   "${INSTALL_PREFIX}/webui" \
@@ -1521,6 +1646,12 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
     copy_dir_contents "${PKG_ROOT}/cube-agent" "${INSTALL_PREFIX}/cube-agent"
   fi
   copy_dir_contents "${PKG_ROOT}/cube-egress" "${INSTALL_PREFIX}/cube-egress"
+  # CubeS3lvol ships in the package only when the builder wrapper supplied
+  # ONE_CLICK_S3LVOL_DIR (build-release-bundle.sh warns+skips otherwise), so
+  # guard the directory like cube-agent does.
+  if [[ -d "${PKG_ROOT}/CubeS3lvol" ]]; then
+    copy_dir_contents "${PKG_ROOT}/CubeS3lvol" "${INSTALL_PREFIX}/CubeS3lvol"
+  fi
   copy_dir_contents "${PKG_ROOT}/systemd" "${INSTALL_PREFIX}/systemd"
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"
 else
@@ -1543,11 +1674,34 @@ mkdir -p \
   /data/log/Cubelet \
   /data/log/CubeShim \
   /data/log/CubeVmm \
+  /data/log/rcow \
   /data/cube-shim/disks \
   /data/snapshot_pack/disks \
   /data/cube-shared \
   /data/cube-shared/volume \
   /data/shared
+
+# CubeS3lvol (s3lvol): per-machine WAL image. The package never ships it --
+# its size fixes the journal/WAL layout and it must not be copied between
+# hosts or recreated after the first activation (rcow_start.sh refuses to
+# self-create an empty image, so this is install-time only). Create only
+# when absent so an upgrade never clobbers existing WAL state, and only
+# when the feature is enabled: a default install (ONE_CLICK_ENABLE_S3LVOL=0)
+# must not leave a ~512 GiB sparse file behind on nodes that never run s3lvol
+# (including control nodes, which copy the full package).
+if [[ "${ONE_CLICK_ENABLE_S3LVOL}" == "1" &&
+      -f "${INSTALL_PREFIX}/CubeS3lvol/bin/s3lvol_tgt" ]]; then
+  wal_img=/data/cubelet/rcow/wal_bdev.img
+  wal_mb=$((RCOW_WAL_MB + RCOW_JOURNAL_MB + RCOW_CACHE_MB))
+  if [[ ! -f "${wal_img}" ]]; then
+    mkdir -p "$(dirname "${wal_img}")"
+    truncate -s "${wal_mb}M" "${wal_img}" \
+      || die "failed to create CubeS3lvol WAL image ${wal_img} (${wal_mb} MiB)"
+    log "created CubeS3lvol WAL image ${wal_img} (${wal_mb} MiB)"
+  else
+    log "CubeS3lvol WAL image ${wal_img} already exists; keeping it"
+  fi
+fi
 
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   mkdir -p \
@@ -1615,6 +1769,17 @@ fi
 if [[ -n "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}" ]]; then
   validate_host_port "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR"
   upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR" "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR}"
+fi
+# CubeOps address for compute-role node registration. Prefer the explicit
+# ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR; otherwise derive from the control
+# plane IP or CubeMaster addr host (CubeOps listens on port 3010).
+if [[ -n "${ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR:-}" ]]; then
+  validate_host_port "${ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR}" "ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR" "${ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR}"
+elif [[ -n "${ONE_CLICK_CONTROL_PLANE_IP:-}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR" "${ONE_CLICK_CONTROL_PLANE_IP}:3010"
+elif [[ -n "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR:-}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR" "${ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR%%:*}:3010"
 fi
 if [[ -n "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NETWORK_CIDR" "${CUBE_SANDBOX_NETWORK_CIDR}"
@@ -1713,12 +1878,54 @@ else
   remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PASSWORD"
 fi
 
+# Persist MinIO deploy settings (control node) independently from CUBE_S3_*
+# (volume plugin). Local MinIO fills CUBE_S3_* before this block.
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_ENABLED" "${CUBE_SANDBOX_MINIO_ENABLED}"
+if [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "1" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_ROOT_USER" "${CUBE_SANDBOX_MINIO_ROOT_USER}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_ROOT_PASSWORD" "${CUBE_SANDBOX_MINIO_ROOT_PASSWORD}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_BUCKET" "${CUBE_SANDBOX_MINIO_BUCKET}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_API_PORT" "${CUBE_SANDBOX_MINIO_API_PORT}"
+  minio_bind="${CUBE_SANDBOX_MINIO_API_BIND:-${CUBE_SANDBOX_NODE_IP:-127.0.0.1}}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_API_BIND" "${minio_bind}"
+fi
+if [[ -n "${CUBE_S3_ENDPOINT}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_ENDPOINT" "${CUBE_S3_ENDPOINT}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_ACCESS_KEY_ID" "${CUBE_S3_ACCESS_KEY_ID}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_SECRET_ACCESS_KEY" "${CUBE_S3_SECRET_ACCESS_KEY}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_BUCKET" "${CUBE_S3_BUCKET}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_REGION" "${CUBE_S3_REGION}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_S3FS_EXTRA_OPTS" "${CUBE_S3_S3FS_EXTRA_OPTS}"
+else
+  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_ENDPOINT"
+  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_ACCESS_KEY_ID"
+  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_SECRET_ACCESS_KEY"
+  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_BUCKET"
+  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_REGION"
+  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_S3FS_EXTRA_OPTS"
+fi
+
+# CubeS3lvol (s3lvol) runtime env: persist the resolved defaults (mirroring
+# rcow_common.sh) so the systemd unit picks them up via EnvironmentFile
+# without re-deriving them, and so `down.sh` / upgrade knows the intent.
+upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_ENABLE_S3LVOL" "${ONE_CLICK_ENABLE_S3LVOL}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_WAL_MB" "${RCOW_WAL_MB}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_JOURNAL_MB" "${RCOW_JOURNAL_MB}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CACHE_MB" "${RCOW_CACHE_MB}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CAPACITY_GB" "${RCOW_CAPACITY_GB}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_CPUMASK" "${RCOW_TGT_CPUMASK}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_MEM_MB" "${RCOW_TGT_MEM_MB}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_LISTEN_ADDR" "${RCOW_LISTEN_ADDR}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_LISTEN_PORT" "${RCOW_LISTEN_PORT}"
+
 chmod +x "${INSTALL_PREFIX}/Cubelet/bin/"*
 chmod +x "${INSTALL_PREFIX}/cube-vs/network/bin/"* 2>/dev/null || true
 chmod +x "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" "${INSTALL_PREFIX}/cube-shim/bin/cube-runtime"
 chmod +x "${INSTALL_PREFIX}/scripts/one-click/"*.sh
 chmod +x "${INSTALL_PREFIX}/scripts/systemd/"*.sh
 chmod +x "${INSTALL_PREFIX}/scripts/cube-egress/"*.sh 2>/dev/null || true
+chmod +x "${INSTALL_PREFIX}/CubeS3lvol/scripts/"*.sh 2>/dev/null || true
+chmod +x "${INSTALL_PREFIX}/CubeS3lvol/bin/s3lvol_tgt" 2>/dev/null || true
 
 if [[ -z "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
   # Log current CIDR for debugging
@@ -1728,7 +1935,7 @@ fi
 
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   chmod +x "${INSTALL_PREFIX}/CubeAPI/bin/cube-api"
-  chmod +x "${INSTALL_PREFIX}/CubeOps/bin/cubeops"
+  chmod +x "${INSTALL_PREFIX}/CubeOps/bin/cubeops" "${INSTALL_PREFIX}/CubeOps/bin/cubeopscli"
   chmod +x "${INSTALL_PREFIX}/CubeMaster/bin/cubemaster" "${INSTALL_PREFIX}/CubeMaster/bin/cubemastercli"
 fi
 
@@ -1738,8 +1945,10 @@ ln -sf "${INSTALL_PREFIX}/Cubelet/bin/cubecli" /usr/local/bin/cubecli
 ln -sf "${INSTALL_PREFIX}/cube-vs/network/bin/cubevsmapdump" /usr/local/bin/cubevsmapdump
 if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   ln -sf "${INSTALL_PREFIX}/CubeMaster/bin/cubemastercli" /usr/local/bin/cubemastercli
+  ln -sf "${INSTALL_PREFIX}/CubeOps/bin/cubeopscli" /usr/local/bin/cubeopscli
 else
   rm -f /usr/local/bin/cubemastercli
+  rm -f /usr/local/bin/cubeopscli
 fi
 
 restore_selinux_contexts

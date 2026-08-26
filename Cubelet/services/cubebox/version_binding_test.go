@@ -8,9 +8,19 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 )
+
+func TestEnvdVersionFromCubeBoxUsesCreateAnnotation(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{Annotations: map[string]string{
+		constants.MasterAnnotationComponentEnvdVersion: " 0.2.0 ",
+	}}}
+	require.Equal(t, "0.2.0", envdVersionFromCubeBox(cb))
+	require.Empty(t, envdVersionFromCubeBox(&cubeboxstore.CubeBox{}))
+	require.Empty(t, envdVersionFromCubeBox(nil))
+}
 
 func TestGuestEnvironmentVersionsFromComponentMapPrefersPinned(t *testing.T) {
 	fallback := guestEnvironmentVersions{

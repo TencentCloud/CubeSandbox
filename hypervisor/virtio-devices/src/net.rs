@@ -814,6 +814,10 @@ impl VirtioDevice for Net {
             Wrapping(self.counters.tx_frames.load(Ordering::Acquire)),
         );
         counters.insert(
+            "tx_dropped_frames",
+            Wrapping(self.counters.tx_dropped_frames.load(Ordering::Acquire)),
+        );
+        counters.insert(
             "tx_limit_bytes",
             Wrapping(self.counters.tx_limit_bytes.load(Ordering::Acquire)),
         );

@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
@@ -52,4 +53,42 @@ func handleUpdateAction(c *gin.Context) {
 	}))
 	rsp = sandbox.Update(CubeLog.WithRequestTrace(ctx, rt), req)
 	common.WriteAPI(c, rsp)
+}
+
+// handleSandboxNetworkAction serves POST /cube/sandbox/network, which replaces
+// the egress policy of a running sandbox.
+func handleSandboxNetworkAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+
+	req := &types.UpdateNetworkRequest{}
+	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
+		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		common.WriteAPI(c, &types.UpdateNetworkRes{
+			Ret: &types.Ret{
+				RetCode: int(errorcode.ErrorCode_MasterParamsError),
+				RetMsg:  err.Error(),
+			},
+		})
+		return
+	}
+	if req.RequestID == "" {
+		req.RequestID = uuid.New().String()
+	}
+	if req.InstanceType == "" {
+		req.InstanceType = cubebox.InstanceType_cubebox.String()
+	}
+	rt.RequestID = req.RequestID
+	rt.InstanceID = req.SandboxID
+	rt.InstanceType = req.InstanceType
+
+	ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]interface{}{
+		"RequestId":    req.RequestID,
+		"InstanceId":   req.SandboxID,
+		"InstanceType": req.InstanceType,
+	}))
+	res := sandbox.UpdateNetwork(CubeLog.WithRequestTrace(ctx, rt), req)
+	if res != nil && res.Ret != nil {
+		rt.RetCode = int64(res.Ret.RetCode)
+	}
+	common.WriteAPI(c, res)
 }

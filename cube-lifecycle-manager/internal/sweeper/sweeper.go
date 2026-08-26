@@ -237,7 +237,7 @@ func (s *Sweeper) tryPause(ctx context.Context, e registry.Entry) error {
 		case errors.As(pauseErr, &apiErr) && apiErr.IsNotFound():
 			// Sandbox doesn't exist on CubeMaster anymore. Clean up local
 			// state and stop chasing it.
-			_ = s.o.Redis.ClearState(ctx, sid)
+			_ = s.o.Redis.ClearStateNotify(ctx, sid)
 			_ = s.o.ProxyPush.DeleteMeta(ctx, sid)
 			s.o.Registry.Delete(sid)
 			s.o.Log.Info("sandbox not found on cubemaster; evicting from registry",
@@ -259,13 +259,13 @@ func (s *Sweeper) tryPause(ctx context.Context, e registry.Entry) error {
 			// Real failure. Roll back: clear the pausing state so a future
 			// sweep can retry, and tell CubeProxy the sandbox is back to
 			// running (it never actually paused).
-			_ = s.o.Redis.ClearState(ctx, sid)
+			_ = s.o.Redis.ClearStateNotify(ctx, sid)
 			_ = s.o.ProxyPush.SetState(ctx, sid, "running")
 			return errors.New("cubemaster pause: " + pauseErr.Error())
 		}
 	}
 
-	if err := s.o.Redis.SetState(ctx, sid, "paused", s.o.StateLockTTL); err != nil {
+	if err := s.o.Redis.WriteState(ctx, sid, "paused", s.o.StateLockTTL); err != nil {
 		s.o.Log.Warn("write paused state failed",
 			zap.String("sandbox_id", sid), zap.Error(err))
 	}
@@ -330,13 +330,13 @@ func (s *Sweeper) tryKill(ctx context.Context, e registry.Entry) error {
 				zap.String("sandbox_id", sid),
 				zap.Int("ret_code", apiErr.RetCode))
 		default:
-			_ = s.o.Redis.ClearState(ctx, sid)
+			_ = s.o.Redis.ClearStateNotify(ctx, sid)
 			_ = s.o.ProxyPush.SetState(ctx, sid, "running")
 			return errors.New("cubemaster kill: " + killErr.Error())
 		}
 	}
 
-	if err := s.o.Redis.SetState(ctx, sid, "killed", s.o.StateLockTTL); err != nil {
+	if err := s.o.Redis.WriteState(ctx, sid, "killed", s.o.StateLockTTL); err != nil {
 		s.o.Log.Warn("write killed state failed",
 			zap.String("sandbox_id", sid), zap.Error(err))
 	}

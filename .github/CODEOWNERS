@@ -40,6 +40,9 @@
 # Deployment: one-click / k8s
 /deploy/one-click/ @fslongjin
 
+# CubeS3lvol: S3/COS-backed block storage (s3lvol)
+/CubeS3lvol/ @changpe1
+
 # Terraform deployment
 /deploy/one-click/terraform/ @lkml-likexu @tinklone
 

@@ -20,6 +20,12 @@ type Volume struct {
 	DevicePath    string `json:"device_path"`
 	SnapshotCount int32  `json:"snapshot_count"`
 	CreatedAt     string `json:"created_at"`
+	// ExportUUID / ExportStatus / Deletable come from cubecow_get_volume_info
+	// JSON (s3-support). Empty for plain volumes and unexported snapshots.
+	// ExportStatus is one of "", "NONE", "INPROGRESS", "DONE".
+	ExportUUID   string `json:"export_uuid"`
+	ExportStatus string `json:"export_status"`
+	Deletable    *bool  `json:"deletable"`
 }
 
 type Snapshot struct {
@@ -28,6 +34,9 @@ type Snapshot struct {
 	DevicePath   string `json:"device_path"`
 	OriginVolume string `json:"origin_volume"`
 	CreatedAt    string `json:"created_at"`
+	ExportUUID   string `json:"export_uuid"`
+	ExportStatus string `json:"export_status"`
+	Deletable    *bool  `json:"deletable"`
 }
 
 type VolumeBlockInfo struct {

@@ -422,7 +422,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		resumePhase = JobPhaseSnapshotting
 	}
 
-	if err := cleanupTemplateReplicasOnNodes(ctx, req.TemplateID, existingReplicas, readyTargets); err != nil {
+	if err := cleanupTemplateReplicasOnNodes(ctx, req.TemplateID, existingReplicas, readyTargets, pinnedCleanupBackend(storageBackendFromCreate(generatedReq))); err != nil {
 		failRedoTemplateImageJob(ctx, jobID, JobPhaseSnapshotting, fmt.Sprintf("cleanup template replicas before redo snapshot failed: %v", err))
 		return
 	}
@@ -431,7 +431,9 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
 		return
 	}
-	if _, err := ensureTemplateDefinitionWithOptions(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{}); err != nil {
+	if _, err := ensureTemplateDefinitionWithOptions(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{
+		StorageBackend: storageBackendFromCreate(generatedReq),
+	}); err != nil {
 		failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
 		return
 	}
@@ -451,8 +453,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 	// refreshTemplateReplicaSummary claims the alias *before* publishing the
 	// READY status so a client that observes the template as READY can always
 	// resolve the alias (closes the redo/claim publish-ordering race).
-	claimAlias := aliasToClaimAtFinalize(ctx, req.TemplateID, jobID)
-	claimWarning, err := refreshTemplateReplicaSummary(ctx, req.TemplateID, claimAlias)
+	claimWarning, err := refreshTemplateReplicaSummary(ctx, req.TemplateID, jobID)
 	if err != nil {
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,

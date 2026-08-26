@@ -2760,8 +2760,11 @@ type RunCubeSandboxRequest struct {
 	Namespace string `protobuf:"bytes,15,opt,name=namespace,proto3" json:"namespace,omitempty"`
 	// Egress network policy for the sandbox template/runtime.
 	CubeNetworkConfig *CubeNetworkConfig `protobuf:"bytes,16,opt,name=cube_network_config,json=cubeNetworkConfig,proto3,oneof" json:"cube_network_config,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// CoW backend from Master (xfs｜s3). Empty means xfs.
+	// Used when Create restores from a snapshot / pause-snap.
+	Backend       string `protobuf:"bytes,17,opt,name=backend,proto3" json:"backend,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RunCubeSandboxRequest) Reset() {
@@ -2869,6 +2872,13 @@ func (x *RunCubeSandboxRequest) GetCubeNetworkConfig() *CubeNetworkConfig {
 		return x.CubeNetworkConfig
 	}
 	return nil
+}
+
+func (x *RunCubeSandboxRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
 }
 
 type RunCubeSandboxResponse struct {
@@ -3976,9 +3986,13 @@ type UpdateCubeSandboxRequest struct {
 	// new features that are opaque to the Kubernetes APIs (both user-facing
 	// and the CRI). Whenever possible, however, runtime authors SHOULD
 	// consider proposing new typed fields for any new features instead.
-	Annotations   map[string]string `protobuf:"bytes,3,rep,name=annotations,proto3" json:"annotations,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Annotations map[string]string `protobuf:"bytes,3,rep,name=annotations,proto3" json:"annotations,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Replacement egress policy for a running sandbox. Absent means "leave the
+	// network alone"; present means the complete desired state, so an omitted or
+	// empty field inside it clears whatever is currently installed.
+	CubeNetworkConfig *CubeNetworkConfig `protobuf:"bytes,4,opt,name=cube_network_config,json=cubeNetworkConfig,proto3,oneof" json:"cube_network_config,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *UpdateCubeSandboxRequest) Reset() {
@@ -4032,6 +4046,13 @@ func (x *UpdateCubeSandboxRequest) GetAnnotations() map[string]string {
 	return nil
 }
 
+func (x *UpdateCubeSandboxRequest) GetCubeNetworkConfig() *CubeNetworkConfig {
+	if x != nil {
+		return x.CubeNetworkConfig
+	}
+	return nil
+}
+
 type UpdateCubeSandboxResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// requestID reqID
@@ -4040,7 +4061,10 @@ type UpdateCubeSandboxResponse struct {
 	Ret *v11.Ret `protobuf:"bytes,2,opt,name=ret,proto3" json:"ret,omitempty"`
 	// Same shape as DestroyCubeSandboxResponse.ext_info. Pause returns volume
 	// ref-count events after in-process keep_tombstone cleanup.
-	ExtInfo       map[string][]byte `protobuf:"bytes,3,rep,name=ext_info,json=extInfo,proto3" json:"ext_info,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	ExtInfo map[string][]byte `protobuf:"bytes,3,rep,name=ext_info,json=extInfo,proto3" json:"ext_info,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// S3 Pause: cubecow_export_snapshot uuids JSON (rootfs/memory/metadata).
+	// Filled before this RPC returns. Empty on xfs.
+	RemoteUuids   string `protobuf:"bytes,4,opt,name=remote_uuids,json=remoteUuids,proto3" json:"remote_uuids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4094,6 +4118,13 @@ func (x *UpdateCubeSandboxResponse) GetExtInfo() map[string][]byte {
 		return x.ExtInfo
 	}
 	return nil
+}
+
+func (x *UpdateCubeSandboxResponse) GetRemoteUuids() string {
+	if x != nil {
+		return x.RemoteUuids
+	}
+	return ""
 }
 
 // IDMapping describes host to container ID mappings for a pod sandbox.
@@ -4371,7 +4402,9 @@ type AppSnapshotRequest struct {
 	//   - cube.master.appsnapshot.template.id: "<template_id>"
 	CreateRequest *RunCubeSandboxRequest `protobuf:"bytes,1,opt,name=create_request,json=createRequest,proto3" json:"create_request,omitempty"`
 	// Custom snapshot directory path. If empty, uses default path.
-	SnapshotDir   string `protobuf:"bytes,2,opt,name=snapshot_dir,json=snapshotDir,proto3" json:"snapshot_dir,omitempty"`
+	SnapshotDir string `protobuf:"bytes,2,opt,name=snapshot_dir,json=snapshotDir,proto3" json:"snapshot_dir,omitempty"`
+	// CoW backend from Master (xfs｜s3). Empty means xfs.
+	Backend       string `protobuf:"bytes,3,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4420,6 +4453,13 @@ func (x *AppSnapshotRequest) GetSnapshotDir() string {
 	return ""
 }
 
+func (x *AppSnapshotRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
+}
+
 // AppSnapshotResponse is the response for app snapshot creation.
 type AppSnapshotResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -4452,7 +4492,10 @@ type AppSnapshotResponse struct {
 	// envd semantic version collected in-guest at snapshot time (best-effort).
 	EnvdVersion string `protobuf:"bytes,14,opt,name=envd_version,json=envdVersion,proto3" json:"envd_version,omitempty"`
 	// cube-shim (and sibling cube-runtime) version bound when this snapshot was created.
-	ShimVersion   string `protobuf:"bytes,15,opt,name=shim_version,json=shimVersion,proto3" json:"shim_version,omitempty"`
+	ShimVersion string `protobuf:"bytes,15,opt,name=shim_version,json=shimVersion,proto3" json:"shim_version,omitempty"`
+	// S3: cubecow_export_snapshot uuids JSON (rootfs/memory/metadata).
+	// Filled before this RPC returns. Empty on xfs.
+	RemoteUuids   string `protobuf:"bytes,16,opt,name=remote_uuids,json=remoteUuids,proto3" json:"remote_uuids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4592,6 +4635,13 @@ func (x *AppSnapshotResponse) GetShimVersion() string {
 	return ""
 }
 
+func (x *AppSnapshotResponse) GetRemoteUuids() string {
+	if x != nil {
+		return x.RemoteUuids
+	}
+	return ""
+}
+
 type CommitSandboxRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// requestID reqID
@@ -4601,7 +4651,9 @@ type CommitSandboxRequest struct {
 	// Logical template ID.
 	TemplateID string `protobuf:"bytes,3,opt,name=templateID,proto3" json:"templateID,omitempty"`
 	// Custom snapshot directory path. If empty, uses default path.
-	SnapshotDir   string `protobuf:"bytes,4,opt,name=snapshot_dir,json=snapshotDir,proto3" json:"snapshot_dir,omitempty"`
+	SnapshotDir string `protobuf:"bytes,4,opt,name=snapshot_dir,json=snapshotDir,proto3" json:"snapshot_dir,omitempty"`
+	// CoW backend from Master (xfs｜s3). Empty means xfs.
+	Backend       string `protobuf:"bytes,5,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4664,6 +4716,13 @@ func (x *CommitSandboxRequest) GetSnapshotDir() string {
 	return ""
 }
 
+func (x *CommitSandboxRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
+}
+
 type CommitSandboxResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// requestID reqID
@@ -4699,7 +4758,10 @@ type CommitSandboxResponse struct {
 	// envd semantic version collected in-guest at commit time (best-effort).
 	EnvdVersion string `protobuf:"bytes,16,opt,name=envd_version,json=envdVersion,proto3" json:"envd_version,omitempty"`
 	// cube-shim (and sibling cube-runtime) version bound when this snapshot was created.
-	ShimVersion   string `protobuf:"bytes,17,opt,name=shim_version,json=shimVersion,proto3" json:"shim_version,omitempty"`
+	ShimVersion string `protobuf:"bytes,17,opt,name=shim_version,json=shimVersion,proto3" json:"shim_version,omitempty"`
+	// S3: cubecow_export_snapshot uuids JSON (rootfs/memory/metadata).
+	// Filled before this RPC returns. Empty on xfs.
+	RemoteUuids   string `protobuf:"bytes,18,opt,name=remote_uuids,json=remoteUuids,proto3" json:"remote_uuids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4853,6 +4915,13 @@ func (x *CommitSandboxResponse) GetShimVersion() string {
 	return ""
 }
 
+func (x *CommitSandboxResponse) GetRemoteUuids() string {
+	if x != nil {
+		return x.RemoteUuids
+	}
+	return ""
+}
+
 type RollbackSandboxRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// requestID reqID
@@ -4874,7 +4943,9 @@ type RollbackSandboxRequest struct {
 	// New sandbox rootfs generation to derive.
 	NewGen uint32 `protobuf:"varint,7,opt,name=new_gen,json=newGen,proto3" json:"new_gen,omitempty"`
 	// Minimum rootfs size after deriving the new generation.
-	DesiredSize   uint64 `protobuf:"varint,8,opt,name=desired_size,json=desiredSize,proto3" json:"desired_size,omitempty"`
+	DesiredSize uint64 `protobuf:"varint,8,opt,name=desired_size,json=desiredSize,proto3" json:"desired_size,omitempty"`
+	// CoW backend from Master (xfs｜s3). Empty means: use catalog, else xfs.
+	Backend       string `protobuf:"bytes,9,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4963,6 +5034,13 @@ func (x *RollbackSandboxRequest) GetDesiredSize() uint64 {
 		return x.DesiredSize
 	}
 	return 0
+}
+
+func (x *RollbackSandboxRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
 }
 
 type RollbackSandboxResponse struct {
@@ -5178,7 +5256,9 @@ type CleanupTemplateRequest struct {
 	// cubecow objects that should be removed on this node. DEPRECATED in v4:
 	// cubelet derives objects from local catalog; legacy masters may still
 	// populate this for backward compatibility but new masters MUST send empty.
-	Objects       []*CowObjectRef `protobuf:"bytes,4,rep,name=objects,proto3" json:"objects,omitempty"`
+	Objects []*CowObjectRef `protobuf:"bytes,4,rep,name=objects,proto3" json:"objects,omitempty"`
+	// CoW backend from Master (xfs｜s3). Empty means xfs.
+	Backend       string `protobuf:"bytes,5,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5239,6 +5319,13 @@ func (x *CleanupTemplateRequest) GetObjects() []*CowObjectRef {
 		return x.Objects
 	}
 	return nil
+}
+
+func (x *CleanupTemplateRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
 }
 
 type CleanupTemplateResponse struct {
@@ -5323,7 +5410,9 @@ type ListSandboxSnapshotsRequest struct {
 	// cubecow objects that should be inspected on this node.
 	Objects []*CowObjectRef `protobuf:"bytes,3,rep,name=objects,proto3" json:"objects,omitempty"`
 	// Snapshot metadata directory that must remain restorable.
-	MetaDir       string `protobuf:"bytes,4,opt,name=meta_dir,json=metaDir,proto3" json:"meta_dir,omitempty"`
+	MetaDir string `protobuf:"bytes,4,opt,name=meta_dir,json=metaDir,proto3" json:"meta_dir,omitempty"`
+	// CoW backend from Master (xfs｜s3). Empty means xfs.
+	Backend       string `protobuf:"bytes,5,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5382,6 +5471,13 @@ func (x *ListSandboxSnapshotsRequest) GetObjects() []*CowObjectRef {
 func (x *ListSandboxSnapshotsRequest) GetMetaDir() string {
 	if x != nil {
 		return x.MetaDir
+	}
+	return ""
+}
+
+func (x *ListSandboxSnapshotsRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
 	}
 	return ""
 }
@@ -5596,7 +5692,9 @@ func (x *ListSandboxSnapshotsResponse) GetPathErrorMessage() string {
 type ListLocalSnapshotsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// requestID reqID
-	RequestID     string `protobuf:"bytes,1,opt,name=requestID,proto3" json:"requestID,omitempty"`
+	RequestID string `protobuf:"bytes,1,opt,name=requestID,proto3" json:"requestID,omitempty"`
+	// Optional filter. Empty returns all backends.
+	Backend       string `protobuf:"bytes,2,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5638,6 +5736,13 @@ func (x *ListLocalSnapshotsRequest) GetRequestID() string {
 	return ""
 }
 
+func (x *ListLocalSnapshotsRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
+}
+
 type LocalSnapshotInfo struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Logical snapshot ID.
@@ -5669,7 +5774,9 @@ type LocalSnapshotInfo struct {
 	BuildRootfsKind string `protobuf:"bytes,13,opt,name=build_rootfs_kind,json=buildRootfsKind,proto3" json:"build_rootfs_kind,omitempty"`
 	// Catalog entry kind: "template" (AppSnapshot) or "runtime_snapshot"
 	// (CommitSandbox). Empty for pre-v4 legacy entries.
-	Kind          string `protobuf:"bytes,14,opt,name=kind,proto3" json:"kind,omitempty"`
+	Kind string `protobuf:"bytes,14,opt,name=kind,proto3" json:"kind,omitempty"`
+	// CoW backend that produced this snapshot (xfs｜s3). Empty means xfs.
+	Backend       string `protobuf:"bytes,15,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5802,6 +5909,13 @@ func (x *LocalSnapshotInfo) GetKind() string {
 	return ""
 }
 
+func (x *LocalSnapshotInfo) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
+}
+
 type ListLocalSnapshotsResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// requestID reqID
@@ -5870,7 +5984,9 @@ type GetLocalSnapshotRequest struct {
 	// requestID reqID
 	RequestID string `protobuf:"bytes,1,opt,name=requestID,proto3" json:"requestID,omitempty"`
 	// Logical snapshot ID to look up.
-	SnapshotID    string `protobuf:"bytes,2,opt,name=snapshotID,proto3" json:"snapshotID,omitempty"`
+	SnapshotID string `protobuf:"bytes,2,opt,name=snapshotID,proto3" json:"snapshotID,omitempty"`
+	// Optional. When set, must match the catalog backend.
+	Backend       string `protobuf:"bytes,3,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5915,6 +6031,13 @@ func (x *GetLocalSnapshotRequest) GetRequestID() string {
 func (x *GetLocalSnapshotRequest) GetSnapshotID() string {
 	if x != nil {
 		return x.SnapshotID
+	}
+	return ""
+}
+
+func (x *GetLocalSnapshotRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
 	}
 	return ""
 }
@@ -5985,7 +6108,9 @@ func (x *GetLocalSnapshotResponse) GetSnapshot() *LocalSnapshotInfo {
 type GetStorageMetricsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// requestID reqID
-	RequestID     string `protobuf:"bytes,1,opt,name=requestID,proto3" json:"requestID,omitempty"`
+	RequestID string `protobuf:"bytes,1,opt,name=requestID,proto3" json:"requestID,omitempty"`
+	// CoW backend to read metrics from (xfs｜s3). Empty means xfs.
+	Backend       string `protobuf:"bytes,2,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6023,6 +6148,13 @@ func (*GetStorageMetricsRequest) Descriptor() ([]byte, []int) {
 func (x *GetStorageMetricsRequest) GetRequestID() string {
 	if x != nil {
 		return x.RequestID
+	}
+	return ""
+}
+
+func (x *GetStorageMetricsRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
 	}
 	return ""
 }
@@ -6753,7 +6885,7 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"l\n" +
 	"\x06Volume\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12N\n" +
-	"\rvolume_source\x18\x02 \x01(\v2).cubelet.services.cubebox.v1.VolumeSourceR\fvolumeSource\"\xad\x06\n" +
+	"\rvolume_source\x18\x02 \x01(\v2).cubelet.services.cubebox.v1.VolumeSourceR\fvolumeSource\"\xc7\x06\n" +
 	"\x15RunCubeSandboxRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x12=\n" +
 	"\avolumes\x18\a \x03(\v2#.cubelet.services.cubebox.v1.VolumeR\avolumes\x12L\n" +
@@ -6768,7 +6900,8 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\rinstance_type\x18\r \x01(\tR\finstanceType\x12!\n" +
 	"\fnetwork_type\x18\x0e \x01(\tR\vnetworkType\x12\x1c\n" +
 	"\tnamespace\x18\x0f \x01(\tR\tnamespace\x12c\n" +
-	"\x13cube_network_config\x18\x10 \x01(\v2..cubelet.services.cubebox.v1.CubeNetworkConfigH\x00R\x11cubeNetworkConfig\x88\x01\x01\x1a>\n" +
+	"\x13cube_network_config\x18\x10 \x01(\v2..cubelet.services.cubebox.v1.CubeNetworkConfigH\x00R\x11cubeNetworkConfig\x88\x01\x01\x12\x18\n" +
+	"\abackend\x18\x11 \x01(\tR\abackend\x1a>\n" +
 	"\x10AnnotationsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a9\n" +
@@ -6892,18 +7025,21 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\a_filterB\t\n" +
 	"\a_option\"Y\n" +
 	"\x17ListCubeSandboxResponse\x12>\n" +
-	"\x05items\x18\x01 \x03(\v2(.cubelet.services.cubebox.v1.CubeSandboxR\x05items\"\x80\x02\n" +
+	"\x05items\x18\x01 \x03(\v2(.cubelet.services.cubebox.v1.CubeSandboxR\x05items\"\xfd\x02\n" +
 	"\x18UpdateCubeSandboxRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x1c\n" +
 	"\tsandboxID\x18\x02 \x01(\tR\tsandboxID\x12h\n" +
-	"\vannotations\x18\x03 \x03(\v2F.cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.AnnotationsEntryR\vannotations\x1a>\n" +
+	"\vannotations\x18\x03 \x03(\v2F.cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.AnnotationsEntryR\vannotations\x12c\n" +
+	"\x13cube_network_config\x18\x04 \x01(\v2..cubelet.services.cubebox.v1.CubeNetworkConfigH\x00R\x11cubeNetworkConfig\x88\x01\x01\x1a>\n" +
 	"\x10AnnotationsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8b\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x16\n" +
+	"\x14_cube_network_config\"\xae\x02\n" +
 	"\x19UpdateCubeSandboxResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12^\n" +
-	"\bext_info\x18\x03 \x03(\v2C.cubelet.services.cubebox.v1.UpdateCubeSandboxResponse.ExtInfoEntryR\aextInfo\x1a:\n" +
+	"\bext_info\x18\x03 \x03(\v2C.cubelet.services.cubebox.v1.UpdateCubeSandboxResponse.ExtInfoEntryR\aextInfo\x12!\n" +
+	"\fremote_uuids\x18\x04 \x01(\tR\vremoteUuids\x1a:\n" +
 	"\fExtInfoEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"_\n" +
@@ -6925,10 +7061,11 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x03cwd\x18\v \x01(\tR\x03cwd\"m\n" +
 	"\x17ExecCubeSandboxResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
-	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\"\x92\x01\n" +
+	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\"\xac\x01\n" +
 	"\x12AppSnapshotRequest\x12Y\n" +
 	"\x0ecreate_request\x18\x01 \x01(\v22.cubelet.services.cubebox.v1.RunCubeSandboxRequestR\rcreateRequest\x12!\n" +
-	"\fsnapshot_dir\x18\x02 \x01(\tR\vsnapshotDir\"\xb9\x04\n" +
+	"\fsnapshot_dir\x18\x02 \x01(\tR\vsnapshotDir\x12\x18\n" +
+	"\abackend\x18\x03 \x01(\tR\abackend\"\xdc\x04\n" +
 	"\x13AppSnapshotResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12\x1c\n" +
@@ -6951,14 +7088,16 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\ragent_version\x18\f \x01(\tR\fagentVersion\x12%\n" +
 	"\x0ekernel_version\x18\r \x01(\tR\rkernelVersion\x12!\n" +
 	"\fenvd_version\x18\x0e \x01(\tR\venvdVersion\x12!\n" +
-	"\fshim_version\x18\x0f \x01(\tR\vshimVersion\"\x95\x01\n" +
+	"\fshim_version\x18\x0f \x01(\tR\vshimVersion\x12!\n" +
+	"\fremote_uuids\x18\x10 \x01(\tR\vremoteUuids\"\xaf\x01\n" +
 	"\x14CommitSandboxRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x1c\n" +
 	"\tsandboxID\x18\x02 \x01(\tR\tsandboxID\x12\x1e\n" +
 	"\n" +
 	"templateID\x18\x03 \x01(\tR\n" +
 	"templateID\x12!\n" +
-	"\fsnapshot_dir\x18\x04 \x01(\tR\vsnapshotDir\"\xf9\x04\n" +
+	"\fsnapshot_dir\x18\x04 \x01(\tR\vsnapshotDir\x12\x18\n" +
+	"\abackend\x18\x05 \x01(\tR\abackend\"\x9c\x05\n" +
 	"\x15CommitSandboxResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12\x1c\n" +
@@ -6985,7 +7124,8 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\ragent_version\x18\x0e \x01(\tR\fagentVersion\x12%\n" +
 	"\x0ekernel_version\x18\x0f \x01(\tR\rkernelVersion\x12!\n" +
 	"\fenvd_version\x18\x10 \x01(\tR\venvdVersion\x12!\n" +
-	"\fshim_version\x18\x11 \x01(\tR\vshimVersion\"\x89\x02\n" +
+	"\fshim_version\x18\x11 \x01(\tR\vshimVersion\x12!\n" +
+	"\fremote_uuids\x18\x12 \x01(\tR\vremoteUuids\"\xa3\x02\n" +
 	"\x16RollbackSandboxRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x1c\n" +
 	"\tsandboxID\x18\x02 \x01(\tR\tsandboxID\x12\x1e\n" +
@@ -6998,7 +7138,8 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"memory_vol\x18\x05 \x01(\tR\tmemoryVol\x12\x19\n" +
 	"\bmeta_dir\x18\x06 \x01(\tR\ametaDir\x12\x17\n" +
 	"\anew_gen\x18\a \x01(\rR\x06newGen\x12!\n" +
-	"\fdesired_size\x18\b \x01(\x04R\vdesiredSize\"\x96\x03\n" +
+	"\fdesired_size\x18\b \x01(\x04R\vdesiredSize\x12\x18\n" +
+	"\abackend\x18\t \x01(\tR\abackend\"\x96\x03\n" +
 	"\x17RollbackSandboxResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12\x1c\n" +
@@ -7021,26 +7162,28 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\fCowObjectRef\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x12\n" +
-	"\x04role\x18\x03 \x01(\tR\x04role\"\xbf\x01\n" +
+	"\x04role\x18\x03 \x01(\tR\x04role\"\xd9\x01\n" +
 	"\x16CleanupTemplateRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x1e\n" +
 	"\n" +
 	"templateID\x18\x02 \x01(\tR\n" +
 	"templateID\x12\"\n" +
 	"\fsnapshotPath\x18\x03 \x01(\tR\fsnapshotPath\x12C\n" +
-	"\aobjects\x18\x04 \x03(\v2).cubelet.services.cubebox.v1.CowObjectRefR\aobjects\"\xb9\x01\n" +
+	"\aobjects\x18\x04 \x03(\v2).cubelet.services.cubebox.v1.CowObjectRefR\aobjects\x12\x18\n" +
+	"\abackend\x18\x05 \x01(\tR\abackend\"\xb9\x01\n" +
 	"\x17CleanupTemplateResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12\x1e\n" +
 	"\n" +
 	"templateID\x18\x03 \x01(\tR\n" +
 	"templateID\x12*\n" +
-	"\x11plugin_volume_ids\x18\x04 \x03(\tR\x0fpluginVolumeIds\"\xb9\x01\n" +
+	"\x11plugin_volume_ids\x18\x04 \x03(\tR\x0fpluginVolumeIds\"\xd3\x01\n" +
 	"\x1bListSandboxSnapshotsRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x1c\n" +
 	"\tsandboxID\x18\x02 \x01(\tR\tsandboxID\x12C\n" +
 	"\aobjects\x18\x03 \x03(\v2).cubelet.services.cubebox.v1.CowObjectRefR\aobjects\x12\x19\n" +
-	"\bmeta_dir\x18\x04 \x01(\tR\ametaDir\"\xca\x01\n" +
+	"\bmeta_dir\x18\x04 \x01(\tR\ametaDir\x12\x18\n" +
+	"\abackend\x18\x05 \x01(\tR\abackend\"\xca\x01\n" +
 	"\x0fCowObjectStatus\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x12\n" +
@@ -7059,9 +7202,10 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x0fmeta_dir_exists\x18\x05 \x01(\bR\rmetaDirExists\x12.\n" +
 	"\x13snapshot_state_path\x18\x06 \x01(\tR\x11snapshotStatePath\x122\n" +
 	"\x15snapshot_state_exists\x18\a \x01(\bR\x13snapshotStateExists\x12,\n" +
-	"\x12path_error_message\x18\b \x01(\tR\x10pathErrorMessage\"9\n" +
+	"\x12path_error_message\x18\b \x01(\tR\x10pathErrorMessage\"S\n" +
 	"\x19ListLocalSnapshotsRequest\x12\x1c\n" +
-	"\trequestID\x18\x01 \x01(\tR\trequestID\"\xe8\x03\n" +
+	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x18\n" +
+	"\abackend\x18\x02 \x01(\tR\abackend\"\x82\x04\n" +
 	"\x11LocalSnapshotInfo\x12\x1e\n" +
 	"\n" +
 	"snapshotID\x18\x01 \x01(\tR\n" +
@@ -7084,22 +7228,25 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"created_at\x18\v \x01(\tR\tcreatedAt\x12(\n" +
 	"\x10build_rootfs_vol\x18\f \x01(\tR\x0ebuildRootfsVol\x12*\n" +
 	"\x11build_rootfs_kind\x18\r \x01(\tR\x0fbuildRootfsKind\x12\x12\n" +
-	"\x04kind\x18\x0e \x01(\tR\x04kind\"\xbe\x01\n" +
+	"\x04kind\x18\x0e \x01(\tR\x04kind\x12\x18\n" +
+	"\abackend\x18\x0f \x01(\tR\abackend\"\xbe\x01\n" +
 	"\x1aListLocalSnapshotsResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12L\n" +
-	"\tsnapshots\x18\x03 \x03(\v2..cubelet.services.cubebox.v1.LocalSnapshotInfoR\tsnapshots\"W\n" +
+	"\tsnapshots\x18\x03 \x03(\v2..cubelet.services.cubebox.v1.LocalSnapshotInfoR\tsnapshots\"q\n" +
 	"\x17GetLocalSnapshotRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x1e\n" +
 	"\n" +
 	"snapshotID\x18\x02 \x01(\tR\n" +
-	"snapshotID\"\xba\x01\n" +
+	"snapshotID\x12\x18\n" +
+	"\abackend\x18\x03 \x01(\tR\abackend\"\xba\x01\n" +
 	"\x18GetLocalSnapshotResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12J\n" +
-	"\bsnapshot\x18\x03 \x01(\v2..cubelet.services.cubebox.v1.LocalSnapshotInfoR\bsnapshot\"8\n" +
+	"\bsnapshot\x18\x03 \x01(\v2..cubelet.services.cubebox.v1.LocalSnapshotInfoR\bsnapshot\"R\n" +
 	"\x18GetStorageMetricsRequest\x12\x1c\n" +
-	"\trequestID\x18\x01 \x01(\tR\trequestID\"\xd3\x02\n" +
+	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x18\n" +
+	"\abackend\x18\x02 \x01(\tR\abackend\"\xd3\x02\n" +
 	"\x19GetStorageMetricsResponse\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
 	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12\x17\n" +
@@ -7380,64 +7527,65 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
 	59,  // 70: cubelet.services.cubebox.v1.ListCubeSandboxRequest.option:type_name -> cubelet.services.cubebox.v1.ListCubeSandboxOption
 	50,  // 71: cubelet.services.cubebox.v1.ListCubeSandboxResponse.items:type_name -> cubelet.services.cubebox.v1.CubeSandbox
 	99,  // 72: cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.annotations:type_name -> cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.AnnotationsEntry
-	104, // 73: cubelet.services.cubebox.v1.UpdateCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	100, // 74: cubelet.services.cubebox.v1.UpdateCubeSandboxResponse.ext_info:type_name -> cubelet.services.cubebox.v1.UpdateCubeSandboxResponse.ExtInfoEntry
-	104, // 75: cubelet.services.cubebox.v1.ExecCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	40,  // 76: cubelet.services.cubebox.v1.AppSnapshotRequest.create_request:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxRequest
-	104, // 77: cubelet.services.cubebox.v1.AppSnapshotResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	104, // 78: cubelet.services.cubebox.v1.CommitSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	104, // 79: cubelet.services.cubebox.v1.RollbackSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	68,  // 80: cubelet.services.cubebox.v1.CleanupTemplateRequest.objects:type_name -> cubelet.services.cubebox.v1.CowObjectRef
-	104, // 81: cubelet.services.cubebox.v1.CleanupTemplateResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	68,  // 82: cubelet.services.cubebox.v1.ListSandboxSnapshotsRequest.objects:type_name -> cubelet.services.cubebox.v1.CowObjectRef
-	104, // 83: cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	72,  // 84: cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse.objects:type_name -> cubelet.services.cubebox.v1.CowObjectStatus
-	104, // 85: cubelet.services.cubebox.v1.ListLocalSnapshotsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	75,  // 86: cubelet.services.cubebox.v1.ListLocalSnapshotsResponse.snapshots:type_name -> cubelet.services.cubebox.v1.LocalSnapshotInfo
-	104, // 87: cubelet.services.cubebox.v1.GetLocalSnapshotResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	75,  // 88: cubelet.services.cubebox.v1.GetLocalSnapshotResponse.snapshot:type_name -> cubelet.services.cubebox.v1.LocalSnapshotInfo
-	104, // 89: cubelet.services.cubebox.v1.GetStorageMetricsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	101, // 90: cubelet.services.cubebox.v1.GetStorageMetricsResponse.metrics:type_name -> cubelet.services.cubebox.v1.GetStorageMetricsResponse.MetricsEntry
-	81,  // 91: cubelet.services.cubebox.v1.SandboxStorageInfo.volumes:type_name -> cubelet.services.cubebox.v1.StorageVolumeInfo
-	104, // 92: cubelet.services.cubebox.v1.InspectStorageVolumesResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	82,  // 93: cubelet.services.cubebox.v1.InspectStorageVolumesResponse.sandboxes:type_name -> cubelet.services.cubebox.v1.SandboxStorageInfo
-	104, // 94: cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
-	86,  // 95: cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse.orphans:type_name -> cubelet.services.cubebox.v1.StorageOrphanEntry
-	40,  // 96: cubelet.services.cubebox.v1.CubeboxMgr.Create:input_type -> cubelet.services.cubebox.v1.RunCubeSandboxRequest
-	48,  // 97: cubelet.services.cubebox.v1.CubeboxMgr.Destroy:input_type -> cubelet.services.cubebox.v1.DestroyCubeSandboxRequest
-	54,  // 98: cubelet.services.cubebox.v1.CubeboxMgr.List:input_type -> cubelet.services.cubebox.v1.ListCubeSandboxRequest
-	56,  // 99: cubelet.services.cubebox.v1.CubeboxMgr.Update:input_type -> cubelet.services.cubebox.v1.UpdateCubeSandboxRequest
-	60,  // 100: cubelet.services.cubebox.v1.CubeboxMgr.Exec:input_type -> cubelet.services.cubebox.v1.ExecCubeSandboxRequest
-	62,  // 101: cubelet.services.cubebox.v1.CubeboxMgr.AppSnapshot:input_type -> cubelet.services.cubebox.v1.AppSnapshotRequest
-	64,  // 102: cubelet.services.cubebox.v1.CubeboxMgr.CommitSandbox:input_type -> cubelet.services.cubebox.v1.CommitSandboxRequest
-	66,  // 103: cubelet.services.cubebox.v1.CubeboxMgr.RollbackSandbox:input_type -> cubelet.services.cubebox.v1.RollbackSandboxRequest
-	69,  // 104: cubelet.services.cubebox.v1.CubeboxMgr.CleanupTemplate:input_type -> cubelet.services.cubebox.v1.CleanupTemplateRequest
-	71,  // 105: cubelet.services.cubebox.v1.CubeboxMgr.ListSandboxSnapshots:input_type -> cubelet.services.cubebox.v1.ListSandboxSnapshotsRequest
-	74,  // 106: cubelet.services.cubebox.v1.CubeboxMgr.ListLocalSnapshots:input_type -> cubelet.services.cubebox.v1.ListLocalSnapshotsRequest
-	77,  // 107: cubelet.services.cubebox.v1.CubeboxMgr.GetLocalSnapshot:input_type -> cubelet.services.cubebox.v1.GetLocalSnapshotRequest
-	79,  // 108: cubelet.services.cubebox.v1.CubeboxMgr.GetStorageMetrics:input_type -> cubelet.services.cubebox.v1.GetStorageMetricsRequest
-	83,  // 109: cubelet.services.cubebox.v1.CubeboxMgr.InspectStorageVolumes:input_type -> cubelet.services.cubebox.v1.InspectStorageVolumesRequest
-	85,  // 110: cubelet.services.cubebox.v1.CubeboxMgr.CleanupOrphanStorageFiles:input_type -> cubelet.services.cubebox.v1.CleanupOrphanStorageFilesRequest
-	41,  // 111: cubelet.services.cubebox.v1.CubeboxMgr.Create:output_type -> cubelet.services.cubebox.v1.RunCubeSandboxResponse
-	49,  // 112: cubelet.services.cubebox.v1.CubeboxMgr.Destroy:output_type -> cubelet.services.cubebox.v1.DestroyCubeSandboxResponse
-	55,  // 113: cubelet.services.cubebox.v1.CubeboxMgr.List:output_type -> cubelet.services.cubebox.v1.ListCubeSandboxResponse
-	57,  // 114: cubelet.services.cubebox.v1.CubeboxMgr.Update:output_type -> cubelet.services.cubebox.v1.UpdateCubeSandboxResponse
-	61,  // 115: cubelet.services.cubebox.v1.CubeboxMgr.Exec:output_type -> cubelet.services.cubebox.v1.ExecCubeSandboxResponse
-	63,  // 116: cubelet.services.cubebox.v1.CubeboxMgr.AppSnapshot:output_type -> cubelet.services.cubebox.v1.AppSnapshotResponse
-	65,  // 117: cubelet.services.cubebox.v1.CubeboxMgr.CommitSandbox:output_type -> cubelet.services.cubebox.v1.CommitSandboxResponse
-	67,  // 118: cubelet.services.cubebox.v1.CubeboxMgr.RollbackSandbox:output_type -> cubelet.services.cubebox.v1.RollbackSandboxResponse
-	70,  // 119: cubelet.services.cubebox.v1.CubeboxMgr.CleanupTemplate:output_type -> cubelet.services.cubebox.v1.CleanupTemplateResponse
-	73,  // 120: cubelet.services.cubebox.v1.CubeboxMgr.ListSandboxSnapshots:output_type -> cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse
-	76,  // 121: cubelet.services.cubebox.v1.CubeboxMgr.ListLocalSnapshots:output_type -> cubelet.services.cubebox.v1.ListLocalSnapshotsResponse
-	78,  // 122: cubelet.services.cubebox.v1.CubeboxMgr.GetLocalSnapshot:output_type -> cubelet.services.cubebox.v1.GetLocalSnapshotResponse
-	80,  // 123: cubelet.services.cubebox.v1.CubeboxMgr.GetStorageMetrics:output_type -> cubelet.services.cubebox.v1.GetStorageMetricsResponse
-	84,  // 124: cubelet.services.cubebox.v1.CubeboxMgr.InspectStorageVolumes:output_type -> cubelet.services.cubebox.v1.InspectStorageVolumesResponse
-	87,  // 125: cubelet.services.cubebox.v1.CubeboxMgr.CleanupOrphanStorageFiles:output_type -> cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse
-	111, // [111:126] is the sub-list for method output_type
-	96,  // [96:111] is the sub-list for method input_type
-	96,  // [96:96] is the sub-list for extension type_name
-	96,  // [96:96] is the sub-list for extension extendee
-	0,   // [0:96] is the sub-list for field type_name
+	43,  // 73: cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.cube_network_config:type_name -> cubelet.services.cubebox.v1.CubeNetworkConfig
+	104, // 74: cubelet.services.cubebox.v1.UpdateCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	100, // 75: cubelet.services.cubebox.v1.UpdateCubeSandboxResponse.ext_info:type_name -> cubelet.services.cubebox.v1.UpdateCubeSandboxResponse.ExtInfoEntry
+	104, // 76: cubelet.services.cubebox.v1.ExecCubeSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	40,  // 77: cubelet.services.cubebox.v1.AppSnapshotRequest.create_request:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxRequest
+	104, // 78: cubelet.services.cubebox.v1.AppSnapshotResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	104, // 79: cubelet.services.cubebox.v1.CommitSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	104, // 80: cubelet.services.cubebox.v1.RollbackSandboxResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	68,  // 81: cubelet.services.cubebox.v1.CleanupTemplateRequest.objects:type_name -> cubelet.services.cubebox.v1.CowObjectRef
+	104, // 82: cubelet.services.cubebox.v1.CleanupTemplateResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	68,  // 83: cubelet.services.cubebox.v1.ListSandboxSnapshotsRequest.objects:type_name -> cubelet.services.cubebox.v1.CowObjectRef
+	104, // 84: cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	72,  // 85: cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse.objects:type_name -> cubelet.services.cubebox.v1.CowObjectStatus
+	104, // 86: cubelet.services.cubebox.v1.ListLocalSnapshotsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	75,  // 87: cubelet.services.cubebox.v1.ListLocalSnapshotsResponse.snapshots:type_name -> cubelet.services.cubebox.v1.LocalSnapshotInfo
+	104, // 88: cubelet.services.cubebox.v1.GetLocalSnapshotResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	75,  // 89: cubelet.services.cubebox.v1.GetLocalSnapshotResponse.snapshot:type_name -> cubelet.services.cubebox.v1.LocalSnapshotInfo
+	104, // 90: cubelet.services.cubebox.v1.GetStorageMetricsResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	101, // 91: cubelet.services.cubebox.v1.GetStorageMetricsResponse.metrics:type_name -> cubelet.services.cubebox.v1.GetStorageMetricsResponse.MetricsEntry
+	81,  // 92: cubelet.services.cubebox.v1.SandboxStorageInfo.volumes:type_name -> cubelet.services.cubebox.v1.StorageVolumeInfo
+	104, // 93: cubelet.services.cubebox.v1.InspectStorageVolumesResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	82,  // 94: cubelet.services.cubebox.v1.InspectStorageVolumesResponse.sandboxes:type_name -> cubelet.services.cubebox.v1.SandboxStorageInfo
+	104, // 95: cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
+	86,  // 96: cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse.orphans:type_name -> cubelet.services.cubebox.v1.StorageOrphanEntry
+	40,  // 97: cubelet.services.cubebox.v1.CubeboxMgr.Create:input_type -> cubelet.services.cubebox.v1.RunCubeSandboxRequest
+	48,  // 98: cubelet.services.cubebox.v1.CubeboxMgr.Destroy:input_type -> cubelet.services.cubebox.v1.DestroyCubeSandboxRequest
+	54,  // 99: cubelet.services.cubebox.v1.CubeboxMgr.List:input_type -> cubelet.services.cubebox.v1.ListCubeSandboxRequest
+	56,  // 100: cubelet.services.cubebox.v1.CubeboxMgr.Update:input_type -> cubelet.services.cubebox.v1.UpdateCubeSandboxRequest
+	60,  // 101: cubelet.services.cubebox.v1.CubeboxMgr.Exec:input_type -> cubelet.services.cubebox.v1.ExecCubeSandboxRequest
+	62,  // 102: cubelet.services.cubebox.v1.CubeboxMgr.AppSnapshot:input_type -> cubelet.services.cubebox.v1.AppSnapshotRequest
+	64,  // 103: cubelet.services.cubebox.v1.CubeboxMgr.CommitSandbox:input_type -> cubelet.services.cubebox.v1.CommitSandboxRequest
+	66,  // 104: cubelet.services.cubebox.v1.CubeboxMgr.RollbackSandbox:input_type -> cubelet.services.cubebox.v1.RollbackSandboxRequest
+	69,  // 105: cubelet.services.cubebox.v1.CubeboxMgr.CleanupTemplate:input_type -> cubelet.services.cubebox.v1.CleanupTemplateRequest
+	71,  // 106: cubelet.services.cubebox.v1.CubeboxMgr.ListSandboxSnapshots:input_type -> cubelet.services.cubebox.v1.ListSandboxSnapshotsRequest
+	74,  // 107: cubelet.services.cubebox.v1.CubeboxMgr.ListLocalSnapshots:input_type -> cubelet.services.cubebox.v1.ListLocalSnapshotsRequest
+	77,  // 108: cubelet.services.cubebox.v1.CubeboxMgr.GetLocalSnapshot:input_type -> cubelet.services.cubebox.v1.GetLocalSnapshotRequest
+	79,  // 109: cubelet.services.cubebox.v1.CubeboxMgr.GetStorageMetrics:input_type -> cubelet.services.cubebox.v1.GetStorageMetricsRequest
+	83,  // 110: cubelet.services.cubebox.v1.CubeboxMgr.InspectStorageVolumes:input_type -> cubelet.services.cubebox.v1.InspectStorageVolumesRequest
+	85,  // 111: cubelet.services.cubebox.v1.CubeboxMgr.CleanupOrphanStorageFiles:input_type -> cubelet.services.cubebox.v1.CleanupOrphanStorageFilesRequest
+	41,  // 112: cubelet.services.cubebox.v1.CubeboxMgr.Create:output_type -> cubelet.services.cubebox.v1.RunCubeSandboxResponse
+	49,  // 113: cubelet.services.cubebox.v1.CubeboxMgr.Destroy:output_type -> cubelet.services.cubebox.v1.DestroyCubeSandboxResponse
+	55,  // 114: cubelet.services.cubebox.v1.CubeboxMgr.List:output_type -> cubelet.services.cubebox.v1.ListCubeSandboxResponse
+	57,  // 115: cubelet.services.cubebox.v1.CubeboxMgr.Update:output_type -> cubelet.services.cubebox.v1.UpdateCubeSandboxResponse
+	61,  // 116: cubelet.services.cubebox.v1.CubeboxMgr.Exec:output_type -> cubelet.services.cubebox.v1.ExecCubeSandboxResponse
+	63,  // 117: cubelet.services.cubebox.v1.CubeboxMgr.AppSnapshot:output_type -> cubelet.services.cubebox.v1.AppSnapshotResponse
+	65,  // 118: cubelet.services.cubebox.v1.CubeboxMgr.CommitSandbox:output_type -> cubelet.services.cubebox.v1.CommitSandboxResponse
+	67,  // 119: cubelet.services.cubebox.v1.CubeboxMgr.RollbackSandbox:output_type -> cubelet.services.cubebox.v1.RollbackSandboxResponse
+	70,  // 120: cubelet.services.cubebox.v1.CubeboxMgr.CleanupTemplate:output_type -> cubelet.services.cubebox.v1.CleanupTemplateResponse
+	73,  // 121: cubelet.services.cubebox.v1.CubeboxMgr.ListSandboxSnapshots:output_type -> cubelet.services.cubebox.v1.ListSandboxSnapshotsResponse
+	76,  // 122: cubelet.services.cubebox.v1.CubeboxMgr.ListLocalSnapshots:output_type -> cubelet.services.cubebox.v1.ListLocalSnapshotsResponse
+	78,  // 123: cubelet.services.cubebox.v1.CubeboxMgr.GetLocalSnapshot:output_type -> cubelet.services.cubebox.v1.GetLocalSnapshotResponse
+	80,  // 124: cubelet.services.cubebox.v1.CubeboxMgr.GetStorageMetrics:output_type -> cubelet.services.cubebox.v1.GetStorageMetricsResponse
+	84,  // 125: cubelet.services.cubebox.v1.CubeboxMgr.InspectStorageVolumes:output_type -> cubelet.services.cubebox.v1.InspectStorageVolumesResponse
+	87,  // 126: cubelet.services.cubebox.v1.CubeboxMgr.CleanupOrphanStorageFiles:output_type -> cubelet.services.cubebox.v1.CleanupOrphanStorageFilesResponse
+	112, // [112:127] is the sub-list for method output_type
+	97,  // [97:112] is the sub-list for method input_type
+	97,  // [97:97] is the sub-list for extension type_name
+	97,  // [97:97] is the sub-list for extension extendee
+	0,   // [0:97] is the sub-list for field type_name
 }
 
 func init() { file_api_services_cubebox_v1_cubebox_proto_init() }
@@ -7455,6 +7603,7 @@ func file_api_services_cubebox_v1_cubebox_proto_init() {
 	file_api_services_cubebox_v1_cubebox_proto_msgTypes[40].OneofWrappers = []any{}
 	file_api_services_cubebox_v1_cubebox_proto_msgTypes[41].OneofWrappers = []any{}
 	file_api_services_cubebox_v1_cubebox_proto_msgTypes[48].OneofWrappers = []any{}
+	file_api_services_cubebox_v1_cubebox_proto_msgTypes[50].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

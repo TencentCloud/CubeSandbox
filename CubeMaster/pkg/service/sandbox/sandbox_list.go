@@ -6,11 +6,12 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"runtime/debug"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,12 +25,24 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types.ListCubeSandboxRes) {
+	return listSandbox(ctx, req, false)
+}
+
+// ListSandboxWithFailOnError surfaces cubelet list failures as a non-success
+// ret_code instead of silently returning an empty list.
+func ListSandboxWithFailOnError(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types.ListCubeSandboxRes) {
+	return listSandbox(ctx, req, true)
+}
+
+func listSandbox(ctx context.Context, req *types.ListCubeSandboxReq, failOnCubeletError bool) (rsp *types.ListCubeSandboxRes) {
 	if req.RequestID == "" {
 		req.RequestID = uuid.New().String()
 	}
@@ -52,6 +65,11 @@ func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types
 		},
 
 		Total: localcache.GetHealthyNodesByInstanceType(-1, req.InstanceType).Len(),
+	}
+	// Inventory path: always emit data (even empty []) so callers can
+	// distinguish "0 sandboxes" from "list did not complete".
+	if failOnCubeletError {
+		rsp.Data = []*types.SandboxBriefData{}
 	}
 
 	var nodeList []*node.Node
@@ -77,42 +95,177 @@ func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types
 		nodeList, rsp.EndIdx = localcache.RangeDBHost(req.StartIdx, req.Size, req.InstanceType)
 	}
 
-	if len(nodeList) == 0 {
+	rsp.Size = len(nodeList)
+	if len(nodeList) > 0 {
+		var resChan = make(chan *types.SandboxBriefData, 1000*len(nodeList))
+		done := make(chan struct{})
+		var listFailed atomic.Bool
+
+		dealRspData(ctx, done, resChan, rsp)
+
+		var wg sync.WaitGroup
+		for _, tmpNode := range nodeList {
+			tmpNode := tmpNode
+			recov.GoWithWaitGroup(&wg, func() {
+				doOneList(ctx, req, tmpNode, resChan, &listFailed)
+			}, func(panicError interface{}) {
+				log.G(ctx).Fatalf("panic:%v", string(debug.Stack()))
+			})
+		}
+		wg.Wait()
+		close(resChan)
+		<-done
+
+		if failOnCubeletError && listFailed.Load() {
+			rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
+			rsp.Ret.RetMsg = "list sandbox failed: cubelet unreachable"
+		}
+	}
+
+	enrichSandboxListBackends(ctx, rsp.Data)
+	mergePauseBindings(ctx, req, rsp)
+	types.SortSandboxList(rsp.Data)
+	return
+}
+
+// mergePauseBindings adds Master's pause state to the node-scan result.
+//
+// A paused sandbox has no shim, so the node scan cannot be trusted to report
+// it, and t_cube_pause_snapshot is the source of truth. Scanned rows are
+// always enriched with pause_snap／remote. Shimless READY／DELETE_FAILED
+// rows that the scan missed are appended only on the last node page (or
+// when --hostid selects one node), so they sit after running sandboxes
+// instead of repeating on every page. Label-filtered lists still do not
+// invent rows (labels only exist on the node).
+func mergePauseBindings(ctx context.Context, req *types.ListCubeSandboxReq, rsp *types.ListCubeSandboxRes) {
+	records, err := pausesnap.List(ctx, pausesnap.ListOptions{
+		HostID:       req.HostID,
+		InstanceType: req.InstanceType,
+	})
+	if err != nil {
+		if !errors.Is(err, pausesnap.ErrNotReady) {
+			log.G(ctx).Warnf("ListSandbox: read pause bindings: %v", err)
+		}
 		return
 	}
+	labelFiltered := req.Filter != nil && len(req.Filter.LabelSelector) > 0
+	rsp.Data = applyPauseBindings(rsp.Data, records, labelFiltered, shouldAppendShimlessPauseRows(req, rsp))
+}
 
-	rsp.Size = len(nodeList)
-
-	var resChan = make(chan *types.SandboxBriefData, 1000*len(nodeList))
-	done := make(chan struct{})
-
-	dealRspData(ctx, done, resChan, rsp)
-
-	var wg sync.WaitGroup
-
-	for _, tmpNode := range nodeList {
-		tmpNode := tmpNode
-		recov.GoWithWaitGroup(&wg, func() {
-			doOneList(ctx, req, tmpNode, resChan)
-		}, func(panicError interface{}) {
-			log.G(ctx).Fatalf("panic:%v", string(debug.Stack()))
-		})
+// shouldAppendShimlessPauseRows is true for a single-host list and for the
+// last node-window page (EndIdx >= Total, or no healthy nodes). Intermediate
+// pages — including an empty window past the last node — only decorate rows
+// the scan already returned.
+func shouldAppendShimlessPauseRows(req *types.ListCubeSandboxReq, rsp *types.ListCubeSandboxRes) bool {
+	if req != nil && strings.TrimSpace(req.HostID) != "" {
+		return true
 	}
-	wg.Wait()
-	close(resChan)
-	<-done
+	if rsp == nil {
+		return false
+	}
+	if rsp.Total <= 0 {
+		return true
+	}
+	return rsp.EndIdx >= rsp.Total
+}
 
-	// Results arrive over resChan in goroutine-completion order, which varies
-	// between calls and across nodes, so rsp.Data would otherwise be reshuffled
-	// on every list request. Sort by creation time descending (newest first),
-	// falling back to SandboxID for a deterministic, stable order.
-	sort.Slice(rsp.Data, func(i, j int) bool {
-		if rsp.Data[i].CreateAt != rsp.Data[j].CreateAt {
-			return rsp.Data[i].CreateAt > rsp.Data[j].CreateAt
+func applyPauseBindings(items []*types.SandboxBriefData, records []*pausesnap.Record,
+	labelFiltered, appendMissing bool) []*types.SandboxBriefData {
+	known := make(map[string]*types.SandboxBriefData, len(items))
+	for _, item := range items {
+		if item != nil && item.SandboxID != "" {
+			known[item.SandboxID] = item
 		}
-		return rsp.Data[i].SandboxID < rsp.Data[j].SandboxID
-	})
-	return
+	}
+	for _, rec := range records {
+		if rec == nil || rec.SandboxID == "" {
+			continue
+		}
+		if item, ok := known[rec.SandboxID]; ok {
+			applyPauseBinding(item, rec)
+			continue
+		}
+		// CREATING / FAILED leave the sandbox running, so the node scan owns
+		// that row and its absence here means the sandbox is gone.
+		// DELETE_FAILED has no shim either and its leftover package is exactly
+		// what an operator needs to see, so it is rendered like READY.
+		if !isShimlessPauseStatus(rec.Status) {
+			continue
+		}
+		// Labels only exist on the node, so a label-filtered list cannot tell
+		// whether this binding would have matched.
+		if labelFiltered || !appendMissing {
+			continue
+		}
+		item := pauseBindingRow(rec)
+		known[rec.SandboxID] = item
+		items = append(items, item)
+	}
+	return items
+}
+
+func applyPauseBinding(item *types.SandboxBriefData, rec *pausesnap.Record) {
+	if item == nil || rec == nil {
+		return
+	}
+	item.PauseSnapshotID = rec.SnapshotID
+	item.RemoteStatus = rec.RemoteStatus
+	item.PauseStatus = strings.TrimSpace(rec.Status)
+	if strings.TrimSpace(item.Backend) == "" {
+		item.Backend = strings.TrimSpace(rec.Backend)
+	}
+}
+
+// isShimlessPauseStatus reports whether the binding, not a node scan, is the
+// only remaining evidence of the sandbox.
+func isShimlessPauseStatus(status string) bool {
+	status = strings.TrimSpace(status)
+	return strings.EqualFold(status, pausesnap.StatusReady) ||
+		strings.EqualFold(status, pausesnap.StatusDeleteFailed)
+}
+
+// pauseBindingRow renders a binding the node did not report. CreateAt stays
+// empty: the binding only knows when the pause happened, not when the sandbox
+// was created, and a wrong creation time is worse than none.
+func pauseBindingRow(rec *pausesnap.Record) *types.SandboxBriefData {
+	item := &types.SandboxBriefData{
+		SandboxID:       rec.SandboxID,
+		Status:          int32(cubebox.ContainerState_CONTAINER_PAUSED),
+		HostID:          rec.NodeID,
+		HostIP:          rec.NodeIP,
+		Backend:         strings.TrimSpace(rec.Backend),
+		PauseSnapshotID: rec.SnapshotID,
+		RemoteStatus:    rec.RemoteStatus,
+		PauseStatus:     strings.TrimSpace(rec.Status),
+	}
+	if !rec.UpdatedAt.IsZero() {
+		item.PauseAt = rec.UpdatedAt.UnixNano()
+	}
+	return item
+}
+
+// enrichSandboxListBackends fills Backend from t_cube_sandbox_spec (DB source of
+// truth for create-time xfs|s3). Missing specs leave Backend empty.
+func enrichSandboxListBackends(ctx context.Context, items []*types.SandboxBriefData) {
+	for _, item := range items {
+		if item == nil || item.SandboxID == "" {
+			continue
+		}
+		if b := strings.TrimSpace(item.Backend); b != "" {
+			continue
+		}
+		if item.Annotations != nil {
+			if b := strings.TrimSpace(item.Annotations[constants.CubeAnnotationStorageBackend]); b != "" {
+				item.Backend = b
+				continue
+			}
+		}
+		spec, err := sandboxspec.Get(ctx, item.SandboxID)
+		if err != nil || spec == nil {
+			continue
+		}
+		item.Backend = strings.TrimSpace(spec.Backend)
+	}
 }
 
 func dealRspData(ctx context.Context, done chan struct{}, resChan chan *types.SandboxBriefData,
@@ -139,7 +292,7 @@ func dealRspData(ctx context.Context, done chan struct{}, resChan chan *types.Sa
 	})
 }
 
-func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node.Node, resChan chan *types.SandboxBriefData) {
+func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node.Node, resChan chan *types.SandboxBriefData, listFailed *atomic.Bool) {
 	start := time.Now()
 	rt := CubeLog.GetTraceInfo(ctx).DeepCopy()
 	rt.Callee = constants.CubeLet
@@ -171,6 +324,7 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 	cubeRsp, err := cubelet.List(ctx, rt.CalleeEndpoint, cubeletReq)
 	if err != nil {
 		rt.RetCode = int64(errorcode.ErrorCode_ReqCubeAPIFailed)
+		listFailed.Store(true)
 		log.G(ctx).WithFields(map[string]interface{}{
 			"CalleeEndpoint": rt.CalleeEndpoint,
 		}).Errorf("List sandbox error:%v", err)
@@ -197,6 +351,8 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 					TemplateID:  templateID,
 					CpuCount:    parseCPUCount(container.GetResources().GetCpu()),
 					MemoryMB:    parseMemoryMB(container.GetResources().GetMem()),
+					CPUMilli:    parseCPUMilli(container.GetResources().GetCpu()),
+					MemoryMiB:   parseMemoryMiB(container.GetResources().GetMem()),
 					Annotations: buildAnnotationsFromLabels(labels),
 					Labels:      labels,
 					NameSpace:   sandbox.GetNamespace(),
@@ -262,4 +418,53 @@ func parseMemoryMB(raw string) int32 {
 		return int32(maxInt32)
 	}
 	return int32(memoryMB)
+}
+
+func parseCPUMilli(raw string) int32 {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0
+	}
+
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return 0
+	}
+	cpuMilli := quantity.MilliValue()
+	if cpuMilli <= 0 {
+		return 0
+	}
+	const maxInt32 = int64(1<<31 - 1)
+	if cpuMilli > maxInt32 {
+		return int32(maxInt32)
+	}
+	return int32(cpuMilli)
+}
+
+func parseMemoryMiB(raw string) int32 {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0
+	}
+
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return 0
+	}
+	bytes := quantity.Value()
+	if bytes <= 0 {
+		return 0
+	}
+	const (
+		bytesPerMiB = int64(1024 * 1024)
+		maxInt32    = int64(1<<31 - 1)
+	)
+	memoryMiB := bytes / bytesPerMiB
+	if bytes%bytesPerMiB != 0 {
+		memoryMiB++
+	}
+	if memoryMiB > maxInt32 {
+		return int32(maxInt32)
+	}
+	return int32(memoryMiB)
 }

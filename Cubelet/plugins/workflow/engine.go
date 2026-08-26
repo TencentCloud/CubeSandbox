@@ -188,6 +188,20 @@ func (b *CreateContext) IsPauseResume() bool {
 	return strings.TrimSpace(b.ReqInfo.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID]) != ""
 }
 
+// IsGuestMountRestore is true when Create restores a VM whose guest already
+// has virtiofs + container binds live in memory: pause resume or FromSnap.
+// Create-from-template only has appsnapshot.template.id — that memory is a
+// clean template and still needs virtio_rw mounted for newly attached volumes.
+func (b *CreateContext) IsGuestMountRestore() bool {
+	if b == nil || b.ReqInfo == nil {
+		return false
+	}
+	if b.IsPauseResume() {
+		return true
+	}
+	return strings.TrimSpace(b.ReqInfo.GetAnnotations()[constants.MasterAnnotationRuntimeSnapshotID]) != ""
+}
+
 func (b *CreateContext) GetSnapshotTemplateID() (string, bool) {
 	if b.ReqInfo == nil {
 		return "", false

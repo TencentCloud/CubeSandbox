@@ -26,10 +26,14 @@ entire page and apply at least one of the hardening strategies below.
 | WebUI | `0.0.0.0` | 12088 | `WEB_UI_HOST_PORT` in `.env` (port only) | Dashboard |
 | MySQL | `127.0.0.1` | 3306 | Hardcoded in compose template | Already loopback-only |
 | Redis | `127.0.0.1` | 6379 | Hardcoded in compose template | Already loopback-only |
+| MinIO API | node IP | 9000 | `CUBE_SANDBOX_MINIO_API_BIND` (defaults to `CUBE_SANDBOX_NODE_IP`) | Compute-node Cubelets need s3fs access; not loopback-only |
+| MinIO console | `127.0.0.1` | 9001 | Hardcoded in compose template | Already loopback-only |
 
-MySQL and Redis are already bound to loopback by the bundled compose template
-and are not reachable from the network. The remaining services listed with a
-`0.0.0.0` default are the ones you need to consider.
+MySQL, Redis, and the MinIO console are already bound to loopback by the bundled
+compose template. The MinIO S3 API is published on the node IP so compute nodes
+can reach it — restrict that port with a firewall to the private network. The
+remaining services listed with a `0.0.0.0` default are the ones you need to
+consider.
 
 ## Per-service bind address configuration
 
@@ -122,6 +126,15 @@ If you need to restrict source IPs, use firewall rules.
 The bundled containers already bind to `127.0.0.1` via the compose template — no
 extra configuration needed. If you use external MySQL/Redis
 (`CUBE_EXTERNAL_MYSQL_HOST`), enforce access control at the network level.
+
+### MinIO
+
+The MinIO console binds to `127.0.0.1:9001`. The S3 API is published on
+`CUBE_SANDBOX_MINIO_API_BIND` (the detected node IP by default, port 9000)
+because compute-node Cubelets mount volumes via s3fs. Do not bind the API to
+loopback if you have compute nodes. Restrict TCP 9000 to the private network
+with a firewall. Set `CUBE_SANDBOX_MINIO_ENABLED=0` when you are not running
+local MinIO.
 
 ## Hardening strategies
 

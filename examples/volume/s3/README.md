@@ -1,41 +1,35 @@
-# S3-Compatible Volume Plugin — Walkthrough
+# S3-Compatible Volume Plugin
 
-Use any S3-compatible object storage as persistent storage for CubeSandbox volumes: create a Volume → mount it in a sandbox → read/write → unmount → delete.
+Bring any S3-compatible object store (AWS S3, Tencent Cloud COS, Cloudflare R2, MinIO, …) into CubeSandbox as a **lifecycle-persistent volume** for sandboxes: create a Volume → mount it in a sandbox → read/write → destroy the sandbox, the data stays → remount it next time.
 
-The plugin is built entirely on standard tooling — **s3fs** for the mount and the **AWS CLI** for the control plane. Nothing in it is vendor-specific: the storage provider is just the `ENDPOINT` URL in the config file, so it targets any S3-compatible endpoint — AWS S3, [Tigris](https://www.tigrisdata.com/), MinIO, Cloudflare R2, and the like.
-
-> **Version requirement:** Cube platform **≥ 0.6.0**, Python SDK **`cubesandbox` ≥ 0.6.0**.
-> Protocol and Hook details: [Volume Plugin framework](../../../docs/guide/volume-plugin.md).
+> **This page is an operator reference** for those who need to **deploy the plugin manually / connect external S3**.
+>
+> **If you're on the default install (one-click or Helm defaults)** — the installer already started MinIO, installed the plugin, and wrote the credentials. **You don't need this page** — see the user tutorial: [S3 Volumes](../../../docs/guide/s3-volume.md).
 
 中文文档：[README.zh.md](README.zh.md)
 
 ---
 
-## Why this plugin exists
+## What this is
 
-| | COS plugin | S3 plugin |
-|---|---|---|
-| Backend | Tencent Cloud COS | any S3-compatible endpoint |
-| Mount driver | cosfs (`amd64` only) | s3fs (`amd64` **and** `arm64`) |
-| Install | manual `.rpm`/`.deb` download | `apt install s3fs` / `yum install s3fs-fuse` |
-| Control plane | coscmd | AWS CLI v2 |
+CubeSandbox sandboxes are ephemeral by default — data is lost when they're killed. The Volume plugin gives a sandbox a **user-scoped persistent volume**: created/mounted/unmounted/deleted via the e2b-compatible `/volumes` API, backed by object storage. This plugin is the S3-compatible backend implementation.
 
-Two gaps this closes. First, if you self-host CubeSandbox outside Tencent Cloud, the COS example requires a Tencent Cloud account — this plugin works with whatever S3-compatible storage you already have. Second, **ARM64 clusters have no working Volume backend via cosfs**: [`deploy/scripts/docker-install-volume-deps.sh`](../../../deploy/scripts/docker-install-volume-deps.sh) skips cosfs on `arm64` because upstream ships no ARM package, while s3fs is packaged for `arm64` by both Debian/Ubuntu and EPEL.
+The plugin is a single static Go binary with a built-in S3 client, so the control plane needs no S3 command line tool; the data plane uses standard **s3fs** for the mount. Nothing is vendor-specific: the backend is just an `ENDPOINT` in the config file.
+
+**Relationship to the COS plugin:** modelled on the COS plugin, but the backend is any S3-compatible endpoint instead of Tencent Cloud COS, and the mount driver s3fs supports both `amd64` and `arm64` (cosfs is `amd64`-only). The two can coexist in one cluster (the default install registers both `cos` and `s3`).
+
+> **Version requirement:** Cube platform **≥ 0.6.0**, Python SDK **`cubesandbox` ≥ 0.6.0**.
+> Protocol and Hook details: [Volume Plugin framework](../../../docs/guide/volume-plugin.md).
 
 ---
 
-## Choosing an endpoint
+## Do you need this page?
 
-Everything below is identical regardless of provider — only `volume-s3.conf` changes:
-
-| Provider | `ENDPOINT` | `REGION` |
-|----------|-----------|----------|
-| AWS S3 | `https://s3.<region>.amazonaws.com` | the bucket's region |
-| Tigris | `https://t3.storage.dev` | `auto` |
-| Cloudflare R2 | `https://<account-id>.r2.cloudflarestorage.com` | `auto` |
-| MinIO | `http://<minio-host>:9000` | any value |
-
-For an end-to-end vendor walkthrough (account, bucket, and access-key setup included), see the [Tigris integration guide](../../../docs/guide/integrations/tigris.md).
+| Your situation | Go to |
+|----------------|-------|
+| Default install (one-click / Helm defaults), want to use S3 Volume | [User tutorial](../../../docs/guide/s3-volume.md) — just use the SDK, no config |
+| Want to swap the bundled MinIO for external S3 | This page from [§2](#2-install-plugin-and-credentials) — just edit `volume-s3.conf` |
+| Deploying the S3 Volume plugin from scratch | This whole page |
 
 ---
 
@@ -45,7 +39,7 @@ For an end-to-end vendor walkthrough (account, bucket, and access-key setup incl
 |------|-------------|
 | Running Cube cluster | At least **CubeMaster**, **Cubelet**, **CubeAPI** (port usually `3000`) |
 | Sandbox template | A `templateID` (see [§7](#7-verify-with-the-sdk)) |
-| S3-compatible storage | A bucket, and an access key pair with read/write permission on it |
+| S3-compatible storage | A bucket, and an access key pair with read/write permission on it (auto-created if missing) |
 | Local access | `sudo` on CubeMaster / Cubelet hosts to install software, edit config, restart services |
 
 **Single-machine dev:** CubeMaster and Cubelet on one host — install deps once.
@@ -60,24 +54,19 @@ For an end-to-end vendor walkthrough (account, bucket, and access-key setup incl
 | Tool | Install on | Purpose (Hook) |
 |------|------------|----------------|
 | **[s3fs](https://github.com/s3fs-fuse/s3fs-fuse)** | **Cubelet** | attach / detach (FUSE mount) |
-| **AWS CLI v2** | **CubeMaster** | create / destroy (volume prefix) |
-| **jq** | **CubeMaster** and **Cubelet** | binary plugin stdout JSON |
+| **jq** | anywhere (optional) | reading plugin output by hand while debugging |
+
+A **CubeMaster-only** node needs nothing from this section: create / destroy talk to the endpoint over HTTP from inside the plugin binary.
 
 ### Option A: install script
 
 **Cubelet node:**
 
 ```bash
-sudo ./install-deps.sh --s3fs --jq
+sudo ./install-deps.sh --s3fs
 ```
 
-**CubeMaster node:**
-
-```bash
-sudo ./install-deps.sh --aws --jq
-```
-
-**Single machine** (both roles on one host):
+**Single machine** (both roles on one host), plus jq for debugging:
 
 ```bash
 sudo ./install-deps.sh --all
@@ -89,13 +78,9 @@ Check without installing: add `--check-only`.
 
 ```bash
 # Cubelet — Debian/Ubuntu
-sudo apt-get install -y s3fs jq
+sudo apt-get install -y s3fs
 # Cubelet — RHEL/CentOS (needs EPEL)
-sudo yum install -y epel-release && sudo yum install -y s3fs-fuse jq
-
-# CubeMaster — AWS CLI v2 (use aarch64 on ARM64 hosts)
-curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
-unzip -q awscliv2.zip && sudo ./aws/install
+sudo yum install -y epel-release && sudo yum install -y s3fs-fuse
 ```
 
 ### Verify install
@@ -109,26 +94,46 @@ s3fs --version | head -1
 
 Both must succeed; a missing `/dev/fuse` breaks attach.
 
-**CubeMaster — AWS CLI, against your bucket**
+**CubeMaster — credentials, against your bucket**
+
+The plugin's own `create` hook is the check: it fails loudly on bad credentials, a wrong endpoint or a missing permission.
 
 ```bash
-AWS_ACCESS_KEY_ID=xxx AWS_SECRET_ACCESS_KEY=xxx AWS_REGION=<region> \
-  aws s3 ls s3://my-cube-volumes/ --endpoint-url <your-endpoint>
+/usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3 \
+  --op create --volume-id preflight-check --name preflight
+/usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3 \
+  --op destroy --volume-id preflight-check
 ```
 
-An empty listing (exit 0) is success. `InvalidAccessKeyId` or `AccessDenied` means the key pair lacks read/write permission on the bucket.
+Both must print `"error":""` and exit 0. `InvalidAccessKeyId` or `AccessDenied` means the key pair lacks read/write permission on the bucket.
 
 ---
 
-## 2. Install plugin and credentials
+## 2. Build and install plugin and credentials
 
-Copy the plugin into both `plugin/` directories:
+Build the binary. From the repository root (uses the project builder image, so no
+local Go toolchain is needed):
+
+```bash
+make cube-volume-s3          # -> _output/bin/cube-volume-s3
+```
+
+Or with a local Go toolchain (≥ 1.25):
+
+```bash
+cd examples/volume/s3 && make    # -> bin/cube-volume-s3
+```
+
+One-click release bundles and the container images already ship the compiled
+binary at `<prefix>/{CubeMaster,Cubelet}/plugin/cube-volume-s3`.
+
+Install it into both `plugin/` directories:
 
 ```bash
 PREFIX=/usr/local/services/cubetoolbox
-sudo install -m 0755 binary/cube-volume-s3.sh \
+sudo install -m 0755 _output/bin/cube-volume-s3 \
   "$PREFIX/CubeMaster/plugin/cube-volume-s3"
-sudo install -m 0755 binary/cube-volume-s3.sh \
+sudo install -m 0755 _output/bin/cube-volume-s3 \
   "$PREFIX/Cubelet/plugin/cube-volume-s3"
 sudo install -m 0600 volume-s3.conf.example \
   "$PREFIX/CubeMaster/plugin/volume-s3.conf"
@@ -143,11 +148,20 @@ Then edit `volume-s3.conf` on each node:
 | `ACCESS_KEY_ID` | Access key ID | yes |
 | `SECRET_ACCESS_KEY` | Secret access key | yes |
 | `BUCKET` | Bucket holding all volumes | yes |
-| `ENDPOINT` | S3-compatible endpoint URL (see [Choosing an endpoint](#choosing-an-endpoint)) | yes |
+| `ENDPOINT` | S3-compatible endpoint URL (see table below) | yes |
 | `REGION` | SigV4 signing region; default `us-east-1` | no |
-| `S3FS_EXTRA_OPTS` | Extra s3fs mount options, whitespace-separated (e.g. `-ouse_path_request_style` for MinIO) | no |
+| `S3FS_EXTRA_OPTS` | Extra s3fs mount options, whitespace-separated (e.g. `-ouse_path_request_style` for MinIO). Multi-option values may be quoted so the file stays `source`-compatible; the plugin strips the quotes. Setting `-ouse_path_request_style` also switches the plugin's own S3 client to path-style addressing. | no |
 
-The config must be root-owned and mode `600` — it holds a secret in plaintext and is `source`d by the plugin:
+Common backends:
+
+| Provider | `ENDPOINT` | `REGION` |
+|----------|-----------|----------|
+| AWS S3 | `https://s3.<region>.amazonaws.com` | the bucket's region |
+| Tencent Cloud COS | `https://cos.<region>.myqcloud.com` | the bucket's region (e.g. `ap-guangzhou`) |
+| Cloudflare R2 | `https://<account-id>.r2.cloudflarestorage.com` | `auto` |
+| MinIO | `http://<minio-host>:9000` | any value |
+
+The config must be root-owned and mode `600` — it holds a secret in plaintext. The plugin parses it as `KEY=VALUE` lines rather than executing it, and looks for `volume-s3.conf` next to the binary (override with `CUBE_S3_CONFIG`):
 
 ```bash
 sudo chown root:root "$PREFIX/CubeMaster/plugin/volume-s3.conf" "$PREFIX/Cubelet/plugin/volume-s3.conf"
@@ -169,7 +183,7 @@ volume_plugins:
     binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3
 ```
 
-`name: s3` is the API/SDK **`driver`**. When `Volume.create("x")` omits the driver, the **first** entry in the list is used.
+`name: s3` is the API/SDK **`driver`**. When `Volume.create("x")` omits the driver, the **first** entry in the list is used — the default install now lists `s3` first, so omitting driver routes to S3.
 
 ---
 
@@ -271,7 +285,7 @@ export CUBE_PROXY_NODE_IP=<cubeproxy-or-cubelet-node-ip>
 ```python
 from cubesandbox import Sandbox, Volume
 
-# ① Create Volume (bucket gets volumes/<id>/.keep)
+# ① Create Volume (bucket gets the s3fs directory object volumes/<id>/)
 vol = Volume.create("my-data", driver="s3")
 print("volume_id:", vol.volume_id)
 
@@ -287,12 +301,12 @@ Volume.destroy(vol.volume_id)
 print("done")
 ```
 
-**Confirm the object landed in the bucket:**
+**Confirm the object landed in the bucket.** Any S3 browser works; [MinIO's `mc`](https://min.io/docs/minio/linux/reference/minio-mc.html) is a single binary and needs no Python:
 
 ```bash
 source /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-s3.conf
-AWS_ACCESS_KEY_ID="$ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$SECRET_ACCESS_KEY" AWS_REGION="${REGION:-us-east-1}" \
-  aws s3 ls "s3://$BUCKET/volumes/" --recursive --endpoint-url "$ENDPOINT"
+mc alias set cube "$ENDPOINT" "$ACCESS_KEY_ID" "$SECRET_ACCESS_KEY"
+mc ls --recursive "cube/$BUCKET/volumes/"
 ```
 
 **Confirm the s3fs mount inside the Cubelet mount namespace** (while the sandbox runs):
@@ -328,10 +342,12 @@ python3 verify_volume.py
 | `unknown driver: s3` | CubeMaster `volume_plugins` missing the entry, or not restarted |
 | `no plugin registered for driver "s3"` | Cubelet missing the same-name plugin, or not restarted |
 | Attach fails, `s3fs mount failed` | `ls /dev/fuse`; credentials and `ENDPOINT` in `volume-s3.conf`; run the manual attach in [§5](#5-restart-services-and-verify) to see the s3fs error |
+| Attach fails, s3fs log `NoSuchKey` for `volumes/<id>/` | Create must PUT the trailing-slash directory object (s3fs mkdir). A `.keep` file under the prefix is a different key. Upgrade the plugin if an older copy still writes `.keep`. |
+| `open config ...: no such file or directory` | `volume-s3.conf` must sit next to the plugin binary, or `CUBE_S3_CONFIG` must point at it |
 | `InvalidAccessKeyId` / `SignatureDoesNotMatch` | Key pair wrong, lacks bucket permission, or `REGION` doesn't match what the endpoint expects for SigV4 |
 | Bucket name contains dots | s3fs uses virtual-hosted-style addressing by default, which breaks TLS for dotted names. Use a bucket without dots, or set `S3FS_EXTRA_OPTS=-ouse_path_request_style` in `volume-s3.conf` (MinIO usually needs it too) |
 | SDK write fails | `CUBE_PROXY_NODE_IP` unset; CubeAPI or template not READY |
-| `Volume.create` without driver not using s3 | The **first** entry in `volume_plugins` is the default driver |
+| `Volume.create` without driver not using s3 | In the default install `s3` is the first `volume_plugins` entry (the default driver), so omitting driver routes to s3; if it doesn't, check the `volume_plugins` order |
 
 More: [Framework §8 Troubleshooting](../../../docs/guide/volume-plugin.md).
 
@@ -349,8 +365,8 @@ Attach mounts `BUCKET:/volumes/<volumeID>` with s3fs at `/data/cube-shared/volum
 
 | Hook | Side | refCount | Behavior |
 |------|------|----------|----------|
-| Create | Controller | — | `aws s3api put-object` writes `volumes/<id>/.keep` |
-| Destroy | Controller | — | `aws s3 rm --recursive` removes the prefix |
+| Create | Controller | — | ensure bucket exists (create if missing), then PUT the 0-byte `volumes/<id>/` object (s3fs directory object) |
+| Destroy | Controller | — | list and delete every object under the prefix |
 | Attach | Node | `0` | `s3fs` mount → return `host_path` |
 | Attach | Node | `> 0` | Return the existing `host_path`; no second mount |
 | Detach | Node | `> 0` | no-op |
@@ -359,6 +375,9 @@ Attach mounts `BUCKET:/volumes/<volumeID>` with s3fs at `/data/cube-shared/volum
 ### Design notes
 
 - **One bucket, one prefix per volume.** Matches the COS example. Multi-bucket setups typically run several plugin instances with different `driver` names, or extend `Create` to accept a bucket. The framework only requires Hook protocol and `driver` consistency.
+- **No S3 command line tool.** The control plane uses [minio-go](https://github.com/minio/minio-go) inside the plugin binary — one ~8MB static binary instead of a ~100MB AWS CLI install on every control node.
+- **Bucket auto-create.** Create checks for the bucket first. An existing bucket does **not** need `s3:CreateBucket`; the plugin only creates the bucket when it is missing (typical for bundled MinIO).
+- **Destroy only tolerates not-found.** A missing bucket or key means the prefix is already gone; every other error propagates so CubeMaster does not drop the volume record while objects remain.
 - **Credentials never enter the sandbox.** They live in the root-owned, mode-`600` config on CubeMaster/Cubelet; the microVM sees only a filesystem.
 - **`private_data` carries the key prefix** from Create to Attach (max 1024 bytes, never returned to SDK clients).
 - **Concurrency.** A per-volume `flock` serialises attach/detach for the same volume on a node, so two sandboxes starting at once cannot double-mount.
@@ -370,15 +389,28 @@ Attach mounts `BUCKET:/volumes/<volumeID>` with s3fs at `/data/cube-shared/volum
 
 ```
 examples/volume/s3/
-├── install-deps.sh          # deps + checks (s3fs / aws / jq)
+├── Makefile                       # build / fmt / lint / test
+├── install-deps.sh                # host deps + checks (s3fs / jq)
 ├── volume-s3.conf.example
-└── binary/
-    └── cube-volume-s3.sh    # the plugin (all four hooks)
+├── cmd/cube-volume-s3/main.go     # flag parsing, hook dispatch, stdout JSON
+└── internal/
+    ├── config/                    # volume-s3.conf parsing
+    ├── s3api/                     # create / destroy via minio-go
+    ├── s3fsmnt/                   # s3fs mount / unmount
+    └── lockfile/                  # cross-process per-volume flock
+```
+
+Run the unit tests (no cloud access needed):
+
+```bash
+cd examples/volume/s3 && make test
+# or, in the project builder image, from the repository root:
+make cube-volume-s3-test
 ```
 
 | Doc | Content |
 |-----|---------|
+| [S3 Volumes (user tutorial)](../../../docs/guide/s3-volume.md) | End-user quick start |
 | [Volume Plugin framework](../../../docs/guide/volume-plugin.md) | Protocol, RefCount, Hook semantics |
-| [Tigris integration guide](../../../docs/guide/integrations/tigris.md) | End-to-end vendor walkthrough using this plugin |
 | [COS example](../cos/README.md) | The reference plugin this one is modelled on |
 | [s3fs-fuse](https://github.com/s3fs-fuse/s3fs-fuse) | Mount driver options and behavior |

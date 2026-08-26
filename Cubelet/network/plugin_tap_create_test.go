@@ -29,14 +29,18 @@ type fakeNetworkRuntime struct {
 	lastEnsureRequest  *networkruntime.EnsureNetworkRequest
 	releaseCalled      bool
 	lastReleaseRequest *networkruntime.ReleaseNetworkRequest
-	listTaps           []networkruntime.TapState
-	dumpPolicies       map[string]map[string]any
-	healthErrs         []error
-	healthCalls        int
-	tapFiles           []*os.File
-	getTapFileCalls    int
-	lastTapSandboxID   string
-	lastTapName        string
+
+	lastUpdatePolicyRequest *networkruntime.UpdateNetworkPolicyRequest
+	updatePolicyErr         error
+
+	listTaps         []networkruntime.TapState
+	dumpPolicies     map[string]map[string]any
+	healthErrs       []error
+	healthCalls      int
+	tapFiles         []*os.File
+	getTapFileCalls  int
+	lastTapSandboxID string
+	lastTapName      string
 }
 
 func (c *fakeNetworkRuntime) EnsureNetwork(_ context.Context, req *networkruntime.EnsureNetworkRequest) (*networkruntime.EnsureNetworkResponse, error) {
@@ -82,6 +86,11 @@ func (c *fakeNetworkRuntime) ReleaseNetwork(_ context.Context, req *networkrunti
 	c.releaseCalled = true
 	c.lastReleaseRequest = req
 	return &networkruntime.ReleaseNetworkResponse{Released: true, PersistMetadata: req.PersistMetadata}, nil
+}
+
+func (c *fakeNetworkRuntime) UpdateNetworkPolicy(_ context.Context, req *networkruntime.UpdateNetworkPolicyRequest) error {
+	c.lastUpdatePolicyRequest = req
+	return c.updatePolicyErr
 }
 
 func (c *fakeNetworkRuntime) ListTaps(_ context.Context, _ *networkruntime.ListTapsRequest) (*networkruntime.ListTapsResponse, error) {

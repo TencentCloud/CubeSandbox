@@ -64,6 +64,7 @@ The following are the standard keys currently registered in the system (`v1`). N
 | Sandbox lifecycle registry | `cube:v1:shared:sandbox:lifecycle:meta` | Hash | shared | CubeMaster | cube-lifecycle-manager | none (lifecycle via `HDEL`) |
 | Sandbox lifecycle events | `cube:v1:shared:sandbox:lifecycle:events` | Stream | shared | CubeMaster | cube-lifecycle-manager | MAXLEN ~ 100000 |
 | Sandbox lifecycle state | `cube:v1:shared:sandbox:lifecycle:state:{sandboxID}` | String | shared | cube-lifecycle-manager | cube-lifecycle-manager | SET TTL (default 60s) |
+| Sandbox lifecycle wakeup | `cube:v1:shared:sandbox:lifecycle:notify` | Pub/Sub channel | shared | cube-lifecycle-manager | cube-lifecycle-manager | n/a (best-effort hint) |
 | Sandbox op lock (pause/resume/delete) | `cube:v1:master:lock:sandbox:{sandboxID}` | String | master | CubeMaster | CubeMaster | SET NX EX by op: pause **180s**, resume/delete **120s**, other **60s**; unlock = token-matched Lua GET+DEL (no renew) |
 | CubeProxy replica registry | `cube:v1:shared:cube_proxy:registry` | Hash | shared | CubeProxy | cube-lifecycle-manager | none (evicted on heartbeat expiry via `HDEL`) |
 | CubeProxy replica heartbeat | `cube:v1:shared:cube_proxy:heartbeat` | Sorted Set | shared | CubeProxy | cube-lifecycle-manager | none (`ZREMRANGEBYSCORE` on expiry, default 15s) |

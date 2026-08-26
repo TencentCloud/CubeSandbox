@@ -21,7 +21,6 @@ import (
 	fwk "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/framework"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/nodehealth"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/rediskey"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
@@ -64,7 +63,7 @@ func Init(ctx context.Context) error {
 		l.sortedNodesByClusters[k] = node.NodeList{}
 	}
 
-	if err := l.loadAllFromDB(); err != nil {
+	if err := l.loadAllFromDB(context.Background()); err != nil {
 		return fmt.Errorf("loadAllFromDB:%v", err)
 	}
 
@@ -179,19 +178,13 @@ func GetNode(id string) (*node.Node, bool) {
 	return nil, false
 }
 
-func metadataHealthTimeout() time.Duration {
-	return nodehealth.MetadataTimeout(config.GetConfig().Common.SyncMetaDataInterval)
-}
-
-func cloneNodeWithCurrentHealth(n *node.Node, now time.Time) *node.Node {
+// cloneNodeWithCurrentHealth returns a defensive copy of n; CubeMaster trusts
+// the CubeOps Healthy verdict without overriding it on sync staleness.
+func cloneNodeWithCurrentHealth(n *node.Node, _ time.Time) *node.Node {
 	if n == nil {
 		return nil
 	}
-	current := n.Clone()
-	status := nodehealth.EvaluateFromFacts(n.ReportedReady, n.MetaDataUpdateAt, now, metadataHealthTimeout())
-	current.Healthy = status.Healthy
-	current.UnhealthyReason = status.UnhealthyReason
-	return current
+	return n.Clone()
 }
 
 func GetNodesByIp(ip string) (*node.Node, bool) {
@@ -221,39 +214,6 @@ func NotifyEvent(e *Event) error {
 		return nil
 	default:
 		return errors.New("event full")
-	}
-}
-
-// EvictNode synchronously removes every scheduler-local view owned by nodeID.
-// It is used after a node deletion commits and by metadata reloads on replicas
-// that observe the deleted registration later.
-func EvictNode(nodeID string) {
-	if nodeID == "" {
-		return
-	}
-	SyncNodeTemplates(nodeID, nil)
-	if l.templateNodeCache != nil {
-		l.templateNodeCache.Delete(nodeID)
-	}
-	if l.cache == nil {
-		return
-	}
-	if existing, ok := l.cache.Get(nodeID); ok {
-		if n, valid := existing.(*node.Node); valid {
-			l.delNodeCache(n)
-			return
-		}
-	}
-	l.cache.Delete(nodeID)
-	// The cache entry may already be gone while a stale pointer still remains
-	// in any instance-type list. Without the original node we cannot derive its
-	// cluster, so remove the ID from every list.
-	l.lockSortedNodes.Lock()
-	defer l.lockSortedNodes.Unlock()
-	candidate := &node.Node{InsID: nodeID}
-	for product, nodes := range l.sortedNodesByClusters {
-		nodes.Remove(candidate)
-		l.sortedNodesByClusters[product] = nodes
 	}
 }
 

@@ -5,11 +5,13 @@
 // Package cow declares the Cubelet CoW object-store abstraction.
 //
 // [Store] is the base interface; concrete backends are subclasses:
-//   - [NameXfsCow] ("xfscow"): local XFS/reflink via cubecow (current)
-//   - [NameS3] ("s3"): reserved for a future remote-backed implementation
+//   - [NameXfsCow] ("xfscow"): local XFS/reflink via cubecow
+//   - [NameS3] ("s3"): S3 scheme Store (cubecow kind=s3; export/fetch/status
+//     for cross-node)
 //
-// Callers use storage package helpers (CommitRootfs, CreateMemoryVolume,
-// DeleteObject, …) which dispatch to the active Store (storage.XfsCow today).
+// XFS and S3 Stores coexist in one Cubelet process. Callers pick a backend via
+// request `type` / [NormalizeBackend] (see storage.StoreFor). Legacy helpers
+// that omit a backend keep defaulting to XFS.
 package cow
 
 import (
@@ -53,6 +55,11 @@ type Store interface {
 	CommitTemplateRootfs(ctx context.Context, sourceName, templateID string) (*Object, error)
 	CreateMemoryVolume(ctx context.Context, templateID string, sizeBytes uint64) (*Object, error)
 	CommitTemplateMemory(ctx context.Context, sourceName, templateID string, sizeBytes uint64) (*Object, error)
+	// CloneSandboxMemory copies package memory into sb-<id>-memory.
+	// Same-node S3 pause resume uses this so the pause package can be
+	// dropped afterwards. XFS restore (template / resume / FromSnap)
+	// does not: CH mmap's the original snapshot MAP_PRIVATE.
+	CloneSandboxMemory(ctx context.Context, sandboxID, sourceName string) (*Object, error)
 	DeleteByKind(ctx context.Context, name, kind string) error
 	DeactivateByKind(ctx context.Context, name, kind string) error
 	ResolveDevPath(ctx context.Context, name, kind string) (string, error)

@@ -19,7 +19,8 @@ use crate::{
         SetTimeoutRequest, SnapshotInfo, SnapshotListItem, TemplateAliasLookupResponse,
         TemplateBuildJob, TemplateBuildStatus, TemplateCompatAdoptResponseView,
         TemplateCompatMatrixView, TemplateCompatRowView, TemplateCompatSummaryView, TemplateDetail,
-        TemplateNodeCompatView, TemplateSummary, Volume, VolumeAndToken,
+        TemplateNodeCompatView, TemplateSummary, UpdateSandboxNetworkRequest, Volume,
+        VolumeAndToken,
     },
 };
 
@@ -77,6 +78,7 @@ impl Modify for SecurityAddon {
         handlers::sandboxes::get_sandbox_logs,
         handlers::sandboxes::get_sandbox_logs_v2,
         handlers::sandboxes::set_sandbox_timeout,
+        handlers::sandboxes::update_sandbox_network,
         handlers::sandboxes::refresh_sandbox,
         handlers::snapshots::create_snapshot,
         handlers::snapshots::list_snapshots,
@@ -111,6 +113,7 @@ impl Modify for SecurityAddon {
         ConnectSandbox,
         ResumedSandbox,
         SetTimeoutRequest,
+        UpdateSandboxNetworkRequest,
         RefreshRequest,
         SandboxLogEntry,
         SandboxLogs,
@@ -147,4 +150,30 @@ pub fn export_to_file(path: impl AsRef<Path>) -> anyhow::Result<()> {
     }
     fs::write(path, yaml)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_rules_schema_documents_native_and_e2b_shapes() {
+        let document = serde_json::to_value(build_openapi()).expect("serialize OpenAPI document");
+        let rules =
+            &document["components"]["schemas"]["SandboxNetworkConfig"]["properties"]["rules"];
+        assert!(
+            rules.to_string().contains("SandboxNetworkRulesInput"),
+            "network.rules should reference its compatibility input schema"
+        );
+
+        let input = &document["components"]["schemas"]["SandboxNetworkRulesInput"];
+        let one_of = input["oneOf"]
+            .as_array()
+            .expect("network rules input should use oneOf");
+
+        assert!(one_of.iter().any(|schema| schema["type"] == "array"));
+        assert!(one_of.iter().any(|schema| {
+            schema["type"] == "object" && schema["additionalProperties"]["type"] == "array"
+        }));
+    }
 }

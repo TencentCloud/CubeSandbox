@@ -74,11 +74,17 @@ type CommonConf struct {
 	HttpPort               int           `yaml:"http_port"`
 	// HttpBind is the HTTP listen address. Empty means 0.0.0.0 (all
 	// interfaces); set to 127.0.0.1 to keep the API loopback-only.
-	HttpBind                        string            `yaml:"http_bind"`
-	WriteTimeout                    int               `yaml:"http_writetimeout"`
-	ReadTimeout                     int               `yaml:"http_readtimeout"`
-	IdleTimeout                     int               `yaml:"http_idletimeout"`
-	GraceFullStopTimeoutInSec       int               `yaml:"gracefull_stop_timeout_insec"`
+	HttpBind                  string `yaml:"http_bind"`
+	WriteTimeout              int    `yaml:"http_writetimeout"`
+	ReadTimeout               int    `yaml:"http_readtimeout"`
+	IdleTimeout               int    `yaml:"http_idletimeout"`
+	GraceFullStopTimeoutInSec int    `yaml:"gracefull_stop_timeout_insec"`
+	// CubeOps node-management base URL.
+	CubeOpsAddr string `yaml:"cube_ops_addr"`
+	// CubeOpsBootRetries: additional LoadNodes attempts (0 = single-shot).
+	// Bridges the systemd startup window.
+	CubeOpsBootRetries              int               `yaml:"cube_ops_boot_retries"`
+	CubeOpsBootBackoff              time.Duration     `yaml:"cube_ops_boot_backoff"`
 	SyncMetaDataInterval            time.Duration     `yaml:"sync_meta_data_interval"`
 	SyncMetricDataInterval          time.Duration     `yaml:"sync_metric_data_interval"`
 	CleanSandboxCacheInterval       time.Duration     `yaml:"clean_sandbox_cache_interval"`
@@ -846,8 +852,17 @@ func preComHandleConf(config *Config) error {
 		config.Common.IdleTimeout = 360
 	}
 
+	if config.Common.CubeOpsBootRetries == 0 {
+		// 1s base + 5 retries → ~31s wait window covers a slow CubeOps start.
+		config.Common.CubeOpsBootRetries = 5
+	}
+	if config.Common.CubeOpsBootBackoff == time.Duration(0) {
+		config.Common.CubeOpsBootBackoff = 1 * time.Second
+	}
+
 	if config.Common.SyncMetaDataInterval == time.Duration(0) {
-		config.Common.SyncMetaDataInterval = 30 * time.Second
+		// Node changes must converge within ~1s for fast scheduling reaction.
+		config.Common.SyncMetaDataInterval = 1 * time.Second
 	}
 
 	if config.Common.SyncMetricDataInterval == time.Duration(0) {

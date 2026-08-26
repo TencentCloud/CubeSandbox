@@ -140,6 +140,7 @@ test_render_template_rejects_non_empty_directory() {
 test_unit_prepare_hooks_are_wired() {
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-mysql.service" "/usr/local/services/cubetoolbox/scripts/systemd/mysql-prepare.sh"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-redis.service" "/usr/local/services/cubetoolbox/scripts/systemd/redis-prepare.sh"
+  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-minio.service" "/usr/local/services/cubetoolbox/scripts/systemd/minio-prepare.sh"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-coredns.service" "/usr/local/services/cubetoolbox/scripts/systemd/coredns-prepare.sh"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-coredns.service" "/usr/local/services/cubetoolbox/scripts/systemd/coredns-postcheck.sh"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-cube-proxy.service" "/usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-prepare.sh"
@@ -211,8 +212,8 @@ test_one_click_scripts_do_not_require_ripgrep() {
 test_quickcheck_reports_node_registration_failure_explicitly() {
   local path="${ONE_CLICK_DIR}/scripts/one-click/quickcheck.sh"
 
-  assert_contains "${path}" "failed to query cubemaster node registration"
-  assert_contains "${path}" "cubemaster node registration missing host_ip="
+  assert_contains "${path}" "failed to query CubeOps node registration for "
+  assert_contains "${path}" "CubeOps node registration missing IP="
   assert_not_contains "${path}" "| rg -q"
 }
 
@@ -425,8 +426,8 @@ test_quickcheck_bind_mount_file_uses_specific_message() {
   assert_stdout_contains "${out}" "expected bind mount source file not ready: ${missing}"
 }
 
-test_quickcheck_node_registration_keeps_missing_host_ip_after_blip() {
-  # Once cubemaster has been reached (registration present but host_ip wrong), a
+test_quickcheck_node_registration_keeps_missing_ip_after_blip() {
+  # Once CubeOps has been reached (registration present but IP wrong), a
   # later connectivity blip must NOT downgrade the diagnostic reason back to
   # "failed to query". Drive the wall clock deterministically with a stubbed
   # date so the deadline is crossed exactly on the second iteration.
@@ -456,8 +457,8 @@ test_quickcheck_node_registration_keeps_missing_host_ip_after_blip() {
       n=$(( n + 1 ))
       printf '%s\n' "${n}" > "${curl_counter}"
       if (( n == 1 )); then
-        # Iteration 1: reachable cubemaster, wrong host_ip -> reached=1.
-        printf '{"host_ip":"10.0.0.99"}\n'
+        # Iteration 1: reachable CubeOps, wrong IP -> reached=1.
+        printf '{"IP":"10.0.0.99"}\n'
         return 0
       fi
       # Iteration 2: connectivity blip.
@@ -465,12 +466,12 @@ test_quickcheck_node_registration_keeps_missing_host_ip_after_blip() {
     }
     check_node_registration "10.0.0.10" "${MASTER_ADDR}"
   )"; then
-    fail "check_node_registration should die when host_ip never matches"
+    fail "check_node_registration should die when IP never matches"
   fi
-  assert_stdout_contains "${out}" "cubemaster node registration missing host_ip=10.0.0.10"
+  assert_stdout_contains "${out}" "CubeOps node registration missing IP=10.0.0.10"
   case "${out}" in
-    *"failed to query cubemaster node registration"*)
-      fail "reason must stay sticky as 'missing host_ip' after cubemaster was reached" ;;
+    *"failed to query CubeOps node registration for 10.0.0.10"*)
+      fail "reason must stay sticky as 'missing IP' after CubeOps was reached" ;;
   esac
 }
 
@@ -641,7 +642,7 @@ test_quickcheck_callers_do_not_wrap_in_retry_loop() {
   assert_not_contains "${upc}" 'for _ in {1..30}'
 }
 
-test_quickcheck_node_registration_prefers_missing_host_ip_reason() {
+test_quickcheck_node_registration_prefers_missing_ip_reason() {
   local out
   if out="$(
     exec 2>&1
@@ -651,13 +652,13 @@ test_quickcheck_node_registration_prefers_missing_host_ip_reason() {
     QUICKCHECK_READY_TIMEOUT=4
     QUICKCHECK_READY_INTERVAL=2
     QUICKCHECK_DEADLINE=$(( $(date +%s) - 1 ))
-    # Reachable cubemaster, but the registered host_ip never matches.
-    curl() { printf '{"host_ip":"10.0.0.99"}\n'; }
+    # Reachable CubeOps, but the registered IP never matches.
+    curl() { printf '{"IP":"10.0.0.99"}\n'; }
     check_node_registration "10.0.0.10" "${MASTER_ADDR}"
   )"; then
-    fail "check_node_registration should die when host_ip never matches"
+    fail "check_node_registration should die when IP never matches"
   fi
-  assert_stdout_contains "${out}" "cubemaster node registration missing host_ip=10.0.0.10"
+  assert_stdout_contains "${out}" "CubeOps node registration missing IP=10.0.0.10"
 }
 
 test_quickcheck_node_registration_reports_unreachable_reason() {
@@ -674,9 +675,9 @@ test_quickcheck_node_registration_reports_unreachable_reason() {
     curl() { return 7; }
     check_node_registration "10.0.0.10" "${MASTER_ADDR}"
   )"; then
-    fail "check_node_registration should die when cubemaster is unreachable"
+    fail "check_node_registration should die when CubeOps is unreachable"
   fi
-  assert_stdout_contains "${out}" "failed to query cubemaster node registration for 10.0.0.10"
+  assert_stdout_contains "${out}" "failed to query CubeOps node registration for 10.0.0.10"
 }
 
 test_quickcheck_node_registration_succeeds_on_first_match() {
@@ -687,13 +688,13 @@ test_quickcheck_node_registration_succeeds_on_first_match() {
     QUICKCHECK_READY_TIMEOUT=30
     QUICKCHECK_READY_INTERVAL=1
     QUICKCHECK_DEADLINE=$(( $(date +%s) + 30 ))
-    curl() { printf '{"host_ip":"10.0.0.10"}\n'; }
+    curl() { printf '{"IP":"10.0.0.10"}\n'; }
     check_node_registration "10.0.0.10" "${MASTER_ADDR}"
-  ) || fail "check_node_registration should succeed when host_ip matches on the first attempt"
+  ) || fail "check_node_registration should succeed when IP matches on the first attempt"
 }
 
-test_quickcheck_node_registration_response_missing_host_ip_field() {
-  # When curl returns valid JSON without a host_ip field, the reason must
+test_quickcheck_node_registration_response_missing_ip_field() {
+  # When curl returns valid JSON without an IP field, the reason must
   # distinguish "unrecognized response" from "known format, wrong IP".
   local out
   if out="$(
@@ -707,9 +708,9 @@ test_quickcheck_node_registration_response_missing_host_ip_field() {
     curl() { printf '{"error":"not ready"}\n'; }
     check_node_registration "10.0.0.10" "${MASTER_ADDR}"
   )"; then
-    fail "check_node_registration should die when response lacks host_ip"
+    fail "check_node_registration should die when response lacks IP field"
   fi
-  assert_stdout_contains "${out}" "response missing host_ip field"
+  assert_stdout_contains "${out}" "CubeOps node registration response missing IP field for 10.0.0.10"
 }
 
 test_quickcheck_check_socket_retries_then_succeeds() {
@@ -905,6 +906,9 @@ test_postcheck_skips_when_external_host_set() {
   CUBE_EXTERNAL_REDIS_MASTER_NAME=mymaster \
     bash "${ONE_CLICK_DIR}/scripts/systemd/redis-postcheck.sh" \
     || fail "redis-postcheck must exit 0 when CUBE_EXTERNAL_REDIS_MASTER_NAME is set"
+  CUBE_SANDBOX_MINIO_ENABLED=0 \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/minio-postcheck.sh" \
+    || fail "minio-postcheck must exit 0 when CUBE_SANDBOX_MINIO_ENABLED=0"
 }
 
 test_external_redis_sentinel_wiring() {
@@ -925,8 +929,102 @@ test_external_redis_sentinel_wiring() {
 
   assert_contains "${env_example}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
   assert_contains "${env_example}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES"
+  assert_contains "${env_example}" "CUBE_S3_ENDPOINT"
+  assert_contains "${env_example}" "CUBE_SANDBOX_MINIO_ENABLED"
+  assert_contains "${env_example}" "CUBE_SANDBOX_MINIO_IMAGE"
+  assert_contains "${env_example}" "minio:RELEASE.2025-09-07T16-13-09Z"
+  assert_contains "${up_support}" "minio:RELEASE.2025-09-07T16-13-09Z"
+  assert_contains "${install_sh}" "fill_s3_from_local_minio"
+  assert_contains "${install_sh}" "local_minio_s3_endpoint"
+  assert_contains "${install_sh}" "check_minio_not_combined_with_user_s3"
+  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" "local_minio_s3_endpoint"
+  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" "s3_config_is_local_minio_fill"
+  assert_contains "${install_sh}" "compute role does not deploy MinIO"
+  if grep -A80 '^write_volume_s3_conf()' "${ONE_CLICK_DIR}/lib/common.sh" | grep -q 'CUBE_SANDBOX_MINIO_'; then
+    fail "write_volume_s3_conf must read only CUBE_S3_* (not CUBE_SANDBOX_MINIO_*)"
+  fi
+  # The S3 volume plugin is a Go binary (examples/volume/s3). These are static
+  # guards on the invariants that are easy to break by refactoring; the
+  # behavioural assertions live in the module's own Go unit tests.
+  local volume_s3_dir="${ONE_CLICK_DIR}/../../examples/volume/s3"
+  local volume_s3_main="${volume_s3_dir}/cmd/cube-volume-s3/main.go"
+  local volume_s3_api="${volume_s3_dir}/internal/s3api/client.go"
+  local volume_s3_mount="${volume_s3_dir}/internal/s3fsmnt/mount.go"
+  local volume_s3_lock="${volume_s3_dir}/internal/lockfile/lockfile.go"
+  local volume_s3_config="${volume_s3_dir}/internal/config/config.go"
+  assert_file "${volume_s3_main}"
+  assert_file "${volume_s3_api}"
+  assert_file "${volume_s3_mount}"
+  assert_file "${volume_s3_lock}"
+  assert_file "${volume_s3_config}"
+  assert_file "${volume_s3_dir}/go.mod"
+
+  # The control plane must not shell out to an S3 command line tool: dropping
+  # the AWS CLI dependency is the whole point of the Go rewrite.
+  if grep -rE 'exec\.Command\("aws"' "${volume_s3_dir}" --include='*.go' >/dev/null; then
+    fail "cube-volume-s3 must not exec the aws CLI; use the minio-go client"
+  fi
+
+  # One process per hook, so the attach/detach lock has to be a file lock. A
+  # sync.Mutex would silently stop serialising anything and let two sandboxes
+  # double-mount the same volume.
+  if ! grep -Fq 'syscall.Flock' "${volume_s3_lock}"; then
+    fail "lockfile must use syscall.Flock (binary plugins get one process per op)"
+  fi
+  # LOCK_EX only appears on the acquire path, so this catches an acquire that
+  # stops locking while Release still mentions Flock.
+  if ! grep -Fq 'syscall.LOCK_EX' "${volume_s3_lock}"; then
+    fail "lockfile must take an exclusive flock (syscall.LOCK_EX)"
+  fi
+  # Guard on the import rather than on "sync.Mutex", so the comment in
+  # lockfile.go explaining why a mutex is wrong does not trip this check.
+  if grep -rn '"sync"' "${volume_s3_dir}" --include='*.go' \
+      | grep -v '_test\.go' >/dev/null; then
+    fail "cube-volume-s3 must not import sync; attach/detach needs a cross-process flock"
+  fi
+  if ! grep -Fq 'lockfile.Acquire' "${volume_s3_main}"; then
+    fail "attach/detach must acquire the per-volume lock"
+  fi
+
+  # s3fs 1.91+ stats the trailing-slash directory object when mounting a subdir,
+  # so create must PUT "volumes/<id>/" (not a .keep file).
+  if ! grep -Fq 'return "volumes/" + volumeID + "/"' "${volume_s3_config}"; then
+    fail "VolumePrefix must be the trailing-slash directory object key"
+  fi
+  if ! grep -Fq 'config.VolumePrefix(volumeID)' "${volume_s3_api}"; then
+    fail "CreateVolumeDir must PUT the trailing-slash directory object"
+  fi
+  if grep -Fq -- '-ocompat_dir' "${volume_s3_mount}"; then
+    fail "s3fs mount must not hardcode -ocompat_dir (unknown on s3fs 1.90; create writes dir/ instead)"
+  fi
+
+  # Concurrent first creates race on MakeBucket; the loser must not fail.
+  if ! grep -Fq 'BucketAlreadyOwnedByYou' "${volume_s3_api}"; then
+    fail "EnsureBucket must treat BucketAlreadyOwnedByYou as success"
+  fi
+  if ! grep -Fq 'BucketAlreadyExists' "${volume_s3_api}"; then
+    fail "EnsureBucket must treat BucketAlreadyExists as success"
+  fi
+  # AWS rejects LocationConstraint for us-east-1 and R2 (region=auto) rejects it
+  # outright; minio-go omits it exactly when the location is us-east-1.
+  if ! grep -A12 '^func BucketCreateRegion' "${volume_s3_api}" | grep -Fq '"us-east-1", "auto"'; then
+    fail "BucketCreateRegion must map both us-east-1 and auto onto us-east-1"
+  fi
+  # destroy may only swallow not-found; anything else has to propagate so
+  # CubeMaster does not drop the volume record while objects remain.
+  if ! grep -A8 '^func IsNotFound' "${volume_s3_api}" | grep -Fq 'NoSuchBucket'; then
+    fail "IsNotFound must treat NoSuchBucket as already gone"
+  fi
+  if ! grep -A8 '^func IsNotFound' "${volume_s3_api}" | grep -Fq 'NoSuchKey'; then
+    fail "IsNotFound must treat NoSuchKey as already gone"
+  fi
   assert_contains "${postcheck}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
   assert_contains "${up_support}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
+  assert_contains "${up_support}" "CUBE_SANDBOX_MINIO_ENABLED"
+  assert_contains "${up_support}" "minio"
+  assert_contains "${up_support}" "SUPPORT_SERVICES:-mysql redis minio"
+  assert_contains "${up_support}" "do not run compose down"
+  assert_not_contains "${up_support}" "down --remove-orphans"
   assert_contains "${up_deps}" "CUBE_PROXY_REDIS_MASTER_NAME"
   assert_contains "${up_deps}" "CUBE_LCM_REDIS_MASTER_NAME"
   assert_contains "${up_deps}" "CUBE_PROXY_REDIS_SENTINEL_NODES"
@@ -987,6 +1085,7 @@ test_mask_external_dep_services_remove_then_mask() {
   # Both local dependency units are routed through the shared masking helper.
   assert_contains "${path}" "mask_local_dep_service cube-sandbox-mysql.service"
   assert_contains "${path}" "mask_local_dep_service cube-sandbox-redis.service"
+  assert_contains "${path}" "mask_local_dep_service cube-sandbox-minio.service"
   # Core fix: remove the installed regular file BEFORE masking, otherwise plain
   # `systemctl mask` fails to overlay its /dev/null symlink on an existing file.
   assert_contains "${path}" "rm -f \"\${unit_dir}/\${unit}\""
@@ -995,6 +1094,7 @@ test_mask_external_dep_services_remove_then_mask() {
   # follows so the new (un)masked state is picked up before the target starts.
   assert_contains "${path}" "systemctl unmask cube-sandbox-mysql.service"
   assert_contains "${path}" "systemctl unmask cube-sandbox-redis.service"
+  assert_contains "${path}" "systemctl unmask cube-sandbox-minio.service"
   assert_contains "${path}" "systemctl daemon-reload"
 }
 
@@ -1020,9 +1120,9 @@ test_quickcheck_timeout_clamped_to_max
 test_quickcheck_timeout_overflow_falls_back_to_default
 test_quickcheck_check_executable_behaviour
 test_quickcheck_bind_mount_file_uses_specific_message
-test_quickcheck_node_registration_prefers_missing_host_ip_reason
+test_quickcheck_node_registration_prefers_missing_ip_reason
 test_quickcheck_node_registration_reports_unreachable_reason
-test_quickcheck_node_registration_keeps_missing_host_ip_after_blip
+test_quickcheck_node_registration_keeps_missing_ip_after_blip
 test_quickcheck_container_ready_retries_transient_states
 test_quickcheck_container_ready_dies_on_terminal_status
 test_quickcheck_container_ready_bounded_by_overall_deadline
@@ -1031,7 +1131,7 @@ test_quickcheck_container_ready_accepts_healthy_status
 test_quickcheck_budget_is_shared_across_sequential_probes
 test_quickcheck_callers_do_not_wrap_in_retry_loop
 test_quickcheck_node_registration_succeeds_on_first_match
-test_quickcheck_node_registration_response_missing_host_ip_field
+test_quickcheck_node_registration_response_missing_ip_field
 test_quickcheck_check_socket_retries_then_succeeds
 test_quickcheck_check_http_retries_then_succeeds
 test_quickcheck_check_unit_active_dies_fast_on_failed_unit

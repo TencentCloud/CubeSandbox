@@ -152,15 +152,15 @@ func parseEndpoints(raw string) []string {
 }
 
 func (c *Client) Readyz(ctx context.Context) error {
-	return c.get(ctx, "/internal/meta/readyz")
+	return c.get(ctx, "/internal/v1/node-agent/readyz")
 }
 
 func (c *Client) RegisterNode(ctx context.Context, req *RegisterNodeRequest) error {
-	return c.post(ctx, "/internal/meta/nodes/register", req)
+	return c.post(ctx, "/internal/v1/node-agent/nodes/register", req)
 }
 
 func (c *Client) UpdateNodeStatus(ctx context.Context, nodeID string, req *UpdateNodeStatusRequest) error {
-	return c.post(ctx, "/internal/meta/nodes/"+nodeID+"/status", req)
+	return c.post(ctx, "/internal/v1/node-agent/nodes/"+nodeID+"/status", req)
 }
 
 func (c *Client) get(ctx context.Context, path string) error {

@@ -3,6 +3,7 @@
 
 # Go build artifacts
 CubeOps/bin/
+examples/volume/s3/bin/
 
 # Go workspace (local-only, do not commit)
 /go.work

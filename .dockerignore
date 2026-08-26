@@ -2,3 +2,9 @@
 !.dockerignore
 !docker/
 !docker/Dockerfile.builder
+!CubeS3lvol
+!CubeS3lvol/setup_dep.sh
+!CubeS3lvol/patches
+!CubeS3lvol/patches/**
+CubeS3lvol/deps
+CubeS3lvol/deps/**

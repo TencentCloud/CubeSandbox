@@ -14,6 +14,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/eventbus"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/registry"
 )
@@ -26,6 +27,11 @@ type fakeStore struct {
 	// element is non-empty, AcquireState seeds that state value into the
 	// map (simulating a peer holding the lock) and returns false.
 	preLocked map[string]string
+	// bus, when non-nil, receives every WriteState / ClearStateNotify
+	// event. This mirrors redisstream.Client.SetLocalBus in production.
+	bus      *eventbus.Bus
+	getCount int
+	afterGet func(int)
 }
 
 func newFakeStore() *fakeStore {
@@ -62,9 +68,49 @@ func (f *fakeStore) ClearState(_ context.Context, sid string) error {
 
 func (f *fakeStore) GetState(_ context.Context, sid string) (string, bool, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	v, ok := f.states[sid]
+	f.getCount++
+	count := f.getCount
+	afterGet := f.afterGet
+	f.mu.Unlock()
+	if afterGet != nil {
+		afterGet(count)
+	}
 	return v, ok, nil
+}
+
+// WriteState mirrors redisstream.Client.WriteState: it performs the state
+// mutation and, when a local bus is attached (see attachBus), fans out a
+// StateNotify to it.
+func (f *fakeStore) WriteState(_ context.Context, sid, state string, _ time.Duration) error {
+	f.mu.Lock()
+	f.states[sid] = state
+	bus := f.bus
+	f.mu.Unlock()
+	if bus != nil {
+		bus.Publish(sid)
+	}
+	return nil
+}
+
+func (f *fakeStore) ClearStateNotify(_ context.Context, sid string) error {
+	f.mu.Lock()
+	delete(f.states, sid)
+	bus := f.bus
+	f.mu.Unlock()
+	if bus != nil {
+		bus.Publish(sid)
+	}
+	return nil
+}
+
+// attachBus wires the fakeStore to a local eventbus.Bus so that state
+// writes fan out to any waiter registered on that bus. Mirrors what
+// redisstream.Client.SetLocalBus does in production.
+func (f *fakeStore) attachBus(b *eventbus.Bus) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bus = b
 }
 
 func (f *fakeStore) state(sid string) string {
@@ -439,6 +485,219 @@ func TestResumer_RunningStatePushRetriesAsynchronously(t *testing.T) {
 			push.mu.Unlock()
 			if got != tt.wantPushes {
 				t.Fatalf("got %d successful pushes, want %d", got, tt.wantPushes)
+			}
+		})
+	}
+}
+
+// newTestResumerWithBus is the eventbus-mode counterpart of newTestResumer.
+// It also attaches the bus to the fakeStore so WriteState / ClearStateNotify
+// calls fan out just like they do in production.
+func newTestResumerWithBus(reg *registry.Registry, store *fakeStore, master *fakeMaster, push *fakePush, bus *eventbus.Bus) *Resumer {
+	store.attachBus(bus)
+	return New(Options{
+		Registry:     reg,
+		Redis:        store,
+		CubeMaster:   master,
+		ProxyPush:    push,
+		StateLockTTL: 30 * time.Second,
+		Log:          zap.NewNop(),
+		EventBus:     bus,
+	})
+}
+
+func observeStoreGets(store *fakeStore) <-chan int {
+	ch := make(chan int, 16)
+	store.mu.Lock()
+	store.afterGet = func(count int) { ch <- count }
+	store.mu.Unlock()
+	return ch
+}
+
+func waitForGetCount(t *testing.T, ch <-chan int, want int) {
+	t.Helper()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case count := <-ch:
+			if count >= want {
+				return
+			}
+		case <-timer.C:
+			t.Fatalf("timed out waiting for GET count %d", want)
+		}
+	}
+}
+
+func TestResumer_EventBusWakesWaiterFast(t *testing.T) {
+	reg := registry.New()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
+	})
+	store := newFakeStore()
+	store.states["sbx"] = "resuming" // peer's in-flight lock
+
+	bus := eventbus.New()
+	master := &fakeMaster{}
+	push := &fakePush{}
+	r := newTestResumerWithBus(reg, store, master, push, bus)
+	gets := observeStoreGets(store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- r.Resume(ctx, "sbx") }()
+
+	// GET #1 observes the peer lock; GET #2 is waitForRunning's initial
+	// read after listener registration. Publish only after both occurred.
+	waitForGetCount(t, gets, 2)
+	_ = store.WriteState(context.Background(), "sbx", "running", time.Minute)
+
+	if err := <-result; err != nil {
+		t.Fatalf("waiter should have observed running via eventbus, got %v", err)
+	}
+	if got := atomic.LoadInt32(&master.calls); got != 0 {
+		t.Fatalf("waiter must not call master.Resume, got %d", got)
+	}
+}
+
+func TestResumer_EventBeforeWaitResolvedByGet(t *testing.T) {
+	reg := registry.New()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
+	})
+	store := newFakeStore()
+	store.states["sbx"] = "resuming"
+
+	bus := eventbus.New()
+	master := &fakeMaster{}
+	push := &fakePush{}
+	r := newTestResumerWithBus(reg, store, master, push, bus)
+
+	firstGetRead := make(chan struct{})
+	releaseFirstGet := make(chan struct{})
+	store.afterGet = func(count int) {
+		if count == 1 {
+			close(firstGetRead)
+			<-releaseFirstGet
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- r.Resume(ctx, "sbx") }()
+
+	<-firstGetRead
+	_ = store.SetState(context.Background(), "sbx", "running", time.Minute)
+	bus.Publish("sbx") // Wait has not registered yet; this hint is discarded.
+	close(releaseFirstGet)
+
+	if err := <-result; err != nil {
+		t.Fatalf("initial GET after Wait should have observed running, got %v", err)
+	}
+}
+
+func TestResumer_EventBusIgnoresStaleHint(t *testing.T) {
+	reg := registry.New()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
+	})
+	store := newFakeStore()
+	store.states["sbx"] = "resuming"
+
+	bus := eventbus.New()
+	// This event predates Wait and must not be replayed.
+	bus.Publish("sbx")
+
+	master := &fakeMaster{}
+	push := &fakePush{}
+	r := newTestResumerWithBus(reg, store, master, push, bus)
+	gets := observeStoreGets(store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- r.Resume(ctx, "sbx") }()
+
+	waitForGetCount(t, gets, 2)
+	bus.Publish("sbx") // stale/duplicate hint while Redis is still resuming
+	waitForGetCount(t, gets, 3)
+	select {
+	case err := <-result:
+		t.Fatalf("stale hint completed wait unexpectedly: %v", err)
+	default:
+	}
+
+	_ = store.WriteState(context.Background(), "sbx", "running", time.Minute)
+	if err := <-result; err != nil {
+		t.Fatalf("stale hint must not fail the current resume: %v", err)
+	}
+}
+
+// TestResumer_EventBusFallbackPolls confirms the Scenario 3 safety net:
+// when the notifier drops a message, the 100ms poll still converges.
+func TestResumer_EventBusFallbackPolls(t *testing.T) {
+	reg := registry.New()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
+	})
+	store := newFakeStore()
+	store.states["sbx"] = "resuming"
+
+	// Bus is provided but the peer flips state via SetState (bypassing the
+	// bus's Publish) — simulates a dropped notify.
+	bus := eventbus.New()
+	// Deliberately do NOT attach the bus to the store, so WriteState fanout
+	// wouldn't fire even if used.
+	master := &fakeMaster{}
+	push := &fakePush{}
+	r := New(Options{
+		Registry:     reg,
+		Redis:        store,
+		CubeMaster:   master,
+		ProxyPush:    push,
+		StateLockTTL: 30 * time.Second,
+		Log:          zap.NewNop(),
+		EventBus:     bus,
+	})
+	gets := observeStoreGets(store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- r.Resume(ctx, "sbx") }()
+
+	waitForGetCount(t, gets, 2)
+	_ = store.SetState(context.Background(), "sbx", "running", time.Minute)
+	waitForGetCount(t, gets, 3) // no hint: this read must come from fallback
+
+	if err := <-result; err != nil {
+		t.Fatalf("fallback poll should have observed running, got %v", err)
+	}
+}
+
+func TestClassifyState(t *testing.T) {
+	tests := []struct {
+		name    string
+		state   string
+		ok      bool
+		wantErr bool
+		done    bool
+	}{
+		{name: "running", state: "running", ok: true, done: true},
+		{name: "paused", state: "paused", ok: true, wantErr: true, done: true},
+		{name: "killed", state: lifecycle.StateKilled, ok: true, wantErr: true, done: true},
+		{name: "missing", ok: false, wantErr: true, done: true},
+		{name: "resuming", state: "resuming", ok: true},
+		{name: "pausing", state: "pausing", ok: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err, done := classifyState(tt.state, tt.ok)
+			if done != tt.done || (err != nil) != tt.wantErr {
+				t.Fatalf("classifyState(%q, %v) = (%v, %v)", tt.state, tt.ok, err, done)
 			}
 		})
 	}

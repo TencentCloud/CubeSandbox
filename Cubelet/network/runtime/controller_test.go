@@ -850,3 +850,265 @@ func TestLoadL7MarksConfig(t *testing.T) {
 		}
 	})
 }
+
+// registerActiveSandbox puts a controller into the state UpdateNetworkPolicy
+// requires: an in-memory managedState plus a committed success state file.
+func registerActiveSandbox(t *testing.T, c *NetworkController, sandboxID string, cfg *CubeNetworkConfig, dnsCIDRs []string) *managedState {
+	t.Helper()
+	state := &managedState{persistedState: persistedState{
+		SandboxID:         sandboxID,
+		NetworkHandle:     sandboxID,
+		TapName:           "tap-" + sandboxID,
+		TapIfIndex:        77,
+		SandboxIP:         "10.30.0.7",
+		CubeNetworkConfig: cfg,
+		DNSAllowOutCIDRs:  dnsCIDRs,
+	}}
+	if err := c.store.WriteTmp(&state.persistedState); err != nil {
+		t.Fatalf("WriteTmp: %v", err)
+	}
+	if err := c.store.CommitCreating(sandboxID); err != nil {
+		t.Fatalf("CommitCreating: %v", err)
+	}
+	if err := c.store.CommitSuccess(sandboxID); err != nil {
+		t.Fatalf("CommitSuccess: %v", err)
+	}
+	c.states[sandboxID] = state
+	return state
+}
+
+func TestUpdateNetworkPolicyAppliesAndPersists(t *testing.T) {
+	c := newCreateTestController(t, nil)
+	state := registerActiveSandbox(t, c, "sb-update", &CubeNetworkConfig{AllowOut: []string{"1.1.1.1/32"}}, nil)
+
+	newCfg := &CubeNetworkConfig{AllowOut: []string{"2.2.2.2/32"}}
+	if err := c.UpdateNetworkPolicy(context.Background(), &UpdateNetworkPolicyRequest{
+		SandboxID:         "sb-update",
+		CubeNetworkConfig: newCfg,
+	}); err != nil {
+		t.Fatalf("UpdateNetworkPolicy: %v", err)
+	}
+
+	adapter := c.cubevsAdapter.(*fakeCubeVSAdapter)
+	if len(adapter.updatedPolicies) != 1 {
+		t.Fatalf("CubeVS update calls=%d, want 1", len(adapter.updatedPolicies))
+	}
+	if got := adapter.updatedPolicies[0].ifindex; got != 77 {
+		t.Errorf("updated ifindex=%d, want 77", got)
+	}
+	if allow := adapter.updatedPolicies[0].opts.AllowOut; allow == nil || len(*allow) != 1 || (*allow)[0] != "2.2.2.2/32" {
+		t.Errorf("CubeVS got allow_out %v, want [2.2.2.2/32]", allow)
+	}
+
+	if len(state.CubeNetworkConfig.AllowOut) != 1 || state.CubeNetworkConfig.AllowOut[0] != "2.2.2.2/32" {
+		t.Errorf("in-memory state not updated: %v", state.CubeNetworkConfig.AllowOut)
+	}
+	persisted, err := c.store.Load("sb-update", StateFileSuccess)
+	if err != nil {
+		t.Fatalf("reload success state: %v", err)
+	}
+	if persisted.CubeNetworkConfig == nil || len(persisted.CubeNetworkConfig.AllowOut) != 1 ||
+		persisted.CubeNetworkConfig.AllowOut[0] != "2.2.2.2/32" {
+		t.Errorf("state file not rewritten: %+v", persisted.CubeNetworkConfig)
+	}
+}
+
+// TestUpdateNetworkPolicyRefoldsDNSResolvers guards the failure mode that would
+// break every domain rule: an update carries only user targets, so the resolver
+// CIDRs recorded at create must be folded back in.
+func TestUpdateNetworkPolicyRefoldsDNSResolvers(t *testing.T) {
+	c := newCreateTestController(t, nil)
+	registerActiveSandbox(t, c, "sb-dns", &CubeNetworkConfig{}, []string{"169.254.0.53/32"})
+
+	if err := c.UpdateNetworkPolicy(context.Background(), &UpdateNetworkPolicyRequest{
+		SandboxID:         "sb-dns",
+		CubeNetworkConfig: &CubeNetworkConfig{AllowOut: []string{"api.example.com"}},
+	}); err != nil {
+		t.Fatalf("UpdateNetworkPolicy: %v", err)
+	}
+
+	allow := c.cubevsAdapter.(*fakeCubeVSAdapter).updatedPolicies[0].opts.AllowOut
+	if allow == nil {
+		t.Fatal("CubeVS received no allow_out")
+	}
+	var sawResolver bool
+	for _, target := range *allow {
+		if target == "169.254.0.53/32" {
+			sawResolver = true
+		}
+	}
+	if !sawResolver {
+		t.Errorf("resolver CIDR dropped by update: %v, DNS would break", *allow)
+	}
+}
+
+// TestUpdateNetworkPolicyFallsBackToCallerResolvers covers the upgrade path: a
+// sandbox created before the runtime recorded its resolvers has them installed
+// but unidentifiable, so the caller's list is used instead of revoking DNS —
+// and persisted, so the fallback is needed at most once per sandbox.
+func TestUpdateNetworkPolicyFallsBackToCallerResolvers(t *testing.T) {
+	c := newCreateTestController(t, nil)
+	registerActiveSandbox(t, c, "sb-legacy", &CubeNetworkConfig{}, nil)
+
+	if err := c.UpdateNetworkPolicy(context.Background(), &UpdateNetworkPolicyRequest{
+		SandboxID:         "sb-legacy",
+		CubeNetworkConfig: &CubeNetworkConfig{AllowOut: []string{"api.example.com"}},
+		DNSAllowOutCIDRs:  []string{"169.254.0.53/32"},
+	}); err != nil {
+		t.Fatalf("UpdateNetworkPolicy: %v", err)
+	}
+
+	allow := *c.cubevsAdapter.(*fakeCubeVSAdapter).updatedPolicies[0].opts.AllowOut
+	var sawResolver bool
+	for _, target := range allow {
+		if target == "169.254.0.53/32" {
+			sawResolver = true
+		}
+	}
+	if !sawResolver {
+		t.Errorf("caller-supplied resolver was ignored for a legacy sandbox: %v", allow)
+	}
+
+	persisted, err := c.store.Load("sb-legacy", StateFileSuccess)
+	if err != nil {
+		t.Fatalf("reload success state: %v", err)
+	}
+	if len(persisted.DNSAllowOutCIDRs) != 1 || persisted.DNSAllowOutCIDRs[0] != "169.254.0.53/32" {
+		t.Errorf("resolver list not backfilled into state: %v", persisted.DNSAllowOutCIDRs)
+	}
+}
+
+// TestUpdateNetworkPolicyDropsResolversWithoutDomains is the other half of the
+// gate: once no rule needs DNS, the implicit resolver exception goes away too.
+// TestUpdateNetworkPolicyDropsResolversWithoutDomains checks the other half of
+// the resolver gate: an IP-only policy must not inherit DNS access.
+//
+// The bare-literal cases are the ones that matter. A DNS name-shape check
+// accepts "2.2.2.2" because digits are valid label characters, so gating on it
+// silently folded the resolver into every IP-only policy. Masked forms like
+// "2.2.2.2/32" happen to fail that check on the slash, which is why they cannot
+// stand in for this.
+func TestUpdateNetworkPolicyDropsResolversWithoutDomains(t *testing.T) {
+	l7Port := 443
+	for _, tc := range []struct {
+		name string
+		cfg  *CubeNetworkConfig
+	}{
+		{"bare IPv4", &CubeNetworkConfig{AllowOut: []string{"2.2.2.2"}}},
+		{"masked IPv4", &CubeNetworkConfig{AllowOut: []string{"2.2.2.2/32"}}},
+		{"subnet", &CubeNetworkConfig{AllowOut: []string{"203.0.113.0/24"}}},
+		{"bare IPv4 L7 host", &CubeNetworkConfig{Rules: []*EgressRule{{
+			Name: "ip-host",
+			Match: &EgressRuleMatch{
+				Host: stringPtr("2.2.2.2"), Port: &l7Port, Scheme: stringPtr("https"),
+			},
+			Action: &EgressRuleAction{Allow: true},
+		}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCreateTestController(t, nil)
+			registerActiveSandbox(t, c, "sb-nodns", &CubeNetworkConfig{}, []string{"169.254.0.53/32"})
+
+			if err := c.UpdateNetworkPolicy(context.Background(), &UpdateNetworkPolicyRequest{
+				SandboxID:         "sb-nodns",
+				CubeNetworkConfig: tc.cfg,
+			}); err != nil {
+				t.Fatalf("UpdateNetworkPolicy: %v", err)
+			}
+
+			// A rules-only policy leaves AllowOut unset, which is itself the
+			// expected outcome here.
+			allow := c.cubevsAdapter.(*fakeCubeVSAdapter).updatedPolicies[0].opts.AllowOut
+			if allow == nil {
+				return
+			}
+			for _, target := range *allow {
+				if target == "169.254.0.53/32" {
+					t.Errorf("resolver CIDR kept for an IP-only policy: %v", *allow)
+				}
+			}
+		})
+	}
+}
+
+// TestUpdateNetworkPolicyEmptyRulesDeletesEgressPolicy pins the empty-rule-set
+// fix: PutPolicy short-circuits on no rules, so clearing every L7 rule has to
+// go through DeletePolicy or the old rules keep intercepting.
+func TestUpdateNetworkPolicyEmptyRulesDeletesEgressPolicy(t *testing.T) {
+	c := newCreateTestController(t, nil)
+	registerActiveSandbox(t, c, "sb-clear", &CubeNetworkConfig{
+		Rules: []*EgressRule{{Name: "r1"}},
+	}, nil)
+
+	if err := c.UpdateNetworkPolicy(context.Background(), &UpdateNetworkPolicyRequest{
+		SandboxID:         "sb-clear",
+		CubeNetworkConfig: &CubeNetworkConfig{},
+	}); err != nil {
+		t.Fatalf("UpdateNetworkPolicy: %v", err)
+	}
+
+	egress := c.cubeEgressAdapter.(*fakeCubeEgressAdapter)
+	if egress.deleteCalls != 1 {
+		t.Errorf("DeletePolicy calls=%d, want 1", egress.deleteCalls)
+	}
+	if egress.putCalls != 0 {
+		t.Errorf("PutPolicy calls=%d, want 0 for an empty rule set", egress.putCalls)
+	}
+}
+
+// TestUpdateNetworkPolicyL7UntouchedSkipsCubeEgress pins that an L3-only update
+// never talks to CubeEgress. Otherwise a sandbox that has no L7 rules — and so
+// nothing installed on the proxy — would still fail its policy updates whenever
+// CubeEgress happens to be down.
+func TestUpdateNetworkPolicyL7UntouchedSkipsCubeEgress(t *testing.T) {
+	c := newCreateTestController(t, nil)
+	registerActiveSandbox(t, c, "sb-l3only", &CubeNetworkConfig{AllowOut: []string{"1.1.1.1/32"}}, nil)
+	egress := c.cubeEgressAdapter.(*fakeCubeEgressAdapter)
+	egress.deleteErr = errors.New("connection refused")
+
+	if err := c.UpdateNetworkPolicy(context.Background(), &UpdateNetworkPolicyRequest{
+		SandboxID:         "sb-l3only",
+		CubeNetworkConfig: &CubeNetworkConfig{AllowOut: []string{"2.2.2.2/32"}},
+	}); err != nil {
+		t.Fatalf("L3-only update failed because of CubeEgress: %v", err)
+	}
+	if egress.deleteCalls != 0 || egress.putCalls != 0 {
+		t.Errorf("CubeEgress was contacted for an L3-only update: delete=%d put=%d",
+			egress.deleteCalls, egress.putCalls)
+	}
+}
+
+func TestUpdateNetworkPolicyUnknownSandbox(t *testing.T) {
+	c := newCreateTestController(t, nil)
+	err := c.UpdateNetworkPolicy(context.Background(), &UpdateNetworkPolicyRequest{
+		SandboxID:         "sb-missing",
+		CubeNetworkConfig: &CubeNetworkConfig{},
+	})
+	if !errors.Is(err, ErrNetworkNotActive) {
+		t.Fatalf("err=%v, want ErrNetworkNotActive so callers can return a conflict", err)
+	}
+}
+
+// TestUpdateNetworkPolicyKeepsOldPolicyOnCubeVSFailure pins the no-rollback
+// contract's safe half: a failed update must not advance the durable state, so
+// a restart re-applies the policy the sandbox actually ran with.
+func TestUpdateNetworkPolicyKeepsOldPolicyOnCubeVSFailure(t *testing.T) {
+	c := newCreateTestController(t, nil)
+	registerActiveSandbox(t, c, "sb-fail", &CubeNetworkConfig{AllowOut: []string{"1.1.1.1/32"}}, nil)
+	c.cubevsAdapter.(*fakeCubeVSAdapter).updateTAPPolicyErr = errors.New("map update failed")
+
+	if err := c.UpdateNetworkPolicy(context.Background(), &UpdateNetworkPolicyRequest{
+		SandboxID:         "sb-fail",
+		CubeNetworkConfig: &CubeNetworkConfig{AllowOut: []string{"2.2.2.2/32"}},
+	}); err == nil {
+		t.Fatal("UpdateNetworkPolicy succeeded despite a CubeVS failure")
+	}
+
+	persisted, err := c.store.Load("sb-fail", StateFileSuccess)
+	if err != nil {
+		t.Fatalf("reload success state: %v", err)
+	}
+	if persisted.CubeNetworkConfig.AllowOut[0] != "1.1.1.1/32" {
+		t.Errorf("failed update was persisted: %v", persisted.CubeNetworkConfig.AllowOut)
+	}
+}

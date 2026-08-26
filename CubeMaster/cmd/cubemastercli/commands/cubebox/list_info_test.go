@@ -92,6 +92,24 @@ func TestBuildListRequestOldUsesQueryParameters(t *testing.T) {
 	}
 }
 
+func TestStatusWithPauseState(t *testing.T) {
+	cases := []struct {
+		status      int32
+		pauseStatus string
+		want        string
+	}{
+		{5, "", "paused"},
+		{5, "READY", "paused"},
+		{5, "DELETE_FAILED", "paused(delete_failed)"},
+		{1, "", "running"},
+	}
+	for _, tc := range cases {
+		if got := statusWithPauseState(tc.status, tc.pauseStatus); got != tc.want {
+			t.Fatalf("statusWithPauseState(%d, %q)=%q, want %q", tc.status, tc.pauseStatus, got, tc.want)
+		}
+	}
+}
+
 func TestBuildListSummaryAll(t *testing.T) {
 	req := &types.ListCubeSandboxReq{StartIdx: 1, Size: 2}
 	rsp := &types.ListCubeSandboxRes{

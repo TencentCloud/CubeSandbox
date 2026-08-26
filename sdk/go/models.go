@@ -22,15 +22,20 @@ type Sandbox struct {
 
 // SandboxInfo is returned by list and get-info endpoints.
 type SandboxInfo struct {
-	TemplateID   string            `json:"templateID"`
-	Alias        string            `json:"alias,omitempty"`
-	SandboxID    string            `json:"sandboxID"`
-	ClientID     string            `json:"clientID"`
-	StartedAt    time.Time         `json:"startedAt"`
-	EndAt        *time.Time        `json:"endAt,omitempty"`
-	EnvdVersion  string            `json:"envdVersion"`
-	Domain       string            `json:"domain,omitempty"`
-	CPUCount     int               `json:"cpuCount"`
+	TemplateID  string     `json:"templateID"`
+	Alias       string     `json:"alias,omitempty"`
+	SandboxID   string     `json:"sandboxID"`
+	ClientID    string     `json:"clientID"`
+	StartedAt   time.Time  `json:"startedAt"`
+	EndAt       *time.Time `json:"endAt,omitempty"`
+	EnvdVersion string     `json:"envdVersion"`
+	Domain      string     `json:"domain,omitempty"`
+	CPUCount    int        `json:"cpuCount"`
+	// CPUMilli is the exact CPU allocation in millicores (e.g. 500 for 0.5
+	// vCPU). It is nil when the server omits it; CPUCount truncates sub-core
+	// values to 0, so prefer CPUMilli for fractional CPU.
+	CPUMilli *int `json:"cpuMilli,omitempty"`
+	// MemoryMB is memory in MiB; the historical field name is retained.
 	MemoryMB     int               `json:"memoryMB"`
 	DiskSizeMB   *int              `json:"diskSizeMB,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
@@ -71,6 +76,23 @@ type CreateOptions struct {
 	// Path a clean absolute path inside the sandbox.
 	VolumeMounts []VolumeMount
 	Extra        map[string]any
+}
+
+// UpdateNetworkOptions is the desired egress policy for Sandbox.UpdateNetwork.
+//
+// It embeds NetworkOptions and carries AllowInternetAccess alongside it rather
+// than beside it, mirroring E2B's SandboxNetworkUpdate so code written against
+// either SDK works unchanged. CreateOptions keeps the flag as a sibling of
+// Network because E2B's create draws the same line.
+//
+// The whole struct is the desired state, not a patch: a zero-valued field is
+// cleared rather than left as it was. AllowInternetAccess is presence-based —
+// nil is not the same as pointing at true.
+type UpdateNetworkOptions struct {
+	NetworkOptions
+	// AllowInternetAccess gates traffic outside the allow list; nil leaves the
+	// field off the request entirely, so the server applies its default.
+	AllowInternetAccess *bool
 }
 
 // DurationPtr returns a pointer to d. It is a convenience for optional

@@ -171,7 +171,7 @@ volume_plugins:
 
 说明：
 
-- `name: cos` 即 API/SDK 里的 **`driver`**；`Volume.create("x")` 省略 driver 时，使用列表**第一项**插件。
+- `name: cos` 即 API/SDK 里的 **`driver`**。默认安装现以 `s3` 为第一项，所以 `Volume.create("x")` 省略 driver 时会走 S3——**用 COS 请显式传 `driver="cos"`**。
 - 仅配置 binary 时，上面一段即可；不要重复添加同名 `cos`。
 
 保存后**先不要重启**，与 Cubelet 一起重启（[§5](#5-重启服务并确认加载成功)）。
@@ -277,7 +277,7 @@ export CUBE_PROXY_NODE_IP=<cubeproxy-或-cubelet-节点-ip>
 from cubesandbox import Sandbox, Volume
 
 # ① 创建 Volume（COS 上出现 volumes/<id>/.keep）
-vol = Volume.create("my-data")          # driver 省略 → 使用 conf 里第一项 cos
+vol = Volume.create("my-data", driver="cos")   # cos 已非默认 driver，需显式指定
 print("volume_id:", vol.volume_id)
 
 # ② 创建沙箱并挂载
@@ -353,7 +353,7 @@ python3 verify_volume.py
 | `no plugin registered for driver "cos"` | Cubelet 未配同名插件或未重启 |
 | 沙箱创建失败 / attach 报错 | Cubelet 日志搜 `[plugin_volume]`、`cosfs`；确认 cosfs、FUSE、`volume-cos.conf` |
 | SDK 写文件失败 | 是否设置 `CUBE_PROXY_NODE_IP`；CubeAPI / 模板是否 READY |
-| `Volume.create` 无 driver 但不是 cos | `volume_plugins` **列表顺序**：第一项才是默认 driver |
+| `Volume.create` 无 driver 但不是 cos | 默认 driver 现为 `s3`（`volume_plugins` 第一项）；用 COS 请显式传 `driver="cos"` |
 
 更多见 [框架指南 §8 故障排查](../../../docs/zh/guide/volume-plugin.md#调试与排障)。
 

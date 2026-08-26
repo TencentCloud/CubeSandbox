@@ -289,6 +289,7 @@ func initCubeVS(cfg Config, device *systemnet.HostDevice, cubeDev *systemnet.Cub
 		CubeRouterIfindex:   cubeRouterIfindex,
 		NodeIfindex:         uint32(device.Index),
 		NodeIP:              device.IP,
+		NodeIPMask:          device.IPMask,
 		NodeMacAddr:         device.Mac,
 		NodeGatewayMacAddr:  device.GatewayMac,
 	}
@@ -306,6 +307,15 @@ func initCubeVS(cfg Config, device *systemnet.HostDevice, cubeDev *systemnet.Cub
 	}
 	if err := os.WriteFile("/proc/sys/net/ipv4/ip_local_port_range", []byte("10000\t19999"), 0644); err != nil {
 		return nil, fmt.Errorf("set ip_local_port_range failed: %w", err)
+	}
+	// Direct mode (no cube-router): the datapath resolves on-link neighbors via
+	// fib and reports into direct_neigh; this scanner drives the kernel's
+	// neighbor learning so fib resolves them. Route-aware mode does not attach
+	// the direct on-link path, so there is nothing to scan.
+	if params.EgressRedirectFlags == 0 {
+		if err := cubevs.StartDirectNeighScanner(params.NodeIP); err != nil {
+			return nil, fmt.Errorf("start direct neighbor scanner failed: %w", err)
+		}
 	}
 	return cubeRouter, nil
 }
@@ -511,6 +521,70 @@ func (s *NetworkController) EnsureNetwork(ctx context.Context, req *EnsureNetwor
 	return state.ensureResponse(), nil
 }
 
+// UpdateNetworkPolicy replaces the egress policy of a running sandbox.
+//
+// Step order is the contract, not an implementation detail:
+//
+//  1. CubeEgress before CubeVS. Whichever way the rule set moves the transient
+//     state errs towards more interception: a new rule is installed before
+//     anything is steered at it, and a removed rule is gone before the datapath
+//     stops steering, so leftover traffic meets the proxy's default deny.
+//  2. CubeVS second, which also bumps the policy generation and so is the point
+//     where established flows start being re-evaluated.
+//  3. Persist last. A crash before this replays the previous policy on restart
+//     — the safe direction, since the caller was never told it succeeded.
+//
+// There is no rollback. The CubeVS diff is computed from the live maps, so
+// replaying the same request converges.
+func (s *NetworkController) UpdateNetworkPolicy(ctx context.Context, req *UpdateNetworkPolicyRequest) error {
+	if req == nil || req.SandboxID == "" {
+		return fmt.Errorf("sandboxID is required")
+	}
+	unlock := func() {}
+	if s.locks != nil {
+		unlock = s.locks.Lock(req.SandboxID)
+	}
+	defer unlock()
+
+	s.mu.Lock()
+	state, ok := s.states[req.SandboxID]
+	s.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("%w: sandbox %q", ErrNetworkNotActive, req.SandboxID)
+	}
+
+	CubeLog.WithContext(ctx).Infof(
+		"network runtime UpdateNetworkPolicy request: sandbox_id=%s sandbox_ip=%s cube_network_config=%s",
+		req.SandboxID, state.SandboxIP, formatCubeNetworkConfig(req.CubeNetworkConfig),
+	)
+
+	// A sandbox created before the runtime recorded its resolvers has them in
+	// its installed AllowOut but nowhere we can identify them, so fall back to
+	// the caller's list rather than silently revoking DNS. Persisting it below
+	// means each sandbox needs the fallback at most once.
+	resolverCIDRs := state.DNSAllowOutCIDRs
+	if len(resolverCIDRs) == 0 {
+		resolverCIDRs = req.DNSAllowOutCIDRs
+	}
+	cfg := withDNSResolverAllowOut(cloneCubeNetworkConfig(req.CubeNetworkConfig), resolverCIDRs)
+	if err := s.syncEgressPolicy(ctx, state, cfg); err != nil {
+		return fmt.Errorf("sync CubeEgress policy for sandbox %s: %w", req.SandboxID, err)
+	}
+	if err := s.updateCubeVSTapPolicy(state.TapIfIndex, req.SandboxID, cfg); err != nil {
+		return fmt.Errorf("update CubeVS policy for sandbox %s: %w", req.SandboxID, err)
+	}
+
+	s.mu.Lock()
+	state.CubeNetworkConfig = cfg
+	state.DNSAllowOutCIDRs = resolverCIDRs
+	s.mu.Unlock()
+
+	if err := s.store.RewriteSuccess(&state.persistedState); err != nil {
+		return fmt.Errorf("persist network policy for sandbox %s: %w", req.SandboxID, err)
+	}
+	return nil
+}
+
 // createState builds the network for a sandbox. It does NOT hold s.mu across
 // the heavy work: the global mutex is only taken briefly inside acquireTap /
 // releaseAcquiredTap / cleanupConflictingTap to mutate the in-memory pools and
@@ -568,6 +642,7 @@ func (s *NetworkController) createState(ctx context.Context, req *EnsureNetworkR
 			ARPNeighbors:      slices.Clone(req.ARPNeighbors),
 			PortMappings:      actualMappings,
 			CubeNetworkConfig: cloneCubeNetworkConfig(req.CubeNetworkConfig),
+			DNSAllowOutCIDRs:  slices.Clone(req.DNSAllowOutCIDRs),
 			PersistMetadata:   s.persistMetadata(req.PersistMetadata, tap.Name, tap.IP.String()),
 		},
 		tap: tap,

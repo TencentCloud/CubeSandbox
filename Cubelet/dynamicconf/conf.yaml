@@ -46,5 +46,8 @@ host:
     image_expiration_time: "24h"
 
 meta_server_config:
-  meta_server_endpoint: "127.0.0.1:8089"
+  # Endpoints are injected by the installer (one-click / prepare-compute-role)
+  # or helm at deploy time. Defaults live in pkg/config/config.go (single-node).
+  meta_server_endpoint: ""
+  cubemaster_http_addr: ""
   node_status_max_images: 40000

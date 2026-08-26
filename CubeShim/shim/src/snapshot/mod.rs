@@ -428,16 +428,42 @@ impl Snapshot {
         }
         let path = Path::new(self.path.as_str());
         if path.exists() {
-            if self.force {
-                fs::remove_dir_all(path)
-                    .map_err(|e| format!("Failed to clean path:{}, err:{}", CUBE_SYS_PATH, e))?;
-            } else {
+            if !self.force {
                 return Err(format!("Paht:{} exist", &self.path));
             }
+            // Clear contents in place. S3 mounts metadata/ as a volume;
+            // remove_dir_all on the mount point returns EBUSY (os error 16).
+            if path.is_dir() {
+                clear_dir_contents(path)?;
+            } else {
+                fs::remove_file(path)
+                    .map_err(|e| format!("Failed to clean path:{}, err:{}", path.display(), e))?;
+                fs::create_dir_all(path)
+                    .map_err(|e| format!("Failed to create path:{}, err:{}", path.display(), e))?;
+            }
+        } else {
+            fs::create_dir_all(path)
+                .map_err(|e| format!("Failed to create path:{}, err:{}", path.display(), e))?;
         }
-        fs::create_dir_all(path)
-            .map_err(|e| format!("Failed to create path:{}, err:{}", CUBE_SYS_PATH, e))?;
 
         Ok(())
     }
+}
+
+fn clear_dir_contents(path: &Path) -> CResult<()> {
+    for entry in fs::read_dir(path)
+        .map_err(|e| format!("Failed to read path:{}, err:{}", path.display(), e))?
+    {
+        let entry =
+            entry.map_err(|e| format!("Failed to read path:{}, err:{}", path.display(), e))?;
+        let child = entry.path();
+        if child.is_dir() {
+            fs::remove_dir_all(&child)
+                .map_err(|e| format!("Failed to clean path:{}, err:{}", child.display(), e))?;
+        } else {
+            fs::remove_file(&child)
+                .map_err(|e| format!("Failed to clean path:{}, err:{}", child.display(), e))?;
+        }
+    }
+    Ok(())
 }

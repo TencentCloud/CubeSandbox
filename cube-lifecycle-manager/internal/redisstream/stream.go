@@ -20,15 +20,48 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 )
 
+// notifyPublishTimeout bounds the best-effort Redis PUBLISH. It is detached
+// from the caller context so a cancelled request cannot drop the hint.
+const notifyPublishTimeout = 500 * time.Millisecond
+
 // Client wraps a go-redis client with lifecycle-shaped methods.
 type Client struct {
 	rdb redis.UniversalClient
 	log *zap.Logger
+
+	// notifyEnabled toggles the Pub/Sub companion emitted alongside every
+	// terminal state write. Off by default so a rollout can enable the
+	// subscriber side first; flipped on via SetNotifyEnabled(true) from
+	// main once Config.EventBusEnabled is true.
+	notifyEnabled bool
+	// localBus, when non-nil, receives every StateNotify locally before it
+	// hits Redis. Same-replica waiters wake without a Pub/Sub round-trip.
+	// Nil is legal and simply means "publish to Redis only".
+	localBus localPublisher
+}
+
+// localPublisher is the subset of eventbus.Bus we need. Kept as an
+// interface here so redisstream does not import eventbus and create a
+// dependency cycle (eventbus already imports lifecycle; main.go stitches
+// the two together).
+type localPublisher interface {
+	Publish(sandboxID string)
 }
 
 func New(rdb redis.UniversalClient, log *zap.Logger) *Client {
 	return &Client{rdb: rdb, log: log}
 }
+
+// SetNotifyEnabled toggles the Pub/Sub publish that accompanies WriteState /
+// ClearStateNotify. When disabled, those methods behave exactly like the
+// legacy SetState / ClearState. Safe to call at startup only.
+func (c *Client) SetNotifyEnabled(on bool) { c.notifyEnabled = on }
+
+// SetLocalBus wires a same-process fan-out that receives every StateNotify
+// synchronously alongside the Redis PUBLISH. Same-replica waiters can
+// therefore be woken with zero Redis round-trip. Passing nil disables the
+// local fan-out. Safe to call at startup only.
+func (c *Client) SetLocalBus(bus localPublisher) { c.localBus = bus }
 
 // Bootstrap returns every sandbox in cube:v1:shared:sandbox:lifecycle:meta.
 // Empty result is fine — it just means CubeMaster hasn't published anything yet.
@@ -168,6 +201,67 @@ func (c *Client) GetState(ctx context.Context, sandboxID string) (string, bool, 
 		return "", false, err
 	}
 	return v, true, nil
+}
+
+// WriteState performs SetState and, when notifications are enabled,
+// publishes a best-effort wakeup hint. Redis remains the source of truth.
+//
+// Failures on the notify path are logged, not returned: the durable Redis
+// write is the source of truth. Waiters degrade to fallback polling and
+// still converge.
+func (c *Client) WriteState(ctx context.Context, sandboxID, state string, ttl time.Duration) error {
+	if err := c.SetState(ctx, sandboxID, state, ttl); err != nil {
+		return err
+	}
+	c.publishNotify(sandboxID)
+	return nil
+}
+
+// ClearStateNotify is the ClearState + Pub/Sub companion used on rollback.
+func (c *Client) ClearStateNotify(ctx context.Context, sandboxID string) error {
+	if err := c.ClearState(ctx, sandboxID); err != nil {
+		return err
+	}
+	c.publishNotify(sandboxID)
+	return nil
+}
+
+// publishNotify fans a hint out locally and over Redis Pub/Sub. It never
+// returns an error: any notify failure degrades to fallback polling.
+func (c *Client) publishNotify(sandboxID string) {
+	if !c.notifyEnabled {
+		return
+	}
+
+	// Local fan-out first: same-replica waiters wake immediately, even if
+	// the Redis PUBLISH below is slow or the caller context is already done.
+	if c.localBus != nil {
+		c.localBus.Publish(sandboxID)
+	}
+
+	payload, err := json.Marshal(lifecycle.StateNotify{SandboxID: sandboxID})
+	if err != nil {
+		// Should never happen — StateNotify is a plain struct.
+		c.log.Warn("state notify marshal failed",
+			zap.String("sandbox_id", sandboxID), zap.Error(err))
+		return
+	}
+
+	// Detach from the caller context and run off the owner path: a cancelled
+	// request must not drop the hint, and resume/pause/kill must not wait
+	// on the extra Redis RTT. Waiters still converge via fallback polling.
+	go c.publishNotifyRedis(sandboxID, payload)
+}
+
+func (c *Client) publishNotifyRedis(sandboxID string, payload []byte) {
+	ctx, cancel := context.WithTimeout(context.Background(), notifyPublishTimeout)
+	defer cancel()
+	if err := c.rdb.Publish(ctx, lifecycle.EventChannel, payload).Err(); err != nil {
+		c.log.Warn("state notify publish failed",
+			zap.String("sandbox_id", sandboxID),
+			zap.String("channel", lifecycle.EventChannel),
+			zap.Error(err))
+	}
 }
 
 func decodeEvent(msg redis.XMessage) *Event {

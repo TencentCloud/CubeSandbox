@@ -22,7 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"gorm.io/gorm"
 )
 
@@ -38,9 +38,20 @@ type local struct {
 
 	sortedNodesByClusters map[string]node.NodeList
 	totalSelfNodes        int64
+
+	// emptySyncStreak counts consecutive empty CubeOps responses before eviction.
+	emptySyncStreak atomic.Int32
 }
 
-var l = &local{}
+// The node/image stores exist from package load so nodemeta query APIs
+// (GetNodeHostFacts / GetPersistedNodeHostFacts) are fail-closed before
+// localcache.Init, matching the pre-migration global.nodes empty map.
+var l = &local{
+	cache:                 cache.New(0, 0),
+	imageCache:            cache.New(0, 0),
+	templateNodeCache:     cache.New(0, 0),
+	sortedNodesByClusters: make(map[string]node.NodeList),
+}
 
 func (l *local) loopSelfNodes(ctx context.Context) {
 	loadNum := func() int64 {
@@ -97,8 +108,8 @@ func (l *local) loop(ctx context.Context) {
 					checkDeadline = time.Now().Add(config.GetConfig().Common.SyncMetaDataInterval)
 				}()
 
-				if err := l.syncAllFromDB(true); err != nil {
-					CubeLog.WithContext(context.Background()).Errorf("loop_all:%s", err)
+				if err := l.syncAllFromDB(ctx, true); err != nil {
+					CubeLog.WithContext(ctx).Errorf("loop_all:%s", err)
 				}
 				if log.IsDebug() {
 					nodes := GetNodes(-1)
@@ -123,9 +134,16 @@ func (l *local) dealEvent(ctx context.Context) {
 				if e == nil {
 					return
 				}
+				if externalNodeLoader != nil {
+					// CubeOps mode: node data is authoritative from cubeops_loader
+					// (full sync every SyncMetaDataInterval). Ignore local DB
+					// events to avoid dual-source conflict.
+					CubeLog.WithContext(ctx).Debugf("dealEvent: ignored in CubeOps mode: type=%v ids=%v", e.Type, e.InsIDs)
+					return
+				}
 				if DEL == e.Type {
 					for _, nodeID := range e.InsIDs {
-						l.delNodeCache(&node.Node{
+						l.delNodeCache(ctx, &node.Node{
 							InsID: nodeID,
 						})
 						CubeLog.WithContext(context.Background()).Warnf("Host delete:%v", nodeID)
@@ -160,18 +178,18 @@ func (l *local) dealEvent(ctx context.Context) {
 	}
 }
 
-func (l *local) checkDirty(allFromDb map[string]struct{}) {
-	if len(allFromDb) == 0 {
-		CubeLog.WithContext(context.Background()).Warnf("checkDirty allFromDb is empty")
-		return
-	}
+// checkDirty removes cached nodes absent from allFromDb. quiet skips the
+// per-node "is dirty" ERROR for expected bulk evictions.
+func (l *local) checkDirty(ctx context.Context, allFromDb map[string]struct{}, quiet bool) {
 	elems := l.cache.Items()
 	for _, v := range elems {
 		h, ok := v.Object.(*node.Node)
 		if ok {
 			if _, ok := allFromDb[h.InsID]; !ok {
-				CubeLog.WithContext(context.Background()).Errorf("node %s is dirty", h.InsID)
-				l.delNodeCache(h)
+				if !quiet {
+					CubeLog.WithContext(context.Background()).Errorf("node %s is dirty", h.InsID)
+				}
+				l.delNodeCache(ctx, h)
 			}
 		}
 	}
@@ -186,10 +204,15 @@ func (l *local) addNodeCache(n *node.Node) {
 	l.appendSortedNodes(n)
 }
 
-func (l *local) delNodeCache(n *node.Node) {
+func (l *local) delNodeCache(ctx context.Context, n *node.Node) {
 	if n == nil {
 		CubeLog.WithContext(context.Background()).Warnf("node is nil")
 		return
+	}
+	// Clean template locality: empty list deregisters all replicas.
+	SyncNodeTemplates(ctx, n.ID(), nil)
+	if l.templateNodeCache != nil {
+		l.templateNodeCache.Delete(n.ID())
 	}
 	l.cache.Delete(n.ID())
 	l.delSortedNodes(n)
@@ -327,6 +350,7 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 		old.NodeLabels = labels
 		old.InvalidateLabelsCache()
 		old.SetSchedulingDisabled(n.SchedulingDisabled())
+		old.Versions = n.Versions
 		l.lockMetaData.Unlock()
 
 		l.updateSortedNodes(old)

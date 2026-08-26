@@ -49,6 +49,22 @@ func TestValidateRedisEmpty(t *testing.T) {
 	assert.Contains(t, err.Error(), "CUBE_LCM_REDIS_ADDR")
 }
 
+func TestEventBusEnabledDefaultAndKillSwitch(t *testing.T) {
+	assert.True(t, Default().EventBusEnabled)
+
+	t.Setenv("CUBE_LCM_EVENTBUS_ENABLED", "false")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.False(t, cfg.EventBusEnabled)
+}
+
+func TestEventBusEnabledRejectsInvalidValue(t *testing.T) {
+	t.Setenv("CUBE_LCM_EVENTBUS_ENABLED", "disable")
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CUBE_LCM_EVENTBUS_ENABLED")
+}
+
 func TestParseSentinelAddrs(t *testing.T) {
 	assert.Equal(t, []string{"10.0.0.11:26379", "10.0.0.12:26379"}, parseSentinelAddrs("10.0.0.11, 10.0.0.12"))
 	assert.Equal(t, []string{"10.0.0.11:26379", "10.0.0.12:26380"}, parseSentinelAddrs("10.0.0.11:26379,10.0.0.12:26380"))

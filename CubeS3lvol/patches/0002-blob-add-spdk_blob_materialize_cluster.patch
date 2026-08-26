@@ -1,0 +1,291 @@
+From a239eb030e2f16350c195f1e9cfb23a5c344ae41 Mon Sep 17 00:00:00 2001
+From: Changpeng Liu <changpeliu@tencent.com>
+Date: Mon, 10 Aug 2026 20:26:14 +0800
+Subject: [PATCH 2/3] blob: add spdk_blob_materialize_cluster()
+
+Allocates one cluster of a thin-provisioned blob and fills it from the blob's
+backing device, exactly as a write to that cluster would. It is the
+single-cluster form of what spdk_bs_inflate_blob() already does to every cluster
+in turn: the loop body of bs_inflate_blob_touch_next(), reachable on its own.
+
+The gap it fills is for a backing device whose contents the caller can describe.
+An external snapshot backed by an object store knows which of its ranges hold
+data and which are holes, and wants to copy out only the former. Today the only
+way to stop reading such a parent is spdk_bs_inflate_blob(), and for an esnap
+clone that is an all-or-nothing operation with two effects the caller did not
+ask for: bs_cluster_needs_allocation() reports every cluster of an esnap clone as
+needing allocation, so the work is proportional to the provisioned size rather
+than to the data, and the blob comes out thick. A 16 TiB volume holding 10 GiB
+costs 16.7 million cluster allocations and all 16 TiB of free space, to stop
+depending on 10 GiB.
+
+With this, a caller materialises the clusters its metadata says are worth
+materialising and leaves the rest as holes. The blob stays thin provisioned and
+keeps its parent; only the named cluster changes.
+
+Two properties worth stating because callers depend on them:
+
+  - An already-allocated cluster is success without work, so a loop over
+    clusters is resumable after a restart -- it skips whatever the previous run
+    finished, at the cost of one array lookup each.
+
+  - It cannot lose a concurrent writer's data. Both allocations proceed, the
+    loser's metadata insert fails with -EEXIST, and blob_insert_cluster_cpl()
+    frees its cluster and re-executes the queued operation against the surviving
+    one. Note this is why the copy is expressed as a queued user operation rather
+    than as a direct read/write pair by the caller: a read-modify-write from
+    outside would have no such protection and could write back data that a writer
+    replaced in between.
+
+  - Success means the cluster is allocated and holds the parent's bytes. Worth
+    stating because it is not free: the operation handed to
+    bs_allocate_and_copy_cluster() is a zero-length read, and that function also
+    queues an operation -- doing nothing else with it -- when an allocation for
+    some *other* cluster is already in flight on the channel. Re-executing a
+    zero-length read copies nothing and reports 0. A write would have re-driven
+    the allocation, since writing to an unallocated cluster must allocate; a read
+    never does, because a read of an unallocated cluster is served by the parent.
+    So the completion checks whether the cluster actually arrived and offers it
+    again if it did not, bounded by a retry count that only decreases while
+    another allocation is in flight. Two blobs materialised from one thread share
+    a channel -- a channel is per thread per blobstore -- and without this they
+    lose nearly every cluster to it, silently.
+
+Nothing existing is touched: the new function only calls what the inflate path
+calls. blob_ut passes unchanged (500 tests).
+
+Signed-off-by: Changpeng Liu <changpeliu@tencent.com>
+Assisted-by: CodeBuddy
+---
+ include/spdk/blob.h    |  33 ++++++++
+ lib/blob/blobstore.c   | 157 +++++++++++++++++++++++++++++++++++++++++
+ lib/blob/spdk_blob.map |   1 +
+ 3 files changed, 191 insertions(+)
+
+diff --git a/include/spdk/blob.h b/include/spdk/blob.h
+index fc61ca2c8..1f146e6f4 100644
+--- a/include/spdk/blob.h
++++ b/include/spdk/blob.h
+@@ -831,6 +831,39 @@ void spdk_bs_inflate_blob(struct spdk_blob_store *bs, struct spdk_io_channel *ch
+ void spdk_bs_blob_decouple_parent(struct spdk_blob_store *bs, struct spdk_io_channel *channel,
+ 				  spdk_blob_id blobid, spdk_blob_op_complete cb_fn, void *cb_arg);
+ 
++/**
++ * Allocate one cluster of a thin-provisioned blob and fill it from the blob's
++ * backing device, as a write to that cluster would.
++ *
++ * This is the single-cluster form of what spdk_bs_inflate_blob() does to every
++ * cluster in turn. It exists for callers that know which clusters are worth
++ * materialising -- typically because their backing device is described by
++ * metadata the caller holds -- and that do not want the other two effects of an
++ * inflate: allocating the clusters the parent has nothing in, and turning the
++ * blob thick. The blob stays thin-provisioned and keeps its parent; only the one
++ * cluster changes.
++ *
++ * A cluster that is already allocated is reported as success without doing any
++ * work, which makes a materialisation loop resumable: re-running it after a
++ * restart skips what the previous run finished.
++ *
++ * Concurrent writes to the same cluster are safe. Both allocations go ahead and
++ * the loser's metadata insert fails with -EEXIST, on which blobstore frees its
++ * own cluster and re-executes the queued operation against the surviving one. No
++ * data is lost either way, and in particular this call cannot overwrite data a
++ * writer put there: it copies from the backing device only into a cluster that
++ * was not allocated when it started.
++ *
++ * \param blob Blob to materialise a cluster of. Must be thin-provisioned and
++ * writable (md_ro false).
++ * \param channel IO channel to do the copy on.
++ * \param cluster Cluster index within the blob.
++ * \param cb_fn Called when the operation is complete.
++ * \param cb_arg Argument passed to function cb_fn.
++ */
++void spdk_blob_materialize_cluster(struct spdk_blob *blob, struct spdk_io_channel *channel,
++				   uint64_t cluster, spdk_blob_op_complete cb_fn, void *cb_arg);
++
+ /**
+  * Perform a shallow copy of a blob to a blobstore device.
+  *
+diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
+index 61d20f435..5b27ced43 100644
+--- a/lib/blob/blobstore.c
++++ b/lib/blob/blobstore.c
+@@ -7352,6 +7352,163 @@ spdk_bs_blob_decouple_parent(struct spdk_blob_store *bs, struct spdk_io_channel
+ }
+ /* END spdk_bs_inflate_blob */
+ 
++/* START spdk_blob_materialize_cluster */
++
++struct materialize_cluster_ctx {
++	struct spdk_blob	*blob;
++	struct spdk_io_channel	*channel;
++	uint64_t		 cluster;
++	uint64_t		 attempts;
++	spdk_blob_op_complete	 cb_fn;
++	void			*cb_arg;
++};
++
++/* An attempt is only spent when another allocation on the same channel was in
++ * flight, and each of those completes, so this bounds a pathological case and not
++ * an ordinary wait. Reaching it is reported rather than retried forever, because a
++ * caller stuck here has no way to tell that from progress. */
++#define MATERIALIZE_CLUSTER_MAX_ATTEMPTS 100000
++
++static void materialize_cluster_attempt(void *arg);
++
++static void
++materialize_cluster_cpl(void *cb_arg, int bserrno)
++{
++	struct materialize_cluster_ctx *ctx = cb_arg;
++
++	if (bserrno == 0 && ctx->blob->active.clusters[ctx->cluster] == 0) {
++		/* Success was reported without the cluster being there, which happens
++		 * when bs_allocate_and_copy_cluster() found an allocation already in
++		 * flight on this channel: it queues the user operation and re-executes
++		 * it once that allocation finishes. Re-executing a write re-drives the
++		 * allocation, because a write to an unallocated cluster has to; the
++		 * zero-length read used below cannot, since blob_request_submit_op()
++		 * completes a zero-length operation immediately and a read of an
++		 * unallocated cluster is served by the parent anyway. So the operation
++		 * comes back successful having copied nothing, and the only way to
++		 * honour what this function promises is to offer the cluster again.
++		 *
++		 * Left to itself this is silent data loss for the one caller that
++		 * matters -- something copying a parent out cluster by cluster before
++		 * cutting the tie to it -- and it needs two allocating writers on one
++		 * channel to happen at all, so it does not show up in a single-threaded
++		 * test. */
++		if (ctx->attempts < MATERIALIZE_CLUSTER_MAX_ATTEMPTS) {
++			/* Through the thread rather than inline: this runs from the
++			 * completion of another cluster's allocation, and the queue that
++			 * was lost to is drained by that same completion, so a direct
++			 * call could lose the race again on a stack that keeps growing. */
++			spdk_thread_send_msg(spdk_io_channel_get_thread(ctx->channel),
++					     materialize_cluster_attempt, ctx);
++			return;
++		}
++
++		SPDK_ERRLOG("blob 0x%" PRIx64 ": cluster %" PRIu64 " was not materialised "
++			    "in %" PRIu64 " attempts\n", ctx->blob->id, ctx->cluster,
++			    ctx->attempts);
++		bserrno = -EAGAIN;
++	}
++
++	ctx->cb_fn(ctx->cb_arg, bserrno);
++	free(ctx);
++}
++
++static void
++materialize_cluster_attempt(void *arg)
++{
++	struct materialize_cluster_ctx *ctx = arg;
++	struct spdk_blob *blob = ctx->blob;
++	struct spdk_bs_cpl cpl;
++	spdk_bs_user_op_t *op;
++	uint64_t io_unit;
++
++	if (blob->active.clusters[ctx->cluster] != 0) {
++		/* In place now, whoever put it there. That is all that was asked. */
++		ctx->cb_fn(ctx->cb_arg, 0);
++		free(ctx);
++		return;
++	}
++
++	ctx->attempts++;
++
++	/* The cluster number is turned into an io unit offset rather than an LBA:
++	 * bs_allocate_and_copy_cluster() turns its argument back into a cluster with
++	 * bs_io_unit_to_cluster_number(), so anything else would misaddress the
++	 * cluster whenever an io unit is not the device's block. */
++	io_unit = ctx->cluster * bs_io_units_per_cluster(blob);
++
++	/* A zero-length read stands in for the write that would normally trigger the
++	 * copy. bs_allocate_and_copy_cluster() needs an operation to queue and to
++	 * re-execute once the cluster is in place; this one has nothing left to do by
++	 * then, which is the point -- and the reason materialize_cluster_cpl() has to
++	 * check whether the cluster really did arrive. */
++	cpl.type = SPDK_BS_CPL_TYPE_BLOB_BASIC;
++	cpl.u.blob_basic.cb_fn = materialize_cluster_cpl;
++	cpl.u.blob_basic.cb_arg = ctx;
++
++	op = bs_user_op_alloc(ctx->channel, &cpl, SPDK_BLOB_READ, blob, NULL, 0, io_unit, 0);
++	if (!op) {
++		ctx->cb_fn(ctx->cb_arg, -ENOMEM);
++		free(ctx);
++		return;
++	}
++
++	bs_allocate_and_copy_cluster(blob, ctx->channel, io_unit, op);
++}
++
++void
++spdk_blob_materialize_cluster(struct spdk_blob *blob, struct spdk_io_channel *channel,
++			      uint64_t cluster, spdk_blob_op_complete cb_fn, void *cb_arg)
++{
++	struct materialize_cluster_ctx *ctx;
++
++	assert(blob != NULL);
++	assert(cb_fn != NULL);
++
++	if (blob->md_ro) {
++		SPDK_ERRLOG("blob 0x%" PRIx64 ": metadata is read only\n", blob->id);
++		cb_fn(cb_arg, -EPERM);
++		return;
++	}
++
++	if (cluster >= blob->active.num_clusters) {
++		SPDK_ERRLOG("blob 0x%" PRIx64 ": cluster %" PRIu64 " is past the end\n",
++			    blob->id, cluster);
++		cb_fn(cb_arg, -EINVAL);
++		return;
++	}
++
++	if (!spdk_blob_is_thin_provisioned(blob)) {
++		/* Every cluster is allocated already, so there is nothing this could
++		 * mean. Reported rather than silently succeeding, because a caller
++		 * asking for this has the wrong blob. */
++		SPDK_ERRLOG("blob 0x%" PRIx64 ": not thin provisioned\n", blob->id);
++		cb_fn(cb_arg, -EINVAL);
++		return;
++	}
++
++	if (blob->active.clusters[cluster] != 0) {
++		cb_fn(cb_arg, 0);
++		return;
++	}
++
++	ctx = calloc(1, sizeof(*ctx));
++	if (!ctx) {
++		cb_fn(cb_arg, -ENOMEM);
++		return;
++	}
++
++	ctx->blob = blob;
++	ctx->channel = channel;
++	ctx->cluster = cluster;
++	ctx->cb_fn = cb_fn;
++	ctx->cb_arg = cb_arg;
++
++	materialize_cluster_attempt(ctx);
++}
++
++/* END spdk_blob_materialize_cluster */
++
+ /* START spdk_bs_blob_shallow_copy */
+ 
+ struct shallow_copy_ctx {
+diff --git a/lib/blob/spdk_blob.map b/lib/blob/spdk_blob.map
+index 09886f49d..7cbb0fd74 100644
+--- a/lib/blob/spdk_blob.map
++++ b/lib/blob/spdk_blob.map
+@@ -41,6 +41,7 @@
+ 	spdk_bs_delete_blob;
+ 	spdk_bs_inflate_blob;
+ 	spdk_bs_blob_decouple_parent;
++	spdk_blob_materialize_cluster;
+ 	spdk_bs_blob_shallow_copy;
+ 	spdk_bs_blob_set_parent;
+ 	spdk_bs_blob_set_external_parent;
+-- 
+2.43.5
+

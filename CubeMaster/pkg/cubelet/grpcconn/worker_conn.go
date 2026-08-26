@@ -7,6 +7,7 @@ package grpcconn
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -58,6 +59,9 @@ func (wc *workerGrpcConnPool) checkWorkerConn() {
 }
 
 func GetWorkerConn(ctx context.Context, addr string) (grpcpool.Conn, error) {
+	if connPool == nil {
+		return nil, fmt.Errorf("worker grpc conn pool is not initialized")
+	}
 	key := constants.GetUA(ctx) + "+" + addr
 	cp, ok := connPool.cache.Load(key)
 	if ok && cp != nil {

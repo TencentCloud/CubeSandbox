@@ -240,6 +240,21 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		ExtInfo:   map[string][]byte{},
 	}
 
+	if b := strings.TrimSpace(req.GetBackend()); b != "" {
+		if req.Annotations == nil {
+			req.Annotations = map[string]string{}
+		}
+		if strings.TrimSpace(req.Annotations[constants.MasterAnnotationStorageBackend]) == "" {
+			req.Annotations[constants.MasterAnnotationStorageBackend] = b
+		}
+	}
+	// Cross-node restore: the disk describing what to run is not on this
+	// node yet, and the reads below expect it.
+	if err := prepareCrossNodeRestore(ctx, req); err != nil {
+		rsp.Ret.RetMsg = err.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_CreateStorageFailed
+		return rsp, nil
+	}
 	// Pause Resume: Master sends a thin Create (ids only); expand containers /
 	// volumes / annotations from sandbox_spec.json packed in the pause snap.
 	if err := expandPauseSnapshotPackage(req); err != nil {
@@ -743,7 +758,13 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 		}
 	}
 	if rsp.Ret.RetCode == errorcode.ErrorCode_Success && pauseSnapToGC != "" {
-		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, pauseSnapToGC)
+		backend, _ := storageBackendFromAnnotations(req.GetAnnotations())
+		if sb != nil {
+			if b := pauseCatalogBackend(sb); b != "" {
+				backend = b
+			}
+		}
+		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, pauseSnapToGC, cleanupBackendForPauseSnap(backend, pauseSnapToGC))
 	}
 	return rsp, nil
 }

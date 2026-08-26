@@ -87,6 +87,56 @@ func TestBuildPauseSandboxSpecIncludesNetworkRecreateFields(t *testing.T) {
 	assert.Equal(t, "10.0.0.0/8", sb.CubeNetworkConfig.AllowOut[0])
 }
 
+// Expanding a Resume replaces the whole request with the packed spec, which
+// knows nothing about where this restore reads its storage from. Losing
+// remote_uuids sends the rootfs path down the clone branch, and cross-node
+// there is no snapshot on this node to clone from.
+func TestPauseRestoreBindingSurvivesPackedSpecSwap(t *testing.T) {
+	thin := &cubebox.RunCubeSandboxRequest{
+		RequestID: "req-1",
+		Backend:   "s3",
+		Annotations: map[string]string{
+			constants.MasterAnnotationDesiredSandboxID:    "sb-1",
+			constants.MasterAnnotationSnapshotRemoteUUIDs: `{"rootfs":"r1","memory":"m1","metadata":"d1"}`,
+			constants.MasterAnnotationSnapshotCrossNode:   "true",
+		},
+	}
+	binding := pauseRestoreBindingFrom(thin, "snap-1", "s3")
+
+	packed := &cubebox.RunCubeSandboxRequest{
+		Containers:  []*cubebox.ContainerConfig{{Id: "c1", Name: "main"}},
+		Annotations: map[string]string{"kept": "yes"},
+	}
+	req := &cubebox.RunCubeSandboxRequest{}
+	*req = *packed
+	binding.applyTo(req)
+
+	assert.Equal(t, "yes", req.Annotations["kept"])
+	assert.Equal(t, "req-1", req.RequestID)
+	assert.Equal(t, "sb-1", req.Annotations[constants.MasterAnnotationDesiredSandboxID])
+	assert.Equal(t, "snap-1", req.Annotations[constants.MasterAnnotationPauseSnapshotID])
+	assert.Equal(t, "snap-1", req.Annotations[constants.MasterAnnotationRuntimeSnapshotID])
+	assert.Equal(t, "s3", req.Annotations[constants.MasterAnnotationStorageBackend])
+	assert.Equal(t, "s3", req.Backend)
+	assert.Equal(t, `{"rootfs":"r1","memory":"m1","metadata":"d1"}`,
+		req.Annotations[constants.MasterAnnotationSnapshotRemoteUUIDs])
+	assert.Equal(t, "true", req.Annotations[constants.MasterAnnotationSnapshotCrossNode])
+	assert.NotEmpty(t, req.Annotations[constants.MasterAnnotationRuntimeSnapshotAttachedAt])
+}
+
+// A same-node Resume must not come out looking cross-node, or the rootfs
+// path would attach the package instead of cloning it.
+func TestPauseRestoreBindingKeepsSameNodeResumeLocal(t *testing.T) {
+	thin := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{
+			constants.MasterAnnotationSnapshotRemoteUUIDs: `{"rootfs":"r1"}`,
+		},
+	}
+	req := &cubebox.RunCubeSandboxRequest{}
+	pauseRestoreBindingFrom(thin, "snap-1", "s3").applyTo(req)
+	assert.Empty(t, req.Annotations[constants.MasterAnnotationSnapshotCrossNode])
+}
+
 func TestMergeThinNetworkFieldsOntoPackedPauseSpec(t *testing.T) {
 	allow := false
 	thin := &cubebox.RunCubeSandboxRequest{

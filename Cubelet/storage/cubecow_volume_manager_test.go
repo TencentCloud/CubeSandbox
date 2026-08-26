@@ -12,33 +12,57 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
 type fakeCowEngine struct {
-	createVolumePath          string
-	createVolumeErr           error
-	createVolumes             []string
-	createVolumeSizes         map[string]uint64
-	createSnapshots           [][2]string
-	createSnapshotActivations []bool
-	createSnapshotPath        string
-	createSnapshotErr         error
-	activatePaths             map[string]string
-	activatedVolumes          []string
-	deactivatedVolumes        []string
-	activateErr               error
-	deactivateErr             error
-	volumeInfos               map[string]*cubecow.Volume
-	listSnapshots             map[string][]cubecow.Snapshot
-	listSnapshotsErr          error
-	deletedVolumes            []string
-	deletedSnapshots          []string
-	deleteVolumeErr           error
-	deleteSnapshotErr         error
-	resizeErr                 error
-	resizedVolumes            map[string]uint64
-	metrics                   map[string]uint64
-	metricsErr                error
+	createVolumePath            string
+	createVolumeErr             error
+	createVolumes               []string
+	createVolumeSizes           map[string]uint64
+	createSnapshots             [][2]string
+	createSnapshotActivations   []bool
+	createSnapshotPath          string
+	createSnapshotErr           error
+	createVolumeFromSnapshots   [][2]string
+	createVolumeFromSnapshotErr error
+	activatePaths               map[string]string
+	activatedVolumes            []string
+	deactivatedVolumes          []string
+	activateErr                 error
+	deactivateErr               error
+	volumeInfos                 map[string]*cubecow.Volume
+	listSnapshots               map[string][]cubecow.Snapshot
+	listSnapshotsErr            error
+	deletedVolumes              []string
+	deletedSnapshots            []string
+	deleteVolumeErr             error
+	deleteSnapshotErr           error
+	deleteErrByName             map[string]error
+	resizeErr                   error
+	resizedVolumes              map[string]uint64
+	metrics                     map[string]uint64
+	metricsErr                  error
+	exportSnapshots             []string
+	exportUUIDPrefix            string
+	exportErr                   error
+	importedLvols               [][2]string
+	importErr                   error
+}
+
+// ImportLvol makes the fake a cowVolumeImporter: cross-node create imports
+// each disk under the sandbox's own name.
+func (f *fakeCowEngine) ImportLvol(name, remoteUUID string) (string, error) {
+	f.importedLvols = append(f.importedLvols, [2]string{name, remoteUUID})
+	if f.importErr != nil {
+		return "", f.importErr
+	}
+	path := "/dev/mapper/" + name
+	if f.volumeInfos == nil {
+		f.volumeInfos = map[string]*cubecow.Volume{}
+	}
+	f.volumeInfos[name] = &cubecow.Volume{DevicePath: path, SizeBytes: 8 << 20}
+	return path, nil
 }
 
 func (f *fakeCowEngine) CreateVolume(name string, sizeBytes uint64) (string, error) {
@@ -58,10 +82,57 @@ func (f *fakeCowEngine) CreateVolume(name string, sizeBytes uint64) (string, err
 	return f.createVolumePath, f.createVolumeErr
 }
 
-func (f *fakeCowEngine) CreateSnapshot(sourceName, snapshotName string, activate bool) (string, error) {
+func (f *fakeCowEngine) CreateSnapshotFromVolume(sourceName, snapshotName string, activate bool) (string, error) {
 	f.createSnapshots = append(f.createSnapshots, [2]string{sourceName, snapshotName})
 	f.createSnapshotActivations = append(f.createSnapshotActivations, activate)
-	return f.createSnapshotPath, f.createSnapshotErr
+	if f.createSnapshotErr != nil {
+		return f.createSnapshotPath, f.createSnapshotErr
+	}
+	path := f.createSnapshotPath
+	// activate=false may return an empty path (template rootfs commit);
+	// only invent a mapper path when activation was requested.
+	if path == "" && activate {
+		path = "/dev/mapper/" + snapshotName
+	}
+	if f.volumeInfos == nil {
+		f.volumeInfos = map[string]*cubecow.Volume{}
+	}
+	if _, ok := f.volumeInfos[snapshotName]; !ok {
+		f.volumeInfos[snapshotName] = &cubecow.Volume{DevicePath: path, SizeBytes: 8 << 20}
+	}
+	if f.listSnapshots == nil {
+		f.listSnapshots = map[string][]cubecow.Snapshot{}
+	}
+	f.listSnapshots[sourceName] = append(f.listSnapshots[sourceName], cubecow.Snapshot{
+		Name:         snapshotName,
+		OriginVolume: sourceName,
+		DevicePath:   path,
+	})
+	return path, nil
+}
+
+func (f *fakeCowEngine) CreateVolumeFromSnapshot(sourceSnapshot, volumeName string) (string, error) {
+	f.createVolumes = append(f.createVolumes, volumeName)
+	if f.createVolumeFromSnapshots == nil {
+		f.createVolumeFromSnapshots = [][2]string{}
+	}
+	f.createVolumeFromSnapshots = append(f.createVolumeFromSnapshots, [2]string{sourceSnapshot, volumeName})
+	if f.createVolumeFromSnapshotErr != nil {
+		return "", f.createVolumeFromSnapshotErr
+	}
+	path := f.createVolumePath
+	if path == "" {
+		path = "/dev/mapper/" + volumeName
+	}
+	if f.volumeInfos == nil {
+		f.volumeInfos = map[string]*cubecow.Volume{}
+	}
+	size := uint64(8 << 20)
+	if src := f.volumeInfos[sourceSnapshot]; src != nil && src.SizeBytes > 0 {
+		size = src.SizeBytes
+	}
+	f.volumeInfos[volumeName] = &cubecow.Volume{DevicePath: path, SizeBytes: size}
+	return path, nil
 }
 
 func (f *fakeCowEngine) ActivateVolume(name string) (string, error) {
@@ -70,8 +141,10 @@ func (f *fakeCowEngine) ActivateVolume(name string) (string, error) {
 		return "", f.activateErr
 	}
 	path := "/dev/mapper/" + name
-	if f.activatePaths != nil && f.activatePaths[name] != "" {
-		path = f.activatePaths[name]
+	if f.activatePaths != nil {
+		if p, ok := f.activatePaths[name]; ok {
+			path = p
+		}
 	}
 	if f.volumeInfos == nil {
 		f.volumeInfos = map[string]*cubecow.Volume{}
@@ -98,11 +171,17 @@ func (f *fakeCowEngine) DeactivateVolume(name string) error {
 
 func (f *fakeCowEngine) DeleteVolume(name string) error {
 	f.deletedVolumes = append(f.deletedVolumes, name)
+	if err, ok := f.deleteErrByName[name]; ok {
+		return err
+	}
 	return f.deleteVolumeErr
 }
 
 func (f *fakeCowEngine) DeleteSnapshot(name string) error {
 	f.deletedSnapshots = append(f.deletedSnapshots, name)
+	if err, ok := f.deleteErrByName[name]; ok {
+		return err
+	}
 	return f.deleteSnapshotErr
 }
 
@@ -151,6 +230,18 @@ func (f *fakeCowEngine) GetMetrics() (map[string]uint64, error) {
 		return map[string]uint64{}, nil
 	}
 	return f.metrics, nil
+}
+
+func (f *fakeCowEngine) ExportSnapshot(name string) (string, error) {
+	f.exportSnapshots = append(f.exportSnapshots, name)
+	if f.exportErr != nil {
+		return "", f.exportErr
+	}
+	prefix := f.exportUUIDPrefix
+	if prefix == "" {
+		prefix = "export-"
+	}
+	return prefix + name, nil
 }
 
 func stubInitDefaultMediumDevice(t *testing.T, fn func(string) error) {
@@ -324,6 +415,63 @@ func TestCreateMemoryVolumeUsesVolumeKind(t *testing.T) {
 	assert.Equal(t, "tpl-snap-memory", volume.VolumeName)
 	assert.Equal(t, cowKindVolume, volume.Kind)
 	assert.Equal(t, "/dev/mapper/tpl-snap-memory", volume.FilePath)
+}
+
+func TestCloneSandboxMemory(t *testing.T) {
+	source := "tpl-snap-pause-memory-snap"
+	dest := SandboxMemoryName("sb1")
+	stores := []struct {
+		name string
+		new  func(*fakeCowEngine) cow.Store
+	}{
+		{"xfs", func(e *fakeCowEngine) cow.Store { return &XfsCow{engine: e} }},
+		{"s3", func(e *fakeCowEngine) cow.Store { return &S3Cow{engine: e} }},
+	}
+	for _, tc := range stores {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := &fakeCowEngine{}
+			store := tc.new(engine)
+			volume, err := store.CloneSandboxMemory(context.Background(), "sb1", source)
+			require.NoError(t, err)
+			require.NotNil(t, volume)
+			assert.Equal(t, dest, volume.VolumeName)
+			assert.Equal(t, cowKindVolume, volume.Kind)
+			assert.Equal(t, [][2]string{{source, dest}}, engine.createVolumeFromSnapshots)
+			assert.NotEmpty(t, volume.FilePath)
+		})
+		t.Run(tc.name+"/already exists", func(t *testing.T) {
+			engine := &fakeCowEngine{
+				createVolumeFromSnapshotErr: &cubecow.CowError{Code: cubecow.SemAlreadyExists, RawRC: int32(cubecow.SemAlreadyExists)},
+				volumeInfos:                 map[string]*cubecow.Volume{dest: {}},
+				activatePaths:               map[string]string{dest: "/dev/mapper/" + dest},
+			}
+			store := tc.new(engine)
+			volume, err := store.CloneSandboxMemory(context.Background(), "sb1", source)
+			require.NoError(t, err)
+			require.Equal(t, dest, volume.VolumeName)
+			assert.Equal(t, cowKindVolume, volume.Kind)
+			assert.Equal(t, "/dev/mapper/"+dest, volume.FilePath)
+		})
+		t.Run(tc.name+"/empty ids", func(t *testing.T) {
+			store := tc.new(&fakeCowEngine{})
+			_, err := store.CloneSandboxMemory(context.Background(), "", source)
+			require.Error(t, err)
+			_, err = store.CloneSandboxMemory(context.Background(), "sb1", "")
+			require.Error(t, err)
+		})
+		t.Run(tc.name+"/volume source", func(t *testing.T) {
+			volSrc := "tpl-snap-pause-memory"
+			engine := &fakeCowEngine{}
+			store := tc.new(engine)
+			volume, err := store.CloneSandboxMemory(context.Background(), "sb1", volSrc)
+			require.NoError(t, err)
+			require.Equal(t, dest, volume.VolumeName)
+			assert.Equal(t, cowKindVolume, volume.Kind)
+			assert.Equal(t, [][2]string{{volSrc, dest}}, engine.createVolumeFromSnapshots)
+			assert.Empty(t, engine.createSnapshots)
+			assert.Empty(t, engine.deletedSnapshots)
+		})
+	}
 }
 
 func TestTemplateArtifactsRejectAlreadyExists(t *testing.T) {

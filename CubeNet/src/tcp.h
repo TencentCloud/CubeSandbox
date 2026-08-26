@@ -338,10 +338,12 @@ static __always_inline bool create_new_sessions(struct __sk_buff *skb,
 						struct session_key *ekey,
 						__u64 now_ns, __u32 vm_ifindex,
 						struct snat_ip *snat_ip, __u16 snat_port,
-						__u8 packet_class, __u8 l7_scheme)
+						__u8 packet_class, __u8 l7_scheme,
+						__u32 policy_version)
 {
 	return create_nat_session(skb, ekey, now_ns, vm_ifindex, snat_ip, snat_port,
-				  TCP_CONNTRACK_SYN_SENT, packet_class, l7_scheme);
+				  TCP_CONNTRACK_SYN_SENT, packet_class, l7_scheme,
+				  policy_version);
 }
 
 #endif /* __TCP_H */

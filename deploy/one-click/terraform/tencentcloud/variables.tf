@@ -356,14 +356,9 @@ variable "cube_api_replicas" {
 }
 
 variable "cube_ops_replicas" {
-  description = "cube-ops Deployment replica count"
+  description = "cube-ops Deployment replica count. Node state lives in shared MySQL/Redis, so replicas may scale beyond 1."
   type        = number
-  default     = 1
-
-  validation {
-    condition     = var.cube_ops_replicas >= 1 && floor(var.cube_ops_replicas) == var.cube_ops_replicas
-    error_message = "cube_ops_replicas must be an integer >= 1."
-  }
+  default     = 2
 }
 
 variable "cube_proxy_replicas" {

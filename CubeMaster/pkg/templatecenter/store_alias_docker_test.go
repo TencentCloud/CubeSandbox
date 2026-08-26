@@ -42,17 +42,26 @@ func runAliasStoreCases(t *testing.T, db *gorm.DB) {
 	t.Run("GetByAliasExcludesSnapshots", func(t *testing.T) {
 		testGetByAliasExcludesSnapshots(t, db)
 	})
-	t.Run("ConcurrentCreateRedoIsMutex", func(t *testing.T) {
-		testConcurrentCreateRedoIsMutex(t, db)
+	t.Run("NewerBuildTransfersAlias", func(t *testing.T) {
+		testNewerBuildTransfersAlias(t, db)
 	})
-	t.Run("CreateRedoDoesNotStealReadyHolder", func(t *testing.T) {
-		testCreateRedoDoesNotStealReadyHolder(t, db)
+	t.Run("OlderBuildCannotReclaimAlias", func(t *testing.T) {
+		testOlderBuildCannotReclaimAlias(t, db)
 	})
-	t.Run("IdempotentReclaimOwnAlias", func(t *testing.T) {
-		testIdempotentReclaimOwnAlias(t, db)
+	t.Run("ConcurrentBuildClaimsConvergeToNewer", func(t *testing.T) {
+		testConcurrentBuildClaimsConvergeToNewer(t, db)
 	})
-	t.Run("FailedHolderOccupiesAliasKey", func(t *testing.T) {
-		testFailedHolderOccupiesAliasKey(t, db)
+	t.Run("UnorderedBuildDoesNotStealAlias", func(t *testing.T) {
+		testUnorderedBuildDoesNotStealAlias(t, db)
+	})
+	t.Run("BuildClaimsAliasFromDeletingHolderWithoutJob", func(t *testing.T) {
+		testBuildClaimsAliasFromDeletingHolderWithoutJob(t, db)
+	})
+	t.Run("BuildClearsDeletingHolderJobAlias", func(t *testing.T) {
+		testBuildClearsDeletingHolderJobAlias(t, db)
+	})
+	t.Run("PublishStatusClaimsTrimmedAlias", func(t *testing.T) {
+		testPublishStatusClaimsTrimmedAlias(t, db)
 	})
 	t.Run("SetAliasSyncsCreateRedoLeavesOthers", func(t *testing.T) {
 		testSetAliasSyncsCreateRedoLeavesOthers(t, db)
@@ -142,126 +151,220 @@ func testGetByAliasExcludesSnapshots(t *testing.T, db *gorm.DB) {
 		"a snapshot's alias must NOT resolve; got err=%v", err)
 }
 
-func testConcurrentCreateRedoIsMutex(t *testing.T, db *gorm.DB) {
-	suf := aliasCaseSuffix()
-	tplA := "tpl-conc-a-" + suf
-	tplB := "tpl-conc-b-" + suf
-	alias := "alias-conc-" + suf
-	insertReadyTemplate(t, db, tplA, "")
-	insertReadyTemplate(t, db, tplB, "")
-	cleanupTemplatesAndJobs(t, db, []string{tplA, tplB}, nil)
-
-	type result struct{ err error }
-	resCh := make(chan result, 2)
-	for _, id := range []string{tplA, tplB} {
-		go func(templateID string) {
-			resCh <- result{err: claimTemplateAlias(context.Background(), templateID, alias, false)}
-		}(id)
-	}
-	r1, r2 := <-resCh, <-resCh
-
-	successes, duplicates := 0, 0
-	for _, r := range []result{r1, r2} {
-		if r.err == nil {
-			successes++
-			continue
-		}
-		assert.True(t, isDuplicateAliasError(r.err),
-			"if a claim fails it must be a duplicate-key error; got: %v", r.err)
-		duplicates++
-	}
-	assert.Equal(t, 1, successes, "exactly one claim must succeed")
-	assert.Equal(t, 1, duplicates, "the loser must see a duplicate-key error")
-
-	got, err := GetTemplateByAlias(context.Background(), alias)
-	require.NoError(t, err)
-	assert.True(t, got.TemplateID == tplA || got.TemplateID == tplB,
-		"alias must resolve to one of the two templates; got %s", got.TemplateID)
-
-	otherID := tplA
-	if got.TemplateID == tplA {
-		otherID = tplB
-	}
-	otherDef, err := GetDefinition(context.Background(), otherID)
-	require.NoError(t, err)
-	assert.Empty(t, otherDef.DisplayName,
-		"the non-owning template's display_name must be empty; got %q", otherDef.DisplayName)
+func insertCreateJob(t *testing.T, db *gorm.DB, templateID, jobID, alias string) {
+	t.Helper()
+	insertImageJob(t, db, &models.TemplateImageJob{
+		JobID:       jobID,
+		TemplateID:  templateID,
+		RequestID:   "req-" + jobID,
+		Operation:   JobOperationCreate,
+		Status:      JobStatusReady,
+		RequestJSON: `{"alias":"` + alias + `"}`,
+	})
 }
 
-func testCreateRedoDoesNotStealReadyHolder(t *testing.T, db *gorm.DB) {
+func testNewerBuildTransfersAlias(t *testing.T, db *gorm.DB) {
 	suf := aliasCaseSuffix()
-	tplReady := "tpl-ready-" + suf
-	tplNew := "tpl-new-" + suf
-	alias := "alias-steal-" + suf
-	insertReadyTemplate(t, db, tplReady, alias)
-	insertReadyTemplate(t, db, tplNew, "")
-	cleanupTemplatesAndJobs(t, db, []string{tplReady, tplNew}, nil)
+	oldTemplateID := "tpl-ordered-old-" + suf
+	newTemplateID := "tpl-ordered-new-" + suf
+	oldJobID := "job-ordered-old-" + suf
+	newJobID := "job-ordered-new-" + suf
+	alias := "alias-ordered-" + suf
+	insertReadyTemplate(t, db, oldTemplateID, alias)
+	insertTemplate(t, db, newTemplateID, StatusPending, "")
+	insertCreateJob(t, db, oldTemplateID, oldJobID, alias)
+	insertImageJob(t, db, &models.TemplateImageJob{
+		JobID:       newJobID,
+		TemplateID:  newTemplateID,
+		RequestID:   "req-" + newJobID,
+		Operation:   JobOperationCreate,
+		Status:      JobStatusRunning,
+		RequestJSON: `{"alias":"` + alias + `"}`,
+	})
+	cleanupTemplatesAndJobs(t, db, []string{oldTemplateID, newTemplateID}, []string{oldJobID, newJobID})
 
-	err := claimTemplateAlias(context.Background(), tplNew, alias, false)
-	require.Error(t, err)
-	assert.True(t, isDuplicateAliasError(err), "create/redo collision must be duplicate-key; got %v", err)
+	displayName, warning, err := publishTemplateStatusWithAlias(
+		context.Background(), newTemplateID, newJobID, StatusReady, "",
+	)
+	require.NoError(t, err)
+	assert.Empty(t, warning)
+	assert.Equal(t, alias, displayName)
 
-	readyDef, err := GetDefinition(context.Background(), tplReady)
+	holder, err := GetTemplateByAlias(context.Background(), alias)
 	require.NoError(t, err)
-	assert.Equal(t, alias, readyDef.DisplayName,
-		"READY holder display_name must never be cleared by create/redo claim")
-
-	newDef, err := GetDefinition(context.Background(), tplNew)
+	assert.Equal(t, newTemplateID, holder.TemplateID)
+	oldDef, err := GetDefinition(context.Background(), oldTemplateID)
 	require.NoError(t, err)
-	assert.Empty(t, newDef.DisplayName, "losing create/redo claimant must stay without alias")
-
-	require.NoError(t, claimTemplateAlias(context.Background(), tplNew, alias, true),
-		"operator path must still be able to transfer the alias")
-	readyDef, err = GetDefinition(context.Background(), tplReady)
+	assert.Empty(t, oldDef.DisplayName)
+	newDef, err := GetDefinition(context.Background(), newTemplateID)
 	require.NoError(t, err)
-	assert.Empty(t, readyDef.DisplayName)
-	newDef, err = GetDefinition(context.Background(), tplNew)
-	require.NoError(t, err)
+	assert.Equal(t, StatusReady, newDef.Status)
 	assert.Equal(t, alias, newDef.DisplayName)
+	var oldJob models.TemplateImageJob
+	require.NoError(t, db.Where("job_id = ?", oldJobID).First(&oldJob).Error)
+	assert.Empty(t, aliasFromRequestJSON(oldJob.RequestJSON))
 }
 
-func testIdempotentReclaimOwnAlias(t *testing.T, db *gorm.DB) {
+func testOlderBuildCannotReclaimAlias(t *testing.T, db *gorm.DB) {
 	suf := aliasCaseSuffix()
-	tplID := "tpl-reclaim-" + suf
-	alias := "alias-reclaim-" + suf
-	insertReadyTemplate(t, db, tplID, alias)
-	cleanupTemplatesAndJobs(t, db, []string{tplID}, nil)
+	oldTemplateID := "tpl-late-old-" + suf
+	newTemplateID := "tpl-late-new-" + suf
+	oldJobID := "job-late-old-" + suf
+	newJobID := "job-late-new-" + suf
+	alias := "alias-late-" + suf
+	insertReadyTemplate(t, db, oldTemplateID, "")
+	insertCreateJob(t, db, oldTemplateID, oldJobID, alias)
+	insertReadyTemplate(t, db, newTemplateID, alias)
+	insertCreateJob(t, db, newTemplateID, newJobID, alias)
+	cleanupTemplatesAndJobs(t, db, []string{oldTemplateID, newTemplateID}, []string{oldJobID, newJobID})
 
-	require.NoError(t, claimTemplateAlias(context.Background(), tplID, alias, false))
-	def, err := GetDefinition(context.Background(), tplID)
+	displayName, warning, err := publishTemplateStatusWithAlias(
+		context.Background(), oldTemplateID, oldJobID, StatusReady, "",
+	)
 	require.NoError(t, err)
+	assert.Empty(t, warning)
+	assert.Empty(t, displayName)
+
+	holder, err := GetTemplateByAlias(context.Background(), alias)
+	require.NoError(t, err)
+	assert.Equal(t, newTemplateID, holder.TemplateID)
+}
+
+func testConcurrentBuildClaimsConvergeToNewer(t *testing.T, db *gorm.DB) {
+	suf := aliasCaseSuffix()
+	oldTemplateID := "tpl-concurrent-old-" + suf
+	newTemplateID := "tpl-concurrent-new-" + suf
+	oldJobID := "job-concurrent-old-" + suf
+	newJobID := "job-concurrent-new-" + suf
+	alias := "alias-concurrent-ordered-" + suf
+	insertReadyTemplate(t, db, oldTemplateID, "")
+	insertReadyTemplate(t, db, newTemplateID, "")
+	insertCreateJob(t, db, oldTemplateID, oldJobID, alias)
+	insertCreateJob(t, db, newTemplateID, newJobID, alias)
+	cleanupTemplatesAndJobs(t, db, []string{oldTemplateID, newTemplateID}, []string{oldJobID, newJobID})
+
+	errCh := make(chan error, 2)
+	go func() {
+		_, _, err := publishTemplateStatusWithAlias(context.Background(), oldTemplateID, oldJobID, StatusReady, "")
+		errCh <- err
+	}()
+	go func() {
+		_, _, err := publishTemplateStatusWithAlias(context.Background(), newTemplateID, newJobID, StatusReady, "")
+		errCh <- err
+	}()
+	require.NoError(t, <-errCh)
+	require.NoError(t, <-errCh)
+
+	holder, err := GetTemplateByAlias(context.Background(), alias)
+	require.NoError(t, err)
+	assert.Equal(t, newTemplateID, holder.TemplateID)
+}
+
+func testUnorderedBuildDoesNotStealAlias(t *testing.T, db *gorm.DB) {
+	suf := aliasCaseSuffix()
+	holderID := "tpl-unordered-holder-" + suf
+	claimantID := "tpl-unordered-claimant-" + suf
+	claimantJobID := "job-unordered-claimant-" + suf
+	alias := "alias-unordered-" + suf
+	insertReadyTemplate(t, db, holderID, alias)
+	insertTemplate(t, db, claimantID, StatusPending, "")
+	insertCreateJob(t, db, claimantID, claimantJobID, alias)
+	cleanupTemplatesAndJobs(t, db, []string{holderID, claimantID}, []string{claimantJobID})
+
+	displayName, warning, err := publishTemplateStatusWithAlias(
+		context.Background(), claimantID, claimantJobID, StatusReady, "",
+	)
+	require.NoError(t, err)
+	assert.Contains(t, warning, "has no CREATE/REDO job metadata")
+	assert.Empty(t, displayName)
+
+	holder, err := GetTemplateByAlias(context.Background(), alias)
+	require.NoError(t, err)
+	assert.Equal(t, holderID, holder.TemplateID)
+}
+
+func testBuildClaimsAliasFromDeletingHolderWithoutJob(t *testing.T, db *gorm.DB) {
+	suf := aliasCaseSuffix()
+	holderID := "tpl-deleting-holder-" + suf
+	claimantID := "tpl-deleting-claimant-" + suf
+	claimantJobID := "job-deleting-claimant-" + suf
+	alias := "alias-deleting-holder-" + suf
+	insertTemplate(t, db, holderID, StatusDeleting, alias)
+	insertTemplate(t, db, claimantID, StatusPending, "")
+	insertCreateJob(t, db, claimantID, claimantJobID, alias)
+	cleanupTemplatesAndJobs(t, db, []string{holderID, claimantID}, []string{claimantJobID})
+
+	displayName, warning, err := publishTemplateStatusWithAlias(
+		context.Background(), claimantID, claimantJobID, StatusReady, "",
+	)
+	require.NoError(t, err)
+	assert.Empty(t, warning)
+	assert.Equal(t, alias, displayName)
+
+	holder, err := GetTemplateByAlias(context.Background(), alias)
+	require.NoError(t, err)
+	assert.Equal(t, claimantID, holder.TemplateID)
+	deletingDef, err := GetDefinition(context.Background(), holderID)
+	require.NoError(t, err)
+	assert.Empty(t, deletingDef.DisplayName)
+}
+
+func testBuildClearsDeletingHolderJobAlias(t *testing.T, db *gorm.DB) {
+	suf := aliasCaseSuffix()
+	holderID := "tpl-deleting-job-holder-" + suf
+	claimantID := "tpl-deleting-job-claimant-" + suf
+	holderJobID := "job-deleting-holder-" + suf
+	claimantJobID := "job-deleting-job-claimant-" + suf
+	alias := "alias-deleting-job-holder-" + suf
+	insertTemplate(t, db, holderID, StatusDeleting, alias)
+	insertTemplate(t, db, claimantID, StatusPending, "")
+	insertCreateJob(t, db, holderID, holderJobID, alias)
+	insertCreateJob(t, db, claimantID, claimantJobID, alias)
+	cleanupTemplatesAndJobs(t, db, []string{holderID, claimantID}, []string{holderJobID, claimantJobID})
+
+	displayName, warning, err := publishTemplateStatusWithAlias(
+		context.Background(), claimantID, claimantJobID, StatusReady, "",
+	)
+	require.NoError(t, err)
+	assert.Empty(t, warning)
+	assert.Equal(t, alias, displayName)
+
+	var holderJob models.TemplateImageJob
+	require.NoError(t, db.Where("job_id = ?", holderJobID).First(&holderJob).Error)
+	assert.Empty(t, aliasFromRequestJSON(holderJob.RequestJSON))
+}
+
+func testPublishStatusClaimsTrimmedAlias(t *testing.T, db *gorm.DB) {
+	suf := aliasCaseSuffix()
+	templateID := "tpl-publish-" + suf
+	jobID := "job-publish-" + suf
+	alias := "alias-publish-" + suf
+	insertTemplate(t, db, templateID, StatusPending, "")
+	insertImageJob(t, db, &models.TemplateImageJob{
+		JobID:       jobID,
+		TemplateID:  templateID,
+		RequestID:   "req-" + jobID,
+		Operation:   JobOperationCreate,
+		Status:      JobStatusRunning,
+		RequestJSON: `{"alias":"  ` + alias + `  "}`,
+	})
+	cleanupTemplatesAndJobs(t, db, []string{templateID}, []string{jobID})
+
+	displayName, warning, err := publishTemplateStatusWithAlias(
+		context.Background(), templateID, jobID, StatusReady, "",
+	)
+	require.NoError(t, err)
+	assert.Empty(t, warning)
+	assert.Equal(t, alias, displayName)
+
+	def, err := GetDefinition(context.Background(), templateID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusReady, def.Status)
 	assert.Equal(t, alias, def.DisplayName)
-}
 
-func testFailedHolderOccupiesAliasKey(t *testing.T, db *gorm.DB) {
-	suf := aliasCaseSuffix()
-	tplFailed := "tpl-failed-" + suf
-	tplReady := "tpl-ready-" + suf
-	alias := "alias-failed-" + suf
-	insertTemplate(t, db, tplFailed, StatusFailed, alias)
-	insertReadyTemplate(t, db, tplReady, "")
-	cleanupTemplatesAndJobs(t, db, []string{tplFailed, tplReady}, nil)
-
-	err := claimTemplateAlias(context.Background(), tplReady, alias, false)
-	require.Error(t, err)
-	assert.True(t, isDuplicateAliasError(err), "FAILED holder must occupy alias_key; got %v", err)
-
-	readyDef, err := GetDefinition(context.Background(), tplReady)
+	holder, err := GetTemplateByAlias(context.Background(), alias)
 	require.NoError(t, err)
-	assert.Empty(t, readyDef.DisplayName, "READY challenger must stay without alias")
-
-	failedDef, err := GetDefinition(context.Background(), tplFailed)
-	require.NoError(t, err)
-	assert.Equal(t, alias, failedDef.DisplayName, "FAILED holder must keep the alias")
-
-	require.NoError(t, claimTemplateAlias(context.Background(), tplReady, alias, true),
-		"operator path must still be able to transfer the alias off a FAILED holder")
-	failedDef, err = GetDefinition(context.Background(), tplFailed)
-	require.NoError(t, err)
-	assert.Empty(t, failedDef.DisplayName)
-	readyDef, err = GetDefinition(context.Background(), tplReady)
-	require.NoError(t, err)
-	assert.Equal(t, alias, readyDef.DisplayName)
+	assert.Equal(t, templateID, holder.TemplateID)
 }
 
 func testSetAliasSyncsCreateRedoLeavesOthers(t *testing.T, db *gorm.DB) {
@@ -345,7 +448,7 @@ func testOperatorClaimRejectsNonReadyTarget(t *testing.T, db *gorm.DB) {
 	insertTemplate(t, db, tplID, StatusPending, "")
 	cleanupTemplatesAndJobs(t, db, []string{tplID}, nil)
 
-	err := claimTemplateAlias(context.Background(), tplID, alias, true)
+	err := SetTemplateAlias(context.Background(), tplID, alias)
 	require.ErrorIs(t, err, ErrTemplateNotReady)
 
 	def, err := GetDefinition(context.Background(), tplID)

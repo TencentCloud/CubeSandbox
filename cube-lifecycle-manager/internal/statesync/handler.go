@@ -124,7 +124,7 @@ func Handle(ctx context.Context, d Deps, ev redisstream.Event) {
 		return
 	}
 
-	if err := d.Redis.SetState(ctx, ev.SandboxID, newState, d.TTL); err != nil {
+	if err := d.Redis.WriteState(ctx, ev.SandboxID, newState, d.TTL); err != nil {
 		log.Warn("state event: set state failed",
 			zap.String("sandbox_id", ev.SandboxID),
 			zap.String("new", newState), zap.Error(err))

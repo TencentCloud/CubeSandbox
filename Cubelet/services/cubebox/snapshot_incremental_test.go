@@ -13,6 +13,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
 func TestNormalizeSnapshotTypeAcceptsKnownValues(t *testing.T) {
@@ -143,7 +144,7 @@ func TestResolveRollbackTargetsReturnsCatalogMemoryKind(t *testing.T) {
 			MemoryVol: "mem",
 			MetaDir:   "/tmp/meta",
 		}
-		rfs, mem, kind, meta, err := resolveRollbackTargets(nil, req)
+		rfs, mem, kind, meta, err := resolveRollbackTargets(nil, cow.BackendXFS, req)
 		require.NoError(t, err)
 		assert.Equal(t, "rfs", rfs)
 		assert.Equal(t, "mem", mem)
@@ -155,7 +156,7 @@ func TestResolveRollbackTargetsReturnsCatalogMemoryKind(t *testing.T) {
 	// bug, and silently filling in defaults would mask it.
 	t.Run("partial request is rejected", func(t *testing.T) {
 		req := &cubebox.RollbackSandboxRequest{RootfsVol: "rfs"}
-		_, _, _, _, err := resolveRollbackTargets(nil, req)
+		_, _, _, _, err := resolveRollbackTargets(nil, cow.BackendXFS, req)
 		require.Error(t, err)
 	})
 }

@@ -300,3 +300,54 @@ func newLocalRunTemplateForPath(templateID, snapshotPath string) *templatetypes.
 		},
 	}
 }
+
+func TestRecoveredMetadataHome(t *testing.T) {
+	baseDir := t.TempDir()
+	home := filepath.Join(baseDir, "tpl-s3")
+	metaDir := filepath.Join(home, "metadata")
+	configPath := filepath.Join(metaDir, "snapshot", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	template := recoveredS3LocalTemplate(home, metaDir)
+	if template == nil {
+		t.Fatal("expected recovered template")
+	}
+	if template.TemplateID != "tpl-s3" {
+		t.Fatalf("id=%q", template.TemplateID)
+	}
+	if template.Snapshot.Snapshot.Path != metaDir {
+		t.Fatalf("path=%q", template.Snapshot.Snapshot.Path)
+	}
+}
+
+// A pause package is a run template as far as recovery is concerned: it is
+// what a cross-node Resume has locally when the original tpl-* was never
+// built on this node.
+func TestRecoveredMetadataHomeAcceptsPausePackage(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "snap-pause-1")
+	metaDir := filepath.Join(home, "metadata")
+	if err := os.MkdirAll(filepath.Dir(metadataHomeConfigPath(home)), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(metadataHomeConfigPath(home), []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	template := recoveredS3LocalTemplate(home, metaDir)
+	if template == nil {
+		t.Fatal("expected recovered template")
+	}
+	if template.TemplateID != "snap-pause-1" {
+		t.Fatalf("id=%q, want snap-pause-1", template.TemplateID)
+	}
+}
+
+// An unmounted or absent package must not blow up the recovery attempt; the
+// caller treats it as a plain miss.
+func TestMountS3PackageMetadataForRecoveryTolerAtesMissingPackage(t *testing.T) {
+	mountS3PackageMetadataForRecovery(context.Background(), "")
+	mountS3PackageMetadataForRecovery(context.Background(), "snap-does-not-exist")
+}

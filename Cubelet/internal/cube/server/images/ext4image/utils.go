@@ -152,7 +152,7 @@ func rewriteDownloadHost(rawURL string) string {
 	if cfg == nil || cfg.MetaServerConfig == nil {
 		return rawURL
 	}
-	endpoint := strings.TrimSpace(cfg.MetaServerConfig.MetaServerEndpoint)
+	endpoint := strings.TrimSpace(cfg.MetaServerConfig.CubeMasterHTTPAddr)
 	if endpoint == "" {
 		return rawURL
 	}

@@ -13,10 +13,12 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/ttrpc"
+	"google.golang.org/protobuf/proto"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/network"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -108,6 +110,8 @@ func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequ
 			return rsp, nil
 		}
 		return s.updateWithPauseCow(ctx, req, sb)
+	case constants.UpdateActionNetwork:
+		return s.updateNetworkPolicy(ctx, req, sb, rsp)
 	case constants.UpdateActionResume:
 		// Resume is Master Create(same sandboxID from pause snap), not Update(resume).
 		rsp.Ret.RetMsg = "pause resume is owned by CubeMaster Create; Update(resume) is not supported"
@@ -634,4 +638,51 @@ func reconcileStuckPausingSandbox(ctx context.Context, client *containerd.Client
 	}
 	convergePauseStateFromShim(ctx, cb, st.Status,
 		fmt.Sprintf("DeadGC stuck PAUSING for %s", stuckFor))
+}
+
+// updateNetworkPolicy applies a new egress policy to a running sandbox. The
+// caller owns the sandbox lifecycle lock.
+//
+// The datapath is converged first and the store second. Persisting first would
+// risk claiming a policy that never reached the node; this way a failure leaves
+// both the store and the node on the previous policy.
+func (s *service) updateNetworkPolicy(
+	ctx context.Context,
+	req *cubebox.UpdateCubeSandboxRequest,
+	sb *cubeboxstore.CubeBox,
+	rsp *cubebox.UpdateCubeSandboxResponse,
+) (*cubebox.UpdateCubeSandboxResponse, error) {
+	cfg := req.GetCubeNetworkConfig()
+	if cfg == nil {
+		rsp.Ret.RetMsg = "must provide cube_network_config for network update"
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		return rsp, nil
+	}
+	if sb.GetStatus().IsPaused() {
+		rsp.Ret.RetMsg = "cannot update network policy of a paused sandbox"
+		rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
+		return rsp, nil
+	}
+
+	if err := network.UpdateSandboxNetworkPolicy(ctx, req.SandboxID, cfg); err != nil {
+		log.G(ctx).Errorf("update network policy failed sandbox=%s err=%v", req.SandboxID, err)
+		rsp.Ret.RetMsg = err.Error()
+		if network.IsSandboxNetworkNotActive(err) {
+			rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
+		} else {
+			rsp.Ret.RetCode = errorcode.ErrorCode_UpdateNetworkFailed
+		}
+		return rsp, nil
+	}
+
+	// Mirror the new policy into the sandbox object: it is what pause packages,
+	// so without this a pause/resume cycle would silently restore the policy the
+	// sandbox was created with.
+	sb.CubeNetworkConfig = proto.Clone(cfg).(*cubebox.CubeNetworkConfig)
+	if err := s.cubeboxMgr.cubeboxManger.SyncByID(ctx, sb.ID); err != nil {
+		// The datapath already carries the new policy, so this is not a failed
+		// update — only a durability gap that a later sync or resume may expose.
+		log.G(ctx).Errorf("persist updated network policy failed sandbox=%s err=%v", sb.ID, err)
+	}
+	return rsp, nil
 }

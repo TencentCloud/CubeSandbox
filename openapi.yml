@@ -239,6 +239,51 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /sandboxes/{sandboxID}/network:
+    put:
+      tags:
+      - handlers::sandboxes
+      operationId: update_sandbox_network
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox identifier
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSandboxNetworkRequest'
+        required: true
+      responses:
+        '204':
+          description: Network policy updated
+        '400':
+          description: Invalid network policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Sandbox is not running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /sandboxes/{sandboxID}/pause:
     post:
       tags:
@@ -800,7 +845,7 @@ paths:
         required: true
       responses:
         '200':
-          description: Alias set or cleared; returns the updated template detail
+          description: Alias updated
           content:
             application/json:
               schema:
@@ -1354,6 +1399,24 @@ components:
           - string
           - 'null'
           description: Writable layer size for the rootfs, e.g. "1G".
+    E2BNetworkRule:
+      type: object
+      properties:
+        transform:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/E2BNetworkTransform'
+      additionalProperties: false
+    E2BNetworkTransform:
+      type: object
+      properties:
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          propertyNames:
+            type: string
+      additionalProperties: false
     EgressRule:
       type: object
       description: 'L7 egress rule: match conditions + action (allow/deny, audit, credential injection).'
@@ -1418,6 +1481,11 @@ components:
 
         Multi-field semantics: AND across fields, OR within `method`.
         Comparisons on sni/host/scheme are case-insensitive.
+
+        `port` + `scheme` together pin the (host, port) tuple CubeEgress intercepts.
+        Both nil keeps the legacy default {80/http, 443/https}. When `port` is set,
+        `scheme` MUST also be set — same-`(host, port)` rules across the policy
+        must agree on `scheme` (the server rejects the whole policy on mismatch).
       properties:
         host:
           type:
@@ -1433,6 +1501,11 @@ components:
           type:
           - string
           - 'null'
+        port:
+          type:
+          - integer
+          - 'null'
+          format: int32
         scheme:
           type:
           - string
@@ -1480,6 +1553,11 @@ components:
         cpuCount:
           type: integer
           format: int32
+          description: Legacy whole-vCPU count. Use cpuMilli for fractional CPU values.
+        cpuMilli:
+          type: integer
+          format: int32
+          description: Exact CPU allocation in millicores, e.g. 100 or 500.
         diskSizeMB:
           type:
           - integer
@@ -1498,6 +1576,7 @@ components:
         memoryMB:
           type: integer
           format: int32
+          description: Memory in MiB. The MB suffix is retained for API compatibility.
         metadata:
           oneOf:
           - type: 'null'
@@ -1636,18 +1715,6 @@ components:
           - integer
           - 'null'
           format: int32
-    SetTemplateAliasRequest:
-      type: object
-      description: Body for PUT /templates/{id}/alias (set, reassign, or clear alias).
-      properties:
-        alias:
-          type:
-          - string
-          - 'null'
-          description: |-
-            New alias for the template. Validated against `^[a-z0-9][a-z0-9-]{0,63}$`
-            with `tpl-`/`snap-` prefixes rejected. Omitted, null, or empty string
-            clears the alias.
     ResumedSandbox:
       type: object
       description: Request body for POST /sandboxes/{id}/resume (deprecated).
@@ -1756,6 +1823,11 @@ components:
         cpuCount:
           type: integer
           format: int32
+          description: Legacy whole-vCPU count. Use cpuMilli for fractional CPU values.
+        cpuMilli:
+          type: integer
+          format: int32
+          description: Exact CPU allocation in millicores, e.g. 100 or 500.
         diskSizeMB:
           type:
           - integer
@@ -1782,6 +1854,7 @@ components:
         memoryMB:
           type: integer
           format: int32
+          description: Memory in MiB. The MB suffix is retained for API compatibility.
         metadata:
           oneOf:
           - type: 'null'
@@ -1908,12 +1981,31 @@ components:
             Host authority forwarded to user services by CubeProxy. `${PORT}` is
             expanded to the requested sandbox port; envd traffic is exempt.
         rules:
-          type:
-          - array
-          - 'null'
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxNetworkRulesInput'
+            description: |-
+              L7 egress rules. Accepts CubeSandbox's ordered rule array and E2B's
+              host-keyed transform map for compatibility. Both are normalized to the
+              ordered internal rule model.
+    SandboxNetworkRulesInput:
+      oneOf:
+      - type: array
+        items:
+          $ref: '#/components/schemas/EgressRule'
+      - type: object
+        additionalProperties:
+          type: array
           items:
-            $ref: '#/components/schemas/EgressRule'
-          description: L7 egress rules, evaluated first-match-wins in list order.
+            $ref: '#/components/schemas/E2BNetworkRule'
+        propertyNames:
+          type: string
+      description: |-
+        Accepted wire shapes for `SandboxNetworkConfig.rules`.
+
+        CubeSandbox clients use the ordered rule array. E2B clients use a
+        host-keyed map whose values are request transforms. CubeAPI normalizes both
+        shapes into the internal ordered egress-rule model.
     SandboxOnTimeout:
       type: string
       enum:
@@ -1921,11 +2013,12 @@ components:
       - pause
     SandboxState:
       type: string
-      description: State of the sandbox (running | paused)
+      description: State of the sandbox (running | paused | pausing | unknown)
       enum:
       - running
       - paused
       - pausing
+      - unknown
     SandboxVolumeMount:
       type: object
       description: Volume mount inside the sandbox.
@@ -1942,6 +2035,19 @@ components:
           description: |-
             CubeSandbox extension: mount this volume read-only for this sandbox
             attachment. Defaults to false when omitted.
+    SetTemplateAliasRequest:
+      type: object
+      description: |-
+        Body for PUT /templates/:id/alias (set / modify / clear alias).
+
+        `alias` is `None` / null / empty string ⇒ clear the current alias.
+        A non-empty value is validated by CubeMaster's `validateTemplateAlias`
+        (the single source of truth; CubeAPI does not re-validate).
+      properties:
+        alias:
+          type:
+          - string
+          - 'null'
     SetTimeoutRequest:
       type: object
       description: Request body for POST /sandboxes/{id}/timeout
@@ -2254,6 +2360,23 @@ components:
           type:
           - string
           - 'null'
+    UpdateSandboxNetworkRequest:
+      type: object
+      description: |-
+        Request body for PUT /sandboxes/{id}/network.
+
+        The body is the complete desired egress policy, not a patch: any field left
+        out clears what the sandbox currently has. This mirrors how `network` is
+        interpreted at create time, so the same object can be sent to either.
+      properties:
+        allowInternetAccess:
+          type:
+          - boolean
+          - 'null'
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxNetworkConfig'
     Volume:
       type: object
       description: Volume descriptor returned in list responses (no token).

@@ -88,7 +88,7 @@ scheduler:
 
 ## 节点元数据如何影响调度
 
-Cubelet 会通过 CubeMaster 的 `/internal/meta` 接口注册节点并持续上报状态。CubeMaster 把这些数据写入元数据存储和本地缓存，调度时读取最新快照。
+Cubelet 会通过 CubeOps 的 `/internal/v1/node-agent` 接口注册节点并持续上报状态。CubeOps 将这些数据持久化到 MySQL/Redis，CubeMaster 每隔几秒从 CubeOps 同步节点视图并维护本地缓存，调度时读取最新快照。
 
 | Cubelet 上报字段 | 来源 | 调度影响 |
 |------------------|------|----------|
@@ -109,8 +109,8 @@ Cubelet 会通过 CubeMaster 的 `/internal/meta` 接口注册节点并持续上
 | 变量 / 配置 | 影响 |
 |-------------|------|
 | `ONE_CLICK_DEPLOY_ROLE=compute` | 安装计算节点，只运行 Cubelet 等运行时服务，并向控制面注册。 |
-| `CUBE_SANDBOX_NODE_IP` | 当前节点注册到 CubeMaster 的可路由地址。配置错误会导致节点不可达或不出现。 |
-| `ONE_CLICK_CONTROL_PLANE_IP` / `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` | Cubelet 注册和上报使用的 CubeMaster 地址。 |
+| `CUBE_SANDBOX_NODE_IP` | 当前节点注册到 CubeOps 的可路由地址。配置错误会导致节点不可达或不出现。 |
+| `ONE_CLICK_CONTROL_PLANE_IP` / `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` | Cubelet 注册和上报使用的 CubeOps 地址（端口 3010）。CubeMaster 单独监听 8089。 |
 | `Cubelet/config/config.toml` 中的 `node_status_update_frequency` | 节点状态和资源上报周期。默认 `1s`，不要配置到 dynamicconf。 |
 | `Cubelet/dynamicconf/conf.yaml` 中的 `host.scheduler_label` | 节点池标签，用于 affinity 和隔离。 |
 | `Cubelet/dynamicconf/conf.yaml` 中的 `host.quota.*` | CPU、内存、MVM 数、创建并发等调度容量。 |
@@ -222,7 +222,7 @@ cubemastercli tpl redo \
 常用入口：
 
 ```bash
-curl http://127.0.0.1:8089/internal/meta/nodes
+curl http://127.0.0.1:3010/internal/v1/nodes
 sudo tail -F /data/log/CubeMaster/cubemaster-req.log
 sudo tail -F /data/log/Cubelet/Cubelet-req.log
 ```
@@ -232,7 +232,7 @@ sudo tail -F /data/log/Cubelet/Cubelet-req.log
 如果 CubeMaster 日志中出现 metric update timeout 类似信息：
 
 - 确认计算节点 `cube-sandbox-cubelet.service` 正常运行。
-- 确认 `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` 或 Terraform 生成的 CubeMaster 地址可达。
+- 确认 `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` 或 Terraform 生成的 CubeOps 地址从计算节点可达。
 - 检查 `node_status_update_frequency` 是否被误改得过大。
 - 确认 `metric_update_timeout` 明显大于上报周期。
 

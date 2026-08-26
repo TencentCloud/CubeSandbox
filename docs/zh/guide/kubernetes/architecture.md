@@ -17,7 +17,7 @@
 | 运维后端 | CubeOps | Deployment + Service | JWT 运维 API + WebUI SDK；监听 `0.0.0.0:3010`；读写 MySQL；访问 CubeMaster |
 | 管理入口 | WebUI | Deployment + Service + ConfigMap | 静态控制台；`/opsapi/`、`/cubeapi/v1/` 反代到 CubeOps（依赖 `cubeOps.enabled`） |
 | 运维入口 | cubemastercli | Deployment | `kubectl exec` 用 CLI；注入本 Release 的 CubeMaster endpoint |
-| 依赖存储 | MySQL / Redis | 内置 StatefulSet 或第三方 | 业务数据 / Proxy 与 lifecycle 状态 |
+| 依赖存储 | MySQL / Redis / MinIO | 内置 StatefulSet 或第三方 | 业务数据 / Proxy 与 lifecycle 状态 / S3 Volume 后端 |
 | 计算面 · 运行时 | `cube-node`（Big Pod） | 原生 `apps/v1` DaemonSet | `wait-node-prep` init + 内嵌 network runtime 的 cubelet + 可选 egress |
 | 计算面 · 产物 | `cube-node-installer` | 原生 `apps/v1` DaemonSet | 将 shim / kernel / guest 安装到宿主机 toolbox |
 | 计算面 · 节点引导 | `cube-node-bootstrap` | 原生 `apps/v1` DaemonSet | `wait-pvm-host`、`cube-node-init`、写 `node-prep-ready` |
@@ -37,6 +37,7 @@ flowchart TB
     CLI["cubemastercli"]
     MYSQL[("MySQL")]
     REDIS[("Redis")]
+    MINIO[("MinIO")]
     PROXY["cube-proxy"]
   end
 
@@ -74,6 +75,8 @@ flowchart TB
   API --> MYSQL
   CM --> MYSQL
   CM --> REDIS
+  CM --> MINIO
+  RUN --> MINIO
   PROXY --> REDIS
   PROXY --> CM
   KDNS --> PROXY
@@ -101,10 +104,11 @@ flowchart TB
 | `cube-ops` | `templates/ops.yaml` | `images.ops`；ClusterIP；bind `0.0.0.0:3010` |
 | `cubemastercli` | `templates/cubemastercli.yaml` | `images.cubemastercli` |
 | `cube-webui` | `templates/webui.yaml` | `images.webui` + nginx ConfigMap（上游 CubeOps） |
-| `cube-secret` | `templates/secret.yaml` | MySQL / Redis / Proxy 等密码 |
+| `cube-secret` | `templates/secret.yaml` | MySQL / Redis / Proxy / MinIO 等密码 |
 | `volume-cos`（可选） | `templates/volume-cos-secret.yaml` | COS 凭证（`volume-cos.conf`）；`volumeCos.enabled` 时挂到 Master + Cubelet |
+| `volume-s3` | `templates/secret.yaml`（内置 MinIO 自动填充）/ `templates/volume-s3-secret.yaml`（用户设置 `volumeS3.*`） | S3 凭证（`volume-s3.conf`）；启用内置 MinIO 或设置了 `volumeS3.endpoint` / `existingSecret` 时挂载到 Master + Cubelet |
 
-### 2.2 MySQL / Redis
+### 2.2 MySQL / Redis / MinIO
 
 | 模式 | 行为 |
 | --- | --- |
@@ -112,12 +116,14 @@ flowchart TB
 | 第三方 MySQL | `mysql.host` 非空 → 不装内置 MySQL |
 | 内置 Redis | `redis.host=""` 且控制面或 Proxy 需要时安装 |
 | 第三方 Redis | `redis.host` 非空 → 不装内置 Redis |
+| 内置 MinIO | `minio.enabled=true` → 部署 StatefulSet + Headless Service（`minio.*` 只负责部署 MinIO 本身；`rootPassword` 留空则自动生成）。若未设置 `volumeS3.endpoint` / `existingSecret`，Chart 从内置 MinIO 自动生成 S3 配置并写出 `volume-s3.conf` |
+| 外部 S3 | `minio.enabled=false` 且设置 `volumeS3.endpoint` / `volumeS3.existingSecret` → 不部署内置 MinIO；`volume-s3.conf` 从 `volumeS3.*` 生成 |
 
 ### 2.3 计算面：四个 DaemonSet
 
 `cube-node` / `cube-node-installer` / `cube-node-bootstrap` 用 `placement.compute`（**不含** `allow-pvm-bootstrap`）。`cube-node-pvm` 用 `placement.pvm`（含 `allow-pvm-bootstrap`），因此非 PVM 节点不会拉取 `cube-pvm-host-bootstrap` 大镜像。
 
-四条计算面（Big Pod / installer / bootstrap / PVM）均为原生 `apps/v1` DaemonSet。无状态控制面（master/api/ops/webui/proxy/lifecycle/cubemastercli）为原生 Deployment；MySQL/Redis 继续使用原生 StatefulSet。
+四条计算面（Big Pod / installer / bootstrap / PVM）均为原生 `apps/v1` DaemonSet。无状态控制面（master/api/ops/webui/proxy/lifecycle/cubemastercli）为原生 Deployment；MySQL/Redis/MinIO 继续使用原生 StatefulSet。
 
 #### Big Pod：`cube-node`
 
@@ -219,7 +225,7 @@ flowchart TD
   B --> C{"values 合法?"}
   C -- 否 --> X["fail render"]
   C -- 是 --> D["Secret / ConfigMap / 持久化"]
-  D --> E["MySQL / Redis 或外部"]
+  D --> E["MySQL / Redis / MinIO 或外部"]
   E --> F["控制面 Deployment"]
   F --> G["Proxy / cluster-dns"]
   G --> H["cube-node + installer + bootstrap + pvm"]
@@ -377,7 +383,7 @@ externalControlPlane:
   apiEndpoint: http://<external-api>:3000  # optional, for helm test
 ```
 
-不安装内置 Master / API / MySQL / Redis / WebUI；默认不装 Proxy（避免与外部数据面不一致）。配置了 `apiEndpoint` 时 helm test 会校验外部 API 与节点注册。
+不安装内置 Master / API / MySQL / Redis / MinIO / WebUI；默认不装 Proxy（避免与外部数据面不一致）。配置了 `apiEndpoint` 时 helm test 会校验外部 API 与节点注册。
 
 ## 7. 关键 values 开关
 
@@ -385,8 +391,8 @@ externalControlPlane:
 | --- | --- | --- |
 | `global.timezone` | `Asia/Shanghai` | 注入 Chart 管理容器的 `TZ` |
 | `storageClass.create` / `name` / `provisioner` | `create=false` | 是否由 chart 创建 StorageClass；默认不创建（PVC 走集群 default SC；TKE 用 `values-tke.yaml`） |
-| `persistence.storageClassName` | `""` | 三 PVC 共用此 SC；`""` → 集群 default |
-| `*.persistence.storageClassName` (master/mysql/redis) | `""` | 组件级覆盖；非空优先于顶层 |
+| `persistence.storageClassName` | `""` | 四 PVC 共用此 SC；`""` → 集群 default |
+| `*.persistence.storageClassName` (master/mysql/redis/minio) | `""` | 组件级覆盖；非空优先于顶层 |
 | `controlPlane.enabled` | `true` | 内置控制面 |
 | `externalControlPlane.enabled` | `false` | 外部 CubeMaster |
 | `placement.controlPlane.nodeSelector` | `cube-control=true` | 控制面调度 |
@@ -401,6 +407,7 @@ externalControlPlane:
 | `bootstrap.pvmHostKernel.bootArgs` | `nopti pti=off` | 当前 `kvm_pvm` 不支持 host KPTI |
 | `bootstrap.nodeInit.*` | 多项 | 预检、XFS、KVM、CIDR |
 | `mysql.host` / `redis.host` | `""` | 非空则用第三方 |
+| `volumeS3.endpoint` / `existingSecret` | `""` | S3 配置来源：都为空且 `minio.enabled=true` 时由内置 MinIO 自动填充；显式设置任一值需 `minio.enabled=false`（二选一，互斥） |
 | `cubeProxy.enabled` / `ingress.enabled` | `true` | Proxy / Ingress |
 | `lifecycleManager.enabled` | `true` | Proxy 启用时必开 |
 | `cubeEgress.enabled` | `true` | Big Pod egress sidecar |
@@ -423,7 +430,7 @@ helm test <release> -n <namespace> --timeout 20m --logs
 
 ## 9. 所有权与卸载边界
 
-Chart 管理并随 release 卸载：控制面与计算面工作负载、内置 MySQL/Redis、Proxy、CA/TLS/config Secret、Helm test RBAC、diagnostics ConfigMap 等。
+Chart 管理并随 release 卸载：控制面与计算面工作负载、内置 MySQL/Redis/MinIO、Proxy、CA/TLS/config Secret、Helm test RBAC、diagnostics ConfigMap 等。
 
 Chart **不**管理：节点 label/taint、第三方 DB、外部 DNS/LB、hostPath 数据、host kernel / GRUB / udev / fstab / XFS 等节点级持久修改。卸载后按平台 runbook 清理宿主机残留。
 

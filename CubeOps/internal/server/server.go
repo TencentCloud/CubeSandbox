@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"regexp"
 	"runtime/debug"
@@ -18,6 +19,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/cubemaster"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/handler"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement"
+	nmhandler "github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/handler"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/nodemetric"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/service"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
 	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
@@ -30,6 +34,7 @@ type Server struct {
 	jm      *auth.JWTManager
 	httpSrv *http.Server
 	cm      *cubemaster.Client
+	nodeSvc *nodemanagement.Service
 }
 
 // New creates a new CubeOps server.
@@ -46,6 +51,20 @@ func New(cfg *config.Config, s *store.Store) *Server {
 
 // Start begins listening for HTTP requests.
 func (s *Server) Start() error {
+	if err := nodemetric.Init(s.cfg); err != nil {
+		return fmt.Errorf("nodemetric init: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	nodeSvc, err := nodemanagement.New(ctx, s.store.DB(), nodemanagement.DefaultDeclaredVersionInfo())
+	if err != nil {
+		return fmt.Errorf("init node management service: %w", err)
+	}
+	// Enable sandbox verification on node deletion via CubeMaster.
+	nodeSvc.SetSandboxInventoryChecker(nodemanagement.SandboxInventoryChecker(s.cm))
+	s.nodeSvc = nodeSvc
+
 	engine := s.buildRouter()
 
 	s.httpSrv = &http.Server{
@@ -84,22 +103,28 @@ func (s *Server) buildRouter() *gin.Engine {
 	r.Use(requestLogger())
 	r.Use(cubeopsRecovery())
 
-	// Health check (no auth) — defined at the root rather than under /api/v1
-	// because external load balancers and k8s probes hit it without a prefix.
+	// Health check (no auth); pings Redis so an outage surfaces as 503.
 	r.GET("/health", func(c *gin.Context) {
+		if err := nodemetric.Ping(c.Request.Context()); err != nil {
+			c.String(http.StatusServiceUnavailable, "redis: %v", err)
+			return
+		}
 		c.String(http.StatusOK, "ok")
 	})
 
 	// Wire up service layer + handlers.
 	authSvc := service.NewAuthService(s.store, s.jm)
 	authH := auth.NewHandler(authSvc)
-	clusterH := handler.NewClusterHandler(s.cm)
+	clusterH := handler.NewClusterHandler(s.cm).WithNodeService(s.nodeSvc)
 	storeH := handler.NewStoreHandler(handler.DefaultRegistryClient())
 	configH := handler.NewConfigHandler(s.cfg.Bind, 100, s.cfg.JWTSecret != "", s.cfg.SandboxDomain, "cubebox")
 	agenthubH := handler.NewAgentHubHandler(s.store, s.cm)
 	// SDK handler gets the AgentHubService so that E2B template/snapshot
 	// deletions can reverse-sync AgentHub registrations
 	sdkH := handler.NewSDKHandler(s.cm).WithAgentHubService(agenthubH.AgentHubService())
+
+	internalH := nmhandler.NewInternalHandler(s.nodeSvc)
+	agentH := nmhandler.NewAgentHandler(s.nodeSvc)
 
 	// Public (no auth) routes — login + refresh.
 	public := r.Group("/api/v1")
@@ -114,6 +139,14 @@ func (s *Server) buildRouter() *gin.Engine {
 	configH.Register(authed)
 	storeH.Register(authed)
 	agenthubH.Register(authed)
+
+	// Internal routes — no auth. These endpoints must not be exposed through
+	// nginx or a public Bind address. Callers: CubeMaster, cubeopscli.
+	internalH.Register(r.Group("/internal/v1"))
+
+	// Internal routes — no auth. These endpoints must not be exposed through
+	// nginx or a public Bind address. Callers: Cubelet (register + heartbeat).
+	agentH.Register(r.Group("/internal/v1/node-agent"))
 
 	// SDK routes — mounted at both /api/v1/sdk and /api/v1/sdk/v2 because
 	// the WebUI and the E2B-compatible clients hit different prefixes.

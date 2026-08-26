@@ -20,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/config"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/cubemasterclient"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/discovery"
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/eventbus"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/httpapi"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/proxypush"
@@ -67,6 +68,18 @@ func run() error {
 	stream := redisstream.New(rdb, logger.Named("redis"))
 	masterClient := cubemasterclient.New(cfg.CubeMasterURL, cfg.HTTPTimeout)
 	reg := registry.New()
+
+	// The eventbus carries best-effort cross-replica wakeup hints. Redis
+	// remains the source of truth and the wait path retains polling fallback.
+	var bus *eventbus.Bus
+	if cfg.EventBusEnabled {
+		bus = eventbus.New()
+		stream.SetNotifyEnabled(true)
+		stream.SetLocalBus(bus)
+		logger.Info("eventbus enabled")
+	} else {
+		logger.Info("eventbus disabled (waitForRunning will poll)")
+	}
 
 	rootCtx, cancel := signalContext()
 	defer cancel()
@@ -147,6 +160,7 @@ func run() error {
 		ProxyPush:    pushClient,
 		StateLockTTL: cfg.StateLockTTL,
 		Log:          logger.Named("resumer"),
+		EventBus:     bus,
 	})
 
 	sweep := sweeper.New(sweeper.Options{
@@ -170,6 +184,9 @@ func run() error {
 	if discSvc != nil {
 		loopCount++
 	}
+	if cfg.EventBusEnabled {
+		loopCount++
+	}
 	stateSyncDeps := statesync.Deps{
 		Registry:  reg,
 		Redis:     stream,
@@ -187,6 +204,10 @@ func run() error {
 	go func() { errs <- apiSrv.Run(rootCtx) }()
 	if discSvc != nil {
 		go func() { errs <- discSvc.Run(rootCtx) }()
+	}
+	if cfg.EventBusEnabled {
+		sub := eventbus.NewSubscriber(rdb, bus, logger.Named("eventbus"))
+		go func() { errs <- sub.Run(rootCtx) }()
 	}
 
 	// First loop to return wins; we cancel siblings via context and drain.

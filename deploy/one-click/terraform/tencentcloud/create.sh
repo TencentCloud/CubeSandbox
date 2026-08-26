@@ -906,7 +906,7 @@ setup_env() {
 	export TF_VAR_tke_node_count="$TKE_NODE_COUNT"
 	export TF_VAR_cubemaster_replicas="${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}"
 	export TF_VAR_cube_api_replicas="${TENCENTCLOUD_CUBE_API_REPLICAS:-1}"
-	export TF_VAR_cube_ops_replicas="${TENCENTCLOUD_CUBE_OPS_REPLICAS:-1}"
+	export TF_VAR_cube_ops_replicas="${TENCENTCLOUD_CUBE_OPS_REPLICAS:-2}"
 	export TF_VAR_cube_proxy_replicas="${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}"
 	export TF_VAR_cube_lifecycle_manager_replicas="${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-1}"
 	export TF_VAR_cube_webui_replicas="${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-1}"
@@ -1163,6 +1163,146 @@ _install_cubemastercli() {
 	verify=$("${js_ssh[@]}" root@"${js_pub_ip}" "cubemastercli --help 2>&1 | head -1" 2>&1) || true
 	if [ -n "$verify" ]; then
 		echo -e "  ${GREEN}✓ cubemastercli installed (jumpserver:/usr/local/bin/cubemastercli)${NC}"
+	fi
+}
+
+# Install cubeopscli on the jumpserver (extracted from the bundle).
+# Mirrors _install_cubemastercli; the sandbox-package already contains
+# cubeopscli after the one-click bundle builder was updated.
+_install_cubeopscli() {
+	local js_pub_ip key_file
+	js_pub_ip=$(terraform output -raw jumpserver_public_ip 2>/dev/null || echo "")
+	key_file="${TENCENTCLOUD_SSH_PRIVATE_KEY_PATH:-$SSH_PRI_KEY}"
+	[ -z "$js_pub_ip" ] && return 1
+
+	local js_ssh=(
+		ssh -i "${key_file}" -p 443
+		-o StrictHostKeyChecking=no
+		-o UserKnownHostsFile=/dev/null
+		-o ConnectTimeout=10
+		-o BatchMode=yes
+		-o LogLevel=ERROR
+	)
+
+	# Check whether it is already installed
+	local already
+	already=$("${js_ssh[@]}" root@"${js_pub_ip}" "command -v cubeopscli 2>&1" 2>&1) || true
+	if echo "$already" | grep -q "cubeopscli"; then
+		echo -e "  ${GREEN}✓ cubeopscli already exists (${already})${NC}"
+		return 0
+	fi
+
+	echo -e "  ${CYAN}Installing cubeopscli on the jumpserver...${NC}"
+
+	if [ -n "${LOCAL_BUNDLE:-}" ]; then
+		# Local bundle: verify → upload → extract cubeopscli
+		local bundle_name
+		bundle_name="$(basename "${LOCAL_BUNDLE}")"
+
+		# Compute the local md5
+		local local_md5
+		local_md5=$(md5sum "${LOCAL_BUNDLE}" 2>/dev/null | awk '{print $1}' || echo "")
+		if [ -z "$local_md5" ] && command -v md5 &>/dev/null; then
+			local_md5=$(md5 -q "${LOCAL_BUNDLE}" 2>/dev/null || echo "")
+		fi
+
+		# Check the bundle md5 on the jumpserver
+		local remote_md5 need_upload=0
+		remote_md5=$("${js_ssh[@]}" root@"${js_pub_ip}" "
+      if [ -f /tmp/${bundle_name} ]; then
+        md5sum /tmp/${bundle_name} 2>/dev/null | awk '{print \$1}' || md5 -q /tmp/${bundle_name} 2>/dev/null || echo 'NO_MD5'
+      else
+        echo 'NOT_FOUND'
+      fi
+    " 2>&1) || true
+		remote_md5=$(echo "$remote_md5" | tr -d '\r\n ')
+
+		if [ "$remote_md5" = "NOT_FOUND" ]; then
+			echo -e "  ${YELLOW}No bundle on the jumpserver, upload required${NC}"
+			need_upload=1
+		elif [ -n "$local_md5" ] && [ -n "$remote_md5" ] && [ "$local_md5" != "$remote_md5" ] && [ "$remote_md5" != "NO_MD5" ]; then
+			echo -e "  ${YELLOW}md5 mismatch (local: ${local_md5}, remote: ${remote_md5}), re-uploading${NC}"
+			need_upload=1
+		else
+			echo -e "  ${GREEN}✓ bundle md5 matches (${local_md5}), skipping upload${NC}"
+		fi
+
+		if [ "$need_upload" -eq 1 ]; then
+			echo -e "  ${CYAN}Uploading the bundle to the jumpserver...${NC}"
+			scp -i "${key_file}" -P 443 \
+				-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+				-o ConnectTimeout=10 \
+				"${LOCAL_BUNDLE}" "root@${js_pub_ip}:/tmp/${bundle_name}" 2>&1 || {
+				echo -e "  ${YELLOW}⚠ bundle upload failed, skipping cubeopscli installation${NC}"
+				return 1
+			}
+			BUNDLE_UPDATED=1
+		fi
+
+		"${js_ssh[@]}" root@"${js_pub_ip}" "
+      set -e
+      mkdir -p /tmp/cube-bundle /tmp/cube-package
+      # 1) Extract the outer bundle
+      tar -xzf /tmp/${bundle_name} -C /tmp/cube-bundle/
+      BUNDLE_DIR=\$(ls -d /tmp/cube-bundle/*/ 2>/dev/null | head -1)
+      # 2) Extract assets/package/sandbox-package.tar.gz
+      PKG_TAR=\"\${BUNDLE_DIR}/assets/package/sandbox-package.tar.gz\"
+      if [ -f \"\${PKG_TAR}\" ]; then
+        tar -xzf \"\${PKG_TAR}\" -C /tmp/cube-package/
+        # 3) Find cubeopscli and install it
+        CLI_BIN=\$(find /tmp/cube-package -name cubeopscli -type f 2>/dev/null | head -1)
+        if [ -n \"\${CLI_BIN}\" ]; then
+          cp \${CLI_BIN} /usr/local/bin/cubeopscli
+          chmod +x /usr/local/bin/cubeopscli
+          echo 'INSTALLED'
+        else
+          echo 'NOT_FOUND: cubeopscli not in sandbox-package'
+        fi
+      else
+        echo \"NOT_FOUND: \${PKG_TAR} not found\"
+      fi
+    " 2>&1 || echo -e "  ${YELLOW}⚠ cubeopscli extraction failed${NC}"
+	else
+		# Online mode: download and extract on the jumpserver
+		local cn_url="https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/one-click/online-install.sh"
+		local gh_url="https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/one-click/online-install.sh"
+
+		"${js_ssh[@]}" root@"${js_pub_ip}" "
+      ONLINE_SCRIPT=\$(curl -fsSL --connect-timeout 10 --max-time 30 '${cn_url}' 2>/dev/null || \\
+                       curl -fsSL --connect-timeout 10 --max-time 30 '${gh_url}' 2>/dev/null)
+      BUNDLE_URL=\$(echo \"\$ONLINE_SCRIPT\" | grep -oE 'https://[^ ]*cube-sandbox-one-click[^ ]*\.tar\.gz' | head -1)
+      if [ -z \"\$BUNDLE_URL\" ]; then
+        echo 'SKIP: cannot determine bundle URL'
+        exit 0
+      fi
+      echo \"Downloading: \$BUNDLE_URL\"
+      mkdir -p /tmp/cube-bundle /tmp/cube-package
+      cd /tmp/cube-bundle
+      curl -fsSL --connect-timeout 10 --max-time 120 \"\$BUNDLE_URL\" -o bundle.tar.gz
+      tar -xzf bundle.tar.gz
+      BUNDLE_DIR=\$(ls -d */ 2>/dev/null | head -1)
+      PKG_TAR=\"\${BUNDLE_DIR}/assets/package/sandbox-package.tar.gz\"
+      if [ -f \"\${PKG_TAR}\" ]; then
+        tar -xzf \"\${PKG_TAR}\" -C /tmp/cube-package/
+        CLI_BIN=\$(find /tmp/cube-package -name cubeopscli -type f 2>/dev/null | head -1)
+        if [ -n \"\${CLI_BIN}\" ]; then
+          cp \${CLI_BIN} /usr/local/bin/cubeopscli
+          chmod +x /usr/local/bin/cubeopscli
+          echo 'INSTALLED'
+        else
+          echo 'NOT_FOUND'
+        fi
+      else
+        echo 'NOT_FOUND'
+      fi
+    " 2>&1 || echo -e "  ${YELLOW}⚠ cubeopscli online installation failed${NC}"
+	fi
+
+	# Verify
+	local verify
+	verify=$("${js_ssh[@]}" root@"${js_pub_ip}" "cubeopscli --help 2>&1 | head -1" 2>&1) || true
+	if [ -n "$verify" ]; then
+		echo -e "  ${GREEN}✓ cubeopscli installed (jumpserver:/usr/local/bin/cubeopscli)${NC}"
 	fi
 }
 
@@ -3697,6 +3837,11 @@ step8_init_compute_nodes() {
 	local cm_clb_ip
 	cm_clb_ip=$(terraform output -raw tke_cubemaster_clb_ip 2>/dev/null || echo "")
 
+	# cube-ops VPC-internal CLB IP. Compute nodes reach cube-ops:3010 for
+	# node registration / heartbeat via this CLB.
+	local ops_clb_ip
+	ops_clb_ip=$(terraform output -raw tke_cube_ops_clb_ip 2>/dev/null || echo "")
+
 	# cube-egress image mirror for the compute nodes. This terraform deployer
 	# always runs inside Tencent Cloud, so the China-region pull-through
 	# (cube-sandbox-cn.tencentcloudcr.com, selected by MIRROR=cn in
@@ -3819,6 +3964,7 @@ step8_init_compute_nodes() {
 				ssh "${ssh_opts[@]}" root@"${compute_private_ip}" "sh /usr/local/services/cubetoolbox/scripts/one-click/down-compute.sh 2>&1" 2>&1 || true
 				sleep 3
 				ssh "${ssh_opts[@]}" root@"${compute_private_ip}" "sed -i 's/^ONE_CLICK_CONTROL_PLANE_IP=.*/ONE_CLICK_CONTROL_PLANE_IP=\"${cm_clb_ip}\"/' /usr/local/services/cubetoolbox/.one-click.env 2>&1" 2>&1 || true
+				ssh "${ssh_opts[@]}" root@"${compute_private_ip}" "sed -i 's/^ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR=.*/ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR=\"${ops_clb_ip}:3010\"/' /usr/local/services/cubetoolbox/.one-click.env 2>&1" 2>&1 || true
 				ssh "${ssh_opts[@]}" root@"${compute_private_ip}" "sh /usr/local/services/cubetoolbox/scripts/one-click/up-compute.sh 2>&1" 2>&1 || true
 				echo -e "  ${GREEN}✓ Compute node re-registered${NC}"
 				continue
@@ -3913,6 +4059,7 @@ CUBE_EXTERNAL_MYSQL_HOST=${mysql_ip}
 CUBE_EXTERNAL_REDIS_HOST=${redis_ip}
 CUBE_PVM_ENABLE=1
 ONE_CLICK_CONTROL_PLANE_IP=\"${control_plane_ip}\"
+ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR=\"${ops_clb_ip}:3010\"
 MIRROR=${egress_mirror}
 EOF
 echo '[local-bundle] .env created:'
@@ -3944,6 +4091,7 @@ echo '[local-bundle] Done'"
          ONE_CLICK_DEPLOY_ROLE=compute \
          CUBE_SANDBOX_NODE_IP='${compute_private_ip}' \
          ONE_CLICK_CONTROL_PLANE_IP='${cm_clb_ip}' \
+         ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR='${ops_clb_ip}:3010' \
          CUBE_PVM_ENABLE=1 \
          MIRROR='${egress_mirror}' bash 2>&1" 2>&1 | tee "$install_log"
 			install_rc=${PIPESTATUS[0]}
@@ -4044,14 +4192,14 @@ REMOTE_CUBELET_FREQ
 		echo -e "  ${YELLOW}⚠ cube-master CLB unavailable, skipping verification${NC}"
 	else
 		local nodes_json
-		# Query cube-master through the jumpserver
-		nodes_json=$(_jump_exec "curl -s --connect-timeout 10 'http://${cm_clb_ip}:8089/internal/meta/nodes' 2>&1" 2>&1) || true
+		# Query CubeOps through the jumpserver (ClusterIP, not exposed via CLB)
+		nodes_json=$(_jump_exec "kubectl -n cubesandbox exec deploy/cube-ops -- curl -s --connect-timeout 10 'http://127.0.0.1:3010/internal/v1/nodes' 2>&1" 2>&1) || true
 
 		# Output the registered nodes (with health status)
 		local node_ips node_count node_status
-		node_ips=$(echo "$nodes_json" | jq -r '.data[]?.node_id' 2>/dev/null || echo "")
-		node_count=$(echo "$nodes_json" | jq -r '.data | length' 2>/dev/null || echo "0")
-		node_status=$(echo "$nodes_json" | jq -r '.data[] | "  \(.node_id)  healthy=\(.healthy)"' 2>/dev/null || echo "")
+		node_ips=$(echo "$nodes_json" | jq -r '.[]?.InstanceID' 2>/dev/null || echo "")
+		node_count=$(echo "$nodes_json" | jq 'if type=="array" then length else 0 end' 2>/dev/null || echo "0")
+		node_status=$(echo "$nodes_json" | jq -r '.[] | "  \(.InstanceID)  healthy=\(.Healthy)"' 2>/dev/null || echo "")
 		echo ""
 		echo -e "  ${CYAN}Registered nodes (${node_count}):${NC}"
 		echo "$node_status"
@@ -4234,7 +4382,7 @@ TENCENTCLOUD_TKE_CLUSTER_VERSION='${TKE_CLUSTER_VERSION:-1.34.1}'
 TENCENTCLOUD_TKE_NODE_COUNT='${TKE_NODE_COUNT:-2}'
 TENCENTCLOUD_CUBEMASTER_REPLICAS='${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}'
 TENCENTCLOUD_CUBE_API_REPLICAS='${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-1}}'
-TENCENTCLOUD_CUBE_OPS_REPLICAS='${TF_VAR_cube_ops_replicas:-${TENCENTCLOUD_CUBE_OPS_REPLICAS:-1}}'
+TENCENTCLOUD_CUBE_OPS_REPLICAS='${TF_VAR_cube_ops_replicas:-${TENCENTCLOUD_CUBE_OPS_REPLICAS:-2}}'
 TENCENTCLOUD_CUBE_PROXY_REPLICAS='${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}}'
 TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS='${TF_VAR_cube_lifecycle_manager_replicas:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-1}}'
 TENCENTCLOUD_CUBE_WEBUI_REPLICAS='${TF_VAR_cube_webui_replicas:-${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-1}}'
@@ -4449,7 +4597,7 @@ write_resolved_tfvars_file() {
 		--arg webui_image "${TF_VAR_webui_image:-${TENCENTCLOUD_WEBUI_IMAGE:-}}" \
 		--argjson cubemaster_replicas "$(_number_or_default "${TF_VAR_cubemaster_replicas:-${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}}" 1)" \
 		--argjson cube_api_replicas "$(_number_or_default "${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-1}}" 1)" \
-		--argjson cube_ops_replicas "$(_number_or_default "${TF_VAR_cube_ops_replicas:-${TENCENTCLOUD_CUBE_OPS_REPLICAS:-1}}" 1)" \
+		--argjson cube_ops_replicas "$(_number_or_default "${TF_VAR_cube_ops_replicas:-${TENCENTCLOUD_CUBE_OPS_REPLICAS:-2}}" 2)" \
 		--argjson cube_proxy_replicas "$(_number_or_default "${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}}" 1)" \
 		--argjson cube_lifecycle_manager_replicas "$(_number_or_default "${TF_VAR_cube_lifecycle_manager_replicas:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS:-1}}" 1)" \
 		--argjson cube_webui_replicas "$(_number_or_default "${TF_VAR_cube_webui_replicas:-${TENCENTCLOUD_CUBE_WEBUI_REPLICAS:-1}}" 1)" \
@@ -4740,6 +4888,7 @@ print_cluster_operator_help() {
 		echo -e "    ${YELLOW}The jumpserver sits in the VPC and already holds:${NC}"
 		echo -e "      • kubectl + kubeconfig at /root/.kube/config (kubectl get pods -n cubesandbox)"
 		echo -e "      • the cubemastercli tool (cubemastercli --help)"
+		echo -e "      • the cubeopscli tool (cubeopscli --help)"
 		echo -e "      • the SSH key to reach the internal compute nodes"
 	else
 		echo -e "    ${YELLOW}Jumpserver public IP unavailable (check: terraform output jumpserver_public_ip)${NC}"
@@ -4858,6 +5007,8 @@ wait_jumpserver_ready() {
 	ensure_js_bundle || echo -e "  ${YELLOW}⚠ Bundle verification/upload had issues; later steps will retry.${NC}"
 	# Install the cubemastercli management tool on the jumpserver
 	_install_cubemastercli
+	# Install the cubeopscli node-management tool on the jumpserver
+	_install_cubeopscli
 	return 0
 }
 
@@ -5001,8 +5152,8 @@ phase7_health_check() {
 		# Informational: how many compute nodes have registered so far. The
 		# standalone compute nodes only register in Step 8, so 0 here is normal.
 		local nodes_json ncount
-		nodes_json=$(_jump_exec "curl -s --connect-timeout 5 --max-time 10 'http://${cm_ip}:8089/internal/meta/nodes' 2>/dev/null" 2>/dev/null)
-		ncount=$(echo "$nodes_json" | jq -r '.data | length' 2>/dev/null || echo "0")
+		nodes_json=$(_jump_exec "kubectl -n cubesandbox exec deploy/cube-ops -- curl -s --connect-timeout 5 --max-time 10 'http://127.0.0.1:3010/internal/v1/nodes' 2>/dev/null" 2>/dev/null)
+		ncount=$(echo "$nodes_json" | jq 'if type=="array" then length else 0 end' 2>/dev/null || echo "0")
 		echo -e "    ${CYAN}registered compute nodes so far: ${ncount:-0} (they register in Step 8)${NC}"
 	else
 		echo -e "  ${RED}✗ cube-master CLB IP not available${NC}"

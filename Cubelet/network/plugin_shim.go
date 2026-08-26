@@ -16,7 +16,7 @@ import (
 // buildEnsureNetworkRequestFromIntent converts the old workflow/shim intent into
 // the declarative runtime request. It keeps guest-side defaults such as eth0,
 // gateway ARP and loopback host-port bindings in one place.
-func (l *local) buildEnsureNetworkRequestFromIntent(sandboxID, requestID string, exposedPorts []int64, shimReq *NetRequest, cubeNetworkConfig *networkruntime.CubeNetworkConfig) *networkruntime.EnsureNetworkRequest {
+func (l *local) buildEnsureNetworkRequestFromIntent(sandboxID, requestID string, exposedPorts []int64, shimReq *NetRequest, cubeNetworkConfig *networkruntime.CubeNetworkConfig, dnsAllowOutCIDRs []string) *networkruntime.EnsureNetworkRequest {
 	desired := &networkruntime.EnsureNetworkRequest{
 		SandboxID:      sandboxID,
 		IdempotencyKey: requestID,
@@ -43,6 +43,9 @@ func (l *local) buildEnsureNetworkRequestFromIntent(sandboxID, requestID string,
 		},
 	}
 	desired.CubeNetworkConfig = cubeNetworkConfig
+	// Recorded, not re-derived: a later policy update carries only user-authored
+	// targets and must fold these same resolvers back in.
+	desired.DNSAllowOutCIDRs = dnsAllowOutCIDRs
 	portReq := make(map[uint16]struct{})
 	for _, port := range exposedPorts {
 		portReq[uint16(port)] = struct{}{}

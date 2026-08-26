@@ -517,15 +517,34 @@ pub extern "C" fn cubecow_resize_volume(
     }
 }
 
-/// Get volume information by name.
+/// Get volume information by name as a JSON string.
 ///
 /// # Parameters
-/// - `out_size_bytes`: receives the volume size in bytes
-/// - `out_device_path`: receives the device path (caller frees)
-/// - `out_snapshot_count`: receives the snapshot count
-/// - `out_created_at`: receives the creation timestamp (caller frees)
+/// - `out_json`: receives a heap-allocated JSON object (caller frees
+///   with `cubecow_free_string`). The object has fields:
+///   ```json
+///   {
+///     "name": "...",
+///     "size_bytes": 0,
+///     "device_path": "...",
+///     "snapshot_count": 0,
+///     "created_at": "...",
+///     "export_uuid": "",
+///     "export_status": "",
+///     "deletable": null
+///   }
+///   ```
+///   - `export_uuid` is `""` when the entry is a plain volume or a
+///     snapshot that has never been exported.
+///   - `export_status` is one of `""`, `"NONE"`, `"INPROGRESS"`,
+///     `"DONE"`; empty when not applicable or when the backend RPC to
+///     refresh status transiently failed (see S3 backend design doc
+///     §2.8).
+///   - `deletable` is `null` when not applicable, otherwise `true` /
+///     `false`.
 ///
-/// All out-params are optional (can be NULL).
+/// `out_json` is optional (may be NULL, in which case the call still
+/// validates the entry exists but produces no payload).
 ///
 /// # Returns
 /// 0 on success, negative error code on failure.
@@ -533,10 +552,7 @@ pub extern "C" fn cubecow_resize_volume(
 pub extern "C" fn cubecow_get_volume_info(
     engine: *mut std::ffi::c_void,
     name: *const c_char,
-    out_size_bytes: *mut u64,
-    out_device_path: *mut *mut c_char,
-    out_snapshot_count: *mut i32,
-    out_created_at: *mut *mut c_char,
+    out_json: *mut *mut c_char,
 ) -> i32 {
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         // SAFETY: `engine` was created by `cubecow_init` and is valid.
@@ -546,21 +562,23 @@ pub extern "C" fn cubecow_get_volume_info(
 
         match eng.get_volume_info(vol_name) {
             Ok(vol) => {
-                // SAFETY: All out-param pointers are checked for null before
-                // dereferencing. The caller guarantees non-null pointers are
-                // valid and writable.
+                let payload = serde_json::json!({
+                    "name": vol.name,
+                    "size_bytes": vol.size_bytes,
+                    "device_path": vol.device_path,
+                    "snapshot_count": vol.snapshot_count,
+                    "created_at": vol.created_at,
+                    "export_uuid": vol.export_uuid,
+                    "export_status": vol.export_status,
+                    "deletable": vol.deletable,
+                });
+                let json_str = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+
+                // SAFETY: `out_json` is checked for null before dereferencing.
+                // The caller guarantees a non-null pointer is writable.
                 unsafe {
-                    if !out_size_bytes.is_null() {
-                        *out_size_bytes = vol.size_bytes;
-                    }
-                    if !out_device_path.is_null() {
-                        *out_device_path = rust_string_to_c(&vol.device_path);
-                    }
-                    if !out_snapshot_count.is_null() {
-                        *out_snapshot_count = vol.snapshot_count;
-                    }
-                    if !out_created_at.is_null() {
-                        *out_created_at = rust_string_to_c(&vol.created_at);
+                    if !out_json.is_null() {
+                        *out_json = rust_string_to_c(&json_str);
                     }
                 }
                 Ok(COW_OK)
@@ -735,7 +753,7 @@ pub extern "C" fn cubecow_list_volumes(
 ///
 /// - `cubecow_activate_volume(name = snapshot_name)` to materialise the
 ///   device later;
-/// - `cubecow_create_snapshot(source_name = snapshot_name, ...)` to
+/// - `cubecow_create_snapshot_from_volume(source_name = snapshot_name, ...)` to
 ///   build a snapshot of this snapshot;
 /// - `cubecow_delete_snapshot(snapshot_name)` to remove it;
 /// - `cubecow_list_snapshots` to enumerate (the entry will appear with
@@ -753,7 +771,7 @@ pub extern "C" fn cubecow_list_volumes(
 /// # Returns
 /// 0 on success, negative error code on failure.
 #[no_mangle]
-pub extern "C" fn cubecow_create_snapshot(
+pub extern "C" fn cubecow_create_snapshot_from_volume(
     engine: *mut std::ffi::c_void,
     source_name: *const c_char,
     snapshot_name: *const c_char,
@@ -768,7 +786,7 @@ pub extern "C" fn cubecow_create_snapshot(
         // SAFETY: `snapshot_name` is a valid C string provided by the caller.
         let snap = unsafe { c_str_to_str(snapshot_name) }?;
 
-        match eng.create_snapshot(src, snap, activate) {
+        match eng.create_snapshot_from_volume(src, snap, activate) {
             Ok(snapshot) => {
                 if !out_device_path.is_null() {
                     // When `activate = false`, `snapshot.device_path` is
@@ -787,7 +805,7 @@ pub extern "C" fn cubecow_create_snapshot(
         Ok(Ok(code)) => code,
         Ok(Err(code)) => code,
         Err(_) => {
-            set_last_error("panic during cubecow_create_snapshot");
+            set_last_error("panic during cubecow_create_snapshot_from_volume");
             COW_ERR_PANIC
         }
     }
@@ -796,7 +814,7 @@ pub extern "C" fn cubecow_create_snapshot(
 /// Activate a volume or snapshot by name (creates its backend device node).
 ///
 /// Must be called before issuing block I/O against a snapshot produced by
-/// `cubecow_create_snapshot`, and can also be used to re-activate a volume /
+/// `cubecow_create_snapshot_from_volume`, and can also be used to re-activate a volume /
 /// snapshot that was previously deactivated via `cubecow_deactivate_volume`.
 /// Idempotent.
 ///
@@ -987,6 +1005,155 @@ pub extern "C" fn cubecow_list_snapshots(
         Ok(Err(code)) => code,
         Err(_) => {
             set_last_error("panic during cubecow_list_snapshots");
+            COW_ERR_PANIC
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-node export / import (backend-specific)
+// ---------------------------------------------------------------------------
+
+/// Publish a read-only snapshot for cross-node recovery.
+///
+/// On success writes the opaque `export_uuid` (owned C string, caller
+/// frees with `cubecow_free_string`) to `out_export_uuid`. Backends
+/// that do not support cross-node recovery return
+/// `COW_ERR_PRECONDITION_FAILED`.
+///
+/// # Returns
+/// 0 on success, negative error code on failure.
+#[no_mangle]
+pub extern "C" fn cubecow_export_snapshot(
+    engine: *mut std::ffi::c_void,
+    snapshot_name: *const c_char,
+    out_export_uuid: *mut *mut c_char,
+) -> i32 {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        // SAFETY: `engine` was created by `cubecow_init` and is valid.
+        let eng = unsafe { engine_ref(engine) }?;
+        // SAFETY: `snapshot_name` is a valid C string provided by the caller.
+        let snap = unsafe { c_str_to_str(snapshot_name) }?;
+
+        match eng.export_snapshot(snap) {
+            Ok(uuid) => {
+                if !out_export_uuid.is_null() {
+                    // SAFETY: `out_export_uuid` is non-null and writable.
+                    unsafe { *out_export_uuid = rust_string_to_c(&uuid) };
+                }
+                Ok(COW_OK)
+            }
+            Err(e) => Err(handle_cow_error(&e)),
+        }
+    }));
+
+    match result {
+        Ok(Ok(code)) => code,
+        Ok(Err(code)) => code,
+        Err(_) => {
+            set_last_error("panic during cubecow_export_snapshot");
+            COW_ERR_PANIC
+        }
+    }
+}
+
+/// Instantiate a writable volume from an `export_uuid` produced by a
+/// remote node's `cubecow_export_snapshot`.
+///
+/// On success writes the newly-created volume's device path (owned
+/// C string, caller frees with `cubecow_free_string`) to
+/// `out_device_path`. Backends that do not support cross-node
+/// recovery return `COW_ERR_PRECONDITION_FAILED`.
+///
+/// # Returns
+/// 0 on success, negative error code on failure.
+#[no_mangle]
+pub extern "C" fn cubecow_import_lvol(
+    engine: *mut std::ffi::c_void,
+    lvol_name: *const c_char,
+    export_uuid: *const c_char,
+    out_device_path: *mut *mut c_char,
+) -> i32 {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        // SAFETY: `engine` was created by `cubecow_init` and is valid.
+        let eng = unsafe { engine_ref(engine) }?;
+        // SAFETY: `lvol_name` is a valid C string provided by the caller.
+        let name = unsafe { c_str_to_str(lvol_name) }?;
+        // SAFETY: `export_uuid` is a valid C string provided by the caller.
+        let uuid = unsafe { c_str_to_str(export_uuid) }?;
+
+        match eng.import_lvol(name, uuid) {
+            Ok(vol) => {
+                if !out_device_path.is_null() {
+                    // SAFETY: `out_device_path` is non-null and writable.
+                    unsafe { *out_device_path = rust_string_to_c(&vol.device_path) };
+                }
+                Ok(COW_OK)
+            }
+            Err(e) => Err(handle_cow_error(&e)),
+        }
+    }));
+
+    match result {
+        Ok(Ok(code)) => code,
+        Ok(Err(code)) => code,
+        Err(_) => {
+            set_last_error("panic during cubecow_import_lvol");
+            COW_ERR_PANIC
+        }
+    }
+}
+
+/// Derive a writable, data-independent volume from an existing snapshot.
+///
+/// The resulting volume is auto-activated (mirroring
+/// `cubecow_create_volume`'s "volume ⇄ device lifetime" contract) and
+/// its device path is written to `out_device_path` (owned C string,
+/// caller frees with `cubecow_free_string`). The source must be an
+/// existing snapshot — passing a writable volume name yields
+/// `COW_ERR_INVALID_ARG`.
+///
+/// # Parameters
+/// - `engine`: opaque engine pointer
+/// - `source_snapshot`: name of the source snapshot (C string)
+/// - `volume_name`: name for the new writable volume (C string)
+/// - `out_device_path`: receives the device path (caller frees with
+///   `cubecow_free_string`). Optional, can be NULL.
+///
+/// # Returns
+/// 0 on success, negative error code on failure.
+#[no_mangle]
+pub extern "C" fn cubecow_create_volume_from_snapshot(
+    engine: *mut std::ffi::c_void,
+    source_snapshot: *const c_char,
+    volume_name: *const c_char,
+    out_device_path: *mut *mut c_char,
+) -> i32 {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        // SAFETY: `engine` was created by `cubecow_init` and is valid.
+        let eng = unsafe { engine_ref(engine) }?;
+        // SAFETY: `source_snapshot` is a valid C string provided by the caller.
+        let src = unsafe { c_str_to_str(source_snapshot) }?;
+        // SAFETY: `volume_name` is a valid C string provided by the caller.
+        let vol = unsafe { c_str_to_str(volume_name) }?;
+
+        match eng.create_volume_from_snapshot(src, vol) {
+            Ok(vol) => {
+                if !out_device_path.is_null() {
+                    // SAFETY: `out_device_path` is non-null and writable.
+                    unsafe { *out_device_path = rust_string_to_c(&vol.device_path) };
+                }
+                Ok(COW_OK)
+            }
+            Err(e) => Err(handle_cow_error(&e)),
+        }
+    }));
+
+    match result {
+        Ok(Ok(code)) => code,
+        Ok(Err(code)) => code,
+        Err(_) => {
+            set_last_error("panic during cubecow_create_volume_from_snapshot");
             COW_ERR_PANIC
         }
     }

@@ -6,6 +6,7 @@ package network
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	networkruntime "github.com/tencentcloud/CubeSandbox/Cubelet/network/runtime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 )
 
@@ -171,7 +173,27 @@ func mergeDNSAllowOutCIDRs(ctx context.Context, cfg *networkruntime.CubeNetworkC
 	if out == nil {
 		out = &networkruntime.CubeNetworkConfig{}
 	}
-	dnsAllowOutCIDRs := make([]string, 0, len(dnsServers))
+	dnsAllowOutCIDRs := dnsServersToAllowOutCIDRs(ctx, dnsServers)
+	// CubeVS AllowOut entries are CIDR-only today and cannot express UDP/TCP port 53.
+	// These resolver CIDRs intentionally keep domain-based allow rules functional
+	// even when AllowInternetAccess=false; restricting them to DNS ports requires a
+	// network runtime/CubeVS policy-model extension.
+	out.AllowOut = appendUniqueString(out.AllowOut, dnsAllowOutCIDRs)
+	return out, dnsAllowOutCIDRs
+}
+
+// dnsServersToAllowOutCIDRs converts resolved DNS server addresses into
+// allow_out CIDRs, dropping the ones CubeVS cannot express.
+//
+// Kept separate from mergeDNSAllowOutCIDRs because the two questions are
+// different: whether to *merge* these into the policy depends on the policy
+// naming a domain, but the list itself is a property of the sandbox and is
+// recorded unconditionally so a later policy update can fold it back in.
+func dnsServersToAllowOutCIDRs(ctx context.Context, dnsServers []string) []string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cidrs := make([]string, 0, len(dnsServers))
 	for _, dnsServer := range dnsServers {
 		cidr, ok := dnsServerToCIDR(dnsServer)
 		if !ok {
@@ -180,14 +202,9 @@ func mergeDNSAllowOutCIDRs(ctx context.Context, cfg *networkruntime.CubeNetworkC
 			}
 			continue
 		}
-		dnsAllowOutCIDRs = append(dnsAllowOutCIDRs, cidr)
+		cidrs = append(cidrs, cidr)
 	}
-	// CubeVS AllowOut entries are CIDR-only today and cannot express UDP/TCP port 53.
-	// These resolver CIDRs intentionally keep domain-based allow rules functional
-	// even when AllowInternetAccess=false; restricting them to DNS ports requires a
-	// network runtime/CubeVS policy-model extension.
-	out.AllowOut = appendUniqueString(out.AllowOut, dnsAllowOutCIDRs)
-	return out, dnsAllowOutCIDRs
+	return cidrs
 }
 
 // shouldAppendDNSAllowOut keeps the resolver exception narrow: pure IP/CIDR
@@ -376,4 +393,57 @@ func appendUniqueString(base []string, extra []string) []string {
 		out = append(out, item)
 	}
 	return out
+}
+
+// ErrSandboxNetworkNotActive reports that the sandbox has no active network, so
+// its policy cannot be updated. Callers map it to a client-visible conflict
+// rather than an internal failure.
+var ErrSandboxNetworkNotActive = networkruntime.ErrNetworkNotActive
+
+// UpdateSandboxNetworkPolicy replaces a running sandbox's egress policy.
+//
+// cfg is the complete desired state as authored by the user; the runtime folds
+// the sandbox's DNS resolver CIDRs back in, so callers pass exactly what the
+// API received. Unlike Create there is no legacy-annotation fallback: the
+// update API is new, so a caller that omits the config is a programming error
+// rather than an old client.
+func UpdateSandboxNetworkPolicy(ctx context.Context, sandboxID string, cfg *cubebox.CubeNetworkConfig) error {
+	if dnm == nil || dnm.tapPlugin == nil || dnm.tapPlugin.networkRuntime == nil {
+		return fmt.Errorf("network runtime is not initialized")
+	}
+	if sandboxID == "" {
+		return fmt.Errorf("sandbox id is empty")
+	}
+	return dnm.tapPlugin.networkRuntime.UpdateNetworkPolicy(ctx, &networkruntime.UpdateNetworkPolicyRequest{
+		SandboxID:         sandboxID,
+		CubeNetworkConfig: mapRunRequestCubeNetworkConfig(cfg),
+		DNSAllowOutCIDRs:  hostDNSAllowOutCIDRs(ctx),
+	})
+}
+
+// hostDNSAllowOutCIDRs resolves the node's default DNS servers as allow-out
+// CIDRs. The runtime only needs this for sandboxes created before it started
+// recording its own resolver list; those it recorded win. Per-container DNS
+// overrides are not recoverable here, so such a legacy sandbox falls back to
+// the node defaults — still better than losing DNS outright.
+func hostDNSAllowOutCIDRs(ctx context.Context) []string {
+	servers, err := netfile.ResolveEffectiveDNSServers(nil)
+	if err != nil {
+		log.G(ctx).Warnf("update network policy: resolve host dns servers failed: %v", err)
+		return nil
+	}
+	cidrs := make([]string, 0, len(servers))
+	for _, server := range servers {
+		if cidr, ok := dnsServerToCIDR(server); ok {
+			cidrs = append(cidrs, cidr)
+		}
+	}
+	return cidrs
+}
+
+// IsSandboxNetworkNotActive reports whether err means the sandbox has no active
+// network, which is a caller mistake (wrong or stopped sandbox) rather than a
+// node-side failure.
+func IsSandboxNetworkNotActive(err error) bool {
+	return errors.Is(err, ErrSandboxNetworkNotActive)
 }

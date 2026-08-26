@@ -234,6 +234,46 @@ Set `redis.host` to use an existing Redis service; the chart will not install `c
 CubeProxy registry heartbeats resolve Redis by hostname, so a redis Pod IP change self-heals.
 Use an FQDN or IP literal: nginx's `resolver` does not apply search domains.
 
+## MinIO and the S3 volume plugin
+
+`minio.*` only installs MinIO (image, port, root user/password, bucket, PVC).
+`volumeS3.*` is the source of truth for the S3 volume plugin: `volume-s3.conf`
+is always rendered from effective S3 fields, never from `minio.*` as a plugin
+config source.
+
+When `minio.enabled=true` (the default) and the operator left
+`volumeS3.endpoint` / `existingSecret` empty, the chart **fills** those S3
+fields from the chart MinIO (in-cluster endpoint, `rootUser` / generated
+password, `bucket`, path-style s3fs options) — same model as one-click
+`CUBE_S3_*` after local MinIO. Leave `minio.rootPassword` empty to generate a
+password on first install (reused from the existing Secret on upgrade).
+
+To use an existing S3-compatible store, set `minio.enabled=false` and
+`volumeS3.endpoint` (or `volumeS3.existingSecret`). Combining both fails render.
+
+| Goal | Values |
+| --- | --- |
+| Built-in MinIO (default) | `minio.enabled: true`, leave `volumeS3.endpoint` empty |
+| External S3 | `minio.enabled: false` plus `volumeS3.endpoint` / `accessKeyId` / `secretAccessKey` / `bucket` |
+| Existing Secret | `minio.enabled: false` plus `volumeS3.existingSecret: <secret with key volume-s3.conf>` |
+| No S3 backend | `minio.enabled: false` and leave `volumeS3.endpoint` empty |
+
+```yaml
+# Point the S3 volume plugin at your own store (MinIO off):
+minio:
+  enabled: false
+volumeS3:
+  endpoint: "https://s3.example.com"
+  accessKeyId: "AKIA..."
+  secretAccessKey: "..."
+  bucket: "cube-volumes"
+  region: us-east-1
+  extraOpts: "-ouse_path_request_style"   # path-style endpoints
+```
+
+When `minio.rootPassword` is set, it must be at least 8 characters (MinIO
+requirement).
+
 ## CubeMaster configuration
 
 The `cube-master` image is built like CI from `CubeMaster/docker/Dockerfile` (repository-root context) and does not carry a Kubernetes-specific entrypoint or bundled `conf.yaml`.
@@ -244,7 +284,7 @@ The chart uses PVC-backed persistence by default so state can survive
 rescheduling across dedicated control nodes:
 
 ```yaml
-# Optional: pin all three control-plane PVCs at once
+# Optional: pin all four control-plane PVCs at once
 persistence:
   storageClassName: ""   # empty → cluster default SC
 
@@ -264,6 +304,11 @@ redis:
     enabled: true
     hostPath: ""
     storageClassName: ""
+minio:
+  persistence:
+    enabled: true
+    hostPath: ""
+    storageClassName: ""
 ```
 
 Set `persistence.storageClassName` (or a component-level
@@ -273,7 +318,7 @@ via `values-tke.yaml`) if you need to pin PVCs. Empty falls back to the
 cluster's default StorageClass, which works out of the box for most
 self-hosted / EKS / GKE / AKS clusters. Use `hostPath` only for
 single-node throwaway environments; multi-control-node deployments must
-use PVCs or external MySQL / Redis. `existingClaim` overrides both
+use PVCs or external MySQL / Redis / S3. `existingClaim` overrides both
 `storageClassName` and `hostPath`.
 
 Do not confuse `storageClass.*` (whether the chart **creates** a
@@ -313,7 +358,7 @@ or set it to `""` if you manage CLB security groups outside Helm.
 
 Default Chart values pull Cube images from TCR **int**
 (`cube-sandbox-int.tencentcloudcr.com`). Users in mainland China should layer
-`values-cn.yaml` so component images, plus mirrored MySQL / Redis / kubectl,
+`values-cn.yaml` so component images, plus mirrored MySQL / Redis / MinIO / kubectl,
 come from TCR **cn** (`cube-sandbox-cn.tencentcloudcr.com`):
 
 ```bash
@@ -324,7 +369,7 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
 ```
 
 Combine with `values-tke.yaml` when installing on TKE in China. The preset sets
-`global.imageRegistry` to the cn host and overrides mysql / redis / kubectl
+`global.imageRegistry` to the cn host and overrides mysql / redis / minio / kubectl
 repositories that do not go through `cube.cubeImage`.
 
 ## Database migration
@@ -355,7 +400,7 @@ the real binary:
 ```bash
 kubectl exec -n cube-system deploy/cube-cubemastercli -- cubemastercli --help
 kubectl exec -n cube-system deploy/cube-cubemastercli -- \
-  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" cubebox list'
 kubectl exec -n cube-system deploy/cube-cubemastercli -- \
   sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" template list'
 ```
@@ -363,6 +408,23 @@ kubectl exec -n cube-system deploy/cube-cubemastercli -- \
 The `cubemastercli` image is intentionally independent from `cube-master` and
 `cube-node`. It contains CLI/operator tooling only; the runtime images do not
 carry this operational entry point.
+
+## cubeopscli operational CLI
+
+The `cubeopscli` binary (from CubeOps, for node management: list/isolate/unisolate)
+is bundled inside the `cubemastercli` image. There is no separate
+`<release>-cubeopscli` Deployment — both CLIs live in the same
+`<release>-cubemastercli` Pod.
+
+When CubeOps is enabled (`cubeOps.enabled` or `externalControlPlane.enabled`),
+the chart injects `CUBEOPSCLI_ADDRESS` and `CUBEOPSCLI_PORT` into the
+cubemastercli Pod so both CLIs are usable via `kubectl exec`:
+
+```bash
+kubectl exec -n cube-system deploy/cube-cubemastercli -- cubeopscli --help
+kubectl exec -n cube-system deploy/cube-cubemastercli -- \
+  sh -lc 'cubeopscli --address "$CUBEOPSCLI_ADDRESS" --port "$CUBEOPSCLI_PORT" node list'
+```
 
 ## Cube Proxy Node
 
@@ -572,7 +634,7 @@ kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c cubelet 
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c wait-node-prep --tail=50
 kubectl logs -n cube-system deploy/cube-master -c cube-master --tail=100
 kubectl exec -n cube-system deploy/cube-cubemastercli -- \
-  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" node list'
+  sh -lc 'cubemastercli --address "$CUBEMASTERCLI_ADDRESS" --port "$CUBEMASTERCLI_PORT" cubebox list'
 helm test cube -n cube-system --timeout 20m
 ```
 

@@ -250,6 +250,9 @@ class CubeSandboxAdapter(SandboxAdapter):
                 return str(raw[key])
         return None
 
+    def update_network(self, network: dict | None = None) -> None:
+        self._sandbox.update_network(network)
+
     def kill(self) -> None:
         self._sandbox.kill()
 

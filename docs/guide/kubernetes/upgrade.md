@@ -7,7 +7,12 @@ The goal in one sentence: **the control plane can roll in an orderly fashion; co
 ::: warning Preview version warning
 The compute plane uses native `apps/v1` DaemonSets: image / resource / template changes **delete and recreate** the Big Pod (PodIP / netns change), which breaks existing sandbox networking. Compute-plane upgrades **recreate the `cube-node` Big Pod** (native DaemonSet) and **will interrupt existing sandboxes on that node**. Before upgrading, call CubeMaster’s isolate API, isolate the node for at least 60 seconds, and destroy the sandboxes on that node. Only after sandboxes are destroyed is it safe to upgrade the node. See [Node Isolation](../node-isolation.md) for the isolate / unisolate commands.
 
-**To smooth upgrades, you may use a Kubernetes plugin you are familiar with to achieve “in-place upgrade”** — update container images without recreating the Pod. After deploying the current version, carefully evaluate changes and test before upgrading further.
+**To make upgrades non-disruptive, you have two options:**
+
+1. Deploy `cube-node` with `hostNetwork` so that Pod recreation no longer breaks sandbox networking — see [Install · cube-node networking and Pod recreation](./install.md#_8-3-cube-node-networking-and-pod-recreation).
+2. Use a Kubernetes plugin you are familiar with to achieve “in-place upgrade” — update container images without recreating the Pod.
+
+After deploying the current version, carefully evaluate changes and test before upgrading further.
 
 **These issues will be addressed in later versions. You are welcome to try the K8s deployment path and report issues and suggestions via Issues.**
 :::
@@ -15,6 +20,8 @@ The compute plane uses native `apps/v1` DaemonSets: image / resource / template 
 ## Why does Big Pod recreate interrupt sandboxes?
 
 CubeSandbox’s network (cubevs) hooks attach to the Pod’s network interface, and sandbox tap devices live in the same netns as the Pod. Recreating the Pod destroys that netns and breaks sandbox networking. Compute upgrades are therefore **disruptive** and need a maintenance window plus node isolation.
+
+Deploying `cube-node` with `hostNetwork: true` at install time avoids the netns change: sandbox network devices then live in the host netns and survive Pod recreation. See [Install · cube-node networking and Pod recreation](./install.md#_8-3-cube-node-networking-and-pod-recreation) for details and caveats, and [PR #1189](https://github.com/TencentCloud/CubeSandbox/pull/1189) for the full in-place replacement design (not yet merged).
 
 ## What are you upgrading, and which workload do you change?
 
@@ -81,9 +88,28 @@ Expect:
 
 - Control-plane Pods finished rolling per Deployment strategy (`cube-master` uses Recreate; other CP Deployments use RollingUpdate)
 - Compute: matching DaemonSet Pods run the new images and are Ready
-- If you bumped Big Pod runtime: existing sandboxes on that node were interrupted; new sandboxes can be created; the node has re-registered with CubeMaster
+- If you bumped Big Pod runtime: existing sandboxes on that node were interrupted; new sandboxes can be created; the node has re-registered with CubeOps
 
 ---
+
+## Upgrade order
+
+During the cube-master → cube-ops migration, components target different endpoints. Apply upgrades in this order to keep the cluster healthy during the cutover:
+
+1. **Bring CubeOps up first (and reachable).** New cubelets with
+   `meta_server_endpoint` pointing at cube-ops fail-fast if the address is
+   unreachable, so cube-ops must be Ready before any cubelet is upgraded.
+2. **Bring CubeMaster up after CubeOps.** CubeMaster fails to start when
+   `cube_ops_addr` is set and cube-ops is down, so cube-ops must be reachable
+   before cube-master boots.
+3. **Do not mix old and new cubelets in one cluster during the cutover.**
+   Old cubelets report to cube-master `:8089`; new cubelets report to
+   cube-ops `:3010`. A mixed fleet reports inconsistent node state. Roll
+   cubelets per node, or take the entire compute plane down before
+   upgrading.
+4. **Only after the above** can you roll `cube-master`, `cube-api`, and
+   compute nodes in the order you prefer.
+
 
 ## Red lines: these operations also recreate the Big Pod
 

@@ -24,6 +24,7 @@ AGENT_EXT4_CONTAINER_DIR := /workspace/$(patsubst $(ROOT_DIR)/%,%,$(abspath $(AG
 MANUAL_DEPLOY_SCRIPT ?= $(ROOT_DIR)/deploy/one-click/deploy-manual.sh
 WEB_DIR ?= $(ROOT_DIR)/web
 CUBECOW_DIR ?= $(ROOT_DIR)/cubecow
+CUBES3LVOL_DIR ?= $(ROOT_DIR)/CubeS3lvol
 CUBELET_COW_THIRD_PARTY_DIR ?= $(ROOT_DIR)/Cubelet/third_party/cubecow
 COW_STATICLIB ?= $(CUBELET_COW_THIRD_PARTY_DIR)/lib/libcubecow.a
 COW_HEADER ?= $(CUBELET_COW_THIRD_PARTY_DIR)/include/cubecow.h
@@ -71,6 +72,7 @@ GO_BUILD_ARTIFACT_DIRS := \
 	$(ROOT_DIR)/CubeProxy/bin \
 	$(ROOT_DIR)/cube-lifecycle-manager/bin \
 	$(ROOT_DIR)/examples/cube-bench/bin \
+	$(ROOT_DIR)/examples/volume/s3/bin \
 	$(CUBELET_COW_THIRD_PARTY_DIR) \
 	$(OUTPUT_DIR) \
 	$(AGENT_EXT4_OUTPUT_DIR)
@@ -81,6 +83,7 @@ GO_BUILD_ARTIFACT_FILES := \
 BINARIES := \
 	agent \
 	cube-init \
+	cube-volume-s3 \
 	cubeapi \
 	cubelet \
 	cubemaster \
@@ -108,11 +111,10 @@ endif
 # mirrors: the ubuntu apt archive (amd64 -> $(APT_MIRROR_BASE)/ubuntu, arm64 ->
 # $(APT_MIRROR_BASE)/ubuntu-ports) plus the llvm.sh installer script and clang-14
 # apt packages (override the LLVM mirror host with LLVM_MIRROR_BASE=...). Unset
-# builds against upstream archive.ubuntu.com/ports.ubuntu.com and apt.llvm.org. The
-# LLVM GPG signing key is always fetched from apt.llvm.org -- llvm.sh hardcodes that
-# URL and the mirror does not serve the key -- but that is a small request that
-# usually succeeds even when bulk package downloads from apt.llvm.org are slow. This
-# build-time MIRROR is unrelated to the runtime MIRROR=cn used by deploy/one-click.
+# builds against upstream archive.ubuntu.com/ports.ubuntu.com and apt.llvm.org.
+# The LLVM GPG signing key is vendored at docker/llvm-snapshot.gpg.key so the
+# image build does not wget it from apt.llvm.org. This build-time MIRROR is
+# unrelated to the runtime MIRROR=cn used by deploy/one-click.
 APT_MIRROR_BASE ?= http://mirrors.tencent.com
 LLVM_MIRROR_BASE ?= https://mirrors.zju.edu.cn/llvm-apt
 BUILDER_BUILD_ARGS ?=
@@ -136,9 +138,13 @@ help:
 	@printf "  cubelet       Build cubelet and cubecli in Docker\n"
 	@printf "  cubevsmapdump Build CubeVS eBPF business map dump tool in Docker\n"
 	@printf "  cubecow-sdk   Build cubecow static library for Cubelet\n"
+	@printf "  cube-s3lvol   Build CubeS3lvol (s3lvol) release in Docker\n"
+	@printf "  cube-s3lvol-test Run CubeS3lvol offline integration tests in Docker\n"
 	@printf "  cubecow-smoke Build cubecow smoke test CLI in Docker\n"
 	@printf "  cubecow-test-native Build SDK artifacts and run native tests in Docker\n"
 	@printf "  cube-proxy-sidecar Build cube-proxy-sidecar (developer-only; not in 'all')\n"
+	@printf "  cube-volume-s3 Build the S3-compatible Volume plugin in Docker\n"
+	@printf "  cube-volume-s3-test Run S3 Volume plugin unit tests in Docker\n"
 	@printf "  agent         Build cube-agent in Docker\n"
 	@printf "  cube-init     Build cube-init (guest PID1) in Docker (alias: guest-init)\n"
 	@printf "  guest-init    Alias for cube-init (source dir guest-init/)\n"
@@ -186,14 +192,33 @@ help:
 	@printf "  - Run 'make builder-image' first if image %s is missing\n" "$(BUILDER_IMAGE)"
 
 .PHONY: builder-image
-# BUILDER_FORCE_REBUILD rebuilds even when the image is present, and adds
-# --no-cache so a stale image is refreshed from scratch rather than reproduced
-# from the Docker layer cache. A plain first build (image missing) stays cached.
+# Context is the repo root (Dockerfile COPYs CubeS3lvol/setup_dep.sh + patches/).
+# Rebuilds when the image's s3lvol SPDK/AWS stamps no longer match the current
+# pin + patches (toolchain layers stay cached). BUILDER_FORCE_REBUILD=1 forces it.
 builder-image:
-	@if [ -z "$(BUILDER_FORCE_REBUILD)" ] && docker image inspect $(BUILDER_IMAGE) >/dev/null 2>&1; then \
-		printf 'Builder image %s already present, skipping build (set BUILDER_FORCE_REBUILD=1 to rebuild)\n' "$(BUILDER_IMAGE)"; \
+	@expected_spdk="$$($(CUBES3LVOL_DIR)/setup_dep.sh --print-stamp spdk)"; \
+	expected_aws="$$($(CUBES3LVOL_DIR)/setup_dep.sh --print-stamp aws)"; \
+	need_build=0; \
+	if [ -n "$(BUILDER_FORCE_REBUILD)" ]; then \
+		need_build=1; \
+	elif ! docker image inspect $(BUILDER_IMAGE) >/dev/null 2>&1; then \
+		need_build=1; \
 	else \
-		docker build $(if $(filter-out 0,$(BUILDER_FORCE_REBUILD)),--no-cache) $(BUILDER_BUILD_ARGS) -t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) ./docker; \
+		actual_spdk="$$(docker image inspect -f '{{index .Config.Labels "org.cubesandbox.s3lvol.spdk-stamp"}}' $(BUILDER_IMAGE) 2>/dev/null || true)"; \
+		actual_aws="$$(docker image inspect -f '{{index .Config.Labels "org.cubesandbox.s3lvol.aws-stamp"}}' $(BUILDER_IMAGE) 2>/dev/null || true)"; \
+		if [ "$$actual_spdk" != "$$expected_spdk" ] || [ "$$actual_aws" != "$$expected_aws" ]; then \
+			printf 'Builder image %s s3lvol stamps stale (spdk %s -> %s, aws %s -> %s), rebuilding\n' \
+				"$(BUILDER_IMAGE)" "$${actual_spdk:-none}" "$$expected_spdk" "$${actual_aws:-none}" "$$expected_aws"; \
+			need_build=1; \
+		fi; \
+	fi; \
+	if [ "$$need_build" -eq 0 ]; then \
+		printf 'Builder image %s already present and s3lvol stamps match, skipping build (set BUILDER_FORCE_REBUILD=1 to rebuild)\n' "$(BUILDER_IMAGE)"; \
+	else \
+		docker build $(if $(filter-out 0,$(BUILDER_FORCE_REBUILD)),--no-cache) $(BUILDER_BUILD_ARGS) \
+			--build-arg S3LVOL_SPDK_STAMP="$$expected_spdk" \
+			--build-arg S3LVOL_AWS_STAMP="$$expected_aws" \
+			-t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) .; \
 	fi
 
 .PHONY: prepare-builder-home
@@ -232,6 +257,12 @@ builder-run: prepare-builder-home prepare-tmp-git-credentials
 ifeq ($(strip $(BUILDER_CMD)),)
 	$(error BUILDER_CMD must not be empty)
 endif
+# The container can run as a different user than the owner of files under the
+# mounted workspace. In CI, cube-s3lvol-test runs as root (0:0, DPDK EAL), but
+# deps/spdk restored from the actions/cache are owned by the runner uid, so
+# git inside the container refuses them ("dubious ownership"). Mark every repo
+# under the mounted workspace as safe -- this only relaxes that check inside
+# the throwaway container.
 	docker run --rm -i \
 		--user "$(BUILDER_USER)" \
 		-e HOME=$(BUILDER_CONTAINER_HOME) \
@@ -249,7 +280,7 @@ endif
 		$(DOCKER_GIT_CRED) \
 		-w /workspace \
 		$(BUILDER_IMAGE) \
-		bash -lc 'mkdir -p "$$HOME" "$$CARGO_HOME" "$$GOPATH" "$$HOME/.cache" "$$HOME/.config" && exec bash -lc "$$BUILDER_CMD"'
+		bash -lc 'mkdir -p "$$HOME" "$$CARGO_HOME" "$$GOPATH" "$$HOME/.cache" "$$HOME/.config" && git config --global --add safe.directory "*" && exec bash -lc "$$BUILDER_CMD"'
 
 .PHONY: cubecow-sdk
 cubecow-sdk:
@@ -261,6 +292,44 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 else
 	$(MAKE) builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk'
+endif
+
+# cube-s3lvol: build the CubeS3lvol release in Docker, mirroring track_s3lvol.
+# setup_dep.sh reuses /opt/s3lvol-* from the builder when stamps match.
+.PHONY: cube-s3lvol
+cube-s3lvol:
+ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
+	@mkdir -p "$(OUTPUT_DIR)/CubeS3lvol"
+	cd "$(CUBES3LVOL_DIR)" && AWS_BUILD_TYPE=RelWithDebInfo ./setup_dep.sh --jobs "$$(nproc)"
+	cd "$(CUBES3LVOL_DIR)" && AWS_BUILD_TYPE=RelWithDebInfo make S3LVOL_BUILD_TYPE=release -j"$$(nproc)"
+	cd "$(CUBES3LVOL_DIR)" && AWS_BUILD_TYPE=RelWithDebInfo ./make_release.sh --no-tar --skip-smoke --version "$(CUBE_VERSION)" --outdir "$(OUTPUT_DIR)/CubeS3lvol"
+	@printf 'CubeS3lvol release: %s/CubeS3lvol/s3lvol-*/ (bin/s3lvol_tgt + scripts/ + VERSION)\n' "$(OUTPUT_DIR)"
+else
+	$(MAKE) builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cube-s3lvol'
+endif
+
+# cube-s3lvol-test: the CI gate (check-rules + debug make + check-offline).
+# Journal/wal/cache/local_dev tests write aio files under /data; tmpfs keeps
+# that off the host. The DPDK EAL tests (--no-huge) still need locked memory,
+# /sys cgroup/cpu topology, and a writable runtime dir; a non-root docker
+# process cannot initialise the EAL (spdk_env_init -> exit 77). Same privileged
+# root pattern as cubevs-test. Incremental setup_dep.sh / make do not rewrite
+# existing 1000-owned deps. setup_dep.sh is incremental.
+.PHONY: cube-s3lvol-test
+cube-s3lvol-test:
+ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
+	cd "$(CUBES3LVOL_DIR)" && ./setup_dep.sh --jobs "$$(nproc)"
+	cd "$(CUBES3LVOL_DIR)" && make check-rules
+	cd "$(CUBES3LVOL_DIR)" && make -j"$$(nproc)"
+	cd "$(CUBES3LVOL_DIR)" && mkdir -p /tmp/s3lvol-dpdk && \
+		RTE_RUNTIME_DIR=/tmp/s3lvol-dpdk make check-offline
+else
+	$(MAKE) builder-image
+	$(MAKE) builder-run \
+		BUILDER_USER=0:0 \
+		BUILDER_RUN_EXTRA_MOUNTS='--privileged --tmpfs /data:rw,mode=1777 --ulimit memlock=-1' \
+		BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cube-s3lvol-test'
 endif
 
 .PHONY: cubecow-clean
@@ -324,6 +393,13 @@ cubevsmapdump: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeNet/cubevs && make gen && go build -o /workspace/_output/bin/cubevsmapdump ./cmd/cubevsmapdump'
 
+# S3-compatible Volume plugin. CubeMaster/Cubelet fork it once per hook, so it
+# ships as a standalone static binary next to the component binaries.
+.PHONY: cube-volume-s3
+cube-volume-s3: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/examples/volume/s3 && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -trimpath -ldflags '-s -w' -o /workspace/_output/bin/cube-volume-s3 ./cmd/cube-volume-s3"
+
 .PHONY: cube-proxy-sidecar
 cube-proxy-sidecar: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
@@ -371,11 +447,17 @@ cube-api: cubeapi
 .PHONY: cubeops
 cubeops: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/CubeOps && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -ldflags '-s -w -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Version=$(CUBE_VERSION) -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Commit=$(CUBE_COMMIT) -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.BuildTime=$(CUBE_BUILD_TIME)' -o /workspace/_output/bin/cubeops ./cmd/cubeops"
+	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/CubeOps && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -ldflags '-s -w -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Version=$(CUBE_VERSION) -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Commit=$(CUBE_COMMIT) -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.BuildTime=$(CUBE_BUILD_TIME)' -o /workspace/_output/bin/cubeops ./cmd/cubeops && go build -ldflags '-s -w' -o /workspace/_output/bin/cubeopscli ./cmd/cubeopscli"
 
 .PHONY: cubeops-test
 cubeops-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeOps && go mod download && go test ./...'
+
+# The plugin's tests need no cloud access; the s3fs helpers skip themselves when
+# mountpoint(1) is unavailable.
+.PHONY: cube-volume-s3-test
+cube-volume-s3-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/examples/volume/s3 && go mod download && go vet ./... && go test ./...'
 
 .PHONY: cubemaster-test
 cubemaster-test: builder-image
@@ -551,6 +633,8 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C sdk/go fmt
 	@printf '  %-8s %s\n' "FMT" "examples/cube-bench"
 	@$(MAKE) -C examples/cube-bench fmt
+	@printf '  %-8s %s\n' "FMT" "examples/volume/s3"
+	@$(MAKE) -C examples/volume/s3 fmt
 else
 	@$(MAKE) builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make fmt'

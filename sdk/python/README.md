@@ -6,7 +6,7 @@
   <a href="https://github.com/TencentCloud/CubeSandbox"><img src="https://img.shields.io/badge/CubeSandbox-GitHub-blue" alt="CubeSandbox" /></a>
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green" alt="Apache 2.0" /></a>
   <img src="https://img.shields.io/badge/Python-3.9%2B-blue" alt="Python 3.9+" />
-  <img src="https://img.shields.io/badge/version-0.6.0-orange" alt="v0.6.0" />
+  <img src="https://img.shields.io/badge/version-0.7.0-orange" alt="v0.7.0" />
 </p>
 
 ---
@@ -403,8 +403,9 @@ lookup remains supported.
 | `.sandbox_domain` | `str \| None` | Sandbox domain (raw `domain`) |
 | `.started_at` | `datetime \| None` | Start time (raw `startedAt` string) |
 | `.end_at` | `datetime \| None` | Expiry time (raw `endAt` string) |
-| `.cpu_count` | `int \| None` | vCPU count (raw `cpuCount`) |
-| `.memory_mb` | `int \| None` | Memory in MB (raw `memoryMB`) |
+| `.cpu_count` | `int \| None` | vCPU count, truncates sub-core to 0 (raw `cpuCount`) |
+| `.cpu_milli` | `int \| None` | Exact CPU allocation in millicores, e.g. 500 for 0.5 vCPU (raw `cpuMilli`) |
+| `.memory_mb` | `int \| None` | Memory in MiB (raw `memoryMB`; the historical field name is retained) |
 | `.disk_size_mb` | `int \| None` | Disk size in MB (raw `diskSizeMB`) |
 | `.envd_version` | `str` | envd version (raw `envdVersion`) |
 | `.state` | `SandboxState \| str \| None` | Lifecycle state; unknown values fall back to the raw string |

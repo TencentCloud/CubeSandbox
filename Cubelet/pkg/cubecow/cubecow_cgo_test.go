@@ -82,12 +82,12 @@ func TestFullLifecycle(t *testing.T) {
 		t.Fatalf("ResizeVolume did not expand: old=%d new=%d", oldSize, newSize)
 	}
 
-	snapshotDev, err := engine.CreateSnapshot(volumeName, snapshotName, true)
+	snapshotDev, err := engine.CreateSnapshotFromVolume(volumeName, snapshotName, true)
 	if err != nil {
-		t.Fatalf("CreateSnapshot failed: %v", err)
+		t.Fatalf("CreateSnapshotFromVolume failed: %v", err)
 	}
 	if snapshotDev == "" {
-		t.Fatal("CreateSnapshot returned empty device path")
+		t.Fatal("CreateSnapshotFromVolume returned empty device path")
 	}
 	defer func() { _ = engine.DeleteSnapshot(snapshotName) }()
 

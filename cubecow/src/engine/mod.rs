@@ -14,10 +14,11 @@
 // [`crate::initialize`] based on [`crate::config::BackendKind`].
 
 pub mod reflink;
+pub mod s3;
 
 use std::collections::HashMap;
 
-use crate::pkg::errors::CubecowResult;
+use crate::pkg::errors::{CubecowError, CubecowResult};
 use crate::{Snapshot, Volume, VolumeBlockInfo};
 
 /// Backend-agnostic interface for the cubecow storage engine.
@@ -67,7 +68,7 @@ pub trait Engine: Send + Sync {
     /// Create a snapshot from a volume or another snapshot. The `activate`
     /// flag controls whether a backing block-device handle is materialised
     /// alongside the snapshot metadata.
-    fn create_snapshot(
+    fn create_snapshot_from_volume(
         &self,
         source_name: &str,
         snapshot_name: &str,
@@ -76,6 +77,15 @@ pub trait Engine: Send + Sync {
 
     /// Delete a snapshot by name.
     fn delete_snapshot(&self, snapshot_name: &str) -> CubecowResult<()>;
+
+    /// Derive a writable, data-independent volume from an existing snapshot.
+    /// The returned volume is auto-activated, matching the
+    /// "volume ⇄ device lifetime" contract of [`Engine::create_volume`].
+    fn create_volume_from_snapshot(
+        &self,
+        source_snapshot: &str,
+        volume_name: &str,
+    ) -> CubecowResult<Volume>;
 
     /// List snapshots of a volume with pagination.
     /// Returns (snapshots, next_page_token).
@@ -95,6 +105,24 @@ pub trait Engine: Send + Sync {
 
     /// Deactivate a volume or snapshot by name. Idempotent.
     fn deactivate_volume(&self, name: &str) -> CubecowResult<()>;
+
+    // -----------------------------------------------------------------------
+    // Cross-node export / import (optional; backend-specific)
+    // -----------------------------------------------------------------------
+
+    /// Export a snapshot for cross-node recovery. Returns an opaque `export_uuid`.
+    fn export_snapshot(&self, _snapshot_name: &str) -> CubecowResult<String> {
+        Err(CubecowError::PreconditionFailed(
+            "export_snapshot is not implemented by this backend".to_string(),
+        ))
+    }
+
+    /// Import a writable volume from an `export_uuid` produced by a remote node.
+    fn import_lvol(&self, _lvol_name: &str, _export_uuid: &str) -> CubecowResult<Volume> {
+        Err(CubecowError::PreconditionFailed(
+            "import_lvol is not implemented by this backend".to_string(),
+        ))
+    }
 
     // -----------------------------------------------------------------------
     // Node operations

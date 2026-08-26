@@ -11,6 +11,7 @@ export {
   type PauseOptions,
   type ListSnapshotsOptions,
   type NetworkOptions,
+  type UpdateNetworkOptions,
   type LifecycleOptions,
 } from "./sandbox.js";
 

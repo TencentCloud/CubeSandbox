@@ -128,9 +128,19 @@ spec:
           volumeMounts:
             {{- include "cube.nodeDataplaneVolumeMounts" . | nindent 12 }}
           {{- if .Values.volumeCos.enabled }}
+            # File bind on the hostPath toolbox. cubelet staging overlays Cubelet/
+            # in place so this mount is not renamed aside with the directory.
             - name: volume-cos-conf
               mountPath: /usr/local/services/cubetoolbox/Cubelet/plugin/volume-cos.conf
               subPath: volume-cos.conf
+              readOnly: true
+          {{- end }}
+          {{- if eq (include "cube.volumeS3Enabled" .) "true" }}
+            # File bind on the hostPath toolbox. cubelet staging overlays Cubelet/
+            # in place so this mount is not renamed aside with the directory.
+            - name: volume-s3-conf
+              mountPath: /usr/local/services/cubetoolbox/Cubelet/plugin/volume-s3.conf
+              subPath: volume-s3.conf
               readOnly: true
           {{- end }}
           resources:
@@ -325,6 +335,12 @@ spec:
         - name: volume-cos-conf
           secret:
             secretName: {{ include "cube.volumeCosSecretName" . }}
+            defaultMode: 0400
+      {{- end }}
+      {{- if eq (include "cube.volumeS3Enabled" .) "true" }}
+        - name: volume-s3-conf
+          secret:
+            secretName: {{ include "cube.volumeS3SecretName" . }}
             defaultMode: 0400
       {{- end }}
       {{- if .Values.cubeEgress.enabled }}

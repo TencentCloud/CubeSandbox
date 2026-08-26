@@ -3,7 +3,11 @@ common:
   http_readtimeout: 120
   http_writetimeout: 360
   http_idletimeout: 360
-  sync_meta_data_interval: 30s
+  # CubeOps node-management base URL. CubeOps is the authoritative node source;
+  # CubeMaster fails to start if unreachable at boot.
+  cube_ops_addr: "http://127.0.0.1:3010"
+  # Shorter sync interval when pulling nodes from CubeOps.
+  sync_meta_data_interval: 1s
   sync_metric_data_interval: 1s
   collect_metric_interval: 1s
   default_headless_service_nodes_num: 1

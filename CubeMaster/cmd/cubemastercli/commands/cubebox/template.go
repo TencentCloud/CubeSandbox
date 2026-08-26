@@ -47,6 +47,8 @@ type templateResponse struct {
 	Status                     string                      `json:"status,omitempty"`
 	LastError                  string                      `json:"last_error,omitempty"`
 	DisplayName                string                      `json:"display_name,omitempty"`
+	StorageBackend             string                      `json:"storage_backend,omitempty"`
+	Backend                    string                      `json:"backend,omitempty"`
 	CreatedAt                  string                      `json:"created_at,omitempty"`
 	ImageInfo                  string                      `json:"image_info,omitempty"`
 	JobID                      string                      `json:"job_id,omitempty"`
@@ -63,15 +65,19 @@ type templateListResponse struct {
 }
 
 type templateSummary struct {
-	TemplateID   string `json:"template_id,omitempty"`
-	InstanceType string `json:"instance_type,omitempty"`
-	Version      string `json:"version,omitempty"`
-	Status       string `json:"status,omitempty"`
-	LastError    string `json:"last_error,omitempty"`
-	DisplayName  string `json:"display_name,omitempty"`
-	CreatedAt    string `json:"created_at,omitempty"`
-	ImageInfo    string `json:"image_info,omitempty"`
-	JobID        string `json:"job_id,omitempty"`
+	TemplateID     string `json:"template_id,omitempty"`
+	InstanceType   string `json:"instance_type,omitempty"`
+	Version        string `json:"version,omitempty"`
+	Status         string `json:"status,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
+	DisplayName    string `json:"display_name,omitempty"`
+	StorageBackend string `json:"storage_backend,omitempty"`
+	Backend        string `json:"backend,omitempty"`
+	OriginNodeID   string `json:"origin_node_id,omitempty"`
+	OriginNodeIP   string `json:"origin_node_ip,omitempty"`
+	CreatedAt      string `json:"created_at,omitempty"`
+	ImageInfo      string `json:"image_info,omitempty"`
+	JobID          string `json:"job_id,omitempty"`
 }
 
 type templateImageJobResponse struct {
@@ -849,6 +855,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringFlag{Name: "writable-layer-size", Usage: "immutable writable layer size, e.g. 20Gi"},
 		cli.StringSliceFlag{Name: "expose-port", Usage: "container port to expose for the template; repeat the flag to specify multiple ports"},
 		cli.StringFlag{Name: "instance-type", Value: "cubebox", Usage: "instance type"},
+		cli.StringFlag{Name: "backend", Usage: "CoW backend for this template and its sandboxes/snapshots (xfs|s3); omit to keep the historical xfs path"},
 		cli.StringFlag{Name: "network-type", Value: "tap", Usage: "network type"},
 		cli.StringSliceFlag{Name: "node", Usage: "create template only on the specified node id or host ip; repeat to specify multiple nodes"},
 		cli.BoolFlag{Name: "allow-internet-access", Usage: "set allowInternetAccess on the network config for the generated template request"},
@@ -904,6 +911,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 			ExposedPorts:       exposedPorts,
 			InstanceType:       c.String("instance-type"),
 			NetworkType:        c.String("network-type"),
+			Backend:            c.String("backend"),
 			RegistryUsername:   c.String("registry-username"),
 			RegistryPassword:   c.String("registry-password"),
 			ContainerOverrides: containerOverrides,
@@ -1146,9 +1154,9 @@ var TemplateListCommand = cli.Command{
 		}
 		wideOutput := strings.EqualFold(strings.TrimSpace(c.String("output")), "wide")
 		w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
-		tabHeader := "TEMPLATE_ID\tALIAS\tSTATUS\tJOB_ID\tCREATED_AT\tIMAGE_INFO"
+		tabHeader := "TEMPLATE_ID\tALIAS\tSTATUS\tBACKEND\tJOB_ID\tCREATED_AT\tIMAGE_INFO"
 		if wideOutput {
-			tabHeader = "TEMPLATE_ID\tALIAS\tSTATUS\tJOB_ID\tLAST_ERROR\tCREATED_AT\tIMAGE_INFO"
+			tabHeader = "TEMPLATE_ID\tALIAS\tSTATUS\tBACKEND\tJOB_ID\tLAST_ERROR\tCREATED_AT\tIMAGE_INFO"
 		}
 		fmt.Fprintln(w, tabHeader)
 		for _, item := range rsp.Data {
@@ -1160,13 +1168,16 @@ var TemplateListCommand = cli.Command{
 			if alias == "" {
 				alias = "-"
 			}
+			backend := firstNonEmptyCLI(item.Backend, item.StorageBackend)
+			var row string
 			if wideOutput {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-					item.TemplateID, alias, item.Status, jobID, item.LastError, item.CreatedAt, item.ImageInfo)
-				continue
+				row = fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s",
+					item.TemplateID, alias, item.Status, backend, jobID, item.LastError, item.CreatedAt, item.ImageInfo)
+			} else {
+				row = fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s",
+					item.TemplateID, alias, item.Status, backend, jobID, item.CreatedAt, item.ImageInfo)
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-				item.TemplateID, alias, item.Status, jobID, item.CreatedAt, item.ImageInfo)
+			fmt.Fprintln(w, row)
 		}
 		return w.Flush()
 	},
@@ -1178,6 +1189,9 @@ func printTemplateSummary(rsp *templateResponse) {
 		log.Printf("alias: %s\n", rsp.DisplayName)
 	}
 	log.Printf("instance_type: %s\n", rsp.InstanceType)
+	if backend := firstNonEmptyCLI(rsp.Backend, rsp.StorageBackend); backend != "" {
+		log.Printf("backend: %s\n", backend)
+	}
 	log.Printf("version: %s\n", rsp.Version)
 	log.Printf("status: %s\n", rsp.Status)
 	if rsp.CreatedAt != "" {

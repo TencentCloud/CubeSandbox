@@ -7,7 +7,12 @@
 ::: warning Preview 版本警告
 计算面使用原生 `apps/v1` DaemonSet：镜像 / 资源 / template 变更会导致 Big Pod **删除重建**（PodIP / netns 变化），存量沙箱网络会中断。计算面升级会 **recreate `cube-node` Big Pod**（原生 DaemonSet），**会中断该节点上的存量沙箱**。升级前请先调用 CubeMaster 的 isolate API，将节点隔离 60 秒以上；并且销毁节点上的沙箱。在销毁沙箱后，才能安全的升级节点。隔离操作详见 [隔离节点](../node-isolation.md)。
 
-**为解决平滑升级问题，您可采用您熟悉的k8s插件去实现“原地升级”  ** —— 即不重建pod，仅升级容器镜像。部署当前版本后若计划升级，应当仔细评估更改、做测试后再实施。
+**若希望升级不中断沙箱，可从两个方向入手：**
+
+1. 部署时为 `cube-node` 启用 `hostNetwork`，使 Pod 重建不再中断沙箱网络——见[安装 · cube-node 网络与 Pod 重建](./install.md#_8-3-cube-node-网络与-pod-重建)。
+2. 采用您熟悉的 K8s 插件实现“原地升级”——不重建 Pod，仅升级容器镜像。
+
+部署当前版本后若计划升级，应当仔细评估更改、做测试后再实施。
 
 **上述问题将在后续版本逐步得到解决。欢迎试用 K8s 部署方式，通过 Issue 反馈问题与建议。**
 :::
@@ -15,6 +20,8 @@
 ## 为什么 Big Pod recreate 会中断沙箱？
 
 CubeSandbox 的网络（cubevs）钩子挂在 Pod 的网卡上，沙箱的 tap 设备也与 Pod 处于同一 netns。Pod 重建会销毁 netns，导致沙箱网络中断。因此计算面升级属于**有中断**操作，需要维护窗口与节点隔离、销毁存量沙箱。
+
+若在部署时为 `cube-node` 启用 `hostNetwork: true`，可避免 netns 变化：沙箱网络设备位于宿主机 netns 中，Pod 重建后依然保留。详细说明与注意事项见[安装 · cube-node 网络与 Pod 重建](./install.md#_8-3-cube-node-网络与-pod-重建)；完整的原地替换设计可参考 [PR #1189](https://github.com/TencentCloud/CubeSandbox/pull/1189)（尚未合入）。
 
 ## 升什么，动哪条工作负载？
 
@@ -81,9 +88,24 @@ kubectl rollout status deploy/cube-master -n cube-system
 
 - 控制面 Pod 按 Deployment 策略完成（`cube-master` 为 Recreate；其它控制面 Deployment 为 RollingUpdate）
 - 计算面：对应 DaemonSet 的 Pod 已换成新镜像并 Ready
-- 若升了 Big Pod 运行时：节点上存量沙箱已中断；新沙箱可创建；节点已重新注册到 CubeMaster
+- 若升了 Big Pod 运行时：节点上存量沙箱已中断；新沙箱可创建；节点已重新注册到 CubeOps
 
 ---
+
+## 升级顺序
+
+在 cube-master → cube-ops 迁移过程中，各组件的目标端点不同
+按以下顺序升级，避免切流期集群出现不一致：
+
+1. **先起 CubeOps（保证可达）。** 新 cubelet 把 `meta_server_endpoint` 指向
+   cube-ops，如果地址不可达会 fail-fast，所以必须先把 CubeOps 起好。
+2. **CubeOps 起来后再起 CubeMaster。** CubeMaster 启动时如果配了
+   `cube_ops_addr` 且 CubeOps 不通，会 fail-fast。
+3. **切流期不要新老 cubelet 同集群混跑。** 旧 cubelet 向 cube-master `:8089`
+   上报，新 cubelet 向 cube-ops `:3010` 上报；混跑会导致节点状态不一致。
+   逐节点滚动升级，或先把整个计算面停了再升。
+4. **以上就绪后**，再按需滚动 `cube-master`、`cube-api`、计算节点。
+
 
 ## 红线：这些操作也会 recreate Big Pod
 
