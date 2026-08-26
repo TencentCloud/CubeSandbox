@@ -63,6 +63,8 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
+# shellcheck source=mk/s3lvol_isa_gate.sh
+. "${REPO_ROOT}/mk/s3lvol_isa_gate.sh"
 
 VERSION=""
 OUTDIR="${REPO_ROOT}/release"
@@ -230,6 +232,11 @@ verify_binary()
 
 verify_binary || die "refusing to package a binary that is not self-contained"
 
+# ISA pin: CONFIG_ARCH=native (or DPDK compile-time VPCLMULQDQ/VAES) ships a
+# binary that only starts on the build CPU. Smoke on that same CPU stays green.
+s3lvol_verify_portable_isa "${SPDK_ROOT}" \
+	|| die "refusing to package a binary built for the build-host CPU"
+
 # ---------------------------------------------------------------------------
 # Assemble
 # ---------------------------------------------------------------------------
@@ -299,6 +306,9 @@ find "${PKG_DIR}/scripts/python" -name '__pycache__' -type d -prune -exec rm -rf
 	[ -n "${spdk_describe}" ] || spdk_describe="${spdk_git}"
 	echo "spdk_git:    ${spdk_git}"
 	echo "spdk_describe: ${spdk_describe}"
+	spdk_target_arch="$(s3lvol_read_spdk_target_arch "${SPDK_ROOT}" 2>/dev/null || true)"
+	[ -n "${spdk_target_arch}" ] || spdk_target_arch="unknown"
+	echo "spdk_target_arch: ${spdk_target_arch}"
 	echo "aws_crt_build_type: ${AWS_BUILT_AS}"
 	if [ -d "${REPO_ROOT}/deps/aws-src" ]; then
 		echo "aws_crt:"

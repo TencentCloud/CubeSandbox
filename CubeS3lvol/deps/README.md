@@ -21,8 +21,10 @@ Local builds use `deps/`; the builder image ships prebuilt trees under `/opt/s3l
 
 `cube-sandbox-builder:ubuntu2004` ships:
 
-- `/opt/s3lvol-spdk` — patched SPDK, `--enable-debug`
+- `/opt/s3lvol-spdk` — patched SPDK, `--enable-debug`, portable `--target-arch` (`haswell` on x86_64, `armv8.2-a+crypto` on aarch64). Not `native`: that follows the image-build host and ships a binary that only starts on that CPU.
 - `/opt/s3lvol-aws-debug` / `/opt/s3lvol-aws-relwithdebinfo` — AWS CRT per build type
+
+Override the ISA pin with `SPDK_TARGET_ARCH` (only the `--target-arch=` value) or replace the whole `./configure` line with `SPDK_CONFIGURE_ARGS`. Changing either changes the SPDK stamp and rebuilds `/opt/s3lvol-spdk`.
 
 Each carries a stamp file. `setup_dep.sh` recomputes the hash from the pin, patches, and CRT tags; a match skips clone/build, a mismatch falls back to `deps/`. `make builder-image` compares those hashes to the image labels `org.cubesandbox.s3lvol.{spdk,aws}-stamp` and rebuilds only when they differ.
 

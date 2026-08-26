@@ -17,12 +17,17 @@
 #    ./setup_dep.sh --force aws     # rebuild even if it looks done
 #    ./setup_dep.sh --jobs 8        # default is nproc
 #    ./setup_dep.sh --print-stamp spdk|aws
+#    ./setup_dep.sh --print-target-arch
+#    ./setup_dep.sh --print-configure-args
 #    ./setup_dep.sh --emit-builder-prebuilt   # image build only
 #
 #  Environment, for when the defaults are wrong:
 #    AWS_BUILD_TYPE        CMake build type for the CRT. Debug by default,
 #                          matching --enable-debug for SPDK; a release package
 #                          wants AWS_BUILD_TYPE=RelWithDebInfo --force aws.
+#    SPDK_TARGET_ARCH      GNU -march / SPDK --target-arch. Default is a
+#                          portable release baseline (haswell on x86_64,
+#                          armv8.2-a+crypto on aarch64), not native.
 #    SPDK_CONFIGURE_ARGS   replaces SPDK's ./configure arguments outright
 #    SPDK_COMMIT           the pinned upstream baseline
 #
@@ -72,6 +77,27 @@ SPDK_REPO="${SPDK_REPO:-https://github.com/spdk/spdk.git}"
 # (`git fetch --depth 1 origin d64c4fa89` -> "couldn't find remote ref").
 SPDK_COMMIT="${SPDK_COMMIT:-d64c4fa89233397460e2e4ff55a1c69b8e498598}"
 
+# Portable --target-arch. SPDK's default is CONFIG_ARCH=native, which follows
+# the build-host CPU (tigerlake / VAES / VPCLMULQDQ on a recent Intel laptop).
+# A statically linked s3lvol_tgt then dies in DPDK EAL on cloud VMs that do
+# not expose those flags. haswell is AVX2 and gcc-9 on the Ubuntu 20.04
+# builder accepts it; x86-64-v3 would need gcc 11+.
+s3lvol_host_machine() {
+	printf '%s\n' "${S3LVOL_HOST_MACHINE:-$(uname -m)}"
+}
+
+s3lvol_default_spdk_target_arch() {
+	case "$(s3lvol_host_machine)" in
+	x86_64|amd64) printf 'haswell\n' ;;
+	aarch64|arm64) printf 'armv8.2-a+crypto\n' ;;
+	*) printf 'native\n' ;;
+	esac
+}
+
+if [ -z "${SPDK_TARGET_ARCH:-}" ]; then
+	SPDK_TARGET_ARCH="$(s3lvol_default_spdk_target_arch)"
+fi
+
 # What ./configure was given. Deliberately short:
 #
 #   --enable-debug     asserts on. This project is pre-production and an assert
@@ -81,10 +107,16 @@ SPDK_COMMIT="${SPDK_COMMIT:-d64c4fa89233397460e2e4ff55a1c69b8e498598}"
 #   --without-nvme-cuse avoids a libfuse3 dependency for a feature nothing here
 #                      touches: CUSE exposes NVMe devices as character devices,
 #                      and this target's only local bdev is aio.
+#   --target-arch=     pinned ISA so a package built on a new laptop still
+#                      starts on Haswell-class cloud VMs.
 #
 # Everything else is left at SPDK's defaults, including CONFIG_SHARED=n, which is
 # what makes the static linking in mk/s3lvol.common.mk possible.
-SPDK_CONFIGURE_ARGS="${SPDK_CONFIGURE_ARGS:---enable-debug --without-nvme-cuse}"
+# SPDK_CONFIGURE_ARGS, when set, replaces this list outright (including the
+# target-arch pin). SPDK_TARGET_ARCH alone changes only the default list.
+if [ -z "${SPDK_CONFIGURE_ARGS:-}" ]; then
+	SPDK_CONFIGURE_ARGS="--enable-debug --without-nvme-cuse --target-arch=${SPDK_TARGET_ARCH}"
+fi
 
 JOBS="$(nproc 2>/dev/null || echo 4)"
 MODE="setup"
@@ -110,6 +142,12 @@ while [ $# -gt 0 ]; do
 	--print-stamp=*)
 		PRINT_STAMP="${1#*=}"
 		MODE="print-stamp"
+		;;
+	--print-target-arch)
+		MODE="print-target-arch"
+		;;
+	--print-configure-args)
+		MODE="print-configure-args"
 		;;
 	--emit-builder-prebuilt)
 		MODE="emit-builder-prebuilt"
@@ -251,6 +289,9 @@ spdk_write_stamp()
 	printf '%s\n' "$(spdk_recipe_stamp)" >"$(spdk_stamp_file "${dir}")" || return 1
 	# slim_spdk_tree drops .git, so make_release.sh reads this pin instead.
 	printf '%s\n' "${SPDK_COMMIT}" >"${dir}/.s3lvol-spdk-commit" || return 1
+	# ISA pin: slim keeps this next to the stamp so make_release.sh can
+	# refuse a native tree after dpdk/build headers are gone.
+	printf '%s\n' "${SPDK_TARGET_ARCH}" >"${dir}/.s3lvol-spdk-arch" || return 1
 }
 
 # Being "done" means the libraries this repository links are actually there, not
@@ -995,6 +1036,16 @@ if [ "${MODE}" = "print-stamp" ]; then
 		exit 1
 		;;
 	esac
+	exit 0
+fi
+
+if [ "${MODE}" = "print-target-arch" ]; then
+	printf '%s\n' "${SPDK_TARGET_ARCH}"
+	exit 0
+fi
+
+if [ "${MODE}" = "print-configure-args" ]; then
+	printf '%s\n' "${SPDK_CONFIGURE_ARGS}"
 	exit 0
 fi
 

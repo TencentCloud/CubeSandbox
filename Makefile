@@ -257,12 +257,6 @@ builder-run: prepare-builder-home prepare-tmp-git-credentials
 ifeq ($(strip $(BUILDER_CMD)),)
 	$(error BUILDER_CMD must not be empty)
 endif
-# The container can run as a different user than the owner of files under the
-# mounted workspace. In CI, cube-s3lvol-test runs as root (0:0, DPDK EAL), but
-# deps/spdk restored from the actions/cache are owned by the runner uid, so
-# git inside the container refuses them ("dubious ownership"). Mark every repo
-# under the mounted workspace as safe -- this only relaxes that check inside
-# the throwaway container.
 	docker run --rm -i \
 		--user "$(BUILDER_USER)" \
 		-e HOME=$(BUILDER_CONTAINER_HOME) \
@@ -280,7 +274,7 @@ endif
 		$(DOCKER_GIT_CRED) \
 		-w /workspace \
 		$(BUILDER_IMAGE) \
-		bash -lc 'mkdir -p "$$HOME" "$$CARGO_HOME" "$$GOPATH" "$$HOME/.cache" "$$HOME/.config" && git config --global --add safe.directory "*" && exec bash -lc "$$BUILDER_CMD"'
+		bash -lc 'mkdir -p "$$HOME" "$$CARGO_HOME" "$$GOPATH" "$$HOME/.cache" "$$HOME/.config" && exec bash -lc "$$BUILDER_CMD"'
 
 .PHONY: cubecow-sdk
 cubecow-sdk:

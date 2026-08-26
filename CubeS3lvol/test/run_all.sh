@@ -308,6 +308,10 @@ echo ""
 # --------------------------------------------------------------------------
 # Integration, no S3
 # --------------------------------------------------------------------------
+echo "--- offline tools"
+run_suite isa_baseline ./test/tools/test_isa_baseline.sh
+echo ""
+
 echo "--- integration (no S3, no root)"
 for t in s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test \
 	 s3_cache_test s3_flush_test s3_export_test s3_statefile_test \
