@@ -40,7 +40,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TOOLS_DIR="${REPO_ROOT}/test/tools"
 
 TGT_BIN="${REPO_ROOT}/app/s3lvol_tgt/s3lvol_tgt"
-RPC_PY="${REPO_ROOT}/../spdk/scripts/rpc.py"
+RPC_PY="${SPDK_ROOT:-${REPO_ROOT}/deps/spdk}/scripts/rpc.py"
 # Every SPDK RPC needs the socket named explicitly: rpc.py defaults to
 # /var/tmp/spdk.sock, while the target now listens on /var/run/s3lvol.sock.
 RPC="${RPC_PY} -s /var/run/s3lvol.sock"

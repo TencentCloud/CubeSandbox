@@ -49,7 +49,7 @@ ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TOOLS="${ROOT}/test/tools"
 RPC_PY="${TOOLS}/s3lvol_rpc.py"
 # bdev_aio_create is an SPDK rpc, not an s3lvol one.
-SPDK_RPC_PY="${SPDK_RPC_PY:-${ROOT}/../spdk/scripts/rpc.py}"
+SPDK_RPC_PY="${SPDK_RPC_PY:-${SPDK_ROOT:-${ROOT}/deps/spdk}/scripts/rpc.py}"
 
 TGT_BIN="${ROOT}/app/s3lvol_tgt/s3lvol_tgt"
 
