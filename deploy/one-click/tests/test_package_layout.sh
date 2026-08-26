@@ -364,6 +364,28 @@ test_env_templates_are_split() {
 # 4) The build entrypoints AND every shipped Terraform deployer script must at
 #    least be syntactically valid — a cheap, cloud-free guard so a broken script
 #    fails here instead of only when a user runs it from the bundle.
+test_s3lvol_bucket_tool_is_packaged() {
+  require_file "${ROOT_DIR}/CubeS3lvol/test/tools/s3_bucket.py" \
+    "s3lvol ensure-bucket tool"
+  require_file "${ROOT_DIR}/CubeS3lvol/make_release.sh" "s3lvol make_release.sh"
+  if ! grep -q -F 's3_bucket.py' "${ROOT_DIR}/CubeS3lvol/make_release.sh"; then
+    fail "make_release.sh must install test/tools/s3_bucket.py into scripts/"
+  fi
+}
+
+test_s3lvol_rpc_launcher_is_packaged() {
+  require_file "${ROOT_DIR}/CubeS3lvol/scripts/rpc.py" "s3lvol rpc.py launcher"
+  require_file "${ROOT_DIR}/CubeS3lvol/scripts/rpc_compat.py" \
+    "s3lvol rpc.py 3.8 compat shim"
+  require_file "${ROOT_DIR}/CubeS3lvol/make_release.sh" "s3lvol make_release.sh"
+  if ! grep -q -F 'scripts/spdk_rpc.py' "${ROOT_DIR}/CubeS3lvol/make_release.sh"; then
+    fail "make_release.sh must install SPDK rpc.py as scripts/spdk_rpc.py"
+  fi
+  if ! grep -q -F '${REPO_ROOT}/scripts/rpc.py' "${ROOT_DIR}/CubeS3lvol/make_release.sh"; then
+    fail "make_release.sh must install this repo's scripts/rpc.py launcher"
+  fi
+}
+
 test_build_scripts_parse() {
   local f
   for f in "${BUNDLE_SH}" "${BUILD_IMAGES_SH}" \
@@ -383,6 +405,8 @@ test_tke_addons_network_config_key
 test_reinstall_cleanup_tracks_packaged_components
 test_terraform_deployer_files_present
 test_env_templates_are_split
+test_s3lvol_bucket_tool_is_packaged
+test_s3lvol_rpc_launcher_is_packaged
 test_build_scripts_parse
 
 if [[ "${failures}" -gt 0 ]]; then

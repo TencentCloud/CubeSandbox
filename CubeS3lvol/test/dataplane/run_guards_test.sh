@@ -45,7 +45,7 @@
 #  Usage:
 #    sudo -E ./test/dataplane/run_guards_test.sh
 #
-#  Needs root, a readable /data/cubelet/cos.cfg and nvme-cli. Uses its own lvstore
+#  Needs root, a readable /data/cubelet/s3.cfg and nvme-cli. Uses its own lvstore
 #  name, WAL image and registries, so a production instance is untouched.
 
 set -u
@@ -65,7 +65,7 @@ export RCOW_WAL_MB=256
 export RCOW_TGT_MEM_MB=2048
 export RCOW_RUN_DIR=/var/tmp/rcow_guardtest
 export RCOW_LOG_DIR=/var/tmp/rcow_guardtest/log
-export RCOW_COS_CFG="${RCOW_COS_CFG:-/data/cubelet/cos.cfg}"
+export RCOW_S3_CFG="${RCOW_S3_CFG:-/data/cubelet/s3.cfg}"
 
 # The point of guard 1: this suite's own registries, under its own run directory.
 export RCOW_ACTIVE_FILE=/var/tmp/rcow_guardtest/active_lvols
@@ -116,7 +116,7 @@ cleanup()
 
 	if [ "${FAIL}" -eq 0 ] && [ -z "${S3LVOL_KEEP_S3:-}" ]; then
 		rcow_load_credentials
-		python3 "${PREFIX_RM}" -e "$(rcow_cfg_get cos_endpoint)" -b "${BUCKET}" \
+		python3 "${PREFIX_RM}" -e "$(rcow_cfg_get endpoint)" -b "${BUCKET}" \
 			-r "$(rcow_cfg_get region)" -p "${RCOW_LVS_NAME}/" 2>&1 | tail -1
 		rm -f "${RCOW_WAL_IMG}"
 		rm -rf "${RCOW_RUN_DIR}" "${WORKDIR}"
@@ -141,11 +141,11 @@ echo "=== [0] preconditions"
 
 [ "$(id -u)" -eq 0 ] || { echo "must run as root" >&2; exit 1; }
 [ -x "${ROOT}/app/s3lvol_tgt/s3lvol_tgt" ] || { echo "target not built" >&2; exit 1; }
-[ -r "${RCOW_COS_CFG}" ] || { echo "no COS config at ${RCOW_COS_CFG}" >&2; exit 1; }
+[ -r "${RCOW_S3_CFG}" ] || { echo "no S3 config at ${RCOW_S3_CFG}" >&2; exit 1; }
 command -v nvme >/dev/null || { echo "nvme-cli is required" >&2; exit 1; }
 [ -n "$(rcow_target_instances)" ] && { echo "a target is already running" >&2; exit 1; }
 
-BUCKET="$(rcow_cos_buckets | head -1)"
+BUCKET="$(rcow_s3_buckets | head -1)"
 WORKDIR="$(mktemp -d /tmp/rcow_guard.XXXXXX)"
 
 rm -rf "${RCOW_RUN_DIR}"

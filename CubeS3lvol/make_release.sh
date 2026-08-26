@@ -12,7 +12,8 @@
 #    ./make_release.sh --outdir /tmp/rel     # default is ./release
 #    ./make_release.sh --no-tar              # leave the directory, skip the tarball
 #    ./make_release.sh --skip-build           # package whatever is already built
-#    ./make_release.sh --skip-smoke           # package, skip the runtime smoke tests
+#    ./make_release.sh --skip-smoke           # skip the DPDK EAL target smoke only
+#                                             # (layout + rpc.py --help still run)
 #
 #  Both build types are recorded in VERSION, and a package that is not a release
 #  build says so at the end. They default to the development setting, which is
@@ -30,8 +31,11 @@
 #    │   ├── rcow_purge.sh        delete an lvstore outright (irreversible)
 #    │   ├── s3lvol_rpc.py        this repo's raw JSON-RPC client
 #    │   ├── s3_prefix_rm.py      bucket cleanup, what rcow_purge.sh deletes with
-#    │   ├── rpc.py               SPDK's, unmodified
-#    │   └── python/spdk/...      what rpc.py imports
+#    │   ├── s3_bucket.py         ensure-bucket, what the one-click supervisor uses
+#    │   ├── rpc.py               this repo's launcher (3.8 argparse shim)
+#    │   ├── rpc_compat.py        BooleanOptionalAction backfill for Python 3.8
+#    │   ├── spdk_rpc.py          SPDK's rpc.py, unmodified
+#    │   └── python/spdk/...      what SPDK rpc.py imports
 #    ├── VERSION
 #    └── README.md
 #
@@ -54,7 +58,7 @@
 #    spdkcli/ wants configshell. Shipping them would put imports in the package
 #    that cannot succeed, and the first person to hit one has to work out whether
 #    it matters.
-#  - cos.cfg and the WAL image. Both are per-machine state: cos.cfg holds
+#  - s3.cfg and the WAL image. Both are per-machine state: s3.cfg holds
 #    credentials, and the WAL image's size fixes the journal layout, so a copy
 #    from elsewhere is an lvstore whose log belongs to another node.
 #  - the test suite. It needs a source tree, fio, and its own credentials.
@@ -112,12 +116,13 @@ PKG_NAME="s3lvol-${VERSION}"
 PKG_DIR="${OUTDIR}/${PKG_NAME}"
 
 # ---------------------------------------------------------------------------
-# Where SPDK is, for rpc.py and its library
+# Where SPDK is, for spdk_rpc.py and its library
 #
-# Resolved the same way the build does, so the rpc.py that ships comes from the
-# SPDK the binary was linked against. Taking it from a different checkout would
-# usually work and occasionally not, in the form of an RPC whose arguments have
-# been renamed.
+# Resolved the same way the build does, so the SPDK client that ships comes from
+# the SPDK the binary was linked against. Taking it from a different checkout
+# would usually work and occasionally not, in the form of an RPC whose arguments
+# have been renamed. The file is installed as scripts/spdk_rpc.py; scripts/rpc.py
+# is this repo's launcher.
 # ---------------------------------------------------------------------------
 if [ -z "${SPDK_ROOT:-}" ]; then
 	if [ -f "${REPO_ROOT}/deps/spdk/scripts/rpc.py" ]; then
@@ -265,8 +270,20 @@ log "scripts/s3_prefix_rm.py (bucket cleanup, used by rcow_purge.sh)"
 install -m 0755 "${REPO_ROOT}/test/tools/s3_prefix_rm.py" \
 	"${PKG_DIR}/scripts/s3_prefix_rm.py" || die "install failed"
 
-log "scripts/rpc.py + scripts/python/spdk (from ${SPDK_ROOT})"
-install -m 0755 "${SPDK_ROOT}/scripts/rpc.py" "${PKG_DIR}/scripts/rpc.py" ||
+# cube-s3lvol-supervise.sh uses this to create the per-backend bucket before
+# rcow_start.sh. Same stdlib SigV4 client as s3_prefix_rm.py -- no aws-cli.
+log "scripts/s3_bucket.py (ensure-bucket, used by the one-click supervisor)"
+install -m 0755 "${REPO_ROOT}/test/tools/s3_bucket.py" \
+	"${PKG_DIR}/scripts/s3_bucket.py" || die "install failed"
+
+log "scripts/rpc.py + scripts/rpc_compat.py (this repo's 3.8-compatible launcher)"
+install -m 0755 "${REPO_ROOT}/scripts/rpc.py" "${PKG_DIR}/scripts/rpc.py" ||
+	die "install failed"
+install -m 0755 "${REPO_ROOT}/scripts/rpc_compat.py" \
+	"${PKG_DIR}/scripts/rpc_compat.py" || die "install failed"
+
+log "scripts/spdk_rpc.py + scripts/python/spdk (from ${SPDK_ROOT})"
+install -m 0755 "${SPDK_ROOT}/scripts/rpc.py" "${PKG_DIR}/scripts/spdk_rpc.py" ||
 	die "install failed"
 
 # Only what rpc.py reaches. cli/ and rpc/ plus the two top-level modules; see
@@ -421,11 +438,12 @@ smoke_test()
 }
 
 # Checked separately because it is a different failure: the target can be fine
-# while rpc.py cannot import its library, and that only shows up when a script
-# tries to create a subsystem.
+# while the launcher cannot start SPDK's client (missing python/spdk, or a
+# Python that still chokes after the 3.8 shim). That only shows up when a
+# script tries to create a subsystem.
 smoke_test_rpc_py()
 {
-	log "smoke test: rpc.py can import its library from scripts/python"
+	log "smoke test: rpc.py launcher can start SPDK's client from scripts/python"
 	if (cd "${PKG_DIR}/scripts" &&
 	    env -i PATH=/usr/bin:/bin PYTHONPATH="${PKG_DIR}/scripts/python" \
 		python3 ./rpc.py --help >/dev/null 2>&1); then
@@ -461,12 +479,16 @@ smoke_test_layout()
 	return 1
 }
 
+# Layout + rpc.py --help need no DPDK and no target. They are the check that
+# would have caught "rpc.py cannot even parse --help on Python 3.8", and they
+# stay on when --skip-smoke is used to dodge the EAL affinity smoke on the
+# builder.
+smoke_test_layout || die "package is broken"
+smoke_test_rpc_py || die "package is broken"
 if [ "${DO_SMOKE}" -eq 1 ]; then
-	smoke_test_layout   || die "package is broken"
-	smoke_test_rpc_py   || die "package is broken"
-	smoke_test          || die "package is broken"
+	smoke_test || die "package is broken"
 else
-	log "--skip-smoke: skipping the runtime smoke tests"
+	log "--skip-smoke: skipping the DPDK EAL target smoke"
 fi
 
 # ---------------------------------------------------------------------------
@@ -516,5 +538,5 @@ fi
 echo ""
 log "on the target machine:"
 log "    tar xzf ${PKG_NAME}.tar.gz && cd ${PKG_NAME}"
-log "    less README.md            # cos.cfg and the WAL image are not included"
+log "    less README.md            # s3.cfg and the WAL image are not included"
 log "    scripts/rcow_start.sh"

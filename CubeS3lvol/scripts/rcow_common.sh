@@ -57,8 +57,8 @@ RCOW_REPO_ROOT="${RCOW_REPO_ROOT:-$(cd "${RCOW_SCRIPT_DIR}/.." && pwd)}"
 # These run both from a source checkout and from a release package, whose layout
 # is flat and has no SPDK tree beside it:
 #
-#   repo:      scripts/rcow_*.sh   app/s3lvol_tgt/s3lvol_tgt   ../spdk/scripts/rpc.py
-#   package:   scripts/rcow_*.sh   bin/s3lvol_tgt              scripts/rpc.py
+#   repo:      scripts/rcow_*.sh   app/s3lvol_tgt/s3lvol_tgt   scripts/rpc.py -> $SPDK_ROOT/scripts/rpc.py
+#   package:   scripts/rcow_*.sh   bin/s3lvol_tgt              scripts/rpc.py -> scripts/spdk_rpc.py
 #
 # Detected rather than substituted at packaging time. Rewriting these paths while
 # building the package would mean the scripts that ship are not the scripts that
@@ -102,7 +102,11 @@ else
 
 	RCOW_TGT_BIN="${RCOW_TGT_BIN:-${RCOW_REPO_ROOT}/app/s3lvol_tgt/s3lvol_tgt}"
 	RCOW_RPC_PY="${RCOW_RPC_PY:-${RCOW_REPO_ROOT}/test/tools/s3lvol_rpc.py}"
-	RCOW_SPDK_RPC_PY="${RCOW_SPDK_RPC_PY:-${SPDK_ROOT}/scripts/rpc.py}"
+	# Same launcher as the package: it applies the 3.8 argparse shim and
+	# then runs $SPDK_ROOT/scripts/rpc.py. Calling the SPDK file directly
+	# would blow up on Ubuntu 20.04 (no BooleanOptionalAction).
+	RCOW_SPDK_RPC_PY="${RCOW_SPDK_RPC_PY:-${RCOW_SCRIPT_DIR}/rpc.py}"
+	export SPDK_ROOT
 fi
 
 RCOW_RPC_SOCK="${RCOW_RPC_SOCK:-/var/run/s3lvol.sock}"
@@ -115,9 +119,9 @@ RCOW_RPC_SOCK="${RCOW_RPC_SOCK:-/var/run/s3lvol.sock}"
 # the same either way.
 # --------------------------------------------------------------------------
 
-# Read for the COS endpoint, region, bucket list and credentials. Credentials
+# Read for the S3 endpoint, region, bucket list and credentials. Credentials
 # leave this file only through the environment of the target process.
-RCOW_COS_CFG="${RCOW_COS_CFG:-/data/cubelet/cos.cfg}"
+RCOW_S3_CFG="${RCOW_S3_CFG:-/data/cubelet/s3.cfg}"
 
 # The local device behind the metadata journal and the WAL. Fixed rather than
 # discovered: it is the one piece of state that must not move between boots, and
@@ -393,7 +397,7 @@ rcow_ensure_run_dir()
 }
 
 # --------------------------------------------------------------------------
-# cos.cfg
+# s3.cfg
 #
 # Parsed with sed rather than sourced. The file is TOML-shaped and holds the
 # account credentials; running it as shell would execute whatever ends up in it,
@@ -403,17 +407,17 @@ rcow_ensure_run_dir()
 rcow_cfg_get()
 {
 	sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
-		"${RCOW_COS_CFG}" 2>/dev/null | head -1 | tr -d '\r'
+		"${RCOW_S3_CFG}" 2>/dev/null | head -1 | tr -d '\r'
 }
 
-# cos_bucket_name is a list -- the config already allows several buckets even
+# buckets is a list -- the config already allows several buckets even
 # though only the first carries an lvstore today. All of them are registered as
 # namespaces, so that a volume imported from another bucket can be reached
 # without a config change.
-rcow_cos_buckets()
+rcow_s3_buckets()
 {
-	sed -n 's/^[[:space:]]*cos_bucket_name[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' \
-		"${RCOW_COS_CFG}" 2>/dev/null | head -1 | tr ',' '\n' |
+	sed -n 's/^[[:space:]]*buckets[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' \
+		"${RCOW_S3_CFG}" 2>/dev/null | head -1 | tr ',' '\n' |
 		sed -n 's/^[[:space:]]*"\([^"]*\)".*/\1/p' | tr -d '\r'
 }
 
@@ -424,8 +428,8 @@ rcow_load_credentials()
 {
 	local id key
 
-	id="$(rcow_cfg_get secretid)"
-	key="$(rcow_cfg_get secretkey)"
+	id="$(rcow_cfg_get access_key_id)"
+	key="$(rcow_cfg_get secret_access_key)"
 
 	if [ -z "${id}" ] || [ -z "${key}" ]; then
 		return 1
@@ -433,6 +437,22 @@ rcow_load_credentials()
 
 	export AWS_ACCESS_KEY_ID="${id}"
 	export AWS_SECRET_ACCESS_KEY="${key}"
+	return 0
+}
+
+# Append --path-style / --no-tls onto the named bash array (caller must pass a
+# hardcoded identifier such as s3_flags or S3_ADDR_FLAGS, never user input).
+rcow_s3_addr_flags()
+{
+	local dest="$1"
+
+	case "${dest}" in
+	''|*[!A-Za-z0-9_]*|[0-9]*)
+		return 0
+		;;
+	esac
+	[ "$(rcow_cfg_get path_style)" = "true" ] && eval "${dest}+=(--path-style)"
+	[ "$(rcow_cfg_get no_tls)" = "true" ] && eval "${dest}+=(--no-tls)"
 	return 0
 }
 
@@ -652,15 +672,22 @@ rcow_wait_rpc()
 	local deadline=$((SECONDS + ${1:-30}))
 	local pid="${2:-}"
 
+	local last_err=""
+
 	while [ "${SECONDS}" -lt "${deadline}" ]; do
-		if RCOW_RPC_TIMEOUT=5 rcow_srpc spdk_get_version >/dev/null 2>&1; then
+		if last_err="$(RCOW_RPC_TIMEOUT=5 rcow_srpc spdk_get_version 2>&1)"; then
 			return 0
 		fi
 		if [ -n "${pid}" ] && ! kill -0 "${pid}" 2>/dev/null; then
+			[ -n "${last_err}" ] && rcow_err "last rpc.py output: ${last_err}"
 			return 1
 		fi
 		sleep 0.2
 	done
+	if [ -n "${last_err}" ]; then
+		rcow_err "rpc.py did not succeed; last output:"
+		printf '%s\n' "${last_err}" | sed 's/^/    /' >&2
+	fi
 	return 1
 }
 

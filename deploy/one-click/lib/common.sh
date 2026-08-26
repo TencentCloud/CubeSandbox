@@ -299,6 +299,80 @@ one_click_s3lvol_required_commands() {
     truncate
 }
 
+s3lvol_nvme_present() {
+  command -v nvme >/dev/null 2>&1
+}
+
+# Prefer apt, then dnf, then yum (detect_pkg_manager knows only apt/yum).
+s3lvol_nvme_pkg_manager() {
+  if command -v apt-get >/dev/null 2>&1; then
+    printf 'apt'
+    return 0
+  fi
+  if command -v dnf >/dev/null 2>&1; then
+    printf 'dnf'
+    return 0
+  fi
+  if command -v yum >/dev/null 2>&1; then
+    printf 'yum'
+    return 0
+  fi
+  return 1
+}
+
+# Install nvme-cli when s3lvol is enabled and `nvme` is missing.
+ensure_nvme_cli() {
+  [[ "${ONE_CLICK_ENABLE_S3LVOL:-0}" == "1" ]] || return 0
+  if s3lvol_nvme_present; then
+    return 0
+  fi
+
+  local pm
+  if ! pm="$(s3lvol_nvme_pkg_manager)"; then
+    die "CubeS3lvol needs nvme-cli (the nvme command) but no apt-get/dnf/yum was found. Install nvme-cli by hand and re-run install.sh"
+  fi
+  log "installing nvme-cli via ${pm}..."
+  if [[ -n "${ONE_CLICK_NVME_CLI_INSTALLER:-}" ]]; then
+    "${ONE_CLICK_NVME_CLI_INSTALLER}" "${pm}"
+  else
+    case "${pm}" in
+      apt)
+        apt-get update -qq
+        apt-get install -y -qq nvme-cli
+        ;;
+      dnf)
+        dnf install -y nvme-cli
+        ;;
+      yum)
+        yum install -y nvme-cli
+        ;;
+    esac
+  fi
+  if ! s3lvol_nvme_present; then
+    die "installed nvme-cli via ${pm} but nvme is still not in PATH. Install nvme-cli by hand (apt: apt-get install -y nvme-cli; dnf/yum: dnf install -y nvme-cli || yum install -y nvme-cli) and re-run install.sh"
+  fi
+}
+
+# validate_s3lvol_rpc_client: prove the packaged rpc.py launcher can start
+# under the *system* python3. SPDK's unmodified rpc.py needs
+# argparse.BooleanOptionalAction (Python 3.9+); Ubuntu 20.04 is 3.8, and
+# without the launcher shim rcow_start.sh loops on "target not answering".
+# A failure here is a client/interpreter mismatch, not a dead target.
+validate_s3lvol_rpc_client() {
+  local rpc_py="$1"
+  local rpc_dir python_dir out
+  [[ -n "${rpc_py}" && -f "${rpc_py}" ]] \
+    || die "CubeS3lvol RPC client is missing (${rpc_py:-unset}). The release package must ship scripts/rpc.py"
+  rpc_dir="$(cd "$(dirname "${rpc_py}")" && pwd)"
+  python_dir="${rpc_dir}/python"
+  if ! out="$(
+    env PYTHONPATH="${python_dir}${PYTHONPATH:+:${PYTHONPATH}}" \
+      python3 "${rpc_py}" --help 2>&1
+  )"; then
+    die "CubeS3lvol RPC client cannot run under $(python3 --version 2>&1) (${rpc_py}): ${out}. This is a Python/rpc.py incompatibility, not a failure of s3lvol_tgt"
+  fi
+}
+
 # validate_cubelet_s3lvol_startup_deps: check the runtime deps of the
 # installed s3lvol_tgt binary. The binary statically links SPDK/DPDK/AWS
 # CRT, so `ldd` on it is the authoritative probe for exactly the system
@@ -337,12 +411,19 @@ validate_cubelet_s3lvol_startup_deps() {
     die "CubeS3lvol startup dependency check failed for ${s3lvol_bin}; missing shared libraries: ${missing_libs[*]} (the binary links against OpenSSL 1.1 -- on distros shipping OpenSSL 3 install the compat package, e.g. compat-openssl11 on RHEL/CentOS/OpenCloudOS)"
   fi
 
-  # A missing COS config makes the target fail on first connect, the unit
+  # Release s3lvol_tgt is built for Haswell/AVX2, not the packager's native
+  # CPU. Fail here with that wording instead of DPDK's RTE_MACHINE dump.
+  if [[ "$(uname -m)" == "x86_64" ]] && ! grep -qw avx2 /proc/cpuinfo; then
+    die "CubeS3lvol release binaries require AVX2 (Haswell baseline). This CPU does not advertise avx2 in /proc/cpuinfo; s3lvol_tgt will not start"
+  fi
+
+  # A missing S3 config makes the target fail on first connect, the unit
   # hits StartLimitBurst and the role target gives up. Fail here instead,
-  # with the fix spelled out.
-  local cos_cfg="${RCOW_COS_CFG:-/data/cubelet/cos.cfg}"
-  if [[ ! -f "${cos_cfg}" ]]; then
-    die "CubeS3lvol is enabled but its COS config is missing: ${cos_cfg}. Create it from the template in deploy/one-click/env.example (or point RCOW_COS_CFG at an existing file) and re-run install.sh"
+  # with the fix spelled out. install.sh writes this file from CUBE_S3_*
+  # when ONE_CLICK_ENABLE_S3LVOL=1; a hand-written file is also accepted.
+  local s3_cfg="${RCOW_S3_CFG:-/data/cubelet/s3.cfg}"
+  if [[ ! -f "${s3_cfg}" ]]; then
+    die "CubeS3lvol is enabled but ${s3_cfg} is missing and there is no CUBE_S3_ENDPOINT to generate it from. Set CUBE_S3_* (or enable bundled MinIO) or write ${s3_cfg} by hand (or point RCOW_S3_CFG at an existing file) and re-run install.sh"
   fi
 
   # The subsystem grid is exported with -a (allow_any_host), so the listener
@@ -356,7 +437,12 @@ validate_cubelet_s3lvol_startup_deps() {
       ;;
   esac
 
-  log "CubeS3lvol startup dependencies OK: ${cmds[*]} + $(ldd "${s3lvol_bin}" 2>/dev/null | awk '/=> \//{n++} END{print n+0}') shared libs resolved; COS config at ${cos_cfg}"
+  local scripts_dir
+  scripts_dir="$(cd "$(dirname "${s3lvol_bin}")/../scripts" 2>/dev/null && pwd)" \
+    || die "CubeS3lvol scripts directory is missing next to ${s3lvol_bin}"
+  validate_s3lvol_rpc_client "${scripts_dir}/rpc.py"
+
+  log "CubeS3lvol startup dependencies OK: ${cmds[*]} + $(ldd "${s3lvol_bin}" 2>/dev/null | awk '/=> \//{n++} END{print n+0}') shared libs resolved; S3 config at ${s3_cfg}"
 }
 
 require_root() {
@@ -1767,6 +1853,125 @@ write_volume_s3_conf() {
       "${CUBE_S3_S3FS_EXTRA_OPTS:-}"
     log "wrote ${plugin_dir}/volume-s3.conf endpoint=${CUBE_S3_ENDPOINT} bucket=${CUBE_S3_BUCKET:-cube-volumes}"
   done
+}
+
+# Sentinel that marks an installer-generated s3.cfg. A file without this line
+# is treated as operator-owned and is never overwritten.
+S3LVOL_CFG_SENTINEL="generated by cube-sandbox one-click; do not edit"
+
+# Print KEY="value" for s3.cfg. rcow_cfg_get's sed requires double quotes and
+# cannot unescape, so a literal quote in the value is rejected.
+toml_assign() {
+  local key="$1"
+  local value="$2"
+  if [[ "${value}" == *\"* ]]; then
+    die "s3.cfg value for ${key} must not contain double quotes"
+  fi
+  printf '%s="%s"\n' "${key}" "${value}"
+}
+
+# Strip http(s):// and any path from CUBE_S3_ENDPOINT. s3lvol uses the host
+# as the HTTP Host header; the scheme becomes no_tls instead.
+s3lvol_host_from_endpoint() {
+  local url="$1"
+  url="${url#http://}"
+  url="${url#https://}"
+  url="${url%%/*}"
+  printf '%s' "${url}"
+}
+
+s3lvol_no_tls_from_endpoint() {
+  [[ "${1:-}" == http://* ]]
+}
+
+# Whether s3.cfg should set path_style="true".
+# CUBE_S3LVOL_PATH_STYLE=1/0 wins; otherwise local MinIO or s3fs path-style opts.
+s3lvol_path_style() {
+  case "${CUBE_S3LVOL_PATH_STYLE:-}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+    0|false|FALSE|no|NO) return 1 ;;
+  esac
+  if s3_config_is_local_minio_fill; then
+    return 0
+  fi
+  [[ "${CUBE_S3_S3FS_EXTRA_OPTS:-}" == *use_path_request_style* ]]
+}
+
+# write_s3lvol_cfg_file: render one s3.cfg. path_style/no_tls are 0/1.
+write_s3lvol_cfg_file() {
+  local conf="$1"
+  local access_key="$2"
+  local secret_key="$3"
+  local bucket="$4"
+  local host="$5"
+  local region="$6"
+  local path_style="$7"
+  local no_tls="$8"
+  local tmp_file old_umask
+
+  if [[ "${bucket}" == *\"* ]]; then
+    die "s3.cfg value for buckets must not contain double quotes"
+  fi
+
+  mkdir -p "$(dirname "${conf}")"
+  old_umask="$(umask)"
+  umask 077
+  tmp_file="$(mktemp "${conf}.XXXXXX")"
+  chmod 600 "${tmp_file}"
+  {
+    printf '# %s\n' "${S3LVOL_CFG_SENTINEL}"
+    toml_assign access_key_id "${access_key}"
+    toml_assign secret_access_key "${secret_key}"
+    toml_assign endpoint "${host}"
+    toml_assign region "${region}"
+    printf 'buckets=["%s"]\n' "${bucket}"
+    if [[ "${path_style}" == "1" ]]; then
+      toml_assign path_style "true"
+    fi
+    if [[ "${no_tls}" == "1" ]]; then
+      toml_assign no_tls "true"
+    fi
+  } > "${tmp_file}"
+  mv -f "${tmp_file}" "${conf}"
+  umask "${old_umask}"
+  chmod 600 "${conf}"
+}
+
+# write_s3lvol_cfg: generate /data/cubelet/s3.cfg from CUBE_S3_* when
+# s3lvol is enabled. Leaves a hand-written file (no sentinel) alone.
+write_s3lvol_cfg() {
+  local conf host no_tls=0 path_style=0
+
+  [[ "${ONE_CLICK_ENABLE_S3LVOL:-0}" == "1" ]] || return 0
+
+  conf="${RCOW_S3_CFG:-/data/cubelet/s3.cfg}"
+  if [[ -z "${CUBE_S3_ENDPOINT:-}" ]]; then
+    return 0
+  fi
+  if [[ -f "${conf}" ]] && ! grep -Fq "${S3LVOL_CFG_SENTINEL}" "${conf}"; then
+    log "keeping hand-written ${conf} (no one-click sentinel)"
+    return 0
+  fi
+
+  host="$(s3lvol_host_from_endpoint "${CUBE_S3_ENDPOINT}")"
+  [[ -n "${host}" ]] || die "CUBE_S3_ENDPOINT=${CUBE_S3_ENDPOINT} has no host; cannot write ${conf}"
+  if s3lvol_no_tls_from_endpoint "${CUBE_S3_ENDPOINT}"; then
+    no_tls=1
+  fi
+  if s3lvol_path_style; then
+    path_style=1
+  fi
+
+  write_s3lvol_cfg_file \
+    "${conf}" \
+    "${CUBE_S3_ACCESS_KEY_ID:-}" \
+    "${CUBE_S3_SECRET_ACCESS_KEY:-}" \
+    "${CUBE_S3LVOL_BUCKET:-cube-s3lvol}" \
+    "${host}" \
+    "${CUBE_S3_REGION:-us-east-1}" \
+    "${path_style}" \
+    "${no_tls}"
+  log "wrote ${conf} endpoint=${host} bucket=${CUBE_S3LVOL_BUCKET:-cube-s3lvol}"
 }
 
 # install_s3_volume_host_deps: install s3fs for the S3 volume plugin.

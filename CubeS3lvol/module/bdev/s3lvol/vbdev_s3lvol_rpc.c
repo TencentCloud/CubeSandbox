@@ -20,7 +20,7 @@
  *
  *     rcow_create_lvstore / rcow_attach_lvstore / rcow_delete_lvstore
  *     rcow_unload_lvstore / rcow_flush_lvstore / rcow_checkpoint_lvstore
- *     rcow_get_lvstores / rcow_add_cos_config
+ *     rcow_get_lvstores / rcow_add_s3_config
  *     rcow_create_lvol / rcow_delete_lvol / rcow_resize_lvol
  *     rcow_create_snapshot / rcow_create_clone
  *     rcow_export_snapshot / rcow_get_snapshot_status / rcow_import_lvol
@@ -1346,9 +1346,9 @@ SPDK_RPC_REGISTER("rcow_checkpoint_lvstore",
 		  rpc_rcow_checkpoint_lvstore, SPDK_RPC_RUNTIME)
 
 /* ==========================================================================
- * rcow_add_cos_config
+ * rcow_add_s3_config
  *
- * Register a namespace that maps to a COS bucket. Meant to be called by a
+ * Register a namespace that maps to an S3 bucket. Meant to be called by a
  * startup script once per bucket before any lvstore is created or attached.
  *
  * The namespace name is typically the bucket name, which makes it easy to read
@@ -1359,7 +1359,7 @@ SPDK_RPC_REGISTER("rcow_checkpoint_lvstore",
  * environment (S3_AUTH_ENV), the same as before.
  * ========================================================================== */
 
-struct rpc_add_cos_config {
+struct rpc_add_s3_config {
 	char *ns_name;
 	char *endpoint;
 	char *bucket;
@@ -1369,7 +1369,7 @@ struct rpc_add_cos_config {
 };
 
 static void
-free_rpc_add_cos_config(struct rpc_add_cos_config *req)
+free_rpc_add_s3_config(struct rpc_add_s3_config *req)
 {
 	free(req->ns_name);
 	free(req->endpoint);
@@ -1377,25 +1377,25 @@ free_rpc_add_cos_config(struct rpc_add_cos_config *req)
 	free(req->region);
 }
 
-static const struct spdk_json_object_decoder rpc_add_cos_config_decoders[] = {
-	{"namespace",  offsetof(struct rpc_add_cos_config, ns_name),  spdk_json_decode_string, false},
-	{"endpoint",   offsetof(struct rpc_add_cos_config, endpoint),   spdk_json_decode_string, false},
-	{"bucket",     offsetof(struct rpc_add_cos_config, bucket),     spdk_json_decode_string, false},
-	{"region",     offsetof(struct rpc_add_cos_config, region),     spdk_json_decode_string, true},
-	{"path_style", offsetof(struct rpc_add_cos_config, path_style), spdk_json_decode_bool,   true},
-	{"no_tls",     offsetof(struct rpc_add_cos_config, no_tls),     spdk_json_decode_bool,   true},
+static const struct spdk_json_object_decoder rpc_add_s3_config_decoders[] = {
+	{"namespace",  offsetof(struct rpc_add_s3_config, ns_name),  spdk_json_decode_string, false},
+	{"endpoint",   offsetof(struct rpc_add_s3_config, endpoint),   spdk_json_decode_string, false},
+	{"bucket",     offsetof(struct rpc_add_s3_config, bucket),     spdk_json_decode_string, false},
+	{"region",     offsetof(struct rpc_add_s3_config, region),     spdk_json_decode_string, true},
+	{"path_style", offsetof(struct rpc_add_s3_config, path_style), spdk_json_decode_bool,   true},
+	{"no_tls",     offsetof(struct rpc_add_s3_config, no_tls),     spdk_json_decode_bool,   true},
 };
 
 static void
-rpc_rcow_add_cos_config(struct spdk_jsonrpc_request *request,
+rpc_rcow_add_s3_config(struct spdk_jsonrpc_request *request,
 			const struct spdk_json_val *params)
 {
-	struct rpc_add_cos_config req = {0};
+	struct rpc_add_s3_config req = {0};
 	struct s3_target target = {0};
 	int rc;
 
-	if (spdk_json_decode_object(params, rpc_add_cos_config_decoders,
-				    SPDK_COUNTOF(rpc_add_cos_config_decoders),
+	if (spdk_json_decode_object(params, rpc_add_s3_config_decoders,
+				    SPDK_COUNTOF(rpc_add_s3_config_decoders),
 				    &req)) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
 						 "Invalid parameters");
@@ -1425,9 +1425,9 @@ rpc_rcow_add_cos_config(struct spdk_jsonrpc_request *request,
 	}
 
 cleanup:
-	free_rpc_add_cos_config(&req);
+	free_rpc_add_s3_config(&req);
 }
-SPDK_RPC_REGISTER("rcow_add_cos_config", rpc_rcow_add_cos_config, SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("rcow_add_s3_config", rpc_rcow_add_s3_config, SPDK_RPC_RUNTIME)
 
 /* ==========================================================================
  * rcow_get_lvstores

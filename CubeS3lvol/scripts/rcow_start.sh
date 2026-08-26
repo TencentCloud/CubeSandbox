@@ -11,7 +11,7 @@
 #                                    creation, so the grid is built up front --
 #                                    but without listeners; see step 7
 #    3. WAL bdev                     the lvstore attach needs it by name
-#    4. COS namespaces               the lvstore attach resolves its namespace
+#    4. S3 namespaces                the lvstore attach resolves its namespace
 #                                    through them
 #    5. lvstore: attach or create    see below
 #    6. replay the active registry   volumes come back where they were
@@ -131,7 +131,7 @@ rcow_ensure_run_dir
 rcow_check_tgt_deps
 [ -x "${RCOW_SPDK_RPC_PY}" ] || rcow_die "SPDK rpc.py not found: ${RCOW_SPDK_RPC_PY} \
 (set SPDK_ROOT)"
-[ -r "${RCOW_COS_CFG}" ] || rcow_die "COS config not readable: ${RCOW_COS_CFG}"
+[ -r "${RCOW_S3_CFG}" ] || rcow_die "S3 config not readable: ${RCOW_S3_CFG}"
 [ -e "${RCOW_WAL_IMG}" ] || rcow_die "WAL image not found: ${RCOW_WAL_IMG}. It \
 is deliberately not created here -- its size fixes the journal and WAL layout, \
 and an empty file where the old one used to be looks to the attach path like an \
@@ -162,18 +162,18 @@ rm -f "${RCOW_RPC_SOCK}" "${RCOW_RPC_SOCK}.lock" "/var/tmp/spdk_cpu_lock_"* \
 	"${RCOW_PIDFILE}"
 
 rcow_load_credentials ||
-	rcow_die "could not read secretid/secretkey from ${RCOW_COS_CFG}"
+	rcow_die "could not read access_key_id/secret_access_key from ${RCOW_S3_CFG}"
 
-COS_ENDPOINT="$(rcow_cfg_get cos_endpoint)"
-COS_REGION="$(rcow_cfg_get region)"
-COS_BUCKETS="$(rcow_cos_buckets)"
+S3_ENDPOINT="$(rcow_cfg_get endpoint)"
+S3_REGION="$(rcow_cfg_get region)"
+S3_BUCKETS="$(rcow_s3_buckets)"
 
-[ -n "${COS_ENDPOINT}" ] || rcow_die "no cos_endpoint in ${RCOW_COS_CFG}"
-[ -n "${COS_BUCKETS}" ]  || rcow_die "no cos_bucket_name in ${RCOW_COS_CFG}"
-[ -n "${COS_REGION}" ]   || COS_REGION="us-east-1"
+[ -n "${S3_ENDPOINT}" ] || rcow_die "no endpoint in ${RCOW_S3_CFG}"
+[ -n "${S3_BUCKETS}" ]  || rcow_die "no buckets in ${RCOW_S3_CFG}"
+[ -n "${S3_REGION}" ]   || S3_REGION="us-east-1"
 
-rcow_log "endpoint ${COS_ENDPOINT}, region ${COS_REGION}"
-rcow_log "buckets: $(printf '%s ' ${COS_BUCKETS})"
+rcow_log "endpoint ${S3_ENDPOINT}, region ${S3_REGION}"
+rcow_log "buckets: $(printf '%s ' ${S3_BUCKETS})"
 rcow_log "lvstore '${RCOW_LVS_NAME}', WAL image ${RCOW_WAL_IMG}"
 
 # ==========================================================================
@@ -247,7 +247,7 @@ HAVE_SUBSYS="$(rcow_subsys_count)"
 	bail "only ${HAVE_SUBSYS} of ${RCOW_NUM_SUBSYS} subsystems exist"
 
 # ==========================================================================
-rcow_step "local device and COS namespaces"
+rcow_step "local device and S3 namespaces"
 
 rcow_srpc bdev_aio_create "${RCOW_WAL_IMG}" "${RCOW_WAL_BDEV}" 4096 \
 	>/dev/null 2>&1 ||
@@ -258,18 +258,18 @@ rcow_log "WAL bdev '${RCOW_WAL_BDEV}' on ${RCOW_WAL_IMG}"
 # blobstore per node), but an import reads from whichever namespace the source
 # lives in, so they are all registered.
 #
-# The COS config may name a path-style, plain-HTTP backend (MinIO in CI): the
+# The S3 config may name a path-style, plain-HTTP backend (MinIO in CI): the
 # two optional flags are read once and folded into every registration.
-RCOW_COS_EXTRA_JSON=""
-[ "$(rcow_cfg_get path_style)" = "true" ] && RCOW_COS_EXTRA_JSON+=',"path_style":true'
-[ "$(rcow_cfg_get no_tls)" = "true" ] && RCOW_COS_EXTRA_JSON+=',"no_tls":true'
+RCOW_S3_EXTRA_JSON=""
+[ "$(rcow_cfg_get path_style)" = "true" ] && RCOW_S3_EXTRA_JSON+=',"path_style":true'
+[ "$(rcow_cfg_get no_tls)" = "true" ] && RCOW_S3_EXTRA_JSON+=',"no_tls":true'
 
-for bucket in ${COS_BUCKETS}; do
-	rcow_rpc rcow_add_cos_config \
+for bucket in ${S3_BUCKETS}; do
+	rcow_rpc rcow_add_s3_config \
 		"$(printf '{"namespace":"%s","endpoint":"%s","bucket":"%s","region":"%s"%s}' \
-			"${bucket}" "${COS_ENDPOINT}" "${bucket}" "${COS_REGION}" \
-			"${RCOW_COS_EXTRA_JSON}")" \
-		>/dev/null || bail "rcow_add_cos_config failed for bucket ${bucket}"
+			"${bucket}" "${S3_ENDPOINT}" "${bucket}" "${S3_REGION}" \
+			"${RCOW_S3_EXTRA_JSON}")" \
+		>/dev/null || bail "rcow_add_s3_config failed for bucket ${bucket}"
 	rcow_log "namespace '${bucket}' registered"
 done
 
@@ -284,9 +284,9 @@ if BSTORE_ENTRY="$(rcow_bstore_entry "${RCOW_LVS_NAME}")"; then
 '${RCOW_LVS_NAME}' has no namespace; it cannot be attached without knowing \
 which bucket it lives in"
 
-	if ! printf '%s\n' "${COS_BUCKETS}" | grep -qxF "${LVS_NS}"; then
+	if ! printf '%s\n' "${S3_BUCKETS}" | grep -qxF "${LVS_NS}"; then
 		bail "'${RCOW_LVS_NAME}' lives in namespace '${LVS_NS}', which is not \
-among the buckets in ${RCOW_COS_CFG}. Attaching it against a different bucket \
+among the buckets in ${RCOW_S3_CFG}. Attaching it against a different bucket \
 would read someone else's metadata"
 	fi
 
@@ -346,7 +346,7 @@ else
 	[ "${DO_CREATE}" -eq 1 ] || bail "no ${RCOW_BSTORE_FILE} entry for \
 '${RCOW_LVS_NAME}' and --no-create was given"
 
-	LVS_NS="$(printf '%s\n' "${COS_BUCKETS}" | head -1)"
+	LVS_NS="$(printf '%s\n' "${S3_BUCKETS}" | head -1)"
 
 	rcow_log "no entry in ${RCOW_BSTORE_FILE}: creating a new lvstore in \
 namespace ${LVS_NS}, capacity ${RCOW_CAPACITY_GB} GiB, journal \

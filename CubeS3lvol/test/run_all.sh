@@ -6,7 +6,7 @@
 #  things. Ten integration tests run anywhere; two more want real S3 credentials;
 #  ten dataplane scripts want root, credentials, a writable /data, and exclusive
 #  use of the machine's nvme stack. Their arguments differ too -- four take
-#  -e/-b/-r, six read /data/cubelet/cos.cfg themselves. So "run the tests" meant
+#  -e/-b/-r, six read /data/cubelet/s3.cfg themselves. So "run the tests" meant
 #  remembering twenty-two invocations, and in practice meant running the two or
 #  three related to whatever had just changed.
 #
@@ -48,9 +48,9 @@
 #    test/run_all.sh --list          show what would run, run nothing
 #
 #  Environment:
-#    S3LVOL_TEST_BUCKET   override the bucket taken from cos.cfg
+#    S3LVOL_TEST_BUCKET   override the bucket taken from s3.cfg
 #    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
-#                         used as-is when set; otherwise read from cos.cfg
+#                         used as-is when set; otherwise read from s3.cfg
 #
 
 set -u
@@ -59,7 +59,7 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SELF_DIR}/.." && pwd)"
 cd "${ROOT}" || exit 1
 
-COS_CFG="${RCOW_COS_CFG:-/data/cubelet/cos.cfg}"
+S3_CFG="${RCOW_S3_CFG:-/data/cubelet/s3.cfg}"
 
 MODE=all
 for arg in "$@"; do
@@ -188,11 +188,11 @@ HAVE_ROOT=0
 [ "$(id -u)" -eq 0 ] && HAVE_ROOT=1
 
 # Credentials: whatever is already exported wins, so a run can use a different
-# account than cos.cfg names without editing it.
+# account than s3.cfg names without editing it.
 HAVE_CREDS=0
 if [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
 	HAVE_CREDS=1
-elif [ -r "${COS_CFG}" ]; then
+elif [ -r "${S3_CFG}" ]; then
 	# shellcheck source=../scripts/rcow_common.sh
 	. "${ROOT}/scripts/rcow_common.sh"
 	if rcow_load_credentials 2>/dev/null; then
@@ -201,9 +201,9 @@ elif [ -r "${COS_CFG}" ]; then
 fi
 
 ENDPOINT=""; BUCKET=""; REGION=""
-if [ -r "${COS_CFG}" ]; then
-	ENDPOINT="$(sed -n 's/^[[:space:]]*cos_endpoint[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "${COS_CFG}" | head -1)"
-	REGION="$(sed -n 's/^[[:space:]]*region[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "${COS_CFG}" | head -1)"
+if [ -r "${S3_CFG}" ]; then
+	ENDPOINT="$(sed -n 's/^[[:space:]]*endpoint[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "${S3_CFG}" | head -1)"
+	REGION="$(sed -n 's/^[[:space:]]*region[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "${S3_CFG}" | head -1)"
 fi
 
 # Kept out of a ${VAR:-$(...)} default: nesting a command substitution that
@@ -211,24 +211,24 @@ fi
 # quote parsing stops agreeing with the obvious reading, and it fails as a syntax
 # error at the end of the file rather than here.
 BUCKET="${S3LVOL_TEST_BUCKET:-}"
-if [ -z "${BUCKET}" ] && [ -r "${COS_CFG}" ]; then
-	BUCKET="$(sed -n 's/^[[:space:]]*cos_bucket_name[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' "${COS_CFG}" |
+if [ -z "${BUCKET}" ] && [ -r "${S3_CFG}" ]; then
+	BUCKET="$(sed -n 's/^[[:space:]]*buckets[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' "${S3_CFG}" |
 		head -1 | tr ',' '\n' |
 		sed -n 's/^[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 fi
 [ -n "${REGION}" ] || REGION=us-east-1
 
 # A path-style, plain-HTTP backend (MinIO in CI) has to be addressed
-# differently from the default virtual-hosted, HTTPS COS. The COS config may
+# differently from the default virtual-hosted, HTTPS S3. The S3 config may
 # carry both flags; whatever run_all.sh reads is exported so the dataplane
-# scripts fold it into their rcow_add_cos_config calls too.
+# scripts fold it into their rcow_add_s3_config calls too.
 S3LVOL_TEST_PATH_STYLE=0
 S3LVOL_TEST_NO_TLS=0
-if [ -r "${COS_CFG}" ]; then
+if [ -r "${S3_CFG}" ]; then
 	[ "$(sed -n 's/^[[:space:]]*path_style[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-		"${COS_CFG}" | head -1)" = "true" ] && S3LVOL_TEST_PATH_STYLE=1
+		"${S3_CFG}" | head -1)" = "true" ] && S3LVOL_TEST_PATH_STYLE=1
 	[ "$(sed -n 's/^[[:space:]]*no_tls[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-		"${COS_CFG}" | head -1)" = "true" ] && S3LVOL_TEST_NO_TLS=1
+		"${S3_CFG}" | head -1)" = "true" ] && S3LVOL_TEST_NO_TLS=1
 fi
 # The same two flags in the string form s3_prefix_rm.py takes, so count_objects
 # and remove_prefix in the dataplane scripts can address the backend identically.
@@ -309,7 +309,9 @@ echo ""
 # Integration, no S3
 # --------------------------------------------------------------------------
 echo "--- offline tools"
+run_suite s3_bucket_selftest python3 ./test/tools/s3_bucket.py --self-test
 run_suite isa_baseline ./test/tools/test_isa_baseline.sh
+run_suite rpc_py38_compat ./test/tools/test_rpc_py38_compat.sh
 echo ""
 
 echo "--- integration (no S3, no root)"
@@ -430,7 +432,7 @@ else
 		echo "--- dataplane (root, real S3, exclusive use of this machine)"
 		# activation and control last: they are the most sensitive to global
 		# state, so they are also the most useful check that the rest tidied
-		# up after themselves. They read cos.cfg on their own and take no
+		# up after themselves. They read s3.cfg on their own and take no
 		# arguments.
 		run_suite run_dataplane_test.sh \
 			./test/dataplane/run_dataplane_test.sh "${S3_ARGS[@]}"

@@ -25,7 +25,7 @@ SPDK_RPC_PY="${SPDK_ROOT}/scripts/rpc.py"
 SPDK_RPC="${SPDK_RPC_PY} -s /var/run/s3lvol.sock"
 PREFIX_RM="${ROOT}/test/tools/s3_prefix_rm.py"
 TGT="${ROOT}/app/s3lvol_tgt/s3lvol_tgt"
-COS_CFG="${RCOW_COS_CFG:-/data/cubelet/cos.cfg}"
+S3_CFG="${RCOW_S3_CFG:-/data/cubelet/s3.cfg}"
 ACTIVE_FILE=/data/cubelet/rcow/active_lvols
 
 LVS=actprobe
@@ -44,11 +44,11 @@ info() { echo "  ---- $*"; }
 TGT_PID=""
 declare -a CONNECTED_NQNS=()
 
-cfg() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "${COS_CFG}" | head -1; }
-ENDPOINT="$(cfg cos_endpoint)"; REGION="$(cfg region)"
-BUCKET="$(sed -n 's/^[[:space:]]*cos_bucket_name[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' "${COS_CFG}" | head -1 | tr ',' '\n' | sed -n 's/^[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-export AWS_ACCESS_KEY_ID="$(cfg secretid)"
-export AWS_SECRET_ACCESS_KEY="$(cfg secretkey)"
+cfg() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "${S3_CFG}" | head -1; }
+ENDPOINT="$(cfg endpoint)"; REGION="$(cfg region)"
+BUCKET="$(sed -n 's/^[[:space:]]*buckets[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' "${S3_CFG}" | head -1 | tr ',' '\n' | sed -n 's/^[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+export AWS_ACCESS_KEY_ID="$(cfg access_key_id)"
+export AWS_SECRET_ACCESS_KEY="$(cfg secret_access_key)"
 
 cleanup() {
 	echo ""
@@ -86,8 +86,8 @@ trap cleanup EXIT
 # --------------------------------------------------------------------------
 echo "=== [1] target, lvstore, volumes"
 [ -x "${TGT}" ] || { echo "target not built: ${TGT}" >&2; exit 1; }
-[ -r "${COS_CFG}" ] || {
-	echo "no COS config at ${COS_CFG}; set RCOW_COS_CFG to point at one" >&2
+[ -r "${S3_CFG}" ] || {
+	echo "no S3 config at ${S3_CFG}; set RCOW_S3_CFG to point at one" >&2
 	exit 1
 }
 if [ -z "${S3LVOL_SKIP_FRESH_CHECK:-}" ]; then
@@ -95,7 +95,7 @@ if [ -z "${S3LVOL_SKIP_FRESH_CHECK:-}" ]; then
 fi
 if [ -z "${ENDPOINT}" ] || [ -z "${BUCKET}" ] || \
    [ -z "${AWS_ACCESS_KEY_ID}" ] || [ -z "${AWS_SECRET_ACCESS_KEY}" ]; then
-	echo "could not parse endpoint/bucket/credentials from ${COS_CFG}" >&2
+	echo "could not parse endpoint/bucket/credentials from ${S3_CFG}" >&2
 	exit 1
 fi
 # -x, not -f: matching the whole command line makes any process that merely
@@ -128,7 +128,7 @@ if [ -z "${S3LVOL_TEST_S3FLAGS:-}" ]; then
 	[ "${S3LVOL_TEST_PATH_STYLE:-0}" -eq 1 ] && S3LVOL_TEST_S3FLAGS+=" --path-style"
 	[ "${S3LVOL_TEST_NO_TLS:-0}" -eq 1 ] && S3LVOL_TEST_S3FLAGS+=" --no-tls"
 fi
-"${RPC}" rcow_add_cos_config "$(printf '{"namespace":"%s","endpoint":"%s","bucket":"%s","region":"%s"%s}' \
+"${RPC}" rcow_add_s3_config "$(printf '{"namespace":"%s","endpoint":"%s","bucket":"%s","region":"%s"%s}' \
 	"${BUCKET}" "${ENDPOINT}" "${BUCKET}" "${REGION}" "${S3LVOL_EXTRA_JSON}")" >/dev/null || exit 1
 "${RPC}" rcow_create_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":8,"wal_bdev":"%s","journal_size_mb":64,"wal_size_mb":128}' \
 	"${LVS}" "${BUCKET}" "${WAL_BDEV}")" >/dev/null || exit 1

@@ -412,9 +412,9 @@ if [ -z "${S3LVOL_TEST_S3FLAGS:-}" ]; then
 	[ "${S3LVOL_TEST_PATH_STYLE:-0}" -eq 1 ] && S3LVOL_TEST_S3FLAGS+=" --path-style"
 	[ "${S3LVOL_TEST_NO_TLS:-0}" -eq 1 ] && S3LVOL_TEST_S3FLAGS+=" --no-tls"
 fi
-rpc_a rcow_add_cos_config "$(printf '{"namespace":"%s","endpoint":"%s","bucket":"%s","region":"%s"%s}' \
+rpc_a rcow_add_s3_config "$(printf '{"namespace":"%s","endpoint":"%s","bucket":"%s","region":"%s"%s}' \
 	"${BUCKET}" "${ENDPOINT}" "${BUCKET}" "${REGION}" "${S3LVOL_EXTRA_JSON}")" >/dev/null 2>&1 \
-	|| { fail "A add_cos_config"; exit 1; }
+	|| { fail "A add_s3_config"; exit 1; }
 rpc_a rcow_create_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%d,"wal_bdev":"%s","journal_size_mb":%d,"wal_size_mb":%d}' \
 	"${LVS_A}" "${BUCKET}" "${CAPACITY_GIB}" "${WAL_A_BDEV}" \
 	"${JOURNAL_MB}" "${WAL_MB}")" >/dev/null 2>&1 \
@@ -614,9 +614,9 @@ EXPECTED="$( { echo "${TMPL_MANIFEST}"; echo "${AGENT_MANIFEST}"; } | sort -u )"
 echo ""
 echo "[4] B: import and verify the data"
 
-rpc_b rcow_add_cos_config "$(printf '{"namespace":"%s","endpoint":"%s","bucket":"%s","region":"%s"%s}' \
+rpc_b rcow_add_s3_config "$(printf '{"namespace":"%s","endpoint":"%s","bucket":"%s","region":"%s"%s}' \
 	"${BUCKET}" "${ENDPOINT}" "${BUCKET}" "${REGION}" "${S3LVOL_EXTRA_JSON}")" >/dev/null 2>&1 \
-	|| { fail "B add_cos_config"; exit 1; }
+	|| { fail "B add_s3_config"; exit 1; }
 rpc_b rcow_create_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%d,"wal_bdev":"%s","journal_size_mb":%d,"wal_size_mb":%d}' \
 	"${LVS_B}" "${BUCKET}" "${CAPACITY_GIB}" "${WAL_B_BDEV}" \
 	"${JOURNAL_MB}" "${WAL_MB}")" >/dev/null 2>&1 \

@@ -29,8 +29,10 @@ s3lvol-<version>/
 ├── scripts/
 │   ├── rcow_start.sh rcow_stop.sh rcow_recovery.sh rcow_common.sh
 │   ├── rcow_purge.sh  s3lvol_rpc.py  s3_prefix_rm.py
-│   ├── rpc.py         # SPDK's, unmodified
-│   └── python/spdk/   # what rpc.py imports
+│   ├── rpc.py         # this repo's launcher (3.8 argparse shim)
+│   ├── rpc_compat.py  # BooleanOptionalAction backfill for Python 3.8
+│   ├── spdk_rpc.py    # SPDK's rpc.py, unmodified
+│   └── python/spdk/   # what SPDK rpc.py imports
 ├── VERSION            # what this package is and what it was built from
 └── README.md
 ```
@@ -38,11 +40,13 @@ s3lvol-<version>/
 Notes for a fresh build machine:
 
 - The script needs an SPDK checkout at `deps/spdk` or `../spdk` (or `SPDK_ROOT`
-  in the environment) to copy `rpc.py` and its library from; it refuses to run
-  without one. `setup_dep.sh` arranges this.
-- It runs a short **smoke test** that actually starts `bin/s3lvol_tgt` to prove
-  DPDK EAL initialises and the RPC socket comes up. On a restricted CI node that
-  cannot run DPDK, pass `--skip-smoke` to package without that check.
+  in the environment) to copy `spdk_rpc.py` and its library from; it refuses to
+  run without one. `setup_dep.sh` arranges this. `scripts/rpc.py` in the package
+  is this repo's launcher: it backfills `argparse.BooleanOptionalAction` so the
+  unmodified SPDK client can run on Python 3.8 (Ubuntu 20.04).
+- Layout detection and `rpc.py --help` always run. A separate **EAL smoke**
+  starts `bin/s3lvol_tgt` to prove DPDK initialises. On a restricted CI node that
+  cannot run DPDK, pass `--skip-smoke` to skip only that EAL check.
 - Both build types are recorded in `VERSION`. The development defaults are not a
   release build; for something meant to be deployed:
 
@@ -67,12 +71,19 @@ apt install -y nvme-cli python3 libssl1.1 libuuid1 libaio1 libnuma1
 openssl**: the package is built against the build machine's `libssl.so.1.1`, and
 the target's major version must match (1.1 and 3.x are not interchangeable).
 
+**CPU ISA (x86_64).** Release binaries are built for **Haswell / AVX2**, not
+the packager's CPU. `setup_dep.sh` passes `--target-arch=haswell` to SPDK
+(aarch64: `armv8.2-a+crypto`) so DPDK does not bake in VAES / VPCLMULQDQ from
+`-march=native`. Override with `SPDK_TARGET_ARCH` or replace the whole
+`./configure` line with `SPDK_CONFIGURE_ARGS`. `make_release.sh` refuses a
+`native` tree. The host needs `avx2` in `/proc/cpuinfo`.
+
 **Two pieces of per-machine state**, neither of them in the package, because they
 cannot be copied from another machine:
 
 | Path | What it is | Why it is not packaged |
 |---|---|---|
-| `/data/cubelet/cos.cfg` | COS endpoint, region, bucket, credentials | Holds secrets, and differs per machine |
+| `/data/cubelet/s3.cfg` | S3 endpoint, region, bucket, credentials | Holds secrets, and differs per machine |
 | `/data/cubelet/rcow/wal_bdev.img` | Backing file for the WAL and metadata journal | **Its size fixes the journal/WAL layout**; a copied image is an lvstore whose log belongs to another node |
 
 Create the WAL image, sized to leave room for `RCOW_JOURNAL_MB` +
@@ -106,8 +117,25 @@ scripts/rcow_purge.sh          # delete the whole lvstore back to a clean state 
 `rcow_start.sh` is idempotent: if already running it tells you and exits rather
 than starting a second instance.
 
-Credentials are read from `cos.cfg` and passed on **only through the target
+Credentials are read from `s3.cfg` and passed on **only through the target
 process's environment** — never on the command line, never into logs.
+
+one-click writes this file from `CUBE_S3_*` when `ONE_CLICK_ENABLE_S3LVOL=1`.
+If you write it by hand, values must be double-quoted and `endpoint` must
+**not** include a scheme (`http://` / `https://` become `no_tls` instead):
+
+```
+access_key_id="..."
+secret_access_key="..."
+endpoint="10.0.0.11:9000"
+region="us-east-1"
+buckets=["cube-s3lvol"]
+path_style="true"
+no_tls="true"
+```
+
+There is no fallback from the old `/data/cubelet/cos.cfg` name or field
+names (`secretid` / `cos_endpoint` / …). Rename the file and switch keys.
 
 ## Environment variables
 
@@ -116,7 +144,7 @@ used ones:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RCOW_COS_CFG` | `/data/cubelet/cos.cfg` | |
+| `RCOW_S3_CFG` | `/data/cubelet/s3.cfg` | |
 | `RCOW_WAL_IMG` | `/data/cubelet/rcow/wal_bdev.img` | |
 | `RCOW_LVS_NAME` | derived `rcow-<hostname-hash>`; a pre-existing `rcow` entry is honoured | lvstore name, also the prefix in S3 |
 | `RCOW_CAPACITY_GB` | `16384` | used only at first create; thin, unused space costs nothing |
@@ -152,9 +180,10 @@ outright rather than silently degrading if `nr_hugepages=0`.
 ## Operations
 
 All of this project's RPCs go through `scripts/s3lvol_rpc.py` (raw JSON-RPC);
-SPDK's own go through `scripts/rpc.py`. The two are not interchangeable: `rpc.py`
-only knows methods it has a Python wrapper for, while `rcow_*` are registered by
-this project and it refuses them directly.
+SPDK's own go through `scripts/rpc.py` (the launcher, which runs `spdk_rpc.py`).
+The two are not interchangeable: SPDK's client only knows methods it has a
+Python wrapper for, while `rcow_*` are registered by this project and it refuses
+them directly.
 
 **Volume lifecycle** (the first lvstore is created by `rcow_start.sh`):
 

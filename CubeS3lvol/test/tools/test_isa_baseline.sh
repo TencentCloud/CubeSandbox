@@ -13,6 +13,7 @@ SETUP="${ROOT}/setup_dep.sh"
 
 fail() {
 	echo "FAIL: $*" >&2
+	echo "result: 0 passed, 1 failed"
 	exit 1
 }
 
@@ -84,3 +85,4 @@ s3lvol_verify_portable_isa "${tmp}/ok" "${tmp}/okflags.h" \
 	|| fail "AVX2-only compile-time flags must pass the ISA gate"
 
 echo "isa baseline tests OK"
+echo "result: 14 passed, 0 failed"

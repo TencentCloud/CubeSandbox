@@ -628,7 +628,7 @@ echo "[2] creating the source volume and writing pattern A"
 # Register the namespace once. The namespace is the bucket name, which is the
 # simplest mapping and the one the startup script will use until the mapping
 # service is added.
-# A path-style, plain-HTTP backend (MinIO in CI) is configured in cos.cfg and
+# A path-style, plain-HTTP backend (MinIO in CI) is configured in s3.cfg and
 # exported by run_all.sh; fold the two flags into the registration.
 S3LVOL_EXTRA_JSON=""
 [ "${S3LVOL_TEST_PATH_STYLE:-0}" -eq 1 ] && S3LVOL_EXTRA_JSON+=',"path_style":true'
@@ -642,10 +642,10 @@ if [ -z "${S3LVOL_TEST_S3FLAGS:-}" ]; then
 	[ "${S3LVOL_TEST_NO_TLS:-0}" -eq 1 ] && S3LVOL_TEST_S3FLAGS+=" --no-tls"
 fi
 
-if ! raw_rpc rcow_add_cos_config "$(printf '{"namespace":"%s","endpoint":"%s","bucket":"%s","region":"%s"%s}' \
+if ! raw_rpc rcow_add_s3_config "$(printf '{"namespace":"%s","endpoint":"%s","bucket":"%s","region":"%s"%s}' \
 		"${BUCKET}" "${ENDPOINT}" "${BUCKET}" "${REGION}" "${S3LVOL_EXTRA_JSON}")" \
 		>/dev/null 2>"${WORKDIR}/cos_config.err"; then
-	fail "rcow_add_cos_config"
+	fail "rcow_add_s3_config"
 	sed 's/^/       /' "${WORKDIR}/cos_config.err"
 	exit 1
 fi

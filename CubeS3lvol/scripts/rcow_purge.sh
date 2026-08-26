@@ -198,13 +198,17 @@ else
 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, or pass --keep-s3 to purge local state \
 only"
 	fi
-	S3_ENDPOINT="$(rcow_cfg_get cos_endpoint)"
+	S3_ENDPOINT="$(rcow_cfg_get endpoint)"
 	S3_REGION="$(rcow_cfg_get region)"
-	S3_BUCKET="$(rcow_cos_buckets | head -1)"
-	[ -n "${S3_BUCKET}" ] || rcow_die "no bucket in ${RCOW_COS_CFG}"
+	S3_BUCKET="$(rcow_s3_buckets | head -1)"
+	[ -n "${S3_BUCKET}" ] || rcow_die "no bucket in ${RCOW_S3_CFG}"
+	S3_ADDR_FLAGS=()
+	rcow_s3_addr_flags S3_ADDR_FLAGS
 
 	S3_COUNT="$(python3 "${PREFIX_RM}" -e "${S3_ENDPOINT}" -b "${S3_BUCKET}" \
-		-r "${S3_REGION}" -p "${S3_PREFIX}" --list 2>/dev/null | grep -c . || true)"
+		-r "${S3_REGION}" -p "${S3_PREFIX}" --list \
+		"${S3_ADDR_FLAGS[@]+"${S3_ADDR_FLAGS[@]}"}" \
+		2>/dev/null | grep -c . || true)"
 	rcow_log "S3: ${S3_COUNT} object(s) under ${S3_BUCKET}/${S3_PREFIX}"
 fi
 
@@ -256,13 +260,15 @@ FAILED=0
 if [ "${KEEP_S3}" -eq 0 ]; then
 	rcow_log "deleting ${S3_COUNT} object(s) under ${S3_PREFIX}"
 	if python3 "${PREFIX_RM}" -e "${S3_ENDPOINT}" -b "${S3_BUCKET}" \
-			-r "${S3_REGION}" -p "${S3_PREFIX}" 2>&1 | tail -2; then
+			-r "${S3_REGION}" -p "${S3_PREFIX}" \
+			"${S3_ADDR_FLAGS[@]+"${S3_ADDR_FLAGS[@]}"}" 2>&1 | tail -2; then
 		# Verified rather than trusted: a partial delete leaves an owner marker
 		# or a checkpoint behind, and the next create then refuses with -EEXIST
 		# for a prefix that looks empty in every other respect.
 		LEFT="$(python3 "${PREFIX_RM}" -e "${S3_ENDPOINT}" -b "${S3_BUCKET}" \
-			-r "${S3_REGION}" -p "${S3_PREFIX}" --list 2>/dev/null | \
-			grep -c . || true)"
+			-r "${S3_REGION}" -p "${S3_PREFIX}" --list \
+			"${S3_ADDR_FLAGS[@]+"${S3_ADDR_FLAGS[@]}"}" \
+			2>/dev/null | grep -c . || true)"
 		if [ "${LEFT}" -eq 0 ]; then
 			rcow_log "S3 prefix is empty"
 		else

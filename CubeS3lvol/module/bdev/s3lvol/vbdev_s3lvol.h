@@ -212,7 +212,7 @@ struct spdk_bs_dev     *s3lvol_lvstore_get_bs_dev(struct s3lvol_lvstore *lvs);
 /**
  * Return the namespace this lvstore was created in.
  *
- * Every lvstore belongs to a namespace, which maps to a COS target through
+ * Every lvstore belongs to a namespace, which maps to an S3 target through
  * rcow_namespace_to_target(). An import defaults to the same namespace, which is
  * the common case.
  */
@@ -227,10 +227,10 @@ const char *s3lvol_lvstore_get_namespace(struct s3lvol_lvstore *lvs);
  * ========================================================================== */
 
 /**
- * Register a namespace that maps to a COS bucket.
+ * Register a namespace that maps to an S3 bucket.
  *
  * \param name      identifier used by create_lvstore / attach_lvstore
- * \param target    COS connection details; only endpoint/bucket/region/
+ * \param target    S3 connection details; only endpoint/bucket/region/
  *                  use_path_style/verify_tls are read, credentials come from
  *                  the environment
  * \return 0 on success, -EEXIST when the name is already taken.
@@ -238,7 +238,7 @@ const char *s3lvol_lvstore_get_namespace(struct s3lvol_lvstore *lvs);
 int rcow_namespace_add(const char *name, const struct s3_target *target);
 
 /**
- * Resolve a namespace name to a COS target.
+ * Resolve a namespace name to an S3 target.
  *
  * \return the registered target, or NULL when the namespace is unknown.
  */

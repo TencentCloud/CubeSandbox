@@ -43,9 +43,46 @@ source "${RCOW_COMMON}" # provides rcow_target_alive + RCOW_PIDFILE default
 # treat the deliberate stop as a failure.
 trap 'exit 0' TERM INT
 
+# Ensure the bucket exists before the target attaches. s3lvol will not
+# create it; a missing bucket fails create/attach with -EACCES. Failure
+# here is only a warning: HEAD 403 can mean "exists but HeadBucket is
+# denied", and MinIO may still be coming up (Restart=on-failure retries).
+S3_BUCKET_PY="${S3LVOL_ROOT}/scripts/s3_bucket.py"
+if [[ ! -f "${S3_BUCKET_PY}" ]]; then
+  S3_BUCKET_PY="${S3LVOL_ROOT}/test/tools/s3_bucket.py"
+fi
+if [[ -f "${S3_BUCKET_PY}" ]]; then
+  if rcow_load_credentials; then
+    s3_host="$(rcow_cfg_get endpoint)"
+    s3_region="$(rcow_cfg_get region)"
+    s3_bucket="$(rcow_s3_buckets | head -1)"
+    [[ -n "${s3_region}" ]] || s3_region="us-east-1"
+    s3_flags=()
+    rcow_s3_addr_flags s3_flags
+    if [[ -n "${s3_host}" && -n "${s3_bucket}" ]]; then
+      if python3 "${S3_BUCKET_PY}" ensure \
+          -e "${s3_host}" -b "${s3_bucket}" -r "${s3_region}" \
+          "${s3_flags[@]+"${s3_flags[@]}"}"; then
+        log "CubeS3lvol: bucket ${s3_bucket} is ready"
+      else
+        log "WARN: could not ensure S3 bucket ${s3_bucket} at ${s3_host}; rcow_start.sh will report the precise error if the bucket is actually missing"
+      fi
+    else
+      log "WARN: ${RCOW_S3_CFG} has no endpoint/buckets; skipping bucket ensure"
+    fi
+  else
+    log "WARN: could not read credentials from ${RCOW_S3_CFG}; skipping bucket ensure"
+  fi
+else
+  log "WARN: s3_bucket.py not found; skipping bucket ensure"
+fi
+
 log "CubeS3lvol: running rcow_start.sh"
-if ! "${RCOW_START}"; then
-  rc=$?
+# Do not use `if ! cmd; then rc=$?`: the `!` inverts success, so rc becomes 0
+# and Restart=on-failure never retries (MinIO still coming up).
+rc=0
+"${RCOW_START}" || rc=$?
+if [[ "${rc}" -ne 0 ]]; then
   log "CubeS3lvol: rcow_start.sh failed (rc=${rc})"
   exit "${rc}"
 fi

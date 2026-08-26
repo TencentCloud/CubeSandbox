@@ -47,7 +47,7 @@
 #  Usage:
 #    sudo -E ./test/dataplane/run_selfimport_test.sh
 #
-#  Needs root, a readable /data/cubelet/cos.cfg, and nvme-cli.
+#  Needs root, a readable /data/cubelet/s3.cfg, and nvme-cli.
 
 set -u
 
@@ -68,7 +68,7 @@ export RCOW_RUN_DIR=/var/tmp/rcow_selfimport
 export RCOW_LOG_DIR=/var/tmp/rcow_selfimport/log
 export RCOW_ACTIVE_FILE=/var/tmp/rcow_selfimport/active_lvols
 export RCOW_BSTORE_FILE=/var/tmp/rcow_selfimport/bstore.json
-export RCOW_COS_CFG="${RCOW_COS_CFG:-/data/cubelet/cos.cfg}"
+export RCOW_S3_CFG="${RCOW_S3_CFG:-/data/cubelet/s3.cfg}"
 
 PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); echo "  [PASS] $*"; }
@@ -220,7 +220,7 @@ cleanup()
 
 	if [ "${FAIL}" -eq 0 ] && [ -z "${S3LVOL_KEEP_S3:-}" ]; then
 		rcow_load_credentials
-		EP="$(rcow_cfg_get cos_endpoint)"; RG="$(rcow_cfg_get region)"
+		EP="$(rcow_cfg_get endpoint)"; RG="$(rcow_cfg_get region)"
 		python3 "${PREFIX_RM}" -e "${EP}" -b "${BUCKET}" -r "${RG}" \
 			-p "${RCOW_LVS_NAME}/" 2>&1 | tail -1
 		# exports/ is bucket-level and shared, so only this run's manifests.
@@ -245,11 +245,11 @@ echo "=== [0] preconditions"
 
 [ "$(id -u)" -eq 0 ] || { echo "must run as root" >&2; exit 1; }
 [ -x "${ROOT}/app/s3lvol_tgt/s3lvol_tgt" ] || { echo "target not built" >&2; exit 1; }
-[ -r "${RCOW_COS_CFG}" ] || { echo "no COS config" >&2; exit 1; }
+[ -r "${RCOW_S3_CFG}" ] || { echo "no S3 config" >&2; exit 1; }
 command -v nvme >/dev/null || { echo "nvme-cli is required" >&2; exit 1; }
 [ -n "$(rcow_target_instances)" ] && { echo "a target is already running" >&2; exit 1; }
 
-BUCKET="$(rcow_cos_buckets | head -1)"
+BUCKET="$(rcow_s3_buckets | head -1)"
 WORKDIR="$(mktemp -d /tmp/rcow_selfimp.XXXXXX)"
 rm -rf "${RCOW_RUN_DIR}"; mkdir -p "${RCOW_RUN_DIR}"
 rm -f "${RCOW_WAL_IMG}"; truncate -s 1G "${RCOW_WAL_IMG}"

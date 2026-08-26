@@ -21,8 +21,8 @@ test/run_all.sh --no-dataplane  # both integration layers, no dataplane
 The reason `run_all.sh` exists is that the suites' preconditions had drifted
 apart: ten integration tests run anywhere, two need real credentials, ten
 dataplane scripts need root + credentials + a writable `/data` + exclusive use
-of the machine's nvme stack; and the arguments differ too (four take
-`-e/-b/-r`, six read `cos.cfg` themselves). So "run the tests" had become
+of the machine's nvme stack; and the arguments differ too (seven take
+`-e/-b/-r`, six read `s3.cfg` themselves). So "run the tests" had become
 "remember twenty-two invocations", and in practice meant running only the two
 or three related to whatever had just changed.
 
@@ -144,7 +144,7 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
 ./test/dataplane/run_recovery_test.sh  -e cos.ap-nanjing.myqcloud.com -b <bucket> -r ap-nanjing
 ./test/dataplane/run_snapshot_test.sh  -e cos.ap-nanjing.myqcloud.com -b <bucket> -r ap-nanjing
 ./test/dataplane/run_export_test.sh    -e cos.ap-nanjing.myqcloud.com -b <bucket> -r ap-nanjing
-./test/dataplane/run_selfimport_test.sh    # reads /data/cubelet/cos.cfg, no arguments
+./test/dataplane/run_selfimport_test.sh    # reads /data/cubelet/s3.cfg, no arguments
 ./test/dataplane/run_snapdelete_test.sh    # same
 ./test/dataplane/run_activation_test.sh    # same
 ./test/dataplane/run_fs_test.sh            # same; really does mkfs.xfs + mount
@@ -443,8 +443,8 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   next round red while **the round that actually produced it shows all green**,
   wrong on both ends.
 
-Common conventions of the dataplane scripts (four of them take `-e/-b/-r`
-arguments, the other six read `/data/cubelet/cos.cfg` themselves):
+Common conventions of the dataplane scripts (seven take `-e/-b/-r`
+arguments, the other six read `/data/cubelet/s3.cfg` themselves):
 
 | Environment variable | Effect |
 |----------|------|

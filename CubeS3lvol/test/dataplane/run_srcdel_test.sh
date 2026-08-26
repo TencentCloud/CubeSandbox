@@ -503,10 +503,10 @@ if [ -z "${S3LVOL_TEST_S3FLAGS:-}" ]; then
 	[ "${S3LVOL_TEST_NO_TLS:-0}" -eq 1 ] && S3LVOL_TEST_S3FLAGS+=" --no-tls"
 fi
 
-if ! raw_rpc rcow_add_cos_config "$(printf '{"namespace":"%s","endpoint":"%s","bucket":"%s","region":"%s"%s}' \
+if ! raw_rpc rcow_add_s3_config "$(printf '{"namespace":"%s","endpoint":"%s","bucket":"%s","region":"%s"%s}' \
 		"${BUCKET}" "${ENDPOINT}" "${BUCKET}" "${REGION}" "${S3LVOL_EXTRA_JSON}")" \
 		>/dev/null 2>"${WORKDIR}/cos_config.err"; then
-	fail "rcow_add_cos_config"
+	fail "rcow_add_s3_config"
 	sed 's/^/       /' "${WORKDIR}/cos_config.err"
 	exit 1
 fi

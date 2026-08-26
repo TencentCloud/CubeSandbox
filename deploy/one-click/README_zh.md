@@ -202,6 +202,7 @@ CubeS3lvol（s3lvol）作为 `cube-sandbox-*` 角色 target 的 `Wants=` 成员�
 - **停止（`down.sh` / `systemctl stop cube-sandbox-{control,compute}.target`）**：s3lvol 单元会走 `cube-s3lvol-stop.sh` 的**条件卸载**——target 进程存活时完整执行 `rcow_stop.sh`（断开 initiator → 卸载 lvstore/回刷 → 终止 target），target 已崩溃时只清理 target 侧残留、绝不断开 NVMf initiator。`down.sh` 只停止服务，**不删除任何数据**（`/data/cubelet/rcow/wal_bdev.img` 与 bstore 元数据保留），再次启动走 attach/replay 恢复。
 - **升级（`install.sh` 升级模式）**：旧 `CubeS3lvol/` 目录被替换（新二进制自动生效），随后 target 随角色 target 重启。`wal_bdev.img` **永不覆盖**（仅首次安装创建，其尺寸固定 journal/WAL 布局），`.one-click.env` 中 `RCOW_*` 配置经升级合并保留。
 - **启停开关**：`.env` 里 `ONE_CLICK_ENABLE_S3LVOL` 翻转为 1/0 后重跑 `install.sh`（或直接 `systemctl enable/disable cube-sandbox-s3lvol.service`）即可。
+- **S3 后端**：启用后 `install.sh` 用 `CUBE_S3_*` 自动写出 `/data/cubelet/s3.cfg`（默认对接内置 MinIO；配了外部 S3 就跟外部走）。s3lvol 使用独立桶 `CUBE_S3LVOL_BUCKET`（默认 `cube-s3lvol`），与 volume 插件的 `cube-volumes` 分开。supervisor 启动前会用 stdlib SigV4 工具幂等建桶，不依赖 awscli。手写且不含 one-click sentinel 的 `s3.cfg` 不会被覆盖。开发机上旧的 `/data/cubelet/cos.cfg` **不会回落**，请改名为 `s3.cfg` 并换成新字段名。
 
 控制节点安装完成后，可以打开 Dashboard：
 
@@ -440,7 +441,7 @@ export E2B_API_KEY=e2b_000000
 - 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
   `mkfs.ext4`、`mount`、`umount`、`losetup`
 - 若 `ONE_CLICK_ENABLE_S3LVOL=1` 且包内存在 `CubeS3lvol/bin/s3lvol_tgt`，还会额外检查：
-  `nvme`（nvme-cli）、`python3`、`truncate`，以及 `s3lvol_tgt` 动态链接的共享库（`ldd` 探测；重点：`libssl.so.1.1` / `libcrypto.so.1.1` 属于 OpenSSL 1.1 分支）
+  `nvme`（nvme-cli）、`python3`、`truncate`，`s3lvol_tgt` 动态链接的共享库（`ldd` 探测；重点：`libssl.so.1.1` / `libcrypto.so.1.1` 属于 OpenSSL 1.1 分支），以及（x86_64）`/proc/cpuinfo` 里的 `avx2`。发布包按 Haswell/AVX2 编，不是打包机的 `native`。缺 `nvme` 时 `install.sh` 会通过系统包管理器自动安装 `nvme-cli`。系统 `python3` 必须能跑通 `CubeS3lvol/scripts/rpc.py --help`（3.8 即可；发布包里的启动器会补上 SPDK 客户端所需的 3.9 `argparse` 接口）。
 
 推荐安装包（覆盖上述 `cubecow` 依赖）：
 
@@ -458,15 +459,15 @@ sudo dnf install -y e2fsprogs util-linux || \
 sudo yum install -y e2fsprogs util-linux
 ```
 
-启用 `ONE_CLICK_ENABLE_S3LVOL=1` 时额外安装包：
+启用 `ONE_CLICK_ENABLE_S3LVOL=1` 时额外安装包（库依赖；`nvme-cli` 由 `install.sh` 自动安装）：
 
 ```bash
 # Debian / Ubuntu（openssl 1.1 通常已满足；缺库时用 ldd 确认）
-sudo apt-get install -y nvme-cli python3 libaio1 libnuma1 uuid-runtime
+sudo apt-get install -y python3 libaio1 libnuma1 uuid-runtime
 
 # OpenCloudOS / RHEL / CentOS（openssl 3 需 compat-openssl11）
-sudo dnf install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11 || \
-sudo yum install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11
+sudo dnf install -y python3 libaio libnuma libuuid compat-openssl11 || \
+sudo yum install -y python3 libaio libnuma libuuid compat-openssl11
 ```
 
 ### control 角色（`install.sh`，默认）
@@ -497,7 +498,7 @@ sudo yum install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11
 - 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
   `mkfs.ext4`、`mount`、`umount`、`losetup`
 - 若 `ONE_CLICK_ENABLE_S3LVOL=1` 且包内存在 `CubeS3lvol/bin/s3lvol_tgt`，还会额外检查：
-  `nvme`（nvme-cli）、`python3`、`truncate`，以及 `s3lvol_tgt` 动态链接的共享库（`ldd` 探测；重点：`libssl.so.1.1` / `libcrypto.so.1.1` 属于 OpenSSL 1.1 分支）
+  `nvme`（nvme-cli）、`python3`、`truncate`，`s3lvol_tgt` 动态链接的共享库（`ldd` 探测；重点：`libssl.so.1.1` / `libcrypto.so.1.1` 属于 OpenSSL 1.1 分支），以及（x86_64）`/proc/cpuinfo` 里的 `avx2`。发布包按 Haswell/AVX2 编，不是打包机的 `native`。缺 `nvme` 时 `install.sh` 会通过系统包管理器自动安装 `nvme-cli`。系统 `python3` 必须能跑通 `CubeS3lvol/scripts/rpc.py --help`（3.8 即可；发布包里的启动器会补上 SPDK 客户端所需的 3.9 `argparse` 接口）。
 
 推荐安装包（覆盖上述 `cubecow` 依赖）：
 
@@ -515,15 +516,15 @@ sudo dnf install -y e2fsprogs util-linux || \
 sudo yum install -y e2fsprogs util-linux
 ```
 
-启用 `ONE_CLICK_ENABLE_S3LVOL=1` 时额外安装包：
+启用 `ONE_CLICK_ENABLE_S3LVOL=1` 时额外安装包（库依赖；`nvme-cli` 由 `install.sh` 自动安装）：
 
 ```bash
 # Debian / Ubuntu（openssl 1.1 通常已满足；缺库时用 ldd 确认）
-sudo apt-get install -y nvme-cli python3 libaio1 libnuma1 uuid-runtime
+sudo apt-get install -y python3 libaio1 libnuma1 uuid-runtime
 
 # OpenCloudOS / RHEL / CentOS（openssl 3 需 compat-openssl11）
-sudo dnf install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11 || \
-sudo yum install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11
+sudo dnf install -y python3 libaio libnuma libuuid compat-openssl11 || \
+sudo yum install -y python3 libaio libnuma libuuid compat-openssl11
 ```
 
 ## 前置条件

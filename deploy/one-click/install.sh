@@ -95,6 +95,10 @@ init_external_dep_defaults() {
   CUBE_S3_BUCKET="${CUBE_S3_BUCKET:-cube-volumes}"
   CUBE_S3_REGION="${CUBE_S3_REGION:-us-east-1}"
   CUBE_S3_S3FS_EXTRA_OPTS="${CUBE_S3_S3FS_EXTRA_OPTS:-}"
+  # s3lvol uses the same CUBE_S3_* store but a dedicated bucket so its
+  # prefixes never collide with the volume plugin's volumes/<id>/ tree.
+  CUBE_S3LVOL_BUCKET="${CUBE_S3LVOL_BUCKET:-cube-s3lvol}"
+  CUBE_S3LVOL_PATH_STYLE="${CUBE_S3LVOL_PATH_STYLE:-}"
 }
 
 # Guard against shipping the example/default credentials to a real external
@@ -1575,9 +1579,17 @@ case "${RCOW_LISTEN_PORT}" in
     ;;
 esac
 
+# Render /data/cubelet/s3.cfg from CUBE_S3_* before the s3lvol preflight
+# looks for it. Hand-written files without the one-click sentinel are kept.
+write_s3lvol_cfg
+
+# nvme-cli is not part of a minimal install; provide it before the
+# startup-deps validation below requires it.
+ensure_nvme_cli
+
 # CubeS3lvol runtime deps (nvme-cli, python3, truncate, and the shared
 # libraries s3lvol_tgt needs -- notably libssl.so.1.1) are validated once
-# here, fail-fast, before the installer touches the system.
+# here, fail-fast, before the installer replaces the install tree.
 validate_cubelet_s3lvol_startup_deps "${PKG_ROOT}/CubeS3lvol/bin/s3lvol_tgt"
 
 patch_cubelet_config_template \
@@ -1909,6 +1921,12 @@ fi
 # rcow_common.sh) so the systemd unit picks them up via EnvironmentFile
 # without re-deriving them, and so `down.sh` / upgrade knows the intent.
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_ENABLE_S3LVOL" "${ONE_CLICK_ENABLE_S3LVOL}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3LVOL_BUCKET" "${CUBE_S3LVOL_BUCKET}"
+if [[ -n "${CUBE_S3LVOL_PATH_STYLE}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3LVOL_PATH_STYLE" "${CUBE_S3LVOL_PATH_STYLE}"
+else
+  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3LVOL_PATH_STYLE"
+fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_WAL_MB" "${RCOW_WAL_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_JOURNAL_MB" "${RCOW_JOURNAL_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CACHE_MB" "${RCOW_CACHE_MB}"

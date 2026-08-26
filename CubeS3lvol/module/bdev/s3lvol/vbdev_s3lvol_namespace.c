@@ -1,12 +1,12 @@
 /* Copyright (c) 2026 Tencent Inc.
  * SPDX-License-Identifier: Apache-2.0 */
 /*
- *   vbdev_s3lvol_namespace -- namespace-to-COS-target registry
+ *   vbdev_s3lvol_namespace -- namespace-to-S3-target registry
  *
- *   Every lvstore lives in a *namespace*, which maps to a COS target (endpoint,
+ *   Every lvstore lives in a *namespace*, which maps to an S3 target (endpoint,
  *   bucket, region, and associated TLS / path-style settings). The registry lives
  *   in process memory -- it is populated by the startup script through
- *   rcow_add_cos_config and does not survive a restart, because the same startup
+ *   rcow_add_s3_config and does not survive a restart, because the same startup
  *   script repopulates it every time.
  *
  *   For now the mapping is a direct TAILQ lookup. That will be replaced by
@@ -68,7 +68,7 @@ rcow_namespace_add(const char *name, const struct s3_target *target)
 		return -ENOMEM;
 	}
 
-	/* Copy only the fields that matter for the COS connection. Credential
+	/* Copy only the fields that matter for the S3 connection. Credential
 	 * fields (access_key / secret_key / session_token) are populated from the
 	 * environment inside s3_client_get_or_create(), never from the RPC.
 	 *

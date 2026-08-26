@@ -241,6 +241,14 @@ role target:
 - **Enable/disable**: flip `ONE_CLICK_ENABLE_S3LVOL` to 1/0 in `.env` and
   re-run `install.sh` (or `systemctl enable/disable
   cube-sandbox-s3lvol.service` directly).
+- **S3 backend**: when enabled, `install.sh` writes `/data/cubelet/s3.cfg`
+  from `CUBE_S3_*` (bundled MinIO fill, or the operator's external store).
+  s3lvol uses its own bucket (`CUBE_S3LVOL_BUCKET`, default `cube-s3lvol`)
+  so it never shares prefixes with the volume plugin's `cube-volumes`.
+  The supervisor idempotently creates that bucket with a stdlib SigV4
+  tool — no awscli. A hand-written `s3.cfg` without the one-click sentinel
+  is left alone. There is **no fallback** from the old `/data/cubelet/cos.cfg`;
+  rename it and switch to the new field names.
 
 ### Digital Assistant Environment Variables
 
@@ -478,7 +486,7 @@ Conditional commands:
 - If the packaged `Cubelet/config/config.toml` enables `storage_backend = "cubecow"`, one-click also checks:
   `mkfs.ext4`, `mount`, `umount`, `losetup`
 - If `ONE_CLICK_ENABLE_S3LVOL=1` and the package ships `CubeS3lvol/bin/s3lvol_tgt`, one-click also checks:
-  `nvme` (nvme-cli), `python3`, `truncate`, and the shared libraries `s3lvol_tgt` links against (`ldd`; notably `libssl.so.1.1` / `libcrypto.so.1.1`, the OpenSSL 1.1 branch)
+  `nvme` (nvme-cli), `python3`, `truncate`, the shared libraries `s3lvol_tgt` links against (`ldd`; notably `libssl.so.1.1` / `libcrypto.so.1.1`, the OpenSSL 1.1 branch), and (x86_64) `avx2` in `/proc/cpuinfo`. Release `s3lvol_tgt` is built for Haswell/AVX2, not the packager's native CPU. `install.sh` installs `nvme-cli` via the system package manager when `nvme` is missing. `python3` must be able to run `CubeS3lvol/scripts/rpc.py --help` (Python 3.8 is enough; the packaged launcher supplies the 3.9 `argparse` bits SPDK's client needs).
 
 Recommended packages to satisfy the cubecow command set:
 
@@ -497,15 +505,15 @@ sudo dnf install -y e2fsprogs util-linux || \
 sudo yum install -y e2fsprogs util-linux
 ```
 
-Additional packages for `ONE_CLICK_ENABLE_S3LVOL=1`:
+Additional packages for `ONE_CLICK_ENABLE_S3LVOL=1` (libraries only; `nvme-cli` is installed by `install.sh`):
 
 ```bash
 # Debian / Ubuntu (OpenSSL 1.1 is usually already present; confirm with ldd)
-sudo apt-get install -y nvme-cli python3 libaio1 libnuma1 uuid-runtime
+sudo apt-get install -y python3 libaio1 libnuma1 uuid-runtime
 
 # OpenCloudOS / RHEL / CentOS (OpenSSL 3 needs compat-openssl11)
-sudo dnf install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11 || \
-sudo yum install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11
+sudo dnf install -y python3 libaio libnuma libuuid compat-openssl11 || \
+sudo yum install -y python3 libaio libnuma libuuid compat-openssl11
 ```
 
 ### Control Role (`install.sh`, default)
@@ -536,7 +544,7 @@ Conditional commands:
 - If the packaged `Cubelet/config/config.toml` enables `storage_backend = "cubecow"`, one-click also checks:
   `mkfs.ext4`, `mount`, `umount`, `losetup`
 - If `ONE_CLICK_ENABLE_S3LVOL=1` and the package ships `CubeS3lvol/bin/s3lvol_tgt`, one-click also checks:
-  `nvme` (nvme-cli), `python3`, `truncate`, and the shared libraries `s3lvol_tgt` links against (`ldd`; notably `libssl.so.1.1` / `libcrypto.so.1.1`, the OpenSSL 1.1 branch)
+  `nvme` (nvme-cli), `python3`, `truncate`, the shared libraries `s3lvol_tgt` links against (`ldd`; notably `libssl.so.1.1` / `libcrypto.so.1.1`, the OpenSSL 1.1 branch), and (x86_64) `avx2` in `/proc/cpuinfo`. Release `s3lvol_tgt` is built for Haswell/AVX2, not the packager's native CPU. `install.sh` installs `nvme-cli` via the system package manager when `nvme` is missing. `python3` must be able to run `CubeS3lvol/scripts/rpc.py --help` (Python 3.8 is enough; the packaged launcher supplies the 3.9 `argparse` bits SPDK's client needs).
 
 Recommended packages to satisfy the cubecow command set:
 
@@ -555,15 +563,15 @@ sudo dnf install -y e2fsprogs util-linux || \
 sudo yum install -y e2fsprogs util-linux
 ```
 
-Additional packages for `ONE_CLICK_ENABLE_S3LVOL=1`:
+Additional packages for `ONE_CLICK_ENABLE_S3LVOL=1` (libraries only; `nvme-cli` is installed by `install.sh`):
 
 ```bash
 # Debian / Ubuntu (OpenSSL 1.1 is usually already present; confirm with ldd)
-sudo apt-get install -y nvme-cli python3 libaio1 libnuma1 uuid-runtime
+sudo apt-get install -y python3 libaio1 libnuma1 uuid-runtime
 
 # OpenCloudOS / RHEL / CentOS (OpenSSL 3 needs compat-openssl11)
-sudo dnf install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11 || \
-sudo yum install -y nvme-cli python3 libaio libnuma libuuid compat-openssl11
+sudo dnf install -y python3 libaio libnuma libuuid compat-openssl11 || \
+sudo yum install -y python3 libaio libnuma libuuid compat-openssl11
 ```
 
 ## Prerequisites
