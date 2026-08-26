@@ -141,12 +141,8 @@ cubemastercli tpl create-from-image \
 
 ## 如何配置后端 S3 服务
 
-跨机能力依赖的 S3 后端**主流程默认是开启的**，只要 **S3lvol 服务就绪**即可，无需额外打开开关。
-
-S3lvol 需要配置自己的 S3 接入信息（endpoint、bucket、access key 等）。
-凭证与节点本地状态见 [CubeS3lvol README](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md)：
-每台计算节点读取 `/data/cubelet/cos.cfg`，WAL / journal 镜像位于 `/data/cubelet/rcow/wal_bdev.img`。
-一键安装会按默认尺寸创建该镜像；不要在节点之间拷贝这份镜像。
+Cube 安装时默认安装 MinIO 作为 S3 服务，方便开箱体验。
+若要接入自己的 S3，按 [CubeS3lvol 文档](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md) 配置即可。
 
 ---
 

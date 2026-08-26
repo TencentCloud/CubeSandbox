@@ -115,9 +115,8 @@ Cubelet reads `/proc/cpuinfo` on the node and hashes CPU identity plus the featu
 
 ## Configuring the S3 backend
 
-The S3 path in CubeSandbox is **on by default**. You need a ready **S3lvol** service; there is no extra feature flag.
-
-Configure your S3 endpoint, bucket, and credentials per [CubeS3lvol README](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md). Each compute node reads `/data/cubelet/cos.cfg`. The WAL / journal image lives at `/data/cubelet/rcow/wal_bdev.img`. The one-click installer creates that image at the default size; do not copy it between nodes.
+Cube install ships MinIO as the default S3 service so you can try the feature out of the box.
+To point at your own S3 store, follow the [CubeS3lvol README](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md).
 
 ---
 
