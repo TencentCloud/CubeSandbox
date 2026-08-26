@@ -31,6 +31,11 @@ type Options struct {
 	CubeMaster   resumePauser
 	ProxyPush    stateNotifier
 	StateLockTTL time.Duration
+	// Owner is this process's identity for state-key transitions; the resume
+	// lock is written as "resuming@<Owner>" and only a matching owner can
+	// commit or release it. Must be unique per process in active-standby
+	// mode. Empty degrades to the legacy bare-value semantics.
+	Owner string
 	// MetaLookup is optional. When set, a registry miss is retried against
 	// the shared meta hash before failing — see iface.go for why.
 	MetaLookup metaLookup
@@ -118,7 +123,7 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 		// for this call only and deliberately NOT cached in the registry:
 		// on a standby nothing keeps a cached entry current (no stream
 		// consumer runs there), and on the leader hydration is owned by
-		// the stream consumer + reconciler.
+		// the stream consumer.
 		meta, err := r.o.MetaLookup.LookupMeta(ctx, sandboxID)
 		if err != nil {
 			return errors.New("meta fallback lookup: " + err.Error())
@@ -144,19 +149,22 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 	// before we'd actually call CubeMaster.
 	//
 	// cube:v1:shared:sandbox:lifecycle:state:<id> is dual-purpose: terminal
-	// markers (paused / running) AND in-flight transition locks (pausing /
-	// resuming) live in the same key. SETNX alone can't distinguish "I'm
-	// resuming this" from "this sandbox is parked at terminal-paused waiting
-	// for someone to resume it" — we need to peek first.
+	// markers (paused / running) AND in-flight transition locks
+	// ("resuming@<owner>" / "pausing@<owner>") live in the same key.
+	// acquireResumeOwnership sorts out which role this call plays; the
+	// transition lock itself is taken via an owner-tagged CAS so that two
+	// replicas can never both end up driving the RPC (issue #1211).
+	own := false
 	switch ownErr := r.acquireResumeOwnership(ctx, sandboxID); {
 	case ownErr == nil:
 		// We took the "resuming" lock; we're on the hook to drive the RPC.
 		// AutoResume gate lives here (the only path that would call
 		// CubeMaster.Resume) — return early if the sandbox opted out of
-		// auto-resume, and release the lock we just SET so the sweeper
+		// auto-resume, and release the lock we just took so the sweeper
 		// doesn't skip decisions for its TTL window.
+		own = true
 		if !entry.Meta.AutoResume {
-			_ = r.o.Redis.ClearStateNotify(ctx, sandboxID)
+			r.releaseOwnership(ctx, sandboxID)
 			return errors.New("auto_resume not enabled for sandbox")
 		}
 		if err := r.callCubeMasterResume(ctx, sandboxID, entry.Meta.InstanceType); err != nil {
@@ -180,19 +188,36 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 	// Success bookkeeping. Three writes, all best-effort:
 	//
 	//  1. Redis state → "running" so the next request from any sidecar
-	//     instance sees the right state.
+	//     instance sees the right state. When we own the transition this
+	//     goes through the owner-gated CommitTransition; a lost commit
+	//     (lock TTL expired mid-RPC and a peer took over) is logged and
+	//     left alone — the current holder owns the next write. The
+	//     already-running re-assert path keeps the legacy unconditional
+	//     write: no ownership is held there and restoring the terminal
+	//     value over a stale key is exactly the reconciliation we want.
 	//  2. CubeProxy local state dict → "running" so the rewrite_phase gate
 	//     stops triggering resumes for this sandbox.
 	//  3. In-memory registry LastActiveMs → now. Without (3) the sweeper
 	//     sees a stale baseline (LastActiveMs=0, CreatedAt from minutes
 	//     ago) and immediately on the next 5s tick logs "idle threshold
 	//     exceeded; pausing" for the sandbox we *just* woke up. The log
-	//     is mostly cosmetic — tryPause will SETNX-fail against
-	//     state=running and silently return — but the noise is
+	//     is mostly cosmetic — tryPause's acquire fails against
+	//     state=running and silently returns — but the noise is
 	//     misleading. The proxy's log_phase will eventually overwrite
 	//     this via the periodic last_active poll, but we want the right
 	//     answer immediately, not 5–10 seconds later.
-	if err := r.o.Redis.WriteState(ctx, sandboxID, "running", r.o.StateLockTTL); err != nil {
+	if own {
+		committed, err := r.o.Redis.CommitTransition(ctx, sandboxID,
+			lifecycle.StateResuming, r.o.Owner, lifecycle.StateRunning, r.o.StateLockTTL)
+		switch {
+		case err != nil:
+			r.o.Log.Warn("commit running state failed",
+				zap.String("sandbox_id", sandboxID), zap.Error(err))
+		case !committed:
+			r.o.Log.Warn("resume commit skipped: state key no longer ours",
+				zap.String("sandbox_id", sandboxID))
+		}
+	} else if err := r.o.Redis.WriteState(ctx, sandboxID, lifecycle.StateRunning, r.o.StateLockTTL); err != nil {
 		r.o.Log.Warn("write running state failed",
 			zap.String("sandbox_id", sandboxID), zap.Error(err))
 	}
@@ -240,7 +265,9 @@ func (r *Resumer) pushRunningState(sandboxID string) {
 // of CubeMaster response (success / not-found / already-running / real
 // failure) onto the appropriate caller-side cleanup. Returns nil when the
 // caller should proceed to the success-bookkeeping path; non-nil when the
-// caller should bail with an error.
+// caller should bail with an error. Only invoked by the call that owns the
+// "resuming" transition, so every cleanup here goes through the owner-gated
+// releaseOwnership.
 func (r *Resumer) callCubeMasterResume(ctx context.Context, sandboxID, instanceType string) error {
 	resumeErr := r.o.CubeMaster.Resume(ctx, sandboxID, instanceType)
 	if resumeErr == nil {
@@ -253,7 +280,7 @@ func (r *Resumer) callCubeMasterResume(ctx context.Context, sandboxID, instanceT
 		// from under us. Evict everywhere and surface as an error to
 		// the HTTP caller so CubeProxy returns 5xx (the dataplane
 		// request can't be served either way).
-		_ = r.o.Redis.ClearStateNotify(ctx, sandboxID)
+		r.releaseOwnership(ctx, sandboxID)
 		_ = r.o.ProxyPush.DeleteMeta(ctx, sandboxID)
 		r.o.Registry.Delete(sandboxID)
 		r.o.Log.Info("sandbox not found on cubemaster during resume; evicted",
@@ -269,76 +296,109 @@ func (r *Resumer) callCubeMasterResume(ctx context.Context, sandboxID, instanceT
 			zap.Int("ret_code", apiErr.RetCode))
 		return nil
 	default:
-		// Real failure: clear the resuming key so a future request can
+		// Real failure: release the resuming lock so a future request can
 		// retry, and surface the error.
-		_ = r.o.Redis.ClearStateNotify(ctx, sandboxID)
+		r.releaseOwnership(ctx, sandboxID)
 		return errors.New("cubemaster resume: " + resumeErr.Error())
+	}
+}
+
+// releaseOwnership drops our "resuming@<Owner>" lock. The CAS only deletes
+// the key when we still own it: if the lock TTL expired mid-RPC and a peer
+// has since acquired (and maybe even committed "running"), their state is
+// left untouched — the review-flagged failure mode of the old unconditional
+// ClearStateNotify. Errors are logged, not returned: the lock TTL is the
+// ultimate backstop either way.
+func (r *Resumer) releaseOwnership(ctx context.Context, sandboxID string) {
+	released, err := r.o.Redis.ReleaseTransition(ctx, sandboxID, lifecycle.StateResuming, r.o.Owner)
+	switch {
+	case err != nil:
+		r.o.Log.Warn("release resuming lock failed",
+			zap.String("sandbox_id", sandboxID), zap.Error(err))
+	case !released:
+		r.o.Log.Warn("resuming lock no longer ours; leaving peer's state alone",
+			zap.String("sandbox_id", sandboxID))
 	}
 }
 
 // acquireResumeOwnership decides whether the current call should drive
 // the resume RPC, wait for a peer to finish, or return immediately. It
-// returns nil when the caller owns the resume (i.e. has the lock written
-// as "resuming"); a non-nil error when the caller should NOT proceed
+// returns nil when the caller owns the resume (i.e. holds the lock written
+// as "resuming@<Owner>"); a non-nil error when the caller should NOT proceed
 // (peer in flight resolved, sandbox already running, or real failure).
 //
 // The state-key conflict (terminal markers vs. transition locks share
-// the key) is resolved by GET-ing the current value:
+// the key) is resolved by a GET → CAS loop:
 //
-//   - "paused" or expired:        we own the resume — write "resuming"
+//   - "paused" or expired:        try to take the lock via
+//     AcquireTransition, which only succeeds when the key is STILL missing
+//     or terminal-paused. Losing the CAS means a peer won the race; the loop
+//     re-reads and falls into the wait branch.
 //   - "running":                   nothing to do, return nil-and-success
 //     via a sentinel (the caller's success
 //     bookkeeping then runs and re-asserts
 //     state, which is the right behaviour
 //     for race-recovery).
-//   - "pausing" or "resuming":    a peer is in flight → waitForRunning
+//   - "pausing[@…]" / "resuming[@…]": a peer is in flight → waitForRunning
 //
-// This is intentionally racy: between GET and SET another sidecar could
-// claim the key. That's fine because the worst case is two resumers both
-// calling CubeMaster.Resume — which CubeMaster handles idempotently
-// (returns "already running" the second time, which we already map to
-// success in the caller).
+// Unlike the old GET-then-SET probe, the CAS makes ownership atomic: two
+// replicas racing the same paused sandbox can no longer both conclude they
+// own the resume and fire duplicate CubeMaster RPCs (issue #1211 review).
 func (r *Resumer) acquireResumeOwnership(ctx context.Context, sandboxID string) error {
-	cur, ok, err := r.o.Redis.GetState(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
+	for {
+		cur, ok, err := r.o.Redis.GetState(ctx, sandboxID)
+		if err != nil {
+			return err
+		}
 
-	switch {
-	case !ok, cur == "paused":
-		// Either no lock at all (most common after sweeper's TTL expired)
-		// or terminal "paused" left by a successful sweep. Either way we
-		// claim ownership by SET-ing "resuming".
-		if err := r.o.Redis.SetState(ctx, sandboxID, "resuming", r.o.StateLockTTL); err != nil {
-			return err
+		switch {
+		case !ok, cur == lifecycle.StatePaused:
+			// Either no lock at all (most common after sweeper's TTL expired)
+			// or terminal "paused" left by a successful sweep. Either way we
+			// try to claim ownership with an atomic CAS; fromStates pins the
+			// acceptable predecessors so a peer's fresh lock is never
+			// overwritten.
+			got, err := r.o.Redis.AcquireTransition(ctx, sandboxID,
+				lifecycle.StateResuming, r.o.Owner, r.o.StateLockTTL, lifecycle.StatePaused)
+			if err != nil {
+				return err
+			}
+			if got {
+				return nil
+			}
+			// Lost the race — the key changed between GET and CAS. Re-read
+			// and decide again (typically lands on the peer's "resuming"
+			// lock and waits below).
+			continue
+		case cur == lifecycle.StateRunning:
+			// Sandbox is already running on Redis's view. No-op resume; the
+			// caller's success path will re-push running to the proxy in case
+			// the local dict drifted.
+			r.o.Log.Info("resume requested but sandbox already running; reconciling",
+				zap.String("sandbox_id", sandboxID))
+			return errAlreadyRunning
+		case lifecycle.IsTransition(cur, lifecycle.StateResuming),
+			lifecycle.IsTransition(cur, lifecycle.StatePausing):
+			// Active transition by a peer (owner-tagged or legacy bare
+			// marker) → wait it out. waitForRunning returning nil means the
+			// peer transitioned to "running"; treat that as a no-op resume
+			// from our perspective so we DON'T issue our own duplicate RPC.
+			// Any other return value (peer-paused, lock expired, ctx done)
+			// propagates as an error.
+			if err := r.waitForRunning(ctx, sandboxID); err != nil {
+				return err
+			}
+			return errAlreadyRunning
+		default:
+			// Unknown state — fall back to wait, same translation rule.
+			r.o.Log.Warn("unknown state during resume ownership probe",
+				zap.String("sandbox_id", sandboxID),
+				zap.String("state", cur))
+			if err := r.waitForRunning(ctx, sandboxID); err != nil {
+				return err
+			}
+			return errAlreadyRunning
 		}
-		return nil
-	case cur == "running":
-		// Sandbox is already running on Redis's view. No-op resume; the
-		// caller's success path will re-push running to the proxy in case
-		// the local dict drifted.
-		r.o.Log.Info("resume requested but sandbox already running; reconciling",
-			zap.String("sandbox_id", sandboxID))
-		return errAlreadyRunning
-	case cur == "pausing" || cur == "resuming":
-		// Active transition by a peer → wait it out. waitForRunning
-		// returning nil means the peer transitioned to "running"; treat
-		// that as a no-op resume from our perspective so we DON'T issue
-		// our own duplicate RPC. Any other return value (peer-paused,
-		// lock expired, ctx done) propagates as an error.
-		if err := r.waitForRunning(ctx, sandboxID); err != nil {
-			return err
-		}
-		return errAlreadyRunning
-	default:
-		// Unknown state — fall back to wait, same translation rule.
-		r.o.Log.Warn("unknown state during resume ownership probe",
-			zap.String("sandbox_id", sandboxID),
-			zap.String("state", cur))
-		if err := r.waitForRunning(ctx, sandboxID); err != nil {
-			return err
-		}
-		return errAlreadyRunning
 	}
 }
 
@@ -348,8 +408,8 @@ func (r *Resumer) acquireResumeOwnership(ctx context.Context, sandboxID string) 
 var errAlreadyRunning = errors.New("sandbox already running")
 
 // waitForRunning is invoked when acquireResumeOwnership observed a peer's
-// transition lock ("pausing" or "resuming") and we must not fire our own
-// duplicate RPC. It resolves the peer's outcome when:
+// transition lock ("pausing[@owner]" or "resuming[@owner]") and we must not
+// fire our own duplicate RPC. It resolves the peer's outcome when:
 //
 //   - state == "running"    → peer succeeded, request can proceed.
 //   - state == "paused"     → peer gave up; bail with an error so

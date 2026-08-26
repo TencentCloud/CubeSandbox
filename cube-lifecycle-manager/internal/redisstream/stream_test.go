@@ -17,8 +17,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 )
 
-// stubRedis implements the Set/Del/Publish subset WriteState and
-// ClearStateNotify need. Other UniversalClient methods panic if called.
+// stubRedis implements the Set/Del/Publish subset WriteState and the
+// transition settle paths need. Other UniversalClient methods panic if
+// called.
 type stubRedis struct {
 	redis.UniversalClient
 	publishCh chan publishCall

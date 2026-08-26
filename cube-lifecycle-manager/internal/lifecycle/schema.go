@@ -18,6 +18,8 @@
 // Whenever you change one side, change the other in the same commit.
 package lifecycle
 
+import "strings"
+
 const (
 	// MetaKey is the HSet snapshot of every live sandbox.
 	MetaKey = "cube:v1:shared:sandbox:lifecycle:meta"
@@ -39,14 +41,46 @@ const (
 // events stream.
 const StateKilled = "killed"
 
+// In-flight transition markers held in the state key while a pause / resume /
+// kill is being driven. They are private to the CLM's state-key coordination;
+// only terminal states ever appear on the events stream.
+const (
+	StatePausing  = "pausing"
+	StateResuming = "resuming"
+	StateKilling  = "killing"
+)
+
+// TransitionValue returns the value written into the state key while a
+// transition is in flight: "<transition>@<owner>". The owner suffix makes
+// cross-replica ownership explicit so that only the replica which took the
+// lock can commit or release it (active-standby, issue #1211). Legacy writers
+// stored the bare transition word, so readers must match with IsTransition,
+// never with a plain ==. An empty owner yields the bare form, which degrades
+// to the legacy pre-owner semantics.
+func TransitionValue(transition, owner string) string {
+	if owner == "" {
+		return transition
+	}
+	return transition + "@" + owner
+}
+
+// IsTransition reports whether cur denotes the given in-flight transition,
+// accepting both the bare legacy form ("pausing") and the owner-tagged form
+// ("pausing@<owner>") so a rolling upgrade never misreads a peer's lock.
+func IsTransition(cur, transition string) bool {
+	return cur == transition || strings.HasPrefix(cur, transition+"@")
+}
+
 // StateNotify is a best-effort wakeup hint. Consumers must read the state key
 // after receiving it instead of trusting the payload as current truth.
 type StateNotify struct {
 	SandboxID string `json:"sandbox_id"`
 }
 
-// StateKey returns the per-sandbox coordination key. Values include running,
-// pausing, paused, resuming, killing, and killed.
+// StateKey returns the per-sandbox coordination key. Terminal values are
+// running, paused, and killed; in-flight transitions are stored as
+// owner-tagged markers ("pausing@<owner>", "resuming@<owner>",
+// "killing@<owner>") — see TransitionValue / IsTransition.
 func StateKey(sandboxID string) string {
 	return "cube:v1:shared:sandbox:lifecycle:state:" + sandboxID
 }

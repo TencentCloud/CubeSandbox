@@ -124,6 +124,8 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | `paused` | 沙箱已暂停 |
 | `resuming` | 恢复过渡中 |
 
+过渡态取值可能带有 `@<owner>` 后缀，标识持有该过渡的 CLM 进程，例如 `resuming@pod-1:9f3ab2c1`。该后缀用于跨副本 resume 所有权的 fencing（Lua compare-and-set 只允许 owner 匹配的进程提交或清理过渡态），因此消费方必须按前缀匹配状态（`resuming@…` 仍视为 `resuming`），不能做全等比较。
+
 ## 6. TTL 策略
 
 | Key 类型 | 策略 | 说明 |

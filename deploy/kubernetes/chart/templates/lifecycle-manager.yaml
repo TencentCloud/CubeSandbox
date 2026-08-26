@@ -34,6 +34,19 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      {{- if gt (.Values.lifecycleManager.replicas | int) 1 }}
+      # Prefer spreading the active-standby replicas across nodes.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "cube.selectorLabels" . | nindent 20 }}
+                    app.kubernetes.io/component: lifecycle-manager
+                topologyKey: kubernetes.io/hostname
+      {{- end }}
       containers:
         - name: cube-lifecycle-manager
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.lifecycleManager "context" $) | quote }}

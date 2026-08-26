@@ -109,9 +109,11 @@ func Handle(ctx context.Context, d Deps, ev redisstream.Event) {
 	// Transition-lock protection: the CLM itself is mid-flight and will
 	// write the terminal state as part of tryPause / doResume. Applying an
 	// external event here would race against that write and could clobber
-	// a "resuming" lock with a "paused" verdict — the opposite of what we
-	// want.
-	if cur == "pausing" || cur == "resuming" {
+	// a "resuming@<owner>" lock with a "paused" verdict — the opposite of
+	// what we want. Transition markers are matched prefix-aware so both the
+	// owner-tagged and the legacy bare form are recognized.
+	if lifecycle.IsTransition(cur, lifecycle.StatePausing) ||
+		lifecycle.IsTransition(cur, lifecycle.StateResuming) {
 		log.Info("state event skipped: transition in progress",
 			zap.String("sandbox_id", ev.SandboxID),
 			zap.String("cur", cur),

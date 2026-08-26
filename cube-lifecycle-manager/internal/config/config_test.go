@@ -161,8 +161,8 @@ func TestValidateHA(t *testing.T) {
 	bad.ReconcileInterval = bad.LeaderTTL
 	require.NoError(t, bad.Validate())
 
-	// ReconcileInterval is validated in both modes: the reconciler and
-	// claimStalePending tickers run in single-replica deployments too.
+	// ReconcileInterval is validated in both modes: the claimStalePending
+	// ticker runs in single-replica deployments too.
 	off := testConfig(t)
 	off.HAEnabled = false
 	off.ReconcileInterval = 0

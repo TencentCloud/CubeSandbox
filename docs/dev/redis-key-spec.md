@@ -124,6 +124,13 @@ See the `redis` tags on `InstanceInfoMap` in [`CubeMaster/pkg/base/types/redis.g
 | `paused` | Sandbox is paused |
 | `resuming` | Resume transition in progress |
 
+Transition values may carry an `@<owner>` suffix naming the CLM process
+that owns the transition — e.g. `resuming@pod-1:9f3ab2c1`. The suffix is
+how cross-replica resume ownership is fenced (the Lua compare-and-set
+only lets the matching owner commit or clear the transition), so
+consumers must prefix-match the state (`resuming@…` is still `resuming`)
+instead of comparing for exact equality.
+
 ## 6. TTL policy
 
 | Key type | Policy | Notes |

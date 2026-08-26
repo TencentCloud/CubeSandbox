@@ -53,23 +53,37 @@ the same Redis in active-standby mode:
 - Replicas elect a leader through a Redis lease
   (`cube:v1:shared:lock:lifecycle_manager:leader`, registered in
   `docs/zh/dev/redis-key-spec.md`). Only the leader runs the stateful loops:
-  stream consumer, idle sweeper, last-active poller, and the periodic
-  reconciler.
-- Standbys keep serving HTTP: `/readyz` returns 503 so the Kubernetes
-  Service routes `/internal/resume` only to the leader. Note the failover
-  window consequence: between the leader's death and the new leader
-  becoming ready, the Service has no ready endpoints and resume requests
-  fail (CubeProxy surfaces 503 + `Retry-After` and clients retry). The
-  registry-miss fallback — answering a resume straight from the
-  authoritative meta hash — covers the freshly-promoted leader whose
-  bootstrap hasn't landed yet, plus any request that reaches a standby
-  directly (e.g. via pod IP).
+  stream consumer (create/delete/update/state events), idle sweeper,
+  last-active poller, and stale-pending-entry takeover (`XAUTOCLAIM`).
+- Every replica — leader and standby alike — returns 200 on `/readyz`.
+  Readiness only means "process healthy"; nothing gates it on leadership.
+  The JSON body still carries a `role` field (`leader` / `standby` /
+  `standalone`) for observability. The Kubernetes Service therefore routes
+  `/internal/resume` traffic to any Ready pod.
+- A standby can genuinely serve resume: on a registry miss it answers
+  straight from the authoritative meta hash (meta-hash fallback), even
+  though its in-memory registry is empty — so resume traffic keeps flowing
+  during a failover instead of hitting a zero-ready-endpoints window.
+  Cross-replica resume ownership is atomic: a Redis Lua compare-and-set on
+  the sandbox state key with a per-process random owner token (transition
+  values look like `resuming@<owner>`) means two replicas receiving the
+  same resume concurrently result in exactly one actual CubeMaster resume
+  RPC.
 - On failover (lease expiry, at most one `CUBE_LCM_LEADER_TTL`) the new
-  leader re-bootstraps from the meta hash, replays the snapshot to every
-  CubeProxy, claims the dead consumer's pending stream entries via
-  `XAUTOCLAIM` (idle ≥ `CUBE_LCM_RECONCILE_INTERVAL`), and lets the
-  reconciler converge any remaining drift between the meta hash, the
-  in-memory registry, and the proxy meta dicts.
+  leader bootstraps its registry from the meta hash, replays the snapshot
+  to every CubeProxy asynchronously (per-proxy goroutines, 5-minute total
+  bound — promotion is never blocked by an unreachable proxy), then claims
+  the dead consumer's pending stream entries via `XAUTOCLAIM` (idle ≥
+  `CUBE_LCM_RECONCILE_INTERVAL`).
+
+There is intentionally **no periodic reconciler** in this change. An
+earlier revision ran a full meta-hash resync that pushed corrections to
+the proxies, but CubeMaster's meta-hash writes are not authoritative in
+all failure modes (an `HSET`/`HDEL` can fail while the stream `XADD`
+succeeds), so treating the hash as absolute truth could delete or
+resurrect sandboxes. Full reconciliation — hash-authority hardening plus
+guaranteed eventual proxy/meta convergence — is deferred to a follow-up
+change. The failover + resume path does not depend on it.
 
 HA-specific variables:
 
@@ -80,19 +94,25 @@ HA-specific variables:
 | `CUBE_LCM_LEADER_KEY` | `cube:v1:shared:lock:lifecycle_manager:leader` | Lease key |
 | `CUBE_LCM_LEADER_TTL` | `15s` | Lease expiry; upper bound on failover time |
 | `CUBE_LCM_LEADER_RENEW_INTERVAL` | `5s` | Lease renewal / acquisition retry cadence |
-| `CUBE_LCM_RECONCILE_INTERVAL` | `60s` | Reconciler cadence; also the min idle time for `XAUTOCLAIM` takeover (must be ≥ `CUBE_LCM_LEADER_TTL`) |
+| `CUBE_LCM_RECONCILE_INTERVAL` | `60s` | Cadence of the leader's stale-pending-entry takeover passes; also the `XAUTOCLAIM` min idle time (must be ≥ `CUBE_LCM_LEADER_TTL` in HA mode). No longer drives a reconciler — none exists |
 
 Two failure-handling notes:
 
-- If the leader loops fail fast three times in a row (each stint shorter
-  than `CUBE_LCM_LEADER_TTL`, e.g. a bootstrap dependency is down while
-  Redis itself is fine), the process exits so the pod supervisor restarts
-  it — instead of hot-looping elect → fail → step down forever. A stint
-  that survives at least one TTL counts as healthy and resets the counter.
+- If a leader loop fails, the process exits so the pod supervisor restarts
+  it — instead of stepping down and re-electing in a hot loop. Failover
+  still completes within one `CUBE_LCM_LEADER_TTL`.
 - `CUBE_LCM_RECONCILE_INTERVAL` must be ≥ `CUBE_LCM_LEADER_TTL` (enforced
-  at startup): it doubles as the `XAUTOCLAIM` min-idle, and a smaller
-  value could steal pending stream entries from a merely partitioned —
-  still alive — old leader.
+  at startup in HA mode): it doubles as the `XAUTOCLAIM` min-idle, and a
+  smaller value could steal pending stream entries from a merely
+  partitioned — still alive — old leader.
 
 The Helm chart enables this by default (`lifecycleManager.ha.enabled: true`,
 `replicas: 2`) and derives `CUBE_LCM_INSTANCE_ID` from the pod name.
+
+### Upgrading an existing single-replica deployment to HA
+
+Roll the new version out with `replicas: 1` first and verify the pod
+becomes Ready, then scale to 2. Never scale out from a build where
+standbys report NotReady on `/readyz`: with the chart's default
+`maxUnavailable: 0` strategy the new standby never becomes available and
+the rollout deadlocks.

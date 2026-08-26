@@ -24,12 +24,13 @@ import (
 type fakeStore struct {
 	mu     sync.Mutex
 	states map[string]string
-	// allowAcquire controls whether AcquireState succeeds. When the second
-	// element is non-empty, AcquireState seeds that state value into the
-	// map (simulating a peer holding the lock) and returns false.
+	// preLocked, when it has an entry for sid, makes AcquireTransition seed
+	// states[sid] with that value (simulating a peer holding the lock) and
+	// return false.
 	preLocked map[string]string
-	// bus, when non-nil, receives every WriteState / ClearStateNotify
-	// event. This mirrors redisstream.Client.SetLocalBus in production.
+	// bus, when non-nil, receives every WriteState / CommitTransition /
+	// ReleaseTransition event. This mirrors redisstream.Client.SetLocalBus
+	// in production.
 	bus      *eventbus.Bus
 	getCount int
 	afterGet func(int)
@@ -39,31 +40,74 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{states: make(map[string]string), preLocked: make(map[string]string)}
 }
 
-func (f *fakeStore) AcquireState(_ context.Context, sid, state string, _ time.Duration) (bool, error) {
+// AcquireTransition mirrors redisstream.Client.AcquireTransition: an atomic
+// CAS that writes the owner-tagged transition marker. It succeeds when the
+// key is missing or when the current value equals one of fromStates; the
+// preLocked hook takes precedence and always fails the acquire.
+func (f *fakeStore) AcquireTransition(_ context.Context, sid, transition, owner string, _ time.Duration, fromStates ...string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if v, ok := f.preLocked[sid]; ok {
 		f.states[sid] = v
 		return false, nil
 	}
-	if _, ok := f.states[sid]; ok {
+	cur, ok := f.states[sid]
+	if !ok {
+		f.states[sid] = lifecycle.TransitionValue(transition, owner)
+		return true, nil
+	}
+	for _, from := range fromStates {
+		if cur == from {
+			f.states[sid] = lifecycle.TransitionValue(transition, owner)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// CommitTransition mirrors redisstream.Client.CommitTransition: the terminal
+// state is written only while the caller still owns the transition lock, and
+// a successful commit fans out a StateNotify to the attached bus.
+func (f *fakeStore) CommitTransition(_ context.Context, sid, transition, owner, newState string, _ time.Duration) (bool, error) {
+	f.mu.Lock()
+	if f.states[sid] != lifecycle.TransitionValue(transition, owner) {
+		f.mu.Unlock()
 		return false, nil
 	}
-	f.states[sid] = state
+	f.states[sid] = newState
+	bus := f.bus
+	f.mu.Unlock()
+	if bus != nil {
+		bus.Publish(sid)
+	}
 	return true, nil
 }
 
+// ReleaseTransition mirrors redisstream.Client.ReleaseTransition: the key is
+// deleted only while the caller still owns the transition lock, and a
+// successful release fans out a StateNotify to the attached bus.
+func (f *fakeStore) ReleaseTransition(_ context.Context, sid, transition, owner string) (bool, error) {
+	f.mu.Lock()
+	if f.states[sid] != lifecycle.TransitionValue(transition, owner) {
+		f.mu.Unlock()
+		return false, nil
+	}
+	delete(f.states, sid)
+	bus := f.bus
+	f.mu.Unlock()
+	if bus != nil {
+		bus.Publish(sid)
+	}
+	return true, nil
+}
+
+// SetState is a test-only helper that force-writes a state value without
+// fanning out to the bus. Tests use it to simulate a peer writer (or a
+// dropped notify); it is not part of the stateStore interface.
 func (f *fakeStore) SetState(_ context.Context, sid, state string, _ time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.states[sid] = state
-	return nil
-}
-
-func (f *fakeStore) ClearState(_ context.Context, sid string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.states, sid)
 	return nil
 }
 
@@ -86,17 +130,6 @@ func (f *fakeStore) GetState(_ context.Context, sid string) (string, bool, error
 func (f *fakeStore) WriteState(_ context.Context, sid, state string, _ time.Duration) error {
 	f.mu.Lock()
 	f.states[sid] = state
-	bus := f.bus
-	f.mu.Unlock()
-	if bus != nil {
-		bus.Publish(sid)
-	}
-	return nil
-}
-
-func (f *fakeStore) ClearStateNotify(_ context.Context, sid string) error {
-	f.mu.Lock()
-	delete(f.states, sid)
 	bus := f.bus
 	f.mu.Unlock()
 	if bus != nil {
@@ -128,6 +161,11 @@ type fakeMaster struct {
 	latency   time.Duration
 	failNext  bool
 	failError error
+	// onResume, when set, fires synchronously inside the Resume RPC (after
+	// the artificial latency, before the result is decided). Tests use it to
+	// mutate the state key while the RPC is in flight — e.g. simulating a
+	// peer that stole the transition lock mid-RPC.
+	onResume func()
 }
 
 func (f *fakeMaster) Resume(ctx context.Context, _, _ string) error {
@@ -138,6 +176,9 @@ func (f *fakeMaster) Resume(ctx context.Context, _, _ string) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	}
+	if f.onResume != nil {
+		f.onResume()
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -347,6 +388,109 @@ func TestResumer_DedupesConcurrentResumes(t *testing.T) {
 	}
 }
 
+// TestResumer_CrossReplicaCASDedup simulates the active-standby race from
+// issue #1211: two replicas (separate Resumer instances with distinct Owners)
+// receive a resume request for the same paused sandbox at the same time. The
+// per-process call coalescing cannot dedup across processes — only the
+// owner-tagged CAS on the shared state key can. Exactly one CubeMaster RPC
+// must fire; the loser waits for the winner's commit and returns nil.
+func TestResumer_CrossReplicaCASDedup(t *testing.T) {
+	reg := registry.New()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
+		CreatedAt: time.Now().Add(-1 * time.Hour).UnixMilli(),
+	})
+	store := newFakeStore()
+	store.states["sbx"] = "paused" // terminal marker from a previous sweep
+	master := &fakeMaster{latency: 100 * time.Millisecond}
+	push := &fakePush{}
+
+	mkResumer := func(owner string) *Resumer {
+		return New(Options{
+			Registry:     reg,
+			Redis:        store,
+			CubeMaster:   master,
+			ProxyPush:    push,
+			StateLockTTL: 30 * time.Second,
+			Owner:        owner,
+			Log:          zap.NewNop(),
+		})
+	}
+	replicaA := mkResumer("a")
+	replicaB := mkResumer("b")
+
+	// No bus: the loser's waitForRunning resolves via the 100ms fallback poll.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, r := range []*Resumer{replicaA, replicaB} {
+		wg.Add(1)
+		i, r := i, r
+		go func() {
+			defer wg.Done()
+			errs[i] = r.Resume(ctx, "sbx")
+		}()
+	}
+	wg.Wait()
+
+	for i, e := range errs {
+		if e != nil {
+			t.Fatalf("replica %d resume failed: %v", i, e)
+		}
+	}
+	if got := atomic.LoadInt32(&master.calls); got != 1 {
+		t.Fatalf("cross-replica CAS must dedup into 1 RPC, got %d", got)
+	}
+	if got := store.state("sbx"); got != "running" {
+		t.Fatalf("expected redis state=running, got %q", got)
+	}
+}
+
+// TestResumer_CommitDoesNotClobberPeerState covers the lost-ownership case:
+// our "resuming@a" lock disappears mid-RPC (TTL expired) and a peer acquires
+// its own "resuming@other" lock before our RPC returns. The owner-gated
+// CommitTransition must then refuse to write "running" — the peer owns the
+// state key now and drives whatever comes next.
+func TestResumer_CommitDoesNotClobberPeerState(t *testing.T) {
+	reg := registry.New()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
+	})
+	store := newFakeStore()
+	store.states["sbx"] = "paused"
+	push := &fakePush{}
+	master := &fakeMaster{}
+
+	r := New(Options{
+		Registry:     reg,
+		Redis:        store,
+		CubeMaster:   master,
+		ProxyPush:    push,
+		StateLockTTL: 30 * time.Second,
+		Owner:        "a",
+		Log:          zap.NewNop(),
+	})
+
+	// While our resume RPC is in flight, a peer steals the state key.
+	// Deterministic: the hook runs synchronously inside fakeMaster.Resume,
+	// before the RPC result returns and long before CommitTransition runs.
+	peerState := lifecycle.TransitionValue(lifecycle.StateResuming, "other")
+	master.onResume = func() {
+		_ = store.SetState(context.Background(), "sbx", peerState, time.Minute)
+	}
+
+	if err := r.Resume(context.Background(), "sbx"); err != nil {
+		t.Fatalf("resume RPC succeeded, so Resume must return nil even when the commit is skipped, got %v", err)
+	}
+	if got := atomic.LoadInt32(&master.calls); got != 1 {
+		t.Fatalf("expected 1 master.Resume call, got %d", got)
+	}
+	if got := store.state("sbx"); got != peerState {
+		t.Fatalf("lost commit must not clobber peer state: expected %q, got %q", peerState, got)
+	}
+}
+
 func TestResumer_RollsBackOnRPCFailure(t *testing.T) {
 	reg := registry.New()
 	reg.Upsert(lifecycle.SandboxLifecycleMeta{
@@ -366,16 +510,17 @@ func TestResumer_RollsBackOnRPCFailure(t *testing.T) {
 }
 
 func TestResumer_WaitsWhenPeerHoldsLock(t *testing.T) {
-	// Pre-seed the state key with "resuming" — simulates a peer sidecar
-	// that's already mid-flight on this sandbox. acquireResumeOwnership
-	// should observe it via GetState and route to waitForRunning instead
-	// of issuing a duplicate CubeMaster RPC.
+	// Pre-seed the state key with an owner-tagged "resuming@peer" — simulates
+	// a peer sidecar (active-standby, issue #1211) that's already mid-flight
+	// on this sandbox. acquireResumeOwnership should observe it via GetState
+	// (IsTransition prefix match) and route to waitForRunning instead of
+	// issuing a duplicate CubeMaster RPC.
 	reg := registry.New()
 	reg.Upsert(lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
 	})
 	store := newFakeStore()
-	store.states["sbx"] = "resuming" // peer's in-flight lock, GetState-visible
+	store.states["sbx"] = lifecycle.TransitionValue(lifecycle.StateResuming, "peer") // peer's in-flight lock, GetState-visible
 	master := &fakeMaster{}
 	push := &fakePush{}
 	r := newTestResumer(reg, store, master, push)
@@ -492,8 +637,8 @@ func TestResumer_RunningStatePushRetriesAsynchronously(t *testing.T) {
 }
 
 // newTestResumerWithBus is the eventbus-mode counterpart of newTestResumer.
-// It also attaches the bus to the fakeStore so WriteState / ClearStateNotify
-// calls fan out just like they do in production.
+// It also attaches the bus to the fakeStore so WriteState / CommitTransition /
+// ReleaseTransition calls fan out just like they do in production.
 func newTestResumerWithBus(reg *registry.Registry, store *fakeStore, master *fakeMaster, push *fakePush, bus *eventbus.Bus) *Resumer {
 	store.attachBus(bus)
 	return New(Options{

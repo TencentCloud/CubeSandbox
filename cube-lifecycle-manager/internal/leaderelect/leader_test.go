@@ -7,6 +7,7 @@ package leaderelect
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -275,6 +276,32 @@ func TestElectorReleasesOnShutdown(t *testing.T) {
 	_, _, releases := store.counts()
 	assert.Equal(t, 1, releases, "shutdown must release the lease so standbys promote fast")
 	assert.False(t, store.hasKey)
+}
+
+func TestElectorFencingTokenUniquePerProcess(t *testing.T) {
+	cfg := testConfig()
+	elA, err := NewWithStore(&fakeLockStore{}, cfg, zap.NewNop())
+	require.NoError(t, err)
+	elB, err := NewWithStore(&fakeLockStore{}, cfg, zap.NewNop())
+	require.NoError(t, err)
+
+	// Same InstanceID, different lock values: the token is the instance ID
+	// plus a per-process random suffix.
+	assert.True(t, strings.HasPrefix(elA.token, cfg.InstanceID+":"))
+	assert.True(t, strings.HasPrefix(elB.token, cfg.InstanceID+":"))
+	assert.NotEqual(t, elA.token, elB.token)
+
+	// A same-named peer must never renew or release a lease it doesn't hold.
+	store := &fakeLockStore{}
+	ctx := context.Background()
+	ok, err := store.tryAcquire(ctx, cfg.Key, elA.token, cfg.TTL)
+	require.NoError(t, err)
+	require.True(t, ok)
+	ok, err = store.renew(ctx, cfg.Key, elB.token, cfg.TTL)
+	require.NoError(t, err)
+	assert.False(t, ok, "peer with same instance ID must not renew our lease")
+	require.NoError(t, store.release(ctx, cfg.Key, elB.token))
+	assert.True(t, store.hasKey, "peer with same instance ID must not release our lease")
 }
 
 func TestElectorDrainsStintBeforeOnLost(t *testing.T) {

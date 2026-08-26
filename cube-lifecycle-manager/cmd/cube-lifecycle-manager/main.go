@@ -10,20 +10,22 @@
 // Active-standby HA (issue #1211): when CUBE_LCM_HA_ENABLED=1, replicas
 // elect a leader through a Redis lease (internal/leaderelect). Only the
 // leader runs the stateful loops (stream consumer, sweeper, last-active
-// poller, reconciler); standbys keep the HTTP server up but report 503 on
-// /readyz so the Service routes resume traffic to the leader (resume
-// requests therefore fail during the failover window and clients retry).
-// A crashed leader is replaced within one leader TTL; the new leader
-// bootstraps from the meta hash, claims the dead consumer's pending stream
-// entries, serves resume through the meta-hash fallback while its bootstrap
-// lands, and the reconciler converges whatever drift remains.
+// poller, stale-pending takeover); every replica keeps the HTTP server up
+// and reports Ready on /readyz, so the Service can route resume traffic to
+// any pod — standbys serve /internal/resume through the meta-hash fallback,
+// with cross-replica ownership arbitrated by an owner-tagged CAS on the
+// state key. A crashed leader is replaced within one leader TTL; the new
+// leader bootstraps from the meta hash, replays it to the proxies
+// asynchronously (promotion is never blocked by an unreachable proxy), and
+// claims the dead consumer's pending stream entries.
 package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
-	"fmt"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -37,7 +39,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/leaderelect"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/proxypush"
-	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/reconciler"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/redisclient"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/redisstream"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/registry"
@@ -167,16 +168,23 @@ func run() error {
 
 	pushClient = proxypush.NewWithFleet(fleet, cfg.CubeAdminToken, cfg.HTTPTimeout, logger.Named("proxypush"))
 
+	// ownerToken is this process's identity for state-key transitions
+	// ("resuming@<owner>" etc.): the configured instance ID plus a
+	// per-process random suffix, so two replicas can never settle each
+	// other's in-flight transition even if instance IDs collide. Shared by
+	// the resumer and the sweeper.
+	ownerToken := cfg.InstanceID + ":" + rand.Text()[:8]
+
 	resumeImpl := resumer.New(resumer.Options{
 		Registry:     reg,
 		Redis:        stream,
 		CubeMaster:   masterClient,
 		ProxyPush:    pushClient,
 		StateLockTTL: cfg.StateLockTTL,
-		// MetaLookup lets a freshly promoted leader whose bootstrap hasn't
-		// landed yet (or a standby reached directly, e.g. via pod IP — the
-		// Service only routes to the leader) serve resume requests straight
-		// from the authoritative meta hash.
+		Owner:        ownerToken,
+		// MetaLookup lets a standby (or a freshly promoted leader whose
+		// bootstrap hasn't landed yet) serve resume requests straight from
+		// the authoritative meta hash even with an empty registry.
 		MetaLookup: stream,
 		Log:        logger.Named("resumer"),
 		EventBus:   bus,
@@ -213,33 +221,23 @@ func run() error {
 	}
 
 	leaderRun := func(ctx context.Context) error {
-		return runLeaderLoops(ctx, cfg, stream, masterClient, pushClient, reg, fleet, logger)
+		return runLeaderLoops(ctx, cfg, stream, masterClient, pushClient, reg, fleet, ownerToken, logger)
 	}
 	if elector != nil {
-		// A leader stint that keeps failing fast (e.g. a bootstrap
-		// dependency is down) would otherwise loop elect → fail → step
-		// down forever without the process ever exiting; past
-		// maxLeaderStintFails consecutive fast failures we give up and let
-		// the pod supervisor restart us. A stint that survived at least
-		// one leader TTL counts as healthy and resets the counter.
-		supervisor := newLeaderSupervisor(maxLeaderStintFails, cfg.LeaderTTL)
 		go func() {
 			errs <- elector.Run(rootCtx, leaderelect.Callbacks{
 				OnElected: func(leaderCtx context.Context) {
-					start := time.Now()
 					err := leaderRun(leaderCtx)
-					if supervisor.Record(err, time.Since(start)) {
-						logger.Error("leader loop failed repeatedly; exiting so the pod supervisor restarts the process",
-							zap.Int("consecutive_failures", supervisor.Fails()),
-							zap.Error(err))
-						errs <- fmt.Errorf("leader loop failed %d consecutive times: %w",
-							supervisor.Fails(), err)
-						return
-					}
 					if err != nil && !errors.Is(err, context.Canceled) {
-						logger.Error("leader loop failed; stepping down so a standby can take over",
+						// A failing leader loop (e.g. a bootstrap
+						// dependency down) must not hot-loop
+						// elect → fail → re-elect without the failure
+						// ever surfacing: exit and let the pod
+						// supervisor restart the process. A standby
+						// promotes within one leader TTL either way.
+						logger.Error("leader loop failed; exiting so the pod supervisor restarts the process",
 							zap.Error(err))
-						elector.StepDown()
+						errs <- err
 					}
 				},
 				OnLost: func() {
@@ -265,12 +263,12 @@ func run() error {
 
 // runLeaderLoops executes every leader-only responsibility: registry
 // bootstrap + fleet hydration, stream consumption, stale-pending-entry
-// claims, last-active polling, the idle sweeper, and the periodic
-// reconciler. It blocks until ctx is cancelled (leadership lost, or
-// shutdown) or a loop fails; the first error wins and cancels the rest.
+// claims, last-active polling, and the idle sweeper. It blocks until ctx is
+// cancelled (leadership lost, or shutdown) or a loop fails; the first error
+// wins and cancels the rest.
 func runLeaderLoops(ctx context.Context, cfg *config.Config, stream *redisstream.Client,
 	masterClient *cubemasterclient.Client, pushClient *proxypush.Client, reg *registry.Registry,
-	fleet proxypush.Fleet, logger *zap.Logger) error {
+	fleet proxypush.Fleet, ownerToken string, logger *zap.Logger) error {
 
 	// startupTs marks the boundary between "bootstrap entries (HGETALL)"
 	// and "stream entries (XREADGROUP)" for the sweeper's warmup logic. It
@@ -286,9 +284,6 @@ func runLeaderLoops(ctx context.Context, cfg *config.Config, stream *redisstream
 	if err := bootstrapRegistry(ctx, stream, reg, startupTs, logger); err != nil {
 		return err
 	}
-	for _, ep := range fleet.Snapshot() {
-		replayRegistryTo(ctx, pushClient, reg, ep, logger.Named("replay"))
-	}
 
 	// 2. Ensure the consumer group exists.
 	if err := stream.EnsureGroup(ctx, cfg.ConsumerGroup); err != nil {
@@ -303,17 +298,10 @@ func runLeaderLoops(ctx context.Context, cfg *config.Config, stream *redisstream
 		DefaultIdleTimeout: cfg.DefaultIdleTimeout,
 		BootstrapWarmup:    cfg.BootstrapWarmup,
 		StateLockTTL:       cfg.StateLockTTL,
+		Owner:              ownerToken,
 		Interval:           cfg.IdleSweepInterval,
 		StartedAt:          startupTs,
 		Log:                logger.Named("sweeper"),
-	})
-
-	recon := reconciler.New(reconciler.Options{
-		Registry:  reg,
-		Redis:     stream,
-		ProxyPush: pushClient,
-		Interval:  cfg.ReconcileInterval,
-		Log:       logger.Named("reconciler"),
 	})
 
 	stateSyncDeps := statesync.Deps{
@@ -324,12 +312,21 @@ func runLeaderLoops(ctx context.Context, cfg *config.Config, stream *redisstream
 		Log:       logger.Named("statesync"),
 	}
 
-	// 3. Run all leader loops concurrently. First error cancels the rest.
-	const loopCount = 5
+	// 3. Hydrate the proxies asynchronously: with thousands of registry
+	//    entries and a per-push HTTP timeout, a serial replay against an
+	//    unreachable proxy would block promotion for hours (issue #1211
+	//    review). Each proxy gets its own goroutine under a shared 5-minute
+	//    deadline. The WaitGroup is drained before runLeaderLoops returns
+	//    so OnLost's registry reset never races an in-flight replay.
+	const loopCount = 4
 	errs := make(chan error, loopCount)
 	loopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	replayWg, stopReplay := startAsyncReplay(loopCtx, pushClient, reg, fleet, logger.Named("replay"))
+	defer stopReplay()
+
+	// 4. Run all leader loops concurrently. First error cancels the rest.
 	go func() {
 		errs <- consumeStream(loopCtx, stream, pushClient, reg, cfg, stateSyncDeps, logger.Named("stream"))
 	}()
@@ -338,14 +335,35 @@ func runLeaderLoops(ctx context.Context, cfg *config.Config, stream *redisstream
 	}()
 	go func() { errs <- pollLastActive(loopCtx, pushClient, reg, cfg.LastActivePoll, logger.Named("active")) }()
 	go func() { errs <- sweep.Run(loopCtx) }()
-	go func() { errs <- recon.Run(loopCtx) }()
 
 	first := <-errs
 	cancel()
+	replayWg.Wait()
 	for i := 0; i < loopCount-1; i++ {
 		<-errs
 	}
 	return first
+}
+
+// startAsyncReplay replays the current registry snapshot to every known
+// proxy, one goroutine per proxy, under a shared 5-minute deadline. The
+// returned WaitGroup completes when all replay goroutines have exited; the
+// caller drains it before returning (so a replay never outlives its leader
+// stint) and defers the CancelFunc to release the timer early when replays
+// finish quickly.
+func startAsyncReplay(ctx context.Context, push *proxypush.Client, reg *registry.Registry,
+	fleet proxypush.Fleet, log *zap.Logger) (*sync.WaitGroup, context.CancelFunc) {
+
+	replayCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	var wg sync.WaitGroup
+	for _, ep := range fleet.Snapshot() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			replayRegistryTo(replayCtx, push, reg, ep, log)
+		}()
+	}
+	return &wg, cancel
 }
 
 // fleetSizer adapts a proxypush.Fleet to httpapi.FleetSizer so /readyz can
@@ -365,8 +383,7 @@ func (s fleetSizer) Snapshot() int {
 // replayRegistryTo pushes every current registry entry to a single admin
 // endpoint. Used by discovery.OnJoin (when a new CubeProxy arrives) and by
 // the leadership bootstrap to hydrate the fleet. Errors are logged but not
-// escalated: reconciliation eventually converges via the stream consumer
-// and the periodic reconciler.
+// escalated: the next (re-)election bootstrap or proxy rejoin replays again.
 func replayRegistryTo(ctx context.Context, push *proxypush.Client,
 	reg *registry.Registry, ep discovery.Endpoint, log *zap.Logger) {
 
@@ -456,53 +473,61 @@ func consumeStream(ctx context.Context, stream *redisstream.Client, push *proxyp
 	}
 }
 
-// claimStalePending is the failover half of stream consumption: right after
-// a promotion it takes over entries that were delivered to a consumer which
+// claimStalePending is the failover half of stream consumption: after a
+// promotion it takes over entries that were delivered to a consumer which
 // has since died or been demoted (in HA mode, typically the previous
 // leader) and feeds them through the same handler as live deliveries.
 // Without it those events would sit in the pending-entries list until the
 // stream's MAXLEN trim drops them, leaving registry/proxy state diverged.
 //
-// The loop drains the predecessor's backlog and then parks for the rest of
-// the stint: XAUTOCLAIM cannot exclude entries owned by the calling
-// consumer, so a claim pass that runs for the whole leadership would
-// eventually steal this leader's own in-flight consumeStream entries — a
-// slow 100-event batch (each handleEvent bounded by the 10s proxy push
-// timeout) can exceed minIdle — and double-process them. A live leader
-// never accumulates stale entries of its own; anything a wedged or demoted
-// stint leaves behind is taken over by the *next* leader's drain.
+// The takeover runs claim passes only until the stint is one minIdle old,
+// finishing with a single full drain, and then parks until leadership ends:
+//
+//   - While the stint is younger than minIdle, every claimable entry (idle
+//     ≥ minIdle) necessarily predates this stint, so passes are safe — and
+//     useful, since the predecessor may have died long before promotion.
+//   - Once the stint is one minIdle old, every entry the predecessor ever
+//     held is past minIdle (promotion itself took at least the leader TTL),
+//     so one cursor-threaded pass drains the whole remaining backlog.
+//   - Anything still pending after that belongs to THIS stint's consumer —
+//     in-flight consumeStream work, which must never be stolen: XAUTOCLAIM
+//     cannot exclude the calling consumer, and a slow 100-event batch (each
+//     handleEvent bounded by the 10s proxy push timeout) eventually crosses
+//     any minIdle. Stealing it would double-process the event.
+//
+// Entries a partitioned ex-leader keeps pulling after our promotion are
+// never claimed here; the next failover's takeover is the backstop, and the
+// resume path's meta-hash fallback keeps those sandboxes servable meanwhile.
 func claimStalePending(ctx context.Context, stream *redisstream.Client, push *proxypush.Client,
 	reg *registry.Registry, cfg *config.Config, ssDeps statesync.Deps, log *zap.Logger) error {
 
 	t := time.NewTicker(cfg.ReconcileInterval)
 	defer t.Stop()
 
+	// minIdle == ReconcileInterval (≥ leader TTL in HA mode, enforced by
+	// config validation): entries a merely partitioned — still alive — old
+	// leader is working on are never stolen, while a dead leader's leftovers
+	// are taken over within one interval of their aging past minIdle.
 	start := time.Now()
 	for {
-		// minIdle == ReconcileInterval (≥ leader TTL in HA mode, enforced by
-		// config validation): entries a merely partitioned — still alive —
-		// old leader is working on are never stolen, while a dead leader's
-		// leftovers are taken over within one interval of their aging past
-		// minIdle.
 		events, err := stream.ClaimPending(ctx, cfg.ConsumerGroup, cfg.ConsumerName,
 			cfg.ReconcileInterval, 100)
+		for _, ev := range events {
+			handleEvent(ctx, ev, push, reg, ssDeps, log)
+			if err := stream.Ack(ctx, cfg.ConsumerGroup, ev.StreamID); err != nil {
+				log.Warn("ack claimed event failed",
+					zap.String("id", ev.StreamID), zap.Error(err))
+			}
+		}
 		if err != nil {
+			// Partial drain (entries already claimed above were processed);
+			// retry next tick and do not park on a failed pass.
 			log.Warn("xautoclaim failed; retrying next tick", zap.Error(err))
 		} else {
-			for _, ev := range events {
-				handleEvent(ctx, ev, push, reg, ssDeps, log)
-				if err := stream.Ack(ctx, cfg.ConsumerGroup, ev.StreamID); err != nil {
-					log.Warn("ack claimed event failed",
-						zap.String("id", ev.StreamID), zap.Error(err))
-				}
-			}
 			if len(events) > 0 {
 				log.Info("claimed stale pending events", zap.Int("count", len(events)))
-			} else if time.Since(start) >= cfg.ReconcileInterval {
-				// Empty pass once every entry the predecessor read just
-				// before dying has aged past minIdle: the takeover is
-				// complete and there is nothing left this loop may
-				// legitimately claim. Park until leadership ends.
+			}
+			if time.Since(start) >= cfg.ReconcileInterval {
 				log.Info("pending-entry takeover complete; parking for the rest of the stint")
 				<-ctx.Done()
 				return ctx.Err()

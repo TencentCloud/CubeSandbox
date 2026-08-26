@@ -32,9 +32,13 @@ type FleetSizer interface {
 }
 
 // LeaderGate is an optional dependency for active-standby deployments
-// (issue #1211): when set, /readyz reports 503 while this replica is a
-// standby, so the Kubernetes Service only routes /internal/resume traffic
-// to the active leader.
+// (issue #1211): when set, /readyz reports the replica's role ("leader" /
+// "standby") in the response body. Readiness itself is NOT gated on
+// leadership — both roles return 200, because a standby genuinely serves
+// /internal/resume via the meta-hash fallback. Gating readiness on
+// leadership would deadlock rolling upgrades with the chart's
+// maxUnavailable=0 strategy (the old pod stays the only Ready endpoint
+// forever) and would needlessly fail resumes a standby could have served.
 type LeaderGate interface {
 	IsLeader() bool
 }
@@ -161,6 +165,10 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	// Without a leader gate the process is a standalone (single-replica)
 	// deployment and is always "the leader" for readiness purposes.
+	//
+	// Both leader and standby report 200: readiness expresses "process is
+	// healthy and can serve", and a standby serves resumes through the
+	// meta-hash fallback. The role is surfaced for observability only.
 	role := "standalone"
 	if s.leader != nil {
 		if s.leader.IsLeader() {
@@ -170,15 +178,12 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	resp := map[string]any{
-		"ok":           role != "standby",
+		"ok":           true,
 		"role":         role,
 		"registry_len": s.registry.Len(),
 	}
 	if s.fleet != nil {
 		resp["fleet_size"] = s.fleet.Snapshot()
-	}
-	if role == "standby" {
-		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }

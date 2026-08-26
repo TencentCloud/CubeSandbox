@@ -96,13 +96,15 @@ type Config struct {
 	// the process behaves exactly as before: every loop runs unconditionally
 	// — the right mode for the single-replica one-click deployment. When
 	// true, replicas elect a leader via a Redis lease; only the leader runs
-	// the stream consumer / sweeper / last-active poller / reconciler, and
-	// /readyz reports 503 on standbys so the Service routes resume traffic
-	// to the active replica.
+	// the stream consumer / sweeper / last-active poller / stale-pending
+	// takeover. Every replica reports Ready on /readyz (the role is in the
+	// response body) and standbys serve /internal/resume via the meta-hash
+	// fallback, so the Service routes resume traffic to any pod.
 	HAEnabled bool
-	// InstanceID uniquely identifies this replica inside the leader lease.
-	// Empty → derived from ConsumerName (which itself defaults to the
-	// hostname, i.e. the pod name under Kubernetes).
+	// InstanceID uniquely identifies this replica inside the leader lease
+	// (a per-process random suffix is appended where a unique fencing value
+	// is required). Empty → derived from ConsumerName (which itself defaults
+	// to the hostname, i.e. the pod name under Kubernetes).
 	InstanceID string
 	// LeaderKey is the Redis lease key. Registered in
 	// docs/zh/dev/redis-key-spec.md.
@@ -113,9 +115,10 @@ type Config struct {
 	// LeaderRenewInterval is the lease renewal (and acquisition retry)
 	// cadence. Must be well below LeaderTTL.
 	LeaderRenewInterval time.Duration
-	// ReconcileInterval is the leader's full-resync cadence against the
-	// meta hash, and the minimum idle time before a dead consumer's pending
-	// stream entries are claimed by the new leader.
+	// ReconcileInterval is the cadence of the leader's stale-pending-entry
+	// takeover passes and doubles as the XAUTOCLAIM min-idle — the minimum
+	// idle time before a dead consumer's pending stream entries are claimed
+	// by the new leader.
 	ReconcileInterval time.Duration
 }
 
@@ -359,9 +362,9 @@ func (c *Config) Validate() error {
 	if c.LastActivePoll <= 0 {
 		return errors.New("last active poll must be > 0")
 	}
-	// ReconcileInterval drives the reconciler and claimStalePending tickers,
-	// which run in single-replica mode too — validate it unconditionally
-	// (a zero/negative value would panic time.NewTicker at startup).
+	// ReconcileInterval drives the claimStalePending ticker, which runs in
+	// single-replica mode too — validate it unconditionally (a zero/negative
+	// value would panic time.NewTicker at startup).
 	if c.ReconcileInterval <= 0 {
 		return errors.New("reconcile interval must be > 0")
 	}

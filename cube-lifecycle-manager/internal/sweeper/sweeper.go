@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/cubemasterclient"
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/registry"
 )
 
@@ -41,7 +42,12 @@ type Options struct {
 	BootstrapWarmup time.Duration
 
 	StateLockTTL time.Duration
-	Interval     time.Duration
+	// Owner is this process's identity for state-key transitions; pause/kill
+	// locks are written as "<transition>@<Owner>" and only a matching owner
+	// can commit or release them. Must be unique per process in
+	// active-standby mode. Empty degrades to the legacy bare-value semantics.
+	Owner    string
+	Interval time.Duration
 
 	// StartedAt is the sidecar's process start time. Used as the boundary
 	// between "bootstrap" and "stream" entries for the warmup gate. When
@@ -146,9 +152,9 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 		}
 
 		// Already-terminal fast path: if Redis says the sandbox is parked
-		// at "paused", "pausing", "killing", or "killed", there is nothing
-		// for us to do — either the dataplane will resume it on demand
-		// (paused) or the sandbox is on its way out (killing/killed).
+		// at "paused", "pausing[@…]", "killing[@…]", or "killed", there is
+		// nothing for us to do — either the dataplane will resume it on
+		// demand (paused) or the sandbox is on its way out (killing/killed).
 		// Without this guard the sweeper logs "idle threshold exceeded"
 		// every Interval and the state-key TTL (StateLockTTL=60s) expires
 		// periodically, causing a pointless RPC churn against CubeMaster
@@ -158,9 +164,10 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 			s.o.Log.Warn("get state failed; will attempt action anyway",
 				zap.String("sandbox_id", e.Meta.SandboxID),
 				zap.Error(stateErr))
-		} else if curState == "paused" || curState == "pausing" ||
-			curState == "killing" || curState == "killed" {
-			// Nothing to do. "pausing" / "killing" mean a peer (or our own
+		} else if curState == "paused" || curState == "killed" ||
+			lifecycle.IsTransition(curState, lifecycle.StatePausing) ||
+			lifecycle.IsTransition(curState, lifecycle.StateKilling) {
+			// Nothing to do. Transition markers mean a peer (or our own
 			// previous invocation) is mid-flight; let it finish.
 			continue
 		}
@@ -198,8 +205,15 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 }
 
 // tryPause acquires the state lock, calls CubeMaster, and pushes the new
-// state out to CubeProxy. It is idempotent — a lost SETNX race is treated as
+// state out to CubeProxy. It is idempotent — a lost CAS race is treated as
 // success (someone else is pausing the same sandbox).
+//
+// The lock is owner-tagged ("pausing@<Owner>") and every follow-up write is
+// owner-gated: commit writes "paused" only while we still hold the lock, and
+// the failure rollback (release + push "running" to the proxy) only fires
+// while we still hold it. A sweeper whose lock TTL expired mid-RPC therefore
+// cannot wipe a "resuming@<peer>" / "running" state a concurrent resumer has
+// since committed (issue #1211 review).
 //
 // Two CubeMaster ret_codes are not real failures and are mapped to
 // terminal-success behaviour:
@@ -213,7 +227,7 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 //     attempt). Treat exactly like a fresh successful pause.
 func (s *Sweeper) tryPause(ctx context.Context, e registry.Entry) error {
 	sid := e.Meta.SandboxID
-	got, err := s.o.Redis.AcquireState(ctx, sid, "pausing", s.o.StateLockTTL)
+	got, err := s.o.Redis.AcquireTransition(ctx, sid, lifecycle.StatePausing, s.o.Owner, s.o.StateLockTTL)
 	if err != nil {
 		return err
 	}
@@ -237,7 +251,7 @@ func (s *Sweeper) tryPause(ctx context.Context, e registry.Entry) error {
 		case errors.As(pauseErr, &apiErr) && apiErr.IsNotFound():
 			// Sandbox doesn't exist on CubeMaster anymore. Clean up local
 			// state and stop chasing it.
-			_ = s.o.Redis.ClearStateNotify(ctx, sid)
+			s.releaseTransition(ctx, sid, lifecycle.StatePausing)
 			_ = s.o.ProxyPush.DeleteMeta(ctx, sid)
 			s.o.Registry.Delete(sid)
 			s.o.Log.Info("sandbox not found on cubemaster; evicting from registry",
@@ -256,22 +270,35 @@ func (s *Sweeper) tryPause(ctx context.Context, e registry.Entry) error {
 				zap.Int("ret_code", apiErr.RetCode))
 			// no return — proceed to success bookkeeping below
 		default:
-			// Real failure. Roll back: clear the pausing state so a future
+			// Real failure. Roll back: release the pausing lock so a future
 			// sweep can retry, and tell CubeProxy the sandbox is back to
-			// running (it never actually paused).
-			_ = s.o.Redis.ClearStateNotify(ctx, sid)
-			_ = s.o.ProxyPush.SetState(ctx, sid, "running")
+			// running (it never actually paused). Both are gated on still
+			// owning the lock — with ownership lost, the current holder's
+			// transition wins and our "running" push would clobber it.
+			if s.releaseTransition(ctx, sid, lifecycle.StatePausing) {
+				_ = s.o.ProxyPush.SetState(ctx, sid, "running")
+			}
 			return errors.New("cubemaster pause: " + pauseErr.Error())
 		}
 	}
 
-	if err := s.o.Redis.WriteState(ctx, sid, "paused", s.o.StateLockTTL); err != nil {
-		s.o.Log.Warn("write paused state failed",
+	committed, err := s.o.Redis.CommitTransition(ctx, sid,
+		lifecycle.StatePausing, s.o.Owner, "paused", s.o.StateLockTTL)
+	switch {
+	case err != nil:
+		s.o.Log.Warn("commit paused state failed",
 			zap.String("sandbox_id", sid), zap.Error(err))
-	}
-	if err := s.o.ProxyPush.SetState(ctx, sid, "paused"); err != nil {
-		s.o.Log.Warn("push paused state failed",
-			zap.String("sandbox_id", sid), zap.Error(err))
+	case !committed:
+		// Lock lost mid-RPC (TTL expired, a peer acquired). The sandbox IS
+		// paused on CubeMaster, but the peer now owns the state key and
+		// drives whatever comes next — don't push "paused" over its view.
+		s.o.Log.Warn("pause commit skipped: state key no longer ours",
+			zap.String("sandbox_id", sid))
+	default:
+		if err := s.o.ProxyPush.SetState(ctx, sid, "paused"); err != nil {
+			s.o.Log.Warn("push paused state failed",
+				zap.String("sandbox_id", sid), zap.Error(err))
+		}
 	}
 
 	s.pauseTriggered.Add(1)
@@ -294,14 +321,14 @@ func (s *Sweeper) KillStats() (triggered, failed int64) {
 }
 
 // tryKill is the kill-path counterpart of tryPause. Same coordination
-// pattern (SETNX → notify proxy → RPC → finalise), but the terminal state is
-// non-recoverable: on success we evict the registry entry and tell every
-// CubeProxy replica to forget the sandbox. The Lua gate maps `killing` /
-// `killed` to 410 Gone so any in-flight client request fails fast instead of
-// hanging on a doomed retry.
+// pattern (owner-tagged CAS acquire → notify proxy → RPC → owner-gated
+// commit), but the terminal state is non-recoverable: on success we evict
+// the registry entry and tell every CubeProxy replica to forget the sandbox.
+// The Lua gate maps `killing` / `killed` to 410 Gone so any in-flight client
+// request fails fast instead of hanging on a doomed retry.
 func (s *Sweeper) tryKill(ctx context.Context, e registry.Entry) error {
 	sid := e.Meta.SandboxID
-	got, err := s.o.Redis.AcquireState(ctx, sid, "killing", s.o.StateLockTTL)
+	got, err := s.o.Redis.AcquireTransition(ctx, sid, lifecycle.StateKilling, s.o.Owner, s.o.StateLockTTL)
 	if err != nil {
 		return err
 	}
@@ -330,15 +357,27 @@ func (s *Sweeper) tryKill(ctx context.Context, e registry.Entry) error {
 				zap.String("sandbox_id", sid),
 				zap.Int("ret_code", apiErr.RetCode))
 		default:
-			_ = s.o.Redis.ClearStateNotify(ctx, sid)
-			_ = s.o.ProxyPush.SetState(ctx, sid, "running")
+			// Real failure: roll back, but only while we still own the lock
+			// (see tryPause for why the proxy "running" push is gated too).
+			if s.releaseTransition(ctx, sid, lifecycle.StateKilling) {
+				_ = s.o.ProxyPush.SetState(ctx, sid, "running")
+			}
 			return errors.New("cubemaster kill: " + killErr.Error())
 		}
 	}
 
-	if err := s.o.Redis.WriteState(ctx, sid, "killed", s.o.StateLockTTL); err != nil {
-		s.o.Log.Warn("write killed state failed",
+	committed, err := s.o.Redis.CommitTransition(ctx, sid,
+		lifecycle.StateKilling, s.o.Owner, "killed", s.o.StateLockTTL)
+	switch {
+	case err != nil:
+		s.o.Log.Warn("commit killed state failed",
 			zap.String("sandbox_id", sid), zap.Error(err))
+	case !committed:
+		// Lock lost mid-RPC. The sandbox is dead regardless — eviction
+		// below still runs; only the state-key write is left to the
+		// current owner.
+		s.o.Log.Warn("kill commit skipped: state key no longer ours",
+			zap.String("sandbox_id", sid))
 	}
 	if err := s.o.ProxyPush.DeleteMeta(ctx, sid); err != nil {
 		s.o.Log.Warn("delete meta after kill failed",
@@ -352,4 +391,24 @@ func (s *Sweeper) tryKill(ctx context.Context, e registry.Entry) error {
 		zap.Intp("timeout_seconds", e.Meta.TimeoutSeconds),
 		zap.String("kill_reason", cubemasterclient.KillReasonTimeout))
 	return nil
+}
+
+// releaseTransition drops our "<transition>@<Owner>" lock and reports
+// whether we still owned it. Errors are logged and reported as
+// not-released: the lock TTL is the ultimate backstop either way.
+func (s *Sweeper) releaseTransition(ctx context.Context, sid, transition string) bool {
+	released, err := s.o.Redis.ReleaseTransition(ctx, sid, transition, s.o.Owner)
+	switch {
+	case err != nil:
+		s.o.Log.Warn("release transition lock failed",
+			zap.String("sandbox_id", sid),
+			zap.String("transition", transition),
+			zap.Error(err))
+		return false
+	case !released:
+		s.o.Log.Warn("transition lock no longer ours; leaving peer's state alone",
+			zap.String("sandbox_id", sid),
+			zap.String("transition", transition))
+	}
+	return released
 }

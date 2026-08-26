@@ -5,20 +5,27 @@
 // Package leaderelect implements Redis-based active-standby leader election
 // for the cube-lifecycle-manager (issue #1211). Multiple CLM replicas run
 // against the same Redis; exactly one holds the leader lease at a time and
-// runs the stream consumer / sweeper / reconciler loops, while the others
-// stay hot standbys (HTTP server only) ready to take over within one lease
-// TTL of a failure.
+// runs the stream consumer / sweeper / last-active-poller loops, while the
+// others stay hot standbys (HTTP server only) ready to take over within one
+// lease TTL of a failure.
 //
 // The lease follows the same SETNX + token + Lua idiom as
-// CubeMaster/pkg/sandboxlock: acquire via SET key id NX EX ttl, renew via a
-// Lua compare-and-expire so a stale holder can never extend a lock it has
+// CubeMaster/pkg/sandboxlock: acquire via SET key token NX EX ttl, renew via
+// a Lua compare-and-expire so a stale holder can never extend a lock it has
 // already lost, and release via a Lua compare-and-delete on graceful
 // shutdown so the standby promotes immediately instead of waiting out the
 // TTL.
+//
+// The token is the configured instance ID plus a per-process random suffix:
+// two processes that (mis)share an instance ID — static hostnames,
+// copy-pasted env — must still never treat each other's lease as their own,
+// or a partitioned ex-leader could renew/release the lease its same-named
+// successor legitimately holds.
 package leaderelect
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"sync/atomic"
 	"time"
@@ -35,8 +42,9 @@ type Config struct {
 	// docs/zh/dev/redis-key-spec.md; follows the cube:v1:{scope}:lock:{resource}:{id}
 	// naming rule for distributed locks).
 	Key string
-	// InstanceID uniquely identifies this replica (pod name / hostname). It
-	// is the fencing token written into the lock value.
+	// InstanceID uniquely identifies this replica (pod name / hostname).
+	// The fencing token written into the lock value is this ID plus a
+	// per-process random suffix generated at construction.
 	InstanceID string
 	// TTL is the lock's expiry. A crashed leader blocks failover for at most
 	// this long.
@@ -104,6 +112,11 @@ type Elector struct {
 	s   store
 	log *zap.Logger
 
+	// token is the fencing value actually written into the lock: the
+	// configured instance ID plus a per-process random suffix (see the
+	// package doc). Logs keep using the bare instance ID for readability.
+	token string
+
 	leader   atomic.Bool
 	stepDown chan struct{} // buffered(1); a send requests voluntary loss of leadership
 
@@ -132,13 +145,14 @@ func NewWithStore(s store, cfg Config, log *zap.Logger) (*Elector, error) {
 		cfg:      cfg,
 		s:        s,
 		log:      log,
+		token:    cfg.InstanceID + ":" + rand.Text()[:8],
 		stepDown: make(chan struct{}, 1),
 	}, nil
 }
 
 // IsLeader reports whether this instance currently holds the lease. Used by
-// the HTTP server's /readyz gate so only the active replica receives resume
-// traffic from the Service.
+// the HTTP server to report the replica role on /readyz, and by proxy
+// discovery's onJoin to suppress standby replays.
 func (e *Elector) IsLeader() bool { return e.leader.Load() }
 
 // StepDown asks the elector to voluntarily release leadership (e.g. because
@@ -191,7 +205,7 @@ func (e *Elector) Run(ctx context.Context, cb Callbacks) error {
 			// cancelled, but the release must still reach Redis so the
 			// standby promotes without waiting out the TTL.
 			relCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := e.s.release(relCtx, e.cfg.Key, e.cfg.InstanceID); err != nil {
+			if err := e.s.release(relCtx, e.cfg.Key, e.token); err != nil {
 				e.log.Warn("leader lease release failed; standby waits for TTL",
 					zap.String("key", e.cfg.Key), zap.Error(err))
 			}
@@ -214,7 +228,7 @@ func (e *Elector) Run(ctx context.Context, cb Callbacks) error {
 		}
 
 		if !e.leader.Load() {
-			ok, err := e.s.tryAcquire(ctx, e.cfg.Key, e.cfg.InstanceID, e.cfg.TTL)
+			ok, err := e.s.tryAcquire(ctx, e.cfg.Key, e.token, e.cfg.TTL)
 			if err != nil {
 				e.log.Warn("leader acquire failed; retrying",
 					zap.String("key", e.cfg.Key), zap.Error(err))
@@ -243,7 +257,7 @@ func (e *Elector) Run(ctx context.Context, cb Callbacks) error {
 			continue
 		}
 
-		ok, err := e.s.renew(ctx, e.cfg.Key, e.cfg.InstanceID, e.cfg.TTL)
+		ok, err := e.s.renew(ctx, e.cfg.Key, e.token, e.cfg.TTL)
 		switch {
 		case err == nil && ok:
 			lastRenewOK = time.Now()

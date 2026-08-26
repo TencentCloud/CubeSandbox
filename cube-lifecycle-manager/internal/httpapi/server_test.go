@@ -29,33 +29,56 @@ type fakeStore struct {
 }
 
 func newFakeStore() *fakeStore { return &fakeStore{states: map[string]string{}} }
-func (f *fakeStore) AcquireState(_ context.Context, sid, state string, _ time.Duration) (bool, error) {
-	if _, ok := f.states[sid]; ok {
+
+// AcquireTransition mirrors redisstream.Client.AcquireTransition: an atomic
+// CAS that writes the owner-tagged transition marker, succeeding when the
+// key is missing or holds one of fromStates.
+func (f *fakeStore) AcquireTransition(_ context.Context, sid, transition, owner string, _ time.Duration, fromStates ...string) (bool, error) {
+	cur, ok := f.states[sid]
+	if !ok {
+		f.states[sid] = lifecycle.TransitionValue(transition, owner)
+		return true, nil
+	}
+	for _, from := range fromStates {
+		if cur == from {
+			f.states[sid] = lifecycle.TransitionValue(transition, owner)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// CommitTransition mirrors redisstream.Client.CommitTransition: the terminal
+// state is written only while the caller still owns the transition lock.
+func (f *fakeStore) CommitTransition(_ context.Context, sid, transition, owner, newState string, _ time.Duration) (bool, error) {
+	if f.states[sid] != lifecycle.TransitionValue(transition, owner) {
 		return false, nil
 	}
-	f.states[sid] = state
+	f.states[sid] = newState
 	return true, nil
 }
-func (f *fakeStore) SetState(_ context.Context, sid, state string, _ time.Duration) error {
-	f.states[sid] = state
-	return nil
-}
-func (f *fakeStore) ClearState(_ context.Context, sid string) error {
+
+// ReleaseTransition mirrors redisstream.Client.ReleaseTransition: the key is
+// deleted only while the caller still owns the transition lock.
+func (f *fakeStore) ReleaseTransition(_ context.Context, sid, transition, owner string) (bool, error) {
+	if f.states[sid] != lifecycle.TransitionValue(transition, owner) {
+		return false, nil
+	}
 	delete(f.states, sid)
-	return nil
+	return true, nil
 }
+
 func (f *fakeStore) GetState(_ context.Context, sid string) (string, bool, error) {
 	v, ok := f.states[sid]
 	return v, ok, nil
 }
 
-// WriteState / ClearStateNotify are the notify-emitting equivalents.
-// The httpapi tests only assert on state values, not notify payloads.
-func (f *fakeStore) WriteState(ctx context.Context, sid, state string, ttl time.Duration) error {
-	return f.SetState(ctx, sid, state, ttl)
-}
-func (f *fakeStore) ClearStateNotify(ctx context.Context, sid string) error {
-	return f.ClearState(ctx, sid)
+// WriteState is the notify-emitting unconditional write used on the
+// already-running re-assert path. The httpapi tests only assert on state
+// values, not notify payloads.
+func (f *fakeStore) WriteState(_ context.Context, sid, state string, _ time.Duration) error {
+	f.states[sid] = state
+	return nil
 }
 
 type fakeMaster struct {
@@ -198,6 +221,11 @@ func TestHealthzAndReadyz(t *testing.T) {
 	if !strings.Contains(string(body2), `"registry_len":1`) {
 		t.Fatalf("/readyz body should mention registry_len=1: %s", body2)
 	}
+	// No LeaderGate configured: the process reports itself as a standalone
+	// (single-replica) deployment, always ready.
+	if !strings.Contains(string(body2), `"ok":true`) || !strings.Contains(string(body2), `"role":"standalone"`) {
+		t.Fatalf("/readyz without a leader gate should report ok=true role=standalone: %s", body2)
+	}
 }
 
 // stubFleetSize is a FleetSizer that returns a caller-provided constant.
@@ -228,7 +256,10 @@ func TestReadyz_LeaderGate(t *testing.T) {
 		return httptest.NewServer(mux)
 	}
 
-	// Standby: not ready, so the Service keeps resume traffic away from it.
+	// Standby: still 200 — readiness expresses "process is healthy and can
+	// serve" (a standby serves resumes via the meta-hash fallback); the role
+	// is surfaced for observability only. Gating readiness on leadership
+	// would deadlock rolling upgrades with maxUnavailable=0.
 	standby := build(stubGate(false))
 	defer standby.Close()
 	resp, err := http.Get(standby.URL + "/readyz")
@@ -237,11 +268,14 @@ func TestReadyz_LeaderGate(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("standby /readyz should be 503, got %d: %s", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("standby /readyz should be 200, got %d: %s", resp.StatusCode, body)
 	}
 	if !strings.Contains(string(body), `"role":"standby"`) {
 		t.Fatalf("standby /readyz should report role=standby: %s", body)
+	}
+	if !strings.Contains(string(body), `"ok":true`) {
+		t.Fatalf("standby /readyz should report ok=true: %s", body)
 	}
 
 	// Leader: ready.
@@ -258,6 +292,9 @@ func TestReadyz_LeaderGate(t *testing.T) {
 	}
 	if !strings.Contains(string(body2), `"role":"leader"`) {
 		t.Fatalf("leader /readyz should report role=leader: %s", body2)
+	}
+	if !strings.Contains(string(body2), `"ok":true`) {
+		t.Fatalf("leader /readyz should report ok=true: %s", body2)
 	}
 }
 

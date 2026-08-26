@@ -1,0 +1,17 @@
+{{- if and (eq (include "cube.lifecycleManagerEnabled" .) "true") (gt (.Values.lifecycleManager.replicas | int) 1) }}
+# Keep at least one active-standby replica alive during voluntary
+# disruptions (node drains, cluster upgrades).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cube.lifecycleManagerName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: lifecycle-manager
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: lifecycle-manager
+{{- end }}
