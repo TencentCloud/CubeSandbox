@@ -828,6 +828,14 @@ struct rpc_lvol_name {
 	char     *lvs_name;
 	char     *lvol_name;
 	uint64_t  size_gib;
+
+	/* Optional on the delete: the uuid of the object the caller means. A name
+	 * is reusable, so between "the delete was refused" and "retry it" the name
+	 * can belong to a different snapshot; --retry-pending therefore sends the
+	 * uuid it read from rcow_get_lvstores, and the delete refuses if the name
+	 * now resolves to something else. */
+	char     *lvol_uuid;
+	char     *lvs_uuid;
 };
 
 static void
@@ -835,6 +843,8 @@ free_rpc_lvol_name(struct rpc_lvol_name *req)
 {
 	free(req->lvs_name);
 	free(req->lvol_name);
+	free(req->lvol_uuid);
+	free(req->lvs_uuid);
 }
 
 static const struct spdk_json_object_decoder rpc_resize_lvol_decoders[] = {
@@ -844,7 +854,61 @@ static const struct spdk_json_object_decoder rpc_resize_lvol_decoders[] = {
 
 static const struct spdk_json_object_decoder rpc_delete_lvol_decoders[] = {
 	{"lvol_name", offsetof(struct rpc_lvol_name, lvol_name), spdk_json_decode_string, false},
+	/* Optional, and checked rather than used for the lookup: a caller that
+	 * knows which object it means says so, and gets a refusal instead of a
+	 * delete if the name has moved on. */
+	{"lvol_uuid", offsetof(struct rpc_lvol_name, lvol_uuid), spdk_json_decode_string, true},
+	{"lvs_uuid",  offsetof(struct rpc_lvol_name, lvs_uuid),  spdk_json_decode_string, true},
 };
+
+/* Refuse when the caller named a uuid and the resolved lvol is not it.
+ *
+ * The lookup stays by name -- that is what every other lvol RPC does, and the
+ * bdev name is derived from it -- but a caller that carries a uuid gets it
+ * verified. This is what stops a retry issued for one snapshot from deleting a
+ * later object that happens to have the same name.
+ *
+ * Returns false when it has already answered the request. */
+static bool
+rpc_delete_uuid_matches(struct spdk_jsonrpc_request *request,
+			const struct rpc_lvol_name *req,
+			struct spdk_lvol *lvol)
+{
+	char have[SPDK_UUID_STRING_LEN];
+
+	if (req->lvol_uuid) {
+		spdk_uuid_fmt_lower(have, sizeof(have), &lvol->uuid);
+		if (strcasecmp(have, req->lvol_uuid) != 0) {
+			SPDK_WARNLOG("rcow_delete_lvol '%s' refused: caller asked "
+				     "for uuid %s but that name is now %s\n",
+				     req->lvol_name, req->lvol_uuid, have);
+			rpc_lvol_respond_errf(request,
+					      "lvol '%s' is uuid %s, not the "
+					      "requested %s; it was recreated "
+					      "since the delete was asked for",
+					      req->lvol_name, have,
+					      req->lvol_uuid);
+			return false;
+		}
+	}
+
+	if (req->lvs_uuid && lvol->lvol_store) {
+		spdk_uuid_fmt_lower(have, sizeof(have), &lvol->lvol_store->uuid);
+		if (strcasecmp(have, req->lvs_uuid) != 0) {
+			SPDK_WARNLOG("rcow_delete_lvol '%s' refused: caller asked "
+				     "for lvstore %s but the lvol is on %s\n",
+				     req->lvol_name, req->lvs_uuid, have);
+			rpc_lvol_respond_errf(request,
+					      "lvol '%s' is on lvstore %s, not "
+					      "the requested %s",
+					      req->lvol_name, have,
+					      req->lvs_uuid);
+			return false;
+		}
+	}
+
+	return true;
+}
 
 /* Resolve lvs_name + lvol_name, answering the request itself on failure.
  *
@@ -1073,6 +1137,12 @@ rpc_rcow_delete_lvol(struct spdk_jsonrpc_request *request,
 
 	lvol = rpc_lookup_lvol(request, &req);
 	if (!lvol) {
+		goto cleanup;
+	}
+
+	/* Before any refusal below, and before anything is torn down: a caller
+	 * that named a uuid means that object and nothing else. */
+	if (!rpc_delete_uuid_matches(request, &req, lvol)) {
 		goto cleanup;
 	}
 
@@ -1433,12 +1503,17 @@ SPDK_RPC_REGISTER("rcow_add_s3_config", rpc_rcow_add_s3_config, SPDK_RPC_RUNTIME
  * rcow_get_lvstores
  * ========================================================================== */
 
+static const char *export_state_str(enum s3lvol_export_state state);
+
 static void
 rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
-			     const struct spdk_json_val *params)
+		     const struct spdk_json_val *params)
 {
 	struct spdk_json_write_ctx *w;
 	struct s3lvol_lvstore *lvs;
+	enum s3lvol_export_state state;
+	bool deletable;
+	bool pending;
 
 	if (params) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
@@ -1550,6 +1625,37 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 				spdk_json_write_named_string(w, "bdev_name", lvol->bdev->name);
 			}
 			spdk_json_write_named_uuid(w, "uuid", &lvol->uuid);
+			/* Answered without needing the blob open: a deactivated
+			 * snapshot is still a snapshot, and --retry-pending gates
+			 * on this field. */
+			spdk_json_write_named_bool(w, "is_snapshot",
+				s3lvol_lvol_is_snapshot(lvol));
+			/* Cluster counts mirror rcow_get_lvol: truthful while the
+			 * blob is open, 0 otherwise. */
+			if (lvol->blob != NULL) {
+				spdk_json_write_named_uint64(w, "total_clusters",
+					spdk_blob_get_num_clusters(lvol->blob));
+				spdk_json_write_named_uint64(w, "allocated_clusters",
+					spdk_blob_get_num_allocated_clusters(lvol->blob));
+			} else {
+				spdk_json_write_named_uint64(w, "total_clusters", 0);
+				spdk_json_write_named_uint64(w, "allocated_clusters", 0);
+			}
+			/* Same answers as rcow_get_snapshot_status. Computed from the
+			 * lvol this loop already holds rather than re-resolved by
+			 * name: the by-name form walks every lvstore per call (O(N^2)
+			 * over this loop) and answers nothing at all when two
+			 * lvstores share a name, which would drop these fields for
+			 * exactly the lvols whose marks --retry-pending has to see. */
+			if (s3lvol_snapshot_query_lvol(lvol, &state, &deletable,
+						       &pending) == 0) {
+				spdk_json_write_named_string(w, "export_status",
+					export_state_str(state));
+				spdk_json_write_named_string(w, "deletable",
+					deletable ? "YES" : "NO");
+				spdk_json_write_named_bool(w, "delete_pending",
+							   pending);
+			}
 			spdk_json_write_object_end(w);
 		}
 		spdk_json_write_array_end(w);
@@ -1802,6 +1908,7 @@ rpc_rcow_get_snapshot_status(struct spdk_jsonrpc_request *request,
 	struct spdk_json_write_ctx *w;
 	enum s3lvol_export_state state;
 	bool deletable;
+	bool pending = false;
 	int rc;
 
 	if (spdk_json_decode_object(params, rpc_export_status_decoders,
@@ -1829,7 +1936,8 @@ rpc_rcow_get_snapshot_status(struct spdk_jsonrpc_request *request,
 	if (req.export_uuid) {
 		rc = s3lvol_export_query(req.export_uuid, &state, &deletable);
 	} else {
-		rc = s3lvol_snapshot_query(req.snapshot_name, &state, &deletable);
+		rc = s3lvol_snapshot_query(req.snapshot_name, &state, &deletable,
+					   &pending);
 		if (rc == -ENODEV) {
 			rpc_lvol_respond_errf(request,
 					      "snapshot '%s' not found in any "
@@ -1862,6 +1970,7 @@ rpc_rcow_get_snapshot_status(struct spdk_jsonrpc_request *request,
 				     export_state_str(state));
 	spdk_json_write_named_string(w, "deletable",
 				     deletable ? "YES" : "NO");
+	spdk_json_write_named_bool(w, "delete_pending", pending);
 	spdk_json_write_object_end(w);
 	rpc_json_buf_respond(request, w, &buf);
 

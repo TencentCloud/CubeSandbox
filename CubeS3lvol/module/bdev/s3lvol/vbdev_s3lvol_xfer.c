@@ -1585,10 +1585,17 @@ s3lvol_lvol_export(struct s3lvol_lvstore *lvs, struct spdk_lvol *snapshot,
  *   1. an export still being written names it
  *   2. a live zero-copy export references it (a dense one owns its own copies,
  *      and an expired reference no longer pins anything)
- *   3. it has more than one clone -- blobstore merges a snapshot into one only
+ *   3. a decouple is running on it (action_in_progress)
+ *   4. it is active, i.e. exported over NVMf -- rcow_delete_lvol refuses that
+ *      before it gets anywhere near the blob
+ *   5. it has more than one clone -- blobstore merges a snapshot into one only
  *
- * Computed on the spot every time; nothing here is cached. A snapshot that is
- * already gone blocks nothing. */
+ * The export and active checks come before the "no blob" shortcut on purpose: a
+ * deactivated snapshot has no open blob but can still be pinned by an export, and
+ * reporting YES for it made --retry-pending attempt a delete that then failed
+ * with EBUSY. Only a snapshot that is genuinely absent blocks nothing.
+ *
+ * Computed on the spot every time; nothing here is cached. */
 static bool
 export_snapshot_deletable(struct s3lvol_lvstore *lvs, const char *snapshot_name)
 {
@@ -1598,7 +1605,8 @@ export_snapshot_deletable(struct s3lvol_lvstore *lvs, const char *snapshot_name)
 	int rc;
 
 	lvol = s3lvol_lvol_find(lvs, snapshot_name);
-	if (!lvol || !lvol->blob) {
+	if (!lvol) {
+		/* Gone: nothing left to refuse. */
 		return true;
 	}
 
@@ -1613,6 +1621,23 @@ export_snapshot_deletable(struct s3lvol_lvstore *lvs, const char *snapshot_name)
 
 	if (s3lvol_export_pinning(owner, lvol->name)) {
 		return false;
+	}
+
+	/* Both of these refuse in s3lvol_lvol_destroy() / rpc_rcow_delete_lvol()
+	 * without ever looking at the blob, so they have to be checked even when
+	 * the blob is closed. */
+	if (lvol->action_in_progress) {
+		return false;
+	}
+
+	if (s3lvol_active_load() == 0 && s3lvol_active_find(lvol->name)) {
+		return false;
+	}
+
+	if (!lvol->blob) {
+		/* Closed: the clone count below is unreadable, and every blocker
+		 * that does not need the blob has been checked above. */
+		return true;
 	}
 
 	/* ids == NULL makes spdk_blob_get_clones report the count in *clone_count
@@ -1699,13 +1724,37 @@ snapshot_export_state(struct s3lvol_lvstore *lvs, const char *snapshot_name)
 }
 
 int
-s3lvol_snapshot_query(const char *snapshot_name,
-		      enum s3lvol_export_state *state, bool *deletable)
+s3lvol_snapshot_query_lvol(struct spdk_lvol *lvol,
+			   enum s3lvol_export_state *state, bool *deletable,
+			   bool *pending)
 {
 	struct s3lvol_lvstore *owner;
+
+	if (!lvol || !state || !deletable || !pending) {
+		return -EINVAL;
+	}
+
+	owner = s3lvol_lvstore_of_lvol(lvol);
+	if (!owner) {
+		return -ENODEV;
+	}
+
+	*state = snapshot_export_state(owner, lvol->name);
+	*deletable = export_snapshot_deletable(owner, lvol->name);
+	*pending = lvol->lvol_store != NULL &&
+		   s3lvol_snapshot_pending_test(&lvol->lvol_store->uuid,
+						&lvol->uuid);
+	return 0;
+}
+
+int
+s3lvol_snapshot_query(const char *snapshot_name,
+		      enum s3lvol_export_state *state, bool *deletable,
+		      bool *pending)
+{
 	struct spdk_lvol *lvol;
 
-	if (!snapshot_name || snapshot_name[0] == '\0' || !state || !deletable) {
+	if (!snapshot_name || snapshot_name[0] == '\0') {
 		return -EINVAL;
 	}
 
@@ -1716,14 +1765,7 @@ s3lvol_snapshot_query(const char *snapshot_name,
 		return -ENODEV;
 	}
 
-	owner = s3lvol_lvstore_of_lvol(lvol);
-	if (!owner) {
-		return -ENODEV;
-	}
-
-	*state = snapshot_export_state(owner, lvol->name);
-	*deletable = export_snapshot_deletable(owner, lvol->name);
-	return 0;
+	return s3lvol_snapshot_query_lvol(lvol, state, deletable, pending);
 }
 
 /* ==========================================================================

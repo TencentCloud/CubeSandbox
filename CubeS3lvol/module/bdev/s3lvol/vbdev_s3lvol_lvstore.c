@@ -52,6 +52,15 @@ struct s3lvol_lvstore {
 	struct s3_client        *client;
 	char                    *name;
 
+	/* Copy of lvs->uuid, taken once the blobstore is open.
+	 *
+	 * Needed because the unload path clears lvs->lvs before
+	 * s3lvol_lvstore_free() runs, and the free is where this lvstore's
+	 * pending-delete marks are dropped -- reading the uuid off lvs->lvs
+	 * there would read NULL and skip the cleanup. Stays all-zero on the
+	 * setup error paths, which never got as far as an open blobstore. */
+	struct spdk_uuid         uuid;
+
 	/* The namespace this lvstore was created in. An import defaults to the
 	 * same namespace, which is the common case. The COS target is resolved
 	 * from this name through rcow_namespace_to_target(). */
@@ -652,6 +661,20 @@ s3lvol_lvstore_free(struct s3lvol_lvstore *lvs)
 	if (!lvs) {
 		return;
 	}
+
+	/* Pending-delete marks belong to this lvstore's lvols, all of which are
+	 * gone by now: unload closed them, delete destroyed them. Leaving the
+	 * marks behind is what would let --retry-pending act on a same-named
+	 * snapshot in the lvstore that gets attached next. The single funnel for
+	 * unload, delete and the setup error paths, so one call covers all.
+	 *
+	 * Keyed off the copy rather than lvs->lvs, which the unload path has
+	 * already cleared by the time it gets here. All-zero means the setup
+	 * never reached an open blobstore, so there is nothing to clear. */
+	if (!spdk_uuid_is_null(&lvs->uuid)) {
+		s3lvol_snapshot_pending_clear_lvs(&lvs->uuid);
+	}
+
 	/* Cached import manifests go with the lvstore. The registry object in S3
 	 * stays: it belongs to the lvstore, and the next attach needs it. */
 	s3lvol_xfer_lvstore_fini(lvs);
@@ -841,6 +864,11 @@ s3lvol_lvs_init_cb(void *cb_arg, struct spdk_lvol_store *lvol_store, int lvserrn
 	}
 
 	lvs->lvs = lvol_store;
+
+	/* Kept for s3lvol_lvstore_free(): the unload clears lvs->lvs before the
+	 * free runs, and the free is where this lvstore's pending-delete marks
+	 * are dropped. */
+	spdk_uuid_copy(&lvs->uuid, &lvol_store->uuid);
 
 	/* The create context is about to go away, so drop its destroy callback;
 	 * the unload path registers its own. */
@@ -1579,6 +1607,11 @@ s3lvol_lvs_load_cb(void *cb_arg, struct spdk_lvol_store *lvol_store, int lvserrn
 	}
 
 	lvs->lvs = lvol_store;
+
+	/* Kept for s3lvol_lvstore_free(): the unload clears lvs->lvs before the
+	 * free runs, and the free is where this lvstore's pending-delete marks
+	 * are dropped. */
+	spdk_uuid_copy(&lvs->uuid, &lvol_store->uuid);
 
 	/* The create context is about to go away, so drop its destroy callback;
 	 * the unload path registers its own. */
@@ -2595,16 +2628,74 @@ struct lvol_destroy_ctx {
 	char                     name[SPDK_LVOL_NAME_MAX];
 	char                     esnap_uuid[SPDK_UUID_STRING_LEN];
 
+	/* The pending-delete mark is keyed by these, and both are unreadable by
+	 * the time the completion runs -- the lvol is freed on success. Copied
+	 * here so the callback can clear (or record) the right mark. */
+	struct spdk_uuid         lvs_uuid;
+	struct spdk_uuid         lvol_uuid;
+
 	/* Cluster counts read before the destroy: the blob must still be open
 	 * to read them, and is gone by the time the success callback runs, so
 	 * the reclaimed counts can only be reported from there. */
 	uint64_t                 allocated_clusters;
 	uint64_t                 total_clusters;
 	bool                     have_cluster_counts;
+	bool                     is_snapshot;
 
 	spdk_lvol_op_complete    cb_fn;
 	void                    *cb_arg;
 };
+
+/* Record the "a delete was asked for and refused" mark for a snapshot.
+ *
+ * Only snapshots get one: an ordinary volume's refusals are the caller's own
+ * doing (deactivate it first), while a snapshot's blockers -- an export pin, a
+ * sibling clone, a running decouple -- clear on their own, and the mark is what
+ * lets --retry-pending come back to it. Keyed by uuid, so it cannot survive into
+ * a same-named object.
+ *
+ * Snapshot-ness is decided without needing the blob open. spdk_blob_is_read_only()
+ * would, and the refusals that call this fire before any blob check -- a
+ * deactivated snapshot still pinned by an export took that path and recorded
+ * nothing. spdk_blob_get_clones() takes a blob_id, which stays valid once the
+ * blob is closed (the same reason lvol->blob_id is used over
+ * spdk_blob_get_id(lvol->blob) further down), and answers 0 clones with rc == 0
+ * for a blob that is not a snapshot at all. */
+bool
+s3lvol_lvol_is_snapshot(struct spdk_lvol *lvol)
+{
+	size_t clone_count = 0;
+	int rc;
+
+	if (!lvol || !lvol->lvol_store || !lvol->lvol_store->blobstore) {
+		return false;
+	}
+
+	/* Open blob: the direct question is cheaper and exact. */
+	if (lvol->blob) {
+		return spdk_blob_is_read_only(lvol->blob);
+	}
+
+	rc = spdk_blob_get_clones(lvol->lvol_store->blobstore, lvol->blob_id,
+				  NULL, &clone_count);
+	if (rc != 0 && rc != -ENOMEM) {
+		return false;
+	}
+	return clone_count > 0;
+}
+
+static void
+destroy_mark_pending(struct spdk_lvol *lvol)
+{
+	if (!lvol || !lvol->lvol_store) {
+		return;
+	}
+	if (!s3lvol_lvol_is_snapshot(lvol)) {
+		return;
+	}
+	s3lvol_snapshot_pending_set(&lvol->lvol_store->uuid, &lvol->uuid,
+				    lvol->name);
+}
 
 /* Deleting the last volume that read an export is what ends this node's
  * dependency on it. The imports registry has to hear about that here, while the
@@ -2615,6 +2706,8 @@ s3lvol_lvol_destroyed(void *cb_arg, int lvolerrno)
 	struct lvol_destroy_ctx *ctx = cb_arg;
 
 	if (lvolerrno == 0) {
+		/* A delete that finally went through clears any pending mark. */
+		s3lvol_snapshot_pending_clear(&ctx->lvs_uuid, &ctx->lvol_uuid);
 		/* The one line a search can find for a successful delete. Nothing else
 		 * prints it: the unregister is silent on success, the object deletes
 		 * that follow are fire-and-forget and log only their failures, and the
@@ -2641,7 +2734,12 @@ s3lvol_lvol_destroyed(void *cb_arg, int lvolerrno)
 	} else {
 		/* The refusal paths in s3lvol_lvol_destroy() log before returning, but
 		 * an asynchronous failure -- the unregister, or spdk_lvol_destroy --
-		 * lands here instead and would otherwise be silent. */
+		 * lands here instead and would otherwise be silent. A blocked
+		 * snapshot delete records the intent so --ls can show it. */
+		if (ctx->is_snapshot) {
+			s3lvol_snapshot_pending_set(&ctx->lvs_uuid,
+						    &ctx->lvol_uuid, ctx->name);
+		}
 		SPDK_ERRLOG("Failed to delete lvol '%s/%s': %s\n",
 			    ctx->owner ? s3lvol_lvstore_get_name(ctx->owner) : "(null)",
 			    ctx->name, spdk_strerror(-lvolerrno));
@@ -2717,6 +2815,7 @@ s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 		SPDK_ERRLOG("lvol '%s' is being exported right now; wait for "
 			    "rcow_get_snapshot_status to stop reporting INPROGRESS "
 			    "before deleting it\n", lvol->name);
+		destroy_mark_pending(lvol);
 		return -EBUSY;
 	}
 
@@ -2729,6 +2828,7 @@ s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 			    "node may be reading through. Release that export, or wait "
 			    "for it to expire, before deleting this.\n",
 			    lvol->name, info.export_uuid);
+		destroy_mark_pending(lvol);
 		return -EBUSY;
 	}
 
@@ -2797,6 +2897,10 @@ s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 				    "blobstore can only merge a snapshot into a "
 				    "single clone, so delete the others first\n",
 				    lvol->name, clone_count);
+			/* Same "record the intent so --retry-pending can pick it up
+			 * once the blocker (the extra clones) clears" contract as
+			 * the export-pin refusals above. */
+			destroy_mark_pending(lvol);
 			return -EBUSY;
 		}
 	}
@@ -2808,6 +2912,10 @@ s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 	if (lvol->action_in_progress) {
 		SPDK_ERRLOG("another operation is in progress on lvol '%s'; it cannot "
 			    "be deleted yet\n", lvol->name);
+		/* The decouple that is running will clear, after which the delete can
+		 * succeed; record the intent for --retry-pending, same contract as
+		 * the export-pin refusals above. */
+		destroy_mark_pending(lvol);
 		return -EBUSY;
 	}
 
@@ -2846,6 +2954,18 @@ s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 
 	/* Copied now: the destroy frees the lvol and its name with it. */
 	snprintf(ctx->name, sizeof(ctx->name), "%s", lvol->name);
+
+	/* Snapshot (read-only blob) deletions carry the pending-delete mark when
+	 * they cannot complete; recorded here because the blob is gone by the
+	 * time the completion callback runs. */
+	ctx->is_snapshot = lvol->blob != NULL && spdk_blob_is_read_only(lvol->blob);
+
+	/* The mark's key, for the same reason: on success the lvol is freed, so
+	 * the completion cannot read either uuid off it any more. */
+	if (lvol->lvol_store) {
+		spdk_uuid_copy(&ctx->lvs_uuid, &lvol->lvol_store->uuid);
+	}
+	spdk_uuid_copy(&ctx->lvol_uuid, &lvol->uuid);
 
 	/* Recorded now, for the same reason the owner is: after the destroy the blob
 	 * is gone and the esnap id with it. An id that is not a NUL-terminated uuid

@@ -462,6 +462,11 @@ else
 		# Snapshot deletion semantics; next to the suites that build clone chains.
 		run_suite run_snapdelete_test.sh \
 			./test/dataplane/run_snapdelete_test.sh
+		# Pending-delete marks: refused -> marked -> skipped while blocked ->
+		# retried once clear. Right after snapdelete: same delete path, but the
+		# question is what a *refused* delete leaves behind.
+		run_suite run_pending_delete_test.sh \
+			./test/dataplane/run_pending_delete_test.sh
 		# Mounts a real filesystem, so it goes after the block-level suites:
 		# when both fail, the one that speaks in dd is the easier read.
 		run_suite run_fs_test.sh \

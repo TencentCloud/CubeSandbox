@@ -478,6 +478,21 @@ test/tools/s3lvol_rpc.py rcow_checkpoint_lvstore '{"lvs_name":"dpvs"}'
 test/tools/s3lvol_rpc.py --sock /var/run/s3lvol.sock --timeout 60 bdev_get_bdevs
 ```
 
+Two modes take no method of their own:
+
+```sh
+test/tools/s3lvol_rpc.py --ls              # rcow_get_lvstores as a table,
+                                           # incl. the DEL / PEND columns
+test/tools/s3lvol_rpc.py --retry-pending   # re-issue the snapshot deletes that
+                                           # were refused and are now deletable
+```
+
+`--retry-pending` acts on the pending-delete marks a refused snapshot delete
+leaves behind (`PEND` in `--ls`). The marks are in the target's memory only,
+nothing retries them automatically, and there is no cancel -- see
+[Retrying a refused snapshot delete](../README.md#retrying-a-refused-snapshot-delete---retry-pending)
+in the main README for the full contract.
+
 Especially useful when debugging a hung target: a process a test script left
 behind can be asked for its state directly.
 

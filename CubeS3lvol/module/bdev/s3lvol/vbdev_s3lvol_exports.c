@@ -49,6 +49,121 @@
  * table, and a node with more live exports than this has a different problem. */
 #define S3LVOL_MAX_EXPORTS 64
 
+/* === Pending-delete marks ==================================================
+ * A delete that cannot complete because the snapshot is referenced (an export
+ * pins it, it has clones, or a decouple is running) records the intent here.
+ * rcow_get_lvstores reports it so the caller sees the snapshot was "tried to
+ * delete" and can retry once the blocker clears. The deferred-completion poller
+ * is a later step.
+ *
+ * Keyed by (lvstore uuid, lvol uuid), not by name. A name is unique only within
+ * one loaded lvstore and is reusable: delete a snapshot and create another one
+ * by the same name, or unload the lvstore and attach it again, and a name-keyed
+ * mark would point at a different object than the one the delete was refused
+ * for -- which --retry-pending would then delete. A lvol uuid is generated once
+ * and never reused, so the mark can only ever name the object it was recorded
+ * for. The lvstore uuid groups the marks so a teardown can drop them all
+ * (s3lvol_snapshot_pending_clear_lvs()); the name is kept for log lines only.
+ */
+
+struct s3lvol_pending_delete {
+	struct spdk_uuid           lvs_uuid;
+	struct spdk_uuid           lvol_uuid;
+	char                       name[SPDK_LVOL_NAME_MAX];
+	TAILQ_ENTRY(s3lvol_pending_delete) link;
+};
+
+static TAILQ_HEAD(, s3lvol_pending_delete) g_pending_deletes =
+	TAILQ_HEAD_INITIALIZER(g_pending_deletes);
+
+static struct s3lvol_pending_delete *
+pending_delete_find(const struct spdk_uuid *lvs_uuid,
+		    const struct spdk_uuid *lvol_uuid)
+{
+	struct s3lvol_pending_delete *pd;
+
+	TAILQ_FOREACH(pd, &g_pending_deletes, link) {
+		if (spdk_uuid_compare(&pd->lvs_uuid, lvs_uuid) == 0 &&
+		    spdk_uuid_compare(&pd->lvol_uuid, lvol_uuid) == 0) {
+			return pd;
+		}
+	}
+	return NULL;
+}
+
+void
+s3lvol_snapshot_pending_set(const struct spdk_uuid *lvs_uuid,
+			    const struct spdk_uuid *lvol_uuid,
+			    const char *name)
+{
+	struct s3lvol_pending_delete *pd;
+
+	if (!lvs_uuid || !lvol_uuid) {
+		return;
+	}
+	if (pending_delete_find(lvs_uuid, lvol_uuid)) {
+		return;
+	}
+	pd = calloc(1, sizeof(*pd));
+	if (!pd) {
+		SPDK_ERRLOG("failed to allocate pending-delete mark for '%s'\n",
+			    name ? name : "(unnamed)");
+		return;
+	}
+	spdk_uuid_copy(&pd->lvs_uuid, lvs_uuid);
+	spdk_uuid_copy(&pd->lvol_uuid, lvol_uuid);
+	snprintf(pd->name, sizeof(pd->name), "%s", name ? name : "");
+	TAILQ_INSERT_TAIL(&g_pending_deletes, pd, link);
+}
+
+bool
+s3lvol_snapshot_pending_test(const struct spdk_uuid *lvs_uuid,
+			     const struct spdk_uuid *lvol_uuid)
+{
+	if (!lvs_uuid || !lvol_uuid) {
+		return false;
+	}
+	return pending_delete_find(lvs_uuid, lvol_uuid) != NULL;
+}
+
+void
+s3lvol_snapshot_pending_clear(const struct spdk_uuid *lvs_uuid,
+			      const struct spdk_uuid *lvol_uuid)
+{
+	struct s3lvol_pending_delete *pd;
+
+	if (!lvs_uuid || !lvol_uuid) {
+		return;
+	}
+	pd = pending_delete_find(lvs_uuid, lvol_uuid);
+	if (pd) {
+		TAILQ_REMOVE(&g_pending_deletes, pd, link);
+		free(pd);
+	}
+}
+
+/* Every mark belonging to one lvstore, dropped in one go.
+ *
+ * Called from the unload / destroy / free paths: past a teardown the marks name
+ * lvols that no longer exist, and an lvstore that is attached again can hand the
+ * same names to different objects. Marks that outlive their lvstore are how
+ * --retry-pending could end up deleting something nobody asked it to. */
+void
+s3lvol_snapshot_pending_clear_lvs(const struct spdk_uuid *lvs_uuid)
+{
+	struct s3lvol_pending_delete *pd, *tmp;
+
+	if (!lvs_uuid) {
+		return;
+	}
+	TAILQ_FOREACH_SAFE(pd, &g_pending_deletes, link, tmp) {
+		if (spdk_uuid_compare(&pd->lvs_uuid, lvs_uuid) == 0) {
+			TAILQ_REMOVE(&g_pending_deletes, pd, link);
+			free(pd);
+		}
+	}
+}
+
 /* One in-flight lease check. Defined below, next to the machinery that uses it;
  * named here because an export points at the check it is waiting for. */
 struct export_lease_get_ctx;

@@ -220,16 +220,25 @@ keeps running in the background. The uuid is not a completion signal — poll it
 
 ```sh
 scripts/s3lvol_rpc.py rcow_get_snapshot_status '{"export_uuid":"<uuid>"}'
-# -> {"export_status":"INPROGRESS","deletable":"NO"}  ... then, eventually
-# -> {"export_status":"DONE","deletable":"NO"}          (still pinned while exported)
+# -> {"export_status":"INPROGRESS","deletable":"NO","delete_pending":false}
+#    ... then, eventually
+# -> {"export_status":"DONE","deletable":"NO","delete_pending":false}
+#    (still pinned while exported)
 ```
 
-`rcow_get_snapshot_status` returns two fields:
+`rcow_get_snapshot_status` returns three fields:
 
 - `export_status`: `INPROGRESS` / `DONE` / `NONE`.
 - `deletable`: `YES` / `NO`, computed on the spot each time (never cached) and
   mirroring what `rcow_delete_lvol` would actually refuse: a snapshot is **not
-  deletable** while an export is in progress or when it has more than one clone.
+  deletable** while an export is in progress or pins it, while a decouple is
+  running on it, while it is active over NVMf, or when it has more than one
+  clone.
+- `delete_pending`: whether a delete was asked for and refused — see
+  [Retrying a refused snapshot delete](#retrying-a-refused-snapshot-delete---retry-pending).
+  Only meaningful when the query names a `snapshot_name`; queried by
+  `export_uuid` it is always `false`, because an export names a snapshot but is
+  not one.
 
 It accepts exactly one of two keys: `export_uuid`, or `snapshot_name` for a
 snapshot that may never have been exported (such a snapshot reports `NONE`).
@@ -365,4 +374,87 @@ is not disturbed by scheduler contention.
   while the decouple still reads through it"*. Wait for the decouple to finish
   (`rcow_get_decouple` status -- its list emptying is the signal) before taking
   the snapshot or clone.
+
+## Retrying a refused snapshot delete (`--retry-pending`)
+
+A snapshot that is pinned — an export names it, it has clones, or a decouple is
+running — cannot be deleted: `rcow_delete_lvol` refuses, and the refusal records
+a **pending-delete mark** for the snapshot. The mark is the *only* record that a
+delete was asked for: from the target's side every delete arrives as the same
+RPC, so there is no way to tell a user's delete from an automation's. The mark
+therefore is what "the user asked for this delete" means.
+
+Marks are keyed by **(lvstore uuid, lvol uuid)**, not by name: a name is unique
+only inside one loaded lvstore and is reusable, so a name-keyed mark could end up
+pointing at a snapshot the delete was never refused for.
+
+`rcow_get_lvstores` reports the mark per snapshot (`delete_pending`), together
+with whether the snapshot is deletable *right now* (`deletable`). Once the
+blocker clears — the export is released or expires, the extra clone is deleted —
+the snapshot becomes deletable, but the delete still has to be carried out by
+hand:
+
+```sh
+test/tools/s3lvol_rpc.py --retry-pending
+```
+
+It reads `rcow_get_lvstores`, finds every snapshot that **both** carries the
+pending-delete mark **and** is currently deletable, and calls `rcow_delete_lvol`
+for each — passing the snapshot's uuid alongside its name, so a delete meant for
+one object cannot land on a later one that reused the name:
+
+- A snapshot without the mark is **never touched** — snapshots a test or another
+  node created, or that were never deleted on purpose, are left alone.
+- A snapshot that is still pinned reports `deletable: NO` and is deliberately
+  skipped; run `--retry-pending` again once the blocker clears.
+- Each successful delete clears the mark on the target; a delete refused again
+  is reported and does not stop the others.
+
+The command takes no method argument. Its exit status is 0 when every
+marked-and-deletable snapshot went through, 1 if any delete failed, and it
+prints `no pending snapshot deletes to retry` when there is nothing to do:
+
+```sh
+$ test/tools/s3lvol_rpc.py --retry-pending
+no pending snapshot deletes to retry
+```
+
+### What this is not
+
+The mark is a record and a manual retry, nothing more. Specifically:
+
+- **Not every refusal records a mark.** Recorded are the snapshot blockers
+  `s3lvol_lvol_destroy()` itself identifies — an export pin (published or still
+  in flight), more than one clone, a running decouple — plus an asynchronous
+  destroy failure. Not recorded: the RPC-layer refusals that run before it (an
+  NVMf-active volume, an unreadable active registry), a bdev unregister that
+  fails, and the case where `spdk_blob_get_clones()` answers an unknown error.
+  Those are either the caller's own precondition to fix (deactivate first) or a
+  failure that has to be looked at rather than retried blindly.
+- **No automatic retry.** Nothing on the target polls the marks; there is no
+  deferred-completion poller. `--retry-pending` is the only thing that acts on
+  them, and it has to be run.
+- **In memory only.** The marks live in the target process and are gone on
+  restart. A delete refused before a restart is afterwards indistinguishable
+  from one that was never asked for.
+- **Dropped with the lvstore.** Unloading or deleting an lvstore drops that
+  lvstore's marks, deliberately: past the teardown they would name lvols that no
+  longer exist, and an lvstore attached again can give the same names to
+  different objects.
+- **No cancel.** Completing the delete is the only way to clear a mark; a
+  refused delete stays recorded for as long as the target runs and its lvstore
+  stays attached.
+- **`delete_pending` is a snapshot notion.** `rcow_get_snapshot_status` reports
+  it when queried by `snapshot_name`; queried by `export_uuid` it is always
+  `false`, because an export names a snapshot but is not one.
+- **The cluster path does not use it.** Cubelet's own delete
+  (`S3Cow.DeleteByKind`) still treats a refused snapshot delete as success, and
+  it does not run `--retry-pending`. This is an operator tool for the node; the
+  object leak on the cluster path is a separate change.
+
+`deletable: YES` means every blocker the delete path checks is clear right now —
+export pins, a running decouple, an NVMf-active volume, and more than one clone.
+It is a snapshot of the current state, not a promise: something can pin the
+snapshot again between the query and the delete, and a retry that is refused
+again is reported by `--retry-pending` (exit status 1) rather than hidden.
 

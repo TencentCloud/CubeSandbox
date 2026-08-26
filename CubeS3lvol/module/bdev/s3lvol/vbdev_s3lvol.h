@@ -725,7 +725,64 @@ int s3lvol_export_query(const char *export_uuid,
  *         lvstore has a volume by that name.
  */
 int s3lvol_snapshot_query(const char *snapshot_name,
-			  enum s3lvol_export_state *state, bool *deletable);
+			  enum s3lvol_export_state *state, bool *deletable,
+			  bool *pending);
+
+/**
+ * The same three answers for an lvol the caller already holds.
+ *
+ * Preferred wherever the lvol is in hand: s3lvol_snapshot_query() re-resolves
+ * the name through s3lvol_lvol_find_any(), which walks every loaded lvstore --
+ * O(N) per call, so O(N^2) over a listing loop -- and answers NULL when the same
+ * name exists in more than one lvstore, silently dropping the fields for every
+ * lvol sharing it.
+ *
+ * \return 0 on success, -EINVAL for a NULL argument, -ENODEV when the lvol is
+ *         not on a loaded s3lvol lvstore.
+ */
+int s3lvol_snapshot_query_lvol(struct spdk_lvol *lvol,
+			       enum s3lvol_export_state *state, bool *deletable,
+			       bool *pending);
+
+/**
+ * Whether an lvol is a snapshot, answerable with the blob closed.
+ *
+ * spdk_blob_is_read_only() needs an open blob, so a deactivated snapshot reads
+ * as "not a snapshot" through it -- which is how a marked-but-deactivated
+ * snapshot became invisible to --retry-pending.
+ */
+bool s3lvol_lvol_is_snapshot(struct spdk_lvol *lvol);
+
+/**
+ * Record / test / clear the "a delete of this snapshot was attempted and could
+ * not complete" mark. There is no deferred-completion poller: the mark only
+ * shows up in rcow_get_lvstores, and the caller (today
+ * test/tools/s3lvol_rpc.py --retry-pending) reissues rcow_delete_lvol once the
+ * blocker (export pin, clones, decouple) clears. The list lives in memory only
+ * and is gone on restart.
+ *
+ * Keyed by (lvstore uuid, lvol uuid) rather than by name: a name is unique only
+ * inside one loaded lvstore and is reusable, so a name-keyed mark can end up
+ * pointing at an object the delete was never refused for. \c name is carried
+ * for log lines only.
+ */
+void s3lvol_snapshot_pending_set(const struct spdk_uuid *lvs_uuid,
+				 const struct spdk_uuid *lvol_uuid,
+				 const char *snapshot_name);
+bool s3lvol_snapshot_pending_test(const struct spdk_uuid *lvs_uuid,
+				  const struct spdk_uuid *lvol_uuid);
+void s3lvol_snapshot_pending_clear(const struct spdk_uuid *lvs_uuid,
+				   const struct spdk_uuid *lvol_uuid);
+
+/**
+ * Drop every pending-delete mark belonging to one lvstore.
+ *
+ * Called from the unload / destroy / free paths. Past a teardown the marks name
+ * lvols that no longer exist, and an lvstore attached again can give the same
+ * names to different objects -- a mark that outlives its lvstore is how
+ * --retry-pending could delete something nobody asked it to.
+ */
+void s3lvol_snapshot_pending_clear_lvs(const struct spdk_uuid *lvs_uuid);
 
 /**
  * Whether an export that has not published its manifest yet names this snapshot.
