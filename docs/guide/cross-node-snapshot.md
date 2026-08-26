@@ -13,11 +13,11 @@ For SDK snapshot / rollback / clone APIs see [Snapshot, Rollback & Clone](./snap
 
 ---
 
-## Conditions for cross-node restore
+## 1. Conditions for cross-node restore
 
 Resume / FromSnap landing on a node other than the origin is **not** the default. All of the following must hold.
 
-### S3 backend, chosen when you build the template
+### 1.1 S3 backend, chosen when you build the template
 
 The sandbox must already be running on the S3 backend. You **cannot switch backends later**. Declare it when you **create the template**; that choice is inherited and locked for every derived object (pause packages, snapshots, and sandboxes created from those snapshots).
 
@@ -39,9 +39,9 @@ cubemastercli tpl create-from-image \
   --probe-path /health
 ```
 
-Confirm `BACKEND` is `s3` with `cubemastercli cubebox template list`. Sandboxes and snapshots created from that template inherit `s3` (see [CLI fields](#cli-fields-for-cross-node-restore)).
+Confirm `BACKEND` is `s3` with `cubemastercli cubebox template list`. Sandboxes and snapshots created from that template inherit `s3` (see [CLI fields](#3-cli-fields-for-cross-node-restore)).
 
-### Origin first; cross-node only when the origin cannot schedule
+### 1.2 Origin first; cross-node only when the origin cannot schedule
 
 The scheduler (`restoreplace`) **always prefers the origin node**. It leaves that node only when the origin cannot take the job **and** the snapshot is allowed to restore cross-node:
 
@@ -69,7 +69,7 @@ In short: if the origin is up and schedulable, restore stays there. If it is gon
 
 An [isolated](./node-isolation.md) origin is unschedulable, which is the usual way to force a cross-node Resume in tests. A sandbox with a **host-mount** is pinned to the origin (`PinToOrigin`) and will not cross even when `remote_status=ready`.
 
-### The snapshot must be remotely `ready`
+### 1.3 The snapshot must be remotely `ready`
 
 Master enforces this from DB state (not from client input):
 
@@ -83,7 +83,7 @@ Master enforces this from DB state (not from client input):
 
 `xfs` leaves `remote_status` empty, so `CanCrossNode` is always false — **xfs snapshots restore only on the origin**.
 
-### Target kernel / CPU must match the origin
+### 1.4 Target kernel / CPU must match the origin
 
 The target node's kernel and CPU identity must match the origin. Memory state (including CPU registers and feature bits) cannot restore correctly otherwise.
 
@@ -102,7 +102,7 @@ Inspect `HostFacts` with `cubeopscli node list --json`:
 
 > Because most display fields are not equality-checked automatically, still compare the full `HostFacts` objects of origin and target with `cubeopscli node list --json` before relying on cross-node restore.
 
-#### How `cpuid_hash` is computed
+#### 1.4.1 How `cpuid_hash` is computed
 
 Cubelet reads `/proc/cpuinfo` on the node and hashes CPU identity plus the feature set with a deterministic SHA-256 digest (prefix `sha256:`). Two hosts hash equal only when identity and features are identical. Inputs:
 
@@ -113,18 +113,18 @@ Cubelet reads `/proc/cpuinfo` on the node and hashes CPU identity plus the featu
 
 ---
 
-## Configuring the S3 backend
+## 2. Configuring the S3 backend
 
 Cube install ships MinIO as the default S3 service so you can try the feature out of the box.
 To point at your own S3 store, follow the [CubeS3lvol README](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md).
 
 ---
 
-## CLI fields for cross-node restore
+## 3. CLI fields for cross-node restore
 
 `cubemastercli` adds `backend` / `remote_status` / `origin_node` columns, and `--backend` on template create. Node list and isolate live on `cubeopscli` (CubeOps, default port `3010`); see [Node Isolation](./node-isolation.md) and [CLI Tools](./cli-tools.md).
 
-### `cubebox list`
+### 3.1 `cubebox list`
 
 Two extra columns show whether a sandbox uses S3 and whether its pause package has synced:
 
@@ -139,7 +139,7 @@ cubemastercli cubebox list --all
 
 Non-paused rows sort by create time descending; paused rows come last and include `pause_snap`. After a successful Resume those columns return to `-`.
 
-### `cubebox snapshot list` / `snapshot info`
+### 3.2 `cubebox snapshot list` / `snapshot info`
 
 | Field | Meaning |
 |-------|---------|
@@ -153,7 +153,7 @@ cubemastercli cubebox snapshot list
 cubemastercli cubebox snapshot info --snapshot-id <snapshot-id>
 ```
 
-### `cubebox template list` / `template info`
+### 3.3 `cubebox template list` / `template info`
 
 The template list adds a `BACKEND` column; `template info` prints `backend: <xfs|s3>`. That value is the default CoW backend for sandboxes and snapshots created from the template.
 
@@ -162,7 +162,7 @@ cubemastercli cubebox template list
 cubemastercli cubebox template info <template-id>
 ```
 
-### `tpl create-from-image --backend xfs|s3`
+### 3.4 `tpl create-from-image --backend xfs|s3`
 
 ```bash
 # Declare the backend at template create; omit to keep historical xfs
@@ -174,7 +174,7 @@ cubemastercli tpl create-from-image \
 
 > The backend is fixed at **template / sandbox create**. Snapshot create does **not** take a backend flag; it always uses the persisted backend.
 
-### `cubeopscli node list`
+### 3.5 `cubeopscli node list`
 
 The default table shows health and isolation. HostFacts are in JSON:
 
@@ -183,17 +183,17 @@ cubeopscli --address 127.0.0.1 --port 3010 node list
 cubeopscli --address 127.0.0.1 --port 3010 node list --json
 ```
 
-`HostFacts` keys are described in [Target kernel / CPU must match the origin](#target-kernel--cpu-must-match-the-origin). Before a cross-node restore, confirm `cpuid_hash` and `host_kernel_release` match, and review the rest of HostFacts.
+`HostFacts` keys are described in [1.4 Target kernel / CPU must match the origin](#14-target-kernel--cpu-must-match-the-origin). Before a cross-node restore, confirm `cpuid_hash` and `host_kernel_release` match, and review the rest of HostFacts.
 
 ---
 
-## Benchmarks
+## 4. Benchmarks
 
 Times are **milliseconds**. **avg** / **p95** are **per-sandbox** create latency (when that sandbox became `running`), not batch wall time divided by concurrency.
 
 Figures below were measured on 2026-08-25. Numbers depend on hardware, image, and dirty-page load; treat them as a same-cluster xfs vs s3 comparison, not a SLA.
 
-### Environment
+### 4.1 Environment
 
 Two identical Tencent Cloud CVM nodes (nested KVM), one control+compute and one compute-only.
 
@@ -205,7 +205,7 @@ Two identical Tencent Cloud CVM nodes (nested KVM), one control+compute and one 
 | Memory | 30 GiB |
 | Data disk | ~1 TB virtio, XFS on `/data` |
 
-### Template
+### 4.2 Template
 
 Both backends use the **same** image and sandbox spec. Each template has a replica on **one** compute node (the origin). Local runs isolate the peer so jobs stay on the origin; cross-node FromSnap isolates the origin.
 
@@ -217,7 +217,7 @@ Both backends use the **same** image and sandbox spec. Each template has a repli
 | Probe | port `49983`, path `/health` |
 | Backends | `xfs` and `s3`, created with `tpl create-from-image --backend …` |
 
-### Method
+### 4.3 Method
 
 Keep this method if you re-measure. Do not change table columns or round semantics.
 
@@ -228,7 +228,7 @@ Keep this method if you re-measure. Do not change table columns or round semanti
 5. **Create from snapshot (S3 local):** isolate the peer; origin still has the replica. **S3 cross-node:** wait until the snapshot is `ready`, isolate the origin, create on the peer.
 6. XFS has no share step and cannot restore cross-node.
 
-### Cold start
+### 4.4 Cold start
 
 Create from the **template** (`Sandbox.create(template=tpl-…)`).
 
@@ -237,7 +237,7 @@ Create from the **template** (`Sandbox.create(template=tpl-…)`).
 | 1           | 50.9    | 57.2    | 430.6  | 471.4  |
 | 5           | 59.5    | 81.2    | 747.4  | 885.8  |
 
-### Snapshot / Pause / Resume
+### 4.5 Snapshot / Pause / Resume
 
 | Operation | xfs avg | xfs p95 | s3 local avg | s3 local p95 | s3 cross-node avg | s3 cross-node p95 |
 |-----------|---------|---------|--------------|--------------|-------------------|-------------------|
@@ -248,7 +248,7 @@ Create from the **template** (`Sandbox.create(template=tpl-…)`).
 
 ---
 
-## Known limitations
+## 5. Known limitations
 
 1. **S3lvol deletes snapshot objects asynchronously.** After you delete an S3 snapshot, CubeS3lvol finishes removing the objects in the background. The delete RPC returning does not mean the objects are gone from S3 immediately.
 
@@ -256,7 +256,7 @@ Create from the **template** (`Sandbox.create(template=tpl-…)`).
 
 ---
 
-## See also
+## 6. See also
 
 - [Snapshot, Rollback & Clone](./snapshot-rollback-clone.md)
 - [Sandbox Lifecycle](./lifecycle.md)

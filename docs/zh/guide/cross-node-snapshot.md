@@ -18,11 +18,11 @@ SDK 侧的快照、回滚、克隆用法见 [快照、回滚与克隆](./snapsho
 
 ---
 
-## 跨机的条件
+## 1. 跨机的条件
 
 跨机恢复（Resume / FromSnap 落到非源节点）不是默认行为，必须同时满足以下条件。
 
-### 必须基于 S3 后端（制作模板时指定）
+### 1.1 必须基于 S3 后端（制作模板时指定）
 
 跨机操作的前提是**沙箱本身运行在 S3 后端之上**。目前 S3 后端**不可在事后切换**，
 必须在「制作模板」阶段就显式声明；一旦确定，该模板及其后续所有派生产物
@@ -50,9 +50,9 @@ cubemastercli tpl create-from-image \
 ```
 
 创建后可用 `cubemastercli cubebox template list` 确认 `BACKEND` 列显示为 `s3`，其下新建的沙箱与
-快照也会自动继承 `s3`（见 [CLI 字段](#cubemastercli-跨机相关的子命令与新显示字段)）。
+快照也会自动继承 `s3`（见 [CLI 字段](#3-cubemastercli-跨机相关的子命令与新显示字段)）。
 
-### 本机优先调度，本机无法调度才跨机
+### 1.2 本机优先调度，本机无法调度才跨机
 
 调度器（`restoreplace`）**优先把恢复任务放回源节点**。只有源节点无法被调度时，
 才会在条件满足的前提下跨机：
@@ -83,7 +83,7 @@ cubemastercli tpl create-from-image \
 源节点被 [隔离](./node-isolation.md) 时视为不可调度，因此隔离是验证跨机 Resume 的常用手段。
 带 **host-mount** 的沙箱会钉在源节点（`PinToOrigin`），即使 `remote_status=ready` 也不会跨机。
 
-### 快照必须在云端「就绪」
+### 1.3 快照必须在云端「就绪」
 
 跨机的硬性门槛由 Master 依据 DB 持久化状态强制（非客户端输入）：
 
@@ -101,7 +101,7 @@ cubemastercli tpl create-from-image \
 
 `xfs` 后端的 `remote_status` 始终为空，因此 `CanCrossNode` 对其恒为 `false`——**xfs 快照只能本机恢复**。
 
-### 跨机目标必须与源机 kernel / CPU 信息一致
+### 1.4 跨机目标必须与源机 kernel / CPU 信息一致
 
 跨机恢复的目标节点，其 **kernel 与 CPU 信息必须与源节点一致**，否则内存态（含 CPU 寄存器 /
 特性位）无法正确还原，恢复会失败或不稳定。
@@ -125,7 +125,7 @@ cubemastercli tpl create-from-image \
 > 因为多数展示字段当前未自动做相等校验，跨机前仍建议用 `cubeopscli node list --json`
 > **人工比对全部 HostFacts**，确认目标节点与源节点一致。
 
-#### `cpuid_hash` 是如何计算的
+#### 1.4.1 `cpuid_hash` 是如何计算的
 
 `cpuid_hash` 由 Cubelet 读取节点的 `/proc/cpuinfo`，
 将 CPU 身份与特性集经确定性 SHA-256 摘要得到（前缀 `sha256:`），
@@ -139,21 +139,21 @@ cubemastercli tpl create-from-image \
 
 ---
 
-## 如何配置后端 S3 服务
+## 2. 如何配置后端 S3 服务
 
 Cube 安装时默认安装 MinIO 作为 S3 服务，方便开箱体验。
 若要接入自己的 S3，按 [CubeS3lvol 文档](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md) 配置即可。
 
 ---
 
-## cubemastercli 跨机相关的子命令与新显示字段
+## 3. cubemastercli 跨机相关的子命令与新显示字段
 
 为支持跨机能力，`cubemastercli` 在多个子命令中新增了 `backend` / `remote_status` /
 `origin_node` 等显示列，并在模板创建时提供 `--backend` 标志。下面按子命令说明。
 
 节点列表与隔离已迁到 `cubeopscli`（CubeOps，默认端口 `3010`），见 [隔离节点](./node-isolation.md) 与 [命令行工具](./cli-tools.md)。
 
-### `cubebox list`（沙箱列表）
+### 3.1 `cubebox list`（沙箱列表）
 
 沙箱列表新增两列，用于一眼看出某个沙箱是否走 S3、以及其暂停包在云端的同步状态：
 
@@ -168,7 +168,7 @@ cubemastercli cubebox list --all
 
 非 paused 行按创建时间倒序；paused 行排在最后，并带 `pause_snap`。Resume 成功后这两列恢复为 `-`。
 
-### `cubebox snapshot list` / `snapshot info`（快照）
+### 3.2 `cubebox snapshot list` / `snapshot info`（快照）
 
 快照资源中的跨机相关字段：
 
@@ -184,7 +184,7 @@ cubemastercli cubebox snapshot list
 cubemastercli cubebox snapshot info --snapshot-id <snapshot-id>
 ```
 
-### `cubebox template list` / `template info`（模板）
+### 3.3 `cubebox template list` / `template info`（模板）
 
 模板列表新增 `BACKEND` 列；`template info` 会打印 `backend: <xfs|s3>`。
 模板的 `backend` 决定其下沙箱与快照默认使用的 CoW 后端。
@@ -194,7 +194,7 @@ cubemastercli cubebox template list
 cubemastercli cubebox template info <template-id>
 ```
 
-### `tpl create-from-image --backend xfs|s3`
+### 3.4 `tpl create-from-image --backend xfs|s3`
 
 ```bash
 # 创建模板时声明后端；省略则沿用历史 xfs 路径
@@ -207,7 +207,7 @@ cubemastercli tpl create-from-image \
 > 后端在**模板 / 沙箱创建**时确定；快照创建命令本身**不接受** backend 选择，
 > 永远使用沙箱 / 模板已持久化的后端。
 
-### `cubeopscli node list`（校验跨机兼容性）
+### 3.5 `cubeopscli node list`（校验跨机兼容性）
 
 默认表格显示节点健康与隔离状态。HostFacts 在 JSON 里：
 
@@ -216,18 +216,18 @@ cubeopscli --address 127.0.0.1 --port 3010 node list
 cubeopscli --address 127.0.0.1 --port 3010 node list --json
 ```
 
-`--json` 中每个节点的 `HostFacts` 字段含义见 [跨机目标必须与源机 kernel / CPU 信息一致](#跨机目标必须与源机-kernel--cpu-信息一致)。
+`--json` 中每个节点的 `HostFacts` 字段含义见 [1.4 跨机目标必须与源机 kernel / CPU 信息一致](#14-跨机目标必须与源机-kernel--cpu-信息一致)。
 跨机前请确认目标节点与源节点的 `cpuid_hash` / `host_kernel_release` 一致，并核对其余 HostFacts。
 
 ---
 
-## 基准性能测试
+## 4. 基准性能测试
 
 单位 **ms**。表中 **avg** / **p95** 是**单实例**从发起到进入 `running` 的耗时，不是整批 wall 再除以并发。
 
 下列数字测于 2026-08-25。结果随硬件、镜像和脏页负载变化，只适合作为同集群上 xfs 与 s3 的对照，不是 SLA。
 
-### 测试环境
+### 4.1 测试环境
 
 两台同规格腾讯云 CVM（嵌套 KVM）：一台控制面+计算，一台仅计算。
 
@@ -239,7 +239,7 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
 | 内存 | 30 GiB |
 | 数据盘 | 约 1 TB virtio，`/data` 为 XFS |
 
-### 模版
+### 4.2 模版
 
 两个后端用**同一镜像、同一规格**。每份模版只在**一台**计算节点有副本（源节点）。同机用例隔离对端，让任务落在源节点；跨机 FromSnap 隔离源节点。
 
@@ -251,7 +251,7 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
 | Probe | 端口 `49983`，路径 `/health` |
 | 后端 | `xfs` 与 `s3`，`tpl create-from-image --backend …` |
 
-### 测试方法
+### 4.3 测试方法
 
 复测时沿用此方法，不要改表格列或「一轮」语义。
 
@@ -262,7 +262,7 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
 5. **从快照创建（S3 本地）：** 隔离对端，源节点仍有副本。**S3 跨机：** 等快照 `ready` 后隔离源节点，在对端创建。
 6. XFS 没有共享步骤，也不能跨机恢复。
 
-### 冷启动（Cold Start）
+### 4.4 冷启动（Cold Start）
 
 从**模版**创建（`Sandbox.create(template=tpl-…)`）。
 
@@ -271,7 +271,7 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
 | 1    | 50.9    | 57.2    | 430.6  | 471.4  |
 | 5    | 59.5    | 81.2    | 747.4  | 885.8  |
 
-### 快照 / 暂停 / 恢复（Snapshot / Pause / Resume）
+### 4.5 快照 / 暂停 / 恢复（Snapshot / Pause / Resume）
 
 | 操作 | xfs avg | xfs p95 | s3 本地 avg | s3 本地 p95 | s3 跨机 avg | s3 跨机 p95 |
 |------|---------|---------|-------------|-------------|-------------|-------------|
@@ -282,7 +282,7 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
 
 ---
 
-## 已知问题
+## 5. 已知问题
 
 1. **S3 快照对象由 S3lvol 异步删除。** 删除 S3 快照后，CubeS3lvol 在后台回收对象。删除接口返回时，对象不一定已经从 S3 上消失。
 
@@ -293,7 +293,7 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
 
 ---
 
-## 参考
+## 6. 参考
 
 - [快照、回滚与克隆](./snapshot-rollback-clone.md)
 - [沙箱生命周期](./lifecycle.md)
