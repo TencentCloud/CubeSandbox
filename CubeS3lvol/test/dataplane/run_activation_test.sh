@@ -18,7 +18,7 @@ set -u
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SELF_DIR}/../.." && pwd)"
-SPDK_ROOT="${SPDK_ROOT:-$(cd "${ROOT}/../spdk" && pwd)}"
+SPDK_ROOT="${SPDK_ROOT:-${ROOT}/deps/spdk}"
 
 RPC="${ROOT}/test/tools/s3lvol_rpc.py"
 SPDK_RPC_PY="${SPDK_ROOT}/scripts/rpc.py"

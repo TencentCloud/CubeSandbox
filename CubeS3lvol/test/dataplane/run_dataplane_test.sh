@@ -64,7 +64,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TOOLS_DIR="${REPO_ROOT}/test/tools"
-SPDK_ROOT="${SPDK_ROOT:-/data/home/cow/spdk}"
+SPDK_ROOT="${SPDK_ROOT:-${REPO_ROOT}/deps/spdk}"
 
 TGT_BIN="${REPO_ROOT}/app/s3lvol_tgt/s3lvol_tgt"
 RPC_PY="${SPDK_ROOT}/scripts/rpc.py"
