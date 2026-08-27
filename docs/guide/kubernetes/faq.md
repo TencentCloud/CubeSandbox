@@ -440,7 +440,7 @@ Whether PVC/PV are deleted depends on the StorageClass `reclaimPolicy` (TKE’s 
 
 ```bash
 ONE_CLICK_ARCH=arm64 \
-PUSH=1 REGISTRY=<your-registry> IMAGE_TAG=v0.7.0-rc1 \
+PUSH=1 REGISTRY=<your-registry> IMAGE_TAG=v0.7.0-rc2 \
 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
