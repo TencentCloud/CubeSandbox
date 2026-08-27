@@ -7,67 +7,34 @@ Run the [Pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-codin
 edits files, runs commands, and reaches an LLM API entirely within an isolated,
 reproducible sandbox.
 
-This example ships:
-
-- A `Dockerfile` that stacks Node.js + the Pi CLI on top of the CubeSandbox base
-  image (envd already listens on `:49983`).
-- `run_pi_agent.py` — a headless one-shot run inside `/workspace`.
-- `resume_pi_agent.py` — pause/resume across two turns, proving `/workspace` and
-  Pi's state directory survive the snapshot.
-- `network_policy.py` — a default-deny egress policy where CubeEgress injects the
-  API key on the wire, so the key never enters the VM.
-- `env_utils.py`, `.env.example`, `requirements.txt`.
-
-## Directory layout
-
-```
-pi-agent-integration/
-├── Dockerfile            # CubeSandbox template image (Node.js + Pi CLI)
-├── .env.example          # Copy to .env and fill in
-├── .gitignore
-├── requirements.txt      # Host driver deps (e2b, cubesandbox, python-dotenv)
-├── env_utils.py          # .env loading, provider keys, Pi command builder
-├── _pi_common.py         # Shared sandbox command helpers (run/ensure/id)
-├── run_pi_agent.py       # One-shot Pi task
-├── resume_pi_agent.py    # Pause / resume session persistence
-├── network_policy.py     # Default-deny egress + on-the-wire key injection
-├── README.md             # English docs (this file)
-└── README_zh.md          # Chinese docs
-```
-
 ## Prerequisites
 
 - A running CubeSandbox deployment; CubeAPI reachable at `http://<node>:3000`.
 - `cubemastercli` on `$PATH`, connected to the cluster.
 - Docker on the build workstation, plus a registry the Cube nodes can pull from.
-- An LLM provider API key (Anthropic by default; any Anthropic-compatible or
-  OpenAI-compatible endpoint works).
+- An LLM provider API key (DeepSeek by default; Anthropic, OpenAI, and other
+  providers are also supported).
 - Python 3.10+ for the host driver scripts.
 
-## 1. Build the template image
+## 1. Build the base template image
 
 ```bash
 docker build --platform linux/amd64 \
-  -t <your-registry>/pi-agent-cube:latest \
+  -t localhost:5000/pi-agent-cube:latest \
   examples/pi-agent-integration
-docker push <your-registry>/pi-agent-cube:latest
+docker push localhost:5000/pi-agent-cube:latest
 ```
-
-The image installs `@earendil-works/pi-coding-agent`, plus `git`, `python3`,
-`ripgrep`, `jq`, and cleans apt/npm caches. The Pi version is pinned via
-`--build-arg PI_VERSION=x.y.z`.
 
 ## 2. Register as a Cube template
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image <your-registry>/pi-agent-cube:latest \
+  --image localhost:5000/pi-agent-cube:latest \
+  --alias pi-agent \
   --writable-layer-size 4G \
   --expose-port 49983 \
   --probe       49983 \
   --probe-path  /health
-
-cubemastercli tpl watch --job-id <job_id>
 ```
 
 Note the `template_id` once the job reaches `READY`.
@@ -86,10 +53,9 @@ pip install -r requirements.txt
 | `E2B_API_URL` | Local process | CubeAPI address (`http://<node>:3000`) |
 | `E2B_API_KEY` | Local process | Any non-empty string in local dev |
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | From step 2 |
-| `PI_PROVIDER` | Pi CLI | `anthropic` (default), `openai`, `deepseek`, ... |
+| `CUBE_WARMUP_TEMPLATE_ID` | `run_pi_warmup.py` | From the warmup template job below |
+| `PI_PROVIDER` | Pi CLI | `deepseek` (default), `anthropic`, `openai`, ... |
 | `PI_MODEL` | Pi CLI | Model id for the provider |
-| `ANTHROPIC_API_KEY` | `envs=...` (direct) or CubeEgress inject (vault) | Provider key |
-| `PI_LLM_HOST` | `network_policy.py` | LLM API host to allow; keep aligned with the provider |
 
 ## 4. One-shot run (direct key flavor)
 
@@ -122,7 +88,51 @@ runs turn 2 to continue the work. The sandbox lifecycle is managed manually with
 `try/finally` (not a context manager), so the pause is not undone by an early
 `kill`.
 
-## 6. Restricted egress + key vault (recommended for shared clusters)
+## 6. Build a pre-warmed Pi SDK snapshot
+
+The one-shot example starts a new `pi` process for every task. The warmup
+variant instead starts a resident Node adapter as the image command. It creates
+one persistent Pi SDK `AgentSession` during boot and only then makes
+`GET /readyz` return HTTP 200. Cube waits for that probe before taking the
+template snapshot, so restored sandboxes already contain the initialized Node
+process and session.
+
+```bash
+docker build --platform linux/amd64 \
+  -f Dockerfile.warmup \
+  --build-arg PI_AGENT_IMAGE=localhost:5000/pi-agent-cube:latest \
+  -t localhost:5000/pi-agent-warmup-cube:latest .
+docker push localhost:5000/pi-agent-warmup-cube:latest
+```
+
+Create the warmup template using the adapter probe (port `8080` is the default
+and can be changed with `PI_WARMUP_PORT`):
+
+```bash
+cubemastercli tpl create-from-image \
+  --image localhost:5000/pi-agent-warmup-cube:latest \
+  --alias pi-warmup \
+  --writable-layer-size 4G \
+  --expose-port 49983 \
+  --expose-port 8080 \
+  --probe       8080 \
+  --probe-path  /readyz
+```
+
+Put the resulting template ID in `CUBE_WARMUP_TEMPLATE_ID`, then send a task to
+the restored session:
+
+```bash
+python run_pi_warmup.py \
+  --prompt "Create hello.py that prints 'Hello from pre-warmed Pi' and run it."
+```
+
+The driver sends the provider key with the `/prompt` request. The adapter keeps
+it in Pi's in-memory auth storage and does not write it into the session or the
+template snapshot. The adapter deliberately serializes prompts for its single
+session; a concurrent request receives HTTP 409.
+
+## 7. Restricted egress + key vault (recommended for shared clusters)
 
 ```bash
 python network_policy.py
@@ -151,6 +161,8 @@ allow rules or preinstall those dependencies into the template.
 | `403 Forbidden - CubeEgress` | Default-deny with no matching allow rule | Add the LLM host (and any extra hosts) to the rules |
 | `Connection error` / TLS failure from Pi on the vault path | Pi runs on Node, which ignores the system CA store and won't trust the CubeEgress interception CA | The script sets `NODE_EXTRA_CA_CERTS` to the system bundle; override with `PI_NODE_EXTRA_CA_CERTS` if your CA lives elsewhere |
 | Readiness probe timeout | Image without envd | Ensure `FROM ghcr.io/tencentcloud/cubesandbox-base:...` |
+| Warmup `/readyz` never succeeds | `PI_PROVIDER` / `PI_MODEL` does not identify a model bundled with the pinned Pi version | Check the adapter logs and use a supported provider/model pair |
+| Warmup task returns HTTP 409 | The resident session is already processing a task | Wait for the current task to finish; one adapter owns one session |
 | `pause()`/`connect()` errors | Platform too old for snapshots | Upgrade the CubeSandbox platform |
 
 ## References

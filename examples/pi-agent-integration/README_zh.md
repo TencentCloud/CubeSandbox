@@ -5,62 +5,33 @@
 在 CubeSandbox MicroVM 内运行 [Pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 （面向终端的 AI 编码 Agent）。Agent 在一个隔离、可复现的沙箱内编辑文件、执行命令并访问 LLM API。
 
-本示例包含：
-
-- 一个 `Dockerfile`：在 CubeSandbox 基础镜像上叠加 Node.js 与 Pi CLI（envd 已监听 `:49983`）。
-- `run_pi_agent.py`：在 `/workspace` 内的一次性无交互运行。
-- `resume_pi_agent.py`：跨两轮的 pause/resume，证明 `/workspace` 与 Pi 状态目录在快照后仍存在。
-- `network_policy.py`：默认拒绝出网的策略，由 CubeEgress 在链路上注入 API Key，密钥不进入 VM。
-- `env_utils.py`、`.env.example`、`requirements.txt`。
-
-## 目录结构
-
-```
-pi-agent-integration/
-├── Dockerfile            # CubeSandbox 模板镜像（Node.js + Pi CLI）
-├── .env.example          # 复制为 .env 并填写
-├── .gitignore
-├── requirements.txt      # 宿主端驱动依赖（e2b、cubesandbox、python-dotenv）
-├── env_utils.py          # .env 加载、provider key、Pi 命令构造
-├── _pi_common.py         # 共享的沙箱命令辅助（run/ensure/id）
-├── run_pi_agent.py       # 一次性 Pi 任务
-├── resume_pi_agent.py    # pause / resume 会话持久化
-├── network_policy.py     # 默认拒绝出网 + 链路上注入密钥
-├── README.md             # 英文文档
-└── README_zh.md          # 中文文档（本文件）
-```
-
 ## 前置条件
 
 - 已部署 CubeSandbox，CubeAPI 可访问（`http://<node>:3000`）。
 - `cubemastercli` 已在 `$PATH` 且已连通集群。
 - 构建机装有 Docker，且 registry 能被 Cube 集群拉取。
-- 一个 LLM provider 的 API Key（默认 Anthropic；任何 Anthropic 兼容或 OpenAI 兼容端点均可）。
+- 一个 LLM provider 的 API Key（默认 DeepSeek；也支持 Anthropic、OpenAI 等 provider）。
 - Python 3.10+（宿主端驱动脚本）。
 
-## 1. 构建模板镜像
+## 1. 构建基础模板镜像
 
 ```bash
 docker build --platform linux/amd64 \
-  -t <your-registry>/pi-agent-cube:latest \
+  -t localhost:5000/pi-agent-cube:latest \
   examples/pi-agent-integration
-docker push <your-registry>/pi-agent-cube:latest
+docker push localhost:5000/pi-agent-cube:latest
 ```
-
-镜像会安装 `@earendil-works/pi-coding-agent`，以及 `git`、`python3`、`ripgrep`、`jq`，并清理
-apt/npm 缓存。Pi 版本通过 `--build-arg PI_VERSION=x.y.z` 固定。
 
 ## 2. 注册为 Cube 模板
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image <your-registry>/pi-agent-cube:latest \
+  --image localhost:5000/pi-agent-cube:latest \
+  --alias pi-agent \
   --writable-layer-size 4G \
   --expose-port 49983 \
   --probe       49983 \
   --probe-path  /health
-
-cubemastercli tpl watch --job-id <job_id>
 ```
 
 任务变为 `READY` 后记下 `template_id`。
@@ -79,10 +50,9 @@ pip install -r requirements.txt
 | `E2B_API_URL` | 本地进程 | CubeAPI 地址（`http://<node>:3000`） |
 | `E2B_API_KEY` | 本地进程 | 本地开发填任意非空字符串 |
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | 来自第 2 步 |
-| `PI_PROVIDER` | Pi CLI | `anthropic`（默认）、`openai`、`deepseek` 等 |
+| `CUBE_WARMUP_TEMPLATE_ID` | `run_pi_warmup.py` | 来自下文 warmup 模板任务 |
+| `PI_PROVIDER` | Pi CLI | `deepseek`（默认）、`anthropic`、`openai` 等 |
 | `PI_MODEL` | Pi CLI | 对应 provider 的模型 id |
-| `ANTHROPIC_API_KEY` | `envs=...`（直连）或 CubeEgress 注入（vault） | provider 密钥 |
-| `PI_LLM_HOST` | `network_policy.py` | 放行的 LLM API host，需与 provider 对齐 |
 
 ## 4. 一次性运行（直连注入密钥）
 
@@ -107,7 +77,47 @@ python resume_pi_agent.py
 （`/root/.pi/agent`）仍在，再执行第二轮续写。沙箱生命周期用 `try/finally` 手动管理（不用
 context manager），避免 pause 后被过早 `kill` 掉。
 
-## 6. 受限出网 + 密钥保险柜（推荐用于共享集群）
+## 6. 制作 Pi SDK warmup 快照
+
+一次性方案会为每个任务启动新的 `pi` 进程。warmup 方案把常驻 Node adapter 作为镜像命令，
+启动时创建一个持久化的 Pi SDK `AgentSession`，初始化完成后 `GET /readyz` 才返回 HTTP 200。
+Cube 会等待该探针成功后制作模板快照，因此从模板恢复的沙箱中已经包含初始化好的 Node 进程和
+session。
+
+```bash
+docker build --platform linux/amd64 \
+  -f Dockerfile.warmup \
+  --build-arg PI_AGENT_IMAGE=localhost:5000/pi-agent-cube:latest \
+  -t localhost:5000/pi-agent-warmup-cube:latest .
+
+docker push localhost:5000/pi-agent-warmup-cube:latest
+```
+
+使用 adapter 的探针制作 warmup 模板（默认端口为 `8080`，可通过 `PI_WARMUP_PORT` 修改）：
+
+```bash
+cubemastercli tpl create-from-image \
+  --image localhost:5000/pi-agent-warmup-cube:latest \
+  --alias pi-warmup \
+  --writable-layer-size 4G \
+  --expose-port 49983 \
+  --expose-port 8080 \
+  --probe       8080 \
+  --probe-path  /readyz
+```
+
+将任务生成的模板 ID 写入 `CUBE_WARMUP_TEMPLATE_ID`，然后向恢复出的 session 发送任务：
+
+```bash
+python run_pi_warmup.py \
+  --prompt "创建 hello.py，打印 'Hello from pre-warmed Pi' 并运行它。"
+```
+
+驱动脚本通过 `/prompt` 请求传递 provider key。adapter 只把它放在 Pi 的内存鉴权存储中，
+不会写入 session 或模板快照。单个 adapter 只维护一个 session，因此任务会串行执行；并发请求会
+收到 HTTP 409。
+
+## 7. 受限出网 + 密钥保险柜（推荐用于共享集群）
 
 ```bash
 python network_policy.py
@@ -132,6 +142,8 @@ python network_policy.py
 | `403 Forbidden - CubeEgress` | 默认拒绝且无匹配放行规则 | 把 LLM host（及所需其他 host）加入规则 |
 | vault 路径下 Pi 报 `Connection error` / TLS 失败 | Pi 基于 Node，忽略系统 CA 库，不信任 CubeEgress 拦截 CA | 脚本已把 `NODE_EXTRA_CA_CERTS` 指向系统 CA 包；若 CA 在别处，用 `PI_NODE_EXTRA_CA_CERTS` 覆盖 |
 | 就绪探针超时 | 镜像缺少 envd | 确认 `FROM ghcr.io/tencentcloud/cubesandbox-base:...` |
+| warmup `/readyz` 一直不成功 | `PI_PROVIDER` / `PI_MODEL` 不是当前固定 Pi 版本内置的模型 | 查看 adapter 日志，改用支持的 provider/model 组合 |
+| warmup 任务返回 HTTP 409 | 常驻 session 正在处理其他任务 | 等当前任务完成；一个 adapter 只维护一个 session |
 | `pause()`/`connect()` 报错 | 平台版本过低不支持快照 | 升级 CubeSandbox 平台 |
 
 ## 参考

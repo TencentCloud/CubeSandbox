@@ -158,10 +158,6 @@ def main() -> int:
         sandbox_id = sandbox_identifier(sandbox)
         print(f"Sandbox ready: {sandbox_id}")
 
-        version_result = run_command(sandbox, "pi --version", timeout=60)
-        ensure_success(version_result, "check Pi version")
-        print(f"Pi version: {getattr(version_result, 'stdout', '').strip()}")
-
         if not args.no_seed:
             seed_project(sandbox, args.workspace, timeout=60)
             print(f"Seeded demo project in {args.workspace}")

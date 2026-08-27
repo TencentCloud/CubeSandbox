@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1.7
+#
+# Warm Pi SDK variant. Build Dockerfile first, then use that image as the base:
+#
+#   docker build -t pi-agent-cube:latest .
+#   docker build -f Dockerfile.warmup \
+#     --build-arg PI_AGENT_IMAGE=pi-agent-cube:latest \
+#     -t pi-agent-warmup-cube:latest .
+
+ARG PI_AGENT_IMAGE=pi-agent-cube:latest
+FROM ${PI_AGENT_IMAGE}
+
+# Keep the adapter next to Pi's dist/ directory. This lets its relative import
+# resolve the globally installed package without installing a second copy.
+COPY pi_warmup_adapter.mjs /tmp/pi_warmup_adapter.mjs
+RUN PI_PACKAGE_DIR="$(npm root -g)/@earendil-works/pi-coding-agent" \
+    && install -m 0755 /tmp/pi_warmup_adapter.mjs "${PI_PACKAGE_DIR}/pi_warmup_adapter.mjs" \
+    && rm /tmp/pi_warmup_adapter.mjs
+
+ENV PI_WARMUP_HOST=0.0.0.0 \
+    PI_WARMUP_PORT=8080 \
+    PI_WARMUP_MAX_BODY_BYTES=1048576
+
+EXPOSE 49983 8080
+
+# The inherited CubeSandbox entrypoint also keeps envd available on :49983.
+CMD ["sh", "-c", "exec node \"$(npm root -g)/@earendil-works/pi-coding-agent/pi_warmup_adapter.mjs\""]

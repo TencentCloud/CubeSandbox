@@ -34,11 +34,11 @@ PROVIDER_DEFAULT_HOST = {
     "openrouter": "openrouter.ai",
 }
 
-# Only Anthropic ships a default model; other providers must set PI_MODEL
-# explicitly (model IDs are provider-specific and change often), so we fail
-# loudly instead of sending a Claude model name to, say, OpenAI.
+# The example has explicit defaults for its primary providers. Other providers
+# must set PI_MODEL because model IDs are provider-specific.
 PROVIDER_DEFAULT_MODEL = {
     "anthropic": "claude-sonnet-4-6",
+    "deepseek": "deepseek-v4-pro",
 }
 
 PASSTHROUGH_ENV_NAMES = (
@@ -95,7 +95,7 @@ def pi_provider() -> str:
     # Normalize case so every downstream comparison and dict lookup
     # (provider_inject, PROVIDER_DEFAULT_HOST, key candidates, ...) is
     # case-insensitive; "Anthropic" and "anthropic" must behave the same.
-    return optional("PI_PROVIDER", "anthropic").strip().lower()
+    return optional("PI_PROVIDER", "deepseek").strip().lower()
 
 
 def pi_model() -> str:
