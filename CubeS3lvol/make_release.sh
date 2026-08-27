@@ -44,9 +44,10 @@
 #  Two properties, both established earlier and both worth restating because the
 #  package silently stops working if either is lost:
 #
-#  1. bin/s3lvol_tgt links SPDK and DPDK statically and carries no RPATH. It is
-#     checked below rather than assumed -- a single -L/-l reintroducing a shared
-#     librte_* would produce a package that runs perfectly on the build machine.
+#  1. bin/s3lvol_tgt links SPDK, DPDK and OpenSSL statically and carries no
+#     RPATH. It is checked below rather than assumed -- a single -L/-l
+#     reintroducing a shared librte_* or libssl.so.1.1 would produce a package
+#     that runs perfectly on the build machine.
 #  2. scripts/rcow_*.sh detect their layout instead of being rewritten here. The
 #     scripts that ship are byte-identical to the ones the test suite runs, which
 #     is the only way their behaviour in the package follows from anything that
@@ -214,6 +215,21 @@ verify_binary()
 		printf '%s\n' "${bad}" | sed 's/^/    /' >&2
 		err "these resolve out of the build machine's SPDK tree, so the package"
 		err "would not run anywhere else. See mk/s3lvol.common.mk (dpdk_link_args)."
+		return 1
+	fi
+
+	bad="$(ldd "${TGT_BIN}" 2>/dev/null | grep -E 'libssl\.so|libcrypto\.so' || true)"
+	if [ -z "${bad}" ]; then
+		bad="$(readelf -d "${TGT_BIN}" 2>/dev/null \
+			| grep -E 'NEEDED.*(libssl|libcrypto)\.so' || true)"
+	fi
+	if [ -n "${bad}" ]; then
+		err "the target still depends on shared OpenSSL:"
+		printf '%s\n' "${bad}" | sed 's/^/    /' >&2
+		err "libssl.so.1.1 is the Ubuntu 20.04 builder's SONAME; Ubuntu 22.04+"
+		err "and OpenSSL 3 distros do not provide it. Link the .a files"
+		err "(OPENSSL_STATIC_LIBS in mk/s3lvol.common.mk) and keep -lssl/-lcrypto"
+		err "out of SYS_LIBS (filter_ssl)."
 		return 1
 	fi
 

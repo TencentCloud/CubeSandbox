@@ -85,9 +85,6 @@ REAL_PC= $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" \
 REAL_SPDK_LIBS = $(call spdk_only_libs,$(REAL_PC))
 REAL_DPDK_ARGS = $(call dpdk_link_args,$(REAL_PC))
 
-REAL_SPDK_SYSLIBS = $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" \
-                   pkg-config --libs --static spdk_syslibs 2>/dev/null)
-
 # (c) blobstore: the Step 3 acceptance test needs spdk_blob, and since s3_bs_dev
 #     now calls into the WAL (which does bdev I/O) it needs spdk_bdev as well --
 #     even in the direct-to-S3 mode this test uses, where no WAL is attached.
@@ -97,7 +94,7 @@ BLOB_PC        = $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" \
 BLOB_SPDK_LIBS = $(call spdk_only_libs,$(BLOB_PC))
 BLOB_DPDK_ARGS = $(call dpdk_link_args,$(BLOB_PC))
 
-TEST_SYS_LIBS  = -pthread -lrt -luuid -lssl -lcrypto -lm -ldl
+TEST_SYS_LIBS  = $(OPENSSL_STATIC_LIBS) -pthread -lrt -luuid -lm -ldl
 
 .PHONY: all clean check
 
@@ -132,7 +129,7 @@ s3_thread_bounce_test: s3_thread_bounce_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	    $(AWS_LIBS) \
 	    -Wl,--start-group $(REAL_SPDK_LIBS) -Wl,--end-group \
 	    $(REAL_DPDK_ARGS) \
-	    $(REAL_SPDK_SYSLIBS) $(TEST_SYS_LIBS) -o $@
+	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
 
 # Step 3 acceptance: blobstore on S3. Needs spdk_blob and a real spdk_thread,
 # so the stub is not linked.
@@ -142,7 +139,7 @@ s3_bs_dev_test: s3_bs_dev_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	    $(AWS_LIBS) \
 	    -Wl,--start-group $(BLOB_SPDK_LIBS) -Wl,--end-group \
 	    $(BLOB_DPDK_ARGS) \
-	    $(REAL_SPDK_SYSLIBS) $(TEST_SYS_LIBS) -o $@
+	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
 
 # chunk map persistence check: no S3, but it does need the bdev layer.
 #
@@ -177,7 +174,7 @@ s3_journal_test: s3_journal_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	        -Wl,--start-group $(JOURNAL_SPDK_LIBS) -Wl,--end-group \
 	    -Wl,--no-whole-archive \
 	    $(JOURNAL_DPDK_ARGS) \
-	    $(REAL_SPDK_SYSLIBS) $(TEST_SYS_LIBS) -o $@
+	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
 
 s3_wal_test: s3_wal_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	$(CC) $(COMMON_CFLAGS) $(JOURNAL_CFLAGS) s3_wal_test.c \
@@ -187,7 +184,7 @@ s3_wal_test: s3_wal_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	        -Wl,--start-group $(JOURNAL_SPDK_LIBS) -Wl,--end-group \
 	    -Wl,--no-whole-archive \
 	    $(JOURNAL_DPDK_ARGS) \
-	    $(REAL_SPDK_SYSLIBS) $(TEST_SYS_LIBS) -o $@
+	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
 
 # The cache reads and writes a region of a real bdev, so it needs the same
 # treatment as the journal and WAL tests: bdev_aio has to register itself, hence
@@ -200,7 +197,7 @@ s3_cache_test: s3_cache_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	        -Wl,--start-group $(JOURNAL_SPDK_LIBS) -Wl,--end-group \
 	    -Wl,--no-whole-archive \
 	    $(JOURNAL_DPDK_ARGS) \
-	    $(REAL_SPDK_SYSLIBS) $(TEST_SYS_LIBS) -o $@
+	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
 
 # overlay + flusher: no S3 and no local device, but two things still pull in
 # libraries. The flusher registers a poller, so a real spdk_thread is needed, and
@@ -214,7 +211,7 @@ s3_flush_test: s3_flush_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	    $(AWS_LIBS) \
 	    -Wl,--start-group $(JOURNAL_SPDK_LIBS) -Wl,--end-group \
 	    $(JOURNAL_DPDK_ARGS) \
-	    $(REAL_SPDK_SYSLIBS) $(TEST_SYS_LIBS) -o $@
+	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
 
 # manifest only: no S3, no local device, no threads, no DPDK init.
 #
@@ -236,7 +233,7 @@ s3_export_test: s3_export_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	    $(AWS_LIBS) \
 	    -Wl,--start-group $(EXPORT_SPDK_LIBS) -Wl,--end-group \
 	    $(EXPORT_DPDK_ARGS) \
-	    $(REAL_SPDK_SYSLIBS) $(TEST_SYS_LIBS) -o $@
+	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
 
 # The state file writer is pure file I/O: it needs no bdev, no threads, no DPDK.
 # It is compiled directly (it lives in the module, whose .a also drags in bdev /
@@ -258,7 +255,7 @@ s3_local_dev_test: s3_local_dev_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	        -Wl,--start-group $(JOURNAL_SPDK_LIBS) -Wl,--end-group \
 	    -Wl,--no-whole-archive \
 	    $(JOURNAL_DPDK_ARGS) \
-	    $(REAL_SPDK_SYSLIBS) $(TEST_SYS_LIBS) -o $@
+	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
 
 # Checkpoint validation: no S3, no DPDK init. The test stubs s3_head /
 # s3_get_range / s3_put / s3_delete, which keeps s3_client_aws.o out of the
@@ -274,7 +271,7 @@ s3_checkpoint_test: s3_checkpoint_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	    $(AWS_LIBS) \
 	    -Wl,--start-group $(EXPORT_SPDK_LIBS) -Wl,--end-group \
 	    $(EXPORT_DPDK_ARGS) \
-	    $(REAL_SPDK_SYSLIBS) $(TEST_SYS_LIBS) -o $@
+	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
 
 # Run only the tests that need no S3 credentials
 check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cache_test \

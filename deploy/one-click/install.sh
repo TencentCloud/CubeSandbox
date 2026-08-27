@@ -1587,8 +1587,8 @@ write_s3lvol_cfg
 # startup-deps validation below requires it.
 ensure_nvme_cli
 
-# CubeS3lvol runtime deps (nvme-cli, python3, truncate, and the shared
-# libraries s3lvol_tgt needs -- notably libssl.so.1.1) are validated once
+# CubeS3lvol runtime deps (nvme-cli, python3, truncate, remaining
+# s3lvol_tgt shared libraries; OpenSSL is static) are validated once
 # here, fail-fast, before the installer replaces the install tree.
 validate_cubelet_s3lvol_startup_deps "${PKG_ROOT}/CubeS3lvol/bin/s3lvol_tgt"
 
@@ -1842,53 +1842,10 @@ else
   upsert_env_kv "${RUNTIME_ENV_FILE}" "DATABASE_URL" "mysql://$(urlencode "${local_mysql_user}"):$(urlencode "${local_mysql_password}")@$(urlencode "${local_mysql_host}"):$(urlencode "${local_mysql_port}")/$(urlencode "${local_mysql_db}")"
 fi
 
-# Persist external Redis config. cube-proxy reads CUBE_PROXY_REDIS_* from the
-# env file when rendering global.conf (CubeMaster reads the patched conf.yaml).
-# When switching modes, remove the opposite-mode keys so stale sentinel/host
-# values cannot keep the previous mode alive via ":-" fallbacks.
-if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_MASTER_NAME" "${CUBE_EXTERNAL_REDIS_MASTER_NAME}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES" "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD" "${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_MASTER_NAME" "${CUBE_EXTERNAL_REDIS_MASTER_NAME}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_SENTINEL_NODES" "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_SENTINEL_PASSWORD" "${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD}"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_HOST"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PORT"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_IP"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PORT"
-elif [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_HOST" "${CUBE_EXTERNAL_REDIS_HOST}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PORT" "${CUBE_EXTERNAL_REDIS_PORT}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_IP" "${CUBE_EXTERNAL_REDIS_HOST}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PORT" "${CUBE_EXTERNAL_REDIS_PORT}"
-  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD}"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_MASTER_NAME"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_SENTINEL_NODES"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_SENTINEL_PASSWORD"
-else
-  # Back to bundled local Redis: drop every external Redis marker so
-  # up-support / proxy / LCM do not keep skipping the local container or
-  # wiring Sentinel from a previous install.
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_MASTER_NAME"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_HOST"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PORT"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EXTERNAL_REDIS_PASSWORD"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_MASTER_NAME"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_SENTINEL_NODES"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_SENTINEL_PASSWORD"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_IP"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PORT"
-  remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PROXY_REDIS_PASSWORD"
-fi
+# Persist Redis for the current mode (Sentinel / standalone / local) and
+# drop opposite-mode keys so stale values cannot keep the previous mode
+# alive via ":-" fallbacks.
+persist_one_click_redis_runtime_env "${RUNTIME_ENV_FILE}"
 
 # Persist MinIO deploy settings (control node) independently from CUBE_S3_*
 # (volume plugin). Local MinIO fills CUBE_S3_* before this block.

@@ -486,7 +486,7 @@ Conditional commands:
 - If the packaged `Cubelet/config/config.toml` enables `storage_backend = "cubecow"`, one-click also checks:
   `mkfs.ext4`, `mount`, `umount`, `losetup`
 - If `ONE_CLICK_ENABLE_S3LVOL=1` and the package ships `CubeS3lvol/bin/s3lvol_tgt`, one-click also checks:
-  `nvme` (nvme-cli), `python3`, `truncate`, the shared libraries `s3lvol_tgt` links against (`ldd`; notably `libssl.so.1.1` / `libcrypto.so.1.1`, the OpenSSL 1.1 branch), and (x86_64) `avx2` in `/proc/cpuinfo`. Release `s3lvol_tgt` is built for Haswell/AVX2, not the packager's native CPU. `install.sh` installs `nvme-cli` via the system package manager when `nvme` is missing. `python3` must be able to run `CubeS3lvol/scripts/rpc.py --help` (Python 3.8 is enough; the packaged launcher supplies the 3.9 `argparse` bits SPDK's client needs).
+  `nvme` (nvme-cli), `python3`, `truncate`, remaining `s3lvol_tgt` shared libraries (`ldd`; OpenSSL is static), and (x86_64) `avx2` in `/proc/cpuinfo`. Release `s3lvol_tgt` is built for Haswell/AVX2, not the packager's native CPU. `install.sh` installs `nvme-cli` via the system package manager when `nvme` is missing. `python3` must be able to run `CubeS3lvol/scripts/rpc.py --help` (Python 3.8 is enough; the packaged launcher supplies the 3.9 `argparse` bits SPDK's client needs).
 
 Recommended packages to satisfy the cubecow command set:
 
@@ -508,12 +508,12 @@ sudo yum install -y e2fsprogs util-linux
 Additional packages for `ONE_CLICK_ENABLE_S3LVOL=1` (libraries only; `nvme-cli` is installed by `install.sh`):
 
 ```bash
-# Debian / Ubuntu (OpenSSL 1.1 is usually already present; confirm with ldd)
+# Debian / Ubuntu
 sudo apt-get install -y python3 libaio1 libnuma1 uuid-runtime
 
-# OpenCloudOS / RHEL / CentOS (OpenSSL 3 needs compat-openssl11)
-sudo dnf install -y python3 libaio libnuma libuuid compat-openssl11 || \
-sudo yum install -y python3 libaio libnuma libuuid compat-openssl11
+# OpenCloudOS / RHEL / CentOS
+sudo dnf install -y python3 libaio libnuma libuuid || \
+sudo yum install -y python3 libaio libnuma libuuid
 ```
 
 ### Control Role (`install.sh`, default)
@@ -544,7 +544,7 @@ Conditional commands:
 - If the packaged `Cubelet/config/config.toml` enables `storage_backend = "cubecow"`, one-click also checks:
   `mkfs.ext4`, `mount`, `umount`, `losetup`
 - If `ONE_CLICK_ENABLE_S3LVOL=1` and the package ships `CubeS3lvol/bin/s3lvol_tgt`, one-click also checks:
-  `nvme` (nvme-cli), `python3`, `truncate`, the shared libraries `s3lvol_tgt` links against (`ldd`; notably `libssl.so.1.1` / `libcrypto.so.1.1`, the OpenSSL 1.1 branch), and (x86_64) `avx2` in `/proc/cpuinfo`. Release `s3lvol_tgt` is built for Haswell/AVX2, not the packager's native CPU. `install.sh` installs `nvme-cli` via the system package manager when `nvme` is missing. `python3` must be able to run `CubeS3lvol/scripts/rpc.py --help` (Python 3.8 is enough; the packaged launcher supplies the 3.9 `argparse` bits SPDK's client needs).
+  `nvme` (nvme-cli), `python3`, `truncate`, remaining `s3lvol_tgt` shared libraries (`ldd`; OpenSSL is static), and (x86_64) `avx2` in `/proc/cpuinfo`. Release `s3lvol_tgt` is built for Haswell/AVX2, not the packager's native CPU. `install.sh` installs `nvme-cli` via the system package manager when `nvme` is missing. `python3` must be able to run `CubeS3lvol/scripts/rpc.py --help` (Python 3.8 is enough; the packaged launcher supplies the 3.9 `argparse` bits SPDK's client needs).
 
 Recommended packages to satisfy the cubecow command set:
 
@@ -566,12 +566,12 @@ sudo yum install -y e2fsprogs util-linux
 Additional packages for `ONE_CLICK_ENABLE_S3LVOL=1` (libraries only; `nvme-cli` is installed by `install.sh`):
 
 ```bash
-# Debian / Ubuntu (OpenSSL 1.1 is usually already present; confirm with ldd)
+# Debian / Ubuntu
 sudo apt-get install -y python3 libaio1 libnuma1 uuid-runtime
 
-# OpenCloudOS / RHEL / CentOS (OpenSSL 3 needs compat-openssl11)
-sudo dnf install -y python3 libaio libnuma libuuid compat-openssl11 || \
-sudo yum install -y python3 libaio libnuma libuuid compat-openssl11
+# OpenCloudOS / RHEL / CentOS
+sudo dnf install -y python3 libaio libnuma libuuid || \
+sudo yum install -y python3 libaio libnuma libuuid
 ```
 
 ## Prerequisites

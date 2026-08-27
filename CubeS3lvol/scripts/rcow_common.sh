@@ -365,28 +365,17 @@ modprobe nvme-tcp failed. Load it (modprobe nvme-tcp), then retry -- without it 
 every nvme connect fails and the initiator reports every subsystem as failed"
 }
 
-# The binary is linked against OpenSSL 1.1 on the build machine. A target node on
-# OpenSSL 3.x ships only 3.x, so ldd reports libssl.so.1.1 / libcrypto.so.1.1 as
-# "not found" and the target dies on its first TLS handshake with an unresolved
-# symbol. Catch that here, before the process is launched, and name the fix
-# instead of leaving a bare loader error in the log.
+# Catch missing DT_NEEDED libraries before launch. OpenSSL is linked
+# statically, so this is the remaining system set (libuuid, libaio, libnuma,
+# glibc, ...). A bare loader error in the log does not name the binary.
 rcow_check_tgt_deps()
 {
-	local missing ssl
+	local missing
 	missing="$(ldd "${RCOW_TGT_BIN}" 2>/dev/null | grep -i 'not found' || true)"
 	[ -n "${missing}" ] || return 0
 
 	rcow_err "the target binary has missing shared libraries:"
 	printf '%s\n' "${missing}" | sed 's/^/    /' >&2
-
-	ssl="$(printf '%s\n' "${missing}" | grep -iE 'libssl|libcrypto' || true)"
-	if [ -n "${ssl}" ]; then
-		rcow_err "these are the OpenSSL 1.1 libraries the binary was linked \
-against. Install compat-openssl11 on this node (yum install compat-openssl11, or \
-dnf install compat-openssl11) to provide libssl.so.1.1 / libcrypto.so.1.1, then \
-retry"
-	fi
-
 	rcow_die "refusing to start with missing shared libraries"
 }
 

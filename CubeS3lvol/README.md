@@ -61,15 +61,15 @@ make S3LVOL_BUILD_TYPE=release && ./make_release.sh
 
 ```sh
 # CentOS / TencentOS
-yum install -y nvme-cli python3 openssl libuuid libaio numactl-libs
+yum install -y nvme-cli python3 libuuid libaio numactl-libs
 
 # Debian / Ubuntu
-apt install -y nvme-cli python3 libssl1.1 libuuid1 libaio1 libnuma1
+apt install -y nvme-cli python3 libuuid1 libaio1 libnuma1
 ```
 
-`ldd bin/s3lvol_tgt` lists the exact system libraries required. **Watch out for
-openssl**: the package is built against the build machine's `libssl.so.1.1`, and
-the target's major version must match (1.1 and 3.x are not interchangeable).
+`ldd bin/s3lvol_tgt` lists the exact system libraries required. OpenSSL is
+linked statically into the binary (the Ubuntu 20.04 builder's 1.1 `.a` files),
+so the target does not need `libssl.so.1.1` or `compat-openssl11`.
 
 **CPU ISA (x86_64).** Release binaries are built for **Haswell / AVX2**, not
 the packager's CPU. `setup_dep.sh` passes `--target-arch=haswell` to SPDK

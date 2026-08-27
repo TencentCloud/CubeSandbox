@@ -441,7 +441,7 @@ export E2B_API_KEY=e2b_000000
 - 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
   `mkfs.ext4`、`mount`、`umount`、`losetup`
 - 若 `ONE_CLICK_ENABLE_S3LVOL=1` 且包内存在 `CubeS3lvol/bin/s3lvol_tgt`，还会额外检查：
-  `nvme`（nvme-cli）、`python3`、`truncate`，`s3lvol_tgt` 动态链接的共享库（`ldd` 探测；重点：`libssl.so.1.1` / `libcrypto.so.1.1` 属于 OpenSSL 1.1 分支），以及（x86_64）`/proc/cpuinfo` 里的 `avx2`。发布包按 Haswell/AVX2 编，不是打包机的 `native`。缺 `nvme` 时 `install.sh` 会通过系统包管理器自动安装 `nvme-cli`。系统 `python3` 必须能跑通 `CubeS3lvol/scripts/rpc.py --help`（3.8 即可；发布包里的启动器会补上 SPDK 客户端所需的 3.9 `argparse` 接口）。
+  `nvme`（nvme-cli）、`python3`、`truncate`，`s3lvol_tgt` 剩余的共享库（`ldd`；OpenSSL 已静态链入），以及（x86_64）`/proc/cpuinfo` 里的 `avx2`。发布包按 Haswell/AVX2 编，不是打包机的 `native`。缺 `nvme` 时 `install.sh` 会通过系统包管理器自动安装 `nvme-cli`。系统 `python3` 必须能跑通 `CubeS3lvol/scripts/rpc.py --help`（3.8 即可；发布包里的启动器会补上 SPDK 客户端所需的 3.9 `argparse` 接口）。
 
 推荐安装包（覆盖上述 `cubecow` 依赖）：
 
@@ -462,12 +462,12 @@ sudo yum install -y e2fsprogs util-linux
 启用 `ONE_CLICK_ENABLE_S3LVOL=1` 时额外安装包（库依赖；`nvme-cli` 由 `install.sh` 自动安装）：
 
 ```bash
-# Debian / Ubuntu（openssl 1.1 通常已满足；缺库时用 ldd 确认）
+# Debian / Ubuntu
 sudo apt-get install -y python3 libaio1 libnuma1 uuid-runtime
 
-# OpenCloudOS / RHEL / CentOS（openssl 3 需 compat-openssl11）
-sudo dnf install -y python3 libaio libnuma libuuid compat-openssl11 || \
-sudo yum install -y python3 libaio libnuma libuuid compat-openssl11
+# OpenCloudOS / RHEL / CentOS
+sudo dnf install -y python3 libaio libnuma libuuid || \
+sudo yum install -y python3 libaio libnuma libuuid
 ```
 
 ### control 角色（`install.sh`，默认）
@@ -498,7 +498,7 @@ sudo yum install -y python3 libaio libnuma libuuid compat-openssl11
 - 若打包内 `Cubelet/config/config.toml` 启用了 `storage_backend = "cubecow"`，还会额外检查：
   `mkfs.ext4`、`mount`、`umount`、`losetup`
 - 若 `ONE_CLICK_ENABLE_S3LVOL=1` 且包内存在 `CubeS3lvol/bin/s3lvol_tgt`，还会额外检查：
-  `nvme`（nvme-cli）、`python3`、`truncate`，`s3lvol_tgt` 动态链接的共享库（`ldd` 探测；重点：`libssl.so.1.1` / `libcrypto.so.1.1` 属于 OpenSSL 1.1 分支），以及（x86_64）`/proc/cpuinfo` 里的 `avx2`。发布包按 Haswell/AVX2 编，不是打包机的 `native`。缺 `nvme` 时 `install.sh` 会通过系统包管理器自动安装 `nvme-cli`。系统 `python3` 必须能跑通 `CubeS3lvol/scripts/rpc.py --help`（3.8 即可；发布包里的启动器会补上 SPDK 客户端所需的 3.9 `argparse` 接口）。
+  `nvme`（nvme-cli）、`python3`、`truncate`，`s3lvol_tgt` 剩余的共享库（`ldd`；OpenSSL 已静态链入），以及（x86_64）`/proc/cpuinfo` 里的 `avx2`。发布包按 Haswell/AVX2 编，不是打包机的 `native`。缺 `nvme` 时 `install.sh` 会通过系统包管理器自动安装 `nvme-cli`。系统 `python3` 必须能跑通 `CubeS3lvol/scripts/rpc.py --help`（3.8 即可；发布包里的启动器会补上 SPDK 客户端所需的 3.9 `argparse` 接口）。
 
 推荐安装包（覆盖上述 `cubecow` 依赖）：
 
@@ -519,12 +519,12 @@ sudo yum install -y e2fsprogs util-linux
 启用 `ONE_CLICK_ENABLE_S3LVOL=1` 时额外安装包（库依赖；`nvme-cli` 由 `install.sh` 自动安装）：
 
 ```bash
-# Debian / Ubuntu（openssl 1.1 通常已满足；缺库时用 ldd 确认）
+# Debian / Ubuntu
 sudo apt-get install -y python3 libaio1 libnuma1 uuid-runtime
 
-# OpenCloudOS / RHEL / CentOS（openssl 3 需 compat-openssl11）
-sudo dnf install -y python3 libaio libnuma libuuid compat-openssl11 || \
-sudo yum install -y python3 libaio libnuma libuuid compat-openssl11
+# OpenCloudOS / RHEL / CentOS
+sudo dnf install -y python3 libaio libnuma libuuid || \
+sudo yum install -y python3 libaio libnuma libuuid
 ```
 
 ## 前置条件

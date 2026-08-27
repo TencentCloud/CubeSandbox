@@ -1041,8 +1041,11 @@ test_external_redis_sentinel_wiring() {
   # Leaving Sentinel mode must scrub conf.yaml keys (env side uses remove_env_kv).
   assert_contains "${install_sh}" "removing stale Redis Sentinel keys from conf.yaml"
   assert_contains "${install_sh}" "/^  master_name:/d; /^  sentinel_nodes:/d; /^  sentinel_password:/d"
-  # Back to bundled Redis must also drop external Redis markers from .one-click.env.
-  assert_contains "${install_sh}" "Back to bundled local Redis: drop every external Redis marker"
+  # Back to bundled Redis must also drop external Redis markers from .one-click.env
+  # and persist CUBE_SANDBOX_REDIS_PASSWORD (extracted into common.sh).
+  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" "Back to bundled local Redis: drop every external Redis marker"
+  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" 'CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123'
+  assert_contains "${install_sh}" 'persist_one_click_redis_runtime_env "${RUNTIME_ENV_FILE}"'
   # SENTINEL lookup must reuse credentials without putting the password in argv.
   assert_contains "${install_sh}" 'REDISCLI_AUTH="${sentinel_pd}"'
   # Leaving Sentinel for bundled Redis must restore password as well as nodes.

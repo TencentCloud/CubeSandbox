@@ -374,9 +374,8 @@ validate_s3lvol_rpc_client() {
 }
 
 # validate_cubelet_s3lvol_startup_deps: check the runtime deps of the
-# installed s3lvol_tgt binary. The binary statically links SPDK/DPDK/AWS
-# CRT, so `ldd` on it is the authoritative probe for exactly the system
-# libraries the target machine must provide (glibc is assumed present).
+# installed s3lvol_tgt binary. SPDK/DPDK/AWS CRT and OpenSSL are static, so
+# `ldd` is the probe for the remaining system libraries (glibc is assumed).
 # Runs only when ONE_CLICK_ENABLE_S3LVOL=1 and the binary is actually in
 # the package.
 validate_cubelet_s3lvol_startup_deps() {
@@ -408,7 +407,7 @@ validate_cubelet_s3lvol_startup_deps() {
   done < <(ldd "${s3lvol_bin}" 2>/dev/null | awk '/=> not found/{print $1}')
 
   if [[ "${#missing_libs[@]}" -gt 0 ]]; then
-    die "CubeS3lvol startup dependency check failed for ${s3lvol_bin}; missing shared libraries: ${missing_libs[*]} (the binary links against OpenSSL 1.1 -- on distros shipping OpenSSL 3 install the compat package, e.g. compat-openssl11 on RHEL/CentOS/OpenCloudOS)"
+    die "CubeS3lvol startup dependency check failed for ${s3lvol_bin}; missing shared libraries: ${missing_libs[*]}"
   fi
 
   # Release s3lvol_tgt is built for Haswell/AVX2, not the packager's native
@@ -866,6 +865,81 @@ remove_env_kv() {
   done < "${env_file}"
 
   mv -f "${tmp_file}" "${env_file}"
+}
+
+_remove_env_keys() {
+  local env_file="$1"
+  shift
+  local key
+  for key in "$@"; do
+    remove_env_kv "${env_file}" "${key}"
+  done
+}
+
+# persist_one_click_redis_runtime_env writes Redis keys for systemd
+# EnvironmentFile consumers (cubeops, cubemaster, cube-proxy, LCM).
+# --mode=install often starts from an empty .one-click.env; without
+# CUBE_SANDBOX_REDIS_PASSWORD, local Redis still requirepass-es
+# (up-support.sh defaults to ceuhvu123) while cubeops AUTH-skips and
+# NOAUTH-fails.
+#
+# Uses the current shell's CUBE_EXTERNAL_* / CUBE_SANDBOX_REDIS_PASSWORD.
+# Sentinel and standalone external branches persist
+# CUBE_EXTERNAL_REDIS_PASSWORD; the local branch persists the resolved
+# sandbox password.
+persist_one_click_redis_runtime_env() {
+  local env_file="$1"
+  [[ -n "${env_file}" ]] || die "persist_one_click_redis_runtime_env: env file path required"
+
+  if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" ]]; then
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_MASTER_NAME" "${CUBE_EXTERNAL_REDIS_MASTER_NAME}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES" "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD:-}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD" "${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD:-}"
+    upsert_env_kv "${env_file}" "CUBE_PROXY_REDIS_MASTER_NAME" "${CUBE_EXTERNAL_REDIS_MASTER_NAME}"
+    upsert_env_kv "${env_file}" "CUBE_PROXY_REDIS_SENTINEL_NODES" "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}"
+    upsert_env_kv "${env_file}" "CUBE_PROXY_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD:-}"
+    upsert_env_kv "${env_file}" "CUBE_PROXY_REDIS_SENTINEL_PASSWORD" "${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD:-}"
+    _remove_env_keys "${env_file}" \
+      CUBE_EXTERNAL_REDIS_HOST \
+      CUBE_EXTERNAL_REDIS_PORT \
+      CUBE_PROXY_REDIS_IP \
+      CUBE_PROXY_REDIS_PORT
+  elif [[ -n "${CUBE_EXTERNAL_REDIS_HOST:-}" ]]; then
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_HOST" "${CUBE_EXTERNAL_REDIS_HOST}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_PORT" "${CUBE_EXTERNAL_REDIS_PORT:-6379}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD:-}"
+    upsert_env_kv "${env_file}" "CUBE_PROXY_REDIS_IP" "${CUBE_EXTERNAL_REDIS_HOST}"
+    upsert_env_kv "${env_file}" "CUBE_PROXY_REDIS_PORT" "${CUBE_EXTERNAL_REDIS_PORT:-6379}"
+    upsert_env_kv "${env_file}" "CUBE_PROXY_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD:-}"
+    _remove_env_keys "${env_file}" \
+      CUBE_EXTERNAL_REDIS_MASTER_NAME \
+      CUBE_EXTERNAL_REDIS_SENTINEL_NODES \
+      CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD \
+      CUBE_PROXY_REDIS_MASTER_NAME \
+      CUBE_PROXY_REDIS_SENTINEL_NODES \
+      CUBE_PROXY_REDIS_SENTINEL_PASSWORD
+  else
+    # Back to bundled local Redis: drop every external Redis marker so
+    # up-support / proxy / LCM do not keep skipping the local container or
+    # wiring Sentinel from a previous install. Persist the password the
+    # local container actually uses (operator override or ceuhvu123).
+    _remove_env_keys "${env_file}" \
+      CUBE_EXTERNAL_REDIS_MASTER_NAME \
+      CUBE_EXTERNAL_REDIS_SENTINEL_NODES \
+      CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD \
+      CUBE_EXTERNAL_REDIS_HOST \
+      CUBE_EXTERNAL_REDIS_PORT \
+      CUBE_EXTERNAL_REDIS_PASSWORD \
+      CUBE_PROXY_REDIS_MASTER_NAME \
+      CUBE_PROXY_REDIS_SENTINEL_NODES \
+      CUBE_PROXY_REDIS_SENTINEL_PASSWORD \
+      CUBE_PROXY_REDIS_IP \
+      CUBE_PROXY_REDIS_PORT \
+      CUBE_PROXY_REDIS_PASSWORD
+    upsert_env_kv "${env_file}" "CUBE_SANDBOX_REDIS_PASSWORD" \
+      "${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}"
+  fi
 }
 
 redis_cli_help_output() {

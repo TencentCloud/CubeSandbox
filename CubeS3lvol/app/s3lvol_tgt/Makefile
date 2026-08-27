@@ -58,6 +58,11 @@
 #  the .so, and the binary carries 30 librte_*.so.26 dependencies plus two rpaths
 #  into the local SPDK tree -- fine on a dev box, broken on any other machine.
 #
+#  **OpenSSL is the same trick.** -lssl would pick libssl.so.1.1 next to
+#  libssl.a, and the package would need that SONAME on the target. Ubuntu 22.04+
+#  does not ship it. OPENSSL_STATIC_LIBS names the .a files; SYS_LIBS has already
+#  dropped -lssl/-lcrypto so they cannot come back as shared objects.
+#
 
 include ../../mk/s3lvol.common.mk
 
@@ -74,8 +79,6 @@ APP = s3lvol_tgt
 SPDK_APP_LIBS = $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" \
                   pkg-config --libs spdk_event_nvmf spdk_event_bdev spdk_lvol \
                               spdk_env_dpdk 2>/dev/null)
-SPDK_SYSLIBS  = $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" \
-                  pkg-config --libs --static spdk_syslibs 2>/dev/null)
 
 # Keep -lspdk_* and -lrte_* apart: the former are named as-is (SPDK only ships
 # .a, so they cannot be mistaken for anything else), the latter become .a full
@@ -95,7 +98,8 @@ $(APP): s3lvol_tgt.c $(MODULE_DIR)/libs3lvol_bdev.a $(S3BSDEV_DIR)/libs3bsdev.a
 	        -Wl,--start-group $(DPDK_STATIC_LIBS) -Wl,--end-group \
 	    -Wl,--no-whole-archive \
 	    $(AWS_LIBS) \
-	    $(SPDK_SYSLIBS) -pthread -lrt -luuid -lssl -lcrypto -lm -ldl -o $@
+	    $(OPENSSL_STATIC_LIBS) \
+	    $(SYS_LIBS) -pthread -lrt -luuid -lm -ldl -o $@
 
 # Both marked phony so the sub-makes always run: without that, an existing .a is
 # considered up to date no matter what changed under lib/ or module/, and the app

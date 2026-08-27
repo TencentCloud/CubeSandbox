@@ -383,6 +383,49 @@ endef
 dpdk_static_libs = $(patsubst -l%,$(DPDK_LIB_DIR)/lib%.a,$(filter -lrte_%,$(1)))
 spdk_only_libs   = $(filter-out -lrte_%,$(1))
 
+# ---------------------------------------------------------------------------
+# OpenSSL: link the archives, not the shared objects
+#
+# The Ubuntu 20.04 builder has libssl.so.1.1. Newer distros (Ubuntu 22.04/24.04,
+# Debian 12, many EL9 images without compat-openssl11) ship only OpenSSL 3.
+# 1.1 and 3.x are different SONAMEs, so a binary that DT_NEEDED libssl.so.1.1
+# will not start there. glibc is the other way around (old baseline, new host),
+# which is why the builder stays on 20.04; OpenSSL is the library that breaks
+# that rule.
+#
+# -lssl prefers libssl.so sitting next to libssl.a (same class of bug as DPDK
+# above). -Wl,-Bstatic -lssl is worse: pkg-config --libs --static spdk_syslibs
+# often emits -lssl -lcrypto again, and a later -Bdynamic would pull the .so
+# back in -- or -Bstatic would leak onto glibc. Name the .a files outright, and
+# drop -lssl/-lcrypto from any syslibs list that still carries them.
+#
+# libssl.a before libcrypto.a. Keep these *outside* --whole-archive: OpenSSL
+# does not register constructors the way SPDK/DPDK do, and wrapping it would
+# pull unused ENGINE objects. -ldl -pthread stay dynamic (OpenSSL 1.1 needs
+# them).
+# ---------------------------------------------------------------------------
+
+OPENSSL_LIBDIR := $(strip $(shell pkg-config --variable=libdir openssl 2>/dev/null))
+ifeq ($(OPENSSL_LIBDIR),)
+OPENSSL_SSL_A_PROBE := $(shell $(CC) -print-file-name=libssl.a 2>/dev/null)
+ifneq ($(filter /%,$(OPENSSL_SSL_A_PROBE)),)
+OPENSSL_LIBDIR := $(patsubst %/,%,$(dir $(OPENSSL_SSL_A_PROBE)))
+endif
+endif
+OPENSSL_STATIC_LIBS := $(OPENSSL_LIBDIR)/libssl.a $(OPENSSL_LIBDIR)/libcrypto.a
+
+filter_ssl = $(filter-out -lssl -lcrypto,$(1))
+SYS_LIBS := $(call filter_ssl,$(SYS_LIBS))
+
+ifeq ($(filter clean help,$(MAKECMDGOALS)),)
+ifeq ($(and $(wildcard $(OPENSSL_LIBDIR)/libssl.a),$(wildcard $(OPENSSL_LIBDIR)/libcrypto.a)),)
+$(error No static OpenSSL at $(OPENSSL_LIBDIR) (need libssl.a and libcrypto.a). \
+        Install libssl-dev (Debian/Ubuntu) or openssl-devel (RHEL/CentOS). \
+        Release s3lvol_tgt links OpenSSL statically so the package does not \
+        need libssl.so.1.1 on the target)
+endif
+endif
+
 # $(call dpdk_link_args,<pkg-config --libs output>) -- the DPDK half, ready to
 # link: archives, wrapped as they must be.
 #
