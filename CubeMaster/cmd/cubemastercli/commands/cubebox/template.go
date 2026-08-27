@@ -610,7 +610,7 @@ var TemplateRenderCommand = cli.Command{
 var TemplateDeleteCommand = cli.Command{
 	Name:      "delete",
 	Usage:     "delete template metadata and node replicas",
-	ArgsUsage: "<template-id>",
+	ArgsUsage: "<template-id> [template-id ...]",
 	Flags: []cli.Flag{
 		cli.StringFlag{
 			Name:  "template-id",
@@ -618,8 +618,8 @@ var TemplateDeleteCommand = cli.Command{
 		},
 	},
 	Action: func(c *cli.Context) error {
-		templateID := resolveTemplateID(c)
-		if templateID == "" {
+		templateIDs := resolveTemplateIDs(c)
+		if len(templateIDs) == 0 {
 			return errors.New("template-id is required")
 		}
 
@@ -628,34 +628,52 @@ var TemplateDeleteCommand = cli.Command{
 			return errors.New("no server addr")
 		}
 		port = c.GlobalString("port")
-		requestID := uuid.New().String()
 		host := serverList[rand.Int()%len(serverList)]
 		url := fmt.Sprintf("http://%s/cube/template", net.JoinHostPort(host, port))
 
-		req := &templateDeleteRequest{
-			RequestID:  requestID,
-			TemplateID: templateID,
+		var deleteErr error
+		for _, templateID := range templateIDs {
+			if err := deleteTemplate(c, url, templateID); err != nil {
+				deleteErr = errors.Join(deleteErr, fmt.Errorf("%s: %w", templateID, err))
+				continue
+			}
+			log.Printf("template deleted: %s\n", templateID)
 		}
-		body, err := jsoniter.Marshal(req)
-		if err != nil {
-			return err
-		}
-
-		rsp := &templateResponse{}
-		if err := doHttpReq(c, url, http.MethodDelete, requestID, bytes.NewBuffer(body), rsp); err != nil {
-			log.Printf("template delete request err. %s. RequestId: %s\n", err.Error(), requestID)
-			return err
-		}
-		if rsp.Ret == nil {
-			return errors.New("empty response")
-		}
-		if rsp.Ret.RetCode != 200 {
-			log.Printf("template delete failed. %s. RequestId: %s\n", rsp.Ret.RetMsg, requestID)
-			return errors.New(rsp.Ret.RetMsg)
-		}
-		log.Printf("template deleted: %s\n", templateID)
-		return nil
+		return deleteErr
 	},
+}
+
+func resolveTemplateIDs(c *cli.Context) []string {
+	if id := c.String("template-id"); id != "" {
+		return []string{id}
+	}
+	return c.Args()
+}
+
+func deleteTemplate(c *cli.Context, url, templateID string) error {
+	requestID := uuid.New().String()
+	req := &templateDeleteRequest{
+		RequestID:  requestID,
+		TemplateID: templateID,
+	}
+	body, err := jsoniter.Marshal(req)
+	if err != nil {
+		return err
+	}
+
+	rsp := &templateResponse{}
+	if err := doHttpReq(c, url, http.MethodDelete, requestID, bytes.NewBuffer(body), rsp); err != nil {
+		log.Printf("template delete request err. %s. TemplateId: %s. RequestId: %s\n", err.Error(), templateID, requestID)
+		return err
+	}
+	if rsp.Ret == nil {
+		return errors.New("empty response")
+	}
+	if rsp.Ret.RetCode != 200 {
+		log.Printf("template delete failed. %s. TemplateId: %s. RequestId: %s\n", rsp.Ret.RetMsg, templateID, requestID)
+		return errors.New(rsp.Ret.RetMsg)
+	}
+	return nil
 }
 
 // templateSetAliasRequest is the JSON body for PUT /cube/template/:id/alias.
