@@ -770,11 +770,14 @@ iface="${CUBE_INGRESS_IFACE:-cube-dev}"
 table="${CUBE_EGRESS_NET_ROUTE_TABLE:-100}"
 chain="${CUBE_EGRESS_NET_CHAIN:-TRANSPROXY}"
 ip link show "${iface}" >/dev/null
-ip rule show | grep -q "iif ${iface} ipproto tcp dport 80 lookup ${table}"
-ip rule show | grep -q "iif ${iface} ipproto tcp dport 443 lookup ${table}"
+http_mark=0xce010000
+https_mark=0xce020000
+mark_mask=0xffff0000
+ip rule show | grep -q "fwmark ${http_mark}/${mark_mask} lookup ${table}"
+ip rule show | grep -q "fwmark ${https_mark}/${mark_mask} lookup ${table}"
 ip route show table "${table}" | grep -Eq "local (default|0\\.0\\.0\\.0/0) dev lo"
-iptables -t mangle -S "${chain}" | grep -q -- "--dport 80"
-iptables -t mangle -S "${chain}" | grep -q -- "--dport 443"
+iptables -t mangle -S "${chain}" | grep -q "${http_mark}"
+iptables -t mangle -S "${chain}" | grep -q "${https_mark}"
 {{- end -}}
 
 {{- define "cube.secretEnabled" -}}
