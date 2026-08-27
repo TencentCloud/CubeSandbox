@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
+	"golang.org/x/oauth2"
 )
 
 func TestNativeRootfsExportEnabledParsesEnv(t *testing.T) {
@@ -40,6 +41,47 @@ func TestNativeRootfsExportEnabledParsesEnv(t *testing.T) {
 	t.Setenv("CUBEMASTER_NATIVE_ROOTFS_EXPORT_ENABLED", "not-a-bool")
 	if !nativeRootfsExportEnabled() {
 		t.Fatal("expected invalid native export env value to fallback to enabled")
+	}
+}
+
+func TestRegistryAuthenticatorUsesGoogleADCForArtifactRegistry(t *testing.T) {
+	old := googleDefaultTokenSource
+	defer func() { googleDefaultTokenSource = old }()
+	googleDefaultTokenSource = func(context.Context, ...string) (oauth2.TokenSource, error) {
+		return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "wi-access-token"}), nil
+	}
+
+	ref, err := name.ParseReference("us-west1-docker.pkg.dev/project/repository/image:tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := registryAuthenticator(context.Background(), ref, nil).Authorization()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth.Username != "oauth2accesstoken" || auth.Password != "wi-access-token" {
+		t.Fatalf("unexpected ADC auth: %#v", auth)
+	}
+}
+
+func TestRegistryAuthenticatorPrefersExplicitCredentials(t *testing.T) {
+	old := googleDefaultTokenSource
+	defer func() { googleDefaultTokenSource = old }()
+	googleDefaultTokenSource = func(context.Context, ...string) (oauth2.TokenSource, error) {
+		t.Fatal("ADC must not be consulted when explicit credentials are supplied")
+		return nil, nil
+	}
+
+	ref, err := name.ParseReference("us-west1-docker.pkg.dev/project/repository/image:tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := registryAuthenticator(context.Background(), ref, &RegistryAuthConfig{Username: "user", Password: "password"}).Authorization()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth.Username != "user" || auth.Password != "password" {
+		t.Fatalf("unexpected explicit auth: %#v", auth)
 	}
 }
 

@@ -85,7 +85,7 @@ func prepareNativeSource(ctx context.Context, spec SourceSpec) (*PreparedSource,
 	if spec.RegistryUsername != "" || spec.RegistryPassword != "" {
 		authCfg = &RegistryAuthConfig{Username: spec.RegistryUsername, Password: spec.RegistryPassword}
 	}
-	authOpt := registryAuthOption(authCfg)
+	authOpt := registryAuthOption(ctx, ref, authCfg)
 	jobs := nativeExportConcurrency()
 	platOpt := remote.WithPlatform(defaultPlatform())
 	jobsOpt := remote.WithJobs(jobs)

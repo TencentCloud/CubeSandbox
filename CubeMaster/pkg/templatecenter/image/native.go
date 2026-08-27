@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,8 +20,10 @@ import (
 	"github.com/containerd/containerd/archive"
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"golang.org/x/oauth2/google"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -39,6 +42,8 @@ var nativeCopyBufferPool = sync.Pool{
 	},
 }
 
+var googleDefaultTokenSource = google.DefaultTokenSource
+
 // nativeRootfsExportEnabled checks if CUBEMASTER_NATIVE_ROOTFS_EXPORT_ENABLED is enabled.
 // By default, it is enabled, which avoids using external CLI tools (docker, skopeo, umoci).
 func nativeRootfsExportEnabled() bool {
@@ -47,15 +52,39 @@ func nativeRootfsExportEnabled() bool {
 }
 
 // registryAuthOption converts PreparedSource credentials into a remote.Option.
-// Falls back to the DefaultKeychain if explicit credentials are not provided.
-func registryAuthOption(auth *RegistryAuthConfig) remote.Option {
+// Explicit credentials always win. For Google Artifact Registry, use
+// Application Default Credentials when available; this includes GKE Workload
+// Identity. Other registries retain the DefaultKeychain fallback.
+func registryAuthOption(ctx context.Context, ref name.Reference, auth *RegistryAuthConfig) remote.Option {
+	return remote.WithAuth(registryAuthenticator(ctx, ref, auth))
+}
+
+func registryAuthenticator(ctx context.Context, ref name.Reference, auth *RegistryAuthConfig) authn.Authenticator {
 	if auth != nil && (auth.Username != "" || auth.Password != "") {
-		return remote.WithAuth(authn.FromConfig(authn.AuthConfig{
+		return authn.FromConfig(authn.AuthConfig{
 			Username: auth.Username,
 			Password: auth.Password,
-		}))
+		})
 	}
-	return remote.WithAuthFromKeychain(authn.DefaultKeychain)
+	if isGoogleArtifactRegistry(ref.Context().RegistryStr()) {
+		if source, err := googleDefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform"); err == nil {
+			if token, err := source.Token(); err == nil && token.AccessToken != "" {
+				return authn.FromConfig(authn.AuthConfig{
+					Username: "oauth2accesstoken",
+					Password: token.AccessToken,
+				})
+			}
+		}
+	}
+	resolved, err := authn.DefaultKeychain.Resolve(ref.Context())
+	if err != nil {
+		return authn.Anonymous
+	}
+	return resolved
+}
+
+func isGoogleArtifactRegistry(registry string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(registry)), ".pkg.dev")
 }
 
 type progressReader struct {
