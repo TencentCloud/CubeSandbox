@@ -10,24 +10,27 @@ import os
 import re
 
 import pytest
-
 from framework.assertions import assert_command_ok
 from framework.capabilities import NETWORK_L7_EGRESS
+from framework.l7_egress import (
+    L7_ATTEMPTS,
+    L7_HTTP_TIMEOUT,
+    http_json_command,
+    l7_command_timeout,
+)
 
 HTTPBUN_HOST = os.environ.get("SDK_E2E_L7_ECHO_HOST", "httpbun.com")
 OTHER_HOST = os.environ.get("SDK_E2E_L7_OTHER_HOST", "example.com")
 INJECT_HEADER = os.environ.get("SDK_E2E_L7_INJECT_HEADER", "X-Cube-E2E-Inject")
-INJECT_SECRET = os.environ.get("SDK_E2E_L7_INJECT_SECRET", "e2e-inject-secret-not-a-real-key")
+INJECT_SECRET = os.environ.get(
+    "SDK_E2E_L7_INJECT_SECRET", "e2e-inject-secret-not-a-real-key"
+)
 # CubeEgress MITM CA CN. The authoritative value (one-click prepare and the
 # k8s chart, deploy/.../cube-egress-prepare.sh + chart values caCommonName) is
 # "CubeSandbox Egress MITM CA". Override with SDK_E2E_L7_MITM_CA_CN if a
 # deployment customized it. A regex fallback in the test also tolerates
 # "Cube Sandbox Egress"-style spacing variants.
 MITM_CA_CN = os.environ.get("SDK_E2E_L7_MITM_CA_CN", "CubeSandbox Egress MITM CA")
-# Cold MITM path (DNS learn + TLS + upstream) needs more headroom than the
-# shared TCP network_probe_timeout default (5s).
-L7_HTTP_TIMEOUT = int(os.environ.get("SDK_E2E_L7_HTTP_TIMEOUT", "15"))
-
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.sdk_compat,
@@ -58,45 +61,6 @@ def _https_rule(
     return {"name": name, "match": match, "action": action}
 
 
-def _http_json_command(url: str, *, method: str = "GET", timeout: int = 15, attempts: int = 3) -> str:
-    """Fetch URL without TLS verify; print STATUS + body (or error).
-
-    Retries transient transport failures (timeout / connection reset / temporary
-    DNS) with backoff, since the public echo endpoints can be slow or rate-limit.
-    An HTTP 4xx/5xx is a real policy verdict and is returned as-is, never retried.
-    """
-    return (
-        "python3 - <<'PY'\n"
-        "import ssl, time, urllib.error, urllib.request\n"
-        f"url = {url!r}\n"
-        f"method = {method!r}\n"
-        f"timeout = {timeout!r}\n"
-        f"attempts = {attempts!r}\n"
-        "ctx = ssl._create_unverified_context()\n"
-        "last = None\n"
-        "for attempt in range(attempts):\n"
-        "    try:\n"
-        "        req = urllib.request.Request(url, method=method)\n"
-        "        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:\n"
-        "            body = resp.read().decode('utf-8', errors='replace')\n"
-        "            print(f'STATUS:{resp.status}')\n"
-        "            print(body)\n"
-        "        break\n"
-        "    except urllib.error.HTTPError as exc:\n"
-        "        body = exc.read().decode('utf-8', errors='replace')\n"
-        "        print(f'STATUS:{exc.code}')\n"
-        "        print(body)\n"
-        "        break\n"
-        "    except Exception as exc:\n"
-        "        last = exc\n"
-        "        if attempt + 1 < attempts:\n"
-        "            time.sleep(min(2 ** attempt, 5))\n"
-        "else:\n"
-        "    print(f'ERROR:{type(last).__name__}:{last}')\n"
-        "PY"
-    )
-
-
 def _parse_status_and_body(result) -> tuple[int | None, str]:
     assert_command_ok(result)
     text = result.stdout
@@ -116,8 +80,7 @@ def _headers_from_httpbun(body: str, *, status: int | None = None) -> dict[str, 
         data = json.loads(body)
     except json.JSONDecodeError as exc:
         raise AssertionError(
-            f"httpbun response was not JSON; status={status} "
-            f"body={body[:200]!r}: {exc}"
+            f"httpbun response was not JSON; status={status} body={body[:200]!r}: {exc}"
         ) from exc
     raw = data.get("headers") or data
     if not isinstance(raw, dict):
@@ -135,7 +98,9 @@ def _header_ci(headers: dict[str, str], name: str) -> str | None:
     return None
 
 
-def _tls_issuer_command(host: str, timeout: int = 15, attempts: int = 3) -> str:
+def _tls_issuer_command(
+    host: str, timeout: int = 15, attempts: int = L7_ATTEMPTS
+) -> str:
     return (
         "python3 - <<'PY'\n"
         "import shutil, socket, ssl, subprocess, tempfile, time\n"
@@ -213,14 +178,16 @@ def test_l7_credential_inject_visible_on_httpbun(sdk_sandbox, sdk_e2e_config):
     )
 
     result = sdk_sandbox.run_command(
-        _http_json_command(
+        http_json_command(
             f"https://{HTTPBUN_HOST}/headers",
             timeout=L7_HTTP_TIMEOUT,
         ),
-        timeout=sdk_e2e_config.command_timeout,
+        timeout=l7_command_timeout(sdk_e2e_config.command_timeout),
     )
     status, body = _parse_status_and_body(result)
-    assert status == 200, f"expected 200 from httpbun; status={status} body={body[:200]!r}"
+    assert status == 200, (
+        f"expected 200 from httpbun; status={status} body={body[:200]!r}"
+    )
     headers = _headers_from_httpbun(body, status=status)
     assert _header_ci(headers, INJECT_HEADER) == INJECT_SECRET, (
         f"injected header {INJECT_HEADER!r} missing or wrong; headers={headers!r}"
@@ -267,11 +234,11 @@ def test_l7_credential_inject_visible_on_httpbun(sdk_sandbox, sdk_e2e_config):
 def test_l7_first_match_wins(sdk_sandbox, sdk_e2e_config):
     """CubeEgress walks rules in order; first match decides allow/deny."""
     allowed = sdk_sandbox.run_command(
-        _http_json_command(
+        http_json_command(
             f"https://{HTTPBUN_HOST}/headers",
             timeout=L7_HTTP_TIMEOUT,
         ),
-        timeout=sdk_e2e_config.command_timeout,
+        timeout=l7_command_timeout(sdk_e2e_config.command_timeout),
     )
     status, body = _parse_status_and_body(allowed)
     assert status == 200, (
@@ -279,11 +246,11 @@ def test_l7_first_match_wins(sdk_sandbox, sdk_e2e_config):
     )
 
     denied = sdk_sandbox.run_command(
-        _http_json_command(
+        http_json_command(
             f"https://{HTTPBUN_HOST}/get",
             timeout=L7_HTTP_TIMEOUT,
         ),
-        timeout=sdk_e2e_config.command_timeout,
+        timeout=l7_command_timeout(sdk_e2e_config.command_timeout),
     )
     status, body = _parse_status_and_body(denied)
     assert status == 403, (
@@ -315,21 +282,21 @@ def test_l7_first_match_wins(sdk_sandbox, sdk_e2e_config):
 def test_l7_deny_and_unmatched_are_blocked(sdk_sandbox, sdk_e2e_config):
     """Explicit deny and no-rule-match both return HTTP 403."""
     ok = sdk_sandbox.run_command(
-        _http_json_command(
+        http_json_command(
             f"https://{HTTPBUN_HOST}/headers",
             timeout=L7_HTTP_TIMEOUT,
         ),
-        timeout=sdk_e2e_config.command_timeout,
+        timeout=l7_command_timeout(sdk_e2e_config.command_timeout),
     )
     status, _ = _parse_status_and_body(ok)
     assert status == 200
 
     explicit_deny = sdk_sandbox.run_command(
-        _http_json_command(
+        http_json_command(
             f"https://{HTTPBUN_HOST}/anything",
             timeout=L7_HTTP_TIMEOUT,
         ),
-        timeout=sdk_e2e_config.command_timeout,
+        timeout=l7_command_timeout(sdk_e2e_config.command_timeout),
     )
     status, body = _parse_status_and_body(explicit_deny)
     assert status == 403, (
@@ -337,11 +304,11 @@ def test_l7_deny_and_unmatched_are_blocked(sdk_sandbox, sdk_e2e_config):
     )
 
     unmatched = sdk_sandbox.run_command(
-        _http_json_command(
+        http_json_command(
             f"https://{HTTPBUN_HOST}/get",
             timeout=L7_HTTP_TIMEOUT,
         ),
-        timeout=sdk_e2e_config.command_timeout,
+        timeout=l7_command_timeout(sdk_e2e_config.command_timeout),
     )
     status, body = _parse_status_and_body(unmatched)
     assert status == 403, (
@@ -369,7 +336,7 @@ def test_l7_tls_mitm_issuer_is_cube_egress_ca(sdk_sandbox, sdk_e2e_config):
     """Peer cert issuer is CubeEgress CA after SNI-layer MITM (needs openssl)."""
     result = sdk_sandbox.run_command(
         _tls_issuer_command(HTTPBUN_HOST, timeout=L7_HTTP_TIMEOUT),
-        timeout=sdk_e2e_config.command_timeout,
+        timeout=l7_command_timeout(sdk_e2e_config.command_timeout),
     )
     assert_command_ok(result)
     line = result.stdout.strip()
@@ -384,7 +351,7 @@ def test_l7_tls_mitm_issuer_is_cube_egress_ca(sdk_sandbox, sdk_e2e_config):
     )
     # Accept the configured CN, or any CubeEgress-style CA subject.
     mitm_ok = MITM_CA_CN in issuer or bool(
-        re.search(r"Cube\s*Sandbox\s+Egress", issuer, re.I)
+        re.search(r"Cube\s*Sandbox\s+Egress", issuer, re.IGNORECASE)
     )
     assert mitm_ok, (
         f"peer certificate issuer should be CubeEgress MITM CA "
@@ -415,11 +382,11 @@ def test_l7_tls_mitm_issuer_is_cube_egress_ca(sdk_sandbox, sdk_e2e_config):
 def test_l7_sni_host_match_allow_and_deny(sdk_sandbox, sdk_e2e_config):
     """match.sni/host allow one destination and deny another."""
     allowed = sdk_sandbox.run_command(
-        _http_json_command(
+        http_json_command(
             f"https://{HTTPBUN_HOST}/headers",
             timeout=L7_HTTP_TIMEOUT,
         ),
-        timeout=sdk_e2e_config.command_timeout,
+        timeout=l7_command_timeout(sdk_e2e_config.command_timeout),
     )
     status, body = _parse_status_and_body(allowed)
     assert status == 200, (
@@ -427,11 +394,11 @@ def test_l7_sni_host_match_allow_and_deny(sdk_sandbox, sdk_e2e_config):
     )
 
     denied = sdk_sandbox.run_command(
-        _http_json_command(
+        http_json_command(
             f"https://{OTHER_HOST}/",
             timeout=L7_HTTP_TIMEOUT,
         ),
-        timeout=sdk_e2e_config.command_timeout,
+        timeout=l7_command_timeout(sdk_e2e_config.command_timeout),
     )
     status, body = _parse_status_and_body(denied)
     assert status == 403, (
