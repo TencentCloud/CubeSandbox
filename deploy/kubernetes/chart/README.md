@@ -22,12 +22,18 @@ deploy/kubernetes/chart/
 
 ## Documentation
 
-Official docs (source of truth; do not keep a parallel copy under this chart):
+Project documentation:
+
+- [In-place Upgrade](./docs/UPGRADE_EN.md) / [原地升级](./docs/UPGRADE.md)
+- [Local-veth EgressProxy Design](./docs/EGRESS_VETH_EN.md) / [EgressProxy 本地 veth 方案](./docs/EGRESS_VETH.md)
+- [Local-veth EgressProxy Test Report](./docs/EGRESS_TEST_EN.md) / [EgressProxy 本地 veth 测试报告](./docs/EGRESS_TEST.md)
+
+Published guides:
 
 - [Kubernetes Deployment](https://cubesandbox.com/guide/kubernetes/) — overview and install order
 - [Helm Install](https://cubesandbox.com/guide/kubernetes/install) — prerequisites through `helm test`
 - [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) — component layering, four compute DaemonSets, DNS / Proxy / Egress, compute-only mode
-- [Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade) — control plane can roll; compute upgrades recreate the Big Pod and interrupt sandboxes
+- [Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade) — general Kubernetes upgrade guidance
 - [FAQ](https://cubesandbox.com/guide/kubernetes/faq) — common install and runtime issues
 - Chinese: [https://cubesandbox.com/zh/guide/kubernetes/](https://cubesandbox.com/zh/guide/kubernetes/)
 

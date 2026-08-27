@@ -1,0 +1,108 @@
+{{- if .Values.egressProxy.enabled }}
+{{- $name := printf "%s-egress-configurer" (include "cube.fullname" .) -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $name }}
+  namespace: cube-egress
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: egress-configurer
+spec:
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: egress-configurer
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: egress-configurer
+    spec:
+      hostNetwork: true
+      automountServiceAccountToken: false
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.computePlacement" . | nindent 6 }}
+      containers:
+        - name: configurer
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.egressConfigurer "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.egressConfigurer.pullPolicy }}
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_ADMIN
+                - NET_RAW
+                - SYS_MODULE
+            seccompProfile:
+              type: RuntimeDefault
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /opt/cube-egress/cleanup.sh
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CUBE_ROUTER_NAT_IP
+              value: {{ .Values.cubeNode.network.cubeRouter.natIP | quote }}
+            - name: CUBE_EGRESS_CLUSTER_CIDRS
+              value: {{ join "," .Values.egressProxy.clusterCIDRs | quote }}
+            - name: XTABLES_LOCKFILE
+              value: /run/cube-egress/xtables.lock
+          readinessProbe:
+            exec:
+              command:
+                - /opt/cube-egress/health.sh
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /opt/cube-egress/health.sh
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: run
+              mountPath: /run/cube-egress
+            - name: modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: rp-filter
+              mountPath: /host-sysctl/rp_filter
+      volumes:
+        - name: run
+          hostPath:
+            path: /run/cube-egress
+            type: DirectoryOrCreate
+        - name: modules
+          hostPath:
+            path: /lib/modules
+            type: Directory
+        - name: rp-filter
+          hostPath:
+            path: /proc/sys/net/ipv4/conf/all/rp_filter
+            type: File
+{{- end }}

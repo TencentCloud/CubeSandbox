@@ -18,6 +18,8 @@ COMPONENT_VERSIONS_ROOT="${COMPONENT_VERSIONS_ROOT:-/data/cubelet/root/component
 CUBE_COMPONENT="${CUBE_COMPONENT:-}"
 CUBE_ROLE="${CUBE_ROLE:-install}"
 CUBE_PID_DIR="${CUBE_PID_DIR:-/run/cube-node}"
+CUBE_HOST_CGROUP_NAME="${CUBE_HOST_CGROUP_NAME:-cube-sandbox-runtime}"
+CUBE_COMPONENT_FINGERPRINT="${CUBE_COMPONENT_FINGERPRINT:-}"
 STATE_DIR="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
 
 log() { printf '[cube-component:%s:%s] %s\n' "${CUBE_COMPONENT:-?}" "${CUBE_ROLE}" "$*"; }
@@ -729,22 +731,240 @@ configure_sandbox_dns() {
 write_pidfile() {
   local name="$1"
   local pid="$2"
+  local starttime tmp_file
+  starttime="$(awk '{print $22}' "/proc/${pid}/stat" 2>/dev/null || true)"
+  [[ "${pid}" =~ ^[0-9]+$ && "${starttime}" =~ ^[0-9]+$ ]] \
+    || fail "cannot record ${name} process identity pid=${pid}"
   mkdir -p "${CUBE_PID_DIR}"
-  printf '%s\n' "${pid}" > "${CUBE_PID_DIR}/${name}.pid"
+  tmp_file="${CUBE_PID_DIR}/${name}.pid.tmp.$$"
+  printf '%s %s\n' "${pid}" "${starttime}" > "${tmp_file}"
+  mv -f "${tmp_file}" "${CUBE_PID_DIR}/${name}.pid"
 }
 
-kill_pidfile() {
+read_pidfile() {
   local name="$1"
   local file="${CUBE_PID_DIR}/${name}.pid"
-  local pid
+  local pid starttime extra
+  [[ -f "${file}" ]] || return 1
+  read -r pid starttime extra < "${file}" || return 1
+  [[ "${pid}" =~ ^[0-9]+$ && "${starttime}" =~ ^[0-9]+$ && -z "${extra:-}" ]] \
+    || return 1
+  printf '%s %s\n' "${pid}" "${starttime}"
+}
+
+process_identity_matches() {
+  local pid="$1"
+  local starttime="$2"
+  local expected_bin="$3"
+  local current_starttime exe exe_name expected_name
+  [[ "${pid}" =~ ^[0-9]+$ && "${starttime}" =~ ^[0-9]+$ ]] || return 1
+  current_starttime="$(awk '{print $22}' "/proc/${pid}/stat" 2>/dev/null || true)"
+  [[ "${current_starttime}" == "${starttime}" ]] || return 1
+  exe="$(readlink "/proc/${pid}/exe" 2>/dev/null || true)"
+  exe="${exe% (deleted)}"
+  exe_name="${exe##*/}"
+  expected_name="${expected_bin##*/}"
+  [[ -n "${exe_name}" && "${exe_name}" == "${expected_name}" ]]
+}
+
+stop_owned_process() {
+  local name="$1"
+  local expected_bin="$2"
+  local timeout_seconds="${3:-30}"
+  local file="${CUBE_PID_DIR}/${name}.pid"
+  local identity pid starttime deadline
+
   [[ -f "${file}" ]] || return 0
-  pid="$(cat "${file}" 2>/dev/null || true)"
-  [[ -n "${pid}" ]] || return 0
-  if kill -0 "${pid}" 2>/dev/null; then
-    log "stopping ${name} pid=${pid}"
-    kill -TERM "${pid}" 2>/dev/null || true
+  identity="$(read_pidfile "${name}" 2>/dev/null || true)"
+  if [[ -z "${identity}" ]]; then
+    log "removing invalid ${name} pidfile"
+    rm -f "${file}"
+    return 0
   fi
+  read -r pid starttime <<< "${identity}"
+  if ! process_identity_matches "${pid}" "${starttime}" "${expected_bin}"; then
+    log "removing stale ${name} pidfile pid=${pid}"
+    rm -f "${file}"
+    return 0
+  fi
+
+  log "stopping ${name} pid=${pid}"
+  kill -TERM "${pid}"
+  deadline=$((SECONDS + timeout_seconds))
+  while process_identity_matches "${pid}" "${starttime}" "${expected_bin}"; do
+    if (( SECONDS >= deadline )); then
+      log "${name} pid=${pid} did not exit after ${timeout_seconds}s"
+      return 1
+    fi
+    sleep 0.1
+  done
   rm -f "${file}"
+}
+
+stop_process_identity() {
+  local name="$1"
+  local pid="$2"
+  local starttime="$3"
+  local expected_bin="$4"
+  local timeout_seconds="${5:-30}"
+  local deadline
+
+  process_identity_matches "${pid}" "${starttime}" "${expected_bin}" || return 0
+  log "stopping ${name} pid=${pid}"
+  kill -TERM "${pid}"
+  deadline=$((SECONDS + timeout_seconds))
+  while process_identity_matches "${pid}" "${starttime}" "${expected_bin}"; do
+    if (( SECONDS >= deadline )); then
+      log "${name} pid=${pid} did not exit after ${timeout_seconds}s"
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
+# Remove the standalone NetworkAgent left by releases that ran it in a
+# separate container. Its pidfile contains a PID from the old container PID
+# namespace, so discover it by the exact executable instead of trusting that
+# stale PID. Revalidate PID, start time, and executable before signaling.
+stop_legacy_network_agents() {
+  local expected_bin="${TOOLBOX_ROOT}/network-agent/bin/network-agent"
+  local proc pid starttime exe argv0
+
+  for proc in /proc/[0-9]*; do
+    pid="${proc##*/}"
+    exe="$(readlink "${proc}/exe" 2>/dev/null || true)"
+    exe="${exe% (deleted)}"
+    case "${exe}" in
+      "${expected_bin}"|"${TOOLBOX_ROOT}"/network-agent.legacy.*/bin/network-agent) ;;
+      *) continue ;;
+    esac
+    argv0="$(tr '\0' '\n' < "${proc}/cmdline" 2>/dev/null | head -n1 || true)"
+    [[ "${argv0}" == "${expected_bin}" ]] || continue
+    starttime="$(awk '{print $22}' "${proc}/stat" 2>/dev/null || true)"
+    process_identity_matches "${pid}" "${starttime}" "${expected_bin}" || continue
+    log "stopping legacy standalone network-agent pid=${pid}"
+    kill -TERM "${pid}"
+  done
+  rm -f "${CUBE_PID_DIR}/network-agent.pid" "${CUBE_PID_DIR}/network-agent.fingerprint"
+}
+
+STARTING_PID=""
+STARTING_STARTTIME=""
+STARTING_PGID=""
+cleanup_starting_process() {
+  local status=$?
+  local pgid=""
+  trap - EXIT TERM INT HUP
+  if [[ -n "${STARTING_PGID}" && "${STARTING_PGID}" == "${STARTING_PID}" ]]; then
+    pgid="${STARTING_PGID}"
+    kill -CONT -- "-${pgid}" 2>/dev/null || true
+    kill -TERM -- "-${pgid}" 2>/dev/null || true
+  elif [[ -n "${STARTING_PID}" ]] &&
+       process_identity_matches "${STARTING_PID}" "${STARTING_STARTTIME}" \
+         "$(readlink "/proc/${STARTING_PID}/exe" 2>/dev/null || true)"; then
+      kill -CONT "${STARTING_PID}" 2>/dev/null || true
+      kill -TERM "${STARTING_PID}" 2>/dev/null || true
+  fi
+  if [[ -n "${STARTING_PID}" ]]; then
+    for _ in $(seq 1 50); do
+      if [[ -n "${pgid}" ]]; then
+        kill -0 -- "-${pgid}" 2>/dev/null || break
+      else
+        kill -0 "${STARTING_PID}" 2>/dev/null || break
+      fi
+      sleep 0.1
+    done
+    if [[ -n "${pgid}" ]] && kill -0 -- "-${pgid}" 2>/dev/null; then
+      kill -KILL -- "-${pgid}" 2>/dev/null || true
+    elif kill -0 "${STARTING_PID}" 2>/dev/null; then
+      kill -KILL "${STARTING_PID}" 2>/dev/null || true
+    fi
+  fi
+  [[ -z "${STARTING_PID}" ]] || wait "${STARTING_PID}" 2>/dev/null || true
+  exit "${status}"
+}
+
+# Move Cubelet out of the Kubernetes Pod cgroups before it starts. CubeShim and
+# VMM processes inherit this host-level cgroup and therefore are not killed
+# when kubelet removes the Big Pod cgroups during a rolling update.
+move_pid_to_host_cgroups() {
+  local pid="$1"
+  local cgroup_root="${CUBE_CGROUP_ROOT:-/sys/fs/cgroup}"
+  local controller_root target source_value moved=0 mode=v1
+
+  [[ "${pid}" =~ ^[0-9]+$ ]] || fail "invalid pid for host cgroup: ${pid}"
+  [[ "${CUBE_HOST_CGROUP_NAME}" =~ ^[a-zA-Z0-9_.-]+$ ]] \
+    || fail "invalid CUBE_HOST_CGROUP_NAME=${CUBE_HOST_CGROUP_NAME}"
+
+  if [[ -f "${cgroup_root}/cgroup.controllers" && -f "${cgroup_root}/cgroup.procs" ]]; then
+    mode=v2
+    target="${cgroup_root}/${CUBE_HOST_CGROUP_NAME}"
+    mkdir -p "${target}"
+    printf '%s\n' "${pid}" > "${target}/cgroup.procs" \
+      || fail "cannot move pid ${pid} to ${target}"
+    grep -qx "${pid}" "${target}/cgroup.procs" \
+      || fail "pid ${pid} is not present in ${target}/cgroup.procs after move"
+    moved=1
+  else
+    for controller_root in "${cgroup_root}"/*; do
+      [[ -f "${controller_root}/tasks" ]] || continue
+      target="${controller_root}/${CUBE_HOST_CGROUP_NAME}"
+      mkdir -p "${target}"
+
+      # A cgroup v1 child cpuset cannot accept tasks until both masks are initialized.
+      if [[ -f "${controller_root}/cpuset.cpus" ]]; then
+        source_value="$(cat "${controller_root}/cpuset.cpus")"
+        [[ -n "${source_value}" ]] && printf '%s\n' "${source_value}" > "${target}/cpuset.cpus"
+      fi
+      if [[ -f "${controller_root}/cpuset.mems" ]]; then
+        source_value="$(cat "${controller_root}/cpuset.mems")"
+        [[ -n "${source_value}" ]] && printf '%s\n' "${source_value}" > "${target}/cpuset.mems"
+      fi
+
+      printf '%s\n' "${pid}" > "${target}/tasks" \
+        || fail "cannot move pid ${pid} to ${target}"
+      grep -qx "${pid}" "${target}/tasks" \
+        || fail "pid ${pid} is not present in ${target}/tasks after move"
+      moved=$((moved + 1))
+    done
+  fi
+
+  [[ "${moved}" -gt 0 ]] || fail "no writable host cgroup hierarchy found"
+  log "moved pid=${pid} to host cgroup /${CUBE_HOST_CGROUP_NAME} mode=${mode} hierarchies=${moved}"
+}
+
+component_fingerprint() {
+  local bin="$1"
+  if [[ -n "${CUBE_COMPONENT_FINGERPRINT}" ]]; then
+    printf '%s\n' "${CUBE_COMPONENT_FINGERPRINT}"
+    return
+  fi
+  sha256sum "${bin}" | awk '{print $1}'
+}
+
+REUSED_HOST_PID=""
+REUSED_HOST_STARTTIME=""
+reuse_host_process() {
+  local name="$1"
+  local fingerprint="$2"
+  local health_url="$3"
+  local pid_file="${CUBE_PID_DIR}/${name}.pid"
+  local fingerprint_file="${CUBE_PID_DIR}/${name}.fingerprint"
+  local identity pid starttime saved
+
+  REUSED_HOST_PID=""
+  REUSED_HOST_STARTTIME=""
+  [[ -f "${pid_file}" && -f "${fingerprint_file}" ]] || return 1
+  identity="$(read_pidfile "${name}" 2>/dev/null || true)"
+  saved="$(cat "${fingerprint_file}" 2>/dev/null || true)"
+  [[ -n "${identity}" && "${saved}" == "${fingerprint}" ]] || return 1
+  read -r pid starttime <<< "${identity}"
+  process_identity_matches "${pid}" "${starttime}" \
+    "${TOOLBOX_ROOT}/network-agent/bin/network-agent" || return 1
+  curl -fsS "${health_url}" >/dev/null 2>&1 || return 1
+  REUSED_HOST_PID="${pid}"
+  REUSED_HOST_STARTTIME="${starttime}"
+  return 0
 }
 
 
@@ -753,7 +973,7 @@ run_cubelet() {
   local bin="${TOOLBOX_ROOT}/Cubelet/bin/cubelet"
   local cfg="${TOOLBOX_ROOT}/Cubelet/config/config.toml"
   local dyn="${CUBELET_DYNAMICCONF:-${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml}"
-  local i pid launch
+  local pid pid_starttime launch
 
   # Self-stage (no separate cubelet-install container). CubeVS tools are bundled
   # with the cubelet image so cube-node-installer does not need an extra
@@ -804,6 +1024,21 @@ run_cubelet() {
     egress_admin_url_esc="$(sed_escape_replacement "${egress_admin_url}")"
     sed -i "s|cube_egress_admin_url = \"[^\"]*\"|cube_egress_admin_url = \"${egress_admin_url_esc}\"|" "${cfg}"
   fi
+  if [[ -n "${CUBE_ROUTER_ENABLE:-}" ]]; then
+    local router_enable="false"
+    [[ "${CUBE_ROUTER_ENABLE}" == "1" || "${CUBE_ROUTER_ENABLE}" == "true" ]] \
+      && router_enable="true"
+    sed -i -E \
+      "s/^([[:space:]]*)cube_router_enable = .*/\\1cube_router_enable = ${router_enable}/" \
+      "${cfg}"
+  fi
+  if [[ -n "${CUBE_ROUTER_CIDR:-}" ]]; then
+    local router_cidr_esc
+    router_cidr_esc="$(sed_escape_replacement "${CUBE_ROUTER_CIDR}")"
+    sed -i -E \
+      "s|^([[:space:]]*)cube_router_cidr = \"[^\"]*\"|\\1cube_router_cidr = \"${router_cidr_esc}\"|" \
+      "${cfg}"
+  fi
   if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
     [[ "${CUBE_TAP_INIT_NUM}" =~ ^[0-9]+$ ]] || fail "CUBE_TAP_INIT_NUM must be a non-negative integer"
     sed -i "s/tap_init_num = [0-9]\+/tap_init_num = ${CUBE_TAP_INIT_NUM}/" "${cfg}"
@@ -836,36 +1071,87 @@ run_cubelet() {
     log "bound /data/cubelet/state to hostPath (skip state tmpfs)"
   fi
 
-  kill_pidfile cubelet
+  stop_legacy_network_agents
+
+  stop_owned_process cubelet "${bin}" 30 \
+    || fail "old cubelet did not exit; refusing to start a second instance"
 
   log "starting cubelet node_id=${CUBE_SANDBOX_NODE_ID:-} endpoint=${CUBE_SANDBOX_ENDPOINT_IP}"
-  "${bin}" --config "${cfg}" --dynamic-conf-path "${dyn}" &
+  # Use a private process group so a failed pre-start can clean up any children
+  # without signalling unrelated host processes.
+  setsid bash -c '
+    kill -STOP "$$"
+    exec "$@"
+  ' cube-component-launcher \
+    "${bin}" --config "${cfg}" --dynamic-conf-path "${dyn}" &
   launch=$!
+  STARTING_PID="${launch}"
+  STARTING_STARTTIME="$(awk '{print $22}' "/proc/${launch}/stat")"
+  trap cleanup_starting_process EXIT TERM INT HUP
+  for i in $(seq 1 50); do
+    grep -q '^State:.*T' "/proc/${launch}/status" 2>/dev/null && break
+    [[ "${i}" -lt 50 ]] || fail "cubelet launcher did not stop for host cgroup move"
+    sleep 0.02
+  done
+  STARTING_PGID="${launch}"
+  move_pid_to_host_cgroups "${launch}"
+  kill -CONT "${launch}"
 
   for i in $(seq 1 60); do
-    pid="$(pidof cubelet 2>/dev/null | awk '{print $1}' || true)"
-    if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1 && ss -lntp 2>/dev/null | grep -q ':9999'; then
-      write_pidfile cubelet "${pid}"
-      log "cubelet ready pid=${pid}"
-      break
+    listener="$(ss -lntp 2>/dev/null || true)"
+    listener_pid="$(awk '
+      /:9999[[:space:]]/ && match($0, /pid=[0-9]+,/) {
+        value=substr($0, RSTART + 4, RLENGTH - 5)
+        print value
+        exit
+      }
+    ' <<< "${listener}")"
+    if [[ -n "${listener_pid}" ]]; then
+      listener_pgid="$(ps -o pgid= -p "${listener_pid}" 2>/dev/null | tr -d '[:space:]')"
+      listener_starttime="$(awk '{print $22}' "/proc/${listener_pid}/stat" 2>/dev/null || true)"
+      if [[ "${listener_pgid}" == "${launch}" ]] &&
+         process_identity_matches "${listener_pid}" "${listener_starttime}" "${bin}"; then
+        pid="${listener_pid}"
+        pid_starttime="${listener_starttime}"
+        write_pidfile cubelet "${pid}"
+        log "cubelet ready pid=${pid}"
+        break
+      fi
     fi
-    if ! kill -0 "${launch}" >/dev/null 2>&1 && [[ -z "${pid}" ]]; then
+    if ! kill -0 -- "-${launch}" >/dev/null 2>&1; then
       fail "cubelet exited before listening on 9999"
     fi
     [[ "${i}" -lt 60 ]] || fail "cubelet did not become ready"
     sleep 1
   done
 
-  cleanup() { kill_pidfile cubelet; }
+  STARTING_PID=""
+  STARTING_STARTTIME=""
+  STARTING_PGID=""
+  trap - EXIT TERM INT HUP
+  cleanup() {
+    stop_process_identity cubelet "${pid}" "${pid_starttime}" "${bin}" 30 \
+      || log "cubelet did not exit before shutdown timeout"
+    if [[ "$(read_pidfile cubelet 2>/dev/null || true)" == "${pid} ${pid_starttime}" ]]; then
+      rm -f "${CUBE_PID_DIR}/cubelet.pid"
+    fi
+  }
   trap cleanup TERM INT HUP EXIT
 
-  while kill -0 "$(cat "${CUBE_PID_DIR}/cubelet.pid" 2>/dev/null || echo 0)" >/dev/null 2>&1; do
+  while process_identity_matches "${pid}" \
+    "$(awk '{print $2}' "${CUBE_PID_DIR}/cubelet.pid" 2>/dev/null || echo 0)" \
+    "${bin}"; do
     sleep 10
   done
   fail "cubelet exited"
 }
 
 main() {
+  if [[ "${1:-}" == "stop-owned-process" ]]; then
+    [[ "$#" -eq 3 ]] || fail "usage: stop-owned-process NAME EXPECTED_BIN"
+    stop_owned_process "$2" "$3" 30
+    return
+  fi
   [[ -n "${CUBE_COMPONENT}" ]] || fail "CUBE_COMPONENT is required"
   case "${CUBE_ROLE}" in
     install) run_install ;;
@@ -879,4 +1165,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${CUBE_COMPONENT_ENTRYPOINT_LIB_ONLY:-false}" != "true" ]]; then
+  main "$@"
+fi

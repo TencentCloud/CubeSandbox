@@ -26,8 +26,9 @@ spec:
       serviceAccountName: {{ include "cube.nodeServiceAccountName" . }}
       automountServiceAccountToken: true
       hostPID: {{ .Values.security.hostPID }}
+      hostNetwork: true
       terminationGracePeriodSeconds: {{ .Values.cubeNode.terminationGracePeriodSeconds }}
-      dnsPolicy: ClusterFirst
+      dnsPolicy: ClusterFirstWithHostNet
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -62,6 +63,14 @@ spec:
               value: cubelet
             - name: CUBE_ROLE
               value: run
+            # Persist across Pod replacement so a new Big Pod can terminate a
+            # stale host-level Cubelet after an ungraceful container exit.
+            - name: CUBE_PID_DIR
+              value: /data/cubelet/run/cube-node
+            - name: CUBE_ROUTER_ENABLE
+              value: {{ ternary "1" "0" .Values.cubeNode.network.cubeRouter.enabled | quote }}
+            - name: CUBE_ROUTER_CIDR
+              value: {{ .Values.cubeNode.network.cubeRouter.cidr | quote }}
             {{- with .Values.cubeNode.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -72,19 +81,6 @@ spec:
               containerPort: 9998
             - name: cubelet-debug
               containerPort: 9966
-          lifecycle:
-            preStop:
-              exec:
-                command:
-                  - /bin/bash
-                  - -ec
-                  - |
-                    # Kill only this container's pidfile. Never pkill -f —
-                    # must not match containerd-shim-cube-rs / cube-runtime / VMM.
-                    pidfile=/run/cube-node/cubelet.pid
-                    if [[ -f "${pidfile}" ]]; then
-                      kill -TERM "$(cat "${pidfile}")" 2>/dev/null || true
-                    fi
           {{- if .Values.cubeNode.probes.startup.enabled }}
           startupProbe:
             {{- if .Values.cubeNode.probes.startup.exec }}

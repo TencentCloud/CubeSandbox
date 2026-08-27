@@ -35,6 +35,7 @@ Pass one or more image names to build only those images (package download and
 ```bash
 ./deploy/kubernetes/images/build-cube-images.sh cubelet
 ./deploy/kubernetes/images/build-cube-images.sh cubelet cube-shim
+./deploy/kubernetes/images/build-cube-images.sh cube-egress-configurer cube-egress-proxy
 ```
 
 Run `./deploy/kubernetes/images/build-cube-images.sh --help` for the full image
@@ -235,6 +236,10 @@ behavior.
   `CubeEgress/scripts/cube-proxy-iptables-init.sh` plus a small idempotent
   entrypoint that waits for `cube-dev`, applies rules, and removes them on
   termination.
+- `cube-egress-configurer` and `cube-egress-proxy` are built from
+  `EgressProxy/Dockerfile.configurer` and `EgressProxy/Dockerfile.proxy`.
+  `EgressProxy/` contains only source and image definitions; Kubernetes
+  resources remain under `deploy/kubernetes/chart`.
 - `cube-webui` is built exactly like CI (`.github/workflows/release-docker-images.yml`):
   context = repository root, file = `deploy/one-click/webui/Dockerfile`, with
   `OPENRESTY_BASE_IMAGE` / `CUBE_VERSION` / `CUBE_COMMIT` / `CUBE_BUILD_TIME`.

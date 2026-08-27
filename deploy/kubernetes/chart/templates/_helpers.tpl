@@ -39,7 +39,8 @@ Cube-owned images should use `cube.cubeImage` instead.
 {{- end -}}
 
 {{- /*
-Render "<repository>:<tag>" for a Cube-owned image with optional
+Render "<repository>@<digest>" when digest is set, otherwise
+"<repository>:<tag>", with optional
 $.Values.global.imageRegistry override applied to the registry portion of
 .repository. Call as:
   include "cube.cubeImage" (dict "image" .Values.images.master "context" $)
@@ -62,7 +63,12 @@ is preserved.
     {{- $repo = printf "%s/%s" (trimSuffix "/" $override) $repo -}}
   {{- end -}}
 {{- end -}}
+{{- $digest := $image.digest | default "" -}}
+{{- if $digest -}}
+{{- printf "%s@%s" $repo $digest -}}
+{{- else -}}
 {{- printf "%s:%s" $repo $image.tag -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "cube.timezoneEnv" -}}
@@ -1042,8 +1048,6 @@ Bootstrap: host mutation mounts for pvm / node-init.
   value: /usr/local/services/cubetoolbox
 - name: IMAGE_ROOT
   value: /opt/cube-image
-- name: CUBE_PID_DIR
-  value: /run/cube-node
 - name: STATE_DIR
   value: {{ .Values.hostPaths.bootstrapState | quote }}
 - name: CUBE_OPS_ENDPOINT
