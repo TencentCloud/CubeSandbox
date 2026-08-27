@@ -254,6 +254,8 @@ Create from the **template** (`Sandbox.create(template=tpl-…)`).
 
 2. **DB / filesystem layout changed vs pre-0.7.0; migration is tested from 0.6.0 only.** Table and on-disk layout differ from versions before 0.7.0. The new release adapts older data for cleanup, but that path is **tested against 0.6.0**. If adaptation fails, delete leftover snapshot files and the matching DB rows by hand.
 
+3. **After a cross-node Resume or creating a sandbox from a snapshot, you cannot Pause or take a snapshot again for a short time.** How long depends on the snapshot object size. This will be fixed in the next release.
+
 ---
 
 ## 6. See also
