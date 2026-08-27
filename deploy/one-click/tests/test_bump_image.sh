@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 # Coverage for scripts/bump-image.sh: the --check release gate, the bump
-# rewrite, the reverse scan, and argument validation. Everything runs inside an
-# isolated git repo seeded with copies of the real tracked files, so the test
-# never mutates the working tree and stays green across future version bumps.
+# rewrite, the reverse scan, and argument validation.
+#
+# Rewrite / argument checks run inside an isolated git repo seeded with copies
+# of the real tracked FILES, so they never mutate the working tree and stay
+# green across future version bumps.
+#
+# The real-repo --check below is an intentional whole-tree consistency gate:
+# it catches a NEW hard-coded location that was never added to FILES (the
+# isolated seed cannot see those files). CI runs it on a clean checkout; a
+# local dirty image-tag pin failing this check is the same as `bump-image.sh
+# --check` failing at the repo root.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -149,6 +157,12 @@ if check "${TARGET}"; then fail "reverse scan should catch a stray tag in a new 
 (cd "${WORK}" && printf '    tag: v1.2.3\n' >stray.yaml && git add -N stray.yaml)
 if check "${TARGET}"; then fail "reverse scan should catch a stray yaml tag"; fi
 (cd "${WORK}" && rm -f stray.yaml && git reset -q -- stray.yaml 2>/dev/null || true)
+
+# 3c. reverse scan also catches VERSION:-vX outside FILES (the form the
+# v0.6.0 bump missed in build-cube-images.sh).
+(cd "${WORK}" && printf 'VERSION="${VERSION:-v1.2.3}"\n' >stray.sh && git add -N stray.sh)
+if check "${TARGET}"; then fail "reverse scan should catch a stray VERSION:- tag"; fi
+(cd "${WORK}" && rm -f stray.sh && git reset -q -- stray.sh 2>/dev/null || true)
 
 # 4. a non-image v-semver is left untouched by bump (variables.tf line guard).
 (cd "${WORK}" && printf '\nrequired_version = "~> v1.2.0"\n' \

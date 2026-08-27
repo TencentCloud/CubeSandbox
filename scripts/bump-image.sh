@@ -236,11 +236,16 @@ do_check() {
 	# Reverse scan: catch a release image tag hard-coded in a file that is NOT in
 	# FILES. Patterns live in one array so the search and the extraction below stay
 	# in sync; they cover the tag formats actually used in this repo: a qualified
-	# image ref (registry/name:tag) and the tag/version assignment forms
-	# (IMAGE_TAG / *_IMAGE_TAG=, CUBE_VERSION, TAG:-) and Helm `tag: vX` lines.
+	# image ref (registry/name:tag), the tag/version assignment forms
+	# (IMAGE_TAG / *_IMAGE_TAG=, CUBE_VERSION, VERSION:-, TAG:-), and Helm
+	# `tag: vX` lines. Unquoted `tag: vX` is treated as a Cube release pin by
+	# convention (chart values.yaml); third-party pins stay quoted and without
+	# a leading "v" (e.g. "1.28.15"). A future unquoted third-party `tag: vX`
+	# should be excluded from this scan, not added to FILES (FILES would
+	# rewrite it to the Cube release version).
 	local -a patterns=(
 		"(${COMPONENTS}):${ERE_SEMVER}"
-		"(IMAGE_TAG|CUBE_VERSION|TAG:-).*${ERE_SEMVER}"
+		"(IMAGE_TAG|CUBE_VERSION|VERSION:-|TAG:-).*${ERE_SEMVER}"
 		"tag:[[:space:]]*${ERE_SEMVER}"
 	)
 	local -a grep_args=()
