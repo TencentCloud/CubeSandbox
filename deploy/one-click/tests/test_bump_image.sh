@@ -8,38 +8,28 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-# The files bump-image.sh rewrites (must all exist, mirroring its FILES list).
-FILES=(
-	deploy/one-click/scripts/systemd/cube-egress-start.sh
-	CubeEgress/Makefile
-	cube-lifecycle-manager/Makefile
-	cube-lifecycle-manager/README.md
-	deploy/one-click/scripts/one-click/up-cube-lifecycle-manager.sh
-	CubeProxy/Makefile
-	deploy/one-click/scripts/one-click/up-cube-proxy.sh
-	deploy/one-click/terraform/tencentcloud/variables.tf
-	deploy/one-click/terraform/tencentcloud/create.sh
-	deploy/one-click/terraform/tencentcloud/build_images.sh
-	deploy/one-click/terraform/tencentcloud/env.example
-	deploy/one-click/README.md
-	deploy/one-click/README_zh.md
-	docs/guide/tencentcloud-terraform-deploy.md
-	docs/zh/guide/tencentcloud-terraform-deploy.md
-	deploy/kubernetes/chart/values.yaml
-	deploy/kubernetes/chart/Chart.yaml
-	deploy/kubernetes/images/build-cube-images.sh
-	deploy/kubernetes/images/README.md
-	deploy/kubernetes/chart/README.md
-	deploy/one-click/build-guest-image.sh
-	docs/guide/kubernetes/faq.md
-	docs/zh/guide/kubernetes/faq.md
-)
-
 failures=0
 fail() {
 	echo "FAIL: $*" >&2
 	failures=$((failures + 1))
 }
+
+# Seed every file bump-image.sh rewrites, parsed from its FILES list so the
+# two cannot drift. A new rewrite target is then covered by bump/--check
+# automatically; add extra assertions below only for format-specific pins.
+mapfile -t FILES < <(awk '
+	/^FILES=\(/ { in_files=1; next }
+	in_files && /^\)/ { exit }
+	in_files {
+		gsub(/^[ \t]+/, "")
+		gsub(/[ \t\\]+$/, "")
+		if ($0 != "") print
+	}
+' "${REPO_ROOT}/scripts/bump-image.sh")
+if [[ "${#FILES[@]}" -eq 0 ]]; then
+	echo "FAIL: could not parse FILES from bump-image.sh" >&2
+	exit 1
+fi
 
 # Detect the version the seeded tree currently pins, so the test does not hard
 # code a value that future releases will move.
@@ -49,6 +39,11 @@ CURRENT="$(grep -oE 'cube-egress:v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?' \
 	echo "FAIL: could not detect current version from cube-egress-start.sh" >&2
 	exit 1
 }
+
+# Reverse scan against the real worktree (not the isolated seed). This is the
+# path that catches a NEW hard-coded location that was never added to FILES.
+(cd "${REPO_ROOT}" && ./scripts/bump-image.sh --check "${CURRENT}" >/dev/null) \
+	|| fail "real-repo --check ${CURRENT} should pass"
 
 # Synthetic bump target — never a real release tag — so rewrite assertions stay
 # meaningful regardless of what CURRENT is. Avoid colliding with CURRENT.
@@ -86,6 +81,29 @@ while IFS= read -r line; do
 done <<<"${component_tags}"
 grep -qE 'tag:\s+"1\.28\.15"' "${WORK}/deploy/kubernetes/chart/values.yaml" \
 	|| fail "values.yaml kubectl third-party tag must remain \"1.28.15\""
+
+# 2b-extra. VERSION:- default, README default-build sentence, and YAML tag
+# examples move; historical pins in the image-build README stay put.
+grep -qE "VERSION=\"\\\$\{VERSION:-${TARGET}\}\"" \
+	"${WORK}/deploy/kubernetes/images/build-cube-images.sh" \
+	|| fail "build-cube-images.sh VERSION default must become ${TARGET}"
+grep -q "so \`${TARGET}\` for the default build" \
+	"${WORK}/deploy/kubernetes/images/README.md" \
+	|| fail "images README default-build sentence must name ${TARGET}"
+grep -q 'older release tags such as `v0.5.1`' \
+	"${WORK}/deploy/kubernetes/images/README.md" \
+	|| fail "historical v0.5.1 in images README must remain"
+grep -qE "CUBE_VERSION=${TARGET}" \
+	"${WORK}/deploy/one-click/build-agent-ext4.sh" \
+	|| fail "build-agent-ext4.sh usage example must become ${TARGET}"
+for f in \
+	deploy/kubernetes/chart/runtime-values.example.yaml \
+	docs/guide/kubernetes/upgrade.md \
+	docs/zh/guide/kubernetes/upgrade.md
+do
+	grep -qE "tag: ${TARGET}" "${WORK}/${f}" \
+		|| fail "${f} tag example must become ${TARGET}"
+done
 
 # 2c. Chart.yaml version / appVersion track the release without the leading "v".
 grep -qx "version: ${CHART_VER}" "${WORK}/deploy/kubernetes/chart/Chart.yaml" \
@@ -126,6 +144,11 @@ check "${TARGET}" || fail "--check ${TARGET} should pass after normalizing quote
 (cd "${WORK}" && printf 'IMAGE_TAG ?= v1.2.3\n' >stray.mk && git add -N stray.mk)
 if check "${TARGET}"; then fail "reverse scan should catch a stray tag in a new file"; fi
 (cd "${WORK}" && rm -f stray.mk && git reset -q -- stray.mk 2>/dev/null || true)
+
+# 3b. reverse scan also catches Helm `tag: vX` outside FILES.
+(cd "${WORK}" && printf '    tag: v1.2.3\n' >stray.yaml && git add -N stray.yaml)
+if check "${TARGET}"; then fail "reverse scan should catch a stray yaml tag"; fi
+(cd "${WORK}" && rm -f stray.yaml && git reset -q -- stray.yaml 2>/dev/null || true)
 
 # 4. a non-image v-semver is left untouched by bump (variables.tf line guard).
 (cd "${WORK}" && printf '\nrequired_version = "~> v1.2.0"\n' \

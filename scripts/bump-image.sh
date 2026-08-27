@@ -29,11 +29,13 @@ set -euo pipefail
 # the perl edits and the reverse scan stay in sync.
 PERL_SEMVER='v\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.]+)?'
 ERE_SEMVER='v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?'
+# Shared perl sub for IMAGE_TAG=vX / CUBE_VERSION=vX usage examples.
+PERL_IMAGE_ASSIGN="s{((?:IMAGE_TAG|CUBE_VERSION)=)${PERL_SEMVER}}{\$1\$ENV{VER}}g"
 
 # Component images that follow the release version (chart + one-click / CI).
 # openresty-tproxy is deliberately excluded: its tag tracks the OpenResty
-# version, not the release. 
-COMPONENTS='cube-egress|cube-egress-net|cube-master|cubemastercli|cube-api|cube-ops|cube-proxy|cube-webui|cube-lifecycle-manager|cubelet|cube-shim|cube-kernel|cube-guest|cube-node-init|cube-wait-node-prep|cube-pvm-host-bootstrap'
+# version, not the release.
+COMPONENTS='cube-egress|cube-egress-net|cube-master|cubemastercli|cube-api|cube-ops|cube-proxy|cube-webui|cube-lifecycle-manager|cubelet|cube-shim|cube-kernel|cube-guest|cube-agent|cube-node-init|cube-wait-node-prep|cube-pvm-host-bootstrap'
 
 usage() {
 	sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -130,16 +132,31 @@ edit_expr() {
 		# appVersion quoted so Helm treats appVersion as a string, not a float.
 		echo "s{(^version:\\s*)\"?\\d+\\.\\d+\\.\\d+(?:[-.][0-9A-Za-z.]+)?\"?}{\$1\$ENV{CHART_VER}}; s{(^appVersion:\\s*)\"?\\d+\\.\\d+\\.\\d+(?:[-.][0-9A-Za-z.]+)?\"?}{\$1\"\$ENV{CHART_VER}\"}"
 		;;
-	deploy/kubernetes/images/build-cube-images.sh | \
-		deploy/kubernetes/images/README.md | \
-		deploy/kubernetes/chart/README.md | \
+	deploy/kubernetes/images/build-cube-images.sh)
+		# Usage examples plus the script's own VERSION:- fallback, which
+		# IMAGE_TAG and SOURCE_REF inherit when unset.
+		echo "${PERL_IMAGE_ASSIGN}; s{(VERSION:-)${PERL_SEMVER}}{\$1\$ENV{VER}}g"
+		;;
+	deploy/kubernetes/images/README.md)
+		# IMAGE_TAG= examples, plus the sentence that names the VERSION default.
+		# Leave historical pins alone (e.g. "older release tags such as v0.5.1").
+		echo "${PERL_IMAGE_ASSIGN}; s{${PERL_SEMVER}}{\$ENV{VER}}g if /default build/;"
+		;;
+	deploy/kubernetes/chart/README.md | \
 		deploy/one-click/build-guest-image.sh | \
+		deploy/one-click/build-agent-ext4.sh | \
 		docs/guide/kubernetes/faq.md | \
 		docs/zh/guide/kubernetes/faq.md)
 		# Docs / usage examples that hard-code IMAGE_TAG=vX or CUBE_VERSION=vX.
 		# Leave non-semver placeholders alone (e.g. IMAGE_TAG=dev) and do not
 		# touch unrelated tags on the same line (e.g. cube-node:v0.4.0-...).
-		echo "s{((?:IMAGE_TAG|CUBE_VERSION)=)${PERL_SEMVER}}{\$1\$ENV{VER}}g"
+		echo "${PERL_IMAGE_ASSIGN}"
+		;;
+	deploy/kubernetes/chart/runtime-values.example.yaml | \
+		docs/guide/kubernetes/upgrade.md | \
+		docs/zh/guide/kubernetes/upgrade.md)
+		# Helm overlay / upgrade examples: `tag: vX` including commented lines.
+		echo "s{(tag:\\s+)${PERL_SEMVER}}{\$1\$ENV{VER}}g"
 		;;
 	*)
 		echo "error: no edit rule for $1" >&2
@@ -166,12 +183,16 @@ FILES=(
 	docs/zh/guide/tencentcloud-terraform-deploy.md
 	deploy/kubernetes/chart/values.yaml
 	deploy/kubernetes/chart/Chart.yaml
+	deploy/kubernetes/chart/runtime-values.example.yaml
 	deploy/kubernetes/images/build-cube-images.sh
 	deploy/kubernetes/images/README.md
 	deploy/kubernetes/chart/README.md
 	deploy/one-click/build-guest-image.sh
+	deploy/one-click/build-agent-ext4.sh
 	docs/guide/kubernetes/faq.md
 	docs/zh/guide/kubernetes/faq.md
+	docs/guide/kubernetes/upgrade.md
+	docs/zh/guide/kubernetes/upgrade.md
 )
 
 do_bump() {
@@ -216,10 +237,11 @@ do_check() {
 	# FILES. Patterns live in one array so the search and the extraction below stay
 	# in sync; they cover the tag formats actually used in this repo: a qualified
 	# image ref (registry/name:tag) and the tag/version assignment forms
-	# (IMAGE_TAG / *_IMAGE_TAG=, CUBE_VERSION, TAG:-).
+	# (IMAGE_TAG / *_IMAGE_TAG=, CUBE_VERSION, TAG:-) and Helm `tag: vX` lines.
 	local -a patterns=(
 		"(${COMPONENTS}):${ERE_SEMVER}"
 		"(IMAGE_TAG|CUBE_VERSION|TAG:-).*${ERE_SEMVER}"
+		"tag:[[:space:]]*${ERE_SEMVER}"
 	)
 	local -a grep_args=()
 	local p

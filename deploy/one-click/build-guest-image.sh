@@ -4,7 +4,7 @@
 #
 # Usage:
 #   OUTPUT_DIR=/path/to/cube-image [ONE_CLICK_CUBE_INIT_BIN=/path/to/cube-init] \
-#     CUBE_VERSION=v0.6.0 ./deploy/one-click/build-guest-image.sh
+#     CUBE_VERSION=v0.7.0-rc1 ./deploy/one-click/build-guest-image.sh
 #
 # When ONE_CLICK_CUBE_INIT_BIN is unset, cube-init is built locally (or via
 # ONE_CLICK_CUBE_INIT_BUILD_MODE=docker).

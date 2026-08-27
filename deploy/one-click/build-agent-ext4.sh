@@ -6,7 +6,7 @@
 #
 # Usage:
 #   OUTPUT_DIR=/path/to/cube-agent [ONE_CLICK_CUBE_AGENT_BIN=/path/to/cube-agent] \
-#     CUBE_VERSION=v0.6.0 ./deploy/one-click/build-agent-ext4.sh
+#     CUBE_VERSION=v0.7.0-rc1 ./deploy/one-click/build-agent-ext4.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
