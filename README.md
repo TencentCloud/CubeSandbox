@@ -400,8 +400,6 @@ We welcome contributions of all kinds—whether it's a bug report, feature sugge
 
 | Feature | Description |
 |---|---|
-| **Cross-Node Pause & Resume** | Suspend a sandbox on one node and resume it on another with full memory and filesystem state preserved |
-| **Cross-Node Snapshot-Based Sandbox Launch** | Create new sandboxes from a snapshot on a different node than the one where it was taken, backed by cluster-shared, on-demand-loading storage |
 | **E2B API Compatibility** | Close remaining gaps with the E2B specification for full drop-in compatibility |
 | **Control Plane / Data Plane Separation** | Decouple the control plane from the data plane so control plane upgrades or failures never affect sandboxes already in flight |
 | **Sandbox Fault Recovery** | Automatic detection and recovery of crashed VMs, stuck shim processes, and network partitions with configurable recovery policies |

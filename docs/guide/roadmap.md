@@ -4,14 +4,6 @@
 
 ## Coming Soon
 
-### Cross-Node Pause and Resume
-
-Suspend a running sandbox on one node and resume it on a different node, with full memory and filesystem state preserved. Unlocks flexible bin-packing, host drain workflows, and cross-node sandbox migration.
-
-### Cross-Node Snapshot-Based Sandbox Launch
-
-Create new sandboxes from a snapshot on a different node than the one where the snapshot was taken, backed by a cluster-shared, on-demand-loading storage layer. The scheduler picks the source node first and transparently falls back to any node with the snapshot synced, so callers get elastic, cluster-wide scheduling from a single snapshot without waiting for a full data copy.
-
 ### E2B API Compatibility
 
 Close the remaining gaps between CubeSandbox's API surface and the E2B specification. The goal is full drop-in compatibility so that workloads and SDK clients targeting E2B can run against a self-hosted CubeSandbox cluster without modification.
