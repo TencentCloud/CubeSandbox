@@ -70,28 +70,6 @@ func UploadSnapshot(ctx context.Context, backend, snapshotID string) (*cow.Remot
 	return uploader.Upload(ctx, snapshotID)
 }
 
-// UploadTemplateRootfs exports a template's rootfs snapshot, the parent
-// layer of every sandbox rootfs derived from it. See
-// [S3Cow.UploadTemplateRootfs]. XFS returns an empty uuid and no error.
-func UploadTemplateRootfs(ctx context.Context, backend, templateID string) (string, error) {
-	normalized, err := cow.NormalizeBackend(backend)
-	if err != nil {
-		return "", err
-	}
-	if normalized != cow.BackendS3 {
-		return "", nil
-	}
-	store, err := requireCowStoreFor(cow.BackendS3)
-	if err != nil {
-		return "", err
-	}
-	s3, ok := store.(*S3Cow)
-	if !ok || s3 == nil {
-		return "", fmt.Errorf("s3 cow store does not support template rootfs export")
-	}
-	return s3.UploadTemplateRootfs(ctx, templateID)
-}
-
 // SnapshotUploadStatus returns upload state from cubecow export_status
 // (NONE→pending, empty/INPROGRESS→running, DONE→ready). XFS is a no-op ready.
 func SnapshotUploadStatus(ctx context.Context, backend, snapshotID string) (*cow.RemoteStatus, error) {

@@ -113,45 +113,6 @@ func (m *S3Cow) Upload(ctx context.Context, snapshotID string) (*cow.RemoteUUIDs
 	return uuids, nil
 }
 
-// UploadTemplateRootfs exports only the rootfs object of a template package.
-//
-// A sandbox rootfs is a child snapshot of the template's rootfs, and a
-// reference export names just the objects the exported layer owns: the
-// child's export carries its own delta and nothing of the parent. Without
-// the parent exported, importing that child on another node yields a hole
-// where the base layer should be — the ext4 superblock and root inode live
-// in the parent, so the volume does not even mount. Exporting the parent
-// here is what makes the child resolvable elsewhere.
-//
-// A template's memory and metadata are not part of that chain (sandbox
-// memory is a fresh single-layer volume; metadata derives from a node-local
-// base and exports as a merged copy), so they stay node-local.
-func (m *S3Cow) UploadTemplateRootfs(ctx context.Context, snapshotID string) (string, error) {
-	id := strings.TrimSpace(snapshotID)
-	if id == "" {
-		return "", fmt.Errorf("snapshot_id is required")
-	}
-	rootfs := ""
-	for _, ref := range activateObjectRefs(ctx, cow.BackendS3, id) {
-		if ref.Role == "rootfs" {
-			rootfs = strings.TrimSpace(ref.Name)
-			break
-		}
-	}
-	if rootfs == "" {
-		return "", fmt.Errorf("no rootfs object for %s", id)
-	}
-	uuid, err := m.uploadOne(rootfs)
-	if err != nil {
-		return "", fmt.Errorf("upload rootfs %s: %w", rootfs, err)
-	}
-	// Settle before returning: the template is only usable cross-node once
-	// its objects are committed, and nothing later in template creation
-	// waits on this.
-	m.waitExportSettled(ctx, rootfs, uuid, time.Now().Add(exportSettleBudget))
-	return uuid, nil
-}
-
 // exportSettleBudget caps the total time Upload spends spacing out a
 // package's exports. Pause runs Upload and then a Destroy inside one 120s
 // budget, so this leaves room for the Destroy even in the worst case. An
