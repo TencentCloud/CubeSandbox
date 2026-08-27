@@ -284,7 +284,31 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
 
 ## 5. 已知问题
 
-1. **S3 快照对象由 S3lvol 异步删除。** 删除 S3 快照后，CubeS3lvol 在后台回收对象。删除接口返回时，对象不一定已经从 S3 上消失。
+1. **S3 快照对象由 S3lvol 异步删除，被引用的快照会拒绝删除。** 删除 S3 快照后，CubeS3lvol 在后台回收对象。
+   删除接口返回时，对象不一定已经从 S3 上消失。
+
+   此外，快照在被引用时**无法删除**，CubeS3lvol 会以 `EBUSY` 拒绝：正在或已经导出（其他节点可能正
+   在读取）、存在多个 clone、正在 decouple。此时 CubeS3lvol 会记录一条 **pending-delete 标记**
+   （按 lvstore uuid + lvol uuid 记录，不按名字，避免同名快照被误删），可通过 `rcow_get_lvstores` 的
+   `delete_pending` 字段查看，`deletable` 字段则表示当前是否可删。
+
+   注意另一种拒绝：卷仍作为 NVMe-oF 命名空间处于 **active** 时，删除会在 RPC 层就被拒绝（提示先执行
+   `rcow_deactive_bdev`），这一路径**不会**记录标记——它是调用方自己可以立即纠正的前置条件，而不是需要
+   等待的阻塞原因。
+
+   阻塞原因解除后（导出被释放或过期、多余 clone 被删除、decouple 结束、卷被 deactivate），需要在该节点上
+   **手动重试**：
+
+   ```sh
+   # 在 CubeS3lvol 目录下
+   test/tools/s3lvol_rpc.py --ls              # 查看 DEL / PEND 两列
+   test/tools/s3lvol_rpc.py --retry-pending   # 重试所有已标记且当前可删的快照
+   ```
+
+   注意该机制的边界：标记**只存在于 s3lvol_tgt 进程内存中**，进程重启或 lvstore 卸载即丢失；**没有自动
+   重试**（无后台轮询），也**无法取消**已记录的标记；并且集群侧的删除路径（Cubelet `S3Cow.DeleteByKind`）
+   目前会把被拒绝的快照删除视为成功、且不会调用 `--retry-pending`，因此这类残留对象需要按上述方式在节点上
+   处理。详见 `CubeS3lvol/README.md` 的 "Retrying a refused snapshot delete"。
 
 2. **DB / FS 结构相较 0.7.0 之前版本变化较大，老数据适配仅覆盖 0.6.0**：本版本相比 0.7.0 之前的版本，
    DB 表结构与文件系统目录结构均有较大调整。新版本会对老版本的数据结构做适配，用于用户清理老数据的场景，

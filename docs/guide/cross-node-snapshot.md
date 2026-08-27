@@ -250,7 +250,21 @@ Create from the **template** (`Sandbox.create(template=tpl-…)`).
 
 ## 5. Known limitations
 
-1. **S3lvol deletes snapshot objects asynchronously.** After you delete an S3 snapshot, CubeS3lvol finishes removing the objects in the background. The delete RPC returning does not mean the objects are gone from S3 immediately.
+1. **S3lvol deletes snapshot objects asynchronously, and referenced snapshots are refused.** After you delete an S3 snapshot, CubeS3lvol finishes removing the objects in the background. The delete RPC returning does not mean the objects are gone from S3 immediately.
+
+   A snapshot that is still referenced **cannot be deleted**: CubeS3lvol refuses with `EBUSY` when it is being or has been exported (another node may be reading through it), has more than one clone, or is being decoupled. CubeS3lvol then records a **pending-delete mark** keyed by **(lvstore uuid, lvol uuid)** — not by name, so a same-named snapshot cannot be deleted by mistake. Check `delete_pending` in `rcow_get_lvstores`; `deletable` shows whether it can be deleted right now.
+
+   A different refusal: when the volume is still an **active** NVMe-oF namespace, the delete is refused at the RPC layer (with a hint to run `rcow_deactive_bdev` first). That path does **not** record a mark — it is a precondition the caller can fix immediately, not a blocker to wait out.
+
+   Once the blocker clears (the export is released or expires, the extra clone is deleted, decouple finishes, or the volume is deactivated), you must **retry by hand** on that node:
+
+   ```sh
+   # from the CubeS3lvol directory
+   test/tools/s3lvol_rpc.py --ls              # check the DEL / PEND columns
+   test/tools/s3lvol_rpc.py --retry-pending   # retry every marked snapshot that is deletable now
+   ```
+
+   Limits of this mechanism: marks live **only in the s3lvol_tgt process memory** and are lost on restart or lvstore unload; there is **no automatic retry** (no background poller) and **no way to cancel** a recorded mark. The cluster delete path (Cubelet `S3Cow.DeleteByKind`) currently treats a refused snapshot delete as success and does not run `--retry-pending`, so leftover objects must be handled on the node as above. See [Retrying a refused snapshot delete](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md#retrying-a-refused-snapshot-delete---retry-pending) in `CubeS3lvol/README.md`.
 
 2. **DB / filesystem layout changed vs pre-0.7.0; migration is tested from 0.6.0 only.** Table and on-disk layout differ from versions before 0.7.0. The new release adapts older data for cleanup, but that path is **tested against 0.6.0**. If adaptation fails, delete leftover snapshot files and the matching DB rows by hand.
 
