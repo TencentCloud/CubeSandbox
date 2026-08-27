@@ -64,6 +64,45 @@ func requirePing(t *testing.T) {
 	}
 }
 
+func TestSnapshotReadinessProbeRunsOnceWithoutInitialDelay(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	accepted := make(chan struct{})
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			close(accepted)
+			_ = conn.Close()
+		}
+	}()
+
+	port := int32(listener.Addr().(*net.TCPAddr).Port)
+	container := &cubebox.ContainerConfig{Probe: &cubebox.Probe{
+		InitialDelayMs:   500,
+		TimeoutMs:        1000,
+		PeriodMs:         100,
+		SuccessThreshold: 3,
+		FailureThreshold: 3,
+		ProbeTimeoutMs:   100,
+		ProbeHandler: &cubebox.ProbeHandler{
+			TcpSocket: &cubebox.TCPSocketAction{Port: port},
+		},
+	}}
+	ci := &cubeboxstore.Container{IP: "127.0.0.1"}
+
+	started := time.Now()
+	err = (&local{}).doSnapshotReadinessProbe(context.Background(), container, ci)
+	require.NoError(t, err)
+	assert.Less(t, time.Since(started), 250*time.Millisecond)
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot readiness probe did not connect")
+	}
+}
+
 func TestProbeErrIp(t *testing.T) {
 	cnt := &cubebox.ContainerConfig{
 		Probe: &cubebox.Probe{
