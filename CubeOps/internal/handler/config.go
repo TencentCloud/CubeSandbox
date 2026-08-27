@@ -14,32 +14,23 @@ import (
 
 // ConfigHandler handles runtime config HTTP requests.
 type ConfigHandler struct {
-	bind            string
-	rateLimitPerSec uint32
-	authEnabled     bool
-	sandboxDomain   string
-	instanceType    string
+	bind          string
+	sandboxDomain string
 }
 
 // NewConfigHandler creates a new config handler.
-func NewConfigHandler(bind string, rateLimitPerSec uint32, authEnabled bool, sandboxDomain, instanceType string) *ConfigHandler {
+func NewConfigHandler(bind, sandboxDomain string) *ConfigHandler {
 	return &ConfigHandler{
-		bind:            bind,
-		rateLimitPerSec: rateLimitPerSec,
-		authEnabled:     authEnabled,
-		sandboxDomain:   sandboxDomain,
-		instanceType:    instanceType,
+		bind:          bind,
+		sandboxDomain: sandboxDomain,
 	}
 }
 
 // RuntimeConfig is the response for GET /config.
 type RuntimeConfig struct {
-	APIEndpoint     string `json:"apiEndpoint"`    // CUBE_API_PUBLIC_HOST + /cubeapi/v1 (E2B SDK compatible, legacy)
-	OpsAPIEndpoint  string `json:"opsApiEndpoint"` // CUBE_OPS_PUBLIC_HOST + /opsapi/v1 (CubeOps ops API)
-	RateLimitPerSec uint32 `json:"rateLimitPerSec"`
-	AuthEnabled     bool   `json:"authEnabled"`
-	SandboxDomain   string `json:"sandboxDomain"`
-	InstanceType    string `json:"instanceType"`
+	APIEndpoint    string `json:"apiEndpoint"`    // CUBE_API_PUBLIC_HOST + /cubeapi/v1 (E2B SDK compatible, legacy)
+	OpsAPIEndpoint string `json:"opsApiEndpoint"` // CUBE_OPS_PUBLIC_HOST + /opsapi/v1 (CubeOps ops API)
+	SandboxDomain  string `json:"sandboxDomain"`
 }
 
 // Register installs the config routes on the given router group.
@@ -50,12 +41,9 @@ func (h *ConfigHandler) Register(r *gin.RouterGroup) {
 // GetConfig handles GET /config.
 func (h *ConfigHandler) GetConfig(c *gin.Context) {
 	httputil.WriteJSON(c, http.StatusOK, RuntimeConfig{
-		APIEndpoint:     publicAPIEndpoint(h.bind),
-		OpsAPIEndpoint:  publicOpsAPIEndpoint(h.bind),
-		RateLimitPerSec: h.rateLimitPerSec,
-		AuthEnabled:     h.authEnabled,
-		SandboxDomain:   h.sandboxDomain,
-		InstanceType:    h.instanceType,
+		APIEndpoint:    publicAPIEndpoint(h.bind),
+		OpsAPIEndpoint: publicOpsAPIEndpoint(h.bind),
+		SandboxDomain:  h.sandboxDomain,
 	})
 }
 

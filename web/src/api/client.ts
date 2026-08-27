@@ -306,10 +306,7 @@ export const clusterApi = {
     ops<{
       apiEndpoint: string;
       opsApiEndpoint: string;
-      rateLimitPerSec: number;
-      authEnabled: boolean;
       sandboxDomain: string;
-      instanceType: string;
     }>('/config'),
 };
 

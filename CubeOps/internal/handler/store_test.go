@@ -391,7 +391,7 @@ func TestStore_RefreshRateLimit(t *testing.T) {
 func newConfigRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 	r := gin.New()
-	h := NewConfigHandler("127.0.0.1:3010", 100, true, "cube.app", "cubebox")
+	h := NewConfigHandler("127.0.0.1:3010", "cube.app")
 	g := r.Group("/api/v1")
 	h.Register(g)
 	return r
@@ -408,17 +408,14 @@ func TestConfig_GetConfig(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
 		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
 	}
-	if cfg["rateLimitPerSec"] != float64(100) {
-		t.Errorf("rateLimitPerSec = %v, want 100", cfg["rateLimitPerSec"])
-	}
-	if cfg["authEnabled"] != true {
-		t.Errorf("authEnabled = %v, want true", cfg["authEnabled"])
-	}
 	if cfg["sandboxDomain"] != "cube.app" {
 		t.Errorf("sandboxDomain = %v, want cube.app", cfg["sandboxDomain"])
 	}
-	if cfg["instanceType"] != "cubebox" {
-		t.Errorf("instanceType = %v, want cubebox", cfg["instanceType"])
+	// Removed fields must not be present in the response.
+	for _, key := range []string{"rateLimitPerSec", "authEnabled", "instanceType"} {
+		if _, ok := cfg[key]; ok {
+			t.Errorf("unexpected field %q present in config response", key)
+		}
 	}
 	// APIEndpoint should fall back to bind address when env var is unset.
 	if cfg["apiEndpoint"] != "http://127.0.0.1:3010/cubeapi/v1" {

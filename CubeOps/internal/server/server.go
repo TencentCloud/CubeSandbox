@@ -117,7 +117,7 @@ func (s *Server) buildRouter() *gin.Engine {
 	authH := auth.NewHandler(authSvc)
 	clusterH := handler.NewClusterHandler(s.cm).WithNodeService(s.nodeSvc)
 	storeH := handler.NewStoreHandler(handler.DefaultRegistryClient())
-	configH := handler.NewConfigHandler(s.cfg.Bind, 100, s.cfg.JWTSecret != "", s.cfg.SandboxDomain, "cubebox")
+	configH := handler.NewConfigHandler(s.cfg.Bind, s.cfg.SandboxDomain)
 	agenthubH := handler.NewAgentHubHandler(s.store, s.cm)
 	// SDK handler gets the AgentHubService so that E2B template/snapshot
 	// deletions can reverse-sync AgentHub registrations
