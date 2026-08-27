@@ -423,14 +423,21 @@ no pending snapshot deletes to retry
 
 The mark is a record and a manual retry, nothing more. Specifically:
 
-- **Not every refusal records a mark.** Recorded are the snapshot blockers
+- **Not every refusal records a mark.** Recorded are the blockers
   `s3lvol_lvol_destroy()` itself identifies — an export pin (published or still
   in flight), more than one clone, a running decouple — plus an asynchronous
-  destroy failure. Not recorded: the RPC-layer refusals that run before it (an
-  NVMf-active volume, an unreadable active registry), a bdev unregister that
-  fails, and the case where `spdk_blob_get_clones()` answers an unknown error.
-  Those are either the caller's own precondition to fix (deactivate first) or a
-  failure that has to be looked at rather than retried blindly.
+  destroy failure. Those are the ones that clear on their own, which is what
+  makes coming back to them worthwhile. Not recorded: the RPC-layer refusals
+  that run before it (an NVMf-active volume, an unreadable active registry), a
+  bdev unregister that fails, and the case where `spdk_blob_get_clones()`
+  answers an unknown error. Those are either the caller's own precondition to
+  fix (deactivate first) or a failure that has to be looked at rather than
+  retried blindly.
+
+  The recording does not re-check that the volume is a snapshot: with the blob
+  closed that is not reliably answerable, and only the three blockers above get
+  that far anyway. In practice a mark therefore means "a delete was asked for
+  and refused because something still referenced the volume".
 - **No automatic retry.** Nothing on the target polls the marks; there is no
   deferred-completion poller. `--retry-pending` is the only thing that acts on
   them, and it has to be run.

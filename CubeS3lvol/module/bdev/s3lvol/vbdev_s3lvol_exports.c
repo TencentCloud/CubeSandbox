@@ -46,8 +46,16 @@
 #include "vbdev_s3lvol_json.h"
 
 /* Same reasoning as the import cap: the registry is read into a fixed decoder
- * table, and a node with more live exports than this has a different problem. */
-#define S3LVOL_MAX_EXPORTS 64
+ * table, and a node with more live exports than this has a different problem.
+ *
+ * Raised from 64 because that was not true in practice. An export leaves the
+ * registry when it is released, and a template-heavy node accumulates entries
+ * whose importers are long gone but which nobody released -- crossing the cap
+ * then made the whole lvstore un-attachable, live exports and all. The entries
+ * do stop pinning their snapshots once their lease goes stale (see the lease
+ * machinery below), so this bounds a registry nobody is maintaining rather
+ * than a working set. */
+#define S3LVOL_MAX_EXPORTS 256
 
 /* === Pending-delete marks ==================================================
  * A delete that cannot complete because the snapshot is referenced (an export
@@ -904,14 +912,37 @@ exports_parse(struct s3lvol_lvstore *lvs, const void *json, size_t len)
 				  S3_EXPORT_LAYOUT_REF : S3_EXPORT_LAYOUT_DENSE;
 		snprintf(exp->uuid_str, sizeof(exp->uuid_str), "%s", e->export_uuid);
 		snprintf(exp->snapshot, sizeof(exp->snapshot), "%s", e->snapshot);
+
 		TAILQ_INSERT_TAIL(&g_exports, exp, link);
+
+		/* Watch the lease, exactly as s3lvol_export_add() does for an export
+		 * created here: the importers this registry describes may still be
+		 * reading, and only the lease can say so.
+		 *
+		 * Without this the entry sits at lease_checked == false for ever --
+		 * nothing ever performs the first GET -- and s3lvol_export_pinning()
+		 * takes its "assume an importer may be reading" branch on every
+		 * query. Safe, but permanent: an export whose importer went away
+		 * years ago still pins its snapshot, and the registry only grows.
+		 * With the poller running, a lease that is absent or stale lets the
+		 * delete through, and releasing the export is what takes the entry
+		 * out of the registry.
+		 *
+		 * Deliberately *not* a filter on expires_at. That stamp is written
+		 * once at export creation and never refreshed, while the importer
+		 * renews its lease past the manifest TTL for as long as it is
+		 * reading -- s3lvol_export_pinning() ignores expires_at whenever a
+		 * fresh lease exists for precisely that reason. Dropping entries by
+		 * TTL here would forget a live importer's pin, and a later delete of
+		 * that snapshot would leave it reading holes. */
+		s3lvol_export_lease_start(exp);
 
 		if (exp->layout == S3_EXPORT_LAYOUT_REF) {
 			SPDK_NOTICELOG("lvstore '%s' still owes export %s the snapshot "
 				       "'%s'%s\n", s3lvol_lvstore_get_name(lvs),
 				       exp->uuid_str, exp->snapshot,
 				       s3lvol_export_is_expired(exp) ?
-				       " (expired, no longer pinned)" : "");
+				       " (deadline passed; the lease decides)" : "");
 		}
 	}
 

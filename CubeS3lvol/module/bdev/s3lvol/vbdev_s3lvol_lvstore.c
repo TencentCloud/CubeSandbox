@@ -2646,51 +2646,33 @@ struct lvol_destroy_ctx {
 	void                    *cb_arg;
 };
 
-/* Record the "a delete was asked for and refused" mark for a snapshot.
+/* Record the "a delete was asked for and refused" mark.
  *
- * Only snapshots get one: an ordinary volume's refusals are the caller's own
- * doing (deactivate it first), while a snapshot's blockers -- an export pin, a
- * sibling clone, a running decouple -- clear on their own, and the mark is what
- * lets --retry-pending come back to it. Keyed by uuid, so it cannot survive into
- * a same-named object.
+ * Called only from the refusals in s3lvol_lvol_destroy() that clear on their own
+ * -- an export pin (published or in flight), more than one clone, a running
+ * decouple -- which is what makes the mark useful: the blocker goes away without
+ * the caller doing anything, and --retry-pending comes back to finish the delete.
+ * Keyed by uuid, so it cannot survive into a same-named object.
  *
- * Snapshot-ness is decided without needing the blob open. spdk_blob_is_read_only()
- * would, and the refusals that call this fire before any blob check -- a
- * deactivated snapshot still pinned by an export took that path and recorded
- * nothing. spdk_blob_get_clones() takes a blob_id, which stays valid once the
- * blob is closed (the same reason lvol->blob_id is used over
- * spdk_blob_get_id(lvol->blob) further down), and answers 0 clones with rc == 0
- * for a blob that is not a snapshot at all. */
-bool
-s3lvol_lvol_is_snapshot(struct spdk_lvol *lvol)
-{
-	size_t clone_count = 0;
-	int rc;
-
-	if (!lvol || !lvol->lvol_store || !lvol->lvol_store->blobstore) {
-		return false;
-	}
-
-	/* Open blob: the direct question is cheaper and exact. */
-	if (lvol->blob) {
-		return spdk_blob_is_read_only(lvol->blob);
-	}
-
-	rc = spdk_blob_get_clones(lvol->lvol_store->blobstore, lvol->blob_id,
-				  NULL, &clone_count);
-	if (rc != 0 && rc != -ENOMEM) {
-		return false;
-	}
-	return clone_count > 0;
-}
-
+ * Deliberately does not test snapshot-ness first. It cannot be answered reliably
+ * with the blob closed, and these refusals fire before any blob check: an export
+ * pin or a queued decouple is reported for a deactivated volume just the same.
+ * spdk_blob_is_read_only() needs the blob open, and spdk_blob_get_clones() only
+ * finds blobs that something still references as a parent -- after a re-attach a
+ * snapshot whose last clone was deleted has no entry at all
+ * (bs_blob_list_add() at blobstore.c:3780 rebuilds the registry from each blob's
+ * parent_id), so it would answer "not a snapshot" for exactly the case the mark
+ * is for.
+ *
+ * The asymmetry decides it: marking something that is not a snapshot costs one
+ * retried delete the caller did ask for, while not marking loses the request
+ * entirely. Only the three blockers above reach here anyway -- an ordinary
+ * volume's "deactivate it first" refusal is answered in the RPC layer and never
+ * gets this far. */
 static void
 destroy_mark_pending(struct spdk_lvol *lvol)
 {
 	if (!lvol || !lvol->lvol_store) {
-		return;
-	}
-	if (!s3lvol_lvol_is_snapshot(lvol)) {
 		return;
 	}
 	s3lvol_snapshot_pending_set(&lvol->lvol_store->uuid, &lvol->uuid,

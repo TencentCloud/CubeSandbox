@@ -854,6 +854,11 @@ static const struct spdk_json_object_decoder rpc_resize_lvol_decoders[] = {
 
 static const struct spdk_json_object_decoder rpc_delete_lvol_decoders[] = {
 	{"lvol_name", offsetof(struct rpc_lvol_name, lvol_name), spdk_json_decode_string, false},
+	/* Optional, and it *drives* the lookup: without it rpc_lookup_lvol()
+	 * resolves the name across every loaded lvstore and answers "not found
+	 * in any lvstore" when two of them share it -- which would leave exactly
+	 * the ambiguous case the uuids below exist for impossible to delete. */
+	{"lvs_name",  offsetof(struct rpc_lvol_name, lvs_name),  spdk_json_decode_string, true},
 	/* Optional, and checked rather than used for the lookup: a caller that
 	 * knows which object it means says so, and gets a refusal instead of a
 	 * delete if the name has moved on. */
@@ -863,10 +868,12 @@ static const struct spdk_json_object_decoder rpc_delete_lvol_decoders[] = {
 
 /* Refuse when the caller named a uuid and the resolved lvol is not it.
  *
- * The lookup stays by name -- that is what every other lvol RPC does, and the
- * bdev name is derived from it -- but a caller that carries a uuid gets it
- * verified. This is what stops a retry issued for one snapshot from deleting a
- * later object that happens to have the same name.
+ * The lookup itself stays by name (scoped to lvs_name when the caller gave one)
+ * -- that is what every other lvol RPC does, and the bdev name is derived from
+ * it. The uuids are the confirmation step: a caller that knows which object it
+ * means gets a refusal rather than a delete when the name has since moved to a
+ * different one. Together with lvs_name they cover both failure modes: the wrong
+ * lvstore, and a replacement that reused the name.
  *
  * Returns false when it has already answered the request. */
 static bool
@@ -1625,11 +1632,14 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 				spdk_json_write_named_string(w, "bdev_name", lvol->bdev->name);
 			}
 			spdk_json_write_named_uuid(w, "uuid", &lvol->uuid);
-			/* Answered without needing the blob open: a deactivated
-			 * snapshot is still a snapshot, and --retry-pending gates
-			 * on this field. */
+			/* Best effort, and only ever informational: a snapshot is a
+			 * read-only blob, which cannot be asked once the blob is
+			 * closed, so a deactivated snapshot reports false here.
+			 * Nothing gates on it -- --retry-pending keys off
+			 * delete_pending, which the target records for snapshots
+			 * only. */
 			spdk_json_write_named_bool(w, "is_snapshot",
-				s3lvol_lvol_is_snapshot(lvol));
+				lvol->blob && spdk_blob_is_read_only(lvol->blob));
 			/* Cluster counts mirror rcow_get_lvol: truthful while the
 			 * blob is open, 0 otherwise. */
 			if (lvol->blob != NULL) {

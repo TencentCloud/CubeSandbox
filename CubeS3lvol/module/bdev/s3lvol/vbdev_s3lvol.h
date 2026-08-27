@@ -745,15 +745,6 @@ int s3lvol_snapshot_query_lvol(struct spdk_lvol *lvol,
 			       bool *pending);
 
 /**
- * Whether an lvol is a snapshot, answerable with the blob closed.
- *
- * spdk_blob_is_read_only() needs an open blob, so a deactivated snapshot reads
- * as "not a snapshot" through it -- which is how a marked-but-deactivated
- * snapshot became invisible to --retry-pending.
- */
-bool s3lvol_lvol_is_snapshot(struct spdk_lvol *lvol);
-
-/**
  * Record / test / clear the "a delete of this snapshot was attempted and could
  * not complete" mark. There is no deferred-completion poller: the mark only
  * shows up in rcow_get_lvstores, and the caller (today

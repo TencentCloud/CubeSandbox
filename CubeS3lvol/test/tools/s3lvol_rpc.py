@@ -223,32 +223,37 @@ def retry_pending_deletes(args):
         if not isinstance(lvs, dict):
             continue
         lvs_uuid = lvs.get("uuid", "")
+        lvs_name = lvs.get("lvs_name", "")
         for l in lvs.get("lvols") or []:
             # delete_pending is the record that a delete was asked for and
             # refused; deletable=YES means the blocker has cleared. Together
             # they are exactly "a user asked, it failed, retry now".
             #
-            # delete_pending alone establishes snapshot-ness: the target only
-            # ever records a mark for a snapshot. is_snapshot is not required
-            # on top of it -- and must not be, since a snapshot deactivated
-            # while it waited for its blocker to clear would then never be
-            # retried.
+            # is_snapshot is deliberately not required on top: the target only
+            # records a mark for a volume something still referenced (an export
+            # pin, a sibling clone, a running decouple), and is_snapshot cannot
+            # be answered once the blob is closed -- requiring it would skip a
+            # snapshot that was deactivated while it waited.
             if l.get("delete_pending") and l.get("deletable") == "YES":
                 targets.append((l.get("name", ""), l.get("uuid", ""),
-                                lvs_uuid))
+                                lvs_uuid, lvs_name))
 
     if not targets:
         print("no pending snapshot deletes to retry")
         return 0
 
     done = 0
-    for name, lvol_uuid, lvs_uuid in targets:
-        # The uuids come from the same rcow_get_lvstores answer the mark was
-        # read from, and the target refuses if the name has since moved to a
-        # different object. Deleting by name alone would let a snapshot that
-        # was recreated under the same name be deleted by a retry meant for
-        # its predecessor.
+    for name, lvol_uuid, lvs_uuid, lvs_name in targets:
+        # lvs_name drives the lookup, the uuids verify it. Without lvs_name the
+        # target resolves by name across every loaded lvstore and answers "not
+        # found in any lvstore" when two of them share the name -- so exactly
+        # the ambiguous case the uuid keying exists for could never be retried.
+        # With it, the lookup is scoped to one lvstore and the uuids then
+        # confirm the object is the one the mark was recorded for, rather than a
+        # replacement that reused the name.
         params = {"lvol_name": name}
+        if lvs_name:
+            params["lvs_name"] = lvs_name
         if lvol_uuid:
             params["lvol_uuid"] = lvol_uuid
         if lvs_uuid:
