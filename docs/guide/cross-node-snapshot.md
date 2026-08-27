@@ -39,7 +39,7 @@ cubemastercli tpl create-from-image \
   --probe-path /health
 ```
 
-Confirm `BACKEND` is `s3` with `cubemastercli cubebox template list`. Sandboxes and snapshots created from that template inherit `s3` (see [CLI fields](#3-cli-fields-for-cross-node-restore)).
+Confirm `BACKEND` is `s3` with `cubemastercli cubebox template list`. Sandboxes and snapshots created from that template inherit `s3` (see [CLI fields](#4-cli-fields-for-cross-node-restore)).
 
 ### 1.2 Origin first; cross-node only when the origin cannot schedule
 
@@ -120,11 +120,39 @@ To point at your own S3 store, follow the [CubeS3lvol README](https://github.com
 
 ---
 
-## 3. CLI fields for cross-node restore
+## 3. Storage requirements on every node
+
+Snapshot objects live in shared S3, but **every node that runs the s3lvol target also needs a local WAL image**. Cross-node restore depends on it: writes to the snapshot are staged on local disk first and flushed to S3 asynchronously, and a node without the image can neither take snapshots nor restore them.
+
+### 3.1 The WAL image
+
+- Path: `/data/cubelet/rcow/wal_bdev.img`
+- Logical size: **512 GiB** by default, created as a **sparse** file by `install.sh`
+- Created once; the journal / WAL / cache split is fixed at creation and cannot be resized afterwards (only by re-creating the image)
+
+The default 512 GiB is three regions:
+
+| Region | Default size | Purpose |
+|--------|-------------|---------|
+| Journal | 1024 MiB | records of in-flight writes, replayed when the lvstore is attached |
+| WAL | 32768 MiB (32 GiB) | locally staged writes before they are flushed to S3 |
+| Chunk cache | 490496 MiB (≈479 GiB) | local cache of recently written chunks |
+
+> The image is **sparse**: provisioning 512 GiB of logical space does not consume 512 GiB of disk up front. Plan physical disk usage around the write working set, not the logical size.
+
+### 3.2 Cluster planning
+
+- **Every node that may restore cross-node needs its own WAL image on local disk** — compute nodes running sandboxes, and control nodes that run the s3lvol target, included.
+- The region sizes are set at install time via `RCOW_JOURNAL_MB` / `RCOW_WAL_MB` / `RCOW_CACHE_MB` (one-click install), or the equivalent runtime env in the CubeS3lvol config. Tuning them only matters **before the first start** — the layout is frozen once the image exists.
+- The image does not hold snapshot data permanently: it is a write buffer plus a cache. The durable copy is in S3.
+
+---
+
+## 4. CLI fields for cross-node restore
 
 `cubemastercli` adds `backend` / `remote_status` / `origin_node` columns, and `--backend` on template create. Node list and isolate live on `cubeopscli` (CubeOps, default port `3010`); see [Node Operations](./node-operations.md) and [CLI Tools](./cli-tools.md).
 
-### 3.1 `cubebox list`
+### 4.1 `cubebox list`
 
 Two extra columns show whether a sandbox uses S3 and whether its pause package has synced:
 
@@ -139,7 +167,7 @@ cubemastercli cubebox list --all
 
 Non-paused rows sort by create time descending; paused rows come last and include `pause_snap`. After a successful Resume those columns return to `-`.
 
-### 3.2 `cubebox snapshot list` / `snapshot info`
+### 4.2 `cubebox snapshot list` / `snapshot info`
 
 | Field | Meaning |
 |-------|---------|
@@ -153,7 +181,7 @@ cubemastercli cubebox snapshot list
 cubemastercli cubebox snapshot info --snapshot-id <snapshot-id>
 ```
 
-### 3.3 `cubebox template list` / `template info`
+### 4.3 `cubebox template list` / `template info`
 
 The template list adds a `BACKEND` column; `template info` prints `backend: <xfs|s3>`. That value is the default CoW backend for sandboxes and snapshots created from the template.
 
@@ -162,7 +190,7 @@ cubemastercli cubebox template list
 cubemastercli cubebox template info <template-id>
 ```
 
-### 3.4 `tpl create-from-image --backend xfs|s3`
+### 4.4 `tpl create-from-image --backend xfs|s3`
 
 ```bash
 # Declare the backend at template create; omit to keep historical xfs
@@ -174,7 +202,7 @@ cubemastercli tpl create-from-image \
 
 > The backend is fixed at **template / sandbox create**. Snapshot create does **not** take a backend flag; it always uses the persisted backend.
 
-### 3.5 `cubeopscli node list`
+### 4.5 `cubeopscli node list`
 
 The default table shows health and isolation. HostFacts are in JSON:
 
@@ -187,13 +215,13 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
 
 ---
 
-## 4. Benchmarks
+## 5. Benchmarks
 
 Times are **milliseconds**. **avg** / **p95** are **per-sandbox** create latency (when that sandbox became `running`), not batch wall time divided by concurrency.
 
 Figures below were measured on 2026-08-25. Numbers depend on hardware, image, and dirty-page load; treat them as a same-cluster xfs vs s3 comparison, not a SLA.
 
-### 4.1 Environment
+### 5.1 Environment
 
 Two identical Tencent Cloud CVM nodes (nested KVM), one control+compute and one compute-only.
 
@@ -205,7 +233,7 @@ Two identical Tencent Cloud CVM nodes (nested KVM), one control+compute and one 
 | Memory | 30 GiB |
 | Data disk | ~1 TB virtio, XFS on `/data` |
 
-### 4.2 Template
+### 5.2 Template
 
 Both backends use the **same** image and sandbox spec. Each template has a replica on **one** compute node (the origin). Local runs isolate the peer so jobs stay on the origin; cross-node FromSnap isolates the origin.
 
@@ -217,7 +245,7 @@ Both backends use the **same** image and sandbox spec. Each template has a repli
 | Probe | port `49983`, path `/health` |
 | Backends | `xfs` and `s3`, created with `tpl create-from-image --backend …` |
 
-### 4.3 Method
+### 5.3 Method
 
 Keep this method if you re-measure. Do not change table columns or round semantics.
 
@@ -228,7 +256,7 @@ Keep this method if you re-measure. Do not change table columns or round semanti
 5. **Create from snapshot (S3 local):** isolate the peer; origin still has the replica. **S3 cross-node:** wait until the snapshot is `ready`, isolate the origin, create on the peer.
 6. XFS has no share step and cannot restore cross-node.
 
-### 4.4 Cold start
+### 5.4 Cold start
 
 Create from the **template** (`Sandbox.create(template=tpl-…)`).
 
@@ -237,7 +265,7 @@ Create from the **template** (`Sandbox.create(template=tpl-…)`).
 | 1           | 50.9    | 57.2    | 430.6  | 471.4  |
 | 5           | 59.5    | 81.2    | 747.4  | 885.8  |
 
-### 4.5 Snapshot / Pause / Resume
+### 5.5 Snapshot / Pause / Resume
 
 | Operation | xfs avg | xfs p95 | s3 local avg | s3 local p95 | s3 cross-node avg | s3 cross-node p95 |
 |-----------|---------|---------|--------------|--------------|-------------------|-------------------|
@@ -248,7 +276,7 @@ Create from the **template** (`Sandbox.create(template=tpl-…)`).
 
 ---
 
-## 5. Known limitations
+## 6. Known limitations
 
 1. **S3lvol deletes snapshot objects asynchronously, and referenced snapshots are refused.** After you delete an S3 snapshot, CubeS3lvol finishes removing the objects in the background. The delete RPC returning does not mean the objects are gone from S3 immediately.
 
@@ -272,7 +300,7 @@ Create from the **template** (`Sandbox.create(template=tpl-…)`).
 
 ---
 
-## 6. See also
+## 7. See also
 
 - [Snapshot, Rollback & Clone](./snapshot-rollback-clone.md)
 - [Sandbox Lifecycle](./lifecycle.md)
