@@ -58,13 +58,22 @@ func Create(ctx context.Context, calleeEp string,
 
 func AppSnapshot(ctx context.Context, calleeEp string,
 	req *cubebox.AppSnapshotRequest) (*cubebox.AppSnapshotResponse, error) {
-	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
+
+	rpcCtx, cancel := appSnapshotContext(ctx,
+		config.GetConfig().CubeletConf.AppSnapshotTimeoutInSec)
+	defer cancel()
+
+	conn, err := grpcconn.GetWorkerConn(rpcCtx, calleeEp)
 	if err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
 	}
 	defer conn.Close()
 	c := cubebox.NewCubeboxMgrClient(conn.Value())
-	return c.AppSnapshot(ctx, req)
+	return c.AppSnapshot(rpcCtx, req)
+}
+
+func appSnapshotContext(ctx context.Context, timeoutInSec int) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, time.Duration(timeoutInSec)*time.Second)
 }
 
 func CommitSandbox(ctx context.Context, calleeEp string,

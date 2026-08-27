@@ -134,11 +134,27 @@ Under `cubelet_conf`:
 
 | Key | Purpose |
 |-----|---------|
-| `default_timeout_insec` | Server default **sandbox idle TTL** (seconds) when the client omits `timeout`. **Unset or `<= 0` means no cluster-wide idle timeout** (sandboxes never time out from idle unless the client sets `timeout`). The repository ships `-1` for this “no default” behavior. Set a positive value (e.g. `300`) in production if you want automatic reclamation of sandboxes created without an explicit TTL. |
-| `create_timeout_insec` | Create/scheduling RPC deadline only — **not** sandbox idle TTL. Defaults to `300` when unset. |
-| `common_timeout_insec` | Generic CubeMaster→Cubelet RPC timeout for non-create paths. |
+| `default_timeout_insec` | The cluster-wide default **sandbox idle TTL** (in seconds), used when the client **does not pass** `timeout`. **If unset or `<= 0`, no cluster-wide idle timeout is applied** (the sandbox is not automatically reclaimed because it is idle unless the client explicitly sets `timeout`). The default is `-1`, meaning “no cluster default.” To automatically reclaim sandboxes created without an explicit TTL in production, set a positive value such as `300` seconds. |
+| `create_timeout_insec` | Timeout for the sandbox create/scheduling RPC. The default is `300` seconds. |
+| `common_timeout_insec` | Generic CubeMaster→Cubelet RPC timeout for non-create paths. The default is `30` seconds. |
+| `create_image_timeout_insec` | Timeout for CubeMaster to instruct a single compute node to **download an image**. It covers downloading, validating, and storing the rootfs artifact. Increase it for large images, low-bandwidth connections, or slow disks. The default is `300` seconds. |
+| `app_snapshot_timeout_insec` | Timeout for CubeMaster to instruct a single compute node to **create a template**. It covers starting the temporary VM, waiting for its readiness probe, saving memory and disk state, cleaning up the temporary VM, and returning the result. If unset or set to a non-positive value, it defaults to `300` seconds. Increase it when network conditions are poor or the template is large. |
 
-After changing `default_timeout_insec`, restart CubeMaster and read [Sandbox lifecycle — Operational Notes](lifecycle.md#cluster-default-idle-timeout-default_timeout_insec) for client-visible behavior. For node selection, quota, labels, scheduler scoring, or template redo after adding compute nodes, see [CubeMaster Scheduler Configuration](./cubemaster-scheduler-config.md).
+The image-download and template-creation timeouts are independent and each starts when its corresponding RPC begins. Example configuration:
+
+```yaml
+cubelet_conf:
+  create_image_timeout_insec: 300
+  app_snapshot_timeout_insec: 600
+```
+
+After changing any of these CubeMaster settings, restart CubeMaster:
+
+```bash
+sudo systemctl restart cube-sandbox-cubemaster.service
+```
+
+For relevant details, see [Sandbox lifecycle — Operational Notes](lifecycle.md#cluster-default-idle-timeout-default_timeout_insec).
 
 ### Scenario B: a service is failing or restart-looping
 
