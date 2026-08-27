@@ -484,7 +484,7 @@ finally:
 ## 参考资料
 
 - 可运行示例 —— `0.x`（LangChain 0.3.x）：[`examples/langchain-integration/0.x`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/langchain-integration/0.x) · `1.x`（LangChain 1.x）：[`examples/langchain-integration/1.x`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/langchain-integration/1.x)
-- 自带镜像：[`docs/guide/tutorials/bring-your-own-image.md`](../tutorials/bring-your-own-image.md)
+- 自定义模板镜像：[`docs/guide/tutorials/bring-your-own-image.md`](../tutorials/bring-your-own-image.md)
 - 从镜像创建模板：[`docs/guide/tutorials/template-from-image.md`](../tutorials/template-from-image.md)
 - 快照 / 克隆 / 回滚：[`docs/guide/snapshot-rollback-clone.md`](../snapshot-rollback-clone.md)
 - 凭证保管 + 出口控制：[`docs/guide/security-proxy.md`](../security-proxy.md)

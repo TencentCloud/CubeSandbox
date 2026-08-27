@@ -1,13 +1,15 @@
 # cubesandbox-base-nginx demo
 
+[中文](README_zh.md)
+
 A minimal image that stacks nginx on top of [`cubesandbox-base`](../../docker/Dockerfile.cube-base),
-so you can test the "Bring Your Own Image" flow end-to-end without any
+so you can test the "Custom Template Images" flow end-to-end without any
 real application.
 
 - envd listens on `:49983` (Cube readiness probe) — inherited from the base image.
 - nginx listens on `:80` and serves a tiny static page.
 
-See [Bring Your Own Image (envd)](../../docs/guide/tutorials/bring-your-own-image.md)
+See [Custom Template Images](../../docs/guide/tutorials/bring-your-own-image.md)
 for the full tutorial.
 
 ## Build
@@ -36,6 +38,8 @@ docker rm -f cube-demo-nginx
 ```
 
 ## Register as a Cube template
+
+Push the image to a registry reachable by the Cube cluster, then run:
 
 ```bash
 cubemastercli tpl create-from-image \

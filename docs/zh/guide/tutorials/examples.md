@@ -8,7 +8,7 @@
 | --- | --- |
 | [代码沙箱快速入门](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/code-sandbox-quickstart) | 创建沙箱，执行 Python 和 Shell 命令，操作文件，并体验核心 E2B 兼容 API。 |
 | [浏览器沙箱（Playwright）](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/browser-sandbox) | 在 MicroVM 中运行无头 Chromium，通过 CDP 使用 Playwright 远程控制浏览器。 |
-| [自定义 nginx 镜像](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/cubesandbox-base-nginx) | 基于 `cubesandbox-base` 构建最小 nginx 镜像，完整验证自带镜像接入流程。 |
+| [自定义 nginx 镜像](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/cubesandbox-base-nginx) | 基于 `cubesandbox-base` 构建最小 nginx 镜像，完整验证自定义模板镜像流程。 |
 
 ## Agent 与框架集成
 

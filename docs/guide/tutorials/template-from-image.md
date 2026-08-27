@@ -1,106 +1,45 @@
 # Creating Templates from OCI Images
 
-This guide walks you through how to create, monitor, and delete a Cube-Sandbox
-template starting from any standard OCI container image, using the
-`cubemastercli` command-line tool.
+This guide explains how to create, monitor, and delete a template from a standard OCI container image.
 
-## Overview
-
-A **template** is a pre-built, immutable rootfs snapshot that the sandbox
-runtime uses to cold-boot (or hot-start) a new sandbox instance.  Creating a
-template from an OCI image is a three-phase pipeline that runs asynchronously
-on the cluster:
-
-```
-OCI Image  ──pull──►  ext4 rootfs  ──boot──►  Snapshot  ──register──►  Template READY
-```
-
-Once the template reaches `READY` status it can be referenced by its
-`template_id` to create sandboxes.
-
----
+Before you begin, consider reading [Templates Overview](../templates.md) to understand the related concepts, including OCI images, template snapshots, ports, probes, and `envd`.
 
 ## Prerequisites
 
-- `cubemastercli` installed and on `$PATH`
-- `CUBEMASTER_ADDR` environment variable set, **or** pass `--server <host>` to
-  every command
+- `cubemastercli` installed and able to connect to CubeMaster
 - The OCI image must be accessible from the CubeMaster nodes (public registry
   or authenticated private registry)
 
-Plain HTTP registries (no TLS) must be written with an `http://` prefix, for
-example `http://harbor.internal:5000/ns/app:tag`. Without that prefix CubeMaster
-defaults to HTTPS (except localhost and RFC1918 addresses).
+> Plain HTTP registries (without TLS) must use an `http://` prefix, for example `http://harbor.internal:5000/ns/app:tag`. Without the prefix, CubeMaster uses HTTPS by default, except for localhost and RFC1918 addresses.
 
-### ⚠️ Your image must expose an HTTP server
+## Step 1 — Select an OCI Image
 
-During template creation, Cube platform boots the container and **probes it
-over HTTP** to determine when it is ready.  This means:
+`create-from-image` accepts an OCI image that has already been built and published. This guide uses the CubeSandbox base image, which includes `envd`:
 
-1. Your container image **must** run an HTTP server on a known port.
-2. You **must** pass the following flags when creating the template:
-   - `--expose-port <port>` — declare the port your HTTP server listens on
-   - `--probe <port>` — tell Cube which port to probe
-   - `--probe-path <path>` — the HTTP path Cube will `GET` (e.g. `/` or `/health`)
-3. Your entrypoint should start the HTTP server **only after** the application
-   is fully ready to serve traffic — Cube marks the template ready as soon as
-   the probe returns HTTP 2xx, and sandboxes launched from that template will
-   immediately receive requests.
+```text
+ghcr.io/tencentcloud/cubesandbox-base:latest
+```
 
-Failing to expose an HTTP server or passing wrong probe parameters will cause
-the template creation to time out.
+The image runs `envd` on port `49983` by default, so `GET /health` can be used directly as the template probe.
 
-### Sandbox readiness
+For custom template images and guidance on integrating other existing images with CubeSandbox, see [Custom Template Images](./bring-your-own-image.md).
 
-The probed port is also the readiness contract for sandboxes: because the
-template only becomes ready once the probe returns HTTP 2xx, a **running**
-sandbox created from that template is expected to serve that port immediately.
-Clients do not need to wait or retry after `create` returns, and the same holds
-for sandboxes brought back by resume or auto-resume.
-
-Two limits are worth knowing:
-
-- **Only the probed port is covered.** A service on a port that is exposed but
-  not probed may still be starting up when the sandbox begins serving traffic;
-  if you need that readiness guarantee, probe that port instead.
-- **The service itself must be healthy.** The guarantee is about the platform
-  making the port reachable — a service that crashes or stops listening inside
-  a running sandbox is unreachable until it recovers.
-
----
-
-## Step 1 — Create the Template
+## Step 2 — Create the Template from the Image
 
 Use the `tpl create-from-image` sub-command to kick off the build job:
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image     cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest \
+  --image     ghcr.io/tencentcloud/cubesandbox-base:latest \
   --writable-layer-size 1G \
-  --expose-port 9000 \
-  --probe 9000 \
-  --probe-path /
+  --expose-port 49983 \
+  --probe 49983 \
+  --probe-path /health
 ```
 
-Pass `--backend s3` to store the template (and every sandbox / snapshot derived from it) on the cluster-shared S3 CoW backend. That is required for [cross-node Pause / Resume / FromSnap](../cross-node-snapshot.md). Omit the flag to keep the historical `xfs` path.
+> Pass `--backend s3` to store the template (and every sandbox / snapshot derived from it) on the cluster-shared S3 CoW backend. That is required for [cross-node Pause / Resume / FromSnap](../cross-node-snapshot.md). Omit the flag to keep the historical `xfs` path.
 
-> **Image registry:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest` instead.
-
-On success the CLI immediately prints a `job_id` and a generated
-`template_id` and exits — the build continues **asynchronously** on the
-cluster.
-
-```
-job_id:      0042cd3a-c1d6-45fd-8757-2595ba0027e8
-template_id: tpl-4ff5adc5eea44c14b1c8dbb3
-attempt_no:  1
-artifact_id:
-status:      PENDING
-phase:       PULLING
-progress:    0%
-```
-
-#### Example — multiple ports, custom probe path, env var
+Template creation can expose multiple ports, use a custom probe path, and pass environment variables:
 
 ```bash
 cubemastercli tpl create-from-image \
@@ -113,43 +52,7 @@ cubemastercli tpl create-from-image \
   --env        MY_ENV=production
 ```
 
-> **Image registry:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` instead.
-
-#### Optional — inject envd at template build time
-
-By default, Cube uses the image as-is and does not inject `envd`. For dev or code-sandbox images that do not already include `envd`, or that need a controlled `envd` version, opt in explicitly:
-
-```bash
-cubemastercli tpl create-from-image \
-  --image     <your-image> \
-  --writable-layer-size 1G \
-  --expose-port 49983 \
-  --probe 49983 \
-  --probe-path /health \
-  --enable-inject-envd
-```
-
-| Flag | Description |
-|------|-------------|
-| `--enable-inject-envd` | Upload an `envd` binary from `cubemastercli` and bake it into the template rootfs. |
-| `--envd-path` | Local path on the machine running `cubemastercli`; used only when `--enable-inject-envd` is set. If omitted, `cubemastercli` uses its embedded default `envd` binary when available. |
-
-When `--enable-inject-envd` is set, `cubemastercli` uploads the selected `envd` binary with the create-from-image request. `--envd-path` is local to `cubemastercli`; it is not a CubeMaster host path and is never sent to CubeMaster as a path. CubeMaster validates the uploaded bytes, writes the binary to `/usr/local/bin/envd` inside the template rootfs, and includes `sha256(uploaded bytes)` in the rootfs artifact fingerprint.
-
-The uploaded `envd` must be a non-empty ELF binary no larger than 16 MiB, and it must be compatible with the target template rootfs operating system and CPU architecture. For example, a Linux x86_64 template image should receive a Linux x86_64 `envd` ELF; templates for other architectures need a matching `envd` binary.
-
-If `cubemastercli` was built without an embedded `envd` binary, `--enable-inject-envd` requires `--envd-path`.
-
-To build a `cubemastercli` binary with an embedded default `envd`, prepare the binary before building and pass `ENVD_LOCAL_PATH`:
-
-```bash
-# Use the official envd artifact once available, or a locally built envd binary for development builds.
-make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
-```
-
----
-
-## Step 2 — Monitor Progress
+## Step 3 — Monitor Progress
 
 There are two ways to follow the build job.
 
@@ -199,9 +102,8 @@ If you only want a one-shot status check without blocking:
 cubemastercli tpl status --job-id <job_id>
 ```
 
----
 
-## Step 3 — Use the Template
+## Step 4 — Use the Template
 
 Once `template_status: READY`, reference the `template_id` when creating
 sandboxes via the E2B SDK:
@@ -211,7 +113,6 @@ export CUBE_TEMPLATE_ID=tpl-748094d2f2374b0a8a37e6ec
 python CubeAPI/examples/create.py
 ```
 
----
 
 ## Querying Templates
 
@@ -273,7 +174,6 @@ cubemastercli tpl render --template-id tpl-748094d2f2374b0a8a37e6ec --json
 
 For a user-oriented walkthrough of what each output means and how to preview the effective request, see [Template Inspection and Request Preview](../template-inspection-and-preview.md).
 
----
 
 ## Deleting a Template
 
@@ -291,7 +191,6 @@ template deleted: tpl-748094d2f2374b0a8a37e6ec
 > replicas.  Any sandboxes already running from this template are **not**
 > affected, but new sandboxes can no longer be created from it.
 
----
 
 ## Troubleshooting
 
@@ -301,4 +200,4 @@ template deleted: tpl-748094d2f2374b0a8a37e6ec
 | Plain HTTP registry pull fails (`server gave HTTP response to HTTPS client`) | Image ref is missing the `http://` prefix | Use `http://harbor.internal:5000/ns/app:tag` |
 | `status: FAILED` after BUILDING | Build error (disk full, Dockerfile issue, etc.) | Re-run `tpl status --job-id <id> --json` and inspect `last_error` |
 | `distribution: 0/N ready` after READY | Artifact distribution still in progress (normal briefly) | Wait and re-run `tpl info`; if stuck check Cubelet logs on target nodes |
-| Sandbox fails readiness probe | Service not listening on the expected port/path at startup | Verify your container starts the HTTP server before signalling ready; adjust `--probe-path` if needed |
+| Sandbox readiness probe keeps failing after startup | The service is not listening on the expected port/path, or the HTTP server started before the service was fully ready | Ensure the HTTP server starts only after the application is fully ready, and verify that `--probe-path` is correct |

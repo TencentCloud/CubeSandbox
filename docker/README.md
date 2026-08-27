@@ -32,5 +32,5 @@ RUN pip install pandas
 Full user-facing tutorial (path A vs path B, entrypoint contract,
 troubleshooting) lives in the Cube docs site:
 
-- English: [Bring Your Own Image (envd)](../docs/guide/tutorials/bring-your-own-image.md)
-- 中文：[自带镜像接入 (envd)](../docs/zh/guide/tutorials/bring-your-own-image.md)
+- English: [Custom Template Images](../docs/guide/tutorials/bring-your-own-image.md)
+- 中文：[自定义模板镜像](../docs/zh/guide/tutorials/bring-your-own-image.md)

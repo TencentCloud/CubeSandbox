@@ -1,4 +1,4 @@
-# 自带镜像接入 (envd)
+# 自定义模板镜像
 
 本教程介绍如何为**你自己的应用或容器镜像**加入 `envd`，以便通过 CubeSandbox SDK 和 E2B SDK 操作沙箱。
 
@@ -75,16 +75,13 @@ cubemastercli tpl create-from-image \
 
 拿到 `template_id` 后，可以通过 CubeSandbox SDK 或 E2B SDK 创建沙箱，示例见[从 OCI 镜像制作模板](./template-from-image.md)。
 
-### 可用的基础镜像 tag
+相关实战内容见[本地与远程镜像实战](./template-build-practice.md)。
 
-| Tag                       | 基础系统       | envd 版本    |
-| ------------------------- | ------------- | ------------ |
-| `2026.16` / `latest`      | `ubuntu:22.04` | `2026.16`    |
-| `2026.16-ubuntu22.04`     | `ubuntu:22.04` | `2026.16`    |
+## 3. 往现有镜像里注入 `envd`
 
-为了保证可复现构建，**推荐 pin 到精确的 envd 版本 (`2026.16`)**。
+如果现有镜像不包含 `envd`，可以在构建自定义镜像时从 `cubesandbox-base` 复制，也可以在执行 `create-from-image` 时由 `cubemastercli` 注入。
 
-## 3. 备选：往现有镜像里注入 `envd`
+### 在 Dockerfile 中复制
 
 如果你想使用你自定义的镜像，可以用 `COPY --from=` 从 `cubesandbox-base`
 镜像中**拷贝** `envd` 和入口脚本：
@@ -126,6 +123,37 @@ CMD ["uvicorn", "app:app", "--app-dir", "/srv", "--host", "0.0.0.0", "--port", "
 ```
 
 构建、推送、创建模板的流程和第 2.2 / 2.3 节一致。
+
+### 在模板构建阶段注入
+
+如果不希望修改 Dockerfile，可以在创建模板时通过 `--enable-inject-envd` 上传并注入 `envd`：
+
+```bash
+cubemastercli tpl create-from-image \
+  --image <your-image> \
+  --writable-layer-size 1G \
+  --expose-port 49983 \
+  --probe 49983 \
+  --probe-path /health \
+  --enable-inject-envd
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `--enable-inject-envd` | 从 `cubemastercli` 上传一个 `envd` 二进制并写入模板 rootfs。 |
+| `--envd-path` | 运行 `cubemastercli` 的机器上的本地路径；仅在设置 `--enable-inject-envd` 时生效。若省略，CLI 会在可用时使用构建期内嵌的默认 `envd`。 |
+
+`--envd-path` 是运行 CLI 的机器上的路径，不是 CubeMaster 宿主机路径。CLI 会通过 `create-from-image` 的 multipart 请求上传二进制；CubeMaster 校验上传内容后，将其写入模板 rootfs 的 `/usr/local/bin/envd`，并把二进制的 SHA-256 纳入 rootfs artifact 指纹，避免复用由不同 `envd` 构建的 artifact。
+
+上传的文件必须是非空 ELF 二进制，大小不能超过 16 MiB，并与目标 rootfs 的操作系统和 CPU 架构兼容。例如，Linux x86_64 镜像需要 Linux x86_64 版本的 `envd`。
+
+如果 `cubemastercli` 构建时没有内嵌默认 `envd`，则必须同时指定 `--envd-path`。如需构建带默认 `envd` 的 CLI，请先准备二进制并执行：
+
+```bash
+make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
+```
+
+对于 `cubebox` 类型，CubeMaster 还会保留注入标记，在创建沙箱时自动包装主容器的启动命令：先在后台运行 `/usr/local/bin/envd`，再执行镜像原有命令，并补充暴露 `49983` 端口。因此这种方式无需修改原镜像的入口程序。非 `cubebox` 类型不会应用该启动包装。
 
 ## 4. 入口脚本契约
 

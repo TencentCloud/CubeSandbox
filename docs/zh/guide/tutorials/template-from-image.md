@@ -1,81 +1,45 @@
 # 从 OCI 镜像制作模板
 
-本文介绍如何使用 `cubemastercli` 命令行工具，从标准 OCI 容器镜像出发，完成模板的创建、进度监控和删除操作。
+本文介绍如何从标准 OCI 容器镜像出发，完成模板的创建、进度监控和删除操作。
 
-## 概述
-
-**模板（Template）** 是一份预构建的不可变 rootfs 快照，沙箱运行时用它来冷启动（或热启动）新的沙箱实例。从 OCI 镜像制作模板是一个在集群上**异步**执行的三阶段流水线：
-
-```
-OCI 镜像  ──拉取──►  ext4 rootfs  ──启动──►  快照  ──注册──►  模板 READY
-```
-
-模板进入 `READY` 状态后，即可通过其 `template_id` 创建沙箱实例。
-
----
+建议在开始前先阅读[模板概览](../templates.md)，了解 OCI 镜像、模板快照、端口、探针和 `envd` 等相关概念。
 
 ## 前置条件
 
-- 已安装 `cubemastercli` 并加入 `$PATH`
-- 设置环境变量 `CUBEMASTER_ADDR`，或在每条命令中加 `--server <host>`
+- 已安装 `cubemastercli` 并可以连接 CubeMaster
 - OCI 镜像须可被 CubeMaster 节点访问（公开仓库或已配置认证的私有仓库）
 
-明文 HTTP 仓库（未启用 TLS）须在镜像引用前加上 `http://`，例如 `http://harbor.internal:5000/ns/app:tag`。不加此前缀时，CubeMaster 默认走 HTTPS（localhost 和 RFC1918 地址除外）。
+> 明文 HTTP 仓库（未启用 TLS）须在镜像引用前加上 `http://`，例如 `http://harbor.internal:5000/ns/app:tag`。不加此前缀时，CubeMaster 默认走 HTTPS（localhost 和 RFC1918 地址除外）。
 
-### ⚠️ 镜像必须提供 HTTP 服务
+## 第一步 — 选择 OCI 镜像
 
-Cube 平台在制作模板时，会启动容器并**通过 HTTP 探测**容器是否已就绪。因此：
+`create-from-image` 接收一个已经构建并发布的 OCI 镜像。本教程使用预装 `envd` 的 CubeSandbox 基础镜像：
 
-1. 你的容器镜像**必须**在某个固定端口上启动一个 HTTP 服务器。
-2. 创建模板时**必须**指定以下参数：
-   - `--expose-port <port>` — 声明 HTTP 服务监听的端口
-   - `--probe <port>` — 告诉 Cube 要探测哪个端口
-   - `--probe-path <path>` — Cube 将 `GET` 的 HTTP 路径（如 `/` 或 `/health`）
-3. 你的容器入口程序应在**应用完全准备好对外提供服务之后**，再启动 HTTP 服务——Cube 在探针返回 HTTP 2xx 时即将模板标记为就绪，由此模板创建的沙箱会立刻开始接收请求。
+```text
+ghcr.io/tencentcloud/cubesandbox-base:latest
+```
 
-如果容器未暴露 HTTP 服务，或探针参数配置错误，模板制作将因超时而失败。
+该镜像中的 `envd` 默认监听 `49983`，可以直接使用 `GET /health` 作为模板探针。
 
-### 沙箱就绪语义
+如需自定义镜像模板以及将其他现有镜像接入 CubeSandbox，请参阅[自定义模板镜像](./bring-your-own-image.md)。
 
-被探测的端口同时也是沙箱的就绪契约：由于模板只有在探针返回 HTTP 2xx 后才会被标记为就绪，因此由该模板创建的**运行中**沙箱，其被探测端口在创建返回时即可提供服务。客户端无需在 `create` 返回后额外等待或重试；通过 resume / 自动恢复重新运行起来的沙箱同样适用。
-
-有两点需要注意：
-
-- **该保证只覆盖被探测的端口。** 仅用 `--expose-port` 暴露而未被探测的端口，其上的服务在沙箱开始接收流量时可能仍在启动中；如果需要同样的就绪保证，请改为探测该端口。
-- **服务自身必须健康。** 该保证针对的是平台侧的端口可达性——运行中的沙箱里若服务崩溃或停止监听，在其恢复之前仍然不可访问。
-
----
-
-## 第一步 — 创建模板
+## 第二步 — 从镜像创建模板
 
 使用 `tpl create-from-image` 子命令发起构建任务：
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image     cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest \
+  --image     ghcr.io/tencentcloud/cubesandbox-base:latest \
   --writable-layer-size 1G \
-  --expose-port 9000 \
-  --probe 9000 \
-  --probe-path /
+  --expose-port 49983 \
+  --probe 49983 \
+  --probe-path /health
 ```
 
-加上 `--backend s3` 后，模板及其派生的沙箱 / 快照会走集群共享的 S3 CoW 后端，这是 [跨机 Pause / Resume / FromSnap](../cross-node-snapshot.md) 的前提。省略该标志则沿用历史 `xfs` 路径。
+> 加上 `--backend s3` 后，模板及其派生的沙箱 / 快照会走集群共享的 S3 CoW 后端，这是 [跨机 Pause / Resume / FromSnap](../cross-node-snapshot.md) 的前提。省略该标志则沿用历史 `xfs` 路径。
 
-> **镜像仓库说明：** 国内优先使用 `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest`；境外访问推荐使用 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest`。
 
-命令成功后立即返回 `job_id` 和自动生成的 `template_id` 并退出，构建任务在集群后台继续执行：
-
-```
-job_id:      0042cd3a-c1d6-45fd-8757-2595ba0027e8
-template_id: tpl-4ff5adc5eea44c14b1c8dbb3
-attempt_no:  1
-artifact_id:
-status:      PENDING
-phase:       PULLING
-progress:    0%
-```
-
-#### 示例 — 多端口 + 自定义探针路径 + 环境变量
+构建模板的过程可以暴露多个端口以及自定义探针路径，也可以传入环境变量
 
 ```bash
 cubemastercli tpl create-from-image \
@@ -88,43 +52,8 @@ cubemastercli tpl create-from-image \
   --env        MY_ENV=production
 ```
 
-> **镜像仓库说明：** 国内优先使用 `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`；境外访问推荐使用 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`。
 
-#### 可选 — 在模板构建阶段注入 envd
-
-默认情况下，Cube 会按原样使用镜像，不会注入 `envd`。如果你的开发环境或代码沙箱镜像尚未包含 `envd`，或需要使用受控版本的 `envd`，可以显式开启：
-
-```bash
-cubemastercli tpl create-from-image \
-  --image     <your-image> \
-  --writable-layer-size 1G \
-  --expose-port 49983 \
-  --probe 49983 \
-  --probe-path /health \
-  --enable-inject-envd
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--enable-inject-envd` | 从 `cubemastercli` 上传一个 `envd` 二进制并写入模板 rootfs。 |
-| `--envd-path` | 运行 `cubemastercli` 的机器上的本地路径；仅在设置 `--enable-inject-envd` 时生效。若省略该参数，`cubemastercli` 会在可用时使用构建期内嵌的默认 `envd`。 |
-
-设置 `--enable-inject-envd` 后，`cubemastercli` 会选择 `envd` 二进制并通过 create-from-image 的 multipart 请求上传给 CubeMaster。`--envd-path` 是 `cubemastercli` 本地路径，不是 CubeMaster 宿主机路径，也不会作为路径发送给 CubeMaster。CubeMaster 只校验并注入本次请求上传的二进制，将其写入模板 rootfs 内的 `/usr/local/bin/envd`，并把 `sha256(uploaded bytes)` 纳入 rootfs artifact 指纹，避免复用由不同 `envd` 构建出的 artifact。
-
-上传的 `envd` 必须是非空 ELF 二进制，大小不能超过 16 MiB，并且需要与目标模板 rootfs 的操作系统和 CPU 架构兼容。例如，为 Linux x86_64 镜像注入的 `envd` 应该是可在该环境中运行的 Linux x86_64 ELF；如果模板镜像是其他架构，需要提供对应架构的 `envd`。
-
-如果 `cubemastercli` 构建时没有内嵌默认 `envd`，则使用 `--enable-inject-envd` 时必须显式传入 `--envd-path`。
-
-构建带内嵌默认 `envd` 的 `cubemastercli` 时，请先准备好 `envd` 二进制，然后在构建时传入 `ENVD_LOCAL_PATH`：
-
-```bash
-# 可使用官方 envd artifact（发布后）或开发环境中本地构建的 envd。
-make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
-```
-
----
-
-## 第二步 — 监控进度
+## 第三步 — 监控进度
 
 有两种方式跟踪构建任务。
 
@@ -173,9 +102,8 @@ template_status:           READY
 cubemastercli tpl status --job-id <job_id>
 ```
 
----
 
-## 第三步 — 使用模板
+## 第四步 — 使用模板
 
 `template_status: READY` 后，通过 `template_id` 使用 E2B SDK 创建沙箱：
 
@@ -184,7 +112,6 @@ export CUBE_TEMPLATE_ID=tpl-748094d2f2374b0a8a37e6ec
 python CubeAPI/examples/create.py
 ```
 
----
 
 ## 查询模板
 
@@ -245,7 +172,6 @@ cubemastercli tpl render --template-id tpl-748094d2f2374b0a8a37e6ec --json
 
 如果你更关心“应该看什么、如何一步步预览最终请求”，可继续阅读[模板检查与请求预览](../template-inspection-and-preview.md)。
 
----
 
 ## 删除模板
 
@@ -261,7 +187,6 @@ template deleted: tpl-748094d2f2374b0a8a37e6ec
 
 > ⚠️ 删除操作会同时移除模板元数据和所有节点上的 artifact 副本。已基于该模板运行的沙箱**不受影响**，但此后无法再用该模板创建新沙箱。
 
----
 
 ## 常见问题
 

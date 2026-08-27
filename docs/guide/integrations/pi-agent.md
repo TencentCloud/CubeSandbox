@@ -293,7 +293,7 @@ version = sandbox.commands.run("pi --version", timeout=60)
 ## References
 
 - Runnable example: [`examples/pi-agent-integration`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/pi-agent-integration)
-- Bring Your Own Image: [`docs/guide/tutorials/bring-your-own-image.md`](../tutorials/bring-your-own-image.md)
+- Custom Template Images: [`docs/guide/tutorials/bring-your-own-image.md`](../tutorials/bring-your-own-image.md)
 - Template from image: [`docs/guide/tutorials/template-from-image.md`](../tutorials/template-from-image.md)
 - Snapshot / Clone / Rollback: [`docs/guide/snapshot-rollback-clone.md`](../snapshot-rollback-clone.md)
 - Credential vault + egress control: [`docs/guide/security-proxy.md`](../security-proxy.md)

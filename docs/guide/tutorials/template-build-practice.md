@@ -5,7 +5,7 @@ This guide walks through two complete workflows for creating custom CubeSandbox 
 - **Option 1: Build a local image** (the image remains on the current machine and does not need to be pushed)
 - **Option 2: Use a remote image** (the image is pushed to a registry and pulled by the cluster)
 
-See also [Create Templates from OCI Image](./template-from-image.md) and [Bring Your Own Image](./bring-your-own-image.md).
+See also [Create Templates from OCI Image](./template-from-image.md) and [Custom Template Images](./bring-your-own-image.md).
 
 
 ## Prerequisites

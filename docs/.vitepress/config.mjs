@@ -180,7 +180,9 @@ export default withMermaid(defineConfig({
               text: 'Templates & Images',
               items: [
                 { text: 'Create Templates from OCI Image', link: '/guide/tutorials/template-from-image' },
-                { text: 'Bring Your Own Image', link: '/guide/tutorials/bring-your-own-image' },
+                { text: 'Custom Template Images', link: '/guide/tutorials/bring-your-own-image' },
+                { text: 'Commit a Running Sandbox', link: '/guide/tutorials/template-from-sandbox' },
+                { text: 'Pre-warm a Template Service', link: '/guide/tutorials/prewarm-template-service' },
                 { text: 'Local & Remote Image Practice', link: '/guide/tutorials/template-build-practice' },
                 { text: 'Template Inspection & Request Preview', link: '/guide/template-inspection-and-preview' },
                 { text: 'Template Aliases', link: '/guide/template-aliases' }
@@ -386,7 +388,9 @@ export default withMermaid(defineConfig({
               text: '模板与镜像',
               items: [
                 { text: '从 OCI 镜像制作模板', link: '/zh/guide/tutorials/template-from-image' },
-                { text: '自带镜像接入', link: '/zh/guide/tutorials/bring-your-own-image' },
+                { text: '自定义模板镜像', link: '/zh/guide/tutorials/bring-your-own-image' },
+                { text: '将运行中的沙箱提交为模板', link: '/zh/guide/tutorials/template-from-sandbox' },
+                { text: '预热模板服务', link: '/zh/guide/tutorials/prewarm-template-service' },
                 { text: '本地与远程镜像实战', link: '/zh/guide/tutorials/template-build-practice' },
                 { text: '模板检查与请求预览', link: '/zh/guide/template-inspection-and-preview' },
                 { text: '模板别名', link: '/zh/guide/template-aliases' }

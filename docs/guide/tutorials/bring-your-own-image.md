@@ -1,4 +1,4 @@
-# Bring Your Own Image (envd)
+# Custom Template Images
 
 This tutorial shows how to add `envd` to **your own application or container image** for use with the CubeSandbox SDK and E2B SDK.
 
@@ -78,16 +78,13 @@ cubemastercli tpl create-from-image \
 
 Once you have a `template_id`, you can use the CubeSandbox SDK or E2B SDK to create sandboxes from it. See [Create Templates from OCI Image](./template-from-image.md) for an example.
 
-### Available base image tags
+For practical examples, see [Local and Remote Image Build Examples](./template-build-practice.md).
 
-| Tag                       | Base OS       | envd version |
-| ------------------------- | ------------- | ------------ |
-| `2026.16` / `latest`      | `ubuntu:22.04` | `2026.16`    |
-| `2026.16-ubuntu22.04`     | `ubuntu:22.04` | `2026.16`    |
+## 3. Inject `envd` into an Existing Image
 
-Pin the exact envd version (`2026.16`) for reproducible builds.
+If an existing image does not contain `envd`, either copy it from `cubesandbox-base` while building a custom image or let `cubemastercli` inject it during `create-from-image`.
 
-## 3. Alternative: inject `envd` into an existing image
+### Copy It in the Dockerfile
 
 When you want to bring your own custom image, copy `envd` and the
 entrypoint **out of** `cubesandbox-base` with a `COPY --from=` stage:
@@ -130,6 +127,37 @@ CMD ["uvicorn", "app:app", "--app-dir", "/srv", "--host", "0.0.0.0", "--port", "
 ```
 
 Build, push and template creation are identical to sections 2.2 / 2.3.
+
+### Inject It During Template Creation
+
+If you do not want to modify the Dockerfile, use `--enable-inject-envd` to upload and inject `envd` while creating the template:
+
+```bash
+cubemastercli tpl create-from-image \
+  --image <your-image> \
+  --writable-layer-size 1G \
+  --expose-port 49983 \
+  --probe 49983 \
+  --probe-path /health \
+  --enable-inject-envd
+```
+
+| Option | Description |
+| --- | --- |
+| `--enable-inject-envd` | Upload an `envd` binary from `cubemastercli` and write it into the template rootfs. |
+| `--envd-path` | A local path on the machine running `cubemastercli`; used only with `--enable-inject-envd`. If omitted, the CLI uses its build-time embedded default `envd` when available. |
+
+`--envd-path` refers to the machine running the CLI, not the CubeMaster host. The CLI uploads the binary in the multipart `create-from-image` request. CubeMaster validates it, writes it to `/usr/local/bin/envd` in the template rootfs, and includes its SHA-256 in the rootfs artifact fingerprint so artifacts built with different `envd` binaries are not reused interchangeably.
+
+The uploaded file must be a non-empty ELF binary no larger than 16 MiB and compatible with the target rootfs operating system and CPU architecture. For example, a Linux x86_64 image requires a Linux x86_64 `envd` binary.
+
+If `cubemastercli` was built without an embedded default `envd`, `--envd-path` is required. To build the CLI with a default binary, prepare `envd` and run:
+
+```bash
+make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
+```
+
+For the `cubebox` instance type, CubeMaster also preserves the injection annotation and automatically wraps the main container command when creating a sandbox: it starts `/usr/local/bin/envd` in the background, executes the image's original command, and adds port `49983` to the exposed ports. The original image entrypoint therefore does not need to be changed when using this method. The command wrapper is not applied to non-`cubebox` instance types.
 
 ## 4. The entrypoint contract
 

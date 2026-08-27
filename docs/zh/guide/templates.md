@@ -1,57 +1,79 @@
 # 模板概览 (Templates)
 
-Template（模板）是 Cube-Sandbox 创建实例的基础镜像和配置快照。本页介绍模板的**概念与生命周期**。
+模板是 CubeSandbox 创建沙箱时使用的可复用运行环境。它不仅包含来自 OCI 镜像的根文件系统，还包含沙箱启动所需的配置和预热后的 MicroVM 快照。基于同一个模板可以反复创建相互隔离、环境一致的沙箱，并通过恢复快照缩短启动时间。
 
-- 使用 CLI 创建、监控、查询或删除模板，请参阅[从 OCI 镜像制作模板](./tutorials/template-from-image.md)。
-- 查看模板状态并预览最终请求，请参阅 [模板检查与请求预览](./template-inspection-and-preview.md)。
+## 核心概念
 
-## 模板生命周期 (三步制作流程)
+### OCI 镜像
 
-1. **Init (初始化构建)**
-   基于基础镜像（如 Ubuntu）和 Dockerfile，使用 Buildkit 等构建引擎，打包出满足沙箱运行需求的 rootfs 文件系统。
+OCI（Open Container Initiative）定义了容器镜像的开放标准。日常使用的 Docker 镜像通常就是 OCI 镜像：它由一组只读文件系统层和镜像配置组成，记录了操作系统文件、应用及依赖，以及 `ENTRYPOINT`、`CMD`、环境变量等启动信息。镜像一般以 `仓库/名称:标签` 引用，例如 `docker.io/library/python:3.11`，也可以用 digest 锁定具体内容。
 
-2. **Boot & Snapshot (冷启动与快照)**
-   将初始化的 rootfs 放入 MicroVM 中冷启动。等待系统和语言环境（如 Python、Node）完全加载后，对此时的内存和状态打下快照 (Snapshot)。
+CubeSandbox 不会把 OCI 镜像直接当作沙箱运行。它会拉取并展开镜像，将其转换为适合 MicroVM 使用的 rootfs，按镜像中的启动配置运行服务，然后生成可快速恢复的模板快照。因此，OCI 镜像是模板的输入，模板才是创建沙箱时使用的产物。
 
-3. **Deploy (注册与发布)**
-   将打包好的 Rootfs 和 Snapshot 文件注册到系统中，成为一个可用的 Template。后续即可通过该 Template 实现沙箱的 **热启动 (Hot Start)**，实现极速启动。
+### 什么时候制作模板快照
 
-## 将运行中的沙箱提交为模板
+CubeSandbox 拉取 OCI 镜像后，会用它启动一个临时 MicroVM。镜像中的入口程序、系统服务和应用会像正常启动沙箱一样运行。Cube 不会在进程刚启动时立刻制作模板，而是**等待指定的 HTTP 探针返回 2xx**；这个响应表示环境已经到达适合保存的时刻。随后 Cube 冻结此时的文件系统和内存状态并生成模板快照。
 
-`tpl commit` 命令用于将运行中沙箱的当前文件系统和内存状态制作成一个新模板，使用时必须通过 `--sandbox-id` 指定源沙箱。
+选择探针，本质上是在定义“什么时候算启动完成”。探针返回得太早，快照可能生成在应用仍在初始化或依赖尚未预热时；探针始终不成功，模板构建则会超时。理想的探针端点应在模板中需要预热的服务都准备完成后才返回 2xx。
 
-默认情况下，CLI 仅发送沙箱 ID。CubeMaster 会根据已保存的沙箱规格记录恢复创建该沙箱时使用的完整请求。对于没有规格记录的旧沙箱，CubeMaster 会回退到该沙箱来源模板中保存的创建请求。
+### 用端口和探针定义就绪时机
 
-CLI 会显示构建进度，并等待模板创建成功或失败。
+Cube 平台在制作模板时，会启动容器并通过 HTTP 探测容器是否已就绪。因此：
 
-可以通过 `--file <path>` 提供完整的 `CreateCubeSandboxReq`，覆盖自动恢复的创建请求。该文件会完全替代控制面恢复的请求，两者不会合并。
+1. 你的容器镜像**必须**在某个固定端口上启动一个 HTTP 服务器，并提供返回 2xx 的就绪端点；它可以来自 `envd`，也可以来自你的应用。
+2. 创建模板时**必须**指定以下参数：
+   - `--expose-port <port>` — 声明 HTTP 服务监听的端口
+   - `--probe <port>` — 告诉 Cube 要探测哪个端口
+   - `--probe-path <path>` — Cube 将 `GET` 的 HTTP 路径（如 `/` 或 `/health`）
+3. 被选择的探针端点应在**需要预热的服务完全准备好之后**才返回 HTTP 2xx。Cube 会以此为信号制作快照；如果探测的是 `envd`，该信号只表示 `envd` 本身已经就绪。
 
-使用 `--file` 时，可以通过以下网络参数修改文件请求中的 `cube_network_config`：
+一次模板构建选择一个探针端口和路径，Cube 会持续请求 `http://<sandbox>:<probe-port><probe-path>`，直到收到 HTTP 2xx 响应后制作快照。
 
-| 参数                              | 作用                       |
-| ------------------------------- | ------------------------ |
-| `--allow-internet-access=false` | 显式设置请求中的联网开关。            |
-| `--allow-out-cidr <cidr>`       | 追加允许访问的出站 CIDR；该参数可重复传入。 |
-| `--deny-out-cidr <cidr>`        | 追加禁止访问的出站 CIDR；该参数可重复传入。 |
+`envd` 是预装在 CubeSandbox 基础镜像中的一个后台服务：沙箱创建后，SDK 的“执行命令”“读写文件”和“打开终端”等操作，实际都会请求沙箱内的 `envd`。`envd` 默认监听 `49983`，其 `/health` 接口会在 `envd` 可以接收这些请求时返回 204。
 
-网络覆盖参数必须与 `--file` 一同使用。
+下面的参数配置是一个最常见的例子，表示开放 `envd` 的 49983 端口，监听探测 49983 端口，并在 `/health` 返回成功后制作模板快照：
 
 ```bash
-# 由 CubeMaster 恢复创建沙箱时使用的请求。
-cubemastercli tpl commit \
-  --sandbox-id <sandbox-id>
-
-# 使用完整的请求文件覆盖自动恢复的结果。
-cubemastercli tpl commit \
-  --sandbox-id <sandbox-id> \
-  --file template-request.json \
-  --allow-internet-access=false
+--expose-port 49983 --probe 49983 --probe-path /health
 ```
 
-提交成功后，CubeMaster 会生成一个新的 `tpl-...` 模板 ID，并在源沙箱所在的节点上创建初始副本。
+但 `envd` 就绪只代表 SDK 数据面已经就绪，不一定代表业务应用也已完成启动。如果模板需要预热 Web 应用、Jupyter 等其他服务，应把探针指向能够反映该应用就绪状态的端口和路径，详见[预热模板服务](./tutorials/prewarm-template-service.md)。
+
+> `envd` 不是制作模板的必需组件。只提供自有 Web 服务且不使用命令、文件或终端等 SDK 能力的镜像，可以不安装 `envd`，直接探测应用自己的健康检查端点。需要这些 SDK 能力时，则应使用包含 `envd` 的基础镜像，或在构建模板时注入 `envd`。具体接入方式见[自定义模板镜像](./tutorials/bring-your-own-image.md)。
+
+### 沙箱就绪语义
+
+被探测的端口同时也是沙箱的就绪契约：由于模板只有在探针返回 HTTP 2xx 后才会被标记为就绪，因此由该模板创建的**运行中**沙箱，其被探测端口在创建返回时即可提供服务。客户端无需在 `create` 创建沙箱后额外等待或重试；通过 resume / 自动恢复重新运行起来的沙箱同样适用。
+
+有两点需要注意：
+
+- **该保证只覆盖被探测的端口。** 仅用 `--expose-port` 暴露而未被探测的端口，其上的服务在沙箱开始接收流量时可能仍在启动中；如果需要同样的就绪保证，请改为探测该端口。
+- **服务自身必须健康。** 该保证针对的是平台侧的端口可达性——运行中的沙箱里若服务崩溃或停止监听，在其恢复之前仍然不可访问。
+
+
+## 如何制作模板
+
+CubeSandbox 支持两种制作方式：
+
+- **从 OCI 镜像制作**：准备包含系统、工具和应用依赖的 OCI 镜像，再由 CubeSandbox 将其转换为模板。这是创建可复现模板的常用方式，详见[从 OCI 镜像制作模板](./tutorials/template-from-image.md)。
+- **从运行中的沙箱制作**：先在沙箱内安装软件或调整环境，再将其当前文件系统和内存状态提交为新模板。适合交互式调试和快速固化环境，详见[将运行中的沙箱提交为模板](./tutorials/template-from-sandbox.md)。
+
+无论采用哪种方式，模板制作过程都可以概括为：准备根文件系统，启动 MicroVM 并等待环境就绪，生成快照，最后注册并发布模板。模板就绪后，CubeSandbox 可以用它快速创建新的沙箱。
+
+## 模板与镜像的关系
+
+OCI 镜像是制作模板的一种输入，而不是可直接启动的 CubeSandbox 模板。两者的主要区别如下：
+
+| | OCI 镜像 | CubeSandbox 模板 |
+| --- | --- | --- |
+| 包含内容 | 根文件系统和容器元数据 | 根文件系统、MicroVM 快照及沙箱运行配置 |
+| 主要用途 | 分发和复现软件环境 | 快速创建 CubeSandbox 沙箱 |
+| 使用方式 | 需要先转换为模板 | 可以直接用于创建沙箱 |
+
+因此，同一个 OCI 镜像可以根据 CPU、内存、网络、启动命令等配置制作出不同的模板；从运行中沙箱提交的模板，则会保留该沙箱提交时的文件系统和内存状态。
 
 ## 下一步
 
 - [从 OCI 镜像制作模板](./tutorials/template-from-image.md) — 完整的 CLI 指南，包括探针配置、进度监控和故障排查。
-- [跨机快照](./cross-node-snapshot.md) — `--backend s3`，以及 Resume / FromSnap 落到其他节点的条件。
-- [模板检查与请求预览](./template-inspection-and-preview.md) — 如何查看模板状态并预览最终生效的请求。
+- [将运行中的沙箱提交为模板](./tutorials/template-from-sandbox.md) — 固化沙箱当前环境，并按需覆盖创建请求。
+- [模板检查与请求预览](./template-inspection-and-preview.md) — 查看模板状态并预览最终生效的请求。
