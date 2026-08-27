@@ -68,18 +68,22 @@ sudo su root
 
 ### Install the PVM Host Kernel
 
-Go to the [CubeSandbox GitHub Releases](https://github.com/TencentCloud/CubeSandbox/releases) page, open the latest release that includes PVM kernel attachments, **right-click the matching attachment → Copy Link Address**, then download with `wget`.
+#### Download the kernel package
 
-Choose the format for your Linux distribution:
+The PVM host kernel package is published on dedicated `kernel-release-*` Releases — download the latest main package from the release page:
+
+1. Open the [GitHub Releases page](https://github.com/TencentCloud/CubeSandbox/releases?q=kernel-release-&expanded=true) (or the [CNB mirror](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases) for mainland China — filter by `kernel-release` there), and open the newest `kernel-release-*` release
+2. Download the **main package** for your distribution:
+   - RPM-based: `kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm`
+   - DEB-based: `linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb`
+
+<small>Optional assets like `kernel-headers-*` and `-dbg` are not needed.</small>
 
 #### RPM-based (OpenCloudOS, RHEL, CentOS, TencentOS, Fedora)
 
-Go to the [Releases page](https://github.com/TencentCloud/CubeSandbox/releases), find `kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm`, right-click and copy the download link:
+Install the downloaded package:
 
 ```bash
-# Replace the URL below with the actual download link you copied from the Releases page
-wget "<kernel rpm download link>"
-
 # Use --oldpackage if the host already has a newer kernel version
 rpm -ivh --oldpackage kernel-*.rpm
 ```
@@ -105,12 +109,9 @@ curl -sL https://github.com/tencentcloud/CubeSandbox/raw/master/deploy/pvm/grub/
 
 #### DEB-based (Ubuntu, Debian)
 
-Go to the [Releases page](https://github.com/TencentCloud/CubeSandbox/releases), find `linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb`, right-click and copy the download link:
+Install the downloaded package:
 
 ```bash
-# Replace the URL below with the actual download link you copied from the Releases page
-wget "<linux-image deb download link>"
-
 dpkg -i linux-image-*opencloudos9.cubesandbox.pvm.host*.deb
 ```
 

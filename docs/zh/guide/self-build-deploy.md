@@ -57,7 +57,26 @@
 
 ### 1.1 准备内核文件
 
-获取编译好的 `vmlinux` 内核文件（自行编译或使用预编译版本），放置到指定目录：
+将编译好的 `vmlinux` 内核文件放入指定目录，两种方式：
+
+**方式 A —— 下载预编译内核（推荐）**
+
+Guest 内核已发布在专属的 `kernel-release-*` Release 上，无需自行编译：
+
+```bash
+# 普通（裸金属/KVM）guest 内核 —— 按目标架构选择
+wget -O deploy/one-click/assets/kernel-artifacts/vmlinux \
+  "https://cnb.cool/CubeSandbox/CubeSandbox/-/releases/download/kernel-release-260812-1/vmlinux-amd64"
+# （aarch64 使用 vmlinux-arm64）
+
+# 若目标主机以 PVM 方式部署，另需下载 PVM guest 内核
+wget -O deploy/one-click/assets/kernel-artifacts/vmlinux-pvm \
+  "https://cnb.cool/CubeSandbox/CubeSandbox/-/releases/download/kernel-release-260812-1/vmlinux-pvm-amd64"
+```
+
+上面的 tag 仅为示例 —— 最新 tag、CNB 镜像及完整资产列表见[下载与 Release 说明](./downloads.md)。
+
+**方式 B —— 自行编译 `vmlinux`**
 
 ```bash
 cp /path/to/vmlinux deploy/one-click/assets/kernel-artifacts/

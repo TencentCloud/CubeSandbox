@@ -68,18 +68,22 @@ sudo su root
 
 ### 安装 PVM 宿主机内核
 
-前往 [CubeSandbox Releases](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases) 页面，打开最新包含 PVM 内核附件的 Release，**在对应附件上右键 → 复制链接地址**，然后用 `wget` 下载。
+#### 下载内核包
 
-根据你的 Linux 发行版选择对应格式：
+PVM 宿主机内核包发布在专属的 `kernel-release-*` Release 上，请到发布页下载最新的内核主包：
+
+1. 打开 [CubeSandbox Releases 页面](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases)，在过滤框输入 `kernel-release`，打开最新的一个
+2. 按你的 Linux 发行版下载**内核主包**：
+   - RPM 系：`kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm`
+   - DEB 系：`linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb`
+
+<small>`kernel-headers-*`、`-dbg` 等为可选包，无需下载。</small>
 
 #### RPM 系（OpenCloudOS、RHEL、CentOS、TencentOS、Fedora）
 
-在 [Release 附件列表](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases/) 中找到 `kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm`，右键复制下载链接：
+安装下载好的内核包：
 
 ```bash
-# 将下面的 URL 替换为你从 Releases 页面右键复制的实际下载链接
-wget "<kernel rpm 下载链接>"
-
 # 若宿主机已有更高版本内核，--oldpackage 跳过版本号比较
 rpm -ivh --oldpackage kernel-*.rpm
 ```
@@ -105,12 +109,9 @@ curl -sL https://cnb.cool/CubeSandbox/CubeSandbox/-/git/raw/master/deploy/pvm/gr
 
 #### DEB 系（Ubuntu、Debian）
 
-在 [Release 附件列表](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases/) 中找到 `linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb`，右键复制下载链接：
+安装下载好的内核包：
 
 ```bash
-# 将下面的 URL 替换为你从 Releases 页面右键复制的实际下载链接
-wget "<linux-image deb 下载链接>"
-
 dpkg -i linux-image-*opencloudos9.cubesandbox.pvm.host*.deb
 ```
 

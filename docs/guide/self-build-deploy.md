@@ -57,7 +57,26 @@ These steps are performed on the **build machine**.
 
 ### 1.1 Prepare the Kernel
 
-Obtain a compiled `vmlinux` kernel file (either compile it yourself or use a prebuilt one) and place it in the designated directory:
+Get a compiled `vmlinux` kernel file into the designated directory. Two options:
+
+**Option A — download a prebuilt kernel (recommended)**
+
+Guest kernels are published on dedicated `kernel-release-*` Releases, so you don't have to compile one yourself:
+
+```bash
+# Standard (bare-metal/KVM) guest kernel — pick the target architecture
+wget -O deploy/one-click/assets/kernel-artifacts/vmlinux \
+  "https://github.com/TencentCloud/CubeSandbox/releases/download/kernel-release-260812-1/vmlinux-amd64"
+# (use vmlinux-arm64 on aarch64)
+
+# If the target host deploys with PVM, also fetch the PVM guest kernel
+wget -O deploy/one-click/assets/kernel-artifacts/vmlinux-pvm \
+  "https://github.com/TencentCloud/CubeSandbox/releases/download/kernel-release-260812-1/vmlinux-pvm-amd64"
+```
+
+The tag above is an example — see [Downloads & Releases](./downloads.md) for the latest tag, the CNB mirror, and the full asset list.
+
+**Option B — compile your own `vmlinux`**
 
 ```bash
 cp /path/to/vmlinux deploy/one-click/assets/kernel-artifacts/

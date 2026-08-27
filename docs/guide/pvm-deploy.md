@@ -46,6 +46,10 @@ Purchase an **x86_64** cloud server from any cloud provider — no special requi
 
 **OpenCloudOS 9 (RPM-based) is the recommended OS.** The Cube Sandbox PVM host kernel is built on the OpenCloudOS kernel, so choosing OpenCloudOS 9 gives the best compatibility with the fewest distribution-specific differences to handle. Other mainstream distributions — Ubuntu, Debian, CentOS, etc. — are equally supported; just follow the corresponding section below.
 
+> 📌 **Shortcut for OpenCloudOS 9 users**
+> The Cube PVM host kernel package is also available on the official OpenCloudOS yum repository — `dnf install` installs it directly, no manual rpm download needed, and the whole deployment takes about 5 commands.
+> 👉 [One-command CubeSandbox deployment on OpenCloudOS 9 — walkthrough (Chinese)](https://mp.weixin.qq.com/s/oGAaUpze_uB_uzyvuYJSIg)
+
 ::: tip Recommended specifications
 - CPU: ≥ 4 cores
 - RAM: ≥ 8 GB
@@ -54,18 +58,22 @@ Purchase an **x86_64** cloud server from any cloud provider — no special requi
 
 ## Step 1: Install the PVM Host Kernel
 
-Go to the [CubeSandbox GitHub Releases](https://github.com/TencentCloud/CubeSandbox/releases) page, open the latest release that includes PVM kernel assets, then **right-click each asset → Copy link address** and paste the URL into the `wget` commands below.
+### Download the kernel package
 
-Choose the package format that matches your Linux distribution:
+The PVM host kernel package is published on dedicated `kernel-release-*` Releases — download the latest main package from the release page:
+
+1. Open the [GitHub Releases page](https://github.com/TencentCloud/CubeSandbox/releases?q=kernel-release-&expanded=true) (or the [CNB mirror](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases) for mainland China — filter by `kernel-release` there), and open the newest `kernel-release-*` release
+2. Download the **main package** for your distribution:
+   - RPM-based (OpenCloudOS, RHEL, CentOS, TencentOS, Fedora): `kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm`
+   - DEB-based (Ubuntu, Debian): `linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb`
+
+<small>Optional assets like `kernel-headers-*` and `-dbg` are not needed.</small>
 
 ### RPM-based (OpenCloudOS, RHEL, CentOS, TencentOS, Fedora)
 
-Go to the [Releases page](https://github.com/TencentCloud/CubeSandbox/releases), find `kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm`, right-click and copy the download link:
+Install the downloaded package:
 
 ```bash
-# Replace the URLs below with the actual download links copied from the Releases page
-wget "<kernel rpm download URL>"
-
 # --oldpackage skips the version check if a newer kernel is already installed
 rpm -ivh --oldpackage kernel-*.rpm
 ```
@@ -92,12 +100,9 @@ bash <(curl -fsSL \
 
 ### DEB-based (Ubuntu, Debian)
 
-Go to the [Releases page](https://github.com/TencentCloud/CubeSandbox/releases), find `linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb`, right-click and copy the download link:
+Install the downloaded package:
 
 ```bash
-# Replace the URLs below with the actual download links copied from the Releases page
-wget "<linux-image deb download URL>"
-
 dpkg -i linux-image-*opencloudos9.cubesandbox.pvm.host*.deb
 ```
 
