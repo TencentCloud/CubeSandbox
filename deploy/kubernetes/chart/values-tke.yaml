@@ -18,6 +18,14 @@
 #      security-groups value defaults to CHANGE_ME_TKE_CLB_SECURITY_GROUP;
 #      helm fails render until you override it in a local values file (or
 #      set it to "" if you manage CLB SGs outside Helm).
+#   5. Uses a non-overlapping cubevs/sandbox CIDR (192.168.0.0/18). TKE's
+#      default Service CIDR is 172.16.0.0/16, which fully contains the Chart
+#      default cubevs 172.16.0.0/18. cube-node installs a host route to the
+#      cubevs bridge; with that range every ClusterIP (cube-ops:3010,
+#      cube-master:8089, kube-dns:53, ...) would be swallowed into the bridge
+#      on hostNetwork compute nodes, blackholing node registration and
+#      in-cluster DNS. See the cubeNode.network / cubeEgress.network sections
+#      below. Override in your runtime values if your VPC/LAN uses 192.168.x.
 #
 # Nothing else about the release is TKE-specific — Cube-owned images default
 # to TCR int (cube-sandbox-int.tencentcloudcr.com/cube-sandbox/...). Users in
@@ -48,6 +56,17 @@ redis:
 minio:
   persistence:
     storageClassName: cube-cbs-wffc
+
+# cubevs/sandbox CIDR must not overlap the cluster Service CIDR. TKE defaults
+# the Service CIDR to 172.16.0.0/16; keep 192.168.0.0/18 (the packaged Cubelet
+# fallback) unless your VPC/LAN uses 192.168.x. tproxyOnIP is the cube-dev
+# gateway = first usable IP of cubeNode.network.cidr — keep the two in sync.
+cubeNode:
+  network:
+    cidr: "192.168.0.0/18"
+cubeEgress:
+  network:
+    tproxyOnIP: "192.168.0.1"
 
 cubeProxy:
   service:
