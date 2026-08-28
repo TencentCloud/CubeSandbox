@@ -73,10 +73,11 @@ cubemastercli tpl watch --job-id <job_id>
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install "crewai-tools[e2b]==1.15.18" "python-dotenv>=1,<2"
+pip install "crewai==1.15.18" "crewai-tools[e2b]==1.15.18" "python-dotenv>=1,<2"
 ```
 
-The `e2b` extra installs both the E2B SDK and the matching CrewAI package.
+The matching pins keep the CrewAI framework and tools on the same release. The `e2b`
+extra installs the E2B SDKs required by the sandbox tools.
 
 ### 3. Configure environment variables
 
@@ -129,6 +130,10 @@ sandbox_tool = E2BExecTool(
     sandbox_timeout=120,
 )
 ```
+
+In `crewai-tools` 1.15.18, `template`, `persistent`, and `sandbox_timeout` are constructor
+fields on `E2BExecTool`. The wrapper forwards `sandbox_timeout` to the E2B SDK as
+`timeout` when it creates or connects to a sandbox.
 
 With `persistent=False` (the default), CrewAI creates a fresh MicroVM for each tool call
 and kills it when that call finishes.
@@ -244,6 +249,7 @@ and Python version returned from the Cube MicroVM.
 ## References
 
 - [CrewAI E2B Sandbox Tools](https://docs.crewai.com/en/tools/ai-ml/e2bsandboxtools)
+- [CrewAI 1.15.18 `E2BBaseTool` source](https://github.com/crewAIInc/crewAI/blob/4bc5d2924218e892bd0bc91b46352b49b0d3a740/lib/crewai-tools/src/crewai_tools/tools/e2b_sandbox_tool/e2b_base_tool.py)
 - [CrewAI LLM connections](https://docs.crewai.com/en/learn/llm-connections)
 - [CubeSandbox quick start](/guide/quickstart)
 - [Connecting clients to a CubeSandbox cluster](/guide/multi-node-deploy#connect-clients-to-the-cluster)

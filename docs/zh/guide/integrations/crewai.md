@@ -70,10 +70,11 @@ cubemastercli tpl watch --job-id <job_id>
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install "crewai-tools[e2b]==1.15.18" "python-dotenv>=1,<2"
+pip install "crewai==1.15.18" "crewai-tools[e2b]==1.15.18" "python-dotenv>=1,<2"
 ```
 
-`e2b` extra 会同时安装 E2B SDK 和匹配版本的 CrewAI。
+相同的版本锁定使 CrewAI 框架与 Tools 保持一致；`e2b` extra 会安装沙箱 Tool 所需的
+E2B SDK。
 
 ### 3. 配置环境变量
 
@@ -126,6 +127,10 @@ sandbox_tool = E2BExecTool(
     sandbox_timeout=120,
 )
 ```
+
+在 `crewai-tools` 1.15.18 中，`template`、`persistent` 和 `sandbox_timeout` 都是
+`E2BExecTool` 的构造字段。创建或连接沙箱时，Wrapper 会将 `sandbox_timeout` 作为
+`timeout` 传给 E2B SDK。
 
 使用 `persistent=False`（默认值）时，CrewAI 会为每次 Tool 调用创建一个新的 MicroVM，
 并在调用结束后将其销毁。
@@ -238,6 +243,7 @@ Verbose 日志中应出现 `E2B Sandbox Exec` 调用，以及 Cube MicroVM 返�
 ## 参考资料
 
 - [CrewAI E2B Sandbox Tools](https://docs.crewai.com/en/tools/ai-ml/e2bsandboxtools)
+- [CrewAI 1.15.18 `E2BBaseTool` 源码](https://github.com/crewAIInc/crewAI/blob/4bc5d2924218e892bd0bc91b46352b49b0d3a740/lib/crewai-tools/src/crewai_tools/tools/e2b_sandbox_tool/e2b_base_tool.py)
 - [CrewAI LLM 连接](https://docs.crewai.com/en/learn/llm-connections)
 - [CubeSandbox 快速开始](/zh/guide/quickstart)
 - [从客户端连接 CubeSandbox 集群](/zh/guide/multi-node-deploy#从客户端连接集群)
