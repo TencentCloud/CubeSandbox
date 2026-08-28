@@ -34,6 +34,13 @@ cubelet_conf:
 auth:
   enable: false
 
+# CubeProxy admin cache invalidation on sandbox resume. admin_token must match
+# the release Secret key cube-admin-token (what CubeProxy validates as
+# X-Cube-Admin-Token). Rendered from the chart helper; see cube.adminToken.
+# admin_port/heartbeat_ttl_ms fall back to defaults (8082 / 15000).
+cube_proxy_conf:
+  admin_token: {{ include "cube.adminToken" . | quote }}
+
 req_template_conf:
   whitelist_req_tag:
     WorkingDir: true
