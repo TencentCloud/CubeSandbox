@@ -41,7 +41,7 @@ lang: zh-CN
 ::: warning 控制平面与数据平面
 `E2B_API_URL` 指向 CubeAPI 控制平面。E2B SDK 还会通过 CubeProxy 访问每个沙箱的数据平面
 域名。生产环境应配置泛域名 DNS；本地开发没有泛域名 DNS 时，可使用
-[E2B 开发 sidecar](/zh/guide/multi-node-deploy#官方-e2b-sdk-无泛域名-dns开发-sidecar)。
+[E2B 开发 sidecar](/zh/guide/multi-node-deploy#官方-e2b-sdk-无泛域名-dns-开发-sidecar)。
 :::
 
 ## 安装与配置
