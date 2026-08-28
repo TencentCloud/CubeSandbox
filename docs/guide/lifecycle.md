@@ -259,7 +259,7 @@ The rejection travels through the following chain to reach the client: `Cubelet 
 - Disk and MvmNum are **not affected** by the ratio — pause snapshots still consume storage and the sandbox object still exists.
 - `ratio=0` is the zero-value-safe default: if this setting is never configured, behavior is identical to previous versions. Upgrades won't cause surprises.
 - This is a **node-level setting** — different nodes can use different ratios to accommodate heterogeneous hardware or tiered pools.
-- When a large batch of sandboxes on a single node wakes up simultaneously and exceeds node capacity, the control plane returns 409 with precise quota numbers. Future releases will support **cross-node resume**, allowing sandboxes to migrate between nodes for true cluster-wide utilization maximization.
+- When a large batch of sandboxes on a single node wakes up simultaneously and exceeds node capacity, the control plane returns 409 with precise quota numbers. For sandboxes on the S3 backend, the scheduler can fall back to another compatible node instead — see [Cross-Node Snapshots](./cross-node-snapshot.md) for the conditions and scheduler rules.
 
 ## Next Steps
 

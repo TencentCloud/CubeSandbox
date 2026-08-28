@@ -16,6 +16,8 @@ Cube Sandbox is a **purpose-built infrastructure for AI Agents** — a productio
 
 * **📸 Snapshot · Clone · Rollback**: Hundred-millisecond checkpoints — roll back to any saved state or fork multiple exploration branches. Powered by CubeCoW Copy-on-Write with incremental dirty-page tracking.
 
+* **🌐 Cross-Node Pause & Resume (Preview)**: With the S3 snapshot backend, a paused sandbox can be resumed on — and new sandboxes created from snapshots on — any compatible node in the cluster. Sandboxes are no longer pinned to a single node, so node maintenance or failure no longer strands your workloads.
+
 * **🔐 Credential Vault**: Keys never enter the sandbox, model context, or logs. Secrets stay in the control plane.
 
 * **🛡️ Egress Control**: Domain allowlists, instant block on unauthorized egress, full audit logs. CubeEgress provides L7 domain filtering, credential injection, and access auditing.
@@ -38,6 +40,7 @@ Cube Sandbox is a **purpose-built infrastructure for AI Agents** — a productio
 | **Deployment Density** | High | Low | **Extreme (Thousands per node)** |
 | **Agent Hosting** | Manual setup | Manual setup | **✅ Native (AgentHub)** |
 | **Auto-Pause / Resume** | / | / | **✅ Platform-managed (100ms resume)** |
+| **Cross-Node Pause / Resume** | / | / | **✅ S3 backend (preview)** |
 | **Snapshot / Clone / Rollback** | / | / | **✅ Sub-second** |
 | **E2B SDK Compatible** | / | / | **✅ Drop-in** |
 
@@ -45,6 +48,7 @@ Cube Sandbox is a **purpose-built infrastructure for AI Agents** — a productio
 
 * [Quick Start](./quickstart.md) — the fastest path from zero to a running sandbox.
 * [Sandbox Lifecycle](./lifecycle.md) — state model, auto-pause, auto-resume.
+* [Cross-Node Snapshots](./cross-node-snapshot.md) — resume a paused sandbox, or create one from a snapshot, on any node in the cluster (S3 backend).
 * [Digital Assistant (AgentHub)](./digital-assistant.md) — host and manage AI Agent instances.
 * [Self-Build Deployment](./self-build-deploy.md) — single-machine deployment reference.
 * [Multi-Node Cluster Deployment](./multi-node-deploy.md) — scale beyond a single machine.

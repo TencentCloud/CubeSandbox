@@ -55,6 +55,19 @@ Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built 
 <table>
   <tr>
     <td align="right" valign="top" width="100">
+      <a href="./docs/changelog/v0.7.0.md">
+        <img src="https://img.shields.io/badge/v0.7.0-2026.08.28-20c997?style=flat-square" alt="v0.7.0" />
+      </a>
+    </td>
+    <td valign="top">
+      <strong>v0.7: Cross-node pause/resume, control plane &amp; ops separation, faster sandbox networking</strong><br/>
+      <b>Cross-node pause/resume</b> — with an S3 backend, suspend a sandbox on one node and resume it on another, or create sandboxes from snapshots (preview)<br/>
+      <b>Control plane &amp; operations separation</b> — node management moves into CubeOps with multi-replica deployment and the new cubeopscli<br/>
+      <a href="./docs/changelog/v0.7.0.md">Changelog →</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="right" valign="top" width="100">
       <a href="./docs/changelog/v0.6.0.md">
         <img src="https://img.shields.io/badge/v0.6.0-2026.07.24-fd7e14?style=flat-square" alt="v0.6.0" />
       </a>
@@ -400,8 +413,8 @@ We welcome contributions of all kinds—whether it's a bug report, feature sugge
 
 | Feature | Description |
 |---|---|
+| **Cross-Node Pause/Resume Performance** | Cut pause/resume latency and speed up snapshot transfer so cross-node resume approaches same-node speed |
 | **E2B API Compatibility** | Close remaining gaps with the E2B specification for full drop-in compatibility |
-| **Control Plane / Data Plane Separation** | Decouple the control plane from the data plane so control plane upgrades or failures never affect sandboxes already in flight |
 | **Sandbox Fault Recovery** | Automatic detection and recovery of crashed VMs, stuck shim processes, and network partitions with configurable recovery policies |
 | **Scheduling & Operations Enhancements** | Resource-aware placement, affinity rules, live rebalancing, and node drain with sandbox migration |
 

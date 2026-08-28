@@ -55,6 +55,19 @@ Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用�
 <table>
   <tr>
     <td align="right" valign="top" width="100">
+      <a href="./docs/zh/changelog/v0.7.0.md">
+        <img src="https://img.shields.io/badge/v0.7.0-2026.08.28-20c997?style=flat-square" alt="v0.7.0" />
+      </a>
+    </td>
+    <td valign="top">
+      <strong>v0.7：跨节点暂停恢复、控制面与运维分离、沙箱网络提速</strong><br/>
+      <b>跨节点暂停恢复</b> — 配合 S3 后端，沙箱支持跨节点暂停/恢复，并可从快照创建沙箱（preview）<br/>
+      <b>控制面与运维分离</b> — 节点管理能力拆分至 CubeOps，支持多副本部署，新增 cubeopscli 运维工具<br/>
+      <a href="./docs/zh/changelog/v0.7.0.md">更新日志 →</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="right" valign="top" width="100">
       <a href="./docs/zh/changelog/v0.6.0.md">
         <img src="https://img.shields.io/badge/v0.6.0-2026.07.24-fd7e14?style=flat-square" alt="v0.6.0" />
       </a>
@@ -413,8 +426,8 @@ http://<控制节点 IP>:12088
 
 | 特性 | 说明 |
 |---|---|
+| **跨机暂停/恢复性能提升** | 降低暂停/恢复时延、加快快照传输，使跨节点恢复接近本节点恢复速度 |
 | **E2B API 对齐补齐** | 补齐与 E2B 规范的剩余差距，实现完整的兼容替代 |
-| **控制面与数据面分离** | 解耦控制面与数据面，控制面升级或故障不影响已在运行的沙箱，保证全路径高可用 |
 | **沙箱异常恢复** | 自动检测并恢复 VM Crash、shim 卡死、网络分区等异常，支持可配置恢复策略 |
 | **调度与运维能力增强** | 资源感知调度、亲和规则、在线均衡与带迁移的节点排空 |
 

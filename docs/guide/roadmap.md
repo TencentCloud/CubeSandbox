@@ -4,13 +4,13 @@
 
 ## Coming Soon
 
+### Cross-Node Pause/Resume Performance
+
+Cross-node pause/resume landed in v0.7.0 as a preview. The next step is performance: cut pause/resume latency and speed up snapshot transfer so that resuming on another node approaches same-node speed.
+
 ### E2B API Compatibility
 
 Close the remaining gaps between CubeSandbox's API surface and the E2B specification. The goal is full drop-in compatibility so that workloads and SDK clients targeting E2B can run against a self-hosted CubeSandbox cluster without modification.
-
-### Control Plane / Data Plane Separation
-
-Separate the control plane (cluster management, scheduling, health checks) from the data plane (sandbox create/run/snapshot) so that a failure or rolling upgrade of the control plane does not affect sandboxes already in flight. Achieving full end-to-end high availability requires that the two planes are independently deployable and fault-isolated.
 
 ### Sandbox Fault Recovery
 
