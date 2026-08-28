@@ -101,7 +101,14 @@ CUBE_S3_BUCKET=cube-volumes
 # CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
 ```
 
-计算节点不部署 MinIO，把控制节点 `.one-click.env` 里的 `CUBE_S3_*` 拷过去即可。详见 [one-click README · 内置 MinIO 与 S3 Volume 插件](https://github.com/TencentCloud/CubeSandbox/blob/master/deploy/one-click/README_zh.md)。
+计算节点不部署 MinIO，把控制节点回填的 `CUBE_S3_*` 拷过去即可：
+
+```bash
+# 在控制节点执行，把输出拷贝到计算节点 .env
+grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
+```
+
+缺失时仅告警并继续安装，S3 卷插件将不可用。详见 [one-click README · 内置 MinIO 与 S3 Volume 插件](https://github.com/TencentCloud/CubeSandbox/blob/master/deploy/one-click/README_zh.md)。
 
 ### Helm 部署
 

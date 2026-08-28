@@ -69,7 +69,14 @@ ONE_CLICK_DEPLOY_ROLE=compute
 ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
 ```
 
-若要使用 S3 Volume，再从控制节点 `.one-click.env` 拷贝 `CUBE_S3_*`（计算节点不部署 MinIO）。
+可选但强烈建议：若要使用 S3 Volume，把控制节点回填的 `CUBE_S3_*` 拷到计算节点 `.env`：
+
+```bash
+# 在控制节点执行，把输出拷贝到计算节点 .env
+grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
+```
+
+计算节点不部署 MinIO。缺失时仅打印黄色警告并继续安装，S3 卷插件在配置前不可用。
 
 如果要显式指定当前计算节点 IP，再补充：
 

@@ -246,9 +246,14 @@ ONE_CLICK_DEPLOY_ROLE=compute
 ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
 ```
 
-若控制节点用了内置 MinIO（或任何 S3 后端），再把该节点 `.one-click.env` 里的
-`CUBE_S3_*` 拷过来。计算节点不部署 MinIO，只消费 `CUBE_S3_*`。用内置 MinIO 时
-还需放行计算节点到控制面的 TCP 9000。
+若控制节点用了内置 MinIO（或任何 S3 后端），建议把该节点回填的 `CUBE_S3_*` 拷过来：
+
+```bash
+# 在控制节点执行，把输出拷贝到计算节点 .env
+grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
+```
+
+计算节点不部署 MinIO，只消费 `CUBE_S3_*`。该项可选但强烈建议——缺失时仅打印黄色警告并继续安装，S3 卷插件在补上配置并重装前不可用。用内置 MinIO 时还需放行计算节点到控制面的 TCP 9000。
 
 如需显式指定计算节点 IP，或目标机默认网卡不是 `eth0`，再额外设置：
 
@@ -358,8 +363,14 @@ CUBE_S3_BUCKET=cube-volumes
 # CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
 ```
 
-计算节点从不部署 MinIO。把控制节点 `.one-click.env` 里填好的 `CUBE_S3_*` 拷到
-计算节点 `.env`（若用内置 MinIO，还需放行控制面 TCP 9000）：
+计算节点从不部署 MinIO。建议把控制节点回填的 `CUBE_S3_*` 拷到计算节点 `.env`：
+
+```bash
+# 在控制节点执行，把输出拷贝到计算节点 .env
+grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
+```
+
+该项可选但强烈建议——缺失时仅打印黄色警告并继续安装，S3 卷插件在补上配置并重装前不可用。用内置 MinIO 时还需放行控制面 TCP 9000。
 
 ```bash
 ONE_CLICK_DEPLOY_ROLE=compute

@@ -101,7 +101,15 @@ CUBE_S3_BUCKET=cube-volumes
 # CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
 ```
 
-Compute nodes don't run MinIO; just copy the `CUBE_S3_*` from the control node's `.one-click.env`. See [one-click README · Bundled MinIO vs the S3 volume plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/deploy/one-click/README.md#bundled-minio-vs-the-s3-volume-plugin).
+Compute nodes don't run MinIO; copy the `CUBE_S3_*` backfilled on the control node:
+
+```bash
+# Run on the control node; paste the output into the compute node's .env
+grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
+```
+
+If missing, the installer warns and continues; the S3 volume plugin stays
+unavailable. See [one-click README · Bundled MinIO vs the S3 volume plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/deploy/one-click/README.md#bundled-minio-vs-the-s3-volume-plugin).
 
 ### Helm deploy
 

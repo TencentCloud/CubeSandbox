@@ -278,10 +278,18 @@ ONE_CLICK_DEPLOY_ROLE=compute
 ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
 ```
 
-If the control node runs bundled MinIO (or any S3 backend), also copy `CUBE_S3_*`
-from that node's `.one-click.env` so the volume plugin can reach the same store.
-Compute nodes never deploy MinIO; they only consume `CUBE_S3_*`. Allow TCP 9000
-from compute to the control node when using bundled MinIO.
+If the control node runs bundled MinIO (or any S3 backend), copy `CUBE_S3_*` from
+that node's runtime env file so the volume plugin reaches the same store:
+
+```bash
+# Run on the control node; paste the output into the compute node's .env
+grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
+```
+
+Compute nodes never deploy MinIO; they only consume `CUBE_S3_*`. These values are
+optional but strongly recommended: if missing, the installer prints a prominent
+warning and continues; the S3 volume plugin stays disabled until configured. Allow
+TCP 9000 from compute to the control node when using bundled MinIO.
 
 If you need to explicitly specify the compute node IP, or if the default NIC on the target machine is not `eth0`, also set:
 
@@ -403,8 +411,16 @@ CUBE_S3_BUCKET=cube-volumes
 ```
 
 Compute nodes never run MinIO. Copy the filled `CUBE_S3_*` values from the
-control node's `.one-click.env` into the compute `.env` (and allow TCP 9000
-from compute to the control node if you are using bundled MinIO):
+control node's runtime env file into the compute `.env`:
+
+```bash
+# Run on the control node; paste the output into the compute node's .env
+grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
+```
+
+These values are optional but strongly recommended — if missing, the installer
+warns and continues; the S3 volume plugin stays disabled until configured. Allow
+TCP 9000 from compute to the control node if using bundled MinIO:
 
 ```bash
 ONE_CLICK_DEPLOY_ROLE=compute

@@ -4,7 +4,9 @@
 #
 # Unit tests for the MinIO / CUBE_S3_* mutex: a previous local-MinIO fill
 # must be allowed on upgrade; an operator-supplied external store must not
-# be combined with CUBE_SANDBOX_MINIO_ENABLED=1.
+# be combined with CUBE_SANDBOX_MINIO_ENABLED=1. Also covers the compute-node
+# missing-S3 warning (warn_compute_s3_missing warns instead of aborting) and
+# warn()'s plain-text output when stderr is not a TTY.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,19 +49,19 @@ expect_die() {
 
 expect_s3_ok() {
   local label="$1"
-  if ! check_compute_s3_required; then
+  if ! warn_compute_s3_missing; then
     fail "${label}: expected check to pass"
   fi
 }
 
-expect_s3_die() {
+expect_s3_warn() {
   local label="$1"
-  local err="${TMP_DIR}/s3.err"
-  if ( check_compute_s3_required ) >"${err}" 2>&1; then
-    fail "${label}: expected check to die"
+  local err="${TMP_DIR}/s3-warn.err"
+  if ! ( warn_compute_s3_missing ) >"${err}" 2>&1; then
+    fail "${label}: expected check to warn and return 0"
   fi
-  grep -Fq "CUBE_S3_ENDPOINT" "${err}" \
-    || fail "${label}: die message missing (got $(cat "${err}"))"
+  grep -Fq "no CUBE_S3_* backend configured" "${err}" \
+    || fail "${label}: warning message missing (got $(cat "${err}"))"
 }
 
 reset_minio_s3_vars() {
@@ -130,12 +132,22 @@ test_minio_disabled_external_endpoint_ok() {
   expect_ok "minio off + external endpoint"
 }
 
-test_compute_empty_s3_endpoint_dies() {
+test_compute_empty_s3_endpoint_warns() {
   reset_minio_s3_vars
   ONE_CLICK_DEPLOY_ROLE=compute
   CUBE_S3_ENDPOINT=""
-  expect_s3_die "compute + empty endpoint"
+  expect_s3_warn "compute + empty endpoint"
   unset ONE_CLICK_DEPLOY_ROLE
+}
+
+test_warn_plain_when_not_tty() {
+  local out
+  out="$(warn "hello" 2>&1 || true)"
+  grep -Fq "[one-click] WARNING: hello" <<<"${out}" \
+    || fail "warn must print plain text when stderr is not a TTY (got ${out})"
+  if grep -Fq $'\033' <<<"${out}"; then
+    fail "warn must not emit ANSI escapes when stderr is not a TTY (got ${out})"
+  fi
 }
 
 test_compute_set_s3_endpoint_ok() {
@@ -199,9 +211,10 @@ test_minio_enabled_local_endpoint_ok
 test_minio_enabled_old_ip_matching_credentials_ok
 test_minio_enabled_external_endpoint_dies
 test_minio_disabled_external_endpoint_ok
-test_compute_empty_s3_endpoint_dies
+test_compute_empty_s3_endpoint_warns
 test_compute_set_s3_endpoint_ok
 test_control_empty_s3_endpoint_ok
+test_warn_plain_when_not_tty
 s3cfg_get() {
   local conf="$1" key="$2"
   sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" \

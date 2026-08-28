@@ -42,7 +42,12 @@ Adding a compute node means installing the compute-plane components and register
    ONE_CLICK_CONTROL_PLANE_IP=<control-plane-ip>
    ```
 
-3. Copy the `CUBE_S3_*` settings from the control node's `.one-click.env`, or configure another shared S3-compatible store.
+3. (Optional but strongly recommended) Copy `CUBE_S3_*` from the control node to this node's `.env`:
+   ```bash
+   # Run on the control node; paste the output into the compute node's .env
+   grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
+   ```
+   Or point at another shared S3-compatible store. If missing, the installer warns and continues, but the S3 volume plugin stays disabled; you'll be reminded again when install finishes.
 4. Install the compute node:
 
    ```bash

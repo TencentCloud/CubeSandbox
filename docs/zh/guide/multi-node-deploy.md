@@ -65,12 +65,11 @@ ONE_CLICK_DEPLOY_ROLE=compute
 CUBE_SANDBOX_NODE_IP=<当前节点IP>
 ONE_CLICK_CONTROL_PLANE_IP=<控制节点IP>
 
-# CUBE_S3_* 必填——Volume 插件强制依赖 S3。计算节点不部署 MinIO，
-# 请把控制节点 .one-click.env 中的 CUBE_S3_* 原样拷贝（必须与控制节点一致，
-# 插件才能解析到同一个存储）。内置 MinIO 时形如：
+# CUBE_S3_*：可选但强烈建议。缺失时仅告警并继续安装，S3 卷插件不可用。
+# 取值方式见下方提示。内置 MinIO 时形如：
 CUBE_S3_ENDPOINT=http://<控制节点IP>:9000
-CUBE_S3_ACCESS_KEY_ID=<取自控制节点 .one-click.env>
-CUBE_S3_SECRET_ACCESS_KEY=<取自控制节点 .one-click.env>
+CUBE_S3_ACCESS_KEY_ID=<取自控制节点>
+CUBE_S3_SECRET_ACCESS_KEY=<取自控制节点>
 CUBE_S3_BUCKET=cube-volumes
 CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
 ```
@@ -80,10 +79,22 @@ CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
 | `ONE_CLICK_DEPLOY_ROLE` | 计算节点必须设为 `compute` |
 | `CUBE_SANDBOX_NODE_IP` | 当前节点主网卡 IP |
 | `ONE_CLICK_CONTROL_PLANE_IP` | 控制节点 IP，自动拼接为 `<ip>:3010` 作为 CubeOps 节点注册地址 |
-| `CUBE_S3_*` | **必填。** Volume 插件强制依赖 S3。计算节点不部署 MinIO，从控制节点 `.one-click.env` 拷贝（或指向自有 S3）。内置 MinIO 还需放行计算节点到控制面 TCP 9000。 |
+| `CUBE_S3_*` | 可选但强烈建议。Volume 插件依赖 S3；缺失时仅告警并继续安装，但 S3 卷插件不可用。取值见下方提示。 |
 
-::: tip 安装时会校验
-`install-compute.sh` 会在修改任何本地配置之前校验 `CUBE_S3_ENDPOINT`；缺失时直接中止，并提示从控制节点拷贝 `CUBE_S3_*`。请先补齐上述变量再运行安装。
+::: tip 缺失时仅告警
+`install-compute.sh` 检查 `CUBE_S3_ENDPOINT`，缺失时打印醒目的黄色警告并继续安装。节点可正常部署，但 **S3 卷插件不可用**，补齐后重装即可。
+
+从控制节点取 `CUBE_S3_*` 回填值：
+
+1. 在控制节点执行：
+   ```bash
+   grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
+   ```
+   输出为空说明控制节点自身未配 S3。
+2. 把输出逐行拷贝到计算节点 `.env`。
+3. 重新执行 `sudo ./install-compute.sh`。
+
+使用内置 MinIO 时，还需放行计算节点到控制面的 TCP 9000。
 :::
 
 如果 CubeOps 使用非默认端口，也可以显式指定：
@@ -289,7 +300,7 @@ sudo ./down.sh
 | `CUBE_SANDBOX_NETWORK_CIDR` | `192.168.0.0/18`（取自 `config.toml`） | cubevs 本地网络 CIDR。需与控制节点一致。格式为 IPv4 CIDR（如 `10.100.0.0/18`），掩码范围 /16~/24。安装时自动检测宿主机冲突。 |
 | `CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK` | `0` | 设为 `1` 跳过冲突检测（不推荐）。 |
 | `ONE_CLICK_RUN_QUICKCHECK` | `1` | 安装后是否执行健康检查 |
-| `CUBE_S3_*` | 空 / 由控制面 MinIO 填入 | **必填。** Volume 插件强制依赖 S3。从控制节点 `.one-click.env` 拷贝；`ENDPOINT` / `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY` / `BUCKET` 无可用默认值。 |
+| `CUBE_S3_*` | 空 / 由控制面 MinIO 填入 | 可选但强烈建议。Volume 插件依赖 S3，缺失时仅告警、S3 卷插件不可用。从控制节点 `/usr/local/services/cubetoolbox/.one-click.env` 拷贝（取值方法见上文第二步）；`ENDPOINT` / `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY` / `BUCKET` 无可用默认值。 |
 
 完整配置参考（构建选项、数据库、代理等）请参阅[本地构建部署 — 配置参考](./self-build-deploy.md#配置参考)。
 

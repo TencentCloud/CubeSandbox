@@ -20,6 +20,38 @@ die() {
   exit 1
 }
 
+# warn: print a prominent warning to stderr. Bold-yellow when stderr is a
+# terminal and color is not disabled (NO_COLOR unset/empty, TERM != dumb);
+# plain text otherwise, so log captures and CI/test `grep` stay clean. The
+# first line carries the [one-click] WARNING: prefix; continuation lines are
+# indented so commands (e.g. the S3 grep hint) stay copyable.
+warn() {
+  local color=0
+  if [[ -t 2 ]] && [[ -z "${NO_COLOR:-}" ]] && [[ "${TERM:-}" != "dumb" ]]; then
+    color=1
+  fi
+  local line first=1
+  while IFS= read -r line; do
+    # Blank separator lines stay blank (no continuation indent).
+    if [[ -z "${line}" ]]; then
+      printf '\n' >&2
+      continue
+    fi
+    if [[ "${first}" -eq 1 ]]; then
+      if [[ "${color}" -eq 1 ]]; then
+        printf '\033[1;33m[one-click] WARNING: %s\033[0m\n' "${line}" >&2
+      else
+        printf '%s\n' "[one-click] WARNING: ${line}" >&2
+      fi
+      first=0
+    elif [[ "${color}" -eq 1 ]]; then
+      printf '\033[1;33m  %s\033[0m\n' "${line}" >&2
+    else
+      printf '  %s\n' "${line}" >&2
+    fi
+  done <<<"$*"
+}
+
 # shellcheck source=../scripts/common/validation.sh
 source "${ONE_CLICK_DIR}/scripts/common/validation.sh"
 
@@ -1838,16 +1870,24 @@ check_minio_not_combined_with_user_s3() {
   die "CUBE_SANDBOX_MINIO_ENABLED=1 cannot be combined with CUBE_S3_ENDPOINT; set CUBE_SANDBOX_MINIO_ENABLED=0 to use an external S3 backend"
 }
 
-# check_compute_s3_required: fail fast when a compute node has no S3 backend
-# configured. Compute nodes never deploy MinIO (install.sh forces
+# warn_compute_s3_missing: warn (do not abort) when a compute node has no S3
+# backend configured. Compute nodes never deploy MinIO (install.sh forces
 # CUBE_SANDBOX_MINIO_ENABLED=0), so the volume plugin resolves the S3 store
-# solely from CUBE_S3_*. Those values must be copied verbatim from the control
-# node's .one-click.env (or point at an operator-managed S3-compatible store);
-# an empty endpoint leaves the volume plugin with no backend at runtime.
-check_compute_s3_required() {
-  [[ "$(one_click_deploy_role)" == "compute" ]] || return 0
+# solely from CUBE_S3_*. Installing without it is allowed, but the volume
+# plugin stays disabled until the values are provided and install is re-run.
+warn_compute_s3_missing() {
+  is_compute_role || return 0
   [[ -n "${CUBE_S3_ENDPOINT:-}" ]] && return 0
-  die "compute node requires CUBE_S3_ENDPOINT (the volume plugin hard-depends on S3): copy CUBE_S3_* from the control node's .one-click.env, or set CUBE_S3_ENDPOINT to an S3-compatible store"
+  warn "compute node has no CUBE_S3_* backend configured; the S3 volume
+plugin will stay disabled until you set one. To fix this:
+
+  1. On the control node, run: grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
+     (empty output means the control node itself has no S3 backend)
+  2. Paste the output into this node's .env
+  3. Re-run: sudo ./install-compute.sh
+
+With bundled MinIO, also allow TCP 9000 from this node to the control node."
+  return 0
 }
 
 # Print KEY='value' so bash `source` of volume-s3.conf is safe. Apostrophes in

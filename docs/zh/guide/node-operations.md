@@ -42,7 +42,12 @@ cubeopscli node list --hostid <node_id>
    ONE_CLICK_CONTROL_PLANE_IP=<控制面IP>
    ```
 
-3. 从控制节点的 `.one-click.env` 复制 `CUBE_S3_*` 配置，或者配置其他共享的 S3 兼容存储。
+3. （可选但强烈建议）从控制节点复制 `CUBE_S3_*` 到本机 `.env`：
+   ```bash
+   # 在控制节点执行，把输出拷贝到计算节点 .env
+   grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
+   ```
+   也可指向其他共享的 S3 兼容存储。缺失时仅告警并继续安装，但 S3 卷插件不可用，安装结束时会再次提醒。
 4. 安装计算节点：
 
    ```bash

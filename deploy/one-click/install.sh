@@ -1489,7 +1489,7 @@ check_cgroup_cpu_preflight
 check_bpf_fs_preflight
 check_glibc_preflight
 check_compute_control_plane_preflight
-check_compute_s3_required
+warn_compute_s3_missing
 
 CUBE_SANDBOX_NODE_IP="$(detect_node_ip)"
 export CUBE_SANDBOX_NODE_IP
@@ -1940,3 +1940,6 @@ fi
 
 log "install complete (role=${DEPLOY_ROLE})"
 print_path_hint
+# Re-print the missing-S3 warning last so an unconfigured compute node ends on
+# the remediation path (no-op for control role and for compute nodes with S3).
+warn_compute_s3_missing
