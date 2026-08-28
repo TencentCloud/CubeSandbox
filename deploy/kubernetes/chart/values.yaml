@@ -553,6 +553,13 @@ cubeNode:
   # cubelet pidfile; containerd-shim-cube-rs / microVMs are left alone.
   terminationGracePeriodSeconds: 30
 
+  # Run cube-node on the host network (hostNetwork: true, dnsPolicy becomes
+  # ClusterFirstWithHostNet). The Pod then shares the host netns, so sandbox
+  # network devices survive cube-node Pod recreation. Trade-offs: cube-node
+  # loses its CNI-assigned Pod identity (Kubernetes NetworkPolicy can no longer
+  # govern sandbox traffic) and cubelet ports (9998/9999/9966) bind on the host.
+  hostNetwork: false
+
   # Stable NodeID = Kubernetes node name (CUBE_SANDBOX_NODE_ID).
   # Endpoint = status.podIP (CUBE_SANDBOX_ENDPOINT_IP).
   nodeIDSource: specNodeName
@@ -988,7 +995,8 @@ bootstrap:
         size: 25G
 
 security:
-  # cube-node always uses the Pod network; no hostNetwork toggle.
+  # cube-node host network is controlled by cubeNode.hostNetwork (default
+  # false = Pod network).
   hostPID: true
   privileged: true
 

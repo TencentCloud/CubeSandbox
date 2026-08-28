@@ -26,8 +26,11 @@ spec:
       serviceAccountName: {{ include "cube.nodeServiceAccountName" . }}
       automountServiceAccountToken: true
       hostPID: {{ .Values.security.hostPID }}
+      hostNetwork: {{ .Values.cubeNode.hostNetwork }}
       terminationGracePeriodSeconds: {{ .Values.cubeNode.terminationGracePeriodSeconds }}
-      dnsPolicy: ClusterFirst
+      # With hostNetwork the Pod shares the host netns; ClusterFirstWithHostNet
+      # keeps in-cluster DNS working from the host network namespace.
+      dnsPolicy: {{ if .Values.cubeNode.hostNetwork }}ClusterFirstWithHostNet{{ else }}ClusterFirst{{ end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
