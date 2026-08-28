@@ -1,0 +1,16 @@
+{
+  "providers": {
+    "orcarouter": {
+      "name": "OrcaRouter",
+      "baseUrl": "https://api.orcarouter.ai/v1",
+      "api": "openai-completions",
+      "apiKey": "$ORCAROUTER_API_KEY",
+      "models": [
+        { "id": "orcarouter/free", "name": "OrcaRouter Free" },
+        { "id": "orcarouter/fusion", "name": "OrcaRouter Fusion" },
+        { "id": "orcarouter/fusion-flash", "name": "OrcaRouter Fusion Flash" },
+        { "id": "orcarouter/fusion-mini", "name": "OrcaRouter Fusion Mini" }
+      ]
+    }
+  }
+}

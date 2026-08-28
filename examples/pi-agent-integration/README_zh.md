@@ -51,7 +51,7 @@ pip install -r requirements.txt
 | `E2B_API_KEY` | 本地进程 | 本地开发填任意非空字符串 |
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | 来自第 2 步 |
 | `CUBE_WARMUP_TEMPLATE_ID` | `run_pi_warmup.py` | 来自下文 warmup 模板任务 |
-| `PI_PROVIDER` | Pi CLI | `deepseek`（默认）、`anthropic`、`openai` 等 |
+| `PI_PROVIDER` | Pi CLI | `deepseek`（默认）、`anthropic`、`openai`、`orcarouter` 等 |
 | `PI_MODEL` | Pi CLI | 对应 provider 的模型 id |
 
 ## 4. 一次性运行（直连注入密钥）
@@ -132,6 +132,23 @@ python network_policy.py
 - 任何其他目的地都会返回 `403 Forbidden - CubeEgress`。
 
 若 Agent 需要访问额外主机（包镜像源、MCP 服务器等），请增加对应的放行规则，或把这些依赖预装进模板。
+
+## 8. 将 OrcaRouter 作为 provider 使用
+
+[OrcaRouter](https://www.orcarouter.ai) 是一个 OpenAI 兼容的 AI 网关。镜像内置
+`models.json`，将其注册为 Pi 的一等公民 provider，无需把它当成匿名的自定义 base URL：
+
+```bash
+# .env
+PI_PROVIDER=orcarouter
+PI_MODEL=orcarouter/fusion-flash
+ORCAROUTER_API_KEY=<your-orcarouter-api-key>
+```
+
+可用模型 ID：`orcarouter/free`、`orcarouter/fusion`、`orcarouter/fusion-flash`、
+`orcarouter/fusion-mini`。注册的 provider 使用 OpenAI Chat Completions API
+（`https://api.orcarouter.ai/v1`），与内置 `openai` provider 相同的端点形态，
+因此直连、warmup、vault 三种方式都无需额外配置。vault 方式下 CubeEgress 同样在链路上注入密钥。
 
 ## 排错
 

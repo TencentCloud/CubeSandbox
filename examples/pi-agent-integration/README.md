@@ -54,7 +54,7 @@ pip install -r requirements.txt
 | `E2B_API_KEY` | Local process | Any non-empty string in local dev |
 | `CUBE_TEMPLATE_ID` | `Sandbox.create(template=...)` | From step 2 |
 | `CUBE_WARMUP_TEMPLATE_ID` | `run_pi_warmup.py` | From the warmup template job below |
-| `PI_PROVIDER` | Pi CLI | `deepseek` (default), `anthropic`, `openai`, ... |
+| `PI_PROVIDER` | Pi CLI | `deepseek` (default), `anthropic`, `openai`, `orcarouter`, ... |
 | `PI_MODEL` | Pi CLI | Model id for the provider |
 
 ## 4. One-shot run (direct key flavor)
@@ -151,6 +151,26 @@ python network_policy.py
 
 If the agent needs extra hosts (package registries, MCP servers), add matching
 allow rules or preinstall those dependencies into the template.
+
+## 8. OrcaRouter as a provider
+
+[OrcaRouter](https://www.orcarouter.ai) is an OpenAI-compatible AI gateway. The
+image ships a `models.json` that registers it as a first-class Pi provider, so
+you do not need to treat it as an anonymous custom base URL:
+
+```bash
+# .env
+PI_PROVIDER=orcarouter
+PI_MODEL=orcarouter/fusion-flash
+ORCAROUTER_API_KEY=<your-orcarouter-api-key>
+```
+
+Available model IDs: `orcarouter/free`, `orcarouter/fusion`,
+`orcarouter/fusion-flash`, `orcarouter/fusion-mini`. The registered provider
+uses the OpenAI Chat Completions API at `https://api.orcarouter.ai/v1` — the
+same endpoint shape as the built-in `openai` provider — so every flavor
+(direct, warmup, vault) works with no extra configuration. In the vault flavor,
+CubeEgress injects the key on the wire just like any other provider.
 
 ## Troubleshooting
 

@@ -20,6 +20,7 @@ PROVIDER_KEY_ENV = {
     "google": "GEMINI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    "orcarouter": "ORCAROUTER_API_KEY",
 }
 
 PROVIDER_KEY_ALIASES = {
@@ -32,6 +33,16 @@ PROVIDER_DEFAULT_HOST = {
     "google": "generativelanguage.googleapis.com",
     "deepseek": "api.deepseek.com",
     "openrouter": "openrouter.ai",
+    "orcarouter": "api.orcarouter.ai",
+}
+
+# Custom Pi providers registered in the image's models.json. Pi has built-in
+# providers (anthropic, openai, deepseek, openrouter, ...) that need no model
+# registration, but a first-class "orcarouter" provider must point Pi at the
+# OrcaRouter OpenAI-compatible endpoint explicitly. This is the OpenAI
+# Chat Completions base URL that mirrors Pi's built-in openai provider.
+PROVIDER_BASE_URL = {
+    "orcarouter": "https://api.orcarouter.ai/v1",
 }
 
 # The example has explicit defaults for its primary providers. Other providers
@@ -192,6 +203,17 @@ def pi_llm_host(provider: str | None = None) -> str:
             if host:
                 return host
     return PROVIDER_DEFAULT_HOST.get(provider_name, "")
+
+
+def pi_base_url(provider: str | None = None) -> str:
+    """Resolve the OpenAI-compatible base URL Pi should use for a provider.
+
+    Custom Pi providers (registered in the image's ``models.json``) must carry
+    an explicit base URL. OrcaRouter is OpenAI Chat Completions compatible, so
+    its base URL points at the gateway's ``/v1`` endpoint. Built-in Pi providers
+    need no base URL: Pi already knows their endpoints.
+    """
+    return PROVIDER_BASE_URL.get((provider or pi_provider()).strip().lower(), "")
 
 
 def _host_from_url(value: str) -> str:

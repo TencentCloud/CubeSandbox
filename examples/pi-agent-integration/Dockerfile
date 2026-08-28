@@ -62,6 +62,14 @@ RUN mkdir -p /workspace "${PI_CODING_AGENT_SESSION_DIR}" \
         '}' \
         > "${PI_CODING_AGENT_DIR}/settings.json"
 
+# Register the "orcarouter" provider with Pi so it is a first-class provider
+# instead of an anonymous custom base URL. OrcaRouter is not a built-in Pi
+# provider, so models.json teaches Pi its OpenAI-compatible endpoint and the
+# model IDs it can reach there. The apiKey references the ORCAROUTER_API_KEY
+# env var: in the direct flavor the host passes the real key, and in the
+# CubeEgress vault flavor the placeholder is replaced on the wire.
+COPY models.json "${PI_CODING_AGENT_DIR}/models.json"
+
 WORKDIR /workspace
 
 EXPOSE 49983

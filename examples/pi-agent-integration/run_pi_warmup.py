@@ -15,6 +15,7 @@ from env_utils import (
     int_env,
     load_local_dotenv,
     optional,
+    pi_base_url,
     pi_model,
     pi_provider,
     require_provider_key,
@@ -80,8 +81,13 @@ def main() -> int:
     required("E2B_API_KEY")
     provider = pi_provider()
     api_key = require_provider_key(provider)
+    # The adapter registers the provider's OpenAI-compatible base URL at runtime
+    # (see pi_warmup_adapter.mjs). OrcaRouter is not a built-in Pi provider, so
+    # it must carry an explicit base URL; built-in providers use an empty string.
     provider_base_url = (
-        optional("ANTHROPIC_BASE_URL") if provider == "anthropic" else ""
+        optional("ANTHROPIC_BASE_URL")
+        if provider == "anthropic"
+        else pi_base_url(provider)
     )
 
     print(f"Creating sandbox from warmup template: {template_id}")

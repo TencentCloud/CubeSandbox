@@ -82,6 +82,10 @@ async function handlePrompt(request, response) {
 
     const provider = String(body.provider || defaultProvider).toLowerCase();
     const modelId = String(body.model || defaultModel);
+    // Register the provider's OpenAI-compatible base URL when the host driver
+    // supplies one (e.g. the custom "orcarouter" provider in models.json).
+    // Built-in Pi providers (anthropic, deepseek, ...) omit baseUrl and use
+    // their built-in endpoint.
     if (typeof body.baseUrl === "string" && body.baseUrl !== "") {
       modelRegistry.registerProvider(provider, { baseUrl: body.baseUrl });
     }
