@@ -100,6 +100,8 @@
 #   CUBE_MASTER_IP        cubemaster address, default 127.0.0.1
 #                         (multi-node cluster: the control node)
 #   CUBE_MASTER_PORT      cubemaster port, default 8089
+#   CUBE_OPS_IP           CubeOps address used to list all registered nodes; defaults to CUBE_MASTER_IP
+#   CUBE_OPS_PORT         CubeOps internal API port, default 3010
 #   CUBE_PROXY_NODE_IP    CubeProxy address used to reach sandboxes, default 127.0.0.1
 #   CUBE_PROXY_PORT_HTTP  CubeProxy HTTP port, default 80
 #   OUTPUT_MD             report output path, default /tmp/cubebench_<timestamp>.md
@@ -610,6 +612,8 @@ cmd_run() {
 	# of showing the operator which deployment is targeted.
 	export CUBE_MASTER_IP="${CUBE_MASTER_IP:-127.0.0.1}"
 	export CUBE_MASTER_PORT="${CUBE_MASTER_PORT:-8089}"
+	export CUBE_OPS_IP="${CUBE_OPS_IP:-$CUBE_MASTER_IP}"
+	export CUBE_OPS_PORT="${CUBE_OPS_PORT:-3010}"
 
 	# Prove the harness can actually operate BEFORE asking the operator to
 	# authorize a destructive run. If a dependency is missing or cubemaster is
@@ -618,7 +622,7 @@ cmd_run() {
 	# against (e.g. the default CUBE_MASTER_IP=127.0.0.1 pointing nowhere on a
 	# real cluster). So check deps and reachability first; both only need the
 	# CUBE_MASTER_IP/PORT defaults resolved just above.
-	require_cmds "${PYTHON_BIN}" awk jq cubemastercli || exit 1
+	require_cmds "${PYTHON_BIN}" awk jq cubemastercli cubeopscli || exit 1
 
 	# Talking to CubeMaster is the first thing that can fail on a cluster, where
 	# the default 127.0.0.1 is wrong; say so here instead of failing later on. A
@@ -675,8 +679,8 @@ cmd_run() {
 	# (Total is GetHealthyNodesByInstanceType().Len()), so a 2-node cluster with one
 	# peer down would also report 1 — and cubecli would leave the down peer's
 	# sandboxes behind while list --all (also healthy-only) never sees them, so the
-	# reset would look clean when it is not. Prove single-node with `node list`,
-	# which hits /internal/node -> GetNodes(-1) and returns ALL nodes regardless of
+	# reset would look clean when it is not. Prove single-node with CubeOps'
+	# authoritative `node list`, which returns ALL registered nodes regardless of
 	# health; only take the fast path when the total node count is exactly 1 (and
 	# this host actually runs Cubelet). Otherwise fall back to the cluster-wide
 	# destroy, which at least covers every currently-healthy node.
@@ -910,8 +914,8 @@ section_3_3() {
 	if [ ! -r "$CUBELET_CONF" ]; then
 		reason="this machine does not run Cubelet (no ${CUBELET_CONF})"
 	else
-		# Count TOTAL nodes via `node list` (GetNodes(-1), every node regardless of
-		# health), not get_node_count's `list --all` which is HEALTHY-only. On a
+		# Count TOTAL nodes via CubeOps' authoritative `node list`, not
+		# get_node_count's `list --all` which is HEALTHY-only. On a
 		# 2-node cluster with one peer down, the healthy count is 1, so the density
 		# test would run — but once the peer rejoins, get_sandbox_count (also
 		# list --all) starts counting its sandboxes while free(1) on this host never
@@ -926,7 +930,7 @@ section_3_3() {
 			# multi-node cluster, and this section would then attribute cluster-wide
 			# memory to this single host. Skip instead, matching the comment's
 			# "refusing to guess this is a single-node deployment".
-			reason="could not determine the Cubelet node count (cubemaster node list error or no nodes); refusing to guess this is a single-node deployment"
+			reason="could not determine the Cubelet node count (cubeopscli node list error or no nodes); refusing to guess this is a single-node deployment"
 		elif [ "$nodes" -gt 1 ]; then
 			reason="the cluster has ${nodes} Cubelet nodes, so sandboxes are spread over hosts this script cannot measure"
 		fi
@@ -1323,6 +1327,10 @@ cubemaster() {
 	cubemastercli --address "${CUBE_MASTER_IP}" --port "${CUBE_MASTER_PORT}" "$@"
 }
 
+cubeops() {
+	cubeopscli --address "${CUBE_OPS_IP}" --port "${CUBE_OPS_PORT}" "$@"
+}
+
 sdk_version() {
 	# The cubesandbox SDK version the 4.x sections benchmark against. Prefer the
 	# concrete version installed into the venv (populated by prepare_snapshot_bench
@@ -1716,13 +1724,14 @@ get_node_count() {
 }
 
 get_total_node_count() {
-	# Unlike `list --all` (which counts HEALTHY Cubelets only), `node list` hits
-	# /internal/node -> GetNodes(-1) and returns EVERY node regardless of health.
-	# Emit the count only when the request succeeds, so an unreachable cubemaster
-	# yields empty (never a bogus "0") and the caller keeps the safe fallback.
+	# Unlike CubeMaster's `list --all` (which counts HEALTHY Cubelets only),
+	# CubeOps is the authoritative node registry and returns EVERY node regardless
+	# of health. Emit the count only when the request succeeds, so unreachable
+	# CubeOps yields empty (never a bogus "0") and the caller keeps the safe
+	# fallback. cubeopscli returns the node array directly, without a data envelope.
 	local json
-	json="$(cubemaster node list --json 2>/dev/null)" || return 1
-	printf '%s' "$json" | jq -e '(.data // []) | length' 2>/dev/null
+	json="$(cubeops node list --json 2>/dev/null)" || return 1
+	printf '%s' "$json" | jq -e 'if type == "array" then length else error("expected node array") end' 2>/dev/null
 }
 
 run_mvm_bench() {
