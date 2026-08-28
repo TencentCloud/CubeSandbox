@@ -676,6 +676,43 @@ func TestCreateInstance_DefaultedTemplateVanishingIsAConflict(t *testing.T) {
 	}
 }
 
+// TestCreateInstance_UnattributableNotFoundIsPassedThrough guards the other side
+// of the conflict branch: a not-found that does not name the identifier we sent
+// is not attributed to the default template. Blaming it there would be worse
+// than the 502 it replaces, which at least carries CubeMaster's own words about
+// whatever the missing resource actually was.
+func TestCreateInstance_UnattributableNotFoundIsPassedThrough(t *testing.T) {
+	cm := &fakeServiceCM{
+		createSandboxErr: &cubemaster.CMError{
+			RetCode: 130404,
+			RetMsg:  `egress network resource "net-7f2" not found`,
+		},
+	}
+	st := llmKeyStore()
+	st.listAgentTemplates = func(_ context.Context, _, _ int) ([]store.AgentTemplate, error) {
+		return []store.AgentTemplate{{TemplateID: "tpl-registered"}}, nil
+	}
+	svc := newTestService(st, cm)
+
+	_, err := svc.CreateInstance(context.Background(), CreateInstanceRequest{
+		Name:   "my-agent",
+		Engine: "openclaw",
+	})
+	var svcErr *Error
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("error is not *service.Error: %v", err)
+	}
+	if svcErr.Status != 502 {
+		t.Errorf("status = %d, want 502 — the not-found names another resource", svcErr.Status)
+	}
+	if strings.Contains(svcErr.Message, "selected by default") {
+		t.Errorf("message = %q, should not blame the default template", svcErr.Message)
+	}
+	if !strings.Contains(svcErr.Message, "net-7f2") {
+		t.Errorf("message = %q, want CubeMaster's own words about the missing resource", svcErr.Message)
+	}
+}
+
 // TestCreateInstance_ExplicitTemplateNotFoundStaysBadGateway guards the
 // narrowness of the case above: a not-found for a template the caller did name
 // is still reported as-is, not rewritten into the registration hint.

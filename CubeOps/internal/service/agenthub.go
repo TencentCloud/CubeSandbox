@@ -644,12 +644,8 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 	// --- Create sandbox ---
 	sandboxResp, err := s.CM.CreateSandbox(ctx, cmReq)
 	if err != nil {
-		// The caller named no template, none is registered, and CubeMaster
-		// could not resolve the fallback either. Report the missing
-		// registration rather than a not-found for an identifier the caller
-		// never supplied.
-		// Both branches drop CubeMaster's own words on purpose: they name a
-		// template identifier the caller never supplied and cannot act on. An
+		// Both branches below drop CubeMaster's own words on purpose: they name
+		// a template identifier the caller never supplied and cannot act on. An
 		// operator can act on it, so log it and keep it as Cause (which
 		// writeServiceError does not serialise) rather than discarding it.
 		if templateDefaulted && isCMNotFound(err) && origin != templateFallbackRegistryUnknown {
@@ -664,24 +660,36 @@ func (s *AgentHubService) CreateInstance(ctx context.Context, req CreateInstance
 					Cause: err,
 				}
 			}
-			// The registry did hold a template when we read it, and CubeMaster
-			// could not resolve what we built from it. Which resource it means is
-			// not knowable here — CubeMaster does not say, and by this point the
-			// published-template fast-path above may have swapped the source to
-			// that template's rootfs snapshot — so the message states the
-			// observable fact and lists the causes rather than picking one. It
-			// stays a conflict rather than a bad request because the request was
-			// fine and the state is not, and it is not the 502 naming an
-			// identifier the caller never chose.
+			// The registry did hold a template when we read it. Before blaming
+			// it, require CubeMaster's own error to name the identifier we sent
+			// — rootfsSourceID, which the published-template fast-path above may
+			// already have swapped to that template's rootfs snapshot. Without
+			// that corroboration the not-found could be about anything else in
+			// the request, and a confident "the default template could not be
+			// resolved" would be worse than the 502 it replaces, which at least
+			// carries CubeMaster's raw message.
 			//
-			// One assumption is worth stating because it is not enforced by
-			// construction: that a 130404 out of CreateSandbox concerns the
-			// template. It holds in this tree — sandbox_create.go raises it only
-			// for ErrTemplateNotFound, and the run phase propagates cubelet ret
-			// codes verbatim (sandbox_run.go, setMasterRsp) from an enum that
-			// contains no 130404 — but it is a property of the codes CubeMaster
-			// happens to use, not a guarantee, which is the other reason the
-			// message stays neutral and the original stays in the log.
+			// This is a substring match on an error string, which is exactly the
+			// dependency the empty-registry branch above refuses to take. The
+			// difference is what a wording change costs: there it would silently
+			// withhold the actionable 400 and reinstate the bug this PR fixes,
+			// while here it degrades to CubeMaster's own error — which is the
+			// right answer whenever we cannot attribute the failure.
+			//
+			// It also stops leaning on an invariant that lives in another tree:
+			// 130404 out of CreateSandbox means a template only because
+			// sandbox_create.go raises it solely for ErrTemplateNotFound and the
+			// run phase forwards cubelet ret codes verbatim from an enum with no
+			// 130404 in it. True today, not enforced here.
+			if rootfsSourceID == "" || !strings.Contains(err.Error(), rootfsSourceID) {
+				logging.G(ctx).Warnf("agenthub: cubemaster reported a not-found that does not name the "+
+					"default template %q; passing its error through unchanged: %v", rootfsSourceID, err)
+				return nil, NewBadGateway("failed to create sandbox: " + err.Error())
+			}
+			// Reported as a conflict rather than a bad request: the request was
+			// fine and the state is not. The message still states the observable
+			// fact and lists the causes rather than picking one, since knowing
+			// the identifier is ours does not tell us why it stopped resolving.
 			logging.G(ctx).Warnf("agenthub: cubemaster could not resolve the default template "+
 				"selected from the registry; cubemaster said: %v", err)
 			return nil, &Error{
