@@ -110,10 +110,10 @@ An existing E2B-backed CrewAI application only needs its connection settings cha
 ```diff
 - E2B_API_URL=https://api.e2b.dev
 - E2B_API_KEY=<e2b-cloud-key>
-- SANDBOX_TEMPLATE=<e2b-template>
+- CUBE_TEMPLATE_ID=<e2b-template>
 + E2B_API_URL=http://<cube-host>:3000
 + E2B_API_KEY=e2b_000000
-+ SANDBOX_TEMPLATE=<cube-template-id>
++ CUBE_TEMPLATE_ID=<cube-template-id>
 ```
 
 The Tool remains the same:
@@ -124,7 +124,7 @@ import os
 from crewai_tools import E2BExecTool
 
 sandbox_tool = E2BExecTool(
-    template=os.environ["SANDBOX_TEMPLATE"],
+    template=os.environ["CUBE_TEMPLATE_ID"],
     persistent=False,
     sandbox_timeout=120,
 )
