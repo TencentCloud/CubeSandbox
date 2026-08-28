@@ -256,7 +256,8 @@ export default withMermaid(defineConfig({
                     { text: 'Claude Code', link: '/guide/integrations/claude-code' },
                     { text: 'LangChain', link: '/guide/integrations/langchain' },
                     { text: 'Pi Agent', link: '/guide/integrations/pi-agent' },
-                    { text: 'OpenAI Agents SDK', link: '/guide/integrations/openai-agents-sdk' }
+                    { text: 'OpenAI Agents SDK', link: '/guide/integrations/openai-agents-sdk' },
+                    { text: 'CrewAI', link: '/guide/integrations/crewai' }
                   ]
                 },
                 {
@@ -267,8 +268,7 @@ export default withMermaid(defineConfig({
                     { text: 'trpc-agent-go', link: '/guide/usecases/trpc-agent-go' },
                     { text: 'Lexmount AI', link: '/guide/usecases/lexmount-browser-agent' },
                     { text: 'Hermes Agent', link: '/guide/usecases/hermes-agent' },
-                    { text: 'Lenovo Cloud Agent', link: '/guide/usecases/lenovo-cloud-agent' },
-                    { text: 'Horizon Insights', link: '/guide/usecases/horizon-insights' }
+                    { text: 'Lenovo Cloud Agent', link: '/guide/usecases/lenovo-cloud-agent' }
                   ]
                 }
               ]
@@ -465,7 +465,8 @@ export default withMermaid(defineConfig({
                     { text: 'Claude Code', link: '/zh/guide/integrations/claude-code' },
                     { text: 'LangChain', link: '/zh/guide/integrations/langchain' },
                     { text: 'Pi Agent', link: '/zh/guide/integrations/pi-agent' },
-                    { text: 'OpenAI Agents SDK', link: '/zh/guide/integrations/openai-agents-sdk' }
+                    { text: 'OpenAI Agents SDK', link: '/zh/guide/integrations/openai-agents-sdk' },
+                    { text: 'CrewAI', link: '/zh/guide/integrations/crewai' }
                   ]
                 },
                 {
@@ -476,8 +477,7 @@ export default withMermaid(defineConfig({
                     { text: 'trpc-agent-go', link: '/zh/guide/usecases/trpc-agent-go' },
                     { text: 'Lexmount AI', link: '/zh/guide/usecases/lexmount-browser-agent' },
                     { text: 'Hermes Agent', link: '/zh/guide/usecases/hermes-agent' },
-                    { text: 'Lenovo Cloud Agent', link: '/zh/guide/usecases/lenovo-cloud-agent' },
-                    { text: 'Horizon Insights', link: '/zh/guide/usecases/horizon-insights' }
+                    { text: 'Lenovo Cloud Agent', link: '/zh/guide/usecases/lenovo-cloud-agent' }
                   ]
                 }
               ]

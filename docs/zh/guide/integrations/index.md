@@ -51,3 +51,4 @@ lang: zh-CN
 | [Claude Code 集成指南](./claude-code.md) | shsaihdsaiudh | 2026-07-06 | integration, claude-code, coding-agent |
 | [LangChain 集成指南](./langchain.md) | peerless-hero | 2026-07-07 | integration, langchain, agent |
 | [OpenAI Agents SDK 集成指南](./openai-agents-sdk.md) | ZedingZhang | 2026-08-19 | integration, openai-agents-sdk, agent |
+| [CrewAI 集成指南](./crewai.md) | eatLaoJun | 2026-08-28 | integration, crewai, agent |
