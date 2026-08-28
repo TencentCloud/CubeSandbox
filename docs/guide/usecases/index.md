@@ -52,3 +52,4 @@ lang: en-US
 | [Lexmount AI: Putting the Browser Runtime Inside the Agent Sandbox](./lexmount-browser-agent.md) | Xiong Xiuzhang | 2026-08-13 | agent, browser, browser-runtime, production |
 | [Hermes Agent: Running a Resident Agent Platform in CubeSandbox](./hermes-agent.md) | Chen Jinbo | 2026-08-20 | agent, persistence, skills, host-mount |
 | [Lenovo Cloud Agent: Sandbox Migration from Daytona to CubeSandbox](./lenovo-cloud-agent.md) | Li Jian | 2026-08-20 | agent, migration, daytona, e2b-compat |
+| [Horizon Insights: Sandboxing Financial Research Agents](./horizon-insights.md) | Wang Zhengkai | 2026-08-26 | agent, financial, host-mount, cubeegress |

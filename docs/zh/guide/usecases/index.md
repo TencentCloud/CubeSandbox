@@ -52,3 +52,4 @@ lang: zh-CN
 | [Lexmount AI：把浏览器运行时搬进 Agent 沙箱](./lexmount-browser-agent.md) | 熊袖璋 | 2026-08-13 | agent, browser, browser-runtime, production |
 | [Hermes Agent：在 Cube Sandbox 中运行常驻 Agent 平台](./hermes-agent.md) | 陈金博 | 2026-08-20 | agent, persistence, skills, host-mount |
 | [Lenovo Cloud Agent：从 Daytona 到 CubeSandbox 的沙箱迁移](./lenovo-cloud-agent.md) | 李健 | 2026-08-20 | agent, migration, daytona, e2b-compat |
+| [Horizon Insights：金融投研 Agent 沙箱化实践](./horizon-insights.md) | 王正凯 | 2026-08-26 | agent, financial, host-mount, cubeegress |

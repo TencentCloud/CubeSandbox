@@ -3,8 +3,7 @@ title: "From Daytona to CubeSandbox: Lenovo's Cloud Agent Sandbox Migration and 
 date: 2026-08-20
 author: Li Jian (Lenovo AI R&D Engineer)
 description: "Replacing a cloud Agent product's sandbox from Daytona to Cube looks like just swapping to a faster tool. But in practice, the migration changes three things: the sandbox deployment model (SaaS to self-hosted), the sandbox startup model (per-session rebuild to snapshot restore), and more fundamentally — the sandbox's role in the product architecture (from 'tool execution container' to 'independent runtime environment')."
-featured: true
-weight: 1
+featured: false
 ---
 
 # From Daytona to CubeSandbox: Lenovo's Cloud Agent Sandbox Migration and Evolution

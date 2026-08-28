@@ -267,7 +267,8 @@ export default withMermaid(defineConfig({
                     { text: 'trpc-agent-go', link: '/guide/usecases/trpc-agent-go' },
                     { text: 'Lexmount AI', link: '/guide/usecases/lexmount-browser-agent' },
                     { text: 'Hermes Agent', link: '/guide/usecases/hermes-agent' },
-                    { text: 'Lenovo Cloud Agent', link: '/guide/usecases/lenovo-cloud-agent' }
+                    { text: 'Lenovo Cloud Agent', link: '/guide/usecases/lenovo-cloud-agent' },
+                    { text: 'Horizon Insights', link: '/guide/usecases/horizon-insights' }
                   ]
                 }
               ]
@@ -475,7 +476,8 @@ export default withMermaid(defineConfig({
                     { text: 'trpc-agent-go', link: '/zh/guide/usecases/trpc-agent-go' },
                     { text: 'Lexmount AI', link: '/zh/guide/usecases/lexmount-browser-agent' },
                     { text: 'Hermes Agent', link: '/zh/guide/usecases/hermes-agent' },
-                    { text: 'Lenovo Cloud Agent', link: '/zh/guide/usecases/lenovo-cloud-agent' }
+                    { text: 'Lenovo Cloud Agent', link: '/zh/guide/usecases/lenovo-cloud-agent' },
+                    { text: 'Horizon Insights', link: '/zh/guide/usecases/horizon-insights' }
                   ]
                 }
               ]

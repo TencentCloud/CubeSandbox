@@ -3,8 +3,7 @@ title: "Cube Sandbox v0.6.0: K8s Deployment, Volume Framework Lead Six Capabilit
 date: 2026-07-24
 author: Cube Sandbox Team
 description: "Today (July 24), Cube Sandbox v0.6.0 is officially released. This version merges 92 commits from 31 contributors, bringing six core features. Among them, K8s and Volume support are the two most requested by the community and the biggest highlights of this release."
-featured: true
-weight: 3
+featured: false
 ---
 
 # Cube Sandbox v0.6.0: K8s Deployment, Volume Framework Lead Six Capabilities Toward Production

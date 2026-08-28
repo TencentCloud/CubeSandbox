@@ -3,8 +3,7 @@ title: "Cube Sandbox v0.6.0：K8s 部署、Volume 框架领衔，六大能力全
 date: 2026-07-24
 author: Cube Sandbox 团队
 description: "今天（7月24日），Cube Sandbox v0.6.0 正式发布。这一版共合入 92 个提交，来自 31 位贡献者，带来六大核心特性。其中，K8s 与 Volume 支持是社区呼声最高的两项，也是本次发布版本的最大亮点。"
-featured: true
-weight: 3
+featured: false
 ---
 
 # Cube Sandbox v0.6.0：K8s 部署、Volume 框架领衔，六大能力全面走向生产

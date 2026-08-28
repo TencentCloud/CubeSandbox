@@ -3,8 +3,7 @@ title: "从 Daytona 到 Cube Sandbox：联想云端 Agent 的沙箱迁移与演�
 date: 2026-08-20
 author: 李健（联想 AI 研发工程师）
 description: "把一个云端 Agent 产品的沙箱从 Daytona 换成 Cube，看起来只是换了一个更快的工具。但真正做下来会发现，迁移会改变三件事：沙箱的部署形态（SaaS → 自托管）、沙箱的启动模型（每次会话重建 → 快照恢复）、以及更本质的——沙箱在产品架构中的角色（从「工具执行容器」到「独立运行环境」）。"
-featured: true
-weight: 1
+featured: false
 ---
 
 # 从 Daytona 到 Cube Sandbox：联想云端 Agent 的沙箱迁移与演进
