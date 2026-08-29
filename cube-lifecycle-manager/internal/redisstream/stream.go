@@ -52,9 +52,10 @@ func New(rdb redis.UniversalClient, log *zap.Logger) *Client {
 	return &Client{rdb: rdb, log: log}
 }
 
-// SetNotifyEnabled toggles the Pub/Sub publish that accompanies WriteState /
-// ClearStateNotify. When disabled, those methods behave exactly like the
-// legacy SetState / ClearState. Safe to call at startup only.
+// SetNotifyEnabled toggles the Pub/Sub publish that accompanies terminal
+// state writes (WriteState and the CommitTransition / ReleaseTransition
+// settle paths). When disabled, those methods degrade to their plain Redis
+// mutation. Safe to call at startup only.
 func (c *Client) SetNotifyEnabled(on bool) { c.notifyEnabled = on }
 
 // SetLocalBus wires a same-process fan-out that receives every StateNotify
@@ -84,6 +85,28 @@ func (c *Client) Bootstrap(ctx context.Context) (map[string]lifecycle.SandboxLif
 		out[sid] = meta
 	}
 	return out, nil
+}
+
+// LookupMeta returns the meta for a single sandbox from the meta HSet.
+// (nil, nil) means the field is absent — CubeMaster doesn't know the sandbox
+// (anymore). Used by the resumer's registry-miss fallback so a
+// freshly-promoted leader whose bootstrap hasn't landed yet (or a standby
+// reached directly via pod IP) can still serve resume requests without
+// waiting for the stream consumer to catch up.
+func (c *Client) LookupMeta(ctx context.Context, sandboxID string) (*lifecycle.SandboxLifecycleMeta, error) {
+	payload, err := c.rdb.HGet(ctx, lifecycle.MetaKey, sandboxID).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("hget %s %s: %w", lifecycle.MetaKey, sandboxID, err)
+	}
+	var meta lifecycle.SandboxLifecycleMeta
+	if err := json.Unmarshal([]byte(payload), &meta); err != nil {
+		return nil, fmt.Errorf("unmarshal meta for %s: %w", sandboxID, err)
+	}
+	meta.SandboxID = sandboxID
+	return &meta, nil
 }
 
 // EnsureGroup creates the consumer group on the events stream, ignoring
@@ -162,32 +185,71 @@ func (c *Client) Ack(ctx context.Context, group, id string) error {
 	return c.rdb.XAck(ctx, lifecycle.EventStreamKey, group, id).Err()
 }
 
-// AcquireState performs a SET NX EX on the per-sandbox lifecycle state key with
-// the supplied desired state. Returns true on success. Used to coordinate
-// concurrent pause/resume across sidecars: whoever wins the SETNX owns the
-// transition.
-func (c *Client) AcquireState(ctx context.Context, sandboxID, state string, ttl time.Duration) (bool, error) {
-	key := lifecycle.StateKey(sandboxID)
-	ok, err := c.rdb.SetNX(ctx, key, state, ttl).Result()
-	if err != nil {
-		return false, fmt.Errorf("setnx %s: %w", key, err)
+// ClaimPending transfers stream entries that have been pending for longer
+// than minIdle — i.e. stuck on a dead or demoted consumer — to `consumer`,
+// returning them for processing. In active-standby mode the new leader uses
+// this to take over the previous leader's pending-entries list
+// (issue #1211); minIdle must be ≥ the leader lease TTL (enforced by config
+// validation when set through CUBE_LCM_*) so entries a live consumer is
+// actively working on are never stolen. The caller must handle
+// and Ack the returned events just like ReadGroup output. Requires Redis
+// 6.2+ (XAUTOCLAIM).
+//
+// One call drains the entire backlog: XAUTOCLAIM scans the PEL in batches
+// of `count` and returns a cursor, which we thread across passes until
+// Redis reports the scan complete. Restarting every pass at "0-0" would
+// drain a large failover backlog at only `count` entries per call. On error
+// the events accumulated so far are still returned so the caller can
+// process and ack them.
+func (c *Client) ClaimPending(ctx context.Context, group, consumer string, minIdle time.Duration, count int64) ([]Event, error) {
+	var out []Event
+	start := "0-0"
+	for {
+		msgs, cursor, err := c.rdb.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+			Stream:   lifecycle.EventStreamKey,
+			Group:    group,
+			Consumer: consumer,
+			MinIdle:  minIdle,
+			Start:    start,
+			Count:    count,
+		}).Result()
+		if err != nil {
+			return out, fmt.Errorf("xautoclaim: %w", err)
+		}
+		for _, msg := range msgs {
+			// Entries the stream's MAXLEN trim has since deleted come back
+			// with no values. Redis ≥ 7 drops them from the PEL on claim,
+			// but on 6.2 they stay pending and resurface on every pass —
+			// ack them explicitly (a no-op where Redis already removed
+			// them) so the PEL can't leak.
+			if len(msg.Values) == 0 {
+				_ = c.Ack(ctx, group, msg.ID)
+				continue
+			}
+			ev := decodeEvent(msg)
+			if ev != nil {
+				out = append(out, *ev)
+			} else {
+				c.log.Warn("redisstream: dropping unparseable claimed event",
+					zap.String("id", msg.ID), zap.Any("values", msg.Values))
+				_ = c.Ack(ctx, group, msg.ID)
+			}
+		}
+		// Redis signals a completed scan with a "0-0" cursor ("0" seen in
+		// the wild from some proxies); anything else means more batches.
+		if cursor == "0-0" || cursor == "0" {
+			return out, nil
+		}
+		start = cursor
 	}
-	return ok, nil
 }
 
-// SetState forces the state value (overwriting any existing). Used to
-// transition pausing → paused or resuming → running once the underlying
-// operation has actually completed.
+// SetState forces the state value (overwriting any existing). Used by
+// WriteState for terminal-state re-asserts; transitions that need ownership
+// go through AcquireTransition / CommitTransition / ReleaseTransition.
 func (c *Client) SetState(ctx context.Context, sandboxID, state string, ttl time.Duration) error {
 	key := lifecycle.StateKey(sandboxID)
 	return c.rdb.Set(ctx, key, state, ttl).Err()
-}
-
-// ClearState drops the key altogether. Used on rollback (operation failed)
-// and on sandbox delete.
-func (c *Client) ClearState(ctx context.Context, sandboxID string) error {
-	key := lifecycle.StateKey(sandboxID)
-	return c.rdb.Del(ctx, key).Err()
 }
 
 // GetState returns the current state and whether the key exists.
@@ -217,14 +279,109 @@ func (c *Client) WriteState(ctx context.Context, sandboxID, state string, ttl ti
 	return nil
 }
 
-// ClearStateNotify is the ClearState + Pub/Sub companion used on rollback.
-func (c *Client) ClearStateNotify(ctx context.Context, sandboxID string) error {
-	if err := c.ClearState(ctx, sandboxID); err != nil {
-		return err
+// AcquireTransition atomically takes the state key for an in-flight
+// transition, writing "<transition>@<owner>". It succeeds only when the key
+// is missing or currently holds one of fromStates; any other value (a peer's
+// transition lock, a terminal state that must not be overwritten) makes it
+// fail. This is the CAS that serializes cross-replica pause/resume/kill:
+// whoever holds the returned ownership is the only one allowed to
+// CommitTransition / ReleaseTransition it (issue #1211).
+//
+// fromStates accepts both bare and owner-tagged stored values as written —
+// pass terminal states (e.g. "paused"); in-flight transitions of peers are
+// never acceptable predecessors.
+func (c *Client) AcquireTransition(ctx context.Context, sandboxID, transition, owner string, ttl time.Duration, fromStates ...string) (bool, error) {
+	key := lifecycle.StateKey(sandboxID)
+	args := make([]any, 0, len(fromStates)+2)
+	args = append(args, lifecycle.TransitionValue(transition, owner), ttl.Milliseconds())
+	for _, from := range fromStates {
+		args = append(args, from)
+	}
+	n, err := acquireTransitionScript.Run(ctx, c.rdb, []string{key}, args...).Int()
+	if err != nil {
+		return false, fmt.Errorf("acquire transition %s: %w", key, err)
+	}
+	return n == 1, nil
+}
+
+// CommitTransition finalises an owned transition by writing the terminal
+// newState — but only when the key still holds this owner's lock. Returns
+// false (without touching the key) when ownership was lost in the meantime
+// (TTL expiry followed by a peer's acquire, external clear, …). On success a
+// best-effort wakeup hint is published, mirroring WriteState.
+func (c *Client) CommitTransition(ctx context.Context, sandboxID, transition, owner, newState string, ttl time.Duration) (bool, error) {
+	key := lifecycle.StateKey(sandboxID)
+	n, err := commitTransitionScript.Run(ctx, c.rdb, []string{key},
+		lifecycle.TransitionValue(transition, owner), newState, ttl.Milliseconds()).Int()
+	if err != nil {
+		return false, fmt.Errorf("commit transition %s: %w", key, err)
+	}
+	if n != 1 {
+		return false, nil
 	}
 	c.publishNotify(sandboxID)
-	return nil
+	return true, nil
 }
+
+// ReleaseTransition abandons an owned transition by deleting the key — but
+// only when the key still holds this owner's lock, so a failed operation can
+// never wipe a state a peer has since committed. Returns false when the key
+// was no longer ours. On success a best-effort wakeup hint is published,
+// mirroring WriteState.
+func (c *Client) ReleaseTransition(ctx context.Context, sandboxID, transition, owner string) (bool, error) {
+	key := lifecycle.StateKey(sandboxID)
+	n, err := releaseTransitionScript.Run(ctx, c.rdb, []string{key},
+		lifecycle.TransitionValue(transition, owner)).Int()
+	if err != nil {
+		return false, fmt.Errorf("release transition %s: %w", key, err)
+	}
+	if n != 1 {
+		return false, nil
+	}
+	c.publishNotify(sandboxID)
+	return true, nil
+}
+
+// acquireTransitionScript: ARGV = {value, ttlMs, fromState...}. Sets the key
+// to value with PX ttlMs iff the key is absent or its value is one of the
+// fromStates. Returns 1 on success, 0 otherwise.
+var acquireTransitionScript = redis.NewScript(`
+local cur = redis.call("GET", KEYS[1])
+if cur then
+	local ok = false
+	for i = 3, #ARGV do
+		if cur == ARGV[i] then
+			ok = true
+			break
+		end
+	end
+	if not ok then
+		return 0
+	end
+end
+redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])
+return 1
+`)
+
+// commitTransitionScript: ARGV = {expectedValue, newState, ttlMs}. Overwrites
+// the key with newState (PX ttlMs) iff the current value equals
+// expectedValue. Returns 1 on success, 0 otherwise.
+var commitTransitionScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+	redis.call("SET", KEYS[1], ARGV[2], "PX", ARGV[3])
+	return 1
+end
+return 0
+`)
+
+// releaseTransitionScript: ARGV = {expectedValue}. Deletes the key iff the
+// current value equals expectedValue. Returns 1 on success, 0 otherwise.
+var releaseTransitionScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+	return redis.call("DEL", KEYS[1])
+end
+return 0
+`)
 
 // publishNotify fans a hint out locally and over Redis Pub/Sub. It never
 // returns an error: any notify failure degrades to fallback polling.

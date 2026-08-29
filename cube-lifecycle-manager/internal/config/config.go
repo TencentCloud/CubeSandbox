@@ -91,6 +91,35 @@ type Config struct {
 	// path and resumer.waitForRunning uses its 100ms polling ticker.
 	// Set CUBE_LCM_EVENTBUS_ENABLED=false as a kill switch.
 	EventBusEnabled bool
+
+	// Active-standby HA (issue #1211). When HAEnabled is false (the default)
+	// the process behaves exactly as before: every loop runs unconditionally
+	// — the right mode for the single-replica one-click deployment. When
+	// true, replicas elect a leader via a Redis lease; only the leader runs
+	// the stream consumer / sweeper / last-active poller / stale-pending
+	// takeover. Every replica reports Ready on /readyz (the role is in the
+	// response body) and standbys serve /internal/resume via the meta-hash
+	// fallback, so the Service routes resume traffic to any pod.
+	HAEnabled bool
+	// InstanceID uniquely identifies this replica inside the leader lease
+	// (a per-process random suffix is appended where a unique fencing value
+	// is required). Empty → derived from ConsumerName (which itself defaults
+	// to the hostname, i.e. the pod name under Kubernetes).
+	InstanceID string
+	// LeaderKey is the Redis lease key. Registered in
+	// docs/zh/dev/redis-key-spec.md.
+	LeaderKey string
+	// LeaderTTL is the lease expiry: a crashed leader blocks failover for at
+	// most this long.
+	LeaderTTL time.Duration
+	// LeaderRenewInterval is the lease renewal (and acquisition retry)
+	// cadence. Must be well below LeaderTTL.
+	LeaderRenewInterval time.Duration
+	// ReconcileInterval is the cadence of the leader's stale-pending-entry
+	// takeover passes and doubles as the XAUTOCLAIM min-idle — the minimum
+	// idle time before a dead consumer's pending stream entries are claimed
+	// by the new leader.
+	ReconcileInterval time.Duration
 }
 
 // Default returns a config populated with safe defaults; callers then override
@@ -119,6 +148,14 @@ func Default() *Config {
 		HeartbeatTTL:     15 * time.Second,
 		DiscoveryRefresh: 3 * time.Second,
 		EventBusEnabled:  true,
+		// HA defaults: disabled (single-replica deployments keep today's
+		// behavior). Sized so a failover completes in ~15s worst case while
+		// a healthy leader renews 3× per TTL window.
+		HAEnabled:           false,
+		LeaderKey:           "cube:v1:shared:lock:lifecycle_manager:leader",
+		LeaderTTL:           15 * time.Second,
+		LeaderRenewInterval: 5 * time.Second,
+		ReconcileInterval:   60 * time.Second,
 	}
 }
 
@@ -237,6 +274,46 @@ func Load() (*Config, error) {
 			c.EventBusEnabled = enabled
 		}
 	}
+	if v := os.Getenv("CUBE_LCM_HA_ENABLED"); v != "" {
+		// ParseBool (like CUBE_LCM_EVENTBUS_ENABLED): a value that *looks*
+		// enabled but isn't recognized ("True", "yes", "on", ...) must fail
+		// loudly at startup, not silently disable HA and revert to the
+		// split-brain single-replica behavior.
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			addErr("CUBE_LCM_HA_ENABLED", err)
+		} else {
+			c.HAEnabled = enabled
+		}
+	}
+	if v := os.Getenv("CUBE_LCM_INSTANCE_ID"); v != "" {
+		c.InstanceID = v
+	}
+	if v := os.Getenv("CUBE_LCM_LEADER_KEY"); v != "" {
+		c.LeaderKey = v
+	}
+	if v := os.Getenv("CUBE_LCM_LEADER_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err != nil {
+			addErr("CUBE_LCM_LEADER_TTL", err)
+		} else {
+			c.LeaderTTL = d
+		}
+	}
+	if v := os.Getenv("CUBE_LCM_LEADER_RENEW_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err != nil {
+			addErr("CUBE_LCM_LEADER_RENEW_INTERVAL", err)
+		} else {
+			c.LeaderRenewInterval = d
+		}
+	}
+	if v := os.Getenv("CUBE_LCM_RECONCILE_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err != nil {
+			addErr("CUBE_LCM_RECONCILE_INTERVAL", err)
+		} else {
+			c.ReconcileInterval = d
+		}
+	}
+
 	if c.ConsumerName == "" {
 		host, err := os.Hostname()
 		if err != nil {
@@ -244,6 +321,11 @@ func Load() (*Config, error) {
 		} else {
 			c.ConsumerName = host
 		}
+	}
+	// InstanceID defaults to the consumer name: both want a per-replica
+	// unique identity (pod name under Kubernetes, hostname on bare metal).
+	if c.InstanceID == "" {
+		c.InstanceID = c.ConsumerName
 	}
 
 	if len(errs) > 0 {
@@ -279,6 +361,34 @@ func (c *Config) Validate() error {
 	}
 	if c.LastActivePoll <= 0 {
 		return errors.New("last active poll must be > 0")
+	}
+	// ReconcileInterval drives the claimStalePending ticker, which runs in
+	// single-replica mode too — validate it unconditionally (a zero/negative
+	// value would panic time.NewTicker at startup).
+	if c.ReconcileInterval <= 0 {
+		return errors.New("reconcile interval must be > 0")
+	}
+	if c.HAEnabled {
+		if c.InstanceID == "" {
+			return errors.New("instance id is empty")
+		}
+		if c.LeaderKey == "" {
+			return errors.New("leader key is empty")
+		}
+		if c.LeaderTTL <= 0 {
+			return errors.New("leader TTL must be > 0")
+		}
+		if c.LeaderRenewInterval <= 0 || c.LeaderRenewInterval >= c.LeaderTTL {
+			return errors.New("leader renew interval must be > 0 and < leader TTL")
+		}
+		// ReconcileInterval doubles as the XAUTOCLAIM min-idle when a new
+		// leader takes over a dead predecessor's pending stream entries
+		// (see cmd main.go claimStalePending). Below the leader TTL those
+		// entries could be stolen from a merely partitioned — still alive —
+		// old leader, causing double processing.
+		if c.ReconcileInterval < c.LeaderTTL {
+			return errors.New("reconcile interval must be >= leader TTL")
+		}
 	}
 	return nil
 }

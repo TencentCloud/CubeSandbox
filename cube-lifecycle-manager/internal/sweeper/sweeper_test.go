@@ -25,34 +25,62 @@ type fakeStore struct {
 	states map[string]string
 
 	failAcquire bool
-	acquireBy   func(sid, state string) bool // when set, controls AcquireState success
+	acquireBy   func(sid, state string) bool // when set, controls AcquireTransition success
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{states: make(map[string]string)}
 }
 
-func (f *fakeStore) AcquireState(_ context.Context, sid, state string, _ time.Duration) (bool, error) {
+// AcquireTransition mirrors redisstream.Client.AcquireTransition: an atomic
+// CAS that writes the owner-tagged transition marker. It succeeds when the
+// key is missing or when the current value equals one of fromStates.
+func (f *fakeStore) AcquireTransition(_ context.Context, sid, transition, owner string, _ time.Duration, fromStates ...string) (bool, error) {
 	if f.failAcquire {
 		return false, errors.New("redis down")
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.acquireBy != nil && !f.acquireBy(sid, state) {
+	want := lifecycle.TransitionValue(transition, owner)
+	if f.acquireBy != nil && !f.acquireBy(sid, want) {
 		return false, nil
 	}
-	if _, ok := f.states[sid]; ok {
-		return false, nil // already held
+	cur, ok := f.states[sid]
+	if !ok {
+		f.states[sid] = want
+		return true, nil
 	}
-	f.states[sid] = state
+	for _, from := range fromStates {
+		if cur == from {
+			f.states[sid] = want
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// CommitTransition mirrors redisstream.Client.CommitTransition: the terminal
+// state is written only while the caller still owns the transition lock.
+func (f *fakeStore) CommitTransition(_ context.Context, sid, transition, owner, newState string, _ time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.states[sid] != lifecycle.TransitionValue(transition, owner) {
+		return false, nil
+	}
+	f.states[sid] = newState
 	return true, nil
 }
 
-func (f *fakeStore) SetState(_ context.Context, sid, state string, _ time.Duration) error {
+// ReleaseTransition mirrors redisstream.Client.ReleaseTransition: the key is
+// deleted only while the caller still owns the transition lock.
+func (f *fakeStore) ReleaseTransition(_ context.Context, sid, transition, owner string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.states[sid] = state
-	return nil
+	if f.states[sid] != lifecycle.TransitionValue(transition, owner) {
+		return false, nil
+	}
+	delete(f.states, sid)
+	return true, nil
 }
 
 func (f *fakeStore) GetState(_ context.Context, sid string) (string, bool, error) {
@@ -62,22 +90,13 @@ func (f *fakeStore) GetState(_ context.Context, sid string) (string, bool, error
 	return v, ok, nil
 }
 
-func (f *fakeStore) ClearState(_ context.Context, sid string) error {
+// setState is a test-only helper that force-writes a state value. Tests use
+// it to simulate a peer writer mid-RPC; it is not part of the stateStore
+// interface.
+func (f *fakeStore) setState(sid, state string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.states, sid)
-	return nil
-}
-
-// WriteState / ClearStateNotify are the notify-emitting equivalents. The
-// sweeper tests don't inspect notify payloads yet, so we simply forward
-// to the legacy SetState / ClearState behaviour.
-func (f *fakeStore) WriteState(ctx context.Context, sid, state string, ttl time.Duration) error {
-	return f.SetState(ctx, sid, state, ttl)
-}
-
-func (f *fakeStore) ClearStateNotify(ctx context.Context, sid string) error {
-	return f.ClearState(ctx, sid)
+	f.states[sid] = state
 }
 
 func (f *fakeStore) state(sid string) string {
@@ -94,6 +113,11 @@ type fakeMaster struct {
 	calls     []string
 	failNext  bool
 	failError error
+	// duringPause, when set, fires synchronously inside the Pause RPC (before
+	// the result is decided). Tests use it to mutate the state key while the
+	// RPC is in flight — e.g. simulating a peer that stole the transition
+	// lock mid-RPC.
+	duringPause func(sid string)
 
 	killCalls    []string
 	killReasons  []string
@@ -103,8 +127,14 @@ type fakeMaster struct {
 
 func (f *fakeMaster) Pause(_ context.Context, sid, _ string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.calls = append(f.calls, sid)
+	hook := f.duringPause
+	f.mu.Unlock()
+	if hook != nil {
+		hook(sid)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.failNext {
 		f.failNext = false
 		return f.failError
@@ -437,10 +467,78 @@ func TestSweeper_RollsBackOnPauseFailure(t *testing.T) {
 	}
 }
 
+// TestSweeper_PauseRollbackSkippedWhenLockStolen is the ownership-gated
+// counterpart of TestSweeper_RollsBackOnPauseFailure (issue #1211): if our
+// "pausing@a" lock is stolen mid-RPC (TTL expired, a peer resumer acquired
+// "resuming@peer"), the failure rollback must NOT fire — releasing would
+// delete the peer's key and the "running" push would clobber the peer's
+// in-flight transition. The sweeper still reports the failure; it just
+// leaves the peer's state alone.
+func TestSweeper_PauseRollbackSkippedWhenLockStolen(t *testing.T) {
+	reg := registry.New()
+	store := newFakeStore()
+	push := newFakePush()
+
+	now := time.Now()
+	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx-stolen", InstanceType: "cubebox",
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
+	}, now.Add(-10*time.Minute).UnixMilli())
+
+	// While our pause RPC is in flight, a peer resumer steals the state key.
+	// Deterministic: the hook runs synchronously inside fakeMaster.Pause,
+	// before the RPC error returns and before releaseTransition is checked.
+	peerState := lifecycle.TransitionValue(lifecycle.StateResuming, "peer")
+	master := &fakeMaster{
+		failNext:  true,
+		failError: errors.New("master 500"),
+		duringPause: func(sid string) {
+			store.setState(sid, peerState)
+		},
+	}
+
+	// Owner "a": our lock is "pausing@a"; the peer's is not, so the
+	// owner-gated ReleaseTransition must refuse to delete it.
+	s := New(Options{
+		Registry:           reg,
+		Redis:              store,
+		CubeMaster:         master,
+		ProxyPush:          push,
+		DefaultIdleTimeout: 5 * time.Minute,
+		BootstrapWarmup:    0,
+		StateLockTTL:       30 * time.Second,
+		Owner:              "a",
+		Interval:           time.Second,
+		Now:                func() time.Time { return now },
+		Log:                zap.NewNop(),
+	})
+	s.sweepOnce(context.Background())
+
+	if got := store.state("sbx-stolen"); got != peerState {
+		t.Fatalf("rollback must not delete the peer's key: expected %q, got %q", peerState, got)
+	}
+	pushed := push.states("sbx-stolen")
+	for _, st := range pushed {
+		if st == "running" {
+			t.Fatalf("rollback must not push running over the peer's transition, got %v", pushed)
+		}
+	}
+	if len(pushed) != 1 || pushed[0] != "pausing" {
+		t.Fatalf("expected only the initial pausing push, got %v", pushed)
+	}
+	if reg.Get("sbx-stolen") == nil {
+		t.Fatal("registry entry should NOT be evicted on pause failure")
+	}
+	_, failed := s.Stats()
+	if failed != 1 {
+		t.Fatalf("expected failed=1, got %d", failed)
+	}
+}
+
 func TestSweeper_SkipsWhenLockHeldElsewhere(t *testing.T) {
 	reg := registry.New()
 	store := newFakeStore()
-	// Pre-seed the state map → AcquireState returns false (someone else owns).
+	// Pre-seed the state map → AcquireTransition returns false (someone else owns).
 	store.states["sbx-5"] = "pausing"
 
 	master := &fakeMaster{}

@@ -68,6 +68,7 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | 沙箱操作锁（pause/resume/delete） | `cube:v1:master:lock:sandbox:{sandboxID}` | String | master | CubeMaster | CubeMaster | 按操作 SET NX EX：pause **180s**，resume/delete **120s**，其它 **60s**；解锁为 token 匹配的 Lua GET+DEL（不续期） |
 | CubeProxy 副本注册表 | `cube:v1:shared:cube_proxy:registry` | Hash | shared | CubeProxy | cube-lifecycle-manager | 无（心跳超时后由 `HDEL` 清理） |
 | CubeProxy 副本心跳 | `cube:v1:shared:cube_proxy:heartbeat` | Sorted Set | shared | CubeProxy | cube-lifecycle-manager | 无（`ZREMRANGEBYSCORE` 清理，默认 15s 过期） |
+| CLM 主备选主锁 | `cube:v1:shared:lock:lifecycle_manager:leader` | String | shared | cube-lifecycle-manager | cube-lifecycle-manager | SET NX EX（默认 15s），持锁方周期续期（默认 5s）；释放为 token 匹配的 Lua GET+DEL |
 
 ### 5.1 Hash 字段约定
 
@@ -123,6 +124,8 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | `paused` | 沙箱已暂停 |
 | `resuming` | 恢复过渡中 |
 
+过渡态取值可能带有 `@<owner>` 后缀，标识持有该过渡的 CLM 进程，例如 `resuming@pod-1:9f3ab2c1`。该后缀用于跨副本 resume 所有权的 fencing（Lua compare-and-set 只允许 owner 匹配的进程提交或清理过渡态），因此消费方必须按前缀匹配状态（`resuming@…` 仍视为 `resuming`），不能做全等比较。
+
 ## 6. TTL 策略
 
 | Key 类型 | 策略 | 说明 |
@@ -137,6 +140,7 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | `lock:sandbox` | SET NX EX（按操作） | 仅作崩溃／泄漏兜底；正常解锁为 token 安全的 Lua（`GET` 匹配持锁 token 后才 `DEL`）。TTL：pause **180s**，resume/delete **120s**，默认 **60s**（见 `CubeMaster/pkg/sandboxlock`）。不续期。 |
 | `cube_proxy:registry` | 无 TTL（依赖心跳） | 每个 CubeProxy 副本启动时写入；对应心跳过期后由 cube-lifecycle-manager 通过 `HDEL` 清理 |
 | `cube_proxy:heartbeat` | Sorted Set 过期 | Score 为最近一次心跳的 unix ms，超过 `heartbeat_ttl`（默认 15s）的条目由 `ZREMRANGEBYSCORE` 清理 |
+| `lock:lifecycle_manager:leader` | SET NX EX + 续期 | CLM active-standby 选主租约（issue #1211）：value 为持有方实例 ID（pod 名/主机名），TTL 默认 15s（`CUBE_LCM_LEADER_TTL`），持有方每 `CUBE_LCM_LEADER_RENEW_INTERVAL`（默认 5s）用 token 匹配的 Lua GET+PEXPIRE 续期；正常退出或主动下台时用 Lua GET+DEL 释放，崩溃时由 TTL 兜底，备节点最长一个 TTL 内接管 |
 | 缓存类（未来新增） | 必须设 TTL | 写入时显式声明，并在文档中登记 |
 
 ## 7. 各服务实现约定

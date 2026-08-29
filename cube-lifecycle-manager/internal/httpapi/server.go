@@ -31,12 +31,25 @@ type FleetSizer interface {
 	Snapshot() int
 }
 
+// LeaderGate is an optional dependency for active-standby deployments
+// (issue #1211): when set, /readyz reports the replica's role ("leader" /
+// "standby") in the response body. Readiness itself is NOT gated on
+// leadership — both roles return 200, because a standby genuinely serves
+// /internal/resume via the meta-hash fallback. Gating readiness on
+// leadership would deadlock rolling upgrades with the chart's
+// maxUnavailable=0 strategy (the old pod stays the only Ready endpoint
+// forever) and would needlessly fail resumes a standby could have served.
+type LeaderGate interface {
+	IsLeader() bool
+}
+
 // Server wires resume/healthz handlers and runs a *http.Server.
 type Server struct {
 	addr     string
 	resumer  *resumer.Resumer
 	registry *registry.Registry
 	fleet    FleetSizer
+	leader   LeaderGate
 	log      *zap.Logger
 	srv      *http.Server
 }
@@ -48,6 +61,13 @@ func New(addr string, r *resumer.Resumer, reg *registry.Registry, log *zap.Logge
 // WithFleetSizer sets the optional fleet-size probe used by /readyz. Chainable.
 func (s *Server) WithFleetSizer(fs FleetSizer) *Server {
 	s.fleet = fs
+	return s
+}
+
+// WithLeaderGate sets the optional leadership probe used by /readyz in
+// active-standby mode. Chainable.
+func (s *Server) WithLeaderGate(g LeaderGate) *Server {
+	s.leader = g
 	return s
 }
 
@@ -143,8 +163,23 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	// Without a leader gate the process is a standalone (single-replica)
+	// deployment and is always "the leader" for readiness purposes.
+	//
+	// Both leader and standby report 200: readiness expresses "process is
+	// healthy and can serve", and a standby serves resumes through the
+	// meta-hash fallback. The role is surfaced for observability only.
+	role := "standalone"
+	if s.leader != nil {
+		if s.leader.IsLeader() {
+			role = "leader"
+		} else {
+			role = "standby"
+		}
+	}
 	resp := map[string]any{
 		"ok":           true,
+		"role":         role,
 		"registry_len": s.registry.Len(),
 	}
 	if s.fleet != nil {

@@ -207,6 +207,9 @@
 {{- if not .Values.images.lifecycleManager.repository }}
 {{- fail "lifecycleManager.enabled=true requires images.lifecycleManager.repository" }}
 {{- end }}
+{{- if and (gt (.Values.lifecycleManager.replicas | int) 1) (not .Values.lifecycleManager.ha.enabled) }}
+{{- fail "lifecycleManager.replicas > 1 requires lifecycleManager.ha.enabled=true: without leader election the replicas run split-brain (concurrent stream consumption and sweeping); set replicas: 1 if you really want a single non-HA instance" }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- if and .Values.webui.enabled .Values.controlPlane.enabled (ne (include "cube.opsEnabled" .) "true") }}

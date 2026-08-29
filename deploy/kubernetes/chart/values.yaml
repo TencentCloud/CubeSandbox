@@ -373,7 +373,43 @@ lifecycleManager:
   # is enabled; CubeProxy points $cube_sidecar_addr at this Service and
   # registers itself in Redis for CLM discovery.
   enabled: true
-  replicas: 1
+  # Two replicas run in active-standby mode (see ha below): only the leader
+  # drives pause/resume decisions, and a crashed leader is replaced within
+  # one leaderTTL. Set replicas: 1 to run a single instance.
+  # With HA enabled both replicas become Ready: /readyz returns 200 on
+  # leader and standby alike (the role is only reported in the response
+  # body), and a standby still serves /internal/resume through the Redis
+  # meta-hash fallback, so the Service routes resume traffic to any Ready
+  # pod. Running the 2 replicas on different nodes is recommended — the
+  # chart prefers spreading them via podAntiAffinity on
+  # kubernetes.io/hostname and installs a PodDisruptionBudget
+  # (minAvailable: 1) whenever replicas > 1.
+  # WARNING: replicas and ha.enabled must move together — replicas > 1 with
+  # ha.enabled: false silently reverts to the pre-HA split-brain (two
+  # replicas consuming the same consumer group and sweeping concurrently),
+  # and the chart rejects that combination at render time.
+  # UPGRADE PATH: when moving an existing single-replica install to HA,
+  # first roll out the new CLM version with replicas: 1 and verify it is
+  # healthy, then scale to replicas: 2. Never scale out from a build where
+  # standbys report NotReady on /readyz: under the chart's
+  # maxUnavailable: 0 strategy the new standby never becomes available and
+  # the rollout deadlocks.
+  replicas: 2
+  # Active-standby HA (issue #1211). Replicas elect a leader through a
+  # Redis lease; leader and standby both report ready on /readyz (the role
+  # is reported in the response body only), so the Service routes resume
+  # traffic to any Ready pod and standbys answer /internal/resume from the
+  # Redis meta-hash fallback.
+  ha:
+    enabled: true
+    # Lease expiry: a crashed leader blocks failover for at most this long.
+    leaderTTL: 15s
+    # Lease renewal cadence; must be well below leaderTTL.
+    leaderRenewInterval: 5s
+    # Cadence of the new leader's pending-entry takeover pass, doubling as
+    # the minimum idle time before a dead leader's pending stream entries
+    # are claimed. Must be >= leaderTTL (enforced by CLM config validation).
+    reconcileInterval: 60s
   podAnnotations: {}
   listenAddr: "0.0.0.0:8083"
   service:

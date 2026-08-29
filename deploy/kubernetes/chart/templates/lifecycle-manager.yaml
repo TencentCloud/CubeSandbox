@@ -34,6 +34,19 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      {{- if gt (.Values.lifecycleManager.replicas | int) 1 }}
+      # Prefer spreading the active-standby replicas across nodes.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "cube.selectorLabels" . | nindent 20 }}
+                    app.kubernetes.io/component: lifecycle-manager
+                topologyKey: kubernetes.io/hostname
+      {{- end }}
       containers:
         - name: cube-lifecycle-manager
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.lifecycleManager "context" $) | quote }}
@@ -78,6 +91,21 @@ spec:
               value: {{ .Values.lifecycleManager.stateLockTTL | quote }}
             - name: CUBE_LCM_EVENTBUS_ENABLED
               value: {{ .Values.lifecycleManager.eventBusEnabled | quote }}
+            - name: CUBE_LCM_HA_ENABLED
+              value: {{ .Values.lifecycleManager.ha.enabled | quote }}
+            {{- if .Values.lifecycleManager.ha.enabled }}
+            # Unique per-replica identity for the leader lease (pod name).
+            - name: CUBE_LCM_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: CUBE_LCM_LEADER_TTL
+              value: {{ .Values.lifecycleManager.ha.leaderTTL | quote }}
+            - name: CUBE_LCM_LEADER_RENEW_INTERVAL
+              value: {{ .Values.lifecycleManager.ha.leaderRenewInterval | quote }}
+            - name: CUBE_LCM_RECONCILE_INTERVAL
+              value: {{ .Values.lifecycleManager.ha.reconcileInterval | quote }}
+            {{- end }}
             - name: CUBE_LCM_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
