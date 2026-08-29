@@ -580,7 +580,7 @@ patch_cubemaster_external_deps() {
     db_name_esc="$(escape_sed "${CUBE_EXTERNAL_DB_NAME}")"
     db_sslmode_esc="$(escape_sed "${CUBE_EXTERNAL_DB_SSLMODE}")"
     # driver is validated against a mysql|postgres whitelist in
-    # validate_external_db_driver, but escape it too so it is handled exactly
+    # validate_external_db_exclusive, but escape it too so it is handled exactly
     # like every other substituted value (no raw interpolation into sed).
     db_driver_esc="$(escape_sed "${db_driver}")"
 
@@ -660,9 +660,10 @@ patch_cubemaster_external_deps() {
 
     # Substitute connection details and driver. Key-prefix matching (no 'g'
     # flag) ensures each line is patched exactly once per section; Redis fields
-    # (nodes:/password:) are never touched.
+    # (nodes:/password:) are never touched. The `^  addr:` anchor avoids
+    # matching `cube_ops_addr:` in the common: block above.
     sed -i \
-      -e "s|addr: \".*\"|addr: \"${db_addr_esc}\"|" \
+      -e "s|^  addr: \".*\"|  addr: \"${db_addr_esc}\"|" \
       -e "s|user: \".*\"|user: \"${db_user_esc}\"|" \
       -e "s|pwd: \".*\"|pwd: \"${db_pwd_esc}\"|" \
       -e "s|db_name: \".*\"|db_name: \"${db_name_esc}\"|" \
