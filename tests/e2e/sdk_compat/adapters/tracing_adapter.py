@@ -81,6 +81,46 @@ class TracingSandboxAdapter(SandboxAdapter):
             output=_content_summary,
         )
 
+    def write_bytes(self, path: str, content: bytes, *, user: str = "root") -> None:
+        return self._trace.capture(
+            "write_bytes",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "path": path,
+                "user": user,
+                **_content_summary(content),
+            },
+            lambda: self._wrapped.write_bytes(path, content, user=user),
+            output=lambda _: {"written": True},
+        )
+
+    def read_bytes(self, path: str, *, user: str = "root") -> bytes:
+        return self._trace.capture(
+            "read_bytes",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "path": path,
+                "user": user,
+            },
+            lambda: self._wrapped.read_bytes(path, user=user),
+            output=_content_summary,
+        )
+
+    def read_stream(self, path: str, *, user: str = "root") -> bytes:
+        return self._trace.capture(
+            "read_stream",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "path": path,
+                "user": user,
+            },
+            lambda: self._wrapped.read_stream(path, user=user),
+            output=_content_summary,
+        )
+
     def list_files(self, path: str) -> list[dict[str, Any]]:
         return self._trace.capture(
             "list_files",
@@ -368,6 +408,8 @@ def wrap_adapter(adapter: SandboxAdapter, trace: TraceCollector | None) -> Sandb
 
 
 def _content_summary(content: Any) -> dict[str, Any]:
+    if isinstance(content, (bytes, bytearray)):
+        return {"content_length": len(content)}
     text = str(content)
     return {
         "content_length": len(text),

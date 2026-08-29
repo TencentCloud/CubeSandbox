@@ -69,7 +69,8 @@ pytest --run-e2e -m "lifecycle and slow"
 - 覆盖写、多行文本和较深路径；
 - 较大文本；
 - 文件 API 与 shell 双向互操作；
-- 读取不存在文件的错误语义。
+- 读取不存在文件的错误语义；
+- 二进制 `bytes` 和 `stream` 读取，包括空文件和 shell 创建的文件。
 
 `cases/filesystem/test_extended.py` 覆盖 SDK 文件 API 的文件和目录元数据、
 嵌套及空目录 list、exists、remove、rename 和 mkdir。
@@ -77,7 +78,7 @@ pytest --run-e2e -m "lifecycle and slow"
 `cases/filesystem/test_batch_and_watch.py` 覆盖两个 SDK backend 的批量文件写入，
 以及目录 create/write/remove 实时事件。
 
-当前内容覆盖仍以文本文件为主，尚未覆盖非 root 权限行为、二进制往返、
+二进制内容已覆盖 `bytes` 和 `stream` 读取。尚未覆盖非 root 权限行为、
 原子替换和并发文件访问。
 
 ### 2.4 Run code
@@ -170,10 +171,10 @@ Token、暂停/恢复、克隆（仅 CubeSandbox）、`mcp` 格式错误时 Cube
 
 当前 suite 主要验证 Python SDK 的同步常用路径和 CubeSandbox/E2B 兼容表面：
 
-- 已验证：创建、查询、命令、文本文件、Python code、pause/resume、kill、
+- 已验证：创建、查询、命令、文本和二进制文件读取、Python code、pause/resume、kill、
   部分自动生命周期、基本出站策略、两实例文件隔离；
-- 未验证：异步 SDK、流式输出、template/snapshot/metadata 完整 API、目录与
-  二进制文件、完整 HTTP/HTTPS/L7/UDP-DNS 网络语义、取消与资源限制、真实并发
+- 未验证：异步 SDK、流式输出、template/snapshot/metadata 完整 API、
+  非 root 文件权限、完整 HTTP/HTTPS/L7/UDP-DNS 网络语义、取消与资源限制、真实并发
   负载、多节点故障恢复。
 
 这不是缺陷清单本身；是否增加用例取决于 API 契约成熟度、环境可重复性和 CI
@@ -197,7 +198,7 @@ Token、暂停/恢复、克隆（仅 CubeSandbox）、`mcp` 格式错误时 Cube
 | --- | --- | --- | --- |
 | 生命周期竞争 | pause 与 timeout 同时发生、resume 请求重入、kill 与 resume 竞争 | 定位状态机与分布式锁问题 | `cases/lifecycle/` |
 | 生命周期时间语义 | timeout 刷新、手动 pause 后 timeout、manual connect 后新 idle 周期、endAt 漂移边界 | 验证 lifecycle contract 而非单次状态 | `cases/lifecycle/` |
-| 文件系统 | 目录创建/列举、权限与非 root user、二进制 round-trip、空文件、删除/rename | 扩大 SDK 文件 API 兼容表面 | `cases/filesystem/` |
+| 文件系统 | 非 root 权限、原子替换、并发文件访问 | 扩大 SDK 文件 API 兼容表面 | `cases/filesystem/` |
 | 命令 | 工作目录、用户切换、信号/取消、输出截断、大输出与 timeout 后资源释放 | 捕获 process/stream 清理问题 | `cases/commands/` |
 | Run code | 多单元异常后 kernel 是否可继续、超时、资源超限、富结果与图表、语言参数 | 验证解释器韧性 | `cases/run_code/` |
 | Network DNS/UDP | 域名 allow/deny、DNS 解析失败、UDP DNS 请求响应 | 不能用 TCP 结果代替 DNS/UDP 策略 | `cases/network/` |

@@ -47,6 +47,15 @@ class SandboxAdapter(ABC):
     def read_file(self, path: str, *, user: str = "root") -> str:
         raise NotImplementedError
 
+    def write_bytes(self, path: str, content: bytes, *, user: str = "root") -> None:
+        raise UnsupportedCapability(self.backend, "filesystem")
+
+    def read_bytes(self, path: str, *, user: str = "root") -> bytes:
+        raise UnsupportedCapability(self.backend, "filesystem")
+
+    def read_stream(self, path: str, *, user: str = "root") -> bytes:
+        raise UnsupportedCapability(self.backend, "filesystem")
+
     def list_files(self, path: str) -> list[dict[str, Any]]:
         raise UnsupportedCapability(self.backend, "filesystem_extended")
 

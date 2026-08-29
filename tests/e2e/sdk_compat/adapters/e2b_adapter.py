@@ -298,13 +298,33 @@ class E2BAdapter(SandboxAdapter):
         writer(path, content)
 
     def read_file(self, path: str, *, user: str = "root") -> str:
+        return str(self._read_with_format(path, "text"))
+
+    def write_bytes(self, path: str, content: bytes, *, user: str = "root") -> None:
+        files = getattr(self._sandbox, "files", None)
+        if files is None:
+            raise RuntimeError("E2B sandbox object does not expose files")
+        writer = getattr(files, "write", None) or getattr(files, "write_file", None)
+        if not callable(writer):
+            raise RuntimeError("E2B files object does not expose write/write_file")
+        writer(path, content)
+
+    def read_bytes(self, path: str, *, user: str = "root") -> bytes:
+        return bytes(self._read_with_format(path, "bytes"))
+
+    def read_stream(self, path: str, *, user: str = "root") -> bytes:
+        return b"".join(self._read_with_format(path, "stream"))
+
+    def _read_with_format(self, path: str, format: str):
         files = getattr(self._sandbox, "files", None)
         if files is None:
             raise RuntimeError("E2B sandbox object does not expose files")
         reader = getattr(files, "read", None) or getattr(files, "read_file", None)
         if not callable(reader):
             raise RuntimeError("E2B files object does not expose read/read_file")
-        return str(reader(path))
+        if format == "text":
+            return reader(path)
+        return reader(path, format=format)
 
     def _files_call(self, names: tuple[str, ...], *args):
         files = getattr(self._sandbox, "files", None)

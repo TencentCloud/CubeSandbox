@@ -118,6 +118,15 @@ class CubeSandboxAdapter(SandboxAdapter):
     def read_file(self, path: str, *, user: str = "root") -> str:
         return self._sandbox.files.read(path, user=user)
 
+    def write_bytes(self, path: str, content: bytes, *, user: str = "root") -> None:
+        self._sandbox.files.write(path, content, user=user)
+
+    def read_bytes(self, path: str, *, user: str = "root") -> bytes:
+        return bytes(self._sandbox.files.read(path, format="bytes", user=user))
+
+    def read_stream(self, path: str, *, user: str = "root") -> bytes:
+        return b"".join(self._sandbox.files.read(path, format="stream", user=user))
+
     def list_files(self, path: str) -> list[dict[str, Any]]:
         return list(self._sandbox.files.list(path))
 

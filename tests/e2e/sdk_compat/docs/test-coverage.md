@@ -77,7 +77,8 @@ data-plane regressions.
 - overwrite, multiline text and deep paths;
 - larger text content;
 - interoperability between file API and shell;
-- missing file error semantics.
+- missing file error semantics;
+- binary `bytes` and `stream` reads, including an empty file and a file created by the shell.
 
 `cases/filesystem/test_extended.py` covers directory and file metadata, nested
 and empty directory listing, exists, remove, rename and mkdir through the SDK
@@ -86,9 +87,8 @@ filesystem API.
 `cases/filesystem/test_batch_and_watch.py` covers multi-file writes and live
 directory create/write/remove events through both SDK backends.
 
-The current content coverage is text-file focused. Non-root permission
-behavior, binary round-trips, atomic replace and concurrent file access are not
-covered yet.
+Binary content is covered for `bytes` and `stream` reads. Non-root permission
+behavior, atomic replace and concurrent file access are not covered yet.
 
 ### 2.4 Run Code
 
@@ -215,11 +215,11 @@ UUID-named directories so parallel runs do not collide.
 The current suite mainly validates synchronous Python SDK paths and the
 CubeSandbox/E2B compatibility surface:
 
-- covered: create, info, command, text files, Python code, pause/resume, kill,
+- covered: create, info, command, text and binary file reads, Python code, pause/resume, kill,
   partial platform lifecycle, basic egress policy and two-sandbox file
   isolation;
 - not covered: async SDK, streaming output, complete template/snapshot/metadata
-  APIs, directory and binary filesystem operations, full HTTP/HTTPS/L7/UDP-DNS
+  APIs, non-root filesystem permissions, full HTTP/HTTPS/L7/UDP-DNS
   network semantics, cancellation/resource limits, real concurrency load and
   multi-node failure recovery.
 
@@ -244,7 +244,7 @@ contract maturity, environment reproducibility and CI budget.
 | --- | --- | --- | --- |
 | Lifecycle races | pause vs timeout, reentrant resume, kill vs resume | Expose state-machine and distributed lock issues | `cases/lifecycle/` |
 | Lifecycle timing | timeout refresh, manual pause before timeout, new idle cycle after manual connect, `endAt` drift | Validate lifecycle contract across time windows | `cases/lifecycle/` |
-| Filesystem | directories, non-root permissions, binary round-trip, empty files, delete/rename | Expand SDK file API compatibility | `cases/filesystem/` |
+| Filesystem | non-root permissions, atomic replace, concurrent file access | Expand SDK file API compatibility | `cases/filesystem/` |
 | Commands | working directory, user switching, signal/cancel, large output and resource cleanup after timeout | Catch process/stream cleanup bugs | `cases/commands/` |
 | Run code | kernel usability after errors, timeout, resource limit, rich output, language parameters | Validate interpreter resilience | `cases/run_code/` |
 | Network DNS/UDP | domain allow/deny, DNS failure, UDP DNS request/response | Avoid using TCP as a proxy for DNS/UDP policy | `cases/network/` |
