@@ -4,6 +4,7 @@
 package cubesandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
@@ -820,6 +821,58 @@ func TestFilesReadUsesEnvdHTTPFileAPI(t *testing.T) {
 	}
 }
 
+func TestFilesReadBytesPreservesBinary(t *testing.T) {
+	png := []byte{0x89, 0x50, 0x4e, 0x47}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/files" {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		w.Write(png)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-bin", TemplateID: "tpl-test"}
+
+	got, err := sb.Files().ReadBytes(context.Background(), "/tmp/x.png")
+	if err != nil {
+		t.Fatalf("ReadBytes: %v", err)
+	}
+	if !bytes.Equal(got, png) {
+		t.Fatalf("got=%x want=%x", got, png)
+	}
+
+	stream, err := sb.Files().ReadStream(context.Background(), "/tmp/x.png")
+	if err != nil {
+		t.Fatalf("ReadStream: %v", err)
+	}
+	defer stream.Close()
+	streamed, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !bytes.Equal(streamed, png) {
+		t.Fatalf("streamed=%x want=%x", streamed, png)
+	}
+
+	// Go strings hold arbitrary bytes (unlike JS/Python UTF-8 text paths), so
+	// Read still round-trips binary. ReadBytes is the e2b format=bytes surface
+	// for callers that want an explicit []byte API.
+	textContent, err := sb.Files().Read(context.Background(), "/tmp/x.png")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !bytes.Equal([]byte(textContent), png) {
+		t.Fatalf("Read round-trip=%x want=%x", []byte(textContent), png)
+	}
+}
+
 func TestFilesReadReturnsEnvdFileError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"file not found"}`, http.StatusNotFound)
@@ -886,14 +939,37 @@ type fakeFileReader struct {
 	path    string
 	user    string
 	content string
+	raw     []byte
 	err     error
 }
 
-func (r *fakeFileReader) readFile(_ context.Context, path string, options ...fileRequestOption) (string, error) {
+func (r *fakeFileReader) readFile(ctx context.Context, path string, options ...fileRequestOption) (string, error) {
+	raw, err := r.readFileBytes(ctx, path, options...)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func (r *fakeFileReader) readFileBytes(_ context.Context, path string, options ...fileRequestOption) ([]byte, error) {
 	r.path = path
 	opts := resolveFileRequestOptions(options...)
 	r.user = opts.user
-	return r.content, r.err
+	if r.err != nil {
+		return nil, r.err
+	}
+	if r.raw != nil {
+		return append([]byte(nil), r.raw...), nil
+	}
+	return []byte(r.content), nil
+}
+
+func (r *fakeFileReader) openFileStream(ctx context.Context, path string, options ...fileRequestOption) (io.ReadCloser, error) {
+	raw, err := r.readFileBytes(ctx, path, options...)
+	if err != nil {
+		return nil, err
+	}
+	return io.NopCloser(bytes.NewReader(raw)), nil
 }
 
 func connectEnvelope(flags byte, payload string) []byte {
