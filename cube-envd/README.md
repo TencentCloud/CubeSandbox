@@ -30,7 +30,7 @@ Implemented (behavior matched fixture-by-fixture against the baseline):
 | REST | `GET /health` (204), `POST /init` (envVars merge + optional accessToken), `GET /envs`, `GET /metrics`, `GET/POST /files` (octet-stream + multipart, relative paths, ownership, error vocabulary) |
 | `process.Process` | `Start` (Connect JSON streaming: start/data/end events; `cwd` validated — a missing/non-directory cwd is rejected with `invalid_argument` and the working directory is entered *after* the privilege drop so the target user's permissions apply; `Connect-Timeout-Ms` kills the child's whole process group and ends with `deadline_exceeded`; client disconnect leaves the child running), `List`, `SendSignal` (whole-group signal) |
 | `filesystem.Filesystem` | `Stat`, `ListDir` (BFS depth), `MakeDir` (ownership on every created component), `Move`, `Remove` (idempotent) |
-| CLI | `-port`, `-isnotfc` (ignored), `-version`/`--version`, `-commit`; unknown flags are warned and skipped so `ENVD_EXTRA_ARGS` written for Go envd keep working |
+| CLI | Go `flag` compatible: `-port` (u16, `-port N` or `-port=N`), `-isnotfc` (accepted and ignored; `-isnotfc=false` is **rejected** — only the non-FC mode is implemented), `-version`/`--version`, `-commit`, `-h`/`-help` (usage, exit 0); `-cmd`/`-cgroup-root` are recognized but not implemented yet (warned and skipped); **any other flag or positional argument is a usage error — Go's message + usage on stderr + exit 2** |
 | Auth | `Authorization: Basic base64("<user>:")` / `username` query, `/etc/passwd` resolution, default user `root`, privilege drop per operation, `X-Access-Token` enforced only after /init provides one |
 
 Out of MVP scope — these return stable, protocol-correct `unimplemented`
@@ -81,6 +81,20 @@ load-bearing ones, and why cube-envd differs:
   there is no pid; upstream reports the pid of its nice(1) wrapper, which is
   equally unusable for `Connect`/`SendSignal` after the exec failure. Event
   order, stderr suffix and exit code 127 match the baseline.
+- **CLI parsing is stricter than Go's `flag` (documented).** *Unlike the
+  upstream Go envd, cube-envd strictly validates every command-line argument:
+  an invalid flag, a positional argument or a malformed value terminates
+  startup immediately with exit code 2 instead of being silently ignored.*
+  Go stops parsing at the first non-flag token and silently ignores it, so a
+  typo in
+  `ENVD_EXTRA_ARGS` could leave envd running on defaults; cube-envd rejects
+  positional arguments, including anything trailing a bare `--`. It also
+  validates `-port` as `u16` at parse time,
+  where Go's `int64` accepts `99999` and only fails when binding, and it
+  rejects a value attached to an output flag (`-version=false`) instead of
+  parsing it as a boolean. Everything Go *does* reject — undefined flags,
+  `bad flag syntax`, missing or invalid values — is rejected here too, with
+  Go's message followed by the usage block on stderr and exit code 2.
 - **Cosmetic HTTP:** Go appends a trailing `\n` to REST error/JSON bodies and
   sends `Vary`/`Allow` headers cube-envd omits; `HEAD` is auto-served by axum.
   None affect the SDKs.

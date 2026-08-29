@@ -178,7 +178,7 @@ Environment variables:
 | Variable           | Default             | Purpose                                              |
 | ------------------ | ------------------- | ---------------------------------------------------- |
 | `ENVD_PORT`        | `49983`             | Port `envd` listens on.                              |
-| `ENVD_EXTRA_ARGS`  | *(empty)*           | Extra flags passed after `-port`. `-isnotfc` is appended automatically if not already present, to skip Firecracker MMDS lookup. |
+| `ENVD_EXTRA_ARGS`  | *(empty)*           | Extra flags passed after `-port`. `-isnotfc` is appended automatically if not already present, to skip Firecracker MMDS lookup. Only flags cube-envd declares are accepted — anything else (including a typo) makes envd exit 2 at startup instead of silently running on defaults. `-cmd` and `-cgroup-root` are recognized but not implemented yet: they are warned about and skipped. |
 | `ENVD_LOG_FILE`    | `/var/log/envd.log` | File that captures envd stdout/stderr. Use `-` to inherit the container stdio. |
 | `ENVD_BIN`         | `/usr/bin/envd`     | Override if you install envd elsewhere.              |
 
