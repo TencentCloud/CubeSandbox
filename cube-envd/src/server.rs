@@ -212,15 +212,17 @@ async fn process_start(
         Err(e) => return proc_svc::stream_error_response(e),
     };
     let deadline = connect::timeout_from_headers(&headers);
+    let keepalive = connect::keepalive_interval_from_headers(&headers);
     tracing::info!(
-        "Start: cmd={:?} args={:?} user={} tag={:?} timeout={:?}",
+        "Start: cmd={:?} args={:?} user={} tag={:?} timeout={:?} keepalive={:?}",
         req.process.cmd,
         req.process.args,
         user.name,
         req.tag,
-        deadline
+        deadline,
+        keepalive
     );
-    proc_svc::start(state, req, user, deadline)
+    proc_svc::start(state, req, user, deadline, keepalive)
 }
 
 async fn process_list(

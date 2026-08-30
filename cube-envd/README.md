@@ -98,6 +98,19 @@ load-bearing ones, and why cube-envd differs:
 - **Cosmetic HTTP:** Go appends a trailing `\n` to REST error/JSON bodies and
   sends `Vary`/`Allow` headers cube-envd omits; `HEAD` is auto-served by axum.
   None affect the SDKs.
+- **Slow output consumers are cut off, not back-pressured.** The process
+  output bus is a bounded broadcast (capacity 64); a connection that falls
+  behind the ring gets its own `Lagged` error, which cube-envd frames as a
+  terminal `resource_exhausted` EndStream error and closes only that stream.
+  The child and every other subscriber keep running untouched. This is the
+  cancel-on-overflow shape upstream #3292 recommends; upstream Go envd's
+  lock-step fan-out has no equivalent error code, so a `resource_exhausted`
+  stream is a cube-envd-only signal a client never sees from Go.
+- **`Keepalive-Ping-Interval` outside the sane range degrades instead of
+  crashing.** Upstream parses the header straight into `time.NewTicker`, so
+  `0`, negative, or int64-duration-overflowing values panic the daemon;
+  cube-envd parses as `u32` and falls back to the 30 s default for any
+  absent, non-numeric, non-positive, or oversized value.
 
 ## Build & test
 
@@ -122,9 +135,13 @@ documented in [tests/e2e/envd_conformance](../tests/e2e/envd_conformance/).
   `/usr/bin/envd` matters: Cubelet's version collection execs `envd
   --version`, so an `ENVD_BIN` override alone would leave the template
   annotated with the other implementation's version.
-- A quiet `Start` stream emits a `keepalive` event every 30 s (like
-  upstream) so proxies and LBs don't idle-close the connection while a
-  long silent command runs.
+- A quiet `Start` stream emits a `keepalive` event so proxies and LBs don't
+  idle-close the connection while a long silent command runs. The default
+  cadence is 30 s — upstream uses 90 s, but 30 s stays safely under the
+  unknown idle timeout (typically 60 s) of the LB in front of CubeProxy. A
+  client can tune the cadence with the `Keepalive-Ping-Interval` request
+  header (integer seconds); an absent, non-numeric, non-positive, or
+  oversized value falls back to 30 s (see "Known behavioral differences").
 - Reported version: `0.1.0`. The control plane has no minimum-version
   rejection (verified across CubeAPI and the SDKs — only feature gates), and
   0.1.0 keeps e2b SDK watch-related feature gates safely disabled, matching

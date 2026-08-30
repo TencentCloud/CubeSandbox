@@ -14,7 +14,8 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::auth::User;
 use crate::connect;
@@ -58,6 +59,7 @@ pub fn start(
     req: StartRequest,
     user: User,
     deadline: Option<std::time::Duration>,
+    keepalive_interval: std::time::Duration,
 ) -> axum::response::Response {
     if req.pty.is_some() {
         return stream_error_response(ConnectError::unimplemented("PTY (Start.pty)"));
@@ -93,7 +95,7 @@ pub fn start(
         }
     };
 
-    let pid = spawned.pid;
+    let exec::SpawnedProcess { pid, initial } = spawned;
     let handle = state.insert_process(ProcEntry {
         pid,
         tag: req.tag.clone(),
@@ -106,7 +108,16 @@ pub fn start(
     let (tx, rx) = mpsc::channel::<Bytes>(64);
     let driver_state = state.clone();
     tokio::spawn(async move {
-        drive_stream(driver_state, pid, handle, spawned.events, tx, deadline).await;
+        drive_stream(
+            driver_state,
+            pid,
+            handle,
+            initial,
+            tx,
+            deadline,
+            keepalive_interval,
+        )
+        .await;
     });
 
     frame_stream_response(tokio_stream::wrappers::ReceiverStream::new(rx))
@@ -116,9 +127,10 @@ async fn drive_stream(
     state: Arc<AppState>,
     pid: u32,
     handle: crate::state::ProcHandle,
-    mut events: mpsc::Receiver<exec::PumpEvent>,
+    mut events: broadcast::Receiver<exec::PumpEvent>,
     tx: mpsc::Sender<Bytes>,
     deadline: Option<std::time::Duration>,
+    keepalive_interval: std::time::Duration,
 ) {
     // send() ignores errors: a dropped receiver means the client is gone,
     // but the child must still be drained and reaped.
@@ -135,35 +147,39 @@ async fn drive_stream(
     let timeout = tokio::time::sleep(deadline.unwrap_or(sleep_forever));
     tokio::pin!(timeout);
 
-    // Baseline behavior: upstream envd emits a `keepalive` event on a quiet
-    // Start stream so intermediaries (CubeProxy, LBs) don't cut an idle
-    // connection while a long-running silent command is still alive.
-    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(30));
+    // Keepalive: upstream envd emits a `keepalive` event on a quiet Start
+    // stream so intermediaries (CubeProxy, LBs) don't cut an idle connection
+    // while a long-running silent command is still alive. The cadence is the
+    // `Keepalive-Ping-Interval` header in whole seconds, defaulting to 30s.
+    let mut keepalive = tokio::time::interval(keepalive_interval);
     keepalive.reset(); // first tick fires after one period, not immediately
 
+    // `stream_closed` flips once a terminal EndStream error frame (deadline
+    // expiry or a too-slow disconnect) has been sent: from then on the wire
+    // must end with that frame, so remaining output is drained (to reap the
+    // child) but never framed again. `timed_out` only tracks whether the
+    // deadline kill has already fired, so the kill happens exactly once even
+    // if the stream was already closed for a different reason.
     let mut timed_out = false;
+    let mut stream_closed = false;
     loop {
         tokio::select! {
             ev = events.recv() => match ev {
-                Some(exec::PumpEvent::Data(d)) => {
-                    // After a timeout the EndStream error frame has already
-                    // been sent and must stay the LAST frame on the wire;
-                    // keep draining (so the child is reaped) but drop the
-                    // buffered output instead of framing it.
-                    if !timed_out {
+                Ok(exec::PumpEvent::Data(d)) => {
+                    if !stream_closed {
                         keepalive.reset();
                         send(event_frame(Event::Data(d))).await;
                     }
                 }
-                Some(exec::PumpEvent::End(end)) => {
-                    if !timed_out {
+                Ok(exec::PumpEvent::End(end)) => {
+                    if !stream_closed {
                         send(event_frame(Event::End(end))).await;
                         send(connect::end_stream_ok()).await;
                     }
                     break;
                 }
-                Some(exec::PumpEvent::SpawnError(msg)) => {
-                    if !timed_out {
+                Ok(exec::PumpEvent::SpawnError(msg)) => {
+                    if !stream_closed {
                         send(connect::end_stream_error(&ConnectError::new(
                             ConnectCode::Internal,
                             msg,
@@ -172,15 +188,34 @@ async fn drive_stream(
                     }
                     break;
                 }
-                None => break,
+                // A subscriber that falls too far behind the ring gets its own
+                // `Lagged` and only its own stream ends here — avoiding
+                // upstream #3292, where one stale subscriber wedges the whole
+                // fan-out. The child and every other subscriber are untouched;
+                // we keep draining so the child is still reaped.
+                Err(RecvError::Lagged(n)) => {
+                    if !stream_closed {
+                        send(connect::end_stream_error(&ConnectError::new(
+                            ConnectCode::ResourceExhausted,
+                            format!("output consumer too slow: {n} events dropped"),
+                        )))
+                        .await;
+                    }
+                    stream_closed = true;
+                }
+                // Every sender is gone without an End event (the pump task
+                // died); nothing more can arrive.
+                Err(RecvError::Closed) => break,
             },
-            _ = keepalive.tick(), if !timed_out => {
+            _ = keepalive.tick(), if !stream_closed => {
                 send(event_frame(Event::KeepAlive(serde_json::Map::new()))).await;
             }
             _ = &mut timeout, if !timed_out => {
                 timed_out = true;
                 // Baseline: deadline expiry kills the process and the stream
-                // ends with deadline_exceeded; no End event is emitted.
+                // ends with deadline_exceeded; no End event is emitted. The
+                // deadline is a property of the command, so it fires even if
+                // the stream was already closed (e.g. a too-slow client).
                 //
                 // Between the child exiting and this signal there is an
                 // unavoidable pgid-reuse window (the kernel could hand the
@@ -188,11 +223,14 @@ async fn drive_stream(
                 // the same window; closing it would need pidfd-based
                 // signalling, out of scope for the MVP.
                 let _ = exec::kill_process_group(pid, libc::SIGKILL);
-                send(connect::end_stream_error(&ConnectError::new(
-                    ConnectCode::DeadlineExceeded,
-                    "context deadline exceeded",
-                )))
-                .await;
+                if !stream_closed {
+                    send(connect::end_stream_error(&ConnectError::new(
+                        ConnectCode::DeadlineExceeded,
+                        "context deadline exceeded",
+                    )))
+                    .await;
+                }
+                stream_closed = true;
                 // Keep looping (without the timeout arm) to drain and reap.
             }
         }
@@ -345,5 +383,73 @@ mod tests {
         let end: serde_json::Value = serde_json::from_slice(&frames[2][5..]).unwrap();
         assert_eq!(end["event"]["end"]["exitCode"], 127);
         assert_eq!(frames[3][0], connect::END_STREAM_FLAG);
+    }
+
+    #[tokio::test]
+    async fn drive_stream_lagged_cuts_off_slow_subscriber() {
+        let state = Arc::new(AppState::new());
+        let handle = state.insert_process(ProcEntry {
+            pid: 42,
+            tag: None,
+            config: crate::msg::process::ProcessConfig {
+                cmd: "/bin/echo".into(),
+                ..Default::default()
+            },
+        });
+
+        // Capacity-1 ring: publishing two events before the driver reads any
+        // overflows the ring, so its first recv() reports Lagged instead of
+        // delivering the overwritten event.
+        let (pub_tx, events) = broadcast::channel::<exec::PumpEvent>(1);
+        let data = |s: &str| {
+            exec::PumpEvent::Data(crate::msg::process::DataEvent {
+                stdout: Some(s.into()),
+                ..Default::default()
+            })
+        };
+        assert!(pub_tx.send(data("a")).is_ok());
+        assert!(pub_tx.send(data("b")).is_ok());
+
+        let (tx, mut rx) = mpsc::channel::<Bytes>(16);
+        let driver_state = state.clone();
+        let driver = tokio::spawn(async move {
+            drive_stream(
+                driver_state,
+                42,
+                handle,
+                events,
+                tx,
+                None,
+                std::time::Duration::from_secs(30),
+            )
+            .await;
+        });
+
+        // The cutoff has already closed the stream; publish End so the driver
+        // drains, breaks, and reaps the process entry.
+        assert!(pub_tx
+            .send(exec::PumpEvent::End(crate::msg::process::EndEvent {
+                exit_code: 0,
+                exited: true,
+                status: "exit status 0".into(),
+                error: None,
+            }))
+            .is_ok());
+
+        let mut frames = Vec::new();
+        while let Some(f) = rx.recv().await {
+            frames.push(f);
+        }
+        driver.await.unwrap();
+
+        // Start, then exactly one terminal EndStream error frame — no Data,
+        // no End event, no end_stream_ok. The lagging subscriber is cut off
+        // and the child (here, already ended) is still reaped.
+        assert_eq!(frames.len(), 2);
+        let start: serde_json::Value = serde_json::from_slice(&frames[0][5..]).unwrap();
+        assert_eq!(start["event"]["start"]["pid"], 42);
+        assert_eq!(frames[1][0], connect::END_STREAM_FLAG);
+        let err: serde_json::Value = serde_json::from_slice(&frames[1][5..]).unwrap();
+        assert_eq!(err["error"]["code"], "resource_exhausted");
     }
 }
