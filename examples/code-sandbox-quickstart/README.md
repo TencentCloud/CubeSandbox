@@ -41,7 +41,7 @@ When the `with` block exits, the sandbox is automatically deleted.
 ## 2. Prerequisites
 
 - A running Cube Sandbox deployment
-- Python 3.8+
+- Python 3.9+ (`cubesandbox` and `e2b-code-interpreter` dependencies)
 
 ```bash
 pip install -r requirements.txt
@@ -77,6 +77,19 @@ cp .env.example .env
 
 After that, you can run any example script directly without manually exporting
 the variables first.
+
+**Local dev outside the cluster:** If `*.cube.app` does not resolve, set
+`CUBE_REMOTE_PROXY_BASE=https://<node-ip>:443` in `.env` (CubeProxy commonly
+uses 443/8080/9090). `load_local_dotenv()` only loads `.env`; E2B data-plane
+scripts call `ensure_dev_sidecar()` to start the sibling
+[`examples/e2b-dev-sidecar/`](../e2b-dev-sidecar/) proxy and patch the
+**E2B SDK** (`e2b_code_interpreter`) so its traffic is routed through the
+sidecar. Requires the full repo clone; if sidecar setup fails, scripts warn
+and continue. Control-plane-only scripts (e.g. `create.py`) skip the sidecar.
+Scripts using the `cubesandbox` SDK in this directory (e.g. `auto-kill.py`) are
+**not** patched and still need `*.cube.app` DNS or other routing outside the
+cluster. Tune `/init` re-apply latency with `CUBE_ENVD_INIT_ATTEMPT_TIMEOUT_S`
+(default `5` seconds per attempt).
 
 Or export directly:
 
@@ -159,7 +172,7 @@ python create_with_envs.py
 Expected output:
 
 ```text
-user-session-test
+session is user-session-test
 ```
 
 ### pause.py — Pause & Resume
@@ -264,6 +277,8 @@ requests.get(url, headers={"e2b-traffic-access-token": sandbox.traffic_access_to
 | `Template not found` | Wrong template ID | Re-run `cubemastercli tpl list` |
 | `Connection refused` | CubeAPI not reachable | Check `E2B_API_URL` and port 3000 |
 | `Sandbox timeout` | Sandbox exceeded its TTL | Increase `timeout` in `Sandbox.create()` |
+| `create_with_envs.py` prints `session is ` with no value | cubebox/VNC templates may drop create-time envs | Example best-effort calls `apply_create_time_envs()` (warn-only on failure); use `commands.run(..., envs={...})` if needed |
+| `CUBE_REMOTE_PROXY_BASE` set but sidecar inactive | Partial repo copy or sidecar setup failed | Use full repo; check warnings. Control-plane scripts still run; data-plane needs sidecar or DNS |
 
 ## 6. Directory Structure
 
