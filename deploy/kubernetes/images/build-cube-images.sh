@@ -394,8 +394,16 @@ ensure_source_tree() {
     || fail "SOURCE_REF=${SOURCE_REF} is not a valid git ref in ${WORKTREE_ROOT}"
   SOURCE_REF_SHA="$(git -C "${WORKTREE_ROOT}" rev-parse "${SOURCE_REF}^{commit}")"
   SOURCE_TREE_STAMP="${SOURCE_TREE_DIR}/.exported-sha"
-  CUBELOG_SRC="$(cubelog_module_at_ref "${SOURCE_REF_SHA}")" \
-    || fail "SOURCE_REF=${SOURCE_REF} has neither pkgs/CubeLog nor cubelog"
+  # Probe cubelog only when a consumer image is selected. cube-api / cube-proxy /
+  # cube-webui / cube-egress / cube-lifecycle-manager never export it, so a
+  # SOURCE_REF that predates both pkgs/CubeLog and cubelog must still be able to
+  # build those images (same reason CubeOps is gated below).
+  CUBELOG_SRC=""
+  if should_build cube-master || should_build cubemastercli \
+     || should_build cubelet || should_build cube-ops; then
+    CUBELOG_SRC="$(cubelog_module_at_ref "${SOURCE_REF_SHA}")" \
+      || fail "SOURCE_REF=${SOURCE_REF} has neither pkgs/CubeLog nor cubelog"
+  fi
   # CubeOps is post-v0.5.1; only export when building cube-ops so older release
   # tags still work for cube-api / cube-proxy / webui / etc. cube-master /
   # cubemastercli need ${CUBELOG_SRC} / CubeDB / Cubelet; cubemastercli also needs
