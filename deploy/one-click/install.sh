@@ -338,7 +338,7 @@ check_dns_preflight() {
       local nm_load_state
       nm_load_state="$(systemctl show -p LoadState --value NetworkManager 2>/dev/null || true)"
       [[ "${nm_load_state}" == "loaded" ]] || \
-        die "DNS setup requires resolvectl or NetworkManager (or set CUBE_PROXY_DNSMASQ_MODE=standalone)"
+        die "DNS setup requires resolvectl or NetworkManager: install the systemd-resolved package that provides resolvectl (apt install systemd-resolved, dnf install systemd-resolved), or set CUBE_PROXY_DNSMASQ_MODE=standalone"
       ;;
     standalone)
       # standalone mode manages dnsmasq itself and only uses NetworkManager
