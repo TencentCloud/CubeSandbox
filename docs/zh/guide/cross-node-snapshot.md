@@ -1,5 +1,9 @@
 # 跨机快照（Pause / Resume / Snapshot）
 
+::: tip 部署范围（v0.7.0）
+本版本暂时只支持在 **one-click 部署**的计算节点上启用 CubeS3lvol；Kubernetes（Helm）部署暂未包含 s3lvol 组件，无法启用跨机 S3 快照。
+:::
+
 CubeSandbox 通过一份可持久化的「包对象」（rootfs / memory / metadata）实现沙箱的
 **暂停（Pause）**、**恢复（Resume）** 与 **快照（Snapshot）**：
 
