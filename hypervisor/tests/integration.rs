@@ -29,7 +29,7 @@ use std::thread;
 use net_util::MacAddr;
 use test_infra::*;
 use vmm::config::RestoreConfig;
-use vmm::vm_config::{DiskConfig, FsConfig, NetConfig, PmemConfig, VsockConfig};
+use vmm::vm_config::{DiskConfig, FsConfig, MemoryConfig, NetConfig, PmemConfig, VsockConfig};
 use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
 use wait_timeout::ChildExt;
 
@@ -257,20 +257,29 @@ fn curl_command(api_socket: &str, method: &str, url: &str, http_body: Option<&st
 }
 
 fn remote_command(api_socket: &str, command: &str, arg: Option<&str>) -> bool {
+    match arg {
+        Some(a) => remote_command_w_args(api_socket, command, &[a]),
+        None => remote_command_w_args(api_socket, command, &[]),
+    }
+}
+
+fn remote_command_w_args(api_socket: &str, command: &str, args: &[&str]) -> bool {
+    remote_command_w_args_output(api_socket, command, args).0
+}
+
+fn remote_command_w_args_output(api_socket: &str, command: &str, args: &[&str]) -> (bool, String) {
     let mut cmd = Command::new(clh_command("ch-remote"));
     cmd.args([&format!("--api-socket={}", api_socket), command]);
+    cmd.args(args);
 
-    if let Some(arg) = arg {
-        cmd.arg(arg);
-    }
     let output = cmd.output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if output.status.success() {
-        true
+        (true, stderr)
     } else {
         eprintln!("Error running ch-remote command: {:?}", &cmd);
-        let stderr = String::from_utf8_lossy(&output.stderr);
         eprintln!("stderr: {}", stderr);
-        false
+        (false, stderr)
     }
 }
 
@@ -2145,6 +2154,26 @@ fn enable_guest_watchdog(guest: &Guest, watchdog_sec: u32) {
 }
 
 fn snapshot_and_check_events(api_socket: &str, snapshot_dir: &str, event_path: &str) {
+    snapshot_with_extra_args_and_check_events(api_socket, snapshot_dir, event_path, &[]);
+}
+
+// Incremental (pagemap_anon) snapshot: dest must already contain a
+// memory-ranges base file. Only CoW anonymous pages are overwritten.
+fn incremental_snapshot_and_check_events(api_socket: &str, snapshot_dir: &str, event_path: &str) {
+    snapshot_with_extra_args_and_check_events(
+        api_socket,
+        snapshot_dir,
+        event_path,
+        &["--snapshot-type", "incremental"],
+    );
+}
+
+fn snapshot_with_extra_args_and_check_events(
+    api_socket: &str,
+    snapshot_dir: &str,
+    event_path: &str,
+    extra_args: &[&str],
+) {
     // Pause the VM
     assert!(remote_command(api_socket, "pause", None));
     let latest_events = [
@@ -2159,12 +2188,11 @@ fn snapshot_and_check_events(api_socket: &str, snapshot_dir: &str, event_path: &
     ];
     assert!(check_latest_events_exact(&latest_events, event_path));
 
-    // Take a snapshot from the VM
-    assert!(remote_command(
-        api_socket,
-        "snapshot",
-        Some(format!("file://{}", snapshot_dir).as_str()),
-    ));
+    let url = format!("file://{}", snapshot_dir);
+    let mut args = Vec::with_capacity(1 + extra_args.len());
+    args.push(url.as_str());
+    args.extend_from_slice(extra_args);
+    assert!(remote_command_w_args(api_socket, "snapshot", &args));
 
     // Wait to make sure the snapshot is completed
     thread::sleep(std::time::Duration::new(10, 0));
@@ -2180,6 +2208,22 @@ fn snapshot_and_check_events(api_socket: &str, snapshot_dir: &str, event_path: &
         },
     ];
     assert!(check_latest_events_exact(&latest_events, event_path));
+}
+
+fn assert_memory_ranges_full_size(snapshot_dir: &str, mem_params: &str) {
+    let memory_ranges = std::path::Path::new(snapshot_dir).join("memory-ranges");
+    assert!(
+        memory_ranges.exists(),
+        "incremental snapshot did not produce {}",
+        memory_ranges.display()
+    );
+    let mem_config = MemoryConfig::parse(mem_params, None).unwrap();
+    let file_len = std::fs::metadata(&memory_ranges).unwrap().len();
+    assert_eq!(
+        file_len, mem_config.size,
+        "memory-ranges logical size {} != guest RAM {}",
+        file_len, mem_config.size
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6539,6 +6583,286 @@ mod common_parallel {
             assert!(String::from_utf8_lossy(&output.stdout).contains(&console_text));
         });
 
+        handle_child_output(r, &output);
+    }
+
+    // Incremental (pagemap_anon) overlays CoW pages onto an existing dest
+    // memory-ranges file. An empty dest has no base, so the snapshot API
+    // must fail and must not create memory-ranges.
+    #[test]
+    fn test_incremental_snapshot_requires_base_memory_ranges() {
+        let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(Box::new(focal));
+        let api_socket = temp_api_path(&guest.tmp_dir);
+        let snapshot_dir = temp_snapshot_dir_path(&guest.tmp_dir);
+
+        let mut child = GuestCommand::new(&guest)
+            .args(["--api-socket", &api_socket])
+            .args(["--cpus", "boot=1"])
+            .args(["--memory", "size=512M"])
+            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .default_disks()
+            .args(["--net", guest.default_net_string().as_str()])
+            .capture_output()
+            .spawn()
+            .unwrap();
+
+        let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
+            assert!(remote_command(&api_socket, "pause", None));
+
+            let url = format!("file://{}", snapshot_dir);
+            let (ok, stderr) = remote_command_w_args_output(
+                &api_socket,
+                "snapshot",
+                &[&url, "--snapshot-type", "incremental"],
+            );
+            assert!(
+                !ok,
+                "incremental snapshot without dest memory-ranges must fail"
+            );
+            assert!(
+                stderr.contains("Base snapshot file not found"),
+                "expected missing-base error, got: {}",
+                stderr
+            );
+            assert!(
+                !std::path::Path::new(&snapshot_dir)
+                    .join("memory-ranges")
+                    .exists(),
+                "failed incremental must not create memory-ranges"
+            );
+        });
+
+        kill_child(&mut child);
+        let output = child.wait_with_output().unwrap();
+        handle_child_output(r, &output);
+    }
+
+    // Incremental (pagemap_anon) after restore: Cubelet Tier 2 path.
+    // Full snapshot becomes the restore base; after restore, guest RAM is a
+    // MAP_PRIVATE mmap of that file. Copy the base memory-ranges to a new
+    // dest (Cubelet does reflink), then incremental overlays CoW pages.
+    #[test]
+    fn test_snapshot_restore_incremental_after_restore() {
+        let mem_params = "size=1G";
+        let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(Box::new(focal));
+        let kernel_path = direct_kernel_boot_path();
+
+        let api_socket_source = format!("{}.1", temp_api_path(&guest.tmp_dir));
+
+        let net_id = "net123";
+        let net_params = format!(
+            "id={},tap=,mac={},ip={},mask=255.255.255.0",
+            net_id, guest.network.guest_mac, guest.network.host_ip
+        );
+
+        let socket = temp_vsock_path(&guest.tmp_dir);
+        let event_path = temp_event_monitor_path(&guest.tmp_dir);
+
+        let mut child = GuestCommand::new(&guest)
+            .args(["--api-socket", &api_socket_source])
+            .args(["--event-monitor", format!("path={}", event_path).as_str()])
+            .args(["--cpus", "boot=2"])
+            .args(["--memory", mem_params])
+            .args(["--kernel", kernel_path.to_str().unwrap()])
+            .default_disks()
+            .args(["--net", net_params.as_str()])
+            .args(["--vsock", format!("cid=3,socket={}", socket).as_str()])
+            .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .capture_output()
+            .spawn()
+            .unwrap();
+
+        let console_text = String::from("On a branch floating down river a cricket, singing.");
+        let snapshot_dir = temp_snapshot_dir_path(&guest.tmp_dir);
+        let base_dir = String::from(
+            guest
+                .tmp_dir
+                .as_path()
+                .join("snapshot_base")
+                .to_str()
+                .unwrap(),
+        );
+        std::fs::create_dir(&base_dir).unwrap();
+
+        let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
+
+            snapshot_and_check_events(
+                api_socket_source.as_str(),
+                base_dir.as_str(),
+                event_path.as_str(),
+            );
+        });
+
+        kill_child(&mut child);
+        let output = child.wait_with_output().unwrap();
+        handle_child_output(r, &output);
+
+        Command::new("rm")
+            .arg("-f")
+            .arg(socket.as_str())
+            .output()
+            .unwrap();
+
+        let api_socket_base_restored = format!("{}.base", temp_api_path(&guest.tmp_dir));
+        let event_path_base_restored = format!("{}.base", temp_event_monitor_path(&guest.tmp_dir));
+
+        let mut child = GuestCommand::new(&guest)
+            .args(["--api-socket", &api_socket_base_restored])
+            .args([
+                "--event-monitor",
+                format!("path={}", event_path_base_restored).as_str(),
+            ])
+            .args([
+                "--restore",
+                format!("source_url=file://{}", base_dir).as_str(),
+            ])
+            .capture_output()
+            .spawn()
+            .unwrap();
+
+        thread::sleep(std::time::Duration::new(10, 0));
+
+        // tmpfs-backed payload: only survives the next restore if incremental
+        // actually captured the CoW pages (disk-backed files would persist
+        // even if the memory snapshot dropped them).
+        let dirty_md5 = std::sync::Mutex::new(String::new());
+
+        let r = std::panic::catch_unwind(|| {
+            let latest_events = [
+                &MetaEvent {
+                    event: "restored".to_string(),
+                    device_id: None,
+                },
+                &MetaEvent {
+                    event: "resuming".to_string(),
+                    device_id: None,
+                },
+                &MetaEvent {
+                    event: "resumed".to_string(),
+                    device_id: None,
+                },
+            ];
+            assert!(check_latest_events_exact(
+                &latest_events,
+                &event_path_base_restored
+            ));
+
+            guest.check_devices_common(Some(&socket), Some(&console_text), None);
+
+            thread::sleep(std::time::Duration::new(5, 0));
+            guest
+                .ssh_command("dd if=/dev/urandom of=/dev/shm/dirty.bin bs=1M count=64")
+                .unwrap();
+            let sum = guest.ssh_command("md5sum /dev/shm/dirty.bin").unwrap();
+            *dirty_md5.lock().unwrap() = sum.trim().to_string();
+
+            // Simulate Cubelet reflink: dest must already hold the base image.
+            std::fs::copy(
+                std::path::Path::new(&base_dir).join("memory-ranges"),
+                std::path::Path::new(&snapshot_dir).join("memory-ranges"),
+            )
+            .expect("copy base memory-ranges into incremental dest");
+
+            incremental_snapshot_and_check_events(
+                api_socket_base_restored.as_str(),
+                snapshot_dir.as_str(),
+                event_path_base_restored.as_str(),
+            );
+
+            assert_memory_ranges_full_size(snapshot_dir.as_str(), mem_params);
+        });
+
+        kill_child(&mut child);
+        let output = child.wait_with_output().unwrap();
+        handle_child_output(r, &output);
+
+        let r = std::panic::catch_unwind(|| {
+            assert!(String::from_utf8_lossy(&output.stdout).contains(&console_text));
+        });
+        handle_child_output(r, &output);
+
+        Command::new("rm")
+            .arg("-f")
+            .arg(socket.as_str())
+            .output()
+            .unwrap();
+
+        let api_socket_restored = format!("{}.2", temp_api_path(&guest.tmp_dir));
+        let event_path_restored = format!("{}.2", temp_event_monitor_path(&guest.tmp_dir));
+
+        let mut child = GuestCommand::new(&guest)
+            .args(["--api-socket", &api_socket_restored])
+            .args([
+                "--event-monitor",
+                format!("path={}", event_path_restored).as_str(),
+            ])
+            .args([
+                "--restore",
+                format!("source_url=file://{}", snapshot_dir).as_str(),
+            ])
+            .capture_output()
+            .spawn()
+            .unwrap();
+
+        thread::sleep(std::time::Duration::new(10, 0));
+        let expected_events = [
+            &MetaEvent {
+                event: "starting".to_string(),
+                device_id: None,
+            },
+            &MetaEvent {
+                event: "restoring".to_string(),
+                device_id: None,
+            },
+        ];
+        assert!(check_sequential_events_exact(
+            &expected_events,
+            &event_path_restored
+        ));
+
+        let r = std::panic::catch_unwind(|| {
+            let latest_events = [
+                &MetaEvent {
+                    event: "restored".to_string(),
+                    device_id: None,
+                },
+                &MetaEvent {
+                    event: "resuming".to_string(),
+                    device_id: None,
+                },
+                &MetaEvent {
+                    event: "resumed".to_string(),
+                    device_id: None,
+                },
+            ];
+            assert!(check_latest_events_exact(
+                &latest_events,
+                &event_path_restored
+            ));
+
+            assert_eq!(guest.get_cpu_count().unwrap_or_default(), 2);
+            guest.check_devices_common(Some(&socket), Some(&console_text), None);
+
+            let restored_md5 = guest.ssh_command("md5sum /dev/shm/dirty.bin").unwrap();
+            assert_eq!(
+                restored_md5.trim(),
+                dirty_md5.lock().unwrap().as_str(),
+                "tmpfs payload mismatch after incremental restore"
+            );
+        });
+
+        kill_child(&mut child);
+        let output = child.wait_with_output().unwrap();
+        handle_child_output(r, &output);
+
+        let r = std::panic::catch_unwind(|| {
+            assert!(String::from_utf8_lossy(&output.stdout).contains(&console_text));
+        });
         handle_child_output(r, &output);
     }
 
