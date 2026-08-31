@@ -479,21 +479,30 @@ type Watcher struct {
 	Events <-chan WatchEvent
 	Errors <-chan error
 
-	events chan WatchEvent
-	errs   chan error
-	ctx    context.Context
-	cancel context.CancelFunc
-	body   io.ReadCloser
-	once   sync.Once
+	events   chan WatchEvent
+	errs     chan error
+	ctx      context.Context
+	cancel   context.CancelFunc
+	body     io.ReadCloser
+	closeErr error
+	once     sync.Once
+}
+
+// closeBody closes the response body exactly once, whether the stream ended
+// naturally (readLoop) or was torn down early (Close).
+func (w *Watcher) closeBody() error {
+	w.once.Do(func() {
+		w.cancel()
+		if w.body != nil {
+			w.closeErr = w.body.Close()
+		}
+	})
+	return w.closeErr
 }
 
 // Close terminates the watcher and releases resources.
 func (w *Watcher) Close() error {
-	w.once.Do(func() {
-		w.cancel()
-		w.body.Close()
-	})
-	return nil
+	return w.closeBody()
 }
 
 type watchDirFrame struct {
@@ -551,7 +560,7 @@ func (s *Sandbox) watchDir(ctx context.Context, path string, options ...fileRequ
 func (w *Watcher) readLoop() {
 	defer close(w.events)
 	defer close(w.errs)
-	defer w.body.Close()
+	defer func() { _ = w.closeBody() }()
 
 	for {
 		flags, payload, err := readConnectEnvelope(w.body)
