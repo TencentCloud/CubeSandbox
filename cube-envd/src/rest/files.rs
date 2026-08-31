@@ -28,6 +28,7 @@ use crate::error::RestError;
 use crate::state::AppState;
 
 fn resolve_request_user(
+    state: &AppState,
     params: &HashMap<String, String>,
     headers: &HeaderMap,
 ) -> Result<User, RestError> {
@@ -41,7 +42,8 @@ fn resolve_request_user(
                     .and_then(|v| v.to_str().ok()),
             )
         })
-        .unwrap_or_else(|| auth::DEFAULT_USER.to_string());
+        // Upstream falls back to `defaults.User` (root until /init overrides it).
+        .unwrap_or_else(|| state.default_user());
     auth::lookup_user(&name).map_err(|msg| RestError::new(StatusCode::UNAUTHORIZED, msg))
 }
 
@@ -59,15 +61,20 @@ pub async fn download(
     if let Err(e) = check_token_rest(&state, &headers) {
         return e.into_response();
     }
-    let user = match resolve_request_user(&params, &headers) {
+    let user = match resolve_request_user(&state, &params, &headers) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
     // Baseline: a missing `path` parameter falls back to the user's home
-    // directory (which then fails with the "is a directory" error).
+    // directory (which then fails with the "is a directory" error). A
+    // `/init`-configured defaultWorkdir takes that slot instead — upstream
+    // resolves an empty path through ResolveDefaultWorkdir first
+    // (`execcontext/context.go:15`) and only then anchors it at the home dir.
     let raw_path = params
         .get("path")
+        .filter(|p| !p.is_empty())
         .cloned()
+        .or_else(|| state.default_workdir())
         .unwrap_or_else(|| user.home.clone());
     let path = auth::resolve_path(&raw_path, &user);
 
@@ -212,7 +219,7 @@ pub async fn upload(
     if let Err(e) = check_token_rest(&state, &headers) {
         return e.into_response();
     }
-    let user = match resolve_request_user(&params, &headers) {
+    let user = match resolve_request_user(&state, &params, &headers) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };

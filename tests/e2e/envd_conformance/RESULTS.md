@@ -1,4 +1,4 @@
-# 验收测试记录 / Acceptance Test Results — 2026-08-07
+# 验收测试记录 / Acceptance Test Results — 2026-08-07（最近一次更新：2026-08-31）
 
 环境：本地部署 CubeSandbox（dev-env QEMU 虚拟机，CubeAPI @127.0.0.1:13000），
 基线 Go envd 0.5.13（`ghcr.io/tencentcloud/cubesandbox-base:2026.16`），
@@ -10,20 +10,57 @@ cube-envd 0.1.0（`make cube-envd` 产物，含独立评审整改，见 §2b）�
 proto3 JSON 映射、路径/用户解析、降权执行、错误映射、进程组信号、句柄化进程表
 防 PID 复用、常量时间令牌比较）。clippy `-D warnings` 通过。
 
+**2026-08-31 重跑**（阶段 1 项 1.7 /init 幂等落地 + 复审整改后）：
+`cargo test --locked` → **75 passed, 0 failed**；
+`cargo clippy --release --all-targets --locked -- -D warnings` 与
+`cargo fmt --check` 均干净。新增 9 个用例覆盖 `/init` body-token 生命周期
+四分支（含错误文案逐字节）、空 token 在解码层被拒、RFC3339 解析（合法/非法各
+十余例、闰日、i64 纳秒范围越界 → 400）、timestamp 闸门（`utils.AtomicMax` 语义）
+与 `defaultUser`/`defaultWorkdir` 的空值不覆盖规则。
+
 ## 2. 一致性对拍（cube-envd vs Go envd 0.5.13）
 
-同一镜像起两个容器（cube-envd 经 `ENVD_BIN` 开关注入），49 个协议场景逐报文对比：
+同一镜像起两个容器（cube-envd 经 `ENVD_BIN` 开关注入）逐报文对比。
+**2026-08-31 重跑（71 个协议场景）**：
 
 ```
-PASS 40  FAIL 0  DECLARED-DIFF 9  SKIP 0  MISSING 0
+PASS 60  FAIL 0  DECLARED-DIFF 11  SKIP 0  MISSING 0
 ```
 
-完整输出可按 [README.md](README.md) 的步骤用 `conformance.py` 复现。
-9 项 DECLARED-DIFF 均为设计声明的 MVP 差异（PTY、watch 家族、/files/compose、
-gzip 编码、嵌套 selector 宽容性、解析器错误措辞、符号链接 lstat vs follow），
-allowlist 见 `conformance.py` `DECLARED_DIFFERENT`。注：allowlist 共 10 条，
-本次 fixture 集命中 9 条——gzip 下载场景（`rest_files_gzip_accept`）的录制
-后补进了 `capture.py`，下次重录基线后将作为第 10 条命中。
+> 注：`rest_init_timestamp_out_of_range` 为手写解析器换 `time` crate + 越界改 400
+> 重构后的实测（本行上方数字为 2026-08-31 重跑实测值，71 场景全录）。
+
+其中 11 项 DECLARED-DIFF 均为设计声明的 MVP 差异（PTY、watch 家族、
+/files/compose、gzip 编码、嵌套 selector 宽容性、解析器错误措辞、
+符号链接 lstat vs follow、以及越界 timestamp 的 400 vs 204），allowlist 见 `conformance.py`
+`DECLARED_DIFFERENT`——本次 allowlist 11 条全部命中（gzip 下载场景
+`rest_files_gzip_accept` 已作为第 10 条进入命中集，越界 timestamp 为第 11 条）。
+
+**2026-08-31 新增的 22 个 `/init` 生命周期场景全部 PASS（未进 allowlist）**：
+首设放行 / 匹配放行 / 已设而 body 不带 → 401 `access token reset not
+authorized` / 不匹配 → 401 `access token validation failed` / 新 timestamp
+生效 / 旧 timestamp 被丢弃且不再校验 token / 非法 timestamp → 400 / 无
+timestamp 恒生效 / `defaultUser` 影响后续 `/files` 的用户解析 /
+`defaultWorkdir` 顶替空 path / 以及收尾的 `/envs` 断言（被拒的三次 /init
+的 envVars 均未落库）。
+
+**2026-08-31 复审后补的 5 个场景（其中 1 个进 allowlist）**：越界 timestamp（年 > 2262）
+——上游 `UnixNano()` 溢出回绕成负值、被闸门当旧请求丢弃 → 204 不落库不动水位；
+cube-envd 把它当调用方 bug 直接 400（DECLARED-DIFF 第 11 条），同样不落库、不动水位
+（紧随其后的 `rest_init_after_out_of_range` 用普通 timestamp 证明水位没被顶死，两侧
+`/envs` 键集完全一致）；空 `accessToken`（→ 400，上游 `*SecureToken.UnmarshalJSON`
+在解码层就拒空串）、无时区的带小数秒 timestamp（→ 400，RFC3339 zone 必选）、
+日历上不存在的日期如 2023-02-31（→ 400，Go 报 `day out of range`）。三者原先在
+cube-envd 上是 204 且**会落库**：空 token 会被存下，此后任何带真实 token 的 `/init`
+都只能 401（SDK/Cubelet 这类只发真实 token 或不发头的调用方全部被挡），改不回来。
+
+> 注（2026-08-31 实测修正了此前对上游的两处误读）：① 相等 timestamp
+> **放行**（`utils.AtomicMax.SetToGreater` 只在严格更小时拒绝）；② timestamp
+> 闸门在 token 校验**之前**，旧 timestamp 的 /init 直接 204、不会 401。
+> 另：`/init` 在上游位于鉴权白名单，**不校验** `X-Access-Token` 头，
+> token 语义完全由 body 决定——cube-envd 已按此对齐（此前会做 header 预检）。
+
+历史基线（2026-08-07，49 个场景）：`PASS 40  FAIL 0  DECLARED-DIFF 9`。
 
 ## 2b. 独立评审整改（三个独立 sub-agent 复核）
 

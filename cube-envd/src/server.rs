@@ -110,14 +110,16 @@ fn panic_handler(
 
 // ---------- shared helpers ----------
 
-/// RPC-surface user resolution (Basic auth, default root).
-fn rpc_user(headers: &HeaderMap) -> Result<User, ConnectError> {
+/// RPC-surface user resolution: Basic auth, falling back to the default user
+/// configured through `/init` (`root` until then, like upstream's
+/// `defaults.User`).
+fn rpc_user(state: &AppState, headers: &HeaderMap) -> Result<User, ConnectError> {
     let name = auth::user_from_basic_auth(
         headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok()),
     )
-    .unwrap_or_else(|| auth::DEFAULT_USER.to_string());
+    .unwrap_or_else(|| state.default_user());
     auth::lookup_user(&name).map_err(|_| {
         ConnectError::new(
             ConnectCode::Unauthenticated,
@@ -207,7 +209,7 @@ async fn process_start(
             ))
         }
     };
-    let user = match rpc_user(&headers) {
+    let user = match rpc_user(&state, &headers) {
         Ok(u) => u,
         Err(e) => return proc_svc::stream_error_response(e),
     };
@@ -274,7 +276,7 @@ macro_rules! fs_unary {
                 Ok(r) => r,
                 Err(e) => return e.into_response(),
             };
-            let user = match rpc_user(&headers) {
+            let user = match rpc_user(&state, &headers) {
                 Ok(u) => u,
                 Err(e) => return e.into_response(),
             };

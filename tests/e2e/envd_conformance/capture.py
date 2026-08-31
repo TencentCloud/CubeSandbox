@@ -215,6 +215,113 @@ def cap_compose():
         {"Content-Type": "application/json"}))
 
 
+# Runs ABSOLUTELY LAST (after compose): the first scenario configures a
+# daemon-wide access token, after which every request must carry
+# X-Access-Token. Upstream /init is on the authorization whitelist, so the
+# token lifecycle is decided by the *body's* accessToken field alone.
+def cap_init_token():
+    tok = "tok-baseline"
+    auth = {"X-Access-Token": tok}
+    # Rejected bodies first (they change no state, so they are safe to run
+    # before the token is configured): upstream decodes into a typed body and
+    # answers any decode failure with a bare 400. An empty accessToken is one
+    # of them (*SecureToken.UnmarshalJSON rejects ""), and so is a timestamp
+    # that is not RFC3339 — no zone, or a day the calendar does not have.
+    record("rest_init_token_empty", http_req(
+        "POST", "/init", json.dumps({"accessToken": ""}).encode(),
+        {"Content-Type": "application/json"}))
+    record("rest_init_timestamp_no_zone", http_req(
+        "POST", "/init", json.dumps({"timestamp": "1970-01-01T00:00:00.5"}).encode(),
+        {"Content-Type": "application/json"}))
+    record("rest_init_timestamp_bad_day", http_req(
+        "POST", "/init", json.dumps({"timestamp": "2023-02-31T00:00:00Z"}).encode(),
+        {"Content-Type": "application/json"}))
+    # Out of the i64-nanosecond range: upstream's UnixNano() wraps and loses
+    # the gate comparison, so it answers 204 without applying anything and
+    # without moving the gate. cube-envd answers 400 (an out-of-range
+    # timestamp is a caller bug) — a DECLARED-DIFF in conformance.py. Either
+    # way nothing is applied and the gate does not move, so the follow-up
+    # (ordinary timestamp) must still apply; that second scenario passes
+    # unchanged on both sides.
+    record("rest_init_timestamp_out_of_range", http_req(
+        "POST", "/init",
+        json.dumps({"timestamp": "9999-01-01T00:00:00Z",
+                    "envVars": {"OUT_OF_RANGE": "1"}}).encode(),
+        {"Content-Type": "application/json"}))
+    record("rest_init_after_out_of_range", http_req(
+        "POST", "/init",
+        json.dumps({"timestamp": "2030-01-01T00:00:00Z",
+                    "envVars": {"AFTER_OUT_OF_RANGE": "1"}}).encode(),
+        {"Content-Type": "application/json"}))
+    # First-time setup: no token configured yet, the body token is accepted.
+    record("rest_init_token_first_set", http_req(
+        "POST", "/init",
+        json.dumps({"envVars": {"INIT_A": "1"}, "accessToken": tok}).encode(),
+        {"Content-Type": "application/json"}))
+    # Token set + different body token -> 401 "access token validation failed".
+    record("rest_init_token_mismatch", http_req(
+        "POST", "/init",
+        json.dumps({"envVars": {"INIT_B": "2"}, "accessToken": "tok-other"}).encode(),
+        {"Content-Type": "application/json"}))
+    # Token set + body omits the token -> 401 "access token reset not authorized".
+    record("rest_init_token_absent", http_req(
+        "POST", "/init", json.dumps({"envVars": {"INIT_C": "3"}}).encode(),
+        {"Content-Type": "application/json"}))
+    # Matching body token -> 204 (and the header is not consulted at all).
+    record("rest_init_token_match", http_req(
+        "POST", "/init",
+        json.dumps({"envVars": {"INIT_D": "4"}, "accessToken": tok}).encode(),
+        {"Content-Type": "application/json"}))
+    # Timestamp gate: a newer timestamp is applied...
+    record("rest_init_timestamp_newer", http_req(
+        "POST", "/init",
+        json.dumps({"timestamp": "2030-01-01T00:00:00Z", "envVars": {"INIT_F": "6"},
+                    "accessToken": tok}).encode(),
+        {"Content-Type": "application/json"}))
+    # ...and an older one is dropped (204 without applying INIT_G).
+    record("rest_init_timestamp_stale", http_req(
+        "POST", "/init",
+        json.dumps({"timestamp": "2001-01-01T00:00:00Z", "envVars": {"INIT_G": "7"},
+                    "accessToken": tok}).encode(),
+        {"Content-Type": "application/json"}))
+    # The gate runs *before* token validation, so a stale request is not 401.
+    record("rest_init_timestamp_stale_skips_validation", http_req(
+        "POST", "/init",
+        json.dumps({"timestamp": "2001-01-01T00:00:00Z", "accessToken": "tok-other"}).encode(),
+        {"Content-Type": "application/json"}))
+    # Unparseable timestamp -> 400 (upstream fails while decoding the body).
+    record("rest_init_timestamp_invalid", http_req(
+        "POST", "/init",
+        json.dumps({"timestamp": "not-a-timestamp", "accessToken": tok}).encode(),
+        {"Content-Type": "application/json"}))
+    # No timestamp at all -> always applied.
+    record("rest_init_no_timestamp", http_req(
+        "POST", "/init", json.dumps({"envVars": {"INIT_H": "8"}, "accessToken": tok}).encode(),
+        {"Content-Type": "application/json"}))
+    # defaultUser overrides the fallback user for later requests.
+    record("rest_init_default_user", http_req(
+        "POST", "/init", json.dumps({"defaultUser": "user", "accessToken": tok}).encode(),
+        {"Content-Type": "application/json"}))
+    # Self-contained fixture: compose above deleted base_a.txt, so upload the
+    # probe file here (as user) and fetch it back with no username and no
+    # Basic auth — only defaultUser can resolve it under /home/user.
+    record("rest_files_default_user_upload", http_req(
+        "POST", "/files?path=/home/user/init_user.txt&username=user", b"init-user-file\n",
+        {"Content-Type": "application/octet-stream", **auth}))
+    record("rest_files_default_user_relative", http_req(
+        "GET", "/files?path=init_user.txt", headers=auth))
+    record("rest_files_default_user_absent", http_req(
+        "GET", "/files?path=/root/init_user.txt", headers=auth))
+    # defaultWorkdir substitutes for an empty path (upstream
+    # execcontext.ResolveDefaultWorkdir), then is anchored at the home dir.
+    record("rest_init_default_workdir", http_req(
+        "POST", "/init", json.dumps({"defaultWorkdir": "init_wd", "accessToken": tok}).encode(),
+        {"Content-Type": "application/json"}))
+    record("rest_files_default_workdir_nopath", http_req("GET", "/files?username=user", headers=auth))
+    # Which env vars actually landed (INIT_B/C/G must be absent).
+    record("rest_envs_after_init_token", http_req("GET", "/envs", headers=auth))
+
+
 # ---------------- B. filesystem.Filesystem unary ----------------
 def cap_fs():
     record("fs_stat_file", connect_unary("filesystem.Filesystem/Stat", {"path": "/home/user/base_a.txt"}))
@@ -363,4 +470,6 @@ if __name__ == "__main__":
         cap_process()
     if which in ("all", "compose"):
         cap_compose()
+    if which in ("all", "init_token"):
+        cap_init_token()
     print(f"\n{len(FIXTURES)} fixtures written to {OUTDIR}")

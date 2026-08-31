@@ -6,6 +6,10 @@
 //! Speaks the E2B envd protocol (REST + ConnectRPC over JSON) on a single
 //! port so existing SDKs and the CubeSandbox control plane keep working
 //! unchanged. See README.md and issue #1227.
+//!
+//! "Upstream" / "baseline" throughout the code means the e2b Go envd
+//! (`e2b-dev/infra`, pinned 0.5.13 / base image 2026.16) that this crate is
+//! compatibility-tested against — see tests/e2e/envd_conformance.
 
 mod auth;
 mod connect;

@@ -40,6 +40,21 @@ pub type ProcHandle = u64;
 pub struct AppState {
     env_vars: RwLock<HashMap<String, String>>,
     access_token: RwLock<Option<String>>,
+    /// User assumed when a request names none. `/init`'s `defaultUser`
+    /// overrides it; until then it mirrors upstream's compile-time constant
+    /// "root", which `/init` only replaces when the field is present and
+    /// non-empty.
+    default_user: RwLock<String>,
+    /// Working directory supplied by `/init` (`defaultWorkdir`). Upstream
+    /// substitutes it only for an *empty* path
+    /// (`execcontext.ResolveDefaultWorkdir`), so the file surface rarely sees
+    /// it while `process.Start` without a cwd does.
+    default_workdir: RwLock<Option<String>>,
+    /// Nanosecond high-water mark of the `/init` timestamps that were applied
+    /// (upstream `utils.AtomicMax`). Setting the system clock from it is
+    /// deliberately NOT implemented — see the declared differences in
+    /// `rest/mod.rs`.
+    last_set_time: Mutex<i64>,
     /// Set once the first /init lands so `envd --version` probes and health
     /// checks are unaffected either way.
     pub initialized: AtomicBool,
@@ -57,14 +72,17 @@ impl AppState {
         Self {
             env_vars: RwLock::new(env_vars),
             access_token: RwLock::new(None),
+            default_user: RwLock::new(crate::auth::DEFAULT_USER.to_string()),
+            default_workdir: RwLock::new(None),
+            last_set_time: Mutex::new(0),
             initialized: AtomicBool::new(false),
             processes: Mutex::new(HashMap::new()),
             next_handle: AtomicU64::new(1),
         }
     }
 
-    /// Merge (not replace) env vars — matches Go envd behavior observed in
-    /// the baseline: repeated /init calls accumulate variables.
+    /// Merge (not replace) env vars — matches the Go envd baseline: repeated
+    /// /init calls accumulate variables.
     pub fn merge_env_vars(&self, vars: HashMap<String, String>) {
         let mut guard = write(&self.env_vars);
         guard.extend(vars);
@@ -77,6 +95,46 @@ impl AppState {
 
     pub fn set_access_token(&self, token: String) {
         *write(&self.access_token) = Some(token);
+    }
+
+    /// Borrow the configured token so `/init` can validate the token carried
+    /// in its body without cloning the secret.
+    pub fn access_token(&self) -> RwLockReadGuard<'_, Option<String>> {
+        read(&self.access_token)
+    }
+
+    pub fn default_user(&self) -> String {
+        read(&self.default_user).clone()
+    }
+
+    pub fn default_workdir(&self) -> Option<String> {
+        read(&self.default_workdir).clone()
+    }
+
+    /// Apply `/init`'s `defaultUser` / `defaultWorkdir`. Upstream ignores both
+    /// when the field is absent *or* an empty string, so an empty value must
+    /// not wipe the previous default.
+    pub fn apply_init_defaults(&self, user: Option<&str>, workdir: Option<&str>) {
+        if let Some(user) = user.filter(|u| !u.is_empty()) {
+            *write(&self.default_user) = user.to_string();
+        }
+        if let Some(workdir) = workdir.filter(|w| !w.is_empty()) {
+            *write(&self.default_workdir) = Some(workdir.to_string());
+        }
+    }
+
+    /// `/init` timestamp gate (upstream `utils.AtomicMax.SetToGreater`):
+    /// returns true when the request may update the state and raises the
+    /// high-water mark. A request without a timestamp always proceeds.
+    pub fn claim_timestamp(&self, incoming: Option<i64>) -> bool {
+        let mut guard = lock(&self.last_set_time);
+        if !timestamp_gate(*guard, incoming) {
+            return false;
+        }
+        if let Some(nanos) = incoming {
+            *guard = nanos;
+        }
+        true
     }
 
     /// Returns Err(()) when a token has been configured via /init and the
@@ -137,11 +195,22 @@ impl AppState {
     }
 }
 
+/// `/init` timestamp comparison, mirroring `utils.AtomicMax.SetToGreater`
+/// (an older request is dropped; an equal one passes and refreshes the mark).
+/// This is protocol surface — a contract for retrying orchestrators — not a
+/// local hot path: Cubelet never sends a timestamp at all (envVars-only).
+pub fn timestamp_gate(prev_nanos: i64, incoming: Option<i64>) -> bool {
+    match incoming {
+        None => true,
+        Some(nanos) => prev_nanos <= nanos,
+    }
+}
+
 /// Length-aware constant-time byte comparison. Runs in time independent of
 /// where the first mismatch is (the length check leaks only the token length,
 /// not its contents), so token verification can't be turned into a timing
 /// oracle. Small enough not to warrant a dependency.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -180,6 +249,55 @@ mod tests {
         assert!(s.check_access_token(Some("secretx")).is_err());
         assert!(s.check_access_token(Some("sec")).is_err());
         assert!(s.check_access_token(None).is_err());
+    }
+
+    #[test]
+    fn timestamp_gate_matches_atomic_max() {
+        // Upstream utils.AtomicMax.SetToGreater: older is rejected, an equal
+        // timestamp passes (and is stored again).
+        assert!(timestamp_gate(0, Some(1)));
+        assert!(timestamp_gate(10, Some(10)));
+        assert!(!timestamp_gate(10, Some(9)));
+        // No timestamp at all: /init always applies its data.
+        assert!(timestamp_gate(10, None));
+    }
+
+    #[test]
+    fn init_defaults_ignore_absent_and_empty() {
+        let s = AppState::new();
+        assert_eq!(s.default_user(), "root");
+        assert_eq!(s.default_workdir(), None);
+        // Empty strings must not wipe the previous default.
+        s.apply_init_defaults(Some(""), Some(""));
+        assert_eq!(s.default_user(), "root");
+        assert_eq!(s.default_workdir(), None);
+        // Absent fields are no-ops as well.
+        s.apply_init_defaults(None, None);
+        assert_eq!(s.default_user(), "root");
+        // Non-empty values take effect and survive later empty/absent ones.
+        s.apply_init_defaults(Some("user"), Some("/home/user"));
+        assert_eq!(s.default_user(), "user");
+        assert_eq!(s.default_workdir().as_deref(), Some("/home/user"));
+        s.apply_init_defaults(Some(""), None);
+        assert_eq!(s.default_user(), "user");
+        assert_eq!(s.default_workdir().as_deref(), Some("/home/user"));
+    }
+
+    #[test]
+    fn claim_timestamp_tracks_high_water_mark() {
+        let s = AppState::new();
+        // First /init with any timestamp wins (the mark starts at 0).
+        assert!(s.claim_timestamp(Some(1000)));
+        // Same timestamp: allowed again (upstream SetToGreater semantics).
+        assert!(s.claim_timestamp(Some(1000)));
+        // Older: dropped — and the state must stay untouched.
+        assert!(!s.claim_timestamp(Some(999)));
+        // Newer: applied, raising the mark.
+        assert!(s.claim_timestamp(Some(1001)));
+        assert!(!s.claim_timestamp(Some(1000)));
+        // No timestamp: always applied, without moving the mark.
+        assert!(s.claim_timestamp(None));
+        assert!(s.claim_timestamp(Some(1001)));
     }
 
     #[test]

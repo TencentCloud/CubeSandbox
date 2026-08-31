@@ -35,6 +35,7 @@ DECLARED_DIFFERENT = {
     "fs_bad_json": "JSON parse error wording is parser-specific (code and status equal)",
     "proc_missing_cmd": "missing-binary stderr prefix: upstream nice(1) wording vs cube-envd (exit 127 and event flow equal)",
     "fs_stat_symlink_probe": "symlink Stat/ListDir: cube-envd lstat's (type SYMLINK, lowercase-l perms, real target); upstream follows the link (target type, uppercase-L, link-self target). Documented known difference; SDKs branch on `code`, not link semantics",
+    "rest_init_timestamp_out_of_range": "timestamp outside i64-nanosecond range (9999): upstream UnixNano() wraps and drops as stale (204); cube-envd rejects as a caller bug (400). Neither applies anything nor moves the gate",
 }
 # Fixtures that depend on prior state in ways the rerun reproduces
 # differently. Currently empty; kept for the next scenario that needs it.
