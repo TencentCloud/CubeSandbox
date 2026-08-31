@@ -5,6 +5,7 @@ package auth
 
 import (
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -26,6 +27,11 @@ type loginLimiter struct {
 	window   time.Duration
 }
 
+const (
+	sweepThreshold = 4096
+	evictTarget    = sweepThreshold / 2
+)
+
 var defaultLoginLimiter = &loginLimiter{
 	failures: make(map[string][]time.Time),
 	limit:    5,               // 5 failed attempts
@@ -41,6 +47,12 @@ func (l *loginLimiter) recordFailure(ip string) {
 	defer l.mu.Unlock()
 	now := time.Now()
 	cutoff := now.Add(-l.window)
+	if len(l.failures) >= sweepThreshold {
+		l.sweepLocked(cutoff)
+		if len(l.failures) >= sweepThreshold {
+			l.evictOldestLocked(evictTarget)
+		}
+	}
 	fails := l.failures[ip]
 	// Drop expired entries.
 	kept := fails[:0]
@@ -54,6 +66,44 @@ func (l *loginLimiter) recordFailure(ip string) {
 		delete(l.failures, ip)
 	} else {
 		l.failures[ip] = kept
+	}
+}
+
+func (l *loginLimiter) sweepLocked(cutoff time.Time) {
+	for ip, fails := range l.failures {
+		kept := fails[:0]
+		for _, t := range fails {
+			if t.After(cutoff) {
+				kept = append(kept, t)
+			}
+		}
+		if len(kept) == 0 {
+			delete(l.failures, ip)
+		} else {
+			l.failures[ip] = kept
+		}
+	}
+}
+
+func (l *loginLimiter) evictOldestLocked(target int) {
+	type entry struct {
+		ip   string
+		last time.Time
+	}
+	entries := make([]entry, 0, len(l.failures))
+	for ip, fails := range l.failures {
+		if len(fails) == 0 {
+			delete(l.failures, ip)
+			continue
+		}
+		entries = append(entries, entry{ip: ip, last: fails[len(fails)-1]})
+	}
+	if len(entries) <= target {
+		return
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].last.Before(entries[j].last) })
+	for i := 0; i < len(entries)-target; i++ {
+		delete(l.failures, entries[i].ip)
 	}
 }
 
@@ -82,26 +132,11 @@ func (l *loginLimiter) isBlocked(ip string) bool {
 	return count >= l.limit
 }
 
-// clientIP extracts the client IP from the request, honoring
-// X-Forwarded-For (set by nginx). Falls back to RemoteAddr.
-func clientIP(c *gin.Context) string {
-	if xff := c.GetHeader("X-Forwarded-For"); xff != "" {
-		// Use the first (leftmost) address — that is the original client.
-		for i := 0; i < len(xff); i++ {
-			if xff[i] == ',' {
-				return xff[:i]
-			}
-		}
-		return xff
-	}
-	return c.ClientIP()
-}
-
 // LoginRateLimit is a gin middleware that blocks IPs with too many recent
 // failed login attempts. It must be installed only on the /auth/login route.
 func LoginRateLimit() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ip := clientIP(c)
+		ip := c.ClientIP()
 		if defaultLoginLimiter.isBlocked(ip) {
 			logging.G(c.Request.Context()).Warnf("login rate limit triggered: client_ip=%s path=%s", ip, c.Request.URL.Path)
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
@@ -116,5 +151,5 @@ func LoginRateLimit() gin.HandlerFunc {
 // markLoginFailure is called by the Login handler when authentication fails.
 // It is exported so the handler can trigger it after a failed login.
 func markLoginFailure(c *gin.Context) {
-	defaultLoginLimiter.recordFailure(clientIP(c))
+	defaultLoginLimiter.recordFailure(c.ClientIP())
 }

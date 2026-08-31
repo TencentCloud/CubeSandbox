@@ -11,6 +11,22 @@ log_file_num: 10              # number of rotated log files to retain
 log_file_size: 100            # max size in MB per log file before rotation
 jwt_secret: ""             # leave empty to auto-generate on first start
 
+# Reverse proxies allowed to assert the client IP via X-Forwarded-For.
+# Empty (the default) trusts none: the login rate limiter keys on the real TCP
+# peer, which is correct for direct exposure. Behind nginx/an LB, list the
+# proxy here as an IP or CIDR, otherwise every client shares one bucket.
+# Keep this as narrow as possible -- any peer whose source address matches is
+# trusted to assert any client IP, so a broad range such as 10.0.0.0/8 hands
+# that power to every workload on the network. 0.0.0.0/0 and ::/0 are rejected,
+# and ranges wider than /16 (v4) or /64 (v6) are accepted but warned about at
+# startup. An empty list is also warned about, since it means every client
+# behind a proxy shares one login bucket.
+# Note: gin expands a bare loopback entry such as 127.0.0.1 to the whole
+# 127.0.0.0/8, and in containerised deployments the proxy usually connects from
+# a bridge address rather than loopback, so 127.0.0.1 is often not what you want.
+# Env override: CUBE_OPS_TRUSTED_PROXIES (comma-separated).
+trusted_proxies: []
+
 # --- Database (MySQL) ---
 # IMPORTANT: Replace the placeholder values below with your real credentials
 # before deploying. The defaults shown here are EXAMPLES ONLY and will not

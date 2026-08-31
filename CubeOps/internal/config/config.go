@@ -21,6 +21,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -34,12 +35,13 @@ import (
 // Config holds all CubeOps runtime configuration.
 type Config struct {
 	// Server
-	Bind        string `yaml:"bind"`
-	LogLevel    string `yaml:"log_level"`
-	LogDir      string `yaml:"log_dir"`
-	LogFileNum  int    `yaml:"log_file_num"`
-	LogFileSize int    `yaml:"log_file_size"`
-	JWTSecret   string `yaml:"jwt_secret"`
+	Bind           string   `yaml:"bind"`
+	LogLevel       string   `yaml:"log_level"`
+	LogDir         string   `yaml:"log_dir"`
+	LogFileNum     int      `yaml:"log_file_num"`
+	LogFileSize    int      `yaml:"log_file_size"`
+	JWTSecret      string   `yaml:"jwt_secret"`
+	TrustedProxies []string `yaml:"trusted_proxies"`
 
 	// Database — either a single URL or the individual fields below.
 	DatabaseURL   string `yaml:"database_url"`
@@ -133,6 +135,10 @@ func Load() (*Config, error) {
 	}
 	if cfg.SandboxDomain == "" {
 		cfg.SandboxDomain = "cube.app"
+	}
+
+	if err := validateTrustedProxies(cfg.TrustedProxies); err != nil {
+		return nil, err
 	}
 
 	// JWT_SECRET is optional — if not set, it will be auto-generated and
@@ -302,6 +308,9 @@ func overrideFromEnv(cfg *Config) {
 	if v := os.Getenv("JWT_SECRET"); v != "" {
 		cfg.JWTSecret = v
 	}
+	if v := os.Getenv("CUBE_OPS_TRUSTED_PROXIES"); v != "" {
+		cfg.TrustedProxies = splitAndTrim(v)
+	}
 	if v := os.Getenv("DATABASE_URL"); v != "" {
 		cfg.DatabaseURL = v
 	}
@@ -365,4 +374,59 @@ func overrideFromEnv(cfg *Config) {
 			cfg.RefreshTTL = d
 		}
 	}
+}
+
+// BroadTrustedProxies returns the configured entries whose prefix is wide
+// enough that a large share of the network can assert a client IP. Callers
+// warn about these; they are not rejected because a pod or VPC CIDR can
+// legitimately be this wide.
+func BroadTrustedProxies(entries []string) []string {
+	var broad []string
+	for _, e := range entries {
+		_, ipNet, err := net.ParseCIDR(strings.TrimSpace(e))
+		if err != nil {
+			continue
+		}
+		ones, bits := ipNet.Mask.Size()
+		limit := 16
+		if bits > 32 {
+			limit = 64
+		}
+		if ones < limit {
+			broad = append(broad, e)
+		}
+	}
+	return broad
+}
+
+func validateTrustedProxies(entries []string) error {
+	for i, e := range entries {
+		e = strings.TrimSpace(e)
+		entries[i] = e
+		if _, ipNet, err := net.ParseCIDR(e); err == nil {
+			ones, bits := ipNet.Mask.Size()
+			if ones == 0 && bits != 0 {
+				return fmt.Errorf("trusted_proxies entry %q trusts every source address, which disables client-IP validation entirely; list the proxy addresses or CIDR blocks instead (trusted_proxies in YAML %s, or CUBE_OPS_TRUSTED_PROXIES)",
+					e, yamlConfigPath())
+			}
+			continue
+		}
+		if net.ParseIP(e) != nil {
+			continue
+		}
+		return fmt.Errorf("trusted_proxies entry %q is not an IP address or CIDR block; use forms like 10.1.2.3, 10.1.0.0/16 or ::1 (trusted_proxies in YAML %s, or CUBE_OPS_TRUSTED_PROXIES). Wildcards such as \"*\", 0.0.0.0/0 and ::/0 are not accepted",
+			e, yamlConfigPath())
+	}
+	return nil
+}
+
+func splitAndTrim(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

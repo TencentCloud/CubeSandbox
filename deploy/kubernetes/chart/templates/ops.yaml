@@ -37,6 +37,10 @@ spec:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             - name: CUBE_OPS_BIND
               value: {{ .Values.cubeOps.bind | quote }}
+            {{- with .Values.cubeOps.trustedProxies }}
+            - name: CUBE_OPS_TRUSTED_PROXIES
+              value: {{ join "," . | quote }}
+            {{- end }}
             - name: CUBE_MASTER_ADDR
               value: {{ printf "http://%s" (include "cube.masterEndpoint" .) | quote }}
             {{- if eq (include "cube.dbDriver" .) "postgres" }}
