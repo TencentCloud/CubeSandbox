@@ -33,7 +33,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/tencentcloud/CubeSandbox/CubeDB v0.0.0-00010101000000-000000000000
 	github.com/tencentcloud/CubeSandbox/Cubelet v0.0.0
-	github.com/tencentcloud/CubeSandbox/cubelog v0.1.1-0.20260113105508-a996703fa42f
+	github.com/tencentcloud/CubeSandbox/pkgs/CubeLog v0.1.1-0.20260113105508-a996703fa42f
 	github.com/urfave/cli v1.22.15
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f
 	golang.org/x/sync v0.20.0
@@ -182,7 +182,7 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 )
 
-replace github.com/tencentcloud/CubeSandbox/cubelog => ../cubelog
+replace github.com/tencentcloud/CubeSandbox/pkgs/CubeLog => ../pkgs/CubeLog
 
 replace github.com/tencentcloud/CubeSandbox/CubeDB => ../CubeDB
 

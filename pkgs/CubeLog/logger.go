@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	cubelogPackage string = "github.com/tencentcloud/CubeSandbox/cubelog"
+	cubelogPackage string = "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 
 	minimumCallerDepth int
 

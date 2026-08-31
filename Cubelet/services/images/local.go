@@ -29,7 +29,7 @@ import (
 	oldimagestore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 type Config struct {

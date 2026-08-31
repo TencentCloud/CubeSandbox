@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/version"
-	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
+	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 // Options controls logger initialisation.

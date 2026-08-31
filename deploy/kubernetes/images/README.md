@@ -106,18 +106,23 @@ By default the script pins those source trees to `${SOURCE_REF}` (defaulting to
 `cube-lifecycle-manager/`, `web/`, and `deploy/one-click/webui/` at that git
 ref into `${BUILD_ROOT}/source-tree/` via `git archive` and points `REPO_ROOT`
 there for the duration of the build. When building `cube-master` or
-`cubemastercli`, it also exports `cubelog/`, `CubeDB/`, and `Cubelet/`;
+`cubemastercli`, it also exports `pkgs/CubeLog/`, `CubeDB/`, and `Cubelet/`;
 `cube-master` additionally exports `deploy/scripts/` (volume-deps installer) and
 `examples/volume/cos/` (Controller plugin binary + example conf).
-When building `cubelet`, it also exports `Cubelet/`, `CubeNet/`, `cubelog/`,
+When building `cubelet`, it also exports `Cubelet/`, `CubeNet/`, `pkgs/CubeLog/`,
 `cubecow/`, `deploy/scripts/`, `deploy/kubernetes/images/scripts/`, and
 `examples/volume/cos/` so the image can build both `cubelet` and
 `cubevsmapdump`. When building `cube-shim`, it also exports `CubeShim/`,
 `hypervisor/`, `deploy/one-click/config-cube.toml`, and
 `deploy/kubernetes/images/scripts/`.
-When building `cube-ops`, it also exports `CubeOps/` and `CubeDB/` (required by
+When building `cube-ops`, it also exports `CubeOps/`, the cubelog module, and `CubeDB/` (required by
 `CubeOps/Dockerfile`; not present on older release tags such as `v0.5.1` — use
 `SOURCE_REF=""` for worktree builds).
+The cubelog module path is probed on `${SOURCE_REF}`: tags at or after this
+move export `pkgs/CubeLog/`; older tags including the default `${VERSION}`
+(`v0.7.0`) still have `cubelog/` and matching `COPY cubelog/` Dockerfiles.
+The script archives whichever path exists on that ref so a default
+`SOURCE_REF=${VERSION}` build does not fail the export step.
 This guarantees the images match the release tag even when the current worktree
 is ahead of it.
 

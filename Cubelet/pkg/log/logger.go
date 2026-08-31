@@ -8,7 +8,7 @@ import (
 	"runtime/debug"
 
 	jsoniter "github.com/json-iterator/go"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 var AuditLogger *CubeLog.Logger = CubeLog.GetDefaultLogger()

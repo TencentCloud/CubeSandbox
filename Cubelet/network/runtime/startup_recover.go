@@ -17,7 +17,7 @@ import (
 	"strings"
 
 	"github.com/cilium/ebpf"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 // recover reconciles durable state files with live host TAP devices after

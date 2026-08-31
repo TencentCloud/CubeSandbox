@@ -131,7 +131,7 @@ export ONE_CLICK_WEB_DIST_DIR=/abs/path/to/web/dist
 - 首次构建 `CubeMaster`、`Cubelet` 时会执行 `go mod download`
 - 构建机需要能访问对应的模块源；如处于内网环境，请提前配置 `GOPROXY`、`GOPRIVATE` 和私有仓库凭据
 - 推荐入口会把 builder HOME 持久化到宿主机缓存目录，因此同一台机器上的后续构建通常不会重复全量下载
-- `cubelog` 仍然通过仓库内本地模块 `../cubelog` 引用，不走远端下载
+- `cubelog` 仍然通过仓库内本地模块 `../pkgs/CubeLog` 引用，不走远端下载
 
 成功后会生成：
 

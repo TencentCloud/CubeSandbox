@@ -131,7 +131,7 @@ export ONE_CLICK_WEB_DIST_DIR=/abs/path/to/web/dist
 - `go mod download` is executed the first time `CubeMaster` and `Cubelet` are built.
 - The build machine must be able to reach the relevant module sources. If you are behind a private network, configure `GOPROXY`, `GOPRIVATE`, and private repository credentials in advance.
 - The recommended entry point persists the builder HOME to a host-side cache directory, so subsequent builds on the same machine typically do not require a full re-download.
-- `cubelog` is still referenced as a local module via `../cubelog` and is not downloaded from a remote source.
+- `cubelog` is still referenced as a local module via `../pkgs/CubeLog` and is not downloaded from a remote source.
 
 On success, the following file will be generated:
 

@@ -7,8 +7,9 @@
 **
 !CubeMaster
 !CubeMaster/**
-!cubelog
-!cubelog/**
+!pkgs
+!pkgs/CubeLog
+!pkgs/CubeLog/**
 !CubeDB
 !CubeDB/**
 !Cubelet

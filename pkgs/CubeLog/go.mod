@@ -1,4 +1,4 @@
-module github.com/tencentcloud/CubeSandbox/cubelog
+module github.com/tencentcloud/CubeSandbox/pkgs/CubeLog
 
 require (
 	github.com/json-iterator/go v1.1.12

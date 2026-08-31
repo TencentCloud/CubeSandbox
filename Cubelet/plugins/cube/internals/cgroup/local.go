@@ -37,7 +37,7 @@ import (
 	v1 "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup/handle/v1"
 	v2 "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup/handle/v2"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 type CgPlugin struct {

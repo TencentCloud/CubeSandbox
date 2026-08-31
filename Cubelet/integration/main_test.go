@@ -21,7 +21,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/nbi/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/version/v1"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 var (

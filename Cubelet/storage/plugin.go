@@ -26,7 +26,7 @@ import (
 	volbinary "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/binary"
 	volrpc "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/rpc"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 var cowLookPath = exec.LookPath

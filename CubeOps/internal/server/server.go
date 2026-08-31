@@ -24,7 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/nodemetric"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/service"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
-	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
+	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 // Server is the CubeOps HTTP server.

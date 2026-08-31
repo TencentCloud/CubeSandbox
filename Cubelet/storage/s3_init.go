@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 // s3InitRetryInterval is the pause between failed S3 init attempts.

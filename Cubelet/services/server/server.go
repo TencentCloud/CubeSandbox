@@ -41,7 +41,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/resourcemetrics"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"google.golang.org/grpc"
 
 	containerdserver "github.com/containerd/containerd/v2/cmd/containerd/server"

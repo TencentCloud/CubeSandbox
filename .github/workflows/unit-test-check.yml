@@ -11,7 +11,7 @@ on:
       - 'CubeMaster/**'
       - 'CubeShim/**'
       - 'CubeNet/**'
-      - 'cubelog/**'
+      - 'pkgs/CubeLog/**'
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
       - 'agent/**'
@@ -30,7 +30,7 @@ on:
       - 'CubeMaster/**'
       - 'CubeShim/**'
       - 'CubeNet/**'
-      - 'cubelog/**'
+      - 'pkgs/CubeLog/**'
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
       - 'agent/**'
@@ -198,8 +198,13 @@ jobs:
                   # helper changes still need the cubelet test set.
                   add_component "cubelet"
                   ;;
-                cubelog/*)
+                pkgs/CubeLog/*)
+                  # Consumers import CubeLog via replace => ../pkgs/CubeLog, so
+                  # CubeLog changes must re-run those test sets too.
                   add_component "cubelog"
+                  add_component "CubeMaster"
+                  add_component "cubelet"
+                  add_component "CubeOps"
                   ;;
                 cube-lifecycle-manager/*)
                   add_component "cube-lifecycle-manager"

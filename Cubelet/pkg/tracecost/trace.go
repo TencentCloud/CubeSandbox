@@ -8,7 +8,7 @@ import (
 	"container/list"
 	"context"
 	"fmt"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"sync"
 	"time"
 )

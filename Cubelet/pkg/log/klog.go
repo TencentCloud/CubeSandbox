@@ -14,8 +14,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"k8s.io/klog/v2"
 
-	"github.com/tencentcloud/CubeSandbox/cubelog"
-	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 type klogToCubeLogWrite struct {

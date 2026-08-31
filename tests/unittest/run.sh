@@ -109,7 +109,7 @@ WITH_TESTS=(
 	# cubelog/cubedb run on the host, not via builder-run: both are pure Go with
 	# no CGO (no `import "C"`) and no builder-only build deps, so the host
 	# toolchain is sufficient and skipping the container is faster.
-	"cubelog|Go|0|cd cubelog && go test -short ./..."
+	"cubelog|Go|0|cd pkgs/CubeLog && go test -short ./..."
 	"cubedb|Go|0|cd CubeDB && go mod download && go test ./..."
 	# cubelet runs only ./pkg/... here; the cgroupfs/host-cap-dependent tests
 	# live under ./plugins/... and ./services/... and are not in this set, so

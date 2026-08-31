@@ -478,7 +478,7 @@ shim-test: builder-image
 # container is faster.
 .PHONY: cubelog-test
 cubelog-test:
-	cd cubelog && go test -short ./...
+	cd pkgs/CubeLog && go test -short ./...
 
 .PHONY: cubedb-test
 cubedb-test:
@@ -610,7 +610,7 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@printf '  %-8s %s\n' "FMT" "Cubelet"
 	@$(MAKE) -C Cubelet fmt
 	@printf '  %-8s %s\n' "FMT" "cubelog"
-	@$(MAKE) -C cubelog fmt
+	@$(MAKE) -C pkgs/CubeLog fmt
 	@printf '  %-8s %s\n' "FMT" "CubeMaster"
 	@$(MAKE) -C CubeMaster fmt
 	@printf '  %-8s %s\n' "FMT" "CubeNet"
