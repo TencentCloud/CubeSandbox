@@ -1,10 +1,59 @@
+import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { defineConfig } from 'vitepress'
 import { withMermaid } from 'vitepress-plugin-mermaid'
+import llmstxt from 'vitepress-plugin-llms'
+import {
+  crawlerHeadTags,
+  regroupLlmsTxtByLanguage,
+  reorderLlmsFullByLanguage,
+  shouldDropFromSitemap,
+  SITE_ORIGIN
+} from './seo.mjs'
 
 export default withMermaid(defineConfig({
   title: "CubeSandbox",
   description: "Instant, Concurrent, Secure & Lightweight Sandbox Service for AI Agents",
   srcExclude: ['**/_template.md'],
+  cleanUrls: true,
+
+  sitemap: {
+    hostname: SITE_ORIGIN,
+    transformItems(items) {
+      return items.filter((item) => !shouldDropFromSitemap(item.url))
+    }
+  },
+
+  vite: {
+    plugins: [
+      ...llmstxt({
+        domain: SITE_ORIGIN,
+        title: 'CubeSandbox',
+        generateLLMsTxt: true,
+        generateLLMsFullTxt: true,
+        generateLLMFriendlyDocsForEachPage: true,
+        stripHTML: true,
+        injectLLMHint: false,
+        excludeUnnecessaryFiles: false,
+        excludeIndexPage: false,
+        excludeBlog: false,
+        ignoreFiles: [
+          '**/_template.md'
+        ]
+      })
+    ]
+  },
+
+  transformHead({ pageData }) {
+    return crawlerHeadTags({ relativePath: pageData.relativePath })
+  },
+
+  buildEnd(siteConfig) {
+    const llmsTxt = join(siteConfig.outDir, 'llms.txt')
+    writeFileSync(llmsTxt, regroupLlmsTxtByLanguage(readFileSync(llmsTxt, 'utf8')))
+    const llmsFull = join(siteConfig.outDir, 'llms-full.txt')
+    writeFileSync(llmsFull, reorderLlmsFullByLanguage(readFileSync(llmsFull, 'utf8')))
+  },
 
   markdown: {
     // Shiki has no bundled PromQL grammar; alias so ```promql blocks do not warn.
