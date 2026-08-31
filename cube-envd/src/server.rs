@@ -17,6 +17,7 @@ use axum::Router;
 
 use crate::auth::{self, User};
 use crate::connect;
+use crate::cors;
 use crate::error::{ConnectCode, ConnectError};
 use crate::rest;
 use crate::services::{filesystem as fs_svc, process as proc_svc};
@@ -85,6 +86,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(tower_http::catch_panic::CatchPanicLayer::custom(
             panic_handler,
         ))
+        // CORS sits outside the panic layer: a preflight is answered here and
+        // never reaches the router, like upstream's withCORS wrapping the
+        // whole server (main.go:194).
+        .layer(axum::middleware::from_fn(cors::middleware))
         .with_state(state)
 }
 

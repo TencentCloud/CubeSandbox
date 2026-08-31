@@ -62,6 +62,39 @@ cube-envd 上是 204 且**会落库**：空 token 会被存下，此后任何带
 
 历史基线（2026-08-07，49 个场景）：`PASS 40  FAIL 0  DECLARED-DIFF 9`。
 
+### 2a. CORS 对照（阶段 1 项 1.5，2026-08-31 新增）
+
+同镜像双容器，逐个请求比对 `Access-Control-*` 与 `Vary`（大小写无关）：
+
+| 请求 | 结果 |
+|---|---|
+| `OPTIONS /health` + Origin + `ACRM: POST` | 一致（204 + ACAO `*` + ACAM 回显 `POST` + Max-Age 7200 + 预检 Vary）|
+| 同上 + `ACRH: content-type, x-access-token` | 一致（额外回显 ACAH）|
+| `OPTIONS` + `ACRM: TRACE`（不在允许方法集）| 一致（仅 Vary，无 ACAO）|
+| `OPTIONS` + ACRM 但无 Origin | 一致（仅 Vary）|
+| `GET /health` + Origin | 一致（ACAO `*` + Expose-Headers 六项 + `Vary: Origin`）|
+| `GET /health` 无 Origin | 一致（仅 `Vary: Origin`）|
+| `POST /envs` + Origin | 一致 |
+| `GET /files?path=...` + Origin | **CORS 头一致**；`Vary` 不同（Go `Accept-Encoding`，cube-envd `Origin`）|
+| `OPTIONS /health` + Origin、无 `ACRM` | 一致（405 + ACAO `*` + Expose-Headers）——review 补测 |
+
+最后一行是项 1.3 的既有缺口（上游 `download.go:118` 设置 `Vary: Accept-Encoding`，
+cube-envd 的 download 尚未发该头），不是 CORS 差异：上游 CORS 中间件在 handler
+**之前**写 `Vary`，会被 handler 自己的 `Set` 覆盖，故 1.3 落地后 cube-envd 同样
+只剩 `Accept-Encoding`——`cors.rs` 的 `apply()` 已按此语义实现（响应已有 `Vary`
+则不动）。`Vary` 不在 `conformance.py` 的 `HEADERS_KEPT` 比对面内，不影响对拍结论。
+
+**Review 补测（2026-08-31）**：`OPTIONS /x`（无 `ACRM`）对 rs/cors 是 actual 请求，
+`isMethodAllowed` 对 OPTIONS 恒放行（cors.go:490-492）——cube-envd 原实现把
+OPTIONS 排除在方法集外，该形状只回 `Vary: Origin`，与上游（405 + ACAO +
+Expose-Headers）不一致；已修（`is_method_allowed` 对 OPTIONS 恒 true）并新增
+conformance 场景 `rest_cors_options_actual` 锁定。
+
+对拍侧新增 7 个 CORS 场景；`conformance.py` 的 `HEADERS_KEPT` 已扩展纳入五个
+`Access-Control-*` 头（`Vary` 因 1.3 缺口仍不在比对面），CORS 头差异从此会被
+fixture 对拍自动抓到。全新容器重录后 **PASS 47 / FAIL 0 / DECLARED-DIFF 10**
+（57 场景）。
+
 ## 2b. 独立评审整改（三个独立 sub-agent 复核）
 
 代码评审 / 协议一致性 / E2E 三路独立 agent 复核后发现并已修复的缺陷：

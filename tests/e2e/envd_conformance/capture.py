@@ -165,6 +165,37 @@ def connect_stream(service_method, payload, user="user", timeout=30,
 
 
 # ---------------- A. REST ----------------
+# CORS: the comparison keeps only Content-Type / Content-Encoding /
+# Cache-Control, so these scenarios prove the *status* contract (a preflight is
+# answered 204 here, not 405 by a router with no OPTIONS route); the
+# Access-Control-* headers themselves are covered by cargo tests in
+# cube-envd/src/cors.rs.
+def cap_cors():
+    origin = {"Origin": "https://conformance.invalid"}
+    record("rest_cors_preflight", http_req(
+        "OPTIONS", "/health",
+        headers={**origin, "Access-Control-Request-Method": "POST"}))
+    record("rest_cors_preflight_request_headers", http_req(
+        "OPTIONS", "/health",
+        headers={**origin, "Access-Control-Request-Method": "POST",
+                 "Access-Control-Request-Headers": "content-type, x-access-token"}))
+    # Method outside the configured six, and a preflight without an Origin:
+    # both are still answered, just without Access-Control-Allow-Origin.
+    record("rest_cors_preflight_bad_method", http_req(
+        "OPTIONS", "/health",
+        headers={**origin, "Access-Control-Request-Method": "TRACE"}))
+    record("rest_cors_preflight_no_origin", http_req(
+        "OPTIONS", "/health", headers={"Access-Control-Request-Method": "POST"}))
+    # Actual (non-preflight) requests reach the handler and gain the headers.
+    record("rest_cors_actual_with_origin", http_req("GET", "/health", headers=origin))
+    record("rest_cors_actual_no_origin", http_req("GET", "/health"))
+    # OPTIONS without Access-Control-Request-Method is an *actual* request to
+    # rs/cors, which always allows OPTIONS as a method (cors.go:490-492): the
+    # router answers 405 and the middleware still adds ACAO + Expose-Headers.
+    # cube-envd regressed this once (Vary-only); the fixture guards it.
+    record("rest_cors_options_actual", http_req("OPTIONS", "/health", headers=origin))
+
+
 def cap_rest():
     record("rest_health", http_req("GET", "/health"))
     record("rest_init_envvars", http_req(
@@ -324,6 +355,17 @@ def cap_init_token():
 
 # ---------------- B. filesystem.Filesystem unary ----------------
 def cap_fs():
+    # Reset artifacts the scenario sequence itself creates, so ListDir below
+    # sees the same /home/user on both sides even when a container is reused
+    # for a rerun: base_c.txt is the side effect of /files/compose (a declared
+    # 501 difference — upstream creates it, cube-envd does not) and zz_link of
+    # the symlink probe. Each is covered by its own scenario; ListDir must not
+    # inherit them.
+    for stale in ("/home/user/base_c.txt", "/home/user/zz_link"):
+        try:
+            connect_unary("filesystem.Filesystem/Remove", {"path": stale})
+        except Exception:
+            pass
     record("fs_stat_file", connect_unary("filesystem.Filesystem/Stat", {"path": "/home/user/base_a.txt"}))
     record("fs_stat_relative", connect_unary("filesystem.Filesystem/Stat", {"path": "base_a.txt"}))
     record("fs_stat_dir", connect_unary("filesystem.Filesystem/Stat", {"path": "/home/user"}))
@@ -462,6 +504,8 @@ def cap_process():
 
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
+    if which in ("all", "cors"):
+        cap_cors()
     if which in ("all", "rest"):
         cap_rest()
     if which in ("all", "fs"):

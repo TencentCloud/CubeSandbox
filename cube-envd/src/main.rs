@@ -13,6 +13,7 @@
 
 mod auth;
 mod connect;
+mod cors;
 mod error;
 mod exec;
 mod msg;

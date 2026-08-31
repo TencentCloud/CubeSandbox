@@ -45,7 +45,10 @@ VOLATILE_KEYS = {"ts", "cpu_used_pct", "cpu_count", "mem_total", "mem_used", "me
                  "mem_total_mib", "mem_used_mib", "disk_used", "disk_total",
                  "watcherId", "pid"}
 TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z")
-HEADERS_KEPT = {"Content-Type", "Content-Encoding", "Cache-Control"}
+HEADERS_KEPT = {"Content-Type", "Content-Encoding", "Cache-Control",
+                "Access-Control-Allow-Origin", "Access-Control-Expose-Headers",
+                "Access-Control-Allow-Methods", "Access-Control-Allow-Headers",
+                "Access-Control-Max-Age"}
 
 
 def normalize(obj, path=""):
