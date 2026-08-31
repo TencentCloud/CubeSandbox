@@ -22,8 +22,8 @@ use crate::connect;
 use crate::error::{ConnectCode, ConnectError};
 use crate::exec;
 use crate::msg::process::{
-    parse_signal, Event, EventEnvelope, ListResponse, ProcessInfo, SendSignalRequest, StartEvent,
-    StartRequest,
+    parse_signal, ConnectRequest, Event, EventEnvelope, ListResponse, ProcessInfo,
+    SendSignalRequest, StartEvent, StartRequest,
 };
 use crate::state::{AppState, ProcEntry};
 
@@ -95,11 +95,16 @@ pub fn start(
         }
     };
 
-    let exec::SpawnedProcess { pid, initial } = spawned;
+    let exec::SpawnedProcess {
+        pid,
+        initial,
+        sender,
+    } = spawned;
     let handle = state.insert_process(ProcEntry {
         pid,
         tag: req.tag.clone(),
         config: req.process.clone(),
+        sender,
     });
 
     // Frames channel: the HTTP body reads from `rx`; the driver task keeps
@@ -111,7 +116,7 @@ pub fn start(
         drive_stream(
             driver_state,
             pid,
-            handle,
+            Some(handle),
             initial,
             tx,
             deadline,
@@ -123,10 +128,56 @@ pub fn start(
     frame_stream_response(tokio_stream::wrappers::ReceiverStream::new(rx))
 }
 
+/// Handle `process.Process/Connect` (attach, server-streaming).
+///
+/// Attach differs from `Start` only in lifecycle: it does not spawn, so there
+/// is no deadline kill, and it does not reap the process-table entry — the
+/// `Start` stream owns both. A `Connect` arriving after the process was
+/// reaped resolves to `not_found`; one arriving in the tiny window between the
+/// child ending and the `Start` stream reaping it is cut off with `Closed`
+/// (no history to replay), a race upstream has as well.
+pub fn connect(
+    state: Arc<AppState>,
+    req: ConnectRequest,
+    keepalive_interval: std::time::Duration,
+) -> axum::response::Response {
+    let (pid, tag) = req.process.flatten();
+    let Some((pid, events)) = state.subscribe(pid, tag.as_deref()) else {
+        // Match Go envd's wording for a selector resolving to no live process
+        // (the same helper SendSignal/List use).
+        let detail = match (pid, tag.as_deref()) {
+            (Some(p), _) => format!("process with pid {p} not found"),
+            (None, Some(t)) => format!("process with tag {t} not found"),
+            (None, None) => "process not found".to_string(),
+        };
+        return stream_error_response(ConnectError::new(ConnectCode::NotFound, detail));
+    };
+
+    // Attach, don't spawn: no deadline kill and no reap on completion. The
+    // fresh receiver starts at the current ring head, so history is not
+    // replayed.
+    let (tx, rx) = mpsc::channel::<Bytes>(64);
+    let driver_state = state.clone();
+    tokio::spawn(async move {
+        drive_stream(
+            driver_state,
+            pid,
+            None,
+            events,
+            tx,
+            None,
+            keepalive_interval,
+        )
+        .await;
+    });
+
+    frame_stream_response(tokio_stream::wrappers::ReceiverStream::new(rx))
+}
+
 async fn drive_stream(
     state: Arc<AppState>,
     pid: u32,
-    handle: crate::state::ProcHandle,
+    handle: Option<crate::state::ProcHandle>,
     mut events: broadcast::Receiver<exec::PumpEvent>,
     tx: mpsc::Sender<Bytes>,
     deadline: Option<std::time::Duration>,
@@ -235,7 +286,12 @@ async fn drive_stream(
             }
         }
     }
-    state.remove_process(handle);
+    // Only the Start stream owns the process-table entry. A Connect attach
+    // passes `handle: None` — its completion (a disconnect) must not reap the
+    // process, which stays owned by the Start stream until the child exits.
+    if let Some(handle) = handle {
+        state.remove_process(handle);
+    }
 }
 
 /// Synthetic event stream matching the baseline shape for a missing binary:
@@ -348,6 +404,7 @@ mod tests {
     fn list_shape() {
         let state = AppState::new();
         assert_eq!(list(&state), serde_json::json!({}));
+        let (sender, _rx) = broadcast::channel::<exec::PumpEvent>(1);
         state.insert_process(ProcEntry {
             pid: 7,
             tag: Some("t".into()),
@@ -356,6 +413,7 @@ mod tests {
                 args: vec!["-c".into(), "x".into()],
                 ..Default::default()
             },
+            sender,
         });
         let v = list(&state);
         assert_eq!(v["processes"][0]["pid"], 7);
@@ -388,6 +446,10 @@ mod tests {
     #[tokio::test]
     async fn drive_stream_lagged_cuts_off_slow_subscriber() {
         let state = Arc::new(AppState::new());
+        // Capacity-1 ring: publishing two events before the driver reads any
+        // overflows the ring, so its first recv() reports Lagged instead of
+        // delivering the overwritten event.
+        let (pub_tx, events) = broadcast::channel::<exec::PumpEvent>(1);
         let handle = state.insert_process(ProcEntry {
             pid: 42,
             tag: None,
@@ -395,12 +457,8 @@ mod tests {
                 cmd: "/bin/echo".into(),
                 ..Default::default()
             },
+            sender: pub_tx.clone(),
         });
-
-        // Capacity-1 ring: publishing two events before the driver reads any
-        // overflows the ring, so its first recv() reports Lagged instead of
-        // delivering the overwritten event.
-        let (pub_tx, events) = broadcast::channel::<exec::PumpEvent>(1);
         let data = |s: &str| {
             exec::PumpEvent::Data(crate::msg::process::DataEvent {
                 stdout: Some(s.into()),
@@ -416,7 +474,7 @@ mod tests {
             drive_stream(
                 driver_state,
                 42,
-                handle,
+                Some(handle),
                 events,
                 tx,
                 None,

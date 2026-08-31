@@ -91,6 +91,15 @@ pub struct SendSignalRequest {
     pub signal: Option<serde_json::Value>,
 }
 
+/// `process.Process/Connect`: attach to an already-running process selected by
+/// pid or tag. Server-streaming; the response is the same `Event` stream as
+/// Start (start → data/keepalive → end), except it begins at the current head
+/// of the output bus — nothing before the attach is replayed.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConnectRequest {
+    pub process: ProcessSelector,
+}
+
 // ---------- responses / events ----------
 
 #[derive(Debug, Clone, Serialize)]

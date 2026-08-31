@@ -32,10 +32,13 @@ pub struct SpawnedProcess {
     /// First subscriber on the process's output bus. Created before the pump
     /// task is spawned so it never misses an early event (a broadcast receiver
     /// sees only events published after it subscribes — there is no replay of
-    /// pre-subscription history). Later `Connect` calls subscribe through
-    /// their own `broadcast::Receiver` (2.4); the pump task keeps the bus
-    /// alive for the child's whole lifetime.
+    /// pre-subscription history). `Connect` attaches a later subscriber via
+    /// `sender.subscribe()`; the pump task keeps the bus alive for the child's
+    /// whole lifetime.
     pub initial: broadcast::Receiver<PumpEvent>,
+    /// A clone of the bus's Sender, kept so `Connect` can hand a fresh
+    /// receiver to an Nth subscriber attaching to a running process.
+    pub sender: broadcast::Sender<PumpEvent>,
 }
 
 /// Merge order (later wins): built-in defaults < /init env vars < request envs.
@@ -166,6 +169,9 @@ pub fn spawn(
     // `initial` is created *before* the pump task so the first subscriber
     // never misses an early event.
     let (tx, initial) = broadcast::channel::<PumpEvent>(64);
+    // A clone kept for `Connect` to subscribe later subscribers; the pump task
+    // moves `tx` itself below.
+    let sender = tx.clone();
 
     tokio::spawn(async move {
         let out_task = pump_pipe(stdout, tx.clone(), false);
@@ -183,7 +189,11 @@ pub fn spawn(
         }
     });
 
-    Ok(SpawnedProcess { pid, initial })
+    Ok(SpawnedProcess {
+        pid,
+        initial,
+        sender,
+    })
 }
 
 async fn pump_pipe<R>(pipe: Option<R>, tx: broadcast::Sender<PumpEvent>, is_stderr: bool)

@@ -13,7 +13,8 @@ Normalized away (legitimately dynamic):
   - hostnames in downloaded /etc/hostname content
 Declared differences (allowlisted, documented in cube-envd/README.md):
   - gzip: cube-envd always identity
-  - CreateWatcher/PTY/SendInput/Connect: unimplemented in cube-envd
+  - CreateWatcher/PTY/SendInput: unimplemented in cube-envd
+  - Connect: implemented; nested-selector shape still rejected differently
   - missing-cmd stderr prefix (nice vs cube-envd wording)
 """
 import json
@@ -30,7 +31,7 @@ DECLARED_DIFFERENT = {
     "rest_files_gzip_accept": "gzip download encoding: upstream supports, cube-envd identity-only",
     "rest_files_compose_probe": "/files/compose: implemented upstream, 501 in cube-envd",
     "proc_sendinput_probe": "SendInput selector error wording differs (unimplemented either way)",
-    "proc_connect_missing": "Process/Connect: unimplemented in cube-envd (upstream: selector error)",
+    "proc_connect_missing": "nested-selector: BOTH refuse to attach — upstream rejects the shape (unimplemented/invalid input type), cube-envd resolves to no pid and returns not_found; neither attaches to a process",
     "proc_sendsignal_nested_probe": "nested-selector: BOTH refuse to act on the process — upstream rejects the shape (501), cube-envd resolves to no pid and returns not_found; neither signals a process (no destructive side effect)",
     "fs_bad_json": "JSON parse error wording is parser-specific (code and status equal)",
     "proc_missing_cmd": "missing-binary stderr prefix: upstream nice(1) wording vs cube-envd (exit 127 and event flow equal)",

@@ -41,10 +41,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/process.Process/Start", post(process_start))
         .route("/process.Process/List", post(process_list))
         .route("/process.Process/SendSignal", post(process_send_signal))
-        .route(
-            "/process.Process/Connect",
-            post(stream_unimplemented("Process/Connect")),
-        )
+        .route("/process.Process/Connect", post(process_connect))
         .route(
             "/process.Process/StreamInput",
             post(stream_unimplemented("Process/StreamInput")),
@@ -230,6 +227,46 @@ async fn process_start(
         keepalive
     );
     proc_svc::start(state, req, user, deadline, keepalive)
+}
+
+async fn process_connect(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    // Streaming surface: every failure is an EndStream error frame on 200.
+    if let Err(e) = connect::check_json_codec(&headers) {
+        return proc_svc::stream_error_response(e);
+    }
+    if let Err(e) = rpc_token_check(&state, &headers) {
+        return proc_svc::stream_error_response(e);
+    }
+    let bytes = match axum::body::to_bytes(body, connect::MAX_ENVELOPE_SIZE + 5).await {
+        Ok(b) => b,
+        Err(e) => {
+            return proc_svc::stream_error_response(ConnectError::new(
+                ConnectCode::InvalidArgument,
+                format!("read request: {e}"),
+            ))
+        }
+    };
+    let payload = match connect::decode_single_envelope(&bytes) {
+        Ok(p) => p,
+        Err(e) => return proc_svc::stream_error_response(e),
+    };
+    let req: crate::msg::process::ConnectRequest = match serde_json::from_slice(&payload) {
+        Ok(r) => r,
+        Err(e) => {
+            return proc_svc::stream_error_response(ConnectError::new(
+                ConnectCode::InvalidArgument,
+                format!("unmarshal message: {e}"),
+            ))
+        }
+    };
+    // Attach only: no Connect-Timeout-Ms (Connect never kills) — just the
+    // keepalive cadence, which still keeps a quiet attached stream alive.
+    let keepalive = connect::keepalive_interval_from_headers(&headers);
+    proc_svc::connect(state, req, keepalive)
 }
 
 async fn process_list(

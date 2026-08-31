@@ -8,6 +8,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use tokio::sync::broadcast;
+
+use crate::exec;
 use crate::msg::process::ProcessConfig;
 
 /// Recover a poisoned lock instead of propagating the panic. A single handler
@@ -29,6 +32,9 @@ pub struct ProcEntry {
     pub pid: u32,
     pub tag: Option<String>,
     pub config: ProcessConfig,
+    /// Output bus the pump publishes on. Held so `Connect` can attach a new
+    /// subscriber to an already-running process via `sender.subscribe()`.
+    pub sender: broadcast::Sender<exec::PumpEvent>,
 }
 
 /// Opaque, process-lifetime-unique key for a live process in the table.
@@ -193,6 +199,31 @@ impl AppState {
         }
         None
     }
+
+    /// Resolve a selector to a live process and subscribe to its output bus.
+    /// `Connect` attaches this way: the fresh `broadcast::Receiver` starts at
+    /// the current head of the ring, so it sees only events published after
+    /// the attach (no replay of history). Resolution mirrors `find_pid` — an
+    /// explicit pid wins, otherwise the most recent tag match.
+    pub fn subscribe(
+        &self,
+        pid: Option<u32>,
+        tag: Option<&str>,
+    ) -> Option<(u32, broadcast::Receiver<exec::PumpEvent>)> {
+        let guard = lock(&self.processes);
+        let entry = if let Some(p) = pid {
+            guard.values().find(|e| e.pid == p)
+        } else if let Some(t) = tag {
+            guard
+                .iter()
+                .filter(|(_, e)| e.tag.as_deref() == Some(t))
+                .max_by_key(|(handle, _)| **handle)
+                .map(|(_, e)| e)
+        } else {
+            None
+        };
+        entry.map(|e| (e.pid, e.sender.subscribe()))
+    }
 }
 
 /// `/init` timestamp comparison, mirroring `utils.AtomicMax.SetToGreater`
@@ -224,6 +255,18 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a ProcEntry with a throwaway broadcast bus — these tests exercise
+    /// pid/tag resolution and reaping, never the output bus itself.
+    fn proc_entry(pid: u32, tag: Option<&str>) -> ProcEntry {
+        let (sender, _rx) = broadcast::channel::<exec::PumpEvent>(1);
+        ProcEntry {
+            pid,
+            tag: tag.map(String::from),
+            config: ProcessConfig::default(),
+            sender,
+        }
+    }
 
     #[test]
     fn init_env_vars_merge_not_replace() {
@@ -312,11 +355,7 @@ mod tests {
     #[test]
     fn process_table_selectors() {
         let s = AppState::new();
-        let h = s.insert_process(ProcEntry {
-            pid: 42,
-            tag: Some("t1".into()),
-            config: ProcessConfig::default(),
-        });
+        let h = s.insert_process(proc_entry(42, Some("t1")));
         assert_eq!(s.find_pid(Some(42), None), Some(42));
         assert_eq!(s.find_pid(None, Some("t1")), Some(42));
         assert_eq!(s.find_pid(Some(41), None), None);
@@ -330,20 +369,54 @@ mod tests {
         // A finished process and a newer one share the same recycled pid; the
         // old one's cleanup must not evict the live entry.
         let s = AppState::new();
-        let old = s.insert_process(ProcEntry {
-            pid: 100,
-            tag: Some("old".into()),
-            config: ProcessConfig::default(),
-        });
-        let _new = s.insert_process(ProcEntry {
-            pid: 100,
-            tag: Some("new".into()),
-            config: ProcessConfig::default(),
-        });
+        let old = s.insert_process(proc_entry(100, Some("old")));
+        let _new = s.insert_process(proc_entry(100, Some("new")));
         s.remove_process(old);
         // The pid is still live (owned by the newer process) and its tag wins.
         assert_eq!(s.find_pid(Some(100), None), Some(100));
         assert_eq!(s.find_pid(None, Some("new")), Some(100));
         assert_eq!(s.find_pid(None, Some("old")), None);
+    }
+
+    #[tokio::test]
+    async fn subscribe_resolves_and_skips_pre_attach_history() {
+        let s = AppState::new();
+        let (tx, _rx) = broadcast::channel::<exec::PumpEvent>(4);
+        let data = |v: &str| {
+            exec::PumpEvent::Data(crate::msg::process::DataEvent {
+                stdout: Some(v.into()),
+                ..Default::default()
+            })
+        };
+        // An event published before the attach is history: a Connect subscriber
+        // starts at the current ring head and must not see it.
+        assert!(tx.send(data("before")).is_ok());
+
+        s.insert_process(ProcEntry {
+            pid: 7,
+            tag: Some("t".into()),
+            config: ProcessConfig::default(),
+            sender: tx.clone(),
+        });
+
+        // pid and tag both resolve to the same live process.
+        let (pid, mut rx) = s.subscribe(Some(7), None).expect("resolve by pid");
+        assert_eq!(pid, 7);
+        assert_eq!(
+            s.subscribe(None, Some("t")).map(|(p, _)| p),
+            Some(7),
+            "resolve by tag"
+        );
+
+        // Only the post-attach event is delivered — "before" is not replayed.
+        assert!(tx.send(data("after")).is_ok());
+        match rx.recv().await.expect("post-attach event") {
+            exec::PumpEvent::Data(d) => assert_eq!(d.stdout.as_deref(), Some("after")),
+            _ => panic!("expected a Data event"),
+        }
+
+        // Unknown selectors resolve to none.
+        assert!(s.subscribe(Some(999), None).is_none());
+        assert!(s.subscribe(None, Some("nope")).is_none());
     }
 }

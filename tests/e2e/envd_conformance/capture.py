@@ -479,7 +479,27 @@ def cap_process():
     record("proc_pty_probe", connect_stream(
         "process.Process/Start", start_req("echo pty-test", pty={"size": {"cols": 80, "rows": 24}}),
         timeout=10, read_deadline=5))
-    # Connect RPC to nonexistent pid
+    # Connect attach: start a tagged process, then attach to it mid-flight and
+    # record the attach stream (start → data → end; no history replay).
+    def run_attach_target():
+        # Keep the Start stream open (read to completion) so the process stays
+        # alive and its output bus stays populated while we attach below.
+        connect_stream("process.Process/Start",
+                       start_req("sleep 2; echo CONNECT_MARK >&2", tag="baseline-connect"),
+                       timeout=30)
+
+    t = threading.Thread(target=run_attach_target)
+    t.start()
+    time.sleep(0.8)  # attach while the target is still running
+    record("proc_connect_attach", connect_stream(
+        "process.Process/Connect", {"process": {"tag": "baseline-connect"}},
+        timeout=30, read_deadline=10))
+    t.join(timeout=15)
+
+    # Connect flat-selector not-found: pid/tag wording matches upstream.
+    record("proc_connect_flat_missing", connect_stream(
+        "process.Process/Connect", {"process": {"pid": 99999}}, timeout=8, read_deadline=5))
+    # Nested (non-flat) selector: upstream rejects the shape outright.
     record("proc_connect_missing", connect_stream(
         "process.Process/Connect", {"process": {"selector": {"pid": 99999}}}, timeout=8, read_deadline=5))
     # SendInput to non-stdin process (error shape)
