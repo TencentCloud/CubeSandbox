@@ -42,3 +42,17 @@ Overrides:
 
 All configuration is via environment variables (prefix `CUBE_LCM_`); see
 `internal/config/config.go` for the authoritative list.
+
+## Webhooks
+
+CLM can push sandbox lifecycle events (`sandbox.created/deleted/paused/resumed/
+timeout.updated`) to external HTTP endpoints. Enable it with
+`CUBE_LCM_WEBHOOK_URLS` (comma-separated targets); optionally set
+`CUBE_LCM_WEBHOOK_EVENTS` (filter) and `CUBE_LCM_WEBHOOK_SECRET` (HMAC-SHA256
+signing). Delivery is async, retried with backoff, and at-least-once (dedupe on
+`event_id` in your receiver). Endpoints can also be managed at runtime via the
+`/admin/webhooks` REST API (`X-Cube-Admin-Token` required).
+
+A runnable receiver example lives in [`examples/webhook-receiver/`](../examples/webhook-receiver/);
+see the [Webhook Integration Guide](../docs/guide/integrations/webhook.md) for
+configuration, payload, and alerting (WeCom bot / generic HTTP) references.

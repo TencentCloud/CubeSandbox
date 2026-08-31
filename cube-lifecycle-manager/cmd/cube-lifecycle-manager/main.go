@@ -30,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/resumer"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/statesync"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/sweeper"
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/webhook"
 )
 
 func main() {
@@ -68,6 +69,26 @@ func run() error {
 	stream := redisstream.New(rdb, logger.Named("redis"))
 	masterClient := cubemasterclient.New(cfg.CubeMasterURL, cfg.HTTPTimeout)
 	reg := registry.New()
+
+	// Webhook delivery to external endpoints. Disabled unless at least one
+	// CUBE_LCM_WEBHOOK_URLS is configured. The Manager is an independent
+	// consumer of the lifecycle stream (its own consumer group), so events are
+	// durable in Redis until delivered+acked. wh may stay nil.
+	var wh *webhook.Manager
+	if len(cfg.WebhookURLs) > 0 {
+		eps := webhook.FromEnv(cfg.WebhookURLs, cfg.WebhookEvents, cfg.WebhookSecret)
+		wh = webhook.New(webhook.Options{
+			Endpoints: eps,
+			Events:    cfg.WebhookEvents,
+			Timeout:   cfg.WebhookTimeout,
+			Retries:   cfg.WebhookMaxRetries,
+			Stream:    stream,
+			Log:       logger.Named("webhook"),
+		})
+		logger.Info("webhook delivery enabled",
+			zap.Strings("urls", cfg.WebhookURLs),
+			zap.Int("endpoints", len(eps)))
+	}
 
 	// The eventbus carries best-effort cross-replica wakeup hints. Redis
 	// remains the source of truth and the wait path retains polling fallback.
@@ -177,7 +198,9 @@ func run() error {
 	})
 
 	apiSrv := httpapi.New(cfg.ListenAddr, resumeImpl, reg, logger.Named("http")).
-		WithFleetSizer(fleetSizer{fleet})
+		WithFleetSizer(fleetSizer{fleet}).
+		WithWebhook(wh).
+		WithAdminToken(cfg.CubeAdminToken)
 
 	// 3. Run all background loops concurrently. First error cancels the rest.
 	loopCount := 4
@@ -185,6 +208,9 @@ func run() error {
 		loopCount++
 	}
 	if cfg.EventBusEnabled {
+		loopCount++
+	}
+	if wh != nil {
 		loopCount++
 	}
 	stateSyncDeps := statesync.Deps{
@@ -208,6 +234,9 @@ func run() error {
 	if cfg.EventBusEnabled {
 		sub := eventbus.NewSubscriber(rdb, bus, logger.Named("eventbus"))
 		go func() { errs <- sub.Run(rootCtx) }()
+	}
+	if wh != nil {
+		go func() { errs <- wh.Run(rootCtx) }()
 	}
 
 	// First loop to return wins; we cancel siblings via context and drain.

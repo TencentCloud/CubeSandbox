@@ -295,3 +295,132 @@ func TestDecodeEvent_UnknownOpSurvives(t *testing.T) {
 		t.Fatalf("unknown op must not populate Meta/State: %+v", ev)
 	}
 }
+
+// readGroupStub records the XReadGroup args and returns prebuilt streams,
+// so the ">" (new) vs "0" (pending) distinction is testable.
+type readGroupStub struct {
+	redis.UniversalClient
+	args    *redis.XReadGroupArgs
+	streams []redis.XStream
+}
+
+func (s *readGroupStub) XReadGroup(ctx context.Context, args *redis.XReadGroupArgs) *redis.XStreamSliceCmd {
+	s.args = args
+	cmd := redis.NewXStreamSliceCmd(ctx)
+	cmd.SetVal(s.streams)
+	return cmd
+}
+
+func TestReadGroup_UsesNewEntriesID(t *testing.T) {
+	s := &readGroupStub{}
+	c := New(s, zap.NewNop())
+	_, err := c.ReadGroup(context.Background(), "g", "c", time.Second, 10)
+	if err != nil {
+		t.Fatalf("ReadGroup: %v", err)
+	}
+	if s.args == nil || s.args.Streams[1] != ">" {
+		t.Fatalf("ReadGroup stream ID = %v, want %q", s.args, ">")
+	}
+}
+
+func TestReadPending_ReadsPendingListAndDecodes(t *testing.T) {
+	s := &readGroupStub{
+		streams: []redis.XStream{{Messages: []redis.XMessage{
+			{ID: "1-0", Values: map[string]interface{}{
+				lifecycle.FieldOp:        lifecycle.OpCreate,
+				lifecycle.FieldSandboxID: "sb-1",
+				lifecycle.FieldTimestamp: "1725030000000",
+				lifecycle.FieldPayload:   `{"sandbox_id":"sb-1","template_id":"tpl-1"}`,
+			}},
+			{ID: "2-0", Values: map[string]interface{}{
+				lifecycle.FieldOp:        lifecycle.OpState,
+				lifecycle.FieldSandboxID: "sb-1",
+				lifecycle.FieldPayload:   `{"state":"paused"}`,
+			}},
+		}}},
+	}
+	c := New(s, zap.NewNop())
+	events, err := c.ReadPending(context.Background(), "g", "c")
+	if err != nil {
+		t.Fatalf("ReadPending: %v", err)
+	}
+	if s.args == nil || s.args.Streams[1] != "0" {
+		t.Fatalf("ReadPending stream ID = %v, want %q", s.args, "0")
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2", len(events))
+	}
+	if events[0].Op != lifecycle.OpCreate || events[0].SandboxID != "sb-1" || events[0].Meta == nil || events[0].Meta.TemplateID != "tpl-1" {
+		t.Fatalf("create decoded wrong: %+v", events[0])
+	}
+	if events[0].Timestamp != 1725030000000 {
+		t.Fatalf("create ts = %d, want 1725030000000", events[0].Timestamp)
+	}
+	if events[1].Op != lifecycle.OpState || events[1].State == nil || events[1].State.State != "paused" {
+		t.Fatalf("state decoded wrong: %+v", events[1])
+	}
+}
+
+func TestReadPending_EmptyPendingReturnsEmpty(t *testing.T) {
+	s := &readGroupStub{}
+	c := New(s, zap.NewNop())
+	events, err := c.ReadPending(context.Background(), "g", "c")
+	if err != nil {
+		t.Fatalf("ReadPending: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events = %d, want 0", len(events))
+	}
+}
+
+// xAutoClaimStub records the XAutoClaim args and returns prebuilt messages,
+// so ReclaimStale's minIdle passthrough and decode path are testable.
+type xAutoClaimStub struct {
+	redis.UniversalClient
+	args    *redis.XAutoClaimArgs
+	messages []redis.XMessage
+}
+
+func (s *xAutoClaimStub) XAutoClaim(ctx context.Context, args *redis.XAutoClaimArgs) *redis.XAutoClaimCmd {
+	s.args = args
+	cmd := redis.NewXAutoClaimCmd(ctx)
+	cmd.SetVal(s.messages, "0-0")
+	return cmd
+}
+
+func TestReclaimStale_PassesMinIdleAndDecodes(t *testing.T) {
+	s := &xAutoClaimStub{
+		messages: []redis.XMessage{
+			{ID: "1-0", Values: map[string]interface{}{
+				lifecycle.FieldOp:        lifecycle.OpDelete,
+				lifecycle.FieldSandboxID: "sb-1",
+			}},
+		},
+	}
+	c := New(s, zap.NewNop())
+	events, err := c.ReclaimStale(context.Background(), "g", "c", 60*time.Second)
+	if err != nil {
+		t.Fatalf("ReclaimStale: %v", err)
+	}
+	if s.args == nil || s.args.MinIdle != 60*time.Second {
+		t.Fatalf("MinIdle = %v, want 60s", s.args.MinIdle)
+	}
+	if s.args.Consumer != "c" {
+		t.Fatalf("Consumer = %q, want c", s.args.Consumer)
+	}
+	if len(events) != 1 || events[0].Op != lifecycle.OpDelete || events[0].SandboxID != "sb-1" {
+		t.Fatalf("decoded = %+v, want one delete for sb-1", events)
+	}
+}
+
+func TestReclaimStale_EmptyReturnsEmpty(t *testing.T) {
+	s := &xAutoClaimStub{}
+	c := New(s, zap.NewNop())
+	events, err := c.ReclaimStale(context.Background(), "g", "c", time.Second)
+	if err != nil {
+		t.Fatalf("ReclaimStale: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events = %d, want 0", len(events))
+	}
+}

@@ -120,10 +120,68 @@ type Event struct {
 // when the block timeout expires (in which case it returns an empty slice and
 // nil error — the caller loops).
 func (c *Client) ReadGroup(ctx context.Context, group, consumer string, block time.Duration, count int) ([]Event, error) {
+	return c.readGroup(ctx, group, consumer, ">", block, count)
+}
+
+// ReadPending returns every entry currently in the group's pending list (read
+// but not yet acknowledged) and assigns them to `consumer`. The webhook
+// consumer group uses this at startup to reclaim events left un-acked by a
+// previous process crash, so a delivery can never be lost — it is redelivered
+// with the same stream ID (→ same webhook event_id) and the receiver dedupes.
+func (c *Client) ReadPending(ctx context.Context, group, consumer string) ([]Event, error) {
+	// ID "0" makes XREADGROUP return the whole pending list regardless of
+	// which consumer originally read each entry. Block is meaningless here.
+	return c.readGroup(ctx, group, consumer, "0", 0, 100)
+}
+
+// ReclaimStale claims and returns every pending entry whose idle time exceeds
+// minIdle, assigning them to `consumer`. It is the periodic safety net the
+// webhook Manager uses to retry entries stuck in pending — e.g. a peer replica
+// that read them and died before acking, or a delivery whose XACK failed.
+// Because it only reclaims entries idle for longer than a delivery could
+// possibly take, it never steals entries currently being delivered.
+func (c *Client) ReclaimStale(ctx context.Context, group, consumer string, minIdle time.Duration) ([]Event, error) {
+	var out []Event
+	start := "0"
+	for {
+		msgs, next, err := c.rdb.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+			Stream:   lifecycle.EventStreamKey,
+			Group:    group,
+			Consumer: consumer,
+			MinIdle:  minIdle,
+			Start:    start,
+			Count:    100,
+		}).Result()
+		if err != nil {
+			return nil, fmt.Errorf("xautoclaim: %w", err)
+		}
+		for _, msg := range msgs {
+			if ev := decodeEvent(msg); ev != nil {
+				out = append(out, *ev)
+			} else {
+				c.log.Warn("redisstream: reclaim dropping unparseable event",
+					zap.String("id", msg.ID), zap.Any("values", msg.Values))
+				// Unparseable entries can never be delivered; ack so the
+				// consumer never loops on them.
+				_ = c.Ack(ctx, group, msg.ID)
+			}
+		}
+		// XAUTOCLAIM returns "0-0" as the cursor once every pending entry has
+		// been iterated; guard both that and the no-progress case so a full
+		// pending list never loops.
+		if len(msgs) == 0 || next == "0-0" || next == start {
+			break
+		}
+		start = next
+	}
+	return out, nil
+}
+
+func (c *Client) readGroup(ctx context.Context, group, consumer, id string, block time.Duration, count int) ([]Event, error) {
 	res, err := c.rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
 		Group:    group,
 		Consumer: consumer,
-		Streams:  []string{lifecycle.EventStreamKey, ">"},
+		Streams:  []string{lifecycle.EventStreamKey, id},
 		Count:    int64(count),
 		Block:    block,
 	}).Result()

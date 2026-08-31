@@ -91,6 +91,15 @@ type Config struct {
 	// path and resumer.waitForRunning uses its 100ms polling ticker.
 	// Set CUBE_LCM_EVENTBUS_ENABLED=false as a kill switch.
 	EventBusEnabled bool
+
+	// Webhook delivery to external endpoints. Disabled entirely when
+	// WebhookURLs is empty. The wire protocol (payload shape +
+	// X-Cube-Signature-256 HMAC) mirrors CubeAPI's webhook emitter.
+	WebhookURLs       []string      // comma-separated endpoint URLs (CUBE_LCM_WEBHOOK_URLS)
+	WebhookEvents     []string      // event filter; "*" or empty = all (CUBE_LCM_WEBHOOK_EVENTS)
+	WebhookSecret     string        // optional shared secret for HMAC-SHA256 signing (CUBE_LCM_WEBHOOK_SECRET)
+	WebhookTimeout    time.Duration // per-request HTTP timeout (CUBE_LCM_WEBHOOK_TIMEOUT)
+	WebhookMaxRetries int           // retries after the first attempt (CUBE_LCM_WEBHOOK_MAX_RETRIES)
 }
 
 // Default returns a config populated with safe defaults; callers then override
@@ -119,6 +128,10 @@ func Default() *Config {
 		HeartbeatTTL:     15 * time.Second,
 		DiscoveryRefresh: 3 * time.Second,
 		EventBusEnabled:  true,
+		// Webhook defaults. WebhookURLs is empty (disabled) by default; the
+		// events filter defaults to "all" (empty list == "*"), no secret.
+		WebhookTimeout:    10 * time.Second,
+		WebhookMaxRetries: 2,
 	}
 }
 
@@ -237,6 +250,30 @@ func Load() (*Config, error) {
 			c.EventBusEnabled = enabled
 		}
 	}
+	if v := os.Getenv("CUBE_LCM_WEBHOOK_URLS"); v != "" {
+		c.WebhookURLs = splitAndTrim(v)
+	}
+	if v := os.Getenv("CUBE_LCM_WEBHOOK_EVENTS"); v != "" {
+		c.WebhookEvents = splitAndTrim(v)
+	}
+	if v := os.Getenv("CUBE_LCM_WEBHOOK_SECRET"); v != "" {
+		c.WebhookSecret = v
+	}
+	if v := os.Getenv("CUBE_LCM_WEBHOOK_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err != nil {
+			addErr("CUBE_LCM_WEBHOOK_TIMEOUT", err)
+		} else {
+			c.WebhookTimeout = d
+		}
+	}
+	if v := os.Getenv("CUBE_LCM_WEBHOOK_MAX_RETRIES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			addErr("CUBE_LCM_WEBHOOK_MAX_RETRIES", err)
+		} else {
+			c.WebhookMaxRetries = n
+		}
+	}
 	if c.ConsumerName == "" {
 		host, err := os.Hostname()
 		if err != nil {
@@ -279,6 +316,15 @@ func (c *Config) Validate() error {
 	}
 	if c.LastActivePoll <= 0 {
 		return errors.New("last active poll must be > 0")
+	}
+	// Webhook tuning knobs are only meaningful when a target is configured.
+	if len(c.WebhookURLs) > 0 {
+		if c.WebhookTimeout <= 0 {
+			return errors.New("webhook timeout must be > 0")
+		}
+		if c.WebhookMaxRetries < 0 {
+			return errors.New("webhook max retries must be >= 0")
+		}
 	}
 	return nil
 }
