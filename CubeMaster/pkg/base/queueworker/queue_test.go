@@ -61,19 +61,24 @@ func TestQueue(t *testing.T) {
 func TestQueueBlock(t *testing.T) {
 	q := NewQueue(5)
 
-	got := false
+	popped := make(chan struct{})
 	go func() {
 		q.BPop()
-		got = true
+		close(popped)
 	}()
 
-	if got {
+	select {
+	case <-popped:
 		t.Error("BPop should block when queue is empty")
+	case <-time.After(50 * time.Millisecond):
 	}
-	q.Push(1)
-	time.Sleep(time.Second)
-	if !got {
-		t.Error("BPop should got value when queue is not empty")
+	if err := q.Push(1); err != nil {
+		t.Fatalf("Push error: %v", err)
+	}
+	select {
+	case <-popped:
+	case <-time.After(time.Second):
+		t.Fatal("BPop should get a value when queue is not empty")
 	}
 }
 

@@ -125,6 +125,15 @@ WITH_TESTS=(
 )
 
 GATED_TESTS=(
+	# The race profile is intentionally separate from the fast default gate: it
+	# recompiles every CubeMaster unit package with the race detector and runs
+	# substantially longer than the regular -short suite.
+	"cubemaster-race|Go+race|0|race-enabled CubeMaster sweep is an extended check|make builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make test-race'"
+	# Docker-backed CubeMaster tests run on the host so dockertest can reach the
+	# daemon and its published 127.0.0.1 ports without nested-container socket or
+	# network plumbing. The component target fails instead of skipping when the
+	# daemon is unavailable.
+	"cubemaster-docker|Go+Docker|0|database tests need a reachable Docker daemon|make -C CubeMaster test-docker"
 	# hypervisor-kvm exercises the tests that need a real /dev/kvm at runtime:
 	# the `vmm` and `hypervisor` crate unit tests call hypervisor::new() /
 	# create_vm(), which fail without KVM (verified: 4/4 vmm cpu:: tests fail with

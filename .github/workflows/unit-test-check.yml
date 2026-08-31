@@ -271,20 +271,37 @@ jobs:
                     else error("unsupported component: " + .)
                     end
                   ),
-                  requires_builder: (. != "CubeProxy" and . != "cubelog" and . != "cubedb")
+                  requires_builder: (. != "CubeProxy" and . != "cubelog" and . != "cubedb"),
+                  run_mode: "root_make"
                 })
-              | map(
-                  . as $c
-                  | ["amd64", "arm64"]
-                  | map(
-                      $c + {
-                        arch: .,
-                        runner: (if . == "amd64" then "ubuntu-latest" else "ubuntu-24.04-arm" end),
-                        display_name: ($c.display_name + " (" + . + ")")
+              | [
+                  .[] as $component
+                  | if $component.component == "CubeMaster" then
+                      $component,
+                        ($component + {
+                          display_name: "CubeMaster Race",
+                          make_target: "test-race",
+                          run_mode: "cubemaster_builder"
+                        }),
+                        ($component + {
+                          display_name: "CubeMaster Docker",
+                          make_target: "test-docker",
+                          requires_builder: false,
+                          run_mode: "cubemaster_host"
+                        })
+                    else
+                      $component
+                    end
+                ]
+              | [
+                  .[] as $component
+                  | ["amd64", "arm64"][] as $arch
+                  | $component + {
+                        arch: $arch,
+                        runner: (if $arch == "amd64" then "ubuntu-latest" else "ubuntu-24.04-arm" end),
+                        display_name: ($component.display_name + " (" + $arch + ")")
                       }
-                    )
-                )
-              | add
+                ]
             '
           )"
 
@@ -307,6 +324,13 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Set up Go
+        if: matrix.run_mode == 'cubemaster_host'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: CubeMaster/go.mod
+          cache-dependency-path: CubeMaster/go.sum
 
       - name: Detect builder changes
         id: builder_changes
@@ -395,13 +419,31 @@ jobs:
           MAKE_TARGET: ${{ matrix.make_target }}
           REQUIRES_BUILDER: ${{ matrix.requires_builder }}
           BUILDER_IMAGE: ${{ steps.builder_image.outputs.image }}
+          RUN_MODE: ${{ matrix.run_mode }}
         run: |
           set -euo pipefail
 
           echo "Component: ${{ matrix.component }}"
-          if [[ "${REQUIRES_BUILDER}" == "true" ]]; then
-            echo "Builder image: ${BUILDER_IMAGE}"
-            make "${MAKE_TARGET}" BUILDER_IMAGE="${BUILDER_IMAGE}"
-          else
-            make "${MAKE_TARGET}"
-          fi
+          case "${RUN_MODE}" in
+            root_make)
+              if [[ "${REQUIRES_BUILDER}" == "true" ]]; then
+                echo "Builder image: ${BUILDER_IMAGE}"
+                make "${MAKE_TARGET}" BUILDER_IMAGE="${BUILDER_IMAGE}"
+              else
+                make "${MAKE_TARGET}"
+              fi
+              ;;
+            cubemaster_builder)
+              echo "Builder image: ${BUILDER_IMAGE}"
+              make builder-run \
+                BUILDER_IMAGE="${BUILDER_IMAGE}" \
+                BUILDER_CMD="cd /workspace/CubeMaster && go mod download && make ${MAKE_TARGET}"
+              ;;
+            cubemaster_host)
+              make -C CubeMaster "${MAKE_TARGET}"
+              ;;
+            *)
+              echo "::error::unsupported run mode: ${RUN_MODE}"
+              exit 1
+              ;;
+          esac
