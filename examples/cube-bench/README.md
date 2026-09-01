@@ -63,6 +63,16 @@ All env vars can be overridden by the corresponding flag.
 | `--dry-latency` | `80,30` | Dry-run latency: `mean,stddev` in ms |
 | `--dry-error-rate` | `0.02` | Simulated error rate (0.0–1.0) |
 | `--no-tui` | `false` | Disable interactive TUI |
+| `--seed` | `42` | Random seed for the pre-generated request sequence |
+| `--workload` | *(none)* | Workload preset: `burst`, `template_storm`, `mixed_spec` (empty = legacy mode) |
+| `--rate` | `0` | Poisson arrival rate in requests/sec (`<=0` = as fast as possible) |
+| `--lifetime` | *(none)* | Per-sandbox lifetime in seconds: `min,max` (uniform); client DELETEs when lifetime expires |
+| `--templates` | *(none)* | Template pool: comma-separated `templateID[:weight[:cpuMillis:memMiB]]` (weight default 1) |
+| `--dump-trace` | *(none)* | Write the pre-generated request sequence to a JSON trace file, then run normally |
+
+Without any scheduling flag (`--workload`/`--rate`/`--lifetime`/`--templates`)
+the tool behaves exactly as before: all requests fire at once and each sandbox
+is deleted immediately after creation.
 
 ### Examples
 
@@ -90,7 +100,79 @@ export CUBE_TEMPLATE_ID=<your-template-id>
 
 # Light terminal theme
 ./bin/cube-bench --dry-run --theme light -c 10 -n 100
+
+# Scheduled workload presets (Poisson arrivals + per-sandbox lifetimes)
+./bin/cube-bench --workload burst -t <template-id>
+./bin/cube-bench --workload template_storm -t <template-id> --seed 7
+./bin/cube-bench --workload mixed_spec \
+  --templates 'tpl-1c2g:6:1000:2048,tpl-2c4g:3:2000:4096,tpl-8c16g:1:8000:16384'
+
+# Ad-hoc schedule without a preset: 20 req/s Poisson, 5-30s lifetimes
+./bin/cube-bench -t <template-id> --rate 20 --lifetime 5,30 -n 200
+
+# Dry-run a preset and keep the exact request sequence as a trace file
+./bin/cube-bench --dry-run --workload burst --no-tui \
+  -o report.json --dump-trace trace.json
+# The same trace can then be replayed by an external scheduling simulator.
 ```
+
+### Workload presets
+
+A preset only supplies flag **defaults** — any flag you pass explicitly wins
+(e.g. `--workload burst -n 20` keeps `total=20`).
+
+| Preset | total | rate (req/s) | lifetime (s) | templates |
+|---|---|---|---|---|
+| `burst` | 500 | 50 | 10–120 | single (`-t`) |
+| `template_storm` | 300 | 30 | 30–90 | single (`-t`) |
+| `mixed_spec` | 400 | 10 | 30–300 | **requires `--templates`** with ≥2 entries, e.g. weights `6:3:1` for 1C2G/2C4G/8C16G |
+
+In scheduled mode the whole request sequence is **pre-generated** from `--seed`
+(same seed ⇒ identical sequence): Poisson inter-arrival times
+(`Exp(λ)`, first request at t=0), uniform lifetimes in `[min,max]`, and
+weighted random template picks. Each create body carries the picked
+`templateID` and `timeout = lifetime + 60s` as a server-side fallback TTL; the
+client issues the DELETE itself when the lifetime expires. The report and JSON
+export add queue-delay percentiles (scheduled vs actual start) and per-template
+create counts/success rates.
+
+### Trace file schema
+
+`--dump-trace FILE` writes the pre-generated sequence before the run starts.
+Requests are sorted by `arrival_ms`; `cpu_millis`/`mem_mib` come from the
+`--templates` spec annotations (`0` when not annotated):
+
+```json
+{
+  "workload": "burst",
+  "seed": 42,
+  "generated_at": "RFC3339",
+  "params": {"rate_per_sec": 50, "lifetime_min_s": 10, "lifetime_max_s": 120, "total": 500},
+  "templates": [{"template_id": "tpl-small", "weight": 1, "cpu_millis": 1000, "mem_mib": 2048}],
+  "requests": [{"seq": 0, "arrival_ms": 0, "template_id": "tpl-small", "cpu_millis": 1000, "mem_mib": 2048, "lifetime_ms": 53210}]
+}
+```
+
+### Comparing runs (A/B report)
+
+`compare` reads the JSON exports of two experiment groups (multiple seeds per
+side) and renders a Markdown report: per-metric mean ± 95% CI, absolute and
+relative change, and an improved/regressed verdict based on a built-in
+direction table (latency/error/cv/fragmentation lower-is-better;
+rates/jain/throughput higher-is-better):
+
+```bash
+./bin/cube-bench compare --baseline default1.json,default2.json,default3.json \
+                         --candidate new1.json,new2.json,new3.json \
+                         --baseline-name default --candidate-name burst-spread \
+                         -o compare.md
+```
+
+It accepts both cube-bench exports (`summary` is flattened recursively) and
+schedsim reports (each entry of a top-level `rounds` array counts as one
+sample), so real-cluster runs and simulator runs can be compared with the same
+command. A metric is flagged in the conclusions when the verdict direction
+matches and |Δ%| ≥ 5%.
 
 ### Network policies
 
@@ -133,13 +215,21 @@ contract still receives `metadata` as strings:
 ## Features
 
 - Goroutine pool with configurable concurrency
-- Live TUI dashboard: progress bar, real-time QPS, rolling operation log
+- Scheduler benchmark workload generator: seeded Poisson arrivals, per-sandbox
+  lifetimes (client-side DELETE + server-side `timeout` TTL), weighted
+  multi-template mixes, and three presets (`burst`, `template_storm`,
+  `mixed_spec`)
+- Trace dump (`--dump-trace`) for replaying the exact same sequence in a
+  scheduling simulator
+- Live TUI dashboard: progress bar, real-time QPS, in-flight estimate, rolling
+  operation log
 - Final report: percentile table (P50/P95/P99), latency histogram, sparkline,
-  and letter grade (S/A/B/C/D)
+  queue-delay percentiles (scheduled mode), and letter grade (S/A/B/C/D)
 - Built-in `--network-policy rules` mode for create-with-rules latency
 - Dark/light/auto theme detection
 - JSON report export (`-o report.json`)
-- Dry-run mode for testing without a CubeSandbox server
+- Dry-run mode for testing without a CubeSandbox server (scheduled mode is
+  seed-reproducible in dry-run too)
 
 ## Clean up
 
