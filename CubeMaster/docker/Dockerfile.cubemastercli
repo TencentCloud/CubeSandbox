@@ -49,6 +49,9 @@ RUN set -eux; \
 # ── Build stage: cubeopscli ────────────────────────────────────────────────────
 FROM golang:1.25-bookworm AS builder-ops
 ARG TARGETARCH
+ARG CUBE_VERSION=0.0.0-dev
+ARG CUBE_COMMIT=unknown
+ARG CUBE_BUILD_TIME=unknown
 
 WORKDIR /src
 
@@ -69,7 +72,10 @@ RUN set -eux; \
       *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     GOOS=linux GOARCH="${goarch}" go build -o /out/cubeopscli \
-      -ldflags "-s -w" \
+      -ldflags "-s -w \
+        -X 'github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Version=${CUBE_VERSION}' \
+        -X 'github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Commit=${CUBE_COMMIT}' \
+        -X 'github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.BuildTime=${CUBE_BUILD_TIME}'" \
       ./cmd/cubeopscli
 
 # ── Runtime stage ──────────────────────────────────────────────────────────────

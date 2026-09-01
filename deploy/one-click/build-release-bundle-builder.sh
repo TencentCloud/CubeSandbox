@@ -347,6 +347,9 @@ track_cubeops() {
   cd /workspace/CubeOps
   go mod download
   go build -ldflags "${CUBEOPS_LDFLAGS}" -o "${PREBUILT_DIR}/cubeops" ./cmd/cubeops
+  # cubeopscli shares the CubeOps module, so build it in the same track and
+  # reuse the module cache warmed by the cubeops build above.
+  go build -ldflags "${CUBEOPS_LDFLAGS}" -o "${PREBUILT_DIR}/cubeopscli" ./cmd/cubeopscli
 }
 
 track_volume_s3() {
@@ -444,9 +447,6 @@ queue_track cubemaster track_cubemaster
 queue_track netstack   track_netstack
 queue_track cubeops    track_cubeops
 queue_track volume-s3 track_volume_s3
-
-echo "[one-click] building cubeopscli in builder" >&2
-(cd /workspace/CubeOps && go build -ldflags "-s -w" -o "${PREBUILT_DIR}/cubeopscli" ./cmd/cubeopscli)
 
 run_tracks
 SCRIPT_EOF

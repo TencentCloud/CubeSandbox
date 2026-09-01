@@ -74,9 +74,14 @@ cubeopscli --address <cubeops-host> --port 3010 node list
 cubeopscli --address <cubeops-host> --port 3010 node isolate <node-id>
 cubeopscli --address <cubeops-host> --port 3010 node unisolate <node-id>
 cubeopscli --address <cubeops-host> --port 3010 node delete <node-id>
+cubeopscli --version
+cubeopscli version
+cubeopscli version --versiononly
 ```
 
 Deleting a node requires it to be **isolated and free of sandboxes**; in a batch, a failure on one node does not stop the rest, and the command exits non-zero if any deletion fails. `delete` is aliased as `rm`; use `--force` to delete when the sandbox inventory cannot be verified (isolation is still required).
+
+`cubeopscli --version` and `cubeopscli version` print the release version (e.g. `cubeopscli v0.7.0 (<commit>) built at <timestamp>`); `cubeopscli version --versiononly` prints just the semantic version.
 
 For adding, isolating, and deleting nodes, see [Node Operations](./node-operations.md).
 
