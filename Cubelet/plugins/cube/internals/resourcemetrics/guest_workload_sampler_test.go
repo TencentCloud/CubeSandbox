@@ -14,8 +14,8 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/stretchr/testify/require"
 
-	cubeboxapi "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	cubeboxapi "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 type fakeGuestWorkloadStore struct {

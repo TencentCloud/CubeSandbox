@@ -7,7 +7,7 @@ package types
 import (
 	"sort"
 
-	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 // IsPausedBrief reports whether the list row is a paused sandbox (no live

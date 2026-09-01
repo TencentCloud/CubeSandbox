@@ -8,8 +8,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
 func Report(ctx context.Context, callee, endpoint, action, calleeAction string, cost time.Duration,

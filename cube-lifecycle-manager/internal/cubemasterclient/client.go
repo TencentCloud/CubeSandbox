@@ -21,7 +21,7 @@ import (
 )
 
 // CubeMaster ret_code constants the sidecar reasons about. The full set
-// lives in CubeMaster/api/services/errorcode/v1/errorcode.proto; we mirror
+// lives in pkgs/proto/services/errorcode/v1/errorcode.proto; we mirror
 // only the codes we need to react to here, keeping the sidecar free of a
 // build-time dependency on the master proto.
 const (

@@ -20,15 +20,16 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubehost/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/types/v1"
 	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images"
 	imagestore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/rootfs"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/critypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/transfer/remote"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/types/v1"
 )
 
 func init() {
@@ -113,14 +114,14 @@ func (s *cubeHostImageReverseClient) sharedHostSnapshotToVm(ctx context.Context,
 		if errdefs.IsNotFound(err) {
 			s.hostMonitor.addCache(false)
 			if forwardRequest.GetAuth() != nil {
-				ctx = constants.WithImageCredentials(ctx, forwardRequest.GetAuth().ToCRI())
+				ctx = constants.WithImageCredentials(ctx, critypes.ToCRI(forwardRequest.GetAuth()))
 			}
 
 			credentials := func(host string) (string, string, error) {
 				if forwardRequest.GetAuth() == nil {
 					return "", "", nil
 				}
-				return cubeimages.ParseAuth(forwardRequest.GetAuth().ToCRI(), host)
+				return cubeimages.ParseAuth(critypes.ToCRI(forwardRequest.GetAuth()), host)
 			}
 
 			sandbox := s.updater.GetSandboxer()

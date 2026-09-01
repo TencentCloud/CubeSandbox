@@ -13,8 +13,6 @@ import (
 
 	"github.com/containerd/plugin"
 	"github.com/google/uuid"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/tomlext"
 	networkruntime "github.com/tencentcloud/CubeSandbox/Cubelet/network/runtime"
 	. "github.com/tencentcloud/CubeSandbox/Cubelet/network/types"
@@ -26,6 +24,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
 var (

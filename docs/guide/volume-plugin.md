@@ -601,20 +601,20 @@ volume_plugins:
 
 ## rpc Plugin Proto Definition
 
-rpc plugins implement gRPC services in [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin.proto). Message fields match the [Hook definitions](#hooks) above (proto uses `snake_case`).
+rpc plugins implement gRPC services in [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin.proto). Message fields match the [Hook definitions](#hooks) above (proto uses `snake_case`).
 
 | File | Description |
 |------|-------------|
-| [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin.proto) | Protocol source |
-| [`volumeplugin.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin.pb.go) | Generated Go messages |
-| [`volumeplugin_grpc.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin_grpc.pb.go) | Generated gRPC stubs |
+| [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin.proto) | Protocol source |
+| [`volumeplugin.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin.pb.go) | Generated Go messages |
+| [`volumeplugin_grpc.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin_grpc.pb.go) | Generated gRPC stubs |
 
 | Service | Caller | RPCs |
 |---------|--------|------|
 | `VolumeControllerService` | CubeMaster | `Create`, `Destroy` |
 | `VolumePluginService` | Cubelet | `Attach`, `Detach` |
 
-Regenerate after editing proto: `cd Cubelet && make proto`. Reference implementation: [`examples/volume/cos/rpc/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.md).
+Regenerate after editing proto: `cd pkgs/proto && make proto`. Reference implementation: [`examples/volume/cos/rpc/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.md).
 
 ---
 
@@ -735,7 +735,7 @@ Platform behavior (independent of a specific plugin):
 | Volume DB model | `CubeMaster/pkg/base/db/models/volume.go` | `VolumeRecord` (includes `refcount`) |
 | Plugin volume mount injection | `CubeMaster/pkg/service/sandbox/hostdir_mount.go` | `injectPluginVolumeMounts` from `plugin-volume-mounts` annotation |
 | Node mount logic | `Cubelet/storage/pluginvolume.go` | bind-mount + virtiofs; node-level refcount transitions |
-| Proto | `Cubelet/api/services/volumeplugin/v1/volumeplugin.proto` | rpc protocol |
-| Generated Go | `Cubelet/api/services/volumeplugin/v1/volumeplugin*.pb.go` | Messages / gRPC stubs |
+| Proto | `pkgs/proto/services/volumeplugin/v1/volumeplugin.proto` | rpc protocol |
+| Generated Go | `pkgs/proto/services/volumeplugin/v1/volumeplugin*.pb.go` | Messages / gRPC stubs |
 | COS reference (binary) | `examples/volume/cos/binary/cube-volume-cos.sh` | Example binary plugin |
 | COS reference (rpc) | `examples/volume/cos/rpc/cmd/cube-volume-cos-rpc` | Example rpc plugin |

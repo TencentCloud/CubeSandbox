@@ -7,7 +7,7 @@ package ret
 import (
 	"fmt"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"google.golang.org/protobuf/proto"
 )
 

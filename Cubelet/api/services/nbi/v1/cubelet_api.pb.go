@@ -11,7 +11,7 @@
 package nbi
 
 import (
-	v1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+	v1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -142,7 +142,7 @@ var File_api_services_nbi_v1_cubelet_api_proto protoreflect.FileDescriptor
 
 const file_api_services_nbi_v1_cubelet_api_proto_rawDesc = "" +
 	"\n" +
-	"%api/services/nbi/v1/cubelet_api.proto\x12\x1bcubelet.services.cubebox.v1\x1a)api/services/errorcode/v1/errorcode.proto\"+\n" +
+	"%api/services/nbi/v1/cubelet_api.proto\x12\x1bcubelet.services.cubebox.v1\x1a%services/errorcode/v1/errorcode.proto\"+\n" +
 	"\vInitRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\"\x93\x02\n" +
 	"\fInitResponse\x12\x1c\n" +

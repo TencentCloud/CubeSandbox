@@ -18,6 +18,7 @@ on:
       - 'cube-lifecycle-manager/Makefile'
       - 'cubecow/Makefile'
       - 'pkgs/CubeLog/Makefile'
+      - 'pkgs/proto/Makefile'
       - 'hypervisor/Makefile'
       - 'sdk/go/Makefile'
       - 'examples/cube-bench/Makefile'

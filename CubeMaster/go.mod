@@ -32,15 +32,14 @@ require (
 	github.com/smallnest/weighted v0.0.0-20230419055410-36b780e40a7a
 	github.com/stretchr/testify v1.11.1
 	github.com/tencentcloud/CubeSandbox/CubeDB v0.0.0-00010101000000-000000000000
-	github.com/tencentcloud/CubeSandbox/Cubelet v0.0.0
 	github.com/tencentcloud/CubeSandbox/pkgs/CubeLog v0.1.1-0.20260113105508-a996703fa42f
+	github.com/tencentcloud/CubeSandbox/pkgs/proto v0.0.0
 	github.com/urfave/cli v1.22.15
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.44.0
 	golang.org/x/time v0.14.0
 	google.golang.org/grpc v1.80.0
-	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.5.1
 	gorm.io/driver/postgres v1.6.0
@@ -170,6 +169,7 @@ require (
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/tools v0.45.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260420184626-e10c466a9529 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect
@@ -186,6 +186,4 @@ replace github.com/tencentcloud/CubeSandbox/pkgs/CubeLog => ../pkgs/CubeLog
 
 replace github.com/tencentcloud/CubeSandbox/CubeDB => ../CubeDB
 
-replace github.com/tencentcloud/CubeSandbox/Cubelet => ../Cubelet
-
-replace github.com/tencentcloud/CubeSandbox/CubeNet/cubevs => ../CubeNet/cubevs
+replace github.com/tencentcloud/CubeSandbox/pkgs/proto => ../pkgs/proto

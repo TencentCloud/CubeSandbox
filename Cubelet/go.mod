@@ -1,6 +1,6 @@
 module github.com/tencentcloud/CubeSandbox/Cubelet
 
-go 1.24.8
+go 1.25.7
 
 require (
 	github.com/cilium/ebpf v0.17.3
@@ -35,6 +35,7 @@ require (
 	github.com/tatsushid/go-fastping v0.0.0-20160109021039-d7bb493dee3e
 	github.com/tchap/go-patricia/v2 v2.3.3
 	github.com/tencentcloud/CubeSandbox/pkgs/CubeLog v0.1.1-0.20260113105508-a996703fa42f
+	github.com/tencentcloud/CubeSandbox/pkgs/proto v0.0.0
 	github.com/vishvananda/netlink v1.3.1
 	go.etcd.io/bbolt v1.4.3
 	golang.org/x/net v0.47.0
@@ -208,6 +209,7 @@ require (
 replace (
 	github.com/gogo/googleapis => github.com/gogo/googleapis v1.3.2
 	github.com/tencentcloud/CubeSandbox/pkgs/CubeLog => ../pkgs/CubeLog
+	github.com/tencentcloud/CubeSandbox/pkgs/proto => ../pkgs/proto
 	google.golang.org/genproto => google.golang.org/genproto v0.0.0-20240123012728-ef4313101c80
 	google.golang.org/grpc => google.golang.org/grpc v1.67.1
 	// use 0.25.16 instande of latest that 0.25.16 have v1alpha2 and v1 runtime API

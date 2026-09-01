@@ -145,6 +145,7 @@ help:
 	@printf "  cube-proxy-sidecar Build cube-proxy-sidecar (developer-only; not in 'all')\n"
 	@printf "  cube-volume-s3 Build the S3-compatible Volume plugin in Docker\n"
 	@printf "  cube-volume-s3-test Run S3 Volume plugin unit tests in Docker\n"
+	@printf "  cube-volume-cos-rpc-test Run COS RPC Volume plugin unit tests in Docker\n"
 	@printf "  agent         Build cube-agent in Docker\n"
 	@printf "  cube-init     Build cube-init (guest PID1) in Docker (alias: guest-init)\n"
 	@printf "  guest-init    Alias for cube-init (source dir guest-init/)\n"
@@ -373,7 +374,7 @@ cubecow-test-native: builder-image
 .PHONY: cubemaster
 cubemaster: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && make proto && CGO_ENABLED=0 make build && mkdir -p /workspace/_output/bin && cp build/cubemaster build/cubemastercli /workspace/_output/bin/'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && CGO_ENABLED=0 make build && mkdir -p /workspace/_output/bin && cp build/cubemaster build/cubemastercli /workspace/_output/bin/'
 
 .PHONY: cubelet
 cubelet: builder-image
@@ -452,6 +453,13 @@ cubeops-test: builder-image
 .PHONY: cube-volume-s3-test
 cube-volume-s3-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/examples/volume/s3 && go mod download && go vet ./... && go test ./...'
+
+# COS RPC Volume plugin (examples/volume/cos/rpc): the reference gRPC volume
+# plugin and the only example consuming pkgs/proto. Standalone Go module (its
+# own go.mod), so it is not covered by any component test target above.
+.PHONY: cube-volume-cos-rpc-test
+cube-volume-cos-rpc-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/examples/volume/cos/rpc && go mod download && go vet ./... && go test ./...'
 
 .PHONY: cubemaster-test
 cubemaster-test: builder-image
@@ -611,6 +619,8 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C Cubelet fmt
 	@printf '  %-8s %s\n' "FMT" "cubelog"
 	@$(MAKE) -C pkgs/CubeLog fmt
+	@printf '  %-8s %s\n' "FMT" "proto"
+	@$(MAKE) -C pkgs/proto fmt
 	@printf '  %-8s %s\n' "FMT" "CubeMaster"
 	@$(MAKE) -C CubeMaster fmt
 	@printf '  %-8s %s\n' "FMT" "CubeNet"

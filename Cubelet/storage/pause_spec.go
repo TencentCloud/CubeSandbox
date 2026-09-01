@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 const pauseSandboxSpecFileName = "sandbox_spec.json"

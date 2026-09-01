@@ -11,11 +11,11 @@ import (
 	"net"
 	"strings"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	networkruntime "github.com/tencentcloud/CubeSandbox/Cubelet/network/runtime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 // buildNetworkRuntimeCubeNetworkConfig prefers the structured request field and

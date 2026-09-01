@@ -12,12 +12,6 @@ endif
 export GO111MODULE=on
 export GOOS=linux
 GO_BIN_DIR := $(shell if [ -n "$$(go env GOBIN)" ]; then printf "%s" "$$(go env GOBIN)"; else printf "%s/bin" "$$(go env GOPATH)"; fi)
-PROTOBUF_INCLUDE_DIR := $(shell python3 -c 'import glob, os, subprocess; candidates = ["/usr/include", "/usr/local/include"]; gopath = subprocess.check_output(["go", "env", "GOPATH"], text=True).strip(); candidates = (glob.glob(os.path.join(gopath, "pkg/mod/github.com/google/gnostic-models@*/third_party")) + glob.glob(os.path.join(gopath, "pkg/mod/github.com/gogo/protobuf@*/protobuf")) + candidates) if gopath else candidates; print(next((c for c in candidates if os.path.exists(os.path.join(c, "google/protobuf/empty.proto")) and os.path.exists(os.path.join(c, "google/protobuf/any.proto"))), ""))')
-PROTOC_INCLUDE_FLAGS=-I=.
-ifneq ($(strip $(PROTOBUF_INCLUDE_DIR)),)
-PROTOC_INCLUDE_FLAGS += -I=$(PROTOBUF_INCLUDE_DIR)
-endif
-PROTOC_GO_FLAGS=--go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative
 export PATH := $(GO_BIN_DIR):$(PATH)
 
 APPS=cubemaster cubemastercli
@@ -28,7 +22,6 @@ DOCKER_BUILD_DIR=docker
 
 
 PKG=github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base
-PROTO=services/errorcode services/cubebox services/images types
 
 
 # Version — injected at build time via ldflags.
@@ -63,17 +56,11 @@ COVERAGE_PACKAGES=$(shell go list ./... \
 	| grep -v github.com/tencentcloud/CubeSandbox/CubeMaster/integration )
 
 
-.PHONY: build deps check-proto-tools fmt lint clean
+.PHONY: build deps fmt lint clean
 build: $(APPS)
 deps:
 	$(call msg,Download modules)
 	$(Q)go mod download
-
-check-proto-tools:
-	@command -v protoc >/dev/null 2>&1 || { echo "error: protoc not installed"; exit 1; }
-	@command -v protoc-gen-go >/dev/null 2>&1 || { echo "error: protoc-gen-go not installed"; exit 1; }
-	@command -v protoc-gen-go-grpc >/dev/null 2>&1 || { echo "error: protoc-gen-go-grpc not installed"; exit 1; }
-	@if [ -z "$(PROTOBUF_INCLUDE_DIR)" ]; then echo "error: protobuf include directory not found"; exit 1; fi
 
 .PHONY: prepare-cubemastercli-envd cleanup-cubemastercli-envd
 prepare-cubemastercli-envd:
@@ -155,15 +142,6 @@ testlocal:
 
 testtt:
 	@export CUBE_MASTER_CONFIG_PATH="$(ROOT_DIR)/test/conf.yaml" && go test -v -timeout=24h -gcflags=all=-l ./integration/... -run $(tt)
-
-proto: check-proto-tools
-	$(call msg,Generate proto)
-	@( for pkg in ${PROTO}; do \
-		echo $$pkg ;\
-		protoc $(PROTOC_INCLUDE_FLAGS) $(PROTOC_GO_FLAGS) \
-		api/$$pkg/v1/*.proto ;\
-	done)
-
 
 BUILDKIT=DOCKER_BUILDKIT=1 docker buildx build
 

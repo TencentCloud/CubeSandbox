@@ -12,6 +12,7 @@ on:
       - 'CubeShim/**'
       - 'CubeNet/**'
       - 'pkgs/CubeLog/**'
+      - 'pkgs/proto/**'
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
       - 'agent/**'
@@ -31,6 +32,7 @@ on:
       - 'CubeShim/**'
       - 'CubeNet/**'
       - 'pkgs/CubeLog/**'
+      - 'pkgs/proto/**'
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
       - 'agent/**'
@@ -62,6 +64,7 @@ on:
           - agent
           - hypervisor
           - volume-s3
+          - volume-cos-rpc
 
 concurrency:
   group: unit-test-${{ github.event.pull_request.number || github.ref }}
@@ -119,6 +122,7 @@ jobs:
             add_component "agent"
             add_component "hypervisor"
             add_component "volume-s3"
+            add_component "volume-cos-rpc"
           }
 
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
@@ -138,6 +142,7 @@ jobs:
               agent) add_component "agent" ;;
               hypervisor) add_component "hypervisor" ;;
               volume-s3) add_component "volume-s3" ;;
+              volume-cos-rpc) add_component "volume-cos-rpc" ;;
               *)
                 echo "::error::unsupported component input: ${selected_component}"
                 exit 1
@@ -206,6 +211,15 @@ jobs:
                   add_component "cubelet"
                   add_component "CubeOps"
                   ;;
+                pkgs/proto/*)
+                  # Shared proto module; consumers import via replace =>
+                  # ../pkgs/proto. Changes re-run the consumer test sets
+                  # (CubeMaster, cubelet) and the cos/rpc example (the only
+                  # example consuming pkgs/proto).
+                  add_component "CubeMaster"
+                  add_component "cubelet"
+                  add_component "volume-cos-rpc"
+                  ;;
                 cube-lifecycle-manager/*)
                   add_component "cube-lifecycle-manager"
                   ;;
@@ -224,6 +238,12 @@ jobs:
                 examples/volume/s3/*)
                   # Standalone Go module, not covered by any component above.
                   add_component "volume-s3"
+                  ;;
+                examples/volume/cos/rpc/*)
+                  # Standalone Go module (the reference gRPC volume plugin and
+                  # the only example consuming pkgs/proto), not covered by any
+                  # component build above.
+                  add_component "volume-cos-rpc"
                   ;;
               esac
             done <<< "${changed_files}"
@@ -255,6 +275,7 @@ jobs:
                     elif . == "agent" then "Agent"
                     elif . == "hypervisor" then "Hypervisor"
                     elif . == "volume-s3" then "S3 Volume Plugin"
+                    elif . == "volume-cos-rpc" then "COS RPC Volume Plugin"
                     else error("unsupported component: " + .)
                     end
                   ),
@@ -273,6 +294,7 @@ jobs:
                     elif . == "agent" then "agent-test"
                     elif . == "hypervisor" then "hypervisor-test"
                     elif . == "volume-s3" then "cube-volume-s3-test"
+                    elif . == "volume-cos-rpc" then "cube-volume-cos-rpc-test"
                     else error("unsupported component: " + .)
                     end
                   ),

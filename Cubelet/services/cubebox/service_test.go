@@ -12,13 +12,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	cubeboxv1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
-	imagesv1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
-	volpluginv1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/volumeplugin/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/numa"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	imagesv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
+	volpluginv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/volumeplugin/v1"
 )
 
 func TestToGRPCContainerIncludesVolumeMounts(t *testing.T) {

@@ -25,7 +25,6 @@ import (
 	"github.com/shopspring/decimal"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/multimetadb/v1"
 	dynamConf "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
@@ -38,6 +37,7 @@ import (
 	v2 "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup/handle/v2"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
 type CgPlugin struct {
