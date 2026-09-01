@@ -135,7 +135,8 @@ spec:
     - metadata:
         name: redis-data
         labels:
-          {{- include "cube.labels" . | nindent 10 }}
+          app.kubernetes.io/name: {{ include "cube.name" . }}
+          app.kubernetes.io/instance: {{ .Release.Name }}
           app.kubernetes.io/component: redis
       spec:
         accessModes:
