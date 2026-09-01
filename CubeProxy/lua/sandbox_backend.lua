@@ -1,11 +1,10 @@
--- file name: sandbox_backend.lua
---
 -- Shared backend resolution helpers used by both host-based and path-based
 -- sandbox routing entry points (rewrite_phase.lua / path_rewrite_phase.lua).
 --
--- Looks up the sandbox proxy metadata stored in Redis under
--- "bypass_host_proxy:<sandbox_id>" (written by CubeMaster) and returns the
--- upstream host:port that the nginx balancer phase should connect to.
+-- Looks up the sandbox proxy metadata written by CubeMaster
+-- (cube:v1:shared:sandbox:proxy:{id}, with a fallback to the legacy
+-- bypass_host_proxy:{id} key) and returns the upstream host:port that the
+-- nginx balancer phase should connect to.
 
 local utils = require "utils"
 local redis_keys = require "redis_keys"
@@ -122,23 +121,18 @@ local function load_sandbox_proxy_metadata(ins_id)
 end
 
 -- Read path. Returns host_ip, host_port, mask_request_host on a valid hit,
--- nil on a miss. The completeness gate is the presence of EVERY served field
--- (false is a valid negative-cache sentinel; only nil means missing): a
--- partial fill or a field lost to TTL skew / LRU eviction leaves a nil and
--- forces a reload instead of serving an incomplete entry or silently skipping
--- the traffic-token check. There is no separate meta_cached flag — checking
--- the fields directly makes one redundant.
+-- nil on a miss. Completeness is the presence of every served field (false is
+-- a valid negative-cache sentinel; only nil means missing): a partial fill or
+-- a field lost to TTL skew / LRU eviction leaves a nil and forces a reload
+-- instead of serving an incomplete entry or silently skipping the traffic-token
+-- check.
 --
 -- The serving backend is computed from the raw route fields the fill mirrors
 -- for the whole sandbox (HostIP / SandboxIP / the per-port host-port mapping),
 -- resolved for the caller's host. A single fill writes every port's mapping at
 -- once, so after an invalidate all ports converge on fresh data from one
--- reload — no per-port reload, no route epoch. On a hit the TTLs are refreshed.
+-- reload. On a hit the TTLs are refreshed.
 local function read_cached_backend(cache, ins_id, container_port, caller_host_ip, timeout)
-    -- The presence of every served field is the completeness gate; there is no
-    -- separate meta_cached flag. A partial fill or a field lost to TTL skew /
-    -- LRU eviction leaves a nil here and forces a reload instead of serving an
-    -- incomplete entry (or skipping the traffic-token check).
     local target_host_ip = cache:get(ins_id .. ":HostIP")
     local target_sandbox_ip = cache:get(ins_id .. ":SandboxIP")
     local mapped_port = cache:get(ins_id .. ":" .. container_port)

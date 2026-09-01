@@ -1,6 +1,6 @@
 -- proxy_registry.lua
 --
--- Publishes this CubeProxy replica to Redis so cube-lifecycle-manager (CLM)
+-- Publishes this CubeProxy replica to Redis so Cube Lifecycle Manager (CLM)
 -- can discover it. Schema (owner: this file; consumer: CLM discovery):
 --
 --   HSET cube:v1:shared:cube_proxy:registry  <proxy_id> <JSON blob>
