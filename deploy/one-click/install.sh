@@ -635,6 +635,13 @@ patch_cubemaster_external_deps() {
           if (/^    sslmode:/) has_sslmode=1
           print; next
         }
+        # A blank line inside the postgres: block does NOT end it. Without this
+        # guard the scanner would treat the blank line as the block terminator,
+        # decide sslmode was "missing", and inject a duplicate `    sslmode:`
+        # ahead of the real one — yaml.v3 rejects duplicate mapping keys, so
+        # CubeMaster would fail to load conf.yaml at boot. Installer-generated
+        # configs never contain such a blank line, but a hand edit can add one.
+        in_section && in_pg && /^[[:space:]]*$/ { print; next }
         # Leaving postgres: block (next line is not 4-space indented)
         in_section && in_pg { flush_pg() }
         # Leaving instance_db_config section (next top-level key)
