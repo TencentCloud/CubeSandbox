@@ -165,6 +165,7 @@ help:
 	@printf "  shim-test     Run CubeShim unit tests in Docker\n"
 	@printf "  cubelog-test  Run cubelog unit tests on the host\n"
 	@printf "  cubedb-test   Run CubeDB unit tests on the host\n"
+	@printf "  proto-test    Run pkgs/proto unit tests on the host\n"
 	@printf "  cube-lifecycle-manager-test Run cube-lifecycle-manager unit tests in Docker\n"
 	@printf "  cubelet-pkg-test Run Cubelet ./pkg/... unit tests in Docker (no coverage)\n"
 	@printf "  agent-test    Run cube-agent unit tests in Docker\n"
@@ -491,6 +492,15 @@ cubelog-test:
 .PHONY: cubedb-test
 cubedb-test:
 	cd CubeDB && go mod download && go test ./...
+
+# pkgs/proto runs on the host: pure Go (generated .pb.go + grpc/protobuf
+# deps, no CGO/builder-only deps), like cubelog/cubedb. Consumers only
+# compile its non-test code via replace, so the module's own _test.go files
+# must be run here -- `go test ./...` in an importer never runs a
+# dependency's tests.
+.PHONY: proto-test
+proto-test:
+	cd pkgs/proto && go mod download && go vet ./... && go test ./...
 
 .PHONY: cube-lifecycle-manager-test
 cube-lifecycle-manager-test: builder-image
