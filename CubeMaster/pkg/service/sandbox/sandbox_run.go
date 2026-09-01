@@ -121,6 +121,13 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 		reschedule: true,
 		retryCost:  time.Duration(0),
 	}
+	// Record the create attempt on every return path (mock / param failure
+	// included); endTime stays zero on early returns and the helper falls
+	// back to now.
+	defer func() {
+		scheduler.ObserveSandboxCreate(scheduler.DefaultProfile,
+			rsp.Ret.RetCode == int(errorcode.ErrorCode_Success), startTime, createCtx.endTime)
+	}()
 	if log.IsDebug() {
 		log.G(ctx).Debugf("CreateSandbox:%s", safePrintCreateCubeSandboxReq(req))
 	} else {
@@ -227,6 +234,8 @@ func (c *createSandboxContext) handleCubelet() {
 			}
 			c.selctx.AddLastBadNode(c.selectHost)
 			c.reschedule = true
+			status, _ := ret.FromError(err)
+			scheduler.RecordReschedule(scheduler.DefaultProfile, status.Code())
 			log.G(c.ctx).Warnf("selected host blocked by scheduling admission, reschedule host=%s err=%v",
 				c.selectHost.ID(), err)
 			continue
@@ -235,6 +244,8 @@ func (c *createSandboxContext) handleCubelet() {
 		if c.callCubelet() {
 			c.retryCost += c.cubeletEndTime.Sub(c.cubeletStartTime)
 			c.retryTimes++
+			scheduler.RecordReschedule(scheduler.DefaultProfile,
+				errorcode.MasterCode(c.cubeletRsp.GetRet().GetRetCode()))
 
 			if c.cubeletRsp != nil && c.cubeletRsp.GetRet() != nil &&
 				errorcode.IsCircutBreakCode(errorcode.MasterCode(c.cubeletRsp.GetRet().GetRetCode())) {
