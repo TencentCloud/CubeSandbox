@@ -7,6 +7,7 @@ package scheduler
 import (
 	"math/rand"
 	"runtime/debug"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -23,6 +24,12 @@ import (
 )
 
 func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
+	startTime := time.Now()
+	// Registered first so it runs after the panic-recovery defer below and
+	// observes the final (nodes, err) pair, including the BackoffSelect
+	// fallback and recovered panics.
+	defer func() { observeSelect(selCtx, nodes, err, startTime) }()
+
 	defer func() {
 		if r := recover(); r != nil {
 			log.G(selCtx.Ctx).Fatalf("Select panic:%+v", string(debug.Stack()))

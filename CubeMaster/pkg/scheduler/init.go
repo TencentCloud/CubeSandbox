@@ -39,4 +39,6 @@ func InitScheduler(ctx context.Context) {
 	scheduler.postScore = postscore.NewSelector()
 
 	initTask(ctx)
+
+	startClusterGaugeCollector(ctx)
 }
