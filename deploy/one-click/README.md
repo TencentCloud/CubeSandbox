@@ -96,14 +96,19 @@ Run the following from the repository root on the host machine (recommended):
 ./deploy/one-click/build-release-bundle-builder.sh
 ```
 
-To embed a default `envd` binary into the packaged `cubemastercli`, prepare the binary on the build host and pass `ENVD_LOCAL_PATH` to the recommended builder entry point:
+By default the release builder compiles the repository's own Rust
+`cube-envd` for the current build architecture and embeds it into the
+packaged `cubemastercli`, so the CLI ships with a default `envd` for
+template injection. To override it with your own ELF, prepare the binary
+on the build host and pass `ENVD_LOCAL_PATH` to the recommended builder
+entry point:
 
 ```bash
 ENVD_LOCAL_PATH=/abs/path/to/envd \
 ./deploy/one-click/build-release-bundle-builder.sh
 ```
 
-When this variable is set, the host wrapper copies the file into `deploy/one-click/.work/envd`; the builder container then builds `cubemastercli` with that file embedded. If `ENVD_LOCAL_PATH` is omitted, the packaged `cubemastercli` does not include a default `envd`, and template builds that opt in to envd injection must pass `--envd-path` at runtime.
+When `ENVD_LOCAL_PATH` is set, the host wrapper copies the file into `deploy/one-click/.work/envd` and the builder container embeds that file instead of building `cube-envd`. When omitted, the current-architecture `cube-envd` (x86_64/aarch64 musl) is compiled inside the container and embedded (`.work/envd` always wins if present). Template builds that opt in to envd injection then need no `--envd-path` at runtime.
 
 This entry point will:
 
