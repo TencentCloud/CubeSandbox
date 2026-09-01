@@ -32,12 +32,12 @@ type Config struct {
 	RedisSentinelPassword string
 
 	// CubeProxy admin endpoints to push to and pull from. Multiple endpoints
-	// are supported even though the recommended deployment is one sidecar
+	// are supported even though the recommended deployment is one CLM
 	// per CubeProxy: future operators may consolidate.
 	CubeProxyAdminURLs []string
 	CubeAdminToken     string // optional shared secret; sent as X-Cube-Admin-Token
 
-	// CubeMaster internal HTTP for pause/resume. Sidecar calls
+	// CubeMaster internal HTTP for pause/resume. CLM calls
 	// POST <CubeMasterURL>/cube/sandbox/update with action=pause|resume.
 	CubeMasterURL string
 
@@ -54,18 +54,18 @@ type Config struct {
 	StreamReadBlock   time.Duration // XREADGROUP BLOCK arg
 	LastActivePoll    time.Duration // GET /admin/last_active cadence
 	IdleSweepInterval time.Duration // sweeper cadence
-	// BootstrapWarmup: after sidecar restart, wait this long before pausing
+	// BootstrapWarmup: after CLM restart, wait this long before pausing
 	// any sandbox that was loaded via HGETALL bootstrap. Lets the
 	// last_active poller backfill activity timestamps first. New sandboxes
 	// that arrive AFTER startup are not affected by this delay.
 	BootstrapWarmup time.Duration
 
 	// Pause/resume locks (SETNX TTL). Long enough to outlive a slow
-	// CubeMaster RPC, short enough that a crashed sidecar releases the lock.
+	// CubeMaster RPC, short enough that a crashed CLM replica releases the lock.
 	StateLockTTL time.Duration
 
 	// Consumer group identity. Group name is fixed; consumer name defaults
-	// to the host's name so multiple sidecars in a cluster get independent
+	// to the host's name so multiple CLM replicas in a cluster get independent
 	// pending-entries lists.
 	ConsumerGroup string
 	ConsumerName  string // empty → derived from os.Hostname()
@@ -253,7 +253,7 @@ func Load() (*Config, error) {
 }
 
 // Validate returns an error if the config has any field combination that the
-// sidecar can't proceed with.
+// CLM can't proceed with.
 func (c *Config) Validate() error {
 	if c.RedisMasterName != "" {
 		if len(c.RedisSentinelAddrs) == 0 {

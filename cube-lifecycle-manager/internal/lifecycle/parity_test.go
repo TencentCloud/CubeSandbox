@@ -11,7 +11,7 @@ import "testing"
 // fails and the diff makes the divergence obvious.
 //
 // Source of truth lives in CubeMaster; we hardcode the same values here so
-// the sidecar can be built without taking a build-time dependency on the
+// CLM can be built without taking a build-time dependency on the
 // CubeMaster module. Whenever you touch the constants, update both files in
 // the same commit.
 func TestSchemaConstants(t *testing.T) {

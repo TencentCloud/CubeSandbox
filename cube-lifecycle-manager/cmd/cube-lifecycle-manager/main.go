@@ -3,9 +3,7 @@
 //
 
 // cube-lifecycle-manager drives the auto-pause / auto-resume loop that sits
-// between CubeMaster, CubeProxy, and Redis. It supersedes the older
-// in-container "cube-proxy-sidecar"; the wire protocol with CubeProxy
-// (admin push endpoints + /_sidecar_resume callback) is unchanged.
+// between CubeMaster, CubeProxy, and Redis.
 package main
 
 import (
@@ -338,7 +336,7 @@ func handleEvent(ctx context.Context, ev redisstream.Event, push *proxypush.Clie
 		}
 		reg.Upsert(*ev.Meta)
 		// Log every create at info level: this is the heartbeat that
-		// proves CubeMaster -> Redis -> sidecar is wired correctly. The
+		// proves CubeMaster -> Redis -> CLM is wired correctly. The
 		// volume is bounded by sandbox creation rate (≪ QPS) so this is
 		// not a noise concern.
 		log.Info("create event applied",

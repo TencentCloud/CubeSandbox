@@ -360,7 +360,7 @@ func TestSweeper_KillSkipsAlreadyKillingSandbox(t *testing.T) {
 }
 
 func TestSweeper_BootstrapWarmupSkipsBootstrapEntries(t *testing.T) {
-	// Verifies the bootstrap-warmup gate: while the sidecar is still in
+	// Verifies the bootstrap-warmup gate: while CLM is still in
 	// its warmup window, sandboxes whose FirstSeenAt is at-or-before the
 	// sweeper's StartedAt (i.e. loaded from HGETALL) are skipped, even if
 	// their CreatedAt is hours old. After the warmup elapses, the sweeper
@@ -680,7 +680,7 @@ func TestSweeper_NilTimeoutFallsBackToDefaultIdle(t *testing.T) {
 
 func TestSweeper_AlreadyPausedReconcilesAsSuccess(t *testing.T) {
 	// CubeMaster returns "sandbox is already paused" (RetCodeTaskStateInvalid)
-	// when a peer sidecar already paused this sandbox. The sweeper should NOT
+	// when a peer CLM replica already paused this sandbox. The sweeper should NOT
 	// roll back: it should write `paused` state to Redis + push to CubeProxy
 	// just like a fresh successful pause, so all callers converge on the
 	// same view.

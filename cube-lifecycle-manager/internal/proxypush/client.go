@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-// Package proxypush is the HTTP client the sidecar uses to push lifecycle
+// Package proxypush is the HTTP client CLM uses to push lifecycle
 // metadata + state to one or more CubeProxy admin endpoints, and to pull the
 // per-request last_active timestamps back. The protocol is documented in
 // CubeProxy/lua/admin_phase.lua — this file is the canonical Go peer.

@@ -4,7 +4,7 @@
 
 // Package redisstream owns every interaction with the lifecycle Redis schema:
 // the meta HSet bootstrap, the events stream consumer, and the per-sandbox
-// state locks used to serialize pause/resume across sidecar instances.
+// state locks used to serialize pause/resume across CLM replicas.
 package redisstream
 
 import (
@@ -164,7 +164,7 @@ func (c *Client) Ack(ctx context.Context, group, id string) error {
 
 // AcquireState performs a SET NX EX on the per-sandbox lifecycle state key with
 // the supplied desired state. Returns true on success. Used to coordinate
-// concurrent pause/resume across sidecars: whoever wins the SETNX owns the
+// concurrent pause/resume across CLM replicas: whoever wins the SETNX owns the
 // transition.
 func (c *Client) AcquireState(ctx context.Context, sandboxID, state string, ttl time.Duration) (bool, error) {
 	key := lifecycle.StateKey(sandboxID)

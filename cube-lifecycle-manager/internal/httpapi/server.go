@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-// Package httpapi exposes the sidecar's internal HTTP surface used by the
+// Package httpapi exposes CLM's internal HTTP surface used by the
 // CubeProxy /_sidecar_resume internal location. Routes:
 //
 //	POST /internal/resume?sandbox_id=...&request_id=...
