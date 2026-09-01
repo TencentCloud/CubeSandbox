@@ -65,12 +65,20 @@ func TestSetLevelGetLevelAndStringToLevel(t *testing.T) {
 		{"WARN", WARN},
 		{"ERROR", ERROR},
 		{"FATAL", FATAL},
+		{"debug", DEBUG},
+		{"info", INFO},
+		{"warn", WARN},
+		{"error", ERROR},
+		{"fatal", FATAL},
+		{"Info", INFO},
+		{" INFO ", INFO},
 		{"unknown", DEBUG},
+		{"", DEBUG},
 	}
 	for _, tc := range cases {
 		got := StringToLevel(tc.in)
 		if got != tc.want {
-			t.Fatalf("StringToLevel(%q) = %v, want %v", tc.in, got, tc.want)
+			t.Errorf("StringToLevel(%q) = %v, want %v", tc.in, got, tc.want)
 		}
 	}
 

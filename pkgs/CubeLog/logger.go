@@ -144,7 +144,7 @@ func EnableLongFilePath() {
 }
 
 func StringToLevel(level string) LogLevel {
-	switch level {
+	switch strings.ToUpper(strings.TrimSpace(level)) {
 	case "DEBUG":
 		return DEBUG
 	case "INFO":
