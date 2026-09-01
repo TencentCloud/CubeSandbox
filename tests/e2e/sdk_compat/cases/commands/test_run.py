@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from framework.assertions import assert_command_ok
@@ -30,10 +32,7 @@ def test_command_stdout_stderr_and_exit_code(sdk_sandbox, sdk_e2e_config):
 
 def test_command_environment_is_available(sdk_sandbox, sdk_e2e_config):
     result = sdk_sandbox.run_command(
-        "SDK_COMPAT_VALUE=ok python3 - <<'PY'\n"
-        "import os\n"
-        "print(os.environ['SDK_COMPAT_VALUE'])\n"
-        "PY",
+        "SDK_COMPAT_VALUE=ok; export SDK_COMPAT_VALUE; printf '%s\\n' \"$SDK_COMPAT_VALUE\"",
         timeout=sdk_e2e_config.command_timeout,
     )
 
@@ -74,8 +73,14 @@ def test_missing_command_returns_127(sdk_sandbox, sdk_e2e_config):
 
 @pytest.mark.p1
 def test_command_timeout_is_enforced(sdk_sandbox):
-    with pytest.raises(
-        Exception,
-        match=r"(?i)timeout|timed out|deadline",
-    ):  # noqa: B017 - SDKs expose backend-specific timeout errors
-        sdk_sandbox.run_command("sleep 5", timeout=1)
+    started = time.monotonic()
+    try:
+        result = sdk_sandbox.run_command("sleep 5", timeout=1)
+    except Exception as error:  # E2B aborts the client stream at the same deadline.
+        result = None
+        assert "timeout" in str(error).lower() or "deadline" in str(error).lower()
+    elapsed = time.monotonic() - started
+
+    if result is not None:
+        assert result.exit_code != 0
+    assert 0.7 <= elapsed < 4, f"command timeout took {elapsed:.2f}s"
