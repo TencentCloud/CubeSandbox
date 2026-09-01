@@ -25,11 +25,13 @@ database_url: "mysql://root:pass@127.0.0.1:3306/testdb"
 jwt_secret: "yaml-secret"
 access_ttl: "30m"
 refresh_ttl: "336h"
+redis_db: 7
 `)
 	if err := os.WriteFile(yamlPath, yamlContent, 0o644); err != nil {
 		t.Fatalf("write yaml: %v", err)
 	}
 	t.Setenv("CUBE_OPS_CONFIG", yamlPath)
+	t.Setenv("REDIS_DB", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -50,6 +52,9 @@ refresh_ttl: "336h"
 	if cfg.JWTSecret != "yaml-secret" {
 		t.Errorf("JWTSecret = %q, want yaml-secret", cfg.JWTSecret)
 	}
+	if cfg.RedisDB != 7 {
+		t.Errorf("RedisDB = %d, want 7", cfg.RedisDB)
+	}
 }
 
 // TestLoad_EnvOverridesYAML proves that environment variables take
@@ -59,12 +64,14 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 	yamlPath := filepath.Join(dir, "config.yaml")
 	yamlContent := []byte(`bind: "0.0.0.0:9999"
 database_url: "mysql://root:pass@127.0.0.1:3306/yamldb"
+redis_db: 3
 `)
 	if err := os.WriteFile(yamlPath, yamlContent, 0o644); err != nil {
 		t.Fatalf("write yaml: %v", err)
 	}
 	t.Setenv("CUBE_OPS_CONFIG", yamlPath)
 	t.Setenv("CUBE_OPS_BIND", "127.0.0.1:7777")
+	t.Setenv("REDIS_DB", "9")
 
 	cfg, err := Load()
 	if err != nil {
@@ -72,6 +79,9 @@ database_url: "mysql://root:pass@127.0.0.1:3306/yamldb"
 	}
 	if cfg.Bind != "127.0.0.1:7777" {
 		t.Errorf("Bind = %q, want 127.0.0.1:7777 (env should override YAML)", cfg.Bind)
+	}
+	if cfg.RedisDB != 9 {
+		t.Errorf("RedisDB = %d, want 9 (env should override YAML)", cfg.RedisDB)
 	}
 }
 

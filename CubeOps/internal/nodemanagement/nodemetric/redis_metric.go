@@ -42,18 +42,14 @@ func SetWriteNodeMetricHook(hook func(*NodeMetric) error) func() {
 }
 
 // Init initializes the Redis pool and verifies connectivity. Redis is required.
-// Supports standalone (REDIS_URL/HOST) and Sentinel (MASTER_NAME) modes.
+// REDIS_URL takes precedence over Sentinel and split host settings.
 func Init(cfg *config.Config) error {
 	if cfg == nil {
 		return errors.New("nodemetric: config is nil; redis is required")
 	}
-	sentinel := cfg.RedisMasterName != ""
-	url := cfg.RedisURL
-	if !sentinel && url == "" && cfg.RedisHost != "" {
-		url = buildRedisURL(cfg.RedisHost, cfg.RedisPort, cfg.RedisPassword)
-	}
-	if !sentinel && url == "" {
-		return errors.New("nodemetric: redis is not configured (set REDIS_URL or REDIS_HOST/REDIS_MASTER_NAME)")
+	url, sentinel, err := resolveRedisConnection(cfg)
+	if err != nil {
+		return err
 	}
 	poolOnce.Do(func() {
 		pool = &redis.Pool{
@@ -82,6 +78,21 @@ func Init(cfg *config.Config) error {
 	return nil
 }
 
+// resolveRedisConnection applies the connection source priority:
+// REDIS_URL, then Sentinel, then split host settings.
+func resolveRedisConnection(cfg *config.Config) (string, bool, error) {
+	if cfg.RedisURL != "" {
+		return cfg.RedisURL, false, nil
+	}
+	if cfg.RedisMasterName != "" {
+		return "", true, nil
+	}
+	if cfg.RedisHost != "" {
+		return buildRedisURL(cfg.RedisHost, cfg.RedisPort, cfg.RedisDB, cfg.RedisPassword), false, nil
+	}
+	return "", false, errors.New("nodemetric: redis is not configured (set REDIS_URL or REDIS_HOST/REDIS_MASTER_NAME)")
+}
+
 // dialSentinel resolves the current master via SENTINEL get-master-addr-by-name,
 // then dials it directly.
 func dialSentinel(cfg *config.Config) (redis.Conn, error) {
@@ -93,6 +104,7 @@ func dialSentinel(cfg *config.Config) (redis.Conn, error) {
 		redis.DialConnectTimeout(redisDialTimeout),
 		redis.DialReadTimeout(redisDialTimeout),
 		redis.DialWriteTimeout(redisDialTimeout),
+		redis.DialDatabase(cfg.RedisDB),
 		redis.DialPassword(cfg.RedisPassword),
 	)
 }
@@ -154,15 +166,15 @@ func parseRedisAddrs(raw string) []string {
 	return out
 }
 
-// buildRedisURL assembles a redis:// URL from split host/port/password.
-func buildRedisURL(host string, port int, password string) string {
+// buildRedisURL assembles a redis:// URL from split host/port/db/password.
+func buildRedisURL(host string, port int, db int, password string) string {
 	if port == 0 {
 		port = 6379
 	}
 	u := &url.URL{
 		Scheme: "redis",
 		Host:   fmt.Sprintf("%s:%d", host, port),
-		Path:   "/0",
+		Path:   fmt.Sprintf("/%d", db),
 	}
 	if password != "" {
 		u.User = url.UserPassword("", password)

@@ -61,11 +61,12 @@ type Config struct {
 	// CubeAPI (for SDK endpoint proxy)
 	CubeAPIURL string `yaml:"cubeapi_url"`
 
-	// Redis (optional): REDIS_URL or the split REDIS_HOST/PORT/PASSWORD triple.
-	// Sentinel: set MasterName (+ SentinelNodes/Password) to use Sentinel mode.
+	// Redis (optional): REDIS_URL is the complete source of truth when set.
+	// Otherwise, MasterName selects Sentinel; split HOST/PORT/DB/PASSWORD is the fallback.
 	RedisURL              string `yaml:"redis_url"`
 	RedisHost             string `yaml:"redis_host"`
 	RedisPort             int    `yaml:"redis_port"`
+	RedisDB               int    `yaml:"redis_db"`
 	RedisPassword         string `yaml:"redis_password"`
 	RedisMasterName       string `yaml:"redis_master_name"`
 	RedisSentinelNodes    string `yaml:"redis_sentinel_nodes"`
@@ -418,6 +419,11 @@ func overrideFromEnv(cfg *Config) {
 	if v := os.Getenv("REDIS_PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil {
 			cfg.RedisPort = p
+		}
+	}
+	if v := os.Getenv("REDIS_DB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.RedisDB = n
 		}
 	}
 	if v := os.Getenv("REDIS_PASSWORD"); v != "" {

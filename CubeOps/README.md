@@ -125,7 +125,8 @@ defaults.
 | `DATABASE_URL` | *(required)* | MySQL connection URL. If unset, built from `CUBE_SANDBOX_MYSQL_{HOST,PORT,USER,PASSWORD,DB}` env vars. |
 | `CUBE_MASTER_ADDR` | `http://127.0.0.1:8089` | CubeMaster base URL |
 | `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | Sandbox domain (used by SDK handler for sandbox URL construction) |
-| `REDIS_URL` | *(optional)* | Redis connection URL. Alternatively use `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`. |
+| `REDIS_URL` | *(optional)* | Complete Redis connection URL, including the database path when needed (for example, `/7`). When set, it overrides all Sentinel and split Redis settings. |
+| `REDIS_DB` | `0` | Redis database index used only with split host/port/password or Sentinel settings. |
 | `CUBE_OPS_WAREHOUSE_WORK_DIR` | `/var/tmp/cubeops-warehouse` | Local unpack scratch (`warehouse.work_dir`); also used as `TMPDIR` |
 | `CUBE_OPS_WAREHOUSE_UPLOAD_TIMEOUT` | `30m` | HTTP write timeout and S3 Put abort budget (`warehouse.upload_timeout`) |
 | `CUBE_OPS_WAREHOUSE_FETCH_TIMEOUT` | `30m` | GitHub/CNB download timeout for one-click imports (`warehouse.fetch_timeout`) |
@@ -169,6 +170,8 @@ export CUBE_OPS_CONFIG=/path/to/your/config.yaml
 
 See [`config.example.yaml`](./config.example.yaml) for all available fields
 with inline comments. One-click does not install this file.
+
+**Redis connection priority**: `REDIS_URL` > Sentinel settings > split `REDIS_HOST`/`REDIS_PORT`/`REDIS_DB`/`REDIS_PASSWORD` settings.
 
 ## Authentication
 

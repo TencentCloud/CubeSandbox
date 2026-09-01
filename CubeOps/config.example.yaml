@@ -45,9 +45,12 @@ cubemaster_addr: "http://127.0.0.1:8089"   # CUBE_MASTER_ADDR
 cubeapi_url: "http://127.0.0.1:3000"       # CUBE_API_URL
 
 # --- Redis (optional, used for node metric fan-out) ---
+# A non-empty redis_url is the complete connection configuration and overrides
+# Sentinel and split settings. Include the logical database in the URL path.
 redis_url: ""
 redis_host: ""
 redis_port: 0
+redis_db: 0
 redis_password: ""
 
 # --- Sandbox domain exposed to SDK clients via /config ---
