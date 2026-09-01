@@ -1,62 +1,55 @@
 # syntax=docker/dockerfile:1.7
 #
-# CubeSandbox base image: a minimal Ubuntu image with envd preinstalled so
-# that sandboxes built FROM this image expose :49983/health out of the box
-# and can be turned into Cube templates without any extra wiring.
-#
-# envd is compiled from e2b-dev/infra@${ENVD_REF} in a builder stage,
-# producing a static linux/amd64 binary that is copied into the final
-# ubuntu:22.04 runtime stage alongside a generic entrypoint.
-#
-# Build example:
-#   docker build \
-#     -f docker/Dockerfile.cube-base \
-#     -t ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
-#     docker/
+# Build from the repository root so this Dockerfile can copy cube-envd/:
+# docker build -f docker/Dockerfile.cube-base -t cubesandbox-base .
 
-ARG ENVD_REF=2026.16
-ARG GO_VERSION=1.25.4
+ARG RUST_TOOLCHAIN=1.89
 ARG UBUNTU_VERSION=22.04
 ARG TARGETARCH
 
-# -------- Stage 1: compile envd from e2b-dev/infra --------
-FROM golang:${GO_VERSION}-bookworm AS envd-builder
+# -------- Stage 1: compile the local Rust envd --------
+FROM rust:${RUST_TOOLCHAIN}-slim-bookworm AS envd-builder
 
-ARG ENVD_REF
-ARG ENVD_UPSTREAM_REPO=https://github.com/e2b-dev/infra.git
+ARG RUST_TOOLCHAIN
+ARG TARGETARCH
+ARG CUBE_ENVD_VERSION=0.1.0
+ARG CUBE_ENVD_COMMIT=unknown
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "${arch}" in \
+      amd64|x86_64) rust_target=x86_64-unknown-linux-musl ;; \
+      arm64|aarch64) rust_target=aarch64-unknown-linux-musl ;; \
+      *) echo "unsupported target architecture: ${arch}" >&2; exit 1 ;; \
+    esac; \
+    echo "${rust_target}" > /tmp/rust-target; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends musl-tools; \
+    rm -rf /var/lib/apt/lists/*; \
+    rustup target add "${rust_target}" --toolchain "${RUST_TOOLCHAIN}"
 
-WORKDIR /src
+WORKDIR /src/cube-envd
 
-# Shallow-clone the upstream tag.
-RUN git clone --depth 1 --branch "${ENVD_REF}" "${ENVD_UPSTREAM_REPO}" infra
+COPY cube-envd/Cargo.toml cube-envd/Cargo.lock cube-envd/rust-toolchain.toml cube-envd/build.rs ./
+COPY cube-envd/proto/ proto/
+COPY cube-envd/src/ src/
 
-WORKDIR /src/infra/packages/envd
-
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    commit_sha="$(git -C /src/infra rev-parse --short HEAD)" \
-    && echo "Building envd from ${ENVD_UPSTREAM_REPO}@${ENVD_REF} (commit=${commit_sha})" \
-    && CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
-       go build -a \
-           -ldflags "-X=main.commitSHA=${commit_sha} -s -w" \
-           -o /out/envd \
-           . \
-    && chmod +x /out/envd \
-    && /out/envd -version \
-    && /out/envd -commit
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    rust_target="$(cat /tmp/rust-target)"; \
+    CUBE_ENVD_VERSION="${CUBE_ENVD_VERSION}" CUBE_ENVD_COMMIT="${CUBE_ENVD_COMMIT}" \
+      cargo "+${RUST_TOOLCHAIN}" build --release --locked --target "${rust_target}" --bin cube-envd; \
+    install -Dm0755 "target/${rust_target}/release/cube-envd" /out/envd; \
+    /out/envd -version; \
+    /out/envd -commit
 
 # -------- Stage 2: runtime image --------
 FROM ubuntu:${UBUNTU_VERSION}
 
-ARG ENVD_REF
 ARG DEBIAN_FRONTEND=noninteractive
+ARG CUBE_ENVD_VERSION=0.1.0
+ARG CUBE_ENVD_COMMIT=unknown
 
-ENV ENVD_REF=${ENVD_REF} \
-    ENVD_PORT=49983 \
+ENV ENVD_PORT=49983 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 
@@ -66,30 +59,29 @@ RUN apt-get update \
         curl \
         sudo \
         tini \
+        util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 # envd defaults to running file/command operations as the `user` account
 # (uid=1000) — the same convention used by e2b's official sandbox templates.
-# Provision it here so SDK calls like `sandbox.files.read(path)` work
-# out of the box without needing to pass `user="root"` everywhere.
 RUN useradd --create-home --uid 1000 --shell /bin/bash user \
     && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/user \
     && chmod 0440 /etc/sudoers.d/user
 
 COPY --from=envd-builder /out/envd /usr/bin/envd
-COPY cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
+COPY docker/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
 RUN chmod +x /usr/bin/envd /usr/local/bin/cube-entrypoint.sh \
     && mkdir -p /var/log \
-    && printf '%s\n' "${ENVD_REF}" > /etc/cubesandbox-envd-ref \
     && /usr/bin/envd -version \
     && /usr/bin/envd -commit
 
 LABEL org.opencontainers.image.source="https://github.com/TencentCloud/CubeSandbox" \
       org.opencontainers.image.title="cubesandbox-base" \
-      org.opencontainers.image.description="CubeSandbox base image with envd compiled from e2b-dev/infra@${ENVD_REF}" \
+      org.opencontainers.image.description="CubeSandbox base image with Rust cube-envd" \
       org.opencontainers.image.licenses="Apache-2.0" \
-      io.cubesandbox.envd.ref="${ENVD_REF}"
+      io.cubesandbox.envd.version="${CUBE_ENVD_VERSION}" \
+      io.cubesandbox.envd.commit="${CUBE_ENVD_COMMIT}"
 
 EXPOSE 49983
 

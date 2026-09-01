@@ -16,6 +16,7 @@ ARG RUST_TOOLCHAIN_DEFAULT=1.89
 ARG RUST_TOOLCHAIN_HYPERVISOR=1.77.2
 ARG RUST_TOOLCHAIN_E2BAPI=1.85
 ARG RUST_TOOLCHAIN_AGENT=1.89
+ARG RUST_TOOLCHAIN_ENVD=1.89
 ARG GITHUB_ACTIONS=false
 ARG RUSTUP_DIST_SERVER=https://rsproxy.cn
 ARG RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
@@ -221,7 +222,7 @@ ENV RUSTUP_UPDATE_ROOT="${RUSTUP_UPDATE_ROOT}"
 
 RUN set -eux; \
     . /etc/buildenv \
-    && for toolchain in "${RUST_TOOLCHAIN_HYPERVISOR}" "${RUST_TOOLCHAIN_E2BAPI}" "${RUST_TOOLCHAIN_AGENT}"; do \
+    && for toolchain in "${RUST_TOOLCHAIN_HYPERVISOR}" "${RUST_TOOLCHAIN_E2BAPI}" "${RUST_TOOLCHAIN_AGENT}" "${RUST_TOOLCHAIN_ENVD}"; do \
         rustup toolchain install "${toolchain}" --profile minimal; \
         rustup component add rust-src clippy rustfmt rust-analyzer llvm-tools-preview --toolchain "${toolchain}"; \
         rustup target add ${TARGET_UNAME_ARCH}-unknown-linux-musl --toolchain "${toolchain}"; \
