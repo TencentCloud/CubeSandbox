@@ -1,10 +1,5 @@
 module github.com/tencentcloud/CubeSandbox/CubeMaster
 
-// Older grpc go.mod entries pull the pre-split cloud.google.com/go module,
-// whose compute/metadata package conflicts with the modern split module used
-// by Workload Identity ADC.
-exclude cloud.google.com/go v0.26.0
-
 go 1.25.7
 
 // toolchain go1.22.9
