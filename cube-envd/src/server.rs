@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::http::header::{HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
@@ -19,6 +19,7 @@ use crate::auth::{self, User};
 use crate::connect;
 use crate::cors;
 use crate::error::{ConnectCode, ConnectError};
+use crate::legacy;
 use crate::rest;
 use crate::services::{filesystem as fs_svc, process as proc_svc};
 use crate::state::AppState;
@@ -322,7 +323,24 @@ macro_rules! fs_unary {
                 Ok(u) => u,
                 Err(e) => return e.into_response(),
             };
-            unary_result($svc(&req, &user))
+            // Legacy downgrade applies ONLY to success (200) filesystem responses,
+            // mirroring upstream WrapUnary's early err-return (interceptor.go:33-36):
+            // errors never reach shouldHideChanges, so no header and no narrowing.
+            let legacy = legacy::is_legacy(&headers);
+            match $svc(&req, &user) {
+                Ok(mut v) => {
+                    if legacy {
+                        legacy::narrow(&mut v);
+                    }
+                    let mut resp = unary_json(v);
+                    if legacy {
+                        resp.headers_mut()
+                            .insert(legacy::LEGACY_HEADER, HeaderValue::from_static("true"));
+                    }
+                    resp
+                }
+                Err(e) => e.into_response(),
+            }
         }
     };
 }

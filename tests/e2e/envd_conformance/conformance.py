@@ -37,6 +37,7 @@ DECLARED_DIFFERENT = {
     "proc_missing_cmd": "missing-binary stderr prefix: upstream nice(1) wording vs cube-envd (exit 127 and event flow equal)",
     "fs_stat_symlink_probe": "symlink Stat/ListDir: cube-envd lstat's (type SYMLINK, lowercase-l perms, real target); upstream follows the link (target type, uppercase-L, link-self target). Documented known difference; SDKs branch on `code`, not link semantics",
     "rest_init_timestamp_out_of_range": "timestamp outside i64-nanosecond range (9999): upstream UnixNano() wraps and drops as stale (204); cube-envd rejects as a caller bug (400). Neither applies anything nor moves the gate",
+    "fs_legacy_stat_symlink": "symlink Stat under legacy UA (item 1.6): cube-envd lstat's (FILE_TYPE_SYMLINK) which is outside the upstream legacy 3-value FileType enum (no SYMLINK); upstream follows the link (FILE_TYPE_FILE). Documented known difference for 1.6.",
 }
 # Fixtures that depend on prior state in ways the rerun reproduces
 # differently. Currently empty; kept for the next scenario that needs it.
@@ -49,7 +50,7 @@ TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z")
 HEADERS_KEPT = {"Content-Type", "Content-Encoding", "Cache-Control",
                 "Access-Control-Allow-Origin", "Access-Control-Expose-Headers",
                 "Access-Control-Allow-Methods", "Access-Control-Allow-Headers",
-                "Access-Control-Max-Age"}
+                "Access-Control-Max-Age", "X-E2B-Legacy-SDK"}
 
 
 def normalize(obj, path=""):

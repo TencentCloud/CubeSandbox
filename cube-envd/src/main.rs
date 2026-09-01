@@ -16,6 +16,7 @@ mod connect;
 mod cors;
 mod error;
 mod exec;
+mod legacy;
 mod msg;
 mod rest;
 mod server;

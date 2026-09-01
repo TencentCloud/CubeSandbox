@@ -357,11 +357,16 @@ def cap_init_token():
 def cap_fs():
     # Reset artifacts the scenario sequence itself creates, so ListDir below
     # sees the same /home/user on both sides even when a container is reused
-    # for a rerun: base_c.txt is the side effect of /files/compose (a declared
-    # 501 difference — upstream creates it, cube-envd does not) and zz_link of
-    # the symlink probe. Each is covered by its own scenario; ListDir must not
-    # inherit them.
-    for stale in ("/home/user/base_c.txt", "/home/user/zz_link"):
+    # for a rerun (base_c.txt from /files/compose; zz_link from the symlink
+    # probe; zz_legacy_a.txt / zz_legacy_dir / zz_legacy_link from
+    # cap_fs_legacy. zz_legacy_a.txt is normally removed mid-scenario by
+    # fs_legacy_remove (A-4), but if a run is interrupted before that it is
+    # orphaned here; the dir/link are removed at cap_fs_legacy's own tail.
+    # Sweeping all of them here only matters if a run was interrupted.
+    # Each is covered by its own scenario; ListDir must not inherit them.
+    for stale in ("/home/user/base_c.txt", "/home/user/zz_link",
+                  "/home/user/zz_legacy_a.txt",
+                  "/home/user/zz_legacy_dir", "/home/user/zz_legacy_link"):
         try:
             connect_unary("filesystem.Filesystem/Remove", {"path": stale})
         except Exception:
@@ -402,6 +407,55 @@ def cap_fs():
                    start_req("ln -sf /home/user/base_a.txt /home/user/zz_link"), user="user")
     record("fs_stat_symlink_probe", connect_unary(
         "filesystem.Filesystem/Stat", {"path": "/home/user/zz_link"}))
+
+
+def cap_fs_legacy():
+    # Legacy SDK (User-Agent "connect-python") conformance (item 1.6).
+    # Self-contained BY DESIGN: every path it reads is created right here, so
+    # `--which fs-legacy` reproduces on its own. Reusing cap_fs' leftovers
+    # (base_a.txt / zz_link) silently recorded `not_found` instead — the run
+    # still "passed" while proving nothing, including the symlink divergence
+    # the allowlist entry claims.
+    UA = {"User-Agent": "connect-python"}
+    # Fixtures: one plain file (Stat), a directory with two plain files
+    # (ListDir `entries`), and a symlink (declared difference).
+    http_req("POST", "/files?path=/home/user/zz_legacy_a.txt&username=user", b"legacy",
+             {"Content-Type": "application/octet-stream"})
+    for name in ("a.txt", "b.txt"):
+        http_req("POST", f"/files?path=/home/user/zz_legacy_dir/{name}&username=user", b"x",
+                 {"Content-Type": "application/octet-stream"})
+    connect_stream("process.Process/Start", start_req(
+        "ln -sf /home/user/zz_legacy_a.txt /home/user/zz_legacy_link"))
+    # A-1: `entry` narrowed to {name,type,path} + X-E2B-Legacy-SDK: true.
+    record("fs_legacy_stat", connect_unary(
+        "filesystem.Filesystem/Stat", {"path": "/home/user/zz_legacy_a.txt"}, extra_headers=UA))
+    # A-2: `entries` narrowed element-wise — the other half of narrow(). Listed
+    # in a private directory so the comparison inherits neither the symlink
+    # difference (F2) nor /home/user's container-state drift.
+    record("fs_legacy_listdir", connect_unary(
+        "filesystem.Filesystem/ListDir", {"path": "/home/user/zz_legacy_dir"},
+        extra_headers=UA))
+    # A-3: symlink under the legacy UA. cube-envd lstat's -> FILE_TYPE_SYMLINK,
+    # which is outside the legacy 3-value FileType enum
+    # (UNSPECIFIED/FILE/DIRECTORY); upstream follows the link ->
+    # FILE_TYPE_FILE. Goes to the DECLARED_DIFFERENT allowlist.
+    record("fs_legacy_stat_symlink", connect_unary(
+        "filesystem.Filesystem/Stat", {"path": "/home/user/zz_legacy_link"}, extra_headers=UA))
+    # A-4: Remove already answers `{}` — only the header can differ.
+    record("fs_legacy_remove", connect_unary(
+        "filesystem.Filesystem/Remove", {"path": "/home/user/zz_legacy_a.txt"},
+        extra_headers=UA))
+    # A-5: errors must NOT be narrowed and must NOT carry X-E2B-Legacy-SDK
+    # (upstream WrapUnary returns the error before shouldHideChanges).
+    record("fs_legacy_stat_missing", connect_unary(
+        "filesystem.Filesystem/Stat", {"path": "/home/user/nope"}, extra_headers=UA))
+    # Leave no residue: no later scenario reads these, and cap_fs sweeps them
+    # as stale before its ListDir if a run was interrupted in between.
+    for stale in ("/home/user/zz_legacy_link", "/home/user/zz_legacy_dir"):
+        try:
+            connect_unary("filesystem.Filesystem/Remove", {"path": stale})
+        except Exception:
+            pass
 
 
 # ---------------- C. process.Process ----------------
@@ -530,6 +584,8 @@ if __name__ == "__main__":
         cap_rest()
     if which in ("all", "fs"):
         cap_fs()
+    if which in ("all", "fs-legacy"):
+        cap_fs_legacy()
     if which in ("all", "proc"):
         cap_process()
     if which in ("all", "compose"):
