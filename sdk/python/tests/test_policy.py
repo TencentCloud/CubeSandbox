@@ -8,7 +8,9 @@ import pytest
 
 from cubesandbox import Action, Inject, Match, Rule
 from cubesandbox._policy import (
+    SECRET_MAX_BYTES,
     _convert_e2b_per_host_rules,
+    _normalize_inject_dict,
     _normalize_match_dict,
     _serialize_rule,
 )
@@ -133,6 +135,28 @@ class TestRuleSerializerHandlesPortScheme:
             "action": {"allow": True},
         })
         assert wire["match"]["port"] == 8443
+
+
+class TestInjectSecretValidation:
+    def test_secret_at_cap_accepted(self):
+        inj = Inject(header="Authorization", secret="x" * SECRET_MAX_BYTES)
+        assert inj.to_wire()["secret"] == "x" * SECRET_MAX_BYTES
+
+    def test_secret_over_cap_rejected(self):
+        with pytest.raises(ValueError, match="exceeds 2048 bytes"):
+            Inject(header="Authorization", secret="x" * (SECRET_MAX_BYTES + 1))
+
+    def test_dict_secret_over_cap_rejected(self):
+        with pytest.raises(ValueError, match="exceeds 2048 bytes"):
+            _normalize_inject_dict({"header": "Authorization", "secret": "x" * (SECRET_MAX_BYTES + 1)})
+
+    def test_e2b_header_over_cap_rejected(self):
+        with pytest.raises(ValueError, match="exceeds 2048 bytes"):
+            _convert_e2b_per_host_rules({
+                "api.example.com": [
+                    {"transform": {"headers": {"Authorization": "x" * (SECRET_MAX_BYTES + 1)}}},
+                ],
+            })
 
 
 class TestE2BPerHostRulesCompat:
