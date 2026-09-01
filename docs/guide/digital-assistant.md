@@ -61,7 +61,7 @@ If the template is missing, built from a different image, or does not include th
 
 ### AgentHub Database
 
-CubeAPI uses MySQL to persist Digital Assistant metadata, including assistant instances, snapshots, templates, and operation history:
+CubeOps persists Digital Assistant metadata — including assistant instances, snapshots, templates, and operation history — through `DATABASE_URL` (CubeAPI is stateless after the CubeAPI/CubeOps decoupling in PR #984):
 
 ```bash
 DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp

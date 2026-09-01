@@ -61,7 +61,7 @@ curl -fsS http://127.0.0.1:18789/ >/dev/null
 
 ### AgentHub 数据库
 
-CubeAPI 使用 MySQL 保存数字助手的元数据，包括助手实例、存档、模板和操作流水。配置方式如下：
+CubeOps 通过 `DATABASE_URL` 保存数字助手的元数据，包括助手实例、存档、模板和操作流水（自 PR #984 CubeAPI/CubeOps 解耦后，CubeAPI 已无状态）。配置方式如下：
 
 ```bash
 DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp

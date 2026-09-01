@@ -44,28 +44,10 @@ spec:
               value: {{ printf "http://%s" (include "cube.masterEndpoint" .) | quote }}
             - name: CUBE_API_BIND
               value: {{ .Values.controlPlane.api.bind | quote }}
-            {{- if eq (include "cube.dbDriver" .) "postgres" }}
-            # Same as CubeOps: driver comes from DATABASE_URL scheme.
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "cube.secretName" . }}
-                  key: database-url
-            {{- else }}
-            - name: CUBE_SANDBOX_MYSQL_HOST
-              value: {{ include "cube.dbHost" . | quote }}
-            - name: CUBE_SANDBOX_MYSQL_PORT
-              value: {{ include "cube.dbPort" . | quote }}
-            - name: CUBE_SANDBOX_MYSQL_USER
-              value: {{ include "cube.dbUser" . | quote }}
-            - name: CUBE_SANDBOX_MYSQL_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "cube.secretName" . }}
-                  key: mysql-password
-            - name: CUBE_SANDBOX_MYSQL_DB
-              value: {{ include "cube.dbName" . | quote }}
-            {{- end }}
+            {{- /* CubeAPI is stateless after the CubeAPI/CubeOps decoupling in
+                   PR #984; AgentHub persistence lives in CubeOps. No DB env is
+                   injected here — DATABASE_URL / CUBE_SANDBOX_MYSQL_* go to the
+                   CubeOps deployment instead. */}}
             - name: CUBE_API_SANDBOX_DOMAIN
               value: {{ .Values.controlPlane.api.sandboxDomain | quote }}
             {{- with .Values.controlPlane.api.env }}
