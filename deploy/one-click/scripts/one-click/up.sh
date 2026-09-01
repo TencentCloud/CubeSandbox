@@ -48,16 +48,12 @@ fi
 if [[ -n "${AUTH_CALLBACK_URL:-}" ]]; then
   CUBE_API_OPTIONAL_EXPORTS+="export AUTH_CALLBACK_URL=\"${AUTH_CALLBACK_URL}\"; "
 fi
-if [[ -n "${DATABASE_URL:-}" ]]; then
-  CUBE_API_OPTIONAL_EXPORTS+="export DATABASE_URL=\"${DATABASE_URL}\"; "
-else
-  mysql_host="${CUBE_SANDBOX_MYSQL_HOST:-127.0.0.1}"
-  mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
-  mysql_user="${CUBE_SANDBOX_MYSQL_USER:-cube}"
-  mysql_password="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
-  mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
-  CUBE_API_OPTIONAL_EXPORTS+="export DATABASE_URL=\"mysql://${mysql_user}:${mysql_password}@${mysql_host}:${mysql_port}/${mysql_db}\"; "
-fi
+# CubeAPI is stateless and does not connect to the database (no DATABASE_URL
+# needed). After the CubeAPI/CubeOps decoupling (PR #984), all AgentHub
+# persistence moved to the CubeOps service; CubeAPI retains only the E2B and
+# SDK-compatible interfaces, which call CubeMaster directly. Injecting a
+# DATABASE_URL here would be misleading in an external-Postgres deployment,
+# where the MySQL fallback would hand CubeAPI a stale mysql:// URL.
 if [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]]; then
   CUBELET_OPTIONAL_EXPORTS+="export CUBE_SANDBOX_NODE_IP=\"${CUBE_SANDBOX_NODE_IP}\"; "
 fi

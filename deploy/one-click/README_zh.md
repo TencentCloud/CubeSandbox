@@ -219,7 +219,7 @@ http://<target-host>:12088
 
 ### 数字助手环境变量
 
-数字助手（AgentHub）需要 CubeAPI 连接 MySQL 保存助手实例、存档、模板和操作流水。one-click 默认会根据 `CUBE_SANDBOX_MYSQL_HOST`、`CUBE_SANDBOX_MYSQL_PORT`、`CUBE_SANDBOX_MYSQL_USER`、`CUBE_SANDBOX_MYSQL_PASSWORD`、`CUBE_SANDBOX_MYSQL_DB` 拼出 `DATABASE_URL`，指向随 one-click 启动的 MySQL：
+数字助手（AgentHub）的助手实例、存档、模板和操作流水由 CubeOps 服务负责持久化（自 PR #984 CubeAPI/CubeOps 解耦后，CubeAPI 已无状态）。one-click 默认会根据 `CUBE_SANDBOX_MYSQL_HOST`、`CUBE_SANDBOX_MYSQL_PORT`、`CUBE_SANDBOX_MYSQL_USER`、`CUBE_SANDBOX_MYSQL_PASSWORD`、`CUBE_SANDBOX_MYSQL_DB` 拼出 `DATABASE_URL`，交由 CubeOps 使用，指向随 one-click 启动的 MySQL：
 
 ```bash
 # 可选；未设置时由 one-click 自动拼接。
@@ -309,7 +309,7 @@ CUBE_EXTERNAL_REDIS_PASSWORD=ceuhvu123
 当设置了 `CUBE_EXTERNAL_MYSQL_HOST`（和/或 `CUBE_EXTERNAL_REDIS_HOST`）时，`install.sh` 会：
 
 - 用外部 MySQL/Redis 地址改写 `CubeMaster/conf.yaml`；
-- 将 `DATABASE_URL`（CubeAPI）和 `CUBE_PROXY_REDIS_*`（cube proxy）写入 `.one-click.env`，让各服务都连接外部地址；
+- 将 `DATABASE_URL`（CubeOps）和 `CUBE_PROXY_REDIS_*`（cube proxy）写入 `.one-click.env`，让各服务都连接外部地址；
 - mask 对应的 `cube-sandbox-mysql.service` / `cube-sandbox-redis.service`，本地容器不会再被启动；
 - 让 `quickcheck.sh` 和 `up-support.sh` 跳过对已外置依赖的本地生命周期管理（`down-support.sh` 未感知外部依赖，仍会执行 `docker compose down`，但由于本地容器从未被启动，这是无害的空操作）。
 
