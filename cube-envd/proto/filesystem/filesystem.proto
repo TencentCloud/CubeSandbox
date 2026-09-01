@@ -1,0 +1,230 @@
+syntax = "proto3";
+
+// 定义文件系统 RPC 的 protobuf 包。
+package filesystem;
+
+import "google/protobuf/timestamp.proto";
+
+// 提供文件、目录和流式目录监听接口。
+service Filesystem {
+  // 查询单个文件系统条目的元数据。
+  rpc Stat(StatRequest) returns (StatResponse);
+  // 创建目录及其缺失父目录。
+  rpc MakeDir(MakeDirRequest) returns (MakeDirResponse);
+  // 移动文件或目录条目。
+  rpc Move(MoveRequest) returns (MoveResponse);
+  // 按指定深度列出目录条目。
+  rpc ListDir(ListDirRequest) returns (ListDirResponse);
+  // 删除文件或目录条目。
+  rpc Remove(RemoveRequest) returns (RemoveResponse);
+
+  // 流式订阅目录中的文件系统事件。
+  rpc WatchDir(WatchDirRequest) returns (stream WatchDirResponse);
+
+  // 创建持久 watcher，当前服务不实现。
+  rpc CreateWatcher(CreateWatcherRequest) returns (CreateWatcherResponse);
+  // 轮询持久 watcher 事件，当前服务不实现。
+  rpc GetWatcherEvents(GetWatcherEventsRequest) returns (GetWatcherEventsResponse);
+  // 移除持久 watcher，当前服务不实现。
+  rpc RemoveWatcher(RemoveWatcherRequest) returns (RemoveWatcherResponse);
+}
+
+// 表示移动条目的源路径和目标路径。
+message MoveRequest {
+  // 要移动的现有路径。
+  string source = 1;
+  // 移动后的目标路径。
+  string destination = 2;
+}
+
+// 返回移动后的目标条目元数据。
+message MoveResponse {
+  // 已移动条目的元数据。
+  EntryInfo entry = 1;
+}
+
+// 表示创建目录的请求。
+message MakeDirRequest {
+  // 要创建的目录路径。
+  string path = 1;
+}
+
+// 返回新建目录的元数据。
+message MakeDirResponse {
+  // 已创建目录的元数据。
+  EntryInfo entry = 1;
+}
+
+// 表示删除文件或目录的请求。
+message RemoveRequest {
+  // 要删除的路径。
+  string path = 1;
+}
+
+// 表示没有响应字段的删除结果。
+message RemoveResponse {}
+
+// 表示查询条目元数据的请求。
+message StatRequest {
+  // 要查询的路径。
+  string path = 1;
+}
+
+// 返回指定路径的条目元数据。
+message StatResponse {
+  // 查询到的条目元数据。
+  EntryInfo entry = 1;
+}
+
+// 描述文件、目录或符号链接的元数据。
+message EntryInfo {
+  // 条目的基名。
+  string name = 1;
+  // 条目的文件类型。
+  FileType type = 2;
+  // 条目的完整路径。
+  string path = 3;
+  // 条目大小，单位为字节。
+  int64 size = 4;
+  // Unix 权限位。
+  uint32 mode = 5;
+  // 人类可读的 rwx 权限字符串。
+  string permissions = 6;
+  // 条目属主名称。
+  string owner = 7;
+  // 条目属组名称。
+  string group = 8;
+  // 条目的最后修改时间。
+  google.protobuf.Timestamp modified_time = 9;
+  // 条目为符号链接时，保存其目标路径。
+  optional string symlink_target = 10;
+  // 由用户定义并存储在文件扩展属性中的元数据。
+  // 键位于 user.e2b. 命名空间，返回时会移除该前缀。
+  // 其他工具写入的普通 user.* 扩展属性不会出现在这里。
+  map<string, string> metadata = 11;
+}
+
+// 定义 EntryInfo 支持的文件系统条目类型。
+enum FileType {
+  // 未指定或无法识别的类型。
+  FILE_TYPE_UNSPECIFIED = 0;
+  // 常规文件。
+  FILE_TYPE_FILE = 1;
+  // 目录。
+  FILE_TYPE_DIRECTORY = 2;
+  // 符号链接。
+  FILE_TYPE_SYMLINK = 3;
+}
+
+// 表示列出目录的请求。
+message ListDirRequest {
+  // 要枚举的目录路径。
+  string path = 1;
+  // 要递归列出的最大深度。
+  uint32 depth = 2;
+}
+
+// 返回按请求深度收集的目录条目。
+message ListDirResponse {
+  // 已收集的条目。
+  repeated EntryInfo entries = 1;
+}
+
+// 表示建立流式目录监听的请求。
+message WatchDirRequest {
+  // 要监听的目录路径。
+  string path = 1;
+  // 是否递归监听子目录。
+  bool recursive = 2;
+  // 为 true 时，事件会在可用情况下附带受影响条目的元数据。
+  bool include_entry = 3;
+  // 为 true 时，允许监听 NFS、CIFS、SMB、FUSE 等网络文件系统挂载。
+  // 网络挂载上的事件可能不可靠或完全不会送达。
+  bool allow_network_mounts = 4;
+}
+
+// 表示 WatchDir 观察到的一个文件系统事件。
+message FilesystemEvent {
+  // 相对于监听根目录的受影响路径。
+  string name = 1;
+  // 事件类型。
+  EventType type = 2;
+  // 触发事件的条目元数据；只有请求 include_entry 且条目仍可 stat 时才会填充。
+  // 删除或移走后的重命名事件通常不包含此字段，因为原路径上的条目已不存在。
+  optional EntryInfo entry = 3;
+}
+
+// 表示 WatchDir 服务端流中的一个事件。
+message WatchDirResponse {
+  // 指定响应事件类型。
+  oneof event {
+    // 表示 watcher 已成功建立。
+    StartEvent start = 1;
+    // 表示一个文件系统变化事件。
+    FilesystemEvent filesystem = 2;
+    // 表示空闲流保活事件。
+    KeepAlive keepalive = 3;
+  }
+
+  // 表示没有额外字段的 watcher 启动事件。
+  message StartEvent {}
+
+  // 表示没有额外字段的保活事件。
+  message KeepAlive {}
+}
+
+// 表示创建持久 watcher 的请求，当前服务不实现。
+message CreateWatcherRequest {
+  // 要监听的目录路径。
+  string path = 1;
+  // 是否递归监听子目录。
+  bool recursive = 2;
+  // 为 true 时，事件会在可用情况下附带受影响条目的元数据。
+  bool include_entry = 3;
+  // 为 true 时，允许监听网络文件系统挂载。
+  // 网络挂载上的事件可能不可靠或完全不会送达。
+  bool allow_network_mounts = 4;
+}
+
+// 返回持久 watcher 的标识符，当前服务不实现。
+message CreateWatcherResponse {
+  // 持久 watcher 的唯一标识符。
+  string watcher_id = 1;
+}
+
+// 表示轮询持久 watcher 事件的请求，当前服务不实现。
+message GetWatcherEventsRequest {
+  // 要轮询的 watcher 标识符。
+  string watcher_id = 1;
+}
+
+// 返回持久 watcher 累积事件，当前服务不实现。
+message GetWatcherEventsResponse {
+  // 已收集的文件系统事件。
+  repeated FilesystemEvent events = 1;
+}
+
+// 表示移除持久 watcher 的请求，当前服务不实现。
+message RemoveWatcherRequest {
+  // 要移除的 watcher 标识符。
+  string watcher_id = 1;
+}
+
+// 表示没有响应字段的移除 watcher 结果。
+message RemoveWatcherResponse {}
+
+// 定义目录监听可报告的文件系统事件类型。
+enum EventType {
+  // 未指定或无法映射的事件类型。
+  EVENT_TYPE_UNSPECIFIED = 0;
+  // 创建文件或目录。
+  EVENT_TYPE_CREATE = 1;
+  // 写入文件内容或其他可写变更。
+  EVENT_TYPE_WRITE = 2;
+  // 删除文件或目录。
+  EVENT_TYPE_REMOVE = 3;
+  // 重命名文件或目录。
+  EVENT_TYPE_RENAME = 4;
+  // 修改权限或所有权。
+  EVENT_TYPE_CHMOD = 5;
+}

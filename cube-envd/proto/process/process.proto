@@ -1,0 +1,260 @@
+syntax = "proto3";
+
+// 定义进程管理 RPC 的 protobuf 包。
+package process;
+
+// 提供进程生命周期、输出订阅和输入控制接口。
+service Process {
+    // 列出当前由 envd 管理的存活进程。
+    rpc List(ListRequest) returns (ListResponse);
+
+    // 订阅指定进程的输出和结束事件。
+    rpc Connect(ConnectRequest) returns (stream ConnectResponse);
+    // 启动进程并流式返回输出和结束事件。
+    rpc Start(StartRequest) returns (stream StartResponse);
+
+    // 更新 PTY 进程的终端尺寸。
+    rpc Update(UpdateRequest) returns (UpdateResponse);
+
+    // 客户端输入流按帧顺序写入同一进程。
+    rpc StreamInput(stream StreamInputRequest) returns (StreamInputResponse);
+    // 向进程的普通 stdin 或 PTY 写入一段输入。
+    rpc SendInput(SendInputRequest) returns (SendInputResponse);
+    // 向进程组发送受支持的终止信号。
+    rpc SendSignal(SendSignalRequest) returns (SendSignalResponse);
+
+    // 关闭普通进程 stdin 以发送 EOF；PTY 进程应发送 Ctrl+D（0x04）。
+    rpc CloseStdin(CloseStdinRequest) returns (CloseStdinResponse);
+}
+
+// 描述可选的伪终端及其尺寸。
+message PTY {
+    // 初始或更新后的终端尺寸。
+    Size size = 1;
+
+    // 描述终端的列数和行数。
+    message Size {
+        // 终端列数。
+        uint32 cols = 1;
+        // 终端行数。
+        uint32 rows = 2;
+    }
+}
+
+// 描述要启动或在列表中返回的进程配置。
+message ProcessConfig {
+    // 要执行的程序路径或命令。
+    string cmd = 1;
+    // 传递给程序的参数列表。
+    repeated string args = 2;
+    // 覆盖默认环境变量的键值对。
+    map<string, string> envs = 3;
+    // 可选的工作目录。
+    optional string cwd = 4;
+}
+
+// 表示无需参数的进程列表请求。
+message ListRequest {}
+
+// 表示进程列表中的一个进程。
+message ProcessInfo {
+    // 进程启动配置。
+    ProcessConfig config = 1;
+    // 进程组组长 PID。
+    uint32 pid = 2;
+    // 调用方提供的可选唯一标签。
+    optional string tag = 3;
+}
+
+// 包含当前存活进程列表的响应。
+message ListResponse {
+    // 当前由 envd 管理的进程。
+    repeated ProcessInfo processes = 1;
+}
+
+// 表示启动一个进程的流式请求。
+message StartRequest {
+    // 必填的进程配置。
+    ProcessConfig process = 1;
+    // 可选的 PTY 配置。
+    optional PTY pty = 2;
+    // 可选的唯一进程标签。
+    optional string tag = 3;
+    // 是否保留普通 stdin；为兼容旧客户端，缺失时默认为 true。
+    optional bool stdin = 4;
+}
+
+// 表示 PTY 进程的更新请求。
+message UpdateRequest {
+    // 要更新的进程选择器。
+    ProcessSelector process = 1;
+
+    // 包含新尺寸的 PTY 配置。
+    optional PTY pty = 2;
+}
+
+// 表示没有响应字段的 PTY 更新结果。
+message UpdateResponse {}
+
+// 表示进程输出流中的一个服务端事件。
+message ProcessEvent {
+    // 指定事件的实际类型。
+    oneof event {
+        // 进程已启动事件。
+        StartEvent start = 1;
+        // 标准输出、标准错误或 PTY 输出事件。
+        DataEvent data = 2;
+        // 进程结束事件。
+        EndEvent end = 3;
+        // 空闲流保活事件。
+        KeepAlive keepalive = 4;
+    }
+
+    // 携带新启动进程的 PID。
+    message StartEvent {
+        // 进程组组长 PID。
+        uint32 pid = 1;
+    }
+
+    // 携带一种进程输出通道的数据。
+    message DataEvent {
+        // 指定输出来自哪个通道。
+        oneof output {
+            // base64 编码的标准输出字节。
+            bytes stdout = 1;
+            // base64 编码的标准错误字节。
+            bytes stderr = 2;
+            // base64 编码的 PTY 输出字节。
+            bytes pty = 3;
+        }
+    }
+
+    // 描述进程的最终退出状态。
+    message EndEvent {
+        // 进程退出码，回收失败时为负值。
+        sint32 exit_code = 1;
+        // 是否以正常退出状态结束。
+        bool exited = 2;
+        // 人类可读的退出状态。
+        string status = 3;
+        // 可选的异常或回收错误。
+        optional string error = 4;
+    }
+
+    // 表示没有额外数据的保活事件。
+    message KeepAlive {}
+}
+
+// 包含 Start 流中一个进程事件的响应。
+message StartResponse {
+    // 要发送给客户端的事件。
+    ProcessEvent event = 1;
+}
+
+// 包含 Connect 流中一个进程事件的响应。
+message ConnectResponse {
+    // 要发送给客户端的事件。
+    ProcessEvent event = 1;
+}
+
+// 表示一元进程输入请求。
+message SendInputRequest {
+    // 要接收输入的进程。
+    ProcessSelector process = 1;
+
+    // 要写入的 stdin 或 PTY 数据。
+    ProcessInput input = 2;
+}
+
+// 表示没有响应字段的一元输入结果。
+message SendInputResponse {}
+
+// 表示写入 stdin 或 PTY 的输入数据。
+message ProcessInput {
+    // 指定输入应写入的通道。
+    oneof input {
+        // base64 编码的普通 stdin 数据。
+        bytes stdin = 1;
+        // base64 编码的 PTY 输入数据。
+        bytes pty = 2;
+    }
+}
+
+// 表示 StreamInput 客户端流中的一个事件。
+message StreamInputRequest {
+    // 指定事件类型。
+    oneof event {
+        // 选择后续数据帧使用的进程。
+        StartEvent start = 1;
+        // 向已选择进程写入输入。
+        DataEvent data = 2;
+        // 保持空闲客户端流存活。
+        KeepAlive keepalive = 3;
+    }
+
+    // 表示流开始时选择的进程。
+    message StartEvent {
+        // 要在后续帧中使用的进程选择器。
+        ProcessSelector process = 1;
+    }
+
+    // 表示一个输入数据帧。
+    message DataEvent {
+        // 要写入的输入内容。
+        ProcessInput input = 2;
+    }
+
+    // 表示没有额外数据的客户端保活帧。
+    message KeepAlive {}
+}
+
+// 表示没有响应字段的流输入结果。
+message StreamInputResponse {}
+
+// 定义 envd 支持的进程控制信号。
+enum Signal {
+    // 未指定信号。
+    SIGNAL_UNSPECIFIED = 0;
+    // 请求进程优雅终止。
+    SIGNAL_SIGTERM = 15;
+    // 强制终止进程。
+    SIGNAL_SIGKILL = 9;
+}
+
+// 表示向进程发送信号的请求。
+message SendSignalRequest {
+    // 要接收信号的进程。
+    ProcessSelector process = 1;
+
+    // 要发送的受支持信号。
+    Signal signal = 2;
+}
+
+// 表示没有响应字段的发送信号结果。
+message SendSignalResponse {}
+
+// 表示关闭普通 stdin 的请求。
+message CloseStdinRequest {
+    // 要关闭 stdin 的进程。
+    ProcessSelector process = 1;
+}
+
+// 表示没有响应字段的关闭 stdin 结果。
+message CloseStdinResponse {}
+
+// 表示订阅进程输出的请求。
+message ConnectRequest {
+    // 要订阅的进程。
+    ProcessSelector process = 1;
+}
+
+// 要求调用方通过 PID 或标签二选一定位进程。
+message ProcessSelector {
+    // 指定唯一的进程定位方式。
+    oneof selector {
+        // 进程组组长 PID。
+        uint32 pid = 1;
+        // 调用方提供的唯一进程标签。
+        string tag = 2;
+    }
+}
