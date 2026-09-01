@@ -76,9 +76,8 @@ global:
   timezone: Asia/Shanghai
   # Non-default cluster DNS domain (empty falls back to cluster.local).
   clusterDomain: ""
-  # Optional private-registry prefix that rewrites every Cube-owned image
-  # repository so operators mirroring the chart into a private registry
-  # only need to change one value.
+  # Optional private-registry host: rewrites the official Cube TCR host
+  # on Cube-owned images; other repositories are left as declared.
   imageRegistry: ""
 
 # StorageClass — off by default so PVCs use the cluster's default
@@ -368,9 +367,10 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
   -n cube-system --create-namespace
 ```
 
-Combine with `values-tke.yaml` when installing on TKE in China. The preset sets
-`global.imageRegistry` to the cn host and overrides mysql / redis / minio / kubectl
-repositories that do not go through `cube.cubeImage`.
+`global.imageRegistry` (set by `values-cn.yaml`) only rewrites the official
+Cube TCR hosts, so per-image overrides pointing at other hosts are left as
+declared. On TKE in China, also combine with `values-tke.yaml` (StorageClass /
+PVC / LoadBalancer only — it does not set `global.imageRegistry`).
 
 ## Database migration
 

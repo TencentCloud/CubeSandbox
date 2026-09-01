@@ -39,22 +39,28 @@ Cube-owned images should use `cube.cubeImage` instead.
 {{- end -}}
 
 {{- /*
-Render "<repository>:<tag>" for a Cube-owned image with optional
-$.Values.global.imageRegistry override applied to the registry portion of
-.repository. Call as:
+Official Cube TCR hosts that global.imageRegistry may rewrite.
+*/}}
+{{- define "cube.officialImageRegistries" -}}
+cube-sandbox-int.tencentcloudcr.com,cube-sandbox-cn.tencentcloudcr.com
+{{- end -}}
+
+{{- /*
+Render "<repository>:<tag>" for a Cube-owned image. Call as:
   include "cube.cubeImage" (dict "image" .Values.images.master "context" $)
-When global.imageRegistry is empty the output is identical to cube.image;
-setting it rewrites the leading registry host (segment before the first "/")
-so the same chart can be republished to any private registry without editing
-each per-image entry. Everything after the first "/" (the repository path)
-is preserved.
+When global.imageRegistry is set, the leading host of .repository is
+rewritten to it — but only if it is an official Cube TCR host
+(cube.officialImageRegistries); other repositories render unchanged.
+Without it the output is identical to cube.image.
 */}}
 {{- define "cube.cubeImage" -}}
 {{- $image := .image -}}
 {{- $ctx := .context -}}
 {{- $repo := $image.repository -}}
 {{- $override := (default (dict) $ctx.Values.global).imageRegistry | default "" -}}
-{{- if $override -}}
+{{- $host := index (splitList "/" $repo) 0 -}}
+{{- $official := splitList "," (include "cube.officialImageRegistries" .context) -}}
+{{- if and $override (has $host $official) -}}
   {{- $parts := splitList "/" $repo -}}
   {{- if gt (len $parts) 1 -}}
     {{- $repo = printf "%s/%s" (trimSuffix "/" $override) (join "/" (rest $parts)) -}}

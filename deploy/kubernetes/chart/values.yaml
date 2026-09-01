@@ -11,15 +11,8 @@ global:
   # kubelet --cluster-domain=<non-default>. Empty falls back to
   # cubeNode.dns.clusterDomain, then "cluster.local".
   clusterDomain: ""
-  # Optional registry prefix that replaces the registry portion of every
-  # Cube-owned image below. Leave empty to keep the per-image repository
-  # exactly as declared. Set to e.g. "my-registry.example.com/cubesandbox"
-  # to mirror all images into a private registry without editing each entry
-  # individually. Applies to the pvmHostBootstrap / nodeInit / node / master
-  # / api / ops / cubemastercli / proxy / lifecycleManager / cubeEgress /
-  # cubeEgressNet / webui / cubelet / cubeShim / cubeKernel /
-  # cubeGuest / cubeAgent / waitNodePrep / kubectl (alpine-k8s mirror) entries but not to
-  # third-party images such as mysql / redis / minio.
+  # Optional private registry host that rewrites the official Cube TCR host
+  # on Cube-owned images. Set to a host only, e.g. my-registry.example.com.
   imageRegistry: ""
 
 images:
