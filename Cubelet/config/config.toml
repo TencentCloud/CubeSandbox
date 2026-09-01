@@ -43,6 +43,8 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     # Static-only cadence for node status and resource reporting.
     # Do not configure this in dynamicconf/conf.yaml.
     node_status_update_frequency = "1s"
+    cubeops_addr = ""
+    cubeops_timeout = "10m"
 
   [plugins."io.cubelet.internal.v1.volume"]
   [plugins."io.cubelet.internal.v1.shimlog"]

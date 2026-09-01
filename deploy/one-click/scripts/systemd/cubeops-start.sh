@@ -29,6 +29,41 @@ export CUBE_MASTER_ADDR="${CUBE_MASTER_ADDR:-http://127.0.0.1:8089}"
 export JWT_ACCESS_TTL="${JWT_ACCESS_TTL:-15m}"
 export JWT_REFRESH_TTL="${JWT_REFRESH_TTL:-168h}"
 
+# Warehouse unpack scratch. Distro /tmp is often tmpfs — keep it on disk.
+CUBE_OPS_WAREHOUSE_WORK_DIR="${CUBE_OPS_WAREHOUSE_WORK_DIR:-/data/cubeops/tmp}"
+mkdir -p "${CUBE_OPS_WAREHOUSE_WORK_DIR}"
+export CUBE_OPS_WAREHOUSE_WORK_DIR
+export TMPDIR="${TMPDIR:-${CUBE_OPS_WAREHOUSE_WORK_DIR}}"
+
+# Derive CubeOps S3 connection from CUBE_S3_* when unset. Bucket stays
+# cube-ops — never copy CUBE_S3_BUCKET (that is cube-volumes).
+if [[ -z "${CUBE_OPS_S3_ENDPOINT:-}" && -n "${CUBE_S3_ENDPOINT:-}" ]]; then
+  export CUBE_OPS_S3_ENDPOINT="${CUBE_S3_ENDPOINT}"
+fi
+if [[ -z "${CUBE_OPS_S3_NODE_ENDPOINT:-}" && -n "${CUBE_OPS_S3_ENDPOINT:-}" ]]; then
+  export CUBE_OPS_S3_NODE_ENDPOINT="${CUBE_OPS_S3_ENDPOINT}"
+fi
+if [[ -z "${CUBE_OPS_S3_ACCESS_KEY_ID:-}" && -n "${CUBE_S3_ACCESS_KEY_ID:-}" ]]; then
+  export CUBE_OPS_S3_ACCESS_KEY_ID="${CUBE_S3_ACCESS_KEY_ID}"
+fi
+if [[ -z "${CUBE_OPS_S3_SECRET_ACCESS_KEY:-}" && -n "${CUBE_S3_SECRET_ACCESS_KEY:-}" ]]; then
+  export CUBE_OPS_S3_SECRET_ACCESS_KEY="${CUBE_S3_SECRET_ACCESS_KEY}"
+fi
+export CUBE_OPS_S3_BUCKET="${CUBE_OPS_S3_BUCKET:-cube-ops}"
+if [[ -z "${CUBE_OPS_S3_REGION:-}" && -n "${CUBE_S3_REGION:-}" ]]; then
+  export CUBE_OPS_S3_REGION="${CUBE_S3_REGION}"
+fi
+if [[ -z "${CUBE_OPS_S3_PATH_STYLE:-}" && -n "${CUBE_S3_S3FS_EXTRA_OPTS:-}" ]]; then
+  if [[ "${CUBE_S3_S3FS_EXTRA_OPTS}" == *use_path_request_style* ]]; then
+    export CUBE_OPS_S3_PATH_STYLE=true
+  fi
+fi
+# Optional warehouse knobs from .one-click.env (defaults live in CubeOps):
+#   CUBE_OPS_WAREHOUSE_UPLOAD_TIMEOUT
+#   CUBE_OPS_WAREHOUSE_FETCH_TIMEOUT
+#   CUBE_OPS_WAREHOUSE_GITHUB_REPOS / CUBE_OPS_WAREHOUSE_CNB_REPOS
+#   CUBE_OPS_WAREHOUSE_GITHUB_TOKEN / CUBE_OPS_WAREHOUSE_CNB_TOKEN
+
 # Shared MySQL (same instance as CubeMaster, database cube_mvp).
 if [[ -n "${DATABASE_URL:-}" ]]; then
   export DATABASE_URL

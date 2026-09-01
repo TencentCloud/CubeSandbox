@@ -319,7 +319,7 @@ export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=1
 | `TENCENTCLOUD_CUBE_DB` / `TENCENTCLOUD_CUBE_USER` / `TENCENTCLOUD_CUBE_PASSWORD` | `cube_mvp` / `cube` / 演示值 | 应用库名 / 账号 / 密码 |
 | `TENCENTCLOUD_CUBEMASTER_REPLICAS` | `1` | cube-master 副本数 |
 | `TENCENTCLOUD_CUBE_API_REPLICAS` | `1` | cube-api 副本数 |
-| `TENCENTCLOUD_CUBE_OPS_REPLICAS` | `2` | cube-ops 副本数。节点状态存储在共享 MySQL/Redis 中，副本数可大于 1。cube-webui 的 `/opsapi/` 与 `/cubeapi/v1/` 会转发到该集群内服务 |
+| `TENCENTCLOUD_CUBE_OPS_REPLICAS` | `2` | cube-ops 副本数。默认栈不带对象存储，组件仓库保持禁用，给 cube-ops 接上 COS（或其他 S3）后才可用（见[组件多版本](/zh/guide/component-multiversion)）。cube-webui 的 `/opsapi/` 与 `/cubeapi/v1/` 会转发到该集群内服务 |
 | `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy 副本数。支持设置为大于 `1`；每个副本都会注册到 Redis，供 cube-lifecycle-manager 发现 |
 | `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS` | `1` | cube-lifecycle-manager 副本数。除非已验证 CLM 高可用行为，否则建议保持 `1` |
 | `TENCENTCLOUD_CUBE_WEBUI_REPLICAS` | `1` | cube-webui 副本数 |

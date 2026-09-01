@@ -23,8 +23,9 @@
     "addMeta": "Add entry"
   },
   "compat": {
-    "stale": "Version drift",
-    "staleHelp": "The node's current component versions differ from those recorded on this template. You can still create a sandbox; make sure the node already has the versions this template needs."
+    "unpinned": "Needs rebuild",
+    "unpinnedHelp": "After the node upgrade, creating a sandbox from this template may fail. Open the template and click Rebuild Template first.",
+    "openTemplate": "Open template"
   },
   "actions": {
     "cancel": "Cancel",

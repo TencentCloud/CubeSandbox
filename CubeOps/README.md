@@ -18,11 +18,16 @@ content-fingerprint tamper detection and cluster-wide locking.
 CubeOps exposes two API groups:
 
 1. **Admin/Ops API** (`/api/v1/auth`, `/api/v1/cluster`, `/api/v1/agenthub`,
-   `/api/v1/store`, `/api/v1/config`) — used by the WebUI for cluster
-   management, digital assistant (AgentHub) lifecycle, and store operations.
+   `/api/v1/store`, `/api/v1/config`, `/api/v1/warehouse`) — used by the WebUI for cluster
+   management, digital assistant (AgentHub) lifecycle, store operations, and the
+   component warehouse.
 2. **SDK API** (`/api/v1/sdk/*`) — used by the WebUI for sandbox/template/
    snapshot CRUD. These endpoints call CubeMaster HTTP REST API directly
    (replacing the former CubeAPI reverse proxy).
+3. **Node warehouse API** (`/internal/warehouse/*`) — unauthenticated, same
+   isolation model as CubeMaster `/internal/meta`. Compute nodes download
+   pinned component versions here. Do not publish this prefix on the public
+   WebUI nginx.
 
 > **Multi-replica**: CubeOps node state lives in shared MySQL/Redis, so it can be scaled beyond one replica for availability.
 
@@ -98,35 +103,14 @@ curl -s http://127.0.0.1:3010/health
 # → ok
 ```
 
-The systemd unit reads environment variables from `.one-click.env` via the
-start script at `deploy/one-click/scripts/systemd/cubeops-start.sh`.
-
 ## Configuration
 
-CubeOps supports two configuration methods, which can be combined:
+One-click and Helm configure CubeOps with environment variables. Nested YAML
+keys map to `CUBE_OPS_<SECTION>_<FIELD>` (for example `s3.endpoint` →
+`CUBE_OPS_S3_ENDPOINT`). Env wins over a YAML file, which wins over built-in
+defaults.
 
-### Option 1: YAML config file (recommended)
-
-Copy the example and edit:
-
-```bash
-cp config.example.yaml /etc/cube/ops.yaml
-vi /etc/cube/ops.yaml
-```
-
-Or point to a custom path:
-
-```bash
-export CUBE_OPS_CONFIG=/path/to/your/config.yaml
-```
-
-See [`config.example.yaml`](./config.example.yaml) for all available fields
-with inline comments.
-
-### Option 2: Environment variables (legacy, still supported)
-
-Environment variables take precedence over YAML — use this to override
-individual fields without editing the YAML file.
+### Environment variables (one-click / Helm)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -142,8 +126,49 @@ individual fields without editing the YAML file.
 | `CUBE_MASTER_ADDR` | `http://127.0.0.1:8089` | CubeMaster base URL |
 | `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | Sandbox domain (used by SDK handler for sandbox URL construction) |
 | `REDIS_URL` | *(optional)* | Redis connection URL. Alternatively use `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`. |
+| `CUBE_OPS_WAREHOUSE_WORK_DIR` | `/var/tmp/cubeops-warehouse` | Local unpack scratch (`warehouse.work_dir`); also used as `TMPDIR` |
+| `CUBE_OPS_WAREHOUSE_UPLOAD_TIMEOUT` | `30m` | HTTP write timeout and S3 Put abort budget (`warehouse.upload_timeout`) |
+| `CUBE_OPS_WAREHOUSE_FETCH_TIMEOUT` | `30m` | GitHub/CNB download timeout for one-click imports (`warehouse.fetch_timeout`) |
+| `CUBE_OPS_WAREHOUSE_UPLOAD_MAX_BYTES` | `8GiB` | Max one-click upload size (`warehouse.upload_max_bytes`) |
+| `CUBE_OPS_S3_ENDPOINT` | empty | Empty (with empty AK/SK) disables warehouse routes (`501 warehouse_disabled`) |
+| `CUBE_OPS_S3_NODE_ENDPOINT` | same as endpoint | Host signed into presigned GET URLs |
+| `CUBE_OPS_S3_ACCESS_KEY_ID` / `SECRET_ACCESS_KEY` | empty | Object-store credentials (never given to nodes) |
+| `CUBE_OPS_S3_BUCKET` | `cube-ops` | CubeOps dedicated bucket, separate from `cube-volumes` / `cube-s3lvol` |
+| `CUBE_OPS_WAREHOUSE_PRESIGN_TTL` | `5m` | Presigned GET TTL (clamped 1m–15m) |
+| `CUBE_OPS_WAREHOUSE_GITHUB_REPOS` | `TencentCloud/CubeSandbox` | Comma-separated GitHub owner/repo allow-list (`warehouse.github_repos`) |
+| `CUBE_OPS_WAREHOUSE_CNB_REPOS` | `CubeSandbox/CubeSandbox` | Comma-separated CNB owner/repo allow-list (`warehouse.cnb_repos`) |
+| `CUBE_OPS_WAREHOUSE_GITHUB_TOKEN` | *(optional)* | Token for private GitHub release downloads (`warehouse.github_token`) |
+| `CUBE_OPS_WAREHOUSE_CNB_TOKEN` | *(optional)* | Token for private CNB release downloads (`warehouse.cnb_token`) |
 
-**Resolution order**: environment variables > YAML file > built-in defaults.
+Warehouse blobs use the CubeOps S3 bucket (`cube-ops`):
+
+- Minimum IAM: `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`,
+  `s3:ListBucket`, `s3:AbortMultipartUpload`, `s3:ListBucketMultipartUploads`
+  (plus `s3:GetBucketLocation` if region is unset).
+- Nodes never receive credentials; they only GET a presigned URL.
+- Anyone who can write the bucket can change the binaries nodes execute —
+  treat AK/SK as a trust boundary.
+
+The systemd unit reads environment variables from `.one-click.env` via the
+start script at `deploy/one-click/scripts/systemd/cubeops-start.sh`.
+
+### YAML file (optional, manual installs)
+
+Copy the example and edit:
+
+```bash
+cp config.example.yaml /etc/cube/ops.yaml
+vi /etc/cube/ops.yaml
+```
+
+Or point to a custom path:
+
+```bash
+export CUBE_OPS_CONFIG=/path/to/your/config.yaml
+```
+
+See [`config.example.yaml`](./config.example.yaml) for all available fields
+with inline comments. One-click does not install this file.
 
 ## Authentication
 
@@ -170,6 +195,29 @@ RBAC is reserved for future use — currently any valid JWT grants full access.
 - `GET /api/v1/cluster/versions` — Component version matrix
 - `GET /api/v1/nodes` — Node list
 - `GET /api/v1/nodes/{nodeID}` — Node detail
+
+### Warehouse
+
+The warehouse catalog is a closed set of four components (`cube-shim`,
+`cube-image`, `cube-agent`, `cube-kernel-scf`). Artifacts stay keyed by
+`(arch, component, version)`. `GET /warehouse/components` always returns
+those four names (empty warehouse: `versionCount: 0`). Unknown names on
+`GET /warehouse/components/{component}` are `400`. If CubeOps cannot
+list nodes, `nodesMissing` is omitted rather than reported as zero.
+
+- `GET /api/v1/warehouse/components` — Catalog summaries (`name`, `versionCount`, `arches`, `sizeBytes`, optional `nodesMissing`)
+- `GET /api/v1/warehouse/components/{component}` — Versions grouped with per-arch artifacts and node coverage
+- `DELETE /api/v1/warehouse/components/{component}/versions/{version}?arch=` — Delete a warehouse copy (not node-local inventory)
+- `POST /api/v1/warehouse/uploads` — Upload a one-click `.tar.gz`
+- `POST /api/v1/warehouse/imports` — Start an async import (github / cnb / upload)
+- `GET /api/v1/warehouse/imports` — List import jobs (`?limit=&offset=`; response `{jobs, total}`)
+- `GET /api/v1/warehouse/imports/{id}` — Import job status
+- `POST /api/v1/warehouse/preinstall` — Create per-node pull jobs
+- `GET /api/v1/warehouse/preinstall` — List preinstall jobs (`?limit=&offset=&node_id=&status=`; response `{jobs, total}`)
+- `GET /internal/warehouse/blob` — Node download of one version tree (no JWT)
+- `GET /internal/warehouse/jobs` — Pending preinstall jobs for this node
+- `POST /internal/warehouse/jobs/{id}/ack` — Ack running/succeeded/failed
+- `PUT /internal/warehouse/inventory` — Replace this node's inventoried versions for one arch (empty `items` clears that node+arch)
 
 ### AgentHub
 - `GET /api/v1/agenthub/instances` — List agent instances

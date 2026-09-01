@@ -166,7 +166,7 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
 - `cubeproxy/` -> `/usr/local/services/cubetoolbox/cubeproxy/`
 - `webui/` -> `/usr/local/services/cubetoolbox/webui/`
 
-其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`，其内置 network runtime 直接读取 `Cubelet/config/config.toml` 中的网络插件配置；`cube-api` 则直接读取 `.one-click.env` 中的环境变量启动，默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，以 Docker 容器运行并由专用 systemd service 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，从发布包内 build context 本地构建镜像，并由 systemd 管理。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI；其生命周期同样由 systemd 托管。
+其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`，其内置 network runtime 直接读取 `Cubelet/config/config.toml` 中的网络插件配置；`cube-api` 和 `cubeops` 都从 `.one-click.env` 读环境变量。CubeOps 仓库相关项是 `CUBE_OPS_WAREHOUSE_*`（超时、GitHub/CNB 白名单和 token）以及 `CUBE_OPS_S3_*`；默认复用 Volume 的 MinIO/S3 连接、用独立的 `cube-ops` 桶，不需要额外配置。一键安装不写 CubeOps YAML。`cube-api` 默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，以 Docker 容器运行并由专用 systemd service 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，从发布包内 build context 本地构建镜像，并由 systemd 管理。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI；其生命周期同样由 systemd 托管。
 
 ## 目标机安装
 

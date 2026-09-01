@@ -7,7 +7,7 @@
 #
 # What this file does compared to values.yaml defaults:
 #   1. Provisions a chart-owned CBS StorageClass named "cube-cbs-wffc" and
-#      pins every CubeMaster / MySQL / Redis / MinIO PVC to it.
+#      pins CubeMaster / MySQL / Redis / MinIO PVCs to it.
 #   2. Uses WaitForFirstConsumer volume binding so multi-AZ TKE clusters
 #      create CBS disks in the same AZ as the scheduled Pod.
 #   3. Exposes CubeProxy via a TKE CLB (LoadBalancer Service) and disables
@@ -56,6 +56,22 @@ redis:
 minio:
   persistence:
     storageClassName: cube-cbs-wffc
+
+# cubeOps no longer uses a warehouse PVC. replicas > 1 is safe with
+# RollingUpdate (default). To enable the warehouse against COS, set
+# cubeOps.s3 (volumeS3.endpoint / inline AK/SK may supply the connection;
+# volumeS3.existingSecret is volume-s3.conf and is not a CubeOps credential).
+# Set nodeEndpoint when compute nodes sit outside cluster DNS.
+# cubeOps:
+#   replicas: 2
+#   s3:
+#     endpoint: https://cos.ap-guangzhou.myqcloud.com
+#     nodeEndpoint: https://cos.ap-guangzhou.myqcloud.com
+#     bucket: cube-ops
+#     region: ap-guangzhou
+#     pathStyle: false
+#     existingSecret: my-cubeops-s3   # keys: s3-access-key-id / s3-secret-access-key
+#     # or inline: accessKeyId / secretAccessKey
 
 # cubevs/sandbox CIDR must not overlap the cluster Service CIDR. TKE defaults
 # the Service CIDR to 172.16.0.0/16; keep 192.168.0.0/18 (the packaged Cubelet

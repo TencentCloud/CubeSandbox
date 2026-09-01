@@ -10,13 +10,15 @@
 //     manifests keep using env vars without changes.
 //
 //  2. YAML file at the path in CUBE_OPS_CONFIG (or /etc/cube/ops.yaml if
-//     unset). YAML is the recommended way to configure CubeOps going forward
-//     because it groups all knobs in one place and supports comments.
+//     unset). One-click and Helm use environment variables; the YAML file is
+//     optional for manual installs. Nested keys map to CUBE_OPS_<SECTION>_<FIELD>
+//     (for example s3.endpoint → CUBE_OPS_S3_ENDPOINT).
 //
 //  3. Built-in defaults.
 //
-// The YAML schema is intentionally flat — one section per top-level
-// component. See config.example.yaml for a fully commented example.
+// The YAML schema groups related knobs under a section per component
+// (for example warehouse:). See config.example.yaml for a fully
+// commented example.
 package config
 
 import (
@@ -78,6 +80,9 @@ type Config struct {
 	// by CubeDB/tombstone (7-day retention, hourly). DISABLED by default — the
 	// purge is irreversible, so it must be opted into explicitly.
 	SoftDeletePurge SoftDeletePurgeConf `yaml:"soft_delete_purge"`
+
+	S3        S3Config        `yaml:"s3"`
+	Warehouse WarehouseConfig `yaml:"warehouse"`
 }
 
 // SoftDeletePurgeConf configures the CubeOps tombstone purger.
@@ -87,6 +92,56 @@ type SoftDeletePurgeConf struct {
 	Retention time.Duration `yaml:"retention"` // <=0 -> 7d; (0,1h) clamped up to 1h
 	Interval  time.Duration `yaml:"interval"`  // <=0 -> 1h; (0,1m) clamped up to 1m
 }
+
+// WarehouseConfig is the component warehouse and its import sources.
+type WarehouseConfig struct {
+	WorkDir        string        `yaml:"work_dir"`
+	UploadTimeout  time.Duration `yaml:"upload_timeout"`
+	FetchTimeout   time.Duration `yaml:"fetch_timeout"`
+	UploadMaxBytes int64         `yaml:"upload_max_bytes"`
+	GitHubRepos    []string      `yaml:"github_repos"`
+	CNBRepos       []string      `yaml:"cnb_repos"`
+	GitHubToken    string        `yaml:"github_token"`
+	CNBToken       string        `yaml:"cnb_token"`
+	PresignTTL     time.Duration `yaml:"presign_ttl"`
+}
+
+// S3Config is the CubeOps object-store connection.
+type S3Config struct {
+	Endpoint        string `yaml:"endpoint"`
+	NodeEndpoint    string `yaml:"node_endpoint"`
+	AccessKeyID     string `yaml:"access_key_id"`
+	SecretAccessKey string `yaml:"secret_access_key"`
+	Bucket          string `yaml:"bucket"`
+	Region          string `yaml:"region"`
+	PathStyle       *bool  `yaml:"path_style"`
+	CreateBucket    *bool  `yaml:"create_bucket"`
+}
+
+const DefaultS3Bucket = "cube-ops"
+
+// S3Configured reports whether the CubeOps object store is usable.
+func (c Config) S3Configured() bool {
+	return strings.TrimSpace(c.S3.Endpoint) != "" &&
+		strings.TrimSpace(c.S3.AccessKeyID) != "" &&
+		strings.TrimSpace(c.S3.SecretAccessKey) != ""
+}
+
+// UsePathStyle defaults to true (MinIO / path-style S3).
+func (c S3Config) UsePathStyle() bool {
+	return defaultTrue(c.PathStyle)
+}
+
+// ShouldCreateBucket defaults to true.
+func (c S3Config) ShouldCreateBucket() bool {
+	return defaultTrue(c.CreateBucket)
+}
+
+func defaultTrue(p *bool) bool {
+	return p == nil || *p
+}
+
+func boolPtr(v bool) *bool { return &v }
 
 // Load reads configuration from YAML + environment variables (env wins).
 func Load() (*Config, error) {
@@ -133,6 +188,31 @@ func Load() (*Config, error) {
 	}
 	if cfg.SandboxDomain == "" {
 		cfg.SandboxDomain = "cube.app"
+	}
+	if cfg.Warehouse.WorkDir == "" {
+		cfg.Warehouse.WorkDir = "/var/tmp/cubeops-warehouse"
+	}
+	if cfg.Warehouse.UploadTimeout == 0 {
+		cfg.Warehouse.UploadTimeout = 30 * time.Minute
+	}
+	if cfg.Warehouse.FetchTimeout == 0 {
+		cfg.Warehouse.FetchTimeout = 30 * time.Minute
+	}
+	if cfg.Warehouse.UploadMaxBytes <= 0 {
+		cfg.Warehouse.UploadMaxBytes = 8 << 30
+	}
+	if cfg.S3.Bucket == "" {
+		cfg.S3.Bucket = DefaultS3Bucket
+	}
+	if cfg.S3.Region == "" {
+		cfg.S3.Region = "us-east-1"
+	}
+	cfg.Warehouse.PresignTTL = clampPresignTTL(cfg.Warehouse.PresignTTL)
+	if len(cfg.Warehouse.GitHubRepos) == 0 {
+		cfg.Warehouse.GitHubRepos = []string{"TencentCloud/CubeSandbox"}
+	}
+	if len(cfg.Warehouse.CNBRepos) == 0 {
+		cfg.Warehouse.CNBRepos = []string{"CubeSandbox/CubeSandbox"}
 	}
 
 	// JWT_SECRET is optional — if not set, it will be auto-generated and
@@ -365,4 +445,106 @@ func overrideFromEnv(cfg *Config) {
 			cfg.RefreshTTL = d
 		}
 	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_WORK_DIR"); v != "" {
+		cfg.Warehouse.WorkDir = v
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_UPLOAD_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Warehouse.UploadTimeout = d
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_FETCH_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Warehouse.FetchTimeout = d
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_GITHUB_TOKEN"); v != "" {
+		cfg.Warehouse.GitHubToken = v
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_CNB_TOKEN"); v != "" {
+		cfg.Warehouse.CNBToken = v
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_GITHUB_REPOS"); v != "" {
+		cfg.Warehouse.GitHubRepos = splitCSV(v)
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_CNB_REPOS"); v != "" {
+		cfg.Warehouse.CNBRepos = splitCSV(v)
+	}
+	if v := os.Getenv("CUBE_OPS_S3_ENDPOINT"); v != "" {
+		cfg.S3.Endpoint = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_NODE_ENDPOINT"); v != "" {
+		cfg.S3.NodeEndpoint = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_ACCESS_KEY_ID"); v != "" {
+		cfg.S3.AccessKeyID = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_SECRET_ACCESS_KEY"); v != "" {
+		cfg.S3.SecretAccessKey = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_BUCKET"); v != "" {
+		cfg.S3.Bucket = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_REGION"); v != "" {
+		cfg.S3.Region = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_PATH_STYLE"); v != "" {
+		if p := parseEnvBool(v); p != nil {
+			cfg.S3.PathStyle = p
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_S3_CREATE_BUCKET"); v != "" {
+		if p := parseEnvBool(v); p != nil {
+			cfg.S3.CreateBucket = p
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_PRESIGN_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Warehouse.PresignTTL = d
+		}
+	}
+	if v := os.Getenv("CUBE_OPS_WAREHOUSE_UPLOAD_MAX_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			cfg.Warehouse.UploadMaxBytes = n
+		}
+	}
+}
+
+func parseEnvBool(v string) *bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return boolPtr(true)
+	case "0", "false", "no", "off":
+		return boolPtr(false)
+	default:
+		return nil
+	}
+}
+
+func clampPresignTTL(d time.Duration) time.Duration {
+	const minTTL = time.Minute
+	const maxTTL = 15 * time.Minute
+	const defTTL = 5 * time.Minute
+	if d <= 0 {
+		return defTTL
+	}
+	if d < minTTL {
+		return minTTL
+	}
+	if d > maxTTL {
+		return maxTTL
+	}
+	return d
+}
+
+func splitCSV(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

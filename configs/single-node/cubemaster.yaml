@@ -31,7 +31,7 @@ cubelet_conf:
   # Shipped default: no cluster-wide idle timeout. Set e.g. 300 in production if needed.
   default_timeout_insec: -1
   # Create/scheduling RPC deadline only (not sandbox idle TTL).
-  create_timeout_insec: 300
+  create_timeout_insec: 600
   create_concurrent_limit: 100
   destroy_concurent_limit: 100
   enable_exposed_port: true

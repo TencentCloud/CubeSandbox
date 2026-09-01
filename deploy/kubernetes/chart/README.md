@@ -76,9 +76,8 @@ global:
   timezone: Asia/Shanghai
   # Non-default cluster DNS domain (empty falls back to cluster.local).
   clusterDomain: ""
-  # Optional private-registry prefix that rewrites every Cube-owned image
-  # repository so operators mirroring the chart into a private registry
-  # only need to change one value.
+  # Optional private-registry host: rewrites the official Cube TCR host
+  # on Cube-owned images; other repositories are left as declared.
   imageRegistry: ""
 
 # StorageClass — off by default so PVCs use the cluster's default
@@ -284,7 +283,7 @@ The chart uses PVC-backed persistence by default so state can survive
 rescheduling across dedicated control nodes:
 
 ```yaml
-# Optional: pin all four control-plane PVCs at once
+# Optional: pin master / mysql / redis / minio PVCs at once.
 persistence:
   storageClassName: ""   # empty → cluster default SC
 
@@ -319,7 +318,11 @@ cluster's default StorageClass, which works out of the box for most
 self-hosted / EKS / GKE / AKS clusters. Use `hostPath` only for
 single-node throwaway environments; multi-control-node deployments must
 use PVCs or external MySQL / Redis / S3. `existingClaim` overrides both
-`storageClassName` and `hostPath`.
+`storageClassName` and `hostPath`. Warehouse blobs live in S3 (chart MinIO
+by default); CubeOps unpack scratch is an `emptyDir`. `cubeOps.replicas`
+may be greater than 1; the default strategy is RollingUpdate with
+`maxUnavailable: 0`. If a previous release set `cubeOps.persistence`,
+remove it — Helm fails render rather than silently dropping that key.
 
 Do not confuse `storageClass.*` (whether the chart **creates** a
 StorageClass) with `persistence.storageClassName` (which SC **name** PVCs
@@ -368,9 +371,10 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
   -n cube-system --create-namespace
 ```
 
-Combine with `values-tke.yaml` when installing on TKE in China. The preset sets
-`global.imageRegistry` to the cn host and overrides mysql / redis / minio / kubectl
-repositories that do not go through `cube.cubeImage`.
+`global.imageRegistry` (set by `values-cn.yaml`) only rewrites the official
+Cube TCR hosts, so per-image overrides pointing at other hosts are left as
+declared. On TKE in China, also combine with `values-tke.yaml` (StorageClass /
+PVC / LoadBalancer only — it does not set `global.imageRegistry`).
 
 ## Database migration
 
@@ -567,6 +571,28 @@ cubeNode:
 - a chart-rendered nginx config proxies `/opsapi/` and `/cubeapi/v1/` (SDK) to the CubeOps Service (`0.0.0.0:3010` in-pod, ClusterIP);
 - `/sandbox/` proxies to CubeProxy; static assets are unchanged;
 - the Service listens on port `12088`, matching one-click `WEB_UI_HOST_PORT`.
+
+Warehouse import allow-lists and tokens are the same `CUBE_OPS_WAREHOUSE_*` env vars as one-click. Set them via `cubeOps.warehouse` (empty lists omit the env so CubeOps defaults apply):
+
+```yaml
+cubeOps:
+  warehouse:
+    githubRepos: ["TencentCloud/CubeSandbox"]
+    cnbRepos: ["CubeSandbox/CubeSandbox"]
+    # Prefer a Secret for private-repo tokens:
+    githubTokenSecret:
+      name: my-warehouse-tokens
+      key: github-token
+    cnbTokenSecret:
+      name: my-warehouse-tokens
+      key: cnb-token
+```
+
+These render as `CUBE_OPS_WAREHOUSE_GITHUB_REPOS`, `CUBE_OPS_WAREHOUSE_CNB_REPOS`, `CUBE_OPS_WAREHOUSE_GITHUB_TOKEN`, and `CUBE_OPS_WAREHOUSE_CNB_TOKEN`. Object storage is `cubeOps.s3` (bucket `cube-ops`; endpoint and inline AK/SK fall back to `volumeS3` then chart MinIO). `cubeOps.replicas` may be greater than 1; the default strategy is RollingUpdate with `maxUnavailable: 0`.
+
+Chart MinIO is a single StatefulSet. For warehouse HA, set `cubeOps.s3.endpoint` (and `nodeEndpoint` for compute nodes outside cluster DNS) to external S3/COS. Credentials are always injected via `secretKeyRef` (`s3-access-key-id` / `s3-secret-access-key`). `cubeOps.s3.existingSecret` must use those keys; it cannot reuse `volumeS3.existingSecret` (`volume-s3.conf`). Sharing a store can reuse the endpoint and inline AK/SK only.
+
+When no cubeOps.s3 / volumeS3 / MinIO endpoint is set, Helm still renders; CubeOps starts and returns `501 warehouse_disabled` on warehouse routes. Helm fails when an endpoint is set without CubeOps credentials.
 
 CubeAPI serves external E2B-compatible SDK clients.
 

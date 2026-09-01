@@ -45,4 +45,5 @@ type RefreshResponse struct {
 // APIError is a generic error response.
 type APIError struct {
 	Error string `json:"error"`
+	Code  string `json:"code,omitempty"`
 }

@@ -121,7 +121,7 @@ func TestDaoConfig_DefaultPort(t *testing.T) {
 // dao.Config handed to store.New().
 func TestDaoConfig_FullLoadToDaoConfig(t *testing.T) {
 	dir := t.TempDir()
-	yamlPath := dir + "/ops.yaml"
+	yamlPath := dir + "/config.yaml"
 	yamlContent := []byte(`database_url: "mysql://loader:loaderpass@192.168.1.10:3306/loaderdb"
 `)
 	if err := os.WriteFile(yamlPath, yamlContent, 0o644); err != nil {

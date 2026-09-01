@@ -69,8 +69,11 @@ case "${MIRROR}" in
     ;;
 esac
 ONE_CLICK_URL="${ONE_CLICK_URL:-${RELEASE_DOWNLOAD_BASE}/${ONE_CLICK_ARTIFACT}}"
-PVM_KERNEL_RPM_URL="${PVM_KERNEL_RPM_URL:-${RELEASE_DOWNLOAD_BASE}/${PVM_KERNEL_RPM_ARTIFACT}}"
-PVM_KERNEL_DEB_URL="${PVM_KERNEL_DEB_URL:-${RELEASE_DOWNLOAD_BASE}/${PVM_KERNEL_DEB_ARTIFACT}}"
+# PVM host rpm/deb live on the dedicated kernel-release-* pin (see
+# deploy/release-assets.yaml), not the product VERSION / IMAGE_TAG.
+# Filled after load_release_asset_pins unless the operator set the URL.
+PVM_KERNEL_RPM_URL="${PVM_KERNEL_RPM_URL:-}"
+PVM_KERNEL_DEB_URL="${PVM_KERNEL_DEB_URL:-}"
 
 # Optional SHA256 checksums for the downloaded artifacts. When set, the
 # download function refuses to accept a mismatching file. Chart operators
@@ -179,6 +182,9 @@ Environment:
   CUBE_BUILDER_IMAGE
   CUBE_KERNEL_VMLINUX / CUBE_KERNEL_PVM_VMLINUX
   CUBE_GUEST_IMAGE_DIR / CUBE_GUEST_IMAGE_TAR
+  KERNEL_BM_AMD64_RELEASE_TAG / KERNEL_BM_ARM64_RELEASE_TAG
+  KERNEL_PVM_RELEASE_TAG / GUEST_IMAGE_RELEASE_TAG
+    (empty = read deploy/release-assets.yaml; same pins as CI)
 
 When no image names are given, all images are built. --local / LOCAL_BIN=1 is
 kept for package-based overlays; currently no package image uses it.
@@ -187,12 +193,12 @@ cube-master / cubemastercli / cubelet / cube-shim are source-built like CI;
 use SOURCE_REF="" to compile from the current worktree.
 
 cube-kernel assembles pre-built vmlinux assets from CUBE_KERNEL_VMLINUX
-(and optional CUBE_KERNEL_PVM_VMLINUX) or from the GitHub/CNB Release.
+(and optional CUBE_KERNEL_PVM_VMLINUX) or from the dedicated kernel-release-*
+pins in deploy/release-assets.yaml (not IMAGE_TAG / GitHub latest).
 BM is always required; PVM is required on amd64 and optional on arm64.
 
 cube-guest assembles pre-built guest rootfs assets from CUBE_GUEST_IMAGE_DIR /
-CUBE_GUEST_IMAGE_TAR or from Release asset cube-guest-image-\${arch}.tar.gz
-(same IMAGE_TAG when present, otherwise latest Release).
+CUBE_GUEST_IMAGE_TAR or from the guest-image-* pin in deploy/release-assets.yaml.
 
 Examples:
   SOURCE_REF="" IMAGE_TAG=dev $0 cube-master
@@ -840,32 +846,48 @@ build_component_image() {
   record_built "${name}"
 }
 
-# Resolve which GitHub/CNB Release tag to pull guest vmlinux from.
-# Prefer IMAGE_TAG/VERSION when that Release exists (BM asset reachable); else latest GitHub Release.
-resolve_kernel_release_tag() {
-  local arch="$1"
-  local tag="${IMAGE_TAG}"
-  local probe_url latest
-  local github_api="https://api.github.com/repos/TencentCloud/CubeSandbox/releases"
-
-  probe_url="$(release_download_base_for_tag "${tag}")/vmlinux-${arch}"
-  if curl --fail --silent --show-error --head \
-    --connect-timeout "${DOWNLOAD_CONNECT_TIMEOUT}" \
-    --output /dev/null \
-    "${probe_url}"; then
-    printf '%s\n' "${tag}"
+# Heavy assets (guest vmlinux / guest rootfs / PVM host packages) are pinned in
+# deploy/release-assets.yaml — the same source CI reads. IMAGE_TAG is only the
+# output image tag and is not a Release that holds those binaries.
+load_release_asset_pins() {
+  if [[ -n "${KERNEL_BM_AMD64_RELEASE_TAG:-}" \
+     && -n "${KERNEL_BM_ARM64_RELEASE_TAG:-}" \
+     && -n "${KERNEL_PVM_RELEASE_TAG:-}" \
+     && -n "${GUEST_IMAGE_RELEASE_TAG:-}" ]]; then
     return 0
   fi
+  local reader="${WORKTREE_ROOT}/scripts/read-release-assets.sh"
+  [[ -f "${reader}" ]] || fail "missing ${reader}"
+  log "loading heavy-asset pins from deploy/release-assets.yaml"
+  eval "$("${reader}")"
+  [[ -n "${KERNEL_BM_AMD64_RELEASE_TAG:-}" ]] \
+    || fail "KERNEL_BM_AMD64_RELEASE_TAG empty after reading pins"
+  [[ -n "${KERNEL_BM_ARM64_RELEASE_TAG:-}" ]] \
+    || fail "KERNEL_BM_ARM64_RELEASE_TAG empty after reading pins"
+  [[ -n "${KERNEL_PVM_RELEASE_TAG:-}" ]] \
+    || fail "KERNEL_PVM_RELEASE_TAG empty after reading pins"
+  [[ -n "${GUEST_IMAGE_RELEASE_TAG:-}" ]] \
+    || fail "GUEST_IMAGE_RELEASE_TAG empty after reading pins"
+}
 
-  log "Release ${tag} has no vmlinux-${arch} (or Release missing); resolving latest GitHub Release"
-  latest="$(
-    curl --fail --silent --show-error \
-      --connect-timeout "${DOWNLOAD_CONNECT_TIMEOUT}" \
-      "${github_api}/latest" \
-      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name",""))'
-  )"
-  [[ -n "${latest}" ]] || fail "could not resolve latest GitHub Release for kernel assets"
-  printf '%s\n' "${latest}"
+kernel_bm_release_tag() {
+  local arch="$1"
+  case "${arch}" in
+    amd64) printf '%s\n' "${KERNEL_BM_AMD64_RELEASE_TAG}" ;;
+    arm64) printf '%s\n' "${KERNEL_BM_ARM64_RELEASE_TAG}" ;;
+    *) fail "unsupported arch for kernel BM pin: ${arch}" ;;
+  esac
+}
+
+fill_pvm_host_package_urls() {
+  local pvm_base
+  load_release_asset_pins
+  pvm_base="$(release_download_base_for_tag "${KERNEL_PVM_RELEASE_TAG}")"
+  PVM_KERNEL_RPM_URL="${PVM_KERNEL_RPM_URL:-${pvm_base}/${PVM_KERNEL_RPM_ARTIFACT}}"
+  PVM_KERNEL_DEB_URL="${PVM_KERNEL_DEB_URL:-${pvm_base}/${PVM_KERNEL_DEB_ARTIFACT}}"
+  PVM_KERNEL_RPM="${DOWNLOAD_DIR}/$(basename "${PVM_KERNEL_RPM_URL}")"
+  PVM_KERNEL_DEB="${DOWNLOAD_DIR}/$(basename "${PVM_KERNEL_DEB_URL}")"
+  log "PVM host packages from dedicated Release ${KERNEL_PVM_RELEASE_TAG}"
 }
 
 release_download_base_for_tag() {
@@ -882,8 +904,9 @@ release_download_base_for_tag() {
 
 # Assemble cube-kernel from pre-built vmlinux artifacts.
 # BM is always required. PVM is required on amd64, optional on arm64 (no PVM guest).
-# Priority: CUBE_KERNEL_VMLINUX (+ optional CUBE_KERNEL_PVM_VMLINUX), else Release download
-# (same IMAGE_TAG when present, otherwise latest Release).
+# Priority: CUBE_KERNEL_VMLINUX (+ optional CUBE_KERNEL_PVM_VMLINUX), else the
+# dedicated kernel-release-* pins in deploy/release-assets.yaml (BM and PVM
+# may be different Releases).
 build_cube_kernel_image() {
   local arch="${ONE_CLICK_ARCH:-amd64}"
   local bm_src="${CUBE_KERNEL_VMLINUX:-}"
@@ -892,8 +915,8 @@ build_cube_kernel_image() {
   local ctx
   local bm_url pvm_url
   local pvm_required=0
-  local kernel_tag kernel_base
-  local asset_version
+  local bm_tag pvm_tag
+  local bm_version pvm_version
 
   case "${arch}" in
     amd64) pvm_required=1 ;;
@@ -909,25 +932,28 @@ build_cube_kernel_image() {
     elif [[ "${pvm_required}" == "1" ]]; then
       fail "cube-kernel on ${arch} requires CUBE_KERNEL_PVM_VMLINUX (PVM guest kernel)"
     fi
-    asset_version="${IMAGE_TAG}"
+    bm_version="${IMAGE_TAG}"
+    pvm_version="${IMAGE_TAG}"
   else
-    kernel_tag="$(resolve_kernel_release_tag "${arch}")"
-    kernel_base="$(release_download_base_for_tag "${kernel_tag}")"
-    asset_version="${kernel_tag}"
+    load_release_asset_pins
+    bm_tag="$(kernel_bm_release_tag "${arch}")"
+    pvm_tag="${KERNEL_PVM_RELEASE_TAG}"
+    bm_version="${bm_tag}"
+    pvm_version="${pvm_tag}"
     mkdir -p "${dl_dir}"
-    bm_url="${kernel_base}/vmlinux-${arch}"
-    pvm_url="${kernel_base}/vmlinux-pvm-${arch}"
-    bm_src="${dl_dir}/${kernel_tag}-vmlinux-${arch}"
-    pvm_src="${dl_dir}/${kernel_tag}-vmlinux-pvm-${arch}"
-    log "downloading cube-kernel BM vmlinux from ${bm_url} (Release ${kernel_tag})"
+    bm_url="$(release_download_base_for_tag "${bm_tag}")/vmlinux-${arch}"
+    pvm_url="$(release_download_base_for_tag "${pvm_tag}")/vmlinux-pvm-${arch}"
+    bm_src="${dl_dir}/${bm_tag}-vmlinux-${arch}"
+    pvm_src="${dl_dir}/${pvm_tag}-vmlinux-pvm-${arch}"
+    log "downloading cube-kernel BM vmlinux from ${bm_url} (pin ${bm_tag})"
     download_file "${bm_url}" "${bm_src}" file
     if [[ "${pvm_required}" == "1" ]]; then
-      log "downloading cube-kernel PVM vmlinux from ${pvm_url}"
+      log "downloading cube-kernel PVM vmlinux from ${pvm_url} (pin ${pvm_tag})"
       download_file "${pvm_url}" "${pvm_src}" file
     elif download_file "${pvm_url}" "${pvm_src}" file; then
       log "downloaded optional cube-kernel PVM vmlinux from ${pvm_url}"
     else
-      log "no vmlinux-pvm-${arch} on Release ${kernel_tag}; building BM-only cube-kernel for ${arch}"
+      log "no vmlinux-pvm-${arch} on pin ${pvm_tag}; building BM-only cube-kernel for ${arch}"
       pvm_src=""
     fi
   fi
@@ -941,43 +967,15 @@ build_cube_kernel_image() {
   fi
   build_image cube-kernel "${ctx}" \
     --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
-    --build-arg "CUBE_KERNEL_BM_VERSION=${CUBE_KERNEL_BM_VERSION:-${asset_version}}" \
-    --build-arg "CUBE_KERNEL_PVM_VERSION=${CUBE_KERNEL_PVM_VERSION:-${asset_version}}"
+    --build-arg "CUBE_KERNEL_BM_VERSION=${CUBE_KERNEL_BM_VERSION:-${bm_version}}" \
+    --build-arg "CUBE_KERNEL_PVM_VERSION=${CUBE_KERNEL_PVM_VERSION:-${pvm_version}}"
   record_built cube-kernel
-}
-
-# Resolve which GitHub/CNB Release tag to pull guest rootfs from.
-# Prefer IMAGE_TAG when that Release has cube-guest-image-${arch}.tar.gz; else latest.
-resolve_guest_release_tag() {
-  local arch="$1"
-  local tag="${IMAGE_TAG}"
-  local probe_url latest
-  local github_api="https://api.github.com/repos/TencentCloud/CubeSandbox/releases"
-
-  probe_url="$(release_download_base_for_tag "${tag}")/cube-guest-image-${arch}.tar.gz"
-  if curl --fail --silent --show-error --head \
-    --connect-timeout "${DOWNLOAD_CONNECT_TIMEOUT}" \
-    --output /dev/null \
-    "${probe_url}"; then
-    printf '%s\n' "${tag}"
-    return 0
-  fi
-
-  log "Release ${tag} has no cube-guest-image-${arch}.tar.gz (or Release missing); resolving latest GitHub Release"
-  latest="$(
-    curl --fail --silent --show-error \
-      --connect-timeout "${DOWNLOAD_CONNECT_TIMEOUT}" \
-      "${github_api}/latest" \
-      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name",""))'
-  )"
-  [[ -n "${latest}" ]] || fail "could not resolve latest GitHub Release for guest assets"
-  printf '%s\n' "${latest}"
 }
 
 # Assemble cube-guest from pre-built guest rootfs artifacts.
 # Priority: CUBE_GUEST_IMAGE_DIR (directory with the three files),
-# CUBE_GUEST_IMAGE_TAR (tar.gz of those files), else Release download
-# (same IMAGE_TAG when present, otherwise latest Release).
+# CUBE_GUEST_IMAGE_TAR (tar.gz of those files), else the guest-image-* pin
+# in deploy/release-assets.yaml.
 build_cube_guest_image() {
   local arch="${ONE_CLICK_ARCH:-amd64}"
   local guest_dir="${CUBE_GUEST_IMAGE_DIR:-}"
@@ -997,12 +995,13 @@ build_cube_guest_image() {
     [[ -f "${guest_tar}" ]] || fail "CUBE_GUEST_IMAGE_TAR not found: ${guest_tar}"
     tar -xzf "${guest_tar}" -C "${stage_dir}"
   else
-    guest_tag="$(resolve_guest_release_tag "${arch}")"
+    load_release_asset_pins
+    guest_tag="${GUEST_IMAGE_RELEASE_TAG}"
     guest_base="$(release_download_base_for_tag "${guest_tag}")"
     mkdir -p "${dl_dir}"
     guest_url="${guest_base}/cube-guest-image-${arch}.tar.gz"
     guest_tar="${dl_dir}/${guest_tag}-cube-guest-image-${arch}.tar.gz"
-    log "downloading cube-guest rootfs from ${guest_url} (Release ${guest_tag})"
+    log "downloading cube-guest rootfs from ${guest_url} (pin ${guest_tag})"
     download_file "${guest_url}" "${guest_tar}" tar.gz
     tar -xzf "${guest_tar}" -C "${stage_dir}"
   fi
@@ -1045,12 +1044,13 @@ build_cube_agent_image() {
     [[ -f "${agent_tar}" ]] || fail "CUBE_AGENT_IMAGE_TAR not found: ${agent_tar}"
     tar -xzf "${agent_tar}" -C "${stage_dir}"
   else
-    agent_tag="$(resolve_guest_release_tag "${arch}")"
+    # cube-agent is a product-release asset (v*), not in release-assets.yaml.
+    agent_tag="${VERSION}"
     agent_base="$(release_download_base_for_tag "${agent_tag}")"
     mkdir -p "${dl_dir}"
     agent_url="${agent_base}/cube-agent-${arch}.tar.gz"
     agent_tar="${dl_dir}/${agent_tag}-cube-agent-${arch}.tar.gz"
-    log "downloading cube-agent artifacts from ${agent_url} (Release ${agent_tag})"
+    log "downloading cube-agent artifacts from ${agent_url} (product ${agent_tag})"
     download_file "${agent_url}" "${agent_tar}" tar.gz
     tar -xzf "${agent_tar}" -C "${stage_dir}"
   fi
@@ -1155,6 +1155,7 @@ run_selected_builds() {
   fi
 
   if should_build cube-pvm-host-bootstrap; then
+    fill_pvm_host_package_urls
     ctx="$(prepare_context cube-pvm-host-bootstrap)"
     copy_scripts "${ctx}" \
       pvm-host-bootstrap.sh \
@@ -1210,8 +1211,8 @@ CONTEXT_DIR="${BUILD_ROOT}/contexts"
 SOURCE_TREE_DIR="${BUILD_ROOT}/source-tree"
 ONE_CLICK_DIRNAME="cube-sandbox-one-click-${VERSION}-${ONE_CLICK_ARCH}"
 ONE_CLICK_TAR="${DOWNLOAD_DIR}/${ONE_CLICK_DIRNAME}.tar.gz"
-PVM_KERNEL_RPM="${DOWNLOAD_DIR}/$(basename "${PVM_KERNEL_RPM_URL}")"
-PVM_KERNEL_DEB="${DOWNLOAD_DIR}/$(basename "${PVM_KERNEL_DEB_URL}")"
+PVM_KERNEL_RPM=""
+PVM_KERNEL_DEB=""
 SANDBOX_PACKAGE_TAR="${EXTRACT_DIR}/${ONE_CLICK_DIRNAME}/assets/package/sandbox-package.tar.gz"
 PACKAGE_DIR="${BUILD_ROOT}/sandbox-package"
 

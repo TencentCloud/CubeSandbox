@@ -11,15 +11,8 @@ global:
   # kubelet --cluster-domain=<non-default>. Empty falls back to
   # cubeNode.dns.clusterDomain, then "cluster.local".
   clusterDomain: ""
-  # Optional registry prefix that replaces the registry portion of every
-  # Cube-owned image below. Leave empty to keep the per-image repository
-  # exactly as declared. Set to e.g. "my-registry.example.com/cubesandbox"
-  # to mirror all images into a private registry without editing each entry
-  # individually. Applies to the pvmHostBootstrap / nodeInit / node / master
-  # / api / ops / cubemastercli / proxy / lifecycleManager / cubeEgress /
-  # cubeEgressNet / webui / cubelet / cubeShim / cubeKernel /
-  # cubeGuest / cubeAgent / waitNodePrep / kubectl (alpine-k8s mirror) entries but not to
-  # third-party images such as mysql / redis / minio.
+  # Optional private registry host that rewrites the official Cube TCR host
+  # on Cube-owned images. Set to a host only, e.g. my-registry.example.com.
   imageRegistry: ""
 
 images:
@@ -148,11 +141,11 @@ storageClass:
   # parameters:
   #   type: cbs
 
-# Convenience: pin CubeMaster / MySQL / Redis / MinIO PVCs to one StorageClass name
-# when the component-level storageClassName is empty. Empty (default) means
-# omit storageClassName on the PVC → cluster default SC. Component-level
-# non-empty values always win (used by values-tke.yaml). Mix different SCs
-# by setting the four component fields explicitly instead of this key.
+# Convenience: pin CubeMaster / MySQL / Redis / MinIO PVCs
+# to one StorageClass name when the component-level storageClassName is empty.
+# Empty (default) means omit storageClassName on the PVC → cluster default SC.
+# Component-level non-empty values always win (used by values-tke.yaml). Mix
+# different SCs by setting the component fields explicitly instead of this key.
 persistence:
   storageClassName: ""
 
@@ -206,8 +199,8 @@ controlPlane:
   enabled: true
   namespaceScoped: true
   # Native Deployment rolling strategy for stateless control-plane workloads
-  # (api, webui, proxy, ops, lifecycle-manager, cubemastercli). Do not apply
-  # maxSurge > 0 to cube-master when it mounts a ReadWriteOnce PVC.
+  # (api, webui, proxy, lifecycle-manager, cubemastercli, cube-ops). Do not
+  # apply maxSurge > 0 to cube-master when it mounts a ReadWriteOnce PVC.
   deploymentStrategy:
     type: RollingUpdate
     rollingUpdate:
@@ -342,8 +335,14 @@ cubeOps:
   # Stateful ops/admin backend (JWT) + WebUI SDK proxy to CubeMaster.
   # Required when webui.enabled=true.
   enabled: true
-  # Shared MySQL/Redis state; two replicas for availability.
-  replicas: 2
+  # CubeOps is stateless once blobs are in S3, so replicas may be > 1.
+  # Chart MinIO is still a single StatefulSet; warehouse HA needs external S3/COS.
+  replicas: 1
+  deploymentStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   podAnnotations: {}
   bind: "0.0.0.0:3010"
   # Empty uses cubeProxy.domain for CUBE_API_SANDBOX_DOMAIN.
@@ -352,6 +351,40 @@ cubeOps:
     type: ClusterIP
     port: 3010
   env: []
+  # Local unpack scratch (emptyDir). Not shared across replicas.
+  workDir: /var/tmp/cubeops-warehouse
+  workDirSizeLimit: 32Gi
+  # Connection fields fall back to volumeS3 then chart MinIO.
+  # bucket does not follow volumeS3.bucket / cube-volumes.
+  s3:
+    # Empty falls back to volumeS3.endpoint, then chart MinIO.
+    # Empty with minio.enabled=false disables the warehouse (501); CubeOps still starts.
+    # Helm fails when an endpoint is set but no CubeOps credentials are available.
+    endpoint: ""
+    nodeEndpoint: ""
+    # Existing Secret must contain keys s3-access-key-id / s3-secret-access-key.
+    # Cannot reuse volumeS3.existingSecret (that Secret holds volume-s3.conf).
+    existingSecret: ""
+    accessKeyId: ""
+    secretAccessKey: ""
+    bucket: cube-ops
+    region: us-east-1
+    pathStyle: true
+    createBucket: true
+  warehouse:
+    presignTTL: 5m
+    # Empty lists omit the env vars so CubeOps built-in allow-lists apply.
+    # A string is also accepted (comma-separated owner/repo).
+    githubRepos: []
+    cnbRepos: []
+    githubToken: ""
+    cnbToken: ""
+    githubTokenSecret:
+      name: ""
+      key: github-token
+    cnbTokenSecret:
+      name: ""
+      key: cnb-token
   probes:
     readiness:
       enabled: true

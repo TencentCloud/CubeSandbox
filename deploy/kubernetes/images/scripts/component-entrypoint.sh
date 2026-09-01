@@ -777,11 +777,22 @@ run_cubelet() {
   apply_effective_pvm_from_state
   select_guest_kernel "$(preserve_guest_kernel_selection "${TOOLBOX_ROOT}/cube-kernel-scf")"
 
-  local ops_esc master_http_esc
+  local ops_esc master_http_esc cubeops_addr_esc cubeops_addr
   ops_esc="$(sed_escape_replacement "${CUBE_OPS_ENDPOINT}")"
   master_http_esc="$(sed_escape_replacement "${CUBE_MASTER_HTTP_ADDR}")"
   sed -i -e "s#^\([[:space:]]*meta_server_endpoint:[[:space:]]*\).*#\1\"${ops_esc}\"#" "${dyn}"
   sed -i -e "s#^\([[:space:]]*cubemaster_http_addr:[[:space:]]*\).*#\1\"${master_http_esc}\"#" "${dyn}"
+  # Warehouse downloads use the same CubeOps as node register/heartbeat.
+  cubeops_addr="${CUBE_OPS_ADDR:-${CUBE_OPS_ENDPOINT}}"
+  if [[ "${cubeops_addr}" != http://* && "${cubeops_addr}" != https://* ]]; then
+    cubeops_addr="http://${cubeops_addr}"
+  fi
+  cubeops_addr_esc="$(sed_escape_replacement "${cubeops_addr}")"
+  if grep -Eq '^[[:space:]]*cubeops_addr[[:space:]]*=' "${cfg}"; then
+    sed -i -e "s#^[[:space:]]*cubeops_addr[[:space:]]*=.*#    cubeops_addr = \"${cubeops_addr_esc}\"#" "${cfg}"
+  else
+    sed -i -e "/node_status_update_frequency/a\\    cubeops_addr = \"${cubeops_addr_esc}\"" "${cfg}"
+  fi
   configure_sandbox_dns
 
   if [[ -z "${CUBE_SANDBOX_ETH_NAME:-}" && "${CUBE_SANDBOX_AUTO_DETECT_ETH:-true}" == "true" ]]; then

@@ -320,7 +320,7 @@ export TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS=1
 | `TENCENTCLOUD_CUBE_DB` / `TENCENTCLOUD_CUBE_USER` / `TENCENTCLOUD_CUBE_PASSWORD` | `cube_mvp` / `cube` / demo | Application DB name / account / password |
 | `TENCENTCLOUD_CUBEMASTER_REPLICAS` | `1` | cube-master replica count |
 | `TENCENTCLOUD_CUBE_API_REPLICAS` | `1` | cube-api replica count |
-| `TENCENTCLOUD_CUBE_OPS_REPLICAS` | `2` | cube-ops replica count. cube-webui routes `/opsapi/` and `/cubeapi/v1/` through this internal service |
+| `TENCENTCLOUD_CUBE_OPS_REPLICAS` | `2` | cube-ops replica count. The default stack ships no object storage, so the component warehouse stays disabled until you wire COS (or other S3) into cube-ops (see [Component multi-version](/guide/component-multiversion)). cube-webui routes `/opsapi/` and `/cubeapi/v1/` through this internal service |
 | `TENCENTCLOUD_CUBE_PROXY_REPLICAS` | `1` | cube-proxy replica count. Values greater than `1` are supported; each replica registers in Redis for cube-lifecycle-manager discovery |
 | `TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_REPLICAS` | `1` | cube-lifecycle-manager replica count. Keep `1` unless CLM HA behavior has been validated for your deployment |
 | `TENCENTCLOUD_CUBE_WEBUI_REPLICAS` | `1` | cube-webui replica count |

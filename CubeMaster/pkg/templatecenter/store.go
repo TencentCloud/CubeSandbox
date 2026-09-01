@@ -1625,42 +1625,24 @@ func normalizeCompatPolicy(policy string) string {
 	}
 }
 
-func compareCompatDimension(bound, current string) (stale bool, unknown bool) {
-	bound = normalizeComponentVersion(bound)
-	current = normalizeComponentVersion(current)
-	if bound == "" || current == "" {
-		return false, true
-	}
-	return bound != current, false
+// hasRestorePin reports whether the replica froze guest-image, cube-agent,
+// kernel, and cube-shim. guest-image and cube-agent alone were already stored
+// for the 0.4.0 compat matrix; without kernel and shim the replica was not
+// created with component multi-version restore, and create would follow live
+// toolbox paths for those components.
+func hasRestorePin(replica ReplicaStatus) bool {
+	guest := normalizeComponentVersion(replica.GuestImageVersion)
+	agent := normalizeComponentVersion(replica.AgentVersion)
+	kernel := normalizeComponentVersion(replica.KernelVersion)
+	shim := normalizeComponentVersion(replica.ShimVersion)
+	return guest != "" && agent != "" && kernel != "" && shim != ""
 }
 
-func evaluateCompat(replica ReplicaStatus, currentGuestImage, currentAgent, _ string) string {
-	policy := normalizeCompatPolicy(replica.CompatPolicy)
-	dimensions := []struct {
-		bound   string
-		current string
-		active  bool
-	}{
-		{replica.GuestImageVersion, currentGuestImage, true},
-		{replica.AgentVersion, currentAgent, policy != CompatPolicyGuestOnly},
+func evaluateCompat(replica ReplicaStatus, _, _, _ string) string {
+	if hasRestorePin(replica) {
+		return CompatStatusOK
 	}
-	seenUnknown := false
-	for _, dim := range dimensions {
-		if !dim.active {
-			continue
-		}
-		stale, unknown := compareCompatDimension(dim.bound, dim.current)
-		if stale {
-			return CompatStatusStale
-		}
-		if unknown {
-			seenUnknown = true
-		}
-	}
-	if seenUnknown {
-		return CompatStatusUnknown
-	}
-	return CompatStatusOK
+	return CompatStatusUnknown
 }
 
 func isReplicaSchedulable(replica ReplicaStatus) bool {
@@ -1668,8 +1650,8 @@ func isReplicaSchedulable(replica ReplicaStatus) bool {
 }
 
 // bindGuestVersionToReplica records pin versions on the replica. CompatStatus
-// still compares guest[+agent] only; kernel/shim are stored for create inject
-// and do not participate in evaluateCompat.
+// is OK only when guest, agent, kernel, and shim are all pinned so live
+// toolbox drift does not mark a multi-version replica as needing rebuild.
 func bindGuestVersionToReplica(replica *ReplicaStatus, guestImageVersion, agentVersion, kernelVersion, shimVersion string) {
 	if replica == nil {
 		return

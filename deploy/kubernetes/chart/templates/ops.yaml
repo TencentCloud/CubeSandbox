@@ -1,5 +1,8 @@
 {{- if eq (include "cube.opsEnabled" .) "true" }}
 {{- $opsPort := .Values.cubeOps.service.port -}}
+{{- $wh := .Values.cubeOps.warehouse | default dict }}
+{{- $opsS3 := .Values.cubeOps.s3 | default dict }}
+{{- $workDir := .Values.cubeOps.workDir | default "/var/tmp/cubeops-warehouse" }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -9,7 +12,7 @@ metadata:
     app.kubernetes.io/component: ops
 spec:
   replicas: {{ .Values.cubeOps.replicas }}
-  {{- include "cube.deploymentStrategy" . | nindent 2 }}
+  {{- include "cube.deploymentStrategy" (dict "root" . "strategy" .Values.cubeOps.deploymentStrategy) | nindent 2 }}
   selector:
     matchLabels:
       {{- include "cube.selectorLabels" . | nindent 6 }}
@@ -37,6 +40,65 @@ spec:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             - name: CUBE_OPS_BIND
               value: {{ .Values.cubeOps.bind | quote }}
+            - name: CUBE_OPS_WAREHOUSE_WORK_DIR
+              value: {{ $workDir | quote }}
+            - name: TMPDIR
+              value: {{ $workDir | quote }}
+            - name: CUBE_OPS_S3_ENDPOINT
+              value: {{ include "cube.opsS3Endpoint" . | quote }}
+            - name: CUBE_OPS_S3_NODE_ENDPOINT
+              value: {{ include "cube.opsS3NodeEndpoint" . | quote }}
+            - name: CUBE_OPS_S3_BUCKET
+              value: {{ include "cube.opsS3Bucket" . | quote }}
+            - name: CUBE_OPS_S3_REGION
+              value: {{ include "cube.opsS3Region" . | quote }}
+            - name: CUBE_OPS_S3_PATH_STYLE
+              value: {{ include "cube.boolEnvDefaultTrue" $opsS3.pathStyle | quote }}
+            - name: CUBE_OPS_S3_CREATE_BUCKET
+              value: {{ include "cube.boolEnvDefaultTrue" $opsS3.createBucket | quote }}
+            - name: CUBE_OPS_WAREHOUSE_PRESIGN_TTL
+              value: {{ ($wh.presignTTL | default "5m") | quote }}
+            - name: CUBE_OPS_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.opsS3SecretName" . | quote }}
+                  key: s3-access-key-id
+            - name: CUBE_OPS_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.opsS3SecretName" . | quote }}
+                  key: s3-secret-access-key
+            {{- $wh := .Values.cubeOps.warehouse | default dict }}
+            {{- with $wh.githubRepos }}
+            - name: CUBE_OPS_WAREHOUSE_GITHUB_REPOS
+              value: {{ include "cube.csvOrString" . | quote }}
+            {{- end }}
+            {{- with $wh.cnbRepos }}
+            - name: CUBE_OPS_WAREHOUSE_CNB_REPOS
+              value: {{ include "cube.csvOrString" . | quote }}
+            {{- end }}
+            {{- $ghSecret := $wh.githubTokenSecret | default dict }}
+            {{- if $ghSecret.name }}
+            - name: CUBE_OPS_WAREHOUSE_GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $ghSecret.name | quote }}
+                  key: {{ $ghSecret.key | default "github-token" | quote }}
+            {{- else if $wh.githubToken }}
+            - name: CUBE_OPS_WAREHOUSE_GITHUB_TOKEN
+              value: {{ $wh.githubToken | quote }}
+            {{- end }}
+            {{- $cnbSecret := $wh.cnbTokenSecret | default dict }}
+            {{- if $cnbSecret.name }}
+            - name: CUBE_OPS_WAREHOUSE_CNB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cnbSecret.name | quote }}
+                  key: {{ $cnbSecret.key | default "cnb-token" | quote }}
+            {{- else if $wh.cnbToken }}
+            - name: CUBE_OPS_WAREHOUSE_CNB_TOKEN
+              value: {{ $wh.cnbToken | quote }}
+            {{- end }}
             - name: CUBE_MASTER_ADDR
               value: {{ printf "http://%s" (include "cube.masterEndpoint" .) | quote }}
             {{- if eq (include "cube.dbDriver" .) "postgres" }}
@@ -114,6 +176,13 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          volumeMounts:
+            - name: cube-ops-work
+              mountPath: {{ $workDir | quote }}
+      volumes:
+        - name: cube-ops-work
+          emptyDir:
+            sizeLimit: {{ .Values.cubeOps.workDirSizeLimit | default "32Gi" | quote }}
 ---
 apiVersion: v1
 kind: Service

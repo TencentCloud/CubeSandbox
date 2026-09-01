@@ -1,11 +1,64 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
+import React from 'react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
+}
+
+export function getStatusBadge(status: string, t: any, error?: string) {
+  switch (status) {
+    case 'pending':
+      return (
+        <span className="inline-flex items-center text-muted-foreground font-medium text-[11px] gap-1.5">
+          <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/50"></span>
+          {t('jobPending')}
+        </span>
+      );
+    case 'running':
+      return (
+        <span className="inline-flex items-center text-primary font-medium text-[11px] gap-1.5">
+          <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse"></span>
+          {t('jobRunning')}
+        </span>
+      );
+    case 'succeeded':
+      return (
+        <span className="inline-flex items-center text-emerald-600 font-medium text-[11px] gap-1.5">
+          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+          {t('jobSucceeded')}
+        </span>
+      );
+    case 'failed':
+      return (
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center text-destructive font-medium text-[11px] gap-1.5">
+            <span className="h-1.5 w-1.5 rounded-full bg-destructive"></span>
+            {t('jobFailed')}
+          </span>
+          {error && (
+            <span className="text-xs text-destructive/80 line-clamp-1 max-w-xs">{error}</span>
+          )}
+        </div>
+      );
+    case 'cancelled':
+      return (
+        <span className="inline-flex items-center text-muted-foreground font-medium text-[11px] gap-1.5">
+          <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/30"></span>
+          {t('jobCancelled')}
+        </span>
+      );
+    default:
+      return (
+        <span className="inline-flex items-center text-muted-foreground font-medium text-[11px] gap-1.5">
+          <span className="h-1.5 w-1.5 rounded-full bg-border"></span>
+          {status}
+        </span>
+      );
+  }
 }
 
 export function formatBytes(mib: number | undefined | null): string {
@@ -35,6 +88,14 @@ function cpuCountToMilli(cpuCount: number | string): number {
     return Number(s) * 1000 || 0;
   }
   return cpuCount * 1000;
+}
+
+export function formatArtifactBytes(n: number): string {
+  if (!n) return '—';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MiB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GiB`;
 }
 
 export function formatRelative(ts?: string | number | null, locale?: string): string {
