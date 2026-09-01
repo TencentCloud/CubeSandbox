@@ -21,8 +21,9 @@
 
 ## 2. 快速开始：基于 `cubesandbox-base`
 
-`cubesandbox-base` 是一个普通的 `ubuntu:22.04`，在 `/usr/bin/envd` 预装
-了 `envd`，并附带一个通用入口脚本——后台拉起 `envd`、前台 `exec` 你
+`cubesandbox-base` 是一个普通的 `ubuntu:22.04`，预装了仓库自研的 Rust
+守护进程 `cube-envd`（安装在 `/usr/bin/envd`，命令名保持 `envd` 以兼容
+SDK），并附带一个通用入口脚本——后台拉起 `envd`、前台 `exec` 你
 提供的 `CMD`。你只需要三步：**写 Dockerfile → 构建推送 → 创建模板**。
 
 > 想看一个能直接跑通的完整示例？可以参考仓库里的
@@ -32,7 +33,7 @@
 ### 2.1 写 Dockerfile
 
 ```dockerfile
-FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16
+FROM ghcr.io/tencentcloud/cubesandbox-base:latest
 
 # 安装你自己需要的工具链
 RUN apt-get update \
@@ -92,9 +93,9 @@ FROM e2bdev/code-interpreter:latest
 USER root
 
 # 从 cubesandbox-base 拉取 envd 与通用入口脚本
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/bin/envd /usr/bin/envd
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/local/bin/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
 # 上游镜像通常已有自己的 entrypoint/CMD。推荐用 cube-entrypoint.sh 包裹它；
@@ -108,9 +109,9 @@ CMD ["/bin/sh", "-c", "sudo --preserve-env=E2B_LOCAL /root/.jupyter/start-up.sh"
 ```dockerfile
 FROM python:3.11-slim
 
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/bin/envd /usr/bin/envd
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/local/bin/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
 RUN pip install --no-cache-dir fastapi uvicorn
@@ -141,17 +142,19 @@ cubemastercli tpl create-from-image \
 | 参数 | 说明 |
 | --- | --- |
 | `--enable-inject-envd` | 从 `cubemastercli` 上传一个 `envd` 二进制并写入模板 rootfs。 |
-| `--envd-path` | 运行 `cubemastercli` 的机器上的本地路径；仅在设置 `--enable-inject-envd` 时生效。若省略，CLI 会在可用时使用构建期内嵌的默认 `envd`。 |
+| `--envd-path` | 运行 `cubemastercli` 的机器上的本地路径；仅在设置 `--enable-inject-envd` 时生效。若省略，CLI 会在可用时使用构建期内嵌的默认 `envd`（即仓库自研的 Rust `cube-envd`）。 |
 
 `--envd-path` 是运行 CLI 的机器上的路径，不是 CubeMaster 宿主机路径。CLI 会通过 `create-from-image` 的 multipart 请求上传二进制；CubeMaster 校验上传内容后，将其写入模板 rootfs 的 `/usr/local/bin/envd`，并把二进制的 SHA-256 纳入 rootfs artifact 指纹，避免复用由不同 `envd` 构建的 artifact。
 
 上传的文件必须是非空 ELF 二进制，大小不能超过 16 MiB，并与目标 rootfs 的操作系统和 CPU 架构兼容。例如，Linux x86_64 镜像需要 Linux x86_64 版本的 `envd`。
 
-如果 `cubemastercli` 构建时没有内嵌默认 `envd`，则必须同时指定 `--envd-path`。如需构建带默认 `envd` 的 CLI，请先准备二进制并执行：
+如果 `cubemastercli` 构建时没有内嵌默认 `envd`，则必须同时指定 `--envd-path`。如需构建带默认 `envd` 的 CLI，请先准备 `envd` ELF 并执行：
 
 ```bash
 make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
 ```
+
+通过 `deploy/one-click/build-release-bundle-builder.sh` 构建的发布包会自动内嵌仓库自研的 `cube-envd`（可用 `ENVD_LOCAL_PATH` 覆盖），因此其中的 `cubemastercli` 无需再传 `--envd-path`。
 
 对于 `cubebox` 类型，CubeMaster 还会保留注入标记，在创建沙箱时自动包装主容器的启动命令：先在后台运行 `/usr/local/bin/envd`，再执行镜像原有命令，并补充暴露 `49983` 端口。因此这种方式无需修改原镜像的入口程序。非 `cubebox` 类型不会应用该启动包装。
 
@@ -208,7 +211,7 @@ docker exec "$cid" curl -s -o /dev/null -w "envd /health => %{http_code}\n" \
 # => envd /health => 204
 
 docker exec "$cid" /usr/bin/envd -version
-# => 2026.16
+# => v0.5.1   （镜像内嵌的 cube-envd 构建版本）
 
 docker rm -f "$cid"
 ```
@@ -235,7 +238,10 @@ docker exec "$cid" cat /var/log/envd.log
 
 基础镜像由仓库内单个 GitHub Actions workflow 自动构建：
 [`.github/workflows/build-envd-base-image.yml`](https://github.com/TencentCloud/CubeSandbox/blob/master/.github/workflows/build-envd-base-image.yml)。
-它会 checkout `e2b-dev/infra` 的指定 tag（默认 `2026.16`），用 Go 1.25.4
-在同一个 job 里直接把 envd 编译进来，构建 `docker/Dockerfile.cube-base`，
-对 `:49983/health` 做 smoke test，然后推送到
-`ghcr.io/tencentcloud/cubesandbox-base`。
+它构建 `docker/Dockerfile.cube-base`：其中的 `envd-builder` 编译阶段会
+编译仓库自研的 Rust `cube-envd`（musl 静态；版本与 commit 通过
+`CUBE_ENVD_VERSION` / `CUBE_ENVD_COMMIT` 构建参数注入），把产物作为
+`/usr/bin/envd` 打进镜像，对 `:49983/health` 做 smoke test 并验证
+`envd -version`/`-commit`，然后推送到
+`ghcr.io/tencentcloud/cubesandbox-base`（`master` 上推送 `latest` 与
+`<sha>-ubuntu22.04` 标签）。

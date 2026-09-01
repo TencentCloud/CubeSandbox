@@ -21,11 +21,12 @@ For interactive development and code-execution sandboxes, keeping `envd` is reco
 
 ## 2. Quick start: build on top of `cubesandbox-base`
 
-`cubesandbox-base` is a plain `ubuntu:22.04` with `envd` preinstalled at
-`/usr/bin/envd` and a generic entrypoint that runs `envd` in the
-background while honoring any `CMD` you supply. Three steps get you to a
-working template: **write a Dockerfile → build and push → create the
-template**.
+`cubesandbox-base` is a plain `ubuntu:22.04` with the repository's own
+Rust daemon `cube-envd` preinstalled at `/usr/bin/envd` (command name
+kept for SDK compatibility) and a generic entrypoint that runs `envd` in
+the background while honoring any `CMD` you supply. Three steps get you
+to a working template: **write a Dockerfile → build and push → create
+the template**.
 
 > Prefer to read a runnable end-to-end example? See
 > [`examples/cubesandbox-base-nginx`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/cubesandbox-base-nginx)
@@ -35,7 +36,7 @@ template**.
 ### 2.1 Write a Dockerfile
 
 ```dockerfile
-FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16
+FROM ghcr.io/tencentcloud/cubesandbox-base:latest
 
 # Install your own tooling
 RUN apt-get update \
@@ -95,9 +96,9 @@ FROM e2bdev/code-interpreter:latest
 USER root
 
 # Pull envd and the generic entrypoint from cubesandbox-base.
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/bin/envd /usr/bin/envd
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/local/bin/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
 # The upstream image already has its own entrypoint/CMD. Either wrap it
@@ -112,9 +113,9 @@ A second example, starting from a slim Python image:
 ```dockerfile
 FROM python:3.11-slim
 
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/bin/envd /usr/bin/envd
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/local/bin/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
 RUN pip install --no-cache-dir fastapi uvicorn
@@ -145,17 +146,19 @@ cubemastercli tpl create-from-image \
 | Option | Description |
 | --- | --- |
 | `--enable-inject-envd` | Upload an `envd` binary from `cubemastercli` and write it into the template rootfs. |
-| `--envd-path` | A local path on the machine running `cubemastercli`; used only with `--enable-inject-envd`. If omitted, the CLI uses its build-time embedded default `envd` when available. |
+| `--envd-path` | A local path on the machine running `cubemastercli`; used only with `--enable-inject-envd`. If omitted, the CLI uses its build-time embedded default `envd` (the in-repo Rust `cube-envd`) when available. |
 
 `--envd-path` refers to the machine running the CLI, not the CubeMaster host. The CLI uploads the binary in the multipart `create-from-image` request. CubeMaster validates it, writes it to `/usr/local/bin/envd` in the template rootfs, and includes its SHA-256 in the rootfs artifact fingerprint so artifacts built with different `envd` binaries are not reused interchangeably.
 
 The uploaded file must be a non-empty ELF binary no larger than 16 MiB and compatible with the target rootfs operating system and CPU architecture. For example, a Linux x86_64 image requires a Linux x86_64 `envd` binary.
 
-If `cubemastercli` was built without an embedded default `envd`, `--envd-path` is required. To build the CLI with a default binary, prepare `envd` and run:
+If `cubemastercli` was built without an embedded default `envd`, `--envd-path` is required. To build the CLI with a default binary, prepare an `envd` ELF and run:
 
 ```bash
 make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
 ```
+
+Release bundles built by `deploy/one-click/build-release-bundle-builder.sh` embed the in-repo `cube-envd` automatically (override via `ENVD_LOCAL_PATH`), so their `cubemastercli` needs no `--envd-path`.
 
 For the `cubebox` instance type, CubeMaster also preserves the injection annotation and automatically wraps the main container command when creating a sandbox: it starts `/usr/local/bin/envd` in the background, executes the image's original command, and adds port `49983` to the exposed ports. The original image entrypoint therefore does not need to be changed when using this method. The command wrapper is not applied to non-`cubebox` instance types.
 
@@ -218,7 +221,7 @@ docker exec "$cid" curl -s -o /dev/null -w "envd /health => %{http_code}\n" \
 # => envd /health => 204
 
 docker exec "$cid" /usr/bin/envd -version
-# => 2026.16
+# => v0.5.1   (semver of the cube-envd build baked into the image)
 
 docker rm -f "$cid"
 ```
@@ -246,7 +249,10 @@ docker exec "$cid" cat /var/log/envd.log
 
 The base image is produced by a single GitHub Actions workflow in this
 repository: [`.github/workflows/build-envd-base-image.yml`](https://github.com/TencentCloud/CubeSandbox/blob/master/.github/workflows/build-envd-base-image.yml).
-It checks out `e2b-dev/infra` at the chosen tag (default `2026.16`),
-compiles `envd` with Go 1.25.4 in-place, builds
-`docker/Dockerfile.cube-base`, runs a `:49983/health` smoke test, then
-pushes to `ghcr.io/tencentcloud/cubesandbox-base`.
+It builds `docker/Dockerfile.cube-base`, whose `envd-builder` stage
+compiles the in-repo Rust daemon `cube-envd` (musl static; version and
+commit injected as `CUBE_ENVD_VERSION` / `CUBE_ENVD_COMMIT` build args),
+bakes it into the image as `/usr/bin/envd`, runs a `:49983/health`
+smoke test plus `envd -version`/`-commit` checks, then pushes to
+`ghcr.io/tencentcloud/cubesandbox-base` (tags: `latest` and
+`<sha>-ubuntu22.04` on `master`).
