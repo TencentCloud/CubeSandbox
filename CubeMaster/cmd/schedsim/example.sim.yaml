@@ -1,0 +1,96 @@
+# Example CubeMaster config for the schedsim scheduling simulator.
+#
+# Usage:
+#   cd CubeMaster
+#   go run ./cmd/schedsim --trace /path/to/trace.json --config cmd/schedsim/example.sim.yaml \
+#     --nodes 300 --template-preload 0.3 --seed 42 --rounds 3 -o report.json
+#
+# Only the scheduler-relevant sections matter: schedsim never starts the HTTP
+# server, DB, Redis, or localcache background sync (localcache.Init is not
+# called); it drives scheduler.Select against in-process node state. Fields
+# below are the minimum the scheduler core reads, plus safety valves for
+# simulation. Compare with the production reference in CubeMaster/conf.yaml.
+
+common:
+  # Required section (config validation fails without it). Nothing here is
+  # actually served in the sim; intervals only pace harmless background
+  # metric goroutines spawned by scheduler.InitScheduler.
+  http_port: 18089
+  collect_metric_interval: 1s
+  report_local_create_num: false
+  report_stdev_metric: false
+
+log:
+  # Required section. schedsim never calls log.Init (no files are written);
+  # it forces the cubelog level to FATAL at bootstrap so per-request
+  # scheduler logs don't flood output or pollute latency measurements.
+  module: "schedsim"
+  path: "/tmp/schedsim-log"
+  level: "error"
+  file_size: 100
+  file_num: 2
+
+cubelet_conf:
+  create_concurrent_limit: 100
+  destroy_concurent_limit: 50
+
+scheduler:
+  # Enumerate all nodes in prefilter, and pick the single highest-scored node
+  # deterministically. priority_select_num > 1 switches the final pick to a
+  # time-seeded weighted random among the top N (not reproducible run-to-run;
+  # see cmd/schedsim/README.md "随机性与复现").
+  pre_select_num: -1
+  priority_select_num: 1
+  least_select_name: "random"
+
+  # The prefilter drops nodes whose metric timestamp is older than this, on
+  # the REAL wall clock while the sim runs on a virtual clock. The sim also
+  # refreshes MetricUpdate on every placement; the large timeout here is the
+  # safety net for slow machines / huge traces.
+  metric_update_timeout: 86400s
+  local_metric_update_timeout: 86400s
+
+  ignore_redis_allocation: false
+  overcommit_ratio:
+    cpu_ratio: 3.0
+    mem_ratio: 2.0
+
+  # Small reserved memory so the mem filter's physical-free check
+  # (MemMBTotal - MemUsage > request + reserved) admits sim requests; sim
+  # nodes report physical total == quota and zero real usage.
+  node_max_mem_reserved_in_mb: 256
+
+  filter:
+    enable_filters:
+      - "cpu"
+      - "mem"
+      - "template_locality"
+      - "realtime_create_num"
+
+  # LeastAllocated-style spreading: score nodes by remaining quota so the
+  # top-1 pick is the least-loaded fitting node. Drop the whole score section
+  # to fall back to uniform random among filtered nodes.
+  score:
+    enable_scorers:
+      - "real_time_weighted_average"
+    resource_weights:
+      req_cpu: 1.0
+      req_mem: 1.0
+      quota_cpu_usage: 1.0
+      quota_mem_usage: 1.0
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1.0
+        enable_weight_factors:
+          - "quota_cpu_usage"
+          - "quota_mem_usage"
+
+  # Maps the sim nodes' oss_cluster_label ("schedsim-<instance-type>") onto
+  # the sim instance type. Without localcache.Init the indexed enumeration is
+  # bypassed anyway (fallback scans all healthy in-cache nodes, which are
+  # exactly the sim fleet), so this documents intent rather than changing
+  # behavior.
+  instance_type_conf:
+    sim:
+      oss_cluster_labels:
+        schedsim-sim: {}
