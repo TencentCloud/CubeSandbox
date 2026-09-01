@@ -2,7 +2,7 @@
 
 共享协议模块：CubeMaster ↔ Cubelet 以及 examples 之间的 gRPC 契约的**单一事实源**。
 
-- 6 组 proto（cubebox / errorcode / images / snapshot / volumeplugin / types）+ 生成代码（`.pb.go` 入库）
+- 7 组 proto（cubebox / errorcode / images / schedulerplugin / snapshot / volumeplugin / types）+ 生成代码（`.pb.go` 入库）
 - `volumeplugin/grpctarget`：volume plugin gRPC 地址规范化工具（43 行，只依赖 `strings`）
 - `doc/api.md`：protoc-gen-doc 生成的共享 API 参考
 
