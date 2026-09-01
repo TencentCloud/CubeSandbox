@@ -107,7 +107,7 @@ func getQuotaCpuUsageScore(n *node.Node) float64 {
 	if sconf == nil {
 		return 0.0
 	}
-	effCpu := sconf.EffectiveQuotaCpu(n.InstanceType, n.QuotaCpu)
+	effCpu := n.QuotaCpu
 	if effCpu <= 0 {
 
 		return 0.0
@@ -121,7 +121,7 @@ func getQuotaMemMbUsageScore(n *node.Node) float64 {
 	if sconf == nil {
 		return 0.0
 	}
-	effMem := sconf.EffectiveQuotaMem(n.InstanceType, n.QuotaMem)
+	effMem := n.QuotaMem
 	if effMem <= 0 {
 		return 0.0
 	}
