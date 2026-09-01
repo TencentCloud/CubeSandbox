@@ -8,3 +8,5 @@
 !CubeS3lvol/patches/**
 CubeS3lvol/deps
 CubeS3lvol/deps/**
+!cube-envd/
+!cube-envd/**
