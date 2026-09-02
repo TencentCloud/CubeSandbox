@@ -143,11 +143,17 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
 | `load_cv_cpu` / `load_cv_mem` | 节点用量率（用量/配额）总体标准差 / 均值；均值为 0 定义为 0 |
 | `jain_cpu` / `jain_mem` | Jain 公平指数 (Σx)²/(n·Σx²)；全 0 定义为 1（完全均衡） |
 | `fragmentation_ratio` | 对 trace 中**最大请求 shape**（max cpu_millis）：放不下该 shape 的节点的空闲 CPU 占总空闲 CPU 的比例。"空闲"与 cpu filter 同口径（配额×超卖比−已分配），"放不下"与 filter 的 `free > req` 判定互补（`free <= maxShape`） |
+| `fragmentation_ratio_mem` | 上者的内存侧版本（max mem_mib，与 mem filter 同口径）。两个指标分开跟踪：取决于超卖比与请求 shape，任一资源都可能先成为瓶颈（如 mem_ratio < cpu_ratio 且 shape 偏小时，内存先耗尽、CPU 被搁置），只看 CPU 侧会漏报 |
 | `herding_top1_share` | 被选中次数最多的节点占总成功放置的比例（羊群度） |
-| `template_hit_rate` | 成功放置中选中节点持有该模板本地副本的比例（分母为带模板的成功请求；仿真请求 `AllowNonLocalTemplate=false`，配合 template_locality filter 时恒为 1——该指标主要用于检测配置漂移） |
+| `template_hit_rate` | 成功放置中选中节点持有该模板本地副本的比例（分母为带模板的成功请求）。放置成功后仿真会把该模板注册到选中节点（预热拉取），因此 locality filter 关闭时该指标跟踪动态局部性（首次未命中、后续命中）；filter 开启且 `AllowNonLocalTemplate=false` 时未预热节点本就不收该模板请求，指标恒为 1，主要用于检测配置漂移 |
 | `active_nodes_avg` / `empty_nodes_avg` | 有/无运行中沙箱的节点数，时间平均 |
 
 指标计算均为纯函数（`pkg/scheduler/sim/metrics.go`），单测手算对拍。
+
+已知限制：每轮结束时节点被标记为不健康但**不会从进程级 localcache 中移除**
+（刻意不调用 `localcache.Init`，没有同步/淘汰回路）；节点 ID 带 RoundID 前缀，
+轮间不会互相污染，但长时间在同一进程内反复跑仿真会累积陈旧节点条目——CLI
+的小轮数场景无影响。
 
 ## 验证
 

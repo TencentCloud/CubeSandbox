@@ -53,20 +53,21 @@ func JainIndex(xs []float64) float64 {
 	return sum * sum / (float64(n) * sq)
 }
 
-// FragmentationRatio measures how much of the cluster's free CPU is stranded
-// in pieces too small for the largest request shape in the trace.
+// FragmentationRatio measures how much of the cluster's free CPU (or memory —
+// the engine applies it per resource) is stranded in pieces too small for the
+// largest request shape in the trace.
 //
-// Definition: let freeCPU_i be node i's schedulable free CPU (effective quota
-// after overcommit minus allocated usage, the same quantity the cpu filter
-// tests) and maxShape the largest cpu_millis over all trace requests. A node
-// "cannot fit" the shape when freeCPU_i <= maxShape (mirroring the filter's
-// strict free > req admission check). The ratio is
+// Definition: let free_i be node i's schedulable free quantity (effective
+// quota after overcommit minus allocated usage, the same quantity the
+// cpu/mem filters test) and maxShape the largest request size over all trace
+// requests. A node "cannot fit" the shape when free_i <= maxShape (mirroring
+// the filter's strict free > req admission check). The ratio is
 //
-//	Σ freeCPU_i over unfit nodes / Σ freeCPU_i over all nodes
+//	Σ free_i over unfit nodes / Σ free_i over all nodes
 //
-// 0 means every free CPU millicore sits on a node that could still take the
-// biggest request; 1 means no free CPU is usable for it. Total free CPU of 0
-// (cluster full or empty quota) is defined as 0.
+// 0 means every free unit sits on a node that could still take the biggest
+// request; 1 means no free unit is usable for it. Total free of 0 (cluster
+// full or empty quota) is defined as 0.
 func FragmentationRatio(free []float64, maxShape float64) float64 {
 	var total, stranded float64
 	for _, f := range free {
@@ -118,9 +119,13 @@ type Snapshot struct {
 	LoadCVMem          float64 // CV of per-node mem usage rate
 	JainCPU            float64 // Jain index of per-node cpu usage rate
 	JainMem            float64 // Jain index of per-node mem usage rate
-	FragmentationRatio float64
-	ActiveNodes        float64 // nodes running >= 1 sandbox
-	EmptyNodes         float64 // nodes running 0 sandboxes
+	FragmentationRatio float64 // free CPU stranded on nodes that cannot fit the largest shape
+	// FragmentationRatioMem is the memory-side analog: tracked separately
+	// because either resource can bind first depending on the overcommit
+	// ratios and the trace shape.
+	FragmentationRatioMem float64
+	ActiveNodes           float64 // nodes running >= 1 sandbox
+	EmptyNodes            float64 // nodes running 0 sandboxes
 }
 
 // TimeWeightedAvg accumulates snapshots against the virtual clock: the state
@@ -170,6 +175,7 @@ func (s *Snapshot) addScaled(o Snapshot, k float64) {
 	s.JainCPU += o.JainCPU * k
 	s.JainMem += o.JainMem * k
 	s.FragmentationRatio += o.FragmentationRatio * k
+	s.FragmentationRatioMem += o.FragmentationRatioMem * k
 	s.ActiveNodes += o.ActiveNodes * k
 	s.EmptyNodes += o.EmptyNodes * k
 }
@@ -182,6 +188,7 @@ func (s *Snapshot) scale(k float64) {
 	s.JainCPU *= k
 	s.JainMem *= k
 	s.FragmentationRatio *= k
+	s.FragmentationRatioMem *= k
 	s.ActiveNodes *= k
 	s.EmptyNodes *= k
 }

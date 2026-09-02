@@ -181,6 +181,9 @@ type engine struct {
 	// constant of the trace, precomputed once so snapshot() stays O(nodes)
 	// instead of rescanning every request after every event.
 	maxReqCPUMillis int64
+	// maxReqMemMiB is the same for mem_mib (memory can bind before CPU under
+	// asymmetric overcommit ratios, so fragmentation is tracked per resource).
+	maxReqMemMiB int64
 
 	nodeOrder []*nodeState
 	nodes     map[string]*nodeState
@@ -216,6 +219,7 @@ func RunRound(ctx context.Context, p Params) (*RoundResult, error) {
 	e := &engine{
 		p:               p,
 		maxReqCPUMillis: p.Trace.MaxRequestCpuMillis(),
+		maxReqMemMiB:    p.Trace.MaxRequestMemMiB(),
 		nodes:           make(map[string]*nodeState, p.Nodes),
 		replicas:        make(map[string]map[string]bool),
 		placements:      make(map[int]*placement),
@@ -399,10 +403,30 @@ func (e *engine) onCreate(ctx context.Context, ev event) {
 	e.nodeSuccess[ns.id]++
 	if req.TemplateID != "" {
 		e.templatedSuccesses++
-		if e.replicas[req.TemplateID][ns.id] {
+		if e.noteTemplatePlacement(req.TemplateID, ns.id) {
 			e.templateHits++
 		}
 	}
+}
+
+// noteTemplatePlacement records a successful placement of a templated request
+// and reports whether the node already held a local replica (a template hit).
+// On a miss it warms the node: a successful placement pulls the template, so
+// later requests for it hit the local replica. (With the template_locality
+// filter enabled the miss branch is unreachable — placement already required
+// the replica — but with it off, template_hit_rate now tracks dynamic
+// locality instead of only the static preload policy.)
+func (e *engine) noteTemplatePlacement(tplID, nodeID string) bool {
+	if e.replicas[tplID][nodeID] {
+		return true
+	}
+	localcache.RegisterTemplateReplica(tplID, nodeID, 1)
+	if e.replicas[tplID] == nil {
+		e.replicas[tplID] = make(map[string]bool)
+	}
+	e.replicas[tplID][nodeID] = true
+	e.registered = append(e.registered, [2]string{tplID, nodeID})
+	return false
 }
 
 func (e *engine) onExpire(ev event) {
@@ -448,16 +472,22 @@ func (e *engine) snapshot() Snapshot {
 	cpuRates := make([]float64, 0, n)
 	memRates := make([]float64, 0, n)
 	freeCPU := make([]float64, 0, n)
+	freeMem := make([]float64, 0, n)
 	var usedCPU, usedMem, quotaCPU, quotaMem float64
 	var active float64
 
 	// Fragmentation is computed against the same effective (overcommit-aware)
-	// free CPU the cpu filter admits on.
-	cpuRatio := 1.0
+	// free CPU/mem the cpu and mem filters admit on — per resource, because
+	// either one can bind first depending on the overcommit ratios and the
+	// trace shape (e.g. mem_ratio < cpu_ratio with small shapes strands CPU).
+	cpuRatio, memRatio := 1.0, 1.0
 	if sc := config.GetConfig().Scheduler; sc != nil {
-		cpuRatio = sc.GetEffectiveOvercommitRatio(e.p.InstanceType).CPURatio
-		if cpuRatio <= 0 {
-			cpuRatio = 1.0
+		oc := sc.GetEffectiveOvercommitRatio(e.p.InstanceType)
+		if oc.CPURatio > 0 {
+			cpuRatio = oc.CPURatio
+		}
+		if oc.MemRatio > 0 {
+			memRatio = oc.MemRatio
 		}
 	}
 
@@ -468,24 +498,30 @@ func (e *engine) snapshot() Snapshot {
 		quotaMem += float64(ns.quotaMemMiB)
 		cpuRates = append(cpuRates, float64(ns.usedCPUMilli)/float64(ns.quotaCPUMilli))
 		memRates = append(memRates, float64(ns.usedMemMiB)/float64(ns.quotaMemMiB))
-		free := float64(ns.quotaCPUMilli)*cpuRatio - float64(ns.usedCPUMilli)
-		if free < 0 {
-			free = 0
+		freeC := float64(ns.quotaCPUMilli)*cpuRatio - float64(ns.usedCPUMilli)
+		if freeC < 0 {
+			freeC = 0
 		}
-		freeCPU = append(freeCPU, free)
+		freeCPU = append(freeCPU, freeC)
+		freeM := float64(ns.quotaMemMiB)*memRatio - float64(ns.usedMemMiB)
+		if freeM < 0 {
+			freeM = 0
+		}
+		freeMem = append(freeMem, freeM)
 		if ns.running > 0 {
 			active++
 		}
 	}
 
 	s := Snapshot{
-		LoadCVCPU:          CoefficientOfVariation(cpuRates),
-		LoadCVMem:          CoefficientOfVariation(memRates),
-		JainCPU:            JainIndex(cpuRates),
-		JainMem:            JainIndex(memRates),
-		FragmentationRatio: FragmentationRatio(freeCPU, float64(e.maxReqCPUMillis)),
-		ActiveNodes:        active,
-		EmptyNodes:         float64(n) - active,
+		LoadCVCPU:             CoefficientOfVariation(cpuRates),
+		LoadCVMem:             CoefficientOfVariation(memRates),
+		JainCPU:               JainIndex(cpuRates),
+		JainMem:               JainIndex(memRates),
+		FragmentationRatio:    FragmentationRatio(freeCPU, float64(e.maxReqCPUMillis)),
+		FragmentationRatioMem: FragmentationRatio(freeMem, float64(e.maxReqMemMiB)),
+		ActiveNodes:           active,
+		EmptyNodes:            float64(n) - active,
 	}
 	if quotaCPU > 0 {
 		s.CPUAllocRate = usedCPU / quotaCPU
@@ -508,21 +544,22 @@ func (e *engine) result() *RoundResult {
 	}
 
 	summary := map[string]float64{
-		"success_rate":         ratio(int64(e.successes), int64(total)),
-		"sched_latency_p50_ms": Percentile(e.latencyMs, 50),
-		"sched_latency_p95_ms": Percentile(e.latencyMs, 95),
-		"sched_latency_p99_ms": Percentile(e.latencyMs, 99),
-		"cpu_alloc_rate":       mean.CPUAllocRate,
-		"mem_alloc_rate":       mean.MemAllocRate,
-		"load_cv_cpu":          mean.LoadCVCPU,
-		"load_cv_mem":          mean.LoadCVMem,
-		"jain_cpu":             mean.JainCPU,
-		"jain_mem":             mean.JainMem,
-		"fragmentation_ratio":  mean.FragmentationRatio,
-		"herding_top1_share":   ratio(int64(top1), int64(e.successes)),
-		"template_hit_rate":    ratio(int64(e.templateHits), int64(e.templatedSuccesses)),
-		"active_nodes_avg":     mean.ActiveNodes,
-		"empty_nodes_avg":      mean.EmptyNodes,
+		"success_rate":            ratio(int64(e.successes), int64(total)),
+		"sched_latency_p50_ms":    Percentile(e.latencyMs, 50),
+		"sched_latency_p95_ms":    Percentile(e.latencyMs, 95),
+		"sched_latency_p99_ms":    Percentile(e.latencyMs, 99),
+		"cpu_alloc_rate":          mean.CPUAllocRate,
+		"mem_alloc_rate":          mean.MemAllocRate,
+		"load_cv_cpu":             mean.LoadCVCPU,
+		"load_cv_mem":             mean.LoadCVMem,
+		"jain_cpu":                mean.JainCPU,
+		"jain_mem":                mean.JainMem,
+		"fragmentation_ratio":     mean.FragmentationRatio,
+		"fragmentation_ratio_mem": mean.FragmentationRatioMem,
+		"herding_top1_share":      ratio(int64(top1), int64(e.successes)),
+		"template_hit_rate":       ratio(int64(e.templateHits), int64(e.templatedSuccesses)),
+		"active_nodes_avg":        mean.ActiveNodes,
+		"empty_nodes_avg":         mean.EmptyNodes,
 	}
 	return &RoundResult{Seed: e.p.Seed, Summary: summary}
 }

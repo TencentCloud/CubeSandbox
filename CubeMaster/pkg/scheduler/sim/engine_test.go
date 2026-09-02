@@ -88,6 +88,9 @@ func TestRunRoundSingleNodeConcentrates(t *testing.T) {
 	approx(t, "active_nodes_avg", s["active_nodes_avg"], 1, 1e-9)
 	approx(t, "empty_nodes_avg", s["empty_nodes_avg"], 0, 1e-9)
 	approx(t, "fragmentation_ratio", s["fragmentation_ratio"], 0, 1e-9)
+	// Mem side: effective free mem (65536×2 − 40960 max used) never drops to
+	// the 2048MiB max shape either, so both resource ratios stay 0.
+	approx(t, "fragmentation_ratio_mem", s["fragmentation_ratio_mem"], 0, 1e-9)
 	// Hand-computed over the virtual span [0,79s]: ramp-up requests*s=190,
 	// plateau 20*41=820, ramp-down 190 -> cpu rate integral 1200/64*1000 ms
 	// over 79000 ms.
@@ -162,4 +165,25 @@ func TestRunRoundTemplateMissFails(t *testing.T) {
 	approx(t, "cpu_alloc_rate", s["cpu_alloc_rate"], 0, 1e-9)
 	approx(t, "active_nodes_avg", s["active_nodes_avg"], 0, 1e-9)
 	approx(t, "empty_nodes_avg", s["empty_nodes_avg"], 2, 1e-9)
+}
+
+// TestNoteTemplatePlacementWarmsUp: the first placement of a template on a
+// node is a miss that warms the node; later placements hit, and every unique
+// (template, node) pair is registered exactly once for cleanup.
+func TestNoteTemplatePlacementWarmsUp(t *testing.T) {
+	e := &engine{replicas: make(map[string]map[string]bool)}
+
+	if hit := e.noteTemplatePlacement("tpl-ut", "sim-node-ut-1"); hit {
+		t.Fatalf("first placement on a node must be a miss")
+	}
+	if hit := e.noteTemplatePlacement("tpl-ut", "sim-node-ut-1"); !hit {
+		t.Fatalf("placement after warm-up must hit")
+	}
+	if hit := e.noteTemplatePlacement("tpl-ut", "sim-node-ut-2"); hit {
+		t.Fatalf("first placement on another node must be a miss")
+	}
+	if len(e.registered) != 2 {
+		t.Fatalf("registered pairs = %d, want 2 (one per unique pair)", len(e.registered))
+	}
+	e.cleanup() // deregister exactly what was registered
 }

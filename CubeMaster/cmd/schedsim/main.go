@@ -53,10 +53,13 @@ func main() {
 	ctx := context.Background()
 
 	// config.Init dumps the whole parsed config to stdout; keep stdout clean
-	// for the JSON report when -o is not given.
-	restoreStdout := silenceStdout()
-	err := sim.Bootstrap(ctx, *configPath)
-	restoreStdout()
+	// for the JSON report when -o is not given. The restore is defer-guarded
+	// so a Bootstrap panic cannot strand the swapped os.Stdout.
+	err := func() error {
+		restoreStdout := silenceStdout()
+		defer restoreStdout()
+		return sim.Bootstrap(ctx, *configPath)
+	}()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "schedsim: bootstrap: %v\n", err)
 		os.Exit(1)

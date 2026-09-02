@@ -104,6 +104,18 @@ func (t *Trace) MaxRequestCpuMillis() int64 {
 	return m
 }
 
+// MaxRequestMemMiB returns the largest mem_mib over all requests — the memory
+// side of the "biggest shape" used by the fragmentation metric.
+func (t *Trace) MaxRequestMemMiB() int64 {
+	var m int64
+	for i := range t.Requests {
+		if t.Requests[i].MemMiB > m {
+			m = t.Requests[i].MemMiB
+		}
+	}
+	return m
+}
+
 // TemplateIDs returns the distinct non-empty template IDs referenced by the
 // templates section, falling back to IDs seen on requests when the templates
 // section is absent.
