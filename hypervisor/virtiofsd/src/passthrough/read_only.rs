@@ -17,6 +17,7 @@ use crate::filesystem::{
 };
 use crate::passthrough::stat::{statx, StatExt};
 
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::fs::File;
@@ -448,6 +449,10 @@ impl FileSystem for PassthroughFsRo {
 }
 
 impl SerializableFileSystem for PassthroughFsRo {
+    fn set_filter_path_remap(&self, remap: HashMap<String, String>) {
+        self.0.set_filter_path_remap(remap)
+    }
+
     fn prepare_serialization(&self, cancel: Arc<AtomicBool>) -> io::Result<()> {
         self.0.prepare_serialization(cancel)
     }

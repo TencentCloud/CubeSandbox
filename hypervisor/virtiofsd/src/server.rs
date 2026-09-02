@@ -171,6 +171,13 @@ impl FilterList {
         self.allowed_dirs.is_empty()
     }
 
+    fn basename_paths(&self) -> HashMap<String, String> {
+        self.allowed_dirs
+            .iter()
+            .map(|(name, (path, _))| (name.clone(), path.clone()))
+            .collect()
+    }
+
     // return allow dire entry.
     pub fn get_allow_dir(&self, key: String) -> Result<(String, stat::StatExt)> {
         if !self.allowed_dirs.contains_key(&key) {
@@ -190,6 +197,7 @@ pub struct Server<F: FileSystem + Sync> {
     fs: F,
     options: AtomicU64,
     root_filter: Arc<Mutex<FilterList>>,
+    remap_filter_enabled: AtomicBool,
 }
 
 impl<F: FileSystem + Sync> Server<F> {
@@ -201,7 +209,20 @@ impl<F: FileSystem + Sync> Server<F> {
             fs,
             options: AtomicU64::new(FsOptions::empty().bits()),
             root_filter: Arc::new(Mutex::new(filter)),
+            remap_filter_enabled: AtomicBool::new(false),
         })
+    }
+
+    /// Enable or disable the filter-path remap feature used during migration
+    /// restore. When disabled (the default), the backend will keep the
+    /// legacy behaviour and skip populating the remap map before deserializing
+    /// device state.
+    pub fn set_remap_filter_enabled(&self, enabled: bool) {
+        self.remap_filter_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn is_remap_filter_enabled(&self) -> bool {
+        self.remap_filter_enabled.load(Ordering::Relaxed)
     }
 
     pub fn update_filter(&self, whitelist: &Option<Vec<String>>) -> Result<()> {
@@ -1879,6 +1900,7 @@ impl<F: FileSystem + SerializableFileSystem + Sync> SerializableFileSystem for S
     }
 
     fn deserialize_and_apply(&self, state_pipe: File) -> io::Result<()> {
+        self.inject_filter_path_remap();
         self.fs.deserialize_and_apply(state_pipe)
     }
 
@@ -1887,7 +1909,20 @@ impl<F: FileSystem + SerializableFileSystem + Sync> SerializableFileSystem for S
     }
 
     fn deserialize_and_apply_data(&self, serialized: &Vec<u8>) -> io::Result<()> {
+        self.inject_filter_path_remap();
         self.fs.deserialize_and_apply_data(serialized)
+    }
+}
+
+impl<F: FileSystem + SerializableFileSystem + Sync> Server<F> {
+    fn inject_filter_path_remap(&self) {
+        if !self.is_remap_filter_enabled() {
+            return;
+        }
+        let remap = self.root_filter.lock().unwrap().basename_paths();
+        if !remap.is_empty() {
+            self.fs.set_filter_path_remap(remap);
+        }
     }
 }
 

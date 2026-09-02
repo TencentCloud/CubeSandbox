@@ -1396,7 +1396,7 @@ impl FsConfig {
     thread_pool_size=<thread_pool_size>,ops_size=<ops_size>,\
     ops_one_time_burst=<ops_one_time_burst>,ops_refill_time=<ops_refill_time>,\
     bw_size=<bw_size>,bw_one_time_burst=<bw_one_time_burst>,bw_refill_time=<bw_refill_time>,\
-    allowed_dirs=<dir_list>\"";
+    allowed_dirs=<dir_list>,remap_filter=<remap_filter>\"";
 
     fn add_frontend_args(parser: &mut OptionParser) {
         parser
@@ -1425,7 +1425,8 @@ impl FsConfig {
             .add("rlimit_nofile")
             .add("killpriv_v2")
             .add("security_label")
-            .add("allowed_dirs");
+            .add("allowed_dirs")
+            .add("remap_filter");
     }
 
     fn add_ratelimiter_args(parser: &mut OptionParser) {
@@ -1523,6 +1524,11 @@ impl FsConfig {
             .convert::<StringList>("allowed_dirs")
             .map_err(Error::ParseFileSystem)?
             .map(|v| v.0);
+        let remap_filter = parser
+            .convert::<Toggle>("remap_filter")
+            .map_err(Error::ParseFileSystem)?
+            .unwrap_or(Toggle(false))
+            .0;
 
         Ok(BackendFsConfig {
             shared_dir,
@@ -1540,6 +1546,7 @@ impl FsConfig {
             killpriv_v2,
             security_label,
             allowed_dirs,
+            remap_filter,
         })
     }
 

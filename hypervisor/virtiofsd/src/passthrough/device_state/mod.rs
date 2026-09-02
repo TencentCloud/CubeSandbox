@@ -80,6 +80,10 @@ impl SerializableFileSystem for PassthroughFs {
         state_pipe.read_to_end(&mut serialized)?;
         self.deserialize_and_apply_data(&serialized)
     }
+
+    fn set_filter_path_remap(&self, remap: std::collections::HashMap<String, String>) {
+        let _ = self.restore_filter_remap.set(remap);
+    }
 }
 
 #[cfg(test)]

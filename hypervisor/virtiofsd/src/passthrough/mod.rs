@@ -31,7 +31,7 @@ use file_handle::{FileHandle, FileOrHandle, OpenableFileHandle};
 use mount_fd::{MPRError, MountFds};
 use stat::{statx, StatExt};
 use std::borrow::Cow;
-use std::collections::{btree_map, BTreeMap};
+use std::collections::{btree_map, BTreeMap, HashMap};
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
@@ -40,7 +40,7 @@ use std::mem::MaybeUninit;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 use xattrmap::{AppliedRule, XattrMap};
 
@@ -471,6 +471,11 @@ pub struct PassthroughFs {
     // serialization each subtree of filter entries.
     filter: RwLock<BTreeMap<Inode, (String, String)>>,
 
+    // basename → destination absolute path, used only while applying a
+    // migration blob so filter inodes open at the restore-time allow_dir.
+    // OnceLock so remap_filter_fullname can return &str borrowed from self.
+    restore_filter_remap: OnceLock<HashMap<String, String>>,
+
     cfg: Config,
 }
 
@@ -525,6 +530,7 @@ impl PassthroughFs {
             os_facts: oslib::OsFacts::new(),
             track_migration_info: AtomicBool::new(false),
             filter: RwLock::new(BTreeMap::new()),
+            restore_filter_remap: OnceLock::new(),
             cfg,
         };
 
@@ -575,6 +581,31 @@ impl PassthroughFs {
             .filter(|hd| hd.inode == inode)
             .cloned()
             .ok_or_else(ebadf)
+    }
+
+    /// If restore remapped this filter basename to a new host path, return that
+    /// path; otherwise keep `fullname` from the migration blob.
+    fn remap_filter_fullname<'a>(
+        &'a self,
+        inode: Inode,
+        filename: &str,
+        fullname: &'a str,
+    ) -> &'a str {
+        match self
+            .restore_filter_remap
+            .get()
+            .and_then(|remap| remap.get(filename))
+            .map(String::as_str)
+        {
+            Some(new_path) if new_path != fullname => {
+                info!(
+                    "remap filter inode {}: {:?} -> {:?}",
+                    inode, fullname, new_path
+                );
+                new_path
+            }
+            _ => fullname,
+        }
     }
 
     fn open_inode(&self, inode: Inode, mut flags: i32) -> io::Result<File> {
