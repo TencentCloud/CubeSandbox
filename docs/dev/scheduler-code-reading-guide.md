@@ -1,8 +1,8 @@
 # CubeSandbox 调度系统代码阅读指南
 
-> 配套文档：`SCHEDULER_PLUGIN_DESIGN.md`（设计/修复方案）
+> 配套文档：[scheduler-plugin-design.md](./scheduler-plugin-design.md)（设计/修复方案）
 > 目标读者：准备实现"集群调度性能评估与高性能调度插件系统"任务的同学
-> 代码基线：`feat/scheduler-eval-plugin @ 4eb62321`（2026-08）
+> 代码基线：`master @ c458228e`（本 PR 与 master 的 merge base）
 
 本文按**推荐阅读顺序**列出实现该任务需要读的代码，标注每个文件"为什么读、读什么、
 关键位置"。标注 📌 的为必读，其余可按需选读。
@@ -15,7 +15,7 @@
 
 - 📌 仓库根 `README.md` 的架构图：CubeAPI → CubeMaster → Cubelet 三段式控制面。
 - 📌 `docs/architecture/`（及 `docs/zh/architecture/`）：调度器是 CubeMaster 的子模块。
-- 设计文档 `SCHEDULER_PLUGIN_DESIGN.md` §2：本文与之对应，读代码时随时对照。
+- 设计文档 [scheduler-plugin-design.md](./scheduler-plugin-design.md) §2：本文与之对应，读代码时随时对照。
 
 ---
 
@@ -26,7 +26,7 @@
 
 ### 1.1 📌 `CubeMaster/pkg/scheduler/schedule.go`（242 行，全读）
 
-调度主流程 `Select()`（L25）。必须弄清：
+调度主流程 `Select()`（`Select` 函数定义处）。必须弄清：
 
 - 流水线顺序：`runPreFilter` → `runFilter`（`parallelRunFilters`，L138，**并行执行各
   Filter 后取交集**）→ `runScoreFilter`（L178，各插件得分 × 权重求和、归一化）→
@@ -233,4 +233,4 @@ K8s 风格 NodeSelector（In/NotIn/Exists/Gt/Lt）。亲和相关的策略（如
 | 5 | 测试与工具 | ~800 行 | 1~2h |
 | 6 | 工程规范 | — | 0.5h |
 
-之后即可按 `SCHEDULER_PLUGIN_DESIGN.md` §8 的 PR 划分动工。
+之后即可按 [scheduler-plugin-design.md](./scheduler-plugin-design.md) §8 的 PR 划分动工。

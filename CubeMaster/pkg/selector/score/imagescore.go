@@ -21,7 +21,7 @@ import (
 const (
 	mb                    int64 = 1024 * 1024
 	minThreshold          int64 = 23 * mb    // 镜像总大小低于该值按该值计分（下限保护）
-	maxContainerThreshold int64 = 80000 * mb // 单个容器镜像大小超过该值按该值计分（上限保护）
+	maxContainerThreshold int64 = 80000 * mb // 镜像得分总和的上限基数：总和超过 该值×容器数 时按该上限计分（聚合上限，非单镜像上限）
 )
 
 // imageScore 镜像本地化评分插件：
@@ -144,7 +144,8 @@ func getImageScore(ctx context.Context, images []*selctx.ImageSpec, nodeInfo *no
 	return float64(score)
 }
 
-// getTemplateScore 按模板 ID 给节点打分：节点已缓存该模板镜像则得高分
+// getTemplateScore 按模板 ID 给节点打分：节点已缓存该模板镜像时，按
+// 镜像大小 × 集群散布度经 calculatePriority 线性映射计分（未缓存则为 0，见函数注释）
 func getTemplateScore(ctx context.Context, templateID string, nodeInfo *node.Node) float64 {
 	_ = ctx
 	if templateID == "" || nodeInfo == nil {
@@ -156,7 +157,9 @@ func getTemplateScore(ctx context.Context, templateID string, nodeInfo *node.Nod
 }
 
 // calculatePriority 将镜像总分映射到 0~MaxNodeScore 区间：
-// 低于下限保底为 minThreshold 对应的分数，高于上限封顶
+// 总分为各已缓存镜像的 Size×集群散布度之和（localcache.scaledImageScore），
+// 先截断到 [minThreshold, maxContainerThreshold×numContainers] 再线性映射——
+// 缓存命中并非满分：约 5GB 镜像全集群散布仅 ≈6/100，总和接近上限才饱和
 func calculatePriority(sumScores int64, numContainers int) int64 {
 	maxThreshold := maxContainerThreshold * int64(numContainers)
 	if sumScores < minThreshold {

@@ -344,7 +344,9 @@ export default withMermaid(defineConfig({
               text: 'Developer Docs',
               items: [
                 { text: 'Overview', link: '/dev/' },
-                { text: 'Redis Key Convention', link: '/dev/redis-key-spec' }
+                { text: 'Redis Key Convention', link: '/dev/redis-key-spec' },
+                { text: 'Scheduler Plugin Design', link: '/dev/scheduler-plugin-design' },
+                { text: 'Scheduler Code Reading Guide', link: '/dev/scheduler-code-reading-guide' }
               ]
             }
           ]

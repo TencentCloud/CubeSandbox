@@ -1,7 +1,7 @@
 # CubeSandbox 集群调度性能评估与高性能调度插件系统 — 设计/修复文档
 
 > 实战任务一（项目导师：龙进）
-> 撰写日期：2026-08-19　对应代码基线：`master @ 4eb62321`
+> 撰写日期：2026-08-19　对应代码基线：`master @ c458228e`（本 PR 与 master 的 merge base）
 
 ---
 
@@ -9,7 +9,7 @@
 
 ### 1.1 调度流水线
 
-入口：`CubeMaster/pkg/scheduler/schedule.go:28` `Select()`，调用方为
+入口：`Select()`（`Select` 函数定义处，`CubeMaster/pkg/scheduler/schedule.go`），调用方为
 `sandbox_run.go:474`（创建）与 `sandbox_migrate.go:40`（迁移）。
 
 ```
@@ -29,17 +29,18 @@ PreFilter ──► Filter（并行执行，取交集）──► Score（加权
 - **Score 接口**（`pkg/selector/score/init.go:19`）：`Select + ID + Weight + Disable`。
   内置 4 个：`real_time_weighted_average`（实时配额余量加权）、
   `multi_factor_weighted_average`（异步预计算多因子）、`affinity_score`、`image_score`
-  （镜像/模板本地性打分）。各插件得分 × 插件权重求和后按总权重归一化（`schedule.go:246`）。
+  （镜像/模板本地性打分）。各插件得分 × 插件权重求和后按总权重归一化（`runScoreFilter`
+  中的归一化，`schedule.go`）。
 - **PostScore**（`pkg/selector/postscore/whilelistscore.go`）：白名单加/减分。注意它并非独立
   阶段，而是在 `runScoreFilter` 内部**归一化之后、`AllSortByScore()` 排序之前**调用
-  （`schedule.go:251`）；新 Pipeline 必须保持这一相对顺序，否则白名单调整会被排序忽略。
+  （`runScoreFilter` 中的 `postScore` 调用点，`schedule.go`）；新 Pipeline 必须保持这一相对顺序，否则白名单调整会被排序忽略。
 - **最终选择**：`selCtx.LeastRandomSelect(PrioritySelectNum)`（`schedule.go:64`）。其实际行为
   由两个配置项共同决定，**未显式配置时打分结果几乎被完全丢弃**：
 
   | 配置项 | 默认值 | 影响 |
   |---|---|---|
-  | `least_select_name` | `random`（`config.go:249`，缺省填充见 `config.go:1207-1208`） | `randomSelect.Add()` 显式忽略 weight 参数（`random_select.go:21-23`），即便 `LeastRandomSelect` 传入了 `Score*1e6`（`selectcontext.go:161`）也不生效 |
-  | `priority_select_num` | **`-1` = 不限制**（`config.go:1203-1204`；`conf.yaml:78` 才显式写为 1） | `LeastNodes(-1)` 返回全部候选，而非 Top-N |
+  | `least_select_name` | `random`（`config.go:249`，缺省填充见 `preHandleScheduler`，`config.go`） | `randomSelect.Add()` 显式忽略 weight 参数（`random_select.go:21-23`），即便 `LeastRandomSelect` 传入了 `Score*1e6`（`selectcontext.go:161`）也不生效 |
+  | `priority_select_num` | **`-1` = 不限制**（`preHandleScheduler` 中的缺省填充，`config.go`；`conf.yaml:78` 才显式写为 1） | `LeastNodes(-1)` 返回全部候选，而非 Top-N |
 
   两者叠加：**当 YAML 未显式设置 `priority_select_num`（即保持代码默认 `-1`）时，部署在
   全部通过 Filter 的候选节点中等概率随机选择**，Score 阶段的排序结果不产生任何影响。
@@ -116,7 +117,7 @@ PreFilter ──► Filter（并行执行，取交集）──► Score（加权
 | 验收要求 | 现有接口 | 缺口 |
 |---|---|---|
 | 启用/禁用插件 | `score.Selector.Disable()` 已定义并被 4 个插件实现 | 无（Profile 直接复用） |
-| 调整权重 | `score.Selector.Weight()` 已定义，`runScoreFilter` 已加权求和并归一化（`schedule.go:246`） | 无（Profile 直接复用） |
+| 调整权重 | `score.Selector.Weight()` 已定义，`runScoreFilter` 已加权求和并归一化（`schedule.go`） | 无（Profile 直接复用） |
 | 组合为策略 Profile | — | 配置层缺 Profile 分组 |
 | 插件注册 | 包级 map + reflect（`filter/init.go:32,43`、`score/init.go:39,56`） | 换成显式注册表 |
 | 插件参数 | 固定字段 `ScorePluginConf`（`config.go:627`） | 换成 per-plugin `args` |
@@ -274,7 +275,7 @@ per-plugin map，保证默认行为不变。
 `[]score.Selector`，交给现有 `runFilter` / `runScoreFilter` 执行。任一步失败即启动失败。
 
 `Weight()` 的取值来源随之统一：Profile 中的 `weight` 字段在实例化时传入插件，
-`Selector.Weight()` 返回该值，`runScoreFilter`（`schedule.go:246`）的加权归一化逻辑不变。
+`Selector.Weight()` 返回该值，`runScoreFilter`（`schedule.go`）的加权归一化逻辑不变。
 
 兼容策略：未配置 `profiles` 时，legacy translator 把现有
 `enable_filters` / `enable_scorers` / `plugin_conf` / `resource_weights` 翻译成等价的
@@ -332,10 +333,17 @@ Profile 的 picker 支持：`best`、`top_n_uniform`、`top_n_weighted`。
 - **Score**：提高现有 `image_score` 的 `template_id` 因子权重，并用
   `real_time_weighted_average` 在副本节点间均衡。原方案再增加 `template_affinity_score`
   会与 `image_score` 重复，因此删除；
-- **权重需实验确定**：`calculatePriority`（`imagescore.go:160-168`）在单模板场景下把本地性
-  压缩为"命中满分 / 未命中零分"两档，因此 `image_score` 与 `real_time_weighted_average`
-  的权重比落在一个较窄区间——过高退化为硬过滤，过低则本地性完全失效。该比值由阶段 3（9/3–9/8）的
-  敏感性扫描（§7）在 `template_storm` workload 上扫出，不预设固定值；
+- **权重需实验确定**：`calculatePriority`（`imagescore.go`）把**聚合**镜像得分截断到
+  `[23MB, 80GB × 容器数]` 后线性映射到 0~100；每个已缓存镜像贡献
+  `镜像大小 × 集群散布度`（`localcache.scaledImageScore`）。单模板场景下命中得分 ≈
+  `100 × (镜像大小 × 散布度 − 23MB) / (80GB − 23MB)`：~5GB 模板全集群散布也只有
+  ≈6/100（`template_storm` 计划的 30% 副本散布下更低，≈2/100），仅接近 80GB 的镜像
+  才饱和，未命中为 0。即本地性是偏弱、随镜像大小与散布度缩放的连续信号，而非
+  "命中满分"，原先"权重须落在较窄区间"的推断不成立。相反，要让本地性左右排序，
+  `image_score` 权重需显著高于按 0~100 打分的实时因子（粗略估计高一个量级），且有效
+  权重随模板镜像大小与散布度变化。该比值由阶段 3（9/3–9/8）的敏感性扫描（§7）在
+  `template_storm` workload 上扫出，实验中固定并记录模板镜像大小与副本散布度，
+  不预设固定值；权重过高仍会退化为近似硬过滤；
 - **Picker**：`best`，使高权重本地性得分稳定生效；
 - **严格模式**：可选 `template-hotstart-strict` Profile 加入 locality 硬 Filter。它可能获得
   接近 100% 的命中率，但资源不足时会降低成功率，必须单独报告，不作为默认值。
@@ -507,8 +515,10 @@ PR 提交注意（遵循 `CONTRIBUTING.md` 与根目录 `AGENTS.md`）：
 
 - **改动波及现有调度行为**：注册表与 Profile 均为等价替换，`legacy-default` 由 translator
   保证逐字节兼容，golden test 覆盖 §3.3 picker 映射表全部组合；
-- **模板本地性打分二值化**：`calculatePriority`（`imagescore.go:160-168`）使模板命中呈
-  满分/零分两档，§4.2 的权重比需由阶段 3（9/3–9/8）的敏感性扫描确定，不预设固定值；
+- **模板本地性打分信号偏弱**：`calculatePriority`（`imagescore.go`）的聚合截断 + 线性映射
+  使典型大小模板的命中得分仅为个位数（~5GB 全散布 ≈6/100，30% 散布 ≈2/100），而非满分；
+  本地性容易被按 0~100 打分的实时资源因子淹没。§4.2 的权重比需由阶段 3（9/3–9/8）的
+  敏感性扫描确定，扫描须固定并记录模板镜像大小与散布度，不预设固定值；
 - **指标基数与性能**：禁止请求、节点、模板 ID 作为 label；通过 benchmark 守住 5% 门槛；
 - **实机实验噪声与规模限制**：集群规模有限（≥3 节点）且存在环境噪声，每组实验
   ≥3 次重复并报告均值与离散程度；结论仅在报告记录的节点清单与参数下成立；
