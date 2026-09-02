@@ -215,8 +215,13 @@ real-cluster runs and simulator runs can be compared with the same command. A
 metric is flagged in the conclusions when the verdict direction matches,
 |Δ%| ≥ 5%, and — whenever both sides have n ≥ 2 — the delta exceeds the
 combined CI half-widths, so small-sample noise is not flagged as a verdict.
+When the baseline mean is exactly 0 (Δ% undefined), the test falls back to
+the absolute delta — still CI-gated when possible — so a 0 → 0.5
+`error_rate` catastrophe is flagged rather than silently dropped.
+Directionless metrics join the "No direction" list only when the same
+magnitude test (without the CI gate) marks the delta notable.
 
-Two caveats when reading verdicts:
+Caveats when reading verdicts:
 
 - **Single-sample sides are not CI-gated.** With n=1 on either side there is
   no interval to compare against, so every |Δ%| ≥ 5% is flagged; one file per
@@ -231,7 +236,7 @@ Per-metric aggregation only counts samples that actually contain the key, so
 when the two groups mix export shapes (e.g. a `create-only` file next to
 `create-delete` files) a row's effective n can be smaller than the group
 header's sample count; the report prints a note under the table when that
-happens.
+happens and annotates affected conclusion rows with the reduced n.
 
 ### Network policies
 

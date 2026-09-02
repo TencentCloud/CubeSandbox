@@ -517,9 +517,20 @@ func groupPrefix(key string) string {
 // sides have n >= 2 — the delta must exceed the combined 95% CI half-widths,
 // so noise at small sample counts is not flagged as a verdict), plus metrics
 // without a known direction.
+//
+// When the baseline mean is exactly 0 the Δ% is undefined and hasPct is
+// false; the significance test then falls back to the absolute delta (still
+// CI-gated when possible), so a 0 -> 0.5 error_rate catastrophe is flagged
+// instead of silently dropped. Directionless rows join the n/a list only
+// when the same magnitude test (without the CI gate) says the delta is
+// notable, so trivial movements don't flood the section.
 func (c *comparison) conclusions() (improved, regressed, noDir []*compareRow) {
 	for _, r := range c.rows {
 		significant := r.hasPct && math.Abs(r.pct) >= 5
+		if r.hasBase && r.hasCand && !r.hasPct {
+			significant = r.delta != 0
+		}
+		notable := significant
 		if significant && r.base.hasCI && r.cand.hasCI {
 			significant = math.Abs(r.delta) > r.base.ci+r.cand.ci
 		}
@@ -530,7 +541,7 @@ func (c *comparison) conclusions() (improved, regressed, noDir []*compareRow) {
 			} else {
 				regressed = append(regressed, r)
 			}
-		case r.verdict == verdictNoDir:
+		case r.verdict == verdictNoDir && notable:
 			noDir = append(noDir, r)
 		}
 	}
@@ -631,7 +642,7 @@ func renderComparison(c *comparison) string {
 	writeConclusionList(&b, c, improved)
 	b.WriteString("\n### Regressed (|Δ%| ≥ 5%, beyond combined 95% CI when n ≥ 2)\n\n")
 	writeConclusionList(&b, c, regressed)
-	b.WriteString("\n### No direction (n/a)\n\n")
+	b.WriteString("\n### No direction (n/a, only |Δ%| ≥ 5% or newly-nonzero shown)\n\n")
 	writeConclusionList(&b, c, noDir)
 	b.WriteString("\n")
 	return b.String()

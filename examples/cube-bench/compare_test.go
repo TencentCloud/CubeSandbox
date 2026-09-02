@@ -271,10 +271,18 @@ func TestCompareZeroBaselinePct(t *testing.T) {
 		t.Errorf("only_base verdict = %v, want missing (absent on candidate side)", ob)
 	}
 
-	// Rows without Δ% never enter the conclusions lists.
-	improved, regressed, _ := cmp.conclusions()
-	if len(improved) != 0 || len(regressed) != 0 {
-		t.Errorf("conclusions improved=%v regressed=%v, want both empty (restart_rate has no Δ%%)", improved, regressed)
+	// Zero-baseline rows fall back to the absolute delta: 0 → 0.5 with tight
+	// CIs (both sides identical values ⇒ CI 0) is a flagged regression even
+	// though Δ% is suppressed in the table.
+	improved, regressed, noDir := cmp.conclusions()
+	if len(improved) != 0 {
+		t.Errorf("conclusions improved = %v, want empty", improved)
+	}
+	if len(regressed) != 1 || regressed[0].key != "restart_rate" {
+		t.Errorf("conclusions regressed = %v, want [restart_rate] (zero-baseline absolute-delta fallback)", regressed)
+	}
+	if len(noDir) != 0 {
+		t.Errorf("conclusions noDir = %v, want empty (only_base misses the candidate side; sched_cv is unchanged)", noDir)
 	}
 }
 
@@ -351,6 +359,50 @@ func TestCompareGroupPrefix(t *testing.T) {
 // ---------------------------------------------------------------------------
 // End to end
 // ---------------------------------------------------------------------------
+
+// TestCompareMixedShapesEndToEnd: a create-only export mixed into a
+// create-delete group must surface the per-metric sample-count note (and the
+// conclusion annotation) in the rendered report.
+func TestCompareMixedShapesEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+
+	b1 := writeTempFile(t, dir, "base-full.json", `{
+		"summary": {"success_rate": 0.9},
+		"create": {"p95_ms": 50}, "delete": {"p95_ms": 20}
+	}`)
+	b2 := writeTempFile(t, dir, "base-create-only.json", `{
+		"summary": {"success_rate": 0.92},
+		"create": {"p95_ms": 55}
+	}`)
+	c1 := writeTempFile(t, dir, "cand-full.json", `{
+		"summary": {"success_rate": 0.95},
+		"create": {"p95_ms": 40}, "delete": {"p95_ms": 30}
+	}`)
+
+	out := filepath.Join(dir, "report.md")
+	var buf bytes.Buffer
+	err := runCompare([]string{"--baseline", b1 + "," + b2, "--candidate", c1, "-o", out}, &buf)
+	if err != nil {
+		t.Fatalf("runCompare: %v", err)
+	}
+	saved, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	report := string(saved)
+
+	for _, want := range []string{
+		"Some metrics appear in fewer samples than the group header count",
+		"- `delete.p95_ms`: n=1 of 2 baseline samples",
+		// delete.p95_ms went 20 → 30 (+50%): flagged regressed (lower-better),
+		// annotated with the reduced baseline n.
+		"- **delete.p95_ms**: +50.0% (20 → 30) (baseline n=1/2)",
+	} {
+		if !strings.Contains(report, want) {
+			t.Errorf("report missing %q\n%s", want, report)
+		}
+	}
+}
 
 func TestCompareEndToEnd(t *testing.T) {
 	dir := t.TempDir()
@@ -456,7 +508,7 @@ func TestCompareEndToEnd(t *testing.T) {
 		"- **error_rate**: -50.0% (0.1 → 0.05)",
 		"### Regressed (|Δ%| ≥ 5%, beyond combined 95% CI when n ≥ 2)",
 		"- (none)",
-		"### No direction (n/a)",
+		"### No direction (n/a, only |Δ%| ≥ 5% or newly-nonzero shown)",
 		"- **queue_depth**: +40.0% (5 → 7)",
 	} {
 		if !strings.Contains(report, want) {
