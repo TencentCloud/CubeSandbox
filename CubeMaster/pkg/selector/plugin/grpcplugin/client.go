@@ -19,12 +19,12 @@ import (
 	"sync"
 	"time"
 
-	schedulerplugin "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/schedulerplugin/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/filter"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/score"
+	schedulerplugin "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/schedulerplugin/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -42,6 +42,7 @@ type breaker struct {
 	threshold int
 	cooldown  time.Duration
 	openUntil time.Time
+	halfOpen  bool
 }
 
 func (b *breaker) before() error {
@@ -51,8 +52,10 @@ func (b *breaker) before() error {
 		return ErrCircuitOpen
 	}
 	if !b.openUntil.IsZero() {
+		// Cooldown expired: enter half-open and allow a probe.
 		b.openUntil = time.Time{}
 		b.failures = 0
+		b.halfOpen = true
 	}
 	return nil
 }
@@ -61,12 +64,22 @@ func (b *breaker) succeeded() {
 	b.mu.Lock()
 	b.failures = 0
 	b.openUntil = time.Time{}
+	b.halfOpen = false
 	b.mu.Unlock()
 }
 
 func (b *breaker) failed() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.halfOpen {
+		// A failed half-open probe means the plugin is still down: reopen
+		// immediately instead of waiting for a fresh run of threshold
+		// failures, so a dead plugin costs one timeout per cooldown window.
+		b.halfOpen = false
+		b.failures = 0
+		b.openUntil = time.Now().Add(b.cooldown)
+		return
+	}
 	b.failures++
 	if b.failures >= b.threshold {
 		b.openUntil = time.Now().Add(b.cooldown)
@@ -187,9 +200,10 @@ func (c *client) reject(err error) error {
 	return err
 }
 
+// syncSnapshot synchronizes the request's immutable snapshot with the plugin.
+// The caller must hold c.syncMu; the lock is held across the whole
+// sync+Filter/Score sequence by the Select methods below.
 func (c *client) syncSnapshot(selection *selctx.SelectorCtx) error {
-	c.syncMu.Lock()
-	defer c.syncMu.Unlock()
 	if selection.SnapshotVersion == "" {
 		return errors.New("scheduler snapshot version is empty")
 	}
@@ -292,6 +306,13 @@ func (p *filterPlugin) ID() string   { return "filter/grpc/" + p.client.name }
 func (p *filterPlugin) Close() error { return p.client.Close() }
 
 func (p *filterPlugin) Select(selection *selctx.SelectorCtx) (node.NodeList, error) {
+	// Snapshot versions are unique per scheduling request, while the plugin
+	// tracks a single synced version. Holding syncMu across the whole
+	// sync+Filter sequence keeps the synced version valid until the Filter RPC
+	// is issued; this intentionally serializes concurrent requests sharing
+	// this client.
+	p.client.syncMu.Lock()
+	defer p.client.syncMu.Unlock()
 	if err := p.client.syncSnapshot(selection); err != nil {
 		return nil, err
 	}
@@ -359,6 +380,11 @@ func (p *scorePlugin) Disable() bool   { return false }
 func (p *scorePlugin) Close() error    { return p.client.Close() }
 
 func (p *scorePlugin) Select(selection *selctx.SelectorCtx) (node.NodeScoreList, error) {
+	// See filterPlugin.Select: syncMu is held across the whole sync+Score
+	// sequence, intentionally serializing concurrent requests sharing this
+	// client so the synced snapshot version stays valid for the Score RPC.
+	p.client.syncMu.Lock()
+	defer p.client.syncMu.Unlock()
 	if err := p.client.syncSnapshot(selection); err != nil {
 		return nil, err
 	}

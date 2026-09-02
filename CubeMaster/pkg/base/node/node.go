@@ -208,6 +208,8 @@ func (n *Node) Clone() *Node {
 	// Clone provides a best-effort read-side snapshot. Mutable counters such
 	// as LocalCreateNum and schedulingDisabled are read atomically. Fields are
 	// copied explicitly so the atomic noCopy marker is never copied by value.
+	// When adding a field to Node, add it to Clone as well — the explicit
+	// per-field copy silently omits new fields otherwise.
 	localCreateNum := atomic.LoadInt64(&n.LocalCreateNum)
 	schedulingDisabled := n.SchedulingDisabled()
 	cloned := &Node{

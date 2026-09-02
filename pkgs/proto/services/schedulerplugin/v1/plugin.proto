@@ -61,7 +61,9 @@ message SnapshotNode {
   repeated string local_templates = 21;
   bool template_local = 22;
   bool snapshot_storage_writable = 23;
-  int64 reserved = 24; // in-flight reservation, populated when reservation management is enabled
+  // In-flight reservation. Not populated today (always 0); reserved for
+  // future reservation management.
+  int64 reserved = 24;
 }
 
 message SnapshotRequest {
