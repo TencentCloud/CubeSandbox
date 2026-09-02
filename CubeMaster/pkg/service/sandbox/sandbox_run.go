@@ -244,8 +244,12 @@ func (c *createSandboxContext) handleCubelet() {
 		if c.callCubelet() {
 			c.retryCost += c.cubeletEndTime.Sub(c.cubeletStartTime)
 			c.retryTimes++
-			scheduler.RecordReschedule(scheduler.DefaultProfile,
-				errorcode.MasterCode(c.cubeletRsp.GetRet().GetRetCode()))
+			// Count only actual reselections: reuse-code retries keep the same
+			// host (errorCodeRetry cleared c.reschedule) and never re-Select.
+			if c.reschedule {
+				scheduler.RecordReschedule(scheduler.DefaultProfile,
+					errorcode.MasterCode(c.cubeletRsp.GetRet().GetRetCode()))
+			}
 
 			if c.cubeletRsp != nil && c.cubeletRsp.GetRet() != nil &&
 				errorcode.IsCircutBreakCode(errorcode.MasterCode(c.cubeletRsp.GetRet().GetRetCode())) {

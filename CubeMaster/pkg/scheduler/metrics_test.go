@@ -90,7 +90,10 @@ func TestRecordDecision(t *testing.T) {
 
 func TestRecordReschedule(t *testing.T) {
 	// rescheduleReason consults the errorcode retry maps; initialize them
-	// with an empty config the same way main does.
+	// with an empty config the same way main does. Caveat: this replaces
+	// process-global retry maps that cannot be restored (they are private),
+	// so any future test in this package that depends on real retry-map
+	// contents becomes order-dependent with this one.
 	errorcode.InitCubeCodeRetryMap(&config.Config{CubeletConf: &config.CubeletConf{}})
 
 	rpcBefore := counterValue(t, schedulerReschedules, DefaultProfile, rescheduleReasonRPCError)
@@ -178,7 +181,7 @@ func TestNodeLoadCV(t *testing.T) {
 		{quotaCpuMilli: 1000, quotaMemMB: 0, cpuUsageMilli: 750, memUsageMB: 4096},
 	}
 
-	cpuCV, memCV := nodeLoadCV(nodes)
+	cpuCV, memCV := nodeLoadCV(nodes, identityCapFn)
 	// cpu ratios 0.5 / 0.25 / 0.75: mean 0.5, population stddev sqrt(1/24).
 	wantCPU := math.Sqrt(1.0/24.0) / 0.5
 	if math.Abs(cpuCV-wantCPU) > 1e-9 {
@@ -190,12 +193,12 @@ func TestNodeLoadCV(t *testing.T) {
 		t.Fatalf("mem CV = %v, want %v", memCV, wantMem)
 	}
 
-	if cpuCV, memCV := nodeLoadCV(nil); cpuCV != 0 || memCV != 0 {
+	if cpuCV, memCV := nodeLoadCV(nil, identityCapFn); cpuCV != 0 || memCV != 0 {
 		t.Fatalf("empty nodes CV = (%v, %v), want (0, 0)", cpuCV, memCV)
 	}
 	// All-idle nodes: zero mean must not divide by zero.
 	idle := []nodeResourceStat{{quotaCpuMilli: 1000, quotaMemMB: 2048}}
-	if cpuCV, memCV := nodeLoadCV(idle); cpuCV != 0 || memCV != 0 {
+	if cpuCV, memCV := nodeLoadCV(idle, identityCapFn); cpuCV != 0 || memCV != 0 {
 		t.Fatalf("idle nodes CV = (%v, %v), want (0, 0)", cpuCV, memCV)
 	}
 }
@@ -207,11 +210,11 @@ func TestCountActiveEmptyNodes(t *testing.T) {
 		{memUsageMB: 1},
 		{},
 	}
-	active, empty := countActiveEmptyNodes(nodes)
+	active, empty := countActiveEmptyNodes(nodes, identityCapFn)
 	if active != 3 || empty != 1 {
 		t.Fatalf("active/empty = (%d, %d), want (3, 1)", active, empty)
 	}
-	if active, empty := countActiveEmptyNodes(nil); active != 0 || empty != 0 {
+	if active, empty := countActiveEmptyNodes(nil, identityCapFn); active != 0 || empty != 0 {
 		t.Fatalf("nil nodes active/empty = (%d, %d), want (0, 0)", active, empty)
 	}
 }

@@ -57,7 +57,6 @@ const (
 const (
 	rescheduleReasonRPCError     = "rpc_error"
 	rescheduleReasonCircuitBreak = "circuit_break"
-	rescheduleReasonReuse        = "reuse"
 	rescheduleReasonLoopRetry    = "loop_retry"
 	rescheduleReasonBackoff      = "backoff"
 	rescheduleReasonAdmission    = "admission"
@@ -102,7 +101,7 @@ var (
 
 	schedulerReschedules = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "scheduler_reschedules_total",
-		Help: "Total handleCubelet retry/reschedule events during sandbox create, by profile and error-code category.",
+		Help: "Total node reselection events during sandbox create (handleCubelet retries that pick a new host), by profile and error-code category.",
 	}, []string{profileLabel, reasonLabel})
 
 	sandboxCreateAttempts = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -127,7 +126,7 @@ var (
 
 	nodeLoadCVGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "scheduler_node_load_cv",
-		Help: "Coefficient of variation (population stddev / mean) of per-node load ratio (usage / raw quota) across healthy nodes.",
+		Help: "Coefficient of variation (population stddev / mean) of per-node load ratio (accounted allocation / overcommitted capacity) across healthy nodes.",
 	}, []string{resourceLabel})
 
 	activeNodesGauge = promauto.NewGauge(prometheus.GaugeOpts{
@@ -180,8 +179,11 @@ func RecordDecision(profile string, templateHit bool) {
 	schedulerDecisions.WithLabelValues(profile, strconv.FormatBool(templateHit)).Inc()
 }
 
-// RecordReschedule counts one handleCubelet retry/reschedule event,
-// categorized from the cubelet/master error code that triggered it.
+// RecordReschedule counts one node reselection during sandbox create,
+// categorized from the cubelet/master error code that triggered it. Callers
+// must only record retries that actually re-run Select: reuse-code retries
+// keep the same host (errorCodeRetry clears c.reschedule) and are not
+// reselections, so the "reuse" category never appears on this metric.
 func RecordReschedule(profile string, code errorcode.ErrorCode) {
 	schedulerReschedules.WithLabelValues(profile, rescheduleReason(code)).Inc()
 }
@@ -197,8 +199,6 @@ func rescheduleReason(code errorcode.ErrorCode) string {
 		return rescheduleReasonRPCError
 	case errorcode.IsCircutBreakCode(code):
 		return rescheduleReasonCircuitBreak
-	case errorcode.IsReuseCode(code):
-		return rescheduleReasonReuse
 	case errorcode.IsLoopRetryCode(code):
 		return rescheduleReasonLoopRetry
 	case errorcode.IsBackoffRetryCode(code):
@@ -290,18 +290,23 @@ func sumClusterQuota(nodes []nodeResourceStat, fn nodeCapacityFunc) clusterQuota
 	return q
 }
 
-// nodeLoadCV returns the coefficient of variation of per-node load ratios
-// (usage / raw quota), computed over nodes with a positive quota. An empty
-// set or zero mean yields 0.
-func nodeLoadCV(nodes []nodeResourceStat) (cpuCV, memCV float64) {
+// nodeLoadCV returns the coefficient of variation of per-node load ratios,
+// computed over nodes with a positive capacity. Ratios use the same
+// scheduler-accounted quantities as the sibling cluster gauges: accounted
+// allocation (EffectiveAllocated) over overcommitted capacity
+// (EffectiveQuota*) — raw usage/quota would diverge under heterogeneous
+// overcommit ratios or ignore_redis_allocation. An empty set or zero mean
+// yields 0.
+func nodeLoadCV(nodes []nodeResourceStat, fn nodeCapacityFunc) (cpuCV, memCV float64) {
 	cpuRatios := make([]float64, 0, len(nodes))
 	memRatios := make([]float64, 0, len(nodes))
 	for _, n := range nodes {
-		if n.quotaCpuMilli > 0 {
-			cpuRatios = append(cpuRatios, float64(n.cpuUsageMilli)/float64(n.quotaCpuMilli))
+		cpuCap, memCap, cpuAlloc, memAlloc := fn(n)
+		if cpuCap > 0 {
+			cpuRatios = append(cpuRatios, float64(cpuAlloc)/float64(cpuCap))
 		}
-		if n.quotaMemMB > 0 {
-			memRatios = append(memRatios, float64(n.memUsageMB)/float64(n.quotaMemMB))
+		if memCap > 0 {
+			memRatios = append(memRatios, float64(memAlloc)/float64(memCap))
 		}
 	}
 	return cvOfRatios(cpuRatios), cvOfRatios(memRatios)
@@ -330,10 +335,12 @@ func cvOfRatios(ratios []float64) float64 {
 }
 
 // countActiveEmptyNodes splits nodes into active (running microVMs or any
-// accounted usage) and empty.
-func countActiveEmptyNodes(nodes []nodeResourceStat) (active, empty int) {
+// accounted allocation) and empty, using the same accounted-allocation view
+// as the other cluster gauges.
+func countActiveEmptyNodes(nodes []nodeResourceStat, fn nodeCapacityFunc) (active, empty int) {
 	for _, n := range nodes {
-		if n.mvmNum > 0 || n.cpuUsageMilli > 0 || n.memUsageMB > 0 {
+		_, _, cpuAlloc, memAlloc := fn(n)
+		if n.mvmNum > 0 || cpuAlloc > 0 || memAlloc > 0 {
 			active++
 		} else {
 			empty++
@@ -378,7 +385,11 @@ func fragmentedCapacityRatio(nodes []nodeResourceStat, fn nodeCapacityFunc, shap
 var clusterGaugeOnce sync.Once
 
 // startClusterGaugeCollector launches the periodic gauge collection exactly
-// once, even if InitScheduler is called repeatedly (e.g. in-process restarts).
+// once per process. The loop is bound to the ctx of the FIRST call:
+// InitScheduler is invoked exactly once in cmd/cubemaster/app/main.go with a
+// process-lifetime context, which is the contract this relies on — a later
+// call with a different ctx would NOT restart the loop after the original
+// ctx is cancelled, so callers must not cancel the original ctx early.
 func startClusterGaugeCollector(ctx context.Context) {
 	clusterGaugeOnce.Do(func() {
 		recov.GoWithRecover(func() {
@@ -439,11 +450,11 @@ func collectClusterGauges() {
 	clusterQuotaGauge.WithLabelValues(resourceLabelMem, quotaTypeAllocated).Set(quota.memAllocated)
 	clusterQuotaGauge.WithLabelValues(resourceLabelMem, quotaTypeCapacity).Set(quota.memCapacity)
 
-	cpuCV, memCV := nodeLoadCV(stats)
+	cpuCV, memCV := nodeLoadCV(stats, capFn)
 	nodeLoadCVGauge.WithLabelValues(resourceLabelCPU).Set(cpuCV)
 	nodeLoadCVGauge.WithLabelValues(resourceLabelMem).Set(memCV)
 
-	active, empty := countActiveEmptyNodes(stats)
+	active, empty := countActiveEmptyNodes(stats, capFn)
 	activeNodesGauge.Set(float64(active))
 	emptyNodesGauge.Set(float64(empty))
 
