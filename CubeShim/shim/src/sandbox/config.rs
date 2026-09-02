@@ -525,15 +525,31 @@ mod tests {
         );
 
         annotations.insert("cube.use_passfd_io".to_string(), "true".to_string());
-        assert!(Config::new(&Some(annotations.clone())).unwrap().use_passfd_io);
+        assert!(
+            Config::new(&Some(annotations.clone()))
+                .unwrap()
+                .use_passfd_io
+        );
 
         annotations.insert("cube.use_passfd_io".to_string(), "TRUE".to_string());
-        assert!(Config::new(&Some(annotations.clone())).unwrap().use_passfd_io);
+        assert!(
+            Config::new(&Some(annotations.clone()))
+                .unwrap()
+                .use_passfd_io
+        );
 
         annotations.insert("cube.use_passfd_io".to_string(), "false".to_string());
-        assert!(!Config::new(&Some(annotations.clone())).unwrap().use_passfd_io);
+        assert!(
+            !Config::new(&Some(annotations.clone()))
+                .unwrap()
+                .use_passfd_io
+        );
 
         annotations.insert("cube.use_passfd_io".to_string(), "1".to_string());
-        assert!(!Config::new(&Some(annotations.clone())).unwrap().use_passfd_io);
+        assert!(
+            !Config::new(&Some(annotations.clone()))
+                .unwrap()
+                .use_passfd_io
+        );
     }
 }

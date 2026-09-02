@@ -4,9 +4,10 @@
 
 use super::ContainerState;
 use crate::log::Log;
-use crate::{debugf, errf, infof};
+use crate::{debugf, errf, infof, warnf};
 use oci_spec::runtime::Process;
 use protoc::{agent, agent_ttrpc};
+use std::time::Duration;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use ttrpc::context;
@@ -373,12 +374,20 @@ impl Exec {
                 res = client.read_stdout(ctx.clone(), &req) => {
                     match res {
                         Err(e) => {
-                            debugf!(log, "init log: read stdout failed:{}", e);
-                            return;
+                            warnf!(log, "init log: read stdout failed:{}, retry", e);
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            continue;
                         }
                         Ok(rsp) => {
+                            if rsp.data.is_empty() {
+                                continue;
+                            }
                             if let Err(e) = file.write_all(&rsp.data).await {
                                 infof!(log, "init log: write stdout failed:{}", e);
+                                return;
+                            }
+                            if let Err(e) = file.flush().await {
+                                infof!(log, "init log: flush stdout failed:{}", e);
                                 return;
                             }
                         }
@@ -439,12 +448,20 @@ impl Exec {
                 res = client.read_stderr(ctx.clone(), &req) => {
                     match res {
                         Err(e) => {
-                            debugf!(log, "init log: read stderr failed:{}", e);
-                            return;
+                            warnf!(log, "init log: read stderr failed:{}, retry", e);
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            continue;
                         }
                         Ok(rsp) => {
+                            if rsp.data.is_empty() {
+                                continue;
+                            }
                             if let Err(e) = file.write_all(&rsp.data).await {
                                 infof!(log, "init log: write stderr failed:{}", e);
+                                return;
+                            }
+                            if let Err(e) = file.flush().await {
+                                infof!(log, "init log: flush stderr failed:{}", e);
                                 return;
                             }
                         }

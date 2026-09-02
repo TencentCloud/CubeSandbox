@@ -224,7 +224,7 @@ func readBundleLog(sandboxID, stream string, all bool, tailN, headN int) error {
 	f, err := openNoFollow(logPath, cubeletStateDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("log file not found: %s (also tried %s)\n(sandbox may not exist or log forwarding may not be enabled)", filepath.Join(sandboxlog.Dir, sandboxID, stream), logPath)
+			return fmt.Errorf("log file not found at %s (host) or %s (legacy bundle)\n(sandbox may not exist or log forwarding may not be enabled)", filepath.Join(sandboxlog.Dir, sandboxID, stream), logPath)
 		}
 		return fmt.Errorf("open %s: %w", logPath, err)
 	}
@@ -310,10 +310,6 @@ func openHostSandboxLog(sandboxID, stream string) (*os.File, string, error) {
 // openSandboxLogFrom tries the host log directory first, then the legacy
 // containerd bundle path. Used by unit tests; live cubecli splits the two
 // paths across host vs mount-namespace processes.
-func openSandboxLog(sandboxID, stream string) (*os.File, string, error) {
-	return openSandboxLogFrom(sandboxID, stream, sandboxlog.Dir, cubeletStateDir)
-}
-
 func openSandboxLogFrom(sandboxID, stream, newBase, oldBase string) (*os.File, string, error) {
 	newPath := filepath.Join(newBase, sandboxID, stream)
 	f, err := openNoFollow(newPath, newBase)
@@ -330,7 +326,7 @@ func openSandboxLogFrom(sandboxID, stream, newBase, oldBase string) (*os.File, s
 		return f, oldPath, nil
 	}
 	if os.IsNotExist(err) {
-		return nil, newPath, fmt.Errorf("log file not found: %s (also tried %s)\n(sandbox may not exist or log forwarding may not be enabled)", newPath, oldPath)
+		return nil, newPath, fmt.Errorf("log file not found at %s (host) or %s (legacy bundle)\n(sandbox may not exist or log forwarding may not be enabled)", newPath, oldPath)
 	}
 	return nil, oldPath, fmt.Errorf("open %s: %w", oldPath, err)
 }

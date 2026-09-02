@@ -103,10 +103,18 @@ def test_host_log_paths():
     assert sandbox_logs.template_log_dir("tpl-example").name == "tpl-example_0"
 
 
+def test_guest_envd_health_cmd():
+    assert "127.0.0.1:49983/health" in sandbox_logs.GUEST_ENVD_HEALTH_CMD
+    assert "cube-e2e-log" in sandbox_logs.guest_envd_probe_cmd("/cube-e2e-log")
+
+
 def test_contains_envd_access_log():
     assert not sandbox_logs.contains_envd_access_log("")
     assert sandbox_logs.contains_envd_access_log('GET /health HTTP/1.1" 200')
     assert sandbox_logs.contains_envd_access_log("POST /process.Process/Start")
+    assert sandbox_logs.contains_envd_access_log("Uvicorn running on http://0.0.0.0:49999")
+    assert sandbox_logs.contains_envd_access_log("cube-e2e-log-deadbeef")
+    assert sandbox_logs.count_envd_access('GET /health\nPOST /process.Process/Start\n') == 2
 
 
 def test_count_envd_rpc():

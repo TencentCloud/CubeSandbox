@@ -1075,9 +1075,13 @@ impl SandBox {
             match containers.get_mut(id) {
                 Some(c) => c.clone(),
                 None => {
-                    if id == &self.id && !self.conf.app_snapshot_create {
+                    let should_clean = id == &self.id && !self.conf.app_snapshot_create;
+                    drop(containers);
+                    if should_clean {
                         crate::container::remove_sandbox_log_dir(&self.id, &self.log).await;
                     }
+                    // Keep NotFound: cubelet already treats it as success on
+                    // destroy. Changing the RPC contract is out of scope.
                     return Err(Error::NotFoundError(format!("not found container:{}", id)));
                 }
             }
@@ -1087,9 +1091,11 @@ impl SandBox {
             .await
             .map_err(|e| Error::Other(format!("{}", e)))?;
 
-        let mut containers = self.containers.lock().await;
-        if containers.remove(id).is_none() {
-            warnf!(self.log, "remove container:{} failed from map", id);
+        {
+            let mut containers = self.containers.lock().await;
+            if containers.remove(id).is_none() {
+                warnf!(self.log, "remove container:{} failed from map", id);
+            }
         }
         // Live Task.Delete. Crash leftover is cleaned by the delete subcommand
         // (`clean_sandbox_resource`). Pause-to-snapshot returns before here.

@@ -3,11 +3,11 @@
 
 """Single-node cubecli checks for envd init logs.
 
-SDK ``commands.run`` hits envd's ``/process.Process/Start`` RPC. envd prints
-that path in its access log; ``cubecli logs`` must show it after create,
-resume, snapshot, and rollback. Template-build logs stay under
-``/data/log/template`` and are read with ``cubecli logs --tpl``. Multi-node
-clusters skip: cubecli can only see the local Cubelet's files.
+Tests GET envd ``/health`` so the access log writes to init stdout;
+``cubecli logs`` must show that after create, resume, snapshot, and
+rollback. Template-build logs stay under ``/data/log/template`` and are
+read with ``cubecli logs --tpl``. Multi-node clusters skip: cubecli can
+only see the local Cubelet's files.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from framework.sandbox_logs import (
     template_log_dir,
     trigger_envd,
     wait_for_envd_rpc,
+    wait_for_host_log_contains,
     wait_host_logs_absent,
 )
 
@@ -63,13 +64,14 @@ def _trigger_and_wait(
     wait_timeout: float,
     min_count: int,
 ) -> str:
-    trigger_envd(adapter, timeout=command_timeout)
+    marker = trigger_envd(adapter, timeout=command_timeout)
     return wait_for_envd_rpc(
         cubecli,
         adapter.sandbox_id,
         address=address,
         timeout=wait_timeout,
         min_count=min_count,
+        needles=(marker,),
     )
 
 
@@ -119,20 +121,26 @@ def test_resume_appends_envd_rpc_to_cubecli_logs(
     resumed = sdk_sandbox.resume_or_connect(timeout=sdk_e2e_config.default_timeout)
     try:
         wait_until_running(resumed, timeout=sdk_e2e_config.default_timeout)
+        assert resumed.sandbox_id == sdk_sandbox.sandbox_id
+        assert_host_logs_present(resumed.sandbox_id)
         wait_until_data_plane_ready(
             resumed,
             timeout=sdk_e2e_config.default_timeout,
             command_timeout=sdk_e2e_config.command_timeout,
         )
-        assert resumed.sandbox_id == sdk_sandbox.sandbox_id
-        assert_host_logs_present(resumed.sandbox_id)
-        logs = _trigger_and_wait(
-            resumed,
+        marker = trigger_envd(resumed, timeout=sdk_e2e_config.command_timeout)
+        wait_for_host_log_contains(
+            resumed.sandbox_id,
+            marker,
+            timeout=sdk_e2e_config.command_timeout,
+        )
+        logs = wait_for_envd_rpc(
             cubecli,
-            address,
-            command_timeout=sdk_e2e_config.command_timeout,
-            wait_timeout=sdk_e2e_config.command_timeout,
+            resumed.sandbox_id,
+            address=address,
+            timeout=sdk_e2e_config.command_timeout,
             min_count=1,
+            needles=(marker,),
         )
         assert contains_envd_access_log(logs)
     finally:
@@ -173,19 +181,25 @@ def test_snapshot_rollback_keeps_envd_cubecli_logs(
         assert_host_logs_present(sdk_sandbox.sandbox_id)
 
         sdk_sandbox.rollback(snapshot_id)
+        assert_host_logs_present(sdk_sandbox.sandbox_id)
         wait_until_data_plane_ready(
             sdk_sandbox,
             timeout=sdk_e2e_config.default_timeout,
             command_timeout=sdk_e2e_config.command_timeout,
         )
-        assert_host_logs_present(sdk_sandbox.sandbox_id)
-        logs = _trigger_and_wait(
-            sdk_sandbox,
+        marker = trigger_envd(sdk_sandbox, timeout=sdk_e2e_config.command_timeout)
+        wait_for_host_log_contains(
+            sdk_sandbox.sandbox_id,
+            marker,
+            timeout=sdk_e2e_config.command_timeout,
+        )
+        logs = wait_for_envd_rpc(
             cubecli,
-            address,
-            command_timeout=sdk_e2e_config.command_timeout,
-            wait_timeout=sdk_e2e_config.command_timeout,
+            sdk_sandbox.sandbox_id,
+            address=address,
+            timeout=sdk_e2e_config.command_timeout,
             min_count=1,
+            needles=(marker,),
         )
         assert contains_envd_access_log(logs)
     finally:

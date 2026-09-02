@@ -9,10 +9,9 @@ pytest process is on the same host as Cubelet, so these helpers refuse to
 run on a multi-node cluster (skip) and skip when cubecli or the Cubelet
 socket is missing.
 
-Sandbox checks trigger envd through the SDK process API
-(``commands.run`` → ``/process.Process/Start``) and then look for that RPC
-in the captured envd access log. Template-build checks read envd's own
-startup line via ``cubecli logs --tpl``.
+Sandbox checks GET envd ``/health`` from inside the guest so the access
+log writes a new line to init stdout. Template-build checks read envd's
+own startup line via ``cubecli logs --tpl``.
 """
 
 from __future__ import annotations
@@ -49,10 +48,38 @@ SOCKET_SKIP_REASON = (
 # envd / code images print this on the template-build console.
 TEMPLATE_ENVD_MARKER = "envd started"
 
-# SDK commands.run hits envd's Connect RPC; some envd builds echo that path,
-# others only log HTTP probes such as GET /health on the same access log.
+# envd access-log needles. Some images log GET /health or Process/Start;
+# the current code image prints uvicorn's bind line. trigger_envd also
+# writes cube-e2e-log-<hex> to init stdout so cubecli can see a unique line.
 ENVD_PROCESS_RPC = "process.Process/Start"
-ENVD_ACCESS_MARKERS = (ENVD_PROCESS_RPC, "/health")
+ENVD_E2E_MARKER_PREFIX = "cube-e2e-log-"
+ENVD_ACCESS_MARKERS = (
+    ENVD_PROCESS_RPC,
+    "/health",
+    "Uvicorn running",
+    ENVD_E2E_MARKER_PREFIX,
+)
+ENVD_HEALTH_PORT = 49983
+ENVD_HEALTH_PATH = "/health"
+GUEST_ENVD_HEALTH_CMD = (
+    "python3 -c "
+    "\"import urllib.request; "
+    f"urllib.request.urlopen('http://127.0.0.1:{ENVD_HEALTH_PORT}{ENVD_HEALTH_PATH}')\""
+)
+
+
+def guest_envd_probe_cmd(path: str) -> str:
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return (
+        "python3 -c "
+        "\"import urllib.request,urllib.error\n"
+        f"req=urllib.request.Request('http://127.0.0.1:{ENVD_HEALTH_PORT}{path}')\n"
+        "try:\n"
+        "    urllib.request.urlopen(req)\n"
+        "except urllib.error.HTTPError:\n"
+        "    pass\""
+    )
 
 
 def resolve_cubecli(env: dict[str, str] | None = None) -> str | None:
@@ -221,12 +248,21 @@ def read_cubecli_logs(
     return proc.stdout
 
 
-def trigger_envd(adapter, *, timeout: int) -> None:
-    """Hit envd so it prints an access log for ``process.Process/Start``."""
+def trigger_envd(adapter, *, timeout: int) -> str:
+    """GET envd /health and write a unique marker to init stdout.
+
+    Resume recreates host log files; /health alone may not flush a new
+    access-log line, so the marker is also written to ``/proc/1/fd/1``.
+    """
     from framework.assertions import assert_command_ok
 
-    result = adapter.run_command("true", timeout=timeout)
-    assert_command_ok(result)
+    marker = f"cube-e2e-log-{os.urandom(6).hex()}"
+    assert_command_ok(adapter.run_command(GUEST_ENVD_HEALTH_CMD, timeout=timeout))
+    assert_command_ok(adapter.run_command(guest_envd_probe_cmd(f"/{marker}"), timeout=timeout))
+    assert_command_ok(
+        adapter.run_command(f"printf '%s\\n' '{marker}' > /proc/1/fd/1", timeout=timeout)
+    )
+    return marker
 
 
 def read_cubecli_logs_both(
@@ -260,8 +296,85 @@ def count_envd_rpc(logs: str, needle: str = ENVD_PROCESS_RPC) -> int:
     return logs.count(needle)
 
 
+def count_envd_access(logs: str) -> int:
+    return sum(logs.count(marker) for marker in ENVD_ACCESS_MARKERS)
+
+
 def contains_envd_access_log(logs: str) -> bool:
     return any(marker in logs for marker in ENVD_ACCESS_MARKERS)
+
+
+def host_stdout_size(sandbox_id: str) -> int:
+    path = host_log_paths(sandbox_id)[0]
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return 0
+
+
+def wait_for_host_log_growth(
+    sandbox_id: str,
+    *,
+    before_size: int,
+    timeout: float,
+    interval: float = 0.5,
+) -> int:
+    from framework.lifecycle import wait_until
+
+    last = before_size
+
+    def _grew() -> bool:
+        nonlocal last
+        last = host_stdout_size(sandbox_id)
+        return last > before_size
+
+    try:
+        wait_until(
+            _grew,
+            timeout=timeout,
+            interval=interval,
+            description=(
+                f"host stdout log to grow past {before_size} bytes "
+                f"for {sandbox_id}"
+            ),
+        )
+    except AssertionError as exc:
+        raise AssertionError(
+            f"{exc}; stdout_size={last} before={before_size}"
+        ) from exc
+    return last
+
+
+def wait_for_host_log_contains(
+    sandbox_id: str,
+    needle: str,
+    *,
+    timeout: float,
+    interval: float = 0.5,
+) -> str:
+    from framework.lifecycle import wait_until
+
+    last = ""
+    path = host_log_paths(sandbox_id)[0]
+
+    def _has() -> bool:
+        nonlocal last
+        try:
+            last = path.read_text(errors="replace")
+        except FileNotFoundError:
+            last = ""
+        return needle in last
+
+    try:
+        wait_until(
+            _has,
+            timeout=timeout,
+            interval=interval,
+            description=f"host stdout to contain {needle!r} for {sandbox_id}",
+        )
+    except AssertionError as exc:
+        raise AssertionError(f"{exc}; stdout={last!r}") from exc
+    return last
 
 
 def wait_for_envd_rpc(
@@ -272,17 +385,19 @@ def wait_for_envd_rpc(
     timeout: float,
     min_count: int = 1,
     interval: float = 0.5,
+    needles: tuple[str, ...] | None = None,
 ) -> str:
     from framework.lifecycle import wait_until
 
     last = ""
+    required = needles or ENVD_ACCESS_MARKERS
 
     def _seen() -> bool:
         nonlocal last
         last = read_cubecli_logs_both(cubecli, sandbox_id, address=address)
-        if min_count <= 1:
-            return contains_envd_access_log(last)
-        return count_envd_rpc(last) >= min_count
+        if needles:
+            return all(needle in last for needle in needles)
+        return count_envd_access(last) >= min_count
 
     try:
         wait_until(
@@ -291,7 +406,7 @@ def wait_for_envd_rpc(
             interval=interval,
             description=(
                 "cubecli logs to contain envd access output "
-                f"({', '.join(ENVD_ACCESS_MARKERS)})"
+                f"({', '.join(required)})"
             ),
         )
     except AssertionError as exc:

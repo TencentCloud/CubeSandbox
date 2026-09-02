@@ -149,9 +149,21 @@ pub async fn create_sandbox_log_paths(sandbox_id: &str) -> CResult<(String, Stri
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("create log dir {}: {}", dir.display(), e))?;
+    let stdout = dir.join("stdout");
+    let stderr = dir.join("stderr");
+    // Pause reaps the previous shim via binary delete and removes this
+    // directory. Resume is a new shim and must recreate the files.
+    for path in [&stdout, &stderr] {
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(path)
+            .await
+            .map_err(|e| format!("create log file {}: {}", path.display(), e))?;
+    }
     Ok((
-        dir.join("stdout").to_string_lossy().into_owned(),
-        dir.join("stderr").to_string_lossy().into_owned(),
+        stdout.to_string_lossy().into_owned(),
+        stderr.to_string_lossy().into_owned(),
     ))
 }
 
