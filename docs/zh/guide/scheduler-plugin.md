@@ -84,7 +84,7 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 - 每个外部插件客户端在整个快照同步 + RPC 过程中持有互斥锁，刻意将经过该插件绑定的并发请求串行化。在默认 100ms `timeout` 下，一个性能劣化的插件会把受影响的创建路径限制在约 10 请求/秒，且 backoff 尝试会额外支付一次快照冻结与同步。请保持插件 RPC 足够快，按此上限规划容量，并把插件延迟视为调度延迟。
 - 同一插件同时用作 Filter 和 Score 时会构建两个独立客户端——各自建连与握手、各自持有熔断器和已同步快照版本——因此一个请求要上传两次全量快照，两个熔断器的状态还可能漂移。按 (name, socket_path) 引用计数共享客户端是已知的后续优化方向。
 - 快照版本号每个请求唯一（时间戳加序列号），插件侧快照缓存跨请求永不命中：每个触及 gRPC 插件的请求都会重传完整的冻结节点集，backoff 路径传两次。改为只在节点集变化时才递增的 epoch 是已知的后续方向。
-- 冻结快照时会对每个候选节点（含 `LocalTemplates`）、请求规格和路由 label 做深克隆；legacy default 管线即使不运行 expr/gRPC 插件也付同样的分配成本。调优前请先基准测量；按 Profile 是否实际使用 expr/gRPC 插件来条件化 freeze 是已知的后续方向。
+- 冻结快照时会对每个候选节点（含 `LocalTemplates`）、请求规格和路由 label 做深克隆；legacy default 管线即使不运行 expr/gRPC 插件也付同样的分配成本。对不允许非本地镜像的模板请求，freeze 期间还会对每个候选执行一次 `GetImageStateByNode` 查找——此前该查找仅在启用 `template_locality` 过滤器时才会发生。调优前请先基准测量；按 Profile 是否实际使用 expr/gRPC 插件来条件化 freeze 是已知的后续方向。
 - 热更新被拒绝时会保留上一份 Profile 集，但全局配置在 watcher 运行前已完成切换，而内建插件在 Select 时实时读取全局配置（Guard 超时、Score 的 `Disable()` 开关、`real_time_weighted_average`/`image_score` 配置段、`EffectiveQuota*` 包装）。因此被拒绝的热更新可能留下「旧管线跑新配置值」的状态——应把拒绝日志视为需要运维介入，而不是无影响事件。
 - gRPC 与 CEL 的请求上下文中，`cpu_millis` 和 `memory_bytes` 都是普通整数，因此「未指定资源规格」与「零规格请求」无法区分——restore 放置路径会传入空规格。
 
@@ -92,3 +92,5 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 
 - 未注册为插件的 legacy `enable_filters` / `enable_scorers` 配置项现在会使 CubeMaster 启动失败，错误信息会指出具体配置项；此前这类条目会被静默跳过。升级前请从配置中移除失效条目，或先注册对应插件。
 - weight 非正的 legacy `enable_scorers` 条目现在会在编译管线时被跳过并输出告警（此前是静默贡献 score×0）；调度行为不变。
+- 上述未注册条目的启动失败只在 legacy 管线实际被编译时成立：一旦 `profiles` 下配置了默认条目，`enable_filters` / `enable_scorers` 就不再参与编译，失效条目会被静默忽略而非报错。迁移到 Profiles 时请一并清理这些条目。
+- `multi_factor_weighted_average` 的 legacy 后台分数刷新协程现在只要对应配置段存在就会启动，即使该 scorer 未列入 `enable_scorers`；循环每个 tick 都会重读实时配置，因此对"已配置但未启用"的部署而言，唯一影响是多一个空转 goroutine。

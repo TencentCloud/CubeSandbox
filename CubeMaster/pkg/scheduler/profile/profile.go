@@ -301,7 +301,11 @@ func compileProfile(ctx context.Context, conf config.SchedulerProfileConf, regis
 		pipeline.Scores = append(pipeline.Scores, ScorePlugin{
 			Name: name, Selector: selector, Weight: weight, Failure: scoreFailure,
 			DefaultScore: pluginConf.DefaultScore, ForceEnabled: true,
-			AllowEmpty: profilePluginKind(pluginConf) == plugin.TypeGo,
+			// Empty-result tolerance ("not applicable, skip") is curated by
+			// name, not by plugin type: a third-party go scorer that returns
+			// nothing must trip the failure policy, not silently degrade the
+			// ranking to candidate order.
+			AllowEmpty: emptyTolerantBuiltinScores[name],
 		})
 		set.addCloser(selector)
 	}
@@ -334,6 +338,16 @@ func failurePolicies(conf config.SchedulerFailureConf) (FilterFailurePolicy, Sco
 }
 
 func enabled(value *bool) bool { return value == nil || *value }
+
+// emptyTolerantBuiltinScores are the in-tree go scorers that legitimately
+// return an empty result when a request is outside their scope:
+// affinity_score without node-preference affinity, image_score without
+// applicable resource weights. Membership — not the plugin's type — decides
+// empty-result tolerance.
+var emptyTolerantBuiltinScores = map[string]bool{
+	"affinity_score": true,
+	"image_score":    true,
+}
 
 func profilePluginKind(conf config.SchedulerProfilePluginConf) string {
 	kind := strings.ToLower(strings.TrimSpace(conf.Type))

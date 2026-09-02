@@ -152,11 +152,16 @@ func TestProfileAllowsEmptyOnlyForBuiltinScores(t *testing.T) {
 	if len(pipeline.Scores) != 2 {
 		t.Fatalf("scores = %+v", pipeline.Scores)
 	}
-	if !pipeline.Scores[0].AllowEmpty {
-		t.Fatal("built-in go score must allow empty (not applicable) results")
+	// Tolerance is curated by name: a third-party go scorer is NOT in the
+	// set, so its empty result trips the failure policy like any expr score.
+	if pipeline.Scores[0].AllowEmpty {
+		t.Fatal("third-party go score must not allow empty results")
 	}
 	if pipeline.Scores[1].AllowEmpty {
 		t.Fatal("expr score must not allow empty results")
+	}
+	if !emptyTolerantBuiltinScores["affinity_score"] || !emptyTolerantBuiltinScores["image_score"] {
+		t.Fatal("the no-op built-ins must stay in the curated empty-tolerant set")
 	}
 }
 

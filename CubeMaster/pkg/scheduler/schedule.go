@@ -280,6 +280,13 @@ func runPreFilter(selCtx *selctx.SelectorCtx) (err error) {
 	return nil
 }
 
+// runFilter, parallelRunFilters, runScoreFilter and shouldSkipBackoffForTemplate
+// are the PRE-profile executor helpers. Select no longer calls them — the
+// profile path (runProfileFilters/runProfileScores) replaced them — and
+// InitScheduler no longer populates the package globals they read. They are
+// retained only for existing tests and out-of-tree embedders; note they
+// subtly differ from the profile path (any filter error is fatal here, and
+// scorers run sequentially).
 func runFilter(selCtx *selctx.SelectorCtx, filters []filter.Selector) error {
 	if tmpResult, err := parallelRunFilters(selCtx, filters); err != nil {
 		log.G(selCtx.Ctx).Warnf("runFilter_failed, err: %v", err)
@@ -293,6 +300,11 @@ func runFilter(selCtx *selctx.SelectorCtx, filters []filter.Selector) error {
 	return nil
 }
 
+// runProfileFilters runs every filter plugin of the stage concurrently and
+// intersects their results, applying each plugin's failure policy. The whole
+// stage always runs to completion: a fail-closed plugin that errors early
+// does NOT short-circuit the others, so a slow sibling bounds the stage's
+// latency (fail-fast applies to the request outcome, not to elapsed time).
 func runProfileFilters(selCtx *selctx.SelectorCtx, filters []profile.FilterPlugin) error {
 	if len(filters) == 0 {
 		return nil
@@ -432,6 +444,9 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 	return runProfileScores(selCtx, bindings)
 }
 
+// runProfileScores runs the stage's scorers concurrently and aggregates
+// weighted scores. Like runProfileFilters, the stage runs to completion even
+// after a fail-closed failure is already determined.
 func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) error {
 	if len(scores) == 0 {
 		return nil
@@ -538,7 +553,11 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 			continue
 		}
 		weight := binding.Weight
-		if weight == 0 {
+		if weight == 0 && binding.Selector != nil {
+			// Compile-time weight validation makes this fallback unreachable
+			// for profile-compiled bindings; it exists for hand-built ones.
+			// Guard on Selector: a nil selector already recorded an error
+			// above, and dereferencing it here would panic instead.
 			weight = binding.Selector.Weight()
 		}
 		if weight <= 0 || math.IsNaN(weight) || math.IsInf(weight, 0) {
