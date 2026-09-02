@@ -1297,6 +1297,9 @@ func (l *local) storeForBackend(backend string) (cow.Store, error) {
 		if l.s3CowManager != nil {
 			return l.s3CowManager, nil
 		}
+		if l.config == nil || !l.config.s3lvolConfigured() {
+			return nil, ErrS3NotConfigured
+		}
 		return nil, ErrS3NotReady
 	default:
 		if l.cowManager != nil {
@@ -1309,6 +1312,9 @@ func (l *local) storeForBackend(backend string) (cow.Store, error) {
 	switch normalized {
 	case cow.BackendS3:
 		if l.s3CowManager == nil {
+			if l.config == nil || !l.config.s3lvolConfigured() {
+				return nil, ErrS3NotConfigured
+			}
 			return nil, ErrS3NotReady
 		}
 		return l.s3CowManager, nil

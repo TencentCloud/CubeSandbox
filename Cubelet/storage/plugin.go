@@ -130,7 +130,7 @@ type Config struct {
 
 // CowInlineConfig mirrors the cubecow `AppConfig` schema. Cubelet owns
 // the cubecow init payload and starts one handle per backend.kind.
-// Users may tune `[log]` and `[cow.s3]` (s3lvol socket); reflink
+// Users may tune `[log]` and `[cow.s3]` (s3lvol enable / socket); reflink
 // `root_dir` and s3 `state_dir` are derived from `data_path`.
 type CowInlineConfig struct {
 	Log     CowLogConfig     `toml:"log"`
@@ -140,6 +140,7 @@ type CowInlineConfig struct {
 
 // CowS3UserConfig is the operator-facing `[cow.s3]` block.
 type CowS3UserConfig struct {
+	Enable       bool    `toml:"enable"`
 	SocketPath   *string `toml:"socket_path"`
 	StateDir     *string `toml:"state_dir"`
 	RPCTimeoutMS *uint64 `toml:"rpc_timeout_ms"`
@@ -282,6 +283,13 @@ func initS3CowEngineWithConfig(cfg *Config) (*cubecow.Engine, string, error) {
 	}
 	engine, err := cubecow.InitWithoutLoggingFromJSON(string(payload))
 	return engine, "inline storage.cow s3 handle", err
+}
+
+// s3lvolConfigured reports whether the operator opted into CubeS3lvol by
+// setting [cow.s3] enable = true. socket_path only names the RPC socket;
+// a default path in config.toml is not an opt-in.
+func (c *Config) s3lvolConfigured() bool {
+	return c != nil && c.Cow.S3.Enable
 }
 
 func (c *Config) s3BackendConfig() CowBackendConfig {
@@ -443,9 +451,10 @@ func init() {
 				return nil, err
 			}
 
-			// S3 cubecow + metadata base: background retry so cubelet does
-			// not depend on s3lvol being up at startup. S3 requests fail
-			// with ErrS3NotReady until the loop succeeds.
+			// S3 cubecow + metadata base: only when [cow.s3] enable is
+			// true. Background retry so cubelet does not depend on s3lvol
+			// being up at startup; S3 requests fail with ErrS3NotReady
+			// until the loop succeeds.
 			localStorage.startS3CowInitLoop(ic.Context)
 
 			return localStorage, nil

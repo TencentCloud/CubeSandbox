@@ -95,11 +95,131 @@ test_up_compute_uses_shared_helper() {
   fi
 }
 
+write_sample_storage_config() {
+  local path="$1"
+  cat > "${path}" <<'EOF'
+    [plugins."io.cubelet.internal.v1.storage"]
+    storage_backend = "cubecow"
+    [plugins."io.cubelet.internal.v1.storage".cow.log]
+    level = "info"
+  [plugins."io.cubelet.internal.v1.images"]
+    runtime_type = "io.containerd.cube.v2"
+EOF
+}
+
+assert_s3_before_images() {
+  local path="$1"
+  local s3_line images_line
+  s3_line="$(grep -nE "$(cubelet_s3_header_re)" "${path}" | head -1 | cut -d: -f1)"
+  images_line="$(grep -nE '^[[:space:]]*\[plugins\."io\.cubelet\.internal\.v1\.images"\]' "${path}" | head -1 | cut -d: -f1)"
+  [[ -n "${s3_line}" ]] || fail "expected ${path} to contain a live cow.s3 header"
+  [[ -n "${images_line}" ]] || fail "expected ${path} to contain images"
+  (( s3_line < images_line )) || fail "cow.s3 must sit before images (s3=${s3_line} images=${images_line})"
+}
+
+test_s3lvol_enable_inserts_after_cow_log() {
+  local cfg="${TMP_DIR}/s3lvol-insert.toml"
+  write_sample_storage_config "${cfg}"
+  write_cubelet_s3lvol_enable "${cfg}" 1
+  [[ "$(count_s3_headers "${cfg}")" == "1" ]] \
+    || fail "insert path must write exactly one cow.s3 table"
+  assert_contains "${cfg}" '[plugins."io.cubelet.internal.v1.storage".cow.s3]'
+  assert_contains "${cfg}" 'enable = true'
+  assert_contains "${cfg}" 'socket_path = "/var/run/s3lvol.sock"'
+  assert_s3_before_images "${cfg}"
+}
+
+test_s3lvol_enable_flips_existing() {
+  local cfg="${TMP_DIR}/s3lvol-flip.toml"
+  cat > "${cfg}" <<'EOF'
+    [plugins."io.cubelet.internal.v1.storage"]
+    storage_backend = "cubecow"
+    [plugins."io.cubelet.internal.v1.storage".cow.log]
+    level = "info"
+    [plugins."io.cubelet.internal.v1.storage".cow.s3]
+    enable = false
+    socket_path = "/tmp/handwritten.sock"
+  [plugins."io.cubelet.internal.v1.images"]
+    runtime_type = "io.containerd.cube.v2"
+EOF
+  write_cubelet_s3lvol_enable "${cfg}" 1
+  assert_contains "${cfg}" 'enable = true'
+  assert_contains "${cfg}" 'socket_path = "/tmp/handwritten.sock"'
+  write_cubelet_s3lvol_enable "${cfg}" 0
+  assert_contains "${cfg}" 'enable = false'
+  if grep -Eq '^[[:space:]]*enable[[:space:]]*=[[:space:]]*true' "${cfg}"; then
+    fail "write_cubelet_s3lvol_enable 0 must clear enable = true"
+  fi
+  assert_contains "${cfg}" 'socket_path = "/tmp/handwritten.sock"'
+  assert_s3_before_images "${cfg}"
+}
+
+count_s3_headers() {
+  count_live_cubelet_s3_headers "$1"
+}
+
+test_s3lvol_enable_inserts_when_header_is_commented() {
+  local cfg="${TMP_DIR}/s3lvol-commented.toml"
+  cat > "${cfg}" <<'EOF'
+    [plugins."io.cubelet.internal.v1.storage"]
+    storage_backend = "cubecow"
+    [plugins."io.cubelet.internal.v1.storage".cow.log]
+    level = "info"
+    # [plugins."io.cubelet.internal.v1.storage".cow.s3]
+    # enable = false
+  [plugins."io.cubelet.internal.v1.images"]
+    runtime_type = "io.containerd.cube.v2"
+EOF
+  write_cubelet_s3lvol_enable "${cfg}" 1
+  [[ "$(count_s3_headers "${cfg}")" == "1" ]] \
+    || fail "commented cow.s3 must not count as a live table"
+  assert_contains "${cfg}" '# [plugins."io.cubelet.internal.v1.storage".cow.s3]'
+  assert_contains "${cfg}" 'enable = true'
+  assert_contains "${cfg}" 'socket_path = "/var/run/s3lvol.sock"'
+  assert_s3_before_images "${cfg}"
+}
+
+test_s3lvol_enable_flips_section_after_images() {
+  local cfg="${TMP_DIR}/s3lvol-after-images.toml"
+  cat > "${cfg}" <<'EOF'
+    [plugins."io.cubelet.internal.v1.storage"]
+    storage_backend = "cubecow"
+    [plugins."io.cubelet.internal.v1.storage".cow.log]
+    level = "info"
+  [plugins."io.cubelet.internal.v1.images"]
+    runtime_type = "io.containerd.cube.v2"
+    [plugins."io.cubelet.internal.v1.storage".cow.s3]
+    enable = false
+    socket_path = "/tmp/appended.sock"
+EOF
+  write_cubelet_s3lvol_enable "${cfg}" 1
+  [[ "$(count_s3_headers "${cfg}")" == "1" ]] \
+    || fail "write_cubelet_s3lvol_enable must not insert a second cow.s3 table"
+  assert_contains "${cfg}" 'enable = true'
+  assert_contains "${cfg}" 'socket_path = "/tmp/appended.sock"'
+  if grep -Fq 'socket_path = "/var/run/s3lvol.sock"' "${cfg}"; then
+    fail "existing handwritten socket_path must be kept when the section already exists"
+  fi
+}
+
+test_cubelet_start_writes_s3lvol_enable() {
+  assert_contains "${ONE_CLICK_DIR}/scripts/systemd/cubelet-start.sh" "write_cubelet_s3lvol_enable"
+  assert_contains "${ONE_CLICK_DIR}/scripts/systemd/cubelet-start.sh" "ONE_CLICK_ENABLE_S3LVOL"
+  if grep -Fq "write_cubelet_s3lvol_socket" "${ONE_CLICK_DIR}/scripts/systemd/cubelet-start.sh"; then
+    fail "cubelet-start.sh must not keep write_cubelet_s3lvol_socket"
+  fi
+}
+
 test_control_default_writes_local_cubeops
 test_scheme_passthrough
 test_compute_override_addr
 test_inserts_when_key_missing
 test_prepare_writes_before_compute_only_exit
 test_up_compute_uses_shared_helper
+test_s3lvol_enable_inserts_after_cow_log
+test_s3lvol_enable_flips_existing
+test_s3lvol_enable_flips_section_after_images
+test_s3lvol_enable_inserts_when_header_is_commented
+test_cubelet_start_writes_s3lvol_enable
 
 echo "cubeops_addr tests OK"

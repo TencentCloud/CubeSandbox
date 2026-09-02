@@ -128,6 +128,12 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     file = "/data/log/cubecow/cubecow.log"
     rotation = "daily"
 
+    [plugins."io.cubelet.internal.v1.storage".cow.s3]
+    # CubeS3lvol opt-in. Default false: cubelet does not probe s3lvol.
+    # One-click flips this from ONE_CLICK_ENABLE_S3LVOL.
+    enable = false
+    socket_path = "/var/run/s3lvol.sock"
+
     # Only needed when switching back to the legacy ext4 / raw / reflink-pool
     # backend: change storage_backend to the corresponding value (e.g. "ext4")
     # and uncomment the fields below as needed. Under cubecow these fields are ignored.

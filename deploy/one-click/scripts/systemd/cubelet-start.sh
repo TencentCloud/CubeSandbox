@@ -21,6 +21,7 @@ PATTERN="^${CUBELET_BIN} --config"
 ensure_executable "${CUBELET_BIN}"
 ensure_file "${CUBELET_CONFIG}"
 ensure_file "${CUBELET_DYNAMICCONF}"
+write_cubelet_s3lvol_enable "${CUBELET_CONFIG}" "${ONE_CLICK_ENABLE_S3LVOL:-0}"
 mkdir -p \
   "${TOOLBOX_ROOT}/cube-vs/network" \
   "${TOOLBOX_ROOT}/cube-snapshot" \

@@ -854,6 +854,7 @@ func TestInitSkipsPoolSetupWhenStorageBackendIsCow(t *testing.T) {
 func TestInitResetsCowStorageAndReinitializesEngine(t *testing.T) {
 	cfg := makeTestConfig(t)
 	cfg.StorageBackend = "cubecow"
+	cfg.Cow.S3.Enable = true
 	// cubelet derives reflink root_dir from data_path, so put data_path
 	// somewhere we can also pre-seed stale state in.
 	rootDir := defaultReflinkAutoRootDir(cfg.DataPath)
