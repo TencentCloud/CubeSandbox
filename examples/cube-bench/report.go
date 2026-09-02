@@ -270,6 +270,14 @@ func extractTimes(results []IterResult, fn func(IterResult) float64) []float64 {
 	return out
 }
 
+// runTruncated reports whether the run ended with fewer results than
+// requested (an early TUI quit), so partial aggregates must be marked rather
+// than read as run characteristics. Shared by the terminal report and the
+// JSON export so the two never disagree.
+func runTruncated(results []IterResult, cfg *Config) bool {
+	return cfg.Total > 0 && len(results) < cfg.Total
+}
+
 // dispatchSaturated reports whether the dispatcher fell permanently behind the
 // requested pace during a rate-paced scheduled run: queue-delay p95 beyond the
 // mean inter-arrival time means the offered load degenerated to bursts and the

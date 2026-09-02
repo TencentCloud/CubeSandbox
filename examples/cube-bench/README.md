@@ -103,12 +103,14 @@ export CUBE_TEMPLATE_ID=<your-template-id>
 
 # Scheduled workload presets (Poisson arrivals + per-sandbox lifetimes)
 # NOTE: pass --concurrency explicitly — a worker slot is held for the full
-# sandbox lifetime, so honoring the preset rate needs ≈ rate x mean lifetime
-# slots (burst ≈ 3250, template_storm ≈ 1800); the default -c 5 stalls the
+# sandbox lifetime, so honoring the preset rate needs ≈ min(rate x mean
+# lifetime, total) slots (burst ≈ 500, template_storm ≈ 300, mixed_spec ≈ 400:
+# each preset's arrival window is shorter than its minimum lifetime, so nearly
+# the whole run is in flight at once); the default -c 5 stalls the
 # dispatcher and the run degrades to ASAP pacing (the tool warns at startup).
-./bin/cube-bench --workload burst -t <template-id> -c 3500
-./bin/cube-bench --workload template_storm -t <template-id> --seed 7 -c 2000
-./bin/cube-bench --workload mixed_spec -c 2000 \
+./bin/cube-bench --workload burst -t <template-id> -c 600
+./bin/cube-bench --workload template_storm -t <template-id> --seed 7 -c 350
+./bin/cube-bench --workload mixed_spec -c 450 \
   --templates 'tpl-1c2g:6:1000:2048,tpl-2c4g:3:2000:4096,tpl-8c16g:1:8000:16384'
 
 # Ad-hoc schedule without a preset: 20 req/s Poisson, 5-30s lifetimes
@@ -186,7 +188,8 @@ queue metrics in one `compare` run.
 > is ≥ 1 s (and is a lower bound even there: it prices the lifetime hold but
 > not the create/delete tail); shorter holds get a qualitative note instead of
 > a precise-looking threshold. Set `--concurrency` at least that high (e.g.
-> `burst`: 50 req/s × ~65 s ≈ 3250) or the dispatcher stalls on the semaphore
+> `burst`: min(50 req/s × ~65 s, 500 requests) ≈ 500) or the dispatcher stalls
+> on the semaphore
 > and the requested
 > `--rate` is not honored; the tool prints a startup warning when it detects
 > this, and at the end of a run it also measures the realized queue-delay p95

@@ -311,7 +311,11 @@ func parseConfig() *Config {
 		}
 		switch {
 		case cfg.Rate > 0 && known:
-			if needed := cfg.Rate * occS; float64(cfg.Concurrency) < needed {
+			// Little's-law steady state assumes an unbounded stream; a finite
+			// run can never hold more than Total requests in flight, so cap
+			// the estimate (a 500-request burst at 50/s with a 65s mean
+			// lifetime needs ~500 slots, not 3250).
+			if needed := min(cfg.Rate*occS, float64(cfg.Total)); float64(cfg.Concurrency) < needed {
 				fmt.Fprintf(os.Stderr, "WARNING: --concurrency %d is below rate(%g/s) x mean occupancy(%gs) = %.0f; "+
 					"the dispatcher will stall on the semaphore and neither the arrival rate nor queue-delay metrics will be honored\n",
 					cfg.Concurrency, cfg.Rate, occS, needed)
@@ -568,7 +572,7 @@ func exportJSON(results []IterResult, cfg *Config) {
 		// dispatch_*/queue_delay_* aggregates are not misread as run
 		// characteristics (compare pops the marker and notes the group),
 		// and skip the saturation marker whose own sample is truncated.
-		partial := cfg.Total > 0 && len(results) < cfg.Total
+		partial := runTruncated(results, cfg)
 		if partial {
 			summaryBlock["partial"] = 1
 		}
@@ -767,7 +771,7 @@ func main() {
 
 	// An early TUI quit truncates the sample: say so next to the on-screen
 	// report so its numbers are not read as a finished run.
-	partial := cfg.Total > 0 && len(allResults) < cfg.Total
+	partial := runTruncated(allResults, cfg)
 	if partial {
 		fmt.Fprintf(os.Stderr, "NOTE: run quit early with %d of %d requests dispatched; "+
 			"the report above and any exported aggregates cover a truncated sample.\n",
