@@ -216,7 +216,6 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 
 	if err := scheduler.InitScheduler(ctx); err != nil {
 		stdlog.Fatalf("scheduler init fail:%v", err)
-		return err
 	}
 
 	if err := sandbox.Init(ctx, cfg); err != nil {

@@ -75,6 +75,7 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 - 返回空结果的内置 `go` Score（例如请求没有节点偏好亲和性时的 `affinity_score`，或资源权重不适用时的 `image_score`）视为「不适用」并被跳过——不报错，也不替换为 `default_score`。只覆盖部分候选节点的结果仍视为失败。
 - `no_candidate` 支持 `fail` 和 `backoff`。Mandatory Guard 永不触发 backoff：Guard 失败（包括清空候选集合）始终快速失败。只有可选 Filter 或最终选点无候选时才进入 backoff；backoff 尝试会在放宽后的候选集合上重新执行 Guards、Filter 和 Score，其中重跑 Guards 是 backoff 尝试自身的安全保障。这也意味着集群饱和时的行为与 legacy 路径不同：legacy 管线在饱和时（例如 `realtime_create_num` 导致无可调度节点）会进入 backoff 选择器重试，而自定义 Profile 会立即让请求失败——`no_candidate: backoff` 不会软化 Guard 的结果。
 - `no_candidate` 未配置时默认为 `fail`。legacy `default` 管线始终走 backoff，因此启用第一个自定义 Profile 会把「Filter 后无候选」从 backoff 重试变成硬 `SelectNodesNoRes` 失败——没有 backoff 尝试，也不会回退到 default 管线。接入 Profile 期间建议显式配置 `no_candidate: backoff`。
+- 插件要表达「没有合适节点」时应返回空候选列表而不是返回错误：插件错误一律按内部错误处理，由该插件的 `failure` 策略裁决，永远不会被归类为 `no_candidate`——因此返回错误的 Filter 不会触发 `backoff`，只会让请求失败（或 fail-open）。
 - 输出校验比引入插件系统之前更严格，且其中大部分现在对 legacy default 管线同样生效：Filter 结果中包含 nil、空 id、重复或非候选节点会让请求直接失败；Score 结果中包含这类条目或 NaN/Inf 值会使该 Score 的整个结果失效（在 legacy `ScoreSkip` 绑定下该 scorer 会被整体剔除，而旧路径会静默把这些条目并入聚合结果，陈旧节点甚至可能因此重新进入候选集）。Profile 编译出的 Score 还要求每个分数落在 [0,100] 内且覆盖全部候选。把第三方 `go` Score 加入 Profile 前请先确认其值域边界——并注意现有 `enable_scorers` 部署同样会套用更严格的处理。
 
 配置在启动或热更新时整体编译；插件名、路由、表达式、权重、选点方式或失败策略无效时，新 Profile 集不会生效，调度器继续使用上一份完整管线。
@@ -98,3 +99,6 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 - 上述未注册条目的启动失败只在 legacy 管线实际被编译时成立：一旦 `profiles` 下配置了默认条目，`enable_filters` / `enable_scorers` 就不再参与编译，失效条目会被静默忽略而非报错。迁移到 Profiles 时请一并清理这些条目。
 - `multi_factor_weighted_average` 的 legacy 后台分数刷新协程现在只要对应配置段存在就会启动，即使该 scorer 未列入 `enable_scorers`；循环每个 tick 都会重读实时配置，因此对"已配置但未启用"的部署而言，唯一影响是多一个空转 goroutine。
 - legacy default 管线现在与自定义 Profile 共用同一个并发运行器：Score 在请求内并行执行，且畸形的 Filter/Score 输出（nil、空 id、重复或非候选条目、NaN/Inf 值）会被拒绝，而不是像旧路径那样静默并入结果。仓库内置插件均满足该契约；升级前请审计任何第三方 `go` 插件。
+- 配置 `profiles` 但没有 `default: true` 条目时，未命中任何路由的请求会回落到由 `enable_filters`/`enable_scorers` 编译出的 legacy 管线；若完全没有 legacy 配置段，该回落管线是无守卫的纯随机选择。编译期会输出一条含已编译 Filter/Score 数量的 RISK 告警——除非明确依赖该回落，否则请配置默认 Profile。
+- 内置 `go` 资源过滤器（`cpu`、`mem`、`disk`）对未携带对应资源规格的请求会直接报错，与 legacy 管线行为完全一致（legacy 也是无条件运行它们的）。可能收到无规格请求（例如传入空规格的 restore 放置路径）的 Profile 不应把它们列为 Guard 或 Filter。
+- 当完全未加载 Profile 集时（例如启动期请求早于 `InitScheduler` 完成），`Select` 现在会以"scheduler profile is not initialized"快速失败；此前它会回落到包级全局 Selector 列表，而新的初始化路径不再填充这些列表。

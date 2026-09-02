@@ -70,3 +70,20 @@ func TestShouldSkipBackoffForTemplate(t *testing.T) {
 		})
 	}
 }
+
+func TestSelectFailsClosedBeforeInit(t *testing.T) {
+	// With no compiled profile set and the singleton's selector lists empty
+	// (the production state before InitScheduler completes), Select must fail
+	// closed rather than silently schedule with an unguarded random pipeline.
+	origFilters, origScores := scheduler.filter, scheduler.score
+	oldProfiles := scheduler.profiles.Swap(nil)
+	defer func() {
+		scheduler.filter, scheduler.score = origFilters, origScores
+		scheduler.profiles.Store(oldProfiles)
+	}()
+	scheduler.filter, scheduler.score = nil, nil
+
+	if _, err := Select(selctx.New("random")); err == nil {
+		t.Fatal("Select before InitScheduler must fail closed")
+	}
+}

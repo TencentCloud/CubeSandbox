@@ -167,6 +167,15 @@ func Compile(ctx context.Context, cfg *config.Config, registry *plugin.Registry)
 		if compileErr != nil {
 			return nil, fmt.Errorf("compile legacy scheduler profile: %w", compileErr)
 		}
+		if len(cfg.Scheduler.Profiles) > 0 {
+			// Unmatched traffic falls back to this legacy pipeline; when no
+			// legacy enable_filters/enable_scorers are configured it compiles
+			// to an unguarded random selection, so a missing default profile
+			// silently strips the safety guards from unmatched requests.
+			log.G(ctx).Warnf("RISK: scheduler profiles configured without a default profile; "+
+				"requests matching no route fall back to the legacy pipeline (%d filters, %d scorers compiled from enable_filters/enable_scorers)",
+				len(legacy.Filters), len(legacy.Scores))
+		}
 		set.fallback = legacy
 	}
 	return set, nil

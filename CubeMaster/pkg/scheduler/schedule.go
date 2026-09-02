@@ -109,8 +109,15 @@ func currentPipeline(selCtx *selctx.SelectorCtx) (*profile.Pipeline, func()) {
 			return pipeline, release
 		}
 	}
-	// Tests and legacy embedders may construct the package singleton directly.
-	// Keep that path functional without weakening production validation.
+	// InitScheduler never populates the singleton's selector lists (it stores
+	// a compiled profile.Set instead), so reaching this fallback with both
+	// lists empty means Select raced startup: fail closed via the nil
+	// pipeline rather than silently scheduling with an unguarded random pick.
+	// Tests and legacy embedders that populate the singleton directly still
+	// get the permissive path below.
+	if len(scheduler.filter) == 0 && len(scheduler.score) == 0 {
+		return nil, nil
+	}
 	topN := 1
 	if current := config.GetConfig(); current != nil && current.Scheduler != nil {
 		topN = current.Scheduler.PrioritySelectNum
@@ -324,7 +331,9 @@ func runProfileFilters(selCtx *selctx.SelectorCtx, filters []profile.FilterPlugi
 		}
 		candidates[candidate.ID()] = struct{}{}
 	}
-	eg, _ := errgroup.WithContext(selCtx.Ctx)
+	// The stage deliberately runs every plugin to completion, so no derived
+	// cancellation context is needed; a plain group avoids implying one.
+	var eg errgroup.Group
 	for index := range filters {
 		index := index
 		eg.Go(func() (err error) {
@@ -395,7 +404,9 @@ func runProfileFilters(selCtx *selctx.SelectorCtx, filters []profile.FilterPlugi
 }
 
 func parallelRunFilters(selCtx *selctx.SelectorCtx, filters []filter.Selector) (node.NodeList, error) {
-	eg, _ := errgroup.WithContext(selCtx.Ctx)
+	// The stage deliberately runs every plugin to completion, so no derived
+	// cancellation context is needed; a plain group avoids implying one.
+	var eg errgroup.Group
 	tmpStat := &utils.AtomicMapStat{}
 	for _, f := range filters {
 		f := f
@@ -457,7 +468,9 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 		skip  bool
 	}
 	results := make([]scoreResult, len(scores))
-	eg, _ := errgroup.WithContext(selCtx.Ctx)
+	// The stage deliberately runs every plugin to completion, so no derived
+	// cancellation context is needed; a plain group avoids implying one.
+	var eg errgroup.Group
 	for index := range scores {
 		index := index
 		eg.Go(func() (err error) {
