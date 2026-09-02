@@ -212,3 +212,30 @@ func TestExternalFilterCircuitBreakerCountsFailuresAcrossSnapshotSync(t *testing
 		t.Fatalf("third attempt error = %v, want circuit open", err)
 	}
 }
+
+func TestCallDoesNotCountCallerCancellationAgainstBreaker(t *testing.T) {
+	// A request-scoped cancellation is the caller's fault, not the plugin's:
+	// a burst of aborted scheduling requests must not open the circuit
+	// against a healthy plugin.
+	c := &client{name: "fake", timeout: time.Minute, breaker: breaker{threshold: 2, cooldown: time.Minute}}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 3; i++ {
+		err := c.call(cancelled, func(ctx context.Context) error { return ctx.Err() })
+		if err == nil {
+			t.Fatal("call with a cancelled parent context must fail")
+		}
+	}
+	if err := c.breaker.before(); err != nil {
+		t.Fatalf("caller cancellations opened the breaker: %v", err)
+	}
+
+	// Plugin-attributable failures (parent alive) are still counted.
+	for i := 0; i < 2; i++ {
+		_ = c.call(context.Background(), func(context.Context) error { return errors.New("plugin boom") })
+	}
+	if err := c.breaker.before(); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("plugin failures did not open the breaker: %v", err)
+	}
+}

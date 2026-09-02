@@ -78,6 +78,13 @@ var snapshotSequence atomic.Uint64
 // local cache already returns clones; this second boundary makes the snapshot
 // ownership explicit and protects callers that inject nodes in tests or
 // benchmark simulations.
+//
+// Call it exactly once per scheduling request, BEFORE any filter narrows the
+// candidate set: re-invoking after filtering re-clones the narrowed result
+// and silently shrinks the "stable snapshot" SnapshotNodes advertises, and a
+// fresh SnapshotVersion would desync external plugins mid-request. Note the
+// frozen result and the snapshot share node pointers, so in-place mutation of
+// a node (there should be none on the read path) is visible through both.
 func (s *SelectorCtx) FreezeSnapshot() {
 	if s == nil {
 		return

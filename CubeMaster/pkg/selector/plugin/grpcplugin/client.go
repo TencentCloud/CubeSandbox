@@ -185,7 +185,15 @@ func (c *client) call(ctx context.Context, invoke func(context.Context) error) e
 	callCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	if err := invoke(callCtx); err != nil {
-		c.breaker.failed()
+		// Count only plugin-attributable failures. When the parent context is
+		// done, the cancellation came from the caller (the scheduling request
+		// was aborted), not from the plugin — a burst of aborted requests must
+		// not open the circuit against a healthy plugin. The plugin's own
+		// slowness trips callCtx's deadline while the parent stays alive, so
+		// it is still counted.
+		if ctx.Err() == nil {
+			c.breaker.failed()
+		}
 		return err
 	}
 	return nil
@@ -241,7 +249,10 @@ func snapshotNode(selection *selctx.SelectorCtx, candidate *node.Node) *schedule
 		Creating: candidate.RealTimeCreateNum, LocalCreating: candidate.LocalCreateNum,
 		MvmNum: candidate.MvmNum, SystemDiskSize: candidate.SystemDiskSize,
 		DataDiskUsage: candidate.DataDiskUsagePer, StorageDiskUsage: candidate.StorageDiskUsagePer,
-		SystemDiskUsage: candidate.SysDiskUsagePer, Labels: candidate.Labels(),
+		SystemDiskUsage: candidate.SysDiskUsagePer,
+		// Labels() hands out the live cached map; copy it before it goes on
+		// the wire so an in-place label refresh can never race the marshal.
+		Labels:         cloneMap(candidate.Labels()),
 		LocalTemplates: append([]string(nil), candidate.LocalTemplates...),
 	}
 	if facts, ok := selection.SnapshotFacts(candidate.ID()); ok {

@@ -117,6 +117,15 @@ func (p *scorePlugin) ID() string      { return "score/expr/" + p.name }
 func (p *scorePlugin) Weight() float64 { return p.weight }
 func (p *scorePlugin) Disable() bool   { return false }
 
+// Select evaluates the expression once per candidate. The expression must be
+// a TOTAL function over node states: any per-node evaluation error, non-number
+// result, or value outside [0,100] fails the whole scheduling request
+// (fail-closed — a partially scored candidate set would silently skew
+// placement). Operator-authored expressions must therefore clamp or guard
+// every node state they may meet (e.g. wrap divisions, bound `100 -
+// node.cpu_util` against cpu_util > 100). The profile runner in the
+// integration half can degrade a failing score plugin to its configured
+// default_score instead of aborting; the plugin itself stays strict.
 func (p *scorePlugin) Select(selection *selctx.SelectorCtx) (node.NodeScoreList, error) {
 	candidates := selection.Nodes()
 	result := make(node.NodeScoreList, 0, len(candidates))
