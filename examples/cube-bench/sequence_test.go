@@ -165,6 +165,8 @@ func TestParseTemplatesRejectsBadSpecs(t *testing.T) {
 		"tpl-a:1:-5",
 		"tpl-a:1:1000:-1",
 		"tpl-a:1:1000:2048:extra",
+		"tpl-a,tpl-a",
+		"tpl-a:1:1000:2048,tpl-a:2:2000:4096",
 	} {
 		if _, err := parseTemplates(spec); err == nil {
 			t.Fatalf("parseTemplates(%q) returned nil error, want rejection", spec)

@@ -67,7 +67,7 @@ All env vars can be overridden by the corresponding flag.
 | `--workload` | *(none)* | Workload preset: `burst`, `template_storm`, `mixed_spec` (empty = legacy mode) |
 | `--rate` | `0` | Poisson arrival rate in requests/sec (`<=0` = as fast as possible) |
 | `--lifetime` | *(none)* | Per-sandbox lifetime in seconds: `min,max` (uniform); client DELETEs when lifetime expires |
-| `--templates` | *(none)* | Template pool: comma-separated `templateID[:weight[:cpuMillis:memMiB]]` (weight default 1). Replaces `-t` for the generated pool (non-additive); warmup and the legacy fallback body still use `-t` |
+| `--templates` | *(none)* | Template pool: comma-separated `templateID[:weight[:cpuMillis:memMiB]]` (weight default 1; duplicate IDs rejected — combine their weights). Replaces `-t` for the generated pool (non-additive); warmup and the legacy fallback body still use `-t` |
 | `--dump-trace` | *(none)* | Write the pre-generated request sequence to a JSON trace file, then run normally (requires a scheduled workload) |
 
 Without any scheduling flag (`--workload`/`--rate`/`--lifetime`/`--templates`)
@@ -154,7 +154,9 @@ lifetime-bearing workload likewise carry a TTL, keyed to `lifetime_max`.) Two
 caveats on the fallback: `timeout` is an *idle* timeout (see
 `docs/guide/lifecycle.md`), so it only acts as a wall-clock cap because the
 bench never touches a sandbox after create; and the seconds truncation makes
-the effective value up to 1s shorter than `lifetime + 60s`. The report and JSON
+the effective value up to 1s shorter than `lifetime + 60s` — for a sub-second
+lifetime `trunc(lifetime)` is 0, so an abandoned run's backstop is exactly
+60s no matter how short the intended hold. The report and JSON
 export add queue-delay percentiles (scheduled vs actual start) and per-template
 create counts/success rates — where `per_template.<id>.created` counts
 full-cycle successes (`r.Err == ""`), mirroring the top-level `successful`: in

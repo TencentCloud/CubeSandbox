@@ -65,9 +65,13 @@ func applyWorkloadPreset(cfg *Config, explicit map[string]bool) error {
 }
 
 // parseTemplates parses "id[:weight[:cpuMillis:memMiB]],..." entries.
-// Weight defaults to 1, cpu/mem default to 0 (unknown spec).
+// Weight defaults to 1, cpu/mem default to 0 (unknown spec). Duplicate IDs
+// are rejected: two entries sharing an ID would draw the same template_id
+// with different specs, making the trace ambiguous and silently merging the
+// per_template export bucket — combine their weights into one entry instead.
 func parseTemplates(spec string) ([]TemplateSpec, error) {
 	var out []TemplateSpec
+	seen := make(map[string]struct{})
 	for _, part := range strings.Split(spec, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -81,6 +85,10 @@ func parseTemplates(spec string) ([]TemplateSpec, error) {
 		if ts.TemplateID == "" {
 			return nil, fmt.Errorf("--templates entry %q: template ID must not be empty", part)
 		}
+		if _, dup := seen[ts.TemplateID]; dup {
+			return nil, fmt.Errorf("--templates entry %q: duplicate template ID %q; combine the weights into one entry", part, ts.TemplateID)
+		}
+		seen[ts.TemplateID] = struct{}{}
 		if len(fields) >= 2 {
 			w, err := strconv.Atoi(strings.TrimSpace(fields[1]))
 			if err != nil || w < 1 {
