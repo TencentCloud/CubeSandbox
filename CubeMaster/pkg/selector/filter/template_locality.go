@@ -51,13 +51,28 @@ func (l *templateLocalityFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeLi
 			continue
 		}
 		if reqRes.TemplateID != "" && !reqRes.AllowNonLocalTemplate {
-			if localcache.GetImageStateByNode(reqRes.TemplateID, inList[i].ID()) == nil {
+			facts, frozen := selCtx.SnapshotFacts(inList[i].ID())
+			templateLocal := false
+			if frozen && facts.TemplateLocalKnown {
+				templateLocal = facts.TemplateLocal
+			} else {
+				templateLocal = localcache.GetImageStateByNode(reqRes.TemplateID, inList[i].ID()) != nil
+			}
+			if !templateLocal {
 				log.G(selCtx.Ctx).Warnf("%v select:%v template=%s not local", l.ID(), inList[i].ID(), reqRes.TemplateID)
 				continue
 			}
-			if reqRes.EnforceSnapshotStorage && !snapshotStorageNodeAllowed(inList[i]) {
-				log.G(selCtx.Ctx).Warnf("%v select:%v template=%s snapshot storage unavailable", l.ID(), inList[i].ID(), reqRes.TemplateID)
-				continue
+			if reqRes.EnforceSnapshotStorage {
+				storageAllowed := false
+				if frozen && facts.SnapshotStorageKnown {
+					storageAllowed = facts.SnapshotStorageAllowed
+				} else {
+					storageAllowed = snapshotStorageNodeAllowed(inList[i])
+				}
+				if !storageAllowed {
+					log.G(selCtx.Ctx).Warnf("%v select:%v template=%s snapshot storage unavailable", l.ID(), inList[i].ID(), reqRes.TemplateID)
+					continue
+				}
 			}
 		}
 		nodes.Append(inList[i])

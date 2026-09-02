@@ -635,6 +635,7 @@ func (c *createSandboxContext) setProxyToRedis() error {
 func (c *createSandboxContext) newContext(ctx context.Context, req *types.CreateCubeSandboxReq) error {
 	c.selctx = selctx.New(config.GetConfig().Scheduler.LeastSelectName)
 	c.selctx.InstanceType = req.InstanceType
+	c.selctx.RequestLabels = config.GetConfig().Scheduler.ControlledProfileLabels(req.Labels)
 
 	c.constructAffanity(ctx, req)
 	c.done = make(chan struct{})

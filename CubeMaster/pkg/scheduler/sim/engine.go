@@ -47,7 +47,9 @@ func Bootstrap(ctx context.Context, configPath string) error {
 	// sim output and pollute the Select latency measurement.
 	CubeLog.SetLevel(CubeLog.FATAL)
 	task.InitTask(ctx, config.GetConfig())
-	scheduler.InitScheduler(ctx)
+	if err := scheduler.InitScheduler(ctx); err != nil {
+		return fmt.Errorf("sim: InitScheduler: %w", err)
+	}
 	return nil
 }
 

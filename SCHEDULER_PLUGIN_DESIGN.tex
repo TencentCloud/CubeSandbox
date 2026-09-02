@@ -1,0 +1,413 @@
+% Compile with: xelatex SCHEDULER_PLUGIN_DESIGN.tex
+\documentclass[UTF8,fontset=none,zihao=-4]{ctexart}
+\usepackage[a4paper,margin=2.5cm,headheight=15pt]{geometry}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{float}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit}
+\tikzset{
+  box/.style={draw, rounded corners, align=center, minimum height=9mm, inner sep=5pt},
+  plug/.style={draw, rounded corners, align=center, minimum height=8mm, inner sep=4pt, fill=gray!8},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  redbox/.style={draw=red!70!black, rounded corners, align=center, minimum height=9mm, inner sep=5pt, thick},
+}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue!50!black}
+
+\setmainfont{Helvetica}
+\setsansfont{Helvetica}
+\setmonofont{Menlo}
+\setCJKmainfont{华文黑体}
+\setCJKsansfont{华文黑体}
+\setCJKmonofont{华文黑体}
+
+\setlength{\emergencystretch}{3em}
+\sloppy
+\linespread{0.96}
+\newcommand{\code}[1]{\colorbox{gray!12}{\texttt{#1}}}
+\setlength{\tabcolsep}{10pt}
+\renewcommand{\arraystretch}{1.6}
+\setlength{\floatsep}{12pt plus 2pt minus 2pt}
+\setlength{\textfloatsep}{16pt plus 2pt minus 4pt}
+\setlength{\intextsep}{12pt plus 2pt minus 2pt}
+\lstset{basicstyle=\footnotesize\ttfamily,frame=single,breaklines=true,
+  columns=fullflexible,keepspaces=true,aboveskip=6pt,belowskip=6pt,xleftmargin=4pt,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{green!45!black},
+  stringstyle=\color{red!70!black},
+  morecomment=[l]{\#},
+  morecomment=[l]{//},
+  morestring=[b]",
+  morestring=[b]'}
+
+\lstdefinelanguage{go}{
+  keywords={type,func,return,if,else,for,range,switch,case,var,const,struct,interface,map,string,int,float64,error,make,append,nil,true,false},
+  morecomment=[l]{//},
+  morestring=[b]",
+}
+
+\lstdefinelanguage{yaml}{
+  keywords={scheduler,active_profile,profiles,name,filters,scores,weight,args,factors,picker,mode},
+  morecomment=[l]{\#},
+  morestring=[b]',
+}
+\setlist{nosep,leftmargin=1.6em}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\title{\textbf{CubeSandbox 调度插件系统方案}}
+\date{}
+\setcounter{secnumdepth}{-1}
+
+\begin{document}
+\maketitle
+
+\section{摘要}
+
+AI Agent 的沙箱负载差异大，突发短命、同模板热启动、大规格长驻需要不同的调度策略，一套固定策略不够用。本方案在不修改现有接口的情况下，做三件事：把插件改成按名字登记，把调度策略打包成一份可切换的配置，用压测数据对比各策略效果。
+
+\section{问题}
+
+调度器的矛盾是需求多变、现状固定。
+
+\textbf{负载这边}，三类典型场景的要求互相冲突：
+
+\begin{center}
+\begin{tikzpicture}[node distance=7mm and 9mm]
+  \node[plug] (a) {突发短命沙箱};
+  \node[plug, below=of a] (b) {同模板热启动};
+  \node[plug, below=of b] (c) {大规格长驻沙箱};
+
+  \node[box, right=2.2cm of a] (a2) {分散到不同节点\\避免创建风暴};
+  \node[box, right=2.2cm of b] (b2) {优先命中模板缓存\\降低启动延迟};
+  \node[box, right=2.2cm of c] (c2) {提高装箱率\\少开机器};
+
+  \draw[arrow] (a) -- (a2);
+  \draw[arrow] (b) -- (b2);
+  \draw[arrow] (c) -- (c2);
+\end{tikzpicture}
+\end{center}
+
+三种要求方向相反，没有一套固定策略能同时满足。
+
+\textbf{现状这边}，调度器恰好只有一套固定策略，还有三个缺口：
+
+\begin{center}
+\begin{tikzpicture}[node distance=7mm and 8mm]
+  \node[redbox] (p1) {没有调度质量指标\\也没有可复现的压测};
+  \node[redbox, right=of p1] (p2) {插件写死在代码里\\加插件要改源码};
+  \node[redbox, right=of p2] (p3) {切换策略要改多处\\配错了也不报错};
+\end{tikzpicture}
+\end{center}
+
+\section{方案总览}
+
+三件事一一对应地填上三个缺口：
+
+\begin{center}
+\begin{tikzpicture}[node distance=9mm and 10mm]
+  \node[redbox] (g1) {没有调度质量指标\\也没有可复现的压测};
+  \node[redbox, right=2.6cm of g1] (g2) {插件写死在代码里\\加插件要改源码};
+  \node[redbox, right=2.6cm of g2] (g3) {切换策略要改多处\\配错了也不报错};
+
+  \node[box, below=of g1] (s1) {评估指标 + 压测工具};
+  \node[box, below=of g2] (s2) {插件登记表};
+  \node[box, below=of g3] (s3) {一份可切换的策略配置};
+
+  \draw[arrow] (g1) -- (s1);
+  \draw[arrow] (g2) -- (s2);
+  \draw[arrow] (g3) -- (s3);
+\end{tikzpicture}
+\end{center}
+
+\section{方案细节}
+
+\subsection*{登记表取代写死的代码}
+
+现在的插件写死在调度器源码里，第三方想加插件得改源码。改成一张插件登记表，插件启动时按名字登记，调度时按名字查表：
+
+\begin{center}
+\begin{tikzpicture}[node distance=8mm and 12mm]
+  \node[box] (now) {改前\\插件写死在调度器里\\第三方改源码才能加};
+  \node[box, right=2.6cm of now] (after) {改后\\插件按名字登记\\第三方登记即可接入};
+  \draw[arrow, thick, -{Latex[length=2.5mm]}] (now) -- node[above, font=\scriptsize]{换} (after);
+\end{tikzpicture}
+\end{center}
+
+好处：插件名写错，启动即报错；构造失败返回错误；第三方登记后重新编译即可接入。
+
+\subsection*{一份配置打包一套策略}
+
+把过滤、打分、权重、选点打包成一个有名字的策略块，切换策略只改一个名字、重启即生效：
+
+\begin{center}
+\begin{tikzpicture}[node distance=8mm and 10mm]
+  \node[box, minimum width=50mm] (conf) {配置文件\\active\_profile: 模板热启动};
+  \node[box, below=of conf, minimum width=50mm] (profiles) {三个策略块：模板热启动 / 突发打散 / 装箱};
+  \draw[arrow] (conf) -- node[right, font=\scriptsize]{改这一行，就切到另一个策略} (profiles);
+\end{tikzpicture}
+\end{center}
+
+每个插件的参数放在自己的参数块里，加新插件只在配置里加一段。没有写新策略时，程序把旧的几处配置自动翻译成默认策略，旧配置照常生效。
+
+\subsection*{内置策略}
+
+三套策略由上面的配置组合而成，复用现有插件，仅在现有插件不够时新写：
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{L{0.20\textwidth}L{0.20\textwidth}L{0.32\textwidth}L{0.28\textwidth}}
+\toprule
+\textbf{策略} & \textbf{适用场景} & \textbf{思路} & \textbf{代价} \\
+\midrule
+burst-spread & 突发秒级沙箱 & 摊到最闲节点，避免创建风暴 & 缓存命中率下降 \\
+template-hotstart & 同模板热启动 & 优先选已缓存模板的节点 & 缓存节点压力更大 \\
+binpack & 大规格长驻沙箱 & 紧凑装箱，少开机器少碎片 & 负载更不均，故障面更大 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+每个策略改善一个指标的同时牺牲另一个，报告同时列出两方面。
+
+\subsection*{指标与压测}
+
+补上调度质量指标，实测和仿真两条路都做，对比各策略：
+
+\begin{center}
+\begin{tikzpicture}[node distance=8mm and 8mm]
+  \node[box] (req) {同一份请求序列\\固定随机种子预生成};
+  \node[box, below=1.2cm of req] (load) {三种负载\\短命高并发、同模板风暴、大小规格混合};
+  \node[box, below=1.2cm of load] (run) {各策略各跑数遍};
+  \node[box, below=1.2cm of run] (report) {对比报告\\每个策略的效果与代价};
+
+  \draw[arrow] (req) -- (load);
+  \draw[arrow] (load) -- (run);
+  \draw[arrow] (run) -- (report);
+\end{tikzpicture}
+\end{center}
+
+两条路各测一类指标，结果都进报告：
+
+\begin{itemize}
+  \item \textbf{cube-bench 真机}：真实创建沙箱、走完整链路，测创建延迟和成功率；
+  \item \textbf{仿真器}：模拟节点与调度过程，评估装箱率、碎片率、负载均衡度，支持大规模集群。
+\end{itemize}
+
+整体装配流程：
+
+\begin{center}
+\begin{tikzpicture}[
+  font=\small,
+  node distance=8mm and 10mm,
+]
+  \node[box, minimum width=32mm] (conf) {配置文件\\写着用哪个策略};
+  \node[box, minimum width=32mm, right=of conf] (compiler) {启动时的装配器\\按名字查插件、\\填好参数};
+  \node[box, minimum width=42mm, right=of compiler] (pipeline) {调度流水线\\过滤、打分、排序、选节点};
+
+  \node[plug, minimum width=32mm, below=of conf] (registry) {插件登记表\\名字对应构造函数};
+  \node[plug, minimum width=32mm, below=of registry] (plugins) {插件包\\内置的加第三方自己写的};
+
+  \draw[arrow] (conf) -- (compiler);
+  \draw[arrow] (compiler) -- (pipeline);
+  \draw[arrow] (compiler) -- (registry);
+  \draw[arrow] (plugins) -- node[right, font=\scriptsize]{启动时登记一次} (registry);
+\end{tikzpicture}
+\end{center}
+
+\subsection*{自定义插件}
+
+提供两个示例插件：
+
+\begin{itemize}
+  \item \textbf{label\_filter}，过滤插件：只留下带指定标签的节点；
+  \item \textbf{zone\_spread\_score}，打分插件：把沙箱分散到不同可用区。
+\end{itemize}
+
+两个例子分别演示过滤和打分，写完登记、重新编译就能用，配套中英文文档。
+
+\section{实施细节}
+
+\subsection*{登记表}
+
+filter 包和 score 包各新增一个 registry.go，接口如下：
+
+\begin{lstlisting}[language=go]
+type Factory func(args json.RawMessage) (Selector, error)
+
+func Register(name string, f Factory) error
+func New(name string, args json.RawMessage) (Selector, error)
+func Names() []string  // 排序返回，便于诊断
+\end{lstlisting}
+
+内置插件在各自 init 里登记，登记名沿用现有配置取值。以 filter 包为例：
+
+\begin{lstlisting}[language=go]
+func init() {
+    Register("cpu", func(args json.RawMessage) (Selector, error) {
+        return NewCpuFilter(), nil
+    })
+    Register("mem", func(args json.RawMessage) (Selector, error) {
+        return NewMemFilter(), nil
+    })
+    // template_locality、realtime_create_num、disk、thirtparty 同理
+}
+\end{lstlisting}
+
+全部内置插件的登记名：
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{L{0.15\textwidth}L{0.30\textwidth}L{0.55\textwidth}}
+\toprule
+\textbf{类型} & \textbf{数量} & \textbf{登记名} \\
+\midrule
+filter & 6 个 & \code{cpu}、\code{mem}、\code{template\_locality}、\code{realtime\_create\_num}、\code{disk}、\code{thirtparty} \\
+score & 4 个 & \code{real\_time\_weighted\_average}、\code{multi\_factor\_weighted\_average}、\code{affinity\_score}、\code{image\_score} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+登记之后，插件与调度之间的调用关系：
+
+\begin{center}
+\begin{tikzpicture}[node distance=10mm and 16mm]
+  \node[plug, minimum width=32mm] (p) {插件实现 Selector\\在 init 里 Register};
+  \node[box, minimum width=30mm, right=of p] (r) {登记表\\名字 → 构造函数};
+  \node[box, minimum width=30mm, right=of r] (s) {调度时 New(名字)\\取出实例};
+
+  \draw[arrow] (p) -- (r);
+  \draw[arrow] (r) -- (s);
+\end{tikzpicture}
+\end{center}
+
+改动清单：
+
+\begin{itemize}
+  \item 移除 \code{filters} / \code{scores} 两个 map，去掉 \code{reflect.ValueOf} 查表逻辑；
+  \item 四处构造 panic 改为返回 error；
+  \item 注册表用读写锁保证并发安全。
+\end{itemize}
+
+\subsection*{策略配置}
+
+新增 profiles 配置，结构如下：
+
+\begin{lstlisting}[language=yaml]
+scheduler:
+  active_profile: template-hotstart
+  profiles:
+    - name: template-hotstart
+      filters: [{name: cpu}, {name: mem}, {name: disk}]
+      scores:
+        - name: image_score
+          weight: 4
+          args: { factors: { template_id: 1 } }
+        - name: real_time_weighted_average
+          weight: 1
+          args: { factors: { realtime_create_num: 3 } }
+      picker: { mode: best }
+\end{lstlisting}
+
+启动时按 \code{active\_profile} 装配，对每个插件依次做四步：
+
+\begin{enumerate}
+  \item 按名字查登记表；
+  \item 解码插件的 \code{args}；
+  \item 校验参数；
+  \item 实例化插件。
+\end{enumerate}
+
+四步产出过滤器和打分器两组插件，交给现有调度流程，任何一步失败直接启动报错。插件的 \code{weight} 字段在实例化时注入，\code{Weight()} 返回该值。
+
+\code{profiles} 留空时，把现有的 \code{enable\_filters}、\code{enable\_scorers}、\code{plugin\_conf}、\code{resource\_weights} 翻译成默认策略。其中 \code{picker} 由两个老配置联合翻译：
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{L{0.55\textwidth}L{0.45\textwidth}}
+\toprule
+\textbf{老配置（\code{least\_select\_name} + \code{priority\_select\_num}）} & \textbf{等价 picker} \\
+\midrule
+random + -1（缺省组合） & top\_n\_uniform，n=全部候选 \\
+random + N & top\_n\_uniform，n=N \\
+rw + N & top\_n\_weighted，n=N \\
+sw / rrw + 任意 & best \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+picker 三种模式的语义：
+
+\begin{itemize}
+  \item \code{best}：选得分最高的节点；
+  \item \code{top\_n\_uniform}：在得分前 N 名中等概率随机；
+  \item \code{top\_n\_weighted}：在前 N 名中按分数加权随机。
+\end{itemize}
+
+n 缺省或为 -1 表示全部。
+
+\subsection*{选点确定化}
+
+改动在 \code{node.go} 的 \code{AllSortByScore()}。现在它用不稳定的 \code{sort.Slice} 且只按分数降序，输入来自 map 遍历，同分时结果随机。改成：
+
+\begin{lstlisting}[language=go]
+sort.Slice(l, func(i, j int) bool {
+    if l[i].Score != l[j].Score {
+        return l[i].Score > l[j].Score
+    }
+    return l[i].ID() < l[j].ID()  // 同分按节点编号
+})
+\end{lstlisting}
+
+同样的输入永远选出同样的节点，这是后面压测对比能复现的前提。
+
+\subsection*{指标}
+
+在 \code{metrics.go} 集中定义，走现有 Prometheus 链路：
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{L{0.46\textwidth}L{0.18\textwidth}L{0.36\textwidth}}
+\toprule
+\textbf{指标} & \textbf{类型} & \textbf{含义} \\
+\midrule
+scheduler\_attempts\_total\{profile,result,reason\} & Counter & 调度尝试数，result 为成功/失败 \\
+scheduler\_duration\_seconds\{profile\} & Histogram & 单次调度耗时，算 P50/P95 \\
+scheduler\_decisions\_total\{profile,template\_hit\} & Counter & 成功决策及模板命中数 \\
+scheduler\_reschedules\_total\{profile,reason\} & Counter & 重调度次数 \\
+sandbox\_create\_attempts\_total\{profile,result\} & Counter & 创建成功/失败次数 \\
+sandbox\_create\_duration\_seconds\{profile,result\} & Histogram & 受理到建成的端到端耗时 \\
+scheduler\_cluster\_quota\{resource,type\} & Gauge & 集群分配量与超卖后容量 \\
+scheduler\_node\_load\_cv\{resource\} & Gauge & 节点负载变异系数，衡量均衡度 \\
+scheduler\_active\_nodes / scheduler\_empty\_nodes & Gauge & 活跃节点数 / 空节点数 \\
+scheduler\_fragmented\_capacity\_ratio\{shape\} & Gauge & 碎片率 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+标签固定用策略名和结果，控制 Prometheus 时序规模。速率和分位数由 counter/histogram 在 PromQL 里推导。
+
+\subsection*{压测}
+
+扩展 cube-bench，三种负载的默认参数：
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{L{0.24\textwidth}L{0.46\textwidth}L{0.30\textwidth}}
+\toprule
+\textbf{负载} & \textbf{参数} & \textbf{模拟目标} \\
+\midrule
+burst & 500 请求、泊松 50/s、寿命 U(10s,120s)、小规格 & 高并发短命 \\
+template\_storm & 300 请求、同一 TemplateID、30\% 节点预置 & 同模板风暴 \\
+mixed\_spec & 400 请求、1C2G:2C4G:8C16G=6:3:1、混合寿命 & 大小规格混合 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+请求序列按固定随机种子预生成，同一份序列给所有策略用，保证对比公平。
+
+\end{document}
