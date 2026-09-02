@@ -7,6 +7,8 @@ package selctx
 
 import (
 	"context"
+	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/smallnest/weighted"
@@ -17,10 +19,15 @@ import (
 )
 
 type SelectorCtx struct {
-	Ctx            context.Context
-	ReqRes         *RequestResource
-	lastBadFilters []*node.Node
-	result         node.NodeList
+	Ctx             context.Context
+	ReqRes          *RequestResource
+	RequestLabels   map[string]string
+	ProfileName     string
+	SnapshotVersion string
+	lastBadFilters  []*node.Node
+	result          node.NodeList
+	snapshot        node.NodeList
+	snapshotFacts   map[string]SnapshotNodeFacts
 
 	selName         string
 	rSelect         weighted.W
@@ -57,6 +64,68 @@ type ImageSpec struct {
 	ImageID string
 }
 
+type SnapshotNodeFacts struct {
+	TemplateLocal          bool
+	TemplateLocalKnown     bool
+	SnapshotStorageAllowed bool
+	SnapshotStorageKnown   bool
+}
+
+var snapshotSequence atomic.Uint64
+
+// FreezeSnapshot defensively clones all mutable request and node data used by
+// plugins and assigns a version shared by the whole scheduling pipeline. The
+// local cache already returns clones; this second boundary makes the snapshot
+// ownership explicit and protects callers that inject nodes in tests or
+// benchmark simulations.
+func (s *SelectorCtx) FreezeSnapshot() {
+	if s == nil {
+		return
+	}
+	if s.Ctx == nil {
+		s.Ctx = context.Background()
+	}
+	if s.result != nil {
+		frozen := make(node.NodeList, 0, len(s.result))
+		for _, candidate := range s.result {
+			frozen = append(frozen, candidate.Clone())
+		}
+		s.result = frozen
+		s.snapshot = append(node.NodeList(nil), frozen...)
+	}
+	if s.ReqRes != nil {
+		request := *s.ReqRes
+		request.TemplateNodeScope = append([]string(nil), s.ReqRes.TemplateNodeScope...)
+		if s.ReqRes.ErofsImages != nil {
+			request.ErofsImages = make([]*ImageSpec, 0, len(s.ReqRes.ErofsImages))
+			for _, image := range s.ReqRes.ErofsImages {
+				if image == nil {
+					request.ErofsImages = append(request.ErofsImages, nil)
+					continue
+				}
+				cloned := *image
+				request.ErofsImages = append(request.ErofsImages, &cloned)
+			}
+		}
+		s.ReqRes = &request
+	}
+	if s.RequestLabels != nil {
+		labels := make(map[string]string, len(s.RequestLabels))
+		for key, value := range s.RequestLabels {
+			labels[key] = value
+		}
+		s.RequestLabels = labels
+	}
+	if s.snapshotFacts != nil {
+		facts := make(map[string]SnapshotNodeFacts, len(s.snapshotFacts))
+		for nodeID, value := range s.snapshotFacts {
+			facts[nodeID] = value
+		}
+		s.snapshotFacts = facts
+	}
+	s.SnapshotVersion = fmt.Sprintf("%d-%d", time.Now().UnixNano(), snapshotSequence.Add(1))
+}
+
 func New(name string) *SelectorCtx {
 	s := &SelectorCtx{
 		selName: name,
@@ -84,6 +153,24 @@ func (s *SelectorCtx) Nodes() node.NodeList {
 	return s.result
 }
 
+// SnapshotNodes returns the complete frozen node set for SnapshotVersion. It
+// remains stable while result is narrowed by Filter plugins.
+func (s *SelectorCtx) SnapshotNodes() node.NodeList {
+	return s.snapshot
+}
+
+func (s *SelectorCtx) SetSnapshotFacts(facts map[string]SnapshotNodeFacts) {
+	s.snapshotFacts = facts
+}
+
+func (s *SelectorCtx) SnapshotFacts(nodeID string) (SnapshotNodeFacts, bool) {
+	if s == nil || s.snapshotFacts == nil {
+		return SnapshotNodeFacts{}, false
+	}
+	facts, ok := s.snapshotFacts[nodeID]
+	return facts, ok
+}
+
 func (s *SelectorCtx) LeastNodes(n int) node.NodeList {
 	size := s.result.Len()
 	if n >= 0 && n <= size {
@@ -94,6 +181,7 @@ func (s *SelectorCtx) LeastNodes(n int) node.NodeList {
 
 func (s *SelectorCtx) SetNodes(list node.NodeList) {
 	s.result = list
+	s.resultWithScore = nil
 }
 
 func (s *SelectorCtx) LeastScoreNodes(n int) node.NodeScoreList {

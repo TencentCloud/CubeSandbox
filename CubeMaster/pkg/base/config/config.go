@@ -245,6 +245,12 @@ type SchedulerConf struct {
 	ThirtpartyFilterInstanceType     map[string]bool                   `yaml:"thirtparty_filter_instance_type"`
 	InstanceTypeConf                 map[string]InstanceTypeConf       `yaml:"instance_type_conf"`
 	NodeAffinitySelectorAllowedKeys  []string                          `yaml:"node_affinity_selector_allowed_keys"`
+	// ProfileRouteLabelKeys is the allow-list of request labels that may be
+	// used by scheduler profile routes or sent to external scheduler plugins.
+	// Route labels not present in this list make the profile configuration
+	// invalid at scheduler startup.
+	ProfileRouteLabelKeys []string               `yaml:"profile_route_label_keys"`
+	Profiles              []SchedulerProfileConf `yaml:"profiles"`
 
 	// IgnoreRedisAllocation, when true, makes the scheduler ignore the
 	// per-node allocated CPU/Mem usage recorded in Redis (treat allocated as
@@ -538,6 +544,78 @@ func (s *SchedulerConf) GetEffectiveNodeMaxMemReservedInMB(instanceType string, 
 
 type SchedulerFilterConf struct {
 	EnableFilters []string `yaml:"enable_filters"`
+}
+
+// SchedulerProfileConf selects and configures one scheduling pipeline. The
+// first matching non-default profile wins; an optional default profile is used
+// when no route matches. With no profiles configured, the scheduler compiles a
+// legacy profile from Filter, Score, PostScore and PrioritySelectNum.
+type SchedulerProfileConf struct {
+	Name      string                       `yaml:"name"`
+	Default   bool                         `yaml:"default"`
+	Route     SchedulerProfileRouteConf    `yaml:"route"`
+	Filters   []SchedulerProfilePluginConf `yaml:"filters"`
+	Scores    []SchedulerProfilePluginConf `yaml:"scores"`
+	Selection SchedulerSelectionConf       `yaml:"selection"`
+	Failure   SchedulerFailureConf         `yaml:"failure"`
+}
+
+type SchedulerProfileRouteConf struct {
+	InstanceTypes []string          `yaml:"instance_types"`
+	Labels        map[string]string `yaml:"labels"`
+}
+
+// SchedulerProfilePluginConf is shared by built-in Go, CEL expression and
+// external gRPC plugins. Type defaults to "go". External plugins use a Unix
+// socket by default, while tests and development may use a host:port target.
+type SchedulerProfilePluginConf struct {
+	Name                   string         `yaml:"name"`
+	Type                   string         `yaml:"type"`
+	Enabled                *bool          `yaml:"enabled"`
+	Weight                 float64        `yaml:"weight"`
+	DefaultScore           float64        `yaml:"default_score"`
+	Expr                   string         `yaml:"expr"`
+	SocketPath             string         `yaml:"socket_path"`
+	Timeout                time.Duration  `yaml:"timeout"`
+	CircuitBreakerFailures int            `yaml:"circuit_breaker_failures"`
+	CircuitBreakerCooldown time.Duration  `yaml:"circuit_breaker_cooldown"`
+	Args                   map[string]any `yaml:"args"`
+}
+
+type SchedulerSelectionConf struct {
+	TopN   int    `yaml:"top_n"`
+	Method string `yaml:"method"`
+}
+
+type SchedulerFailureConf struct {
+	Filter      string `yaml:"filter"`
+	Score       string `yaml:"score"`
+	NoCandidate string `yaml:"no_candidate"`
+}
+
+// ControlledProfileLabels returns a defensive copy containing only labels
+// explicitly allowed for profile routing. This prevents arbitrary user labels
+// from changing scheduler policy or leaking to external plugins.
+func (s *SchedulerConf) ControlledProfileLabels(labels map[string]string) map[string]string {
+	if s == nil || len(labels) == 0 || len(s.ProfileRouteLabelKeys) == 0 {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(s.ProfileRouteLabelKeys))
+	for _, key := range s.ProfileRouteLabelKeys {
+		if key = strings.TrimSpace(key); key != "" {
+			allowed[key] = struct{}{}
+		}
+	}
+	out := make(map[string]string, len(allowed))
+	for key := range allowed {
+		if value, ok := labels[key]; ok {
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 type PostScoreConf struct {

@@ -1,0 +1,101 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package cube.schedulerplugin.v1;
+
+option go_package = "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/schedulerplugin/v1;schedulerplugin";
+
+// SchedulerPlugin is a versioned, batch-oriented extension API. Snapshot data
+// is synchronized independently; per-request calls carry only the snapshot
+// version, request context and candidate IDs.
+service SchedulerPlugin {
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+  rpc SyncSnapshot(SnapshotRequest) returns (SnapshotResponse);
+  rpc Filter(FilterRequest) returns (FilterResponse);
+  rpc Score(ScoreRequest) returns (ScoreResponse);
+}
+
+message HandshakeRequest {
+  string protocol_version = 1;
+  string plugin_name = 2;
+}
+
+message HandshakeResponse {
+  string protocol_version = 1;
+  string plugin_name = 2;
+  repeated string capabilities = 3; // "filter" and/or "score"
+}
+
+message RequestContext {
+  string instance_type = 1;
+  int64 cpu_millis = 2;
+  int64 memory_bytes = 3;
+  int64 system_disk_size = 4;
+  string template_id = 5;
+  map<string, string> labels = 6;
+}
+
+message SnapshotNode {
+  string id = 1;
+  string ip = 2;
+  bool healthy = 3;
+  int64 cpu_total = 4;
+  double cpu_util = 5;
+  double cpu_load = 6;
+  int64 mem_total_mb = 7;
+  int64 mem_usage_mb = 8;
+  int64 quota_cpu = 9;
+  int64 allocated_cpu = 10;
+  int64 quota_mem_mb = 11;
+  int64 allocated_mem_mb = 12;
+  int64 creating = 13;
+  int64 local_creating = 14;
+  int64 mvm_num = 15;
+  int64 system_disk_size = 16;
+  double data_disk_usage = 17;
+  double storage_disk_usage = 18;
+  double system_disk_usage = 19;
+  map<string, string> labels = 20;
+  repeated string local_templates = 21;
+  bool template_local = 22;
+  bool snapshot_storage_writable = 23;
+  int64 reserved = 24; // in-flight reservation, populated when reservation management is enabled
+}
+
+message SnapshotRequest {
+  string snapshot_version = 1;
+  repeated SnapshotNode nodes = 2;
+}
+
+message SnapshotResponse {
+  string snapshot_version = 1;
+}
+
+message FilterRequest {
+  string snapshot_version = 1;
+  RequestContext request = 2;
+  repeated string candidate_ids = 3;
+}
+
+message FilterResponse {
+  string snapshot_version = 1;
+  repeated string kept_ids = 2;
+}
+
+message ScoreRequest {
+  string snapshot_version = 1;
+  RequestContext request = 2;
+  repeated string candidate_ids = 3;
+}
+
+message NodeScore {
+  string node_id = 1;
+  double score = 2; // normalized to [0,100]
+}
+
+message ScoreResponse {
+  string snapshot_version = 1;
+  repeated NodeScore scores = 2;
+}
