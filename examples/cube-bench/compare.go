@@ -700,10 +700,10 @@ func renderComparison(c *comparison) string {
 			"Use multiple seeds per side for decisions.\n\n")
 	}
 	if scheduledShape(c.baseline) != scheduledShape(c.candidate) {
-		b.WriteString("> **Note:** one group is a scheduled-mode export and the other is not. Shared key " +
-			"names span different windows and meanings across the two modes — `total_time_s` is the dispatch " +
-			"window in scheduled mode but the wall-clock run in legacy mode, and `throughput_qps` derives " +
-			"from it — so cross-shape Δ on those keys is not meaningful. Compare like with like.\n\n")
+		b.WriteString("> **Note:** one group is a scheduled-mode export and the other is not. In scheduled " +
+			"mode `total_time_s`/`throughput_qps` include per-sandbox lifetime tails (the run ends at the last " +
+			"lifetime DELETE), while a legacy run ends at the last immediate delete — the shared keys span " +
+			"different windows, so cross-shape Δ on them is not meaningful. Compare like with like.\n\n")
 	}
 	if c.baseline.saturated || c.candidate.saturated {
 		var groups []string

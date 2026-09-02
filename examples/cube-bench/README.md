@@ -150,7 +150,9 @@ caveats on the fallback: `timeout` is an *idle* timeout (see
 bench never touches a sandbox after create; and the seconds truncation makes
 the effective value up to 1s shorter than `lifetime + 60s`. The report and JSON
 export add queue-delay percentiles (scheduled vs actual start) and per-template
-create counts/success rates.
+create counts/success rates — where `per_template.<id>.created` counts
+full-cycle successes (`r.Err == ""`), mirroring the top-level `successful`: in
+`create-delete` mode a sandbox whose delete failed counts as *not* created.
 
 **Throughput metrics in scheduled mode.** `total_time_s`/`throughput_qps`
 measure the *whole run*, which ends only when the last sandbox is DELETEd —
@@ -181,8 +183,9 @@ queue metrics in one `compare` run.
 > lifetime` rule of thumb is fine for the ≥ 10 s preset lifetimes but
 > underestimates for ad-hoc sub-second lifetimes where create/delete time is
 > comparable — so the numeric startup check only runs when the mean lifetime
-> is ≥ 1 s; shorter holds get a qualitative warning instead of a
-> precise-looking threshold. Set `--concurrency` at least that high (e.g.
+> is ≥ 1 s (and is a lower bound even there: it prices the lifetime hold but
+> not the create/delete tail); shorter holds get a qualitative note instead of
+> a precise-looking threshold. Set `--concurrency` at least that high (e.g.
 > `burst`: 50 req/s × ~65 s ≈ 3250) or the dispatcher stalls on the semaphore
 > and the requested
 > `--rate` is not honored; the tool prints a startup warning when it detects
@@ -193,7 +196,12 @@ queue metrics in one `compare` run.
 > describe the client's semaphore rather than the offered schedule. The JSON
 > export marks such runs with `dispatch_saturated: 1` in `summary`; `compare`
 > pops that marker out of the metric rows and prints a warning for the
-> affected group instead.
+> affected group instead. Two readings of the marker to keep in mind: it
+> cannot distinguish client under-provisioning from a slow server create path
+> (a create-latency spike holds slots just as long) — check `create.p95`
+> before blaming `--concurrency` — and a transient burst delaying >5% of
+> arrivals past the mean gap trips the whole-run marker even when the run
+> otherwise honored pace.
 
 ### Trace file schema
 
@@ -289,14 +297,14 @@ Caveats when reading verdicts:
   any |Δ%| ≥ 5% is flagged regardless of whether the difference would
   survive real variance. Read zero-width CIs as "no variance measured", not
   "no variance exists".
-- **Mixed scheduled/legacy shapes share key names with different meanings.**
-  When one group is a scheduled-mode export and the other is not,
-  `total_time_s` is the dispatch window on one side and the whole-run wall
-  clock on the other, and `throughput_qps` inherits that difference — their
-  Δ rows are not meaningful. The report detects the shape mix (via the
-  scheduled-only `queue_delay_*`/`dispatch_window_s`/`per_template.*` keys)
-  and prints a notice under the experiment-setup table; compare like with
-  like.
+- **Mixed scheduled/legacy shapes share key names spanning different
+  windows.** When one group is a scheduled-mode export and the other is not,
+  `total_time_s`/`throughput_qps` include per-sandbox lifetime tails on the
+  scheduled side (the run ends at the last lifetime DELETE) while the legacy
+  side ends at the last immediate delete — their Δ rows are not meaningful.
+  The report detects the shape mix (via the scheduled-only
+  `queue_delay_*`/`dispatch_window_s`/`per_template.*` keys) and prints a
+  notice under the experiment-setup table; compare like with like.
 - **Rounds files flatten only each round's `summary`.** Round-level stat
   blocks outside `summary` are dropped; today's only rounds producer
   (schedsim) carries just `seed` + `summary` per round, so nothing is lost

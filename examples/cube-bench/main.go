@@ -320,11 +320,12 @@ func parseConfig() *Config {
 			// No reliable occupancy estimate (no lifetime hold, or a
 			// sub-second lifetime whose create/delete tail is comparable):
 			// warn qualitatively instead of printing a precise-looking
-			// threshold.
-			fmt.Fprintf(os.Stderr, "WARNING: at --rate %g/s each worker slot is held for a request's whole residency "+
-				"(create, any lifetime hold, delete), so a low --concurrency (%d) stalls the dispatcher and "+
-				"queue-delay metrics then measure the client's own semaphore, not the scheduler. "+
-				"Raise --concurrency towards rate x mean residency.\n",
+			// threshold. Worded as a caution: plenty of rate-paced runs
+			// without a lifetime hold are perfectly healthy.
+			fmt.Fprintf(os.Stderr, "NOTE: at --rate %g/s each worker slot is held for a request's whole residency "+
+				"(create, any lifetime hold, delete). If --concurrency (%d) is low relative to rate x mean "+
+				"residency, the dispatcher stalls and queue-delay metrics then measure the client's own "+
+				"semaphore, not the scheduler; the end-of-run saturation check will say if that happened.\n",
 				cfg.Rate, cfg.Concurrency)
 		case !cfg.DryRun && cfg.hasLifetime && cfg.Mode == "create-delete":
 			// ASAP dispatch with lifetimes: every worker slot is held for the
@@ -754,7 +755,9 @@ func main() {
 	if sat, p95, interArrival := dispatchSaturated(allResults, cfg); sat {
 		fmt.Fprintf(os.Stderr, "WARNING: queue-delay p95 (%.0fms) exceeded the mean inter-arrival time (%.0fms): "+
 			"the dispatcher fell permanently behind and the offered load degenerated to bursts — "+
-			"queue_delay_*/dispatch metrics measure the client's semaphore, not the scheduler. Raise --concurrency.\n",
+			"queue_delay_*/dispatch metrics no longer describe the offered schedule. Either --concurrency is too "+
+			"low for the offered rate (each slot is held for create+lifetime+delete) or create latency blew up "+
+			"server-side — check create.p95 before raising --concurrency.\n",
 			p95, interArrival)
 	}
 

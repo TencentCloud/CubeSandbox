@@ -436,3 +436,20 @@ func TestDispatchSaturated(t *testing.T) {
 		t.Errorf("saturated=%v p95=%v inter-arrival=%v, want saturated with p95 > inter-arrival", sat, p95, ia)
 	}
 }
+
+func TestDispatchSaturatedToleratesTransient(t *testing.T) {
+	cfg, _ := scheduledExportFixture() // rate 50/s -> 20ms inter-arrival
+	// 100 requests: 4 delayed far past the inter-arrival gap (a transient
+	// burst), the rest on time. p95 must stay under the gap, so the
+	// whole-run saturation marker stays off.
+	results := make([]IterResult, 100)
+	for i := range results {
+		results[i] = IterResult{Seq: i, SchedDelayMs: 1}
+	}
+	for _, i := range []int{10, 30, 60, 85} {
+		results[i].SchedDelayMs = 500
+	}
+	if sat, p95, ia := dispatchSaturated(results, cfg); sat {
+		t.Errorf("transient burst tripped the saturation marker (p95=%v, inter-arrival=%v)", p95, ia)
+	}
+}
