@@ -57,12 +57,6 @@ load-bearing ones, and why cube-envd differs:
   leaking grandchildren (e.g. a backgrounded `sleep`) as orphans. This is a
   deliberate divergence: a sandbox data-plane should not leak processes. The
   event stream, exit codes and `deadline_exceeded` framing are unchanged.
-- **Symlink `Stat`/`ListDir` (lstat vs follow).** cube-envd reports the link
-  itself (`type: FILE_TYPE_SYMLINK`, `permissions: "l…"`, `symlinkTarget` = the
-  real target). Go follows the link (target's type/mode, `permissions: "L…"`,
-  and for a dangling link `symlinkTarget` = the link's own path). SDKs branch
-  on the RPC `code`, not link type, so this is a wire-shape difference rather
-  than an SDK break; it is allowlisted and called out here.
 - **Stricter-input handling is more lenient (documented).** For malformed
   unary requests Go rejects with 415/400 (missing/`text/plain` content-type,
   zero-length body, trailing bytes or multiple stream envelopes — cube-envd
@@ -112,6 +106,16 @@ load-bearing ones, and why cube-envd differs:
   `0`, negative, or int64-duration-overflowing values panic the daemon;
   cube-envd parses as `u32` and falls back to the 30 s default for any
   absent, non-numeric, non-positive, or oversized value.
+
+Behaviors that look like divergences but are deliberately aligned with the
+baseline (asserted by the conformance fixtures, not allowlisted):
+
+- **Symlink `Stat`/`ListDir` follows upstream `GetEntryInfo`.** A link's `type`
+  and `mode` describe its followed target (`permissions` still describe the link
+  itself, rendered `L…` like Go's `os.FileMode.String()`), and a dangling link
+  reports the proto3-zero `FILE_TYPE_UNSPECIFIED` with no `type`/`mode` keys.
+  `ListDir` resolves its root with a following stat but never descends into a
+  symlinked child — matching upstream's `followSymlink` + `filepath.WalkDir`.
 
 ## Build & test
 

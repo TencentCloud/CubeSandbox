@@ -1,4 +1,4 @@
-# 验收测试记录 / Acceptance Test Results — 2026-08-07（最近一次更新：2026-08-31）
+# 验收测试记录 / Acceptance Test Results — 2026-08-07（最近一次更新：2026-09-02）
 
 环境：本地部署 CubeSandbox（dev-env QEMU 虚拟机，CubeAPI @127.0.0.1:13000），
 基线 Go envd 0.5.13（`ghcr.io/tencentcloud/cubesandbox-base:2026.16`），
@@ -21,6 +21,23 @@ proto3 JSON 映射、路径/用户解析、降权执行、错误映射、进程�
 ## 2. 一致性对拍（cube-envd vs Go envd 0.5.13）
 
 同一镜像起两个容器（cube-envd 经 `ENVD_BIN` 开关注入）逐报文对比。
+**2026-09-02 重跑（88 个协议场景，全新容器全量重录）**：
+
+```
+PASS 78  FAIL 0  DECLARED-DIFF 10  SKIP 0  MISSING 0
+```
+
+较上版变化：① `fs_stat_symlink_probe` 移出 allowlist——服务层 `entry_info`
+按上游 `GetEntryInfo` 对齐后，悬垂链接（探测目标 `zz_probe_gone` 显式不存在）
+两侧给出完全一致的 entry；② 新增 `fs_stat_suid`/`fs_stat_sticky` 锁定
+Go `FileMode.String()` 的 `u`/`g`/`t` 前缀权限格式（4755 → `urwxr-xr-x`、
+1777 文件 → `trwxrwxrwx`，数值 `mode` = `Perm()` 不含特殊位）；③ `cap_fs`
+改为自建 `base_a.txt`/`base_b.bin`（不再依赖先跑 rest 组，消除对裸容器录制
+时 Stat/Move 黄金路径录成 404 的假通过）；④ 新增 `fs_makedir_on_file`——
+MakeDir 到已存在文件：上游按 `os.Stat` 的 `isDir` 分支给
+`invalid_argument`（`path already exists but it is not a directory`），
+cube-envd 原给 `already_exists`，已对齐。
+
 **2026-08-31 重跑（71 个协议场景）**：
 
 ```
@@ -118,6 +135,62 @@ fixture 对拍自动抓到。全新容器重录后 **PASS 47 / FAIL 0 / DECLARED
 覆盖 issue #1227 要求的五类路径：成功 / 错误 / 超时（`Connect-Timeout-Ms`
 到期杀进程 + `deadline_exceeded`）/ 取消（断连后进程存活）/ 大输出（2 MiB
 字节级一致）。
+
+### 2c. legacy SDK（User-Agent `connect-python`）对照（阶段 1 项 1.6，2026-09-01 新增）
+
+同镜像双容器全新重录（83 个场景）：
+
+```
+PASS 71  FAIL 0  DECLARED-DIFF 12  SKIP 0  MISSING 0
+```
+
+较 1.6 之前（78 场景，`PASS 67 / DECLARED-DIFF 11`）净增 5 个 legacy 场景，
+其中 4 个 PASS、1 个进 allowlist。逐场景实测：
+
+| 场景 | 断言 | 结果 |
+|---|---|---|
+| `fs_legacy_stat` | Stat 200：`entry` 收窄为 `{name,type,path}`（size/mode/permissions/owner/group/modifiedTime/symlinkTarget 全丢）+ `X-E2B-Legacy-SDK: true` | 一致 |
+| `fs_legacy_listdir` | ListDir 200：`entries` 每个元素同样收窄 + 头 | 一致 |
+| `fs_legacy_remove` | Remove 200：`{}`（本来就空）+ 头 | 一致 |
+| `fs_legacy_stat_missing` | Stat 404：**不**收窄、**不**带 `X-E2B-Legacy-SDK`（上游 `WrapUnary` 先返回 err，走不到 `shouldHideChanges`）| 一致 |
+| `fs_legacy_stat_symlink` | 符号链接 Stat：跟随链接 → 目标类型（`FILE_TYPE_FILE`）| 一致 |
+| `fs_legacy_stat_symlink_dir` | 指向目录的链接 → `FILE_TYPE_DIRECTORY`（follow 语义）| 一致 |
+| `fs_legacy_stat_symlink_dangling` | 悬垂链接 → `FILE_TYPE_UNSPECIFIED`（proto3 零值，`type`/`mode` 键省略，Stat 仍 200）| 一致 |
+
+**2026-09-02 服务层对齐后**：legacy 对拍另有独立目录（`fixtures-go-legacy` /
+`fixtures-rust-legacy`，7 个 legacy 场景，`--which fs-legacy` 可单独重跑；全量
+`all` 录制的 87 个 fixture 里同样包含这 7 个），并补
+`fs_legacy_stat_symlink_dir`（链接→目录）与 `fs_legacy_stat_symlink_dangling`
+（悬垂链接）两个形状。两者最初都 FAIL（cube-envd 一律收窄成 `FILE`）——
+根因不在 legacy 收窄层，而在服务层条目语义：cube-envd 的 `entry_info` 已按上游
+`shared GetEntryInfo`（`entry.go:19-68`）对齐——链接的 type/mode 取跟随目标、
+悬垂目标 → `UnknownFileType`（零值省略）、`permissions` 按 Go `FileMode.String()`
+（`L…`、setuid/setgid/sticky 为 `u`/`g`/`t` 前缀）、`symlinkTarget` 按
+`EvalSymlinks` 语义；`ListDir` 同步改为 `filepath.WalkDir` 的 DFS 序。
+`narrow_entry` 不再做任何类型映射（服务层不再产出 `FILE_TYPE_SYMLINK`）。
+`fs_legacy_stat_symlink` 从 `DECLARED_DIFFERENT` 移除；重录后：
+
+```
+PASS 7  FAIL 0  DECLARED-DIFF 0  SKIP 0  MISSING 0
+```
+
+全量对拍（88 场景）同步重录：`PASS 78 / FAIL 0 / DECLARED-DIFF 10`，
+`fs_stat_symlink_probe` 移出 allowlist（悬垂链接两侧给出完全一致的 entry），
+新增 `fs_stat_suid`/`fs_stat_sticky` 锁定 `u`/`g`/`t` 前缀格式，新增
+`fs_makedir_on_file` 锁定 MakeDir 到已存在文件的 `invalid_argument` 对齐。
+
+单元测试 `cargo test --locked` → **93 passed, 0 failed**（legacy 用例之外含新增
+symlink 语义覆盖：链接三形状的 `entry_info`、Go `FileMode.String` 特殊位前缀、
+`ListDir` 根跟随链接但不进入链接子目录、悬垂链接作根 → 404 而非 400、DFS 完整
+序列含第三层）；`cargo clippy
+--all-targets --locked -- -D warnings` 与 `cargo fmt --check` 均干净。
+
+> Review 修正（2026-09-01）：首版 legacy 场景复用了 `cap_fs` 的残留路径
+> （`base_a.txt` / `zz_link`），`--which fs-legacy` 单独跑时两个前置都不存在，
+> 4 个 fixture 里有 3 个录成 404 `not_found`——对拍照样"通过"却什么也没证明，
+> allowlist 里的 symlink 差异更是没有实测依据。已改为自带 fixtures（自建文件、
+> 自建目录、自建符号链接，跑完自清），并补 `fs_legacy_listdir` 覆盖 `entries`
+> 分支。
 
 ## 3. SDK 端到端（三大验收场景）
 

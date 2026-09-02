@@ -61,6 +61,12 @@ pub fn narrow(v: &mut Value) {
 ///
 /// Fixed 3-key WHITELIST — not "preserve all known fields"; the set is exactly
 /// what upstream's legacy `EntryInfo` carries.
+///
+/// No value remapping happens here: the service layer classifies entries with
+/// upstream `GetEntryInfo` semantics (links followed, dangling links
+/// UNSPECIFIED), so the only types that can reach this whitelist are the three
+/// legacy enum values — UNSPECIFIED (already omitted from the JSON by the
+/// proto3-zero serialization), FILE, DIRECTORY.
 fn narrow_entry(e: &mut Value) {
     if let Some(obj) = e.as_object_mut() {
         obj.retain(|k, _| matches!(k.as_str(), "name" | "type" | "path"));
@@ -141,6 +147,20 @@ mod tests {
                     .into_iter()
                     .collect::<std::collections::HashSet<_>>()
             );
+        }
+    }
+
+    #[test]
+    fn narrow_entry_keeps_three_known_types_verbatim() {
+        // The three in-enum values pass through untouched.
+        for (t, path) in [
+            ("FILE_TYPE_UNSPECIFIED", "/u"),
+            ("FILE_TYPE_FILE", "/f"),
+            ("FILE_TYPE_DIRECTORY", "/d"),
+        ] {
+            let mut v = serde_json::json!({"name": "n", "type": t, "path": path});
+            narrow_entry(&mut v);
+            assert_eq!(v["type"], serde_json::json!(t), "{t} must pass through");
         }
     }
 
