@@ -214,7 +214,10 @@ artifact, not a regression.
 > requests (below that the p95 IS the maximum delay, so a single hiccup would
 > trip it), and at rates of several hundred req/s the mean inter-arrival
 > approaches the `time.Sleep` granularity, where even healthy runs can exceed
-> it — treat the marker as advisory there. An early TUI quit instead exports
+> it — treat the marker as advisory there. An early TUI quit stops the
+> dispatcher from releasing further requests (released ones still run their
+> create/lifetime/delete cycle out; the per-request server-side `timeout` is
+> the backstop for anything abandoned) and exports
 > `partial: 1` in `summary` (suppressing the saturation marker), which
 > `compare` surfaces as a note and covers with the same key exclusion, plus
 > the truncated `per_template.*` blocks (they aggregate only the results

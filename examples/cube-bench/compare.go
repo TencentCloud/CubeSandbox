@@ -705,8 +705,12 @@ func (c *comparison) conclusions() (improved, regressed, noDir []*compareRow) {
 			if ai != aj {
 				return ai > aj
 			}
-			// Zero-baseline rows have no Δ% (pct stays 0); rank them by the
-			// absolute delta instead of letting them sink to the bottom.
+			// Zero-baseline rows have no Δ% (pct stays 0), so they sort below
+			// every row with a defined Δ% — even a near-zero-baseline row
+			// whose huge percentage is an artifact of the no-floor Δ% math.
+			// The absolute-delta key only orders zero-baseline rows among
+			// themselves; their significance still comes from the absolute
+			// fallback in conclusions(), not from this ranking.
 			if di, dj := math.Abs(rows[i].delta), math.Abs(rows[j].delta); di != dj {
 				return di > dj
 			}

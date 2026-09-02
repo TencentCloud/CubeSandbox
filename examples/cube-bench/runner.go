@@ -264,7 +264,10 @@ func RunBenchmark(cfg *Config, resultCh chan<- IterResult, client *http.Client) 
 // sleeps until each request's scheduled arrival offset, then blocks on the
 // concurrency semaphore before releasing the goroutine. The gap between
 // scheduled arrival and actual goroutine start is reported as SchedDelayMs.
-func RunScheduled(cfg *Config, sched []ScheduledRequest, resultCh chan<- IterResult, client *http.Client) {
+// Closing stop (e.g. an early TUI quit) ends dispatch: requests not yet
+// released are skipped, while released ones run their full create/lifetime/
+// delete cycle. A nil stop channel never fires.
+func RunScheduled(cfg *Config, sched []ScheduledRequest, resultCh chan<- IterResult, client *http.Client, stop <-chan struct{}) {
 	sem := make(chan struct{}, cfg.Concurrency)
 	var wg sync.WaitGroup
 
@@ -273,13 +276,27 @@ func RunScheduled(cfg *Config, sched []ScheduledRequest, resultCh chan<- IterRes
 	}
 
 	benchStart := time.Now()
+dispatch:
 	for i := range sched {
 		sr := sched[i]
 		if d := time.Until(benchStart.Add(sr.ArrivalOffset)); d > 0 {
-			time.Sleep(d)
+			timer := time.NewTimer(d)
+			select {
+			case <-timer.C:
+			case <-stop:
+				timer.Stop()
+				break dispatch
+			}
 		}
 		wg.Add(1)
-		sem <- struct{}{}
+		select {
+		case sem <- struct{}{}:
+		case <-stop:
+			// Stopped while back-pressured on the semaphore: undo the Add and
+			// end dispatch instead of releasing another sandbox after quit.
+			wg.Done()
+			break dispatch
+		}
 		// Count the release only after the semaphore admits the request, so
 		// the TUI in-flight gauge tracks live sandboxes instead of the
 		// planned schedule (which degenerates to "remaining" in ASAP mode

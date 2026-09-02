@@ -240,7 +240,7 @@ func TestRunScheduledEndToEnd(t *testing.T) {
 	sched := GenerateSequence(cfg, rand.New(rand.NewSource(cfg.Seed)))
 
 	resultCh := make(chan IterResult, cfg.Total)
-	go RunScheduled(cfg, sched, resultCh, server.Client())
+	go RunScheduled(cfg, sched, resultCh, server.Client(), nil)
 	var results []IterResult
 	for r := range resultCh {
 		results = append(results, r)
@@ -327,7 +327,7 @@ func TestRunScheduledDryRunReproducible(t *testing.T) {
 		cfg := newCfg()
 		sched := GenerateSequence(cfg, rand.New(rand.NewSource(cfg.Seed)))
 		resultCh := make(chan IterResult, cfg.Total)
-		go RunScheduled(cfg, sched, resultCh, nil)
+		go RunScheduled(cfg, sched, resultCh, nil, nil)
 		results := map[int]IterResult{}
 		for r := range resultCh {
 			results[r.Seq] = r
@@ -359,6 +359,58 @@ func TestRunScheduledDryRunReproducible(t *testing.T) {
 		if ra.LifetimeMs < 10 || ra.LifetimeMs > 20 {
 			t.Fatalf("seq %d LifetimeMs = %v, want within [10, 20]", seq, ra.LifetimeMs)
 		}
+	}
+}
+
+// TestRunScheduledStopsDispatchOnStop: closing the stop channel (an early TUI
+// quit) must end dispatch — with a 1 req/s pace a 12-request run would take
+// ~11 s, so a run finishing right after the first result with far fewer
+// results proves the remaining schedule was abandoned, while the released
+// request still completed its cycle.
+func TestRunScheduledStopsDispatchOnStop(t *testing.T) {
+	cfg := &Config{
+		Concurrency:    1,
+		Total:          12,
+		Mode:           "create-delete",
+		DryRun:         true,
+		DryLatencyMean: 2,
+		DryLatencyStd:  1,
+		DryErrorRate:   0,
+		Seed:           5,
+		Rate:           1,
+		hasLifetime:    true,
+		LifetimeMin:    0.01,
+		LifetimeMax:    0.02,
+		Scheduled:      true,
+		Templates:      []TemplateSpec{{TemplateID: "tpl-stop", Weight: 1}},
+	}
+	sched := GenerateSequence(cfg, rand.New(rand.NewSource(cfg.Seed)))
+	resultCh := make(chan IterResult, cfg.Total)
+	stop := make(chan struct{})
+	go RunScheduled(cfg, sched, resultCh, nil, stop)
+
+	first, ok := <-resultCh
+	if !ok || first.Err != "" {
+		t.Fatalf("first result = %+v, ok=%v", first, ok)
+	}
+	close(stop)
+
+	done := time.After(5 * time.Second)
+	count := 1
+	for {
+		select {
+		case _, ok := <-resultCh:
+			if !ok {
+				goto closed
+			}
+			count++
+		case <-done:
+			t.Fatal("dispatcher did not close resultCh after stop")
+		}
+	}
+closed:
+	if count >= cfg.Total {
+		t.Fatalf("results = %d, want the remaining schedule abandoned (< %d)", count, cfg.Total)
 	}
 }
 

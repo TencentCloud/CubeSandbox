@@ -174,6 +174,9 @@ func pickTemplate(templates []TemplateSpec, totalWeight int, rng *rand.Rand) Tem
 		}
 		draw -= t.Weight
 	}
+	// Unreachable while totalWeight > 0 and every weight is >= 1 (both enforced
+	// by parseTemplates); kept as a defensive fallback so a future relaxation
+	// of those invariants degrades to a biased pick instead of an index panic.
 	return templates[len(templates)-1]
 }
 

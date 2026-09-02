@@ -743,8 +743,13 @@ func main() {
 
 	startTime := time.Now()
 
+	// stopAsked ends scheduled dispatch when the operator quits the TUI early,
+	// so the client stops releasing new sandboxes against a cluster whose run
+	// has been abandoned (released ones still finish their cycle; the
+	// per-request server-side timeout is the backstop).
+	stopAsked := make(chan struct{})
 	if cfg.Scheduled {
-		go RunScheduled(cfg, sched, resultCh, client)
+		go RunScheduled(cfg, sched, resultCh, client, stopAsked)
 	} else {
 		go RunBenchmark(cfg, resultCh, client)
 	}
@@ -763,6 +768,24 @@ func main() {
 		}
 		fm := finalModel.(model)
 		allResults = fm.results
+		if cfg.Scheduled {
+			close(stopAsked)
+			// Pull in results that completed but sat unread in the buffer when
+			// the TUI stopped consuming, so a truncated sample covers
+			// everything finished by quit time.
+		drain:
+			for {
+				select {
+				case r, ok := <-resultCh:
+					if !ok {
+						break drain
+					}
+					allResults = append(allResults, r)
+				default:
+					break drain
+				}
+			}
+		}
 	}
 
 	cfg.elapsed = time.Since(startTime).Seconds()
@@ -773,7 +796,7 @@ func main() {
 	// report so its numbers are not read as a finished run.
 	partial := runTruncated(allResults, cfg)
 	if partial {
-		fmt.Fprintf(os.Stderr, "NOTE: run quit early with %d of %d requests dispatched; "+
+		fmt.Fprintf(os.Stderr, "NOTE: run quit early with %d of %d requests completed; "+
 			"the report above and any exported aggregates cover a truncated sample.\n",
 			len(allResults), cfg.Total)
 	}
