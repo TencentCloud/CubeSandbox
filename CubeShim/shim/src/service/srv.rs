@@ -66,6 +66,8 @@ impl Shim for Service {
             let _ = fs::remove_file(sk_file.as_str());
         }
 
+        // Binary delete: also removes /data/cubelet/log/<id> so a crashed
+        // shim does not leak host log files until a later live Task.Delete.
         utils::Utils::clean_sandbox_resource(&self.id).map_err(Error::Other)?;
 
         Ok(api::DeleteResponse::new())

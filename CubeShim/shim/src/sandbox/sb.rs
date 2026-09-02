@@ -1074,7 +1074,12 @@ impl SandBox {
             let mut containers = self.containers.lock().await;
             match containers.get_mut(id) {
                 Some(c) => c.clone(),
-                None => return Err(Error::NotFoundError(format!("not found container:{}", id))),
+                None => {
+                    if id == &self.id && !self.conf.app_snapshot_create {
+                        crate::container::remove_sandbox_log_dir(&self.id, &self.log).await;
+                    }
+                    return Err(Error::NotFoundError(format!("not found container:{}", id)));
+                }
             }
         };
         let (code, tm) = container
@@ -1085,6 +1090,11 @@ impl SandBox {
         let mut containers = self.containers.lock().await;
         if containers.remove(id).is_none() {
             warnf!(self.log, "remove container:{} failed from map", id);
+        }
+        // Live Task.Delete. Crash leftover is cleaned by the delete subcommand
+        // (`clean_sandbox_resource`). Pause-to-snapshot returns before here.
+        if id == &self.id && !self.conf.app_snapshot_create {
+            crate::container::remove_sandbox_log_dir(&self.id, &self.log).await;
         }
         Ok((code, tm))
     }

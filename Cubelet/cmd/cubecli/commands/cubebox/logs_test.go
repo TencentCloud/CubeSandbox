@@ -5,6 +5,9 @@
 package cubebox
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -79,5 +82,66 @@ func TestReplacePositionalArgDoesNotModifyOriginal(t *testing.T) {
 	_ = replacePositionalArg(original, "aabbccdd", "aabbccddeeff00112233445566778899")
 	if original[2] != "aabbccdd" {
 		t.Fatalf("original slice was modified: got %q want %q", original[2], "aabbccdd")
+	}
+}
+
+func TestOpenSandboxLogFromPrefersNewPath(t *testing.T) {
+	newBase := t.TempDir()
+	oldBase := t.TempDir()
+	id := "aabbccddeeff00112233445566778899"
+	if err := os.MkdirAll(filepath.Join(newBase, id), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(oldBase, id), 0755); err != nil {
+		t.Fatal(err)
+	}
+	newFile := filepath.Join(newBase, id, "stdout")
+	oldFile := filepath.Join(oldBase, id, "stdout")
+	if err := os.WriteFile(newFile, []byte("new\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(oldFile, []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	f, path, err := openSandboxLogFrom(id, "stdout", newBase, oldBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if path != newFile {
+		t.Fatalf("path=%q want %q", path, newFile)
+	}
+}
+
+func TestOpenSandboxLogFromFallsBackToBundle(t *testing.T) {
+	newBase := t.TempDir()
+	oldBase := t.TempDir()
+	id := "aabbccddeeff00112233445566778899"
+	if err := os.MkdirAll(filepath.Join(oldBase, id), 0755); err != nil {
+		t.Fatal(err)
+	}
+	oldFile := filepath.Join(oldBase, id, "stdout")
+	if err := os.WriteFile(oldFile, []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	f, path, err := openSandboxLogFrom(id, "stdout", newBase, oldBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if path != oldFile {
+		t.Fatalf("path=%q want %q", path, oldFile)
+	}
+}
+
+func TestOpenSandboxLogFromMissingBoth(t *testing.T) {
+	_, _, err := openSandboxLogFrom("aabbccddeeff00112233445566778899", "stdout", t.TempDir(), t.TempDir())
+	if err == nil {
+		t.Fatal("expected missing log error")
+	}
+	if !strings.Contains(err.Error(), "log file not found") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
