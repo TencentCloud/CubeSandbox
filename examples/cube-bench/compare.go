@@ -811,6 +811,9 @@ func renderComparison(c *comparison) string {
 	if line := configHighlights("candidate", c.candidate); line != "" {
 		b.WriteString(line + "\n")
 	}
+	if note := configMismatchNote(c.baseline, c.candidate); note != "" {
+		b.WriteString(note + "\n")
+	}
 
 	b.WriteString("\n## Metric Comparison\n\n")
 	b.WriteString("Cells show the mean across samples; CI is the 95% confidence interval half-width (Student-t t95·σ/√n), shown only when n ≥ 2. Δ = candidate − baseline. Verdicts are directional; the conclusion lists additionally require |Δ| beyond the 95% CI of the difference (√(ci_base² + ci_cand²)) when both sides have n ≥ 2. Δ% is relative to the baseline mean with no floor, so near-zero baselines (e.g. an error_rate ≈ 0) can produce enormous percentages — read them alongside the absolute Δ.\n\n")
@@ -897,6 +900,60 @@ func configHighlights(label string, g *sampleGroup) string {
 		return ""
 	}
 	return fmt.Sprintf("- **%s config**: %s", label, strings.Join(parts, "; "))
+}
+
+// configCompareKeys are the pacing/shape config fields where a silent
+// baseline-vs-candidate mismatch makes queue_delay_*/dispatch_* verdicts a
+// client-config artifact rather than a scheduler effect. Seeds are excluded
+// on purpose: they randomize the sequence, they do not pace it.
+var configCompareKeys = []string{"concurrency", "rate_per_sec", "lifetime_min_s", "lifetime_max_s"}
+
+// uniqueConfigValue returns the single de-duplicated value of key across the
+// group's files. ok is false when the key is missing everywhere or takes more
+// than one value inside the group — a ragged group is already surfaced by
+// configHighlights, and comparing one ragged side would be noise.
+func uniqueConfigValue(g *sampleGroup, key string) (string, bool) {
+	var val string
+	set := false
+	for _, f := range g.files {
+		if f.config == nil {
+			continue
+		}
+		v, ok := f.config[key]
+		if !ok {
+			continue
+		}
+		s := formatConfigValue(v)
+		if !set {
+			val, set = s, true
+			continue
+		}
+		if val != s {
+			return "", false
+		}
+	}
+	return val, set
+}
+
+// configMismatchNote flags a scheduled-vs-scheduled comparison whose two
+// groups were paced differently. Absence of a key on either side (legacy
+// exports) is not a mismatch; only two present, distinct values are.
+func configMismatchNote(base, cand *sampleGroup) string {
+	var diffs []string
+	for _, key := range configCompareKeys {
+		bv, bok := uniqueConfigValue(base, key)
+		cv, cok := uniqueConfigValue(cand, key)
+		if bok && cok && bv != cv {
+			diffs = append(diffs, fmt.Sprintf("%s (%s vs %s)", key, bv, cv))
+		}
+	}
+	if len(diffs) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("> **Note:** the two groups were run with mismatched client config (%s). "+
+		"`queue_delay_*`/`dispatch_*` verdicts on such a pair are client-config artifacts, not scheduler "+
+		"effects — rerun both sides under the same `--rate`/`--concurrency`/`--lifetime` before trusting "+
+		"those rows.", strings.Join(diffs, ", "))
 }
 
 func formatConfigValue(v any) string {

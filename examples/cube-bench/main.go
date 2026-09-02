@@ -350,6 +350,16 @@ func parseConfig() *Config {
 		}
 	}
 
+	// A rate-paced create-delete run without --lifetime creates sandboxes
+	// with no server-side timeout, so an early quit (Ctrl-C, TUI quit)
+	// strands whatever was still in flight — permanently, since the
+	// lifetime-keyed TTL backstop below does not apply. Say so up front.
+	if cfg.Rate > 0 && !cfg.hasLifetime && !cfg.DryRun && cfg.Mode == "create-delete" {
+		fmt.Fprintf(os.Stderr, "NOTE: --rate without --lifetime creates sandboxes with no server-side TTL backstop; "+
+			"an early quit can strand up to --concurrency (%d) in-flight sandboxes. Set --lifetime to bound the leak.\n",
+			cfg.Concurrency)
+	}
+
 	// Validate host-mount early so the CLI fails fast on bad input while still
 	// preserving the original JSON for config display and exported reports.
 	// Cache the compacted JSON string once so benchmark throughput is not

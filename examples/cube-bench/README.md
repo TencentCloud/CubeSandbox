@@ -72,7 +72,11 @@ All env vars can be overridden by the corresponding flag.
 
 Without any scheduling flag (`--workload`/`--rate`/`--lifetime`/`--templates`)
 the tool behaves exactly as before: all requests fire at once and each sandbox
-is deleted immediately after creation.
+is deleted immediately after creation. Conversely, any one of those flags
+alone is enough to enter scheduled mode — including `--templates` by itself,
+which then also changes the JSON export shape (per-request
+`template_id`/`scheduled_arrival_ms`, `queue_delay_*`/`dispatch_*` aggregates,
+and `per_template.*` blocks appear even without `--rate` or `--lifetime`).
 
 ### Examples
 

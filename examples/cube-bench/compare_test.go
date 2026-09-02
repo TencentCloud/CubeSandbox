@@ -690,6 +690,71 @@ func TestComparePartialWarning(t *testing.T) {
 	}
 }
 
+func TestCompareConfigMismatchNote(t *testing.T) {
+	dir := t.TempDir()
+
+	b1 := writeTempFile(t, dir, "base.json", `{
+		"config": {"rate_per_sec": 50, "concurrency": 64},
+		"summary": {"success_rate": 0.9, "queue_delay_p50_ms": 5}
+	}`)
+	c1 := writeTempFile(t, dir, "cand.json", `{
+		"config": {"rate_per_sec": 30, "concurrency": 64},
+		"summary": {"success_rate": 0.9, "queue_delay_p50_ms": 3}
+	}`)
+
+	out := filepath.Join(dir, "report.md")
+	var buf bytes.Buffer
+	if err := runCompare([]string{"--baseline", b1, "--candidate", c1, "-o", out}, &buf); err != nil {
+		t.Fatalf("runCompare: %v", err)
+	}
+	saved, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	report := string(saved)
+
+	if !strings.Contains(report, "rate_per_sec (50 vs 30)") {
+		t.Errorf("report missing the config-mismatch note\n%s", report)
+	}
+	// concurrency matched, so it must not be listed as a mismatch.
+	if strings.Contains(report, "concurrency (") {
+		t.Errorf("matched concurrency listed as a mismatch\n%s", report)
+	}
+
+	// Matching pacing config must not produce the note.
+	c2 := writeTempFile(t, dir, "cand-match.json", `{
+		"config": {"rate_per_sec": 50, "concurrency": 64},
+		"summary": {"success_rate": 0.9, "queue_delay_p50_ms": 3}
+	}`)
+	out2 := filepath.Join(dir, "report2.md")
+	if err := runCompare([]string{"--baseline", b1, "--candidate", c2, "-o", out2}, &buf); err != nil {
+		t.Fatalf("runCompare: %v", err)
+	}
+	saved2, err := os.ReadFile(out2)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if strings.Contains(string(saved2), "client-config artifacts") {
+		t.Errorf("matching configs still produced the mismatch note\n%s", saved2)
+	}
+
+	// A legacy export without config keys is not a mismatch either.
+	c3 := writeTempFile(t, dir, "cand-legacy.json", `{
+		"summary": {"success_rate": 0.9, "queue_delay_p50_ms": 3}
+	}`)
+	out3 := filepath.Join(dir, "report3.md")
+	if err := runCompare([]string{"--baseline", b1, "--candidate", c3, "-o", out3}, &buf); err != nil {
+		t.Fatalf("runCompare: %v", err)
+	}
+	saved3, err := os.ReadFile(out3)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if strings.Contains(string(saved3), "client-config artifacts") {
+		t.Errorf("missing config keys treated as a mismatch\n%s", saved3)
+	}
+}
+
 func TestLoadSampleFileDropsDispatchKeysWhenFlagged(t *testing.T) {
 	dir := t.TempDir()
 
