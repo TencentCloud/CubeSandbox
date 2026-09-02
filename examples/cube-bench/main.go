@@ -348,7 +348,16 @@ func parseConfig() *Config {
 	if bodyTemplate == "" && len(cfg.Templates) > 0 {
 		bodyTemplate = cfg.Templates[0].TemplateID
 	}
-	requestBody, err := buildCreateRequestBody(bodyTemplate, cfg.hostMountValue, cfg.NetworkPolicy)
+	// The cached body serves warmup requests, which otherwise get no TTL
+	// safety net: on a lifetime-bearing workload an interrupted run would leak
+	// them. Give warmup the same server-side fallback as measured requests,
+	// keyed to the top of the lifetime range.
+	var warmupTimeout *int64
+	if cfg.Scheduled && cfg.hasLifetime {
+		t := int64(cfg.LifetimeMax) + 60
+		warmupTimeout = &t
+	}
+	requestBody, err := buildCreateRequestBodyWithTimeout(bodyTemplate, cfg.hostMountValue, cfg.NetworkPolicy, warmupTimeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: create request body build failed: %v\n", err)
 		os.Exit(1)
@@ -556,6 +565,14 @@ func exportJSON(results []IterResult, cfg *Config) {
 			summaryBlock["queue_delay_p95_ms"] = Percentile(delays, 95)
 			summaryBlock["queue_delay_p99_ms"] = Percentile(delays, 99)
 		}
+		// Machine-readable marker for the end-of-run saturation check: when
+		// set, the dispatcher fell permanently behind pace and the
+		// queue_delay_*/dispatch_* keys above describe the client's
+		// semaphore, not the offered schedule. compare surfaces this as a
+		// warning instead of a metric row.
+		if sat, _, _ := dispatchSaturated(results, cfg); sat {
+			summaryBlock["dispatch_saturated"] = 1
+		}
 		type tplAgg struct{ attempts, created int }
 		agg := map[string]*tplAgg{}
 		for _, r := range results {
@@ -725,16 +742,12 @@ func main() {
 	// fell permanently behind and the offered load degenerated to bursts; the
 	// queue_delay_* metrics then measure the client semaphore, not the
 	// scheduler. Surface that instead of letting the numbers read as a valid
-	// scheduled-mode run.
-	if cfg.Scheduled && cfg.Rate > 0 {
-		if delays := extractTimes(allResults, func(r IterResult) float64 { return r.SchedDelayMs }); len(delays) > 0 {
-			if p95, interArrival := Percentile(delays, 95), 1000/cfg.Rate; p95 > interArrival {
-				fmt.Fprintf(os.Stderr, "WARNING: queue-delay p95 (%.0fms) exceeded the mean inter-arrival time (%.0fms): "+
-					"the dispatcher fell permanently behind and the offered load degenerated to bursts — "+
-					"queue_delay_*/dispatch metrics measure the client's semaphore, not the scheduler. Raise --concurrency.\n",
-					p95, interArrival)
-			}
-		}
+	// scheduled-mode run; exportJSON marks the report machine-readably.
+	if sat, p95, interArrival := dispatchSaturated(allResults, cfg); sat {
+		fmt.Fprintf(os.Stderr, "WARNING: queue-delay p95 (%.0fms) exceeded the mean inter-arrival time (%.0fms): "+
+			"the dispatcher fell permanently behind and the offered load degenerated to bursts — "+
+			"queue_delay_*/dispatch metrics measure the client's semaphore, not the scheduler. Raise --concurrency.\n",
+			p95, interArrival)
 	}
 
 	if cfg.Output != "" {

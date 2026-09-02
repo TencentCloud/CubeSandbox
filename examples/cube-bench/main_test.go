@@ -288,6 +288,10 @@ func TestExportJSONScheduledAddsKeys(t *testing.T) {
 	if got := summary["dispatch_qps"].(float64); got != 1.2 {
 		t.Fatalf("dispatch_qps = %v, want 1.2 (3 requests / 2.5s)", got)
 	}
+	// Delays of 1/3/5ms against a 20ms inter-arrival: not saturated, no marker.
+	if _, ok := summary["dispatch_saturated"]; ok {
+		t.Fatalf("unsaturated run must not set dispatch_saturated")
+	}
 	if summary["queue_delay_p50_ms"].(float64) != 3 {
 		t.Fatalf("queue_delay_p50_ms = %v, want 3", summary["queue_delay_p50_ms"])
 	}
@@ -379,5 +383,56 @@ func TestExportJSONScheduledASAPOmitsDispatchKeys(t *testing.T) {
 	// Queue-delay keys are still meaningful without pacing.
 	if _, ok := summary["queue_delay_p50_ms"]; !ok {
 		t.Fatalf("summary missing key %q", "queue_delay_p50_ms")
+	}
+}
+
+func TestExportJSONSaturatedMarked(t *testing.T) {
+	cfg, results := scheduledExportFixture()
+	cfg.setDispatchElapsed(2.5)
+	// p95 100ms against a 20ms inter-arrival (50/s): the dispatcher fell
+	// permanently behind, so the export must carry the saturation marker.
+	for i := range results {
+		results[i].SchedDelayMs = 100
+	}
+	cfg.Output = t.TempDir() + "/report.json"
+
+	exportJSON(results, cfg)
+
+	data, err := os.ReadFile(cfg.Output)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	summary := report["summary"].(map[string]any)
+	if got := summary["dispatch_saturated"]; got != float64(1) {
+		t.Fatalf("dispatch_saturated = %v, want 1", got)
+	}
+}
+
+func TestDispatchSaturated(t *testing.T) {
+	cfg, results := scheduledExportFixture()
+
+	// Legacy mode and unpaced runs never report saturation.
+	if sat, _, _ := dispatchSaturated([]IterResult{{SchedDelayMs: 1e6}}, &Config{}); sat {
+		t.Errorf("legacy config reported saturated")
+	}
+	asap, _ := scheduledExportFixture()
+	asap.Rate = 0
+	if sat, _, _ := dispatchSaturated(results, asap); sat {
+		t.Errorf("ASAP run reported saturated")
+	}
+
+	if sat, p95, ia := dispatchSaturated(results, cfg); sat {
+		t.Errorf("fixture delays (p95 %v vs inter-arrival %v) reported saturated", p95, ia)
+	}
+	for i := range results {
+		results[i].SchedDelayMs = 100
+	}
+	sat, p95, ia := dispatchSaturated(results, cfg)
+	if !sat || p95 <= ia {
+		t.Errorf("saturated=%v p95=%v inter-arrival=%v, want saturated with p95 > inter-arrival", sat, p95, ia)
 	}
 }

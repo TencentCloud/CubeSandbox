@@ -284,6 +284,12 @@ func TestCompareZeroBaselinePct(t *testing.T) {
 	if len(noDir) != 0 {
 		t.Errorf("conclusions noDir = %v, want empty (only_base misses the candidate side; sched_cv is unchanged)", noDir)
 	}
+
+	// The flagged zero-baseline row must carry the caveat marker in the
+	// rendered report so the report stands alone without the README.
+	if report := renderComparison(cmp); !strings.Contains(report, "zero baseline") {
+		t.Errorf("rendered report missing the zero-baseline marker:\n%s", report)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -606,5 +612,58 @@ func TestSampleCountNotes(t *testing.T) {
 	}
 	if got := buildComparison(same, same, time.Now()).sampleCountNotes(); len(got) != 0 {
 		t.Errorf("homogeneous comparison produced notes: %v", got)
+	}
+}
+
+func TestCompareDispatchSaturatedWarning(t *testing.T) {
+	dir := t.TempDir()
+
+	b1 := writeTempFile(t, dir, "base-saturated.json", `{
+		"summary": {"success_rate": 0.9, "queue_delay_p50_ms": 500, "dispatch_saturated": 1}
+	}`)
+	c1 := writeTempFile(t, dir, "cand-clean.json", `{
+		"summary": {"success_rate": 0.9, "queue_delay_p50_ms": 3}
+	}`)
+
+	out := filepath.Join(dir, "report.md")
+	var buf bytes.Buffer
+	if err := runCompare([]string{"--baseline", b1, "--candidate", c1, "-o", out}, &buf); err != nil {
+		t.Fatalf("runCompare: %v", err)
+	}
+	saved, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	report := string(saved)
+
+	if !strings.Contains(report, "> **Warning:** baseline (") {
+		t.Errorf("report missing the saturation warning naming the baseline group\n%s", report)
+	}
+	// The marker is a run-quality flag, not a metric: it must not survive
+	// into the comparison table as a row.
+	if strings.Contains(report, "| dispatch_saturated |") {
+		t.Errorf("dispatch_saturated leaked into the metric table\n%s", report)
+	}
+}
+
+func TestCompareNoDirSortedByImpact(t *testing.T) {
+	// Three directionless metrics: one small pct move, one large pct move, one
+	// zero-baseline row (no Δ%). Expect large pct first, then small pct, then
+	// the zero-baseline row ranked by absolute delta rather than buried.
+	baseline := &sampleGroup{name: "b", samples: []map[string]float64{
+		{"aaa_small": 100, "zzz_big": 100, "mmm_zero": 0},
+	}}
+	candidate := &sampleGroup{name: "c", samples: []map[string]float64{
+		{"aaa_small": 106, "zzz_big": 160, "mmm_zero": 0.5},
+	}}
+	cmp := buildComparison(baseline, candidate, time.Now().UTC())
+
+	_, _, noDir := cmp.conclusions()
+	if len(noDir) != 3 {
+		t.Fatalf("noDir = %v, want 3 rows", noDir)
+	}
+	if noDir[0].key != "zzz_big" || noDir[1].key != "aaa_small" || noDir[2].key != "mmm_zero" {
+		t.Errorf("noDir order = [%s %s %s], want [zzz_big aaa_small mmm_zero]",
+			noDir[0].key, noDir[1].key, noDir[2].key)
 	}
 }

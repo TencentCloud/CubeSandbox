@@ -140,11 +140,12 @@ weighted random template picks. Each create body carries the picked
 `templateID` and `timeout = trunc(lifetime) + 60s` as a server-side fallback
 TTL; the client issues the DELETE itself when the lifetime expires. (The TTL
 is set in `create-only` mode too — intentional, so lifetime-bearing presets
-don't leak sandboxes when the client never DELETEs.) Two caveats on the
-fallback: `timeout` is an *idle* timeout (see `docs/guide/lifecycle.md`), so
-it only acts as a wall-clock cap because the bench never touches a sandbox
-after create; and the seconds truncation makes the effective value up to 1s
-shorter than `lifetime + 60s`. The report and JSON
+don't leak sandboxes when the client never DELETEs; `--warmup` requests on a
+lifetime-bearing workload likewise carry a TTL, keyed to `lifetime_max`.) Two
+caveats on the fallback: `timeout` is an *idle* timeout (see
+`docs/guide/lifecycle.md`), so it only acts as a wall-clock cap because the
+bench never touches a sandbox after create; and the seconds truncation makes
+the effective value up to 1s shorter than `lifetime + 60s`. The report and JSON
 export add queue-delay percentiles (scheduled vs actual start) and per-template
 create counts/success rates.
 
@@ -183,7 +184,10 @@ queue metrics in one `compare` run.
 > against the mean inter-arrival time (1000/rate) and warns when p95 exceeds
 > it — at that point the dispatcher has fallen permanently behind, the offered
 > load has degenerated to bursts, and the `queue_delay_*`/`dispatch_*` metrics
-> describe the client's semaphore rather than the offered schedule.
+> describe the client's semaphore rather than the offered schedule. The JSON
+> export marks such runs with `dispatch_saturated: 1` in `summary`; `compare`
+> pops that marker out of the metric rows and prints a warning for the
+> affected group instead.
 
 ### Trace file schema
 
@@ -271,7 +275,14 @@ Caveats when reading verdicts:
   baseline mean is exactly 0, significance falls back to the absolute delta,
   so with tight CIs on both sides even a 0 → 1e-9 movement is flagged as
   Improved/Regressed. That is statistically real but usually immaterial —
-  judge from the absolute Δ shown next to the verdict.
+  judge from the absolute Δ shown next to the verdict; affected conclusion
+  rows carry a "zero baseline" marker in the report.
+- **Identical values across seeds yield zero-width CIs.** When every seed
+  produces the same value (common for integer-millisecond percentiles), the
+  per-side CI is exactly 0 and the difference-CI noise gate never engages —
+  any |Δ%| ≥ 5% is flagged regardless of whether the difference would
+  survive real variance. Read zero-width CIs as "no variance measured", not
+  "no variance exists".
 - **Mixed scheduled/legacy shapes share key names with different meanings.**
   When one group is a scheduled-mode export and the other is not,
   `total_time_s` is the dispatch window on one side and the whole-run wall

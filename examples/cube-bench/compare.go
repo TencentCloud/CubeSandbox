@@ -117,13 +117,29 @@ type sampleFile struct {
 	config    map[string]any
 	samples   []map[string]float64
 	viaRounds bool
+	// saturated is set when any sample carried the dispatch_saturated marker:
+	// that run's dispatcher fell behind pace, so its queue_delay_*/dispatch_*
+	// numbers describe the client semaphore, not the offered schedule.
+	saturated bool
 }
 
 // sampleGroup is one side of the comparison (baseline or candidate).
 type sampleGroup struct {
-	name    string
-	files   []*sampleFile
-	samples []map[string]float64
+	name      string
+	files     []*sampleFile
+	samples   []map[string]float64
+	saturated bool // any file in the group carried dispatch_saturated
+}
+
+// extractSaturated pops the dispatch_saturated marker out of a freshly loaded
+// sample: it is a run-quality flag, not a metric, so it must warn rather than
+// appear as a comparison row. Reports whether the marker was present.
+func extractSaturated(sample map[string]float64) bool {
+	if sample["dispatch_saturated"] > 0 {
+		delete(sample, "dispatch_saturated")
+		return true
+	}
+	return false
 }
 
 // scheduledShape reports whether any sample in the group carries the keys a
@@ -161,6 +177,7 @@ func loadSampleGroup(name string, paths []string) (*sampleGroup, error) {
 		}
 		g.files = append(g.files, f)
 		g.samples = append(g.samples, f.samples...)
+		g.saturated = g.saturated || f.saturated
 	}
 	return g, nil
 }
@@ -197,6 +214,9 @@ func loadSampleFile(path string) (*sampleFile, error) {
 			if err != nil {
 				return nil, fmt.Errorf("compare: %s: rounds[%d]: %w", path, i, err)
 			}
+			if extractSaturated(sample) {
+				f.saturated = true
+			}
 			f.samples = append(f.samples, sample)
 		}
 		return f, nil
@@ -213,6 +233,7 @@ func loadSampleFile(path string) (*sampleFile, error) {
 			flattenMetrics(blk, k, sample)
 		}
 	}
+	f.saturated = extractSaturated(sample)
 	f.samples = []map[string]float64{sample}
 	return f, nil
 }
@@ -595,11 +616,17 @@ func (c *comparison) conclusions() (improved, regressed, noDir []*compareRow) {
 			if ai != aj {
 				return ai > aj
 			}
+			// Zero-baseline rows have no Δ% (pct stays 0); rank them by the
+			// absolute delta instead of letting them sink to the bottom.
+			if di, dj := math.Abs(rows[i].delta), math.Abs(rows[j].delta); di != dj {
+				return di > dj
+			}
 			return rows[i].key < rows[j].key
 		})
 	}
 	byImpact(improved)
 	byImpact(regressed)
+	byImpact(noDir)
 	return improved, regressed, noDir
 }
 
@@ -653,6 +680,20 @@ func renderComparison(c *comparison) string {
 			"names span different windows and meanings across the two modes — `total_time_s` is the dispatch " +
 			"window in scheduled mode but the wall-clock run in legacy mode, and `throughput_qps` derives " +
 			"from it — so cross-shape Δ on those keys is not meaningful. Compare like with like.\n\n")
+	}
+	if c.baseline.saturated || c.candidate.saturated {
+		var groups []string
+		if c.baseline.saturated {
+			groups = append(groups, "baseline ("+c.baseline.name+")")
+		}
+		if c.candidate.saturated {
+			groups = append(groups, "candidate ("+c.candidate.name+")")
+		}
+		fmt.Fprintf(&b, "> **Warning:** %s: runs marked `dispatch_saturated` — the dispatcher fell "+
+			"permanently behind the requested pace, so their `queue_delay_*`/`dispatch_*` numbers describe the "+
+			"client's concurrency semaphore, not the offered schedule. Rerun with higher `--concurrency` before "+
+			"trusting verdicts on those keys.\n\n",
+			strings.Join(groups, " and "))
 	}
 	writeFileList(&b, "baseline", c.baseline)
 	writeFileList(&b, "candidate", c.candidate)
@@ -791,8 +832,15 @@ func writeConclusionList(b *strings.Builder, c *comparison, rows []*compareRow) 
 		return
 	}
 	for _, r := range rows {
-		fmt.Fprintf(b, "- **%s**: %s (%s → %s)%s\n",
-			r.key, pctCell(r), formatNum(r.base.mean), formatNum(r.cand.mean), c.rowCountNote(r))
+		zeroBase := ""
+		if r.hasBase && !r.hasPct {
+			// Baseline mean exactly 0: Δ% is undefined and the verdict rests
+			// on the absolute delta with no magnitude floor — echo the caveat
+			// at the row so the report stands alone.
+			zeroBase = " *(zero baseline — judged on absolute Δ)*"
+		}
+		fmt.Fprintf(b, "- **%s**: %s (%s → %s)%s%s\n",
+			r.key, pctCell(r), formatNum(r.base.mean), formatNum(r.cand.mean), c.rowCountNote(r), zeroBase)
 	}
 }
 

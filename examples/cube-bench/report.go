@@ -269,3 +269,20 @@ func extractTimes(results []IterResult, fn func(IterResult) float64) []float64 {
 	}
 	return out
 }
+
+// dispatchSaturated reports whether the dispatcher fell permanently behind the
+// requested pace during a rate-paced scheduled run: queue-delay p95 beyond the
+// mean inter-arrival time means the offered load degenerated to bursts and the
+// queue_delay_*/dispatch_* metrics describe the client's semaphore, not the
+// scheduler. It returns the p95 and inter-arrival values for messaging.
+func dispatchSaturated(results []IterResult, cfg *Config) (saturated bool, p95, interArrival float64) {
+	if !cfg.Scheduled || cfg.Rate <= 0 {
+		return false, 0, 0
+	}
+	delays := extractTimes(results, func(r IterResult) float64 { return r.SchedDelayMs })
+	if len(delays) == 0 {
+		return false, 0, 0
+	}
+	p95, interArrival = Percentile(delays, 95), 1000/cfg.Rate
+	return p95 > interArrival, p95, interArrival
+}
