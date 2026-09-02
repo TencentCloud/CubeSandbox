@@ -299,10 +299,15 @@ func parseConfig() *Config {
 					occS += min(meanLife, dryRunMaxLifetimeSleep.Seconds())
 				}
 			}
-		case cfg.hasLifetime && cfg.Mode == "create-delete":
+		case cfg.hasLifetime && cfg.Mode == "create-delete" && meanLife >= 1:
 			// Real create-delete run: create/delete latency is unknown ahead
 			// but the lifetime dominates for any realistic setting.
 			occS, known = meanLife, true
+		case cfg.hasLifetime && cfg.Mode == "create-delete":
+			// Sub-second mean lifetime: the unknown create/delete tail is
+			// comparable to the hold (see README), so a precise-looking
+			// rate x lifetime threshold would understate the real slot
+			// requirement. Fall through to the qualitative warning.
 		}
 		switch {
 		case cfg.Rate > 0 && known:
@@ -312,12 +317,15 @@ func parseConfig() *Config {
 					cfg.Concurrency, cfg.Rate, occS, needed)
 			}
 		case cfg.Rate > 0:
-			// Real run with the slot held for create(+delete) only: no
-			// occupancy estimate to compute a numeric threshold from, so warn
-			// qualitatively.
-			fmt.Fprintf(os.Stderr, "WARNING: --rate without --lifetime: each worker slot is still occupied for "+
-				"create+delete, so at high rates a low --concurrency stalls the dispatcher and queue-delay "+
-				"metrics measure the client's own semaphore, not the scheduler\n")
+			// No reliable occupancy estimate (no lifetime hold, or a
+			// sub-second lifetime whose create/delete tail is comparable):
+			// warn qualitatively instead of printing a precise-looking
+			// threshold.
+			fmt.Fprintf(os.Stderr, "WARNING: at --rate %g/s each worker slot is held for a request's whole residency "+
+				"(create, any lifetime hold, delete), so a low --concurrency (%d) stalls the dispatcher and "+
+				"queue-delay metrics then measure the client's own semaphore, not the scheduler. "+
+				"Raise --concurrency towards rate x mean residency.\n",
+				cfg.Rate, cfg.Concurrency)
 		case !cfg.DryRun && cfg.hasLifetime && cfg.Mode == "create-delete":
 			// ASAP dispatch with lifetimes: every worker slot is held for the
 			// full lifetime, so the run time is bounded below by

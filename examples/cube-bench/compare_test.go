@@ -667,3 +667,30 @@ func TestCompareNoDirSortedByImpact(t *testing.T) {
 			noDir[0].key, noDir[1].key, noDir[2].key)
 	}
 }
+
+func TestCompareScaleCountersNotConcluded(t *testing.T) {
+	// Different workload sizes (-n) move create.count by -40% and
+	// summary.errors likewise — pure scale noise that must not surface in any
+	// conclusion list, even the no-direction one.
+	baseline := &sampleGroup{name: "b", samples: []map[string]float64{
+		{"create.count": 100, "summary.errors": 5, "failure_count": 10},
+	}}
+	candidate := &sampleGroup{name: "c", samples: []map[string]float64{
+		{"create.count": 60, "summary.errors": 3, "failure_count": 20},
+	}}
+	cmp := buildComparison(baseline, candidate, time.Now().UTC())
+
+	improved, regressed, noDir := cmp.conclusions()
+	for _, list := range [][]*compareRow{improved, regressed, noDir} {
+		for _, r := range list {
+			if r.key == "create.count" || r.key == "summary.errors" {
+				t.Errorf("scale counter %s leaked into conclusions", r.key)
+			}
+		}
+	}
+	// failure_count is NOT a scale counter: "count" outside a create/delete
+	// stat block stays directional, so 10 -> 20 is a flagged regression.
+	if len(regressed) != 1 || regressed[0].key != "failure_count" {
+		t.Errorf("regressed = %v, want [failure_count]", regressed)
+	}
+}

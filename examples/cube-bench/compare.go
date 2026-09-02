@@ -410,12 +410,32 @@ var (
 // countTokens are whole-token names of raw scale counters, which track
 // workload size (-n, template mix), not the quality of the change under test.
 // They are excluded from direction inference so scale differences are not
-// flagged as regressions. These are exact tokens: "error_rate", "failure_rate"
-// and even "failure_count" stay directional — only bare plural count keys
-// (summary.errors, per_template.<id>.attempts, ...) match.
+// flagged as regressions, and from the conclusion lists so they are not
+// flagged as notable no-direction moves either. These are exact tokens:
+// "error_rate", "failure_rate" and even "failure_count" stay directional —
+// only bare plural count keys (summary.errors, per_template.<id>.attempts,
+// ...) match.
 var countTokens = map[string]bool{
 	"attempts": true, "created": true, "deleted": true,
 	"errors": true, "failures": true, "successful": true,
+}
+
+// isScaleCounter reports whether key is a raw scale counter: a bare count
+// token from countTokens, or the singular "count" of a create/delete stat
+// block (create.count/delete.count track how many cycles ran — scale, not
+// quality). "count" outside a stat block stays directional, so failure_count
+// keeps its lower-better verdict.
+func isScaleCounter(key string) bool {
+	k := strings.ToLower(key)
+	tokens := strings.FieldsFunc(k, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	for _, tok := range tokens {
+		if countTokens[tok] {
+			return true
+		}
+	}
+	return len(tokens) > 1 && statBlockGroups[tokens[0]] && tokens[len(tokens)-1] == "count"
 }
 
 func metricDirection(key string) direction {
@@ -423,10 +443,8 @@ func metricDirection(key string) direction {
 	tokens := strings.FieldsFunc(k, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
-	for _, tok := range tokens {
-		if countTokens[tok] {
-			return dirNA
-		}
+	if isScaleCounter(key) {
+		return dirNA
 	}
 	if len(tokens) > 1 && statBlockGroups[tokens[0]] {
 		for _, tok := range tokens[1:] {
@@ -577,7 +595,8 @@ func groupPrefix(key string) string {
 // difference of the two independent means, √(ci_base² + ci_cand²), so noise
 // at small sample counts is not flagged as a verdict; summing the half-widths
 // instead would be over-conservative and hide genuine movements), plus
-// metrics without a known direction.
+// metrics without a known direction. Raw scale counters (isScaleCounter) are
+// excluded from every list: they track workload size, not the change.
 //
 // When the baseline mean is exactly 0 the Δ% is undefined and hasPct is
 // false; the significance test then falls back to the absolute delta (still
@@ -589,6 +608,11 @@ func groupPrefix(key string) string {
 // the delta is notable, so trivial movements don't flood the section.
 func (c *comparison) conclusions() (improved, regressed, noDir []*compareRow) {
 	for _, r := range c.rows {
+		if isScaleCounter(r.key) {
+			// Scale counters track workload size, not the change under test;
+			// keep them out of every conclusion list regardless of magnitude.
+			continue
+		}
 		significant := r.hasPct && math.Abs(r.pct) >= 5
 		if r.hasBase && r.hasCand && !r.hasPct {
 			significant = r.delta != 0

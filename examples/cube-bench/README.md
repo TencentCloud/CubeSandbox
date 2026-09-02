@@ -116,8 +116,11 @@ export CUBE_TEMPLATE_ID=<your-template-id>
 
 # Dry-run a preset and keep the exact request sequence as a trace file
 # (dry-run clamps the per-sandbox lifetime sleep to 25ms, so even burst
-# finishes in seconds at the default concurrency)
-./bin/cube-bench --dry-run --workload burst --no-tui \
+# finishes in seconds; dry occupancy is still ~0.137s per request, so burst
+# at 50/s needs ~7 slots — pass -c 8 to keep the run clear of the startup
+# warning and the dispatch_saturated marker, though the written trace is
+# identical either way)
+./bin/cube-bench --dry-run --workload burst --no-tui -c 8 \
   -o report.json --dump-trace trace.json
 # The same trace can then be replayed by an external scheduling simulator.
 ```
@@ -177,8 +180,11 @@ queue metrics in one `compare` run.
 > `rate × (mean create + mean lifetime + mean delete)`. The `rate × mean
 > lifetime` rule of thumb is fine for the ≥ 10 s preset lifetimes but
 > underestimates for ad-hoc sub-second lifetimes where create/delete time is
-> comparable. Set `--concurrency` at least that high (e.g. `burst`: 50 req/s ×
-> ~65 s ≈ 3250) or the dispatcher stalls on the semaphore and the requested
+> comparable — so the numeric startup check only runs when the mean lifetime
+> is ≥ 1 s; shorter holds get a qualitative warning instead of a
+> precise-looking threshold. Set `--concurrency` at least that high (e.g.
+> `burst`: 50 req/s × ~65 s ≈ 3250) or the dispatcher stalls on the semaphore
+> and the requested
 > `--rate` is not honored; the tool prints a startup warning when it detects
 > this, and at the end of a run it also measures the realized queue-delay p95
 > against the mean inter-arrival time (1000/rate) and warns when p95 exceeds
