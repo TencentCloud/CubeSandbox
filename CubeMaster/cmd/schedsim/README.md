@@ -61,6 +61,10 @@ go run ./cmd/schedsim --trace /tmp/storm.trace.json \
 ```
 
 `cpu_millis`/`mem_mib` 为 0 的请求会被拒绝加载并提示 trace 缺少规格标注。
+加载时**不会**交叉校验每个请求的 `template_id` 是否出现在 `templates` 段：
+引用了未列出模板的请求永远不会被预置副本，在严格 locality（默认
+`--allow-non-local-template=false` 且 locality filter 开启）下会全部失败且
+无加载期报错——排查 `success_rate=0` 时先检查这一点。
 多轮结果取各轮均值落在 `summary`，逐轮明细在 `rounds[]`——注意分位指标
 （`sched_latency_p50/p95/p99_ms`）也是**逐轮分位的均值**，不是全样本合并后的
 真实分位；要看分布形状请读 `rounds[]`。
@@ -166,6 +170,21 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
 `EffectiveAllocated` 恒为 0，调度器完全看不到仿真的进程内用量回写，配额门禁永不
 触发，所有利用率/均衡指标失真——仿真配置必须保持 `false`（`Bootstrap` 检测到
 `true` 会向 stderr 打印警告）。
+
+模型层面的已知简化：
+
+- **模板预热是瞬时的**：放置成功后 `noteTemplatePlacement` 同步注册本地副本，
+  下一个请求（虚拟时钟上可能 0ms 后）立即命中；真实拉取耗时且可能失败，因此
+  `template_hit_rate` 是 locality 收益的**乐观上界**。
+- **低 preload 会扭曲头部指标**：示例配置开着 locality filter，配合默认
+  `--allow-non-local-template=false`，`--template-preload 0.3` 意味着约 70% 的
+  节点永远放不下某模板——此时 `success_rate`/碎片/均衡部分度量的是副本覆盖度而
+  非调度质量。要测量动态 locality（未命中→预热→命中）并解开这个扭曲，用
+  `--allow-non-local-template` 或关闭 locality filter（参见指标定义表
+  `template_hit_rate` 行）。
+- 示例配置的 `instance_type_conf.sim → schedsim-sim` 映射当前是惰性的（未调
+  `localcache.Init` 时节点枚举走 fallback 全扫，与索引无关）；若未来重构让枚举在
+  Init 之前走索引路径，仿真会静默失效——届时这个映射会变成真实依赖。
 
 ## 验证
 

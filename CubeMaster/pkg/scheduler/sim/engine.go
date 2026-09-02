@@ -39,6 +39,13 @@ import (
 // and every later call is a no-op returning the first call's result, so the
 // config path is fixed by the first call. Library consumers must not expect
 // to re-init with a different config in the same process.
+//
+// Note for would-be embedders: Bootstrap also forces the process-wide
+// CubeLog level to FATAL, installs the config singleton, and leaves the
+// config-watcher and scheduler monitor/collect goroutines running on the
+// passed context for the life of the process. It is meant for the
+// short-lived schedsim CLI and tests, not for embedding in a long-lived
+// binary.
 func Bootstrap(ctx context.Context, configPath string) error {
 	bootOnce.Do(func() {
 		bootErr = bootstrap(ctx, configPath)
