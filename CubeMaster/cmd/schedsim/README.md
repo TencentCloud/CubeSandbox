@@ -183,6 +183,11 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
 **不要在运行中编辑 `--config` 指向的配置文件**，否则正在进行的轮次会切到新
 配置，同一份报告会混入两套配置的结果。
 
+再一限制：`sched_latency_*` 测的是进程内 `Select` 调用的耗时，包含了仿真进程
+自身后台 goroutine（如 `collectMetric` 的 1s ticker、配置 watcher）造成的调度
+抖动——把它当作同一 run 内、同形状 run 间的相对指标，不要当作调度器延迟的绝对
+真值。
+
 模型层面的已知简化：
 
 - **模板预热是瞬时的**：放置成功后 `noteTemplatePlacement` 同步注册本地副本，

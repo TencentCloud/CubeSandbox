@@ -97,6 +97,23 @@ func (t *Trace) validate() error {
 		}
 		prev = r.ArrivalMs
 	}
+	// Cross-check template references: with the shipped strict-locality filter
+	// a request whose template_id is absent from the templates section is
+	// guaranteed rejection — fail at load, not post-hoc. Only checked when the
+	// templates section is present; without it TemplateIDs falls back to
+	// request-derived IDs.
+	if len(t.Templates) > 0 {
+		known := make(map[string]bool, len(t.Templates))
+		for _, tpl := range t.Templates {
+			known[tpl.TemplateID] = true
+		}
+		for i := range t.Requests {
+			if id := t.Requests[i].TemplateID; id != "" && !known[id] {
+				return fmt.Errorf("request seq=%d references template_id %q which is not in the templates section",
+					t.Requests[i].Seq, id)
+			}
+		}
+	}
 	return nil
 }
 

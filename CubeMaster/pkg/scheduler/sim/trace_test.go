@@ -99,3 +99,24 @@ func TestTemplateIDsFallbackToRequests(t *testing.T) {
 		t.Fatalf("TemplateIDs=%v", ids)
 	}
 }
+
+func TestLoadTraceRejectsUnknownTemplate(t *testing.T) {
+	// With the templates section present, a request referencing an undeclared
+	// template_id is guaranteed rejection under strict locality — fail at
+	// load instead of producing an all-rejected round.
+	tr := validTrace()
+	tr.Requests[1].TemplateID = "tpl-ghost"
+	_, err := LoadTrace(writeTrace(t, tr))
+	if err == nil || !strings.Contains(err.Error(), "tpl-ghost") {
+		t.Fatalf("want unknown-template error, got %v", err)
+	}
+
+	// Without a templates section the check is skipped (TemplateIDs falls
+	// back to request-derived IDs).
+	tr = validTrace()
+	tr.Templates = nil
+	tr.Requests[1].TemplateID = "tpl-other"
+	if _, err := LoadTrace(writeTrace(t, tr)); err != nil {
+		t.Fatalf("trace without templates section must stay loadable: %v", err)
+	}
+}

@@ -76,8 +76,12 @@ scheduler:
       - "realtime_create_num"
 
   # LeastAllocated-style spreading: score nodes by remaining quota so the
-  # top-1 pick is the least-loaded fitting node. Drop the whole score section
-  # to fall back to uniform random among filtered nodes.
+  # top-1 pick is the least-loaded fitting node. Dropping the whole score
+  # section does NOT yield a principled uniform random: with
+  # priority_select_num: 1 the selector falls back to LeastNodes(1) — the
+  # first node of the filtered enumeration (in the sim that order is the
+  # nondeterministic go-cache scan, so arbitrary per request; on a real
+  # cluster it would be a fixed sorted order). Keep the section.
   score:
     enable_scorers:
       - "real_time_weighted_average"
