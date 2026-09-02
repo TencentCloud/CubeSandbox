@@ -691,7 +691,7 @@ func TestLoadSampleFileDropsDispatchKeysWhenFlagged(t *testing.T) {
 	dir := t.TempDir()
 
 	path := writeTempFile(t, dir, "flagged.json", `{
-		"summary": {"success_rate": 0.9, "queue_delay_p50_ms": 500, "dispatch_qps": 12.5, "dispatch_saturated": 1}
+		"summary": {"success_rate": 0.9, "queue_delay_p50_ms": 500, "dispatch_qps": 12.5, "dispatch_saturated": 1, "per_template.tpl-a.created": 40}
 	}`)
 	f, err := loadSampleFile(path)
 	if err != nil {
@@ -702,7 +702,8 @@ func TestLoadSampleFileDropsDispatchKeysWhenFlagged(t *testing.T) {
 	}
 	// The flagged run's queue_delay_*/dispatch_* values describe the client
 	// semaphore, not the offered schedule: they must be dropped before the
-	// sample reaches the metric tables and verdict lists.
+	// sample reaches the metric tables and verdict lists. per_template.*
+	// blocks survive a saturated run — they reflect what actually ran.
 	for _, k := range []string{"queue_delay_p50_ms", "dispatch_qps", "dispatch_saturated"} {
 		if _, ok := f.samples[0][k]; ok {
 			t.Errorf("key %q survived the flagged-sample drop", k)
@@ -711,9 +712,12 @@ func TestLoadSampleFileDropsDispatchKeysWhenFlagged(t *testing.T) {
 	if got := f.samples[0]["success_rate"]; got != 0.9 {
 		t.Errorf("success_rate = %v, want 0.9 (unrelated keys kept)", got)
 	}
+	if got := f.samples[0]["per_template.tpl-a.created"]; got != 40 {
+		t.Errorf("per_template.tpl-a.created = %v, want 40 (kept for a saturated run)", got)
+	}
 
 	path = writeTempFile(t, dir, "partial.json", `{
-		"summary": {"success_rate": 0.9, "queue_delay_p99_ms": 42, "partial": 1}
+		"summary": {"success_rate": 0.9, "queue_delay_p99_ms": 42, "partial": 1, "per_template.tpl-a.created": 7}
 	}`)
 	f, err = loadSampleFile(path)
 	if err != nil {
@@ -724,6 +728,11 @@ func TestLoadSampleFileDropsDispatchKeysWhenFlagged(t *testing.T) {
 	}
 	if _, ok := f.samples[0]["queue_delay_p99_ms"]; ok {
 		t.Errorf("queue_delay_p99_ms survived the partial-sample drop")
+	}
+	// A partial run's per_template.* blocks aggregate only the results
+	// consumed before the quit, so they must be dropped too.
+	if _, ok := f.samples[0]["per_template.tpl-a.created"]; ok {
+		t.Errorf("per_template.tpl-a.created survived the partial-sample drop")
 	}
 }
 

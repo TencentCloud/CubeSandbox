@@ -161,10 +161,15 @@ func extractPartial(sample map[string]float64) bool {
 // from a sample whose run is flagged saturated or partial: those numbers
 // describe the client's semaphore or a truncated sample, not the offered
 // schedule, so they must not reach the metric tables or the verdict lists.
-// Affected rows render "—" and the group-level warning/note explains why.
-func dropUntrustworthyDispatchKeys(sample map[string]float64) {
+// A partial (early-quit) run additionally drops its per_template.* blocks:
+// they aggregate only the results consumed before the quit, so against a
+// full run they would read as spurious per-template regressions (a saturated
+// run keeps them — they reflect what actually ran). Affected rows render "—"
+// and the group-level warning/note explains why.
+func dropUntrustworthyDispatchKeys(sample map[string]float64, partial bool) {
 	for k := range sample {
-		if strings.HasPrefix(k, "queue_delay_") || strings.HasPrefix(k, "dispatch_") {
+		if strings.HasPrefix(k, "queue_delay_") || strings.HasPrefix(k, "dispatch_") ||
+			(partial && strings.HasPrefix(k, "per_template.")) {
 			delete(sample, k)
 		}
 	}
@@ -246,7 +251,7 @@ func loadSampleFile(path string) (*sampleFile, error) {
 			saturated := extractSaturated(sample)
 			partial := extractPartial(sample)
 			if saturated || partial {
-				dropUntrustworthyDispatchKeys(sample)
+				dropUntrustworthyDispatchKeys(sample, partial)
 			}
 			f.saturated = f.saturated || saturated
 			f.partial = f.partial || partial
@@ -269,7 +274,7 @@ func loadSampleFile(path string) (*sampleFile, error) {
 	f.saturated = extractSaturated(sample)
 	f.partial = extractPartial(sample)
 	if f.saturated || f.partial {
-		dropUntrustworthyDispatchKeys(sample)
+		dropUntrustworthyDispatchKeys(sample, f.partial)
 	}
 	f.samples = []map[string]float64{sample}
 	return f, nil

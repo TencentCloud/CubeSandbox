@@ -174,7 +174,12 @@ sleep overshoot) — a self-check that the generator isn't throttling itself,
 and ~0 when the concurrency guidance below is followed. They are *not*
 scheduler-side queueing; scheduler queueing shows up in `create.*` latency
 instead. Don't mix cube-bench's `queue_delay_*` with schedsim's scheduler-side
-queue metrics in one `compare` run.
+queue metrics in one `compare` run. And because the delay is a function of the
+client's own pacing and `--concurrency`, only compare `queue_delay_*` rows
+between runs with identical pacing and concurrency — an unpaced run (no
+`--rate`) releases every request at once and never trips the saturation
+marker, so its `queue_delay_*` rows against a paced run are a client-config
+artifact, not a regression.
 
 > **Concurrency for lifetime-bearing presets.** A worker slot is held for the
 > full sandbox lifetime (create → lifetime sleep → delete). The lifetime sleep
@@ -211,7 +216,10 @@ queue metrics in one `compare` run.
 > approaches the `time.Sleep` granularity, where even healthy runs can exceed
 > it — treat the marker as advisory there. An early TUI quit instead exports
 > `partial: 1` in `summary` (suppressing the saturation marker), which
-> `compare` surfaces as a note and covers with the same key exclusion.
+> `compare` surfaces as a note and covers with the same key exclusion, plus
+> the truncated `per_template.*` blocks (they aggregate only the results
+> consumed before the quit; a saturated run keeps them — they reflect what
+> actually ran).
 
 ### Trace file schema
 
