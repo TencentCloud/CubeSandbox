@@ -46,7 +46,8 @@ func TestObserveScheduleAttempt(t *testing.T) {
 	noNodeBefore := counterValue(t, schedulerAttempts, DefaultProfile, metricResultError, attemptReasonNoNode)
 	prefilterBefore := counterValue(t, schedulerAttempts, DefaultProfile, metricResultError, attemptReasonPreFilter)
 	errorBefore := counterValue(t, schedulerAttempts, DefaultProfile, metricResultError, attemptReasonError)
-	histBefore := histogramCount(t, schedulerDuration, DefaultProfile)
+	histSuccBefore := histogramCount(t, schedulerDuration, DefaultProfile, metricResultSuccess)
+	histErrBefore := histogramCount(t, schedulerDuration, DefaultProfile, metricResultError)
 
 	ObserveScheduleAttempt(DefaultProfile, nil, time.Millisecond)
 	ObserveScheduleAttempt(DefaultProfile, ret.Err(errorcode.ErrorCode_SelectNodesNoRes, "no res"), 2*time.Millisecond)
@@ -67,8 +68,11 @@ func TestObserveScheduleAttempt(t *testing.T) {
 	if got := counterValue(t, schedulerAttempts, DefaultProfile, metricResultError, attemptReasonError); got != errorBefore+2 {
 		t.Fatalf("error attempts delta = %v, want 2", got-errorBefore)
 	}
-	if got := histogramCount(t, schedulerDuration, DefaultProfile); got != histBefore+5 {
-		t.Fatalf("duration histogram count delta = %v, want 5", got-histBefore)
+	if got := histogramCount(t, schedulerDuration, DefaultProfile, metricResultSuccess); got != histSuccBefore+1 {
+		t.Fatalf("success duration histogram count delta = %v, want 1", got-histSuccBefore)
+	}
+	if got := histogramCount(t, schedulerDuration, DefaultProfile, metricResultError); got != histErrBefore+4 {
+		t.Fatalf("error duration histogram count delta = %v, want 4", got-histErrBefore)
 	}
 }
 

@@ -53,7 +53,13 @@ const (
 // Reschedule reason categories for handleCubelet retries, derived from the
 // cubelet/master error code. The classification order in rescheduleReason is
 // significant because a code can sit in several retry maps at once:
-// rpc_error > circuit_break > reuse > loop_retry > backoff > admission > other.
+// rpc_error > circuit_break > loop_retry > backoff > admission > other.
+// Note on reachability: with RecordReschedule gated on actual reselections,
+// the current call sites only emit rpc_error / circuit_break / loop_retry
+// (cubelet retry codes) and admission (scheduling-gate rejections);
+// backoff-only codes never trigger a retry (the loop-map check precedes the
+// backoff delay in errorCodeRetry), so backoff and other are kept for
+// future-proofing but are not emitted today.
 const (
 	rescheduleReasonRPCError     = "rpc_error"
 	rescheduleReasonCircuitBreak = "circuit_break"
@@ -90,18 +96,18 @@ var (
 
 	schedulerDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "scheduler_duration_seconds",
-		Help:    "Latency of a single scheduler Select call, by profile.",
+		Help:    "Latency of a single scheduler Select call, by profile and result (the split keeps failure modes like no_node out of the success SLO).",
 		Buckets: prometheus.ExponentialBuckets(0.0005, 2, 13), // 0.5ms .. ~2s
-	}, []string{profileLabel})
+	}, []string{profileLabel, resultLabel})
 
 	schedulerDecisions = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "scheduler_decisions_total",
-		Help: "Total successful scheduling decisions, by profile and whether the selected node already holds a local replica of the requested template.",
+		Help: "Total successful scheduler Select calls, by profile and whether the selected node already holds a local replica of the requested template. One create can re-run Select (admission rejection, reschedule) and migrate/restore flows also call it, so this exceeds actual sandbox placements under churn.",
 	}, []string{profileLabel, templateHitLabel})
 
 	schedulerReschedules = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "scheduler_reschedules_total",
-		Help: "Total node reselection events during sandbox create (handleCubelet retries that pick a new host), by profile and error-code category.",
+		Help: "Total scheduler reselection attempts during sandbox create (handleCubelet retries that re-run Select; the same host may still be re-picked), by profile and error-code category.",
 	}, []string{profileLabel, reasonLabel})
 
 	sandboxCreateAttempts = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -154,7 +160,7 @@ func ObserveScheduleAttempt(profile string, err error, d time.Duration) {
 		result, reason = metricResultError, classifyAttemptError(err)
 	}
 	schedulerAttempts.WithLabelValues(profile, result, reason).Inc()
-	schedulerDuration.WithLabelValues(profile).Observe(d.Seconds())
+	schedulerDuration.WithLabelValues(profile, result).Observe(d.Seconds())
 }
 
 // classifyAttemptError maps the Select failure error code to a small reason
@@ -458,6 +464,10 @@ func collectClusterGauges() {
 	activeNodesGauge.Set(float64(active))
 	emptyNodesGauge.Set(float64(empty))
 
+	// The reference shape defaults to 100 cores / 300Gi when MaxMvmCPU /
+	// MaxMvmMemory are unset (config preHandle*), under which essentially no
+	// node is "fit" and this gauge sits near 1 — only informative when the
+	// deployment configures real shape values.
 	shapeCPU := cfg.Scheduler.MaxMvmCPURes()
 	shapeMem := cfg.Scheduler.MaxMvmMemoryRes()
 	fragmentedCapacityGauge.WithLabelValues(fragmentShapeMaxMVM).

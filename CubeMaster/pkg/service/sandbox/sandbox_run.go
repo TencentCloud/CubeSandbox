@@ -246,7 +246,9 @@ func (c *createSandboxContext) handleCubelet() {
 			c.retryTimes++
 			// Count only actual reselections: reuse-code retries keep the same
 			// host (errorCodeRetry cleared c.reschedule) and never re-Select.
-			if c.reschedule {
+			// Direct-host (debug InsId/InsIp) creates pin the host and never
+			// re-Select either, so they must not count as reschedules.
+			if c.reschedule && !c.directHost {
 				scheduler.RecordReschedule(scheduler.DefaultProfile,
 					errorcode.MasterCode(c.cubeletRsp.GetRet().GetRetCode()))
 			}
