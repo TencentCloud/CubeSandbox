@@ -19,10 +19,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::convert::From;
 use std::convert::TryFrom;
+use std::fmt;
+use std::fs;
 use std::path::PathBuf;
 use std::result;
 use std::str::FromStr;
-use std::{fmt, fs};
 use thiserror::Error;
 use virtio_devices::block::MINIMUM_BLOCK_QUEUE_SIZE;
 use virtiofsd::passthrough::xattrmap::XattrMap;
@@ -56,10 +57,6 @@ pub enum Error {
     ParseCpus(OptionParserError),
     /// Invalid CPU features
     InvalidCpuFeatures(String),
-    /// Invalid Ivshmem backend file size
-    InvalidIvshmemSize(u64),
-    /// Invalid Ivshmem backend file path
-    InvalidIvshmemPath(std::io::Error),
     /// Error parsing memory options
     ParseMemory(OptionParserError),
     /// Error parsing memory zone options
@@ -120,13 +117,13 @@ pub enum Error {
     ParseVdpaPathMissing,
     /// Failed parsing TPM device
     ParseTpm(OptionParserError),
-    /// Failed parsing ivsmem device
-    ParseIvshmem(OptionParserError),
     /// Missing path for TPM device
     ParseTpmPathMissing,
     /// Filesystem shared_dir is missing
     ParseFsSharedDirMissing,
-    /// Missing path for ivsmem device
+    /// Failed parsing ivshmem device
+    ParseIvshmem(OptionParserError),
+    /// Missing path for ivshmem device
     ParseIvshmemPathMissing,
 }
 
@@ -201,6 +198,12 @@ pub enum ValidationError {
     InvalidMtu(u16),
     /// native virtio-fs shouldn't have socket argument
     NativeVirtioFsSocket,
+    /// Invalid Ivshmem input size (must be a power of 2)
+    InvalidIvshmemInputSize(u64),
+    /// Invalid Ivshmem backend file size
+    InvalidIvshmemSize(u64),
+    /// Invalid Ivshmem backend file path
+    InvalidIvshmemPath,
 }
 
 type ValidationResult<T> = std::result::Result<T, ValidationError>;
@@ -322,6 +325,17 @@ impl fmt::Display for ValidationError {
                     mtu
                 )
             }
+            InvalidIvshmemInputSize(size) => {
+                write!(
+                    f,
+                    "Invalid ivshmem input size {} (must be power of 2)",
+                    size
+                )
+            }
+            InvalidIvshmemSize(size) => {
+                write!(f, "Invalid ivshmem backend file size {}", size)
+            }
+            InvalidIvshmemPath => write!(f, "Invalid ivshmem backend file path"),
         }
     }
 }
@@ -336,8 +350,6 @@ impl fmt::Display for Error {
             }
             ParseCpus(o) => write!(f, "Error parsing --cpus: {}", o),
             InvalidCpuFeatures(o) => write!(f, "Invalid feature in --cpus features list: {}", o),
-            InvalidIvshmemSize(o) => write!(f, "Invalid ivshmem backend file size: {}", o),
-            InvalidIvshmemPath(o) => write!(f, "Invalid ivshmem backend file path: {}", o),
             ParseDevice(o) => write!(f, "Error parsing --device: {}", o),
             ParseDevicePathMissing => write!(f, "Error parsing --device: path missing"),
             ParseFileSystem(o) => write!(f, "Error parsing --fs: {}", o),
@@ -384,9 +396,9 @@ impl fmt::Display for Error {
             ParseVdpa(o) => write!(f, "Error parsing --vdpa: {}", o),
             ParseVdpaPathMissing => write!(f, "Error parsing --vdpa: path missing"),
             ParseTpm(o) => write!(f, "Error parsing --tpm: {}", o),
-            ParseIvshmem(o) => write!(f, "Error parsing --ivshmem: {}", o),
             ParseTpmPathMissing => write!(f, "Error parsing --tpm: path missing"),
             ParseFsSharedDirMissing => write!(f, "Error parsing --shared_dir: path missing"),
+            ParseIvshmem(o) => write!(f, "Error parsing --ivshmem: {}", o),
             ParseIvshmemPathMissing => write!(f, "Error parsing --ivshmem: path missing"),
         }
     }
@@ -486,8 +498,8 @@ impl<'a> VmParams<'a> {
         let gdb = args.contains_id("gdb");
         let tpm: Option<&str> = args.get_one::<String>("tpm").map(|x| x as &str);
         let sys_ctrl = args.get_flag("sys-ctrl");
-        let ivshmem: Option<&str> = args.get_one::<String>("ivshmem").map(|x| x as &str);
         let pvpanic = args.get_flag("pvpanic");
+        let ivshmem: Option<&str> = args.get_one::<String>("ivshmem").map(|x| x as &str);
         VmParams {
             cpus,
             memory,
@@ -2192,8 +2204,10 @@ impl TpmConfig {
 }
 
 impl IvshmemConfig {
-    pub const SYNTAX: &'static str = "Ivshmem device \
-        \"(backend file) path=</path/to/a/file>,size=<file_size/must=2^n>\"";
+    pub const SYNTAX: &'static str = "Ivshmem device. Specify the backend file path and size \
+    for the shared memory: \"path=</path/to/a/file>, size=<file_size>\" \
+    \nThe <file_size> must be a power of 2 (e.g., 2M, 4M, etc.), as it represents the size \
+    of the memory region mapped to the guest. Default size is 128M.";
     pub fn parse(ivshmem: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser.add("path").add("size");
@@ -2202,26 +2216,30 @@ impl IvshmemConfig {
             .get("path")
             .map(PathBuf::from)
             .ok_or(Error::ParseIvshmemPathMissing)?;
-
         let size = parser
             .convert::<ByteSized>("size")
             .map_err(Error::ParseIvshmem)?
             .unwrap_or(ByteSized((DEFAULT_IVSHMEM_SIZE << 20) as u64))
             .0;
-
-        // size must = 2^n
-        if size == 0 || (size & (size - 1)) != 0 {
-            return Err(Error::InvalidIvshmemSize(size));
-        }
-        let metadata = fs::metadata(path.to_str().unwrap()).map_err(Error::InvalidIvshmemPath)?;
-        if metadata.len() < size {
-            return Err(Error::InvalidIvshmemSize(size));
-        }
-
         Ok(IvshmemConfig {
             path,
             size: size as usize,
         })
+    }
+
+    pub fn validate(&self) -> ValidationResult<()> {
+        let size = self.size as u64;
+        let path = &self.path;
+        // size must = 2^n
+        if !size.is_power_of_two() {
+            return Err(ValidationError::InvalidIvshmemInputSize(size));
+        }
+        let metadata = fs::metadata(path.to_str().unwrap())
+            .map_err(|_| ValidationError::InvalidIvshmemPath)?;
+        if metadata.len() < size {
+            return Err(ValidationError::InvalidIvshmemSize(metadata.len()));
+        }
+        Ok(())
     }
 }
 
@@ -2674,6 +2692,10 @@ impl VmConfig {
             .as_ref()
             .map(|p| p.iommu_segments.is_some())
             .unwrap_or_default();
+
+        if let Some(ivshmem_config) = &self.ivshmem {
+            ivshmem_config.validate()?;
+        }
 
         Ok(id_list)
     }

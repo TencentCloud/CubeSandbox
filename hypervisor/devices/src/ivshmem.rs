@@ -3,16 +3,20 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use std::any::Any;
+use std::path::PathBuf;
+use std::result;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
+
+use anyhow::anyhow;
 use byteorder::{ByteOrder, LittleEndian};
 use pci::{
     BarReprogrammingParams, PciBarConfiguration, PciBarPrefetchable, PciBarRegionType,
     PciClassCode, PciConfiguration, PciDevice, PciDeviceError, PciHeaderType, PciSubclass,
 };
 use serde::{Deserialize, Serialize};
-use std::any::Any;
-use std::result;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use thiserror::Error;
 use vm_allocator::{AddressAllocator, SystemAllocator};
 use vm_device::{BusDevice, Resource};
 use vm_memory::bitmap::AtomicBitmap;
@@ -28,33 +32,55 @@ const IVSHMEM_DEVICE_ID: u16 = 0x1110;
 
 const IVSHMEM_REG_BAR_SIZE: u64 = 0x100;
 
-///
-/// ```text
-/// Offset  Size  Access      On reset  Function
-///     0     4   read/write        0   Interrupt Mask
-///                                     bit 0: peer interrupt (rev 0)
-///                                            reserved       (rev 1)
-///                                     bit 1..31: reserved
-///     4     4   read/write        0   Interrupt Status
-///                                     bit 0: peer interrupt (rev 0)
-///                                            reserved       (rev 1)
-///                                     bit 1..31: reserved
-///     8     4   read-only   0 or ID   IVPosition
-///    12     4   write-only      N/A   Doorbell
-///                                     bit 0..15: vector
-///                                     bit 16..31: peer ID
-///    16   240   none            N/A   reserved
-/// ```
-///
-
-const IVSHMEM_REG_INTERRUPT_MASK: u64 = 0;
-const IVSHMEM_REG_INTERRUPT_STATUS: u64 = 4;
-const IVSHMEM_REG_IV_POSITION: u64 = 8;
-const IVSHMEM_REG_DOORBELL: u64 = 12;
-
 type GuestRegionMmap = vm_memory::GuestRegionMmap<AtomicBitmap>;
 
-#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum IvshmemError {
+    #[error("Failed to retrieve IvshmemDeviceState: {0}")]
+    RetrieveIvshmemDeviceStateState(#[source] anyhow::Error),
+    #[error("Failed to remove user memory region")]
+    RemoveUserMemoryRegion,
+    #[error("Failed to create user memory region.")]
+    CreateUserMemoryRegion,
+    #[error("Failed to create userspace mapping.")]
+    CreateUserspaceMapping,
+    #[error("Failed to remove old userspace mapping.")]
+    RemoveUserspaceMapping,
+    #[error("Failed to add device region.")]
+    AddDeviceRegion,
+    #[error("Failed to remove device region.")]
+    RemoveDeviceRegion,
+}
+
+/// Userspace mapping descriptor used by ivshmem to track the host-side
+/// memory region that backs the BAR2 shared memory.
+///
+/// Mirrors the layout of `virtio_devices::UserspaceMapping`. It is defined
+/// here to avoid a cyclic dependency between the `devices` crate and
+/// `virtio-devices`.
+#[derive(Clone)]
+pub struct IvshmemUserspaceMapping {
+    pub host_addr: u64,
+    pub mem_slot: u32,
+    pub addr: GuestAddress,
+    pub len: u64,
+    pub mergeable: bool,
+}
+
+/// Operations the VMM must provide so that ivshmem can (re)map its shared
+/// memory region into the guest at runtime, e.g. when the guest reprograms
+/// BAR2 to a new address.
+pub trait IvshmemOps: Send + Sync {
+    fn map_ram_region(
+        &mut self,
+        start_addr: u64,
+        size: usize,
+        backing_file: Option<PathBuf>,
+    ) -> Result<(Arc<GuestRegionMmap>, IvshmemUserspaceMapping), IvshmemError>;
+
+    fn unmap_ram_region(&mut self, mapping: IvshmemUserspaceMapping) -> Result<(), IvshmemError>;
+}
+
 #[derive(Copy, Clone)]
 pub enum IvshmemSubclass {
     Other = 0x00,
@@ -66,10 +92,16 @@ impl PciSubclass for IvshmemSubclass {
     }
 }
 
+/// Inner-Vm Shared Memory Device (Ivshmem device)
+///
+/// This device can share memory between host and guest(ivshmem-plain)
+/// and share memory between guests(ivshmem-doorbell).
+/// But only ivshmem-plain support now, ivshmem-doorbell doesn't support yet.
 pub struct IvshmemDevice {
     id: String,
 
     // ivshmem device registers
+    // (only used for ivshmem-doorbell, ivshmem-doorbell don't support yet)
     interrupt_mask: u32,
     interrupt_status: Arc<AtomicU32>,
     iv_position: u32,
@@ -79,8 +111,11 @@ pub struct IvshmemDevice {
     configuration: PciConfiguration,
     bar_regions: Vec<PciBarConfiguration>,
 
-    region: Option<Arc<GuestRegionMmap>>,
     region_size: u64,
+    ivshmem_ops: Arc<Mutex<dyn IvshmemOps>>,
+    backend_file: Option<PathBuf>,
+    region: Option<Arc<GuestRegionMmap>>,
+    userspace_mapping: Option<IvshmemUserspaceMapping>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -92,8 +127,24 @@ pub struct IvshmemDeviceState {
 }
 
 impl IvshmemDevice {
-    pub fn new(id: String, state: Option<IvshmemDeviceState>, region_size: u64) -> Self {
-        let configuration = PciConfiguration::new(
+    pub fn new(
+        id: String,
+        region_size: u64,
+        backend_file: Option<PathBuf>,
+        ivshmem_ops: Arc<Mutex<dyn IvshmemOps>>,
+        snapshot: Option<Snapshot>,
+    ) -> Result<Self, IvshmemError> {
+        let state: Option<IvshmemDeviceState> = snapshot
+            .as_ref()
+            .map(|s| s.to_state(&id))
+            .transpose()
+            .map_err(|e| {
+                IvshmemError::RetrieveIvshmemDeviceStateState(anyhow!(
+                    "Failed to get IvshmemDeviceState from Snapshot: {e}",
+                ))
+            })?;
+
+        let mut configuration = PciConfiguration::new(
             IVSHMEM_VENDOR_ID,
             IVSHMEM_DEVICE_ID,
             0x1,
@@ -106,7 +157,27 @@ impl IvshmemDevice {
             None,
         );
 
-        if let Some(s) = state {
+        // When restoring, immediately apply the saved PciConfiguration state
+        // (including the BAR2 address the guest last programmed) so that
+        // `data_bar_addr()` returns the correct GPA before the VMM tries to
+        // (re)create the host-side userspace mapping for BAR2 in
+        // `add_ivshmem_device`. Without this, PciConfiguration only gets
+        // restored later in `restore_devices`, and the initial ivshmem
+        // mapping would be created at address 0 which breaks
+        // snapshot/restore and live-migration.
+        if let Some(snapshot) = snapshot.as_ref() {
+            if let Some(pci_config_snapshot) = snapshot.snapshots.get(&configuration.id()) {
+                configuration
+                    .restore(*pci_config_snapshot.clone())
+                    .map_err(|e| {
+                        IvshmemError::RetrieveIvshmemDeviceStateState(anyhow!(
+                            "Failed to restore PciConfiguration from Snapshot: {e}",
+                        ))
+                    })?;
+            }
+        }
+
+        let device = if let Some(s) = state {
             IvshmemDevice {
                 id,
                 configuration,
@@ -116,7 +187,10 @@ impl IvshmemDevice {
                 iv_position: s.iv_position,
                 doorbell: s.doorbell,
                 region_size,
+                ivshmem_ops,
+                backend_file,
                 region: None,
+                userspace_mapping: None,
             }
         } else {
             IvshmemDevice {
@@ -128,21 +202,30 @@ impl IvshmemDevice {
                 iv_position: 0,
                 doorbell: 0,
                 region_size,
+                ivshmem_ops,
+                backend_file,
                 region: None,
+                userspace_mapping: None,
             }
-        }
+        };
+        Ok(device)
+    }
+
+    pub fn set_region(
+        &mut self,
+        region: Arc<GuestRegionMmap>,
+        userspace_mapping: IvshmemUserspaceMapping,
+    ) {
+        self.region = Some(region);
+        self.userspace_mapping = Some(userspace_mapping);
     }
 
     pub fn config_bar_addr(&self) -> u64 {
-        self.configuration.get_bar_addr(0)
+        self.configuration.get_bar_addr(IVSHMEM_BAR0_IDX)
     }
 
     pub fn data_bar_addr(&self) -> u64 {
-        self.configuration.get_bar_addr(2)
-    }
-
-    pub fn assign_region(&mut self, region: Arc<GuestRegionMmap>) {
-        self.region = Some(region);
+        self.configuration.get_bar_addr(IVSHMEM_BAR2_IDX)
     }
 
     fn state(&self) -> IvshmemDeviceState {
@@ -152,13 +235,6 @@ impl IvshmemDevice {
             iv_position: self.iv_position,
             doorbell: self.doorbell,
         }
-    }
-
-    fn set_state(&mut self, state: &IvshmemDeviceState) {
-        self.interrupt_mask = state.interrupt_mask;
-        self.interrupt_status = Arc::new(AtomicU32::new(state.interrupt_status));
-        self.iv_position = state.iv_position;
-        self.doorbell = state.doorbell;
     }
 }
 
@@ -176,13 +252,14 @@ impl PciDevice for IvshmemDevice {
     fn allocate_bars(
         &mut self,
         allocator: &Arc<Mutex<SystemAllocator>>,
-        _mmio_allocator: &mut AddressAllocator,
+        mmio_allocator: &mut AddressAllocator,
         resources: Option<Vec<Resource>>,
     ) -> std::result::Result<Vec<PciBarConfiguration>, PciDeviceError> {
         let mut bars = Vec::new();
         let mut bar0_addr = None;
         let mut bar2_addr = None;
 
+        let restoring = resources.is_some();
         if let Some(resources) = resources {
             for resource in resources {
                 match resource {
@@ -216,6 +293,7 @@ impl PciDevice for IvshmemDevice {
             .unwrap()
             .allocate_mmio_hole_addresses(bar0_addr, IVSHMEM_REG_BAR_SIZE, None)
             .ok_or(PciDeviceError::IoAllocationFailed(IVSHMEM_REG_BAR_SIZE))?;
+        debug!("ivshmem bar0 address 0x{:x}", bar0_addr.0);
 
         let bar0 = PciBarConfiguration::default()
             .set_index(IVSHMEM_BAR0_IDX)
@@ -224,20 +302,14 @@ impl PciDevice for IvshmemDevice {
             .set_region_type(PciBarRegionType::Memory32BitRegion)
             .set_prefetchable(PciBarPrefetchable::NotPrefetchable);
 
-        debug!("ivshmem bar0 address 0x{:x}", bar0_addr.0);
-        self.configuration
-            .add_pci_bar(&bar0)
-            .map_err(|e| PciDeviceError::IoRegistrationFailed(bar0_addr.raw_value(), e))?;
-
         // BAR1 holds MSI-X table and PBA (only ivshmem-doorbell).
 
         // BAR2 maps the shared memory object
         let bar2_size = self.region_size;
-        let bar2_addr = allocator
-            .lock()
-            .unwrap()
-            .allocate_mmio_hole_addresses(bar2_addr, bar2_size, None)
+        let bar2_addr = mmio_allocator
+            .allocate(bar2_addr, bar2_size, None)
             .ok_or(PciDeviceError::IoAllocationFailed(bar2_size))?;
+        debug!("ivshmem bar2 address 0x{:x}", bar2_addr.0);
 
         let bar2 = PciBarConfiguration::default()
             .set_index(IVSHMEM_BAR2_IDX)
@@ -246,10 +318,14 @@ impl PciDevice for IvshmemDevice {
             .set_region_type(PciBarRegionType::Memory64BitRegion)
             .set_prefetchable(PciBarPrefetchable::Prefetchable);
 
-        debug!("ivshmem bar2 address 0x{:x}", bar2_addr.0);
-        self.configuration
-            .add_pci_bar(&bar2)
-            .map_err(|e| PciDeviceError::IoRegistrationFailed(bar2_addr.raw_value(), e))?;
+        if !restoring {
+            self.configuration
+                .add_pci_bar(&bar0)
+                .map_err(|e| PciDeviceError::IoRegistrationFailed(bar0_addr.raw_value(), e))?;
+            self.configuration
+                .add_pci_bar(&bar2)
+                .map_err(|e| PciDeviceError::IoRegistrationFailed(bar2_addr.raw_value(), e))?;
+        }
 
         bars.push(bar0);
         bars.push(bar2);
@@ -260,13 +336,10 @@ impl PciDevice for IvshmemDevice {
 
     fn free_bars(
         &mut self,
-        allocator: &mut SystemAllocator,
+        _allocator: &mut SystemAllocator,
         _mmio_allocator: &mut AddressAllocator,
     ) -> std::result::Result<(), PciDeviceError> {
-        for bar in self.bar_regions.drain(..) {
-            allocator.free_mmio_hole_addresses(GuestAddress(bar.addr()), bar.size());
-        }
-
+        warn!("Device hotplug are not supported for ivshmem");
         Ok(())
     }
 
@@ -281,16 +354,16 @@ impl PciDevice for IvshmemDevice {
         None
     }
 
-    fn read_config_register(&mut self, reg_idx: usize) -> u32 {
-        self.configuration.read_reg(reg_idx)
-    }
-
     fn detect_bar_reprogramming(
         &mut self,
         reg_idx: usize,
         data: &[u8],
     ) -> Option<BarReprogrammingParams> {
         self.configuration.detect_bar_reprogramming(reg_idx, data)
+    }
+
+    fn read_config_register(&mut self, reg_idx: usize) -> u32 {
+        self.configuration.read_reg(reg_idx)
     }
 
     fn read_bar(&mut self, base: u64, offset: u64, data: &mut [u8]) {
@@ -305,33 +378,48 @@ impl PciDevice for IvshmemDevice {
         match bar_idx {
             // bar 0
             0 => {
-                let v = match offset {
-                    IVSHMEM_REG_INTERRUPT_MASK => self.interrupt_mask,
-                    IVSHMEM_REG_INTERRUPT_STATUS => self.interrupt_status.load(Ordering::SeqCst),
-                    IVSHMEM_REG_IV_POSITION => self.iv_position,
-                    IVSHMEM_REG_DOORBELL => self.doorbell,
-                    _ => {
-                        warn!("Unknown offset: {offset}");
-                        0u32
-                    }
-                };
-                LittleEndian::write_u32(data, v);
+                // ivshmem don't use interrupt, we return zero now.
+                LittleEndian::write_u32(data, 0);
             }
             // bar 2
-            1 => warn!("unexpect read ivshmem memory idx: {offset}"),
+            1 => warn!("Unexpected read ivshmem memory idx: {offset}"),
             _ => {
-                warn!("invalid bar_idx: {bar_idx}");
+                warn!("Invalid bar_idx: {bar_idx}");
             }
         };
     }
 
     fn write_bar(&mut self, base: u64, offset: u64, _data: &[u8]) -> Option<Arc<Barrier>> {
         debug!("write base {base:x} offset {offset}");
-        warn!("unexpect write ivshmem memory idx: {offset}");
+        warn!("Unexpected write ivshmem memory idx: {offset}");
         None
     }
 
     fn move_bar(&mut self, old_base: u64, new_base: u64) -> result::Result<(), std::io::Error> {
+        // BAR2 holds the shared memory mapping. When the guest reprograms
+        // BAR2 to a new address, we must tear down the old userspace mapping
+        // and create a new one at the new GPA so that guest accesses to the
+        // new BAR address actually hit the same host backing memory.
+        if new_base == self.data_bar_addr() {
+            if let Some(old_mapping) = self.userspace_mapping.take() {
+                self.ivshmem_ops
+                    .lock()
+                    .unwrap()
+                    .unmap_ram_region(old_mapping)
+                    .map_err(std::io::Error::other)?;
+            }
+            let (region, new_mapping) = self
+                .ivshmem_ops
+                .lock()
+                .unwrap()
+                .map_ram_region(
+                    new_base,
+                    self.region_size as usize,
+                    self.backend_file.clone(),
+                )
+                .map_err(std::io::Error::other)?;
+            self.set_region(region, new_mapping);
+        }
         for bar in self.bar_regions.iter_mut() {
             if bar.addr() == old_base {
                 *bar = bar.set_address(new_base);
@@ -357,22 +445,18 @@ impl Snapshottable for IvshmemDevice {
         self.id.clone()
     }
 
-    fn snapshot(&mut self) -> Result<Snapshot, MigratableError> {
+    // The snapshot/restore (also live migration) support only work for ivshmem-plain mode.
+    // Additional work is needed for supporting ivshmem-doorbell.
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
         let mut snapshot = Snapshot::new_from_state(&self.id, &self.state())?;
 
+        // Snapshot PciConfiguration
         snapshot.add_snapshot(self.configuration.snapshot()?);
 
         Ok(snapshot)
     }
-
-    fn restore(&mut self, snapshot: Snapshot) -> Result<(), MigratableError> {
-        self.set_state(&snapshot.to_state(&self.id)?);
-        if let Some(pci_config_snapshot) = snapshot.snapshots.get(&self.configuration.id()) {
-            self.configuration.restore(*pci_config_snapshot.clone())?;
-        }
-        Ok(())
-    }
 }
 
 impl Transportable for IvshmemDevice {}
+
 impl Migratable for IvshmemDevice {}

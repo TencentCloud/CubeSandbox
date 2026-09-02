@@ -1809,3 +1809,27 @@ pub fn measure_virtio_net_latency(guest: &Guest, test_timeout: u32) -> Result<Ve
     let content = fs::read(log_file).map_err(Error::EthrLogFile)?;
     parse_ethr_latency_output(&content)
 }
+
+// parse the bar address from the output of `lspci -vv`
+
+pub fn extract_bar_address(output: &str, device_desc: &str, bar_index: usize) -> Option<String> {
+    let devices: Vec<&str> = output.split("\n\n").collect();
+
+    for device in devices {
+        if device.contains(device_desc) {
+            for line in device.lines() {
+                let line = line.trim();
+                let line_start_str = format!("Region {bar_index}: Memory at");
+                // for example: Region 2: Memory at 200000000 (64-bit, non-prefetchable) [size=1M]
+                if line.starts_with(line_start_str.as_str()) {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 4 {
+                        let addr_str = parts[4];
+                        return Some(String::from(addr_str));
+                    }
+                }
+            }
+        }
+    }
+    None
+}

@@ -323,4 +323,10 @@ if [ $RES -eq 0 ]; then
     RES=$?
 fi
 
+if [ $RES -eq 0 ]; then
+    build_test_filters "ivshmem" "$test_filter"
+    time cargo test $features -- --test-threads=$(($(nproc)/2)) ${test_binary_args[*]} ${test_filters[*]}
+    RES=$?
+fi
+
 exit $RES
