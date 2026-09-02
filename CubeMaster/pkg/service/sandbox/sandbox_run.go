@@ -121,16 +121,6 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 		reschedule: true,
 		retryCost:  time.Duration(0),
 	}
-	// Record the create attempt on every return path (mock / param failure
-	// included); endTime stays zero on early returns and the helper falls
-	// back to now. Mock creates (MockCreateDirect) share the sandbox_create_*
-	// series deliberately — mock mode is a dev/debug facility, and anyone
-	// reading create success-rate SLOs from these metrics must not run with
-	// mock config enabled.
-	defer func() {
-		scheduler.ObserveSandboxCreate(scheduler.DefaultProfile,
-			rsp.Ret.RetCode == int(errorcode.ErrorCode_Success), startTime, createCtx.endTime)
-	}()
 	if log.IsDebug() {
 		log.G(ctx).Debugf("CreateSandbox:%s", safePrintCreateCubeSandboxReq(req))
 	} else {
@@ -163,6 +153,18 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 		createCtx.setMasterRsp(int(err.Code()), err.Message())
 		return
 	}
+
+	// Record the create attempt once the request has entered the scheduling
+	// path. API-admission failures (param validation, unknown debug target)
+	// and the MockCreateDirect short-circuit above return before this point
+	// and are excluded by design: they never reached the scheduler, so
+	// counting them would inflate create-infra error-rate SLOs with
+	// client-input errors. endTime stays zero on later early returns and the
+	// helper falls back to now.
+	defer func() {
+		scheduler.ObserveSandboxCreate(scheduler.DefaultProfile,
+			rsp.Ret.RetCode == int(errorcode.ErrorCode_Success), startTime, createCtx.endTime)
+	}()
 
 	if config.GetConfig().Common.MockCreateDirectHandle {
 		createCtx.Handle()

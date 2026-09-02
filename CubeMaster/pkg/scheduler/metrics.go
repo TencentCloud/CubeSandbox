@@ -91,18 +91,20 @@ const clusterGaugeCollectInterval = 15 * time.Second
 var (
 	schedulerAttempts = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "scheduler_attempts_total",
-		Help: "Total scheduler Select attempts, by profile, result and failure reason.",
+		Help: "Total scheduler Select attempts, by profile, result and failure reason. " +
+			"Select is shared by create (including reschedule re-selects), migrate and restore flows, so this is not a create-only series.",
 	}, []string{profileLabel, resultLabel, reasonLabel})
 
 	schedulerDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "scheduler_duration_seconds",
-		Help:    "Latency of a single scheduler Select call, by profile and result (the split keeps failure modes like no_node out of the success SLO).",
+		Help:    "Latency of a single scheduler Select call, by profile and result (the split keeps failure modes like no_node out of the success SLO). Covers create, migrate and restore flows.",
 		Buckets: prometheus.ExponentialBuckets(0.0005, 2, 13), // 0.5ms .. ~2s
 	}, []string{profileLabel, resultLabel})
 
 	schedulerDecisions = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "scheduler_decisions_total",
-		Help: "Total successful scheduler Select calls, by profile and whether the selected node already holds a local replica of the requested template. One create can re-run Select (admission rejection, reschedule) and migrate/restore flows also call it, so this exceeds actual sandbox placements under churn.",
+		Help: "Total successful scheduler Select calls, by profile and whether the selected node already holds a local replica of the requested template. One create can re-run Select (admission rejection, reschedule) and migrate/restore flows also call it, so this exceeds actual sandbox placements under churn. " +
+			"template_hit=true only means the chosen node happens to hold a local replica; it is not proof the locality filter drove the choice (the filter may be off or AllowNonLocalTemplate set).",
 	}, []string{profileLabel, templateHitLabel})
 
 	schedulerReschedules = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -148,7 +150,7 @@ var (
 	fragmentedCapacityGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "scheduler_fragmented_capacity_ratio",
 		Help: "Ratio of free capacity stranded on nodes that cannot fit the reference shape (see fragmentedCapacityRatio), by shape. " +
-			"With default (unset) shape config the reference shape is 100C/300Gi and this gauge sits near 1 — only informative with real shape values configured.",
+			"Only exported when the shape is explicitly configured via max_mvm_cpu/max_mvm_memory; with defaults (100C/300Gi) it would sit near 1 and carry no signal.",
 	}, []string{shapeLabel})
 )
 
@@ -226,9 +228,11 @@ func classifyRescheduleReason(code errorcode.ErrorCode, isCircuitBreak, isLoopRe
 	}
 }
 
-// ObserveSandboxCreate records one finished sandbox create request.
-// start/end reuse the createSandboxContext timestamps; an unset or inverted
-// end falls back to now so early-return paths still get a sane duration.
+// ObserveSandboxCreate records one finished sandbox create request that
+// entered the scheduling path (admission-rejected and mock-short-circuited
+// requests never reach the call site — see CreateSandbox). start/end reuse
+// the createSandboxContext timestamps; an unset or inverted end falls back to
+// now so early-return paths still get a sane duration.
 func ObserveSandboxCreate(profile string, success bool, start, end time.Time) {
 	if start.IsZero() {
 		start = time.Now()
@@ -473,12 +477,14 @@ func collectClusterGauges() {
 	activeNodesGauge.Set(float64(active))
 	emptyNodesGauge.Set(float64(empty))
 
-	// The reference shape defaults to 100 cores / 300Gi when MaxMvmCPU /
-	// MaxMvmMemory are unset (config preHandle*), under which essentially no
-	// node is "fit" and this gauge sits near 1 — only informative when the
-	// deployment configures real shape values.
-	shapeCPU := cfg.Scheduler.MaxMvmCPURes()
-	shapeMem := cfg.Scheduler.MaxMvmMemoryRes()
-	fragmentedCapacityGauge.WithLabelValues(fragmentShapeMaxMVM).
-		Set(fragmentedCapacityRatio(stats, capFn, shapeCPU.MilliValue(), shapeMem.Value()/(1024*1024)))
+	// Only export when the reference shape was explicitly configured: unset
+	// MaxMvmCPU/MaxMvmMemory fall back to 100C/300Gi (the string fields stay
+	// empty after preHandle fills the parsed defaults), under which the gauge
+	// is pinned near 1 and carries no signal.
+	if cfg.Scheduler.MaxMvmCPU != "" && cfg.Scheduler.MaxMvmMemory != "" {
+		shapeCPU := cfg.Scheduler.MaxMvmCPURes()
+		shapeMem := cfg.Scheduler.MaxMvmMemoryRes()
+		fragmentedCapacityGauge.WithLabelValues(fragmentShapeMaxMVM).
+			Set(fragmentedCapacityRatio(stats, capFn, shapeCPU.MilliValue(), shapeMem.Value()/(1024*1024)))
+	}
 }
