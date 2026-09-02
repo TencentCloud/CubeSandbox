@@ -57,6 +57,17 @@ func (partialScore) Select(selection *selctx.SelectorCtx) (node.NodeScoreList, e
 	return node.NodeScoreList{{InsID: candidate.ID(), OrigNode: candidate, Score: 90}}, nil
 }
 
+// foreignNodeScore returns a node outside the candidate set, which the
+// pre-plugin scheduler silently merged into the aggregate.
+type foreignNodeScore struct{}
+
+func (foreignNodeScore) ID() string      { return "foreign-score" }
+func (foreignNodeScore) Weight() float64 { return 1 }
+func (foreignNodeScore) Disable() bool   { return false }
+func (foreignNodeScore) Select(*selctx.SelectorCtx) (node.NodeScoreList, error) {
+	return node.NodeScoreList{{InsID: "foreign", Score: 50}}, nil
+}
+
 // emptyScore mirrors built-in scorers such as affinity_score/image_score that
 // return an empty list when the request is outside their scope.
 type emptyScore struct{}
@@ -219,5 +230,24 @@ func TestRunProfileScoresPartialCoverageFailsClosed(t *testing.T) {
 	}})
 	if err == nil {
 		t.Fatal("partial coverage from a force-enabled scorer must fail")
+	}
+}
+
+// The legacy default pipeline binds scorers with ScoreSkip and without
+// ForceEnabled, so a scorer returning a non-candidate node (which the
+// pre-plugin scheduler silently merged into the aggregate) is dropped
+// entirely and scheduling still succeeds on the remaining scorers.
+func TestRunProfileScoresLegacySkipsNonCandidateOutput(t *testing.T) {
+	selection := executorContext()
+	err := runProfileScores(selection, []profile.ScorePlugin{
+		{Name: "foreign", Selector: foreignNodeScore{}, Weight: 1, Failure: profile.ScoreSkip},
+		{Name: "values", Selector: executorScore{id: "values", values: map[string]float64{"n1": 100, "n2": 0}}, Weight: 1, Failure: profile.ScoreSkip},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := selection.LeastScoreNodes(-1)
+	if len(got) != 2 || got[0].Score != 100 || got[1].Score != 0 {
+		t.Fatalf("scores = %+v", got)
 	}
 }

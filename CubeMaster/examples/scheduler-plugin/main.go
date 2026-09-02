@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -97,6 +98,11 @@ func main() {
 	socket := os.Getenv("SOCKET")
 	if socket == "" {
 		socket = "/run/cube-scheduler-example.sock"
+	}
+	// A previous unclean exit can leave the socket file behind; remove it so
+	// the example restarts without manual cleanup.
+	if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Fatalf("remove stale socket %s: %v", socket, err)
 	}
 	listener, err := net.Listen("unix", socket)
 	if err != nil {

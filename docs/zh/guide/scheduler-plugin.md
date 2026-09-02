@@ -42,7 +42,7 @@ scheduler:
 - `expr`：启动时编译 CEL；Filter 必须返回 `bool`，Score 必须返回 0—100 的数值。
 - `grpc`：连接独立进程，启动时完成协议/能力握手；请求超时、连续失败熔断、快照版本及返回节点/分数均由 CubeMaster 校验。
 
-进程内 Go 插件实现现有 `filter.Selector` 或 `score.Selector` 接口，并在包初始化时调用 `plugin.RegisterGoFilter` / `plugin.RegisterGoScore`。CubeMaster 二进制需导入该包，因此新增 Go 插件后需要重新编译；重复名称会在启动时被拒绝。注意并发契约：Profile 会在同一请求内并发执行各个 Score（legacy 路径是顺序执行），而不同请求之间本来就并发，因此注册的实现必须是只读且线程安全的——仓库内置插件均满足。
+进程内 Go 插件实现现有 `filter.Selector` 或 `score.Selector` 接口，并在包初始化时调用 `plugin.RegisterGoFilter` / `plugin.RegisterGoScore`。CubeMaster 二进制需导入该包，因此新增 Go 插件后需要重新编译；重复名称会在启动时被拒绝。注意并发契约：现在所有管线（包括 legacy default 管线）都会在同一请求内并发执行各个 Filter 和 Score——每个插件都面向完整候选集运行，Filter 结果在全部 Filter 跑完后才取交集——不同请求之间也始终并发，因此注册的实现必须是只读且线程安全的——仓库内置插件均满足。引入插件系统之前的 legacy 路径是顺序执行 Score 的。
 
 CEL 提供基于版本化 protobuf 的强类型只读对象 `node` 与 `request`，未知字段、错误类型运算和不合法返回类型会在 Profile 激活时被拒绝。常用节点字段包括 `cpu_util`、`cpu_load`、`quota_cpu`、`allocated_cpu`、`quota_mem_mb`、`allocated_mem_mb`、`creating`、`local_creating`、`mvm_num`、`labels`、`local_templates`、`template_local` 和 `snapshot_storage_writable`；`reserved` 为预留字段，当前恒为 0。请求字段包括 `instance_type`、`cpu_millis`、`memory_bytes`、`system_disk_size`、`template_id` 和 `labels`。
 
@@ -73,7 +73,7 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 - 返回空结果的内置 `go` Score（例如请求没有节点偏好亲和性时的 `affinity_score`，或资源权重不适用时的 `image_score`）视为「不适用」并被跳过——不报错，也不替换为 `default_score`。只覆盖部分候选节点的结果仍视为失败。
 - `no_candidate` 支持 `fail` 和 `backoff`。Mandatory Guard 永不触发 backoff：Guard 失败（包括清空候选集合）始终快速失败。只有可选 Filter 或最终选点无候选时才进入 backoff；backoff 尝试会在放宽后的候选集合上重新执行 Guards、Filter 和 Score，其中重跑 Guards 是 backoff 尝试自身的安全保障。这也意味着集群饱和时的行为与 legacy 路径不同：legacy 管线在饱和时（例如 `realtime_create_num` 导致无可调度节点）会进入 backoff 选择器重试，而自定义 Profile 会立即让请求失败——`no_candidate: backoff` 不会软化 Guard 的结果。
 - `no_candidate` 未配置时默认为 `fail`。legacy `default` 管线始终走 backoff，因此启用第一个自定义 Profile 会把「Filter 后无候选」从 backoff 重试变成硬 `SelectNodesNoRes` 失败——没有 backoff 尝试，也不会回退到 default 管线。接入 Profile 期间建议显式配置 `no_candidate: backoff`。
-- Profile 路径的输出校验比 legacy 更严格：Filter 结果中包含 nil、空 id、重复或非候选节点会让请求直接失败（legacy 会静默忽略这些条目）；每个 Score 结果必须是有限值、落在 [0,100] 内且覆盖全部候选（legacy 容忍任意有限分数与部分覆盖）。把第三方 `go` Score 加入 Profile 前请先确认其值域边界。
+- 输出校验比引入插件系统之前更严格，且其中大部分现在对 legacy default 管线同样生效：Filter 结果中包含 nil、空 id、重复或非候选节点会让请求直接失败；Score 结果中包含这类条目或 NaN/Inf 值会使该 Score 的整个结果失效（在 legacy `ScoreSkip` 绑定下该 scorer 会被整体剔除，而旧路径会静默把这些条目并入聚合结果，陈旧节点甚至可能因此重新进入候选集）。Profile 编译出的 Score 还要求每个分数落在 [0,100] 内且覆盖全部候选。把第三方 `go` Score 加入 Profile 前请先确认其值域边界——并注意现有 `enable_scorers` 部署同样会套用更严格的处理。
 
 配置在启动或热更新时整体编译；插件名、路由、表达式、权重、选点方式或失败策略无效时，新 Profile 集不会生效，调度器继续使用上一份完整管线。
 
@@ -87,6 +87,7 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 - 冻结快照时会对每个候选节点（含 `LocalTemplates`）、请求规格和路由 label 做深克隆；legacy default 管线即使不运行 expr/gRPC 插件也付同样的分配成本。对不允许非本地镜像的模板请求，freeze 期间还会对每个候选执行一次 `GetImageStateByNode` 查找——此前该查找仅在启用 `template_locality` 过滤器时才会发生。调优前请先基准测量；按 Profile 是否实际使用 expr/gRPC 插件来条件化 freeze 是已知的后续方向。
 - 热更新被拒绝时会保留上一份 Profile 集，但全局配置在 watcher 运行前已完成切换，而内建插件在 Select 时实时读取全局配置（Guard 超时、Score 的 `Disable()` 开关、`real_time_weighted_average`/`image_score` 配置段、`EffectiveQuota*` 包装）。因此被拒绝的热更新可能留下「旧管线跑新配置值」的状态——应把拒绝日志视为需要运维介入，而不是无影响事件。
 - gRPC 与 CEL 的请求上下文中，`cpu_millis` 和 `memory_bytes` 都是普通整数，因此「未指定资源规格」与「零规格请求」无法区分——restore 放置路径会传入空规格。
+- 各类插件的分数量纲并未统一：expr 与 gRPC Score 强制限制在 [0,100]，而内置 `go` Score 各有自己的值域——`real_time_weighted_average` 归一化到约 [0,1]，而 `image_score` 与 `affinity_score` 的分值可达约 100。在混用 `type: go` 与 `type: expr`/`grpc` Score 的 Profile 中，必须用各插件的 `weight` 吸收值域差异，否则值域更宽的插件会主导聚合结果。
 
 ## 兼容性说明
 
@@ -94,3 +95,4 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 - weight 非正的 legacy `enable_scorers` 条目现在会在编译管线时被跳过并输出告警（此前是静默贡献 score×0）；调度行为不变。
 - 上述未注册条目的启动失败只在 legacy 管线实际被编译时成立：一旦 `profiles` 下配置了默认条目，`enable_filters` / `enable_scorers` 就不再参与编译，失效条目会被静默忽略而非报错。迁移到 Profiles 时请一并清理这些条目。
 - `multi_factor_weighted_average` 的 legacy 后台分数刷新协程现在只要对应配置段存在就会启动，即使该 scorer 未列入 `enable_scorers`；循环每个 tick 都会重读实时配置，因此对"已配置但未启用"的部署而言，唯一影响是多一个空转 goroutine。
+- legacy default 管线现在与自定义 Profile 共用同一个并发运行器：Score 在请求内并行执行，且畸形的 Filter/Score 输出（nil、空 id、重复或非候选条目、NaN/Inf 值）会被拒绝，而不是像旧路径那样静默并入结果。仓库内置插件均满足该契约；升级前请审计任何第三方 `go` 插件。
