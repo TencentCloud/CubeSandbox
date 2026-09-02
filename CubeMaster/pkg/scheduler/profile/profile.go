@@ -367,6 +367,13 @@ func compileRoute(conf config.SchedulerProfileRouteConf, allowedLabels map[strin
 		if _, allowed := allowedLabels[key]; !allowed {
 			return compiledRoute{}, fmt.Errorf("route label %q is not in profile_route_label_keys", key)
 		}
+		if value == "" {
+			// matches() compares against selection.RequestLabels[key], which
+			// is "" when the request carries no such label — an empty route
+			// value would silently match those requests (including
+			// migrate/restore paths that never populate RequestLabels).
+			return compiledRoute{}, fmt.Errorf("route label %q has an empty value", key)
+		}
 		route.labels[key] = value
 	}
 	return route, nil

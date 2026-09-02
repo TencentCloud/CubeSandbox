@@ -42,7 +42,7 @@ scheduler:
 - `expr`：启动时编译 CEL；Filter 必须返回 `bool`，Score 必须返回 0—100 的数值。
 - `grpc`：连接独立进程，启动时完成协议/能力握手；请求超时、连续失败熔断、快照版本及返回节点/分数均由 CubeMaster 校验。
 
-进程内 Go 插件实现现有 `filter.Selector` 或 `score.Selector` 接口，并在包初始化时调用 `plugin.RegisterGoFilter` / `plugin.RegisterGoScore`。CubeMaster 二进制需导入该包，因此新增 Go 插件后需要重新编译；重复名称会在启动时被拒绝。
+进程内 Go 插件实现现有 `filter.Selector` 或 `score.Selector` 接口，并在包初始化时调用 `plugin.RegisterGoFilter` / `plugin.RegisterGoScore`。CubeMaster 二进制需导入该包，因此新增 Go 插件后需要重新编译；重复名称会在启动时被拒绝。注意并发契约：Profile 会在同一请求内并发执行各个 Score（legacy 路径是顺序执行），而不同请求之间本来就并发，因此注册的实现必须是只读且线程安全的——仓库内置插件均满足。
 
 CEL 提供基于版本化 protobuf 的强类型只读对象 `node` 与 `request`，未知字段、错误类型运算和不合法返回类型会在 Profile 激活时被拒绝。常用节点字段包括 `cpu_util`、`cpu_load`、`quota_cpu`、`allocated_cpu`、`quota_mem_mb`、`allocated_mem_mb`、`creating`、`local_creating`、`mvm_num`、`labels`、`local_templates`、`template_local` 和 `snapshot_storage_writable`；`reserved` 为预留字段，当前恒为 0。请求字段包括 `instance_type`、`cpu_millis`、`memory_bytes`、`system_disk_size`、`template_id` 和 `labels`。
 
@@ -71,8 +71,9 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 - Filter 默认 `fail-closed`；`fail-open` 必须显式配置，并会输出风险告警。
 - Score 默认 `default-score`，单个插件失败后用其 `default_score`（本身默认为 0）继续；也可配置 `fail-closed`。这与 Filter 刻意方向相反——健康 fail-closed、质量 fail-open——而且除一行告警日志外是静默的：所有候选拿到相同的常数分，失败插件的排序贡献消失；若它是唯一的 Score，排序退化为候选顺序。对排序质量敏感的部署应显式配置 `failure.score: fail-closed`。
 - 返回空结果的内置 `go` Score（例如请求没有节点偏好亲和性时的 `affinity_score`，或资源权重不适用时的 `image_score`）视为「不适用」并被跳过——不报错，也不替换为 `default_score`。只覆盖部分候选节点的结果仍视为失败。
-- `no_candidate` 支持 `fail` 和 `backoff`。Mandatory Guard 永不触发 backoff：Guard 失败（包括清空候选集合）始终快速失败。只有可选 Filter 或最终选点无候选时才进入 backoff；backoff 尝试会在放宽后的候选集合上重新执行 Guards、Filter 和 Score，其中重跑 Guards 是 backoff 尝试自身的安全保障。
+- `no_candidate` 支持 `fail` 和 `backoff`。Mandatory Guard 永不触发 backoff：Guard 失败（包括清空候选集合）始终快速失败。只有可选 Filter 或最终选点无候选时才进入 backoff；backoff 尝试会在放宽后的候选集合上重新执行 Guards、Filter 和 Score，其中重跑 Guards 是 backoff 尝试自身的安全保障。这也意味着集群饱和时的行为与 legacy 路径不同：legacy 管线在饱和时（例如 `realtime_create_num` 导致无可调度节点）会进入 backoff 选择器重试，而自定义 Profile 会立即让请求失败——`no_candidate: backoff` 不会软化 Guard 的结果。
 - `no_candidate` 未配置时默认为 `fail`。legacy `default` 管线始终走 backoff，因此启用第一个自定义 Profile 会把「Filter 后无候选」从 backoff 重试变成硬 `SelectNodesNoRes` 失败——没有 backoff 尝试，也不会回退到 default 管线。接入 Profile 期间建议显式配置 `no_candidate: backoff`。
+- Profile 路径的输出校验比 legacy 更严格：Filter 结果中包含 nil、空 id、重复或非候选节点会让请求直接失败（legacy 会静默忽略这些条目）；每个 Score 结果必须是有限值、落在 [0,100] 内且覆盖全部候选（legacy 容忍任意有限分数与部分覆盖）。把第三方 `go` Score 加入 Profile 前请先确认其值域边界。
 
 配置在启动或热更新时整体编译；插件名、路由、表达式、权重、选点方式或失败策略无效时，新 Profile 集不会生效，调度器继续使用上一份完整管线。
 

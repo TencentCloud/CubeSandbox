@@ -111,6 +111,22 @@ func TestProfileValidationRejectsUncontrolledLabelsAndUnknownPlugins(t *testing.
 	}
 }
 
+func TestProfileRejectsEmptyRouteLabelValue(t *testing.T) {
+	// Route matching compares against RequestLabels[key], which is "" when
+	// the request carries no such label — an empty route value would silently
+	// match every unlabeled request, so it is rejected at compile time.
+	cfg := &config.Config{Scheduler: &config.WrapperSchedulerConf{SchedulerConf: config.SchedulerConf{
+		ProfileRouteLabelKeys: []string{"workload"},
+		Profiles: []config.SchedulerProfileConf{{
+			Name:  "bad",
+			Route: config.SchedulerProfileRouteConf{Labels: map[string]string{"workload": ""}},
+		}},
+	}}}
+	if _, err := Compile(context.Background(), cfg, profileRegistry(t)); err == nil {
+		t.Fatal("empty route label value must be rejected")
+	}
+}
+
 func TestProfileAllowsEmptyOnlyForBuiltinScores(t *testing.T) {
 	registry := profileRegistry(t)
 	if err := registry.RegisterScore(plugin.TypeGo, "noop_score", func(context.Context, config.SchedulerProfilePluginConf) (score.Selector, error) {
