@@ -168,10 +168,11 @@ var SummaryKeys = []string{
 type RoundResult struct {
 	Seed    int64              `json:"seed"`
 	Summary map[string]float64 `json:"summary"`
-	// FailureReasons counts the distinct Select errors behind
-	// summary.failures (capped, see maxFailReasons), so a config that rejects
-	// the whole trace names its cause instead of failing silently. Omitted
-	// when the round had no failures.
+	// FailureReasons counts the distinct Select errors behind the round's
+	// failed requests (their count is (1-success_rate) × requests — Summary
+	// carries no failures key), so a config that rejects the whole trace
+	// names its cause instead of failing silently. Omitted when the round
+	// had no failures.
 	FailureReasons map[string]int `json:"failure_reasons,omitempty"`
 }
 
