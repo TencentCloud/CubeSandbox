@@ -9,9 +9,16 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/profile"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/backofffilter"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/filter"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/plugin"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/plugin/expr"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/plugin/grpcplugin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/postscore"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/prefilter"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/score"
@@ -29,14 +36,63 @@ var scheduler = struct {
 	postScore       postscore.Selector
 	preSelector     filter.Selector
 	backoffSelector filter.Selector
+	registry        *plugin.Registry
+	profiles        atomic.Pointer[profile.Set]
 }{filter: make([]filter.Selector, 0)}
 
-func InitScheduler(ctx context.Context) {
+func InitScheduler(ctx context.Context) error {
 	scheduler.preSelector = prefilter.NewPreFilter()
 	scheduler.backoffSelector = backofffilter.NewBackoffFilter()
-	scheduler.filter = filter.NewSelector()
-	scheduler.score = score.NewSelector(ctx)
 	scheduler.postScore = postscore.NewSelector()
 
+	registry := plugin.NewRegistry()
+	if err := plugin.RegisterBuiltins(registry); err != nil {
+		return err
+	}
+	if err := plugin.ApplyGoExtensions(registry); err != nil {
+		return err
+	}
+	if err := registry.RegisterFilterProvider(plugin.TypeExpression, expr.NewFilter); err != nil {
+		return err
+	}
+	if err := registry.RegisterScoreProvider(plugin.TypeExpression, expr.NewScore); err != nil {
+		return err
+	}
+	if err := registry.RegisterFilterProvider(plugin.TypeGRPC, grpcplugin.NewFilter); err != nil {
+		return err
+	}
+	if err := registry.RegisterScoreProvider(plugin.TypeGRPC, grpcplugin.NewScore); err != nil {
+		return err
+	}
+	profiles, err := profile.Compile(ctx, config.GetConfig(), registry)
+	if err != nil {
+		return err
+	}
+	scheduler.registry = registry
+	scheduler.profiles.Store(profiles)
+	config.AppendConfigWatcher(&schedulerConfigWatcher{ctx: ctx, registry: registry})
+	score.StartAsyncScore(ctx)
+
 	initTask(ctx)
+	return nil
+}
+
+type schedulerConfigWatcher struct {
+	ctx      context.Context
+	registry *plugin.Registry
+}
+
+func (w *schedulerConfigWatcher) OnEvent(updated *config.Config) {
+	compiled, err := profile.Compile(w.ctx, updated, w.registry)
+	if err != nil {
+		log.G(w.ctx).Errorf("scheduler profile reload rejected; keeping previous pipeline: %v", err)
+		return
+	}
+	previous := scheduler.profiles.Swap(compiled)
+	if previous != nil {
+		// Close is lease-aware: in-flight scheduling calls keep using the old
+		// immutable set and its external plugin connections until they finish.
+		_ = previous.Close()
+	}
+	log.G(w.ctx).Infof("scheduler profiles reloaded: %v", compiled.Names())
 }
