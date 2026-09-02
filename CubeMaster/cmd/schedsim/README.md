@@ -160,9 +160,14 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
   集群里节点分数恒并列，此时仍受下条所述枚举次序影响，**只有分数严格有序时
   才是确定性选取**；这也是 `--rounds` 默认 3 轮的原因。
 - 残余非确定性：未调 `localcache.Init` 时节点枚举走 go-cache map 遍历，
-  分数完全并列时的 tie-break 次序逐次运行可能不同。该路径不可在不修改
+  分数完全并列时的 tie-break 次序**每个请求都会重新随机**（每次 Select 都是
+  一次新的 map 遍历），而非仅逐次运行不同。该路径不可在不修改
   localcache 的前提下固定，故结论性指标请依赖 `--rounds` 多轮聚合
   （各轮独立 seed，报告顶层 summary 即逐轮均值）。
+- 单发语义：trace 里的每个请求 = 恰好一次调度尝试，被拒绝即计为失败，
+  不因后续容量释放而重试（与 CubeMaster 创建时单次 Select 的语义一致；
+  应用层重试不在模型内）。cube-bench 的 trace 导出同样一请求一记录，
+  两侧契约一致。
 - `BackoffSelect` 的 `math/rand` 全局源在仿真里不可达（无
   BackoffNodeSelector 时 backoff 恒为空集），无需 seed。
 

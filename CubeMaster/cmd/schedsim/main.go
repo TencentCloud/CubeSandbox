@@ -104,6 +104,10 @@ func main() {
 		results = append(results, rr)
 		fmt.Fprintf(os.Stderr, "schedsim: round %d (seed %d): success_rate=%.4f cpu_alloc_rate=%.4f template_hit_rate=%.4f\n",
 			i, roundSeed, rr.Summary["success_rate"], rr.Summary["cpu_alloc_rate"], rr.Summary["template_hit_rate"])
+		if len(rr.FailureReasons) > 0 {
+			fmt.Fprintf(os.Stderr, "schedsim: round %d failure reasons: %s\n",
+				i, sim.TopFailureReasons(rr.FailureReasons, 3))
+		}
 	}
 
 	rep := &sim.Report{

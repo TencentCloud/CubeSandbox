@@ -37,7 +37,7 @@ cubelet_conf:
 scheduler:
   # Enumerate all nodes in prefilter, and pick the single highest-scored node
   # deterministically. priority_select_num > 1 switches the final pick to a
-  # time-seeded weighted random among the top N (not reproducible run-to-run;
+  # time-seeded uniform random among the top N (not reproducible run-to-run;
   # see cmd/schedsim/README.md "随机性与复现").
   pre_select_num: -1
   priority_select_num: 1

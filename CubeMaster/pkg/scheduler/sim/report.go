@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 )
 
 // ReportConfig echoes the run parameters into the report so results are
@@ -57,6 +59,33 @@ func MeanSummary(rounds []*RoundResult) map[string]float64 {
 		out[k] = sum / float64(len(rounds))
 	}
 	return out
+}
+
+// TopFailureReasons renders the most frequent failure reasons of a round,
+// most frequent first, for the CLI's stderr diagnostics.
+func TopFailureReasons(reasons map[string]int, limit int) string {
+	type kv struct {
+		reason string
+		count  int
+	}
+	rows := make([]kv, 0, len(reasons))
+	for reason, count := range reasons {
+		rows = append(rows, kv{reason, count})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].count != rows[j].count {
+			return rows[i].count > rows[j].count
+		}
+		return rows[i].reason < rows[j].reason
+	})
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	parts := make([]string, 0, len(rows))
+	for _, r := range rows {
+		parts = append(parts, fmt.Sprintf("%dx %s", r.count, r.reason))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // WriteReport marshals the report indented and writes it to path, or to

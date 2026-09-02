@@ -168,6 +168,11 @@ var SummaryKeys = []string{
 type RoundResult struct {
 	Seed    int64              `json:"seed"`
 	Summary map[string]float64 `json:"summary"`
+	// FailureReasons counts the distinct Select errors behind
+	// summary.failures (capped, see maxFailReasons), so a config that rejects
+	// the whole trace names its cause instead of failing silently. Omitted
+	// when the round had no failures.
+	FailureReasons map[string]int `json:"failure_reasons,omitempty"`
 }
 
 // nodeState is the simulator's own book on a node; localcache mirrors it via
@@ -257,10 +262,29 @@ type engine struct {
 
 	successes           int
 	failures            int
+	failReasons         map[string]int
 	templatedSuccesses  int
 	templateHits        int
 	nodeSuccess         map[string]int
 	metricStateDiverged int
+}
+
+// maxFailReasons caps the distinct error strings a round records so a
+// per-node/per-request dynamic message cannot grow the report unboundedly;
+// overflow folds into "(other)".
+const maxFailReasons = 8
+
+// noteFailure counts a failed request and its reason.
+func (e *engine) noteFailure(reason string) {
+	e.failures++
+	if len(reason) > 200 {
+		reason = reason[:200] + "…"
+	}
+	if _, ok := e.failReasons[reason]; ok || len(e.failReasons) < maxFailReasons {
+		e.failReasons[reason]++
+		return
+	}
+	e.failReasons["(other)"]++
 }
 
 // roundMu serializes RunRound: rounds share the process-wide localcache, so a
@@ -295,6 +319,7 @@ func RunRound(ctx context.Context, p Params) (*RoundResult, error) {
 		replicas:    make(map[string]map[string]bool),
 		placements:  make(map[int]*placement),
 		nodeSuccess: make(map[string]int),
+		failReasons: make(map[string]int),
 	}
 	e.maxReqCPUMillis, e.maxReqMemMiB = e.maxFeasibleShape()
 	e.injectNodes()
@@ -537,14 +562,18 @@ func (e *engine) onCreate(ctx context.Context, ev event) {
 	e.latencyMs = append(e.latencyMs, float64(time.Since(start))/float64(time.Millisecond))
 
 	if err != nil || selected == nil {
-		e.failures++
+		reason := "select returned no node"
+		if err != nil {
+			reason = err.Error()
+		}
+		e.noteFailure(reason)
 		return
 	}
 	ns, ok := e.nodes[selected.ID()]
 	if !ok {
 		// The scheduler must only return injected sim nodes; treat anything
 		// else as a failure rather than corrupting the books.
-		e.failures++
+		e.noteFailure(fmt.Sprintf("scheduler returned non-sim node %q", selected.ID()))
 		return
 	}
 	e.successes++
@@ -747,7 +776,7 @@ func (e *engine) result() *RoundResult {
 		// report instead of silently invalidating the round.
 		"metric_state_diverged": float64(e.metricStateDiverged),
 	}
-	return &RoundResult{Seed: e.p.Seed, Summary: summary}
+	return &RoundResult{Seed: e.p.Seed, Summary: summary, FailureReasons: e.failReasons}
 }
 
 func ratio(num, den int64) float64 {

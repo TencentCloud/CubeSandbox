@@ -215,6 +215,44 @@ func TestRunRoundTemplateMissFails(t *testing.T) {
 	approx(t, "cpu_alloc_rate", s["cpu_alloc_rate"], 0, 1e-9)
 	approx(t, "active_nodes_avg", s["active_nodes_avg"], 0, 1e-9)
 	approx(t, "empty_nodes_avg", s["empty_nodes_avg"], 2, 1e-9)
+	// An all-rejecting round must name its cause: the distinct Select errors
+	// behind the failures are recorded (capped), not dropped.
+	if len(rr.FailureReasons) == 0 {
+		t.Fatal("an all-rejected round must record its failure reasons")
+	}
+	total := 0
+	for reason, count := range rr.FailureReasons {
+		if reason == "" || count <= 0 {
+			t.Fatalf("bad failure reason entry %q: %d", reason, count)
+		}
+		total += count
+	}
+	if total != 4 {
+		t.Fatalf("failure reasons cover %d requests, want 4", total)
+	}
+}
+
+// TestNoteFailureCapsDistinctReasons: a per-request dynamic message must not
+// grow the report unboundedly — distinct reasons past maxFailReasons fold
+// into "(other)" while the failure count stays exact.
+func TestNoteFailureCapsDistinctReasons(t *testing.T) {
+	e := &engine{failReasons: make(map[string]int)}
+	for i := 0; i < maxFailReasons+5; i++ {
+		e.noteFailure(fmt.Sprintf("boom on node %d", i))
+	}
+	e.noteFailure("boom on node 0")
+	if e.failures != maxFailReasons+6 {
+		t.Fatalf("failures = %d, want %d", e.failures, maxFailReasons+6)
+	}
+	if len(e.failReasons) != maxFailReasons+1 { // 8 distinct + "(other)"
+		t.Fatalf("distinct reasons = %d, want %d", len(e.failReasons), maxFailReasons+1)
+	}
+	if e.failReasons["(other)"] != 5 {
+		t.Fatalf("(other) = %d, want 5", e.failReasons["(other)"])
+	}
+	if e.failReasons["boom on node 0"] != 2 {
+		t.Fatalf("repeat reason = %d, want 2", e.failReasons["boom on node 0"])
+	}
 }
 
 // TestRunRoundAllowNonLocalTemplate: with the locality constraint relaxed and
