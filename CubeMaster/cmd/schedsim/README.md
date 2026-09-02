@@ -25,8 +25,12 @@ go build -o /tmp/schedsim ./cmd/schedsim
   --node-cpu-millis 64000 \            # 单节点 CPU 配额（毫核）
   --node-mem-mib 131072 \              # 单节点内存配额（MiB）
   --instance-type sim \                # 所有节点注册的 instance type
-  --template-preload 0.3 \             # 每个模板预置本地副本的节点比例
-  --seed 42 --rounds 3 \               # 第 i 轮 seed = seed+i
+  --template-preload 0.3 \             # 每个模板预置本地副本的节点比例（默认 1.0：全预热
+                                       # 集群，template_hit_rate ≡ 1；要观察 locality 收益
+                                       # 需显式调低，如 0.3）
+  --seed 42 --rounds 3 \               # 第 i 轮 seed = seed+i（默认 3 轮；并列分数的
+                                       # tie-break 逐次运行不同，单轮结果不可复现，见
+                                       # "随机性与复现"）
   -o report.json                       # 缺省写 stdout（bootstrap 的 config 输出已被屏蔽，stdout 直接是干净 JSON）
 ```
 
@@ -62,10 +66,11 @@ go run ./cmd/schedsim --trace /tmp/storm.trace.json \
 ```
 
 `cpu_millis`/`mem_mib` 为 0 的请求会被拒绝加载并提示 trace 缺少规格标注。
-加载时**不会**交叉校验每个请求的 `template_id` 是否出现在 `templates` 段：
-引用了未列出模板的请求永远不会被预置副本，在严格 locality（默认
-`--allow-non-local-template=false` 且 locality filter 开启）下会全部失败且
-无加载期报错——排查 `success_rate=0` 时先检查这一点。
+加载时还会交叉校验每个请求的 `template_id` 是否出现在 `templates` 段：引用未
+列出模板的请求在严格 locality 下必然全部失败，因此直接在加载期报错而非产出
+一份 `success_rate=0` 的报告（`templates` 段整体缺省时跳过该校验，模板集合回退
+为按请求推导）。cube-bench 生成的 trace 恒满足该约束；手工构造 trace 做非本地
+模板实验（`--allow-non-local-template`）时同样要求段内声明齐全。
 多轮结果取各轮均值落在 `summary`，逐轮明细在 `rounds[]`——注意分位指标
 （`sched_latency_p50/p95/p99_ms`）也是**逐轮分位的均值**，不是全样本合并后的
 真实分位；要看分布形状请读 `rounds[]`。
@@ -136,7 +141,9 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
 - 终选随机性：`selctx.New` 内部的 `randomSelect` 用 `golang.org/x/exp/rand`
   以 `time.Now()` 播种，外部无法固定；`LeastRandomSelect` 在
   `priority_select_num > 1` 时从前 N 名中均匀随机，**逐次运行不可复现**。
-  example.sim.yaml 设 `priority_select_num: 1`（确定性取最高分）规避。
+  example.sim.yaml 设 `priority_select_num: 1` 规避为"取最高分"——但同构空闲
+  集群里节点分数恒并列，此时仍受下条所述枚举次序影响，**只有分数严格有序时
+  才是确定性选取**；这也是 `--rounds` 默认 3 轮的原因。
 - 残余非确定性：未调 `localcache.Init` 时节点枚举走 go-cache map 遍历，
   分数完全并列时的 tie-break 次序逐次运行可能不同。该路径不可在不修改
   localcache 的前提下固定，故结论性指标请依赖 `--rounds` 多轮聚合
@@ -163,6 +170,7 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
 | `herding_top1_share` | 被选中次数最多的节点占总成功放置的比例（羊群度） |
 | `template_hit_rate` | 成功放置中选中节点持有该模板本地副本的比例（分母为带模板的成功请求）。放置成功后仿真会把该模板注册到选中节点（预热拉取），因此 locality filter 关闭时该指标跟踪动态局部性（首次未命中、后续命中）；filter 开启且 `AllowNonLocalTemplate=false` 时未预热节点本就不收该模板请求，指标恒为 1，主要用于检测配置漂移 |
 | `active_nodes_avg` / `empty_nodes_avg` | 有/无运行中沙箱的节点数，时间平均 |
+| `metric_push_errors` | 仿真账本向 localcache 回写用量失败的次数；非 0 意味着本轮账本与调度器所见状态脱钩，该轮所有指标作废排查 |
 
 指标计算均为纯函数（`pkg/scheduler/sim/metrics.go`），单测手算对拍。
 

@@ -26,9 +26,11 @@ type TraceParams struct {
 
 type TraceTemplate struct {
 	TemplateID string `json:"template_id"`
-	Weight     int    `json:"weight"`
-	CpuMillis  int64  `json:"cpu_millis"`
-	MemMiB     int64  `json:"mem_mib"`
+	// Weight is a producer-side field (cube-bench's template mix); the
+	// simulator never reads it — per-request resource specs drive placement.
+	Weight    int   `json:"weight"`
+	CpuMillis int64 `json:"cpu_millis"`
+	MemMiB    int64 `json:"mem_mib"`
 }
 
 type TraceRequest struct {

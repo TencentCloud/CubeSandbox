@@ -36,8 +36,12 @@ func main() {
 		preload       = flag.Float64("template-preload", 1.0, "fraction of nodes preloaded with a local replica of each template")
 		allowNonLocal = flag.Bool("allow-non-local-template", false,
 			"let requests land on nodes without a local template replica (models S3 remote_ready cross-node restore)")
-		seed   = flag.Int64("seed", 42, "base seed; round i uses seed+i")
-		rounds = flag.Int("rounds", 1, "number of simulation rounds")
+		seed = flag.Int64("seed", 42, "base seed; round i uses seed+i")
+		// Default to 3 rounds: with priority_select_num=1 over a homogeneous
+		// idle fleet, score ties are broken by the nondeterministic
+		// enumeration order, so a single round is not reproducible — the
+		// multi-round mean is the reportable number (see README "随机性与复现").
+		rounds = flag.Int("rounds", 3, "number of simulation rounds")
 		out    = flag.String("o", "", "report output path (default: stdout)")
 	)
 	flag.Parse()
