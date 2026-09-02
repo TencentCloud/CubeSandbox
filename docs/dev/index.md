@@ -8,10 +8,9 @@ If you are *using* CubeSandbox (deploying it, building templates, calling the AP
 
 - [Redis Key Convention](./redis-key-spec) — the unified namespace every service must use for the shared Redis instance: naming format, scope ownership, the registered key catalog, TTL policy, and the per-service key-builder modules.
 
-## Scheduler
-
-- [Scheduler Plugin Design](/zh/dev/scheduler-plugin-design) — design/repair doc for the cluster-scheduler evaluation and plugin system: code-reading findings, metric definitions, the registry + Profile configuration mechanism, three built-in strategy profiles, and the benchmark plan (Chinese).
-- [Scheduler Code Reading Guide](/zh/dev/scheduler-code-reading-guide) — a guided tour of the scheduler codebase for implementing the above: reading order, key files and symbols, test templates, and engineering conventions (Chinese).
+<!-- The scheduler plugin design / code reading guide currently exist only in
+     Chinese under /zh/dev/; per the bilingual-parity rule below, EN cross-links
+     are deferred until EN mirror pages land. -->
 
 ## What belongs here
 
