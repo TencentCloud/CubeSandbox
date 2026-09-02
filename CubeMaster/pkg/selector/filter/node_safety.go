@@ -9,6 +9,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -33,15 +34,15 @@ import (
 // "staleness check off" — a defensible reading of a configuration that is
 // unusable for the canonical path anyway. One intentional divergence: the
 // prefilter Fatalf's on CpuLoadUsage > CpuTotal (an invariant violation worth
-// a crash in the canonical path), while this guard drops the node — a
-// profile guard must not take the scheduler down.
+// a crash in the canonical path), while this guard drops the node with a
+// warning — a profile guard must not take the scheduler down.
 type nodeSafetyFilter struct{}
 
 func NewNodeSafetyFilter() *nodeSafetyFilter { return &nodeSafetyFilter{} }
 
 func (*nodeSafetyFilter) ID() string { return constants.SelectorFilterID + "/node_safety" }
 
-func (*nodeSafetyFilter) Select(selection *selctx.SelectorCtx) (node.NodeList, error) {
+func (f *nodeSafetyFilter) Select(selection *selctx.SelectorCtx) (node.NodeList, error) {
 	current := config.GetConfig()
 	if current == nil || current.Scheduler == nil {
 		return nil, ret.Errorf(errorcode.ErrorCode_MasterInternalError, "scheduler config is nil")
@@ -56,6 +57,8 @@ func (*nodeSafetyFilter) Select(selection *selctx.SelectorCtx) (node.NodeList, e
 			continue
 		}
 		if candidate.CpuLoadUsage > float64(candidate.CpuTotal) {
+			log.G(selection.Ctx).Warnf("%v select:%v, CpuLoadUsage:%v, CpuTotal:%v",
+				f.ID(), candidate.ID(), candidate.CpuLoadUsage, candidate.CpuTotal)
 			continue
 		}
 		if scheduler.MetricUpdateTimeout > 0 && time.Since(candidate.MetricUpdate) > scheduler.MetricUpdateTimeout {

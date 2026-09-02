@@ -62,6 +62,14 @@ func TestSorted(t *testing.T) {
 	assert.Equal(t, 1, tmpNode.Index)
 }
 
+func TestNewDefaultsNonNilContext(t *testing.T) {
+	// gRPC/CEL plugin paths derive child contexts from Ctx; New() must never
+	// hand out a nil one, even before FreezeSnapshot backfills it.
+	if slctx := New(""); slctx.Ctx == nil {
+		t.Fatal("New() must default Ctx to a non-nil context")
+	}
+}
+
 func TestFreezeSnapshotIsIdempotent(t *testing.T) {
 	slctx := New("")
 	slctx.SetNodes(node.NodeList{{InsID: "n1"}, {InsID: "n2"}})

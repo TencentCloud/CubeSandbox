@@ -415,6 +415,11 @@ type scorePlugin struct {
 }
 
 func NewScore(ctx context.Context, conf config.SchedulerProfilePluginConf) (score.Selector, error) {
+	// Validate the weight before dialing: a pure config error must not pay
+	// for (or leak) a plugin connection.
+	if conf.Weight < 0 {
+		return nil, fmt.Errorf("external scheduler score %q has a negative weight %v", strings.TrimSpace(conf.Name), conf.Weight)
+	}
 	client, err := newClient(ctx, conf, "score")
 	if err != nil {
 		return nil, err

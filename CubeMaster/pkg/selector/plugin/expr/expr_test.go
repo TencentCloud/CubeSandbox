@@ -71,6 +71,29 @@ func TestExpressionValidation(t *testing.T) {
 	}
 }
 
+func TestExpressionRejectsNegativeWeight(t *testing.T) {
+	if _, err := NewScore(context.Background(), config.SchedulerProfilePluginConf{
+		Name: "negative-weight", Expr: "100.0 - node.cpu_util", Weight: -1,
+	}); err == nil {
+		t.Fatal("negative score weight must be rejected")
+	}
+	if _, err := NewFilter(context.Background(), config.SchedulerProfilePluginConf{
+		Name: "negative-weight", Expr: "node.cpu_util < 50.0", Weight: -1,
+	}); err == nil {
+		t.Fatal("negative filter weight must be rejected")
+	}
+	// Zero still means "unset" and defaults to 1.
+	scorer, err := NewScore(context.Background(), config.SchedulerProfilePluginConf{
+		Name: "default-weight", Expr: "1.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scorer.Weight() != 1 {
+		t.Fatalf("Weight() = %v, want default 1", scorer.Weight())
+	}
+}
+
 func TestExpressionRejectsInvalidTypedOperationAtCompileTime(t *testing.T) {
 	_, err := NewScore(context.Background(), config.SchedulerProfilePluginConf{
 		Name: "bad-operation", Expr: `node.cpu_util + "not-a-number"`,

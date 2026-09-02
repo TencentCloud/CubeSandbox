@@ -66,6 +66,9 @@ func compile(conf config.SchedulerProfilePluginConf, wantFilter bool) (*evaluato
 		return nil, fmt.Errorf("create expression plugin %q program: %w", name, err)
 	}
 	weight := conf.Weight
+	if weight < 0 {
+		return nil, fmt.Errorf("expression plugin %q has a negative weight %v", name, weight)
+	}
 	if weight == 0 {
 		// Zero means "unset" and defaults to 1; an explicit weight: 0 is
 		// indistinguishable from unset and therefore unsupported. A

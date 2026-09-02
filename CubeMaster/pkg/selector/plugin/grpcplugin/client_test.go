@@ -164,6 +164,16 @@ func TestExternalScoreRejectsOutOfRangeValues(t *testing.T) {
 	}
 }
 
+func TestExternalScoreRejectsNegativeWeight(t *testing.T) {
+	// The weight is validated before the plugin is dialed, so a negative
+	// weight is rejected without a listening server.
+	if _, err := NewScore(context.Background(), config.SchedulerProfilePluginConf{
+		Name: "fake", SocketPath: "unused", Weight: -1,
+	}); err == nil {
+		t.Fatal("negative score weight must be rejected")
+	}
+}
+
 func TestNewClientDialsUnixSocket(t *testing.T) {
 	// Exercise the production dial path (newClient -> native unix scheme),
 	// not just the bufconn-injected newClientFromConn used by the other tests.

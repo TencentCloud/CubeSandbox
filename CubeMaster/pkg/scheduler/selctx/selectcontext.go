@@ -159,7 +159,10 @@ func (s *SelectorCtx) RefreezeSnapshot() {
 }
 
 func New(name string) *SelectorCtx {
+	// Default Ctx so plugin paths (gRPC WithTimeout, CEL ContextEval) never
+	// derive from a nil parent even before FreezeSnapshot runs.
 	s := &SelectorCtx{
+		Ctx:     context.Background(),
 		selName: name,
 	}
 	switch name {
