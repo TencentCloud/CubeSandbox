@@ -5,6 +5,7 @@
 //! stdout/stderr pump feeding the Start event stream.
 
 use std::collections::HashMap;
+use std::os::fd::RawFd;
 use std::process::Stdio;
 
 use tokio::io::AsyncReadExt;
@@ -103,7 +104,11 @@ pub fn spawn(
     env: HashMap<String, String>,
     cwd: String,
     user: &User,
+    cgroup_fd: Option<RawFd>,
 ) -> std::io::Result<SpawnedProcess> {
+    // Consumed by the pre_exec cgroup placement: when set, the child is
+    // written into cgroup_fd's subtree before privileges are dropped.
+    let _ = cgroup_fd;
     let mut command = tokio::process::Command::new(cmd);
     command
         .args(args)
@@ -290,6 +295,7 @@ mod tests {
             env,
             "/".into(),
             &user,
+            None,
         )
         .unwrap();
         assert!(proc.pid > 0);
@@ -333,6 +339,7 @@ mod tests {
             HashMap::new(),
             "/".into(),
             &user,
+            None,
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

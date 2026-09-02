@@ -86,7 +86,7 @@ pub fn start(
         }
     };
 
-    let spawned = match exec::spawn(&req.process.cmd, &req.process.args, env, cwd, &user) {
+    let spawned = match exec::spawn(&req.process.cmd, &req.process.args, env, cwd, &user, None) {
         Ok(s) => s,
         Err(e) => {
             // Baseline behavior for a missing binary is a full event stream
