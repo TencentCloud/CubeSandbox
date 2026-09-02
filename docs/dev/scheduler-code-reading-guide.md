@@ -1,10 +1,11 @@
 # CubeSandbox 调度系统代码阅读指南
 
-> 配套文档：[scheduler-plugin-design.md](./scheduler-plugin-design.md)（设计/修复方案）
-> 目标读者：准备实现"集群调度性能评估与高性能调度插件系统"任务的同学
-> 代码基线：`master @ c458228e`（本 PR 与 master 的 merge base）
+> 配套文档：[scheduler-plugin-design.md](./scheduler-plugin-design.md)（设计方案）
+> 目标读者：准备阅读或扩展 CubeMaster 调度代码的开发者
+> 代码基线：`master @ c458228e`（本 PR 与 master 的 merge base）。文中行号锚点以本 PR
+> 合并后的代码树为准（基线 + 本 PR 新增的注释）；本 PR 未改动的文件与 `master @ c458228e` 一致。
 
-本文按**推荐阅读顺序**列出实现该任务需要读的代码，标注每个文件"为什么读、读什么、
+本文按**推荐阅读顺序**列出阅读与扩展调度器需要读的代码，标注每个文件"为什么读、读什么、
 关键位置"。标注 📌 的为必读，其余可按需选读。
 
 ---
@@ -24,50 +25,50 @@
 调度代码全部在 `CubeMaster/pkg/scheduler/` 与 `CubeMaster/pkg/selector/` 两个目录，
 **总量不大，建议通读**。
 
-### 1.1 📌 `CubeMaster/pkg/scheduler/schedule.go`（242 行，全读）
+### 1.1 📌 `CubeMaster/pkg/scheduler/schedule.go`（268 行，全读）
 
 调度主流程 `Select()`（`Select` 函数定义处）。必须弄清：
 
-- 流水线顺序：`runPreFilter` → `runFilter`（`parallelRunFilters`，L138，**并行执行各
-  Filter 后取交集**）→ `runScoreFilter`（L178，各插件得分 × 权重求和、归一化）→
+- 流水线顺序：`runPreFilter` → `runFilter`（`parallelRunFilters`，L159，**并行执行各
+  Filter 后取交集**）→ `runScoreFilter`（L203，各插件得分 × 权重求和、归一化）→
   `postScore` → `LeastRandomSelect(PrioritySelectNum)`。默认 `random` selector 在得分前 N 名
   中均匀随机，传入的权重会被忽略；`priority_select_num=1` 时选择最高分节点。
-- 失败路径：Filter 失败 → `BackoffSelect`（L72）；`shouldSkipBackoffForTemplate`
-  （L59）——模板创建请求**不走** backoff，这是模板本地性策略的关键分支。
+- 失败路径：Filter 失败 → `BackoffSelect`（L87）；`shouldSkipBackoffForTemplate`
+  （L72）——模板创建请求**不走** backoff，这是模板本地性策略的关键分支。
 - 你将在这里插入：`Select()` 出入口的延迟/成功率埋点、模板命中判定。
 
-### 1.2 📌 `CubeMaster/pkg/scheduler/init.go`（42 行，全读）
+### 1.2 📌 `CubeMaster/pkg/scheduler/init.go`（51 行，全读）
 
 `InitScheduler()`：preSelector / backoffSelector / filter / score / postScore 的装配点。
 Profile 机制落地时，这里（或下游 `NewSelector()`）是切换策略组合的入口。
 
-### 1.3 📌 `CubeMaster/pkg/scheduler/selctx/selectcontext.go`（175 行，全读）
+### 1.3 📌 `CubeMaster/pkg/scheduler/selctx/selectcontext.go`（198 行，全读）
 
 调度上下文 `SelectorCtx`：贯穿整条流水线的数据载体。重点：
 
-- `RequestResource`（L39）：一次创建请求的资源需求（Cpu/Mem/磁盘/`TemplateID`/
+- `RequestResource`（L43）：一次创建请求的资源需求（Cpu/Mem/磁盘/`TemplateID`/
   `ErofsImages`/`TemplateNodeScope`）——你的 Filter/Score 插件能拿到的全部请求信息。
-- `Affinity`（L33）：节点亲和性（NodeSelector / 优选 terms）。
-- `LeastRandomSelect`（L134）：构造最终 Top-N 候选及权重；实际选择语义由
+- `Affinity`（L36）：节点亲和性（NodeSelector / 优选 terms）。
+- `LeastRandomSelect`（L155）：构造最终 Top-N 候选及权重；实际选择语义由
   `least_select_name` 指定的 selector 决定，默认 `random` 为均匀随机。
 - `lastBadFilters` / `FilterOut`：熔断（circuit filter）机制。
 
-### 1.4 📌 `CubeMaster/pkg/scheduler/local.go`（319 行，全读）
+### 1.4 📌 `CubeMaster/pkg/scheduler/local.go`（347 行，全读）
 
 调度器的后台任务，**和"评估指标"直接相关**：
 
-- `reportStdevTrace()`（L217）：现有的节点 CPU/内存/MvmNum 使用率**标准差**上报
+- `reportStdevTrace()`（L239）：现有的节点 CPU/内存/MvmNum 使用率**标准差**上报
   （`rcrowley/go-metrics` + CubeLog Trace）——你的装箱率/均衡度指标要复用这条链路。
-- `monitorLimit()`（L259）：按健康节点数动态调整每节点创建并发上限
+- `monitorLimit()`（L285）：按健康节点数动态调整每节点创建并发上限
   （buffer queue 限流）——理解"突发短生命周期"场景必须先理解这段。
-- `AddBufferTask`（L110）：创建任务的缓冲队列入口。
+- `AddBufferTask`（L126）：创建任务的缓冲队列入口。
 
 ### 1.5 📌 调用点：创建与迁移路径
 
 - `CubeMaster/pkg/service/sandbox/sandbox_run.go`：`createSandboxContext.schedule()`
-  （L467）调用 `scheduler.Select`；`errorCodeRetry()`（L428）与 `backoffRetryDelay()`
-  （L483）——调度失败/cubelet 失败后的重试与重调度逻辑，"重调度率"指标埋在这里；
-  `dealMetric()`（L499）——创建链路现有的 metric 上报方式，可仿照。
+  （L468）调用 `scheduler.Select`；`errorCodeRetry()`（L429）与 `backoffRetryDelay()`
+  （L484）——调度失败/cubelet 失败后的重试与重调度逻辑，"重调度率"指标埋在这里；
+  `dealMetric()`（L500）——创建链路现有的 metric 上报方式，可仿照。
 - `CubeMaster/pkg/service/sandbox/sandbox_migrate.go` L40：迁移也走 `Select`，
   指标采集别忘了这条路径。
 
@@ -77,13 +78,13 @@ Profile 机制落地时，这里（或下游 `NewSelector()`）是切换策略�
 
 ### 2.1 📌 接口定义（两个文件，各 50 行左右）
 
-- `CubeMaster/pkg/selector/filter/init.go`：`Selector` 接口（`Select + ID`，L16）、
-  静态注册 map `filters`（L40）、`NewSelector()` 的 reflect 实例化（L22）。
+- `CubeMaster/pkg/selector/filter/init.go`：`Selector` 接口（`Select + ID`，L17）、
+  静态注册 map `filters`（L43）、`NewSelector()` 的 reflect 实例化（L32）。
 - `CubeMaster/pkg/selector/score/init.go`：`Selector` 接口（`Select + ID + Weight +
-  Disable`，L18）、静态注册 map `scores`（L52）。
+  Disable`，L19）、静态注册 map `scores`（L56）。
 
-**这两个 map 就是现有的代码内静态注册点**。新方案不会只把它们替换成全局 Registry，
-而是通过 `pluginapi/v1`、实例级 Registry 和启动入口显式注入完成迁移，详见设计文档 §4.2。
+**这两个 map 就是现有的代码内静态注册点**。新方案把它们替换为显式注册表
+（`Register`/`New`，编译期检查 + 未知插件名 fail fast），详见设计文档 §3.2。
 
 ### 2.2 📌 内置 Filter 插件（6 个，每个 60~90 行，全读）
 
@@ -122,7 +123,7 @@ Profile 机制落地时，这里（或下游 `NewSelector()`）是切换策略�
 - `postscore/whilelistscore.go`：白名单加减分（运营干预手段）。
 - `backofffilter/backofffilter.go`：Filter 全灭后的降级路径（只查亲和/磁盘/MvmNum）。
 
-### 2.5 📌 `CubeMaster/pkg/scheduler/affinity/nodeaffinity.go`（155 行）
+### 2.5 📌 `CubeMaster/pkg/scheduler/affinity/nodeaffinity.go`（170 行）
 
 K8s 风格 NodeSelector（In/NotIn/Exists/Gt/Lt）。亲和相关的策略（如专属集群、
 大规格机型亲和 `LargeSizeAffinityConf`）依赖它。
@@ -132,15 +133,15 @@ K8s 风格 NodeSelector（In/NotIn/Exists/Gt/Lt）。亲和相关的策略（如
 ## 第 3 阶段：配置体系（Profile 机制落在哪）
 
 - 📌 `CubeMaster/pkg/base/config/config.go`：
-  - `SchedulerConf`（L178）：调度器全部配置字段——overcommit、并发数、亲和、
+  - `SchedulerConf`（L252）：调度器全部配置字段——overcommit、并发数、亲和、
     各类 per-instance-type 覆盖。Profile 字段要加在这里。
-  - `SchedulerFilterConf`（L499）/ `SchedulerScoreConf`（L513）/ `ScorePluginConf`
-    （L519）/ `PostScoreConf`（L503）：现有的插件启用与权重配置。
+  - `SchedulerFilterConf`（L615）/ `SchedulerScoreConf`（L631）/ `ScorePluginConf`
+    （L638）/ `PostScoreConf`（L620）：现有的插件启用与权重配置。
     注意 `ScorePluginConf` 是**固定字段结构体**——每加一个 score 插件都要改它，
     这是扩展性短板之一。
-  - `GetEffectiveOvercommitRatio`（L273）与默认值（CPU=3、Mem=2，L265）。
-  - `EffectiveQuotaCpu` / `EffectiveAllocated` 等（L490 附近）：配额换算公共函数。
-- 📌 `CubeMaster/conf.yaml` L85 起的 `scheduler:` 段：配置的实际形态，
+  - `GetEffectiveOvercommitRatio`（L359）与默认值（CPU=3、Mem=2，L350-351）。
+  - `EffectiveQuotaCpu`（L413）/ `EffectiveAllocated`（L452）等：配额换算公共函数。
+- 📌 `CubeMaster/conf.yaml` L77 起的 `scheduler:` 段：配置的实际形态，
   你的 Profile 示例要加在这里。
 - 📌 `CubeMaster/pkg/base/constants/constants.go`：`SelectorFilterID` 等 ID 前缀
   （L9-13）与 20 个 `WeightFactor*` 因子名（L241-260）。
@@ -149,14 +150,14 @@ K8s 风格 NodeSelector（In/NotIn/Exists/Gt/Lt）。亲和相关的策略（如
 
 ## 第 4 阶段：数据底座（调度决策依赖的数据从哪来）
 
-- 📌 `CubeMaster/pkg/base/node/node.go`：`Node` 结构体（L20）——配额
+- 📌 `CubeMaster/pkg/base/node/node.go`：`Node` 结构体（L43）——配额
   （`QuotaCpu/QuotaMem`）、已分配（`QuotaCpuUsage/QuotaMemUsage`）、实时利用率
   （`CpuUtil/CpuLoadUsage/MemUsage`）、磁盘、MvmNum、健康状态等，打分因子的原料。
 - 📌 `CubeMaster/pkg/localcache/export.go`：调度器的数据访问门面，重点函数：
-  `GetSchedulableNodesByInstanceType`（L118）、`GetHealthyNodes`（L107）、
-  `MaxMvmLimit`/`RealMaxMvmLimit`（L352/372）、`CreateConcurrentLimit`/
-  `RealTimeCreateConcurrentLimit`（L383/401）、`HealthyMasterNodes`（L454）、
-  `GetImageStateByNode`（L463）。
+  `GetSchedulableNodesByInstanceType`（L117）、`GetHealthyNodes`（L106）、
+  `MaxMvmLimit`/`RealMaxMvmLimit`（L345/365）、`CreateConcurrentLimit`/
+  `RealTimeCreateConcurrentLimit`（L376/394）、`HealthyMasterNodes`（L447）、
+  `GetImageStateByNode`（L456）。
 - 选读：`localcache/node_cache.go`（节点清单维护）、`image_cache.go` /
   `template_locality.go`（模板副本分布——"模板命中率"指标的数据源）、
   `redis_cache.go`（分配账本在 Redis 的记录，`ignore_redis_allocation` 开关的由来）。
@@ -169,13 +170,13 @@ K8s 风格 NodeSelector（In/NotIn/Exists/Gt/Lt）。亲和相关的策略（如
 
 - 📌 现有单测（作为新插件测试模板）：
   - `selector/filter/template_locality_test.go`、`selector/score/imagescore_test.go`
-    （494 行，表驱动 + fake 数据的完整范例）；
+    （568 行，表驱动 + fake 数据的完整范例）；
   - `scheduler/schedule_test.go`（操作包级 `scheduler.filter` 变量的手法）；
   - `selector/score/asyncscore_test.go`、`selctx/selectcontext_test.go`。
 - 📌 `examples/cube-bench/`：现有端到端压测工具（打真实 CubeAPI，测创建/删除延迟，
   有 `--dry-run`、JSON 导出、报表 UI）。你的 `schedbench` 仿真器可以复用它的
   报表/统计代码（`stats.go`、`report.go`），但注意它**不含调度决策质量**维度。
-- 选读：`tests/e2e/`——E2E 框架，验收时若需要真实集群回归可看这里。
+- 选读：`tests/e2e/`——E2E 框架，需要真实集群回归时可看这里。
 
 ---
 
@@ -185,8 +186,8 @@ K8s 风格 NodeSelector（In/NotIn/Exists/Gt/Lt）。亲和相关的策略（如
   AI 辅助的 commit/PR 必须带 `Assisted-by: <AGENT>:<MODEL>`。
 - 📌 `CONTRIBUTING.md`：构建（`make cubemaster`）、文档 PR 规范
   （docs 中英目录、kebab-case 文件名、frontmatter）。
-- 📌 `CubeMaster/.golangci.yaml`：代码规范检查配置——验收标准里"PR 通过项目代码
-  规范检查"指的就是它，提交前本地跑 `golangci-lint run`。
+- 📌 `CubeMaster/.golangci.yaml`：代码规范检查配置——贡献者提交的 PR 需通过这套
+  规范检查，提交前本地跑 `golangci-lint run`。
 - `CubeMaster/Makefile`：测试/构建入口。
 
 ---
@@ -210,7 +211,7 @@ K8s 风格 NodeSelector（In/NotIn/Exists/Gt/Lt）。亲和相关的策略（如
 2. 新增一个 Filter / Score 插件，今天需要改哪几个文件？（答案：插件文件本身 +
    `init.go` 的 map + `ScorePluginConf` 结构体 + conf.yaml —— 这就是要改造的 4 个点）
 3. `enable_scorers` 里的插件权重与 `resource_weights` 里的因子权重如何叠加？
-   （`runScoreFilter` L194：`n.Score *= f.Weight()`，因子权重在各插件内部先加权）
+   （`runScoreFilter` L222：`n.Score *= f.Weight()`，因子权重在各插件内部先加权）
 4. overcommit 在哪里生效？（`EffectiveQuotaCpu/Mem`，被 cpu/mem filter 与打分因子共用）
 5. 模板本地性如何保证？它的"命中率"指标该用什么数据计算？
    （`template_locality` 硬过滤 + `image_score` 软打分；`GetImageStateByNode`）

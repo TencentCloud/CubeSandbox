@@ -47,9 +47,14 @@ type Config struct {
 	CubeProxyConf    *CubeProxyConf        `yaml:"cube_proxy_conf"`    // CubeProxy 路由缓存失效配置
 
 	// SoftDeletePurge configures the scheduled hard-purge of soft-deleted
-	// (tombstoned) database rows (issue #973). nil leaves the purger at its
-	// safe defaults (7-day retention, hourly, enabled). See CubeDB/tombstone.
-	// SoftDeletePurge 配置软删除（墓碑）行的定时硬清理；nil 时使用安全默认值（保留 7 天、每小时、启用）
+	// (tombstoned) database rows (issue #973). nil means the purger stays
+	// DISABLED; even when the block is present, enable: true is required —
+	// the purge is irreversible, so it is strictly opt-in. When enabled,
+	// unset retention/interval fall back to safe defaults (7 days, hourly).
+	// See CubeDB/tombstone.
+	// SoftDeletePurge 配置软删除（墓碑）行的定时硬清理；nil 时清理器保持禁用，
+	// 即使配置了该块也需 enable: true 显式开启——清理不可逆，严格按需启用。
+	// 启用后未设置的保留期/间隔回退到安全默认值（7 天、每小时）
 	SoftDeletePurge *SoftDeletePurgeConf `yaml:"soft_delete_purge"`
 
 	// VolumePlugins lists external Controller Hook Plugin configurations.
@@ -81,11 +86,11 @@ type CommonConf struct {
 	// HttpBind is the HTTP listen address. Empty means 0.0.0.0 (all
 	// interfaces); set to 127.0.0.1 to keep the API loopback-only.
 	// HttpBind HTTP 监听地址，默认 0.0.0.0；设为 127.0.0.1 则仅本机可访问
-	HttpBind                        string            `yaml:"http_bind"`
-	WriteTimeout                    int               `yaml:"http_writetimeout"`                   // HTTP 写超时（秒）
-	ReadTimeout                     int               `yaml:"http_readtimeout"`                    // HTTP 读超时（秒）
-	IdleTimeout                     int               `yaml:"http_idletimeout"`                    // HTTP 空闲超时（秒）
-	GraceFullStopTimeoutInSec       int               `yaml:"gracefull_stop_timeout_insec"`        // 优雅停机超时（秒）
+	HttpBind                  string `yaml:"http_bind"`
+	WriteTimeout              int    `yaml:"http_writetimeout"`            // HTTP 写超时（秒）
+	ReadTimeout               int    `yaml:"http_readtimeout"`             // HTTP 读超时（秒）
+	IdleTimeout               int    `yaml:"http_idletimeout"`             // HTTP 空闲超时（秒）
+	GraceFullStopTimeoutInSec int    `yaml:"gracefull_stop_timeout_insec"` // 优雅停机超时（秒）
 	// CubeOps node-management base URL.
 	CubeOpsAddr string `yaml:"cube_ops_addr"`
 	// CubeOpsBootRetries: additional LoadNodes attempts (0 = single-shot).

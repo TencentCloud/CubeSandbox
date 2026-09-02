@@ -1,7 +1,7 @@
 # CubeSandbox 集群调度性能评估与高性能调度插件系统 — 设计/修复文档
 
-> 实战任务一（项目导师：龙进）
-> 撰写日期：2026-08-19　对应代码基线：`master @ c458228e`（本 PR 与 master 的 merge base）
+> 代码基线：`master @ c458228e`（本 PR 与 master 的 merge base）。文中行号锚点以本 PR
+> 合并后的代码树为准（基线 + 本 PR 新增的注释）；本 PR 未改动的文件与 `master @ c458228e` 一致。
 
 ---
 
@@ -25,7 +25,7 @@ PreFilter ──► Filter（并行执行，取交集）──► Score（加权
   不健康、熔断、亲和性不匹配、MvmNum 超限、指标超时的节点。
 - **Filter 接口**（`pkg/selector/filter/init.go:17`）：`Select(ctx) (NodeList, error) + ID()`。
   内置 6 个：`cpu`、`mem`、`template_locality`、`realtime_create_num`、`disk`、`thirtparty`。
-  并行执行后取**交集**（`schedule.go:157` `parallelRunFilters`）。
+  并行执行后取**交集**（`schedule.go:159` `parallelRunFilters`）。
 - **Score 接口**（`pkg/selector/score/init.go:19`）：`Select + ID + Weight + Disable`。
   内置 4 个：`real_time_weighted_average`（实时配额余量加权）、
   `multi_factor_weighted_average`（异步预计算多因子）、`affinity_score`、`image_score`
@@ -34,20 +34,19 @@ PreFilter ──► Filter（并行执行，取交集）──► Score（加权
 - **PostScore**（`pkg/selector/postscore/whilelistscore.go`）：白名单加/减分。注意它并非独立
   阶段，而是在 `runScoreFilter` 内部**归一化之后、`AllSortByScore()` 排序之前**调用
   （`runScoreFilter` 中的 `postScore` 调用点，`schedule.go`）；新 Pipeline 必须保持这一相对顺序，否则白名单调整会被排序忽略。
-- **最终选择**：`selCtx.LeastRandomSelect(PrioritySelectNum)`（`schedule.go:64`）。其实际行为
+- **最终选择**：`selCtx.LeastRandomSelect(PrioritySelectNum)`（`schedule.go:66`）。其实际行为
   由两个配置项共同决定，**未显式配置时打分结果几乎被完全丢弃**：
 
   | 配置项 | 默认值 | 影响 |
   |---|---|---|
-  | `least_select_name` | `random`（`config.go:249`，缺省填充见 `preHandleScheduler`，`config.go`） | `randomSelect.Add()` 显式忽略 weight 参数（`random_select.go:21-23`），即便 `LeastRandomSelect` 传入了 `Score*1e6`（`selectcontext.go:161`）也不生效 |
+  | `least_select_name` | `random`（字段定义 `config.go:260`，缺省填充见 `preHandleScheduler`，`config.go`） | `randomSelect.Add()` 显式忽略 weight 参数（`random_select.go:21-23`），即便 `LeastRandomSelect` 传入了 `Score*1e6`（`selectcontext.go:165`）也不生效 |
   | `priority_select_num` | **`-1` = 不限制**（`preHandleScheduler` 中的缺省填充，`config.go`；`conf.yaml:78` 才显式写为 1） | `LeastNodes(-1)` 返回全部候选，而非 Top-N |
 
   两者叠加：**当 YAML 未显式设置 `priority_select_num`（即保持代码默认 `-1`）时，部署在
   全部通过 Filter 的候选节点中等概率随机选择**，Score 阶段的排序结果不产生任何影响。
   仓库自带的 `conf.yaml` 显式写了 `priority_select_num: 1`，按该配置部署则确定性取最高分
-  节点、打分真实生效——退化只发生在沿用代码缺省值的部署上。这正是 issue #573（打分缺省时
-  的退化行为）描述的现象，也是本任务"基线可
-  显著改善"的最直接依据——不是插件算得不好，而是算完没被使用。
+  节点、打分真实生效——退化只发生在沿用代码缺省值的部署上。这是"打分缺省时退化"的典型
+  现象，也是本方案"基线可显著改善"的最直接依据——不是插件算得不好，而是算完没被使用。
 
   需要说明的是，加权路径本身是存在的：显式配置 `least_select_name: rw` 会走
   `weighted.RandW`，`sw`/`rrw` 同理，此时权重真实生效。所以这是**配置缺省值问题，而非实现
@@ -61,14 +60,14 @@ PreFilter ──► Filter（并行执行，取交集）──► Score（加权
 - 配置驱动：`conf.yaml` 的 `scheduler.filter.enable_filters` /
   `scheduler.score.enable_scorers` 按名字启用；权重在
   `scheduler.score.plugin_conf.<plugin>.weight` 与 `scheduler.score.resource_weights` 中
-  （结构体见 `pkg/base/config/config.go:241` `SchedulerConf`、`config.go:627` `ScorePluginConf`）。
-- overcommit：`scheduler.overcommit_ratio`（默认 CPU=3、Mem=2，见 `config.go:339-340`，
-  可按 instance_type 覆盖，`config.go:348` `GetEffectiveOvercommitRatio`）。
+  （结构体见 `pkg/base/config/config.go:252` `SchedulerConf`、`config.go:638` `ScorePluginConf`）。
+- overcommit：`scheduler.overcommit_ratio`（默认 CPU=3、Mem=2，见 `config.go:350-351`，
+  可按 instance_type 覆盖，`config.go:359` `GetEffectiveOvercommitRatio`）。
 
 **存在的扩展性问题：**
 1. 新插件必须改 `pkg/selector/{filter,score}` 包内的 map —— 入侵式，第三方无法在自己仓库注册；
 2. `ScorePluginConf` 是**固定字段结构体**，每加一个 score 插件就要改 config 结构体。
-   现成的反面例证：`config.go:632` 已定义 `TemplateScore *TemplateScore` 字段并可被 yaml 解析，
+   现成的反面例证：`config.go:643` 已定义 `TemplateScore *TemplateScore` 字段并可被 yaml 解析，
    但 `score/init.go:56` 的注册表中**并没有对应的构造函数**——配置面存在、实现面缺失的死字段。
    配置结构与插件集合分离正是 §3.3 改用 per-plugin `args` 的直接动因；
 3. 没有"策略 Profile"概念：切换一套策略要同时改 enable_filters / enable_scorers / 多个
@@ -90,16 +89,16 @@ PreFilter ──► Filter（并行执行，取交集）──► Score（加权
 
 ---
 
-## 2. 目标与验收标准映射
+## 2. 设计目标
 
-| # | 验收标准 | 设计方案对应章节 |
+| # | 设计目标 | 对应章节 |
 |---|---|---|
 | 1 | 指标定义文档，benchmark 输出 ≥5 项调度质量指标 | §3.1 指标定义 + §5 benchmark 报告 |
 | 2 | 插件统一接入流水线，配置文件可切换策略 Profile | §3.2 注册表 + §3.3 Profile 与 per-plugin 配置 |
-| 3 | ≥3 种内置调度策略，各有适用场景说明与配置示例 | §4.1 ~ 5.3 |
-| 4 | 用户自定义插件开发示例与文档 | §4.4 |
+| 3 | 提供 ≥3 种内置调度策略，各有适用场景说明与配置示例 | §4.1 ~ 5.3 |
+| 4 | 提供用户自定义插件开发示例与文档 | §4.4 |
 | 5 | benchmark 含 ≥3 种 workload，一键运行生成对比报告 | §5.2 |
-| 6 | 新策略至少一项指标明显改善，trade-off 需说明 | §5.3 报告 + §8 验收阈值 |
+| 6 | 新策略至少一项指标明显改善，trade-off 需说明 | §5.3 报告 + §8 参考阈值 |
 | 7 | 单测覆盖新增插件核心逻辑，PR 过代码规范检查 | §6、§7 |
 
 ---
@@ -108,19 +107,19 @@ PreFilter ──► Filter（并行执行，取交集）──► Score（加权
 
 ### 3.0 设计思路
 
-任务要求是"**在现有 `filter.Selector` / `score.Selector` 接口基础上**，设计可扩展的调度插件
-注册与配置机制"。因此本方案**不新建插件接口**：两个 `Selector` 接口保持原样，新插件与内置
+本方案的设计目标是"**在现有 `filter.Selector` / `score.Selector` 接口基础上**，提供可扩展的
+调度插件注册与配置机制"。因此**不新建插件接口**：两个 `Selector` 接口保持原样，新插件与内置
 插件实现同一接口，不存在 legacy 与新 API 的双轨。
 
-现有接口已经具备验收所需的三项能力，缺口全部在**注册与配置层**：
+现有接口已经具备所需的三项能力，缺口全部在**注册与配置层**：
 
-| 验收要求 | 现有接口 | 缺口 |
+| 能力要求 | 现有接口 | 缺口 |
 |---|---|---|
 | 启用/禁用插件 | `score.Selector.Disable()` 已定义并被 4 个插件实现 | 无（Profile 直接复用） |
 | 调整权重 | `score.Selector.Weight()` 已定义，`runScoreFilter` 已加权求和并归一化（`schedule.go`） | 无（Profile 直接复用） |
 | 组合为策略 Profile | — | 配置层缺 Profile 分组 |
 | 插件注册 | 包级 map + reflect（`filter/init.go:32,43`、`score/init.go:39,56`） | 换成显式注册表 |
-| 插件参数 | 固定字段 `ScorePluginConf`（`config.go:627`） | 换成 per-plugin `args` |
+| 插件参数 | 固定字段 `ScorePluginConf`（`config.go:638`） | 换成 per-plugin `args` |
 
 即 `Weight()` / `Disable()` 本来就是为可配置化设计的，只是上层没有对应的配置结构。三项改造
 互相独立，均不触及 `Selector` 接口签名：
@@ -130,7 +129,7 @@ PreFilter ──► Filter（并行执行，取交集）──► Score（加权
 2. **per-plugin `args`**（§3.3）：取代固定字段结构体，新增插件不必再改 config 结构；
 3. **Profile**（§3.3）：命名策略组合，一处配置切换整套 filter/score/权重/picker。
 
-自定义插件的接入方式即任务要求的"**实现标准接口并注册即可**"：在自己的包里实现
+自定义插件的接入方式为"**实现标准接口并注册即可**"：在自己的包里实现
 `filter.Selector` 或 `score.Selector`，调用 `Register` 注册，在装配处 import 该包，
 重新构建即可生效。不要求动态热加载。
 
@@ -154,7 +153,7 @@ conf.yaml (profiles)                 CubeMaster
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.1 调度评估指标体系（交付物 1）
+### 3.1 调度评估指标体系
 
 沿用 CubeMaster 已有 Prometheus 暴露链路，在 `CubeMaster/pkg/scheduler/metrics.go` 集中定义
 指标；速率和分位数由 PromQL 从 counter/histogram 推导，不再重复维护易漂移的 rate gauge。
@@ -187,7 +186,7 @@ conf.yaml (profiles)                 CubeMaster
 指标定义、PromQL 示例和 label 基数约束分别落到
 `docs/dev/scheduler-metrics.md` 与 `docs/zh/dev/scheduler-metrics.md`。
 
-### 3.2 插件注册表（交付物 2 之注册部分）
+### 3.2 插件注册表
 
 `Selector` 接口不变，只把"名字 → 实例"的构造方式从 reflect 换成显式注册表。
 `filter` 与 `score` 各一份，结构同构：
@@ -231,7 +230,7 @@ func init() {
 注册表是包级的，与现状一致；单测通过 `Register` + 独立 `New` 调用即可覆盖，无需暴露实例级
 容器。重复注册同名插件返回 error，在启动期暴露。
 
-### 3.3 Profile 与 per-plugin 配置（交付物 2 之配置部分）
+### 3.3 Profile 与 per-plugin 配置
 
 Profile 不直接复用固定字段的 `ScorePluginConf`，每个插件拥有独立 `args`：
 
@@ -263,9 +262,10 @@ scheduler:
 > `mvm_num`、`cpu_util`、`image_id`、`template_id`。legacy translator 依赖这套名字做双向映射，
 > 本方案不改名。
 
-与 legacy 的结构差异：现状 `EnableWeightFactors []string`（`config.go:644-648`）只声明启用哪些
-因子，权重统一从全局 `Score.ResourceWeights map[string]float64`（`config.go:68`）查
-（`utils.go:65-76` `getFactorWeight`）——即**因子的启用与权重被拆在两处、且权重全局共享，
+与 legacy 的结构差异：现状各 score 插件配置中的 `EnableWeightFactors []string` 字段
+（`config.go`，每个插件结构体各一份）只声明启用哪些因子，权重统一从全局
+`Score.ResourceWeights map[string]float64`（`config.go:633`）查
+（`utils.go:66-76` `getFactorWeight`）——即**因子的启用与权重被拆在两处、且权重全局共享，
 不同 scorer 无法对同一因子取不同权重**。Profile 的 `args.factors` 把二者合并为 per-plugin
 的 `map[string]float64`，legacy translator 负责把旧的 `[]string` + 全局 map 翻译成等价的
 per-plugin map，保证默认行为不变。
@@ -305,14 +305,14 @@ Profile 的 picker 支持：`best`、`top_n_uniform`、`top_n_weighted`。
   和 fragmentation；
 - 热路径只做固定 label 的 Counter/Histogram 观测，不记录 node_id/template_id，
   防止 Prometheus 时序爆炸。注：现有 `cube_snapshot_storage_mode`
-  （`snapshot_metrics.go:29-32`）已使用 node 级 label，本方案不扩大该模式。
+  （`pkg/templatecenter/snapshot_metrics.go:29-32`）已使用 node 级 label，本方案不扩大该模式。
 
 > 本方案不涉及资源预占。#695 所述并发超卖需要独立的原子 reservation/rollback 机制，
-> 属于并发正确性问题，与调度策略质量正交，不在本任务范围内。
+> 属于并发正确性问题，与调度策略质量正交，不在本方案范围内。
 
 ---
 
-## 4. 内置调度策略（交付物 3）
+## 4. 内置调度策略
 
 三个策略均为 Profile 配置；尽量组合现有插件，只在缺少能力时新增插件。
 
@@ -341,7 +341,7 @@ Profile 的 picker 支持：`best`、`top_n_uniform`、`top_n_weighted`。
   才饱和，未命中为 0。即本地性是偏弱、随镜像大小与散布度缩放的连续信号，而非
   "命中满分"，原先"权重须落在较窄区间"的推断不成立。相反，要让本地性左右排序，
   `image_score` 权重需显著高于按 0~100 打分的实时因子（粗略估计高一个量级），且有效
-  权重随模板镜像大小与散布度变化。该比值由阶段 3（9/3–9/8）的敏感性扫描（§7）在
+  权重随模板镜像大小与散布度变化。该比值由步骤 3 的敏感性扫描（§7）在
   `template_storm` workload 上扫出，实验中固定并记录模板镜像大小与副本散布度，
   不预设固定值；权重过高仍会退化为近似硬过滤；
 - **Picker**：`best`，使高权重本地性得分稳定生效；
@@ -368,7 +368,7 @@ score = 100 × (1 - weightedMean(cpuRemain, memRemain))
 策略 benchmark 必须固定相同 overcommit ratio；把 overcommit 与策略同时改变会产生混杂
 变量，无法说明收益来自插件。生产 Profile 可以覆盖 overcommit，但报告需将其作为单独实验。
 
-### 4.4 自定义插件开发示例（交付物 4）
+### 4.4 自定义插件开发示例
 
 新增中英文 `docs/dev/scheduler-plugin-development.md` 与
 `docs/zh/dev/scheduler-plugin-development.md`，配套示例代码
@@ -389,11 +389,11 @@ score = 100 × (1 - weightedMean(cpuRemain, memRemain))
 
 ---
 
-## 5. 调度 Benchmark 与实机验证（交付物 5、6）
+## 5. 调度 Benchmark 与实机验证
 
-### 5.1 实机验证环境（验收数据以实机测量为准）
+### 5.1 实机验证环境（效果数据以实机测量为准）
 
-项目环境具备真实 CPU 资源，对比实验直接在真实集群上运行，验收数字全部来自实测，
+项目环境具备真实 CPU 资源，对比实验直接在真实集群上运行，效果数字全部来自实测，
 不依赖离线仿真：
 
 - **集群形态**：1 个 CubeMaster + ≥3 个 cubelet 节点（可用同机多 VM 或多 cubelet 实例，
@@ -419,10 +419,10 @@ master 侧从 §3.1/§3.4 的指标链路（Prometheus `/metrics`）在实验窗
 节点侧同窗口采集 CPU/Mem CV、装箱率、碎片率、活跃/空节点数。
 
 需要的改造（单测与基准测试同样需要，与仿真无关）：`template_locality`
-（`template_locality.go:50,91`）与 `realtime_create_num`（`realtimecreatelimit.go:40-48`）
+（`template_locality.go:54,96`）与 `realtime_create_num`（`realtimecreatelimit.go:40-48`）
 目前直接调用 localcache 包级函数，需补上与 `imagescore.go:34`、`prefilter.go:26`
 同款的函数指针注入点，使这两个插件在单测与 go bench 中可注入 fake 数据。
-这是 §7 阶段 2 注册表改造的一部分。
+这是 §7 步骤 2 注册表改造的一部分。
 
 ### 5.2 三种内置 Workload
 
@@ -465,24 +465,23 @@ master 侧从 §3.1/§3.4 的指标链路（Prometheus `/metrics`）在实验窗
 新增代码执行 `go test -race ./...`（资源允许的 package）、`go vet ./...`、
 `golangci-lint run ./...` 和 `gofmt`。基准测试设置性能门槛：`legacy-default` Profile 在固定
 100 节点用例中，调度吞吐下降不超过 5%，P95 额外开销不超过 5%；超限需 profile/pprof 解释。
-该门槛的基线由阶段 1（8/19–8/26）搭建的单机基准用例产出（§7）。
+该门槛的基线由步骤 1 搭建的单机基准用例产出（§7）。
 
 ---
 
-## 7. 时间规划与阶段交付
+## 7. 实施步骤
 
-按硬期限倒排：**设计文档 2026-08-26 交付，2026-09-11 前提交全部 PR**。总工期约三周半，
-压缩为四个阶段，每个阶段形成可独立审查、可回滚的 PR，避免最后一次性提交大改动：
+按依赖顺序分四步推进，每步形成可独立审查、可回滚的 PR，避免一次性提交大改动：
 
-| 时间 | 重点工作 | 交付物与退出条件 |
+| 步骤 | 重点工作 | 产出与完成条件 |
 |---|---|---|
-| 阶段 1（8/19–8/26） | 设计评审与定稿；指标口径与埋点、cube-bench workload 扩展骨架先行 | **8/26 设计文档交付**；指标文档；cube-bench 可跑通单 workload 实机流程；单机基准用例产出性能门槛基线 |
-| 阶段 2（8/27–9/2） | filter/score 注册表、localcache 注入点、4 处 panic 整改；per-plugin `args` + Profile + legacy translator | 注册表 PR 与 Profile PR 提交；未知插件名 fail fast；legacy 配置逐字节等价；默认行为 golden test 通过 |
-| 阶段 3（9/3–9/8） | 三个 Profile、demand-aware binpack、权重敏感性扫描；cube-bench 三类 workload 与报告生成、实机矩阵实验 | 策略 PR 提交；一键生成 MD/JSON/CSV、固定 seed 可复现、输出 ≥5 指标；§4.2 权重区间由实机实验确定 |
-| 阶段 4（9/9–9/11） | 参数实验收尾、中英文文档、示例插件、CI 收尾 | **9/11 前提交全部 PR**：对比报告、开发文档与示例、全部 CI 通过 |
+| 步骤 1 | 设计评审与定稿；指标口径与埋点、cube-bench workload 扩展骨架先行 | 设计文档定稿；指标文档；cube-bench 可跑通单 workload 实机流程；单机基准用例产出性能门槛基线 |
+| 步骤 2 | filter/score 注册表、localcache 注入点、4 处 panic 整改；per-plugin `args` + Profile + legacy translator | 注册表 PR 与 Profile PR 提交；未知插件名 fail fast；legacy 配置逐字节等价；默认行为 golden test 通过 |
+| 步骤 3 | 三个 Profile、demand-aware binpack、权重敏感性扫描；cube-bench 三类 workload 与报告生成、实机矩阵实验 | 策略 PR 提交；一键生成 MD/JSON/CSV、固定 seed 可复现、输出 ≥5 指标；§4.2 权重区间由实机实验确定 |
+| 步骤 4 | 参数实验收尾、中英文文档、示例插件、CI 收尾 | 对比报告、开发文档与示例、全部 CI 通过 |
 
-阶段 2 的两个 PR 串行合入，阶段 3 的策略与 benchmark 可并行推进；若阶段 3 进度受挤压，
-优先保证策略 PR 与对比报告，中英文文档与示例插件在 9/11 前以独立 PR 补齐。
+步骤 2 的两个 PR 串行合入，步骤 3 的策略与 benchmark 可并行推进；若步骤 3 进度受挤压，
+优先保证策略 PR 与对比报告，中英文文档与示例插件随后以独立 PR 补齐。
 
 推荐 PR 顺序：指标/benchmark 基线 → 注册表 → Profile → 策略 → benchmark 报告 →
 文档与示例。
@@ -496,9 +495,9 @@ PR 提交注意（遵循 `CONTRIBUTING.md` 与根目录 `AGENTS.md`）：
 
 ---
 
-## 8. 预期效果、验收阈值与风险
+## 8. 预期效果与风险
 
-以下是验收目标，不是脱离实验的性能承诺；最终以相同 workload、seed 和 overcommit 的
+以下是评估用的参考阈值，不是脱离实验的性能承诺；最终以相同 workload、seed 和 overcommit 的
 对照报告为准，至少一个新策略达到对应主目标且守住成功率门槛：
 
 | Profile | 主目标（相对 legacy-default） | 守门指标 | 已知权衡 |
@@ -517,7 +516,7 @@ PR 提交注意（遵循 `CONTRIBUTING.md` 与根目录 `AGENTS.md`）：
   保证逐字节兼容，golden test 覆盖 §3.3 picker 映射表全部组合；
 - **模板本地性打分信号偏弱**：`calculatePriority`（`imagescore.go`）的聚合截断 + 线性映射
   使典型大小模板的命中得分仅为个位数（~5GB 全散布 ≈6/100，30% 散布 ≈2/100），而非满分；
-  本地性容易被按 0~100 打分的实时资源因子淹没。§4.2 的权重比需由阶段 3（9/3–9/8）的
+  本地性容易被按 0~100 打分的实时资源因子淹没。§4.2 的权重比需由步骤 3 的
   敏感性扫描确定，扫描须固定并记录模板镜像大小与散布度，不预设固定值；
 - **指标基数与性能**：禁止请求、节点、模板 ID 作为 label；通过 benchmark 守住 5% 门槛；
 - **实机实验噪声与规模限制**：集群规模有限（≥3 节点）且存在环境噪声，每组实验
