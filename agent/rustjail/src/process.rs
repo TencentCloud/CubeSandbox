@@ -805,8 +805,8 @@ mod tests {
     fn test_reset_log_stream_readers_keeps_pipe_readable() {
         let (r, w) = unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
         let logger = Logger::root(slog::Discard, o!("source" => "unit-test"));
-        let mut process = Process::new(&logger, &OCIProcess::default(), "reset-io", true, 32)
-            .unwrap();
+        let mut process =
+            Process::new(&logger, &OCIProcess::default(), "reset-io", true, 32).unwrap();
         process.parent_stdout = Some(r);
         process.reset_log_stream_readers().unwrap();
         assert!(process.readers.is_empty());
