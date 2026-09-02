@@ -215,11 +215,15 @@ artifact, not a regression.
 > trip it), and at rates of several hundred req/s the mean inter-arrival
 > approaches the `time.Sleep` granularity, where even healthy runs can exceed
 > it — treat the marker as advisory there. An early TUI quit stops the
-> dispatcher from releasing further requests (released ones still run their
-> create/lifetime/delete cycle out; the per-request server-side `timeout` is
-> the backstop for anything abandoned) and exports
-> `partial: 1` in `summary` (suppressing the saturation marker), which
-> `compare` surfaces as a note and covers with the same key exclusion, plus
+> dispatcher from releasing further requests and exports
+> `partial: 1` in `summary` (suppressing the saturation marker). Released
+> requests are best-effort: the process does not wait for them after a quit,
+> so a worker killed mid create/delete can strand a sandbox — the per-request
+> server-side `timeout` (set only for lifetime-bearing runs) is the backstop.
+> The partial marker — which legacy-mode exports also carry on an early
+> quit, so the JSON never disagrees with the console note — is surfaced by
+> `compare` as a note and covers the flagged group with the dispatch-key
+> exclusion, plus
 > the truncated `per_template.*` blocks (they aggregate only the results
 > consumed before the quit; a saturated run keeps them — they reflect what
 > actually ran).

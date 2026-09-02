@@ -452,6 +452,35 @@ func TestExportJSONPartialMarked(t *testing.T) {
 	}
 }
 
+func TestExportJSONLegacyPartialMarked(t *testing.T) {
+	// The truncation note prints for legacy runs too, so a truncated legacy
+	// export must carry the same marker instead of looking like a finished
+	// run to downstream consumers (compare pops it generically).
+	cfg := &Config{
+		Template:       "tpl-a",
+		Mode:           "create-delete",
+		Total:          5,
+		requestHeaders: map[string]string{},
+		elapsed:        5,
+	}
+	cfg.Output = t.TempDir() + "/report.json"
+
+	exportJSON([]IterResult{{Seq: 1, CreateMs: 100, DeleteMs: 40}}, cfg)
+
+	data, err := os.ReadFile(cfg.Output)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	summary := report["summary"].(map[string]any)
+	if got := summary["partial"]; got != float64(1) {
+		t.Fatalf("partial = %v, want 1", got)
+	}
+}
+
 func TestDispatchSaturated(t *testing.T) {
 	cfg, results := scheduledExportFixture()
 

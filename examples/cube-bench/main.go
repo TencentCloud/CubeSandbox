@@ -567,15 +567,16 @@ func exportJSON(results []IterResult, cfg *Config) {
 		"success_rate":   successRate,
 		"throughput_qps": throughput,
 	}
+	// An early TUI quit exports a truncated sample: mark it so partial
+	// aggregates are not misread as run characteristics (compare pops the
+	// marker and notes the group). This applies to legacy runs too — the
+	// console note prints for both modes, so the export must not disagree.
+	partial := runTruncated(results, cfg)
+	if partial {
+		summaryBlock["partial"] = 1
+	}
 	if cfg.Scheduled {
-		// An early TUI quit exports a truncated sample: mark it so partial
-		// dispatch_*/queue_delay_* aggregates are not misread as run
-		// characteristics (compare pops the marker and notes the group),
-		// and skip the saturation marker whose own sample is truncated.
-		partial := runTruncated(results, cfg)
-		if partial {
-			summaryBlock["partial"] = 1
-		}
+		// Skip the saturation marker whose own sample is truncated.
 		// Dispatch-side throughput: requests released per second of the
 		// dispatch window. Unlike throughput_qps (total requests over the
 		// whole run), this excludes per-sandbox lifetime tails, so it
@@ -745,8 +746,9 @@ func main() {
 
 	// stopAsked ends scheduled dispatch when the operator quits the TUI early,
 	// so the client stops releasing new sandboxes against a cluster whose run
-	// has been abandoned (released ones still finish their cycle; the
-	// per-request server-side timeout is the backstop).
+	// has been abandoned. Released requests are best-effort: the process does
+	// not wait for them after a quit, and the per-request server-side timeout
+	// (set only with --lifetime) is the backstop for anything abandoned.
 	stopAsked := make(chan struct{})
 	if cfg.Scheduled {
 		go RunScheduled(cfg, sched, resultCh, client, stopAsked)
@@ -771,8 +773,8 @@ func main() {
 		if cfg.Scheduled {
 			close(stopAsked)
 			// Pull in results that completed but sat unread in the buffer when
-			// the TUI stopped consuming, so a truncated sample covers
-			// everything finished by quit time.
+			// the TUI stopped consuming. Best effort: results still in flight
+			// at this instant are simply absent from the truncated sample.
 		drain:
 			for {
 				select {

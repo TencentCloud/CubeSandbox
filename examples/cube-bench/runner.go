@@ -265,8 +265,10 @@ func RunBenchmark(cfg *Config, resultCh chan<- IterResult, client *http.Client) 
 // concurrency semaphore before releasing the goroutine. The gap between
 // scheduled arrival and actual goroutine start is reported as SchedDelayMs.
 // Closing stop (e.g. an early TUI quit) ends dispatch: requests not yet
-// released are skipped, while released ones run their full create/lifetime/
-// delete cycle. A nil stop channel never fires.
+// released are skipped. Released ones are NOT waited on at quit — main
+// returns and the process may exit mid create/lifetime/delete, so an
+// abandoned sandbox relies on the server-side timeout backstop (present
+// only in lifetime-bearing runs). A nil stop channel never fires.
 func RunScheduled(cfg *Config, sched []ScheduledRequest, resultCh chan<- IterResult, client *http.Client, stop <-chan struct{}) {
 	sem := make(chan struct{}, cfg.Concurrency)
 	var wg sync.WaitGroup
