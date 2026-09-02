@@ -277,36 +277,57 @@ func parseConfig() *Config {
 		cfg.Total = 1
 	}
 
-	// A worker slot is held for the full sandbox lifetime, so the dispatcher
-	// can only honor the requested Poisson rate when concurrency >= rate x
-	// mean lifetime; otherwise queue delays measure the client's own
-	// concurrency limit, not the scheduler. Warn loudly (presets included).
-	if cfg.Scheduled && cfg.hasLifetime {
+	// A worker slot is held for the request's whole occupancy, so the
+	// dispatcher can only honor the requested Poisson rate when
+	// concurrency >= rate x mean occupancy; otherwise queue delays measure
+	// the client's own concurrency limit, not the scheduler. Warn loudly.
+	if cfg.Scheduled {
 		meanLife := (cfg.LifetimeMin + cfg.LifetimeMax) / 2
-		if cfg.Rate > 0 {
-			if needed := cfg.Rate * meanLife; float64(cfg.Concurrency) < needed {
-				fmt.Fprintf(os.Stderr, "WARNING: --concurrency %d is below rate(%g/s) x mean lifetime(%gs) = %.0f; "+
-					"the dispatcher will stall on the semaphore and neither the arrival rate nor queue-delay metrics will be honored\n",
-					cfg.Concurrency, cfg.Rate, meanLife, needed)
+		// occS estimates how long a worker slot is held per request; known is
+		// false when no estimate exists (real run without a lifetime hold:
+		// only the unknown create/delete latency occupies the slot).
+		// Dry-run occupancy uses the synthetic latencies and the clamped
+		// lifetime sleep (dryRunMaxLifetimeSleep), never the configured
+		// lifetime range; create-only holds the slot for the create alone.
+		occS, known := 0.0, false
+		switch {
+		case cfg.DryRun:
+			occS, known = cfg.DryLatencyMean/1000, true
+			if cfg.Mode == "create-delete" {
+				occS += cfg.DryLatencyMean * 0.4 / 1000
+				if cfg.hasLifetime {
+					occS += min(meanLife, dryRunMaxLifetimeSleep.Seconds())
+				}
 			}
-		} else if est := float64(cfg.Total) * meanLife / float64(cfg.Concurrency); est > 300 {
+		case cfg.hasLifetime && cfg.Mode == "create-delete":
+			// Real create-delete run: create/delete latency is unknown ahead
+			// but the lifetime dominates for any realistic setting.
+			occS, known = meanLife, true
+		}
+		switch {
+		case cfg.Rate > 0 && known:
+			if needed := cfg.Rate * occS; float64(cfg.Concurrency) < needed {
+				fmt.Fprintf(os.Stderr, "WARNING: --concurrency %d is below rate(%g/s) x mean occupancy(%gs) = %.0f; "+
+					"the dispatcher will stall on the semaphore and neither the arrival rate nor queue-delay metrics will be honored\n",
+					cfg.Concurrency, cfg.Rate, occS, needed)
+			}
+		case cfg.Rate > 0:
+			// Real run with the slot held for create(+delete) only: no
+			// occupancy estimate to compute a numeric threshold from, so warn
+			// qualitatively.
+			fmt.Fprintf(os.Stderr, "WARNING: --rate without --lifetime: each worker slot is still occupied for "+
+				"create+delete, so at high rates a low --concurrency stalls the dispatcher and queue-delay "+
+				"metrics measure the client's own semaphore, not the scheduler\n")
+		case !cfg.DryRun && cfg.hasLifetime && cfg.Mode == "create-delete":
 			// ASAP dispatch with lifetimes: every worker slot is held for the
 			// full lifetime, so the run time is bounded below by
 			// total x mean lifetime / concurrency.
-			fmt.Fprintf(os.Stderr, "WARNING: %d requests with mean lifetime %gs at --concurrency %d will take at least ~%.0fs; "+
-				"raise --concurrency or add --rate to pace arrivals\n",
-				cfg.Total, meanLife, cfg.Concurrency, est)
+			if est := float64(cfg.Total) * occS / float64(cfg.Concurrency); est > 300 {
+				fmt.Fprintf(os.Stderr, "WARNING: %d requests with mean lifetime %gs at --concurrency %d will take at least ~%.0fs; "+
+					"raise --concurrency or add --rate to pace arrivals\n",
+					cfg.Total, meanLife, cfg.Concurrency, est)
+			}
 		}
-	}
-	if cfg.Scheduled && cfg.Rate > 0 && !cfg.hasLifetime {
-		// No --lifetime, but a worker slot is still held for create+delete:
-		// at high rates a small -c stalls the dispatcher just the same, and
-		// queue_delay_* then measures the client's own semaphore, not the
-		// scheduler. There is no residence estimate to compute a numeric
-		// threshold from, so warn qualitatively.
-		fmt.Fprintf(os.Stderr, "WARNING: --rate without --lifetime: each worker slot is still occupied for "+
-			"create+delete, so at high rates a low --concurrency stalls the dispatcher and queue-delay "+
-			"metrics measure the client's own semaphore, not the scheduler\n")
 	}
 
 	// Validate host-mount early so the CLI fails fast on bad input while still
@@ -699,6 +720,22 @@ func main() {
 	cfg.elapsed = time.Since(startTime).Seconds()
 
 	RenderReport(allResults, cfg)
+
+	// If queue-delay p95 exceeds the mean inter-arrival time, the dispatcher
+	// fell permanently behind and the offered load degenerated to bursts; the
+	// queue_delay_* metrics then measure the client semaphore, not the
+	// scheduler. Surface that instead of letting the numbers read as a valid
+	// scheduled-mode run.
+	if cfg.Scheduled && cfg.Rate > 0 {
+		if delays := extractTimes(allResults, func(r IterResult) float64 { return r.SchedDelayMs }); len(delays) > 0 {
+			if p95, interArrival := Percentile(delays, 95), 1000/cfg.Rate; p95 > interArrival {
+				fmt.Fprintf(os.Stderr, "WARNING: queue-delay p95 (%.0fms) exceeded the mean inter-arrival time (%.0fms): "+
+					"the dispatcher fell permanently behind and the offered load degenerated to bursts — "+
+					"queue_delay_*/dispatch metrics measure the client's semaphore, not the scheduler. Raise --concurrency.\n",
+					p95, interArrival)
+			}
+		}
+	}
 
 	if cfg.Output != "" {
 		exportJSON(allResults, cfg)

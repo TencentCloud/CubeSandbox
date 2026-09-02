@@ -179,7 +179,11 @@ queue metrics in one `compare` run.
 > comparable. Set `--concurrency` at least that high (e.g. `burst`: 50 req/s ×
 > ~65 s ≈ 3250) or the dispatcher stalls on the semaphore and the requested
 > `--rate` is not honored; the tool prints a startup warning when it detects
-> this.
+> this, and at the end of a run it also measures the realized queue-delay p95
+> against the mean inter-arrival time (1000/rate) and warns when p95 exceeds
+> it — at that point the dispatcher has fallen permanently behind, the offered
+> load has degenerated to bursts, and the `queue_delay_*`/`dispatch_*` metrics
+> describe the client's semaphore rather than the offered schedule.
 
 ### Trace file schema
 
@@ -201,7 +205,10 @@ Requests are sorted by `arrival_ms`; `cpu_millis`/`mem_mib` come from the
 `lifetime_ms` is the planned hold time measured from create completion (the
 client sleeps it after the create response returns); true sandbox residence is
 `create + lifetime + delete`, so trace replayers modeling occupancy should add
-the create/delete tail themselves.
+the create/delete tail themselves. `arrival_ms` and `lifetime_ms` are integer
+milliseconds — at rates above ~1000/s sub-millisecond arrival spacing is
+truncated, and the authoritative replay order is `seq`, not the truncated
+timestamps.
 
 Note on `seq` numbering: scheduled mode (and the trace contract) numbers
 requests 0..N-1, while the legacy non-scheduled export numbers `raw[].seq`
@@ -265,6 +272,18 @@ Caveats when reading verdicts:
   so with tight CIs on both sides even a 0 → 1e-9 movement is flagged as
   Improved/Regressed. That is statistically real but usually immaterial —
   judge from the absolute Δ shown next to the verdict.
+- **Mixed scheduled/legacy shapes share key names with different meanings.**
+  When one group is a scheduled-mode export and the other is not,
+  `total_time_s` is the dispatch window on one side and the whole-run wall
+  clock on the other, and `throughput_qps` inherits that difference — their
+  Δ rows are not meaningful. The report detects the shape mix (via the
+  scheduled-only `queue_delay_*`/`dispatch_window_s`/`per_template.*` keys)
+  and prints a notice under the experiment-setup table; compare like with
+  like.
+- **Rounds files flatten only each round's `summary`.** Round-level stat
+  blocks outside `summary` are dropped; today's only rounds producer
+  (schedsim) carries just `seed` + `summary` per round, so nothing is lost
+  in practice.
 
 Per-metric aggregation only counts samples that actually contain the key, so
 when the two groups mix export shapes (e.g. a `create-only` file next to

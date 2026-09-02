@@ -126,6 +126,22 @@ type sampleGroup struct {
 	samples []map[string]float64
 }
 
+// scheduledShape reports whether any sample in the group carries the keys a
+// scheduled-mode export adds to "summary" (queue_delay_p50_ms,
+// dispatch_window_s, or a per_template.* block). Scheduled and legacy runs
+// share key names such as total_time_s/throughput_qps with different windows
+// and meanings, so a baseline/candidate mix of the two shapes needs a warning.
+func scheduledShape(g *sampleGroup) bool {
+	for _, s := range g.samples {
+		for k := range s {
+			if k == "queue_delay_p50_ms" || k == "dispatch_window_s" || strings.HasPrefix(k, "per_template.") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func splitCommaList(raw string) []string {
 	var out []string
 	for _, p := range strings.Split(raw, ",") {
@@ -166,6 +182,10 @@ func loadSampleFile(path string) (*sampleFile, error) {
 
 	// A non-empty top-level "rounds" array turns the file into one sample
 	// per round; otherwise the top-level "summary" is the single sample.
+	// Only each round's "summary" is flattened: round-level stat blocks
+	// (create/delete latency etc.) are dropped. That matches the current
+	// rounds producer (schedsim rounds carry just seed + summary); a future
+	// exporter that adds per-round stat blocks must extend this branch.
 	if rounds, ok := root["rounds"].([]any); ok && len(rounds) > 0 {
 		f.viaRounds = true
 		for i, r := range rounds {
@@ -627,6 +647,12 @@ func renderComparison(c *comparison) string {
 		b.WriteString("> **Note:** at least one group has n < 2, so verdicts in this report are NOT " +
 			"CI-gated — every |Δ%| ≥ 5% row is flagged, including single-run noise. " +
 			"Use multiple seeds per side for decisions.\n\n")
+	}
+	if scheduledShape(c.baseline) != scheduledShape(c.candidate) {
+		b.WriteString("> **Note:** one group is a scheduled-mode export and the other is not. Shared key " +
+			"names span different windows and meanings across the two modes — `total_time_s` is the dispatch " +
+			"window in scheduled mode but the wall-clock run in legacy mode, and `throughput_qps` derives " +
+			"from it — so cross-shape Δ on those keys is not meaningful. Compare like with like.\n\n")
 	}
 	writeFileList(&b, "baseline", c.baseline)
 	writeFileList(&b, "candidate", c.candidate)
