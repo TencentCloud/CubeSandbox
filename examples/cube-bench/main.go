@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -63,9 +65,26 @@ type Config struct {
 	sequence     []ScheduledRequest
 
 	elapsed float64
-	// dispatchElapsed is the wall-clock span of the scheduled dispatch loop
-	// (first to last request release), excluding per-sandbox lifetime tails.
-	dispatchElapsed float64
+	// dispatchElapsedBits holds math.Float64bits of the wall-clock span of the
+	// scheduled dispatch loop (first to last request release), excluding
+	// per-sandbox lifetime tails. Stored atomically: on an early TUI quit the
+	// report path reads it while the dispatcher goroutine may still write it.
+	dispatchElapsedBits atomic.Uint64
+	// released counts scheduled requests actually admitted to a worker slot
+	// (semaphore acquired), so the TUI in-flight gauge reflects real releases
+	// instead of reconstructing them from the planned arrival schedule.
+	released atomic.Int64
+}
+
+// setDispatchElapsed publishes the dispatch window; getDispatchElapsed reads
+// it back. Both stay race-free against a dispatcher goroutine that is still
+// running because the TUI was quit early.
+func (c *Config) setDispatchElapsed(v float64) {
+	c.dispatchElapsedBits.Store(math.Float64bits(v))
+}
+
+func (c *Config) getDispatchElapsed() float64 {
+	return math.Float64frombits(c.dispatchElapsedBits.Load())
 }
 
 type createRequest struct {
@@ -494,9 +513,9 @@ func exportJSON(results []IterResult, cfg *Config) {
 		// reflects the arrival rate the scheduler actually saw. Only
 		// meaningful for rate-paced runs: without --rate the "window" is
 		// just the client's release burst, so the keys are omitted.
-		if cfg.Rate > 0 && cfg.dispatchElapsed > 0 {
-			summaryBlock["dispatch_window_s"] = cfg.dispatchElapsed
-			summaryBlock["dispatch_qps"] = float64(len(results)) / cfg.dispatchElapsed
+		if de := cfg.getDispatchElapsed(); cfg.Rate > 0 && de > 0 {
+			summaryBlock["dispatch_window_s"] = de
+			summaryBlock["dispatch_qps"] = float64(len(results)) / de
 		}
 		// Queue delay is measured per dispatched request, independent of
 		// create success, so it uses all results.

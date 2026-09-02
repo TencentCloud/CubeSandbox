@@ -231,14 +231,11 @@ func (m model) renderStats(elapsed time.Duration) string {
 	kv("Avg Create", LatencyStyle(createAvg).Render(fmt.Sprintf("%.0f ms", createAvg)))
 	kv("Avg Delete", LatencyStyle(deleteAvg).Render(fmt.Sprintf("%.0f ms", deleteAvg)))
 	if m.cfg.Scheduled && len(m.cfg.sequence) > 0 {
-		// Approximate in-flight: released per schedule minus completed.
-		started := 0
-		for _, sr := range m.cfg.sequence {
-			if sr.ArrivalOffset <= elapsed {
-				started++
-			}
-		}
-		inFlight := started - m.completed
+		// In-flight from actual dispatcher releases minus completions. The
+		// planned arrival schedule is not usable here: in ASAP mode every
+		// offset is 0 (gauge would read "remaining"), and under semaphore
+		// back-pressure scheduled arrivals outpace real releases.
+		inFlight := int(m.cfg.released.Load()) - m.completed
 		if inFlight < 0 {
 			inFlight = 0
 		}

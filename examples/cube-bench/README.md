@@ -167,11 +167,17 @@ instead. Don't mix cube-bench's `queue_delay_*` with schedsim's scheduler-side
 queue metrics in one `compare` run.
 
 > **Concurrency for lifetime-bearing presets.** A worker slot is held for the
-> full sandbox lifetime (create → lifetime sleep → delete), so the steady-state
-> number of live sandboxes ≈ `rate × mean lifetime`. Set `--concurrency` at
-> least that high (e.g. `burst`: 50 req/s × ~65 s ≈ 3250) or the dispatcher
-> stalls on the semaphore and the requested `--rate` is not honored; the tool
-> prints a startup warning when it detects this.
+> full sandbox lifetime (create → lifetime sleep → delete). The lifetime sleep
+> starts only after the create response returns (the client cannot know the
+> sandbox ID earlier), so the effective residence per sandbox is
+> `create + lifetime + delete` and the steady-state number of live sandboxes ≈
+> `rate × (mean create + mean lifetime + mean delete)`. The `rate × mean
+> lifetime` rule of thumb is fine for the ≥ 10 s preset lifetimes but
+> underestimates for ad-hoc sub-second lifetimes where create/delete time is
+> comparable. Set `--concurrency` at least that high (e.g. `burst`: 50 req/s ×
+> ~65 s ≈ 3250) or the dispatcher stalls on the semaphore and the requested
+> `--rate` is not honored; the tool prints a startup warning when it detects
+> this.
 
 ### Trace file schema
 
@@ -189,6 +195,11 @@ Requests are sorted by `arrival_ms`; `cpu_millis`/`mem_mib` come from the
   "requests": [{"seq": 0, "arrival_ms": 0, "template_id": "tpl-small", "cpu_millis": 1000, "mem_mib": 2048, "lifetime_ms": 53210}]
 }
 ```
+
+`lifetime_ms` is the planned hold time measured from create completion (the
+client sleeps it after the create response returns); true sandbox residence is
+`create + lifetime + delete`, so trace replayers modeling occupancy should add
+the create/delete tail themselves.
 
 ### Comparing runs (A/B report)
 

@@ -237,7 +237,7 @@ func scheduledExportFixture() (*Config, []IterResult) {
 
 func TestExportJSONScheduledAddsKeys(t *testing.T) {
 	cfg, results := scheduledExportFixture()
-	cfg.dispatchElapsed = 2.5
+	cfg.setDispatchElapsed(2.5)
 	cfg.Output = t.TempDir() + "/report.json"
 
 	exportJSON(results, cfg)
@@ -357,7 +357,7 @@ func TestExportJSONLegacyOmitsScheduledKeys(t *testing.T) {
 func TestExportJSONScheduledASAPOmitsDispatchKeys(t *testing.T) {
 	cfg, results := scheduledExportFixture()
 	cfg.Rate = 0 // ASAP dispatch: no arrival pacing, dispatch window is meaningless
-	cfg.dispatchElapsed = 0.01
+	cfg.setDispatchElapsed(0.01)
 	cfg.Output = t.TempDir() + "/report.json"
 
 	exportJSON(results, cfg)

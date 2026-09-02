@@ -291,6 +291,15 @@ func TestRunScheduledEndToEnd(t *testing.T) {
 			t.Fatalf("result #%d SchedDelayMs = %v, want >= ~0", r.Seq, r.SchedDelayMs)
 		}
 	}
+
+	// Every request was admitted to the single worker slot exactly once, and
+	// the dispatch window was published through the atomic accessor.
+	if got := cfg.released.Load(); got != int64(cfg.Total) {
+		t.Fatalf("released = %d, want %d", got, cfg.Total)
+	}
+	if got := cfg.getDispatchElapsed(); got <= 0 {
+		t.Fatalf("dispatchElapsed = %v, want > 0", got)
+	}
 }
 
 // TestRunScheduledDryRunReproducible verifies the dry-run scheduled path uses

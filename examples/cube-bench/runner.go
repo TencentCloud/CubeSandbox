@@ -270,6 +270,11 @@ func RunScheduled(cfg *Config, sched []ScheduledRequest, resultCh chan<- IterRes
 		}
 		wg.Add(1)
 		sem <- struct{}{}
+		// Count the release only after the semaphore admits the request, so
+		// the TUI in-flight gauge tracks live sandboxes instead of the
+		// planned schedule (which degenerates to "remaining" in ASAP mode
+		// and over-counts under back-pressure).
+		cfg.released.Add(1)
 		go func(sr ScheduledRequest, actualStart time.Duration) {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -291,7 +296,7 @@ func RunScheduled(cfg *Config, sched []ScheduledRequest, resultCh chan<- IterRes
 	// The dispatch window closes once the last request has been released;
 	// wg.Wait() below additionally waits out per-sandbox lifetime tails,
 	// which would otherwise dilute the arrival-side dispatch rate.
-	cfg.dispatchElapsed = time.Since(benchStart).Seconds()
+	cfg.setDispatchElapsed(time.Since(benchStart).Seconds())
 
 	wg.Wait()
 	close(resultCh)
