@@ -217,8 +217,12 @@ func TestRun_RerunsAfterVersionMissingAtHeadSchema(t *testing.T) {
 	if err := migrate.Run(ctx, db, "mysql", testSessionLocker()); err != nil {
 		t.Fatalf("initial migrate.Run: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM goose_db_version WHERE version_id = 2`); err != nil {
-		t.Fatalf("delete version 2: %v", err)
+	// 0002 is frozen and still ADD IF MISSING the unused retain column on
+	// t_cube_template_definition. 20260902140000 drops that dead column
+	// (never written or read). Replaying 0002 without also replaying the
+	// drop would reintroduce retain and fail assertHeadSchema.
+	if _, err := db.ExecContext(ctx, `DELETE FROM goose_db_version WHERE version_id IN (2, 20260902140000)`); err != nil {
+		t.Fatalf("delete version 2 and drop-retain: %v", err)
 	}
 	if err := migrate.Run(ctx, db, "mysql", testSessionLocker()); err != nil {
 		t.Fatalf("rerun migrate.Run at HEAD schema without version 2: %v", err)
@@ -356,9 +360,10 @@ func assertHeadSchema(t *testing.T, db *sql.DB) {
 			table: "t_cube_template_definition",
 			columns: []string{
 				"kind", "origin_sandbox_id", "origin_node_id",
-				"display_name", "storage_backend", "retain",
+				"display_name", "storage_backend",
 				"rootfs_size_bytes_at_snapshot",
 			},
+			absent: []string{"retain"},
 			indexes: []string{
 				"idx_template_kind_status",
 				"idx_snapshot_origin_sandbox",
@@ -407,6 +412,7 @@ func assertHeadSchema(t *testing.T, db *sql.DB) {
 				"snapshot_id", "origin_sandbox_id", "origin_node_id",
 				"backend", "remote_status", "request_json", "export_uuids",
 			},
+			absent: []string{"retain"},
 			indexes: []string{
 				"uniq_cube_snapshot_id",
 				"idx_cube_snapshot_origin_sandbox",

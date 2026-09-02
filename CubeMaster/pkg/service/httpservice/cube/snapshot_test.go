@@ -6,6 +6,7 @@ package cube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -316,12 +317,20 @@ func TestConstrainSnapshotCreateScopeIntersectsRequestedScope(t *testing.T) {
 	assert.Equal(t, []string{"node-b"}, req.DistributionScope)
 }
 
+func stubSnapshotReadyForNewUse(t *testing.T) {
+	t.Helper()
+	orig := ensureSnapshotReadyForNewUseFn
+	ensureSnapshotReadyForNewUseFn = func(ctx context.Context, snapshotID string) error { return nil }
+	t.Cleanup(func() { ensureSnapshotReadyForNewUseFn = orig })
+}
+
 // TestBindSnapshotCreateReplicaInjectsRuntimeAnnotations verifies the v4
 // contract: master sets only the logical snapshot id + attached_at
 // annotations, never the physical memory_vol/memory_dev. Any stale physical
 // annotation present in the caller-supplied request must be stripped so it
 // cannot reach the cubelet.
 func TestBindSnapshotCreateReplicaInjectsRuntimeAnnotations(t *testing.T) {
+	stubSnapshotReadyForNewUse(t)
 	origResolveSnapshotReadyNodeScopeFn := resolveSnapshotReadyNodeScopeFn
 	origResolveSnapshotReadyReplicaFn := resolveSnapshotReadyReplicaFn
 	t.Cleanup(func() {
@@ -353,6 +362,7 @@ func TestBindSnapshotCreateReplicaInjectsRuntimeAnnotations(t *testing.T) {
 }
 
 func TestBindSnapshotCreateReplicaCrossNodeWhenOriginCannotSchedule(t *testing.T) {
+	stubSnapshotReadyForNewUse(t)
 	origSource := getSnapshotRestoreSourceFn
 	origDecide := decideRestorePlacementFn
 	t.Cleanup(func() {
@@ -394,6 +404,7 @@ func TestBindSnapshotCreateReplicaCrossNodeWhenOriginCannotSchedule(t *testing.T
 }
 
 func TestBindSnapshotCreateReplicaKeepsOriginWhenPlacementSaysOrigin(t *testing.T) {
+	stubSnapshotReadyForNewUse(t)
 	origSource := getSnapshotRestoreSourceFn
 	origDecide := decideRestorePlacementFn
 	origReplica := resolveSnapshotReadyReplicaFn
@@ -431,6 +442,7 @@ func TestBindSnapshotCreateReplicaKeepsOriginWhenPlacementSaysOrigin(t *testing.
 }
 
 func TestBindSnapshotCreateReplicaXFSIgnoresExportUUIDs(t *testing.T) {
+	stubSnapshotReadyForNewUse(t)
 	origSource := getSnapshotRestoreSourceFn
 	origDecide := decideRestorePlacementFn
 	origReplica := resolveSnapshotReadyReplicaFn
@@ -463,6 +475,20 @@ func TestBindSnapshotCreateReplicaXFSIgnoresExportUUIDs(t *testing.T) {
 	assert.Equal(t, []string{"node-a"}, req.DistributionScope)
 	assert.Empty(t, req.Annotations[constants.CubeAnnotationSnapshotRemoteUUIDs])
 	assert.Empty(t, req.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal])
+}
+
+func TestBindSnapshotCreateReplicaRejectsTombstone(t *testing.T) {
+	orig := ensureSnapshotReadyForNewUseFn
+	t.Cleanup(func() { ensureSnapshotReadyForNewUseFn = orig })
+	ensureSnapshotReadyForNewUseFn = func(ctx context.Context, snapshotID string) error {
+		return fmt.Errorf("%w: %s", templatecenter.ErrSnapshotNotFound, snapshotID)
+	}
+
+	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{}}
+	err := bindSnapshotCreateReplica(context.Background(), "snap-deleted", req)
+	if !errors.Is(err, templatecenter.ErrSnapshotNotFound) {
+		t.Fatalf("error = %v, want ErrSnapshotNotFound", err)
+	}
 }
 
 // TestBindAppSnapshotTemplateReplicaRequiresReadyReplica verifies that even

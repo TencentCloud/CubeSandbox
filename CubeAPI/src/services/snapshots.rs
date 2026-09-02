@@ -113,20 +113,12 @@ impl SnapshotService {
 
     // ── DELETE /templates/{templateID}  (when templateID is a snapshot id) ─
     //
-    // Relies on CubeMaster's *synchronous* `DELETE /cube/snapshot/{id}`
-    // contract: when the master returns `ret_code == 0`, the snapshot
-    // (replica + metadata + cubelet-side LVM/meta) is fully gone; when it
-    // errors, the operation either was rejected up-front or ran to a
-    // recorded failure.  We assert this invariant via
-    // `ensure_operation_ready(resp.status(), …)` — if master ever drifts
-    // back to handing us Pending/Running we want the caller to see it as
-    // an `Internal` error rather than silently returning success on an
-    // un-finished delete.
-    //
-    // The 240 s router timeout (see `routes::SNAPSHOT_LONG_ROUTE_TIMEOUT`)
-    // exists exactly so a slow cubelet cleanup does not get cut off by the
-    // 30 s default budget.  The snapshot API is synchronous — CubeAPI waits
-    // for a terminal state and does not expose a polling interface.
+    // Master returns `ret_code == 0` + `status == READY` once the snapshot is
+    // logically retired. Physical cleanup is synchronous only with no
+    // runtime refs; otherwise the row is tombstoned and bytes are reclaimed
+    // later. `ensure_operation_ready` rejects Pending/Running; CREATING /
+    // in-progress delete remain conflicts. The 240 s timeout covers the
+    // no-ref synchronous path.
 
     pub async fn delete(&self, snapshot_id: &str) -> AppResult<ApiDeleteSnapshotResponse> {
         let req = DeleteSnapshotRequest {
@@ -160,6 +152,11 @@ impl SnapshotService {
     }
 
     pub async fn has_snapshot(&self, snapshot_id: &str) -> AppResult<bool> {
+        // Identity, not visibility: a tombstoned snap- id is still a snapshot
+        // and must keep using DeleteSnapshot (idempotent), not DeleteTemplate.
+        if is_snapshot_identity(snapshot_id) {
+            return Ok(true);
+        }
         match self.cubemaster.get_snapshot(snapshot_id, false).await {
             Ok(resp) => {
                 resp.ret.as_result().map_err(internal_error)?;
@@ -493,6 +490,10 @@ fn snapshot_names(resource: &SnapshotResource) -> Vec<String> {
     vec![resource.snapshot_id.clone()]
 }
 
+fn is_snapshot_identity(id: &str) -> bool {
+    id.trim().starts_with("snap-")
+}
+
 fn owned_or_fallback(value: String, fallback: &str) -> String {
     if value.trim().is_empty() {
         fallback.to_string()
@@ -520,6 +521,15 @@ mod tests {
             created_at: None,
             updated_at: None,
         }
+    }
+
+    #[test]
+    fn snapshot_identity_uses_snap_prefix() {
+        assert!(is_snapshot_identity("snap-c85fc2cb8bc04831bd75f551"));
+        assert!(is_snapshot_identity("  snap-abc"));
+        assert!(!is_snapshot_identity("tpl-abc"));
+        assert!(!is_snapshot_identity(""));
+        assert!(!is_snapshot_identity("snapshot-1"));
     }
 
     #[test]

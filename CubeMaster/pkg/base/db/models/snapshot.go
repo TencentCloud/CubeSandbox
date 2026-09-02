@@ -24,7 +24,6 @@ type SnapshotRecord struct {
 	Version                   string `json:"version" gorm:"column:version"`
 	Status                    string `json:"status" gorm:"column:status"`
 	LastError                 string `json:"last_error" gorm:"column:last_error"`
-	Retain                    bool   `json:"retain" gorm:"column:retain"`
 	RootfsSizeBytesAtSnapshot uint64 `json:"rootfs_size_bytes_at_snapshot" gorm:"column:rootfs_size_bytes_at_snapshot"`
 	OriginHostFactsJSON       string `json:"origin_host_facts_json" gorm:"column:origin_host_facts_json"`
 	RequestJSON               string `json:"request_json" gorm:"column:request_json"`

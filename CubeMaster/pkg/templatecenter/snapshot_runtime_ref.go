@@ -151,6 +151,11 @@ func AcquireSnapshotRuntimeRef(ctx context.Context, ref SnapshotRuntimeRefInfo) 
 	return AttachSnapshotRuntimeBinding(ctx, ref, "attached runtime ref")
 }
 
+var (
+	acquireSnapshotRuntimeRefFn      = AcquireSnapshotRuntimeRef
+	countActiveSnapshotRuntimeRefsFn = CountActiveSnapshotRuntimeRefs
+)
+
 func AttachSnapshotRuntimeBinding(ctx context.Context, ref SnapshotRuntimeRefInfo, reason string) error {
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
@@ -481,6 +486,9 @@ func RefreshSnapshotRuntimeRefsFromNode(ctx context.Context, nodeID, nodeIP stri
 			if _, ok := observedKeys[snapshotRuntimeBindingKey(item.SandboxID, item.BindingType)]; ok {
 				continue
 			}
+			if retainUnobservedTombstoneRuntimeRef(ctx, item) {
+				continue
+			}
 			if err := detachObservedSnapshotRuntimeBindingTx(tx, item, "runtime ref not observed on node", now); err != nil {
 				return err
 			}
@@ -531,6 +539,40 @@ func SnapshotRuntimeRefFromSandboxBriefData(sandbox *sandboxtypes.SandboxBriefDa
 	return ref, ref.SnapshotID != ""
 }
 
+// snapshotRuntimeRefFromTemplateID observes a live sandbox as bound to a
+// snapshot when its TemplateID still has a t_cube_snapshot row, including
+// tombstones. GetTemplateKind is the create-path API and skips tombstones.
+func snapshotRuntimeRefFromTemplateID(ctx context.Context, sandbox *sandboxtypes.SandboxBriefData) (SnapshotRuntimeRefInfo, bool) {
+	if sandbox == nil {
+		return SnapshotRuntimeRefInfo{}, false
+	}
+	templateID := strings.TrimSpace(sandbox.TemplateID)
+	if templateID == "" {
+		return SnapshotRuntimeRefInfo{}, false
+	}
+	rec, err := getSnapshotRecord(ctx, templateID)
+	if err != nil || rec == nil {
+		return SnapshotRuntimeRefInfo{}, false
+	}
+	return SnapshotRuntimeRefInfo{
+		SnapshotID: templateID,
+		SandboxID:  sandbox.SandboxID,
+		NodeID:     sandbox.HostID,
+		NodeIP:     sandbox.HostIP,
+	}, true
+}
+
+// retainUnobservedTombstoneRuntimeRef keeps an existing ref when the snapshot
+// is already retired and the sandbox still exists on master. Lost annotations
+// must not detach the last ref and trigger physical delete.
+func retainUnobservedTombstoneRuntimeRef(ctx context.Context, item models.SnapshotRuntimeActive) bool {
+	rec, err := getSnapshotRecord(ctx, item.SnapshotID)
+	if err != nil || rec == nil || !snapshotRejectsNewUse(rec.Status) {
+		return false
+	}
+	return sandboxExistsOnMasterFn(ctx, item.SandboxID)
+}
+
 func snapshotRuntimeRefFromAnnotationMap(sandboxID, nodeID, nodeIP string, annotations map[string]string) SnapshotRuntimeRefInfo {
 	// v5: the physical memory_vol annotation no longer exists. The ref's
 	// MemoryVol is populated only from the rollback RPC response (see
@@ -569,18 +611,9 @@ func parseSnapshotRuntimeRefTime(raw string) (time.Time, bool) {
 // registering the ref - callers should fail fast if the snapshot is not
 // actually consumable.
 func RegisterSnapshotRuntimeRefForCreatedSandbox(ctx context.Context, snapshotID, sandboxID, nodeID, nodeIP string) error {
-	snapshotID = strings.TrimSpace(snapshotID)
-	if snapshotID == "" {
-		return nil
-	}
-	if _, err := getSnapshotReadyReplica(ctx, snapshotID, nodeID); err != nil {
+	return acquireCreatedSandboxRuntimeRef(ctx, snapshotID, sandboxID, nodeID, nodeIP, func() error {
+		_, err := getSnapshotReadyReplica(ctx, snapshotID, nodeID)
 		return err
-	}
-	return AcquireSnapshotRuntimeRef(ctx, SnapshotRuntimeRefInfo{
-		SnapshotID: snapshotID,
-		SandboxID:  sandboxID,
-		NodeID:     nodeID,
-		NodeIP:     nodeIP,
 	})
 }
 
@@ -599,17 +632,37 @@ func RegisterSnapshotRuntimeRefForCreatedSandboxWithReplica(
 	snapshotID, sandboxID, nodeID, nodeIP string,
 	replica ReplicaStatus,
 ) error {
+	return acquireCreatedSandboxRuntimeRef(ctx, snapshotID, sandboxID, nodeID, nodeIP, func() error {
+		return validateSnapshotReadyReplica(replica)
+	})
+}
+
+// acquireCreatedSandboxRuntimeRef records a sandbox↔snapshot binding.
+// DELETED / DELETING skip validation so a create that bound before
+// retire can still register. The snapshot write lock serializes this
+// with DeleteSnapshot / finalize count-then-DELETING. Cleanup waits for
+// refs registered before physical delete starts; a create RPC that has
+// not finished yet is the same window as the pre-tombstone sync delete.
+func acquireCreatedSandboxRuntimeRef(ctx context.Context, snapshotID, sandboxID, nodeID, nodeIP string, validate func() error) error {
 	snapshotID = strings.TrimSpace(snapshotID)
 	if snapshotID == "" {
 		return nil
 	}
-	if err := validateSnapshotReadyReplica(replica); err != nil {
-		return err
-	}
-	return AcquireSnapshotRuntimeRef(ctx, SnapshotRuntimeRefInfo{
-		SnapshotID: snapshotID,
-		SandboxID:  sandboxID,
-		NodeID:     nodeID,
-		NodeIP:     nodeIP,
+	return withSnapshotWriteLocks([]string{snapshotResourceLockKey(snapshotID)}, func() error {
+		allowInFlight := false
+		if rec, err := getSnapshotRecord(ctx, snapshotID); err == nil && rec != nil {
+			allowInFlight = snapshotRejectsNewUse(rec.Status)
+		}
+		if !allowInFlight {
+			if err := validate(); err != nil {
+				return err
+			}
+		}
+		return acquireSnapshotRuntimeRefFn(ctx, SnapshotRuntimeRefInfo{
+			SnapshotID: snapshotID,
+			SandboxID:  sandboxID,
+			NodeID:     nodeID,
+			NodeIP:     nodeIP,
+		})
 	})
 }

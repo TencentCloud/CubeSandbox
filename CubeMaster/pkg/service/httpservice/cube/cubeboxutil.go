@@ -32,6 +32,7 @@ var (
 	resolveTemplateReadyReplicaFn   = templatecenter.ResolveTemplateReadyReplica
 	getSnapshotRestoreSourceFn      = templatecenter.GetSnapshotRestoreSource
 	decideRestorePlacementFn        = restoreplace.Decide
+	ensureSnapshotReadyForNewUseFn  = templatecenter.EnsureSnapshotReadyForNewUse
 )
 
 func getCubeboxReqTemplate() (*types.CreateCubeSandboxReq, error) {
@@ -583,6 +584,9 @@ func constrainSnapshotCreateScope(ctx context.Context, snapshotID string, reqInO
 // keys are explicitly deleted so any stale value supplied by the caller
 // cannot reach the cubelet.
 func bindSnapshotCreateReplica(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq) error {
+	if err := ensureSnapshotReadyForNewUseFn(ctx, snapshotID); err != nil {
+		return err
+	}
 	if src, err := getSnapshotRestoreSourceFn(ctx, snapshotID); err == nil && src != nil {
 		return bindSnapshotCreateReplicaWithPlacement(ctx, snapshotID, reqInOut, src)
 	} else if err != nil && !errors.Is(err, templatecenter.ErrSnapshotNotFound) &&

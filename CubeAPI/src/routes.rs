@@ -487,9 +487,9 @@ mod tests {
 
     /// Verifies that `DELETE /templates/:id` is mounted on the long-budget
     /// router (240 s in production), not on the 30 s standard router, so that
-    /// CubeMaster's *synchronous* snapshot delete contract — which can
-    /// legitimately wait for cubelet LVM/metadata cleanup — is not cut short
-    /// by an HTTP timeout that fires while the master is still working.
+    /// CubeMaster's snapshot delete contract — which still waits for cubelet
+    /// cleanup when no sandbox holds a runtime ref — is not cut short by an
+    /// HTTP timeout that fires while the master is still working.
     ///
     /// Strategy: rebuild the same merge topology as `build_router` but with
     /// scaled-down durations (50 ms vs 5 s) and a slow handler that sleeps

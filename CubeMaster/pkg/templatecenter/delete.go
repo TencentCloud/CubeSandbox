@@ -76,6 +76,12 @@ func DeleteTemplate(ctx context.Context, templateID, instanceType string) error 
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
 	}
+	if rec, err := getSnapshotRecord(ctx, templateID); err == nil && rec != nil {
+		_, err := DeleteSnapshot(ctx, uuid.NewString(), templateID, instanceType)
+		return err
+	} else if err != nil && !errors.Is(err, ErrSnapshotNotFound) {
+		return err
+	}
 	return withTemplateWriteLock(templateID, func() error {
 		targets, err := discoverTemplateCleanupTargets(ctx, templateID, instanceType)
 		if err != nil {

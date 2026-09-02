@@ -11,8 +11,10 @@ import (
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	errorcodev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	"gorm.io/gorm"
 )
 
 func TestDeleteTemplateWithTargetsAllowsJobOnlyCleanup(t *testing.T) {
@@ -433,6 +435,39 @@ func TestIsIgnorableArtifactDeleteMessage(t *testing.T) {
 	}
 	if isIgnorableArtifactDeleteMessage("node not found") {
 		t.Fatal("node not found should not be ignored")
+	}
+}
+
+func TestDeleteTemplateDelegatesTombstonedSnapshot(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{SnapshotID: snapshotID, Status: StatusDeleted}, nil
+	})
+	delegated := false
+	patches.ApplyFunc(DeleteSnapshot, func(ctx context.Context, requestID, snapshotID, instanceType string) (*sandboxtypes.TemplateImageJobInfo, error) {
+		delegated = true
+		if snapshotID != "snap-tomb" {
+			t.Fatalf("snapshotID = %q", snapshotID)
+		}
+		return &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil
+	})
+	origReplica := runReplicaCleanup
+	t.Cleanup(func() { runReplicaCleanup = origReplica })
+	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator, _ string) error {
+		t.Fatal("must not physically clean a snapshot via DeleteTemplate")
+		return nil
+	}
+
+	if err := DeleteTemplate(context.Background(), "snap-tomb", "cubebox"); err != nil {
+		t.Fatalf("DeleteTemplate: %v", err)
+	}
+	if !delegated {
+		t.Fatal("expected DeleteSnapshot")
 	}
 }
 

@@ -106,9 +106,10 @@ func assertPGHeadSchema(t *testing.T, db *sql.DB) {
 			table: "t_cube_template_definition",
 			columns: []string{
 				"kind", "origin_sandbox_id", "origin_node_id",
-				"display_name", "storage_backend", "retain",
+				"display_name", "storage_backend",
 				"rootfs_size_bytes_at_snapshot", "rootfs_artifact_id",
 			},
+			absent: []string{"retain"},
 			indexes: []string{
 				"idx_template_kind_status",
 				"idx_snapshot_origin_sandbox",
@@ -157,6 +158,7 @@ func assertPGHeadSchema(t *testing.T, db *sql.DB) {
 				"snapshot_id", "origin_sandbox_id", "origin_node_id",
 				"backend", "remote_status", "request_json", "export_uuids",
 			},
+			absent: []string{"retain"},
 			indexes: []string{
 				"uniq_cube_snapshot_id",
 				"idx_cube_snapshot_origin_sandbox",

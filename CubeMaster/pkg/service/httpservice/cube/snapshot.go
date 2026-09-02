@@ -123,7 +123,6 @@ type snapshotResource struct {
 	StorageBackend            string                         `json:"storage_backend,omitempty"`
 	Backend                   string                         `json:"backend,omitempty"`
 	RemoteStatus              string                         `json:"remote_status,omitempty"`
-	Retain                    bool                           `json:"retain,omitempty"`
 	RootfsSizeBytesAtSnapshot uint64                         `json:"rootfs_size_bytes_at_snapshot,omitempty"`
 	LastError                 string                         `json:"last_error,omitempty"`
 	CreatedAt                 string                         `json:"created_at,omitempty"`
@@ -615,30 +614,13 @@ func getSnapshot(r *http.Request, rt *CubeLog.RequestTrace, snapshotID string) i
 	}
 }
 
-// deleteSnapshot fronts `DELETE /cube/snapshot/{snapshot_id}` and is part of
-// the *synchronous* snapshot contract: the HTTP response is not produced
-// until the underlying snapshot-delete job has reached a terminal status
-// (READY on success, FAILED on error).  Specifically:
+// deleteSnapshot fronts `DELETE /cube/snapshot/{snapshot_id}`.
 //
-//   - Inputs are validated, then `templatecenter.DeleteSnapshot` runs the
-//     full delete pipeline (replica cleanup via cubelet, metadata removal,
-//     cache invalidation) inside a context capped at
-//     `templatecenter.SnapshotOperationTimeout()` (15 min).
-//   - `extendSnapshotWriteDeadline(w)` widens the HTTP write deadline to
-//     `SnapshotOperationTimeout + 30s` so the server-side write does not
-//     fire before the synchronous wait completes.
-//   - `executeSnapshotDeleteJob` -> `finalizeSynchronousSnapshotJob` only
-//     returns a non-error `info` when the job row is `Ready`; any other
-//     terminal state (`Failed`, missing) becomes an error and is mapped to
-//     a 4xx/5xx ret code.  Pending/Running can never escape this handler.
-//
-// Callers may therefore treat a successful response as "snapshot definitely
-// removed" and a non-success response as "the operation either ran to
-// failure or was rejected before starting" — there is no middle "still
-// running, please poll" outcome.  `GET /cube/operation/{operation_id}` is
-// kept around purely for human audit; programmatic clients have no reason
-// to poll.  The snapshot API is synchronous — CubeAPI waits for a
-// terminal state and does not expose a polling interface to callers.
+// Success means the snapshot is logically retired: List/Get hide it and it
+// can no longer create or roll back. With no runtime refs, physical cleanup
+// is also synchronous (15 min cap); otherwise the row is tombstoned and
+// bytes are reclaimed later. CREATING / DELETING / active job → conflict;
+// no polling path.
 func deleteSnapshot(r *http.Request, rt *CubeLog.RequestTrace, snapshotID string) interface{} {
 	if snapshotID == "" {
 		return &operationResponse{
@@ -800,7 +782,6 @@ func snapshotResourceFromInfo(info *templatecenter.SnapshotInfo) *snapshotResour
 		StorageBackend:            firstNonEmptyTrimmed(info.Backend, info.StorageBackend),
 		Backend:                   firstNonEmptyTrimmed(info.Backend, info.StorageBackend),
 		RemoteStatus:              info.RemoteStatus,
-		Retain:                    info.Retain,
 		RootfsSizeBytesAtSnapshot: info.RootfsSizeBytesAtSnapshot,
 		LastError:                 info.LastError,
 		CreatedAt:                 info.CreatedAt,

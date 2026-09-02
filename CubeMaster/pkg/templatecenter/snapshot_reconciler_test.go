@@ -325,3 +325,253 @@ func TestReconcileSnapshotReplicaPresenceSkipsS3(t *testing.T) {
 	require.Equal(t, 0, probes)
 	require.Empty(t, *updated)
 }
+
+func TestReconcileSnapshotReplicaPresenceDoesNotOverwriteTombstone(t *testing.T) {
+	for _, raced := range []string{StatusDeleted, StatusDeleting} {
+		t.Run(raced, func(t *testing.T) {
+			casCalls := 0
+			unguardedFailed := false
+			patches := gomonkey.NewPatches()
+			t.Cleanup(patches.Reset)
+			patches.ApplyFunc(cubelet.GetCubeletAddr, func(hostIP string) string {
+				return hostIP
+			})
+			patches.ApplyFunc(updateSnapshotFieldsIfStatusIn, func(ctx context.Context, snapshotID string, values map[string]any, statuses ...string) (bool, error) {
+				casCalls++
+				if snapshotID != "snap-1" {
+					t.Fatalf("snapshotID = %q", snapshotID)
+				}
+				if values["status"] != StatusFailed {
+					t.Fatalf("CAS status = %v, want FAILED", values["status"])
+				}
+				if len(statuses) != 2 || statuses[0] != StatusReady || statuses[1] != StatusFailed {
+					t.Fatalf("CAS allowed statuses = %v, want READY, FAILED", statuses)
+				}
+				return false, nil
+			})
+			patches.ApplyFunc(updateSnapshotFields, func(ctx context.Context, snapshotID string, values map[string]any) error {
+				if values["status"] == StatusFailed {
+					unguardedFailed = true
+				}
+				return nil
+			})
+
+			_ = stubReconcilerDB(t,
+				models.SnapshotRecord{
+					SnapshotID:   "snap-1",
+					Status:       StatusReady,
+					Backend:      constants.SnapshotBackendXFS,
+					InstanceType: "cubebox",
+					OriginNodeID: "node-a",
+					OriginNodeIP: "10.0.0.8",
+				},
+				models.TemplateReplica{
+					TemplateID:   "snap-1",
+					NodeID:       "node-a",
+					NodeIP:       "10.0.0.8",
+					InstanceType: "cubebox",
+					Status:       ReplicaStatusReady,
+					Phase:        ReplicaPhaseReady,
+				})
+
+			origProbe := getLocalSnapshotOnCubelet
+			t.Cleanup(func() { getLocalSnapshotOnCubelet = origProbe })
+			getLocalSnapshotOnCubelet = func(ctx context.Context, addr string,
+				req *cubeboxv1.GetLocalSnapshotRequest) (*cubeboxv1.GetLocalSnapshotResponse, error) {
+				return &cubeboxv1.GetLocalSnapshotResponse{
+					Ret: &errorcodev1.Ret{RetCode: errorcodev1.ErrorCode_Success},
+				}, nil
+			}
+
+			require.NoError(t, reconcileSnapshotReplicaPresence(context.Background()))
+			require.Equal(t, 1, casCalls, "replica-presence must CAS FAILED against READY/FAILED")
+			require.False(t, unguardedFailed, "must not write FAILED through unguarded updateSnapshotFields after a %s race", raced)
+		})
+	}
+}
+
+func staleDeleteJob(status string) *models.TemplateImageJob {
+	job := &models.TemplateImageJob{
+		JobID:     "job-stale-delete",
+		Operation: JobOperationSnapshotDelete,
+		Status:    status,
+	}
+	job.UpdatedAt = time.Now().Add(-snapshotOperationTimeout - time.Minute)
+	return job
+}
+
+func TestShouldReclaimStaleSnapshotDeleteJob(t *testing.T) {
+	deleting := models.SnapshotRecord{SnapshotID: "snap-1", Status: StatusDeleting}
+	creating := models.SnapshotRecord{SnapshotID: "snap-1", Status: StatusCreating}
+
+	if !shouldReclaimStaleSnapshotDeleteJob(deleting, staleDeleteJob(JobStatusPending)) {
+		t.Fatal("DELETING + stale pending SNAPSHOT_DELETE must reclaim")
+	}
+	if !shouldReclaimStaleSnapshotDeleteJob(deleting, staleDeleteJob(JobStatusRunning)) {
+		t.Fatal("DELETING + stale running SNAPSHOT_DELETE must reclaim")
+	}
+
+	fresh := staleDeleteJob(JobStatusPending)
+	fresh.UpdatedAt = time.Now()
+	if shouldReclaimStaleSnapshotDeleteJob(deleting, fresh) {
+		t.Fatal("fresh delete job must not reclaim")
+	}
+	if shouldReclaimStaleSnapshotDeleteJob(creating, staleDeleteJob(JobStatusPending)) {
+		t.Fatal("CREATING must not reclaim a stale job")
+	}
+
+	createJob := staleDeleteJob(JobStatusPending)
+	createJob.Operation = JobOperationSnapshotCreate
+	if shouldReclaimStaleSnapshotDeleteJob(deleting, createJob) {
+		t.Fatal("non-delete job must not reclaim")
+	}
+	if shouldReclaimStaleSnapshotDeleteJob(deleting, nil) {
+		t.Fatal("nil job must not reclaim")
+	}
+}
+
+func TestShouldFailStaleDeleteJobOnTombstone(t *testing.T) {
+	deleted := models.SnapshotRecord{SnapshotID: "snap-1", Status: StatusDeleted}
+	deleting := models.SnapshotRecord{SnapshotID: "snap-1", Status: StatusDeleting}
+
+	if !shouldFailStaleDeleteJobOnTombstone(deleted, staleDeleteJob(JobStatusPending)) {
+		t.Fatal("DELETED + stale pending SNAPSHOT_DELETE must fail the job")
+	}
+	if shouldFailStaleDeleteJobOnTombstone(deleting, staleDeleteJob(JobStatusPending)) {
+		t.Fatal("DELETING is handled by the timeout reclaim path, not this helper")
+	}
+	fresh := staleDeleteJob(JobStatusRunning)
+	fresh.UpdatedAt = time.Now()
+	if shouldFailStaleDeleteJobOnTombstone(deleted, fresh) {
+		t.Fatal("fresh delete job on a tombstone must not be failed")
+	}
+}
+
+func TestFailStaleDeleteJobOnTombstoneMarksJobFailed(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	job := staleDeleteJob(JobStatusPending)
+	var failed map[string]any
+	patches.ApplyFunc(getActiveSnapshotJobByResourceID, func(ctx context.Context, resourceID string) (*models.TemplateImageJob, error) {
+		return job, nil
+	})
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, values map[string]any) error {
+		failed = values
+		return nil
+	})
+
+	err := failStaleDeleteJobOnTombstone(context.Background(), models.SnapshotRecord{
+		SnapshotID: "snap-split",
+		Status:     StatusDeleted,
+	})
+	require.NoError(t, err)
+	require.Equal(t, JobStatusFailed, failed["status"])
+	require.Contains(t, failed["error_message"], "on tombstone")
+}
+
+func TestReclaimTimedOutSnapshotRecordStaleDeleteJob(t *testing.T) {
+	for _, jobStatus := range []string{JobStatusPending, JobStatusRunning} {
+		t.Run(jobStatus, func(t *testing.T) {
+			patches := gomonkey.NewPatches()
+			defer patches.Reset()
+
+			job := staleDeleteJob(jobStatus)
+			var failedJob map[string]any
+			var snapFields map[string]any
+			patches.ApplyFunc(getActiveSnapshotJobByResourceID, func(ctx context.Context, resourceID string) (*models.TemplateImageJob, error) {
+				return job, nil
+			})
+			patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, values map[string]any) error {
+				failedJob = values
+				return nil
+			})
+			patches.ApplyFunc(updateSnapshotFields, func(ctx context.Context, snapshotID string, values map[string]any) error {
+				snapFields = values
+				return nil
+			})
+
+			err := reclaimTimedOutSnapshotRecord(context.Background(), models.SnapshotRecord{
+				SnapshotID: "snap-stuck",
+				Status:     StatusDeleting,
+			})
+			require.NoError(t, err)
+			require.Equal(t, JobStatusFailed, failedJob["status"])
+			require.Equal(t, StatusDeleted, snapFields["status"])
+			require.Contains(t, snapFields["last_error"], "stale delete job")
+		})
+	}
+}
+
+func TestReclaimTimedOutSnapshotRecordSkipsFreshDeleteJob(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	job := staleDeleteJob(JobStatusPending)
+	job.UpdatedAt = time.Now()
+	patches.ApplyFunc(getActiveSnapshotJobByResourceID, func(ctx context.Context, resourceID string) (*models.TemplateImageJob, error) {
+		return job, nil
+	})
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, values map[string]any) error {
+		t.Fatal("must not fail a fresh delete job")
+		return nil
+	})
+	patches.ApplyFunc(updateSnapshotFields, func(ctx context.Context, snapshotID string, values map[string]any) error {
+		t.Fatal("must not rewrite snapshot while a fresh delete job is active")
+		return nil
+	})
+
+	err := reclaimTimedOutSnapshotRecord(context.Background(), models.SnapshotRecord{
+		SnapshotID: "snap-live",
+		Status:     StatusDeleting,
+	})
+	require.NoError(t, err)
+}
+
+func TestReclaimTimedOutSnapshotRecordSkipsCreatingWithStaleJob(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	patches.ApplyFunc(getActiveSnapshotJobByResourceID, func(ctx context.Context, resourceID string) (*models.TemplateImageJob, error) {
+		return staleDeleteJob(JobStatusPending), nil
+	})
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, values map[string]any) error {
+		t.Fatal("CREATING must not fail a stale job")
+		return nil
+	})
+	patches.ApplyFunc(updateSnapshotFields, func(ctx context.Context, snapshotID string, values map[string]any) error {
+		t.Fatal("CREATING + active job must keep the existing skip path")
+		return nil
+	})
+
+	err := reclaimTimedOutSnapshotRecord(context.Background(), models.SnapshotRecord{
+		SnapshotID: "snap-creating",
+		Status:     StatusCreating,
+	})
+	require.NoError(t, err)
+}
+
+func TestReclaimTimedOutSnapshotRecordNoJob(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	var snapFields map[string]any
+	patches.ApplyFunc(getActiveSnapshotJobByResourceID, func(ctx context.Context, resourceID string) (*models.TemplateImageJob, error) {
+		return nil, gorm.ErrRecordNotFound
+	})
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, values map[string]any) error {
+		t.Fatal("must not touch a job when none is active")
+		return nil
+	})
+	patches.ApplyFunc(updateSnapshotFields, func(ctx context.Context, snapshotID string, values map[string]any) error {
+		snapFields = values
+		return nil
+	})
+
+	err := reclaimTimedOutSnapshotRecord(context.Background(), models.SnapshotRecord{
+		SnapshotID: "snap-no-job",
+		Status:     StatusDeleting,
+	})
+	require.NoError(t, err)
+	require.Equal(t, StatusDeleted, snapFields["status"])
+}

@@ -84,6 +84,17 @@ func failedReplicaStatus(replica models.TemplateReplica, message string) Replica
 	return status
 }
 
+// stampReplicaPresenceFailed marks a missing local catalog entry FAILED.
+// The snapshot row is CAS-updated only while still READY/FAILED so a
+// concurrent tombstone is not overwritten.
+func stampReplicaPresenceFailed(ctx context.Context, snapshotID string, model models.TemplateReplica, msg string) {
+	_ = UpsertReplica(ctx, snapshotID, model.InstanceType, failedReplicaStatus(model, msg))
+	_, _ = updateSnapshotFieldsIfStatusIn(ctx, snapshotID, map[string]any{
+		"status":     StatusFailed,
+		"last_error": msg,
+	}, StatusReady, StatusFailed)
+}
+
 var (
 	snapshotReconcilerOnce sync.Once
 	snapshotStorageCache   = struct {
@@ -125,6 +136,9 @@ func runSnapshotReconcilerPass(ctx context.Context) {
 	}
 	if err := reconcileSnapshotRuntimeRefs(ctx); err != nil {
 		logger.Warnf("reconcile snapshot runtime refs failed: %v", err)
+	}
+	if err := reconcileSnapshotTombstones(ctx); err != nil {
+		logger.Warnf("reconcile snapshot tombstones failed: %v", err)
 	}
 	if err := refreshSnapshotStorageMetrics(ctx); err != nil {
 		logger.Warnf("refresh snapshot storage metrics failed: %v", err)
@@ -181,22 +195,75 @@ func reconcileSnapshotDefinitionTimeouts(ctx context.Context) error {
 		return err
 	}
 	for _, rec := range rows {
-		active, err := getActiveSnapshotJobByResourceID(ctx, rec.SnapshotID)
-		if err == nil && active != nil {
-			continue
-		}
-		if err != nil && !errorsIsRecordNotFound(err) {
-			return err
-		}
-		lastError := fmt.Sprintf("snapshot %s remained in %s beyond %s", rec.SnapshotID, rec.Status, snapshotOperationTimeout)
-		if err := updateSnapshotFields(ctx, rec.SnapshotID, map[string]any{
-			"status":     StatusFailed,
-			"last_error": lastError,
-		}); err != nil {
+		if err := reclaimTimedOutSnapshotRecord(ctx, rec); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// shouldReclaimStaleSnapshotDeleteJob is true when a DELETING row is held
+// by an expired SNAPSHOT_DELETE job (typical after a master crash between
+// insertSnapshotDeleteJob and execute). Fresh jobs and CREATING stay skipped.
+func snapshotDeleteJobIsStale(job *models.TemplateImageJob) bool {
+	if job == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(job.Operation), JobOperationSnapshotDelete) {
+		return false
+	}
+	if job.UpdatedAt.IsZero() {
+		return false
+	}
+	return time.Since(job.UpdatedAt) >= snapshotOperationTimeout
+}
+
+func shouldReclaimStaleSnapshotDeleteJob(rec models.SnapshotRecord, job *models.TemplateImageJob) bool {
+	if !strings.EqualFold(strings.TrimSpace(rec.Status), StatusDeleting) {
+		return false
+	}
+	return snapshotDeleteJobIsStale(job)
+}
+
+func shouldFailStaleDeleteJobOnTombstone(rec models.SnapshotRecord, job *models.TemplateImageJob) bool {
+	if !snapshotIsTombstoned(rec.Status) {
+		return false
+	}
+	return snapshotDeleteJobIsStale(job)
+}
+
+// reclaimTimedOutSnapshotRecord returns a stuck CREATING/DELETING row to a
+// terminal-or-retryable status. A live active job still wins, except a stale
+// SNAPSHOT_DELETE job which is failed so the tombstone reconciler can retry.
+func reclaimTimedOutSnapshotRecord(ctx context.Context, rec models.SnapshotRecord) error {
+	active, err := getActiveSnapshotJobByResourceID(ctx, rec.SnapshotID)
+	if err != nil && !errorsIsRecordNotFound(err) {
+		return err
+	}
+	if active != nil {
+		if !shouldReclaimStaleSnapshotDeleteJob(rec, active) {
+			return nil
+		}
+		if err := updateTemplateImageJob(ctx, active.JobID, map[string]any{
+			"status":        JobStatusFailed,
+			"error_message": fmt.Sprintf("stale snapshot delete job %s exceeded %s", active.JobID, snapshotOperationTimeout),
+		}); err != nil {
+			return err
+		}
+	}
+	lastError := fmt.Sprintf("snapshot %s remained in %s beyond %s", rec.SnapshotID, rec.Status, snapshotOperationTimeout)
+	if active != nil {
+		lastError = fmt.Sprintf("snapshot %s remained in %s beyond %s with stale delete job %s", rec.SnapshotID, rec.Status, snapshotOperationTimeout, active.JobID)
+	}
+	// Stuck DELETING returns to DELETED so the tombstone reconciler can retry.
+	status := StatusFailed
+	if strings.EqualFold(rec.Status, StatusDeleting) {
+		status = StatusDeleted
+	}
+	return updateSnapshotFields(ctx, rec.SnapshotID, map[string]any{
+		"status":     status,
+		"last_error": lastError,
+	})
 }
 
 func reconcileSnapshotReplicaPresence(ctx context.Context) error {
@@ -205,7 +272,7 @@ func reconcileSnapshotReplicaPresence(ctx context.Context) error {
 	defer setSnapshotOrphanGauge(orphanCount)
 	var rows []models.SnapshotRecord
 	if err := store.db.WithContext(ctx).Table(constants.SnapshotTableName).
-		Where("status IN ?", []string{StatusReady, StatusFailed, StatusDeleting}).
+		Where("status IN ?", []string{StatusReady, StatusFailed}).
 		Find(&rows).Error; err != nil {
 		return err
 	}
@@ -278,11 +345,7 @@ func reconcileSnapshotReplicaPresence(ctx context.Context) error {
 				if rsp.GetSnapshot() == nil || strings.TrimSpace(rsp.GetSnapshot().GetSnapshotID()) == "" {
 					orphanCount++
 					msg := fmt.Sprintf("snapshot %s missing from local catalog on node %s", rec.SnapshotID, firstNonEmpty(replica.NodeID, hostIP))
-					_ = UpsertReplica(ctx, rec.SnapshotID, model.InstanceType, failedReplicaStatus(model, msg))
-					_ = updateSnapshotFields(ctx, rec.SnapshotID, map[string]any{
-						"status":     StatusFailed,
-						"last_error": msg,
-					})
+					stampReplicaPresenceFailed(ctx, rec.SnapshotID, model, msg)
 				}
 			case cubeleterrorcode.ErrorCode_PreConditionFailed:
 				orphanCount++
@@ -291,11 +354,7 @@ func reconcileSnapshotReplicaPresence(ctx context.Context) error {
 					NodeID: model.NodeID,
 					NodeIP: model.NodeIP,
 				}}, snapshotBackend)
-				_ = UpsertReplica(ctx, rec.SnapshotID, model.InstanceType, failedReplicaStatus(model, msg))
-				_ = updateSnapshotFields(ctx, rec.SnapshotID, map[string]any{
-					"status":     StatusFailed,
-					"last_error": msg,
-				})
+				stampReplicaPresenceFailed(ctx, rec.SnapshotID, model, msg)
 			default:
 				reconcileErr = errors.Join(reconcileErr, fmt.Errorf("snapshot %s reconcile on node %s returned ret=%d %s", rec.SnapshotID, firstNonEmpty(replica.NodeID, hostIP), retCode, retMsg))
 			}
@@ -338,23 +397,9 @@ func reconcileSnapshotRuntimeRefs(ctx context.Context) error {
 				observed = append(observed, ref)
 				continue
 			}
-			templateID := ""
-			if item != nil {
-				templateID = strings.TrimSpace(item.TemplateID)
+			if ref, ok := snapshotRuntimeRefFromTemplateID(ctx, item); ok {
+				observed = append(observed, ref)
 			}
-			if templateID == "" {
-				continue
-			}
-			kind, err := GetTemplateKind(ctx, templateID)
-			if err != nil || !strings.EqualFold(kind, TemplateKindSnapshot) {
-				continue
-			}
-			observed = append(observed, SnapshotRuntimeRefInfo{
-				SnapshotID: templateID,
-				SandboxID:  item.SandboxID,
-				NodeID:     item.HostID,
-				NodeIP:     item.HostIP,
-			})
 		}
 		if err := RefreshSnapshotRuntimeRefsFromNode(ctx, nodeID, nodeIP, observed); err != nil {
 			reconcileErr = err
