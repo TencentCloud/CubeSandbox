@@ -568,6 +568,18 @@ type SchedulerProfileRouteConf struct {
 // SchedulerProfilePluginConf is shared by built-in Go, CEL expression and
 // external gRPC plugins. Type defaults to "go". External plugins use a Unix
 // socket by default, while tests and development may use a host:port target.
+//
+// Enforcement is split across two layers:
+//   - The plugin framework (this package's consumers plugin/expr and
+//     plugin/grpcplugin) resolves and validates Name, Type, Expr, SocketPath,
+//     Timeout and CircuitBreaker*; expr and grpc score plugins also honor
+//     Weight at build time.
+//   - Enabled, DefaultScore, Args and the profile-level Selection/Failure
+//     blocks are consumed by the profile runner that wires plugins into the
+//     schedule loop. Until that runner is active, setting enabled: false does
+//     NOT stop the plugin from being built or run. For type "go" scores the
+//     effective weight still comes from the legacy
+//     Scheduler.Score.ScorePluginConf section, not from this Weight field.
 type SchedulerProfilePluginConf struct {
 	Name                   string         `yaml:"name"`
 	Type                   string         `yaml:"type"`

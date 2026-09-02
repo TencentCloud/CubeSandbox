@@ -61,3 +61,40 @@ func TestSorted(t *testing.T) {
 	}
 	assert.Equal(t, 1, tmpNode.Index)
 }
+
+func TestFreezeSnapshotIsIdempotent(t *testing.T) {
+	slctx := New("")
+	slctx.SetNodes(node.NodeList{{InsID: "n1"}, {InsID: "n2"}})
+	slctx.FreezeSnapshot()
+	version := slctx.SnapshotVersion
+	if version == "" {
+		t.Fatal("SnapshotVersion is empty after FreezeSnapshot")
+	}
+	if slctx.SnapshotNodes().Len() != 2 {
+		t.Fatalf("SnapshotNodes().Len() = %d, want 2", slctx.SnapshotNodes().Len())
+	}
+	// Narrow the candidate set, then re-freeze: both the version and the
+	// snapshot must stay exactly as the first freeze left them.
+	slctx.SetNodes(slctx.Nodes()[1:])
+	slctx.FreezeSnapshot()
+	if slctx.SnapshotVersion != version {
+		t.Fatalf("SnapshotVersion changed on re-freeze: %q -> %q", version, slctx.SnapshotVersion)
+	}
+	if slctx.SnapshotNodes().Len() != 2 {
+		t.Fatalf("SnapshotNodes().Len() = %d after re-freeze, want 2", slctx.SnapshotNodes().Len())
+	}
+	if slctx.Nodes().Len() != 1 {
+		t.Fatalf("Nodes().Len() = %d, want narrowed result of 1", slctx.Nodes().Len())
+	}
+}
+
+func TestFreezeSnapshotVersionsAreUnique(t *testing.T) {
+	first, second := New(""), New("")
+	first.SetNodes(node.NodeList{{InsID: "n1"}})
+	second.SetNodes(node.NodeList{{InsID: "n1"}})
+	first.FreezeSnapshot()
+	second.FreezeSnapshot()
+	if first.SnapshotVersion == second.SnapshotVersion {
+		t.Fatalf("SnapshotVersion %q is not unique per request", first.SnapshotVersion)
+	}
+}

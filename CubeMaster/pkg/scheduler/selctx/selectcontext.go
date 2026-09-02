@@ -7,7 +7,7 @@ package selctx
 
 import (
 	"context"
-	"fmt"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -28,6 +28,7 @@ type SelectorCtx struct {
 	result          node.NodeList
 	snapshot        node.NodeList
 	snapshotFacts   map[string]SnapshotNodeFacts
+	snapshotFrozen  bool
 
 	selName         string
 	rSelect         weighted.W
@@ -79,16 +80,19 @@ var snapshotSequence atomic.Uint64
 // ownership explicit and protects callers that inject nodes in tests or
 // benchmark simulations.
 //
-// Call it exactly once per scheduling request, BEFORE any filter narrows the
-// candidate set: re-invoking after filtering re-clones the narrowed result
-// and silently shrinks the "stable snapshot" SnapshotNodes advertises, and a
-// fresh SnapshotVersion would desync external plugins mid-request. Note the
-// frozen result and the snapshot share node pointers, so in-place mutation of
-// a node (there should be none on the read path) is visible through both.
+// Call it once per scheduling request, BEFORE any filter narrows the
+// candidate set. The call is idempotent: re-invoking is a no-op, so a second
+// freeze can neither shrink the "stable snapshot" SnapshotNodes advertises
+// nor desync external plugins with a fresh SnapshotVersion mid-request.
+// SnapshotVersion is a process-unique sequence number (not wall-clock
+// derived), so it stays stable for the life of the request. Note the frozen
+// result and the snapshot share node pointers, so in-place mutation of a
+// node (there should be none on the read path) is visible through both.
 func (s *SelectorCtx) FreezeSnapshot() {
-	if s == nil {
+	if s == nil || s.snapshotFrozen {
 		return
 	}
+	s.snapshotFrozen = true
 	if s.Ctx == nil {
 		s.Ctx = context.Background()
 	}
@@ -130,7 +134,7 @@ func (s *SelectorCtx) FreezeSnapshot() {
 		}
 		s.snapshotFacts = facts
 	}
-	s.SnapshotVersion = fmt.Sprintf("%d-%d", time.Now().UnixNano(), snapshotSequence.Add(1))
+	s.SnapshotVersion = strconv.FormatUint(snapshotSequence.Add(1), 10)
 }
 
 func New(name string) *SelectorCtx {

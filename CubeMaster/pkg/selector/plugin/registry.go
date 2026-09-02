@@ -188,8 +188,17 @@ func (r *Registry) BuildFilter(ctx context.Context, conf config.SchedulerProfile
 	if factory == nil {
 		factory = r.filterProviders[kind]
 	}
+	// A kind registered under either phase is a known type: only report
+	// ErrUnknownPluginType when the kind is entirely absent, so a typo'd
+	// filter name on a scores-only registry surfaces as "unknown plugin"
+	// instead of the misleading "unknown type".
 	_, knownType := r.filters[kind]
+	if !knownType {
+		_, knownType = r.scores[kind]
+	}
 	if _, ok := r.filterProviders[kind]; ok {
+		knownType = true
+	} else if _, ok := r.scoreProviders[kind]; ok {
 		knownType = true
 	}
 	r.mu.RUnlock()
@@ -225,8 +234,14 @@ func (r *Registry) BuildScore(ctx context.Context, conf config.SchedulerProfileP
 	if factory == nil {
 		factory = r.scoreProviders[kind]
 	}
+	// See BuildFilter: a kind registered under either phase is a known type.
 	_, knownType := r.scores[kind]
+	if !knownType {
+		_, knownType = r.filters[kind]
+	}
 	if _, ok := r.scoreProviders[kind]; ok {
+		knownType = true
+	} else if _, ok := r.filterProviders[kind]; ok {
 		knownType = true
 	}
 	r.mu.RUnlock()

@@ -67,6 +67,10 @@ func compile(conf config.SchedulerProfilePluginConf, wantFilter bool) (*evaluato
 	}
 	weight := conf.Weight
 	if weight == 0 {
+		// Zero means "unset" and defaults to 1; an explicit weight: 0 is
+		// indistinguishable from unset and therefore unsupported. A
+		// zero-weight score would contribute nothing to the weighted total
+		// anyway — operators disable a score via the profile instead.
 		weight = 1
 	}
 	return &evaluator{name: name, program: program, weight: weight}, nil

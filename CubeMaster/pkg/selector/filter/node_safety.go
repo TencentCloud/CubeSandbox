@@ -23,10 +23,15 @@ import (
 //
 // The checks deliberately mirror pkg/selector/prefilter exactly — same
 // timeout (MetricUpdateTimeout) for both metric timestamps — so the guard
-// never drops a node the canonical prefilter would have kept. One intentional
-// divergence: the prefilter Fatalf's on CpuLoadUsage > CpuTotal (an invariant
-// violation worth a crash in the canonical path), while this guard drops the
-// node — a profile guard must not take the scheduler down.
+// never drops a node the canonical prefilter would have kept.
+// SchedulerConf.LocalMetricUpdateTimeout exists in conf.yaml but is
+// referenced nowhere else in the codebase; until the canonical prefilter
+// adopts a dedicated local-metric timeout, this guard shares
+// MetricUpdateTimeout for the local timestamp as well so the two paths
+// cannot disagree. One intentional divergence: the prefilter Fatalf's on
+// CpuLoadUsage > CpuTotal (an invariant violation worth a crash in the
+// canonical path), while this guard drops the node — a profile guard must
+// not take the scheduler down.
 type nodeSafetyFilter struct{}
 
 func NewNodeSafetyFilter() *nodeSafetyFilter { return &nodeSafetyFilter{} }

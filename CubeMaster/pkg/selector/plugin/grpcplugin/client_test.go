@@ -130,8 +130,9 @@ func TestExternalFilterSynchronizesAndValidatesSnapshot(t *testing.T) {
 	if lastSnapshot != selection.SnapshotVersion {
 		t.Fatalf("synced version = %q, want %q", lastSnapshot, selection.SnapshotVersion)
 	}
-	selection.FreezeSnapshot()
-	if _, err := selector.Select(selection); err == nil {
+	// A second scheduling request is a fresh context with its own frozen
+	// snapshot; FreezeSnapshot is idempotent per request.
+	if _, err := selector.Select(grpcSelection()); err == nil {
 		t.Fatal("non-candidate filter result must be rejected")
 	}
 }

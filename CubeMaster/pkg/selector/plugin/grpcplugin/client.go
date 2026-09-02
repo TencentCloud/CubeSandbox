@@ -52,7 +52,13 @@ func (b *breaker) before() error {
 		return ErrCircuitOpen
 	}
 	if !b.openUntil.IsZero() {
-		// Cooldown expired: enter half-open and allow a probe.
+		// Cooldown expired: enter half-open and allow a probe. before() admits
+		// every caller once the cooldown has elapsed, so concurrent callers
+		// would all become half-open probes (a single failed probe reopens
+		// the circuit even if a concurrent probe succeeds). That is
+		// acceptable today because every call path holds the client's syncMu,
+		// which serializes probes; if call() is ever used without syncMu, add
+		// a single-flight probe guard here.
 		b.openUntil = time.Time{}
 		b.failures = 0
 		b.halfOpen = true
@@ -211,6 +217,14 @@ func (c *client) reject(err error) error {
 // syncSnapshot synchronizes the request's immutable snapshot with the plugin.
 // The caller must hold c.syncMu; the lock is held across the whole
 // sync+Filter/Score sequence by the Select methods below.
+//
+// Throughput ceiling: SnapshotVersion is unique per scheduling request, so
+// the syncedVersion short-circuit can only deduplicate repeated syncs within
+// a single request — across requests it always misses. Every scheduling
+// request that reaches an external plugin therefore re-sends the complete
+// pre-filter node pool, and syncMu serializes those requests (up to 2x
+// timeout per plugin per request). Keying the snapshot by node-pool
+// generation so unchanged pools are not re-sent is a deliberate follow-up.
 func (c *client) syncSnapshot(selection *selctx.SelectorCtx) error {
 	if selection.SnapshotVersion == "" {
 		return errors.New("scheduler snapshot version is empty")
@@ -380,6 +394,10 @@ func NewScore(ctx context.Context, conf config.SchedulerProfilePluginConf) (scor
 	}
 	weight := conf.Weight
 	if weight == 0 {
+		// Zero means "unset" and defaults to 1; an explicit weight: 0 is
+		// indistinguishable from unset and therefore unsupported. A zero-weight
+		// score would contribute nothing to the weighted total anyway —
+		// operators disable a score via the profile instead.
 		weight = 1
 	}
 	return &scorePlugin{client: client, weight: weight}, nil
