@@ -68,7 +68,7 @@ All env vars can be overridden by the corresponding flag.
 | `--rate` | `0` | Poisson arrival rate in requests/sec (`<=0` = as fast as possible) |
 | `--lifetime` | *(none)* | Per-sandbox lifetime in seconds: `min,max` (uniform); client DELETEs when lifetime expires |
 | `--templates` | *(none)* | Template pool: comma-separated `templateID[:weight[:cpuMillis:memMiB]]` (weight default 1) |
-| `--dump-trace` | *(none)* | Write the pre-generated request sequence to a JSON trace file, then run normally |
+| `--dump-trace` | *(none)* | Write the pre-generated request sequence to a JSON trace file, then run normally (requires a scheduled workload) |
 
 Without any scheduling flag (`--workload`/`--rate`/`--lifetime`/`--templates`)
 the tool behaves exactly as before: all requests fire at once and each sandbox
@@ -135,6 +135,12 @@ weighted random template picks. Each create body carries the picked
 client issues the DELETE itself when the lifetime expires. The report and JSON
 export add queue-delay percentiles (scheduled vs actual start) and per-template
 create counts/success rates.
+
+> **Concurrency for lifetime-bearing presets.** A worker slot is held for the
+> full sandbox lifetime (create → lifetime sleep → delete), so the steady-state
+> number of live sandboxes ≈ `rate × mean lifetime`. Set `--concurrency` at
+> least that high (e.g. `burst`: 50 req/s × ~65 s ≈ 3250) or the dispatcher
+> stalls on the semaphore and the requested `--rate` is not honored.
 
 ### Trace file schema
 

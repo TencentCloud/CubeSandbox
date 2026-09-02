@@ -145,7 +145,7 @@ func parseConfig() *Config {
 	flag.Float64Var(&cfg.Rate, "rate", 0, "Poisson arrival rate in requests/sec (<=0 = as fast as possible)")
 	lifetime := flag.String("lifetime", "", "Per-sandbox lifetime in seconds: min,max (uniform); client DELETEs at lifetime")
 	flag.StringVar(&cfg.TemplatesRaw, "templates", "", "Comma-separated templateID[:weight[:cpuMillis:memMiB]] pool")
-	flag.StringVar(&cfg.DumpTrace, "dump-trace", "", "Write the pre-generated request sequence to a JSON trace file")
+	flag.StringVar(&cfg.DumpTrace, "dump-trace", "", "Write the pre-generated request sequence to a JSON trace file (requires a scheduled workload)")
 
 	var noTUI bool
 	flag.BoolVar(&noTUI, "no-tui", false, "Disable interactive TUI (auto-detected in non-TTY)")
@@ -242,6 +242,11 @@ func parseConfig() *Config {
 	}
 
 	cfg.Scheduled = cfg.Workload != "" || cfg.Rate > 0 || cfg.hasLifetime || cfg.TemplatesRaw != ""
+
+	if cfg.DumpTrace != "" && !cfg.Scheduled {
+		fmt.Fprintln(os.Stderr, "ERROR: --dump-trace requires a scheduled workload (--workload, or --rate/--lifetime/--templates)")
+		os.Exit(1)
+	}
 
 	if cfg.Concurrency < 1 {
 		cfg.Concurrency = 1

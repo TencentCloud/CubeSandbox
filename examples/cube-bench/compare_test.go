@@ -100,6 +100,23 @@ func TestFlattenRoundsAndSingleSample(t *testing.T) {
 		t.Errorf("plain file samples = %v, want single {x:1}", f.samples)
 	}
 
+	// Real cube-bench exports keep the create/delete stat blocks at the top
+	// level, outside "summary"; they must fold into the sample so latency
+	// percentiles stay comparable.
+	withLat := writeTempFile(t, dir, "with_latency.json", `{
+		"summary": {"x": 1},
+		"create": {"count": 2, "p95": 120.5},
+		"delete": {"count": 2, "p95": 30}
+	}`)
+	f, err = loadSampleFile(withLat)
+	if err != nil {
+		t.Fatalf("loadSampleFile(withLat): %v", err)
+	}
+	wantLat := map[string]float64{"x": 1, "create.count": 2, "create.p95": 120.5, "delete.count": 2, "delete.p95": 30}
+	if len(f.samples) != 1 || !reflect.DeepEqual(f.samples[0], wantLat) {
+		t.Errorf("withLat samples = %v, want single %v", f.samples, wantLat)
+	}
+
 	// An empty rounds array falls back to the single-sample path.
 	emptyRounds := writeTempFile(t, dir, "empty_rounds.json", `{"summary": {"x": 2}, "rounds": []}`)
 	f, err = loadSampleFile(emptyRounds)

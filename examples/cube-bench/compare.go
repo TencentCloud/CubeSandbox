@@ -184,6 +184,13 @@ func loadSampleFile(path string) (*sampleFile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("compare: %s: %w", path, err)
 	}
+	// cube-bench exports keep the create/delete latency stat blocks at the top
+	// level, outside "summary"; fold them in so latency percentiles comparable.
+	for _, k := range []string{"create", "delete"} {
+		if blk, ok := root[k].(map[string]any); ok {
+			flattenMetrics(blk, k, sample)
+		}
+	}
 	f.samples = []map[string]float64{sample}
 	return f, nil
 }
