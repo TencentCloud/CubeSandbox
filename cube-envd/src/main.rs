@@ -12,6 +12,7 @@
 //! compatibility-tested against — see tests/e2e/envd_conformance.
 
 mod auth;
+mod cgroup;
 mod connect;
 mod cors;
 mod error;
@@ -235,7 +236,7 @@ fn main() {
         .expect("build tokio runtime");
 
     runtime.block_on(async move {
-        let state = Arc::new(state::AppState::new());
+        let state = Arc::new(state::AppState::new().with_cgroup(cgroup::init()));
         let app = server::router(state);
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], cli.port));
         let listener = match tokio::net::TcpListener::bind(addr).await {
