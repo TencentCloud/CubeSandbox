@@ -298,6 +298,16 @@ func parseConfig() *Config {
 				cfg.Total, meanLife, cfg.Concurrency, est)
 		}
 	}
+	if cfg.Scheduled && cfg.Rate > 0 && !cfg.hasLifetime {
+		// No --lifetime, but a worker slot is still held for create+delete:
+		// at high rates a small -c stalls the dispatcher just the same, and
+		// queue_delay_* then measures the client's own semaphore, not the
+		// scheduler. There is no residence estimate to compute a numeric
+		// threshold from, so warn qualitatively.
+		fmt.Fprintf(os.Stderr, "WARNING: --rate without --lifetime: each worker slot is still occupied for "+
+			"create+delete, so at high rates a low --concurrency stalls the dispatcher and queue-delay "+
+			"metrics measure the client's own semaphore, not the scheduler\n")
+	}
 
 	// Validate host-mount early so the CLI fails fast on bad input while still
 	// preserving the original JSON for config display and exported reports.

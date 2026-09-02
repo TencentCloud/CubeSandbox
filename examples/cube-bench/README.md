@@ -203,6 +203,10 @@ client sleeps it after the create response returns); true sandbox residence is
 `create + lifetime + delete`, so trace replayers modeling occupancy should add
 the create/delete tail themselves.
 
+Note on `seq` numbering: scheduled mode (and the trace contract) numbers
+requests 0..N-1, while the legacy non-scheduled export numbers `raw[].seq`
+1..N — expect a one-off shift when diffing raw entries across modes.
+
 ### Comparing runs (A/B report)
 
 `compare` reads the JSON exports of two experiment groups (multiple seeds per
@@ -235,7 +239,9 @@ correctly render as "—". Same-tool A/B (cube-bench vs cube-bench, schedsim vs
 schedsim) is where the full metric set lines up. A
 metric is flagged in the conclusions when the verdict direction matches,
 |Δ%| ≥ 5%, and — whenever both sides have n ≥ 2 — the delta exceeds the
-combined CI half-widths, so small-sample noise is not flagged as a verdict.
+95% CI of the difference (√(ci_base² + ci_cand²), the standard combination
+for two independent means), so small-sample noise is not flagged as a
+verdict.
 When the baseline mean is exactly 0 (Δ% undefined), the test falls back to
 the absolute delta — still CI-gated when possible — so a 0 → 0.5
 `error_rate` catastrophe is flagged rather than silently dropped.
@@ -252,6 +258,11 @@ Caveats when reading verdicts:
   baselines (e.g. `error_rate` ≈ 0.001) produce enormous percentages that
   always clear the 5% bar. Read them alongside the absolute Δ, which is shown
   next to them.
+- **The zero-baseline fallback has no magnitude floor either.** When the
+  baseline mean is exactly 0, significance falls back to the absolute delta,
+  so with tight CIs on both sides even a 0 → 1e-9 movement is flagged as
+  Improved/Regressed. That is statistically real but usually immaterial —
+  judge from the absolute Δ shown next to the verdict.
 
 Per-metric aggregation only counts samples that actually contain the key, so
 when the two groups mix export shapes (e.g. a `create-only` file next to

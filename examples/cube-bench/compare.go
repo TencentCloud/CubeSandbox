@@ -530,16 +530,20 @@ func groupPrefix(key string) string {
 
 // conclusions splits rows into the report's conclusion lists: significant
 // improvements/regressions (verdict matches, |Δ%| >= 5%, and — when both
-// sides have n >= 2 — the delta must exceed the combined 95% CI half-widths,
-// so noise at small sample counts is not flagged as a verdict), plus metrics
-// without a known direction.
+// sides have n >= 2 — the delta must exceed the 95% CI half-width of the
+// difference of the two independent means, √(ci_base² + ci_cand²), so noise
+// at small sample counts is not flagged as a verdict; summing the half-widths
+// instead would be over-conservative and hide genuine movements), plus
+// metrics without a known direction.
 //
 // When the baseline mean is exactly 0 the Δ% is undefined and hasPct is
 // false; the significance test then falls back to the absolute delta (still
 // CI-gated when possible), so a 0 -> 0.5 error_rate catastrophe is flagged
-// instead of silently dropped. Directionless rows join the n/a list only
-// when the same magnitude test (without the CI gate) says the delta is
-// notable, so trivial movements don't flood the section.
+// instead of silently dropped. The fallback has no magnitude floor: with
+// tight CIs on both sides even a 0 -> 1e-9 movement is flagged, so judge
+// materiality from the absolute Δ shown alongside. Directionless rows join
+// the n/a list only when the same magnitude test (without the CI gate) says
+// the delta is notable, so trivial movements don't flood the section.
 func (c *comparison) conclusions() (improved, regressed, noDir []*compareRow) {
 	for _, r := range c.rows {
 		significant := r.hasPct && math.Abs(r.pct) >= 5
@@ -548,7 +552,9 @@ func (c *comparison) conclusions() (improved, regressed, noDir []*compareRow) {
 		}
 		notable := significant
 		if significant && r.base.hasCI && r.cand.hasCI {
-			significant = math.Abs(r.delta) > r.base.ci+r.cand.ci
+			// 95% CI of the difference of two independent means: root-sum-of-
+			// squares of the per-side half-widths.
+			significant = math.Abs(r.delta) > math.Hypot(r.base.ci, r.cand.ci)
 		}
 		switch {
 		case (r.verdict == verdictImproved || r.verdict == verdictRegressed) && significant:
@@ -625,7 +631,7 @@ func renderComparison(c *comparison) string {
 	}
 
 	b.WriteString("\n## Metric Comparison\n\n")
-	b.WriteString("Cells show the mean across samples; CI is the 95% confidence interval half-width (Student-t t95·σ/√n), shown only when n ≥ 2. Δ = candidate − baseline. Verdicts are directional; the conclusion lists additionally require |Δ| beyond the combined CI half-widths when both sides have n ≥ 2. Δ% is relative to the baseline mean with no floor, so near-zero baselines (e.g. an error_rate ≈ 0) can produce enormous percentages — read them alongside the absolute Δ.\n\n")
+	b.WriteString("Cells show the mean across samples; CI is the 95% confidence interval half-width (Student-t t95·σ/√n), shown only when n ≥ 2. Δ = candidate − baseline. Verdicts are directional; the conclusion lists additionally require |Δ| beyond the 95% CI of the difference (√(ci_base² + ci_cand²)) when both sides have n ≥ 2. Δ% is relative to the baseline mean with no floor, so near-zero baselines (e.g. an error_rate ≈ 0) can produce enormous percentages — read them alongside the absolute Δ.\n\n")
 	if len(c.rows) == 0 {
 		b.WriteString("- (no numeric metrics found)\n")
 	}
@@ -654,9 +660,9 @@ func renderComparison(c *comparison) string {
 
 	improved, regressed, noDir := c.conclusions()
 	b.WriteString("\n## Conclusions\n\n")
-	b.WriteString("### Improved (|Δ%| ≥ 5%, beyond combined 95% CI when n ≥ 2)\n\n")
+	b.WriteString("### Improved (|Δ%| ≥ 5%, beyond 95% CI of the difference when n ≥ 2)\n\n")
 	writeConclusionList(&b, c, improved)
-	b.WriteString("\n### Regressed (|Δ%| ≥ 5%, beyond combined 95% CI when n ≥ 2)\n\n")
+	b.WriteString("\n### Regressed (|Δ%| ≥ 5%, beyond 95% CI of the difference when n ≥ 2)\n\n")
 	writeConclusionList(&b, c, regressed)
 	b.WriteString("\n### No direction (n/a, only |Δ%| ≥ 5% or newly-nonzero shown)\n\n")
 	writeConclusionList(&b, c, noDir)

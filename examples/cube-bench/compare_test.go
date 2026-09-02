@@ -501,14 +501,16 @@ func TestCompareEndToEnd(t *testing.T) {
 		}
 	}
 
-	// Conclusions: with n=3 per side the combined CI gate keeps only
-	// error_rate (|Δ| = 0.05 > 0.049687); the other directional deltas are
+	// Conclusions: with n=3 per side the difference-CI gate keeps error_rate
+	// (|Δ| = 0.05 > √(0.049687² + 0²)) and success_rate (0.06 >
+	// √(0.049687² + 0.024843²) ≈ 0.0556); the other directional deltas are
 	// within noise and stay out of the lists.
 	for _, want := range []string{
 		"## Conclusions",
-		"### Improved (|Δ%| ≥ 5%, beyond combined 95% CI when n ≥ 2)",
+		"### Improved (|Δ%| ≥ 5%, beyond 95% CI of the difference when n ≥ 2)",
 		"- **error_rate**: -50.0% (0.1 → 0.05)",
-		"### Regressed (|Δ%| ≥ 5%, beyond combined 95% CI when n ≥ 2)",
+		"- **success_rate**: +6.5% (0.92 → 0.98)",
+		"### Regressed (|Δ%| ≥ 5%, beyond 95% CI of the difference when n ≥ 2)",
 		"- (none)",
 		"### No direction (n/a, only |Δ%| ≥ 5% or newly-nonzero shown)",
 		"- **queue_depth**: +40.0% (5 → 7)",
@@ -520,7 +522,6 @@ func TestCompareEndToEnd(t *testing.T) {
 
 	// CI-gated deltas must not appear as conclusions.
 	for _, notWant := range []string{
-		"- **success_rate**:",
 		"- **sched_latency_p95**:",
 		"- **throughput_qps**:",
 		"- **create.p95_ms**:",
