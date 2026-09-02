@@ -169,9 +169,10 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
 ### 指标定义
 
 时间平均类指标（`cpu/mem_alloc_rate`、`load_cv_*`、`jain_*`、`fragmentation_ratio*`、
-`active/empty_nodes_avg`）的积分窗口固定为 [0, max(arrival_ms) + max(lifetime_ms))，
-由 trace 唯一决定、与调度成功率无关：被拒绝的请求不产生到期事件，若窗口止于最后
-一个事件，拒绝率高的配置会在更短的分母上积分，A/B 对比就被污染了。
+`active/empty_nodes_avg`）的积分窗口固定为 [0, max_i(arrival_ms_i + lifetime_ms_i))
+（trace 中最晚的到期时刻），由 trace 唯一决定、与调度成功率无关：被拒绝的请求不产生
+到期事件，若窗口止于最后一个事件，拒绝率高的配置会在更短的分母上积分，A/B 对比就
+被污染了。
 
 | key | 定义 |
 | --- | --- |

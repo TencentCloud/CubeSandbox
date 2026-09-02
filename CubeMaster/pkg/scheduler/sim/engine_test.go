@@ -42,7 +42,20 @@ func bootstrapOnce(t *testing.T) {
 			bootstrapErr = fmt.Errorf("resolve test config: %w", err)
 			return
 		}
-		bootstrapErr = Bootstrap(context.Background(), cfgPath)
+		bootstrapErr = func() error {
+			// config.Init dumps the parsed config to stdout; swallow it like
+			// cmd/schedsim's silenceStdout does so `go test` output stays
+			// clean.
+			old := os.Stdout
+			if devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
+				os.Stdout = devnull
+				defer func() {
+					os.Stdout = old
+					_ = devnull.Close()
+				}()
+			}
+			return Bootstrap(context.Background(), cfgPath)
+		}()
 	})
 	if bootstrapErr != nil {
 		t.Fatalf("bootstrap: %v", bootstrapErr)
@@ -286,8 +299,8 @@ func TestNoteTemplatePlacementWarmsUp(t *testing.T) {
 }
 
 // TestRunRoundAveragingWindowIsTraceDerived: the time-averaging window must
-// close at the trace-derived horizon max(arrival_ms)+max(lifetime_ms), not at
-// the last event — a rejected request pushes no expiry, so an event-derived
+// close at the trace-derived horizon max_i(arrival_ms[i]+lifetime_ms[i]), not
+// at the last event — a rejected request pushes no expiry, so an event-derived
 // window would shrink with the scheduler's own success rate and break A/B
 // comparability. Here request #1 (200000 millicores > the 192000 effective
 // free = 64000×3 cpu_ratio) is rejected; the admitted request #0 holds

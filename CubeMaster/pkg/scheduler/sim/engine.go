@@ -500,9 +500,10 @@ func (e *engine) runEvents(ctx context.Context) {
 	// last event. Rejected requests push no expiry, so an event-derived
 	// window would end earlier for configs that reject the trace tail — the
 	// time denominator would drift with the scheduler's own success rate and
-	// break A/B comparability. max(arrival_ms)+max(lifetime_ms) upper-bounds
-	// every admitted placement's expiry, and every admitted placement has
-	// expired by then, so the tail credits only the drained (zero-load) state.
+	// break A/B comparability. max_i(arrival_ms[i]+lifetime_ms[i]) is the
+	// latest would-be expiry across the trace: it upper-bounds every
+	// admitted placement's expiry, and every admitted placement has expired
+	// by then, so the tail credits only the drained (zero-load) state.
 	var horizonMs int64
 	for _, r := range e.p.Trace.Requests {
 		if end := r.ArrivalMs + r.LifetimeMs; end > horizonMs {
