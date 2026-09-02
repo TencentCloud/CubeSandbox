@@ -328,10 +328,15 @@ func parseConfig() *Config {
 				"semaphore, not the scheduler; the end-of-run saturation check will say if that happened.\n",
 				cfg.Rate, cfg.Concurrency)
 		case !cfg.DryRun && cfg.hasLifetime && cfg.Mode == "create-delete":
-			// ASAP dispatch with lifetimes: every worker slot is held for the
-			// full lifetime, so the run time is bounded below by
-			// total x mean lifetime / concurrency.
-			if est := float64(cfg.Total) * occS / float64(cfg.Concurrency); est > 300 {
+			// ASAP dispatch with lifetimes: every worker slot is held for at
+			// least the full lifetime, so the run time is bounded below by
+			// total x mean lifetime / concurrency. Use meanLife directly:
+			// occS deliberately stays 0 for sub-second lifetimes (a
+			// precise-looking rate x lifetime threshold would understate the
+			// slot requirement there), but this lower bound only needs the
+			// hold — the omitted create/delete tail makes the true run
+			// longer still.
+			if est := float64(cfg.Total) * meanLife / float64(cfg.Concurrency); est > 300 {
 				fmt.Fprintf(os.Stderr, "WARNING: %d requests with mean lifetime %gs at --concurrency %d will take at least ~%.0fs; "+
 					"raise --concurrency or add --rate to pace arrivals\n",
 					cfg.Total, meanLife, cfg.Concurrency, est)

@@ -420,13 +420,28 @@ var countTokens = map[string]bool{
 	"errors": true, "failures": true, "successful": true,
 }
 
+// classifyKey strips data-derived segments before direction/scale
+// classification. Today the only such segment is the template id in
+// per_template.<id>.<stat>: a user-chosen id like "sbx-errors" or
+// "herd-pool" must not flip the sibling stat's classification (a spurious
+// "errors" count token or "herd" lower-better substring).
+func classifyKey(key string) string {
+	const prefix = "per_template."
+	if rest, ok := strings.CutPrefix(key, prefix); ok {
+		if i := strings.LastIndex(rest, "."); i >= 0 {
+			return prefix + rest[i+1:]
+		}
+	}
+	return key
+}
+
 // isScaleCounter reports whether key is a raw scale counter: a bare count
 // token from countTokens, or the singular "count" of a create/delete stat
 // block (create.count/delete.count track how many cycles ran — scale, not
 // quality). "count" outside a stat block stays directional, so failure_count
 // keeps its lower-better verdict.
 func isScaleCounter(key string) bool {
-	k := strings.ToLower(key)
+	k := strings.ToLower(classifyKey(key))
 	tokens := strings.FieldsFunc(k, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
@@ -439,7 +454,7 @@ func isScaleCounter(key string) bool {
 }
 
 func metricDirection(key string) direction {
-	k := strings.ToLower(key)
+	k := strings.ToLower(classifyKey(key))
 	tokens := strings.FieldsFunc(k, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
@@ -581,8 +596,16 @@ func compareVerdict(r *compareRow) verdict {
 
 // groupPrefix groups metrics by their natural key prefix: the segment before
 // the first '.' or '_' (e.g. "create.p95_ms" -> "create", "queue_depth" ->
-// "queue"). Keys without a separator form their own group.
+// "queue"). Keys without a separator form their own group. per_template keys
+// group by the template id instead, so a per-template comparison renders one
+// section per template rather than a single jumbled "per" table.
 func groupPrefix(key string) string {
+	if rest, ok := strings.CutPrefix(key, "per_template."); ok {
+		if i := strings.Index(rest, "."); i > 0 {
+			return "per_template." + rest[:i]
+		}
+		return key
+	}
 	if i := strings.IndexAny(key, "._"); i > 0 {
 		return key[:i]
 	}

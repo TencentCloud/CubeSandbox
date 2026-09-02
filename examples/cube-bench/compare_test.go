@@ -340,6 +340,12 @@ func TestMetricDirection(t *testing.T) {
 		{"create.count", dirNA}, // counts are not a quality signal
 		{"summary.errors", dirNA},
 		{"per_template.tpl-a.attempts", dirNA},
+		// Data-derived key segments must not flip classification: the
+		// template id in per_template.<id>.<stat> is user data.
+		{"per_template.sbx-errors.success_rate", dirHigherBetter},
+		{"per_template.herd-pool.success_rate", dirHigherBetter},
+		{"per_template.pool.with.dots.error_rate", dirLowerBetter},
+		{"per_template.tpl-a.created", dirNA},
 	}
 	for _, tc := range cases {
 		if got := metricDirection(tc.key); got != tc.want {
@@ -356,6 +362,10 @@ func TestCompareGroupPrefix(t *testing.T) {
 		"sched_latency_p99": "sched",
 		"load_balance_cv":   "load",
 		"jain":              "jain",
+		// per_template keys group by the embedded template id
+		"per_template.tpl-a.success_rate": "per_template.tpl-a",
+		"per_template.tpl-b.success_rate": "per_template.tpl-b",
+		"per_template.tpl-a":              "per_template.tpl-a",
 	}
 	for key, want := range cases {
 		if got := groupPrefix(key); got != want {
