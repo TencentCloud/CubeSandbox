@@ -470,3 +470,53 @@ func TestCompareFlagErrors(t *testing.T) {
 		t.Errorf("usage text should mention --baseline")
 	}
 }
+
+func TestSampleCountNotes(t *testing.T) {
+	// Heterogeneous exports: delete.p95_ms is absent from the second baseline
+	// sample, queue_depth is absent from the whole candidate side, and
+	// success_rate is present in every sample on both sides.
+	baseline := &sampleGroup{
+		name: "base",
+		samples: []map[string]float64{
+			{"success_rate": 0.9, "delete.p95_ms": 40, "queue_depth": 5},
+			{"success_rate": 0.92, "queue_depth": 6},
+		},
+	}
+	candidate := &sampleGroup{
+		name: "cand",
+		samples: []map[string]float64{
+			{"success_rate": 0.95, "delete.p95_ms": 30},
+			{"success_rate": 0.96, "delete.p95_ms": 28},
+		},
+	}
+	cmp := buildComparison(baseline, candidate, time.Now())
+
+	notes := cmp.sampleCountNotes()
+	if len(notes) != 1 {
+		t.Fatalf("sampleCountNotes len = %d, want 1: %v", len(notes), notes)
+	}
+	want := "- `delete.p95_ms`: n=1 of 2 baseline samples"
+	if notes[0] != want {
+		t.Errorf("note = %q, want %q", notes[0], want)
+	}
+
+	// Missing-on-one-side rows (verdictMissing) have no n on that side and
+	// must not produce a note for that side.
+	for _, note := range notes {
+		if strings.Contains(note, "queue_depth") || strings.Contains(note, "success_rate") {
+			t.Errorf("unexpected note %q", note)
+		}
+	}
+
+	// Homogeneous samples produce no notes at all.
+	same := &sampleGroup{
+		name: "same",
+		samples: []map[string]float64{
+			{"success_rate": 0.9},
+			{"success_rate": 0.91},
+		},
+	}
+	if got := buildComparison(same, same, time.Now()).sampleCountNotes(); len(got) != 0 {
+		t.Errorf("homogeneous comparison produced notes: %v", got)
+	}
+}

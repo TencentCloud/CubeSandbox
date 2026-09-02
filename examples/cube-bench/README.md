@@ -132,9 +132,29 @@ In scheduled mode the whole request sequence is **pre-generated** from `--seed`
 (`Exp(λ)`, first request at t=0), uniform lifetimes in `[min,max]`, and
 weighted random template picks. Each create body carries the picked
 `templateID` and `timeout = lifetime + 60s` as a server-side fallback TTL; the
-client issues the DELETE itself when the lifetime expires. The report and JSON
+client issues the DELETE itself when the lifetime expires. (The TTL is set in
+`create-only` mode too — intentional, so lifetime-bearing presets don't leak
+sandboxes when the client never DELETEs.) The report and JSON
 export add queue-delay percentiles (scheduled vs actual start) and per-template
 create counts/success rates.
+
+**Throughput metrics in scheduled mode.** `total_time_s`/`throughput_qps`
+measure the *whole run*, which ends only when the last sandbox is DELETEd —
+i.e. they include the lifetime tail and are diluted by the workload's own
+lifetime distribution. The JSON export therefore also reports
+`dispatch_window_s` (wall-clock span of the dispatch loop, first to last
+request release) and `dispatch_qps` (requests released per second of that
+window), which reflect the arrival-side throughput the scheduler actually saw.
+For A/B comparisons of scheduler behavior, prefer `dispatch_qps`;
+`throughput_qps` answers "how fast did the whole experiment finish".
+
+Also note that `queue_delay_*` percentiles are **client-side dispatch delay**
+(time the local dispatcher spent blocked on the concurrency semaphore, plus
+sleep overshoot) — a self-check that the generator isn't throttling itself,
+and ~0 when the concurrency guidance below is followed. They are *not*
+scheduler-side queueing; scheduler queueing shows up in `create.*` latency
+instead. Don't mix cube-bench's `queue_delay_*` with schedsim's scheduler-side
+queue metrics in one `compare` run.
 
 > **Concurrency for lifetime-bearing presets.** A worker slot is held for the
 > full sandbox lifetime (create → lifetime sleep → delete), so the steady-state
@@ -184,6 +204,23 @@ real-cluster runs and simulator runs can be compared with the same command. A
 metric is flagged in the conclusions when the verdict direction matches,
 |Δ%| ≥ 5%, and — whenever both sides have n ≥ 2 — the delta exceeds the
 combined CI half-widths, so small-sample noise is not flagged as a verdict.
+
+Two caveats when reading verdicts:
+
+- **Single-sample sides are not CI-gated.** With n=1 on either side there is
+  no interval to compare against, so every |Δ%| ≥ 5% is flagged; one file per
+  side therefore produces verdicts that are pure single-run noise. Use
+  multiple seeds per side for decisions.
+- **Δ% has no floor.** It is relative to the baseline mean, so near-zero
+  baselines (e.g. `error_rate` ≈ 0.001) produce enormous percentages that
+  always clear the 5% bar. Read them alongside the absolute Δ, which is shown
+  next to them.
+
+Per-metric aggregation only counts samples that actually contain the key, so
+when the two groups mix export shapes (e.g. a `create-only` file next to
+`create-delete` files) a row's effective n can be smaller than the group
+header's sample count; the report prints a note under the table when that
+happens.
 
 ### Network policies
 

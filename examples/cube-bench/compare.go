@@ -533,6 +533,30 @@ func (c *comparison) conclusions() (improved, regressed, noDir []*compareRow) {
 	return improved, regressed, noDir
 }
 
+// sampleCountNotes flags rows whose per-metric sample count differs from the
+// group sample count. Aggregation only accumulates values from samples that
+// contain the key, so heterogeneous exports (e.g. a create-only run next to
+// create-delete runs, or a legacy run without queue_delay_* next to a
+// scheduled one) shrink a row's n — and therefore its CI and whether the CI
+// noise-gate applies — relative to the group header.
+func (c *comparison) sampleCountNotes() []string {
+	var notes []string
+	baseN, candN := len(c.baseline.samples), len(c.candidate.samples)
+	for _, r := range c.rows {
+		baseShort := r.hasBase && r.base.n != baseN
+		candShort := r.hasCand && r.cand.n != candN
+		switch {
+		case baseShort && candShort:
+			notes = append(notes, fmt.Sprintf("- `%s`: n=%d of %d baseline, n=%d of %d candidate samples", r.key, r.base.n, baseN, r.cand.n, candN))
+		case baseShort:
+			notes = append(notes, fmt.Sprintf("- `%s`: n=%d of %d baseline samples", r.key, r.base.n, baseN))
+		case candShort:
+			notes = append(notes, fmt.Sprintf("- `%s`: n=%d of %d candidate samples", r.key, r.cand.n, candN))
+		}
+	}
+	return notes
+}
+
 // ---------------------------------------------------------------------------
 // Markdown rendering
 // ---------------------------------------------------------------------------
@@ -559,7 +583,7 @@ func renderComparison(c *comparison) string {
 	}
 
 	b.WriteString("\n## Metric Comparison\n\n")
-	b.WriteString("Cells show the mean across samples; CI is the 95% confidence interval half-width (Student-t t95·σ/√n), shown only when n ≥ 2. Δ = candidate − baseline. Verdicts are directional; the conclusion lists additionally require |Δ| beyond the combined CI half-widths when both sides have n ≥ 2.\n\n")
+	b.WriteString("Cells show the mean across samples; CI is the 95% confidence interval half-width (Student-t t95·σ/√n), shown only when n ≥ 2. Δ = candidate − baseline. Verdicts are directional; the conclusion lists additionally require |Δ| beyond the combined CI half-widths when both sides have n ≥ 2. Δ% is relative to the baseline mean with no floor, so near-zero baselines (e.g. an error_rate ≈ 0) can produce enormous percentages — read them alongside the absolute Δ.\n\n")
 	if len(c.rows) == 0 {
 		b.WriteString("- (no numeric metrics found)\n")
 	}
@@ -577,6 +601,13 @@ func renderComparison(c *comparison) string {
 		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n",
 			r.key, statsCell(r.base, r.hasBase), statsCell(r.cand, r.hasCand),
 			deltaCell(r), pctCell(r), string(r.verdict))
+	}
+
+	if notes := c.sampleCountNotes(); len(notes) > 0 {
+		b.WriteString("\nSome metrics appear in fewer samples than the group header count (mixed export shapes); their n and CI cover only the samples that contain them:\n\n")
+		for _, note := range notes {
+			b.WriteString(note + "\n")
+		}
 	}
 
 	improved, regressed, noDir := c.conclusions()

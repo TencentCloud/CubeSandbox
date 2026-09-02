@@ -45,6 +45,12 @@ func RenderReport(results []IterResult, cfg *Config) {
 	fmt.Println()
 	fmt.Println(summaryBox)
 
+	// Queue delay intentionally covers failed creates too (it is recorded
+	// regardless of outcome), so render it before the early return below.
+	if cfg.Scheduled {
+		renderQueueDelaySection(results)
+	}
+
 	if len(okResults) == 0 {
 		fmt.Println(T.Error.Bold(true).Render("\n  No successful results to report."))
 		return
@@ -56,9 +62,6 @@ func RenderReport(results []IterResult, cfg *Config) {
 	renderLatencySection("CREATE", createTimes)
 	if cfg.Mode == "create-delete" {
 		renderLatencySection("DELETE", deleteTimes)
-	}
-	if cfg.Scheduled {
-		renderQueueDelaySection(results)
 	}
 
 	// ── Sparkline timeline ──

@@ -237,6 +237,7 @@ func scheduledExportFixture() (*Config, []IterResult) {
 
 func TestExportJSONScheduledAddsKeys(t *testing.T) {
 	cfg, results := scheduledExportFixture()
+	cfg.dispatchElapsed = 2.5
 	cfg.Output = t.TempDir() + "/report.json"
 
 	exportJSON(results, cfg)
@@ -276,10 +277,16 @@ func TestExportJSONScheduledAddsKeys(t *testing.T) {
 			t.Fatalf("summary missing legacy key %q", key)
 		}
 	}
-	for _, key := range []string{"queue_delay_p50_ms", "queue_delay_p95_ms", "queue_delay_p99_ms"} {
+	for _, key := range []string{"queue_delay_p50_ms", "queue_delay_p95_ms", "queue_delay_p99_ms", "dispatch_window_s", "dispatch_qps"} {
 		if _, ok := summary[key]; !ok {
 			t.Fatalf("summary missing key %q", key)
 		}
+	}
+	if summary["dispatch_window_s"].(float64) != 2.5 {
+		t.Fatalf("dispatch_window_s = %v, want 2.5", summary["dispatch_window_s"])
+	}
+	if got := summary["dispatch_qps"].(float64); got != 1.2 {
+		t.Fatalf("dispatch_qps = %v, want 1.2 (3 requests / 2.5s)", got)
 	}
 	if summary["queue_delay_p50_ms"].(float64) != 3 {
 		t.Fatalf("queue_delay_p50_ms = %v, want 3", summary["queue_delay_p50_ms"])
@@ -333,7 +340,7 @@ func TestExportJSONLegacyOmitsScheduledKeys(t *testing.T) {
 		}
 	}
 	summary := report["summary"].(map[string]any)
-	for _, key := range []string{"queue_delay_p50_ms", "queue_delay_p95_ms", "queue_delay_p99_ms", "per_template"} {
+	for _, key := range []string{"queue_delay_p50_ms", "queue_delay_p95_ms", "queue_delay_p99_ms", "per_template", "dispatch_window_s", "dispatch_qps"} {
 		if _, ok := summary[key]; ok {
 			t.Fatalf("legacy summary must not contain %q", key)
 		}

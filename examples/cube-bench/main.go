@@ -63,6 +63,9 @@ type Config struct {
 	sequence     []ScheduledRequest
 
 	elapsed float64
+	// dispatchElapsed is the wall-clock span of the scheduled dispatch loop
+	// (first to last request release), excluding per-sandbox lifetime tails.
+	dispatchElapsed float64
 }
 
 type createRequest struct {
@@ -476,6 +479,14 @@ func exportJSON(results []IterResult, cfg *Config) {
 		"throughput_qps": throughput,
 	}
 	if cfg.Scheduled {
+		// Dispatch-side throughput: requests released per second of the
+		// dispatch window. Unlike throughput_qps (total requests over the
+		// whole run), this excludes per-sandbox lifetime tails, so it
+		// reflects the arrival rate the scheduler actually saw.
+		if cfg.dispatchElapsed > 0 {
+			summaryBlock["dispatch_window_s"] = cfg.dispatchElapsed
+			summaryBlock["dispatch_qps"] = float64(len(results)) / cfg.dispatchElapsed
+		}
 		// Queue delay is measured per dispatched request, independent of
 		// create success, so it uses all results.
 		delays := extractTimes(results, func(r IterResult) float64 { return r.SchedDelayMs })

@@ -282,6 +282,11 @@ func RunScheduled(cfg *Config, sched []ScheduledRequest, resultCh chan<- IterRes
 		}(sr, time.Since(benchStart))
 	}
 
+	// The dispatch window closes once the last request has been released;
+	// wg.Wait() below additionally waits out per-sandbox lifetime tails,
+	// which would otherwise dilute the arrival-side dispatch rate.
+	cfg.dispatchElapsed = time.Since(benchStart).Seconds()
+
 	wg.Wait()
 	close(resultCh)
 }
