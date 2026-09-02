@@ -277,8 +277,10 @@ const maxFailReasons = 8
 // noteFailure counts a failed request and its reason.
 func (e *engine) noteFailure(reason string) {
 	e.failures++
-	if len(reason) > 200 {
-		reason = reason[:200] + "…"
+	// Rune-bounded so a multibyte character is never split mid-sequence
+	// (byte slicing would leak invalid UTF-8 into the JSON report).
+	if runes := []rune(reason); len(runes) > 200 {
+		reason = string(runes[:199]) + "…"
 	}
 	if _, ok := e.failReasons[reason]; ok || len(e.failReasons) < maxFailReasons {
 		e.failReasons[reason]++
@@ -309,6 +311,13 @@ func RunRound(ctx context.Context, p Params) (*RoundResult, error) {
 		return nil, errors.New("sim: RunRound is not safe for concurrent calls; a round is already in progress")
 	}
 	defer roundMu.Unlock()
+
+	// RunRound is exported for in-memory-trace library use; without Bootstrap
+	// the scheduler short-circuits every request with an opaque reason, so
+	// fail fast with a diagnosable precondition instead.
+	if sc := config.GetConfig(); sc == nil || sc.Scheduler == nil {
+		return nil, errors.New("sim: Bootstrap must be called before RunRound")
+	}
 
 	if err := p.validate(); err != nil {
 		return nil, err
