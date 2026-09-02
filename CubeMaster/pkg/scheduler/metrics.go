@@ -147,7 +147,8 @@ var (
 
 	fragmentedCapacityGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "scheduler_fragmented_capacity_ratio",
-		Help: "Ratio of free capacity stranded on nodes that cannot fit the reference shape (see fragmentedCapacityRatio), by shape.",
+		Help: "Ratio of free capacity stranded on nodes that cannot fit the reference shape (see fragmentedCapacityRatio), by shape. " +
+			"With default (unset) shape config the reference shape is 100C/300Gi and this gauge sits near 1 — only informative with real shape values configured.",
 	}, []string{shapeLabel})
 )
 
@@ -195,19 +196,27 @@ func RecordReschedule(profile string, code errorcode.ErrorCode) {
 }
 
 // rescheduleReason classifies the error code into a low-cardinality category.
-// Precedence matters for codes present in several retry maps (e.g.
-// HostDiskNotEnough is both circuit-breaking and loop-retryable): the first
-// matching category wins, mirroring how handleCubelet treats the code.
 func rescheduleReason(code errorcode.ErrorCode) string {
+	return classifyRescheduleReason(code,
+		errorcode.IsCircutBreakCode, errorcode.IsLoopRetryCode, errorcode.IsBackoffRetryCode)
+}
+
+// classifyRescheduleReason is the pure core of rescheduleReason with the
+// retry-map predicates injected, so tests can exercise the classification
+// without touching the process-global errorcode maps. Precedence matters for
+// codes present in several retry maps (e.g. HostDiskNotEnough is both
+// circuit-breaking and loop-retryable): the first matching category wins,
+// mirroring how handleCubelet treats the code.
+func classifyRescheduleReason(code errorcode.ErrorCode, isCircuitBreak, isLoopRetry, isBackoffRetry func(errorcode.ErrorCode) bool) string {
 	switch {
 	case code == errorcode.ErrorCode_ReqCubeAPIFailed:
 		// errRetry (cubelet RPC failure) always synthesizes this code.
 		return rescheduleReasonRPCError
-	case errorcode.IsCircutBreakCode(code):
+	case isCircuitBreak(code):
 		return rescheduleReasonCircuitBreak
-	case errorcode.IsLoopRetryCode(code):
+	case isLoopRetry(code):
 		return rescheduleReasonLoopRetry
-	case errorcode.IsBackoffRetryCode(code):
+	case isBackoffRetry(code):
 		return rescheduleReasonBackoff
 	case code == errorcode.ErrorCode_SelectNodesFailed:
 		// The scheduling-admission gate rejected the selected node.

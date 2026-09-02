@@ -14,7 +14,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 )
@@ -92,35 +91,45 @@ func TestRecordDecision(t *testing.T) {
 	}
 }
 
-func TestRecordReschedule(t *testing.T) {
-	// rescheduleReason consults the errorcode retry maps; initialize them
-	// with an empty config the same way main does. Caveat: this replaces
-	// process-global retry maps that cannot be restored (they are private),
-	// so any future test in this package that depends on real retry-map
-	// contents becomes order-dependent with this one.
-	errorcode.InitCubeCodeRetryMap(&config.Config{CubeletConf: &config.CubeletConf{}})
+func TestClassifyRescheduleReason(t *testing.T) {
+	no := func(errorcode.ErrorCode) bool { return false }
+	yes := func(errorcode.ErrorCode) bool { return true }
+	isConnHost := func(code errorcode.ErrorCode) bool { return code == errorcode.ErrorCode_ConnHostFailed }
 
+	cases := []struct {
+		name                         string
+		code                         errorcode.ErrorCode
+		isCircuit, isLoop, isBackoff func(errorcode.ErrorCode) bool
+		want                         string
+	}{
+		{"rpc error", errorcode.ErrorCode_ReqCubeAPIFailed, no, no, no, rescheduleReasonRPCError},
+		{"circuit break", errorcode.ErrorCode_ConnHostFailed, isConnHost, no, no, rescheduleReasonCircuitBreak},
+		// ConnHostFailed in several maps: circuit_break wins (handleCubelet precedence).
+		{"circuit beats loop", errorcode.ErrorCode_ConnHostFailed, yes, yes, no, rescheduleReasonCircuitBreak},
+		{"loop retry", errorcode.ErrorCode_ConnHostFailed, no, yes, no, rescheduleReasonLoopRetry},
+		{"backoff", errorcode.ErrorCode_ConnHostFailed, no, no, yes, rescheduleReasonBackoff},
+		{"admission", errorcode.ErrorCode_SelectNodesFailed, no, no, no, rescheduleReasonAdmission},
+		{"other", errorcode.ErrorCode_DBError, no, no, no, rescheduleReasonOther},
+	}
+	for _, tc := range cases {
+		if got := classifyRescheduleReason(tc.code, tc.isCircuit, tc.isLoop, tc.isBackoff); got != tc.want {
+			t.Errorf("%s: classifyRescheduleReason = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestRecordReschedule(t *testing.T) {
+	// Only the fixed-code path is exercised end to end: ReqCubeAPIFailed
+	// short-circuits before any retry-map predicate, so this test needs no
+	// errorcode map init and never mutates that process-global state (the
+	// maps are private and cannot be restored). Category classification is
+	// covered by TestClassifyRescheduleReason with injected predicates.
 	rpcBefore := counterValue(t, schedulerReschedules, DefaultProfile, rescheduleReasonRPCError)
-	circuitBefore := counterValue(t, schedulerReschedules, DefaultProfile, rescheduleReasonCircuitBreak)
-	admissionBefore := counterValue(t, schedulerReschedules, DefaultProfile, rescheduleReasonAdmission)
-	otherBefore := counterValue(t, schedulerReschedules, DefaultProfile, rescheduleReasonOther)
 
 	RecordReschedule(DefaultProfile, errorcode.ErrorCode_ReqCubeAPIFailed)
-	RecordReschedule(DefaultProfile, errorcode.ErrorCode_ConnHostFailed)
-	RecordReschedule(DefaultProfile, errorcode.ErrorCode_SelectNodesFailed)
-	RecordReschedule(DefaultProfile, errorcode.ErrorCode_DBError)
 
 	if got := counterValue(t, schedulerReschedules, DefaultProfile, rescheduleReasonRPCError); got != rpcBefore+1 {
 		t.Fatalf("rpc_error delta = %v, want 1", got-rpcBefore)
-	}
-	if got := counterValue(t, schedulerReschedules, DefaultProfile, rescheduleReasonCircuitBreak); got != circuitBefore+1 {
-		t.Fatalf("circuit_break delta = %v, want 1", got-circuitBefore)
-	}
-	if got := counterValue(t, schedulerReschedules, DefaultProfile, rescheduleReasonAdmission); got != admissionBefore+1 {
-		t.Fatalf("admission delta = %v, want 1", got-admissionBefore)
-	}
-	if got := counterValue(t, schedulerReschedules, DefaultProfile, rescheduleReasonOther); got != otherBefore+1 {
-		t.Fatalf("other delta = %v, want 1", got-otherBefore)
 	}
 }
 

@@ -123,7 +123,10 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 	}
 	// Record the create attempt on every return path (mock / param failure
 	// included); endTime stays zero on early returns and the helper falls
-	// back to now.
+	// back to now. Mock creates (MockCreateDirect) share the sandbox_create_*
+	// series deliberately — mock mode is a dev/debug facility, and anyone
+	// reading create success-rate SLOs from these metrics must not run with
+	// mock config enabled.
 	defer func() {
 		scheduler.ObserveSandboxCreate(scheduler.DefaultProfile,
 			rsp.Ret.RetCode == int(errorcode.ErrorCode_Success), startTime, createCtx.endTime)
