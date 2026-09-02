@@ -65,6 +65,12 @@ func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
 	}
 	freezeSnapshot(selCtx)
 
+	// Mandatory guards are fail-closed by design: a guard failure (including
+	// an emptied candidate set) always fails fast and never consults the
+	// pipeline's no_candidate policy — backoff below only applies to the
+	// optional filters and final selection. The guard re-run inside
+	// backoffSelectWithPipeline is the backoff attempt's own safety net on
+	// the relaxed candidate set, not a retry of this pass.
 	if err := runProfileFilters(selCtx, pipeline.Guards); err != nil {
 		return nil, err
 	}

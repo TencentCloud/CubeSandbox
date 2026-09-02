@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	schedulerplugin "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/schedulerplugin/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
+	schedulerplugin "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/schedulerplugin/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -158,6 +158,34 @@ func TestExternalScoreRejectsOutOfRangeValues(t *testing.T) {
 	server.mu.Unlock()
 	if _, err := selector.Select(grpcSelection()); err == nil {
 		t.Fatal("out-of-range external score must be rejected")
+	}
+}
+
+func TestBreakerReopensOnHalfOpenProbeFailure(t *testing.T) {
+	b := &breaker{threshold: 2, cooldown: time.Minute}
+	b.failed()
+	b.failed()
+	if err := b.before(); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("before() = %v, want circuit open after threshold failures", err)
+	}
+	// Cooldown expires: the next call is a half-open probe and is allowed.
+	b.openUntil = time.Now().Add(-time.Second)
+	if err := b.before(); err != nil {
+		t.Fatalf("half-open probe rejected: %v", err)
+	}
+	// A single failed probe reopens the circuit immediately.
+	b.failed()
+	if err := b.before(); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("before() = %v, want immediate reopen after a failed half-open probe", err)
+	}
+	// After the next cooldown a successful probe closes the circuit again.
+	b.openUntil = time.Now().Add(-time.Second)
+	if err := b.before(); err != nil {
+		t.Fatalf("second half-open probe rejected: %v", err)
+	}
+	b.succeeded()
+	if b.halfOpen || b.failures != 0 || !b.openUntil.IsZero() {
+		t.Fatalf("breaker = %+v, want closed and reset", b)
 	}
 }
 

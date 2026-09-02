@@ -19,12 +19,12 @@ import (
 	"sync"
 	"time"
 
-	schedulerplugin "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/schedulerplugin/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/filter"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/score"
+	schedulerplugin "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/schedulerplugin/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -42,6 +42,7 @@ type breaker struct {
 	threshold int
 	cooldown  time.Duration
 	openUntil time.Time
+	halfOpen  bool
 }
 
 func (b *breaker) before() error {
@@ -51,8 +52,10 @@ func (b *breaker) before() error {
 		return ErrCircuitOpen
 	}
 	if !b.openUntil.IsZero() {
+		// Cooldown expired: enter half-open and allow a probe.
 		b.openUntil = time.Time{}
 		b.failures = 0
+		b.halfOpen = true
 	}
 	return nil
 }
@@ -61,12 +64,22 @@ func (b *breaker) succeeded() {
 	b.mu.Lock()
 	b.failures = 0
 	b.openUntil = time.Time{}
+	b.halfOpen = false
 	b.mu.Unlock()
 }
 
 func (b *breaker) failed() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.halfOpen {
+		// A failed half-open probe means the plugin is still down: reopen
+		// immediately instead of waiting for a fresh run of threshold
+		// failures, so a dead plugin costs one timeout per cooldown window.
+		b.halfOpen = false
+		b.failures = 0
+		b.openUntil = time.Now().Add(b.cooldown)
+		return
+	}
 	b.failures++
 	if b.failures >= b.threshold {
 		b.openUntil = time.Now().Add(b.cooldown)
