@@ -504,6 +504,7 @@ type ScorePluginConf struct {
 	AffinityScore              *AffinityScore              `yaml:"affinity_score"`
 	ImageScore                 *ImageScore                 `yaml:"image_score"`
 	TemplateScore              *TemplateScore              `yaml:"template_score"`
+	ExternalHTTPScore          *ExternalHTTPScore          `yaml:"external_http_score"`
 }
 
 type MultiFactorWeightedAverage struct {
@@ -535,6 +536,14 @@ type TemplateScore struct {
 	Weight              float64  `yaml:"weight"`
 	EnableWeightFactors []string `yaml:"enable_weight_factors"`
 	Disable             bool     `yaml:"disable"`
+}
+
+type ExternalHTTPScore struct {
+	Weight   float64       `yaml:"weight"`
+	Endpoint string        `yaml:"endpoint"`
+	Timeout  time.Duration `yaml:"timeout"`
+	Mode     string        `yaml:"mode"`
+	Disable  bool          `yaml:"disable"`
 }
 
 type CubeletConf struct {

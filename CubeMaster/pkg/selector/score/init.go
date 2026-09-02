@@ -54,4 +54,5 @@ var scores = map[string]interface{}{
 	"multi_factor_weighted_average": NewMultiFactorWeightedAverageScore,
 	"affinity_score":                NewAffinityScore,
 	"image_score":                   NewImageScore,
+	"external_http_score":           NewExternalHTTPScore,
 }
