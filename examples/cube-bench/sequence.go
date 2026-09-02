@@ -221,7 +221,11 @@ type traceFile struct {
 }
 
 // DumpTrace writes the pre-generated sequence as a JSON trace file that other
-// tooling (e.g. a scheduling simulator) can replay.
+// tooling (e.g. a scheduling simulator) can replay. arrival_ms/lifetime_ms
+// are integer milliseconds (Duration.Milliseconds(), truncated toward zero),
+// while the JSON export's raw entries keep float-millisecond precision for
+// the same seq — cross-checking the two files can show sub-millisecond
+// differences, which is expected.
 func DumpTrace(path string, cfg *Config, seq []ScheduledRequest) error {
 	tf := traceFile{
 		Workload:    workloadDisplayName(cfg),

@@ -765,6 +765,15 @@ func main() {
 
 	RenderReport(allResults, cfg)
 
+	// An early TUI quit truncates the sample: say so next to the on-screen
+	// report so its numbers are not read as a finished run.
+	partial := cfg.Total > 0 && len(allResults) < cfg.Total
+	if partial {
+		fmt.Fprintf(os.Stderr, "NOTE: run quit early with %d of %d requests dispatched; "+
+			"the report above and any exported aggregates cover a truncated sample.\n",
+			len(allResults), cfg.Total)
+	}
+
 	// If queue-delay p95 exceeds the mean inter-arrival time, the dispatcher
 	// fell permanently behind and the offered load degenerated to bursts; the
 	// queue_delay_* metrics then measure the client semaphore, not the
@@ -772,7 +781,6 @@ func main() {
 	// scheduled-mode run; exportJSON marks the report machine-readably.
 	// Skipped on an early-quit truncated sample — the p95 would describe the
 	// partial run, and the export carries a "partial" marker instead.
-	partial := cfg.Total > 0 && len(allResults) < cfg.Total
 	if sat, p95, interArrival := dispatchSaturated(allResults, cfg); sat && !partial {
 		fmt.Fprintf(os.Stderr, "WARNING: queue-delay p95 (%.0fms) exceeded the mean inter-arrival time (%.0fms): "+
 			"the dispatcher fell permanently behind and the offered load degenerated to bursts — "+

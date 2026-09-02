@@ -687,6 +687,46 @@ func TestComparePartialWarning(t *testing.T) {
 	}
 }
 
+func TestLoadSampleFileDropsDispatchKeysWhenFlagged(t *testing.T) {
+	dir := t.TempDir()
+
+	path := writeTempFile(t, dir, "flagged.json", `{
+		"summary": {"success_rate": 0.9, "queue_delay_p50_ms": 500, "dispatch_qps": 12.5, "dispatch_saturated": 1}
+	}`)
+	f, err := loadSampleFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.saturated {
+		t.Fatal("saturated flag not recorded")
+	}
+	// The flagged run's queue_delay_*/dispatch_* values describe the client
+	// semaphore, not the offered schedule: they must be dropped before the
+	// sample reaches the metric tables and verdict lists.
+	for _, k := range []string{"queue_delay_p50_ms", "dispatch_qps", "dispatch_saturated"} {
+		if _, ok := f.samples[0][k]; ok {
+			t.Errorf("key %q survived the flagged-sample drop", k)
+		}
+	}
+	if got := f.samples[0]["success_rate"]; got != 0.9 {
+		t.Errorf("success_rate = %v, want 0.9 (unrelated keys kept)", got)
+	}
+
+	path = writeTempFile(t, dir, "partial.json", `{
+		"summary": {"success_rate": 0.9, "queue_delay_p99_ms": 42, "partial": 1}
+	}`)
+	f, err = loadSampleFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.partial {
+		t.Fatal("partial flag not recorded")
+	}
+	if _, ok := f.samples[0]["queue_delay_p99_ms"]; ok {
+		t.Errorf("queue_delay_p99_ms survived the partial-sample drop")
+	}
+}
+
 func TestCompareNoDirSortedByImpact(t *testing.T) {
 	// Three directionless metrics: one small pct move, one large pct move, one
 	// zero-baseline row (no Δ%). Expect large pct first, then small pct, then

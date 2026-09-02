@@ -195,8 +195,9 @@ queue metrics in one `compare` run.
 > load has degenerated to bursts, and the `queue_delay_*`/`dispatch_*` metrics
 > describe the client's semaphore rather than the offered schedule. The JSON
 > export marks such runs with `dispatch_saturated: 1` in `summary`; `compare`
-> pops that marker out of the metric rows and prints a warning for the
-> affected group instead. Two readings of the marker to keep in mind: it
+> pops that marker, drops the untrustworthy `queue_delay_*`/`dispatch_*` keys
+> from the flagged group (their rows render "—" and stay out of the verdict
+> lists), and prints a warning naming the group instead. Two readings of the marker to keep in mind: it
 > cannot distinguish client under-provisioning from a slow server create path
 > (a create-latency spike holds slots just as long) — check `create.p95`
 > before blaming `--concurrency` — and a transient burst delaying >5% of
@@ -207,7 +208,7 @@ queue metrics in one `compare` run.
 > approaches the `time.Sleep` granularity, where even healthy runs can exceed
 > it — treat the marker as advisory there. An early TUI quit instead exports
 > `partial: 1` in `summary` (suppressing the saturation marker), which
-> `compare` surfaces as a note in the same way.
+> `compare` surfaces as a note and covers with the same key exclusion.
 
 ### Trace file schema
 

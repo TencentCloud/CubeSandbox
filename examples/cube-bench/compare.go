@@ -157,6 +157,19 @@ func extractPartial(sample map[string]float64) bool {
 	return false
 }
 
+// dropUntrustworthyDispatchKeys removes the queue_delay_*/dispatch_* keys
+// from a sample whose run is flagged saturated or partial: those numbers
+// describe the client's semaphore or a truncated sample, not the offered
+// schedule, so they must not reach the metric tables or the verdict lists.
+// Affected rows render "—" and the group-level warning/note explains why.
+func dropUntrustworthyDispatchKeys(sample map[string]float64) {
+	for k := range sample {
+		if strings.HasPrefix(k, "queue_delay_") || strings.HasPrefix(k, "dispatch_") {
+			delete(sample, k)
+		}
+	}
+}
+
 // scheduledShape reports whether any sample in the group carries the keys a
 // scheduled-mode export adds to "summary" (queue_delay_p50_ms,
 // dispatch_window_s, or a per_template.* block). Scheduled and legacy runs
@@ -230,12 +243,13 @@ func loadSampleFile(path string) (*sampleFile, error) {
 			if err != nil {
 				return nil, fmt.Errorf("compare: %s: rounds[%d]: %w", path, i, err)
 			}
-			if extractSaturated(sample) {
-				f.saturated = true
+			saturated := extractSaturated(sample)
+			partial := extractPartial(sample)
+			if saturated || partial {
+				dropUntrustworthyDispatchKeys(sample)
 			}
-			if extractPartial(sample) {
-				f.partial = true
-			}
+			f.saturated = f.saturated || saturated
+			f.partial = f.partial || partial
 			f.samples = append(f.samples, sample)
 		}
 		return f, nil
@@ -254,6 +268,9 @@ func loadSampleFile(path string) (*sampleFile, error) {
 	}
 	f.saturated = extractSaturated(sample)
 	f.partial = extractPartial(sample)
+	if f.saturated || f.partial {
+		dropUntrustworthyDispatchKeys(sample)
+	}
 	f.samples = []map[string]float64{sample}
 	return f, nil
 }
@@ -839,7 +856,7 @@ func writeFileList(b *strings.Builder, label string, g *sampleGroup) {
 // configHighlightKeys are the config fields surfaced in the report metadata
 // when present. Values are de-duplicated per group, so files that differ only
 // by seed render as e.g. "seed=1, 2, 3".
-var configHighlightKeys = []string{"seed", "seeds", "rounds", "workload", "profile", "version", "template", "templates", "mode"}
+var configHighlightKeys = []string{"seed", "seeds", "rounds", "workload", "profile", "version", "template", "templates", "mode", "concurrency", "rate_per_sec", "lifetime_min_s", "lifetime_max_s"}
 
 func configHighlights(label string, g *sampleGroup) string {
 	var parts []string
