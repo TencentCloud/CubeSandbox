@@ -184,8 +184,17 @@ class CubeSandboxAdapter(SandboxAdapter):
             raise errors[0]
         return events
 
-    def run_code(self, code: str, *, timeout: int = 60) -> CodeResult:
-        execution = self._sandbox.run_code(code, timeout=timeout)
+    def run_code(
+        self,
+        code: str,
+        *,
+        env_vars: dict[str, str] | None = None,
+        timeout: int = 60,
+    ) -> CodeResult:
+        kwargs = {"timeout": timeout}
+        if env_vars is not None:
+            kwargs["envs"] = env_vars
+        execution = self._sandbox.run_code(code, **kwargs)
         stdout = _normalize_log_lines(execution.logs.stdout) if execution.logs else []
         stderr = _normalize_log_lines(execution.logs.stderr) if execution.logs else []
         return CodeResult(

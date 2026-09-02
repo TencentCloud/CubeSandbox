@@ -167,16 +167,27 @@ class TracingSandboxAdapter(SandboxAdapter):
             ),
         )
 
-    def run_code(self, code: str, *, timeout: int = 60) -> CodeResult:
+    def run_code(
+        self,
+        code: str,
+        *,
+        env_vars: dict[str, str] | None = None,
+        timeout: int = 60,
+    ) -> CodeResult:
         return self._trace.capture(
             "run_code",
             {
                 "backend": self.backend,
                 "sandbox_id": self.sandbox_id,
                 "code": code,
+                "env_vars": env_vars,
                 "timeout": timeout,
             },
-            lambda: self._wrapped.run_code(code, timeout=timeout),
+            lambda: self._wrapped.run_code(
+                code,
+                env_vars=env_vars,
+                timeout=timeout,
+            ),
         )
 
     def pause(self, *, timeout: int = 60) -> None:
