@@ -65,6 +65,15 @@ type Params struct {
 	// rng). 1.0 = every node has every template.
 	TemplatePreload float64
 
+	// AllowNonLocalTemplate relaxes strict template locality. When false
+	// (default), requests insist on a node holding a local replica, matching
+	// the template_locality filter's strict semantics — which makes
+	// template_hit_rate ≡ 1 by construction whenever that filter is enabled.
+	// When true, requests may land on nodes without a local replica, modeling
+	// the S3 remote_ready cross-node restore path and turning
+	// template_hit_rate into a dynamic miss→warm→hit measurement.
+	AllowNonLocalTemplate bool
+
 	// Seed drives template preload placement for this round. Round i of a
 	// multi-round run uses base seed + i.
 	Seed int64
@@ -110,6 +119,7 @@ var SummaryKeys = []string{
 	"template_hit_rate",
 	"active_nodes_avg",
 	"empty_nodes_avg",
+	"metric_push_errors",
 }
 
 // RoundResult carries one round's seed and its flat summary metrics.
@@ -360,10 +370,10 @@ func (e *engine) onCreate(ctx context.Context, ev event) {
 	selCtx.ReqRes = &selctx.RequestResource{
 		Cpu: *resource.NewMilliQuantity(req.CpuMillis, resource.DecimalSI),
 		Mem: *resource.NewQuantity(req.MemMiB*1024*1024, resource.BinarySI),
-		// The sim pairs with configs that enable the template_locality filter:
+		// Template locality defaults to strict (see Params.AllowNonLocalTemplate):
 		// requests insist on a local replica so locality quality is measurable.
 		TemplateID:            req.TemplateID,
-		AllowNonLocalTemplate: false,
+		AllowNonLocalTemplate: e.p.AllowNonLocalTemplate,
 	}
 
 	start := time.Now()
@@ -561,6 +571,10 @@ func (e *engine) result() *RoundResult {
 		"template_hit_rate":       ratio(int64(e.templateHits), int64(e.templatedSuccesses)),
 		"active_nodes_avg":        mean.ActiveNodes,
 		"empty_nodes_avg":         mean.EmptyNodes,
+		// Surfaced (not just counted) so a desync between the sim's book and
+		// the localcache state the scheduler admits on is visible in the
+		// report instead of silently invalidating the round.
+		"metric_push_errors": float64(e.metricPushErrors),
 	}
 	return &RoundResult{Seed: e.p.Seed, Summary: summary}
 }

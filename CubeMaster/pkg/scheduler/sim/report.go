@@ -23,7 +23,10 @@ type ReportConfig struct {
 	NodeMemMiB      int64   `json:"node_mem_mib"`
 	InstanceType    string  `json:"instance_type"`
 	TemplatePreload float64 `json:"template_preload"`
-	Requests        int     `json:"requests"`
+	// AllowNonLocalTemplate flips scheduler semantics (strict locality vs
+	// remote-place allowed), so it is echoed for cross-run comparability.
+	AllowNonLocalTemplate bool `json:"allow_non_local_template"`
+	Requests              int  `json:"requests"`
 }
 
 // Report is the schedsim output document: run config, the cross-round mean

@@ -96,6 +96,7 @@ func TestRunRoundSingleNodeConcentrates(t *testing.T) {
 	approx(t, "herding_top1_share", s["herding_top1_share"], 1, 1e-9)
 	approx(t, "active_nodes_avg", s["active_nodes_avg"], 1, 1e-9)
 	approx(t, "empty_nodes_avg", s["empty_nodes_avg"], 0, 1e-9)
+	approx(t, "metric_push_errors", s["metric_push_errors"], 0, 1e-9)
 	approx(t, "fragmentation_ratio", s["fragmentation_ratio"], 0, 1e-9)
 	// Mem side: effective free mem (65536×2 − 40960 max used) never drops to
 	// the 2048MiB max shape either, so both resource ratios stay 0.
@@ -174,6 +175,66 @@ func TestRunRoundTemplateMissFails(t *testing.T) {
 	approx(t, "cpu_alloc_rate", s["cpu_alloc_rate"], 0, 1e-9)
 	approx(t, "active_nodes_avg", s["active_nodes_avg"], 0, 1e-9)
 	approx(t, "empty_nodes_avg", s["empty_nodes_avg"], 2, 1e-9)
+}
+
+// TestRunRoundAllowNonLocalTemplate: with the locality constraint relaxed and
+// no preloaded replica, requests still succeed (the S3 remote_ready restore
+// path); each node's first placement is a miss that warms it, so with a 2-2
+// spread over 2 nodes exactly half of the 4 templated placements hit.
+func TestRunRoundAllowNonLocalTemplate(t *testing.T) {
+	bootstrapOnce(t)
+	rr, err := RunRound(context.Background(), Params{
+		Trace:                 mkTrace(4, 1000, 60000, 1000, 2048, "tpl-remote"),
+		Nodes:                 2,
+		NodeCPUMillis:         64000,
+		NodeMemMiB:            65536,
+		InstanceType:          "sim",
+		TemplatePreload:       0,
+		AllowNonLocalTemplate: true,
+		Seed:                  3,
+		RoundID:               3,
+	})
+	if err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	s := rr.Summary
+	approx(t, "success_rate", s["success_rate"], 1, 1e-9)
+	approx(t, "template_hit_rate", s["template_hit_rate"], 0.5, 1e-9)
+	approx(t, "metric_push_errors", s["metric_push_errors"], 0, 1e-9)
+}
+
+// TestRunRoundSummaryCoversSummaryKeys pins the report contract: a round
+// summary carries every SummaryKeys entry (so MeanSummary never silently
+// drops a metric), and the aggregated summary has exactly that key set.
+func TestRunRoundSummaryCoversSummaryKeys(t *testing.T) {
+	bootstrapOnce(t)
+	rr, err := RunRound(context.Background(), Params{
+		Trace:           mkTrace(4, 1000, 60000, 1000, 2048, "tpl-keys"),
+		Nodes:           1,
+		NodeCPUMillis:   64000,
+		NodeMemMiB:      65536,
+		InstanceType:    "sim",
+		TemplatePreload: 1.0,
+		Seed:            5,
+		RoundID:         4,
+	})
+	if err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	for _, k := range SummaryKeys {
+		if _, ok := rr.Summary[k]; !ok {
+			t.Fatalf("round summary missing SummaryKeys entry %q", k)
+		}
+	}
+	mean := MeanSummary([]*RoundResult{rr})
+	if len(mean) != len(SummaryKeys) {
+		t.Fatalf("MeanSummary emitted %d keys, want %d", len(mean), len(SummaryKeys))
+	}
+	for _, k := range SummaryKeys {
+		if mean[k] != rr.Summary[k] {
+			t.Fatalf("MeanSummary(%q) = %v over a single round, want %v", k, mean[k], rr.Summary[k])
+		}
+	}
 }
 
 // TestNoteTemplatePlacementWarmsUp: the first placement of a template on a
