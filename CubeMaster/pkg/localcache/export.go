@@ -208,6 +208,18 @@ func UpsertNode(n *node.Node) {
 	}
 }
 
+// RemoveNode deletes a node from the in-process caches (node cache, sorted
+// index, template-locality membership) synchronously, without going through
+// the event loop. It exists for in-process tooling such as schedsim that
+// injects nodes via UpsertNode without Init and must withdraw them completely
+// at the end of a run; the production removal path is the DEL event in
+// dealEvent. n needs only the identity fields (InsID/IP) plus the
+// OssClusterLabel the node was injected with, so the sorted-index bucket
+// resolves the same way as at injection.
+func RemoveNode(ctx context.Context, n *node.Node) {
+	l.delNodeCache(ctx, n)
+}
+
 func NotifyEvent(e *Event) error {
 	select {
 	case l.event <- e:

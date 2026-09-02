@@ -177,7 +177,10 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
 `active/empty_nodes_avg`）的积分窗口固定为 [0, max_i(arrival_ms_i + lifetime_ms_i))
 （trace 中最晚的到期时刻），由 trace 唯一决定、与调度成功率无关：被拒绝的请求不产生
 到期事件，若窗口止于最后一个事件，拒绝率高的配置会在更短的分母上积分，A/B 对比就
-被污染了。
+被污染了。代价是对侧极端值：窗口上界取自**全部**请求（包括任何配置都放不下的），
+一条晚到且长 lifetime 的被拒请求会把窗口拖长，给每个配置的绝对值都掺入一段空转尾巴
+——`active_nodes_avg`/`empty_nodes_avg` 按同一窗口积分，可用来估计空转占比；跨配置
+delta 不受影响，但不要把被拖长的绝对值当作集群真实水位。
 
 | key | 定义 |
 | --- | --- |
@@ -195,17 +198,16 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
 
 指标计算均为纯函数（`pkg/scheduler/sim/metrics.go`），单测手算对拍。
 
-已知限制：每轮结束时 cleanup 先把节点的配额用量计数清零（经
-`UpdateNodeMetricInProcess`），再标记为不健康——`UpsertNode` 的合并路径在重复注入时
-**保留** `QuotaCpuUsage/QuotaMemUsage/MvmNum/MetricUpdate`，显式清零让同一进程内顺序
-复用同一 RoundID 从归零状态重新注入，不会继承（例如被中断轮次）残留的用量。节点条目
-本身**不会从进程级 localcache 中移除**（刻意不调用 `localcache.Init`，没有同步/淘汰
-回路），长时间在同一进程内反复跑仿真会累积陈旧节点条目——CLI 的小轮数场景无影响。
-`RunRound` 不支持进程内并发：多轮共享进程级 localcache，一轮的 cleanup 会改写另一轮
-正在调度所依据的状态，因此并发调用直接报错而非排队。唯一不中性的是 `sched_latency_*`：节点枚举（fallback 全扫
-路径）的开销随累积条目增长，**多轮 run 内靠后轮次的延迟分位会被轻微抬高**，
-跨配置对比请以相同 `--rounds`/`--nodes` 形状为前提，并按相同轮次下标对齐
-（config A 的 round i 对 config B 的 round i），不要拿 A 的首轮比 B 的末轮。
+已知限制：每轮结束时 cleanup 经 `localcache.RemoveNode` 把本轮注入的节点从进程级
+localcache 中**整体移除**（节点缓存、排序索引、模板 locality 成员关系），并按注册清单
+逐一注销模板副本——多轮之间因此不残留任何状态，同一进程内顺序复用同一 RoundID 也总是
+从全新注入开始，不会继承（例如被中断轮次）残留的用量。`RunRound` 不支持进程内并发：
+多轮共享进程级 localcache，一轮的 cleanup 会改写另一轮正在调度所依据的状态，因此并发
+调用直接报错而非排队。`sched_latency_*` 仍非中性：注入节点的 `OssClusterLabel` 经
+`getInstanceTypeName` 落入 DefaultInstanceTypeName 桶，与 sim 的 `instance_type` 不同，
+Select 的 prefilter 每次都走 collectCacheNodes fallback 全扫并克隆存活节点，开销随
+`--nodes` 增长（但不再随轮次下标累积）；跨配置对比请以相同 `--rounds`/`--nodes` 形状为
+前提。
 
 另一限制：`scheduler.ignore_redis_allocation: true` 会让 filter 的
 `EffectiveAllocated` 恒为 0，调度器完全看不到仿真的进程内用量回写，配额门禁永不

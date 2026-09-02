@@ -111,8 +111,8 @@ type Params struct {
 	// multi-round run uses base seed + i.
 	Seed int64
 	// RoundID uniquifies injected node IDs inside the process-wide
-	// localcache. Sequential reuse is safe: cleanup drains the round's
-	// cached usage, so re-injection starts from zeroed counters, not from
+	// localcache. Sequential reuse is safe: cleanup removes the round's node
+	// entries, so re-injection is a fresh insert rather than a merge into
 	// whatever a previous round left behind.
 	RoundID int
 }
@@ -304,9 +304,9 @@ var roundMu sync.Mutex
 // RoundID uniquifies the round's node IDs inside this process. Nothing is
 // shared across schedsim processes (no localcache.Init, no DB/Redis), so the
 // uniqueness scope is per-process only; within a process, sequential reuse of
-// a RoundID is safe because cleanup drains the round's cached usage before
-// withdrawing its nodes. RunRound is not safe for concurrent in-process
-// calls: it fails fast while another round is in progress.
+// a RoundID is safe because cleanup removes the round's node entries before
+// returning. RunRound is not safe for concurrent in-process calls: it fails
+// fast while another round is in progress.
 func RunRound(ctx context.Context, p Params) (*RoundResult, error) {
 	if !roundMu.TryLock() {
 		return nil, errors.New("sim: RunRound is not safe for concurrent calls; a round is already in progress")
@@ -336,8 +336,8 @@ func RunRound(ctx context.Context, p Params) (*RoundResult, error) {
 	defer e.cleanup()
 	e.preloadTemplates()
 	e.runEvents(ctx)
-	// Audit before the deferred cleanup runs: afterwards the cache mirror is
-	// zeroed and the comparison would be trivially clean.
+	// Audit before the deferred cleanup runs: afterwards the nodes are
+	// removed and every lookup would count as diverged.
 	e.auditMetricState()
 	return e.result(), nil
 }
@@ -454,35 +454,23 @@ func (e *engine) injectNodes() {
 
 // cleanup withdraws the round's nodes and deregisters exactly the template
 // replicas this round registered, so rounds cannot leak state into each other
-// even though localcache exposes no bulk-clear API. Withdrawal is two steps:
-// zero the usage counters, then mark the node unhealthy (which drops it from
-// the schedulable enumeration). The zeroing is what makes an in-process
-// RoundID reuse safe: UpsertNode's merge path (updateNodeFromMetaData)
-// preserves QuotaCpuUsage/QuotaMemUsage/MvmNum/MetricUpdate across
-// re-injection, so without the reset a reused round would schedule against
-// whatever usage an interrupted previous round left cached.
+// even though localcache exposes no bulk-clear API. Nodes are REMOVED from
+// the cache (RemoveNode), not just marked unhealthy: sim nodes sort under the
+// DefaultInstanceTypeName bucket while Select enumerates by the sim's
+// instance_type, so every Select takes the collectCacheNodes fallback over
+// the raw node cache — entries merely marked unhealthy would accumulate there
+// across rounds and inflate sched_latency_* for the later ones. Removal also
+// makes RoundID reuse safe: re-injection after a delete is a fresh insert, so
+// no cached usage counters survive (UpsertNode's merge path, which preserves
+// QuotaCpuUsage/QuotaMemUsage/MvmNum, only applies while the entry exists).
 func (e *engine) cleanup() {
 	for _, pair := range e.registered {
 		localcache.DeregisterTemplateReplica(pair[0], pair[1])
 	}
 	for _, ns := range e.nodeOrder {
-		// UpdateNodeMetricInProcess with a zeroed allocated group is the
-		// existing exported way to reset the preserved counters.
-		if err := localcache.UpdateNodeMetricInProcess(&localcache.NodeMetric{
-			NodeID:       ns.id,
-			MetricTime:   time.Now(),
-			HasAllocated: true,
-		}); err != nil {
-			e.metricStateDiverged++
-		}
-		localcache.UpsertNode(&node.Node{
-			InsID:            ns.id,
-			IP:               "",
-			Healthy:          false,
-			UnhealthyReason:  "schedsim round finished",
-			InstanceType:     e.p.InstanceType,
-			OssClusterLabel:  e.p.ossClusterLabel(),
-			MetaDataUpdateAt: time.Now(),
+		localcache.RemoveNode(context.Background(), &node.Node{
+			InsID:           ns.id,
+			OssClusterLabel: e.p.ossClusterLabel(),
 		})
 	}
 }
@@ -670,9 +658,9 @@ func (e *engine) pushMetric(ns *nodeState) {
 
 // auditMetricState compares each injected node's localcache-cached quota
 // usage against the simulator's final book and counts diverged nodes into
-// metricStateDiverged. It runs at round end, before cleanup zeroes and
-// withdraws the nodes: a lost push or an external mutation would otherwise
-// leave the scheduler admitting on state the sim no longer believes, silently
+// metricStateDiverged. It runs at round end, before cleanup removes the
+// nodes: a lost push or an external mutation would otherwise leave the
+// scheduler admitting on state the sim no longer believes, silently
 // invalidating the round's metrics.
 func (e *engine) auditMetricState() {
 	for _, ns := range e.nodeOrder {

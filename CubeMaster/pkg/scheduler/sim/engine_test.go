@@ -549,14 +549,13 @@ func TestRunRoundZeroLifetime(t *testing.T) {
 }
 
 // TestRunRoundSameRoundIDSequentialReuse: reusing a RoundID across sequential
-// rounds must not skew the later round — cleanup drains the round's cached
-// nodes (usage zeroed, marked unhealthy), so the second round re-injects onto
-// clean state and matches a control round run under a fresh RoundID on the
-// distribution-independent metrics (tie-break enumeration order can still
-// reshuffle per-node placement, so node-local metrics are excluded). The
-// 50000-milli shape fills each 192000-milli effective node to exactly 3
-// placements, so leftover usage from round one would reject requests in the
-// reuse round and show up here.
+// rounds must not skew the later round — cleanup removes the round's node
+// entries, so the second round re-injects fresh and matches a control round
+// run under a fresh RoundID on the distribution-independent metrics
+// (tie-break enumeration order can still reshuffle per-node placement, so
+// node-local metrics are excluded). The 50000-milli shape fills each
+// 192000-milli effective node to exactly 3 placements, so usage surviving
+// from round one would reject requests in the reuse round and show up here.
 func TestRunRoundSameRoundIDSequentialReuse(t *testing.T) {
 	bootstrapOnce(t)
 	params := func(roundID int) Params {
@@ -578,16 +577,11 @@ func TestRunRoundSameRoundIDSequentialReuse(t *testing.T) {
 	if _, err := RunRound(context.Background(), params(11)); err != nil {
 		t.Fatalf("first round: %v", err)
 	}
-	// The first round's cached nodes must be drained and withdrawn: this is
-	// the state a RoundID reuse re-injects onto.
+	// The first round's cached nodes must be fully withdrawn: this is the
+	// state a RoundID reuse re-injects onto.
 	for i := 0; i < 2; i++ {
-		n, ok := localcache.GetNode(fmt.Sprintf("schedsim-r11-n%05d", i))
-		if !ok || n == nil {
-			t.Fatalf("round-1 node %d missing from localcache after cleanup", i)
-		}
-		if n.Healthy || n.QuotaCpuUsage != 0 || n.QuotaMemUsage != 0 || n.MvmNum != 0 {
-			t.Fatalf("round-1 node %d not drained: healthy=%v cpu=%d mem=%d mvm=%d",
-				i, n.Healthy, n.QuotaCpuUsage, n.QuotaMemUsage, n.MvmNum)
+		if n, ok := localcache.GetNode(fmt.Sprintf("schedsim-r11-n%05d", i)); ok && n != nil {
+			t.Fatalf("round-1 node %d still in localcache after cleanup", i)
 		}
 	}
 	second, err := RunRound(context.Background(), params(11))
@@ -601,12 +595,16 @@ func TestRunRoundSameRoundIDSequentialReuse(t *testing.T) {
 	approx(t, "metric_state_diverged", second.Summary["metric_state_diverged"], 0, 1e-9)
 }
 
-// TestCleanupDrainsCachedUsage: UpsertNode's merge path preserves the cached
-// usage counters on re-injection, so cleanup must explicitly zero them —
-// otherwise a round reusing the RoundID would schedule against whatever usage
-// an interrupted previous round left cached (simulated here by a push whose
-// round never drains).
-func TestCleanupDrainsCachedUsage(t *testing.T) {
+// TestCleanupRemovesNodes: cleanup must delete the round's node entries from
+// the process-wide localcache, not just mark them unhealthy — Select's
+// prefilter falls back to scanning the raw node cache for sim nodes, so
+// leftover entries would accumulate across rounds and inflate sched_latency_*
+// for the later ones. Removal also means a round reusing the RoundID
+// re-injects fresh: UpsertNode's merge path preserves cached usage counters
+// only while the entry exists, so the re-injected node must start zeroed even
+// when the previous round pushed usage (simulated here by a push whose round
+// never runs its events).
+func TestCleanupRemovesNodes(t *testing.T) {
 	bootstrapOnce(t)
 	e := &engine{
 		p:     Params{Nodes: 1, NodeCPUMillis: 64000, NodeMemMiB: 65536, InstanceType: "sim", RoundID: 12},
@@ -617,15 +615,22 @@ func TestCleanupDrainsCachedUsage(t *testing.T) {
 	ns.usedCPUMilli, ns.usedMemMiB, ns.running = 12345, 678, 3
 	e.pushMetric(ns)
 	e.cleanup()
+	if n, ok := localcache.GetNode(ns.id); ok && n != nil {
+		t.Fatalf("node still in localcache after cleanup: %+v", n)
+	}
+
+	e2 := &engine{
+		p:     Params{Nodes: 1, NodeCPUMillis: 64000, NodeMemMiB: 65536, InstanceType: "sim", RoundID: 12},
+		nodes: make(map[string]*nodeState, 1),
+	}
+	e2.injectNodes()
+	defer e2.cleanup()
 	n, ok := localcache.GetNode(ns.id)
 	if !ok || n == nil {
-		t.Fatalf("node missing from localcache after cleanup")
-	}
-	if n.Healthy {
-		t.Fatalf("cleanup must mark the node unhealthy")
+		t.Fatalf("re-injected node missing from localcache")
 	}
 	if n.QuotaCpuUsage != 0 || n.QuotaMemUsage != 0 || n.MvmNum != 0 {
-		t.Fatalf("cleanup left cached usage: cpu=%d mem=%d mvm=%d",
+		t.Fatalf("re-injection inherited cached usage: cpu=%d mem=%d mvm=%d",
 			n.QuotaCpuUsage, n.QuotaMemUsage, n.MvmNum)
 	}
 }
