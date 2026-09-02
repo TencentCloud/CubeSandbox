@@ -67,7 +67,7 @@ All env vars can be overridden by the corresponding flag.
 | `--workload` | *(none)* | Workload preset: `burst`, `template_storm`, `mixed_spec` (empty = legacy mode) |
 | `--rate` | `0` | Poisson arrival rate in requests/sec (`<=0` = as fast as possible) |
 | `--lifetime` | *(none)* | Per-sandbox lifetime in seconds: `min,max` (uniform); client DELETEs when lifetime expires |
-| `--templates` | *(none)* | Template pool: comma-separated `templateID[:weight[:cpuMillis:memMiB]]` (weight default 1) |
+| `--templates` | *(none)* | Template pool: comma-separated `templateID[:weight[:cpuMillis:memMiB]]` (weight default 1). Replaces `-t` for the generated pool (non-additive); warmup and the legacy fallback body still use `-t` |
 | `--dump-trace` | *(none)* | Write the pre-generated request sequence to a JSON trace file, then run normally (requires a scheduled workload) |
 
 Without any scheduling flag (`--workload`/`--rate`/`--lifetime`/`--templates`)
@@ -239,8 +239,9 @@ correctly render as "—". Same-tool A/B (cube-bench vs cube-bench, schedsim vs
 schedsim) is where the full metric set lines up. A
 metric is flagged in the conclusions when the verdict direction matches,
 |Δ%| ≥ 5%, and — whenever both sides have n ≥ 2 — the delta exceeds the
-95% CI of the difference (√(ci_base² + ci_cand²), the standard combination
-for two independent means), so small-sample noise is not flagged as a
+95% CI of the difference (√(ci_base² + ci_cand²); exact when both sides share
+the same degrees of freedom, otherwise a mild and generally conservative
+approximation), so small-sample noise is not flagged as a
 verdict.
 When the baseline mean is exactly 0 (Δ% undefined), the test falls back to
 the absolute delta — still CI-gated when possible — so a 0 → 0.5
@@ -252,8 +253,9 @@ Caveats when reading verdicts:
 
 - **Single-sample sides are not CI-gated.** With n=1 on either side there is
   no interval to compare against, so every |Δ%| ≥ 5% is flagged; one file per
-  side therefore produces verdicts that are pure single-run noise. Use
-  multiple seeds per side for decisions.
+  side therefore produces verdicts that are pure single-run noise. The report
+  prints a notice under the experiment-setup table whenever a group has n < 2.
+  Use multiple seeds per side for decisions.
 - **Δ% has no floor.** It is relative to the baseline mean, so near-zero
   baselines (e.g. `error_rate` ≈ 0.001) produce enormous percentages that
   always clear the 5% bar. Read them alongside the absolute Δ, which is shown

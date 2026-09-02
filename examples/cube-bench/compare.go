@@ -98,7 +98,9 @@ func runCompare(args []string, stdout io.Writer) error {
 	}
 	fmt.Fprint(stdout, report)
 	if output != "" {
-		fmt.Fprintf(stdout, "\nReport saved to %s\n", output)
+		// The confirmation is not part of the report; keep it off the report
+		// stream so `compare -o x.md > report.md` redirections stay clean.
+		fmt.Fprintf(os.Stderr, "Report saved to %s\n", output)
 	}
 	return nil
 }
@@ -621,6 +623,11 @@ func renderComparison(c *comparison) string {
 	fmt.Fprintf(&b, "| baseline | %s | %d | %d |\n", c.baseline.name, len(c.baseline.files), len(c.baseline.samples))
 	fmt.Fprintf(&b, "| candidate | %s | %d | %d |\n", c.candidate.name, len(c.candidate.files), len(c.candidate.samples))
 	b.WriteString("\n")
+	if len(c.baseline.samples) < 2 || len(c.candidate.samples) < 2 {
+		b.WriteString("> **Note:** at least one group has n < 2, so verdicts in this report are NOT " +
+			"CI-gated — every |Δ%| ≥ 5% row is flagged, including single-run noise. " +
+			"Use multiple seeds per side for decisions.\n\n")
+	}
 	writeFileList(&b, "baseline", c.baseline)
 	writeFileList(&b, "candidate", c.candidate)
 	if line := configHighlights("baseline", c.baseline); line != "" {
