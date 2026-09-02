@@ -80,7 +80,10 @@ func getMetricUpdateDiff(n *node.Node) float64 {
 	return getReciprocal(n.MetricUpdate.Unix(), time.Now().Unix())
 }
 
-// getMetricLocalUpdateDiff 节点本地指标更新时间越新得分越高
+// getMetricLocalUpdateDiff 当前实现与 getMetricUpdateDiff 完全相同：读的同样是
+// n.MetricUpdate（全局指标更新时间），而非名字暗示的 n.MetricLocalUpdateAt，
+// 因此本地指标新鲜度实际不参与该因子得分。疑似复制遗留的缺陷，此处按实际行为注释；
+// 是否应改读 n.MetricLocalUpdateAt 留待维护者确认。
 func getMetricLocalUpdateDiff(n *node.Node) float64 {
 	return getReciprocal(n.MetricUpdate.Unix(), time.Now().Unix())
 }

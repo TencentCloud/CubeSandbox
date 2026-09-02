@@ -34,15 +34,18 @@ PreFilter ──► Filter（并行执行，取交集）──► Score（加权
   阶段，而是在 `runScoreFilter` 内部**归一化之后、`AllSortByScore()` 排序之前**调用
   （`schedule.go:251`）；新 Pipeline 必须保持这一相对顺序，否则白名单调整会被排序忽略。
 - **最终选择**：`selCtx.LeastRandomSelect(PrioritySelectNum)`（`schedule.go:64`）。其实际行为
-  由两个配置项共同决定，**默认配置下打分结果几乎被完全丢弃**：
+  由两个配置项共同决定，**未显式配置时打分结果几乎被完全丢弃**：
 
   | 配置项 | 默认值 | 影响 |
   |---|---|---|
   | `least_select_name` | `random`（`config.go:249`，缺省填充见 `config.go:1207-1208`） | `randomSelect.Add()` 显式忽略 weight 参数（`random_select.go:21-23`），即便 `LeastRandomSelect` 传入了 `Score*1e6`（`selectcontext.go:161`）也不生效 |
-  | `priority_select_num` | **`-1` = 不限制**（`config.go:1203-1204`；`conf.yaml:74` 才显式写为 1） | `LeastNodes(-1)` 返回全部候选，而非 Top-N |
+  | `priority_select_num` | **`-1` = 不限制**（`config.go:1203-1204`；`conf.yaml:78` 才显式写为 1） | `LeastNodes(-1)` 返回全部候选，而非 Top-N |
 
-  两者叠加：**默认部署在全部通过 Filter 的候选节点中等概率随机选择**，Score 阶段的排序结果
-  不产生任何影响。这正是 issue #573（打分缺省时的退化行为）描述的现象，也是本任务"基线可
+  两者叠加：**当 YAML 未显式设置 `priority_select_num`（即保持代码默认 `-1`）时，部署在
+  全部通过 Filter 的候选节点中等概率随机选择**，Score 阶段的排序结果不产生任何影响。
+  仓库自带的 `conf.yaml` 显式写了 `priority_select_num: 1`，按该配置部署则确定性取最高分
+  节点、打分真实生效——退化只发生在沿用代码缺省值的部署上。这正是 issue #573（打分缺省时
+  的退化行为）描述的现象，也是本任务"基线可
   显著改善"的最直接依据——不是插件算得不好，而是算完没被使用。
 
   需要说明的是，加权路径本身是存在的：显式配置 `least_select_name: rw` 会走
@@ -244,7 +247,7 @@ scheduler:
         - name: image_score
           weight: 4
           args:
-            # 因子名沿用 constants.go:221-240 的既有取值，避免与 legacy 配置产生两套命名
+            # 因子名沿用 constants.go:241-260 的既有取值，避免与 legacy 配置产生两套命名
             factors: { template_id: 1 }
         - name: real_time_weighted_average
           weight: 1
@@ -253,7 +256,7 @@ scheduler:
       picker: { mode: best }
 ```
 
-> **因子命名必须与现有常量一致**（`pkg/base/constants/constants.go:221-240`，
+> **因子命名必须与现有常量一致**（`pkg/base/constants/constants.go:241-260`，
 > 消费点 `pkg/selector/score/utils.go:18-53`）：`realtime_create_num`（非
 > `real_time_create_num`）、`quota_cpu_usage` / `quota_mem_usage`（非 `quota_cpu` / `quota_mem`）、
 > `mvm_num`、`cpu_util`、`image_id`、`template_id`。legacy translator 依赖这套名字做双向映射，

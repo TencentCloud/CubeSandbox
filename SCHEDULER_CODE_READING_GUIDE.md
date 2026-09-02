@@ -103,14 +103,15 @@ Profile 机制落地时，这里（或下游 `NewSelector()`）是切换策略�
 `CubeMaster/pkg/selector/score/`：
 
 - 📌 `realtimescore.go`：`real_time_weighted_average` —— 实时配额余量加权打分，
-  **新打分插件的最佳模板**（注意 L24 构造函数 panic 的问题，注册表改造要顺手解决）。
+  **新打分插件的最佳模板**（注意 `NewRealTimeWeightedAverageScore` 构造函数 panic 的问题，注册表改造要顺手解决）。
 - 📌 `utils.go`：**全部 14 个打分因子函数**（`getMvmNumScore`、`getQuotaCpuUsageScore`、
   `getCpuUtilScore`…），写 spread/binpack 打分时直接复用或反用（binpack 就是
   "利用率越高分越高"，与现有因子方向相反）。
 - 📌 `imagescore.go`：`image_score` —— 镜像/模板本地性打分，`template-hotstart`
   策略的核心插件，注意 `EnableWeightFactors` 里 `image_id` / `template_id` 两个因子。
 - `multifactorscore.go` + `asyncscore.go`：`multi_factor_weighted_average` ——
-  后台 50ms ticker 预计算 `n.Score`（`loopAsyncScore`），调度时直接读。
+  后台按 `ScoreInterval` 周期预计算 `n.Score`（`loopAsyncScore` 的 50ms ticker
+  只做轮询，到点由 `checkDeadline` 放行重算），调度时直接读。
   **性能敏感场景的参考**：把重计算挪出调度热路径。
 - `affinityscore.go`：节点亲和性优选打分（配合第 3 阶段的 affinity 读）。
 
@@ -142,7 +143,7 @@ K8s 风格 NodeSelector（In/NotIn/Exists/Gt/Lt）。亲和相关的策略（如
 - 📌 `CubeMaster/conf.yaml` L85 起的 `scheduler:` 段：配置的实际形态，
   你的 Profile 示例要加在这里。
 - 📌 `CubeMaster/pkg/base/constants/constants.go`：`SelectorFilterID` 等 ID 前缀
-  （L9-13）与 14 个 `WeightFactor*` 因子名（L195-214）。
+  （L9-13）与 20 个 `WeightFactor*` 因子名（L241-260）。
 
 ---
 

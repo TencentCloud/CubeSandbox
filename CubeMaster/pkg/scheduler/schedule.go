@@ -23,8 +23,10 @@ import (
 )
 
 // Select 调度主流程：预过滤 -> 兜底过滤（可选）-> 并行过滤 -> 评分 -> 加权随机选出最终节点。
-// 过滤阶段失败时，若启用了 template_locality 过滤则直接返回错误，
-// 否则降级走 BackoffSelect 兜底路径
+// 预过滤失败时降级走 runBackoffFilter 重新圈选候选集；并行过滤失败时降级走
+// BackoffSelect 兜底。两条降级路径共用一个例外：仅当请求携带非空 TemplateID
+// 且启用了 template_locality 过滤（shouldSkipBackoffForTemplate）时才跳过降级、
+// 直接返回错误；不带模板的普通请求总是走降级。
 func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
 	defer func() {
 		if r := recover(); r != nil {
