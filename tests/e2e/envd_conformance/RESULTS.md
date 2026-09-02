@@ -214,6 +214,51 @@ CubeProxy 访问。**19 passed, 0 failed**。
 | `echo hi` 端到端延迟 P50 / P95（100 次） | 6.3 / 8.3 ms | 4.3 / 5.6 ms | −32% / −33% |
 | 静态二进制体积 | 10.5 MB | 2.6 MB | −75% |
 
+## 5. item 1.8 cgroup 真机验证（2026-09-02，feat/cube-envd-cgroup-1.8）
+
+cgroup 行为不经 envd RPC 暴露，conformance 套件无法对拍（计划 §5），故以真机实测
+覆盖 init() 正向路径与 spawn 落位。
+
+### 环境矩阵落点（计划 §6）
+
+| 环境 | 矩阵行 | 实测结果 |
+|---|---|---|
+| dev 机宿主真根（WSL2，cgroup v2，systemd 已启用 controller） | 第 1 行（一致） | cube-envd init() 非 Noop：subtree_control 幂等追加成功（宿主已含 cpuset cpu io memory hugetlb pids rdma）；`/sys/fs/cgroup/{user,ptys}` 建出；`user/memory.max=12404305920`（meminfo 算得）、`cpu.max="max 100000"`；envd 自身不迁移（仍在 `0::/init.scope`） |
+| 普通 docker 容器（私有 cgroupns，ns root 承载容器进程） | 第 3 行（同结局 → Noop） | subtree_control enable 失败（cgroup v2 no-internal-process 规则，EIO）→ Err → Noop；1.8 对拍全程 Noop 下运行 |
+| `--privileged` 容器 + PID1 自移子 cgroup（构造"容器节点空"拓扑） | 嵌套可写根（第 2 行效果） | init() 非 Noop：subtree_control = "cpu memory"；start 的 sleep 进程落在 `user/`（`cgroup.procs` 含 pid，`/proc/<pid>/cgroup = 0::/user`）——验收标准① |
+
+### A1 探针（exec.rs `#[ignore]`，计划 §5）
+
+`sudo cargo test -- --ignored spawn_lands_child_in_its_cgroup`（宿主真根）→ ok：真实
+cgroup dir fd 经 pre_exec `openat` 写入 `cgroup.procs`，子进程 `/proc/<pid>/cgroup`
+落在 `cube-a1-<pid>` 子树；测试自清理，host 无残留。
+
+### 单测（变基到 1.6 之后实测）
+
+`cargo test` → **110 passed, 0 failed, 1 ignored**（ignored 为 A1 探针）；
+`cargo clippy --all-targets` 与 `cargo fmt --check` 均干净。较 1.6 的 93 增加 17
+（本分支新增用例，含 1 个 ignored 探针）。
+
+### 对拍（2026-09-03 变基后重录）
+
+`proc_missing_cmd` 出 allowlist 的依据（本分支实测）：wrapper 之后 missing cmd 的
+stderr 与上游字节一致 ——
+`/usr/bin/nice: '/no/such/bin': No such file or directory`。
+
+本分支变基到 1.6 之后 fresh 容器重录（同镜像起两个容器，`capture.py all` 两侧各
+90 fixture，`conformance.py` 退出码 0）。三行口径不同，前两行为各自分支当时的历史
+实测，第三行为本分支当前实测：
+
+| 口径 | 场景 | PASS | FAIL | DECLARED-DIFF | allowlist |
+|---|---|---|---|---|---|
+| 1.8 首测（1.6 前，80 fixture） | 80 | 70 | 0 | 10 | 11 → 10（移除 `proc_missing_cmd`） |
+| 1.6 重录（§2c） | 88 | 78 | 0 | 10 | 11 → 10（移除 `fs_stat_symlink_probe`） |
+| **1.8 变基后重录（2026-09-03）** | 90 | 81 | 0 | 9 | 9（`proc_missing_cmd` 与 `fs_stat_symlink_probe` 均已移除） |
+
+场景数 90 是 1.6 合并时套件即有的规模（base 与本分支的 `capture.py` 完全相同，
+本分支未动）——§2c 记录的 88 是 1.6 开发中更早的时点。`conformance.py` 的
+`DECLARED_DIFFERENT` 现 9 条且全部命中，无孤儿条目；FAIL 恒 0。
+
 ## 复现
 
 见 [README.md](README.md)。E2E 需要本地部署环境与两个模板：

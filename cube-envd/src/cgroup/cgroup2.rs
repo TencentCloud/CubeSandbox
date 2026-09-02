@@ -61,26 +61,34 @@ fn build_subtrees(
     enable_subtree_control(root)?;
 
     let mut fds: HashMap<ProcType, RawFd> = HashMap::new();
+    let mut errs: Vec<String> = Vec::new();
     for (t, cfg) in types {
-        let fd = match create_one_cgroup(root, cfg) {
-            Ok(fd) => fd,
-            Err(e) => {
-                // All-or-nothing rollback. `fds` is a plain HashMap of RawFd
-                // (i32) — dropping it closes nothing — so close the fds built
-                // so far explicitly, exactly like upstream `createCgroups`
-                // (cgroup2.go) does before joining the errors.
-                for fd in fds.values() {
-                    // SAFETY: fds we opened ourselves; no other owner exists.
-                    unsafe {
-                        libc::close(*fd);
-                    }
-                }
-                return Err(io::Error::other(format!(
-                    "failed to create {t:?} cgroup: {e}"
-                )));
+        match create_one_cgroup(root, cfg) {
+            Ok(fd) => {
+                fds.insert(*t, fd);
             }
-        };
-        fds.insert(*t, fd);
+            Err(e) => {
+                // Keep trying like upstream `createCgroups` (cgroup2.go:80-88):
+                // every remaining subtree is still attempted, then the fds
+                // built so far are closed and all errors are joined. Lower-case
+                // type labels match upstream's string-typed ProcessType
+                // (iface.go: pty/user).
+                let name = match t {
+                    ProcType::Pty => "pty",
+                    ProcType::User => "user",
+                };
+                errs.push(format!("failed to create {name} cgroup: {e}"));
+            }
+        }
+    }
+    if !errs.is_empty() {
+        for fd in fds.values() {
+            // SAFETY: fds we opened ourselves; no other owner exists.
+            unsafe {
+                libc::close(*fd);
+            }
+        }
+        return Err(io::Error::other(errs.join("; ")));
     }
     Ok(fds)
 }
@@ -328,7 +336,7 @@ mod tests {
 
         let before = open_fds_under(dir.path());
         let err = build_subtrees(dir.path(), &sample_types(16 * 1024 * 1024)).unwrap_err();
-        assert!(err.to_string().contains("failed to create Pty cgroup"));
+        assert!(err.to_string().contains("failed to create pty cgroup"));
         assert_eq!(
             open_fds_under(dir.path()),
             before,

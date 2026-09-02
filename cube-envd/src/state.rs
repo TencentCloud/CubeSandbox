@@ -109,7 +109,6 @@ impl AppState {
     /// cgroup dir fd for `t`, or `None` under the Noop fallback. Handed to
     /// `exec::spawn` at the process service layer (mirrors upstream
     /// `getProcType` + `GetFileDescriptor` in handler.go).
-    #[allow(dead_code)] // item 1.8: first caller lands in commit C
     pub fn cgroup_fd(&self, t: ProcType) -> Option<RawFd> {
         self.cgroup.fd(t)
     }
@@ -304,6 +303,29 @@ mod tests {
         assert_eq!(vars.get("A").map(String::as_str), Some("1"));
         assert_eq!(vars.get("B").map(String::as_str), Some("2"));
         assert_eq!(vars.get("E2B_SANDBOX").map(String::as_str), Some("false"));
+    }
+
+    /// The two lines the process service depends on (plan §3.4): a fresh
+    /// `AppState` has no cgroup manager (`fd() == None` — unit tests never
+    /// probe the host tree), and `with_cgroup` swaps in the real one so the
+    /// same call starts returning `Some`. A stub manager stands in for
+    /// `Cgroup2Manager` (whose constructor needs a real cgroup v2 mount).
+    #[test]
+    fn cgroup_fd_defaults_noop_then_with_cgroup_swaps_in() {
+        struct Stub;
+        impl Manager for Stub {
+            fn fd(&self, _t: ProcType) -> Option<RawFd> {
+                Some(42)
+            }
+        }
+
+        let s = AppState::new();
+        assert_eq!(s.cgroup_fd(ProcType::User), None);
+        assert_eq!(s.cgroup_fd(ProcType::Pty), None);
+
+        let s = s.with_cgroup(Arc::new(Stub));
+        assert_eq!(s.cgroup_fd(ProcType::User), Some(42));
+        assert_eq!(s.cgroup_fd(ProcType::Pty), Some(42));
     }
 
     #[test]

@@ -72,10 +72,6 @@ load-bearing ones, and why cube-envd differs:
   aware. Overwriting an existing file preserves its mode bits. Multipart
   parts without a filename are ignored as form fields (only the raw
   octet-stream path uses the `?path` query target).
-- **Missing-binary start event reports `pid: 0`.** Nothing is spawned, so
-  there is no pid; upstream reports the pid of its nice(1) wrapper, which is
-  equally unusable for `Connect`/`SendSignal` after the exec failure. Event
-  order, stderr suffix and exit code 127 match the baseline.
 - **CLI parsing is stricter than Go's `flag` (documented).** *Unlike the
   upstream Go envd, cube-envd strictly validates every command-line argument:
   an invalid flag, a positional argument or a malformed value terminates

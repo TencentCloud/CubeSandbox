@@ -34,7 +34,6 @@ DECLARED_DIFFERENT = {
     "proc_connect_missing": "nested-selector: BOTH refuse to attach — upstream rejects the shape (unimplemented/invalid input type), cube-envd resolves to no pid and returns not_found; neither attaches to a process",
     "proc_sendsignal_nested_probe": "nested-selector: BOTH refuse to act on the process — upstream rejects the shape (501), cube-envd resolves to no pid and returns not_found; neither signals a process (no destructive side effect)",
     "fs_bad_json": "JSON parse error wording is parser-specific (code and status equal)",
-    "proc_missing_cmd": "missing-binary stderr prefix: upstream nice(1) wording vs cube-envd (exit 127 and event flow equal)",
     "rest_init_timestamp_out_of_range": "timestamp outside i64-nanosecond range (9999): upstream UnixNano() wraps and drops as stale (204); cube-envd rejects as a caller bug (400). Neither applies anything nor moves the gate",
 }
 # Fixtures that depend on prior state in ways the rerun reproduces

@@ -15,6 +15,78 @@ use crate::auth::User;
 use crate::msg::process::{DataEvent, EndEvent};
 use crate::state::AppState;
 
+/// Write this child's pid into `dirfd`'s `cgroup.procs`. Runs inside the
+/// forked child before exec, so it must be allocation-free and call only
+/// async-signal-safe libc. `dirfd` is a manager-owned cgroup directory fd
+/// (borrowed for the daemon lifetime — never closed here; the open on
+/// `cgroup.procs` carries O_CLOEXEC so the fd cannot leak past exec).
+fn place_in_cgroup(dirfd: RawFd) -> std::io::Result<()> {
+    let procs = b"cgroup.procs\0";
+    // SAFETY: pre_exec runs in the forked child, single-threaded; dirfd is a
+    // valid fd inherited from the parent.
+    let fd = unsafe {
+        libc::openat(
+            dirfd,
+            procs.as_ptr() as *const libc::c_char,
+            libc::O_WRONLY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // Format the pid without allocation: `<pid>\n`.
+    let pid = unsafe { libc::getpid() };
+    debug_assert!(pid > 0, "forked child always has a pid");
+    let mut num = [0u8; 16];
+    let mut n = num.len();
+    let mut v = pid.max(1) as u32;
+    while v > 0 {
+        n -= 1;
+        num[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    let mut buf = [0u8; 17];
+    let len = num.len() - n;
+    buf[..len].copy_from_slice(&num[n..]);
+    buf[len] = b'\n';
+
+    // Loop until the whole pid line is written (a short write on a regular
+    // file should not happen, but the cgroupfs write path may return EINTR).
+    let mut off = 0usize;
+    let total = len + 1;
+    let result = loop {
+        // SAFETY: buf is fully initialized for [off, total); fd is ours.
+        let w = unsafe {
+            libc::write(
+                fd,
+                buf[off..total].as_ptr() as *const libc::c_void,
+                total - off,
+            )
+        };
+        if w < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break Err(e);
+        }
+        if w == 0 {
+            // A zero-length write on a regular file is unreachable, but keep
+            // the branch allocation-free like the rest of this function:
+            // io::Error::new(WriteZero, ...) boxes a message.
+            break Err(std::io::Error::from_raw_os_error(libc::EIO));
+        }
+        off += w as usize;
+        if off >= total {
+            break Ok(());
+        }
+    };
+    // SAFETY: fd was opened by us above and not closed elsewhere.
+    unsafe { libc::close(fd) };
+    result
+}
+
 /// Matches upstream envd's default PATH for spawned commands.
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const READ_CHUNK: usize = 32 * 1024;
@@ -28,6 +100,7 @@ pub enum PumpEvent {
     SpawnError(String),
 }
 
+#[derive(Debug)]
 pub struct SpawnedProcess {
     pub pid: u32,
     /// First subscriber on the process's output bus. Created before the pump
@@ -106,9 +179,6 @@ pub fn spawn(
     user: &User,
     cgroup_fd: Option<RawFd>,
 ) -> std::io::Result<SpawnedProcess> {
-    // Consumed by the pre_exec cgroup placement: when set, the child is
-    // written into cgroup_fd's subtree before privileges are dropped.
-    let _ = cgroup_fd;
     let mut command = tokio::process::Command::new(cmd);
     command
         .args(args)
@@ -126,10 +196,23 @@ pub fn spawn(
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "cwd contains NUL"))?;
     unsafe {
         command.pre_exec(move || {
+            // 1. Cgroup placement — the first thing the child does, while it
+            //    still runs as the daemon's identity and the subtree is
+            //    writable. Mirrors upstream's clone3(CLONE_INTO_CGROUP): the
+            //    child is inside its subtree before it can touch anything.
+            //    Fail-fast: any error aborts the spawn (the child never
+            //    execs), matching upstream's clone3 error handling.
+            if let Some(dirfd) = cgroup_fd {
+                place_in_cgroup(dirfd)?;
+            }
             // Put the child in its own process group (leader pgid == pid) so a
             // timeout or SendSignal can reach the whole tree — a shell plus the
             // descendants it forks — via kill(-pgid), not just the direct
-            // child. Mirrors upstream envd's SysProcAttr{Setpgid: true}.
+            // child. This is a deliberate CubeSandbox extension, not an
+            // upstream mirror: the Go envd process path sets no Setpgid at all
+            // (handler.go:125-133 carries only UseCgroupFD/CgroupFD/
+            // Credential), and the single `Setpgid: true` upstream lives in
+            // internal/port/forward.go — the socat forwarder this crate drops.
             if libc::setpgid(0, 0) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -328,6 +411,120 @@ mod tests {
         assert_eq!(end.exit_code, 3);
         assert!(end.exited);
         assert_eq!(end.status, "exit status 3");
+    }
+
+    #[tokio::test]
+    #[ignore = "A1 probe (plan §5): needs root + a writable cgroup v2 mount"]
+    async fn spawn_lands_child_in_its_cgroup() {
+        // Locks the "dir fd is still live at pre_exec time" ordering
+        // assumption against toolchain upgrades: with a real cgroup dir fd,
+        // pre_exec's openat on it must succeed so the child lands inside that
+        // subtree. Needs root and a writable cgroup v2 fs:
+        //   sudo cargo test -- --ignored spawn_lands_child_in_its_cgroup
+        use std::os::unix::io::AsRawFd;
+        use std::path::{Path, PathBuf};
+        use std::time::Duration;
+
+        assert_eq!(
+            unsafe { libc::geteuid() },
+            0,
+            "A1 probe needs root: sudo cargo test -- --ignored spawn_lands_child_in_its_cgroup"
+        );
+
+        let root = Path::new("/sys/fs/cgroup");
+        let name = format!("cube-a1-{}", std::process::id());
+        let dir = root.join(&name);
+        std::fs::create_dir(&dir)
+            .unwrap_or_else(|e| panic!("mkdir {dir:?} (cgroup v2 writable?): {e}"));
+
+        // rmdir needs the cgroup empty; the child is SIGKILLed before the
+        // guard runs. Leftover dirs (prefix cube-a1-) can be removed manually.
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+
+        let user = current_user();
+        let dirfd = std::fs::File::open(&dir).unwrap();
+        let proc = spawn(
+            "/bin/sh",
+            &["-c".into(), "sleep 5".into()],
+            HashMap::new(),
+            "/".into(),
+            &user,
+            Some(dirfd.as_raw_fd()),
+        )
+        .unwrap();
+
+        // pre_exec writes the pid before exec; poll cgroup.procs until the
+        // child shows up (it must land in the subtree, never silently
+        // outside it).
+        let procs_path = dir.join("cgroup.procs");
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let content = std::fs::read_to_string(&procs_path).unwrap_or_default();
+            if content
+                .split_whitespace()
+                .any(|p| p == proc.pid.to_string())
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child pid {} never appeared in {procs_path:?}",
+                proc.pid
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // The kernel agrees via /proc: the child's cgroup path ends with the
+        // probe directory name.
+        let cg = std::fs::read_to_string(format!("/proc/{}/cgroup", proc.pid)).unwrap();
+        assert!(
+            cg.trim().ends_with(&name),
+            "child cgroup {cg:?} not under probe dir {name}"
+        );
+
+        kill_process_group(proc.pid, libc::SIGKILL).unwrap();
+        // Let the child die so the cleanup rmdir has a chance (best effort;
+        // the guard ignores failure).
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn spawn_fails_fast_when_cgroup_placement_fails() {
+        // Cgroup placement runs first in pre_exec and any error aborts the
+        // spawn (upstream clone3 semantics): a directory fd without a
+        // writable cgroup.procs must fail the spawn, never "succeed" with
+        // the process outside its subtree.
+        use std::os::unix::io::AsRawFd;
+        let user = current_user();
+        let dir = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(dir.path()).unwrap();
+        let err = spawn(
+            "/bin/sh",
+            &["-c".into(), "echo should-not-run".into()],
+            HashMap::new(),
+            "/".into(),
+            &user,
+            Some(dirfd.as_raw_fd()),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+
+        // An invalid fd fails the same way; the child never execs either way.
+        let err = spawn(
+            "/bin/sh",
+            &["-c".into(), "echo should-not-run".into()],
+            HashMap::new(),
+            "/".into(),
+            &user,
+            Some(-1),
+        )
+        .unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EBADF));
     }
 
     #[tokio::test]

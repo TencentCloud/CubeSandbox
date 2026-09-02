@@ -37,7 +37,9 @@ const DEFAULT_PORT: u16 = 49983;
 /// recognized — so a trailing bare value is never mistaken for a positional
 /// argument — then warned about and ignored.
 ///
-/// TODO(1.8): implement -cgroup-root (cgroups v2).
+/// -cgroup-root is a deliberate non-feature (plan §6, item 1.8): upstream's
+/// root override only matters when the daemon runs nested under another
+/// cgroup root; add it if a nested conformance comparison ever needs it.
 /// TODO: implement -cmd (command to run on daemon start).
 const UNIMPLEMENTED: &[&str] = &["cmd", "cgroup-root"];
 

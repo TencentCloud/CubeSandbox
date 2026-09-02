@@ -45,7 +45,6 @@ pub enum ProcType {
 /// cleanup), so observable behaviour is unchanged. Startup failure fallback =
 /// constructing a `NoopManager` instance (not an `Option`), matching upstream
 /// `createCgroupManager`'s named-return + defer (plan §0.1).
-#[allow(dead_code)] // item 1.8: first caller lands in commit C (exec.rs pre_exec)
 pub trait Manager: Send + Sync {
     /// Returns the cgroup dir fd for `t`, or `None` when that subtree was not
     /// created (cgroup v2 unavailable → NoopManager). The fd is **borrowed**:

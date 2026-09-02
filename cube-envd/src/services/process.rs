@@ -18,6 +18,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::auth::User;
+use crate::cgroup::ProcType;
 use crate::connect;
 use crate::error::{ConnectCode, ConnectError};
 use crate::exec;
@@ -53,6 +54,71 @@ fn event_frame(event: Event) -> Bytes {
     connect::message_frame(&value)
 }
 
+/// Target OOM score and nice level for user commands (upstream
+/// handler.go:29-30). The wrapper applies them in the child before the
+/// command exists, so nothing can inherit envd's protected values.
+const DEFAULT_OOM_SCORE: i32 = 100;
+const DEFAULT_NICE: i32 = 0;
+
+/// Nice value of the current process, as the wrapper delta needs it.
+/// Reads the raw syscall the way upstream does (handler.go:82-88): the
+/// kernel encodes the result as `20 - nice`, so `20 - prio` is the nice
+/// value. Reading the raw encoding rather than the C library's
+/// `getpriority` is deliberate — libc converts to the nice value itself,
+/// where `-1` is both a legitimate nice level and the error return, so a
+/// daemon started at nice -1 could not be told apart from a failure. The
+/// raw encoding maps every valid nice to `1..=40`, leaving -1 unambiguously
+/// an error. (Do not apply `20 - prio` to a libc `getpriority` result: that
+/// combination yields delta -20 at the daemon's nice 0 and the wrapper then
+/// tries to raise priority as the unprivileged user, failing with EPERM.)
+fn current_nice() -> i32 {
+    // SAFETY: getpriority(PRIO_PROCESS, 0) addresses this process.
+    let prio = unsafe { libc::syscall(libc::SYS_getpriority, libc::PRIO_PROCESS, 0) };
+    if prio < 0 {
+        return 0;
+    }
+    20 - prio as i32
+}
+
+/// Assemble the OOM/nice wrapper upstream prepends to every user command
+/// (handler.go:98-105): `echo <oom> > /proc/$$/oom_score_adj && exec
+/// /usr/bin/nice -n <delta> "$@"`, run as `/bin/sh -c <script> -- <cmd>
+/// <args...>`. The command replaces sh via exec (same pid) after the score
+/// and nice are set in the child. nice(1) is a relative adjustment, hence
+/// the delta from the current (inherited) nice to the target.
+fn oom_nice_wrapper(cmd: &str, args: &[String]) -> (String, Vec<String>) {
+    let delta = DEFAULT_NICE - current_nice();
+    let script = format!(
+        "echo {DEFAULT_OOM_SCORE} > /proc/$$/oom_score_adj && exec /usr/bin/nice -n {delta} \"${{@}}\""
+    );
+    let mut sh_args = vec!["-c".to_string(), script, "--".to_string(), cmd.to_string()];
+    sh_args.extend(args.iter().cloned());
+    ("/bin/sh".to_string(), sh_args)
+}
+
+/// The user's original command as one shell-style string, wrapper internals
+/// stripped — mirrors upstream `Handler.userCommand` (handler.go:71-74,
+/// `strings.Join(append([cmd], args...), " ")`). No shell escaping: upstream
+/// does none either; this text only feeds error messages.
+fn user_command(cmd: &str, args: &[String]) -> String {
+    std::iter::once(cmd)
+        .chain(args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Which cgroup subtree a Start request belongs to (upstream
+/// handler.go:340 getProcType). PTY starts are rejected before this runs
+/// today, so this is always `User` in practice, but the interface must not
+/// assume it — when PTY lands it switches to `Pty` on its own.
+pub(crate) fn get_proc_type(req: &StartRequest) -> ProcType {
+    if req.pty.is_some() {
+        ProcType::Pty
+    } else {
+        ProcType::User
+    }
+}
+
 /// Handle `process.Process/Start`.
 pub fn start(
     state: Arc<AppState>,
@@ -86,12 +152,25 @@ pub fn start(
         }
     };
 
-    let spawned = match exec::spawn(&req.process.cmd, &req.process.args, env, cwd, &user, None) {
+    // Upstream wraps every start in an OOM/nice shell (handler.go:98-105):
+    // the wrapper also makes a "missing binary" a wrapper-level failure with
+    // /usr/bin/nice's own wording (exit 127 event flow), not a spawn error.
+    let (wrapper_cmd, wrapper_args) = oom_nice_wrapper(&req.process.cmd, &req.process.args);
+    let cgroup_fd = state.cgroup_fd(get_proc_type(&req));
+    let spawned = match exec::spawn(&wrapper_cmd, &wrapper_args, env, cwd, &user, cgroup_fd) {
         Ok(s) => s,
         Err(e) => {
-            // Baseline behavior for a missing binary is a full event stream
-            // (start → stderr → end 127), not a spawn-level RPC error.
-            return frame_stream_response(missing_cmd_stream(&req.process.cmd, &e));
+            // A genuine spawn failure is an InvalidArgument RPC error
+            // (upstream start.go:207-209), not an event stream. Only real
+            // system failures reach here now — the wrapper (/bin/sh) always
+            // exists, so a missing command never does.
+            return stream_error_response(ConnectError::new(
+                ConnectCode::InvalidArgument,
+                format!(
+                    "error starting process '{}': {e}",
+                    user_command(&req.process.cmd, &req.process.args)
+                ),
+            ));
         }
     };
 
@@ -294,52 +373,6 @@ async fn drive_stream(
     }
 }
 
-/// Synthetic event stream matching the baseline shape for a missing binary:
-/// start → stderr line → end(127). The baseline stderr text comes from the
-/// nice(1) wrapper upstream uses; cube-envd emits its own prefix but keeps
-/// the recognizable `'<cmd>': No such file or directory` suffix and code.
-///
-/// The start event carries `pid: 0`: nothing was spawned, so there is no
-/// real pid to report. Upstream reports the nice(1) wrapper's pid there — a
-/// documented difference (README "Known behavioral differences"); a pid of a
-/// process that failed exec is unusable for Connect/SendSignal either way.
-///
-/// A pre_exec chdir failure (cwd exists but the target user cannot enter
-/// it) also surfaces here as EACCES and is worded against the command;
-/// the exit code (126) matches what a shell would report for either cause.
-fn missing_cmd_stream(
-    cmd: &str,
-    err: &std::io::Error,
-) -> impl futures::Stream<Item = Bytes> + Send + 'static {
-    use base64::Engine;
-    let (text, code) = if err.kind() == std::io::ErrorKind::NotFound {
-        (
-            format!("cube-envd: '{cmd}': No such file or directory\n"),
-            127,
-        )
-    } else if err.kind() == std::io::ErrorKind::PermissionDenied {
-        (format!("cube-envd: '{cmd}': Permission denied\n"), 126)
-    } else {
-        (format!("cube-envd: '{cmd}': {err}\n"), 126)
-    };
-    let stderr_b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
-    let end = crate::msg::process::EndEvent {
-        exit_code: code,
-        exited: true,
-        status: format!("exit status {code}"),
-        error: Some(format!("exit status {code}")),
-    };
-    futures::stream::iter([
-        event_frame(Event::Start(StartEvent { pid: 0 })),
-        event_frame(Event::Data(crate::msg::process::DataEvent {
-            stderr: Some(stderr_b64),
-            ..Default::default()
-        })),
-        event_frame(Event::End(end)),
-        connect::end_stream_ok(),
-    ])
-}
-
 /// Handle `process.Process/List` (unary).
 pub fn list(state: &AppState) -> serde_json::Value {
     let processes = state
@@ -398,7 +431,6 @@ pub fn send_signal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt;
 
     #[test]
     fn list_shape() {
@@ -431,16 +463,71 @@ mod tests {
         assert_eq!(err.code, ConnectCode::NotFound);
     }
 
-    #[tokio::test]
-    async fn missing_cmd_stream_shape() {
-        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
-        let frames: Vec<Bytes> = missing_cmd_stream("/no/such/bin", &err).collect().await;
-        assert_eq!(frames.len(), 4);
-        let start: serde_json::Value = serde_json::from_slice(&frames[0][5..]).unwrap();
-        assert_eq!(start, serde_json::json!({"event":{"start":{"pid":0}}}));
-        let end: serde_json::Value = serde_json::from_slice(&frames[2][5..]).unwrap();
-        assert_eq!(end["event"]["end"]["exitCode"], 127);
-        assert_eq!(frames[3][0], connect::END_STREAM_FLAG);
+    #[test]
+    fn oom_nice_wrapper_shape() {
+        // Script structure must match upstream handler.go:98-105: OOM score
+        // written first, then exec /usr/bin/nice with a relative delta.
+        let (cmd, args) = oom_nice_wrapper("/no/such/bin", &[]);
+        assert_eq!(cmd, "/bin/sh");
+        assert_eq!(args.len(), 4);
+        assert_eq!(args[0], "-c");
+        assert!(args[1].starts_with("echo 100 > /proc/$$/oom_score_adj && exec /usr/bin/nice -n "));
+        assert!(args[1].ends_with(" \"${@}\""));
+        assert_eq!(args[2], "--");
+        assert_eq!(args[3], "/no/such/bin");
+
+        let (_, args) = oom_nice_wrapper("/bin/echo", &["hi".to_string()]);
+        assert_eq!(args[3], "/bin/echo");
+        assert_eq!(args[4], "hi");
+    }
+
+    #[test]
+    fn current_nice_returns_the_nice_value() {
+        // Cross-check against libc's getpriority, which converts the kernel's
+        // raw `20 - nice` encoding back to the nice value itself — an
+        // independent source for the same number. This locks the convention:
+        // returning the raw encoding (or applying `20 - prio` to the libc
+        // result) both yield 20 at the daemon's nice 0, i.e. delta -20 and a
+        // wrapper that tries to raise priority as the unprivileged user.
+        // SAFETY: PRIO_PROCESS with pid 0 addresses this process.
+        let libc_nice = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+        if libc_nice == -1 {
+            // Ambiguous (real nice -1 vs error) and unreachable here: the
+            // test process inherits nice 0.
+            return;
+        }
+        assert_eq!(current_nice(), libc_nice);
+    }
+
+    #[test]
+    fn user_command_joins_cmd_and_args_like_upstream() {
+        // Mirrors handler.go:71-74: plain space join of cmd + args, no shell
+        // escaping — the text is only for error messages.
+        assert_eq!(user_command("sleep", &[]), "sleep");
+        assert_eq!(user_command("sleep", &["30".to_string()]), "sleep 30");
+        assert_eq!(
+            user_command("/bin/echo", &["a b".to_string(), "c".to_string()]),
+            "/bin/echo a b c"
+        );
+    }
+
+    #[test]
+    fn get_proc_type_maps_pty_and_default() {
+        let base = StartRequest {
+            process: crate::msg::process::ProcessConfig {
+                cmd: "x".into(),
+                ..Default::default()
+            },
+            pty: None,
+            tag: None,
+            stdin: None,
+        };
+        assert_eq!(get_proc_type(&base), ProcType::User);
+        let pty_req = StartRequest {
+            pty: Some(crate::msg::process::Pty { size: None }),
+            ..base
+        };
+        assert_eq!(get_proc_type(&pty_req), ProcType::Pty);
     }
 
     #[tokio::test]
