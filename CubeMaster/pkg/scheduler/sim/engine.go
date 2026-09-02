@@ -177,6 +177,11 @@ func (h *eventHeap) Pop() interface{} {
 type engine struct {
 	p Params
 
+	// maxReqCPUMillis is the largest cpu_millis over the whole trace. It is a
+	// constant of the trace, precomputed once so snapshot() stays O(nodes)
+	// instead of rescanning every request after every event.
+	maxReqCPUMillis int64
+
 	nodeOrder []*nodeState
 	nodes     map[string]*nodeState
 	replicas  map[string]map[string]bool // templateID -> nodeIDs with a local replica
@@ -209,11 +214,12 @@ func RunRound(ctx context.Context, p Params) (*RoundResult, error) {
 		return nil, err
 	}
 	e := &engine{
-		p:           p,
-		nodes:       make(map[string]*nodeState, p.Nodes),
-		replicas:    make(map[string]map[string]bool),
-		placements:  make(map[int]*placement),
-		nodeSuccess: make(map[string]int),
+		p:               p,
+		maxReqCPUMillis: p.Trace.MaxRequestCpuMillis(),
+		nodes:           make(map[string]*nodeState, p.Nodes),
+		replicas:        make(map[string]map[string]bool),
+		placements:      make(map[int]*placement),
+		nodeSuccess:     make(map[string]int),
 	}
 	e.injectNodes()
 	defer e.cleanup()
@@ -318,6 +324,10 @@ func (e *engine) runEvents(ctx context.Context) {
 	for i := range e.p.Trace.Requests {
 		heap.Push(&e.events, event{timeMs: e.p.Trace.Requests[i].ArrivalMs, kind: evCreate, reqIdx: i})
 	}
+	// Install the empty-cluster snapshot at t=0 so the fully idle prefix
+	// [0, firstArrival) is credited in the time-weighted averages instead of
+	// being silently dropped; a no-op when the first arrival is at t=0.
+	e.sampler.Advance(0, e.snapshot())
 	for e.events.Len() > 0 {
 		ev := heap.Pop(&e.events).(event)
 		switch ev.kind {
@@ -473,7 +483,7 @@ func (e *engine) snapshot() Snapshot {
 		LoadCVMem:          CoefficientOfVariation(memRates),
 		JainCPU:            JainIndex(cpuRates),
 		JainMem:            JainIndex(memRates),
-		FragmentationRatio: FragmentationRatio(freeCPU, float64(e.p.Trace.MaxRequestCpuMillis())),
+		FragmentationRatio: FragmentationRatio(freeCPU, float64(e.maxReqCPUMillis)),
 		ActiveNodes:        active,
 		EmptyNodes:         float64(n) - active,
 	}

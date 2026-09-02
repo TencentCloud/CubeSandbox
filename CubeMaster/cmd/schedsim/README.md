@@ -32,7 +32,17 @@ go build -o /tmp/schedsim ./cmd/schedsim
 ## 与 cube-bench 的衔接
 
 trace 文件是跨工具契约（字段名双方冻结，见
-`examples/cube-bench/sequence.go` 与 `pkg/scheduler/sim/trace.go`）：
+`examples/cube-bench/sequence.go` 与 `pkg/scheduler/sim/trace.go`）。
+注意：生产者侧（cube-bench `--dump-trace`）随配套 PR
+[TencentCloud/CubeSandbox#1623](https://github.com/TencentCloud/CubeSandbox/pull/1623)
+落地；在它合并之前，可先用本目录的 `example.trace.json`（6 个带规格标注的
+请求）做独立冒烟：
+
+```bash
+cd CubeMaster
+go run ./cmd/schedsim --trace cmd/schedsim/example.trace.json \
+  --config cmd/schedsim/example.sim.yaml --nodes 4 --template-preload 1.0
+```
 
 ```bash
 # 生成 trace（cube-bench 是独立 module；--dry-run 离线生成，不碰真机）。
@@ -51,7 +61,9 @@ go run ./cmd/schedsim --trace /tmp/storm.trace.json \
 ```
 
 `cpu_millis`/`mem_mib` 为 0 的请求会被拒绝加载并提示 trace 缺少规格标注。
-多轮结果取各轮均值落在 `summary`，逐轮明细在 `rounds[]`。
+多轮结果取各轮均值落在 `summary`，逐轮明细在 `rounds[]`——注意分位指标
+（`sched_latency_p50/p95/p99_ms`）也是**逐轮分位的均值**，不是全样本合并后的
+真实分位；要看分布形状请读 `rounds[]`。
 
 ## 设计
 
@@ -76,6 +88,20 @@ go run ./cmd/schedsim --trace /tmp/storm.trace.json \
 `CpuTotal`/`MemMBTotal`（物理总量=配额）、`MetaDataUpdateAt/MetricUpdate/
 MetricLocalUpdateAt=now`。用量侧（`QuotaCpuUsage/QuotaMemUsage/MvmNum`）由
 仿真账本维护并实时镜像进 localcache。
+
+### 真实用量门禁不生效（口径与局限）
+
+仿真只镜像**配额口径**的用量（`QuotaCpuUsage/QuotaMemUsage/MvmNum`），从不更新
+真实用量字段（`MemUsage`/`CpuUtil`）与实时创建计数（`RealTimeCreateNum`/
+`LocalCreateNum`），因此三条真实集群门禁在仿真里恒不触发：
+
+- mem filter 的物理内存检查（`MemMBTotal - MemUsage > req + reserved`）恒过——
+  配合示例配置（物理=配额、`mem_ratio: 2.0`），单节点可被分配到约 2× 物理内存；
+- cpu filter 的 `CpuUtil >= NodeMaxCpuUtil` 守卫恒不触发；
+- `realtime_create_num` filter 恒不拒绝。
+
+结论：`mem_alloc_rate`/`load_cv_mem` 等绝对值可能超出真实集群可达范围，
+仿真结果用于**同配置族的相对 A/B 对比**，不要直接对标生产的绝对容量上限。
 
 ### metric 新鲜度（坑 1）
 

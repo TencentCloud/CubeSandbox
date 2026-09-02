@@ -1,0 +1,18 @@
+{
+  "workload": "example",
+  "seed": 42,
+  "generated_at": "2026-09-02T00:00:00Z",
+  "params": {"rate_per_sec": 2, "lifetime_min_s": 30, "lifetime_max_s": 90, "total": 6},
+  "templates": [
+    {"template_id": "tpl-a", "weight": 3, "cpu_millis": 1000, "mem_mib": 2048},
+    {"template_id": "tpl-b", "weight": 1, "cpu_millis": 2000, "mem_mib": 4096}
+  ],
+  "requests": [
+    {"seq": 0, "arrival_ms": 0, "template_id": "tpl-a", "cpu_millis": 1000, "mem_mib": 2048, "lifetime_ms": 45000},
+    {"seq": 1, "arrival_ms": 500, "template_id": "tpl-a", "cpu_millis": 1000, "mem_mib": 2048, "lifetime_ms": 60000},
+    {"seq": 2, "arrival_ms": 1000, "template_id": "tpl-b", "cpu_millis": 2000, "mem_mib": 4096, "lifetime_ms": 30000},
+    {"seq": 3, "arrival_ms": 1500, "template_id": "tpl-a", "cpu_millis": 1000, "mem_mib": 2048, "lifetime_ms": 90000},
+    {"seq": 4, "arrival_ms": 2000, "template_id": "tpl-b", "cpu_millis": 2000, "mem_mib": 4096, "lifetime_ms": 45000},
+    {"seq": 5, "arrival_ms": 2500, "template_id": "tpl-a", "cpu_millis": 1000, "mem_mib": 2048, "lifetime_ms": 60000}
+  ]
+}
