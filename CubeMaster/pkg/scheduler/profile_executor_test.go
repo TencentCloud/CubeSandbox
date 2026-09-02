@@ -178,18 +178,20 @@ func TestRunProfileScoresUsesDefaultAndStableOrder(t *testing.T) {
 	}
 }
 
-func TestRunProfileScoresIncompleteOutputUsesDefault(t *testing.T) {
+func TestRunProfileScoresInvalidOutputFailsDespiteDefaultScore(t *testing.T) {
+	// Partial coverage is a validation-class error: the default-score policy
+	// only absorbs transport/invocation failures, so malformed output fails
+	// closed instead of being masked behind a constant default score.
 	selection := executorContext()
 	err := runProfileScores(selection, []profile.ScorePlugin{{
 		Name: "partial", Selector: partialScore{}, Weight: 1, Failure: profile.ScoreDefaultScore,
 		DefaultScore: 25, ForceEnabled: true,
 	}})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("partial coverage must fail closed even under the default-score policy")
 	}
-	got := selection.LeastScoreNodes(-1)
-	if len(got) != 2 || got[0].Score != 25 || got[1].Score != 25 {
-		t.Fatalf("scores = %+v", got)
+	if isNoCandidateError(err) {
+		t.Fatal("a validation failure must not be classified as an empty candidate set")
 	}
 }
 

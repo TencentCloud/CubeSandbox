@@ -5,11 +5,27 @@
 package scheduler
 
 import (
+	"context"
+	"errors"
 	"testing"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 	sfilter "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/filter"
 )
+
+// staticNodesFilter serves a fixed candidate set, standing in for the
+// pre/backoff selectors in Select-level tests.
+type staticNodesFilter struct {
+	id    string
+	nodes node.NodeList
+	err   error
+}
+
+func (f staticNodesFilter) ID() string { return f.id }
+func (f staticNodesFilter) Select(*selctx.SelectorCtx) (node.NodeList, error) {
+	return f.nodes, f.err
+}
 
 func TestShouldSkipBackoffForTemplate(t *testing.T) {
 	origFilters := scheduler.filter
@@ -85,5 +101,35 @@ func TestSelectFailsClosedBeforeInit(t *testing.T) {
 
 	if _, err := Select(selctx.New("random")); err == nil {
 		t.Fatal("Select before InitScheduler must fail closed")
+	}
+}
+
+func TestSelectLegacyFilterErrorFailsInsteadOfBackoff(t *testing.T) {
+	// On the legacy default pipeline a genuine filter error (a plugin or
+	// validation failure, as opposed to an empty candidate set) must fail the
+	// request: BackoffSelect must not silently rescue a defective plugin
+	// while the relaxed pool is non-empty.
+	origFilters, origScores := scheduler.filter, scheduler.score
+	origPre, origBackoff := scheduler.preSelector, scheduler.backoffSelector
+	oldProfiles := scheduler.profiles.Swap(nil)
+	defer func() {
+		scheduler.filter, scheduler.score = origFilters, origScores
+		scheduler.preSelector, scheduler.backoffSelector = origPre, origBackoff
+		scheduler.profiles.Store(oldProfiles)
+	}()
+	candidates := node.NodeList{{InsID: "n1"}, {InsID: "n2"}}
+	scheduler.filter = []sfilter.Selector{executorFilter{id: "broken", err: errors.New("boom")}}
+	scheduler.score = nil
+	scheduler.preSelector = staticNodesFilter{id: "pre", nodes: candidates}
+	scheduler.backoffSelector = staticNodesFilter{id: "backoff", nodes: candidates}
+
+	ctx := selctx.New("random")
+	ctx.Ctx = context.Background()
+	selected, err := Select(ctx)
+	if err == nil || selected != nil {
+		t.Fatalf("Select = %v, %v; want the filter error, not a backoff rescue", selected, err)
+	}
+	if isNoCandidateError(err) {
+		t.Fatal("a plugin failure must not be classified as an empty candidate set")
 	}
 }

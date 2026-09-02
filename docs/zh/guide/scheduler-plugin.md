@@ -71,7 +71,7 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 
 - Mandatory Guard 始终 fail-closed。
 - Filter 默认 `fail-closed`；`fail-open` 必须显式配置，并会输出风险告警。
-- Score 默认 `default-score`，单个插件失败后用其 `default_score`（本身默认为 0）继续；也可配置 `fail-closed`。这与 Filter 刻意方向相反——健康 fail-closed、质量 fail-open——而且除一行告警日志外是静默的：所有候选拿到相同的常数分，失败插件的排序贡献消失；若它是唯一的 Score，排序退化为候选顺序。对排序质量敏感的部署应显式配置 `failure.score: fail-closed`。
+- Score 默认 `default-score`，单个插件传输/调用失败后用其 `default_score`（本身默认为 0）继续；也可配置 `fail-closed`。这与 Filter 刻意方向相反——健康 fail-closed、质量 fail-open——而且除一行告警日志外是静默的：所有候选拿到相同的常数分，失败插件的排序贡献消失；若它是唯一的 Score，排序退化为候选顺序。对排序质量敏感的部署应显式配置 `failure.score: fail-closed`。畸形输出绝不会被替换：校验类失败（nil、空 id、重复或非候选节点、NaN/Inf 或 [0,100] 外分值、只覆盖部分候选）意味着插件本身有缺陷，在任何 Score 策略下都 fail-closed，`default-score` 也不例外。
 - 返回空结果的内置 `go` Score（例如请求没有节点偏好亲和性时的 `affinity_score`，或资源权重不适用时的 `image_score`）视为「不适用」并被跳过——不报错，也不替换为 `default_score`。只覆盖部分候选节点的结果仍视为失败。
 - `no_candidate` 支持 `fail` 和 `backoff`。Mandatory Guard 永不触发 backoff：Guard 失败（包括清空候选集合）始终快速失败。只有可选 Filter 或最终选点无候选时才进入 backoff；backoff 尝试会在放宽后的候选集合上重新执行 Guards、Filter 和 Score，其中重跑 Guards 是 backoff 尝试自身的安全保障。这也意味着集群饱和时的行为与 legacy 路径不同：legacy 管线在饱和时（例如 `realtime_create_num` 导致无可调度节点）会进入 backoff 选择器重试，而自定义 Profile 会立即让请求失败——`no_candidate: backoff` 不会软化 Guard 的结果。
 - `no_candidate` 未配置时默认为 `fail`。legacy `default` 管线始终走 backoff，因此启用第一个自定义 Profile 会把「Filter 后无候选」从 backoff 重试变成硬 `SelectNodesNoRes` 失败——没有 backoff 尝试，也不会回退到 default 管线。接入 Profile 期间建议显式配置 `no_candidate: backoff`。

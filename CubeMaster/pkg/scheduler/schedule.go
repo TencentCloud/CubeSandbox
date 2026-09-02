@@ -76,9 +76,13 @@ func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
 	}
 	if err := runProfileFilters(selCtx, pipeline.Filters); err != nil {
 		legacy := len(pipeline.Guards) == 0
+		// Only an empty candidate set may fall through to backoff, on every
+		// pipeline — legacy included. A plugin/validation error fails the
+		// request; otherwise BackoffSelect would silently rescue a defective
+		// plugin whenever the relaxed pool is non-empty.
 		if pipeline.NoCandidate != profile.NoCandidateBackoff ||
 			(legacy && pipelineHasTemplateGuard(selCtx, pipeline)) ||
-			(!legacy && !isNoCandidateError(err)) {
+			!isNoCandidateError(err) {
 			return nil, err
 		}
 
@@ -511,6 +515,9 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 		if result.skip {
 			continue
 		}
+		// validationErr marks errors raised by output validation below, as
+		// opposed to a transport/invocation failure from calling the plugin.
+		validationErr := false
 		if result.err == nil {
 			seen := make(map[string]struct{}, len(result.nodes))
 			for _, scored := range result.nodes {
@@ -547,12 +554,20 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 					result.err = fmt.Errorf("score plugin %q returned %d scores for %d candidates", binding.Name, len(seen), len(candidates))
 				}
 			}
+			validationErr = result.err != nil
 		}
 		if result.err != nil {
 			switch binding.Failure {
 			case profile.ScoreFailClosed:
 				return ret.Err(errorcode.ErrorCode_MasterInternalError, result.err.Error())
 			case profile.ScoreDefaultScore:
+				if validationErr {
+					// default-score absorbs transport/invocation failures
+					// only. Malformed output means the plugin is defective:
+					// fail closed rather than mask the defect behind a
+					// constant score for every candidate.
+					return ret.Err(errorcode.ErrorCode_MasterInternalError, result.err.Error())
+				}
 				log.G(selCtx.Ctx).Warnf("scheduler score %q failed; using default score %.2f: %v", binding.Name, binding.DefaultScore, result.err)
 				result.nodes = make(node.NodeScoreList, 0, len(selCtx.Nodes()))
 				for _, candidate := range selCtx.Nodes() {
