@@ -178,6 +178,11 @@ func (r *Registry) RegisterScoreProvider(kind string, factory ScoreFactory) erro
 	return nil
 }
 
+// BuildFilter constructs the configured filter plugin. The caller owns the
+// result's lifecycle: a plugin holding resources (a gRPC connection) also
+// implements io.Closer, and the caller must type-assert and Close it (the
+// profile runner's Set does exactly this) — the registry retains no
+// references to what it builds.
 func (r *Registry) BuildFilter(ctx context.Context, conf config.SchedulerProfilePluginConf) (selector filter.Selector, err error) {
 	if r == nil {
 		return nil, errors.New("scheduler plugin registry is nil")
@@ -224,6 +229,8 @@ func (r *Registry) BuildFilter(ctx context.Context, conf config.SchedulerProfile
 	return selector, nil
 }
 
+// BuildScore constructs the configured score plugin. Lifecycle ownership is
+// the caller's, exactly as documented on BuildFilter.
 func (r *Registry) BuildScore(ctx context.Context, conf config.SchedulerProfilePluginConf) (selector score.Selector, err error) {
 	if r == nil {
 		return nil, errors.New("scheduler plugin registry is nil")

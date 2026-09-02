@@ -7,7 +7,9 @@ package grpcplugin
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -159,6 +161,38 @@ func TestExternalScoreRejectsOutOfRangeValues(t *testing.T) {
 	server.mu.Unlock()
 	if _, err := selector.Select(grpcSelection()); err == nil {
 		t.Fatal("out-of-range external score must be rejected")
+	}
+}
+
+func TestNewClientDialsUnixSocket(t *testing.T) {
+	// Exercise the production dial path (newClient -> native unix scheme),
+	// not just the bufconn-injected newClientFromConn used by the other tests.
+	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "plugin.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	schedulerplugin.RegisterSchedulerPluginServer(server, &fakeSchedulerPlugin{})
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+
+	selector, err := NewFilter(context.Background(), config.SchedulerProfilePluginConf{
+		Name: "fake", SocketPath: listener.Addr().String(), Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if closer, ok := selector.(io.Closer); ok {
+			_ = closer.Close()
+		}
+	})
+	kept, err := selector.Select(grpcSelection())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kept) != 1 {
+		t.Fatalf("kept = %v", kept)
 	}
 }
 

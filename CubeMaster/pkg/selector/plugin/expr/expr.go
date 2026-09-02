@@ -92,6 +92,11 @@ func (p *filterPlugin) Select(selection *selctx.SelectorCtx) (node.NodeList, err
 	candidates := selection.Nodes()
 	kept := make(node.NodeList, 0, len(candidates))
 	for _, candidate := range candidates {
+		// Fail closed on malformed candidates, matching the gRPC plugin's
+		// candidateIndex contract.
+		if candidate == nil || candidate.ID() == "" {
+			return nil, fmt.Errorf("expression filter %q: scheduler candidate has an empty id", p.name)
+		}
 		out, _, err := p.program.ContextEval(selection.Ctx, activation(selection, candidate))
 		if err != nil {
 			return nil, fmt.Errorf("expression filter %q on node %q: %w", p.name, candidate.ID(), err)
@@ -134,6 +139,11 @@ func (p *scorePlugin) Select(selection *selctx.SelectorCtx) (node.NodeScoreList,
 	candidates := selection.Nodes()
 	result := make(node.NodeScoreList, 0, len(candidates))
 	for _, candidate := range candidates {
+		// Fail closed on malformed candidates, matching the gRPC plugin's
+		// candidateIndex contract.
+		if candidate == nil || candidate.ID() == "" {
+			return nil, fmt.Errorf("expression score %q: scheduler candidate has an empty id", p.name)
+		}
 		out, _, err := p.program.ContextEval(selection.Ctx, activation(selection, candidate))
 		if err != nil {
 			return nil, fmt.Errorf("expression score %q on node %q: %w", p.name, candidate.ID(), err)
@@ -202,7 +212,10 @@ func activation(selection *selctx.SelectorCtx, candidate *node.Node) map[string]
 		SystemDiskUsage: candidate.SysDiskUsagePer, Labels: cloneStringMap(candidate.Labels()),
 		LocalTemplates: localTemplates, TemplateLocal: templateLocal,
 	}
-	if facts, ok := selection.SnapshotFacts(candidate.ID()); ok {
+	if facts, ok := selection.SnapshotFacts(candidate.ID()); ok && facts.SnapshotStorageKnown {
+		// Storage writability is exposed only when the runner actually
+		// evaluated it; unknown is indistinguishable from absent and stays
+		// false (fail closed).
 		nodeValues.SnapshotStorageWritable = facts.SnapshotStorageAllowed
 	}
 	return map[string]any{"node": nodeValues, "request": requestValues}

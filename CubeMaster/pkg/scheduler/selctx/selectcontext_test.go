@@ -116,3 +116,28 @@ func TestFreezeSnapshotDefersUntilCandidatesAttached(t *testing.T) {
 		t.Fatalf("SnapshotNodes().Len() = %d, want 1", slctx.SnapshotNodes().Len())
 	}
 }
+
+func TestRefreezeSnapshotReArmsAfterPoolReplacement(t *testing.T) {
+	slctx := New("")
+	slctx.SetNodes(node.NodeList{{InsID: "n1"}})
+	slctx.FreezeSnapshot()
+	first := slctx.SnapshotVersion
+
+	// The backoff path replaces the candidate pool wholesale; an explicit
+	// re-arm lets the next freeze publish the new pool under a fresh version.
+	slctx.SetNodes(node.NodeList{{InsID: "n2"}, {InsID: "n3"}})
+	slctx.RefreezeSnapshot()
+	slctx.FreezeSnapshot()
+	if slctx.SnapshotVersion == first {
+		t.Fatal("SnapshotVersion unchanged after refreeze")
+	}
+	if slctx.SnapshotNodes().Len() != 2 {
+		t.Fatalf("SnapshotNodes().Len() = %d after refreeze, want 2", slctx.SnapshotNodes().Len())
+	}
+
+	// Without a re-arm the freeze stays idempotent.
+	slctx.FreezeSnapshot()
+	if version := slctx.SnapshotVersion; version == "" {
+		t.Fatal("SnapshotVersion must stay set")
+	}
+}

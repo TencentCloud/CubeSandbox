@@ -65,6 +65,10 @@ type ImageSpec struct {
 	ImageID string
 }
 
+// SnapshotNodeFacts carries the runner-computed per-node facts plugins see.
+// The Known flags distinguish "evaluated to false" from "not evaluated":
+// consumers must treat a fact as absent (fail closed) unless its Known flag
+// is set.
 type SnapshotNodeFacts struct {
 	TemplateLocal          bool
 	TemplateLocalKnown     bool
@@ -138,6 +142,20 @@ func (s *SelectorCtx) FreezeSnapshot() {
 		s.snapshotFacts = facts
 	}
 	s.SnapshotVersion = strconv.FormatUint(snapshotSequence.Add(1), 10)
+}
+
+// RefreezeSnapshot re-arms FreezeSnapshot after the candidate pool has been
+// REPLACED wholesale — the scheduling backoff path expands the pool, and
+// external plugins must then sync the new pool under a fresh SnapshotVersion.
+// Never call it after filters merely NARROWED the pool: that would silently
+// shrink the stable snapshot external plugins already synced. Callers must
+// also refresh the snapshot facts (SetSnapshotFacts) for the new pool before
+// the re-armed FreezeSnapshot runs.
+func (s *SelectorCtx) RefreezeSnapshot() {
+	if s == nil {
+		return
+	}
+	s.snapshotFrozen = false
 }
 
 func New(name string) *SelectorCtx {

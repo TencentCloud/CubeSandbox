@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net"
 	"slices"
 	"strings"
 	"sync"
@@ -117,11 +116,9 @@ func newClient(ctx context.Context, conf config.SchedulerProfilePluginConf, capa
 	dialTarget := target
 	options := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 	if strings.HasPrefix(target, "/") || strings.HasPrefix(target, "unix://") {
-		path := strings.TrimPrefix(target, "unix://")
-		dialTarget = "passthrough:///" + path
-		options = append(options, grpc.WithContextDialer(func(dialCtx context.Context, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(dialCtx, "unix", path)
-		}))
+		// Native unix scheme: "unix://" + an absolute path yields
+		// "unix:///abs/path", which grpc-go resolves without a custom dialer.
+		dialTarget = "unix://" + strings.TrimPrefix(target, "unix://")
 	}
 	connection, err := grpc.NewClient(dialTarget, options...)
 	if err != nil {
@@ -280,7 +277,12 @@ func snapshotNode(selection *selctx.SelectorCtx, candidate *node.Node) *schedule
 	}
 	facts, known := selection.SnapshotFacts(candidate.ID())
 	if known {
-		result.SnapshotStorageWritable = facts.SnapshotStorageAllowed
+		if facts.SnapshotStorageKnown {
+			// Exposed only when the runner evaluated storage writability;
+			// unknown is indistinguishable from absent and stays false
+			// (fail closed).
+			result.SnapshotStorageWritable = facts.SnapshotStorageAllowed
+		}
 		if facts.TemplateLocalKnown {
 			result.TemplateLocal = facts.TemplateLocal
 		}
