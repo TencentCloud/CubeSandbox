@@ -110,8 +110,10 @@ type Params struct {
 	// Seed drives template preload placement for this round. Round i of a
 	// multi-round run uses base seed + i.
 	Seed int64
-	// RoundID uniquifies injected node IDs so rounds never collide inside the
-	// process-wide localcache.
+	// RoundID uniquifies injected node IDs inside the process-wide
+	// localcache. Sequential reuse is safe: cleanup drains the round's
+	// cached usage, so re-injection starts from zeroed counters, not from
+	// whatever a previous round left behind.
 	RoundID int
 }
 
@@ -159,7 +161,7 @@ var SummaryKeys = []string{
 	"template_hit_rate",
 	"active_nodes_avg",
 	"empty_nodes_avg",
-	"metric_push_errors",
+	"metric_state_diverged",
 }
 
 // RoundResult carries one round's seed and its flat summary metrics.
@@ -253,23 +255,37 @@ type engine struct {
 	sampler   TimeWeightedAvg
 	latencyMs []float64
 
-	successes          int
-	failures           int
-	templatedSuccesses int
-	templateHits       int
-	nodeSuccess        map[string]int
-	metricPushErrors   int
+	successes           int
+	failures            int
+	templatedSuccesses  int
+	templateHits        int
+	nodeSuccess         map[string]int
+	metricStateDiverged int
 }
+
+// roundMu serializes RunRound: rounds share the process-wide localcache, so a
+// concurrent round would schedule against state another round is mutating
+// (and that round's cleanup would zero and withdraw nodes mid-flight). The
+// guard fails fast instead of queueing a whole round behind the lock.
+var roundMu sync.Mutex
 
 // RunRound executes one full simulation round: inject nodes, preload template
 // replicas, replay the trace on a virtual clock, then withdraw the round's
 // nodes/replicas from localcache. The real scheduler core decides placements;
 // the wall-clock cost of every Select call is recorded as scheduling latency.
 //
-// RoundID uniquifies the round's node IDs inside this process; it must also
-// be unique across concurrently running schedsim processes, because all of
-// them share the same localcache-backed node namespace on a host.
+// RoundID uniquifies the round's node IDs inside this process. Nothing is
+// shared across schedsim processes (no localcache.Init, no DB/Redis), so the
+// uniqueness scope is per-process only; within a process, sequential reuse of
+// a RoundID is safe because cleanup drains the round's cached usage before
+// withdrawing its nodes. RunRound is not safe for concurrent in-process
+// calls: it fails fast while another round is in progress.
 func RunRound(ctx context.Context, p Params) (*RoundResult, error) {
+	if !roundMu.TryLock() {
+		return nil, errors.New("sim: RunRound is not safe for concurrent calls; a round is already in progress")
+	}
+	defer roundMu.Unlock()
+
 	if err := p.validate(); err != nil {
 		return nil, err
 	}
@@ -285,6 +301,9 @@ func RunRound(ctx context.Context, p Params) (*RoundResult, error) {
 	defer e.cleanup()
 	e.preloadTemplates()
 	e.runEvents(ctx)
+	// Audit before the deferred cleanup runs: afterwards the cache mirror is
+	// zeroed and the comparison would be trivially clean.
+	e.auditMetricState()
 	return e.result(), nil
 }
 
@@ -398,15 +417,29 @@ func (e *engine) injectNodes() {
 	}
 }
 
-// cleanup withdraws the round's nodes (marked unhealthy, which drops them from
-// the schedulable enumeration) and deregisters exactly the template replicas
-// this round registered, so rounds cannot leak state into each other even
-// though localcache exposes no bulk-clear API.
+// cleanup withdraws the round's nodes and deregisters exactly the template
+// replicas this round registered, so rounds cannot leak state into each other
+// even though localcache exposes no bulk-clear API. Withdrawal is two steps:
+// zero the usage counters, then mark the node unhealthy (which drops it from
+// the schedulable enumeration). The zeroing is what makes an in-process
+// RoundID reuse safe: UpsertNode's merge path (updateNodeFromMetaData)
+// preserves QuotaCpuUsage/QuotaMemUsage/MvmNum/MetricUpdate across
+// re-injection, so without the reset a reused round would schedule against
+// whatever usage an interrupted previous round left cached.
 func (e *engine) cleanup() {
 	for _, pair := range e.registered {
 		localcache.DeregisterTemplateReplica(pair[0], pair[1])
 	}
 	for _, ns := range e.nodeOrder {
+		// UpdateNodeMetricInProcess with a zeroed allocated group is the
+		// existing exported way to reset the preserved counters.
+		if err := localcache.UpdateNodeMetricInProcess(&localcache.NodeMetric{
+			NodeID:       ns.id,
+			MetricTime:   time.Now(),
+			HasAllocated: true,
+		}); err != nil {
+			e.metricStateDiverged++
+		}
 		localcache.UpsertNode(&node.Node{
 			InsID:            ns.id,
 			IP:               "",
@@ -591,7 +624,28 @@ func (e *engine) pushMetric(ns *nodeState) {
 		MvmNum:        ns.running,
 	})
 	if err != nil {
-		e.metricPushErrors++
+		e.metricStateDiverged++
+	}
+}
+
+// auditMetricState compares each injected node's localcache-cached quota
+// usage against the simulator's final book and counts diverged nodes into
+// metricStateDiverged. It runs at round end, before cleanup zeroes and
+// withdraws the nodes: a lost push or an external mutation would otherwise
+// leave the scheduler admitting on state the sim no longer believes, silently
+// invalidating the round's metrics.
+func (e *engine) auditMetricState() {
+	for _, ns := range e.nodeOrder {
+		n, ok := localcache.GetNode(ns.id)
+		if !ok || n == nil {
+			e.metricStateDiverged++
+			continue
+		}
+		if n.QuotaCpuUsage != ns.usedCPUMilli ||
+			n.QuotaMemUsage != ns.usedMemMiB ||
+			n.MvmNum != ns.running {
+			e.metricStateDiverged++
+		}
 	}
 }
 
@@ -690,7 +744,7 @@ func (e *engine) result() *RoundResult {
 		// Surfaced (not just counted) so a desync between the sim's book and
 		// the localcache state the scheduler admits on is visible in the
 		// report instead of silently invalidating the round.
-		"metric_push_errors": float64(e.metricPushErrors),
+		"metric_state_diverged": float64(e.metricStateDiverged),
 	}
 	return &RoundResult{Seed: e.p.Seed, Summary: summary}
 }

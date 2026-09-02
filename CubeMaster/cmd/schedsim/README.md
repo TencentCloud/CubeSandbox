@@ -185,14 +185,18 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
 | `herding_top1_share` | 被选中次数最多的节点占总成功放置的比例（羊群度） |
 | `template_hit_rate` | 成功放置中选中节点持有该模板本地副本的比例（分母为带模板的成功请求）。放置成功后仿真会把该模板注册到选中节点（预热拉取），因此 locality filter 关闭时该指标跟踪动态局部性（首次未命中、后续命中）；filter 开启且 `AllowNonLocalTemplate=false` 时未预热节点本就不收该模板请求，指标恒为 1，主要用于检测配置漂移 |
 | `active_nodes_avg` / `empty_nodes_avg` | 有/无运行中沙箱的节点数，时间平均 |
-| `metric_push_errors` | 仿真账本向 localcache 回写用量失败的次数；非 0 意味着本轮账本与调度器所见状态脱钩，该轮所有指标作废排查 |
+| `metric_state_diverged` | 仿真账本与 localcache（调度器实际准入所依据的状态）脱钩的观测次数：用量回写失败数，加上轮末审计逐节点比对缓存用量（`QuotaCpuUsage/QuotaMemUsage/MvmNum`）与仿真账本发现的漂移节点数；非 0 意味着本轮调度器在不一致状态上做了准入，该轮所有指标作废排查 |
 
 指标计算均为纯函数（`pkg/scheduler/sim/metrics.go`），单测手算对拍。
 
-已知限制：每轮结束时节点被标记为不健康但**不会从进程级 localcache 中移除**
-（刻意不调用 `localcache.Init`，没有同步/淘汰回路）；节点 ID 带 RoundID 前缀，
-轮间不会互相污染，但长时间在同一进程内反复跑仿真会累积陈旧节点条目——CLI
-的小轮数场景无影响。唯一不中性的是 `sched_latency_*`：节点枚举（fallback 全扫
+已知限制：每轮结束时 cleanup 先把节点的配额用量计数清零（经
+`UpdateNodeMetricInProcess`），再标记为不健康——`UpsertNode` 的合并路径在重复注入时
+**保留** `QuotaCpuUsage/QuotaMemUsage/MvmNum/MetricUpdate`，显式清零让同一进程内顺序
+复用同一 RoundID 从归零状态重新注入，不会继承（例如被中断轮次）残留的用量。节点条目
+本身**不会从进程级 localcache 中移除**（刻意不调用 `localcache.Init`，没有同步/淘汰
+回路），长时间在同一进程内反复跑仿真会累积陈旧节点条目——CLI 的小轮数场景无影响。
+`RunRound` 不支持进程内并发：多轮共享进程级 localcache，一轮的 cleanup 会改写另一轮
+正在调度所依据的状态，因此并发调用直接报错而非排队。唯一不中性的是 `sched_latency_*`：节点枚举（fallback 全扫
 路径）的开销随累积条目增长，**多轮 run 内靠后轮次的延迟分位会被轻微抬高**，
 跨配置对比请以相同 `--rounds`/`--nodes` 形状为前提，并按相同轮次下标对齐
 （config A 的 round i 对 config B 的 round i），不要拿 A 的首轮比 B 的末轮。

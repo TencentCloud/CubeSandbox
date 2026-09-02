@@ -12,10 +12,12 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	yaml "gopkg.in/yaml.v3"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 )
 
 // bootstrapped guards the one-time process bootstrap: config.Init and
@@ -121,7 +123,7 @@ func TestRunRoundSingleNodeConcentrates(t *testing.T) {
 	approx(t, "herding_top1_share", s["herding_top1_share"], 1, 1e-9)
 	approx(t, "active_nodes_avg", s["active_nodes_avg"], 1, 1e-9)
 	approx(t, "empty_nodes_avg", s["empty_nodes_avg"], 0, 1e-9)
-	approx(t, "metric_push_errors", s["metric_push_errors"], 0, 1e-9)
+	approx(t, "metric_state_diverged", s["metric_state_diverged"], 0, 1e-9)
 	approx(t, "fragmentation_ratio", s["fragmentation_ratio"], 0, 1e-9)
 	// Mem side: effective free mem (65536×2 − 40960 max used) never drops to
 	// the 2048MiB max shape either, so both resource ratios stay 0.
@@ -225,7 +227,7 @@ func TestRunRoundAllowNonLocalTemplate(t *testing.T) {
 	s := rr.Summary
 	approx(t, "success_rate", s["success_rate"], 1, 1e-9)
 	approx(t, "template_hit_rate", s["template_hit_rate"], 0.5, 1e-9)
-	approx(t, "metric_push_errors", s["metric_push_errors"], 0, 1e-9)
+	approx(t, "metric_state_diverged", s["metric_state_diverged"], 0, 1e-9)
 }
 
 // TestRunRoundSummaryCoversSummaryKeys pins the report contract: a round
@@ -493,4 +495,145 @@ func TestRunRoundZeroLifetime(t *testing.T) {
 	approx(t, "cpu_alloc_rate", s["cpu_alloc_rate"], 0, 1e-9)
 	approx(t, "mem_alloc_rate", s["mem_alloc_rate"], 0, 1e-9)
 	approx(t, "active_nodes_avg", s["active_nodes_avg"], 0, 1e-9)
+}
+
+// TestRunRoundSameRoundIDSequentialReuse: reusing a RoundID across sequential
+// rounds must not skew the later round — cleanup drains the round's cached
+// nodes (usage zeroed, marked unhealthy), so the second round re-injects onto
+// clean state and matches a control round run under a fresh RoundID on the
+// distribution-independent metrics (tie-break enumeration order can still
+// reshuffle per-node placement, so node-local metrics are excluded). The
+// 50000-milli shape fills each 192000-milli effective node to exactly 3
+// placements, so leftover usage from round one would reject requests in the
+// reuse round and show up here.
+func TestRunRoundSameRoundIDSequentialReuse(t *testing.T) {
+	bootstrapOnce(t)
+	params := func(roundID int) Params {
+		return Params{
+			Trace:           mkTrace(6, 1000, 60000, 50000, 2048, "tpl-reuse"),
+			Nodes:           2,
+			NodeCPUMillis:   64000,
+			NodeMemMiB:      65536,
+			InstanceType:    "sim",
+			TemplatePreload: 1.0,
+			Seed:            21,
+			RoundID:         roundID,
+		}
+	}
+	control, err := RunRound(context.Background(), params(10))
+	if err != nil {
+		t.Fatalf("control round: %v", err)
+	}
+	if _, err := RunRound(context.Background(), params(11)); err != nil {
+		t.Fatalf("first round: %v", err)
+	}
+	// The first round's cached nodes must be drained and withdrawn: this is
+	// the state a RoundID reuse re-injects onto.
+	for i := 0; i < 2; i++ {
+		n, ok := localcache.GetNode(fmt.Sprintf("schedsim-r11-n%05d", i))
+		if !ok || n == nil {
+			t.Fatalf("round-1 node %d missing from localcache after cleanup", i)
+		}
+		if n.Healthy || n.QuotaCpuUsage != 0 || n.QuotaMemUsage != 0 || n.MvmNum != 0 {
+			t.Fatalf("round-1 node %d not drained: healthy=%v cpu=%d mem=%d mvm=%d",
+				i, n.Healthy, n.QuotaCpuUsage, n.QuotaMemUsage, n.MvmNum)
+		}
+	}
+	second, err := RunRound(context.Background(), params(11))
+	if err != nil {
+		t.Fatalf("second round: %v", err)
+	}
+	approx(t, "success_rate", second.Summary["success_rate"], 1, 1e-9)
+	for _, k := range []string{"success_rate", "cpu_alloc_rate", "mem_alloc_rate"} {
+		approx(t, k, second.Summary[k], control.Summary[k], 1e-9)
+	}
+	approx(t, "metric_state_diverged", second.Summary["metric_state_diverged"], 0, 1e-9)
+}
+
+// TestCleanupDrainsCachedUsage: UpsertNode's merge path preserves the cached
+// usage counters on re-injection, so cleanup must explicitly zero them —
+// otherwise a round reusing the RoundID would schedule against whatever usage
+// an interrupted previous round left cached (simulated here by a push whose
+// round never drains).
+func TestCleanupDrainsCachedUsage(t *testing.T) {
+	bootstrapOnce(t)
+	e := &engine{
+		p:     Params{Nodes: 1, NodeCPUMillis: 64000, NodeMemMiB: 65536, InstanceType: "sim", RoundID: 12},
+		nodes: make(map[string]*nodeState, 1),
+	}
+	e.injectNodes()
+	ns := e.nodeOrder[0]
+	ns.usedCPUMilli, ns.usedMemMiB, ns.running = 12345, 678, 3
+	e.pushMetric(ns)
+	e.cleanup()
+	n, ok := localcache.GetNode(ns.id)
+	if !ok || n == nil {
+		t.Fatalf("node missing from localcache after cleanup")
+	}
+	if n.Healthy {
+		t.Fatalf("cleanup must mark the node unhealthy")
+	}
+	if n.QuotaCpuUsage != 0 || n.QuotaMemUsage != 0 || n.MvmNum != 0 {
+		t.Fatalf("cleanup left cached usage: cpu=%d mem=%d mvm=%d",
+			n.QuotaCpuUsage, n.QuotaMemUsage, n.MvmNum)
+	}
+}
+
+// TestAuditMetricStateCatchesDivergence: the round-end audit compares each
+// injected node's localcache-cached usage against the sim's book; a drift of
+// the scheduler-observed state (here: a direct localcache write bypassing the
+// engine, as an external writer or a lost push would cause) must be caught.
+func TestAuditMetricStateCatchesDivergence(t *testing.T) {
+	bootstrapOnce(t)
+	e := &engine{
+		p:     Params{Nodes: 1, NodeCPUMillis: 64000, NodeMemMiB: 65536, InstanceType: "sim", RoundID: 13},
+		nodes: make(map[string]*nodeState, 1),
+	}
+	e.injectNodes()
+	defer e.cleanup()
+	ns := e.nodeOrder[0]
+	ns.usedCPUMilli, ns.usedMemMiB, ns.running = 1000, 2048, 1
+	e.pushMetric(ns)
+	e.auditMetricState()
+	if e.metricStateDiverged != 0 {
+		t.Fatalf("in-sync node flagged as diverged: %d", e.metricStateDiverged)
+	}
+	if err := localcache.UpdateNodeMetricInProcess(&localcache.NodeMetric{
+		NodeID:        ns.id,
+		MetricTime:    time.Now(),
+		HasAllocated:  true,
+		MilliCPUUsage: 9999,
+		MemoryMBUsage: 2048,
+		MvmNum:        1,
+	}); err != nil {
+		t.Fatalf("drift write: %v", err)
+	}
+	e.auditMetricState()
+	if e.metricStateDiverged != 1 {
+		t.Fatalf("diverged node not caught: metricStateDiverged = %d, want 1", e.metricStateDiverged)
+	}
+}
+
+// TestRunRoundRejectsConcurrentCalls: rounds share the process-wide
+// localcache, so a second RunRound while one is in progress must fail fast
+// instead of scheduling against state the first round is mutating. Holding
+// roundMu directly stands in for the in-progress round, keeping the test
+// deterministic.
+func TestRunRoundRejectsConcurrentCalls(t *testing.T) {
+	bootstrapOnce(t)
+	roundMu.Lock()
+	defer roundMu.Unlock()
+	_, err := RunRound(context.Background(), Params{
+		Trace:           mkTrace(2, 1000, 60000, 1000, 2048, "tpl-conc"),
+		Nodes:           1,
+		NodeCPUMillis:   64000,
+		NodeMemMiB:      65536,
+		InstanceType:    "sim",
+		TemplatePreload: 1.0,
+		Seed:            1,
+		RoundID:         14,
+	})
+	if err == nil {
+		t.Fatalf("concurrent RunRound must fail fast while a round is in progress")
+	}
 }
