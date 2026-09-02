@@ -228,7 +228,10 @@ artifact, not a regression.
 
 `--dump-trace FILE` writes the pre-generated sequence before the run starts.
 Requests are sorted by `arrival_ms`; `cpu_millis`/`mem_mib` come from the
-`--templates` spec annotations (`0` when not annotated):
+`--templates` spec annotations (`0` when not annotated). One trace request is
+exactly one scheduler attempt: replaying consumers (e.g. schedsim) must not
+requeue or retry a rejected request — app-level retries are out of the
+contract's scope, and cube-bench itself issues one create per sequence entry:
 
 ```json
 {
