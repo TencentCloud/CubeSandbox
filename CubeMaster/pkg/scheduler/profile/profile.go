@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/filter"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/plugin"
@@ -59,6 +60,11 @@ type ScorePlugin struct {
 	Failure      ScoreFailurePolicy
 	DefaultScore float64
 	ForceEnabled bool
+	// AllowEmpty treats an empty score list as "not applicable" and skips the
+	// plugin instead of failing the completeness check. It is set for
+	// built-in go scorers (e.g. affinity_score, image_score) that legitimately
+	// no-op when a request is outside their scope, mirroring the legacy path.
+	AllowEmpty bool
 }
 
 type Pipeline struct {
@@ -176,7 +182,7 @@ func compileLegacy(ctx context.Context, scheduler *config.WrapperSchedulerConf, 
 			conf := config.SchedulerProfilePluginConf{Name: name, Type: plugin.TypeGo}
 			selector, err := registry.BuildFilter(ctx, conf)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("enable_filters entry %q is not a registered plugin; remove it from the config or register the plugin before starting CubeMaster: %w", name, err)
 			}
 			pipeline.Filters = append(pipeline.Filters, FilterPlugin{Name: name, Selector: selector, Failure: FilterFailClosed})
 			set.addCloser(selector)
@@ -187,10 +193,22 @@ func compileLegacy(ctx context.Context, scheduler *config.WrapperSchedulerConf, 
 			conf := config.SchedulerProfilePluginConf{Name: name, Type: plugin.TypeGo}
 			selector, err := registry.BuildScore(ctx, conf)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("enable_scorers entry %q is not a registered plugin; remove it from the config or register the plugin before starting CubeMaster: %w", name, err)
+			}
+			weight := selector.Weight()
+			if weight <= 0 || math.IsNaN(weight) || math.IsInf(weight, 0) {
+				// The pre-profile runScoreFilter tolerated a non-positive
+				// weight (the scorer contributed score*0 and added nothing
+				// to the normalizer). Skipping it here keeps such configs
+				// scheduling instead of failing every Select at runtime.
+				log.G(ctx).Warnf("enable_scorers entry %q has invalid weight %v; skipping the scorer", name, weight)
+				if closer, ok := selector.(io.Closer); ok {
+					_ = closer.Close()
+				}
+				continue
 			}
 			pipeline.Scores = append(pipeline.Scores, ScorePlugin{
-				Name: name, Selector: selector, Weight: selector.Weight(), Failure: ScoreSkip,
+				Name: name, Selector: selector, Weight: weight, Failure: ScoreSkip,
 			})
 			set.addCloser(selector)
 		}
@@ -283,6 +301,7 @@ func compileProfile(ctx context.Context, conf config.SchedulerProfileConf, regis
 		pipeline.Scores = append(pipeline.Scores, ScorePlugin{
 			Name: name, Selector: selector, Weight: weight, Failure: scoreFailure,
 			DefaultScore: pluginConf.DefaultScore, ForceEnabled: true,
+			AllowEmpty: profilePluginKind(pluginConf) == plugin.TypeGo,
 		})
 		set.addCloser(selector)
 	}
@@ -316,12 +335,16 @@ func failurePolicies(conf config.SchedulerFailureConf) (FilterFailurePolicy, Sco
 
 func enabled(value *bool) bool { return value == nil || *value }
 
-func profilePluginKey(conf config.SchedulerProfilePluginConf) string {
+func profilePluginKind(conf config.SchedulerProfilePluginConf) string {
 	kind := strings.ToLower(strings.TrimSpace(conf.Type))
 	if kind == "" || kind == "builtin" {
 		kind = plugin.TypeGo
 	}
-	return kind + "/" + strings.ToLower(strings.TrimSpace(conf.Name))
+	return kind
+}
+
+func profilePluginKey(conf config.SchedulerProfilePluginConf) string {
+	return profilePluginKind(conf) + "/" + strings.ToLower(strings.TrimSpace(conf.Name))
 }
 
 func compileRoute(conf config.SchedulerProfileRouteConf, allowedLabels map[string]struct{}, pipeline *Pipeline) (compiledRoute, error) {

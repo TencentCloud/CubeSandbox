@@ -65,6 +65,12 @@ func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
 	}
 	freezeSnapshot(selCtx)
 
+	// Mandatory guards are fail-closed by design: a guard failure (including
+	// an emptied candidate set) always fails fast and never consults the
+	// pipeline's no_candidate policy — backoff below only applies to the
+	// optional filters and final selection. The guard re-run inside
+	// backoffSelectWithPipeline is the backoff attempt's own safety net on
+	// the relaxed candidate set, not a retry of this pass.
 	if err := runProfileFilters(selCtx, pipeline.Guards); err != nil {
 		return nil, err
 	}
@@ -164,6 +170,9 @@ func selectNode(selCtx *selctx.SelectorCtx, pipeline *profile.Pipeline) *node.No
 	if pipeline.Selection == profile.SelectionHighest {
 		return selCtx.Nodes()[0]
 	}
+	// spread deliberately aliases random today: both pick uniformly from the
+	// top-N scored nodes. Note that a custom profile without an explicit
+	// top_n defaults to 1, i.e. deterministic best-node selection.
 	return selCtx.LeastRandomSelect(pipeline.TopN)
 }
 
@@ -171,6 +180,10 @@ func backoffSelectWithPipeline(selCtx *selctx.SelectorCtx, pipeline *profile.Pip
 	if err := runBackoffFilter(selCtx); err != nil {
 		return nil, err
 	}
+	// The backoff selector replaced the candidate set, so the snapshot is
+	// frozen a second time: per-node localcache lookups, a new SnapshotVersion
+	// and, for gRPC plugins, another sync. This double snapshot on the backoff
+	// path is intentional and a known per-request overhead.
 	freezeSnapshot(selCtx)
 	if err := runProfileFilters(selCtx, pipeline.Guards); err != nil {
 		return nil, err
@@ -493,7 +506,15 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 				}
 			}
 			if result.err == nil && binding.ForceEnabled && len(seen) != len(candidates) {
-				result.err = fmt.Errorf("score plugin %q returned %d scores for %d candidates", binding.Name, len(seen), len(candidates))
+				// An empty result from a built-in go scorer means "not
+				// applicable" (e.g. affinity_score when the request has no
+				// node-preference affinity); mirror the legacy path and skip
+				// the plugin instead of failing or substituting default
+				// scores. Partial coverage (0 < seen < candidates) stays an
+				// error.
+				if !(len(seen) == 0 && binding.AllowEmpty) {
+					result.err = fmt.Errorf("score plugin %q returned %d scores for %d candidates", binding.Name, len(seen), len(candidates))
+				}
 			}
 		}
 		if result.err != nil {

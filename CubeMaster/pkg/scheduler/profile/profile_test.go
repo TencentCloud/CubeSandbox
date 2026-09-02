@@ -10,9 +10,11 @@ import (
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/plugin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/plugin/expr"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/score"
 )
 
 type trackingCloser struct{ closed bool }
@@ -23,6 +25,20 @@ func (c *trackingCloser) Close() error {
 }
 
 var _ io.Closer = (*trackingCloser)(nil)
+
+type noopScore struct{}
+
+func (noopScore) ID() string      { return "score/go/noop_score" }
+func (noopScore) Weight() float64 { return 1 }
+func (noopScore) Disable() bool   { return false }
+func (noopScore) Select(*selctx.SelectorCtx) (node.NodeScoreList, error) {
+	return node.NodeScoreList{}, nil
+}
+
+type zeroWeightScore struct{ noopScore }
+
+func (zeroWeightScore) ID() string      { return "score/go/zero_weight_score" }
+func (zeroWeightScore) Weight() float64 { return 0 }
 
 func profileRegistry(t *testing.T) *plugin.Registry {
 	t.Helper()
@@ -92,6 +108,71 @@ func TestProfileValidationRejectsUncontrolledLabelsAndUnknownPlugins(t *testing.
 				t.Fatal("invalid profile must be rejected")
 			}
 		})
+	}
+}
+
+func TestProfileAllowsEmptyOnlyForBuiltinScores(t *testing.T) {
+	registry := profileRegistry(t)
+	if err := registry.RegisterScore(plugin.TypeGo, "noop_score", func(context.Context, config.SchedulerProfilePluginConf) (score.Selector, error) {
+		return noopScore{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Scheduler: &config.WrapperSchedulerConf{SchedulerConf: config.SchedulerConf{
+		Profiles: []config.SchedulerProfileConf{{
+			Name: "mixed", Default: true,
+			Scores: []config.SchedulerProfilePluginConf{
+				{Name: "noop_score"},
+				{Name: "idle", Type: "expr", Expr: "100.0 - node.cpu_util"},
+			},
+		}},
+	}}}
+	set, err := Compile(context.Background(), cfg, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = set.Close() })
+	pipeline := set.Match(&selctx.SelectorCtx{})
+	if len(pipeline.Scores) != 2 {
+		t.Fatalf("scores = %+v", pipeline.Scores)
+	}
+	if !pipeline.Scores[0].AllowEmpty {
+		t.Fatal("built-in go score must allow empty (not applicable) results")
+	}
+	if pipeline.Scores[1].AllowEmpty {
+		t.Fatal("expr score must not allow empty results")
+	}
+}
+
+func TestCompileLegacySkipsInvalidWeightScorer(t *testing.T) {
+	registry := profileRegistry(t)
+	if err := registry.RegisterScore(plugin.TypeGo, "zero_weight_score", func(context.Context, config.SchedulerProfilePluginConf) (score.Selector, error) {
+		return zeroWeightScore{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.RegisterScore(plugin.TypeGo, "noop_score", func(context.Context, config.SchedulerProfilePluginConf) (score.Selector, error) {
+		return noopScore{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Scheduler: &config.WrapperSchedulerConf{SchedulerConf: config.SchedulerConf{
+		Score: &config.SchedulerScoreConf{
+			EnableScorers:   []string{"zero_weight_score", "noop_score"},
+			ResourceWeights: map[string]float64{"cpu": 1},
+		},
+	}}}
+	set, err := Compile(context.Background(), cfg, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = set.Close() })
+	pipeline := set.Match(&selctx.SelectorCtx{})
+	if pipeline == nil || pipeline.Name != "default" {
+		t.Fatalf("pipeline = %+v", pipeline)
+	}
+	if len(pipeline.Scores) != 1 || pipeline.Scores[0].Name != "noop_score" {
+		t.Fatalf("zero-weight scorer must be skipped, scores = %+v", pipeline.Scores)
 	}
 }
 
