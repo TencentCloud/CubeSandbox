@@ -1225,6 +1225,15 @@ pub trait FileSystem {
     fn get_root_ino(&self) -> io::Result<u64> {
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
+
+    /// Whether the filesystem has `readdirplus` support enabled.
+    ///
+    /// When this returns `false`, the server should reject any `readdirplus` FUSE request
+    /// (returning an empty reply) to guard against guests that bypass the negotiated
+    /// capabilities and issue forged `readdirplus` requests directly.
+    fn readdirplus_enabled(&self) -> bool {
+        false
+    }
 }
 
 /// Allow filesystem's state to be serialized for migration.

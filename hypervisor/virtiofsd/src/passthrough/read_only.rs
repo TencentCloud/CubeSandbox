@@ -441,6 +441,10 @@ impl FileSystem for PassthroughFsRo {
 
         Ok(st.st.st_ino)
     }
+
+    fn readdirplus_enabled(&self) -> bool {
+        self.0.readdirplus_enabled()
+    }
 }
 
 impl SerializableFileSystem for PassthroughFsRo {

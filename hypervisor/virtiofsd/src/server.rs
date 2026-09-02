@@ -1387,6 +1387,14 @@ impl<F: FileSystem + Sync> Server<F> {
             );
         }
 
+        // If `readdirplus` is not enabled in the filesystem configuration, reject any
+        // `readdirplus` FUSE request by returning an empty reply.  This prevents a
+        // malicious guest from bypassing the negotiated capabilities and issuing forged
+        // `readdirplus` requests directly.
+        if !self.fs.readdirplus_enabled() {
+            return reply_readdir(0, in_header.unique, w);
+        }
+
         // Skip over enough bytes for the header.
         let unique = in_header.unique;
         let mut cursor = w.split_at(size_of::<OutHeader>()).unwrap();
