@@ -46,6 +46,8 @@ In-process implementations use the existing `filter.Selector` or `score.Selector
 
 CEL receives strongly typed, read-only, versioned protobuf `node` and `request` objects. Unknown fields, invalid type operations, and invalid return types are rejected when the Profile is activated. Common node fields include `cpu_util`, `cpu_load`, `quota_cpu`, `allocated_cpu`, `quota_mem_mb`, `allocated_mem_mb`, `creating`, `local_creating`, `mvm_num`, `labels`, `local_templates`, `template_local`, and `snapshot_storage_writable`. `reserved` is reserved for future use and currently always 0. Request fields include `instance_type`, `cpu_millis`, `memory_bytes`, `system_disk_size`, `template_id`, and `labels`.
 
+Node metric fields carry raw telemetry and can exceed their nominal range — an over-committed node may report `cpu_util` above 100. A score result outside [0,100] fails output validation, so an expression that subtracts from a bound (`100.0 - node.cpu_util`) should clamp explicitly with a conditional, e.g. `node.cpu_util > 100.0 ? 0.0 : 100.0 - node.cpu_util`.
+
 External plugin example:
 
 ```yaml

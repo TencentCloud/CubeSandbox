@@ -46,6 +46,8 @@ scheduler:
 
 CEL 提供基于版本化 protobuf 的强类型只读对象 `node` 与 `request`，未知字段、错误类型运算和不合法返回类型会在 Profile 激活时被拒绝。常用节点字段包括 `cpu_util`、`cpu_load`、`quota_cpu`、`allocated_cpu`、`quota_mem_mb`、`allocated_mem_mb`、`creating`、`local_creating`、`mvm_num`、`labels`、`local_templates`、`template_local` 和 `snapshot_storage_writable`；`reserved` 为预留字段，当前恒为 0。请求字段包括 `instance_type`、`cpu_millis`、`memory_bytes`、`system_disk_size`、`template_id` 和 `labels`。
 
+节点指标字段承载的是原始遥测值，可能超出名义值域——超卖节点的 `cpu_util` 可能超过 100。Score 结果落在 [0,100] 之外会被输出校验判为失败，因此形如 `100.0 - node.cpu_util` 这类从上限做减法的表达式应显式钳制，例如 `node.cpu_util > 100.0 ? 0.0 : 100.0 - node.cpu_util`。
+
 外部插件配置示例：
 
 ```yaml
