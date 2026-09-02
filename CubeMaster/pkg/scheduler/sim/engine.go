@@ -221,9 +221,11 @@ func (h *eventHeap) Pop() interface{} {
 type engine struct {
 	p Params
 
-	// maxReqCPUMillis is the largest cpu_millis over the whole trace. It is a
-	// constant of the trace, precomputed once so snapshot() stays O(nodes)
-	// instead of rescanning every request after every event.
+	// maxReqCPUMillis is the largest cpu_millis among the trace's FEASIBLE
+	// requests — those at least one empty node could admit (see
+	// maxFeasibleShape). It is a constant of the trace and node spec,
+	// precomputed once so snapshot() stays O(nodes) instead of rescanning
+	// every request after every event.
 	maxReqCPUMillis int64
 	// maxReqMemMiB is the same for mem_mib (memory can bind before CPU under
 	// asymmetric overcommit ratios, so fragmentation is tracked per resource).
@@ -261,19 +263,69 @@ func RunRound(ctx context.Context, p Params) (*RoundResult, error) {
 		return nil, err
 	}
 	e := &engine{
-		p:               p,
-		maxReqCPUMillis: p.Trace.MaxRequestCpuMillis(),
-		maxReqMemMiB:    p.Trace.MaxRequestMemMiB(),
-		nodes:           make(map[string]*nodeState, p.Nodes),
-		replicas:        make(map[string]map[string]bool),
-		placements:      make(map[int]*placement),
-		nodeSuccess:     make(map[string]int),
+		p:           p,
+		nodes:       make(map[string]*nodeState, p.Nodes),
+		replicas:    make(map[string]map[string]bool),
+		placements:  make(map[int]*placement),
+		nodeSuccess: make(map[string]int),
 	}
+	e.maxReqCPUMillis, e.maxReqMemMiB = e.maxFeasibleShape()
 	e.injectNodes()
 	defer e.cleanup()
 	e.preloadTemplates()
 	e.runEvents(ctx)
 	return e.result(), nil
+}
+
+// effectiveOvercommitRatios returns the cpu/mem overcommit multipliers the
+// cpu and mem filters admit on for the sim instance type, defaulting to 1.0
+// when the scheduler config is absent or carries a non-positive ratio.
+func (e *engine) effectiveOvercommitRatios() (cpuRatio, memRatio float64) {
+	cpuRatio, memRatio = 1.0, 1.0
+	if sc := config.GetConfig().Scheduler; sc != nil {
+		oc := sc.GetEffectiveOvercommitRatio(e.p.InstanceType)
+		if oc.CPURatio > 0 {
+			cpuRatio = oc.CPURatio
+		}
+		if oc.MemRatio > 0 {
+			memRatio = oc.MemRatio
+		}
+	}
+	return cpuRatio, memRatio
+}
+
+// maxFeasibleShape returns the largest per-resource request shape that an
+// EMPTY node could still admit, mirroring the filters' strict free > req
+// check against the effective (overcommit-aware) capacity of an empty node;
+// nodes are homogeneous, so one feasibility test covers the fleet. Requests
+// no empty node could ever fit are excluded: they are rejected wherever they
+// land, so counting them in the fragmentation shape would peg
+// fragmentation_ratio at ~1 for the whole window and measure the
+// unplaceable outlier instead of scheduler-induced stranding. When no
+// request is feasible the plain trace max is kept (success_rate is 0 anyway,
+// and the metric stays defined).
+func (e *engine) maxFeasibleShape() (cpuMillis, memMiB int64) {
+	cpuRatio, memRatio := e.effectiveOvercommitRatios()
+	emptyCPU := float64(e.p.NodeCPUMillis) * cpuRatio
+	emptyMem := float64(e.p.NodeMemMiB) * memRatio
+	feasible := false
+	for i := range e.p.Trace.Requests {
+		r := &e.p.Trace.Requests[i]
+		if float64(r.CpuMillis) >= emptyCPU || float64(r.MemMiB) >= emptyMem {
+			continue
+		}
+		feasible = true
+		if r.CpuMillis > cpuMillis {
+			cpuMillis = r.CpuMillis
+		}
+		if r.MemMiB > memMiB {
+			memMiB = r.MemMiB
+		}
+	}
+	if !feasible {
+		return e.p.Trace.MaxRequestCpuMillis(), e.p.Trace.MaxRequestMemMiB()
+	}
+	return cpuMillis, memMiB
 }
 
 // ossClusterLabel returns the cluster label injected on sim nodes. Configs may
@@ -539,16 +591,10 @@ func (e *engine) snapshot() Snapshot {
 	// free CPU/mem the cpu and mem filters admit on — per resource, because
 	// either one can bind first depending on the overcommit ratios and the
 	// trace shape (e.g. mem_ratio < cpu_ratio with small shapes strands CPU).
-	cpuRatio, memRatio := 1.0, 1.0
-	if sc := config.GetConfig().Scheduler; sc != nil {
-		oc := sc.GetEffectiveOvercommitRatio(e.p.InstanceType)
-		if oc.CPURatio > 0 {
-			cpuRatio = oc.CPURatio
-		}
-		if oc.MemRatio > 0 {
-			memRatio = oc.MemRatio
-		}
-	}
+	// The shape is the largest FEASIBLE request (maxFeasibleShape): requests
+	// no empty node could admit are rejected wherever they land, so they must
+	// not mark every node unfit and peg the ratio at ~1.
+	cpuRatio, memRatio := e.effectiveOvercommitRatios()
 
 	for _, ns := range e.nodeOrder {
 		usedCPU += float64(ns.usedCPUMilli)

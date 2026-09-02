@@ -59,9 +59,13 @@ func JainIndex(xs []float64) float64 {
 //
 // Definition: let free_i be node i's schedulable free quantity (effective
 // quota after overcommit minus allocated usage, the same quantity the
-// cpu/mem filters test) and maxShape the largest request size over all trace
-// requests. A node "cannot fit" the shape when free_i <= maxShape (mirroring
-// the filter's strict free > req admission check). The ratio is
+// cpu/mem filters test) and maxShape the largest FEASIBLE request size over
+// all trace requests — the engine excludes requests no empty node could ever
+// admit (they are rejected wherever they land, so they measure the
+// unplaceable outlier, not scheduler fragmentation; see
+// engine.maxFeasibleShape). A node "cannot fit" the shape when
+// free_i <= maxShape (mirroring the filter's strict free > req admission
+// check). The ratio is
 //
 //	Σ free_i over unfit nodes / Σ free_i over all nodes
 //
@@ -119,7 +123,7 @@ type Snapshot struct {
 	LoadCVMem          float64 // CV of per-node mem usage rate
 	JainCPU            float64 // Jain index of per-node cpu usage rate
 	JainMem            float64 // Jain index of per-node mem usage rate
-	FragmentationRatio float64 // free CPU stranded on nodes that cannot fit the largest shape
+	FragmentationRatio float64 // free CPU stranded on nodes that cannot fit the largest feasible shape
 	// FragmentationRatioMem is the memory-side analog: tracked separately
 	// because either resource can bind first depending on the overcommit
 	// ratios and the trace shape.

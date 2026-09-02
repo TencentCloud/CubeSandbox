@@ -8,18 +8,25 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+
+	yaml "gopkg.in/yaml.v3"
+
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 )
 
 // bootstrapped guards the one-time process bootstrap: config.Init and
 // scheduler.InitScheduler install process-wide state, so all engine tests
-// share a single init. The config under test is the shipped example, which
-// doubles as a check that example.sim.yaml stays loadable. The error is
-// captured (not t.Fatalf inside Once.Do — a Goexit still marks the Once
-// done) so every test fails with the root cause instead of cascading into
-// half-initialized downstream failures.
+// share a single init. The config under test is testdata/sim.test.yaml — a
+// frozen copy of the shipped example, so user edits to
+// cmd/schedsim/example.sim.yaml cannot break these tests; the example's
+// loadability is covered separately by TestShippedExampleConfigParses. The
+// error is captured (not t.Fatalf inside Once.Do — a Goexit still marks the
+// Once done) so every test fails with the root cause instead of cascading
+// into half-initialized downstream failures.
 var (
 	bootstrapped sync.Once
 	bootstrapErr error
@@ -28,15 +35,33 @@ var (
 func bootstrapOnce(t *testing.T) {
 	t.Helper()
 	bootstrapped.Do(func() {
-		cfgPath, err := filepath.Abs("../../../cmd/schedsim/example.sim.yaml")
+		cfgPath, err := filepath.Abs("testdata/sim.test.yaml")
 		if err != nil {
-			bootstrapErr = fmt.Errorf("resolve example config: %w", err)
+			bootstrapErr = fmt.Errorf("resolve test config: %w", err)
 			return
 		}
 		bootstrapErr = Bootstrap(context.Background(), cfgPath)
 	})
 	if bootstrapErr != nil {
 		t.Fatalf("bootstrap: %v", bootstrapErr)
+	}
+}
+
+// TestShippedExampleConfigParses keeps the shipped, user-editable example
+// loadable without coupling the engine tests to it: parse-only into the
+// config struct config.Init uses (Bootstrap/config.Init are process-global
+// one-shot and already consumed by bootstrapOnce, so they must not run here).
+func TestShippedExampleConfigParses(t *testing.T) {
+	data, err := os.ReadFile("../../../cmd/schedsim/example.sim.yaml")
+	if err != nil {
+		t.Fatalf("read shipped example: %v", err)
+	}
+	cfg := &config.Config{}
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		t.Fatalf("shipped example does not parse into config.Config: %v", err)
+	}
+	if cfg.Scheduler == nil {
+		t.Fatalf("shipped example lost its scheduler section")
 	}
 }
 
@@ -295,4 +320,94 @@ func TestRunRoundAveragingWindowIsTraceDerived(t *testing.T) {
 	approx(t, "success_rate", s["success_rate"], 0.5, 1e-9)
 	approx(t, "cpu_alloc_rate", s["cpu_alloc_rate"], (1000.0/64000.0)*(10000.0/15000.0), 1e-9)
 	approx(t, "active_nodes_avg", s["active_nodes_avg"], 10000.0/15000.0, 1e-9)
+}
+
+// TestRunRoundFragmentationExcludesInfeasibleShape: the fragmentation shape is
+// the largest FEASIBLE request. Request #1 (200000 millicores > the 192000
+// effective free of an empty node = 64000×3 cpu_ratio) can never be admitted,
+// so it must not peg fragmentation_ratio at ~1; with the shape reduced to the
+// feasible 1000 millicores every node's free CPU stays above it and the ratio
+// is exactly 0 over the whole window. (Counted over the whole trace instead,
+// this same run reports fragmentation_ratio == 1 whenever any CPU is free.)
+func TestRunRoundFragmentationExcludesInfeasibleShape(t *testing.T) {
+	bootstrapOnce(t)
+	tr := &Trace{
+		Workload: "test",
+		Templates: []TraceTemplate{
+			{TemplateID: "tpl-frag", Weight: 1, CpuMillis: 1000, MemMiB: 2048},
+		},
+		Requests: []TraceRequest{
+			{Seq: 0, ArrivalMs: 0, TemplateID: "tpl-frag", CpuMillis: 1000, MemMiB: 2048, LifetimeMs: 10000},
+			{Seq: 1, ArrivalMs: 5000, TemplateID: "tpl-frag", CpuMillis: 200000, MemMiB: 2048, LifetimeMs: 10000},
+		},
+	}
+	rr, err := RunRound(context.Background(), Params{
+		Trace:           tr,
+		Nodes:           1,
+		NodeCPUMillis:   64000,
+		NodeMemMiB:      65536,
+		InstanceType:    "sim",
+		TemplatePreload: 1.0,
+		Seed:            13,
+		RoundID:         6,
+	})
+	if err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	s := rr.Summary
+	approx(t, "success_rate", s["success_rate"], 0.5, 1e-9)
+	approx(t, "fragmentation_ratio", s["fragmentation_ratio"], 0, 1e-9)
+	approx(t, "fragmentation_ratio_mem", s["fragmentation_ratio_mem"], 0, 1e-9)
+}
+
+// TestMaxFeasibleShape pins the shape selection: only requests an empty node
+// could admit (strict free > req on both resources against the
+// overcommit-aware empty-node capacity) count toward the max; when nothing is
+// feasible the plain trace max is the fallback. The test config carries
+// cpu_ratio 3.0 / mem_ratio 2.0, so an empty 64000-milli/65536-MiB node
+// admits shapes strictly below 192000 millicores and 131072 MiB.
+func TestMaxFeasibleShape(t *testing.T) {
+	bootstrapOnce(t)
+	newEngine := func(reqs ...TraceRequest) *engine {
+		return &engine{
+			p: Params{
+				Trace:         &Trace{Requests: reqs},
+				NodeCPUMillis: 64000,
+				NodeMemMiB:    65536,
+				InstanceType:  "sim",
+			},
+		}
+	}
+
+	t.Run("infeasible outliers excluded per resource", func(t *testing.T) {
+		cpu, mem := newEngine(
+			TraceRequest{CpuMillis: 1000, MemMiB: 2048},
+			TraceRequest{CpuMillis: 200000, MemMiB: 2048}, // cpu-infeasible
+			TraceRequest{CpuMillis: 500, MemMiB: 200000},  // mem-infeasible
+		).maxFeasibleShape()
+		if cpu != 1000 || mem != 2048 {
+			t.Fatalf("got (%d, %d), want (1000, 2048)", cpu, mem)
+		}
+	})
+
+	t.Run("boundary is strict like the filters", func(t *testing.T) {
+		cpu, mem := newEngine(
+			TraceRequest{CpuMillis: 192000, MemMiB: 2048}, // cpu == empty effective free: not admissible
+			TraceRequest{CpuMillis: 1000, MemMiB: 131072}, // mem == empty effective free: not admissible
+			TraceRequest{CpuMillis: 3000, MemMiB: 4096},
+		).maxFeasibleShape()
+		if cpu != 3000 || mem != 4096 {
+			t.Fatalf("got (%d, %d), want (3000, 4096)", cpu, mem)
+		}
+	})
+
+	t.Run("no feasible request falls back to trace max", func(t *testing.T) {
+		cpu, mem := newEngine(
+			TraceRequest{CpuMillis: 200000, MemMiB: 2048},
+			TraceRequest{CpuMillis: 250000, MemMiB: 200000},
+		).maxFeasibleShape()
+		if cpu != 250000 || mem != 200000 {
+			t.Fatalf("got (%d, %d), want trace max (250000, 200000)", cpu, mem)
+		}
+	})
 }

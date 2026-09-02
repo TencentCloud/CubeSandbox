@@ -7,8 +7,9 @@ schedsim 用**模拟节点状态**在单个进程内驱动 CubeMaster 真实的�
 
 ```
 cmd/schedsim/main.go        CLI 入口（flag 编排、逐轮驱动、报告输出）
-cmd/schedsim/example.sim.yaml  示例调度配置（本目录测试也用它，改它要跑测试）
+cmd/schedsim/example.sim.yaml  示例调度配置（可自由编辑；仅 parse-only 冒烟测试守护其可解析）
 pkg/scheduler/sim/          可测逻辑：trace 解析、虚拟时钟事件循环、指标纯函数
+pkg/scheduler/sim/testdata/sim.test.yaml  引擎测试自用的示例冻结副本（有意改示例时重新同步它）
 ```
 
 ## 用法
@@ -104,6 +105,12 @@ MetricLocalUpdateAt=now`。用量侧（`QuotaCpuUsage/QuotaMemUsage/MvmNum`）�
 - cpu filter 的 `CpuUtil >= NodeMaxCpuUtil` 守卫恒不触发；
 - `realtime_create_num` filter 恒不拒绝。
 
+另有一条被**刻意抬高**而非失效的门禁：prefilter 的节点并发沙箱数上限
+（`MvmNum >= RealMaxMvmLimit`，生产默认 3000/节点）。密集 trace（如 10 万请求
+铺在 300 节点上且 lifetime 较长）会先撞上这条上限、悄无声息地压低
+`success_rate`，因此示例配置把它调到 `node_max_mvm_num: 100000`，让配额门禁
+——被测对象——先触发；评估更密集场景时记得真实集群在这条上限处就开始拒绝。
+
 结论：`mem_alloc_rate`/`load_cv_mem` 等绝对值可能超出真实集群可达范围，
 仿真结果用于**同配置族的相对 A/B 对比**，不要直接对标生产的绝对容量上限。
 
@@ -151,8 +158,8 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
 | `cpu_alloc_rate` / `mem_alloc_rate` | Σ 用量 / Σ 原始配额（集群级，时间平均；超卖下可 >1 的部分由 effective 配额承载，此处按原始配额） |
 | `load_cv_cpu` / `load_cv_mem` | 节点用量率（用量/配额）总体标准差 / 均值；均值为 0 定义为 0 |
 | `jain_cpu` / `jain_mem` | Jain 公平指数 (Σx)²/(n·Σx²)；全 0 定义为 1（完全均衡） |
-| `fragmentation_ratio` | 对 trace 中**最大请求 shape**（max cpu_millis）：放不下该 shape 的节点的空闲 CPU 占总空闲 CPU 的比例。"空闲"与 cpu filter 同口径（配额×超卖比−已分配），"放不下"与 filter 的 `free > req` 判定互补（`free <= maxShape`） |
-| `fragmentation_ratio_mem` | 上者的内存侧版本（max mem_mib，与 mem filter 同口径）。两个指标分开跟踪：取决于超卖比与请求 shape，任一资源都可能先成为瓶颈（如 mem_ratio < cpu_ratio 且 shape 偏小时，内存先耗尽、CPU 被搁置），只看 CPU 侧会漏报 |
+| `fragmentation_ratio` | 对 trace 中最大**可行**请求 shape（max cpu_millis；连空节点都放不下的请求被排除——节点同构，`cpu_millis >= 配额×cpu_ratio` 或 `mem_mib >= 配额×mem_ratio` 的请求到哪儿都会被拒，计入会把所有节点判成 unfit、让指标恒 ≈1，度量的是离群请求而非调度碎片；整份 trace 均不可行时回退为全 trace 最大值）：放不下该 shape 的节点的空闲 CPU 占总空闲 CPU 的比例。"空闲"与 cpu filter 同口径（配额×超卖比−已分配），"放不下"与 filter 的 `free > req` 判定互补（`free <= maxShape`） |
+| `fragmentation_ratio_mem` | 上者的内存侧版本（max mem_mib，同样的可行性排除，与 mem filter 同口径）。两个指标分开跟踪：取决于超卖比与请求 shape，任一资源都可能先成为瓶颈（如 mem_ratio < cpu_ratio 且 shape 偏小时，内存先耗尽、CPU 被搁置），只看 CPU 侧会漏报 |
 | `herding_top1_share` | 被选中次数最多的节点占总成功放置的比例（羊群度） |
 | `template_hit_rate` | 成功放置中选中节点持有该模板本地副本的比例（分母为带模板的成功请求）。放置成功后仿真会把该模板注册到选中节点（预热拉取），因此 locality filter 关闭时该指标跟踪动态局部性（首次未命中、后续命中）；filter 开启且 `AllowNonLocalTemplate=false` 时未预热节点本就不收该模板请求，指标恒为 1，主要用于检测配置漂移 |
 | `active_nodes_avg` / `empty_nodes_avg` | 有/无运行中沙箱的节点数，时间平均 |
@@ -170,6 +177,10 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
 `EffectiveAllocated` 恒为 0，调度器完全看不到仿真的进程内用量回写，配额门禁永不
 触发，所有利用率/均衡指标失真——仿真配置必须保持 `false`（`Bootstrap` 检测到
 `true` 会向 stderr 打印警告）。
+
+再一限制：`config.Init` 安装的 hotswap watcher 在仿真运行期间保持活跃——
+**不要在运行中编辑 `--config` 指向的配置文件**，否则正在进行的轮次会切到新
+配置，同一份报告会混入两套配置的结果。
 
 模型层面的已知简化：
 
@@ -195,7 +206,10 @@ go test ./pkg/scheduler/sim/...
 GOOS=linux GOARCH=amd64 go build ./cmd/schedsim
 ```
 
-e2e 测试（`engine_test.go`）覆盖：单节点全集中（cv=0、jain=1、
+e2e 测试（`engine_test.go`）从 `pkg/scheduler/sim/testdata/sim.test.yaml`
+（示例配置的冻结副本）bootstrap，覆盖：单节点全集中（cv=0、jain=1、
 cpu_alloc_rate 对手算积分）、4 节点 8 请求 least-loaded 均分
 （2-2-2-2、top1=0.25）、preload=0 时模板请求全部被 locality filter 拒绝
-（success_rate=0）。
+（success_rate=0）。shipped 示例的可加载性由 parse-only 冒烟测试
+（`TestShippedExampleConfigParses`）单独守护——编辑 `example.sim.yaml` 不会
+破坏引擎测试；有意改动调度字段时，把变更同步进 testdata 副本即可。

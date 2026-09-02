@@ -1,15 +1,8 @@
-# Example CubeMaster config for the schedsim scheduling simulator.
-#
-# Usage:
-#   cd CubeMaster
-#   go run ./cmd/schedsim --trace /path/to/trace.json --config cmd/schedsim/example.sim.yaml \
-#     --nodes 300 --template-preload 0.3 --seed 42 --rounds 3 -o report.json
-#
-# Only the scheduler-relevant sections matter: schedsim never starts the HTTP
-# server, DB, Redis, or localcache background sync (localcache.Init is not
-# called); it drives scheduler.Select against in-process node state. Fields
-# below are the minimum the scheduler core reads, plus safety valves for
-# simulation. Compare with the production reference in CubeMaster/conf.yaml.
+# Frozen copy of cmd/schedsim/example.sim.yaml for the engine tests in this
+# package, so that user edits to the shipped example cannot break them. When
+# the example's scheduler-relevant fields change intentionally, re-sync this
+# file. The shipped example's loadability is covered by the parse-only
+# TestShippedExampleConfigParses.
 
 common:
   # Required section (config validation fails without it). Nothing here is
