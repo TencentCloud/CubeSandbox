@@ -69,7 +69,7 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 
 - Mandatory Guard 始终 fail-closed。
 - Filter 默认 `fail-closed`；`fail-open` 必须显式配置，并会输出风险告警。
-- Score 默认 `default-score`，单个插件失败后用其 `default_score` 继续；也可配置 `fail-closed`。
+- Score 默认 `default-score`，单个插件失败后用其 `default_score`（本身默认为 0）继续；也可配置 `fail-closed`。这与 Filter 刻意方向相反——健康 fail-closed、质量 fail-open——而且除一行告警日志外是静默的：所有候选拿到相同的常数分，失败插件的排序贡献消失；若它是唯一的 Score，排序退化为候选顺序。对排序质量敏感的部署应显式配置 `failure.score: fail-closed`。
 - 返回空结果的内置 `go` Score（例如请求没有节点偏好亲和性时的 `affinity_score`，或资源权重不适用时的 `image_score`）视为「不适用」并被跳过——不报错，也不替换为 `default_score`。只覆盖部分候选节点的结果仍视为失败。
 - `no_candidate` 支持 `fail` 和 `backoff`。Mandatory Guard 永不触发 backoff：Guard 失败（包括清空候选集合）始终快速失败。只有可选 Filter 或最终选点无候选时才进入 backoff；backoff 尝试会在放宽后的候选集合上重新执行 Guards、Filter 和 Score，其中重跑 Guards 是 backoff 尝试自身的安全保障。
 - `no_candidate` 未配置时默认为 `fail`。legacy `default` 管线始终走 backoff，因此启用第一个自定义 Profile 会把「Filter 后无候选」从 backoff 重试变成硬 `SelectNodesNoRes` 失败——没有 backoff 尝试，也不会回退到 default 管线。接入 Profile 期间建议显式配置 `no_candidate: backoff`。
@@ -79,9 +79,15 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 ## 运维注意事项
 
 - 配置 `scheduler.profiles` 后，外部 gRPC 插件会在 CubeMaster 启动、编译 Profile 集时同步建连并完成握手。任何建连或握手错误都会中止 `InitScheduler` 并使进程退出——插件只是暂时不可用（尚未启动、正在重启或 socket 残留）也会导致整个 master 无法启动，包括完全不经过该插件的 default Profile 流量。这与热更新路径刻意不对称：热更新会拒绝损坏的 Profile 集并保留上一份管线。请保证所有已配置的外部插件先于 CubeMaster 就绪（通过 systemd、sidecar 或监督进程编排启动顺序），或者干脆不配置外部插件。
+- 熔断器打开对整个 Profile 是硬失败，而不是无候选事件：连续失败达到 `circuit_breaker_failures`（默认 3）后，插件在 `circuit_breaker_cooldown` 窗口（默认 30s）内以 `ErrCircuitOpen` 快速失败，表现为 Filter 错误，`no_candidate: backoff` 无法挽救。插件抖动会让路由到该 Profile 的请求在一个个 cooldown 窗口内持续失败——每个窗口结束后只允许一次半开探测，探测失败立即重新打开熔断器。如果插件只是建议性的，配置 `failure.filter: fail-open`；否则按插件真实的恢复速度调整 `timeout`、`circuit_breaker_failures` 和 `circuit_breaker_cooldown`。
 - 每个外部插件客户端在整个快照同步 + RPC 过程中持有互斥锁，刻意将经过该插件绑定的并发请求串行化。在默认 100ms `timeout` 下，一个性能劣化的插件会把受影响的创建路径限制在约 10 请求/秒，且 backoff 尝试会额外支付一次快照冻结与同步。请保持插件 RPC 足够快，按此上限规划容量，并把插件延迟视为调度延迟。
+- 同一插件同时用作 Filter 和 Score 时会构建两个独立客户端——各自建连与握手、各自持有熔断器和已同步快照版本——因此一个请求要上传两次全量快照，两个熔断器的状态还可能漂移。按 (name, socket_path) 引用计数共享客户端是已知的后续优化方向。
+- 快照版本号每个请求唯一（时间戳加序列号），插件侧快照缓存跨请求永不命中：每个触及 gRPC 插件的请求都会重传完整的冻结节点集，backoff 路径传两次。改为只在节点集变化时才递增的 epoch 是已知的后续方向。
+- 冻结快照时会对每个候选节点（含 `LocalTemplates`）、请求规格和路由 label 做深克隆；legacy default 管线即使不运行 expr/gRPC 插件也付同样的分配成本。调优前请先基准测量；按 Profile 是否实际使用 expr/gRPC 插件来条件化 freeze 是已知的后续方向。
+- 热更新被拒绝时会保留上一份 Profile 集，但全局配置在 watcher 运行前已完成切换，而内建插件在 Select 时实时读取全局配置（Guard 超时、Score 的 `Disable()` 开关、`real_time_weighted_average`/`image_score` 配置段、`EffectiveQuota*` 包装）。因此被拒绝的热更新可能留下「旧管线跑新配置值」的状态——应把拒绝日志视为需要运维介入，而不是无影响事件。
 - gRPC 与 CEL 的请求上下文中，`cpu_millis` 和 `memory_bytes` 都是普通整数，因此「未指定资源规格」与「零规格请求」无法区分——restore 放置路径会传入空规格。
 
 ## 兼容性说明
 
 - 未注册为插件的 legacy `enable_filters` / `enable_scorers` 配置项现在会使 CubeMaster 启动失败，错误信息会指出具体配置项；此前这类条目会被静默跳过。升级前请从配置中移除失效条目，或先注册对应插件。
+- weight 非正的 legacy `enable_scorers` 条目现在会在编译管线时被跳过并输出告警（此前是静默贡献 score×0）；调度行为不变。
