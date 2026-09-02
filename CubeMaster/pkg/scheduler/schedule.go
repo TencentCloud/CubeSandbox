@@ -180,10 +180,13 @@ func backoffSelectWithPipeline(selCtx *selctx.SelectorCtx, pipeline *profile.Pip
 	if err := runBackoffFilter(selCtx); err != nil {
 		return nil, err
 	}
-	// The backoff selector replaced the candidate set, so the snapshot is
-	// frozen a second time: per-node localcache lookups, a new SnapshotVersion
-	// and, for gRPC plugins, another sync. This double snapshot on the backoff
-	// path is intentional and a known per-request overhead.
+	// The backoff selector replaced the candidate set wholesale, so the
+	// snapshot is frozen a second time: RefreezeSnapshot re-arms the
+	// idempotent freeze for exactly this whole-pool replacement (never for
+	// mere narrowing), producing a new SnapshotVersion and, for gRPC plugins,
+	// another sync. This double snapshot on the backoff path is intentional
+	// and a known per-request overhead.
+	selCtx.RefreezeSnapshot()
 	freezeSnapshot(selCtx)
 	if err := runProfileFilters(selCtx, pipeline.Guards); err != nil {
 		return nil, err
