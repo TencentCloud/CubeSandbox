@@ -656,6 +656,37 @@ func TestCompareDispatchSaturatedWarning(t *testing.T) {
 	}
 }
 
+func TestComparePartialWarning(t *testing.T) {
+	dir := t.TempDir()
+
+	b1 := writeTempFile(t, dir, "base-partial.json", `{
+		"summary": {"success_rate": 0.9, "queue_delay_p50_ms": 500, "partial": 1}
+	}`)
+	c1 := writeTempFile(t, dir, "cand-clean.json", `{
+		"summary": {"success_rate": 0.9, "queue_delay_p50_ms": 3}
+	}`)
+
+	out := filepath.Join(dir, "report.md")
+	var buf bytes.Buffer
+	if err := runCompare([]string{"--baseline", b1, "--candidate", c1, "-o", out}, &buf); err != nil {
+		t.Fatalf("runCompare: %v", err)
+	}
+	saved, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	report := string(saved)
+
+	if !strings.Contains(report, "> **Note:** baseline (") {
+		t.Errorf("report missing the partial note naming the baseline group\n%s", report)
+	}
+	// Like dispatch_saturated, the marker is a run-quality flag and must not
+	// appear as a comparison row.
+	if strings.Contains(report, "| partial |") {
+		t.Errorf("partial leaked into the metric table\n%s", report)
+	}
+}
+
 func TestCompareNoDirSortedByImpact(t *testing.T) {
 	// Three directionless metrics: one small pct move, one large pct move, one
 	// zero-baseline row (no Δ%). Expect large pct first, then small pct, then

@@ -201,7 +201,13 @@ queue metrics in one `compare` run.
 > (a create-latency spike holds slots just as long) — check `create.p95`
 > before blaming `--concurrency` — and a transient burst delaying >5% of
 > arrivals past the mean gap trips the whole-run marker even when the run
-> otherwise honored pace.
+> otherwise honored pace. The marker is only computed with ≥20 dispatched
+> requests (below that the p95 IS the maximum delay, so a single hiccup would
+> trip it), and at rates of several hundred req/s the mean inter-arrival
+> approaches the `time.Sleep` granularity, where even healthy runs can exceed
+> it — treat the marker as advisory there. An early TUI quit instead exports
+> `partial: 1` in `summary` (suppressing the saturation marker), which
+> `compare` surfaces as a note in the same way.
 
 ### Trace file schema
 

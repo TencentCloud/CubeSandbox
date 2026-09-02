@@ -316,12 +316,14 @@ func parseConfig() *Config {
 					"the dispatcher will stall on the semaphore and neither the arrival rate nor queue-delay metrics will be honored\n",
 					cfg.Concurrency, cfg.Rate, occS, needed)
 			}
-		case cfg.Rate > 0:
+		case cfg.Rate > 0 && cfg.Mode == "create-delete":
 			// No reliable occupancy estimate (no lifetime hold, or a
 			// sub-second lifetime whose create/delete tail is comparable):
 			// warn qualitatively instead of printing a precise-looking
 			// threshold. Worded as a caution: plenty of rate-paced runs
-			// without a lifetime hold are perfectly healthy.
+			// without a lifetime hold are perfectly healthy. Create-only
+			// runs hold a slot only for the create call and get no note;
+			// the end-of-run saturation check covers the stall case.
 			fmt.Fprintf(os.Stderr, "NOTE: at --rate %g/s each worker slot is held for a request's whole residency "+
 				"(create, any lifetime hold, delete). If --concurrency (%d) is low relative to rate x mean "+
 				"residency, the dispatcher stalls and queue-delay metrics then measure the client's own "+
@@ -356,8 +358,9 @@ func parseConfig() *Config {
 	cfg.hostMountValue = hostMountValue
 	cfg.requestHeaders = map[string]string{"Authorization": "Bearer " + cfg.APIKey}
 
-	// In scheduled mode without -t the pool drives per-request bodies; the
-	// cached body (warmup/fallback) then uses the first pool template.
+	// In scheduled mode the pool drives per-request bodies; the cached body
+	// (warmup/fallback) uses -t / CUBE_TEMPLATE_ID when set and only falls
+	// back to the first pool template when neither is given.
 	bodyTemplate := cfg.Template
 	if bodyTemplate == "" && len(cfg.Templates) > 0 {
 		bodyTemplate = cfg.Templates[0].TemplateID
@@ -561,6 +564,14 @@ func exportJSON(results []IterResult, cfg *Config) {
 		"throughput_qps": throughput,
 	}
 	if cfg.Scheduled {
+		// An early TUI quit exports a truncated sample: mark it so partial
+		// dispatch_*/queue_delay_* aggregates are not misread as run
+		// characteristics (compare pops the marker and notes the group),
+		// and skip the saturation marker whose own sample is truncated.
+		partial := cfg.Total > 0 && len(results) < cfg.Total
+		if partial {
+			summaryBlock["partial"] = 1
+		}
 		// Dispatch-side throughput: requests released per second of the
 		// dispatch window. Unlike throughput_qps (total requests over the
 		// whole run), this excludes per-sandbox lifetime tails, so it
@@ -584,8 +595,10 @@ func exportJSON(results []IterResult, cfg *Config) {
 		// queue_delay_*/dispatch_* keys above describe the client's
 		// semaphore, not the offered schedule. compare surfaces this as a
 		// warning instead of a metric row.
-		if sat, _, _ := dispatchSaturated(results, cfg); sat {
-			summaryBlock["dispatch_saturated"] = 1
+		if !partial {
+			if sat, _, _ := dispatchSaturated(results, cfg); sat {
+				summaryBlock["dispatch_saturated"] = 1
+			}
 		}
 		type tplAgg struct{ attempts, created int }
 		agg := map[string]*tplAgg{}
@@ -757,7 +770,10 @@ func main() {
 	// queue_delay_* metrics then measure the client semaphore, not the
 	// scheduler. Surface that instead of letting the numbers read as a valid
 	// scheduled-mode run; exportJSON marks the report machine-readably.
-	if sat, p95, interArrival := dispatchSaturated(allResults, cfg); sat {
+	// Skipped on an early-quit truncated sample — the p95 would describe the
+	// partial run, and the export carries a "partial" marker instead.
+	partial := cfg.Total > 0 && len(allResults) < cfg.Total
+	if sat, p95, interArrival := dispatchSaturated(allResults, cfg); sat && !partial {
 		fmt.Fprintf(os.Stderr, "WARNING: queue-delay p95 (%.0fms) exceeded the mean inter-arrival time (%.0fms): "+
 			"the dispatcher fell permanently behind and the offered load degenerated to bursts — "+
 			"queue_delay_*/dispatch metrics no longer describe the offered schedule. Either --concurrency is too "+

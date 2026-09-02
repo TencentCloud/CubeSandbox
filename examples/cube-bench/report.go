@@ -275,12 +275,19 @@ func extractTimes(results []IterResult, fn func(IterResult) float64) []float64 {
 // mean inter-arrival time means the offered load degenerated to bursts and the
 // queue_delay_*/dispatch_* metrics describe the client's semaphore, not the
 // scheduler. It returns the p95 and inter-arrival values for messaging.
+//
+// Percentile computes k = ceil(n*p/100)-1, so below 20 samples the p95 IS the
+// maximum delay and one stalled request (a GC pause, a server hiccup) would
+// trip the marker; stay silent there rather than cry wolf on short ad-hoc
+// runs. At very high rates the mean inter-arrival also shrinks toward the
+// time.Sleep granularity, where even healthy runs can trip it — see the
+// README before trusting the marker at several hundred req/s.
 func dispatchSaturated(results []IterResult, cfg *Config) (saturated bool, p95, interArrival float64) {
 	if !cfg.Scheduled || cfg.Rate <= 0 {
 		return false, 0, 0
 	}
 	delays := extractTimes(results, func(r IterResult) float64 { return r.SchedDelayMs })
-	if len(delays) == 0 {
+	if len(delays) < 20 {
 		return false, 0, 0
 	}
 	p95, interArrival = Percentile(delays, 95), 1000/cfg.Rate

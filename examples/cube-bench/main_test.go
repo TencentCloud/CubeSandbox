@@ -391,6 +391,12 @@ func TestExportJSONSaturatedMarked(t *testing.T) {
 	cfg.setDispatchElapsed(2.5)
 	// p95 100ms against a 20ms inter-arrival (50/s): the dispatcher fell
 	// permanently behind, so the export must carry the saturation marker.
+	// Pad to the marker's minimum sample size (below it p95 == max and the
+	// check stays silent by design).
+	for len(results) < 20 {
+		results = append(results, results[len(results)-1])
+	}
+	cfg.Total = len(results)
 	for i := range results {
 		results[i].SchedDelayMs = 100
 	}
@@ -410,6 +416,40 @@ func TestExportJSONSaturatedMarked(t *testing.T) {
 	if got := summary["dispatch_saturated"]; got != float64(1) {
 		t.Fatalf("dispatch_saturated = %v, want 1", got)
 	}
+	if _, ok := summary["partial"]; ok {
+		t.Fatalf("complete run must not set partial")
+	}
+}
+
+func TestExportJSONPartialMarked(t *testing.T) {
+	cfg, results := scheduledExportFixture()
+	cfg.setDispatchElapsed(2.5)
+	// Early TUI quit: fewer results than requested. Even with delays that
+	// would trip the saturation marker on a complete run, the export must
+	// carry "partial" and suppress the saturation marker.
+	cfg.Total = len(results) + 5
+	for i := range results {
+		results[i].SchedDelayMs = 100
+	}
+	cfg.Output = t.TempDir() + "/report.json"
+
+	exportJSON(results, cfg)
+
+	data, err := os.ReadFile(cfg.Output)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	summary := report["summary"].(map[string]any)
+	if got := summary["partial"]; got != float64(1) {
+		t.Fatalf("partial = %v, want 1", got)
+	}
+	if _, ok := summary["dispatch_saturated"]; ok {
+		t.Fatalf("partial run must not set dispatch_saturated")
+	}
 }
 
 func TestDispatchSaturated(t *testing.T) {
@@ -428,10 +468,21 @@ func TestDispatchSaturated(t *testing.T) {
 	if sat, p95, ia := dispatchSaturated(results, cfg); sat {
 		t.Errorf("fixture delays (p95 %v vs inter-arrival %v) reported saturated", p95, ia)
 	}
+	// Below the minimum sample size the check stays silent even when every
+	// request stalled: with n < 20 the p95 IS the maximum delay, so a single
+	// hiccup would otherwise trip the marker.
 	for i := range results {
 		results[i].SchedDelayMs = 100
 	}
-	sat, p95, ia := dispatchSaturated(results, cfg)
+	if sat, _, _ := dispatchSaturated(results, cfg); sat {
+		t.Errorf("small sample (n=%d) reported saturated", len(results))
+	}
+
+	big := make([]IterResult, 20)
+	for i := range big {
+		big[i] = IterResult{Seq: i, SchedDelayMs: 100}
+	}
+	sat, p95, ia := dispatchSaturated(big, cfg)
 	if !sat || p95 <= ia {
 		t.Errorf("saturated=%v p95=%v inter-arrival=%v, want saturated with p95 > inter-arrival", sat, p95, ia)
 	}

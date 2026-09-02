@@ -121,6 +121,9 @@ type sampleFile struct {
 	// that run's dispatcher fell behind pace, so its queue_delay_*/dispatch_*
 	// numbers describe the client semaphore, not the offered schedule.
 	saturated bool
+	// partial is set when any sample carried the partial marker: the run was
+	// quit early, so its aggregates cover a truncated sample.
+	partial bool
 }
 
 // sampleGroup is one side of the comparison (baseline or candidate).
@@ -129,6 +132,7 @@ type sampleGroup struct {
 	files     []*sampleFile
 	samples   []map[string]float64
 	saturated bool // any file in the group carried dispatch_saturated
+	partial   bool // any file in the group carried partial
 }
 
 // extractSaturated pops the dispatch_saturated marker out of a freshly loaded
@@ -137,6 +141,17 @@ type sampleGroup struct {
 func extractSaturated(sample map[string]float64) bool {
 	if sample["dispatch_saturated"] > 0 {
 		delete(sample, "dispatch_saturated")
+		return true
+	}
+	return false
+}
+
+// extractPartial pops the partial marker for the same reason: an early-quit
+// truncated export is a run-quality flag, not a comparison row. Reports
+// whether the marker was present.
+func extractPartial(sample map[string]float64) bool {
+	if sample["partial"] > 0 {
+		delete(sample, "partial")
 		return true
 	}
 	return false
@@ -178,6 +193,7 @@ func loadSampleGroup(name string, paths []string) (*sampleGroup, error) {
 		g.files = append(g.files, f)
 		g.samples = append(g.samples, f.samples...)
 		g.saturated = g.saturated || f.saturated
+		g.partial = g.partial || f.partial
 	}
 	return g, nil
 }
@@ -217,6 +233,9 @@ func loadSampleFile(path string) (*sampleFile, error) {
 			if extractSaturated(sample) {
 				f.saturated = true
 			}
+			if extractPartial(sample) {
+				f.partial = true
+			}
 			f.samples = append(f.samples, sample)
 		}
 		return f, nil
@@ -234,6 +253,7 @@ func loadSampleFile(path string) (*sampleFile, error) {
 		}
 	}
 	f.saturated = extractSaturated(sample)
+	f.partial = extractPartial(sample)
 	f.samples = []map[string]float64{sample}
 	return f, nil
 }
@@ -740,6 +760,19 @@ func renderComparison(c *comparison) string {
 			"permanently behind the requested pace, so their `queue_delay_*`/`dispatch_*` numbers describe the "+
 			"client's concurrency semaphore, not the offered schedule. Rerun with higher `--concurrency` before "+
 			"trusting verdicts on those keys.\n\n",
+			strings.Join(groups, " and "))
+	}
+	if c.baseline.partial || c.candidate.partial {
+		var groups []string
+		if c.baseline.partial {
+			groups = append(groups, "baseline ("+c.baseline.name+")")
+		}
+		if c.candidate.partial {
+			groups = append(groups, "candidate ("+c.candidate.name+")")
+		}
+		fmt.Fprintf(&b, "> **Note:** %s: exports marked `partial` — the runs were quit early, so their "+
+			"`queue_delay_*`/`dispatch_*`/`per_template.*` aggregates cover a truncated sample. Rerun to "+
+			"completion before trusting verdicts on those keys.\n\n",
 			strings.Join(groups, " and "))
 	}
 	writeFileList(&b, "baseline", c.baseline)
