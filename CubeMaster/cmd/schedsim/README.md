@@ -26,7 +26,7 @@ go build -o /tmp/schedsim ./cmd/schedsim
   --instance-type sim \                # 所有节点注册的 instance type
   --template-preload 0.3 \             # 每个模板预置本地副本的节点比例
   --seed 42 --rounds 3 \               # 第 i 轮 seed = seed+i
-  -o report.json                       # 缺省写 stdout（注意此时 stdout 前有 config 噪声）
+  -o report.json                       # 缺省写 stdout（bootstrap 的 config 输出已被屏蔽，stdout 直接是干净 JSON）
 ```
 
 ## 与 cube-bench 的衔接
@@ -135,6 +135,11 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
 
 ### 指标定义
 
+时间平均类指标（`cpu/mem_alloc_rate`、`load_cv_*`、`jain_*`、`fragmentation_ratio*`、
+`active/empty_nodes_avg`）的积分窗口固定为 [0, max(arrival_ms) + max(lifetime_ms))，
+由 trace 唯一决定、与调度成功率无关：被拒绝的请求不产生到期事件，若窗口止于最后
+一个事件，拒绝率高的配置会在更短的分母上积分，A/B 对比就被污染了。
+
 | key | 定义 |
 | --- | --- |
 | `success_rate` | Select 成功数 / 请求总数 |
@@ -153,7 +158,14 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
 已知限制：每轮结束时节点被标记为不健康但**不会从进程级 localcache 中移除**
 （刻意不调用 `localcache.Init`，没有同步/淘汰回路）；节点 ID 带 RoundID 前缀，
 轮间不会互相污染，但长时间在同一进程内反复跑仿真会累积陈旧节点条目——CLI
-的小轮数场景无影响。
+的小轮数场景无影响。唯一不中性的是 `sched_latency_*`：节点枚举（fallback 全扫
+路径）的开销随累积条目增长，**多轮 run 内靠后轮次的延迟分位会被轻微抬高**，
+跨配置对比请以相同 `--rounds`/`--nodes` 形状为前提。
+
+另一限制：`scheduler.ignore_redis_allocation: true` 会让 filter 的
+`EffectiveAllocated` 恒为 0，调度器完全看不到仿真的进程内用量回写，配额门禁永不
+触发，所有利用率/均衡指标失真——仿真配置必须保持 `false`（`Bootstrap` 检测到
+`true` 会向 stderr 打印警告）。
 
 ## 验证
 

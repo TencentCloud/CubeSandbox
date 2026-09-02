@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -33,7 +34,24 @@ import (
 // task.InitTask is required: scheduler.InitScheduler spawns a monitorLimit
 // goroutine that periodically calls task.SetTaskWorkerConcurrent, which
 // nil-panics (recovered, but noisy) when the task package was never init'ed.
+//
+// Bootstrap is process-global and one-shot: the first call performs the init
+// and every later call is a no-op returning the first call's result, so the
+// config path is fixed by the first call. Library consumers must not expect
+// to re-init with a different config in the same process.
 func Bootstrap(ctx context.Context, configPath string) error {
+	bootOnce.Do(func() {
+		bootErr = bootstrap(ctx, configPath)
+	})
+	return bootErr
+}
+
+var (
+	bootOnce sync.Once
+	bootErr  error
+)
+
+func bootstrap(ctx context.Context, configPath string) error {
 	if configPath == "" {
 		return errors.New("sim: config path is required")
 	}
@@ -42,6 +60,14 @@ func Bootstrap(ctx context.Context, configPath string) error {
 	}
 	if _, err := config.Init(); err != nil {
 		return fmt.Errorf("sim: config.Init: %w", err)
+	}
+	// With ignore_redis_allocation the filters' EffectiveAllocated is 0, so
+	// the scheduler never observes the sim's in-process usage pushes and the
+	// quota gates never bind — every utilization/balance metric degenerates.
+	if sc := config.GetConfig().Scheduler; sc != nil && sc.ShouldIgnoreRedisAllocation() {
+		fmt.Fprintln(os.Stderr, "schedsim: WARNING: scheduler.ignore_redis_allocation=true makes the scheduler "+
+			"ignore the sim's allocation pushes; quota gates never bind and utilization metrics are meaningless — "+
+			"set it to false for simulation")
 	}
 	// The scheduler core logs per-request at Info/Warn; that would flood the
 	// sim output and pollute the Select latency measurement.
@@ -355,6 +381,21 @@ func (e *engine) runEvents(ctx context.Context) {
 		// the virtual time it persisted.
 		e.sampler.Advance(ev.timeMs, e.snapshot())
 	}
+
+	// Close the averaging window at a trace-derived horizon instead of the
+	// last event. Rejected requests push no expiry, so an event-derived
+	// window would end earlier for configs that reject the trace tail — the
+	// time denominator would drift with the scheduler's own success rate and
+	// break A/B comparability. max(arrival_ms)+max(lifetime_ms) upper-bounds
+	// every admitted placement's expiry, and every admitted placement has
+	// expired by then, so the tail credits only the drained (zero-load) state.
+	var horizonMs int64
+	for _, r := range e.p.Trace.Requests {
+		if end := r.ArrivalMs + r.LifetimeMs; end > horizonMs {
+			horizonMs = end
+		}
+	}
+	e.sampler.Advance(horizonMs, e.snapshot())
 }
 
 func (e *engine) onCreate(ctx context.Context, ev event) {

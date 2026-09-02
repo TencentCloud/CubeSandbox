@@ -257,3 +257,42 @@ func TestNoteTemplatePlacementWarmsUp(t *testing.T) {
 	}
 	e.cleanup() // deregister exactly what was registered
 }
+
+// TestRunRoundAveragingWindowIsTraceDerived: the time-averaging window must
+// close at the trace-derived horizon max(arrival_ms)+max(lifetime_ms), not at
+// the last event — a rejected request pushes no expiry, so an event-derived
+// window would shrink with the scheduler's own success rate and break A/B
+// comparability. Here request #1 (200000 millicores > the 192000 effective
+// free = 64000×3 cpu_ratio) is rejected; the admitted request #0 holds
+// 1000/64000 of the node over [0,10s) and the window runs to 15s, diluting
+// the averages with the drained 5s tail.
+func TestRunRoundAveragingWindowIsTraceDerived(t *testing.T) {
+	bootstrapOnce(t)
+	tr := &Trace{
+		Workload: "test",
+		Templates: []TraceTemplate{
+			{TemplateID: "tpl-win", Weight: 1, CpuMillis: 1000, MemMiB: 2048},
+		},
+		Requests: []TraceRequest{
+			{Seq: 0, ArrivalMs: 0, TemplateID: "tpl-win", CpuMillis: 1000, MemMiB: 2048, LifetimeMs: 10000},
+			{Seq: 1, ArrivalMs: 5000, TemplateID: "tpl-win", CpuMillis: 200000, MemMiB: 2048, LifetimeMs: 10000},
+		},
+	}
+	rr, err := RunRound(context.Background(), Params{
+		Trace:           tr,
+		Nodes:           1,
+		NodeCPUMillis:   64000,
+		NodeMemMiB:      65536,
+		InstanceType:    "sim",
+		TemplatePreload: 1.0,
+		Seed:            11,
+		RoundID:         5,
+	})
+	if err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	s := rr.Summary
+	approx(t, "success_rate", s["success_rate"], 0.5, 1e-9)
+	approx(t, "cpu_alloc_rate", s["cpu_alloc_rate"], (1000.0/64000.0)*(10000.0/15000.0), 1e-9)
+	approx(t, "active_nodes_avg", s["active_nodes_avg"], 10000.0/15000.0, 1e-9)
+}
