@@ -15,7 +15,8 @@ import (
 )
 
 // templateLocalityFilter 模板本地化过滤插件：
-// 保证带有模板的请求只调度到已缓存该模板镜像、且在允许调度范围内的节点
+// 保证携带模板的请求只调度到允许调度范围内的节点，且默认要求节点已缓存该模板镜像
+// （AllowNonLocalTemplate 可放宽本地缓存要求）
 type templateLocalityFilter struct{}
 
 func NewTemplateLocalityFilter() *templateLocalityFilter {
@@ -30,10 +31,10 @@ func (l *templateLocalityFilter) String() string {
 	return l.ID()
 }
 
-// Select 过滤规则（仅当请求携带 TemplateID 时生效）：
+// Select 过滤规则（请求携带 TemplateID 或配置了 TemplateNodeScope 时生效）：
 // 1. 节点必须在模板允许的调度范围内（TemplateNodeScope）；
-// 2. 节点本地必须已缓存模板镜像；
-// 3. 若请求强制要求快照存储，节点还需支持快照存储写入
+// 2. 请求携带 TemplateID 且未开启 AllowNonLocalTemplate 时，节点本地必须已缓存模板镜像；
+// 3. 在规则 2 的前提下，若请求强制要求快照存储，节点还需支持快照存储写入
 func (l *templateLocalityFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	inList := selCtx.Nodes()
 	reqRes := selCtx.GetReqRes()

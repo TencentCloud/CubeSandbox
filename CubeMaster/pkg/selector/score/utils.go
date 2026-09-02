@@ -14,7 +14,10 @@ import (
 )
 
 // getFactorWeightedAverageScore 按启用的因子列表计算节点加权平均分：
-// 每个因子得到一个 0~100 区间的基础分（越高表示资源越空闲/负载越低），再乘以对应权重求和
+// 各因子基础分方向一致（越高越好：资源越空闲/负载越低/指标越新鲜），再乘以对应权重求和。
+// 注意各因子量纲并不统一：多数因子落在 0~100 区间；getMetricUpdateDiff 与
+// getMetricLocalUpdateDiff 返回 ≈[0,1] 的 Unix 时间比值（现实陈旧度下几乎恒为 1）；
+// getCreateLimitScore 直接返回原始并发上限值——调整因子权重时须考虑量纲差异
 func getFactorWeightedAverageScore(n *node.Node, enableWeightFactors []string) float64 {
 	scores := float64(0)
 	for _, v := range enableWeightFactors {

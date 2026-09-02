@@ -8,6 +8,11 @@
 
 - [Redis Key 命名规范](./redis-key-spec)——所有服务在共享 Redis 实例上必须遵循的统一命名空间：命名格式、归属划分、已注册 Key 清单、TTL 策略，以及各服务的 key 构造模块。
 
+## 调度
+
+- [调度插件系统设计](./scheduler-plugin-design)——集群调度性能评估与高性能调度插件系统的设计文档：现状走读结论、指标定义、注册表与 Profile 配置机制、三种内置策略 Profile，以及 benchmark 方案。
+- [调度代码阅读指南](./scheduler-code-reading-guide)——实现上述方案所需的调度代码导读：推荐阅读顺序、关键文件与符号、测试模板与工程规范。
+
 ## 适合放在这里的内容
 
 - 跨服务的数据契约与命名约定（key、消息主题、schema）

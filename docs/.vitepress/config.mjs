@@ -344,9 +344,7 @@ export default withMermaid(defineConfig({
               text: 'Developer Docs',
               items: [
                 { text: 'Overview', link: '/dev/' },
-                { text: 'Redis Key Convention', link: '/dev/redis-key-spec' },
-                { text: 'Scheduler Plugin Design', link: '/dev/scheduler-plugin-design' },
-                { text: 'Scheduler Code Reading Guide', link: '/dev/scheduler-code-reading-guide' }
+                { text: 'Redis Key Convention', link: '/dev/redis-key-spec' }
               ]
             }
           ]
@@ -556,7 +554,9 @@ export default withMermaid(defineConfig({
               text: '开发者文档',
               items: [
                 { text: '概览', link: '/zh/dev/' },
-                { text: 'Redis Key 命名规范', link: '/zh/dev/redis-key-spec' }
+                { text: 'Redis Key 命名规范', link: '/zh/dev/redis-key-spec' },
+                { text: '调度插件系统设计', link: '/zh/dev/scheduler-plugin-design' },
+                { text: '调度代码阅读指南', link: '/zh/dev/scheduler-code-reading-guide' }
               ]
             }
           ]
