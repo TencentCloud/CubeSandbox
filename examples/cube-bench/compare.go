@@ -628,11 +628,11 @@ func renderComparison(c *comparison) string {
 	improved, regressed, noDir := c.conclusions()
 	b.WriteString("\n## Conclusions\n\n")
 	b.WriteString("### Improved (|Δ%| ≥ 5%, beyond combined 95% CI when n ≥ 2)\n\n")
-	writeConclusionList(&b, improved)
+	writeConclusionList(&b, c, improved)
 	b.WriteString("\n### Regressed (|Δ%| ≥ 5%, beyond combined 95% CI when n ≥ 2)\n\n")
-	writeConclusionList(&b, regressed)
+	writeConclusionList(&b, c, regressed)
 	b.WriteString("\n### No direction (n/a)\n\n")
-	writeConclusionList(&b, noDir)
+	writeConclusionList(&b, c, noDir)
 	b.WriteString("\n")
 	return b.String()
 }
@@ -701,14 +701,32 @@ func formatConfigValue(v any) string {
 	}
 }
 
-func writeConclusionList(b *strings.Builder, rows []*compareRow) {
+// rowCountNote annotates a conclusion row when its per-metric sample count
+// is smaller than the group header count (mixed export shapes), so the
+// downgrade from CI-gated to pure |Δ%| is visible where the verdict lands.
+func (c *comparison) rowCountNote(r *compareRow) string {
+	baseN, candN := len(c.baseline.samples), len(c.candidate.samples)
+	var parts []string
+	if r.hasBase && r.base.n != baseN {
+		parts = append(parts, fmt.Sprintf("baseline n=%d/%d", r.base.n, baseN))
+	}
+	if r.hasCand && r.cand.n != candN {
+		parts = append(parts, fmt.Sprintf("candidate n=%d/%d", r.cand.n, candN))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
+}
+
+func writeConclusionList(b *strings.Builder, c *comparison, rows []*compareRow) {
 	if len(rows) == 0 {
 		b.WriteString("- (none)\n")
 		return
 	}
 	for _, r := range rows {
-		fmt.Fprintf(b, "- **%s**: %s (%s → %s)\n",
-			r.key, pctCell(r), formatNum(r.base.mean), formatNum(r.cand.mean))
+		fmt.Fprintf(b, "- **%s**: %s (%s → %s)%s\n",
+			r.key, pctCell(r), formatNum(r.base.mean), formatNum(r.cand.mean), c.rowCountNote(r))
 	}
 }
 

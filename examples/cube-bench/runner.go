@@ -107,8 +107,14 @@ func doBenchCycle(client *http.Client, cfg *Config, body []byte, seq int, delete
 }
 
 // benchOneScheduled runs one pre-generated request: per-request template,
-// server-side TTL hint (timeout = lifetime + 60s), and a client-side DELETE
-// once the lifetime elapses.
+// server-side TTL hint (timeout = trunc(lifetime) + 60s), and a client-side
+// DELETE once the lifetime elapses.
+//
+// Note: the create `timeout` is an *idle* timeout (see
+// docs/guide/lifecycle.md) — any sandbox activity refreshes the deadline.
+// cube-bench never touches a sandbox after create, so here it behaves like a
+// wall-clock fallback cap; the client-side DELETE remains the primary
+// lifetime enforcement.
 func benchOneScheduled(client *http.Client, cfg *Config, sr ScheduledRequest) IterResult {
 	var timeoutS *int64
 	if sr.Lifetime > 0 {

@@ -42,8 +42,13 @@ func newModel(cfg *Config, resultCh <-chan IterResult) model {
 		resultCh: resultCh,
 		total:    cfg.Total,
 		progress: p,
-		qpsStart: time.Now(),
-		width:    80,
+		// The model is created as the dispatcher starts, so key elapsed/
+		// in-flight off creation time, not the first completion — for
+		// lifetime-bearing runs the first result only arrives after a full
+		// create → lifetime-sleep → delete cycle.
+		startTime: time.Now(),
+		qpsStart:  time.Now(),
+		width:     80,
 	}
 }
 

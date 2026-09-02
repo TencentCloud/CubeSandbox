@@ -102,13 +102,17 @@ export CUBE_TEMPLATE_ID=<your-template-id>
 ./bin/cube-bench --dry-run --theme light -c 10 -n 100
 
 # Scheduled workload presets (Poisson arrivals + per-sandbox lifetimes)
-./bin/cube-bench --workload burst -t <template-id>
-./bin/cube-bench --workload template_storm -t <template-id> --seed 7
-./bin/cube-bench --workload mixed_spec \
+# NOTE: pass --concurrency explicitly — a worker slot is held for the full
+# sandbox lifetime, so honoring the preset rate needs ≈ rate x mean lifetime
+# slots (burst ≈ 3250, template_storm ≈ 1800); the default -c 5 stalls the
+# dispatcher and the run degrades to ASAP pacing (the tool warns at startup).
+./bin/cube-bench --workload burst -t <template-id> -c 3500
+./bin/cube-bench --workload template_storm -t <template-id> --seed 7 -c 2000
+./bin/cube-bench --workload mixed_spec -c 2000 \
   --templates 'tpl-1c2g:6:1000:2048,tpl-2c4g:3:2000:4096,tpl-8c16g:1:8000:16384'
 
 # Ad-hoc schedule without a preset: 20 req/s Poisson, 5-30s lifetimes
-./bin/cube-bench -t <template-id> --rate 20 --lifetime 5,30 -n 200
+./bin/cube-bench -t <template-id> --rate 20 --lifetime 5,30 -n 200 -c 400
 
 # Dry-run a preset and keep the exact request sequence as a trace file
 ./bin/cube-bench --dry-run --workload burst --no-tui \
@@ -131,10 +135,14 @@ In scheduled mode the whole request sequence is **pre-generated** from `--seed`
 (same seed ⇒ identical sequence): Poisson inter-arrival times
 (`Exp(λ)`, first request at t=0), uniform lifetimes in `[min,max]`, and
 weighted random template picks. Each create body carries the picked
-`templateID` and `timeout = lifetime + 60s` as a server-side fallback TTL; the
-client issues the DELETE itself when the lifetime expires. (The TTL is set in
-`create-only` mode too — intentional, so lifetime-bearing presets don't leak
-sandboxes when the client never DELETEs.) The report and JSON
+`templateID` and `timeout = trunc(lifetime) + 60s` as a server-side fallback
+TTL; the client issues the DELETE itself when the lifetime expires. (The TTL
+is set in `create-only` mode too — intentional, so lifetime-bearing presets
+don't leak sandboxes when the client never DELETEs.) Two caveats on the
+fallback: `timeout` is an *idle* timeout (see `docs/guide/lifecycle.md`), so
+it only acts as a wall-clock cap because the bench never touches a sandbox
+after create; and the seconds truncation makes the effective value up to 1s
+shorter than `lifetime + 60s`. The report and JSON
 export add queue-delay percentiles (scheduled vs actual start) and per-template
 create counts/success rates.
 
