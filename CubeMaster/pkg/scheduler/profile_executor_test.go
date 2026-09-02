@@ -57,6 +57,28 @@ func (partialScore) Select(selection *selctx.SelectorCtx) (node.NodeScoreList, e
 	return node.NodeScoreList{{InsID: candidate.ID(), OrigNode: candidate, Score: 90}}, nil
 }
 
+// panicScore models a defective plugin: the panic is a defect-class failure,
+// not a transport error, so no policy may mask it.
+type panicScore struct{}
+
+func (panicScore) ID() string      { return "panic-score" }
+func (panicScore) Weight() float64 { return 1 }
+func (panicScore) Disable() bool   { return false }
+func (panicScore) Select(*selctx.SelectorCtx) (node.NodeScoreList, error) {
+	panic("boom")
+}
+
+// disabledScore models a globally-disabled built-in scorer: it must be
+// skipped before Select, on every pipeline.
+type disabledScore struct{}
+
+func (disabledScore) ID() string      { return "disabled-score" }
+func (disabledScore) Weight() float64 { return 1 }
+func (disabledScore) Disable() bool   { return true }
+func (disabledScore) Select(*selctx.SelectorCtx) (node.NodeScoreList, error) {
+	return nil, errors.New("disabled scorer must not be called")
+}
+
 // foreignNodeScore returns a node outside the candidate set, which the
 // pre-plugin scheduler silently merged into the aggregate.
 type foreignNodeScore struct{}
@@ -192,6 +214,39 @@ func TestRunProfileScoresInvalidOutputFailsDespiteDefaultScore(t *testing.T) {
 	}
 	if isNoCandidateError(err) {
 		t.Fatal("a validation failure must not be classified as an empty candidate set")
+	}
+}
+
+func TestRunProfileScoresPanicFailsDespiteDefaultScore(t *testing.T) {
+	// A panicking scorer is a defect-class failure, not a transport error:
+	// default-score must fail closed instead of hiding the defect behind a
+	// constant score.
+	selection := executorContext()
+	err := runProfileScores(selection, []profile.ScorePlugin{{
+		Name: "panicky", Selector: panicScore{}, Weight: 1, Failure: profile.ScoreDefaultScore,
+		DefaultScore: 25, ForceEnabled: true,
+	}})
+	if err == nil {
+		t.Fatal("a panicking scorer must fail closed even under the default-score policy")
+	}
+}
+
+func TestRunProfileScoresHonorsDisableForProfileScorers(t *testing.T) {
+	// A globally-disabled built-in scorer referenced by a profile is skipped
+	// like the legacy path — not run into a completeness failure on every
+	// request. The expr/gRPC plugin selectors report Disable()==false, so
+	// their profile bindings are unaffected.
+	selection := executorContext()
+	err := runProfileScores(selection, []profile.ScorePlugin{
+		{Name: "disabled", Selector: disabledScore{}, Weight: 1, Failure: profile.ScoreFailClosed, ForceEnabled: true},
+		{Name: "values", Selector: executorScore{id: "values", values: map[string]float64{"n1": 100, "n2": 0}}, Weight: 1, Failure: profile.ScoreFailClosed, ForceEnabled: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := selection.LeastScoreNodes(-1)
+	if len(got) != 2 || got[0].Score != 100 || got[1].Score != 0 {
+		t.Fatalf("scores = %+v", got)
 	}
 }
 

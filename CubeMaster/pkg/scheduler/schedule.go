@@ -470,6 +470,10 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 		nodes node.NodeScoreList
 		err   error
 		skip  bool
+		// defect marks defect-class failures (a panic or a nil binding) as
+		// opposed to transport/invocation errors: a defective plugin must
+		// fail closed even under the default-score policy.
+		defect bool
 	}
 	results := make([]scoreResult, len(scores))
 	// The stage deliberately runs every plugin to completion, so no derived
@@ -481,14 +485,21 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 			defer func() {
 				if recovered := recover(); recovered != nil {
 					results[index].err = fmt.Errorf("score plugin %q panic: %v", scores[index].Name, recovered)
+					results[index].defect = true
 				}
 			}()
 			selector := scores[index].Selector
 			if selector == nil {
 				results[index].err = fmt.Errorf("score plugin %q is nil", scores[index].Name)
+				results[index].defect = true
 				return nil
 			}
-			if !scores[index].ForceEnabled && selector.Disable() {
+			// The scorer-level Disable() switch is honored for every binding,
+			// profile-compiled ones included: the expr/gRPC plugin selectors
+			// report Disable()==false unconditionally, and a disabled built-in
+			// go scorer self-gates to an empty result, which would otherwise
+			// hard-fail the completeness check on every profile request.
+			if selector.Disable() {
 				results[index].skip = true
 				return nil
 			}
@@ -515,9 +526,11 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 		if result.skip {
 			continue
 		}
-		// validationErr marks errors raised by output validation below, as
-		// opposed to a transport/invocation failure from calling the plugin.
-		validationErr := false
+		// validationErr marks defect-class errors: malformed output caught by
+		// the validation below, plus panics/nil bindings flagged in the
+		// goroutine — as opposed to a transport/invocation failure from
+		// calling the plugin.
+		validationErr := result.defect
 		if result.err == nil {
 			seen := make(map[string]struct{}, len(result.nodes))
 			for _, scored := range result.nodes {
@@ -563,9 +576,10 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 			case profile.ScoreDefaultScore:
 				if validationErr {
 					// default-score absorbs transport/invocation failures
-					// only. Malformed output means the plugin is defective:
-					// fail closed rather than mask the defect behind a
-					// constant score for every candidate.
+					// only. A defect-class failure (malformed output, panic,
+					// nil binding) means the plugin is defective: fail closed
+					// rather than mask the defect behind a constant score
+					// for every candidate.
 					return ret.Err(errorcode.ErrorCode_MasterInternalError, result.err.Error())
 				}
 				log.G(selCtx.Ctx).Warnf("scheduler score %q failed; using default score %.2f: %v", binding.Name, binding.DefaultScore, result.err)

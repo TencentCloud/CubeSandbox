@@ -92,7 +92,9 @@ func (w *schedulerConfigWatcher) OnEvent(updated *config.Config) {
 	if previous != nil {
 		// Close is lease-aware: in-flight scheduling calls keep using the old
 		// immutable set and its external plugin connections until they finish.
-		_ = previous.Close()
+		if err := previous.Close(); err != nil {
+			log.G(w.ctx).Errorf("scheduler profiles: closing the retired set: %v", err)
+		}
 	}
 	log.G(w.ctx).Infof("scheduler profiles reloaded: %v", compiled.Names())
 }
