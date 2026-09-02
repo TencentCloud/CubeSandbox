@@ -332,6 +332,8 @@ func TestMetricDirection(t *testing.T) {
 		{"total_time_s", dirNA},
 		{"queue_depth", dirNA},
 		{"create.count", dirNA}, // counts are not a quality signal
+		{"summary.errors", dirNA},
+		{"per_template.tpl-a.attempts", dirNA},
 	}
 	for _, tc := range cases {
 		if got := metricDirection(tc.key); got != tc.want {

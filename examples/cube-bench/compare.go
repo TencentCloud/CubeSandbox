@@ -364,11 +364,27 @@ var (
 	}
 )
 
+// countTokens are whole-token names of raw scale counters, which track
+// workload size (-n, template mix), not the quality of the change under test.
+// They are excluded from direction inference so scale differences are not
+// flagged as regressions. These are exact tokens: "error_rate", "failure_rate"
+// and even "failure_count" stay directional — only bare plural count keys
+// (summary.errors, per_template.<id>.attempts, ...) match.
+var countTokens = map[string]bool{
+	"attempts": true, "created": true, "deleted": true,
+	"errors": true, "failures": true, "successful": true,
+}
+
 func metricDirection(key string) direction {
 	k := strings.ToLower(key)
 	tokens := strings.FieldsFunc(k, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
+	for _, tok := range tokens {
+		if countTokens[tok] {
+			return dirNA
+		}
+	}
 	if len(tokens) > 1 && statBlockGroups[tokens[0]] {
 		for _, tok := range tokens[1:] {
 			if statBlockStats[tok] {
@@ -663,7 +679,7 @@ func writeFileList(b *strings.Builder, label string, g *sampleGroup) {
 // configHighlightKeys are the config fields surfaced in the report metadata
 // when present. Values are de-duplicated per group, so files that differ only
 // by seed render as e.g. "seed=1, 2, 3".
-var configHighlightKeys = []string{"seed", "seeds", "rounds", "workload", "profile", "version", "template", "mode"}
+var configHighlightKeys = []string{"seed", "seeds", "rounds", "workload", "profile", "version", "template", "templates", "mode"}
 
 func configHighlights(label string, g *sampleGroup) string {
 	var parts []string

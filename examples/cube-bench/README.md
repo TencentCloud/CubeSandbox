@@ -115,6 +115,8 @@ export CUBE_TEMPLATE_ID=<your-template-id>
 ./bin/cube-bench -t <template-id> --rate 20 --lifetime 5,30 -n 200 -c 400
 
 # Dry-run a preset and keep the exact request sequence as a trace file
+# (dry-run clamps the per-sandbox lifetime sleep to 25ms, so even burst
+# finishes in seconds at the default concurrency)
 ./bin/cube-bench --dry-run --workload burst --no-tui \
   -o report.json --dump-trace trace.json
 # The same trace can then be replayed by an external scheduling simulator.
@@ -222,7 +224,15 @@ bad-when-rising rates such as `restart_rate`/`preempt_rate`/`evict_rate`/
 It accepts both cube-bench exports (`summary` plus the top-level
 `create`/`delete` stat blocks are flattened recursively) and schedsim reports
 (each entry of a top-level `rounds` array counts as one sample), so
-real-cluster runs and simulator runs can be compared with the same command. A
+real-cluster runs and simulator runs can be compared with the same command.
+
+Metrics pair by exact flattened key, so a cross-tool run only compares what
+both tools emit: between a cube-bench export and a schedsim report that is
+essentially `success_rate` — cube-bench measures the client side, schedsim the
+scheduler side, and one-sided keys (cube-bench's `create.*`/`delete.*` blocks
+and `queue_delay_*`; schedsim's `sched_latency_*`, `cpu_alloc_rate`, ...)
+correctly render as "—". Same-tool A/B (cube-bench vs cube-bench, schedsim vs
+schedsim) is where the full metric set lines up. A
 metric is flagged in the conclusions when the verdict direction matches,
 |Δ%| ≥ 5%, and — whenever both sides have n ≥ 2 — the delta exceeds the
 combined CI half-widths, so small-sample noise is not flagged as a verdict.
@@ -303,8 +313,10 @@ contract still receives `metadata` as strings:
 - Built-in `--network-policy rules` mode for create-with-rules latency
 - Dark/light/auto theme detection
 - JSON report export (`-o report.json`)
-- Dry-run mode for testing without a CubeSandbox server (scheduled mode is
-  seed-reproducible in dry-run too)
+- Dry-run mode for testing without a CubeSandbox server (in scheduled mode the
+  request sequence and the synthetic create/delete latencies are
+  seed-reproducible; wall-clock timing metrics — `queue_delay_*`,
+  `dispatch_window_s`/`dispatch_qps` — are not)
 
 ## Clean up
 

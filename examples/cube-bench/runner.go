@@ -29,6 +29,12 @@ type createResp struct {
 	SandboxID string `json:"sandboxID"`
 }
 
+// dryRunMaxLifetimeSleep caps the per-sandbox occupancy sleep in dry-run
+// scheduled mode. Dry-run exists for fast determinism smoke tests, not
+// occupancy modeling, so lifetime-bearing presets must not stall for hours;
+// the planned lifetime is still recorded in IterResult.LifetimeMs.
+const dryRunMaxLifetimeSleep = 25 * time.Millisecond
+
 func benchOne(client *http.Client, cfg *Config, seq int) IterResult {
 	return doBenchCycle(client, cfg, cfg.requestBody, seq, 0)
 }
@@ -157,7 +163,11 @@ func benchOneDry(cfg *Config, seq int) IterResult {
 
 // benchOneDryScheduled simulates one scheduled request. Randomness comes from
 // a per-request rng derived from (seed, seq), so a fixed --seed reproduces the
-// exact same latencies/errors regardless of goroutine scheduling.
+// exact same latencies/errors regardless of goroutine scheduling. The
+// occupancy sleep is clamped to dryRunMaxLifetimeSleep: dry-run is the fast
+// smoke path, and with real lifetimes a lifetime-bearing preset (e.g. burst =
+// 500 × 10–120s) cannot finish in reasonable time at moderate concurrency.
+// The recorded LifetimeMs still carries the planned value.
 func benchOneDryScheduled(cfg *Config, sr ScheduledRequest) IterResult {
 	rng := rand.New(rand.NewSource(cfg.Seed*1000003 + int64(sr.Seq) + 1))
 	r := IterResult{Seq: sr.Seq}
@@ -175,8 +185,8 @@ func benchOneDryScheduled(cfg *Config, sr ScheduledRequest) IterResult {
 	}
 
 	if cfg.Mode == "create-delete" {
-		if sr.Lifetime > 0 {
-			time.Sleep(sr.Lifetime)
+		if lt := min(sr.Lifetime, dryRunMaxLifetimeSleep); lt > 0 {
+			time.Sleep(lt)
 		}
 		deleteLat := cfg.DryLatencyMean*0.4 + cfg.DryLatencyStd*0.5*rng.NormFloat64()
 		if deleteLat < 1 {
