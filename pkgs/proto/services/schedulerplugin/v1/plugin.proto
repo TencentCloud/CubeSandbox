@@ -41,12 +41,17 @@ message SnapshotNode {
   string id = 1;
   string ip = 2;
   bool healthy = 3;
+  // Physical CPU core count (NOT milli-cores). The quota_cpu/allocated_cpu
+  // fields below and RequestContext.cpu_millis are milli-cores; convert
+  // before comparing capacity.
   int64 cpu_total = 4;
   double cpu_util = 5;
   double cpu_load = 6;
   int64 mem_total_mb = 7;
   int64 mem_usage_mb = 8;
+  // Milli-cores.
   int64 quota_cpu = 9;
+  // Milli-cores.
   int64 allocated_cpu = 10;
   int64 quota_mem_mb = 11;
   int64 allocated_mem_mb = 12;

@@ -13,6 +13,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/filter"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/plugin/expr"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/score"
 )
 
@@ -85,5 +86,58 @@ func TestRegistryProviderBuildsDynamicPlugin(t *testing.T) {
 	}
 	if selector.ID() != "filter/test" {
 		t.Fatalf("selector ID = %q", selector.ID())
+	}
+}
+
+// TestRegistryBuildsExprPluginsEndToEnd exercises the provider path the
+// integration half relies on: register the real CEL providers, build plugins
+// through BuildFilter/BuildScore, and run them against a frozen selection.
+func TestRegistryBuildsExprPluginsEndToEnd(t *testing.T) {
+	registry := NewRegistry()
+	if err := registry.RegisterFilterProvider(TypeExpression, expr.NewFilter); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.RegisterScoreProvider(TypeExpression, expr.NewScore); err != nil {
+		t.Fatal(err)
+	}
+	exprFilter, err := registry.BuildFilter(context.Background(), config.SchedulerProfilePluginConf{
+		Name: "healthy_only", Type: TypeExpression, Expr: "node.healthy",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exprScore, err := registry.BuildScore(context.Background(), config.SchedulerProfilePluginConf{
+		Name: "cpu_util", Type: TypeExpression, Expr: "node.cpu_util",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	filterSelection := selctx.New("")
+	filterSelection.SetNodes(node.NodeList{
+		{InsID: "healthy", Healthy: true, CpuUtil: 10},
+		{InsID: "unhealthy", Healthy: false, CpuUtil: 90},
+	})
+	filterSelection.FreezeSnapshot()
+	kept, err := exprFilter.Select(filterSelection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.Len() != 1 || kept[0].ID() != "healthy" {
+		t.Fatalf("expr filter kept %v", kept)
+	}
+
+	scoreSelection := selctx.New("")
+	scoreSelection.SetNodes(node.NodeList{
+		{InsID: "idle", Healthy: true, CpuUtil: 10},
+		{InsID: "busy", Healthy: true, CpuUtil: 90},
+	})
+	scoreSelection.FreezeSnapshot()
+	scored, err := exprScore.Select(scoreSelection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scored.Len() != 2 || scored[0].Score != 10 || scored[1].Score != 90 {
+		t.Fatalf("expr scores = %+v", scored)
 	}
 }

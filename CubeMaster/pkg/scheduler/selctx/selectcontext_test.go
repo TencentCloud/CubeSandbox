@@ -98,3 +98,21 @@ func TestFreezeSnapshotVersionsAreUnique(t *testing.T) {
 		t.Fatalf("SnapshotVersion %q is not unique per request", first.SnapshotVersion)
 	}
 }
+
+func TestFreezeSnapshotDefersUntilCandidatesAttached(t *testing.T) {
+	slctx := New("")
+	// No candidate pool yet: the freeze must be deferred, leaving the version
+	// empty so external plugins fail closed instead of syncing an empty pool.
+	slctx.FreezeSnapshot()
+	if slctx.SnapshotVersion != "" {
+		t.Fatalf("SnapshotVersion = %q, want empty before candidates attach", slctx.SnapshotVersion)
+	}
+	slctx.SetNodes(node.NodeList{{InsID: "n1"}})
+	slctx.FreezeSnapshot()
+	if slctx.SnapshotVersion == "" {
+		t.Fatal("SnapshotVersion is empty after candidates attached")
+	}
+	if slctx.SnapshotNodes().Len() != 1 {
+		t.Fatalf("SnapshotNodes().Len() = %d, want 1", slctx.SnapshotNodes().Len())
+	}
+}

@@ -148,6 +148,12 @@ func newClientFromConn(ctx context.Context, conf config.SchedulerProfilePluginCo
 	if cooldown <= 0 {
 		cooldown = 30 * time.Second
 	}
+	// Note on defaults: the connection is lazy (no grpc.WithBlock), so a dead
+	// plugin surfaces as per-RPC Unavailable errors. With the default
+	// threshold/cooldown, up to `threshold` scheduling requests per cooldown
+	// window each pay the full per-call timeout before the circuit opens —
+	// the per-request scheduling budget must absorb timeout x threshold after
+	// a plugin crash.
 	c := &client{
 		name: name, timeout: timeout, capability: capability,
 		connection: connection, rpc: schedulerplugin.NewSchedulerPluginClient(connection),
@@ -191,13 +197,16 @@ func (c *client) call(ctx context.Context, invoke func(context.Context) error) e
 	callCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	if err := invoke(callCtx); err != nil {
-		// Count only plugin-attributable failures. When the parent context is
-		// done, the cancellation came from the caller (the scheduling request
-		// was aborted), not from the plugin — a burst of aborted requests must
-		// not open the circuit against a healthy plugin. The plugin's own
-		// slowness trips callCtx's deadline while the parent stays alive, so
-		// it is still counted.
-		if ctx.Err() == nil {
+		// Count only plugin-attributable failures. An explicit caller
+		// cancellation (context.Canceled on the parent) means the scheduling
+		// request was aborted, not that the plugin is unhealthy — a burst of
+		// aborted requests must not open the circuit against a healthy
+		// plugin. A parent DEADLINE expiry is still counted: the plugin call
+		// was in flight when the request's time budget ran out, which is
+		// indistinguishable from a slow plugin. The plugin's own slowness
+		// trips callCtx's deadline while the parent stays alive, so it is
+		// counted as well.
+		if !errors.Is(ctx.Err(), context.Canceled) {
 			c.breaker.failed()
 		}
 		return err
@@ -269,9 +278,25 @@ func snapshotNode(selection *selctx.SelectorCtx, candidate *node.Node) *schedule
 		Labels:         cloneMap(candidate.Labels()),
 		LocalTemplates: append([]string(nil), candidate.LocalTemplates...),
 	}
-	if facts, ok := selection.SnapshotFacts(candidate.ID()); ok {
-		result.TemplateLocal = facts.TemplateLocal
+	facts, known := selection.SnapshotFacts(candidate.ID())
+	if known {
 		result.SnapshotStorageWritable = facts.SnapshotStorageAllowed
+		if facts.TemplateLocalKnown {
+			result.TemplateLocal = facts.TemplateLocal
+		}
+	}
+	// Mirror the expr plugin's activation: when locality facts are absent or
+	// unknown and the request names a template, derive TemplateLocal from the
+	// node's LocalTemplates so CEL and gRPC plugins observe the same value.
+	if !known || !facts.TemplateLocalKnown {
+		if resources := selection.GetReqRes(); resources != nil && resources.TemplateID != "" {
+			for _, templateID := range result.LocalTemplates {
+				if templateID == resources.TemplateID {
+					result.TemplateLocal = true
+					break
+				}
+			}
+		}
 	}
 	return result
 }

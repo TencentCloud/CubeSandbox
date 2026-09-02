@@ -268,6 +268,8 @@ func (r *Registry) BuildScore(ctx context.Context, conf config.SchedulerProfileP
 }
 
 // Names returns stable, human-readable registered names for diagnostics.
+// Names are normalized (lowercased) registration keys, so they may differ in
+// case from the profiles[].name an operator configured.
 func (r *Registry) Names() []string {
 	if r == nil {
 		return nil

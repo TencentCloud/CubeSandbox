@@ -239,4 +239,17 @@ func TestCallDoesNotCountCallerCancellationAgainstBreaker(t *testing.T) {
 	if err := c.breaker.before(); !errors.Is(err, ErrCircuitOpen) {
 		t.Fatalf("plugin failures did not open the breaker: %v", err)
 	}
+
+	// A parent DEADLINE expiring mid-call is also counted: the plugin was
+	// still working when the request's time budget ran out, which is
+	// indistinguishable from a slow plugin.
+	deadlineClient := &client{name: "fake", timeout: time.Minute, breaker: breaker{threshold: 2, cooldown: time.Minute}}
+	expired, cancelDeadline := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelDeadline()
+	for i := 0; i < 2; i++ {
+		_ = deadlineClient.call(expired, func(ctx context.Context) error { return ctx.Err() })
+	}
+	if err := deadlineClient.breaker.before(); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("parent deadline expiries did not open the breaker: %v", err)
+	}
 }

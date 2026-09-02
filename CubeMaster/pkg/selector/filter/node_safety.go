@@ -21,17 +21,20 @@ import (
 // checks; keeping them in the custom Profile guard set prevents an explicitly
 // configured backoff policy from bypassing them.
 //
-// The checks deliberately mirror pkg/selector/prefilter exactly — same
-// timeout (MetricUpdateTimeout) for both metric timestamps — so the guard
-// never drops a node the canonical prefilter would have kept.
-// SchedulerConf.LocalMetricUpdateTimeout exists in conf.yaml but is
-// referenced nowhere else in the codebase; until the canonical prefilter
-// adopts a dedicated local-metric timeout, this guard shares
-// MetricUpdateTimeout for the local timestamp as well so the two paths
-// cannot disagree. One intentional divergence: the prefilter Fatalf's on
-// CpuLoadUsage > CpuTotal (an invariant violation worth a crash in the
-// canonical path), while this guard drops the node — a profile guard must
-// not take the scheduler down.
+// The checks deliberately mirror pkg/selector/prefilter: same timeout
+// (MetricUpdateTimeout) for both metric timestamps, so the guard never drops
+// a node the canonical prefilter would have kept. SchedulerConf.
+// LocalMetricUpdateTimeout exists in conf.yaml but is referenced nowhere else
+// in the codebase; until the canonical prefilter adopts a dedicated
+// local-metric timeout, this guard shares MetricUpdateTimeout for the local
+// timestamp as well so the two paths cannot disagree. The one behavioral gap
+// is a disabled timeout: the prefilter compares unconditionally (so a zero
+// timeout drops every node there), while this guard treats timeout <= 0 as
+// "staleness check off" — a defensible reading of a configuration that is
+// unusable for the canonical path anyway. One intentional divergence: the
+// prefilter Fatalf's on CpuLoadUsage > CpuTotal (an invariant violation worth
+// a crash in the canonical path), while this guard drops the node — a
+// profile guard must not take the scheduler down.
 type nodeSafetyFilter struct{}
 
 func NewNodeSafetyFilter() *nodeSafetyFilter { return &nodeSafetyFilter{} }

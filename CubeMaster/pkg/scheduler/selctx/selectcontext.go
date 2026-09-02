@@ -80,30 +80,33 @@ var snapshotSequence atomic.Uint64
 // ownership explicit and protects callers that inject nodes in tests or
 // benchmark simulations.
 //
-// Call it once per scheduling request, BEFORE any filter narrows the
-// candidate set. The call is idempotent: re-invoking is a no-op, so a second
-// freeze can neither shrink the "stable snapshot" SnapshotNodes advertises
-// nor desync external plugins with a fresh SnapshotVersion mid-request.
-// SnapshotVersion is a process-unique sequence number (not wall-clock
-// derived), so it stays stable for the life of the request. Note the frozen
-// result and the snapshot share node pointers, so in-place mutation of a
-// node (there should be none on the read path) is visible through both.
+// Call it once per scheduling request, AFTER the full candidate pool is
+// attached and BEFORE any filter narrows it. The call is idempotent:
+// re-invoking is a no-op, so a second freeze can neither shrink the "stable
+// snapshot" SnapshotNodes advertises nor desync external plugins with a
+// fresh SnapshotVersion mid-request. While no candidate pool is attached
+// (result == nil) the freeze is DEFERRED — the call is a no-op that leaves
+// SnapshotVersion empty, so external plugins fail closed ("snapshot version
+// is empty") instead of syncing an empty node pool and then being asked to
+// filter candidates they never saw. SnapshotVersion is a process-unique
+// sequence number (not wall-clock derived), so it stays stable for the life
+// of the request. Note the frozen result and the snapshot share node
+// pointers, so in-place mutation of a node (there should be none on the
+// read path) is visible through both.
 func (s *SelectorCtx) FreezeSnapshot() {
-	if s == nil || s.snapshotFrozen {
+	if s == nil || s.snapshotFrozen || s.result == nil {
 		return
 	}
 	s.snapshotFrozen = true
 	if s.Ctx == nil {
 		s.Ctx = context.Background()
 	}
-	if s.result != nil {
-		frozen := make(node.NodeList, 0, len(s.result))
-		for _, candidate := range s.result {
-			frozen = append(frozen, candidate.Clone())
-		}
-		s.result = frozen
-		s.snapshot = append(node.NodeList(nil), frozen...)
+	frozen := make(node.NodeList, 0, len(s.result))
+	for _, candidate := range s.result {
+		frozen = append(frozen, candidate.Clone())
 	}
+	s.result = frozen
+	s.snapshot = append(node.NodeList(nil), frozen...)
 	if s.ReqRes != nil {
 		request := *s.ReqRes
 		request.TemplateNodeScope = append([]string(nil), s.ReqRes.TemplateNodeScope...)
