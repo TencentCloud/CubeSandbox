@@ -23,6 +23,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -154,11 +155,6 @@ func Load() (*Config, error) {
 	// Environment variable overrides take precedence.
 	overrideFromEnv(cfg)
 
-	// Build DATABASE_URL from individual fields if not set directly.
-	if cfg.DatabaseURL == "" {
-		cfg.DatabaseURL = cfg.buildMySQLURL()
-	}
-
 	// Default durations.
 	if cfg.AccessTTL == 0 {
 		cfg.AccessTTL = 15 * time.Minute
@@ -218,101 +214,114 @@ func Load() (*Config, error) {
 
 	// JWT_SECRET is optional — if not set, it will be auto-generated and
 	// persisted to the DB on first startup (see store.bootstrapJWTSecret).
-	if cfg.DatabaseURL == "" {
-		return nil, fmt.Errorf("database_url (or mysql_host + mysql_user + mysql_password + mysql_db) is required (set in YAML %s or via DATABASE_URL env)",
+	// Database must come from either DATABASE_URL or the mysql_host* fields.
+	if cfg.DatabaseURL == "" && strings.TrimSpace(cfg.MySQLHost) == "" {
+		return nil, fmt.Errorf("database_url or mysql_host is required (set in YAML %s or via DATABASE_URL / CUBE_SANDBOX_MYSQL_HOST env)",
 			yamlConfigPath())
 	}
 
 	return cfg, nil
 }
 
-// DaoConfig converts the CubeOps config to a CubeDB dao.Config.
-//
-// If DatabaseURL is set, it is the single source of truth and the individual
-// MySQL* fields are ignored. This fixes R06: previously DatabaseURL was
-// accepted by Load() and passed the required-field check, but DaoConfig()
-// silently used the (possibly empty) MySQL* fields instead, causing CubeOps
-// to connect with empty user/db or fall back to localhost.
-//
-// S6 fix: the driver is selected from the URL scheme (mysql:// or
-// postgres://), so PostgreSQL deployments work instead of silently falling
-// back to MySQL and failing on dialect-specific SQL.
-func (c *Config) DaoConfig() dao.Config {
-	// Fast path: no DatabaseURL — use the individual fields as before.
+// DaoConfig maps the config to a CubeDB dao.Config. DatabaseURL wins when
+// set (driver inferred from its scheme); otherwise the MySQL* fields are used
+// directly, so passwords never round-trip through a URL.
+func (c *Config) DaoConfig() (dao.Config, error) {
 	if c.DatabaseURL == "" {
-		return dao.Config{
-			Driver:       "mysql",
-			User:         c.MySQLUser,
-			Pwd:          c.MySQLPassword,
-			Addr:         fmt.Sprintf("%s:%d", c.MySQLHost, c.MySQLPortOrDefault()),
-			DBName:       c.MySQLDB,
-			MaxIdleConns: 10,
-			MaxOpenConns: 100,
-		}
+		return c.daoConfigFromFields()
+	}
+	return daoConfigFromURL(c.DatabaseURL)
+}
+
+// daoConfigFromFields builds a dao.Config directly from the MySQL* fields,
+// failing fast on a missing required field (host, user or database).
+func (c *Config) daoConfigFromFields() (dao.Config, error) {
+	host := strings.TrimSpace(c.MySQLHost)
+	if host == "" {
+		return dao.Config{}, fmt.Errorf("mysql_host is required (set CUBE_SANDBOX_MYSQL_HOST or mysql_host)")
+	}
+	user := strings.TrimSpace(c.MySQLUser)
+	if user == "" {
+		return dao.Config{}, fmt.Errorf("mysql_user is required (set CUBE_SANDBOX_MYSQL_USER or mysql_user)")
+	}
+	dbname := strings.TrimSpace(c.MySQLDB)
+	if dbname == "" {
+		return dao.Config{}, fmt.Errorf("mysql_db is required (set CUBE_SANDBOX_MYSQL_DB or mysql_db)")
+	}
+	return dao.Config{
+		Driver:       "mysql",
+		User:         user,
+		Pwd:          c.MySQLPassword,
+		Addr:         net.JoinHostPort(host, strconv.Itoa(c.MySQLPortOrDefault())),
+		DBName:       dbname,
+		MaxIdleConns: 10,
+		MaxOpenConns: 100,
+	}, nil
+}
+
+// daoConfigFromURL parses a full database URL into a dao.Config, inferring the
+// driver from the scheme (mysql:// or postgres://). Malformed URLs fail fast
+// instead of silently falling back to localhost:3306.
+func daoConfigFromURL(rawURL string) (dao.Config, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		// url.Parse errors can embed the password; keep the message generic.
+		return dao.Config{}, fmt.Errorf("invalid database_url: failed to parse (check scheme, host and password escaping)")
+	}
+	// Redact credentials for any error message that follows.
+	redacted := u.Redacted()
+
+	driver := "mysql"
+	port := 3306
+	switch strings.ToLower(u.Scheme) {
+	case "postgres", "postgresql":
+		driver, port = "postgres", 5432
+	case "mysql", "":
+		// defaults above
+	default:
+		return dao.Config{}, fmt.Errorf("unsupported database_url scheme %q (want mysql:// or postgres://)", u.Scheme)
 	}
 
-	// Parse DatabaseURL and select driver from the scheme.
-	// Supported schemes: mysql://, postgres:// (or postgresql://).
-	driver, user, pass, host, port, dbname := parseDatabaseURL(c.DatabaseURL)
+	host := u.Hostname()
+	if host == "" {
+		// Opaque URLs (missing "//") hide credentials from Redacted().
+		if u.Opaque != "" {
+			return dao.Config{}, fmt.Errorf("invalid database_url: failed to parse (check scheme, host and password escaping)")
+		}
+		return dao.Config{}, fmt.Errorf("database_url %s has no host", redacted)
+	}
+	if h := u.Port(); h != "" {
+		p, err := strconv.Atoi(h)
+		if err != nil {
+			return dao.Config{}, fmt.Errorf("database_url %s has invalid port %q", redacted, h)
+		}
+		port = p
+	}
+
+	var user, pass string
+	if u.User != nil {
+		user = u.User.Username()
+		pass, _ = u.User.Password()
+	}
+	if user == "" {
+		return dao.Config{}, fmt.Errorf("database_url %s has no user", redacted)
+	}
+
+	// Database name is the path without leading "/".
+	dbname := strings.TrimPrefix(u.Path, "/")
+	if dbname == "" {
+		return dao.Config{}, fmt.Errorf("database_url %s has no database name", redacted)
+	}
+
 	return dao.Config{
 		Driver:       driver,
 		User:         user,
 		Pwd:          pass,
-		Addr:         fmt.Sprintf("%s:%d", host, port),
+		Addr:         net.JoinHostPort(host, strconv.Itoa(port)),
 		DBName:       dbname,
 		MaxIdleConns: 10,
 		MaxOpenConns: 100,
-	}
-}
-
-// parseDatabaseURL extracts (driver, user, password, host, port, dbname) from
-// a database URL. The driver is inferred from the scheme:
-//   - mysql://    → "mysql"
-//   - postgres:// or postgresql:// → "postgres"
-//
-// If parsing fails for any component, the caller's individual fields are NOT
-// consulted — the error surfaces as an empty component that the DB driver
-// will reject with a clear "access denied" or "unknown database" message,
-// which is better than silently connecting to the wrong database.
-func parseDatabaseURL(rawURL string) (driver, user, pass, host string, port int, dbname string) {
-	port = 3306 // default (MySQL)
-
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return
-	}
-
-	// Select driver from scheme.
-	scheme := strings.ToLower(u.Scheme)
-	switch scheme {
-	case "postgres", "postgresql":
-		driver = "postgres"
-		port = 5432 // default PG port if not specified
-	case "mysql", "":
-		driver = "mysql"
-	default:
-		driver = scheme // let resolveDriver reject unknown schemes
-	}
-
-	// url.Parse puts user:pass into User, host:port into Host.
-	if u.User != nil {
-		user = u.User.Username()
-		if p, ok := u.User.Password(); ok {
-			pass = p
-		}
-	}
-
-	host = u.Hostname()
-	if h := u.Port(); h != "" {
-		if p, err := strconv.Atoi(h); err == nil {
-			port = p
-		}
-	}
-
-	// Database name is the path without leading "/".
-	dbname = strings.TrimPrefix(u.Path, "/")
-
-	return
+	}, nil
 }
 
 // MySQLPortOrDefault returns the configured MySQL port or 3306.
@@ -321,15 +330,6 @@ func (c *Config) MySQLPortOrDefault() int {
 		return 3306
 	}
 	return c.MySQLPort
-}
-
-// buildMySQLURL builds a mysql:// URL from the individual MySQL fields.
-func (c *Config) buildMySQLURL() string {
-	if c.MySQLHost == "" {
-		return ""
-	}
-	return fmt.Sprintf("mysql://%s:%s@%s:%d/%s",
-		c.MySQLUser, c.MySQLPassword, c.MySQLHost, c.MySQLPortOrDefault(), c.MySQLDB)
 }
 
 func yamlConfigPath() string {
