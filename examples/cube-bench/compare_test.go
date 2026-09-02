@@ -366,6 +366,9 @@ func TestCompareGroupPrefix(t *testing.T) {
 		"per_template.tpl-a.success_rate": "per_template.tpl-a",
 		"per_template.tpl-b.success_rate": "per_template.tpl-b",
 		"per_template.tpl-a":              "per_template.tpl-a",
+		// ids containing dots group by the full id (last-dot split)
+		"per_template.pool.with.dots.error_rate": "per_template.pool.with.dots",
+		"per_template.pool.with.dots.created":    "per_template.pool.with.dots",
 	}
 	for key, want := range cases {
 		if got := groupPrefix(key); got != want {

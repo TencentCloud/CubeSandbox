@@ -640,10 +640,12 @@ func compareVerdict(r *compareRow) verdict {
 // the first '.' or '_' (e.g. "create.p95_ms" -> "create", "queue_depth" ->
 // "queue"). Keys without a separator form their own group. per_template keys
 // group by the template id instead, so a per-template comparison renders one
-// section per template rather than a single jumbled "per" table.
+// section per template rather than a single jumbled "per" table; the id is
+// delimited by the LAST dot (matching classifyKey), so ids containing dots
+// still group correctly.
 func groupPrefix(key string) string {
 	if rest, ok := strings.CutPrefix(key, "per_template."); ok {
-		if i := strings.Index(rest, "."); i > 0 {
+		if i := strings.LastIndex(rest, "."); i > 0 {
 			return "per_template." + rest[:i]
 		}
 		return key

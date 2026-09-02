@@ -582,8 +582,12 @@ func exportJSON(results []IterResult, cfg *Config) {
 		// whole run), this excludes per-sandbox lifetime tails, so it
 		// reflects the arrival rate the scheduler actually saw. Only
 		// meaningful for rate-paced runs: without --rate the "window" is
-		// just the client's release burst, so the keys are omitted.
-		if de := cfg.getDispatchElapsed(); cfg.Rate > 0 && de > 0 {
+		// just the client's release burst, so the keys are omitted. Skipped
+		// on partial runs too: the drained result count undercounts released
+		// requests and the dispatch-elapsed publish races the export, so the
+		// pair would be nondeterministic (compare strips dispatch_* for
+		// partial groups anyway).
+		if de := cfg.getDispatchElapsed(); cfg.Rate > 0 && de > 0 && !partial {
 			summaryBlock["dispatch_window_s"] = de
 			summaryBlock["dispatch_qps"] = float64(len(results)) / de
 		}
