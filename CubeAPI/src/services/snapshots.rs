@@ -22,6 +22,12 @@ pub struct SnapshotService {
     instance_type: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotContext {
+    pub snapshot_id: String,
+    pub origin_sandbox_id: Option<String>,
+}
+
 impl SnapshotService {
     pub fn new(cubemaster: CubeMasterClient, instance_type: String) -> Self {
         Self {
@@ -159,13 +165,16 @@ impl SnapshotService {
         }
     }
 
-    pub async fn has_snapshot(&self, snapshot_id: &str) -> AppResult<bool> {
+    pub async fn get_snapshot_context(
+        &self,
+        snapshot_id: &str,
+    ) -> AppResult<Option<SnapshotContext>> {
         match self.cubemaster.get_snapshot(snapshot_id, false).await {
             Ok(resp) => {
                 resp.ret.as_result().map_err(internal_error)?;
-                Ok(true)
+                Ok(Some(snapshot_resource_to_context(resp.snapshot)))
             }
-            Err(e) if e.is_not_found() => Ok(false),
+            Err(e) if e.is_not_found() => Ok(None),
             Err(e) => Err(internal_error(e)),
         }
     }
@@ -424,11 +433,7 @@ fn snapshot_resource_to_list_item(r: SnapshotResource) -> SnapshotListItem {
         snapshot_id: r.snapshot_id,
         names,
         status: r.status,
-        origin_sandbox_id: if r.origin_sandbox_id.is_empty() {
-            None
-        } else {
-            Some(r.origin_sandbox_id)
-        },
+        origin_sandbox_id: non_empty_string(r.origin_sandbox_id),
         created_at: r.created_at,
         updated_at: r.updated_at,
         backend,
@@ -449,6 +454,21 @@ fn optional_backend(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn snapshot_resource_to_context(r: SnapshotResource) -> SnapshotContext {
+    SnapshotContext {
+        snapshot_id: r.snapshot_id,
+        origin_sandbox_id: non_empty_string(r.origin_sandbox_id),
+    }
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
     }
 }
 
@@ -614,6 +634,25 @@ mod tests {
                 .and_then(|values| values.first())
                 .and_then(|value| value.as_str()),
             Some("snap-name")
+        );
+    }
+
+    #[test]
+    fn snapshot_origin_sandbox_id_normalization_is_consistent() {
+        let mut list_snapshot = sample_snapshot("READY");
+        list_snapshot.origin_sandbox_id = "  \t\n".into();
+        let mut context_snapshot = list_snapshot.clone();
+
+        let list_item = snapshot_resource_to_list_item(list_snapshot);
+        let context = snapshot_resource_to_context(context_snapshot.clone());
+
+        assert_eq!(list_item.origin_sandbox_id, None);
+        assert_eq!(context.origin_sandbox_id, None);
+
+        context_snapshot.origin_sandbox_id = "sb-2".into();
+        assert_eq!(
+            snapshot_resource_to_context(context_snapshot).origin_sandbox_id,
+            Some("sb-2".to_string())
         );
     }
 }

@@ -249,17 +249,22 @@ mod tests {
     use super::build_router;
     use crate::{
         config::ServerConfig,
-        logging::{arc, noop::NoopLogger},
+        logging::{
+            arc, noop::NoopLogger, LogEvent, Logger, EVENT_SANDBOX_ROLLED_BACK,
+            EVENT_SNAPSHOT_CREATED, EVENT_SNAPSHOT_DELETED,
+        },
         state::AppState,
     };
+    use async_trait::async_trait;
     use axum::{
-        extract::Json,
+        extract::{Json, Path},
         http::{header::RETRY_AFTER, StatusCode},
-        routing::delete,
+        routing::{delete, get, post},
         Router,
     };
     use axum_test::TestServer;
     use serde_json::Value;
+    use std::sync::{Arc, Mutex};
 
     async fn test_server() -> TestServer {
         let mut config = ServerConfig::default();
@@ -267,6 +272,449 @@ mod tests {
 
         let state = AppState::new(config, arc(NoopLogger)).await;
         TestServer::new(build_router(state)).expect("router should build")
+    }
+
+    #[derive(Clone)]
+    struct RecordingLogger {
+        events: Arc<Mutex<Vec<LogEvent>>>,
+    }
+
+    #[async_trait]
+    impl Logger for RecordingLogger {
+        async fn log(&self, event: LogEvent) {
+            self.events
+                .lock()
+                .expect("recording logger mutex poisoned")
+                .push(event);
+        }
+
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+    }
+
+    async fn recording_server(
+        cubemaster_router: Router,
+    ) -> (TestServer, Arc<Mutex<Vec<LogEvent>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            axum::serve(listener, cubemaster_router)
+                .await
+                .expect("mock CubeMaster server should run");
+        });
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let config = ServerConfig {
+            cubemaster_url: format!("http://{address}"),
+            ..ServerConfig::default()
+        };
+        let state = AppState::new(
+            config,
+            arc(RecordingLogger {
+                events: events.clone(),
+            }),
+        )
+        .await;
+        (
+            TestServer::new(build_router(state)).expect("router should build"),
+            events,
+        )
+    }
+
+    fn recorded_events(events: &Arc<Mutex<Vec<LogEvent>>>) -> Vec<LogEvent> {
+        events
+            .lock()
+            .expect("recording logger mutex poisoned")
+            .clone()
+    }
+
+    fn field_str(event: &LogEvent, key: &str) -> String {
+        event
+            .fields
+            .get(key)
+            .unwrap_or_else(|| panic!("expected event field `{key}` to exist"))
+            .as_str()
+            .unwrap_or_else(|| panic!("expected event field `{key}` to be a string"))
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn create_snapshot_emits_snapshot_created_event() {
+        async fn sandbox_info() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "sandbox-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-1",
+                    "status": 1,
+                    "template_id": "tpl-1",
+                    "containers": [{
+                        "container_id": "sb-1",
+                        "type": "sandbox",
+                        "cpu": "1000m",
+                        "mem": "128Mi"
+                    }]
+                }]
+            }))
+        }
+
+        async fn template_detail() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "template-detail",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "template_id": "tpl-1",
+                "create_request": {}
+            }))
+        }
+
+        async fn create_snapshot() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "snapshot-create",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "snapshot": {
+                    "snapshot_id": "snap-1",
+                    "names": ["checkpoint"],
+                    "status": "READY",
+                    "origin_sandbox_id": "sb-1"
+                }
+            }))
+        }
+
+        let cubemaster = Router::new()
+            .route("/cube/sandbox/info", get(sandbox_info))
+            .route("/cube/template", get(template_detail))
+            .route("/cube/snapshot", post(create_snapshot));
+        let (server, events) = recording_server(cubemaster).await;
+
+        server
+            .post("/sandboxes/sb-1/snapshots")
+            .json(&serde_json::json!({ "name": "checkpoint" }))
+            .await
+            .assert_status(StatusCode::CREATED);
+
+        let events = recorded_events(&events);
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.event, EVENT_SNAPSHOT_CREATED);
+        assert_eq!(field_str(event, "sandbox_id"), "sb-1");
+        assert_eq!(field_str(event, "snapshot_id"), "snap-1");
+        assert_eq!(
+            event.fields.get("names"),
+            Some(&serde_json::json!(["checkpoint"]))
+        );
+    }
+
+    #[tokio::test]
+    async fn create_snapshot_failure_emits_no_success_event() {
+        async fn sandbox_info() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "sandbox-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-1",
+                    "status": 1,
+                    "template_id": "tpl-1",
+                    "containers": [{
+                        "container_id": "sb-1",
+                        "type": "sandbox",
+                        "cpu": "1000m",
+                        "mem": "128Mi"
+                    }]
+                }]
+            }))
+        }
+
+        async fn template_detail() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "template-detail",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "template_id": "tpl-1",
+                "create_request": {}
+            }))
+        }
+
+        async fn create_snapshot(Json(request): Json<Value>) -> Json<Value> {
+            match request["display_name"].as_str().unwrap_or_default() {
+                "non-ready" => Json(serde_json::json!({
+                    "requestID": "snapshot-create",
+                    "ret": { "ret_code": 0, "ret_msg": "ok" },
+                    "snapshot": {
+                        "snapshot_id": "snap-running",
+                        "names": ["non-ready"],
+                        "status": "RUNNING",
+                        "origin_sandbox_id": "sb-1"
+                    }
+                })),
+                "error" => Json(serde_json::json!({
+                    "requestID": "snapshot-create",
+                    "ret": { "ret_code": 130409, "ret_msg": "snapshot create rejected" }
+                })),
+                name => panic!("unexpected snapshot name: {name}"),
+            }
+        }
+
+        let cubemaster = Router::new()
+            .route("/cube/sandbox/info", get(sandbox_info))
+            .route("/cube/template", get(template_detail))
+            .route("/cube/snapshot", post(create_snapshot));
+        let (server, events) = recording_server(cubemaster).await;
+
+        for (name, expected_status) in [
+            ("non-ready", StatusCode::INTERNAL_SERVER_ERROR),
+            ("error", StatusCode::INTERNAL_SERVER_ERROR),
+        ] {
+            server
+                .post("/sandboxes/sb-1/snapshots")
+                .json(&serde_json::json!({ "name": name }))
+                .await
+                .assert_status(expected_status);
+        }
+
+        assert!(recorded_events(&events).is_empty());
+    }
+
+    #[tokio::test]
+    async fn rollback_sandbox_emits_sandbox_rolled_back_event() {
+        async fn rollback(Path(sandbox_id): Path<String>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "rollback",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "sandbox_id": sandbox_id,
+                "snapshot_id": "snap-1",
+                "operation_id": "op-rollback",
+                "status": "READY"
+            }))
+        }
+
+        let cubemaster = Router::new().route("/cube/sandbox/:sandboxID/rollback", post(rollback));
+        let (server, events) = recording_server(cubemaster).await;
+
+        server
+            .post("/sandboxes/sb-1/rollback")
+            .json(&serde_json::json!({ "snapshotID": "snap-1" }))
+            .await
+            .assert_status(StatusCode::OK);
+
+        let events = recorded_events(&events);
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.event, EVENT_SANDBOX_ROLLED_BACK);
+        assert_eq!(field_str(event, "sandbox_id"), "sb-1");
+        assert_eq!(field_str(event, "snapshot_id"), "snap-1");
+        assert_eq!(field_str(event, "operation_id"), "op-rollback");
+        assert_eq!(field_str(event, "status"), "READY");
+    }
+
+    #[tokio::test]
+    async fn rollback_sandbox_non_ready_response_emits_no_success_event() {
+        async fn rollback(Path(sandbox_id): Path<String>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "rollback",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "sandbox_id": sandbox_id,
+                "snapshot_id": "snap-1",
+                "operation_id": "op-rollback",
+                "status": "RUNNING"
+            }))
+        }
+
+        let cubemaster = Router::new().route("/cube/sandbox/:sandboxID/rollback", post(rollback));
+        let (server, events) = recording_server(cubemaster).await;
+
+        server
+            .post("/sandboxes/sb-1/rollback")
+            .json(&serde_json::json!({ "snapshotID": "snap-1" }))
+            .await
+            .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+
+        assert!(recorded_events(&events).is_empty());
+    }
+
+    #[tokio::test]
+    async fn rollback_sandbox_error_emits_no_success_event() {
+        async fn rollback() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "rollback",
+                "ret": { "ret_code": 130409, "ret_msg": "rollback rejected" }
+            }))
+        }
+
+        let cubemaster = Router::new().route("/cube/sandbox/:sandboxID/rollback", post(rollback));
+        let (server, events) = recording_server(cubemaster).await;
+
+        server
+            .post("/sandboxes/sb-1/rollback")
+            .json(&serde_json::json!({ "snapshotID": "snap-1" }))
+            .await
+            .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+
+        assert!(recorded_events(&events).is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_snapshot_emits_snapshot_deleted_event() {
+        async fn snapshot_detail(Path(snapshot_id): Path<String>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "snapshot-detail",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "snapshot": {
+                    "snapshot_id": snapshot_id,
+                    "status": "READY",
+                    "origin_sandbox_id": "sb-1"
+                }
+            }))
+        }
+
+        async fn delete_snapshot(Path(_snapshot_id): Path<String>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "snapshot-delete",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "operation_id": "op-delete",
+                "status": "READY"
+            }))
+        }
+
+        let cubemaster = Router::new().route(
+            "/cube/snapshot/:snapshotID",
+            get(snapshot_detail).delete(delete_snapshot),
+        );
+        let (server, events) = recording_server(cubemaster).await;
+
+        let response = server.delete("/templates/snap-1").await;
+        response.assert_status(StatusCode::NO_CONTENT);
+        assert_eq!(response.header("x-operation-id"), "op-delete");
+
+        let events = recorded_events(&events);
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.event, EVENT_SNAPSHOT_DELETED);
+        assert_eq!(field_str(event, "snapshot_id"), "snap-1");
+        assert_eq!(field_str(event, "sandbox_id"), "sb-1");
+        assert_eq!(field_str(event, "operation_id"), "op-delete");
+        assert_eq!(field_str(event, "status"), "READY");
+    }
+
+    #[tokio::test]
+    async fn delete_snapshot_without_origin_sandbox_id_omits_sandbox_id_field() {
+        async fn snapshot_detail(Path(snapshot_id): Path<String>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "snapshot-detail",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "snapshot": {
+                    "snapshot_id": snapshot_id,
+                    "status": "READY"
+                }
+            }))
+        }
+
+        async fn delete_snapshot(Path(_snapshot_id): Path<String>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "snapshot-delete",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "operation_id": "op-delete",
+                "status": "READY"
+            }))
+        }
+
+        let cubemaster = Router::new().route(
+            "/cube/snapshot/:snapshotID",
+            get(snapshot_detail).delete(delete_snapshot),
+        );
+        let (server, events) = recording_server(cubemaster).await;
+
+        server
+            .delete("/templates/snap-1")
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+
+        let events = recorded_events(&events);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, EVENT_SNAPSHOT_DELETED);
+        assert!(!events[0].fields.contains_key("sandbox_id"));
+    }
+
+    #[tokio::test]
+    async fn delete_snapshot_failure_emits_no_success_event() {
+        async fn snapshot_detail(Path(snapshot_id): Path<String>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "snapshot-detail",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "snapshot": {
+                    "snapshot_id": snapshot_id,
+                    "status": "READY",
+                    "origin_sandbox_id": "sb-1"
+                }
+            }))
+        }
+
+        async fn delete_snapshot(Path(snapshot_id): Path<String>) -> Json<Value> {
+            match snapshot_id.as_str() {
+                "snap-running" => Json(serde_json::json!({
+                    "requestID": "snapshot-delete",
+                    "ret": { "ret_code": 0, "ret_msg": "ok" },
+                    "operation_id": "op-running",
+                    "status": "RUNNING"
+                })),
+                "snap-error" => Json(serde_json::json!({
+                    "requestID": "snapshot-delete",
+                    "ret": { "ret_code": 130409, "ret_msg": "snapshot delete rejected" }
+                })),
+                id => panic!("unexpected snapshot id: {id}"),
+            }
+        }
+
+        let cubemaster = Router::new().route(
+            "/cube/snapshot/:snapshotID",
+            get(snapshot_detail).delete(delete_snapshot),
+        );
+        let (server, events) = recording_server(cubemaster).await;
+
+        for (snapshot_id, expected_status) in [
+            ("snap-running", StatusCode::INTERNAL_SERVER_ERROR),
+            ("snap-error", StatusCode::INTERNAL_SERVER_ERROR),
+        ] {
+            server
+                .delete(&format!("/templates/{snapshot_id}"))
+                .await
+                .assert_status(expected_status);
+        }
+
+        assert!(recorded_events(&events).is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_regular_template_does_not_emit_snapshot_deleted_event() {
+        async fn snapshot_not_found() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "snapshot-detail",
+                "ret": { "ret_code": 130404, "ret_msg": "snapshot not found" }
+            }))
+        }
+
+        async fn delete_template() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "template-delete",
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        let cubemaster = Router::new()
+            .route("/cube/snapshot/:snapshotID", get(snapshot_not_found))
+            .route("/cube/template", delete(delete_template));
+        let (server, events) = recording_server(cubemaster).await;
+
+        server
+            .delete("/templates/tpl-1")
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+
+        let events = recorded_events(&events);
+        assert!(events
+            .iter()
+            .all(|event| event.event != EVENT_SNAPSHOT_DELETED));
     }
 
     #[tokio::test]

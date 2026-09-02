@@ -7,6 +7,7 @@ If you are *using* CubeSandbox (deploying it, building templates, calling the AP
 ## Conventions
 
 - [Redis Key Convention](./redis-key-spec) — the unified namespace every service must use for the shared Redis instance: naming format, scope ownership, the registered key catalog, TTL policy, and the per-service key-builder modules.
+- [CubeAPI Lifecycle Events](./lifecycle-events) — the `LogEvent` contract, logger pipeline, backend status, emission rules, and event catalog for sandbox and snapshot operations.
 
 ## What belongs here
 

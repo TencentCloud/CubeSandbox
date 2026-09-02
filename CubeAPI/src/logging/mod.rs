@@ -35,6 +35,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+// ─── Event names ───────────────────────────────────────────────────────────
+
+pub const EVENT_SNAPSHOT_CREATED: &str = "snapshot.created";
+pub const EVENT_SANDBOX_ROLLED_BACK: &str = "sandbox.rolled_back";
+pub const EVENT_SNAPSHOT_DELETED: &str = "snapshot.deleted";
+
 // ─── Log level ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

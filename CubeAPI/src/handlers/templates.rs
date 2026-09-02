@@ -14,6 +14,7 @@ use serde::Deserialize;
 
 use crate::{
     error::{AppError, AppResult},
+    logging::{LogEvent, LogLevel, EVENT_SNAPSHOT_DELETED},
     models::{
         ApiError, CreateTemplateRequest, ListTemplatesQuery, RebuildTemplateRequest,
         SetTemplateAliasRequest, TemplateAliasLookupResponse, TemplateBuildJob,
@@ -276,12 +277,30 @@ pub async fn delete_template(
     // branch additionally exposes the operation id via a response header so
     // audit trails / debugging can still correlate the deletion with its
     // CubeMaster job, but no body is returned.
-    if state.services.snapshots.has_snapshot(&template_id).await? {
+    if let Some(snapshot_context) = state
+        .services
+        .snapshots
+        .get_snapshot_context(&template_id)
+        .await?
+    {
         let resp = state.services.snapshots.delete(&template_id).await?;
         let mut headers = HeaderMap::new();
         if let Ok(value) = HeaderValue::from_str(&resp.operation_id) {
             headers.insert("x-operation-id", value);
         }
+        let mut event = LogEvent::new(LogLevel::Info, EVENT_SNAPSHOT_DELETED)
+            .field("snapshot_id", &snapshot_context.snapshot_id)
+            .field("operation_id", &resp.operation_id)
+            .field("status", &resp.status);
+        if let Some(origin_sandbox_id) = snapshot_context.origin_sandbox_id {
+            event = event.field("sandbox_id", origin_sandbox_id);
+        } else {
+            tracing::debug!(
+                snapshot_id = %snapshot_context.snapshot_id,
+                "snapshot delete event emitted without origin sandbox id"
+            );
+        }
+        state.logger.log(event).await;
         return Ok((StatusCode::NO_CONTENT, headers).into_response());
     }
     // Alias resolution happens at the CubeMaster layer (deleteTemplate

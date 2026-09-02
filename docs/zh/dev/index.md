@@ -7,6 +7,7 @@
 ## 约定
 
 - [Redis Key 命名规范](./redis-key-spec)——所有服务在共享 Redis 实例上必须遵循的统一命名空间：命名格式、归属划分、已注册 Key 清单、TTL 策略，以及各服务的 key 构造模块。
+- [CubeAPI 生命周期事件](./lifecycle-events)——`LogEvent` 契约、日志管线、后端状态、事件产生规则，以及沙箱与快照操作的事件目录。
 
 ## 适合放在这里的内容
 
