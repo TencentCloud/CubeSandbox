@@ -32,6 +32,10 @@ scheduler:
 
 自定义 Profile 固定执行 `node_safety`、`cpu`、`mem`、`disk`、`template_locality` 和 `realtime_create_num` Guards，配置不能关闭或重复声明这些安全约束。其中 `node_safety` 会在正常路径和 backoff 路径检查健康度、指标新鲜度、MVM 上限及 CPU load 合法性。
 
+`selection.method` 支持 `random`、`spread` 和 `highest`。目前 `spread` 与 `random` 等价：都从得分最高的前 `top_n` 个节点中均匀随机选点，只有 `highest` 始终选择得分最高的节点。自定义 Profile 未显式配置 `top_n` 时默认为 1，此时 `random`/`spread` 等价于确定性地选择最优节点；而 legacy `default` Profile 使用 `priority_select_num`。
+
+基于 label 的路由只在创建沙箱（create）路径生效。迁移（migrate）和恢复放置（restore placement）调度不会设置路由 label，因此按 label 路由的 Profile 在这两条路径上不可达，相关请求始终走 fallback 管线。
+
 ## 插件类型
 
 - `go`（默认）：编译进 CubeMaster，通过统一 Registry 按名称注册。
@@ -66,6 +70,11 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 - Mandatory Guard 始终 fail-closed。
 - Filter 默认 `fail-closed`；`fail-open` 必须显式配置，并会输出风险告警。
 - Score 默认 `default-score`，单个插件失败后用其 `default_score` 继续；也可配置 `fail-closed`。
+- 返回空结果的内置 `go` Score（例如请求没有节点偏好亲和性时的 `affinity_score`，或资源权重不适用时的 `image_score`）视为「不适用」并被跳过——不报错，也不替换为 `default_score`。只覆盖部分候选节点的结果仍视为失败。
 - `no_candidate` 支持 `fail` 和 `backoff`。自定义 Profile 使用 backoff 时仍会重新执行 Guards、Filter 和 Score。
 
 配置在启动或热更新时整体编译；插件名、路由、表达式、权重、选点方式或失败策略无效时，新 Profile 集不会生效，调度器继续使用上一份完整管线。
+
+## 兼容性说明
+
+- 未注册为插件的 legacy `enable_filters` / `enable_scorers` 配置项现在会使 CubeMaster 启动失败，错误信息会指出具体配置项；此前这类条目会被静默跳过。升级前请从配置中移除失效条目，或先注册对应插件。

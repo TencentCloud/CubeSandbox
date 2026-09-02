@@ -57,6 +57,17 @@ func (partialScore) Select(selection *selctx.SelectorCtx) (node.NodeScoreList, e
 	return node.NodeScoreList{{InsID: candidate.ID(), OrigNode: candidate, Score: 90}}, nil
 }
 
+// emptyScore mirrors built-in scorers such as affinity_score/image_score that
+// return an empty list when the request is outside their scope.
+type emptyScore struct{}
+
+func (emptyScore) ID() string      { return "empty-score" }
+func (emptyScore) Weight() float64 { return 1 }
+func (emptyScore) Disable() bool   { return false }
+func (emptyScore) Select(*selctx.SelectorCtx) (node.NodeScoreList, error) {
+	return node.NodeScoreList{}, nil
+}
+
 func (s executorScore) ID() string      { return s.id }
 func (s executorScore) Weight() float64 { return 1 }
 func (s executorScore) Disable() bool   { return false }
@@ -168,5 +179,45 @@ func TestRunProfileScoresIncompleteOutputUsesDefault(t *testing.T) {
 	got := selection.LeastScoreNodes(-1)
 	if len(got) != 2 || got[0].Score != 25 || got[1].Score != 25 {
 		t.Fatalf("scores = %+v", got)
+	}
+}
+
+func TestRunProfileScoresEmptyBuiltinIsSkipped(t *testing.T) {
+	// Under fail-closed the empty result must not abort scheduling, and under
+	// default-score it must not dilute the other scorers with constant
+	// defaults; the full-coverage scorer alone decides the order.
+	for _, failure := range []profile.ScoreFailurePolicy{profile.ScoreFailClosed, profile.ScoreDefaultScore} {
+		selection := executorContext()
+		err := runProfileScores(selection, []profile.ScorePlugin{
+			{Name: "empty", Selector: emptyScore{}, Weight: 1, Failure: failure, DefaultScore: 25, ForceEnabled: true, AllowEmpty: true},
+			{Name: "values", Selector: executorScore{id: "values", values: map[string]float64{"n1": 100, "n2": 0}}, Weight: 1, Failure: profile.ScoreFailClosed, ForceEnabled: true},
+		})
+		if err != nil {
+			t.Fatalf("policy %s: %v", failure, err)
+		}
+		got := selection.LeastScoreNodes(-1)
+		if len(got) != 2 || got[0].Score != 100 || got[1].Score != 0 {
+			t.Fatalf("policy %s: scores = %+v", failure, got)
+		}
+	}
+}
+
+func TestRunProfileScoresEmptyWithoutAllowEmptyFails(t *testing.T) {
+	selection := executorContext()
+	err := runProfileScores(selection, []profile.ScorePlugin{{
+		Name: "empty", Selector: emptyScore{}, Weight: 1, Failure: profile.ScoreFailClosed, ForceEnabled: true,
+	}})
+	if err == nil {
+		t.Fatal("empty output from a force-enabled scorer without AllowEmpty must fail")
+	}
+}
+
+func TestRunProfileScoresPartialCoverageFailsClosed(t *testing.T) {
+	selection := executorContext()
+	err := runProfileScores(selection, []profile.ScorePlugin{{
+		Name: "partial", Selector: partialScore{}, Weight: 1, Failure: profile.ScoreFailClosed, ForceEnabled: true,
+	}})
+	if err == nil {
+		t.Fatal("partial coverage from a force-enabled scorer must fail")
 	}
 }

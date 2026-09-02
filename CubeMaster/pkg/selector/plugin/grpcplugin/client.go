@@ -187,9 +187,10 @@ func (c *client) reject(err error) error {
 	return err
 }
 
+// syncSnapshot synchronizes the request's immutable snapshot with the plugin.
+// The caller must hold c.syncMu; the lock is held across the whole
+// sync+Filter/Score sequence by the Select methods below.
 func (c *client) syncSnapshot(selection *selctx.SelectorCtx) error {
-	c.syncMu.Lock()
-	defer c.syncMu.Unlock()
 	if selection.SnapshotVersion == "" {
 		return errors.New("scheduler snapshot version is empty")
 	}
@@ -292,6 +293,13 @@ func (p *filterPlugin) ID() string   { return "filter/grpc/" + p.client.name }
 func (p *filterPlugin) Close() error { return p.client.Close() }
 
 func (p *filterPlugin) Select(selection *selctx.SelectorCtx) (node.NodeList, error) {
+	// Snapshot versions are unique per scheduling request, while the plugin
+	// tracks a single synced version. Holding syncMu across the whole
+	// sync+Filter sequence keeps the synced version valid until the Filter RPC
+	// is issued; this intentionally serializes concurrent requests sharing
+	// this client.
+	p.client.syncMu.Lock()
+	defer p.client.syncMu.Unlock()
 	if err := p.client.syncSnapshot(selection); err != nil {
 		return nil, err
 	}
@@ -359,6 +367,11 @@ func (p *scorePlugin) Disable() bool   { return false }
 func (p *scorePlugin) Close() error    { return p.client.Close() }
 
 func (p *scorePlugin) Select(selection *selctx.SelectorCtx) (node.NodeScoreList, error) {
+	// See filterPlugin.Select: syncMu is held across the whole sync+Score
+	// sequence, intentionally serializing concurrent requests sharing this
+	// client so the synced snapshot version stays valid for the Score RPC.
+	p.client.syncMu.Lock()
+	defer p.client.syncMu.Unlock()
 	if err := p.client.syncSnapshot(selection); err != nil {
 		return nil, err
 	}
