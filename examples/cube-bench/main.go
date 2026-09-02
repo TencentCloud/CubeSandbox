@@ -255,6 +255,19 @@ func parseConfig() *Config {
 		cfg.Total = 1
 	}
 
+	// A worker slot is held for the full sandbox lifetime, so the dispatcher
+	// can only honor the requested Poisson rate when concurrency >= rate x
+	// mean lifetime; otherwise queue delays measure the client's own
+	// concurrency limit, not the scheduler. Warn loudly (presets included).
+	if cfg.Scheduled && cfg.Rate > 0 && cfg.hasLifetime {
+		meanLife := (cfg.LifetimeMin + cfg.LifetimeMax) / 2
+		if needed := cfg.Rate * meanLife; float64(cfg.Concurrency) < needed {
+			fmt.Fprintf(os.Stderr, "WARNING: --concurrency %d is below rate(%g/s) x mean lifetime(%gs) = %.0f; "+
+				"the dispatcher will stall on the semaphore and neither the arrival rate nor queue-delay metrics will be honored\n",
+				cfg.Concurrency, cfg.Rate, meanLife, needed)
+		}
+	}
+
 	// Validate host-mount early so the CLI fails fast on bad input while still
 	// preserving the original JSON for config display and exported reports.
 	// Cache the compacted JSON string once so benchmark throughput is not

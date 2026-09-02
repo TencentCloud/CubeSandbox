@@ -173,7 +173,9 @@ func TestCompareStatsAggregate(t *testing.T) {
 	if !a.hasCI {
 		t.Errorf("a.should have CI (n=3)")
 	}
-	if want := 1.96 * 2 / math.Sqrt(3); math.Abs(a.ci-want) > 1e-12 {
+	// n=3 -> df=2 -> t95 = 4.303; the small-sample interval is much wider
+	// than the normal 1.96·σ/√n.
+	if want := 4.303 * 2 / math.Sqrt(3); math.Abs(a.ci-want) > 1e-12 {
 		t.Errorf("a.ci = %v, want %v", a.ci, want)
 	}
 
@@ -187,9 +189,9 @@ func TestCompareStatsAggregate(t *testing.T) {
 	if math.Abs(b.stdDev-math.Sqrt(2)) > 1e-12 {
 		t.Errorf("b.stdDev = %v, want sqrt(2)", b.stdDev)
 	}
-	// 1.96 * sqrt(2) / sqrt(2) = 1.96 exactly
-	if math.Abs(b.ci-1.96) > 1e-12 {
-		t.Errorf("b.ci = %v, want 1.96", b.ci)
+	// n=2 -> df=1 -> t95 = 12.706; 12.706 * sqrt(2) / sqrt(2) = 12.706 exactly
+	if math.Abs(b.ci-12.706) > 1e-12 {
+		t.Errorf("b.ci = %v, want 12.706", b.ci)
 	}
 
 	single := aggregateSamples([]map[string]float64{{"x": 5}})["x"]
@@ -278,12 +280,17 @@ func TestMetricDirection(t *testing.T) {
 		{"fragment_ratio", dirLowerBetter},
 		{"herd_score", dirLowerBetter},
 		{"herding_index", dirLowerBetter},
+		// cube-bench stat blocks: any stat suffix under create/delete is
+		// lower-better, with or without a "_ms" suffix
+		{"create.p95", dirLowerBetter},
+		{"create.p95_ms", dirLowerBetter},
+		{"delete.avg", dirLowerBetter},
 		// no direction: unknown keys, and false-positive guards
 		{"strategy", dirNA},  // must not substring-match "rate"
 		{"discovery", dirNA}, // must not substring-match "cv"
 		{"total_time_s", dirNA},
 		{"queue_depth", dirNA},
-		{"create.p95_ms", dirNA},
+		{"create.count", dirNA}, // counts are not a quality signal
 	}
 	for _, tc := range cases {
 		if got := metricDirection(tc.key); got != tc.want {
@@ -393,30 +400,30 @@ func TestCompareEndToEnd(t *testing.T) {
 		"## Metric Comparison",
 		"### create",
 		"### sched",
-		"| success_rate | 0.92 ± 0.022632 | 0.98 ± 0.011316 | +0.06 | +6.5% | improved |",
-		"| error_rate | 0.1 ± 0.022632 | 0.05 ± 0 | -0.05 | -50.0% | improved |",
-		"| sched_latency_p95 | 120 ± 11.316 | 95 ± 5.658 | -25 | -20.8% | improved |",
-		"| throughput_qps | 100 ± 11.316 | 90 ± 5.658 | -10 | -10.0% | regressed |",
-		"| queue_depth | 5 ± 1.1316 | 7 ± 0 | +2 | +40.0% | n/a |",
-		// create.p95_ms carries no direction keyword -> n/a per the direction table
-		"| create.p95_ms | 60 ± 11.316 | 45 ± 5.658 | -15 | -25.0% | n/a |",
+		"| success_rate | 0.92 ± 0.049687 | 0.98 ± 0.024843 | +0.06 | +6.5% | improved |",
+		"| error_rate | 0.1 ± 0.049687 | 0.05 ± 0 | -0.05 | -50.0% | improved |",
+		"| sched_latency_p95 | 120 ± 24.843 | 95 ± 12.422 | -25 | -20.8% | improved |",
+		"| throughput_qps | 100 ± 24.843 | 90 ± 12.422 | -10 | -10.0% | regressed |",
+		"| queue_depth | 5 ± 2.4843 | 7 ± 0 | +2 | +40.0% | n/a |",
+		// cube-bench stat-block keys (create.p95_ms etc.) are lower-better
+		// per the direction table
+		"| create.p95_ms | 60 ± 24.843 | 45 ± 12.422 | -15 | -25.0% | improved |",
 	} {
 		if !strings.Contains(report, want) {
 			t.Errorf("report missing table content %q", want)
 		}
 	}
 
-	// Conclusions.
+	// Conclusions: with n=3 per side the combined CI gate keeps only
+	// error_rate (|Δ| = 0.05 > 0.049687); the other directional deltas are
+	// within noise and stay out of the lists.
 	for _, want := range []string{
 		"## Conclusions",
-		"### Improved (|Δ%| ≥ 5%)",
+		"### Improved (|Δ%| ≥ 5%, beyond combined 95% CI when n ≥ 2)",
 		"- **error_rate**: -50.0% (0.1 → 0.05)",
-		"- **sched_latency_p95**: -20.8% (120 → 95)",
-		"- **success_rate**: +6.5% (0.92 → 0.98)",
-		"### Regressed (|Δ%| ≥ 5%)",
-		"- **throughput_qps**: -10.0% (100 → 90)",
+		"### Regressed (|Δ%| ≥ 5%, beyond combined 95% CI when n ≥ 2)",
+		"- (none)",
 		"### No direction (n/a)",
-		"- **create.p95_ms**: -25.0% (60 → 45)",
 		"- **queue_depth**: +40.0% (5 → 7)",
 	} {
 		if !strings.Contains(report, want) {
@@ -424,17 +431,23 @@ func TestCompareEndToEnd(t *testing.T) {
 		}
 	}
 
-	// Improved entries are ordered by |Δ%| descending.
-	iErr := strings.Index(report, "**error_rate**")
-	iSched := strings.Index(report, "**sched_latency_p95**")
-	iSuccess := strings.Index(report, "**success_rate**")
-	if !(iErr >= 0 && iErr < iSched && iSched < iSuccess) {
-		t.Errorf("improved list not ordered by |Δ%%| desc: error_rate@%d sched@%d success@%d", iErr, iSched, iSuccess)
+	// CI-gated deltas must not appear as conclusions.
+	for _, notWant := range []string{
+		"- **success_rate**:",
+		"- **sched_latency_p95**:",
+		"- **throughput_qps**:",
+		"- **create.p95_ms**:",
+	} {
+		if strings.Contains(report, notWant) {
+			t.Errorf("CI-gated metric %q must not appear in conclusions", notWant)
+		}
 	}
 
-	// regressed conclusion entry must appear after its heading, n/a entry after its own.
-	if strings.Index(report, "**throughput_qps**: -10.0%") < strings.Index(report, "### Regressed") {
-		t.Errorf("throughput_qps conclusion not under the Regressed heading")
+	// The single surviving improved entry must appear under its own heading,
+	// the n/a entry under its own.
+	iErr := strings.Index(report, "**error_rate**")
+	if iErr < strings.Index(report, "### Improved") {
+		t.Errorf("error_rate conclusion not under the Improved heading")
 	}
 	if strings.Index(report, "**queue_depth**") < strings.Index(report, "### No direction") {
 		t.Errorf("queue_depth conclusion not under the No direction heading")

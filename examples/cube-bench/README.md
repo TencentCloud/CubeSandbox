@@ -140,7 +140,8 @@ create counts/success rates.
 > full sandbox lifetime (create → lifetime sleep → delete), so the steady-state
 > number of live sandboxes ≈ `rate × mean lifetime`. Set `--concurrency` at
 > least that high (e.g. `burst`: 50 req/s × ~65 s ≈ 3250) or the dispatcher
-> stalls on the semaphore and the requested `--rate` is not honored.
+> stalls on the semaphore and the requested `--rate` is not honored; the tool
+> prints a startup warning when it detects this.
 
 ### Trace file schema
 
@@ -162,9 +163,11 @@ Requests are sorted by `arrival_ms`; `cpu_millis`/`mem_mib` come from the
 ### Comparing runs (A/B report)
 
 `compare` reads the JSON exports of two experiment groups (multiple seeds per
-side) and renders a Markdown report: per-metric mean ± 95% CI, absolute and
-relative change, and an improved/regressed verdict based on a built-in
-direction table (latency/error/cv/fragmentation lower-is-better;
+side) and renders a Markdown report: per-metric mean ± 95% CI (Student-t
+quantiles — a normal z badly understates the interval at a handful of seeds),
+absolute and relative change, and an improved/regressed verdict based on a
+built-in direction table (latency/error/cv/fragmentation lower-is-better,
+including cube-bench's own `create.*`/`delete.*` stat blocks;
 rates/jain/throughput higher-is-better):
 
 ```bash
@@ -174,11 +177,13 @@ rates/jain/throughput higher-is-better):
                          -o compare.md
 ```
 
-It accepts both cube-bench exports (`summary` is flattened recursively) and
-schedsim reports (each entry of a top-level `rounds` array counts as one
-sample), so real-cluster runs and simulator runs can be compared with the same
-command. A metric is flagged in the conclusions when the verdict direction
-matches and |Δ%| ≥ 5%.
+It accepts both cube-bench exports (`summary` plus the top-level
+`create`/`delete` stat blocks are flattened recursively) and schedsim reports
+(each entry of a top-level `rounds` array counts as one sample), so
+real-cluster runs and simulator runs can be compared with the same command. A
+metric is flagged in the conclusions when the verdict direction matches,
+|Δ%| ≥ 5%, and — whenever both sides have n ≥ 2 — the delta exceeds the
+combined CI half-widths, so small-sample noise is not flagged as a verdict.
 
 ### Network policies
 

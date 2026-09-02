@@ -246,12 +246,33 @@ func aggregateSamples(samples []map[string]float64) map[string]metricStats {
 	for k, vs := range values {
 		st := metricStats{n: len(vs), mean: sampleMean(vs), stdDev: sampleStdDev(vs)}
 		if st.n >= 2 {
-			st.ci = 1.96 * st.stdDev / math.Sqrt(float64(st.n))
+			st.ci = t95(st.n) * st.stdDev / math.Sqrt(float64(st.n))
 			st.hasCI = true
 		}
 		out[k] = st
 	}
 	return out
+}
+
+// t95 returns the two-sided 95% Student-t quantile for n samples (df = n-1).
+// The normal 1.96 badly understates the interval at the sample sizes this
+// tool is meant for — a handful of seed files per side (df=1: 12.706).
+var t95Table = []float64{
+	12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, // df 1-10
+	2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086, // df 11-20
+	2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042, // df 21-30
+}
+
+func t95(n int) float64 {
+	df := n - 1
+	switch {
+	case df < 1:
+		return 0
+	case df <= 30:
+		return t95Table[df-1]
+	default:
+		return 1.96
+	}
 }
 
 func sampleMean(vs []float64) float64 {
@@ -316,11 +337,30 @@ var (
 	higherBetterTokens     = []string{"rate", "qps"}
 )
 
+// cube-bench's own exported latency stat blocks ("create.p95", "delete.avg",
+// also the "_ms"-suffixed nested variants like "create.p95_ms") carry no
+// direction keyword. Classify any create/delete key that carries a stat-block
+// suffix as lower-better; "count" stays directionless.
+var (
+	statBlockGroups = map[string]bool{"create": true, "delete": true}
+	statBlockStats  = map[string]bool{
+		"min": true, "max": true, "avg": true, "std": true,
+		"p50": true, "p90": true, "p95": true, "p99": true,
+	}
+)
+
 func metricDirection(key string) direction {
 	k := strings.ToLower(key)
 	tokens := strings.FieldsFunc(k, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
+	if len(tokens) > 1 && statBlockGroups[tokens[0]] {
+		for _, tok := range tokens[1:] {
+			if statBlockStats[tok] {
+				return dirLowerBetter
+			}
+		}
+	}
 	if directionMatches(k, tokens, lowerBetterSubstrings, lowerBetterTokens) {
 		return dirLowerBetter
 	}
@@ -458,12 +498,18 @@ func groupPrefix(key string) string {
 }
 
 // conclusions splits rows into the report's conclusion lists: significant
-// improvements/regressions (verdict matches and |Δ%| >= 5%), plus metrics
+// improvements/regressions (verdict matches, |Δ%| >= 5%, and — when both
+// sides have n >= 2 — the delta must exceed the combined 95% CI half-widths,
+// so noise at small sample counts is not flagged as a verdict), plus metrics
 // without a known direction.
 func (c *comparison) conclusions() (improved, regressed, noDir []*compareRow) {
 	for _, r := range c.rows {
+		significant := r.hasPct && math.Abs(r.pct) >= 5
+		if significant && r.base.hasCI && r.cand.hasCI {
+			significant = math.Abs(r.delta) > r.base.ci+r.cand.ci
+		}
 		switch {
-		case (r.verdict == verdictImproved || r.verdict == verdictRegressed) && r.hasPct && math.Abs(r.pct) >= 5:
+		case (r.verdict == verdictImproved || r.verdict == verdictRegressed) && significant:
 			if r.verdict == verdictImproved {
 				improved = append(improved, r)
 			} else {
@@ -513,7 +559,7 @@ func renderComparison(c *comparison) string {
 	}
 
 	b.WriteString("\n## Metric Comparison\n\n")
-	b.WriteString("Cells show the mean across samples; CI is the 95% confidence interval half-width (1.96·σ/√n), shown only when n ≥ 2. Δ = candidate − baseline.\n\n")
+	b.WriteString("Cells show the mean across samples; CI is the 95% confidence interval half-width (Student-t t95·σ/√n), shown only when n ≥ 2. Δ = candidate − baseline. Verdicts are directional; the conclusion lists additionally require |Δ| beyond the combined CI half-widths when both sides have n ≥ 2.\n\n")
 	if len(c.rows) == 0 {
 		b.WriteString("- (no numeric metrics found)\n")
 	}
@@ -535,9 +581,9 @@ func renderComparison(c *comparison) string {
 
 	improved, regressed, noDir := c.conclusions()
 	b.WriteString("\n## Conclusions\n\n")
-	b.WriteString("### Improved (|Δ%| ≥ 5%)\n\n")
+	b.WriteString("### Improved (|Δ%| ≥ 5%, beyond combined 95% CI when n ≥ 2)\n\n")
 	writeConclusionList(&b, improved)
-	b.WriteString("\n### Regressed (|Δ%| ≥ 5%)\n\n")
+	b.WriteString("\n### Regressed (|Δ%| ≥ 5%, beyond combined 95% CI when n ≥ 2)\n\n")
 	writeConclusionList(&b, regressed)
 	b.WriteString("\n### No direction (n/a)\n\n")
 	writeConclusionList(&b, noDir)
