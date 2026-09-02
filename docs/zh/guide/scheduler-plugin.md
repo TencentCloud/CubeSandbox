@@ -32,9 +32,9 @@ scheduler:
 
 自定义 Profile 固定执行 `node_safety`、`cpu`、`mem`、`disk`、`template_locality` 和 `realtime_create_num` Guards，配置不能关闭或重复声明这些安全约束。其中 `node_safety` 会在正常路径和 backoff 路径检查健康度、指标新鲜度、MVM 上限及 CPU load 合法性。
 
-`selection.method` 支持 `random`、`spread` 和 `highest`。目前 `spread` 与 `random` 等价：都从得分最高的前 `top_n` 个节点中均匀随机选点，只有 `highest` 始终选择得分最高的节点。自定义 Profile 未显式配置 `top_n` 时默认为 1，此时 `random`/`spread` 等价于确定性地选择最优节点；而 legacy `default` Profile 使用 `priority_select_num`。
+`selection.method` 支持 `random`、`spread` 和 `highest`。目前 `spread` 与 `random` 等价：都从得分最高的前 `top_n` 个节点中均匀随机选点，只有 `highest` 始终选择得分最高的节点。自定义 Profile 未显式配置 `top_n` 时默认为 1，此时 `random`/`spread` 等价于确定性地选择最优节点；而 legacy `default` Profile 使用 `priority_select_num`。需要打散时请显式配置 `top_n`。
 
-基于 label 的路由只在创建沙箱（create）路径生效。迁移（migrate）和恢复放置（restore placement）调度不会设置路由 label，因此按 label 路由的 Profile 在这两条路径上不可达，相关请求始终走 fallback 管线。
+基于 label 的路由只在创建沙箱（create）路径生效。迁移（migrate）和恢复放置（restore placement）调度不会设置路由 label，因此按 label 路由的 Profile 在这两条路径上不可达，相关请求始终走 fallback 管线。但 instance type 路由会在每个调度请求上匹配：migrate 和 restore 流程不带路由 label，却仍参与 `instance_types` 匹配（restore 会设置实例类型；migrate 的实例类型为空，而 `.*` 同样可以匹配空串）。像 `instance_types: [".*"]` 这样的宽泛路由会把这些非创建流程引入 Profile，其中的 expr/gRPC 插件将看到空的或零值的请求。请把 `instance_types` 限定在真正需要路由的实例类型上；另外，当不带资源规格的请求到达 mandatory `cpu`/`mem` Guard 时，Guard 会 fail-closed——直接返回硬错误且不进入 backoff。
 
 ## 插件类型
 
@@ -72,8 +72,15 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 - Score 默认 `default-score`，单个插件失败后用其 `default_score` 继续；也可配置 `fail-closed`。
 - 返回空结果的内置 `go` Score（例如请求没有节点偏好亲和性时的 `affinity_score`，或资源权重不适用时的 `image_score`）视为「不适用」并被跳过——不报错，也不替换为 `default_score`。只覆盖部分候选节点的结果仍视为失败。
 - `no_candidate` 支持 `fail` 和 `backoff`。Mandatory Guard 永不触发 backoff：Guard 失败（包括清空候选集合）始终快速失败。只有可选 Filter 或最终选点无候选时才进入 backoff；backoff 尝试会在放宽后的候选集合上重新执行 Guards、Filter 和 Score，其中重跑 Guards 是 backoff 尝试自身的安全保障。
+- `no_candidate` 未配置时默认为 `fail`。legacy `default` 管线始终走 backoff，因此启用第一个自定义 Profile 会把「Filter 后无候选」从 backoff 重试变成硬 `SelectNodesNoRes` 失败——没有 backoff 尝试，也不会回退到 default 管线。接入 Profile 期间建议显式配置 `no_candidate: backoff`。
 
 配置在启动或热更新时整体编译；插件名、路由、表达式、权重、选点方式或失败策略无效时，新 Profile 集不会生效，调度器继续使用上一份完整管线。
+
+## 运维注意事项
+
+- 配置 `scheduler.profiles` 后，外部 gRPC 插件会在 CubeMaster 启动、编译 Profile 集时同步建连并完成握手。任何建连或握手错误都会中止 `InitScheduler` 并使进程退出——插件只是暂时不可用（尚未启动、正在重启或 socket 残留）也会导致整个 master 无法启动，包括完全不经过该插件的 default Profile 流量。这与热更新路径刻意不对称：热更新会拒绝损坏的 Profile 集并保留上一份管线。请保证所有已配置的外部插件先于 CubeMaster 就绪（通过 systemd、sidecar 或监督进程编排启动顺序），或者干脆不配置外部插件。
+- 每个外部插件客户端在整个快照同步 + RPC 过程中持有互斥锁，刻意将经过该插件绑定的并发请求串行化。在默认 100ms `timeout` 下，一个性能劣化的插件会把受影响的创建路径限制在约 10 请求/秒，且 backoff 尝试会额外支付一次快照冻结与同步。请保持插件 RPC 足够快，按此上限规划容量，并把插件延迟视为调度延迟。
+- gRPC 与 CEL 的请求上下文中，`cpu_millis` 和 `memory_bytes` 都是普通整数，因此「未指定资源规格」与「零规格请求」无法区分——restore 放置路径会传入空规格。
 
 ## 兼容性说明
 
