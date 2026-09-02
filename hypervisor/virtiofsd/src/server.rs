@@ -391,6 +391,14 @@ impl<F: FileSystem + Sync> Server<F> {
         }
     }
 
+    // When an allow-dir whitelist is configured, the FUSE root is a synthetic, filtered directory:
+    // the guest may only traverse into whitelisted entries (LOOKUP) and list them (READDIR/
+    // READDIRPLUS). It must never create, delete, rename, link, or change metadata directly on the
+    // real backend root. Returns true when `nodeid` is that filtered root so callers reject the op.
+    fn is_filtered_root(&self, nodeid: u64) -> bool {
+        nodeid == ROOT_ID && !self.root_filter.as_ref().lock().unwrap().is_empty()
+    }
+
     fn lookup(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
         let namelen = (in_header.len as usize)
             .checked_sub(size_of::<InHeader>())
@@ -468,6 +476,14 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn setattr(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
+        if self.is_filtered_root(in_header.nodeid) {
+            return reply_error(
+                io::Error::from_raw_os_error(libc::EACCES),
+                in_header.unique,
+                w,
+            );
+        }
+
         let setattr_in: SetattrIn = r.read_obj().map_err(Error::DecodeMessage)?;
 
         let handle = if setattr_in.valid & FATTR_FH != 0 {
@@ -514,6 +530,14 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn symlink(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
+        if self.is_filtered_root(in_header.nodeid) {
+            return reply_error(
+                io::Error::from_raw_os_error(libc::EACCES),
+                in_header.unique,
+                w,
+            );
+        }
+
         // Unfortunately the name and linkname are encoded one after another and
         // separated by a nul character.
         let len = (in_header.len as usize)
@@ -549,6 +573,14 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn mknod(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
+        if self.is_filtered_root(in_header.nodeid) {
+            return reply_error(
+                io::Error::from_raw_os_error(libc::EACCES),
+                in_header.unique,
+                w,
+            );
+        }
+
         let MknodIn {
             mode, rdev, umask, ..
         } = r.read_obj().map_err(Error::DecodeMessage)?;
@@ -586,6 +618,14 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn mkdir(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
+        if self.is_filtered_root(in_header.nodeid) {
+            return reply_error(
+                io::Error::from_raw_os_error(libc::EACCES),
+                in_header.unique,
+                w,
+            );
+        }
+
         let MkdirIn { mode, umask } = r.read_obj().map_err(Error::DecodeMessage)?;
 
         let remaining_len = (in_header.len as usize)
@@ -620,6 +660,14 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn unlink(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
+        if self.is_filtered_root(in_header.nodeid) {
+            return reply_error(
+                io::Error::from_raw_os_error(libc::EACCES),
+                in_header.unique,
+                w,
+            );
+        }
+
         let namelen = (in_header.len as usize)
             .checked_sub(size_of::<InHeader>())
             .ok_or(Error::InvalidHeaderLength)?;
@@ -638,6 +686,14 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn rmdir(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
+        if self.is_filtered_root(in_header.nodeid) {
+            return reply_error(
+                io::Error::from_raw_os_error(libc::EACCES),
+                in_header.unique,
+                w,
+            );
+        }
+
         let namelen = (in_header.len as usize)
             .checked_sub(size_of::<InHeader>())
             .ok_or(Error::InvalidHeaderLength)?;
@@ -664,6 +720,16 @@ impl<F: FileSystem + Sync> Server<F> {
         mut r: Reader,
         w: Writer,
     ) -> Result<usize> {
+        // Reject renames whose source (`in_header.nodeid`) or destination (`newdir`) parent is the
+        // filtered root, so the guest can neither remove from nor create in the real backend root.
+        if self.is_filtered_root(in_header.nodeid) || self.is_filtered_root(newdir) {
+            return reply_error(
+                io::Error::from_raw_os_error(libc::EACCES),
+                in_header.unique,
+                w,
+            );
+        }
+
         let buflen = (in_header.len as usize)
             .checked_sub(size_of::<InHeader>())
             .and_then(|l| l.checked_sub(msg_size))
@@ -710,6 +776,15 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn link(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
+        // `in_header.nodeid` is the destination parent; deny hardlinks into the filtered root.
+        if self.is_filtered_root(in_header.nodeid) {
+            return reply_error(
+                io::Error::from_raw_os_error(libc::EACCES),
+                in_header.unique,
+                w,
+            );
+        }
+
         let LinkIn { oldnodeid } = r.read_obj().map_err(Error::DecodeMessage)?;
 
         let namelen = (in_header.len as usize)
@@ -944,6 +1019,14 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn setxattr(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
+        if self.is_filtered_root(in_header.nodeid) {
+            return reply_error(
+                io::Error::from_raw_os_error(libc::EACCES),
+                in_header.unique,
+                w,
+            );
+        }
+
         let options = FsOptions::from_bits_truncate(self.options.load(Ordering::Relaxed));
         let (
             SetxattrIn {
@@ -1073,6 +1156,14 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn removexattr(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
+        if self.is_filtered_root(in_header.nodeid) {
+            return reply_error(
+                io::Error::from_raw_os_error(libc::EACCES),
+                in_header.unique,
+                w,
+            );
+        }
+
         let namelen = (in_header.len as usize)
             .checked_sub(size_of::<InHeader>())
             .ok_or(Error::InvalidHeaderLength)?;
@@ -1530,6 +1621,14 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn create(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
+        if self.is_filtered_root(in_header.nodeid) {
+            return reply_error(
+                io::Error::from_raw_os_error(libc::EACCES),
+                in_header.unique,
+                w,
+            );
+        }
+
         let CreateIn {
             flags,
             mode,
