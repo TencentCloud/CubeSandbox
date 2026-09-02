@@ -410,6 +410,20 @@ func TestMaxFeasibleShape(t *testing.T) {
 			t.Fatalf("got (%d, %d), want trace max (250000, 200000)", cpu, mem)
 		}
 	})
+
+	// The test config sets node_max_mem_reserved_in_mb: 256, so the mem
+	// filter's physical gate caps an empty 65536-MiB node at 65280 MiB —
+	// stricter than the 131072-MiB overcommit bound. A straddle-band request
+	// is unplaceable and must not become the feasible mem shape.
+	t.Run("physical mem gate caps feasibility below the overcommit bound", func(t *testing.T) {
+		cpu, mem := newEngine(
+			TraceRequest{CpuMillis: 1000, MemMiB: 65500}, // straddle band: unplaceable
+			TraceRequest{CpuMillis: 1000, MemMiB: 4096},
+		).maxFeasibleShape()
+		if cpu != 1000 || mem != 4096 {
+			t.Fatalf("got (%d, %d), want (1000, 4096)", cpu, mem)
+		}
+	})
 }
 
 // TestRunRoundRejectsMalformedTrace: RunRound is exported and accepts

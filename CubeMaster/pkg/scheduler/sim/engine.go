@@ -265,6 +265,10 @@ type engine struct {
 // replicas, replay the trace on a virtual clock, then withdraw the round's
 // nodes/replicas from localcache. The real scheduler core decides placements;
 // the wall-clock cost of every Select call is recorded as scheduling latency.
+//
+// RoundID uniquifies the round's node IDs inside this process; it must also
+// be unique across concurrently running schedsim processes, because all of
+// them share the same localcache-backed node namespace on a host.
 func RunRound(ctx context.Context, p Params) (*RoundResult, error) {
 	if err := p.validate(); err != nil {
 		return nil, err
@@ -304,17 +308,28 @@ func (e *engine) effectiveOvercommitRatios() (cpuRatio, memRatio float64) {
 // maxFeasibleShape returns the largest per-resource request shape that an
 // EMPTY node could still admit, mirroring the filters' strict free > req
 // check against the effective (overcommit-aware) capacity of an empty node;
-// nodes are homogeneous, so one feasibility test covers the fleet. Requests
-// no empty node could ever fit are excluded: they are rejected wherever they
-// land, so counting them in the fragmentation shape would peg
-// fragmentation_ratio at ~1 for the whole window and measure the
-// unplaceable outlier instead of scheduler-induced stranding. When no
-// request is feasible the plain trace max is kept (success_rate is 0 anyway,
-// and the metric stays defined).
+// nodes are homogeneous, so one feasibility test covers the fleet. The mem
+// side additionally applies the mem filter's physical-memory gate: in-sim
+// MemUsage never moves, so a request in [NodeMemMiB-reserved,
+// NodeMemMiB*mem_ratio) can never be placed anywhere, and without the cap it
+// would become the fleet's "largest feasible mem shape" — the exact
+// unplaceable-outlier failure this exclusion exists to prevent. (The cpu
+// filter has no physical-gate analog.) Requests no empty node could ever fit
+// are excluded: they are rejected wherever they land, so counting them in the
+// fragmentation shape would peg fragmentation_ratio at ~1 for the whole
+// window and measure the unplaceable outlier instead of scheduler-induced
+// stranding. When no request is feasible the plain trace max is kept
+// (success_rate is 0 anyway, and the metric stays defined).
 func (e *engine) maxFeasibleShape() (cpuMillis, memMiB int64) {
 	cpuRatio, memRatio := e.effectiveOvercommitRatios()
 	emptyCPU := float64(e.p.NodeCPUMillis) * cpuRatio
 	emptyMem := float64(e.p.NodeMemMiB) * memRatio
+	if sc := config.GetConfig().Scheduler; sc != nil {
+		reserved := sc.GetEffectiveNodeMaxMemReservedInMB(e.p.InstanceType, e.p.NodeMemMiB)
+		if physical := float64(e.p.NodeMemMiB - reserved); physical < emptyMem {
+			emptyMem = physical
+		}
+	}
 	feasible := false
 	for i := range e.p.Trace.Requests {
 		r := &e.p.Trace.Requests[i]

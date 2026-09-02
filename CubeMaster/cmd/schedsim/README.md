@@ -105,8 +105,14 @@ MetricLocalUpdateAt=now`。用量侧（`QuotaCpuUsage/QuotaMemUsage/MvmNum`）�
 真实用量字段（`MemUsage`/`CpuUtil`）与实时创建计数（`RealTimeCreateNum`/
 `LocalCreateNum`），因此三条真实集群门禁在仿真里恒不触发：
 
-- mem filter 的物理内存检查（`MemMBTotal - MemUsage > req + reserved`）恒过——
-  配合示例配置（物理=配额、`mem_ratio: 2.0`），单节点可被分配到约 2× 物理内存；
+- mem filter 的物理内存检查（`MemMBTotal - MemUsage > req + reserved`）：因为
+  `MemUsage` 恒为 0，它对**聚合**放置恒不触发——许多小沙箱可以把单节点分配到约
+  2× 物理内存（示例配置 `mem_ratio: 2.0`）；但对**单个大请求**它反而生效：任何
+  `mem_mib >= 节点物理内存 - reserved`（默认 `--node-mem-mib 131072` 加示例
+  `reserved: 256` 时即 `>= 130816` MiB）的请求在所有节点上都会被这条门禁无条件
+  拒绝，无论配额口径还剩多少。`fragmentation_ratio_mem` 的可行形状已按此门禁
+  收窄，请勿给 trace 塞入这一跨档区间（`[物理-reserved, 物理×mem_ratio)`）的
+  请求并误读由此产生的指标；
 - cpu filter 的 `CpuUtil >= NodeMaxCpuUtil` 守卫恒不触发；
 - `realtime_create_num` filter 恒不拒绝。
 
@@ -118,6 +124,12 @@ MetricLocalUpdateAt=now`。用量侧（`QuotaCpuUsage/QuotaMemUsage/MvmNum`）�
 
 结论：`mem_alloc_rate`/`load_cv_mem` 等绝对值可能超出真实集群可达范围，
 仿真结果用于**同配置族的相对 A/B 对比**，不要直接对标生产的绝对容量上限。
+
+另注意：`Bootstrap` 启动的后台 goroutine（监控与 metric 采集，默认约 5s 一跳）
+随进程生命周期运行，其周期性节点枚举**不**走 `lockMetaData`，而仿真主 goroutine
+的账本写走 `lockMetaData`——单轮真实耗时跨过后台 tick 后存在读/写竞争窗口，
+`go test -race` 或超长 trace 可能触发竞态告警。仿真器按设计不要求全链路
+race-free，请勿据此读数之外过度解读。
 
 ### metric 新鲜度（坑 1）
 
