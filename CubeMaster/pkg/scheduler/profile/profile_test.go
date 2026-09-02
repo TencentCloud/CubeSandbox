@@ -35,6 +35,11 @@ func (noopScore) Select(*selctx.SelectorCtx) (node.NodeScoreList, error) {
 	return node.NodeScoreList{}, nil
 }
 
+type zeroWeightScore struct{ noopScore }
+
+func (zeroWeightScore) ID() string      { return "score/go/zero_weight_score" }
+func (zeroWeightScore) Weight() float64 { return 0 }
+
 func profileRegistry(t *testing.T) *plugin.Registry {
 	t.Helper()
 	registry := plugin.NewRegistry()
@@ -136,6 +141,38 @@ func TestProfileAllowsEmptyOnlyForBuiltinScores(t *testing.T) {
 	}
 	if pipeline.Scores[1].AllowEmpty {
 		t.Fatal("expr score must not allow empty results")
+	}
+}
+
+func TestCompileLegacySkipsInvalidWeightScorer(t *testing.T) {
+	registry := profileRegistry(t)
+	if err := registry.RegisterScore(plugin.TypeGo, "zero_weight_score", func(context.Context, config.SchedulerProfilePluginConf) (score.Selector, error) {
+		return zeroWeightScore{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.RegisterScore(plugin.TypeGo, "noop_score", func(context.Context, config.SchedulerProfilePluginConf) (score.Selector, error) {
+		return noopScore{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Scheduler: &config.WrapperSchedulerConf{SchedulerConf: config.SchedulerConf{
+		Score: &config.SchedulerScoreConf{
+			EnableScorers:   []string{"zero_weight_score", "noop_score"},
+			ResourceWeights: map[string]float64{"cpu": 1},
+		},
+	}}}
+	set, err := Compile(context.Background(), cfg, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = set.Close() })
+	pipeline := set.Match(&selctx.SelectorCtx{})
+	if pipeline == nil || pipeline.Name != "default" {
+		t.Fatalf("pipeline = %+v", pipeline)
+	}
+	if len(pipeline.Scores) != 1 || pipeline.Scores[0].Name != "noop_score" {
+		t.Fatalf("zero-weight scorer must be skipped, scores = %+v", pipeline.Scores)
 	}
 }
 

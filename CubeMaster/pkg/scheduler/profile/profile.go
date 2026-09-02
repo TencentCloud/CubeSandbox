@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/filter"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/plugin"
@@ -194,8 +195,20 @@ func compileLegacy(ctx context.Context, scheduler *config.WrapperSchedulerConf, 
 			if err != nil {
 				return nil, fmt.Errorf("enable_scorers entry %q is not a registered plugin; remove it from the config or register the plugin before starting CubeMaster: %w", name, err)
 			}
+			weight := selector.Weight()
+			if weight <= 0 || math.IsNaN(weight) || math.IsInf(weight, 0) {
+				// The pre-profile runScoreFilter tolerated a non-positive
+				// weight (the scorer contributed score*0 and added nothing
+				// to the normalizer). Skipping it here keeps such configs
+				// scheduling instead of failing every Select at runtime.
+				log.G(ctx).Warnf("enable_scorers entry %q has invalid weight %v; skipping the scorer", name, weight)
+				if closer, ok := selector.(io.Closer); ok {
+					_ = closer.Close()
+				}
+				continue
+			}
 			pipeline.Scores = append(pipeline.Scores, ScorePlugin{
-				Name: name, Selector: selector, Weight: selector.Weight(), Failure: ScoreSkip,
+				Name: name, Selector: selector, Weight: weight, Failure: ScoreSkip,
 			})
 			set.addCloser(selector)
 		}
