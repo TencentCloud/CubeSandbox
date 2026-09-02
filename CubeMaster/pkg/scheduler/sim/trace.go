@@ -11,6 +11,7 @@ package sim
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 )
 
@@ -96,6 +97,17 @@ func (t *Trace) validate() error {
 		}
 		if r.LifetimeMs < 0 {
 			return fmt.Errorf("request seq=%d has negative lifetime_ms=%d", r.Seq, r.LifetimeMs)
+		}
+		// The engine derives expiry times (arrival_ms+lifetime_ms) and byte
+		// conversions (mem_mib*1024*1024) from these magnitudes in int64;
+		// reject values that would overflow and silently corrupt the round.
+		if r.ArrivalMs > math.MaxInt64-r.LifetimeMs {
+			return fmt.Errorf("request seq=%d arrival_ms=%d + lifetime_ms=%d overflows int64",
+				r.Seq, r.ArrivalMs, r.LifetimeMs)
+		}
+		if r.MemMiB > math.MaxInt64/(1024*1024) {
+			return fmt.Errorf("request seq=%d mem_mib=%d overflows int64 when converted to bytes",
+				r.Seq, r.MemMiB)
 		}
 		prev = r.ArrivalMs
 	}

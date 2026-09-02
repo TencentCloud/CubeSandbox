@@ -6,6 +6,7 @@ package sim
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,6 +86,22 @@ func TestLoadTraceRejectsNegativeLifetime(t *testing.T) {
 	tr.Requests[0].LifetimeMs = -1
 	if _, err := LoadTrace(writeTrace(t, tr)); err == nil {
 		t.Fatal("want error for negative lifetime")
+	}
+}
+
+func TestLoadTraceRejectsOverflowMagnitudes(t *testing.T) {
+	// The engine computes arrival_ms+lifetime_ms and mem_mib*1024*1024 in
+	// int64; absurd magnitudes must fail at load instead of wrapping.
+	tr := validTrace()
+	tr.Requests[1].LifetimeMs = math.MaxInt64
+	if _, err := LoadTrace(writeTrace(t, tr)); err == nil || !strings.Contains(err.Error(), "overflows") {
+		t.Fatalf("want arrival+lifetime overflow error, got %v", err)
+	}
+
+	tr = validTrace()
+	tr.Requests[0].MemMiB = math.MaxInt64/(1024*1024) + 1
+	if _, err := LoadTrace(writeTrace(t, tr)); err == nil || !strings.Contains(err.Error(), "overflows") {
+		t.Fatalf("want mem_mib byte-conversion overflow error, got %v", err)
 	}
 }
 
