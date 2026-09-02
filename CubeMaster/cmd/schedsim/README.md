@@ -29,6 +29,27 @@ go build -o /tmp/schedsim ./cmd/schedsim
   -o report.json                       # 缺省写 stdout（注意此时 stdout 前有 config 噪声）
 ```
 
+## 多策略对比（--compare）
+
+同一 trace、同一模拟集群、同一 seed 下对比多个调度配置（例如 legacy 配置
+vs 基于 `scheduler.profiles` 的插件策略），一次命令产出 Markdown A/B 报告：
+
+```bash
+schedsim \
+  --compare legacy=cmd/schedsim/example.sim.yaml,spread=cmd/schedsim/example.profiles.sim.yaml \
+  --trace /tmp/storm.trace.json --nodes 300 --template-preload 0.3 \
+  --seed 42 --rounds 3 -o compare.md --out-dir /tmp/sim-out
+```
+
+- `--compare` 取逗号分隔的 `名字=配置路径` 列表，**第一个为 baseline**；
+- 每个变体跑一个独立子进程（config/scheduler/localcache 都是进程级单例，
+  无法在同进程内重建），变体间只有调度配置不同，其余变量全部受控；
+- 每个变体的单跑 JSON 落在 `--out-dir`（缺省为临时目录），可直接喂给
+  `cube-bench compare` 与真机结果交叉对比；
+- Markdown 报告含：每指标逐轮均值±样本标准差、相对 baseline 的 Δ%、
+  按指标方向判定的 improved/regressed 结论（|Δ%| ≥ 5% 才列入）；
+  方向依赖策略目标的指标（分配率、活跃/空节点数）只报数值不下结论。
+
 ## 与 cube-bench 的衔接
 
 trace 文件是跨工具契约（字段名双方冻结，见

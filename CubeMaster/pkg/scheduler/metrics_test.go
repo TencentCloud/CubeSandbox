@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
 func counterValue(t *testing.T, vec *prometheus.CounterVec, labels ...string) float64 {
@@ -245,5 +246,18 @@ func TestFragmentedCapacityRatio(t *testing.T) {
 	full := []nodeResourceStat{{quotaCpuMilli: 4000, quotaMemMB: 4096, cpuUsageMilli: 4000, memUsageMB: 4096}}
 	if got := fragmentedCapacityRatio(full, identityCapFn, 2000, 2048); got != 0 {
 		t.Fatalf("fully-allocated fragmented ratio = %v, want 0", got)
+	}
+}
+
+func TestProfileNameOf(t *testing.T) {
+	if got := ProfileNameOf(nil); got != DefaultProfile {
+		t.Fatalf("ProfileNameOf(nil) = %q, want %q", got, DefaultProfile)
+	}
+	if got := ProfileNameOf(&selctx.SelectorCtx{}); got != DefaultProfile {
+		t.Fatalf("ProfileNameOf(unstamped) = %q, want %q", got, DefaultProfile)
+	}
+	stamped := &selctx.SelectorCtx{ProfileName: "template-hotstart"}
+	if got := ProfileNameOf(stamped); got != "template-hotstart" {
+		t.Fatalf("ProfileNameOf(stamped) = %q, want template-hotstart", got)
 	}
 }

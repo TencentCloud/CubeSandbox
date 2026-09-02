@@ -12,6 +12,13 @@
 //	schedsim --trace trace.json --config example.sim.yaml \
 //	  --nodes 300 --node-cpu-millis 64000 --node-mem-mib 131072 \
 //	  --template-preload 0.3 --seed 42 --rounds 3 -o report.json
+//
+// Compare mode runs the same trace under several scheduler configs (one
+// subprocess per variant, so each gets a clean process-wide scheduler state)
+// and renders a markdown A/B report whose first variant is the baseline:
+//
+//	schedsim --compare legacy=example.sim.yaml,spread=example.profiles.sim.yaml \
+//	  --trace trace.json --nodes 300 --rounds 3 -o compare.md --out-dir ./sim-out
 package main
 
 import (
@@ -29,6 +36,8 @@ func main() {
 	var (
 		tracePath    = flag.String("trace", "", "trace file (cube-bench --dump-trace JSON), required")
 		configPath   = flag.String("config", "", "CubeMaster YAML config for the scheduler under test, required")
+		compareList  = flag.String("compare", "", "compare mode: comma-separated name=config.yaml variants; the first is the baseline. Supersedes --config")
+		outDir       = flag.String("out-dir", "", "compare mode: directory for per-variant JSON reports (default: a fresh temp dir)")
 		nodes        = flag.Int("nodes", 300, "number of simulated homogeneous nodes")
 		nodeCPUMilli = flag.Int64("node-cpu-millis", 64000, "per-node cpu quota in millicores")
 		nodeMemMiB   = flag.Int64("node-mem-mib", 131072, "per-node memory quota in MiB")
@@ -40,8 +49,8 @@ func main() {
 	)
 	flag.Parse()
 
-	if *tracePath == "" || *configPath == "" {
-		fmt.Fprintln(os.Stderr, "schedsim: --trace and --config are both required")
+	if *tracePath == "" || (*configPath == "" && *compareList == "") {
+		fmt.Fprintln(os.Stderr, "schedsim: --trace and (--config or --compare) are required")
 		flag.Usage()
 		os.Exit(2)
 	}
@@ -50,12 +59,38 @@ func main() {
 		os.Exit(2)
 	}
 
+	if *compareList != "" {
+		opts := compareOptions{
+			TracePath:    *tracePath,
+			OutDir:       *outDir,
+			Nodes:        *nodes,
+			NodeCPUMilli: *nodeCPUMilli,
+			NodeMemMiB:   *nodeMemMiB,
+			InstanceType: *instanceType,
+			Preload:      *preload,
+			Seed:         *seed,
+			Rounds:       *rounds,
+			Out:          *out,
+		}
+		if err := runCompareMode(*compareList, opts); err != nil {
+			fmt.Fprintf(os.Stderr, "schedsim: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	runSingle(*tracePath, *configPath, *nodes, *nodeCPUMilli, *nodeMemMiB, *instanceType, *preload, *seed, *rounds, *out)
+}
+
+// runSingle executes one simulation campaign against a single config and
+// writes the JSON report.
+func runSingle(tracePath, configPath string, nodes int, nodeCPUMilli, nodeMemMiB int64, instanceType string, preload float64, seed int64, rounds int, out string) {
 	ctx := context.Background()
 
 	// config.Init dumps the whole parsed config to stdout; keep stdout clean
 	// for the JSON report when -o is not given.
 	restoreStdout := silenceStdout()
-	err := sim.Bootstrap(ctx, *configPath)
+	err := sim.Bootstrap(ctx, configPath)
 	restoreStdout()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "schedsim: bootstrap: %v\n", err)
@@ -68,22 +103,22 @@ func main() {
 			sc.MetricUpdateTimeout)
 	}
 
-	trace, err := sim.LoadTrace(*tracePath)
+	trace, err := sim.LoadTrace(tracePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "schedsim: %v\n", err)
 		os.Exit(1)
 	}
 
-	results := make([]*sim.RoundResult, 0, *rounds)
-	for i := 0; i < *rounds; i++ {
-		roundSeed := *seed + int64(i)
+	results := make([]*sim.RoundResult, 0, rounds)
+	for i := 0; i < rounds; i++ {
+		roundSeed := seed + int64(i)
 		rr, err := sim.RunRound(ctx, sim.Params{
 			Trace:           trace,
-			Nodes:           *nodes,
-			NodeCPUMillis:   *nodeCPUMilli,
-			NodeMemMiB:      *nodeMemMiB,
-			InstanceType:    *instanceType,
-			TemplatePreload: *preload,
+			Nodes:           nodes,
+			NodeCPUMillis:   nodeCPUMilli,
+			NodeMemMiB:      nodeMemMiB,
+			InstanceType:    instanceType,
+			TemplatePreload: preload,
 			Seed:            roundSeed,
 			RoundID:         i,
 		})
@@ -99,26 +134,26 @@ func main() {
 	rep := &sim.Report{
 		Config: sim.ReportConfig{
 			Tool:            "schedsim",
-			Trace:           *tracePath,
+			Trace:           tracePath,
 			Workload:        trace.Workload,
-			Seed:            *seed,
-			Rounds:          *rounds,
-			Nodes:           *nodes,
-			NodeCPUMillis:   *nodeCPUMilli,
-			NodeMemMiB:      *nodeMemMiB,
-			InstanceType:    *instanceType,
-			TemplatePreload: *preload,
+			Seed:            seed,
+			Rounds:          rounds,
+			Nodes:           nodes,
+			NodeCPUMillis:   nodeCPUMilli,
+			NodeMemMiB:      nodeMemMiB,
+			InstanceType:    instanceType,
+			TemplatePreload: preload,
 			Requests:        len(trace.Requests),
 		},
 		Summary: sim.MeanSummary(results),
 		Rounds:  results,
 	}
-	if err := sim.WriteReport(*out, rep); err != nil {
+	if err := sim.WriteReport(out, rep); err != nil {
 		fmt.Fprintf(os.Stderr, "schedsim: %v\n", err)
 		os.Exit(1)
 	}
-	if *out != "" {
-		fmt.Fprintf(os.Stderr, "schedsim: report written to %s\n", *out)
+	if out != "" {
+		fmt.Fprintf(os.Stderr, "schedsim: report written to %s\n", out)
 	}
 }
 

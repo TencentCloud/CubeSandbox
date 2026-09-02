@@ -24,11 +24,21 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
-// DefaultProfile is the scheduling profile label attached to every metric in
-// this file.
-// TODO(profile-router): pass the real profile name once the module-1 Profile
-// Router lands; until then all series carry profile="default".
+// DefaultProfile is the profile label used when no profile has routed the
+// request yet (e.g. create-path failures before scheduling ran).
 const DefaultProfile = "default"
+
+// ProfileNameOf returns the metrics profile label for a scheduling context:
+// the name of the profile the pipeline actually routed the request to
+// (SelectorCtx.ProfileName is stamped by Select), falling back to
+// DefaultProfile when the context or stamp is absent. Profile names come from
+// the operator's config, a bounded set, so they are safe as a metric label.
+func ProfileNameOf(selCtx *selctx.SelectorCtx) string {
+	if selCtx == nil || selCtx.ProfileName == "" {
+		return DefaultProfile
+	}
+	return selCtx.ProfileName
+}
 
 // Label value enums. Cardinality is intentionally kept small and closed.
 const (
@@ -237,11 +247,11 @@ func observeSelect(selCtx *selctx.SelectorCtx, selected *node.Node, err error, s
 	if err == nil && selected == nil {
 		err = ret.Err(errorcode.ErrorCode_SelectNodesNoRes, ErrNoRes.Error())
 	}
-	ObserveScheduleAttempt(DefaultProfile, err, time.Since(start))
+	ObserveScheduleAttempt(ProfileNameOf(selCtx), err, time.Since(start))
 	if err != nil {
 		return
 	}
-	RecordDecision(DefaultProfile, templateLocalHit(selCtx, selected))
+	RecordDecision(ProfileNameOf(selCtx), templateLocalHit(selCtx, selected))
 }
 
 // templateLocalHit reports whether the selected node holds a local replica of
