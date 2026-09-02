@@ -203,6 +203,34 @@ func TestCompareStatsAggregate(t *testing.T) {
 	}
 }
 
+func TestT95(t *testing.T) {
+	// Table values (df <= 30) are exact; beyond the table the Cornish–Fisher
+	// expansion must track the true quantile instead of jumping to 1.96.
+	cases := []struct {
+		n    int
+		want float64
+		tol  float64
+	}{
+		{2, 12.706, 1e-12},
+		{31, 2.042, 1e-12},  // df=30, last table entry
+		{32, 2.0395, 1e-3},  // df=31: true 2.03951
+		{61, 2.0003, 1e-3},  // df=60: true 2.00030
+		{121, 1.9799, 1e-3}, // df=120: true 1.97993
+		{10000, 1.9602, 1e-3},
+	}
+	for _, tc := range cases {
+		if got := t95(tc.n); math.Abs(got-tc.want) > tc.tol {
+			t.Errorf("t95(%d) = %v, want ~%v", tc.n, got, tc.want)
+		}
+	}
+	// The quantile decreases monotonically in df.
+	for n := 2; n < 500; n++ {
+		if t95(n) < t95(n+1) {
+			t.Fatalf("t95 not monotonic: t95(%d)=%v < t95(%d)=%v", n, t95(n), n+1, t95(n+1))
+		}
+	}
+}
+
 func TestCompareZeroBaselinePct(t *testing.T) {
 	baseline := &sampleGroup{name: "b", samples: []map[string]float64{
 		{"restart_rate": 0, "sched_cv": 1, "only_base": 3},
@@ -229,8 +257,8 @@ func TestCompareZeroBaselinePct(t *testing.T) {
 	if got := pctCell(rr); got != "—" {
 		t.Errorf("pctCell = %q, want em dash", got)
 	}
-	if rr.verdict != verdictImproved {
-		t.Errorf("restart_rate verdict = %q, want improved (higher-better, delta>0)", rr.verdict)
+	if rr.verdict != verdictRegressed {
+		t.Errorf("restart_rate verdict = %q, want regressed (restart_* rates are lower-better, delta>0)", rr.verdict)
 	}
 
 	cv := rows["sched_cv"]
@@ -244,9 +272,9 @@ func TestCompareZeroBaselinePct(t *testing.T) {
 	}
 
 	// Rows without Δ% never enter the conclusions lists.
-	improved, _, _ := cmp.conclusions()
-	if len(improved) != 0 {
-		t.Errorf("conclusions improved = %v, want empty (restart_rate has no Δ%%)", improved)
+	improved, regressed, _ := cmp.conclusions()
+	if len(improved) != 0 || len(regressed) != 0 {
+		t.Errorf("conclusions improved=%v regressed=%v, want both empty (restart_rate has no Δ%%)", improved, regressed)
 	}
 }
 
@@ -274,6 +302,11 @@ func TestMetricDirection(t *testing.T) {
 		{"job_duration", dirLowerBetter},
 		{"error_rate", dirLowerBetter}, // lower rules beat "rate"
 		{"failure_count", dirLowerBetter},
+		{"restart_rate", dirLowerBetter},    // rising bad rates are regressions
+		{"preempt_rate", dirLowerBetter},    // even though "rate" is a
+		{"preemption_rate", dirLowerBetter}, // higher-better token
+		{"eviction_rate", dirLowerBetter},
+		{"retry_rate", dirLowerBetter},
 		{"sched_cv", dirLowerBetter},
 		{"queue_cv_ratio", dirLowerBetter},
 		{"fragmentation", dirLowerBetter},

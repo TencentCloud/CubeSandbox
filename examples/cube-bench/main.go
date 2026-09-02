@@ -262,12 +262,21 @@ func parseConfig() *Config {
 	// can only honor the requested Poisson rate when concurrency >= rate x
 	// mean lifetime; otherwise queue delays measure the client's own
 	// concurrency limit, not the scheduler. Warn loudly (presets included).
-	if cfg.Scheduled && cfg.Rate > 0 && cfg.hasLifetime {
+	if cfg.Scheduled && cfg.hasLifetime {
 		meanLife := (cfg.LifetimeMin + cfg.LifetimeMax) / 2
-		if needed := cfg.Rate * meanLife; float64(cfg.Concurrency) < needed {
-			fmt.Fprintf(os.Stderr, "WARNING: --concurrency %d is below rate(%g/s) x mean lifetime(%gs) = %.0f; "+
-				"the dispatcher will stall on the semaphore and neither the arrival rate nor queue-delay metrics will be honored\n",
-				cfg.Concurrency, cfg.Rate, meanLife, needed)
+		if cfg.Rate > 0 {
+			if needed := cfg.Rate * meanLife; float64(cfg.Concurrency) < needed {
+				fmt.Fprintf(os.Stderr, "WARNING: --concurrency %d is below rate(%g/s) x mean lifetime(%gs) = %.0f; "+
+					"the dispatcher will stall on the semaphore and neither the arrival rate nor queue-delay metrics will be honored\n",
+					cfg.Concurrency, cfg.Rate, meanLife, needed)
+			}
+		} else if est := float64(cfg.Total) * meanLife / float64(cfg.Concurrency); est > 300 {
+			// ASAP dispatch with lifetimes: every worker slot is held for the
+			// full lifetime, so the run time is bounded below by
+			// total x mean lifetime / concurrency.
+			fmt.Fprintf(os.Stderr, "WARNING: %d requests with mean lifetime %gs at --concurrency %d will take at least ~%.0fs; "+
+				"raise --concurrency or add --rate to pace arrivals\n",
+				cfg.Total, meanLife, cfg.Concurrency, est)
 		}
 	}
 
@@ -482,8 +491,10 @@ func exportJSON(results []IterResult, cfg *Config) {
 		// Dispatch-side throughput: requests released per second of the
 		// dispatch window. Unlike throughput_qps (total requests over the
 		// whole run), this excludes per-sandbox lifetime tails, so it
-		// reflects the arrival rate the scheduler actually saw.
-		if cfg.dispatchElapsed > 0 {
+		// reflects the arrival rate the scheduler actually saw. Only
+		// meaningful for rate-paced runs: without --rate the "window" is
+		// just the client's release burst, so the keys are omitted.
+		if cfg.Rate > 0 && cfg.dispatchElapsed > 0 {
 			summaryBlock["dispatch_window_s"] = cfg.dispatchElapsed
 			summaryBlock["dispatch_qps"] = float64(len(results)) / cfg.dispatchElapsed
 		}

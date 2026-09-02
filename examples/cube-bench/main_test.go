@@ -353,3 +353,31 @@ func TestExportJSONLegacyOmitsScheduledKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestExportJSONScheduledASAPOmitsDispatchKeys(t *testing.T) {
+	cfg, results := scheduledExportFixture()
+	cfg.Rate = 0 // ASAP dispatch: no arrival pacing, dispatch window is meaningless
+	cfg.dispatchElapsed = 0.01
+	cfg.Output = t.TempDir() + "/report.json"
+
+	exportJSON(results, cfg)
+
+	data, err := os.ReadFile(cfg.Output)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	summary := report["summary"].(map[string]any)
+	for _, key := range []string{"dispatch_window_s", "dispatch_qps"} {
+		if _, ok := summary[key]; ok {
+			t.Fatalf("unpaced scheduled summary must not contain %q", key)
+		}
+	}
+	// Queue-delay keys are still meaningful without pacing.
+	if _, ok := summary["queue_delay_p50_ms"]; !ok {
+		t.Fatalf("summary missing key %q", "queue_delay_p50_ms")
+	}
+}

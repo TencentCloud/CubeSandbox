@@ -145,6 +145,8 @@ lifetime distribution. The JSON export therefore also reports
 `dispatch_window_s` (wall-clock span of the dispatch loop, first to last
 request release) and `dispatch_qps` (requests released per second of that
 window), which reflect the arrival-side throughput the scheduler actually saw.
+Both keys are emitted only for rate-paced runs (`--rate > 0`): without pacing
+the "window" is just the client's release burst and the rate is meaningless.
 For A/B comparisons of scheduler behavior, prefer `dispatch_qps`;
 `throughput_qps` answers "how fast did the whole experiment finish".
 
@@ -187,8 +189,9 @@ side) and renders a Markdown report: per-metric mean ± 95% CI (Student-t
 quantiles — a normal z badly understates the interval at a handful of seeds),
 absolute and relative change, and an improved/regressed verdict based on a
 built-in direction table (latency/error/cv/fragmentation lower-is-better,
-including cube-bench's own `create.*`/`delete.*` stat blocks;
-rates/jain/throughput higher-is-better):
+including cube-bench's own `create.*`/`delete.*` stat blocks and
+bad-when-rising rates such as `restart_rate`/`preempt_rate`/`evict_rate`/
+`retry_rate`; other rates/jain/throughput higher-is-better):
 
 ```bash
 ./bin/cube-bench compare --baseline default1.json,default2.json,default3.json \

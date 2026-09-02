@@ -271,7 +271,19 @@ func t95(n int) float64 {
 	case df <= 30:
 		return t95Table[df-1]
 	default:
-		return 1.96
+		// Cornish–Fisher expansion of the two-sided 95% Student-t quantile
+		// around the normal value z=1.95996...: t ≈ z + g1/df + g2/df² +
+		// g3/df³ with g1=(z³+z)/4, g2=(5z⁵+16z³+3z)/96,
+		// g3=(3z⁷+19z⁵+17z³−15z)/384. Accurate to ~1e-4 for df > 30, where
+		// t has approached but not yet reached 1.96 (df=31: 2.0395,
+		// df=60: 2.0003, df=120: 1.9799).
+		const z = 1.959963986120195
+		v := float64(df)
+		z2, z3 := z*z, z*z*z
+		g1 := (z3 + z) / 4
+		g2 := (5*z3*z2 + 16*z3 + 3*z) / 96
+		g3 := (3*z3*z2*z2 + 19*z3*z2 + 17*z3 - 15*z) / 384
+		return z + g1/v + g2/(v*v) + g3/(v*v*v)
 	}
 }
 
@@ -329,9 +341,12 @@ const (
 // key split on non-alphanumeric characters), so "strategy" does not match
 // "rate" and "discovery" does not match "cv". Lower-better rules win when a
 // key matches both families, hence "error_rate" is lower-better while
-// "success_rate" is higher-better.
+// "success_rate" is higher-better. Scheduler-quality rates that are bad when
+// they rise (restart/preempt/evict/retry) are pinned lower-better explicitly —
+// the generic "rate" token alone would otherwise flag a growing restart_rate
+// as an improvement.
 var (
-	lowerBetterSubstrings  = []string{"latency", "delay", "duration", "error", "failure", "fragment", "herd"}
+	lowerBetterSubstrings  = []string{"latency", "delay", "duration", "error", "failure", "fragment", "herd", "restart", "preempt", "evict", "retry"}
 	lowerBetterTokens      = []string{"cv"}
 	higherBetterSubstrings = []string{"jain", "throughput"}
 	higherBetterTokens     = []string{"rate", "qps"}
