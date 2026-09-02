@@ -195,6 +195,11 @@ impl AgentService {
                     info!(sl!(), "reconnecting passfd for restored container {}", id);
                     process.reconnect_passfd(io).await?;
                 }
+                process.reset_log_stream_readers().map_err(|e| anyhow!(e))?;
+                info!(
+                    sl!(),
+                    "reset log-forward readers for restored container {}", id
+                );
 
                 process.pid
             };

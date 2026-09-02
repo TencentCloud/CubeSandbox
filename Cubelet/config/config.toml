@@ -43,6 +43,8 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     # Static-only cadence for node status and resource reporting.
     # Do not configure this in dynamicconf/conf.yaml.
     node_status_update_frequency = "1s"
+    cubeops_addr = ""
+    cubeops_timeout = "10m"
 
   [plugins."io.cubelet.internal.v1.volume"]
   [plugins."io.cubelet.internal.v1.shimlog"]
@@ -125,6 +127,12 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     format = "compact"
     file = "/data/log/cubecow/cubecow.log"
     rotation = "daily"
+
+    [plugins."io.cubelet.internal.v1.storage".cow.s3]
+    # CubeS3lvol opt-in. Default false: cubelet does not probe s3lvol.
+    # One-click flips this from ONE_CLICK_ENABLE_S3LVOL.
+    enable = false
+    socket_path = "/var/run/s3lvol.sock"
 
     # Only needed when switching back to the legacy ext4 / raw / reflink-pool
     # backend: change storage_backend to the corresponding value (e.g. "ext4")

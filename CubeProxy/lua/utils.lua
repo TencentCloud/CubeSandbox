@@ -1,4 +1,3 @@
--- file name: utils.lua
 local ok, new_tab = pcall(require, "table.new")
 if not ok or type(new_tab) ~= "function" then
     new_tab = function(narr, nrec)
@@ -6,12 +5,8 @@ if not ok or type(new_tab) ~= "function" then
     end
 end
 
-local _M = new_tab(0, 155)
+local _M = new_tab(0, 10)
 _M._VERSION = '0.01'
-
-local mt = {
-    __index = _M
-}
 
 -- HTTP status → gRPC status code (google.rpc.Code). Used on the plaintext
 -- gRPC ingress so native clients get trailers instead of JSON over HTTP 4xx/5xx.
@@ -30,25 +25,6 @@ local GRPC_MESSAGE = {
     [410] = "gone",
     [503] = "unavailable",
 }
-
---[[
-    1 arg:
-        - file_name: the file to read
-    2 return values:
-        - content: the content of the file
-        - error: any error that occurred during executing the function
---]]
-function _M.get_file_content(self, file_name)
-    local f, err = io.open(file_name, "r")
-    if not f then
-        return "", err
-    end
-
-    local content = f:read("*all")
-    f:close()
-
-    return content, nil
-end
 
 --[[
     1 arg:

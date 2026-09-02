@@ -39,12 +39,13 @@ Everything lives behind the 11 icons in the left rail. Hover any icon to see its
 | 3 | 🧩 | **Templates** | Catalog of reusable sandbox snapshots; create new ones from OCI images |
 | 4 | 🖥️ | **Nodes** | Fleet health: per-host CPU, memory, slot capacity |
 | 5 | 🧬 | **Versions** | Component version matrix across nodes (kernel, agent, guest image) |
-| 6 | 🌐 | **Network** | API gateway config and per-node rate limits |
-| 7 | 📈 | **Observability** | Runtime status, sandbox health, template build overview |
-| 8 | 🔑 | **API Keys** | SDK API key management (JWT-based since v0.6.0) |
-| 9 | 🏪 | **Template Store** | Install official preset images to bootstrap templates |
-| 10 | 🤖 | **AgentHub** | Recruit and manage AI agent instances running on Cube Sandbox |
-| 11 | ⚙️ | **Settings** | Theme, language, cluster info, keyboard shortcuts |
+| 6 | 📦 | **Warehouse** | Import one-click packages; nodes download a missing bound version on create/restore |
+| 7 | 🌐 | **Network** | API gateway config and per-node rate limits |
+| 8 | 📈 | **Observability** | Runtime status, sandbox health, template build overview |
+| 9 | 🔑 | **API Keys** | SDK API key management (JWT-based since v0.6.0) |
+| 10 | 🏪 | **Template Store** | Install official preset images to bootstrap templates |
+| 11 | 🤖 | **AgentHub** | Recruit and manage AI agent instances running on Cube Sandbox |
+| 12 | ⚙️ | **Settings** | Theme, language, cluster info, keyboard shortcuts |
 
 ::: tip New user? Start with **Overview**.
 It shows everything important in one screen and refreshes automatically.
@@ -65,7 +66,7 @@ If any number is red, click into **Nodes** to see which host is unhappy.
 ### 3.2 Create a sandbox
 
 1. Click **Sandboxes** in the left rail, then **+ New sandbox** (top-right).
-2. Pick a template from the grid. Prefer a `READY` template. A `STALE` badge only means the node's current component versions differ from those recorded on the template — creation is still allowed; make sure the node already has the component versions the template needs.
+2. Pick a template from the grid. Prefer a `READY` template. If it says **Needs rebuild**, open the template and click **Rebuild Template** before creating a sandbox. Other `READY` templates keep working after a node upgrade.
 3. (Optional) Add a few `meta` key/value pairs as labels.
 4. Click **Create**. Within a couple of seconds you'll be redirected to the sandbox's detail page, where you can watch its logs stream in real time.
 
@@ -127,6 +128,7 @@ Yes — it lives in `web/` of the repo, built with Vite + React + TypeScript + T
 
 - [Quick Start](./quickstart.md) — if you haven't installed yet, get to a running Dashboard in minutes
 - [Service Management](./service-management.md) — how to start/stop/restart the `cube-sandbox-webui.service` container
+- [Component multi-version](./component-multiversion.md) — nodes keep multiple component versions; upgrading components does not break old templates or sandboxes
 - [Authentication](./authentication.md) — turn on API keys if you haven't
 - [HTTPS & Domain Resolution](./https-and-domain.md) — put the Dashboard behind TLS
 - [Architecture Overview](../architecture/overview.md) — understand how CubeAPI, CubeMaster, Cubelet fit together behind the scenes

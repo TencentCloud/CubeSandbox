@@ -18,10 +18,10 @@ import (
 	gomock "go.uber.org/mock/gomock"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	criimages "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images"
 	criimagestore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func makeCubeBox(image string) *cubebox.CubeSandbox {

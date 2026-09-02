@@ -19,7 +19,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/tencentcloud/CubeSandbox/CubeNet/cubevs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network/runtime/systemnet"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 var (
@@ -221,7 +221,7 @@ func newProductionControllerDeps(cfg Config) (networkControllerDeps, error) {
 		device:            device,
 		cubeDev:           cubeDev,
 		cubeRouter:        cubeRouter,
-		tapAdapter:        newRealTapDeviceAdapter(),
+		tapAdapter:        newRealTapDeviceAdapter(cfg.CIDR),
 		cubevsAdapter:     newRealCubeVSAdapter(),
 		cubeEgressAdapter: newCubeEgressAdapterFromConfig(cfg),
 	}, nil

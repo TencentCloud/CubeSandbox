@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
+	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 // uuidV4Pattern matches the canonical UUID layout from uuid.NewString().

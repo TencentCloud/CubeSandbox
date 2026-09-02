@@ -11,7 +11,8 @@ on:
       - 'CubeMaster/**'
       - 'CubeShim/**'
       - 'CubeNet/**'
-      - 'cubelog/**'
+      - 'pkgs/CubeLog/**'
+      - 'pkgs/proto/**'
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
       - 'agent/**'
@@ -30,7 +31,8 @@ on:
       - 'CubeMaster/**'
       - 'CubeShim/**'
       - 'CubeNet/**'
-      - 'cubelog/**'
+      - 'pkgs/CubeLog/**'
+      - 'pkgs/proto/**'
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
       - 'agent/**'
@@ -62,6 +64,8 @@ on:
           - agent
           - hypervisor
           - volume-s3
+          - volume-cos-rpc
+          - proto
 
 concurrency:
   group: unit-test-${{ github.event.pull_request.number || github.ref }}
@@ -119,6 +123,8 @@ jobs:
             add_component "agent"
             add_component "hypervisor"
             add_component "volume-s3"
+            add_component "volume-cos-rpc"
+            add_component "proto"
           }
 
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
@@ -138,6 +144,8 @@ jobs:
               agent) add_component "agent" ;;
               hypervisor) add_component "hypervisor" ;;
               volume-s3) add_component "volume-s3" ;;
+              volume-cos-rpc) add_component "volume-cos-rpc" ;;
+              proto) add_component "proto" ;;
               *)
                 echo "::error::unsupported component input: ${selected_component}"
                 exit 1
@@ -198,8 +206,25 @@ jobs:
                   # helper changes still need the cubelet test set.
                   add_component "cubelet"
                   ;;
-                cubelog/*)
+                pkgs/CubeLog/*)
+                  # Consumers import CubeLog via replace => ../pkgs/CubeLog, so
+                  # CubeLog changes must re-run those test sets too.
                   add_component "cubelog"
+                  add_component "CubeMaster"
+                  add_component "cubelet"
+                  add_component "CubeOps"
+                  ;;
+                pkgs/proto/*)
+                  # Shared proto module; consumers import via replace =>
+                  # ../pkgs/proto. Changes re-run the consumer test sets
+                  # (CubeMaster, cubelet), the cos/rpc example (the only
+                  # example consuming pkgs/proto), and the module's own
+                  # unit tests -- importer `go test` never runs a
+                  # dependency's _test.go files.
+                  add_component "proto"
+                  add_component "CubeMaster"
+                  add_component "cubelet"
+                  add_component "volume-cos-rpc"
                   ;;
                 cube-lifecycle-manager/*)
                   add_component "cube-lifecycle-manager"
@@ -219,6 +244,12 @@ jobs:
                 examples/volume/s3/*)
                   # Standalone Go module, not covered by any component above.
                   add_component "volume-s3"
+                  ;;
+                examples/volume/cos/rpc/*)
+                  # Standalone Go module (the reference gRPC volume plugin and
+                  # the only example consuming pkgs/proto), not covered by any
+                  # component build above.
+                  add_component "volume-cos-rpc"
                   ;;
               esac
             done <<< "${changed_files}"
@@ -250,6 +281,8 @@ jobs:
                     elif . == "agent" then "Agent"
                     elif . == "hypervisor" then "Hypervisor"
                     elif . == "volume-s3" then "S3 Volume Plugin"
+                    elif . == "volume-cos-rpc" then "COS RPC Volume Plugin"
+                    elif . == "proto" then "Proto"
                     else error("unsupported component: " + .)
                     end
                   ),
@@ -268,10 +301,12 @@ jobs:
                     elif . == "agent" then "agent-test"
                     elif . == "hypervisor" then "hypervisor-test"
                     elif . == "volume-s3" then "cube-volume-s3-test"
+                    elif . == "volume-cos-rpc" then "cube-volume-cos-rpc-test"
+                    elif . == "proto" then "proto-test"
                     else error("unsupported component: " + .)
                     end
                   ),
-                  requires_builder: (. != "CubeProxy" and . != "cubelog" and . != "cubedb")
+                  requires_builder: (. != "CubeProxy" and . != "cubelog" and . != "cubedb" and . != "proto")
                 })
               | map(
                   . as $c

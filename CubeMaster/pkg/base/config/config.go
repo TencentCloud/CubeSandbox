@@ -23,7 +23,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	volumeplugin "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -987,7 +987,7 @@ func preHandleCubeletConf(config *Config) error {
 	}
 	// DefaultTimeoutInsec is left untouched — see docs/guide/lifecycle.md.
 	if config.CubeletConf.CreateTimeoutInsec <= 0 {
-		config.CubeletConf.CreateTimeoutInsec = 300
+		config.CubeletConf.CreateTimeoutInsec = 600
 	}
 	if config.CubeletConf.MaxRetries == 0 {
 		config.CubeletConf.MaxRetries = 5

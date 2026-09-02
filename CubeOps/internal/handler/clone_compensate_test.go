@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	cubelog "github.com/tencentcloud/CubeSandbox/cubelog"
+	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 // TestCloneAgent_CompensationCorrelatesRequestID verifies that when

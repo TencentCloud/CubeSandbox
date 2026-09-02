@@ -365,7 +365,7 @@ func TestResumer_RollsBackOnRPCFailure(t *testing.T) {
 }
 
 func TestResumer_WaitsWhenPeerHoldsLock(t *testing.T) {
-	// Pre-seed the state key with "resuming" — simulates a peer sidecar
+	// Pre-seed the state key with "resuming" — simulates a peer CLM replica
 	// that's already mid-flight on this sandbox. acquireResumeOwnership
 	// should observe it via GetState and route to waitForRunning instead
 	// of issuing a duplicate CubeMaster RPC.

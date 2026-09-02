@@ -8,8 +8,8 @@ package errorcode
 import (
 	"sync"
 
-	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
 type ErrorCode cubeleterrorcode.ErrorCode

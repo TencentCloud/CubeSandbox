@@ -179,7 +179,12 @@ For a user-oriented walkthrough of what each output means and how to preview the
 
 ```bash
 cubemastercli tpl delete tpl-748094d2f2374b0a8a37e6ec
+
+# Delete multiple templates in one command
+cubemastercli tpl delete tpl-first tpl-second tpl-third
 ```
+
+When multiple template IDs are provided, the CLI attempts every deletion even if one fails, then returns a combined error for the failed templates.
 
 On success:
 

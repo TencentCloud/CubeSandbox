@@ -43,14 +43,7 @@ func (s *Subscriber) Run(ctx context.Context) error {
 		s.log.Warn("eventbus subscriber unavailable; retrying",
 			zap.Duration("retry_delay", retryDelay),
 			zap.Error(err))
-
-		timer := time.NewTimer(retryDelay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
+		time.Sleep(retryDelay)
 	}
 }
 

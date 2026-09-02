@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 // s3InitRetryInterval is the pause between failed S3 init attempts.
@@ -20,6 +20,10 @@ var s3InitRetryInterval = 5 * time.Second
 // ErrS3NotReady is returned for backend=s3 requests while the S3 cubecow
 // handle and metadata base are still initializing (or retrying).
 var ErrS3NotReady = errors.New("s3 storage is not ready (initializing)")
+
+// ErrS3NotConfigured is returned for backend=s3 requests when the operator
+// has not opted into CubeS3lvol ([cow.s3] enable is false).
+var ErrS3NotConfigured = errors.New("s3 storage is not configured (set [cow.s3] enable = true to enable CubeS3lvol)")
 
 // ensureS3MetadataReadyFn is swapped in tests to avoid real mkfs/mount.
 var ensureS3MetadataReadyFn = EnsureS3MetadataReady
@@ -33,6 +37,10 @@ var (
 
 func (l *local) startS3CowInitLoop(parent context.Context) {
 	if l == nil || !l.useCowStorage() {
+		return
+	}
+	if l.config == nil || !l.config.s3lvolConfigured() {
+		CubeLog.Infof("s3 cubecow init skipped; set [cow.s3] enable = true to enable")
 		return
 	}
 	l.stopS3CowInitLoop()

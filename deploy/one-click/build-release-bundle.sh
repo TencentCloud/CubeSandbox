@@ -371,6 +371,14 @@ components["cubeops"] = {
     "digest_sha256": required_sha256(os.path.join(core_bin_dir, "cubeops")),
 }
 
+# ── cubeopscli from CORE_BIN_DIR ──
+components["cubeopscli"] = {
+    "version": cube_version,
+    "commit": cube_commit,
+    "build_time": cube_build_time,
+    "digest_sha256": required_sha256(os.path.join(core_bin_dir, "cubeopscli")),
+}
+
 # ── Rust binaries from build-vm-assets.sh ──
 components["cube-agent"] = {
     "version": cube_version,
@@ -723,7 +731,7 @@ build_or_copy_go_binary \
 build_or_copy_go_binary \
   "cubeopscli" "${CUBE_OPS_CLI_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeOps" "${CUBE_OPS_BUILD_MODE}" \
-  "${CORE_BIN_DIR}/cubeopscli" ./cmd/cubeopscli
+  "${CORE_BIN_DIR}/cubeopscli" ./cmd/cubeopscli "${CUBEOPS_VERSION_PKG}"
 build_or_copy_go_binary \
   "cubevsmapdump" "${CUBEVSMAPDUMP_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeNet/cubevs" "${CUBEVSMAPDUMP_BUILD_MODE}" \

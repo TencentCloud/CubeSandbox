@@ -1,7 +1,7 @@
 [Unit]
 Description=Cube Sandbox CubeOps (admin/ops API)
-After=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service
-Wants=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service
+After=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service cube-sandbox-minio.service
+Wants=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service cube-sandbox-minio.service
 ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
 PartOf=cube-sandbox-control.target
 

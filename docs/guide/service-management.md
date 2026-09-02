@@ -135,7 +135,7 @@ Under `cubelet_conf`:
 | Key | Purpose |
 |-----|---------|
 | `default_timeout_insec` | Server default **sandbox idle TTL** (seconds) when the client omits `timeout`. **Unset or `<= 0` means no cluster-wide idle timeout** (sandboxes never time out from idle unless the client sets `timeout`). The repository ships `-1` for this “no default” behavior. Set a positive value (e.g. `300`) in production if you want automatic reclamation of sandboxes created without an explicit TTL. |
-| `create_timeout_insec` | Create/scheduling RPC deadline only — **not** sandbox idle TTL. Defaults to `300` when unset. |
+| `create_timeout_insec` | Create/scheduling RPC deadline only — **not** sandbox idle TTL. Defaults to `600` when unset. |
 | `common_timeout_insec` | Generic CubeMaster→Cubelet RPC timeout for non-create paths. |
 
 After changing `default_timeout_insec`, restart CubeMaster and read [Sandbox lifecycle — Operational Notes](lifecycle.md#cluster-default-idle-timeout-default_timeout_insec) for client-visible behavior. For node selection, quota, labels, scheduler scoring, or template redo after adding compute nodes, see [CubeMaster Scheduler Configuration](./cubemaster-scheduler-config.md).

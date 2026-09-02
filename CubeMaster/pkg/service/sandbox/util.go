@@ -15,8 +15,6 @@ import (
 	"unicode"
 
 	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
-	cubeboximages "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	dbmodels "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
@@ -26,6 +24,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	cubeboximages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 	"gorm.io/gorm"
 	"k8s.io/apimachinery/pkg/api/resource"
 

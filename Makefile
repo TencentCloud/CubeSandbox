@@ -145,6 +145,7 @@ help:
 	@printf "  cube-proxy-sidecar Build cube-proxy-sidecar (developer-only; not in 'all')\n"
 	@printf "  cube-volume-s3 Build the S3-compatible Volume plugin in Docker\n"
 	@printf "  cube-volume-s3-test Run S3 Volume plugin unit tests in Docker\n"
+	@printf "  cube-volume-cos-rpc-test Run COS RPC Volume plugin unit tests in Docker\n"
 	@printf "  agent         Build cube-agent in Docker\n"
 	@printf "  cube-init     Build cube-init (guest PID1) in Docker (alias: guest-init)\n"
 	@printf "  guest-init    Alias for cube-init (source dir guest-init/)\n"
@@ -164,6 +165,7 @@ help:
 	@printf "  shim-test     Run CubeShim unit tests in Docker\n"
 	@printf "  cubelog-test  Run cubelog unit tests on the host\n"
 	@printf "  cubedb-test   Run CubeDB unit tests on the host\n"
+	@printf "  proto-test    Run pkgs/proto unit tests on the host\n"
 	@printf "  cube-lifecycle-manager-test Run cube-lifecycle-manager unit tests in Docker\n"
 	@printf "  cubelet-pkg-test Run Cubelet ./pkg/... unit tests in Docker (no coverage)\n"
 	@printf "  agent-test    Run cube-agent unit tests in Docker\n"
@@ -373,7 +375,7 @@ cubecow-test-native: builder-image
 .PHONY: cubemaster
 cubemaster: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && make proto && CGO_ENABLED=0 make build && mkdir -p /workspace/_output/bin && cp build/cubemaster build/cubemastercli /workspace/_output/bin/'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && CGO_ENABLED=0 make build && mkdir -p /workspace/_output/bin && cp build/cubemaster build/cubemastercli /workspace/_output/bin/'
 
 .PHONY: cubelet
 cubelet: builder-image
@@ -441,7 +443,7 @@ cube-api: cubeapi
 .PHONY: cubeops
 cubeops: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/CubeOps && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -ldflags '-s -w -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Version=$(CUBE_VERSION) -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.Commit=$(CUBE_COMMIT) -X github.com/tencentcloud/CubeSandbox/CubeOps/internal/version.BuildTime=$(CUBE_BUILD_TIME)' -o /workspace/_output/bin/cubeops ./cmd/cubeops && go build -ldflags '-s -w' -o /workspace/_output/bin/cubeopscli ./cmd/cubeopscli"
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeOps && CGO_ENABLED=0 make build && cp bin/cubeops bin/cubeopscli /workspace/_output/bin/'
 
 .PHONY: cubeops-test
 cubeops-test: builder-image
@@ -452,6 +454,13 @@ cubeops-test: builder-image
 .PHONY: cube-volume-s3-test
 cube-volume-s3-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/examples/volume/s3 && go mod download && go vet ./... && go test ./...'
+
+# COS RPC Volume plugin (examples/volume/cos/rpc): the reference gRPC volume
+# plugin and the only example consuming pkgs/proto. Standalone Go module (its
+# own go.mod), so it is not covered by any component test target above.
+.PHONY: cube-volume-cos-rpc-test
+cube-volume-cos-rpc-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/examples/volume/cos/rpc && go mod download && go vet ./... && go test ./...'
 
 .PHONY: cubemaster-test
 cubemaster-test: builder-image
@@ -478,11 +487,20 @@ shim-test: builder-image
 # container is faster.
 .PHONY: cubelog-test
 cubelog-test:
-	cd cubelog && go test -short ./...
+	cd pkgs/CubeLog && go test -short ./...
 
 .PHONY: cubedb-test
 cubedb-test:
 	cd CubeDB && go mod download && go test ./...
+
+# pkgs/proto runs on the host: pure Go (generated .pb.go + grpc/protobuf
+# deps, no CGO/builder-only deps), like cubelog/cubedb. Consumers only
+# compile its non-test code via replace, so the module's own _test.go files
+# must be run here -- `go test ./...` in an importer never runs a
+# dependency's tests.
+.PHONY: proto-test
+proto-test:
+	cd pkgs/proto && go mod download && go vet ./... && go test ./...
 
 .PHONY: cube-lifecycle-manager-test
 cube-lifecycle-manager-test: builder-image
@@ -610,7 +628,9 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@printf '  %-8s %s\n' "FMT" "Cubelet"
 	@$(MAKE) -C Cubelet fmt
 	@printf '  %-8s %s\n' "FMT" "cubelog"
-	@$(MAKE) -C cubelog fmt
+	@$(MAKE) -C pkgs/CubeLog fmt
+	@printf '  %-8s %s\n' "FMT" "proto"
+	@$(MAKE) -C pkgs/proto fmt
 	@printf '  %-8s %s\n' "FMT" "CubeMaster"
 	@$(MAKE) -C CubeMaster fmt
 	@printf '  %-8s %s\n' "FMT" "CubeNet"

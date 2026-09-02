@@ -671,6 +671,24 @@ impl Process {
         Some(reader)
     }
 
+    /// After snapshot restore, cached Tokio `PipeStream` wrappers still point
+    /// at the pre-snapshot reactor. Dup the log-pipe read ends and drop the
+    /// cache so the next `read_stdout` / `read_stderr` attaches cleanly.
+    /// The write ends inherited by the init process are unchanged.
+    pub fn reset_log_stream_readers(&mut self) -> result::Result<(), String> {
+        if let Some(fd) = self.parent_stdout {
+            let dup = unistd::dup(fd).map_err(|e| format!("dup parent_stdout: {:?}", e))?;
+            self.parent_stdout = Some(dup);
+        }
+        if let Some(fd) = self.parent_stderr {
+            let dup = unistd::dup(fd).map_err(|e| format!("dup parent_stderr: {:?}", e))?;
+            self.parent_stderr = Some(dup);
+        }
+        self.readers.clear();
+        self.writers.clear();
+        Ok(())
+    }
+
     pub fn get_writer(&mut self, stream_type: StreamType) -> Option<Writer> {
         if let Some(writer) = self.writers.get(&stream_type) {
             return Some(writer.clone());
@@ -781,5 +799,25 @@ mod tests {
         assert!(process.parent_stdin.is_none());
         assert!(process.parent_stdout.is_none());
         assert!(process.parent_stderr.is_none());
+    }
+
+    #[test]
+    fn test_reset_log_stream_readers_keeps_pipe_readable() {
+        let (r, w) = unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
+        let logger = Logger::root(slog::Discard, o!("source" => "unit-test"));
+        let mut process =
+            Process::new(&logger, &OCIProcess::default(), "reset-io", true, 32).unwrap();
+        process.parent_stdout = Some(r);
+        process.reset_log_stream_readers().unwrap();
+        assert!(process.readers.is_empty());
+        assert!(process.writers.is_empty());
+        let new_fd = process.parent_stdout.expect("duped stdout");
+        assert_ne!(new_fd, r);
+        unistd::write(w, b"x").unwrap();
+        let mut buf = [0u8; 1];
+        assert_eq!(unistd::read(new_fd, &mut buf).unwrap(), 1);
+        assert_eq!(&buf, b"x");
+        let _ = unistd::close(w);
+        let _ = unistd::close(new_fd);
     }
 }

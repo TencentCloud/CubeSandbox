@@ -1,8 +1,9 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-.PHONY: build run test vet fmt clean docker
+.PHONY: build run test vet fmt clean docker deps
 
+APPS=cubeops cubeopscli
 BINARY=cubeops
 BIND=127.0.0.1:3010
 
@@ -18,8 +19,13 @@ BUILD_FLAGS=-ldflags "-s -w \
   -X '$(VERSION_PKG).Commit=$(CUBE_COMMIT)' \
   -X '$(VERSION_PKG).BuildTime=$(CUBE_BUILD_TIME)'"
 
-build:
-	go build $(BUILD_FLAGS) -o bin/$(BINARY) ./cmd/cubeops
+build: $(APPS)
+
+deps:
+	go mod download
+
+$(APPS): deps
+	go build $(BUILD_FLAGS) -o bin/$@ ./cmd/$@
 
 run: build
 	JWT_SECRET=test-secret-dummy \

@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -84,6 +85,25 @@ func newCommitContext(t *testing.T, args []string) *cli.Context {
 
 	ctx := cli.NewContext(nil, set, nil)
 	ctx.Command = TemplateCommitCommand
+	return ctx
+}
+
+func newDeleteContext(t *testing.T, args []string) *cli.Context {
+	t.Helper()
+
+	set := flag.NewFlagSet("delete", flag.ContinueOnError)
+	set.String("address", "", "cubemaster address")
+	set.String("port", "", "cubemaster port")
+	set.Duration("timeout", 0, "request timeout")
+	for _, cliFlag := range TemplateDeleteCommand.Flags {
+		cliFlag.Apply(set)
+	}
+	if err := set.Parse(args); err != nil {
+		t.Fatalf("parse args %v: %v", args, err)
+	}
+
+	ctx := cli.NewContext(nil, set, nil)
+	ctx.Command = TemplateDeleteCommand
 	return ctx
 }
 
@@ -816,5 +836,111 @@ func TestResolveTemplateIDFromAllTemplateCommands(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolveTemplateIDs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "multiple positional ids",
+			args: []string{"tpl-1", "tpl-2", "tpl-3"},
+			want: []string{"tpl-1", "tpl-2", "tpl-3"},
+		},
+		{
+			name: "flag preserves existing override behavior",
+			args: []string{"--template-id", "tpl-flag", "tpl-positional"},
+			want: []string{"tpl-flag"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := newDeleteContext(t, tt.args)
+			if got := resolveTemplateIDs(ctx); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTemplateDeleteCommandDeletesAllTemplateIDs(t *testing.T) {
+	var deleted []string
+	origHTTPClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var body templateDeleteRequest
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Fatalf("decode delete request: %v", err)
+		}
+		deleted = append(deleted, body.TemplateID)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"ret":{"ret_code":200,"ret_msg":"success"}}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+	defer func() { http.DefaultClient = origHTTPClient }()
+
+	ctx := newDeleteContext(t, []string{
+		"--address", "127.0.0.1",
+		"--port", "8089",
+		"tpl-1", "tpl-2", "tpl-3",
+	})
+	action := TemplateDeleteCommand.Action.(func(*cli.Context) error)
+	if err := action(ctx); err != nil {
+		t.Fatalf("delete returned error: %v", err)
+	}
+	if want := []string{"tpl-1", "tpl-2", "tpl-3"}; !reflect.DeepEqual(deleted, want) {
+		t.Fatalf("deleted %v, want %v", deleted, want)
+	}
+}
+
+func TestTemplateDeleteCommandContinuesAfterFailure(t *testing.T) {
+	var deleted []string
+	var logBuf bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+	})
+
+	origHTTPClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var body templateDeleteRequest
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Fatalf("decode delete request: %v", err)
+		}
+		deleted = append(deleted, body.TemplateID)
+		response := `{"ret":{"ret_code":200,"ret_msg":"success"}}`
+		if body.TemplateID == "tpl-fail" {
+			response = `{"ret":{"ret_code":500,"ret_msg":"delete failed"}}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(response)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+	defer func() { http.DefaultClient = origHTTPClient }()
+
+	ctx := newDeleteContext(t, []string{
+		"--address", "127.0.0.1",
+		"--port", "8089",
+		"tpl-first", "tpl-fail", "tpl-last",
+	})
+	action := TemplateDeleteCommand.Action.(func(*cli.Context) error)
+	err := action(ctx)
+	if err == nil || !strings.Contains(err.Error(), "tpl-fail: delete failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := []string{"tpl-first", "tpl-fail", "tpl-last"}; !reflect.DeepEqual(deleted, want) {
+		t.Fatalf("deleted %v, want %v", deleted, want)
+	}
+	if got := logBuf.String(); !strings.Contains(got, "template delete failed. delete failed. TemplateId: tpl-fail. RequestId:") {
+		t.Fatalf("failure log %q does not identify failed template", got)
 	}
 }

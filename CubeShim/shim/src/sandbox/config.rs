@@ -101,7 +101,7 @@ impl Default for Config {
             notify_snapshot_ret: false,
             app_snapshot_create: false,
             app_snapshot_restore: false,
-            use_passfd_io: true,
+            use_passfd_io: false,
             extra_kernel_params: Vec::new(),
         }
     }
@@ -182,10 +182,12 @@ impl Config {
             }
         };
 
+        // Opt-in only: cubelet must set cube.use_passfd_io=true. Missing or
+        // any other value keeps the legacy RPC log-forward path.
         let use_passfd_io = anno
             .get("cube.use_passfd_io")
-            .map(|v| !v.eq_ignore_ascii_case("false"))
-            .unwrap_or(true);
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
         let mut cube_vips = String::new();
         if let Some(v) = anno.get(ANNO_CUBE_VIPS) {
@@ -508,5 +510,46 @@ mod tests {
         assert!(ret.is_ok());
         let config = ret.unwrap();
         assert_eq!(config.extra_kernel_params, vec!["single=param".to_string()]);
+    }
+
+    #[test]
+    fn passfd_io_is_opt_in() {
+        let mut annotations = HashMap::<String, String>::new();
+        let res = r#"{"cpu": 1, "memory": 2048, "preserve_memory": 2048, "snap_memory": 2048}"#;
+        annotations.insert(ANNO_VM_RES.to_string(), res.to_string());
+
+        let config = Config::new(&Some(annotations.clone())).unwrap();
+        assert!(
+            !config.use_passfd_io,
+            "missing annotation must keep the legacy log-forward path"
+        );
+
+        annotations.insert("cube.use_passfd_io".to_string(), "true".to_string());
+        assert!(
+            Config::new(&Some(annotations.clone()))
+                .unwrap()
+                .use_passfd_io
+        );
+
+        annotations.insert("cube.use_passfd_io".to_string(), "TRUE".to_string());
+        assert!(
+            Config::new(&Some(annotations.clone()))
+                .unwrap()
+                .use_passfd_io
+        );
+
+        annotations.insert("cube.use_passfd_io".to_string(), "false".to_string());
+        assert!(
+            !Config::new(&Some(annotations.clone()))
+                .unwrap()
+                .use_passfd_io
+        );
+
+        annotations.insert("cube.use_passfd_io".to_string(), "1".to_string());
+        assert!(
+            !Config::new(&Some(annotations.clone()))
+                .unwrap()
+                .use_passfd_io
+        );
     }
 }

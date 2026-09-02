@@ -23,8 +23,8 @@ import (
 )
 
 // Options bundles dependencies for the Resumer. Concrete production wiring
-// lives in cmd/sidecar/main.go; the interface types defined in iface.go let
-// tests substitute fakes for Redis / CubeMaster / CubeProxy.
+// lives in cmd/cube-lifecycle-manager/main.go; the interface types defined
+// in iface.go let tests substitute fakes for Redis / CubeMaster / CubeProxy.
 type Options struct {
 	Registry     *registry.Registry
 	Redis        stateStore
@@ -157,8 +157,8 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 
 	// Success bookkeeping. Three writes, all best-effort:
 	//
-	//  1. Redis state → "running" so the next request from any sidecar
-	//     instance sees the right state.
+	//  1. Redis state → "running" so the next request from any CLM replica
+	//     sees the right state.
 	//  2. CubeProxy local state dict → "running" so the rewrite_phase gate
 	//     stops triggering resumes for this sandbox.
 	//  3. In-memory registry LastActiveMs → now. Without (3) the sweeper
@@ -271,7 +271,7 @@ func (r *Resumer) callCubeMasterResume(ctx context.Context, sandboxID, instanceT
 //     for race-recovery).
 //   - "pausing" or "resuming":    a peer is in flight → waitForRunning
 //
-// This is intentionally racy: between GET and SET another sidecar could
+// This is intentionally racy: between GET and SET another CLM replica could
 // claim the key. That's fine because the worst case is two resumers both
 // calling CubeMaster.Resume — which CubeMaster handles idempotently
 // (returns "already running" the second time, which we already map to

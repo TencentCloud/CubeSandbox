@@ -208,6 +208,18 @@ CUBE_OPS_ESC="$(sed_escape_replacement "${CUBE_OPS_ENDPOINT}")"
 CUBE_MASTER_HTTP_ESC="$(sed_escape_replacement "${CUBE_MASTER_HTTP_ADDR}")"
 sed -i -e "s#^\([[:space:]]*meta_server_endpoint:[[:space:]]*\).*#\1\"${CUBE_OPS_ESC}\"#" "${CUBELET_DYNAMICCONF}"
 sed -i -e "s#^\([[:space:]]*cubemaster_http_addr:[[:space:]]*\).*#\1\"${CUBE_MASTER_HTTP_ESC}\"#" "${CUBELET_DYNAMICCONF}"
+# Warehouse downloads use the same CubeOps as node register/heartbeat.
+# CUBE_OPS_ADDR overrides; otherwise http(s):// is added to CUBE_OPS_ENDPOINT.
+CUBELET_CUBEOPS_ADDR="${CUBE_OPS_ADDR:-${CUBE_OPS_ENDPOINT}}"
+if [[ "${CUBELET_CUBEOPS_ADDR}" != http://* && "${CUBELET_CUBEOPS_ADDR}" != https://* ]]; then
+  CUBELET_CUBEOPS_ADDR="http://${CUBELET_CUBEOPS_ADDR}"
+fi
+CUBE_OPS_ADDR_ESC="$(sed_escape_replacement "${CUBELET_CUBEOPS_ADDR}")"
+if grep -Eq '^[[:space:]]*cubeops_addr[[:space:]]*=' "${CUBELET_CONFIG}"; then
+  sed -i -e "s#^[[:space:]]*cubeops_addr[[:space:]]*=.*#    cubeops_addr = \"${CUBE_OPS_ADDR_ESC}\"#" "${CUBELET_CONFIG}"
+else
+  sed -i -e "/node_status_update_frequency/a\\    cubeops_addr = \"${CUBE_OPS_ADDR_ESC}\"" "${CUBELET_CONFIG}"
+fi
 configure_sandbox_dns
 
 if [[ -z "${CUBE_SANDBOX_ETH_NAME:-}" && "${CUBE_SANDBOX_AUTO_DETECT_ETH}" == "true" ]]; then

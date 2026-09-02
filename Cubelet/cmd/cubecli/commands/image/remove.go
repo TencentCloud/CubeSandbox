@@ -11,9 +11,9 @@ import (
 
 	jsoniter "github.com/json-iterator/go"
 	"github.com/sirupsen/logrus"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/urfave/cli/v2"
 	errorUtils "k8s.io/apimachinery/pkg/util/errors"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"

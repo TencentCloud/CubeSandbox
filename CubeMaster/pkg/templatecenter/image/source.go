@@ -85,12 +85,15 @@ func prepareNativeSource(ctx context.Context, spec SourceSpec) (*PreparedSource,
 	if spec.RegistryUsername != "" || spec.RegistryPassword != "" {
 		authCfg = &RegistryAuthConfig{Username: spec.RegistryUsername, Password: spec.RegistryPassword}
 	}
-	authOpt := registryAuthOption(authCfg)
+	auth, err := registryAuthenticator(ctx, ref, authCfg)
+	if err != nil {
+		return nil, fmt.Errorf("native export failed to resolve registry auth for %q: %w", spec.ImageRef, err)
+	}
 	jobs := nativeExportConcurrency()
 	platOpt := remote.WithPlatform(defaultPlatform())
 	jobsOpt := remote.WithJobs(jobs)
 
-	img, err := remote.Image(ref, remote.WithContext(ctx), authOpt, platOpt, jobsOpt)
+	img, err := remote.Image(ref, remote.WithContext(ctx), remote.WithAuth(auth), platOpt, jobsOpt)
 	if err != nil {
 		return nil, fmt.Errorf("native export failed to resolve image %q (if this is a multi-arch index, verify the requested platform exists): %w", spec.ImageRef, err)
 	}

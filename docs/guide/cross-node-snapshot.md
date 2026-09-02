@@ -1,5 +1,9 @@
 # Cross-Node Snapshots (Pause / Resume / Snapshot)
 
+::: tip Deployment scope (v0.7.0)
+In this release, CubeS3lvol can only be enabled on compute nodes installed via **one-click (bare-metal) deployment**; Kubernetes (Helm) deployments do not include the s3lvol target, so the cross-node S3 snapshot path is unavailable there.
+:::
+
 CubeSandbox persists a sandbox as a **package** of three objects (rootfs / memory / metadata) so you can **Pause**, **Resume**, and take a **Snapshot**:
 
 - **Pause / Resume**: freeze a running sandbox (memory + filesystem) into a pause package, then restore it on the same node or another compatible node.

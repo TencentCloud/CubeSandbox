@@ -177,7 +177,12 @@ cubemastercli tpl render --template-id tpl-748094d2f2374b0a8a37e6ec --json
 
 ```bash
 cubemastercli tpl delete tpl-748094d2f2374b0a8a37e6ec
+
+# 一次删除多个模板
+cubemastercli tpl delete tpl-first tpl-second tpl-third
 ```
+
+传入多个模板 ID 时，即使其中某个模板删除失败，CLI 也会继续尝试删除其余模板，最后汇总返回失败项。
 
 成功后输出：
 

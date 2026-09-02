@@ -599,20 +599,20 @@ volume_plugins:
 
 ## rpc 插件 pb 定义说明
 
-rpc 插件实现 [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin.proto) 中的 gRPC 服务。消息字段与上文 [Hook 定义](#hook-定义) 一致（proto 使用 `snake_case`）。
+rpc 插件实现 [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin.proto) 中的 gRPC 服务。消息字段与上文 [Hook 定义](#hook-定义) 一致（proto 使用 `snake_case`）。
 
 | 文件 | 说明 |
 |------|------|
-| [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin.proto) | 协议源文件 |
-| [`volumeplugin.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin.pb.go) | 已提交的 Go message |
-| [`volumeplugin_grpc.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin_grpc.pb.go) | 已提交的 gRPC stub |
+| [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin.proto) | 协议源文件 |
+| [`volumeplugin.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin.pb.go) | 已提交的 Go message |
+| [`volumeplugin_grpc.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin_grpc.pb.go) | 已提交的 gRPC stub |
 
 | Service | 调用方 | RPC |
 |---------|--------|-----|
 | `VolumeControllerService` | CubeMaster | `Create`、`Destroy` |
 | `VolumePluginService` | Cubelet | `Attach`、`Detach` |
 
-修改 proto 后重新生成：`cd Cubelet && make proto`。参考实现：[`examples/volume/cos/rpc/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.zh.md)。
+修改 proto 后重新生成：`cd pkgs/proto && make proto`。参考实现：[`examples/volume/cos/rpc/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.zh.md)。
 
 ---
 
@@ -732,7 +732,7 @@ Volume 依赖 CubeMaster 与 Cubelet **双侧**均升级到支持 Volume 插件�
 | 跨节点 refcount | `CubeMaster/pkg/volume/refcount/refcount.go` | 解析 ext_info 事件并累加 `t_cube_volume.refcount` |
 | Volume DB 模型 | `CubeMaster/pkg/base/db/models/volume.go` | `VolumeRecord`（含 `refcount` 字段） |
 | Node 挂载逻辑 | `Cubelet/storage/pluginvolume.go` | bind-mount + virtiofs；上报 node 级 refcount 转变 |
-| 协议定义 | `Cubelet/api/services/volumeplugin/v1/volumeplugin.proto` | rpc 类型 proto |
-| Go 生成代码 | `Cubelet/api/services/volumeplugin/v1/volumeplugin*.pb.go` | 已提交的 message / rpc stub |
+| 协议定义 | `pkgs/proto/services/volumeplugin/v1/volumeplugin.proto` | rpc 类型 proto |
+| Go 生成代码 | `pkgs/proto/services/volumeplugin/v1/volumeplugin*.pb.go` | 已提交的 message / rpc stub |
 | COS 参考（binary） | `examples/volume/cos/binary/cube-volume-cos.sh` | binary 类型示例 |
 | COS 参考（rpc） | `examples/volume/cos/rpc/cmd/cube-volume-cos-rpc` | rpc 类型示例 |

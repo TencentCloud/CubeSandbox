@@ -45,6 +45,9 @@ type KubeletConfig struct {
 	DisableCreateNode bool `toml:"disable_create_node,omitempty"`
 
 	NodeStatusUpdateFrequency tomlext.Duration `toml:"node_status_update_frequency,omitempty"`
+
+	CubeOpsAddr    string           `toml:"cubeops_addr,omitempty"`
+	CubeOpsTimeout tomlext.Duration `toml:"cubeops_timeout,omitempty"`
 }
 
 func DefaultCubeletConfig() *KubeletConfig {
@@ -53,6 +56,7 @@ func DefaultCubeletConfig() *KubeletConfig {
 		ResyncInterval:            10 * time.Hour,
 		DisableCreateNode:         false,
 		NodeStatusUpdateFrequency: tomlext.FromStdTime(10 * time.Second),
+		CubeOpsTimeout:            tomlext.FromStdTime(10 * time.Minute),
 	}
 }
 
@@ -114,6 +118,11 @@ type Cubelet struct {
 	versionCollector *versioninfo.Collector
 
 	closeCh chan struct{}
+}
+
+// StopChannel is closed when Cubelet shuts down.
+func (kl *Cubelet) StopChannel() <-chan struct{} {
+	return kl.closeCh
 }
 
 func NewCubelet(

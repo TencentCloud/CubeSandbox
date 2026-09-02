@@ -2333,7 +2333,9 @@ ip_int_to_dot() {
 is_cube_tap_netdev() {
   local iface="$1"
   iface="${iface%%@*}"
-  [[ "${iface}" =~ ^z[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  # Current: dotted IPv4. Legacy: z + IPv4 (names that still fit IFNAMSIZ).
+  [[ "${iface}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || [[ "${iface}" =~ ^z[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
 is_cube_managed_netdev() {
@@ -2403,7 +2405,8 @@ _check_cidr_conflict() {
       continue
     fi
     # Other cube-managed devices, including the optional cube-router and
-    # persistent TAP devices named "z<ipv4>", are also deployment residue.
+    # persistent TAP devices named "<ipv4>" (legacy "z<ipv4>"), are also
+    # deployment residue.
     if is_cube_managed_netdev "${iface_name}"; then
       continue
     fi
@@ -2557,7 +2560,7 @@ _check_cidr_conflict() {
       die "${cidr_label} '${cidr}' overlaps an existing cube-dev network (${cd_network}/${cd_mask}).
 
   Changing the sandbox CIDR on a host that already has a cube network is
-  disruptive: the old cube-dev and the persistent z* TAP devices are left
+  disruptive: the old cube-dev and the persistent TAP devices are left
   stale. A reboot alone is NOT enough -- the systemd target is enabled and
   cubelet's embedded network runtime rebuilds the old network from config.toml on boot.
 
@@ -2565,7 +2568,9 @@ _check_cidr_conflict() {
     sudo systemctl stop 'cube-sandbox-*.target'
     sudo ip link delete cube-dev 2>/dev/null || true
     sudo ip link delete cube-router 2>/dev/null || true
-    ip tuntap show | awk -F: '/^z[0-9]+\\./{print \$1}' \\
+    ip tuntap show | awk -F: '
+      \$1 ~ /^(z)?[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\$/ { print \$1 }
+    ' \\
       | xargs -r -n1 -I{} sudo ip tuntap del dev {} mode tap
   then re-run install with the new CIDR.
 

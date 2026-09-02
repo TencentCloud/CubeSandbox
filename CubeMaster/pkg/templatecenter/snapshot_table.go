@@ -50,9 +50,33 @@ func updateSnapshotFields(ctx context.Context, snapshotID string, values map[str
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
 	}
+	return updateSnapshotFieldsTx(store.db.WithContext(ctx), snapshotID, values)
+}
+
+func updateSnapshotFieldsTx(tx *gorm.DB, snapshotID string, values map[string]any) error {
 	values["updated_at"] = gorm.Expr("CURRENT_TIMESTAMP")
-	return store.db.WithContext(ctx).Table(constants.SnapshotTableName).
+	return tx.Table(constants.SnapshotTableName).
 		Where("snapshot_id = ?", snapshotID).Updates(values).Error
+}
+
+// updateSnapshotFieldsIfStatusIn writes only when the row is still in one of
+// statuses. Used by replica-presence so a concurrent tombstone / physical
+// delete is not overwritten with FAILED.
+func updateSnapshotFieldsIfStatusIn(ctx context.Context, snapshotID string, values map[string]any, statuses ...string) (bool, error) {
+	if !isReady() {
+		return false, ErrTemplateStoreNotInitialized
+	}
+	if len(statuses) == 0 {
+		return false, nil
+	}
+	values["updated_at"] = gorm.Expr("CURRENT_TIMESTAMP")
+	result := store.db.WithContext(ctx).Table(constants.SnapshotTableName).
+		Where("snapshot_id = ? AND status IN ?", snapshotID, statuses).
+		Updates(values)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
 }
 
 func createSnapshotTx(ctx context.Context, tx *gorm.DB, snapshotID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, rec *models.SnapshotRecord) error {
@@ -99,7 +123,6 @@ func snapshotInfoFromRecord(rec *models.SnapshotRecord, replicas []ReplicaStatus
 		StorageBackend:            rec.Backend,
 		Backend:                   rec.Backend,
 		RemoteStatus:              rec.RemoteStatus,
-		Retain:                    rec.Retain,
 		RootfsSizeBytesAtSnapshot: rec.RootfsSizeBytesAtSnapshot,
 		LastError:                 rec.LastError,
 		CreatedAt:                 formatUTCRFC3339(rec.CreatedAt),
@@ -167,6 +190,9 @@ func GetSnapshotRestoreSource(ctx context.Context, snapshotID string) (*RestoreS
 	rec, err := getSnapshotRecord(ctx, snapshotID)
 	if err != nil {
 		return nil, err
+	}
+	if snapshotRejectsNewUse(rec.Status) {
+		return nil, wrapSnapshotNotFound(snapshotID)
 	}
 	return &RestoreSource{
 		SnapshotID:          rec.SnapshotID,

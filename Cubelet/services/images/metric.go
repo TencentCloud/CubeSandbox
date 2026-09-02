@@ -10,7 +10,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	metrictype "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/metric/types"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 func (l *local) RegisterMetrics(register *metrictype.CollectRegister) error {

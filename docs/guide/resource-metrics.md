@@ -370,16 +370,16 @@ An old `cube-agent` may lack the required cgroup v2 accounting semantics and res
 
 Run template `redo` for an image-built template.
 
-`redo` uses the node's current guest image and `cube-agent` to rebuild a replica for the same template ID. After the task completes and compatibility returns to `OK`, newly created sandboxes can export `guest_workload` metrics.
+`redo` uses the node's current guest image and `cube-agent` to rebuild a replica for the same template ID. After the task completes, newly created sandboxes can export `guest_workload` metrics.
 
-`STALE` only means the node's current guest/agent versions differ from the versions recorded on the template. It does not block creation. You can still create sandboxes from a `READY` template; CubeSandbox looks up the recorded component versions on the node. If those versions are missing locally, creation fails until you place the matching component versions under the multi-version directory. Run template `redo` when you need a newer guest image / `cube-agent` so new sandboxes can export `guest_workload` metrics.
+After a node upgrade, templates marked **Needs rebuild** in the Dashboard must be rebuilt (click **Rebuild Template**) before you create sandboxes from them. Other templates can still be used directly — creation looks up the recorded versions on the node (or downloads them from the component warehouse). Click **Rebuild Template** on an already-usable template only when you want the node's current guest image / `cube-agent` so new sandboxes can export `guest_workload` metrics.
 
 ### User snapshots and existing sandboxes
 
 - For a user snapshot created from a running sandbox, create a sandbox from a compatible new template and then create a new snapshot.
 - A running or paused old sandbox retains its in-memory `cube-agent` and must be deleted and recreated to complete the upgrade.
 
-The one-click bundle writes the reviewed `cube-agent` into the guest image and records component versions and checksums. A `STALE` entry in the compat matrix is for visibility only; as long as the template is `READY`, you can still create sandboxes using the component versions recorded on that template.
+The one-click bundle writes the reviewed `cube-agent` into the guest image. As long as the template is `READY` and is not marked **Needs rebuild**, you can still create sandboxes after an upgrade.
 
 At runtime, CubeShim also validates the resource metrics capability version returned by `StatsContainer`, preventing all-zero or incomplete `guest_workload` data from being accepted as valid metrics.
 

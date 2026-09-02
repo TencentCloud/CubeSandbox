@@ -4190,10 +4190,12 @@ REMOTE_CUBELET_FREQ
 
 	if [ -z "${cm_clb_ip}" ]; then
 		echo -e "  ${YELLOW}⚠ cube-master CLB unavailable, skipping verification${NC}"
+	elif [ -z "${ops_clb_ip}" ]; then
+		echo -e "  ${YELLOW}⚠ cube-ops CLB unavailable, skipping node registration verification and template creation${NC}"
 	else
 		local nodes_json
-		# Query CubeOps through the jumpserver (ClusterIP, not exposed via CLB)
-		nodes_json=$(_jump_exec "kubectl -n cubesandbox exec deploy/cube-ops -- curl -s --connect-timeout 10 'http://127.0.0.1:3010/internal/v1/nodes' 2>&1" 2>&1) || true
+		# Query CubeOps via its VPC-internal CLB (same address compute nodes use).
+		nodes_json=$(_jump_exec "curl -s --connect-timeout 10 --max-time 10 'http://${ops_clb_ip}:3010/internal/v1/nodes' 2>&1" 2>&1) || true
 
 		# Output the registered nodes (with health status)
 		local node_ips node_count node_status
@@ -4217,9 +4219,9 @@ REMOTE_CUBELET_FREQ
 			mysql_db="${CUBE_DB:-cube_mvp}"
 
 			if [ -n "$mysql_host" ]; then
-				# Only query nodes with healthy=true
+				# Only query healthy nodes; `.InstanceID` is the DB `node_id`.
 				local healthy_node_ips node_list
-				healthy_node_ips=$(echo "$nodes_json" | jq -r '.data[] | select(.healthy == true) | .node_id' 2>/dev/null || echo "")
+				healthy_node_ips=$(echo "$nodes_json" | jq -r '.[] | select(.Healthy == true) | .InstanceID' 2>/dev/null || echo "")
 				if [ -z "$healthy_node_ips" ]; then
 					echo -e "  ${YELLOW}⚠ No healthy nodes${NC}"
 				else
@@ -4233,9 +4235,9 @@ REMOTE_CUBELET_FREQ
 
 		# Check the number of existing templates; create one if it is 0 (requires at least 1 registered node)
 		if [ -n "${cm_clb_ip}" ]; then
-			# Get the number of registered healthy nodes
+			# Get the number of registered healthy nodes.
 			local healthy_count
-			healthy_count=$(echo "$nodes_json" | jq -r '[.data[]? | select(.healthy == true)] | length' 2>/dev/null || echo "0")
+			healthy_count=$(echo "$nodes_json" | jq -r '[.[]? | select(.Healthy == true)] | length' 2>/dev/null || echo "0")
 			healthy_count=$(echo "$healthy_count" | tr -d ' \n\r')
 			echo -e "  ${CYAN}Registered healthy nodes: ${healthy_count:-0}${NC}"
 
@@ -4268,7 +4270,8 @@ REMOTE_CUBELET_FREQ
 	# failures and continue instead of aborting an otherwise-working deployment.
 	if [ "${#failed_nodes[@]}" -gt 0 ] && [ -n "${nodes_json:-}" ]; then
 		local _expected_ip _healthy_ips _all_registered=1 _expected_n=0
-		_healthy_ips=$(echo "$nodes_json" | jq -r '.data[]? | select(.healthy == true) | .node_id' 2>/dev/null || echo "")
+		# Healthy node's registered host IP (`.IP`), matched against private IPs.
+		_healthy_ips=$(echo "$nodes_json" | jq -r '.[]? | select(.Healthy == true) | .IP' 2>/dev/null || echo "")
 		while IFS= read -r _expected_ip; do
 			[ -n "$_expected_ip" ] || continue
 			_expected_n=$((_expected_n + 1))
@@ -5132,9 +5135,10 @@ phase7_health_check() {
 	echo ""
 
 	# ---- 2) Probe the component endpoints through the CLBs (from jumpserver) -
-	local cm_ip api_ip proxy_ip webui_ip
+	local cm_ip api_ip ops_ip proxy_ip webui_ip
 	cm_ip=$(terraform output -raw tke_cubemaster_clb_ip 2>/dev/null || echo "")
 	api_ip=$(terraform output -raw tke_cube_api_clb_ip 2>/dev/null || echo "")
+	ops_ip=$(terraform output -raw tke_cube_ops_clb_ip 2>/dev/null || echo "")
 	proxy_ip=$(terraform output -raw tke_cube_proxy_clb_ip 2>/dev/null || echo "")
 	webui_ip=$(terraform output -raw tke_cube_webui_clb_ip 2>/dev/null || echo "")
 
@@ -5151,8 +5155,12 @@ phase7_health_check() {
 		fi
 		# Informational: how many compute nodes have registered so far. The
 		# standalone compute nodes only register in Step 8, so 0 here is normal.
-		local nodes_json ncount
-		nodes_json=$(_jump_exec "kubectl -n cubesandbox exec deploy/cube-ops -- curl -s --connect-timeout 5 --max-time 10 'http://127.0.0.1:3010/internal/v1/nodes' 2>/dev/null" 2>/dev/null)
+		# Query CubeOps via its VPC-internal CLB (same as other endpoint probes).
+		# Keep nodes_json bound (→ count 0) if the cube-ops CLB is not ready yet.
+		local nodes_json="[]" ncount
+		if [ -n "$ops_ip" ]; then
+			nodes_json=$(_jump_exec "curl -s --connect-timeout 5 --max-time 10 'http://${ops_ip}:3010/internal/v1/nodes' 2>/dev/null" 2>/dev/null)
+		fi
 		ncount=$(echo "$nodes_json" | jq 'if type=="array" then length else 0 end' 2>/dev/null || echo "0")
 		echo -e "    ${CYAN}registered compute nodes so far: ${ncount:-0} (they register in Step 8)${NC}"
 	else

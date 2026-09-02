@@ -18,7 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"golang.org/x/sys/unix"
 	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/api/resource"

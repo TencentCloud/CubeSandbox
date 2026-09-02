@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
@@ -20,6 +19,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 var ErrTemplateInUse = errors.New("template is still in use")
@@ -75,6 +75,12 @@ func cleanupLocatorKey(locator templateCleanupLocator) string {
 func DeleteTemplate(ctx context.Context, templateID, instanceType string) error {
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
+	}
+	if rec, err := getSnapshotRecord(ctx, templateID); err == nil && rec != nil {
+		_, err := DeleteSnapshot(ctx, uuid.NewString(), templateID, instanceType)
+		return err
+	} else if err != nil && !errors.Is(err, ErrSnapshotNotFound) {
+		return err
 	}
 	return withTemplateWriteLock(templateID, func() error {
 		targets, err := discoverTemplateCleanupTargets(ctx, templateID, instanceType)

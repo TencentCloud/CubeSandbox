@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"testing/synctest"
 
 	"github.com/agiledragon/gomonkey/v2"
+	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -24,6 +26,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
+	"golang.org/x/oauth2"
 )
 
 func TestNativeRootfsExportEnabledParsesEnv(t *testing.T) {
@@ -41,6 +44,204 @@ func TestNativeRootfsExportEnabledParsesEnv(t *testing.T) {
 	if !nativeRootfsExportEnabled() {
 		t.Fatal("expected invalid native export env value to fallback to enabled")
 	}
+}
+
+func TestRegistryAuthenticatorUsesADCForArtifactRegistryWhenKeychainAnonymous(t *testing.T) {
+	setAuthSeams(t, fakeKeychain{auth: authn.Anonymous}, func(context.Context, ...string) (oauth2.TokenSource, error) {
+		return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "wi-access-token"}), nil
+	})
+
+	ref, err := name.ParseReference("us-west1-docker.pkg.dev/project/repository/image:tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := registryAuthenticator(context.Background(), ref, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := auth.Authorization()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Username != "oauth2accesstoken" || cfg.Password != "wi-access-token" {
+		t.Fatalf("unexpected ADC auth: %#v", cfg)
+	}
+}
+
+func TestRegistryAuthenticatorPrefersKeychainCredsOverADC(t *testing.T) {
+	setAuthSeams(t, fakeKeychain{auth: authn.FromConfig(authn.AuthConfig{Username: "kc-user", Password: "kc-pass"})}, func(context.Context, ...string) (oauth2.TokenSource, error) {
+		t.Fatal("ADC must not be consulted when the keychain has credentials")
+		return nil, nil
+	})
+
+	ref, err := name.ParseReference("us-west1-docker.pkg.dev/project/repository/image:tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := registryAuthenticator(context.Background(), ref, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := auth.Authorization()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Username != "kc-user" || cfg.Password != "kc-pass" {
+		t.Fatalf("unexpected keychain auth: %#v", cfg)
+	}
+}
+
+func TestRegistryAuthenticatorPrefersExplicitCredentials(t *testing.T) {
+	// Explicit credentials must win even when keychain and ADC would both supply creds.
+	setAuthSeams(t, fakeKeychain{auth: authn.FromConfig(authn.AuthConfig{Username: "kc-user", Password: "kc-pass"})}, func(context.Context, ...string) (oauth2.TokenSource, error) {
+		t.Fatal("ADC must not be consulted when explicit credentials are supplied")
+		return nil, nil
+	})
+
+	ref, err := name.ParseReference("us-west1-docker.pkg.dev/project/repository/image:tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := registryAuthenticator(context.Background(), ref, &RegistryAuthConfig{Username: "user", Password: "password"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := auth.Authorization()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Username != "user" || cfg.Password != "password" {
+		t.Fatalf("unexpected explicit auth: %#v", cfg)
+	}
+}
+
+func TestRegistryAuthenticatorSkipsADCForNonGoogleRegistry(t *testing.T) {
+	setAuthSeams(t, fakeKeychain{auth: authn.Anonymous}, func(context.Context, ...string) (oauth2.TokenSource, error) {
+		t.Fatal("ADC must not be consulted for non-Artifact-Registry refs")
+		return nil, nil
+	})
+
+	for _, refStr := range []string{
+		"gcr.io/project/repo:tag",
+		"asia.gcr.io/project/repo:tag",
+		"registry.example.com/ns/repo:tag",
+		"docker.io/library/alpine:latest",
+	} {
+		ref, err := name.ParseReference(refStr)
+		if err != nil {
+			t.Fatalf("parse %q: %v", refStr, err)
+		}
+		auth, err := registryAuthenticator(context.Background(), ref, nil)
+		if err != nil {
+			t.Fatalf("ref %q: %v", refStr, err)
+		}
+		if auth != authn.Anonymous {
+			t.Fatalf("ref %q: expected anonymous, got %#v", refStr, auth)
+		}
+	}
+}
+
+func TestRegistryAuthenticatorFallsBackToAnonymousWhenADCUnavailable(t *testing.T) {
+	setAuthSeams(t, fakeKeychain{auth: authn.Anonymous}, func(context.Context, ...string) (oauth2.TokenSource, error) {
+		return nil, errors.New("no google creds found")
+	})
+
+	ref, err := name.ParseReference("us-west1-docker.pkg.dev/project/repository/image:tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := registryAuthenticator(context.Background(), ref, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth != authn.Anonymous {
+		t.Fatalf("expected anonymous fallback, got %#v", auth)
+	}
+}
+
+func TestRegistryAuthenticatorPropagatesKeychainError(t *testing.T) {
+	// ADC is never reached because the keychain error propagates first.
+	setAuthSeams(t, fakeKeychain{err: errors.New("keychain boom")}, nil)
+
+	ref, err := name.ParseReference("us-west1-docker.pkg.dev/project/repository/image:tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registryAuthenticator(context.Background(), ref, nil); err == nil {
+		t.Fatal("expected keychain error to propagate")
+	}
+}
+
+func TestTokenSourceAuthenticatorRefreshesPerRequest(t *testing.T) {
+	src := &countingTokenSource{}
+	a := &tokenSourceAuthenticator{source: src}
+
+	first, err := a.Authorization()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := a.Authorization()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Password != "token-1" || second.Password != "token-2" {
+		t.Fatalf("expected per-call token refresh, got %q then %q", first.Password, second.Password)
+	}
+}
+
+func TestIsGoogleArtifactRegistry(t *testing.T) {
+	cases := []struct {
+		registry string
+		want     bool
+	}{
+		{"us-west1-docker.pkg.dev", true},
+		{"us-east1.pkg.dev", true},
+		{"US-WEST1-DOCKER.PKG.DEV", true}, // case-insensitive
+		{"gcr.io", false},
+		{"asia.gcr.io", false},
+		{"pkg.dev", false},
+		{"docker.io", false},
+		{"registry.example.com", false},
+	}
+	for _, c := range cases {
+		if got := isGoogleArtifactRegistry(c.registry); got != c.want {
+			t.Errorf("isGoogleArtifactRegistry(%q)=%v, want %v", c.registry, got, c.want)
+		}
+	}
+}
+
+// setAuthSeams swaps the auth resolution seams for the duration of a test and
+// restores them via t.Cleanup. Pass nil for ts when ADC must never be consulted.
+func setAuthSeams(t *testing.T, kc authn.Keychain, ts func(context.Context, ...string) (oauth2.TokenSource, error)) {
+	t.Helper()
+	oldKC := defaultKeychain
+	oldTS := googleDefaultTokenSource
+	defaultKeychain = kc
+	googleDefaultTokenSource = ts
+	t.Cleanup(func() {
+		defaultKeychain = oldKC
+		googleDefaultTokenSource = oldTS
+	})
+}
+
+// fakeKeychain lets tests control what the default keychain resolves to.
+type fakeKeychain struct {
+	auth authn.Authenticator
+	err  error
+}
+
+func (k fakeKeychain) Resolve(authn.Resource) (authn.Authenticator, error) {
+	return k.auth, k.err
+}
+
+// countingTokenSource returns a fresh access token on every call.
+type countingTokenSource struct {
+	calls int
+}
+
+func (s *countingTokenSource) Token() (*oauth2.Token, error) {
+	s.calls++
+	return &oauth2.Token{AccessToken: fmt.Sprintf("token-%d", s.calls)}, nil
 }
 
 func TestNativeExportConcurrencyParsesEnv(t *testing.T) {

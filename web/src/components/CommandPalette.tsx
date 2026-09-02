@@ -4,7 +4,16 @@
 import { Command } from 'cmdk';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Boxes, Package, Server, LayoutDashboard, Activity, Settings, Plus } from 'lucide-react';
+import {
+  Boxes,
+  Package,
+  Server,
+  LayoutDashboard,
+  Activity,
+  Settings,
+  Plus,
+  Archive,
+} from 'lucide-react';
 import { useCommandPaletteStore } from '@/store/ui';
 
 export function CommandPalette() {
@@ -64,6 +73,11 @@ export function CommandPalette() {
                 icon={<Server size={14} />}
                 label={tNav('nodes')}
                 onSelect={() => go('/nodes')}
+              />
+              <Item
+                icon={<Archive size={14} />}
+                label={tNav('warehouse')}
+                onSelect={() => go('/warehouse')}
               />
               <Item
                 icon={<Activity size={14} />}

@@ -86,3 +86,6 @@ web/tsconfig.tsbuildinfo
 
 # Local toolchain downloads (e.g. portable protoc)
 .tools/
+
+# Local Helm runtime values (passwords / advertiseIP / TLS). Example is tracked.
+runtime-values.yaml

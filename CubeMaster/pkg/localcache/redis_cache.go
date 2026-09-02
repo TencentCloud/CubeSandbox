@@ -23,7 +23,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/wrapredis"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 type RedisNodeInfo struct {

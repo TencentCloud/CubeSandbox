@@ -74,9 +74,14 @@ cubeopscli --address <cubeops-host> --port 3010 node list
 cubeopscli --address <cubeops-host> --port 3010 node isolate <node-id>
 cubeopscli --address <cubeops-host> --port 3010 node unisolate <node-id>
 cubeopscli --address <cubeops-host> --port 3010 node delete <node-id>
+cubeopscli --version
+cubeopscli version
+cubeopscli version --versiononly
 ```
 
 删除节点要求节点**已隔离且无沙箱**；批量删除时单个节点失败不会中断后续节点，命令最终返回非零退出码。`delete` 的别名是 `rm`；用 `--force` 可在无法校验沙箱清单时强制删除（仍要求先隔离）。
+
+`cubeopscli --version` 与 `cubeopscli version` 输出发布版本（如 `cubeopscli v0.7.0 (<commit>) built at <timestamp>`）；`cubeopscli version --versiononly` 只输出语义化版本号。
 
 增加、隔离与删除节点的详细用法见[节点相关操作](./node-operations.md)。
 

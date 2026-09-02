@@ -135,7 +135,7 @@ sudo systemctl restart cube-sandbox-<service>.service
 | 配置项 | 说明 |
 |--------|------|
 | `default_timeout_insec` | 客户端**不传** `timeout` 时，集群默认的**沙箱空闲 TTL**（秒）。**未配置或 `<= 0` 表示不设集群级空闲超时**（沙箱不会因空闲被自动回收，除非客户端显式传 `timeout`）。仓库默认为 `-1`，即“无集群默认”。生产环境若需自动回收未带 TTL 的沙箱，可改为正数（如 `300`）。 |
-| `create_timeout_insec` | 仅限制创建/调度 RPC 的截止时间，**不是**沙箱空闲 TTL。未配置时默认 `300`。 |
+| `create_timeout_insec` | 仅限制创建/调度 RPC 的截止时间，**不是**沙箱空闲 TTL。未配置时默认 `600`。 |
 | `common_timeout_insec` | CubeMaster 访问 Cubelet 的通用 RPC 超时（非 create 专用）。 |
 
 修改 `default_timeout_insec` 后需重启 CubeMaster；客户端可见语义见[沙箱生命周期 — 设计与运维要点](lifecycle.md#集群默认空闲超时default_timeout_insec)。如果要调整节点选择、quota、label、调度评分或新增计算节点后的 template redo，请参阅[CubeMaster 调度器配置参考](./cubemaster-scheduler-config.md)。

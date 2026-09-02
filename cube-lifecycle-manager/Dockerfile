@@ -3,8 +3,7 @@
 #
 # Multi-stage build for cube-lifecycle-manager — the standalone service that
 # owns sandbox auto-pause / auto-resume coordination between CubeMaster,
-# CubeProxy and Redis. It supersedes the older in-container cube-proxy-sidecar
-# with an unchanged wire protocol (admin push + /_sidecar_resume callback).
+# CubeProxy and Redis.
 #
 # Usage:
 #   docker build -t cube-lifecycle-manager:one-click .

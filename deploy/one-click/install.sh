@@ -99,6 +99,7 @@ init_external_dep_defaults() {
   # prefixes never collide with the volume plugin's volumes/<id>/ tree.
   CUBE_S3LVOL_BUCKET="${CUBE_S3LVOL_BUCKET:-cube-s3lvol}"
   CUBE_S3LVOL_PATH_STYLE="${CUBE_S3LVOL_PATH_STYLE:-}"
+  CUBE_OPS_S3_BUCKET="${CUBE_OPS_S3_BUCKET:-cube-ops}"
 }
 
 # Guard against shipping the example/default credentials to a real external
@@ -1879,6 +1880,7 @@ fi
 # without re-deriving them, and so `down.sh` / upgrade knows the intent.
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_ENABLE_S3LVOL" "${ONE_CLICK_ENABLE_S3LVOL}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3LVOL_BUCKET" "${CUBE_S3LVOL_BUCKET}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_S3_BUCKET" "${CUBE_OPS_S3_BUCKET:-cube-ops}"
 if [[ -n "${CUBE_S3LVOL_PATH_STYLE}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3LVOL_PATH_STYLE" "${CUBE_S3LVOL_PATH_STYLE}"
 else

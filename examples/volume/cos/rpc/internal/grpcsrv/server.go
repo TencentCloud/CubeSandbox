@@ -12,8 +12,8 @@ import (
 	"os"
 	"path/filepath"
 
-	vpb "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/volumeplugin/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/grpctarget"
+	vpb "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/volumeplugin/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/volumeplugin/grpctarget"
 	"github.com/tencentcloud/CubeSandbox/examples/volume/cos/rpc/internal/config"
 	"github.com/tencentcloud/CubeSandbox/examples/volume/cos/rpc/internal/cosapi"
 	"github.com/tencentcloud/CubeSandbox/examples/volume/cos/rpc/internal/cosfs"

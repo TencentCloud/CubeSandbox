@@ -10,7 +10,6 @@ import {
   getVersionMatrix,
   getSandboxDetail,
   getSandboxLogs,
-  getSandboxSession,
   getTemplate,
   getTemplateCompat,
   listNodes,
@@ -21,9 +20,24 @@ import {
   resetMockState,
   resumeSandbox,
 } from '../fixtures';
+import {
+  createImportJobs,
+  createPreinstallJobs,
+  createUpload,
+  deleteWarehouseVersion,
+  getImportJob,
+  listImportJobs,
+  getWarehouseComponent,
+  listPreinstallJobs,
+  listWarehouseComponents,
+} from '../fixtures/warehouse';
 
 function notFound(message: string) {
   return HttpResponse.json({ code: 404, message }, { status: 404 });
+}
+
+function opsError(status: number, error: string, code?: string) {
+  return HttpResponse.json(code ? { error, code } : { error }, { status });
 }
 
 export const handlers = [
@@ -140,5 +154,152 @@ export const handlers = [
   http.post('/mock/reset', async () => {
     resetMockState();
     return HttpResponse.json({ ok: true });
+  }),
+
+  // Mock mode has no CubeOps: keep the shell open so warehouse and other
+  // ops-backed pages can be exercised locally.
+  http.get('/opsapi/v1/auth/session', async () => {
+    await mockDelay();
+    return HttpResponse.json({ authRequired: false, authenticated: true, username: 'mock' });
+  }),
+  http.post('/opsapi/v1/auth/login', async () => {
+    await mockDelay();
+    return HttpResponse.json({
+      accessToken: 'mock-access',
+      refreshToken: 'mock-refresh',
+      username: 'mock',
+      expiresInSecs: 3600,
+    });
+  }),
+  http.post('/opsapi/v1/auth/logout', async () => {
+    await mockDelay();
+    return new HttpResponse(null, { status: 204 });
+  }),
+  http.post('/opsapi/v1/auth/refresh', async () => {
+    await mockDelay();
+    return HttpResponse.json({ accessToken: 'mock-access', refreshToken: 'mock-refresh' });
+  }),
+
+  http.get('/opsapi/v1/warehouse/components', async () => {
+    await mockDelay();
+    const nodeIds = listNodes()
+      .map((n) => n.nodeID)
+      .filter(Boolean);
+    return HttpResponse.json(listWarehouseComponents(nodeIds));
+  }),
+
+  http.get('/opsapi/v1/warehouse/components/:component', async ({ params }) => {
+    await mockDelay();
+    const nodeIds = listNodes()
+      .map((n) => n.nodeID)
+      .filter(Boolean);
+    const result = getWarehouseComponent(String(params.component), nodeIds);
+    if (!result.ok) {
+      return opsError(result.status, result.error);
+    }
+    return HttpResponse.json(result.detail);
+  }),
+
+  http.delete(
+    '/opsapi/v1/warehouse/components/:component/versions/:version',
+    async ({ request, params }) => {
+      await mockDelay();
+      const url = new URL(request.url);
+      const arch = url.searchParams.get('arch') ?? '';
+      if (!arch) {
+        return opsError(400, 'arch query is required (amd64 or arm64)');
+      }
+      const result = deleteWarehouseVersion(String(params.component), String(params.version), arch);
+      if (result === 'not_found') {
+        return opsError(404, 'warehouse version not found', 'warehouse_not_found');
+      }
+      return new HttpResponse(null, { status: 204 });
+    },
+  ),
+
+  http.post('/opsapi/v1/warehouse/uploads', async ({ request }) => {
+    await mockDelay();
+    const form = await request.formData();
+    const file = form.get('file');
+    if (!(file instanceof File)) {
+      return opsError(400, 'multipart field file is required');
+    }
+    const result = createUpload(file.name);
+    if (!result.ok) {
+      return opsError(400, result.error);
+    }
+    return HttpResponse.json(
+      { uploadId: result.uploadId, filename: result.filename },
+      { status: 201 },
+    );
+  }),
+
+  http.post('/opsapi/v1/warehouse/imports', async ({ request }) => {
+    await mockDelay();
+    let body: {
+      source?: string;
+      repo?: string;
+      tag?: string;
+      uploadId?: string;
+      arch?: string[];
+    };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return opsError(400, 'invalid JSON body');
+    }
+    const result = createImportJobs(body);
+    if (!result.ok) {
+      return opsError(result.status, result.error);
+    }
+    return HttpResponse.json({ jobs: result.jobs }, { status: 202 });
+  }),
+
+  http.get('/opsapi/v1/warehouse/imports', async ({ request }) => {
+    await mockDelay();
+    const url = new URL(request.url);
+    return HttpResponse.json(
+      listImportJobs({
+        limit: url.searchParams.get('limit'),
+        offset: url.searchParams.get('offset'),
+      }),
+    );
+  }),
+
+  http.get('/opsapi/v1/warehouse/imports/:id', async ({ params }) => {
+    await mockDelay();
+    const job = getImportJob(String(params.id));
+    if (!job) {
+      return opsError(404, 'import job not found');
+    }
+    return HttpResponse.json(job);
+  }),
+
+  http.get('/opsapi/v1/warehouse/preinstall', async ({ request }) => {
+    await mockDelay();
+    const url = new URL(request.url);
+    return HttpResponse.json(
+      listPreinstallJobs({
+        node_id: url.searchParams.get('node_id'),
+        status: url.searchParams.get('status'),
+        limit: url.searchParams.get('limit'),
+        offset: url.searchParams.get('offset'),
+      }),
+    );
+  }),
+
+  http.post('/opsapi/v1/warehouse/preinstall', async ({ request }) => {
+    await mockDelay();
+    let body: { nodeIds?: string[]; arch?: string; component?: string; version?: string };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return opsError(400, 'invalid JSON body');
+    }
+    const result = createPreinstallJobs(body);
+    if (!result.ok) {
+      return opsError(result.status, result.error, result.code);
+    }
+    return HttpResponse.json({ jobs: result.jobs }, { status: 202 });
   }),
 ];

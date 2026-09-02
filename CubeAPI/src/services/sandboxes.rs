@@ -1109,6 +1109,7 @@ pub(crate) fn build_cube_network_config(
     if let Some(rs) = network.and_then(|n| n.rules.as_ref()) {
         for (index, rule) in rs.iter().enumerate() {
             validate_egress_rule_match(&rule.r#match, index)?;
+            validate_egress_rule_injects(rule, index)?;
         }
     }
 
@@ -1141,6 +1142,24 @@ pub(crate) fn build_cube_network_config(
         deny_out,
         rules,
     }))
+}
+
+/// Cap inline inject secrets at e2b's maxNetworkRuleHeaderValueLen (2048).
+/// That is well under nginx's default large_client_header_buffers (8k).
+const SECRET_MAX_BYTES: usize = 2048;
+
+fn validate_egress_rule_injects(rule: &EgressRule, index: usize) -> AppResult<()> {
+    let Some(injects) = rule.action.inject.as_ref() else {
+        return Ok(());
+    };
+    for (j, inj) in injects.iter().enumerate() {
+        if inj.secret.len() > SECRET_MAX_BYTES {
+            return Err(AppError::BadRequest(format!(
+                "network.rules[{index}].action.inject[{j}].secret exceeds {SECRET_MAX_BYTES} bytes"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Validate the port/scheme pair on one egress rule match, mirroring the
@@ -1746,6 +1765,48 @@ mod tests {
             })),
         )
         .expect("uppercase scheme is accepted");
+    }
+
+    fn network_with_inject(secret: String) -> SandboxNetworkConfig {
+        SandboxNetworkConfig {
+            allow_public_traffic: None,
+            allow_out: None,
+            deny_out: None,
+            mask_request_host: None,
+            rules: Some(vec![EgressRule {
+                name: "r1".to_string(),
+                r#match: EgressRuleMatch::default(),
+                action: EgressRuleAction {
+                    allow: true,
+                    audit: None,
+                    inject: Some(vec![EgressRuleInject {
+                        header: "Authorization".to_string(),
+                        secret,
+                        format: None,
+                    }]),
+                },
+            }]),
+        }
+    }
+
+    #[test]
+    fn egress_inject_secret_at_cap_accepted() {
+        let context = build_cube_network_config(None, Some(&network_with_inject("x".repeat(2048))))
+            .expect("2048-byte secret is at the cap")
+            .expect("context should exist");
+        assert_eq!(
+            context.rules[0].action.inject.as_ref().unwrap()[0]
+                .secret
+                .len(),
+            2048
+        );
+    }
+
+    #[test]
+    fn egress_inject_secret_over_cap_rejected() {
+        let err = build_cube_network_config(None, Some(&network_with_inject("x".repeat(2049))))
+            .expect_err("2049-byte secret must be rejected");
+        assert!(err.to_string().contains("exceeds 2048 bytes"), "{err}");
     }
 
     #[test]

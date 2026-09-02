@@ -148,6 +148,63 @@ func TestCreateRejectsInvalidRulePortScheme(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsOversizedInjectSecret(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, sandboxJSON(testSandboxID, "tpl-env"))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-env"})
+	_, err := client.Create(context.Background(), CreateOptions{
+		Network: NetworkOptions{
+			Rules: []Rule{{
+				Name:  "r1",
+				Match: Match{Host: "api.example.com"},
+				Action: Action{
+					Allow:  true,
+					Inject: []Inject{{Header: "Authorization", Secret: strings.Repeat("x", secretMaxBytes+1)}},
+				},
+			}},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds 2048 bytes") {
+		t.Fatalf("err=%v, want inject.secret cap", err)
+	}
+	if called {
+		t.Fatal("server was called despite client-side validation failure")
+	}
+}
+
+func TestCreateAcceptsInjectSecretAtCap(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, sandboxJSON(testSandboxID, "tpl-env"))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-env", Timeout: 300 * time.Second})
+	_, err := client.Create(context.Background(), CreateOptions{
+		Network: NetworkOptions{
+			Rules: []Rule{{
+				Name:  "r1",
+				Match: Match{Host: "api.example.com"},
+				Action: Action{
+					Allow:  true,
+					Inject: []Inject{{Header: "Authorization", Secret: strings.Repeat("x", secretMaxBytes)}},
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+}
+
 func TestMatchValidateAcceptsLegacySchemeOnly(t *testing.T) {
 	// Scheme alone (no port) filters HTTP vs HTTPS on the default {80, 443}
 	// set — the classic behavior, not the port-scoped feature.

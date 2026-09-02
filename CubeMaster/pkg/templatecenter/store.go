@@ -16,7 +16,6 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
-	cubeboxv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db"
@@ -33,6 +32,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -47,6 +47,7 @@ const (
 	StatusFailed         = "FAILED"
 	StatusCreating       = "CREATING"
 	StatusDeleting       = "DELETING"
+	StatusDeleted        = "DELETED"
 
 	TemplateKindTemplate = "template"
 	TemplateKindSnapshot = "snapshot"
@@ -135,7 +136,6 @@ type TemplateInfo struct {
 	DisplayName               string          `json:"display_name,omitempty"`
 	StorageBackend            string          `json:"storage_backend,omitempty"`
 	Backend                   string          `json:"backend,omitempty"`
-	Retain                    bool            `json:"retain,omitempty"`
 	RootfsSizeBytesAtSnapshot uint64          `json:"rootfs_size_bytes_at_snapshot,omitempty"`
 	LastError                 string          `json:"last_error,omitempty"`
 	CreatedAt                 string          `json:"created_at,omitempty"`
@@ -166,7 +166,6 @@ func templateInfoFromDefinition(def models.TemplateDefinition) TemplateInfo {
 		DisplayName:               def.DisplayName,
 		StorageBackend:            def.StorageBackend,
 		Backend:                   def.StorageBackend,
-		Retain:                    def.Retain,
 		RootfsSizeBytesAtSnapshot: def.RootfsSizeBytesAtSnapshot,
 		LastError:                 def.LastError,
 	}
@@ -184,7 +183,6 @@ type definitionCreateOptions struct {
 	OriginHostFactsJSON       string
 	DisplayName               string
 	StorageBackend            string
-	Retain                    bool
 	RootfsSizeBytesAtSnapshot uint64
 }
 
@@ -211,11 +209,19 @@ func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
 		latestJobByTemplateID[job.TemplateID] = job
 	}
 
+	hiddenIDs, err := hiddenSnapshotIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	out := make([]TemplateInfo, 0, len(defs))
 	for _, def := range defs {
 		// Pause-produced snaps are internal Resume artifacts (Kind=pause_snapshot).
 		// Keep them out of template/snapshot list surfaces.
 		if strings.EqualFold(strings.TrimSpace(def.Kind), pausesnap.KindPauseSnapshot) {
+			continue
+		}
+		if _, skip := hiddenIDs[def.TemplateID]; skip {
 			continue
 		}
 		imageInfo := extractImageInfoFromRequestJSON(def.RequestJSON)
@@ -238,10 +244,44 @@ func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
 		if _, ok := seen[job.TemplateID]; ok {
 			continue
 		}
+		if _, skip := hiddenIDs[job.TemplateID]; skip {
+			continue
+		}
 		out = append(out, templateInfoFromJob(&job))
 		seen[job.TemplateID] = struct{}{}
 	}
 	return out, nil
+}
+
+// hiddenSnapshotIDs returns DELETED/DELETING snapshot IDs so ListTemplates
+// can omit leftover definition or job rows for the same id.
+func hiddenSnapshotIDs(ctx context.Context) (map[string]struct{}, error) {
+	rows, err := listSnapshotRecordsByStatus(ctx, StatusDeleted, StatusDeleting)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]struct{}, len(rows))
+	for _, rec := range rows {
+		out[rec.SnapshotID] = struct{}{}
+	}
+	return out, nil
+}
+
+// errIfHiddenSnapshot returns ErrTemplateNotFound when a snapshot row exists
+// and rejects new use. Missing rows and an uninitialized store are ignored
+// so definition/job fallbacks still run.
+func errIfHiddenSnapshot(ctx context.Context, templateID string) error {
+	rec, err := getSnapshotRecord(ctx, templateID)
+	if err != nil {
+		if errors.Is(err, ErrSnapshotNotFound) || errors.Is(err, ErrTemplateStoreNotInitialized) {
+			return nil
+		}
+		return err
+	}
+	if rec != nil && snapshotRejectsNewUse(rec.Status) {
+		return ErrTemplateNotFound
+	}
+	return nil
 }
 
 func Init(ctx context.Context) error {
@@ -275,8 +315,17 @@ func Init(ctx context.Context) error {
 
 func configureSnapshotRuntimeRefHooks() {
 	releaseBySandboxID := func(ctx context.Context, sandboxID string) error {
+		// Look up the ref before releasing so we can trigger the tombstone
+		// finalizer for that snapshot afterward.
+		ref, refErr := GetActiveSnapshotRuntimeRefBySandbox(ctx, sandboxID)
+		if refErr != nil && !errors.Is(refErr, gorm.ErrRecordNotFound) {
+			log.G(ctx).Warnf("lookup snapshot runtime ref before destroy release failed: %v", refErr)
+		}
 		errReleasingRefs := ReleaseSnapshotRuntimeRefsBySandbox(ctx, sandboxID, snapshotRuntimeRefReleasedByDestroy)
 		errDeletingSpec := sandboxspec.Delete(ctx, sandboxID)
+		if ref != nil && strings.TrimSpace(ref.SnapshotID) != "" {
+			maybeFinalizeTombstone(ctx, ref.SnapshotID)
+		}
 		if errReleasingRefs != nil && errDeletingSpec != nil {
 			return errors.Join(errReleasingRefs, errDeletingSpec)
 		}
@@ -810,14 +859,17 @@ func UpdateDefinitionStatus(ctx context.Context, templateID, status, lastError s
 }
 
 func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, error) {
-	def, err := GetDefinition(ctx, templateID)
-	if err != nil {
-		if !errors.Is(err, ErrTemplateNotFound) {
-			return nil, err
-		}
+	def, defErr := GetDefinition(ctx, templateID)
+	if defErr != nil && !errors.Is(defErr, ErrTemplateNotFound) {
+		return nil, defErr
+	}
+	if err := errIfHiddenSnapshot(ctx, templateID); err != nil {
+		return nil, err
+	}
+	if defErr != nil {
 		job, jobErr := getLatestTemplateImageJobByTemplateID(ctx, templateID)
 		if jobErr != nil {
-			return nil, err
+			return nil, defErr
 		}
 		info := templateInfoFromJob(job)
 		return &info, nil
@@ -1513,6 +1565,9 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 		err := withTemplateReadLock(templateID, func() error {
 			dbStart := time.Now()
 			if rec, snapErr := getSnapshotRecord(ctx, templateID); snapErr == nil && rec != nil {
+				if snapshotRejectsNewUse(rec.Status) {
+					return ErrTemplateNotFound
+				}
 				reportTemplateMetric(ctx, constants.MySQL, store.dbAddr, constants.ActionTemplateGetDefinition, time.Since(dbStart), 0)
 				parsed, err := requestFromSnapshotJSON(rec.RequestJSON)
 				if err != nil {
@@ -1625,42 +1680,24 @@ func normalizeCompatPolicy(policy string) string {
 	}
 }
 
-func compareCompatDimension(bound, current string) (stale bool, unknown bool) {
-	bound = normalizeComponentVersion(bound)
-	current = normalizeComponentVersion(current)
-	if bound == "" || current == "" {
-		return false, true
-	}
-	return bound != current, false
+// hasRestorePin reports whether the replica froze guest-image, cube-agent,
+// kernel, and cube-shim. guest-image and cube-agent alone were already stored
+// for the 0.4.0 compat matrix; without kernel and shim the replica was not
+// created with component multi-version restore, and create would follow live
+// toolbox paths for those components.
+func hasRestorePin(replica ReplicaStatus) bool {
+	guest := normalizeComponentVersion(replica.GuestImageVersion)
+	agent := normalizeComponentVersion(replica.AgentVersion)
+	kernel := normalizeComponentVersion(replica.KernelVersion)
+	shim := normalizeComponentVersion(replica.ShimVersion)
+	return guest != "" && agent != "" && kernel != "" && shim != ""
 }
 
-func evaluateCompat(replica ReplicaStatus, currentGuestImage, currentAgent, _ string) string {
-	policy := normalizeCompatPolicy(replica.CompatPolicy)
-	dimensions := []struct {
-		bound   string
-		current string
-		active  bool
-	}{
-		{replica.GuestImageVersion, currentGuestImage, true},
-		{replica.AgentVersion, currentAgent, policy != CompatPolicyGuestOnly},
+func evaluateCompat(replica ReplicaStatus, _, _, _ string) string {
+	if hasRestorePin(replica) {
+		return CompatStatusOK
 	}
-	seenUnknown := false
-	for _, dim := range dimensions {
-		if !dim.active {
-			continue
-		}
-		stale, unknown := compareCompatDimension(dim.bound, dim.current)
-		if stale {
-			return CompatStatusStale
-		}
-		if unknown {
-			seenUnknown = true
-		}
-	}
-	if seenUnknown {
-		return CompatStatusUnknown
-	}
-	return CompatStatusOK
+	return CompatStatusUnknown
 }
 
 func isReplicaSchedulable(replica ReplicaStatus) bool {
@@ -1668,8 +1705,8 @@ func isReplicaSchedulable(replica ReplicaStatus) bool {
 }
 
 // bindGuestVersionToReplica records pin versions on the replica. CompatStatus
-// still compares guest[+agent] only; kernel/shim are stored for create inject
-// and do not participate in evaluateCompat.
+// is OK only when guest, agent, kernel, and shim are all pinned so live
+// toolbox drift does not mark a multi-version replica as needing rebuild.
 func bindGuestVersionToReplica(replica *ReplicaStatus, guestImageVersion, agentVersion, kernelVersion, shimVersion string) {
 	if replica == nil {
 		return

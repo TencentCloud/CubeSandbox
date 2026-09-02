@@ -17,7 +17,7 @@ import (
 	"strings"
 
 	"github.com/cilium/ebpf"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 // recover reconciles durable state files with live host TAP devices after
@@ -777,16 +777,24 @@ func (s *NetworkController) claimRecoveredSuccessResources(state *managedState) 
 // uniquely from the IP, so no other goroutine can re-reference this tap between
 // the check and the destroy.
 //
-// Lookup is by deterministic tap name (RTM_GETLINK), not LinkList. A full dump
-// of every host interface on every pool-miss create races with concurrent TAP
-// churn and surfaces as netlink ErrDumpInterrupted under density load.
+// Lookup is by the current TAP name then the legacy z-prefixed name
+// (RTM_GETLINK), not LinkList. A full dump of every host interface on every
+// pool-miss create races with concurrent TAP churn and surfaces as netlink
+// ErrDumpInterrupted under density load.
 func (s *NetworkController) cleanupConflictingTap(ip net.IP) error {
-	tap, err := s.tapAdapter.GetByName(tapName(ip.String()))
-	if err != nil {
-		if isTapNotFound(err) {
-			return nil
+	var tap *tapDevice
+	for _, name := range candidateTapNames(ip.String()) {
+		found, err := s.tapAdapter.GetByName(name)
+		if err != nil {
+			if isTapNotFound(err) {
+				continue
+			}
+			return err
 		}
-		return err
+		if found != nil {
+			tap = found
+			break
+		}
 	}
 	if tap == nil {
 		return nil

@@ -76,14 +76,12 @@ func ScheduleCompatScanForNode(nodeID string) {
 }
 
 // ScanNodeCompat updates replica compat_status for the compat matrix only.
-// It does not touch scheduling caches: READY replicas remain schedulable regardless of STALE.
+// It does not touch scheduling caches: READY replicas remain schedulable
+// regardless of historical STALE rows. Pinned replicas stay OK even when the
+// node has not reported live versions yet.
 func ScanNodeCompat(ctx context.Context, nodeID string) error {
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
-	}
-	current, ok := nodemeta.GetNodeComponentVersions(ctx, nodeID)
-	if !ok {
-		return markNodeReadyReplicasCompat(ctx, nodeID, CompatStatusUnknown)
 	}
 
 	replicas := make([]models.TemplateReplica, 0)
@@ -94,33 +92,11 @@ func ScanNodeCompat(ctx context.Context, nodeID string) error {
 	}
 	for _, row := range replicas {
 		replica := replicaModelToStatus(row)
-		next := evaluateCompat(replica, current[compatComponentGuestImage], current[compatComponentAgent], current[compatComponentKernel])
+		next := evaluateCompat(replica, "", "", "")
 		if next == normalizeCompatStatus(replica.CompatStatus) {
 			continue
 		}
 		if err := updateReplicaCompat(ctx, row.TemplateID, nodeID, next); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func markNodeReadyReplicasCompat(ctx context.Context, nodeID, status string) error {
-	replicas := make([]models.TemplateReplica, 0)
-	if err := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
-		Where("node_id = ? AND status = ?", nodeID, ReplicaStatusReady).
-		Find(&replicas).Error; err != nil {
-		return err
-	}
-	for _, row := range replicas {
-		current := normalizeCompatStatus(row.CompatStatus)
-		if current == CompatStatusStale && status == CompatStatusUnknown {
-			continue
-		}
-		if current == status {
-			continue
-		}
-		if err := updateReplicaCompat(ctx, row.TemplateID, nodeID, status); err != nil {
 			return err
 		}
 	}

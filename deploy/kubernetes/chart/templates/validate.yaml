@@ -249,3 +249,22 @@
 {{- if and (eq (include "cube.minioBuiltinEnabled" .) "true") .Values.minio.rootPassword (lt (len (printf "%s" .Values.minio.rootPassword)) 8) }}
 {{- fail "minio.rootPassword must be at least 8 characters when set (leave empty to generate one)" }}
 {{- end }}
+{{- if eq (include "cube.opsEnabled" .) "true" }}
+{{- if hasKey (.Values.cubeOps | default dict) "persistence" }}
+{{- fail "cubeOps.persistence was removed; warehouse blobs are stored in S3. Remove cubeOps.persistence from your values (including values-tke.yaml)." }}
+{{- end }}
+{{- $opsS3 := default dict .Values.cubeOps.s3 }}
+{{- $opsEndpoint := include "cube.opsS3Endpoint" . }}
+{{- $opsExistingSecret := $opsS3.existingSecret | default "" }}
+{{- $opsAK := $opsS3.accessKeyId | default "" }}
+{{- $opsSK := $opsS3.secretAccessKey | default "" }}
+{{- $volAK := (.Values.volumeS3).accessKeyId | default "" }}
+{{- $volSK := (.Values.volumeS3).secretAccessKey | default "" }}
+{{- $hasOpsCreds := or (ne $opsExistingSecret "") (and (ne $opsAK "") (ne $opsSK "")) (and (ne $volAK "") (ne $volSK "")) (eq (include "cube.minioBuiltinEnabled" .) "true") }}
+{{- if and (ne $opsExistingSecret "") (eq $opsEndpoint "") }}
+{{- fail "cubeOps.s3.existingSecret requires cubeOps.s3.endpoint (or volumeS3.endpoint / chart MinIO); the Secret only supplies s3-access-key-id / s3-secret-access-key" }}
+{{- end }}
+{{- if and (ne $opsEndpoint "") (not $hasOpsCreds) }}
+{{- fail "cubeOps S3 endpoint is set but no credentials: set cubeOps.s3.existingSecret (keys s3-access-key-id / s3-secret-access-key), cubeOps.s3.accessKeyId+secretAccessKey, or volumeS3.accessKeyId+secretAccessKey. volumeS3.existingSecret (volume-s3.conf) is not a CubeOps credential source." }}
+{{- end }}
+{{- end }}

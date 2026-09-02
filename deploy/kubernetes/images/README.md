@@ -53,8 +53,9 @@ compile from the current worktree (see below).
 `cube-kernel` does not use the one-click package. It stages guest kernels from:
 
 1. `CUBE_KERNEL_VMLINUX` (required) and optional `CUBE_KERNEL_PVM_VMLINUX`, or
-2. Release assets `vmlinux-${arch}` (required) and `vmlinux-pvm-${arch}`
-   (`arch` from `ONE_CLICK_ARCH`, default `amd64`).
+2. The dedicated `kernel-release-*` pins in `deploy/release-assets.yaml`
+   (same source CI uses; BM and PVM may be different Releases).
+   `IMAGE_TAG` is only the output image tag.
 
 **PVM policy:** required on `amd64`; optional on `arm64` (no PVM guest kernel
 today — arm64 images are BM-only when `vmlinux-pvm-arm64` is absent).
@@ -76,14 +77,14 @@ IMAGE_TAG=v0.7.0 ./deploy/kubernetes/images/build-cube-images.sh cube-kernel
 1. `CUBE_GUEST_IMAGE_DIR` (directory containing `cube-guest-image-cpu.img`,
    `version`), or
 2. `CUBE_GUEST_IMAGE_TAR` (`.tar.gz` of those files), or
-3. Release asset `cube-guest-image-${arch}.tar.gz` (same `IMAGE_TAG` when
-   present, otherwise latest GitHub Release).
+3. The `guest-image-*` pin in `deploy/release-assets.yaml`.
 
 `cube-agent` stages the independent Agent plane file from:
 
 1. `CUBE_AGENT_IMAGE_DIR` (`cube-agent.ext4` + `version`), or
 2. `CUBE_AGENT_IMAGE_TAR`, or
-3. Release asset `cube-agent-${arch}.tar.gz`.
+3. Product Release `${VERSION}` asset `cube-agent-${arch}.tar.gz`
+   (not pinned in `release-assets.yaml`).
 
 ```bash
 CUBE_GUEST_IMAGE_DIR=/path/to/cube-image IMAGE_TAG=dev \
@@ -106,18 +107,23 @@ By default the script pins those source trees to `${SOURCE_REF}` (defaulting to
 `cube-lifecycle-manager/`, `web/`, and `deploy/one-click/webui/` at that git
 ref into `${BUILD_ROOT}/source-tree/` via `git archive` and points `REPO_ROOT`
 there for the duration of the build. When building `cube-master` or
-`cubemastercli`, it also exports `cubelog/`, `CubeDB/`, and `Cubelet/`;
+`cubemastercli`, it also exports `pkgs/CubeLog/`, `CubeDB/`, and `Cubelet/`;
 `cube-master` additionally exports `deploy/scripts/` (volume-deps installer) and
 `examples/volume/cos/` (Controller plugin binary + example conf).
-When building `cubelet`, it also exports `Cubelet/`, `CubeNet/`, `cubelog/`,
+When building `cubelet`, it also exports `Cubelet/`, `CubeNet/`, `pkgs/CubeLog/`,
 `cubecow/`, `deploy/scripts/`, `deploy/kubernetes/images/scripts/`, and
 `examples/volume/cos/` so the image can build both `cubelet` and
 `cubevsmapdump`. When building `cube-shim`, it also exports `CubeShim/`,
 `hypervisor/`, `deploy/one-click/config-cube.toml`, and
 `deploy/kubernetes/images/scripts/`.
-When building `cube-ops`, it also exports `CubeOps/` and `CubeDB/` (required by
+When building `cube-ops`, it also exports `CubeOps/`, the cubelog module, and `CubeDB/` (required by
 `CubeOps/Dockerfile`; not present on older release tags such as `v0.5.1` — use
 `SOURCE_REF=""` for worktree builds).
+The cubelog module path is probed on `${SOURCE_REF}`: tags at or after this
+move export `pkgs/CubeLog/`; older tags including the default `${VERSION}`
+(`v0.7.0`) still have `cubelog/` and matching `COPY cubelog/` Dockerfiles.
+The script archives whichever path exists on that ref so a default
+`SOURCE_REF=${VERSION}` build does not fail the export step.
 This guarantees the images match the release tag even when the current worktree
 is ahead of it.
 

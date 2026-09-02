@@ -22,15 +22,7 @@
     "endpoint": "API 端点",
     "endpointDesc": "CubeOps 的对外访问地址。启动时通过 CUBE_OPS_PUBLIC_HOST 环境变量配置。",
     "test": "测试连接",
-    "connected": "连接正常",
-    "runtime": "运行时配置",
-    "runtimeDesc": "来自 CubeOps 的运行时只读信息。",
-    "sandboxDomain": "沙箱域名",
-    "instanceType": "默认实例类型",
-    "rateLimit": "限流策略",
-    "auth": "认证状态",
-    "authOn": "已启用",
-    "authOff": "未启用"
+    "connected": "连接正常"
   },
   "shortcuts": {
     "title": "快捷键",
@@ -55,7 +47,6 @@
     "desc": "版本信息与相关链接。",
     "version": "版本",
     "cubeApi": "CubeOps 地址",
-    "instanceType": "默认实例类型",
     "docs": "文档"
   }
 }

@@ -29,10 +29,10 @@ type Options struct {
 	ProxyPush          stateNotifier
 	DefaultIdleTimeout time.Duration
 
-	// BootstrapWarmup delays the first sweep after the sidecar starts so the
+	// BootstrapWarmup delays the first sweep after CLM starts so the
 	// last_active poller has a chance to populate activity timestamps for
-	// sandboxes that were already running before this sidecar instance came
-	// up. Without this delay, a fresh sidecar would observe LastActiveMs=0
+	// sandboxes that were already running before this CLM instance came
+	// up. Without this delay, a fresh CLM would observe LastActiveMs=0
 	// for every bootstrap entry and immediately try to pause anything past
 	// its idle deadline — even if the sandbox has been actively serving
 	// traffic on the proxy.
@@ -43,7 +43,7 @@ type Options struct {
 	StateLockTTL time.Duration
 	Interval     time.Duration
 
-	// StartedAt is the sidecar's process start time. Used as the boundary
+	// StartedAt is CLM's process start time. Used as the boundary
 	// between "bootstrap" and "stream" entries for the warmup gate. When
 	// zero, defaults to Now() at construction time.
 	StartedAt time.Time
@@ -95,7 +95,7 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 	now := s.o.Now()
 	nowMs := now.UnixMilli()
 
-	// Bootstrap-warmup gate: when the sidecar just started, hold off on
+	// Bootstrap-warmup gate: when CLM just started, hold off on
 	// pausing entries that came in via HGETALL bootstrap (FirstSeenAt ≈
 	// startedAt). Two reasons:
 	//   * LastActiveMs hasn't been backfilled yet — first last_active
@@ -117,7 +117,7 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 		}
 
 		// Baseline = the most recent of (LastActiveMs, CreatedAt). For a
-		// sandbox the sidecar has just observed via stream, LastActiveMs
+		// sandbox CLM has just observed via stream, LastActiveMs
 		// is 0 until the next request arrives — fall through to CreatedAt
 		// which always carries a real timestamp from CubeMaster.
 		baseline := e.LastActiveMs
@@ -209,7 +209,7 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 //     from the registry so the next sweep doesn't keep retrying forever
 //     and don't leave the proxy seeing a stale "pausing" state.
 //   - TaskStateInvalid / "sandbox is already paused" → the sandbox is
-//     already where we wanted it (peer sidecar / earlier failed-but-applied
+//     already where we wanted it (peer CLM replica / earlier failed-but-applied
 //     attempt). Treat exactly like a fresh successful pause.
 func (s *Sweeper) tryPause(ctx context.Context, e registry.Entry) error {
 	sid := e.Meta.SandboxID
@@ -218,7 +218,7 @@ func (s *Sweeper) tryPause(ctx context.Context, e registry.Entry) error {
 		return err
 	}
 	if !got {
-		// Another sidecar (or our own resume handler) holds the state. Skip.
+		// Another CLM replica (or our own resume handler) holds the state. Skip.
 		return nil
 	}
 
@@ -248,7 +248,7 @@ func (s *Sweeper) tryPause(ctx context.Context, e registry.Entry) error {
 		case errors.As(pauseErr, &apiErr) && apiErr.IsAlreadyInState():
 			// CubeMaster says the sandbox is already paused. Fall through
 			// to the success path so we still write `paused` state to
-			// Redis + push it to CubeProxy (in case a peer sidecar paused
+			// Redis + push it to CubeProxy (in case a peer CLM replica paused
 			// it but didn't push, or our previous attempt failed only on
 			// the post-RPC bookkeeping).
 			s.o.Log.Info("sandbox already paused on cubemaster; reconciling state",
@@ -306,7 +306,7 @@ func (s *Sweeper) tryKill(ctx context.Context, e registry.Entry) error {
 		return err
 	}
 	if !got {
-		// A peer sidecar (or our own resume / pause path) holds the state.
+		// A peer CLM replica (or our own resume / pause path) holds the state.
 		// Skip — the holder will drive the transition.
 		return nil
 	}

@@ -12,7 +12,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/oci"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func WithProcessArgs(req *cubebox.ContainerConfig, image *imagespec.ImageConfig) oci.SpecOpts {

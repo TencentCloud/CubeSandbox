@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"errors"
+	"net"
 	"testing"
 
 	"github.com/vishvananda/netlink"
@@ -156,5 +157,97 @@ func TestDestroyTapPolicyCleanupFailureDoesNotFailDestroy(t *testing.T) {
 
 	if err := destroyTap(99); err != nil {
 		t.Fatalf("destroyTap error=%v, want nil when only policy cleanup fails", err)
+	}
+}
+
+func TestTapNameIsBareIPv4(t *testing.T) {
+	if got := tapName("192.168.195.183"); got != "192.168.195.183" {
+		t.Fatalf("tapName=%q, want bare IPv4", got)
+	}
+}
+
+func TestParseCubeTapIPAcceptsCurrentAndLegacyNames(t *testing.T) {
+	cases := []struct {
+		name string
+		want string
+	}{
+		{name: "192.168.0.10", want: "192.168.0.10"},
+		{name: "z192.168.0.10", want: "192.168.0.10"},
+		{name: "10.1.2.3", want: "10.1.2.3"},
+		{name: "z10.1.2.3", want: "10.1.2.3"},
+	}
+	for _, tc := range cases {
+		got, err := parseCubeTapIP(tc.name)
+		if err != nil {
+			t.Fatalf("parseCubeTapIP(%q): %v", tc.name, err)
+		}
+		if got.String() != tc.want {
+			t.Fatalf("parseCubeTapIP(%q)=%s, want %s", tc.name, got, tc.want)
+		}
+	}
+	for _, name := range []string{"eth0", "zeth0", "cube-dev", "zz192.168.0.1", "2001:db8::1"} {
+		if _, err := parseCubeTapIP(name); err == nil {
+			t.Fatalf("parseCubeTapIP(%q) succeeded, want error", name)
+		}
+	}
+}
+
+func TestCandidateTapNamesCurrentThenLegacy(t *testing.T) {
+	got := candidateTapNames("192.168.0.10")
+	want := []string{"192.168.0.10", "z192.168.0.10"}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("candidateTapNames=%v, want %v", got, want)
+	}
+}
+
+func TestListCubeTapsAcceptsBothNamesAndFiltersCIDR(t *testing.T) {
+	origList := netlinkLinkList
+	t.Cleanup(func() { netlinkLinkList = origList })
+	netlinkLinkList = func() ([]netlink.Link, error) {
+		return []netlink.Link{
+			&netlink.Tuntap{
+				LinkAttrs: netlink.LinkAttrs{Name: "z192.168.0.10", Index: 10},
+				Mode:      netlink.TUNTAP_MODE_TAP,
+			},
+			&netlink.Tuntap{
+				LinkAttrs: netlink.LinkAttrs{Name: "192.168.0.11", Index: 11},
+				Mode:      netlink.TUNTAP_MODE_TAP,
+			},
+			&netlink.Tuntap{
+				LinkAttrs: netlink.LinkAttrs{Name: "10.0.0.1", Index: 12},
+				Mode:      netlink.TUNTAP_MODE_TAP,
+			},
+			&netlink.Tuntap{
+				LinkAttrs: netlink.LinkAttrs{Name: "eth0", Index: 13},
+				Mode:      netlink.TUNTAP_MODE_TAP,
+			},
+			&netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: "192.168.0.12", Index: 14}},
+		}, nil
+	}
+
+	_, cidr, err := net.ParseCIDR("192.168.0.0/18")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := listCubeTaps(cidr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("listCubeTaps got %d devices: %+v", len(got), got)
+	}
+	if tap := got["192.168.0.10"]; tap == nil || tap.Name != "z192.168.0.10" || tap.Index != 10 {
+		t.Fatalf("legacy z+IP tap: %+v", tap)
+	}
+	if tap := got["192.168.0.11"]; tap == nil || tap.Name != "192.168.0.11" || tap.Index != 11 {
+		t.Fatalf("current IP tap: %+v", tap)
+	}
+
+	empty, err := listCubeTaps(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("nil CIDR must not claim host TAPs, got %+v", empty)
 	}
 }

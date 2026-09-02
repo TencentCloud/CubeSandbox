@@ -128,17 +128,6 @@ func reapDNSLearnedPoliciesForInner(inner *ebpf.Map, now uint64) error {
 	return nil
 }
 
-// reapDNSLearnedPoliciesForInnerMap is kept for tests/callers that still pass a
-// map ID. Prefer reapDNSLearnedPoliciesForInner with a cached FD.
-func reapDNSLearnedPoliciesForInnerMap(innerMapID uint32, now uint64) error {
-	inner, err := ebpf.NewMapFromID(ebpf.MapID(innerMapID))
-	if err != nil {
-		return fmt.Errorf("ebpf.NewMapFromID failed: %w, id: %d", err, innerMapID)
-	}
-	defer inner.Close()
-	return reapDNSLearnedPoliciesForInner(inner, now)
-}
-
 // reapDNSQueryTrack deletes expired pending DNS queries that never got a response.
 func reapDNSQueryTrack(now uint64) {
 	queryTrack, err := loadPinnedMap(MapNameDNSQueryTrack)

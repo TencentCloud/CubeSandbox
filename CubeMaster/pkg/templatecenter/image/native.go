@@ -6,12 +6,14 @@ package image
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,8 +21,11 @@ import (
 	"github.com/containerd/containerd/archive"
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -39,6 +44,11 @@ var nativeCopyBufferPool = sync.Pool{
 	},
 }
 
+var (
+	googleDefaultTokenSource                = google.DefaultTokenSource
+	defaultKeychain          authn.Keychain = authn.DefaultKeychain // seam for tests
+)
+
 // nativeRootfsExportEnabled checks if CUBEMASTER_NATIVE_ROOTFS_EXPORT_ENABLED is enabled.
 // By default, it is enabled, which avoids using external CLI tools (docker, skopeo, umoci).
 func nativeRootfsExportEnabled() bool {
@@ -46,16 +56,66 @@ func nativeRootfsExportEnabled() bool {
 	return err != nil || v
 }
 
-// registryAuthOption converts PreparedSource credentials into a remote.Option.
-// Falls back to the DefaultKeychain if explicit credentials are not provided.
-func registryAuthOption(auth *RegistryAuthConfig) remote.Option {
+const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
+
+// registryAuthenticator resolves registry auth for a pull. Explicit credentials
+// always win. For Google Artifact Registry, the docker keychain wins when it
+// has credentials; otherwise Application Default Credentials (including GKE
+// Workload Identity) are used. Other registries retain the DefaultKeychain
+// fallback.
+func registryAuthenticator(ctx context.Context, ref name.Reference, auth *RegistryAuthConfig) (authn.Authenticator, error) {
 	if auth != nil && (auth.Username != "" || auth.Password != "") {
-		return remote.WithAuth(authn.FromConfig(authn.AuthConfig{
+		return authn.FromConfig(authn.AuthConfig{
 			Username: auth.Username,
 			Password: auth.Password,
-		}))
+		}), nil
 	}
-	return remote.WithAuthFromKeychain(authn.DefaultKeychain)
+	registry := ref.Context()
+	// Docker-config credentials win over ADC; keychain errors propagate.
+	resolved, err := defaultKeychain.Resolve(registry)
+	if err != nil {
+		return nil, err
+	}
+	if resolved != authn.Anonymous {
+		return resolved, nil
+	}
+	if isGoogleArtifactRegistry(registry.RegistryStr()) {
+		source, err := googleDefaultTokenSource(ctx, cloudPlatformScope)
+		if err == nil {
+			return &tokenSourceAuthenticator{source: source}, nil
+		}
+		// ADC is unavailable (e.g. not on GCP, Workload Identity misconfigured).
+		// Fall through to anonymous, but log so this is distinguishable from a
+		// permission problem at the registry.
+		log.G(ctx).Debugf("Artifact Registry ADC unavailable for %s: %v", registry.RegistryStr(), err)
+	}
+	return authn.Anonymous, nil
+}
+
+// tokenSourceAuthenticator presents an OAuth2 access token as the
+// `oauth2accesstoken` username that Artifact Registry expects. Token() is
+// invoked on every Authorization() so the underlying ReuseTokenSource can
+// refresh the token if a pull outlives its ~1h lifetime.
+type tokenSourceAuthenticator struct {
+	source oauth2.TokenSource
+}
+
+func (a *tokenSourceAuthenticator) Authorization() (*authn.AuthConfig, error) {
+	token, err := a.source.Token()
+	if err != nil {
+		return nil, err
+	}
+	if token.AccessToken == "" {
+		return nil, errors.New("ADC returned empty access token for Artifact Registry")
+	}
+	return &authn.AuthConfig{
+		Username: "oauth2accesstoken",
+		Password: token.AccessToken,
+	}, nil
+}
+
+func isGoogleArtifactRegistry(registry string) bool {
+	return strings.HasSuffix(strings.ToLower(registry), ".pkg.dev")
 }
 
 type progressReader struct {

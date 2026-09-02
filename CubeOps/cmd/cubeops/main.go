@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,6 +19,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/server"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/warehouse"
 )
 
 func main() {
@@ -76,7 +78,7 @@ func main() {
 	}
 	cfg.JWTSecret = jwtSecret
 
-	srv := server.New(cfg, s)
+	srv := server.New(cfg, s, initWarehouseBlobs(ctx, cfg))
 
 	// Graceful shutdown
 	go func() {
@@ -98,4 +100,50 @@ func main() {
 	}
 
 	logging.G(ctx).Info("CubeOps stopped")
+}
+
+func initWarehouseBlobs(ctx context.Context, cfg *config.Config) warehouse.BlobStore {
+	if !cfg.S3Configured() {
+		slog.Warn("component warehouse disabled: S3 is not configured")
+		return nil
+	}
+	blobs, err := warehouse.NewS3BlobStore(cfg.S3, cfg.Warehouse.UploadTimeout)
+	if err != nil {
+		slog.Warn("component warehouse disabled: s3 client", "error", err)
+		return nil
+	}
+	if err := probeWarehouseBucket(ctx, blobs); err != nil {
+		return blobs
+	}
+	lctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	if err := blobs.EnsureLifecycle(lctx); err != nil {
+		slog.Warn("warehouse bucket lifecycle", "error", err)
+	}
+	return blobs
+}
+
+func probeWarehouseBucket(ctx context.Context, blobs warehouse.BlobStore) error {
+	delay := time.Second
+	var last error
+	for i := 0; i < 8; i++ {
+		pctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		last = blobs.EnsureBucket(pctx)
+		cancel()
+		if last == nil {
+			return nil
+		}
+		slog.Warn("warehouse s3 probe failed", "attempt", i+1, "error", last)
+		select {
+		case <-ctx.Done():
+			slog.Warn("warehouse s3 probe canceled; continuing with client")
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		if delay < 15*time.Second {
+			delay *= 2
+		}
+	}
+	slog.Warn("warehouse s3 still unreachable; continuing with client", "error", last)
+	return last
 }

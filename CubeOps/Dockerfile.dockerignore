@@ -3,11 +3,12 @@
 #
 # Build-context filter for CubeOps/Dockerfile (context = repository root).
 # The repo-root .dockerignore excludes everything except docker/ builder files,
-# so CubeOps and its sibling CubeDB dependency must be explicitly allowed here.
+# so CubeOps and its sibling CubeDB / pkgs/CubeLog modules must be allowed here.
 **
 !CubeOps
 !CubeOps/**
 !CubeDB
 !CubeDB/**
-!cubelog
-!cubelog/**
+!pkgs
+!pkgs/CubeLog
+!pkgs/CubeLog/**

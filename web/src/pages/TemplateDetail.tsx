@@ -88,17 +88,31 @@ function compatTone(status: string) {
   switch (status.toUpperCase()) {
     case 'OK':
       return 'bg-cube-ok/15 text-cube-ok border-cube-ok/30';
-    case 'STALE':
-      return 'bg-destructive/10 text-destructive border-destructive/30';
     case 'UNKNOWN':
-      return 'bg-cube-warn/15 text-cube-warn border-cube-warn/30';
+      return 'bg-cube-err/15 text-cube-err border-cube-err/30';
+    case 'STALE':
+      return 'bg-muted text-muted-foreground border-border';
     default:
       return 'bg-muted text-muted-foreground border-border';
   }
 }
 
-function isStaleCompat(status: string) {
-  return status.toUpperCase() === 'STALE';
+function isUnknownCompat(status: string) {
+  return status.toUpperCase() === 'UNKNOWN';
+}
+
+function replicaLiveDiffers(node: TemplateNodeCompat): boolean {
+  const guestBound = (node.boundGuestImageVersion ?? '').trim();
+  const guestCurrent = (node.currentGuestImageVersion ?? '').trim();
+  const agentBound = (node.boundAgentVersion ?? '').trim();
+  const agentCurrent = (node.currentAgentVersion ?? '').trim();
+  const kernelBound = (node.boundKernelVersion ?? '').trim();
+  const kernelCurrent = (node.currentKernelVersion ?? '').trim();
+  return (
+    (guestBound !== '' && guestCurrent !== '' && guestBound !== guestCurrent) ||
+    (agentBound !== '' && agentCurrent !== '' && agentBound !== agentCurrent) ||
+    (kernelBound !== '' && kernelCurrent !== '' && kernelBound !== kernelCurrent)
+  );
 }
 
 function CompatBadge({ status }: { status: string }) {
@@ -526,36 +540,43 @@ function CompatWarning({
   disabled: boolean;
 }) {
   const { t } = useTranslation('templateDetail');
-  const staleNodes = row.nodes.filter((node) => isStaleCompat(node.compatStatus));
-  if (staleNodes.length === 0) return null;
+  const unknownNodes = row.nodes.filter((node) => isUnknownCompat(node.compatStatus));
+  if (unknownNodes.length === 0) return null;
   return (
-    <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/5 p-4">
+    <div className="mt-4 rounded-lg border border-cube-err/30 bg-cube-err/5 p-4">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <div className="flex items-center gap-2 text-destructive">
+          <div className="flex items-center gap-2 text-cube-err">
             <AlertTriangle className="h-4 w-4 shrink-0" />
             <p className="text-sm font-semibold">{t('compat.staleTitle')}</p>
           </div>
           <p className="mt-1 text-xs text-muted-foreground">
-            {t('compat.staleDesc', { count: staleNodes.length })}
+            {t('compat.staleDesc', { count: unknownNodes.length })}
           </p>
         </div>
-        <Button
-          variant="destructive"
-          size="sm"
-          disabled={disabled}
-          onClick={onRebuild}
-          className="shrink-0"
-        >
+        <Button size="sm" disabled={disabled} onClick={onRebuild} className="shrink-0">
           <RefreshCw className={cn('h-4 w-4 mr-1.5', disabled && 'animate-spin')} />
           {t('rebuild.button')}
         </Button>
       </div>
       <div className="mt-4 space-y-3">
-        {staleNodes.map((node) => (
+        {unknownNodes.map((node) => (
           <CompatNodeCard key={compatNodeKey(node)} node={node} variant="warning" />
         ))}
       </div>
+    </div>
+  );
+}
+
+function CompatDriftNote({ row }: { row: TemplateCompatRow }) {
+  const { t } = useTranslation('templateDetail');
+  const drifted = row.nodes.filter((node) => replicaLiveDiffers(node));
+  if (drifted.length === 0) return null;
+  if (row.nodes.some((node) => isUnknownCompat(node.compatStatus))) return null;
+  return (
+    <div className="mt-4 rounded-lg border border-border/60 bg-muted/30 p-4">
+      <p className="text-sm font-medium">{t('compat.driftTitle')}</p>
+      <p className="mt-1 text-xs text-muted-foreground">{t('compat.driftDesc')}</p>
     </div>
   );
 }
@@ -772,8 +793,8 @@ export default function TemplateDetailPage() {
   const compatRow = compat?.templates.find((row) => row.templateID === templateID);
   const compatStatus = compatRow?.overall ?? 'UNKNOWN';
   const compatNodes = compatRow?.nodes ?? [];
-  const isStale = isStaleCompat(compatStatus);
-  const headerAccentClass = isStale ? 'border-destructive' : 'border-cube-ok';
+  const isUnknown = isUnknownCompat(compatStatus);
+  const headerAccentClass = isUnknown ? 'border-cube-err' : 'border-cube-ok';
 
   return (
     <div className="px-6 py-8">
@@ -830,7 +851,7 @@ export default function TemplateDetailPage() {
         <div
           className={cn(
             'flex items-stretch shrink-0 divide-x',
-            isStale ? 'divide-destructive/20' : 'divide-cube-ok/20',
+            isUnknown ? 'divide-cube-err/20' : 'divide-cube-ok/20',
           )}
         >
           {[
@@ -870,11 +891,14 @@ export default function TemplateDetailPage() {
       </div>
 
       {compatRow && (
-        <CompatWarning
-          row={compatRow}
-          disabled={isBuilding || rebuildMutation.isPending}
-          onRebuild={() => setShowRebuildConfirm(true)}
-        />
+        <>
+          <CompatWarning
+            row={compatRow}
+            disabled={isBuilding || rebuildMutation.isPending}
+            onRebuild={() => setShowRebuildConfirm(true)}
+          />
+          <CompatDriftNote row={compatRow} />
+        </>
       )}
 
       {/* ── build progress ── */}

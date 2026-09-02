@@ -39,22 +39,28 @@ Cube-owned images should use `cube.cubeImage` instead.
 {{- end -}}
 
 {{- /*
-Render "<repository>:<tag>" for a Cube-owned image with optional
-$.Values.global.imageRegistry override applied to the registry portion of
-.repository. Call as:
+Official Cube TCR hosts that global.imageRegistry may rewrite.
+*/}}
+{{- define "cube.officialImageRegistries" -}}
+cube-sandbox-int.tencentcloudcr.com,cube-sandbox-cn.tencentcloudcr.com
+{{- end -}}
+
+{{- /*
+Render "<repository>:<tag>" for a Cube-owned image. Call as:
   include "cube.cubeImage" (dict "image" .Values.images.master "context" $)
-When global.imageRegistry is empty the output is identical to cube.image;
-setting it rewrites the leading registry host (segment before the first "/")
-so the same chart can be republished to any private registry without editing
-each per-image entry. Everything after the first "/" (the repository path)
-is preserved.
+When global.imageRegistry is set, the leading host of .repository is
+rewritten to it — but only if it is an official Cube TCR host
+(cube.officialImageRegistries); other repositories render unchanged.
+Without it the output is identical to cube.image.
 */}}
 {{- define "cube.cubeImage" -}}
 {{- $image := .image -}}
 {{- $ctx := .context -}}
 {{- $repo := $image.repository -}}
 {{- $override := (default (dict) $ctx.Values.global).imageRegistry | default "" -}}
-{{- if $override -}}
+{{- $host := index (splitList "/" $repo) 0 -}}
+{{- $official := splitList "," (include "cube.officialImageRegistries" .context) -}}
+{{- if and $override (has $host $official) -}}
   {{- $parts := splitList "/" $repo -}}
   {{- if gt (len $parts) 1 -}}
     {{- $repo = printf "%s/%s" (trimSuffix "/" $override) (join "/" (rest $parts)) -}}
@@ -93,6 +99,15 @@ affinity:
   {{- toYaml . | nindent 2 }}
 {{- end }}
 {{- with .Values.placement.compute.tolerations }}
+tolerations:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}
+
+{{- /* Helm tests except node-runtime-test: both plane taints, no nodeSelector. */ -}}
+{{- define "cube.testPlacement" -}}
+{{- $tolerations := concat (.Values.placement.controlPlane.tolerations | default list) (.Values.placement.compute.tolerations | default list) -}}
+{{- with $tolerations }}
 tolerations:
   {{- toYaml . | nindent 2 }}
 {{- end }}
@@ -288,8 +303,10 @@ http {
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
-            proxy_read_timeout 300s;
-            proxy_send_timeout 300s;
+            client_max_body_size 8g;
+            proxy_request_buffering off;
+            proxy_read_timeout 1800s;
+            proxy_send_timeout 1800s;
 
             proxy_pass {{ $opsUpstream }}/api/;
         }
@@ -300,8 +317,9 @@ http {
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
-            proxy_read_timeout 300s;
-            proxy_send_timeout 300s;
+            client_max_body_size 8g;
+            proxy_read_timeout 1800s;
+            proxy_send_timeout 1800s;
 
             rewrite ^/cubeapi/v1/(.*)$ /api/v1/sdk/$1 break;
             proxy_pass {{ $opsUpstream }};
@@ -322,8 +340,9 @@ http {
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
-            proxy_read_timeout 300s;
-            proxy_send_timeout 300s;
+            client_max_body_size 8g;
+            proxy_read_timeout 1800s;
+            proxy_send_timeout 1800s;
 
             rewrite ^/(.*)$ /api/v1/sdk/$1 break;
             proxy_pass {{ $opsUpstream }};
@@ -466,6 +485,15 @@ see validate.yaml) to avoid the double generation entirely.
 {{- end -}}
 {{- end -}}
 
+{{/* Join a string or list into a comma-separated CubeOps warehouse env value. */}}
+{{- define "cube.csvOrString" -}}
+{{- if kindIs "string" . -}}
+{{- . -}}
+{{- else -}}
+{{- join "," . -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "cube.mysqlPVCName" -}}
 {{- if .Values.mysql.persistence.existingClaim -}}
 {{- .Values.mysql.persistence.existingClaim -}}
@@ -578,6 +606,66 @@ chart-owned StorageClass). This helper only picks which SC name a PVC binds to.
 
 {{- define "cube.minioEndpoint" -}}
 {{- printf "http://%s.%s.svc.%s:%v" (include "cube.minioName" .) .Release.Namespace (include "cube.clusterDomain" .) (.Values.minio.port | default 9000) -}}
+{{- end -}}
+
+{{/*
+Render a bool env value that defaults to true. Helm's `default` treats
+false as empty, so callers must not use `| default true` for these knobs.
+*/}}
+{{- define "cube.boolEnvDefaultTrue" -}}
+{{- if kindIs "bool" . -}}
+{{- ternary "true" "false" . -}}
+{{- else -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+cubeOps.s3.endpoint > volumeS3.endpoint > chart MinIO.
+*/}}
+{{- define "cube.opsS3Endpoint" -}}
+{{- $s3 := default dict .Values.cubeOps.s3 -}}
+{{- if ne (($s3.endpoint) | default "") "" -}}
+{{- $s3.endpoint -}}
+{{- else if ne (((.Values.volumeS3).endpoint) | default "") "" -}}
+{{- .Values.volumeS3.endpoint -}}
+{{- else if eq (include "cube.minioBuiltinEnabled" .) "true" -}}
+{{- include "cube.minioEndpoint" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.opsS3NodeEndpoint" -}}
+{{- $s3 := default dict .Values.cubeOps.s3 -}}
+{{- if ne (($s3.nodeEndpoint) | default "") "" -}}
+{{- $s3.nodeEndpoint -}}
+{{- else -}}
+{{- include "cube.opsS3Endpoint" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.opsS3SecretName" -}}
+{{- $s3 := default dict .Values.cubeOps.s3 -}}
+{{- if ne (($s3.existingSecret) | default "") "" -}}
+{{- $s3.existingSecret -}}
+{{- else -}}
+{{- include "cube.secretName" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.opsS3Bucket" -}}
+{{- $s3 := default dict .Values.cubeOps.s3 -}}
+{{- $s3.bucket | default "cube-ops" -}}
+{{- end -}}
+
+{{- define "cube.opsS3Region" -}}
+{{- $s3 := default dict .Values.cubeOps.s3 -}}
+{{- if ne (($s3.region) | default "") "" -}}
+{{- $s3.region -}}
+{{- else if ne (((.Values.volumeS3).region) | default "") "" -}}
+{{- .Values.volumeS3.region -}}
+{{- else -}}
+us-east-1
+{{- end -}}
 {{- end -}}
 
 {{/*

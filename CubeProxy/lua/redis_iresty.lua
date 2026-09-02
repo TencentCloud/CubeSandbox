@@ -1,4 +1,3 @@
--- file name: redis_iresty.lua
 local redis_c = require "resty.redis"
 
 local unpack = unpack or table.unpack
@@ -353,43 +352,6 @@ function _M.commit_pipeline(self)
     return results, err
 end
 
-function _M.subscribe(self, channel)
-    local redis, err = redis_c:new()
-    if not redis then
-        return nil, err
-    end
-
-    local ok, err = self:connect_mod(redis)
-    if not ok or err then
-        return nil, err
-    end
-
-    ok, err = self:auth_mod(redis)
-    if not ok or err then
-        return nil, err
-    end
-
-    ok, err = self:select_mod(redis)
-    if not ok or err then
-        return nil, err
-    end
-
-    local res, err = redis:subscribe(channel)
-    if not res then
-        return nil, err
-    end
-
-    res, err = redis:read_reply()
-    if not res then
-        return nil, err
-    end
-
-    redis:unsubscribe(channel)
-    self.set_keepalive_mod(redis)
-
-    return res, err
-end
-
 local function exec_command(self, cmd, ...)
     local redis, err = redis_c:new()
     if not redis then
@@ -452,13 +414,6 @@ for i = 1, #commands do
     _M[cmd] = function(self, ...)
         return do_command(self, cmd, ...)
     end
-end
-
-function _M.get_redis_address(self)
-    if sentinel_mode(self) then
-        return string.format("sentinel:%s(%s)", self.redis_master_name, self.redis_sentinel_nodes or "")
-    end
-    return string.format("%s:%d", self.redis_ip, self.redis_port)
 end
 
 function _M.new(self, opts)
