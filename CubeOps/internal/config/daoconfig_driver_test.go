@@ -21,7 +21,7 @@ func TestS6_PostgresURLSelectsPostgresDriver(t *testing.T) {
 		DatabaseURL: "postgres://alice:s3cret@10.0.0.5:5432/mydb",
 	}
 
-	dc := cfg.DaoConfig()
+	dc := mustDaoConfig(t, cfg)
 
 	if dc.Driver != "postgres" {
 		t.Errorf("Driver = %q, want postgres (S6: URL scheme must select driver)", dc.Driver)
@@ -44,7 +44,7 @@ func TestS6_PostgresqlURLAlsoWorks(t *testing.T) {
 		DatabaseURL: "postgresql://user:pass@host:5432/db",
 	}
 
-	dc := cfg.DaoConfig()
+	dc := mustDaoConfig(t, cfg)
 
 	if dc.Driver != "postgres" {
 		t.Errorf("Driver = %q, want postgres for postgresql:// scheme (S6)", dc.Driver)
@@ -58,7 +58,7 @@ func TestS6_PostgresDefaultPort(t *testing.T) {
 		DatabaseURL: "postgres://user:pass@host/db",
 	}
 
-	dc := cfg.DaoConfig()
+	dc := mustDaoConfig(t, cfg)
 
 	if dc.Addr != "host:5432" {
 		t.Errorf("Addr = %q, want host:5432 (PG default port, S6)", dc.Addr)
@@ -72,7 +72,7 @@ func TestS6_MySQLURLStillSelectsMySQLDriver(t *testing.T) {
 		DatabaseURL: "mysql://user:pass@host:3306/db",
 	}
 
-	dc := cfg.DaoConfig()
+	dc := mustDaoConfig(t, cfg)
 
 	if dc.Driver != "mysql" {
 		t.Errorf("Driver = %q, want mysql (S6 regression: MySQL must still work)", dc.Driver)
