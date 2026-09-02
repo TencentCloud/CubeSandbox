@@ -6,6 +6,7 @@ package sim
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"path/filepath"
 	"sync"
@@ -15,20 +16,28 @@ import (
 // bootstrapped guards the one-time process bootstrap: config.Init and
 // scheduler.InitScheduler install process-wide state, so all engine tests
 // share a single init. The config under test is the shipped example, which
-// doubles as a check that example.sim.yaml stays loadable.
-var bootstrapped sync.Once
+// doubles as a check that example.sim.yaml stays loadable. The error is
+// captured (not t.Fatalf inside Once.Do — a Goexit still marks the Once
+// done) so every test fails with the root cause instead of cascading into
+// half-initialized downstream failures.
+var (
+	bootstrapped sync.Once
+	bootstrapErr error
+)
 
 func bootstrapOnce(t *testing.T) {
 	t.Helper()
 	bootstrapped.Do(func() {
 		cfgPath, err := filepath.Abs("../../../cmd/schedsim/example.sim.yaml")
 		if err != nil {
-			t.Fatalf("resolve example config: %v", err)
+			bootstrapErr = fmt.Errorf("resolve example config: %w", err)
+			return
 		}
-		if err := Bootstrap(context.Background(), cfgPath); err != nil {
-			t.Fatalf("Bootstrap: %v", err)
-		}
+		bootstrapErr = Bootstrap(context.Background(), cfgPath)
 	})
+	if bootstrapErr != nil {
+		t.Fatalf("bootstrap: %v", bootstrapErr)
+	}
 }
 
 func approx(t *testing.T, name string, got, want, eps float64) {

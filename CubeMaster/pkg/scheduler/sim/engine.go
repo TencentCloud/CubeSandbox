@@ -105,6 +105,7 @@ var SummaryKeys = []string{
 	"jain_cpu",
 	"jain_mem",
 	"fragmentation_ratio",
+	"fragmentation_ratio_mem",
 	"herding_top1_share",
 	"template_hit_rate",
 	"active_nodes_avg",
