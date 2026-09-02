@@ -131,6 +131,13 @@ func (p *Params) validate() error {
 	if p.TemplatePreload < 0 || p.TemplatePreload > 1 {
 		return fmt.Errorf("sim: template preload ratio %v out of [0,1]", p.TemplatePreload)
 	}
+	// RunRound is exported and accepts in-memory traces, so the LoadTrace
+	// request-field checks must run here too: a negative lifetime would push
+	// an expiry ahead of its own create and silently corrupt the round's
+	// time-weighted metrics instead of failing.
+	if err := p.Trace.validate(); err != nil {
+		return fmt.Errorf("sim: invalid trace: %w", err)
+	}
 	return nil
 }
 

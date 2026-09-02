@@ -62,34 +62,42 @@ func LoadTrace(path string) (*Trace, error) {
 	if err := json.Unmarshal(data, t); err != nil {
 		return nil, fmt.Errorf("parse trace %s: %w", path, err)
 	}
+	if err := t.validate(); err != nil {
+		return nil, fmt.Errorf("trace %s: %w", path, err)
+	}
+	return t, nil
+}
+
+// validate enforces the trace contract on the in-memory form. LoadTrace calls
+// it for file input; RunRound calls it via Params.validate so exported API
+// callers get the same guarantees — a malformed request (e.g. negative
+// lifetime) would otherwise silently corrupt the round's time-weighted
+// metrics instead of producing an error.
+func (t *Trace) validate() error {
 	if len(t.Requests) == 0 {
-		return nil, fmt.Errorf("trace %s has no requests", path)
+		return fmt.Errorf("trace has no requests")
 	}
 	prev := int64(-1)
-	maxArrival := int64(0)
 	for i := range t.Requests {
 		r := &t.Requests[i]
 		if r.CpuMillis <= 0 || r.MemMiB <= 0 {
-			return nil, fmt.Errorf("trace %s request seq=%d has cpu_millis=%d mem_mib=%d: "+
+			return fmt.Errorf("request seq=%d has cpu_millis=%d mem_mib=%d: "+
 				"requests need a resource spec (cpu_millis/mem_mib > 0); re-generate the trace with spec annotations",
-				path, r.Seq, r.CpuMillis, r.MemMiB)
+				r.Seq, r.CpuMillis, r.MemMiB)
 		}
 		if r.ArrivalMs < 0 {
-			return nil, fmt.Errorf("trace %s request seq=%d has negative arrival_ms=%d", path, r.Seq, r.ArrivalMs)
+			return fmt.Errorf("request seq=%d has negative arrival_ms=%d", r.Seq, r.ArrivalMs)
 		}
 		if r.ArrivalMs < prev {
-			return nil, fmt.Errorf("trace %s requests must be sorted by arrival_ms ascending (seq=%d arrival_ms=%d after %d)",
-				path, r.Seq, r.ArrivalMs, prev)
+			return fmt.Errorf("requests must be sorted by arrival_ms ascending (seq=%d arrival_ms=%d after %d)",
+				r.Seq, r.ArrivalMs, prev)
 		}
 		if r.LifetimeMs < 0 {
-			return nil, fmt.Errorf("trace %s request seq=%d has negative lifetime_ms=%d", path, r.Seq, r.LifetimeMs)
+			return fmt.Errorf("request seq=%d has negative lifetime_ms=%d", r.Seq, r.LifetimeMs)
 		}
 		prev = r.ArrivalMs
-		if r.ArrivalMs > maxArrival {
-			maxArrival = r.ArrivalMs
-		}
 	}
-	return t, nil
+	return nil
 }
 
 // MaxRequestCpuMillis returns the largest cpu_millis over all requests — the

@@ -171,7 +171,8 @@ example.sim.yaml 把 `metric_update_timeout` 调到 86400s，同时引擎每次�
 轮间不会互相污染，但长时间在同一进程内反复跑仿真会累积陈旧节点条目——CLI
 的小轮数场景无影响。唯一不中性的是 `sched_latency_*`：节点枚举（fallback 全扫
 路径）的开销随累积条目增长，**多轮 run 内靠后轮次的延迟分位会被轻微抬高**，
-跨配置对比请以相同 `--rounds`/`--nodes` 形状为前提。
+跨配置对比请以相同 `--rounds`/`--nodes` 形状为前提，并按相同轮次下标对齐
+（config A 的 round i 对 config B 的 round i），不要拿 A 的首轮比 B 的末轮。
 
 另一限制：`scheduler.ignore_redis_allocation: true` 会让 filter 的
 `EffectiveAllocated` 恒为 0，调度器完全看不到仿真的进程内用量回写，配额门禁永不

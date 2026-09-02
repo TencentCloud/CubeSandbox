@@ -411,3 +411,72 @@ func TestMaxFeasibleShape(t *testing.T) {
 		}
 	})
 }
+
+// TestRunRoundRejectsMalformedTrace: RunRound is exported and accepts
+// in-memory traces, so the LoadTrace request-field checks must also fire
+// through Params.validate — a negative lifetime would otherwise push an
+// expiry ahead of its own create and silently corrupt the round's
+// time-weighted metrics.
+func TestRunRoundRejectsMalformedTrace(t *testing.T) {
+	bootstrapOnce(t)
+	base := func() Params {
+		return Params{
+			Trace:           mkTrace(2, 1000, 60000, 1000, 2048, "tpl-bad"),
+			Nodes:           1,
+			NodeCPUMillis:   64000,
+			NodeMemMiB:      65536,
+			InstanceType:    "sim",
+			TemplatePreload: 1.0,
+			Seed:            1,
+			RoundID:         7,
+		}
+	}
+
+	cases := map[string]func(tr *Trace){
+		"negative lifetime": func(tr *Trace) { tr.Requests[0].LifetimeMs = -1 },
+		"zero cpu":          func(tr *Trace) { tr.Requests[0].CpuMillis = 0 },
+		"zero mem":          func(tr *Trace) { tr.Requests[0].MemMiB = 0 },
+		"negative arrival":  func(tr *Trace) { tr.Requests[0].ArrivalMs = -1 },
+		"unsorted arrival": func(tr *Trace) {
+			tr.Requests[0].ArrivalMs = 1000
+			tr.Requests[1].ArrivalMs = 500
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := base()
+			mutate(p.Trace)
+			if _, err := RunRound(context.Background(), p); err == nil {
+				t.Fatalf("RunRound accepted a malformed trace (%s)", name)
+			}
+		})
+	}
+}
+
+// TestRunRoundZeroLifetime: zero-lifetime requests create and expire at the
+// same timestamp, exercising the evExpire-before-evCreate tie-break. They are
+// valid, must all schedule, and integrate zero occupancy.
+func TestRunRoundZeroLifetime(t *testing.T) {
+	bootstrapOnce(t)
+	rr, err := RunRound(context.Background(), Params{
+		Trace:           mkTrace(5, 1000, 0, 1000, 2048, "tpl-zl"),
+		Nodes:           2,
+		NodeCPUMillis:   64000,
+		NodeMemMiB:      65536,
+		InstanceType:    "sim",
+		TemplatePreload: 1.0,
+		Seed:            3,
+		RoundID:         8,
+	})
+	if err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	s := rr.Summary
+	approx(t, "success_rate", s["success_rate"], 1, 1e-9)
+	approx(t, "template_hit_rate", s["template_hit_rate"], 1, 1e-9)
+	// Zero-duration bookings integrate no usage over the [0, max arrival)
+	// window.
+	approx(t, "cpu_alloc_rate", s["cpu_alloc_rate"], 0, 1e-9)
+	approx(t, "mem_alloc_rate", s["mem_alloc_rate"], 0, 1e-9)
+	approx(t, "active_nodes_avg", s["active_nodes_avg"], 0, 1e-9)
+}
