@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
@@ -75,6 +76,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "schedsim: note: scheduler.metric_update_timeout=%v is short; the sim refreshes "+
 			"node metrics on every placement, but a large value (e.g. 86400s) is recommended for slow machines\n",
 			sc.MetricUpdateTimeout)
+	}
+
+	if sc := config.GetConfig().Scheduler; sc != nil && sc.Filter != nil &&
+		slices.Contains(sc.Filter.EnableFilters, "template_locality") && !*allowNonLocal {
+		fmt.Fprintln(os.Stderr, "schedsim: note: template_locality is enabled and --allow-non-local-template is off, "+
+			"so every successful placement lands on a node with a local replica and template_hit_rate is 1 by "+
+			"construction; to measure dynamic locality use --allow-non-local-template with --template-preload < 1")
 	}
 
 	trace, err := sim.LoadTrace(*tracePath)

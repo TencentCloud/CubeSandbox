@@ -223,6 +223,12 @@ Select 的 prefilter 每次都走 collectCacheNodes fallback 全扫并克隆存�
 抖动——把它当作同一 run 内、同形状 run 间的相对指标，不要当作调度器延迟的绝对
 真值。
 
+运行开销随 `nodes × events` 增长：每个事件后仿真都会对整个 fleet 做一次快照
+（逐节点读回 localcache 并比对账本），轮末 `sched_latency_*` 的三个分位数
+（p50/p95/p99）还会各自对延迟样本复制排序一次；示例规模（数百节点、数千请求）
+在秒级完成，但 10 万请求 × 数百节点的回放会明显变慢——大规模回放前先按此形状
+预估耗时。
+
 模型层面的已知简化：
 
 - **模板预热是瞬时的**：放置成功后 `noteTemplatePlacement` 同步注册本地副本，

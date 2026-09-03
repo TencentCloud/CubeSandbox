@@ -44,6 +44,13 @@ type Event struct {
 
 var externalNodeLoader func(context.Context) ([]*node.Node, error)
 
+// inited records whether Init has run in this process. RemoveNode refuses to
+// run once Init has, because the production removal path is the DEL event in
+// dealEvent; a direct removal there would bypass the event loop and the
+// Redis-backed sync, and would race the next loader tick re-installing the
+// node.
+var inited atomic.Bool
+
 func RegisterNodeLoader(loader func(context.Context) ([]*node.Node, error)) {
 	externalNodeLoader = loader
 }
@@ -80,6 +87,7 @@ func Init(ctx context.Context) error {
 	CubeLog.WithContext(context.Background()).Debugf("init_all,cost:%v,:%v", time.Since(start), GetNodes(-1).String())
 
 	go l.cleanSandboxCache(ctx)
+	inited.Store(true)
 	return nil
 }
 
@@ -212,14 +220,18 @@ func UpsertNode(n *node.Node) {
 // index, template-locality membership) synchronously, without going through
 // the event loop. It exists ONLY for single-process tooling that never calls
 // Init (schedsim): such a process injects nodes via UpsertNode and must
-// withdraw them completely at the end of a run. In an Init'ed process the
-// production removal path is the DEL event in dealEvent — calling RemoveNode
-// there would bypass the event loop and the Redis-backed sync, and would race
-// the next loader tick re-installing the node; do not adopt it outside that
-// tooling. n needs only the identity fields (InsID/IP) plus the
+// withdraw them completely at the end of a run. Once Init has run, RemoveNode
+// refuses to act (it logs an error and returns): the production removal path
+// is the DEL event in dealEvent, and a direct removal would bypass the event
+// loop and the Redis-backed sync and race the next loader tick re-installing
+// the node. n needs only the identity fields (InsID/IP) plus the
 // OssClusterLabel the node was injected with, so the sorted-index bucket
 // resolves the same way as at injection.
 func RemoveNode(ctx context.Context, n *node.Node) {
+	if inited.Load() {
+		CubeLog.WithContext(ctx).Errorf("localcache.RemoveNode refused: Init has already run in this process; use the DEL event path")
+		return
+	}
 	l.delNodeCache(ctx, n)
 }
 
