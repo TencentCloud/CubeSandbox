@@ -994,10 +994,11 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 	backend := createContextStorageBackend(opts)
 	// Cross-node imports a sandbox-private memory volume. XFS template
 	// start / pause resume / FromSnap mmap the original snapshot file
-	// MAP_PRIVATE; CH keeps it open so later unlink of the package is
-	// safe and a clone would only duplicate bytes. Same-node S3 pause
-	// resume still clones onto sb-<id>-memory: deactivate of an NVMe
-	// lvol would yank the live disk, unlike an unlinked XFS file.
+	// MAP_PRIVATE. Master's Resume CleanupTemplate is a no-op on XFS
+	// while the live sandbox still holds that pause id; next Pause or
+	// Destroy unlinks the package (CH keeps the fd open). Same-node S3
+	// pause resume still clones onto sb-<id>-memory: deactivate of an
+	// NVMe lvol would yank the live disk, unlike an unlinked XFS file.
 	if imp := CrossNodeSandboxImport(annotations); imp != nil {
 		name, devPath, err := imp.Memory(ctx)
 		if err != nil {

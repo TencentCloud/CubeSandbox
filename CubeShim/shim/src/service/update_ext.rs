@@ -5,6 +5,7 @@
 use crate::log::Log;
 use crate::{common::CResult, errf, infof, sandbox::sb::SandBox};
 use cube_hypervisor::config::RestoreConfig;
+use cube_hypervisor::SnapshotType;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -104,6 +105,20 @@ struct PauseSnapshotConfig {
     /// CommitSandbox layout (`--memory-vol`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_vol_url: Option<String>,
+
+    /// Same values as cube-runtime `--snapshot-type`: `full`, `incremental`,
+    /// `soft-dirty`. Missing / empty / unknown defaults to Full so older
+    /// Cubelets keep the historical full dump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_type: Option<String>,
+}
+
+fn parse_pause_snapshot_type(raw: Option<&str>) -> SnapshotType {
+    let s = raw.map(str::trim).unwrap_or("");
+    if s.is_empty() {
+        return SnapshotType::Full;
+    }
+    s.parse().unwrap_or(SnapshotType::Full)
 }
 
 /// Outcome of an extended update action.
@@ -204,14 +219,16 @@ async fn do_pause_to_snapshot(
         .into());
     }
 
+    let snapshot_type = parse_pause_snapshot_type(pause_cfg.snapshot_type.as_deref());
     infof!(
         log,
-        "pause to snapshot: destination={} memory_vol_url={:?}",
+        "pause to snapshot: destination={} memory_vol_url={:?} snapshot_type={}",
         destination_path,
-        pause_cfg.memory_vol_url
+        pause_cfg.memory_vol_url,
+        snapshot_type
     );
 
-    sb.pause_vm_to_snapshot(&destination_path, pause_cfg.memory_vol_url)
+    sb.pause_vm_to_snapshot(&destination_path, pause_cfg.memory_vol_url, snapshot_type)
         .await
         .map_err(|e| {
             errf!(log, "pause to snapshot failed: {}", e);
@@ -273,5 +290,28 @@ mod tests {
             cfg.memory_vol_url.as_deref(),
             Some("file:///dev/cubecow/mem1")
         );
+        assert_eq!(cfg.snapshot_type, None);
+        assert_eq!(
+            parse_pause_snapshot_type(cfg.snapshot_type.as_deref()),
+            SnapshotType::Full
+        );
+    }
+
+    #[test]
+    fn pause_snapshot_config_parses_soft_dirty() {
+        let raw = r#"{"destination_url":"/data/snap/pause-1","memory_vol_url":"file:///dev/cubecow/mem1","snapshot_type":"soft-dirty"}"#;
+        let cfg: PauseSnapshotConfig = serde_json::from_str(raw).unwrap();
+        assert_eq!(cfg.snapshot_type.as_deref(), Some("soft-dirty"));
+        assert_eq!(
+            parse_pause_snapshot_type(cfg.snapshot_type.as_deref()),
+            SnapshotType::SoftDirty
+        );
+        assert_eq!(
+            parse_pause_snapshot_type(Some("incremental")),
+            SnapshotType::Incremental
+        );
+        assert_eq!(parse_pause_snapshot_type(Some("weird")), SnapshotType::Full);
+        assert_eq!(parse_pause_snapshot_type(Some("")), SnapshotType::Full);
+        assert_eq!(parse_pause_snapshot_type(None), SnapshotType::Full);
     }
 }

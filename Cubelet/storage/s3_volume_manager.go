@@ -173,11 +173,14 @@ func (m *S3Cow) CreateMemoryVolume(ctx context.Context, templateID string, sizeB
 }
 
 // CommitTemplateMemory derives a writable memory volume for templateID from
-// a RO memory snapshot (create_volume_from_snapshot). Source must be a
-// snapshot — seal prior package memory before using it as a clone base.
+// a RO memory snapshot (create_volume_from_snapshot). A live sandbox volume
+// (imported / cloned sb-*-memory) is snapshotted first, then cloned.
 func (m *S3Cow) CommitTemplateMemory(ctx context.Context, sourceName, templateID string, sizeBytes uint64) (*cowVolume, error) {
 	volumeName := cowTemplateMemoryName(templateID)
 	devPath, err := m.createOrResolveVolumeFromSnapshot(ctx, sourceName, volumeName)
+	if err != nil && isS3CloneSourceMustBeSnapshot(err) {
+		devPath, err = m.cloneVolumeFromWritableSource(ctx, sourceName, volumeName)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -213,6 +216,17 @@ func (m *S3Cow) CommitTemplateMemory(ctx context.Context, sourceName, templateID
 
 func (m *S3Cow) CloneSandboxMemory(ctx context.Context, sandboxID, sourceName string) (*cowVolume, error) {
 	return cloneSandboxMemory(ctx, m, sandboxID, sourceName)
+}
+
+// cloneVolumeFromWritableSource snapshots a live volume, clones that snap
+// into dest, then deletes the snap. The snap exists only inside this call.
+func (m *S3Cow) cloneVolumeFromWritableSource(ctx context.Context, sourceVol, destVol string) (string, error) {
+	srcSnap := destVol + "-src"
+	if _, err := m.createOrResolveSnapshotPathFromSource(ctx, sourceVol, srcSnap); err != nil {
+		return "", fmt.Errorf("snapshot live memory %s: %w", sourceVol, err)
+	}
+	defer func() { _ = m.DeleteByKind(ctx, srcSnap, cowKindSnapshot) }()
+	return m.createOrResolveVolumeFromSnapshot(ctx, srcSnap, destVol)
 }
 
 func (m *S3Cow) createInitializedTemplateVolume(ctx context.Context, name string, sizeBytes uint64) (*cowVolume, error) {
@@ -489,4 +503,12 @@ func (m *S3Cow) oppositeDeleteFunc(kind string) func(string) error {
 	default:
 		return nil
 	}
+}
+
+func isS3CloneSourceMustBeSnapshot(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "is a volume") && strings.Contains(msg, "snapshot")
 }

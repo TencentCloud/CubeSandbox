@@ -207,6 +207,11 @@ const (
 	// id (same snap-* format as normal Commit snapshots). Cubelet only stores
 	// the local catalog under this id; Kind=pause_snapshot.
 	MasterAnnotationPauseSnapshotID = "cube.master.pause.snapshot.id"
+	// MasterAnnotationLaunchMemorySnapshotID is the template or customer
+	// snapshot the sandbox was first started from. Pause always clones
+	// this memory image and writes an incremental overlay. Resume and
+	// Commit must not overwrite it.
+	MasterAnnotationLaunchMemorySnapshotID = "cube.master.launch.memory.snapshot.id"
 	// MasterAnnotationStorageBackend is the CoW backend Master passes on
 	// Pause / Commit (xfs｜s3). Empty means xfs.
 	MasterAnnotationStorageBackend = "cube.master.storage.backend"

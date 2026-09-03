@@ -446,11 +446,14 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	// describes a sandbox that is by now running whatever the proxy thinks.
 	purgeErr := cubeproxy.InvalidateBackendCache(ctx, req.SandboxID, targetIP)
 
-	// After Create the sandbox runs on private disks. Drop the pause package
-	// on the node that still holds it: origin when that IP is known and not
-	// the target (also the PAUSED tombstone), otherwise this node. Do not
-	// key this off CrossNode — a cross-node placement with a blank origin
-	// would otherwise skip both cleanup paths and leak the package.
+	// After Create the sandbox runs on private disks. Ask Cubelet to drop
+	// the pause package on the node that still holds it: origin when that
+	// IP is known and not the target (also the PAUSED tombstone), otherwise
+	// this node. Cubelet decides whether the catalog actually goes away
+	// (S3 already cloned onto sb-*-memory; XFS Resume still mmaps the
+	// package and no-ops until the next Pause or Destroy). Do not key this
+	// off CrossNode — a cross-node placement with a blank origin would
+	// otherwise skip both cleanup paths and leak the package.
 	origin := strings.TrimSpace(rec.NodeIP)
 	if origin != "" && origin != targetIP {
 		if err := pausesnap.DropOriginTombstone(ctx, req.RequestID, req.SandboxID, origin, rec.SnapshotID, rec.Backend); err != nil {
