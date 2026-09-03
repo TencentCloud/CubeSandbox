@@ -417,6 +417,9 @@ We welcome contributions of all kinds—whether it's a bug report, feature sugge
 | **E2B API Compatibility** | Close remaining gaps with the E2B specification for full drop-in compatibility |
 | **Sandbox Fault Recovery** | Automatic detection and recovery of crashed VMs, stuck shim processes, and network partitions with configurable recovery policies |
 | **Scheduling & Operations Enhancements** | Resource-aware placement, affinity rules, live rebalancing, and node drain with sandbox migration |
+| **S3 Performance and Cost Optimization** | Incremental uploads, better cache, and cheaper storage classes so S3 snapshot/volume I/O stays fast at lower cost |
+| **Filesystem-Only Snapshots** | Snapshot the writable filesystem without a memory dump for cheaper, faster clone/restore when a cold start from disk is enough |
+| **GPU Sandboxes** | Attach host GPUs to sandboxes so Agent and inference workloads can run CUDA inside the isolated VM, with GPU-aware scheduling |
 
 ## Sponsors
 

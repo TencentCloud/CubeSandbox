@@ -20,6 +20,18 @@ Automatic detection and recovery of sandboxes in abnormal states — crashed VMs
 
 Richer scheduling capabilities including resource-aware placement, affinity/anti-affinity rules, and priority classes. Also covers operational tooling: live resource rebalancing and node drain with sandbox migration.
 
+### S3 Performance and Cost Optimization
+
+Cross-node pause/resume and volumes already persist through S3-compatible object storage. Next is to cut both latency and bill: incremental uploads, better local cache, and cheaper storage classes so snapshot transfer and volume I/O stay fast without paying full-object prices every time.
+
+### Filesystem-Only Snapshots
+
+Today a snapshot captures memory and the writable filesystem together. A filesystem-only snapshot skips the memory dump so clone and restore are cheaper and faster when the workload can cold-start from disk — installed packages, workspace files, and envd state — without a live RAM image.
+
+### GPU Sandboxes
+
+Attach host GPUs to sandboxes so Agent and inference workloads can run CUDA (and similar accelerators) inside the same isolated VM model, with the scheduler accounting for GPU inventory and placement.
+
 ---
 
 ## How to Influence the Roadmap
