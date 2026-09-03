@@ -1,29 +1,38 @@
 #!/usr/bin/env bash
-# 派生 export 自续租探针：发布后无人导入时，它引用的上游还受保护吗
+# Derived-export self-renewal probe: after publish, with nobody importing,
+# is the upstream it names still protected?
 #
-# 修的是 design §6 里 "E pins A while E is alive" 这一条。此前 E 自己不 pin ——
-# 只有 E 的**读者**会为 A 续租。于是存在这样一个窗口：
+# This is design §6, "E pins A while E is alive". Previously E did not pin --
+# only E's *readers* renewed A's lease. That left a window:
 #
-#   B 从 A 导入 → B 发布派生 export E（引用 A 的 prefix）
-#              → 但没有任何节点导入 E
-#              → 没人为 A 续租 → A 的租约陈旧 → A 删掉快照
-#              → E 成为一份看起来有效、实际解析不到任何对象的 manifest
+#   B imports from A -> B publishes derived export E (naming A's prefix)
+#                    -> no node imports E
+#                    -> nobody renews A -> A's lease goes stale -> A deletes
+#                       the snapshot
+#                    -> E is a manifest that looks valid and resolves to
+#                       nothing
 #
-# 现在 E 从发布起就自己为上游续租，直到用户显式 rcow_release_export。
+# E now renews upstream itself from the moment it is published, until the
+# user explicitly rcow_release_export.
 #
-# 判据：
-#   [3] B 发布 E 之后（无任何 import），日志说 E 在为上游续租，且键指向 A
-#   [4] A 的租约对象确实在被刷新，且写者是 E 而不是 vb —— 这是 A 那侧唯一会看的东西
-#   [5] unload 后停止、attach 后恢复 —— 这份义务是对另一个节点的，必须跨重启存活
-#   [6] release_export 之后续租停止 —— 这是设计上唯一的出口
+# Checks:
+#   [3] after B publishes E (with no import), the log says E is renewing
+#       upstream, and the key names A
+#   [4] A's lease object is actually being refreshed, and the writer is E
+#       not vb -- that is the only thing A's side looks at
+#   [5] it stops on unload and resumes on attach -- the duty is to another
+#       node, so it must survive a restart
+#   [6] renewals stop after release_export -- that is the only designed exit
 #
-# [4] 是最要紧的：只看日志说"在续租"不够，得看 S3 上那个对象的 updated_at
-# 真的在往前走，否则一个提交了 PUT 却全部失败的实现也会打出同样的日志。而且必须
-# 看 importer_id：vb 也在为同一个键续租（它读的就是 EXP_A），只是周期长得多，
-# 所以"时间戳动了"本身并不能说明是 E 动的。
+# [4] is the one that matters: a log line saying "renewing" is not enough;
+# updated_at on the S3 object has to actually move, or an implementation
+# whose PUTs all fail would print the same log. importer_id must be checked
+# too: vb also renews the same key (it is reading EXP_A), just on a much
+# longer period, so "the timestamp moved" does not by itself say E moved it.
 #
-# [5] 之所以做成"先停后复"而不是只看"attach 后还在续租"：后者在某个 poller 从未
-# 被停掉的情况下同样会通过，而那是另一个 bug。
+# [5] is stop-then-resume rather than just "still renewing after attach":
+# the latter also passes if some poller was never stopped, which is a
+# different bug.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -365,8 +374,9 @@ fi
 echo
 echo "===== SUMMARY"
 if [ "${FAILED}" = "0" ]; then
-	echo "  未被导入的派生 export 也会为其上游续租，直到 release_export。"
+	echo "  an unimported derived export still renews its upstream until"
+	echo "  release_export."
 else
-	echo "  ${FAILED} 项失败 —— 见上方 [FAIL]"
+	echo "  ${FAILED} failure(s) -- see [FAIL] above"
 fi
 exit "${FAILED}"

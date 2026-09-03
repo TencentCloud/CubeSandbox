@@ -1,22 +1,28 @@
 #!/usr/bin/env bash
-# Phase 1 探针 #2：从"引用式快照"克隆（clone of a reference snapshot）
+# Phase 1 probe #2: clone of a reference snapshot.
 #
-# 形状与 probe_esnap_snapshot.sh 相同（一个 target、两个 lvstore 轮流、
-# nvmf_subsystem_add_ns 暴露 bdev、/sys/class/nvme 定位设备）。
+# Same shape as probe_esnap_snapshot.sh (one target, two lvstores in turn,
+# nvmf_subsystem_add_ns to expose the bdev, /sys/class/nvme to find the
+# device).
 #
-# 为什么要单独探一次 clone：
+# Why clone is probed separately:
 #
-#   create_clone 的 derive_check 检查的是**被克隆的快照 S**，而不是 V ——
-#   decouple 队列里排的是 V，所以 decouple_pending(S) 大概率为假，
-#   clone 可能今天就能通过。真正要证的是数据正确性，而不是能否调用。
+#   create_clone's derive_check looks at **the snapshot being cloned, S**,
+#   not V -- the decouple queue holds V, so decouple_pending(S) is almost
+#   certainly false, and clone may already succeed today. What has to be
+#   proven is data correctness, not whether the call is allowed.
 #
-# 要回答：
-#   1. 从 S（esnap clone V 的快照）克隆 C，当前代码会拒绝吗？
-#   2. C 能否读到正确数据（C -> S -> esnap -> 源 export A）？
-#   3. 写 C 之后：C 读到新数据、S 保持不变吗（跨 esnap 边界的 COW）？
-#   4. C 是否零拷贝——写之前 ALLOC 为 0，只为写入的部分分配？
-#   5. decouple V 之后、删除 V 之后，S 与 C 是否仍然正确？
-#   6. 直接克隆 V（可写卷）是否仍被正确拒绝（应当拒绝，不是要改的行为）？
+# Questions:
+#   1. Cloning C from S (the snapshot of esnap clone V): does current code
+#      refuse?
+#   2. Can C read the right data (C -> S -> esnap -> source export A)?
+#   3. After writing C: does C see the new data and S stay unchanged
+#      (COW across the esnap boundary)?
+#   4. Is C zero-copy -- ALLOC 0 before the write, allocated only for what
+#      was written?
+#   5. After decoupling V and after deleting V, are S and C still correct?
+#   6. Is cloning V itself (a writable volume) still correctly refused
+#      (it should be; that is not behaviour to change)?
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

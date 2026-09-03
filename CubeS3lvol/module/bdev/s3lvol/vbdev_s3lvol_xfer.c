@@ -1269,6 +1269,9 @@ export_report(struct export_ctx *ctx, int status)
 			    "such export; re-export to try again.\n",
 			    ctx->info.export_uuid, ctx->info.snapshot_name,
 			    spdk_strerror(-status));
+	} else {
+		SPDK_NOTICELOG("Export %s of snapshot '%s' completed\n",
+			       ctx->info.export_uuid, ctx->info.snapshot_name);
 	}
 
 	if (ctx->channel) {
@@ -3870,8 +3873,7 @@ s3lvol_decouple_dequeue_lvol(struct spdk_lvol *lvol)
  * impossible rather than merely slow. And letting it proceed is worse than
  * either: the snapshot takes the external snapshot identity with it, and the
  * decouple then materialises every remaining cluster before failing its detach
- * with "blob is not a clone of an external snapshot" -- measured, see
- * docs/import-reference-snapshot-design.md §9.2.
+ * with "blob is not a clone of an external snapshot".
  *
  * Answers:
  *   0  nothing to cancel, or cancelled already -- the caller may go straight on
@@ -3952,13 +3954,12 @@ s3lvol_lvol_decouple(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 	 * snapshot, so after one is taken the volume has no external parent left to
 	 * clear (-EINVAL above) and the snapshot could not be materialised either --
 	 * nothing could stop the chain depending on the source export except deleting
-	 * it. Measured, and written up as §9.2 of
-	 * docs/import-reference-snapshot-design.md.
+	 * it.
 	 *
 	 * What it takes is lifting md_ro for the copy, which
 	 * spdk_blob_materialize_cluster() now does and which blobstore itself does
 	 * whenever it modifies a snapshot. Nothing a reader sees changes: the bytes
-	 * move from "fetched through the export" to "held locally". §9.5 measures the
+	 * move from "fetched through the export" to "held locally". The design measures the
 	 * whole thing, including that the snapshot's clones keep reading correctly
 	 * while it happens. */
 

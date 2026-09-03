@@ -640,7 +640,7 @@ wal_submit(struct s3_wal *wal, enum s3_wal_entry_type type, uint64_t lba,
 		return;
 	}
 	/* Backpressure is a retry signal, not a failure: blobstore will queue
-	 * and resubmit (W5). */
+	 * and resubmit. */
 	if (wal->state == S3_WAL_BACKPRESSURE) {
 		if (cb_fn) {
 			cb_fn(cb_arg, -EAGAIN);

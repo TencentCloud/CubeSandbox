@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
-# 租约下限探针：短 TTL 的导入是否还会每秒续约，租约对象是否立刻出现
+# Lease-floor probe: does importing a short-TTL export still renew every
+# second, and does the lease object appear immediately?
 #
-# 回答两件在正常 TTL 下看不见的事：
+# Two things that never show up at a normal TTL:
 #
-#   1. 一个 TTL 只剩几秒（或已过期）的 export，被导入后续约间隔是多少。
-#      改动前是 max(1, remaining/3) —— 坍缩到 1 秒，并把 renew_s:1 写进租约，
-#      源端据此把宽限期算成 3 秒。三秒是一次慢 PUT 的量级，而源端判定
-#      STALE 之后是无人值守地删快照。
-#   2. 租约对象在 import 之后多久出现。poller 要等一个周期才首次触发，
-#      所以把间隔从 1 秒抬到 20 秒，会把这个空窗一并放大到 20 秒 ——
-#      而空窗期内 lease_updated_at 为 0，对已过期的 lease-aware export
-#      同样判 STALE。抬下限就必须同时补首次写入，这里验证补上了。
+#   1. After importing an export whose TTL has a few seconds left (or has
+#      already expired), what is the renew interval? Before the change it
+#      was max(1, remaining/3) -- collapsing to 1 second, with renew_s:1
+#      written into the lease, from which the source computes a 3-second
+#      grace. Three seconds is the scale of one slow PUT, and after the
+#      source marks STALE it deletes the snapshot unattended.
+#   2. How soon after import does the lease object appear? The poller waits
+#      one period before the first tick, so raising the interval from 1 s
+#      to 20 s would also stretch that empty window to 20 s -- and while it
+#      is empty, lease_updated_at is 0, which for an already-expired
+#      lease-aware export is also STALE. Raising the floor therefore has to
+#      write the first lease immediately; this checks that it does.
 #
-# 只用一个 lvstore：import 到本 lvstore 会退化成本地 clone，不走 esnap，
-# 所以这里用两个（源导出后 unload，目标再建），形状照抄 probe_esnap_snapshot.sh。
+# One lvstore is not enough: importing into the same lvstore degrades to a
+# local clone and never takes the esnap path. Two are used (unload after
+# the source exports, then create the destination), matching
+# probe_esnap_snapshot.sh.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -184,8 +191,9 @@ fi
 echo
 echo "===== SUMMARY"
 if [ "${FAILED}" = "0" ]; then
-	echo "  过期 export 的导入不再每秒续约，租约在 import 时即写入。"
+	echo "  importing an expired export no longer renews every second;"
+	echo "  the lease is written at import."
 else
-	echo "  ${FAILED} 项失败 —— 见上方 [FAIL]"
+	echo "  ${FAILED} failure(s) -- see [FAIL] above"
 fi
 exit "${FAILED}"

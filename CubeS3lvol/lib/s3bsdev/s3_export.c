@@ -746,23 +746,21 @@ s3_export_manifest_seal(struct s3_export_manifest *m)
 	 * segfault when the byte happens to sit near the end of a mapping, and
 	 * silently reads adjacent memory when it does not. The other stages avoid it
 	 * by passing whole arrays; this one has to skip holes, so it copies. */
-	{
-		uint8_t batch[64];
-		size_t n = 0;
+	uint8_t batch[64];
+	size_t n = 0;
 
-		for (i = 0; i < m->num_chunks; i++) {
-			if (!bitmap_test(m->present, i)) {
-				continue;
-			}
-			batch[n++] = m->src_idx[i];
-			if (n == sizeof(batch)) {
-				m->crc32c = spdk_crc32c_update(batch, n, m->crc32c);
-				n = 0;
-			}
+	for (i = 0; i < m->num_chunks; i++) {
+		if (!bitmap_test(m->present, i)) {
+			continue;
 		}
-		if (n != 0) {
+		batch[n++] = m->src_idx[i];
+		if (n == sizeof(batch)) {
 			m->crc32c = spdk_crc32c_update(batch, n, m->crc32c);
+			n = 0;
 		}
+	}
+	if (n != 0) {
+		m->crc32c = spdk_crc32c_update(batch, n, m->crc32c);
 	}
 }
 

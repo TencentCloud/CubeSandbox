@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Phase 1 第 0 步探针：esnap clone 上的 create_snapshot 语义
+# Phase 1 step-0 probe: create_snapshot semantics on an esnap clone.
 #
-# 形状照抄 test/dataplane/probe_decouple_window.sh：一个 target、两个 lvstore
-# 轮流（一个进程只装得下一个 blobstore：源建好并导出后 unload，目标才建），
-# 用 nvmf_subsystem_add_ns 直接暴露 bdev，再从 /sys/class/nvme 定位宿主设备。
+# Shape copied from test/dataplane/probe_decouple_window.sh: one target, two
+# lvstores in turn (one process holds one blobstore: unload the source after
+# it is built and exported, then create the destination), expose the bdev
+# with nvmf_subsystem_add_ns, then find the host device under
+# /sys/class/nvme.
 #
-# 要回答：
-#   1. 对 esnap clone V 做 create_snapshot 能否成功、产出什么？
-#   2. S 能否读到正确的数据（读穿到源 export A）？
-#   3. 随后 decouple V，S 的数据是否仍然正确？
-#      —— lvstore.c:2531-2535 声称的 hazard 是否真实
+# Questions:
+#   1. Does create_snapshot on esnap clone V succeed, and what does it
+#      produce?
+#   2. Can S read the right data (through to source export A)?
+#   3. After then decoupling V, is S still correct?
+#      -- is the hazard claimed at lvstore.c:2531-2535 real?
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -258,7 +261,7 @@ info "decouple settled (waited ${i}s)"
 
 if [ -n "${NSID_S}" ] && S_DEV2="$(wait_dev "${NSID_S}")" || NSID_S="$(expose "${DST_LVS}/S")" && S_DEV2="$(wait_dev "${NSID_S}")"; then
 	S2_MD5="$(dd if="${S_DEV2}" bs=1M count="${FILL_MB}" iflag=direct status=none | md5sum | cut -d' ' -f1)"
-	info "S read (after V decoupled) = ${S2_MD5}  $([ "${S2_MD5}" = "${PAT_MD5}" ] && echo "MATCH ✓ S 仍然正确" || echo "MISMATCH ✗ S 被 decouple 破坏")"
+	info "S read (after V decoupled) = ${S2_MD5}  $([ "${S2_MD5}" = "${PAT_MD5}" ] && echo "MATCH ✓ S still correct" || echo "MISMATCH ✗ S was broken by the decouple")"
 else
 	info "S could not be re-read after the decouple"
 fi
@@ -287,8 +290,8 @@ if rpc --ls rcow_get_lvstores 2>/dev/null | grep -qE '^S '; then
 		S3_MD5="$(dd if="${S_DEV3}" bs=1M count="${FILL_MB}" iflag=direct status=none \
 			| md5sum | cut -d' ' -f1)"
 		info "S read (after V deleted) = ${S3_MD5}  $([ "${S3_MD5}" = "${PAT_MD5}" ] \
-			&& echo "MATCH ✓ S 独立于 V（持有自己的 esnap parent）" \
-			|| echo "MISMATCH ✗ S 依赖 V，删 V 后失效")"
+			&& echo "MATCH ✓ S is independent of V (holds its own esnap parent)" \
+			|| echo "MISMATCH ✗ S depends on V and broke after V was deleted")"
 	else
 		info "S could not be read after deleting V"
 	fi

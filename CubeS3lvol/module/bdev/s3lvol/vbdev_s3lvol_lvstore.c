@@ -9,7 +9,7 @@
  *   === Why maintain our own lvstore list ===
  *
  *   The upstream lvstore<->bdev pairing table g_spdk_lvol_pairs is static
- *   private (vbdev_lvol.c:20); no external API can insert entries, so the
+ *   private (vbdev_lvol.c); no external API can insert entries, so the
  *   built-in bdev_lvol_* RPCs are unavailable to us. We keep our own copy for
  *   the bespoke RPCs to look up.
  *
@@ -17,7 +17,7 @@
  *
  *   It assumes the lvstore sits on a real bdev: it builds its own bs_dev with
  *   spdk_bdev_create_bs_dev_ext() and then unconditionally dereferences
- *   bs_dev->get_base_bdev() (vbdev_lvol.c:286). Our bs_dev has no bdev
+ *   bs_dev->get_base_bdev() (vbdev_lvol.c). Our bs_dev has no bdev
  *   underneath; get_base_bdev is NULL and it would segfault. spdk_lvs_init()
  *   itself only needs a struct spdk_bs_dev *, so the wrapper is bypassed and
  *   it is called directly.
@@ -2904,7 +2904,7 @@ s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 	 * are not holes, and unable to open its clone at all after a restart.
 	 *
 	 * Refused rather than materialised, and that is now a decision rather than a
-	 * gap (2026-08-05). Materialising -- server-side copying the objects into the
+	 * gap. Materialising -- server-side copying the objects into the
 	 * export's own prefix and rewriting the manifest as dense -- founders on the
 	 * rewrite: an importer caches the manifest verbatim in its imports registry
 	 * and reloads it from there on attach, never re-fetching, so it would go on

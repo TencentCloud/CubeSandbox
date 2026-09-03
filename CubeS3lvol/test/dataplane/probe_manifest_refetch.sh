@@ -1,30 +1,40 @@
 #!/usr/bin/env bash
-# 重取探针：源端物化后，导入端的读能否透明恢复
+# Refetch probe: after the source materialises, can the importer's reads
+# recover transparently?
 #
-# 要验证的是 B 方案 —— 404 不向上报错，而是挂起该 I/O、重取 manifest、
-# 换用新的、再重试一次。客户端应当只看到一次变慢的读，而不是一次 I/O 错误。
+# This is plan B -- a 404 is not reported up; the I/O is held, the manifest
+# is refetched, swapped in, and retried once. The client should see one
+# slower read, not an I/O error.
 #
-# 场景是手工造的，因为源端的物化路径（第 5 步的写侧）还没接通。这里用
-# 三步模拟"源端搬走了对象"之后的 S3 状态：
+# The scene is built by hand because the source materialise path (the write
+# side of step 5) was not wired yet. Three steps fake the S3 state after
+# "the source moved the objects":
 #
-#   1. 正常导入一个 ref export，读一遍确认数据对；
-#   2. 把 <src-lvs>/data/ 下的对象复制到另一个 prefix，发布一份
-#      generation+1、source.prefix 指向新位置的 manifest，再删掉原对象；
-#   3. 再读一遍。旧 manifest 指向的键已经不存在，所以每个 chunk 都会 404。
+#   1. Import a ref export normally and read once to confirm the data.
+#   2. Copy objects under <src-lvs>/data/ to another prefix, publish a
+#      generation+1 manifest whose source.prefix points there, then delete
+#      the originals.
+#   3. Read again. Every key in the old manifest is gone, so every chunk
+#      404s.
 #
-# 为什么是"换 prefix"而不是"改成 dense"：dense 会改变 manifest 必须携带的
-# 字段和 crc 的分段方式，手工伪造的多半会被 parse() 拒掉 —— 那样探针失败在
-# 自己的伪造上，对重取路径什么也没证明。换 prefix 保持了全部校验和与不变量，
-# 同时让旧 manifest 里的每个键都 404，这正是要测的条件。
+# Why "move the prefix" rather than "rewrite as dense": dense changes which
+# fields the manifest must carry and how the crc is staged, so a hand-built
+# one would likely be rejected by parse() -- and a probe that fails on its
+# own forgery proves nothing about refetch. Moving the prefix keeps every
+# checksum and every invariant intact while still making every key in the
+# old manifest 404, which is the condition being tested.
 #
-# 判据有两条，缺一不可：
-#   - 读**成功**且 md5 与写入一致（B 方案生效，而不是把错误抛上去）；
-#   - 日志里出现且只出现一次 refetch（去重生效 —— 一次大读会拆成很多
-#     chunk GET，物化后它们同时 404，每个都触发一次重取的话就是一串
-#     重复的 manifest GET 和几次互相竞争的 swap）。
+# Two checks, both required:
+#   - the read **succeeds** and the md5 matches what was written (plan B
+#     took effect, rather than throwing the error up);
+#   - the log shows exactly one refetch (dedup works -- one large read
+#     splits into many chunk GETs; after materialise they all 404 at once,
+#     and without dedup that would be a string of duplicate manifest GETs
+#     and racing swaps).
 #
-# 注意：这里不 unload/reload lvstore。重取是内存里的行为，重启会重新
-# 读 manifest 从而绕过它 —— 那样测的就不是这条路径了。
+# The lvstore is not unloaded/reloaded. Refetch is in-memory; a restart
+# would re-read the manifest and skip this path, which is not what is
+# being tested.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -253,7 +263,7 @@ PY
 if [ $? -ne 0 ]; then
 	bad "could not simulate the materialisation"
 	sed 's/^/       /' "${WORKDIR}/materialise.log"
-	echo; echo "===== SUMMARY"; echo "  ${FAILED} 项失败"; exit "${FAILED}"
+	echo; echo "===== SUMMARY"; echo "  ${FAILED} failure(s)"; exit "${FAILED}"
 fi
 sed 's/^/       /' "${WORKDIR}/materialise.log"
 ok "the source's objects are gone and a newer manifest is published"
@@ -298,8 +308,10 @@ want "with no further refetch" "${NREF2}" "0"
 echo
 echo "===== SUMMARY"
 if [ "${FAILED}" = "0" ]; then
-	echo "  物化后读透明恢复：404 触发一次重取，换用新 manifest，数据正确。"
+	echo "  reads recover transparently after materialise: a 404 triggers"
+	echo "  one refetch, the new manifest is swapped in, and the data is"
+	echo "  correct."
 else
-	echo "  ${FAILED} 项失败 —— 见上方 [FAIL]"
+	echo "  ${FAILED} failure(s) -- see [FAIL] above"
 fi
 exit "${FAILED}"

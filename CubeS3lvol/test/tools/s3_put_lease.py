@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-# 探针工具：往 S3 写一个 export lease 对象，模拟另一节点的 importer 续约。
-# 复用 s3_prefix_rm.py 的 stdlib SigV4 签名（测试机没有 boto3）。
+# Probe helper: PUT an export lease object on S3, as if another node's
+# importer were renewing. Reuses s3_prefix_rm.py's stdlib SigV4 signing
+# (no boto3 on the test hosts).
 import datetime
 import hashlib
 import hmac

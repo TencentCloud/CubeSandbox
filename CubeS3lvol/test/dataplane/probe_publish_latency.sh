@@ -1,46 +1,54 @@
 #!/usr/bin/env bash
-# 端到端发布延迟：import -> create_snapshot -> export_snapshot 各步花多久？
+# End-to-end publish latency: how long do import -> create_snapshot ->
+# export_snapshot take on each path?
 #
-# 起因（用户指出，实测确认）：第 1 步让 create_snapshot 变成 O(1)，但真正的
-# 发布链路是 import -> create_snapshot -> export_snapshot。快照 S 拿走了
-# external parent，所以 export 走到 export_build_chain 时命中
-# spdk_blob_is_esnap_clone()，返回 -ENOTSUP，然后**静默退化成拷贝**
-# （export_ref() -> export_copy()）。拷贝要把已分配的字节读出来再上传一遍。
+# Origin (called out by a user, then measured): step 1 made create_snapshot
+# O(1), but the real publish chain is import -> create_snapshot ->
+# export_snapshot. Snapshot S takes the external parent, so export hits
+# spdk_blob_is_esnap_clone() in export_build_chain, gets -ENOTSUP, and
+# **silently falls back to a copy** (export_ref() -> export_copy()). The copy
+# reads the allocated bytes back out and uploads them again.
 #
-# 也就是说 O(1) 只是从一个 RPC 挪到了下一个，端到端仍是 O(size)。
-# 这个探针要把三条路径的耗时和产出 layout 摆在一起：
+# So O(1) only moved from one RPC to the next; end-to-end was still O(size).
+# This probe puts the three paths' timings and resulting layouts side by side:
 #
-#   路径 A  import -> snapshot -> export            （S 是 esnap clone）
-#   路径 B  import -> snapshot -> decouple S -> export （先收敛再发布）
-#   路径 C  import(decouple 完成) -> snapshot -> export （老办法，先物化后快照）
+#   path A  import -> snapshot -> export                 (S is an esnap clone)
+#   path B  import -> snapshot -> decouple S -> export   (converge, then publish)
+#   path C  import (decouple finished) -> snapshot -> export
+#           (the old way: materialise first, then snapshot)
 #
-# 要回答：
-#   1. 路径 A 的 export 是 REF 还是 DENSE？耗时多少？
-#   2. 路径 B 的 export 是 REF 吗？（若是，说明收敛后可零拷贝再发布）
-#   3. 三条路径的端到端总耗时，哪一条真的更快？
-#   4. S3 上各自占多少对象（存储放大）
+# Questions:
+#   1. Is path A's export REF or DENSE, and how long does it take?
+#   2. Is path B's export REF? (If so, a converged snapshot can be
+#      re-published zero-copy.)
+#   3. Which path is actually faster end to end?
+#   4. How many S3 objects does each occupy (storage amplification)?
 #
-# === 上面描述的是 v3 之前的状态。结论已被 manifest v3 推翻（2026-09-02 实测）===
+# === The above was the pre-v3 state. Manifest v3 reversed the conclusion
+#     (measured 2026-09-02). ===
 #
-#   路径          publish      total     layout   export prefix 对象数
-#   A （旧）       1781ms      2292ms     dense    64
-#   A （v3 后）     366ms       800ms     ref       0
-#   B （v3 后）     622ms      7551ms     ref       0
-#   C （v3 后）     620ms      7424ms     ref       0
+#   path           publish      total     layout   export-prefix objects
+#   A (old)        1781ms      2292ms     dense    64
+#   A (after v3)    366ms       800ms     ref       0
+#   B (after v3)    622ms      7551ms     ref       0
+#   C (after v3)    620ms      7424ms     ref       0
 #
-# export_build_chain() 遇到 esnap 已不再返回 -ENOTSUP：它把 esnap id 当作
-# export uuid 读出来，交给 export_ref() 在 import 注册表里找到父 manifest，
-# 由 s3_export_manifest_inherit() 把父的多源表摊平进来。所以路径 A 现在是
-# 零拷贝的，而且比先收敛的 B/C 快近 10 倍 —— 那两条路径付的是 decouple 的
-# 全卷物化钱。这正是设计要的 O(1) publish。
+# export_build_chain() no longer returns -ENOTSUP on an esnap: it reads the
+# esnap id as an export uuid, hands it to export_ref() to find the parent
+# manifest in the import registry, and s3_export_manifest_inherit() flattens
+# the parent's multi-source table in. Path A is therefore zero-copy, and
+# nearly 10x faster than B/C -- those two pay for a full-volume materialise
+# via decouple. That is the O(1) publish the design wanted.
 #
-# 这个探针只打印、不断言，留作性能口径。**layout=ref 的正式回归在
-# run_derived_test.sh 的步骤 [3]**（断言 version=3 且 layout=ref）；这里的数字
-# 是给"发布到底快了多少"这个问题用的。
+# This probe prints; it does not assert. Keep it as a performance yardstick.
+# **The formal layout=ref regression is run_derived_test.sh around step [3]**
+# (asserts version=3 and layout=ref). The numbers here answer "how much
+# faster did publish actually get?".
 #
-# 仍会退化成拷贝的残余情况（见 docs/manifest-v3-format.md 的判定表）：
-# 跨 bucket/endpoint/region、父 manifest 本身是 dense、chunk_size 不一致、
-# 本地快照链深度 > 32、import 注册表缺条目。
+# Residual cases that still fall back to a copy (see the decision table in
+# docs/manifest-v3-format.md): cross bucket/endpoint/region, a parent
+# manifest that is itself dense, mismatched chunk_size, local snapshot chain
+# deeper than 32, a missing import-registry entry.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -241,12 +249,12 @@ rpc rcow_create_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","capacity_g
 info "destination lvstore ready"
 
 # --------------------------------------------------------------------------
-# 计时与观测辅助
+# Timing and observation helpers
 # --------------------------------------------------------------------------
 now_ms() { date +%s%3N; }
 
-# 一个 export 的 layout。只写在 manifest 对象里（s3_export.c:581），没有 RPC
-# 报告它，所以只能把 manifest 读回来。
+# Layout of one export. It lives only in the manifest object (s3_export.c:581);
+# no RPC reports it, so the manifest has to be read back.
 layout_of()
 {
 	[ -n "${1:-}" ] || { echo "no-uuid"; return; }
@@ -254,10 +262,11 @@ layout_of()
 		-r "${RG}" -u "$1" --field layout 2>/dev/null || echo "unreadable"
 }
 
-# 某个 prefix 下的对象数，用来看存储放大。
+# Object count under a prefix, for storage amplification.
 #
-# 用 wc 而不是 `grep -c . || echo 0`：grep 没匹配时退出码非零，那个 fallback
-# 就会往一个已经是 "0" 的值后面再追加一行，得到一个两行的"数字"。
+# Use wc rather than `grep -c . || echo 0`: grep's non-zero exit on no match
+# would append another "0" onto a value that is already "0", producing a
+# two-line "number".
 objects_under()
 {
 	python3 "${PREFIX_RM}" --list -e "${EP}" -b "${BK}" -r "${RG}" -p "$1" \
@@ -291,7 +300,7 @@ print(len(r if isinstance(r,list) else r.get("queue",[])))' 2>/dev/null)" = "0" 
 }
 
 # --------------------------------------------------------------------------
-# [2] 路径 A：import -> snapshot -> export（S 仍是 esnap clone）
+# [2] Path A: import -> snapshot -> export (S is still an esnap clone)
 # --------------------------------------------------------------------------
 echo
 info "[A] import -> snapshot -> export, with S still an esnap clone"
@@ -324,7 +333,7 @@ grep -aE 'external snapshot, whose|exporting by copying|Snapshot chain reaches' 
 rpc --ls rcow_get_lvstores
 
 # --------------------------------------------------------------------------
-# [3] 路径 B：import -> snapshot -> decouple S -> export（先收敛再发布）
+# [3] Path B: import -> snapshot -> decouple S -> export (converge, then publish)
 # --------------------------------------------------------------------------
 echo
 info "[B] import -> snapshot -> decouple the snapshot -> export"
@@ -357,7 +366,7 @@ info "B: layout=${B_LAYOUT}  objects under its export prefix=${B_OBJS}"
 rpc --ls rcow_get_lvstores
 
 # --------------------------------------------------------------------------
-# [4] 路径 C：等 import 的 decouple 自己跑完，再 snapshot -> export
+# [4] Path C: wait for import's own decouple to finish, then snapshot -> export
 # --------------------------------------------------------------------------
 echo
 info "[C] import, let its decouple finish, then snapshot -> export"
@@ -399,10 +408,12 @@ printf '%-46s %9sms %9sms %10s\n' \
 echo
 echo "  export-prefix objects: A=${A_OBJS}  B=${B_OBJS}  C=${C_OBJS}"
 echo
-echo "  怎么读这张表：A 的 layout 应当是 ref，publish 数百毫秒，export prefix"
-echo "  对象数 0。若 A 出现 dense，说明 export_ref() 又退化成了拷贝 —— 查是不是"
-echo "  跨 bucket/endpoint/region、父 manifest 已是 dense、chunk_size 不一致，"
-echo "  或本地快照链深度超过 32。"
+echo "  How to read this table: A's layout should be ref, publish a few hundred"
+echo "  milliseconds, and the export prefix should have 0 objects. If A comes"
+echo "  out dense, export_ref() fell back to a copy again -- check for a cross"
+echo "  bucket/endpoint/region, a parent manifest that is already dense, a"
+echo "  mismatched chunk_size, or a local snapshot chain deeper than 32."
 echo
-echo "  A 比 B/C 快近 10 倍，差的是 decouple 的全卷物化：B/C 用等待换独立性，"
-echo "  A 用一条跨 prefix 的引用换即时发布。"
+echo "  A is nearly 10x faster than B/C; the gap is decouple's full-volume"
+echo "  materialise. B/C trade wait time for independence; A trades a"
+echo "  cross-prefix reference for instant publish."

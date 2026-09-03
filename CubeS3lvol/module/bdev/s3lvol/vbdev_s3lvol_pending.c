@@ -454,10 +454,10 @@ pending_lvol_deletable(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 	 * stops pinning are not equally good. A stale lease is evidence: an
 	 * importer wrote it and stopped renewing, so nobody is reading. An export
 	 * with no lease is not -- its TTL lapses on its own, and completing a
-	 * delete on that basis is exactly the hazard §5.3 of
-	 * docs/pending-delete-design.md refuses to automate. So LEGACY is skipped
-	 * whether or not the TTL has passed, which also covers an entry that was
-	 * recorded before the first lease GET had answered. */
+	 * delete on that basis is exactly the hazard that refuses to automate.
+	 * So LEGACY is skipped whether or not the TTL has passed, which also
+	 * covers an entry that was recorded before the first lease GET had
+	 * answered. */
 	switch (s3lvol_export_pin_state(lvs, lvol->name)) {
 	case S3LVOL_EXPORT_PIN_LEASE:
 		*why = "an importer may still be reading an export of it";

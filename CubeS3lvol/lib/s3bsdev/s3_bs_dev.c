@@ -2346,7 +2346,7 @@ s3_flush_put(struct s3_flush_ctx *fc)
 	/* Overlay goes on last so it wins over whatever the old object held. */
 	s3_overlay_flush_merge(ctx->overlay, fc->view, fc->chunk_buf);
 
-	/* create-once (P2): a fresh uuid every time, never an in-place update. */
+	/* create-once: a fresh uuid every time, never an in-place update. */
 	spdk_uuid_generate(&fc->new_uuid);
 	s3_data_key(ctx, &fc->new_uuid, key, sizeof(key));
 
@@ -3215,23 +3215,19 @@ s3_bs_dev_get_stats(struct spdk_bs_dev *bs_dev, struct s3_bs_dev_stats *out)
 	out->ckpt_lsn    = ctx->ckpt_lsn_done;
 	out->ckpt_gen    = ctx->ckpt_gen;
 	out->ckpt_interval_sec = ctx->ckpt_interval_sec;
-	{
-		struct s3_journal *j = s3_chunk_map_get_journal(ctx->chunk_map);
 
-		out->journal_used_bytes = s3_journal_get_used_bytes(j);
-		out->journal_capacity_bytes = s3_journal_get_capacity_bytes(j);
-	}
+	struct s3_journal *j = s3_chunk_map_get_journal(ctx->chunk_map);
+	out->journal_used_bytes = s3_journal_get_used_bytes(j);
+	out->journal_capacity_bytes = s3_journal_get_capacity_bytes(j);
 
 	out->overlay_bytes       = s3_overlay_get_bytes(ctx->overlay);
 	out->overlay_live_chunks = s3_overlay_get_live_chunks(ctx->overlay);
-	{
-		struct s3_overlay_stats ostats = {};
 
-		s3_overlay_get_stats(ctx->overlay, &ostats);
-		out->overlay_flushed_full   = ostats.flushed_full;
-		out->overlay_flushed_aged   = ostats.flushed_aged;
-		out->overlay_flushed_forced = ostats.flushed_forced;
-	}
+	struct s3_overlay_stats ostats = {};
+	s3_overlay_get_stats(ctx->overlay, &ostats);
+	out->overlay_flushed_full   = ostats.flushed_full;
+	out->overlay_flushed_aged   = ostats.flushed_aged;
+	out->overlay_flushed_forced = ostats.flushed_forced;
 
 	if (ctx->flusher) {
 		s3_flusher_get_stats(ctx->flusher, &fstats);

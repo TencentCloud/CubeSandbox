@@ -1,29 +1,35 @@
 #!/usr/bin/env bash
-# Phase 1 探针 #3：快照/克隆 与 decouple 的相互作用
+# Phase 1 probe #3: how snapshot/clone interact with decouple.
 #
-# !! 历史探针，结论已记入 docs/import-reference-snapshot-design.md §9.2。
-#    它当时需要 derive_check 的两个拒绝分支被 #if 0 关掉才跑得到场景二，
-#    而**代码已经变了**：create_snapshot 现在会取消进行中的 decouple（§3.1），
-#    所以场景二不再需要补丁，也不再复现它当年测到的那个失败——
-#    下面找 "blob is not a clone of an external snapshot" 的 grep 现在应当
-#    什么都找不到，那正是修复生效的样子。
-#    要验证当前行为，用 test/dataplane/run_snapshot_cancel_test.sh。
+# !! Historical probe; conclusions are in
+#    docs/import-reference-snapshot-design.md §9.2.
+#    It needed derive_check's two refuse branches #if 0'd out to even reach
+#    scenario 2, and **the code has changed**: create_snapshot now cancels
+#    an in-flight decouple (§3.1), so scenario 2 no longer needs a patch
+#    and no longer reproduces the failure it measured then --
+#    grepping for "blob is not a clone of an external snapshot" should now
+#    find nothing, which is what the fix looks like.
+#    For current behaviour use test/dataplane/run_snapshot_cancel_test.sh.
 #
-# 起因：探针 #2 发现 create_snapshot 之后 `decouple V` 被拒绝，报
+# Origin: probe #2 found that after create_snapshot, `decouple V` is refused
+# with
 #   "lvol 'V' does not read through to an export; there is nothing to decouple"
-# —— 也就是说快照 S 接管了 esnap 身份，V 退化成 S 的普通 clone。
+# -- i.e. snapshot S took the esnap identity and V became an ordinary clone
+# of S.
 #
-# 这直接影响 import-reference-snapshot-design §9 里"decouple 正常完成"那句
-# 结论是否成立，必须核实。
+# That directly affects whether the sentence in import-reference-snapshot-design
+# §9 that "decouple finishes normally" still holds; it has to be checked.
 #
-# 要回答：
-#   A. 快照之后，谁还是 esnap clone？V 还是 S？
-#   B. `decouple V` 被拒之后，能否改为 decouple S（只读快照）？
-#   C. import(decouple:true) 时 decouple 已在飞行中，此时建快照 ——
-#      那个 decouple 最终是成功还是失败？失败信息是什么？
-#      （derive_check 注释预言的是 "blob is not a clone of an external
-#        snapshot"，即物化做完了、最后一步摘 parent 时失败）
-#   D. 无论 decouple 成败，数据是否始终正确？
+# Questions:
+#   A. After the snapshot, who is still an esnap clone -- V or S?
+#   B. After `decouple V` is refused, can S (the read-only snapshot) be
+#      decoupled instead?
+#   C. import(decouple:true) with decouple already in flight, then snapshot --
+#      does that decouple succeed or fail, and with what message?
+#      (The derive_check comment predicted "blob is not a clone of an
+#      external snapshot": materialise finished, then detaching the parent
+#      as the last step failed.)
+#   D. Whatever decouple does, is the data always correct?
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -224,7 +230,7 @@ rpc rcow_create_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","capacity_g
 info "destination lvstore ready"
 
 # --------------------------------------------------------------------------
-# [2] 场景一：import(decouple:false) -> 快照 -> 谁持有 esnap？
+# [2] Scenario 1: import(decouple:false) -> snapshot -> who holds the esnap?
 # --------------------------------------------------------------------------
 echo
 info "[2] scenario 1: import with decouple:false, then snapshot"
@@ -241,7 +247,7 @@ info "decouple V  -> ${DEC_V}"
 DEC_S="$(rpc rcow_decouple_lvol '{"lvol_name":"S"}' 2>&1)"
 info "decouple S  -> ${DEC_S}"
 
-# 队列里现在有什么（若 S 被接受，等它跑完）
+# What is in the queue now (if S was accepted, wait for it to finish).
 for i in $(seq 240); do
 	busy="$(rpc rcow_get_decouple 2>/dev/null | python3 -c '
 import json,sys
@@ -260,15 +266,16 @@ info "S = ${S_MD5_1}  $([ "${S_MD5_1}" = "${PAT_MD5}" ] && echo "MATCH ✓" || e
 info "V = ${V_MD5_1}  $([ "${V_MD5_1}" = "${PAT_MD5}" ] && echo "MATCH ✓" || echo "MISMATCH ✗")"
 rpc --ls rcow_get_lvstores
 
-# 清掉场景一，为场景二腾地方
+# Drop scenario 1 to make room for scenario 2.
 rpc rcow_delete_lvol '{"lvol_name":"V"}' >/dev/null 2>&1
 rpc rcow_delete_lvol '{"lvol_name":"S"}' >/dev/null 2>&1
 sleep 2
 
 # --------------------------------------------------------------------------
-# [3] 场景二：import(decouple:true)，decouple 在飞行中时建快照
-#     —— 这是 derive_check 注释预言会出问题的那个窗口
-#     需要 derive_check 的两个拒绝分支被临时移除（#if 0）才能走到
+# [3] Scenario 2: import(decouple:true), snapshot while decouple is in flight
+#     -- the window the derive_check comment predicted would go wrong
+#     Originally needed derive_check's two refuse branches temporarily
+#     removed (#if 0) to even reach it
 # --------------------------------------------------------------------------
 echo
 info "[3] scenario 2: import with decouple:true, snapshot while it is in flight"

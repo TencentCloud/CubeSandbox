@@ -609,8 +609,8 @@ s3_chunk_map_remove(struct s3_chunk_map *map, uint64_t chunk_index,
  *
  * lsn == 0 means "no journal record behind this change" and always applies. Two
  * callers rely on it: restoring a checkpoint, whose entries carry one LSN for the
- * snapshot as a whole (s3_checkpoint.c:326), and the WAL's unmap replay
- * (s3_bs_dev.c:2399), which must be able to undo a mapping the journal restored.
+ * snapshot as a whole (s3_checkpoint.c), and the WAL's unmap replay
+ * (s3_bs_dev.c), which must be able to undo a mapping the journal restored.
  * ========================================================================== */
 
 /* Should this record be applied, given what the entry already holds?

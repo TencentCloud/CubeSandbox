@@ -1,26 +1,35 @@
 #!/usr/bin/env bash
-# 物化探针：源端能否收回被 export 钉住的快照
+# Materialise probe: can the source reclaim a snapshot pinned by an export?
 #
-# 这是整条链路的目的所在。ref export 引用源 lvstore 的活对象，所以它钉住快照 ——
-# 只要还有 importer 在续租，快照就删不掉，无论对方是否真的还需要数据。物化是
-# 唯一的出路：源端把数据拷成 export 自有的副本，重新发布 dense manifest（generation+1），
-# 此后 export 不再欠任何人，快照可以删。
+# This is the point of the whole path. A ref export names live objects on the
+# source lvstore, so it pins the snapshot -- as long as an importer is still
+# renewing, the snapshot cannot be deleted, whether or not anyone still needs
+# the data. Materialise is the only way out: the source copies the data into
+# objects the export owns, republishes a dense manifest (generation+1), and
+# after that the export owes nobody anything and the snapshot can go.
 #
-# 判据按因果顺序排列，每一条都不能少：
+# Checks, in causal order; none of them is optional:
 #
-#   [2] 手工写一份新鲜租约，让源端相信有 importer 在读
-#   [3] 物化前：快照删不掉（钉住的证据 —— 否则后面的"可删"证明不了任何事）
-#   [4] 物化：RPC 成功，manifest 变成 dense 且 generation 递增、TTL 归零
-#   [5] 物化后：快照可以删掉了 —— 这是整个功能的目的
-#   [6] 源端 unload 之后再导入：数据仍然正确，且不再产生租约
+#   [2] write a fresh lease by hand so the source believes an importer is
+#       reading
+#   [3] before materialising: the snapshot cannot be deleted (proof it is
+#       pinned -- otherwise "deletable afterwards" proves nothing)
+#   [4] materialise: the RPC succeeds, the manifest becomes dense, generation
+#       advances, TTL goes to zero
+#   [5] after materialising: the snapshot can be deleted -- the point of the
+#       feature
+#   [6] import after the source is unloaded: the data is still correct, and
+#       no lease is taken
 #
-# 为什么 [2] 用手写租约而不是真的导入：一个进程只装得下一个 blobstore，源和目标
-# lvstore 无法同时加载。这对本探针无损 —— 快照删除的判据是**租约**
-# （export_pin_state），而不是本进程里的读者数，所以一份租约正是真实 importer
-# 会留下的信号。真实导入放在 [6]，那时源端已经卸载。
+# Why [2] uses a hand-written lease rather than a real import: one process
+# holds one blobstore, so source and destination lvstores cannot be loaded
+# together. That does not weaken this probe -- snapshot delete decides by
+# *lease* (export_pin_state), not by counting readers in this process, so a
+# lease is exactly the signal a real importer would leave. The real import
+# is [6], after the source is unloaded.
 #
-# [5] 和 [6] 合起来才是完整的证明：[5] 说源端确实拿回了空间，[6] 说这不是靠
-# 丢数据换来的。
+# [5] and [6] together are the full proof: [5] says the source got the space
+# back; [6] says that was not by throwing the data away.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -208,7 +217,7 @@ MAT="$(rpc --raw rcow_materialise_export "$(printf '{"export_uuid":"%s","lvs_nam
 info "reply: ${MAT}"
 if printf '%s' "${MAT}" | grep -qiE 'error|refus'; then
 	bad "rcow_materialise_export failed: ${MAT}"
-	echo; echo "===== SUMMARY"; echo "  ${FAILED} 项失败"; exit "${FAILED}"
+	echo; echo "===== SUMMARY"; echo "  ${FAILED} failure(s)"; exit "${FAILED}"
 fi
 ok "rcow_materialise_export succeeded"
 
@@ -282,9 +291,10 @@ fi
 echo
 echo "===== SUMMARY"
 if [ "${FAILED}" = "0" ]; then
-	echo "  源端收回了快照：物化后 export 自持副本、快照可删，"
-	echo "  而 export 依然可被导入，数据正确。"
+	echo "  the source reclaimed the snapshot: after materialising, the"
+	echo "  export holds its own copies, the snapshot can be deleted, and"
+	echo "  the export can still be imported with the right data."
 else
-	echo "  ${FAILED} 项失败 —— 见上方 [FAIL]"
+	echo "  ${FAILED} failure(s) -- see [FAIL] above"
 fi
 exit "${FAILED}"

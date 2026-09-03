@@ -76,8 +76,8 @@ done
 # Tally
 #
 # Assertion counts come from the suites' own summary lines, which are not in one
-# format: the older tests print Chinese, s3_flush_test omits the "result:"
-# prefix, and the scripts use the English form. All three are parsed rather than
+# format: s3_flush_test omits the "result:" prefix, and the scripts use the
+# English "result: N passed, M failed" form. Both are parsed rather than
 # unified, because rewriting eight suites' output to tidy up a report is a poor
 # trade -- and a suite whose line cannot be parsed is reported as such instead of
 # being counted as zero.

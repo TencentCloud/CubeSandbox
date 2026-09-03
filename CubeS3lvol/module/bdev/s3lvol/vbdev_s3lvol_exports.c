@@ -136,7 +136,7 @@ struct s3lvol_export {
 	 * resolved to nothing.
 	 *
 	 * So the export renews on its own behalf, from the moment it is published.
-	 * "E pins A while E is alive" (design §6) rather than "while somebody reads
+	 * "E pins A while E is alive" rather than "while somebody reads
 	 * E", which is the difference between a publish-then-leave flow working and
 	 * silently rotting.
 	 *
@@ -445,7 +445,7 @@ export_lease_got_body(void *cb_arg, uint64_t bytes_read, int status)
 
 	/* The high-water mark, not the last value read, and that is load-bearing.
 	 *
-	 * One key holds one object and the last writer wins (design §2.1), but there
+	 * One key holds one object and the last writer wins, but there
 	 * can be several writers with wildly different cadences: an importer renews
 	 * at remaining_ttl/3 -- 1200 s at the default TTL -- while a *derived export*
 	 * referencing this prefix renews at the 20 s floor, because it has no TTL of

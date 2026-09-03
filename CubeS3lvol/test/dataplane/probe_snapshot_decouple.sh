@@ -1,25 +1,36 @@
 #!/usr/bin/env bash
-# Phase 1 第 2 步探针：父快照被物化时，它的 clone 读得对吗？
+# Phase 1 step-2 probe: when a parent snapshot is materialised, do its clones
+# still read correctly?
 #
-# 这是 §7 计划里唯一没有测量支撑的假设，也是第 3 步（decouple 只读快照）的门禁。
-# 上一次把未验证的假设当结论已经付过代价（§9.2），这次先测。
+# This is the only unmeasured assumption in the §7 plan, and the gate for
+# step 3 (decouple a read-only snapshot). Treating an unverified assumption
+# as a conclusion already cost once (§9.2); measure first this time.
 #
-# !! 当初跑它需要两处临时补丁；**补丁现在已经是主干代码**（第 3 步），所以
-#    直接跑即可。原来的补丁自检已经去掉——留着会让它拒绝在正确的代码上运行。
+# !! It originally needed two temporary patches; **those patches are now
+#    on the main line** (step 3), so it can be run as-is. The old patch
+#    self-check was removed -- leaving it would refuse to run on the
+#    correct code.
 #
-#    但那次踩的坑仍然成立，改 deps/spdk 时务必记住：顶层 make **不会**重编
-#    deps/spdk，必须先在 deps/spdk 里 make。第一次跑这个探针时补丁没生效，
-#    结果看起来像"物化只读快照静默无效"这个错误结论（§9.5）。
+#    The pitfall from that first run still holds: when changing deps/spdk,
+#    remember that the top-level make **does not** rebuild deps/spdk; make
+#    inside deps/spdk first. The first time this probe ran the patch was
+#    not in the binary, which looked like "materialising a read-only
+#    snapshot is a silent no-op" -- the wrong conclusion in §9.5.
 #
-#    回归断言版见 test/dataplane/run_snapshot_converge_test.sh。
+#    The asserting regression is test/dataplane/run_snapshot_converge_test.sh.
 #
-# 要回答：
-#   1. decouple 一个只读快照 S 能否真的完成（不只是"没报错"——要验 S 不再是 esnap）
-#   2. S 物化**期间**，clone C 持续读是否始终正确
-#   3. 物化后 S / C / V 三者数据是否都对
-#      （V 也是 S 的 clone：快照后 V 变成 S 的普通 clone）
-#   4. 收敛是否真的达成：放掉源 export 之后三者是否仍可读
-#   5. C 自己写过的 cluster 是否被物化影响（不该）
+# Questions:
+#   1. Does decoupling a read-only snapshot S actually finish (not merely
+#      "no error" -- S must no longer be an esnap)?
+#   2. While S is being materialised, do continuous reads of clone C stay
+#      correct?
+#   3. After materialise, are S / C / V all correct?
+#      (V is also a clone of S: after the snapshot, V becomes an ordinary
+#      clone of S.)
+#   4. Is convergence real: after dropping the source export, can all three
+#      still be read?
+#   5. Are clusters C wrote itself affected by the materialise? (They must
+#      not be.)
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -226,7 +237,8 @@ rpc rcow_create_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","capacity_g
 info "destination lvstore ready"
 
 # --------------------------------------------------------------------------
-# [2] import V -> snapshot S -> clone C；再往 C 写一段，使 C 自己也有 cluster
+# [2] import V -> snapshot S -> clone C; then write a range on C so C owns
+#     some clusters of its own
 # --------------------------------------------------------------------------
 echo
 info "[2] import V, snapshot S, clone C"
@@ -237,7 +249,8 @@ rpc rcow_create_snapshot '{"lvol_name":"V","snapshot_name":"S"}' >/dev/null 2>&1
 rpc rcow_create_clone '{"snapshot_name":"S","clone_name":"C"}' >/dev/null 2>&1 \
 	|| { echo "clone failed"; exit 1; }
 
-# C 写入自己的一段，使它同时拥有"自有 cluster"和"经 S 继承的 cluster"
+# Write a range on C so it has both "its own clusters" and "clusters
+# inherited through S".
 NEW="${WORKDIR}/newdata.bin"
 dd if=/dev/urandom of="${NEW}" bs=1M count="${WRITE_MB}" status=none
 EXPECT="${WORKDIR}/expect_c.bin"
@@ -253,7 +266,7 @@ info "C device ${C_DEV} (kept exposed for the duration)"
 rpc --ls rcow_get_lvstores
 
 # --------------------------------------------------------------------------
-# [3] 后台持续读 C，然后 decouple 只读快照 S
+# [3] background reader on C, then decouple the read-only snapshot S
 # --------------------------------------------------------------------------
 echo
 info "[3] start a reader loop on C, then decouple S"
@@ -293,7 +306,7 @@ if [ "${BAD}" != "0" ]; then
 fi
 
 # --------------------------------------------------------------------------
-# [4] 物化后：三者数据 + S 是否真的脱离了 export
+# [4] after materialise: data of all three, and whether S really left the export
 # --------------------------------------------------------------------------
 echo
 info "[4] after materialisation"
@@ -306,12 +319,12 @@ info "S = ${S_AFTER}  $([ "${S_AFTER}" = "${PAT_MD5}" ] && echo "MATCH ✓" || e
 info "V = ${V_AFTER}  $([ "${V_AFTER}" = "${PAT_MD5}" ] && echo "MATCH ✓" || echo "MISMATCH ✗")"
 rpc --ls rcow_get_lvstores
 
-# S 若真的脱离了，再次 decouple 必须报 EINVAL（不再是 esnap clone）
+# If S really left, a second decouple must return EINVAL (no longer an esnap clone).
 REDEC="$(rpc rcow_decouple_lvol '{"lvol_name":"S"}' 2>&1)"
-info "decouple S again -> ${REDEC}   (Invalid argument = 已脱离 export，收敛成功)"
+info "decouple S again -> ${REDEC}   (Invalid argument = left the export; converged)"
 
 # --------------------------------------------------------------------------
-# [5] 真正的收敛证明：放掉源 export，三者仍须可读
+# [5] the real convergence proof: drop the source export; all three must still read
 # --------------------------------------------------------------------------
 echo
 info "[5] delete A's objects from S3, reload the lvstore, then re-read"
