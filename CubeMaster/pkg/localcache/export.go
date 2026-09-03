@@ -45,10 +45,11 @@ type Event struct {
 var externalNodeLoader func(context.Context) ([]*node.Node, error)
 
 // inited records whether Init has run in this process. RemoveNode refuses to
-// run once Init has, because the production removal path is the DEL event in
-// dealEvent; a direct removal there would bypass the event loop and the
-// Redis-backed sync, and would race the next loader tick re-installing the
-// node.
+// run once Init has: after Init, node removal is owned by the loader/event
+// machinery (the DEL event in dealEvent for DB-loaded nodes; in CubeOps mode
+// dealEvent ignores events entirely and removal happens via the external
+// loader's next sync). A direct removal there would bypass that machinery and
+// race the next loader tick re-installing the node.
 var inited atomic.Bool
 
 func RegisterNodeLoader(loader func(context.Context) ([]*node.Node, error)) {
@@ -223,15 +224,18 @@ func UpsertNode(n *node.Node) {
 // withdraw them completely at the end of a run. Once Init has run, RemoveNode
 // refuses to act: it logs an error AND returns it, so the caller can detect
 // that the node was not removed (the log alone is invisible to consumers that
-// force a FATAL log level, as schedsim's Bootstrap does). The production
-// removal path is the DEL event in dealEvent; a direct removal there would
-// bypass the event loop and the Redis-backed sync and race the next loader
-// tick re-installing the node. n needs only the identity fields (InsID/IP)
-// plus the OssClusterLabel the node was injected with, so the sorted-index
-// bucket resolves the same way as at injection.
+// force a FATAL log level, as schedsim's Bootstrap does). After Init, node
+// removal is owned by the loader/event machinery — the DEL event in dealEvent
+// when nodes come from the DB, or the external loader's next sync in CubeOps
+// mode (dealEvent ignores DEL there) — and a direct removal would bypass that
+// machinery and race the next loader tick re-installing the node. n needs
+// only the identity fields (InsID/IP) plus the OssClusterLabel the node was
+// injected with, so the sorted-index bucket resolves the same way as at
+// injection.
 func RemoveNode(ctx context.Context, n *node.Node) error {
 	if inited.Load() {
-		err := errors.New("localcache.RemoveNode refused: Init has already run in this process; use the DEL event path")
+		err := errors.New("localcache.RemoveNode refused: Init has already run in this process; " +
+			"node removal is now owned by the loader/event machinery (DEL event, or the external loader's sync in CubeOps mode)")
 		CubeLog.WithContext(ctx).Errorf("%v", err)
 		return err
 	}

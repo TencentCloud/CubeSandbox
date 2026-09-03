@@ -31,9 +31,10 @@ import (
 // deliberately NOT called so no DB/Redis connections or background sync
 // goroutines start; the package-level localcache stores are already usable.
 //
-// task.InitTask is required: scheduler.InitScheduler spawns a monitorLimit
-// goroutine that periodically calls task.SetTaskWorkerConcurrent, which
-// nil-panics (recovered, but noisy) when the task package was never init'ed.
+// task.InitTask is required defensively: scheduler code paths reach the
+// task package (e.g. monitorLimit's task.SetTaskWorkerConcurrent), which
+// nil-panics (recovered, but noisy) when the task package was never
+// init'ed.
 //
 // Bootstrap is process-global and one-shot: the first call performs the init
 // and every later call is a no-op returning the first call's result, so the
@@ -42,10 +43,11 @@ import (
 //
 // Note for would-be embedders: Bootstrap also forces the process-wide
 // CubeLog level to FATAL, installs the config singleton, and leaves the
-// config-watcher and scheduler monitor/collect goroutines running on the
-// passed context for the life of the process. It is meant for the
-// short-lived schedsim CLI and tests, not for embedding in a long-lived
-// binary.
+// config-watcher running for the life of the process (the scheduler's
+// monitor/collect goroutines are given a bootstrap-scoped context that is
+// cancelled as soon as InitScheduler returns, so they exit at their first
+// tick without touching sim state). It is meant for the short-lived
+// schedsim CLI and tests, not for embedding in a long-lived binary.
 func Bootstrap(ctx context.Context, configPath string) error {
 	bootOnce.Do(func() {
 		bootErr = bootstrap(ctx, configPath)
@@ -80,7 +82,19 @@ func bootstrap(ctx context.Context, configPath string) error {
 	// sim output and pollute the Select latency measurement.
 	CubeLog.SetLevel(CubeLog.FATAL)
 	task.InitTask(ctx, config.GetConfig())
-	scheduler.InitScheduler(ctx)
+	// InitScheduler spawns production background loops (collectMetric,
+	// reportMetric, monitorLimit, and the async score refresher when the MFA
+	// section exists) that enumerate and clone the localcache fleet on every
+	// tick. The sim maintains node metrics itself via pushMetric, those
+	// loops' unsynchronized clone reads race with the engine's writes, and
+	// their work (buffer-queue stats, Redis reports, task-pool limits) is
+	// meaningless in-process. Hand InitScheduler a bootstrap-scoped context
+	// and cancel it the moment the pipeline is built: every loop exits at
+	// its first tick without ever touching node state, so rounds are
+	// race-clean by construction and sched_latency_* pays no clone jitter.
+	schedCtx, stopSchedLoops := context.WithCancel(ctx)
+	scheduler.InitScheduler(schedCtx)
+	stopSchedLoops()
 	return nil
 }
 

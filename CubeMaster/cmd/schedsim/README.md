@@ -125,11 +125,11 @@ MetricLocalUpdateAt=now`。用量侧（`QuotaCpuUsage/QuotaMemUsage/MvmNum`）�
 结论：`mem_alloc_rate`/`load_cv_mem` 等绝对值可能超出真实集群可达范围，
 仿真结果用于**同配置族的相对 A/B 对比**，不要直接对标生产的绝对容量上限。
 
-另注意：`Bootstrap` 启动的后台 goroutine（监控与 metric 采集，默认约 5s 一跳）
-随进程生命周期运行，其周期性节点枚举**不**走 `lockMetaData`，而仿真主 goroutine
-的账本写走 `lockMetaData`——单轮真实耗时跨过后台 tick 后存在读/写竞争窗口，
-`go test -race` 或超长 trace 可能触发竞态告警。仿真器按设计不要求全链路
-race-free，请勿据此读数之外过度解读。
+另注意：`Bootstrap` 给 `scheduler.InitScheduler` 传入一个引导作用域的 context 并在
+管线构建完成后立即取消——调度器的后台循环（collectMetric/reportMetric/
+monitorLimit 及可能的异步打分协程）在首个 tick 即退出，从不触碰仿真的节点状态，
+因此回放与 `go test -race` 不会因这些循环报竞态，其克隆开销也不再计入
+`sched_latency_*` 抖动。仍在进程内常驻的只有配置 watcher（不读 localcache）。
 
 ### metric 新鲜度（坑 1）
 
@@ -220,10 +220,9 @@ Select 的 prefilter 每次都走 collectCacheNodes fallback 全扫并克隆存�
 **不要在运行中编辑 `--config` 指向的配置文件**，否则正在进行的轮次会切到新
 配置，同一份报告会混入两套配置的结果。
 
-再一限制：`sched_latency_*` 测的是进程内 `Select` 调用的耗时，包含了仿真进程
-自身后台 goroutine（如 `collectMetric` 的 1s ticker、配置 watcher）造成的调度
-抖动——把它当作同一 run 内、同形状 run 间的相对指标，不要当作调度器延迟的绝对
-真值。
+再一限制：`sched_latency_*` 测的是进程内 `Select` 调用的耗时，仍包含仿真进程
+残余后台活动（如配置 watcher）造成的调度抖动——把它当作同一 run 内、同形状
+run 间的相对指标，不要当作调度器延迟的绝对真值。
 
 运行开销随 `nodes × events` 增长：每个事件后仿真都会对整个 fleet 做一次快照
 （逐节点读回 localcache 并比对账本），轮末 `sched_latency_*` 的三个分位数
