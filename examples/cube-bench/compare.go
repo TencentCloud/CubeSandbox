@@ -175,12 +175,20 @@ func dropUntrustworthyDispatchKeys(sample map[string]float64, partial bool) {
 	}
 }
 
-// scheduledShape reports whether any sample in the group carries the keys a
-// scheduled-mode export adds to "summary" (queue_delay_p50_ms,
-// dispatch_window_s, or a per_template.* block). Scheduled and legacy runs
-// share key names such as total_time_s/throughput_qps with different windows
-// and meanings, so a baseline/candidate mix of the two shapes needs a warning.
+// scheduledShape reports whether the group looks like a scheduled-mode
+// export. The config block's "workload" key (written only in scheduled mode)
+// is the primary signal because it survives the saturated/partial key drop —
+// a partial scheduled run loses exactly the summary keys the fallback below
+// keys on, and must not be misread as legacy-shaped. The key scan remains as
+// the fallback for config-less files. Scheduled and legacy runs share key
+// names such as total_time_s/throughput_qps with different windows and
+// meanings, so a baseline/candidate mix of the two shapes needs a warning.
 func scheduledShape(g *sampleGroup) bool {
+	for _, f := range g.files {
+		if _, ok := f.config["workload"]; ok {
+			return true
+		}
+	}
 	for _, s := range g.samples {
 		for k := range s {
 			if k == "queue_delay_p50_ms" || k == "dispatch_window_s" || strings.HasPrefix(k, "per_template.") {
@@ -814,6 +822,13 @@ func renderComparison(c *comparison) string {
 	if note := configMismatchNote(c.baseline, c.candidate); note != "" {
 		b.WriteString(note + "\n")
 	}
+	for _, g := range []*sampleGroup{c.baseline, c.candidate} {
+		if v, ok := uniqueConfigValue(g, "dry_run"); ok && v == "true" {
+			fmt.Fprintf(&b, "> **Warning:** %s is a dry-run export: its latencies are synthesized "+
+				"(lifetime sleeps clamped, errors drawn from --dry-error-rate), so verdicts on its rows "+
+				"describe the simulator, not a scheduler or a real API.\n", g.name)
+		}
+	}
 
 	b.WriteString("\n## Metric Comparison\n\n")
 	b.WriteString("Cells show the mean across samples; CI is the 95% confidence interval half-width (Student-t t95·σ/√n), shown only when n ≥ 2. Δ = candidate − baseline. Verdicts are directional; the conclusion lists additionally require |Δ| beyond the 95% CI of the difference (√(ci_base² + ci_cand²)) when both sides have n ≥ 2. Δ% is relative to the baseline mean with no floor, so near-zero baselines (e.g. an error_rate ≈ 0) can produce enormous percentages — read them alongside the absolute Δ.\n\n")
@@ -832,7 +847,7 @@ func renderComparison(c *comparison) string {
 			group = r.group
 		}
 		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n",
-			r.key, statsCell(r.base, r.hasBase), statsCell(r.cand, r.hasCand),
+			mdTableCell(r.key), statsCell(r.base, r.hasBase), statsCell(r.cand, r.hasCand),
 			deltaCell(r), pctCell(r), string(r.verdict))
 	}
 
@@ -870,7 +885,7 @@ func writeFileList(b *strings.Builder, label string, g *sampleGroup) {
 // configHighlightKeys are the config fields surfaced in the report metadata
 // when present. Values are de-duplicated per group, so files that differ only
 // by seed render as e.g. "seed=1, 2, 3".
-var configHighlightKeys = []string{"seed", "seeds", "rounds", "workload", "profile", "version", "template", "templates", "mode", "concurrency", "rate_per_sec", "lifetime_min_s", "lifetime_max_s"}
+var configHighlightKeys = []string{"seed", "seeds", "rounds", "workload", "profile", "version", "template", "templates", "mode", "concurrency", "rate_per_sec", "lifetime_min_s", "lifetime_max_s", "dry_run"}
 
 func configHighlights(label string, g *sampleGroup) string {
 	var parts []string
@@ -905,7 +920,8 @@ func configHighlights(label string, g *sampleGroup) string {
 // configCompareKeys are the pacing/shape config fields where a silent
 // baseline-vs-candidate mismatch makes queue_delay_*/dispatch_* verdicts a
 // client-config artifact rather than a scheduler effect. Seeds are excluded
-// on purpose: they randomize the sequence, they do not pace it.
+// on purpose: they randomize the sequence, they do not pace it. dry_run is
+// deliberately not here either — it gets its own stronger warning below.
 var configCompareKeys = []string{"concurrency", "rate_per_sec", "lifetime_min_s", "lifetime_max_s"}
 
 // uniqueConfigValue returns the single de-duplicated value of key across the
@@ -1007,6 +1023,13 @@ func writeConclusionList(b *strings.Builder, c *comparison, rows []*compareRow) 
 		fmt.Fprintf(b, "- **%s**: %s (%s → %s)%s%s\n",
 			r.key, pctCell(r), formatNum(r.base.mean), formatNum(r.cand.mean), c.rowCountNote(r), zeroBase)
 	}
+}
+
+// mdTableCell escapes the one character that would split a Markdown table
+// cell: template IDs embedded in per_template.* keys are operator-supplied
+// via --templates and not otherwise validated beyond non-empty/`:`-free.
+func mdTableCell(s string) string {
+	return strings.ReplaceAll(s, "|", "\\|")
 }
 
 func statsCell(st metricStats, ok bool) string {

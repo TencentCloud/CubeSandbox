@@ -755,6 +755,110 @@ func TestCompareConfigMismatchNote(t *testing.T) {
 	}
 }
 
+func TestCompareScheduledShapeUsesConfig(t *testing.T) {
+	// A partial scheduled export loses its queue_delay_*/per_template.* keys
+	// to the drop, so shape detection must come from the config block:
+	// partial-scheduled vs full-scheduled must NOT raise the cross-shape note.
+	dir := t.TempDir()
+
+	b1 := writeTempFile(t, dir, "base-partial-sched.json", `{
+		"config": {"workload": "custom", "rate_per_sec": 50},
+		"summary": {"success_rate": 0.9, "queue_delay_p50_ms": 500, "partial": 1, "per_template.tpl-a.created": 7}
+	}`)
+	c1 := writeTempFile(t, dir, "cand-full-sched.json", `{
+		"config": {"workload": "custom", "rate_per_sec": 50},
+		"summary": {"success_rate": 0.9, "queue_delay_p50_ms": 3}
+	}`)
+
+	out := filepath.Join(dir, "report.md")
+	var buf bytes.Buffer
+	if err := runCompare([]string{"--baseline", b1, "--candidate", c1, "-o", out}, &buf); err != nil {
+		t.Fatalf("runCompare: %v", err)
+	}
+	saved, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	report := string(saved)
+	if strings.Contains(report, "one group is a scheduled-mode export and the other is not") {
+		t.Errorf("partial scheduled group misread as legacy-shaped\n%s", report)
+	}
+	if !strings.Contains(report, "> **Note:** baseline (") {
+		t.Errorf("report missing the partial note\n%s", report)
+	}
+
+	// partial-scheduled vs legacy: the cross-shape warning must still fire.
+	c2 := writeTempFile(t, dir, "cand-legacy.json", `{
+		"summary": {"success_rate": 0.9, "total_time_s": 10}
+	}`)
+	out2 := filepath.Join(dir, "report2.md")
+	if err := runCompare([]string{"--baseline", b1, "--candidate", c2, "-o", out2}, &buf); err != nil {
+		t.Fatalf("runCompare: %v", err)
+	}
+	saved2, err := os.ReadFile(out2)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if !strings.Contains(string(saved2), "one group is a scheduled-mode export and the other is not") {
+		t.Errorf("cross-shape note missing for partial-scheduled vs legacy\n%s", saved2)
+	}
+}
+
+func TestCompareDryRunWarning(t *testing.T) {
+	dir := t.TempDir()
+
+	b1 := writeTempFile(t, dir, "base-dry.json", `{
+		"config": {"workload": "custom", "dry_run": true},
+		"summary": {"success_rate": 0.98, "queue_delay_p50_ms": 5}
+	}`)
+	c1 := writeTempFile(t, dir, "cand-real.json", `{
+		"config": {"workload": "custom", "dry_run": false},
+		"summary": {"success_rate": 0.9, "queue_delay_p50_ms": 3}
+	}`)
+
+	out := filepath.Join(dir, "report.md")
+	var buf bytes.Buffer
+	if err := runCompare([]string{"--baseline", b1, "--candidate", c1, "-o", out}, &buf); err != nil {
+		t.Fatalf("runCompare: %v", err)
+	}
+	saved, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	report := string(saved)
+	if !strings.Contains(report, "> **Warning:** baseline is a dry-run export") {
+		t.Errorf("report missing the dry-run warning\n%s", report)
+	}
+	// dry_run must also surface in the config highlights.
+	if !strings.Contains(report, "dry_run=true") {
+		t.Errorf("dry_run missing from config highlights\n%s", report)
+	}
+}
+
+func TestCompareEscapesMetricKeys(t *testing.T) {
+	dir := t.TempDir()
+
+	b1 := writeTempFile(t, dir, "base.json", `{
+		"summary": {"success_rate": 0.9, "per_template.tpl|a.created": 4}
+	}`)
+	c1 := writeTempFile(t, dir, "cand.json", `{
+		"summary": {"success_rate": 0.9, "per_template.tpl|a.created": 6}
+	}`)
+
+	out := filepath.Join(dir, "report.md")
+	var buf bytes.Buffer
+	if err := runCompare([]string{"--baseline", b1, "--candidate", c1, "-o", out}, &buf); err != nil {
+		t.Fatalf("runCompare: %v", err)
+	}
+	saved, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if !strings.Contains(string(saved), "per_template.tpl\\|a.created") {
+		t.Errorf("pipe in metric key not escaped\n%s", saved)
+	}
+}
+
 func TestLoadSampleFileDropsDispatchKeysWhenFlagged(t *testing.T) {
 	dir := t.TempDir()
 

@@ -225,7 +225,9 @@ artifact, not a regression.
 > `partial: 1` in `summary` (suppressing the saturation marker). Released
 > requests are best-effort: the process does not wait for them after a quit,
 > so a worker killed mid create/delete can strand a sandbox — the per-request
-> server-side `timeout` (set only for lifetime-bearing runs) is the backstop.
+> server-side `timeout` (set only for lifetime-bearing runs) is the backstop,
+> and a rate-paced `create-delete` run without `--lifetime` prints a startup
+> NOTE precisely because it has none.
 > The partial marker — which legacy-mode exports also carry on an early
 > quit, so the JSON never disagrees with the console note — is surfaced by
 > `compare` as a note and covers the flagged group with the dispatch-key
@@ -336,9 +338,22 @@ Caveats when reading verdicts:
   `total_time_s`/`throughput_qps` include per-sandbox lifetime tails on the
   scheduled side (the run ends at the last lifetime DELETE) while the legacy
   side ends at the last immediate delete — their Δ rows are not meaningful.
-  The report detects the shape mix (via the scheduled-only
-  `queue_delay_*`/`dispatch_window_s`/`per_template.*` keys) and prints a
-  notice under the experiment-setup table; compare like with like.
+  The report detects the shape mix (via the scheduled-only `workload` config
+  key, which survives the partial/saturated key drop, falling back to the
+  `queue_delay_*`/`dispatch_window_s`/`per_template.*` summary keys for
+  config-less files) and prints a notice under the experiment-setup table;
+  compare like with like.
+- **Mismatched pacing config across the groups is flagged.** When the two
+  groups were run with different `concurrency`/`rate_per_sec`/`lifetime_*`
+  values (per-group de-duplicated; a missing key is not a mismatch), the
+  report prints a note that `queue_delay_*`/`dispatch_*` verdicts on such a
+  pair are client-config artifacts — rerun both sides under the same pacing
+  flags before trusting those rows.
+- **Dry-run exports are marked and flagged.** Scheduled exports carry
+  `config.dry_run`, surfaced in the report's config highlights; any group
+  whose export is a dry-run gets a warning that its latencies are synthesized
+  (lifetime sleeps clamped to 25ms, errors drawn from `--dry-error-rate`), so
+  verdicts over them describe the simulator, not a scheduler or a real API.
 - **Rounds files flatten only each round's `summary`.** Round-level stat
   blocks outside `summary` are dropped; today's only rounds producer
   (schedsim) carries just `seed` + `summary` per round, so nothing is lost
