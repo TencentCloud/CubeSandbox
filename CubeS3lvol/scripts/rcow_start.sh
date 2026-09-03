@@ -226,9 +226,12 @@ printf '\n==== %s: starting %s\n' "$(date -Is)" "${RCOW_TGT_BIN}" >>"${RCOW_LOG}
 # options, and the pools are allocated during subsystem init. Passed separately
 # from TGT_ARGS so that overriding those cannot drop it.
 #
+# -r must match RCOW_RPC_SOCK: s3lvol_tgt defaults to /var/run/s3lvol.sock,
+# and rcow_wait_rpc below probes RCOW_RPC_SOCK -- a mismatch just times out.
+#
 # shellcheck disable=SC2086
 TGT_PID="$(rcow_start_target_detached "${RCOW_TGT_BIN}" -m "${RCOW_TGT_CPUMASK}" \
-	--wait-for-rpc ${TGT_ARGS})" ||
+	-r "${RCOW_RPC_SOCK}" --wait-for-rpc ${TGT_ARGS})" ||
 	bail "the target did not come up far enough to record its pid"
 
 rcow_wait_rpc 60 "${TGT_PID}" ||

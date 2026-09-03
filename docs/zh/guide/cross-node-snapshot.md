@@ -1,7 +1,7 @@
 # 跨机快照（Pause / Resume / Snapshot）
 
-::: tip 部署范围（v0.7.0）
-本版本暂时只支持在 **one-click 部署**的计算节点上启用 CubeS3lvol；Kubernetes（Helm）部署暂未包含 s3lvol 组件，无法启用跨机 S3 快照。
+::: tip 部署范围
+CubeS3lvol 在 one-click 和 Kubernetes 上都**默认关闭**。开启方式见 [§2 配置后端 S3 服务](#2-如何配置后端-s3-服务)；资源与存储规划见 [§3 每台节点的存储需求](#3-每台节点的存储需求重点是-wal)。
 :::
 
 CubeSandbox 通过一份可持久化的「包对象」（rootfs / memory / metadata）实现沙箱的
@@ -148,9 +148,35 @@ cubemastercli tpl create-from-image \
 Cube 安装时默认安装 MinIO 作为 S3 服务，方便开箱体验。
 若要接入自己的 S3，按 [CubeS3lvol 文档](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md) 配置即可。
 
+### 2.1 Kubernetes（Helm）
+
+设置 `cubeS3lvol.enabled=true` 即可，无需其他配置：sidecar 复用 chart MinIO 或 `volumeS3` 的 endpoint 与凭证，写入自己的 `cube-s3lvol` 桶——始终与 S3 volume 插件的 `cube-volumes` 桶分开。cubelet 的 entrypoint 会把 `[cow.s3] enable` 写成 `true`，并把 `socket_path` 指到共享 emptyDir socket；只写 socket、不写 `enable` 不会开启。开启会**重建该节点的 Big Pod 并中断其上正在运行的沙箱**，请在维护窗口操作。
+
+身份来自完整的 Kubernetes 节点名，哈希成 `rcow-<8hex>`。Pod 重建仍是同一台机器。`cubeS3lvol.lvsName` 会给集群里每个节点钉同一个名字——多节点不要设。
+
+只有以下情况需要额外设置：
+
+- 外部 S3 端点为 path-style——显式设 `cubeS3lvol.s3.pathStyle: true`；
+- CPU 核做了隔离——设置 `cubeS3lvol.cpuMask`（默认 rcow 的 `0x3`）。
+
+```yaml
+cubeS3lvol:
+  enabled: true
+  # 可选：覆盖 endpoint / 密钥。桶必须与 cube-volumes 分开。
+  # s3:
+  #   endpoint: https://s3.example.com
+  #   accessKeyId: ...
+  #   secretAccessKey: ...
+  #   bucket: cube-s3lvol
+```
+
+首次启动时若 WAL 文件不存在会创建稀疏文件；`journalMB` / `walMB` / `cacheMB` 只在该文件出现之前生效。开启 sidecar 后，Big Pod 的 `terminationGracePeriodSeconds` 会提高到至少 180s，以便 `rcow_stop` 完成 disconnect 与 unload。
+
 ---
 
 ## 3. 每台节点的存储需求（重点是 WAL）
+
+每台运行 s3lvol 的节点需预留约 **2 核 CPU + 18 GiB 内存**；x86_64 节点需要 AVX2（Haswell）。
 
 快照对象存放在共享 S3 上，但**每台运行 s3lvol 的节点还需要一块本地 WAL 镜像盘**。
 跨机恢复依赖它：对快照的写入会先落到本地盘，再异步刷写回 S3；没有这块盘的节点既无法制作快照，
@@ -159,7 +185,7 @@ Cube 安装时默认安装 MinIO 作为 S3 服务，方便开箱体验。
 ### 3.1 WAL 镜像盘
 
 - 路径：`/data/cubelet/rcow/wal_bdev.img`
-- 逻辑大小：默认 **512 GiB**，由 `install.sh` 以**稀疏文件**方式创建
+- 逻辑大小：默认 **512 GiB**，由 one-click `install.sh` 或 Helm sidecar 入口在首次启动时以**稀疏文件**方式创建
 - 只创建一次：journal / WAL / cache 三段的划分在创建时就固定，之后无法调整（只能重新创建镜像）
 
 默认 512 GiB 由三段组成：
@@ -178,7 +204,8 @@ Cube 安装时默认安装 MinIO 作为 S3 服务，方便开箱体验。
 - **每台可能参与跨机恢复的节点都要在本地磁盘上准备自己的 WAL 镜像**——包括运行沙箱的计算节点，
   以及运行 s3lvol 的控制节点。
 - 三段大小在安装时通过 `RCOW_JOURNAL_MB` / `RCOW_WAL_MB` / `RCOW_CACHE_MB`
-  （一键安装）或 CubeS3lvol 运行时环境配置设置。调整只在**首次启动前**有意义——镜像一旦创建，布局即固定。
+  （一键安装）、chart 的 `cubeS3lvol.journalMB` / `walMB` / `cacheMB`（Helm）
+  或 CubeS3lvol 运行时环境配置设置。调整只在**首次启动前**有意义——镜像一旦创建，布局即固定。
 - 镜像不长期保存快照数据：它只是写缓冲加缓存，持久副本在 S3。
 
 ---

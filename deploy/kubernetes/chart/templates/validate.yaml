@@ -249,6 +249,34 @@
 {{- if and (eq (include "cube.minioBuiltinEnabled" .) "true") .Values.minio.rootPassword (lt (len (printf "%s" .Values.minio.rootPassword)) 8) }}
 {{- fail "minio.rootPassword must be at least 8 characters when set (leave empty to generate one)" }}
 {{- end }}
+{{- if eq (include "cube.s3lvolEnabled" .) "true" }}
+{{- if not ((.Values.images.cubeS3lvol).repository) }}
+{{- fail "cubeS3lvol.enabled=true requires images.cubeS3lvol.repository" }}
+{{- end }}
+{{- $s3lvolBucket := include "cube.s3lvolEffectiveBucket" . }}
+{{- if eq $s3lvolBucket "cube-volumes" }}
+{{- fail "cubeS3lvol must not share the S3 volume plugin bucket (cube-volumes); set cubeS3lvol.s3.bucket" }}
+{{- end }}
+{{- $volBucket := ((.Values.volumeS3).bucket) | default "" }}
+{{- if and (ne $volBucket "") (eq $s3lvolBucket $volBucket) }}
+{{- fail "cubeS3lvol.s3.bucket must not equal volumeS3.bucket; cube-s3lvol must use its own bucket" }}
+{{- end }}
+{{- $s3lvolS3 := default dict ((.Values.cubeS3lvol).s3) }}
+{{- if eq (($s3lvolS3.existingSecret) | default "") "" }}
+{{- if eq (include "cube.s3lvolEffectiveEndpoint" .) "" }}
+{{- fail "cubeS3lvol.enabled=true requires cubeS3lvol.s3.endpoint, volumeS3.endpoint, cubeS3lvol.s3.existingSecret, or chart MinIO" }}
+{{- end }}
+{{- if ne (include "cube.s3lvolHasResolvedCreds" .) "true" }}
+{{- fail "cubeS3lvol.enabled=true requires S3 credentials: cubeS3lvol.s3.existingSecret, cubeS3lvol.s3.accessKeyId+secretAccessKey, volumeS3.accessKeyId+secretAccessKey, or chart MinIO" }}
+{{- end }}
+{{- $s3lvolQuoteCheck := list ($s3lvolS3.accessKeyId | default "") ($s3lvolS3.secretAccessKey | default "") ($s3lvolS3.bucket | default "cube-s3lvol") }}
+{{- range $s3lvolQuoteCheck }}
+{{- if contains "\"" (. | toString) }}
+{{- fail "cubeS3lvol.s3 values must not contain double quotes (s3.cfg is double-quoted TOML)" }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if eq (include "cube.opsEnabled" .) "true" }}
 {{- if hasKey (.Values.cubeOps | default dict) "persistence" }}
 {{- fail "cubeOps.persistence was removed; warehouse blobs are stored in S3. Remove cubeOps.persistence from your values (including values-tke.yaml)." }}

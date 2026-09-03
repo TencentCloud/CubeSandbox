@@ -35,7 +35,7 @@ PERL_IMAGE_ASSIGN="s{((?:IMAGE_TAG|CUBE_VERSION)=)${PERL_SEMVER}}{\$1\$ENV{VER}}
 # Component images that follow the release version (chart + one-click / CI).
 # openresty-tproxy is deliberately excluded: its tag tracks the OpenResty
 # version, not the release.
-COMPONENTS='cube-egress|cube-egress-net|cube-master|cubemastercli|cube-api|cube-ops|cube-proxy|cube-webui|cube-lifecycle-manager|cubelet|cube-shim|cube-kernel|cube-guest|cube-agent|cube-node-init|cube-wait-node-prep|cube-pvm-host-bootstrap'
+COMPONENTS='cube-egress|cube-egress-net|cube-s3lvol|cube-master|cubemastercli|cube-api|cube-ops|cube-proxy|cube-webui|cube-lifecycle-manager|cubelet|cube-shim|cube-kernel|cube-guest|cube-agent|cube-node-init|cube-wait-node-prep|cube-pvm-host-bootstrap'
 
 usage() {
 	sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'

@@ -100,6 +100,11 @@ images:
     tag: v0.7.0
     pullPolicy: IfNotPresent
 
+  cubeS3lvol:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-s3lvol
+    tag: v0.7.0
+    pullPolicy: IfNotPresent
+
   webui:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-webui
     tag: v0.7.0
@@ -958,6 +963,61 @@ cubeEgress:
       memory: "64Mi"
     limits:
       memory: "128Mi"
+
+# Optional CubeS3lvol NVMe/TCP target sidecar (S3-backed cross-node snapshots)
+# in the cube-node Big Pod. Off by default, same as one-click. Enabling it
+# recreates the Big Pod (interrupting sandboxes on the node) and adds ~2 CPU
+# + 18 GiB RAM plus a ~512 GiB sparse WAL per compute node; x86_64 needs AVX2.
+cubeS3lvol:
+  enabled: false
+  # Optional cluster-wide pin. Empty: the sidecar hashes the full Kubernetes
+  # node name (spec.nodeName) to rcow-<8hex>. Do not set this on a multi-node
+  # cluster — every node would share one S3 prefix.
+  lvsName: ""
+  socketPath: /var/run/s3lvol/s3lvol.sock
+  # Empty: rcow default 0x3 (CPU0+1). Set when the container is pinned to
+  # isolated cores.
+  cpuMask: ""
+  tgtMemMB: 16384
+  journalMB: 1024
+  walMB: 32768
+  cacheMB: 490496
+  listenAddr: "127.0.0.1"
+  listenPort: 4420
+  # rcow_stop needs disconnect + unload; Big Pod default 30s is too short.
+  terminationGracePeriodSeconds: 180
+  s3:
+    # Existing Secret must contain key s3.cfg (s3lvol format, not volume-s3.conf).
+    existingSecret: ""
+    secretName: ""
+    # Explicit override; otherwise chart MinIO or volumeS3 is reused.
+    endpoint: ""
+    accessKeyId: ""
+    secretAccessKey: ""
+    bucket: cube-s3lvol
+    region: ""
+    # Default: true only when filling from chart MinIO; external path-style
+    # endpoints must set pathStyle: true.
+    # pathStyle: true
+  probes:
+    startup:
+      enabled: true
+      # Probe RPC uses --timeout 5; kubelet default timeoutSeconds is 1.
+      timeoutSeconds: 8
+      periodSeconds: 10
+      failureThreshold: 30
+    readiness:
+      enabled: true
+      timeoutSeconds: 8
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 12
+  resources:
+    requests:
+      cpu: "2"
+      memory: "18Gi"
+    limits:
+      memory: "20Gi"
 
 bootstrap:
   pvmHostKernel:

@@ -110,4 +110,6 @@ assert_recreate_change_detected network \
   --set-string cubeNode.network.ethName=eth9
 assert_recreate_change_detected egress \
   --set cubeEgress.enabled=false
+assert_recreate_change_detected s3lvol \
+  --set cubeS3lvol.enabled=true
 echo "Big Pod template stability guard passed"

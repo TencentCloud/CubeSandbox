@@ -1,7 +1,7 @@
 # Cross-Node Snapshots (Pause / Resume / Snapshot)
 
-::: tip Deployment scope (v0.7.0)
-In this release, CubeS3lvol can only be enabled on compute nodes installed via **one-click (bare-metal) deployment**; Kubernetes (Helm) deployments do not include the s3lvol target, so the cross-node S3 snapshot path is unavailable there.
+::: tip Deployment scope
+CubeS3lvol is **off by default** on both one-click and Kubernetes deployments. To enable it see [§2 Configuring the S3 backend](#2-configuring-the-s3-backend); for resource and storage planning see [§3 Storage requirements on every node](#3-storage-requirements-on-every-node).
 :::
 
 CubeSandbox persists a sandbox as a **package** of three objects (rootfs / memory / metadata) so you can **Pause**, **Resume**, and take a **Snapshot**:
@@ -122,16 +122,42 @@ Cubelet reads `/proc/cpuinfo` on the node and hashes CPU identity plus the featu
 Cube install ships MinIO as the default S3 service so you can try the feature out of the box.
 To point at your own S3 store, follow the [CubeS3lvol README](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md).
 
+### 2.1 Kubernetes (Helm)
+
+Set `cubeS3lvol.enabled=true` on the chart. Nothing else is required: the sidecar reuses the chart MinIO or `volumeS3` endpoint and credentials, and writes to its own `cube-s3lvol` bucket — always separate from the S3 volume plugin's `cube-volumes` bucket. The cubelet entrypoint then sets `[cow.s3] enable = true` and points `socket_path` at the shared emptyDir socket; writing a socket path without `enable` does not opt in. Enabling it **recreates the Big Pod and interrupts sandboxes on that node**; do this in a maintenance window.
+
+Identity comes from the full Kubernetes node name, hashed to `rcow-<8hex>`. A Pod recreate keeps the same name. `cubeS3lvol.lvsName` pins the same name on every node — do not set it on a multi-node cluster.
+
+Extra settings are only needed when:
+
+- the S3 endpoint is external and path-style — set `cubeS3lvol.s3.pathStyle: true`;
+- cores are isolated — set `cubeS3lvol.cpuMask` (default is rcow's `0x3`).
+
+```yaml
+cubeS3lvol:
+  enabled: true
+  # Optional: override endpoint / keys. Bucket must stay separate from cube-volumes.
+  # s3:
+  #   endpoint: https://s3.example.com
+  #   accessKeyId: ...
+  #   secretAccessKey: ...
+  #   bucket: cube-s3lvol
+```
+
+The first start creates the sparse WAL if it is missing; `journalMB` / `walMB` / `cacheMB` only apply before that file exists. Enabling the sidecar also raises the Big Pod's `terminationGracePeriodSeconds` to at least 180s so `rcow_stop` can disconnect and unload.
+
 ---
 
 ## 3. Storage requirements on every node
+
+Every node that runs the s3lvol target needs about **2 CPU + 18 GiB RAM**; x86_64 hosts need AVX2 (Haswell).
 
 Snapshot objects live in shared S3, but **every node that runs the s3lvol target also needs a local WAL image**. Cross-node restore depends on it: writes to the snapshot are staged on local disk first and flushed to S3 asynchronously, and a node without the image can neither take snapshots nor restore them.
 
 ### 3.1 The WAL image
 
 - Path: `/data/cubelet/rcow/wal_bdev.img`
-- Logical size: **512 GiB** by default, created as a **sparse** file by `install.sh`
+- Logical size: **512 GiB** by default, created as a **sparse** file by one-click `install.sh` or the Helm sidecar entrypoint on first start
 - Created once; the journal / WAL / cache split is fixed at creation and cannot be resized afterwards (only by re-creating the image)
 
 The default 512 GiB is three regions:
@@ -147,7 +173,7 @@ The default 512 GiB is three regions:
 ### 3.2 Cluster planning
 
 - **Every node that may restore cross-node needs its own WAL image on local disk** — compute nodes running sandboxes, and control nodes that run the s3lvol target, included.
-- The region sizes are set at install time via `RCOW_JOURNAL_MB` / `RCOW_WAL_MB` / `RCOW_CACHE_MB` (one-click install), or the equivalent runtime env in the CubeS3lvol config. Tuning them only matters **before the first start** — the layout is frozen once the image exists.
+- The region sizes are set at install time via `RCOW_JOURNAL_MB` / `RCOW_WAL_MB` / `RCOW_CACHE_MB` (one-click), chart `cubeS3lvol.journalMB` / `walMB` / `cacheMB` (Helm), or the equivalent runtime env. Tuning them only matters **before the first start** — the layout is frozen once the image exists.
 - The image does not hold snapshot data permanently: it is a write buffer plus a cache. The durable copy is in S3.
 
 ---

@@ -18,7 +18,7 @@ on:
         type: string
         default: ''
       components:
-        description: 'Comma-separated components to build, or "all" (cube-egress, cube-egress-net, cube-master, cubemastercli, cubelet, cube-shim, cube-kernel, cube-guest, cube-agent, cube-pvm-host-bootstrap, cube-node-init, cube-wait-node-prep, cube-api, cube-ops, cube-proxy, webui, cube-lifecycle-manager)'
+        description: 'Comma-separated components to build, or "all" (cube-egress, cube-egress-net, cube-s3lvol, cube-master, cubemastercli, cubelet, cube-shim, cube-kernel, cube-guest, cube-agent, cube-pvm-host-bootstrap, cube-node-init, cube-wait-node-prep, cube-api, cube-ops, cube-proxy, webui, cube-lifecycle-manager)'
         required: false
         type: string
         default: all
@@ -204,6 +204,7 @@ jobs:
           known = {
               "cube-egress",
               "cube-egress-net",
+              "cube-s3lvol",
               "cube-master",
               "cubemastercli",
               "cubelet",
@@ -244,6 +245,14 @@ jobs:
                   "context": "cube-egress-net-ctx",
                   "dockerfile": "deploy/kubernetes/images/cube-egress-net/Dockerfile",
                   "cache_scope": "cube-egress-net",
+              },
+              {
+                  "component": "cube-s3lvol",
+                  "image": "cube-s3lvol",
+                  "context": ".",
+                  "dockerfile": "deploy/kubernetes/images/cube-s3lvol/Dockerfile",
+                  "cache_scope": "cube-s3lvol",
+                  "arches": ["amd64"],
               },
               {
                   "component": "cube-master",
@@ -731,6 +740,7 @@ jobs:
             CUBE_VERSION=${{ inputs.image_tag }}
             CUBE_COMMIT=${{ steps.meta.outputs.commit }}
             CUBE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
+            CUBE_BUILDER_IMAGE=ghcr.io/tencentcloud/cubesandbox-builder:ubuntu2004
             CUBE_PROXY_BASE_IMAGE=${{ env.OPENRESTY_BASE_IMAGE }}
             OPENRESTY_BASE_IMAGE=${{ env.OPENRESTY_BASE_IMAGE }}
             CUBE_KERNEL_BM_VERSION=${{ steps.stage_kernel.outputs.asset_tag_bm || inputs.image_tag }}

@@ -99,6 +99,7 @@ ALL_IMAGES=(
   cube-lifecycle-manager
   cube-egress
   cube-egress-net
+  cube-s3lvol
   cube-webui
   cubelet
   cube-shim
@@ -126,6 +127,7 @@ SOURCE_IMAGES=(
   cube-lifecycle-manager
   cube-egress
   cube-egress-net
+  cube-s3lvol
   cube-webui
 )
 
@@ -401,7 +403,7 @@ ensure_source_tree() {
   SOURCE_REF_SHA="$(git -C "${WORKTREE_ROOT}" rev-parse "${SOURCE_REF}^{commit}")"
   SOURCE_TREE_STAMP="${SOURCE_TREE_DIR}/.exported-sha"
   # Probe cubelog only when a consumer image is selected. cube-api / cube-proxy /
-  # cube-webui / cube-egress / cube-lifecycle-manager never export it, so a
+  # cube-webui / cube-egress / cube-s3lvol / cube-lifecycle-manager never export it, so a
   # SOURCE_REF that predates both pkgs/CubeLog and cubelog must still be able to
   # build those images (same reason CubeOps is gated below).
   CUBELOG_SRC=""
@@ -419,6 +421,9 @@ ensure_source_tree() {
   # cubecow / deploy scripts + volume plugin examples.
   # cube-shim needs CubeShim / hypervisor / config-cube.toml + entrypoint.
   SOURCE_EXPORT_SET="CubeMaster CubeAPI CubeProxy CubeEgress cube-lifecycle-manager web deploy/one-click/webui"
+  if should_build cube-s3lvol; then
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeS3lvol deploy/kubernetes/images/scripts deploy/kubernetes/images/cube-s3lvol"
+  fi
   if should_build cube-master || should_build cubemastercli; then
     SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} ${CUBELOG_SRC} CubeDB Cubelet"
   fi
@@ -816,6 +821,22 @@ EOF
   build_image cube-node "${ctx}" "${dockerfile}"
 }
 
+# Same as .github/workflows/release-docker-images.yml for component "cube-s3lvol":
+# context=., file=deploy/kubernetes/images/cube-s3lvol/Dockerfile, CUBE_BUILDER_IMAGE.
+build_cube_s3lvol_image() {
+  [[ -f "${SCRIPT_DIR}/cube-s3lvol/Dockerfile" ]] \
+    || fail "missing deploy/kubernetes/images/cube-s3lvol/Dockerfile"
+  [[ -d "${REPO_ROOT}/CubeS3lvol" ]] || fail "missing CubeS3lvol tree in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/CubeS3lvol/make_release.sh" ]] \
+    || fail "missing CubeS3lvol/make_release.sh in ${REPO_ROOT}"
+  [[ -f "${REPO_ROOT}/deploy/kubernetes/images/scripts/cube-s3lvol-entrypoint.sh" ]] \
+    || fail "missing cube-s3lvol-entrypoint.sh in ${REPO_ROOT}"
+  build_image cube-s3lvol "${REPO_ROOT}" \
+    --build-arg "CUBE_BUILDER_IMAGE=${CUBE_BUILDER_IMAGE}" \
+    --build-arg "CUBE_VERSION=${IMAGE_TAG}"
+  record_built cube-s3lvol
+}
+
 copy_cube_egress_net_context() {
   local ctx="$1"
   local init_script="${REPO_ROOT}/CubeEgress/scripts/cube-proxy-iptables-init.sh"
@@ -1115,6 +1136,11 @@ run_selected_builds() {
     copy_cube_egress_net_context "${ctx}"
     build_image cube-egress-net "${ctx}"
     record_built cube-egress-net
+  fi
+
+  if should_build cube-s3lvol; then
+    ensure_source_tree
+    build_cube_s3lvol_image
   fi
 
   if should_build cube-webui; then

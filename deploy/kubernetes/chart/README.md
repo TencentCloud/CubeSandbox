@@ -638,6 +638,32 @@ cubeEgress:
 
 Do not rotate the CubeEgress CA casually: templates baked with the old CA and sandboxes trusting the old CA must be considered during rotation.
 
+## CubeS3lvol
+
+`cubeS3lvol.enabled=false` by default, same as one-click. Enabling it injects a `cube-s3lvol` sidecar into the Cube Node Big Pod and **recreates that Pod, interrupting sandboxes on the node** — budget about 2 CPU, 18 GiB RAM, and a 512 GiB sparse WAL per compute node (x86_64 needs AVX2).
+
+When enabled, the sidecar:
+
+- runs in its own `cube-s3lvol` image next to cubelet;
+- shares a Unix socket (`/var/run/s3lvol/s3lvol.sock`) with cubelet over an in-memory emptyDir, and writes cubelet's `[cow.s3] enable = true` + `socket_path` (a socket path alone does not opt in);
+- keeps WAL and logs on the existing `data-cubelet` / `data-log` hostPaths, so a Pod recreate loses nothing;
+- reads S3 config from a chart Secret mounted at `/etc/s3lvol/s3.cfg`; an `existingSecret` must contain that key in s3lvol format (not `volume-s3.conf`);
+- reuses chart MinIO or `volumeS3` endpoint and credentials by default. The bucket is `cube-s3lvol` and must not be the volume plugin's `cube-volumes` (Helm fails on a shared bucket);
+- identifies the node by hashing the full Kubernetes node name (`spec.nodeName`) to `rcow-<8hex>`, so a Pod recreate is not a new machine and IP / dotted node names stay unique. `cubeS3lvol.lvsName` pins the same name on every node — do not set it when more than one node runs the sidecar;
+- uses rcow's default CPU mask (`0x3`); set `cubeS3lvol.cpuMask` when cores are isolated.
+
+```yaml
+cubeS3lvol:
+  enabled: true
+  # Optional: explicit S3 (otherwise chart MinIO or volumeS3 is reused).
+  # s3:
+  #   existingSecret: my-s3lvol-cfg   # key must be s3.cfg
+  #   endpoint: https://s3.example.com
+  #   accessKeyId: ...
+  #   secretAccessKey: ...
+  #   bucket: cube-s3lvol
+```
+
 ## Render and lint
 
 ```bash

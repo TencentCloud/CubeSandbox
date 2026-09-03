@@ -1204,3 +1204,116 @@ set -euo pipefail
 echo "cube.stageToolboxScript is superseded by per-component install containers" >&2
 exit 1
 {{- end -}}
+
+{{- define "cube.s3lvolEnabled" -}}
+{{- if ((.Values.cubeS3lvol).enabled) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- define "cube.s3lvolSocketPath" -}}
+{{- ((.Values.cubeS3lvol).socketPath) | default "/var/run/s3lvol/s3lvol.sock" -}}
+{{- end -}}
+
+{{- define "cube.s3lvolSecretName" -}}
+{{- $s3 := default dict ((.Values.cubeS3lvol).s3) -}}
+{{- if ne (($s3.existingSecret) | default "") "" -}}
+{{- $s3.existingSecret -}}
+{{- else if ne (($s3.secretName) | default "") "" -}}
+{{- $s3.secretName -}}
+{{- else -}}
+{{- printf "%s-s3lvol" (include "cube.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* True when the chart must generate the Secret from chart MinIO root credentials. */}}
+{{- define "cube.s3lvolFillsFromMinio" -}}
+{{- $s3 := default dict ((.Values.cubeS3lvol).s3) -}}
+{{- $userCreds := and (ne (($s3.accessKeyId) | default "") "") (ne (($s3.secretAccessKey) | default "") "") -}}
+{{- if and (eq (include "cube.s3lvolEnabled" .) "true") (eq (($s3.existingSecret) | default "") "") (not $userCreds) (eq (include "cube.minioBuiltinEnabled" .) "true") -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- define "cube.s3lvolEffectiveEndpoint" -}}
+{{- $s3 := default dict ((.Values.cubeS3lvol).s3) -}}
+{{- if ne (($s3.endpoint) | default "") "" -}}
+{{- $s3.endpoint -}}
+{{- else if ne (include "cube.volumeS3EffectiveEndpoint" .) "" -}}
+{{- include "cube.volumeS3EffectiveEndpoint" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.s3lvolEffectiveBucket" -}}
+{{- $s3 := default dict ((.Values.cubeS3lvol).s3) -}}
+{{- $s3.bucket | default "cube-s3lvol" -}}
+{{- end -}}
+
+{{- define "cube.s3lvolEffectiveRegion" -}}
+{{- $s3 := default dict ((.Values.cubeS3lvol).s3) -}}
+{{- if ne (($s3.region) | default "") "" -}}
+{{- $s3.region -}}
+{{- else if ne (((.Values.volumeS3).region) | default "") "" -}}
+{{- .Values.volumeS3.region -}}
+{{- else -}}
+us-east-1
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.s3lvolPathStyle" -}}
+{{- $s3 := default dict ((.Values.cubeS3lvol).s3) -}}
+{{- if hasKey $s3 "pathStyle" -}}
+{{- if $s3.pathStyle -}}true{{- else -}}false{{- end -}}
+{{- else if eq (include "cube.s3lvolFillsFromMinio" .) "true" -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
+{{/* s3.cfg body. Caller passes dict: accessKeyId, secretAccessKey, endpoint, region, bucket, pathStyle. */}}
+{{- define "cube.s3lvolCfgBody" -}}
+{{- $e := .endpoint | toString -}}
+{{- $host := first (splitList "/" (trimPrefix "https://" (trimPrefix "http://" $e))) -}}
+access_key_id="{{ .accessKeyId }}"
+secret_access_key="{{ .secretAccessKey }}"
+endpoint="{{ $host }}"
+region="{{ .region }}"
+buckets=["{{ .bucket }}"]
+{{- if .pathStyle }}
+path_style="true"
+{{- end }}
+{{- if hasPrefix "http://" $e }}
+no_tls="true"
+{{- end }}
+{{- end -}}
+
+{{- define "cube.s3lvolHasResolvedCreds" -}}
+{{- $s3 := default dict ((.Values.cubeS3lvol).s3) -}}
+{{- if ne (($s3.existingSecret) | default "") "" -}}
+true
+{{- else if and (ne (($s3.accessKeyId) | default "") "") (ne (($s3.secretAccessKey) | default "") "") -}}
+true
+{{- else if and (ne (((.Values.volumeS3).accessKeyId) | default "") "") (ne (((.Values.volumeS3).secretAccessKey) | default "") "") -}}
+true
+{{- else if eq (include "cube.minioBuiltinEnabled" .) "true" -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.s3lvolProbeCommand" -}}
+sock={{ include "cube.s3lvolSocketPath" . }}; test -S "${sock}" && python3 /opt/s3lvol/scripts/s3lvol_rpc.py --sock "${sock}" --timeout 5 rcow_get_lvstores >/dev/null
+{{- end -}}
+
+{{/* Big Pod grace = max(cubeNode, cubeS3lvol) terminationGracePeriodSeconds. */}}
+{{- define "cube.nodeTerminationGracePeriodSeconds" -}}
+{{- $grace := int (.Values.cubeNode.terminationGracePeriodSeconds | default 30) -}}
+{{- if eq (include "cube.s3lvolEnabled" .) "true" -}}
+{{- $s3lvolGrace := int (((.Values.cubeS3lvol).terminationGracePeriodSeconds) | default 180) -}}
+{{- if gt $s3lvolGrace $grace -}}
+{{- $s3lvolGrace -}}
+{{- else -}}
+{{- $grace -}}
+{{- end -}}
+{{- else -}}
+{{- $grace -}}
+{{- end -}}
+{{- end -}}

@@ -99,7 +99,7 @@ IMAGE_TAG=v0.7.0 ./deploy/kubernetes/images/build-cube-images.sh cube-guest cube
 ## Pinning source to a release tag
 
 `cube-master`, `cubemastercli`, `cubelet`, `cube-shim`, `cube-api`, `cube-ops`,
-`cube-proxy`, `cube-egress`, `cube-lifecycle-manager`, and `cube-webui` are
+`cube-proxy`, `cube-egress`, `cube-s3lvol`, `cube-lifecycle-manager`, and `cube-webui` are
 compiled from repository source (rather than binaries in the release tarball).
 By default the script pins those source trees to `${SOURCE_REF}` (defaulting to
 `${VERSION}`, so `v0.7.0` for the default build). It exports `CubeMaster/`,
@@ -119,6 +119,8 @@ When building `cubelet`, it also exports `Cubelet/`, `CubeNet/`, `pkgs/CubeLog/`
 When building `cube-ops`, it also exports `CubeOps/`, the cubelog module, and `CubeDB/` (required by
 `CubeOps/Dockerfile`; not present on older release tags such as `v0.5.1` — use
 `SOURCE_REF=""` for worktree builds).
+When building `cube-s3lvol`, it also exports `CubeS3lvol/` and
+`deploy/kubernetes/images/scripts/cube-s3lvol-entrypoint.sh`.
 The cubelog module path is probed on `${SOURCE_REF}`: tags at or after this
 move export `pkgs/CubeLog/`; older tags including the default `${VERSION}`
 (`v0.7.0`) still have `cubelog/` and matching `COPY cubelog/` Dockerfiles.
@@ -241,6 +243,12 @@ behavior.
   `CubeEgress/scripts/cube-proxy-iptables-init.sh` plus a small idempotent
   entrypoint that waits for `cube-dev`, applies rules, and removes them on
   termination.
+- `cube-s3lvol` is the optional cube-node sidecar that runs the CubeS3lvol
+  NVMe/TCP target (`s3lvol_tgt`). Context is the repository root; file is
+  `deploy/kubernetes/images/cube-s3lvol/Dockerfile` (builder stage
+  `CUBE_BUILDER_IMAGE`, Ubuntu 20.04 runtime). Enable it with chart
+  `cubeS3lvol.enabled`. Release binaries need Haswell/AVX2 on x86_64; the
+  publish workflow is amd64-only.
 - `cube-webui` is built exactly like CI (`.github/workflows/release-docker-images.yml`):
   context = repository root, file = `deploy/one-click/webui/Dockerfile`, with
   `OPENRESTY_BASE_IMAGE` / `CUBE_VERSION` / `CUBE_COMMIT` / `CUBE_BUILD_TIME`.

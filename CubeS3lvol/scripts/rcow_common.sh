@@ -1396,8 +1396,12 @@ sequential reads on those will issue one S3 request per 128 KiB"
 # the design doc, single-writer is an upper-layer guarantee. This is that layer
 # doing its part.
 #
-# A truncated digest of the short hostname is what makes it per-node: stable across
-# reboots, needs no coordination, and does not leak the hostname into bucket keys.
+# A truncated digest of the identity hostname is what makes it per-node: stable
+# across reboots, needs no coordination, and does not leak the hostname into
+# bucket keys. DNS names still use hostname -s (the label before the first
+# dot) so an existing one-click prefix survives a domain-suffix change.
+# Addresses and dotted hostnames with a numeric short name (192.0.2.48,
+# 192.0.2.48.internal -> short name "192", one prefix per /8) hash in full.
 #
 # On collisions, honestly: 4 bytes is 32 bits, so for N nodes in one bucket the
 # birthday probability is roughly N^2 / 2^33 -- about 1 in 8600 at a thousand
@@ -1425,6 +1429,81 @@ RCOW_LVS_NAME_LEGACY="${RCOW_LVS_NAME_LEGACY:-rcow}"
 #
 # printf, not echo: the digest must be of the hostname alone, with no trailing
 # newline, or it changes depending on who recomputes it.
+#
+# rcow_node_hash [id]: hash an explicit identity, or this machine's
+# rcow_identity_host when no argument is given.
+
+# IPv4 (four decimal fields) or IPv6 (hostnames cannot contain ':').
+# Deliberately loose: octets are not range-checked.
+rcow_is_ip_hostname()
+{
+	local s="${1:-}"
+	local oct
+
+	[ -n "${s}" ] || return 1
+	case "${s}" in
+	*:*)
+		return 0
+		;;
+	esac
+
+	local IFS='.'
+	# shellcheck disable=SC2086
+	set -- ${s}
+	[ "$#" -eq 4 ] || return 1
+	for oct; do
+		case "${oct}" in
+		''|*[!0-9]*)
+			return 1
+			;;
+		esac
+	done
+	return 0
+}
+
+# Identity string to hash, given the full hostname and hostname -s.
+rcow_identity_host_from()
+{
+	local full="${1:-}"
+	local short="${2:-}"
+
+	if [ -z "${full}" ] && [ -z "${short}" ]; then
+		return 1
+	fi
+	if rcow_is_ip_hostname "${full}"; then
+		printf '%s' "${full}"
+		return 0
+	fi
+	# hostname -s of 192.0.2.48.internal is "192" -- the same collision as a
+	# bare IPv4, with a search domain appended.
+	case "${short}" in
+	''|*[!0-9]*)
+		;;
+	*)
+		case "${full}" in
+		*.*)
+			printf '%s' "${full}"
+			return 0
+			;;
+		esac
+		;;
+	esac
+	if [ -n "${short}" ]; then
+		printf '%s' "${short}"
+		return 0
+	fi
+	printf '%s' "${full}"
+}
+
+rcow_identity_host()
+{
+	local full short
+
+	full="$(hostname 2>/dev/null || true)"
+	short="$(hostname -s 2>/dev/null || true)"
+	rcow_identity_host_from "${full}" "${short}"
+}
+
 rcow_node_hash()
 {
 	local host
@@ -1435,13 +1514,17 @@ rcow_node_hash()
 		return 1
 	}
 
-	host="$(hostname -s 2>/dev/null || true)"
+	if [ "$#" -ge 1 ]; then
+		host="${1}"
+	else
+		host="$(rcow_identity_host)" || true
+	fi
 	if [ -z "${host}" ]; then
 		# Refusing rather than falling back to a constant: a fallback would give
 		# every affected node the same prefix, which is the failure this whole
 		# mechanism exists to prevent.
-		rcow_err "'hostname -s' is empty, so a per-node lvstore name cannot be"
-		rcow_err "derived; set RCOW_LVS_NAME explicitly"
+		rcow_err "identity hostname is empty, so a per-node lvstore name cannot"
+		rcow_err "be derived; set RCOW_LVS_NAME explicitly"
 		return 1
 	fi
 

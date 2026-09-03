@@ -146,7 +146,7 @@ used ones:
 |---|---|---|
 | `RCOW_S3_CFG` | `/data/cubelet/s3.cfg` | |
 | `RCOW_WAL_IMG` | `/data/cubelet/rcow/wal_bdev.img` | |
-| `RCOW_LVS_NAME` | derived `rcow-<hostname-hash>`; a pre-existing `rcow` entry is honoured | lvstore name, also the prefix in S3 |
+| `RCOW_LVS_NAME` | derived `rcow-<identity-hash>`; a pre-existing `rcow` entry is honoured | lvstore name, also the prefix in S3 |
 | `RCOW_CAPACITY_GB` | `16384` | used only at first create; thin, unused space costs nothing |
 | `RCOW_CACHE_MB` | `490496` | chunk cache on the WAL image; only matters before the first start |
 | `RCOW_LISTEN_ADDR` / `RCOW_LISTEN_PORT` | `127.0.0.1` / `4420` | |
@@ -164,11 +164,24 @@ hostname: two machines with the same hostname (containers, cloned disks)
 each consider the other's marker stale and force-take a volume the other is
 still serving, which can corrupt data.
 
-The lvstore name is derived from the same hostname (`rcow-<hostname-hash>`),
-so duplicate hostnames also collide on the S3 prefix itself. When nodes have
-a real unique id (an inventory id, a Kubernetes node name, an instance id),
-pin `RCOW_LVS_NAME` to it instead of relying on the hostname-derived
-default, and never let two nodes share a hostname.
+The lvstore name is derived from the same hostname (`rcow-<identity-hash>`),
+so duplicate hostnames also collide on the S3 prefix itself. The identity
+string is `hostname -s` for a DNS name (`worker1.example.com` → `worker1`),
+so an existing prefix survives a domain-suffix change. An address is not an
+FQDN: `hostname -s` of `192.0.2.48` is `192`, which would give every node
+in a /8 the same prefix. IPv4, IPv6, and a purely numeric short name of a
+dotted hostname (`192.0.2.48.internal`) are hashed in full.
+
+Changing the identity string changes the prefix. A node whose hostname is
+already an IP, and that already created a store under the old `hostname -s`
+hash, looks like a new machine on upgrade (create formats the WAL; the old
+S3 prefix is orphaned unless you pin `RCOW_LVS_NAME` to the old name).
+
+When nodes have a real unique id (an inventory id, a Kubernetes node name,
+an instance id), pin `RCOW_LVS_NAME` to `rcow-<hash of that full id>`
+instead of relying on `hostname -s`, and never let two nodes share a
+hostname. The Helm sidecar does this automatically from the full
+`spec.nodeName`.
 
 `RCOW_NO_HUGE=1` is a **choice, not a concession**: nothing on this data path
 needs DMA (the local disk goes through `bdev_aio` read/write syscalls, the

@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Build-context filter for cube-s3lvol/Dockerfile (context = repository root).
+# Keep CubeS3lvol sources and the k8s entrypoint; drop local deps/release
+# artifacts so the builder image's /opt/s3lvol-* trees are used instead.
+**
+!CubeS3lvol
+!CubeS3lvol/**
+CubeS3lvol/deps/**
+!CubeS3lvol/deps/.gitkeep
+!CubeS3lvol/deps/README.md
+CubeS3lvol/release/**
+CubeS3lvol/app/s3lvol_tgt/s3lvol_tgt
+CubeS3lvol/test/unit/**/*
+CubeS3lvol/test/integration/**/*
+!CubeS3lvol/test/tools
+!CubeS3lvol/test/tools/**
+!deploy
+!deploy/kubernetes
+!deploy/kubernetes/images
+!deploy/kubernetes/images/scripts
+!deploy/kubernetes/images/scripts/cube-s3lvol-entrypoint.sh

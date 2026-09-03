@@ -124,6 +124,16 @@ spec:
           echo "${container_names}" | grep -qxF 'cube-egress'
           echo "${container_names}" | grep -qxF 'cube-egress-net'
           {{- end }}
+
+          {{- if .Values.cubeS3lvol.enabled }}
+          echo '[health-test] check CubeS3lvol container by name in CubeNode pods'
+          pods_json="$(kget "/api/v1/namespaces/${ns}/pods?labelSelector=app.kubernetes.io/component%3Dcube-node")"
+          container_names="$(printf '%s\n' "${pods_json}" \
+            | tr ',' '\n' \
+            | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' \
+            | awk -F'"' '{print $4}')"
+          echo "${container_names}" | grep -qxF 'cube-s3lvol'
+          {{- end }}
 {{ if eq (include "cube.cubemastercliEnabled" .) "true" }}
 ---
 apiVersion: v1

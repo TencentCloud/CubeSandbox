@@ -54,6 +54,7 @@ jobs:
           sh -n deploy/kubernetes/images/scripts/pvm-host-bootstrap.sh
           sh -n deploy/kubernetes/images/scripts/wait-node-prep.sh
           sh -n deploy/kubernetes/chart/files/cube-proxy/cube-proxy-entrypoint.sh
+          bash -n deploy/kubernetes/images/scripts/cube-s3lvol-entrypoint.sh
       # Cloud-free chart/image guard suite (deploy/kubernetes/*/scripts/
       # test-*.sh). Helm is installed above; every script is self-contained.
       # Loop so new test-*.sh are picked up automatically instead of drifting
