@@ -40,6 +40,9 @@ pub struct ProcEntry {
     /// Duplicate of the pty master fd (None for a pipe-spawned process), kept
     /// so `Update` can resize the window while the pump owns the original.
     pub pty_master: Option<std::fs::File>,
+    /// Process-owned writable endpoint used by SendInput/StreamInput and
+    /// CloseStdin. Cloned out of the table before any async write is awaited.
+    pub input: exec::InputHandle,
 }
 
 /// Opaque, process-lifetime-unique key for a live process in the table.
@@ -274,6 +277,14 @@ impl AppState {
         find_entry(&guard, pid, tag).map(|e| (e.pid, e.sender.subscribe()))
     }
 
+    /// Resolve a selector and clone its process-owned input endpoint. The
+    /// process-table lock is released before callers await the input mutex or
+    /// perform I/O, so one blocked stdin cannot stall unrelated RPCs.
+    pub fn input_handle(&self, pid: Option<u32>, tag: Option<&str>) -> Option<exec::InputHandle> {
+        let guard = lock(&self.processes);
+        find_entry(&guard, pid, tag).map(|e| e.input.clone())
+    }
+
     /// Resize the pty window of a live process selected by pid or tag. The
     /// ioctl happens under the process-table lock — it is a fast, non-blocking
     /// syscall and holding the lock keeps the entry alive for the duration.
@@ -331,6 +342,7 @@ mod tests {
             config: ProcessConfig::default(),
             sender,
             pty_master: None,
+            input: Arc::new(tokio::sync::Mutex::new(exec::InputWriter::Pipe(None))),
         }
     }
 
@@ -487,6 +499,7 @@ mod tests {
             config: ProcessConfig::default(),
             sender: tx.clone(),
             pty_master: None,
+            input: Arc::new(tokio::sync::Mutex::new(exec::InputWriter::Pipe(None))),
         });
 
         // pid and tag both resolve to the same live process.
@@ -536,6 +549,7 @@ mod tests {
             config: ProcessConfig::default(),
             sender,
             pty_master: Some(not_a_tty),
+            input: Arc::new(tokio::sync::Mutex::new(exec::InputWriter::Pipe(None))),
         });
         assert!(matches!(
             s.resize_pty(Some(8), None, 80, 24),

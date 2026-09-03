@@ -100,22 +100,27 @@ def scenario_pty(sb):
     from cubesandbox import PtySize
     handle = sb.pty.create(PtySize(rows=24, cols=80))
     try:
-        # resize() drives the Update RPC (TIOCSWINSZ on the pty master). The
-        # SDK's send_stdin maps to SendInput, which is out of MVP scope, so we
-        # observe the effect by reading the pty slave's kernel winsize directly
-        # instead of typing `stty size` through stdin.
+        # Exercise both input and resize through the public SDK. The /proc
+        # check independently confirms that the child still owns a real tty.
         handle.resize(PtySize(rows=43, cols=132))
         tty = sb.commands.run(f"readlink /proc/{handle.pid}/fd/0").stdout.strip()
         check("pty attached to a tty", tty.startswith("/dev/"), repr(tty))
         if tty.startswith("/dev/"):
             r = sb.commands.run(f"stty size < {tty}")
             check("pty resize observed (43 132)", "43 132" in r.stdout, repr(r.stdout))
+        handle.send_stdin("printf 'INPUT_OK\\n'; stty size; exit\n")
+        output = []
+        exit_code = handle.wait(output.append)
+        text = b"".join(output).decode("utf-8", "replace")
+        check("pty SendInput reaches shell", "INPUT_OK" in text, repr(text))
+        check("pty input stream exits cleanly", exit_code == 0, f"exit={exit_code}")
     finally:
-        try:
-            killed = handle.kill()
-            check("pty kill", killed)
-        except Exception as e:
-            print(f"  pty kill failed: {e}")
+        if handle.exit_code is None:
+            try:
+                killed = handle.kill()
+                check("pty kill", killed)
+            except Exception as e:
+                print(f"  pty kill failed: {e}")
 
 
 def run_suite(template, label, full=True):

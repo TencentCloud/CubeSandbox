@@ -13,7 +13,7 @@ Normalized away (legitimately dynamic):
   - hostnames in downloaded /etc/hostname content
 Declared differences (allowlisted, documented in cube-envd/README.md):
   - gzip: cube-envd always identity
-  - CreateWatcher/SendInput: unimplemented in cube-envd
+  - CreateWatcher: unimplemented in cube-envd
   - Connect: implemented; nested-selector shape still rejected differently
 """
 import json
@@ -28,7 +28,7 @@ DECLARED_DIFFERENT = {
     "fs_watch_unary_probe": "CreateWatcher: implemented upstream, unimplemented in cube-envd",
     "rest_files_gzip_accept": "gzip download encoding: upstream supports, cube-envd identity-only",
     "rest_files_compose_probe": "/files/compose: implemented upstream, 501 in cube-envd",
-    "proc_sendinput_probe": "SendInput selector error wording differs (unimplemented either way)",
+    "proc_sendinput_probe": "nested SendInput selector: both refuse to write; upstream rejects the shape while cube-envd resolves it to not_found",
     "proc_connect_missing": "nested-selector: BOTH refuse to attach — upstream rejects the shape (unimplemented/invalid input type), cube-envd resolves to no pid and returns not_found; neither attaches to a process",
     "proc_sendsignal_nested_probe": "nested-selector: BOTH refuse to act on the process — upstream rejects the shape (501), cube-envd resolves to no pid and returns not_found; neither signals a process (no destructive side effect)",
     "fs_bad_json": "JSON parse error wording is parser-specific (code and status equal)",

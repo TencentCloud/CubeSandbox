@@ -12,6 +12,7 @@ suite gates cube-envd changes, `ENVD_REF` bumps, and SDK-matrix updates.
 |---|---|
 | `capture.py` | Runs ~45 scenarios (REST / filesystem RPC / process streaming, covering success, error, timeout, disconnect paths) against a live envd and records raw wire fixtures |
 | `conformance.py` | Normalizes two fixture directories (volatile values, header case, chunking) and diffs them; declared MVP differences are allowlisted with reasons |
+| `lifecycle_smoke.go` | Assertion-based black-box regression for interactive input and slow-client process cleanup against one live envd |
 | `perf.py` | Startup-to-/health latency, RSS, and command round-trip comparison |
 
 ## Running
@@ -38,7 +39,11 @@ ENVD_BASE=http://127.0.0.1:49984 OUTDIR=fixtures-rust python3 capture.py all
 # 3. Diff. Exit code 0 = conformant (declared differences excluded).
 python3 conformance.py fixtures-go fixtures-rust
 
-# 4. Optional: performance comparison (writes perf-results.json).
+# 4. Lifecycle regression against cube-envd. The default is :49984; ENVD_BASE
+#    can point at another live instance.
+ENVD_BASE=http://127.0.0.1:49984 go run lifecycle_smoke.go
+
+# 5. Optional: performance comparison (writes perf-results.json).
 python3 perf.py
 ```
 
@@ -56,8 +61,8 @@ python3 perf.py
 
 | Path class | Scenarios |
 |---|---|
-| success | health, init→envs, metrics, upload/download (octet+multipart, absolute+relative), Stat/ListDir/MakeDir/Move/Remove, echo/stderr/env-merge/cwd/user switching, large output (2 MiB byte-exact), signal kill, pty |
+| success | health, init→envs, metrics, upload/download (octet+multipart, absolute+relative), Stat/ListDir/MakeDir/Move/Remove, echo/stderr/env-merge/cwd/user switching, large output (2 MiB byte-exact), signal kill, pty, pipe/PTY input, fragmented StreamInput, CloseStdin EOF |
 | error | bad user (REST 401 / RPC unauthenticated), missing paths, directory download, missing binary (127), malformed JSON |
-| timeout | `Connect-Timeout-Ms` expiry → `deadline_exceeded` + process killed |
+| timeout | `Connect-Timeout-Ms` expiry → `deadline_exceeded` + process killed, including an unread response whose output queue is full |
 | cancellation | client disconnect mid-stream → process keeps running (List + side-effect check) |
 | unimplemented | watch family / compose answer with stable protocol-correct errors |

@@ -88,6 +88,51 @@ pub struct SendSignalRequest {
     pub signal: Option<serde_json::Value>,
 }
 
+/// Input bytes use protobuf JSON's base64 string representation. The service
+/// validates that exactly one oneof arm is present before decoding it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProcessInput {
+    #[serde(default)]
+    pub stdin: Option<String>,
+    #[serde(default)]
+    pub pty: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SendInputRequest {
+    pub process: ProcessSelector,
+    #[serde(default)]
+    pub input: ProcessInput,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CloseStdinRequest {
+    pub process: ProcessSelector,
+}
+
+/// Client-streaming input event. The flattened optional fields mirror the
+/// protobuf oneof; the handler rejects zero or multiple populated arms.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StreamInputRequest {
+    #[serde(default)]
+    pub start: Option<StreamInputStartEvent>,
+    #[serde(default)]
+    pub data: Option<StreamInputDataEvent>,
+    #[serde(default)]
+    pub keepalive: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamInputStartEvent {
+    pub process: ProcessSelector,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StreamInputDataEvent {
+    #[serde(default)]
+    pub input: ProcessInput,
+}
+
 /// `process.Process/Connect`: attach to an already-running process selected by
 /// pid or tag. Server-streaming; the response is the same `Event` stream as
 /// Start (start → data/keepalive → end), except it begins at the current head
@@ -248,6 +293,23 @@ mod tests {
         assert_eq!(req.process.args.len(), 3);
         assert_eq!(req.stdin, Some(false));
         assert!(req.pty.is_none());
+    }
+
+    #[test]
+    fn input_requests_accept_proto_json_shapes() {
+        let unary: SendInputRequest =
+            serde_json::from_str(r#"{"process":{"pid":42},"input":{"pty":"aGkK"}}"#).unwrap();
+        assert_eq!(unary.process.pid, Some(42));
+        assert_eq!(unary.input.pty.as_deref(), Some("aGkK"));
+
+        let start: StreamInputRequest =
+            serde_json::from_str(r#"{"start":{"process":{"tag":"shell"}}}"#).unwrap();
+        assert_eq!(
+            start.start.expect("start event").process.tag.as_deref(),
+            Some("shell")
+        );
+        let keepalive: StreamInputRequest = serde_json::from_str(r#"{"keepalive":{}}"#).unwrap();
+        assert!(keepalive.keepalive.is_some());
     }
 
     #[test]

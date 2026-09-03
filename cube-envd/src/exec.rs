@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::process::Stdio;
+use std::sync::Arc;
 
 use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast;
@@ -100,6 +101,17 @@ pub enum PumpEvent {
     SpawnError(String),
 }
 
+/// Process-owned input endpoint. The mutex serializes writes from unary and
+/// streaming RPCs without holding the global process-table lock across I/O.
+#[derive(Debug)]
+pub enum InputWriter {
+    Pty(tokio::fs::File),
+    /// `None` means stdin was disabled at Start or has already been closed.
+    Pipe(Option<tokio::process::ChildStdin>),
+}
+
+pub type InputHandle = Arc<tokio::sync::Mutex<InputWriter>>;
+
 #[derive(Debug)]
 pub struct SpawnedProcess {
     pub pid: u32,
@@ -116,6 +128,8 @@ pub struct SpawnedProcess {
     /// A duplicate of the pty master fd (None for a pipe-spawned process),
     /// kept so `Update` can resize the window while the pump owns the original.
     pub pty_master: Option<std::fs::File>,
+    /// Writable stdin/pty endpoint retained for the input RPC family.
+    pub input: InputHandle,
 }
 
 /// Merge order (later wins): built-in defaults < /init env vars < request envs.
@@ -236,6 +250,7 @@ pub fn spawn(
     env: HashMap<String, String>,
     cwd: String,
     user: &User,
+    stdin_enabled: bool,
     cgroup_fd: Option<RawFd>,
 ) -> std::io::Result<SpawnedProcess> {
     let mut command = tokio::process::Command::new(cmd);
@@ -243,7 +258,11 @@ pub fn spawn(
         .args(args)
         .env_clear()
         .envs(&env)
-        .stdin(Stdio::null())
+        .stdin(if stdin_enabled {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(false);
@@ -256,6 +275,9 @@ pub fn spawn(
     // fallback to 0 never fires in practice, but kill_process_group guards
     // against 0/1 regardless so a bogus pid can never signal envd's own group.
     let pid = child.id().unwrap_or_default();
+    let input = Arc::new(tokio::sync::Mutex::new(InputWriter::Pipe(
+        child.stdin.take(),
+    )));
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
@@ -292,6 +314,7 @@ pub fn spawn(
         initial,
         sender,
         pty_master: None,
+        input,
     })
 }
 
@@ -404,9 +427,10 @@ pub fn spawn_pty(
     // consumes its `File` (the original is the one consumed last).
     let (cols, rows) = size;
     let (master_file, slave_file) = open_pty(cols, rows)?;
-    // A dup of the master kept for `Update` to resize; the pump task owns the
-    // original below.
+    // Separate dups are retained for Update and input; the pump task owns the
+    // original below. Input writes are serialized by the process-owned mutex.
     let resize_master = master_file.try_clone()?;
+    let input_master = master_file.try_clone()?;
 
     let mut command = tokio::process::Command::new(cmd);
     command
@@ -429,16 +453,33 @@ pub fn spawn_pty(
     // moves `tx` itself below.
     let sender = tx.clone();
     let master = tokio::fs::File::from_std(master_file);
+    let input = Arc::new(tokio::sync::Mutex::new(InputWriter::Pty(
+        tokio::fs::File::from_std(input_master),
+    )));
 
     tokio::spawn(async move {
         // Read the master until EOF (the child exited and closed its slave),
         // then reap — the same "drain fully before End" contract as `spawn`.
-        pump_pty(master, tx.clone()).await;
-        match child.wait().await {
-            Ok(status) => {
+        let pump_error = pump_pty(master, tx.clone()).await.err();
+        if pump_error.is_some() {
+            let _ = kill_process_group(pid, libc::SIGKILL);
+        }
+        let wait_result = child.wait().await;
+        match (pump_error, wait_result) {
+            (Some(read_error), Ok(_)) => {
+                let _ = tx.send(PumpEvent::SpawnError(format!(
+                    "pty read failed: {read_error}"
+                )));
+            }
+            (Some(read_error), Err(wait_error)) => {
+                let _ = tx.send(PumpEvent::SpawnError(format!(
+                    "pty read failed: {read_error}; wait failed: {wait_error}"
+                )));
+            }
+            (None, Ok(status)) => {
                 let _ = tx.send(PumpEvent::End(EndEvent::from_exit_status(status)));
             }
-            Err(e) => {
+            (None, Err(e)) => {
                 let _ = tx.send(PumpEvent::SpawnError(format!("wait failed: {e}")));
             }
         }
@@ -449,19 +490,26 @@ pub fn spawn_pty(
         initial,
         sender,
         pty_master: Some(resize_master),
+        input,
     })
 }
 
 /// Pump a pty master fd into `DataEvent { pty }` frames. Mirrors `pump_pipe`:
 /// keep draining once the last subscriber is gone (so the child never blocks
 /// on a full pty buffer) but stop encoding.
-async fn pump_pty(mut master: tokio::fs::File, tx: broadcast::Sender<PumpEvent>) {
+async fn pump_pty(
+    mut master: tokio::fs::File,
+    tx: broadcast::Sender<PumpEvent>,
+) -> std::io::Result<()> {
     use base64::Engine;
     let mut buf = vec![0u8; READ_CHUNK];
     let mut receiver_gone = false;
     loop {
         match master.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) => return Ok(()),
+            Err(e) if is_pty_eof(&e) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
             Ok(n) => {
                 if receiver_gone {
                     continue;
@@ -477,6 +525,12 @@ async fn pump_pty(mut master: tokio::fs::File, tx: broadcast::Sender<PumpEvent>)
             }
         }
     }
+}
+
+/// Linux returns EIO when the last PTY slave closes. It is the PTY equivalent
+/// of EOF; other errors must remain visible to the process stream.
+fn is_pty_eof(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::EIO)
 }
 
 async fn pump_pipe<R>(pipe: Option<R>, tx: broadcast::Sender<PumpEvent>, is_stderr: bool)
@@ -573,6 +627,7 @@ mod tests {
             env,
             "/".into(),
             &user,
+            false,
             None,
         )
         .unwrap();
@@ -650,6 +705,7 @@ mod tests {
             HashMap::new(),
             "/".into(),
             &user,
+            false,
             Some(dirfd.as_raw_fd()),
         )
         .unwrap();
@@ -704,6 +760,7 @@ mod tests {
             HashMap::new(),
             "/".into(),
             &user,
+            false,
             Some(dirfd.as_raw_fd()),
         )
         .unwrap_err();
@@ -716,6 +773,7 @@ mod tests {
             HashMap::new(),
             "/".into(),
             &user,
+            false,
             Some(-1),
         )
         .unwrap_err();
@@ -792,6 +850,15 @@ mod tests {
         assert_eq!(rc, 0, "TIOCGWINSZ read back failed");
         assert_eq!(ws.ws_row, 40);
         assert_eq!(ws.ws_col, 120);
+    }
+
+    #[test]
+    fn only_eio_is_treated_as_pty_eof() {
+        assert!(is_pty_eof(&std::io::Error::from_raw_os_error(libc::EIO)));
+        assert!(!is_pty_eof(&std::io::Error::from_raw_os_error(libc::EBADF)));
+        assert!(!is_pty_eof(&std::io::Error::from(
+            std::io::ErrorKind::Interrupted
+        )));
     }
 
     #[tokio::test]
@@ -937,6 +1004,7 @@ mod tests {
             HashMap::new(),
             "/".into(),
             &user,
+            false,
             None,
         )
         .unwrap();

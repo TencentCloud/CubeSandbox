@@ -14,6 +14,7 @@ use axum::http::header::{HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
+use futures::StreamExt;
 
 use crate::auth::{self, User};
 use crate::connect;
@@ -43,18 +44,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/process.Process/List", post(process_list))
         .route("/process.Process/SendSignal", post(process_send_signal))
         .route("/process.Process/Connect", post(process_connect))
-        .route(
-            "/process.Process/StreamInput",
-            post(stream_unimplemented("Process/StreamInput")),
-        )
-        .route(
-            "/process.Process/SendInput",
-            post(unary_unimplemented("Process/SendInput")),
-        )
-        .route(
-            "/process.Process/CloseStdin",
-            post(unary_unimplemented("Process/CloseStdin")),
-        )
+        .route("/process.Process/StreamInput", post(process_stream_input))
+        .route("/process.Process/SendInput", post(process_send_input))
+        .route("/process.Process/CloseStdin", post(process_close_stdin))
         .route("/process.Process/Update", post(process_update))
         // filesystem.Filesystem
         .route("/filesystem.Filesystem/Stat", post(fs_stat))
@@ -298,6 +290,93 @@ async fn process_send_signal(
         Err(e) => return e.into_response(),
     };
     unary_result(proc_svc::send_signal(&state, &req))
+}
+
+async fn process_send_input(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    if let Err(e) = rpc_token_check(&state, &headers) {
+        return e.into_response();
+    }
+    let req: crate::msg::process::SendInputRequest = match read_unary_request(&headers, body).await
+    {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    unary_result(proc_svc::send_input(&state, &req).await)
+}
+
+async fn process_close_stdin(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    if let Err(e) = rpc_token_check(&state, &headers) {
+        return e.into_response();
+    }
+    let req: crate::msg::process::CloseStdinRequest = match read_unary_request(&headers, body).await
+    {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    unary_result(proc_svc::close_stdin(&state, &req).await)
+}
+
+async fn process_stream_input(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    // StreamInput is a streaming surface in both directions: request parsing
+    // and service failures are returned as an EndStream error on HTTP 200.
+    if let Err(e) = connect::check_json_codec(&headers) {
+        return proc_svc::stream_error_response(e);
+    }
+    if let Err(e) = rpc_token_check(&state, &headers) {
+        return proc_svc::stream_error_response(e);
+    }
+
+    let mut chunks = body.into_data_stream();
+    let mut decoder = connect::EnvelopeDecoder::default();
+    let mut selected = None;
+    while let Some(chunk) = chunks.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                return proc_svc::stream_error_response(ConnectError::new(
+                    ConnectCode::InvalidArgument,
+                    format!("read request: {e}"),
+                ))
+            }
+        };
+        decoder.push(&chunk);
+        loop {
+            let payload = match decoder.next_message() {
+                Ok(Some(payload)) => payload,
+                Ok(None) => break,
+                Err(e) => return proc_svc::stream_error_response(e),
+            };
+            let req: crate::msg::process::StreamInputRequest =
+                match serde_json::from_slice(&payload) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        return proc_svc::stream_error_response(ConnectError::new(
+                            ConnectCode::InvalidArgument,
+                            format!("unmarshal message: {e}"),
+                        ))
+                    }
+                };
+            if let Err(e) = proc_svc::stream_input_event(&state, &mut selected, req).await {
+                return proc_svc::stream_error_response(e);
+            }
+        }
+    }
+    if let Err(e) = decoder.finish() {
+        return proc_svc::stream_error_response(e);
+    }
+    proc_svc::empty_stream_response()
 }
 
 async fn process_update(

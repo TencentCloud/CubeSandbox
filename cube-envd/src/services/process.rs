@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc};
 
@@ -23,10 +24,13 @@ use crate::connect;
 use crate::error::{ConnectCode, ConnectError};
 use crate::exec;
 use crate::msg::process::{
-    parse_signal, ConnectRequest, Event, EventEnvelope, ListResponse, ProcessInfo,
-    SendSignalRequest, StartEvent, StartRequest, UpdateRequest,
+    parse_signal, CloseStdinRequest, ConnectRequest, Event, EventEnvelope, ListResponse,
+    ProcessInfo, ProcessInput, SendInputRequest, SendSignalRequest, StartEvent, StartRequest,
+    StreamInputRequest, UpdateRequest,
 };
 use crate::state::{AppState, ProcEntry, PtyResizeError};
+
+const RESPONSE_QUEUE_CAPACITY: usize = 65;
 
 pub fn frame_stream_response(
     frames: impl futures::Stream<Item = Bytes> + Send + 'static,
@@ -46,6 +50,17 @@ pub fn frame_stream_response(
 /// A streaming response that carries a single EndStream error frame.
 pub fn stream_error_response(err: ConnectError) -> axum::response::Response {
     frame_stream_response(futures::stream::iter([connect::end_stream_error(&err)]))
+}
+
+/// Successful response for a client-streaming RPC: one empty response message
+/// followed by the mandatory EndStream envelope.
+pub fn empty_stream_response() -> axum::response::Response {
+    let message = connect::message_frame(&serde_json::json!({}));
+    let trailer = connect::end_stream_ok();
+    let mut frames = Vec::with_capacity(message.len() + trailer.len());
+    frames.extend_from_slice(&message);
+    frames.extend_from_slice(&trailer);
+    frame_stream_response(futures::stream::iter([Bytes::from(frames)]))
 }
 
 fn event_frame(event: Event) -> Bytes {
@@ -126,14 +141,6 @@ pub fn start(
     deadline: Option<std::time::Duration>,
     keepalive_interval: std::time::Duration,
 ) -> axum::response::Response {
-    // A pty supplies the child's stdio itself; interactive stdin without a
-    // pty (`SendInput`/`StreamInput`/`CloseStdin`) is still out of MVP scope
-    // and stays routed to `unimplemented`.
-    if req.pty.is_none() && req.stdin == Some(true) {
-        return stream_error_response(ConnectError::unimplemented(
-            "interactive stdin (Start.stdin=true)",
-        ));
-    }
     if req.process.cmd.is_empty() {
         return stream_error_response(ConnectError::new(
             ConnectCode::InvalidArgument,
@@ -175,7 +182,16 @@ pub fn start(
             cgroup_fd,
         )
     } else {
-        exec::spawn(&wrapper_cmd, &wrapper_args, env, cwd, &user, cgroup_fd)
+        // Backwards compatibility: an omitted Start.stdin defaults to true.
+        exec::spawn(
+            &wrapper_cmd,
+            &wrapper_args,
+            env,
+            cwd,
+            &user,
+            req.stdin.unwrap_or(true),
+            cgroup_fd,
+        )
     };
     let spawned = match spawn_result {
         Ok(s) => s,
@@ -197,6 +213,7 @@ pub fn start(
         initial,
         sender,
         pty_master,
+        input,
     } = spawned;
     let handle = state.insert_process(ProcEntry {
         pid,
@@ -204,12 +221,16 @@ pub fn start(
         config: req.process.clone(),
         sender,
         pty_master,
+        input,
     });
 
-    // Frames channel: the HTTP body reads from `rx`; the driver task keeps
-    // consuming pump events even if the client goes away so the child is
-    // always reaped and the process table stays accurate.
-    let (tx, rx) = mpsc::channel::<Bytes>(64);
+    // Frames channel: the HTTP body reads from `rx`. The driver never waits
+    // for capacity here: a slow client must not prevent deadline handling or
+    // process reaping.
+    // Keep one slot reserved for an EndStream frame. At most 64 ordinary
+    // frames may be queued, so a client that falls behind still receives an
+    // explicit resource_exhausted trailer once it resumes reading.
+    let (tx, rx) = mpsc::channel::<Bytes>(RESPONSE_QUEUE_CAPACITY);
     let driver_state = state.clone();
     tokio::spawn(async move {
         drive_stream(
@@ -250,7 +271,7 @@ pub fn connect(
     // Attach, don't spawn: no deadline kill and no reap on completion. The
     // fresh receiver starts at the current ring head, so history is not
     // replayed.
-    let (tx, rx) = mpsc::channel::<Bytes>(64);
+    let (tx, rx) = mpsc::channel::<Bytes>(RESPONSE_QUEUE_CAPACITY);
     let driver_state = state.clone();
     tokio::spawn(async move {
         drive_stream(
@@ -277,16 +298,16 @@ async fn drive_stream(
     deadline: Option<std::time::Duration>,
     keepalive_interval: std::time::Duration,
 ) {
-    // send() ignores errors: a dropped receiver means the client is gone,
-    // but the child must still be drained and reaped.
-    let send = |b: Bytes| {
-        let tx = tx.clone();
-        async move {
-            let _ = tx.send(b).await;
-        }
-    };
-
-    send(event_frame(Event::Start(StartEvent { pid }))).await;
+    let owns_process = handle.is_some();
+    // The producer lives in `output` and is dropped immediately on
+    // backpressure or disconnect so the HTTP body reaches EOF as soon as
+    // queued frames drain.
+    let mut output = Some(tx);
+    if !try_send_data_frame(&mut output, event_frame(Event::Start(StartEvent { pid })))
+        && !owns_process
+    {
+        return;
+    }
 
     let sleep_forever = std::time::Duration::from_secs(60 * 60 * 24 * 365);
     let timeout = tokio::time::sleep(deadline.unwrap_or(sleep_forever));
@@ -299,38 +320,64 @@ async fn drive_stream(
     let mut keepalive = tokio::time::interval(keepalive_interval);
     keepalive.reset(); // first tick fires after one period, not immediately
 
-    // `stream_closed` flips once a terminal EndStream error frame (deadline
-    // expiry or a too-slow disconnect) has been sent: from then on the wire
-    // must end with that frame, so remaining output is drained (to reap the
-    // child) but never framed again. `timed_out` only tracks whether the
+    // Once `output` is None, remaining output is drained only to reap an owned
+    // Start process. `timed_out` only tracks whether the
     // deadline kill has already fired, so the kill happens exactly once even
     // if the stream was already closed for a different reason.
     let mut timed_out = false;
-    let mut stream_closed = false;
     loop {
+        // Sender::closed needs ownership across await. Keep this clone scoped
+        // to one select iteration so setting `output = None` really drops the
+        // last producer instead of an observer clone holding the body open.
+        let close_signal = output.as_ref().cloned();
+        let watch_receiver = close_signal.is_some();
         tokio::select! {
+            _ = async move {
+                if let Some(tx) = close_signal {
+                    tx.closed().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if watch_receiver => {
+                output.take();
+                if !owns_process {
+                    break;
+                }
+            }
             ev = events.recv() => match ev {
                 Ok(exec::PumpEvent::Data(d)) => {
-                    if !stream_closed {
+                    if output.is_some() {
                         keepalive.reset();
-                        send(event_frame(Event::Data(d))).await;
+                        if !try_send_data_frame(&mut output, event_frame(Event::Data(d)))
+                            && !owns_process
+                        {
+                            break;
+                        }
                     }
                 }
                 Ok(exec::PumpEvent::End(end)) => {
-                    if !stream_closed {
-                        send(event_frame(Event::End(end))).await;
-                        send(connect::end_stream_ok()).await;
+                    if output.is_some() {
+                        // One queue slot carries both terminal envelopes. This
+                        // prevents a nearly-full queue from exposing End
+                        // without the required EndStream trailer.
+                        let event = event_frame(Event::End(end));
+                        let trailer = connect::end_stream_ok();
+                        let mut terminal = Vec::with_capacity(event.len() + trailer.len());
+                        terminal.extend_from_slice(&event);
+                        terminal.extend_from_slice(&trailer);
+                        try_send_terminal_frame(&mut output, Bytes::from(terminal));
                     }
+                    output.take();
                     break;
                 }
                 Ok(exec::PumpEvent::SpawnError(msg)) => {
-                    if !stream_closed {
-                        send(connect::end_stream_error(&ConnectError::new(
+                    if output.is_some() {
+                        try_send_terminal_frame(&mut output, connect::end_stream_error(&ConnectError::new(
                             ConnectCode::Internal,
                             msg,
-                        )))
-                        .await;
+                        )));
                     }
+                    output.take();
                     break;
                 }
                 // A subscriber that falls too far behind the ring gets its own
@@ -339,21 +386,27 @@ async fn drive_stream(
                 // fan-out. The child and every other subscriber are untouched;
                 // we keep draining so the child is still reaped.
                 Err(RecvError::Lagged(n)) => {
-                    if !stream_closed {
-                        send(connect::end_stream_error(&ConnectError::new(
+                    if output.is_some() {
+                        try_send_terminal_frame(&mut output, connect::end_stream_error(&ConnectError::new(
                             ConnectCode::ResourceExhausted,
                             format!("output consumer too slow: {n} events dropped"),
-                        )))
-                        .await;
+                        )));
                     }
-                    stream_closed = true;
+                    output.take();
+                    if !owns_process {
+                        break;
+                    }
                 }
                 // Every sender is gone without an End event (the pump task
                 // died); nothing more can arrive.
                 Err(RecvError::Closed) => break,
             },
-            _ = keepalive.tick(), if !stream_closed => {
-                send(event_frame(Event::KeepAlive(serde_json::Map::new()))).await;
+            _ = keepalive.tick(), if output.is_some() => {
+                if !try_send_data_frame(&mut output, event_frame(Event::KeepAlive(serde_json::Map::new())))
+                    && !owns_process
+                {
+                    break;
+                }
             }
             _ = &mut timeout, if !timed_out => {
                 timed_out = true;
@@ -368,14 +421,13 @@ async fn drive_stream(
                 // the same window; closing it would need pidfd-based
                 // signalling, out of scope for the MVP.
                 let _ = exec::kill_process_group(pid, libc::SIGKILL);
-                if !stream_closed {
-                    send(connect::end_stream_error(&ConnectError::new(
+                if output.is_some() {
+                    try_send_terminal_frame(&mut output, connect::end_stream_error(&ConnectError::new(
                         ConnectCode::DeadlineExceeded,
                         "context deadline exceeded",
-                    )))
-                    .await;
+                    )));
                 }
-                stream_closed = true;
+                output.take();
                 // Keep looping (without the timeout arm) to drain and reap.
             }
         }
@@ -386,6 +438,41 @@ async fn drive_stream(
     if let Some(handle) = handle {
         state.remove_process(handle);
     }
+}
+
+/// Never await HTTP response capacity from the process driver. One queue slot
+/// is reserved for the terminal error: when ordinary output reaches that
+/// boundary, close only this connection with an explicit resource_exhausted
+/// EndStream frame while Start keeps enforcing its deadline and reaping.
+fn try_send_data_frame(output: &mut Option<mpsc::Sender<Bytes>>, frame: Bytes) -> bool {
+    let Some(tx) = output.as_ref() else {
+        return false;
+    };
+    if tx.capacity() <= 1 {
+        try_send_terminal_frame(
+            output,
+            connect::end_stream_error(&ConnectError::new(
+                ConnectCode::ResourceExhausted,
+                "output consumer too slow: response queue full",
+            )),
+        );
+        return false;
+    }
+
+    if tx.try_send(frame).is_err() {
+        output.take();
+        return false;
+    }
+    true
+}
+
+/// Queue a final EndStream-bearing frame in the reserved slot and drop the
+/// producer. A closed receiver needs no trailer because the HTTP client is
+/// already gone.
+fn try_send_terminal_frame(output: &mut Option<mpsc::Sender<Bytes>>, frame: Bytes) -> bool {
+    let sent = output.as_ref().is_some_and(|tx| tx.try_send(frame).is_ok());
+    output.take();
+    sent
 }
 
 /// Handle `process.Process/List` (unary).
@@ -431,6 +518,143 @@ pub fn send_signal(
         }
     })?;
     Ok(serde_json::json!({}))
+}
+
+/// Handle `process.Process/SendInput` (unary). Input handles are process-owned
+/// and mutex-protected, so concurrent unary calls and StreamInput messages are
+/// written in a deterministic order without serializing unrelated processes.
+pub async fn send_input(
+    state: &AppState,
+    req: &SendInputRequest,
+) -> Result<serde_json::Value, ConnectError> {
+    let (pid, tag) = req.process.flatten();
+    let input = state
+        .input_handle(pid, tag.as_deref())
+        .ok_or_else(|| not_found(pid, tag.as_deref()))?;
+    write_process_input(&input, &req.input).await?;
+    Ok(serde_json::json!({}))
+}
+
+/// Apply one StreamInput event in receive order. A `start` event selects (or
+/// reselects) the target process; data before selection is rejected rather than
+/// dereferencing an absent writer, and keepalive is intentionally a no-op.
+pub async fn stream_input_event(
+    state: &AppState,
+    selected: &mut Option<exec::InputHandle>,
+    req: StreamInputRequest,
+) -> Result<(), ConnectError> {
+    let arms = usize::from(req.start.is_some())
+        + usize::from(req.data.is_some())
+        + usize::from(req.keepalive.is_some());
+    if arms != 1 {
+        return Err(ConnectError::new(
+            ConnectCode::Unimplemented,
+            "input stream event is not implemented",
+        ));
+    }
+
+    if let Some(start) = req.start {
+        let (pid, tag) = start.process.flatten();
+        *selected = Some(
+            state
+                .input_handle(pid, tag.as_deref())
+                .ok_or_else(|| not_found(pid, tag.as_deref()))?,
+        );
+    } else if let Some(data) = req.data {
+        let input = selected.as_ref().ok_or_else(|| {
+            ConnectError::new(
+                ConnectCode::InvalidArgument,
+                "input stream has no process selected",
+            )
+        })?;
+        write_process_input(input, &data.input).await?;
+    }
+    Ok(())
+}
+
+/// Close a non-PTY stdin. Taking the writer makes repeated calls idempotent;
+/// dropping/shutting it down delivers EOF to the child. PTYs use Ctrl+D.
+pub async fn close_stdin(
+    state: &AppState,
+    req: &CloseStdinRequest,
+) -> Result<serde_json::Value, ConnectError> {
+    let (pid, tag) = req.process.flatten();
+    let input = state
+        .input_handle(pid, tag.as_deref())
+        .ok_or_else(|| not_found(pid, tag.as_deref()))?;
+    let mut writer = input.lock().await;
+    match &mut *writer {
+        exec::InputWriter::Pty(_) => Err(ConnectError::new(
+            ConnectCode::Internal,
+            "error closing stdin: cannot close stdin for PTY process — send Ctrl+D (0x04) instead",
+        )),
+        exec::InputWriter::Pipe(pipe) => {
+            if let Some(mut stdin) = pipe.take() {
+                stdin.shutdown().await.map_err(|e| {
+                    ConnectError::new(ConnectCode::Internal, format!("error closing stdin: {e}"))
+                })?;
+            }
+            Ok(serde_json::json!({}))
+        }
+    }
+}
+
+async fn write_process_input(
+    input: &exec::InputHandle,
+    request: &ProcessInput,
+) -> Result<(), ConnectError> {
+    use base64::Engine;
+
+    let (kind, encoded) = match (&request.stdin, &request.pty) {
+        (Some(data), None) => (InputKind::Stdin, data),
+        (None, Some(data)) => (InputKind::Pty, data),
+        _ => {
+            return Err(ConnectError::new(
+                ConnectCode::Unimplemented,
+                "process input type is not implemented",
+            ))
+        }
+    };
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|e| {
+            ConnectError::new(
+                ConnectCode::InvalidArgument,
+                format!("invalid base64 process input: {e}"),
+            )
+        })?;
+
+    let mut writer = input.lock().await;
+    match (&mut *writer, kind) {
+        (exec::InputWriter::Pty(pty), InputKind::Pty) => {
+            pty.write_all(&data).await.map_err(|e| {
+                ConnectError::new(ConnectCode::Internal, format!("error writing to tty: {e}"))
+            })
+        }
+        (exec::InputWriter::Pty(_), InputKind::Stdin) => Err(ConnectError::new(
+            ConnectCode::Internal,
+            "error writing to stdin: tty assigned to process — input should be written to the pty, not the stdin",
+        )),
+        (exec::InputWriter::Pipe(_), InputKind::Pty) => Err(ConnectError::new(
+            ConnectCode::Internal,
+            "error writing to tty: tty not assigned to process — input should be written to the stdin, not the tty",
+        )),
+        (exec::InputWriter::Pipe(Some(stdin)), InputKind::Stdin) => {
+            stdin.write_all(&data).await.map_err(|e| {
+                ConnectError::new(ConnectCode::Internal, format!("error writing to stdin: {e}"))
+            })
+        }
+        (exec::InputWriter::Pipe(None), InputKind::Stdin) => Err(ConnectError::new(
+            ConnectCode::Internal,
+            "error writing to stdin: stdin not enabled or closed",
+        )),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum InputKind {
+    Stdin,
+    Pty,
 }
 
 /// The "not found" detail shared by every selector-based RPC — byte-for-byte
@@ -484,6 +708,48 @@ pub fn update(state: &AppState, req: &UpdateRequest) -> Result<serde_json::Value
 mod tests {
     use super::*;
 
+    fn disabled_input() -> exec::InputHandle {
+        Arc::new(tokio::sync::Mutex::new(exec::InputWriter::Pipe(None)))
+    }
+
+    fn current_user() -> User {
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        User {
+            name: "test".into(),
+            uid,
+            gid,
+            home: "/tmp".into(),
+            groups: vec![gid],
+        }
+    }
+
+    fn insert_spawned(
+        state: &AppState,
+        spawned: exec::SpawnedProcess,
+    ) -> (
+        u32,
+        crate::state::ProcHandle,
+        broadcast::Receiver<exec::PumpEvent>,
+    ) {
+        let exec::SpawnedProcess {
+            pid,
+            initial,
+            sender,
+            pty_master,
+            input,
+        } = spawned;
+        let handle = state.insert_process(ProcEntry {
+            pid,
+            tag: None,
+            config: crate::msg::process::ProcessConfig::default(),
+            sender,
+            pty_master,
+            input,
+        });
+        (pid, handle, initial)
+    }
+
     #[test]
     fn list_shape() {
         let state = AppState::new();
@@ -499,6 +765,7 @@ mod tests {
             },
             sender,
             pty_master: None,
+            input: disabled_input(),
         });
         let v = list(&state);
         assert_eq!(v["processes"][0]["pid"], 7);
@@ -600,6 +867,7 @@ mod tests {
             config: crate::msg::process::ProcessConfig::default(),
             sender,
             pty_master: None,
+            input: disabled_input(),
         });
         let req: UpdateRequest = serde_json::from_str(r#"{"process":{"pid":7}}"#).unwrap();
         assert_eq!(update(&state, &req).unwrap(), serde_json::json!({}));
@@ -626,6 +894,7 @@ mod tests {
             config: crate::msg::process::ProcessConfig::default(),
             sender,
             pty_master: None,
+            input: disabled_input(),
         });
         let req: UpdateRequest =
             serde_json::from_str(r#"{"process":{"pid":7},"pty":{"size":{"cols":80,"rows":24}}}"#)
@@ -636,6 +905,349 @@ mod tests {
             err.message,
             "error resizing tty: tty not assigned to process"
         );
+    }
+
+    #[tokio::test]
+    async fn pipe_input_and_close_stdin_reach_the_child() {
+        use base64::Engine;
+
+        let state = AppState::new();
+        let spawned = exec::spawn(
+            "/bin/cat",
+            &[],
+            std::collections::HashMap::new(),
+            "/".into(),
+            &current_user(),
+            true,
+            None,
+        )
+        .unwrap();
+        let (pid, handle, mut events) = insert_spawned(&state, spawned);
+        let data = base64::engine::general_purpose::STANDARD.encode(b"pipe-input\n");
+        let req: SendInputRequest = serde_json::from_value(serde_json::json!({
+            "process": {"pid": pid},
+            "input": {"stdin": data}
+        }))
+        .unwrap();
+        assert_eq!(
+            send_input(&state, &req).await.unwrap(),
+            serde_json::json!({})
+        );
+
+        let close: CloseStdinRequest =
+            serde_json::from_value(serde_json::json!({"process": {"pid": pid}})).unwrap();
+        assert_eq!(
+            close_stdin(&state, &close).await.unwrap(),
+            serde_json::json!({})
+        );
+        // Closing an already-closed pipe is intentionally idempotent.
+        close_stdin(&state, &close).await.unwrap();
+
+        let mut stdout = Vec::new();
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(3), events.recv())
+                .await
+                .expect("cat did not exit after stdin EOF")
+                .expect("event bus closed before End")
+            {
+                exec::PumpEvent::Data(data) => {
+                    if let Some(chunk) = data.stdout {
+                        stdout.extend(
+                            base64::engine::general_purpose::STANDARD
+                                .decode(chunk)
+                                .unwrap(),
+                        );
+                    }
+                }
+                exec::PumpEvent::End(end) => {
+                    assert_eq!(end.exit_code, 0);
+                    break;
+                }
+                exec::PumpEvent::SpawnError(e) => panic!("spawn error: {e}"),
+            }
+        }
+        assert_eq!(stdout, b"pipe-input\n");
+        state.remove_process(handle);
+    }
+
+    #[tokio::test]
+    async fn pty_input_uses_the_master_and_rejects_stdin_close() {
+        use base64::Engine;
+
+        let state = AppState::new();
+        let spawned = exec::spawn_pty(
+            "/bin/sh",
+            &[
+                "-c".into(),
+                "read line; printf 'got:%s\\n' \"$line\"; sleep 30".into(),
+            ],
+            std::collections::HashMap::new(),
+            "/".into(),
+            &current_user(),
+            (80, 24),
+            None,
+        )
+        .unwrap();
+        let (pid, handle, mut events) = insert_spawned(&state, spawned);
+        let req: SendInputRequest = serde_json::from_value(serde_json::json!({
+            "process": {"pid": pid},
+            "input": {"pty": base64::engine::general_purpose::STANDARD.encode(b"hello\n")}
+        }))
+        .unwrap();
+        send_input(&state, &req).await.unwrap();
+
+        let wrong: SendInputRequest = serde_json::from_value(serde_json::json!({
+            "process": {"pid": pid},
+            "input": {"stdin": base64::engine::general_purpose::STANDARD.encode(b"x")}
+        }))
+        .unwrap();
+        assert!(send_input(&state, &wrong)
+            .await
+            .unwrap_err()
+            .message
+            .contains("tty assigned to process"));
+        let close: CloseStdinRequest =
+            serde_json::from_value(serde_json::json!({"process": {"pid": pid}})).unwrap();
+        assert!(close_stdin(&state, &close)
+            .await
+            .unwrap_err()
+            .message
+            .contains("send Ctrl+D"));
+
+        let mut output = Vec::new();
+        while !String::from_utf8_lossy(&output).contains("got:hello") {
+            match tokio::time::timeout(std::time::Duration::from_secs(3), events.recv())
+                .await
+                .expect("PTY did not consume input")
+                .expect("event bus closed before expected output")
+            {
+                exec::PumpEvent::Data(data) => {
+                    if let Some(chunk) = data.pty {
+                        output.extend(
+                            base64::engine::general_purpose::STANDARD
+                                .decode(chunk)
+                                .unwrap(),
+                        );
+                    }
+                }
+                exec::PumpEvent::End(end) => panic!("PTY exited early: {end:?}"),
+                exec::PumpEvent::SpawnError(e) => panic!("spawn error: {e}"),
+            }
+        }
+        exec::kill_process_group(pid, libc::SIGKILL).unwrap();
+        while !matches!(events.recv().await, Ok(exec::PumpEvent::End(_))) {}
+        state.remove_process(handle);
+    }
+
+    #[tokio::test]
+    async fn connect_driver_exits_when_response_receiver_disconnects() {
+        let state = Arc::new(AppState::new());
+        let (_pub_tx, events) = broadcast::channel::<exec::PumpEvent>(4);
+        let (tx, mut rx) = mpsc::channel::<Bytes>(4);
+        let driver = tokio::spawn(drive_stream(
+            state,
+            42,
+            None,
+            events,
+            tx,
+            None,
+            std::time::Duration::from_secs(30),
+        ));
+        rx.recv().await.expect("start frame");
+        drop(rx);
+        tokio::time::timeout(std::time::Duration::from_millis(500), driver)
+            .await
+            .expect("detached Connect driver leaked after client disconnect")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn unread_full_response_does_not_block_deadline_or_reaping() {
+        let state = Arc::new(AppState::new());
+        let spawned = exec::spawn(
+            "/bin/sh",
+            &["-c".into(), "while :; do printf 1234567890; done".into()],
+            std::collections::HashMap::new(),
+            "/".into(),
+            &current_user(),
+            false,
+            None,
+        )
+        .unwrap();
+        let (pid, handle, events) = insert_spawned(&state, spawned);
+        // Start fills this one-slot queue. No receiver read occurs until after
+        // the driver has enforced the deadline and reaped the child.
+        let (tx, mut rx) = mpsc::channel::<Bytes>(RESPONSE_QUEUE_CAPACITY);
+        let driver = tokio::spawn(drive_stream(
+            state.clone(),
+            pid,
+            Some(handle),
+            events,
+            tx,
+            Some(std::time::Duration::from_millis(50)),
+            std::time::Duration::from_secs(30),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(3), driver)
+            .await
+            .expect("full HTTP response queue blocked deadline/reaping")
+            .unwrap();
+        assert!(state.find_pid(Some(pid), None).is_none());
+        let mut frames = Vec::new();
+        while let Some(frame) = rx.recv().await {
+            frames.push(frame);
+        }
+        assert_eq!(
+            frames.first().map(|f| f[0]),
+            Some(0),
+            "queued Start frame was lost"
+        );
+        assert_eq!(
+            frames.last().map(|f| f[0]),
+            Some(connect::END_STREAM_FLAG),
+            "backpressure must leave an explicit EndStream error"
+        );
+    }
+
+    #[tokio::test]
+    async fn backpressure_closes_response_before_owned_process_exits() {
+        let state = Arc::new(AppState::new());
+        let (pub_tx, events) = broadcast::channel::<exec::PumpEvent>(4);
+        let handle = state.insert_process(ProcEntry {
+            pid: 42,
+            tag: None,
+            config: crate::msg::process::ProcessConfig::default(),
+            sender: pub_tx.clone(),
+            pty_master: None,
+            input: disabled_input(),
+        });
+        // Start consumes the first slot; the second is reserved for the
+        // resource_exhausted EndStream frame when Data cannot be queued.
+        let (tx, mut rx) = mpsc::channel::<Bytes>(2);
+        let driver = tokio::spawn(drive_stream(
+            state.clone(),
+            42,
+            Some(handle),
+            events,
+            tx,
+            None,
+            std::time::Duration::from_secs(30),
+        ));
+        tokio::task::yield_now().await;
+        assert!(pub_tx
+            .send(exec::PumpEvent::Data(crate::msg::process::DataEvent {
+                stdout: Some("eA==".into()),
+                ..Default::default()
+            }))
+            .is_ok());
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        assert!(rx.recv().await.is_some(), "Start frame missing");
+        let terminal = rx.recv().await.expect("backpressure error missing");
+        assert_eq!(terminal[0], connect::END_STREAM_FLAG);
+        let payload: serde_json::Value = serde_json::from_slice(&terminal[5..]).unwrap();
+        assert_eq!(payload["error"]["code"], "resource_exhausted");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+                .await
+                .expect("response producer remained open after backpressure")
+                .is_none()
+        );
+        assert!(
+            state.find_pid(Some(42), None).is_some(),
+            "closing the response must not reap a still-running Start process"
+        );
+
+        assert!(pub_tx
+            .send(exec::PumpEvent::End(crate::msg::process::EndEvent {
+                exit_code: 0,
+                exited: true,
+                status: "exit status 0".into(),
+                error: None,
+            }))
+            .is_ok());
+        driver.await.unwrap();
+        assert!(state.find_pid(Some(42), None).is_none());
+    }
+
+    #[tokio::test]
+    async fn end_event_and_end_stream_share_one_queue_slot() {
+        let state = Arc::new(AppState::new());
+        let (pub_tx, events) = broadcast::channel::<exec::PumpEvent>(4);
+        let (tx, mut rx) = mpsc::channel::<Bytes>(2);
+        let driver = tokio::spawn(drive_stream(
+            state,
+            42,
+            None,
+            events,
+            tx,
+            None,
+            std::time::Duration::from_secs(30),
+        ));
+        tokio::task::yield_now().await;
+        assert!(pub_tx
+            .send(exec::PumpEvent::End(crate::msg::process::EndEvent {
+                exit_code: 0,
+                exited: true,
+                status: "exit status 0".into(),
+                error: None,
+            }))
+            .is_ok());
+        driver.await.unwrap();
+
+        let start = rx.recv().await.expect("Start queue item");
+        assert_eq!(start[0], 0);
+        let terminal = rx.recv().await.expect("combined terminal queue item");
+        let event_size =
+            u32::from_be_bytes([terminal[1], terminal[2], terminal[3], terminal[4]]) as usize;
+        let trailer_offset = 5 + event_size;
+        assert_eq!(terminal[0], 0);
+        assert_eq!(terminal[trailer_offset], connect::END_STREAM_FLAG);
+        assert_eq!(&terminal[trailer_offset + 5..], b"{}");
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_input_requires_start_and_reuses_selected_writer() {
+        let state = AppState::new();
+        let (sender, _events) = broadcast::channel::<exec::PumpEvent>(1);
+        state.insert_process(ProcEntry {
+            pid: 7,
+            tag: Some("shell".into()),
+            config: crate::msg::process::ProcessConfig::default(),
+            sender,
+            pty_master: None,
+            input: disabled_input(),
+        });
+        let mut selected = None;
+        let data: StreamInputRequest = serde_json::from_value(serde_json::json!({
+            "data": {"input": {"stdin": "eA=="}}
+        }))
+        .unwrap();
+        assert_eq!(
+            stream_input_event(&state, &mut selected, data.clone())
+                .await
+                .unwrap_err()
+                .code,
+            ConnectCode::InvalidArgument
+        );
+        let start: StreamInputRequest = serde_json::from_value(serde_json::json!({
+            "start": {"process": {"tag": "shell"}}
+        }))
+        .unwrap();
+        stream_input_event(&state, &mut selected, start)
+            .await
+            .unwrap();
+        assert!(selected.is_some());
+        assert!(stream_input_event(&state, &mut selected, data)
+            .await
+            .unwrap_err()
+            .message
+            .contains("stdin not enabled or closed"));
+        let keepalive: StreamInputRequest =
+            serde_json::from_value(serde_json::json!({"keepalive": {}})).unwrap();
+        stream_input_event(&state, &mut selected, keepalive)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -654,6 +1266,7 @@ mod tests {
             },
             sender: pub_tx.clone(),
             pty_master: None,
+            input: disabled_input(),
         });
         let data = |s: &str| {
             exec::PumpEvent::Data(crate::msg::process::DataEvent {

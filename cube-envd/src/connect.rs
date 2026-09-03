@@ -17,7 +17,7 @@
 //! Binary protobuf codecs (`application/proto`, `application/connect+proto`)
 //! are rejected with `unimplemented` — a declared MVP difference.
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::error::{ConnectCode, ConnectError};
 
@@ -49,6 +49,83 @@ pub fn end_stream_error(err: &ConnectError) -> Bytes {
         "error": { "code": err.code.as_str(), "message": err.message }
     });
     encode_envelope(END_STREAM_FLAG, payload.to_string().as_bytes())
+}
+
+/// Incremental decoder for Connect client-streaming request envelopes. It
+/// keeps at most one incomplete frame between body chunks and enforces the
+/// same per-message limit as server-streaming requests.
+#[derive(Default)]
+pub struct EnvelopeDecoder {
+    buffered: BytesMut,
+}
+
+impl EnvelopeDecoder {
+    pub fn push(&mut self, chunk: &[u8]) {
+        self.buffered.extend_from_slice(chunk);
+    }
+
+    pub fn next_message(&mut self) -> Result<Option<Bytes>, ConnectError> {
+        if self.buffered.len() < 5 {
+            return Ok(None);
+        }
+        let flags = self.buffered[0];
+        if flags & COMPRESSED_FLAG != 0 {
+            return Err(ConnectError::new(
+                ConnectCode::Internal,
+                "compressed Connect stream messages are not supported",
+            ));
+        }
+        if flags != 0 {
+            return Err(ConnectError::new(
+                ConnectCode::InvalidArgument,
+                format!("unexpected Connect request envelope flags: 0x{flags:02x}"),
+            ));
+        }
+        let size = u32::from_be_bytes([
+            self.buffered[1],
+            self.buffered[2],
+            self.buffered[3],
+            self.buffered[4],
+        ]) as usize;
+        if size > MAX_ENVELOPE_SIZE {
+            return Err(ConnectError::new(
+                ConnectCode::InvalidArgument,
+                format!("Connect stream message too large: {size} bytes"),
+            ));
+        }
+        if self.buffered.len() < 5 + size {
+            return Ok(None);
+        }
+
+        let mut frame = self.buffered.split_to(5 + size);
+        frame.advance(5);
+        Ok(Some(frame.freeze()))
+    }
+
+    pub fn finish(self) -> Result<(), ConnectError> {
+        if self.buffered.is_empty() {
+            return Ok(());
+        }
+        if self.buffered.len() < 5 {
+            return Err(ConnectError::new(
+                ConnectCode::InvalidArgument,
+                "truncated Connect envelope: missing 5-byte header",
+            ));
+        }
+        let size = u32::from_be_bytes([
+            self.buffered[1],
+            self.buffered[2],
+            self.buffered[3],
+            self.buffered[4],
+        ]) as usize;
+        Err(ConnectError::new(
+            ConnectCode::InvalidArgument,
+            format!(
+                "truncated Connect envelope: declared {size} bytes, got {}",
+                self.buffered.len() - 5
+            ),
+        ))
+    }
 }
 
 /// Decode the first envelope from a fully-buffered streaming request body.
@@ -184,6 +261,49 @@ mod tests {
         let mut bad = encode_envelope(0, b"abc").to_vec();
         bad[4] = 200;
         assert!(decode_single_envelope(&bad).is_err());
+    }
+
+    #[test]
+    fn incremental_decoder_handles_chunk_boundaries_and_multiple_frames() {
+        let first = encode_envelope(0, br#"{"start":{}}"#);
+        let second = encode_envelope(0, br#"{"keepalive":{}}"#);
+        let joined = [first.as_ref(), second.as_ref()].concat();
+        let mut decoder = EnvelopeDecoder::default();
+
+        decoder.push(&joined[..3]);
+        assert!(decoder.next_message().unwrap().is_none());
+        decoder.push(&joined[3..first.len() + 2]);
+        assert_eq!(
+            decoder.next_message().unwrap().unwrap().as_ref(),
+            br#"{"start":{}}"#
+        );
+        assert!(decoder.next_message().unwrap().is_none());
+        decoder.push(&joined[first.len() + 2..]);
+        assert_eq!(
+            decoder.next_message().unwrap().unwrap().as_ref(),
+            br#"{"keepalive":{}}"#
+        );
+        assert!(decoder.next_message().unwrap().is_none());
+        decoder.finish().unwrap();
+    }
+
+    #[test]
+    fn incremental_decoder_rejects_flags_and_truncated_tail() {
+        let mut decoder = EnvelopeDecoder::default();
+        decoder.push(&encode_envelope(END_STREAM_FLAG, b"{}"));
+        assert_eq!(
+            decoder.next_message().unwrap_err().code,
+            ConnectCode::InvalidArgument
+        );
+
+        let frame = encode_envelope(0, b"abcdef");
+        let mut decoder = EnvelopeDecoder::default();
+        decoder.push(&frame[..frame.len() - 1]);
+        assert!(decoder.next_message().unwrap().is_none());
+        assert_eq!(
+            decoder.finish().unwrap_err().code,
+            ConnectCode::InvalidArgument
+        );
     }
 
     #[test]

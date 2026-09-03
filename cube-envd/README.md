@@ -28,7 +28,7 @@ Implemented (behavior matched fixture-by-fixture against the baseline):
 | Surface | Detail |
 |---|---|
 | REST | `GET /health` (204), `POST /init` (envVars merge + optional accessToken), `GET /envs`, `GET /metrics`, `GET/POST /files` (octet-stream + multipart, relative paths, ownership, error vocabulary) |
-| `process.Process` | `Start` (Connect JSON streaming: start/data/end events; `pty` allocates a real pty (stdout/stderr merge into `data.pty`, CRLF line discipline, window size seeded from `pty.size`); `cwd` validated — a missing/non-directory cwd is rejected with `invalid_argument` and the working directory is entered *after* the privilege drop so the target user's permissions apply; `Connect-Timeout-Ms` kills the child's whole process group and ends with `deadline_exceeded`; client disconnect leaves the child running), `Connect` (attach to a running process by pid/tag; emits start/data/end from the attach point onward — no history replay; never kills or reaps), `List`, `SendSignal` (whole-group signal), `Update` (resize a running pty's window) |
+| `process.Process` | `Start` (Connect JSON streaming: start/data/end events; optional pipe stdin defaults on; `pty` allocates a real pty with merged `data.pty` output, CRLF line discipline and initial window size; `cwd` validation and privilege drop; whole-group deadline cleanup), `Connect` (attach by pid/tag from the current output head), `List`, `SendSignal`, `SendInput`, `StreamInput`, `CloseStdin` and `Update` |
 | `filesystem.Filesystem` | `Stat`, `ListDir` (BFS depth), `MakeDir` (ownership on every created component), `Move`, `Remove` (idempotent) |
 | CLI | Go `flag` compatible: `-port` (u16, `-port N` or `-port=N`), `-isnotfc` (accepted and ignored; `-isnotfc=false` is **rejected** — only the non-FC mode is implemented), `-version`/`--version`, `-commit`, `-h`/`-help` (usage, exit 0); `-cmd`/`-cgroup-root` are recognized but not implemented yet (warned and skipped); **any other flag or positional argument is a usage error — Go's message + usage on stderr + exit 2** |
 | Auth | `Authorization: Basic base64("<user>:")` / `username` query, `/etc/passwd` resolution, default user `root`, privilege drop per operation, `X-Access-Token` enforced only after /init provides one |
@@ -37,8 +37,6 @@ Out of MVP scope — these return stable, protocol-correct `unimplemented`
 errors (HTTP 501 on unary surfaces, EndStream error frames on streaming
 surfaces), never panics or silent success:
 
-- interactive stdin (`SendInput`, `StreamInput`, `CloseStdin`,
-  `Start.stdin=true`)
 - watch family (`WatchDir`, `CreateWatcher`, `GetWatcherEvents`,
   `RemoveWatcher`)
 - `/files/compose`, gzip download encoding, `/files` signature verification
