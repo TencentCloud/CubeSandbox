@@ -78,7 +78,7 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 - 插件要表达「没有合适节点」时应返回空候选列表而不是返回错误：插件错误一律按内部错误处理，由该插件的 `failure` 策略裁决，永远不会被归类为 `no_candidate`——因此返回错误的 Filter 不会触发 `backoff`，只会让请求失败（或 fail-open）。
 - 输出校验比引入插件系统之前更严格，且其中大部分现在对 legacy default 管线同样生效：Filter 结果中包含 nil、空 id、重复或非候选节点会让请求直接失败；Score 结果中包含这类条目或 NaN/Inf 值会使该 Score 的整个结果失效（在 legacy `ScoreSkip` 绑定下该 scorer 会被整体剔除，而旧路径会静默把这些条目并入聚合结果，陈旧节点甚至可能因此重新进入候选集）。Profile 编译出的 Score 还要求每个分数落在 [0,100] 内且覆盖全部候选。把第三方 `go` Score 加入 Profile 前请先确认其值域边界——并注意现有 `enable_scorers` 部署同样会套用更严格的处理。
 
-配置在启动或热更新时整体编译；插件名、路由、表达式、权重、选点方式或失败策略无效时，新 Profile 集不会生效，调度器继续使用上一份完整管线。
+配置在启动或热更新时整体编译；插件名、路由、表达式、权重、选点方式或失败策略无效时，新 Profile 集不会生效，调度器继续使用上一份完整管线。`scheduler` 配置段未发生变化的热更新会整体跳过重编译——外部插件 socket 不会重新建连，暂时不可达的插件也不会把一次无关的热更新变成被拒绝的更新。
 
 ## 运维注意事项
 
@@ -100,6 +100,7 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 - `multi_factor_weighted_average` 的 legacy 后台分数刷新协程只要对应配置段存在就会启动，并在任一已编译管线（包括 legacy 回落管线）绑定该 scorer、**或** legacy `enable_scorers` 条件成立（配置了 `score.resource_weights` 且 `enable_scorers` 非空——沿用引入插件前的激活条件，保证 `node.Score` 运维端点在原有部署里不丢数据）时保持刷新；其余情况下空转。该检查每个 tick 都会执行，因此热加载新绑定或移除该 scorer 无需重启即可生效；"已配置但未绑定"的部署只多一个空转 goroutine，而不再每个 `ScoreInterval` 对全量节点写一次分数。
 - legacy default 管线现在与自定义 Profile 共用同一个并发运行器：Score 在请求内并行执行，且畸形的 Filter/Score 输出（nil、空 id、重复或非候选条目、NaN/Inf 值）会被拒绝，而不是像旧路径那样静默并入结果。仓库内置插件均满足该契约；升级前请审计任何第三方 `go` 插件。
 - legacy `enable_filters` 管线中 Filter 返回错误现在会使请求直接失败；只有候选集被清空（`SelectNodesNoRes`）才会继续回落到 `BackoffSelect`（preFilter 阶段仍保留旧的任意错误兜底）。此前任何 Filter 错误——包括插件自身缺陷或 panic——都会被静默兜底为宽松池随机挑选，把坏掉的 Filter 掩盖成随机放置。请修复或移除报错的 Filter，不要依赖错误兜底。
+- legacy 的模板请求 backoff 豁免——启用 `template_locality` 时模板请求被过滤为空会直接失败而不是进入 backoff——只对 legacy 管线生效。自定义 Profile 把 `template_locality` 保留为强制 Guard（该侧仍然快速失败），但 `no_candidate: backoff` 的 Profile 在 **prefilter** 阶段得到空候选时（例如 affinity `NodeSelector` 匹配不到任何节点）会回落到宽松池，而 `backoffSelectWithPipeline` 只重跑强制 Guard、不重跑 prefilter 的 affinity 匹配——因此在 Profile 管线上，模板请求的 affinity 约束可能被静默放宽。如果依赖旧的快速失败行为，请把模板流量路由到 `no_candidate: fail` 的 Profile。
 - 配置 `profiles` 但没有 `default: true` 条目时，未命中任何路由的请求会回落到由 `enable_filters`/`enable_scorers` 编译出的 legacy 管线；若完全没有 legacy 配置段，该回落管线是无守卫的纯随机选择。编译期会输出一条含已编译 Filter/Score 数量的 RISK 告警——除非明确依赖该回落，否则请配置默认 Profile。
 - 内置 `go` 资源过滤器（`cpu`、`mem`、`disk`）对未携带对应资源规格的请求会直接报错，与 legacy 管线行为完全一致（legacy 也是无条件运行它们的）。可能收到无规格请求（例如传入空规格的 restore 放置路径）的 Profile 不应把它们列为 Guard 或 Filter。注意 `default: true` 的 Profile 无法豁免：强制 Guard 永远执行，因此在资源紧张的集群上，被默认 Profile 接住的无规格流量可能硬失败且无 backoff 兜底；存在默认 Profile 时编译期会输出 RISK 告警。
 - 当完全未加载 Profile 集时（例如启动期请求早于 `InitScheduler` 完成），`Select` 现在会以"scheduler profile is not initialized"快速失败；此前它会回落到包级全局 Selector 列表，而新的初始化路径不再填充这些列表。

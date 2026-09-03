@@ -8,6 +8,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"sync/atomic"
 
@@ -70,7 +71,7 @@ func InitScheduler(ctx context.Context) error {
 	}
 	scheduler.registry = registry
 	scheduler.profiles.Store(profiles)
-	config.AppendConfigWatcher(&schedulerConfigWatcher{ctx: ctx, registry: registry})
+	config.AppendConfigWatcher(&schedulerConfigWatcher{ctx: ctx, registry: registry, lastCompiled: config.GetConfig().Scheduler})
 	// The async refresher writes n.Score on every cached node each
 	// ScoreInterval; keep it inert while no compiled pipeline (the legacy
 	// fallback included) binds the scorer AND the legacy enable_scorers
@@ -98,9 +99,22 @@ func InitScheduler(ctx context.Context) error {
 type schedulerConfigWatcher struct {
 	ctx      context.Context
 	registry *plugin.Registry
+	// lastCompiled is the scheduler section the live profile set was
+	// compiled from. Hot reloads deliver a freshly decoded Config graph (the
+	// global pointer is swapped, never mutated in place), so a DeepEqual
+	// against the previous section is a sound change detector.
+	lastCompiled *config.WrapperSchedulerConf
 }
 
 func (w *schedulerConfigWatcher) OnEvent(updated *config.Config) {
+	// Recompile only when the scheduler section actually changed: Compile
+	// reads nothing outside it, and a full recompile re-dials and
+	// re-handshakes every external plugin socket — on an unrelated reload
+	// that both churns connections and lets a momentarily-unreachable
+	// plugin reject a reload whose global config has already swapped in.
+	if updated == nil || reflect.DeepEqual(updated.Scheduler, w.lastCompiled) {
+		return
+	}
 	compiled, err := profile.Compile(w.ctx, updated, w.registry)
 	if err != nil {
 		log.G(w.ctx).Errorf("scheduler profile reload rejected; keeping previous pipeline: %v", err)
@@ -114,5 +128,9 @@ func (w *schedulerConfigWatcher) OnEvent(updated *config.Config) {
 			log.G(w.ctx).Errorf("scheduler profiles: closing the retired set: %v", err)
 		}
 	}
+	// Only a successfully compiled-and-swapped section becomes the
+	// fingerprint: a rejected reload must be retried by the next event, not
+	// remembered as if it had taken effect.
+	w.lastCompiled = updated.Scheduler
 	log.G(w.ctx).Infof("scheduler profiles reloaded: %v", compiled.Names())
 }

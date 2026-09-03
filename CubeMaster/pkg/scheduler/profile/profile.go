@@ -334,11 +334,12 @@ func compileProfile(ctx context.Context, conf config.SchedulerProfileConf, regis
 		pipeline.Scores = append(pipeline.Scores, ScorePlugin{
 			Name: name, Selector: selector, Weight: weight, Failure: scoreFailure,
 			DefaultScore: pluginConf.DefaultScore, ForceEnabled: true,
-			// Empty-result tolerance ("not applicable, skip") is curated by
-			// name, not by plugin type: a third-party go scorer that returns
-			// nothing must trip the failure policy, not silently degrade the
-			// ranking to candidate order.
-			AllowEmpty: emptyTolerantBuiltinScores[name],
+			// Empty-result tolerance ("not applicable, skip") is curated for
+			// the in-tree go built-ins only — by kind AND name: an expr/grpc
+			// scorer configured under a curated name, or any third-party go
+			// scorer, must trip the failure policy on an empty result rather
+			// than silently degrade the ranking to candidate order.
+			AllowEmpty: profilePluginKind(pluginConf) == plugin.TypeGo && emptyTolerantBuiltinScores[name],
 		})
 		set.addCloser(selector)
 	}
