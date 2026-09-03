@@ -168,7 +168,7 @@ spec:
                   name: {{ include "cube.secretName" . }}
                   key: redis-password
             - name: REDIS_DB
-              value: {{ .Values.cubeProxy.redis.db | quote }}
+              value: {{ include "cube.redisDB" . | quote }}
             - name: REDIS_MASTER_NAME
               value: {{ .Values.redis.masterName | default "" | quote }}
             - name: REDIS_SENTINEL_NODES
@@ -235,7 +235,7 @@ spec:
                   name: {{ include "cube.secretName" . }}
                   key: redis-password
             - name: CUBE_PROXY_REGISTRY_REDIS_DB
-              value: {{ .Values.cubeProxy.redis.db | quote }}
+              value: {{ include "cube.redisDB" . | quote }}
             - name: CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME
               value: {{ .Values.redis.masterName | default "" | quote }}
             - name: CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES

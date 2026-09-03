@@ -139,6 +139,8 @@ spec:
                 secretKeyRef:
                   name: {{ include "cube.secretName" . }}
                   key: redis-password
+            - name: REDIS_DB
+              value: {{ include "cube.redisDB" . | quote }}
             - name: REDIS_MASTER_NAME
               value: {{ .Values.redis.masterName | default "" | quote }}
             - name: REDIS_SENTINEL_NODES

@@ -68,6 +68,13 @@
 {{- if hasKey (.Values.images | default dict) "pause" }}
 {{- fail "images.pause was removed; Big Pod placeholder slots (cube-slot-*) are gone. Remove images.pause from your values." }}
 {{- end }}
+{{- /* Only fail on non-zero nested db: old chart defaults shipped db:0, and helm upgrade keeps those keys in release values. */}}
+{{- if and (hasKey ((.Values.cubeProxy).redis | default dict) "db") (ne (((.Values.cubeProxy).redis).db | default 0 | int) 0) }}
+{{- fail "cubeProxy.redis.db was removed; set top-level redis.db instead (Master / Proxy / LCM / Ops share one logical DB)." }}
+{{- end }}
+{{- if and (hasKey ((.Values.lifecycleManager).redis | default dict) "db") (ne (((.Values.lifecycleManager).redis).db | default 0 | int) 0) }}
+{{- fail "lifecycleManager.redis.db was removed; set top-level redis.db instead (Master / Proxy / LCM / Ops share one logical DB)." }}
+{{- end }}
 {{- if hasKey (.Values.cubeNode | default dict) "placeholderSlots" }}
 {{- fail "cubeNode.placeholderSlots was removed; Big Pod no longer reserves cube-slot-1..6. Remove cubeNode.placeholderSlots from your values." }}
 {{- end }}
