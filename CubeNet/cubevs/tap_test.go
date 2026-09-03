@@ -124,10 +124,11 @@ func TestDeleteTAPDeviceMetadataEntriesLookupErrorDoesNotPartiallyDelete(t *test
 }
 
 func TestTAPMetadataLifecycleContinuesWithoutMetricsMap(t *testing.T) {
-	mountBpffs(t)
-	pinTAPMetadataMapsWithoutMetrics(t)
-
 	const ifindex = uint32(41)
+	// pinPolicyMaps mounts the scratch bpffs. Metadata is pinned on that
+	// same mount afterwards; a second mountBpffs would hide it.
+	pinPolicyMaps(t, ifindex)
+	pinTAPMetadataMapsWithoutMetrics(t)
 	ip := net.ParseIP("10.0.0.41")
 	if err := AddTAPDevice(ifindex, ip, "sandbox-41", 1, MVMOptions{}); err != nil {
 		t.Fatalf("AddTAPDevice failed without metrics map: %v", err)
@@ -146,6 +147,34 @@ func TestTAPMetadataLifecycleContinuesWithoutMetricsMap(t *testing.T) {
 	}
 	if _, err := GetTAPDevice(ifindex); !errors.Is(err, ebpf.ErrKeyNotExist) {
 		t.Fatalf("GetTAPDevice after delete error=%v, want ErrKeyNotExist", err)
+	}
+}
+
+func TestDeleteTAPDevicePolicyMapsDropsDNSTrackRateLimit(t *testing.T) {
+	const ifindex = uint32(77)
+	pinPolicyMaps(t, ifindex)
+	pinTAPMetadataMapsWithoutMetrics(t)
+	if err := setDNSTrackRateLimit(ifindex); err != nil {
+		t.Fatalf("install rate limit: %v", err)
+	}
+
+	if err := DeleteTAPDevicePolicyMaps(ifindex); err != nil {
+		t.Fatalf("DeleteTAPDevicePolicyMaps: %v", err)
+	}
+	m, err := loadPinnedMap(MapNameDNSTrackRL)
+	if err != nil {
+		t.Fatalf("load %s: %v", MapNameDNSTrackRL, err)
+	}
+	defer m.Close()
+	var state dnsTrackRLState
+	key := ifindex
+	err = m.Lookup(&key, &state)
+	if !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Fatalf("rate-limit entry after destroy: %v, want ErrKeyNotExist", err)
+	}
+
+	if err := DeleteTAPDevicePolicyMaps(ifindex); err != nil {
+		t.Fatalf("second DeleteTAPDevicePolicyMaps: %v", err)
 	}
 }
 

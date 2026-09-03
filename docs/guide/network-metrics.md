@@ -180,7 +180,7 @@ and the eBPF datapath never creates an entry after a key miss.
 | Metadata repair, idempotent upsert, or legacy TAP replacement | `UpsertTAPDeviceMetadata` attempts the same reset before writing metadata | A successful update resets counters to zero; failure leaves the previous map state unchanged |
 | Network-policy update | Only policy maps are changed | Counters continue |
 | Sandbox rollback with the same TAP/IP | Only TAP/session generations are changed | Counters do not roll back or reset |
-| CubeVS initialization recreates `sandbox_metrics` | Every entry is removed; startup recovery independently ensures an entry for each active TAP after validating its metadata | Successful entries restart at zero; an ensure failure leaves that `sandbox_ip` series unavailable |
+| CubeVS initialization | The pinned map is reused. `Init` does not delete or recreate it | Counters already in the map survive the process restart |
 
 The ensure operation writes a zero value with `UpdateAny`, replacing any entry
 already associated with the IP. User space attempts the map update before
@@ -189,9 +189,12 @@ subsequent TAP metadata or policy programming. If an old entry exists, a failed
 update leaves its counters unchanged; otherwise the sandbox remains without a
 metrics entry.
 
-Startup recovery performs the same ensure independently of metadata repair.
-This repopulates a recreated map even when the pinned TAP metadata already
-matches the recovered sandbox and does not need an upsert.
+Startup recovery still runs that ensure after the pinned TAP metadata has
+been checked, including when the metadata already matches and no upsert is
+required. A successful ensure writes zero over the surviving entry, so that
+recovered sandbox starts again at zero. A failed ensure leaves the previous
+entry in place. Sandboxes the recovery pass does not visit keep whatever
+counters the map already held.
 
 A new TAP registration proceeds in this order:
 
@@ -221,14 +224,13 @@ or retains the previous entry when the overwrite failed.
   does not appear in the Prometheus response, so network metrics for that
   sandbox are unavailable.
 
-::: info Empty data after restart
-CubeVS initialization intentionally recreates `sandbox_metrics`; counters are
-not persistent. Startup recovery independently ensures an entry for every
-active TAP, so successful entries resume exporting from zero even when their
-metadata was already intact. If that ensure fails, the sandbox exports no
-counter series until a later recovery, metadata upsert, TAP re-registration, or
-new sandbox lifecycle succeeds. An absent series means missing data, not a zero
-counter or no network traffic.
+::: info Counters survive CubeVS initialization
+`Init` does not recreate `sandbox_metrics`, so the pinned counters are
+persistent across a CubeVS process restart. Startup recovery then ensures an
+entry for every recovered TAP. Success resets that sandbox to zero; failure
+keeps the counters that were already there. An IP the recovery pass does not
+visit is left unchanged. An absent series still means the key is missing, not
+that the counter is zero or that the sandbox sent no traffic.
 :::
 
 `cubesandbox_network_exporter_up{source="sandbox"} == 1` means only that the
@@ -244,7 +246,7 @@ active TAP/IP inventory with the set of `sandbox_ip` labels in Prometheus.
 | Deleting an entry that does not exist | Treat as idempotent success |
 | Metrics-entry deletion fails | Log a warning without blocking TAP, IP, or port reclamation |
 | A later sandbox reuses the IP | `EnsureSandboxTrafficMetrics` overwrites the entry with zero before publishing the new metadata |
-| CubeVS initialization | Recreate the complete `sandbox_metrics` map; all old counters disappear and omitted sandboxes have empty data |
+| CubeVS initialization | Leave the pinned map in place. Recovery does not delete entries it does not visit |
 
 Network-policy updates and rollback under the same network assignment do not
 delete or reset an entry. Metadata refresh resets the entry but does not delete
@@ -307,12 +309,13 @@ entries; session-map scanning remains in the background reaper.
 | Sandbox rollback with the same network assignment | Counters continue; they are not snapshot-aware | Stale sessions are removed and the next snapshot converges |
 | Sandbox deletion | Series is removed after TAP cleanup | Sessions disappear after removal/reaping |
 | Sandbox IP reuse | Ensure overwrites the entry with zero before registration; failure may carry residual counters into the new lifecycle | Sessions follow their own lifecycle |
-| CubeVS/Cubelet network initialization | Recreate `sandbox_metrics`; recovery independently ensures each active sandbox at zero, while ensure failures remain absent | The in-memory cache starts empty and is published by the reaper |
+| CubeVS/Cubelet network initialization | The pinned map and its counters survive `Init`. Recovery ensure resets each recovered sandbox to zero on success, and leaves the previous counters on failure | The in-memory cache starts empty and is published by the reaper |
 
-These counters are scoped to the current CubeVS runtime and sandbox IP
-assignment. Prometheus should treat a CubeVS restart, metadata upsert, or IP
-reassignment as a counter-reset boundary. An ensure warning means that boundary
-is unreliable and the series may still contain values from the previous entry.
+These counters are scoped to the pinned `sandbox_metrics` map and the current
+sandbox IP assignment. A CubeVS process restart does not by itself reset them.
+Prometheus should treat a successful recovery ensure, metadata upsert, or IP
+reassignment as a counter-reset boundary. An ensure warning means that sandbox
+kept the counters already stored for its IP.
 
 The label is `sandbox_ip`, not `sandbox_id`, because the datapath's stable,
 available ownership key is the assigned IPv4 address. Join it with control-plane
