@@ -558,11 +558,6 @@ func exportJSON(results []IterResult, cfg *Config) {
 		configBlock["rate_per_sec"] = cfg.Rate
 		configBlock["lifetime_min_s"] = cfg.LifetimeMin
 		configBlock["lifetime_max_s"] = cfg.LifetimeMax
-		// Machine-readable dry-run marker: a scheduled dry-run shares rate/
-		// lifetime/concurrency/templates/seed with a real run of the same
-		// flags, so without this key compare cannot tell simulated latencies
-		// from measured ones.
-		configBlock["dry_run"] = cfg.DryRun
 		templates := make([]map[string]interface{}, len(cfg.Templates))
 		for i, t := range cfg.Templates {
 			templates[i] = map[string]interface{}{
@@ -573,6 +568,16 @@ func exportJSON(results []IterResult, cfg *Config) {
 			}
 		}
 		configBlock["templates"] = templates
+	}
+	if cfg.Scheduled || cfg.DryRun {
+		// Machine-readable dry-run marker: a dry-run shares rate/lifetime/
+		// concurrency/templates/seed (scheduled) or template/concurrency/
+		// total (legacy) with a real run of the same flags, so without this
+		// key compare cannot tell simulated latencies from measured ones.
+		// Legacy real runs keep the exact pre-scheduled export shape (no new
+		// key); legacy dry-runs opt into the marker so compare's warning
+		// fires for them too.
+		configBlock["dry_run"] = cfg.DryRun
 	}
 
 	summaryBlock := map[string]interface{}{

@@ -414,6 +414,44 @@ closed:
 	}
 }
 
+// TestRunScheduledStopBeforeDispatch: with stop already closed and every
+// arrival offset in the past (ASAP pace, or a dispatcher that fell behind
+// schedule), the dispatcher must release nothing — without the
+// pre-admission stop check the two-case semaphore select admits requests at
+// random against the closed stop channel.
+func TestRunScheduledStopBeforeDispatch(t *testing.T) {
+	cfg := &Config{
+		Concurrency:    4,
+		Total:          12,
+		Mode:           "create-delete",
+		DryRun:         true,
+		DryLatencyMean: 2,
+		DryLatencyStd:  1,
+		DryErrorRate:   0,
+		Seed:           5,
+		Scheduled:      true,
+		Templates:      []TemplateSpec{{TemplateID: "tpl-stop", Weight: 1}},
+	}
+	sched := make([]ScheduledRequest, cfg.Total)
+	for i := range sched {
+		sched[i] = ScheduledRequest{
+			Seq:           i + 1,
+			ArrivalOffset: 0, // already due at dispatch start
+			TemplateID:    "tpl-stop",
+			CpuMillis:     1000,
+			MemMiB:        2048,
+			Lifetime:      10 * time.Millisecond,
+		}
+	}
+	resultCh := make(chan IterResult, cfg.Total)
+	stop := make(chan struct{})
+	close(stop) // the quit lands before dispatch begins
+	RunScheduled(cfg, sched, resultCh, nil, stop)
+	for r := range resultCh {
+		t.Fatalf("request released despite the closed stop channel: %+v", r)
+	}
+}
+
 // TestBenchOneLegacyLeavesScheduledFieldsZero pins legacy behavior: without
 // scheduling flags the new IterResult diagnostics stay zero.
 func TestBenchOneLegacyLeavesScheduledFieldsZero(t *testing.T) {

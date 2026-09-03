@@ -755,6 +755,35 @@ func TestCompareConfigMismatchNote(t *testing.T) {
 	}
 }
 
+func TestCompareConfigMismatchNoteRequiresDispatchRows(t *testing.T) {
+	// Legacy-vs-legacy: the concurrency difference is real, but neither side
+	// has queue_delay_*/dispatch_* rows, so the note — which speaks only
+	// about those rows — must not fire.
+	dir := t.TempDir()
+
+	b1 := writeTempFile(t, dir, "base-legacy.json", `{
+		"config": {"concurrency": 5},
+		"summary": {"success_rate": 0.9, "create_p50_ms": 100}
+	}`)
+	c1 := writeTempFile(t, dir, "cand-legacy.json", `{
+		"config": {"concurrency": 10},
+		"summary": {"success_rate": 0.9, "create_p50_ms": 80}
+	}`)
+
+	out := filepath.Join(dir, "report.md")
+	var buf bytes.Buffer
+	if err := runCompare([]string{"--baseline", b1, "--candidate", c1, "-o", out}, &buf); err != nil {
+		t.Fatalf("runCompare: %v", err)
+	}
+	saved, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if strings.Contains(string(saved), "client-config artifacts") {
+		t.Errorf("legacy-vs-legacy pair without dispatch rows got the mismatch note\n%s", saved)
+	}
+}
+
 func TestCompareScheduledShapeUsesConfig(t *testing.T) {
 	// A partial scheduled export loses its queue_delay_*/per_template.* keys
 	// to the drop, so shape detection must come from the config block:

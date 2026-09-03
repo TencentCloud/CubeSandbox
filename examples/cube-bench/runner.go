@@ -290,6 +290,18 @@ dispatch:
 				break dispatch
 			}
 		}
+		// The arrival-timer branch above is the only stop check while the
+		// dispatcher is on pace; once it falls behind (arrival offsets already
+		// in the past, e.g. saturation or ASAP mode) that branch is skipped,
+		// and in the two-case select below a ready semaphore slot would
+		// compete with the closed stop channel at random, releasing requests
+		// after quit. Re-check stop first so a quit under back-pressure stops
+		// dispatch deterministically.
+		select {
+		case <-stop:
+			break dispatch
+		default:
+		}
 		wg.Add(1)
 		select {
 		case sem <- struct{}{}:

@@ -356,6 +356,44 @@ func TestExportJSONLegacyOmitsScheduledKeys(t *testing.T) {
 			t.Fatalf("legacy raw[0] must not contain %q", key)
 		}
 	}
+	// A legacy real run keeps the exact pre-scheduled shape: no dry_run key.
+	if _, ok := config["dry_run"]; ok {
+		t.Fatalf("legacy non-dry-run config must not contain %q", "dry_run")
+	}
+}
+
+// TestExportJSONLegacyDryRunMarked: a legacy dry-run export opts into the
+// machine-readable dry_run marker so compare's synthesized-latency warning
+// fires for it too.
+func TestExportJSONLegacyDryRunMarked(t *testing.T) {
+	cfg := &Config{
+		Template:       "tpl-a",
+		Mode:           "create-delete",
+		DryRun:         true,
+		requestHeaders: map[string]string{},
+		elapsed:        5,
+	}
+	cfg.Output = t.TempDir() + "/report.json"
+	results := []IterResult{{Seq: 1, CreateMs: 100, DeleteMs: 40}}
+
+	exportJSON(results, cfg)
+
+	data, err := os.ReadFile(cfg.Output)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	config := report["config"].(map[string]any)
+	if config["dry_run"] != true {
+		t.Fatalf("legacy dry-run config dry_run = %v, want true", config["dry_run"])
+	}
+	// The rest of the legacy shape is untouched.
+	if _, ok := config["workload"]; ok {
+		t.Fatalf("legacy dry-run config must not contain %q", "workload")
+	}
 }
 
 func TestExportJSONScheduledASAPOmitsDispatchKeys(t *testing.T) {

@@ -345,15 +345,18 @@ Caveats when reading verdicts:
   compare like with like.
 - **Mismatched pacing config across the groups is flagged.** When the two
   groups were run with different `concurrency`/`rate_per_sec`/`lifetime_*`
-  values (per-group de-duplicated; a missing key is not a mismatch), the
-  report prints a note that `queue_delay_*`/`dispatch_*` verdicts on such a
-  pair are client-config artifacts — rerun both sides under the same pacing
-  flags before trusting those rows.
-- **Dry-run exports are marked and flagged.** Scheduled exports carry
-  `config.dry_run`, surfaced in the report's config highlights; any group
-  whose export is a dry-run gets a warning that its latencies are synthesized
-  (lifetime sleeps clamped to 25ms, errors drawn from `--dry-error-rate`), so
-  verdicts over them describe the simulator, not a scheduler or a real API.
+  values (per-group de-duplicated; a missing key is not a mismatch) and at
+  least one side actually carries `queue_delay_*`/`dispatch_*` rows, the
+  report prints a note that those verdicts are client-config artifacts —
+  rerun both sides under the same pacing flags before trusting those rows.
+  A legacy-vs-legacy pair (no dispatch rows anywhere) never raises it.
+- **Dry-run exports are marked and flagged.** Scheduled exports always carry
+  `config.dry_run`, and legacy dry-run exports opt into the same marker
+  (legacy real runs keep the exact pre-scheduled export shape); the key is
+  surfaced in the report's config highlights, and any group whose export is
+  a dry-run gets a warning that its latencies are synthesized (lifetime
+  sleeps clamped to 25ms, errors drawn from `--dry-error-rate`), so verdicts
+  over them describe the simulator, not a scheduler or a real API.
 - **Rounds files flatten only each round's `summary`.** Round-level stat
   blocks outside `summary` are dropped; today's only rounds producer
   (schedsim) carries just `seed` + `summary` per round, so nothing is lost

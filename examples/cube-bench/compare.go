@@ -953,8 +953,15 @@ func uniqueConfigValue(g *sampleGroup, key string) (string, bool) {
 
 // configMismatchNote flags a scheduled-vs-scheduled comparison whose two
 // groups were paced differently. Absence of a key on either side (legacy
-// exports) is not a mismatch; only two present, distinct values are.
+// exports) is not a mismatch; only two present, distinct values are. The
+// note only fires when at least one group actually carries
+// queue_delay_*/dispatch_* samples: those are the rows it talks about, and
+// pointing a legacy-vs-legacy reader (which has no such rows anywhere in the
+// report) at them is misleading.
 func configMismatchNote(base, cand *sampleGroup) string {
+	if !hasDispatchMetrics(base) && !hasDispatchMetrics(cand) {
+		return ""
+	}
 	var diffs []string
 	for _, key := range configCompareKeys {
 		bv, bok := uniqueConfigValue(base, key)
@@ -970,6 +977,21 @@ func configMismatchNote(base, cand *sampleGroup) string {
 		"`queue_delay_*`/`dispatch_*` verdicts on such a pair are client-config artifacts, not scheduler "+
 		"effects — rerun both sides under the same `--rate`/`--concurrency`/`--lifetime` before trusting "+
 		"those rows.", strings.Join(diffs, ", "))
+}
+
+// hasDispatchMetrics reports whether any sample in the group carries
+// queue_delay_*/dispatch_* keys — the rows configMismatchNote speaks about.
+// It runs after dropUntrustworthyDispatchKeys, so a saturated/partial group
+// whose dispatch keys were all dropped counts as not having them.
+func hasDispatchMetrics(g *sampleGroup) bool {
+	for _, s := range g.samples {
+		for k := range s {
+			if strings.HasPrefix(k, "queue_delay_") || strings.HasPrefix(k, "dispatch_") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func formatConfigValue(v any) string {
