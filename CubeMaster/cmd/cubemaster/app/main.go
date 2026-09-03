@@ -232,17 +232,8 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 // process; whoever loses the lock race blocks until the winner is done,
 // then sees the schema is already at HEAD and returns immediately.
 func initDatabaseSchema(ctx context.Context, cfg *config.Config) error {
-	// The schema produced by CubeDB/migrate/migrations is a single catalog
-	// covering the host/node inventory tables (t_cube_host_*, t_cube_node_*)
-	// and the instance tables (t_cube_template_*, t_cube_instance_*,
-	// t_cube_sandbox_spec, ...), all in the one configured database.
-	// Build the dao config through the same mapping as the integration /
-	// mock-debug bootstrap, so the two dao.Open identities cannot drift.
-	// The snapshots are still read at different times (mock_db reads the
-	// live global via config.GetDbConfig(); this reads cfg captured at
-	// Run() start), so a config hotswap landing between MockInit and here
-	// would still change the identity and fail this dao.Open with
-	// "dao: already opened with ... (requested ...)".
+	// Migrations put every table in the one configured database; build the
+	// dao config through the shared helper so both dao.Open identities match.
 	daoCfg, err := db.ConfigFromDBConfig(cfg.InstanceDBConfig)
 	if err != nil {
 		return fmt.Errorf("dao: %w", err)
