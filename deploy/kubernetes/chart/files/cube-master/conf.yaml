@@ -72,7 +72,7 @@ redis:
   sentinel_nodes: {{ .Values.redis.sentinelNodes | default "" | quote }}
   sentinel_password: {{ .Values.redis.sentinelPassword | default "" | quote }}
   password: {{ .Values.redis.password | quote }}
-  db_no: 0
+  db_no: {{ include "cube.redisDB" . }}
   max_idle: 8
   max_active: 32
   idle_timeout: 30
