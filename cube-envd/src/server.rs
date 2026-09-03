@@ -55,10 +55,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/process.Process/CloseStdin",
             post(unary_unimplemented("Process/CloseStdin")),
         )
-        .route(
-            "/process.Process/Update",
-            post(unary_unimplemented("Process/Update")),
-        )
+        .route("/process.Process/Update", post(process_update))
         // filesystem.Filesystem
         .route("/filesystem.Filesystem/Stat", post(fs_stat))
         .route("/filesystem.Filesystem/ListDir", post(fs_list_dir))
@@ -301,6 +298,21 @@ async fn process_send_signal(
         Err(e) => return e.into_response(),
     };
     unary_result(proc_svc::send_signal(&state, &req))
+}
+
+async fn process_update(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    if let Err(e) = rpc_token_check(&state, &headers) {
+        return e.into_response();
+    }
+    let req: crate::msg::process::UpdateRequest = match read_unary_request(&headers, body).await {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    unary_result(proc_svc::update(&state, &req))
 }
 
 // ---------- filesystem handlers ----------

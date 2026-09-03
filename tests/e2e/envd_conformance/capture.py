@@ -521,6 +521,28 @@ def start_req(cmd_args, envs=None, cwd=None, tag=None, stdin=False, pty=None):
     return p
 
 
+def wait_for_tag(tag, timeout=5.0):
+    """Poll List until a process with `tag` is registered; return its pid.
+
+    Removes the registration race: a Start is a streaming request whose
+    process-table insertion happens server-side on a schedule the client cannot
+    observe, so a fixed sleep before a selector RPC is flaky. Polling until the
+    tag is visible makes the follow-up deterministic.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        lst = connect_unary("process.Process/List", {})
+        try:
+            body = json.loads(lst["body"]) if lst["status"] == 200 else {}
+            for p in body.get("processes", []):
+                if p.get("tag") == tag:
+                    return p.get("pid")
+        except Exception:
+            pass
+        time.sleep(0.1)
+    return None
+
+
 def cap_process():
     record("proc_echo", connect_stream("process.Process/Start", start_req("echo hello-baseline")))
     record("proc_stderr_exit3", connect_stream(
@@ -577,10 +599,64 @@ def cap_process():
     disc["file_written"] = connect_unary("filesystem.Filesystem/Stat", {"path": "/tmp/disc_done"}, user="root")
     record("proc_disconnect_keeps_running", disc)
 
-    # PTY start (Go implements it — recorded for divergence documentation)
+    # PTY start (both implementations emit data.pty frames)
     record("proc_pty_probe", connect_stream(
         "process.Process/Start", start_req("echo pty-test", pty={"size": {"cols": 80, "rows": 24}}),
         timeout=10, read_deadline=5))
+
+    # PTY resize (Update): start a pty that reports its window size, resize it
+    # mid-flight, and record both the unary response and the size the process
+    # observes afterward. The coalesced pty stream is "24 80\r\n43 132\r\n"
+    # when both the Start-time size and the resize take effect.
+    upd = {}
+    upd_stream = {}
+
+    def run_resize():
+        upd_stream["r"] = connect_stream(
+            "process.Process/Start",
+            start_req("stty size; sleep 2; stty size", tag="baseline-resize",
+                      pty={"size": {"cols": 80, "rows": 24}}),
+            timeout=15)
+
+    t = threading.Thread(target=run_resize)
+    t.start()
+    time.sleep(0.6)  # first `stty size` is done; the process is inside `sleep 2`
+    upd["update"] = connect_unary(
+        "process.Process/Update",
+        {"process": {"tag": "baseline-resize"},
+         "pty": {"size": {"cols": 132, "rows": 43}}})
+    t.join(timeout=15)
+    upd["stream"] = upd_stream["r"]
+    record("proc_update_resize", upd)
+
+    # Update error/no-op shapes:
+    # - unknown selector is not_found (resolution happens before the resize)
+    record("proc_update_unknown_process", connect_unary(
+        "process.Process/Update",
+        {"process": {"pid": 99999}, "pty": {"size": {"cols": 10, "rows": 10}}}))
+    # - missing pty on a live process is a silent no-op success
+    def run_no_pty():
+        connect_stream("process.Process/Start",
+                       start_req("sleep 10", tag="baseline-nopty",
+                                 pty={"size": {"cols": 80, "rows": 24}}), timeout=20)
+    t2 = threading.Thread(target=run_no_pty)
+    t2.start()
+    no_pty_pid = wait_for_tag("baseline-nopty")
+    record("proc_update_missing_pty", connect_unary(
+        "process.Process/Update", {"process": {"pid": no_pty_pid}}))
+    # - resizing a non-pty (pipe-spawned) process is an internal error
+    def run_pipe():
+        connect_stream("process.Process/Start",
+                       start_req("sleep 10", tag="baseline-pipe"), timeout=20)
+    t3 = threading.Thread(target=run_pipe)
+    t3.start()
+    pipe_pid = wait_for_tag("baseline-pipe")
+    record("proc_update_non_pty", connect_unary(
+        "process.Process/Update",
+        {"process": {"pid": pipe_pid}, "pty": {"size": {"cols": 10, "rows": 10}}}))
+    t2.join(timeout=20)
+    t3.join(timeout=20)
+
     # Connect attach: start a tagged process, then attach to it mid-flight and
     # record the attach stream (start → data → end; no history replay).
     def run_attach_target():

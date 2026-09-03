@@ -34,17 +34,14 @@ pub struct ProcessConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PtySize {
     #[serde(default)]
-    #[allow(dead_code)] // parsed for request validation only; PTY is out of MVP scope
     pub cols: u32,
     #[serde(default)]
-    #[allow(dead_code)]
     pub rows: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Pty {
     #[serde(default)]
-    #[allow(dead_code)] // presence alone routes the request to `unimplemented`
     pub size: Option<PtySize>,
 }
 
@@ -98,6 +95,17 @@ pub struct SendSignalRequest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConnectRequest {
     pub process: ProcessSelector,
+}
+
+/// `process.Process/Update`: resize the pty window of a running process. The
+/// `pty` is optional in the proto; the handler resolves the process first, then
+/// a missing `pty` (or a `pty` without a `size`) is a silent no-op success —
+/// matching Go envd — not a caller error.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateRequest {
+    pub process: ProcessSelector,
+    #[serde(default)]
+    pub pty: Option<Pty>,
 }
 
 // ---------- responses / events ----------

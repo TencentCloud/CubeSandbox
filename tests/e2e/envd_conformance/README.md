@@ -47,7 +47,7 @@ python3 perf.py
 - `PASS` — normalized fixtures identical.
 - `DECLARED-DIFF` — allowlisted in `conformance.py` `DECLARED_DIFFERENT`
   with a reason; every entry maps to the "known differences" table in the
-  cube-envd design doc / PR description (PTY, watch, `/files/compose`,
+  cube-envd design doc / PR description (watch, `/files/compose`,
   gzip, nested-selector leniency, parser-specific error wording).
 - `FAIL` — a real behavioral divergence; fix cube-envd or, if the change
   is intentional, move it to the allowlist **with a reason** in the same PR.
@@ -56,8 +56,8 @@ python3 perf.py
 
 | Path class | Scenarios |
 |---|---|
-| success | health, init→envs, metrics, upload/download (octet+multipart, absolute+relative), Stat/ListDir/MakeDir/Move/Remove, echo/stderr/env-merge/cwd/user switching, large output (2 MiB byte-exact), signal kill |
+| success | health, init→envs, metrics, upload/download (octet+multipart, absolute+relative), Stat/ListDir/MakeDir/Move/Remove, echo/stderr/env-merge/cwd/user switching, large output (2 MiB byte-exact), signal kill, pty |
 | error | bad user (REST 401 / RPC unauthenticated), missing paths, directory download, missing binary (127), malformed JSON |
 | timeout | `Connect-Timeout-Ms` expiry → `deadline_exceeded` + process killed |
 | cancellation | client disconnect mid-stream → process keeps running (List + side-effect check) |
-| unimplemented | PTY / watch family / compose answer with stable protocol-correct errors |
+| unimplemented | watch family / compose answer with stable protocol-correct errors |

@@ -5,7 +5,7 @@
 //! stdout/stderr pump feeding the Start event stream.
 
 use std::collections::HashMap;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::process::Stdio;
 
 use tokio::io::AsyncReadExt;
@@ -113,6 +113,9 @@ pub struct SpawnedProcess {
     /// A clone of the bus's Sender, kept so `Connect` can hand a fresh
     /// receiver to an Nth subscriber attaching to a running process.
     pub sender: broadcast::Sender<PumpEvent>,
+    /// A duplicate of the pty master fd (None for a pipe-spawned process),
+    /// kept so `Update` can resize the window while the pump owns the original.
+    pub pty_master: Option<std::fs::File>,
 }
 
 /// Merge order (later wins): built-in defaults < /init env vars < request envs.
@@ -171,6 +174,62 @@ pub fn resolve_cwd(cwd: Option<&str>, user: &User) -> Result<String, String> {
     }
 }
 
+/// Build the shared `pre_exec` closure: cgroup placement, process/session
+/// setup, privilege drop, then chdir.
+fn child_pre_exec(
+    user: &User,
+    cwd: &str,
+    cgroup_fd: Option<RawFd>,
+    controlling_tty: bool,
+) -> std::io::Result<impl FnMut() -> std::io::Result<()> + Send + Sync> {
+    let uid = user.uid;
+    let gid = user.gid;
+    let groups: Vec<libc::gid_t> = user.groups.iter().map(|g| *g as libc::gid_t).collect();
+    let cwd_c = std::ffi::CString::new(cwd.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "cwd contains NUL"))?;
+    Ok(move || unsafe {
+        // Place the child while it still has the daemon's cgroup privileges.
+        if let Some(dirfd) = cgroup_fd {
+            place_in_cgroup(dirfd)?;
+        }
+
+        if controlling_tty {
+            // A controlling terminal can only be acquired by a session leader.
+            // std::process has already installed the PTY slave on fd 0 before
+            // pre_exec runs, so attach that fd after creating the session.
+            // setsid also makes pid == sid == pgid, preserving whole-group
+            // signalling through kill(-pid, ...).
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        } else if libc::setpgid(0, 0) != 0 {
+            // Pipe-spawned commands need their own process group so timeout
+            // and SendSignal reach descendants as well as the direct child.
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let drop_privs = !(libc::geteuid() == uid && libc::getegid() == gid);
+        if drop_privs {
+            if libc::setgroups(groups.len(), groups.as_ptr()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::setgid(gid) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::setuid(uid) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        if libc::chdir(cwd_c.as_ptr()) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    })
+}
+
 pub fn spawn(
     cmd: &str,
     args: &[String],
@@ -188,57 +247,8 @@ pub fn spawn(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(false);
-
-    let uid = user.uid;
-    let gid = user.gid;
-    let groups: Vec<libc::gid_t> = user.groups.iter().map(|g| *g as libc::gid_t).collect();
-    let cwd_c = std::ffi::CString::new(cwd.as_bytes())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "cwd contains NUL"))?;
     unsafe {
-        command.pre_exec(move || {
-            // 1. Cgroup placement — the first thing the child does, while it
-            //    still runs as the daemon's identity and the subtree is
-            //    writable. Mirrors upstream's clone3(CLONE_INTO_CGROUP): the
-            //    child is inside its subtree before it can touch anything.
-            //    Fail-fast: any error aborts the spawn (the child never
-            //    execs), matching upstream's clone3 error handling.
-            if let Some(dirfd) = cgroup_fd {
-                place_in_cgroup(dirfd)?;
-            }
-            // Put the child in its own process group (leader pgid == pid) so a
-            // timeout or SendSignal can reach the whole tree — a shell plus the
-            // descendants it forks — via kill(-pgid), not just the direct
-            // child. This is a deliberate CubeSandbox extension, not an
-            // upstream mirror: the Go envd process path sets no Setpgid at all
-            // (handler.go:125-133 carries only UseCgroupFD/CgroupFD/
-            // Credential), and the single `Setpgid: true` upstream lives in
-            // internal/port/forward.go — the socat forwarder this crate drops.
-            if libc::setpgid(0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            // Drop privileges: supplementary groups first, then gid, then uid.
-            // Skip when already running as the target identity (unprivileged
-            // unit tests; setgroups needs CAP_SETGID even for a no-op).
-            let drop_privs = !(libc::geteuid() == uid && libc::getegid() == gid);
-            if drop_privs {
-                if libc::setgroups(groups.len(), groups.as_ptr()) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::setgid(gid) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::setuid(uid) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            // chdir AFTER dropping privileges so the target user's directory
-            // permissions are enforced: a dir root can enter but `user` cannot
-            // must fail here, not run as if it were accessible.
-            if libc::chdir(cwd_c.as_ptr()) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+        command.pre_exec(child_pre_exec(user, &cwd, cgroup_fd, false)?);
     }
 
     let mut child = command.spawn()?;
@@ -281,7 +291,192 @@ pub fn spawn(
         pid,
         initial,
         sender,
+        pty_master: None,
     })
+}
+
+/// Allocate a pty pair the portable, non-libutil way and return `(master,
+/// slave)`.
+///
+/// `openpty`/`forkpty` live in `libutil.so.1` on glibc < 2.34 (the ubuntu20.04
+/// builder runs glibc 2.31), and the libc crate declares them as plain
+/// `extern "C"` symbols with no `-lutil` link, so calling `libc::openpty`
+/// would fail to link the unit tests. Every primitive used here — `posix_openpt`,
+/// `grantpt`, `unlockpt`, `TIOCGPTN`, `open` — is in libc proper on both glibc
+/// and musl (this is also the sequence upstream `creack/pty` uses). Both fds
+/// carry `O_CLOEXEC` so the master never leaks into the child's fd table and
+/// keeps the pty open past the child's exit.
+fn open_pty(cols: u16, rows: u16) -> std::io::Result<(std::fs::File, std::fs::File)> {
+    let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+    if master < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // grantpt sets the slave's ownership, unlockpt clears its lock; both must
+    // succeed before the slave device can be opened.
+    if unsafe { libc::grantpt(master) } != 0 || unsafe { libc::unlockpt(master) } != 0 {
+        let err = std::io::Error::last_os_error();
+        unsafe { libc::close(master) };
+        return Err(err);
+    }
+    // TIOCGPTN reads the pty's minor number; the slave is then /dev/pts/N.
+    let mut minor: libc::c_int = 0;
+    if unsafe { libc::ioctl(master, libc::TIOCGPTN, &mut minor) } != 0 {
+        let err = std::io::Error::last_os_error();
+        unsafe { libc::close(master) };
+        return Err(err);
+    }
+    let path = std::ffi::CString::new(format!("/dev/pts/{minor}"))
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "pty path"))?;
+    let slave = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+        )
+    };
+    if slave < 0 {
+        let err = std::io::Error::last_os_error();
+        unsafe { libc::close(master) };
+        return Err(err);
+    }
+    // Seed the window size before the child starts, matching pty.StartWithSize.
+    let winsize = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    if unsafe { libc::ioctl(slave, libc::TIOCSWINSZ, &winsize) } != 0 {
+        let err = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(slave);
+            libc::close(master);
+        }
+        return Err(err);
+    }
+
+    let master_file = unsafe { std::fs::File::from_raw_fd(master) };
+    let slave_file = unsafe { std::fs::File::from_raw_fd(slave) };
+    Ok((master_file, slave_file))
+}
+
+/// Resize the window of an already-allocated pty (`TIOCSWINSZ` on the master).
+///
+/// The kernel stores a single `winsize` per pty pair, so setting it on the
+/// master is visible to the child on the slave — this is how `Update` resizes
+/// a running pty without touching the child's fd table. Zero values are passed
+/// through to the kernel, matching upstream's direct `uint16` conversion.
+pub fn resize_pty(master: &std::fs::File, cols: u16, rows: u16) -> std::io::Result<()> {
+    let winsize = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let rc = unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &winsize) };
+    if rc != 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Spawn a command with its stdio attached to a freshly allocated pty.
+///
+/// The slave becomes the child's stdin/stdout/stderr (so stdout and stderr
+/// merge into the single master, and later `SendInput` writes the master); the
+/// master is what the pump reads the child's output from. A pty keeps its
+/// default line discipline (ONLCR on), so the child's `\n` reaches the master
+/// as `\r\n` — the baseline `data.pty` payload is CRLF-translated.
+///
+/// `cols`/`rows` seed the window size at allocation (`TIOCSWINSZ`); zero values
+/// are passed through, matching upstream's empty `pty.Winsize{}`.
+pub fn spawn_pty(
+    cmd: &str,
+    args: &[String],
+    env: HashMap<String, String>,
+    cwd: String,
+    user: &User,
+    size: (u16, u16),
+    cgroup_fd: Option<RawFd>,
+) -> std::io::Result<SpawnedProcess> {
+    // `open_pty` returns (master, slave); `Stdio::from(File)` dups the slave
+    // fd onto 0/1/2 in the child, needing three handles because `Stdio::from`
+    // consumes its `File` (the original is the one consumed last).
+    let (cols, rows) = size;
+    let (master_file, slave_file) = open_pty(cols, rows)?;
+    // A dup of the master kept for `Update` to resize; the pump task owns the
+    // original below.
+    let resize_master = master_file.try_clone()?;
+
+    let mut command = tokio::process::Command::new(cmd);
+    command
+        .args(args)
+        .env_clear()
+        .envs(&env)
+        .stdin(Stdio::from(slave_file.try_clone()?))
+        .stdout(Stdio::from(slave_file.try_clone()?))
+        .stderr(Stdio::from(slave_file))
+        .kill_on_drop(false);
+    unsafe {
+        command.pre_exec(child_pre_exec(user, &cwd, cgroup_fd, true)?);
+    }
+
+    let mut child = command.spawn()?;
+    let pid = child.id().unwrap_or_default();
+
+    let (tx, initial) = broadcast::channel::<PumpEvent>(64);
+    // A clone kept for `Connect` to subscribe later subscribers; the pump task
+    // moves `tx` itself below.
+    let sender = tx.clone();
+    let master = tokio::fs::File::from_std(master_file);
+
+    tokio::spawn(async move {
+        // Read the master until EOF (the child exited and closed its slave),
+        // then reap — the same "drain fully before End" contract as `spawn`.
+        pump_pty(master, tx.clone()).await;
+        match child.wait().await {
+            Ok(status) => {
+                let _ = tx.send(PumpEvent::End(EndEvent::from_exit_status(status)));
+            }
+            Err(e) => {
+                let _ = tx.send(PumpEvent::SpawnError(format!("wait failed: {e}")));
+            }
+        }
+    });
+
+    Ok(SpawnedProcess {
+        pid,
+        initial,
+        sender,
+        pty_master: Some(resize_master),
+    })
+}
+
+/// Pump a pty master fd into `DataEvent { pty }` frames. Mirrors `pump_pipe`:
+/// keep draining once the last subscriber is gone (so the child never blocks
+/// on a full pty buffer) but stop encoding.
+async fn pump_pty(mut master: tokio::fs::File, tx: broadcast::Sender<PumpEvent>) {
+    use base64::Engine;
+    let mut buf = vec![0u8; READ_CHUNK];
+    let mut receiver_gone = false;
+    loop {
+        match master.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if receiver_gone {
+                    continue;
+                }
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
+                let event = DataEvent {
+                    pty: Some(b64),
+                    ..Default::default()
+                };
+                if tx.send(PumpEvent::Data(event)).is_err() {
+                    receiver_gone = true;
+                }
+            }
+        }
+    }
 }
 
 async fn pump_pipe<R>(pipe: Option<R>, tx: broadcast::Sender<PumpEvent>, is_stderr: bool)
@@ -525,6 +720,212 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+
+        // PTY spawns must honor the same fail-fast placement contract.
+        let err = spawn_pty(
+            "/bin/sh",
+            &["-c".into(), "echo should-not-run".into()],
+            HashMap::new(),
+            "/".into(),
+            &user,
+            (80, 24),
+            Some(-1),
+        )
+        .unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+    }
+
+    #[tokio::test]
+    async fn spawn_pty_captures_output_and_exit() {
+        let user = current_user();
+        let env = HashMap::from([("PATH".to_string(), DEFAULT_PATH.to_string())]);
+        let mut proc = spawn_pty(
+            "/bin/sh",
+            &["-c".into(), "echo pty-test".into()],
+            env,
+            "/".into(),
+            &user,
+            (80, 24),
+            None,
+        )
+        .unwrap();
+        assert!(proc.pid > 0);
+
+        let mut pty = Vec::new();
+        let mut end: Option<EndEvent> = None;
+        loop {
+            match proc.initial.recv().await {
+                Ok(PumpEvent::Data(d)) => {
+                    use base64::Engine;
+                    if let Some(s) = d.pty {
+                        pty.extend(base64::engine::general_purpose::STANDARD.decode(s).unwrap());
+                    }
+                }
+                Ok(PumpEvent::End(e)) => {
+                    end = Some(e);
+                    break;
+                }
+                Ok(PumpEvent::SpawnError(e)) => panic!("spawn error: {e}"),
+                Err(_) => break,
+            }
+        }
+        // The pty line discipline translates the child's '\n' to '\r\n'.
+        assert_eq!(String::from_utf8_lossy(&pty), "pty-test\r\n");
+        let end = end.expect("end event");
+        assert_eq!(end.exit_code, 0);
+        assert!(end.exited);
+        assert_eq!(end.status, "exit status 0");
+    }
+
+    #[test]
+    fn resize_pty_updates_window_size() {
+        use std::os::unix::io::AsRawFd;
+        let (master, _slave) = open_pty(80, 24).unwrap();
+        resize_pty(&master, 120, 40).unwrap();
+        let mut ws = libc::winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let rc = unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCGWINSZ, &mut ws) };
+        assert_eq!(rc, 0, "TIOCGWINSZ read back failed");
+        assert_eq!(ws.ws_row, 40);
+        assert_eq!(ws.ws_col, 120);
+    }
+
+    #[tokio::test]
+    async fn spawn_pty_has_a_controlling_terminal_and_foreground_group() {
+        use base64::Engine;
+
+        let user = current_user();
+        let mut proc = spawn_pty(
+            "/bin/sh",
+            &[
+                "-c".into(),
+                "if { : </dev/tty; } 2>/dev/null; then echo DEVTTY=yes; else echo DEVTTY=no; fi; ps -o pid= -o sid= -o pgid= -o tpgid= -p $$".into(),
+            ],
+            HashMap::new(),
+            "/".into(),
+            &user,
+            (80, 24),
+            None,
+        )
+        .unwrap();
+        let pid = proc.pid;
+
+        let mut output = Vec::new();
+        loop {
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(5), proc.initial.recv())
+                    .await
+                    .expect("PTY process timed out")
+                    .expect("PTY event stream closed before End");
+            match event {
+                PumpEvent::Data(d) => {
+                    if let Some(data) = d.pty {
+                        output.extend(
+                            base64::engine::general_purpose::STANDARD
+                                .decode(data)
+                                .unwrap(),
+                        );
+                    }
+                }
+                PumpEvent::End(end) => {
+                    assert_eq!(end.exit_code, 0);
+                    break;
+                }
+                PumpEvent::SpawnError(e) => panic!("spawn error: {e}"),
+            }
+        }
+
+        let text = String::from_utf8_lossy(&output);
+        assert!(text.contains("DEVTTY=yes"), "PTY output: {text:?}");
+        let ids = text
+            .lines()
+            .find_map(|line| {
+                let values = line
+                    .split_whitespace()
+                    .map(str::parse::<u32>)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
+                (values.len() == 4).then_some(values)
+            })
+            .expect("pid/sid/pgid/tpgid line");
+        assert_eq!(ids, vec![pid, pid, pid, pid]);
+    }
+
+    #[tokio::test]
+    async fn resize_pty_delivers_sigwinch_to_the_foreground_group() {
+        use base64::Engine;
+
+        let user = current_user();
+        let mut proc = spawn_pty(
+            "/bin/sh",
+            &[
+                "-c".into(),
+                "trap 'echo WINCH; stty size; exit 0' WINCH; echo READY; while :; do sleep 1; done"
+                    .into(),
+            ],
+            HashMap::new(),
+            "/".into(),
+            &user,
+            (80, 24),
+            None,
+        )
+        .unwrap();
+        let resize_master = proc.pty_master.take().expect("PTY resize fd");
+        let mut output = Vec::new();
+
+        while !String::from_utf8_lossy(&output).contains("READY") {
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(5), proc.initial.recv())
+                    .await
+                    .expect("PTY did not become ready")
+                    .expect("PTY event stream closed before READY");
+            match event {
+                PumpEvent::Data(d) => {
+                    if let Some(data) = d.pty {
+                        output.extend(
+                            base64::engine::general_purpose::STANDARD
+                                .decode(data)
+                                .unwrap(),
+                        );
+                    }
+                }
+                PumpEvent::End(end) => panic!("PTY exited before resize: {end:?}"),
+                PumpEvent::SpawnError(e) => panic!("spawn error: {e}"),
+            }
+        }
+
+        resize_pty(&resize_master, 132, 43).unwrap();
+        loop {
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(5), proc.initial.recv())
+                    .await
+                    .expect("PTY did not handle SIGWINCH")
+                    .expect("PTY event stream closed before End");
+            match event {
+                PumpEvent::Data(d) => {
+                    if let Some(data) = d.pty {
+                        output.extend(
+                            base64::engine::general_purpose::STANDARD
+                                .decode(data)
+                                .unwrap(),
+                        );
+                    }
+                }
+                PumpEvent::End(end) => {
+                    assert_eq!(end.exit_code, 0);
+                    break;
+                }
+                PumpEvent::SpawnError(e) => panic!("spawn error: {e}"),
+            }
+        }
+
+        let text = String::from_utf8_lossy(&output);
+        assert!(text.contains("WINCH"), "PTY output: {text:?}");
+        assert!(text.contains("43 132"), "PTY output: {text:?}");
     }
 
     #[tokio::test]

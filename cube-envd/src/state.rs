@@ -37,6 +37,9 @@ pub struct ProcEntry {
     /// Output bus the pump publishes on. Held so `Connect` can attach a new
     /// subscriber to an already-running process via `sender.subscribe()`.
     pub sender: broadcast::Sender<exec::PumpEvent>,
+    /// Duplicate of the pty master fd (None for a pipe-spawned process), kept
+    /// so `Update` can resize the window while the pump owns the original.
+    pub pty_master: Option<std::fs::File>,
 }
 
 /// Opaque, process-lifetime-unique key for a live process in the table.
@@ -44,6 +47,37 @@ pub struct ProcEntry {
 /// cleanup from evicting a *different* process that the OS happened to give
 /// the same recycled pid.
 pub type ProcHandle = u64;
+
+/// Outcome of `AppState::resize_pty`, split so the caller can map each case to
+/// the right Connect error: `NotFound` for a selector resolving to no live
+/// process, `NotAPty` for a live process started without a pty, and `Io` for
+/// an ioctl failure (e.g. the pty was already torn down).
+#[derive(Debug)]
+pub enum PtyResizeError {
+    NotFound,
+    NotAPty,
+    Io(std::io::Error),
+}
+
+/// Resolve a flat selector to a live entry, mirroring the pid-wins / most
+/// recent-tag-wins rule used by `find_pid` and `subscribe`.
+fn find_entry<'a>(
+    processes: &'a HashMap<ProcHandle, ProcEntry>,
+    pid: Option<u32>,
+    tag: Option<&str>,
+) -> Option<&'a ProcEntry> {
+    if let Some(p) = pid {
+        processes.values().find(|e| e.pid == p)
+    } else if let Some(t) = tag {
+        processes
+            .iter()
+            .filter(|(_, e)| e.tag.as_deref() == Some(t))
+            .max_by_key(|(handle, _)| **handle)
+            .map(|(_, e)| e)
+    } else {
+        None
+    }
+}
 
 pub struct AppState {
     env_vars: RwLock<HashMap<String, String>>,
@@ -237,18 +271,23 @@ impl AppState {
         tag: Option<&str>,
     ) -> Option<(u32, broadcast::Receiver<exec::PumpEvent>)> {
         let guard = lock(&self.processes);
-        let entry = if let Some(p) = pid {
-            guard.values().find(|e| e.pid == p)
-        } else if let Some(t) = tag {
-            guard
-                .iter()
-                .filter(|(_, e)| e.tag.as_deref() == Some(t))
-                .max_by_key(|(handle, _)| **handle)
-                .map(|(_, e)| e)
-        } else {
-            None
-        };
-        entry.map(|e| (e.pid, e.sender.subscribe()))
+        find_entry(&guard, pid, tag).map(|e| (e.pid, e.sender.subscribe()))
+    }
+
+    /// Resize the pty window of a live process selected by pid or tag. The
+    /// ioctl happens under the process-table lock — it is a fast, non-blocking
+    /// syscall and holding the lock keeps the entry alive for the duration.
+    pub fn resize_pty(
+        &self,
+        pid: Option<u32>,
+        tag: Option<&str>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), PtyResizeError> {
+        let guard = lock(&self.processes);
+        let entry = find_entry(&guard, pid, tag).ok_or(PtyResizeError::NotFound)?;
+        let master = entry.pty_master.as_ref().ok_or(PtyResizeError::NotAPty)?;
+        exec::resize_pty(master, cols, rows).map_err(PtyResizeError::Io)
     }
 }
 
@@ -291,6 +330,7 @@ mod tests {
             tag: tag.map(String::from),
             config: ProcessConfig::default(),
             sender,
+            pty_master: None,
         }
     }
 
@@ -446,6 +486,7 @@ mod tests {
             tag: Some("t".into()),
             config: ProcessConfig::default(),
             sender: tx.clone(),
+            pty_master: None,
         });
 
         // pid and tag both resolve to the same live process.
@@ -467,5 +508,38 @@ mod tests {
         // Unknown selectors resolve to none.
         assert!(s.subscribe(Some(999), None).is_none());
         assert!(s.subscribe(None, Some("nope")).is_none());
+    }
+
+    #[test]
+    fn resize_pty_resolves_and_reports() {
+        let s = AppState::new();
+
+        // Unknown selector → NotFound.
+        assert!(matches!(
+            s.resize_pty(Some(42), None, 80, 24),
+            Err(PtyResizeError::NotFound)
+        ));
+
+        // A live process with no pty → NotAPty.
+        let _h = s.insert_process(proc_entry(7, Some("no-pty")));
+        assert!(matches!(
+            s.resize_pty(Some(7), None, 80, 24),
+            Err(PtyResizeError::NotAPty)
+        ));
+
+        // A live process whose "pty" is not a terminal → ioctl fails → Io.
+        let not_a_tty = std::fs::File::open("/dev/null").unwrap();
+        let (sender, _rx) = broadcast::channel::<exec::PumpEvent>(1);
+        s.insert_process(ProcEntry {
+            pid: 8,
+            tag: Some("bad-pty".into()),
+            config: ProcessConfig::default(),
+            sender,
+            pty_master: Some(not_a_tty),
+        });
+        assert!(matches!(
+            s.resize_pty(Some(8), None, 80, 24),
+            Err(PtyResizeError::Io(_))
+        ));
     }
 }

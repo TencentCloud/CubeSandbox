@@ -24,9 +24,9 @@ use crate::error::{ConnectCode, ConnectError};
 use crate::exec;
 use crate::msg::process::{
     parse_signal, ConnectRequest, Event, EventEnvelope, ListResponse, ProcessInfo,
-    SendSignalRequest, StartEvent, StartRequest,
+    SendSignalRequest, StartEvent, StartRequest, UpdateRequest,
 };
-use crate::state::{AppState, ProcEntry};
+use crate::state::{AppState, ProcEntry, PtyResizeError};
 
 pub fn frame_stream_response(
     frames: impl futures::Stream<Item = Bytes> + Send + 'static,
@@ -108,9 +108,8 @@ fn user_command(cmd: &str, args: &[String]) -> String {
 }
 
 /// Which cgroup subtree a Start request belongs to (upstream
-/// handler.go:340 getProcType). PTY starts are rejected before this runs
-/// today, so this is always `User` in practice, but the interface must not
-/// assume it — when PTY lands it switches to `Pty` on its own.
+/// handler.go getProcType). PTY commands use the higher-weight `ptys` subtree;
+/// pipe commands use `user`.
 pub(crate) fn get_proc_type(req: &StartRequest) -> ProcType {
     if req.pty.is_some() {
         ProcType::Pty
@@ -127,10 +126,10 @@ pub fn start(
     deadline: Option<std::time::Duration>,
     keepalive_interval: std::time::Duration,
 ) -> axum::response::Response {
-    if req.pty.is_some() {
-        return stream_error_response(ConnectError::unimplemented("PTY (Start.pty)"));
-    }
-    if req.stdin == Some(true) {
+    // A pty supplies the child's stdio itself; interactive stdin without a
+    // pty (`SendInput`/`StreamInput`/`CloseStdin`) is still out of MVP scope
+    // and stays routed to `unimplemented`.
+    if req.pty.is_none() && req.stdin == Some(true) {
         return stream_error_response(ConnectError::unimplemented(
             "interactive stdin (Start.stdin=true)",
         ));
@@ -157,13 +156,32 @@ pub fn start(
     // /usr/bin/nice's own wording (exit 127 event flow), not a spawn error.
     let (wrapper_cmd, wrapper_args) = oom_nice_wrapper(&req.process.cmd, &req.process.args);
     let cgroup_fd = state.cgroup_fd(get_proc_type(&req));
-    let spawned = match exec::spawn(&wrapper_cmd, &wrapper_args, env, cwd, &user, cgroup_fd) {
+    // PTY vs pipe spawn differ only in the stdio plumbing; everything
+    // downstream (broadcast pump → drive_stream) is identical because the pty
+    // master publishes the same `DataEvent { pty }` onto the same bus.
+    let spawn_result = if let Some(pty) = &req.pty {
+        let (cols, rows) = pty
+            .size
+            .as_ref()
+            .map(|s| (s.cols as u16, s.rows as u16))
+            .unwrap_or((0, 0));
+        exec::spawn_pty(
+            &wrapper_cmd,
+            &wrapper_args,
+            env,
+            cwd,
+            &user,
+            (cols, rows),
+            cgroup_fd,
+        )
+    } else {
+        exec::spawn(&wrapper_cmd, &wrapper_args, env, cwd, &user, cgroup_fd)
+    };
+    let spawned = match spawn_result {
         Ok(s) => s,
         Err(e) => {
-            // A genuine spawn failure is an InvalidArgument RPC error
-            // (upstream start.go:207-209), not an event stream. Only real
-            // system failures reach here now — the wrapper (/bin/sh) always
-            // exists, so a missing command never does.
+            // A genuine spawn failure is an InvalidArgument RPC error. The
+            // wrapper makes a missing user command a natural exit-127 event.
             return stream_error_response(ConnectError::new(
                 ConnectCode::InvalidArgument,
                 format!(
@@ -178,12 +196,14 @@ pub fn start(
         pid,
         initial,
         sender,
+        pty_master,
     } = spawned;
     let handle = state.insert_process(ProcEntry {
         pid,
         tag: req.tag.clone(),
         config: req.process.clone(),
         sender,
+        pty_master,
     });
 
     // Frames channel: the HTTP body reads from `rx`; the driver task keeps
@@ -224,12 +244,7 @@ pub fn connect(
     let Some((pid, events)) = state.subscribe(pid, tag.as_deref()) else {
         // Match Go envd's wording for a selector resolving to no live process
         // (the same helper SendSignal/List use).
-        let detail = match (pid, tag.as_deref()) {
-            (Some(p), _) => format!("process with pid {p} not found"),
-            (None, Some(t)) => format!("process with tag {t} not found"),
-            (None, None) => "process not found".to_string(),
-        };
-        return stream_error_response(ConnectError::new(ConnectCode::NotFound, detail));
+        return stream_error_response(not_found(pid, tag.as_deref()));
     };
 
     // Attach, don't spawn: no deadline kill and no reap on completion. The
@@ -396,12 +411,7 @@ pub fn send_signal(
     let target = state.find_pid(pid, tag.as_deref()).ok_or_else(|| {
         // Match Go envd's specific wording so a client logging the message
         // sees the same text: "process with pid N not found" / "... tag X ...".
-        let detail = match (pid, tag.as_deref()) {
-            (Some(p), _) => format!("process with pid {p} not found"),
-            (None, Some(t)) => format!("process with tag {t} not found"),
-            (None, None) => "process not found".to_string(),
-        };
-        ConnectError::new(ConnectCode::NotFound, detail)
+        not_found(pid, tag.as_deref())
     })?;
     let signo = parse_signal(req.signal.as_ref()).ok_or_else(|| {
         ConnectError::new(
@@ -415,17 +425,59 @@ pub fn send_signal(
     // not a misleading Internal.
     exec::kill_process_group(target, signo).map_err(|e| {
         if e.raw_os_error() == Some(libc::ESRCH) {
-            let detail = match (pid, tag.as_deref()) {
-                (Some(p), _) => format!("process with pid {p} not found"),
-                (None, Some(t)) => format!("process with tag {t} not found"),
-                (None, None) => "process not found".to_string(),
-            };
-            ConnectError::new(ConnectCode::NotFound, detail)
+            not_found(pid, tag.as_deref())
         } else {
             ConnectError::new(ConnectCode::Internal, format!("kill failed: {e}"))
         }
     })?;
     Ok(serde_json::json!({}))
+}
+
+/// The "not found" detail shared by every selector-based RPC — byte-for-byte
+/// the Go envd wording a client logs ("process with pid N not found" /
+/// "... tag X ..." / bare "process not found").
+fn not_found(pid: Option<u32>, tag: Option<&str>) -> ConnectError {
+    let detail = match (pid, tag) {
+        (Some(p), _) => format!("process with pid {p} not found"),
+        (None, Some(t)) => format!("process with tag {t} not found"),
+        (None, None) => "process not found".to_string(),
+    };
+    ConnectError::new(ConnectCode::NotFound, detail)
+}
+
+/// Handle `process.Process/Update` (unary): resize a live process's pty window.
+///
+/// Baseline-verified semantics (Go envd):
+/// - the process is resolved FIRST, so an unknown selector is `not_found` even
+///   when the `pty` field is absent;
+/// - a missing `pty` (or a `pty` without a `size`) is a silent no-op success
+///   (`{}`), never an error — the SDK always sends both, but a bare Update is
+///   not a caller bug;
+/// - a live process without a pty answers `internal` with Go's exact
+///   "error resizing tty: ..." wording.
+pub fn update(state: &AppState, req: &UpdateRequest) -> Result<serde_json::Value, ConnectError> {
+    let (pid, tag) = req.process.flatten();
+    let Some(size) = req.pty.as_ref().and_then(|p| p.size.as_ref()) else {
+        // Nothing to resize: resolve to keep the not_found contract, then no-op.
+        state
+            .find_pid(pid, tag.as_deref())
+            .ok_or_else(|| not_found(pid, tag.as_deref()))?;
+        return Ok(serde_json::json!({}));
+    };
+    let cols = size.cols as u16;
+    let rows = size.rows as u16;
+    match state.resize_pty(pid, tag.as_deref(), cols, rows) {
+        Ok(()) => Ok(serde_json::json!({})),
+        Err(PtyResizeError::NotFound) => Err(not_found(pid, tag.as_deref())),
+        Err(PtyResizeError::NotAPty) => Err(ConnectError::new(
+            ConnectCode::Internal,
+            "error resizing tty: tty not assigned to process",
+        )),
+        Err(PtyResizeError::Io(e)) => Err(ConnectError::new(
+            ConnectCode::Internal,
+            format!("error resizing tty: {e}"),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -446,6 +498,7 @@ mod tests {
                 ..Default::default()
             },
             sender,
+            pty_master: None,
         });
         let v = list(&state);
         assert_eq!(v["processes"][0]["pid"], 7);
@@ -530,6 +583,61 @@ mod tests {
         assert_eq!(get_proc_type(&pty_req), ProcType::Pty);
     }
 
+    #[test]
+    fn update_missing_pty_resolves_then_noops() {
+        let state = AppState::new();
+        // Missing pty on an unknown process is still not_found (resolve first).
+        let req: UpdateRequest = serde_json::from_str(r#"{"process":{"pid":1}}"#).unwrap();
+        assert_eq!(
+            update(&state, &req).unwrap_err().code,
+            ConnectCode::NotFound
+        );
+        // Missing pty on a live process is a silent no-op success, not an error.
+        let (sender, _rx) = broadcast::channel::<exec::PumpEvent>(1);
+        state.insert_process(ProcEntry {
+            pid: 7,
+            tag: Some("t".into()),
+            config: crate::msg::process::ProcessConfig::default(),
+            sender,
+            pty_master: None,
+        });
+        let req: UpdateRequest = serde_json::from_str(r#"{"process":{"pid":7}}"#).unwrap();
+        assert_eq!(update(&state, &req).unwrap(), serde_json::json!({}));
+    }
+
+    #[test]
+    fn update_unknown_process() {
+        let state = AppState::new();
+        let req: UpdateRequest = serde_json::from_str(
+            r#"{"process":{"tag":"nope"},"pty":{"size":{"cols":80,"rows":24}}}"#,
+        )
+        .unwrap();
+        let err = update(&state, &req).unwrap_err();
+        assert_eq!(err.code, ConnectCode::NotFound);
+    }
+
+    #[test]
+    fn update_non_pty_process_is_internal() {
+        let state = AppState::new();
+        let (sender, _rx) = broadcast::channel::<exec::PumpEvent>(1);
+        state.insert_process(ProcEntry {
+            pid: 7,
+            tag: None,
+            config: crate::msg::process::ProcessConfig::default(),
+            sender,
+            pty_master: None,
+        });
+        let req: UpdateRequest =
+            serde_json::from_str(r#"{"process":{"pid":7},"pty":{"size":{"cols":80,"rows":24}}}"#)
+                .unwrap();
+        let err = update(&state, &req).unwrap_err();
+        assert_eq!(err.code, ConnectCode::Internal);
+        assert_eq!(
+            err.message,
+            "error resizing tty: tty not assigned to process"
+        );
+    }
+
     #[tokio::test]
     async fn drive_stream_lagged_cuts_off_slow_subscriber() {
         let state = Arc::new(AppState::new());
@@ -545,6 +653,7 @@ mod tests {
                 ..Default::default()
             },
             sender: pub_tx.clone(),
+            pty_master: None,
         });
         let data = |s: &str| {
             exec::PumpEvent::Data(crate::msg::process::DataEvent {

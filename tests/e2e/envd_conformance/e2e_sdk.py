@@ -95,6 +95,29 @@ def scenario_files(sb):
         check("missing file errors", "404" in str(e) or "not exist" in str(e), type(e).__name__)
 
 
+def scenario_pty(sb):
+    print("--- scenario 4: pty create / resize ---")
+    from cubesandbox import PtySize
+    handle = sb.pty.create(PtySize(rows=24, cols=80))
+    try:
+        # resize() drives the Update RPC (TIOCSWINSZ on the pty master). The
+        # SDK's send_stdin maps to SendInput, which is out of MVP scope, so we
+        # observe the effect by reading the pty slave's kernel winsize directly
+        # instead of typing `stty size` through stdin.
+        handle.resize(PtySize(rows=43, cols=132))
+        tty = sb.commands.run(f"readlink /proc/{handle.pid}/fd/0").stdout.strip()
+        check("pty attached to a tty", tty.startswith("/dev/"), repr(tty))
+        if tty.startswith("/dev/"):
+            r = sb.commands.run(f"stty size < {tty}")
+            check("pty resize observed (43 132)", "43 132" in r.stdout, repr(r.stdout))
+    finally:
+        try:
+            killed = handle.kill()
+            check("pty kill", killed)
+        except Exception as e:
+            print(f"  pty kill failed: {e}")
+
+
 def run_suite(template, label, full=True):
     print(f"\n===== template {template} ({label}) =====")
     sb = Sandbox.create(template=template, timeout=300)
@@ -104,6 +127,7 @@ def run_suite(template, label, full=True):
         if full:
             scenario_commands(sb)
             scenario_files(sb)
+            scenario_pty(sb)
         else:
             r = sb.commands.run("echo rollback-ok")
             check("rollback smoke: command", r.stdout == "rollback-ok\n")

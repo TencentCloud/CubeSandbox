@@ -13,9 +13,8 @@ Normalized away (legitimately dynamic):
   - hostnames in downloaded /etc/hostname content
 Declared differences (allowlisted, documented in cube-envd/README.md):
   - gzip: cube-envd always identity
-  - CreateWatcher/PTY/SendInput: unimplemented in cube-envd
+  - CreateWatcher/SendInput: unimplemented in cube-envd
   - Connect: implemented; nested-selector shape still rejected differently
-  - missing-cmd stderr prefix (nice vs cube-envd wording)
 """
 import json
 import re
@@ -27,7 +26,6 @@ RS_DIR = sys.argv[2] if len(sys.argv) > 2 else "fixtures-rust"
 # Fixtures where cube-envd intentionally differs (cube-envd/README.md).
 DECLARED_DIFFERENT = {
     "fs_watch_unary_probe": "CreateWatcher: implemented upstream, unimplemented in cube-envd",
-    "proc_pty_probe": "PTY: implemented upstream, unimplemented in cube-envd",
     "rest_files_gzip_accept": "gzip download encoding: upstream supports, cube-envd identity-only",
     "rest_files_compose_probe": "/files/compose: implemented upstream, 501 in cube-envd",
     "proc_sendinput_probe": "SendInput selector error wording differs (unimplemented either way)",
