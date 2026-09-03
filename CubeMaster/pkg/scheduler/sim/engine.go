@@ -307,7 +307,7 @@ var roundMu sync.Mutex
 // a RoundID is safe because cleanup removes the round's node entries before
 // returning. RunRound is not safe for concurrent in-process calls: it fails
 // fast while another round is in progress.
-func RunRound(ctx context.Context, p Params) (*RoundResult, error) {
+func RunRound(ctx context.Context, p Params) (_ *RoundResult, retErr error) {
 	if !roundMu.TryLock() {
 		return nil, errors.New("sim: RunRound is not safe for concurrent calls; a round is already in progress")
 	}
@@ -333,7 +333,13 @@ func RunRound(ctx context.Context, p Params) (*RoundResult, error) {
 	}
 	e.maxReqCPUMillis, e.maxReqMemMiB = e.maxFeasibleShape()
 	e.injectNodes()
-	defer e.cleanup()
+	defer func() {
+		// A cleanup failure breaks the no-residue guarantee every later round
+		// relies on, so it must fail the round even though the results are in.
+		if cerr := e.cleanup(); cerr != nil && retErr == nil {
+			retErr = cerr
+		}
+	}()
 	e.preloadTemplates()
 	e.runEvents(ctx)
 	// Audit before the deferred cleanup runs: afterwards the nodes are
@@ -460,16 +466,28 @@ func (e *engine) injectNodes() {
 // makes RoundID reuse safe: re-injection after a delete is a fresh insert, so
 // no cached usage counters survive (UpsertNode's merge path, which preserves
 // QuotaCpuUsage/QuotaMemUsage/MvmNum, only applies while the entry exists).
-func (e *engine) cleanup() {
+// If RemoveNode refuses (localcache.Init ran in this process) the no-residue
+// guarantee is broken, so cleanup returns an error and RunRound fails the
+// round rather than silently leaving injected nodes behind.
+func (e *engine) cleanup() error {
 	for _, pair := range e.registered {
 		localcache.DeregisterTemplateReplica(pair[0], pair[1])
 	}
+	var failed int
+	var lastErr error
 	for _, ns := range e.nodeOrder {
-		localcache.RemoveNode(context.Background(), &node.Node{
+		if err := localcache.RemoveNode(context.Background(), &node.Node{
 			InsID:           ns.id,
 			OssClusterLabel: e.p.ossClusterLabel(),
-		})
+		}); err != nil {
+			failed++
+			lastErr = err
+		}
 	}
+	if failed > 0 {
+		return fmt.Errorf("sim: cleanup could not remove %d/%d injected nodes: %w", failed, len(e.nodeOrder), lastErr)
+	}
+	return nil
 }
 
 // preloadTemplates registers a local replica of every trace template on a

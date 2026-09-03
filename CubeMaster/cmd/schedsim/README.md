@@ -194,14 +194,16 @@ delta 不受影响，但不要把被拖长的绝对值当作集群真实水位�
 | `herding_top1_share` | 被选中次数最多的节点占总成功放置的比例（羊群度） |
 | `template_hit_rate` | 成功放置中选中节点持有该模板本地副本的比例（分母为带模板的成功请求）。放置成功后仿真会把该模板注册到选中节点（预热拉取），因此 locality filter 关闭时该指标跟踪动态局部性（首次未命中、后续命中）；filter 开启且 `AllowNonLocalTemplate=false` 时未预热节点本就不收该模板请求，指标恒为 1，主要用于检测配置漂移 |
 | `active_nodes_avg` / `empty_nodes_avg` | 有/无运行中沙箱的节点数，时间平均 |
-| `metric_state_diverged` | 仿真账本与 localcache（调度器实际准入所依据的状态）脱钩的观测次数：每次用量回写后立即读回逐字段比对（回写报错或落库值与账本不符都计数，漂移因此在发生的间隔被捕获，而非等到轮末双方都归零后无从察觉），加上轮末审计逐节点比对缓存用量（`QuotaCpuUsage/QuotaMemUsage/MvmNum`）发现的漂移节点数；非 0 意味着本轮调度器在不一致状态上做了准入，该轮所有指标作废排查 |
+| `metric_state_diverged` | 仿真账本与 localcache（调度器实际准入所依据的状态）脱钩的观测次数：每次用量回写后立即读回逐字段比对（回写报错或落库值与账本不符都计数，漂移因此在发生的间隔被捕获，而非等到轮末双方都归零后无从察觉），加上轮末审计逐节点比对缓存用量（`QuotaCpuUsage/QuotaMemUsage/MvmNum`）发现的漂移节点数；非 0 意味着本轮调度器在不一致状态上做了准入，该轮所有指标作废排查（CLI 会在该轮输出 WARNING） |
 
 指标计算均为纯函数（`pkg/scheduler/sim/metrics.go`），单测手算对拍。
 
 已知限制：每轮结束时 cleanup 经 `localcache.RemoveNode` 把本轮注入的节点从进程级
 localcache 中**整体移除**（节点缓存、排序索引、模板 locality 成员关系），并按注册清单
 逐一注销模板副本——多轮之间因此不残留任何状态，同一进程内顺序复用同一 RoundID 也总是
-从全新注入开始，不会继承（例如被中断轮次）残留的用量。`RunRound` 不支持进程内并发：
+从全新注入开始，不会继承（例如被中断轮次）残留的用量。若进程调过 `localcache.Init`，
+`RemoveNode` 会拒绝执行并返回错误，cleanup 随之失败、该轮以错误告终——多轮无残留的
+保证宁可报错也不静默破坏。`RunRound` 不支持进程内并发：
 多轮共享进程级 localcache，一轮的 cleanup 会改写另一轮正在调度所依据的状态，因此并发
 调用直接报错而非排队。`sched_latency_*` 仍非中性：注入节点的 `OssClusterLabel` 经
 `getInstanceTypeName` 落入 DefaultInstanceTypeName 桶，与 sim 的 `instance_type` 不同，

@@ -221,18 +221,22 @@ func UpsertNode(n *node.Node) {
 // the event loop. It exists ONLY for single-process tooling that never calls
 // Init (schedsim): such a process injects nodes via UpsertNode and must
 // withdraw them completely at the end of a run. Once Init has run, RemoveNode
-// refuses to act (it logs an error and returns): the production removal path
-// is the DEL event in dealEvent, and a direct removal would bypass the event
-// loop and the Redis-backed sync and race the next loader tick re-installing
-// the node. n needs only the identity fields (InsID/IP) plus the
-// OssClusterLabel the node was injected with, so the sorted-index bucket
-// resolves the same way as at injection.
-func RemoveNode(ctx context.Context, n *node.Node) {
+// refuses to act: it logs an error AND returns it, so the caller can detect
+// that the node was not removed (the log alone is invisible to consumers that
+// force a FATAL log level, as schedsim's Bootstrap does). The production
+// removal path is the DEL event in dealEvent; a direct removal there would
+// bypass the event loop and the Redis-backed sync and race the next loader
+// tick re-installing the node. n needs only the identity fields (InsID/IP)
+// plus the OssClusterLabel the node was injected with, so the sorted-index
+// bucket resolves the same way as at injection.
+func RemoveNode(ctx context.Context, n *node.Node) error {
 	if inited.Load() {
-		CubeLog.WithContext(ctx).Errorf("localcache.RemoveNode refused: Init has already run in this process; use the DEL event path")
-		return
+		err := errors.New("localcache.RemoveNode refused: Init has already run in this process; use the DEL event path")
+		CubeLog.WithContext(ctx).Errorf("%v", err)
+		return err
 	}
 	l.delNodeCache(ctx, n)
+	return nil
 }
 
 func NotifyEvent(e *Event) error {
