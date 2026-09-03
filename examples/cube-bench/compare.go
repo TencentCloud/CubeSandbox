@@ -823,8 +823,8 @@ func renderComparison(c *comparison) string {
 		b.WriteString(note + "\n")
 	}
 	for _, g := range []*sampleGroup{c.baseline, c.candidate} {
-		if v, ok := uniqueConfigValue(g, "dry_run"); ok && v == "true" {
-			fmt.Fprintf(&b, "> **Warning:** %s is a dry-run export: its latencies are synthesized "+
+		if groupHasDryRun(g) {
+			fmt.Fprintf(&b, "> **Warning:** %s contains a dry-run export: its latencies are synthesized "+
 				"(lifetime sleeps clamped, errors drawn from --dry-error-rate), so verdicts on its rows "+
 				"describe the simulator, not a scheduler or a real API.\n", g.name)
 		}
@@ -949,6 +949,22 @@ func uniqueConfigValue(g *sampleGroup, key string) (string, bool) {
 		}
 	}
 	return val, set
+}
+
+// groupHasDryRun reports whether ANY file in the group is a dry-run export.
+// uniqueConfigValue would miss a mixed dry-run/real group (the key takes
+// more than one value), but aggregation blends synthetic and real latencies
+// into the same rows, so the warning must fire on any dry-run member.
+func groupHasDryRun(g *sampleGroup) bool {
+	for _, f := range g.files {
+		if f.config == nil {
+			continue
+		}
+		if v, ok := f.config["dry_run"]; ok && formatConfigValue(v) == "true" {
+			return true
+		}
+	}
+	return false
 }
 
 // configMismatchNote flags a scheduled-vs-scheduled comparison whose two

@@ -295,8 +295,8 @@ dispatch:
 		// in the past, e.g. saturation or ASAP mode) that branch is skipped,
 		// and in the two-case select below a ready semaphore slot would
 		// compete with the closed stop channel at random, releasing requests
-		// after quit. Re-check stop first so a quit under back-pressure stops
-		// dispatch deterministically.
+		// after quit. Re-check stop before AND after the admission so a quit
+		// under back-pressure stops dispatch deterministically.
 		select {
 		case <-stop:
 			break dispatch
@@ -310,6 +310,17 @@ dispatch:
 			// end dispatch instead of releasing another sandbox after quit.
 			wg.Done()
 			break dispatch
+		}
+		select {
+		case <-stop:
+			// stop closed while the semaphore admit raced it: hand the slot
+			// back and undo the Add rather than spawning work after quit.
+			// A stop landing after this check is not a leak — the admission
+			// decision legitimately predates it.
+			<-sem
+			wg.Done()
+			break dispatch
+		default:
 		}
 		// Count the release only after the semaphore admits the request, so
 		// the TUI in-flight gauge tracks live sandboxes instead of the

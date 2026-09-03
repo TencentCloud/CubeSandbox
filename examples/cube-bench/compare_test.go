@@ -855,12 +855,31 @@ func TestCompareDryRunWarning(t *testing.T) {
 		t.Fatalf("read report: %v", err)
 	}
 	report := string(saved)
-	if !strings.Contains(report, "> **Warning:** baseline is a dry-run export") {
+	if !strings.Contains(report, "> **Warning:** baseline contains a dry-run export") {
 		t.Errorf("report missing the dry-run warning\n%s", report)
 	}
 	// dry_run must also surface in the config highlights.
 	if !strings.Contains(report, "dry_run=true") {
 		t.Errorf("dry_run missing from config highlights\n%s", report)
+	}
+
+	// A mixed dry-run/real group blends synthetic and measured latencies
+	// into the same rows; the warning must still fire even though dry_run
+	// takes two values inside the group.
+	b2 := writeTempFile(t, dir, "base-real.json", `{
+		"config": {"workload": "custom", "dry_run": false},
+		"summary": {"success_rate": 0.97, "queue_delay_p50_ms": 4}
+	}`)
+	out2 := filepath.Join(dir, "report2.md")
+	if err := runCompare([]string{"--baseline", b1 + "," + b2, "--candidate", c1, "-o", out2}, &buf); err != nil {
+		t.Fatalf("runCompare: %v", err)
+	}
+	saved2, err := os.ReadFile(out2)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if !strings.Contains(string(saved2), "> **Warning:** baseline contains a dry-run export") {
+		t.Errorf("mixed dry-run/real group missing the warning\n%s", saved2)
 	}
 }
 

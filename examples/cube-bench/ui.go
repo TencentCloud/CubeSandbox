@@ -37,19 +37,23 @@ func newModel(cfg *Config, resultCh <-chan IterResult) model {
 		progress.WithDefaultGradient(),
 		progress.WithWidth(50),
 	)
-	return model{
+	m := model{
 		cfg:      cfg,
 		resultCh: resultCh,
 		total:    cfg.Total,
 		progress: p,
+		qpsStart: time.Now(),
+		width:    80,
+	}
+	if cfg.Scheduled {
 		// The model is created as the dispatcher starts, so key elapsed/
 		// in-flight off creation time, not the first completion — for
 		// lifetime-bearing runs the first result only arrives after a full
-		// create → lifetime-sleep → delete cycle.
-		startTime: time.Now(),
-		qpsStart:  time.Now(),
-		width:     80,
+		// create → lifetime-sleep → delete cycle. Legacy mode keeps its
+		// historical first-completion baseline via the lazy init in Update.
+		m.startTime = time.Now()
 	}
+	return m
 }
 
 func (m model) Init() tea.Cmd {
