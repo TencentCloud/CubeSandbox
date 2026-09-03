@@ -50,6 +50,15 @@ bitmap_bytes(uint64_t num_chunks)
 	return (size_t)((num_chunks + 7) / 8);
 }
 
+/* snprintf rather than strncpy: the destinations are fixed-size fields that must
+ * end up NUL-terminated whatever the source length, and a NULL source is the
+ * ordinary case for an optional JSON member. */
+static void
+copy_field(char *dst, size_t dst_len, const char *src)
+{
+	snprintf(dst, dst_len, "%s", src ? src : "");
+}
+
 /* Wire form of one ref: 16 bytes of uuid, and nothing else.
  *
  * valid_bytes used to live here, as four bytes that were almost always the same
@@ -175,7 +184,15 @@ s3_export_manifest_create(const char *uuid_str, uint64_t size_bytes,
 		return -ENOMEM;
 	}
 
-	m->version      = S3_EXPORT_VERSION;
+	/* Version 2 until something needs more, which is decided at serialize time by
+	 * how many sources ended up in the table -- see s3_export_manifest_serialize().
+	 *
+	 * Not S3_EXPORT_VERSION: an export that references one prefix is describable
+	 * in version 2, and writing it as 3 would make it unreadable to every binary
+	 * that has not been upgraded, for no gain. Only a derived export -- which an
+	 * older binary could not have produced or served anyway -- needs the newer
+	 * form. That is what keeps the rollout free of ordering constraints. */
+	m->version      = 2;
 	m->layout       = layout;
 	m->size_bytes   = size_bytes;
 	m->chunk_size   = chunk_size;
@@ -189,6 +206,12 @@ s3_export_manifest_create(const char *uuid_str, uint64_t size_bytes,
 		free(m);
 		return -ENOMEM;
 	}
+	m->resolved = calloc(1, bitmap_bytes(m->num_chunks));
+	if (!m->resolved) {
+		free(m->present);
+		free(m);
+		return -ENOMEM;
+	}
 
 	if (layout == S3_EXPORT_LAYOUT_REF) {
 		/* Indexed by chunk rather than packed by presence: the walk that fills
@@ -197,6 +220,7 @@ s3_export_manifest_create(const char *uuid_str, uint64_t size_bytes,
 		 * an order the reader depends on. Packing happens once, at serialize. */
 		m->refs = calloc(m->num_chunks, sizeof(*m->refs));
 		if (!m->refs) {
+			free(m->resolved);
 			free(m->present);
 			free(m);
 			return -ENOMEM;
@@ -206,10 +230,30 @@ s3_export_manifest_create(const char *uuid_str, uint64_t size_bytes,
 		m->full = calloc(1, bitmap_bytes(m->num_chunks));
 		if (!m->full) {
 			free(m->refs);
+			free(m->resolved);
 			free(m->present);
 			free(m);
 			return -ENOMEM;
 		}
+
+		/* One source to start with, this export's own, filled in by
+		 * s3_export_manifest_set_src(). Every REF manifest has at least this
+		 * entry -- including one parsed from version 2, where it is synthesised
+		 * -- so the read path never has to ask whether a source table exists.
+		 *
+		 * src_idx stays NULL until a second source appears: all-zero indices are
+		 * exactly what NULL means, and not allocating a byte per chunk for the
+		 * common single-source export keeps the manifest the size it was. */
+		m->srcs = calloc(S3_EXPORT_MAX_SOURCES, sizeof(*m->srcs));
+		if (!m->srcs) {
+			free(m->full);
+			free(m->refs);
+			free(m->resolved);
+			free(m->present);
+			free(m);
+			return -ENOMEM;
+		}
+		m->num_srcs = 1;
 	}
 
 	*out = m;
@@ -220,23 +264,29 @@ void
 s3_export_manifest_ref(struct s3_export_manifest *m)
 {
 	if (m) {
-		m->refcnt++;
+		__atomic_fetch_add(&m->refcnt, 1, __ATOMIC_RELAXED);
 	}
 }
 
 void
 s3_export_manifest_unref(struct s3_export_manifest *m)
 {
+	uint32_t prev;
+
 	if (!m) {
 		return;
 	}
-	assert(m->refcnt > 0);
-	if (--m->refcnt > 0) {
+	prev = __atomic_fetch_sub(&m->refcnt, 1, __ATOMIC_ACQ_REL);
+	assert(prev > 0);
+	if (prev > 1) {
 		return;
 	}
 	free(m->present);
+	free(m->resolved);
 	free(m->full);
 	free(m->refs);
+	free(m->srcs);
+	free(m->src_idx);
 	free(m);
 }
 
@@ -247,6 +297,15 @@ s3_export_manifest_set_present(struct s3_export_manifest *m, uint64_t chunk_inde
 		return;
 	}
 	m->present[chunk_index / 8] |= (uint8_t)(1u << (chunk_index % 8));
+}
+
+void
+s3_export_manifest_set_resolved(struct s3_export_manifest *m, uint64_t chunk_index)
+{
+	if (!m || !m->resolved || chunk_index >= m->num_chunks) {
+		return;
+	}
+	m->resolved[chunk_index / 8] |= (uint8_t)(1u << (chunk_index % 8));
 }
 
 int
@@ -275,6 +334,288 @@ s3_export_manifest_set_ref(struct s3_export_manifest *m, uint64_t chunk_index,
 	return 0;
 }
 
+int
+s3_export_manifest_add_src(struct s3_export_manifest *m, const char *prefix,
+			   const char *export_uuid, const char *snapshot_uuid,
+			   uint8_t *out_idx)
+{
+	uint32_t i;
+
+	if (!m || !prefix || prefix[0] == '\0' || !out_idx) {
+		return -EINVAL;
+	}
+	if (m->layout != S3_EXPORT_LAYOUT_REF || !m->srcs) {
+		return -EINVAL;
+	}
+
+	/* Entry 0 mirrors src.prefix, which create() cannot know: the caller fills
+	 * src in afterwards. Synced here rather than requiring a setter, so that
+	 * "this export's own prefix" resolves to 0 no matter which order the caller
+	 * did things in -- and so entry 0 cannot silently stay empty and then match
+	 * nothing, which would give the own prefix a second entry of its own. */
+	if (m->srcs[0].prefix[0] == '\0' && m->src.prefix[0] != '\0') {
+		copy_field(m->srcs[0].prefix, sizeof(m->srcs[0].prefix), m->src.prefix);
+	}
+
+	/* Entry 0 included: a chunk that turns out to live under this export's own
+	 * prefix must resolve to 0 rather than to a duplicate entry naming the same
+	 * place, or two indices would mean the same thing and the manifest would stop
+	 * being canonical. */
+	for (i = 0; i < m->num_srcs; i++) {
+		if (strcmp(m->srcs[i].prefix, prefix) == 0) {
+			/* First writer of the identity fields wins, so a caller that
+			 * has them can pass them once and the rest can pass NULL. */
+			if (m->srcs[i].export_uuid[0] == '\0' && export_uuid) {
+				copy_field(m->srcs[i].export_uuid,
+					   sizeof(m->srcs[i].export_uuid), export_uuid);
+			}
+			if (m->srcs[i].snapshot_uuid[0] == '\0' && snapshot_uuid) {
+				copy_field(m->srcs[i].snapshot_uuid,
+					   sizeof(m->srcs[i].snapshot_uuid),
+					   snapshot_uuid);
+			}
+			*out_idx = (uint8_t)i;
+			return 0;
+		}
+	}
+
+	if (m->num_srcs >= S3_EXPORT_MAX_SOURCES) {
+		/* The caller's move is to export by copying, which collapses the whole
+		 * lineage back to one source. Reported rather than silently reusing a
+		 * slot, because a wrong index reads another chunk's object and returns
+		 * bytes that look fine. */
+		SPDK_ERRLOG("export manifest already names %u sources; cannot add '%s'\n",
+			    m->num_srcs, prefix);
+		return -E2BIG;
+	}
+
+	i = m->num_srcs;
+	copy_field(m->srcs[i].prefix, sizeof(m->srcs[i].prefix), prefix);
+	copy_field(m->srcs[i].export_uuid, sizeof(m->srcs[i].export_uuid), export_uuid);
+	copy_field(m->srcs[i].snapshot_uuid, sizeof(m->srcs[i].snapshot_uuid),
+		   snapshot_uuid);
+	m->num_srcs = i + 1;
+	*out_idx = (uint8_t)i;
+	return 0;
+}
+
+int
+s3_export_manifest_inheritable(const struct s3_export_manifest *parent,
+			       const struct s3_export_source *dst,
+			       const char *uuid_str)
+{
+	if (!parent || !dst) {
+		return -EINVAL;
+	}
+	if (!uuid_str) {
+		uuid_str = "(unnamed)";
+	}
+
+	if (parent->layout != S3_EXPORT_LAYOUT_REF) {
+		/* A copied export keys its objects exports/<uuid>/chunk-N rather than
+		 * data/<uuid>, and a source entry is a bare prefix -- there is no way
+		 * to write down where those chunks are. */
+		SPDK_NOTICELOG("Export %s: parent %s is a copied export, whose object "
+			       "layout a source entry cannot name. Exporting by copying "
+			       "instead.\n", uuid_str, parent->uuid_str);
+		return -ENOTSUP;
+	}
+
+	/* A source entry carries a prefix and shares endpoint, bucket and region
+	 * with `src`. Referencing a parent reachable some other way would write a
+	 * manifest whose reader looks in the wrong bucket -- finding either nothing,
+	 * or, under a prefix that happens to exist there, another volume's objects.
+	 *
+	 * Region is compared with the rest even though it does not address anything
+	 * by itself: a client is built per endpoint/bucket/region, so a manifest that
+	 * silently changed it would be resolved by a client the importer did not
+	 * expect to need. */
+	if (strcmp(parent->src.bucket, dst->bucket) != 0 ||
+	    strcmp(parent->src.endpoint, dst->endpoint) != 0 ||
+	    strcmp(parent->src.region, dst->region) != 0) {
+		SPDK_NOTICELOG("Export %s: parent %s lives in %s/%s (region '%s'), not "
+			       "%s/%s (region '%s'), and a source entry cannot say so. "
+			       "Exporting by copying instead.\n", uuid_str,
+			       parent->uuid_str, parent->src.endpoint,
+			       parent->src.bucket, parent->src.region,
+			       dst->endpoint, dst->bucket, dst->region);
+		return -ENOTSUP;
+	}
+
+	return 0;
+}
+
+/* Whose lease governs one chunk of \p p, which is what an importer of the manifest
+ * inheriting it has to renew to keep the objects alive.
+ *
+ * Entry 0 carries no export uuid -- its objects are governed by that manifest's
+ * own export -- so the identity comes from the manifest itself there. Deeper
+ * entries already name the export governing them and are carried across unchanged,
+ * which is what keeps a twice-derived export renewing against the node that
+ * actually holds the data rather than against the middleman. */
+static void
+inherit_chunk_lease(const struct s3_export_manifest *p, uint64_t chunk,
+		    const char **export_uuid, const char **snapshot_uuid)
+{
+	uint8_t idx = p->src_idx ? p->src_idx[chunk] : 0;
+
+	if (idx == 0 || idx >= p->num_srcs) {
+		*export_uuid   = p->uuid_str;
+		*snapshot_uuid = p->src.snapshot_uuid;
+		return;
+	}
+	*export_uuid   = p->srcs[idx].export_uuid;
+	*snapshot_uuid = p->srcs[idx].snapshot_uuid;
+}
+
+int
+s3_export_manifest_inherit(struct s3_export_manifest *m,
+			   const struct s3_export_manifest *parent,
+			   uint64_t *out_named, uint64_t *out_bytes)
+{
+	uint64_t chunks, chunk;
+	uint64_t named = 0, bytes = 0;
+
+	if (!m || !parent) {
+		return -EINVAL;
+	}
+	if (m->layout != S3_EXPORT_LAYOUT_REF ||
+	    parent->layout != S3_EXPORT_LAYOUT_REF) {
+		return -EINVAL;
+	}
+	if (m->chunk_size != parent->chunk_size) {
+		/* Index i covers a different byte range under each, so nothing can be
+		 * carried across without re-cutting the data. */
+		return -EINVAL;
+	}
+
+	/* The shorter of the two. A volume can grow after an import, so the parent is
+	 * often the smaller; chunks past its end were never its to describe. It can
+	 * also be the longer one, if the export was of something bigger than this
+	 * snapshot, and those chunks are past the end of this manifest's tables. */
+	chunks = spdk_min(m->num_chunks, parent->num_chunks);
+
+	for (chunk = 0; chunk < chunks; chunk++) {
+		const struct s3_export_ref *ref;
+		const char *prefix, *export_uuid, *snapshot_uuid;
+		uint8_t idx;
+		int rc;
+
+		if (s3_export_manifest_is_present(m, chunk) ||
+		    s3_export_manifest_is_resolved(m, chunk)) {
+			/* Something nearer owns it, or the walk already settled it as
+			 * local zeroes. Not overwritten: reversing either would serve the
+			 * data as it was before the import. */
+			continue;
+		}
+		ref = s3_export_manifest_get_ref(parent, chunk);
+		if (!ref) {
+			/* A hole in the parent, left absent here too -- which is how a
+			 * manifest spells "reads as zeroes". */
+			continue;
+		}
+
+		prefix = s3_export_manifest_chunk_prefix(parent, chunk);
+		if (prefix[0] == '\0') {
+			/* The parent cannot say where its own chunk lives. parse()
+			 * rejects that, so a manifest off the wire is never in this state.
+			 * Refused rather than guessed: a guess names an object that very
+			 * likely exists and holds something else. */
+			SPDK_ERRLOG("export %s: parent %s cannot resolve its chunk %"
+				    PRIu64 "\n", m->uuid_str, parent->uuid_str, chunk);
+			return -EIO;
+		}
+
+		inherit_chunk_lease(parent, chunk, &export_uuid, &snapshot_uuid);
+
+		/* Deduped on prefix by add_src(), so the many chunks sharing a source
+		 * cost one entry. -E2BIG once there are more distinct prefixes than a
+		 * manifest can name, which the caller treats as "copy instead". */
+		rc = s3_export_manifest_add_src(m, prefix, export_uuid, snapshot_uuid,
+						&idx);
+		if (rc != 0) {
+			return rc;
+		}
+
+		rc = s3_export_manifest_set_ref(m, chunk, &ref->uuid, ref->valid_bytes);
+		if (rc != 0) {
+			return rc;
+		}
+		rc = s3_export_manifest_set_chunk_src(m, chunk, idx);
+		if (rc != 0) {
+			return rc;
+		}
+
+		named++;
+		bytes += ref->valid_bytes;
+	}
+
+	if (out_named) {
+		*out_named = named;
+	}
+	if (out_bytes) {
+		*out_bytes = bytes;
+	}
+	return 0;
+}
+
+int
+s3_export_manifest_set_chunk_src(struct s3_export_manifest *m, uint64_t chunk_index,
+				 uint8_t src_idx)
+{
+	if (!m || chunk_index >= m->num_chunks) {
+		return -EINVAL;
+	}
+	if (m->layout != S3_EXPORT_LAYOUT_REF || !m->srcs) {
+		return -EINVAL;
+	}
+	if (src_idx >= m->num_srcs) {
+		/* Never handed out by add_src(), so it cannot be resolved. Refused for
+		 * the same reason parse does: an out-of-range index picks up whatever is
+		 * at that slot and reads another chunk's object. */
+		SPDK_ERRLOG("chunk %" PRIu64 " names source %u of %u\n", chunk_index,
+			    src_idx, m->num_srcs);
+		return -EINVAL;
+	}
+
+	if (src_idx == 0 && !m->src_idx) {
+		/* Nothing to record: NULL already means "everything from entry 0", and
+		 * allocating a byte per chunk to store zeroes would make a
+		 * single-source manifest pay for a table it does not need -- and would
+		 * make it serialize as version 3. */
+		s3_export_manifest_set_present(m, chunk_index);
+		return 0;
+	}
+
+	if (!m->src_idx) {
+		m->src_idx = calloc(m->num_chunks, 1);
+		if (!m->src_idx) {
+			return -ENOMEM;
+		}
+	}
+	m->src_idx[chunk_index] = src_idx;
+	s3_export_manifest_set_present(m, chunk_index);
+	return 0;
+}
+
+const char *
+s3_export_manifest_chunk_prefix(const struct s3_export_manifest *m,
+				uint64_t chunk_index)
+{
+	uint8_t idx;
+
+	if (!m || chunk_index >= m->num_chunks || !m->srcs || m->num_srcs == 0) {
+		return "";
+	}
+	/* NULL src_idx is the single-source case, which is also every version 2
+	 * manifest: entry 0 for every chunk. */
+	idx = m->src_idx ? m->src_idx[chunk_index] : 0;
+	if (idx >= m->num_srcs) {
+		return "";
+	}
+	return m->srcs[idx].prefix;
+}
+
 const struct s3_export_ref *
 s3_export_manifest_get_ref(const struct s3_export_manifest *m, uint64_t chunk_index)
 {
@@ -294,6 +635,15 @@ s3_export_manifest_is_present(const struct s3_export_manifest *m, uint64_t chunk
 		return false;
 	}
 	return (m->present[chunk_index / 8] & (1u << (chunk_index % 8))) != 0;
+}
+
+bool
+s3_export_manifest_is_resolved(const struct s3_export_manifest *m, uint64_t chunk_index)
+{
+	if (!m || !m->resolved || chunk_index >= m->num_chunks) {
+		return false;
+	}
+	return (m->resolved[chunk_index / 8] & (1u << (chunk_index % 8))) != 0;
 }
 
 bool
@@ -370,6 +720,49 @@ s3_export_manifest_seal(struct s3_export_manifest *m)
 		}
 		pack_u32(wire, m->refs[i].valid_bytes);
 		m->crc32c = spdk_crc32c_update(wire, sizeof(wire), m->crc32c);
+	}
+
+	/* Appended, and only from version 3, so the stages above stay byte for byte
+	 * what version 2 computed. Keyed on the manifest's own version rather than
+	 * S3_EXPORT_VERSION: parse re-seals to verify the crc it read, so using the
+	 * compile-time constant here would recompute every version 2 manifest with a
+	 * stage it does not have and report corruption on all of them.
+	 *
+	 * src_idx has to be covered. A flipped bit there resolves a chunk against a
+	 * different prefix, and the object it finds is another chunk's -- valid
+	 * bytes, wrong place, no error anywhere. That is the failure the crc exists
+	 * for, and the bitmaps would still check out without this.
+	 *
+	 * A single-source manifest has src_idx == NULL, i.e. all indices zero, and
+	 * contributes nothing here: the two ways of saying "everything comes from
+	 * srcs[0]" have to seal identically, or a manifest would fail its own crc
+	 * after a round trip that changed nothing. */
+	if (m->version < 3 || !m->src_idx) {
+		return;
+	}
+	/* Batched into a small buffer rather than fed a byte at a time.
+	 * spdk_crc32c_update() reads its input eight bytes at a time and masks the
+	 * tail, so handing it a one-byte object reads past that object -- which is a
+	 * segfault when the byte happens to sit near the end of a mapping, and
+	 * silently reads adjacent memory when it does not. The other stages avoid it
+	 * by passing whole arrays; this one has to skip holes, so it copies. */
+	{
+		uint8_t batch[64];
+		size_t n = 0;
+
+		for (i = 0; i < m->num_chunks; i++) {
+			if (!bitmap_test(m->present, i)) {
+				continue;
+			}
+			batch[n++] = m->src_idx[i];
+			if (n == sizeof(batch)) {
+				m->crc32c = spdk_crc32c_update(batch, n, m->crc32c);
+				n = 0;
+			}
+		}
+		if (n != 0) {
+			m->crc32c = spdk_crc32c_update(batch, n, m->crc32c);
+		}
 	}
 }
 
@@ -498,6 +891,39 @@ pack_all_partials(const struct s3_export_manifest *m, uint8_t **out, size_t *out
 	return 0;
 }
 
+/* The source index of every present chunk, ascending -- the same packing rule the
+ * ref table follows, so a reader that walks one walks the other.
+ *
+ * One byte per present chunk rather than per chunk: a hole has no object and so no
+ * prefix to resolve it against, and packing by presence keeps this array the same
+ * length as the ref table it parallels. */
+static int
+pack_all_src_idx(const struct s3_export_manifest *m, uint8_t **out, size_t *out_len)
+{
+	uint8_t *buf;
+	size_t len;
+	uint64_t i;
+	size_t at = 0;
+
+	len = (size_t)m->present_chunks;
+	buf = malloc(len ? len : 1);
+	if (!buf) {
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < m->num_chunks; i++) {
+		if (!bitmap_test(m->present, i)) {
+			continue;
+		}
+		buf[at++] = m->src_idx ? m->src_idx[i] : 0;
+	}
+	assert(at == len);
+
+	*out = buf;
+	*out_len = len;
+	return 0;
+}
+
 /* base64 of a byte range, or NULL on allocation failure. Zero length yields an
  * empty string, which is what an all-full manifest's partials table is. */
 static char *
@@ -525,6 +951,7 @@ s3_export_manifest_serialize(struct s3_export_manifest *m, char **out, size_t *o
 	char *full_b64 = NULL;
 	char *refs_b64 = NULL;
 	char *partials_b64 = NULL;
+	char *src_idx_b64 = NULL;
 	uint8_t *packed = NULL;
 	size_t packed_len = 0;
 	size_t nbytes;
@@ -568,6 +995,44 @@ s3_export_manifest_serialize(struct s3_export_manifest *m, char **out, size_t *o
 			rc = -ENOMEM;
 			goto err;
 		}
+
+		/* Version is decided here, by whether more than one prefix is involved,
+		 * rather than fixed at create time. A single-source export is fully
+		 * describable in version 2, and emitting 3 for it would make it
+		 * unreadable to every binary that has not been upgraded, for nothing.
+		 *
+		 * Raised before the seal below, because seal() stages the crc by
+		 * m->version -- writing the header at 3 while sealing as 2 would produce
+		 * a manifest whose own crc does not verify. */
+		/* Same sync add_src() does, for the manifest that never called it: the
+		 * read path answers a chunk's prefix out of srcs[0], so leaving it empty
+		 * would make every chunk of an ordinary single-source export resolve to
+		 * "". Cheap, and it keeps the invariant in both places rather than
+		 * relying on the writer having used one particular API. */
+		if (m->srcs && m->srcs[0].prefix[0] == '\0') {
+			copy_field(m->srcs[0].prefix, sizeof(m->srcs[0].prefix),
+				   m->src.prefix);
+		}
+
+		if (m->num_srcs > 1) {
+			m->version = 3;
+
+			rc = pack_all_src_idx(m, &packed, &packed_len);
+			if (rc != 0) {
+				goto err;
+			}
+			src_idx_b64 = encode_b64(packed, packed_len);
+			free(packed);
+			if (!src_idx_b64) {
+				rc = -ENOMEM;
+				goto err;
+			}
+		}
+
+		/* Re-sealed because the version may have just moved, and with it the crc
+		 * stages. Callers seal before serializing, but they cannot know which
+		 * version this is going to be. */
+		s3_export_manifest_seal(m);
 	}
 
 	w = spdk_json_write_begin(json_buf_append, &buf, 0);
@@ -610,10 +1075,40 @@ s3_export_manifest_serialize(struct s3_export_manifest *m, char **out, size_t *o
 		spdk_json_write_named_string(w, "full", full_b64);
 		spdk_json_write_named_string(w, "refs", refs_b64);
 		spdk_json_write_named_string(w, "partials", partials_b64);
+
+		/* Version 3 only, and both together: a source table without indices
+		 * would leave every chunk pointing at entry 0, and indices without a
+		 * table would name entries nobody can resolve. Parse refuses either on
+		 * its own for that reason.
+		 *
+		 * Entry 0 is not written. It always mirrors `source` above, so putting it
+		 * on the wire would be a second place for the same prefix to be wrong,
+		 * and a reader that trusted the copy would resolve chunks against a
+		 * prefix the manifest does not claim to come from. */
+		if (src_idx_b64) {
+			uint32_t si;
+
+			spdk_json_write_named_array_begin(w, "srcs");
+			for (si = 1; si < m->num_srcs; si++) {
+				spdk_json_write_object_begin(w);
+				spdk_json_write_named_string(w, "prefix",
+							     m->srcs[si].prefix);
+				spdk_json_write_named_string(w, "export_uuid",
+							     m->srcs[si].export_uuid);
+				if (m->srcs[si].snapshot_uuid[0] != '\0') {
+					spdk_json_write_named_string(w, "snapshot_uuid",
+								     m->srcs[si].snapshot_uuid);
+				}
+				spdk_json_write_object_end(w);
+			}
+			spdk_json_write_array_end(w);
+			spdk_json_write_named_string(w, "src_idx", src_idx_b64);
+		}
 	}
 	spdk_json_write_object_end(w);
 
 	rc = spdk_json_write_end(w);
+	free(src_idx_b64);
 	free(partials_b64);
 	free(refs_b64);
 	free(full_b64);
@@ -628,6 +1123,7 @@ s3_export_manifest_serialize(struct s3_export_manifest *m, char **out, size_t *o
 	*out_len = buf.len;
 	return 0;
 err:
+	free(src_idx_b64);
 	free(partials_b64);
 	free(refs_b64);
 	free(full_b64);
@@ -661,6 +1157,41 @@ static const struct spdk_json_object_decoder source_decoders[] = {
 	{"snapshot_uuid", offsetof(struct source_json, snapshot_uuid), spdk_json_decode_string, true},
 };
 
+/* One entry of the "srcs" array. Only entries 1.. travel: entry 0 always mirrors
+ * "source", so it is synthesised rather than read. */
+struct src_entry_json {
+	char *prefix;
+	char *export_uuid;
+	char *snapshot_uuid;
+};
+
+static const struct spdk_json_object_decoder src_entry_decoders[] = {
+	{"prefix",        offsetof(struct src_entry_json, prefix),        spdk_json_decode_string, false},
+	{"export_uuid",   offsetof(struct src_entry_json, export_uuid),   spdk_json_decode_string, true},
+	{"snapshot_uuid", offsetof(struct src_entry_json, snapshot_uuid), spdk_json_decode_string, true},
+};
+
+/* Decoded straight into the manifest's table rather than into an intermediate
+ * array, because the count is what has to be checked against
+ * S3_EXPORT_MAX_SOURCES before anything is indexed by it. Filled in by
+ * decode_srcs() below, which needs the manifest and so cannot be a plain
+ * spdk_json_decode_array element function. */
+struct srcs_json {
+	const struct spdk_json_val *values;   /* the array, or NULL */
+};
+
+static int
+decode_srcs_array(const struct spdk_json_val *val, void *out)
+{
+	struct srcs_json *s = out;
+
+	if (val->type != SPDK_JSON_VAL_ARRAY_BEGIN) {
+		return -EINVAL;
+	}
+	s->values = val;
+	return 0;
+}
+
 struct manifest_json {
 	uint32_t          version;
 	char             *layout;
@@ -680,6 +1211,8 @@ struct manifest_json {
 	char             *partials;
 	uint32_t generation;
 	uint64_t expires_at;
+	struct srcs_json  srcs;
+	char             *src_idx;
 };
 
 static int
@@ -717,6 +1250,11 @@ static const struct spdk_json_object_decoder manifest_decoders[] = {
 	 * optional: those are generation 0 and never expire, which is what a
 	 * zeroed struct already says. */
 	{"generation", offsetof(struct manifest_json, generation), spdk_json_decode_uint32, true},
+	/* Version 3. Optional so a version 2 manifest still decodes; the pair is
+	 * then checked for being all-or-nothing, since one without the other
+	 * describes chunks nobody can resolve. */
+	{"srcs",    offsetof(struct manifest_json, srcs),    decode_srcs_array,       true},
+	{"src_idx", offsetof(struct manifest_json, src_idx), spdk_json_decode_string, true},
 	{"expires_at", offsetof(struct manifest_json, expires_at), spdk_json_decode_uint64, true},
 };
 
@@ -729,6 +1267,7 @@ free_manifest_json(struct manifest_json *j)
 	free(j->refs);
 	free(j->full);
 	free(j->partials);
+	free(j->src_idx);
 	free(j->src.endpoint);
 	free(j->src.region);
 	free(j->src.bucket);
@@ -878,10 +1417,123 @@ out:
 	return rc;
 }
 
-static void
-copy_field(char *dst, size_t dst_len, const char *src)
+/* The source table and the per-chunk indices, for a version 3 ref manifest.
+ *
+ * Entry 0 is already in place, synthesised from `source`, so this fills in 1..
+ * and then the indices. Everything here is a refusal rather than a repair: an
+ * index that names a source which is not there resolves a chunk against whatever
+ * happens to be at that slot, and the object it finds belongs to another chunk --
+ * valid bytes from the wrong place, which no later check would catch.
+ */
+static int
+parse_srcs(struct s3_export_manifest *m, const struct manifest_json *j)
 {
-	snprintf(dst, dst_len, "%s", src ? src : "");
+	struct spdk_json_val *it;
+	uint8_t *decoded = NULL;
+	uint32_t n = 1;
+	uint64_t i;
+	size_t at = 0;
+	int rc;
+
+	/* All or nothing. A table without indices leaves every chunk on entry 0,
+	 * silently ignoring the sources the writer meant to use; indices without a
+	 * table name entries that do not exist. Either way the manifest means
+	 * something other than what it says. */
+	if ((j->srcs.values != NULL) != (j->src_idx != NULL)) {
+		SPDK_ERRLOG("export manifest has %s but not the other\n",
+			    j->srcs.values ? "a source table" : "source indices");
+		return -EINVAL;
+	}
+	if (j->srcs.values == NULL) {
+		/* Version 2, or a version 3 manifest that needed only one source.
+		 * src_idx stays NULL, which every reader treats as all zeroes. */
+		return 0;
+	}
+	if (j->version < 3) {
+		SPDK_ERRLOG("export manifest is version %u but carries a source "
+			    "table\n", j->version);
+		return -EINVAL;
+	}
+
+	/* spdk_json_val arrays are flat: the ARRAY_BEGIN carries how many values it
+	 * spans, and each element is itself a run of values. Walked with
+	 * spdk_json_next() so nested objects are skipped as units. */
+	/* Cast away const because spdk_json_next() takes a mutable pointer; it does
+	 * not write through it. */
+	it = (struct spdk_json_val *)(uintptr_t)(j->srcs.values + 1);
+	while (it->type != SPDK_JSON_VAL_ARRAY_END) {
+		struct src_entry_json e = {0};
+
+		if (n >= S3_EXPORT_MAX_SOURCES) {
+			SPDK_ERRLOG("export manifest names more than %d sources\n",
+				    S3_EXPORT_MAX_SOURCES);
+			return -E2BIG;
+		}
+		if (spdk_json_decode_object(it, src_entry_decoders,
+					    SPDK_COUNTOF(src_entry_decoders), &e) != 0) {
+			SPDK_ERRLOG("export manifest source %u is malformed\n", n);
+			return -EINVAL;
+		}
+		copy_field(m->srcs[n].prefix, sizeof(m->srcs[n].prefix), e.prefix);
+		copy_field(m->srcs[n].export_uuid, sizeof(m->srcs[n].export_uuid),
+			   e.export_uuid);
+		copy_field(m->srcs[n].snapshot_uuid, sizeof(m->srcs[n].snapshot_uuid),
+			   e.snapshot_uuid);
+		free(e.prefix);
+		free(e.export_uuid);
+		free(e.snapshot_uuid);
+
+		if (m->srcs[n].prefix[0] == '\0') {
+			SPDK_ERRLOG("export manifest source %u has an empty prefix\n", n);
+			return -EINVAL;
+		}
+		n++;
+		/* spdk_json_next() answers NULL at the end of the enclosing container as
+		 * well as on malformed input, so the loop condition above -- not this --
+		 * is what ends a well-formed array. Treating NULL as an error here
+		 * rejected every valid table whose last element it stepped past. */
+		it = spdk_json_next(it);
+		if (it == NULL) {
+			break;
+		}
+	}
+
+	if (n < 2) {
+		/* An empty table would have been written as version 2, so its presence
+		 * means the writer thought it had sources and lost them. */
+		SPDK_ERRLOG("export manifest carries an empty source table\n");
+		return -EINVAL;
+	}
+	m->num_srcs = n;
+
+	/* One byte per present chunk, in ascending chunk order -- the same packing
+	 * the ref table uses. present_chunks is already correct here: the caller
+	 * sealed after decoding the bitmap. */
+	rc = decode_b64_exact(j->src_idx, &decoded, (size_t)m->present_chunks,
+			      "source indices");
+	if (rc != 0) {
+		return rc;
+	}
+
+	m->src_idx = calloc(m->num_chunks, 1);
+	if (!m->src_idx) {
+		free(decoded);
+		return -ENOMEM;
+	}
+	for (i = 0; i < m->num_chunks; i++) {
+		if (!bitmap_test(m->present, i)) {
+			continue;
+		}
+		if (decoded[at] >= m->num_srcs) {
+			SPDK_ERRLOG("export manifest chunk %" PRIu64 " names source %u "
+				    "of %u\n", i, decoded[at], m->num_srcs);
+			free(decoded);
+			return -EINVAL;
+		}
+		m->src_idx[i] = decoded[at++];
+	}
+	free(decoded);
+	return 0;
 }
 
 int
@@ -949,9 +1601,9 @@ s3_export_manifest_parse(const void *json, size_t len, struct s3_export_manifest
 	 * future zero-copy layout would name the source's own chunk objects, and
 	 * reading it as if it were dense would produce an lvol full of the wrong
 	 * data rather than an error. */
-	if (j.version != S3_EXPORT_VERSION) {
-		SPDK_ERRLOG("export manifest version %u is not supported (want %u)\n",
-			    j.version, S3_EXPORT_VERSION);
+	if (j.version < S3_EXPORT_VERSION_MIN || j.version > S3_EXPORT_VERSION) {
+		SPDK_ERRLOG("export manifest version %u is not supported (want %u..%u)\n",
+			    j.version, S3_EXPORT_VERSION_MIN, S3_EXPORT_VERSION);
 		rc = -ENOTSUP;
 		goto out;
 	}
@@ -1000,6 +1652,13 @@ s3_export_manifest_parse(const void *json, size_t len, struct s3_export_manifest
 	if (rc != 0) {
 		goto out;
 	}
+	/* Set before anything re-seals, because seal() picks its crc stages by it.
+	 * create() leaves it at S3_EXPORT_VERSION, which was harmless while exactly
+	 * one version could be read and becomes a bug the moment two can: every older
+	 * manifest would be recomputed with a stage it does not carry, and reported as
+	 * corrupt. */
+	m->version = j.version;
+
 	if (m->num_chunks != j.num_chunks) {
 		SPDK_ERRLOG("export manifest claims %" PRIu64 " chunks, geometry says "
 			    "%" PRIu64 "\n", j.num_chunks, m->num_chunks);
@@ -1021,6 +1680,28 @@ s3_export_manifest_parse(const void *json, size_t len, struct s3_export_manifest
 		 * crc is discarded -- the full bitmap is still zeroed at this point. */
 		s3_export_manifest_seal(m);
 		rc = unpack_all_refs(m, j.refs, j.full, j.partials);
+		if (rc != 0) {
+			goto out;
+		}
+		/* Entry 0 mirrors src, for every version, and is synthesised rather
+		 * than read: a version 2 manifest has no source table at all, and this
+		 * is what makes that invisible further in -- it arrives as a one-entry
+		 * table naming its own prefix, with src_idx NULL meaning "every chunk
+		 * from entry 0". So the read path has one shape to handle rather than a
+		 * version test at every key it builds.
+		 *
+		 * Done here rather than beside the other src fields further down,
+		 * because parse_srcs() needs it and the final seal is what folds
+		 * src_idx into the crc: decoding the indices after that seal would
+		 * leave them out of the sum and fail every version 3 manifest on its
+		 * own checksum. */
+		copy_field(m->srcs[0].prefix, sizeof(m->srcs[0].prefix), j.src.prefix);
+		copy_field(m->srcs[0].snapshot_uuid, sizeof(m->srcs[0].snapshot_uuid),
+			   j.src.snapshot_uuid);
+		m->srcs[0].export_uuid[0] = '\0';
+		m->num_srcs = 1;
+
+		rc = parse_srcs(m, &j);
 		if (rc != 0) {
 			goto out;
 		}
@@ -1492,6 +2173,10 @@ s3_export_run(const struct s3_export_opts *opts, s3_export_cb cb, void *cb_arg)
 
 	ctx->m->src          = opts->src;
 	ctx->m->cluster_size = opts->cluster_size;
+	/* 0 for a new export, which leaves the field as created() set it. Non-zero
+	 * when this run replaces a manifest importers may hold -- see the field's
+	 * comment in s3_export.h. */
+	ctx->m->generation   = opts->generation;
 	ctx->num_chunks= ctx->m->num_chunks;
 	ctx->blocks_per_chunk = ctx->chunk_size / S3LVOL_BLOCK_SIZE;
 

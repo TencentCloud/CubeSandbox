@@ -77,10 +77,23 @@ struct s3lvol_import {
 	 *
 	 * The lease writes to the *source* bucket, so it needs its own client:
 	 * s3lvol_lvstore_get_client() reaches this lvstore's bucket, which is
-	 * only the same one when the import stays within a bucket. */
+	 * only the same one when the import stays within a bucket.
+	 *
+	 * One key per source, not one per import. A derived export names the prefixes
+	 * of every node its data passed through, and each of those nodes decides
+	 * independently whether its snapshot is still needed -- so renewing only the
+	 * export this import names would leave the node that actually holds the older
+	 * chunks free to delete them. The keys are renewed against the *original*
+	 * exports rather than through the intermediate, which is what lets the
+	 * middleman go away: nothing in the chain depends on it still running.
+	 *
+	 * One client and one poller regardless, because every source shares the
+	 * endpoint, bucket and region of `src` -- the writer refuses to reference
+	 * anything else -- and they all share the interval. */
 	struct spdk_poller          *lease_poller;
 	struct s3_client            *lease_client;
-	char                         lease_key[S3_EXPORT_KEY_MAX];
+	char                       (*lease_keys)[S3_EXPORT_KEY_MAX];
+	uint32_t                     num_lease_keys;
 	uint64_t                     lease_interval_us;
 
 	TAILQ_ENTRY(s3lvol_import)  link;
@@ -97,6 +110,9 @@ static int import_lease_renew(void *arg);
 static void import_lease_put_done(void *cb_arg, int status);
 static void import_build_target(const struct s3lvol_import *imp,
 				struct s3_target *out);
+static int imports_save(struct s3lvol_lvstore *lvs, spdk_lvs_op_complete cb_fn,
+			 void *cb_arg);
+static void import_on_swap(void *arg, struct s3_export_manifest *m);
 
 /* ==========================================================================
  * Registry
@@ -211,18 +227,21 @@ import_add(struct s3lvol_lvstore *lvs, struct s3_export_manifest *m,
 static void
 import_lease_put_done(void *cb_arg, int status)
 {
-	char *uuid_str = cb_arg;
+	char *key = cb_arg;
 
 	/* No state to update. A failure means the lease went stale for a while,
-	 * which the source's grace period exists to absorb. Logged at debug level
-	 * so a *sustained* failure is still visible in the noise. cb_arg is a
-	 * strdup()'d copy precisely so this can run after import_remove() freed
-	 * the import -- a PUT can still be in flight when that happens. */
+	 * which the source's grace period exists to absorb. cb_arg is a strdup()'d
+	 * copy precisely so this can run after import_remove() freed the import -- a
+	 * PUT can still be in flight when that happens.
+	 *
+	 * The key rather than the export uuid, because an import renews several and
+	 * they are not equally interesting: the one that fails is the prefix whose
+	 * node may now delete data this volume is still reading. */
 	if (status != 0) {
-		SPDK_WARNLOG("lease renew failed for export %s: %s\n",
-			     uuid_str, spdk_strerror(-status));
+		SPDK_WARNLOG("lease renew failed for '%s': %s\n",
+			     key, spdk_strerror(-status));
 	}
-	free(uuid_str);
+	free(key);
 }
 
 static int
@@ -232,7 +251,7 @@ import_lease_renew(void *arg)
 	char body[128];
 	struct iovec iov;
 	uint64_t now = (uint64_t)time(NULL);
-	char *uuid_str;
+	uint32_t i;
 
 	/* The body is a tiny JSON document. The source needs three things from
 	 * it: that the object was recently written (updated_at), who wrote it
@@ -248,19 +267,31 @@ import_lease_renew(void *arg)
 	iov.iov_base = body;
 	iov.iov_len  = strlen(body);
 
-	/* Owned by the completion callback, not by this stack frame: s3_put()
-	 * copies the body but not cb_arg, and the callback outlives the poller. */
-	uuid_str = strdup(imp->m->uuid_str);
-	if (!uuid_str) {
-		return SPDK_POLLER_IDLE;
-	}
+	/* Every source, one PUT each. The same body goes to all of them: it says who
+	 * is reading and how often it will say so again, neither of which depends on
+	 * which prefix is being renewed.
+	 *
+	 * Each is submitted independently and a failure of one does not stop the
+	 * rest. They protect different nodes' snapshots, so skipping the others
+	 * because one failed would turn one unreachable prefix into every prefix
+	 * going stale. */
+	for (i = 0; i < imp->num_lease_keys; i++) {
+		char *key;
 
-	if (s3_put(imp->lease_client, imp->lease_key, &iov, 1, false,
-		   import_lease_put_done, uuid_str) != 0) {
-		/* The next poller tick retries; nothing else to do. */
-		SPDK_WARNLOG("lease renew submit failed for export %s\n",
-			     imp->m->uuid_str);
-		free(uuid_str);
+		/* Owned by the completion callback, not by this stack frame: s3_put()
+		 * copies the body but not cb_arg, and the callback outlives the
+		 * poller -- and, after import_remove(), the keys array itself. */
+		key = strdup(imp->lease_keys[i]);
+		if (!key) {
+			continue;
+		}
+
+		if (s3_put(imp->lease_client, key, &iov, 1, false,
+			   import_lease_put_done, key) != 0) {
+			/* The next poller tick retries; nothing else to do. */
+			SPDK_WARNLOG("lease renew submit failed for '%s'\n", key);
+			free(key);
+		}
 	}
 
 	/* Fixed period, not re-armed by the PUT: the poller keeps ticking, and
@@ -281,6 +312,11 @@ import_lease_stop(struct s3lvol_import *imp)
 		s3_client_put(imp->lease_client);
 		imp->lease_client = NULL;
 	}
+	/* Safe with PUTs still in flight: each one carries its own copy of the key,
+	 * which is why import_lease_renew() strdup()s rather than passing these. */
+	free(imp->lease_keys);
+	imp->lease_keys = NULL;
+	imp->num_lease_keys = 0;
 }
 
 /* Start the lease for an import, if it has one. A dense export pins nothing and
@@ -310,8 +346,63 @@ import_lease_start(struct s3lvol_import *imp)
 		return;
 	}
 
-	snprintf(imp->lease_key, sizeof(imp->lease_key), "%s/meta/exports/%s.lease",
-		 m->src.prefix, m->uuid_str);
+	/* One key per source. Entry 0 is this export's own -- its objects are under
+	 * the prefix that published the manifest, so the lease is the manifest's own
+	 * uuid. Every later entry names the export that governs it, and the lease goes
+	 * there directly rather than to the node this manifest came from: that node
+	 * may already be gone, and the objects are not its to protect. */
+	imp->lease_keys = calloc(m->num_srcs ? m->num_srcs : 1,
+				 sizeof(*imp->lease_keys));
+	if (!imp->lease_keys) {
+		SPDK_WARNLOG("No memory for the lease keys of export %s. The source "
+			     "may delete its snapshot while this import still reads "
+			     "it.\n", m->uuid_str);
+		s3_client_put(imp->lease_client);
+		imp->lease_client = NULL;
+		return;
+	}
+
+	if (m->num_srcs == 0) {
+		/* A ref manifest always has at least entry 0 once parsed, so this is
+		 * only reachable for one built in memory. Kept because losing the lease
+		 * entirely is a worse failure than an extra branch. */
+		snprintf(imp->lease_keys[0], sizeof(imp->lease_keys[0]),
+			 "%s/meta/exports/%s.lease", m->src.prefix, m->uuid_str);
+		imp->num_lease_keys = 1;
+	} else {
+		uint32_t j;
+
+		for (j = 0; j < m->num_srcs; j++) {
+			const char *uuid = (j == 0) ? m->uuid_str
+					   : m->srcs[j].export_uuid;
+
+			if (uuid[0] == '\0') {
+				/* Nothing to renew against: the manifest names the prefix
+				 * but not the export governing it. Said out loud, because
+				 * it means those chunks are not protected by anything this
+				 * node does. */
+				SPDK_WARNLOG("Export %s names prefix '%s' without an export "
+					     "uuid, so its lease cannot be renewed. That "
+					     "node may delete the snapshot behind those "
+					     "chunks while this import still reads them.\n",
+					     m->uuid_str, m->srcs[j].prefix);
+				continue;
+			}
+			snprintf(imp->lease_keys[imp->num_lease_keys],
+				 sizeof(imp->lease_keys[0]),
+				 "%s/meta/exports/%s.lease", m->srcs[j].prefix, uuid);
+			imp->num_lease_keys++;
+		}
+	}
+
+	if (imp->num_lease_keys == 0) {
+		SPDK_WARNLOG("Export %s has no renewable lease\n", m->uuid_str);
+		free(imp->lease_keys);
+		imp->lease_keys = NULL;
+		s3_client_put(imp->lease_client);
+		imp->lease_client = NULL;
+		return;
+	}
 
 	/* Renew at a third of the remaining TTL, bounded below.
 	 *
@@ -346,6 +437,9 @@ import_lease_start(struct s3lvol_import *imp)
 	if (!imp->lease_poller) {
 		SPDK_WARNLOG("Could not start the lease poller for export %s\n",
 			     m->uuid_str);
+		free(imp->lease_keys);
+		imp->lease_keys = NULL;
+		imp->num_lease_keys = 0;
 		s3_client_put(imp->lease_client);
 		imp->lease_client = NULL;
 		return;
@@ -364,8 +458,19 @@ import_lease_start(struct s3lvol_import *imp)
 	 * the next tick retries, and there is no state to keep straight. */
 	import_lease_renew(imp);
 
-	SPDK_NOTICELOG("export %s lease renewing every %" PRIu64 " second(s)\n",
-		       m->uuid_str, ttl);
+	SPDK_NOTICELOG("export %s renewing %u lease(s) every %" PRIu64 " second(s)\n",
+		       m->uuid_str, imp->num_lease_keys, ttl);
+	if (imp->num_lease_keys > 1) {
+		uint32_t j;
+
+		/* Listed individually because this is the set of nodes that must keep
+		 * their snapshots for this volume to stay readable, and it is not
+		 * derivable from anything else an operator can see here. */
+		for (j = 0; j < imp->num_lease_keys; j++) {
+			SPDK_NOTICELOG("export %s lease [%u]: %s\n", m->uuid_str, j,
+				       imp->lease_keys[j]);
+		}
+	}
 }
 
 static void
@@ -813,6 +918,34 @@ import_build_target(const struct s3lvol_import *imp, struct s3_target *out)
 	out->auth_mode      = S3_AUTH_ENV;
 }
 
+static void
+import_on_swap(void *arg, struct s3_export_manifest *m)
+{
+	struct s3lvol_import *imp = arg;
+	struct s3_export_manifest *old;
+
+	if (!imp || !m || !imp->m) {
+		return;
+	}
+	if (m->generation <= imp->m->generation) {
+		return;
+	}
+
+	old = imp->m;
+	s3_export_manifest_ref(m);
+	imp->m = m;
+	s3_export_manifest_unref(old);
+
+	if (!imp->lvs) {
+		return;
+	}
+	if (imports_save(imp->lvs, NULL, NULL) != 0) {
+		SPDK_WARNLOG("Could not persist generation %u of import %s; a "
+			     "restart would inherit the previous generation\n",
+			     m->generation, m->uuid_str);
+	}
+}
+
 int
 s3lvol_esnap_dev_create(void *bs_ctx, void *blob_ctx, struct spdk_blob *blob,
 			const void *esnap_id, uint32_t id_len,
@@ -866,8 +999,13 @@ s3lvol_esnap_dev_create(void *bs_ctx, void *blob_ctx, struct spdk_blob *blob,
 	rc = s3_export_bs_dev_create(client, imp->m, bs_dev);
 	if (rc != 0) {
 		s3_client_put(client);
+		return rc;
 	}
-	return rc;
+	/* A 404 refetch swaps the device's manifest first. Without this the
+	 * import registry, derived exports, and same-bucket decouple would keep
+	 * naming the generation materialisation has already deleted. */
+	s3_export_bs_dev_set_on_swap(*bs_dev, import_on_swap, imp);
+	return 0;
 }
 
 /* ==========================================================================
@@ -962,6 +1100,80 @@ export_inflight_remove(const char *uuid)
 		TAILQ_REMOVE(&g_inflight, inf, link);
 		free(inf);
 	}
+}
+
+/* Mutations of manifests that already exist (replacement or release).
+ *
+ * Kept separate from g_inflight: that list means "the uuid has been handed out
+ * but no durable export exists yet" and drives rcow_get_snapshot_status. A
+ * replacement remains a perfectly usable DONE export throughout, but release,
+ * another replacement, and a new export reusing the uuid must not race its
+ * final PUT or DELETE. */
+struct export_rewrite {
+	char                         uuid_str[SPDK_UUID_STRING_LEN];
+	TAILQ_ENTRY(export_rewrite)  link;
+};
+
+static TAILQ_HEAD(, export_rewrite) g_export_rewrites =
+	TAILQ_HEAD_INITIALIZER(g_export_rewrites);
+
+static struct export_rewrite *
+export_rewrite_find(const char *uuid)
+{
+	struct export_rewrite *rw;
+
+	TAILQ_FOREACH(rw, &g_export_rewrites, link) {
+		if (strcmp(rw->uuid_str, uuid) == 0) {
+			return rw;
+		}
+	}
+	return NULL;
+}
+
+static struct export_rewrite *
+export_rewrite_add(const char *uuid)
+{
+	struct export_rewrite *rw;
+
+	if (export_rewrite_find(uuid)) {
+		return NULL;
+	}
+	rw = calloc(1, sizeof(*rw));
+	if (!rw) {
+		return NULL;
+	}
+	snprintf(rw->uuid_str, sizeof(rw->uuid_str), "%s", uuid);
+	TAILQ_INSERT_TAIL(&g_export_rewrites, rw, link);
+	return rw;
+}
+
+static void
+export_rewrite_remove(struct export_rewrite *rw)
+{
+	if (rw) {
+		TAILQ_REMOVE(&g_export_rewrites, rw, link);
+		free(rw);
+	}
+}
+
+static bool
+export_rewrite_pins_snapshot(struct s3lvol_lvstore *lvs, const char *snapshot)
+{
+	struct export_rewrite *rw;
+
+	TAILQ_FOREACH(rw, &g_export_rewrites, link) {
+		struct s3lvol_export_entry info;
+		struct s3lvol_export *exp = s3lvol_export_find(lvs, rw->uuid_str);
+
+		if (!exp) {
+			continue;
+		}
+		s3lvol_export_get(exp, &info);
+		if (strcmp(info.snapshot, snapshot) == 0) {
+			return true;
+		}
+	}
+	return false;
 }
 
 bool
@@ -1136,22 +1348,30 @@ export_copy_done(void *cb_arg, struct s3_export_manifest *m, int status)
 
 /* Everything the manifest says about where it came from. Both engines record the
  * same thing, so it is filled in once. */
+/* Where the export's objects live, and which snapshot they came from.
+ *
+ * Split out from export_fill_src() because materialising needs exactly this and
+ * has no export_ctx: it republishes an existing export rather than starting one,
+ * so it has a uuid and a snapshot name where the export path has a whole request.
+ * Keeping one copy matters more here than the extra function -- the *importing*
+ * node feeds these fields to s3_client_get_or_create() every time it reopens the
+ * clone, so two versions that drift produce a manifest that fails much later, on
+ * another machine.
+ */
 static int
-export_fill_src(struct export_ctx *ctx, struct s3_export_source *src)
+export_fill_src_for(struct s3lvol_lvstore *lvs, struct spdk_lvol *snapshot,
+		    struct s3_export_source *src)
 {
-	const char *ns = s3lvol_lvstore_get_namespace(ctx->lvs);
+	const char *ns = s3lvol_lvstore_get_namespace(lvs);
 	const struct s3_target *tgt = rcow_namespace_to_target(ns);
 
-	/* The manifest records where the source lives, and that record is what the
-	 * *importing* node feeds to s3_client_get_or_create() through
-	 * import_build_target() every time it reopens the clone. An empty endpoint
-	 * here would therefore produce a manifest that fails much later, on another
-	 * node, at attach time -- so refuse to write one rather than paper over it. */
+	/* An empty endpoint would produce a manifest that fails at attach time on
+	 * the importing node, so refuse to write one rather than paper over it. */
 	if (!tgt || !tgt->endpoint || !tgt->bucket) {
 		SPDK_ERRLOG("lvstore '%s': namespace '%s' does not resolve to a COS "
 			    "target, so the manifest could not say where the exported "
 			    "objects live\n",
-			    s3lvol_lvstore_get_name(ctx->lvs), ns ? ns : "(none)");
+			    s3lvol_lvstore_get_name(lvs), ns ? ns : "(none)");
 		return -ENOENT;
 	}
 
@@ -1160,15 +1380,26 @@ export_fill_src(struct export_ctx *ctx, struct s3_export_source *src)
 		 tgt->region ? tgt->region : "");
 	snprintf(src->bucket, sizeof(src->bucket), "%s", tgt->bucket);
 	snprintf(src->prefix, sizeof(src->prefix), "%s",
-		 s3lvol_lvstore_get_name(ctx->lvs));
+		 s3lvol_lvstore_get_name(lvs));
 	snprintf(src->lvs_name, sizeof(src->lvs_name), "%s",
-		 s3lvol_lvstore_get_name(ctx->lvs));
-	snprintf(src->snapshot, sizeof(src->snapshot), "%s", ctx->snapshot->name);
-	src->blob_id = spdk_blob_get_id(ctx->snapshot->blob);
+		 s3lvol_lvstore_get_name(lvs));
+	snprintf(src->snapshot, sizeof(src->snapshot), "%s", snapshot->name);
+	src->blob_id = spdk_blob_get_id(snapshot->blob);
 	/* The identity of the source, as opposed to blob_id, which blobstore hands
 	 * back out after a delete. See the field's comment in s3_export.h. */
 	snprintf(src->snapshot_uuid, sizeof(src->snapshot_uuid), "%s",
-		 ctx->snapshot->uuid_str);
+		 snapshot->uuid_str);
+	return 0;
+}
+
+static int
+export_fill_src(struct export_ctx *ctx, struct s3_export_source *src)
+{
+	int rc = export_fill_src_for(ctx->lvs, ctx->snapshot, src);
+
+	if (rc != 0) {
+		return rc;
+	}
 
 	snprintf(ctx->info.snapshot_name, sizeof(ctx->info.snapshot_name), "%s",
 		 ctx->snapshot->name);
@@ -1205,17 +1436,26 @@ blob_by_id(struct spdk_lvol_store *store, spdk_blob_id id)
  * Every layer resolves through the same chunk map -- one bs_dev, one address
  * space -- so this costs a list lookup per layer and no I/O at all.
  *
+ * The one layer that does not is an esnap clone, whose inherited data is under the
+ * exporting lvstore's prefix. The walk stops there and \p esnap_uuid receives the
+ * export uuid it reads through, empty when the chain ended in a blob instead. The
+ * clone is still part of the chain: what it wrote since the import is local like
+ * anything else, and only what it inherited is not.
+ *
  * Failures here are all routing answers, not errors: the copy engine reads through
  * blobstore, which flattens the chain by itself, so it can handle every case this
  * declines.
  */
 static int
 export_build_chain(struct s3lvol_lvstore *lvs, struct spdk_blob *snapshot,
-		   struct spdk_blob **chain, uint32_t max, uint32_t *out_len)
+		   struct spdk_blob **chain, uint32_t max, uint32_t *out_len,
+		   char *esnap_uuid, size_t esnap_uuid_len)
 {
 	struct spdk_lvol_store *store = s3lvol_lvstore_get_lvs(lvs);
 	struct spdk_blob *cur = snapshot;
 	uint32_t n = 0;
+
+	esnap_uuid[0] = '\0';
 
 	while (true) {
 		spdk_blob_id pid;
@@ -1234,15 +1474,29 @@ export_build_chain(struct s3lvol_lvstore *lvs, struct spdk_blob *snapshot,
 		 * wrong would end the walk early and silently drop everything the esnap
 		 * parent holds.
 		 *
-		 * The parent's data is under another lvstore's prefix, so this chunk map
-		 * cannot resolve it at all. That is also why it matters whether the
-		 * importing node still reads through to an export: a volume with no
-		 * parent can be handed off zero-copy again. */
+		 * The clone itself stays in the chain: it owns whatever was written since
+		 * the import, and those clusters are in this lvstore's chunk map like any
+		 * other. What it inherits is not -- that lives under the exporting
+		 * lvstore's prefix -- so the walk stops here and the esnap id is handed
+		 * back instead. The caller turns it into the manifest those chunks can be
+		 * named out of, or falls back to copying if it cannot. */
 		if (spdk_blob_is_esnap_clone(cur)) {
-			SPDK_NOTICELOG("Snapshot chain reaches an external snapshot, whose "
-				       "data is not in this lvstore's chunk map; exporting "
-				       "by copying instead.\n");
-			return -ENOTSUP;
+			const void *id = NULL;
+			size_t id_len = 0;
+
+			if (spdk_blob_get_esnap_id(cur, &id, &id_len) != 0 ||
+			    id_len == 0 || id_len >= esnap_uuid_len) {
+				/* The id is the export uuid the import wrote. Anything else
+				 * means this clone was not made by an import, so there is no
+				 * manifest to inherit from. */
+				SPDK_NOTICELOG("Snapshot chain reaches an external snapshot "
+					       "whose id is not an export uuid (%zu byte(s)); "
+					       "exporting by copying instead.\n", id_len);
+				return -ENOTSUP;
+			}
+			memcpy(esnap_uuid, id, id_len);
+			esnap_uuid[id_len] = '\0';
+			break;
 		}
 
 		pid = spdk_blob_get_parent_snapshot(store->blobstore,
@@ -1268,6 +1522,61 @@ export_build_chain(struct s3lvol_lvstore *lvs, struct spdk_blob *snapshot,
 	return 0;
 }
 
+/* How many layers export_build_chain() would walk for this blob.
+ *
+ * Deliberately the same walk as above, counting instead of collecting, and that
+ * duplication is the point: this number is only worth reporting if it is the
+ * number the export path will act on. Anything that made the two disagree would
+ * put the warning at a different depth from the fallback it warns about, which is
+ * worse than not warning at all.
+ *
+ * So the three stopping conditions are mirrored exactly -- esnap clone before
+ * asking for a parent (see the walk for why that order matters), no parent, and a
+ * parent no lvol of this store has open. Unlike the walk this has no maximum: the
+ * caller wants to know how far past a threshold it is, and returning "32" for
+ * everything deeper would hide precisely the case worth seeing. A cycle is
+ * impossible -- a snapshot chain is built by parenting new blobs onto old ones --
+ * but the count is bounded anyway by the blob count of the store, since every step
+ * moves to a distinct parent.
+ *
+ * Costs one list lookup per layer and no I/O, so it is cheap enough to answer per
+ * lvol in an RPC that already walks them all.
+ */
+uint32_t
+s3lvol_lvol_chain_depth(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol)
+{
+	struct spdk_lvol_store *store;
+	struct spdk_blob *cur;
+	uint32_t n = 0;
+
+	if (!lvs || !lvol || !lvol->blob) {
+		return 0;
+	}
+	store = s3lvol_lvstore_get_lvs(lvs);
+	if (!store) {
+		return 0;
+	}
+
+	cur = lvol->blob;
+	while (cur) {
+		spdk_blob_id pid;
+
+		n++;
+
+		if (spdk_blob_is_esnap_clone(cur)) {
+			break;
+		}
+		pid = spdk_blob_get_parent_snapshot(store->blobstore,
+						    spdk_blob_get_id(cur));
+		if (pid == SPDK_BLOBID_INVALID) {
+			break;
+		}
+		cur = blob_by_id(store, pid);
+	}
+
+	return n;
+}
+
 /* Name the objects the snapshot already occupies, and upload only the manifest.
  *
  * This is the path a handoff is supposed to take: no data is read and none is
@@ -1282,14 +1591,37 @@ export_ref(struct export_ctx *ctx)
 	struct spdk_lvol_store *store = s3lvol_lvstore_get_lvs(ctx->lvs);
 	struct spdk_blob *chain[S3LVOL_DEFAULT_MAX_CHAIN_DEPTH];
 	struct s3_export_ref_opts opts = {0};
+	char esnap_uuid[SPDK_UUID_STRING_LEN];
 	uint32_t chain_len = 0;
 	int rc;
 
 	rc = export_build_chain(ctx->lvs, ctx->snapshot->blob, chain,
-				SPDK_COUNTOF(chain), &chain_len);
+				SPDK_COUNTOF(chain), &chain_len,
+				esnap_uuid, sizeof(esnap_uuid));
 	if (rc != 0) {
 		export_copy(ctx);
 		return;
+	}
+
+	/* The chain bottomed out in an export rather than in a blob, so the chunks
+	 * older than the import have to be named out of that export's manifest. It is
+	 * in memory already: the import registry holds it for as long as any volume
+	 * reads through it, which is precisely the condition for being here.
+	 *
+	 * A missing entry is not an error to report. It means this node is reading
+	 * through an export it has no manifest for, which the load path refuses to
+	 * let happen -- so the honest response is to copy, which needs no manifest. */
+	if (esnap_uuid[0] != '\0') {
+		struct s3lvol_import *imp = import_find(ctx->lvs, esnap_uuid);
+
+		if (!imp) {
+			SPDK_NOTICELOG("Snapshot reads through export %s, which this "
+				       "lvstore has no manifest for; exporting by copying "
+				       "instead.\n", esnap_uuid);
+			export_copy(ctx);
+			return;
+		}
+		opts.parent = imp->m;
 	}
 
 	opts.bs_dev = s3lvol_lvstore_get_bs_dev(ctx->lvs);
@@ -1308,6 +1640,21 @@ export_ref(struct export_ctx *ctx)
 
 	rc = s3_export_run_ref(&opts, export_copy_done, ctx);
 	if (rc == -ENOTSUP) {
+		export_copy(ctx);
+		return;
+	}
+	if (rc == -E2BIG) {
+		/* More distinct prefixes than a manifest can name, which a volume
+		 * reaches by being handed on enough times. A routing answer like
+		 * -ENOTSUP, not a failure: copying collapses the whole lineage back to
+		 * one prefix, so it is exactly the case that needs it.
+		 *
+		 * Kept as its own branch rather than folded into -ENOTSUP because it
+		 * says something an operator would want to see -- a volume that has
+		 * travelled far enough to stop being handed on for free. */
+		SPDK_NOTICELOG("Export %s: the lineage names more prefixes than a "
+			       "manifest can hold. Exporting by copying instead, which "
+			       "collapses it back to one.\n", ctx->info.export_uuid);
 		export_copy(ctx);
 		return;
 	}
@@ -1514,6 +1861,12 @@ s3lvol_lvol_export(struct s3lvol_lvstore *lvs, struct spdk_lvol *snapshot,
 			    "Create one first.\n", snapshot->name);
 		return -EINVAL;
 	}
+	if (snapshot->action_in_progress ||
+	    export_rewrite_pins_snapshot(lvs, snapshot->name)) {
+		SPDK_ERRLOG("snapshot '%s' is being decoupled or an export of it is "
+			    "being rewritten\n", snapshot->name);
+		return -EBUSY;
+	}
 
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) {
@@ -1586,6 +1939,12 @@ s3lvol_lvol_export(struct s3lvol_lvstore *lvs, struct spdk_lvol *snapshot,
 		free(ctx);
 		return -EEXIST;
 	}
+	if (export_rewrite_find(ctx->info.export_uuid)) {
+		SPDK_ERRLOG("export %s is being rewritten or released\n",
+			    ctx->info.export_uuid);
+		free(ctx);
+		return -EBUSY;
+	}
 
 	/* Registered before the drain, which can complete synchronously: the export
 	 * has to be observable, and the snapshot protected, from here on. */
@@ -1607,6 +1966,267 @@ s3lvol_lvol_export(struct s3lvol_lvstore *lvs, struct spdk_lvol *snapshot,
 
 	export_drain(ctx);
 	return 0;
+}
+
+/* ==========================================================================
+ * Materialising: stop owing anybody the snapshot
+ *
+ * A reference export names this lvstore's live chunk objects. That is why it pins
+ * the snapshot: those objects cannot be reclaimed while an importer may read
+ * them, and the pin has no expiry that means anything -- an importer renewing its
+ * lease keeps the snapshot undeletable for as long as it likes.
+ *
+ * Materialising is the way out. The snapshot is read once, uploaded as the
+ * export's own copies, and the manifest republished as dense with a higher
+ * generation. The export then owes nothing and the snapshot becomes deletable.
+ *
+ * Importers are not notified and need not be. They keep reading the old objects
+ * until those disappear with the snapshot; the resulting 404 makes them refetch,
+ * find the higher generation and carry on against the copies. Which is why the
+ * ordering matters in one direction only: the new manifest must exist before the
+ * old objects go, or a reader refetches into the very manifest that sent it to a
+ * missing key.
+ * ========================================================================== */
+
+struct materialise_ctx {
+	struct s3lvol_lvstore    *lvs;
+	char                      uuid_str[SPDK_UUID_STRING_LEN];
+	char                      snapshot[SPDK_LVOL_NAME_MAX];
+	struct spdk_io_channel   *channel;
+	struct export_rewrite    *rewrite;
+	uint32_t                  generation;
+
+	spdk_lvol_op_complete     cb_fn;
+	void                     *cb_arg;
+};
+
+static void
+materialise_report(struct materialise_ctx *ctx, int status)
+{
+	spdk_lvol_op_complete cb_fn = ctx->cb_fn;
+	void *cb_arg = ctx->cb_arg;
+
+	if (ctx->channel) {
+		spdk_bs_free_io_channel(ctx->channel);
+	}
+	export_rewrite_remove(ctx->rewrite);
+	if (status != 0) {
+		/* The export is untouched: the manifest is only replaced once the
+		 * copies are up, so a failure here leaves the reference export exactly
+		 * as it was and the snapshot still pinned. Retryable. */
+		SPDK_ERRLOG("Materialising export %s of snapshot '%s' failed: %s. The "
+			    "export is unchanged and still references the snapshot.\n",
+			    ctx->uuid_str, ctx->snapshot, spdk_strerror(-status));
+	}
+	free(ctx);
+	if (cb_fn) {
+		cb_fn(cb_arg, status);
+	}
+}
+
+static void
+materialise_saved(void *cb_arg, int status)
+{
+	struct materialise_ctx *ctx = cb_arg;
+
+	if (status != 0) {
+		/* The manifest on S3 already says dense, so importers are served
+		 * correctly and the data is safe. What is lost is this node's own
+		 * record: a restart reads the registry back, sees a reference export,
+		 * and refuses to delete the snapshot again. Wrong in the safe
+		 * direction, and worth a loud line because the fix is to materialise
+		 * again rather than to look for a corrupted export. */
+		SPDK_ERRLOG("export %s was materialised on S3 but the registry could "
+			    "not be saved: %s. A restart will treat it as a reference "
+			    "export again and keep pinning snapshot '%s'; materialise "
+			    "it again to clear that.\n",
+			    ctx->uuid_str, spdk_strerror(-status), ctx->snapshot);
+	} else {
+		SPDK_NOTICELOG("export %s is now a copy at generation %u; snapshot "
+			       "'%s' is no longer pinned by it\n",
+			       ctx->uuid_str, ctx->generation, ctx->snapshot);
+	}
+
+	/* Reported as success either way: the export *is* materialised, which is
+	 * what the caller asked for. Failing here would invite a retry that redoes
+	 * the whole copy for a bookkeeping problem. */
+	materialise_report(ctx, 0);
+}
+
+static void
+materialise_done(void *cb_arg, struct s3_export_manifest *m, int status)
+{
+	struct materialise_ctx *ctx = cb_arg;
+	struct s3lvol_export *exp;
+	int rc;
+
+	if (status != 0 || !m) {
+		materialise_report(ctx, status != 0 ? status : -EIO);
+		return;
+	}
+
+	ctx->generation = m->generation;
+	s3_export_manifest_unref(m);
+
+	/* The registry entry follows the manifest, not the other way round: until
+	 * the manifest is published the export still references the snapshot, and a
+	 * registry that said otherwise would let the snapshot be deleted under a
+	 * reader. */
+	exp = s3lvol_export_find(ctx->lvs, ctx->uuid_str);
+	if (!exp) {
+		/* Released while the copy was running. The objects it uploaded are
+		 * orphans under exports/<uuid>/, which GC collects with the rest of
+		 * the prefix; nothing to undo here. */
+		SPDK_WARNLOG("export %s was released while being materialised; its "
+			     "copies are orphaned and will be collected\n",
+			     ctx->uuid_str);
+		materialise_report(ctx, 0);
+		return;
+	}
+
+	s3lvol_export_set_materialised(exp, ctx->generation);
+
+	rc = s3lvol_export_registry_save(ctx->lvs, materialise_saved, ctx);
+	if (rc != 0) {
+		materialise_saved(ctx, rc);
+	}
+}
+
+int
+s3lvol_export_materialise(struct s3lvol_lvstore *lvs, const char *export_uuid,
+			  spdk_lvol_op_complete cb_fn, void *cb_arg)
+{
+	struct spdk_lvol_store *store;
+	struct s3lvol_export_entry entry;
+	struct materialise_ctx *ctx;
+	struct s3lvol_export *exp;
+	struct spdk_lvol *snapshot;
+	struct s3_export_opts opts = {0};
+	uint64_t cluster_size;
+	int rc;
+
+	if (!lvs || !export_uuid) {
+		return -EINVAL;
+	}
+
+	exp = s3lvol_export_find(lvs, export_uuid);
+	if (!exp) {
+		SPDK_ERRLOG("lvstore '%s' has no export %s\n",
+			    s3lvol_lvstore_get_name(lvs), export_uuid);
+		return -ENOENT;
+	}
+	s3lvol_export_get(exp, &entry);
+
+	if (!entry.is_ref) {
+		/* Already holds its own copies, so there is nothing to free the
+		 * snapshot from. Not an error: a caller sweeping several exports
+		 * should be able to ask about each without checking first. */
+		return -EALREADY;
+	}
+
+	/* An export still being written names the same snapshot and would publish
+	 * over the manifest this is about to replace, in either order. */
+	if (export_inflight_find(export_uuid)) {
+		SPDK_ERRLOG("export %s is still being written\n", export_uuid);
+		return -EBUSY;
+	}
+	if (export_rewrite_find(export_uuid)) {
+		SPDK_ERRLOG("export %s is already being rewritten\n", export_uuid);
+		return -EBUSY;
+	}
+
+	snapshot = s3lvol_lvol_find(lvs, entry.snapshot);
+	if (!snapshot || !snapshot->blob) {
+		/* The manifest references objects belonging to a snapshot this lvstore
+		 * no longer has. Nothing can be copied, and the export is unreadable
+		 * whatever happens next. */
+		SPDK_ERRLOG("export %s names snapshot '%s', which lvstore '%s' does "
+			    "not have; there is nothing left to copy\n",
+			    export_uuid, entry.snapshot,
+			    s3lvol_lvstore_get_name(lvs));
+		return -ENOENT;
+	}
+	if (!spdk_blob_is_read_only(snapshot->blob)) {
+		/* Would make the copy a torn mixture of two points in time, the same
+		 * reason export refuses a writable volume. */
+		SPDK_ERRLOG("'%s' is writable; refusing to copy it\n", entry.snapshot);
+		return -EINVAL;
+	}
+	if (snapshot->action_in_progress) {
+		SPDK_ERRLOG("snapshot '%s' has another operation in progress\n",
+			    entry.snapshot);
+		return -EBUSY;
+	}
+
+	store = s3lvol_lvstore_get_lvs(lvs);
+	cluster_size = spdk_bs_get_cluster_size(store->blobstore);
+	if ((cluster_size & (cluster_size - 1)) != 0) {
+		SPDK_ERRLOG("lvstore '%s' has a cluster size of %" PRIu64 " which is "
+			    "not a power of two\n", s3lvol_lvstore_get_name(lvs),
+			    cluster_size);
+		return -ENOTSUP;
+	}
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		return -ENOMEM;
+	}
+	ctx->lvs    = lvs;
+	ctx->cb_fn  = cb_fn;
+	ctx->cb_arg = cb_arg;
+	snprintf(ctx->uuid_str, sizeof(ctx->uuid_str), "%s", export_uuid);
+	snprintf(ctx->snapshot, sizeof(ctx->snapshot), "%s", entry.snapshot);
+	ctx->rewrite = export_rewrite_add(export_uuid);
+	if (!ctx->rewrite) {
+		free(ctx);
+		return -ENOMEM;
+	}
+
+	ctx->channel = spdk_bs_alloc_io_channel(store->blobstore);
+	if (!ctx->channel) {
+		export_rewrite_remove(ctx->rewrite);
+		free(ctx);
+		return -ENOMEM;
+	}
+
+	opts.client       = s3lvol_lvstore_get_client(lvs);
+	opts.prefix       = s3lvol_lvstore_get_name(lvs);
+	opts.uuid_str     = ctx->uuid_str;
+	opts.blob         = snapshot->blob;
+	opts.channel      = ctx->channel;
+	opts.chunk_size   = (uint32_t)cluster_size;
+	opts.cluster_size = (uint32_t)cluster_size;
+
+	/* Same shape as a fresh dense export, with two differences that matter.
+	 *
+	 * generation is one past what is published, which is the whole mechanism an
+	 * importer uses to tell a refetch apart from the manifest it already has.
+	 * Without it a reader would refetch, see the same generation, and conclude
+	 * its objects were deleted rather than moved.
+	 *
+	 * expires_at stays 0. A deadline was only ever a promise to keep a snapshot
+	 * for somebody else, and after this there is no snapshot in it. */
+	rc = export_fill_src_for(lvs, snapshot, &opts.src);
+	if (rc != 0) {
+		spdk_bs_free_io_channel(ctx->channel);
+		export_rewrite_remove(ctx->rewrite);
+		free(ctx);
+		return rc;
+	}
+	opts.generation = entry.generation + 1;
+
+	SPDK_NOTICELOG("Materialising export %s: copying snapshot '%s' so it stops "
+		       "being referenced (generation %u -> %u)\n",
+		       export_uuid, entry.snapshot, entry.generation,
+		       opts.generation);
+
+	rc = s3_export_run(&opts, materialise_done, ctx);
+	if (rc != 0) {
+		spdk_bs_free_io_channel(ctx->channel);
+		export_rewrite_remove(ctx->rewrite);
+		free(ctx);
+	}
+	return rc;
 }
 
 /* Whether the snapshot an export names can be deleted right now.
@@ -2383,6 +3003,22 @@ struct s3lvol_decouple {
 
 	int                        status;
 
+	/* Set to abort at the next cluster boundary. Checked by decouple_next(),
+	 * which is the one place this can safely happen: it is entered only from
+	 * decouple_start() and from the message decouple_cluster_done() sends, so
+	 * no materialisation is ever in flight when it runs. An aborted run leaves
+	 * the volume exactly as an interrupted one does -- some clusters local, the
+	 * rest still read through the export, the esnap parent untouched, since
+	 * clear_external_parent() only happens after the last cluster -- so there
+	 * is nothing to roll back and the clusters already copied are kept. */
+	bool                       cancelled;
+
+	/* Told when a cancellation has taken effect, so whoever asked for it can go
+	 * on. Separate from cb_fn: that one belongs to whoever asked for the
+	 * decouple, and still has to hear -ECANCELED. */
+	spdk_lvol_op_complete      cancel_cb_fn;
+	void                      *cancel_cb_arg;
+
 	spdk_lvol_op_complete      cb_fn;
 	void                      *cb_arg;
 
@@ -2390,6 +3026,319 @@ struct s3lvol_decouple {
 };
 
 static TAILQ_HEAD(, s3lvol_decouple) g_decouples = TAILQ_HEAD_INITIALIZER(g_decouples);
+
+struct decouple_rewrite_entry {
+	char                    uuid_str[SPDK_UUID_STRING_LEN];
+	uint64_t                expires_at;
+	uint32_t                generation;
+	struct export_rewrite  *rewrite;
+};
+
+struct decouple_rewrite_ctx {
+	struct s3lvol_decouple       *decouple;
+	struct decouple_rewrite_entry *entries;
+	size_t                         count;
+	size_t                         current;
+	struct spdk_blob              *chain[S3LVOL_DEFAULT_MAX_CHAIN_DEPTH];
+	uint32_t                       chain_len;
+	struct s3_export_source        src;
+	struct spdk_poller            *drain_retry_poller;
+	uint32_t                       drain_retries;
+	int                            first_error;
+	bool                           registry_changed;
+};
+
+static void decouple_finish(struct s3lvol_decouple *d);
+static void decouple_rewrite_next(struct decouple_rewrite_ctx *ctx);
+
+static void
+decouple_rewrite_next_msg(void *arg)
+{
+	decouple_rewrite_next(arg);
+}
+
+static void
+decouple_rewrite_complete(struct decouple_rewrite_ctx *ctx)
+{
+	struct s3lvol_decouple *d = ctx->decouple;
+	size_t i;
+
+	spdk_poller_unregister(&ctx->drain_retry_poller);
+	for (i = ctx->current; i < ctx->count; i++) {
+		export_rewrite_remove(ctx->entries[i].rewrite);
+		ctx->entries[i].rewrite = NULL;
+	}
+	free(ctx->entries);
+	free(ctx);
+	decouple_finish(d);
+}
+
+static void
+decouple_rewrite_saved(void *cb_arg, int status)
+{
+	struct decouple_rewrite_ctx *ctx = cb_arg;
+
+	if (status != 0) {
+		/* Every published manifest already points only at local objects. A stale
+		 * registry can merely resume leases which are no longer needed; it
+		 * cannot let an upstream snapshot be deleted too early. */
+		SPDK_ERRLOG("snapshot '%s' was decoupled and its exports were rewritten, "
+			    "but the export registry could not be saved: %s. A restart "
+			    "may resume unnecessary upstream leases.\n",
+			    ctx->decouple->lvol_name, spdk_strerror(-status));
+	}
+	if (ctx->first_error != 0) {
+		SPDK_ERRLOG("snapshot '%s' is local, but one or more exports could not "
+			    "be redirected to it: %s. Their upstream leases remain; "
+			    "rcow_materialise_export can be used as a fallback.\n",
+			    ctx->decouple->lvol_name,
+			    spdk_strerror(-ctx->first_error));
+	}
+	decouple_rewrite_complete(ctx);
+}
+
+static void
+decouple_rewrite_done(void *cb_arg, struct s3_export_manifest *m, int status)
+{
+	struct decouple_rewrite_ctx *ctx = cb_arg;
+	struct decouple_rewrite_entry *entry = &ctx->entries[ctx->current];
+	struct s3lvol_export_entry current;
+	struct s3lvol_export *exp;
+
+	if (status != 0 || !m) {
+		if (ctx->first_error == 0) {
+			ctx->first_error = status != 0 ? status : -EIO;
+		}
+		SPDK_ERRLOG("could not redirect export %s after snapshot '%s' was "
+			    "decoupled: %s; keeping its upstream leases\n",
+			    entry->uuid_str, ctx->decouple->lvol_name,
+			    spdk_strerror(-(status != 0 ? status : -EIO)));
+		goto next;
+	}
+
+	exp = s3lvol_export_find(ctx->decouple->lvs, entry->uuid_str);
+	if (!exp) {
+		SPDK_WARNLOG("export %s disappeared while its manifest was being "
+			     "redirected; the replacement is unrecorded\n",
+			     entry->uuid_str);
+		goto next;
+	}
+	s3lvol_export_get(exp, &current);
+	if (!current.is_ref || current.generation != entry->generation) {
+		if (ctx->first_error == 0) {
+			ctx->first_error = -ESTALE;
+		}
+		SPDK_ERRLOG("export %s changed from generation %u while its local "
+			    "replacement was being published; keeping its registry "
+			    "state and upstream leases\n",
+			    entry->uuid_str, entry->generation);
+		goto next;
+	}
+
+	/* Publishing completed before this mutation. From this point the export
+	 * names only this lvstore, so its upstream leases can safely stop. */
+	s3lvol_export_set_local_ref(exp, m->generation);
+	ctx->registry_changed = true;
+	SPDK_NOTICELOG("export %s now references local snapshot '%s' at generation "
+		       "%u; its upstream leases have stopped\n",
+		       entry->uuid_str, ctx->decouple->lvol_name, m->generation);
+
+next:
+	if (m) {
+		s3_export_manifest_unref(m);
+	}
+	export_rewrite_remove(entry->rewrite);
+	entry->rewrite = NULL;
+	ctx->current++;
+	/* s3_export_run_ref() can reject synchronously. Bounce the next entry so a
+	 * run of such failures cannot recurse once per export and exhaust the
+	 * reactor stack. */
+	spdk_thread_send_msg(spdk_get_thread(), decouple_rewrite_next_msg, ctx);
+}
+
+static void
+decouple_rewrite_next(struct decouple_rewrite_ctx *ctx)
+{
+	struct decouple_rewrite_entry *entry;
+	struct s3_export_ref_opts opts = {0};
+	int rc;
+
+	if (ctx->current == ctx->count) {
+		if (ctx->registry_changed) {
+			rc = s3lvol_export_registry_save(ctx->decouple->lvs,
+							 decouple_rewrite_saved, ctx);
+			if (rc != 0) {
+				decouple_rewrite_saved(ctx, rc);
+			}
+		} else {
+			decouple_rewrite_saved(ctx, 0);
+		}
+		return;
+	}
+
+	entry = &ctx->entries[ctx->current];
+	if (entry->generation == UINT32_MAX) {
+		if (ctx->first_error == 0) {
+			ctx->first_error = -EOVERFLOW;
+		}
+		SPDK_ERRLOG("export %s is already at the maximum manifest generation; "
+			    "it cannot be redirected automatically\n", entry->uuid_str);
+		export_rewrite_remove(entry->rewrite);
+		entry->rewrite = NULL;
+		ctx->current++;
+		spdk_thread_send_msg(spdk_get_thread(), decouple_rewrite_next_msg, ctx);
+		return;
+	}
+
+	opts.bs_dev       = s3lvol_lvstore_get_bs_dev(ctx->decouple->lvs);
+	opts.chain        = ctx->chain;
+	opts.chain_len    = ctx->chain_len;
+	opts.client       = s3lvol_lvstore_get_client(ctx->decouple->lvs);
+	opts.prefix       = s3lvol_lvstore_get_name(ctx->decouple->lvs);
+	opts.uuid_str     = entry->uuid_str;
+	opts.cluster_size = (uint32_t)ctx->decouple->cluster_size;
+	opts.expires_at   = entry->expires_at;
+	opts.generation   = entry->generation + 1;
+	opts.src          = ctx->src;
+
+	rc = s3_export_run_ref(&opts, decouple_rewrite_done, ctx);
+	if (rc != 0) {
+		decouple_rewrite_done(ctx, NULL, rc);
+	}
+}
+
+static void
+decouple_rewrite_drained(void *cb_arg, int status)
+{
+	struct decouple_rewrite_ctx *ctx = cb_arg;
+	struct s3lvol_decouple *d = ctx->decouple;
+	char esnap_uuid[SPDK_UUID_STRING_LEN];
+	int rc;
+
+	spdk_poller_unregister(&ctx->drain_retry_poller);
+	if (status != 0) {
+		ctx->first_error = status;
+		decouple_rewrite_saved(ctx, 0);
+		return;
+	}
+
+	rc = export_build_chain(d->lvs, d->lvol->blob, ctx->chain,
+				SPDK_COUNTOF(ctx->chain), &ctx->chain_len,
+				esnap_uuid, sizeof(esnap_uuid));
+	if (rc == 0 && esnap_uuid[0] != '\0') {
+		/* clear_external_parent completed before this path started. Seeing an
+		 * external parent now means publishing a local-only manifest would
+		 * silently omit inherited data. */
+		rc = -EIO;
+	}
+	if (rc == 0) {
+		rc = export_fill_src_for(d->lvs, d->lvol, &ctx->src);
+	}
+	if (rc != 0) {
+		ctx->first_error = rc;
+		decouple_rewrite_saved(ctx, 0);
+		return;
+	}
+
+	decouple_rewrite_next(ctx);
+}
+
+static void decouple_rewrite_flush_done(void *cb_arg, int status);
+
+static int
+decouple_rewrite_drain_retry(void *arg)
+{
+	struct decouple_rewrite_ctx *ctx = arg;
+
+	spdk_poller_unregister(&ctx->drain_retry_poller);
+	s3lvol_lvstore_flush(ctx->decouple->lvs, decouple_rewrite_flush_done, ctx);
+	return SPDK_POLLER_BUSY;
+}
+
+static void
+decouple_rewrite_flush_done(void *cb_arg, int status)
+{
+	struct decouple_rewrite_ctx *ctx = cb_arg;
+
+	if (status == -EBUSY && ctx->drain_retries < EXPORT_DRAIN_MAX_RETRIES) {
+		ctx->drain_retries++;
+		ctx->drain_retry_poller =
+			SPDK_POLLER_REGISTER(decouple_rewrite_drain_retry, ctx,
+					     EXPORT_DRAIN_RETRY_US);
+		if (ctx->drain_retry_poller) {
+			return;
+		}
+	}
+	decouple_rewrite_drained(ctx, status);
+}
+
+/* Redirect every already-published reference export of this snapshot after the
+ * snapshot has become local. The export uuid stays stable; generation is what
+ * tells existing importers that a 404 should be retried against the replacement.
+ */
+static void
+decouple_rewrite_exports(struct s3lvol_decouple *d)
+{
+	struct decouple_rewrite_ctx *ctx;
+	struct s3lvol_export_entry info;
+	struct s3lvol_export *exp;
+	size_t count = 0, i = 0;
+
+	for (exp = s3lvol_export_first(d->lvs); exp; exp = s3lvol_export_next(exp)) {
+		s3lvol_export_get(exp, &info);
+		if (info.is_ref && strcmp(info.snapshot, d->lvol_name) == 0) {
+			count++;
+		}
+	}
+	if (count == 0) {
+		decouple_finish(d);
+		return;
+	}
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		SPDK_ERRLOG("snapshot '%s' is local, but there is no memory to redirect "
+			    "its %zu reference export(s); upstream leases remain\n",
+			    d->lvol_name, count);
+		decouple_finish(d);
+		return;
+	}
+	ctx->entries = calloc(count, sizeof(*ctx->entries));
+	if (!ctx->entries) {
+		free(ctx);
+		SPDK_ERRLOG("snapshot '%s' is local, but there is no memory to redirect "
+			    "its %zu reference export(s); upstream leases remain\n",
+			    d->lvol_name, count);
+		decouple_finish(d);
+		return;
+	}
+	ctx->decouple = d;
+	ctx->count = count;
+
+	for (exp = s3lvol_export_first(d->lvs); exp && i < count;
+	     exp = s3lvol_export_next(exp)) {
+		s3lvol_export_get(exp, &info);
+		if (!info.is_ref || strcmp(info.snapshot, d->lvol_name) != 0) {
+			continue;
+		}
+		snprintf(ctx->entries[i].uuid_str, sizeof(ctx->entries[i].uuid_str),
+			 "%s", info.export_uuid);
+		ctx->entries[i].expires_at = info.expires_at;
+		ctx->entries[i].generation = info.generation;
+		ctx->entries[i].rewrite = export_rewrite_add(info.export_uuid);
+		if (!ctx->entries[i].rewrite) {
+			ctx->first_error = export_rewrite_find(info.export_uuid) ?
+					   -EBUSY : -ENOMEM;
+			decouple_rewrite_saved(ctx, 0);
+			return;
+		}
+		i++;
+	}
+
+	SPDK_NOTICELOG("snapshot '%s' is local; redirecting %zu reference export(s) "
+		       "before completing its decouple\n", d->lvol_name, count);
+	s3lvol_lvstore_flush(d->lvs, decouple_rewrite_flush_done, ctx);
+}
 
 /* True when the manifest has no object anywhere under this cluster, i.e. the
  * parent would serve it as zeroes and there is nothing to copy.
@@ -2415,12 +3364,26 @@ decouple_finish(struct s3lvol_decouple *d)
 {
 	spdk_lvol_op_complete cb_fn = d->cb_fn;
 	void *cb_arg = d->cb_arg;
+	spdk_lvol_op_complete cancel_cb_fn = d->cancel_cb_fn;
+	void *cancel_cb_arg = d->cancel_cb_arg;
 	int status = d->status;
 
 	if (status == 0) {
 		SPDK_NOTICELOG("lvol '%s' no longer reads export %s: %" PRIu64
 			       " cluster(s) materialised\n", d->lvol_name, d->uuid_str,
 			       d->done);
+	} else if (status == -ECANCELED) {
+		/* Not an error, and deliberately not sharing the message below: that
+		 * one says the volume can be decoupled again, which is untrue here.
+		 * A cancellation is asked for by create_snapshot, and once the
+		 * snapshot exists the external parent belongs to it, so this volume
+		 * has nothing left to decouple from. The clusters copied so far are
+		 * kept -- they hold the parent's bytes, and the snapshot inherits
+		 * them. */
+		SPDK_NOTICELOG("Decoupling lvol '%s' from export %s was cancelled "
+			       "after %" PRIu64 " of %" PRIu64 " cluster(s); the "
+			       "%" PRIu64 " already materialised are kept\n",
+			       d->lvol_name, d->uuid_str, d->done, d->total, d->done);
 	} else {
 		SPDK_ERRLOG("Decoupling lvol '%s' from export %s failed after %" PRIu64
 			    " of %" PRIu64 " cluster(s): %s. The volume still reads "
@@ -2447,6 +3410,14 @@ decouple_finish(struct s3lvol_decouple *d)
 	if (cb_fn) {
 		cb_fn(cb_arg, status);
 	}
+
+	/* Last, so that whatever the cancellation was making room for -- a snapshot --
+	 * runs with this decouple gone from every list and action_in_progress already
+	 * cleared above. Otherwise the snapshot would meet the flag it just waited
+	 * for. */
+	if (cancel_cb_fn) {
+		cancel_cb_fn(cancel_cb_arg, 0);
+	}
 }
 
 static void
@@ -2465,7 +3436,7 @@ decouple_cleared(void *cb_arg, int bserrno)
 	 * objects. Ordered this way because the reverse leaves a blob naming an
 	 * export that no attach can resolve. */
 	s3lvol_imports_recheck(d->lvs, d->uuid_str);
-	decouple_finish(d);
+	decouple_rewrite_exports(d);
 }
 
 static void decouple_next(struct s3lvol_decouple *d);
@@ -2531,6 +3502,16 @@ static void
 decouple_next(struct s3lvol_decouple *d)
 {
 	uint64_t cluster;
+
+	/* The abort point. Safe precisely here: both ways into this function -- the
+	 * initial call from decouple_start() and the message sent by
+	 * decouple_cluster_done() -- arrive with no materialisation outstanding, so
+	 * stopping needs no wait and no rollback. See struct s3lvol_decouple. */
+	if (d->cancelled) {
+		d->status = -ECANCELED;
+		decouple_finish(d);
+		return;
+	}
 
 	while (d->cluster < d->num_clusters && decouple_cluster_is_hole(d, d->cluster)) {
 		d->cluster++;
@@ -2697,8 +3678,9 @@ s3lvol_lvol_decouple_pending(const struct spdk_lvol *lvol)
 }
 
 /* Start materialising now. The caller has already established that this volume is
- * an esnap clone, writable, not already running or queued, and that nothing else
- * is decoupling the same export. */
+ * an esnap clone, not already running or queued, and that nothing else is
+ * decoupling the same export. It may be read-only: a snapshot is what a reference
+ * chain has to materialise to become independent of its source export. */
 static int
 decouple_start(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 	       const char *uuid_str, spdk_lvol_op_complete cb_fn, void *cb_arg)
@@ -2843,6 +3825,26 @@ decouple_start_next_queued(void)
 	}
 }
 
+/* Drop a queued decouple and tell whoever asked for it. `reason` completes the
+ * sentence "lvol X was waiting to be decoupled from export Y and ...", so that a
+ * log line says which of the two callers below took it out of the queue -- the
+ * volume going away, or a snapshot being taken of it. */
+static void
+decouple_dequeue(struct decouple_queued *q, const char *lvol_name, const char *reason)
+{
+	spdk_lvol_op_complete cb_fn = q->cb_fn;
+	void *cb_arg = q->cb_arg;
+
+	SPDK_NOTICELOG("lvol '%s' was waiting to be decoupled from export %s and %s; "
+		       "dropping it from the queue\n", lvol_name, q->uuid_str, reason);
+	TAILQ_REMOVE(&g_decouple_queue, q, link);
+	free(q);
+
+	if (cb_fn) {
+		cb_fn(cb_arg, -ECANCELED);
+	}
+}
+
 /* Forget a queued decouple because its volume is going away.
  *
  * A queued volume does not hold action_in_progress, so nothing stops it being
@@ -2852,24 +3854,74 @@ void
 s3lvol_decouple_dequeue_lvol(struct spdk_lvol *lvol)
 {
 	struct decouple_queued *q = decouple_queued_find(lvol);
-	spdk_lvol_op_complete cb_fn;
-	void *cb_arg;
 
 	if (!q) {
 		return;
 	}
+	decouple_dequeue(q, lvol->name, "is going away");
+}
 
-	SPDK_NOTICELOG("lvol '%s' was waiting to be decoupled from export %s and is "
-		       "going away; dropping it from the queue\n", lvol->name,
-		       q->uuid_str);
-	TAILQ_REMOVE(&g_decouple_queue, q, link);
-	cb_fn  = q->cb_fn;
-	cb_arg = q->cb_arg;
-	free(q);
+/* Stop decoupling this volume, because a snapshot of it is being taken.
+ *
+ * Why cancel rather than refuse. `decouple` defaults to true and is started
+ * before rcow_import_lvol even answers, so "import a volume, then snapshot it" --
+ * an ordinary thing to want -- always arrives while a decouple is in progress.
+ * Refusing there (which is what derive_check used to do) makes that sequence
+ * impossible rather than merely slow. And letting it proceed is worse than
+ * either: the snapshot takes the external snapshot identity with it, and the
+ * decouple then materialises every remaining cluster before failing its detach
+ * with "blob is not a clone of an external snapshot" -- measured, see
+ * docs/import-reference-snapshot-design.md §9.2.
+ *
+ * Answers:
+ *   0  nothing to cancel, or cancelled already -- the caller may go straight on
+ *   1  cancellation under way; cb_fn will be called once it has taken effect
+ *   <0 error
+ *
+ * The distinction matters because the queued case completes synchronously while a
+ * running one cannot: it has to reach the next cluster boundary first. */
+int
+s3lvol_decouple_cancel(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn,
+		       void *cb_arg)
+{
+	struct decouple_queued *q;
+	struct s3lvol_decouple *d;
 
-	if (cb_fn) {
-		cb_fn(cb_arg, -ECANCELED);
+	if (!lvol) {
+		return -EINVAL;
 	}
+
+	q = decouple_queued_find(lvol);
+	if (q) {
+		/* Never started, so there is nothing to unwind and nothing to wait
+		 * for. Note this leaves the volume with no materialised clusters at
+		 * all, which is correct: it never read anything out of the export. */
+		decouple_dequeue(q, lvol->name, "is being snapshotted");
+		return 0;
+	}
+
+	d = decouple_find(lvol);
+	if (!d) {
+		return 0;
+	}
+
+	if (d->cancel_cb_fn) {
+		/* Two derives racing on one volume. Refused rather than chained: the
+		 * second caller would be woken by the first one's cancellation and
+		 * proceed on an assumption it never made. */
+		SPDK_ERRLOG("lvol '%s' is already having its decouple cancelled\n",
+			    lvol->name);
+		return -EBUSY;
+	}
+
+	d->cancelled     = true;
+	d->cancel_cb_fn  = cb_fn;
+	d->cancel_cb_arg = cb_arg;
+
+	SPDK_NOTICELOG("Cancelling the decouple of lvol '%s' from export %s so it can "
+		       "be snapshotted; %" PRIu64 " of %" PRIu64 " cluster(s) done\n",
+		       d->lvol_name, d->uuid_str, d->done, d->total);
+	return 1;
 }
 
 int
@@ -2892,15 +3944,23 @@ s3lvol_lvol_decouple(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 		return -EINVAL;
 	}
 
-	/* A snapshot cannot be decoupled: materialising a cluster is a write, and its
-	 * metadata is read-only. It is also not what the caller wants -- the way to
-	 * free a snapshot of an imported volume from the export is to delete it, or
-	 * to decouple the volume it was taken from before taking it. */
-	if (spdk_blob_is_read_only(lvol->blob)) {
-		SPDK_ERRLOG("lvol '%s' is read-only (a snapshot?) and cannot be "
-			    "decoupled\n", lvol->name);
-		return -EPERM;
-	}
+	/* Read-only is allowed, and is the case that matters.
+	 *
+	 * This used to refuse, on the grounds that materialising a cluster writes and
+	 * a snapshot's metadata is read-only. The refusal is what made a reference
+	 * chain permanent: create_snapshot hands the external snapshot to the
+	 * snapshot, so after one is taken the volume has no external parent left to
+	 * clear (-EINVAL above) and the snapshot could not be materialised either --
+	 * nothing could stop the chain depending on the source export except deleting
+	 * it. Measured, and written up as §9.2 of
+	 * docs/import-reference-snapshot-design.md.
+	 *
+	 * What it takes is lifting md_ro for the copy, which
+	 * spdk_blob_materialize_cluster() now does and which blobstore itself does
+	 * whenever it modifies a snapshot. Nothing a reader sees changes: the bytes
+	 * move from "fetched through the export" to "held locally". §9.5 measures the
+	 * whole thing, including that the snapshot's clones keep reading correctly
+	 * while it happens. */
 
 	if (decouple_find(lvol)) {
 		SPDK_ERRLOG("lvol '%s' is already being decoupled\n", lvol->name);
@@ -2913,6 +3973,11 @@ s3lvol_lvol_decouple(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 	}
 	if (lvol->action_in_progress) {
 		SPDK_ERRLOG("another operation is in progress on lvol '%s'\n",
+			    lvol->name);
+		return -EBUSY;
+	}
+	if (export_rewrite_pins_snapshot(lvs, lvol->name)) {
+		SPDK_ERRLOG("an export of lvol '%s' is already being rewritten\n",
 			    lvol->name);
 		return -EBUSY;
 	}
@@ -3151,6 +4216,7 @@ struct release_ctx {
 	uint32_t                   pending;
 	uint64_t                   deleted;
 	int                        status;
+	struct export_rewrite    *rewrite;
 
 	spdk_lvol_op_complete      cb_fn;
 	void                      *cb_arg;
@@ -3170,6 +4236,7 @@ release_finish(struct release_ctx *ctx)
 
 	s3_export_manifest_unref(ctx->m);
 	free(ctx->body);
+	export_rewrite_remove(ctx->rewrite);
 	free(ctx);
 
 	if (cb_fn) {
@@ -3408,11 +4475,30 @@ s3lvol_export_release(struct s3lvol_lvstore *lvs, const char *export_uuid,
 		      spdk_lvol_op_complete cb_fn, void *cb_arg)
 {
 	struct s3lvol_lvstore *other;
+	struct s3lvol_export *published;
 	struct release_ctx *ctx;
 	int rc;
 
 	if (!lvs || !export_uuid) {
 		return -EINVAL;
+	}
+	if (export_rewrite_find(export_uuid)) {
+		SPDK_ERRLOG("export %s is being rewritten; release it after that "
+			    "finishes\n", export_uuid);
+		return -EBUSY;
+	}
+	published = s3lvol_export_find(lvs, export_uuid);
+	if (published) {
+		struct s3lvol_export_entry info;
+		struct spdk_lvol *snapshot;
+
+		s3lvol_export_get(published, &info);
+		snapshot = info.is_ref ? s3lvol_lvol_find(lvs, info.snapshot) : NULL;
+		if (snapshot && snapshot->action_in_progress) {
+			SPDK_ERRLOG("export %s names snapshot '%s', which is being "
+				    "decoupled\n", export_uuid, info.snapshot);
+			return -EBUSY;
+		}
 	}
 
 	/* Refuse while a volume *in this process* still reads through to it. Deleting
@@ -3471,11 +4557,17 @@ s3lvol_export_release(struct s3lvol_lvstore *lvs, const char *export_uuid,
 	ctx->cb_fn  = cb_fn;
 	ctx->cb_arg = cb_arg;
 	snprintf(ctx->uuid_str, sizeof(ctx->uuid_str), "%s", export_uuid);
+	ctx->rewrite = export_rewrite_add(export_uuid);
+	if (!ctx->rewrite) {
+		free(ctx);
+		return -ENOMEM;
+	}
 	s3_export_manifest_key(ctx->uuid_str, ctx->key, sizeof(ctx->key));
 
 	rc = s3_head(s3lvol_lvstore_get_client(lvs), ctx->key, &ctx->size,
 		     release_head_done, ctx);
 	if (rc != 0) {
+		export_rewrite_remove(ctx->rewrite);
 		free(ctx);
 	}
 	return rc;

@@ -758,17 +758,44 @@ static const struct spdk_json_object_decoder rpc_create_clone_decoders[] = {
  * Also, callers should not hand-assemble a bdev name for nvmf -- the correct
  * entry point is rcow_active_bdev, which takes the lvol name (not the bdev
  * name). */
+/* Carries the one fact the reply needs beyond the new name: whether taking this
+ * snapshot cancelled a decouple. Known synchronously, but reported from the
+ * completion, which is why it cannot simply be a local variable. */
+struct rpc_derive_ctx {
+	struct spdk_jsonrpc_request *request;
+	bool                         cancelled_decouple;
+};
+
 static void
 rpc_derive_lvol_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 {
-	struct spdk_jsonrpc_request *request = cb_arg;
+	struct rpc_derive_ctx *ctx = cb_arg;
+	struct spdk_json_write_ctx *w;
 
 	if (lvolerrno != 0) {
-		rpc_lvol_respond_err(request, lvolerrno, NULL);
+		rpc_lvol_respond_err(ctx->request, lvolerrno, NULL);
+		free(ctx);
 		return;
 	}
 
-	rpc_lvol_respond_ok(request, lvol->name);
+	if (!ctx->cancelled_decouple) {
+		rpc_lvol_respond_ok(ctx->request, lvol->name);
+		free(ctx);
+		return;
+	}
+
+	/* Said out loud rather than logged only. The caller asked for this volume to
+	 * be decoupled -- by default, without naming it -- and that is not going to
+	 * happen now: the snapshot holds the external parent, so the chain keeps
+	 * reading the source export, and this node keeps renewing its lease. A caller
+	 * that wanted a self-contained volume has to know it did not get one. */
+	w = spdk_jsonrpc_begin_result(ctx->request);
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_string(w, "name", lvol->name);
+	spdk_json_write_named_bool(w, "decouple_cancelled", true);
+	spdk_json_write_object_end(w);
+	spdk_jsonrpc_end_result(ctx->request, w);
+	free(ctx);
 }
 
 /* Shared by both: decode, resolve, dispatch. The only differences are the decoder
@@ -781,6 +808,7 @@ rpc_derive_lvol(struct spdk_jsonrpc_request *request,
 		size_t decoder_count, bool snapshot)
 {
 	struct rpc_lvol_derive req = {0};
+	struct rpc_derive_ctx *ctx;
 	struct s3lvol_lvstore *lvs;
 	struct spdk_lvol *lvol;
 	int rc;
@@ -802,15 +830,28 @@ rpc_derive_lvol(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		rpc_lvol_respond_err(request, -ENOMEM, NULL);
+		goto cleanup;
+	}
+	ctx->request = request;
+
 	if (snapshot) {
 		rc = s3lvol_lvol_create_snapshot(lvs, lvol, req.new_name,
-						 rpc_derive_lvol_cb, request);
+						 &ctx->cancelled_decouple,
+						 rpc_derive_lvol_cb, ctx);
 	} else {
+		/* No cancellation on this path: create_clone derives from a snapshot,
+		 * which never has a decouple of its own -- the queue holds the volume
+		 * the snapshot was taken from. So the field stays false and the reply
+		 * keeps its old shape. */
 		rc = s3lvol_lvol_create_clone(lvs, lvol, req.new_name,
-					      rpc_derive_lvol_cb, request);
+					      rpc_derive_lvol_cb, ctx);
 	}
 	if (rc != 0) {
 		rpc_lvol_respond_err(request, rc, NULL);
+		free(ctx);
 	}
 
 cleanup:
@@ -1703,6 +1744,15 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 				spdk_json_write_named_bool(w, "delete_pending",
 							   pending);
 			}
+			/* How deep the snapshot chain under this lvol is, because
+			 * crossing S3LVOL_DEFAULT_MAX_CHAIN_DEPTH turns an export of
+			 * it into a full copy that nothing ever reclaims. The target
+			 * warns when a derive crosses the soft threshold, but a
+			 * warning only reaches whoever reads the log at the time; a
+			 * control plane deciding whether to prune needs to be able to
+			 * ask. 0 for a deactivated volume, like the cluster counts. */
+			spdk_json_write_named_uint32(w, "chain_depth",
+				s3lvol_lvol_chain_depth(lvs, lvol));
 			spdk_json_write_object_end(w);
 		}
 		spdk_json_write_array_end(w);
@@ -2371,6 +2421,67 @@ cleanup:
 	free(req.export_uuid);
 }
 SPDK_RPC_REGISTER("rcow_release_export", rpc_rcow_release_export,
+		  SPDK_RPC_RUNTIME)
+
+/* Turn a reference export into a copied one, so this node stops owing anybody the
+ * snapshot behind it.
+ *
+ * The counterpart to rcow_release_export, and the choice between them is whose
+ * data survives. Release deletes the export and refuses while anything reads it;
+ * this keeps the export readable for ever by copying what it references, and the
+ * snapshot becomes deletable. It is what a node runs when it wants its space back
+ * without waiting for every importer to finish.
+ *
+ * Importers need not be told: the manifest is replaced in place, and a reader
+ * discovers it when the objects it holds stop existing. */
+static void
+rpc_rcow_materialise_export(struct spdk_jsonrpc_request *request,
+			    const struct spdk_json_val *params)
+{
+	struct rpc_export_id req = {0};
+	struct rpc_lvol_op_ctx *ctx;
+	struct s3lvol_lvstore *lvs;
+	int rc;
+
+	if (spdk_json_decode_object(params, rpc_export_id_decoders,
+				    SPDK_COUNTOF(rpc_export_id_decoders), &req)) {
+		rpc_lvol_respond_err(request, 0, "Invalid parameters");
+		goto cleanup;
+	}
+
+	lvs = rpc_lvstore_for(request, req.lvs_name);
+	if (!lvs) {
+		goto cleanup;
+	}
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		rpc_lvol_respond_err(request, -ENOMEM, NULL);
+		goto cleanup;
+	}
+	ctx->request   = request;
+	ctx->lvol_name = strdup(req.export_uuid);
+	if (!ctx->lvol_name) {
+		free(ctx);
+		rpc_lvol_respond_err(request, -ENOMEM, NULL);
+		goto cleanup;
+	}
+
+	/* Answers when the copy is done, not when it starts: the caller's next move
+	 * is usually to delete the snapshot, and that is only allowed once this has
+	 * finished. Unlike an export, which hands back a uuid to poll. */
+	rc = s3lvol_export_materialise(lvs, req.export_uuid, rpc_lvol_op_cb, ctx);
+	if (rc != 0) {
+		free(ctx->lvol_name);
+		free(ctx);
+		rpc_lvol_respond_err(request, rc, NULL);
+	}
+
+cleanup:
+	free(req.lvs_name);
+	free(req.export_uuid);
+}
+SPDK_RPC_REGISTER("rcow_materialise_export", rpc_rcow_materialise_export,
 		  SPDK_RPC_RUNTIME)
 
 /* What this node currently publishes, and what it currently reads through to.

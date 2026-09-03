@@ -54,8 +54,36 @@
  * 2: the ref table shed its per-chunk valid_bytes. A version 1 reader handed a
  *    version 2 manifest would consume 24 bytes per ref out of a 16-byte-per-ref
  *    table, so every chunk past the first would name another chunk's object --
- *    which reads back as valid data from the wrong place. Hence a bump. */
-#define S3_EXPORT_VERSION       2
+ *    which reads back as valid data from the wrong place. Hence a bump.
+ *
+ * 3: per-chunk sources (srcs[] plus src_idx[]), so that a snapshot whose chunks
+ *    come partly from another export can be described at all. A version 2 reader
+ *    would ignore src_idx and resolve every chunk against the single `src`,
+ *    returning another object's bytes for the ones that belong elsewhere. Hence
+ *    a bump.
+ */
+#define S3_EXPORT_VERSION       3
+
+/* The oldest a reader accepts. Writing is always at S3_EXPORT_VERSION; reading
+ * has to span the range, because manifests already in a bucket outlive the binary
+ * that wrote them -- including ones this binary wrote before being upgraded.
+ *
+ * 1 is excluded rather than merely old: its 24-byte ref entries read as 16-byte
+ * ones name a different object for every chunk past the first, and return
+ * plausible data from the wrong place. That is the failure a version exists to
+ * prevent, so it stays refused. */
+#define S3_EXPORT_VERSION_MIN   2
+
+/* How many prefixes one manifest may reference. A derived export adds its own
+ * prefix to the ones it inherited, so this bounds the length of a derivation
+ * lineage: A publishes, B imports and republishes, C imports and republishes.
+ *
+ * Explicit, and much smaller than the 255 a one-byte index would allow, because
+ * the ceiling has to be reachable in a test. What happens past it is a fallback
+ * to copying -- correct, but it turns an O(1) publish into an O(size) one, and a
+ * limit that can only be hit by a lineage nobody is watching is a limit nobody
+ * finds out about until it costs them a volume. */
+#define S3_EXPORT_MAX_SOURCES   16
 
 /* How a manifest names the bytes it describes.
  *
@@ -145,6 +173,35 @@ struct s3_export_source {
 	char     snapshot_uuid[SPDK_UUID_STRING_LEN];
 };
 
+/* One prefix a ref manifest resolves chunks against. Version 3 and later.
+ *
+ * Deliberately not a whole struct s3_export_source: every entry shares the
+ * endpoint, bucket and region of `src`, because the writer refuses to reference
+ * another bucket and falls back to copying instead. That keeps a reader to one S3
+ * client and keeps the pin enforceable -- a reference into a bucket this node may
+ * not even be configured for could not be honoured. */
+struct s3_export_src_entry {
+	char prefix[S3_EXPORT_PREFIX_MAX];
+
+	/* Whose lease governs these objects, so an importer knows what to renew:
+	 * <prefix>/meta/exports/<uuid>.lease. Empty for entry 0, whose lease is this
+	 * manifest's own.
+	 *
+	 * This is what keeps the delete path unchanged across a derivation. An
+	 * importer of a derived export renews on the *original* export directly, so
+	 * the original's source refuses to delete its snapshot whether or not the
+	 * intermediate node is still running -- which is what publish-then-leave
+	 * requires. */
+	char export_uuid[SPDK_UUID_STRING_LEN];
+
+	/* Identity of the snapshot behind that export. Present for the same reason
+	 * s3_export_source::snapshot_uuid is: blob ids are handed back after a
+	 * delete, so a snapshot deleted and recreated under one name can match on
+	 * both name and blob_id while being an entirely different volume. Empty
+	 * means "cannot prove", never "matches". */
+	char snapshot_uuid[SPDK_UUID_STRING_LEN];
+};
+
 struct s3_export_manifest {
 	uint32_t version;
 	enum s3_export_layout layout;
@@ -187,6 +244,21 @@ struct s3_export_manifest {
 	 * keeps sparse volumes sparse across an export. */
 	uint8_t *present;
 
+	/* Construction only, never serialized, not part of the crc.
+	 *
+	 * `present` cannot say "this chunk is already settled as zeroes": that
+	 * is also how an untouched hole is spelled, and inherit() fills those
+	 * from the parent. A local write_zeroes / unmap drops the mapping and
+	 * leaves the cluster allocated, so the walk sees a hole and, without
+	 * this bit, the parent object comes back -- stale data where the volume
+	 * reads as zero.
+	 *
+	 * The walk sets this when is_zeroes() says the cluster holds no data.
+	 * inherit() and later layers then skip it the same way they skip a
+	 * present chunk. On the wire the chunk stays a hole, which is what the
+	 * importer uses for zeroes. */
+	uint8_t *resolved;
+
 	/* REF layout only. One bit per chunk: set means "this chunk's object holds
 	 * a whole chunk_size", i.e. valid_bytes needs no separate entry.
 	 *
@@ -207,14 +279,39 @@ struct s3_export_manifest {
 	 * index and which therefore needs nothing here. */
 	struct s3_export_ref *refs;
 
+	/* Which prefix each chunk's object lives under. REF layout only.
+	 *
+	 * A snapshot taken on an imported volume owns some of its chunks and reads
+	 * the rest through the export it came from, so one prefix cannot describe
+	 * it. srcs[0] is always this export's own -- src.prefix -- which is what
+	 * lets the read path treat a single-source manifest as the ordinary case of
+	 * a multi-source one rather than a separate shape.
+	 *
+	 * A version 2 manifest has neither of these on the wire; parse synthesises
+	 * the one-entry table from src so that everything downstream sees one shape.
+	 * num_srcs is therefore >= 1 for any REF manifest, and 0 for a dense one. */
+	struct s3_export_src_entry *srcs;
+	uint32_t                    num_srcs;
+
+	/* num_chunks entries, meaningful exactly where `present` is set: an index
+	 * into srcs[]. Kept separate from refs[] rather than added to
+	 * struct s3_export_ref so that a ref stays 16 bytes on the wire and v2's
+	 * packing is untouched. NULL means every chunk resolves to srcs[0], which is
+	 * how a v2 manifest arrives. */
+	uint8_t *src_idx;
+
 	/* Over the bitmap, and for a ref manifest over the full bitmap, the packed
-	 * uuids and the partial-length exceptions too, in that order. */
+	 * uuids and the partial-length exceptions too, in that order -- and, from
+	 * version 3, src_idx after those. The stage list follows `version` rather
+	 * than S3_EXPORT_VERSION: recomputing a v2 manifest's crc with the v3 stages
+	 * would report corruption on every manifest already in a bucket. */
 	uint32_t crc32c;
 
 	/* Manifests are shared: the import cache holds one reference, and every
 	 * s3_export_bs_dev built from it holds another. The bs_dev outlives the
 	 * import RPC and may outlive a release, so this cannot be an owner
-	 * pointer. */
+	 * pointer. Touched from nvmf I/O threads as well as the swap thread, so
+	 * ref/unref are atomic. */
 	uint32_t refcnt;
 };
 
@@ -249,6 +346,15 @@ void s3_export_manifest_unref(struct s3_export_manifest *m);
 void s3_export_manifest_set_present(struct s3_export_manifest *m, uint64_t chunk_index);
 
 /**
+ * Claim a chunk as locally settled zeroes without marking it present.
+ *
+ * Used by the zero-copy walk so inherit() does not restore a parent object over
+ * a write_zeroes / unmap. Does not belong on the wire: a hole already reads as
+ * zeroes for the importer.
+ */
+void s3_export_manifest_set_resolved(struct s3_export_manifest *m, uint64_t chunk_index);
+
+/**
  * Record which object a chunk of a ref export lives in, and mark it present.
  *
  * \return -EINVAL on a dense manifest or an index out of range. Refused rather
@@ -256,6 +362,96 @@ void s3_export_manifest_set_present(struct s3_export_manifest *m, uint64_t chunk
  */
 int s3_export_manifest_set_ref(struct s3_export_manifest *m, uint64_t chunk_index,
 			       const struct spdk_uuid *uuid, uint32_t valid_bytes);
+
+/**
+ * Add a prefix this manifest may resolve chunks against, or find the existing
+ * entry for it, and answer its index.
+ *
+ * Idempotent on \p prefix: a derived export names the same parent prefix for
+ * however many chunks it inherited, so the caller can ask per chunk without
+ * having to keep track. The identity fields are taken from the first call that
+ * supplies them and are not overwritten afterwards, so a later call may pass NULL.
+ *
+ * \param export_uuid whose lease governs those objects, so an importer knows what
+ *                    to renew. NULL or empty for a prefix that needs no lease.
+ * \param snapshot_uuid identity of the snapshot behind it; NULL if unknown.
+ * \param out_idx receives the index to store in the chunk's slot.
+ *
+ * \return 0 on success, -E2BIG once S3_EXPORT_MAX_SOURCES prefixes are named --
+ * which the caller is expected to treat as "export by copying instead", the same
+ * as any other reason a reference cannot be expressed.
+ */
+int s3_export_manifest_add_src(struct s3_export_manifest *m, const char *prefix,
+			       const char *export_uuid, const char *snapshot_uuid,
+			       uint8_t *out_idx);
+
+/**
+ * Record that a chunk's object lives under source \p src_idx rather than under
+ * this export's own prefix. Marks the chunk present, like set_ref.
+ *
+ * Kept separate from set_ref so that the common single-source writer needs no
+ * per-chunk source argument at all, and so that a chunk cannot be given a source
+ * without a ref: this refuses an index no add_src() has handed out.
+ */
+int s3_export_manifest_set_chunk_src(struct s3_export_manifest *m,
+				     uint64_t chunk_index, uint8_t src_idx);
+
+/**
+ * Whether \p parent can be referenced by an export published to \p dst, or whether
+ * the caller has to copy instead.
+ *
+ * Separate from the walk because it is a question about two manifests and nothing
+ * else -- no blob, no device -- which is also what makes the degradation decision
+ * testable on its own. The walk asks it before doing any work.
+ *
+ * \return 0 when a reference can be expressed; -ENOTSUP when it cannot, which is a
+ * routing answer rather than a failure: the copy engine reads through blobstore
+ * and expresses any history under one prefix. -EINVAL on a NULL argument.
+ */
+int s3_export_manifest_inheritable(const struct s3_export_manifest *parent,
+				   const struct s3_export_source *dst,
+				   const char *uuid_str);
+
+/**
+ * Fill \p m 's absent chunks from \p parent, recording each against the prefix that
+ * actually holds it.
+ *
+ * This is how a snapshot taken on an imported volume is handed on without copying:
+ * the clusters written since the import are in the local chunk map and the caller's
+ * walk finds them, while everything older belongs to the export the volume reads
+ * through and lives under its prefix.
+ *
+ * **Call after everything local has been recorded.** A chunk already present, or
+ * one the walk marked resolved as local zeroes, is skipped, never overwritten.
+ * That is what makes a rewrite since the import, or a local write_zeroes, win
+ * over the imported object. Called too early, it would serve the data as it was
+ * before the import -- correct-looking and wrong.
+ *
+ * Flattening, not chaining: the prefix is taken from \p parent per chunk, so a
+ * parent that was itself derived contributes its grandparent's prefix for the
+ * chunks it inherited. A manifest therefore never refers to another manifest,
+ * resolution stays one hop however many times a volume has been handed on, and no
+ * intermediate node has to still exist. For the same reason the lease identity is
+ * carried across rather than replaced: an importer renews against the node that
+ * holds the objects, not against the middleman.
+ *
+ * Both manifests must be ref layout and share a chunk size, since a chunk index
+ * means a different byte range under a different one. Only the chunks the two have
+ * in common are considered -- a volume that grew since the import has chunks the
+ * parent never described.
+ *
+ * \return 0, with \p out_named and \p out_bytes set when non-NULL; -E2BIG once
+ * more distinct prefixes are needed than a manifest can name, which the caller is
+ * expected to treat as "export by copying instead"; -EINVAL on a mismatch of
+ * layout or chunk size.
+ */
+int s3_export_manifest_inherit(struct s3_export_manifest *m,
+			       const struct s3_export_manifest *parent,
+			       uint64_t *out_named, uint64_t *out_bytes);
+
+/** Which prefix a chunk resolves against; "" if the manifest cannot say. */
+const char *s3_export_manifest_chunk_prefix(const struct s3_export_manifest *m,
+					    uint64_t chunk_index);
 
 /**
  * The ref for one chunk, or NULL if this is not a ref manifest, the index is out
@@ -266,6 +462,9 @@ const struct s3_export_ref *s3_export_manifest_get_ref(
 
 bool s3_export_manifest_is_present(const struct s3_export_manifest *m,
 				   uint64_t chunk_index);
+
+bool s3_export_manifest_is_resolved(const struct s3_export_manifest *m,
+				    uint64_t chunk_index);
 
 /**
  * True when no chunk in the range has an object, i.e. the whole range reads as
@@ -371,6 +570,17 @@ struct s3_export_opts {
 	 * is otherwise a serial chain of round trips. 0 takes the default. */
 	uint32_t                max_inflight;
 
+	/* Which version of this export's manifest this run publishes. 0 for a new
+	 * export, which is every ordinary one.
+	 *
+	 * Non-zero only when *replacing* a manifest that importers may already
+	 * hold: materialising a reference export rewrites it in place, and the
+	 * higher generation is the only way a reader can tell the manifest it just
+	 * refetched from the one that sent it looking. Publishing a replacement at
+	 * the same generation would have that reader conclude its objects were
+	 * deleted rather than copied. */
+	uint32_t                generation;
+
 	struct s3_export_source src;
 };
 
@@ -459,7 +669,38 @@ struct s3_export_ref_opts {
 	uint32_t        cluster_size;
 	uint64_t    expires_at;
 
+	/* Version to publish. 0 for a new export; old+1 when an already-published
+	 * reference export is rewritten after its snapshot becomes fully local.
+	 * Readers use the increase to distinguish the replacement manifest from
+	 * the stale one that sent them to an object which has since disappeared. */
+	uint32_t        generation;
+
 	struct s3_export_source src;
+
+	/* The manifest of the export that the last layer of the chain reads through,
+	 * when that layer is an esnap clone. NULL for every export that is not
+	 * derived from an import, which is the ordinary case.
+	 *
+	 * This is what lets a snapshot taken on an imported volume be handed on
+	 * without copying. The clusters written since the import are in this
+	 * lvstore's chunk map and the walk finds them; everything older belongs to
+	 * the export the clone reads through, lives under *its* prefix, and cannot
+	 * be resolved by this chunk map at all. Naming those chunks out of this
+	 * manifest is the alternative to reading and re-uploading them.
+	 *
+	 * Flattened, not chained: each inherited chunk is recorded against the
+	 * prefix that actually holds it, which for a parent that was itself derived
+	 * means the grandparent's prefix rather than the parent's. So a manifest
+	 * never refers to another manifest, resolution stays one hop no matter how
+	 * many times a volume has been handed on, and no node in the history has to
+	 * still be alive.
+	 *
+	 * The caller must have checked that this export is reachable the same way
+	 * `src` is -- same endpoint, bucket and region -- because a source entry
+	 * carries only a prefix and shares the rest with `src`. It must also be a
+	 * ref export of the same chunk size. Where any of that does not hold there
+	 * is nothing to express and the caller uses the copying engine. */
+	const struct s3_export_manifest *parent;
 };
 
 /**
@@ -485,11 +726,12 @@ struct s3_export_ref_opts {
  * which references nothing and therefore does not care. -ENOTSUP is a routing
  * decision, not a failure: the caller is expected to try the copying engine.
  *
- * A chain whose last layer is an esnap clone must not be passed: the data it
- * inherits lives under another lvstore's prefix, so this chunk map cannot resolve
- * it and the manifest would be short exactly where that parent held data. The
- * caller detects that while assembling the chain and routes to the copy engine,
- * which reads through blobstore and flattens everything.
+ * A chain whose last layer is an esnap clone needs `parent` set to the manifest
+ * that layer reads through. The data it inherits lives under another lvstore's
+ * prefix, so this chunk map cannot resolve it, and without the parent manifest the
+ * result would be short exactly where that parent held data -- reading as zeroes
+ * on the importing node, with nothing to say so. Passing an esnap chain with no
+ * parent is refused rather than silently truncated.
  */
 int s3_export_run_ref(const struct s3_export_ref_opts *opts,
 		      s3_export_cb cb, void *cb_arg);
@@ -506,7 +748,16 @@ int s3_export_run_ref(const struct s3_export_ref_opts *opts,
  * write to a back device, so those exist to turn a bug into an error instead of
  * a corruption.
  *
- * Takes a reference on \c m and on \c client, releasing both from destroy().
+ * The two arguments are held differently, which is easy to get wrong in both
+ * directions:
+ *
+ *   \c m is *referenced* -- the caller keeps its own reference and must still
+ *   release it.
+ *
+ *   \c client is *consumed* -- the caller's reference moves in here, and
+ *   destroy() releases it. Putting it as well is a double free. On failure the
+ *   move does not happen and the caller still owns it.
+ *
  * Note that destroy() is called by blobstore, at a time the importer does not
  * control -- which is why neither may be owned by the import request.
  *
@@ -515,5 +766,68 @@ int s3_export_run_ref(const struct s3_export_ref_opts *opts,
  */
 int s3_export_bs_dev_create(struct s3_client *client, struct s3_export_manifest *m,
 			    struct spdk_bs_dev **out);
+
+/** Called once the swap is complete and the old manifest has been released. */
+typedef void (*s3_export_bs_dev_swap_cb)(void *cb_arg, int status);
+
+/**
+ * Called on the swapping thread immediately after the new manifest is published,
+ * before the grace period that releases the previous one.
+ *
+ * The import registry uses this so derive/decouple and a later attach see the
+ * same generation the data plane is already reading.
+ */
+typedef void (*s3_export_bs_dev_on_swap_fn)(void *arg, struct s3_export_manifest *m);
+
+void s3_export_bs_dev_set_on_swap(struct spdk_bs_dev *bs_dev,
+				  s3_export_bs_dev_on_swap_fn fn, void *arg);
+
+/**
+ * Point this device at a newer manifest for the same export.
+ *
+ * A ref export names the source's live objects, so when the source materialises
+ * it -- rewrites the manifest as dense, holding its own copies -- those objects
+ * go and an importer still on the old manifest reads 404s. Refetching and calling
+ * this is the way out, and `generation` is how the two are told apart.
+ *
+ * **Asynchronous, and the reason is not I/O.** Every other thread reads the
+ * manifest with no serialisation, which is what keeps this device lock free, so
+ * the old one cannot be released until each of them has been through its event
+ * loop once. The pointer is swapped before returning -- reads issued after this
+ * call resolve against \p m -- but the callback is what says the previous
+ * manifest is gone.
+ *
+ * Refuses rather than adopts a manifest that is not a strictly newer version of
+ * the same thing:
+ *
+ * \return 0 and the callback runs; -EINVAL for a different export uuid, a
+ * changed size, or a changed chunk size, any of which would have the clone
+ * reading something blobstore did not size it for; -EALREADY when \p m is no
+ * newer. That is not a failure:
+ * it is both "the source has not rewritten it yet" and "this generation is
+ * already installed" (another refetch swapped while a GET still used the old
+ * keys). A 404-driven refetch must retry waiters on -EALREADY, not treat it as
+ * the source having deleted the snapshot; see
+ * s3_export_bs_dev_refetch_already_current().
+ */
+int s3_export_bs_dev_swap_manifest(struct spdk_bs_dev *bs_dev,
+				   struct s3_export_manifest *m,
+				   s3_export_bs_dev_swap_cb cb, void *cb_arg);
+
+/**
+ * True when swap_manifest() returned -EALREADY: the device is already on the
+ * generation that was just fetched.
+ *
+ * A refetch started from a 404 must then retry waiters against the current
+ * keys. A GET issued before a swap can 404 after it; the follow-up refetch
+ * sees -EALREADY even though those keys now exist under the new manifest.
+ * If the objects are genuinely gone, the retry 404s once and the I/O's
+ * retried flag stops another refetch.
+ */
+static inline bool
+s3_export_bs_dev_refetch_already_current(int swap_rc)
+{
+	return swap_rc == -EALREADY;
+}
 
 #endif /* S3LVOL_EXPORT_H */

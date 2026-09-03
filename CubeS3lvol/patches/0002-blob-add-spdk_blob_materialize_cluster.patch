@@ -51,22 +51,48 @@ Two properties worth stating because callers depend on them:
     a channel -- a channel is per thread per blobstore -- and without this they
     lose nearly every cluster to it, silently.
 
-Nothing existing is touched: the new function only calls what the inflate path
-calls. blob_ut passes unchanged (500 tests).
+One existing behaviour does change: md_ro. A read-only blob used to be refused
+here, and that refusal is what made a reference chain permanent. Snapshotting an
+esnap clone hands the external snapshot to the snapshot, so afterwards the volume
+has no external parent to clear and the snapshot could not be materialised
+either -- nothing could free the chain from its source except deleting it. Since
+materialising allocates clusters and copies the parent's bytes into them, what a
+reader sees is identical either way, so the flag is lifted for the duration and
+restored on every exit. That is what blobstore already does whenever it modifies
+a snapshot's metadata: delete_snapshot_freeze_io_cb() saves md_ro, clears it,
+syncs, and puts it back, including for a snapshot that is itself an esnap clone.
+Data stays protected by data_ro, which is untouched -- the operation submitted is
+a read.
+
+Deleting the check rather than lifting the flag would not do:
+blob_insert_cluster_msg() marks the blob dirty, and md_ro together with a dirty
+blob is the state spdk_blob_sync_md() asserts against. Restoring is therefore
+ordered after the metadata sync, which is guaranteed because
+blob_op_cluster_msg_cb() -- what completes the user operation the completion
+waits on -- runs only once blob_sync_md() is done.
+
+Unlike the delete path this does not freeze I/O, for the same reason a decouple
+does not: readers have to keep working while the copying goes on, and a cluster
+arriving under a reader is ordinary copy-on-write, which the allocation path
+already serialises. Measured with a clone reading its parent throughout the
+materialisation, 258 reads with no mismatch, and with the source objects deleted
+and the store re-attached before the final read so that no cache could answer it.
+
+blob_ut passes unchanged.
 
 Signed-off-by: Changpeng Liu <changpeliu@tencent.com>
 Assisted-by: CodeBuddy
 ---
- include/spdk/blob.h    |  33 ++++++++
- lib/blob/blobstore.c   | 157 +++++++++++++++++++++++++++++++++++++++++
- lib/blob/spdk_blob.map |   1 +
- 3 files changed, 191 insertions(+)
+  include/spdk/blob.h    |  33 ++++++++
+  lib/blob/blobstore.c   | 203 +++++++++++++++++++++++++++++++++++++++++++++++++
+  lib/blob/spdk_blob.map |   1 +
+  3 files changed, 237 insertions(+)
 
 diff --git a/include/spdk/blob.h b/include/spdk/blob.h
-index fc61ca2c8..1f146e6f4 100644
+index fe98215..71b2e62 100644
 --- a/include/spdk/blob.h
 +++ b/include/spdk/blob.h
-@@ -831,6 +831,39 @@ void spdk_bs_inflate_blob(struct spdk_blob_store *bs, struct spdk_io_channel *ch
+@@ -804,6 +804,39 @@ void spdk_bs_inflate_blob(struct spdk_blob_store *bs, struct spdk_io_channel *ch
  void spdk_bs_blob_decouple_parent(struct spdk_blob_store *bs, struct spdk_io_channel *channel,
  				  spdk_blob_id blobid, spdk_blob_op_complete cb_fn, void *cb_arg);
  
@@ -107,10 +133,10 @@ index fc61ca2c8..1f146e6f4 100644
   * Perform a shallow copy of a blob to a blobstore device.
   *
 diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
-index 61d20f435..5b27ced43 100644
+index 08b7915..15699bc 100644
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
-@@ -7352,6 +7352,163 @@ spdk_bs_blob_decouple_parent(struct spdk_blob_store *bs, struct spdk_io_channel
+@@ -7334,6 +7334,209 @@ spdk_bs_blob_decouple_parent(struct spdk_blob_store *bs, struct spdk_io_channel
  }
  /* END spdk_bs_inflate_blob */
  
@@ -123,7 +149,32 @@ index 61d20f435..5b27ced43 100644
 +	uint64_t		 attempts;
 +	spdk_blob_op_complete	 cb_fn;
 +	void			*cb_arg;
++
++	/* md_ro as the caller had it, restored on every way out of here.
++	 *
++	 * Allocating a cluster writes metadata, so md_ro has to come off for the
++	 * duration -- see the comment in spdk_blob_materialize_cluster(). It lives
++	 * in the context rather than on the stack because it has to survive the
++	 * retry loop in materialize_cluster_cpl(), which re-enters
++	 * materialize_cluster_attempt() from a different call stack. */
++	bool			 md_ro;
 +};
++
++/* Give md_ro back. Called from every exit after it was taken off, and only from
++ * those: the early returns in spdk_blob_materialize_cluster() all happen before
++ * the context exists.
++ *
++ * Ordered after the metadata sync, never before it. blob_insert_cluster_msg()
++ * marks the blob dirty and syncs it, and blob_op_cluster_msg_cb() -- which is
++ * what completes the user operation this waits on -- runs only once that sync is
++ * done. Restoring earlier would leave the blob md_ro *and* dirty, which is the
++ * state spdk_blob_sync_md() asserts against. */
++static void
++materialize_cluster_restore_md_ro(struct materialize_cluster_ctx *ctx)
++{
++	assert(ctx->blob->state == SPDK_BLOB_STATE_CLEAN || ctx->md_ro == false);
++	ctx->blob->md_ro = ctx->md_ro;
++}
 +
 +/* An attempt is only spent when another allocation on the same channel was in
 + * flight, and each of those completes, so this bounds a pathological case and not
@@ -171,6 +222,7 @@ index 61d20f435..5b27ced43 100644
 +		bserrno = -EAGAIN;
 +	}
 +
++	materialize_cluster_restore_md_ro(ctx);
 +	ctx->cb_fn(ctx->cb_arg, bserrno);
 +	free(ctx);
 +}
@@ -186,6 +238,7 @@ index 61d20f435..5b27ced43 100644
 +
 +	if (blob->active.clusters[ctx->cluster] != 0) {
 +		/* In place now, whoever put it there. That is all that was asked. */
++		materialize_cluster_restore_md_ro(ctx);
 +		ctx->cb_fn(ctx->cb_arg, 0);
 +		free(ctx);
 +		return;
@@ -210,6 +263,7 @@ index 61d20f435..5b27ced43 100644
 +
 +	op = bs_user_op_alloc(ctx->channel, &cpl, SPDK_BLOB_READ, blob, NULL, 0, io_unit, 0);
 +	if (!op) {
++		materialize_cluster_restore_md_ro(ctx);
 +		ctx->cb_fn(ctx->cb_arg, -ENOMEM);
 +		free(ctx);
 +		return;
@@ -226,12 +280,6 @@ index 61d20f435..5b27ced43 100644
 +
 +	assert(blob != NULL);
 +	assert(cb_fn != NULL);
-+
-+	if (blob->md_ro) {
-+		SPDK_ERRLOG("blob 0x%" PRIx64 ": metadata is read only\n", blob->id);
-+		cb_fn(cb_arg, -EPERM);
-+		return;
-+	}
 +
 +	if (cluster >= blob->active.num_clusters) {
 +		SPDK_ERRLOG("blob 0x%" PRIx64 ": cluster %" PRIu64 " is past the end\n",
@@ -263,6 +311,30 @@ index 61d20f435..5b27ced43 100644
 +	ctx->blob = blob;
 +	ctx->channel = channel;
 +	ctx->cluster = cluster;
++
++	/* Take md_ro off for the duration.
++	 *
++	 * A read-only blob is the interesting caller, not an accident: materialising
++	 * a snapshot is how a chain of clones stops depending on an external
++	 * snapshot, and a snapshot is md_ro by definition. Refusing here made that
++	 * impossible while making no data safer -- this allocates clusters and copies
++	 * the parent's bytes into them, so what a reader sees does not change either
++	 * way. Data stays protected by data_ro, which is untouched: the operation
++	 * submitted below is a read.
++	 *
++	 * Lifting the flag is what blobstore already does whenever it has to modify a
++	 * snapshot's metadata -- see delete_snapshot_freeze_io_cb(), which saves it,
++	 * clears it, and puts it back, including for a snapshot that is itself an
++	 * esnap clone. Deleting the check instead of lifting the flag would not work:
++	 * blob_insert_cluster_msg() marks the blob dirty, and md_ro with a dirty blob
++	 * is the state spdk_blob_sync_md() asserts against.
++	 *
++	 * Unlike the delete path this does not freeze I/O, for the same reason a
++	 * decouple does not: readers have to keep working while the copying goes on,
++	 * and a cluster arriving under a reader is ordinary copy-on-write, which the
++	 * allocation path below already serialises. */
++	ctx->md_ro = blob->md_ro;
++	blob->md_ro = false;
 +	ctx->cb_fn = cb_fn;
 +	ctx->cb_arg = cb_arg;
 +
@@ -275,10 +347,10 @@ index 61d20f435..5b27ced43 100644
  
  struct shallow_copy_ctx {
 diff --git a/lib/blob/spdk_blob.map b/lib/blob/spdk_blob.map
-index 09886f49d..7cbb0fd74 100644
+index d4d85c2..c1a9c7c 100644
 --- a/lib/blob/spdk_blob.map
 +++ b/lib/blob/spdk_blob.map
-@@ -41,6 +41,7 @@
+@@ -40,6 +40,7 @@
  	spdk_bs_delete_blob;
  	spdk_bs_inflate_blob;
  	spdk_bs_blob_decouple_parent;
@@ -286,6 +358,3 @@ index 09886f49d..7cbb0fd74 100644
  	spdk_bs_blob_shallow_copy;
  	spdk_bs_blob_set_parent;
  	spdk_bs_blob_set_external_parent;
--- 
-2.43.5
-

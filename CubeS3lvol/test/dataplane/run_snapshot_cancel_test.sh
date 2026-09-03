@@ -2,35 +2,33 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
-#  Regression test for issue 2: snapshotting an esnap clone whose decouple is
-#  queued must not leave a decouple that cannot detach.
+#  Snapshotting an imported volume whose decouple is *running* must cancel that
+#  decouple and succeed.
 #
-#  The field failure it pins down (64-node): a decouple that is queued behind a
-#  slow full-volume materialisation does not hold action_in_progress, so a
-#  snapshot of the volume was allowed -- and snapshotting an esnap clone moves
-#  the external snapshot identity onto the new snapshot (spdk_bs_create_snapshot
-#  clears it on the origin). The queued decouple then materialised everything
-#  and failed its detach with "blob is not a clone of an external snapshot".
+#  The companion of run_decouple_queue_test.sh, which covers the queued case.
+#  This one covers the common one: s3lvol_lvol_decouple() starts immediately
+#  unless another decouple is in the way, so an ordinary "import, then snapshot"
+#  meets a decouple that is already materialising -- and trips the
+#  action_in_progress branch of derive_check rather than the decouple_pending one.
+#  Both had to give way; a queue only exercises one of them.
 #
-#  This test reproduces the queue window and asserts the fix. The fix was first a
-#  refusal, and is now a cancellation: refusing was correct about the hazard but
-#  made "import a volume, then snapshot it" impossible, since decouple defaults to
-#  true and is started before the import replies. So create_snapshot cancels the
-#  decouple and proceeds, which removes the hazard by removing the decouple. What
-#  is asserted either way is that no decouple ever materialises everything and then
-#  fails to detach.
+#  What must hold afterwards:
+#    - the snapshot exists, and the reply says decouple_cancelled
+#    - the decouple stopped part-way and said so, without the detach failure of
+#      docs/import-reference-snapshot-design.md 9.2
+#    - clusters materialised before the cancellation are kept, and they belong to
+#      the snapshot (a volume hands its clusters over when snapshotted)
+#    - the snapshot reads the source's bytes, and so does the volume
+#    - the volume can no longer be decoupled: the snapshot holds the parent now
 #
 #  Scenario:
-#    src: a big volume written full -> snapshot -> export  (the decouple of its
-#         import takes minutes, which is the queue window)
-#    src: a small sparse volume -> snapshot -> export
-#    dst: import big (decouple:true)   -- starts materialising, slowly
-#    dst: import small (decouple:true) -- queued behind big
-#    while small is queued: snapshot small -> cancels the queued decouple, succeeds
-#    big's decouple must be unaffected, and small must afterwards be undecouplable
+#    src: a volume written full -> snapshot -> export  (a slow decouple, so the
+#         cancellation lands in the middle of one rather than after it)
+#    dst: import it with decouple:true, assert the decouple is actually running
+#    dst: snapshot the import -> must cancel and succeed
 #
 #  Usage:
-#    sudo -E ./test/dataplane/repro_issue2.sh -e <endpoint> -b <bucket> [-r <region>]
+#    sudo -E ./test/dataplane/run_snapshot_cancel_test.sh -e <endpoint> -b <bucket> [-r <region>]
 #
 #  Credentials from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
 #  Needs root, nvme-cli, a writable /data.
@@ -43,38 +41,33 @@ TOOLS_DIR="${REPO_ROOT}/test/tools"
 
 TGT_BIN="${REPO_ROOT}/app/s3lvol_tgt/s3lvol_tgt"
 RPC_PY="${SPDK_ROOT:-${REPO_ROOT}/deps/spdk}/scripts/rpc.py"
-RPC="${RPC_PY} -s /var/run/s3lvol.sock"
-RPC_SOCK="/var/run/s3lvol.sock"
+RPC="${RPC_PY} -s /var/run/s3lvol_sc.sock"
+RPC_SOCK="/var/run/s3lvol_sc.sock"
 
 S3_EXPORTS_DIR="exports"
 
-SRC_LVS="r2src"
-DST_LVS="r2dst"
+SRC_LVS="scsrc"
+DST_LVS="scdst"
 
 BIG_VOL="big0"
-SMALL_VOL="small0"
 BIG_SNAP="big0-snap"
-SMALL_SNAP="small0-snap"
 BIG_IMP="big0-imp"
-SMALL_IMP="small0-imp"
-SMALL_IMP_SNAP="small0-imp-snap"
+BIG_IMP_SNAP="big0-imp-snap"
 
 CAPACITY_GIB=8
-BIG_GIB=1          # full volume: written end to end
-SMALL_GIB=1        # sparse: only SMALL_WRITE_MB written
-SMALL_WRITE_MB=16
+BIG_GIB=1          # written end to end, so its decouple is slow enough to catch
 JOURNAL_MB=64
 WAL_MB=128
 WAL_FILE_MB=$((JOURNAL_MB + WAL_MB + 128))
 
-SRC_WAL_FILE="/data/r2_src.img"
-DST_WAL_FILE="/data/r2_dst.img"
-SRC_WAL_BDEV="r2_src_wal0"
-DST_WAL_BDEV="r2_dst_wal0"
+SRC_WAL_FILE="/data/sc_src.img"
+DST_WAL_FILE="/data/sc_dst.img"
+SRC_WAL_BDEV="sc_src_wal0"
+DST_WAL_BDEV="sc_dst_wal0"
 
-NQN="nqn.2026-08.io.spdk:r2"
+NQN="nqn.2026-08.io.spdk:sc"
 LISTEN_ADDR="127.0.0.1"
-LISTEN_PORT="4420"
+LISTEN_PORT="4421"
 
 ENDPOINT=""
 BUCKET=""
@@ -92,7 +85,6 @@ CONNECTED=0
 TRANSPORT_READY=0
 TEARDOWN_ANOMALY=0
 BIG_EXP_UUID=""
-SMALL_EXP_UUID=""
 
 pass() { PASS=$((PASS + 1)); echo "[PASS] $*"; }
 fail() { FAIL=$((FAIL + 1)); echo "[FAIL] $*"; }
@@ -206,6 +198,72 @@ sys.exit(0 if len(json.load(open(sys.argv[1]))) == 0 else 1)
 		sleep 1
 	done
 	return 1
+}
+
+remove_ns()
+{
+	python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+		nvmf_subsystem_remove_ns \
+		"$(printf '{"nqn":"%s","nsid":%s}' "${NQN}" "$1")" >/dev/null 2>&1 || true
+}
+
+# md5 of the first BIG_GIB of one volume, by name.
+#
+# Exposed and withdrawn around each read rather than kept: the namespaces are all
+# on one subsystem, so a volume added while connected shows up as another
+# /dev/nvmeXnY, and the set difference is how it is found -- the same way the
+# source device is located above.
+read_vol_md5()
+{
+	local name="$1" before dev nsid _i
+
+	before="$(ls /dev/nvme*n* 2>/dev/null | sort || true)"
+
+	# --raw, because for nvmf_subsystem_add_ns the result *is* the nsid, and
+	# SPDK's own rpc.py prints nothing for it -- which is fine for the callers
+	# that only check the exit code, but this one has to give the namespace back
+	# afterwards.
+	nsid="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+		nvmf_subsystem_add_ns \
+		"$(printf '{"nqn":"%s","namespace":{"bdev_name":"%s"}}' \
+			"${NQN}" "${DST_LVS}/${name}")" \
+		2>"${WORKDIR}/addns_${name}.err" | tr -d '[:space:]')"
+	if [ -z "${nsid}" ]; then
+		{
+			echo "add_ns for ${DST_LVS}/${name} produced no nsid"
+			echo "stderr:"; sed 's/^/  /' "${WORKDIR}/addns_${name}.err"
+			echo "devices: $(ls /dev/nvme*n* 2>/dev/null | tr '\n' ' ')"
+		} >>"${WORKDIR}/read_vol_diag.txt" 2>&1
+		return 1
+	fi
+
+	dev=""
+	for _i in $(seq 40); do
+		dev="$(comm -13 <(echo "${before}") \
+			<(ls /dev/nvme*n* 2>/dev/null | sort || true) | head -1)"
+		[ -n "${dev}" ] && [ -b "${dev}" ] && break
+		dev=""
+		sleep 0.5
+	done
+	if [ -z "${dev}" ]; then
+		{
+			echo "no new device for ${name} (nsid ${nsid})"
+			echo "before: ${before}"
+			echo "after:  $(ls /dev/nvme*n* 2>/dev/null | tr '\n' ' ')"
+			echo "controllers:"
+			for c in /sys/class/nvme/nvme*; do
+				[ -e "${c}/subsysnqn" ] && echo "  $(basename "${c}") $(cat "${c}/subsysnqn")"
+			done
+		} >>"${WORKDIR}/read_vol_diag.txt" 2>&1
+		remove_ns "${nsid}"
+		return 1
+	fi
+
+	dd if="${dev}" bs=1M count=$((BIG_GIB * 1024)) iflag=direct status=none \
+		| md5sum | cut -d' ' -f1
+	remove_ns "${nsid}"
+	sleep 1
+	return 0
 }
 
 cleanup()
@@ -352,6 +410,18 @@ dd if="${WORKDIR}/big.pat" of="${BIG_DEV}" bs=1M count=$((BIG_GIB * 1024)) \
 	oflag=direct conv=fsync status=none 2>"${WORKDIR}/big_write.err"
 pass "big volume written full"
 
+# What every later read is compared against. Taken from the device rather than the
+# pattern file so that a source-side write bug fails here rather than looking like
+# a decouple bug three steps later.
+SRC_MD5="$(dd if="${BIG_DEV}" bs=1M count=$((BIG_GIB * 1024)) iflag=direct \
+	status=none | md5sum | cut -d' ' -f1)"
+info "source content ${SRC_MD5}"
+if [ "${SRC_MD5}" = "$(md5sum "${WORKDIR}/big.pat" | cut -d' ' -f1)" ]; then
+	pass "source reads back what was written"
+else
+	fail "source does not read back what was written"
+fi
+
 raw_rpc rcow_create_snapshot "$(printf '{"lvol_name":"%s","snapshot_name":"%s"}' \
 	"${BIG_VOL}" "${BIG_SNAP}")" >/dev/null 2>&1 \
 	|| { fail "snapshot big"; exit 1; }
@@ -363,168 +433,152 @@ wait_export_done "${BIG_EXP_UUID}" "big export" || exit 1
 pass "big snapshot exported (${BIG_EXP_UUID})"
 
 # ==========================================================================
-echo "[3] source small volume, sparse"
-raw_rpc rcow_create_lvol "$(printf '{"lvol_name":"%s","size_gib":%d}' \
-	"${SMALL_VOL}" "${SMALL_GIB}")" >/dev/null 2>&1 \
-	|| { fail "create small lvol"; exit 1; }
-${RPC} nvmf_subsystem_add_ns "${NQN}" "${SRC_LVS}/${SMALL_VOL}" \
-	>/dev/null 2>&1 || { fail "nvmf_subsystem_add_ns (small)"; exit 1; }
-nvme ns-rescan "/dev/$(basename "${BIG_DEV}" | sed 's/n[0-9]*$//')" \
-	>/dev/null 2>&1 || true
-SMALL_DEV=""
-for _ in $(seq 30); do
-	SMALL_DEV="$(comm -13 <(echo "${BEFORE_CONNECT}") \
-			<(ls /dev/nvme*n* 2>/dev/null | sort || true) | grep -v "${BIG_DEV}" \
-			| head -1)"
-	[ -n "${SMALL_DEV}" ] && break
-	sleep 0.5
-done
-[ -n "${SMALL_DEV}" ] || { fail "no device for small volume"; exit 1; }
-pass "small volume is ${SMALL_DEV}"
-
-dd if=/dev/urandom of="${WORKDIR}/small.pat" bs=1M count="${SMALL_WRITE_MB}" \
-	status=none
-dd if="${WORKDIR}/small.pat" of="${SMALL_DEV}" bs=1M count="${SMALL_WRITE_MB}" \
-	seek=0 oflag=direct conv=fsync status=none 2>"${WORKDIR}/small_write.err"
-pass "small volume written (${SMALL_WRITE_MB} MiB sparse)"
-
-raw_rpc rcow_create_snapshot "$(printf '{"lvol_name":"%s","snapshot_name":"%s"}' \
-	"${SMALL_VOL}" "${SMALL_SNAP}")" >/dev/null 2>&1 \
-	|| { fail "snapshot small"; exit 1; }
-SMALL_EXP_UUID="$(raw_rpc rcow_export_snapshot \
-	"$(printf '{"snapshot_name":"%s"}' "${SMALL_SNAP}")" \
-	2>"${WORKDIR}/small_exp.err" | tr -d ' \t\r\n')"
-[ -n "${SMALL_EXP_UUID}" ] || { fail "export small snapshot"; exit 1; }
-wait_export_done "${SMALL_EXP_UUID}" "small export" || exit 1
-pass "small snapshot exported (${SMALL_EXP_UUID})"
-
-# One blobstore per node: the source lvstore has to be unloaded before the
-# destination can be created. Its export lives in S3, so the import below still
-# reads through it.
+echo "[3] destination lvstore"
+# One blobstore per node: the source has to be unloaded before the destination can
+# be created. Its export lives in S3, so the import below still reads through it --
+# and the device the source was read from is gone from here on, which is why
+# SRC_MD5 was taken while it was still attached.
+nvme_settle
+remove_ns 1
 raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${SRC_LVS}")" \
 	>/dev/null 2>"${WORKDIR}/unload_src.err" \
 	|| { fail "unload src lvstore"; sed 's/^/       /' "${WORKDIR}/unload_src.err"; exit 1; }
 SRC_CREATED=0
-pass "src lvstore unloaded (exports remain in S3)"
+pass "src lvstore unloaded (its export remains in S3)"
 
-# ==========================================================================
-echo "[4] destination lvstore"
-# The namespace was registered for the source; one registration per bucket.
-raw_rpc rcow_create_lvstore \
-	"$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%d,"wal_bdev":"%s","journal_size_mb":%d,"wal_size_mb":%d}' \
-		"${DST_LVS}" "${BUCKET}" "${CAPACITY_GIB}" "${DST_WAL_BDEV}" \
-		"${JOURNAL_MB}" "${WAL_MB}")" \
-	>"${WORKDIR}/dst_lvs.json" 2>"${WORKDIR}/dst_lvs.err" \
-	|| { fail "dst create_lvstore"; sed 's/^/       /' "${WORKDIR}/dst_lvs.err"; exit 1; }
+if ! raw_rpc rcow_create_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%d,"wal_bdev":"%s","journal_size_mb":%d,"wal_size_mb":%d,"force":true}' \
+	"${DST_LVS}" "${BUCKET}" "${CAPACITY_GIB}" "${DST_WAL_BDEV}" "${JOURNAL_MB}" "${WAL_MB}")" \
+	>/dev/null; then
+	fail "could not create ${DST_LVS}"
+	exit 1
+fi
 DST_CREATED=1
-pass "dst lvstore ${DST_LVS} created"
+pass "destination lvstore ready"
 
 # ==========================================================================
-echo "[5] import big with decouple:true (starts materialising)"
-if ! raw_rpc rcow_import_lvol \
-		"$(printf '{"lvol_name":"%s","export_uuid":"%s","lvs_name":"%s","decouple":true}' \
-			"${BIG_IMP}" "${BIG_EXP_UUID}" "${DST_LVS}")" \
-		>"${WORKDIR}/import_big.json" 2>"${WORKDIR}/import_big.err"; then
-	fail "import big"
-	sed 's/^/       /' "${WORKDIR}/import_big.err"
+echo "[4] import with decouple:true, and catch it while it runs"
+if ! raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","lvs_name":"%s","decouple":true}' \
+	"${BIG_IMP}" "${BIG_EXP_UUID}" "${DST_LVS}")" >/dev/null; then
+	fail "import of ${BIG_IMP} failed"
 	exit 1
 fi
-pass "big imported, decoupling in background"
 
-# Give the big decouple a moment to grab the queue.
-sleep 3
-
-# ==========================================================================
-echo "[6] import small with decouple:true (queued behind big)"
-if ! raw_rpc rcow_import_lvol \
-		"$(printf '{"lvol_name":"%s","export_uuid":"%s","lvs_name":"%s","decouple":true}' \
-			"${SMALL_IMP}" "${SMALL_EXP_UUID}" "${DST_LVS}")" \
-		>"${WORKDIR}/import_small.json" 2>"${WORKDIR}/import_small.err"; then
-	fail "import small"
-	sed 's/^/       /' "${WORKDIR}/import_small.err"
+# It must be *running*, not queued -- that is the branch this test exists for.
+# decouple_start() is called before the import replies, so this should already
+# hold; asserted rather than assumed, because a queued one would quietly turn this
+# into a duplicate of run_decouple_queue_test.sh.
+if ! grep -qE "Decoupling lvol '${BIG_IMP}'" "${TGT_LOG}"; then
+	fail "${BIG_IMP} is not materialising -- this test needs a running decouple"
 	exit 1
 fi
-pass "small imported, decouple queued behind big"
+pass "${BIG_IMP} imported, decouple running"
+
+# Let it get somewhere, so the cancellation has clusters to keep.
+sleep 5
 
 # ==========================================================================
-echo "[7] while small is queued: snapshot it (must cancel the decouple and succeed)"
-# This used to assert a refusal, and the refusal was correct as far as it went --
-# letting the snapshot through while the decouple stood is what produced the
-# detach failure this test is named for. But refusing makes "import a volume,
-# then snapshot it" impossible, because decouple defaults to true and starts
-# before the import replies. So the decouple is cancelled instead, and the
-# snapshot proceeds; the hazard is gone because there is no longer a decouple to
-# fail. See docs/import-reference-snapshot-design.md §3.1 and §9.2.
+echo "[5] snapshot the importing volume (must cancel the running decouple)"
 raw_rpc rcow_create_snapshot "$(printf '{"lvol_name":"%s","snapshot_name":"%s"}' \
-	"${SMALL_IMP}" "${SMALL_IMP_SNAP}")" \
-	>"${WORKDIR}/snap_small.json" 2>"${WORKDIR}/snap_small.err"
+	"${BIG_IMP}" "${BIG_IMP_SNAP}")" \
+	>"${WORKDIR}/snap.json" 2>"${WORKDIR}/snap.err"
 SNAP_RC=$?
 if [ "${SNAP_RC}" -eq 0 ]; then
-	pass "snapshot of queued small succeeded (rc=0)"
+	pass "snapshot succeeded while a decouple was running (rc=0)"
 else
-	fail "snapshot of queued small refused (rc=${SNAP_RC}) -- it must cancel the queued decouple instead"
-	sed 's/^/    /' "${WORKDIR}/snap_small.err" 2>/dev/null | tail -5
+	fail "snapshot refused (rc=${SNAP_RC}) -- it must cancel the running decouple"
+	sed 's/^/    /' "${WORKDIR}/snap.err" 2>/dev/null | tail -5
 fi
 
-# The reply has to say the decouple was dropped: the caller asked for one, by
-# default, and is not getting it.
-if grep -q 'decouple_cancelled' "${WORKDIR}/snap_small.json" 2>/dev/null; then
+if grep -q 'decouple_cancelled' "${WORKDIR}/snap.json" 2>/dev/null; then
 	pass "reply reports decouple_cancelled"
 else
-	fail "reply does not report decouple_cancelled: $(tr -d '\n' < "${WORKDIR}/snap_small.json" 2>/dev/null | head -c 200)"
+	fail "reply does not report decouple_cancelled"
+	tr -d '\n' < "${WORKDIR}/snap.json" 2>/dev/null | head -c 200 | sed 's/^/    /'
 fi
 
-# Cancelled from the queue, so it must say so -- and must not have started.
-if grep -qE "'${SMALL_IMP}' was waiting to be decoupled .* is being snapshotted" "${TGT_LOG}"; then
-	pass "queued decouple of ${SMALL_IMP} was dequeued for the snapshot"
+if grep -qE "Cancelling the decouple of lvol '${BIG_IMP}'" "${TGT_LOG}"; then
+	pass "cancellation logged with its progress"
 else
-	fail "no dequeue-for-snapshot line for ${SMALL_IMP} in the log"
-fi
-if grep -qE "Decoupling lvol '${SMALL_IMP}'" "${TGT_LOG}"; then
-	fail "${SMALL_IMP} started materialising -- a queued cancel must stop it before that"
-else
-	pass "${SMALL_IMP} never started materialising"
+	fail "no cancellation line for ${BIG_IMP} in the log"
 fi
 
 # ==========================================================================
-echo "[8] wait for all decouples to finish"
+echo "[6] the decouple must stop, part-way, without a detach failure"
 if wait_for_decouple; then
-	pass "all decouples finished"
+	pass "no decouple left running"
 else
-	fail "decouple did not finish in time"
+	fail "decouple still running after the cancellation"
+fi
+
+if grep -qE "Decoupling lvol '${BIG_IMP}' from export .* was cancelled after" "${TGT_LOG}"; then
+	pass "decouple reported itself cancelled"
+else
+	fail "no 'was cancelled after' line -- the abort path did not run"
+fi
+
+# The regression this whole family of tests is about.
+if grep -qE 'blob is not a clone of an external snapshot' "${TGT_LOG}"; then
+	fail "detach failure present -- cancelling did not prevent the 9.2 hazard"
+else
+	pass "no detach failure"
+fi
+
+# The old failure message must not be reused for a cancellation: it says the
+# volume can be decoupled again, which is exactly what [8] shows to be false.
+if grep -qE "Decoupling lvol '${BIG_IMP}'.*can be decoupled again" "${TGT_LOG}"; then
+	fail "cancellation logged with the misleading 'can be decoupled again' message"
+else
+	pass "cancellation did not claim the volume can be decoupled again"
 fi
 
 # ==========================================================================
-echo "[9] verdict"
-echo "--- relevant log lines:"
-grep -nE 'queued to be decoupled|decouple_start|decouple_finish|Decoupling|blob is not a clone' \
-	"${TGT_LOG}" | tail -40 | sed 's/^/    /' || true
-
-# The point of the whole test. Whether the snapshot is refused or the decouple is
-# cancelled, what must never appear is a decouple that materialised everything and
-# then could not detach.
-if grep -qE 'blob is not a clone of an external snapshot' "${TGT_LOG}"; then
-	fail "decouple detach failed -- the fix did not hold"
+echo "[7] clusters copied before the cancellation are kept, and belong to the snapshot"
+raw_rpc rcow_get_lvstores "" >"${WORKDIR}/lvs.json" 2>/dev/null || true
+SNAP_ALLOC="$(python3 -c "
+import json, sys
+try:
+    rows = json.load(open(sys.argv[1]))
+except Exception:
+    print(-1); raise SystemExit
+for lvs in (rows if isinstance(rows, list) else rows.get('lvstores', [])):
+    for l in lvs.get('lvols', []):
+        if l.get('name') == sys.argv[2]:
+            print(l.get('allocated_clusters', -1)); raise SystemExit
+print(-1)
+" "${WORKDIR}/lvs.json" "${BIG_IMP_SNAP}" 2>/dev/null || echo -1)"
+if [ "${SNAP_ALLOC}" -gt 0 ] 2>/dev/null; then
+	pass "snapshot owns ${SNAP_ALLOC} materialised cluster(s) -- the partial copy was kept"
 else
-	pass "no detach failure: every decouple detached cleanly"
+	info "snapshot allocated clusters reported as '${SNAP_ALLOC}'"
+	info "(0 would mean the cancellation beat the first cluster; the 5 s wait should prevent that)"
+	fail "snapshot owns no clusters -- the partial copy was discarded, or never started"
 fi
 
-# big was never snapshotted, so its decouple must still have run to completion --
-# cancelling one volume's decouple must not disturb another's.
-if grep -qE "'${BIG_IMP}' no longer reads export" "${TGT_LOG}"; then
-	pass "${BIG_IMP} decoupled cleanly, unaffected by the cancellation"
+# ==========================================================================
+echo "[8] the volume can no longer be decoupled: its snapshot holds the parent"
+if raw_rpc rcow_decouple_lvol "$(printf '{"lvol_name":"%s"}' "${BIG_IMP}")" \
+	>/dev/null 2>"${WORKDIR}/redecouple.err"; then
+	fail "${BIG_IMP} accepted a decouple after being snapshotted"
 else
-	fail "${BIG_IMP} did not finish its decouple"
+	pass "${BIG_IMP} refuses a further decouple (it reads its snapshot, not the export)"
 fi
 
-# small's decouple was cancelled, so it must still read the export -- and asking
-# again must be refused, because the snapshot now owns the external parent.
-raw_rpc rcow_decouple_lvol "$(printf '{"lvol_name":"%s"}' "${SMALL_IMP}")" \
-	>/dev/null 2>"${WORKDIR}/redecouple.err"
-if [ $? -ne 0 ]; then
-	pass "${SMALL_IMP} can no longer be decoupled (its snapshot holds the parent)"
+# ==========================================================================
+echo "[9] data: the snapshot and the volume both read the source's bytes"
+SNAP_MD5="$(read_vol_md5 "${BIG_IMP_SNAP}")" || SNAP_MD5="unreadable"
+VOL_MD5="$(read_vol_md5 "${BIG_IMP}")" || VOL_MD5="unreadable"
+info "source   ${SRC_MD5}"
+info "snapshot ${SNAP_MD5}"
+info "volume   ${VOL_MD5}"
+if [ "${SNAP_MD5}" = "${SRC_MD5}" ]; then
+	pass "snapshot reads the source's bytes"
 else
-	fail "${SMALL_IMP} accepted a decouple after being snapshotted -- it has no external parent to clear"
+	fail "snapshot content differs from the source"
+fi
+if [ "${VOL_MD5}" = "${SRC_MD5}" ]; then
+	pass "volume still reads the source's bytes"
+else
+	fail "volume content differs from the source"
 fi
 
 check_target "step 9" || exit 1

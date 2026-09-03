@@ -244,10 +244,11 @@ S3_ARGS=(-e "${ENDPOINT}" -b "${BUCKET}" -r "${REGION}")
 
 if [ "${MODE}" = list ]; then
 	echo "offline integration: spawner thread_bounce journal wal cache flush export"
-	echo "                     statefile local_dev checkpoint"
+	echo "                     statefile local_dev checkpoint export_swap"
 	echo "with S3:             s3_client_test s3_bs_dev_test"
 	echo "dataplane:           dataplane recovery snapshot export srcdel selfimport"
-	echo "                     decouple_queue agent_template snapdelete pending_delete"
+	echo "                     derived decouple_queue snapshot_cancel snapshot_converge"
+	echo "                     agent_template snapdelete pending_delete"
 	echo "                     fs guards activation control"
 	echo ""
 	echo "root:        $([ "${HAVE_ROOT}" -eq 1 ] && echo yes || echo no)"
@@ -320,8 +321,8 @@ echo ""
 echo "--- integration (no S3, no root)"
 for t in s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test \
 	 s3_cache_test s3_flush_test s3_export_test s3_statefile_test \
-	 s3_local_dev_test s3_checkpoint_test s3_lease_term_test \
-	 s3_pending_persist_test; do
+	 s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
+	 s3_lease_term_test s3_pending_persist_test; do
 	run_suite "${t}" "./test/integration/${t}"
 done
 echo ""
@@ -422,14 +423,18 @@ else:
 
 if [ "${MODE}" != all ]; then
 	echo "--- dataplane: skipped, $([ "${MODE}" = offline ] && echo --offline || echo --no-dataplane)"
-	for t in dataplane recovery snapshot export selfimport decouple_queue snapdelete fs guards activation control; do
+	for t in dataplane recovery snapshot export srcdel selfimport derived \
+		 decouple_queue snapshot_cancel snapshot_converge agent_template \
+		 snapdelete pending_delete fs guards activation control; do
 		report_skip "run_${t}_test.sh" "not requested" 1
 	done
 else
 	BLOCKER="$(dataplane_blocker)"
 	if [ -n "${BLOCKER}" ]; then
 		echo "--- dataplane"
-		for t in dataplane recovery snapshot export selfimport decouple_queue snapdelete fs guards activation control; do
+		for t in dataplane recovery snapshot export srcdel selfimport derived \
+			 decouple_queue snapshot_cancel snapshot_converge agent_template \
+			 snapdelete pending_delete fs guards activation control; do
 			report_skip "run_${t}_test.sh" "${BLOCKER}"
 		done
 	else
@@ -453,12 +458,30 @@ else
 		# Next to export, whose manifests it consumes.
 		run_suite run_selfimport_test.sh \
 			./test/dataplane/run_selfimport_test.sh
-		# A queued decouple must not be snapshotable: snapshotting an esnap
-		# clone moves its external snapshot onto the new snapshot, and the
-		# queued decouple then fails its detach. Regression for the 64-node
-		# failure; consumes export manifests like export does.
+		# Handing on an imported volume without copying it: three lvstores in
+		# turn, so that what the last one reads has to resolve against two
+		# prefixes at once. Next to selfimport because it is the other half of
+		# the same question -- selfimport is an import that comes home, this is
+		# one that keeps travelling.
+		run_suite run_derived_test.sh \
+			./test/dataplane/run_derived_test.sh "${S3_ARGS[@]}"
+		# Snapshotting a volume whose decouple is *queued* must cancel that
+		# decouple rather than leave one that materialises everything and then
+		# cannot detach. Regression for the 64-node failure; consumes export
+		# manifests like export does.
 		run_suite run_decouple_queue_test.sh \
 			./test/dataplane/run_decouple_queue_test.sh "${S3_ARGS[@]}"
+		# The same, for a decouple that is *running* -- the common case, since a
+		# decouple starts unless another is in the way, so it is the branch an
+		# ordinary "import, then snapshot" trips.
+		run_suite run_snapshot_cancel_test.sh \
+			./test/dataplane/run_snapshot_cancel_test.sh "${S3_ARGS[@]}"
+		# And that such a chain can then stop depending on its source: the
+		# snapshot is decoupled, and the final read happens after the source
+		# prefix is deleted and the lvstore re-attached, so a pass cannot come
+		# from a cache.
+		run_suite run_snapshot_converge_test.sh \
+			./test/dataplane/run_snapshot_converge_test.sh "${S3_ARGS[@]}"
 		# The agent-template chain across two real s3lvol_tgt processes (only
 		# the bucket is shared); consumes export manifests like export does.
 		run_suite run_agent_template_test.sh \

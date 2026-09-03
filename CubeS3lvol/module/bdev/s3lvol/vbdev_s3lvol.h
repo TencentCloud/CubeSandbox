@@ -543,13 +543,33 @@ int s3lvol_lvol_create(struct s3lvol_lvstore *lvs, const char *name,
  * the missing bdev.
  */
 /* True while the lvol is in the decouple queue, running or waiting its turn.
- * A snapshot or clone must not be taken of such a volume: the snapshot would
- * take the external snapshot identity with it, and the queued decouple would
- * then fail its detach after materialising the data. */
+ * A snapshot or clone must not be taken of such a volume while this holds: the
+ * snapshot would take the external snapshot identity with it, and the decouple
+ * would then fail its detach after materialising the data. create_snapshot
+ * cancels the decouple rather than refusing -- see s3lvol_decouple_cancel(). */
 bool s3lvol_lvol_decouple_pending(const struct spdk_lvol *lvol);
 
+/**
+ * Stop decoupling this lvol so that a snapshot may be taken of it.
+ *
+ * \return 0  nothing to cancel, or done synchronously -- carry on immediately
+ *         1  under way; cb_fn is called once the decouple has stopped
+ *         <0 error (-EBUSY if a cancellation is already pending)
+ */
+int s3lvol_decouple_cancel(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn,
+			   void *cb_arg);
+
+/**
+ * Create a read-only snapshot of an lvol, and register it as a bdev.
+ *
+ * If a decouple is in flight on \p lvol it is cancelled first, which makes this
+ * asynchronous even before the snapshot itself starts; \p out_cancelled_decouple,
+ * when not NULL, is set synchronously to say whether that happened, so a caller
+ * can report that the volume it asked to be decoupled no longer will be.
+ */
 int s3lvol_lvol_create_snapshot(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 				const char *snapshot_name,
+				bool *out_cancelled_decouple,
 				s3lvol_lvol_op_cb cb_fn, void *cb_arg);
 
 /**
@@ -743,6 +763,33 @@ int s3lvol_snapshot_query(const char *snapshot_name,
 int s3lvol_snapshot_query_lvol(struct spdk_lvol *lvol,
 			       enum s3lvol_export_state *state, bool *deletable,
 			       bool *pending);
+
+/**
+ * How many layers a zero-copy export of \p lvol would have to walk.
+ *
+ * The same walk export_build_chain() performs, counting rather than collecting,
+ * so the number answers a question with a consequence: past
+ * S3LVOL_DEFAULT_MAX_CHAIN_DEPTH that export stops being zero-copy and becomes a
+ * full copy of the volume -- and the resulting dense export is permanent, since
+ * the reaper only ever collects reference exports (their snapshot going away is
+ * what makes them collectable, which says nothing about a self-contained one).
+ *
+ * Which is why this is reported rather than merely bounded. The fallback to
+ * copying is correct and silent, so without a number in hand there is no way to
+ * tell a node approaching it from one nowhere near, and the first evidence would
+ * be the duplicate objects after it happened.
+ *
+ * Includes \p lvol itself, so a volume with no parent is 1. Counts through an
+ * esnap clone to the clone and stops there: what lies beyond is another
+ * lvstore's, and the export names it out of the parent manifest rather than
+ * walking it. Not capped -- how far past a threshold a chain is, is the useful
+ * part.
+ *
+ * \return the depth, or 0 if the lvol has no open blob (a deactivated volume
+ *         cannot be asked, exactly as the cluster counts cannot).
+ */
+uint32_t s3lvol_lvol_chain_depth(struct s3lvol_lvstore *lvs,
+				 struct spdk_lvol *lvol);
 
 /**
  * Why a delete could not be carried out when it was asked for.
@@ -1217,6 +1264,7 @@ struct s3lvol_export *s3lvol_export_add(struct s3lvol_lvstore *lvs,
 					const char *snapshot_name);
 void s3lvol_export_forget(struct s3lvol_export *exp);
 void s3lvol_export_set_materialised(struct s3lvol_export *exp, uint32_t generation);
+void s3lvol_export_set_local_ref(struct s3lvol_export *exp, uint32_t generation);
 
 struct s3lvol_export *s3lvol_export_first(struct s3lvol_lvstore *lvs);
 struct s3lvol_export *s3lvol_export_next(struct s3lvol_export *prev);
@@ -1241,6 +1289,39 @@ int s3lvol_xfer_exports_load(struct s3lvol_lvstore *lvs,
 			     spdk_lvs_op_complete cb_fn, void *cb_arg);
 
 void s3lvol_xfer_exports_fini(struct s3lvol_lvstore *lvs);
+
+/**
+ * Turn a reference export into a copied one, so this node stops owing anybody
+ * its snapshot.
+ *
+ * A reference export names this lvstore's live chunk objects, which is why it
+ * pins the snapshot behind it: those objects cannot be reclaimed while an
+ * importer may read them. There is no way out of that today -- the snapshot
+ * stays undeletable for as long as any importer keeps renewing, however little
+ * it still needs the data. Materialising is the way out: read the snapshot,
+ * upload the export's own copies, and publish the manifest again as dense with
+ * `generation` bumped.
+ *
+ * Afterwards the export owes nothing. It holds copies, so the pin goes, the
+ * lease watch stops, and the TTL is meaningless -- see
+ * s3lvol_export_set_materialised().
+ *
+ * **Importers are not told, and do not have to be.** The manifest is replaced in
+ * place, so an importer holding the old one keeps reading until the objects it
+ * names disappear; the 404 then makes it refetch, find the higher generation, and
+ * carry on against the copies. That is why the ordering here is not negotiable:
+ * the new manifest has to be published before the old objects can be deleted, or
+ * a reader hits a 404 and refetches into the manifest that sent it there.
+ *
+ * This does not delete the old chunk objects. They belong to the snapshot's chunk
+ * map, not to the export, and they go when the snapshot does -- which is now
+ * allowed to happen.
+ *
+ * \return 0 with the callback pending; -ENOENT if no such export; -EALREADY if it
+ * is already a copy; -EBUSY if a materialisation of it is already running.
+ */
+int s3lvol_export_materialise(struct s3lvol_lvstore *lvs, const char *export_uuid,
+			      spdk_lvol_op_complete cb_fn, void *cb_arg);
 
 struct s3lvol_import *s3lvol_import_first(struct s3lvol_lvstore *lvs);
 struct s3lvol_import *s3lvol_import_next(struct s3lvol_import *prev);

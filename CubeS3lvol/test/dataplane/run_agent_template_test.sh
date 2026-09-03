@@ -17,6 +17,7 @@
 #      -> delete the clone (merged into its snapshot) -> export the snapshot
 #    B (destination node):
 #      a fresh s3lvol_tgt process -> import the export -> verify the data
+#      -> delete the import -> import the same uuid again -> verify again
 #
 #  What it proves beyond the single-process suites (run_export_test.sh runs
 #  both sides inside one target):
@@ -28,7 +29,8 @@
 #      then exports that merged state cleanly -- the agent instance is
 #      transient, the image it produced is the asset;
 #    - an import on an unrelated node reads the exact data (file-level md5,
-#      not just a dd of one region) of the source-side snapshot.
+#      not just a dd of one region) of the source-side snapshot;
+#    - B can delete that import and import the same uuid again.
 #
 #  === Why two real processes instead of two lvstores ===
 #
@@ -685,6 +687,93 @@ else
 	info "--- imported ---"; echo "${IMPORTED_MANIFEST}" | sort -u | sed 's/^/       /'
 fi
 check_target "${TGT_B_PID}" "${WORKDIR}/target_b.log" "step 4" || exit 1
+
+# ==========================================================================
+# [4b] B: delete the import and import the same export again
+#
+# Two real processes, only the bucket shared. 11k covers the same pair inside
+# one target; this is the deployment form -- B's lease, imports registry and
+# lvol name must go away with the delete, or the second import fails for a
+# reason that has nothing to do with A's snapshot.
+# ==========================================================================
+echo ""
+echo "[4b] B: delete the import and import the same export again"
+
+B_REIMP_ROUNDS=2
+for round in $(seq 1 "${B_REIMP_ROUNDS}"); do
+	if [ "${MOUNTED_IMPORT}" -eq 1 ]; then
+		unmount_quietly "${MNT_IMPORT}" || {
+			fail "umount import (round ${round})"; exit 1; }
+		MOUNTED_IMPORT=0
+	fi
+	nvme_settle
+	B_NSID="$(nsid_of_sock "${SOCK_B}" "${NQN_B}" "${LVS_B}/${IMPORT_VOL}")"
+	[ -n "${B_NSID}" ] && spdk_b nvmf_subsystem_remove_ns "${NQN_B}" \
+		"${B_NSID}" >/dev/null 2>&1 || true
+	nvme_settle
+
+	if ! rpc_b rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${IMPORT_VOL}")" \
+			>/dev/null 2>"${WORKDIR}/b_del_${round}.err"; then
+		fail "B delete_lvol (round ${round})"
+		sed 's/^/       /' "${WORKDIR}/b_del_${round}.err"
+		exit 1
+	fi
+	if python3 "${SPDK_RPC_PY}" -s "${SOCK_B}" bdev_get_bdevs \
+			-b "${LVS_B}/${IMPORT_VOL}" >/dev/null 2>&1; then
+		fail "round ${round}: ${IMPORT_VOL} still registered on B after delete"
+		exit 1
+	fi
+	pass "round ${round}: B deleted ${IMPORT_VOL}"
+
+	if ! rpc_b rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","decouple":true}' \
+			"${IMPORT_VOL}" "${EXP_UUID}")" >/dev/null 2>&1; then
+		fail "B import_lvol (round ${round})"
+		exit 1
+	fi
+	pass "round ${round}: B imported ${IMPORT_VOL} again"
+
+	DECOUPLE_DONE=0
+	for _i in $(seq 120); do
+		n="$(rpc_b rcow_get_decouple '{}' 2>/dev/null || echo '[]')"
+		if [ "$(printf '%s' "${n}" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null)" = "0" ]; then
+			DECOUPLE_DONE=1
+			break
+		fi
+		sleep 1
+	done
+	if [ "${DECOUPLE_DONE}" -eq 1 ]; then
+		pass "round ${round}: B decouple finished"
+	else
+		fail "round ${round}: B decouple did not finish in 120s"
+		exit 1
+	fi
+
+	BEFORE_B_NS="$(ls /dev/nvme*n* 2>/dev/null | sort || true)"
+	spdk_b nvmf_subsystem_add_ns "${NQN_B}" \
+		"${LVS_B}/${IMPORT_VOL}" >/dev/null 2>&1 \
+		|| { fail "B add_ns import (round ${round})"; exit 1; }
+	DEV_B="$(wait_new_ns "${BEFORE_B_NS}")"
+	if [ -z "${DEV_B}" ]; then
+		fail "round ${round}: B: no namespace appeared"
+		exit 1
+	fi
+	pass "round ${round}: B import device ${DEV_B}"
+
+	mount "${DEV_B}" "${MNT_IMPORT}" || { fail "mount import (round ${round})"; exit 1; }
+	MOUNTED_IMPORT=1
+	IMPORTED_MANIFEST="$(fs_manifest "${MNT_IMPORT}")"
+	if [ "$(echo "${IMPORTED_MANIFEST}" | sort -u)" = "${EXPECTED}" ]; then
+		pass "round ${round}: reimported data still matches the source snapshot"
+	else
+		fail "round ${round}: reimported data differs from the source snapshot"
+		info "--- expected ---"; echo "${EXPECTED}" | sed 's/^/       /'
+		info "--- imported ---"; echo "${IMPORTED_MANIFEST}" | sort -u | sed 's/^/       /'
+		exit 1
+	fi
+	check_target "${TGT_B_PID}" "${WORKDIR}/target_b.log" "step 4b round ${round}" \
+		|| exit 1
+done
+pass "B imported, deleted and imported the same export again ${B_REIMP_ROUNDS} times"
 
 # ==========================================================================
 # [5] the snapshot exported after the clone was merged into it
