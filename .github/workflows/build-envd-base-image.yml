@@ -6,26 +6,22 @@ on:
     paths:
       - 'docker/Dockerfile.cube-base'
       - 'docker/cube-entrypoint.sh'
+      - 'cube-envd/**'
       - '.github/workflows/build-envd-base-image.yml'
   pull_request:
     paths:
       - 'docker/Dockerfile.cube-base'
       - 'docker/cube-entrypoint.sh'
+      - 'cube-envd/**'
       - '.github/workflows/build-envd-base-image.yml'
   workflow_dispatch:
-    inputs:
-      envd_ref:
-        description: 'Upstream e2b-dev/infra ref (tag/branch/SHA) to compile envd from'
-        required: false
-        default: '2026.16'
 
 env:
-  ENVD_REF_DEFAULT: '2026.16'
   IMAGE_NAME: ghcr.io/tencentcloud/cubesandbox-base
   BASE_OS_TAG_SUFFIX: ubuntu22.04
 
 concurrency:
-  group: build-envd-base-image-${{ github.ref }}-${{ github.event.inputs.envd_ref || 'default' }}
+  group: build-envd-base-image-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -39,12 +35,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve envd ref
-        id: meta_ref
-        run: |
-          envd_ref="${{ github.event.inputs.envd_ref || env.ENVD_REF_DEFAULT }}"
-          echo "envd_ref=${envd_ref}" >> "${GITHUB_OUTPUT}"
-          echo "Compiling envd from e2b-dev/infra@${envd_ref}"
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -63,17 +55,16 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ steps.meta_ref.outputs.envd_ref }},enable=${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
-            type=raw,value=${{ steps.meta_ref.outputs.envd_ref }}-${{ env.BASE_OS_TAG_SUFFIX }},enable=${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
+            type=raw,value=${{ github.sha }}-${{ env.BASE_OS_TAG_SUFFIX }},enable=${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
             type=raw,value=latest,enable=${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
             type=sha,prefix=sha-,format=short
           labels: |
-            io.cubesandbox.envd.ref=${{ steps.meta_ref.outputs.envd_ref }}
+            io.cubesandbox.envd.commit=${{ github.sha }}
 
       - name: Build image (load locally for smoke test)
         uses: docker/build-push-action@v6
         with:
-          context: docker
+          context: .
           file: docker/Dockerfile.cube-base
           platforms: linux/amd64
           push: false
@@ -81,7 +72,8 @@ jobs:
           tags: cubesandbox-base:ci-smoke
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            ENVD_REF=${{ steps.meta_ref.outputs.envd_ref }}
+            CUBE_ENVD_VERSION=${{ github.sha }}
+            CUBE_ENVD_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -117,13 +109,14 @@ jobs:
         if: github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master'
         uses: docker/build-push-action@v6
         with:
-          context: docker
+          context: .
           file: docker/Dockerfile.cube-base
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            ENVD_REF=${{ steps.meta_ref.outputs.envd_ref }}
+            CUBE_ENVD_VERSION=${{ github.sha }}
+            CUBE_ENVD_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -76,6 +76,7 @@ rm -f \
   "${PREBUILT_DIR}/cubeopscli" \
   "${PREBUILT_DIR}/cubevsmapdump" \
   "${PREBUILT_DIR}/cube-agent" \
+  "${PREBUILT_DIR}/cube-envd" \
   "${PREBUILT_DIR}/cube-init" \
   "${PREBUILT_DIR}/containerd-shim-cube-rs" \
   "${PREBUILT_DIR}/cube-runtime"
@@ -407,16 +408,27 @@ track_s3lvol() {
   }
 }
 
-# Serial pre-launch step: build cubemastercli with the client-supplied envd
-# payload when present. The envd payload must be embedded into the
-# cubemastercli binary before packaging, but that build cannot safely share the
-# later track_cubemaster path because the latter would overwrite the artifact.
+# Serial pre-launch step: build the current-architecture static cube-envd, then
+# embed it in cubemastercli. An explicit ENVD_LOCAL_PATH remains an override
+# for release operators who provide their own compatible ELF.
 echo "[one-click] building cubemastercli in builder" >&2
+ENVD_EMBED_PATH="/workspace/deploy/one-click/.work/prebuilt/cube-envd"
 if [[ -f /workspace/deploy/one-click/.work/envd ]]; then
-  (cd /workspace/CubeMaster && make cubemastercli ENVD_LOCAL_PATH="/workspace/deploy/one-click/.work/envd")
+  ENVD_EMBED_PATH="/workspace/deploy/one-click/.work/envd"
 else
-  (cd /workspace/CubeMaster && make cubemastercli)
+  case "$(uname -m)" in
+    x86_64) CUBE_ENVD_TARGET="x86_64-unknown-linux-musl" ;;
+    aarch64) CUBE_ENVD_TARGET="aarch64-unknown-linux-musl" ;;
+    *) echo "[one-click] unsupported cube-envd architecture: $(uname -m)" >&2; exit 1 ;;
+  esac
+  (
+    cd /workspace/cube-envd
+    CUBE_ENVD_VERSION="${CUBE_VERSION}" CUBE_ENVD_COMMIT="${CUBE_COMMIT}" \
+      cargo +1.89 build --release --locked --target "${CUBE_ENVD_TARGET}" --bin cube-envd
+    install -m 0755 "target/${CUBE_ENVD_TARGET}/release/cube-envd" "${ENVD_EMBED_PATH}"
+  )
 fi
+(cd /workspace/CubeMaster && make cubemastercli ENVD_LOCAL_PATH="${ENVD_EMBED_PATH}")
 install -m 0755 /workspace/CubeMaster/build/cubemastercli "${PREBUILT_DIR}/cubemastercli"
 
 # Serial pre-launch step: generate cubevs BPF bindings exactly once before

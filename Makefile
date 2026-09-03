@@ -51,6 +51,7 @@ RUST_PROJECT_DIRS := \
 	$(ROOT_DIR)/CubeAPI \
 	$(ROOT_DIR)/CubeShim \
 	$(ROOT_DIR)/agent \
+	$(ROOT_DIR)/cube-envd \
 	$(ROOT_DIR)/guest-init \
 	$(ROOT_DIR)/cubecow \
 	$(ROOT_DIR)/hypervisor
@@ -151,6 +152,7 @@ help:
 	@printf "  cube-volume-s3-test Run S3 Volume plugin unit tests in Docker\n"
 	@printf "  cube-volume-cos-rpc-test Run COS RPC Volume plugin unit tests in Docker\n"
 	@printf "  agent         Build cube-agent in Docker\n"
+	@printf "  cube-envd     Build static cube-envd in Docker\n"
 	@printf "  cube-init     Build cube-init (guest PID1) in Docker (alias: guest-init)\n"
 	@printf "  guest-init    Alias for cube-init (source dir guest-init/)\n"
 	@printf "  agent-ext4    Build independent cube-agent.ext4 (+ version) in Docker (alias: cube-agent-ext4)\n"
@@ -379,7 +381,7 @@ cubecow-test-native: builder-image
 .PHONY: cubemaster
 cubemaster: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && CGO_ENABLED=0 make build && mkdir -p /workspace/_output/bin && cp build/cubemaster build/cubemastercli /workspace/_output/bin/'
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/cube-envd && CUBE_ENVD_VERSION=$(CUBE_VERSION) CUBE_ENVD_COMMIT=$(CUBE_COMMIT) make install BINDIR=/workspace/_output/bin && cd /workspace/CubeMaster && CGO_ENABLED=0 make cubemaster && CGO_ENABLED=0 make cubemastercli ENVD_LOCAL_PATH=/workspace/_output/bin/cube-envd && cp build/cubemaster build/cubemastercli /workspace/_output/bin/'
 
 .PHONY: cubelet
 cubelet: builder-image
@@ -409,6 +411,11 @@ cube-proxy-sidecar: builder-image
 agent: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/agent && make -j1 &&  make BINDIR=/workspace/_output/bin install'
+
+.PHONY: cube-envd
+cube-envd: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/cube-envd && CUBE_ENVD_VERSION=$(CUBE_VERSION) CUBE_ENVD_COMMIT=$(CUBE_COMMIT) make install BINDIR=/workspace/_output/bin'
 
 .PHONY: cube-init guest-init
 cube-init guest-init: builder-image

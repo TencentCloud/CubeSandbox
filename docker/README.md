@@ -14,18 +14,20 @@ by [`.github/workflows/build-builder-image.yml`](../.github/workflows/build-buil
 
 Base image for user-supplied sandbox templates. It is `ubuntu:22.04`
 with `envd` preinstalled on `:49983`, so any image built `FROM` it is
-already ready for Cube's readiness probe. Published as
+already ready for Cube's readiness probe. `envd` is the repository's
+own Rust daemon `cube-envd` (installed as `/usr/bin/envd`, command name
+kept for E2B compatibility). Published as
 `ghcr.io/tencentcloud/cubesandbox-base` by
-[`.github/workflows/build-envd-base-image.yml`](../.github/workflows/build-envd-base-image.yml),
-which compiles `envd` in-place from
-[`e2b-dev/infra`](https://github.com/e2b-dev/infra) at tag `2026.16`
-(override via `workflow_dispatch` input `envd_ref`) before baking the
-image.
+[`.github/workflows/build-envd-base-image.yml`](../.github/workflows/build-envd-base-image.yml):
+it compiles `cube-envd` from [`cube-envd/`](../cube-envd/) inside
+`docker/Dockerfile.cube-base` (Rust + musl static, version/commit
+injected via build args), bakes it into the image as `/usr/bin/envd`,
+and runs a `:49983/health` smoke test before pushing.
 
 Minimal consumer example:
 
 ```dockerfile
-FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16
+FROM ghcr.io/tencentcloud/cubesandbox-base:latest
 RUN pip install pandas
 ```
 
