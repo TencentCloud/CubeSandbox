@@ -340,6 +340,12 @@ func TestMetricDirection(t *testing.T) {
 		{"create.count", dirNA}, // counts are not a quality signal
 		{"summary.errors", dirNA},
 		{"per_template.tpl-a.attempts", dirNA},
+		// A count token as the tail of a qualified name is NOT a scale
+		// counter: these are "bad when they rise" signals the lower-better
+		// substrings pin, and must not be silently excluded from verdicts.
+		{"restart_errors", dirLowerBetter},
+		{"evict_failures", dirLowerBetter},
+		{"errors_total", dirLowerBetter},
 		// Data-derived key segments must not flip classification: the
 		// template id in per_template.<id>.<stat> is user data.
 		{"per_template.sbx-errors.success_rate", dirHigherBetter},
@@ -495,6 +501,11 @@ func TestCompareEndToEnd(t *testing.T) {
 		"seed=1",
 		"workload=mixed",
 		"version=v2",
+		// Both groups deliberately mix a cube-bench export with rounds files
+		// to exercise multi-shape aggregation — and the report must flag
+		// exactly that blend instead of endorsing it.
+		"> **Warning:** default mixes cube-bench exports",
+		"> **Warning:** new-policy mixes cube-bench exports",
 	} {
 		if !strings.Contains(report, want) {
 			t.Errorf("report missing metadata %q", want)
@@ -752,6 +763,53 @@ func TestCompareConfigMismatchNote(t *testing.T) {
 	}
 	if strings.Contains(string(saved3), "client-config artifacts") {
 		t.Errorf("missing config keys treated as a mismatch\n%s", saved3)
+	}
+}
+
+func TestCompareMixedProducerWarning(t *testing.T) {
+	// Pure single-producer groups must not raise the mix warning; blending a
+	// cube-bench export with a schedsim rounds file in one group must.
+	dir := t.TempDir()
+
+	plain1 := writeTempFile(t, dir, "plain1.json", `{
+		"config": {"workload": "burst"},
+		"summary": {"success_rate": 0.9}
+	}`)
+	plain2 := writeTempFile(t, dir, "plain2.json", `{
+		"config": {"workload": "burst"},
+		"summary": {"success_rate": 0.91}
+	}`)
+	rounds1 := writeTempFile(t, dir, "rounds1.json", `{
+		"config": {"workload": "burst"},
+		"rounds": [{"seed": 1, "summary": {"success_rate": 0.95}}]
+	}`)
+
+	out := filepath.Join(dir, "report.md")
+	var buf bytes.Buffer
+	if err := runCompare([]string{"--baseline", plain1 + "," + plain2, "--candidate", rounds1, "-o", out}, &buf); err != nil {
+		t.Fatalf("runCompare: %v", err)
+	}
+	saved, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if strings.Contains(string(saved), "mixes cube-bench exports") {
+		t.Errorf("pure groups got the producer-mix warning\n%s", saved)
+	}
+
+	out2 := filepath.Join(dir, "report2.md")
+	if err := runCompare([]string{"--baseline", plain1 + "," + rounds1, "--candidate", plain2, "-o", out2}, &buf); err != nil {
+		t.Fatalf("runCompare: %v", err)
+	}
+	saved2, err := os.ReadFile(out2)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if !strings.Contains(string(saved2), "> **Warning:** baseline mixes cube-bench exports") {
+		t.Errorf("mixed-producer baseline missing the warning\n%s", saved2)
+	}
+	if strings.Contains(string(saved2), "> **Warning:** candidate mixes cube-bench exports") {
+		t.Errorf("pure candidate got the producer-mix warning\n%s", saved2)
 	}
 }
 

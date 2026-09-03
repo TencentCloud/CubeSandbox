@@ -361,6 +361,13 @@ Caveats when reading verdicts:
   blocks outside `summary` are dropped; today's only rounds producer
   (schedsim) carries just `seed` + `summary` per round, so nothing is lost
   in practice.
+- **A group that mixes producers is flagged.** cube-bench exports
+  (client-side measurements) and schedsim rounds files (simulator reports)
+  on the SAME side of an A/B blend two measurement domains into one mean/CI;
+  the report prints a warning naming the group. Split producers into
+  separate comparisons — the endorsed cross-tool shape is one producer per
+  side (e.g. schedsim rounds as baseline vs cube-bench runs as candidate),
+  reading only the semantically shared keys.
 
 Per-metric aggregation only counts samples that actually contain the key, so
 when the two groups mix export shapes (e.g. a `create-only` file next to

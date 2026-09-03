@@ -486,19 +486,29 @@ func classifyKey(key string) string {
 }
 
 // isScaleCounter reports whether key is a raw scale counter: a bare count
-// token from countTokens, or the singular "count" of a create/delete stat
+// token from countTokens used AS the metric name — the whole key (errors),
+// a summary-namespaced key (summary.errors), or a per_template stat
+// (per_template.<id>.attempts, which classifyKey reduces to
+// per_template.attempts) — or the singular "count" of a create/delete stat
 // block (create.count/delete.count track how many cycles ran — scale, not
-// quality). "count" outside a stat block stays directional, so failure_count
-// keeps its lower-better verdict.
+// quality). A count token appearing as the tail of a qualified name does
+// NOT classify: restart_errors, evict_failures, sched_errors and
+// errors_total are "bad when they rise" signals the lower-better rules
+// deliberately cover, not workload-size counters. "count" outside a stat
+// block also stays directional, so failure_count keeps its lower-better
+// verdict.
 func isScaleCounter(key string) bool {
 	k := strings.ToLower(classifyKey(key))
 	tokens := strings.FieldsFunc(k, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
-	for _, tok := range tokens {
-		if countTokens[tok] {
-			return true
-		}
+	switch {
+	case len(tokens) == 1 && countTokens[tokens[0]]:
+		return true
+	case len(tokens) == 2 && tokens[0] == "summary" && countTokens[tokens[1]]:
+		return true
+	case len(tokens) == 3 && tokens[0] == "per" && tokens[1] == "template" && countTokens[tokens[2]]:
+		return true
 	}
 	return len(tokens) > 1 && statBlockGroups[tokens[0]] && tokens[len(tokens)-1] == "count"
 }
@@ -828,6 +838,11 @@ func renderComparison(c *comparison) string {
 				"(lifetime sleeps clamped, errors drawn from --dry-error-rate), so verdicts on its rows "+
 				"describe the simulator, not a scheduler or a real API.\n", g.name)
 		}
+		if groupMixesProducers(g) {
+			fmt.Fprintf(&b, "> **Warning:** %s mixes cube-bench exports (client-side measurements) with "+
+				"schedsim rounds files (simulator reports) in one group: both contribute samples to the same "+
+				"means and CIs while measuring different domains — split them into separate comparisons.\n", g.name)
+		}
 	}
 
 	b.WriteString("\n## Metric Comparison\n\n")
@@ -965,6 +980,23 @@ func groupHasDryRun(g *sampleGroup) bool {
 		}
 	}
 	return false
+}
+
+// groupMixesProducers reports whether the group blends files from different
+// producers — a cube-bench export and a schedsim rounds file. Their samples
+// aggregate into the same mean/CI rows but come from different measurement
+// domains (client-observed vs simulator-reported), so the blend is warned
+// about rather than silently trusted.
+func groupMixesProducers(g *sampleGroup) bool {
+	rounds, plain := false, false
+	for _, f := range g.files {
+		if f.viaRounds {
+			rounds = true
+		} else {
+			plain = true
+		}
+	}
+	return rounds && plain
 }
 
 // configMismatchNote flags a scheduled-vs-scheduled comparison whose two
