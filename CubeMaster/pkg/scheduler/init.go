@@ -73,11 +73,22 @@ func InitScheduler(ctx context.Context) error {
 	config.AppendConfigWatcher(&schedulerConfigWatcher{ctx: ctx, registry: registry})
 	// The async refresher writes n.Score on every cached node each
 	// ScoreInterval; keep it inert while no compiled pipeline (the legacy
-	// fallback included) binds the scorer. Evaluated per tick so a hot reload
-	// that newly binds or drops the scorer takes effect without a restart.
+	// fallback included) binds the scorer AND the legacy enable_scorers
+	// condition is unmet. node.Score is also consumed directly by the
+	// operator endpoints (info ScoreOnly, stat "score"/"pscore"), so the
+	// legacy term keeps those endpoints fed for deployments that configure
+	// scorers without any profile binding them — replicating the old
+	// NewSelector gate (resource_weights set and enable_scorers non-empty).
+	// Evaluated per tick so a hot reload that newly binds or drops the
+	// scorer takes effect without a restart.
 	score.StartAsyncScore(ctx, func() bool {
-		profiles := scheduler.profiles.Load()
-		return profiles != nil && profiles.UsesScore(score.MultiFactorWeightedAverage)
+		if profiles := scheduler.profiles.Load(); profiles != nil &&
+			profiles.UsesScore(score.MultiFactorWeightedAverage) {
+			return true
+		}
+		sc := config.GetConfig().Scheduler
+		return sc != nil && sc.Score != nil && sc.Score.ResourceWeights != nil &&
+			len(sc.Score.EnableScorers) > 0
 	})
 
 	initTask(ctx)

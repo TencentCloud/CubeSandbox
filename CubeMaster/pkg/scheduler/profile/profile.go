@@ -146,12 +146,15 @@ func Compile(ctx context.Context, cfg *config.Config, registry *plugin.Registry)
 		if compileErr != nil {
 			return nil, fmt.Errorf("compile scheduler profile %q: %w", name, compileErr)
 		}
-		if profileConf.Selection.TopN == 0 && cfg.Scheduler.PrioritySelectNum > 1 {
+		if profileConf.Selection.TopN == 0 && cfg.Scheduler.PrioritySelectNum != 1 {
 			// Migration trap: a selection-less profile defaults to top_n 1
 			// (deterministic best-node pick), silently replacing the legacy
-			// top-N spread. Nothing fails, so say it at compile time.
+			// spread — both top-N (priority_select_num > 1) and whole-pool
+			// (priority_select_num unset, normalized to -1) spreads are
+			// affected. Nothing fails, so say it at compile time.
 			log.G(ctx).Warnf("RISK: scheduler profile %q sets no selection.top_n and defaults to 1 (best-node pick) "+
-				"while legacy priority_select_num=%d; set selection.top_n explicitly to keep spreading",
+				"while legacy priority_select_num=%d (>1 means top-N spread, -1 means whole-pool spread); "+
+				"set selection.top_n explicitly to keep spreading",
 				name, cfg.Scheduler.PrioritySelectNum)
 		}
 		if profileConf.Default {

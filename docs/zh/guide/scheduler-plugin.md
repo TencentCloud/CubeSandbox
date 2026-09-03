@@ -94,10 +94,10 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 
 ## 兼容性说明
 
-- 未注册为插件的 legacy `enable_filters` / `enable_scorers` 配置项现在会使 CubeMaster 启动失败，错误信息会指出具体配置项；此前这类条目会被静默跳过。升级前请从配置中移除失效条目，或先注册对应插件。
+- 未注册为插件的 legacy `enable_filters` / `enable_scorers` 配置项现在会使 CubeMaster 启动失败，错误信息会指出具体配置项；此前这类条目会被静默跳过。升级前请从配置中移除失效条目，或先注册对应插件。Score 一侧的启动失败以配置了 `score.resource_weights` 为前提——legacy scorer 列表只在该条件下参与编译（与引入插件前的行为一致），仅有 `enable_scorers` 而没有 `resource_weights` 时条目不会被编译，也就不会被拒绝。
 - weight 非正的 legacy `enable_scorers` 条目现在会在编译管线时被跳过并输出告警（此前是静默贡献 score×0）；调度行为不变。
 - 上述未注册条目的启动失败只在 legacy 管线实际被编译时成立：一旦 `profiles` 下配置了默认条目，`enable_filters` / `enable_scorers` 就不再参与编译，失效条目会被静默忽略而非报错。迁移到 Profiles 时请一并清理这些条目。
-- `multi_factor_weighted_average` 的 legacy 后台分数刷新协程只要对应配置段存在就会启动，但在任何已编译管线（包括 legacy 回落管线）真正绑定该 scorer 之前保持空转。绑定检查每个 tick 都会执行，因此热加载新绑定或移除该 scorer 无需重启即可生效；"已配置但未绑定"的部署只多一个空转 goroutine，而不再每个 `ScoreInterval` 对全量节点写一次分数。
+- `multi_factor_weighted_average` 的 legacy 后台分数刷新协程只要对应配置段存在就会启动，并在任一已编译管线（包括 legacy 回落管线）绑定该 scorer、**或** legacy `enable_scorers` 条件成立（配置了 `score.resource_weights` 且 `enable_scorers` 非空——沿用引入插件前的激活条件，保证 `node.Score` 运维端点在原有部署里不丢数据）时保持刷新；其余情况下空转。该检查每个 tick 都会执行，因此热加载新绑定或移除该 scorer 无需重启即可生效；"已配置但未绑定"的部署只多一个空转 goroutine，而不再每个 `ScoreInterval` 对全量节点写一次分数。
 - legacy default 管线现在与自定义 Profile 共用同一个并发运行器：Score 在请求内并行执行，且畸形的 Filter/Score 输出（nil、空 id、重复或非候选条目、NaN/Inf 值）会被拒绝，而不是像旧路径那样静默并入结果。仓库内置插件均满足该契约；升级前请审计任何第三方 `go` 插件。
 - legacy `enable_filters` 管线中 Filter 返回错误现在会使请求直接失败；只有候选集被清空（`SelectNodesNoRes`）才会继续回落到 `BackoffSelect`（preFilter 阶段仍保留旧的任意错误兜底）。此前任何 Filter 错误——包括插件自身缺陷或 panic——都会被静默兜底为宽松池随机挑选，把坏掉的 Filter 掩盖成随机放置。请修复或移除报错的 Filter，不要依赖错误兜底。
 - 配置 `profiles` 但没有 `default: true` 条目时，未命中任何路由的请求会回落到由 `enable_filters`/`enable_scorers` 编译出的 legacy 管线；若完全没有 legacy 配置段，该回落管线是无守卫的纯随机选择。编译期会输出一条含已编译 Filter/Score 数量的 RISK 告警——除非明确依赖该回落，否则请配置默认 Profile。

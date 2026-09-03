@@ -98,11 +98,17 @@ func Select(selCtx *selctx.SelectorCtx) (nodes *node.Node, err error) {
 	}
 
 	selected := selectNode(selCtx, pipeline)
-	if selected == nil && pipeline.NoCandidate == profile.NoCandidateBackoff {
-		if len(pipeline.Guards) == 0 {
-			return BackoffSelect(selCtx)
+	if selected == nil {
+		if pipeline.NoCandidate == profile.NoCandidateBackoff {
+			if len(pipeline.Guards) == 0 {
+				return BackoffSelect(selCtx)
+			}
+			return backoffSelectWithPipeline(selCtx, pipeline)
 		}
-		return backoffSelectWithPipeline(selCtx, pipeline)
+		// selectNode found nothing and the policy does not allow backoff:
+		// fail with no-resource instead of returning (nil, nil), which
+		// callers would read as a successful selection.
+		return nil, ret.Err(errorcode.ErrorCode_SelectNodesNoRes, ErrNoRes.Error())
 	}
 	return selected, nil
 }
