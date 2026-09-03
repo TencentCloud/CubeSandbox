@@ -1,6 +1,6 @@
 [Unit]
 Description=Cube Sandbox S3lvol (RCOW data plane)
-After=network-online.target
+After=network-online.target cube-sandbox-minio.service
 Wants=network-online.target
 ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
 RequiresMountsFor=/data/cubelet /data/log

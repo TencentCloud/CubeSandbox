@@ -362,6 +362,56 @@ EOF
   assert_contains "${diff}" "[explicit]"
 }
 
+# Contract boundary: the merge stays generic — a .env value that EQUALS the
+# env.example default is never an explicit override, for toggle keys too.
+# Toggle intent (flipping ONE_CLICK_ENABLE_S3LVOL back to 0 on upgrade) is
+# handled outside the merge by snapshot_one_click_toggles /
+# apply_one_click_toggles (see tests/test_toggle_inputs.sh), and the final
+# value is persisted by install.sh's upsert_env_kv.
+test_dotenv_default_valued_key_not_explicit() {
+  local new="${TMP_DIR}/new_s3lvol.example" old="${TMP_DIR}/old_s3lvol.env"
+  local dotenv="${TMP_DIR}/new_s3lvol.env"
+  local out="${TMP_DIR}/out_s3lvol.env" diff="${TMP_DIR}/diff_s3lvol.txt"
+  cat > "${new}" <<'EOF'
+ONE_CLICK_ENABLE_S3LVOL=0
+CUBE_SANDBOX_MYSQL_PORT=3306
+EOF
+  cat > "${old}" <<'EOF'
+ONE_CLICK_ENABLE_S3LVOL=1
+CUBE_SANDBOX_MYSQL_PORT=3307
+EOF
+  cat > "${dotenv}" <<'EOF'
+ONE_CLICK_ENABLE_S3LVOL=0
+CUBE_SANDBOX_MYSQL_PORT=3306
+EOF
+
+  merge_env_three_way "${new}" "${old}" "" "${dotenv}" "${out}" "${diff}" 2>/dev/null
+
+  # Both keys equal the new defaults, so the old runtime values are preserved
+  # (cp env.example .env regression guard).
+  assert_value "${out}" ONE_CLICK_ENABLE_S3LVOL 1
+  assert_value "${out}" CUBE_SANDBOX_MYSQL_PORT 3307
+  assert_contains "${diff}" "[preserved]"
+  assert_contains "${diff}" "= ONE_CLICK_ENABLE_S3LVOL=1"
+}
+
+test_absent_dotenv_preserves_s3lvol() {
+  local new="${TMP_DIR}/new_s3lvol2.example" old="${TMP_DIR}/old_s3lvol2.env"
+  local out="${TMP_DIR}/out_s3lvol2.env" diff="${TMP_DIR}/diff_s3lvol2.txt"
+  cat > "${new}" <<'EOF'
+ONE_CLICK_ENABLE_S3LVOL=0
+EOF
+  cat > "${old}" <<'EOF'
+ONE_CLICK_ENABLE_S3LVOL=1
+EOF
+
+  merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
+
+  assert_value "${out}" ONE_CLICK_ENABLE_S3LVOL 1
+  assert_contains "${diff}" "[preserved]"
+  assert_contains "${diff}" "= ONE_CLICK_ENABLE_S3LVOL=1"
+}
+
 test_version_lt() {
   version_lt 1.0.0 2.0.0 || fail "1.0.0 < 2.0.0 should be true"
   version_lt v0.2.2 v0.2.3 || fail "v0.2.2 < v0.2.3 should be true"
@@ -656,6 +706,8 @@ test_two_way_migrates_legacy_cube_proxy_cert_dir_default
 test_two_way_migrates_single_quoted_legacy_cube_proxy_cert_dir_default
 test_two_way_preserves_custom_cube_proxy_cert_dir
 test_new_dotenv_overrides_take_priority
+test_dotenv_default_valued_key_not_explicit
+test_absent_dotenv_preserves_s3lvol
 test_version_lt
 test_diff_report_redacts_secrets
 test_drops_obsolete_agenthub_keys

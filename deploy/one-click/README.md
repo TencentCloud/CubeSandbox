@@ -64,7 +64,7 @@ Kernel multi-version inventory (content-addressed):
 - `KERNEL_TAG` / `PVM_KERNEL_TAG` are **not** inventory directory names; `release-manifest` `kernel.version` / `pvm_version` also record content short hashes
 - Ensure maps the digest from Master identity onto that short key
 
-The installed runtime still uses `cube-kernel-scf/vmlinux` as the active guest kernel path. The package stores `vmlinux-bm` and keeps `vmlinux` as a symlink: by default it points to `vmlinux-bm`; if the target machine sets `CUBE_PVM_ENABLE=1` during installation, the installer points it to `vmlinux-pvm`.
+The installed runtime still uses `cube-kernel-scf/vmlinux` as the active guest kernel path. The package stores `vmlinux-bm` and keeps `vmlinux` as a symlink: by default it points to `vmlinux-bm`; if the target machine sets `CUBE_PVM_ENABLE=1` during installation, the installer points it to `vmlinux-pvm`. `CUBE_PVM_ENABLE` is an installer toggle: on upgrades, `CUBE_PVM_ENABLE=0|1 ./install.sh` or the key appearing in the bundle `.env` always wins (even for `0`, the default), while a full `cp env.example .env` resets it to `0`.
 
 The guest image no longer depends on a local zip file. By default it is generated locally from `deploy/guest-image/Dockerfile` during the one-click release package build. Common override parameters:
 
@@ -238,9 +238,15 @@ role target:
   role target. `wal_bdev.img` is **never overwritten** (created only on first
   install; its size fixes the journal/WAL layout), and the `RCOW_*` settings in
   `.one-click.env` are merged and kept across the upgrade.
-- **Enable/disable**: flip `ONE_CLICK_ENABLE_S3LVOL` to 1/0 in `.env` and
-  re-run `install.sh` (or `systemctl enable/disable
-  cube-sandbox-s3lvol.service` directly).
+- **Enable/disable**: preferred `ONE_CLICK_ENABLE_S3LVOL=0|1 ./install.sh`
+  (honored on upgrade as well). Or put only that key in the bundle `.env`
+  and re-run `install.sh`. Do not `cp env.example .env` as a full copy
+  before upgrade — that resets this switch to `0`. Hand-editing
+  `.one-click.env` is no longer required. `systemctl enable/disable
+  cube-sandbox-s3lvol.service` still works as a direct systemd toggle.
+  `CUBE_PVM_ENABLE` follows the same rule: appearing in `.env` or the
+  process environment always counts as an explicit choice (so a full
+  `cp env.example .env` before an upgrade also resets it to `0`).
 - **S3 backend**: when enabled, `install.sh` writes `/data/cubelet/s3.cfg`
   from `CUBE_S3_*` (bundled MinIO fill, or the operator's external store).
   s3lvol uses its own bucket (`CUBE_S3LVOL_BUCKET`, default `cube-s3lvol`)

@@ -574,6 +574,15 @@ test_install_sh_wires_upgrade_flow() {
   # on upgrade, CIDR host-conflict detection is skipped (M2)
   assert_contains "${f}" 'check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_NETWORK_CIDR" 24 16'
   assert_contains "${f}" 'check_cidr_preflight "192.168.0.0/18" "${cidr_skip_conflict}" "default CubeSandbox network CIDR" 24 16'
+  # This-run toggle intent (ONE_CLICK_TOGGLE_KEYS) must be captured before any
+  # env sourcing and re-applied after the upgrade merge.
+  assert_contains "${f}" "snapshot_one_click_toggles"
+  assert_contains "${f}" "apply_one_click_toggles"
+  assert_contains "${f}" "ONE_CLICK_TOGGLE_KEYS"
+  # Stop s3lvol before the target/glob stop so it can flush while MinIO is up.
+  assert_contains "${f}" "systemctl stop cube-sandbox-s3lvol.service"
+  # Disable must clear leftover failed state.
+  assert_contains "${f}" "systemctl reset-failed cube-sandbox-s3lvol.service"
 }
 
 test_explicit_install_mode

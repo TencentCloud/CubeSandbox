@@ -499,6 +499,73 @@ load_env_file() {
   fi
 }
 
+# Installer toggle keys: on/off switches whose this-run value must survive the
+# upgrade env merge. The merge treats a bundle-.env value as an explicit
+# operator override only when it differs from the new env.example default
+# (the `cp env.example .env` safeguard), so flipping one of these keys BACK to
+# the template default via .env would otherwise be inexpressible on upgrade.
+# For the keys listed here, presence in the bundle .env or in install.sh's
+# process environment counts as explicit operator intent and is re-applied
+# after the merge (snapshot_one_click_toggles / apply_one_click_toggles).
+#
+# Opting a key in gives it presence-implies-explicit semantics: a wholesale
+# `cp env.example .env` carried into an upgrade resets the key to the template
+# default (documented caveat in the one-click README).
+ONE_CLICK_TOGGLE_KEYS=(
+  ONE_CLICK_ENABLE_S3LVOL
+  CUBE_PVM_ENABLE
+)
+
+# snapshot_one_click_toggles: capture this-run operator intent for
+# ONE_CLICK_TOGGLE_KEYS from the process environment and the bundle .env.
+# Must run BEFORE any env file is sourced: the upgrade merge later sources the
+# merged old-runtime env, which would otherwise clobber both channels.
+#   ONE_CLICK_TOGGLE_ENV_SNAPSHOT     key -> value from the process environment
+#   ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT  key -> value from the bundle .env
+# (presence in .env is enough — a value equal to the env.example default still
+# counts, which is exactly what makes "flip back to default" expressible)
+snapshot_one_click_toggles() {
+  local env_file="$1"
+  local key
+  # -g: these are process-wide state read later by apply_one_click_toggles;
+  # -A: keys are env-var names, not numeric indexes. NOTE: the declaration and
+  # the empty-assignment must be separate statements — bash 4.2 (CentOS 7)
+  # mishandles `declare -gA VAR=()` by creating a function-local array.
+  declare -gA ONE_CLICK_TOGGLE_ENV_SNAPSHOT
+  declare -gA ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT
+  ONE_CLICK_TOGGLE_ENV_SNAPSHOT=()
+  ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT=()
+  for key in "${ONE_CLICK_TOGGLE_KEYS[@]}"; do
+    if [[ -n "${!key+x}" ]]; then
+      ONE_CLICK_TOGGLE_ENV_SNAPSHOT["${key}"]="${!key}"
+    fi
+    if [[ -f "${env_file}" ]] && grep -q "^${key}=" "${env_file}"; then
+      ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT["${key}"]="$(read_env_key "${env_file}" "${key}")"
+    fi
+  done
+  return 0
+}
+
+# apply_one_click_toggles: re-apply the snapshotted operator intent after the
+# env files (including the upgrade merge output) have been sourced. Precedence
+# mirrors install.sh's documented channel order (CLI flags > .env > process
+# environment > defaults): .env key > process environment > merged/loaded
+# value. The final value is persisted by install.sh's upsert_env_kv, so this
+# is the single place toggle intent is resolved.
+apply_one_click_toggles() {
+  local key
+  for key in "${ONE_CLICK_TOGGLE_KEYS[@]}"; do
+    if [[ -n "${ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT[${key}]+x}" ]]; then
+      printf -v "${key}" '%s' "${ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT[${key}]}"
+      log "toggle ${key}=${!key} (explicit in .env)"
+    elif [[ -n "${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[${key}]+x}" ]]; then
+      printf -v "${key}" '%s' "${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[${key}]}"
+      log "toggle ${key}=${!key} (explicit in process environment)"
+    fi
+  done
+  return 0
+}
+
 # Load build-machine overrides for release-bundle scripts.
 # Precedence: ONE_CLICK_BUILD_ENV_FILE > ${ONE_CLICK_DIR}/build.env >
 # legacy ONE_CLICK_ENV_FILE / .env (with a migration hint).
@@ -1474,6 +1541,10 @@ for line in template:
     # differs from the new env.example default. This is intentional: the common
     # way to create a .env is `cp env.example .env`, which would otherwise make
     # every key an "override" and clobber the user's existing customizations.
+    # (Installer toggle keys such as ONE_CLICK_ENABLE_S3LVOL are NOT special-
+    # cased here: their this-run intent is captured and re-applied around this
+    # merge by snapshot_one_click_toggles / apply_one_click_toggles in
+    # install.sh, and persisted via upsert_env_kv afterwards.)
     if key in new_overrides and new_overrides[key] != new_defaults.get(key):
         chosen = new_overrides[key]
         explicit.append(key)

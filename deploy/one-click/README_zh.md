@@ -64,7 +64,7 @@ export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
 - `KERNEL_TAG` / `PVM_KERNEL_TAG` **不作为**库存目录名；`release-manifest` 的 `kernel.version` / `pvm_version` 同样记录内容短哈希
 - Ensure 从 Master identity 中的 digest 映射到上述短 key
 
-运行时仍然使用 `cube-kernel-scf/vmlinux`。包内保留 `vmlinux-bm`，`vmlinux` 为软链：默认指向 `vmlinux-bm`；目标机安装时设 `CUBE_PVM_ENABLE=1` 则指向 `vmlinux-pvm`。
+运行时仍然使用 `cube-kernel-scf/vmlinux`。包内保留 `vmlinux-bm`，`vmlinux` 为软链：默认指向 `vmlinux-bm`；目标机安装时设 `CUBE_PVM_ENABLE=1` 则指向 `vmlinux-pvm`。`CUBE_PVM_ENABLE` 是安装器开关：升级时 `CUBE_PVM_ENABLE=0|1 ./install.sh` 或包内 `.env` 出现该 key 即为显式设置（`0` 默认值同样生效），整份 `cp env.example .env` 会把它重置为 `0`。
 
 guest image 不再依赖本地 zip。默认在构建 one-click 发布包时基于 `deploy/guest-image/Dockerfile` 本地生成。常用覆盖参数如下：
 
@@ -201,7 +201,7 @@ CubeS3lvol（s3lvol）作为 `cube-sandbox-*` 角色 target 的 `Wants=` 成员�
 
 - **停止（`down.sh` / `systemctl stop cube-sandbox-{control,compute}.target`）**：s3lvol 单元会走 `cube-s3lvol-stop.sh` 的**条件卸载**——target 进程存活时完整执行 `rcow_stop.sh`（断开 initiator → 卸载 lvstore/回刷 → 终止 target），target 已崩溃时只清理 target 侧残留、绝不断开 NVMf initiator。`down.sh` 只停止服务，**不删除任何数据**（`/data/cubelet/rcow/wal_bdev.img` 与 bstore 元数据保留），再次启动走 attach/replay 恢复。
 - **升级（`install.sh` 升级模式）**：旧 `CubeS3lvol/` 目录被替换（新二进制自动生效），随后 target 随角色 target 重启。`wal_bdev.img` **永不覆盖**（仅首次安装创建，其尺寸固定 journal/WAL 布局），`.one-click.env` 中 `RCOW_*` 配置经升级合并保留。
-- **启停开关**：`.env` 里 `ONE_CLICK_ENABLE_S3LVOL` 翻转为 1/0 后重跑 `install.sh`（或直接 `systemctl enable/disable cube-sandbox-s3lvol.service`）即可。
+- **启停开关**：推荐 `ONE_CLICK_ENABLE_S3LVOL=0|1 ./install.sh`（upgrade 同样生效）。或在包内 `.env` **只写这一项** 再重跑 `install.sh`。不要整份 `cp env.example .env` 再 upgrade，否则这个开关会被重置成 `0`。不必再手改 `.one-click.env`。也可以直接 `systemctl enable/disable cube-sandbox-s3lvol.service`。`CUBE_PVM_ENABLE` 遵循同样规则：出现在 `.env` 或进程环境中即视为显式设置（整份 `cp` 同样会把它重置为 `0`）。
 - **S3 后端**：启用后 `install.sh` 用 `CUBE_S3_*` 自动写出 `/data/cubelet/s3.cfg`（默认对接内置 MinIO；配了外部 S3 就跟外部走）。s3lvol 使用独立桶 `CUBE_S3LVOL_BUCKET`（默认 `cube-s3lvol`），与 volume 插件的 `cube-volumes` 分开。supervisor 启动前会用 stdlib SigV4 工具幂等建桶，不依赖 awscli。手写且不含 one-click sentinel 的 `s3.cfg` 不会被覆盖。开发机上旧的 `/data/cubelet/cos.cfg` **不会回落**，请改名为 `s3.cfg` 并换成新字段名。
 
 控制节点安装完成后，可以打开 Dashboard：

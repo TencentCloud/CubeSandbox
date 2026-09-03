@@ -43,6 +43,10 @@ esac
 require_root
 
 ENV_FILE="${ONE_CLICK_ENV_FILE:-${SCRIPT_DIR}/.env}"
+# Snapshot this-run toggle intent (ONE_CLICK_TOGGLE_KEYS) before any file is
+# sourced: the upgrade merge later loads the old .one-click.env, which would
+# otherwise clobber both `VAR=x ./install.sh` and toggle keys carried in .env.
+snapshot_one_click_toggles "${ENV_FILE}"
 if [[ -f "${ENV_FILE}" ]]; then
   load_env_file "${ENV_FILE}"
   # CLI flags must win over .env values: load_env_file uses `set -a; source`,
@@ -249,6 +253,10 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   apply_cli_overrides
   DEPLOY_ROLE="$(one_click_deploy_role)"
 fi
+# Re-apply this-run toggle intent (harmless on fresh install): the merged env
+# above preserves the old runtime values for keys whose .env value equals the
+# env.example default, which would otherwise ignore an explicit flip back.
+apply_one_click_toggles
 
 init_external_dep_defaults
 if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
@@ -1344,6 +1352,11 @@ stop_existing_systemd_deployment() {
   # service afterwards, which both forces failed units back to inactive
   # and guarantees the next `enable --now <target>` actually re-runs
   # ExecStart instead of returning a "no-op, already active" exit 0.
+  #
+  # Stop s3lvol before the target/glob stop so it can flush to MinIO
+  # while the S3 endpoint is still up. A glob `cube-sandbox-*.service`
+  # stop has undefined order and otherwise races MinIO down first.
+  systemctl stop cube-sandbox-s3lvol.service >/dev/null 2>&1 || true
   systemctl disable --now \
     cube-sandbox-control.target \
     cube-sandbox-compute.target >/dev/null 2>&1 || true
@@ -1407,6 +1420,7 @@ start_systemd_target() {
       || log "WARN: could not enable cube-sandbox-s3lvol.service"
   else
     systemctl disable cube-sandbox-s3lvol.service >/dev/null 2>&1 || true
+    systemctl reset-failed cube-sandbox-s3lvol.service >/dev/null 2>&1 || true
   fi
 
   systemctl enable --now "${target}"
