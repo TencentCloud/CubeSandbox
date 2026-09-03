@@ -130,6 +130,7 @@ func Compile(ctx context.Context, cfg *config.Config, registry *plugin.Registry)
 
 	seenNames := make(map[string]struct{}, len(cfg.Scheduler.Profiles))
 	defaultSeen := false
+	defaultName := ""
 	for index := range cfg.Scheduler.Profiles {
 		profileConf := cfg.Scheduler.Profiles[index]
 		name := strings.TrimSpace(profileConf.Name)
@@ -145,6 +146,14 @@ func Compile(ctx context.Context, cfg *config.Config, registry *plugin.Registry)
 		if compileErr != nil {
 			return nil, fmt.Errorf("compile scheduler profile %q: %w", name, compileErr)
 		}
+		if profileConf.Selection.TopN == 0 && cfg.Scheduler.PrioritySelectNum > 1 {
+			// Migration trap: a selection-less profile defaults to top_n 1
+			// (deterministic best-node pick), silently replacing the legacy
+			// top-N spread. Nothing fails, so say it at compile time.
+			log.G(ctx).Warnf("RISK: scheduler profile %q sets no selection.top_n and defaults to 1 (best-node pick) "+
+				"while legacy priority_select_num=%d; set selection.top_n explicitly to keep spreading",
+				name, cfg.Scheduler.PrioritySelectNum)
+		}
 		if profileConf.Default {
 			if defaultSeen {
 				return nil, errors.New("multiple default scheduler profiles configured")
@@ -153,6 +162,7 @@ func Compile(ctx context.Context, cfg *config.Config, registry *plugin.Registry)
 				return nil, fmt.Errorf("default scheduler profile %q must not define a route", name)
 			}
 			defaultSeen = true
+			defaultName = name
 			set.fallback = pipeline
 			continue
 		}
@@ -177,6 +187,17 @@ func Compile(ctx context.Context, cfg *config.Config, registry *plugin.Registry)
 				len(legacy.Filters), len(legacy.Scores))
 		}
 		set.fallback = legacy
+	} else {
+		// The default profile catches every request that matches no route —
+		// including migrate/restore flows, which carry no routing labels and
+		// whose restore placement may arrive with an empty resource spec. The
+		// mandatory resource guards never back off, so on a packed cluster
+		// such a request hard-fails with no-candidate where the pre-profile
+		// code would have rescued it via BackoffSelect. Operators who must
+		// keep those flows schedulable should route them explicitly.
+		log.G(ctx).Warnf("RISK: default scheduler profile %q catches all unmatched traffic, including spec-less "+
+			"migrate/restore placements; its mandatory resource guards never back off, so such requests can "+
+			"hard-fail with no BackoffSelect escape", defaultName)
 	}
 	return set, nil
 }
@@ -480,6 +501,34 @@ func (s *Set) Names() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// UsesScore reports whether any compiled pipeline in the set binds the named
+// score plugin (case-insensitive), the legacy fallback included. The
+// scheduler uses it to keep the multi_factor_weighted_average background
+// refresher inert while no pipeline consumes the node scores it maintains.
+func (s *Set) UsesScore(name string) bool {
+	if s == nil {
+		return false
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	used := func(p *Pipeline) bool {
+		if p == nil {
+			return false
+		}
+		for _, sc := range p.Scores {
+			if strings.ToLower(sc.Name) == name {
+				return true
+			}
+		}
+		return false
+	}
+	for _, route := range s.routes {
+		if used(route.pipeline) {
+			return true
+		}
+	}
+	return used(s.fallback)
 }
 
 func (s *Set) addCloser(value any) {

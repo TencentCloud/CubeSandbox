@@ -41,26 +41,35 @@ func NewSelector(ctx context.Context) []Selector {
 		ss = append(ss, fn.Call(nil)[0].Interface().(Selector))
 	}
 
-	StartAsyncScore(ctx)
+	StartAsyncScore(ctx, nil)
 	return ss
 }
 
-// StartAsyncScore starts the legacy background score refresher when enabled.
-// The profile-based scheduler builds score plugins one by one through the
-// unified registry, so background initialization is kept as an explicit hook.
-func StartAsyncScore(ctx context.Context) {
+// MultiFactorWeightedAverage is the registry name of the scorer whose node
+// scores are maintained by the background async refresher (loopAsyncScore).
+const MultiFactorWeightedAverage = "multi_factor_weighted_average"
+
+// StartAsyncScore starts the background score refresher for
+// multi_factor_weighted_average when that config section exists. The loop is
+// gated per tick on active: while no compiled pipeline binds the scorer
+// (active returns false) ticks are skipped, so a configured-but-unbound
+// deployment costs one idle goroutine instead of a fleet-wide node-score
+// write every ScoreInterval. A nil active means always-on, preserving the
+// legacy NewSelector behavior (which only reaches here when enable_scorers
+// is non-empty).
+func StartAsyncScore(ctx context.Context, active func() bool) {
 	conf := config.GetConfig().Scheduler
 	if conf == nil || conf.Score == nil || conf.Score.ScorePluginConf.MultiFactorWeightedAverage == nil {
 		return
 	}
 	recov.GoWithRecover(func() {
-		loopAsyncScore(ctx)
+		loopAsyncScore(ctx, active)
 	})
 }
 
 var scores = map[string]interface{}{
 	"real_time_weighted_average":    NewRealTimeWeightedAverageScore,
-	"multi_factor_weighted_average": NewMultiFactorWeightedAverageScore,
+	MultiFactorWeightedAverage:      NewMultiFactorWeightedAverageScore,
 	"affinity_score":                NewAffinityScore,
 	"image_score":                   NewImageScore,
 }

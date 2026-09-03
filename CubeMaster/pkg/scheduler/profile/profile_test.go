@@ -197,6 +197,40 @@ func TestCompileLegacySkipsInvalidWeightScorer(t *testing.T) {
 	}
 }
 
+func TestSetUsesScore(t *testing.T) {
+	registry := profileRegistry(t)
+	if err := registry.RegisterScore(plugin.TypeGo, "noop_score", func(context.Context, config.SchedulerProfilePluginConf) (score.Selector, error) {
+		return noopScore{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Scheduler: &config.WrapperSchedulerConf{SchedulerConf: config.SchedulerConf{
+		Score: &config.SchedulerScoreConf{
+			EnableScorers:   []string{"noop_score"},
+			ResourceWeights: map[string]float64{"cpu": 1},
+		},
+	}}}
+	set, err := Compile(context.Background(), cfg, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = set.Close() })
+
+	// The legacy fallback pipeline binds the scorer; matching is
+	// case-insensitive because profile and legacy compilation normalize
+	// names differently.
+	if !set.UsesScore("noop_score") || !set.UsesScore("NOOP_SCORE") {
+		t.Fatal("UsesScore must find the fallback pipeline's scorer")
+	}
+	if set.UsesScore("multi_factor_weighted_average") {
+		t.Fatal("UsesScore found a scorer nothing binds")
+	}
+	var nilSet *Set
+	if nilSet.UsesScore("noop_score") {
+		t.Fatal("UsesScore on a nil set must be false")
+	}
+}
+
 func TestCustomDefaultDoesNotCompileUnusedLegacyPlugins(t *testing.T) {
 	cfg := &config.Config{Scheduler: &config.WrapperSchedulerConf{SchedulerConf: config.SchedulerConf{
 		Filter: &config.SchedulerFilterConf{EnableFilters: []string{"removed-legacy-plugin"}},

@@ -71,7 +71,14 @@ func InitScheduler(ctx context.Context) error {
 	scheduler.registry = registry
 	scheduler.profiles.Store(profiles)
 	config.AppendConfigWatcher(&schedulerConfigWatcher{ctx: ctx, registry: registry})
-	score.StartAsyncScore(ctx)
+	// The async refresher writes n.Score on every cached node each
+	// ScoreInterval; keep it inert while no compiled pipeline (the legacy
+	// fallback included) binds the scorer. Evaluated per tick so a hot reload
+	// that newly binds or drops the scorer takes effect without a restart.
+	score.StartAsyncScore(ctx, func() bool {
+		profiles := scheduler.profiles.Load()
+		return profiles != nil && profiles.UsesScore(score.MultiFactorWeightedAverage)
+	})
 
 	initTask(ctx)
 	return nil

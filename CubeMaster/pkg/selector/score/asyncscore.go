@@ -20,7 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
-func loopAsyncScore(ctx context.Context) {
+func loopAsyncScore(ctx context.Context, active func() bool) {
 	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage
 	if cfg == nil {
 		return
@@ -40,6 +40,11 @@ func loopAsyncScore(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			recov.WithRecover(func() {
+				// While no compiled pipeline binds the scorer, the refreshed
+				// node scores have no consumer — skip the fleet-wide write.
+				if active != nil && !active() {
+					return
+				}
 				if checkDeadline.After(time.Now()) {
 
 					return

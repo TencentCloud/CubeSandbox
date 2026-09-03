@@ -582,7 +582,22 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 					// for every candidate.
 					return ret.Err(errorcode.ErrorCode_MasterInternalError, result.err.Error())
 				}
-				log.G(selCtx.Ctx).Warnf("scheduler score %q failed; using default score %.2f: %v", binding.Name, binding.DefaultScore, result.err)
+				// When no other binding contributes real scores this request,
+				// the substitution silently degenerates the ranking to
+				// candidate order — log it louder than a partial degradation.
+				live := 0
+				for j := range results {
+					if j != index && !results[j].skip && results[j].err == nil {
+						live++
+					}
+				}
+				if live == 0 {
+					log.G(selCtx.Ctx).Errorf("scheduler score %q is the only active scorer and failed; "+
+						"substituting default score %.2f degenerates the ranking to candidate order for this request: %v",
+						binding.Name, binding.DefaultScore, result.err)
+				} else {
+					log.G(selCtx.Ctx).Warnf("scheduler score %q failed; using default score %.2f: %v", binding.Name, binding.DefaultScore, result.err)
+				}
 				result.nodes = make(node.NodeScoreList, 0, len(selCtx.Nodes()))
 				for _, candidate := range selCtx.Nodes() {
 					result.nodes = append(result.nodes, &node.NodeScore{InsID: candidate.ID(), OrigNode: candidate, MvmNum: candidate.MvmNum, Score: binding.DefaultScore})
