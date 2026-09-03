@@ -246,7 +246,9 @@ if [ "${MODE}" = list ]; then
 	echo "offline integration: spawner thread_bounce journal wal cache flush export"
 	echo "                     statefile local_dev checkpoint"
 	echo "with S3:             s3_client_test s3_bs_dev_test"
-	echo "dataplane:           dataplane recovery snapshot export selfimport decouple_queue snapdelete fs guards activation control"
+	echo "dataplane:           dataplane recovery snapshot export srcdel selfimport"
+	echo "                     decouple_queue agent_template snapdelete pending_delete"
+	echo "                     fs guards activation control"
 	echo ""
 	echo "root:        $([ "${HAVE_ROOT}" -eq 1 ] && echo yes || echo no)"
 	echo "credentials: $([ "${HAVE_CREDS}" -eq 1 ] && echo yes || echo no)"
@@ -318,7 +320,8 @@ echo ""
 echo "--- integration (no S3, no root)"
 for t in s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test \
 	 s3_cache_test s3_flush_test s3_export_test s3_statefile_test \
-	 s3_local_dev_test s3_checkpoint_test; do
+	 s3_local_dev_test s3_checkpoint_test s3_lease_term_test \
+	 s3_pending_persist_test; do
 	run_suite "${t}" "./test/integration/${t}"
 done
 echo ""
@@ -463,9 +466,10 @@ else
 		# Snapshot deletion semantics; next to the suites that build clone chains.
 		run_suite run_snapdelete_test.sh \
 			./test/dataplane/run_snapdelete_test.sh
-		# Pending-delete marks: refused -> marked -> skipped while blocked ->
-		# retried once clear. Right after snapdelete: same delete path, but the
-		# question is what a *refused* delete leaves behind.
+		# Deletes that could not be carried out when asked for: the intent, the
+		# deferral, the poller that completes them, and cancelling. Directly
+		# after snapdelete, whose refusals are what this queue is built on.
+		# Slowest part is one wait for the 60 s poller.
 		run_suite run_pending_delete_test.sh \
 			./test/dataplane/run_pending_delete_test.sh
 		# Mounts a real filesystem, so it goes after the block-level suites:

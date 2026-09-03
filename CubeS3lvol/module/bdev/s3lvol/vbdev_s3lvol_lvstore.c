@@ -757,6 +757,14 @@ lvs_setup_report(struct lvs_setup_ctx *ctx)
 
 	TAILQ_INSERT_TAIL(&g_lvstores, lvs, link);
 
+	/* Deletes that were asked for before the last restart and could not be
+	 * carried out. Started here rather than earlier in the chain because the
+	 * queue is keyed by lvstore uuid, which only exists once blobstore is up,
+	 * and because it must not be able to hold the attach up: it is fire and
+	 * forget. Callbacks re-resolve this wrapper by uuid, so an unload that
+	 * wins the race drops the body instead of using a freed pointer. */
+	s3lvol_pending_load(lvs);
+
 	SPDK_NOTICELOG("lvstore '%s' %s: cluster=%" PRIu64 " bytes, "
 		       "%" PRIu64 " free clusters, write path=%s\n",
 		       lvs->name, ctx_attaching ? "attached" : "ready",
@@ -2670,13 +2678,17 @@ struct lvol_destroy_ctx {
  * volume's "deactivate it first" refusal is answered in the RPC layer and never
  * gets this far. */
 static void
-destroy_mark_pending(struct spdk_lvol *lvol)
+destroy_mark_pending(struct spdk_lvol *lvol, enum s3lvol_pending_reason reason)
 {
+	struct s3lvol_lvstore *owner;
+
 	if (!lvol || !lvol->lvol_store) {
 		return;
 	}
+	owner = s3lvol_lvstore_find_by_lvs(lvol->lvol_store);
 	s3lvol_snapshot_pending_set(&lvol->lvol_store->uuid, &lvol->uuid,
-				    lvol->name);
+				    owner ? s3lvol_lvstore_get_name(owner) : NULL,
+				    lvol->name, reason);
 }
 
 /* Deleting the last volume that read an export is what ends this node's
@@ -2717,10 +2729,20 @@ s3lvol_lvol_destroyed(void *cb_arg, int lvolerrno)
 		/* The refusal paths in s3lvol_lvol_destroy() log before returning, but
 		 * an asynchronous failure -- the unregister, or spdk_lvol_destroy --
 		 * lands here instead and would otherwise be silent. A blocked
-		 * snapshot delete records the intent so --ls can show it. */
+		 * snapshot delete records the intent so --ls can show it.
+		 *
+		 * Recorded as FAILED rather than as one of the reference blockers:
+		 * the pre-checks all passed, so whatever stopped this is not a
+		 * reference count and would stop it again. The poller leaves such
+		 * an entry alone and an explicit retry is needed. */
 		if (ctx->is_snapshot) {
 			s3lvol_snapshot_pending_set(&ctx->lvs_uuid,
-						    &ctx->lvol_uuid, ctx->name);
+						    &ctx->lvol_uuid,
+						    ctx->owner
+						    ? s3lvol_lvstore_get_name(ctx->owner)
+						    : NULL,
+						    ctx->name,
+						    S3LVOL_PENDING_FAILED);
 		}
 		SPDK_ERRLOG("Failed to delete lvol '%s/%s': %s\n",
 			    ctx->owner ? s3lvol_lvstore_get_name(ctx->owner) : "(null)",
@@ -2797,7 +2819,7 @@ s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 		SPDK_ERRLOG("lvol '%s' is being exported right now; wait for "
 			    "rcow_get_snapshot_status to stop reporting INPROGRESS "
 			    "before deleting it\n", lvol->name);
-		destroy_mark_pending(lvol);
+		destroy_mark_pending(lvol, S3LVOL_PENDING_EXPORT_INFLIGHT);
 		return -EBUSY;
 	}
 
@@ -2810,7 +2832,16 @@ s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 			    "node may be reading through. Release that export, or wait "
 			    "for it to expire, before deleting this.\n",
 			    lvol->name, info.export_uuid);
-		destroy_mark_pending(lvol);
+		/* Recorded either way -- the caller asked, and the request must not
+		 * be lost -- but which kind of blocker decides whether the queue
+		 * finishes it. An export whose importers keep a lease says so when
+		 * they stop; one with no lease can only ever be judged by a TTL,
+		 * and a delete on that basis stays a decision. */
+		destroy_mark_pending(lvol,
+				     s3lvol_export_pin_state(owner, lvol->name) ==
+				     S3LVOL_EXPORT_PIN_LEGACY
+				     ? S3LVOL_PENDING_EXPORT_LEGACY
+				     : S3LVOL_PENDING_EXPORT);
 		return -EBUSY;
 	}
 
@@ -2879,10 +2910,10 @@ s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 				    "blobstore can only merge a snapshot into a "
 				    "single clone, so delete the others first\n",
 				    lvol->name, clone_count);
-			/* Same "record the intent so --retry-pending can pick it up
+			/* Same "record the intent so the queue can pick it up
 			 * once the blocker (the extra clones) clears" contract as
 			 * the export-pin refusals above. */
-			destroy_mark_pending(lvol);
+			destroy_mark_pending(lvol, S3LVOL_PENDING_CLONE_COUNT);
 			return -EBUSY;
 		}
 	}
@@ -2897,7 +2928,7 @@ s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 		/* The decouple that is running will clear, after which the delete can
 		 * succeed; record the intent for --retry-pending, same contract as
 		 * the export-pin refusals above. */
-		destroy_mark_pending(lvol);
+		destroy_mark_pending(lvol, S3LVOL_PENDING_DECOUPLE);
 		return -EBUSY;
 	}
 

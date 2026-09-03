@@ -114,6 +114,56 @@ wait_export_done()
 	done
 }
 
+# A lease-aware export stays pinned until a lease HEAD submitted at or after
+# expires_at misses. The poller is floored at S3LVOL_LEASE_RENEW_MIN_SEC (20s),
+# so ttl_sec=2 plus a few seconds of sleep is not enough for the pin to lift.
+wait_export_deletable()
+{
+	local uuid="$1"
+	local deadline=$(( $(date +%s) + 90 ))
+	local out got
+
+	while :; do
+		if ! out="$(rpc rcow_get_snapshot_status \
+				"$(printf '{"export_uuid":"%s"}' "${uuid}")" \
+				2>/dev/null)"; then
+			fail "export ${uuid} vanished while waiting for it to unpin"
+			return 1
+		fi
+		got="$(printf '%s' "${out}" \
+			| python3 -c 'import json,sys; print(json.load(sys.stdin).get("deletable",""))' \
+				2>/dev/null)"
+		if [ "${got}" = "YES" ]; then
+			return 0
+		fi
+		if [ "$(date +%s)" -ge "${deadline}" ]; then
+			fail "export ${uuid} still deletable=${got:-?} after 90s"
+			return 1
+		fi
+		sleep 1
+	done
+}
+
+# True once the named lvol is no longer in the store. A deferred delete reports
+# success while the snapshot is still there; the negatives below need it gone.
+wait_lvol_gone()
+{
+	local name="$1"
+	local deadline=$(( $(date +%s) + 30 ))
+
+	while :; do
+		if ! rpc rcow_get_snapshot_status \
+			"$(printf '{"snapshot_name":"%s"}' "${name}")" \
+			>/dev/null 2>&1; then
+			return 0
+		fi
+		if [ "$(date +%s)" -ge "${deadline}" ]; then
+			return 1
+		fi
+		sleep 0.5
+	done
+}
+
 # The import reply carries a third field saying which implementation ran. Read from
 # the reply rather than guessed from side effects.
 import_mode()
@@ -343,11 +393,25 @@ fi
 # snapshot with a clone is undeletable -- which is not true and briefly became a bug
 # when the pre-flight check in s3lvol_lvol_destroy refused at one clone as well.
 # run_snapdelete_test.sh covers the one-clone case that must succeed.
-if rpc rcow_delete_lvol '{"lvol_name":"snap0"}' >/dev/null 2>&1; then
-	fail "snap0 was deleted while both vol0 and c_local clone it"
+#
+# The delete is *deferred* rather than refused: an extra clone goes away on its
+# own, so the intent is recorded and completed when it does
+# (docs/pending-delete-design.md). What has to hold here is that snap0 survives.
+DEL_OUT="$(python3 "${RPC_PY}" --sock "${RCOW_RPC_SOCK}" --raw \
+	rcow_delete_lvol '{"lvol_name":"snap0"}' 2>&1)"
+if echo "${DEL_OUT}" | grep -q '"deferred": *true'; then
+	pass "and deleting snap0 is deferred while it has two clones"
+elif rpc rcow_get_lvol '{"lvol_name":"snap0"}' >/dev/null 2>&1 ||
+     rpc --ls rcow_get_lvstores 2>/dev/null | grep -q '^snap0 '; then
+	pass "and snap0 was not deleted while it has two clones"
 else
-	pass "and snap0 cannot be deleted while it has two clones"
+	fail "snap0 was deleted while both vol0 and c_local clone it"
 fi
+
+# Withdraw it: later steps still expect snap0, and the poller would remove it as
+# soon as one of the clones goes.
+python3 "${RPC_PY}" --sock "${RCOW_RPC_SOCK}" \
+	rcow_cancel_pending_delete '{"lvol_name":"snap0"}' >/dev/null 2>&1
 
 # ==========================================================================
 echo ""
@@ -370,24 +434,25 @@ rpc rcow_flush_lvstore "$(printf '{"lvs_name":"%s"}' "${RCOW_LVS_NAME}")" >/dev/
 # The layout cannot be chosen over RPC either -- the decoders take snapshot_name,
 # export_id and ttl_sec, and same-bucket always means REF.
 #
-# What does work is the TTL. s3lvol_export_pinning() reports an expired export as
-# not pinning, which is exactly so that this delete can proceed, and import does not
-# reject an expired manifest. So: export with a two-second TTL, let it lapse, then
-# delete. The manifest is still in the bucket because nothing released it.
+# What does work is waiting out the pin. s3lvol_export_pinning() reports a
+# lease-aware export as not pinning only after a lease HEAD submitted at or after
+# expires_at misses -- ttl_sec=2 is the deadline, not the wait. Import does not
+# reject an expired manifest. The snapshot is then actually gone, not merely
+# queued as a deferred delete.
 U2="$(rpc rcow_export_snapshot '{"snapshot_name":"snap_gone","ttl_sec":2}' | tr -d '"')"
 EXPORTS="${EXPORTS} ${U2}"
 [ -n "${U2}" ] && pass "exported snap_gone as ${U2} with a 2s TTL" \
 	|| { fail "export of snap_gone failed"; exit 1; }
 wait_export_done "${U2}" || exit 1
-
-sleep 4
+wait_export_deletable "${U2}" || exit 1
 
 # tmp1 clones snap_gone, so it has to go first -- and deactivated, not just deleted.
 del_vol tmp1
-if rpc rcow_delete_lvol '{"lvol_name":"snap_gone"}' >/dev/null 2>&1; then
-	pass "with the export expired, the source snapshot could be deleted"
+if rpc rcow_delete_lvol '{"lvol_name":"snap_gone"}' >/dev/null 2>&1 \
+	&& wait_lvol_gone snap_gone; then
+	pass "with the export unpinned, the source snapshot could be deleted"
 else
-	fail "could not delete snap_gone even after its export expired"
+	fail "could not delete snap_gone even after its export unpinned"
 	grep "snap_gone" "${RCOW_LOG}" | tail -2 | sed 's/^/       /'
 fi
 
@@ -418,16 +483,18 @@ sync
 rpc rcow_create_snapshot '{"lvol_name":"tmp2","snapshot_name":"snap_dup"}' >/dev/null
 rpc rcow_flush_lvstore "$(printf '{"lvs_name":"%s"}' "${RCOW_LVS_NAME}")" >/dev/null 2>&1
 # Two-second TTL for the same reason as step [3]: the export would otherwise pin
-# snap_dup and the replacement below could not happen.
+# snap_dup and the replacement below could not happen. Wait for the pin to lift,
+# not merely for the deadline to pass.
 U3="$(rpc rcow_export_snapshot '{"snapshot_name":"snap_dup","ttl_sec":2}' | tr -d '"')"
 wait_export_done "${U3}" || exit 1
-sleep 4
+wait_export_deletable "${U3}" || exit 1
 EXPORTS="${EXPORTS} ${U3}"
 pass "exported snap_dup as ${U3}"
 
 # Replace it: same name, different blob, different content.
 del_vol tmp2
 rpc rcow_delete_lvol '{"lvol_name":"snap_dup"}' >/dev/null 2>&1
+wait_lvol_gone snap_dup || fail "snap_dup was still present after its export unpinned"
 rpc rcow_create_lvol '{"lvol_name":"tmp3","size_gib":1}' >/dev/null 2>&1
 T="$(resolve tmp3)"
 [ -b "${T}" ] || { fail "tmp3 did not become a device"; exit 1; }
@@ -503,13 +570,14 @@ rpc rcow_create_snapshot '{"lvol_name":"tmp4","snapshot_name":"snap_rw"}' >/dev/
 rpc rcow_flush_lvstore "$(printf '{"lvs_name":"%s"}' "${RCOW_LVS_NAME}")" >/dev/null 2>&1
 U4="$(rpc rcow_export_snapshot '{"snapshot_name":"snap_rw","ttl_sec":2}' | tr -d '"')"
 wait_export_done "${U4}" || exit 1
-sleep 4
+wait_export_deletable "${U4}" || exit 1
 EXPORTS="${EXPORTS} ${U4}"
 
 # Replace the snapshot with a *writable* lvol of the same name.
 del_vol tmp4
 rpc rcow_delete_lvol '{"lvol_name":"snap_rw"}' >/dev/null 2>&1
-if rpc rcow_create_lvol '{"lvol_name":"snap_rw","size_gib":1}' >/dev/null 2>&1; then
+if wait_lvol_gone snap_rw \
+	&& rpc rcow_create_lvol '{"lvol_name":"snap_rw","size_gib":1}' >/dev/null 2>&1; then
 	pass "created a writable lvol named snap_rw"
 else
 	fail "could not create a writable snap_rw"

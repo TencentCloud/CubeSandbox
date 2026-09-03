@@ -238,6 +238,33 @@ check_deletable()
 	fi
 }
 
+# Lease-aware: a 404 recorded before expires_at does not unpin, and the lease
+# poller is floored at 20s. Poll until the field matches rather than sleeping
+# a TTL-sized margin.
+wait_deletable()
+{
+	local uuid="$1"
+	local want="$2"
+	local where="$3"
+	local deadline=$(( $(date +%s) + 90 ))
+	local got
+
+	while :; do
+		if ! got="$(export_status_field "${uuid}" deletable)"; then
+			fail "cannot read deletable: export ${uuid} does not exist (${where})"
+			return 1
+		fi
+		if [ "${got}" = "${want}" ]; then
+			return 0
+		fi
+		if [ "$(date +%s)" -ge "${deadline}" ]; then
+			fail "deletable=${got}, expected ${want} for ${uuid} (${where})"
+			return 1
+		fi
+		sleep 1
+	done
+}
+
 now_ns()
 {
 	date +%s%N
@@ -851,14 +878,40 @@ SNAP_DEL2="$(snapshot_status_field "${EXPORT_SNAP_NAME}" deletable)" \
 	&& pass "both forms agree that it is not deletable" \
 	|| fail "the snapshot form says deletable='${SNAP_DEL2}', expected NO"
 
-if raw_rpc rcow_delete_lvol \
-		"$(printf '{"lvol_name":"%s"}' "${EXPORT_SNAP_NAME}")" \
-		>/dev/null 2>&1; then
-	fail "deleting the snapshot behind a live export succeeded"
-	exit 1
-else
+# The delete does not go through -- deletable said NO and the delete path agrees
+# -- but how that is reported depends on whether the export's liveness can be
+# decided. An export this fresh has not had its first lease check answered yet,
+# so the target assumes an importer may arrive, records the intent, and reports
+# it as deferred: the delete completes by itself once the lease goes stale, with
+# no release_export and no retry. Only an export known to have no lease at all
+# (the pre-lease case, where a TTL is the sole signal) is refused outright.
+#
+# Either way the snapshot must still be here, which is the property this step
+# exists for.
+# --raw, not raw_rpc: that helper unwraps the {bool_value, string_value}
+# envelope, which is what hides the deferred flag this has to look at.
+DEL_OUT="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${EXPORT_SNAP_NAME}")" 2>&1)"
+if echo "${DEL_OUT}" | grep -q '"deferred": *true'; then
+	pass "rcow_delete_lvol defers it (the export still pins it)"
+elif echo "${DEL_OUT}" | grep -q '"bool_value": *false'; then
 	pass "rcow_delete_lvol refuses it too (deletable agrees with the delete path)"
+else
+	fail "deleting the snapshot behind a live export was accepted outright: ${DEL_OUT}"
+	exit 1
 fi
+
+if snapshot_status_field "${EXPORT_SNAP_NAME}" export_status >/dev/null 2>&1; then
+	pass "the exported snapshot is still there"
+else
+	fail "the snapshot behind a live export is gone"
+	exit 1
+fi
+
+# Withdraw the intent, or the poller would delete this snapshot as soon as the
+# export stops pinning it -- the rest of this suite still needs it.
+raw_rpc rcow_cancel_pending_delete \
+	"$(printf '{"lvol_name":"%s"}' "${EXPORT_SNAP_NAME}")" >/dev/null 2>&1
 check_target "step 3, deletable" || exit 1
 
 # An uuid nobody exported is refused rather than described: the reply carries
@@ -1979,9 +2032,11 @@ wait_export_done "${TTL_U}" "step 11d.4" || exit 1
 
 check_deletable "${TTL_U}" NO "step 11d.4, within TTL"
 
-# 3 s ttl plus margin; the poll that does the work is once a second.
-sleep 5
-
+# 3 s ttl plus margin is not the unpin: a miss from before expires_at must be
+# followed by a poll at or after the deadline, at the 20s lease cadence.
+wait_deletable "${TTL_U}" YES "step 11d.4, after TTL" || {
+	check_target "step 11d.4" || exit 1
+}
 ST_TTL="$(export_status_field "${TTL_U}" export_status)"
 [ "${ST_TTL}" = "DONE" ] \
 	&& pass "the expired export still reports DONE" \

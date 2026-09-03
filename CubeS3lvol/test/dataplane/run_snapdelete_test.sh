@@ -337,25 +337,43 @@ rpc rcow_create_clone '{"snapshot_name":"sx","clone_name":"cx"}' >/dev/null 2>&1
 # `if rpc rcow_get_bdev '{"device_name":"cx"}'`, which fails for a volume that was
 # never activated -- so the whole two-clone case silently skipped and the one
 # assertion the pre-flight check exists for was never run.
-# The reason is checked in the target log, not in the RPC reply. The reply carries
-# only strerror(-EBUSY) -- "Device or resource busy" -- which is what a dozen other
-# refusals would also say, so matching on it would accept the wrong cause. The log
-# is where the clone count appears.
-LOG_BEFORE="$(grep -c 'is a snapshot with' "${RCOW_LOG}" 2>/dev/null || echo 0)"
+#
+# Two clones is no longer an error, it is a *deferral*: blobstore still cannot
+# merge into two, so the delete does not happen now, but the extra clone is
+# something that goes away on its own and the delete completes when it does (see
+# docs/pending-delete-design.md). So the RPC answers success with deferred:true,
+# and what has to be asserted is that sx is still there and the reason was
+# recorded -- not that the call failed.
+#
+# The reason is checked in the target log, not in the RPC reply: the reply says
+# only that the delete was queued, while the log is where the clone count appears.
+if OUT="$(python3 "${RPC_PY}" --sock "${RCOW_RPC_SOCK}" --raw \
+		rcow_delete_lvol '{"lvol_name":"sx"}' 2>&1)"; then
+	if echo "${OUT}" | grep -q '"deferred": *true'; then
+		pass "sx was not deleted; the delete was deferred until a clone goes"
+	else
+		fail "sx was deleted despite having two clones (${VOL} and cx)"
+		info "blobstore cannot merge into two clones, so this had to be deferred"
+	fi
+else
+	fail "the delete of sx was refused outright rather than deferred: \
+$(echo "${OUT}" | tr -d '\n' | head -c 120)"
+fi
 
-if OUT="$(rpc rcow_delete_lvol '{"lvol_name":"sx"}' 2>&1)"; then
-	fail "sx was deleted despite having two clones (${VOL} and cx)"
-	info "blobstore cannot merge into two clones, so this had to be refused"
-elif [ "$(grep -c 'is a snapshot with 2 clones' "${RCOW_LOG}" 2>/dev/null || echo 0)" \
+if [ "$(grep -c 'is a snapshot with 2 clones' "${RCOW_LOG}" 2>/dev/null || echo 0)" \
 		-gt 0 ]; then
-	pass "sx refused by the pre-flight check, which names the clone count"
+	pass "the pre-flight check named the clone count"
 elif [ "$(grep -c 'more than one clone' "${RCOW_LOG}" 2>/dev/null || echo 0)" -gt 0 ]; then
 	fail "the refusal came from blobstore, i.e. too late: the bdev is already gone"
 	info "the pre-flight check in s3lvol_lvol_destroy should have caught this"
 else
-	fail "sx refused, but nothing in the log says why: \
-$(echo "${OUT}" | tr -d '\n' | head -c 120)"
+	fail "sx was not deleted, but nothing in the log says why"
 fi
+
+# Withdraw the intent again: the rest of this script expects sx to stay put, and
+# the poller would otherwise delete it as soon as cx is gone.
+python3 "${RPC_PY}" --sock "${RCOW_RPC_SOCK}" \
+	rcow_cancel_pending_delete '{"lvol_name":"sx"}' >/dev/null 2>&1
 
 # The refusal must have happened before any teardown: same data, and the volume is
 # still writable. A late refusal would have unregistered the bdev already.

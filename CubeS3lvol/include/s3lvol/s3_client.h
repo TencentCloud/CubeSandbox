@@ -89,6 +89,15 @@ int s3_client_get_or_create(const struct s3_target *target, struct s3_client **o
 
 void s3_client_put(struct s3_client *client);
 
+/**
+ * Take another reference on an existing client.
+ *
+ * Unload drops the lvstore's reference. An in-flight HEAD or GET started
+ * against that lvstore still needs the CRT client until its callback runs, so
+ * the load path holds an extra ref for the lifetime of that request.
+ */
+void s3_client_get(struct s3_client *client);
+
 /* ==========================================================================
  * Object operations
  *

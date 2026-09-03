@@ -1063,6 +1063,19 @@ s3_client_shutdown_complete(void *user_data)
 }
 
 void
+s3_client_get(struct s3_client *client)
+{
+	if (!client) {
+		return;
+	}
+
+	assert(client->refcnt > 0);
+	client->refcnt++;
+	SPDK_NOTICELOG("S3 client %s refcnt incremented to %u\n",
+		       client->endpoint, client->refcnt);
+}
+
+void
 s3_client_put(struct s3_client *client)
 {
 	uint32_t i;

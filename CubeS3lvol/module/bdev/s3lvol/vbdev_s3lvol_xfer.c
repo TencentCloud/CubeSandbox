@@ -313,13 +313,32 @@ import_lease_start(struct s3lvol_import *imp)
 	snprintf(imp->lease_key, sizeof(imp->lease_key), "%s/meta/exports/%s.lease",
 		 m->src.prefix, m->uuid_str);
 
-	/* Renew at a third of the remaining TTL, floored at one second so a
-	 * short-lived export is still protected. An export already past its
-	 * deadline gets the same floor: renewing can only make the source
-	 * *less* likely to delete, which is the safe direction. */
+	/* Renew at a third of the remaining TTL, bounded below.
+	 *
+	 * The floor is not a tuning constant. The interval is reported to the source
+	 * as renew_s and the source's grace period is three times it, so a small
+	 * interval buys a small window to stay alive in -- and the verdict on the
+	 * other side, STALE, is acted on by a poller with nobody watching. An export
+	 * imported at or past its deadline yields remaining = 0, and the old
+	 * one-second floor then asked the source to delete the snapshot if two
+	 * consecutive PUTs were late.
+	 *
+	 * Nothing rejects an expired export at import, so that is reachable rather
+	 * than theoretical: the manifest is still perfectly readable, and the TTL
+	 * says when the source stops promising, not when the data goes.
+	 *
+	 * S3LVOL_LEASE_RENEW_MIN_SEC times three is exactly the minimum grace the
+	 * source applies, so an import at the floor and a source at its floor agree
+	 * by construction rather than by two numbers happening to be compatible. The
+	 * source clamps this anyway -- it does not trust a cadence it is told -- so
+	 * this end is about the cost of the PUTs and about telling the truth in
+	 * renew_s, not about being the safety property. */
 	now = (uint64_t)time(NULL);
 	remaining = (m->expires_at > now) ? (m->expires_at - now) : 0;
-	ttl = (remaining / 3) ? (remaining / 3) : 1;
+	ttl = remaining / 3;
+	if (ttl < S3LVOL_LEASE_RENEW_MIN_SEC) {
+		ttl = S3LVOL_LEASE_RENEW_MIN_SEC;
+	}
 	imp->lease_interval_us = ttl * SPDK_SEC_TO_USEC;
 
 	imp->lease_poller = SPDK_POLLER_REGISTER(import_lease_renew, imp,
@@ -331,6 +350,19 @@ import_lease_start(struct s3lvol_import *imp)
 		imp->lease_client = NULL;
 		return;
 	}
+
+	/* Written now, not at the first tick.
+	 *
+	 * SPDK_POLLER_REGISTER fires after one period, so until then there is no
+	 * lease object at all -- and an absent lease on a lease-aware export whose
+	 * deadline has passed is STALE, which the source's poller acts on by itself.
+	 * At the old one-second period that window was too small to matter. At twenty
+	 * seconds it is a hole big enough to lose a snapshot through, opened by the
+	 * very change meant to make this safer.
+	 *
+	 * Its failure is not checked for the same reason the periodic one's is not:
+	 * the next tick retries, and there is no state to keep straight. */
+	import_lease_renew(imp);
 
 	SPDK_NOTICELOG("export %s lease renewing every %" PRIu64 " second(s)\n",
 		       m->uuid_str, ttl);

@@ -360,8 +360,21 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
    `rcow_deactive_bdev`），这一路径**不会**记录标记——它是调用方自己可以立即纠正的前置条件，而不是需要
    等待的阻塞原因。
 
-   阻塞原因解除后（导出被释放或过期、多余 clone 被删除、decouple 结束、卷被 deactivate），需要在该节点上
-   **手动重试**：
+   之后约 60 秒一次的 poller 会在阻塞消失后自动完成删除，覆盖：**带 lease 的 export**（importer 停止续约、
+   lease 变 stale）、多余 clone、已经结束的 decouple、以及仍在 publish 的 export。**没有 lease 的
+   export 不会自动删**：TTL 到期只说明时间过了，不能证明没有人在读，这类标记要等人工（或 `--retry-pending`）
+   决定。异步 destroy 已经失败的，也不会每分钟重试。
+
+   标记会写入 `<prefix>/meta/pending-deletes.json`，下次 attach 时恢复。删除 RPC **先返回、再 PUT**；若在
+   窗口内崩溃，意图会丢失，需要再发一次删除。poller 能自行完成的阻塞会返回成功，并带 **`deferred: true`**。
+   **没有 lease 的 export 仍返回 EBUSY**，标记两种情况都会记下。
+   用 `rcow_cancel_pending_delete` 撤回意图（必填 `lvol_name`，可选 `lvs_name` 消歧义），该 RPC 幂等。
+   若 poller 已经提交了 destroy，cancel 只丢掉标记，快照仍可能被删掉。
+
+   对仍在从 import decouple 的卷做快照会保留外部 parent，`rcow_create_snapshot` 此时返回
+   **`decouple_cancelled: true`**。
+
+   `--retry-pending` 仍用于无 lease 的 export、失败的 destroy，以及不想等 poller 的场景：
 
    ```sh
    # 在 CubeS3lvol 目录下
@@ -369,10 +382,9 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
    test/tools/s3lvol_rpc.py --retry-pending   # 重试所有已标记且当前可删的快照
    ```
 
-   注意该机制的边界：标记**只存在于 s3lvol_tgt 进程内存中**，进程重启或 lvstore 卸载即丢失；**没有自动
-   重试**（无后台轮询），也**无法取消**已记录的标记；并且集群侧的删除路径（Cubelet `S3Cow.DeleteByKind`）
-   目前会把被拒绝的快照删除视为成功、且不会调用 `--retry-pending`，因此这类残留对象需要按上述方式在节点上
-   处理。详见 `CubeS3lvol/README.md` 的 "Retrying a refused snapshot delete"。
+   集群侧删除路径（Cubelet `S3Cow.DeleteByKind`）目前仍把被拒绝的快照删除视为成功、且不会调用
+   `--retry-pending`，因此那条路径上的残留对象仍需按上面方式在节点上处理。详见
+   `CubeS3lvol/README.md` 的 "Retrying a refused snapshot delete"。
 
 2. **DB / FS 结构相较 0.7.0 之前版本变化较大，老数据适配仅覆盖 0.6.0**：本版本相比 0.7.0 之前的版本，
    DB 表结构与文件系统目录结构均有较大调整。新版本会对老版本的数据结构做适配，用于用户清理老数据的场景，

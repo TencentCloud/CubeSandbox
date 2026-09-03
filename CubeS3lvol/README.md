@@ -209,18 +209,27 @@ scripts/s3lvol_rpc.py rcow_delete_lvol     '{"lvol_name":"clone0"}'
 scripts/s3lvol_rpc.py rcow_get_lvstores    # list all lvstores and lvols
 ```
 
+(`rcow_pending_load_hold` exists only so tests can park pending-delete registry
+HEAD/GET around unload; it is not an operations RPC.)
+
 The parameter names are deliberately chosen; the easy mistakes to make when
 copying them:
 
 - `create_lvol` has **no `lvs_name`** — it operates on the single lvstore that
   exists.
 - `create_snapshot` takes `lvol_name` as the source and `snapshot_name` as the
-  target; snapshots are read-only.
+  target; snapshots are read-only. If the source is still decoupling from an
+  import, the snapshot keeps that external parent and the reply includes
+  `decouple_cancelled: true`.
 - `create_clone` takes `snapshot_name` (which **must be a read-only snapshot**)
   as the source and `clone_name` as the target.
 - `resize_lvol` can only grow, never shrink.
 - `delete_lvol` also clears the volume's activation record, so the next restart
-  does not try to restore it.
+  does not try to restore it. A snapshot that is still pinned is recorded as an
+  intent rather than carried out. When the blocker is one the poller can finish
+  on its own, the reply is the usual success envelope plus `deferred: true`. A
+  lease-less export (`export_legacy`) still returns EBUSY; the mark is recorded
+  either way. `rcow_cancel_pending_delete` withdraws it.
 
 **Exporting a snapshot** (cross-node transfer):
 
@@ -402,10 +411,11 @@ only inside one loaded lvstore and is reusable, so a name-keyed mark could end u
 pointing at a snapshot the delete was never refused for.
 
 `rcow_get_lvstores` reports the mark per snapshot (`delete_pending`), together
-with whether the snapshot is deletable *right now* (`deletable`). Once the
-blocker clears — the export is released or expires, the extra clone is deleted —
-the snapshot becomes deletable, but the delete still has to be carried out by
-hand:
+with whether the snapshot is deletable *right now* (`deletable`).
+
+Most recorded intents are finished by a **background poller** (~60 s, 16 deletes
+per tick) once the blocker is gone. `--retry-pending` is for the cases the
+poller will not touch, and for not waiting a minute:
 
 ```sh
 test/tools/s3lvol_rpc.py --retry-pending
@@ -432,38 +442,84 @@ $ test/tools/s3lvol_rpc.py --retry-pending
 no pending snapshot deletes to retry
 ```
 
-### What this is not
+### What the poller completes, and what still needs a human
 
-The mark is a record and a manual retry, nothing more. Specifically:
+The poller finishes deletes whose blockers clear without anyone deciding
+anything:
+
+- a **leased** export (`export`) — the importer stops renewing, the lease goes
+  stale, that is evidence nobody is reading;
+- an export still **publishing** (`export_inflight`);
+- extra **clones** (`clone_count`);
+- a running **decouple** (`decouple`).
+
+It will **not** complete:
+
+- an export with **no lease at all** (`export_legacy`). Its TTL lapsing only
+  means time passed, not that an importer stopped reading; auto-completing that
+  would delete objects out from under a live reader. Those marks stay until a
+  human (or `--retry-pending`) decides;
+- a destroy that already **failed asynchronously** (`failed`). Retrying it every
+  minute would only repeat the same failure.
+
+If the poller itself failed to register, queued deletes also wait for an
+explicit retry (a log line says so).
+
+### Persistence and the crash window
+
+Marks are written to `<prefix>/meta/pending-deletes.json` and restored when the
+lvstore attaches, so a restart does not forget a delete the caller was told not
+to reissue.
+
+The RPC answers **before** that PUT. If the process crashes (or the PUT fails)
+in the window after the mark is in memory and before the object lands, the
+intent is gone after the next attach and the delete has to be asked for again
+— the same class of window the exports registry accepts, and cheaper: the
+snapshot is still there.
+
+Unload or destroy drops the in-memory queue for that lvstore (marks must not
+outlive the lvols they name). The S3 object is reloaded on the next attach of
+the same prefix; a failed or missing registry is logged and attach continues.
+
+### Cancelling a pending delete (`rcow_cancel_pending_delete`)
+
+The mark is an intent, not a lock. Withdraw it with:
+
+```sh
+scripts/s3lvol_rpc.py rcow_cancel_pending_delete '{"lvol_name":"snap0"}'
+# optional lvs_name when the same snapshot name exists on more than one lvstore
+scripts/s3lvol_rpc.py rcow_cancel_pending_delete '{"lvs_name":"vs0","lvol_name":"snap0"}'
+```
+
+`lvol_name` is required; `lvs_name` is optional and only disambiguates. The
+RPC is **idempotent**: cancelling a name that was never queued, or that the
+poller has already finished, still succeeds — the caller asked for "this
+snapshot will not be deleted behind my back", and that is the state they get.
+The snapshot itself was never touched, only the intent.
+
+The same crash window applies as for recording: the RPC answers, then the
+registry PUT runs. A crash before that PUT lands can restore the mark on the
+next attach.
+
+If the poller has **already submitted** `s3lvol_lvol_destroy`, cancel only
+drops the mark. It does not abort the in-flight destroy; the snapshot may
+still go away. Check `rcow_get_lvstores` afterwards if that race matters.
+
+### What this is not
 
 - **Not every refusal records a mark.** Recorded are the blockers
   `s3lvol_lvol_destroy()` itself identifies — an export pin (published or still
   in flight), more than one clone, a running decouple — plus an asynchronous
-  destroy failure. Those are the ones that clear on their own, which is what
-  makes coming back to them worthwhile. Not recorded: the RPC-layer refusals
-  that run before it (an NVMf-active volume, an unreadable active registry), a
-  bdev unregister that fails, and the case where `spdk_blob_get_clones()`
-  answers an unknown error. Those are either the caller's own precondition to
-  fix (deactivate first) or a failure that has to be looked at rather than
-  retried blindly.
+  destroy failure. Not recorded: the RPC-layer refusals that run before it (an
+  NVMf-active volume, an unreadable active registry), a bdev unregister that
+  fails, and the case where `spdk_blob_get_clones()` answers an unknown error.
+  Those are either the caller's own precondition to fix (deactivate first) or a
+  failure that has to be looked at rather than retried blindly.
 
   The recording does not re-check that the volume is a snapshot: with the blob
   closed that is not reliably answerable, and only the three blockers above get
   that far anyway. In practice a mark therefore means "a delete was asked for
   and refused because something still referenced the volume".
-- **No automatic retry.** Nothing on the target polls the marks; there is no
-  deferred-completion poller. `--retry-pending` is the only thing that acts on
-  them, and it has to be run.
-- **In memory only.** The marks live in the target process and are gone on
-  restart. A delete refused before a restart is afterwards indistinguishable
-  from one that was never asked for.
-- **Dropped with the lvstore.** Unloading or deleting an lvstore drops that
-  lvstore's marks, deliberately: past the teardown they would name lvols that no
-  longer exist, and an lvstore attached again can give the same names to
-  different objects.
-- **No cancel.** Completing the delete is the only way to clear a mark; a
-  refused delete stays recorded for as long as the target runs and its lvstore
-  stays attached.
 - **`delete_pending` is a snapshot notion.** `rcow_get_snapshot_status` reports
   it when queried by `snapshot_name`; queried by `export_uuid` it is always
   `false`, because an export names a snapshot but is not one.

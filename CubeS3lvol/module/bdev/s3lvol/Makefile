@@ -16,6 +16,7 @@ SRCS = vbdev_s3lvol.c \
        vbdev_s3lvol_lvstore.c \
        vbdev_s3lvol_lvol.c \
        vbdev_s3lvol_xfer.c vbdev_s3lvol_exports.c \
+       vbdev_s3lvol_pending.c \
        vbdev_s3lvol_namespace.c \
        vbdev_s3lvol_statefile.c \
        vbdev_s3lvol_active.c \
