@@ -210,10 +210,13 @@ func UpsertNode(n *node.Node) {
 
 // RemoveNode deletes a node from the in-process caches (node cache, sorted
 // index, template-locality membership) synchronously, without going through
-// the event loop. It exists for in-process tooling such as schedsim that
-// injects nodes via UpsertNode without Init and must withdraw them completely
-// at the end of a run; the production removal path is the DEL event in
-// dealEvent. n needs only the identity fields (InsID/IP) plus the
+// the event loop. It exists ONLY for single-process tooling that never calls
+// Init (schedsim): such a process injects nodes via UpsertNode and must
+// withdraw them completely at the end of a run. In an Init'ed process the
+// production removal path is the DEL event in dealEvent — calling RemoveNode
+// there would bypass the event loop and the Redis-backed sync, and would race
+// the next loader tick re-installing the node; do not adopt it outside that
+// tooling. n needs only the identity fields (InsID/IP) plus the
 // OssClusterLabel the node was injected with, so the sorted-index bucket
 // resolves the same way as at injection.
 func RemoveNode(ctx context.Context, n *node.Node) {

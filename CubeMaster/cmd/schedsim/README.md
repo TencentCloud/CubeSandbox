@@ -189,12 +189,12 @@ delta 不受影响，但不要把被拖长的绝对值当作集群真实水位�
 | `cpu_alloc_rate` / `mem_alloc_rate` | Σ 用量 / Σ 原始配额（集群级，时间平均；超卖下可 >1 的部分由 effective 配额承载，此处按原始配额） |
 | `load_cv_cpu` / `load_cv_mem` | 节点用量率（用量/配额）总体标准差 / 均值；均值为 0 定义为 0 |
 | `jain_cpu` / `jain_mem` | Jain 公平指数 (Σx)²/(n·Σx²)；全 0 定义为 1（完全均衡） |
-| `fragmentation_ratio` | 对 trace 中最大**可行**请求 shape（max cpu_millis；连空节点都放不下的请求被排除——节点同构，`cpu_millis >= 配额×cpu_ratio` 或 `mem_mib >= 配额×mem_ratio` 的请求到哪儿都会被拒，计入会把所有节点判成 unfit、让指标恒 ≈1，度量的是离群请求而非调度碎片；整份 trace 均不可行时回退为全 trace 最大值）：放不下该 shape 的节点的空闲 CPU 占总空闲 CPU 的比例。"空闲"与 cpu filter 同口径（配额×超卖比−已分配），"放不下"与 filter 的 `free > req` 判定互补（`free <= maxShape`） |
+| `fragmentation_ratio` | 对 trace 中最大**可行**请求 shape（max cpu_millis；连空节点都放不下的请求被排除——节点同构，`cpu_millis >= EffectiveQuotaCpu` 或 `mem_mib >= EffectiveQuotaMem` 的请求到哪儿都会被拒，计入会把所有节点判成 unfit、让指标恒 ≈1，度量的是离群请求而非调度碎片；整份 trace 均不可行时回退为全 trace 最大值）：放不下该 shape 的节点的空闲 CPU 占总空闲 CPU 的比例。"空闲"与 cpu filter 完全同口径（`EffectiveQuotaCpu`（配额×超卖比的**截断整数**，含溢出钳制）−已分配），"放不下"与 filter 的 `free > req` 判定互补（`free <= maxShape`） |
 | `fragmentation_ratio_mem` | 上者的内存侧版本（max mem_mib，同样的可行性排除，与 mem filter 同口径）。两个指标分开跟踪：取决于超卖比与请求 shape，任一资源都可能先成为瓶颈（如 mem_ratio < cpu_ratio 且 shape 偏小时，内存先耗尽、CPU 被搁置），只看 CPU 侧会漏报 |
 | `herding_top1_share` | 被选中次数最多的节点占总成功放置的比例（羊群度） |
 | `template_hit_rate` | 成功放置中选中节点持有该模板本地副本的比例（分母为带模板的成功请求）。放置成功后仿真会把该模板注册到选中节点（预热拉取），因此 locality filter 关闭时该指标跟踪动态局部性（首次未命中、后续命中）；filter 开启且 `AllowNonLocalTemplate=false` 时未预热节点本就不收该模板请求，指标恒为 1，主要用于检测配置漂移 |
 | `active_nodes_avg` / `empty_nodes_avg` | 有/无运行中沙箱的节点数，时间平均 |
-| `metric_state_diverged` | 仿真账本与 localcache（调度器实际准入所依据的状态）脱钩的观测次数：用量回写失败数，加上轮末审计逐节点比对缓存用量（`QuotaCpuUsage/QuotaMemUsage/MvmNum`）与仿真账本发现的漂移节点数；非 0 意味着本轮调度器在不一致状态上做了准入，该轮所有指标作废排查 |
+| `metric_state_diverged` | 仿真账本与 localcache（调度器实际准入所依据的状态）脱钩的观测次数：每次用量回写后立即读回逐字段比对（回写报错或落库值与账本不符都计数，漂移因此在发生的间隔被捕获，而非等到轮末双方都归零后无从察觉），加上轮末审计逐节点比对缓存用量（`QuotaCpuUsage/QuotaMemUsage/MvmNum`）发现的漂移节点数；非 0 意味着本轮调度器在不一致状态上做了准入，该轮所有指标作废排查 |
 
 指标计算均为纯函数（`pkg/scheduler/sim/metrics.go`），单测手算对拍。
 

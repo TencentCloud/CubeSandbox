@@ -342,21 +342,18 @@ func RunRound(ctx context.Context, p Params) (*RoundResult, error) {
 	return e.result(), nil
 }
 
-// effectiveOvercommitRatios returns the cpu/mem overcommit multipliers the
-// cpu and mem filters admit on for the sim instance type, defaulting to 1.0
-// when the scheduler config is absent or carries a non-positive ratio.
-func (e *engine) effectiveOvercommitRatios() (cpuRatio, memRatio float64) {
-	cpuRatio, memRatio = 1.0, 1.0
+// effectiveQuotas returns the per-node effective (overcommit-aware) quotas as
+// the same truncated int64 values the cpu/mem filters admit on
+// (config.EffectiveQuotaCpu/Mem, which inherit the ratio validation and the
+// overflow clamp), so the fragmentation free/feasibility math cannot disagree
+// with the scheduler gate inside a sub-unit float band for fractional
+// overcommit ratios.
+func (e *engine) effectiveQuotas() (cpuMillis, memMiB int64) {
 	if sc := config.GetConfig().Scheduler; sc != nil {
-		oc := sc.GetEffectiveOvercommitRatio(e.p.InstanceType)
-		if oc.CPURatio > 0 {
-			cpuRatio = oc.CPURatio
-		}
-		if oc.MemRatio > 0 {
-			memRatio = oc.MemRatio
-		}
+		return sc.EffectiveQuotaCpu(e.p.InstanceType, e.p.NodeCPUMillis),
+			sc.EffectiveQuotaMem(e.p.InstanceType, e.p.NodeMemMiB)
 	}
-	return cpuRatio, memRatio
+	return e.p.NodeCPUMillis, e.p.NodeMemMiB
 }
 
 // maxFeasibleShape returns the largest per-resource request shape that an
@@ -375,9 +372,9 @@ func (e *engine) effectiveOvercommitRatios() (cpuRatio, memRatio float64) {
 // stranding. When no request is feasible the plain trace max is kept
 // (success_rate is 0 anyway, and the metric stays defined).
 func (e *engine) maxFeasibleShape() (cpuMillis, memMiB int64) {
-	cpuRatio, memRatio := e.effectiveOvercommitRatios()
-	emptyCPU := float64(e.p.NodeCPUMillis) * cpuRatio
-	emptyMem := float64(e.p.NodeMemMiB) * memRatio
+	effCPU, effMem := e.effectiveQuotas()
+	emptyCPU := float64(effCPU)
+	emptyMem := float64(effMem)
 	if sc := config.GetConfig().Scheduler; sc != nil {
 		reserved := sc.GetEffectiveNodeMaxMemReservedInMB(e.p.InstanceType, e.p.NodeMemMiB)
 		if physical := float64(e.p.NodeMemMiB - reserved); physical < emptyMem {
@@ -653,15 +650,28 @@ func (e *engine) pushMetric(ns *nodeState) {
 	})
 	if err != nil {
 		e.metricStateDiverged++
+		return
+	}
+	// Read back what the scheduler would admit on right now. A push that
+	// returns success but lands wrong (merge-path drift, an unexpected
+	// writer) is the divergence that matters, and only a push-time check can
+	// see it: the end-of-round audit runs after every placement has expired,
+	// when both sides have returned to zero.
+	n, ok := localcache.GetNode(ns.id)
+	if !ok || n == nil ||
+		n.QuotaCpuUsage != ns.usedCPUMilli ||
+		n.QuotaMemUsage != ns.usedMemMiB ||
+		n.MvmNum != ns.running {
+		e.metricStateDiverged++
 	}
 }
 
 // auditMetricState compares each injected node's localcache-cached quota
 // usage against the simulator's final book and counts diverged nodes into
-// metricStateDiverged. It runs at round end, before cleanup removes the
-// nodes: a lost push or an external mutation would otherwise leave the
-// scheduler admitting on state the sim no longer believes, silently
-// invalidating the round's metrics.
+// metricStateDiverged. It is the rest-state complement of pushMetric's
+// push-time read-back: mid-round drift is caught where it happens, while this
+// end-of-round pass catches a node that vanished from the cache or was
+// mutated outside the push path before cleanup removes the entries.
 func (e *engine) auditMetricState() {
 	for _, ns := range e.nodeOrder {
 		n, ok := localcache.GetNode(ns.id)
@@ -695,10 +705,13 @@ func (e *engine) snapshot() Snapshot {
 	// free CPU/mem the cpu and mem filters admit on — per resource, because
 	// either one can bind first depending on the overcommit ratios and the
 	// trace shape (e.g. mem_ratio < cpu_ratio with small shapes strands CPU).
-	// The shape is the largest FEASIBLE request (maxFeasibleShape): requests
-	// no empty node could admit are rejected wherever they land, so they must
-	// not mark every node unfit and peg the ratio at ~1.
-	cpuRatio, memRatio := e.effectiveOvercommitRatios()
+	// The quotas are the filters' truncated int64 values (effectiveQuotas), so
+	// a fractional ratio cannot leave a sub-unit band where the metric counts
+	// a node feasible while the scheduler would reject it. The shape is the
+	// largest FEASIBLE request (maxFeasibleShape): requests no empty node
+	// could admit are rejected wherever they land, so they must not mark every
+	// node unfit and peg the ratio at ~1.
+	effCPU, effMem := e.effectiveQuotas()
 
 	for _, ns := range e.nodeOrder {
 		usedCPU += float64(ns.usedCPUMilli)
@@ -707,12 +720,12 @@ func (e *engine) snapshot() Snapshot {
 		quotaMem += float64(ns.quotaMemMiB)
 		cpuRates = append(cpuRates, float64(ns.usedCPUMilli)/float64(ns.quotaCPUMilli))
 		memRates = append(memRates, float64(ns.usedMemMiB)/float64(ns.quotaMemMiB))
-		freeC := float64(ns.quotaCPUMilli)*cpuRatio - float64(ns.usedCPUMilli)
+		freeC := float64(effCPU - ns.usedCPUMilli)
 		if freeC < 0 {
 			freeC = 0
 		}
 		freeCPU = append(freeCPU, freeC)
-		freeM := float64(ns.quotaMemMiB)*memRatio - float64(ns.usedMemMiB)
+		freeM := float64(effMem - ns.usedMemMiB)
 		if freeM < 0 {
 			freeM = 0
 		}
