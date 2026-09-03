@@ -403,6 +403,12 @@ spdk_only_libs   = $(filter-out -lrte_%,$(1))
 # does not register constructors the way SPDK/DPDK do, and wrapping it would
 # pull unused ENGINE objects. -ldl -pthread stay dynamic (OpenSSL 1.1 needs
 # them).
+#
+# The archive may also need -lz, which the .so never does because it carries its
+# own DT_NEEDED. Distros disagree: TencentOS/RHEL build libcrypto with zlib
+# compression, so c_zlib.o refers to inflate/deflate and the link fails without
+# it, while Debian's is built no-comp. Probed rather than always appended, so a
+# builder that does not need zlib does not gain a dependency on it.
 # ---------------------------------------------------------------------------
 
 OPENSSL_LIBDIR := $(strip $(shell pkg-config --variable=libdir openssl 2>/dev/null))
@@ -412,18 +418,28 @@ ifneq ($(filter /%,$(OPENSSL_SSL_A_PROBE)),)
 OPENSSL_LIBDIR := $(patsubst %/,%,$(dir $(OPENSSL_SSL_A_PROBE)))
 endif
 endif
-OPENSSL_STATIC_LIBS := $(OPENSSL_LIBDIR)/libssl.a $(OPENSSL_LIBDIR)/libcrypto.a
 
 filter_ssl = $(filter-out -lssl -lcrypto,$(1))
 SYS_LIBS := $(call filter_ssl,$(SYS_LIBS))
 
-ifeq ($(filter clean help,$(MAKECMDGOALS)),)
+# Archives when present (release / Ubuntu 20.04 builder). Shared -lssl otherwise:
+# openssl-devel on RHEL/TencentOS ships headers and .so only; the .a files are
+# openssl-static. make_release.sh still refuses a binary that DT_NEEDED libssl.
 ifeq ($(and $(wildcard $(OPENSSL_LIBDIR)/libssl.a),$(wildcard $(OPENSSL_LIBDIR)/libcrypto.a)),)
-$(error No static OpenSSL at $(OPENSSL_LIBDIR) (need libssl.a and libcrypto.a). \
-        Install libssl-dev (Debian/Ubuntu) or openssl-devel (RHEL/CentOS). \
-        Release s3lvol_tgt links OpenSSL statically so the package does not \
-        need libssl.so.1.1 on the target)
+ifeq ($(filter clean help,$(MAKECMDGOALS)),)
+ifndef S3LVOL_OPENSSL_SHARED_WARNED
+$(warning No static OpenSSL at $(OPENSSL_LIBDIR); linking shared -lssl -lcrypto. \
+        Install openssl-static (RHEL/TencentOS) or libssl-dev (Debian/Ubuntu) \
+        for a package that does not need libssl.so.1.1 on the target)
+export S3LVOL_OPENSSL_SHARED_WARNED := 1
 endif
+endif
+OPENSSL_STATIC_LIBS := -lssl -lcrypto
+else
+OPENSSL_ZLIB := $(shell nm -u $(OPENSSL_LIBDIR)/libcrypto.a 2>/dev/null \
+        | grep -qw inflate && echo -lz)
+OPENSSL_STATIC_LIBS := $(OPENSSL_LIBDIR)/libssl.a $(OPENSSL_LIBDIR)/libcrypto.a \
+        $(OPENSSL_ZLIB)
 endif
 
 # $(call dpdk_link_args,<pkg-config --libs output>) -- the DPDK half, ready to
