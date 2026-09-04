@@ -200,7 +200,7 @@ impl serialized::Inode {
                 // walking via parent fd and are not remapped here.
                 let (filename, is_filter) =
                     if !fullname.is_empty() && std::path::Path::new(fullname).is_absolute() {
-                        (fs.remap_filter_fullname(self.id, filename, fullname), true)
+                        (fs.remap_filter_fullname(self.id, fullname), true)
                     } else {
                         (filename.as_str(), false)
                     };
@@ -580,6 +580,25 @@ mod tests {
         );
         assert_eq!(host_path(&fs, FILTER_ID), new_mnt);
         assert_eq!(host_path(&fs, CHILD_ID), new_mnt.join("file"));
+    }
+
+    #[test]
+    fn remap_uses_fullname_basename_after_restore() {
+        let shared = TestDir::new("restored-shared");
+        let old = TestDir::new("restored-old");
+        let new = TestDir::new("restored-new");
+        let old_mnt = old.mkdir("mnt");
+        let new_mnt = new.mkdir("mnt");
+
+        let fs = mk_fs(shared.path());
+        let mut remap = HashMap::new();
+        remap.insert("mnt".into(), new_mnt.to_str().unwrap().to_string());
+        fs.set_filter_path_remap(remap);
+
+        assert_eq!(
+            fs.remap_filter_fullname(FILTER_ID, old_mnt.to_str().unwrap()),
+            new_mnt.to_str().unwrap()
+        );
     }
 
     #[test]

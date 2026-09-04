@@ -67,6 +67,13 @@ func createRequestHasHostMount(req *types.CreateCubeSandboxReq) bool {
 	return false
 }
 
+// CreateRequestHasHostMount reports whether a create request carries a raw
+// host-mount dependency. Snapshot restore uses it to keep that dependency on
+// its origin node.
+func CreateRequestHasHostMount(req *types.CreateCubeSandboxReq) bool {
+	return createRequestHasHostMount(req)
+}
+
 func injectHostDirMounts(ctx context.Context, req *types.CreateCubeSandboxReq) error {
 	if req.Annotations == nil {
 		log.G(ctx).Infof("[hostdir] no annotations, skip")
@@ -107,38 +114,89 @@ func injectHostDirMounts(ctx context.Context, req *types.CreateCubeSandboxReq) e
 
 	for i, o := range opts {
 		name := fmt.Sprintf("hostdir-%d", i)
-		vol := &types.Volume{
+		if err := ensureHostDirVolume(req, name, o.HostPath); err != nil {
+			return err
+		}
+		for _, c := range req.Containers {
+			if err := ensureHostDirVolumeMount(c, name, o); err != nil {
+				return err
+			}
+		}
+		log.G(ctx).Infof("[hostdir] ensured Volume and VolumeMount %q hostPath=%s containerPath=%s readOnly=%v",
+			name, o.HostPath, o.MountPath, o.ReadOnly)
+	}
+
+	return nil
+}
+
+func ensureHostDirVolume(req *types.CreateCubeSandboxReq, name, hostPath string) error {
+	var existing *types.Volume
+	for _, volume := range req.Volumes {
+		if volume == nil || volume.Name != name {
+			continue
+		}
+		if existing != nil {
+			return fmt.Errorf("host-mount volume %q is duplicated before injection", name)
+		}
+		existing = volume
+	}
+	if existing == nil {
+		req.Volumes = append(req.Volumes, &types.Volume{
 			Name: name,
 			VolumeSource: &types.VolumeSource{
 				HostDirVolumeSources: &types.HostDirVolumeSources{
-					VolumeSources: []*types.HostDirSource{
-						{
-							Name:     name,
-							HostPath: o.HostPath,
-						},
-					},
+					VolumeSources: []*types.HostDirSource{{
+						Name:     name,
+						HostPath: hostPath,
+					}},
 				},
 			},
-		}
-		req.Volumes = append(req.Volumes, vol)
-		log.G(ctx).Infof("[hostdir] injected Volume %q hostPath=%s", name, o.HostPath)
-	}
-
-	vm := make([]*cubeboxv1.VolumeMounts, 0, len(opts))
-	for i, o := range opts {
-		name := fmt.Sprintf("hostdir-%d", i)
-		vm = append(vm, &cubeboxv1.VolumeMounts{
-			Name:          name,
-			ContainerPath: o.MountPath,
-			HostPath:      o.HostPath,
-			Readonly:      o.ReadOnly,
 		})
-		log.G(ctx).Infof("[hostdir] injected VolumeMount %q containerPath=%s readOnly=%v", name, o.MountPath, o.ReadOnly)
-	}
-	for _, c := range req.Containers {
-		c.VolumeMounts = append(c.VolumeMounts, vm...)
+		return nil
 	}
 
+	if existing.VolumeSource == nil {
+		return fmt.Errorf("host-mount volume %q conflicts with existing volume source", name)
+	}
+	hostDirs := existing.VolumeSource.HostDirVolumeSources
+	if hostDirs == nil || len(hostDirs.VolumeSources) != 1 {
+		return fmt.Errorf("host-mount volume %q conflicts with existing volume source", name)
+	}
+	source := hostDirs.VolumeSources[0]
+	if source == nil || source.Name != name || filepath.Clean(source.HostPath) != hostPath {
+		return fmt.Errorf("host-mount volume %q conflicts with existing hostPath", name)
+	}
+	return nil
+}
+
+func ensureHostDirVolumeMount(container *types.Container, name string, option HostDirMountOption) error {
+	if container == nil {
+		return nil
+	}
+	var existing *cubeboxv1.VolumeMounts
+	for _, mount := range container.VolumeMounts {
+		if mount == nil || mount.GetName() != name {
+			continue
+		}
+		if existing != nil {
+			return fmt.Errorf("host-mount volume mount %q is duplicated before injection", name)
+		}
+		existing = mount
+	}
+	if existing == nil {
+		container.VolumeMounts = append(container.VolumeMounts, &cubeboxv1.VolumeMounts{
+			Name:          name,
+			ContainerPath: option.MountPath,
+			HostPath:      option.HostPath,
+			Readonly:      option.ReadOnly,
+		})
+		return nil
+	}
+	if filepath.Clean(existing.GetHostPath()) != option.HostPath ||
+		filepath.Clean(existing.GetContainerPath()) != filepath.Clean(option.MountPath) ||
+		existing.GetReadonly() != option.ReadOnly {
+		return fmt.Errorf("host-mount volume mount %q conflicts with existing mount", name)
+	}
 	return nil
 }
 

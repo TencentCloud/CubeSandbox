@@ -234,6 +234,31 @@ func TestInjectHostDirMountsSetsHostPathOnVolumeMount(t *testing.T) {
 	}
 }
 
+func TestInjectHostDirMountsIsIdempotentForSnapshotRestore(t *testing.T) {
+	req := &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			AnnotationHostDirMount: `[
+				{"hostPath":"/data/shared/rw","mountPath":"/mnt/rw"},
+				{"hostPath":"/data/shared/ro","mountPath":"/mnt/ro","readOnly":true}
+			]`,
+		},
+		Containers: []*types.Container{{Name: "work"}},
+	}
+
+	if err := injectHostDirMounts(context.Background(), req); err != nil {
+		t.Fatalf("first injectHostDirMounts() error=%v", err)
+	}
+	if err := injectHostDirMounts(context.Background(), req); err != nil {
+		t.Fatalf("second injectHostDirMounts() error=%v", err)
+	}
+	if len(req.Volumes) != 2 {
+		t.Fatalf("volume count=%d want 2", len(req.Volumes))
+	}
+	if len(req.Containers[0].VolumeMounts) != 2 {
+		t.Fatalf("volume mount count=%d want 2", len(req.Containers[0].VolumeMounts))
+	}
+}
+
 func TestCreateRequestHasHostMount(t *testing.T) {
 	t.Parallel()
 	if createRequestHasHostMount(nil) {

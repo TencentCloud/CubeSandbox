@@ -22,6 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/restoreplace"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
@@ -401,6 +402,71 @@ func TestBindSnapshotCreateReplicaCrossNodeWhenOriginCannotSchedule(t *testing.T
 	assert.Equal(t, constants.SnapshotBackendS3, req.Annotations[constants.CubeAnnotationStorageBackend])
 	assert.Equal(t, `{"rootfs":"r1","memory":"m1"}`, req.Annotations[constants.CubeAnnotationSnapshotRemoteUUIDs])
 	assert.Equal(t, "snap-1", req.Annotations[constants.CubeAnnotationRuntimeSnapshotID])
+}
+
+func TestBindSnapshotCreateReplicaPinsRawHostMountToOrigin(t *testing.T) {
+	stubSnapshotReadyForNewUse(t)
+	origSource := getSnapshotRestoreSourceFn
+	origDecide := decideRestorePlacementFn
+	origReplica := resolveSnapshotReadyReplicaFn
+	t.Cleanup(func() {
+		getSnapshotRestoreSourceFn = origSource
+		decideRestorePlacementFn = origDecide
+		resolveSnapshotReadyReplicaFn = origReplica
+	})
+	getSnapshotRestoreSourceFn = func(context.Context, string) (*templatecenter.RestoreSource, error) {
+		return &templatecenter.RestoreSource{
+			SnapshotID: "snap-1", Backend: constants.SnapshotBackendS3,
+			RemoteStatus: constants.RemoteStatusReady, OriginNodeID: "node-a", OriginNodeIP: "10.0.0.1",
+		}, nil
+	}
+	decideRestorePlacementFn = func(_ context.Context, in restoreplace.Input) (*restoreplace.Placement, error) {
+		assert.True(t, in.PinToOrigin)
+		return &restoreplace.Placement{NodeID: "node-a", NodeIP: "10.0.0.1"}, nil
+	}
+	resolveSnapshotReadyReplicaFn = func(context.Context, string, string) (templatecenter.ReplicaStatus, error) {
+		return templatecenter.ReplicaStatus{NodeID: "node-a"}, nil
+	}
+	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{
+		sandbox.AnnotationHostDirMount: `[{"hostPath":"/data/shared","mountPath":"/mnt"}]`,
+	}}
+
+	require.NoError(t, bindSnapshotCreateReplica(context.Background(), "snap-1", req))
+	assert.Equal(t, []string{"node-a"}, req.DistributionScope)
+	assert.Empty(t, req.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal])
+}
+
+func TestSnapshotRestoreHasHostMountFromStoredTemplate(t *testing.T) {
+	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{}}
+	templateReq := &types.CreateCubeSandboxReq{Annotations: map[string]string{
+		sandbox.AnnotationHostDirMount: `[{"hostPath":"/data/shared","mountPath":"/mnt"}]`,
+	}}
+
+	assert.True(t, snapshotRestoreHasHostMount(req, templateReq))
+}
+
+func TestBindSnapshotCreateReplicaHostMountFailsWithoutOriginMetadata(t *testing.T) {
+	stubSnapshotReadyForNewUse(t)
+	origSource := getSnapshotRestoreSourceFn
+	origReplica := resolveSnapshotReadyReplicaFn
+	t.Cleanup(func() {
+		getSnapshotRestoreSourceFn = origSource
+		resolveSnapshotReadyReplicaFn = origReplica
+	})
+	getSnapshotRestoreSourceFn = func(context.Context, string) (*templatecenter.RestoreSource, error) {
+		return nil, templatecenter.ErrTemplateStoreNotInitialized
+	}
+	resolveSnapshotReadyReplicaFn = func(context.Context, string, string) (templatecenter.ReplicaStatus, error) {
+		t.Fatal("host-mount restore must not use an unpinned legacy replica")
+		return templatecenter.ReplicaStatus{}, nil
+	}
+	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{
+		sandbox.AnnotationHostDirMount: `[{"hostPath":"/data/shared","mountPath":"/mnt"}]`,
+	}}
+
+	err := bindSnapshotCreateReplica(context.Background(), "snap-1", req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires origin restore metadata")
 }
 
 func TestBindSnapshotCreateReplicaKeepsOriginWhenPlacementSaysOrigin(t *testing.T) {

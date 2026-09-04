@@ -32,6 +32,7 @@ const MAX_NUM_PCI_SEGMENTS: u16 = 16;
 const UPDATE_FS_SHARED_DIR_FIELD: &str = "shared_dir";
 const UPDATE_FS_ALLOWED_DIRS_FIELD: &str = "allowed_dirs";
 const UPDATE_FS_CACHE_FIELD: &str = "cache";
+const UPDATE_FS_REMAP_FILTER_FIELD: &str = "remap_filter";
 
 /// Errors associated with VM configuration parameters.
 #[derive(Debug, Error)]
@@ -2236,6 +2237,7 @@ enum DeviceValue {
     Str(String),
     Arr(Vec<String>),
     Value(u64),
+    Bool(bool),
 }
 
 impl VmConfig {
@@ -2369,6 +2371,10 @@ impl VmConfig {
                         UPDATE_FS_CACHE_FIELD,
                         DeviceValue::Value(backend.cache as u64),
                     );
+                    device.insert(
+                        UPDATE_FS_REMAP_FILTER_FIELD,
+                        DeviceValue::Bool(backend.remap_filter),
+                    );
                     devices.insert(fs_cfg.id.as_ref().unwrap().clone(), device);
                 }
                 if fs_cfg.rate_limiter_config.is_some() {
@@ -2397,6 +2403,11 @@ impl VmConfig {
                                 device.get(UPDATE_FS_CACHE_FIELD)
                             {
                                 backend.cache = *cache as u8;
+                            }
+                            if let Some(DeviceValue::Bool(remap_filter)) =
+                                device.get(UPDATE_FS_REMAP_FILTER_FIELD)
+                            {
+                                backend.remap_filter = *remap_filter;
                             }
                         }
                     }
@@ -2868,6 +2879,36 @@ impl VmConfig {
 mod tests {
     use super::*;
     use net_util::MacAddr;
+
+    #[test]
+    fn update_fses_preserves_restore_remap_filter() {
+        let mut config = VmConfig {
+            fs: Some(vec![FsConfig {
+                id: Some("virtio_rw".to_string()),
+                backendfs_config: Some(BackendFsConfig::default()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let restore_fses = vec![FsConfig {
+            id: Some("virtio_rw".to_string()),
+            backendfs_config: Some(BackendFsConfig {
+                remap_filter: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }];
+
+        config.update_fses(&restore_fses);
+
+        assert!(
+            config.fs.unwrap()[0]
+                .backendfs_config
+                .as_ref()
+                .unwrap()
+                .remap_filter
+        );
+    }
 
     #[test]
     fn test_cpu_parsing() -> Result<()> {

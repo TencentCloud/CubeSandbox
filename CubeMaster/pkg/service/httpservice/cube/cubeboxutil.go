@@ -480,7 +480,8 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveBind, time.Since(bindStart))
 	}()
 	if strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
-		if err := bindSnapshotCreateReplica(ctx, templateID, reqInOut); err != nil {
+		pinToOrigin := snapshotRestoreHasHostMount(reqInOut, templateReq)
+		if err := bindSnapshotCreateReplicaWithHostMount(ctx, templateID, reqInOut, pinToOrigin); err != nil {
 			return err
 		}
 	}
@@ -536,6 +537,11 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	return nil
 }
 
+func snapshotRestoreHasHostMount(req, templateReq *types.CreateCubeSandboxReq) bool {
+	return sandbox.CreateRequestHasHostMount(req) ||
+		sandbox.CreateRequestHasHostMount(templateReq)
+}
+
 func skipTemplateLocalityReady(ctx context.Context, templateID string) bool {
 	src, err := getSnapshotRestoreSourceFn(ctx, templateID)
 	if err != nil || src == nil {
@@ -584,14 +590,26 @@ func constrainSnapshotCreateScope(ctx context.Context, snapshotID string, reqInO
 // keys are explicitly deleted so any stale value supplied by the caller
 // cannot reach the cubelet.
 func bindSnapshotCreateReplica(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq) error {
+	return bindSnapshotCreateReplicaWithHostMount(
+		ctx,
+		snapshotID,
+		reqInOut,
+		sandbox.CreateRequestHasHostMount(reqInOut),
+	)
+}
+
+func bindSnapshotCreateReplicaWithHostMount(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq, pinToOrigin bool) error {
 	if err := ensureSnapshotReadyForNewUseFn(ctx, snapshotID); err != nil {
 		return err
 	}
 	if src, err := getSnapshotRestoreSourceFn(ctx, snapshotID); err == nil && src != nil {
-		return bindSnapshotCreateReplicaWithPlacement(ctx, snapshotID, reqInOut, src)
+		return bindSnapshotCreateReplicaWithPlacement(ctx, snapshotID, reqInOut, src, pinToOrigin)
 	} else if err != nil && !errors.Is(err, templatecenter.ErrSnapshotNotFound) &&
 		!errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized) {
 		return err
+	}
+	if pinToOrigin {
+		return fmt.Errorf("snapshot %s with host-mount requires origin restore metadata", snapshotID)
 	}
 	return bindSnapshotCreateReplicaLocal(ctx, snapshotID, reqInOut)
 }
@@ -601,7 +619,7 @@ func bindSnapshotCreateReplica(ctx context.Context, snapshotID string, reqInOut 
 // must not call Decide: after a Master restart the heartbeat cache is
 // empty and Decide would fail even though the snapshot row already has
 // OriginNodeIP.
-func fromSnapshotPlacement(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq, src *templatecenter.RestoreSource, instanceType string, reqRes *selctx.RequestResource) (*restoreplace.Placement, error) {
+func fromSnapshotPlacement(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq, src *templatecenter.RestoreSource, instanceType string, reqRes *selctx.RequestResource, pinToOrigin bool) (*restoreplace.Placement, error) {
 	if src == nil {
 		return nil, fmt.Errorf("snapshot %s: restore source is nil", snapshotID)
 	}
@@ -629,10 +647,11 @@ func fromSnapshotPlacement(ctx context.Context, snapshotID string, reqInOut *typ
 		InstanceType:        instanceType,
 		ReqRes:              reqRes,
 		RequestedScope:      requestedScope,
+		PinToOrigin:         pinToOrigin,
 	})
 }
 
-func bindSnapshotCreateReplicaWithPlacement(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq, src *templatecenter.RestoreSource) error {
+func bindSnapshotCreateReplicaWithPlacement(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq, src *templatecenter.RestoreSource, pinToOrigin bool) error {
 	var reqRes *selctx.RequestResource
 	if config.GetConfig() != nil {
 		if r, err := sandbox.RequestResources(reqInOut); err == nil {
@@ -643,7 +662,7 @@ func bindSnapshotCreateReplicaWithPlacement(ctx context.Context, snapshotID stri
 	if instanceType == "" {
 		instanceType = src.InstanceType
 	}
-	placement, err := fromSnapshotPlacement(ctx, snapshotID, reqInOut, src, instanceType, reqRes)
+	placement, err := fromSnapshotPlacement(ctx, snapshotID, reqInOut, src, instanceType, reqRes, pinToOrigin)
 	if err != nil {
 		return err
 	}

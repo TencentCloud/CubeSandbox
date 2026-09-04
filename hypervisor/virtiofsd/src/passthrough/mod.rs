@@ -585,16 +585,16 @@ impl PassthroughFs {
 
     /// If restore remapped this filter basename to a new host path, return that
     /// path; otherwise keep `fullname` from the migration blob.
-    fn remap_filter_fullname<'a>(
-        &'a self,
-        inode: Inode,
-        filename: &str,
-        fullname: &'a str,
-    ) -> &'a str {
+    fn remap_filter_fullname<'a>(&'a self, inode: Inode, fullname: &'a str) -> &'a str {
         match self
             .restore_filter_remap
             .get()
-            .and_then(|remap| remap.get(filename))
+            .and_then(|remap| {
+                std::path::Path::new(fullname)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| remap.get(name))
+            })
             .map(String::as_str)
         {
             Some(new_path) if new_path != fullname => {

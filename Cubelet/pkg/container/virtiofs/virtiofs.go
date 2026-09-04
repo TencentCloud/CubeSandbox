@@ -36,6 +36,9 @@ type VirtioBackendFsConfig struct {
 	AllowedDirs []string `json:"allowed_dirs"`
 	ReadOnly    bool     `json:"read_only"`
 	Cache       int      `json:"cache"`
+	// RemapFilter makes restore-time allowed_dirs authoritative for serialized
+	// filter roots. It is enabled only when restoring guest mount state.
+	RemapFilter bool `json:"remap_filter,omitempty"`
 }
 
 type ErofsImagePath struct {
