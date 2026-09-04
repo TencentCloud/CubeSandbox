@@ -235,7 +235,8 @@ docker exec "$cid" cat /var/log/envd.log
 
 基础镜像由仓库内单个 GitHub Actions workflow 自动构建：
 [`.github/workflows/build-envd-base-image.yml`](https://github.com/TencentCloud/CubeSandbox/blob/master/.github/workflows/build-envd-base-image.yml)。
-它会 checkout `e2b-dev/infra` 的指定 tag（默认 `2026.16`），用 Go 1.25.4
-在同一个 job 里直接把 envd 编译进来，构建 `docker/Dockerfile.cube-base`，
-对 `:49983/health` 做 smoke test，然后推送到
+它会 checkout `e2b-dev/infra` 的指定 tag（默认 `2026.16`），在原生
+`linux/amd64` 与 `linux/arm64` runner 上用 Go 1.25.4 编译 envd，构建
+`docker/Dockerfile.cube-base`，分别对 `:49983/health` 做 smoke test，再
+合成 multi-arch manifest list 推送到
 `ghcr.io/tencentcloud/cubesandbox-base`。
