@@ -248,7 +248,7 @@ if [ "${MODE}" = list ]; then
 	echo "with S3:             s3_client_test s3_bs_dev_test"
 	echo "dataplane:           dataplane recovery snapshot export srcdel selfimport"
 	echo "                     derived decouple_queue snapshot_cancel snapshot_converge"
-	echo "                     agent_template snapdelete pending_delete"
+	echo "                     agent_template cubecow_client snapdelete pending_delete"
 	echo "                     fs guards activation control"
 	echo ""
 	echo "root:        $([ "${HAVE_ROOT}" -eq 1 ] && echo yes || echo no)"
@@ -425,7 +425,7 @@ if [ "${MODE}" != all ]; then
 	echo "--- dataplane: skipped, $([ "${MODE}" = offline ] && echo --offline || echo --no-dataplane)"
 	for t in dataplane recovery snapshot export srcdel selfimport derived \
 		 decouple_queue snapshot_cancel snapshot_converge agent_template \
-		 snapdelete pending_delete fs guards activation control; do
+		 cubecow_client snapdelete pending_delete fs guards activation control; do
 		report_skip "run_${t}_test.sh" "not requested" 1
 	done
 else
@@ -434,7 +434,7 @@ else
 		echo "--- dataplane"
 		for t in dataplane recovery snapshot export srcdel selfimport derived \
 			 decouple_queue snapshot_cancel snapshot_converge agent_template \
-			 snapdelete pending_delete fs guards activation control; do
+			 cubecow_client snapdelete pending_delete fs guards activation control; do
 			report_skip "run_${t}_test.sh" "${BLOCKER}"
 		done
 	else
@@ -486,6 +486,13 @@ else
 		# the bucket is shared); consumes export manifests like export does.
 		run_suite run_agent_template_test.sh \
 			./test/dataplane/run_agent_template_test.sh "${S3_ARGS[@]}"
+		# cubecow/Cubelet client contract: the 11 rcow_* methods in the
+		# order Cubelet actually issues them (seal, clone fan-out, parallel
+		# export, import then activate without waiting for decouple). Next
+		# to agent_template because that suite is the two-process deployment
+		# form of a similar chain; this one is the single-client RPC form.
+		run_suite run_cubecow_client_test.sh \
+			./test/dataplane/run_cubecow_client_test.sh
 		# Snapshot deletion semantics; next to the suites that build clone chains.
 		run_suite run_snapdelete_test.sh \
 			./test/dataplane/run_snapdelete_test.sh

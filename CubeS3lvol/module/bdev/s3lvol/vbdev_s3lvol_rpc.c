@@ -3663,7 +3663,7 @@ rpc_rcow_get_bdev(struct spdk_jsonrpc_request *request,
 	 * never activated. Checked before anything is allocated. */
 	if (req.device_name) {
 		if (!s3lvol_active_find(req.device_name)) {
-			rpc_lvol_respond_errf(request, "'%s' is not active",
+			rpc_lvol_respond_errf(request, "'%s' is not active (not found)",
 					      req.device_name);
 			goto cleanup;
 		}
