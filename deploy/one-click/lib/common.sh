@@ -54,6 +54,8 @@ warn() {
 
 # shellcheck source=../scripts/common/validation.sh
 source "${ONE_CLICK_DIR}/scripts/common/validation.sh"
+# shellcheck source=../scripts/common/cubebox_os_image.sh
+source "${ONE_CLICK_DIR}/scripts/common/cubebox_os_image.sh"
 
 # Avoid `ldd --version | head -1` under strict mode: `head` may exit early and
 # SIGPIPE `ldd`, which turns a valid glibc probe into a false failure.
@@ -514,6 +516,7 @@ load_env_file() {
 ONE_CLICK_TOGGLE_KEYS=(
   ONE_CLICK_ENABLE_S3LVOL
   CUBE_PVM_ENABLE
+  CUBE_CUBEBOX_OS_IMAGE_ON_DATA
 )
 
 # snapshot_one_click_toggles: capture this-run operator intent for
@@ -1530,8 +1533,10 @@ patch_cubelet_config_template() {
 # non-empty existing prefix is only wiped when it is a recognised CubeSandbox
 # install (presence of a marker artifact such as .one-click.env / CubeMaster)
 # or effectively empty. A lone '.backup' left over from an interrupted upgrade
-# is fine only when it is a real directory, not a symlink. Non-existent prefixes
-# are allowed (a fresh path the installer is about to create).
+# is fine only when it is a real directory, not a symlink. The managed
+# cubebox_os_image -> /data/cubebox_os_image link is also allowed (runtime data
+# redirected off rootfs). Non-existent prefixes are allowed (a fresh path the
+# installer is about to create).
 assert_safe_install_prefix() {
   local prefix="$1"
 
@@ -1577,10 +1582,24 @@ _assert_no_top_level_symlinks() {
   local dir="$1"
   local display="$2"
   local symlink
-  symlink="$(find "${dir}" -mindepth 1 -maxdepth 1 -type l -print -quit 2>/dev/null || true)"
-  if [[ -n "${symlink}" ]]; then
+  # Only the managed cubebox_os_image -> data-disk symlink is allowed; other
+  # top-level symlinks remain forbidden so wipe cannot follow unexpected targets.
+  while IFS= read -r symlink; do
+    [[ -n "${symlink}" ]] || continue
+    if _is_managed_cubebox_os_image_symlink "${symlink}"; then
+      continue
+    fi
     die "refusing to wipe install root ${display}: contains top-level symlink (${symlink}); move it away and retry"
-  fi
+  done < <(find "${dir}" -mindepth 1 -maxdepth 1 -type l -print 2>/dev/null || true)
+}
+
+# True when path is the intentional toolbox redirect to the configured data dir.
+_is_managed_cubebox_os_image_symlink() {
+  local path="$1"
+  local expected="${CUBEBOX_OS_IMAGE_DATA_DIR:-${CUBEBOX_OS_IMAGE_DATA_DIR_DEFAULT:-/data/cubebox_os_image}}"
+  [[ -L "${path}" ]] || return 1
+  [[ "$(basename "${path}")" == "cubebox_os_image" ]] || return 1
+  [[ "$(readlink "${path}")" == "${expected}" ]]
 }
 
 _assert_cube_prefix_marker_or_empty() {
@@ -1595,8 +1614,20 @@ _assert_cube_prefix_marker_or_empty() {
     fi
   done
   if [[ -z "${cube_marker}" ]]; then
-    local stray
-    stray="$(find "${dir}" -mindepth 1 -maxdepth 1 ! -name '.backup' -print -quit 2>/dev/null || true)"
+    local stray="" entry
+    # Ignore .backup and the managed cubebox_os_image symlink when judging emptiness.
+    # A real directory named cubebox_os_image is foreign content and must not pass.
+    while IFS= read -r entry; do
+      [[ -n "${entry}" ]] || continue
+      if [[ "$(basename "${entry}")" == ".backup" ]]; then
+        continue
+      fi
+      if _is_managed_cubebox_os_image_symlink "${entry}"; then
+        continue
+      fi
+      stray="${entry}"
+      break
+    done < <(find "${dir}" -mindepth 1 -maxdepth 1 -print 2>/dev/null || true)
     if [[ -n "${stray}" ]]; then
       die "refusing to wipe install root ${display}: directory is not empty and contains no CubeSandbox installation markers (.one-click.env / CubeMaster / CubeAPI / Cubelet). Remove the foreign content first."
     fi
@@ -1629,7 +1660,23 @@ wipe_custom_install_prefix_contents() {
     # gap between path validation and destructive deletion.
     _assert_no_top_level_symlinks "." "${prefix}"
     _assert_cube_prefix_marker_or_empty "." "${prefix}"
-    find . -mindepth 1 -maxdepth 1 ! -name '.backup' -exec rm -rf -- {} +
+    # Preserve .backup and the managed cubebox_os_image symlink (rm would only
+    # drop the link; keeping it avoids a gap before ensure recreates it). A
+    # real cubebox_os_image directory is wiped like any other top-level entry.
+    local entry
+    while IFS= read -r entry; do
+      [[ -n "${entry}" ]] || continue
+      if [[ "$(basename "${entry}")" == ".backup" ]]; then
+        continue
+      fi
+      # Preserve the managed redirect only while the toggle is on. With
+      # CUBE_CUBEBOX_OS_IMAGE_ON_DATA=0, drop the leftover link so a reinstall
+      # can use a real toolbox-local directory.
+      if _is_managed_cubebox_os_image_symlink "${entry}" && cubebox_os_image_on_data_enabled; then
+        continue
+      fi
+      rm -rf -- "${entry}"
+    done < <(find . -mindepth 1 -maxdepth 1 -print 2>/dev/null || true)
   )
 }
 

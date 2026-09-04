@@ -131,6 +131,12 @@ spec:
               value: {{ .Values.bootstrap.nodeInit.writeUdevRule | quote }}
             - name: CREATE_HOST_DIRS
               value: {{ .Values.bootstrap.nodeInit.createHostDirs | quote }}
+            - name: CUBE_CUBEBOX_OS_IMAGE_ON_DATA
+              value: {{ ternary "1" "0" .Values.hostPaths.cubeboxOsImageOnData | quote }}
+            - name: CUBEBOX_OS_IMAGE_DATA_DIR
+              value: {{ .Values.hostPaths.dataCubeboxOsImage | quote }}
+            - name: TOOLBOX_HOST_ROOT
+              value: {{ .Values.hostPaths.toolbox | quote }}
             - name: CHECK_MASTER_CONNECTIVITY
               value: {{ .Values.bootstrap.nodeInit.checkMasterConnectivity | quote }}
             - name: CUBE_MASTER_ENDPOINT

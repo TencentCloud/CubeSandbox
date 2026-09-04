@@ -56,7 +56,7 @@ run_toggle_roundtrip() {
 }
 
 test_toggle_keys_registry() {
-  assert_toggle_keys ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE
+  assert_toggle_keys ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE CUBE_CUBEBOX_OS_IMAGE_ON_DATA
 }
 
 # Core regression: a .env value that equals the env.example default (0) must
