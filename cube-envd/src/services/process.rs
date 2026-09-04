@@ -531,7 +531,7 @@ pub async fn send_input(
     let input = state
         .input_handle(pid, tag.as_deref())
         .ok_or_else(|| not_found(pid, tag.as_deref()))?;
-    write_process_input(&input, &req.input).await?;
+    write_process_input(pid, &input, &req.input).await?;
     Ok(serde_json::json!({}))
 }
 
@@ -549,7 +549,7 @@ pub async fn stream_input_event(
     if arms != 1 {
         return Err(ConnectError::new(
             ConnectCode::Unimplemented,
-            "input stream event is not implemented",
+            "invalid event type <nil>",
         ));
     }
 
@@ -567,7 +567,7 @@ pub async fn stream_input_event(
                 "input stream has no process selected",
             )
         })?;
-        write_process_input(input, &data.input).await?;
+        write_process_input(None, input, &data.input).await?;
     }
     Ok(())
 }
@@ -585,13 +585,13 @@ pub async fn close_stdin(
     let mut writer = input.lock().await;
     match &mut *writer {
         exec::InputWriter::Pty(_) => Err(ConnectError::new(
-            ConnectCode::Internal,
+            ConnectCode::Unknown,
             "error closing stdin: cannot close stdin for PTY process — send Ctrl+D (0x04) instead",
         )),
         exec::InputWriter::Pipe(pipe) => {
             if let Some(mut stdin) = pipe.take() {
                 stdin.shutdown().await.map_err(|e| {
-                    ConnectError::new(ConnectCode::Internal, format!("error closing stdin: {e}"))
+                    ConnectError::new(ConnectCode::Unknown, format!("error closing stdin: {e}"))
                 })?;
             }
             Ok(serde_json::json!({}))
@@ -600,6 +600,7 @@ pub async fn close_stdin(
 }
 
 async fn write_process_input(
+    pid: Option<u32>,
     input: &exec::InputHandle,
     request: &ProcessInput,
 ) -> Result<(), ConnectError> {
@@ -611,7 +612,7 @@ async fn write_process_input(
         _ => {
             return Err(ConnectError::new(
                 ConnectCode::Unimplemented,
-                "process input type is not implemented",
+                "invalid input type <nil>",
             ))
         }
     };
@@ -641,7 +642,13 @@ async fn write_process_input(
         )),
         (exec::InputWriter::Pipe(Some(stdin)), InputKind::Stdin) => {
             stdin.write_all(&data).await.map_err(|e| {
-                ConnectError::new(ConnectCode::Internal, format!("error writing to stdin: {e}"))
+                ConnectError::new(ConnectCode::Internal, format!(
+                    "error writing to stdin: {}",
+                    match pid {
+                        Some(pid) => format!("error writing to stdin of process '{pid}': {e}"),
+                        None => e.to_string(),
+                    }
+                ))
             })
         }
         (exec::InputWriter::Pipe(None), InputKind::Stdin) => Err(ConnectError::new(

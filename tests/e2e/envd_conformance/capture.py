@@ -12,6 +12,7 @@ import os
 import socket
 import struct
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -161,6 +162,72 @@ def connect_stream(service_method, payload, user="user", timeout=30,
             s.close()
         except Exception:
             pass
+    return result
+
+
+def connect_client_stream(service_method, payloads, user="user", timeout=30):
+    """Send a fragmented Connect request stream and capture its response."""
+    headers = {
+        "Host": f"{HOST}:{PORT}",
+        "Content-Type": "application/connect+json",
+        "Connect-Protocol-Version": "1",
+        "Authorization": basic_user(user),
+        "Connection": "close",
+        "Transfer-Encoding": "chunked",
+    }
+    s = socket.create_connection((HOST, PORT), timeout=timeout)
+    result = {"frames": []}
+    try:
+        request = (f"POST /{service_method} HTTP/1.1\r\n" +
+                   "".join(f"{k}: {v}\r\n" for k, v in headers.items()) + "\r\n")
+        s.sendall(request.encode())
+        for payload in payloads:
+            frame = envelope(json.dumps(payload).encode())
+            for part in (frame[:2], frame[2:7], frame[7:]):
+                s.sendall(f"{len(part):x}\r\n".encode() + part + b"\r\n")
+                time.sleep(0.01)
+        s.sendall(b"0\r\n\r\n")
+        f = s.makefile("rb")
+        result["status_line"] = f.readline().decode().strip()
+        resp_headers = {}
+        while True:
+            line = f.readline().decode().strip()
+            if not line:
+                break
+            k, _, v = line.partition(":")
+            resp_headers[k.lower()] = v.strip().lower()
+        chunked = resp_headers.get("transfer-encoding") == "chunked"
+        response_buffer = bytearray()
+
+        def read_response(n):
+            if not chunked:
+                return f.read(n)
+            while len(response_buffer) < n:
+                size_line = f.readline().strip()
+                if not size_line:
+                    break
+                size = int(size_line, 16)
+                if size == 0:
+                    f.readline()
+                    break
+                data = f.read(size)
+                f.read(2)
+                response_buffer.extend(data)
+            out = bytes(response_buffer[:n])
+            del response_buffer[:n]
+            return out
+        while True:
+            hdr = read_response(5)
+            if len(hdr) < 5:
+                break
+            size = struct.unpack(">I", hdr[1:5])[0]
+            raw = read_response(size)
+            result["frames"].append({"flags": hdr[0], "size": size,
+                                     "payload": json.loads(raw)})
+            if hdr[0] & 0x02:
+                break
+    finally:
+        s.close()
     return result
 
 
@@ -507,7 +574,8 @@ def cap_fs_legacy():
 
 
 # ---------------- C. process.Process ----------------
-def start_req(cmd_args, envs=None, cwd=None, tag=None, stdin=False, pty=None):
+def start_req(cmd_args, envs=None, cwd=None, tag=None, stdin=False, pty=None,
+              include_stdin=True):
     p = {"process": {"cmd": "/bin/bash", "args": ["-l", "-c", cmd_args]}}
     if envs:
         p["process"]["envs"] = envs
@@ -515,7 +583,8 @@ def start_req(cmd_args, envs=None, cwd=None, tag=None, stdin=False, pty=None):
         p["process"]["cwd"] = cwd
     if tag:
         p["tag"] = tag
-    p["stdin"] = stdin
+    if include_stdin:
+        p["stdin"] = stdin
     if pty:
         p["pty"] = pty
     return p
@@ -560,8 +629,67 @@ def cap_process():
     record("proc_bad_user", connect_stream("process.Process/Start", start_req("id"), user="ghost9"))
     record("proc_missing_cmd", connect_stream(
         "process.Process/Start", {"process": {"cmd": "/no/such/bin", "args": []}, "stdin": False}))
+    # stdin omitted: backwards-compatible default is enabled.
+    stdin_default = {}
+    def run_stdin_default():
+        stdin_default["stream"] = connect_stream(
+            "process.Process/Start",
+            start_req("read line; printf 'default:%s' \"$line\"; sleep 1", tag="baseline-stdin-default",
+                      include_stdin=False), timeout=10)
+    t_default = threading.Thread(target=run_stdin_default)
+    t_default.start()
+    default_pid = wait_for_tag("baseline-stdin-default")
+    stdin_default["input"] = connect_unary(
+        "process.Process/SendInput",
+        {"process": {"pid": default_pid}, "input": {"stdin": base64.b64encode(b"ok\n").decode()}})
+    stdin_default["close"] = connect_unary(
+        "process.Process/CloseStdin", {"process": {"pid": default_pid}})
+    t_default.join(timeout=10)
+    record("proc_stdin_default", stdin_default)
+
+    # Valid pipe input + CloseStdin EOF.
+    pipe_input = {}
+    def run_pipe_input():
+        pipe_input["stream"] = connect_stream(
+            "process.Process/Start",
+            start_req("cat", tag="baseline-pipe-input", stdin=True), timeout=10)
+    t_pipe = threading.Thread(target=run_pipe_input)
+    t_pipe.start()
+    pipe_pid = wait_for_tag("baseline-pipe-input")
+    pipe_input["input"] = connect_unary(
+        "process.Process/SendInput",
+        {"process": {"pid": pipe_pid}, "input": {"stdin": base64.b64encode(b"pipe\n").decode()}})
+    pipe_input["malformed"] = connect_unary(
+        "process.Process/SendInput", {"process": {"pid": pipe_pid}, "input": {}})
+    pipe_input["close"] = connect_unary(
+        "process.Process/CloseStdin", {"process": {"pid": pipe_pid}})
+    t_pipe.join(timeout=10)
+    record("proc_pipe_input_close", pipe_input)
+
+    # Fragmented client-streaming input: split envelope headers and payload
+    # across several HTTP chunks, then close stdin to deliver EOF.
+    stream_input = {}
+    def run_stream_input_target():
+        stream_input["stream"] = connect_stream(
+            "process.Process/Start",
+            start_req("cat", tag="baseline-stream-input", stdin=True), timeout=10)
+    t_stream = threading.Thread(target=run_stream_input_target)
+    t_stream.start()
+    stream_pid = wait_for_tag("baseline-stream-input")
+    stream_input["input"] = connect_client_stream(
+        "process.Process/StreamInput",
+        [{"start": {"process": {"pid": stream_pid}}},
+         {"data": {"input": {"stdin": base64.b64encode(b"fragmented\n").decode()}}}],
+        timeout=10)
+    stream_input["close"] = connect_unary(
+        "process.Process/CloseStdin", {"process": {"pid": stream_pid}})
+    t_stream.join(timeout=10)
+    record("proc_stream_input_fragmented", stream_input)
+
+    # The malformed input result is recorded with the valid pipe process above,
+    # so the service reaches the input oneof validation path.
+    record("proc_sendinput_malformed", pipe_input["malformed"])
     # signal kill: start sleep with tag, then List + SendSignal + observe end event
-    import threading
     sig_result = {}
 
     def run_sleeper():

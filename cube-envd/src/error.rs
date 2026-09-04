@@ -23,6 +23,7 @@ pub enum ConnectCode {
     Unimplemented,
     DeadlineExceeded,
     Internal,
+    Unknown,
 }
 
 impl ConnectCode {
@@ -37,6 +38,7 @@ impl ConnectCode {
             ConnectCode::Unimplemented => "unimplemented",
             ConnectCode::DeadlineExceeded => "deadline_exceeded",
             ConnectCode::Internal => "internal",
+            ConnectCode::Unknown => "unknown",
         }
     }
 
@@ -52,6 +54,7 @@ impl ConnectCode {
             ConnectCode::Unimplemented => StatusCode::NOT_IMPLEMENTED,
             ConnectCode::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
             ConnectCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            ConnectCode::Unknown => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }

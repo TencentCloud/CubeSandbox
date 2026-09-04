@@ -10,9 +10,9 @@ suite gates cube-envd changes, `ENVD_REF` bumps, and SDK-matrix updates.
 
 | File | Purpose |
 |---|---|
-| `capture.py` | Runs ~45 scenarios (REST / filesystem RPC / process streaming, covering success, error, timeout, disconnect paths) against a live envd and records raw wire fixtures |
+| `capture.py` | Runs REST, filesystem RPC, and process streaming scenarios against a live envd, including pipe/PTY input, fragmented StreamInput, CloseStdin, stdin-default, timeout, and disconnect paths; records raw wire fixtures |
 | `conformance.py` | Normalizes two fixture directories (volatile values, header case, chunking) and diffs them; declared MVP differences are allowlisted with reasons |
-| `lifecycle_smoke.go` | Assertion-based black-box regression for interactive input and slow-client process cleanup against one live envd |
+| `lifecycle_smoke.go` | Assertion-based black-box regression for interactive input and slow-client process cleanup against one live envd; these checks complement, but do not replace, Go-vs-Rust fixture capture |
 | `perf.py` | Startup-to-/health latency, RSS, and command round-trip comparison |
 
 ## Running

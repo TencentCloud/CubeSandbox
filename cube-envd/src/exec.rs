@@ -461,23 +461,18 @@ pub fn spawn_pty(
         // Read the master until EOF (the child exited and closed its slave),
         // then reap — the same "drain fully before End" contract as `spawn`.
         let pump_error = pump_pty(master, tx.clone()).await.err();
-        if pump_error.is_some() {
-            let _ = kill_process_group(pid, libc::SIGKILL);
+        if let Some(error) = &pump_error {
+            tracing::warn!(pid, "error reading from pty: {error}");
         }
         let wait_result = child.wait().await;
         match (pump_error, wait_result) {
-            (Some(read_error), Ok(_)) => {
-                let _ = tx.send(PumpEvent::SpawnError(format!(
-                    "pty read failed: {read_error}"
-                )));
+            (Some(_), Ok(status)) | (None, Ok(status)) => {
+                let _ = tx.send(PumpEvent::End(EndEvent::from_exit_status(status)));
             }
             (Some(read_error), Err(wait_error)) => {
                 let _ = tx.send(PumpEvent::SpawnError(format!(
                     "pty read failed: {read_error}; wait failed: {wait_error}"
                 )));
-            }
-            (None, Ok(status)) => {
-                let _ = tx.send(PumpEvent::End(EndEvent::from_exit_status(status)));
             }
             (None, Err(e)) => {
                 let _ = tx.send(PumpEvent::SpawnError(format!("wait failed: {e}")));
