@@ -109,6 +109,37 @@ Clones returned by `clone()` satisfy three properties:
 | **Isolation** | Writes in one clone are invisible to others and to the source sandbox |
 | **Continuity** | The source sandbox keeps running after `clone()` returns, unaffected |
 
+## Fork
+
+`sb.fork(count=N)` derives N running copies in a **single server-side call**: the backend snapshots the source once and derives every copy from that snapshot. The source keeps running, and the temporary snapshot is managed by the server — no client-side cleanup.
+
+```python
+src = Sandbox.create(template=TEMPLATE_ID)
+forks = src.fork(count=3)
+for sb in forks:
+    if isinstance(sb, Sandbox):
+        sb.run_code("print('alive')")  # a running copy
+    else:
+        print(f"fork failed: {sb}")    # that slot's exception
+```
+
+Each fork succeeds or fails independently. The return value has exactly `count` entries — a `Sandbox` or the `Exception` that prevented that fork from starting. Partial success keeps the copies and does not raise; only whole-request failures raise (e.g. the source sandbox does not exist).
+
+### clone vs fork
+
+| | `clone(n=N)` | `fork(count=N)` |
+|---|---|---|
+| Failure semantics | All-or-nothing: failures kill siblings and raise | Per-fork independent: partial success keeps winners |
+| Orchestration | Client-side: snapshot + N creates | One server-side call (single snapshot, N derivations) |
+| Temp snapshot | Deleted by the SDK after the last clone is killed | Managed by the server |
+| Concurrency | `concurrency` option (default 1) | Server-governed |
+
+### Parameters and errors
+
+- `count`: 1..100, default 1. Out-of-range values raise in every SDK.
+- `timeout` — idle TTL of the forked sandboxes; the source is unaffected. Units differ per SDK: **seconds** (Python), **milliseconds** via `timeoutMs` (Node), a `time.Duration` (Go). The wire unit is seconds.
+- `404` source sandbox not found. `409` source not in a forkable state — a freshly created sandbox may need a moment before it can be snapshotted; retry shortly.
+
 ## Rollback
 
 `sb.rollback(snapshot_id)` restores the sandbox **in place** to the specified snapshot state: the filesystem is fully reset, the **sandbox ID stays the same**, and the `sb` object remains usable.
@@ -142,7 +173,7 @@ with Sandbox.create(template=new_snap.snapshot_id) as forked:
 - **Snapshots are not free.** Each snapshot corresponds to a full image in persistent storage. Delete snapshots when they are no longer needed, or run `list_snapshots()` periodically to clean up.
 - **`with` blocks do not delete snapshots.** The context manager only calls `kill()` on the sandbox. Snapshots created with `create_snapshot()` must be deleted explicitly with `Sandbox.delete_snapshot()`.
 - **`clone()` cleans up its internal snapshot automatically.** For temporary fan-out you do not need to manage snapshot lifecycle yourself — just call `clone()`.
-- **For large-scale fan-out**, prefer `clone(n=N, concurrency=C)`. The SDK handles cleanup on failure and avoids orphaned resources.
+- **For large-scale fan-out**, prefer `fork(count=N)` — one round-trip, per-fork independence, server-managed cleanup. Use `clone(n=N, concurrency=C)` when you need all-or-nothing semantics.
 
 ## Reference
 

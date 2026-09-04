@@ -12,6 +12,10 @@ CODE_INTERPRETER = "code_interpreter"
 PAUSE_RESUME = "pause_resume"
 SET_TIMEOUT = "set_timeout"
 ROLLBACK_CLONE = "rollback_clone"
+# E2B added Sandbox.fork in 2.46.4; the suite's validated e2b range
+# (2.21.0-2.37.1, see e2b-versions.txt) predates it, so fork stays
+# CubeSandbox-only until the range catches up.
+FORK = "fork"
 NETWORK_ALLOW_DENY = "network_allow_deny"
 # In-place egress policy replacement on a running sandbox, including
 # re-evaluation of already-established connections.
@@ -55,6 +59,7 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         PAUSE_RESUME,
         SET_TIMEOUT,
         ROLLBACK_CLONE,
+        FORK,
         NETWORK_ALLOW_DENY,
         NETWORK_PUBLIC_ACCESS,
         NETWORK_MASK_REQUEST_HOST,

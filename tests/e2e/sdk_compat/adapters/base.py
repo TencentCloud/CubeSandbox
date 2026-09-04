@@ -118,6 +118,12 @@ class SandboxAdapter(ABC):
     def clone(self, n: int = 1, *, concurrency: int = 1) -> list["SandboxAdapter"]:
         raise UnsupportedCapability(self.backend, "rollback_clone")
 
+    def fork(
+        self, count: int = 1, *, timeout: int | None = None
+    ) -> list[tuple["SandboxAdapter" | None, Exception | None]]:
+        """Server-side fork: one entry per requested fork, success or failure."""
+        raise UnsupportedCapability(self.backend, "fork")
+
     def list_snapshot_ids(self) -> set[str]:
         raise UnsupportedCapability(self.backend, "rollback_clone")
 

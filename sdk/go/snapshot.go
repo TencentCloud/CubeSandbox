@@ -7,11 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"sync"
+	"time"
 )
 
 // SnapshotInfo is the metadata returned by snapshot APIs. Snapshots are stored
@@ -168,10 +170,28 @@ func (s *Sandbox) Rollback(ctx context.Context, snapshotID string) (map[string]a
 	return result, nil
 }
 
-// Clone snapshots this sandbox and spins up opts.N fresh sandboxes from it.
-// The temporary snapshot is deleted after the last clone is killed through
-// this SDK process. On any create failure all successful siblings are killed
-// and the first error is returned, so a partial fan-out never leaks sandboxes.
+// ForkResult is the outcome of one requested fork: exactly one of Sandbox or
+// Err is set. Sandbox is non-nil when the fork started; Err describes why it
+// failed to start.
+type ForkResult struct {
+	Sandbox *Sandbox
+	Err     error
+}
+
+// forkRequestTimeout: CubeAPI's FORK_ROUTE_TIMEOUT plus headroom.
+const forkRequestTimeout = 1600 * time.Second
+
+// ForkOptions controls Sandbox.Fork: Count (1..100, default 1), per-fork
+// TTL Timeout, and client-side RequestTimeout.
+type ForkOptions struct {
+	Count          *int
+	Timeout        *time.Duration
+	RequestTimeout *time.Duration
+}
+
+// Clone snapshots this sandbox and spins up opts.N copies. The temp snapshot
+// is deleted after the last clone is killed. On any create failure the
+// successful siblings are killed and the first error is returned.
 func (s *Sandbox) Clone(ctx context.Context, opts CloneOptions) ([]*Sandbox, error) {
 	if err := s.ensureClient(); err != nil {
 		return nil, err
@@ -220,6 +240,7 @@ func (s *Sandbox) Clone(ctx context.Context, opts CloneOptions) ([]*Sandbox, err
 		}()
 	}
 	wg.Wait()
+
 	cleanup := &cloneCleanup{
 		client:     s.client,
 		snapshotID: snapshot.SnapshotID,
@@ -235,12 +256,92 @@ func (s *Sandbox) Clone(ctx context.Context, opts CloneOptions) ([]*Sandbox, err
 			_ = clone.Kill(context.WithoutCancel(ctx))
 		}
 		// A failed Kill does not release its clone ownership. Force the
-		// best-effort snapshot cleanup after all surviving siblings have been
+		// best-effort snapshot cleanup after every surviving sibling has been
 		// handled so a transient teardown failure cannot leak the snapshot.
 		cleanup.cleanup(context.WithoutCancel(ctx))
 		return nil, firstErr
 	}
 	return clones, nil
+}
+
+// forkResultEntry is one element of the server-side fork response array. The
+// server snapshots the source once and derives N sandboxes server-side, so a
+// fork is a single HTTP round-trip rather than client orchestration. Exactly one
+// of Sandbox or Error is populated per entry.
+type forkResultEntry struct {
+	Sandbox *Sandbox         `json:"sandbox,omitempty"`
+	Error   *forkErrorResult `json:"error,omitempty"`
+}
+
+// forkErrorResult is the per-fork error payload ({ code, message }).
+type forkErrorResult struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e *forkErrorResult) asError() error {
+	if e == nil {
+		return errors.New("fork failed")
+	}
+	return &APIError{RetCode: e.Code, Message: e.Message, Kind: apiErrorKindAPI}
+}
+
+// Fork derives opts.Count copies of this sandbox server-side. Each fork
+// succeeds or fails independently — successes are kept when siblings fail
+// (unlike Clone's all-or-nothing). The temporary snapshot is created and
+// managed by the backend, so no client-side cleanup is needed. Concurrency is
+// governed by the server, not the caller.
+func (s *Sandbox) Fork(ctx context.Context, opts ForkOptions) ([]ForkResult, error) {
+	count := 1
+	if opts.Count != nil {
+		count = *opts.Count
+	}
+	if count < 1 || count > 100 {
+		return nil, errors.New("count must be between 1 and 100")
+	}
+	if err := s.ensureClient(); err != nil {
+		return nil, err
+	}
+
+	// Fork may legally take minutes; an existing ctx deadline always wins.
+	timeout := forkRequestTimeout
+	if opts.RequestTimeout != nil {
+		timeout = *opts.RequestTimeout
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	// Drop the control client's overall timeout; the deadline lives in ctx.
+	// The shared transport is safe for concurrent clients.
+	forkHTTP := *s.client.controlHTTP
+	forkHTTP.Timeout = 0
+
+	payload := map[string]any{"count": count}
+	if opts.Timeout != nil {
+		payload["timeout"] = timeoutPayloadSeconds(*opts.Timeout)
+	}
+
+	var entries []forkResultEntry
+	path := "/sandboxes/" + url.PathEscape(s.SandboxID) + "/fork"
+	if err := s.client.doJSONWith(&forkHTTP, ctx, http.MethodPost, path, payload, &entries, http.StatusOK, http.StatusCreated); err != nil {
+		return nil, err
+	}
+	if len(entries) != count {
+		return nil, fmt.Errorf("fork returned %d results, expected %d", len(entries), count)
+	}
+
+	out := make([]ForkResult, len(entries))
+	for i, entry := range entries {
+		if entry.Sandbox != nil {
+			s.client.attachSandbox(entry.Sandbox)
+			out[i] = ForkResult{Sandbox: entry.Sandbox}
+		} else {
+			out[i] = ForkResult{Err: entry.Error.asError()}
+		}
+	}
+	return out, nil
 }
 
 // resetConnections drops pooled data-plane connections so the next request

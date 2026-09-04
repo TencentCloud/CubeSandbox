@@ -170,12 +170,18 @@ func (c *Client) attachSandbox(sandbox *Sandbox) {
 }
 
 func (c *Client) doJSON(ctx context.Context, method, path string, body any, out any, okStatuses ...int) error {
+	return c.doJSONWith(c.controlHTTP, ctx, method, path, body, out, okStatuses...)
+}
+
+// doJSONWith is doJSON on an explicit client; Fork uses a client without the
+// overall timeout so its long deadline is governed by ctx alone.
+func (c *Client) doJSONWith(httpClient *http.Client, ctx context.Context, method, path string, body any, out any, okStatuses ...int) error {
 	req, err := c.newRequest(ctx, method, path, body)
 	if err != nil {
 		return err
 	}
 
-	resp, err := c.controlHTTP.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}

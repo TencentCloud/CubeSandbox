@@ -238,6 +238,24 @@ class CubeSandboxAdapter(SandboxAdapter):
             for sandbox in self._sandbox.clone(n=n, concurrency=concurrency)
         ]
 
+    def fork(
+        self, count: int = 1, *, timeout: int | None = None
+    ) -> list[tuple["CubeSandboxAdapter" | None, Exception | None]]:
+        results = self._sandbox.fork(count, timeout=timeout)
+        return [
+            (
+                type(self)(
+                    item,
+                    sdk_config=self._sdk_config,
+                    e2e_config=self._e2e_config,
+                ),
+                None,
+            )
+            if isinstance(item, self._sandbox.__class__)
+            else (None, item)
+            for item in results
+        ]
+
     def list_snapshot_ids(self) -> set[str]:
         from cubesandbox import Sandbox
 
