@@ -180,6 +180,10 @@ sudo ./install.sh
 ```
 
 one-click 固定安装到 `/usr/local/services/cubetoolbox`。
+默认 `cubebox_os_image` 仍是 toolbox 下的真实目录; 设
+`CUBE_CUBEBOX_OS_IMAGE_ON_DATA=1` 可软链到 `CUBEBOX_OS_IMAGE_DATA_DIR`
+(默认 `/data/cubebox_os_image`), 避免大体积模板根文件系统打爆系统盘.
+升级时关掉开关不会自动拆掉已有软链; 全新 `--mode=install` 并设为 `0` 会去掉受管软链.
 
 新的 one-click 安装统一只使用 systemd 托管：
 

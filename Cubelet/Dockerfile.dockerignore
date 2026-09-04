@@ -21,6 +21,7 @@
 !deploy/kubernetes/images
 !deploy/kubernetes/images/scripts
 !deploy/kubernetes/images/scripts/component-entrypoint.sh
+!deploy/kubernetes/images/scripts/cubebox_os_image.sh
 !examples
 !examples/volume
 !examples/volume/cos
