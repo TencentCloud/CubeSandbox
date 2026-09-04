@@ -346,7 +346,12 @@ func configureSnapshotRuntimeRefHooks() {
 // still surface them here so future callers of the hook can react.
 func configureSandboxSpecHooks() {
 	sandbox.SetAfterCreateSandboxSuccessHook(func(ctx context.Context, sandboxID, hostID, hostIP string, req *sandboxtypes.CreateCubeSandboxReq) error {
-		return sandboxspec.Put(ctx, sandboxID, req, sandboxspec.PutOptions{
+		storedReq, err := cloneCreateRequest(req)
+		if err != nil {
+			return err
+		}
+		delete(storedReq.Annotations, sandbox.AnnotationPluginVolumeSources)
+		return sandboxspec.Put(ctx, sandboxID, storedReq, sandboxspec.PutOptions{
 			HostID: hostID,
 			HostIP: hostIP,
 		})
@@ -425,6 +430,10 @@ func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sa
 		return nil, err
 	}
 	delete(cloned.Annotations, constants.CubeAnnotationsAppSnapshotCreate)
+	// Runtime plugin metadata may contain opaque provider state. Persist only
+	// the stable volume IDs/mount declarations and resolve current metadata
+	// from t_cube_volume for every restore.
+	delete(cloned.Annotations, sandbox.AnnotationPluginVolumeSources)
 	cloned.SnapshotDir = ""
 	cloned.Timeout = nil
 	cloned.InsId = ""

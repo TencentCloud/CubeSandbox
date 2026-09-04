@@ -372,6 +372,10 @@ func validateCommitVolumeSources(cb *cubeboxstore.CubeBox, rawHostMounts map[str
 	if cb == nil {
 		return nil
 	}
+	pluginVolumes, err := declaredPluginVolumes(cb.Annotations)
+	if err != nil {
+		return err
+	}
 	if err := validateDeclaredRawHostDirVolumes(cb.Volumes, rawHostMounts); err != nil {
 		return err
 	}
@@ -409,10 +413,16 @@ func validateCommitVolumeSources(cb *cubeboxstore.CubeBox, rawHostMounts map[str
 		}
 		source := volume.GetVolumeSource()
 		if source == nil {
-			continue
+			return fmt.Errorf("volume %s has no persisted source", volume.GetName())
 		}
-		if source.GetPluginVolume() != nil {
-			return fmt.Errorf("plugin_volume %s is not supported by CommitSandbox", volume.GetName())
+		if plugin := source.GetPluginVolume(); plugin != nil {
+			if strings.TrimSpace(plugin.GetDriver()) == "" {
+				return fmt.Errorf("plugin_volume %s has an empty driver", volume.GetName())
+			}
+			if declaredDriver, ok := pluginVolumes[volume.GetName()]; ok && declaredDriver != plugin.GetDriver() {
+				return fmt.Errorf("plugin_volume %s driver does not match runtime metadata", volume.GetName())
+			}
+			continue
 		}
 		if hostDirs := source.GetHostDirVolumes(); hostDirs != nil {
 			if _, ok := rawHostMounts[volume.GetName()]; ok {
@@ -430,13 +440,36 @@ func validateCommitVolumeSources(cb *cubeboxstore.CubeBox, rawHostMounts map[str
 				return fmt.Errorf("sandbox_path volume %s with type %s is not supported by CommitSandbox", volume.GetName(), sandboxPath.GetType())
 			}
 		}
+		if emptyVolumeSource(source) {
+			if _, ok := pluginVolumes[volume.GetName()]; !ok {
+				return fmt.Errorf("volume %s has an unknown empty source", volume.GetName())
+			}
+		}
 	}
-	for name := range usedVolumes {
-		if commitPluginVolumeListed(cb.Annotations, name) {
-			return fmt.Errorf("plugin_volume %s is not supported by CommitSandbox", name)
+	volumeNames := make(map[string]int, len(cb.Volumes))
+	for _, volume := range cb.Volumes {
+		if volume != nil && volume.GetName() != "" {
+			volumeNames[volume.GetName()]++
+		}
+	}
+	for name := range pluginVolumes {
+		if _, ok := usedVolumes[name]; !ok {
+			return fmt.Errorf("plugin_volume %s is declared but not mounted", name)
+		}
+		if volumeNames[name] != 1 {
+			return fmt.Errorf("plugin_volume %s must have exactly one volume declaration", name)
 		}
 	}
 	return nil
+}
+
+func emptyVolumeSource(source *cubebox.VolumeSource) bool {
+	return source != nil &&
+		source.GetEmptyDir() == nil &&
+		source.GetSandboxPath() == nil &&
+		source.GetHostDirVolumes() == nil &&
+		source.GetImage() == nil &&
+		source.GetPluginVolume() == nil
 }
 
 func validateDeclaredRawHostDirVolumes(volumes []*cubebox.Volume, declarations map[string]rawHostMountDeclaration) error {
@@ -469,29 +502,34 @@ func validateDeclaredRawHostDirVolumes(volumes []*cubebox.Volume, declarations m
 	return nil
 }
 
-// commitPluginVolumeListed reports whether volumeName is in the
-// plugin-volume-sources annotation (mixed-version path when VolumeSource
-// has no plugin_volume field).
-func commitPluginVolumeListed(annotations map[string]string, volumeName string) bool {
-	if annotations == nil || volumeName == "" {
-		return false
+func declaredPluginVolumes(annotations map[string]string) (map[string]string, error) {
+	result := make(map[string]string)
+	if annotations == nil {
+		return result, nil
 	}
 	raw := strings.TrimSpace(annotations["plugin-volume-sources"])
-	if raw == "" {
-		return false
+	if raw == "" || raw == "[]" || strings.EqualFold(raw, "null") {
+		return result, nil
 	}
 	var entries []struct {
-		Name string `json:"name"`
+		Name   string `json:"name"`
+		Driver string `json:"driver"`
 	}
 	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
-		return false
+		return nil, fmt.Errorf("invalid plugin-volume-sources annotation: %w", err)
 	}
-	for _, e := range entries {
-		if e.Name == volumeName {
-			return true
+	for i, entry := range entries {
+		entry.Name = strings.TrimSpace(entry.Name)
+		entry.Driver = strings.TrimSpace(entry.Driver)
+		if entry.Name == "" || entry.Driver == "" {
+			return nil, fmt.Errorf("plugin-volume-sources entry %d requires name and driver", i)
 		}
+		if _, ok := result[entry.Name]; ok {
+			return nil, fmt.Errorf("plugin_volume %s is duplicated in runtime metadata", entry.Name)
+		}
+		result[entry.Name] = entry.Driver
 	}
-	return false
+	return result, nil
 }
 
 type rawHostMountDeclaration struct {

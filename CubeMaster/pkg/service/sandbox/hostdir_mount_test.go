@@ -9,7 +9,10 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func TestInjectHostDirMounts_AllowedPrefix(t *testing.T) {
@@ -132,16 +135,19 @@ func TestInjectHostDirMounts_MalformedJSON(t *testing.T) {
 func TestInjectPluginVolumeMounts_Readonly(t *testing.T) {
 	tests := []struct {
 		name         string
+		volumeName   string
 		annotation   string
 		wantReadonly bool
 	}{
 		{
 			name:         "readonly forwarded",
+			volumeName:   "dataset-volume",
 			annotation:   `[{"name":"dataset-volume","container_path":"/dataset","readonly":true}]`,
 			wantReadonly: true,
 		},
 		{
 			name:         "readonly omitted defaults to false",
+			volumeName:   "workspace-volume",
 			annotation:   `[{"name":"workspace-volume","container_path":"/workspace"}]`,
 			wantReadonly: false,
 		},
@@ -153,6 +159,7 @@ func TestInjectPluginVolumeMounts_Readonly(t *testing.T) {
 				Annotations: map[string]string{
 					AnnotationPluginVolumeMounts: tt.annotation,
 				},
+				Volumes:    []*types.Volume{{Name: tt.volumeName}},
 				Containers: []*types.Container{{Name: "main"}, {Name: "sidecar"}},
 			}
 
@@ -182,6 +189,53 @@ func TestInjectPluginVolumeMounts_InvalidReadonlyType(t *testing.T) {
 	if err := injectPluginVolumeMounts(context.Background(), req); err == nil {
 		t.Fatal("injectPluginVolumeMounts() error = nil, want invalid readonly type error")
 	}
+}
+
+func TestInjectPluginVolumeMountsIsIdempotentForSnapshotRestore(t *testing.T) {
+	req := &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			AnnotationPluginVolumeMounts: `[{"name":"dataset","container_path":"/dataset","readonly":true}]`,
+		},
+		Volumes:    []*types.Volume{{Name: "dataset"}},
+		Containers: []*types.Container{{Name: "main"}},
+	}
+	require.NoError(t, injectPluginVolumeMounts(context.Background(), req))
+	require.NoError(t, injectPluginVolumeMounts(context.Background(), req))
+	require.Len(t, req.Containers[0].VolumeMounts, 1)
+	assert.Equal(t, "dataset", req.Containers[0].VolumeMounts[0].GetName())
+	assert.True(t, req.Containers[0].VolumeMounts[0].GetReadonly())
+}
+
+func TestInjectPluginVolumeMountsRejectsConflictingStoredMount(t *testing.T) {
+	req := &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			AnnotationPluginVolumeMounts: `[{"name":"dataset","container_path":"/dataset"}]`,
+		},
+		Volumes: []*types.Volume{{Name: "dataset"}},
+		Containers: []*types.Container{{
+			Name: "main",
+			VolumeMounts: []*cubeboxv1.VolumeMounts{{
+				Name:          "dataset",
+				ContainerPath: "/other",
+			}},
+		}},
+	}
+	err := injectPluginVolumeMounts(context.Background(), req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conflicts")
+}
+
+func TestCreateRequestHasPluginVolume(t *testing.T) {
+	assert.False(t, CreateRequestHasPluginVolume(nil))
+	assert.False(t, CreateRequestHasPluginVolume(&types.CreateCubeSandboxReq{}))
+	assert.True(t, CreateRequestHasPluginVolume(&types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			AnnotationPluginVolumeMounts: `[{"name":"dataset","container_path":"/dataset"}]`,
+		},
+	}))
+	assert.True(t, CreateRequestHasPluginVolume(&types.CreateCubeSandboxReq{
+		Volumes: []*types.Volume{{Name: "dataset"}},
+	}))
 }
 
 func TestValidateHostPath(t *testing.T) {

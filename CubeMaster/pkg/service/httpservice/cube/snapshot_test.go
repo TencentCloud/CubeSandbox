@@ -436,13 +436,52 @@ func TestBindSnapshotCreateReplicaPinsRawHostMountToOrigin(t *testing.T) {
 	assert.Empty(t, req.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal])
 }
 
-func TestSnapshotRestoreHasHostMountFromStoredTemplate(t *testing.T) {
+func TestBindSnapshotCreateReplicaPinsPluginVolumeToOrigin(t *testing.T) {
+	stubSnapshotReadyForNewUse(t)
+	origSource := getSnapshotRestoreSourceFn
+	origDecide := decideRestorePlacementFn
+	origReplica := resolveSnapshotReadyReplicaFn
+	t.Cleanup(func() {
+		getSnapshotRestoreSourceFn = origSource
+		decideRestorePlacementFn = origDecide
+		resolveSnapshotReadyReplicaFn = origReplica
+	})
+	getSnapshotRestoreSourceFn = func(context.Context, string) (*templatecenter.RestoreSource, error) {
+		return &templatecenter.RestoreSource{
+			SnapshotID: "snap-1", Backend: constants.SnapshotBackendS3,
+			RemoteStatus: constants.RemoteStatusReady, OriginNodeID: "node-a", OriginNodeIP: "10.0.0.1",
+		}, nil
+	}
+	decideRestorePlacementFn = func(_ context.Context, in restoreplace.Input) (*restoreplace.Placement, error) {
+		assert.True(t, in.PinToOrigin)
+		return &restoreplace.Placement{NodeID: "node-a", NodeIP: "10.0.0.1"}, nil
+	}
+	resolveSnapshotReadyReplicaFn = func(context.Context, string, string) (templatecenter.ReplicaStatus, error) {
+		return templatecenter.ReplicaStatus{NodeID: "node-a"}, nil
+	}
+	req := &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			sandbox.AnnotationPluginVolumeMounts: `[{"name":"data","container_path":"/mnt/data"}]`,
+		},
+		Volumes: []*types.Volume{{Name: "data"}},
+	}
+
+	require.NoError(t, bindSnapshotCreateReplica(context.Background(), "snap-1", req))
+	assert.Equal(t, []string{"node-a"}, req.DistributionScope)
+	assert.Empty(t, req.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal])
+}
+
+func TestSnapshotRestoreHasExternalMountFromStoredTemplate(t *testing.T) {
 	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{}}
 	templateReq := &types.CreateCubeSandboxReq{Annotations: map[string]string{
 		sandbox.AnnotationHostDirMount: `[{"hostPath":"/data/shared","mountPath":"/mnt"}]`,
 	}}
 
-	assert.True(t, snapshotRestoreHasHostMount(req, templateReq))
+	assert.True(t, snapshotRestoreHasExternalMount(req, templateReq))
+	templateReq.Annotations = map[string]string{
+		sandbox.AnnotationPluginVolumeMounts: `[{"name":"data","container_path":"/mnt"}]`,
+	}
+	assert.True(t, snapshotRestoreHasExternalMount(req, templateReq))
 }
 
 func TestBindSnapshotCreateReplicaHostMountFailsWithoutOriginMetadata(t *testing.T) {

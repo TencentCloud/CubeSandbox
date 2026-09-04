@@ -564,7 +564,7 @@ func TestValidateCommitSandboxTargetRejectsSandboxPathHostBind(t *testing.T) {
 	}
 }
 
-func TestValidateCommitSandboxTargetRejectsPluginVolume(t *testing.T) {
+func TestValidateCommitSandboxTargetAllowsPluginVolume(t *testing.T) {
 	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
 		Name: "data",
 		VolumeSource: &cubeboxv1.VolumeSource{
@@ -578,12 +578,12 @@ func TestValidateCommitSandboxTargetRejectsPluginVolume(t *testing.T) {
 		ContainerPath: "/data/vol",
 	}})
 
-	_, err := validateCommitSandboxTarget(cb)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "plugin_volume")
+	root, err := validateCommitSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", root)
 }
 
-func TestValidateCommitSandboxTargetRejectsPluginVolumeAnnotation(t *testing.T) {
+func TestValidateCommitSandboxTargetAllowsPluginVolumeAnnotation(t *testing.T) {
 	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
 		Name:         "data",
 		VolumeSource: &cubeboxv1.VolumeSource{},
@@ -598,9 +598,44 @@ func TestValidateCommitSandboxTargetRejectsPluginVolumeAnnotation(t *testing.T) 
 		"plugin-volume-sources": `[{"name":"data","driver":"cos-rpc"}]`,
 	}
 
+	root, err := validateCommitSandboxTarget(cb)
+	require.NoError(t, err)
+	assert.Equal(t, "root", root)
+}
+
+func TestValidateCommitSandboxTargetRejectsMalformedPluginVolumeAnnotation(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name:         "data",
+		VolumeSource: &cubeboxv1.VolumeSource{},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "data",
+		ContainerPath: "/data/vol",
+	}})
+	cb.Annotations = map[string]string{"plugin-volume-sources": `{bad`}
+
 	_, err := validateCommitSandboxTarget(cb)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "plugin_volume")
+	assert.Contains(t, err.Error(), "invalid plugin-volume-sources")
+}
+
+func TestValidateCommitSandboxTargetRejectsUnknownEmptyVolumeSource(t *testing.T) {
+	cb := newRunningCommitSandboxForTest([]*cubeboxv1.Volume{{
+		Name:         "data",
+		VolumeSource: &cubeboxv1.VolumeSource{},
+	}}, []*cubeboxv1.VolumeMounts{{
+		Name:          "root",
+		ContainerPath: "/",
+	}, {
+		Name:          "data",
+		ContainerPath: "/data/vol",
+	}})
+
+	_, err := validateCommitSandboxTarget(cb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown empty source")
 }
 
 func TestValidatePauseSandboxTargetAllowsPluginVolume(t *testing.T) {

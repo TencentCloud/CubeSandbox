@@ -269,8 +269,8 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 	if err := checkParam(req); err != nil {
 		return nil, err
 	}
-	log.G(ctx).Infof("[hostdir] ConstructCubeletReq: annotations=%v volumes_before_inject=%d",
-		req.Annotations, len(req.Volumes))
+	log.G(ctx).Infof("[hostdir] ConstructCubeletReq: annotation_count=%d volumes_before_inject=%d",
+		len(req.Annotations), len(req.Volumes))
 
 	// Normalize the sandbox idle timeout into a concrete value.
 	timeoutSeconds, err := resolveTimeoutSeconds(req.Timeout, config.GetConfig().CubeletConf.DefaultTimeoutInsec)
@@ -318,6 +318,11 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 
 	if err = checkAndGetVolumes(req, out); err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
+	}
+	if sourceMetadata, ok := req.Annotations[AnnotationPluginVolumeSources]; ok {
+		out.Annotations[AnnotationPluginVolumeSources] = sourceMetadata
+	} else {
+		delete(out.Annotations, AnnotationPluginVolumeSources)
 	}
 	// Sync any annotations added by checkAndGetVolumes (e.g. plugin-volume-sources)
 	// into the outgoing RunCubeSandboxRequest.
@@ -786,6 +791,10 @@ func checkAndGetVolumes(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSan
 			}
 		}
 	}
+	// plugin-volume-sources contains runtime driver/private_data resolved from
+	// t_cube_volume. Never reuse a value inherited from a snapshot or an
+	// earlier construction pass; rebuild it from current VolumeRecord rows.
+	delete(req.Annotations, AnnotationPluginVolumeSources)
 
 	if req.Volumes != nil {
 		for _, e := range req.Volumes {
@@ -793,9 +802,15 @@ func checkAndGetVolumes(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSan
 				return fmt.Errorf("volume name must not be empty")
 			}
 
-			// Identify plugin volumes by name appearing in plugin-volume-mounts
-			// annotation, or by having a nil VolumeSource.
-			if e.VolumeSource == nil || pluginVolumeNames[e.Name] {
+			// Identify plugin volumes by annotation, nil source (the CubeAPI
+			// representation), or the native PluginVolume source.
+			explicitPlugin := e.VolumeSource != nil && e.VolumeSource.PluginVolume != nil
+			if explicitPlugin {
+				if volumeID := strings.TrimSpace(e.VolumeSource.PluginVolume.Options["volume_id"]); volumeID != "" && volumeID != e.Name {
+					return fmt.Errorf("volume [%s]: plugin volume_id %q must match volume name", e.Name, volumeID)
+				}
+			}
+			if e.VolumeSource == nil || explicitPlugin || pluginVolumeNames[e.Name] {
 				record, err := resolveVolumeRecord(e.Name)
 				if err != nil {
 					return fmt.Errorf("volume [%s]: %w", e.Name, err)
@@ -1182,7 +1197,6 @@ func pluginVolumeWireVolume(name string) *cubebox.Volume {
 //
 // private_data is omitted from the JSON object when empty.
 func appendPluginVolumeSourceAnnotation(req *types.CreateCubeSandboxReq, name, driver, privateData string) error {
-	const key = "plugin-volume-sources"
 	type entry struct {
 		Name        string `json:"name"`
 		Driver      string `json:"driver"`
@@ -1192,16 +1206,31 @@ func appendPluginVolumeSourceAnnotation(req *types.CreateCubeSandboxReq, name, d
 		req.Annotations = make(map[string]string)
 	}
 	var entries []entry
-	if raw := req.Annotations[key]; raw != "" {
+	if raw := req.Annotations[AnnotationPluginVolumeSources]; raw != "" {
 		if err := json.Unmarshal([]byte(raw), &entries); err != nil {
 			return err
 		}
 	}
-	entries = append(entries, entry{Name: name, Driver: driver, PrivateData: privateData})
-	b, err := json.Marshal(entries)
+	next := entry{Name: name, Driver: driver, PrivateData: privateData}
+	found := false
+	out := entries[:0]
+	for _, existing := range entries {
+		if existing.Name != name {
+			out = append(out, existing)
+			continue
+		}
+		if !found {
+			out = append(out, next)
+			found = true
+		}
+	}
+	if !found {
+		out = append(out, next)
+	}
+	b, err := json.Marshal(out)
 	if err != nil {
 		return err
 	}
-	req.Annotations[key] = string(b)
+	req.Annotations[AnnotationPluginVolumeSources] = string(b)
 	return nil
 }
