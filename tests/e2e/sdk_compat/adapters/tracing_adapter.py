@@ -285,6 +285,28 @@ class TracingSandboxAdapter(SandboxAdapter):
         )
         return [wrap_adapter(clone, self._trace) for clone in clones]
 
+    def fork(
+        self, count: int = 1, *, timeout: int | None = None
+    ) -> list[tuple[SandboxAdapter | None, Exception | None]]:
+        results = self._trace.capture(
+            "fork",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "count": count,
+                "timeout": timeout,
+            },
+            lambda: self._wrapped.fork(count, timeout=timeout),
+            output=lambda results: {
+                "forked_ids": [a.sandbox_id for a, _ in results if a is not None],
+                "failures": [str(err) for _, err in results if err is not None],
+            },
+        )
+        return [
+            (wrap_adapter(adapter, self._trace) if adapter is not None else None, err)
+            for adapter, err in results
+        ]
+
     def list_snapshot_ids(self) -> set[str]:
         return self._trace.capture(
             "list_snapshot_ids",

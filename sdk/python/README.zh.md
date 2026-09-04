@@ -105,6 +105,25 @@ sb.pause(timeout=60, interval=0.5) # 自定义轮询参数
 sb2 = Sandbox.connect(sb.sandbox_id)
 ```
 
+### 分叉（Fork）
+
+```python
+sb = Sandbox.create()
+
+# 一次服务端调用：后端对 sb 只打一次快照，派生 N 个副本。
+forks = sb.fork(count=3)              # list[Sandbox | Exception]，每个 fork 一项
+forks = sb.fork(count=3, timeout=60)  # timeout：新副本空闲存活时长，单位秒
+
+for f in forks:
+    if isinstance(f, Sandbox):
+        f.run_code("print('alive')")  # 运行中的副本
+    else:
+        print(f)                      # 该 fork 的异常
+```
+
+部分成功会保留副本且不抛异常；只有整体失败才抛异常（如源沙箱不存在）。
+`count` 为 1..100（默认 1）。与 `clone` 不同，临时快照由服务端管理。
+
 ### 指定计算节点
 
 通过计算节点 ID 或 Host IP 限定调度范围。只传一个节点即可将沙箱固定到

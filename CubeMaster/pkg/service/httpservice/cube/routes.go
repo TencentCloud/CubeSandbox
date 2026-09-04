@@ -25,6 +25,7 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.POST(SandboxCommitAction, handleSandboxCommitAction)
 	g.POST(SandboxRollbackAction, handleSandboxRollbackAction)
 	g.POST(SandboxAction+"/:sandbox_id/rollback", handleSandboxRollbackAction)
+	g.POST(SandboxAction+"/:sandbox_id/fork", handleForkSandboxFromSandboxAction)
 	g.POST(SandboxUpdateAction, handleUpdateAction)
 	g.POST(SandboxNetworkAction, handleSandboxNetworkAction)
 	g.POST(SandboxTimeoutAction, handleSandboxTimeoutAction)
