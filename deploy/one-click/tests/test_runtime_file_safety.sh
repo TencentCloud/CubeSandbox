@@ -904,6 +904,10 @@ test_postcheck_skips_when_external_host_set() {
   CUBE_EXTERNAL_MYSQL_HOST=db.example.com \
     bash "${ONE_CLICK_DIR}/scripts/systemd/mysql-postcheck.sh" \
     || fail "mysql-postcheck must exit 0 when CUBE_EXTERNAL_MYSQL_HOST is set"
+  CUBE_EXTERNAL_POSTGRES_HOST=pg.example.com \
+    CUBE_DATABASE_DRIVER=postgres \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/mysql-postcheck.sh" \
+    || fail "mysql-postcheck must exit 0 when CUBE_EXTERNAL_POSTGRES_HOST is set"
   CUBE_EXTERNAL_REDIS_HOST=cache.example.com \
     bash "${ONE_CLICK_DIR}/scripts/systemd/redis-postcheck.sh" \
     || fail "redis-postcheck must exit 0 when CUBE_EXTERNAL_REDIS_HOST is set"
