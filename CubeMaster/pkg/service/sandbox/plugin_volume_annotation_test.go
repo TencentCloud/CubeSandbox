@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
@@ -69,4 +71,25 @@ func TestAppendPluginVolumeSourceAnnotation_malformedExisting(t *testing.T) {
 	if err := appendPluginVolumeSourceAnnotation(req, "vol-a", "cos", "x"); err == nil {
 		t.Fatal("expected error for malformed existing annotation")
 	}
+}
+
+func TestAppendPluginVolumeSourceAnnotationReplacesStaleEntry(t *testing.T) {
+	t.Parallel()
+
+	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{
+		AnnotationPluginVolumeSources: `[
+			{"name":"vol-a","driver":"old","private_data":"stale"},
+			{"name":"vol-a","driver":"duplicate","private_data":"duplicate"},
+			{"name":"vol-b","driver":"cos"}
+		]`,
+	}}
+	require.NoError(t, appendPluginVolumeSourceAnnotation(req, "vol-a", "s3", "fresh"))
+
+	var entries []map[string]string
+	require.NoError(t, json.Unmarshal([]byte(req.Annotations[AnnotationPluginVolumeSources]), &entries))
+	require.Len(t, entries, 2)
+	assert.Equal(t, map[string]string{
+		"name": "vol-a", "driver": "s3", "private_data": "fresh",
+	}, entries[0])
+	assert.Equal(t, "vol-b", entries[1]["name"])
 }

@@ -109,7 +109,14 @@ func newVolumeTestEngine(t *testing.T) (*gin.Engine, *gorm.DB, *fakeControllerPl
 
 	origDB := volumeDB
 	volumeDB = func() *gorm.DB { return db }
-	t.Cleanup(func() { volumeDB = origDB })
+	origSnapshotRef := snapshotReferencesPluginVolume
+	snapshotReferencesPluginVolume = func(context.Context, string) (bool, error) {
+		return false, nil
+	}
+	t.Cleanup(func() {
+		volumeDB = origDB
+		snapshotReferencesPluginVolume = origSnapshotRef
+	})
 
 	fake := newFakeControllerPlugin("fake-vol")
 	plugin.Register(fake)
@@ -217,6 +224,23 @@ func TestVolumeHTTP_DeleteWhenRefCountNonZeroReturnsConflict(t *testing.T) {
 	_, env = doVolumeRequest(t, r, http.MethodDelete, "/cube/volume/"+volumeID, "")
 	assert.Equal(t, 0, env.Ret.RetCode)
 	assert.True(t, fake.wasDestroyed(volumeID))
+}
+
+func TestVolumeHTTP_DeleteWhenSnapshotReferencesVolumeReturnsConflict(t *testing.T) {
+	r, _, fake := newVolumeTestEngine(t)
+	volumeID := "vol-snapshot-ref"
+	snapshotReferencesPluginVolume = func(_ context.Context, got string) (bool, error) {
+		return got == volumeID, nil
+	}
+
+	_, created := doVolumeRequest(t, r, http.MethodPost, "/cube/volume",
+		fmt.Sprintf(`{"name":%q,"driver":%q}`, volumeID, fake.Name()))
+	require.Equal(t, 0, created.Ret.RetCode)
+
+	_, env := doVolumeRequest(t, r, http.MethodDelete, "/cube/volume/"+volumeID, "")
+	assert.Equal(t, int(errorcode.ErrorCode_Conflict), env.Ret.RetCode)
+	assert.Contains(t, env.Ret.RetMsg, "active snapshot")
+	assert.False(t, fake.wasDestroyed(volumeID))
 }
 
 func TestVolumeHTTP_UnknownDriverRejected(t *testing.T) {

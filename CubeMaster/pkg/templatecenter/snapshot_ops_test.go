@@ -16,6 +16,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	errorcodev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -27,6 +28,7 @@ func TestBuildSnapshotRequestsUsesSnapshotID(t *testing.T) {
 		Request: &sandboxtypes.Request{RequestID: "req-1"},
 		Annotations: map[string]string{
 			constants.CubeAnnotationsSystemDiskSize: "20",
+			sandbox.AnnotationPluginVolumeSources:   `[{"name":"data","driver":"s3","private_data":"secret"}]`,
 		},
 	}
 
@@ -41,6 +43,12 @@ func TestBuildSnapshotRequestsUsesSnapshotID(t *testing.T) {
 		if got := constants.GetAppSnapshotVersion(item.Annotations); got != DefaultTemplateVersion {
 			t.Fatalf("snapshot version = %q, want %q", got, DefaultTemplateVersion)
 		}
+	}
+	if _, ok := storedReq.Annotations[sandbox.AnnotationPluginVolumeSources]; ok {
+		t.Fatal("stored snapshot request must not retain runtime plugin volume source metadata")
+	}
+	if _, ok := createReq.Annotations[sandbox.AnnotationPluginVolumeSources]; !ok {
+		t.Fatal("live create request should remain unchanged")
 	}
 }
 
