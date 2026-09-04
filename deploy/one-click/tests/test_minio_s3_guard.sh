@@ -475,6 +475,54 @@ test_ensure_nvme_cli_installs_when_missing() {
     || fail "ensure_nvme_cli must pass the detected pm to the installer (got $(cat "${marker}"))"
 }
 
+# install_s3_volume_host_deps must not invoke install-s3-deps.sh (dnf/yum) when
+# no S3 backend is configured. When CUBE_S3_ENDPOINT is set it must run the
+# script so mounts get s3fs/jq.
+test_install_s3_volume_host_deps_skips_without_endpoint() {
+  local prefix="${TMP_DIR}/s3-deps-skip"
+  local marker="${prefix}/ran"
+  local out="${TMP_DIR}/s3-deps-skip.out"
+  rm -rf "${prefix}"
+  mkdir -p "${prefix}/Cubelet/plugin"
+  cat > "${prefix}/Cubelet/plugin/install-s3-deps.sh" <<EOF
+#!/usr/bin/env bash
+printf 'ran\n' > "${marker}"
+exit 0
+EOF
+  chmod +x "${prefix}/Cubelet/plugin/install-s3-deps.sh"
+  CUBE_S3_ENDPOINT=""
+  rm -f "${marker}"
+  ( install_s3_volume_host_deps "${prefix}" "compute" ) >"${out}" 2>&1 \
+    || fail "empty endpoint must return 0 (got $(cat "${out}"))"
+  grep -Fq "skipping host jq/s3fs install" "${out}" \
+    || fail "empty endpoint must log skip (got $(cat "${out}"))"
+  [[ ! -f "${marker}" ]] \
+    || fail "empty endpoint must not invoke install-s3-deps.sh"
+}
+
+test_install_s3_volume_host_deps_runs_with_endpoint() {
+  local prefix="${TMP_DIR}/s3-deps-run"
+  local marker="${prefix}/ran"
+  local out="${TMP_DIR}/s3-deps-run.out"
+  rm -rf "${prefix}"
+  mkdir -p "${prefix}/Cubelet/plugin"
+  cat > "${prefix}/Cubelet/plugin/install-s3-deps.sh" <<EOF
+#!/usr/bin/env bash
+printf 'ran\n' > "${marker}"
+exit 0
+EOF
+  chmod +x "${prefix}/Cubelet/plugin/install-s3-deps.sh"
+  CUBE_S3_ENDPOINT="http://10.0.0.11:9000"
+  rm -f "${marker}"
+  ( install_s3_volume_host_deps "${prefix}" "compute" ) >"${out}" 2>&1 \
+    || fail "set endpoint must return 0 (got $(cat "${out}"))"
+  [[ -f "${marker}" ]] \
+    || fail "set endpoint must invoke install-s3-deps.sh (out=$(cat "${out}"))"
+  if grep -Fq "skipping host jq/s3fs install" "${out}"; then
+    fail "set endpoint must not log skip"
+  fi
+}
+
 test_write_volume_s3_conf_file_source_roundtrip
 test_s3lvol_host_from_endpoint
 test_write_s3lvol_cfg_file_roundtrip
@@ -488,6 +536,8 @@ test_rcow_purge_expands_s3_addr_flags
 test_ensure_nvme_cli_skips_when_disabled
 test_ensure_nvme_cli_skips_when_present
 test_ensure_nvme_cli_installs_when_missing
+test_install_s3_volume_host_deps_skips_without_endpoint
+test_install_s3_volume_host_deps_runs_with_endpoint
 test_validate_s3lvol_rpc_client_accepts_help
 test_validate_s3lvol_rpc_client_dies_on_incompat
 test_validate_cubelet_s3lvol_startup_deps_runs_rpc_help

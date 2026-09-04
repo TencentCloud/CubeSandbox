@@ -2476,6 +2476,14 @@ install_s3_volume_host_deps() {
   local deploy_role="$2"
   local script
 
+  # No S3 backend configured (CUBE_S3_ENDPOINT empty; MinIO path fills this
+  # earlier when enabled): skip jq/s3fs package installs so offline/private
+  # hosts are not forced onto dnf/yum.
+  if [[ -z "${CUBE_S3_ENDPOINT:-}" ]]; then
+    log "S3 volume backend not configured; skipping host jq/s3fs install"
+    return 0
+  fi
+
   if [[ "${deploy_role}" == "compute" ]]; then
     script="${install_prefix}/Cubelet/plugin/install-s3-deps.sh"
   else
