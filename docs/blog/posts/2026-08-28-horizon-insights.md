@@ -3,8 +3,7 @@ title: "Sandboxing Financial Research Agents: Hongze Info's Architecture and Sel
 date: 2026-08-26
 author: Wang Zhengkai (CTO, Hongze Midao)
 description: "A single financial research Agent run can last tens of seconds to several minutes, reading research methodologies and data definitions, calling data APIs, running scripts, generating intermediate files, and having the model synthesize results. The sandbox carrying it can't just 'run a snippet of code' — it must contain the complete Agent loop in an isolated environment. This article introduces three core use cases of CubeSandbox in Hongze's 4as Agent."
-featured: true
-weight: 2
+featured: false
 ---
 
 # Sandboxing Financial Research Agents: Hongze Info's Architecture and Selection Practice with CubeSandbox
