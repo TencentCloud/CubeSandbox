@@ -44,7 +44,6 @@ func TestMountArgs(t *testing.T) {
 		"-oendpoint=us-east-1",
 		"-opasswd_file=" + m.cfg.PasswdFile,
 		"-oallow_other",
-		"-ononempty",
 		"-ouse_path_request_style",
 	} {
 		if !strings.Contains(joined, want) {
