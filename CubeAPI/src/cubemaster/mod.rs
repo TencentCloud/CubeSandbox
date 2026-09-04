@@ -17,6 +17,7 @@
 ///   - GET    /cube/snapshot                          list snapshots (paginated)
 ///   - DELETE /cube/snapshot/{snapshot_id}            delete snapshot (synchronous terminal result)
 ///   - POST   /cube/sandbox/{sandbox_id}/rollback     rollback sandbox to snapshot (synchronous terminal result)
+///   - POST   /cube/sandbox/{sandbox_id}/fork         fork sandbox into N copies (server-side, one snapshot)
 ///   - GET    /cube/operation/{operation_id}          query operation/audit record (not required for snapshot completion)
 ///
 /// New APIs required (❌ not yet on CubeMaster — pending implementation):
@@ -307,6 +308,27 @@ impl CubeMasterClient {
     ) -> Result<RollbackResponse, CubeMasterError> {
         validate_path_segment("sandbox_id", sandbox_id)?;
         let url = format!("{}/cube/sandbox/{}/rollback", self.base_url, sandbox_id);
+        let resp = self
+            .inner
+            .post(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// POST /cube/sandbox/{sandbox_id}/fork — fork a running sandbox into N
+    /// copies from a single snapshot. CubeMaster performs the fork server-side
+    /// (one snapshot, N bounded-concurrency derives) and returns one result per
+    /// requested fork.
+    pub async fn fork_sandbox(
+        &self,
+        sandbox_id: &str,
+        req: &ForkSandboxRequest,
+    ) -> Result<ForkSandboxResponse, CubeMasterError> {
+        validate_path_segment("sandbox_id", sandbox_id)?;
+        let url = format!("{}/cube/sandbox/{}/fork", self.base_url, sandbox_id);
         let resp = self
             .inner
             .post(&url)
@@ -1798,6 +1820,80 @@ impl RollbackResponse {
 // only consumer of `/cube/operation/{id}` left in the system is human audit.
 // If a programmatic consumer comes back, restore the wrapper next to the
 // commented-out method on `CubeMasterClient`.
+
+// ─── POST /cube/sandbox/{sandbox_id}/fork ─────────────────────────────────
+//
+// Mirror of CubeMaster's server-side fork (pkg/service/httpservice/cube/fork.go):
+// it snapshots the source sandbox once, derives `count` sandboxes from that
+// snapshot with bounded concurrency, and returns one result per requested fork
+// (each either a created sandbox or a business error). CubeAPI forwards the
+// whole `results` array verbatim and only re-shapes each element into the
+// E2B-compatible `{ sandbox | error }` model (see services::sandboxes::fork).
+
+/// POST /cube/sandbox/{sandbox_id}/fork — request body.
+#[derive(Debug, Serialize)]
+pub struct ForkSandboxRequest {
+    #[serde(
+        rename = "request_id",
+        skip_serializing_if = "String::is_empty",
+        default
+    )]
+    pub request_id: String,
+    /// Number of fork sandboxes to derive (1..=100).
+    #[serde(skip_serializing_if = "is_zero", default)]
+    pub count: i32,
+    /// Optional idle TTL (seconds) applied to each forked sandbox.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<i32>,
+}
+
+fn is_zero(value: &i32) -> bool {
+    *value == 0
+}
+
+/// One created sandbox inside a successful fork result — a slim mirror of
+/// CubeMaster's `types.CreateCubeSandboxRes`. Only the fields CubeAPI needs to
+/// assemble an E2B `Sandbox` are surfaced.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct ForkSandbox {
+    #[serde(default)]
+    pub sandbox_id: String,
+    #[serde(default)]
+    pub sandbox_ip: String,
+    #[serde(default)]
+    pub host_id: String,
+    #[serde(default)]
+    pub host_ip: String,
+    /// Per-sandbox traffic token, populated only when the derived sandbox is
+    /// not publicly reachable (`allowPublicTraffic=false`).
+    #[serde(default)]
+    pub traffic_access_token: Option<String>,
+    /// Generic extension metadata echoed by CubeMaster (may carry envd version).
+    #[serde(default)]
+    pub ext_info: HashMap<String, String>,
+}
+
+/// One element of the `results` array: exactly one of `sandbox` or `ret` is
+/// present, encoding per-fork success/failure independently.
+#[derive(Debug, Deserialize)]
+pub struct ForkSandboxResult {
+    #[serde(default)]
+    pub sandbox: Option<ForkSandbox>,
+    #[serde(default)]
+    pub ret: Option<RetCode>,
+}
+
+/// POST /cube/sandbox/{sandbox_id}/fork — response envelope.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct ForkSandboxResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    #[serde(default)]
+    pub results: Vec<ForkSandboxResult>,
+}
 
 // Returns the trimmed slice of `value` if it contains any non-whitespace
 // characters, otherwise `None`.

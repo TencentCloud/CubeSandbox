@@ -14,9 +14,10 @@ use crate::{
     error::{AppError, AppResult},
     logging::{LogEvent, LogLevel},
     models::{
-        ApiError, ConnectSandbox, ListSandboxesQuery, ListSandboxesV2Query, NewSandbox,
-        RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
-        SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest, UpdateSandboxNetworkRequest,
+        ApiError, ConnectSandbox, ForkRequest, ForkResult, ListSandboxesQuery,
+        ListSandboxesV2Query, NewSandbox, RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail,
+        SandboxLogsQuery, SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest,
+        UpdateSandboxNetworkRequest,
     },
     state::AppState,
 };
@@ -205,6 +206,56 @@ pub async fn create_sandbox(
         .await;
 
     Ok((StatusCode::CREATED, Json(created)))
+}
+
+// ─── POST /sandboxes/:sandboxID/fork ─────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/sandboxes/{sandboxID}/fork",
+    params(
+        ("sandboxID" = String, Path, description = "Source sandbox identifier")
+    ),
+    request_body = ForkRequest,
+    responses(
+        (status = 201, description = "Fork results (array length == count; per-fork failures are error entries, still 201)", body = Vec<ForkResult>),
+        (status = 400, description = "Invalid request", body = ApiError),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 409, description = "Sandbox state does not allow fork", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn fork_sandbox(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    Json(body): Json<ForkRequest>,
+) -> AppResult<impl IntoResponse> {
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "fork_sandbox")
+                .field("sandbox_id", &sandbox_id)
+                .field_value("count", body.count),
+        )
+        .await;
+
+    let results = state.services.sandboxes.fork(&sandbox_id, body).await?;
+
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Info, "api.response")
+                .field("handler", "fork_sandbox")
+                .field("sandbox_id", &sandbox_id)
+                .field_value(
+                    "forked",
+                    results.iter().filter(|r| r.sandbox.is_some()).count(),
+                ),
+        )
+        .await;
+
+    Ok((StatusCode::CREATED, Json(results)))
 }
 
 // ─── DELETE /sandboxes/:sandboxID ─────────────────────────────────────────────
