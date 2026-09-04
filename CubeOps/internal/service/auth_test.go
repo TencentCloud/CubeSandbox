@@ -23,7 +23,7 @@ type fakeUserStore struct {
 func (f *fakeUserStore) GetUserPassword(_ context.Context, username string) (string, error) {
 	pw, ok := f.passwords[username]
 	if !ok {
-		return "", errors.New("user not found")
+		return "", nil
 	}
 	return pw, nil
 }
