@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math/rand"
 	"os"
 	"runtime"
 	"strconv"
@@ -46,11 +47,27 @@ type Config struct {
 	DryErrorRate   float64
 	NoTUI          bool
 
+	// Scheduled workload generator. Scheduled is true when any of the
+	// scheduling flags (--workload/--rate/--lifetime/--templates) is in use;
+	// false keeps the exact legacy behavior.
+	Seed         int64
+	Workload     string
+	Rate         float64 // Poisson arrival rate in requests/sec (<=0 = asap)
+	LifetimeMin  float64 // seconds
+	LifetimeMax  float64 // seconds
+	hasLifetime  bool
+	TemplatesRaw string
+	Templates    []TemplateSpec
+	DumpTrace    string
+	Scheduled    bool
+	sequence     []ScheduledRequest
+
 	elapsed float64
 }
 
 type createRequest struct {
 	TemplateID          string                `json:"templateID"`
+	Timeout             *int64                `json:"timeout,omitempty"`
 	AllowInternetAccess *bool                 `json:"allow_internet_access,omitempty"`
 	Network             *sandboxNetworkConfig `json:"network,omitempty"`
 	Metadata            map[string]string     `json:"metadata,omitempty"`
@@ -77,7 +94,11 @@ func prepareHostMount(rawJSON string) (string, error) {
 }
 
 func buildCreateRequestBody(template string, hostMount string, networkPolicy string) ([]byte, error) {
-	reqBody := createRequest{TemplateID: template}
+	return buildCreateRequestBodyWithTimeout(template, hostMount, networkPolicy, nil)
+}
+
+func buildCreateRequestBodyWithTimeout(template string, hostMount string, networkPolicy string, timeoutS *int64) ([]byte, error) {
+	reqBody := createRequest{TemplateID: template, Timeout: timeoutS}
 	if hostMount != "" {
 		reqBody.Metadata = map[string]string{"host-mount": hostMount}
 	}
@@ -118,6 +139,14 @@ func parseConfig() *Config {
 	flag.StringVar(&cfg.ThemeName, "theme", "auto", "Color theme: dark | light | auto")
 	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Simulate API calls with random latencies")
 
+	// Scheduled workload generator flags (empty/zero = legacy behavior)
+	flag.Int64Var(&cfg.Seed, "seed", 42, "Random seed for the pre-generated request sequence")
+	flag.StringVar(&cfg.Workload, "workload", "", "Workload preset: burst | template_storm | mixed_spec")
+	flag.Float64Var(&cfg.Rate, "rate", 0, "Poisson arrival rate in requests/sec (<=0 = as fast as possible)")
+	lifetime := flag.String("lifetime", "", "Per-sandbox lifetime in seconds: min,max (uniform); client DELETEs at lifetime")
+	flag.StringVar(&cfg.TemplatesRaw, "templates", "", "Comma-separated templateID[:weight[:cpuMillis:memMiB]] pool")
+	flag.StringVar(&cfg.DumpTrace, "dump-trace", "", "Write the pre-generated request sequence to a JSON trace file")
+
 	var noTUI bool
 	flag.BoolVar(&noTUI, "no-tui", false, "Disable interactive TUI (auto-detected in non-TTY)")
 
@@ -125,6 +154,11 @@ func parseConfig() *Config {
 	flag.Float64Var(&cfg.DryErrorRate, "dry-error-rate", 0.02, "Dry-run simulated error rate 0.0-1.0")
 
 	flag.Parse()
+
+	// Remember which flags were passed explicitly so workload presets only
+	// fill in defaults and never override user input.
+	explicit := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
 
 	cfg.NoTUI = noTUI || !term.IsTerminal(int(os.Stdout.Fd()))
 
@@ -169,6 +203,46 @@ func parseConfig() *Config {
 		}
 	}
 
+	// Explicit --lifetime parses first; a workload preset only fills it in
+	// when the flag was not given.
+	if *lifetime != "" {
+		lo, hi, err := parseLifetime(*lifetime)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			os.Exit(1)
+		}
+		cfg.LifetimeMin, cfg.LifetimeMax, cfg.hasLifetime = lo, hi, true
+	}
+	if cfg.Workload != "" {
+		if err := applyWorkloadPreset(cfg, explicit); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if cfg.Rate < 0 {
+		cfg.Rate = 0
+	}
+
+	// Template pool: --templates wins; otherwise the single -t/--template is
+	// equivalent to a one-element pool with weight 1.
+	if cfg.TemplatesRaw != "" {
+		templates, err := parseTemplates(cfg.TemplatesRaw)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			os.Exit(1)
+		}
+		cfg.Templates = templates
+	} else if cfg.Template != "" {
+		cfg.Templates = []TemplateSpec{{TemplateID: cfg.Template, Weight: 1}}
+	}
+	if cfg.Workload == "mixed_spec" && len(cfg.Templates) < 2 {
+		fmt.Fprintln(os.Stderr, "ERROR: workload mixed_spec requires --templates with at least 2 templates, e.g.")
+		fmt.Fprintln(os.Stderr, "  --templates 'tpl-1c2g:6:1000:2048,tpl-2c4g:3:2000:4096,tpl-8c16g:1:8000:16384'  # 6:3:1 for 1C2G/2C4G/8C16G")
+		os.Exit(1)
+	}
+
+	cfg.Scheduled = cfg.Workload != "" || cfg.Rate > 0 || cfg.hasLifetime || cfg.TemplatesRaw != ""
+
 	if cfg.Concurrency < 1 {
 		cfg.Concurrency = 1
 	}
@@ -188,7 +262,13 @@ func parseConfig() *Config {
 	cfg.hostMountValue = hostMountValue
 	cfg.requestHeaders = map[string]string{"Authorization": "Bearer " + cfg.APIKey}
 
-	requestBody, err := buildCreateRequestBody(cfg.Template, cfg.hostMountValue, cfg.NetworkPolicy)
+	// In scheduled mode without -t the pool drives per-request bodies; the
+	// cached body (warmup/fallback) then uses the first pool template.
+	bodyTemplate := cfg.Template
+	if bodyTemplate == "" && len(cfg.Templates) > 0 {
+		bodyTemplate = cfg.Templates[0].TemplateID
+	}
+	requestBody, err := buildCreateRequestBody(bodyTemplate, cfg.hostMountValue, cfg.NetworkPolicy)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: create request body build failed: %v\n", err)
 		os.Exit(1)
@@ -215,6 +295,21 @@ func renderConfig(cfg *Config) {
 		{"Warmup Rounds", fmt.Sprintf("%d", cfg.Warmup)},
 		{"Mode", cfg.Mode},
 		{"Network Policy", cfg.networkFP.summary()},
+	}
+	if cfg.Scheduled {
+		kvs = append(kvs,
+			kvPair{"Workload", workloadDisplayName(cfg)},
+			kvPair{"Seed", fmt.Sprintf("%d", cfg.Seed)},
+			kvPair{"Rate", fmt.Sprintf("%g req/s", cfg.Rate)},
+		)
+		if cfg.hasLifetime {
+			kvs = append(kvs, kvPair{"Lifetime", fmt.Sprintf("%g-%gs", cfg.LifetimeMin, cfg.LifetimeMax)})
+		}
+		var pool []string
+		for _, t := range cfg.Templates {
+			pool = append(pool, fmt.Sprintf("%s(w%d)", t.TemplateID, t.Weight))
+		}
+		kvs = append(kvs, kvPair{"Templates", strings.Join(pool, ", ")})
 	}
 	if cfg.HostMount != "" {
 		// Pretty-print the original host-mount JSON for readability.
@@ -302,6 +397,13 @@ func exportJSON(results []IterResult, cfg *Config) {
 			"create_ms": r.CreateMs,
 			"delete_ms": r.DeleteMs,
 		}
+		if cfg.Scheduled {
+			entry["template_id"] = r.TemplateID
+			entry["scheduled_arrival_ms"] = r.ScheduledArrivalMs
+			entry["actual_start_ms"] = r.ActualStartMs
+			entry["sched_delay_ms"] = r.SchedDelayMs
+			entry["lifetime_ms"] = r.LifetimeMs
+		}
 		if r.Err != "" {
 			entry["error"] = r.Err
 		}
@@ -317,30 +419,87 @@ func exportJSON(results []IterResult, cfg *Config) {
 		throughput = float64(len(okResults)) / cfg.elapsed
 	}
 
+	configBlock := map[string]interface{}{
+		"template":             cfg.Template,
+		"api_url":              cfg.APIURL,
+		"concurrency":          cfg.Concurrency,
+		"total":                cfg.Total,
+		"warmup":               cfg.Warmup,
+		"mode":                 cfg.Mode,
+		"host_mount":           cfg.HostMount,
+		"network_policy":       cfg.networkFP.Policy,
+		"network_allow_out":    cfg.networkFP.AllowOut,
+		"network_rules":        cfg.networkFP.Rules,
+		"network_inject_rules": cfg.networkFP.InjectRules,
+	}
+	if cfg.Scheduled {
+		configBlock["workload"] = workloadDisplayName(cfg)
+		configBlock["seed"] = cfg.Seed
+		configBlock["rate_per_sec"] = cfg.Rate
+		configBlock["lifetime_min_s"] = cfg.LifetimeMin
+		configBlock["lifetime_max_s"] = cfg.LifetimeMax
+		templates := make([]map[string]interface{}, len(cfg.Templates))
+		for i, t := range cfg.Templates {
+			templates[i] = map[string]interface{}{
+				"template_id": t.TemplateID,
+				"weight":      t.Weight,
+				"cpu_millis":  t.CpuMillis,
+				"mem_mib":     t.MemMiB,
+			}
+		}
+		configBlock["templates"] = templates
+	}
+
+	summaryBlock := map[string]interface{}{
+		"total_time_s":   cfg.elapsed,
+		"successful":     len(okResults),
+		"errors":         len(results) - len(okResults),
+		"success_rate":   successRate,
+		"throughput_qps": throughput,
+	}
+	if cfg.Scheduled {
+		// Queue delay is measured per dispatched request, independent of
+		// create success, so it uses all results.
+		delays := extractTimes(results, func(r IterResult) float64 { return r.SchedDelayMs })
+		if len(delays) > 0 {
+			summaryBlock["queue_delay_p50_ms"] = Percentile(delays, 50)
+			summaryBlock["queue_delay_p95_ms"] = Percentile(delays, 95)
+			summaryBlock["queue_delay_p99_ms"] = Percentile(delays, 99)
+		}
+		type tplAgg struct{ attempts, created int }
+		agg := map[string]*tplAgg{}
+		for _, r := range results {
+			a := agg[r.TemplateID]
+			if a == nil {
+				a = &tplAgg{}
+				agg[r.TemplateID] = a
+			}
+			a.attempts++
+			if r.Err == "" {
+				a.created++
+			}
+		}
+		perTemplate := map[string]interface{}{}
+		for id, a := range agg {
+			rate := 0.0
+			if a.attempts > 0 {
+				rate = float64(a.created) / float64(a.attempts)
+			}
+			perTemplate[id] = map[string]interface{}{
+				"attempts":     a.attempts,
+				"created":      a.created,
+				"success_rate": rate,
+			}
+		}
+		summaryBlock["per_template"] = perTemplate
+	}
+
 	report := map[string]interface{}{
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
-		"config": map[string]interface{}{
-			"template":             cfg.Template,
-			"api_url":              cfg.APIURL,
-			"concurrency":          cfg.Concurrency,
-			"total":                cfg.Total,
-			"warmup":               cfg.Warmup,
-			"mode":                 cfg.Mode,
-			"host_mount":           cfg.HostMount,
-			"network_policy":       cfg.networkFP.Policy,
-			"network_allow_out":    cfg.networkFP.AllowOut,
-			"network_rules":        cfg.networkFP.Rules,
-			"network_inject_rules": cfg.networkFP.InjectRules,
-		},
-		"summary": map[string]interface{}{
-			"total_time_s":   cfg.elapsed,
-			"successful":     len(okResults),
-			"errors":         len(results) - len(okResults),
-			"success_rate":   successRate,
-			"throughput_qps": throughput,
-		},
-		"create": statBlock(createTimes),
-		"raw":    raw,
+		"config":    configBlock,
+		"summary":   summaryBlock,
+		"create":    statBlock(createTimes),
+		"raw":       raw,
 	}
 	if cfg.Mode == "create-delete" {
 		report["delete"] = statBlock(deleteTimes)
@@ -384,6 +543,14 @@ func collectWithSimpleProgress(ch <-chan IterResult, total int) []IterResult {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "compare" {
+		if err := runCompare(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "ERROR:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	cfg := parseConfig()
 
 	switch cfg.ThemeName {
@@ -396,8 +563,8 @@ func main() {
 	}
 
 	if !cfg.DryRun {
-		if cfg.Template == "" {
-			fmt.Fprintln(os.Stderr, T.Error.Render("ERROR:")+" template ID not set. Use -t or set CUBE_TEMPLATE_ID.")
+		if cfg.Template == "" && len(cfg.Templates) == 0 {
+			fmt.Fprintln(os.Stderr, T.Error.Render("ERROR:")+" template ID not set. Use -t/--templates or set CUBE_TEMPLATE_ID.")
 			os.Exit(1)
 		}
 		if cfg.APIURL == "" {
@@ -417,13 +584,32 @@ func main() {
 		renderDryRunBanner(cfg)
 	}
 
+	// Pre-generate the request sequence before any timing starts; dumping the
+	// trace must not delay the scheduled arrivals.
+	var sched []ScheduledRequest
+	if cfg.Scheduled {
+		sched = GenerateSequence(cfg, rand.New(rand.NewSource(cfg.Seed)))
+		cfg.sequence = sched
+		if cfg.DumpTrace != "" {
+			if err := DumpTrace(cfg.DumpTrace, cfg, sched); err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("  %s %s\n\n", T.Muted.Render("Trace saved to"), lipgloss.NewStyle().Bold(true).Render(cfg.DumpTrace))
+		}
+	}
+
 	client := RunWarmup(cfg, os.Stdout)
 
 	resultCh := make(chan IterResult, cfg.Total)
 
 	startTime := time.Now()
 
-	go RunBenchmark(cfg, resultCh, client)
+	if cfg.Scheduled {
+		go RunScheduled(cfg, sched, resultCh, client)
+	} else {
+		go RunBenchmark(cfg, resultCh, client)
+	}
 
 	var allResults []IterResult
 

@@ -57,6 +57,9 @@ func RenderReport(results []IterResult, cfg *Config) {
 	if cfg.Mode == "create-delete" {
 		renderLatencySection("DELETE", deleteTimes)
 	}
+	if cfg.Scheduled {
+		renderQueueDelaySection(results)
+	}
 
 	// ── Sparkline timeline ──
 	sparkContent := renderSparklines(createTimes, deleteTimes, cfg.Mode)
@@ -159,6 +162,29 @@ func renderLatencySection(label string, times []float64) {
 		Width(78).
 		Render(T.Heading.Render(fmt.Sprintf("  %s Latency", label)) + "\n\n" + content)
 
+	fmt.Println()
+	fmt.Println(box)
+}
+
+// renderQueueDelaySection reports the gap between each request's scheduled
+// arrival and its actual start (dispatcher sleep overshoot + semaphore wait).
+func renderQueueDelaySection(results []IterResult) {
+	delays := extractTimes(results, func(r IterResult) float64 { return r.SchedDelayMs })
+	if len(delays) == 0 {
+		return
+	}
+	content := renderKV([]kvPair{
+		{"min / avg", fmt.Sprintf("%.2f / %.2f ms", Min(delays), Mean(delays))},
+		{"P50 / P95 / P99", fmt.Sprintf("%.2f / %.2f / %.2f ms",
+			Percentile(delays, 50), Percentile(delays, 95), Percentile(delays, 99))},
+		{"max", fmt.Sprintf("%.2f ms", Max(delays))},
+	})
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(T.Border).
+		Padding(1, 3).
+		Width(78).
+		Render(T.Heading.Render("  Queue Delay (scheduled → actual start)") + "\n\n" + content)
 	fmt.Println()
 	fmt.Println(box)
 }

@@ -16,6 +16,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+// realTimeWeightedAverageScore 实时加权平均评分插件：
+// 综合节点多维度实时指标（创建并发、MVM 数、资源利用率等）加权求平均，
+// 并叠加请求资源（CPU/内存）满足度得分，实现资源感知的负载均衡调度
 type realTimeWeightedAverageScore struct {
 	weight float64
 }
@@ -40,10 +43,12 @@ func (l *realTimeWeightedAverageScore) String() string {
 func (l *realTimeWeightedAverageScore) Weight() float64 {
 	return l.weight
 }
+
 func (l *realTimeWeightedAverageScore) Disable() bool {
 	return config.GetConfig().Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage.Disable
 }
 
+// Select 为每个候选节点计算实时加权平均分并按总权重归一化
 func (l *realTimeWeightedAverageScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList,
 	err error) {
 	defer func() {
@@ -88,6 +93,7 @@ func (l *realTimeWeightedAverageScore) Select(selCtx *selctx.SelectorCtx) (nodes
 	return nodes, nil
 }
 
+// getRealTimeTotalWeight 计算实时评分启用因子的权重总和
 func getRealTimeTotalWeight() (float64, error) {
 	schedConf := config.GetConfig().Scheduler
 	if schedConf == nil || schedConf.Score == nil {
@@ -104,6 +110,8 @@ func getRealTimeTotalWeight() (float64, error) {
 	return w, nil
 }
 
+// getRealtimeWeightedAverageScore 计算节点实时加权平均分：
+// 基础分为启用因子的加权和，另叠加请求 CPU/内存后节点剩余资源比例的得分
 func getRealtimeWeightedAverageScore(n *node.Node, cpuq, memq *resource.Quantity) float64 {
 	schedConf := config.GetConfig().Scheduler
 	if schedConf == nil || schedConf.Score == nil {
@@ -120,6 +128,7 @@ func getRealtimeWeightedAverageScore(n *node.Node, cpuq, memq *resource.Quantity
 
 		cpuReqValue := cpuq.MilliValue()
 		effCpu := schedConf.EffectiveQuotaCpu(n.InstanceType, n.QuotaCpu)
+		// 节点在分配本次请求后的剩余 CPU 配额占比越高，得分越高
 		cpuLeft := getReciprocal(effCpu-schedConf.EffectiveAllocated(n.QuotaCpuUsage)-cpuReqValue, effCpu)
 		scores += cpuLeft * getFactorWeight(constants.WeightFactorReqCpu)
 	}
@@ -128,6 +137,7 @@ func getRealtimeWeightedAverageScore(n *node.Node, cpuq, memq *resource.Quantity
 
 		memReqValue := memq.Value() / 1024 / 1024
 		effMem := schedConf.EffectiveQuotaMem(n.InstanceType, n.QuotaMem)
+		// 节点在分配本次请求后的剩余内存配额占比越高，得分越高
 		memLeft := getReciprocal(effMem-schedConf.EffectiveAllocated(n.QuotaMemUsage)-memReqValue, effMem)
 		scores += memLeft * getFactorWeight(constants.WeightFactorReqMem)
 	}

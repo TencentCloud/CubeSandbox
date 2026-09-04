@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -345,4 +346,48 @@ func TestGetAllowedHostMountPrefixes_DefaultDefensiveCopy(t *testing.T) {
 	// package-level default must not be affected
 	got2 := GetAllowedHostMountPrefixes()
 	assert.Equal(t, "/data/shared/", got2[0])
+}
+
+func TestControlledProfileLabels(t *testing.T) {
+	scheduler := &SchedulerConf{ProfileRouteLabelKeys: []string{"workload", "tenant"}}
+	got := scheduler.ControlledProfileLabels(map[string]string{
+		"workload": "burst",
+		"tenant":   "team-a",
+		"secret":   "must-not-leak",
+	})
+	assert.Equal(t, map[string]string{"workload": "burst", "tenant": "team-a"}, got)
+}
+
+func TestSchedulerProfileYAML(t *testing.T) {
+	var parsed struct {
+		Scheduler *WrapperSchedulerConf `yaml:"scheduler"`
+	}
+	err := yaml.Unmarshal([]byte(`
+scheduler:
+  profile_route_label_keys: [workload]
+  profiles:
+    - name: burst
+      route:
+        instance_types: ["S.*"]
+        labels: {workload: burst}
+      filters:
+        - name: idle
+          type: expr
+          expr: node.creating < 8
+      scores:
+        - name: external
+          type: grpc
+          socket_path: /run/scheduler.sock
+          timeout: 100ms
+          weight: 2
+      selection: {top_n: 5, method: spread}
+      failure: {filter: fail-closed, score: default-score, no_candidate: fail}
+`), &parsed)
+	assert.NoError(t, err)
+	if assert.NotNil(t, parsed.Scheduler) && assert.Len(t, parsed.Scheduler.Profiles, 1) {
+		profile := parsed.Scheduler.Profiles[0]
+		assert.Equal(t, "burst", profile.Name)
+		assert.Equal(t, 100*time.Millisecond, profile.Scores[0].Timeout)
+		assert.Equal(t, "spread", profile.Selection.Method)
+	}
 }

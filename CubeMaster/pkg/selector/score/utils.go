@@ -13,6 +13,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 )
 
+// getFactorWeightedAverageScore 按启用的因子列表计算节点加权平均分：
+// 每个因子得到一个 0~100 区间的基础分（越高表示资源越空闲/负载越低），再乘以对应权重求和
 func getFactorWeightedAverageScore(n *node.Node, enableWeightFactors []string) float64 {
 	scores := float64(0)
 	for _, v := range enableWeightFactors {
@@ -50,6 +52,7 @@ func getFactorWeightedAverageScore(n *node.Node, enableWeightFactors []string) f
 	return scores
 }
 
+// getReciprocal 计算 v 占 base 的比例（0~1），base 为 0 时返回 0
 func getReciprocal(v int64, base int64) float64 {
 	if base == 0 {
 		return 0.0
@@ -59,6 +62,7 @@ func getReciprocal(v int64, base int64) float64 {
 	return f
 }
 
+// getFactorWeight 取配置中某权重因子的权重值
 func getFactorWeight(k string) float64 {
 	sconf := config.GetConfig().Scheduler
 	if sconf == nil || sconf.Score == nil {
@@ -71,22 +75,28 @@ func getFactorWeight(k string) float64 {
 	return v
 }
 
+// getMetricUpdateDiff 节点指标更新时间越新得分越高（防止陈旧指标节点被选中）
 func getMetricUpdateDiff(n *node.Node) float64 {
 	return getReciprocal(n.MetricUpdate.Unix(), time.Now().Unix())
 }
+
+// getMetricLocalUpdateDiff 节点本地指标更新时间越新得分越高
 func getMetricLocalUpdateDiff(n *node.Node) float64 {
 	return getReciprocal(n.MetricUpdate.Unix(), time.Now().Unix())
 }
 
+// getCreateLimitScore 节点创建并发上限越高得分越高
 func getCreateLimitScore(n *node.Node) float64 {
 	return float64(n.CreateConcurrentNum)
 }
 
+// getRealTimeCreateNumScore 节点实时创建并发数占比越低得分越高
 func getRealTimeCreateNumScore(n *node.Node) float64 {
 	f := getReciprocal(n.RealTimeCreateNum, n.CreateConcurrentNum)
 	return 100.0 - f*100.0
 }
 
+// getLocalCreateNumScore 节点本地创建并发数折算全局后占比越低得分越高
 func getLocalCreateNumScore(n *node.Node) float64 {
 	max := n.CreateConcurrentNum
 	localcnt := localcache.LocalCreateConcurrentLimit(n)
@@ -96,12 +106,14 @@ func getLocalCreateNumScore(n *node.Node) float64 {
 	return 100.0 - f*100.0
 }
 
+// getMvmNumScore 节点 MVM 数量占上限比例越低得分越高
 func getMvmNumScore(n *node.Node) float64 {
 	max := localcache.MaxMvmLimit(n)
 	f := getReciprocal(n.MvmNum, max)
 	return 100.0 - f*100.0
 }
 
+// getQuotaCpuUsageScore 节点 CPU 配额使用率越低得分越高
 func getQuotaCpuUsageScore(n *node.Node) float64 {
 	sconf := config.GetConfig().Scheduler
 	if sconf == nil {
@@ -116,6 +128,7 @@ func getQuotaCpuUsageScore(n *node.Node) float64 {
 	return 100.0 - f*100.0
 }
 
+// getQuotaMemMbUsageScore 节点内存配额使用率越低得分越高
 func getQuotaMemMbUsageScore(n *node.Node) float64 {
 	sconf := config.GetConfig().Scheduler
 	if sconf == nil {
@@ -129,6 +142,7 @@ func getQuotaMemMbUsageScore(n *node.Node) float64 {
 	return 100.0 - f*100.0
 }
 
+// getCpuLoadUsageScore 节点 CPU 负载占比越低得分越高
 func getCpuLoadUsageScore(n *node.Node) float64 {
 	if n.CpuTotal <= 0 {
 
@@ -138,10 +152,12 @@ func getCpuLoadUsageScore(n *node.Node) float64 {
 	return 100.0 - f*100.0
 }
 
+// getCpuUtilScore 节点 CPU 利用率越低得分越高
 func getCpuUtilScore(n *node.Node) float64 {
 	return 100.0 - n.CpuUtil
 }
 
+// getMemMbUsageScore 节点内存使用占比越低得分越高
 func getMemMbUsageScore(n *node.Node) float64 {
 	if n.MemMBTotal <= 0 {
 
@@ -151,14 +167,17 @@ func getMemMbUsageScore(n *node.Node) float64 {
 	return 100.0 - f*100.0
 }
 
+// getDataDiskUsageScore 节点数据盘使用率越低得分越高
 func getDataDiskUsageScore(n *node.Node) float64 {
 	return 100.0 - n.DataDiskUsagePer
 }
 
+// getSysDiskUsageScore 节点系统盘使用率越低得分越高
 func getSysDiskUsageScore(n *node.Node) float64 {
 	return 100.0 - n.SysDiskUsagePer
 }
 
+// getStorageUsageScore 节点存储盘使用率越低得分越高
 func getStorageUsageScore(n *node.Node) float64 {
 	return 100.0 - n.StorageDiskUsagePer
 }
