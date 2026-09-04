@@ -104,6 +104,13 @@ func (s *service) listCubeboxes() []*cubeboxstore.CubeBox {
 // S3 already cloned onto sb-*-memory and must drop the package. PAUSED /
 // EXITED / UNKNOWN do not hold a live mmap, so DelPaused and leftover GC
 // still delete.
+//
+// Only Cubelet-stamped Labels count (not user Create annotations). Match
+// the current pause id or the restore-base: Pause overwrites the pause id
+// before the overlay finishes, so a delayed Cleanup of the previous package
+// must still see the mmap / incremental source. cleanupTemplate also
+// requires catalog Kind=pause_snapshot so a forged label cannot pin a
+// template or customer snap.
 func keepLiveXFSPausePackage(boxes []*cubeboxstore.CubeBox, snapID, backend string) bool {
 	if storage.IsS3Backend(backend) {
 		return false
@@ -121,9 +128,16 @@ func keepLiveXFSPausePackage(boxes []*cubeboxstore.CubeBox, snapID, backend stri
 }
 
 func sandboxHoldsLiveXFSPausePackage(sb *cubeboxstore.CubeBox, snapID string) bool {
-	if sb == nil || stampedPauseSnapshotID(sb) != snapID {
+	if sb == nil || !sandboxLiveForXFSPauseKeep(sb) {
 		return false
 	}
+	if cubeBoxLabel(sb, constants.MasterAnnotationPauseSnapshotID) == snapID {
+		return true
+	}
+	return cubeBoxLabel(sb, constants.MasterAnnotationRuntimeRestoreSnapshotID) == snapID
+}
+
+func sandboxLiveForXFSPauseKeep(sb *cubeboxstore.CubeBox) bool {
 	st := sb.GetStatus()
 	if st == nil {
 		return false
@@ -136,6 +150,22 @@ func sandboxHoldsLiveXFSPausePackage(sb *cubeboxstore.CubeBox, snapID string) bo
 	default:
 		return false
 	}
+}
+
+func cubeBoxLabel(sb *cubeboxstore.CubeBox, key string) string {
+	if sb == nil || key == "" {
+		return ""
+	}
+	sb.MetaLock.Lock()
+	defer sb.MetaLock.Unlock()
+	if sb.Labels == nil {
+		return ""
+	}
+	return strings.TrimSpace(sb.Labels[key])
+}
+
+func isPauseSnapshotCatalogKind(kind string) bool {
+	return strings.EqualFold(strings.TrimSpace(kind), storage.CatalogKindPauseSnapshot)
 }
 
 // replacedLivePauseSnapshotID is the pause snap Resume left as live. After a
@@ -235,7 +265,7 @@ func (s *service) updateWithPauseCow(
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve sandbox rootfs: %v", err)
 		return rsp, nil
 	}
-	// Own volume if this sandbox has one; otherwise the start template／snapshot.
+	// Own volume if this sandbox has one; otherwise the start template/snapshot.
 	memoryObject, snapshotType, err := preparePauseMemoryArtifact(ctx, stepLog, sb, snapID, memorySizeBytes, backend)
 	if err != nil {
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
@@ -406,7 +436,7 @@ func (s *service) updateWithPauseCow(
 		return failPause(errorcode.ErrorCode_Unknown,
 			fmt.Sprintf("failed to persist pause snapshot catalog for %s: %v", snapID, err))
 	}
-	// S3: seal memory／metadata work volumes to RO snapshots before Upload.
+	// S3: seal memory/metadata work volumes to RO snapshots before Upload.
 	if err := storage.FinalizeS3PackageSnapshots(workCtx, backend, snapID); err != nil {
 		_ = storage.UnmountS3Metadata(layout.MetaDir)
 		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()

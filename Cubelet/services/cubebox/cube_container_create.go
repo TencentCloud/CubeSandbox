@@ -281,10 +281,12 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		// reflinkable base after the most recent commit's snapshot is
 		// deleted.
 		setRuntimeRestoreBaseLabels(sandBox, snapshotID, now)
-		// Resume-from-pause stamps pause snapshot id. XFS Resume still
-		// mmaps that package; CleanupTemplate no-ops while this label
-		// is live. Next Pause or Destroy GCs it. S3 already cloned onto
-		// sb-*-memory and CleanupTemplate deletes the package.
+		// Resume-from-pause stamps pause snapshot id. Master strips this
+		// key from user Create; only the thin Resume request carries it.
+		// XFS Resume still mmaps that package; CleanupTemplate no-ops
+		// while this label is live. Next Pause or Destroy GCs it. S3
+		// already cloned onto sb-*-memory and CleanupTemplate deletes
+		// the package.
 		if pauseID := strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID]); pauseID != "" {
 			if sandBox.Labels == nil {
 				sandBox.Labels = map[string]string{}

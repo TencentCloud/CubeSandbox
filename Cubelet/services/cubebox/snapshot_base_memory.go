@@ -118,7 +118,7 @@ func resolveRestoreBaseMemoryObject(ctx context.Context, cb *cubeboxstore.CubeBo
 // resolveLaunchAncestorSnapshotID is the memory base Pause copies from:
 // the template or customer snapshot this sandbox was first started from.
 // It ignores last-commit / last-restore labels and the pause snap itself
-// (those change across Pause／Resume／Commit).
+// (those change across Pause/Resume/Commit).
 func resolveLaunchAncestorSnapshotID(cb *cubeboxstore.CubeBox) string {
 	if cb == nil {
 		return ""
@@ -140,7 +140,7 @@ func resolveLaunchAncestorSnapshotID(cb *cubeboxstore.CubeBox) string {
 // launchAncestorIsLastRestore reports whether an incremental overlay onto a
 // clone of the launch ancestor is valid. pagemap_anon records anon pages
 // dirty *since the last restore*; the dest must already hold every still-
-// clean page from that restore. The template／first customer snap only
+// clean page from that restore. The template/first customer snap only
 // satisfies that when the VM was last restored from the same image — the
 // first Pause after Create-from-template.
 //
@@ -149,7 +149,7 @@ func resolveLaunchAncestorSnapshotID(cb *cubeboxstore.CubeBox) string {
 // volume). Cloning the template and asking for incremental would drop
 // every page that landed in the pause image and stayed clean. The next
 // restore then comes up holey: agent health can still answer, then
-// set_guest_date_time／reseed hang on ttrpc.
+// set_guest_date_time/reseed hang on ttrpc.
 func launchAncestorIsLastRestore(cb *cubeboxstore.CubeBox, ancestorID string) bool {
 	ancestorID = strings.TrimSpace(ancestorID)
 	if ancestorID == "" {
@@ -234,7 +234,7 @@ func resolveMemoryObjectFromSnapshotID(ctx context.Context, backend, snapshotID 
 //  3. Last-restore catalog. XFS Resume keeps the pause package so this
 //     Pause can incremental-overlay onto that image; Cubelet GCs the
 //     old package after this Pause succeeds (or on Destroy).
-//  4. Full dump into an empty volume when no catalog／volume base is
+//  4. Full dump into an empty volume when no catalog/volume base is
 //     left (template gone, or an S3 own-volume clone that failed).
 func preparePauseMemoryArtifact(
 	ctx context.Context,

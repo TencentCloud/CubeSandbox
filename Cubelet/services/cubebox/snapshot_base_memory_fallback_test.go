@@ -310,7 +310,7 @@ func TestResolveLaunchAncestorKeepsStartImage(t *testing.T) {
 	}
 	assert.Equal(t, "snap-customer", resolveLaunchAncestorSnapshotID(fromSnap))
 
-	// Commit／Resume rewrite runtime labels; Pause must still copy the start image.
+	// Commit/Resume rewrite runtime labels; Pause must still copy the start image.
 	now := time.Now().UTC()
 	setRuntimeSnapshotBindingLabels(fromTpl, "snap-after-commit", now)
 	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(fromTpl, now.Add(time.Second))

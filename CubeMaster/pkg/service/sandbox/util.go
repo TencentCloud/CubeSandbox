@@ -909,6 +909,9 @@ func checkAndGetAnnotation(req *types.CreateCubeSandboxReq, out *cubebox.RunCube
 
 		if strings.HasPrefix(k, constants.CubeAnnotationsPrefix) ||
 			strings.HasPrefix(k, constants.CubeAnnotationsCloadPrefix) {
+			if rejectUserCubeMasterAnnotation(k) {
+				continue
+			}
 			out.Annotations[k] = v
 		}
 	}
@@ -946,6 +949,22 @@ func setCreateTimeEnvVarsAnnotation(out map[string]string, envVars map[string]st
 	}
 	out[constants.CubeAnnotationCreateTimeEnvVars] = string(payload)
 	return nil
+}
+
+// rejectUserCubeMasterAnnotation drops Create annotations that only Master
+// or Cubelet may stamp. Forwarding them lets a client pin
+// cube.master.pause.snapshot.id on a running sandbox and make XFS
+// CleanupTemplate no-op for another tenant's pause catalog.
+func rejectUserCubeMasterAnnotation(key string) bool {
+	switch strings.TrimSpace(key) {
+	case constants.CubeAnnotationPauseSnapshotID,
+		constants.CubeAnnotationLaunchMemorySnapshotID,
+		constants.CubeAnnotationRuntimeRestoreSnapshotID,
+		constants.CubeAnnotationRuntimeRestoreSnapshotAttachedAt:
+		return true
+	default:
+		return false
+	}
 }
 
 func getBlkQosAnnotation(req *types.CreateCubeSandboxReq) string {

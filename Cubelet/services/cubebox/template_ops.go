@@ -502,14 +502,17 @@ func (s *service) cleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
-	if _, catErr := storage.GetLocalSnapshotFor(ctx, backend, rsp.TemplateID); errors.Is(catErr, storage.ErrSnapshotCatalogNotFound) {
+	entry, catErr := storage.GetLocalSnapshotFor(ctx, backend, rsp.TemplateID)
+	if errors.Is(catErr, storage.ErrSnapshotCatalogNotFound) {
 		if other := otherCowBackend(backend); other != backend {
-			if _, altErr := storage.GetLocalSnapshotFor(ctx, other, rsp.TemplateID); altErr == nil {
+			if alt, altErr := storage.GetLocalSnapshotFor(ctx, other, rsp.TemplateID); altErr == nil {
 				backend = other
+				entry = alt
 			}
 		}
 	}
-	if honorLiveXFSPause && keepLiveXFSPausePackage(s.listCubeboxes(), rsp.TemplateID, backend) {
+	if honorLiveXFSPause && keepLiveXFSPausePackage(s.listCubeboxes(), rsp.TemplateID, backend) &&
+		entry != nil && isPauseSnapshotCatalogKind(entry.Kind) {
 		log.G(ctx).Infof("CleanupTemplate %s: keeping XFS pause package; a live sandbox still restores from it",
 			rsp.TemplateID)
 		return rsp, nil

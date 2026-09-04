@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
@@ -285,5 +286,34 @@ func TestGetReqResourceRejectsCPUOverflowBeforeMemOverflow(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cpu") {
 		t.Fatalf("expected cpu validation error to win, got %v", err)
+	}
+}
+
+func TestCheckAndGetAnnotationStripsPlatformPauseKeys(t *testing.T) {
+	ensureSandboxTestConfig(t)
+	req := &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			constants.CubeAnnotationPauseSnapshotID:                  "snap-forged-pause",
+			constants.CubeAnnotationLaunchMemorySnapshotID:           "tpl-forged",
+			constants.CubeAnnotationRuntimeRestoreSnapshotID:         "snap-forged-restore",
+			constants.CubeAnnotationRuntimeRestoreSnapshotAttachedAt: "2026-09-04T00:00:00Z",
+			constants.CubeAnnotationRuntimeSnapshotID:                "snap-user-runtime",
+		},
+	}
+	out := &cubebox.RunCubeSandboxRequest{}
+	if err := checkAndGetAnnotation(req, out); err != nil {
+		t.Fatalf("checkAndGetAnnotation: %v", err)
+	}
+	if _, ok := out.Annotations[constants.CubeAnnotationPauseSnapshotID]; ok {
+		t.Fatal("user pause snapshot id must not be forwarded")
+	}
+	if _, ok := out.Annotations[constants.CubeAnnotationLaunchMemorySnapshotID]; ok {
+		t.Fatal("user launch ancestor must not be forwarded")
+	}
+	if _, ok := out.Annotations[constants.CubeAnnotationRuntimeRestoreSnapshotID]; ok {
+		t.Fatal("user restore-base must not be forwarded")
+	}
+	if got := out.Annotations[constants.CubeAnnotationRuntimeSnapshotID]; got != "snap-user-runtime" {
+		t.Fatalf("other cube.master keys still forward, got %q", got)
 	}
 }

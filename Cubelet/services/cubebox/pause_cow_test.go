@@ -240,4 +240,27 @@ func TestKeepLiveXFSPausePackage(t *testing.T) {
 	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{other}, snap, "xfs") {
 		t.Fatal("unrelated sandbox must not pin this package")
 	}
+
+	forged := newCubeboxWithStatusForTest("sb-forged", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	forged.AddAnnotations(map[string]string{constants.MasterAnnotationPauseSnapshotID: snap})
+	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{forged}, snap, "xfs") {
+		t.Fatal("user Create annotation must not pin an XFS pause package")
+	}
+
+	nextPause := newCubeboxWithStatusForTest("sb-next", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	stampPauseSnapshotID(nextPause, "snap-new000000000000000000000001")
+	nextPause.AddLabels(map[string]string{constants.MasterAnnotationRuntimeRestoreSnapshotID: snap})
+	if !keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{nextPause}, snap, "xfs") {
+		t.Fatal("restore-base must keep the previous package while Pause stamps a new id")
+	}
+}
+
+func TestIsPauseSnapshotCatalogKind(t *testing.T) {
+	t.Parallel()
+	if !isPauseSnapshotCatalogKind("pause_snapshot") {
+		t.Fatal("pause_snapshot must keep")
+	}
+	if isPauseSnapshotCatalogKind("snapshot") || isPauseSnapshotCatalogKind("template") || isPauseSnapshotCatalogKind("") {
+		t.Fatal("non-pause kinds must not keep")
+	}
 }
