@@ -421,6 +421,7 @@ lifecycleManager:
     # Empty host uses redis.host or chart-managed cube-redis.
     host: ""
     port: ""
+    # Deprecated: ignored; use top-level redis.db (Master/Proxy/LCM share one DB).
     db: 0
   defaultIdleTimeout: 5m
   heartbeatTTL: 15s
@@ -533,6 +534,9 @@ redis:
   # AUTH against Sentinel instances only. Leave empty when Sentinel has no requirepass
   # (master password still uses redis.password).
   sentinelPassword: ""
+  # Logical Redis DB (0-15 on standalone/Sentinel masters). Master / Proxy / LCM share this.
+  # Use a distinct db per Cube cluster when sharing one Redis instance.
+  db: 0
   # SECURITY: Override before any non-throwaway deployment. templates/validate.yaml
   # refuses to render when this equals the CHANGE_ME_* sentinel.
   password: CHANGE_ME_REDIS_PASSWORD
@@ -797,6 +801,7 @@ cubeProxy:
     # Overrides must be an FQDN or IP literal (nginx resolver has no search domains).
     host: ""
     port: ""
+    # Deprecated: ignored; use top-level redis.db (Master/Proxy/LCM share one DB).
     db: 0
   timeout:
     min: 500
