@@ -453,7 +453,7 @@ pub async fn get_sandbox_logs_v2(
     let logs = state
         .services
         .sandboxes
-        .get_logs_v2(&sandbox_id, params.cursor, params.limit)
+        .get_logs_v2(&sandbox_id, params.limit)
         .await?;
     state
         .logger

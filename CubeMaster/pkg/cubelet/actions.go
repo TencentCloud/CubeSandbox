@@ -157,6 +157,22 @@ func GetStorageMetrics(ctx context.Context, calleeEp string,
 	return c.GetStorageMetrics(ctx, req)
 }
 
+// GetSandboxEvents fetches events from the Cubelet owning the sandbox.
+func GetSandboxEvents(ctx context.Context, calleeEp string,
+	req *cubebox.GetSandboxEventsRequest) (*cubebox.GetSandboxEventsResponse, error) {
+	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
+	if err != nil {
+		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
+	}
+	defer conn.Close()
+	c := cubebox.NewCubeboxMgrClient(conn.Value())
+	ctx, cancel := context.WithTimeout(ctx,
+		time.Duration(config.GetConfig().CubeletConf.CommonTimeoutInsec)*time.Second)
+	defer cancel()
+
+	return c.GetSandboxEvents(ctx, req)
+}
+
 func List(ctx context.Context, calleeEp string,
 	req *cubebox.ListCubeSandboxRequest) (*cubebox.ListCubeSandboxResponse, error) {
 	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
