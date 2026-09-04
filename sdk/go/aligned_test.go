@@ -465,6 +465,193 @@ func TestCloneKillsSiblingsOnFailure(t *testing.T) {
 	}
 }
 
+func TestForkRejectsCountOverCap(t *testing.T) {
+	sb := &Sandbox{}
+	if _, err := sb.Fork(context.Background(), ForkOptions{Count: 101}); err == nil {
+		t.Fatal("Fork(count=101) returned nil error")
+	}
+}
+
+func TestForkZeroCountDefaultsToOne(t *testing.T) {
+	var created atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/snapshots"):
+			fmt.Fprint(w, `{"snapshotID":"snap-fork"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes":
+			created.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, sandboxJSON("fork-1", "snap-fork"))
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	sb := &Sandbox{client: client, SandboxID: testSandboxID}
+	forks, err := sb.Fork(context.Background(), ForkOptions{})
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if len(forks) != 1 || forks[0].Err != nil {
+		t.Fatalf("forks=%#v, want one success", forks)
+	}
+	if got := created.Load(); got != 1 {
+		t.Fatalf("created=%d, want 1", got)
+	}
+}
+
+func TestForkForwardsSnapshotAndTimeout(t *testing.T) {
+	var gotTemplate string
+	var gotTimeout any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/snapshots"):
+			fmt.Fprint(w, `{"snapshotID":"snap-fork"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			gotTemplate = body["templateID"].(string)
+			gotTimeout = body["timeout"]
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, sandboxJSON("fork-1", "snap-fork"))
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/sandboxes/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && r.URL.Path == "/templates/snap-fork":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	sb := &Sandbox{client: client, SandboxID: testSandboxID}
+	forks, err := sb.Fork(context.Background(), ForkOptions{Count: 1, Timeout: DurationPtr(60 * time.Second)})
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if len(forks) != 1 || forks[0].Err != nil || forks[0].Sandbox == nil {
+		t.Fatalf("forks=%#v", forks)
+	}
+	if gotTemplate != "snap-fork" {
+		t.Fatalf("templateID=%q, want snap-fork", gotTemplate)
+	}
+	if gotTimeout != float64(60) {
+		t.Fatalf("timeout=%v, want 60", gotTimeout)
+	}
+	if err := forks[0].Sandbox.Kill(context.Background()); err != nil {
+		t.Fatalf("kill fork: %v", err)
+	}
+}
+
+func TestForkKeepsSuccessfulSiblingsAndReportsFailures(t *testing.T) {
+	var created, killed atomic.Int32
+	var snapshotDeletes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/snapshots"):
+			fmt.Fprint(w, `{"snapshotID":"snap-fork"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes":
+			id := created.Add(1)
+			if id == 3 { // fail the 3rd requested fork
+				http.Error(w, `{"message":"fork 3 failed"}`, http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, sandboxJSON(fmt.Sprintf("fork-%d", id), "snap-fork"))
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/sandboxes/"):
+			killed.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && r.URL.Path == "/templates/snap-fork":
+			snapshotDeletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	sb := &Sandbox{client: client, SandboxID: testSandboxID}
+	forks, err := sb.Fork(context.Background(), ForkOptions{Count: 5})
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if len(forks) != 5 {
+		t.Fatalf("len(forks)=%d, want 5", len(forks))
+	}
+	var ok []*Sandbox
+	for _, f := range forks {
+		if f.Err != nil {
+			continue
+		}
+		ok = append(ok, f.Sandbox)
+	}
+	if len(ok) != 4 {
+		t.Fatalf("successful forks=%d, want 4", len(ok))
+	}
+	if killed.Load() != 0 {
+		t.Fatalf("fork killed %d successful siblings, want 0", killed.Load())
+	}
+	if snapshotDeletes.Load() != 0 {
+		t.Fatalf("snapshot deleted before forks were killed")
+	}
+	var wg sync.WaitGroup
+	for _, f := range ok {
+		wg.Add(1)
+		go func(s *Sandbox) {
+			defer wg.Done()
+			_ = s.Kill(context.Background())
+		}(f)
+	}
+	wg.Wait()
+	if got := snapshotDeletes.Load(); got != 1 {
+		t.Fatalf("snapshotDeletes=%d, want 1 after all forks killed", got)
+	}
+}
+
+func TestForkDeletesSnapshotWhenEveryForkFails(t *testing.T) {
+	var snapshotDeletes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/snapshots"):
+			fmt.Fprint(w, `{"snapshotID":"snap-all-fail"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes":
+			http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+		case r.Method == http.MethodDelete && r.URL.Path == "/templates/snap-all-fail":
+			snapshotDeletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	sb := &Sandbox{client: client, SandboxID: testSandboxID}
+	forks, err := sb.Fork(context.Background(), ForkOptions{Count: 3})
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if len(forks) != 3 {
+		t.Fatalf("len(forks)=%d, want 3", len(forks))
+	}
+	for _, f := range forks {
+		if f.Err == nil {
+			t.Fatalf("expected an error, got sandbox %#v", f.Sandbox)
+		}
+	}
+	if got := snapshotDeletes.Load(); got != 1 {
+		t.Fatalf("snapshotDeletes=%d, want 1 when every fork fails", got)
+	}
+}
+
 func TestFilesWriteOctetStreamThenMultipartFallback(t *testing.T) {
 	var contentTypes []string
 	var usernames []string

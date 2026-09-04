@@ -769,6 +769,77 @@ class Sandbox:
             pass
         self._session = self._build_session()
 
+    def _fan_out(
+        self,
+        n: int,
+        *,
+        timeout: int | None = None,
+        concurrency: int = 1,
+        fail_fast: bool = True,
+    ) -> tuple[list["Sandbox" | BaseException | None], _CloneCleanup | None]:
+        """Spin up ``n`` sandboxes from one fresh snapshot with bounded concurrency.
+
+        Captures the sandbox once, then creates ``n`` sandboxes from that
+        snapshot, attaching a shared ``_CloneCleanup`` so the temporary snapshot
+        is deleted once the last clone is killed. Returns ``(outcomes, cleanup)``
+        where ``outcomes[i]`` is the :class:`Sandbox` — or the ``BaseException``
+        that prevented it — for requested slot ``i``. Slots never attempted
+        under ``fail_fast`` (all-or-nothing ``clone``) are ``None``. Concurrent
+        mode always drains every in-flight create; when no sandbox succeeded the
+        snapshot is deleted here so it never leaks.
+        """
+        snapshot = self.create_snapshot()
+        snap_id = snapshot.snapshot_id
+        cfg = self._config
+
+        def _create_one() -> Sandbox:
+            kwargs: dict[str, Any] = {"template": snap_id, "config": cfg}
+            if timeout is not None:
+                kwargs["timeout"] = timeout
+            return Sandbox.create(**kwargs)
+
+        outcomes: list[Sandbox | BaseException | None] = [None] * n
+        if concurrency <= 1 or n <= 1:
+            # Sequential. ``fail_fast`` short-circuits on the first failure to
+            # preserve clone's historical behaviour; ``fork`` drains instead.
+            for i in range(n):
+                try:
+                    outcomes[i] = _create_one()
+                except BaseException as exc:  # noqa: BLE001
+                    outcomes[i] = exc
+                    if fail_fast:
+                        break
+        else:
+            # Local import keeps the default (sequential) path free of
+            # threading machinery for callers that never opt-in.
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            workers = min(n, concurrency)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_create_one): i for i in range(n)}
+                # Drain every future — never leak a Sandbox just because an
+                # earlier sibling raised; fill each requested slot by index.
+                for fut in as_completed(futures):
+                    slot = futures[fut]
+                    try:
+                        outcomes[slot] = fut.result()
+                    except BaseException as exc:  # noqa: BLE001
+                        outcomes[slot] = exc
+
+        sandboxes = [sb for sb in outcomes if isinstance(sb, Sandbox)]
+        if sandboxes:
+            cleanup = _CloneCleanup(snap_id, len(sandboxes), cfg)
+            for sb in sandboxes:
+                sb._clone_cleanup = cleanup
+            return outcomes, cleanup
+        # Nothing holds the snapshot (``n == 0`` or every create failed):
+        # delete it here so a partial fan-out cannot leak the snapshot.
+        try:
+            Sandbox.delete_snapshot(snap_id, config=cfg)
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass
+        return outcomes, None
+
     def clone(self, n: int = 1, *, concurrency: int = 1) -> list["Sandbox"]:
         """Clone this sandbox *n* times (1.6).
 
@@ -811,69 +882,68 @@ class Sandbox:
                 killing every sibling that did succeed).
             ApiError: On unexpected backend error.
         """
-        snapshot = self.create_snapshot()
-        snap_id = snapshot.snapshot_id
-        cfg = self._config
-
-        def _create_one() -> Sandbox:
-            return Sandbox.create(template=snap_id, config=cfg)
-
-        sandboxes: list[Sandbox] = []
-        first_error: BaseException | None = None
-        if concurrency <= 1 or n <= 1:
-            # Sequential: short-circuit on first failure to preserve the
-            # historical fail-fast behaviour.
-            for _ in range(n):
-                try:
-                    sandboxes.append(_create_one())
-                except BaseException as exc:  # noqa: BLE001
-                    first_error = exc
-                    break
-        else:
-            # Local import: keeps the default (sequential) path free of
-            # threading machinery for callers that never opt-in.
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-            workers = min(n, concurrency)
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = [pool.submit(_create_one) for _ in range(n)]
-                # Drain every future — never leak a Sandbox just because
-                # an earlier sibling raised. We collect successes and the
-                # first exception, then decide what to do once all futures
-                # have settled.
-                for fut in as_completed(futures):
-                    try:
-                        sandboxes.append(fut.result())
-                    except BaseException as exc:  # noqa: BLE001
-                        if first_error is None:
-                            first_error = exc
-                        # Keep draining: another in-flight create may
-                        # still succeed and we must not drop its result.
-        cleanup = _CloneCleanup(snap_id, len(sandboxes), cfg)
-        for sb in sandboxes:
-            sb._clone_cleanup = cleanup
-
-        if first_error is not None:
-            # We hit at least one failure. The caller asked for *n* clones
-            # and got fewer — there is no clean way to return both partial
-            # successes and an exception, so kill the orphans and propagate.
-            # This is "all-or-nothing" semantics for the failure case.
-            for sb in sandboxes:
+        outcomes, cleanup = self._fan_out(n, concurrency=concurrency, fail_fast=True)
+        failures = [o for o in outcomes if isinstance(o, BaseException)]
+        if failures:
+            # All-or-nothing: the caller asked for *n* clones and got fewer —
+            # there is no clean way to return partial successes alongside an
+            # exception, so kill the orphans and propagate the first error.
+            for sb in (o for o in outcomes if isinstance(o, Sandbox)):
                 try:
                     sb.kill()
                 except Exception:  # noqa: BLE001 — best-effort cleanup
                     pass
             # A failed kill cannot release its ownership. Force the idempotent
             # backstop after every surviving sibling has been attempted.
-            cleanup.cleanup()
-            raise first_error
+            if cleanup is not None:
+                cleanup.cleanup()
+            raise failures[0]
+        return [o for o in outcomes if isinstance(o, Sandbox)]
 
-        if not sandboxes:
-            try:
-                Sandbox.delete_snapshot(snap_id, config=cfg)
-            except Exception:  # noqa: BLE001 — best-effort cleanup
-                pass
-        return sandboxes
+    def fork(
+        self,
+        count: int = 1,
+        *,
+        timeout: int | None = None,
+        concurrency: int = 1,
+    ) -> list["Sandbox" | BaseException]:
+        """Fork this sandbox *count* times.
+
+        Each fork is attempted and succeeds or fails independently: the returned
+        list has one entry per requested fork — a :class:`Sandbox`, or the
+        ``BaseException`` that prevented it from starting. Successful forks are
+        kept even when siblings fail (unlike :meth:`clone`, which is
+        all-or-nothing). The temporary snapshot is deleted after the last fork
+        is killed, or immediately if none succeed.
+
+        Concurrency is capped at ``min(count, concurrency)`` (default 1 =
+        sequential); it is never implied by ``count``.
+
+        Args:
+            count: Number of forks to create, 1..100 (default: 1).
+            timeout: Idle timeout in seconds per new fork (``None`` = server
+                default); only affects the forks.
+            concurrency: Max parallel ``Sandbox.create`` calls (default 1);
+                capped at ``count``.
+
+        Returns:
+            A list with exactly *count* entries, in request order.
+
+        Raises:
+            ValueError: If ``count`` is outside ``1..100``.
+            CubeSandboxError: If snapshot creation fails (no fork attempted).
+            ApiError: On unexpected backend error.
+        """
+        if count < 1 or count > 100:
+            raise ValueError("count must be between 1 and 100")
+        outcomes, _cleanup = self._fan_out(
+            count,
+            timeout=timeout,
+            concurrency=concurrency,
+            fail_fast=False,
+        )
+        # ``fail_fast=False`` fills every slot, so no ``None`` can remain.
+        return [o for o in outcomes if o is not None]
 
 
     def _build_session(self) -> requests.Session:

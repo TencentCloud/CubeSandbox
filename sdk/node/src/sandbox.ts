@@ -712,6 +712,82 @@ export class Sandbox {
   }
 
   /**
+   * Spin up ``n`` sandboxes from one fresh snapshot with bounded concurrency.
+   *
+   * Captures the sandbox once, then creates ``n`` sandboxes from that snapshot,
+   * attaching a shared {@link CloneCleanup} so the temporary snapshot is deleted
+   * once the last one is killed. ``outcomes[i]`` is the {@link Sandbox} — or the
+   * {@link Error} that prevented it — for requested slot ``i``; slots never
+   * attempted under ``failFast`` (all-or-nothing ``clone``) are ``undefined``.
+   * When no sandbox succeeded the snapshot is deleted here so it never leaks.
+   */
+  private async _fanOut(
+    n: number,
+    opts: { timeout?: number; concurrency?: number; failFast: boolean },
+  ): Promise<{ outcomes: Array<Sandbox | Error | undefined>; cleanup: CloneCleanup | null }> {
+    const { timeout, failFast } = opts;
+    const concurrency = opts.concurrency ?? 1;
+    const snapshot = await this.createSnapshot();
+    const snapId = snapshot.snapshotId;
+    const cfg = this.config;
+
+    const createOne = (): Promise<Sandbox> => {
+      const createOpts: CreateOptions = { template: snapId, config: cfg };
+      if (timeout !== undefined) createOpts.timeout = timeout;
+      return Sandbox.create(createOpts);
+    };
+
+    const outcomes: Array<Sandbox | Error | undefined> = new Array(n).fill(undefined);
+    if (concurrency <= 1 || n <= 1) {
+      // Sequential. ``failFast`` short-circuits on the first failure to
+      // preserve clone's historical behaviour; ``fork`` drains instead.
+      for (let i = 0; i < n; i++) {
+        try {
+          outcomes[i] = await createOne();
+        } catch (err) {
+          outcomes[i] = err as Error;
+          if (failFast) break;
+        }
+      }
+    } else {
+      // Bounded fan-out: at most min(n, concurrency) creates in flight (workers
+      // share a cursor). Drain every task so a mid-fan-out failure can't leak a
+      // sibling; each slot is filled by its requested index.
+      const limit = Math.min(n, concurrency);
+      let next = 0;
+      const worker = async (): Promise<void> => {
+        for (;;) {
+          const index = next++;
+          if (index >= n) return;
+          try {
+            outcomes[index] = await createOne();
+          } catch (err) {
+            outcomes[index] = err as Error;
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: limit }, () => worker()));
+    }
+
+    const sandboxes = outcomes.filter((o): o is Sandbox => o instanceof Sandbox);
+    if (sandboxes.length > 0) {
+      const cleanup = new CloneCleanup(snapId, sandboxes.length, cfg);
+      sandboxes.forEach((sandbox) => {
+        sandbox._cloneCleanup = cleanup;
+      });
+      return { outcomes, cleanup };
+    }
+    // Nothing holds the snapshot (``n === 0`` or every create failed): delete it
+    // here so a partial fan-out cannot leak the snapshot.
+    try {
+      await Sandbox.deleteSnapshot(snapId, { config: cfg });
+    } catch {
+      // best-effort snapshot cleanup
+    }
+    return { outcomes, cleanup: null };
+  }
+
+  /**
    * Clone this sandbox ``n`` times. The temporary snapshot is deleted after
    * the last clone is killed through this SDK process.
    *
@@ -722,69 +798,57 @@ export class Sandbox {
    */
   async clone(n = 1, options: { concurrency?: number } = {}): Promise<Sandbox[]> {
     const concurrency = options.concurrency ?? 1;
-    const snapshot = await this.createSnapshot();
-    const snapId = snapshot.snapshotId;
-    const cfg = this.config;
+    const { outcomes, cleanup } = await this._fanOut(n, { concurrency, failFast: true });
 
-    const createOne = (): Promise<Sandbox> => Sandbox.create({ template: snapId, config: cfg });
-
-    const sandboxes: Sandbox[] = [];
-    let firstError: unknown = null;
-
-    if (concurrency <= 1 || n <= 1) {
-      for (let i = 0; i < n; i++) {
-        try {
-          sandboxes.push(await createOne());
-        } catch (err) {
-          firstError = err;
-          break;
-        }
-      }
-    } else {
-        // Bounded fan-out: at most min(n, concurrency) create calls are in
-        // flight at once (workers pull from a shared cursor), matching the
-        // Python (ThreadPoolExecutor) and Go (semaphore) SDKs. Every task is
-        // drained so a mid-fan-out failure never leaks a created sibling.
-        const limit = Math.min(n, concurrency);
-        let next = 0;
-        const worker = async (): Promise<void> => {
-          for (;;) {
-            const index = next++;
-            if (index >= n) {
-              return;
-            }
-            try {
-              sandboxes.push(await createOne());
-            } catch (err) {
-              if (firstError === null) {
-                firstError = err;
-              }
-            }
-          }
-        };
-        await Promise.all(Array.from({ length: limit }, () => worker()));
-    }
-
-    const cleanup = new CloneCleanup(snapId, sandboxes.length, cfg);
-    sandboxes.forEach((sandbox) => {
-      sandbox._cloneCleanup = cleanup;
-    });
-
-    if (firstError !== null) {
-      await Promise.allSettled(sandboxes.map((sb) => sb.kill()));
+    const failures = outcomes.filter((o): o is Error => o instanceof Error);
+    if (failures.length > 0) {
+      // All-or-nothing: the caller asked for *n* clones and got fewer — there
+      // is no clean way to return partial successes alongside an exception, so
+      // kill the orphans and rethrow the first error.
+      await Promise.allSettled(
+        outcomes.filter((o): o is Sandbox => o instanceof Sandbox).map((sb) => sb.kill()),
+      );
       // A failed kill cannot release its ownership. Force the idempotent
       // backstop after every surviving sibling has settled.
-      await cleanup.cleanup();
-      throw firstError;
+      if (cleanup !== null) await cleanup.cleanup();
+      throw failures[0];
     }
-    if (sandboxes.length === 0) {
-      try {
-        await Sandbox.deleteSnapshot(snapId, { config: cfg });
-      } catch {
-        // best-effort snapshot cleanup
-      }
+    return outcomes.filter((o): o is Sandbox => o instanceof Sandbox);
+  }
+
+  /**
+   * Fork this sandbox ``count`` times, mirroring E2B's ``Sandbox.fork``.
+   *
+   * Each requested fork succeeds or fails independently: every sandbox is
+   * attempted and the outcome is reported in the returned array at that fork's
+   * position — a {@link Sandbox} instance or the {@link Error} that prevented it
+   * from starting (``Promise.allSettled``-style). Unlike {@link clone}
+   * (all-or-nothing), successful forks are kept even when siblings fail.
+   *
+   * Concurrency is bounded by ``concurrency`` (default 1, sequential) at
+   * ``min(count, concurrency)``; it never exceeds ``count`` and is not implied
+   * by it. ``timeout`` is in seconds, matching {@link CreateOptions.timeout}.
+   * The temporary snapshot is deleted after the last fork is killed through
+   * this SDK process; if no fork succeeds it is deleted immediately.
+   *
+   * @param options ``count`` 1..100, ``timeout`` (seconds) and ``concurrency``.
+   * @returns Exactly ``count`` entries, in request order — each a {@link Sandbox}
+   *   instance (when that fork started) or an {@link Error}.
+   */
+  async fork(
+    options: { count?: number; timeout?: number; concurrency?: number } = {},
+  ): Promise<Array<Sandbox | Error>> {
+    const count = options.count ?? 1;
+    if (count < 1 || count > 100) {
+      throw new RangeError("count must be between 1 and 100");
     }
-    return sandboxes;
+    const { outcomes } = await this._fanOut(count, {
+      timeout: options.timeout,
+      concurrency: options.concurrency,
+      failFast: false,
+    });
+    // ``failFast=false`` fills every slot, so no ``undefined`` can remain.
+    return outcomes.filter((o): o is Sandbox | Error => o !== undefined);
   }
 
   /** Close pooled HTTP connections without destroying the sandbox. */

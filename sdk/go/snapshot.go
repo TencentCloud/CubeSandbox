@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"time"
 )
 
 // SnapshotInfo is the metadata returned by snapshot APIs. Snapshots are stored
@@ -168,58 +169,80 @@ func (s *Sandbox) Rollback(ctx context.Context, snapshotID string) (map[string]a
 	return result, nil
 }
 
-// Clone snapshots this sandbox and spins up opts.N fresh sandboxes from it.
-// The temporary snapshot is deleted after the last clone is killed through
-// this SDK process. On any create failure all successful siblings are killed
-// and the first error is returned, so a partial fan-out never leaks sandboxes.
-func (s *Sandbox) Clone(ctx context.Context, opts CloneOptions) ([]*Sandbox, error) {
+// ForkResult is the outcome of one requested fork: exactly one of Sandbox or
+// Err is set. Sandbox is non-nil when the fork started; Err describes why it
+// failed to start.
+type ForkResult struct {
+	Sandbox *Sandbox
+	Err     error
+}
+
+// ForkOptions controls Sandbox.Fork. Count defaults to 1 and is capped at 100;
+// Concurrency defaults to 1 (sequential) and is capped at Count.
+type ForkOptions struct {
+	Count       int
+	Timeout     *time.Duration
+	Concurrency int
+}
+
+// fanOutResult is one requested fan-out slot.
+type fanOutResult struct {
+	sandbox *Sandbox // non-nil when the slot started
+	err     error    // non-nil when the slot failed
+}
+
+// fanOut creates n sandboxes from one snapshot (bounded concurrency). Successes
+// carry a cloneCleanup deleting the temp snapshot after the last is killed, or
+// deletes it here if none succeed. Returns one result per slot.
+func (s *Sandbox) fanOut(ctx context.Context, n int, timeout *time.Duration, concurrency int) ([]fanOutResult, *cloneCleanup, error) {
 	if err := s.ensureClient(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	n := opts.N
-	if n <= 0 {
-		n = 1
-	}
-	concurrency := opts.Concurrency
 	if concurrency <= 0 {
 		concurrency = 1
 	}
 
 	snapshot, err := s.CreateSnapshot(ctx, "")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	createOne := func() (*Sandbox, error) {
-		return s.client.Create(ctx, CreateOptions{TemplateID: snapshot.SnapshotID})
+		return s.client.Create(ctx, CreateOptions{TemplateID: snapshot.SnapshotID, Timeout: timeout})
 	}
 
+	results := make([]fanOutResult, n)
 	var (
 		mu        sync.Mutex
-		clones    []*Sandbox
-		firstErr  error
 		wg        sync.WaitGroup
 		semaphore = make(chan struct{}, min(n, concurrency))
 	)
 	for i := 0; i < n; i++ {
 		wg.Add(1)
-		go func() {
+		go func(idx int) {
 			defer wg.Done()
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
-
-			clone, err := createOne()
+			sandbox, err := createOne()
 			mu.Lock()
 			defer mu.Unlock()
-			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
-				return
-			}
-			clones = append(clones, clone)
-		}()
+			results[idx].sandbox = sandbox
+			results[idx].err = err
+		}(i)
 	}
 	wg.Wait()
+
+	var clones []*Sandbox
+	for _, r := range results {
+		if r.err == nil && r.sandbox != nil {
+			clones = append(clones, r.sandbox)
+		}
+	}
+	if len(clones) == 0 {
+		// Nothing holds the snapshot; delete it so a partial fan-out cannot
+		// leak the temporary snapshot.
+		_ = s.client.DeleteSnapshot(context.WithoutCancel(ctx), snapshot.SnapshotID)
+		return results, nil, nil
+	}
 	cleanup := &cloneCleanup{
 		client:     s.client,
 		snapshotID: snapshot.SnapshotID,
@@ -229,18 +252,74 @@ func (s *Sandbox) Clone(ctx context.Context, opts CloneOptions) ([]*Sandbox, err
 	for _, clone := range clones {
 		clone.cloneCleanup = cleanup
 	}
+	return results, cleanup, nil
+}
+
+// Clone snapshots this sandbox and spins up opts.N fresh sandboxes from it.
+// The temporary snapshot is deleted after the last clone is killed through
+// this SDK process. On any create failure all successful siblings are killed
+// and the first error is returned, so a partial fan-out never leaks sandboxes.
+func (s *Sandbox) Clone(ctx context.Context, opts CloneOptions) ([]*Sandbox, error) {
+	n := opts.N
+	if n <= 0 {
+		n = 1
+	}
+	results, cleanup, err := s.fanOut(ctx, n, nil, opts.Concurrency)
+	if err != nil {
+		return nil, err
+	}
+
+	clones := make([]*Sandbox, 0, len(results))
+	var firstErr error
+	for _, r := range results {
+		if r.err != nil {
+			if firstErr == nil {
+				firstErr = r.err
+			}
+			continue
+		}
+		clones = append(clones, r.sandbox)
+	}
 
 	if firstErr != nil {
+		// All-or-nothing: the caller asked for *n* clones and got fewer, so
+		// kill the orphans and return the first error.
 		for _, clone := range clones {
 			_ = clone.Kill(context.WithoutCancel(ctx))
 		}
 		// A failed Kill does not release its clone ownership. Force the
-		// best-effort snapshot cleanup after all surviving siblings have been
+		// best-effort snapshot cleanup after every surviving sibling has been
 		// handled so a transient teardown failure cannot leak the snapshot.
-		cleanup.cleanup(context.WithoutCancel(ctx))
+		if cleanup != nil {
+			cleanup.cleanup(context.WithoutCancel(ctx))
+		}
 		return nil, firstErr
 	}
 	return clones, nil
+}
+
+// Fork creates opts.Count sandboxes from one snapshot. Each fork succeeds or
+// fails independently — successes are kept when siblings fail (unlike Clone's
+// all-or-nothing). Concurrency defaults to 1 and is capped at
+// min(Count, Concurrency). The temp snapshot is deleted after the last fork is
+// killed, or immediately if none succeed.
+func (s *Sandbox) Fork(ctx context.Context, opts ForkOptions) ([]ForkResult, error) {
+	count := opts.Count
+	if count <= 0 {
+		count = 1
+	}
+	if count > 100 {
+		return nil, errors.New("count must be between 1 and 100")
+	}
+	results, _, err := s.fanOut(ctx, count, opts.Timeout, opts.Concurrency)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ForkResult, len(results))
+	for i, r := range results {
+		out[i] = ForkResult{Sandbox: r.sandbox, Err: r.err}
+	}
+	return out, nil
 }
 
 // resetConnections drops pooled data-plane connections so the next request

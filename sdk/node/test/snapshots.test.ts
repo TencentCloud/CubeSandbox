@@ -297,3 +297,204 @@ describe("Sandbox.clone", () => {
     sb.close();
   });
 });
+
+describe("Sandbox.fork", () => {
+  it("forks one by default, reusing the snapshot as template", async () => {
+    const sb = await createSandbox();
+    const createdIds: string[] = [];
+    let snapshotDeleted = false;
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname.endsWith("/snapshots")) {
+        return { status: 200, json: { snapshotID: "snap-fork" } };
+      }
+      if (req.method === "POST" && req.pathname === "/sandboxes") {
+        expect(JSON.parse(req.body.toString()).templateID).toBe("snap-fork");
+        const id = `sb-fork-${createdIds.length}`;
+        createdIds.push(id);
+        return { status: 201, json: { ...SANDBOX_DATA, sandboxID: id } };
+      }
+      if (req.method === "DELETE" && req.pathname.startsWith("/sandboxes/")) {
+        return { status: 204 };
+      }
+      if (req.method === "DELETE" && req.pathname === "/templates/snap-fork") {
+        snapshotDeleted = true;
+        return { status: 204 };
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+
+    const forks = await sb.fork();
+    expect(forks).toHaveLength(1);
+    expect(forks[0]).toBeInstanceOf(Sandbox);
+    expect((forks[0] as Sandbox).sandboxId).toBe("sb-fork-0");
+    expect(snapshotDeleted).toBe(false);
+    // The temp snapshot is deleted only after the last fork is killed.
+    await (forks[0] as Sandbox).kill();
+    expect(snapshotDeleted).toBe(true);
+    sb.close();
+  });
+
+  it("forks count sandboxes and forwards the snapshot id", async () => {
+    const sb = await createSandbox();
+    const createdIds: string[] = [];
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname.endsWith("/snapshots")) {
+        return { status: 200, json: { snapshotID: "snap-fork3" } };
+      }
+      if (req.method === "POST" && req.pathname === "/sandboxes") {
+        expect(JSON.parse(req.body.toString()).templateID).toBe("snap-fork3");
+        const id = `sb-fork-${createdIds.length}`;
+        createdIds.push(id);
+        return { status: 201, json: { ...SANDBOX_DATA, sandboxID: id } };
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+
+    const forks = await sb.fork({ count: 3 });
+    expect(forks).toHaveLength(3);
+    expect(forks.every((f) => f instanceof Sandbox)).toBe(true);
+    expect((forks as Sandbox[]).map((f) => f.sandboxId)).toEqual([
+      "sb-fork-0",
+      "sb-fork-1",
+      "sb-fork-2",
+    ]);
+    (forks as Sandbox[]).forEach((f) => f.close());
+    sb.close();
+  });
+
+  it("passes timeout to each created sandbox", async () => {
+    const sb = await createSandbox();
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname.endsWith("/snapshots")) {
+        return { status: 200, json: { snapshotID: "snap-t" } };
+      }
+      if (req.method === "POST" && req.pathname === "/sandboxes") {
+        const body = JSON.parse(req.body.toString());
+        expect(body.timeout).toBe(60);
+        return { status: 201, json: { ...SANDBOX_DATA, sandboxID: "sb-fork-t" } };
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+    await sb.fork({ count: 2, timeout: 60 });
+    sb.close();
+  });
+
+  it("rejects count outside 1..100", async () => {
+    const sb = await createSandbox();
+    await expect(sb.fork({ count: 0 })).rejects.toThrow(/count must be between 1 and 100/);
+    await expect(sb.fork({ count: 101 })).rejects.toThrow(/count must be between 1 and 100/);
+    sb.close();
+  });
+
+  it("keeps successful forks and reports per-fork failures as errors", async () => {
+    const sb = await createSandbox();
+    const killed: string[] = [];
+    let createCount = 0;
+    let snapshotDeleted = false;
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname.endsWith("/snapshots")) {
+        return { status: 200, json: { snapshotID: "snap-partial" } };
+      }
+      if (req.method === "POST" && req.pathname === "/sandboxes") {
+        createCount += 1;
+        if (createCount === 3) {
+          return { status: 500, json: { message: "fork 3 failed" } };
+        }
+        return { status: 201, json: { ...SANDBOX_DATA, sandboxID: `sb-fork-${createCount}` } };
+      }
+      if (req.method === "DELETE" && req.pathname.startsWith("/sandboxes/")) {
+        killed.push(req.pathname);
+        return { status: 204 };
+      }
+      if (req.method === "DELETE" && req.pathname === "/templates/snap-partial") {
+        snapshotDeleted = true;
+        return { status: 204 };
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+
+    const forks = await sb.fork({ count: 5 });
+    expect(forks).toHaveLength(5);
+    // Slots 0,1,3,4 succeeded; slot 2 (the 3rd create) failed.
+    const ok = forks.filter((f): f is Sandbox => f instanceof Sandbox);
+    const errs = forks.filter((f): f is Error => f instanceof Error);
+    expect(ok).toHaveLength(4);
+    expect(errs).toHaveLength(1);
+    expect(errs[0].message).toMatch(/fork 3 failed/);
+    // Successful forks are preserved, not killed by fork itself.
+    expect(killed).toHaveLength(0);
+    // Snapshot stays until the last success is killed.
+    expect(snapshotDeleted).toBe(false);
+    ok.forEach((f) => f.close());
+    sb.close();
+  });
+
+  it("deletes the snapshot when every fork fails", async () => {
+    const sb = await createSandbox();
+    let snapshotDeleted = false;
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname.endsWith("/snapshots")) {
+        return { status: 200, json: { snapshotID: "snap-all-fail" } };
+      }
+      if (req.method === "POST" && req.pathname === "/sandboxes") {
+        return { status: 500, json: { message: "boom" } };
+      }
+      if (req.method === "DELETE" && req.pathname === "/templates/snap-all-fail") {
+        snapshotDeleted = true;
+        return { status: 204 };
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+
+    const forks = await sb.fork({ count: 3 });
+    expect(forks).toHaveLength(3);
+    expect(forks.every((f) => f instanceof Error)).toBe(true);
+    expect(snapshotDeleted).toBe(true);
+    sb.close();
+  });
+
+  it("aborts the whole request when snapshotting fails", async () => {
+    const sb = await createSandbox();
+    let createCalls = 0;
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname.endsWith("/snapshots")) {
+        return { status: 500, json: { message: "snap boom" } };
+      }
+      if (req.method === "POST" && req.pathname === "/sandboxes") {
+        createCalls += 1;
+        return { status: 201, json: SANDBOX_DATA };
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+    await expect(sb.fork({ count: 3 })).rejects.toThrow(/snap boom/);
+    expect(createCalls).toBe(0);
+    sb.close();
+  });
+
+  it("caps in-flight creates at `concurrency`", async () => {
+    const sb = await createSandbox();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let created = 0;
+    setHandler(async (req) => {
+      if (req.method === "POST" && req.pathname.endsWith("/snapshots")) {
+        return { status: 200, json: { snapshotID: "snap-fork" } };
+      }
+      if (req.method === "POST" && req.pathname === "/sandboxes") {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((r) => setTimeout(r, 50));
+        inFlight -= 1;
+        return { status: 201, json: { ...SANDBOX_DATA, sandboxID: `sb-fork-${created++}` } };
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+
+    const forks = await sb.fork({ count: 6, concurrency: 2 });
+    expect(forks).toHaveLength(6);
+    expect(maxInFlight).toBeLessThanOrEqual(2);
+    expect(maxInFlight).toBeGreaterThan(1);
+    forks.forEach((f) => (f as Sandbox).close());
+    sb.close();
+  });
+});

@@ -2506,6 +2506,188 @@ class TestClone:
                 sb.clone(n=1, snapshot_name="leaky")  # type: ignore[call-arg]
 
 
+class TestFork:
+    """Tests for ``Sandbox.fork(count, *, timeout, concurrency)`` — E2B fork
+    compatibility: per-fork independent success/failure, never all-or-nothing."""
+
+    @staticmethod
+    def _patch_fork_internals(snapshot_id: str = "snap-fork"):
+        """Patch ``create_snapshot`` / ``create`` / ``delete_snapshot`` so fork
+        builds fresh Sandboxes without any network I/O."""
+        from contextlib import ExitStack
+        from itertools import count
+
+        snap_obj = MagicMock()
+        snap_obj.snapshot_id = snapshot_id
+        counter = count()
+
+        def _make(*_args, **_kwargs):
+            n = next(counter)
+            return Sandbox({**SANDBOX_DATA, "sandboxID": f"sb-fork-{n:03d}"},
+                           config=make_config())
+
+        stack = ExitStack()
+        snap_p = stack.enter_context(
+            patch.object(Sandbox, "create_snapshot", return_value=snap_obj)
+        )
+        create_p = stack.enter_context(
+            patch.object(Sandbox, "create", side_effect=_make)
+        )
+        delete_p = stack.enter_context(
+            patch.object(Sandbox, "delete_snapshot")
+        )
+        return stack, snap_p, create_p, delete_p
+
+    def test_fork_default_returns_one(self):
+        sb = make_sandbox()
+        stack, _snap, create_p, delete_p = self._patch_fork_internals()
+        with stack:
+            result = sb.fork()
+            assert len(result) == 1
+            assert isinstance(result[0], Sandbox)
+            assert create_p.call_count == 1
+            delete_p.assert_not_called()
+
+            response = MagicMock(ok=True)
+            with patch.object(result[0]._session, "delete", return_value=response):
+                result[0].kill()
+            delete_p.assert_called_once_with("snap-fork", config=sb._config)
+
+    def test_fork_count_sequential(self):
+        sb = make_sandbox()
+        stack, _snap, create_p, _delete = self._patch_fork_internals()
+        with stack:
+            result = sb.fork(count=5)
+        assert len(result) == 5
+        assert all(isinstance(r, Sandbox) for r in result)
+        assert create_p.call_count == 5
+
+    def test_fork_uses_snapshot_id_as_template_and_passes_timeout(self):
+        sb = make_sandbox()
+        stack, _snap, create_p, _delete = self._patch_fork_internals(
+            snapshot_id="snap-t"
+        )
+        with stack:
+            sb.fork(count=2, timeout=60)
+        for call in create_p.call_args_list:
+            assert call.kwargs["template"] == "snap-t"
+            assert call.kwargs["timeout"] == 60
+
+    def test_fork_timeout_none_is_omitted(self):
+        sb = make_sandbox()
+        stack, _snap, create_p, _delete = self._patch_fork_internals()
+        with stack:
+            sb.fork(count=2)
+        for call in create_p.call_args_list:
+            assert "timeout" not in call.kwargs
+
+    def test_fork_rejects_count_out_of_range(self):
+        sb = make_sandbox()
+        for bad in (0, -1, 101):
+            with pytest.raises(ValueError, match="count must be between 1 and 100"):
+                sb.fork(count=bad)
+
+    def test_fork_partial_failure_keeps_successes(self):
+        """Unlike clone (all-or-nothing), fork keeps each successful sibling and
+        reports failures as Exception entries at their slot, without killing the
+        successes."""
+        sb = make_sandbox()
+        snap_obj = MagicMock()
+        snap_obj.snapshot_id = "snap-partial"
+        lock = threading.Lock()
+        idx = {"n": 0}
+        created: list[Sandbox] = []
+
+        def _flaky(*_args, **_kwargs):
+            with lock:
+                idx["n"] += 1
+                i = idx["n"]
+            if i == 3:
+                raise ApiError("fork 3 failed")
+            inst = Sandbox(
+                {**SANDBOX_DATA, "sandboxID": f"sb-f-{i:03d}"},
+                config=make_config(),
+            )
+            with lock:
+                created.append(inst)
+            return inst
+
+        with (
+            patch.object(Sandbox, "create_snapshot", return_value=snap_obj),
+            patch.object(Sandbox, "create", side_effect=_flaky),
+            patch.object(Sandbox, "kill") as kill_p,
+            patch.object(Sandbox, "delete_snapshot") as delete_p,
+        ):
+            result = sb.fork(count=5)
+
+        assert len(result) == 5, "fork must report one outcome per requested slot"
+        # Slots 0,1,3,4 succeeded; slot 2 failed.
+        ok = [r for r in result if isinstance(r, Sandbox)]
+        errs = [r for r in result if isinstance(r, BaseException)]
+        assert len(ok) == 4
+        assert len(errs) == 1
+        assert isinstance(errs[0], ApiError)
+        assert "fork 3 failed" in str(errs[0])
+        # Successes are preserved and NOT killed by fork itself.
+        kill_p.assert_not_called()
+        # Snapshot stays until the last success is killed.
+        delete_p.assert_not_called()
+
+    def test_fork_all_fail_deletes_snapshot(self):
+        """If every create fails, fork returns all Exceptions and cleans up the
+        snapshot immediately (nothing holds a cleanup reference)."""
+        sb = make_sandbox()
+        snap_obj = MagicMock()
+        snap_obj.snapshot_id = "snap-all-fail"
+        with (
+            patch.object(Sandbox, "create_snapshot", return_value=snap_obj),
+            patch.object(Sandbox, "create", side_effect=ApiError("boom")),
+            patch.object(Sandbox, "delete_snapshot") as delete_p,
+        ):
+            result = sb.fork(count=3)
+        assert len(result) == 3
+        assert all(isinstance(r, BaseException) for r in result)
+        delete_p.assert_called_once_with("snap-all-fail", config=sb._config)
+
+    def test_fork_snapshot_failure_raises(self):
+        """A failed snapshot aborts the whole request (no fork attempted),
+        mirroring E2B's whole-request failure semantics."""
+        sb = make_sandbox()
+        with (
+            patch.object(Sandbox, "create_snapshot",
+                         side_effect=ApiError("snap boom")),
+            patch.object(Sandbox, "create") as create_p,
+        ):
+            with pytest.raises(ApiError, match="snap boom"):
+                sb.fork(count=3)
+        create_p.assert_not_called()
+
+    def test_fork_concurrent_returns_n(self):
+        sb = make_sandbox()
+        stack, _snap, create_p, _delete = self._patch_fork_internals()
+        with stack:
+            result = sb.fork(count=8, concurrency=4)
+        assert len(result) == 8
+        assert create_p.call_count == 8
+
+    def test_fork_concurrency_caps_at_count(self):
+        sb = make_sandbox()
+        stack, _snap, create_p, _delete = self._patch_fork_internals()
+        with stack:
+            result = sb.fork(count=3, concurrency=100)
+        assert len(result) == 3
+        assert create_p.call_count == 3
+
+    def test_fork_concurrency_one_no_threads(self):
+        sb = make_sandbox()
+        stack, _snap, create_p, _delete = self._patch_fork_internals()
+        with stack:
+            with patch("concurrent.futures.ThreadPoolExecutor",
+                       side_effect=AssertionError("must not be used")):
+                result = sb.fork(count=4)
+        assert len(result) == 4
+
+
 # ── Templates ─────────────────────────────────────────────────────────────────
 
 class TestTemplateAPI:
