@@ -24,6 +24,8 @@ die() {
 source "${SYSTEMD_HELPER_DIR}/../common/validation.sh"
 # shellcheck source=../common/cubelet_config.sh
 source "${SYSTEMD_HELPER_DIR}/../common/cubelet_config.sh"
+# shellcheck source=../common/cubebox_os_image.sh
+source "${SYSTEMD_HELPER_DIR}/../common/cubebox_os_image.sh"
 
 require_cmd() {
   local cmd="$1"
