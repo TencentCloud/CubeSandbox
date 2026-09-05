@@ -79,23 +79,36 @@ static VGIC_ICC_REGS: &[u64] = &[
     SYS_ICC_AP1R3_EL1,
 ];
 
-fn icc_attr_access(gic: &DeviceFd, offset: u64, typer: u64, val: &u32, set: bool) -> Result<()> {
+/// Read an ICC register.
+///
+/// The destination buffer must be a local `mut` whose address is handed to
+/// KVM_GET_DEVICE_ATTR; going through a `&u32` would let LLVM treat the kernel
+/// write-back as a readonly-noalias violation and fold the result to 0.
+fn icc_attr_get(gic: &DeviceFd, offset: u64, typer: u64) -> Result<u32> {
+    let mut val: u32 = 0;
     let mut gic_icc_attr = kvm_device_attr {
         group: KVM_DEV_ARM_VGIC_GRP_CPU_SYSREGS,
         attr: ((typer & KVM_DEV_ARM_VGIC_V3_MPIDR_MASK) | offset), // this needs the mpidr
-        addr: val as *const u32 as u64,
+        addr: &mut val as *mut u32 as u64,
         flags: 0,
     };
-    if set {
-        gic.set_device_attr(&gic_icc_attr).map_err(|e| {
-            Error::SetDeviceAttribute(HypervisorDeviceError::SetDeviceAttribute(e.into()))
-        })?;
-    } else {
-        gic.get_device_attr(&mut gic_icc_attr).map_err(|e| {
-            Error::GetDeviceAttribute(HypervisorDeviceError::GetDeviceAttribute(e.into()))
-        })?;
-    }
-    Ok(())
+    gic.get_device_attr(&mut gic_icc_attr).map_err(|e| {
+        Error::GetDeviceAttribute(HypervisorDeviceError::GetDeviceAttribute(e.into()))
+    })?;
+    Ok(val)
+}
+
+/// Write an ICC register.
+fn icc_attr_set(gic: &DeviceFd, offset: u64, typer: u64, val: u32) -> Result<()> {
+    let gic_icc_attr = kvm_device_attr {
+        group: KVM_DEV_ARM_VGIC_GRP_CPU_SYSREGS,
+        attr: ((typer & KVM_DEV_ARM_VGIC_V3_MPIDR_MASK) | offset), // this needs the mpidr
+        addr: &val as *const u32 as u64,
+        flags: 0,
+    };
+    gic.set_device_attr(&gic_icc_attr).map_err(|e| {
+        Error::SetDeviceAttribute(HypervisorDeviceError::SetDeviceAttribute(e.into()))
+    })
 }
 
 /// Get ICC registers.
@@ -107,10 +120,9 @@ pub fn get_icc_regs(gic: &DeviceFd, gicr_typer: &[u64]) -> Result<Vec<u32>> {
     for ix in gicr_typer {
         let i = *ix;
         for icc_offset in VGIC_ICC_REGS {
-            let val = 0;
             if *icc_offset == SYS_ICC_CTLR_EL1 {
                 // calculate priority bits by reading the ctrl_el1 register.
-                icc_attr_access(gic, *icc_offset, i, &val, false)?;
+                let val = icc_attr_get(gic, *icc_offset, i)?;
                 // The priority bits are found in the ICC_CTLR_EL1 register (bits from  10:8).
                 // See page 194 from https://static.docs.arm.com/ihi0069/c/IHI0069C_gic_
                 // architecture_specification.pdf.
@@ -130,8 +142,7 @@ pub fn get_icc_regs(gic: &DeviceFd, gicr_typer: &[u64]) -> Result<Vec<u32>> {
             // 7 bits of priority.
             else if *icc_offset == SYS_ICC_AP0R1_EL1 || *icc_offset == SYS_ICC_AP1R1_EL1 {
                 if num_priority_bits >= 6 {
-                    icc_attr_access(gic, *icc_offset, i, &val, false)?;
-                    state.push(val);
+                    state.push(icc_attr_get(gic, *icc_offset, i)?);
                 }
             } else if *icc_offset == SYS_ICC_AP0R2_EL1
                 || *icc_offset == SYS_ICC_AP0R3_EL1
@@ -139,12 +150,10 @@ pub fn get_icc_regs(gic: &DeviceFd, gicr_typer: &[u64]) -> Result<Vec<u32>> {
                 || *icc_offset == SYS_ICC_AP1R3_EL1
             {
                 if num_priority_bits == 7 {
-                    icc_attr_access(gic, *icc_offset, i, &val, false)?;
-                    state.push(val);
+                    state.push(icc_attr_get(gic, *icc_offset, i)?);
                 }
             } else {
-                icc_attr_access(gic, *icc_offset, i, &val, false)?;
-                state.push(val);
+                state.push(icc_attr_get(gic, *icc_offset, i)?);
             }
         }
     }
@@ -165,7 +174,7 @@ pub fn set_icc_regs(gic: &DeviceFd, gicr_typer: &[u64], state: &[u32]) -> Result
             }
             if *icc_offset == SYS_ICC_AP0R1_EL1 || *icc_offset == SYS_ICC_AP1R1_EL1 {
                 if num_priority_bits >= 6 {
-                    icc_attr_access(gic, *icc_offset, i, &state[idx], true)?;
+                    icc_attr_set(gic, *icc_offset, i, state[idx])?;
                     idx += 1;
                 }
                 continue;
@@ -176,12 +185,12 @@ pub fn set_icc_regs(gic: &DeviceFd, gicr_typer: &[u64], state: &[u32]) -> Result
                 || *icc_offset == SYS_ICC_AP1R3_EL1
             {
                 if num_priority_bits == 7 {
-                    icc_attr_access(gic, *icc_offset, i, &state[idx], true)?;
+                    icc_attr_set(gic, *icc_offset, i, state[idx])?;
                     idx += 1;
                 }
                 continue;
             }
-            icc_attr_access(gic, *icc_offset, i, &state[idx], true)?;
+            icc_attr_set(gic, *icc_offset, i, state[idx])?;
             idx += 1;
         }
     }
