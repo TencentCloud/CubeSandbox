@@ -23,34 +23,38 @@ const GITS_CWRITER: u32 = 0x0088;
 const GITS_CREADR: u32 = 0x0090;
 const GITS_BASER: u32 = 0x0100;
 
-/// Access an ITS device attribute.
+/// Read an ITS device attribute.
 ///
-/// This is a helper function to get/set the ITS device attribute depending
-/// the bool parameter `set` provided.
-pub fn gicv3_its_attr_access(
-    its_device: &DeviceFd,
-    group: u32,
-    attr: u32,
-    val: &u64,
-    set: bool,
-) -> Result<()> {
+/// The destination buffer must be a local `mut` whose address is handed to
+/// KVM_GET_DEVICE_ATTR; going through a `&u64` would let LLVM treat the kernel
+/// write-back as a readonly-noalias violation and fold the result to 0.
+pub fn gicv3_its_attr_get(its_device: &DeviceFd, group: u32, attr: u32) -> Result<u64> {
+    let mut val: u64 = 0;
     let mut gicv3_its_attr = kvm_bindings::kvm_device_attr {
         group,
         attr: attr as u64,
-        addr: val as *const u64 as u64,
+        addr: &mut val as *mut u64 as u64,
         flags: 0,
     };
-    if set {
-        its_device.set_device_attr(&gicv3_its_attr).map_err(|e| {
-            Error::SetDeviceAttribute(HypervisorDeviceError::SetDeviceAttribute(e.into()))
-        })
-    } else {
-        its_device
-            .get_device_attr(&mut gicv3_its_attr)
-            .map_err(|e| {
-                Error::GetDeviceAttribute(HypervisorDeviceError::GetDeviceAttribute(e.into()))
-            })
-    }
+    its_device
+        .get_device_attr(&mut gicv3_its_attr)
+        .map_err(|e| {
+            Error::GetDeviceAttribute(HypervisorDeviceError::GetDeviceAttribute(e.into()))
+        })?;
+    Ok(val)
+}
+
+/// Write an ITS device attribute.
+pub fn gicv3_its_attr_set(its_device: &DeviceFd, group: u32, attr: u32, val: u64) -> Result<()> {
+    let gicv3_its_attr = kvm_bindings::kvm_device_attr {
+        group,
+        attr: attr as u64,
+        addr: &val as *const u64 as u64,
+        flags: 0,
+    };
+    its_device
+        .set_device_attr(&gicv3_its_attr)
+        .map_err(|e| Error::SetDeviceAttribute(HypervisorDeviceError::SetDeviceAttribute(e.into())))
 }
 
 /// Function that saves/restores ITS tables into guest RAM.
@@ -324,60 +328,43 @@ impl Vgic for KvmGicV3Its {
 
         let icc_state = get_icc_regs(&self.device, &gicr_typers)?;
 
-        let its_baser_state: [u64; 8] = [0; 8];
+        let mut its_baser_state: [u64; 8] = [0; 8];
         for i in 0..8 {
-            gicv3_its_attr_access(
+            its_baser_state[i as usize] = gicv3_its_attr_get(
                 self.its_device.as_ref().unwrap(),
                 kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
                 GITS_BASER + i * 8,
-                &its_baser_state[i as usize],
-                false,
             )?;
         }
 
-        let its_ctlr_state: u64 = 0;
-        gicv3_its_attr_access(
+        let its_ctlr_state = gicv3_its_attr_get(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CTLR,
-            &its_ctlr_state,
-            false,
         )?;
 
-        let its_cbaser_state: u64 = 0;
-        gicv3_its_attr_access(
+        let its_cbaser_state = gicv3_its_attr_get(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CBASER,
-            &its_cbaser_state,
-            false,
         )?;
 
-        let its_creadr_state: u64 = 0;
-        gicv3_its_attr_access(
+        let its_creadr_state = gicv3_its_attr_get(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CREADR,
-            &its_creadr_state,
-            false,
         )?;
 
-        let its_cwriter_state: u64 = 0;
-        gicv3_its_attr_access(
+        let its_cwriter_state = gicv3_its_attr_get(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CWRITER,
-            &its_cwriter_state,
-            false,
         )?;
 
-        let its_iidr_state: u64 = 0;
-        gicv3_its_attr_access(
+        let its_iidr_state = gicv3_its_attr_get(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_IIDR,
-            &its_iidr_state,
-            false,
         )?;
 
         Ok(Gicv3ItsState {
@@ -407,57 +394,51 @@ impl Vgic for KvmGicV3Its {
         set_icc_regs(&self.device, &gicr_typers, &state.icc)?;
 
         //Restore GICv3ITS registers
-        gicv3_its_attr_access(
+        gicv3_its_attr_set(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_IIDR,
-            &state.its_iidr,
-            true,
+            state.its_iidr,
         )?;
 
-        gicv3_its_attr_access(
+        gicv3_its_attr_set(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CBASER,
-            &state.its_cbaser,
-            true,
+            state.its_cbaser,
         )?;
 
-        gicv3_its_attr_access(
+        gicv3_its_attr_set(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CREADR,
-            &state.its_creadr,
-            true,
+            state.its_creadr,
         )?;
 
-        gicv3_its_attr_access(
+        gicv3_its_attr_set(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CWRITER,
-            &state.its_cwriter,
-            true,
+            state.its_cwriter,
         )?;
 
         for i in 0..8 {
-            gicv3_its_attr_access(
+            gicv3_its_attr_set(
                 self.its_device.as_ref().unwrap(),
                 kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
                 GITS_BASER + i * 8,
-                &state.its_baser[i as usize],
-                true,
+                state.its_baser[i as usize],
             )?;
         }
 
         // Restore ITS tables
         gicv3_its_tables_access(self.its_device.as_ref().unwrap(), false)?;
 
-        gicv3_its_attr_access(
+        gicv3_its_attr_set(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CTLR,
-            &state.its_ctlr,
-            true,
+            state.its_ctlr,
         )
     }
 
@@ -559,6 +540,53 @@ mod tests {
         assert!(state.len() == 9);
 
         assert!(set_icc_regs(&gic.device, &gicr_typer, &state).is_ok());
+    }
+
+    // Regression test for the vgic state-save miscompile: rustc 1.96+
+    // (release, lto) folded the KVM_GET_DEVICE_ATTR read-backs to zero,
+    // producing an all-zero GIC snapshot that breaks pause->resume
+    // (GICv3ITS SetDeviceAttribute EINVAL). Needs /dev/kvm; run in
+    // release to exercise the optimized build.
+    #[test]
+    fn test_gic_state_save_nonzero_roundtrip() {
+        use crate::arch::aarch64::gic::Vgic;
+
+        let hv = crate::new().unwrap();
+        let vm = hv.create_vm().unwrap();
+        vm.create_vcpu(0, None).unwrap();
+        let mut vgic = KvmGicV3Its::new(&*vm, create_test_vgic_config()).unwrap();
+
+        // Every bank must read back non-zero (all-zero == miscompiled).
+        let dist = get_dist_regs(&vgic.device).unwrap();
+        let rdist = get_redist_regs(&vgic.device, &[123]).unwrap();
+        let icc = get_icc_regs(&vgic.device, &[123]).unwrap();
+        let its = vgic.state().unwrap();
+        assert!(dist.iter().any(|&v| v != 0), "dist all zero — miscompiled?");
+        assert!(
+            rdist.iter().any(|&v| v != 0),
+            "rdist all zero — miscompiled?"
+        );
+        assert!(icc.iter().any(|&v| v != 0), "icc all zero — miscompiled?");
+        assert_ne!(its.its_iidr, 0, "GITS_IIDR zero — miscompiled?");
+
+        // Exact-value round-trip on the writable ICC registers (the bank
+        // that broke pause->resume): IGRPEN0/1, PMR, BPR0/1. PMR is masked
+        // to the 5 implemented priority bits for kernel portability.
+        let mut icc_want = icc.clone();
+        icc_want[2..7].copy_from_slice(&[1, 1, 0xA8, 3, 3]);
+        set_icc_regs(&vgic.device, &[123], &icc_want).unwrap();
+        assert_eq!(
+            &get_icc_regs(&vgic.device, &[123]).unwrap()[2..7],
+            &[1u32, 1, 0xA8, 3, 3]
+        );
+
+        // Aggregate round-trip through the restore path (set_state).
+        vgic.set_state(&its).unwrap();
+        assert_ne!(
+            vgic.state().unwrap().its_iidr,
+            0,
+            "GITS_IIDR zero after set_state"
+        );
     }
 
     #[test]
