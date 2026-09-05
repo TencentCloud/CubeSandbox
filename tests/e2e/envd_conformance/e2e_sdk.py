@@ -12,6 +12,10 @@ Env: CUBE_API_URL, CUBE_PROXY_NODE_IP, CUBE_PROXY_PORT_HTTP,
 import os
 import sys
 import time
+import hashlib
+import threading
+from pathlib import Path
+from types import SimpleNamespace
 
 # Repo-root SDK (tests/e2e/envd_conformance -> ../../../sdk/python).
 sys.path.insert(
@@ -128,6 +132,9 @@ def run_suite(template, label, full=True):
     sb = Sandbox.create(template=template, timeout=300)
     try:
         print(f"sandbox: {sb.sandbox_id}")
+        binary = os.environ.get("ENVD_TEST_BINARY") if full else None
+        if binary:
+            install_test_daemon(sb, binary)
         scenario_health(sb)
         if full:
             scenario_commands(sb)
@@ -144,6 +151,52 @@ def run_suite(template, label, full=True):
             print("sandbox killed")
         except Exception as e:
             print(f"kill failed: {e}")
+
+
+def install_test_daemon(sandbox, binary):
+    from cubesandbox._commands import Commands
+
+    content = Path(binary).read_bytes()
+    expected = hashlib.sha256(content).hexdigest()
+    target = "/tmp/pr12-review-envd"
+    sandbox.files.write(target, content, user="root")
+    result = sandbox.commands.run(f"chmod 755 {target}; sha256sum {target}")
+    if result.stdout.split()[0] != expected:
+        raise RuntimeError("uploaded test daemon does not match the built binary")
+    print(f"test binary sha256={expected}")
+    original_host = sandbox.get_host
+    bootstrap = Commands(SimpleNamespace(
+        _client=sandbox._client, _data=sandbox._data, get_host=original_host,
+    ))
+    errors = []
+
+    def serve():
+        try:
+            bootstrap.run(
+                "mkdir -p /sys/fs/cgroup/pr12-review; "
+                "CUBE_ENVD_CGROUP_ROOT=/sys/fs/cgroup/pr12-review "
+                "CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES=134217728 "
+                f"exec {target} -port 49984",
+                timeout=240,
+            )
+        except Exception as error:
+            errors.append(error)
+
+    threading.Thread(target=serve, daemon=True).start()
+    sandbox.get_host = lambda port: original_host(49984 if port == 49983 else port)
+    for attempt in range(60):
+        if errors:
+            raise RuntimeError(f"test daemon stopped: {errors[0]}")
+        try:
+            result = sandbox.commands.run("echo pr12-ready", timeout=3)
+            if result.stdout.strip() == "pr12-ready":
+                check("new daemon reachable through CubeProxy", True)
+                result = sandbox.commands.run("kill -TERM $$")
+                check("new daemon termination metadata through CubeProxy", result.signal == 15)
+                return
+        except Exception:
+            time.sleep(0.5)
+    raise RuntimeError("test daemon did not become reachable through CubeProxy")
 
 
 if __name__ == "__main__":

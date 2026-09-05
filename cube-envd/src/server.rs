@@ -253,10 +253,11 @@ async fn process_connect(
             ))
         }
     };
-    // Attach only: no Connect-Timeout-Ms (Connect never kills) — just the
-    // keepalive cadence, which still keeps a quiet attached stream alive.
     let keepalive = connect::keepalive_interval_from_headers(&headers);
-    proc_svc::connect(state, req, keepalive)
+    // Connect is an attachment, not a command owner. The Start request owns
+    // the process deadline; applying Connect-Timeout-Ms here would terminate
+    // long-lived PTY attachments after an absolute wall-clock interval.
+    proc_svc::connect(state, req, keepalive, None)
 }
 
 async fn process_list(

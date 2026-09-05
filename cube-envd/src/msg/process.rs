@@ -59,13 +59,10 @@ pub struct StartRequest {
 /// Flat oneof selector: `{"pid":1}` or `{"tag":"t"}`.
 ///
 /// The nested `{"selector":{...}}` shape is deliberately NOT understood.
-/// Upstream Go envd rejects that shape outright; cube-envd used to flatten and
-/// act on the inner selector, which meant a malformed SendSignal could kill a
-/// live process where Go performed no action at all (#1227: out-of-scope input
-/// must not silently execute a side effect). A nested-only selector now
-/// deserializes to an empty selector, so it resolves to no pid and SendSignal
-/// answers `not_found` without touching any process.
+/// Upstream Go envd rejects that shape outright; a nested-only selector
+/// is rejected before control dispatch (#1227: no destructive side effects).
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessSelector {
     #[serde(default)]
     pub pid: Option<u32>,
@@ -217,6 +214,12 @@ pub struct EndEvent {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
+    #[serde(rename = "oomKilled", skip_serializing_if = "Option::is_none")]
+    pub oom_killed: Option<bool>,
+    #[serde(rename = "killedBy", skip_serializing_if = "Option::is_none")]
+    pub killed_by: Option<String>,
 }
 
 fn is_zero_i32(v: &i32) -> bool {
@@ -233,6 +236,9 @@ impl EndEvent {
                 exited: true,
                 status: text.clone(),
                 error: (code != 0).then_some(text),
+                signal: None,
+                oom_killed: None,
+                killed_by: None,
             }
         } else {
             let signo = status.signal().unwrap_or(0);
@@ -242,6 +248,9 @@ impl EndEvent {
                 exited: false,
                 status: text.clone(),
                 error: Some(text),
+                signal: Some(signo),
+                oom_killed: None,
+                killed_by: None,
             }
         }
     }
@@ -313,15 +322,12 @@ mod tests {
     }
 
     #[test]
-    fn selector_flat_only_nested_ignored() {
+    fn selector_flat_only_nested_rejected() {
         let flat: ProcessSelector = serde_json::from_str(r#"{"tag":"t1"}"#).unwrap();
         assert_eq!(flat.flatten(), (None, Some("t1".to_string())));
         let flat_pid: ProcessSelector = serde_json::from_str(r#"{"pid":42}"#).unwrap();
         assert_eq!(flat_pid.flatten(), (Some(42), None));
-        // Nested shape is rejected like upstream: it carries no pid/tag, so it
-        // resolves to nothing rather than acting on the inner selector.
-        let nested: ProcessSelector = serde_json::from_str(r#"{"selector":{"pid":7}}"#).unwrap();
-        assert_eq!(nested.flatten(), (None, None));
+        assert!(serde_json::from_str::<ProcessSelector>(r#"{"selector":{"pid":7}}"#).is_err());
     }
 
     #[test]
@@ -331,6 +337,9 @@ mod tests {
             exited: true,
             status: "exit status 0".into(),
             error: None,
+            signal: None,
+            oom_killed: None,
+            killed_by: None,
         };
         let v = serde_json::to_value(EventEnvelope {
             event: Event::End(e),
@@ -343,12 +352,30 @@ mod tests {
     }
 
     #[test]
+    fn termination_metadata_uses_proto_json_field_names() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let mut end = EndEvent::from_exit_status(std::process::ExitStatus::from_raw(libc::SIGKILL));
+        end.oom_killed = Some(true);
+        end.killed_by = Some("oom".to_string());
+        let value = serde_json::to_value(end).unwrap();
+        assert_eq!(value["signal"], 9);
+        assert_eq!(value["oomKilled"], true);
+        assert_eq!(value["killedBy"], "oom");
+        assert!(value.get("oom_killed").is_none());
+        assert!(value.get("killed_by").is_none());
+    }
+
+    #[test]
     fn end_event_nonzero_and_signal() {
         let e = EndEvent {
             exit_code: 3,
             exited: true,
             status: "exit status 3".into(),
             error: Some("exit status 3".into()),
+            signal: None,
+            oom_killed: None,
+            killed_by: None,
         };
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v["exitCode"], 3);
@@ -359,6 +386,9 @@ mod tests {
             exited: false,
             status: "signal: killed".into(),
             error: Some("signal: killed".into()),
+            signal: Some(9),
+            oom_killed: None,
+            killed_by: None,
         };
         let v = serde_json::to_value(&killed).unwrap();
         assert_eq!(v["exitCode"], -1);

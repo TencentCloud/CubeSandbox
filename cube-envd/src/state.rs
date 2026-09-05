@@ -5,6 +5,7 @@
 //! the table of processes started through `process.Process/Start`.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -14,6 +15,12 @@ use tokio::sync::broadcast;
 use crate::cgroup::{self, Manager, ProcType};
 use crate::exec;
 use crate::msg::process::ProcessConfig;
+
+type ProcessControl = (
+    u32,
+    Option<Arc<cgroup::ProcessCgroup>>,
+    Arc<Mutex<Option<String>>>,
+);
 
 /// Recover a poisoned lock instead of propagating the panic. A single handler
 /// panicking while holding one of these locks must not brick the daemon for
@@ -43,6 +50,16 @@ pub struct ProcEntry {
     /// Process-owned writable endpoint used by SendInput/StreamInput and
     /// CloseStdin. Cloned out of the table before any async write is awaited.
     pub input: exec::InputHandle,
+    /// Optional per-command cgroup leaf. The supervisor retains its own clone
+    /// after removing the entry so escaped descendants can still be killed and
+    /// the leaf removed without keeping the process table visible.
+    pub cgroup: Option<Arc<cgroup::ProcessCgroup>>,
+    /// Shared cause marker consumed by the output pump when it publishes End.
+    pub termination: Arc<std::sync::Mutex<Option<String>>>,
+    /// Terminal event published by the output pump. This closes the small
+    /// Connect-vs-exit race where a subscriber could otherwise attach after
+    /// the broadcast terminal event and wait forever for a channel close.
+    pub terminal: Arc<Mutex<Option<exec::PumpEvent>>>,
 }
 
 /// Opaque, process-lifetime-unique key for a live process in the table.
@@ -110,7 +127,8 @@ pub struct AppState {
     /// `createCgroupManager`'s named return + defer swap, plan §0.1). `new()`
     /// always starts with the no-op fallback so unit tests never touch
     /// /sys/fs/cgroup; `main.rs` swaps in the real manager exactly once via
-    /// `with_cgroup(cgroup::init())`.
+    /// `with_cgroup(cgroup::init())`. Runtime allocation failures reject the
+    /// request; existing processes retain their leaf handles for cleanup.
     cgroup: Arc<dyn Manager>,
 }
 
@@ -146,8 +164,18 @@ impl AppState {
     /// cgroup dir fd for `t`, or `None` under the Noop fallback. Handed to
     /// `exec::spawn` at the process service layer (mirrors upstream
     /// `getProcType` + `GetFileDescriptor` in handler.go).
+    #[cfg(test)]
     pub fn cgroup_fd(&self, t: ProcType) -> Option<RawFd> {
         self.cgroup.fd(t)
+    }
+
+    /// Allocate a per-command cgroup; runtime failures reject the request
+    /// rather than starting an unconfined command.
+    pub fn create_process_cgroup(
+        &self,
+        t: ProcType,
+    ) -> std::io::Result<Option<Arc<cgroup::ProcessCgroup>>> {
+        self.cgroup.create_process(t)
     }
 
     /// Merge (not replace) env vars — matches the Go envd baseline: repeated
@@ -235,6 +263,17 @@ impl AppState {
         lock(&self.processes).remove(&handle);
     }
 
+    /// Cache a terminal event before removing a process entry. Existing
+    /// subscribers still receive it through the broadcast bus; a new
+    /// subscriber racing in the removal window receives the cached event via
+    /// a one-shot broadcast channel.
+    pub fn mark_terminal(&self, handle: ProcHandle, event: exec::PumpEvent) {
+        let guard = lock(&self.processes);
+        if let Some(entry) = guard.get(&handle) {
+            *lock(&entry.terminal) = Some(event);
+        }
+    }
+
     pub fn list_processes(&self) -> Vec<(u32, Option<String>, ProcessConfig)> {
         let guard = lock(&self.processes);
         let mut out: Vec<_> = guard
@@ -263,6 +302,16 @@ impl AppState {
         None
     }
 
+    /// Resolve the signalling target together with its per-command cgroup.
+    /// Cloning the Arc releases the process-table lock before cgroup.kill or
+    /// kill(2), while the supervisor's handle key still prevents PID-reuse
+    /// cleanup from removing a newer entry.
+    pub fn process_control(&self, pid: Option<u32>, tag: Option<&str>) -> Option<ProcessControl> {
+        let guard = lock(&self.processes);
+        find_entry(&guard, pid, tag)
+            .map(|entry| (entry.pid, entry.cgroup.clone(), entry.termination.clone()))
+    }
+
     /// Resolve a selector to a live process and subscribe to its output bus.
     /// `Connect` attaches this way: the fresh `broadcast::Receiver` starts at
     /// the current head of the ring, so it sees only events published after
@@ -274,7 +323,22 @@ impl AppState {
         tag: Option<&str>,
     ) -> Option<(u32, broadcast::Receiver<exec::PumpEvent>)> {
         let guard = lock(&self.processes);
-        find_entry(&guard, pid, tag).map(|e| (e.pid, e.sender.subscribe()))
+        find_entry(&guard, pid, tag).map(|e| {
+            // Subscribe before inspecting the terminal cache. The pump writes
+            // the cache and publishes the terminal event without holding the
+            // process-table lock; checking first would leave a race window in
+            // which Connect misses the event and later observes only a closed
+            // bus. If the cache was already populated, replace the receiver
+            // with a one-shot channel carrying the cached event.
+            let receiver = e.sender.subscribe();
+            if let Some(terminal) = lock(&e.terminal).clone() {
+                let (sender, receiver) = broadcast::channel(1);
+                let _ = sender.send(terminal);
+                (e.pid, receiver)
+            } else {
+                (e.pid, receiver)
+            }
+        })
     }
 
     /// Resolve a selector and clone its process-owned input endpoint. The
@@ -343,6 +407,9 @@ mod tests {
             sender,
             pty_master: None,
             input: Arc::new(tokio::sync::Mutex::new(exec::InputWriter::Pipe(None))),
+            cgroup: None,
+            termination: Arc::new(Mutex::new(None)),
+            terminal: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -500,6 +567,9 @@ mod tests {
             sender: tx.clone(),
             pty_master: None,
             input: Arc::new(tokio::sync::Mutex::new(exec::InputWriter::Pipe(None))),
+            cgroup: None,
+            termination: Arc::new(Mutex::new(None)),
+            terminal: Arc::new(Mutex::new(None)),
         });
 
         // pid and tag both resolve to the same live process.
@@ -521,6 +591,38 @@ mod tests {
         // Unknown selectors resolve to none.
         assert!(s.subscribe(Some(999), None).is_none());
         assert!(s.subscribe(None, Some("nope")).is_none());
+    }
+
+    #[tokio::test]
+    async fn subscribe_after_terminal_publication_gets_cached_event() {
+        let s = AppState::new();
+        let (sender, _rx) = broadcast::channel::<exec::PumpEvent>(4);
+        let handle = s.insert_process(ProcEntry {
+            pid: 9,
+            tag: Some("finished".into()),
+            config: ProcessConfig::default(),
+            sender,
+            pty_master: None,
+            input: Arc::new(tokio::sync::Mutex::new(exec::InputWriter::Pipe(None))),
+            cgroup: None,
+            termination: Arc::new(Mutex::new(None)),
+            terminal: Arc::new(Mutex::new(None)),
+        });
+        let terminal = exec::PumpEvent::End(crate::msg::process::EndEvent {
+            exit_code: 0,
+            exited: true,
+            status: "exit status 0".into(),
+            error: None,
+            signal: None,
+            oom_killed: None,
+            killed_by: None,
+        });
+        s.mark_terminal(handle, terminal.clone());
+
+        let (_, mut events) = s.subscribe(Some(9), None).expect("finished entry remains");
+        assert!(matches!(events.recv().await, Ok(exec::PumpEvent::End(_))));
+        s.remove_process(handle);
+        assert!(s.subscribe(Some(9), None).is_none());
     }
 
     #[test]
@@ -550,6 +652,9 @@ mod tests {
             sender,
             pty_master: Some(not_a_tty),
             input: Arc::new(tokio::sync::Mutex::new(exec::InputWriter::Pipe(None))),
+            cgroup: None,
+            termination: Arc::new(Mutex::new(None)),
+            terminal: Arc::new(Mutex::new(None)),
         });
         assert!(matches!(
             s.resize_pty(Some(8), None, 80, 24),

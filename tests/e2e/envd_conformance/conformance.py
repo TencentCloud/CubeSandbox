@@ -28,9 +28,9 @@ DECLARED_DIFFERENT = {
     "fs_watch_unary_probe": "CreateWatcher: implemented upstream, unimplemented in cube-envd",
     "rest_files_gzip_accept": "gzip download encoding: upstream supports, cube-envd identity-only",
     "rest_files_compose_probe": "/files/compose: implemented upstream, 501 in cube-envd",
-    "proc_sendinput_probe": "nested SendInput selector: both refuse to write; upstream rejects the shape while cube-envd resolves it to not_found",
-    "proc_connect_missing": "nested-selector: BOTH refuse to attach — upstream rejects the shape (unimplemented/invalid input type), cube-envd resolves to no pid and returns not_found; neither attaches to a process",
-    "proc_sendsignal_nested_probe": "nested-selector: BOTH refuse to act on the process — upstream rejects the shape (501), cube-envd resolves to no pid and returns not_found; neither signals a process (no destructive side effect)",
+    "proc_sendinput_probe": "nested selector: upstream returns unimplemented (501); cube-envd rejects the unknown field during decoding (400 invalid_argument); neither writes input",
+    "proc_connect_missing": "nested selector: upstream streams unimplemented; cube-envd streams invalid_argument for the unknown field; neither attaches",
+    "proc_sendsignal_nested_probe": "nested selector: upstream returns unimplemented (501); cube-envd rejects the unknown field during decoding (400 invalid_argument); neither signals a process (#1227)",
     "fs_bad_json": "JSON parse error wording is parser-specific (code and status equal)",
     "rest_init_timestamp_out_of_range": "timestamp outside i64-nanosecond range (9999): upstream UnixNano() wraps and drops as stale (204); cube-envd rejects as a caller bug (400). Neither applies anything nor moves the gate",
 }
@@ -96,15 +96,27 @@ def norm_stream_frames(fx):
     between runs of the same implementation; content per stream is exact.
     """
     import base64 as b64mod
-    if not isinstance(fx, dict) or "frames" not in fx:
+    if isinstance(fx, list):
+        return [norm_stream_frames(item) for item in fx]
+    if isinstance(fx, dict) and "frames" not in fx:
+        normalized = {key: norm_stream_frames(value) for key, value in fx.items()}
+        if "flags" in normalized and "payload" in normalized:
+            normalized.pop("size", None)
+        return normalized
+    if not isinstance(fx, dict):
         return fx
     out = dict(fx)
     frames = []
     streams = {}
-    for fr in fx["frames"]:
+    for index, fr in enumerate(fx["frames"]):
+        if timeout_metadata_extension(fx["frames"], index):
+            continue
         p = normalize(fr.get("payload"))
         if isinstance(p, dict):
             ev = p.get("event", {})
+            if isinstance(ev, dict) and isinstance(ev.get("end"), dict):
+                for extension in ("signal", "oomKilled", "killedBy"):
+                    ev["end"].pop(extension, None)
             if isinstance(ev, dict) and "start" in ev and isinstance(ev["start"], dict):
                 if "pid" in ev["start"]:
                     ev["start"]["pid"] = "<int>"
@@ -127,6 +139,21 @@ def norm_stream_frames(fx):
     for k in ("closed_early", "stopped_by_deadline", "socket_timeout"):
         out.pop(k, None)
     return out
+
+
+def timeout_metadata_extension(frames, index):
+    if index + 1 >= len(frames):
+        return False
+    frame = frames[index]
+    following = frames[index + 1]
+    expected = {"exitCode": -1, "status": "signal: killed", "error": "signal: killed",
+                "signal": 9, "killedBy": "timeout"}
+    return (
+        frame.get("flags") == 0
+        and frame.get("payload") == {"event": {"end": expected}}
+        and following.get("flags") == 2
+        and following.get("payload", {}).get("error", {}).get("code") == "deadline_exceeded"
+    )
 
 
 def load(dirname, name):

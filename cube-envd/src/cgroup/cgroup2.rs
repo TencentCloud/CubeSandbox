@@ -11,21 +11,28 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{IntoRawFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-use super::{check_magic, CgroupConfig, Manager, ProcType};
+use super::{check_magic, CgroupConfig, Manager, ProcType, ProcessCgroup};
 
 #[derive(Debug)]
 pub struct Cgroup2Manager {
+    root: PathBuf,
     fds: HashMap<ProcType, RawFd>,
+    parents: HashMap<ProcType, String>,
+    leaf_properties: HashMap<ProcType, HashMap<String, String>>,
+    next_leaf: AtomicU64,
 }
 
 impl Cgroup2Manager {
     /// Verify `root` is a cgroup v2 filesystem, enable the `memory`/`cpu`
-    /// controllers on it, then create every subtree in `types`. All-or-
+    /// controllers on it, then create every type subtree in `types`. Commands
+    /// later receive unique leaves beneath these type roots. All-or-
     /// nothing (upstream `createCgroups`, cgroup2.go): when one subtree fails
-    /// the fds already built are closed by `Drop` and the whole construction
-    /// returns Err — no partial subtrees survive. Directories are **not**
-    /// removed on rollback (upstream behaviour).
+    /// the fds already built are closed and the whole construction returns
+    /// Err. Directories created before the failure are **not** removed on
+    /// rollback (upstream behaviour), but no manager retains their fds.
     ///
     /// Order: statfs probe → subtree_control → mkdir → properties → open.
     pub fn new(root: &Path, types: &[(ProcType, CgroupConfig)]) -> io::Result<Self> {
@@ -35,6 +42,27 @@ impl Cgroup2Manager {
                 "cgroup root {} is not a cgroup2 filesystem (type=0x{f_type:x})",
                 root.display()
             )));
+        }
+        if !root.join("cgroup.controllers").is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "cgroup root {} has no cgroup.controllers file",
+                    root.display()
+                ),
+            ));
+        }
+        let controllers = std::fs::read_to_string(root.join("cgroup.controllers"))?;
+        for required in ["cpu", "memory"] {
+            if !controllers.split_whitespace().any(|name| name == required) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "cgroup root {} lacks required {required} controller",
+                        root.display()
+                    ),
+                ));
+            }
         }
 
         // Deviation from upstream (declared, plan §6): upstream never writes
@@ -46,8 +74,108 @@ impl Cgroup2Manager {
         // (cgroup2.go:59-68) — this text is all a startup-failure warn has to
         // go on, so a bare errno is not enough to find the culprit path.
         build_subtrees(root, types)
-            .map(|fds| Cgroup2Manager { fds })
+            .map(|fds| Self::from_parts(root, types, fds))
             .map_err(|e| io::Error::new(e.kind(), format!("failed to create cgroups: {e}")))
+    }
+
+    fn from_parts(
+        root: &Path,
+        types: &[(ProcType, CgroupConfig)],
+        fds: HashMap<ProcType, RawFd>,
+    ) -> Self {
+        let parents = types
+            .iter()
+            .map(|(kind, config)| (*kind, config.path.clone()))
+            .collect();
+        let leaf_properties = types
+            .iter()
+            .map(|(kind, config)| {
+                // A process leaf must carry every resource property that was
+                // applied to its type parent. In particular, cpu.weight is
+                // not inherited by cgroup v2 children; filtering it out here
+                // silently reset PTY/user scheduling to the kernel default.
+                let properties = config.properties.clone();
+                (*kind, properties)
+            })
+            .collect();
+        Self {
+            root: root.to_path_buf(),
+            fds,
+            parents,
+            leaf_properties,
+            next_leaf: AtomicU64::new(1),
+        }
+    }
+
+    fn create_process_inner(&self, kind: ProcType) -> io::Result<Arc<ProcessCgroup>> {
+        let parent = self.parents.get(&kind).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "cgroup process type is not configured",
+            )
+        })?;
+        let properties = self.leaf_properties.get(&kind).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "cgroup leaf properties are not configured",
+            )
+        })?;
+        let parent = self.root.join(parent);
+
+        // `cgroup.kill` is the only operation that can reliably reach a
+        // descendant which called setsid(). If the mounted kernel lacks this
+        // v2 interface, do not claim that a per-command cgroup gives
+        // escape-proof cleanup; reject the allocation instead.
+        if !parent.join("cgroup.kill").is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "process cgroup parent {} has no cgroup.kill interface",
+                    parent.display()
+                ),
+            ));
+        }
+
+        // PID + monotonic id avoids collisions between concurrent commands;
+        // retrying AlreadyExists also covers a stale leaf from a prior daemon
+        // that happened to reuse the same pid.
+        for _ in 0..1024 {
+            let id = self.next_leaf.fetch_add(1, Ordering::Relaxed);
+            let dir = parent.join(format!("process-{}-{id}", std::process::id()));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+
+            for (name, value) in properties {
+                if let Err(e) = std::fs::write(dir.join(name), value) {
+                    let _ = std::fs::remove_dir(&dir);
+                    return Err(io::Error::new(
+                        e.kind(),
+                        format!(
+                            "failed to write process cgroup property {name} in {}: {e}",
+                            dir.display()
+                        ),
+                    ));
+                }
+            }
+            let file = match File::open(&dir) {
+                Ok(file) => file,
+                Err(e) => {
+                    let _ = std::fs::remove_dir(&dir);
+                    return Err(io::Error::new(
+                        e.kind(),
+                        format!("failed to open process cgroup {}: {e}", dir.display()),
+                    ));
+                }
+            };
+            return Ok(Arc::new(ProcessCgroup::new(dir, file)));
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a unique process cgroup after 1024 attempts",
+        ))
     }
 }
 
@@ -63,6 +191,31 @@ fn build_subtrees(
     let mut fds: HashMap<ProcType, RawFd> = HashMap::new();
     let mut errs: Vec<String> = Vec::new();
     for (t, cfg) in types {
+        let parent = root.join(&cfg.path);
+        // On a real cgroup v2 mount, controller files such as memory.max and
+        // cpu.weight are exposed on a child only after the controller is
+        // enabled on its parent.  Create the directory and enable its
+        // subtree before writing resource properties; plain-directory test
+        // fixtures do not enforce this kernel ordering, which previously hid
+        // the bug.
+        if let Err(e) = std::fs::create_dir_all(&parent) {
+            let name = match t {
+                ProcType::Pty => "pty",
+                ProcType::User => "user",
+            };
+            errs.push(format!("failed to create {name} cgroup: {e}"));
+            continue;
+        }
+        if let Err(e) = enable_subtree_control(&parent) {
+            let name = match t {
+                ProcType::Pty => "pty",
+                ProcType::User => "user",
+            };
+            errs.push(format!(
+                "failed to enable controllers for {name} cgroup: {e}"
+            ));
+            continue;
+        }
         match create_one_cgroup(root, cfg) {
             Ok(fd) => {
                 fds.insert(*t, fd);
@@ -94,8 +247,13 @@ fn build_subtrees(
 }
 
 impl Manager for Cgroup2Manager {
+    #[cfg(test)]
     fn fd(&self, t: ProcType) -> Option<RawFd> {
         self.fds.get(&t).copied()
+    }
+
+    fn create_process(&self, kind: ProcType) -> io::Result<Option<Arc<ProcessCgroup>>> {
+        self.create_process_inner(kind).map(Some)
     }
 }
 
@@ -267,8 +425,15 @@ mod tests {
     /// Build a manager in a temp dir, skipping the statfs probe (a temp dir
     /// is not a cgroup2 filesystem — `new` is exercised separately below).
     fn manager_in(dir: &Path) -> Cgroup2Manager {
-        let fds = build_subtrees(dir, &sample_types(16 * 1024 * 1024)).unwrap();
-        Cgroup2Manager { fds }
+        let types = sample_types(16 * 1024 * 1024);
+        let fds = build_subtrees(dir, &types).unwrap();
+        // A real cgroup v2 hierarchy exposes cgroup.kill in every cgroup;
+        // model that capability in the ordinary-file fixture used by leaf
+        // allocation tests.
+        for relative in ["user", "ptys"] {
+            std::fs::write(dir.join(relative).join("cgroup.kill"), "").unwrap();
+        }
+        Cgroup2Manager::from_parts(dir, &types, fds)
     }
 
     #[test]
@@ -379,11 +544,95 @@ mod tests {
     }
 
     #[test]
+    fn enables_controllers_on_each_parent_for_process_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cgroup.subtree_control"), "").unwrap();
+        std::fs::create_dir(dir.path().join("user")).unwrap();
+        std::fs::write(dir.path().join("user/cgroup.subtree_control"), "").unwrap();
+        std::fs::create_dir(dir.path().join("ptys")).unwrap();
+        std::fs::write(dir.path().join("ptys/cgroup.subtree_control"), "cpu").unwrap();
+
+        let mgr = manager_in(dir.path());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("user/cgroup.subtree_control"))
+                .unwrap()
+                .trim(),
+            "+memory +cpu"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ptys/cgroup.subtree_control"))
+                .unwrap()
+                .trim(),
+            "+memory"
+        );
+        drop(mgr);
+    }
+
+    #[test]
     fn missing_subtree_control_file_is_skipped() {
         // Temp dirs have no cgroup.subtree_control at all — the enable step
         // must be skipped, not fatal, so the pure file logic stays testable.
         let dir = tempfile::tempdir().unwrap();
         let mgr = manager_in(dir.path());
         assert!(mgr.fd(ProcType::User).is_some());
+    }
+
+    #[test]
+    fn creates_distinct_process_leaf_with_inherited_memory_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = manager_in(dir.path());
+        let first = mgr.create_process(ProcType::User).unwrap().unwrap();
+        let second = mgr.create_process(ProcType::User).unwrap().unwrap();
+        assert_ne!(first.path(), second.path());
+        assert!(first.path().starts_with(dir.path().join("user")));
+        assert_eq!(
+            std::fs::read_to_string(first.path().join("memory.max"))
+                .unwrap()
+                .trim(),
+            compute_limits(16 * 1024 * 1024).to_string()
+        );
+        assert_eq!(
+            std::fs::read_to_string(first.path().join("cpu.weight"))
+                .unwrap()
+                .trim(),
+            "50"
+        );
+        let pty = mgr.create_process(ProcType::Pty).unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(pty.path().join("cpu.weight"))
+                .unwrap()
+                .trim(),
+            "200"
+        );
+        // The test filesystem uses ordinary files rather than cgroupfs
+        // virtual properties; remove them after dropping the handles so the
+        // temporary directory can be reclaimed without masking the assertion.
+        let first_path = first.path().to_path_buf();
+        let second_path = second.path().to_path_buf();
+        let pty_path = pty.path().to_path_buf();
+        drop(first);
+        drop(second);
+        drop(pty);
+        for path in [first_path, second_path, pty_path] {
+            let _ = std::fs::remove_file(path.join("memory.max"));
+            let _ = std::fs::remove_file(path.join("memory.high"));
+            let _ = std::fs::remove_file(path.join("cpu.weight"));
+            let _ = std::fs::remove_file(path.join("cgroup.kill"));
+            let _ = std::fs::remove_dir(path);
+        }
+    }
+
+    #[test]
+    fn missing_cgroup_kill_interface_rejects_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let types = sample_types(16 * 1024 * 1024);
+        let fds = build_subtrees(dir.path(), &types).unwrap();
+        let mgr = Cgroup2Manager::from_parts(dir.path(), &types, fds);
+
+        let error = mgr.create_process(ProcType::User).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(mgr.create_process(ProcType::User).is_err());
+        std::fs::write(dir.path().join("user/cgroup.kill"), "").unwrap();
+        assert!(mgr.create_process(ProcType::User).unwrap().is_some());
     }
 }

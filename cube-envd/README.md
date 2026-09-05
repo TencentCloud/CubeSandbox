@@ -54,15 +54,17 @@ load-bearing ones, and why cube-envd differs:
   the descendants it forked. Go envd 0.5.13 signals only the direct child,
   leaking grandchildren (e.g. a backgrounded `sleep`) as orphans. This is a
   deliberate divergence: a sandbox data-plane should not leak processes. The
-  event stream, exit codes and `deadline_exceeded` framing are unchanged.
+  exit codes and `deadline_exceeded` trailer are preserved; cube-envd also
+  publishes a terminal EndEvent carrying the actual signal before that trailer.
 - **Stricter-input handling is more lenient (documented).** For malformed
   unary requests Go rejects with 415/400 (missing/`text/plain` content-type,
   zero-length body, trailing bytes or multiple stream envelopes — cube-envd
   decodes the first envelope and ignores trailing bytes); cube-envd
   accepts the common shapes and executes. It never *executes a side effect* on
   a shape Go refuses — the cases that did (nested `SendSignal`/`Connect`
-  selectors) resolve to `not_found` without signalling or attaching to any
-  process.
+  selectors) are rejected during decoding with `invalid_argument` without
+  signalling or attaching to any process (#1227). An empty flat selector `{}`
+  returns `unimplemented`, matching the upstream service default branch.
 - **Uploads buffer in memory (bounded).** Both upload paths hold the payload
   (≤ 64 MiB) in memory before the atomic temp-file write; Go streams to disk.
   Worst case is bounded and rejected cleanly with 413 above the cap, but very
@@ -169,3 +171,45 @@ from `status`), int64 fields serialize as strings, oneofs are flat
 (`{"process":{"pid":1}}`), streaming errors always ride the EndStream frame
 on HTTP 200, and a signal-killed process reports `exitCode:-1` with
 `status:"signal: killed"`.
+
+## Process termination metadata and cgroup policy
+
+EndEvent optionally includes `signal` (numeric terminating signal),
+`oomKilled`, and `killedBy` (`user`, `timeout`, or `oom`). Normal exits omit
+these fields unless an envd-side cause was explicitly recorded. SDK result
+objects default absent OOM metadata to false.
+
+OOM attribution requires all of: main-process SIGKILL, an increased
+per-command `memory.events.oom_kill` counter, and no recorded user/timeout
+cause. A descendant-only OOM followed by a successful parent exit is not
+reported as a main-process OOM. Explicit user/timeout causes take precedence.
+The counter is command-leaf scoped, not PID scoped: an unrelated external
+SIGKILL concurrent with a descendant OOM remains inherently ambiguous.
+
+Each command gets a cgroup v2 leaf under `user` or `ptys`. With an active
+manager, leaf-allocation errors reject Start with `resource_exhausted`;
+pre-exec placement errors reject Start without running user code. Neither
+path retries without confinement or permanently disables the manager.
+Subsequent requests can recover once the underlying resource problem clears.
+Startup inability to initialize cgroups still selects the existing logged
+Noop fallback. Commands in that mode do not claim per-command OOM evidence
+or escape-proof descendant cleanup.
+
+There is no direct fallback into the type parent: these parents distribute
+memory/cpu to child leaves and cannot also accept internal processes under
+cgroup v2's no-internal-process constraint. There is no PID-0 migration probe.
+
+Configuration:
+
+- `CUBE_ENVD_CGROUP_ROOT`: cgroup v2 root, default `/sys/fs/cgroup`; nested
+  daemon membership is resolved when visible below that root.
+- `CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES`: positive requested memory cap, clamped
+  by the safe guest/enclosing-parent limit. Without it, the budget reserves
+  `min(total/8, 128 MiB)` from the effective guest/parent memory ceiling.
+
+A Start timeout kills the command, publishes the real EndEvent, then emits a
+`deadline_exceeded` trailer. Connect ignores `Connect-Timeout-Ms`: it is an
+attachment and remains until the process ends or the client disconnects; the
+client SDKs may still apply their own idle/request timeout. Python Commands always uses the in-house
+Connect-JSON decoder, regardless of whether the E2B package is installed;
+Go Commands copies termination fields into the public CommandResult.

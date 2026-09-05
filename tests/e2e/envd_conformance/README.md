@@ -14,6 +14,8 @@ suite gates cube-envd changes, `ENVD_REF` bumps, and SDK-matrix updates.
 | `conformance.py` | Normalizes two fixture directories (volatile values, header case, chunking) and diffs them; declared MVP differences are allowlisted with reasons |
 | `lifecycle_smoke.go` | Assertion-based black-box regression for interactive input and slow-client process cleanup against one live envd; these checks complement, but do not replace, Go-vs-Rust fixture capture |
 | `perf.py` | Startup-to-/health latency, RSS, and command round-trip comparison |
+| `termination_e2e.py` | Real cgroupfs OOM, fail-closed allocation/recovery, escaped descendants, wire metadata and Python SDK checks in an isolated Linux/QEMU guest |
+| `test_conformance.py` | Unit coverage ensuring extension normalization does not hide unrelated wire differences |
 
 ## Running
 
@@ -53,7 +55,7 @@ python3 perf.py
 - `DECLARED-DIFF` — allowlisted in `conformance.py` `DECLARED_DIFFERENT`
   with a reason; every entry maps to the "known differences" table in the
   cube-envd design doc / PR description (watch, `/files/compose`,
-  gzip, nested-selector leniency, parser-specific error wording).
+  gzip, nested-selector error differences, parser-specific error wording).
 - `FAIL` — a real behavioral divergence; fix cube-envd or, if the change
   is intentional, move it to the allowlist **with a reason** in the same PR.
 
@@ -66,3 +68,52 @@ python3 perf.py
 | timeout | `Connect-Timeout-Ms` expiry → `deadline_exceeded` + process killed, including an unread response whose output queue is full |
 | cancellation | client disconnect mid-stream → process keeps running (List + side-effect check) |
 | unimplemented | watch family / compose answer with stable protocol-correct errors |
+
+## Termination metadata extension
+
+`signal`, `oomKilled` and `killedBy` are CubeSandbox extensions to upstream's
+EndEvent. The comparison removes only these fields from EndEvent objects,
+including nested captured streams, while still comparing exit status/error.
+On timeout, cube-envd additionally emits the exact SIGKILL/timeout EndEvent
+before `deadline_exceeded`; the comparator recognizes only that specific
+event/trailer pair. Unexpected causes, exit codes and trailers remain failures.
+`termination_e2e.py` independently asserts the extension values against real
+process deaths; this is not a blanket allowlist for signal/timeout scenarios.
+
+```bash
+python3 -m unittest discover -s tests/e2e/envd_conformance -p test_conformance.py -v
+```
+
+## Real QEMU/cgroupfs tests
+
+Copy the newly built musl binary, `termination_e2e.py`, and `sdk/python` into
+the existing test guest. Run as root with Python SDK dependencies installed:
+
+```bash
+sudo env PYTHONPATH=/path/to/sdk/python python3 -u \
+  termination_e2e.py /path/to/cube-envd
+```
+
+The test creates a unique cgroup subtree with a 256 MiB parent cap, no swap,
+64 MiB command limits, and a separate daemon on a dynamically chosen port.
+It checks real main-process OOM, descendant-only OOM, timeout/user attribution,
+pipe/PTY placement, escaped-descendant cleanup and the Python command/PTY SDKs.
+Setting `user/cgroup.max.descendants=0` forces real allocation failures; two
+requests must fail without executing user code. Restoring `max` must allow
+confined execution without restarting the daemon. All test leaves and the
+test daemon are removed afterwards. Existing services are not restarted.
+
+For the full CubeAPI → CubeProxy → daemon path, `e2e_sdk.py` can inject a
+candidate binary into a **new disposable sandbox** without rebuilding or
+modifying an existing template:
+
+```bash
+CUBE_API_URL=... CUBE_PROXY_NODE_IP=... CUBE_PROXY_PORT_HTTP=... \
+  TEMPLATE_CUBE=<existing-ready-template> \
+  ENVD_TEST_BINARY=/path/to/new/cube-envd python3 -u e2e_sdk.py
+```
+
+The upload is SHA-256 checked. Only that test sandbox routes its SDK process
+and filesystem calls to the new daemon on port 49984. Template boot/readiness
+still uses the original daemon on 49983: this validates the new binary's live
+data plane, not a rebuilt image's boot path. The sandbox is deleted at exit.

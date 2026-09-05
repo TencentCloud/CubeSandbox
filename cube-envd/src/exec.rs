@@ -8,9 +8,11 @@ use std::collections::HashMap;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::Mutex;
 
+use tokio::io::unix::AsyncFd;
 use tokio::io::AsyncReadExt;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot, Notify};
 
 use crate::auth::User;
 use crate::msg::process::{DataEvent, EndEvent};
@@ -91,21 +93,27 @@ fn place_in_cgroup(dirfd: RawFd) -> std::io::Result<()> {
 /// Matches upstream envd's default PATH for spawned commands.
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const READ_CHUNK: usize = 32 * 1024;
+/// Once the direct child has been reaped, inherited stdout/stderr or PTY
+/// slave descriptors must not keep the process entry alive forever. Normal
+/// exits reach EOF immediately; this grace period only catches background or
+/// daemonized descendants that deliberately retain those descriptors.
+const OUTPUT_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// One output event published on a process's broadcast bus. `Clone` because
 /// `broadcast::Sender::send` fans a copy out to every subscriber.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum PumpEvent {
     Data(DataEvent),
     End(EndEvent),
     SpawnError(String),
+    DeadlineExceeded,
 }
 
 /// Process-owned input endpoint. The mutex serializes writes from unary and
 /// streaming RPCs without holding the global process-table lock across I/O.
 #[derive(Debug)]
 pub enum InputWriter {
-    Pty(tokio::fs::File),
+    Pty(AsyncFd<std::fs::File>),
     /// `None` means stdin was disabled at Start or has already been closed.
     Pipe(Option<tokio::process::ChildStdin>),
 }
@@ -130,6 +138,30 @@ pub struct SpawnedProcess {
     pub pty_master: Option<std::fs::File>,
     /// Writable stdin/pty endpoint retained for the input RPC family.
     pub input: InputHandle,
+    /// Resolves after the direct child has been reaped and the terminal event
+    /// has been cached/published. The process service owns this receiver so
+    /// deadline cancellation and table cleanup follow the child's real
+    /// lifetime, not HTTP response backpressure.
+    pub completion: oneshot::Receiver<()>,
+    /// Terminal event cache shared with the process table. A Connect racing
+    /// with terminal publication can use this cache to receive the complete
+    /// End/SpawnError event instead of subscribing after the broadcast head
+    /// and observing a bare channel close.
+    pub terminal: Arc<std::sync::Mutex<Option<PumpEvent>>>,
+    /// Fired immediately after `child.wait()` returns, before output-drain
+    /// grace. Deadline supervision uses this signal so a child that exited
+    /// before its deadline is never misclassified merely because a detached
+    /// descendant kept stdout/stderr open.
+    pub reaped: Arc<Notify>,
+    /// Shared termination metadata set by the supervisor or SendSignal
+    /// before killing the process. The output pump folds it into EndEvent
+    /// without changing the legacy status/error fields.
+    pub termination: Arc<Mutex<Option<String>>>,
+    /// Filled by the process service immediately after spawn. Keeping this
+    /// indirection avoids making the low-level spawn API depend on cgroup
+    /// allocation ordering while still allowing the pump to inspect
+    /// memory.events before publishing the terminal event.
+    pub cgroup: Arc<Mutex<Option<Arc<crate::cgroup::ProcessCgroup>>>>,
 }
 
 /// Merge order (later wins): built-in defaults < /init env vars < request envs.
@@ -244,6 +276,7 @@ fn child_pre_exec(
     })
 }
 
+#[cfg(test)]
 pub fn spawn(
     cmd: &str,
     args: &[String],
@@ -252,6 +285,23 @@ pub fn spawn(
     user: &User,
     stdin_enabled: bool,
     cgroup_fd: Option<RawFd>,
+) -> std::io::Result<SpawnedProcess> {
+    spawn_with_cgroup(cmd, args, env, cwd, user, stdin_enabled, cgroup_fd, None)
+}
+
+/// Spawn a pipe-backed process and seed the cgroup metadata before the pump
+/// task starts. This closes the fast-exit race where an OOM/termination event
+/// could otherwise be decorated before the process service stores its leaf.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_with_cgroup(
+    cmd: &str,
+    args: &[String],
+    env: HashMap<String, String>,
+    cwd: String,
+    user: &User,
+    stdin_enabled: bool,
+    cgroup_fd: Option<RawFd>,
+    process_cgroup: Option<Arc<crate::cgroup::ProcessCgroup>>,
 ) -> std::io::Result<SpawnedProcess> {
     let mut command = tokio::process::Command::new(cmd);
     command
@@ -292,21 +342,58 @@ pub fn spawn(
     // A clone kept for `Connect` to subscribe later subscribers; the pump task
     // moves `tx` itself below.
     let sender = tx.clone();
+    let (completion_tx, completion) = oneshot::channel();
+    let terminal = Arc::new(std::sync::Mutex::new(None));
+    let terminal_for_pump = terminal.clone();
+    let reaped = Arc::new(Notify::new());
+    let reaped_for_pump = reaped.clone();
+    let termination = Arc::new(Mutex::new(None));
+    let cgroup = Arc::new(Mutex::new(process_cgroup));
+    let termination_for_pump = termination.clone();
+    let cgroup_for_pump = cgroup.clone();
 
     tokio::spawn(async move {
-        let out_task = pump_pipe(stdout, tx.clone(), false);
-        let err_task = pump_pipe(stderr, tx.clone(), true);
-        // Drain both pipes fully before reporting the exit status so no
-        // DataEvent can arrive after the EndEvent.
-        let (_, _) = tokio::join!(out_task, err_task);
-        match child.wait().await {
-            Ok(status) => {
-                let _ = tx.send(PumpEvent::End(EndEvent::from_exit_status(status)));
+        let output = async {
+            tokio::try_join!(
+                pump_pipe(stdout, tx.clone(), false),
+                pump_pipe(stderr, tx.clone(), true)
+            )
+            .map(|_| ())
+        };
+        tokio::pin!(output);
+        let wait = child.wait();
+        tokio::pin!(wait);
+
+        // Poll wait and the output pumps together. Waiting for EOF first can
+        // leave the direct child as a zombie forever when a daemonized
+        // descendant inherits a pipe. Once wait wins, give already-buffered
+        // output a short chance to drain, then close our read ends.
+        let terminal = tokio::select! {
+            output_result = &mut output => {
+                if output_result.is_err() {
+                    let _ = kill_process_group(pid, libc::SIGKILL);
+                }
+                let wait_result = wait.await;
+                reaped_for_pump.notify_one();
+                terminal_after_output("process output", output_result, wait_result)
             }
-            Err(e) => {
-                let _ = tx.send(PumpEvent::SpawnError(format!("wait failed: {e}")));
+            wait_result = &mut wait => {
+                reaped_for_pump.notify_one();
+                let output_result = tokio::time::timeout(OUTPUT_DRAIN_GRACE, &mut output).await;
+                terminal_after_wait("process output", pid, wait_result, output_result)
             }
-        }
+        };
+        let terminal = decorate_terminal(terminal, &termination_for_pump, &cgroup_for_pump);
+        let mut slot = terminal_for_pump
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(terminal.clone());
+        drop(slot);
+        let _ = tx.send(terminal);
+        // Signal completion only after the terminal event is cached and
+        // published. This gives the supervisor a race-free handoff point for
+        // process-table removal.
+        let _ = completion_tx.send(());
     });
 
     Ok(SpawnedProcess {
@@ -315,6 +402,11 @@ pub fn spawn(
         sender,
         pty_master: None,
         input,
+        completion,
+        terminal,
+        reaped,
+        termination,
+        cgroup,
     })
 }
 
@@ -330,7 +422,9 @@ pub fn spawn(
 /// carry `O_CLOEXEC` so the master never leaks into the child's fd table and
 /// keeps the pty open past the child's exit.
 fn open_pty(cols: u16, rows: u16) -> std::io::Result<(std::fs::File, std::fs::File)> {
-    let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+    let master = unsafe {
+        libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK)
+    };
     if master < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -413,6 +507,7 @@ pub fn resize_pty(master: &std::fs::File, cols: u16, rows: u16) -> std::io::Resu
 ///
 /// `cols`/`rows` seed the window size at allocation (`TIOCSWINSZ`); zero values
 /// are passed through, matching upstream's empty `pty.Winsize{}`.
+#[cfg(test)]
 pub fn spawn_pty(
     cmd: &str,
     args: &[String],
@@ -421,6 +516,21 @@ pub fn spawn_pty(
     user: &User,
     size: (u16, u16),
     cgroup_fd: Option<RawFd>,
+) -> std::io::Result<SpawnedProcess> {
+    spawn_pty_with_cgroup(cmd, args, env, cwd, user, size, cgroup_fd, None)
+}
+
+/// PTY variant of [`spawn_with_cgroup`].
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_pty_with_cgroup(
+    cmd: &str,
+    args: &[String],
+    env: HashMap<String, String>,
+    cwd: String,
+    user: &User,
+    size: (u16, u16),
+    cgroup_fd: Option<RawFd>,
+    process_cgroup: Option<Arc<crate::cgroup::ProcessCgroup>>,
 ) -> std::io::Result<SpawnedProcess> {
     // `open_pty` returns (master, slave); `Stdio::from(File)` dups the slave
     // fd onto 0/1/2 in the child, needing three handles because `Stdio::from`
@@ -431,6 +541,12 @@ pub fn spawn_pty(
     // original below. Input writes are serialized by the process-owned mutex.
     let resize_master = master_file.try_clone()?;
     let input_master = master_file.try_clone()?;
+    // Register both async master handles before spawning. If registration
+    // fails, no child exists yet and all PTY descriptors are dropped cleanly.
+    let master = AsyncFd::new(master_file)?;
+    let input = Arc::new(tokio::sync::Mutex::new(InputWriter::Pty(AsyncFd::new(
+        input_master,
+    )?)));
 
     let mut command = tokio::process::Command::new(cmd);
     command
@@ -452,32 +568,45 @@ pub fn spawn_pty(
     // A clone kept for `Connect` to subscribe later subscribers; the pump task
     // moves `tx` itself below.
     let sender = tx.clone();
-    let master = tokio::fs::File::from_std(master_file);
-    let input = Arc::new(tokio::sync::Mutex::new(InputWriter::Pty(
-        tokio::fs::File::from_std(input_master),
-    )));
+    let (completion_tx, completion) = oneshot::channel();
+    let terminal = Arc::new(std::sync::Mutex::new(None));
+    let terminal_for_pump = terminal.clone();
+    let reaped = Arc::new(Notify::new());
+    let reaped_for_pump = reaped.clone();
+    let termination = Arc::new(Mutex::new(None));
+    let cgroup = Arc::new(Mutex::new(process_cgroup));
+    let termination_for_pump = termination.clone();
+    let cgroup_for_pump = cgroup.clone();
 
     tokio::spawn(async move {
-        // Read the master until EOF (the child exited and closed its slave),
-        // then reap — the same "drain fully before End" contract as `spawn`.
-        let pump_error = pump_pty(master, tx.clone()).await.err();
-        if let Some(error) = &pump_error {
-            tracing::warn!(pid, "error reading from pty: {error}");
-        }
-        let wait_result = child.wait().await;
-        match (pump_error, wait_result) {
-            (Some(_), Ok(status)) | (None, Ok(status)) => {
-                let _ = tx.send(PumpEvent::End(EndEvent::from_exit_status(status)));
+        let output = pump_pty(master, tx.clone());
+        tokio::pin!(output);
+        let wait = child.wait();
+        tokio::pin!(wait);
+
+        let terminal = tokio::select! {
+            output_result = &mut output => {
+                if let Err(error) = &output_result {
+                    tracing::warn!(pid, "error reading from pty: {error}");
+                }
+                let wait_result = wait.await;
+                reaped_for_pump.notify_one();
+                terminal_after_output("pty", output_result, wait_result)
             }
-            (Some(read_error), Err(wait_error)) => {
-                let _ = tx.send(PumpEvent::SpawnError(format!(
-                    "pty read failed: {read_error}; wait failed: {wait_error}"
-                )));
+            wait_result = &mut wait => {
+                reaped_for_pump.notify_one();
+                let output_result = tokio::time::timeout(OUTPUT_DRAIN_GRACE, &mut output).await;
+                terminal_after_wait("pty", pid, wait_result, output_result)
             }
-            (None, Err(e)) => {
-                let _ = tx.send(PumpEvent::SpawnError(format!("wait failed: {e}")));
-            }
-        }
+        };
+        let terminal = decorate_terminal(terminal, &termination_for_pump, &cgroup_for_pump);
+        let mut slot = terminal_for_pump
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(terminal.clone());
+        drop(slot);
+        let _ = tx.send(terminal);
+        let _ = completion_tx.send(());
     });
 
     Ok(SpawnedProcess {
@@ -486,27 +615,129 @@ pub fn spawn_pty(
         sender,
         pty_master: Some(resize_master),
         input,
+        completion,
+        terminal,
+        reaped,
+        termination,
+        cgroup,
     })
+}
+
+fn decorate_terminal(
+    event: PumpEvent,
+    termination: &Arc<Mutex<Option<String>>>,
+    cgroup: &Arc<Mutex<Option<Arc<crate::cgroup::ProcessCgroup>>>>,
+) -> PumpEvent {
+    let PumpEvent::End(mut end) = event else {
+        return event;
+    };
+    let cause = termination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let oom_killed = end.signal == Some(libc::SIGKILL) && cause.is_none() && {
+        let group = cgroup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match group {
+            Some(group) => match group.oom_killed() {
+                Ok(killed) => killed,
+                Err(error) => {
+                    // An unreadable memory.events file means the OOM state is
+                    // unknown, not a confirmed non-OOM exit. Keep the optional
+                    // wire field absent and make the loss observable.
+                    tracing::warn!(
+                        "process cgroup {}: unable to determine OOM termination: {error}",
+                        group.path().display()
+                    );
+                    false
+                }
+            },
+            None => false,
+        }
+    };
+    if oom_killed {
+        end.oom_killed = Some(true);
+        end.killed_by = Some("oom".to_string());
+    } else if let Some(cause) = cause {
+        end.killed_by = Some(cause);
+    }
+    PumpEvent::End(end)
+}
+
+fn terminal_after_output(
+    output_name: &str,
+    output_result: std::io::Result<()>,
+    wait_result: std::io::Result<std::process::ExitStatus>,
+) -> PumpEvent {
+    match (output_result, wait_result) {
+        (Ok(()), Ok(status)) => PumpEvent::End(EndEvent::from_exit_status(status)),
+        (Ok(()), Err(wait_error)) => PumpEvent::SpawnError(format!("wait failed: {wait_error}")),
+        (Err(_), Ok(status)) if output_name == "pty" => {
+            PumpEvent::End(EndEvent::from_exit_status(status))
+        }
+        (Err(read_error), Ok(_)) => {
+            PumpEvent::SpawnError(format!("{output_name} read failed: {read_error}"))
+        }
+        (Err(read_error), Err(wait_error)) => PumpEvent::SpawnError(format!(
+            "{output_name} read failed: {read_error}; wait failed: {wait_error}"
+        )),
+    }
+}
+
+fn terminal_after_wait(
+    output_name: &str,
+    pid: u32,
+    wait_result: std::io::Result<std::process::ExitStatus>,
+    output_result: Result<std::io::Result<()>, tokio::time::error::Elapsed>,
+) -> PumpEvent {
+    let status = match wait_result {
+        Ok(status) => status,
+        Err(wait_error) => return PumpEvent::SpawnError(format!("wait failed: {wait_error}")),
+    };
+    match output_result {
+        Ok(Ok(())) => PumpEvent::End(EndEvent::from_exit_status(status)),
+        Ok(Err(read_error)) if output_name == "pty" => {
+            tracing::warn!(pid, "error reading from pty: {read_error}");
+            PumpEvent::End(EndEvent::from_exit_status(status))
+        }
+        Ok(Err(read_error)) => {
+            PumpEvent::SpawnError(format!("{output_name} read failed: {read_error}"))
+        }
+        Err(_) => {
+            tracing::warn!(
+                "pid {pid}: {output_name} remained open after the direct child exited; closing it after {:?}",
+                OUTPUT_DRAIN_GRACE
+            );
+            PumpEvent::End(EndEvent::from_exit_status(status))
+        }
+    }
 }
 
 /// Pump a pty master fd into `DataEvent { pty }` frames. Mirrors `pump_pipe`:
 /// keep draining once the last subscriber is gone (so the child never blocks
 /// on a full pty buffer) but stop encoding.
 async fn pump_pty(
-    mut master: tokio::fs::File,
+    master: AsyncFd<std::fs::File>,
     tx: broadcast::Sender<PumpEvent>,
 ) -> std::io::Result<()> {
     use base64::Engine;
+    use std::io::Read;
     let mut buf = vec![0u8; READ_CHUNK];
-    let mut receiver_gone = false;
     loop {
-        match master.read(&mut buf).await {
-            Ok(0) => return Ok(()),
-            Err(e) if is_pty_eof(&e) => return Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-            Ok(n) => {
-                if receiver_gone {
+        let mut readiness = master.readable().await?;
+        match readiness.try_io(|inner| inner.get_ref().read(&mut buf)) {
+            Ok(Ok(0)) => return Ok(()),
+            Ok(Err(e)) if is_pty_eof(&e) => return Ok(()),
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Ok(Err(e)) => return Err(e),
+            Err(_would_block) => continue,
+            Ok(Ok(n)) => {
+                // A disconnected Start must not permanently disable output
+                // for a later Connect. Skip work while nobody is attached,
+                // but re-check on every read so reattachment resumes delivery.
+                if tx.receiver_count() == 0 {
                     continue;
                 }
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
@@ -514,12 +745,34 @@ async fn pump_pty(
                     pty: Some(b64),
                     ..Default::default()
                 };
-                if tx.send(PumpEvent::Data(event)).is_err() {
-                    receiver_gone = true;
-                }
+                let _ = tx.send(PumpEvent::Data(event));
             }
         }
     }
+}
+
+/// Write bytes to a non-blocking PTY master without using tokio's blocking
+/// filesystem pool. Readiness is re-registered after EAGAIN, so cancellation
+/// of the RPC releases the fd promptly even when the child is not reading.
+pub async fn write_pty(master: &AsyncFd<std::fs::File>, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut offset = 0;
+    while offset < data.len() {
+        let mut readiness = master.writable().await?;
+        match readiness.try_io(|inner| inner.get_ref().write(&data[offset..])) {
+            Ok(Ok(0)) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "pty write returned zero",
+                ))
+            }
+            Ok(Ok(n)) => offset += n,
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Ok(Err(e)) => return Err(e),
+            Err(_would_block) => continue,
+        }
+    }
+    Ok(())
 }
 
 /// Linux returns EIO when the last PTY slave closes. It is the PTY equivalent
@@ -528,25 +781,24 @@ fn is_pty_eof(error: &std::io::Error) -> bool {
     error.raw_os_error() == Some(libc::EIO)
 }
 
-async fn pump_pipe<R>(pipe: Option<R>, tx: broadcast::Sender<PumpEvent>, is_stderr: bool)
+async fn pump_pipe<R>(
+    pipe: Option<R>,
+    tx: broadcast::Sender<PumpEvent>,
+    is_stderr: bool,
+) -> std::io::Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     use base64::Engine;
-    let Some(mut pipe) = pipe else { return };
+    let Some(mut pipe) = pipe else { return Ok(()) };
     let mut buf = vec![0u8; READ_CHUNK];
-    // Set once the last receiver goes away: keep draining so the child never
-    // blocks on a full pipe, but skip encoding/sending. Currently unreachable
-    // — `initial` is the sole receiver and drive_stream holds it until it has
-    // seen End, which the pump sends only after both pipes drain — but it
-    // becomes live once Connect adds subscribers that can all drop while a
-    // lingering descendant still holds the pipe open.
-    let mut receiver_gone = false;
     loop {
         match pipe.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
             Ok(n) => {
-                if receiver_gone {
+                if tx.receiver_count() == 0 {
                     continue;
                 }
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
@@ -561,12 +813,7 @@ where
                         ..Default::default()
                     }
                 };
-                // `send` fails only when every subscriber has gone away; keep
-                // draining the pipe so the child never blocks, but stop
-                // encoding once nobody is listening.
-                if tx.send(PumpEvent::Data(event)).is_err() {
-                    receiver_gone = true;
-                }
+                let _ = tx.send(PumpEvent::Data(event));
             }
         }
     }
@@ -598,6 +845,65 @@ pub fn kill_process_group(pid: u32, signo: i32) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oom_metadata_requires_sigkill_and_preserves_recorded_causes() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let events = directory.path().join("memory.events");
+        std::fs::write(&events, "oom_kill 0\n").unwrap();
+        let group = Arc::new(crate::cgroup::ProcessCgroup::new(
+            directory.path().to_path_buf(),
+            std::fs::File::open(directory.path()).unwrap(),
+        ));
+        let cgroup = Arc::new(Mutex::new(Some(group)));
+        for (status, cause, delta, expected_oom, expected_cause) in [
+            (0, None, 1, false, None),
+            (libc::SIGTERM, None, 1, false, None),
+            (libc::SIGKILL, None, 0, false, None),
+            (libc::SIGKILL, None, 1, true, Some("oom")),
+            (libc::SIGKILL, Some("timeout"), 1, false, Some("timeout")),
+            (libc::SIGKILL, Some("user"), 1, false, Some("user")),
+        ] {
+            std::fs::write(&events, format!("oom_kill {delta}\n")).unwrap();
+            let termination = Arc::new(Mutex::new(cause.map(str::to_string)));
+            let event = PumpEvent::End(EndEvent::from_exit_status(
+                std::process::ExitStatus::from_raw(status),
+            ));
+            let PumpEvent::End(end) = decorate_terminal(event, &termination, &cgroup) else {
+                panic!("lost terminal event");
+            };
+            assert_eq!(end.oom_killed.unwrap_or(false), expected_oom);
+            assert_eq!(end.killed_by.as_deref(), expected_cause);
+        }
+    }
+
+    #[test]
+    fn pty_read_errors_preserve_child_exit_status() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let terminal = terminal_after_output(
+            "pty",
+            Err(std::io::Error::from_raw_os_error(libc::EBADF)),
+            Ok(std::process::ExitStatus::from_raw(libc::SIGTERM)),
+        );
+        let PumpEvent::End(end) = terminal else {
+            panic!("PTY read failure replaced child exit status: {terminal:?}");
+        };
+        assert_eq!(end.signal, Some(libc::SIGTERM));
+
+        let terminal = terminal_after_wait(
+            "pty",
+            42,
+            Ok(std::process::ExitStatus::from_raw(libc::SIGTERM)),
+            Ok(Err(std::io::Error::from_raw_os_error(libc::EBADF))),
+        );
+        let PumpEvent::End(end) = terminal else {
+            panic!("PTY drain failure replaced child exit status: {terminal:?}");
+        };
+        assert_eq!(end.signal, Some(libc::SIGTERM));
+    }
 
     fn current_user() -> User {
         // Run exec tests as the invoking user so they work unprivileged.
@@ -647,6 +953,7 @@ mod tests {
                     break;
                 }
                 Ok(PumpEvent::SpawnError(e)) => panic!("spawn error: {e}"),
+                Ok(PumpEvent::DeadlineExceeded) => panic!("unexpected deadline"),
                 Err(_) => break,
             }
         }
@@ -819,6 +1126,7 @@ mod tests {
                     break;
                 }
                 Ok(PumpEvent::SpawnError(e)) => panic!("spawn error: {e}"),
+                Ok(PumpEvent::DeadlineExceeded) => panic!("unexpected deadline"),
                 Err(_) => break,
             }
         }
@@ -828,6 +1136,148 @@ mod tests {
         assert_eq!(end.exit_code, 0);
         assert!(end.exited);
         assert_eq!(end.status, "exit status 0");
+    }
+
+    #[tokio::test]
+    async fn direct_child_is_reaped_when_detached_descendant_keeps_pty_open() {
+        use base64::Engine;
+
+        struct KillOnDrop(Option<u32>);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                if let Some(pid) = self.0 {
+                    unsafe {
+                        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                    }
+                }
+            }
+        }
+
+        let user = current_user();
+        let mut proc = spawn_pty(
+            "/bin/sh",
+            &[
+                "-c".into(),
+                "setsid /bin/sh -c 'trap \"\" HUP; sleep 10' & echo DESC:$!; exit 0".into(),
+            ],
+            HashMap::from([("PATH".to_string(), DEFAULT_PATH.to_string())]),
+            "/".into(),
+            &user,
+            (80, 24),
+            None,
+        )
+        .unwrap();
+        let direct_pid = proc.pid;
+        let mut output = Vec::new();
+        let descendant_pid = loop {
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(3), proc.initial.recv())
+                    .await
+                    .expect("PTY never reported detached descendant")
+                    .expect("PTY stream closed before descendant pid");
+            match event {
+                PumpEvent::Data(data) => {
+                    if let Some(data) = data.pty {
+                        output.extend(
+                            base64::engine::general_purpose::STANDARD
+                                .decode(data)
+                                .unwrap(),
+                        );
+                    }
+                    if let Some(pid) = String::from_utf8_lossy(&output)
+                        .lines()
+                        .find_map(|line| line.trim().strip_prefix("DESC:"))
+                        .and_then(|pid| pid.parse::<u32>().ok())
+                    {
+                        break pid;
+                    }
+                }
+                PumpEvent::End(end) => panic!("PTY ended before descendant pid: {end:?}"),
+                PumpEvent::SpawnError(e) => panic!("spawn error: {e}"),
+                PumpEvent::DeadlineExceeded => panic!("unexpected deadline"),
+            }
+        };
+        let mut cleanup = KillOnDrop(Some(descendant_pid));
+
+        let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let direct_proc = std::path::PathBuf::from(format!("/proc/{direct_pid}"));
+        while direct_proc.exists() && std::time::Instant::now() < reap_deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            !direct_proc.exists(),
+            "direct child {direct_pid} remained as a zombie while descendant {descendant_pid} held the PTY"
+        );
+
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), proc.initial.recv())
+                .await
+                .expect("PTY output drain stayed open indefinitely")
+                .expect("PTY stream closed before End")
+            {
+                PumpEvent::End(end) => {
+                    assert_eq!(end.exit_code, 0);
+                    break;
+                }
+                PumpEvent::Data(_) => {}
+                PumpEvent::SpawnError(e) => panic!("spawn error: {e}"),
+                PumpEvent::DeadlineExceeded => panic!("unexpected deadline"),
+            }
+        }
+
+        unsafe {
+            libc::kill(-(descendant_pid as libc::pid_t), libc::SIGKILL);
+        }
+        cleanup.0 = None;
+    }
+
+    #[tokio::test]
+    async fn output_delivery_resumes_for_a_later_subscriber() {
+        use base64::Engine;
+
+        let user = current_user();
+        let proc = spawn(
+            "/bin/sh",
+            &[
+                "-c".into(),
+                "printf before; sleep 0.25; printf after; sleep 0.05".into(),
+            ],
+            HashMap::new(),
+            "/".into(),
+            &user,
+            false,
+            None,
+        )
+        .unwrap();
+        let sender = proc.sender.clone();
+        drop(proc.initial);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let mut attached = sender.subscribe();
+        let mut output = Vec::new();
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(3), attached.recv())
+                .await
+                .expect("reattached subscriber timed out")
+                .expect("output bus closed before End")
+            {
+                PumpEvent::Data(data) => {
+                    if let Some(data) = data.stdout {
+                        output.extend(
+                            base64::engine::general_purpose::STANDARD
+                                .decode(data)
+                                .unwrap(),
+                        );
+                    }
+                }
+                PumpEvent::End(_) => break,
+                PumpEvent::SpawnError(e) => panic!("spawn error: {e}"),
+                PumpEvent::DeadlineExceeded => panic!("unexpected deadline"),
+            }
+        }
+        assert!(
+            String::from_utf8_lossy(&output).contains("after"),
+            "pump stopped publishing after the first subscriber disconnected"
+        );
     }
 
     #[test]
@@ -898,6 +1348,7 @@ mod tests {
                     break;
                 }
                 PumpEvent::SpawnError(e) => panic!("spawn error: {e}"),
+                PumpEvent::DeadlineExceeded => panic!("unexpected deadline"),
             }
         }
 
@@ -957,6 +1408,7 @@ mod tests {
                 }
                 PumpEvent::End(end) => panic!("PTY exited before resize: {end:?}"),
                 PumpEvent::SpawnError(e) => panic!("spawn error: {e}"),
+                PumpEvent::DeadlineExceeded => panic!("unexpected deadline"),
             }
         }
 
@@ -982,6 +1434,7 @@ mod tests {
                     break;
                 }
                 PumpEvent::SpawnError(e) => panic!("spawn error: {e}"),
+                PumpEvent::DeadlineExceeded => panic!("unexpected deadline"),
             }
         }
 

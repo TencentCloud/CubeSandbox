@@ -6,8 +6,8 @@
 //! Baseline-verified streaming semantics:
 //! - the whole Start response is HTTP 200; all errors (bad user, deadline,
 //!   unimplemented capability) travel as EndStream error frames;
-//! - `Connect-Timeout-Ms` expiry KILLS the child and ends the stream with
-//!   `deadline_exceeded`;
+//! - `Connect-Timeout-Ms` on Start is a process deadline (KILL +
+//!   `deadline_exceeded`); on Connect it bounds only that attachment;
 //! - a client disconnect does NOT kill the child — it keeps running and
 //!   stays visible to `List` until it exits on its own.
 
@@ -19,18 +19,19 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::auth::User;
-use crate::cgroup::ProcType;
+use crate::cgroup::{self, ProcType};
 use crate::connect;
 use crate::error::{ConnectCode, ConnectError};
 use crate::exec;
 use crate::msg::process::{
     parse_signal, CloseStdinRequest, ConnectRequest, Event, EventEnvelope, ListResponse,
-    ProcessInfo, ProcessInput, SendInputRequest, SendSignalRequest, StartEvent, StartRequest,
-    StreamInputRequest, UpdateRequest,
+    ProcessInfo, ProcessInput, ProcessSelector, SendInputRequest, SendSignalRequest, StartEvent,
+    StartRequest, StreamInputRequest, UpdateRequest,
 };
 use crate::state::{AppState, ProcEntry, PtyResizeError};
 
 const RESPONSE_QUEUE_CAPACITY: usize = 65;
+const PROCESS_REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub fn frame_stream_response(
     frames: impl futures::Stream<Item = Bytes> + Send + 'static,
@@ -162,40 +163,61 @@ pub fn start(
     // the wrapper also makes a "missing binary" a wrapper-level failure with
     // /usr/bin/nice's own wording (exit 127 event flow), not a spawn error.
     let (wrapper_cmd, wrapper_args) = oom_nice_wrapper(&req.process.cmd, &req.process.args);
-    let cgroup_fd = state.cgroup_fd(get_proc_type(&req));
+    let process_cgroup = match state.create_process_cgroup(get_proc_type(&req)) {
+        Ok(cgroup) => cgroup,
+        Err(e) => {
+            return stream_error_response(ConnectError::new(
+                ConnectCode::ResourceExhausted,
+                format!("cannot allocate process cgroup: {e}"),
+            ));
+        }
+    };
     // PTY vs pipe spawn differ only in the stdio plumbing; everything
     // downstream (broadcast pump → drive_stream) is identical because the pty
     // master publishes the same `DataEvent { pty }` onto the same bus.
-    let spawn_result = if let Some(pty) = &req.pty {
-        let (cols, rows) = pty
-            .size
-            .as_ref()
-            .map(|s| (s.cols as u16, s.rows as u16))
-            .unwrap_or((0, 0));
-        exec::spawn_pty(
-            &wrapper_cmd,
-            &wrapper_args,
-            env,
-            cwd,
-            &user,
-            (cols, rows),
-            cgroup_fd,
-        )
-    } else {
-        // Backwards compatibility: an omitted Start.stdin defaults to true.
-        exec::spawn(
-            &wrapper_cmd,
-            &wrapper_args,
-            env,
-            cwd,
-            &user,
-            req.stdin.unwrap_or(true),
-            cgroup_fd,
-        )
+    let spawn_once = |cgroup_fd, cgroup_for_spawn: Option<Arc<cgroup::ProcessCgroup>>| {
+        if let Some(pty) = &req.pty {
+            let (cols, rows) = pty
+                .size
+                .as_ref()
+                .map(|s| (s.cols as u16, s.rows as u16))
+                .unwrap_or((0, 0));
+            exec::spawn_pty_with_cgroup(
+                &wrapper_cmd,
+                &wrapper_args,
+                env.clone(),
+                cwd.clone(),
+                &user,
+                (cols, rows),
+                cgroup_fd,
+                cgroup_for_spawn,
+            )
+        } else {
+            // Backwards compatibility: an omitted Start.stdin defaults to true.
+            exec::spawn_with_cgroup(
+                &wrapper_cmd,
+                &wrapper_args,
+                env.clone(),
+                cwd.clone(),
+                &user,
+                req.stdin.unwrap_or(true),
+                cgroup_fd,
+                cgroup_for_spawn,
+            )
+        }
     };
+    let spawn_result = spawn_once(
+        process_cgroup.as_deref().map(cgroup::ProcessCgroup::fd),
+        process_cgroup.clone(),
+    );
     let spawned = match spawn_result {
         Ok(s) => s,
         Err(e) => {
+            if let Some(group) = &process_cgroup {
+                if let Err(cleanup_error) = group.remove_if_empty() {
+                    tracing::warn!("failed to remove unused process cgroup: {cleanup_error}");
+                }
+            }
             // A genuine spawn failure is an InvalidArgument RPC error. The
             // wrapper makes a missing user command a natural exit-127 event.
             return stream_error_response(ConnectError::new(
@@ -214,7 +236,24 @@ pub fn start(
         sender,
         pty_master,
         input,
+        completion,
+        terminal,
+        reaped,
+        termination,
+        cgroup: spawned_cgroup,
     } = spawned;
+    debug_assert_eq!(
+        spawned_cgroup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|group| group.path()),
+        process_cgroup.as_ref().map(|group| group.path()),
+        "spawn pump must receive cgroup metadata before it starts"
+    );
+    let supervisor_sender = sender.clone();
+    let supervisor_cgroup = process_cgroup.clone();
+    let supervisor_reaped = reaped.clone();
     let handle = state.insert_process(ProcEntry {
         pid,
         tag: req.tag.clone(),
@@ -222,6 +261,24 @@ pub fn start(
         sender,
         pty_master,
         input,
+        cgroup: process_cgroup,
+        termination: termination.clone(),
+        terminal,
+    });
+    let supervisor_state = state.clone();
+    tokio::spawn(async move {
+        supervise_process(
+            supervisor_state,
+            handle,
+            pid,
+            supervisor_sender,
+            completion,
+            deadline,
+            supervisor_cgroup,
+            supervisor_reaped,
+            termination.clone(),
+        )
+        .await;
     });
 
     // Frames channel: the HTTP body reads from `rx`. The driver never waits
@@ -231,18 +288,8 @@ pub fn start(
     // frames may be queued, so a client that falls behind still receives an
     // explicit resource_exhausted trailer once it resumes reading.
     let (tx, rx) = mpsc::channel::<Bytes>(RESPONSE_QUEUE_CAPACITY);
-    let driver_state = state.clone();
     tokio::spawn(async move {
-        drive_stream(
-            driver_state,
-            pid,
-            Some(handle),
-            initial,
-            tx,
-            deadline,
-            keepalive_interval,
-        )
-        .await;
+        drive_stream(pid, initial, tx, keepalive_interval, None).await;
     });
 
     frame_stream_response(tokio_stream::wrappers::ReceiverStream::new(rx))
@@ -250,200 +297,346 @@ pub fn start(
 
 /// Handle `process.Process/Connect` (attach, server-streaming).
 ///
-/// Attach differs from `Start` only in lifecycle: it does not spawn, so there
-/// is no deadline kill, and it does not reap the process-table entry — the
-/// `Start` stream owns both. A `Connect` arriving after the process was
-/// reaped resolves to `not_found`; one arriving in the tiny window between the
-/// child ending and the `Start` stream reaping it is cut off with `Closed`
-/// (no history to replay), a race upstream has as well.
+/// Attach differs from `Start` only in lifecycle: it does not spawn and never
+/// owns the process. The independent supervisor handles deadline and table
+/// cleanup, so disconnecting either stream only releases that subscription.
 pub fn connect(
     state: Arc<AppState>,
     req: ConnectRequest,
     keepalive_interval: std::time::Duration,
+    stream_deadline: Option<std::time::Duration>,
 ) -> axum::response::Response {
-    let (pid, tag) = req.process.flatten();
+    let (pid, tag) = match validated_selector(&req.process) {
+        Ok(selector) => selector,
+        Err(e) => return stream_error_response(e),
+    };
     let Some((pid, events)) = state.subscribe(pid, tag.as_deref()) else {
         // Match Go envd's wording for a selector resolving to no live process
         // (the same helper SendSignal/List use).
         return stream_error_response(not_found(pid, tag.as_deref()));
     };
 
-    // Attach, don't spawn: no deadline kill and no reap on completion. The
-    // fresh receiver starts at the current ring head, so history is not
+    // The fresh receiver starts at the current ring head, so history is not
     // replayed.
     let (tx, rx) = mpsc::channel::<Bytes>(RESPONSE_QUEUE_CAPACITY);
-    let driver_state = state.clone();
     tokio::spawn(async move {
-        drive_stream(
-            driver_state,
-            pid,
-            None,
-            events,
-            tx,
-            None,
-            keepalive_interval,
-        )
-        .await;
+        drive_stream(pid, events, tx, keepalive_interval, stream_deadline).await;
     });
 
     frame_stream_response(tokio_stream::wrappers::ReceiverStream::new(rx))
 }
 
-async fn drive_stream(
+#[allow(clippy::too_many_arguments)]
+async fn supervise_process(
     state: Arc<AppState>,
+    handle: crate::state::ProcHandle,
     pid: u32,
-    handle: Option<crate::state::ProcHandle>,
-    mut events: broadcast::Receiver<exec::PumpEvent>,
-    tx: mpsc::Sender<Bytes>,
+    sender: broadcast::Sender<exec::PumpEvent>,
+    mut completion: tokio::sync::oneshot::Receiver<()>,
     deadline: Option<std::time::Duration>,
-    keepalive_interval: std::time::Duration,
+    cgroup: Option<Arc<cgroup::ProcessCgroup>>,
+    reaped: Arc<tokio::sync::Notify>,
+    termination: Arc<std::sync::Mutex<Option<String>>>,
 ) {
-    let owns_process = handle.is_some();
-    // The producer lives in `output` and is dropped immediately on
-    // backpressure or disconnect so the HTTP body reaches EOF as soon as
-    // queued frames drain.
-    let mut output = Some(tx);
-    if !try_send_data_frame(&mut output, event_frame(Event::Start(StartEvent { pid })))
-        && !owns_process
-    {
-        return;
-    }
-
-    let sleep_forever = std::time::Duration::from_secs(60 * 60 * 24 * 365);
-    let timeout = tokio::time::sleep(deadline.unwrap_or(sleep_forever));
-    tokio::pin!(timeout);
-
-    // Keepalive: upstream envd emits a `keepalive` event on a quiet Start
-    // stream so intermediaries (CubeProxy, LBs) don't cut an idle connection
-    // while a long-running silent command is still alive. The cadence is the
-    // `Keepalive-Ping-Interval` header in whole seconds, defaulting to 30s.
-    let mut keepalive = tokio::time::interval(keepalive_interval);
-    keepalive.reset(); // first tick fires after one period, not immediately
-
-    // Once `output` is None, remaining output is drained only to reap an owned
-    // Start process. `timed_out` only tracks whether the
-    // deadline kill has already fired, so the kill happens exactly once even
-    // if the stream was already closed for a different reason.
-    let mut timed_out = false;
-    loop {
-        // Sender::closed needs ownership across await. Keep this clone scoped
-        // to one select iteration so setting `output = None` really drops the
-        // last producer instead of an observer clone holding the body open.
-        let close_signal = output.as_ref().cloned();
-        let watch_receiver = close_signal.is_some();
+    if let Some(deadline) = deadline {
+        let reaped_signal = reaped.notified();
+        tokio::pin!(reaped_signal);
         tokio::select! {
-            _ = async move {
-                if let Some(tx) = close_signal {
-                    tx.closed().await;
+            // Prefer a direct-child reap that became ready at the same instant
+            // as the deadline; a process that already exited is not timed out
+            // merely because output-drain grace is still running.
+            biased;
+            _ = &mut reaped_signal => {
+                let result = tokio::time::timeout(PROCESS_REAP_GRACE, &mut completion).await;
+                let monitor_ok = matches!(result, Ok(Ok(())));
+                if !monitor_ok {
+                    let _ = kill_process_tree(pid, cgroup.as_ref());
+                    let error = exec::PumpEvent::SpawnError(
+                        "process monitor stopped before reporting exit".into(),
+                    );
+                    state.mark_terminal(handle, error.clone());
+                    state.remove_process(handle);
+                    let _ = sender.send(error);
                 } else {
-                    std::future::pending::<()>().await;
+                    state.remove_process(handle);
                 }
-            }, if watch_receiver => {
-                output.take();
-                if !owns_process {
-                    break;
+                if monitor_ok {
+                    kill_descendants_and_cleanup(pid, cgroup).await;
+                } else {
+                    cleanup_process_cgroup(cgroup).await;
                 }
             }
-            ev = events.recv() => match ev {
-                Ok(exec::PumpEvent::Data(d)) => {
-                    if output.is_some() {
-                        keepalive.reset();
-                        if !try_send_data_frame(&mut output, event_frame(Event::Data(d)))
-                            && !owns_process
-                        {
-                            break;
-                        }
+            _ = tokio::time::sleep(deadline) => {
+                // Remove first so a concurrent Connect/Input/Update cannot
+                // attach to a command whose deadline has already expired.
+                state.remove_process(handle);
+                // Publish the deadline marker before signalling the child.
+                // cgroup.kill can make the pump race to publish End on another
+                // runtime worker; ordering this event first guarantees every
+                // still-attached stream observes deadline_exceeded rather than
+                // a misleading normal End.
+                let _ = sender.send(exec::PumpEvent::DeadlineExceeded);
+                // Serialize the cause marker with the kill syscall. SendSignal
+                // uses the same mutex; holding it across both operations means
+                // a concurrent user signal cannot race with timeout and leave
+                // `killedBy` describing the wrong operation.
+                let kill_result = {
+                    let mut cause = termination
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    // Publish a tentative cause before the syscall while the
+                    // same mutex is held.  The output pump also takes this
+                    // mutex before decorating EndEvent, so it cannot observe
+                    // a successful kill in the gap before the marker is
+                    // written.  If the process already exited (ESRCH), clear
+                    // the tentative value so a natural exit is not mislabeled.
+                    *cause = Some("timeout".to_string());
+                    let result = kill_process_tree(pid, cgroup.as_ref());
+                    if result.is_err() {
+                        *cause = None;
+                    }
+                    result
+                };
+                if let Err(e) = kill_result {
+                    if e.raw_os_error() != Some(libc::ESRCH) {
+                        tracing::warn!("pid {pid}: deadline kill failed: {e}");
                     }
                 }
-                Ok(exec::PumpEvent::End(end)) => {
-                    if output.is_some() {
-                        // One queue slot carries both terminal envelopes. This
-                        // prevents a nearly-full queue from exposing End
-                        // without the required EndStream trailer.
-                        let event = event_frame(Event::End(end));
-                        let trailer = connect::end_stream_ok();
-                        let mut terminal = Vec::with_capacity(event.len() + trailer.len());
-                        terminal.extend_from_slice(&event);
-                        terminal.extend_from_slice(&trailer);
-                        try_send_terminal_frame(&mut output, Bytes::from(terminal));
-                    }
-                    output.take();
-                    break;
-                }
-                Ok(exec::PumpEvent::SpawnError(msg)) => {
-                    if output.is_some() {
-                        try_send_terminal_frame(&mut output, connect::end_stream_error(&ConnectError::new(
-                            ConnectCode::Internal,
-                            msg,
-                        )));
-                    }
-                    output.take();
-                    break;
-                }
-                // A subscriber that falls too far behind the ring gets its own
-                // `Lagged` and only its own stream ends here — avoiding
-                // upstream #3292, where one stale subscriber wedges the whole
-                // fan-out. The child and every other subscriber are untouched;
-                // we keep draining so the child is still reaped.
-                Err(RecvError::Lagged(n)) => {
-                    if output.is_some() {
-                        try_send_terminal_frame(&mut output, connect::end_stream_error(&ConnectError::new(
-                            ConnectCode::ResourceExhausted,
-                            format!("output consumer too slow: {n} events dropped"),
-                        )));
-                    }
-                    output.take();
-                    if !owns_process {
-                        break;
-                    }
-                }
-                // Every sender is gone without an End event (the pump task
-                // died); nothing more can arrive.
-                Err(RecvError::Closed) => break,
-            },
-            _ = keepalive.tick(), if output.is_some() => {
-                if !try_send_data_frame(&mut output, event_frame(Event::KeepAlive(serde_json::Map::new())))
-                    && !owns_process
+                // Retain supervision while streams await the child's EndEvent.
+                // The direct child must actually be reaped. Bound this wait
+                // so a failed/denied kill cannot leak the supervisor forever.
+                if tokio::time::timeout(PROCESS_REAP_GRACE, &mut completion)
+                    .await
+                    .is_err()
                 {
-                    break;
+                    tracing::warn!(
+                        "pid {pid}: timed out waiting for direct child reap after deadline kill"
+                    );
                 }
+                cleanup_process_cgroup(cgroup).await;
             }
-            _ = &mut timeout, if !timed_out => {
-                timed_out = true;
-                // Baseline: deadline expiry kills the process and the stream
-                // ends with deadline_exceeded; no End event is emitted. The
-                // deadline is a property of the command, so it fires even if
-                // the stream was already closed (e.g. a too-slow client).
-                //
-                // Between the child exiting and this signal there is an
-                // unavoidable pgid-reuse window (the kernel could hand the
-                // freed pgid to an unrelated process). Upstream Go envd has
-                // the same window; closing it would need pidfd-based
-                // signalling, out of scope for the MVP.
-                let _ = exec::kill_process_group(pid, libc::SIGKILL);
-                if output.is_some() {
-                    try_send_terminal_frame(&mut output, connect::end_stream_error(&ConnectError::new(
-                        ConnectCode::DeadlineExceeded,
-                        "context deadline exceeded",
-                    )));
-                }
-                output.take();
-                // Keep looping (without the timeout arm) to drain and reap.
+        }
+    } else {
+        let monitor_ok = completion.await.is_ok();
+        if !monitor_ok {
+            let _ = kill_process_tree(pid, cgroup.as_ref());
+            let error =
+                exec::PumpEvent::SpawnError("process monitor stopped before reporting exit".into());
+            state.mark_terminal(handle, error.clone());
+            state.remove_process(handle);
+            let _ = sender.send(error);
+        } else {
+            state.remove_process(handle);
+        }
+        if monitor_ok {
+            kill_descendants_and_cleanup(pid, cgroup).await;
+        } else {
+            cleanup_process_cgroup(cgroup).await;
+        }
+    }
+}
+
+/// Kill the direct process group, using the per-command cgroup as the stronger
+/// mechanism when available. cgroup.kill is the only operation that reaches a
+/// descendant which called setsid(); a missing/failed cgroup falls back to the
+/// established process-group signal.
+fn kill_process_tree(pid: u32, cgroup: Option<&Arc<cgroup::ProcessCgroup>>) -> std::io::Result<()> {
+    if let Some(cgroup) = cgroup {
+        match cgroup.kill_all() {
+            Ok(()) => return Ok(()),
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {
+                // An empty per-command leaf is authoritative: the direct
+                // child has already gone away. Do not fall back to
+                // kill(-pid), whose process-group id may have been recycled
+                // for an unrelated process.
+                return Err(e);
+            }
+            Err(e) => {
+                tracing::warn!("pid {pid}: cgroup.kill failed, falling back to process group: {e}")
             }
         }
     }
-    // Only the Start stream owns the process-table entry. A Connect attach
-    // passes `handle: None` — its completion (a disconnect) must not reap the
-    // process, which stays owned by the Start stream until the child exits.
-    if let Some(handle) = handle {
-        state.remove_process(handle);
+    exec::kill_process_group(pid, libc::SIGKILL)
+}
+
+async fn kill_descendants_and_cleanup(pid: u32, cgroup: Option<Arc<cgroup::ProcessCgroup>>) {
+    let cgroup_result = if let Some(cgroup_ref) = cgroup.as_ref() {
+        match cgroup_ref.kill_all() {
+            Ok(()) => Some(true),
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {
+                // Empty cgroup means there are no descendants to clean. In
+                // particular, do not signal a potentially recycled pgid.
+                Some(false)
+            }
+            Err(e) => {
+                tracing::warn!("pid {pid}: cgroup.kill after exit failed: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // A Noop/degraded cgroup manager still needs to reap descendants that
+    // stayed in the original process group. Only cgroup.kill reaches a
+    // setsid() escapee; when no cgroup is available, retain the established
+    // process-group fallback for ordinary descendants.
+    if cgroup_result.is_none() {
+        if let Err(group_error) = exec::kill_process_group(pid, libc::SIGKILL) {
+            if group_error.raw_os_error() != Some(libc::ESRCH) {
+                tracing::warn!("pid {pid}: process-group descendant cleanup failed: {group_error}");
+            }
+        }
+    }
+    cleanup_process_cgroup(cgroup).await;
+}
+
+async fn cleanup_process_cgroup(cgroup: Option<Arc<cgroup::ProcessCgroup>>) {
+    let Some(cgroup) = cgroup else {
+        return;
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match cgroup.remove_if_empty() {
+            Ok(()) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        "cgroup: timed out removing process leaf {}",
+                        cgroup.path().display()
+                    );
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "cgroup: failed to remove process leaf {}: {e}",
+                    cgroup.path().display()
+                );
+                return;
+            }
+        }
+    }
+}
+
+async fn drive_stream(
+    pid: u32,
+    mut events: broadcast::Receiver<exec::PumpEvent>,
+    tx: mpsc::Sender<Bytes>,
+    keepalive_interval: std::time::Duration,
+    stream_deadline: Option<std::time::Duration>,
+) {
+    // The producer is dropped immediately on backpressure or disconnect.
+    // Process lifetime is owned by the separate supervisor, so this task
+    // never needs to retain a dead HTTP client's broadcast subscription.
+    let mut output = Some(tx);
+    let mut deadline_seen = false;
+    if !try_send_data_frame(&mut output, event_frame(Event::Start(StartEvent { pid }))) {
+        return;
+    }
+
+    let mut keepalive = tokio::time::interval(keepalive_interval);
+    keepalive.reset(); // first tick fires after one period, not immediately
+    let deadline = async move {
+        match stream_deadline {
+            Some(deadline) => tokio::time::sleep(deadline).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(deadline);
+
+    loop {
+        let close_signal = output.as_ref().cloned().expect("output sender is live");
+        tokio::select! {
+            _ = close_signal.closed() => return,
+            ev = events.recv() => match ev {
+                Ok(exec::PumpEvent::Data(d)) => {
+                    keepalive.reset();
+                    if !try_send_data_frame(&mut output, event_frame(Event::Data(d))) {
+                        return;
+                    }
+                }
+                Ok(exec::PumpEvent::End(end)) => {
+                    // One queue slot carries both terminal envelopes. This
+                    // prevents a nearly-full queue from exposing End without
+                    // the required EndStream trailer.
+                    let event = event_frame(Event::End(end));
+                    let trailer = if deadline_seen {
+                        connect::end_stream_error(&ConnectError::new(
+                            ConnectCode::DeadlineExceeded,
+                            "context deadline exceeded",
+                        ))
+                    } else {
+                        connect::end_stream_ok()
+                    };
+                    let mut terminal = Vec::with_capacity(event.len() + trailer.len());
+                    terminal.extend_from_slice(&event);
+                    terminal.extend_from_slice(&trailer);
+                    try_send_terminal_frame(&mut output, Bytes::from(terminal));
+                    return;
+                }
+                Ok(exec::PumpEvent::SpawnError(msg)) => {
+                    try_send_terminal_frame(&mut output, connect::end_stream_error(&ConnectError::new(
+                        ConnectCode::Internal,
+                        msg,
+                    )));
+                    return;
+                }
+                Ok(exec::PumpEvent::DeadlineExceeded) => {
+                    // The supervisor has recorded the timeout and started
+                    // killing the process. Keep this attachment alive until
+                    // the pump publishes the real EndEvent, so clients get
+                    // both the actual signal and `killedBy: "timeout"`.
+                    deadline_seen = true;
+                }
+                Err(RecvError::Lagged(n)) => {
+                    try_send_terminal_frame(&mut output, connect::end_stream_error(&ConnectError::new(
+                        ConnectCode::ResourceExhausted,
+                        format!("output consumer too slow: {n} events dropped"),
+                    )));
+                    return;
+                }
+            Err(RecvError::Closed) => {
+                    let (code, message) = if deadline_seen {
+                        (ConnectCode::DeadlineExceeded, "context deadline exceeded")
+                    } else {
+                        (
+                            ConnectCode::Internal,
+                            "process output stream closed before a terminal event",
+                        )
+                    };
+                    try_send_terminal_frame(
+                        &mut output,
+                        connect::end_stream_error(&ConnectError::new(code, message)),
+                    );
+                    return;
+                }
+            },
+            _ = keepalive.tick() => {
+                if !try_send_data_frame(&mut output, event_frame(Event::KeepAlive(serde_json::Map::new()))) {
+                    return;
+                }
+            }
+            _ = &mut deadline, if !deadline_seen => {
+                // A Connect timeout bounds this attachment only. The process
+                // belongs to its Start supervisor and must remain available
+                // for List, input and a later Connect.
+                try_send_terminal_frame(&mut output, connect::end_stream_error(&ConnectError::new(
+                    ConnectCode::DeadlineExceeded,
+                    "context deadline exceeded",
+                )));
+                return;
+            }
+        }
     }
 }
 
 /// Never await HTTP response capacity from the process driver. One queue slot
 /// is reserved for the terminal error: when ordinary output reaches that
 /// boundary, close only this connection with an explicit resource_exhausted
-/// EndStream frame while Start keeps enforcing its deadline and reaping.
+/// EndStream frame while the independent supervisor continues deadline and
+/// process cleanup work.
 fn try_send_data_frame(output: &mut Option<mpsc::Sender<Bytes>>, frame: Bytes) -> bool {
     let Some(tx) = output.as_ref() else {
         return false;
@@ -494,23 +687,62 @@ pub fn send_signal(
     state: &AppState,
     req: &SendSignalRequest,
 ) -> Result<serde_json::Value, ConnectError> {
-    let (pid, tag) = req.process.flatten();
-    let target = state.find_pid(pid, tag.as_deref()).ok_or_else(|| {
-        // Match Go envd's specific wording so a client logging the message
-        // sees the same text: "process with pid N not found" / "... tag X ...".
-        not_found(pid, tag.as_deref())
-    })?;
+    let (pid, tag) = validated_selector(&req.process)?;
+    let (target, process_cgroup, termination) =
+        state.process_control(pid, tag.as_deref()).ok_or_else(|| {
+            // Match Go envd's specific wording so a client logging the message
+            // sees the same text: "process with pid N not found" / "... tag X ...".
+            not_found(pid, tag.as_deref())
+        })?;
     let signo = parse_signal(req.signal.as_ref()).ok_or_else(|| {
         ConnectError::new(
             ConnectCode::InvalidArgument,
             format!("unsupported signal: {:?}", req.signal),
         )
     })?;
+    // Serialize the signal syscall and the termination-cause marker. The
+    // output pump takes the same mutex while decorating EndEvent, so it cannot
+    // publish a natural exit in the gap between a successful kill and writing
+    // `killedBy: "user"`. Conversely, an ESRCH leaves no stale user marker and
+    // the natural exit remains correctly classified.
     // The table can still hold a pid whose process exited but was not yet
     // reaped; kill(-pid) then fails with ESRCH. Report that as not_found
     // (the process is gone from the caller's perspective, matching Go),
     // not a misleading Internal.
-    exec::kill_process_group(target, signo).map_err(|e| {
+    let result = {
+        let mut cause = termination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // As with timeout supervision, hold the cause marker across the
+        // signal syscall.  A failed/ESRCH signal must not leave stale
+        // `killedBy: "user"` metadata on a natural exit.
+        *cause = Some("user".to_string());
+        let result = if signo == libc::SIGKILL {
+            kill_process_tree(target, process_cgroup.as_ref())
+        } else if let Some(cgroup) = process_cgroup.as_ref() {
+            // cgroup v2 has no generic "signal every task" primitive, but
+            // enumerating the leaf closes the setsid() escape that a bare
+            // process-group signal leaves behind. A transient cgroupfs/read
+            // failure falls back to the established process-group behavior so a
+            // degraded hierarchy never makes SendSignal unavailable.
+            match cgroup.signal_all(signo) {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    tracing::warn!(
+                        "pid {target}: cgroup signal failed, falling back to process group: {e}"
+                    );
+                    exec::kill_process_group(target, signo)
+                }
+            }
+        } else {
+            exec::kill_process_group(target, signo)
+        };
+        if result.is_err() {
+            *cause = None;
+        }
+        result
+    };
+    result.map_err(|e| {
         if e.raw_os_error() == Some(libc::ESRCH) {
             not_found(pid, tag.as_deref())
         } else {
@@ -527,7 +759,7 @@ pub async fn send_input(
     state: &AppState,
     req: &SendInputRequest,
 ) -> Result<serde_json::Value, ConnectError> {
-    let (pid, tag) = req.process.flatten();
+    let (pid, tag) = validated_selector(&req.process)?;
     let input = state
         .input_handle(pid, tag.as_deref())
         .ok_or_else(|| not_found(pid, tag.as_deref()))?;
@@ -554,7 +786,7 @@ pub async fn stream_input_event(
     }
 
     if let Some(start) = req.start {
-        let (pid, tag) = start.process.flatten();
+        let (pid, tag) = validated_selector(&start.process)?;
         *selected = Some(
             state
                 .input_handle(pid, tag.as_deref())
@@ -572,13 +804,14 @@ pub async fn stream_input_event(
     Ok(())
 }
 
-/// Close a non-PTY stdin. Taking the writer makes repeated calls idempotent;
-/// dropping/shutting it down delivers EOF to the child. PTYs use Ctrl+D.
+/// Close stdin. Taking a pipe writer and shutting it down delivers EOF to the
+/// child. A PTY has no separate closeable stdin stream; callers must send
+/// Ctrl-D through SendInput instead.
 pub async fn close_stdin(
     state: &AppState,
     req: &CloseStdinRequest,
 ) -> Result<serde_json::Value, ConnectError> {
-    let (pid, tag) = req.process.flatten();
+    let (pid, tag) = validated_selector(&req.process)?;
     let input = state
         .input_handle(pid, tag.as_deref())
         .ok_or_else(|| not_found(pid, tag.as_deref()))?;
@@ -628,7 +861,7 @@ async fn write_process_input(
     let mut writer = input.lock().await;
     match (&mut *writer, kind) {
         (exec::InputWriter::Pty(pty), InputKind::Pty) => {
-            pty.write_all(&data).await.map_err(|e| {
+            exec::write_pty(pty, &data).await.map_err(|e| {
                 ConnectError::new(ConnectCode::Internal, format!("error writing to tty: {e}"))
             })
         }
@@ -642,13 +875,16 @@ async fn write_process_input(
         )),
         (exec::InputWriter::Pipe(Some(stdin)), InputKind::Stdin) => {
             stdin.write_all(&data).await.map_err(|e| {
-                ConnectError::new(ConnectCode::Internal, format!(
-                    "error writing to stdin: {}",
-                    match pid {
-                        Some(pid) => format!("error writing to stdin of process '{pid}': {e}"),
-                        None => e.to_string(),
-                    }
-                ))
+                ConnectError::new(
+                    ConnectCode::Internal,
+                    format!(
+                        "error writing to stdin: {}",
+                        match pid {
+                            Some(pid) => format!("error writing to stdin of process '{pid}': {e}"),
+                            None => e.to_string(),
+                        }
+                    ),
+                )
             })
         }
         (exec::InputWriter::Pipe(None), InputKind::Stdin) => Err(ConnectError::new(
@@ -676,6 +912,22 @@ fn not_found(pid: Option<u32>, tag: Option<&str>) -> ConnectError {
     ConnectError::new(ConnectCode::NotFound, detail)
 }
 
+fn validated_selector(
+    selector: &ProcessSelector,
+) -> Result<(Option<u32>, Option<String>), ConnectError> {
+    match (selector.pid, selector.tag.as_deref()) {
+        (Some(_), Some(_)) => Err(ConnectError::new(
+            ConnectCode::InvalidArgument,
+            "process selector cannot contain both pid and tag",
+        )),
+        (None, None) => Err(ConnectError::new(
+            ConnectCode::Unimplemented,
+            "invalid input type *process.ProcessSelector",
+        )),
+        _ => Ok(selector.flatten()),
+    }
+}
+
 /// Handle `process.Process/Update` (unary): resize a live process's pty window.
 ///
 /// Baseline-verified semantics (Go envd):
@@ -687,7 +939,7 @@ fn not_found(pid: Option<u32>, tag: Option<&str>) -> ConnectError {
 /// - a live process without a pty answers `internal` with Go's exact
 ///   "error resizing tty: ..." wording.
 pub fn update(state: &AppState, req: &UpdateRequest) -> Result<serde_json::Value, ConnectError> {
-    let (pid, tag) = req.process.flatten();
+    let (pid, tag) = validated_selector(&req.process)?;
     let Some(size) = req.pty.as_ref().and_then(|p| p.size.as_ref()) else {
         // Nothing to resize: resolve to keep the not_found contract, then no-op.
         state
@@ -715,6 +967,59 @@ pub fn update(state: &AppState, req: &UpdateRequest) -> Result<serde_json::Value
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn allocation_and_placement_errors_never_execute_user_code() {
+        struct FailingManager(Option<Arc<cgroup::ProcessCgroup>>);
+        impl cgroup::Manager for FailingManager {
+            fn fd(&self, _kind: ProcType) -> Option<std::os::fd::RawFd> {
+                None
+            }
+
+            fn create_process(
+                &self,
+                _kind: ProcType,
+            ) -> std::io::Result<Option<Arc<cgroup::ProcessCgroup>>> {
+                match &self.0 {
+                    Some(group) => Ok(Some(group.clone())),
+                    None => Err(std::io::Error::from_raw_os_error(libc::ENOSPC)),
+                }
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("must-not-execute");
+        let invalid_group = Arc::new(cgroup::ProcessCgroup::new(
+            directory.path().to_path_buf(),
+            std::fs::File::open("/dev/null").unwrap(),
+        ));
+        for (group, code) in [
+            (None, "resource_exhausted"),
+            (Some(invalid_group), "invalid_argument"),
+        ] {
+            let state = Arc::new(AppState::new().with_cgroup(Arc::new(FailingManager(group))));
+            for _ in 0..2 {
+                let request: StartRequest = serde_json::from_value(serde_json::json!({
+                    "process": {"cmd": "/usr/bin/touch", "args": [marker.to_str().unwrap()]},
+                }))
+                .unwrap();
+                let response = start(
+                    state.clone(),
+                    request,
+                    current_user(),
+                    None,
+                    std::time::Duration::from_secs(30),
+                );
+                let body = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                assert_eq!(body[0], connect::END_STREAM_FLAG);
+                let payload: serde_json::Value = serde_json::from_slice(&body[5..]).unwrap();
+                assert_eq!(payload["error"]["code"], code);
+                assert!(!marker.exists());
+            }
+        }
+    }
+
     fn disabled_input() -> exec::InputHandle {
         Arc::new(tokio::sync::Mutex::new(exec::InputWriter::Pipe(None)))
     }
@@ -731,6 +1036,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn insert_spawned(
         state: &AppState,
         spawned: exec::SpawnedProcess,
@@ -738,6 +1044,10 @@ mod tests {
         u32,
         crate::state::ProcHandle,
         broadcast::Receiver<exec::PumpEvent>,
+        tokio::sync::oneshot::Receiver<()>,
+        broadcast::Sender<exec::PumpEvent>,
+        Arc<tokio::sync::Notify>,
+        Arc<std::sync::Mutex<Option<String>>>,
     ) {
         let exec::SpawnedProcess {
             pid,
@@ -745,7 +1055,13 @@ mod tests {
             sender,
             pty_master,
             input,
+            completion,
+            terminal,
+            reaped,
+            termination,
+            cgroup,
         } = spawned;
+        let supervisor_sender = sender.clone();
         let handle = state.insert_process(ProcEntry {
             pid,
             tag: None,
@@ -753,8 +1069,22 @@ mod tests {
             sender,
             pty_master,
             input,
+            cgroup: cgroup
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            termination: termination.clone(),
+            terminal,
         });
-        (pid, handle, initial)
+        (
+            pid,
+            handle,
+            initial,
+            completion,
+            supervisor_sender,
+            reaped,
+            termination,
+        )
     }
 
     #[test]
@@ -773,6 +1103,9 @@ mod tests {
             sender,
             pty_master: None,
             input: disabled_input(),
+            cgroup: None,
+            termination: Arc::new(std::sync::Mutex::new(None)),
+            terminal: Arc::new(std::sync::Mutex::new(None)),
         });
         let v = list(&state);
         assert_eq!(v["processes"][0]["pid"], 7);
@@ -788,6 +1121,32 @@ mod tests {
                 .unwrap();
         let err = send_signal(&state, &req).unwrap_err();
         assert_eq!(err.code, ConnectCode::NotFound);
+    }
+
+    #[test]
+    fn selector_rejects_pid_and_tag_together() {
+        let selector: ProcessSelector = serde_json::from_str(r#"{"pid":7,"tag":"shell"}"#).unwrap();
+        let err = validated_selector(&selector).unwrap_err();
+        assert_eq!(err.code, ConnectCode::InvalidArgument);
+        assert!(err.message.contains("both pid and tag"));
+    }
+
+    #[test]
+    fn selector_rejects_empty_oneof() {
+        let selector: ProcessSelector = serde_json::from_str(r#"{}"#).unwrap();
+        let err = validated_selector(&selector).unwrap_err();
+        assert_eq!(err.code, ConnectCode::Unimplemented);
+        assert!(err.message.contains("invalid input type"));
+    }
+
+    #[test]
+    fn malformed_nested_selector_cannot_reach_control_dispatch() {
+        // Decode before entering any selector-based service. This is the
+        // important side-effect boundary: malformed input must be rejected,
+        // never normalized to an empty selector or combined with a valid pid.
+        assert!(
+            serde_json::from_str::<ProcessSelector>(r#"{"selector":{"pid":7},"pid":8}"#).is_err()
+        );
     }
 
     #[test]
@@ -875,6 +1234,9 @@ mod tests {
             sender,
             pty_master: None,
             input: disabled_input(),
+            cgroup: None,
+            termination: Arc::new(std::sync::Mutex::new(None)),
+            terminal: Arc::new(std::sync::Mutex::new(None)),
         });
         let req: UpdateRequest = serde_json::from_str(r#"{"process":{"pid":7}}"#).unwrap();
         assert_eq!(update(&state, &req).unwrap(), serde_json::json!({}));
@@ -902,6 +1264,9 @@ mod tests {
             sender,
             pty_master: None,
             input: disabled_input(),
+            cgroup: None,
+            termination: Arc::new(std::sync::Mutex::new(None)),
+            terminal: Arc::new(std::sync::Mutex::new(None)),
         });
         let req: UpdateRequest =
             serde_json::from_str(r#"{"process":{"pid":7},"pty":{"size":{"cols":80,"rows":24}}}"#)
@@ -929,7 +1294,8 @@ mod tests {
             None,
         )
         .unwrap();
-        let (pid, handle, mut events) = insert_spawned(&state, spawned);
+        let (pid, handle, mut events, _completion, _sender, _reaped, _termination) =
+            insert_spawned(&state, spawned);
         let data = base64::engine::general_purpose::STANDARD.encode(b"pipe-input\n");
         let req: SendInputRequest = serde_json::from_value(serde_json::json!({
             "process": {"pid": pid},
@@ -971,6 +1337,7 @@ mod tests {
                     break;
                 }
                 exec::PumpEvent::SpawnError(e) => panic!("spawn error: {e}"),
+                exec::PumpEvent::DeadlineExceeded => panic!("unexpected deadline"),
             }
         }
         assert_eq!(stdout, b"pipe-input\n");
@@ -978,7 +1345,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pty_input_uses_the_master_and_rejects_stdin_close() {
+    async fn pty_input_uses_master_and_close_stdin_is_rejected() {
         use base64::Engine;
 
         let state = AppState::new();
@@ -986,7 +1353,7 @@ mod tests {
             "/bin/sh",
             &[
                 "-c".into(),
-                "read line; printf 'got:%s\\n' \"$line\"; sleep 30".into(),
+                "read line; printf 'got:%s\\n' \"$line\"; read rest".into(),
             ],
             std::collections::HashMap::new(),
             "/".into(),
@@ -995,7 +1362,8 @@ mod tests {
             None,
         )
         .unwrap();
-        let (pid, handle, mut events) = insert_spawned(&state, spawned);
+        let (pid, handle, mut events, _completion, _sender, _reaped, _termination) =
+            insert_spawned(&state, spawned);
         let req: SendInputRequest = serde_json::from_value(serde_json::json!({
             "process": {"pid": pid},
             "input": {"pty": base64::engine::general_purpose::STANDARD.encode(b"hello\n")}
@@ -1015,11 +1383,9 @@ mod tests {
             .contains("tty assigned to process"));
         let close: CloseStdinRequest =
             serde_json::from_value(serde_json::json!({"process": {"pid": pid}})).unwrap();
-        assert!(close_stdin(&state, &close)
-            .await
-            .unwrap_err()
-            .message
-            .contains("send Ctrl+D"));
+        let error = close_stdin(&state, &close).await.unwrap_err();
+        assert_eq!(error.code, ConnectCode::Unknown);
+        assert!(error.message.contains("cannot close stdin for PTY process"));
 
         let mut output = Vec::new();
         while !String::from_utf8_lossy(&output).contains("got:hello") {
@@ -1039,26 +1405,39 @@ mod tests {
                 }
                 exec::PumpEvent::End(end) => panic!("PTY exited early: {end:?}"),
                 exec::PumpEvent::SpawnError(e) => panic!("spawn error: {e}"),
+                exec::PumpEvent::DeadlineExceeded => panic!("unexpected deadline"),
             }
         }
-        exec::kill_process_group(pid, libc::SIGKILL).unwrap();
-        while !matches!(events.recv().await, Ok(exec::PumpEvent::End(_))) {}
+        let eof: SendInputRequest = serde_json::from_value(serde_json::json!({
+            "process": {"pid": pid},
+            "input": {"pty": base64::engine::general_purpose::STANDARD.encode([0x04])}
+        }))
+        .unwrap();
+        send_input(&state, &eof).await.unwrap();
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(3), events.recv())
+                .await
+                .expect("PTY did not exit after Ctrl-D")
+                .expect("event bus closed before terminal event")
+            {
+                exec::PumpEvent::End(_) => break,
+                exec::PumpEvent::Data(_) => {}
+                event => panic!("unexpected terminal event: {event:?}"),
+            }
+        }
         state.remove_process(handle);
     }
 
     #[tokio::test]
     async fn connect_driver_exits_when_response_receiver_disconnects() {
-        let state = Arc::new(AppState::new());
         let (_pub_tx, events) = broadcast::channel::<exec::PumpEvent>(4);
         let (tx, mut rx) = mpsc::channel::<Bytes>(4);
         let driver = tokio::spawn(drive_stream(
-            state,
             42,
-            None,
             events,
             tx,
-            None,
             std::time::Duration::from_secs(30),
+            None,
         ));
         rx.recv().await.expect("start frame");
         drop(rx);
@@ -1066,6 +1445,284 @@ mod tests {
             .await
             .expect("detached Connect driver leaked after client disconnect")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_timeout_ends_only_the_attachment() {
+        let state = Arc::new(AppState::new());
+        let spawned = exec::spawn(
+            "/bin/sh",
+            &["-c".into(), "sleep 1".into()],
+            std::collections::HashMap::new(),
+            "/".into(),
+            &current_user(),
+            false,
+            None,
+        )
+        .unwrap();
+        let (pid, handle, events, completion, sender, reaped, termination) =
+            insert_spawned(&state, spawned);
+        let supervisor = tokio::spawn(supervise_process(
+            state.clone(),
+            handle,
+            pid,
+            sender,
+            completion,
+            None,
+            None,
+            reaped,
+            termination,
+        ));
+        let (tx, mut rx) = mpsc::channel::<Bytes>(4);
+        let driver = tokio::spawn(drive_stream(
+            pid,
+            events,
+            tx,
+            std::time::Duration::from_secs(30),
+            Some(std::time::Duration::from_millis(20)),
+        ));
+        assert_eq!(rx.recv().await.unwrap()[0], 0);
+        let terminal = rx.recv().await.expect("Connect timeout frame");
+        assert_eq!(terminal[0], connect::END_STREAM_FLAG);
+        let payload: serde_json::Value = serde_json::from_slice(&terminal[5..]).unwrap();
+        assert_eq!(payload["error"]["code"], "deadline_exceeded");
+        assert!(state.find_pid(Some(pid), None).is_some());
+        driver.await.unwrap();
+        exec::kill_process_group(pid, libc::SIGKILL).unwrap();
+        supervisor.await.unwrap();
+        assert!(state.find_pid(Some(pid), None).is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_without_server_deadline_survives_timeout_header_semantics() {
+        let state = Arc::new(AppState::new());
+        let spawned = exec::spawn(
+            "/bin/sh",
+            &["-c".into(), "sleep 1".into()],
+            std::collections::HashMap::new(),
+            "/".into(),
+            &current_user(),
+            false,
+            None,
+        )
+        .unwrap();
+        let (pid, handle, events, completion, sender, reaped, termination) =
+            insert_spawned(&state, spawned);
+        let supervisor = tokio::spawn(supervise_process(
+            state.clone(),
+            handle,
+            pid,
+            sender,
+            completion,
+            None,
+            None,
+            reaped,
+            termination,
+        ));
+        let (tx, mut rx) = mpsc::channel::<Bytes>(4);
+        let driver = tokio::spawn(drive_stream(
+            pid,
+            events,
+            tx,
+            std::time::Duration::from_secs(30),
+            None,
+        ));
+        assert_eq!(rx.recv().await.unwrap()[0], 0);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+                .await
+                .is_err()
+        );
+        let terminal = rx.recv().await.expect("process EndEvent and EndStream");
+        assert_eq!(terminal[0], 0);
+        driver.await.unwrap();
+        supervisor.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn closed_output_bus_returns_explicit_error_frame() {
+        let (pub_tx, events) = broadcast::channel::<exec::PumpEvent>(4);
+        let (tx, mut rx) = mpsc::channel::<Bytes>(4);
+        let driver = tokio::spawn(drive_stream(
+            42,
+            events,
+            tx,
+            std::time::Duration::from_secs(30),
+            None,
+        ));
+        assert_eq!(rx.recv().await.unwrap()[0], 0);
+        drop(pub_tx);
+        let terminal = rx.recv().await.expect("unexpected closed-bus frame");
+        assert_eq!(terminal[0], connect::END_STREAM_FLAG);
+        let payload: serde_json::Value = serde_json::from_slice(&terminal[5..]).unwrap();
+        assert_eq!(payload["error"]["code"], "internal");
+        assert!(rx.recv().await.is_none());
+        driver.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn process_supervisor_cleans_up_after_start_response_disconnects() {
+        let state = Arc::new(AppState::new());
+        let spawned = exec::spawn(
+            "/bin/sh",
+            &["-c".into(), "sleep 1".into()],
+            std::collections::HashMap::new(),
+            "/".into(),
+            &current_user(),
+            false,
+            None,
+        )
+        .unwrap();
+        let (pid, handle, events, completion, sender, reaped, termination) =
+            insert_spawned(&state, spawned);
+        let supervisor = tokio::spawn(supervise_process(
+            state.clone(),
+            handle,
+            pid,
+            sender,
+            completion,
+            None,
+            None,
+            reaped,
+            termination,
+        ));
+        let (tx, mut rx) = mpsc::channel::<Bytes>(4);
+        let driver = tokio::spawn(drive_stream(
+            pid,
+            events,
+            tx,
+            std::time::Duration::from_secs(30),
+            None,
+        ));
+        rx.recv().await.expect("start frame");
+        drop(rx);
+        tokio::time::timeout(std::time::Duration::from_millis(500), driver)
+            .await
+            .expect("Start response task did not exit after disconnect")
+            .unwrap();
+        assert!(
+            state.find_pid(Some(pid), None).is_some(),
+            "disconnect must not remove a still-running process"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(3), supervisor)
+            .await
+            .expect("supervisor did not reap the disconnected process")
+            .unwrap();
+        assert!(state.find_pid(Some(pid), None).is_none());
+    }
+
+    #[tokio::test]
+    async fn process_supervisor_deadline_is_delivered_without_http_backpressure() {
+        let state = Arc::new(AppState::new());
+        let spawned = exec::spawn(
+            "/bin/sh",
+            &["-c".into(), "sleep 30".into()],
+            std::collections::HashMap::new(),
+            "/".into(),
+            &current_user(),
+            false,
+            None,
+        )
+        .unwrap();
+        let (pid, handle, events, completion, sender, reaped, termination) =
+            insert_spawned(&state, spawned);
+        let supervisor = tokio::spawn(supervise_process(
+            state.clone(),
+            handle,
+            pid,
+            sender,
+            completion,
+            Some(std::time::Duration::from_millis(20)),
+            None,
+            reaped,
+            termination,
+        ));
+        let (tx, mut rx) = mpsc::channel::<Bytes>(4);
+        let driver = tokio::spawn(drive_stream(
+            pid,
+            events,
+            tx,
+            std::time::Duration::from_secs(30),
+            None,
+        ));
+
+        let start = rx.recv().await.expect("start frame");
+        assert_eq!(start[0], 0);
+        let terminal = rx.recv().await.expect("deadline EndEvent and EndStream");
+        assert_eq!(terminal[0], 0);
+        let size = u32::from_be_bytes(terminal[1..5].try_into().unwrap()) as usize;
+        let end: serde_json::Value = serde_json::from_slice(&terminal[5..5 + size]).unwrap();
+        assert_eq!(end["event"]["end"]["signal"], libc::SIGKILL);
+        assert_eq!(end["event"]["end"]["killedBy"], "timeout");
+        let trailer = &terminal[5 + size..];
+        assert_eq!(trailer[0], connect::END_STREAM_FLAG);
+        let payload: serde_json::Value = serde_json::from_slice(&trailer[5..]).unwrap();
+        assert_eq!(payload["error"]["code"], "deadline_exceeded");
+        assert!(state.find_pid(Some(pid), None).is_none());
+        driver.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), supervisor)
+            .await
+            .expect("deadline process was not reaped")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn deadline_does_not_misclassify_child_reaped_during_output_drain() {
+        let state = Arc::new(AppState::new());
+        let spawned = exec::spawn(
+            "/bin/sh",
+            &["-c".into(), "sleep 1 & exit 0".into()],
+            std::collections::HashMap::new(),
+            "/".into(),
+            &current_user(),
+            false,
+            None,
+        )
+        .unwrap();
+        let (pid, handle, events, completion, sender, reaped, termination) =
+            insert_spawned(&state, spawned);
+        let supervisor = tokio::spawn(supervise_process(
+            state.clone(),
+            handle,
+            pid,
+            sender,
+            completion,
+            Some(std::time::Duration::from_millis(100)),
+            None,
+            reaped,
+            termination,
+        ));
+        let (tx, mut rx) = mpsc::channel::<Bytes>(4);
+        let driver = tokio::spawn(drive_stream(
+            pid,
+            events,
+            tx,
+            std::time::Duration::from_secs(30),
+            None,
+        ));
+        assert_eq!(rx.recv().await.unwrap()[0], 0);
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("child terminal event did not arrive")
+            .expect("response closed before terminal event");
+        assert_eq!(
+            terminal[0], 0,
+            "child was incorrectly classified as timed out"
+        );
+        let payload_size =
+            u32::from_be_bytes([terminal[1], terminal[2], terminal[3], terminal[4]]) as usize;
+        let payload: serde_json::Value =
+            serde_json::from_slice(&terminal[5..5 + payload_size]).unwrap();
+        assert_eq!(payload["event"]["end"]["status"], "exit status 0");
+        let trailer_offset = 5 + payload_size;
+        assert_eq!(terminal[trailer_offset], connect::END_STREAM_FLAG);
+        assert!(
+            rx.recv().await.is_none(),
+            "response remained open after EndStream"
+        );
+        driver.await.unwrap();
+        supervisor.await.unwrap();
+        assert!(state.find_pid(Some(pid), None).is_none());
     }
 
     #[tokio::test]
@@ -1081,23 +1738,34 @@ mod tests {
             None,
         )
         .unwrap();
-        let (pid, handle, events) = insert_spawned(&state, spawned);
-        // Start fills this one-slot queue. No receiver read occurs until after
-        // the driver has enforced the deadline and reaped the child.
+        let (pid, handle, events, completion, sender, reaped, termination) =
+            insert_spawned(&state, spawned);
+        let supervisor = tokio::spawn(supervise_process(
+            state.clone(),
+            handle,
+            pid,
+            sender,
+            completion,
+            Some(std::time::Duration::from_millis(50)),
+            None,
+            reaped,
+            termination,
+        ));
+        // No receiver read occurs until after the independent supervisor has
+        // enforced the deadline and reaped the child.
         let (tx, mut rx) = mpsc::channel::<Bytes>(RESPONSE_QUEUE_CAPACITY);
         let driver = tokio::spawn(drive_stream(
-            state.clone(),
             pid,
-            Some(handle),
             events,
             tx,
-            Some(std::time::Duration::from_millis(50)),
             std::time::Duration::from_secs(30),
+            None,
         ));
-        tokio::time::timeout(std::time::Duration::from_secs(3), driver)
+        tokio::time::timeout(std::time::Duration::from_secs(3), supervisor)
             .await
             .expect("full HTTP response queue blocked deadline/reaping")
             .unwrap();
+        driver.await.unwrap();
         assert!(state.find_pid(Some(pid), None).is_none());
         let mut frames = Vec::new();
         while let Some(frame) = rx.recv().await {
@@ -1108,36 +1776,49 @@ mod tests {
             Some(0),
             "queued Start frame was lost"
         );
-        assert_eq!(
-            frames.last().map(|f| f[0]),
-            Some(connect::END_STREAM_FLAG),
-            "backpressure must leave an explicit EndStream error"
-        );
+        let bytes: Vec<u8> = frames.into_iter().flatten().collect();
+        let mut remaining = bytes.as_slice();
+        let mut last = None;
+        while !remaining.is_empty() {
+            assert!(remaining.len() >= 5);
+            let length = u32::from_be_bytes(remaining[1..5].try_into().unwrap()) as usize;
+            let payload: serde_json::Value =
+                serde_json::from_slice(&remaining[5..5 + length]).unwrap();
+            last = Some((remaining[0], payload));
+            remaining = &remaining[5 + length..];
+        }
+        let (flags, payload) = last.expect("missing terminal envelope");
+        assert_eq!(flags, connect::END_STREAM_FLAG);
+        assert!(matches!(
+            payload["error"]["code"].as_str(),
+            Some("resource_exhausted" | "deadline_exceeded")
+        ));
     }
 
     #[tokio::test]
-    async fn backpressure_closes_response_before_owned_process_exits() {
+    async fn backpressure_closes_only_the_response_task() {
         let state = Arc::new(AppState::new());
         let (pub_tx, events) = broadcast::channel::<exec::PumpEvent>(4);
-        let handle = state.insert_process(ProcEntry {
+        let _handle = state.insert_process(ProcEntry {
             pid: 42,
             tag: None,
             config: crate::msg::process::ProcessConfig::default(),
             sender: pub_tx.clone(),
             pty_master: None,
             input: disabled_input(),
+            cgroup: None,
+            termination: Arc::new(std::sync::Mutex::new(None)),
+            terminal: Arc::new(std::sync::Mutex::new(None)),
         });
         // Start consumes the first slot; the second is reserved for the
         // resource_exhausted EndStream frame when Data cannot be queued.
         let (tx, mut rx) = mpsc::channel::<Bytes>(2);
         let driver = tokio::spawn(drive_stream(
-            state.clone(),
             42,
-            Some(handle),
             events,
             tx,
-            None,
             std::time::Duration::from_secs(30),
+            None,
         ));
         tokio::task::yield_now().await;
         assert!(pub_tx
@@ -1164,31 +1845,20 @@ mod tests {
             "closing the response must not reap a still-running Start process"
         );
 
-        assert!(pub_tx
-            .send(exec::PumpEvent::End(crate::msg::process::EndEvent {
-                exit_code: 0,
-                exited: true,
-                status: "exit status 0".into(),
-                error: None,
-            }))
-            .is_ok());
         driver.await.unwrap();
-        assert!(state.find_pid(Some(42), None).is_none());
+        assert!(state.find_pid(Some(42), None).is_some());
     }
 
     #[tokio::test]
     async fn end_event_and_end_stream_share_one_queue_slot() {
-        let state = Arc::new(AppState::new());
         let (pub_tx, events) = broadcast::channel::<exec::PumpEvent>(4);
         let (tx, mut rx) = mpsc::channel::<Bytes>(2);
         let driver = tokio::spawn(drive_stream(
-            state,
             42,
-            None,
             events,
             tx,
-            None,
             std::time::Duration::from_secs(30),
+            None,
         ));
         tokio::task::yield_now().await;
         assert!(pub_tx
@@ -1197,6 +1867,9 @@ mod tests {
                 exited: true,
                 status: "exit status 0".into(),
                 error: None,
+                signal: None,
+                oom_killed: None,
+                killed_by: None,
             }))
             .is_ok());
         driver.await.unwrap();
@@ -1224,6 +1897,9 @@ mod tests {
             sender,
             pty_master: None,
             input: disabled_input(),
+            cgroup: None,
+            termination: Arc::new(std::sync::Mutex::new(None)),
+            terminal: Arc::new(std::sync::Mutex::new(None)),
         });
         let mut selected = None;
         let data: StreamInputRequest = serde_json::from_value(serde_json::json!({
@@ -1258,23 +1934,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn input_oneof_validation_reports_unimplemented() {
+        let state = AppState::new();
+        let (sender, _events) = broadcast::channel::<exec::PumpEvent>(1);
+        let pid = state.insert_process(ProcEntry {
+            pid: 8,
+            tag: None,
+            config: crate::msg::process::ProcessConfig::default(),
+            sender,
+            pty_master: None,
+            input: disabled_input(),
+            cgroup: None,
+            termination: Arc::new(std::sync::Mutex::new(None)),
+            terminal: Arc::new(std::sync::Mutex::new(None)),
+        });
+
+        let send = SendInputRequest {
+            process: ProcessSelector {
+                pid: Some(8),
+                tag: None,
+            },
+            input: ProcessInput::default(),
+        };
+        let error = send_input(&state, &send).await.unwrap_err();
+        assert_eq!(error.code, ConnectCode::Unimplemented);
+        assert_eq!(error.message, "invalid input type <nil>");
+
+        let mut selected = None;
+        let malformed = StreamInputRequest::default();
+        let error = stream_input_event(&state, &mut selected, malformed)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ConnectCode::Unimplemented);
+        assert_eq!(error.message, "invalid event type <nil>");
+        state.remove_process(pid);
+    }
+
+    #[tokio::test]
     async fn drive_stream_lagged_cuts_off_slow_subscriber() {
-        let state = Arc::new(AppState::new());
         // Capacity-1 ring: publishing two events before the driver reads any
         // overflows the ring, so its first recv() reports Lagged instead of
         // delivering the overwritten event.
         let (pub_tx, events) = broadcast::channel::<exec::PumpEvent>(1);
-        let handle = state.insert_process(ProcEntry {
-            pid: 42,
-            tag: None,
-            config: crate::msg::process::ProcessConfig {
-                cmd: "/bin/echo".into(),
-                ..Default::default()
-            },
-            sender: pub_tx.clone(),
-            pty_master: None,
-            input: disabled_input(),
-        });
         let data = |s: &str| {
             exec::PumpEvent::Data(crate::msg::process::DataEvent {
                 stdout: Some(s.into()),
@@ -1285,30 +1986,9 @@ mod tests {
         assert!(pub_tx.send(data("b")).is_ok());
 
         let (tx, mut rx) = mpsc::channel::<Bytes>(16);
-        let driver_state = state.clone();
         let driver = tokio::spawn(async move {
-            drive_stream(
-                driver_state,
-                42,
-                Some(handle),
-                events,
-                tx,
-                None,
-                std::time::Duration::from_secs(30),
-            )
-            .await;
+            drive_stream(42, events, tx, std::time::Duration::from_secs(30), None).await;
         });
-
-        // The cutoff has already closed the stream; publish End so the driver
-        // drains, breaks, and reaps the process entry.
-        assert!(pub_tx
-            .send(exec::PumpEvent::End(crate::msg::process::EndEvent {
-                exit_code: 0,
-                exited: true,
-                status: "exit status 0".into(),
-                error: None,
-            }))
-            .is_ok());
 
         let mut frames = Vec::new();
         while let Some(f) = rx.recv().await {
@@ -1318,7 +1998,7 @@ mod tests {
 
         // Start, then exactly one terminal EndStream error frame — no Data,
         // no End event, no end_stream_ok. The lagging subscriber is cut off
-        // and the child (here, already ended) is still reaped.
+        // and no process-lifecycle work is retained in this response task.
         assert_eq!(frames.len(), 2);
         let start: serde_json::Value = serde_json::from_slice(&frames[0][5..]).unwrap();
         assert_eq!(start["event"]["start"]["pid"], 42);
