@@ -131,6 +131,7 @@ Consume output via **either** `Output()` **or** `Wait(onData)`, not both — the
 ```go
 // Read & write
 content, err := sb.Files().Read(ctx, "/etc/hosts")
+png, err := sb.Files().ReadBytes(ctx, "/tmp/chart.png")
 err = sb.Files().Write(ctx, "/tmp/hello.txt", []byte("hi"))
 
 // Execute all filesystem operations as a specific sandbox user.
@@ -166,7 +167,9 @@ for ev := range watcher.Events {
 | Method | Description |
 |---|---|
 | `ForUser(user)` | Return an immutable view that runs all filesystem operations as `user` |
-| `Read(ctx, path)` | Download file content via `GET /files` |
+| `Read(ctx, path)` | Download file content as text via `GET /files` (e2b `format=text`) |
+| `ReadBytes(ctx, path)` | Download raw bytes (e2b `format=bytes`) |
+| `ReadStream(ctx, path)` | Stream download; caller must `Close` (e2b `format=stream`) |
 | `Write(ctx, path, data)` | Upload via `POST /files` (octet-stream, multipart fallback) |
 | `WriteFiles(ctx, entries)` | Batch write, stops on first error, returns count |
 | `List(ctx, path)` | List directory entries via `ListDir` RPC |
