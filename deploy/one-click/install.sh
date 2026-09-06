@@ -301,6 +301,17 @@ case "${CUBE_PVM_ENABLE}" in
   *) die "unsupported CUBE_PVM_ENABLE: ${CUBE_PVM_ENABLE} (expected 0 or 1)" ;;
 esac
 
+# Softlink <install>/cubebox_os_image -> /data/cubebox_os_image by default so
+# large template rootfs does not fill the system disk. Set to 0 to keep a real
+# directory under the toolbox.
+CUBE_CUBEBOX_OS_IMAGE_ON_DATA="${CUBE_CUBEBOX_OS_IMAGE_ON_DATA:-1}"
+case "${CUBE_CUBEBOX_OS_IMAGE_ON_DATA}" in
+  0|1) ;;
+  *) die "unsupported CUBE_CUBEBOX_OS_IMAGE_ON_DATA: ${CUBE_CUBEBOX_OS_IMAGE_ON_DATA} (expected 0 or 1)" ;;
+esac
+CUBEBOX_OS_IMAGE_DATA_DIR="${CUBEBOX_OS_IMAGE_DATA_DIR:-${CUBEBOX_OS_IMAGE_DATA_DIR_DEFAULT:-/data/cubebox_os_image}}"
+[[ "${CUBEBOX_OS_IMAGE_DATA_DIR}" == /* ]] || die "CUBEBOX_OS_IMAGE_DATA_DIR must be absolute: ${CUBEBOX_OS_IMAGE_DATA_DIR}"
+
 print_path_hint() {
   {
     echo
@@ -1779,6 +1790,10 @@ mkdir -p \
   /data/cube-shared/volume \
   /data/shared
 
+# Large template rootfs on the data disk:
+# <prefix>/cubebox_os_image -> /data/cubebox_os_image (toggle: CUBE_CUBEBOX_OS_IMAGE_ON_DATA).
+ensure_cubebox_os_image_on_data "${INSTALL_PREFIX}"
+
 # CubeS3lvol (s3lvol): per-machine WAL image. The package never ships it --
 # its size fixes the journal/WAL layout and it must not be copied between
 # hosts or recreated after the first activation (rcow_start.sh refuses to
@@ -1847,6 +1862,8 @@ elif [[ -f "${SCRIPT_DIR}/release-manifest.json" ]]; then
 fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_DEPLOY_ROLE" "${DEPLOY_ROLE}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PVM_ENABLE" "${CUBE_PVM_ENABLE}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_CUBEBOX_OS_IMAGE_ON_DATA" "${CUBE_CUBEBOX_OS_IMAGE_ON_DATA}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBEBOX_OS_IMAGE_DATA_DIR" "${CUBEBOX_OS_IMAGE_DATA_DIR}"
 MIRROR="${MIRROR:-}"
 case "${MIRROR}" in
   ""|cn) ;;

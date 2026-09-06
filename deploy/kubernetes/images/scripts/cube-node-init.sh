@@ -17,6 +17,9 @@ CHMOD_KVM="${CHMOD_KVM:-true}"
 LOAD_KVM_MODULE="${LOAD_KVM_MODULE:-true}"
 WRITE_UDEV_RULE="${WRITE_UDEV_RULE:-true}"
 CREATE_HOST_DIRS="${CREATE_HOST_DIRS:-true}"
+CUBE_CUBEBOX_OS_IMAGE_ON_DATA="${CUBE_CUBEBOX_OS_IMAGE_ON_DATA:-1}"
+CUBEBOX_OS_IMAGE_DATA_DIR="${CUBEBOX_OS_IMAGE_DATA_DIR:-/data/cubebox_os_image}"
+TOOLBOX_HOST_ROOT="${TOOLBOX_HOST_ROOT:-/usr/local/services/cubetoolbox}"
 CHECK_MASTER_CONNECTIVITY="${CHECK_MASTER_CONNECTIVITY:-true}"
 CUBE_MASTER_ENDPOINT="${CUBE_MASTER_ENDPOINT:-cube-master.cube-system.svc.cluster.local:8089}"
 CHECK_MEMORY="${CHECK_MEMORY:-true}"
@@ -357,6 +360,62 @@ if [ "$CREATE_HOST_DIRS" = "true" ]; then
     "$(host_path /data/cube-shared/volume)" \
     "$(host_path /data/shared)" \
     "$(host_path /tmp/cube)"
+  if [ "$CUBE_CUBEBOX_OS_IMAGE_ON_DATA" = "1" ] && [ ! -f /scripts/cubebox_os_image.sh ]; then
+    # Soft-skip when the library is absent (image/chart skew) so node prep
+    # still writes node-prep-ready — matches component-entrypoint/stage guards.
+    log "WARN: /scripts/cubebox_os_image.sh missing; skipping cubebox_os_image softlink ensure (node prep continues)"
+  elif [ "$CUBE_CUBEBOX_OS_IMAGE_ON_DATA" = "1" ]; then
+    toolbox_host="${TOOLBOX_HOST_ROOT:-/usr/local/services/cubetoolbox}"
+    # Reject unsafe chars before single-quote splicing into host scripts
+    # (SECURITY MODEL: quote every operator-supplied value).
+    # Deny quotes/metacharacters and any non-printable / control bytes (newlines).
+    case "${toolbox_host}${CUBEBOX_OS_IMAGE_DATA_DIR}" in
+      *\'*|*\`*|*\$*|*[![:print:]]*)
+        fail "toolbox/data path contains unsafe characters for host splicing"
+        ;;
+    esac
+    case "${toolbox_host}" in /*) ;; *) fail "TOOLBOX_HOST_ROOT must be absolute: ${toolbox_host}" ;; esac
+    case "${CUBEBOX_OS_IMAGE_DATA_DIR}" in /*) ;; *) fail "CUBEBOX_OS_IMAGE_DATA_DIR must be absolute: ${CUBEBOX_OS_IMAGE_DATA_DIR}" ;; esac
+    # Avoid nested sh/bash -ec quoting: write a host-side wrapper and run it
+    # under host_mount_sh (single implementation via cubebox_os_image.sh).
+    # Soft-skip when host has no bash so bash-less nodes still become Ready.
+    # Use host mktemp to avoid predictable /tmp names under hostPID.
+    helper_host="$(host_mount_sh 'mktemp /tmp/cube-cubebox_os_image.XXXXXX')" \
+      || fail "failed to mktemp host helper for cubebox_os_image"
+    wrapper_host="$(host_mount_sh 'mktemp /tmp/cube-cubebox_os_image-run.XXXXXX')" \
+      || fail "failed to mktemp host wrapper for cubebox_os_image"
+    helper_host="$(printf '%s' "${helper_host}" | tr -d '\n\r')"
+    wrapper_host="$(printf '%s' "${wrapper_host}" | tr -d '\n\r')"
+    [ -n "${helper_host}" ] && [ -n "${wrapper_host}" ] \
+      || fail "empty host mktemp path for cubebox_os_image"
+    # Clean host temps on any exit (success path also rm's inside the wrapper).
+    # shellcheck disable=SC2064
+    trap 'rm -f "$(host_path "${helper_host}")" "$(host_path "${wrapper_host}")"' EXIT
+    cp /scripts/cubebox_os_image.sh "$(host_path "${helper_host}")"
+    cat >"$(host_path "${wrapper_host}")" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+fail() { echo "[cube-node-init] ERROR: \$*" >&2; exit 1; }
+export CUBE_CUBEBOX_OS_IMAGE_ON_DATA=1
+export CUBEBOX_OS_IMAGE_DATA_DIR='${CUBEBOX_OS_IMAGE_DATA_DIR}'
+# shellcheck disable=SC1091
+. '${helper_host}'
+ensure_cubebox_os_image_on_data '${toolbox_host}' '${CUBEBOX_OS_IMAGE_DATA_DIR}'
+rm -f '${helper_host}' '${wrapper_host}'
+EOF
+    chmod +x "$(host_path "${wrapper_host}")"
+    if host_mount_sh "command -v bash >/dev/null 2>&1"; then
+      if host_mount_sh "bash '${wrapper_host}'"; then
+        log "cubebox_os_image softlink ready on host (${toolbox_host}/cubebox_os_image -> ${CUBEBOX_OS_IMAGE_DATA_DIR})"
+      else
+        log "WARN: cubebox_os_image softlink ensure failed on host; node prep continues"
+      fi
+    else
+      log "WARN: host has no bash; skipping cubebox_os_image softlink ensure (node prep continues)"
+    fi
+    trap - EXIT
+    rm -f "$(host_path "${helper_host}")" "$(host_path "${wrapper_host}")"
+  fi
 fi
 
 if ! xfs_info "$DATA_CUBELET" >/dev/null 2>&1; then

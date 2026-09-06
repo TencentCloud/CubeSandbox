@@ -804,7 +804,7 @@ build_cube_node_from_base_image() {
 
   [[ -n "${CUBE_NODE_BASE_IMAGE}" ]] || fail "CUBE_NODE_BASE_IMAGE is required"
   ctx="$(prepare_context cube-node)"
-  copy_scripts "${ctx}" cube-node-entrypoint.sh stage-toolbox.sh
+  copy_scripts "${ctx}" cube-node-entrypoint.sh stage-toolbox.sh cubebox_os_image.sh
   dockerfile="${ctx}/Dockerfile.rebase"
 
   cat > "${dockerfile}" <<EOF
@@ -812,8 +812,10 @@ FROM ${CUBE_NODE_BASE_IMAGE}
 
 COPY scripts/cube-node-entrypoint.sh /usr/local/bin/cube-node-entrypoint.sh
 COPY scripts/stage-toolbox.sh /usr/local/bin/stage-toolbox.sh
+COPY scripts/cubebox_os_image.sh /usr/local/bin/cubebox_os_image.sh
 
-RUN chmod +x /usr/local/bin/cube-node-entrypoint.sh /usr/local/bin/stage-toolbox.sh
+RUN chmod +x /usr/local/bin/cube-node-entrypoint.sh /usr/local/bin/stage-toolbox.sh \
+    && chmod 644 /usr/local/bin/cubebox_os_image.sh
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/cube-node-entrypoint.sh"]
 EOF
@@ -1168,7 +1170,7 @@ run_selected_builds() {
 
   if should_build cube-node-init; then
     ctx="$(prepare_context cube-node-init)"
-    copy_scripts "${ctx}" cube-node-init.sh wait-pvm-host.sh node-prep-lib.sh
+    copy_scripts "${ctx}" cube-node-init.sh wait-pvm-host.sh node-prep-lib.sh cubebox_os_image.sh
     build_image cube-node-init "${ctx}"
     record_built cube-node-init
   fi
