@@ -358,6 +358,8 @@ Build-performance knobs (all optional):
 | `CUBE_PROXY_HTTP_PORT` | `80` | CubeProxy HTTP listen port; the systemd post-start TCP listener check follows this port |
 | `CUBE_PROXY_GRPC_PORT` | `9090` | CubeProxy plaintext gRPC (HTTP/2) listen port |
 | `CUBE_EGRESS_ADMIN_PORT` | `9091` | CubeEgress loopback admin API port (policy push); install.sh also patches Cubelet `cube_egress_admin_url` |
+| `CUBE_EGRESS_PROXY_READ_TIMEOUT` | `300s` | CubeEgress nginx `proxy_read_timeout` on the transparent HTTP/HTTPS locations (LLM prefill). Bare integers are seconds. |
+| `CUBE_EGRESS_PROXY_SEND_TIMEOUT` | same as read | CubeEgress nginx `proxy_send_timeout`. Follows `CUBE_EGRESS_PROXY_READ_TIMEOUT` when unset. |
 | `CUBE_PROXY_DNS_ENABLE` | `1` | Enable CoreDNS (must be `1` for one-click) |
 | `CUBE_PROXY_DNS_ANSWER_IP` | `${CUBE_SANDBOX_NODE_IP}` | IP returned by CoreDNS for `cube.app` |
 | `CUBE_PROXY_COREDNS_BIND_ADDR` | `127.0.0.54` | CoreDNS bind address |

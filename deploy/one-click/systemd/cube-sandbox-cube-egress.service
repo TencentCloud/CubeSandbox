@@ -15,6 +15,8 @@ PartOf=cube-sandbox-control.target cube-sandbox-compute.target
 # (CUBE_EGRESS_ADMIN_PORT, default :9091) accepts policy pushes from
 # Cubelet; without TPROXY rules, no sandbox traffic reaches us anyway,
 # which is the correct state until the first sandbox lands.
+# CUBE_EGRESS_PROXY_READ_TIMEOUT / CUBE_EGRESS_PROXY_SEND_TIMEOUT
+# (default 300s) are rendered into nginx.conf by the container entrypoint.
 
 [Service]
 Type=simple

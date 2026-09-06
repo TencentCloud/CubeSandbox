@@ -179,6 +179,10 @@ spec:
               value: {{ ternary "1" "0" .Values.cubeEgress.debugDump | quote }}
             - name: CUBE_EGRESS_ADMIN_PORT
               value: {{ .Values.cubeEgress.adminPort | quote }}
+            - name: CUBE_EGRESS_PROXY_READ_TIMEOUT
+              value: {{ .Values.cubeEgress.proxyReadTimeout | quote }}
+            - name: CUBE_EGRESS_PROXY_SEND_TIMEOUT
+              value: {{ .Values.cubeEgress.proxySendTimeout | quote }}
           ports:
             - name: egress-admin
               containerPort: {{ .Values.cubeEgress.adminPort }}

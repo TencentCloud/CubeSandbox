@@ -614,6 +614,7 @@ The script collects Pods, DaemonSets, Deployments, StatefulSets, Services, Endpo
 `cubeEgress.enabled=true` runs CubeEgress inside the Cube Node Big Pod:
 
 - `cube-egress` mounts `/etc/cube/ca` and exposes the loopback admin API on `127.0.0.1:9091` by default (`cubeEgress.adminPort` / `CUBE_EGRESS_ADMIN_PORT`);
+- transparent proxy timeouts default to 300s (`cubeEgress.proxyReadTimeout` / `cubeEgress.proxySendTimeout`, `CUBE_EGRESS_PROXY_READ_TIMEOUT` / `CUBE_EGRESS_PROXY_SEND_TIMEOUT`) so LLM prefill is not cut off at 60s;
 - `cube-egress-net` waits for the `cube-dev` interface, applies the upstream `CubeEgress/scripts/cube-proxy-iptables-init.sh` rules, periodically reapplies them, and removes them on Pod termination;
 - CubeMaster and CubeAPI both mount the same CA Secret at `/etc/cube/ca` so template CA bake and AgentHub/OpenClaw CA injection use the same trust root.
 

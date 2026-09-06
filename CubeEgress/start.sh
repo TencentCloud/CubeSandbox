@@ -6,7 +6,7 @@
 #   2. Warn if CA expires within 30 days; fail if already expired
 #   3. Assert placeholder cert/key exist (host pre-generates them)
 #   4. Assert audit log dir is writable as the cube-proxy worker uid
-#   5. nginx -t (config validity)
+#   5. Render listen IP / admin port / proxy timeouts; nginx -t
 #   5b. Optional: write cube-egress/version.json for inventory (best-effort)
 #   6. exec openresty as PID 1
 
@@ -102,6 +102,52 @@ configure_admin_port() {
     log "nginx admin listen: 127.0.0.1:${admin_port}"
 }
 
+# nginx time: https://nginx.org/en/docs/syntax.html
+# Accept a bare positive integer (seconds) or integer + ms|s|m|h|d.
+nginx_timeout_value() {
+    local raw="$1"
+    local name="$2"
+    local value="${raw#"${raw%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    [[ -n "${value}" ]] || fatal "invalid ${name}: empty"
+    if [[ "${value}" =~ ^[0-9]+$ ]]; then
+        value="${value}s"
+    fi
+    [[ "${value}" =~ ^[1-9][0-9]*(ms|[smhd])$ ]] \
+        || fatal "invalid ${name}: ${raw} (want a positive nginx time, e.g. 300s)"
+    printf '%s\n' "${value}"
+}
+
+configure_proxy_timeouts() {
+    # Transparent locations only. LLM prefill is often >60s to first byte;
+    # 300s is the shipped default. SEND follows READ when unset so one knob
+    # covers both. proxy_connect_timeout stays 10s (connecting is not slow).
+    local read_timeout send_timeout read_n send_n
+    read_timeout="$(nginx_timeout_value "${CUBE_EGRESS_PROXY_READ_TIMEOUT:-300s}" CUBE_EGRESS_PROXY_READ_TIMEOUT)"
+    send_timeout="$(nginx_timeout_value "${CUBE_EGRESS_PROXY_SEND_TIMEOUT:-${CUBE_EGRESS_PROXY_READ_TIMEOUT:-300s}}" CUBE_EGRESS_PROXY_SEND_TIMEOUT)"
+
+    [[ -f "${NGINX_CONF}" ]] || fatal "nginx config missing: ${NGINX_CONF}"
+    read_n="$(grep -cE '^[[:space:]]*proxy_read_timeout[[:space:]]' "${NGINX_CONF}" || true)"
+    send_n="$(grep -cE '^[[:space:]]*proxy_send_timeout[[:space:]]' "${NGINX_CONF}" || true)"
+    [[ "${read_n}" == "2" && "${send_n}" == "2" ]] \
+        || fatal "expected 2 proxy_read_timeout and 2 proxy_send_timeout in ${NGINX_CONF}, got read=${read_n} send=${send_n}"
+
+    sed -i -E \
+        -e "s/^([[:space:]]*)proxy_read_timeout[[:space:]]+[^;]+;/\\1proxy_read_timeout ${read_timeout};/" \
+        -e "s/^([[:space:]]*)proxy_send_timeout[[:space:]]+[^;]+;/\\1proxy_send_timeout ${send_timeout};/" \
+        "${NGINX_CONF}"
+    [[ "$(grep -cF "proxy_read_timeout ${read_timeout};" "${NGINX_CONF}" || true)" == "2" ]] \
+        || fatal "failed to render proxy_read_timeout ${read_timeout} in ${NGINX_CONF}"
+    [[ "$(grep -cF "proxy_send_timeout ${send_timeout};" "${NGINX_CONF}" || true)" == "2" ]] \
+        || fatal "failed to render proxy_send_timeout ${send_timeout} in ${NGINX_CONF}"
+    log "nginx proxy_read_timeout=${read_timeout} proxy_send_timeout=${send_timeout}"
+}
+
+# Allow tests to source the render helpers without becoming PID 1.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
+
 # -------- 0. Must run as root --------
 # Several downstream steps require uid 0:
 #   - chown the bind-mounted audit dir (CAP_CHOWN)
@@ -194,9 +240,10 @@ if (( (owner_bits & 3) != 3 )); then
     fatal "audit dir mode ${audit_mode} lacks owner rwx bits: ${AUDIT_DIR}"
 fi
 
-# -------- 5. Render listener IP / admin port and validate nginx config --------
+# -------- 5. Render listener IP / admin port / proxy timeouts and validate nginx config --------
 configure_listen_ip
 configure_admin_port
+configure_proxy_timeouts
 log "Running nginx -t"
 "${NGINX_BIN}" -t
 

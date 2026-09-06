@@ -892,6 +892,12 @@ cubeEgress:
   adminPort: 9091
   bootstrapURL: http://127.0.0.1:9998/v1/policies/dump
   debugDump: false
+  # nginx proxy_*_timeout on the transparent HTTP/HTTPS locations.
+  # LLM prefill often exceeds the historic 60s default; 300s covers
+  # ~100k-token prompts. Bare integers are seconds. Send follows read
+  # inside the container when this is left at the same default.
+  proxyReadTimeout: 300s
+  proxySendTimeout: 300s
   ca:
     # Supported modes:
     #   selfSigned     - chart creates/reuses a release-scoped CA Secret.

@@ -18,6 +18,10 @@ rule list attached at sandbox-creation time:
 - **Access auditing** — every decision (allow / deny / inject /
   TLS handshake outcome) is written to a per-host JSONL audit log.
 
+Upstream `proxy_read_timeout` / `proxy_send_timeout` default to 300s
+(`CUBE_EGRESS_PROXY_READ_TIMEOUT` / `CUBE_EGRESS_PROXY_SEND_TIMEOUT`)
+so LLM prefill is not cut off at 60s. `proxy_connect_timeout` stays 10s.
+
 ## How it intercepts
 
 CubeEgress runs as a host-network container and binds two TPROXY

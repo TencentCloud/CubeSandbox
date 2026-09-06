@@ -57,6 +57,13 @@ case "${ADMIN_PORT}" in
     ;;
 esac
 
+PROXY_READ_TIMEOUT="${CUBE_EGRESS_PROXY_READ_TIMEOUT:-300s}"
+PROXY_SEND_TIMEOUT="${CUBE_EGRESS_PROXY_SEND_TIMEOUT:-${CUBE_EGRESS_PROXY_READ_TIMEOUT:-300s}}"
+[[ "${PROXY_READ_TIMEOUT}" =~ ^[1-9][0-9]*(ms|[smhd])$ ]] \
+  || die "invalid CUBE_EGRESS_PROXY_READ_TIMEOUT: ${PROXY_READ_TIMEOUT}"
+[[ "${PROXY_SEND_TIMEOUT}" =~ ^[1-9][0-9]*(ms|[smhd])$ ]] \
+  || die "invalid CUBE_EGRESS_PROXY_SEND_TIMEOUT: ${PROXY_SEND_TIMEOUT}"
+
 ensure_dir "${CA_DIR}"
 ensure_dir "${AUDIT_DIR}"
 ensure_file "${CA_DIR}/cube-root-ca.crt"
@@ -107,6 +114,8 @@ docker create \
   -e "CUBE_EGRESS_BOOTSTRAP_URL=${BOOTSTRAP_URL}" \
   -e "CUBE_SANDBOX_NETWORK_CIDR=${SANDBOX_NETWORK_CIDR}" \
   -e "CUBE_EGRESS_ADMIN_PORT=${ADMIN_PORT}" \
+  -e "CUBE_EGRESS_PROXY_READ_TIMEOUT=${PROXY_READ_TIMEOUT}" \
+  -e "CUBE_EGRESS_PROXY_SEND_TIMEOUT=${PROXY_SEND_TIMEOUT}" \
   "${CUBE_EGRESS_IMAGE}" >/dev/null
 
 # `docker start -a` keeps the foreground attached to the container
