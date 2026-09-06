@@ -81,6 +81,17 @@ func TestPreviewSandboxReturnsResolvedRequests(t *testing.T) {
 	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
 }
 
+func TestRedactPreviewPluginVolumeSources(t *testing.T) {
+	req := &cubeboxv1.RunCubeSandboxRequest{Annotations: map[string]string{
+		"plugin-volume-sources": `[{"name":"data","driver":"s3","private_data":"secret"}]`,
+	}}
+	redacted := redactPreviewPluginVolumeSources(req)
+	require.NotNil(t, redacted)
+	assert.NotContains(t, redacted.Annotations["plugin-volume-sources"], "secret")
+	assert.Contains(t, redacted.Annotations["plugin-volume-sources"], `"driver":"s3"`)
+	assert.Contains(t, req.Annotations["plugin-volume-sources"], "secret", "input must not be mutated")
+}
+
 func TestHandleSandboxPreviewRejectsGet(t *testing.T) {
 	rt := &CubeLog.RequestTrace{}
 	ctx := CubeLog.WithRequestTrace(context.Background(), rt)

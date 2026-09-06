@@ -15,6 +15,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"gorm.io/gorm"
@@ -27,6 +28,8 @@ import (
 // volumeDB must NOT be swapped concurrently: callers of newVolumeTestEngine
 // must not call t.Parallel() on any test that uses it.
 var volumeDB = func() *gorm.DB { return dao.Default() }
+
+var snapshotReferencesPluginVolume = templatecenter.SnapshotReferencesPluginVolume
 
 // ─── Request / response types ───────────────────────────────────────────────
 
@@ -292,6 +295,19 @@ func handleDeleteVolume(c *gin.Context) {
 		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_Conflict, fmt.Sprintf(
 			"volume %s is in use by %d node(s); destroy the sandboxes using it before deleting",
 			volumeID, record.RefCount,
+		))})
+		return
+	}
+	referenced, err := snapshotReferencesPluginVolume(c.Request.Context(), volumeID)
+	if err != nil {
+		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_DBError,
+			"check snapshot volume dependencies: "+err.Error())})
+		return
+	}
+	if referenced {
+		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_Conflict, fmt.Sprintf(
+			"volume %s is referenced by an active snapshot; delete the snapshot before deleting the volume",
+			volumeID,
 		))})
 		return
 	}

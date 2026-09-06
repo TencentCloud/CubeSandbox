@@ -480,7 +480,7 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveBind, time.Since(bindStart))
 	}()
 	if strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
-		pinToOrigin := snapshotRestoreHasHostMount(reqInOut, templateReq)
+		pinToOrigin := snapshotRestoreHasExternalMount(reqInOut, templateReq)
 		if err := bindSnapshotCreateReplicaWithHostMount(ctx, templateID, reqInOut, pinToOrigin); err != nil {
 			return err
 		}
@@ -537,9 +537,11 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	return nil
 }
 
-func snapshotRestoreHasHostMount(req, templateReq *types.CreateCubeSandboxReq) bool {
+func snapshotRestoreHasExternalMount(req, templateReq *types.CreateCubeSandboxReq) bool {
 	return sandbox.CreateRequestHasHostMount(req) ||
-		sandbox.CreateRequestHasHostMount(templateReq)
+		sandbox.CreateRequestHasHostMount(templateReq) ||
+		sandbox.CreateRequestHasPluginVolume(req) ||
+		sandbox.CreateRequestHasPluginVolume(templateReq)
 }
 
 func skipTemplateLocalityReady(ctx context.Context, templateID string) bool {
@@ -594,7 +596,8 @@ func bindSnapshotCreateReplica(ctx context.Context, snapshotID string, reqInOut 
 		ctx,
 		snapshotID,
 		reqInOut,
-		sandbox.CreateRequestHasHostMount(reqInOut),
+		sandbox.CreateRequestHasHostMount(reqInOut) ||
+			sandbox.CreateRequestHasPluginVolume(reqInOut),
 	)
 }
 
@@ -609,7 +612,7 @@ func bindSnapshotCreateReplicaWithHostMount(ctx context.Context, snapshotID stri
 		return err
 	}
 	if pinToOrigin {
-		return fmt.Errorf("snapshot %s with host-mount requires origin restore metadata", snapshotID)
+		return fmt.Errorf("snapshot %s with external mount requires origin restore metadata", snapshotID)
 	}
 	return bindSnapshotCreateReplicaLocal(ctx, snapshotID, reqInOut)
 }

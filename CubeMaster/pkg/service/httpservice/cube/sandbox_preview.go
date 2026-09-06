@@ -137,8 +137,41 @@ func previewSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		},
 		APIRequest:     apiReq,
 		MergedRequest:  mergedReq,
-		CubeletRequest: cubeletReq,
+		CubeletRequest: redactPreviewPluginVolumeSources(cubeletReq),
 	}
+}
+
+func redactPreviewPluginVolumeSources(req *api.RunCubeSandboxRequest) *api.RunCubeSandboxRequest {
+	if req == nil {
+		return nil
+	}
+	payload, err := jsoniter.Marshal(req)
+	if err != nil {
+		return nil
+	}
+	cloned := &api.RunCubeSandboxRequest{}
+	if err := jsoniter.Unmarshal(payload, cloned); err != nil {
+		return nil
+	}
+	raw := cloned.Annotations[sandbox.AnnotationPluginVolumeSources]
+	if raw == "" {
+		return cloned
+	}
+	var entries []map[string]interface{}
+	if err := jsoniter.UnmarshalFromString(raw, &entries); err != nil {
+		delete(cloned.Annotations, sandbox.AnnotationPluginVolumeSources)
+		return cloned
+	}
+	for _, entry := range entries {
+		delete(entry, "private_data")
+	}
+	redacted, err := jsoniter.MarshalToString(entries)
+	if err != nil {
+		delete(cloned.Annotations, sandbox.AnnotationPluginVolumeSources)
+		return cloned
+	}
+	cloned.Annotations[sandbox.AnnotationPluginVolumeSources] = redacted
+	return cloned
 }
 
 func cloneCreateReq(req *types.CreateCubeSandboxReq) (*types.CreateCubeSandboxReq, error) {
