@@ -1,0 +1,30 @@
+{
+  "name": "normalize-slug",
+  "summary": "Implement a small slug normalizer against fixed acceptance tests.",
+  "planning_instructions": "Plan a correct implementation for normalize_slug in app.py. The fixed acceptance tests require lowercase words, one hyphen for every run of non-alphanumeric characters, no leading or trailing hyphen, and an empty string when no words remain.",
+  "implementation_instructions": "Implement normalize_slug in app.py without changing the acceptance tests.",
+  "test_command": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v",
+  "test_timeout_seconds": 120,
+  "allowed_paths": [
+    "app.py"
+  ],
+  "strategies": [
+    {
+      "name": "minimal",
+      "instructions": "Implement the smallest clear solution that satisfies every acceptance test."
+    },
+    {
+      "name": "defensive",
+      "instructions": "Implement a defensive solution with explicit handling for empty and noisy input."
+    },
+    {
+      "name": "readable",
+      "instructions": "Prioritize readability, standard-library usage, and easy maintenance."
+    },
+    {
+      "name": "focused",
+      "instructions": "Use a focused implementation with no unrelated refactoring."
+    }
+  ],
+  "expect_baseline_failure": true
+}
