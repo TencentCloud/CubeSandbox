@@ -106,11 +106,10 @@ func TestLoad_NoYAML_UsesEnvAndDefaults(t *testing.T) {
 	}
 }
 
-// TestLoad_MissingDB_Fails proves we still require a database URL.
+// TestLoad_MissingDB_Fails requires a DATABASE_URL or the MySQL* fields.
 func TestLoad_MissingDB_Fails(t *testing.T) {
 	t.Setenv("CUBE_OPS_CONFIG", "/nonexistent/path/config.yaml")
 	t.Setenv("DATABASE_URL", "")
-	// Also clear individual MySQL env vars so buildMySQLURL returns "".
 	t.Setenv("CUBE_SANDBOX_MYSQL_HOST", "")
 
 	_, err := Load()

@@ -122,7 +122,7 @@ defaults.
 | `JWT_SECRET` | *(optional)* | JWT signing secret. If unset, a secret is auto-generated on first startup and persisted to the `t_system_setting` table in the database. |
 | `JWT_ACCESS_TTL` | `15m` | Access token TTL |
 | `JWT_REFRESH_TTL` | `168h` | Refresh token TTL (7 days) |
-| `DATABASE_URL` | *(required)* | MySQL connection URL. If unset, built from `CUBE_SANDBOX_MYSQL_{HOST,PORT,USER,PASSWORD,DB}` env vars. |
+| `DATABASE_URL` | *(required)* | Full connection URL (`mysql://` or `postgres://`). Alternatively the DB can be set via the `CUBE_SANDBOX_MYSQL_{HOST,PORT,USER,PASSWORD,DB}` fields; the URL wins when both are set. |
 | `CUBE_MASTER_ADDR` | `http://127.0.0.1:8089` | CubeMaster base URL |
 | `CUBE_API_SANDBOX_DOMAIN` | `cube.app` | Sandbox domain (used by SDK handler for sandbox URL construction) |
 | `REDIS_URL` | *(optional)* | Complete Redis connection URL, including the database path when needed (for example, `/7`). When set, it overrides all Sentinel and split Redis settings. |

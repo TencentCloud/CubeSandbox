@@ -44,7 +44,12 @@ func main() {
 	defer cancel()
 
 	// Initialise database + migrations + master key
-	s, err := store.New(ctx, cfg.DaoConfig())
+	daoCfg, err := cfg.DaoConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cubeops: invalid database config: %v\n", err)
+		os.Exit(1)
+	}
+	s, err := store.New(ctx, daoCfg)
 	if err != nil {
 		logging.G(ctx).Errorf("failed to initialise database: err=%q", err.Error())
 		os.Exit(1)
