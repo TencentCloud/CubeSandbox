@@ -77,44 +77,55 @@ static VGIC_DIST_REGS: &[DistReg] = &[
     VGIC_DIST_REG!(GICD_IPRIORITYR, 8, 0),
 ];
 
-fn dist_attr_access(gic: &DeviceFd, offset: u32, val: &u32, set: bool) -> Result<()> {
+/// Read a distributor register.
+///
+/// The destination buffer must be a local `mut` whose address is handed to
+/// KVM_GET_DEVICE_ATTR; going through a `&u32` would let LLVM treat the kernel
+/// write-back as a readonly-noalias violation and fold the result to 0.
+fn dist_attr_get(gic: &DeviceFd, offset: u32) -> Result<u32> {
+    let mut val: u32 = 0;
     let mut gic_dist_attr = kvm_device_attr {
         group: KVM_DEV_ARM_VGIC_GRP_DIST_REGS,
         attr: offset as u64,
-        addr: val as *const u32 as u64,
+        addr: &mut val as *mut u32 as u64,
         flags: 0,
     };
-    if set {
-        gic.set_device_attr(&gic_dist_attr).map_err(|e| {
-            Error::SetDeviceAttribute(HypervisorDeviceError::SetDeviceAttribute(e.into()))
-        })?;
-    } else {
-        gic.get_device_attr(&mut gic_dist_attr).map_err(|e| {
-            Error::GetDeviceAttribute(HypervisorDeviceError::GetDeviceAttribute(e.into()))
-        })?;
-    }
-    Ok(())
+    gic.get_device_attr(&mut gic_dist_attr).map_err(|e| {
+        Error::GetDeviceAttribute(HypervisorDeviceError::GetDeviceAttribute(e.into()))
+    })?;
+    Ok(val)
+}
+
+/// Write a distributor register.
+fn dist_attr_set(gic: &DeviceFd, offset: u32, val: u32) -> Result<()> {
+    let gic_dist_attr = kvm_device_attr {
+        group: KVM_DEV_ARM_VGIC_GRP_DIST_REGS,
+        attr: offset as u64,
+        addr: &val as *const u32 as u64,
+        flags: 0,
+    };
+    gic.set_device_attr(&gic_dist_attr).map_err(|e| {
+        Error::SetDeviceAttribute(HypervisorDeviceError::SetDeviceAttribute(e.into()))
+    })
 }
 
 /// Get the distributor control register.
 pub fn read_ctlr(gic: &DeviceFd) -> Result<u32> {
-    let val: u32 = 0;
-    dist_attr_access(gic, GICD_CTLR, &val, false)?;
-    Ok(val)
+    dist_attr_get(gic, GICD_CTLR)
 }
 
 /// Set the distributor control register.
 pub fn write_ctlr(gic: &DeviceFd, val: u32) -> Result<()> {
-    dist_attr_access(gic, GICD_CTLR, &val, true)
+    dist_attr_set(gic, GICD_CTLR, val)
 }
 
 fn get_interrupts_num(gic: &DeviceFd) -> Result<u32> {
-    let num_irq = 0;
+    let mut num_irq = 0;
 
     let mut nr_irqs_attr = kvm_device_attr {
         group: KVM_DEV_ARM_VGIC_GRP_NR_IRQS,
         attr: 0,
-        addr: &num_irq as *const u32 as u64,
+        addr: &mut num_irq as *mut u32 as u64,
         flags: 0,
     };
     gic.get_device_attr(&mut nr_irqs_attr).map_err(|e| {
@@ -158,8 +169,7 @@ pub fn set_dist_regs(gic: &DeviceFd, state: &[u32]) -> Result<()> {
         let end = compute_reg_len(gic, dreg, base)?;
 
         while base < end {
-            let val = state[idx];
-            dist_attr_access(gic, base, &val, true)?;
+            dist_attr_set(gic, base, state[idx])?;
             idx += 1;
             base += REG_SIZE as u32;
         }
@@ -175,9 +185,7 @@ pub fn get_dist_regs(gic: &DeviceFd) -> Result<Vec<u32>> {
         let end = compute_reg_len(gic, dreg, base)?;
 
         while base < end {
-            let val: u32 = 0;
-            dist_attr_access(gic, base, &val, false)?;
-            state.push(val);
+            state.push(dist_attr_get(gic, base)?);
             base += REG_SIZE as u32;
         }
     }

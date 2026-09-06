@@ -96,23 +96,36 @@ static VGIC_SGI_REGS: &[RdistReg] = &[
     VGIC_RDIST_REG!(GICR_IPRIORITYR0, 32),
 ];
 
-fn redist_attr_access(gic: &DeviceFd, offset: u32, typer: u64, val: &u32, set: bool) -> Result<()> {
+/// Read a redistributor register.
+///
+/// The destination buffer must be a local `mut` whose address is handed to
+/// KVM_GET_DEVICE_ATTR; going through a `&u32` would let LLVM treat the kernel
+/// write-back as a readonly-noalias violation and fold the result to 0.
+fn redist_attr_get(gic: &DeviceFd, offset: u32, typer: u64) -> Result<u32> {
+    let mut val: u32 = 0;
     let mut gic_redist_attr = kvm_device_attr {
         group: KVM_DEV_ARM_VGIC_GRP_REDIST_REGS,
         attr: (typer & KVM_DEV_ARM_VGIC_V3_MPIDR_MASK) | (offset as u64), // this needs the mpidr
-        addr: val as *const u32 as u64,
+        addr: &mut val as *mut u32 as u64,
         flags: 0,
     };
-    if set {
-        gic.set_device_attr(&gic_redist_attr).map_err(|e| {
-            Error::SetDeviceAttribute(HypervisorDeviceError::SetDeviceAttribute(e.into()))
-        })?;
-    } else {
-        gic.get_device_attr(&mut gic_redist_attr).map_err(|e| {
-            Error::GetDeviceAttribute(HypervisorDeviceError::GetDeviceAttribute(e.into()))
-        })?;
-    }
-    Ok(())
+    gic.get_device_attr(&mut gic_redist_attr).map_err(|e| {
+        Error::GetDeviceAttribute(HypervisorDeviceError::GetDeviceAttribute(e.into()))
+    })?;
+    Ok(val)
+}
+
+/// Write a redistributor register.
+fn redist_attr_set(gic: &DeviceFd, offset: u32, typer: u64, val: u32) -> Result<()> {
+    let gic_redist_attr = kvm_device_attr {
+        group: KVM_DEV_ARM_VGIC_GRP_REDIST_REGS,
+        attr: (typer & KVM_DEV_ARM_VGIC_V3_MPIDR_MASK) | (offset as u64), // this needs the mpidr
+        addr: &val as *const u32 as u64,
+        flags: 0,
+    };
+    gic.set_device_attr(&gic_redist_attr).map_err(|e| {
+        Error::SetDeviceAttribute(HypervisorDeviceError::SetDeviceAttribute(e.into()))
+    })
 }
 
 fn access_redists_aux(
@@ -129,14 +142,11 @@ fn access_redists_aux(
             let end = base + rdreg.length as u32;
 
             while base < end {
-                let mut val = 0;
                 if set {
-                    val = state[*idx];
-                    redist_attr_access(gic, base, *i, &val, true)?;
+                    redist_attr_set(gic, base, *i, state[*idx])?;
                     *idx += 1;
                 } else {
-                    redist_attr_access(gic, base, *i, &val, false)?;
-                    state.push(val);
+                    state.push(redist_attr_get(gic, base, *i)?);
                 }
                 base += REG_SIZE as u32;
             }

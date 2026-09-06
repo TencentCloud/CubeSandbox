@@ -23,34 +23,38 @@ const GITS_CWRITER: u32 = 0x0088;
 const GITS_CREADR: u32 = 0x0090;
 const GITS_BASER: u32 = 0x0100;
 
-/// Access an ITS device attribute.
+/// Read an ITS device attribute.
 ///
-/// This is a helper function to get/set the ITS device attribute depending
-/// the bool parameter `set` provided.
-pub fn gicv3_its_attr_access(
-    its_device: &DeviceFd,
-    group: u32,
-    attr: u32,
-    val: &u64,
-    set: bool,
-) -> Result<()> {
+/// The destination buffer must be a local `mut` whose address is handed to
+/// KVM_GET_DEVICE_ATTR; going through a `&u64` would let LLVM treat the kernel
+/// write-back as a readonly-noalias violation and fold the result to 0.
+pub fn gicv3_its_attr_get(its_device: &DeviceFd, group: u32, attr: u32) -> Result<u64> {
+    let mut val: u64 = 0;
     let mut gicv3_its_attr = kvm_bindings::kvm_device_attr {
         group,
         attr: attr as u64,
-        addr: val as *const u64 as u64,
+        addr: &mut val as *mut u64 as u64,
         flags: 0,
     };
-    if set {
-        its_device.set_device_attr(&gicv3_its_attr).map_err(|e| {
-            Error::SetDeviceAttribute(HypervisorDeviceError::SetDeviceAttribute(e.into()))
-        })
-    } else {
-        its_device
-            .get_device_attr(&mut gicv3_its_attr)
-            .map_err(|e| {
-                Error::GetDeviceAttribute(HypervisorDeviceError::GetDeviceAttribute(e.into()))
-            })
-    }
+    its_device
+        .get_device_attr(&mut gicv3_its_attr)
+        .map_err(|e| {
+            Error::GetDeviceAttribute(HypervisorDeviceError::GetDeviceAttribute(e.into()))
+        })?;
+    Ok(val)
+}
+
+/// Write an ITS device attribute.
+pub fn gicv3_its_attr_set(its_device: &DeviceFd, group: u32, attr: u32, val: u64) -> Result<()> {
+    let gicv3_its_attr = kvm_bindings::kvm_device_attr {
+        group,
+        attr: attr as u64,
+        addr: &val as *const u64 as u64,
+        flags: 0,
+    };
+    its_device.set_device_attr(&gicv3_its_attr).map_err(|e| {
+        Error::SetDeviceAttribute(HypervisorDeviceError::SetDeviceAttribute(e.into()))
+    })
 }
 
 /// Function that saves/restores ITS tables into guest RAM.
@@ -324,60 +328,43 @@ impl Vgic for KvmGicV3Its {
 
         let icc_state = get_icc_regs(&self.device, &gicr_typers)?;
 
-        let its_baser_state: [u64; 8] = [0; 8];
+        let mut its_baser_state: [u64; 8] = [0; 8];
         for i in 0..8 {
-            gicv3_its_attr_access(
+            its_baser_state[i as usize] = gicv3_its_attr_get(
                 self.its_device.as_ref().unwrap(),
                 kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
                 GITS_BASER + i * 8,
-                &its_baser_state[i as usize],
-                false,
             )?;
         }
 
-        let its_ctlr_state: u64 = 0;
-        gicv3_its_attr_access(
+        let its_ctlr_state = gicv3_its_attr_get(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CTLR,
-            &its_ctlr_state,
-            false,
         )?;
 
-        let its_cbaser_state: u64 = 0;
-        gicv3_its_attr_access(
+        let its_cbaser_state = gicv3_its_attr_get(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CBASER,
-            &its_cbaser_state,
-            false,
         )?;
 
-        let its_creadr_state: u64 = 0;
-        gicv3_its_attr_access(
+        let its_creadr_state = gicv3_its_attr_get(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CREADR,
-            &its_creadr_state,
-            false,
         )?;
 
-        let its_cwriter_state: u64 = 0;
-        gicv3_its_attr_access(
+        let its_cwriter_state = gicv3_its_attr_get(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CWRITER,
-            &its_cwriter_state,
-            false,
         )?;
 
-        let its_iidr_state: u64 = 0;
-        gicv3_its_attr_access(
+        let its_iidr_state = gicv3_its_attr_get(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_IIDR,
-            &its_iidr_state,
-            false,
         )?;
 
         Ok(Gicv3ItsState {
@@ -407,57 +394,51 @@ impl Vgic for KvmGicV3Its {
         set_icc_regs(&self.device, &gicr_typers, &state.icc)?;
 
         //Restore GICv3ITS registers
-        gicv3_its_attr_access(
+        gicv3_its_attr_set(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_IIDR,
-            &state.its_iidr,
-            true,
+            state.its_iidr,
         )?;
 
-        gicv3_its_attr_access(
+        gicv3_its_attr_set(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CBASER,
-            &state.its_cbaser,
-            true,
+            state.its_cbaser,
         )?;
 
-        gicv3_its_attr_access(
+        gicv3_its_attr_set(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CREADR,
-            &state.its_creadr,
-            true,
+            state.its_creadr,
         )?;
 
-        gicv3_its_attr_access(
+        gicv3_its_attr_set(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CWRITER,
-            &state.its_cwriter,
-            true,
+            state.its_cwriter,
         )?;
 
         for i in 0..8 {
-            gicv3_its_attr_access(
+            gicv3_its_attr_set(
                 self.its_device.as_ref().unwrap(),
                 kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
                 GITS_BASER + i * 8,
-                &state.its_baser[i as usize],
-                true,
+                state.its_baser[i as usize],
             )?;
         }
 
         // Restore ITS tables
         gicv3_its_tables_access(self.its_device.as_ref().unwrap(), false)?;
 
-        gicv3_its_attr_access(
+        gicv3_its_attr_set(
             self.its_device.as_ref().unwrap(),
             kvm_bindings::KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
             GITS_CTLR,
-            &state.its_ctlr,
-            true,
+            state.its_ctlr,
         )
     }
 
