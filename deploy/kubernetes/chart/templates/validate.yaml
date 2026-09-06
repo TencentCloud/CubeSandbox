@@ -198,6 +198,15 @@
 {{- fail "cubeProxy.enabled=true requires lifecycleManager.enabled=true (cube-lifecycle-manager replaces the obsolete cube-proxy-sidecar)" }}
 {{- end }}
 {{- if eq (include "cube.lifecycleManagerEnabled" .) "true" }}
+{{- $leaderElection := .Values.lifecycleManager.leaderElection | default dict -}}
+{{- if $leaderElection.enabled }}
+{{- if lt (int .Values.lifecycleManager.replicas) 2 }}
+{{- fail "lifecycleManager.leaderElection.enabled=true requires lifecycleManager.replicas>=2" }}
+{{- end }}
+{{- if or (empty $leaderElection.leaseTTL) (empty $leaderElection.renewInterval) (empty $leaderElection.retryInterval) }}
+{{- fail "lifecycleManager.leaderElection.enabled=true requires leaseTTL, renewInterval, and retryInterval" }}
+{{- end }}
+{{- end }}
 {{- if not (include "cube.masterEndpoint" .) }}
 {{- fail "lifecycleManager.enabled=true requires a CubeMaster endpoint (controlPlane.master or externalControlPlane.masterEndpoint)" }}
 {{- end }}

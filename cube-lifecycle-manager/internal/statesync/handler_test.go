@@ -19,11 +19,12 @@ import (
 )
 
 type fakeRedis struct {
-	mu       sync.Mutex
-	states   map[string]string
-	getErr   error
-	setErr   error
-	setCalls int
+	mu         sync.Mutex
+	states     map[string]string
+	getErr     error
+	setErr     error
+	setCalls   int
+	casUpdated *bool
 }
 
 func newFakeRedis() *fakeRedis {
@@ -58,11 +59,35 @@ func (f *fakeRedis) WriteState(ctx context.Context, sid, state string, ttl time.
 	return f.SetState(ctx, sid, state, ttl)
 }
 
+func (f *fakeRedis) WriteStateCAS(
+	_ context.Context, sid, expected, state, _ string, _ time.Duration,
+) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setCalls++
+	if f.setErr != nil {
+		return false, f.setErr
+	}
+	if f.casUpdated != nil {
+		return *f.casUpdated, nil
+	}
+	if f.states[sid] != expected {
+		return false, nil
+	}
+	f.states[sid] = state
+	return true, nil
+}
+
 type fakeProxy struct {
 	mu    sync.Mutex
 	calls []string // "sid=state"
 	err   error
 }
+
+type fakeLeader struct{ leader bool }
+
+func (f fakeLeader) IsLeader() bool { return f.leader }
+func (f fakeLeader) Enabled() bool  { return true }
 
 func (p *fakeProxy) SetState(_ context.Context, sid, state string) error {
 	p.mu.Lock()
@@ -146,17 +171,17 @@ func TestHandle_RunningToPaused(t *testing.T) {
 	}
 }
 
-func TestHandle_IdempotentSameState(t *testing.T) {
+func TestHandle_SameStateRecordsEventVersion(t *testing.T) {
 	d, r, p, _ := buildDeps(t)
 	r.states["sbx-1"] = "paused"
 
 	Handle(context.Background(), d, stateEvent("sbx-1", lifecycle.StatePaused, lifecycle.ActorCubeMaster))
 
-	if r.setCalls != 0 {
-		t.Fatalf("SetState must not be called on no-op: %d", r.setCalls)
+	if r.setCalls != 1 {
+		t.Fatalf("same-state event must record its version: %d", r.setCalls)
 	}
-	if got := p.recorded(); len(got) != 0 {
-		t.Fatalf("proxy push must not be called on no-op: %+v", got)
+	if got := p.recorded(); len(got) != 1 {
+		t.Fatalf("same-state event should converge proxy once: %+v", got)
 	}
 }
 
@@ -229,15 +254,69 @@ func TestHandle_InvalidState(t *testing.T) {
 	}
 }
 
-func TestHandle_SetStateErrorStillPushesProxy(t *testing.T) {
+func TestHandle_SetStateErrorDoesNotPushProxy(t *testing.T) {
 	d, r, p, _ := buildDeps(t)
 	r.states["sbx-1"] = "paused"
 	r.setErr = errors.New("redis boom")
 
 	Handle(context.Background(), d, stateEvent("sbx-1", lifecycle.StateRunning, lifecycle.ActorCubeMaster))
 
-	if got := p.recorded(); len(got) != 1 {
-		t.Fatalf("proxy push must still fire when Redis SetState fails: %+v", got)
+	if got := p.recorded(); len(got) != 0 {
+		t.Fatalf("proxy push must not fire when Redis CAS fails: %+v", got)
+	}
+}
+
+func TestHandle_StandbyRetainsWarmStateWithoutExternalWrites(t *testing.T) {
+	d, r, p, reg := buildDeps(t)
+	d.Leader = fakeLeader{leader: false}
+	r.states["sbx-1"] = lifecycle.StatePaused
+
+	Handle(context.Background(), d, stateEvent("sbx-1", lifecycle.StateRunning, lifecycle.ActorCubeMaster))
+
+	if got := r.states["sbx-1"]; got != lifecycle.StatePaused {
+		t.Fatalf("standby changed Redis state to %q", got)
+	}
+	if got := p.recorded(); len(got) != 0 {
+		t.Fatalf("standby pushed proxy state: %+v", got)
+	}
+	if got := reg.Get("sbx-1").RuntimeState; got != lifecycle.StateRunning {
+		t.Fatalf("warm RuntimeState = %q, want running", got)
+	}
+}
+
+func TestHandle_LeaseHolderPersistsWithoutPushingProxy(t *testing.T) {
+	d, r, p, reg := buildDeps(t)
+	d.Leader = fakeLeader{leader: false}
+	d.Persister = fakeLeader{leader: true}
+	r.states["sbx-1"] = lifecycle.StatePaused
+
+	Handle(context.Background(), d, stateEvent("sbx-1", lifecycle.StateRunning, lifecycle.ActorCubeMaster))
+
+	if got := r.states["sbx-1"]; got != lifecycle.StateRunning {
+		t.Fatalf("lease holder Redis state = %q, want running", got)
+	}
+	if got := p.recorded(); len(got) != 0 {
+		t.Fatalf("promotion catch-up must not push CubeProxy: %+v", got)
+	}
+	if got := reg.Get("sbx-1").RuntimeState; got != lifecycle.StateRunning {
+		t.Fatalf("RuntimeState = %q, want running", got)
+	}
+}
+
+func TestHandle_RejectedOldEventDoesNotRollBackWarmState(t *testing.T) {
+	d, r, p, reg := buildDeps(t)
+	r.states["sbx-1"] = lifecycle.StateRunning
+	reg.SetRuntimeState("sbx-1", lifecycle.StateRunning)
+	rejected := false
+	r.casUpdated = &rejected
+
+	Handle(context.Background(), d, stateEvent("sbx-1", lifecycle.StatePaused, lifecycle.ActorCubeMaster))
+
+	if got := reg.Get("sbx-1").RuntimeState; got != lifecycle.StateRunning {
+		t.Fatalf("rejected old event rolled RuntimeState back to %q", got)
+	}
+	if got := p.recorded(); len(got) != 0 {
+		t.Fatalf("rejected old event pushed proxy state: %+v", got)
 	}
 }
 

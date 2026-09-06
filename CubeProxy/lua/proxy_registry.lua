@@ -22,9 +22,12 @@ local _M = { _VERSION = "0.01" }
 local REGISTRY_KEY  = "cube:v1:shared:cube_proxy:registry"
 local HEARTBEAT_KEY = "cube:v1:shared:cube_proxy:heartbeat"
 
--- publish is the single-tick worker. It (re)writes the registry entry the
--- first time it runs (or after a Redis outage), and always refreshes the
--- heartbeat score to now_ms. Every network operation is wrapped in pcall
+-- publish is the single-tick worker. It rewrites the registry entry and
+-- refreshes the heartbeat score on every tick. Rewriting the Hash row is
+-- intentional: CLM pruning cannot atomically check the heartbeat ZSet and
+-- delete the Hash field across Redis Cluster slots, so the next heartbeat
+-- must always repair a concurrently pruned row. Every network operation is
+-- wrapped in pcall
 -- so a transient failure never propagates up into ngx.timer.every, which
 -- would tear the timer down permanently.
 local function publish(premature, cfg, state)
@@ -46,37 +49,27 @@ local function publish(premature, cfg, state)
 
     local now_ms = math.floor(ngx.now() * 1000)
 
-    -- (Re)publish the registry Hash on the very first successful call, and
-    -- also after any error observed on the previous tick — that way a
-    -- transient Redis restart never leaves us in a state where the heartbeat
-    -- says "alive" but the registry row is gone.
-    if not state.registry_pushed then
-        local blob = cjson.encode({
-            proxy_id   = cfg.proxy_id,
-            admin_url  = cfg.admin_url,
-            resume_url = cfg.resume_url,
-            node_ip    = cfg.node_ip,
-            started_at = state.started_at,
-            version    = cfg.version,
-        })
-        if not blob then
-            ngx.log(ngx.ERR, "proxy_registry: cjson encode failed")
-            return
-        end
-        local ok, err = red:hset(REGISTRY_KEY, cfg.proxy_id, blob)
-        if not ok then
-            ngx.log(ngx.ERR, "proxy_registry: hset failed: ", tostring(err))
-            return -- leave state.registry_pushed=false so we retry next tick
-        end
-        state.registry_pushed = true
+    local blob = cjson.encode({
+        proxy_id   = cfg.proxy_id,
+        admin_url  = cfg.admin_url,
+        resume_url = cfg.resume_url,
+        node_ip    = cfg.node_ip,
+        started_at = state.started_at,
+        version    = cfg.version,
+    })
+    if not blob then
+        ngx.log(ngx.ERR, "proxy_registry: cjson encode failed")
+        return
+    end
+    local hset_ok, hset_err = red:hset(REGISTRY_KEY, cfg.proxy_id, blob)
+    if not hset_ok then
+        ngx.log(ngx.ERR, "proxy_registry: hset failed: ", tostring(hset_err))
+        return
     end
 
     local ok, err = red:zadd(HEARTBEAT_KEY, now_ms, cfg.proxy_id)
     if not ok then
         ngx.log(ngx.ERR, "proxy_registry: zadd failed: ", tostring(err))
-        -- Consider the registry row stale too; force a re-push on next tick
-        -- so we recover cleanly after Redis flushed its state.
-        state.registry_pushed = false
         return
     end
 
@@ -116,9 +109,8 @@ function _M.setup(cfg)
     end
 
     local state = {
-        started_at      = math.floor(ngx.now() * 1000),
-        registry_pushed = false,
-        last_pushed_ms  = 0,
+        started_at     = math.floor(ngx.now() * 1000),
+        last_pushed_ms = 0,
     }
 
     -- Cosockets (used by the Redis client) are disabled during

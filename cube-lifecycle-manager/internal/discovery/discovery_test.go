@@ -59,6 +59,35 @@ func TestDiffJoins(t *testing.T) {
 	}
 }
 
+func TestDiffJoinsTreatsStartedAtChangeAsRejoin(t *testing.T) {
+	prev := map[string]*live{
+		"a": {ep: Endpoint{ProxyID: "a", AdminURL: "http://a", StartedAt: 1}},
+	}
+	cur := map[string]*live{
+		"a": {ep: Endpoint{ProxyID: "a", AdminURL: "http://a", StartedAt: 2}},
+	}
+	joins, leaves := diffJoins(prev, cur)
+	if len(leaves) != 0 {
+		t.Fatalf("leaves = %v, want none", leaves)
+	}
+	if len(joins) != 1 || joins[0] != "a" {
+		t.Fatalf("joins = %v, want [a]", joins)
+	}
+}
+
+func TestDiffJoinsTreatsAdminURLChangeAsRejoin(t *testing.T) {
+	prev := map[string]*live{
+		"a": {ep: Endpoint{ProxyID: "a", AdminURL: "http://old"}},
+	}
+	cur := map[string]*live{
+		"a": {ep: Endpoint{ProxyID: "a", AdminURL: "http://new"}},
+	}
+	joins, leaves := diffJoins(prev, cur)
+	if len(leaves) != 0 || len(joins) != 1 || joins[0] != "a" {
+		t.Fatalf("joins=%v leaves=%v", joins, leaves)
+	}
+}
+
 func TestSnapshotMap_ConcurrentReads(t *testing.T) {
 	var mu sync.RWMutex
 	m := map[string]*live{

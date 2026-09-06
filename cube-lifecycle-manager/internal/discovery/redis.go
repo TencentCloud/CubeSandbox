@@ -14,6 +14,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/leader"
 )
 
 // RedisDiscovery is the production Fleet: it periodically reads the
@@ -26,6 +28,7 @@ type RedisDiscovery struct {
 	refresh time.Duration
 	onJoin  func(Endpoint)
 	onLeave func(string)
+	leader  leader.Status
 
 	mu    sync.RWMutex
 	state map[string]*live
@@ -38,11 +41,16 @@ type Options struct {
 	HeartbeatTTL    time.Duration // members with score < now-TTL are considered dead
 	RefreshInterval time.Duration // how often to re-scan Redis
 
-	// OnJoin fires exactly once when a proxy first appears in the live set.
-	// Used by main to trigger a registry replay (HGETALL meta → push).
+	// OnJoin fires when a proxy first appears in the live set, or when its
+	// StartedAt / AdminURL changes (restart or address move). Used by main
+	// to hydrate that replica from the registry snapshot.
 	OnJoin func(Endpoint)
 	// OnLeave fires when a proxy's heartbeat has aged past TTL.
 	OnLeave func(proxyID string)
+
+	// Leader gates only destructive pruning. Every replica still refreshes its
+	// local fleet so standby resume requests remain warm.
+	Leader leader.Status
 }
 
 // New builds a RedisDiscovery with sane defaults for zero-valued options.
@@ -69,6 +77,7 @@ func New(o Options) *RedisDiscovery {
 		refresh: o.RefreshInterval,
 		onJoin:  o.OnJoin,
 		onLeave: o.OnLeave,
+		leader:  o.Leader,
 		state:   make(map[string]*live),
 	}
 }
@@ -185,8 +194,10 @@ func (d *RedisDiscovery) refreshOnce(ctx context.Context) error {
 	// Best-effort prune of expired heartbeat members + their registry rows.
 	// Failures here don't invalidate the refresh (state is already updated),
 	// they just delay cleanup until the next tick.
-	if err := d.pruneExpired(ctx, cutoff); err != nil {
-		d.log.Warn("discovery: prune failed", zap.Error(err))
+	if d.leader == nil || d.leader.IsLeader() {
+		if err := d.pruneExpired(ctx, cutoff); err != nil {
+			d.log.Warn("discovery: prune failed", zap.Error(err))
+		}
 	}
 	return nil
 }
@@ -197,9 +208,9 @@ func (d *RedisDiscovery) refreshOnce(ctx context.Context) error {
 func (d *RedisDiscovery) pruneExpired(ctx context.Context, cutoff int64) error {
 	// ZRANGEBYSCORE ... to collect expired IDs first; we need them to feed
 	// HDEL. Doing this before ZREMRANGEBYSCORE keeps the two operations
-	// consistent even if a new heartbeat lands in between (worst case: we
-	// HDEL a row that got re-registered in the same tick, which the proxy
-	// will republish on its next timer tick — self-healing).
+	// consistent enough for pruning. A heartbeat can land between the read
+	// and pipeline, so CubeProxy deliberately rewrites its registry Hash row
+	// on every heartbeat; any concurrent HDEL is repaired on the next tick.
 	rangeArgs := &redis.ZRangeBy{
 		Min: "-inf",
 		Max: "(" + strconv.FormatInt(cutoff+1, 10), // inclusive of cutoff

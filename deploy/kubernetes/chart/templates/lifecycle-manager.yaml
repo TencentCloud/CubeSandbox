@@ -34,6 +34,16 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/instance: {{ .Release.Name }}
+                    app.kubernetes.io/component: lifecycle-manager
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: cube-lifecycle-manager
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.lifecycleManager "context" $) | quote }}
@@ -78,6 +88,14 @@ spec:
               value: {{ .Values.lifecycleManager.stateLockTTL | quote }}
             - name: CUBE_LCM_EVENTBUS_ENABLED
               value: {{ .Values.lifecycleManager.eventBusEnabled | quote }}
+            - name: CUBE_LCM_LEADER_ELECTION_ENABLED
+              value: {{ .Values.lifecycleManager.leaderElection.enabled | quote }}
+            - name: CUBE_LCM_LEADER_LEASE_TTL
+              value: {{ .Values.lifecycleManager.leaderElection.leaseTTL | quote }}
+            - name: CUBE_LCM_LEADER_RENEW_INTERVAL
+              value: {{ .Values.lifecycleManager.leaderElection.renewInterval | quote }}
+            - name: CUBE_LCM_LEADER_RETRY_INTERVAL
+              value: {{ .Values.lifecycleManager.leaderElection.retryInterval | quote }}
             - name: CUBE_LCM_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:

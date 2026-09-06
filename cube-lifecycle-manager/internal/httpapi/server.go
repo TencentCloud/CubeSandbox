@@ -20,6 +20,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/leader"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/registry"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/resumer"
 )
@@ -37,6 +38,7 @@ type Server struct {
 	resumer  *resumer.Resumer
 	registry *registry.Registry
 	fleet    FleetSizer
+	leader   leader.Status
 	log      *zap.Logger
 	srv      *http.Server
 }
@@ -48,6 +50,13 @@ func New(addr string, r *resumer.Resumer, reg *registry.Registry, log *zap.Logge
 // WithFleetSizer sets the optional fleet-size probe used by /readyz. Chainable.
 func (s *Server) WithFleetSizer(fs FleetSizer) *Server {
 	s.fleet = fs
+	return s
+}
+
+// WithLeaderStatus exposes the current election role through /readyz without
+// changing readiness: warm standbys must remain in Service endpoints.
+func (s *Server) WithLeaderStatus(status leader.Status) *Server {
+	s.leader = status
 	return s
 }
 
@@ -144,8 +153,16 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	resp := map[string]any{
-		"ok":           true,
-		"registry_len": s.registry.Len(),
+		"ok":                      true,
+		"role":                    "leader",
+		"leader_election_enabled": false,
+		"registry_len":            s.registry.Len(),
+	}
+	if s.leader != nil {
+		resp["leader_election_enabled"] = s.leader.Enabled()
+		if !s.leader.IsLeader() {
+			resp["role"] = "standby"
+		}
 	}
 	if s.fleet != nil {
 		resp["fleet_size"] = s.fleet.Snapshot()

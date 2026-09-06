@@ -91,6 +91,19 @@ func (c *Client) UpsertMetaTo(ctx context.Context, adminURL string, meta lifecyc
 	return err
 }
 
+// SetStateTo pushes a state transition to a single admin URL.
+func (c *Client) SetStateTo(ctx context.Context, adminURL, sandboxID, state string) error {
+	body, err := json.Marshal(map[string]string{
+		"sandbox_id": sandboxID,
+		"state":      state,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal state: %w", err)
+	}
+	_, err = c.do(ctx, http.MethodPost, adminURL, "/admin/state", body)
+	return err
+}
+
 // DeleteMeta drops a sandbox from every CubeProxy.
 func (c *Client) DeleteMeta(ctx context.Context, sandboxID string) error {
 	body, err := json.Marshal(map[string]string{"sandbox_id": sandboxID})

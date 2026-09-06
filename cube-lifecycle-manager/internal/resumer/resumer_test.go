@@ -14,6 +14,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/cubemasterclient"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/eventbus"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/registry"
@@ -50,6 +51,21 @@ func (f *fakeStore) AcquireState(_ context.Context, sid, state string, _ time.Du
 	}
 	f.states[sid] = state
 	return true, nil
+}
+
+func (f *fakeStore) AcquireResume(_ context.Context, sid string, _ time.Duration) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if v, ok := f.preLocked[sid]; ok {
+		f.states[sid] = v
+		return v, false, nil
+	}
+	current, ok := f.states[sid]
+	if !ok || current == lifecycle.StatePaused {
+		f.states[sid] = "resuming"
+		return "resuming", true, nil
+	}
+	return current, false, nil
 }
 
 func (f *fakeStore) SetState(_ context.Context, sid, state string, _ time.Duration) error {
@@ -346,13 +362,50 @@ func TestResumer_DedupesConcurrentResumes(t *testing.T) {
 	}
 }
 
+func TestResumer_DedupesAcrossReplicas(t *testing.T) {
+	reg := registry.New()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
+	})
+	store := newFakeStore()
+	store.states["sbx"] = lifecycle.StatePaused
+	master := &fakeMaster{latency: 100 * time.Millisecond}
+	first := newTestResumer(reg, store, master, &fakePush{})
+	second := newTestResumer(reg, store, master, &fakePush{})
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, r := range []*Resumer{first, second} {
+		go func(r *Resumer) {
+			<-start
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			errs <- r.Resume(ctx, "sbx")
+		}(r)
+	}
+	close(start)
+
+	if err := <-errs; err != nil {
+		t.Fatalf("first replica failed: %v", err)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("second replica failed: %v", err)
+	}
+	if got := atomic.LoadInt32(&master.calls); got != 1 {
+		t.Fatalf("cross-replica resumes must coalesce into 1 RPC, got %d", got)
+	}
+}
+
 func TestResumer_RollsBackOnRPCFailure(t *testing.T) {
 	reg := registry.New()
 	reg.Upsert(lifecycle.SandboxLifecycleMeta{
 		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
 	})
 	store := newFakeStore()
-	master := &fakeMaster{failNext: true, failError: errors.New("master 500")}
+	master := &fakeMaster{failNext: true, failError: &cubemasterclient.APIError{
+		RetCode: 999,
+		RetMsg:  "definitive failure",
+	}}
 	push := &fakePush{}
 	r := newTestResumer(reg, store, master, push)
 
@@ -361,6 +414,23 @@ func TestResumer_RollsBackOnRPCFailure(t *testing.T) {
 	}
 	if got := store.state("sbx"); got != "" {
 		t.Fatalf("state must be cleared on rollback, got %q", got)
+	}
+}
+
+func TestResumer_PreservesOwnershipOnUnknownRPCResult(t *testing.T) {
+	reg := registry.New()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
+	})
+	store := newFakeStore()
+	master := &fakeMaster{failNext: true, failError: errors.New("connection reset")}
+	r := newTestResumer(reg, store, master, &fakePush{})
+
+	if err := r.Resume(context.Background(), "sbx"); err == nil {
+		t.Fatal("expected error from transport failure")
+	}
+	if got := store.state("sbx"); got != "resuming" {
+		t.Fatalf("unknown result must retain ownership until TTL, got %q", got)
 	}
 }
 

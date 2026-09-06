@@ -95,11 +95,17 @@ func cloneEndpoints(src map[string]*live) []Endpoint {
 	return out
 }
 
-// diffJoins compares "previous" and "current" ProxyID sets, returning the IDs
-// that appear only in "current" (joins) and only in "previous" (leaves).
+// diffJoins compares previous and current ProxyID sets. A matching ID with a
+// new StartedAt or AdminURL is treated as a rejoin so the leader can hydrate
+// the restarted replica without synthesizing a leave.
 func diffJoins(prev, cur map[string]*live) (joins, leaves []string) {
-	for id := range cur {
-		if _, ok := prev[id]; !ok {
+	for id, l := range cur {
+		old, ok := prev[id]
+		if !ok {
+			joins = append(joins, id)
+			continue
+		}
+		if old.ep.StartedAt != l.ep.StartedAt || old.ep.AdminURL != l.ep.AdminURL {
 			joins = append(joins, id)
 		}
 	}

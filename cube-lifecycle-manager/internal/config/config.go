@@ -51,7 +51,7 @@ type Config struct {
 	DefaultIdleTimeout time.Duration
 
 	// Loop intervals.
-	StreamReadBlock   time.Duration // XREADGROUP BLOCK arg
+	StreamReadBlock   time.Duration // XREAD BLOCK arg
 	LastActivePoll    time.Duration // GET /admin/last_active cadence
 	IdleSweepInterval time.Duration // sweeper cadence
 	// BootstrapWarmup: after CLM restart, wait this long before pausing
@@ -64,11 +64,12 @@ type Config struct {
 	// CubeMaster RPC, short enough that a crashed CLM replica releases the lock.
 	StateLockTTL time.Duration
 
-	// Consumer group identity. Group name is fixed; consumer name defaults
-	// to the host's name so multiple CLM replicas in a cluster get independent
-	// pending-entries lists.
+	// ConsumerGroup is retained for one release for configuration/logging
+	// compatibility; broadcast XREAD no longer uses a consumer group.
 	ConsumerGroup string
-	ConsumerName  string // empty → derived from os.Hostname()
+	// ConsumerName defaults to the hostname and is now used as the leader
+	// election identity prefix.
+	ConsumerName string // empty → derived from os.Hostname()
 
 	// HTTP client timeouts (for outbound calls to CubeMaster + CubeProxy).
 	HTTPTimeout time.Duration
@@ -91,6 +92,14 @@ type Config struct {
 	// path and resumer.waitForRunning uses its 100ms polling ticker.
 	// Set CUBE_LCM_EVENTBUS_ENABLED=false as a kill switch.
 	EventBusEnabled bool
+
+	// Leader election gates singleton maintenance work (idle sweep/kill and
+	// CubeProxy registry pruning). Warm standbys still consume lifecycle
+	// events, poll activity, and serve resume requests.
+	LeaderElectionEnabled bool
+	LeaderLeaseTTL        time.Duration
+	LeaderRenewInterval   time.Duration
+	LeaderRetryInterval   time.Duration
 }
 
 // Default returns a config populated with safe defaults; callers then override
@@ -119,6 +128,12 @@ func Default() *Config {
 		HeartbeatTTL:     15 * time.Second,
 		DiscoveryRefresh: 3 * time.Second,
 		EventBusEnabled:  true,
+		// Disabled by default so non-Kubernetes single-instance deployments
+		// retain their current behavior. Kubernetes explicitly enables it.
+		LeaderElectionEnabled: false,
+		LeaderLeaseTTL:        10 * time.Second,
+		LeaderRenewInterval:   3 * time.Second,
+		LeaderRetryInterval:   time.Second,
 	}
 }
 
@@ -237,6 +252,35 @@ func Load() (*Config, error) {
 			c.EventBusEnabled = enabled
 		}
 	}
+	if v := os.Getenv("CUBE_LCM_LEADER_ELECTION_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			addErr("CUBE_LCM_LEADER_ELECTION_ENABLED", err)
+		} else {
+			c.LeaderElectionEnabled = enabled
+		}
+	}
+	if v := os.Getenv("CUBE_LCM_LEADER_LEASE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err != nil {
+			addErr("CUBE_LCM_LEADER_LEASE_TTL", err)
+		} else {
+			c.LeaderLeaseTTL = d
+		}
+	}
+	if v := os.Getenv("CUBE_LCM_LEADER_RENEW_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err != nil {
+			addErr("CUBE_LCM_LEADER_RENEW_INTERVAL", err)
+		} else {
+			c.LeaderRenewInterval = d
+		}
+	}
+	if v := os.Getenv("CUBE_LCM_LEADER_RETRY_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err != nil {
+			addErr("CUBE_LCM_LEADER_RETRY_INTERVAL", err)
+		} else {
+			c.LeaderRetryInterval = d
+		}
+	}
 	if c.ConsumerName == "" {
 		host, err := os.Hostname()
 		if err != nil {
@@ -279,6 +323,24 @@ func (c *Config) Validate() error {
 	}
 	if c.LastActivePoll <= 0 {
 		return errors.New("last active poll must be > 0")
+	}
+	if c.HTTPTimeout <= 0 {
+		return errors.New("http timeout must be > 0")
+	}
+	if c.StateLockTTL <= c.HTTPTimeout {
+		return errors.New("state lock ttl must be greater than the HTTP timeout")
+	}
+	if c.LeaderLeaseTTL <= 0 {
+		return errors.New("leader lease ttl must be > 0")
+	}
+	if c.LeaderRenewInterval <= 0 {
+		return errors.New("leader renew interval must be > 0")
+	}
+	if c.LeaderRenewInterval*2 >= c.LeaderLeaseTTL {
+		return errors.New("leader renew interval must be less than half the lease ttl")
+	}
+	if c.LeaderRetryInterval <= 0 || c.LeaderRetryInterval >= c.LeaderLeaseTTL {
+		return errors.New("leader retry interval must be > 0 and less than the lease ttl")
 	}
 	return nil
 }

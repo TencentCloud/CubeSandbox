@@ -11,8 +11,8 @@
 //     value=JSON snapshot. CLM HGETALL it on startup to bootstrap
 //     the registry.
 //   - cube:v1:shared:sandbox:lifecycle:events  Stream, append-only event
-//     log of create/delete/update/state operations. CLM consumes via
-//     XREADGROUP for incremental updates after the bootstrap.
+//     log of create/delete/update/state operations. Every CLM replica consumes
+//     it via XREAD so each warm standby maintains a complete registry.
 //
 // Stream events cover two classes of change:
 //
@@ -41,8 +41,8 @@ var (
 	// know about. Field = sandbox ID, value = JSON-encoded SandboxLifecycleMeta.
 	MetaKey = rediskey.SandboxLifecycleMeta()
 
-	// EventStreamKey is the append-only stream of create/delete events. The
-	// sidecar maintains a consumer group on it; entries trim with MAXLEN ~.
+	// EventStreamKey is the append-only stream of create/delete events. CLM
+	// replicas keep independent XREAD cursors; entries trim with MAXLEN ~.
 	EventStreamKey = rediskey.SandboxLifecycleEvents()
 )
 

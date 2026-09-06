@@ -51,9 +51,10 @@ type Resumer struct {
 }
 
 const (
-	proxyStatePushTimeout = 3 * time.Second
-	proxyStatePushRetries = 2
-	waitPollInterval      = 100 * time.Millisecond
+	proxyStatePushTimeout   = 3 * time.Second
+	stateBookkeepingTimeout = 3 * time.Second
+	proxyStatePushRetries   = 2
+	waitPollInterval        = 100 * time.Millisecond
 )
 
 // call represents one in-flight resume operation. Every goroutine waiting on
@@ -134,7 +135,7 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 		// auto-resume, and release the lock we just SET so the sweeper
 		// doesn't skip decisions for its TTL window.
 		if !entry.Meta.AutoResume {
-			_ = r.o.Redis.ClearStateNotify(ctx, sandboxID)
+			r.clearState(sandboxID)
 			return errors.New("auto_resume not enabled for sandbox")
 		}
 		if err := r.callCubeMasterResume(ctx, sandboxID, entry.Meta.InstanceType); err != nil {
@@ -170,7 +171,9 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 	//     misleading. The proxy's log_phase will eventually overwrite
 	//     this via the periodic last_active poll, but we want the right
 	//     answer immediately, not 5–10 seconds later.
-	if err := r.o.Redis.WriteState(ctx, sandboxID, "running", r.o.StateLockTTL); err != nil {
+	bookkeepingCtx, cancel := context.WithTimeout(context.Background(), stateBookkeepingTimeout)
+	defer cancel()
+	if err := r.o.Redis.WriteState(bookkeepingCtx, sandboxID, "running", r.o.StateLockTTL); err != nil {
 		r.o.Log.Warn("write running state failed",
 			zap.String("sandbox_id", sandboxID), zap.Error(err))
 	}
@@ -180,6 +183,7 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 	// replica to respond. Use an independent bounded context because the
 	// request context is about to be returned (and may already be cancelled).
 	go r.pushRunningState(sandboxID)
+	r.o.Registry.SetRuntimeState(sandboxID, lifecycle.StateRunning)
 	r.o.Registry.MergeLastActive(sandboxID, time.Now().UnixMilli())
 
 	r.o.Log.Info("auto-resumed sandbox",
@@ -231,8 +235,10 @@ func (r *Resumer) callCubeMasterResume(ctx context.Context, sandboxID, instanceT
 		// from under us. Evict everywhere and surface as an error to
 		// the HTTP caller so CubeProxy returns 5xx (the dataplane
 		// request can't be served either way).
-		_ = r.o.Redis.ClearStateNotify(ctx, sandboxID)
-		_ = r.o.ProxyPush.DeleteMeta(ctx, sandboxID)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), stateBookkeepingTimeout)
+		_ = r.o.Redis.ClearStateNotify(cleanupCtx, sandboxID)
+		_ = r.o.ProxyPush.DeleteMeta(cleanupCtx, sandboxID)
+		cancel()
 		r.o.Registry.Delete(sandboxID)
 		r.o.Log.Info("sandbox not found on cubemaster during resume; evicted",
 			zap.String("sandbox_id", sandboxID),
@@ -247,10 +253,25 @@ func (r *Resumer) callCubeMasterResume(ctx context.Context, sandboxID, instanceT
 			zap.Int("ret_code", apiErr.RetCode))
 		return nil
 	default:
-		// Real failure: clear the resuming key so a future request can
-		// retry, and surface the error.
-		_ = r.o.Redis.ClearStateNotify(ctx, sandboxID)
+		// A transport or timeout error has an unknown server-side result.
+		// Preserve ownership until its TTL so another replica cannot issue a
+		// duplicate resume while CubeMaster may already be completing this one.
+		if !errors.As(resumeErr, &apiErr) {
+			return errors.New("cubemaster resume result unknown: " + resumeErr.Error())
+		}
+		// A structured non-success response is definitive; release ownership
+		// with an independent context so request cancellation cannot strand it.
+		r.clearState(sandboxID)
 		return errors.New("cubemaster resume: " + resumeErr.Error())
+	}
+}
+
+func (r *Resumer) clearState(sandboxID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), stateBookkeepingTimeout)
+	defer cancel()
+	if err := r.o.Redis.ClearStateNotify(ctx, sandboxID); err != nil {
+		r.o.Log.Warn("clear resume ownership failed",
+			zap.String("sandbox_id", sandboxID), zap.Error(err))
 	}
 }
 
@@ -261,9 +282,9 @@ func (r *Resumer) callCubeMasterResume(ctx context.Context, sandboxID, instanceT
 // (peer in flight resolved, sandbox already running, or real failure).
 //
 // The state-key conflict (terminal markers vs. transition locks share
-// the key) is resolved by GET-ing the current value:
+// the key) is resolved by an atomic single-key WATCH transaction:
 //
-//   - "paused" or expired:        we own the resume — write "resuming"
+//   - "paused" or expired:        atomically write "resuming"; the winner owns
 //   - "running":                   nothing to do, return nil-and-success
 //     via a sentinel (the caller's success
 //     bookkeeping then runs and re-asserts
@@ -271,26 +292,19 @@ func (r *Resumer) callCubeMasterResume(ctx context.Context, sandboxID, instanceT
 //     for race-recovery).
 //   - "pausing" or "resuming":    a peer is in flight → waitForRunning
 //
-// This is intentionally racy: between GET and SET another CLM replica could
-// claim the key. That's fine because the worst case is two resumers both
-// calling CubeMaster.Resume — which CubeMaster handles idempotently
-// (returns "already running" the second time, which we already map to
-// success in the caller).
+// WATCH/MULTI keeps the paused→resuming transition atomic across CLM replicas.
+// CubeMaster's own lifecycle lock remains the final guard for ambiguous
+// transport failures where a timed-out operation may still complete remotely.
 func (r *Resumer) acquireResumeOwnership(ctx context.Context, sandboxID string) error {
-	cur, ok, err := r.o.Redis.GetState(ctx, sandboxID)
+	cur, acquired, err := r.o.Redis.AcquireResume(ctx, sandboxID, r.o.StateLockTTL)
 	if err != nil {
 		return err
 	}
+	if acquired {
+		return nil
+	}
 
 	switch {
-	case !ok, cur == "paused":
-		// Either no lock at all (most common after sweeper's TTL expired)
-		// or terminal "paused" left by a successful sweep. Either way we
-		// claim ownership by SET-ing "resuming".
-		if err := r.o.Redis.SetState(ctx, sandboxID, "resuming", r.o.StateLockTTL); err != nil {
-			return err
-		}
-		return nil
 	case cur == "running":
 		// Sandbox is already running on Redis's view. No-op resume; the
 		// caller's success path will re-push running to the proxy in case
@@ -308,6 +322,11 @@ func (r *Resumer) acquireResumeOwnership(ctx context.Context, sandboxID string) 
 			return err
 		}
 		return errAlreadyRunning
+	case cur == "", cur == "paused":
+		// AcquireResume only returns these values when its WATCH transaction
+		// repeatedly conflicted, which is surfaced as an error. Keep this
+		// defensive branch for alternate stateStore implementations.
+		return errors.New("resume ownership was not acquired")
 	default:
 		// Unknown state — fall back to wait, same translation rule.
 		r.o.Log.Warn("unknown state during resume ownership probe",

@@ -13,6 +13,7 @@ import (
 // in-memory fake so we don't depend on a live Redis.
 type stateStore interface {
 	AcquireState(ctx context.Context, sandboxID, state string, ttl time.Duration) (bool, error)
+	AcquireResume(ctx context.Context, sandboxID string, ttl time.Duration) (state string, acquired bool, err error)
 	SetState(ctx context.Context, sandboxID, state string, ttl time.Duration) error
 	ClearState(ctx context.Context, sandboxID string) error
 	GetState(ctx context.Context, sandboxID string) (string, bool, error)

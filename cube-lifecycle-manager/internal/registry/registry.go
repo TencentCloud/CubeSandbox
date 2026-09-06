@@ -21,6 +21,10 @@ import (
 type Entry struct {
 	Meta lifecycle.SandboxLifecycleMeta
 
+	// RuntimeState is the latest terminal state observed on the lifecycle
+	// stream. Warm standbys retain it for promotion reconciliation.
+	RuntimeState string
+
 	// LastActiveMs is the most recent activity timestamp seen across all
 	// CubeProxy instances (CLM takes max() over instances). Zero means
 	// "never observed" — the sweeper falls back to Meta.CreatedAt for the
@@ -88,6 +92,19 @@ func (r *Registry) MergeLastActive(sandboxID string, tsMs int64) bool {
 		return true
 	}
 	return false
+}
+
+// SetRuntimeState records the latest terminal lifecycle state for promotion.
+// Unknown sandboxes are ignored until their create event arrives.
+func (r *Registry) SetRuntimeState(sandboxID, state string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[sandboxID]
+	if !ok {
+		return false
+	}
+	e.RuntimeState = state
+	return true
 }
 
 // ResetLastActive clears LastActiveMs back to 0 for a single sandbox.

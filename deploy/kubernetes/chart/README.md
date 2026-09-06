@@ -438,6 +438,18 @@ The default TLS mode is `selfSigned`, matching the one-click mkcert-style test e
 
 `cube-proxy` depends on chart-managed `cube-lifecycle-manager` for sandbox auto-pause / auto-resume. The chart wires nginx `$cube_sidecar_addr` to the lifecycle-manager Service, opens the proxy admin listener for in-cluster discovery, and registers each proxy replica in Redis. Do not deploy a separate cube-proxy-sidecar.
 
+The lifecycle manager runs two warm replicas by default. Both replicas consume
+lifecycle events and serve resume callbacks, while a Redis lease elects the
+single replica allowed to run idle sweep/kill and stale-proxy pruning. The
+lease uses single-key Redis transactions and requires no Kubernetes RBAC.
+Production deployments should pair this with Sentinel or managed HA Redis;
+the chart's built-in single-replica Redis remains a shared failure point.
+Because Redis replication is asynchronous, a Redis failover does not provide
+strict fencing for an already in-flight leader operation. The new leader
+catches up the event stream, waits one CubeProxy HTTP timeout so those
+in-flight writes can finish, then catches up again before running singleton
+work. Local lease deadlines and per-sandbox locks bound the remaining window.
+
 ### Production TLS Secret
 
 ```yaml

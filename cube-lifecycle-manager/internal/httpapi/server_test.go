@@ -36,6 +36,14 @@ func (f *fakeStore) AcquireState(_ context.Context, sid, state string, _ time.Du
 	f.states[sid] = state
 	return true, nil
 }
+func (f *fakeStore) AcquireResume(_ context.Context, sid string, _ time.Duration) (string, bool, error) {
+	current, ok := f.states[sid]
+	if !ok || current == lifecycle.StatePaused {
+		f.states[sid] = "resuming"
+		return "resuming", true, nil
+	}
+	return current, false, nil
+}
 func (f *fakeStore) SetState(_ context.Context, sid, state string, _ time.Duration) error {
 	f.states[sid] = state
 	return nil
@@ -205,6 +213,14 @@ type stubFleetSize int
 
 func (s stubFleetSize) Snapshot() int { return int(s) }
 
+type stubLeaderStatus struct {
+	leader  bool
+	enabled bool
+}
+
+func (s stubLeaderStatus) IsLeader() bool { return s.leader }
+func (s stubLeaderStatus) Enabled() bool  { return s.enabled }
+
 func TestReadyz_ExposesFleetSizeWhenConfigured(t *testing.T) {
 	reg := registry.New()
 	reg.Upsert(lifecycle.SandboxLifecycleMeta{SandboxID: "sbx"})
@@ -236,5 +252,37 @@ func TestReadyz_ExposesFleetSizeWhenConfigured(t *testing.T) {
 	}
 	if !strings.Contains(string(body), `"fleet_size":3`) {
 		t.Fatalf("/readyz should surface fleet_size=3: %s", body)
+	}
+}
+
+func TestReadyz_ExposesStandbyWithoutFailingReadiness(t *testing.T) {
+	reg := registry.New()
+	r := resumer.New(resumer.Options{
+		Registry:     reg,
+		Redis:        newFakeStore(),
+		CubeMaster:   &fakeMaster{},
+		ProxyPush:    fakePush{},
+		StateLockTTL: time.Minute,
+		Log:          zap.NewNop(),
+	})
+	s := New(":0", r, reg, zap.NewNop()).
+		WithLeaderStatus(stubLeaderStatus{leader: false, enabled: true})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/readyz", s.handleReadyz)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/readyz wrong status: %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), `"role":"standby"`) ||
+		!strings.Contains(string(body), `"leader_election_enabled":true`) {
+		t.Fatalf("/readyz should expose standby role: %s", body)
 	}
 }

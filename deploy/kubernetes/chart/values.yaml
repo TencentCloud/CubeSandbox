@@ -411,7 +411,15 @@ lifecycleManager:
   # is enabled; CubeProxy points $cube_sidecar_addr at this Service and
   # registers itself in Redis for CLM discovery.
   enabled: true
-  replicas: 1
+  # Two replicas run active-standby when leader election is enabled. The
+  # preferred anti-affinity in the Deployment spreads them across nodes when
+  # the cluster has enough eligible control-plane nodes.
+  replicas: 2
+  leaderElection:
+    enabled: true
+    leaseTTL: 10s
+    renewInterval: 3s
+    retryInterval: 1s
   podAnnotations: {}
   listenAddr: "0.0.0.0:8083"
   service:

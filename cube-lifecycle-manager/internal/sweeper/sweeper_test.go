@@ -185,6 +185,11 @@ func newTestSweeper(reg *registry.Registry, store *fakeStore, master *fakeMaster
 	})
 }
 
+type stubLeaderStatus bool
+
+func (s stubLeaderStatus) IsLeader() bool { return bool(s) }
+func (s stubLeaderStatus) Enabled() bool  { return true }
+
 // seedEntry inserts a registry entry. Unlike the previous grace-period
 // design, the sweeper now bases its idle decision on max(LastActiveMs,
 // CreatedAt), so test cases just need to set those fields appropriately.
@@ -195,6 +200,29 @@ func seedEntry(t *testing.T, r *registry.Registry, meta lifecycle.SandboxLifecyc
 		if !r.MergeLastActive(meta.SandboxID, lastActiveMs) {
 			t.Fatalf("seed: MergeLastActive(%s, %d) didn't advance", meta.SandboxID, lastActiveMs)
 		}
+	}
+}
+
+func TestSweeper_StandbySkipsIdleWork(t *testing.T) {
+	reg := registry.New()
+	store := newFakeStore()
+	master := &fakeMaster{}
+	push := newFakePush()
+	now := time.Now()
+	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx-standby", InstanceType: "cubebox",
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(1),
+	}, now.Add(-time.Minute).UnixMilli())
+
+	s := newTestSweeper(reg, store, master, push, now)
+	s.o.Leader = stubLeaderStatus(false)
+	s.sweepOnce(context.Background())
+
+	if len(master.calls) != 0 {
+		t.Fatalf("standby must not pause sandboxes: %v", master.calls)
+	}
+	if got := store.state("sbx-standby"); got != "" {
+		t.Fatalf("standby must not mutate state, got %q", got)
 	}
 }
 
