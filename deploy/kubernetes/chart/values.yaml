@@ -623,6 +623,21 @@ cubeNode:
     # Skip host-network conflict checks (cube-node-init) and the Service CIDR
     # preflight Hook. Use only when you accept blackhole / routing risk.
     cidrSkipConflictCheck: false
+    # Guest MTU patched into Cubelet config.toml mvm_mtu
+    # (CUBE_SANDBOX_NETWORK_MTU). The sandbox tap is created with this value and
+    # the hypervisor advertises it to the guest over VIRTIO_NET_F_MTU, so it is
+    # effectively the guest's MTU and must not exceed the MTU of the interface
+    # the traffic leaves through. cube-node runs on the Pod network by default,
+    # where an encapsulating CNI is smaller than 1500 (Flannel VXLAN is 1450;
+    # Calico's documented IPIP default is 1480), and the guest cannot recover
+    # on its own: oversized frames are dropped on egress and inbound ICMP
+    # fragmentation-needed is not forwarded into the guest, so connections
+    # stall instead of failing.
+    # "auto" lowers mvm_mtu to the detected NIC's MTU and never raises it, so it
+    # is a no-op wherever the uplink is already >= the packaged value. Set an
+    # integer in 1280..65535 to pin it, or 0 to keep the packaged Cubelet
+    # config.toml value.
+    mtu: "auto"
 
   dns:
     clusterDomain: cluster.local
