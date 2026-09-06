@@ -11,6 +11,16 @@ common:
   collect_metric_interval: 1s
   default_headless_service_nodes_num: 1
   enable_check_com_net_id_param: false
+  # Template build wiring: CubeMaster no longer has a templatecenter_enabled
+  # switch. Every template-from-image build is forwarded to CubeTemplateCenter.
+  #
+  # CubeTemplateCenter's address can be set here (persistent, per-deployment)
+  # or overridden by the CUBE_TEMPLATE_CENTER_ADDR environment variable
+  # (ad-hoc debugging). Env wins over yaml. Both empty means "not configured"
+  # and all template builds will fail.
+  {{- if .Values.controlPlane.templateCenter.enabled }}
+  template_center_addr: "http://{{ include "cube.templateCenterEndpoint" . }}"
+  {{- end }}
 
 log:
   module: "cubemaster"

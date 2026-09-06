@@ -14,6 +14,22 @@ common:
   collect_metric_interval: 1s
   default_headless_service_nodes_num: 1
   enable_check_com_net_id_param: false
+  # CubeTemplateCenter master switch -- the ONLY template knob in this file.
+  # Unset and false are the same: every template path is served locally,
+  # exactly as before the split. An explicit true forwards template-from-image
+  # builds to CubeTemplateCenter.
+  templatecenter_enabled: false
+  # CubeTemplateCenter's address is deliberately NOT a key here: it is a
+  # deployment fact, so CubeMaster reads it from the CUBE_TEMPLATE_CENTER_ADDR
+  # environment variable (the counterpart of CUBE_MASTER_ADDR, which TC uses to
+  # call back). To hand builds to the TC service installed (but not enabled) by
+  # the same bundle:
+  #   1. set templatecenter_enabled to true here,
+  #   2. set CUBE_TEMPLATE_CENTER_ADDR=http://127.0.0.1:8090 in
+  #      /usr/local/services/cubetoolbox/.one-click.env,
+  #   3. restart cube-sandbox-cubemaster.service and
+  #      cube-sandbox-cubetemplatecenter.service.
+  # TC reports build status back over http://127.0.0.1:8089.
 
 log:
   module: "cubemaster"

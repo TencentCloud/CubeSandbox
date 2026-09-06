@@ -12,6 +12,10 @@ common:
   collect_metric_interval: 1s
   default_headless_service_nodes_num: 1
   enable_check_com_net_id_param: false
+  # CubeTemplateCenter address for template builds. Can be set here or via
+  # CUBE_TEMPLATE_CENTER_ADDR env (env wins). Uncomment and adjust for your
+  # deployment; one-click defaults to http://127.0.0.1:8090.
+  # template_center_addr: "http://127.0.0.1:8090"
 
 log:
   module: "cubemaster"

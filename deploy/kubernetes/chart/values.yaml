@@ -70,6 +70,14 @@ images:
     tag: v0.7.0
     pullPolicy: IfNotPresent
 
+  # Standalone template build service. Built from
+  # CubeTemplateCenter/docker/Dockerfile; carries skopeo / umoci / e2fsprogs
+  # because it is the process that pulls images and makes the ext4.
+  templateCenter:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-templatecenter
+    tag: v0.7.0
+    pullPolicy: IfNotPresent
+
   ops:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-ops
     tag: v0.7.0
@@ -214,23 +222,39 @@ controlPlane:
 
   master:
     enabled: true
+    # Number of Master replicas. Master is stateless (all state in DB), so
+    # multiple replicas can run concurrently without coordination. Increase
+    # for higher API throughput and availability.
     replicas: 1
     # Default PVC is ReadWriteOnce: RollingUpdate with maxSurge would start a
     # second Pod before the old one releases the volume and hang on multi-attach.
     # Recreate deletes the old Pod first so the PVC can remount cleanly.
+    #
+    # If using shared storage (ReadWriteMany) or S3-only artifact storage
+    # (persistence.enabled=false), you can switch to RollingUpdate.
     deploymentStrategy:
       type: Recreate
     command: []
     args: []
     env: []
     nodeIPs: []
+    # Bypass the migration content preflight. Rarely needed: an applied version
+    # that is absent from this image's migrations tree is only reported, so a
+    # database migrated by a different build line no longer blocks startup.
+    # Enable this only to bypass a real content drift (a migration edited after
+    # being applied), which stays fatal by design.
+    skipMigrationFingerprintCheck: false
     service:
       type: ClusterIP
       port: 8089
     persistence:
-      # One-click persists CubeMaster artifacts under /data/CubeMaster/storage.
-      # Kubernetes multi-control-node deployments use PVC by default so data
-      # follows the Pod when it is rescheduled across control nodes.
+      # Master persists artifact metadata in DB, but may cache ext4 files
+      # locally for faster distribution to nodes. If using S3-only storage
+      # (TC uploads to S3, Master fetches from S3), set enabled=false.
+      #
+      # For multi-replica Master with shared storage, use ReadWriteMany
+      # access mode (requires a storage class that supports RWX, e.g., CBS
+      # with multi-attach or a shared filesystem like CFS).
       enabled: true
       hostPath: ""
       existingClaim: ""
@@ -256,6 +280,115 @@ controlPlane:
         initialDelaySeconds: 30
         periodSeconds: 20
         failureThreshold: 6
+    resources: {}
+
+  # Standalone template build service (CubeTemplateCenter). REQUIRED.
+  #
+  # CubeTemplateCenter is the ONLY component that builds template ext4 images
+  # (pulls container images, exports rootfs, runs mkfs.ext4, uploads to S3).
+  # CubeMaster does NOT build locally; it only orchestrates (persists job rows,
+  # forwards build requests to TC, receives BUILT callbacks, distributes
+  # artifacts to nodes).
+  #
+  # Disabling TC (enabled=false) will cause all template build requests to
+  # fail. This flag exists only for migration scenarios where you need to
+  # temporarily disable TC during an upgrade.
+  #
+  # Both sides are wired from this one value -- no manual conf editing.
+  # enabled=true renders templatecenter_enabled=true into CubeMaster's conf and
+  # injects CUBE_TEMPLATE_CENTER_ADDR into its Deployment (and CUBE_MASTER_ADDR
+  # into TC's), so the two halves can never disagree.
+  templateCenter:
+    enabled: true
+    # Number of TC replicas. Default 1; increase for higher build throughput.
+    #
+    # Multi-replica artifact storage options (choose one):
+    #   1. CBS PVC with ReadWriteMany access mode: all replicas mount the same
+    #      shared cloud disk, so ext4 artifacts written by one replica are
+    #      readable by all others. Requires a storage class that supports RWX
+    #      (e.g., CBS with multi-attach, or a shared filesystem like CFS).
+    #   2. S3/MinIO object storage: TC uploads ext4 to S3 after building, and
+    #      replicas fetch from S3 when needed. Set CUBE_S3_* env vars.
+    #
+    # Without either of these, artifacts are written to a node-local disk and
+    # other replicas cannot read them, causing downloads to 404.
+    #
+    # TC replicas coordinate via DB session locks (see pkg/lock) to prevent
+    # duplicate builds of the same spec. The lock key is the template spec
+    # fingerprint, so concurrent builds of DIFFERENT specs can proceed in
+    # parallel across replicas.
+    #
+    # A build is in-memory progress state, so a replica cannot take over an
+    # interrupted build from another replica. The reconciler (pkg/reconcile)
+    # marks stale builds as FAILED after a timeout; the client must retry.
+    replicas: 1
+    # Bypass the migration content preflight. Rarely needed: an applied version
+    # that is absent from this image's migrations tree is only reported, so a
+    # database ahead of the binary no longer blocks startup. Enable this only to
+    # bypass a real content drift (a migration edited after being applied), which
+    # stays fatal by design.
+    skipMigrationFingerprintCheck: false
+    command: []
+    args: []
+    env: []
+    # Pin TC to the same node as CubeMaster so both can mount the ReadWriteOnce
+    # artifact PVC (RWO is per-node, not per-Pod). Required because TC writes the
+    # ext4 and CubeMaster is the one that serves it to Cubelet.
+    #
+    # Set to false ONLY when the artifact volume is genuinely shared across nodes
+    # or when master and TC are pinned by other means; then supply `affinity`.
+    colocateWithMaster: true
+    affinity: {}
+    persistence:
+      # Empty means "share CubeMaster's artifact claim", which is the required
+      # default. Point this at another claim only if that claim is mounted by the
+      # CubeMaster replica serving downloads as well.
+      existingClaim: ""
+    # S3/MinIO artifact storage. When the global CUBE_S3_* environment variables
+    # are set (typically via .Values.global.env or the s3lvol section), TC
+    # uploads built ext4 artifacts to S3 and reports a presigned URL; Cubelet
+    # downloads directly from S3 instead of through CubeMaster's local HTTP
+    # endpoint.
+    #
+    # TC shares the same S3 configuration as Cubelet / s3lvol / volume plugins,
+    # so S3 is configured once for the whole deployment. No templateCenter-
+    # specific S3 settings are needed here.
+    service:
+      type: ClusterIP
+      port: 8090
+      # Only for NodePort / LoadBalancer. Must be empty for ClusterIP.
+      nodePort: ""
+    # VPC-internal CLB, for reaching TC from outside the cluster. Control-plane
+    # traffic from CubeMaster uses the ClusterIP Service and does not go through
+    # this. The build endpoint is unauthenticated, so keep the CLB internal.
+    #
+    # TKE example:
+    #   internalLoadBalancer:
+    #     enabled: true
+    #     annotations:
+    #       service.kubernetes.io/qcloud-loadbalancer-internal-subnetid: subnet-xxxxxxxx
+    #       service.cloud.tencent.com/pass-to-target: "true"
+    #       service.cloud.tencent.com/security-groups: "sg-xxxxxxxx"
+    internalLoadBalancer:
+      enabled: false
+      annotations: {}
+      port: 8090
+    probes:
+      readiness:
+        enabled: true
+        path: /health
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        failureThreshold: 12
+      liveness:
+        enabled: true
+        path: /health
+        # Slower than CubeMaster's on purpose: restarting TC mid-build abandons
+        # the ext4 and leaves the job for the reconciler, so the probe must
+        # tolerate a busy process.
+        initialDelaySeconds: 60
+        periodSeconds: 30
+        failureThreshold: 8
     resources: {}
 
   api:

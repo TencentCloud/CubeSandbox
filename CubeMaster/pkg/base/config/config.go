@@ -74,47 +74,63 @@ type CommonConf struct {
 	HttpPort               int           `yaml:"http_port"`
 	// HttpBind is the HTTP listen address. Empty means 0.0.0.0 (all
 	// interfaces); set to 127.0.0.1 to keep the API loopback-only.
-	HttpBind                  string `yaml:"http_bind"`
-	WriteTimeout              int    `yaml:"http_writetimeout"`
-	ReadTimeout               int    `yaml:"http_readtimeout"`
-	IdleTimeout               int    `yaml:"http_idletimeout"`
-	GraceFullStopTimeoutInSec int    `yaml:"gracefull_stop_timeout_insec"`
+	HttpBind                       string            `yaml:"http_bind"`
+	WriteTimeout                   int               `yaml:"http_writetimeout"`
+	ReadTimeout                    int               `yaml:"http_readtimeout"`
+	IdleTimeout                    int               `yaml:"http_idletimeout"`
+	GraceFullStopTimeoutInSec      int               `yaml:"gracefull_stop_timeout_insec"`
 	// CubeOps node-management base URL.
 	CubeOpsAddr string `yaml:"cube_ops_addr"`
+	// CubeMaster's HTTP base URL, used by CubeTemplateCenter to report build
+	// results. Can be set here (persistent, per-deployment) or overridden by
+	// the CUBE_MASTER_ADDR environment variable (ad-hoc debugging). Env wins
+	// over yaml. Only CubeTemplateCenter reads this; CubeMaster itself ignores it.
+	MasterAddr string `yaml:"master_addr"`
 	// CubeOpsBootRetries: additional LoadNodes attempts (0 = single-shot).
 	// Bridges the systemd startup window.
-	CubeOpsBootRetries              int               `yaml:"cube_ops_boot_retries"`
-	CubeOpsBootBackoff              time.Duration     `yaml:"cube_ops_boot_backoff"`
-	SyncMetaDataInterval            time.Duration     `yaml:"sync_meta_data_interval"`
-	SyncMetricDataInterval          time.Duration     `yaml:"sync_metric_data_interval"`
-	CleanSandboxCacheInterval       time.Duration     `yaml:"clean_sandbox_cache_interval"`
-	EnabledListRunningSandboxCache  bool              `yaml:"enabled_list_running_sandbox_cache"`
-	AsyncTaskQueueSize              int               `yaml:"async_task_queue_size"`
-	AsyncTaskWorkerNum              int               `yaml:"async_task_worker_num"`
-	HeadlessServiceName             string            `yaml:"headless_service_name"`
-	DefaultHeadlessServiceNodesNum  int64             `yaml:"default_headless_service_nodes_num"`
-	ListFilterOutLables             map[string]string `yaml:"list_filter_out_lables"`
-	CollectMetricInterval           time.Duration     `yaml:"collect_metric_interval"`
-	ReportLocalCreateNum            bool              `yaml:"report_local_create_num"`
-	ReportStdevMetric               bool              `yaml:"report_stdev_metric"`
-	GwCacheExpiredTime              time.Duration     `yaml:"gw_cache_expired_time"`
-	GwCacheEnable                   bool              `yaml:"gw_cache_enable"`
-	ReportGWRedisGetMetric          bool              `yaml:"report_gw_redis_get_metric"`
-	EnableGetStatusFromCubelet      bool              `yaml:"enable_get_status_from_cubelet"`
-	DisableHardDelete               bool              `yaml:"disable_hard_delete"`
-	CollectSandboxMemoryWhitelist   []string          `yaml:"collect_sandbox_memory_whitelist"`
-	EnableAllCollectSandboxMemory   bool              `yaml:"enable_all_collect_sandbox_memory"`
-	FilterErrMsgErrorCode           map[int]bool      `yaml:"filter_err_msg_error_code"`
-	DescribeInstancesWhiteList      map[string]bool   `yaml:"describe_instances_white_list"`
-	DescribeTaskExpireTime          int               `yaml:"describe_task_expire_time"`
-	EnablePrivateIpQuery            bool              `yaml:"enable_private_ip_query"`
-	DbMaxRetryCount                 int               `yaml:"db_max_retry_count"`
-	DbRetryInterval                 time.Duration     `yaml:"db_retry_interval"`
-	EnableCheckComNetIDParam        bool              `yaml:"enable_check_com_net_id_param"`
-	EnableDescribeInstanceFromRedis bool              `yaml:"enable_describe_instance_from_redis"`
-	MaxNICQueue                     int               `yaml:"max_nic_queue"`
-	DisableCreateImageCluster       map[string]bool   `yaml:"disable_create_image_cluster"`
-	EnableAGSColdStartSwitch        bool              `yaml:"enable_ags_cold_start_switch"`
+	CubeOpsBootRetries             int               `yaml:"cube_ops_boot_retries"`
+	CubeOpsBootBackoff             time.Duration     `yaml:"cube_ops_boot_backoff"`
+	SyncMetaDataInterval           time.Duration     `yaml:"sync_meta_data_interval"`
+	SyncMetricDataInterval         time.Duration     `yaml:"sync_metric_data_interval"`
+	CleanSandboxCacheInterval      time.Duration     `yaml:"clean_sandbox_cache_interval"`
+	EnabledListRunningSandboxCache bool              `yaml:"enabled_list_running_sandbox_cache"`
+	AsyncTaskQueueSize             int               `yaml:"async_task_queue_size"`
+	AsyncTaskWorkerNum             int               `yaml:"async_task_worker_num"`
+	HeadlessServiceName            string            `yaml:"headless_service_name"`
+	DefaultHeadlessServiceNodesNum int64             `yaml:"default_headless_service_nodes_num"`
+	ListFilterOutLables            map[string]string `yaml:"list_filter_out_lables"`
+	CollectMetricInterval          time.Duration     `yaml:"collect_metric_interval"`
+	ReportLocalCreateNum           bool              `yaml:"report_local_create_num"`
+	ReportStdevMetric              bool              `yaml:"report_stdev_metric"`
+	GwCacheExpiredTime             time.Duration     `yaml:"gw_cache_expired_time"`
+	GwCacheEnable                  bool              `yaml:"gw_cache_enable"`
+	ReportGWRedisGetMetric         bool              `yaml:"report_gw_redis_get_metric"`
+	EnableGetStatusFromCubelet     bool              `yaml:"enable_get_status_from_cubelet"`
+	DisableHardDelete              bool              `yaml:"disable_hard_delete"`
+
+	// TemplateCacheTTL is how long template metadata stays in the local cache
+	// before expiring. Default 6 hours, matching the historical behavior.
+	// Shorter values reduce the stale-read window in multi-replica deployments
+	// at the cost of more frequent DB queries.
+	TemplateCacheTTL time.Duration `yaml:"template_cache_ttl"`
+	// TemplateCenterAddrValue is CubeTemplateCenter's HTTP base URL from conf.yaml.
+	// Named with a Value suffix to avoid colliding with the TemplateCenterAddr()
+	// method on Config. Access via Config.TemplateCenterAddr() which handles the
+	// env > yaml priority.
+	TemplateCenterAddrValue         string          `yaml:"template_center_addr"`
+	CollectSandboxMemoryWhitelist   []string        `yaml:"collect_sandbox_memory_whitelist"`
+	EnableAllCollectSandboxMemory   bool            `yaml:"enable_all_collect_sandbox_memory"`
+	FilterErrMsgErrorCode           map[int]bool    `yaml:"filter_err_msg_error_code"`
+	DescribeInstancesWhiteList      map[string]bool `yaml:"describe_instances_white_list"`
+	DescribeTaskExpireTime          int             `yaml:"describe_task_expire_time"`
+	EnablePrivateIpQuery            bool            `yaml:"enable_private_ip_query"`
+	DbMaxRetryCount                 int             `yaml:"db_max_retry_count"`
+	DbRetryInterval                 time.Duration   `yaml:"db_retry_interval"`
+	EnableCheckComNetIDParam        bool            `yaml:"enable_check_com_net_id_param"`
+	EnableDescribeInstanceFromRedis bool            `yaml:"enable_describe_instance_from_redis"`
+	MaxNICQueue                     int             `yaml:"max_nic_queue"`
+	DisableCreateImageCluster       map[string]bool `yaml:"disable_create_image_cluster"`
+	EnableAGSColdStartSwitch        bool            `yaml:"enable_ags_cold_start_switch"`
 }
 
 type AuthConf struct {
@@ -931,6 +947,9 @@ func preComHandleConf(config *Config) error {
 	if config.Common.MaxNICQueue == 0 {
 		config.Common.MaxNICQueue = 4
 	}
+	if config.Common.TemplateCacheTTL == 0 {
+		config.Common.TemplateCacheTTL = 360 * time.Minute
+	}
 	return nil
 }
 func preHandleAuthConf(config *Config) error {
@@ -1246,6 +1265,29 @@ func validate(cfg *Config) error {
 //go:noinline
 func GetConfig() *Config {
 	return cfg
+}
+
+// EnvTemplateCenterAddr is how CubeMaster finds CubeTemplateCenter. It mirrors
+// CUBE_MASTER_ADDR, the variable every other component uses to find CubeMaster:
+// one name per target component, shared by whoever needs to reach it, so a
+// deployment sets each address exactly once. An address is a deployment fact,
+// not a process tunable, which is why it is an environment variable and not a
+// conf.yaml key.
+const EnvTemplateCenterAddr = "CUBE_TEMPLATE_CENTER_ADDR"
+
+// TemplateCenterAddr returns CubeTemplateCenter's base URL with no trailing
+// slash, or "" when unset. Read from the environment on every call so it can
+// be changed without editing (or even loading) conf.yaml.
+func (c *Config) TemplateCenterAddr() string {
+	// Priority: env > yaml. Env is for ad-hoc debugging (override without
+	// editing conf.yaml); yaml is the persistent deployment value.
+	if addr := strings.TrimSpace(os.Getenv(EnvTemplateCenterAddr)); addr != "" {
+		return strings.TrimRight(addr, "/")
+	}
+	if c.Common != nil {
+		return strings.TrimRight(strings.TrimSpace(c.Common.TemplateCenterAddrValue), "/")
+	}
+	return ""
 }
 
 var defaultAllowedHostMountPrefixes = []string{"/data/shared/"}

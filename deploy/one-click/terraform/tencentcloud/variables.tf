@@ -322,6 +322,29 @@ variable "cube_lifecycle_manager_image" {
   type        = string
   default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.7.0"
 }
+
+variable "templatecenter_image" {
+  description = "Full cube-templatecenter image override."
+  type        = string
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-templatecenter:v0.7.0"
+}
+
+variable "templatecenter_enabled" {
+  description = "Deploy CubeTemplateCenter. REQUIRED for template builds. CubeMaster does NOT build locally; it only orchestrates. Disabling TC will cause all template build requests to fail."
+  type        = bool
+  default     = true
+}
+
+variable "templatecenter_replicas" {
+  description = "CubeTemplateCenter replica count. Increase for higher build throughput. Multi-replica requires shared artifact storage: either (1) CBS PVC with ReadWriteMany access mode (shared cloud disk), or (2) S3/MinIO object storage (CUBE_S3_* env vars). TC replicas coordinate via DB session locks to prevent duplicate builds of the same spec."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.templatecenter_replicas >= 1 && floor(var.templatecenter_replicas) == var.templatecenter_replicas
+    error_message = "templatecenter_replicas must be an integer >= 1."
+  }
+}
 # Per-component replica counts. All four default to 1 in env.example / variables.tf
 # and are independently tunable via -var / TF_VAR_* / the TENCENTCLOUD_*_REPLICAS
 # env knobs wired by create.sh.

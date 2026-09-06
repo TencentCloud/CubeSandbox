@@ -12,13 +12,14 @@ locals {
   image_namespace = var.use_tcr ? (
     var.image_namespace != "" ? var.image_namespace : tencentcloud_tcr_namespace.cluster[0].name
   ) : var.image_namespace
-  cube_master_image = var.cubemaster_image != "" ? var.cubemaster_image : "${local.image_registry}/${local.image_namespace}/cube-master:${var.image_tag}"
-  cube_api_image    = var.cubeapi_image != "" ? var.cubeapi_image : "${local.image_registry}/${local.image_namespace}/cube-api:${var.image_tag}"
-  cube_ops_image    = var.cubeops_image != "" ? var.cubeops_image : "${local.image_registry}/${local.image_namespace}/cube-ops:${var.image_tag}"
-  cube_proxy_image  = var.cubeproxy_image != "" ? var.cubeproxy_image : "${local.image_registry}/${local.image_namespace}/cube-proxy:${var.image_tag}"
-  cube_webui_image  = var.webui_image != "" ? var.webui_image : "${local.image_registry}/${local.image_namespace}/cube-webui:${var.image_tag}"
-  cube_lcm_image    = var.cube_lifecycle_manager_image != "" ? var.cube_lifecycle_manager_image : "${local.image_registry}/${local.image_namespace}/cube-lifecycle-manager:${var.image_tag}"
-  cube_admin_token  = var.cube_admin_token != "" ? var.cube_admin_token : random_password.cube_admin_token[0].result
+  cube_master_image    = var.cubemaster_image != "" ? var.cubemaster_image : "${local.image_registry}/${local.image_namespace}/cube-master:${var.image_tag}"
+  cube_api_image       = var.cubeapi_image != "" ? var.cubeapi_image : "${local.image_registry}/${local.image_namespace}/cube-api:${var.image_tag}"
+  cube_ops_image       = var.cubeops_image != "" ? var.cubeops_image : "${local.image_registry}/${local.image_namespace}/cube-ops:${var.image_tag}"
+  cube_proxy_image     = var.cubeproxy_image != "" ? var.cubeproxy_image : "${local.image_registry}/${local.image_namespace}/cube-proxy:${var.image_tag}"
+  cube_webui_image     = var.webui_image != "" ? var.webui_image : "${local.image_registry}/${local.image_namespace}/cube-webui:${var.image_tag}"
+  cube_lcm_image       = var.cube_lifecycle_manager_image != "" ? var.cube_lifecycle_manager_image : "${local.image_registry}/${local.image_namespace}/cube-lifecycle-manager:${var.image_tag}"
+  templatecenter_image = var.templatecenter_image != "" ? var.templatecenter_image : "${local.image_registry}/${local.image_namespace}/cube-templatecenter:${var.image_tag}"
+  cube_admin_token     = var.cube_admin_token != "" ? var.cube_admin_token : random_password.cube_admin_token[0].result
 
   # cube_db / cube_user are wired through Terraform (var.cube_db / var.cube_user)
   # so the MySQL account/database created in main.tf, the cube-master conf Secret
@@ -274,6 +275,8 @@ resource "kubernetes_secret" "cubemaster_conf" {
         collect_metric_interval            = "1s"
         default_headless_service_nodes_num = local.cubemaster_replicas
         enable_check_com_net_id_param      = false
+        # CubeMaster no longer has a templatecenter_enabled switch: every
+        # template-from-image build is forwarded to CubeTemplateCenter.
       }
       log = {
         module    = "cubemaster"
@@ -521,6 +524,122 @@ resource "kubernetes_service" "cubemaster" {
     port {
       name     = "http"
       port     = 8089
+      protocol = "TCP"
+    }
+  }
+}
+
+# ---------------------------------------------------------------
+# CubeTemplateCenter: Deployment → ClusterIP Service
+# Only deployed when templatecenter_enabled=true. TC is the data-plane half of
+# template building: it pulls the image, builds the ext4, and reports status
+# back to CubeMaster. CubeMaster keeps the control plane (DB, distribution).
+# ---------------------------------------------------------------
+resource "kubernetes_deployment" "templatecenter" {
+  count      = local.deploy_addons && var.templatecenter_enabled ? 1 : 0
+  depends_on = [kubernetes_deployment.cubemaster]
+
+  metadata {
+    name      = "cube-templatecenter"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+    labels    = { app = "cube-templatecenter" }
+  }
+  spec {
+    replicas = var.templatecenter_replicas
+    selector {
+      match_labels = { app = "cube-templatecenter" }
+    }
+    template {
+      metadata {
+        labels = { app = "cube-templatecenter" }
+      }
+      spec {
+        container {
+          name  = "cube-templatecenter"
+          image = local.templatecenter_image
+          env {
+            name  = "CUBE_TEMPLATE_CENTER_CONFIG_PATH"
+            value = "/usr/local/services/cubetoolbox/CubeTemplateCenter/conf.yaml"
+          }
+          env {
+            name  = "CUBE_MASTER_ADDR"
+            value = "http://cubemaster.cubesandbox.svc.cluster.local:8089"
+          }
+          # TC writes the ext4 into the same shared store CubeMaster serves
+          # downloads from. When use_cfs=false (single-replica emptyDir), TC
+          # must run on the same node as CubeMaster to share the volume.
+          env {
+            name  = "CUBE_TEMPLATE_CENTER_ARTIFACT_STORE_DIR"
+            value = "/data/CubeMaster/storage"
+          }
+          port {
+            name           = "http"
+            container_port = 8090
+          }
+          readiness_probe {
+            http_get {
+              path = "/health"
+              port = 8090
+            }
+            initial_delay_seconds = 10
+            period_seconds        = 10
+          }
+          volume_mount {
+            name       = "data"
+            mount_path = "/data/CubeMaster/storage"
+          }
+          volume_mount {
+            name       = "cube-egress-ca"
+            mount_path = "/etc/cube/ca"
+            read_only  = true
+          }
+        }
+        # Share the same storage backend as CubeMaster: CFS when enabled,
+        # otherwise pod-local emptyDir (single-replica only).
+        dynamic "volume" {
+          for_each = var.use_cfs ? [1] : []
+          content {
+            name = "data"
+            nfs {
+              server = tencentcloud_cfs_file_system.cubemaster_data[0].mount_ip
+              path   = "/"
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = var.use_cfs ? [] : [1]
+          content {
+            name = "data"
+            empty_dir {}
+          }
+        }
+        volume {
+          name = "cube-egress-ca"
+          secret {
+            secret_name = kubernetes_secret.cube_egress_ca[0].metadata[0].name
+            items {
+              key  = "cube-root-ca.crt"
+              path = "cube-root-ca.crt"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+resource "kubernetes_service" "templatecenter" {
+  count = local.deploy_addons && var.templatecenter_enabled ? 1 : 0
+  metadata {
+    name      = "cube-templatecenter"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+  }
+  spec {
+    type     = "ClusterIP"
+    selector = { app = "cube-templatecenter" }
+    port {
+      name     = "http"
+      port     = 8090
       protocol = "TCP"
     }
   }

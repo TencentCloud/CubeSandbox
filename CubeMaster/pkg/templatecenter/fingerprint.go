@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -64,8 +65,35 @@ func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageR
 	return hex.EncodeToString(sum[:])
 }
 
+// buildArtifactID generates a unique artifact ID for a given spec fingerprint.
+//
+// The ID includes a UUID suffix to avoid collisions when the same template
+// spec is rebuilt after a previous artifact was deleted. Without the UUID,
+// rebuilding the same spec would produce the same artifact ID, causing the
+// new ext4 file to overwrite (or be confused with) the old one on shared
+// storage or on nodes that still have the old file cached.
+//
+// Deduplication across concurrent builds of the same spec is handled at the
+// Master layer (submitTemplateFromImage checks for existing READY artifacts
+// by fingerprint before creating a job) and at the TC layer (build.go checks
+// the DB for a READY artifact with the same fingerprint before building), NOT
+// by artifact ID equality. This allows artifact IDs to be unique per build
+// while still preventing redundant builds of the same spec.
 func buildArtifactID(fingerprint string) string {
-	return "rfs-" + fingerprint[:24]
+	return fmt.Sprintf("rfs-%s-%s", fingerprint[:24], uuid.New().String()[:8])
+}
+
+// BuildTemplateSpecFingerprintWithEnvdSHA exports the fingerprint builder so
+// the standalone CubeTemplateCenter process computes the exact same value
+// during remote builds (keeping artifact dedup compatible with local mode).
+func BuildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageReq, sourceImageDigest, cubeEgressCAFingerprint, envdSHA string) string {
+	return buildTemplateSpecFingerprintWithEnvdSHA(req, sourceImageDigest, cubeEgressCAFingerprint, envdSHA)
+}
+
+// BuildArtifactID exports buildArtifactID for CubeTemplateCenter (remote
+// build mode), so artifact IDs are derived identically in both modes.
+func BuildArtifactID(fingerprint string) string {
+	return buildArtifactID(fingerprint)
 }
 
 func marshalTemplateImageJobRequest(req *types.CreateTemplateFromImageReq) (string, error) {

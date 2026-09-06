@@ -1,0 +1,52 @@
+common:
+  # CubeTemplateCenter is single-host with CubeMaster in the one-click layout:
+  # it writes the ext4 into CubeMaster's artifact dir and CubeMaster serves the
+  # download from the same disk (design 9.7). Loopback bind is correct here
+  # because the only caller is the local CubeMaster. Expose it only for a split
+  # deployment, and then only on a trusted network -- the build endpoint is
+  # unauthenticated.
+  http_bind: "__CUBETEMPLATECENTER_HTTP_BIND__"
+  http_port: 8090
+  http_readtimeout: 120
+  http_writetimeout: 360
+  http_idletimeout: 360
+  # CubeMaster's HTTP base URL for reporting build results. Can be set here
+  # (persistent, per-deployment) or overridden by CUBE_MASTER_ADDR env (env
+  # wins). Defaults to http://127.0.0.1:8089 if both are empty.
+  master_addr: "__CUBETEMPLATECENTER_MASTER_ADDR__"
+
+log:
+  module: "templatecenter"
+  path: "/data/log/CubeTemplateCenter"
+  file_size: 100
+  file_num: 10
+  level: "info"
+
+# TC migrates the same CubeDB as CubeMaster (whichever process wins the lock
+# applies the schema). These credentials must therefore match CubeMaster's.
+instance_db_config:
+  addr: "127.0.0.1:__CUBE_SANDBOX_MYSQL_PORT__"
+  user: "__CUBE_SANDBOX_MYSQL_USER__"
+  pwd: "__CUBE_SANDBOX_MYSQL_PASSWORD__"
+  db_name: "__CUBE_SANDBOX_MYSQL_DB__"
+  conn_timeout: 5
+  read_timeout: 5
+  write_timeout: 5
+  max_idle_conns: 5
+  max_open_conns: 20
+  max_conn_life_time_seconds: 300
+
+# Redis carries the live pull-progress snapshots, written through localcache
+# with the same keys CubeMaster reads when answering a progress query. db_no
+# must stay 0 so both sides share the keyspace.
+redis:
+  nodes: "127.0.0.1:__CUBE_SANDBOX_REDIS_PORT__"
+  password: "__CUBE_SANDBOX_REDIS_PASSWORD__"
+  db_no: 0
+  max_idle: 8
+  max_active: 32
+  idle_timeout: 30
+  max_retry: 2
+
+auth:
+  enable: false

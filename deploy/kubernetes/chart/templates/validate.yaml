@@ -3,6 +3,49 @@
 {{- if and .Values.controlPlane.enabled (not $controlPlaneSelector) }}
 {{- fail "controlPlane.enabled=true requires placement.controlPlane.nodeSelector" }}
 {{- end }}
+{{- $templateCenter := .Values.controlPlane.templateCenter -}}
+{{- if hasKey $templateCenter "buildMode" }}
+{{- fail "controlPlane.templateCenter.buildMode no longer exists: template offload is now a single boolean. Use controlPlane.templateCenter.enabled only -- it renders templatecenter_enabled into CubeMaster's conf, and builds go to TC when that is true" }}
+{{- end }}
+{{- if hasKey $templateCenter "routeMode" }}
+{{- fail "controlPlane.templateCenter.routeMode no longer exists: the route proxy was removed along with the build-mode string. CubeMaster always serves the public template API; use controlPlane.templateCenter.enabled only" }}
+{{- end }}
+{{- if and $templateCenter.enabled (not (and .Values.controlPlane.enabled .Values.controlPlane.master.enabled)) }}
+{{- fail "controlPlane.templateCenter.enabled=true requires controlPlane.master.enabled=true: TC writes the ext4 but CubeMaster is what serves it to Cubelet and owns every business-state write" }}
+{{- end }}
+{{- if and $templateCenter.enabled .Values.externalControlPlane.enabled }}
+{{- fail "controlPlane.templateCenter.enabled=true is not supported with externalControlPlane.enabled=true: TC must share the artifact directory with the CubeMaster that serves downloads, which an out-of-cluster master cannot do" }}
+{{- end }}
+{{- if and $templateCenter.enabled $templateCenter.colocateWithMaster (gt (int .Values.controlPlane.master.replicas) 1) }}
+{{- fail "controlPlane.templateCenter.colocateWithMaster=true requires controlPlane.master.replicas=1: the artifact store is node-local, so with several master replicas a download can land on a node that never built the artifact" }}
+{{- end }}
+{{- if and $templateCenter.enabled (not $templateCenter.colocateWithMaster) (not $templateCenter.affinity) }}
+{{- fail "controlPlane.templateCenter.colocateWithMaster=false requires controlPlane.templateCenter.affinity: without it TC may be scheduled away from the CubeMaster holding the artifact volume" }}
+{{- end }}
+{{- if hasKey $templateCenter "replicas" }}
+{{- fail (printf "controlPlane.templateCenter.replicas is not supported (got %v): CubeTemplateCenter is always exactly one instance. Artifacts live on a node-local disk behind a ReadWriteOnce PVC with no cross-node sharing layer, so a second replica could neither read the first one's ext4 files nor take over its builds, and the two would race on the same artifact directory. Remove the key; scale CubeMaster instead, which is the stateless half" $templateCenter.replicas) }}
+{{- end }}
+{{- /*
+TC shares CubeMaster's artifact volume, so CubeMaster's access mode decides
+whether co-location is merely required or physically unavoidable. Reject the
+combination that cannot work at all: a ReadWriteOnce claim plus TC scheduled
+away from CubeMaster means one of the two Pods cannot attach the volume.
+*/ -}}
+{{- if and $templateCenter.enabled (not $templateCenter.colocateWithMaster) }}
+{{- $masterPersistence := .Values.controlPlane.master.persistence -}}
+{{- if and $masterPersistence.enabled (not $masterPersistence.hostPath) }}
+{{- $modes := $masterPersistence.accessModes | default list -}}
+{{- if and (not (has "ReadWriteMany" $modes)) (not $templateCenter.persistence.existingClaim) }}
+{{- fail (printf "controlPlane.templateCenter.colocateWithMaster=false requires a ReadWriteMany artifact volume, but controlPlane.master.persistence.accessModes is %v. TC writes the ext4 and CubeMaster serves it from the same directory; with ReadWriteOnce (CBS and most block CSI drivers) only one node can attach the volume, so an un-colocated TC either fails to attach or builds into a different disk and every artifact download 404s. Either keep colocateWithMaster=true, or provide a genuinely shared volume (e.g. CFS/NFS with ReadWriteMany) via controlPlane.master.persistence.accessModes and controlPlane.templateCenter.persistence.existingClaim" $modes) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if and $templateCenter.enabled .Values.controlPlane.master.persistence.enabled .Values.controlPlane.master.persistence.hostPath (not $templateCenter.colocateWithMaster) }}
+{{- fail "controlPlane.templateCenter.colocateWithMaster=false cannot work with controlPlane.master.persistence.hostPath: a hostPath artifact store exists only on one node, so TC must run on that same node as CubeMaster" }}
+{{- end }}
+{{- if and $templateCenter.enabled (eq $templateCenter.service.type "ClusterIP") $templateCenter.service.nodePort }}
+{{- fail "controlPlane.templateCenter.service.nodePort must be empty when service.type is ClusterIP" }}
+{{- end }}
 {{- if .Values.cubeNode.enabled }}
 {{- if not $computeSelector }}
 {{- fail "cube-node requires placement.compute.nodeSelector, otherwise host-mutating bootstrap may run on all nodes" }}

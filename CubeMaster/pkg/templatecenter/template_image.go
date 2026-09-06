@@ -92,11 +92,22 @@ func newRedoTemplateImageJobRecord(jobID string, normalized *types.RedoTemplateF
 	}
 }
 
+// SubmitTemplateFromImage persists the image_jobs record (PENDING) but does
+// NOT start any in-process build. CubeMaster no longer builds templates
+// locally; the caller (HTTP handler) forwards the job to CubeTemplateCenter,
+// which builds the artifact and reports status back via the internal callback.
 func SubmitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string) (*types.TemplateImageJobInfo, error) {
-	return SubmitTemplateFromImageWithEnvdPayload(ctx, req, downloadBaseURL, nil)
+	return submitTemplateFromImage(ctx, req, downloadBaseURL, nil)
 }
 
-func SubmitTemplateFromImageWithEnvdPayload(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdPayload *EnvdInjectionPayload) (*types.TemplateImageJobInfo, error) {
+// SubmitTemplateFromImageWithoutBuild is the explicit remote-build entry point.
+// Kept as a separate name so callers state the intent ("no local build") rather
+// than relying on a flag.
+func SubmitTemplateFromImageWithoutBuild(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string) (*types.TemplateImageJobInfo, error) {
+	return submitTemplateFromImage(ctx, req, downloadBaseURL, nil)
+}
+
+func submitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdPayload *EnvdInjectionPayload) (*types.TemplateImageJobInfo, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
 	}
@@ -115,10 +126,18 @@ func SubmitTemplateFromImageWithEnvdPayload(ctx context.Context, req *types.Crea
 	if err != nil {
 		return nil, err
 	}
+
+	// Compute the spec fingerprint early so we can check for a READY artifact
+	// before creating a new job. This deduplicates concurrent identical
+	// requests at the Master layer: if an artifact for this exact spec already
+	// exists and is READY, we skip the build entirely.
+	fingerprint := BuildTemplateSpecFingerprintWithEnvdSHA(normalized, "", "", "")
+
 	jobID := uuid.New().String()
 	attemptNo := int32(1)
 	retryOfJobID := ""
 	reusedExistingJob := false
+	reusedExistingArtifact := false
 	if err := withTemplateWriteLock(normalized.TemplateID, func() error {
 		definitionFailed := false
 		if def, err := GetDefinition(ctx, normalized.TemplateID); err == nil {
@@ -128,6 +147,26 @@ func SubmitTemplateFromImageWithEnvdPayload(ctx context.Context, req *types.Crea
 				return fmt.Errorf("template %s already exists; rootfs template specs are immutable, use a new template id to change writable layer size or rootfs settings", normalized.TemplateID)
 			}
 		} else if !errors.Is(err, ErrTemplateNotFound) {
+			return err
+		}
+
+		// Check for an existing READY artifact with the same fingerprint.
+		// If found, reuse it instead of creating a new build job.
+		if artifact, err := getRootfsArtifactByFingerprint(ctx, fingerprint); err == nil {
+			if artifact.Status == ArtifactStatusReady {
+				// Verify the ext4 file still exists on disk.
+				fileErr := validateReusableRootfsArtifactFile(artifact)
+				if fileErr == nil {
+					log.G(ctx).Infof("reusing existing READY artifact %s for template %s (fingerprint match)", artifact.ArtifactID, normalized.TemplateID)
+					reusedExistingArtifact = true
+					// Create a synthetic job that immediately goes to DISTRIBUTING phase
+					// with the existing artifact, skipping the build.
+					record := newReuseArtifactJobRecord(jobID, normalized, requestSnapshot, artifact)
+					return store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).Create(record).Error
+				}
+				log.G(ctx).Warnf("artifact %s is READY but ext4 file is missing/invalid: %v; will rebuild", artifact.ArtifactID, fileErr)
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 
@@ -167,17 +206,60 @@ func SubmitTemplateFromImageWithEnvdPayload(ctx context.Context, req *types.Crea
 	}); err != nil {
 		return nil, err
 	}
+	if reusedExistingArtifact {
+		log.G(ctx).Infof("template %s reuses existing artifact, job %s starts at DISTRIBUTING phase", normalized.TemplateID, jobID)
+		// The caller (HTTP handler) will see the job is already BUILT and
+		// trigger the resume/distribution flow instead of forwarding to TC.
+		return GetTemplateImageJobInfo(ctx, jobID)
+	}
 	if reusedExistingJob {
 		return GetTemplateImageJobInfo(ctx, jobID)
 	}
-	go runTemplateImageJob(detachTemplateImageJobContext(ctx, "template_image_create", map[string]any{
-		"job_id":          jobID,
-		"template_id":     normalized.TemplateID,
-		"attempt_no":      attemptNo,
-		"retry_of_job_id": retryOfJobID,
-		"image":           normalized.SourceImageRef,
-	}), jobID, normalized, downloadBaseURL, envdPayload)
+	// No local build goroutine: CubeMaster only persists the job. The HTTP
+	// handler forwards it to CubeTemplateCenter, which builds and calls back.
 	return GetTemplateImageJobInfo(ctx, jobID)
+}
+
+// newReuseArtifactJobRecord creates a job record that skips the build phase
+// and starts directly at BUILT status with the given artifact. This is used
+// when Master detects a READY artifact with matching fingerprint at submit
+// time, avoiding a redundant TC build.
+func newReuseArtifactJobRecord(jobID string, req *types.CreateTemplateFromImageReq, requestSnapshot string, artifact *models.RootfsArtifact) *models.TemplateImageJob {
+	return &models.TemplateImageJob{
+		JobID:                   jobID,
+		TemplateID:              req.TemplateID,
+		Status:                  JobStatusBuilt,
+		Phase:                   JobPhaseReady,
+		Progress:                100,
+		Operation:               JobOperationCreate,
+		AttemptNo:               1,
+		RequestJSON:             requestSnapshot,
+		ArtifactID:              artifact.ArtifactID,
+		TemplateSpecFingerprint: artifact.TemplateSpecFingerprint,
+		SourceImageDigest:       artifact.SourceImageDigest,
+		ArtifactStatus:          artifact.Status,
+		ResultJSON:              artifact.GeneratedRequestJSON,
+	}
+}
+
+// RedoNeedsFullRebuild reports whether a redo job requires a full rootfs
+// rebuild (true) or can reuse the existing artifact and only redistribute it
+// (false). A rebuild is required when the artifact is missing, failed, or not
+// READY; reuse is possible only when the artifact row exists and is READY.
+// Exported for the HTTP handler to decide whether to forward a redo to TC.
+func RedoNeedsFullRebuild(ctx context.Context, jobID string) bool {
+	job, err := getTemplateImageJobRecordByID(ctx, jobID)
+	if err != nil || job == nil {
+		return true
+	}
+	if strings.TrimSpace(job.ArtifactID) == "" {
+		return true
+	}
+	artifact, err := getRootfsArtifactByID(ctx, job.ArtifactID)
+	if err != nil || artifact == nil {
+		return true
+	}
+	return !artifactStatusReusableForRedo(artifact.Status)
 }
 
 func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFromImageReq, downloadBaseURL string) (*types.TemplateImageJobInfo, error) {
@@ -247,6 +329,18 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 	}); err != nil {
 		return nil, err
 	}
+	// Redo has two paths:
+	//  1. Reuse artifact and redistribute only: no build needed, CubeMaster
+	//     handles it locally (the artifact already exists).
+	//  2. Full rebuild: the build is data-plane work owned by
+	//     CubeTemplateCenter, same as create. The HTTP handler forwards the
+	//     job to TC; CubeMaster only persists it here.
+	if RedoNeedsFullRebuild(ctx, jobID) {
+		// Full rebuild: leave the job PENDING for the HTTP handler to forward
+		// to TC. No local build goroutine.
+		return GetTemplateImageJobInfo(ctx, jobID)
+	}
+	// Redistribution-only: run the local redo pipeline (no build).
 	go runRedoTemplateImageJob(detachTemplateImageJobContext(ctx, "template_image_redo", map[string]any{
 		"job_id":      jobID,
 		"template_id": normalized.TemplateID,
@@ -261,6 +355,12 @@ func GetTemplateImageJobInfo(ctx context.Context, jobID string) (*types.Template
 	record := &models.TemplateImageJob{}
 	if err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
 		Where("job_id = ?", jobID).First(record).Error; err != nil {
+		// Translate the driver-level miss into a domain error. Leaking
+		// gorm.ErrRecordNotFound made every handler classify "this job does not
+		// exist" as an internal error and answer 500 instead of NotFound.
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("%w: job_id=%s", ErrTemplateImageJobNotFound, jobID)
+		}
 		return nil, err
 	}
 	info, err := jobModelToInfo(ctx, record)
@@ -301,6 +401,22 @@ func GetRootfsArtifactInfo(ctx context.Context, artifactID string) (*types.Rootf
 	return artifactModelToInfo(record), nil
 }
 
+// GetRootfsArtifactForRedirect loads the artifact row and validates the
+// download token, but does NOT open the ext4 file. Used by the download
+// handler to decide whether to 302-redirect to the artifact's presigned S3
+// URL (artifact_url non-empty) or fall through to the local-file stream
+// (artifact_url empty, i.e. legacy/local-disk artifacts).
+func GetRootfsArtifactForRedirect(ctx context.Context, artifactID, token string) (*models.RootfsArtifact, error) {
+	record, err := getRootfsArtifactByID(ctx, artifactID)
+	if err != nil {
+		return nil, err
+	}
+	if record.DownloadToken != "" && token != record.DownloadToken {
+		return nil, fmt.Errorf("invalid artifact token")
+	}
+	return record, nil
+}
+
 func OpenRootfsArtifact(ctx context.Context, artifactID, token string) (*models.RootfsArtifact, *os.File, error) {
 	record, err := getRootfsArtifactByID(ctx, artifactID)
 	if err != nil {
@@ -312,6 +428,20 @@ func OpenRootfsArtifact(ctx context.Context, artifactID, token string) (*models.
 	f, err := os.Open(record.Ext4Path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			// This is where the row/file drift is usually discovered: the row is
+			// READY, distribution accepted it, and a cubelet is pulling right now.
+			//
+			// resolveMissingArtifact decides whether it is safe to demote. If this
+			// node owns the artifact the row is demoted so the next create
+			// rebuilds it, instead of every retry taking the reuse path and dying
+			// on this same line forever (issue #852). If the artifact belongs to
+			// another CubeMaster the row is left alone and the error says so:
+			// the pull was routed to a node that never had the file (issue #1005),
+			// and demoting here would destroy an artifact that is perfectly fine
+			// elsewhere.
+			if verdict := resolveMissingArtifact(ctx, record); verdict != artifactMissingVerdictNone {
+				return nil, nil, fmt.Errorf("artifact source missing: %w", missingArtifactError(record, verdict))
+			}
 			return nil, nil, fmt.Errorf("artifact source missing: %w", err)
 		}
 		return nil, nil, err

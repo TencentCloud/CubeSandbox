@@ -166,6 +166,27 @@ func logUnprotectedVersions(applied map[int64]bool, stored map[int64]storedFinge
 
 // Fail if an applied+fingerprinted version's on-disk sha256 drifted.
 // Unapplied stored rows are ignored (remediation: delete goose_db_version row).
+//
+// Two failure shapes are deliberately treated differently:
+//
+//   - content drift (recorded sha256 != on-disk sha256) is fatal. This is the
+//     case the check exists for: goose keys off the version number alone, so an
+//     edited or reused migration is skipped SILENTLY and the schema quietly
+//     diverges from the SQL that supposedly produced it.
+//
+//   - a version that is applied but has no file in this binary's migrations tree
+//     is only reported. It means the database was migrated by a build that
+//     carries migrations this one does not have -- a different branch line, or
+//     simply a newer image pointed at the same database. That direction is safe:
+//     goose only ever runs versions it can see, so the extra tables and indexes
+//     just go unused, and there is nothing for this process to apply or verify.
+//     Refusing to start would take down every component sharing that database
+//     (CubeMaster and CubeTemplateCenter both migrate CubeDB) over state that
+//     cannot harm them.
+//
+// The distinction matters because the two used to share one error, which forced
+// operators to disable the whole check -- including the fatal half -- just to
+// start a component against a database that was merely ahead of it.
 func preflightFingerprints(
 	ctx context.Context,
 	db *sql.DB,
@@ -191,16 +212,14 @@ func preflightFingerprints(
 	}
 
 	var mismatches []string
+	var absent []string
 	for version, sf := range stored {
 		if !applied[version] {
 			continue
 		}
 		ff, ok := fsFP[version]
 		if !ok {
-			mismatches = append(mismatches, fmt.Sprintf(
-				"version %d: applied file %q is missing from the migrations tree",
-				version, sf.source,
-			))
+			absent = append(absent, fmt.Sprintf("%d (%s)", version, sf.source))
 			continue
 		}
 		if ff.sum != sf.sum {
@@ -211,6 +230,7 @@ func preflightFingerprints(
 			))
 		}
 	}
+	logAbsentVersions(absent)
 	if len(mismatches) == 0 {
 		return nil
 	}
@@ -222,6 +242,23 @@ func preflightFingerprints(
 			"timestamped migration instead. To bypass intentionally, set %s=1.\n  - %s",
 		ErrFingerprintMismatch, skipFingerprintEnv, strings.Join(mismatches, "\n  - "),
 	)
+}
+
+// logAbsentVersions reports applied versions this binary has no file for. Loud
+// enough to be found when diagnosing a version skew, but not fatal: see
+// preflightFingerprints for why this direction is safe.
+func logAbsentVersions(absent []string) {
+	if len(absent) == 0 {
+		return
+	}
+	sort.Strings(absent)
+	log.Printf("migrate: %d applied migration version(s) are NOT present in this "+
+		"binary's migrations tree, so their content cannot be checked: %s. "+
+		"The database was migrated by a build carrying migrations this one does "+
+		"not have (a different branch line, or a newer image on the same "+
+		"database); a database ahead of the binary is safe, but confirm the "+
+		"image versions are what you intend",
+		len(absent), strings.Join(absent, ", "))
 }
 
 func recordFingerprints(
