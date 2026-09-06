@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Build-context filter for CubeTemplateCenter/docker/Dockerfile
+# (context = repository root).
+#
+# The repo-root .dockerignore is tailored to docker/Dockerfile.builder and would
+# exclude CubeTemplateCenter/ without these overrides. CubeTemplateCenter's
+# go.mod replaces the local CubeMaster, CubeDB, Cubelet and cubelog modules via
+# ../CubeMaster, ../CubeDB, ../Cubelet and ../cubelog, so the image build must
+# include all five directories.
+**
+!CubeTemplateCenter
+!CubeTemplateCenter/**
+!CubeMaster
+!CubeMaster/**
+!cubelog
+!cubelog/**
+!CubeDB
+!CubeDB/**
+!Cubelet
+!Cubelet/**

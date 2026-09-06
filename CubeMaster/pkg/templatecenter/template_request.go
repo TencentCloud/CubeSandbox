@@ -15,12 +15,11 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
-func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifact *models.RootfsArtifact, imageCfg image.DockerImageConfig, downloadBaseURL string) (*types.CreateCubeSandboxReq, error) {
+func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifact *models.RootfsArtifact, imageCfg DockerImageConfig, downloadBaseURL string) (*types.CreateCubeSandboxReq, error) {
 	annotations := map[string]string{
 		constants.CubeAnnotationAppSnapshotTemplateID:      req.TemplateID,
 		constants.CubeAnnotationsAppSnapshotCreate:         "true",
@@ -51,9 +50,13 @@ func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifa
 			},
 		},
 	}
+	downloadURL := strings.TrimSpace(artifact.ArtifactURL)
+	if downloadURL == "" {
+		downloadURL = buildDownloadURL(downloadBaseURL, artifact.ArtifactID, artifact.DownloadToken)
+	}
 	imageAnnotations := map[string]string{
 		constants.CubeAnnotationRootfsArtifactID:        artifact.ArtifactID,
-		constants.CubeAnnotationRootfsArtifactURL:       buildDownloadURL(downloadBaseURL, artifact.ArtifactID, artifact.DownloadToken),
+		constants.CubeAnnotationRootfsArtifactURL:       downloadURL,
 		constants.CubeAnnotationRootfsArtifactToken:     artifact.DownloadToken,
 		constants.CubeAnnotationRootfsArtifactSHA256:    artifact.Ext4SHA256,
 		constants.CubeAnnotationRootfsArtifactSizeBytes: strconv.FormatInt(artifact.Ext4SizeBytes, 10),
@@ -195,7 +198,7 @@ func probeOrNil(overrides *types.ContainerOverrides) *types.Probe {
 }
 
 func buildDownloadURL(baseURL, artifactID, token string) string {
-	trimmed := strings.TrimRight(image.NormalizeBaseURL(baseURL), "/")
+	trimmed := strings.TrimRight(NormalizeBaseURL(baseURL), "/")
 	if trimmed == "" {
 		trimmed = "http://" + artifactRootHostHint()
 	}

@@ -59,6 +59,19 @@ func Init(ctx context.Context) error {
 	return nil
 }
 
+// Ready reports whether the node metadata subsystem is initialized and able
+// to serve node queries. It is used by CubeTemplateCenter's health check when
+// TC serves the public template API (and therefore needs the node view to pick
+// distribution targets).
+func Ready() bool {
+	// nodemeta is ready when it has been initialized (declared versions loaded)
+	// and the localcache node loader has been registered. The declaredVersions
+	// map is populated at Init, so a non-empty map is a reliable signal.
+	declaredVersionsMu.RLock()
+	defer declaredVersionsMu.RUnlock()
+	return len(declaredVersions) > 0
+}
+
 // DeclaredVersions returns a snapshot of the release-declared component versions.
 func DeclaredVersions() map[string]string {
 	declaredVersionsMu.RLock()

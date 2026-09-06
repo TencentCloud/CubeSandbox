@@ -158,16 +158,30 @@ func distributeRootfsArtifact(ctx context.Context, req *types.CreateTemplateFrom
 			strings.TrimSpace(artifact.Ext4SHA256) != "", strings.TrimSpace(artifact.DownloadToken) != "", artifact.MasterNodeIP,
 		)
 	}
+	// The five checks above only read the artifact row. A row can be perfectly
+	// READY while the ext4 it points at is not on this node — either because the
+	// artifact store did not survive a restart (issue #852) or because another
+	// CubeMaster built it and the store is node-local (issue #1005).
+	// Distributing either way hands every cubelet a download URL that can only
+	// 404 or serve a stale file, so fail here with the drift spelled out instead
+	// of collecting N identical per-node sha256 mismatches.
+	if verdict := resolveMissingArtifact(ctx, artifact); verdict != artifactMissingVerdictNone {
+		return nil, 0, 0, 0, missingArtifactError(artifact, verdict)
+	}
 	targets, err := resolveTemplateNodes(req.InstanceType, req.DistributionScope)
 	if err != nil {
 		return nil, 0, 0, 0, err
+	}
+	downloadURL := strings.TrimSpace(artifact.ArtifactURL)
+	if downloadURL == "" {
+		downloadURL = buildDownloadURL(artifact.MasterNodeIP, artifact.ArtifactID, artifact.DownloadToken)
 	}
 	spec := &imagev1.ImageSpec{
 		Image:        artifact.ArtifactID,
 		StorageMedia: imagev1.ImageStorageMediaType_ext4.String(),
 		Annotations: map[string]string{
 			constants.CubeAnnotationRootfsArtifactID:        artifact.ArtifactID,
-			constants.CubeAnnotationRootfsArtifactURL:       buildDownloadURL(artifact.MasterNodeIP, artifact.ArtifactID, artifact.DownloadToken),
+			constants.CubeAnnotationRootfsArtifactURL:       downloadURL,
 			constants.CubeAnnotationRootfsArtifactToken:     artifact.DownloadToken,
 			constants.CubeAnnotationRootfsArtifactSHA256:    artifact.Ext4SHA256,
 			constants.CubeAnnotationRootfsArtifactSizeBytes: strconv.FormatInt(artifact.Ext4SizeBytes, 10),

@@ -79,6 +79,7 @@ VOLUME_S3_BUILD_MODE="${ONE_CLICK_VOLUME_S3_BUILD_MODE:-local}"
 
 CUBEMASTER_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTER_BIN:-}"
 CUBEMASTERCLI_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTERCLI_BIN:-}"
+TEMPLATECENTER_BIN_OVERRIDE="${ONE_CLICK_TEMPLATECENTER_BIN:-}"
 CUBELET_BIN_OVERRIDE="${ONE_CLICK_CUBELET_BIN:-}"
 CUBECLI_BIN_OVERRIDE="${ONE_CLICK_CUBECLI_BIN:-}"
 API_BIN_OVERRIDE="${ONE_CLICK_CUBE_API_BIN:-}"
@@ -712,6 +713,12 @@ build_or_copy_go_binary \
   "cubemastercli" "${CUBEMASTERCLI_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeMaster" "${CUBEMASTER_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cubemastercli" ./cmd/cubemastercli "${CUBEMASTER_VERSION_PKG}"
+# Separate module, but its ldflags target CubeMaster's version package because
+# that is what its go.mod pulls in for version reporting.
+build_or_copy_go_binary \
+  "templatecenter" "${TEMPLATECENTER_BIN_OVERRIDE}" \
+  "${ROOT_DIR}/CubeTemplateCenter" "${CUBEMASTER_BUILD_MODE}" \
+  "${CORE_BIN_DIR}/templatecenter" ./cmd/templatecenter "${CUBEMASTER_VERSION_PKG}"
 build_or_copy_go_binary \
   "cubelet" "${CUBELET_BIN_OVERRIDE}" \
   "${ROOT_DIR}/Cubelet" "${CUBELET_BUILD_MODE}" \
@@ -742,6 +749,7 @@ mkdir -p \
   "${PACKAGE_ROOT}/CubeOps/bin" \
   "${PACKAGE_ROOT}/CubeMaster/bin" \
   "${PACKAGE_ROOT}/CubeMaster/plugin" \
+  "${PACKAGE_ROOT}/CubeTemplateCenter/bin" \
   "${PACKAGE_ROOT}/Cubelet/bin" \
   "${PACKAGE_ROOT}/Cubelet/plugin" \
   "${PACKAGE_ROOT}/Cubelet/config" \
@@ -788,6 +796,18 @@ copy_file "${ROOT_DIR}/configs/single-node/cubemaster.yaml" "${PACKAGE_ROOT}/Cub
 copy_file "${ROOT_DIR}/deploy/scripts/docker-install-volume-deps.sh" \
   "${PACKAGE_ROOT}/CubeMaster/docker-install-volume-deps.sh"
 chmod +x "${PACKAGE_ROOT}/CubeMaster/docker-install-volume-deps.sh"
+
+# CubeTemplateCenter. Shipped in every package but inert until an operator
+# enables cube-sandbox-cubetemplatecenter.service: CubeMaster defaults to
+# building templates in-process (templatecenter_enabled=false), so an unused
+# binary and conf on disk cost nothing, whereas a missing one would make
+# enabling the unit a re-install.
+copy_file "${CORE_BIN_DIR}/templatecenter" "${PACKAGE_ROOT}/CubeTemplateCenter/bin/templatecenter"
+# The repo-root CubeTemplateCenter/conf.yaml is the Helm template (its db/redis/
+# port fields are {{ }} placeholders that are never rendered on a bare host), so
+# ship the single-node template, which install.sh resolves the same way it does
+# CubeMaster's.
+copy_file "${ROOT_DIR}/configs/single-node/templatecenter.yaml" "${PACKAGE_ROOT}/CubeTemplateCenter/conf.yaml"
 
 copy_file "${CORE_BIN_DIR}/cubelet" "${PACKAGE_ROOT}/Cubelet/bin/cubelet"
 copy_file "${CORE_BIN_DIR}/cubecli" "${PACKAGE_ROOT}/Cubelet/bin/cubecli"

@@ -195,6 +195,10 @@ tolerations:
 {{- printf "%s-api" (include "cube.fullname" .) -}}
 {{- end -}}
 
+{{- define "cube.templateCenterName" -}}
+{{- printf "%s-templatecenter" (include "cube.fullname" .) -}}
+{{- end -}}
+
 {{- define "cube.cubemastercliName" -}}
 {{- printf "%s-cubemastercli" (include "cube.fullname" .) -}}
 {{- end -}}
@@ -448,6 +452,7 @@ http {
 {{- printf "%s-master-config" (include "cube.fullname" .) -}}
 {{- end -}}
 
+<<<<<<< HEAD
 {{/*
 cube.adminToken resolves the shared CubeProxy admin token. CubeProxy reads it at
 runtime as CUBE_PROXY_ADMIN_TOKEN and the lifecycle manager as CUBE_LCM_ADMIN_TOKEN
@@ -475,6 +480,10 @@ see validate.yaml) to avoid the double generation entirely.
 {{- randAlphaNum 32 -}}
 {{- end -}}
 {{- end -}}
+=======
+{{- define "cube.templateCenterConfigSecretName" -}}
+{{- printf "%s-templatecenter-config" (include "cube.fullname" .) -}}
+>>>>>>> c9569978 (feat(templatecenter): standalone template build service)
 {{- end -}}
 
 {{- define "cube.masterStoragePVCName" -}}
@@ -714,6 +723,47 @@ enabled and the operator left volumeS3.endpoint empty, fill from chart MinIO
 {{- include "cube.masterEndpoint" . -}}
 {{- end -}}
 {{- end -}}
+
+{{- /*
+Base URL CubeMaster uses for CUBE_TEMPLATE_CENTER_ADDR, and that TC's reporter
+uses in reverse for CUBE_MASTER_ADDR. Always the in-cluster ClusterIP
+Service: the optional CLB below is for reaching TC from OUTSIDE the cluster, and
+routing control-plane-internal traffic through a load balancer would add a hop
+and a failure domain for no benefit.
+*/ -}}
+{{- define "cube.templateCenterEndpoint" -}}
+{{- if and .Values.controlPlane.templateCenter.enabled (not .Values.externalControlPlane.enabled) -}}
+{{- printf "http://%s.%s.svc.%s:%v" (include "cube.templateCenterName" .) .Release.Namespace (include "cube.clusterDomain" .) .Values.controlPlane.templateCenter.service.port -}}
+{{- end -}}
+{{- end -}}
+
+{{- /*
+CubeMaster no longer has a templatecenter_enabled switch: every template build
+is forwarded to CubeTemplateCenter. This helper is kept only so existing chart
+values do not break; it always renders "true" because there is no local build
+mode left to gate.
+*/ -}}
+{{- define "cube.templateCenterEnabledConf" -}}
+{{- "true" -}}
+{{- end -}}
+
+{{- /*
+Claim backing TC's artifact store.
+
+Defaults to CubeMaster's claim, because the two processes MUST see the same
+directory: TC writes the ext4 and CubeMaster serves it over
+/cube/template/artifact/download (design 9.7). ReadWriteOnce means single NODE,
+not single Pod, so co-located Pods can both mount it — which is what the
+podAffinity in templatecenter.yaml enforces.
+*/ -}}
+{{- define "cube.templateCenterStorageClaimName" -}}
+{{- if .Values.controlPlane.templateCenter.persistence.existingClaim -}}
+{{- .Values.controlPlane.templateCenter.persistence.existingClaim -}}
+{{- else -}}
+{{- include "cube.masterStoragePVCName" . -}}
+{{- end -}}
+{{- end -}}
+
 
 {{- define "cube.cubemastercliMasterAddress" -}}
 {{- $endpoint := include "cube.cubemastercliMasterEndpoint" . -}}
