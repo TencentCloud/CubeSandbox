@@ -63,9 +63,49 @@ func AddTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVM
 	if err := UpsertTAPDeviceMetadata(ifindex, ip, id, version); err != nil {
 		return err
 	}
+	if err := setDNSTrackRateLimit(ifindex); err != nil {
+		_ = DeleteTAPDevice(ifindex, ip)
+		return err
+	}
 	if err := applyNetPolicy(ifindex, opts); err != nil {
 		_ = DeleteTAPDevice(ifindex, ip)
 		return err
+	}
+	return nil
+}
+
+// setDNSTrackRateLimit installs the sandbox's zeroed DNS query-tracking
+// counter. It is installed before any policy so the ceiling is in place for the
+// sandbox's very first query — a missing entry means "unlimited" on the BPF
+// side, which is the right default for an unregistered ifindex but not for a
+// live one.
+func setDNSTrackRateLimit(ifindex uint32) error {
+	m, err := loadPinnedMap(MapNameDNSTrackRL)
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+
+	// All-zero: the first BPF access sees window_end_ns == 0 and opens a fresh
+	// window. The Lock field's contents belong to the kernel.
+	state := dnsTrackRLState{}
+	if err := m.Update(&ifindex, &state, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("map.Update failed: %w, name: %s", err, MapNameDNSTrackRL)
+	}
+	return nil
+}
+
+// deleteDNSTrackRateLimit drops the sandbox's counter on teardown so a reused
+// ifindex starts from a fresh window rather than inheriting a stale one.
+func deleteDNSTrackRateLimit(ifindex uint32) error {
+	m, err := loadPinnedMap(MapNameDNSTrackRL)
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+
+	if err := m.Delete(&ifindex); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("map.Delete failed: %w, name: %s", err, MapNameDNSTrackRL)
 	}
 	return nil
 }
@@ -210,6 +250,9 @@ func UpsertTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts 
 // explicitly so policy cleanup and metadata cleanup remain separate steps.
 func DeleteTAPDevice(ifindex uint32, ip net.IP) error {
 	if err := CleanupTAPDevicePolicy(ifindex); err != nil {
+		return err
+	}
+	if err := deleteDNSTrackRateLimit(ifindex); err != nil {
 		return err
 	}
 	return DeleteTAPDeviceMetadata(ifindex, ip)

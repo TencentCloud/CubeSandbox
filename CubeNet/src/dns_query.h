@@ -178,10 +178,53 @@ static __always_inline bool dns_query_should_filter_ipv4_a(struct __sk_buff *skb
 	return is_ipv4_a;
 }
 
-/* Track an allowed IPv4 A query so the response can inherit its L7 flags
- * and per-host port set. Copies port_count + ports[] verbatim from the matched
- * dns_allow_value so dns_learn_response_ip can rebuild net_policy_value_v3
- * without a second dns_allow_v2 lookup at response time.
+/* Fixed-window rate limit on how fast one sandbox can have queries tracked.
+ *
+ * A tracked query is what authorizes its response to be uploaded to user
+ * space, where learning costs a full desired-state recomputation. Without a
+ * ceiling a sandbox could drive that path as fast as it can emit UDP.
+ *
+ * Returns true when the query may be tracked. A missing map entry means "no
+ * limit" so a sandbox whose entry has not been installed yet still learns; the
+ * entry is written at AddTAPDevice time.
+ */
+static __always_inline bool dns_track_rate_allow(__u32 ifindex)
+{
+	struct dns_track_rl_state *rl;
+	__u64 now_ns;
+	bool allow;
+
+	rl = bpf_map_lookup_elem(&dns_track_rl, &ifindex);
+	if (!rl)
+		return true;
+
+	now_ns = bpf_ktime_get_ns();
+	bpf_spin_lock(&rl->lock);
+	if (now_ns >= rl->window_end_ns) {
+		rl->window_end_ns = now_ns + DNS_TRACK_WINDOW_NS;
+		rl->count = 1;
+		allow = true;
+	} else if (rl->count < DNS_TRACK_QPS_LIMIT) {
+		rl->count++;
+		allow = true;
+	} else {
+		allow = false;
+	}
+	bpf_spin_unlock(&rl->lock);
+
+	return allow;
+}
+
+/* Track an allowed IPv4 A query so its response can be recognised and handed
+ * to user space.
+ *
+ * Only the key and the expiry matter now. The value's flags are still written
+ * because a map dump showing which rule a pending query matched is useful when
+ * debugging, but nothing reads them: the response path only asks "was this
+ * tracked", and the user-space learner derives the L7 flags and port set from
+ * its own domain index, so it always uses the *current* rule rather than the
+ * one that was in force when the query left. That is what makes a policy
+ * update take effect on replies already in flight.
  */
 static __always_inline void dns_track_allowed_query(struct __sk_buff *skb,
 						    const struct dns_query_state *state,
@@ -194,7 +237,9 @@ static __always_inline void dns_track_allowed_query(struct __sk_buff *skb,
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct udphdr *udp;
-	int i;
+
+	if (!dns_track_rate_allow(state->ifindex))
+		return;
 
 	if (!__pull_headers_udp(skb, &l2, &l3, &udp))
 		return;
@@ -208,24 +253,6 @@ static __always_inline void dns_track_allowed_query(struct __sk_buff *skb,
 	track_key.qname_hash = qname_hash;
 	track_value.flags = matched->flags;
 	track_value.expires_at_ns = bpf_ktime_get_ns() + DNS_QUERY_TRACK_TTL_NS;
-	track_value.port_count = matched->port_count;
-	if (track_value.port_count > MAX_L7_PORTS_PER_HOST)
-		track_value.port_count = MAX_L7_PORTS_PER_HOST;
-
-#pragma unroll
-	for (i = 0; i < MAX_L7_PORTS_PER_HOST; i++) {
-		/* Guard inside body (not `break`) so clang keeps this as a
-		 * fixed-trip-count loop and fully unrolls it — otherwise the BPF
-		 * verifier rejects ports[i] writes as variable-offset stack
-		 * accesses. Field-by-field assignment sidesteps clang's memcpy
-		 * lowering for whole-struct copies (which is disallowed in BPF).
-		 */
-		if (i < track_value.port_count) {
-			track_value.ports[i].port = matched->ports[i].port;
-			track_value.ports[i].scheme = matched->ports[i].scheme;
-			track_value.ports[i]._pad = matched->ports[i]._pad;
-		}
-	}
 
 	bpf_map_update_elem(&dns_query_track, &track_key, &track_value, BPF_ANY);
 }
