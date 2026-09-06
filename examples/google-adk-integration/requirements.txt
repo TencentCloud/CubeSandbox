@@ -1,0 +1,5 @@
+google-adk==2.7.1
+e2b==2.26.0
+e2b-code-interpreter==2.8.1
+aiohttp>=3.9
+python-dotenv
