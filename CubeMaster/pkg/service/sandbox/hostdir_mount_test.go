@@ -225,19 +225,6 @@ func TestInjectPluginVolumeMountsRejectsConflictingStoredMount(t *testing.T) {
 	assert.Contains(t, err.Error(), "conflicts")
 }
 
-func TestCreateRequestHasPluginVolume(t *testing.T) {
-	assert.False(t, CreateRequestHasPluginVolume(nil))
-	assert.False(t, CreateRequestHasPluginVolume(&types.CreateCubeSandboxReq{}))
-	assert.True(t, CreateRequestHasPluginVolume(&types.CreateCubeSandboxReq{
-		Annotations: map[string]string{
-			AnnotationPluginVolumeMounts: `[{"name":"dataset","container_path":"/dataset"}]`,
-		},
-	}))
-	assert.True(t, CreateRequestHasPluginVolume(&types.CreateCubeSandboxReq{
-		Volumes: []*types.Volume{{Name: "dataset"}},
-	}))
-}
-
 func TestValidateHostPath(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -231,28 +231,6 @@ type pluginVolumeMountEntry struct {
 	Readonly      bool   `json:"readonly,omitempty"`
 }
 
-// CreateRequestHasPluginVolume reports whether a create request depends on a
-// managed plugin volume. Reference-only snapshots use this to stay on their
-// origin node until drivers can declare portability and topology.
-func CreateRequestHasPluginVolume(req *types.CreateCubeSandboxReq) bool {
-	if req == nil {
-		return false
-	}
-	for _, key := range []string{AnnotationPluginVolumeMounts, AnnotationPluginVolumeSources} {
-		raw := strings.TrimSpace(req.Annotations[key])
-		if raw != "" && raw != "[]" && !strings.EqualFold(raw, "null") {
-			return true
-		}
-	}
-	for _, volume := range req.Volumes {
-		if volume != nil && volume.Name != "" &&
-			(volume.VolumeSource == nil || volume.VolumeSource.PluginVolume != nil) {
-			return true
-		}
-	}
-	return false
-}
-
 // injectPluginVolumeMounts reads the "plugin-volume-mounts" annotation and
 // ensures the corresponding VolumeMounts exist on every container.
 // This is the counterpart to CubeAPI's annotation-based forwarding of
