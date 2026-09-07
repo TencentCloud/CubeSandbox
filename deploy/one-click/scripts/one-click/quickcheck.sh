@@ -431,6 +431,21 @@ quickcheck_main() {
   echo "[quickcheck] 2/4 check cubemaster /notify/health"
   check_http "http://${MASTER_ADDR}/notify/health"
 
+  # CubeTemplateCenter ships inert (its unit is installed but not enabled by
+  # default -- see deploy/one-click/systemd/cube-sandbox-cubetemplatecenter.service)
+  # but CubeMaster no longer builds templates in-process and has no fallback:
+  # once an operator enables the unit, every template-from-image build depends
+  # on it being up and reachable at CUBE_TEMPLATE_CENTER_ADDR. Only probed when
+  # the unit is actually enabled, so a deployment that has not turned on
+  # template building yet is not failed for a component it never opted into.
+  if [[ "${ROLE}" != "compute" ]] \
+      && systemctl is-enabled --quiet cube-sandbox-cubetemplatecenter.service 2>/dev/null; then
+    echo "[quickcheck] check cube-sandbox-cubetemplatecenter.service + /health"
+    check_unit_active cube-sandbox-cubetemplatecenter.service
+    local TC_ADDR="${CUBE_TEMPLATE_CENTER_ADDR:-http://127.0.0.1:8090}"
+    check_http "${TC_ADDR%/}/health"
+  fi
+
   if [[ "${ROLE}" == "compute" ]]; then
     [[ -n "${NODE_ID}" ]] || die "CUBE_SANDBOX_NODE_IP is required for compute quickcheck"
     validate_ipv4_literal "${NODE_ID}" "CUBE_SANDBOX_NODE_IP"
