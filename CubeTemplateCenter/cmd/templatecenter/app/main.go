@@ -13,10 +13,10 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
-	_ "github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/mysql"    // register mysql driver
-	_ "github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/postgres" // register postgres driver
-	"github.com/tencentcloud/CubeSandbox/CubeDB/migrate"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
+	_ "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/mysql"    // register mysql driver
+	_ "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/postgres" // register postgres driver
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/migrate"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"

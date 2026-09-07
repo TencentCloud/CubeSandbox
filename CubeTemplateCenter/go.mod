@@ -10,10 +10,10 @@ require (
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.23.2
-	github.com/tencentcloud/CubeSandbox/CubeDB v0.0.0-00010101000000-000000000000
 	github.com/tencentcloud/CubeSandbox/CubeMaster v0.0.0-00010101000000-000000000000
 	github.com/tencentcloud/CubeSandbox/cubelog v0.0.0-20260828105459-09274501dd12
 	github.com/tencentcloud/CubeSandbox/pkgs/CubeLog v0.1.1-0.20260113105508-a996703fa42f
+	github.com/tencentcloud/CubeSandbox/pkgs/cubedb v0.0.0-00010101000000-000000000000
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/sys v0.47.0
@@ -132,7 +132,7 @@ require (
 
 replace github.com/tencentcloud/CubeSandbox/CubeMaster => ../CubeMaster
 
-replace github.com/tencentcloud/CubeSandbox/CubeDB => ../CubeDB
+replace github.com/tencentcloud/CubeSandbox/pkgs/cubedb => ../pkgs/cubedb
 
 replace github.com/tencentcloud/CubeSandbox/Cubelet => ../Cubelet
 
