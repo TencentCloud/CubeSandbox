@@ -617,14 +617,6 @@ func TestCreateWithInvalidParam(t *testing.T) {
 
 }
 
-func TestMain(m *testing.M) {
-	if os.Getenv("CI") != "" {
-		fmt.Println("Skipping testing in CI environment")
-		return
-	}
-	m.Run()
-}
-
 func TestPollImmediateInfiniteWithContext(t *testing.T) {
 	timeout := 5 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
