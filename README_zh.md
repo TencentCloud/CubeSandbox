@@ -434,23 +434,6 @@ http://<控制节点 IP>:12088
 | **只带文件系统的快照** | 只保存可写文件系统、跳过内存 dump，适合磁盘冷启动场景，克隆/恢复更快更省 |
 | **GPU 沙箱** | 把宿主机 GPU 透传到沙箱，Agent / 推理可在隔离 VM 内使用 CUDA，调度感知 GPU 库存 |
 
-## 赞助商
-
-<table>
-  <tr>
-    <td align="center">
-      <a href="https://cloud.tencent.com/">
-        <img src="./docs/assets/tcloud_logo_zh.png" alt="腾讯云" height="40">
-      </a>
-    </td>
-    <td align="center">
-      <a href="https://www.arm.com/">
-        <img src="./docs/assets/arm-logo.svg" alt="Arm" height="40">
-      </a>
-    </td>
-  </tr>
-</table>
-
 ## 贡献者
 
 感谢所有贡献者：
