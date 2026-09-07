@@ -215,7 +215,7 @@ IMG=my-registry.example.com/my-team/my-sandbox:v1
 cid=$(docker create "$IMG") && docker start "$cid"
 ```
 
-Continue only if both commands succeed. If creation fails, resolve the Docker error first. If startup fails, use the container ID in `$cid` to inspect the failure in step 3.
+If `docker create` reports an error, resolve it before continuing. If `docker start` reports an error, use the container ID in `$cid` to inspect the failure in step 3. If both commands succeed, continue to step 2: a successful `docker start` does not guarantee that the container stays running.
 
 **2. Check the container and envd.**
 
