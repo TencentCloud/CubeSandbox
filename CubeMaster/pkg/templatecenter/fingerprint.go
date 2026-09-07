@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -20,8 +21,28 @@ func unmarshalTemplateImageJobRequest(payload string) (*types.CreateTemplateFrom
 	if err := json.Unmarshal([]byte(payload), req); err != nil {
 		return nil, err
 	}
+	// Preserve the TemplateID exactly as it was persisted in this job's
+	// RequestJSON snapshot. normalizeTemplateImageRequest unconditionally
+	// overwrites TemplateID with a FRESH random value (by design, for the
+	// create-submission path, where a client-supplied ID must always be
+	// ignored) -- but this function decodes an ALREADY-SUBMITTED job's
+	// snapshot, whose TemplateID was already generated once at submit time
+	// and is the same ID the job row, template definition, and replicas were
+	// created under. Letting normalize regenerate it here silently produced a
+	// SECOND, different template_id (e.g. remote_build_resume.go's resume
+	// path used it to register the definition + replicas), leaving the
+	// original job's template_id orphaned with no matching definition row
+	// while the real template ended up under the regenerated ID instead.
+	originalTemplateID := strings.TrimSpace(req.TemplateID)
 	req.Request = &types.Request{RequestID: uuid.NewString()}
-	return normalizeTemplateImageRequest(req)
+	normalized, err := normalizeTemplateImageRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	if originalTemplateID != "" {
+		normalized.TemplateID = originalTemplateID
+	}
+	return normalized, nil
 }
 
 func buildTemplateSpecFingerprint(req *types.CreateTemplateFromImageReq, sourceImageDigest string) string {

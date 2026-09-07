@@ -292,6 +292,16 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		failRedoTemplateImageJob(ctx, jobID, jobRecord.ResumePhase, err.Error())
 		return
 	}
+	// Hard invariant: the decoded snapshot's template_id MUST equal the
+	// job row's own template_id, otherwise downstream steps could register
+	// artifacts/definitions under a different template_id than the one this
+	// job (and its replicas) actually belong to, orphaning the real record.
+	if decodedID := strings.TrimSpace(sourceReq.TemplateID); decodedID != strings.TrimSpace(jobRecord.TemplateID) {
+		err := fmt.Errorf("decoded request template_id %q does not match job %s template_id %q; refusing to resume to avoid orphaning the template", decodedID, jobID, jobRecord.TemplateID)
+		logger.Errorf("%v", err)
+		failRedoTemplateImageJob(ctx, jobID, jobRecord.ResumePhase, err.Error())
+		return
+	}
 	existingReplicas, err := ListReplicas(ctx, req.TemplateID)
 	if err != nil {
 		failRedoTemplateImageJob(ctx, jobID, jobRecord.ResumePhase, err.Error())

@@ -341,6 +341,24 @@ func ResumeTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, r
 		})
 		return failErr
 	}
+	// Hard invariant: the decoded snapshot's template_id MUST equal the
+	// job row's own template_id. This is the exact class of bug that
+	// previously orphaned a job's template_id (unmarshalTemplateImageJobRequest
+	// silently minting a second, different ID) while the real definition +
+	// replicas got registered under the regenerated ID instead. Fail loudly
+	// here rather than letting registerRemoteBuiltArtifact silently write the
+	// definition/replicas under a mismatched template_id again in the future.
+	if decodedID := strings.TrimSpace(req.TemplateID); decodedID != strings.TrimSpace(job.TemplateID) {
+		failErr := fmt.Errorf("decoded request template_id %q does not match job %s template_id %q; refusing to resume to avoid orphaning the template", decodedID, jobID, job.TemplateID)
+		log.G(ctx).Errorf("%v", failErr)
+		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+			"status":        JobStatusFailed,
+			"phase":         JobPhaseCreatingTemplate,
+			"progress":      100,
+			"error_message": failErr.Error(),
+		})
+		return failErr
+	}
 
 	logger := log.G(ctx).WithFields(map[string]any{
 		"job_id":      jobID,
