@@ -13,10 +13,6 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
-	_ "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/mysql"    // register mysql driver
-	_ "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/postgres" // register postgres driver
-	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/migrate"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
@@ -30,6 +26,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/reconcile"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/tcconfig"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
+	_ "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/mysql"    // register mysql driver
+	_ "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/postgres" // register postgres driver
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/migrate"
 )
 
 // App is the template center application.

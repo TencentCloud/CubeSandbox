@@ -377,8 +377,8 @@ func initCommon(ctx context.Context, includeSnapshotSide bool) error {
 			// the worker (cubelet) grpc pool, which TC never initializes. See
 			// InitForTemplateCenter.
 			startArtifactGC(ctx)
-			}
-			scheduleInitialCompatScan(ctx)
+		}
+		scheduleInitialCompatScan(ctx)
 	})
 	return initErr
 }
