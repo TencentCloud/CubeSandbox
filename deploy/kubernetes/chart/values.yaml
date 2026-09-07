@@ -290,16 +290,11 @@ controlPlane:
   # forwards build requests to TC, receives BUILT callbacks, distributes
   # artifacts to nodes).
   #
-  # Disabling TC (enabled=false) will cause all template build requests to
-  # fail. This flag exists only for migration scenarios where you need to
-  # temporarily disable TC during an upgrade.
-  #
-  # Both sides are wired from this one value -- no manual conf editing.
-  # enabled=true renders templatecenter_enabled=true into CubeMaster's conf and
-  # injects CUBE_TEMPLATE_CENTER_ADDR into its Deployment (and CUBE_MASTER_ADDR
-  # into TC's), so the two halves can never disagree.
+  # There is no enabled switch: whenever controlPlane.enabled is true, TC is
+  # deployed unconditionally and CUBE_TEMPLATE_CENTER_ADDR / CUBE_MASTER_ADDR
+  # are wired automatically on both sides -- no manual conf editing, and no
+  # way to end up with a CubeMaster that has nowhere to forward builds.
   templateCenter:
-    enabled: true
     # TC always runs exactly one instance. Artifacts live on a node-local disk
     # behind a ReadWriteOnce PVC with no cross-node sharing layer, so a second
     # replica could neither read the first one's ext4 files nor take over its

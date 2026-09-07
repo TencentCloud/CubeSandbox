@@ -8,18 +8,21 @@
 {{- fail "controlPlane.templateCenter.buildMode no longer exists: template offload is now a single boolean. Use controlPlane.templateCenter.enabled only -- it renders templatecenter_enabled into CubeMaster's conf, and builds go to TC when that is true" }}
 {{- end }}
 {{- if hasKey $templateCenter "routeMode" }}
-{{- fail "controlPlane.templateCenter.routeMode no longer exists: the route proxy was removed along with the build-mode string. CubeMaster always serves the public template API; use controlPlane.templateCenter.enabled only" }}
+{{- fail "controlPlane.templateCenter.routeMode no longer exists: the route proxy was removed along with the build-mode string. CubeMaster always serves the public template API" }}
 {{- end }}
-{{- if and $templateCenter.enabled .Values.controlPlane.enabled (not .Values.controlPlane.master.enabled) }}
-{{- fail "controlPlane.templateCenter.enabled=true requires controlPlane.master.enabled=true: TC writes the ext4 but CubeMaster is what serves it to Cubelet and owns every business-state write" }}
+{{- if hasKey $templateCenter "enabled" }}
+{{- fail "controlPlane.templateCenter.enabled no longer exists: TC is mandatory and deploys automatically whenever controlPlane.enabled=true (CubeMaster no longer builds templates in-process). Remove controlPlane.templateCenter.enabled from your values" }}
 {{- end }}
-{{- if and $templateCenter.enabled .Values.controlPlane.enabled .Values.externalControlPlane.enabled }}
-{{- fail "controlPlane.templateCenter.enabled=true is not supported with externalControlPlane.enabled=true: TC must share the artifact directory with the CubeMaster that serves downloads, which an out-of-cluster master cannot do" }}
+{{- if and .Values.controlPlane.enabled (not .Values.controlPlane.master.enabled) }}
+{{- fail "controlPlane.enabled=true requires controlPlane.master.enabled=true: TC (which deploys automatically) writes the ext4 but CubeMaster is what serves it to Cubelet and owns every business-state write" }}
 {{- end }}
-{{- if and $templateCenter.enabled $templateCenter.colocateWithMaster (gt (int .Values.controlPlane.master.replicas) 1) }}
+{{- if and .Values.controlPlane.enabled .Values.externalControlPlane.enabled }}
+{{- fail "controlPlane.enabled=true is not supported with externalControlPlane.enabled=true: TC (which deploys automatically) must share the artifact directory with the CubeMaster that serves downloads, which an out-of-cluster master cannot do" }}
+{{- end }}
+{{- if and .Values.controlPlane.enabled $templateCenter.colocateWithMaster (gt (int .Values.controlPlane.master.replicas) 1) }}
 {{- fail "controlPlane.templateCenter.colocateWithMaster=true requires controlPlane.master.replicas=1: the artifact store is node-local, so with several master replicas a download can land on a node that never built the artifact" }}
 {{- end }}
-{{- if and $templateCenter.enabled (not $templateCenter.colocateWithMaster) (not $templateCenter.affinity) }}
+{{- if and .Values.controlPlane.enabled (not $templateCenter.colocateWithMaster) (not $templateCenter.affinity) }}
 {{- fail "controlPlane.templateCenter.colocateWithMaster=false requires controlPlane.templateCenter.affinity: without it TC may be scheduled away from the CubeMaster holding the artifact volume" }}
 {{- end }}
 {{- if hasKey $templateCenter "replicas" }}
