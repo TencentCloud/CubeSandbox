@@ -88,20 +88,29 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	// submit would try to forward the job back to TC itself over HTTP.
 	// Keeping them local avoids this self-forward loop entirely.
 	//
-	// The proxied remainder (status/list/compat/artifact download/GET/alias)
-	// is pure DB read/write or file serving with no cubelet RPC and no
-	// forwarding, so it is safe on TC, which owns that part of the template
-	// API surface. Routes are enumerated explicitly (mirroring
-	// RegisterTemplateRoutes) rather than via a wildcard catch-all, so the
-	// local routes can be carved out; keep this list in sync with
-	// RegisterTemplateRoutes below.
+	// GET info/list and the alias write are also local, but for a different
+	// reason: the template query caches (templateInfoCache /
+	// templateListCache / templateDefinitionCache) are process-local
+	// in-memory maps, so a write on CubeMaster (delete/create/alias)
+	// invalidates only CubeMaster's own caches. If TC served these reads it
+	// would keep answering from its now-stale cache for up to the 1-minute
+	// TTL — e.g. a just-deleted template kept showing READY until the entry
+	// expired. Serving reads on the process that writes keeps
+	// read-your-writes coherent.
+	//
+	// The proxied remainder is uncached and safe on TC: the compat matrix
+	// and the job/build-status polls are plain DB reads, and the artifact
+	// download is file serving (or an S3 redirect). Routes are enumerated
+	// explicitly (mirroring RegisterTemplateRoutes) rather than via a
+	// wildcard catch-all, so the local routes can be carved out; keep this
+	// list in sync with RegisterTemplateRoutes below.
 	g.POST(TemplateFromImageAction, createTemplateFromImageGinHandler)
 	g.POST(TemplateRedoAction, handleRedoTemplateAction)
 	g.POST(TemplateAction, createTemplateGinHandler)
 	g.DELETE(TemplateAction, deleteTemplateGinHandler)
+	g.GET(TemplateAction, getTemplateGinHandler)
+	g.PUT(TemplateAction+"/:template_id/alias", setTemplateAliasGinHandler)
 
-	g.GET(TemplateAction, proxyToTemplateCenter)
-	g.PUT(TemplateAction+"/:template_id/alias", proxyToTemplateCenter)
 	g.GET(TemplateCompatAction, proxyToTemplateCenter)
 	g.POST(TemplateCompatAction, proxyToTemplateCenter)
 	g.GET(TemplateBuildStatusAction+"/:build_id/status", proxyToTemplateCenter)
@@ -129,23 +138,26 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 // Used by the standalone CubeTemplateCenter process — sandbox / snapshot /
 // volume CRUD stay with CubeMaster and are NOT registered here.
 //
-// Only pure-DB / file-serving handlers are registered here. TC never
-// initializes the worker (cubelet) grpc conn pool, so every handler that can
-// issue a cubelet RPC — create-from-snapshot (replica materialization and
-// rollback cleanup), delete (node replica/artifact cleanup), redo
-// (DISTRIBUTING resume) — is served by CubeMaster instead, as are the two
-// build-submit POSTs whose forwarding reads CUBE_TEMPLATE_CENTER_ADDR from
-// CubeMaster's own environment (see RegisterCubeRoutes). CubeMaster reaches
-// TC's data plane exclusively through the internal /tc/api/v1/* endpoints
-// (build submit, artifact delete), never by sending these writes here.
+// Only uncached pure-DB / file-serving handlers are registered here. TC
+// never initializes the worker (cubelet) grpc conn pool, so every handler
+// that can issue a cubelet RPC — create-from-snapshot (replica
+// materialization and rollback cleanup), delete (node replica/artifact
+// cleanup), redo (DISTRIBUTING resume) — is served by CubeMaster instead,
+// as are the two build-submit POSTs whose forwarding reads
+// CUBE_TEMPLATE_CENTER_ADDR from CubeMaster's own environment (see
+// RegisterCubeRoutes). CubeMaster reaches TC's data plane exclusively
+// through the internal /tc/api/v1/* endpoints (build submit, artifact
+// delete), never by sending these writes here.
+//
+// GET info/list and PUT alias are NOT here either: they go through the
+// process-local template query caches, which are only coherent on the
+// process that performs the writes (CubeMaster).
 //
 // Mirrors the proxied subset of the Template + Artifact/CA + RootfsArtifact
 // block of RegisterCubeRoutes. Keep in sync with that function.
 func RegisterTemplateRoutes(g *gin.RouterGroup) {
-	// Template reads + build status. The writes (create/delete/redo/
-	// from-image submit) live on CubeMaster — see the doc comment above.
-	g.GET(TemplateAction, getTemplateGinHandler)
-	g.PUT(TemplateAction+"/:template_id/alias", setTemplateAliasGinHandler)
+	// Uncached reads + build status + file serving only. The cached reads
+	// (info/list) and every write live on CubeMaster — see the doc comment.
 	g.GET(TemplateCompatAction, getTemplateCompatGinHandler)
 	g.POST(TemplateCompatAction, updateTemplateCompatGinHandler)
 	g.GET(TemplateBuildStatusAction+"/:build_id/status", handleTemplateBuildStatusAction)
