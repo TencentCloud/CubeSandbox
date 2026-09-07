@@ -15,14 +15,14 @@ import (
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/pressly/goose/v3/lock"
-	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
 const (
 	// DriverName is the canonical short name; it doubles as the
-	// migrations sub-directory under CubeDB/migrate/migrations.
+	// migrations sub-directory under pkgs/cubedb/migrate/migrations.
 	DriverName = "mysql"
 
 	// globalLockName is the GET_LOCK key held for the entire goose.Up()

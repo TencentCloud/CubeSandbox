@@ -378,11 +378,11 @@ PVC / LoadBalancer only — it does not set `global.imageRegistry`).
 
 ## Database migration
 
-The chart does not deliver a separate DB migration Job or image. CubeMaster owns MySQL schema migration and runs its embedded `CubeMaster/pkg/base/dao/migrate/migrations/mysql` migrations during startup.
+The chart does not deliver a separate DB migration Job or image. CubeMaster and CubeOps share the `pkgs/cubedb` migrator and apply the embedded SQL under `pkgs/cubedb/migrate/migrations/{mysql,postgres}` at process startup.
 
-- CubeMaster uses the configured MySQL endpoint, user, password, and database.
+- CubeMaster and CubeOps use the configured database endpoint, user, password, and database.
 - The chart does not package or maintain SQL files under `files/`; do not add migration SQL copies to the chart.
-- CubeMaster records applied versions in `goose_db_version` and serializes concurrent migration attempts through the migration lock implemented by CubeMaster.
+- Applied versions are recorded in `goose_db_version`. Concurrent migration attempts are serialized by the cluster lock in `pkgs/cubedb`.
 - There is no chart-managed SQL data seed, and the one-click single-node seed file `sql/002_seed_single_node.sql` is intentionally not rendered by the chart. Node registration must come from real Cube Node Pods selected by `placement.compute.nodeSelector`.
 - When using a third-party database, set `mysql.host` or `postgres.host` (matching `database.driver`) and ensure the configured user can create/alter tables in that database.
 

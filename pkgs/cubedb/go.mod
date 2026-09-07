@@ -1,4 +1,4 @@
-module github.com/tencentcloud/CubeSandbox/CubeDB
+module github.com/tencentcloud/CubeSandbox/pkgs/cubedb
 
 go 1.25.7
 

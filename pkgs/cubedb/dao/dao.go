@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/pressly/goose/v3/lock"
-	"github.com/tencentcloud/CubeSandbox/CubeDB/migrate"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/migrate"
 	"gorm.io/gorm"
 )
 

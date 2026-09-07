@@ -30,7 +30,7 @@ import (
 	"time"
 
 	"github.com/goccy/go-yaml"
-	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 )
 
 // Config holds all CubeOps runtime configuration.

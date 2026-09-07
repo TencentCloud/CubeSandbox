@@ -6,7 +6,7 @@ on:
     paths:
       - 'CubeAPI/**'
       - 'CubeOps/**'
-      - 'CubeDB/**'
+      - 'pkgs/cubedb/**'
       - 'CubeProxy/**'
       - 'CubeMaster/**'
       - 'CubeShim/**'
@@ -26,7 +26,7 @@ on:
     paths:
       - 'CubeAPI/**'
       - 'CubeOps/**'
-      - 'CubeDB/**'
+      - 'pkgs/cubedb/**'
       - 'CubeProxy/**'
       - 'CubeMaster/**'
       - 'CubeShim/**'
@@ -180,11 +180,12 @@ jobs:
                 CubeOps/*)
                   add_component "CubeOps"
                   ;;
-                CubeDB/*)
-                  # CubeOps imports CubeDB/dao via a `replace => ../CubeDB`
-                  # directive, so CubeDB changes must re-run CubeOps tests too.
+                pkgs/cubedb/*)
+                  # cubedb is consumed locally by CubeOps and CubeMaster, so
+                  # its changes must re-run their test sets too.
                   add_component "cubedb"
                   add_component "CubeOps"
+                  add_component "CubeMaster"
                   ;;
                 CubeProxy/*)
                   add_component "CubeProxy"

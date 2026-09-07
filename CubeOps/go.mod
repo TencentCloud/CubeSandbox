@@ -13,8 +13,8 @@ require (
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/ory/dockertest/v3 v3.12.0
 	github.com/stretchr/testify v1.11.1
-	github.com/tencentcloud/CubeSandbox/CubeDB v0.1.0
 	github.com/tencentcloud/CubeSandbox/pkgs/CubeLog v0.1.1-0.20260113105508-a996703fa42f
+	github.com/tencentcloud/CubeSandbox/pkgs/cubedb v0.1.0
 	github.com/urfave/cli v1.22.15
 	golang.org/x/crypto v0.55.0
 	gorm.io/gorm v1.25.10
@@ -118,4 +118,4 @@ require (
 	gorm.io/driver/postgres v1.6.0 // indirect
 )
 
-replace github.com/tencentcloud/CubeSandbox/CubeDB => ../CubeDB
+replace github.com/tencentcloud/CubeSandbox/pkgs/cubedb => ../pkgs/cubedb

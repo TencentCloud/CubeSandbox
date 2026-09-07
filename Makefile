@@ -495,7 +495,7 @@ cubelog-test:
 
 .PHONY: cubedb-test
 cubedb-test:
-	cd CubeDB && go mod download && go test ./...
+	cd pkgs/cubedb && go mod download && go test ./...
 
 # pkgs/proto runs on the host: pure Go (generated .pb.go + grpc/protobuf
 # deps, no CGO/builder-only deps), like cubelog/cubedb. Consumers only

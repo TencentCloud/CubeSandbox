@@ -6,7 +6,7 @@ package store
 import (
 	"strings"
 
-	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 )
 
 // testDialectForced allows tests to force a specific dialect without opening

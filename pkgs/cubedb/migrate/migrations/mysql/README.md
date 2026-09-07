@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # CubeMaster MySQL Migration Conventions
 
 This directory is applied automatically at process startup by
-[`pkg/base/dao/migrate`](../../migrate.go) via
+[`pkgs/cubedb/migrate`](../../migrate.go) via
 [`github.com/pressly/goose/v3`](https://github.com/pressly/goose).
 
 ## Background: why sequential numbers are no longer allowed

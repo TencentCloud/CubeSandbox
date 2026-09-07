@@ -291,7 +291,7 @@ func Init(ctx context.Context) error {
 	}
 	var initErr error
 	storeOnce.Do(func() {
-		// Schema is owned by pkg/base/dao/migrate and applied in main.go
+		// Schema is owned by pkgs/cubedb/migrate and applied in main.go
 		// before any business package Init runs; here we only attach to
 		// the existing *gorm.DB.
 		store.db = db.Init(config.GetDbConfig())

@@ -107,7 +107,7 @@ By default the script pins those source trees to `${SOURCE_REF}` (defaulting to
 `cube-lifecycle-manager/`, `web/`, and `deploy/one-click/webui/` at that git
 ref into `${BUILD_ROOT}/source-tree/` via `git archive` and points `REPO_ROOT`
 there for the duration of the build. When building `cube-master` or
-`cubemastercli`, it also exports `pkgs/CubeLog/`, `CubeDB/`, and `Cubelet/`;
+`cubemastercli`, it also exports `pkgs/CubeLog/`, `pkgs/cubedb/`, and `Cubelet/`;
 `cube-master` additionally exports `deploy/scripts/` (volume-deps installer) and
 `examples/volume/cos/` (Controller plugin binary + example conf).
 When building `cubelet`, it also exports `Cubelet/`, `CubeNet/`, `pkgs/CubeLog/`,
@@ -116,7 +116,7 @@ When building `cubelet`, it also exports `Cubelet/`, `CubeNet/`, `pkgs/CubeLog/`
 `cubevsmapdump`. When building `cube-shim`, it also exports `CubeShim/`,
 `hypervisor/`, `deploy/one-click/config-cube.toml`, and
 `deploy/kubernetes/images/scripts/`.
-When building `cube-ops`, it also exports `CubeOps/`, the cubelog module, and `CubeDB/` (required by
+When building `cube-ops`, it also exports `CubeOps/`, the cubelog module, and `pkgs/cubedb/` (required by
 `CubeOps/Dockerfile`; not present on older release tags such as `v0.5.1` — use
 `SOURCE_REF=""` for worktree builds).
 When building `cube-s3lvol`, it also exports `CubeS3lvol/` and
@@ -124,6 +124,9 @@ When building `cube-s3lvol`, it also exports `CubeS3lvol/` and
 The cubelog module path is probed on `${SOURCE_REF}`: tags at or after this
 move export `pkgs/CubeLog/`; older tags including the default `${VERSION}`
 (`v0.7.0`) still have `cubelog/` and matching `COPY cubelog/` Dockerfiles.
+The CubeDB module path is probed the same way: current trees export
+`pkgs/cubedb/`; older tags still have `CubeDB/` and matching `COPY CubeDB/`
+Dockerfiles.
 The script archives whichever path exists on that ref so a default
 `SOURCE_REF=${VERSION}` build does not fail the export step.
 This guarantees the images match the release tag even when the current worktree
@@ -223,7 +226,7 @@ behavior.
   `CUBE_VERSION` / `CUBE_COMMIT` / `CUBE_BUILD_TIME`. No duplicate Dockerfile is
   kept under `deploy/kubernetes/images/`.
 - `cube-ops` is built from `CubeOps/Dockerfile` with context = repository root
-  (needs sibling `CubeDB/` via `CubeOps/Dockerfile.dockerignore`); same as CI
+  (needs sibling `pkgs/cubedb/` via `CubeOps/Dockerfile.dockerignore`); same as CI
   `release-docker-images.yml`. No duplicate Dockerfile is kept here.
 - `cubemastercli` is built exactly like CI (`.github/workflows/release-docker-images.yml`):
   context = repository root, file = `CubeMaster/docker/Dockerfile.cubemastercli`,
@@ -260,4 +263,4 @@ The Helm chart stays under `deploy/kubernetes/chart`; image build logic stays he
 
 `build-cube-images.sh` copies only the scripts required by each image into that image's build context. Do not add generic helper scripts here unless they are referenced by a Dockerfile or explicitly copied by the build script.
 
-CubeMaster runtime layout matches one-click under `/usr/local/services/cubetoolbox/CubeMaster/` (`bin/cubemaster`, `plugin/`, `conf.yaml`). Runtime configuration is delivered by the Helm chart from `deploy/kubernetes/chart/files/cube-master/conf.yaml` as a Secret mounted at `/usr/local/services/cubetoolbox/CubeMaster/conf.yaml`. CubeMaster schema migrations are embedded in the `cubemaster` binary at compile time from `CubeMaster/pkg/base/dao/migrate/migrations/mysql`; this image build does not package a second SQL copy.
+CubeMaster runtime layout matches one-click under `/usr/local/services/cubetoolbox/CubeMaster/` (`bin/cubemaster`, `plugin/`, `conf.yaml`). Runtime configuration is delivered by the Helm chart from `deploy/kubernetes/chart/files/cube-master/conf.yaml` as a Secret mounted at `/usr/local/services/cubetoolbox/CubeMaster/conf.yaml`. CubeMaster schema migrations are embedded in the `cubemaster` binary at compile time from `pkgs/cubedb/migrate/migrations/{mysql,postgres}`; this image build does not package a second SQL copy.

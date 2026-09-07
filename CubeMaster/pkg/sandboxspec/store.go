@@ -44,7 +44,7 @@ func Init(client *gorm.DB) error {
 	if client == nil {
 		return errors.New("sandboxspec.Init: nil db")
 	}
-	// Schema for t_cube_sandbox_spec is owned by pkg/base/dao/migrate and
+	// Schema for t_cube_sandbox_spec is owned by pkgs/cubedb/migrate and
 	// applied at startup before Init runs; here we only cache the handle.
 	dbMu.Lock()
 	db = client

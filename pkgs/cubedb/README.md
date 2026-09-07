@@ -1,8 +1,8 @@
 # CubeDB
 
 Shared database migration and data-access package for the CubeSandbox
-platform. Used by both [CubeMaster](../CubeMaster) and
-[CubeOps](../CubeOps).
+platform. Used by both [CubeMaster](../../CubeMaster) and
+[CubeOps](../../CubeOps).
 
 ## What's Included
 
@@ -41,8 +41,8 @@ Blank-import from `main.go` to register the MySQL driver:
 
 ```go
 import (
-    "github.com/tencentcloud/CubeSandbox/CubeDB/dao"
-    _ "github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/mysql"
+    "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
+    _ "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/mysql"
 )
 ```
 
@@ -55,8 +55,8 @@ import (
     "context"
     "fmt"
 
-    "github.com/tencentcloud/CubeSandbox/CubeDB/dao"
-    _ "github.com/tencentcloud/CubeSandbox/CubeDB/dao/driver/mysql"
+    "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
+    _ "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/mysql"
 )
 
 func initDB(ctx context.Context, cfg dao.Config) error {

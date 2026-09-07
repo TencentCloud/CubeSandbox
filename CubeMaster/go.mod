@@ -31,8 +31,8 @@ require (
 	github.com/rcrowley/go-metrics v0.0.0-20200313005456-10cdbea86bc0
 	github.com/smallnest/weighted v0.0.0-20230419055410-36b780e40a7a
 	github.com/stretchr/testify v1.11.1
-	github.com/tencentcloud/CubeSandbox/CubeDB v0.0.0-00010101000000-000000000000
 	github.com/tencentcloud/CubeSandbox/pkgs/CubeLog v0.1.1-0.20260113105508-a996703fa42f
+	github.com/tencentcloud/CubeSandbox/pkgs/cubedb v0.0.0-00010101000000-000000000000
 	github.com/tencentcloud/CubeSandbox/pkgs/proto v0.0.0
 	github.com/urfave/cli v1.22.15
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f
@@ -186,6 +186,6 @@ require (
 
 replace github.com/tencentcloud/CubeSandbox/pkgs/CubeLog => ../pkgs/CubeLog
 
-replace github.com/tencentcloud/CubeSandbox/CubeDB => ../CubeDB
+replace github.com/tencentcloud/CubeSandbox/pkgs/cubedb => ../pkgs/cubedb
 
 replace github.com/tencentcloud/CubeSandbox/pkgs/proto => ../pkgs/proto

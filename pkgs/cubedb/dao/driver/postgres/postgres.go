@@ -18,7 +18,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver: "pgx"
 	"github.com/pressly/goose/v3/lock"
-	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
