@@ -1,7 +1,7 @@
 # Cross-Node Snapshots (Pause / Resume / Snapshot)
 
 ::: tip Deployment scope
-CubeS3lvol is **off by default** on both one-click and Kubernetes deployments. To enable it see [§2 Configuring the S3 backend](#2-configuring-the-s3-backend); for resource and storage planning see [§3 Storage requirements on every node](#3-storage-requirements-on-every-node).
+CubeS3lvol is **off by default** on both one-click and Kubernetes deployments. To enable it see [§2 Configuring the S3 backend](#_2-configuring-the-s3-backend); for resource and storage planning see [§3 Storage requirements on every node](#_3-storage-requirements-on-every-node).
 :::
 
 CubeSandbox persists a sandbox as a **package** of three objects (rootfs / memory / metadata) so you can **Pause**, **Resume**, and take a **Snapshot**:
@@ -43,7 +43,7 @@ cubemastercli tpl create-from-image \
   --probe-path /health
 ```
 
-Confirm `BACKEND` is `s3` with `cubemastercli cubebox template list`. Sandboxes and snapshots created from that template inherit `s3` (see [CLI fields](#4-cli-fields-for-cross-node-restore)).
+Confirm `BACKEND` is `s3` with `cubemastercli cubebox template list`. Sandboxes and snapshots created from that template inherit `s3` (see [CLI fields](#_4-cli-fields-for-cross-node-restore)).
 
 ### 1.2 Origin first; cross-node only when the origin cannot schedule
 
@@ -72,6 +72,15 @@ The scheduler (`restoreplace`) **always prefers the origin node**. It leaves tha
 In short: if the origin is up and schedulable, restore stays there. If it is gone or unschedulable **and** the snapshot meets the cross-node conditions, restore moves. Otherwise the API fails; it will not pick an incompatible node.
 
 An [isolated](./node-operations.md) origin is unschedulable, which is the usual way to force a cross-node Resume in tests. A sandbox with a **host-mount** is pinned to the origin (`PinToOrigin`) and will not cross even when `remote_status=ready`.
+
+External storage changes the placement behavior:
+
+- **Raw host mounts remain origin-only.** A host path has no cluster-wide identity, so an identical path string on another node is not considered portable.
+- **Plugin Volumes may attempt cross-node restore.** For FromSnap, Master resolves each current Volume record and sends its driver metadata to the target Cubelet. For Resume, Master validates the recorded Volume IDs and Cubelet reads the attach metadata from the pause package. In both paths, Cubelet checks that the driver is registered locally and calls `Attach` before starting the VM.
+- The scheduler currently does **not** model Volume portability, topology, multi-attach support, or driver availability. Operators must configure the required driver and backend access on every eligible node. A missing Volume, missing target driver, or failed `Attach` fails the FromSnap/Resume operation; CubeSandbox does not start the VM without its required Volume.
+- FromSnap may attach the same read-write Volume while the source sandbox is still running. Use a backend that safely supports the intended sharing pattern; otherwise stop the source first or use a read-only mount.
+
+The S3 requirement on this page applies to the **VM snapshot package backend**, not necessarily to the plugin Volume's own backend. For example, an S3 VM snapshot may restore with an NFS, CephFS, or S3-backed plugin Volume if the target node can attach it.
 
 ### 1.3 The snapshot must be remotely `ready`
 
@@ -241,7 +250,7 @@ cubeopscli --address 127.0.0.1 --port 3010 node list
 cubeopscli --address 127.0.0.1 --port 3010 node list --json
 ```
 
-`HostFacts` keys are described in [1.4 Target kernel / CPU must match the origin](#14-target-kernel--cpu-must-match-the-origin). Before a cross-node restore, confirm `cpuid_hash` and `host_kernel_release` match, and review the rest of HostFacts.
+`HostFacts` keys are described in [1.4 Target kernel / CPU must match the origin](#_14-target-kernel--cpu-must-match-the-origin). Before a cross-node restore, confirm `cpuid_hash` and `host_kernel_release` match, and review the rest of HostFacts.
 
 ---
 

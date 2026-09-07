@@ -81,6 +81,17 @@ with Sandbox.create(volume_mounts={"/data": VolumeMount(vol, read_only=True)}) a
     sb.files.read("/data/model.bin")
 ```
 
+### Use with cross-node snapshots
+
+An S3 Volume can be reattached when a sandbox is restored on another node because its data lives in shared object storage. This is separate from the VM snapshot backend:
+
+- Build the sandbox template with `--backend s3` and wait for the snapshot's `remote_status` to become `ready`.
+- Configure the same `s3` Volume driver, `CUBE_S3_*` connection, and `s3fs` dependency on every eligible Cubelet node.
+- FromSnap restores VM/rootfs state from the VM snapshot package, then attaches the existing Volume ID. Volume data is not rewound; the restored sandbox sees the Volume's current contents.
+- If the Volume was deleted, the target driver is missing, or S3 attach fails, sandbox creation fails before the VM starts.
+
+See [Cross-Node Snapshots](./cross-node-snapshot.md) for VM compatibility and placement requirements.
+
 ---
 
 ## Connecting external S3

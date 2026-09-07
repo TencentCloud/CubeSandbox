@@ -1,7 +1,7 @@
 # 跨机快照（Pause / Resume / Snapshot）
 
 ::: tip 部署范围
-CubeS3lvol 在 one-click 和 Kubernetes 上都**默认关闭**。开启方式见 [§2 配置后端 S3 服务](#2-如何配置后端-s3-服务)；资源与存储规划见 [§3 每台节点的存储需求](#3-每台节点的存储需求重点是-wal)。
+CubeS3lvol 在 one-click 和 Kubernetes 上都**默认关闭**。开启方式见 [§2 配置后端 S3 服务](#_2-如何配置后端-s3-服务)；资源与存储规划见 [§3 每台节点的存储需求](#_3-每台节点的存储需求重点是-wal)。
 :::
 
 CubeSandbox 通过一份可持久化的「包对象」（rootfs / memory / metadata）实现沙箱的
@@ -54,7 +54,7 @@ cubemastercli tpl create-from-image \
 ```
 
 创建后可用 `cubemastercli cubebox template list` 确认 `BACKEND` 列显示为 `s3`，其下新建的沙箱与
-快照也会自动继承 `s3`（见 [CLI 字段](#4-cubemastercli-跨机相关的子命令与新显示字段)）。
+快照也会自动继承 `s3`（见 [CLI 字段](#_4-cubemastercli-跨机相关的子命令与新显示字段)）。
 
 ### 1.2 本机优先调度，本机无法调度才跨机
 
@@ -63,19 +63,19 @@ cubemastercli tpl create-from-image \
 
 ```
 ┌─────────────────┐   ┌──────────────────┐  是  ┌──────────────────┐
-│Resume/FromSnap  │──▶│ 源节点可调度?     │─────▶│ 本机恢复(源节点) │
+│Resume/FromSnap  │──▶│ 源节点可调度?      │─────▶│ 本机恢复(源节点)   │
 └─────────────────┘   └────────┬─────────┘      └──────────────────┘
                                │ 否
                                ▼
                       ┌──────────────────┐  是  ┌──────────────────┐
-                      │ CanCrossNode?    │─────▶│ 跨机恢复         │
-                      │ backend=s3 ∧    │      │ (任意兼容节点)   │
-                      │ remote=ready ∧  │      └──────────────────┘
-                      │ kernel/cpu 一致 │  否
+                      │ CanCrossNode?    │─────▶│ 跨机恢复          │
+                      │ backend=s3 ∧     │      │ (任意兼容节点)     │
+                      │ remote=ready ∧   │      └──────────────────┘
+                      │ kernel/cpu 一致   │
                       └────────┬─────────┘
-                               ▼
+                               ▼ 否
                       ┌──────────────────┐
-                      │ 报错: cannot     │
+                      │ 报错: cannot      │
                       │ restore cross-   │
                       │ node             │
                       └──────────────────┘
@@ -85,7 +85,13 @@ cubemastercli tpl create-from-image \
 否则直接报错，不会盲目落到不兼容的节点。
 
 源节点被 [隔离](./node-operations.md) 时视为不可调度，因此隔离是验证跨机 Resume 的常用手段。
-带 **host-mount** 的沙箱会钉在源节点（`PinToOrigin`），即使 `remote_status=ready` 也不会跨机。
+
+外部存储会进一步影响放置行为：
+
+- 带 **host-mount** 的沙箱会钉在源节点（`PinToOrigin`），不会参与跨机调度；host path 没有集群级稳定身份，因此其他节点上的同名路径不会被视为可移植存储。
+- 带 **Plugin Volume** 的沙箱可以跨机恢复。但请注意，运维方需要保证所有候选节点都安装所需 volume driver 并能访问后端。Volume 不存在、目标节点缺少 driver 或 `Attach` 失败时，FromSnap/Resume 会失败，不会在缺失必要 Volume 的情况下启动 VM。
+
+> FromSnap 时源沙箱可能仍在运行，因此同一个读写 Volume 可能同时被两个节点 Attach。请使用能够安全支持相应共享方式的后端；否则应先停止源沙箱，或使用只读挂载。
 
 ### 1.3 快照必须在云端「就绪」
 
@@ -280,7 +286,7 @@ cubeopscli --address 127.0.0.1 --port 3010 node list
 cubeopscli --address 127.0.0.1 --port 3010 node list --json
 ```
 
-`--json` 中每个节点的 `HostFacts` 字段含义见 [1.4 跨机目标必须与源机 kernel / CPU 信息一致](#14-跨机目标必须与源机-kernel--cpu-信息一致)。
+`--json` 中每个节点的 `HostFacts` 字段含义见 [1.4 跨机目标必须与源机 kernel / CPU 信息一致](#_14-跨机目标必须与源机-kernel--cpu-信息一致)。
 跨机前请确认目标节点与源节点的 `cpuid_hash` / `host_kernel_release` 一致，并核对其余 HostFacts。
 
 ---
