@@ -197,27 +197,58 @@ exec "$@"
 
 ## 5. 本地验证镜像（可选）
 
-创建模板前，可以跑一遍 CI 用于验证 base 镜像的同款 smoke test：
+创建模板前, 先确认镜像使用默认启动命令时能保持运行, 且 envd 可以响应. 以下步骤请在同一个终端中执行; 宿主机需要 Docker, 镜像内需要 `curl` 和 `/usr/bin/envd`.
+
+**1. 启动镜像.**
 
 ```bash
 IMG=my-registry.example.com/my-team/my-sandbox:v1
-cid=$(docker run -d --rm "$IMG")
+cid=$(docker create "$IMG") && docker start "$cid"
+```
 
-docker exec "$cid" curl -s -o /dev/null -w "envd /health => %{http_code}\n" \
+两条命令都成功后再继续. 如果创建失败, 先处理 Docker 输出的错误; 如果启动失败, 使用 `$cid` 中的容器 ID 按第 3 步排查.
+
+**2. 检查容器状态和 envd.**
+
+```bash
+docker inspect --format '{{json .State}}' "$cid"
+```
+
+状态应显示 `"Status":"running"` 和 `"Running":true`. 如果为 `exited`, 转到第 3 步排查, 即使 `ExitCode` 是 `0` 也不能视为通过: 容器需要保持运行才能服务 sandbox 请求.
+
+```bash
+docker exec "$cid" curl -sS --noproxy '*' --connect-timeout 1 --max-time 3 \
+    -o /dev/null -w 'envd /health => %{http_code}\n' \
     http://127.0.0.1:49983/health
-# => envd /health => 204
+# 预期: envd /health => 204
 
 docker exec "$cid" /usr/bin/envd -version
 # => 2026.16
+```
 
+探活请求必须执行成功并输出 `204`; 其他 HTTP 状态码, 包括 `200` 或 `500`, 都不算通过. 如果 envd 仍在启动, 等几秒后重试探活命令; 持续失败时转到第 3 步. 版本命令也应成功, 并确认输出与你安装的 envd 版本一致, 例如上文 base 镜像的 `2026.16`.
+
+容器保持运行、探活成功返回 `204`、版本符合预期, 表示基本的本地启动和 envd 就绪检查通过. 全部通过后, 跳到第 4 步删除测试容器, 再创建模板并验证应用需要的 SDK 操作. 本地检查不覆盖集群拉取镜像、sandbox 网络和 envd `/init`.
+
+**3. 检查失败时, 先查看状态和日志, 再删除容器.**
+
+```bash
+docker inspect --format '{{json .State}}' "$cid"
+docker logs --tail 100 "$cid"
+
+logdir=$(mktemp -d)
+docker cp "$cid":/var/log/envd.log "$logdir/envd.log" && tail -n 100 "$logdir/envd.log"
+```
+
+结合状态中的 `ExitCode`、`OOMKilled`、`Error` 和启动日志定位原因. 容器已停止时, `docker cp` 仍可提取 envd 日志. 如果文件不存在, 检查启动输出及入口脚本配置的日志路径. 收集完诊断信息后, 按第 4 步删除容器. 修复镜像后, 再从第 1 步重新验证.
+
+**4. 验证或排障结束后清理容器.**
+
+```bash
 docker rm -f "$cid"
 ```
 
-如果几秒之内 `/health` 没有返回 `204`，检查容器里 envd 的日志：
-
-```bash
-docker exec "$cid" cat /var/log/envd.log
-```
+如果复制了日志, 文件会保留在 `$logdir` 中供查看, 不再需要时可自行删除.
 
 ## 6. 排错速查
 

@@ -206,29 +206,58 @@ exec "$@"
 
 ## 5. Verifying the image locally (optional)
 
-Before creating a template you can run the same smoke test that CI runs
-on the base image:
+Before creating a template, check that the image stays running with its default startup command and that envd responds. Run the following steps in the same terminal; the host needs Docker, and the image needs `curl` and `/usr/bin/envd`.
+
+**1. Start the image.**
 
 ```bash
 IMG=my-registry.example.com/my-team/my-sandbox:v1
-cid=$(docker run -d --rm "$IMG")
+cid=$(docker create "$IMG") && docker start "$cid"
+```
 
-docker exec "$cid" curl -s -o /dev/null -w "envd /health => %{http_code}\n" \
+Continue only if both commands succeed. If creation fails, resolve the Docker error first. If startup fails, use the container ID in `$cid` to inspect the failure in step 3.
+
+**2. Check the container and envd.**
+
+```bash
+docker inspect --format '{{json .State}}' "$cid"
+```
+
+The state must show `"Status":"running"` and `"Running":true`. If it shows `exited`, go to step 3, even if `ExitCode` is `0`: the container must stay running to serve sandbox requests.
+
+```bash
+docker exec "$cid" curl -sS --noproxy '*' --connect-timeout 1 --max-time 3 \
+    -o /dev/null -w 'envd /health => %{http_code}\n' \
     http://127.0.0.1:49983/health
-# => envd /health => 204
+# Expected: envd /health => 204
 
 docker exec "$cid" /usr/bin/envd -version
 # => 2026.16
+```
 
+The health request must complete successfully and print `204`; any other HTTP code, including `200` or `500`, is a failed check. If envd is still starting, wait a few seconds and retry the health request. If it still fails, go to step 3. The version command must also succeed; compare its output with the envd version you installed (`2026.16` for the base image used above).
+
+A running container, a successful `204` response, and the expected version confirm basic local startup and envd readiness. If all checks pass, skip to step 4 to remove the test container. Then create a template and verify the SDK operations your application uses. Local checks do not exercise cluster image pulling, sandbox networking, or envd `/init`.
+
+**3. If a check fails, inspect the state and logs before removing the container.**
+
+```bash
+docker inspect --format '{{json .State}}' "$cid"
+docker logs --tail 100 "$cid"
+
+logdir=$(mktemp -d)
+docker cp "$cid":/var/log/envd.log "$logdir/envd.log" && tail -n 100 "$logdir/envd.log"
+```
+
+Use `ExitCode`, `OOMKilled`, and `Error` in the state output together with the startup logs to find the cause. `docker cp` can retrieve the envd log even when the container has stopped. If that file does not exist, check the startup output and the log path configured by your entrypoint. After collecting the diagnostics, remove the container in step 4. Fix the image, then repeat from step 1.
+
+**4. Clean up after verification or troubleshooting.**
+
+```bash
 docker rm -f "$cid"
 ```
 
-If `/health` does not reach `204` within a few seconds, inspect
-`/var/log/envd.log` inside the container:
-
-```bash
-docker exec "$cid" cat /var/log/envd.log
-```
+If you copied logs, they remain in `$logdir` for inspection and can be deleted when no longer needed.
 
 ## 6. Troubleshooting
 
