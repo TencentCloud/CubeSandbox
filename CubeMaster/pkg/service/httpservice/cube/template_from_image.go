@@ -117,7 +117,15 @@ func createTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interfac
 			},
 		}
 	}
-	go forwardBuildJobToTemplateCenter(job.JobID, req, requestBaseURL(r), envdPayload)
+	// Only a job still awaiting a build (PENDING) needs forwarding to TC.
+	// SubmitTemplateFromImageWithoutBuild can also return an existing job
+	// that is already RUNNING (an identical in-flight request was reused) --
+	// forwarding that again would resubmit a job TC already has. TC itself
+	// only ever accepts PENDING/RUNNING build jobs it created, so a
+	// non-PENDING job forwarded here would 404 and get wrongly marked FAILED.
+	if job != nil && job.Status == templatecenter.JobStatusPending {
+		go forwardBuildJobToTemplateCenter(job.JobID, req, requestBaseURL(r), envdPayload)
+	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
 	return &types.CreateTemplateFromImageRes{
 		RequestID: req.RequestID,

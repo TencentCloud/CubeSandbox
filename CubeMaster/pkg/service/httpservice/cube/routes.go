@@ -57,19 +57,43 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.DELETE(SnapshotAction+"/:snapshot_id", deleteSnapshotGinHandler)
 	g.GET(OperationAction+"/:operation_id", handleSnapshotOperationAction)
 
-	// Template control plane. Proxied directly to CubeTemplateCenter: TC owns
-	// the whole template API surface (CRUD, build, redo, compat), CubeMaster
-	// only keeps the internal status-callback route below. CubeMaster is a
-	// thin reverse proxy for /cube/template/* so clients see a single entry
-	// point while the work happens in TC.
+	// Template control plane. Every /cube/template/* route is proxied
+	// straight to CubeTemplateCenter EXCEPT the two POSTs below (from-image
+	// create, redo), which CubeMaster must handle itself.
 	//
-	// Register only the exact path plus a single catch-all: gin forbids a
-	// concrete segment (e.g. /template/compat) alongside the /*any wildcard
-	// under the same prefix, and the catch-all already covers compat / redo /
-	// build / from-image / artifact/download. proxyToTemplateCenter forwards the
-	// original path untouched, and TC registers the concrete routes itself.
-	g.Any(TemplateAction, proxyToTemplateCenter)
-	g.Any(TemplateAction+"/*any", proxyToTemplateCenter)
+	// Why the split: createTemplateFromImageGinHandler and
+	// handleRedoTemplateAction share code with TC (same package) and, after
+	// persisting the job, spawn forwardBuildJobToTemplateCenter /
+	// forwardRedoBuildJobToTemplateCenter, which read CubeMaster's own
+	// CUBE_TEMPLATE_CENTER_ADDR to push the actual build to TC's internal
+	// /tc/api/v1/build endpoint. If these two requests were proxied to TC like
+	// every other template route, TC would run that same handler code
+	// in-process and its forward call would try to read
+	// CUBE_TEMPLATE_CENTER_ADDR from TC's OWN process environment — which is
+	// never set (only CubeMaster's process env carries it) — and TC would end
+	// up trying to forward the job back to itself over HTTP. Keeping
+	// create/redo local to CubeMaster avoids this self-forward loop entirely.
+	//
+	// Every other template route (status/list/compat/artifact download/CRUD
+	// GET-DELETE-alias) is a pure DB read/write with no forwarding, so it is
+	// safe to run on either process and stays proxied to TC, which owns
+	// that part of the template API surface. Routes are enumerated
+	// explicitly (mirroring RegisterTemplateRoutes) rather than via a
+	// wildcard catch-all, so the two local routes can be carved out; keep
+	// this list in sync with RegisterTemplateRoutes below.
+	g.POST(TemplateFromImageAction, createTemplateFromImageGinHandler)
+	g.POST(TemplateRedoAction, handleRedoTemplateAction)
+
+	g.POST(TemplateAction, proxyToTemplateCenter)
+	g.GET(TemplateAction, proxyToTemplateCenter)
+	g.DELETE(TemplateAction, proxyToTemplateCenter)
+	g.PUT(TemplateAction+"/:template_id/alias", proxyToTemplateCenter)
+	g.GET(TemplateCompatAction, proxyToTemplateCenter)
+	g.POST(TemplateCompatAction, proxyToTemplateCenter)
+	g.GET(TemplateBuildStatusAction+"/:build_id/status", proxyToTemplateCenter)
+	g.GET(TemplateFromImageAction, proxyToTemplateCenter)
+	g.GET(TemplateArtifactDownloadAction, proxyToTemplateCenter)
+	g.HEAD(TemplateArtifactDownloadAction, proxyToTemplateCenter)
 
 	// Artifact / CA download: served locally from the shared artifact disk so
 	// Cubelet does not pay a second network hop through TC.

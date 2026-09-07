@@ -344,6 +344,8 @@ test_env_templates_are_split() {
     || fail "build.env.example missing ONE_CLICK_CUBEMASTER_BUILD_MODE"
   grep -q 'ONE_CLICK_CUBEMASTER_BIN=' "${build_example}" \
     || fail "build.env.example missing ONE_CLICK_CUBEMASTER_BIN"
+  grep -q 'ONE_CLICK_TEMPLATECENTER_BIN=' "${build_example}" \
+    || fail "build.env.example missing ONE_CLICK_TEMPLATECENTER_BIN"
   grep -q 'ONE_CLICK_MKCERT_BIN=' "${build_example}" \
     || fail "build.env.example missing ONE_CLICK_MKCERT_BIN"
   grep -q 'ONE_CLICK_VOLUME_S3_BIN=' "${build_example}" \

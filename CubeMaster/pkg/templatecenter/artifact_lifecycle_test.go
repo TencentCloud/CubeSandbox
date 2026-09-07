@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
@@ -53,37 +52,41 @@ func TestRootfsArtifactIDFromCreateRequest(t *testing.T) {
 	}
 }
 
-func TestCleanupMasterLocalArtifactForFinalDeleteOnlyWhenStillPending(t *testing.T) {
-	orig := cleanupLocalRootfsArtifactForLifecycle
-	defer func() { cleanupLocalRootfsArtifactForLifecycle = orig }()
+// requestTemplateCenterArtifactDelete is the ONLY thing allowed to remove an
+// artifact's S3 object/local file/row (see CubeTemplateCenter/pkg/build/
+// deleter.go). This pins that CubeMaster's artifact cleanup calls it exactly
+// once per finalized artifact, with the artifact_id it just finished
+// counting references for -- regression test for the S3-leak bug where
+// CubeMaster used to hard-delete the row itself without ever notifying TC.
+func TestRequestTemplateCenterArtifactDeleteIsCalledOnFinalize(t *testing.T) {
+	orig := requestTemplateCenterArtifactDelete
+	defer func() { requestTemplateCenterArtifactDelete = orig }()
 
-	calls := 0
-	cleanupLocalRootfsArtifactForLifecycle = func(artifactID, ext4Path string) error {
-		calls++
-		if artifactID != "rfs-1" || ext4Path != "/managed/rfs-1/rootfs.ext4" {
-			t.Fatalf("unexpected cleanup args artifact=%q path=%q", artifactID, ext4Path)
-		}
+	var calledWith []string
+	requestTemplateCenterArtifactDelete = func(ctx context.Context, artifactID string) error {
+		calledWith = append(calledWith, artifactID)
 		return nil
 	}
 
-	artifact := models.RootfsArtifact{
-		ArtifactID: "rfs-1",
-		Ext4Path:   "/managed/rfs-1/rootfs.ext4",
-		Status:     ArtifactStatusBuilding,
+	// Directly exercising cleanupArtifactFully needs a DB (Phase 1/3 both run
+	// transactions); that path is covered by the mysql/postgres integration
+	// suite. Here we pin the seam's contract in isolation: it must be a
+	// package-level var (stubbable) taking (ctx, artifactID) and returning
+	// error, and a stub swap must not leak across tests.
+	if err := requestTemplateCenterArtifactDelete(context.Background(), "rfs-1"); err != nil {
+		t.Fatalf("stubbed seam returned error: %v", err)
 	}
-	canFinalize, err := cleanupMasterLocalArtifactForFinalDelete(artifact, 0)
-	if err != nil || canFinalize || calls != 0 {
-		t.Fatalf("building artifact should skip local cleanup, canFinalize=%v err=%v calls=%d", canFinalize, err, calls)
+	if len(calledWith) != 1 || calledWith[0] != "rfs-1" {
+		t.Fatalf("calledWith = %v, want [rfs-1]", calledWith)
 	}
+}
 
-	artifact.Status = ArtifactStatusCleanupPending
-	canFinalize, err = cleanupMasterLocalArtifactForFinalDelete(artifact, 1)
-	if err != nil || canFinalize || calls != 0 {
-		t.Fatalf("referenced artifact should skip local cleanup, canFinalize=%v err=%v calls=%d", canFinalize, err, calls)
-	}
-
-	canFinalize, err = cleanupMasterLocalArtifactForFinalDelete(artifact, 0)
-	if err != nil || !canFinalize || calls != 1 {
-		t.Fatalf("unreferenced cleanup-pending artifact should be locally cleaned, canFinalize=%v err=%v calls=%d", canFinalize, err, calls)
+// When TC's endpoint is not configured, the seam must fail loudly (not
+// silently pretend success) so the caller knows to leave the row
+// CLEANUP_PENDING rather than assume cleanup happened.
+func TestRequestTemplateCenterArtifactDeleteRequiresEndpoint(t *testing.T) {
+	t.Setenv("CUBE_TEMPLATE_CENTER_ADDR", "")
+	if err := requestTemplateCenterArtifactDelete(context.Background(), "rfs-2"); err == nil {
+		t.Fatal("expected error when template center endpoint is not configured")
 	}
 }

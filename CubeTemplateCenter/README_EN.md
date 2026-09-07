@@ -10,7 +10,7 @@ The logic lives in `CubeMaster/pkg/templatecenter`; TC just runs it as its own p
 |---|---|---|
 | Template API (`/cube/template*`) | serves it | no |
 | Job persistence / state machine | owns it | no |
-| Build (pull, ext4, fingerprint) | local by default | takes over when enabled |
+| Build (pull, ext4, fingerprint) | never | owns it |
 | Artifact to Cubelet | reads shared disk | writes only |
 | Cross-node distribution / redo | owns it | no |
 
@@ -18,15 +18,14 @@ The artifact never crosses the network: both mount the same disk (`/data/CubeMas
 
 ## Configuration
 
-One switch, two addresses:
+No switch: CubeMaster can no longer build templates in-process, so every `template-from-image` request is forwarded to TC and fails outright if TC is unreachable. Only two addresses matter:
 
 | What | Where | Value |
 |---|---|---|
-| Use TC for builds | CubeMaster `conf.yaml` | `templatecenter_enabled: true/false`, default false |
 | CubeMaster finds TC | env var | `CUBE_TEMPLATE_CENTER_ADDR`, e.g. `http://127.0.0.1:8090` |
 | TC reports to CubeMaster | env var | `CUBE_MASTER_ADDR`, e.g. `http://127.0.0.1:8089` |
 
-Addresses change with the deployment, so they are env vars, not conf keys. While the switch is false, neither address is read.
+Addresses change with the deployment, so they are normally env vars (CubeMaster `conf.yaml` also accepts `common.template_center_addr` as a persistent fallback; the env var wins).
 
 ## Run
 
@@ -51,7 +50,7 @@ helm upgrade --install cube deploy/kubernetes/chart \
 
 Conf, both addresses, PVC, and same-node affinity are wired automatically.
 
-**Bare metal / one-click**: `cube-sandbox-cubetemplatecenter.service` is installed but not started. To enable: set `templatecenter_enabled: true` in CubeMaster's `conf.yaml`, set `CUBE_TEMPLATE_CENTER_ADDR` in `.one-click.env`, restart both services.
+**Bare metal / one-click**: `cube-sandbox-cubetemplatecenter.service` is installed but not started by default, in which case every template build fails. Enable it with `systemctl enable --now cube-sandbox-cubetemplatecenter.service` (the default address `http://127.0.0.1:8090` is already exported by `cubemaster-start.sh`; only override `CUBE_TEMPLATE_CENTER_ADDR` in `.one-click.env` for a split deployment).
 
 **Why single-replica**: artifacts live on a node-local disk with no cross-node sharing. A second replica can't read the first one's files, can't take over its build, and races it on the same directory. For availability, scale CubeMaster.
 

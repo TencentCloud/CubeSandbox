@@ -57,12 +57,37 @@ fi
 ensure_executable "${TC_BIN}"
 ensure_file "${TC_CFG}"
 
-# Required to pull and unpack the source image, and to make the filesystem.
-# Missing tools would otherwise surface much later as a failed build reported
-# over the status callback, with a message that does not mention the real cause.
-for tool in skopeo umoci mkfs.ext4; do
-  command -v "${tool}" >/dev/null 2>&1 || die "templatecenter requires ${tool} in PATH"
-done
+# mkfs.ext4 is required unconditionally: every export path (native, dockerless,
+# docker) ends by materializing the rootfs into an ext4 image. Missing it would
+# otherwise surface much later as a failed build reported over the status
+# callback, with a message that does not mention the real cause.
+command -v mkfs.ext4 >/dev/null 2>&1 || die "templatecenter requires mkfs.ext4 in PATH"
+
+# skopeo/umoci are ONLY required on the dockerless image-pull path. Since v3
+# the default (and recommended) path is the native, pure-Go image puller
+# (CUBEMASTER_NATIVE_ROOTFS_EXPORT_ENABLED defaults to enabled -- see
+# nativeRootfsExportEnabled() in CubeTemplateCenter/pkg/image/native.go), which
+# needs neither skopeo, umoci, nor a docker daemon. Hard-requiring them here
+# unconditionally used to reject startup on hosts that only have the tools the
+# native path actually needs. Mirror the same enabled-by-default semantics
+# (unset/unparsable -> enabled, matching Go's strconv.ParseBool error path) so
+# this check only fires when native export has been explicitly disabled. The
+# binary's own image.EnsureArtifactBuildPreflight (run before every build) is
+# still the authoritative, finer-grained check (it also covers the
+# skopeo+umoci vs. docker+tar fallback and the loop-mount tool set) --
+# duplicating that whole matrix here would just risk drifting out of sync with
+# it, so this only fails fast on the one condition worth rejecting at startup.
+case "${CUBEMASTER_NATIVE_ROOTFS_EXPORT_ENABLED:-}" in
+  1|t|T|true|True|TRUE) native_rootfs_export_enabled=1 ;;
+  0|f|F|false|False|FALSE) native_rootfs_export_enabled=0 ;;
+  *) native_rootfs_export_enabled=1 ;;
+esac
+if [[ "${native_rootfs_export_enabled}" == "0" ]]; then
+  for tool in skopeo umoci; do
+    command -v "${tool}" >/dev/null 2>&1 \
+      || die "templatecenter requires ${tool} in PATH (required because CUBEMASTER_NATIVE_ROOTFS_EXPORT_ENABLED=${CUBEMASTER_NATIVE_ROOTFS_EXPORT_ENABLED} disables the native export path)"
+  done
+fi
 
 export CUBE_TEMPLATE_CENTER_CONFIG_PATH="${TC_CFG}"
 export CUBE_MASTER_ADDR="${TC_MASTER_ADDR}"

@@ -6,8 +6,11 @@ package cube
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 )
 
 // These tests verify markForwardBuildJobFailed's core invariant: it must mark
@@ -23,18 +26,29 @@ import (
 
 // captureUpdateJob swaps the DB-write seam for a recorder and returns the
 // captured call, restoring the original when the test ends.
+//
+// errAtCall records ctx.Err() synchronously INSIDE the stub, at the moment
+// updateTemplateImageJobFn is invoked. This matters because
+// markForwardBuildJobFailed defers its own cancel() on the context it
+// builds; by the time the function returns to the test, that deferred
+// cancel has already fired, so captured.ctx.Err() checked AFTER the call
+// would always read "context canceled" regardless of whether the write
+// actually happened on a live context. errAtCall captures the true
+// liveness at write-time instead.
 func captureUpdateJob(t *testing.T) *struct {
-	ctx    context.Context
-	jobID  string
-	values map[string]any
-	called bool
+	ctx       context.Context
+	jobID     string
+	values    map[string]any
+	called    bool
+	errAtCall error
 } {
 	t.Helper()
 	captured := &struct {
-		ctx    context.Context
-		jobID  string
-		values map[string]any
-		called bool
+		ctx       context.Context
+		jobID     string
+		values    map[string]any
+		called    bool
+		errAtCall error
 	}{}
 	orig := updateTemplateImageJobFn
 	updateTemplateImageJobFn = func(ctx context.Context, jobID string, values map[string]any) error {
@@ -42,6 +56,7 @@ func captureUpdateJob(t *testing.T) *struct {
 		captured.jobID = jobID
 		captured.values = values
 		captured.called = true
+		captured.errAtCall = ctx.Err()
 		return nil
 	}
 	t.Cleanup(func() { updateTemplateImageJobFn = orig })
@@ -66,8 +81,8 @@ func TestForwardBuildJobFailedUsesFreshContext(t *testing.T) {
 	if captured.ctx == nil {
 		t.Fatal("no ctx captured from the DB write")
 	}
-	if err := captured.ctx.Err(); err != nil {
-		t.Fatalf("markForwardBuildJobFailed must use a fresh context for the DB write, got err=%v", err)
+	if captured.errAtCall != nil {
+		t.Fatalf("markForwardBuildJobFailed must use a fresh context for the DB write, got err=%v", captured.errAtCall)
 	}
 	if captured.jobID != "job-1" {
 		t.Fatalf("jobID = %q, want job-1", captured.jobID)
@@ -96,8 +111,8 @@ func TestForwardBuildJobFailedContextIsIndependent(t *testing.T) {
 	if v, ok := captured.ctx.Value(key{}).(string); ok && v == "v" {
 		t.Fatalf("DB-write ctx must not inherit caller values; got %q", v)
 	}
-	if captured.ctx.Err() != nil {
-		t.Fatalf("DB-write ctx should be live, got err=%v", captured.ctx.Err())
+	if captured.errAtCall != nil {
+		t.Fatalf("DB-write ctx should be live, got err=%v", captured.errAtCall)
 	}
 }
 
@@ -110,7 +125,50 @@ func TestForwardBuildJobFailedHealthyCaller(t *testing.T) {
 	if !captured.called {
 		t.Fatal("expected the DB write to be invoked")
 	}
-	if captured.ctx.Err() != nil {
-		t.Fatalf("DB-write ctx should be live, got err=%v", captured.ctx.Err())
+	if captured.errAtCall != nil {
+		t.Fatalf("DB-write ctx should be live, got err=%v", captured.errAtCall)
+	}
+}
+
+// P2-11 regression: the templatecenter_enabled switch was removed from the
+// codebase (remoteTemplateBuildEnabled always returns true; there is no
+// local build fallback anymore), but the "missing endpoint" error message
+// used to still say "templatecenter_enabled=true but ..." -- a stale,
+// misleading reference to a switch that no longer exists. The message must
+// name the actual missing env var instead.
+func TestForwardBuildJobToTemplateCenterMissingEndpointMessageIsNotStale(t *testing.T) {
+	t.Setenv(config.EnvTemplateCenterAddr, "")
+	captured := captureUpdateJob(t)
+
+	forwardBuildJobToTemplateCenter("job-missing-endpoint", nil, "", nil)
+
+	if !captured.called {
+		t.Fatal("expected the DB write to be invoked")
+	}
+	msg, _ := captured.values["error_message"].(string)
+	if strings.Contains(msg, "templatecenter_enabled") {
+		t.Fatalf("error_message must not reference the removed templatecenter_enabled switch, got %q", msg)
+	}
+	if !strings.Contains(msg, config.EnvTemplateCenterAddr) {
+		t.Fatalf("error_message must name the missing env var %s, got %q", config.EnvTemplateCenterAddr, msg)
+	}
+}
+
+// Same regression, for the redo forwarding path.
+func TestForwardRedoBuildJobToTemplateCenterMissingEndpointMessageIsNotStale(t *testing.T) {
+	t.Setenv(config.EnvTemplateCenterAddr, "")
+	captured := captureUpdateJob(t)
+
+	forwardRedoBuildJobToTemplateCenter("job-missing-endpoint-redo", "")
+
+	if !captured.called {
+		t.Fatal("expected the DB write to be invoked")
+	}
+	msg, _ := captured.values["error_message"].(string)
+	if strings.Contains(msg, "templatecenter_enabled") {
+		t.Fatalf("error_message must not reference the removed templatecenter_enabled switch, got %q", msg)
+	}
+	if !strings.Contains(msg, config.EnvTemplateCenterAddr) {
+		t.Fatalf("error_message must name the missing env var %s, got %q", config.EnvTemplateCenterAddr, msg)
 	}
 }

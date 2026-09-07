@@ -127,17 +127,10 @@ func submitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromI
 		return nil, err
 	}
 
-	// Compute the spec fingerprint early so we can check for a READY artifact
-	// before creating a new job. This deduplicates concurrent identical
-	// requests at the Master layer: if an artifact for this exact spec already
-	// exists and is READY, we skip the build entirely.
-	fingerprint := BuildTemplateSpecFingerprintWithEnvdSHA(normalized, "", "", "")
-
 	jobID := uuid.New().String()
 	attemptNo := int32(1)
 	retryOfJobID := ""
 	reusedExistingJob := false
-	reusedExistingArtifact := false
 	if err := withTemplateWriteLock(normalized.TemplateID, func() error {
 		definitionFailed := false
 		if def, err := GetDefinition(ctx, normalized.TemplateID); err == nil {
@@ -150,25 +143,26 @@ func submitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromI
 			return err
 		}
 
-		// Check for an existing READY artifact with the same fingerprint.
-		// If found, reuse it instead of creating a new build job.
-		if artifact, err := getRootfsArtifactByFingerprint(ctx, fingerprint); err == nil {
-			if artifact.Status == ArtifactStatusReady {
-				// Verify the ext4 file still exists on disk.
-				fileErr := validateReusableRootfsArtifactFile(artifact)
-				if fileErr == nil {
-					log.G(ctx).Infof("reusing existing READY artifact %s for template %s (fingerprint match)", artifact.ArtifactID, normalized.TemplateID)
-					reusedExistingArtifact = true
-					// Create a synthetic job that immediately goes to DISTRIBUTING phase
-					// with the existing artifact, skipping the build.
-					record := newReuseArtifactJobRecord(jobID, normalized, requestSnapshot, artifact)
-					return store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).Create(record).Error
-				}
-				log.G(ctx).Warnf("artifact %s is READY but ext4 file is missing/invalid: %v; will rebuild", artifact.ArtifactID, fileErr)
-			}
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
+		// NOTE: there used to be an early READY-artifact reuse check here,
+		// keyed by BuildTemplateSpecFingerprintWithEnvdSHA(normalized, "", "",
+		// "") -- i.e. computed with an EMPTY source image digest, CA
+		// fingerprint, and envd SHA. CubeMaster does not resolve the image
+		// digest at submit time (that happens in CubeTemplateCenter after
+		// pulling image config), so that fingerprint could never equal the
+		// real fingerprint stored on a completed artifact (which is computed
+		// with the actual digest/CA/envd values in build.go). The check was
+		// therefore permanently dead: it never found a match, never reused
+		// anything, and needlessly created a job pre-populated with a bogus
+		// JobStatusBuilt status that the HTTP handler would then forward to
+		// TC anyway (TC only accepts PENDING/RUNNING jobs, so the forward
+		// always 404'd and the job got wrongly marked FAILED).
+		//
+		// The correct dedup already exists in CubeTemplateCenter:
+		// build.reuseExistingArtifact runs AFTER the image digest is
+		// resolved, using the real fingerprint, and reports BUILT back to
+		// Master via the normal callback without doing another build. So
+		// Master always creates a PENDING job here and lets the HTTP handler
+		// forward it to TC; TC decides reuse vs. rebuild with correct data.
 
 		if job, err := getActiveTemplateImageJobByTemplateID(ctx, normalized.TemplateID); err == nil {
 			if job.RequestJSON == requestSnapshot {
@@ -206,40 +200,12 @@ func submitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromI
 	}); err != nil {
 		return nil, err
 	}
-	if reusedExistingArtifact {
-		log.G(ctx).Infof("template %s reuses existing artifact, job %s starts at DISTRIBUTING phase", normalized.TemplateID, jobID)
-		// The caller (HTTP handler) will see the job is already BUILT and
-		// trigger the resume/distribution flow instead of forwarding to TC.
-		return GetTemplateImageJobInfo(ctx, jobID)
-	}
 	if reusedExistingJob {
 		return GetTemplateImageJobInfo(ctx, jobID)
 	}
 	// No local build goroutine: CubeMaster only persists the job. The HTTP
 	// handler forwards it to CubeTemplateCenter, which builds and calls back.
 	return GetTemplateImageJobInfo(ctx, jobID)
-}
-
-// newReuseArtifactJobRecord creates a job record that skips the build phase
-// and starts directly at BUILT status with the given artifact. This is used
-// when Master detects a READY artifact with matching fingerprint at submit
-// time, avoiding a redundant TC build.
-func newReuseArtifactJobRecord(jobID string, req *types.CreateTemplateFromImageReq, requestSnapshot string, artifact *models.RootfsArtifact) *models.TemplateImageJob {
-	return &models.TemplateImageJob{
-		JobID:                   jobID,
-		TemplateID:              req.TemplateID,
-		Status:                  JobStatusBuilt,
-		Phase:                   JobPhaseReady,
-		Progress:                100,
-		Operation:               JobOperationCreate,
-		AttemptNo:               1,
-		RequestJSON:             requestSnapshot,
-		ArtifactID:              artifact.ArtifactID,
-		TemplateSpecFingerprint: artifact.TemplateSpecFingerprint,
-		SourceImageDigest:       artifact.SourceImageDigest,
-		ArtifactStatus:          artifact.Status,
-		ResultJSON:              artifact.GeneratedRequestJSON,
-	}
 }
 
 // RedoNeedsFullRebuild reports whether a redo job requires a full rootfs

@@ -258,7 +258,7 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 		}
 		logger.Infof("another replica is building spec %s, waiting to reuse", fingerprint[:16])
 
-		if existing, ok := reuseExistingArtifact(ctx, db, fingerprint); ok {
+		if existing, ok := reuseExistingArtifact(ctx, db, fingerprint, s3CfgEnabled, s3Client); ok {
 			artifactURL := artifactPresignedURL(ctx, s3CfgEnabled, s3Client, existing.ArtifactID, logger)
 			// Construct a BuildResult from the artifact metadata.
 			buildResult := &image.BuildResult{
@@ -324,7 +324,7 @@ func runBuildLocked(
 	}
 
 	if db := templatecenter.GetDB(); db != nil {
-		if existing, ok := reuseExistingArtifact(ctx, db, fingerprint); ok {
+		if existing, ok := reuseExistingArtifact(ctx, db, fingerprint, s3CfgEnabled, s3Client); ok {
 			logger.Infof("artifact already built by a sibling job, reusing: artifact_id=%s path=%s", existing.ArtifactID, existing.Ext4Path)
 			// The reused ext4 already contains the CA baked at build time; report
 			// the fingerprint we resolved so CubeMaster records it consistently.
@@ -519,9 +519,16 @@ func isBuildInProgress(storeDir string) bool {
 // The query checks:
 //   - template_spec_fingerprint matches
 //   - status is READY
-//   - the ext4 file exists on disk (defensive check; the file may have been
-//     cleaned up by GC or manual intervention)
-func reuseExistingArtifact(ctx context.Context, db *gorm.DB, fingerprint string) (*models.RootfsArtifact, bool) {
+//   - the artifact's actual data still exists:
+//   - S3-backed artifacts (artifact_url set) are verified with a HEAD
+//     request against the bucket, NOT os.Stat. Multiple TC replicas do not
+//     necessarily share local disk when S3/MinIO is configured -- checking
+//     only os.Stat(Ext4Path) meant a replica other than the one that built
+//     the artifact would always see the local file "missing" and silently
+//     fall through to a full rebuild instead of reusing the S3 object.
+//   - local-only artifacts (no artifact_url) fall back to os.Stat, since
+//     that IS the artifact's only copy in that mode.
+func reuseExistingArtifact(ctx context.Context, db *gorm.DB, fingerprint string, s3CfgEnabled bool, s3Client *s3store.Client) (*models.RootfsArtifact, bool) {
 	var artifact models.RootfsArtifact
 	err := db.WithContext(ctx).
 		Table(constants.RootfsArtifactTableName).
@@ -534,15 +541,54 @@ func reuseExistingArtifact(ctx context.Context, db *gorm.DB, fingerprint string)
 		return nil, false
 	}
 
-	// Defensive check: verify the ext4 file still exists.
-	if _, err := os.Stat(artifact.Ext4Path); err != nil {
-		log.G(ctx).Warnf("reuse check: artifact %s is READY but ext4 file %s is missing: %v", artifact.ArtifactID, artifact.Ext4Path, err)
+	var statS3 func() (bool, error)
+	if s3CfgEnabled && s3Client != nil {
+		statS3 = func() (bool, error) { return s3Client.Stat(ctx, artifact.ArtifactID) }
+	}
+	reason, ok := artifactDataExists(&artifact, statS3)
+	if !ok {
+		log.G(ctx).Warnf("reuse check: artifact %s is READY but data is missing: %s", artifact.ArtifactID, reason)
 		return nil, false
 	}
 
-	log.G(ctx).Infof("reuse check: found READY artifact %s for fingerprint %s (ext4: %s, %d bytes)",
-		artifact.ArtifactID, fingerprint[:16], artifact.Ext4Path, artifact.Ext4SizeBytes)
+	log.G(ctx).Infof("reuse check: found READY artifact %s for fingerprint %s (%s)",
+		artifact.ArtifactID, fingerprint[:16], reason)
 	return &artifact, true
+}
+
+// artifactDataExists decides whether a READY artifact's underlying data is
+// still present, and returns a short human-readable reason for logging.
+//
+//   - S3-backed artifacts (ArtifactURL set) are verified via statS3 (a HEAD
+//     request against the bucket), NOT os.Stat. Multiple TC replicas do not
+//     necessarily share local disk when S3/MinIO is configured -- checking
+//     only os.Stat(Ext4Path) meant a replica other than the one that built
+//     the artifact would always see the local file "missing" and silently
+//     fall through to a full rebuild instead of reusing the S3 object.
+//   - If the HEAD check itself errors (transient network issue, not
+//     necessarily a missing object), fall back to os.Stat rather than
+//     forcing an unnecessary rebuild when a valid local copy exists on this
+//     replica.
+//   - Local-only artifacts (no ArtifactURL, or S3 not configured on this
+//     replica) are verified with os.Stat only, since that IS the artifact's
+//     only copy in that mode.
+func artifactDataExists(artifact *models.RootfsArtifact, statS3 func() (bool, error)) (string, bool) {
+	if artifact.ArtifactURL != "" && statS3 != nil {
+		exists, err := statS3()
+		switch {
+		case err == nil && exists:
+			return "s3 object confirmed", true
+		case err == nil && !exists:
+			return "s3 object missing", false
+		default:
+			// err != nil: fall through to the local-disk check below.
+		}
+	}
+
+	if _, err := os.Stat(artifact.Ext4Path); err != nil {
+		return fmt.Sprintf("ext4 file %s missing: %v", artifact.Ext4Path, err), false
+	}
+	return fmt.Sprintf("ext4: %s, %d bytes", artifact.Ext4Path, artifact.Ext4SizeBytes), true
 }
 
 // fileSHA256 streams the file through sha256 (same algorithm as the build path).

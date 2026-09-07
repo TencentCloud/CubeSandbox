@@ -10,7 +10,7 @@
 |---|---|---|
 | 模板 API（`/cube/template*`） | 提供 | 不提供 |
 | 任务落库 / 状态机 | 负责 | 不负责 |
-| 构建（拉镜像、建 ext4、指纹） | 默认本地做 | 启用后接管 |
+| 构建（拉镜像、建 ext4、指纹） | 不做 | 负责 |
 | 产物发给 Cubelet | 从共享磁盘读 | 只写盘 |
 | 跨节点分发 / redo | 负责 | 不负责 |
 
@@ -18,15 +18,14 @@
 
 ## 配置
 
-一个开关，两个地址：
+没有开关：CubeMaster 已经不能本地构建模板，所有 `template-from-image` 都会转发给 TC，TC 不可达就直接失败。只需要两个地址：
 
 | 项 | 在哪 | 值 |
 |---|---|---|
-| 是否用 TC 构建 | CubeMaster `conf.yaml` | `templatecenter_enabled: true/false`，默认 false |
 | CubeMaster 找 TC | 环境变量 | `CUBE_TEMPLATE_CENTER_ADDR`，如 `http://127.0.0.1:8090` |
 | TC 回报 CubeMaster | 环境变量 | `CUBE_MASTER_ADDR`，如 `http://127.0.0.1:8089` |
 
-地址随部署变，所以走环境变量，不进 conf。开关是 false 时两个地址都不读。
+地址随部署变，所以走环境变量（也可以在 CubeMaster `conf.yaml` 用 `common.template_center_addr` 持久化配置，环境变量优先）。
 
 ## 启动
 
@@ -51,7 +50,7 @@ helm upgrade --install cube deploy/kubernetes/chart \
 
 conf、双向地址、PVC、同节点亲和都自动配好。
 
-**裸机 / one-click**：`cube-sandbox-cubetemplatecenter.service` 已装好但默认不启动。启用：CubeMaster `conf.yaml` 设 `templatecenter_enabled: true`，`.one-click.env` 设 `CUBE_TEMPLATE_CENTER_ADDR`，重启两个服务。
+**裸机 / one-click**：`cube-sandbox-cubetemplatecenter.service` 已装好但默认不启动，此时所有模板构建都会失败。启用：`systemctl enable --now cube-sandbox-cubetemplatecenter.service`（默认地址 `http://127.0.0.1:8090` 已经由 `cubemaster-start.sh` 导出，跨机部署才需要在 `.one-click.env` 覆盖 `CUBE_TEMPLATE_CENTER_ADDR`）。
 
 **为什么只能单副本**：产物在节点本地盘，没有跨节点共享。起第二个副本，读不到第一个的文件，也接不了它的构建，还会抢同一个目录。要高可用，扩 CubeMaster。
 

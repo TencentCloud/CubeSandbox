@@ -267,6 +267,12 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 		Ext4SizeBytes           int64  `json:"ext4_size_bytes"`
 		ImageConfigJSON         string `json:"image_config_json"`
 		MasterNodeIP            string `json:"master_node_ip"`
+		// ArtifactURL (S3/MinIO presigned URL) MUST be decoded here too: it is
+		// part of the same terminal callback payload TC stored in result_json.
+		// Omitting it used to make replay silently zero out ArtifactURL on
+		// finalizeRemoteArtifact, losing/overwriting the S3 URL for any job
+		// that got stuck and had to be resumed via reconciler replay.
+		ArtifactURL             string `json:"artifact_url"`
 		CubeEgressCABaked       bool   `json:"cube_egress_ca_baked"`
 		CubeEgressCAFingerprint string `json:"cube_egress_ca_fingerprint"`
 		CubeEgressCATargets     int    `json:"cube_egress_ca_targets_written"`
@@ -283,6 +289,7 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 		Ext4SizeBytes:           raw.Ext4SizeBytes,
 		ImageConfigJSON:         raw.ImageConfigJSON,
 		MasterNodeIP:            raw.MasterNodeIP,
+		ArtifactURL:             raw.ArtifactURL,
 		CubeEgressCABaked:       raw.CubeEgressCABaked,
 		CubeEgressCAFingerprint: raw.CubeEgressCAFingerprint,
 		CubeEgressCATargets:     raw.CubeEgressCATargets,

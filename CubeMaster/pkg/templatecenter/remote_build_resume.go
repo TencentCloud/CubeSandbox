@@ -20,17 +20,67 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
-// resumeJobLocks serializes concurrent resume attempts for the same template
-// job. A resume can be triggered from two sources at once: the internal status
-// callback goroutine (TC reports BUILT) and the image-job reconciler (which
-// replays jobs stuck in BUILT). Without a per-job mutex both would run the
-// register/distribute pipeline concurrently and regenerate the artifact's
-// DownloadToken -- the in-flight download from the first attempt then 404s.
-var resumeJobLocks sync.Map // map[string]*sync.Mutex
+// resumeArtifactLocks serializes concurrent resume attempts for the same
+// rootfs artifact. A resume can be triggered from two sources at once: the
+// internal status callback goroutine (TC reports BUILT) and the image-job
+// reconciler (which replays jobs stuck in BUILT). Without a mutex both would
+// run the register/distribute pipeline concurrently and regenerate the
+// artifact's DownloadToken -- the in-flight download from the first attempt
+// then 404s.
+//
+// Keyed by artifact_id, NOT job_id: the resource actually being mutated by
+// registerRemoteBuiltArtifact/finalizeRemoteArtifact is the rootfs_artifacts
+// row, and two DIFFERENT job_ids can resolve to the SAME artifact_id (e.g. a
+// dedup/reuse hit, or a redo job that redistributes an already-built
+// artifact). A per-job_id lock does not serialize those cases at all, so the
+// DownloadToken race the lock exists to prevent could still happen across
+// job_id boundaries. Locking by artifact_id closes that gap.
+//
+// Entries are reference-counted and removed once no goroutine holds/awaits
+// the lock for that artifact_id. Without this, resumeArtifactLocks used to
+// grow by one entry for EVERY artifact_id ever processed over the process
+// lifetime and never shrink -- an unbounded map (memory leak) on a
+// long-running Master.
+var (
+	resumeArtifactLocksMu sync.Mutex
+	resumeArtifactLocks   = map[string]*refCountedMutex{}
+)
 
-func resumeJobLock(jobID string) *sync.Mutex {
-	muV, _ := resumeJobLocks.LoadOrStore(jobID, &sync.Mutex{})
-	return muV.(*sync.Mutex)
+type refCountedMutex struct {
+	mu  sync.Mutex
+	ref int
+}
+
+// acquireResumeArtifactLock locks (creating the entry on first use) and
+// returns a release function that must be called exactly once to unlock and,
+// once no other goroutine references the entry, remove it from the map.
+func acquireResumeArtifactLock(artifactID string) func() {
+	resumeArtifactLocksMu.Lock()
+	entry, ok := resumeArtifactLocks[artifactID]
+	if !ok {
+		entry = &refCountedMutex{}
+		resumeArtifactLocks[artifactID] = entry
+	}
+	entry.ref++
+	resumeArtifactLocksMu.Unlock()
+
+	entry.mu.Lock()
+
+	released := false
+	return func() {
+		if released {
+			return
+		}
+		released = true
+		entry.mu.Unlock()
+
+		resumeArtifactLocksMu.Lock()
+		entry.ref--
+		if entry.ref == 0 {
+			delete(resumeArtifactLocks, artifactID)
+		}
+		resumeArtifactLocksMu.Unlock()
+	}
 }
 
 // RemoteBuildResult is the artifact metadata reported by CubeTemplateCenter
@@ -244,14 +294,15 @@ func ResumeTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, r
 		return err
 	}
 
-	// Serialize concurrent resumes of this job (callback goroutine + reconciler
-	// replay) and re-check the job state under the lock, so a duplicate or late
-	// BUILT report cannot flip an already-terminal job back through the pipeline
-	// or double-register the artifact (which would regenerate DownloadToken and
-	// break the in-flight download of the first attempt).
-	mu := resumeJobLock(jobID)
-	mu.Lock()
-	defer mu.Unlock()
+	// Serialize concurrent resumes of this artifact (callback goroutine +
+	// reconciler replay, possibly from different job_ids that resolved to the
+	// same artifact_id) and re-check the job state under the lock, so a
+	// duplicate or late BUILT report cannot flip an already-terminal job back
+	// through the pipeline or double-register the artifact (which would
+	// regenerate DownloadToken and break the in-flight download of the first
+	// attempt).
+	release := acquireResumeArtifactLock(result.ArtifactID)
+	defer release()
 
 	job, err := getTemplateImageJobRecordByID(ctx, jobID)
 	if err != nil {
