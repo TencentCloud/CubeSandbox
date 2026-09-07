@@ -6,17 +6,20 @@
 #
 # The repo-root .dockerignore is tailored to docker/Dockerfile.builder and would
 # exclude CubeTemplateCenter/ without these overrides. CubeTemplateCenter's
-# go.mod replaces the local CubeMaster, CubeDB, Cubelet and cubelog modules via
-# ../CubeMaster, ../CubeDB, ../Cubelet and ../cubelog, so the image build must
-# include all five directories.
+# go.mod replaces the local CubeMaster, pkgs/CubeLog, pkgs/cubedb, Cubelet and
+# pkgs/proto modules via ../CubeMaster, ../pkgs/CubeLog, ../pkgs/cubedb,
+# ../Cubelet and ../pkgs/proto, so the image build must include all six
+# directories.
 **
 !CubeTemplateCenter
 !CubeTemplateCenter/**
 !CubeMaster
 !CubeMaster/**
-!cubelog
-!cubelog/**
-!CubeDB
-!CubeDB/**
+!pkgs/CubeLog
+!pkgs/CubeLog/**
+!pkgs/cubedb
+!pkgs/cubedb/**
 !Cubelet
 !Cubelet/**
+!pkgs/proto
+!pkgs/proto/**

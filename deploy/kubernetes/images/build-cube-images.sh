@@ -720,14 +720,15 @@ build_cube_master_image() {
 # Same as .github/workflows/release-docker-images.yml for component
 # "cube-templatecenter": context=., file=CubeTemplateCenter/docker/Dockerfile.
 # TC reuses CubeMaster's templatecenter package, so it needs the same sibling
-# modules (cubelog / CubeDB / Cubelet) as cube-master.
+# modules (pkgs/CubeLog / pkgs/cubedb / Cubelet / pkgs/proto) as cube-master.
 build_cube_templatecenter_image() {
   [[ -f "${REPO_ROOT}/CubeTemplateCenter/docker/Dockerfile" ]] \
     || fail "missing CubeTemplateCenter/docker/Dockerfile in ${REPO_ROOT}"
   [[ -f "${REPO_ROOT}/CubeTemplateCenter/go.mod" ]] || fail "missing CubeTemplateCenter go.mod in ${REPO_ROOT}"
   [[ -f "${REPO_ROOT}/CubeMaster/go.mod" ]] || fail "missing CubeMaster go.mod in ${REPO_ROOT}"
-  [[ -d "${REPO_ROOT}/cubelog" ]] || fail "missing cubelog sibling module in ${REPO_ROOT}"
-  [[ -d "${REPO_ROOT}/CubeDB" ]] || fail "missing CubeDB sibling module in ${REPO_ROOT}"
+  require_cubelog_module
+  require_cubedb_module
+  [[ -d "${REPO_ROOT}/pkgs/proto" ]] || fail "missing pkgs/proto sibling module in ${REPO_ROOT}"
   [[ -d "${REPO_ROOT}/Cubelet" ]] || fail "missing Cubelet sibling module in ${REPO_ROOT}"
   build_image cube-templatecenter "${REPO_ROOT}" "${REPO_ROOT}/CubeTemplateCenter/docker/Dockerfile" \
     --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
