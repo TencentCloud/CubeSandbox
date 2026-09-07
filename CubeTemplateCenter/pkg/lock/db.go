@@ -25,19 +25,71 @@ package lock
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
 	"gorm.io/gorm"
 )
 
+// maxMySQLLockNameLen is MySQL's hard limit for GET_LOCK/RELEASE_LOCK
+// identifiers. Exceeding it fails the query with:
+//
+//	Error 4163 (42000): User-level lock name '...' should not exceed 64 characters.
+//
+// PostgreSQL's pg_advisory_lock/pg_try_advisory_lock take hashtext(name),
+// which accepts arbitrary-length input, so this limit is MySQL-specific.
+// normalizeLockName is still applied unconditionally (both dialects) so a
+// given lock name maps to one canonical string regardless of which
+// database driver is in play.
+const maxMySQLLockNameLen = 64
+
+// normalizeLockName deterministically shortens name to fit MySQL's 64-char
+// GET_LOCK limit. Callers such as WithBuildLock build lock names as
+// "tc_build_" + fingerprint, where fingerprint is a 64-char sha256 hex
+// digest -- 73 bytes total, which blows past the limit and fails every
+// build with Error 4163.
+//
+// The result is a pure function of the full original name, so:
+//   - acquire and release always agree (both call this before touching the
+//     DB, so they normalize the same input to the same output)
+//   - every TC replica computes the identical string for the identical
+//     input (no per-process/per-machine state involved)
+//   - two different long names practically never collapse onto the same
+//     short name: the suffix is a 64-bit slice of a sha256 digest of the
+//     FULL name, not just the truncated prefix
+//
+// Short names (the common case: fixed constants like "tc_reconcile_v1")
+// pass through unchanged.
+func normalizeLockName(name string) string {
+	if len(name) <= maxMySQLLockNameLen {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	suffix := "_" + hex.EncodeToString(sum[:])[:16] // 17 bytes, fixed width
+	prefixBudget := maxMySQLLockNameLen - len(suffix)
+	if prefixBudget < 0 {
+		prefixBudget = 0
+	}
+	prefix := name
+	if len(prefix) > prefixBudget {
+		prefix = prefix[:prefixBudget]
+	}
+	return prefix + suffix
+}
+
 // TrySessionLock attempts to acquire a cross-instance session lock with 0
 // timeout (immediate return).
 //
 //   - MySQL:      SELECT GET_LOCK(name, 0)
 //   - PostgreSQL: SELECT pg_try_advisory_lock(hashtext(name))
+//
+// name is normalized via normalizeLockName before use, so callers may pass
+// names longer than MySQL's 64-char limit (e.g. a lock scoped by a sha256
+// fingerprint) without pre-shortening them.
 //
 // The caller MUST pass a *gorm.DB pinned to one connection so that
 // acquire and release share the same session. Use PinConn to obtain one.
@@ -47,6 +99,7 @@ import (
 //   - (false, nil):     lock held by another session
 //   - (false, err):     lock state is uncertain; caller should DiscardPinnedSession
 func TrySessionLock(sess *gorm.DB, name string) (bool, error) {
+	name = normalizeLockName(name)
 	dialect := sess.Dialector.Name()
 	switch dialect {
 	case "postgres":
@@ -82,11 +135,16 @@ func TrySessionLock(sess *gorm.DB, name string) (bool, error) {
 //   - MySQL:      SELECT RELEASE_LOCK(name)
 //   - PostgreSQL: SELECT pg_advisory_unlock(hashtext(name))
 //
+// name is normalized via normalizeLockName before use, identically to
+// TrySessionLock, so the same original name always resolves to the same
+// physical lock on release as it did on acquire.
+//
 // Returns:
 //   - (true, nil):  released (this session was the holder)
 //   - (false, nil): this session is known not to hold the lock
 //   - (false, err): lock state unknown; caller should DiscardPinnedSession
 func ReleaseSessionLock(sess *gorm.DB, name string) (bool, error) {
+	name = normalizeLockName(name)
 	dialect := sess.Dialector.Name()
 	switch dialect {
 	case "postgres":
