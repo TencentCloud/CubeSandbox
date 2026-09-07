@@ -421,23 +421,6 @@ We welcome contributions of all kinds—whether it's a bug report, feature sugge
 | **Filesystem-Only Snapshots** | Snapshot the writable filesystem without a memory dump for cheaper, faster clone/restore when a cold start from disk is enough |
 | **GPU Sandboxes** | Attach host GPUs to sandboxes so Agent and inference workloads can run CUDA inside the isolated VM, with GPU-aware scheduling |
 
-## Sponsors
-
-<table>
-  <tr>
-    <td align="center">
-      <a href="https://www.tencentcloud.com/">
-        <img src="./docs/assets/tcloud_logo_en.png" alt="Tencent Cloud" height="40">
-      </a>
-    </td>
-    <td align="center">
-      <a href="https://www.arm.com/">
-        <img src="./docs/assets/arm-logo.svg" alt="Arm" height="40">
-      </a>
-    </td>
-  </tr>
-</table>
-
 ## Contributors
 
 Thanks to all contributors:

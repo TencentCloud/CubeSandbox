@@ -109,7 +109,9 @@ func newVolumeTestEngine(t *testing.T) (*gin.Engine, *gorm.DB, *fakeControllerPl
 
 	origDB := volumeDB
 	volumeDB = func() *gorm.DB { return db }
-	t.Cleanup(func() { volumeDB = origDB })
+	t.Cleanup(func() {
+		volumeDB = origDB
+	})
 
 	fake := newFakeControllerPlugin("fake-vol")
 	plugin.Register(fake)

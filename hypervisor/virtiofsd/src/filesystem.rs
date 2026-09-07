@@ -1225,6 +1225,15 @@ pub trait FileSystem {
     fn get_root_ino(&self) -> io::Result<u64> {
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
+
+    /// Whether the filesystem has `readdirplus` support enabled.
+    ///
+    /// When this returns `false`, the server should reject any `readdirplus` FUSE request
+    /// (returning an empty reply) to guard against guests that bypass the negotiated
+    /// capabilities and issue forged `readdirplus` requests directly.
+    fn readdirplus_enabled(&self) -> bool {
+        false
+    }
 }
 
 /// Allow filesystem's state to be serialized for migration.
@@ -1287,4 +1296,11 @@ pub trait SerializableFileSystem {
             "State deserialization data not supported",
         ))
     }
+
+    /// Destination-only: map filter inode basename → host path to open at restore.
+    ///
+    /// `Server` fills this from the current `FilterList` before applying a
+    /// migration blob. Default is a no-op so backends that do not implement
+    /// filter restore ignore the table.
+    fn set_filter_path_remap(&self, _remap: std::collections::HashMap<String, String>) {}
 }

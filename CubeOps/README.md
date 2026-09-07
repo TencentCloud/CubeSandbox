@@ -12,7 +12,7 @@ CubeOps is the "ops half" of the CubeAPI/CubeOps split:
 - **CubeOps** (Go) — stateful admin/ops API + SDK proxy to CubeMaster. Listens on `:3010`; in All-in-One mode binds `0.0.0.0:3010` so the WebUI nginx container can reach it via `host.docker.internal`. Change the default password in production.
 
 Both services share the same MySQL database. Schema migrations are managed
-by the shared [`CubeDB`](../CubeDB) Go module, which wraps goose with
+by the shared [`CubeDB`](../pkgs/cubedb) Go module, which wraps goose with
 content-fingerprint tamper detection and cluster-wide locking.
 
 CubeOps exposes two API groups:
@@ -403,6 +403,6 @@ go test ./internal/store/... -v
 
 ## Dependencies
 
-- [CubeDB](../CubeDB) — Shared database migration & DAO package
+- [CubeDB](../pkgs/cubedb) — Shared database migration & DAO package
 - [CubeMaster](../CubeMaster) — Cluster orchestrator (HTTP API)
 - MySQL 8.0 — Shared database

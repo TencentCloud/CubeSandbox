@@ -104,8 +104,11 @@ func TestPauseRestoreBindingSurvivesPackedSpecSwap(t *testing.T) {
 	binding := pauseRestoreBindingFrom(thin, "snap-1", "s3")
 
 	packed := &cubebox.RunCubeSandboxRequest{
-		Containers:  []*cubebox.ContainerConfig{{Id: "c1", Name: "main"}},
-		Annotations: map[string]string{"kept": "yes"},
+		Containers: []*cubebox.ContainerConfig{{Id: "c1", Name: "main"}},
+		Annotations: map[string]string{
+			"kept": "yes",
+			constants.MasterAnnotationLaunchMemorySnapshotID: "tpl-T",
+		},
 	}
 	req := &cubebox.RunCubeSandboxRequest{}
 	*req = *packed
@@ -121,6 +124,7 @@ func TestPauseRestoreBindingSurvivesPackedSpecSwap(t *testing.T) {
 	assert.Equal(t, `{"rootfs":"r1","memory":"m1","metadata":"d1"}`,
 		req.Annotations[constants.MasterAnnotationSnapshotRemoteUUIDs])
 	assert.Equal(t, "true", req.Annotations[constants.MasterAnnotationSnapshotCrossNode])
+	assert.Equal(t, "tpl-T", req.Annotations[constants.MasterAnnotationLaunchMemorySnapshotID])
 	assert.NotEmpty(t, req.Annotations[constants.MasterAnnotationRuntimeSnapshotAttachedAt])
 }
 

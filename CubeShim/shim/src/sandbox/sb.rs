@@ -1356,6 +1356,8 @@ impl SandBox {
     ///   `metadata.json` is written beside it — same layout as CommitSandbox
     ///   so Resume can use `get_snapshot_dir(base, cpu, mem)`.
     /// * `memory_vol_url` – optional CubeCow (or device) URL for memory ranges.
+    /// * `snapshot_type` – same Full / Incremental / SoftDirty choice as
+    ///   CommitSandbox (`--snapshot-type`).
     ///
     /// On success the MicroVM is deleted (`pause2snapshot`) and state stays
     /// `Paused`. Cubelet then reaps this shim via task Delete. On failure after
@@ -1364,6 +1366,7 @@ impl SandBox {
         &mut self,
         destination_path: &str,
         memory_vol_url: Option<String>,
+        snapshot_type: SnapshotType,
     ) -> CResult<()> {
         {
             let mut state = self.state.lock().await;
@@ -1378,7 +1381,7 @@ impl SandBox {
         }
 
         if let Err(e) = self
-            .pause_vm_to_snapshot_inner(destination_path, memory_vol_url)
+            .pause_vm_to_snapshot_inner(destination_path, memory_vol_url, snapshot_type)
             .await
         {
             let mut state = self.state.lock().await;
@@ -1392,6 +1395,7 @@ impl SandBox {
         &mut self,
         destination_path: &str,
         memory_vol_url: Option<String>,
+        snapshot_type: SnapshotType,
     ) -> CResult<()> {
         self.disconnect_agent(false).await?;
 
@@ -1413,7 +1417,7 @@ impl SandBox {
         })?;
 
         let destination_url = format!("file://{}", snapshot_dir.display());
-        ch.pause_vm_cube_with_config(&destination_url, memory_vol_url)
+        ch.pause_vm_cube_with_config(&destination_url, memory_vol_url, snapshot_type)
             .await?;
 
         // vmshutdown event after pause2snapshot deletes the MicroVM

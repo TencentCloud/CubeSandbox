@@ -8,7 +8,7 @@ trap). The tombstone purger is the scheduled janitor that fixes this.
 
 ## What it does
 
-A single shared package, `CubeDB/tombstone`, runs in **both** binaries that
+A single shared package, `pkgs/cubedb/tombstone`, runs in **both** binaries that
 share the database:
 
 - **CubeMaster** — purges `t_cube_*` tombstone tables.

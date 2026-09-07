@@ -335,19 +335,29 @@ During installation, runtime files are prepared in this directory and the follow
 - `redis:7-alpine`
 - `minio` (S3-compatible volume backend; explicit via `CUBE_SANDBOX_MINIO_ENABLED`, default on)
 
-### Using an external MySQL / Redis
+### Using an external MySQL / PostgreSQL / Redis
 
-To point CubeSandbox at an existing MySQL/Redis server instead of the bundled
-local containers, set the following in `.env` before running `install.sh`
-(see `env.example`):
+To point CubeSandbox at an existing MySQL, PostgreSQL, or Redis server instead
+of the bundled local containers, set the following in `.env` before running
+`install.sh` (see `env.example`). `CUBE_DATABASE_DRIVER` mirrors Helm
+`database.driver`: `mysql` (default) or `postgres` (always external).
 
 ```bash
-# External MySQL (any subset of the credential fields may be overridden)
+# External MySQL (default driver; any subset of the credential fields may be overridden)
+# CUBE_DATABASE_DRIVER=mysql
 CUBE_EXTERNAL_MYSQL_HOST=10.0.0.20
 CUBE_EXTERNAL_MYSQL_PORT=3306
 CUBE_EXTERNAL_MYSQL_USER=cube
 CUBE_EXTERNAL_MYSQL_PASSWORD=cube_pass
 CUBE_EXTERNAL_MYSQL_DB=cube_mvp
+
+# External PostgreSQL (one-click never ships a local PostgreSQL)
+# CUBE_DATABASE_DRIVER=postgres
+# CUBE_EXTERNAL_POSTGRES_HOST=10.0.0.20
+# CUBE_EXTERNAL_POSTGRES_PORT=5432
+# CUBE_EXTERNAL_POSTGRES_USER=cube
+# CUBE_EXTERNAL_POSTGRES_PASSWORD=cube_pass
+# CUBE_EXTERNAL_POSTGRES_DB=cube_mvp
 
 # External Redis
 CUBE_EXTERNAL_REDIS_HOST=10.0.0.21
@@ -355,15 +365,24 @@ CUBE_EXTERNAL_REDIS_PORT=6379
 CUBE_EXTERNAL_REDIS_PASSWORD=ceuhvu123
 ```
 
-When `CUBE_EXTERNAL_MYSQL_HOST` (and/or `CUBE_EXTERNAL_REDIS_HOST`) is set, `install.sh`:
+When `CUBE_EXTERNAL_MYSQL_HOST`, `CUBE_EXTERNAL_POSTGRES_HOST` (with
+`CUBE_DATABASE_DRIVER=postgres`), and/or `CUBE_EXTERNAL_REDIS_HOST` is set,
+`install.sh`:
 
-- patches `CubeMaster/conf.yaml` with the external MySQL/Redis endpoint;
-- writes `DATABASE_URL` (CubeAPI) and `CUBE_PROXY_REDIS_*` (cube proxy) to `.one-click.env` so every service consumes the external endpoint;
-- masks the corresponding `cube-sandbox-mysql.service` / `cube-sandbox-redis.service` so the local container is never started; and
-- makes `quickcheck.sh` and `up-support.sh` skip lifecycle management of the now-external dependency. (`down-support.sh` has no external-dep awareness and still issues a `docker compose down`, but this is a harmless no-op because the local containers were never started for the external dependency.)
+- patches `CubeMaster/conf.yaml` with the external endpoint and sets
+  `instance_db_config.driver` for SQL engines;
+- writes `DATABASE_URL` (`mysql://` or `postgresql://`) and `CUBE_PROXY_REDIS_*`
+  to `.one-click.env` so every service consumes the external endpoint;
+- masks the corresponding `cube-sandbox-mysql.service` / `cube-sandbox-redis.service`
+  so the local container is never started; and
+- makes `quickcheck.sh` and `up-support.sh` skip lifecycle management of the
+  now-external dependency. (`down-support.sh` has no external-dep awareness and
+  still issues a `docker compose down`, but this is a harmless no-op because the
+  local containers were never started for the external dependency.)
 
-The external MySQL must already grant the configured user access to the target
-database. CubeMaster runs its own embedded schema migrations on first start.
+The external database must already grant the configured user access to the
+target database. CubeMaster runs its own embedded schema migrations on first
+start.
 
 ### Bundled MinIO vs the S3 volume plugin
 

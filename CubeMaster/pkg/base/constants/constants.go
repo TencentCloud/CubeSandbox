@@ -77,6 +77,13 @@ const (
 	// Master (same snap-* format as normal snapshots). DB Kind=pause_snapshot;
 	// Cubelet only keeps the local catalog under that id.
 	CubeAnnotationPauseSnapshotID = "cube.master.pause.snapshot.id"
+	// CubeAnnotationLaunchMemorySnapshotID is the start-image id Cubelet
+	// stamps once. User Create must not set it (see checkAndGetAnnotation).
+	CubeAnnotationLaunchMemorySnapshotID = "cube.master.launch.memory.snapshot.id"
+	// CubeAnnotationRuntimeRestoreSnapshotID is the memory image the VM was
+	// last restored from. User Create must not set it.
+	CubeAnnotationRuntimeRestoreSnapshotID         = "cube.master.runtime.restore.snapshot.id"
+	CubeAnnotationRuntimeRestoreSnapshotAttachedAt = "cube.master.runtime.restore.snapshot.attached_at"
 	// CubeAnnotationStorageBackend is the CoW backend Master passes to Cubelet
 	// on Pause / Commit (xfs｜s3). Empty means xfs.
 	CubeAnnotationStorageBackend = "cube.master.storage.backend"

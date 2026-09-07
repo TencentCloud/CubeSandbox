@@ -13,6 +13,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
@@ -187,6 +188,43 @@ func GetSandboxRootfsFor(ctx context.Context, backend, sandboxID, preferredVolum
 		return nil, err
 	}
 	return backendFileInfoToSnapshotObject(ctx, store, rootfs)
+}
+
+// GetImportedSandboxMemoryFor returns the sandbox-private memory disk Create
+// minted (cross-node import or same-node S3 pause-resume clone). Empty / missing
+// is not an error: XFS template start and XFS Resume never create one.
+func GetImportedSandboxMemoryFor(ctx context.Context, backend, sandboxID string) (*CowSnapshotObject, error) {
+	sandboxID = strings.TrimSpace(sandboxID)
+	if localStorage == nil || sandboxID == "" {
+		return nil, nil
+	}
+	info, err := localStorage.readBackendFileInfo(ctx, sandboxID)
+	if err != nil {
+		if errors.Is(err, utils.ErrorKeyNotFound) || errors.Is(err, utils.ErrorBucketNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if info == nil {
+		return nil, nil
+	}
+	name := strings.TrimSpace(info.ImportedMemoryVol)
+	if name == "" {
+		return nil, nil
+	}
+	store, err := requireCowStoreFor(backend)
+	if err != nil {
+		return nil, err
+	}
+	devPath, err := store.ResolveDevPath(ctx, name, cowKindVolume)
+	if err != nil {
+		return nil, fmt.Errorf("resolve imported memory %s: %w", name, err)
+	}
+	return &CowSnapshotObject{
+		Name:    name,
+		Kind:    CowKindVolume,
+		DevPath: devPath,
+	}, nil
 }
 
 // CommitRootfs commits source rootfs into tpl-<id>-rootfs on the default (XFS) Store.

@@ -78,10 +78,10 @@ func setRuntimeRestoreBaseLabels(cb *cubeboxstore.CubeBox, snapshotID string, at
 
 // invalidateRuntimeSnapshotBindingsAfterOpaqueRestore marks both runtime
 // memory bases as unusable after the VM has been restored from a source that
-// Cubelet cannot later reflink from (for example CubeShim's pause/resume path,
-// which restores from /data/cubelet/root/pausevm/<sandbox> with no cubecow
-// memory_vol_url). The next CommitSandbox must therefore produce a full
-// snapshot unless it first establishes a new runtime snapshot binding.
+// Cubelet cannot later reflink from. CoW Pause/Resume now writes a catalog
+// memory object like CommitSandbox; Create-from-pause-snap stamps a real
+// restore-base id. This helper remains for leftover in-place resume
+// convergence (TaskResumed) that still has no cubecow dest.
 func invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(cb *cubeboxstore.CubeBox, attachedAt time.Time) {
 	if cb == nil {
 		return

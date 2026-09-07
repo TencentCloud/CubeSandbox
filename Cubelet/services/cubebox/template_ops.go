@@ -309,33 +309,41 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 }
 
 func validateCommitSandboxTarget(cb *cubeboxstore.CubeBox) (string, error) {
-	return validateSnapshotSandboxTarget(cb, true /* rejectHostDeps */)
+	return validateSnapshotSandboxTarget(cb, true /* validateHostDeps */)
 }
 
 // validatePauseSandboxTarget is the Pause/CoW gate: running + writable rootfs.
 // Unlike CommitSandbox, host-mount / host_dir / sandbox_path / plugin_volume
 // binds are allowed — Cubelet re-binds the same host path on Resume (same sandboxID).
 func validatePauseSandboxTarget(cb *cubeboxstore.CubeBox) (string, error) {
-	return validateSnapshotSandboxTarget(cb, false /* rejectHostDeps */)
+	return validateSnapshotSandboxTarget(cb, false /* validateHostDeps */)
 }
 
-func validateSnapshotSandboxTarget(cb *cubeboxstore.CubeBox, rejectHostDeps bool) (string, error) {
+func validateSnapshotSandboxTarget(cb *cubeboxstore.CubeBox, validateHostDeps bool) (string, error) {
 	if cb == nil {
 		return "", errors.New("sandbox is not found")
 	}
 	if cb.GetStatus() == nil || cb.GetStatus().Get().State() != cubebox.ContainerState_CONTAINER_RUNNING {
 		return "", fmt.Errorf("sandbox %s is not running", cb.ID)
 	}
-	if rejectHostDeps {
+	if validateHostDeps {
+		rawHostMounts, err := declaredRawHostMounts(cb.Annotations)
+		if err != nil {
+			return "", err
+		}
+		// The main container is created from the sandbox request and must carry
+		// every declared host mount. Runtime-created auxiliary containers may
+		// omit them, but any host mounts they do carry are still validated below.
+		mainContainer := cb.FirstContainer()
 		for _, container := range cb.AllContainers() {
-			if container == nil || container.Config == nil {
+			if container == nil {
 				continue
 			}
-			if err := validateNoHostPathVolumes(container.Config); err != nil {
+			if err := validateRawHostPathVolumes(container.Config, rawHostMounts, container == mainContainer); err != nil {
 				return "", err
 			}
 		}
-		if err := validateCommitVolumeSources(cb); err != nil {
+		if err := validateCommitVolumeSources(cb, rawHostMounts); err != nil {
 			return "", err
 		}
 	}
@@ -360,9 +368,16 @@ func validateSnapshotSandboxTarget(cb *cubeboxstore.CubeBox, rejectHostDeps bool
 	return rootVolumeName, nil
 }
 
-func validateCommitVolumeSources(cb *cubeboxstore.CubeBox) error {
+func validateCommitVolumeSources(cb *cubeboxstore.CubeBox, rawHostMounts map[string]rawHostMountDeclaration) error {
 	if cb == nil {
 		return nil
+	}
+	pluginVolumes, err := declaredPluginVolumes(cb.Annotations)
+	if err != nil {
+		return err
+	}
+	if err := validateDeclaredRawHostDirVolumes(cb.Volumes, rawHostMounts); err != nil {
+		return err
 	}
 	if len(cb.Volumes) == 0 {
 		for _, container := range cb.AllContainers() {
@@ -398,12 +413,21 @@ func validateCommitVolumeSources(cb *cubeboxstore.CubeBox) error {
 		}
 		source := volume.GetVolumeSource()
 		if source == nil {
+			return fmt.Errorf("volume %s has no persisted source", volume.GetName())
+		}
+		if plugin := source.GetPluginVolume(); plugin != nil {
+			if strings.TrimSpace(plugin.GetDriver()) == "" {
+				return fmt.Errorf("plugin_volume %s has an empty driver", volume.GetName())
+			}
+			if declaredDriver, ok := pluginVolumes[volume.GetName()]; ok && declaredDriver != plugin.GetDriver() {
+				return fmt.Errorf("plugin_volume %s driver does not match runtime metadata", volume.GetName())
+			}
 			continue
 		}
-		if source.GetPluginVolume() != nil {
-			return fmt.Errorf("plugin_volume %s is not supported by CommitSandbox", volume.GetName())
-		}
 		if hostDirs := source.GetHostDirVolumes(); hostDirs != nil {
+			if _, ok := rawHostMounts[volume.GetName()]; ok {
+				continue
+			}
 			for _, hostDir := range hostDirs.GetVolumeSources() {
 				if hostDir != nil && hostDir.GetHostPath() != "" {
 					return fmt.Errorf("host_dir volume %s is not supported by CommitSandbox", volume.GetName())
@@ -416,53 +440,178 @@ func validateCommitVolumeSources(cb *cubeboxstore.CubeBox) error {
 				return fmt.Errorf("sandbox_path volume %s with type %s is not supported by CommitSandbox", volume.GetName(), sandboxPath.GetType())
 			}
 		}
+		if emptyVolumeSource(source) {
+			if _, ok := pluginVolumes[volume.GetName()]; !ok {
+				return fmt.Errorf("volume %s has an unknown empty source", volume.GetName())
+			}
+		}
 	}
-	for name := range usedVolumes {
-		if commitPluginVolumeListed(cb.Annotations, name) {
-			return fmt.Errorf("plugin_volume %s is not supported by CommitSandbox", name)
+	volumeNames := make(map[string]int, len(cb.Volumes))
+	for _, volume := range cb.Volumes {
+		if volume != nil && volume.GetName() != "" {
+			volumeNames[volume.GetName()]++
+		}
+	}
+	for name := range pluginVolumes {
+		if _, ok := usedVolumes[name]; !ok {
+			return fmt.Errorf("plugin_volume %s is declared but not mounted", name)
+		}
+		if volumeNames[name] != 1 {
+			return fmt.Errorf("plugin_volume %s must have exactly one volume declaration", name)
 		}
 	}
 	return nil
 }
 
-// commitPluginVolumeListed reports whether volumeName is in the
-// plugin-volume-sources annotation (mixed-version path when VolumeSource
-// has no plugin_volume field).
-func commitPluginVolumeListed(annotations map[string]string, volumeName string) bool {
-	if annotations == nil || volumeName == "" {
-		return false
-	}
-	raw := strings.TrimSpace(annotations["plugin-volume-sources"])
-	if raw == "" {
-		return false
-	}
-	var entries []struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if e.Name == volumeName {
-			return true
-		}
-	}
-	return false
+func emptyVolumeSource(source *cubebox.VolumeSource) bool {
+	return source != nil &&
+		source.GetEmptyDir() == nil &&
+		source.GetSandboxPath() == nil &&
+		source.GetHostDirVolumes() == nil &&
+		source.GetImage() == nil &&
+		source.GetPluginVolume() == nil
 }
 
-func validateNoHostPathVolumes(config *cubebox.ContainerConfig) error {
+func validateDeclaredRawHostDirVolumes(volumes []*cubebox.Volume, declarations map[string]rawHostMountDeclaration) error {
+	counts := make(map[string]int, len(declarations))
+	for _, volume := range volumes {
+		if volume == nil {
+			continue
+		}
+		declaration, ok := declarations[volume.GetName()]
+		if !ok {
+			continue
+		}
+		counts[volume.GetName()]++
+		if counts[volume.GetName()] > 1 {
+			return fmt.Errorf("raw host-mount volume %s is duplicated", volume.GetName())
+		}
+		hostDirs := volume.GetVolumeSource().GetHostDirVolumes()
+		sources := hostDirs.GetVolumeSources()
+		if len(sources) != 1 || sources[0] == nil ||
+			sources[0].GetName() != volume.GetName() ||
+			filepath.Clean(sources[0].GetHostPath()) != declaration.HostPath {
+			return fmt.Errorf("host_dir volume %s does not match raw host-mount metadata", volume.GetName())
+		}
+	}
+	for name := range declarations {
+		if counts[name] != 1 {
+			return fmt.Errorf("raw host-mount volume %s is missing", name)
+		}
+	}
+	return nil
+}
+
+func declaredPluginVolumes(annotations map[string]string) (map[string]string, error) {
+	result := make(map[string]string)
+	if annotations == nil {
+		return result, nil
+	}
+	raw := strings.TrimSpace(annotations["plugin-volume-sources"])
+	if raw == "" || raw == "[]" || strings.EqualFold(raw, "null") {
+		return result, nil
+	}
+	var entries []struct {
+		Name   string `json:"name"`
+		Driver string `json:"driver"`
+	}
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return nil, fmt.Errorf("invalid plugin-volume-sources annotation: %w", err)
+	}
+	for i, entry := range entries {
+		entry.Name = strings.TrimSpace(entry.Name)
+		entry.Driver = strings.TrimSpace(entry.Driver)
+		if entry.Name == "" || entry.Driver == "" {
+			return nil, fmt.Errorf("plugin-volume-sources entry %d requires name and driver", i)
+		}
+		if _, ok := result[entry.Name]; ok {
+			return nil, fmt.Errorf("plugin_volume %s is duplicated in runtime metadata", entry.Name)
+		}
+		result[entry.Name] = entry.Driver
+	}
+	return result, nil
+}
+
+type rawHostMountDeclaration struct {
+	HostPath  string `json:"hostPath"`
+	MountPath string `json:"mountPath"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
+}
+
+func declaredRawHostMounts(annotations map[string]string) (map[string]rawHostMountDeclaration, error) {
+	result := make(map[string]rawHostMountDeclaration)
+	raw := strings.TrimSpace(annotations["host-mount"])
+	if raw == "" || raw == "[]" || strings.EqualFold(raw, "null") {
+		return result, nil
+	}
+	var declarations []rawHostMountDeclaration
+	if err := json.Unmarshal([]byte(raw), &declarations); err != nil {
+		return nil, fmt.Errorf("invalid host-mount annotation: %w", err)
+	}
+	for i, declaration := range declarations {
+		declaration.HostPath = filepath.Clean(declaration.HostPath)
+		declaration.MountPath = filepath.Clean(declaration.MountPath)
+		if !filepath.IsAbs(declaration.HostPath) || !filepath.IsAbs(declaration.MountPath) {
+			return nil, fmt.Errorf("host-mount entry %d must use absolute hostPath and mountPath", i)
+		}
+		result[fmt.Sprintf("hostdir-%d", i)] = declaration
+	}
+	return result, nil
+}
+
+func validateRawHostPathVolumes(config *cubebox.ContainerConfig, declarations map[string]rawHostMountDeclaration, requireDeclared bool) error {
 	if config == nil {
+		if requireDeclared && len(declarations) != 0 {
+			return errors.New("container config is missing declared raw host-mount volume mounts")
+		}
 		return nil
 	}
+	counts := make(map[string]int, len(declarations))
 	for _, mount := range config.GetVolumeMounts() {
-		if mount != nil && mount.GetHostPath() != "" {
-			return fmt.Errorf("hostPath volume mount %s is not supported by CommitSandbox", mount.GetName())
+		if mount == nil {
+			continue
+		}
+		declaration, ok := declarations[mount.GetName()]
+		if !ok {
+			if mount.GetHostPath() != "" {
+				return fmt.Errorf("hostPath volume mount %s is not declared by raw host-mount metadata", mount.GetName())
+			}
+			continue
+		}
+		counts[mount.GetName()]++
+		if counts[mount.GetName()] > 1 {
+			return fmt.Errorf("raw host-mount volume mount %s is duplicated", mount.GetName())
+		}
+		if mount.GetHostPath() == "" {
+			return fmt.Errorf("raw host-mount volume mount %s has no hostPath", mount.GetName())
+		}
+		if filepath.Clean(mount.GetHostPath()) != declaration.HostPath ||
+			filepath.Clean(mount.GetContainerPath()) != declaration.MountPath ||
+			mount.GetReadonly() != declaration.ReadOnly {
+			return fmt.Errorf("hostPath volume mount %s does not match raw host-mount metadata", mount.GetName())
+		}
+	}
+	// Only the main container must contain every declaration. Auxiliary
+	// containers are allowed to use none or a subset of the sandbox mounts.
+	if requireDeclared {
+		for name := range declarations {
+			if counts[name] != 1 {
+				return fmt.Errorf("raw host-mount volume mount %s is missing", name)
+			}
 		}
 	}
 	return nil
 }
 
 func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTemplateRequest) (*cubebox.CleanupTemplateResponse, error) {
+	return s.cleanupTemplate(ctx, req, true)
+}
+
+// cleanupTemplate removes a catalog package. honorLiveXFSPause is true for
+// the Master RPC: XFS Resume still mmaps the pause file, so a Cleanup of
+// that snap while a live sandbox holds cube.master.pause.snapshot.id is a
+// successful no-op. Cubelet's own next-Pause / Destroy GC passes false.
+func (s *service) cleanupTemplate(ctx context.Context, req *cubebox.CleanupTemplateRequest, honorLiveXFSPause bool) (*cubebox.CleanupTemplateResponse, error) {
 	rsp := &cubebox.CleanupTemplateResponse{
 		RequestID:  req.GetRequestID(),
 		TemplateID: strings.TrimSpace(req.GetTemplateID()),
@@ -494,12 +643,20 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
-	if _, catErr := storage.GetLocalSnapshotFor(ctx, backend, rsp.TemplateID); errors.Is(catErr, storage.ErrSnapshotCatalogNotFound) {
+	entry, catErr := storage.GetLocalSnapshotFor(ctx, backend, rsp.TemplateID)
+	if errors.Is(catErr, storage.ErrSnapshotCatalogNotFound) {
 		if other := otherCowBackend(backend); other != backend {
-			if _, altErr := storage.GetLocalSnapshotFor(ctx, other, rsp.TemplateID); altErr == nil {
+			if alt, altErr := storage.GetLocalSnapshotFor(ctx, other, rsp.TemplateID); altErr == nil {
 				backend = other
+				entry = alt
 			}
 		}
+	}
+	if honorLiveXFSPause && keepLiveXFSPausePackage(s.listCubeboxes(), rsp.TemplateID, backend) &&
+		entry != nil && isPauseSnapshotCatalogKind(entry.Kind) {
+		log.G(ctx).Infof("CleanupTemplate %s: keeping XFS pause package; a live sandbox still restores from it",
+			rsp.TemplateID)
+		return rsp, nil
 	}
 	refs, snapshotPath, err := resolveCleanupRefs(ctx, backend, rsp.TemplateID, req.GetObjects(), req.GetSnapshotPath())
 	if err != nil {

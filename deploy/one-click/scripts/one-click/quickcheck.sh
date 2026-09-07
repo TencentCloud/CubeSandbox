@@ -335,11 +335,16 @@ quickcheck_main() {
     OPS_ADDR="$(resolve_control_plane_cubeops_addr)"
   fi
 
-  # When external MySQL/Redis is configured the local container + systemd unit do
-  # not exist, so the corresponding checks must be skipped.
+  # When external MySQL/PostgreSQL/Redis is configured the local container +
+  # systemd unit do not exist, so the corresponding checks must be skipped.
   local EXTERNAL_MYSQL_HOST="${CUBE_EXTERNAL_MYSQL_HOST:-}"
+  local EXTERNAL_POSTGRES_HOST="${CUBE_EXTERNAL_POSTGRES_HOST:-}"
   local EXTERNAL_REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-}"
   local EXTERNAL_REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
+  local SKIP_LOCAL_MYSQL=0
+  if [[ -n "${EXTERNAL_MYSQL_HOST}" || -n "${EXTERNAL_POSTGRES_HOST}" ]]; then
+    SKIP_LOCAL_MYSQL=1
+  fi
 
   # Validate the host:port / IP values before they are interpolated into curl
   # URLs and grep patterns. resolve_control_plane_cubemaster_addr already
@@ -383,8 +388,12 @@ quickcheck_main() {
       s3lvol_recovery_verify_ok
   fi
   if [[ "${ROLE}" != "compute" ]]; then
-    if [[ -n "${EXTERNAL_MYSQL_HOST}" ]]; then
-      echo "[quickcheck] external MySQL (${EXTERNAL_MYSQL_HOST}); skipping local mysql unit check"
+    if [[ "${SKIP_LOCAL_MYSQL}" -eq 1 ]]; then
+      if [[ -n "${EXTERNAL_POSTGRES_HOST}" ]]; then
+        echo "[quickcheck] external PostgreSQL (${EXTERNAL_POSTGRES_HOST}); skipping local mysql unit check"
+      else
+        echo "[quickcheck] external MySQL (${EXTERNAL_MYSQL_HOST}); skipping local mysql unit check"
+      fi
     else
       check_unit_active cube-sandbox-mysql.service
     fi
@@ -415,7 +424,7 @@ quickcheck_main() {
 
   if command -v docker >/dev/null 2>&1 && [[ "${ROLE}" != "compute" ]]; then
     echo "[quickcheck] check container runtime state"
-    [[ -n "${EXTERNAL_MYSQL_HOST}" ]] || check_container_ready "${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}"
+    [[ "${SKIP_LOCAL_MYSQL}" -eq 1 ]] || check_container_ready "${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}"
     [[ -n "${EXTERNAL_REDIS_HOST}" || -n "${EXTERNAL_REDIS_MASTER_NAME}" ]] || check_container_ready "${CUBE_SANDBOX_REDIS_CONTAINER:-cube-sandbox-redis}"
     [[ "${CUBE_SANDBOX_MINIO_ENABLED:-1}" == "1" ]] && check_container_ready "${CUBE_SANDBOX_MINIO_CONTAINER:-cube-sandbox-minio}"
     check_container_ready "${CUBE_PROXY_CONTAINER_NAME:-cube-proxy}"

@@ -18,7 +18,7 @@ WORKTREE_ROOT="${REPO_ROOT}"
 VERSION="${VERSION:-v0.7.0}"
 IMAGE_TAG="${IMAGE_TAG:-${VERSION}}"
 REGISTRY="${REGISTRY:-cube-sandbox-int.tencentcloudcr.com/cube-sandbox}"
-# SOURCE_REF pins the CubeMaster / CubeAPI / CubeOps / CubeDB / CubeProxy /
+# SOURCE_REF pins the CubeMaster / CubeAPI / CubeOps / pkgs/cubedb / CubeProxy /
 # CubeEgress / cube-lifecycle-manager / web / deploy/one-click/webui (and
 # cube-master / cubemastercli / cubelet / cube-shim sibling modules) source
 # tree used when building cube-master / cubemastercli / cubelet / cube-shim /
@@ -166,6 +166,28 @@ require_cubelog_module() {
     return 0
   fi
   fail "missing pkgs/CubeLog or legacy cubelog sibling module in ${REPO_ROOT}"
+}
+
+# CubeDB lived at CubeDB/ until it moved to pkgs/cubedb. SOURCE_REF may
+# therefore be an older tag whose Dockerfiles still COPY CubeDB/.
+cubedb_module_at_ref() {
+  local sha="$1"
+  if git -C "${WORKTREE_ROOT}" cat-file -e "${sha}:pkgs/cubedb/go.mod" 2>/dev/null; then
+    printf '%s\n' "pkgs/cubedb"
+    return 0
+  fi
+  if git -C "${WORKTREE_ROOT}" cat-file -e "${sha}:CubeDB/go.mod" 2>/dev/null; then
+    printf '%s\n' "CubeDB"
+    return 0
+  fi
+  return 1
+}
+
+require_cubedb_module() {
+  if [[ -d "${REPO_ROOT}/pkgs/cubedb" || -d "${REPO_ROOT}/CubeDB" ]]; then
+    return 0
+  fi
+  fail "missing pkgs/cubedb or legacy CubeDB sibling module in ${REPO_ROOT}"
 }
 
 usage() {
@@ -387,7 +409,7 @@ ensure_source_tree() {
   SOURCE_READY=1
 
   # When SOURCE_REF is set (default: ${VERSION}), export the CubeMaster / CubeAPI /
-  # CubeOps / CubeDB / CubeProxy / CubeEgress / cube-lifecycle-manager / web /
+  # CubeOps / pkgs/cubedb / CubeProxy / CubeEgress / cube-lifecycle-manager / web /
   # deploy/one-click/webui trees at that ref into ${SOURCE_TREE_DIR} and point
   # REPO_ROOT there. This ensures cube-master, cubemastercli, cubelet, cube-api,
   # cube-ops, cube-proxy, cube-egress, cube-lifecycle-manager, cube-webui and
@@ -409,14 +431,20 @@ ensure_source_tree() {
   # SOURCE_REF that predates both pkgs/CubeLog and cubelog must still be able to
   # build those images (same reason CubeOps is gated below).
   CUBELOG_SRC=""
+  CUBEDB_SRC=""
   if should_build cube-master || should_build cubemastercli \
      || should_build cubelet || should_build cube-ops; then
     CUBELOG_SRC="$(cubelog_module_at_ref "${SOURCE_REF_SHA}")" \
       || fail "SOURCE_REF=${SOURCE_REF} has neither pkgs/CubeLog nor cubelog"
   fi
+  if should_build cube-master || should_build cubemastercli \
+     || should_build cube-ops; then
+    CUBEDB_SRC="$(cubedb_module_at_ref "${SOURCE_REF_SHA}")" \
+      || fail "SOURCE_REF=${SOURCE_REF} has neither pkgs/cubedb nor CubeDB"
+  fi
   # CubeOps is post-v0.5.1; only export when building cube-ops so older release
   # tags still work for cube-api / cube-proxy / webui / etc. cube-master /
-  # cubemastercli need ${CUBELOG_SRC} / CubeDB / Cubelet; cubemastercli also needs
+  # cubemastercli need ${CUBELOG_SRC} / ${CUBEDB_SRC} / Cubelet; cubemastercli also needs
   # CubeOps (the image bundles both cubemastercli and cubeopscli binaries).
   # cube-master also needs
   # deploy/scripts for volume-deps. cubelet needs Cubelet / CubeNet / ${CUBELOG_SRC} /
@@ -427,7 +455,7 @@ ensure_source_tree() {
     SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeS3lvol deploy/kubernetes/images/scripts deploy/kubernetes/images/cube-s3lvol"
   fi
   if should_build cube-master || should_build cubemastercli; then
-    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} ${CUBELOG_SRC} CubeDB Cubelet"
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} ${CUBELOG_SRC} ${CUBEDB_SRC} Cubelet"
   fi
   if should_build cubemastercli; then
     SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeOps"
@@ -444,7 +472,7 @@ ensure_source_tree() {
   if should_build cube-ops; then
     SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeOps ${CUBELOG_SRC}"
     if ! should_build cube-master && ! should_build cubemastercli; then
-      SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeDB"
+      SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} ${CUBEDB_SRC}"
     fi
   fi
   if [[ ! -f "${SOURCE_TREE_STAMP}" ]] \
@@ -672,7 +700,7 @@ build_cube_master_image() {
   [[ -f "${REPO_ROOT}/CubeMaster/docker/Dockerfile" ]] || fail "missing CubeMaster/docker/Dockerfile in ${REPO_ROOT}"
   [[ -f "${REPO_ROOT}/CubeMaster/go.mod" ]] || fail "missing CubeMaster go.mod in ${REPO_ROOT}"
   require_cubelog_module
-  [[ -d "${REPO_ROOT}/CubeDB" ]] || fail "missing CubeDB sibling module in ${REPO_ROOT}"
+  require_cubedb_module
   [[ -d "${REPO_ROOT}/Cubelet" ]] || fail "missing Cubelet sibling module in ${REPO_ROOT}"
   [[ -f "${REPO_ROOT}/deploy/scripts/docker-install-volume-deps.sh" ]] \
     || fail "missing deploy/scripts/docker-install-volume-deps.sh in ${REPO_ROOT}"
@@ -717,7 +745,7 @@ build_cubemastercli_image() {
   [[ -f "${REPO_ROOT}/CubeMaster/go.mod" ]] || fail "missing CubeMaster go.mod in ${REPO_ROOT}"
   [[ -f "${REPO_ROOT}/CubeOps/go.mod" ]] || fail "missing CubeOps go.mod in ${REPO_ROOT}"
   require_cubelog_module
-  [[ -d "${REPO_ROOT}/CubeDB" ]] || fail "missing CubeDB sibling module in ${REPO_ROOT}"
+  require_cubedb_module
   [[ -d "${REPO_ROOT}/Cubelet" ]] || fail "missing Cubelet sibling module in ${REPO_ROOT}"
   build_image cubemastercli "${REPO_ROOT}" "${REPO_ROOT}/CubeMaster/docker/Dockerfile.cubemastercli" \
     --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
@@ -771,10 +799,10 @@ build_cube_shim_image() {
 }
 
 # Same as .github/workflows/release-docker-images.yml for component "cube-ops":
-# context=., file=CubeOps/Dockerfile (needs sibling CubeDB via Dockerfile.dockerignore).
+# context=., file=CubeOps/Dockerfile (needs sibling pkgs/cubedb via Dockerfile.dockerignore).
 build_cube_ops_image() {
   [[ -f "${REPO_ROOT}/CubeOps/go.mod" ]] || fail "missing CubeOps go.mod in ${REPO_ROOT}"
-  [[ -d "${REPO_ROOT}/CubeDB" ]] || fail "missing CubeDB sibling module in ${REPO_ROOT}"
+  require_cubedb_module
   require_cubelog_module
   build_image cube-ops "${REPO_ROOT}" "${REPO_ROOT}/CubeOps/Dockerfile"
   record_built cube-ops

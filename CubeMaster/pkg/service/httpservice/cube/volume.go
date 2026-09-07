@@ -10,13 +10,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/tencentcloud/CubeSandbox/CubeDB/dao"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 	"gorm.io/gorm"
 )
 

@@ -60,6 +60,7 @@ func generateSandboxVirtiofsOpt(ctx context.Context, flowOpts *workflow.CreateCo
 				AllowedDirs: v.bindPaths,
 				ReadOnly:    k.readOnly,
 				Cache:       constants.VirtiofsCacheNone,
+				RemapFilter: flowOpts.IsGuestMountRestore(),
 			},
 		}
 		if k.readOnly {

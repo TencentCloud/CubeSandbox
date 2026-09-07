@@ -39,14 +39,10 @@ impl SnapshotService {
         backend: Option<String>,
     ) -> AppResult<SnapshotInfo> {
         let request_id = new_request_id();
-        let create_request = self
-            .build_create_request_payload(sandbox_id, &request_id)
-            .await?;
         let req = CreateSnapshotRequest {
             request_id: request_id.clone(),
             sandbox_id: sandbox_id.to_string(),
             display_name: name,
-            create_request,
             backend,
         };
 
@@ -211,90 +207,6 @@ impl SnapshotService {
             Err(e) => Err(internal_error(e)),
         }
     }
-
-    async fn build_create_request_payload(
-        &self,
-        sandbox_id: &str,
-        request_id: &str,
-    ) -> AppResult<serde_json::Value> {
-        let sandbox = self.fetch_sandbox(sandbox_id).await?;
-        if let Some(template_payload) = self
-            .template_create_request_payload(&sandbox.template_id, request_id)
-            .await?
-        {
-            return Ok(template_payload);
-        }
-        Ok(self.minimal_create_request_payload(&sandbox, request_id))
-    }
-
-    async fn fetch_sandbox(&self, sandbox_id: &str) -> AppResult<crate::cubemaster::SandboxDetail> {
-        let resp = self
-            .cubemaster
-            .get_sandbox(sandbox_id, &self.instance_type)
-            .await
-            .map_err(|e| {
-                if e.is_not_found() {
-                    AppError::NotFound(format!("sandbox {} not found", sandbox_id))
-                } else {
-                    internal_error(e)
-                }
-            })?;
-        resp.ret.as_result().map_err(|e| {
-            if e.is_not_found() {
-                AppError::NotFound(format!("sandbox {} not found", sandbox_id))
-            } else {
-                internal_error(e)
-            }
-        })?;
-        resp.into_first_sandbox(&self.instance_type)
-            .ok_or_else(|| AppError::NotFound(format!("sandbox {} not found", sandbox_id)))
-    }
-
-    async fn template_create_request_payload(
-        &self,
-        template_id: &str,
-        request_id: &str,
-    ) -> AppResult<Option<serde_json::Value>> {
-        let template_id = template_id.trim();
-        if template_id.is_empty() {
-            return Ok(None);
-        }
-        let resp = match self.cubemaster.get_template(template_id).await {
-            Ok(resp) => resp,
-            Err(e) if e.is_not_found() => return Ok(None),
-            Err(e) => return Err(internal_error(e)),
-        };
-        resp.ret.as_result().map_err(internal_error)?;
-        let mut value = match resp.create_request {
-            Some(value) => value,
-            None => return Ok(None),
-        };
-        ensure_request_id(&mut value, request_id);
-        Ok(Some(value))
-    }
-
-    fn minimal_create_request_payload(
-        &self,
-        sandbox: &crate::cubemaster::SandboxDetail,
-        request_id: &str,
-    ) -> serde_json::Value {
-        let mut annotations = sandbox.annotations.clone();
-        if !sandbox.template_id.trim().is_empty() {
-            annotations
-                .entry("cube.master.appsnapshot.template.id".to_string())
-                .or_insert_with(|| sandbox.template_id.clone());
-        }
-
-        serde_json::json!({
-            "request_id": request_id,
-            "instance_type": self.instance_type.clone(),
-            "annotations": annotations,
-            "labels": sandbox.labels.clone(),
-            "containers": [],
-            "exposed_ports": [],
-            "network_type": "tap",
-        })
-    }
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -447,34 +359,6 @@ fn optional_backend(value: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
-}
-
-fn ensure_request_id(value: &mut serde_json::Value, request_id: &str) {
-    if !value.is_object() {
-        *value = serde_json::json!({});
-    }
-    let object = value.as_object_mut().expect("object just initialized");
-    object.insert(
-        "request_id".to_string(),
-        serde_json::Value::String(request_id.to_string()),
-    );
-    object.insert(
-        "requestID".to_string(),
-        serde_json::Value::String(request_id.to_string()),
-    );
-    let request_field = object
-        .entry("request".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    if !request_field.is_object() {
-        *request_field = serde_json::json!({});
-    }
-    request_field
-        .as_object_mut()
-        .expect("request field just initialized")
-        .insert(
-            "requestID".to_string(),
-            serde_json::Value::String(request_id.to_string()),
-        );
 }
 
 fn snapshot_names(resource: &SnapshotResource) -> Vec<String> {

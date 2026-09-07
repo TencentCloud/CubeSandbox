@@ -33,6 +33,7 @@ func TestPreviewSandboxReturnsResolvedRequests(t *testing.T) {
 	previewDealCubeboxCreateReqWithTemplateFn = func(ctx context.Context, req *types.CreateCubeSandboxReq) error {
 		req.Namespace = "resolved-ns"
 		req.NetworkType = "tap"
+		req.Annotations["plugin-volume-sources"] = `[{"name":"work","driver":"s3","private_data":"secret"}]`
 		req.Containers = append(req.Containers, &types.Container{
 			Name: "main",
 		})
@@ -43,6 +44,9 @@ func TestPreviewSandboxReturnsResolvedRequests(t *testing.T) {
 		return &cubeboxv1.RunCubeSandboxRequest{
 			RequestID: req.RequestID,
 			Namespace: req.Namespace,
+			Annotations: map[string]string{
+				"plugin-volume-sources": req.Annotations["plugin-volume-sources"],
+			},
 			Containers: []*cubeboxv1.ContainerConfig{
 				{Name: "main"},
 			},
@@ -73,12 +77,25 @@ func TestPreviewSandboxReturnsResolvedRequests(t *testing.T) {
 	if assert.NotNil(t, got.MergedRequest) {
 		assert.Equal(t, "resolved-ns", got.MergedRequest.Namespace)
 		assert.Len(t, got.MergedRequest.Containers, 1)
+		assert.NotContains(t, got.MergedRequest.Annotations["plugin-volume-sources"], "private_data")
 	}
 	if assert.NotNil(t, got.CubeletRequest) {
 		assert.Equal(t, "resolved-ns", got.CubeletRequest.Namespace)
 		assert.Len(t, got.CubeletRequest.Containers, 1)
+		assert.NotContains(t, got.CubeletRequest.Annotations["plugin-volume-sources"], "private_data")
 	}
 	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
+}
+
+func TestRedactPreviewPluginVolumeSources(t *testing.T) {
+	req := &cubeboxv1.RunCubeSandboxRequest{Annotations: map[string]string{
+		"plugin-volume-sources": `[{"name":"data","driver":"s3","private_data":"secret"}]`,
+	}}
+	redacted := redactPreviewPluginVolumeSources(req)
+	require.NotNil(t, redacted)
+	assert.NotContains(t, redacted.Annotations["plugin-volume-sources"], "private_data")
+	assert.Contains(t, redacted.Annotations["plugin-volume-sources"], `"driver":"s3"`)
+	assert.Contains(t, req.Annotations["plugin-volume-sources"], "secret", "input must not be mutated")
 }
 
 func TestHandleSandboxPreviewRejectsGet(t *testing.T) {

@@ -181,6 +181,27 @@ resource contention test or multi-worker safety validation.
 
 `cases/volume/` covers Volume Plugin CRUD, sandbox bind/unbind and delete-while-bound behavior. It also verifies that one Volume can remain writable in one sandbox while a concurrent attachment is read-only in another sandbox, including read access and rejected create, write, rename and delete operations. These cases are CubeSandbox-only, default to the S3 driver, and run with `--run-e2e` unless `SDK_E2E_VOLUME_PLUGIN=false`.
 
+### 2.9 Host Mount
+
+`cases/host-mount/` covers raw host-directory mount validation, runtime bind
+failures, read-only enforcement, nested mounts, public mount metadata, and
+cross-sandbox sharing. `test_snapshot_clone_rollback.py` additionally verifies:
+
+- creating a new sandbox from an exact snapshot restores guest rootfs state
+  while retaining current external data, remapping both RW and RO mounts, and
+  preserving their access modes;
+- snapshots created from a restored sandbox can be restored again after the
+  intermediate sandbox is destroyed, remapping both mounts on every generation;
+- rollback restores guest rootfs state while retaining external file content,
+  creations, deletions, mount access modes, and the writable channel;
+- fork-style concurrent clones inherit and isolate guest state while sharing
+  the writable raw host mount and preserving the read-only mount.
+
+These cases require both the CubeSandbox-only `host_mount` and
+`rollback_clone` capabilities. They mount the configured allowed-prefix root
+read-write and a provisioned child read-only, then isolate payloads in
+UUID-named directories so parallel runs do not collide.
+
 ## 3. Coverage Boundaries
 
 The current suite mainly validates synchronous Python SDK paths and the

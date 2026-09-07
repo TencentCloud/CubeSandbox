@@ -247,6 +247,7 @@ docker exec "$cid" cat /var/log/envd.log
 The base image is produced by a single GitHub Actions workflow in this
 repository: [`.github/workflows/build-envd-base-image.yml`](https://github.com/TencentCloud/CubeSandbox/blob/master/.github/workflows/build-envd-base-image.yml).
 It checks out `e2b-dev/infra` at the chosen tag (default `2026.16`),
-compiles `envd` with Go 1.25.4 in-place, builds
-`docker/Dockerfile.cube-base`, runs a `:49983/health` smoke test, then
-pushes to `ghcr.io/tencentcloud/cubesandbox-base`.
+compiles `envd` with Go 1.25.4 in-place on native `linux/amd64` and
+`linux/arm64` runners, builds `docker/Dockerfile.cube-base`, runs a
+`:49983/health` smoke test on each architecture, then publishes a
+multi-arch manifest list to `ghcr.io/tencentcloud/cubesandbox-base`.

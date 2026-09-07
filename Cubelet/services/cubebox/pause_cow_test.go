@@ -5,6 +5,7 @@
 package cubebox
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -180,5 +181,86 @@ func TestPauseCatalogBackendPrefersAnnotationThenLabel(t *testing.T) {
 	sb.AddAnnotations(map[string]string{constants.MasterAnnotationStorageBackend: "xfs"})
 	if got := pauseCatalogBackend(sb); got != "xfs" {
 		t.Fatalf("annotation should win, got %q", got)
+	}
+}
+
+func TestNewPauseSnapshotConfigCarriesSnapshotType(t *testing.T) {
+	t.Parallel()
+	cfg := newPauseSnapshotConfig("/data/snap/pause-1", "file:///dev/cubecow/mem1", snapshotTypeSoftDirty)
+	if cfg.DestinationURL != "/data/snap/pause-1" {
+		t.Fatalf("dest=%q", cfg.DestinationURL)
+	}
+	if cfg.MemoryVolURL == nil || *cfg.MemoryVolURL != "file:///dev/cubecow/mem1" {
+		t.Fatalf("memory_vol=%v", cfg.MemoryVolURL)
+	}
+	if cfg.SnapshotType != snapshotTypeSoftDirty {
+		t.Fatalf("snapshot_type=%q", cfg.SnapshotType)
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got pauseSnapshotConfig
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.SnapshotType != snapshotTypeSoftDirty {
+		t.Fatalf("roundtrip snapshot_type=%q", got.SnapshotType)
+	}
+
+	empty := newPauseSnapshotConfig("/data/snap/pause-1", "", "")
+	if empty.MemoryVolURL != nil {
+		t.Fatalf("empty mem url should omit pointer, got %v", empty.MemoryVolURL)
+	}
+	if empty.SnapshotType != snapshotTypeFull {
+		t.Fatalf("empty type must default to full, got %q", empty.SnapshotType)
+	}
+}
+
+func TestKeepLiveXFSPausePackage(t *testing.T) {
+	t.Parallel()
+	snap := "snap-keepxfs000000000000000001"
+	running := newCubeboxWithStatusForTest("sb-run", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	stampPauseSnapshotID(running, snap)
+	if !keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{running}, snap, "xfs") {
+		t.Fatal("XFS running resume must keep the pause package")
+	}
+	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{running}, snap, "s3") {
+		t.Fatal("S3 resume must drop the pause package")
+	}
+
+	paused := newCubeboxWithStatusForTest("sb-paused", cubeboxstore.Status{PausedAt: time.Now().UnixNano()})
+	stampPauseSnapshotID(paused, snap)
+	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{paused}, snap, "xfs") {
+		t.Fatal("PAUSED DelPaused must be allowed to delete the package")
+	}
+
+	other := newCubeboxWithStatusForTest("sb-other", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	stampPauseSnapshotID(other, "snap-other00000000000000000001")
+	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{other}, snap, "xfs") {
+		t.Fatal("unrelated sandbox must not pin this package")
+	}
+
+	forged := newCubeboxWithStatusForTest("sb-forged", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	forged.AddAnnotations(map[string]string{constants.MasterAnnotationPauseSnapshotID: snap})
+	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{forged}, snap, "xfs") {
+		t.Fatal("user Create annotation must not pin an XFS pause package")
+	}
+
+	nextPause := newCubeboxWithStatusForTest("sb-next", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	stampPauseSnapshotID(nextPause, "snap-new000000000000000000000001")
+	nextPause.AddLabels(map[string]string{constants.MasterAnnotationRuntimeRestoreSnapshotID: snap})
+	if !keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{nextPause}, snap, "xfs") {
+		t.Fatal("restore-base must keep the previous package while Pause stamps a new id")
+	}
+}
+
+func TestIsPauseSnapshotCatalogKind(t *testing.T) {
+	t.Parallel()
+	if !isPauseSnapshotCatalogKind("pause_snapshot") {
+		t.Fatal("pause_snapshot must keep")
+	}
+	if isPauseSnapshotCatalogKind("snapshot") || isPauseSnapshotCatalogKind("template") || isPauseSnapshotCatalogKind("") {
+		t.Fatal("non-pause kinds must not keep")
 	}
 }

@@ -119,16 +119,14 @@ func getRealtimeWeightedAverageScore(n *node.Node, cpuq, memq *resource.Quantity
 	if cpuq != nil {
 
 		cpuReqValue := cpuq.MilliValue()
-		effCpu := schedConf.EffectiveQuotaCpu(n.InstanceType, n.QuotaCpu)
-		cpuLeft := getReciprocal(effCpu-schedConf.EffectiveAllocated(n.QuotaCpuUsage)-cpuReqValue, effCpu)
+		cpuLeft := getReciprocal(n.QuotaCpu-schedConf.EffectiveAllocated(n.QuotaCpuUsage)-cpuReqValue, n.QuotaCpu)
 		scores += cpuLeft * getFactorWeight(constants.WeightFactorReqCpu)
 	}
 
 	if memq != nil {
 
 		memReqValue := memq.Value() / 1024 / 1024
-		effMem := schedConf.EffectiveQuotaMem(n.InstanceType, n.QuotaMem)
-		memLeft := getReciprocal(effMem-schedConf.EffectiveAllocated(n.QuotaMemUsage)-memReqValue, effMem)
+		memLeft := getReciprocal(n.QuotaMem-schedConf.EffectiveAllocated(n.QuotaMemUsage)-memReqValue, n.QuotaMem)
 		scores += memLeft * getFactorWeight(constants.WeightFactorReqMem)
 	}
 	return scores

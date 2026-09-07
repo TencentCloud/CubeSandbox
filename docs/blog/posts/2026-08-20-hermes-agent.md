@@ -3,8 +3,7 @@ title: "Running Hermes Agent in Cube Sandbox: Persistent Mounts, Skills Layering
 date: 2026-08-20
 author: Chen Jinbo (Shanghai Yangpu New Energy AI Team)
 description: "A resident Agent application needs the sandbox to remember not just task artifacts, but also the Agent's own configuration, conversation history, and a set of frequently invoked Skills. But sandboxes are inherently ephemeral — restarts, pauses, and migrations can zero out all of this state. This article shares the pitfalls and solutions from the Shanghai Yangpu New Energy AI team's migration of Hermes Studio onto CubeSandbox."
-featured: true
-weight: 2
+featured: false
 ---
 
 # Running Hermes Agent in Cube Sandbox: Persistent Mounts, Skills Layering, and Network Recovery

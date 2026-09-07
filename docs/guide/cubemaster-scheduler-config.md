@@ -49,11 +49,11 @@ Without scoring, CubeMaster still filters nodes but may choose from the filtered
 
 ## Key scheduler fields
 
-Merge the following scoring fields into the existing `scheduler` section of `cubemaster.yaml`. Keep your existing `filter`, timeout, overcommit, and instance-type-specific settings unless you intentionally want to replace them.
+Merge the following scoring fields into the existing `scheduler` section of `cubemaster.yaml`. Keep your existing `filter`, timeout, and instance-type-specific settings unless you intentionally want to replace them.
 
 ```yaml
 scheduler:
-  # Keep your existing filter, timeout, overcommit, and other scheduler settings.
+  # Keep your existing filter, timeout, and other scheduler settings.
   priority_select_num: 3
   score:
     enable_scorers:
@@ -81,7 +81,6 @@ scheduler:
 | `filter.enable_filters` | Enables scheduling filters. Common filters include CPU, memory, template locality, and real-time create concurrency. |
 | `score.enable_scorers` | Enables scoring plugins. Multi-node deployments usually enable `real_time_weighted_average`; when it is enabled, the matching `score.plugin_conf.real_time_weighted_average` block is required or CubeMaster can panic during scheduler startup. |
 | `score.resource_weights` | Controls the influence of MVM count, create concurrency, CPU quota usage, and memory quota usage. Higher weight means stronger influence; factors must also be listed under `score.plugin_conf.real_time_weighted_average.enable_weight_factors`. |
-| `overcommit_ratio` / `overcommit_ratio_conf` | Applies CPU/memory overcommit ratios to Cubelet-reported quota. Defaults are CPU `3` and memory `2`; overrides can be set per instance type. |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | Global or per-instance-type single-node MVM limits. Cubelet-reported `max_mvm_num` also participates in the effective limit. |
 | `disk_usage_max_percent` | Threshold used by the `disk` filter and backoff path to avoid placing more sandboxes on nearly full machines. |
 | `affinityconf` / `node_affinity_selector_allowed_keys` | Controls affinity and constraints by cluster label, zone, CPU type, instance type, and other allowed selector keys. |
@@ -92,10 +91,10 @@ Cubelet registers nodes and continuously reports status through CubeOps's `/inte
 
 | Cubelet-reported field | Source | Scheduling effect |
 |------------------------|--------|-------------------|
-| `instance_type` | Cubelet node identity / instance type | Matches request `instance_type`, selects template replicas, and applies type-specific MVM / overcommit settings. |
+| `instance_type` | Cubelet node identity / instance type | Matches request `instance_type`, selects template replicas, and applies type-specific MVM settings. |
 | `cluster_label` | `host.scheduler_label` | Used for cluster-label affinity and node-pool isolation. |
-| `quota_cpu` | `host.quota.mcpu_limit` or derived from host resources | Base schedulable CPU capacity, with overcommit applied before CPU filtering and scoring. |
-| `quota_mem_mb` | `host.quota.mem_limit` or derived from host resources | Base schedulable memory capacity, with overcommit applied before memory filtering and scoring. |
+| `quota_cpu` | `host.quota.mcpu_limit` or derived from host resources | Schedulable CPU capacity used by CPU filtering and scoring. |
+| `quota_mem_mb` | `host.quota.mem_limit` or derived from host resources | Schedulable memory capacity used by memory filtering and scoring. |
 | `max_mvm_num` | `host.quota.mvm_limit` or memory-derived default | Single-node MVM limit. Nodes at the limit are filtered out. |
 | `create_concurrent_num` | `host.quota.creation_concurrent_num` | Reported per-node create concurrency. `0` means Cubelet does not set an additional engine flow limit, but CubeMaster scheduling still falls back to `cubelet_conf.create_concurrent_limit`. |
 | allocated / disk usage / cgroup metrics | Periodic Cubelet reports | Used for current resource usage, disk watermarks, and scoring factors. |
@@ -175,7 +174,7 @@ Recommendations:
 For higher concurrency or long-running environments:
 
 - Set clear `host.scheduler_label` values per node pool, such as general, memory-heavy, or load-test pools.
-- Configure `node_max_mvm_num_conf` and `overcommit_ratio_conf` per `instance_type`; avoid using one limit for both large and small nodes.
+- Configure `node_max_mvm_num_conf` per `instance_type`; avoid using one limit for both large and small nodes.
 - Increase `priority_select_num` to a small fraction of healthy compute nodes, but avoid making final selection fully random.
 - Keep the `template_locality` filter enabled so creation only lands on nodes with usable template replicas.
 - Set explicit `host.quota.creation_concurrent_num` values to avoid a burst of image, disk, or VMM work overloading a single node.
@@ -215,7 +214,6 @@ Check:
 
 - Whether `quota_cpu` / `quota_mem_mb` are lower than the requested resources.
 - Whether `host.quota.mcpu_limit`, `host.quota.mem_limit`, and `host.quota.mvm_limit` still use low derived defaults.
-- Whether `overcommit_ratio` is too low or per-type overrides are not what you expected.
 - Whether `mvm_num` reached `max_mvm_num` or `node_max_mvm_num_conf`.
 - Whether the effective create concurrency limit is blocking the node. Remember that `create_concurrent_num: 0` still falls back to CubeMaster's `cubelet_conf.create_concurrent_limit` at the scheduler layer.
 

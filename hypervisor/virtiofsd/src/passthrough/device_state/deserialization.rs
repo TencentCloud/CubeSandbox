@@ -195,11 +195,14 @@ impl serialized::Inode {
                     }
                 };
 
+                // Restore-time FilterList is authoritative for filter roots: same
+                // guest basename opens at the current allow_dir path. Children keep
+                // walking via parent fd and are not remapped here.
                 let (filename, is_filter) =
                     if !fullname.is_empty() && std::path::Path::new(fullname).is_absolute() {
-                        (fullname, true)
+                        (fs.remap_filter_fullname(self.id, fullname), true)
                     } else {
-                        (filename, false)
+                        (filename.as_str(), false)
                     };
 
                 let inode_data = self
@@ -217,10 +220,12 @@ impl serialized::Inode {
                         "deserialization filter inode, id:{:?}, name:{:?}, fullname:{:?}",
                         self.id, filename, fullname
                     );
+                    // Write the remapped open path so the data plane follows
+                    // the restore-time allow_dir, not the blob's stale fullname.
                     fs.filter
                         .write()
                         .unwrap()
-                        .insert(self.id, (filename.to_string(), fullname.to_string()));
+                        .insert(self.id, (filename.to_string(), filename.to_string()));
                 }
 
                 Ok(true)
@@ -416,5 +421,275 @@ impl serialized::Handle {
             .unwrap()
             .insert(self.id, Arc::new(handle_data));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::filesystem::SerializableFileSystem;
+    use crate::fuse;
+    use crate::passthrough::device_state::serialized;
+    use crate::passthrough::Config;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const FILTER_ID: u64 = 2;
+    const CHILD_ID: u64 = 3;
+
+    static FIXTURE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(test_name: &str) -> Self {
+            let pid = std::process::id();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let seq = FIXTURE_SEQ.fetch_add(1, Ordering::Relaxed);
+            let base = std::env::temp_dir()
+                .join(format!("virtiofsd-remap-{pid}-{nanos}-{seq}-{test_name}"));
+            fs::create_dir_all(&base).unwrap();
+            TestDir {
+                path: fs::canonicalize(&base).unwrap(),
+            }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn mkdir(&self, rel: &str) -> PathBuf {
+            let full = self.path.join(rel);
+            fs::create_dir_all(&full).unwrap();
+            fs::canonicalize(&full).unwrap()
+        }
+
+        fn touch(&self, rel: &str) {
+            let full = self.path.join(rel);
+            if let Some(parent) = full.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::File::create(&full).unwrap();
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn mk_fs(root: &Path) -> PassthroughFs {
+        let mut cfg = Config::default();
+        cfg.root_dir = root.to_str().unwrap().to_string();
+        cfg.migration_verify_handles = false;
+        cfg.migration_on_error = MigrationOnError::Abort;
+        PassthroughFs::new(cfg).unwrap()
+    }
+
+    fn apply_mnt_tree(fs: &PassthroughFs, mnt_fullname: &str) {
+        serialized::PassthroughFsV1 {
+            inodes: vec![
+                serialized::Inode {
+                    id: fuse::ROOT_ID,
+                    // +1 for the filter inode's Path.parent strong ref
+                    refcount: 2,
+                    location: serialized::InodeLocation::RootNode,
+                    file_handle: None,
+                },
+                serialized::Inode {
+                    id: FILTER_ID,
+                    // +1 for the child inode's Path.parent strong ref
+                    refcount: 2,
+                    location: serialized::InodeLocation::Path {
+                        parent: fuse::ROOT_ID,
+                        filename: "mnt".into(),
+                        fullname: mnt_fullname.to_string(),
+                    },
+                    file_handle: None,
+                },
+                serialized::Inode {
+                    id: CHILD_ID,
+                    refcount: 1,
+                    location: serialized::InodeLocation::Path {
+                        parent: FILTER_ID,
+                        filename: "file".into(),
+                        fullname: String::new(),
+                    },
+                    file_handle: None,
+                },
+            ],
+            next_inode: 4,
+            handles: Vec::new(),
+            next_handle: 0,
+            negotiated_opts: serialized::NegotiatedOpts {
+                writeback: false,
+                announce_submounts: false,
+                posix_acl: false,
+                sup_group_extension: false,
+            },
+        }
+        .apply(fs)
+        .expect("apply failed");
+    }
+
+    fn host_path(fs: &PassthroughFs, inode: u64) -> PathBuf {
+        let data = fs.inodes.get(inode).expect("inode missing");
+        let cpath = data.get_path(&fs.proc_self_fd).expect("get_path failed");
+        PathBuf::from(cpath.to_str().unwrap())
+    }
+
+    fn filter_original_path(fs: &PassthroughFs, inode: u64) -> String {
+        fs.filter
+            .read()
+            .unwrap()
+            .get(&inode)
+            .map(|(_, original)| original.clone())
+            .expect("filter entry missing")
+    }
+
+    #[test]
+    fn remap_hit_opens_new_tree() {
+        let shared = TestDir::new("hit-shared");
+        let old = TestDir::new("hit-old");
+        let new = TestDir::new("hit-new");
+        old.mkdir("mnt");
+        old.touch("mnt/file");
+        let new_mnt = new.mkdir("mnt");
+        new.touch("mnt/file");
+
+        let fs = mk_fs(shared.path());
+        let mut remap = HashMap::new();
+        remap.insert("mnt".into(), new_mnt.to_str().unwrap().to_string());
+        fs.set_filter_path_remap(remap);
+
+        let old_mnt = old.path().join("mnt");
+        apply_mnt_tree(&fs, old_mnt.to_str().unwrap());
+
+        assert_eq!(
+            filter_original_path(&fs, FILTER_ID),
+            new_mnt.to_str().unwrap()
+        );
+        assert_eq!(host_path(&fs, FILTER_ID), new_mnt);
+        assert_eq!(host_path(&fs, CHILD_ID), new_mnt.join("file"));
+    }
+
+    #[test]
+    fn remap_uses_fullname_basename_after_restore() {
+        let shared = TestDir::new("restored-shared");
+        let old = TestDir::new("restored-old");
+        let new = TestDir::new("restored-new");
+        let old_mnt = old.mkdir("mnt");
+        let new_mnt = new.mkdir("mnt");
+
+        let fs = mk_fs(shared.path());
+        let mut remap = HashMap::new();
+        remap.insert("mnt".into(), new_mnt.to_str().unwrap().to_string());
+        fs.set_filter_path_remap(remap);
+
+        assert_eq!(
+            fs.remap_filter_fullname(FILTER_ID, old_mnt.to_str().unwrap()),
+            new_mnt.to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn remap_miss_keeps_blob_fullname() {
+        let shared = TestDir::new("miss-shared");
+        let old = TestDir::new("miss-old");
+        old.mkdir("mnt");
+        old.touch("mnt/file");
+        let old_mnt = old.path().join("mnt");
+
+        let fs = mk_fs(shared.path());
+        apply_mnt_tree(&fs, old_mnt.to_str().unwrap());
+
+        let old_mnt = fs::canonicalize(&old_mnt).unwrap();
+        assert_eq!(
+            filter_original_path(&fs, FILTER_ID),
+            old_mnt.to_str().unwrap()
+        );
+        assert_eq!(host_path(&fs, FILTER_ID), old_mnt);
+        assert_eq!(host_path(&fs, CHILD_ID), old_mnt.join("file"));
+    }
+
+    #[test]
+    fn remap_identity_is_noop() {
+        let shared = TestDir::new("id-shared");
+        let old = TestDir::new("id-old");
+        old.mkdir("mnt");
+        old.touch("mnt/file");
+        let old_mnt = fs::canonicalize(old.path().join("mnt")).unwrap();
+
+        let fs = mk_fs(shared.path());
+        let mut remap = HashMap::new();
+        remap.insert("mnt".into(), old_mnt.to_str().unwrap().to_string());
+        fs.set_filter_path_remap(remap);
+        apply_mnt_tree(&fs, old_mnt.to_str().unwrap());
+
+        assert_eq!(
+            filter_original_path(&fs, FILTER_ID),
+            old_mnt.to_str().unwrap()
+        );
+        assert_eq!(host_path(&fs, FILTER_ID), old_mnt);
+    }
+
+    #[test]
+    fn remap_ignores_non_filter_child() {
+        let shared = TestDir::new("child-shared");
+        shared.touch("file");
+        let decoy = TestDir::new("child-decoy");
+        decoy.touch("file");
+
+        let fs = mk_fs(shared.path());
+        let mut remap = HashMap::new();
+        remap.insert(
+            "file".into(),
+            decoy.path().join("file").to_str().unwrap().to_string(),
+        );
+        fs.set_filter_path_remap(remap);
+
+        serialized::PassthroughFsV1 {
+            inodes: vec![
+                serialized::Inode {
+                    id: fuse::ROOT_ID,
+                    refcount: 2,
+                    location: serialized::InodeLocation::RootNode,
+                    file_handle: None,
+                },
+                serialized::Inode {
+                    id: CHILD_ID,
+                    refcount: 1,
+                    location: serialized::InodeLocation::Path {
+                        parent: fuse::ROOT_ID,
+                        filename: "file".into(),
+                        fullname: String::new(),
+                    },
+                    file_handle: None,
+                },
+            ],
+            next_inode: 4,
+            handles: Vec::new(),
+            next_handle: 0,
+            negotiated_opts: serialized::NegotiatedOpts {
+                writeback: false,
+                announce_submounts: false,
+                posix_acl: false,
+                sup_group_extension: false,
+            },
+        }
+        .apply(&fs)
+        .unwrap();
+
+        assert_eq!(host_path(&fs, CHILD_ID), shared.path().join("file"));
+        assert!(fs.filter.read().unwrap().is_empty());
     }
 }

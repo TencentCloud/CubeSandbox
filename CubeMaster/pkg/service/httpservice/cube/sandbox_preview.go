@@ -107,7 +107,7 @@ func previewSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 				},
 			},
 			APIRequest:    apiReq,
-			MergedRequest: mergedReq,
+			MergedRequest: redactPreviewMergedRequest(mergedReq),
 		}
 	}
 	cubeletReq, err := previewConstructCubeletReqFn(ctx, cubeletReqInput)
@@ -122,7 +122,7 @@ func previewSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 				},
 			},
 			APIRequest:    apiReq,
-			MergedRequest: mergedReq,
+			MergedRequest: redactPreviewMergedRequest(mergedReq),
 		}
 	}
 
@@ -136,9 +136,58 @@ func previewSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 			},
 		},
 		APIRequest:     apiReq,
-		MergedRequest:  mergedReq,
-		CubeletRequest: cubeletReq,
+		MergedRequest:  redactPreviewMergedRequest(mergedReq),
+		CubeletRequest: redactPreviewPluginVolumeSources(cubeletReq),
 	}
+}
+
+func redactPreviewMergedRequest(req *types.CreateCubeSandboxReq) *types.CreateCubeSandboxReq {
+	if req == nil {
+		return nil
+	}
+	cloned, err := cloneCreateReq(req)
+	if err != nil {
+		return nil
+	}
+	redactPluginVolumeSources(cloned.Annotations)
+	return cloned
+}
+
+func redactPreviewPluginVolumeSources(req *api.RunCubeSandboxRequest) *api.RunCubeSandboxRequest {
+	if req == nil {
+		return nil
+	}
+	payload, err := jsoniter.Marshal(req)
+	if err != nil {
+		return nil
+	}
+	cloned := &api.RunCubeSandboxRequest{}
+	if err := jsoniter.Unmarshal(payload, cloned); err != nil {
+		return nil
+	}
+	redactPluginVolumeSources(cloned.Annotations)
+	return cloned
+}
+
+func redactPluginVolumeSources(annotations map[string]string) {
+	raw := annotations[sandbox.AnnotationPluginVolumeSources]
+	if raw == "" {
+		return
+	}
+	var entries []map[string]interface{}
+	if err := jsoniter.UnmarshalFromString(raw, &entries); err != nil {
+		delete(annotations, sandbox.AnnotationPluginVolumeSources)
+		return
+	}
+	for _, entry := range entries {
+		delete(entry, "private_data")
+	}
+	redacted, err := jsoniter.MarshalToString(entries)
+	if err != nil {
+		delete(annotations, sandbox.AnnotationPluginVolumeSources)
+		return
+	}
+	annotations[sandbox.AnnotationPluginVolumeSources] = redacted
 }
 
 func cloneCreateReq(req *types.CreateCubeSandboxReq) (*types.CreateCubeSandboxReq, error) {

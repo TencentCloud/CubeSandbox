@@ -146,11 +146,11 @@ curl http://127.0.0.1:3010/internal/v1/nodes
 
 多机部署时，应在控制节点的 CubeMaster 配置中设置 `scheduler.score`。如果未配置评分，CubeMaster 会先过滤可用节点，再按照过滤后的节点顺序进行选择，新的沙箱可能集中到第一个可用节点，直到资源过滤器把流量推到其他节点。
 
-可以将下面这些调度字段合并到 `cubemaster.yaml` 中已有的 `scheduler` 段。请保留当前部署已有的 `filter`、超时、overcommit 和其他 scheduler 配置。
+可以将下面这些调度字段合并到 `cubemaster.yaml` 中已有的 `scheduler` 段。请保留当前部署已有的 `filter`、超时和其他 scheduler 配置。
 
 ```yaml
 scheduler:
-  # 保留当前部署已有的 filter、超时、overcommit 和其他 scheduler 配置。
+  # 保留当前部署已有的 filter、超时和其他 scheduler 配置。
   priority_select_num: 3
   score:
     enable_scorers:

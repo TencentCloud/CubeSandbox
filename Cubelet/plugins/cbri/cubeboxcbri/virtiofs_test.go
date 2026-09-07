@@ -355,6 +355,7 @@ func TestGenerateRestoreVirtiofsOptSkipsGuestMountRestore(t *testing.T) {
 			require.NoError(t, err)
 			spec := applySpecOpts(t, context.Background(), sandboxOpts)
 			require.NotEmpty(t, spec.Annotations[constants.AnnotationVirtiofs])
+			require.Contains(t, spec.Annotations[constants.AnnotationVirtiofs], `"remap_filter":true`)
 		})
 	}
 }

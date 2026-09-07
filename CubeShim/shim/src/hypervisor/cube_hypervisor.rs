@@ -287,20 +287,24 @@ impl CubeHypervisor {
     }
 
     pub async fn pause_vm_cube(&self, path: &str) -> CResult<()> {
-        self.pause_vm_cube_with_config(path, None).await
+        self.pause_vm_cube_with_config(path, None, SnapshotType::Full)
+            .await
     }
 
     /// Pause the VM and write a snapshot. When `memory_vol_url` is set, memory
     /// ranges are stored on that CubeCow (or other) volume while config/state
     /// still land under `destination_url` — the same layout CommitSandbox /
-    /// cube-runtime snapshot uses.
+    /// cube-runtime snapshot uses. `snapshot_type` is the same Full /
+    /// Incremental / SoftDirty choice CommitSandbox sends via `--snapshot-type`.
     pub async fn pause_vm_cube_with_config(
         &self,
         destination_url: &str,
         memory_vol_url: Option<String>,
+        snapshot_type: SnapshotType,
     ) -> CResult<()> {
         let snap_config = Arc::new(SnapshotConfig {
             destination_url: destination_url.to_string(),
+            snapshot_type,
             memory_vol_url,
             ..Default::default()
         });

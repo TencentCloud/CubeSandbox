@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tencentcloud/CubeSandbox/CubeDB/tombstone"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/config"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/server"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/warehouse"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/tombstone"
 )
 
 func main() {

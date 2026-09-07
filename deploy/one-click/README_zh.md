@@ -293,18 +293,29 @@ MySQL/Redis 依赖默认会部署到：
 - `redis:7-alpine`
 - `minio`（S3 兼容 Volume 后端；由 `CUBE_SANDBOX_MINIO_ENABLED` 显式开关，默认开启）
 
-### 使用外部 MySQL / Redis
+### 使用外部 MySQL / PostgreSQL / Redis
 
-如果希望使用已有的 MySQL/Redis 服务器，而不是内置的本地容器，可在执行
-`install.sh` 之前在 `.env` 中设置以下变量（参见 `env.example`）：
+如果希望使用已有的 MySQL、PostgreSQL 或 Redis 服务器，而不是内置的本地容器，
+可在执行 `install.sh` 之前在 `.env` 中设置以下变量（参见 `env.example`）。
+`CUBE_DATABASE_DRIVER` 对齐 Helm 的 `database.driver`：`mysql`（默认）或
+`postgres`（始终外置，one-click 从不自带本地 PostgreSQL）。
 
 ```bash
-# 外部 MySQL（凭据字段可按需覆盖）
+# 外部 MySQL（默认驱动；凭据字段可按需覆盖）
+# CUBE_DATABASE_DRIVER=mysql
 CUBE_EXTERNAL_MYSQL_HOST=10.0.0.20
 CUBE_EXTERNAL_MYSQL_PORT=3306
 CUBE_EXTERNAL_MYSQL_USER=cube
 CUBE_EXTERNAL_MYSQL_PASSWORD=cube_pass
 CUBE_EXTERNAL_MYSQL_DB=cube_mvp
+
+# 外部 PostgreSQL
+# CUBE_DATABASE_DRIVER=postgres
+# CUBE_EXTERNAL_POSTGRES_HOST=10.0.0.20
+# CUBE_EXTERNAL_POSTGRES_PORT=5432
+# CUBE_EXTERNAL_POSTGRES_USER=cube
+# CUBE_EXTERNAL_POSTGRES_PASSWORD=cube_pass
+# CUBE_EXTERNAL_POSTGRES_DB=cube_mvp
 
 # 外部 Redis
 CUBE_EXTERNAL_REDIS_HOST=10.0.0.21
@@ -312,14 +323,15 @@ CUBE_EXTERNAL_REDIS_PORT=6379
 CUBE_EXTERNAL_REDIS_PASSWORD=ceuhvu123
 ```
 
-当设置了 `CUBE_EXTERNAL_MYSQL_HOST`（和/或 `CUBE_EXTERNAL_REDIS_HOST`）时，`install.sh` 会：
+当设置了 `CUBE_EXTERNAL_MYSQL_HOST`、`CUBE_EXTERNAL_POSTGRES_HOST`（且
+`CUBE_DATABASE_DRIVER=postgres`）和/或 `CUBE_EXTERNAL_REDIS_HOST` 时，`install.sh` 会：
 
-- 用外部 MySQL/Redis 地址改写 `CubeMaster/conf.yaml`；
-- 将 `DATABASE_URL`（CubeAPI）和 `CUBE_PROXY_REDIS_*`（cube proxy）写入 `.one-click.env`，让各服务都连接外部地址；
+- 用外部地址改写 `CubeMaster/conf.yaml`，并设置 `instance_db_config.driver`；
+- 将 `DATABASE_URL`（`mysql://` 或 `postgresql://`）和 `CUBE_PROXY_REDIS_*` 写入 `.one-click.env`，让各服务都连接外部地址；
 - mask 对应的 `cube-sandbox-mysql.service` / `cube-sandbox-redis.service`，本地容器不会再被启动；
 - 让 `quickcheck.sh` 和 `up-support.sh` 跳过对已外置依赖的本地生命周期管理（`down-support.sh` 未感知外部依赖，仍会执行 `docker compose down`，但由于本地容器从未被启动，这是无害的空操作）。
 
-外部 MySQL 需要预先授予所配置用户对目标库的访问权限；CubeMaster 首次启动会自行执行内置 schema 迁移。
+外部数据库需要预先授予所配置用户对目标库的访问权限；CubeMaster 首次启动会自行执行内置 schema 迁移。
 
 ### 内置 MinIO 与 S3 Volume 插件
 

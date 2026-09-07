@@ -318,7 +318,9 @@ export default withMermaid(defineConfig({
                     { text: 'Lexmount AI', link: '/guide/usecases/lexmount-browser-agent' },
                     { text: 'Hermes Agent', link: '/guide/usecases/hermes-agent' },
                     { text: 'Lenovo Cloud Agent', link: '/guide/usecases/lenovo-cloud-agent' },
-                    { text: 'Horizon Insights', link: '/guide/usecases/horizon-insights' }
+                    { text: 'Horizon Insights', link: '/guide/usecases/horizon-insights' },
+                    { text: 'Guangdong Rising', link: '/guide/usecases/guangdong-rising' },
+                    { text: 'unisound', link: '/guide/usecases/unisound-rl-rollout' }
                   ]
                 }
               ]
@@ -528,7 +530,9 @@ export default withMermaid(defineConfig({
                     { text: 'Lexmount AI', link: '/zh/guide/usecases/lexmount-browser-agent' },
                     { text: 'Hermes Agent', link: '/zh/guide/usecases/hermes-agent' },
                     { text: 'Lenovo Cloud Agent', link: '/zh/guide/usecases/lenovo-cloud-agent' },
-                    { text: 'Horizon Insights', link: '/zh/guide/usecases/horizon-insights' }
+                    { text: 'Horizon Insights', link: '/zh/guide/usecases/horizon-insights' },
+                    { text: 'Guangdong Rising', link: '/zh/guide/usecases/guangdong-rising' },
+                    { text: 'unisound', link: '/zh/guide/usecases/unisound-rl-rollout' }
                   ]
                 }
               ]

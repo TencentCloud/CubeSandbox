@@ -107,12 +107,11 @@ func getQuotaCpuUsageScore(n *node.Node) float64 {
 	if sconf == nil {
 		return 0.0
 	}
-	effCpu := sconf.EffectiveQuotaCpu(n.InstanceType, n.QuotaCpu)
-	if effCpu <= 0 {
+	if n.QuotaCpu <= 0 {
 
 		return 0.0
 	}
-	f := getReciprocal(sconf.EffectiveAllocated(n.QuotaCpuUsage), effCpu)
+	f := getReciprocal(sconf.EffectiveAllocated(n.QuotaCpuUsage), n.QuotaCpu)
 	return 100.0 - f*100.0
 }
 
@@ -121,11 +120,10 @@ func getQuotaMemMbUsageScore(n *node.Node) float64 {
 	if sconf == nil {
 		return 0.0
 	}
-	effMem := sconf.EffectiveQuotaMem(n.InstanceType, n.QuotaMem)
-	if effMem <= 0 {
+	if n.QuotaMem <= 0 {
 		return 0.0
 	}
-	f := getReciprocal(sconf.EffectiveAllocated(n.QuotaMemUsage), effMem)
+	f := getReciprocal(sconf.EffectiveAllocated(n.QuotaMemUsage), n.QuotaMem)
 	return 100.0 - f*100.0
 }
 

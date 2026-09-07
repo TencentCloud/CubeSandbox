@@ -7,14 +7,14 @@
 # Why timestamps (not sequential numbers): goose tracks migrations only by the
 # integer filename prefix. Sequential numbers get reused across rebases, which
 # silently skips a migration. A UTC timestamp is unique and never needs renaming
-# on rebase. See migrations/mysql/README.md for the full rationale.
+# on rebase. See pkgs/cubedb/migrate/migrations/mysql/README.md for the full rationale.
 #
 # Usage:
 #   scripts/new-migration.sh <description>
 #
 # Example:
 #   scripts/new-migration.sh add_foo_column
-#   -> CubeDB/migrate/migrations/mysql/20260622143000_add_foo_column.sql
+#   -> pkgs/cubedb/migrate/migrations/mysql/20260622143000_add_foo_column.sql
 
 set -euo pipefail
 
@@ -34,7 +34,7 @@ fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
-mysql_dir="${repo_root}/CubeDB/migrate/migrations/mysql"
+mysql_dir="${repo_root}/pkgs/cubedb/migrate/migrations/mysql"
 
 if [[ ! -d "${mysql_dir}" ]]; then
   echo "error: migrations dir not found: ${mysql_dir}" >&2

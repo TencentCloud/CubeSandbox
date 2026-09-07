@@ -123,28 +123,41 @@ func TestGoWithRecoverWithoutCrash(t *testing.T) {
 
 func TestGoWithRetryWithoutCrash(t *testing.T) {
 	var panicTime int32 = 0
+	done := make(chan struct{})
 	GoWithRetry(func() {
 		fmt.Println("no panic")
+		close(done)
 	}, 3, func(panicError interface{}) {
 		atomic.AddInt32(&panicTime, 1)
 	})
-	time.Sleep(2 * time.Second)
-	if panicTime != 0 {
-		t.Errorf("should be %d, actual %d", 0, 1)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not complete")
+	}
+	if got := atomic.LoadInt32(&panicTime); got != 0 {
+		t.Errorf("should be %d, actual %d", 0, got)
 	}
 }
 
 func TestGoWithRetryWithCrash(t *testing.T) {
-	retryTime := 3
+	const retryTime int32 = 3
 	var panicTime int32 = 0
+	done := make(chan struct{})
 	GoWithRetry(func() {
 		fmt.Println("panic")
 		panic(any(errors.New("RetryPanic")))
-	}, retryTime, func(panicError interface{}) {
-		atomic.AddInt32(&panicTime, 1)
+	}, int(retryTime), func(panicError interface{}) {
+		if atomic.AddInt32(&panicTime, 1) == retryTime {
+			close(done)
+		}
 	})
-	time.Sleep(2 * time.Second)
-	if int(panicTime) != retryTime {
-		t.Errorf("should be %d, actual %d", 0, 1)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retry handler did not complete")
+	}
+	if got := atomic.LoadInt32(&panicTime); got != retryTime {
+		t.Errorf("should be %d, actual %d", retryTime, got)
 	}
 }

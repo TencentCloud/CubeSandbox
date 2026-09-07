@@ -289,3 +289,75 @@ func TestOpaqueRestoreInvalidatesIncrementalBases(t *testing.T) {
 	assert.Equal(t, "snap-full-after-resume", resolveBaseSnapshotID(cb))
 	assert.Equal(t, runtimeSnapshotBindingInvalidID, resolveRestoreBaseSnapshotID(cb))
 }
+
+func TestResolveLaunchAncestorKeepsStartImage(t *testing.T) {
+	fromTpl := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: "tpl-T",
+			},
+		},
+	}
+	assert.Equal(t, "tpl-T", resolveLaunchAncestorSnapshotID(fromTpl))
+
+	fromSnap := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{
+			Annotations: map[string]string{
+				constants.MasterAnnotationRuntimeSnapshotID:     "snap-customer",
+				constants.MasterAnnotationAppSnapshotTemplateID: "tpl-T",
+			},
+		},
+	}
+	assert.Equal(t, "snap-customer", resolveLaunchAncestorSnapshotID(fromSnap))
+
+	// Commit/Resume rewrite runtime labels; Pause must still copy the start image.
+	now := time.Now().UTC()
+	setRuntimeSnapshotBindingLabels(fromTpl, "snap-after-commit", now)
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(fromTpl, now.Add(time.Second))
+	fromTpl.AddAnnotations(map[string]string{
+		constants.MasterAnnotationRuntimeSnapshotID: runtimeSnapshotBindingInvalidID,
+	})
+	assert.Equal(t, "tpl-T", resolveLaunchAncestorSnapshotID(fromTpl))
+
+	stampLaunchMemoryAncestorOnce(fromSnap, "snap-customer")
+	stampPauseSnapshotID(fromSnap, "snap-pause-1")
+	fromSnap.AddAnnotations(map[string]string{
+		constants.MasterAnnotationRuntimeSnapshotID: "snap-pause-1",
+	})
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(fromSnap, now)
+	assert.Equal(t, "snap-customer", resolveLaunchAncestorSnapshotID(fromSnap),
+		"Resume must not replace the FromSnap ancestor with the pause package")
+
+	stampLaunchMemoryAncestorOnce(fromSnap, "tpl-T")
+	assert.Equal(t, "snap-customer", fromSnap.Labels[constants.MasterAnnotationLaunchMemorySnapshotID],
+		"launch ancestor is written once and never overwritten")
+}
+
+func TestLaunchAncestorIsLastRestore(t *testing.T) {
+	fromTpl := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: "tpl-T",
+			},
+		},
+	}
+	assert.True(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
+		"first Pause after Create-from-template: no restore-base yet is OK")
+
+	now := time.Now().UTC()
+	setRuntimeRestoreBaseLabels(fromTpl, "tpl-T", now)
+	assert.True(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
+		"Create-from-template stamps restore-base to the same ancestor")
+
+	setRuntimeRestoreBaseLabels(fromTpl, "snap-pause-1", now.Add(time.Second))
+	stampPauseSnapshotID(fromTpl, "snap-pause-1")
+	assert.False(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
+		"after Resume the restore-base is the pause package, not the template")
+
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(fromTpl, now.Add(2*time.Second))
+	assert.False(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
+		"opaque restore must not incremental-overlay onto the ancestor")
+
+	assert.False(t, launchAncestorIsLastRestore(fromTpl, ""),
+		"empty ancestor is never a valid incremental dest")
+}

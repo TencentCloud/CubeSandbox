@@ -10,10 +10,10 @@
 !pkgs
 !pkgs/CubeLog
 !pkgs/CubeLog/**
+!pkgs/cubedb
+!pkgs/cubedb/**
 !pkgs/proto
 !pkgs/proto/**
-!CubeDB
-!CubeDB/**
 !Cubelet
 !Cubelet/**
 !CubeOps
