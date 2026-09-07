@@ -826,6 +826,7 @@ type UpdateRequest struct {
 	SandboxID    string `json:"sandbox_id"`
 	InstanceType string `json:"instance_type"`
 	Action       string `json:"action"`
+	Timeout      *int   `json:"timeout,omitempty"`
 	// Backend is the CoW store (xfs｜s3) forwarded to Cubelet as
 	// cube.master.storage.backend. Empty means xfs.
 	Backend string `json:"backend,omitempty"`
