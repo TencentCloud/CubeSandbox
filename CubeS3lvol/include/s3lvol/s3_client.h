@@ -200,10 +200,11 @@ int s3_delete_batch(struct s3_client *client, const char **keys, uint32_t count,
  * bytes. Export-prefix materialisation (copying into exports/ before deleting
  * a referenced snapshot) was rejected -- see lib/s3bsdev/s3_gc.c.
  *
- * Before actually using it, know one trap: CopyObject returns **HTTP 200 with
- * `<Error>` in the body**. A DEFAULT-type meta request probably does not parse
- * the body, so after every object copy a HEAD verification is required -- the
- * status code alone is not enough.
+ * CopyObject can return HTTP 200 with `<Error>` in the body (S3 keeps the
+ * connection alive during a long server-side copy). The status code alone is
+ * not enough: this call accumulates up to 8 KiB of response XML and succeeds
+ * only when that prefix contains a complete CopyObjectResult opening tag.
+ * A truncated body without that tag is an error, not success.
  */
 int s3_copy_object(struct s3_client *client,
 		   const char *src_bucket, const char *src_key,

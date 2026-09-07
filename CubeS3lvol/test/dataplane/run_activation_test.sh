@@ -314,6 +314,15 @@ RE_NSID="$(jget "${RE_JSON}" nsid)"; RE_SUB="$(jget "${RE_JSON}" subsys)"
 	&& pass "reattached at exactly subsys ${A_SUB} nsid ${A_NSID}" \
 	|| fail "reattached to subsys ${RE_SUB} nsid ${RE_NSID}, wanted ${A_SUB}/${A_NSID}"
 
+# No sleep: Cubelet opens the path get_bdev returns. A same-nsid reactivate
+# used to hand back /dev/nvmeXnY while udev was still replacing the node.
+RE_DEV="$(jget "$("${RPC}" rcow_get_bdev '{"device_name":"disk-a"}')" device_path)"
+if [ -n "${RE_DEV}" ] && [ -b "${RE_DEV}" ]; then
+	pass "get_bdev after same-nsid reactivate is an openable block device (${RE_DEV})"
+else
+	fail "get_bdev after same-nsid reactivate: '${RE_DEV}' is not a block device"
+fi
+
 sleep 2
 nvme ns-rescan "/dev/nvme0" >/dev/null 2>&1 || true
 sleep 1

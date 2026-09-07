@@ -28,6 +28,8 @@
 #include "spdk/nvmf.h"
 #include "spdk/string.h"
 
+#include <sys/sysmacros.h>
+
 #include "vbdev_s3lvol.h"
 
 SPDK_LOG_REGISTER_COMPONENT(s3lvol_nvmf)
@@ -444,6 +446,78 @@ s3lvol_nvmf_resolve_device(const char *uuid_str, char *out, size_t out_len)
 
 	closedir(d);
 	return rc;
+}
+
+bool
+s3lvol_nvmf_device_is_ready(const char *dev, const char *uuid_str)
+{
+	struct stat st, st2;
+	char sysdir[PATH_MAX];
+	char id[SPDK_UUID_STRING_LEN + 16];
+	char devnum[64];
+	const char *leaf;
+	unsigned maj, min;
+	int n;
+
+	if (!dev || !dev[0] || !uuid_str || !uuid_str[0]) {
+		return false;
+	}
+	if (stat(dev, &st) != 0 || !S_ISBLK(st.st_mode)) {
+		return false;
+	}
+	leaf = strrchr(dev, '/');
+	if (leaf == NULL || leaf[1] == '\0') {
+		return false;
+	}
+	n = snprintf(sysdir, sizeof(sysdir), "/sys/block/%s", leaf + 1);
+	if (n < 0 || n >= (int)sizeof(sysdir)) {
+		return false;
+	}
+
+	/* The uuid (or wwid) must be this lvol. After a same-nsid reactivate,
+	 * /sys/block/<name>/uuid can already be the new namespace while /dev
+	 * still holds the previous occupant's node; matching only major:minor
+	 * would hand that node out. */
+	if (sysfs_read_line(sysdir, "uuid", id, sizeof(id))) {
+		if (strcasecmp(id, uuid_str) != 0) {
+			return false;
+		}
+	} else if (sysfs_read_line(sysdir, "wwid", id, sizeof(id))) {
+		if (strcasestr(id, uuid_str) == NULL) {
+			return false;
+		}
+	} else {
+		return false;
+	}
+
+	if (!sysfs_read_line(sysdir, "dev", devnum, sizeof(devnum))) {
+		return false;
+	}
+	if (sscanf(devnum, "%u:%u", &maj, &min) != 2) {
+		return false;
+	}
+	if (st.st_rdev != makedev(maj, min)) {
+		return false;
+	}
+
+	/* udev may unlink the node between the first stat and the sysfs reads. */
+	if (stat(dev, &st2) != 0 || !S_ISBLK(st2.st_mode) ||
+	    st2.st_rdev != st.st_rdev) {
+		return false;
+	}
+	return true;
+}
+
+bool
+s3lvol_nvmf_udev_settled(void)
+{
+	/* udev keeps /run/udev/queue in place exactly while it still has events
+	 * to apply -- this is the file udevadm settle waits on. Its absence is
+	 * what makes a node that passes s3lvol_nvmf_device_is_ready() stable:
+	 * nobody is left to unlink it. When udev is not running (containers
+	 * with a static /dev) the file never appears, and nothing moves /dev
+	 * behind us either, so treating that as settled is right. */
+	return access("/run/udev/queue", F_OK) != 0;
 }
 
 uint32_t

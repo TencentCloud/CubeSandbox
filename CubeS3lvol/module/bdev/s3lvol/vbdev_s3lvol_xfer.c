@@ -3364,7 +3364,8 @@ decouple_cluster_is_hole(const struct s3lvol_decouple *d, uint64_t cluster)
 	return s3_export_manifest_range_is_zeroes(d->m, first, last - first + 1);
 }
 
-#define DECOUPLE_PREFETCH 16
+/* Matches S3_INGEST_SLOTS: keep CopyObject in flight up to the slot table. */
+#define DECOUPLE_PREFETCH 32
 
 static int
 decouple_ingest_src(void *cb_arg, uint64_t chunk_index,

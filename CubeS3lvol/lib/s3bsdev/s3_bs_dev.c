@@ -2142,7 +2142,6 @@ struct s3_ingest_slot {
 	struct spdk_uuid          uuid;
 	uint32_t                  valid_bytes;
 	char                      dest_key[S3_KEY_MAX];
-	uint64_t                  head_size;
 	struct s3_ingest_op      *waiter;
 };
 
@@ -2150,6 +2149,9 @@ struct s3_ingest {
 	char                      src_bucket[128];
 	s3_ingest_src_fn          src_fn;
 	void                     *src_arg;
+	/* CopyObjects plus in-flight chunk-map binds. End must not free this
+	 * struct until both have drained: bind callbacks keep a pointer into
+	 * slots[], which lives here. */
 	uint32_t                  inflight;
 	struct s3_ingest_slot     slots[S3_INGEST_SLOTS];
 	s3_bs_dev_cb              end_cb;
@@ -2160,18 +2162,56 @@ struct s3_ingest {
 struct s3_ingest_op {
 	struct s3_ctx             *ctx;
 	struct spdk_bs_dev_cb_args *cb_args;
+	struct spdk_thread       *submit_thread;
 	uint64_t                   dst_lba;
 	uint64_t                   src_lba;
 	uint64_t                   lba_count;
 	uint64_t                   pos;
+	int                        status;
+};
+
+struct ingest_prefetch_msg {
+	struct s3_ctx *ctx;
+	uint64_t        src_lba;
+	uint64_t        lba_count;
 };
 
 static void s3_bs_dev_copy(struct spdk_bs_dev *dev, struct spdk_io_channel *channel,
 			   uint64_t dst_lba, uint64_t src_lba, uint64_t lba_count,
 			   struct spdk_bs_dev_cb_args *cb_args);
 static void ingest_op_next(struct s3_ingest_op *op);
+static void ingest_op_complete(struct s3_ingest_op *op, int status);
 static void ingest_try_finish_end(struct s3_ctx *ctx);
 static int ingest_start_slot(struct s3_ingest_slot *slot, uint64_t src_chunk);
+static void ingest_bound(void *cb_arg, const struct spdk_uuid *old_uuid, int status);
+static void ingest_start_bind(struct s3_ingest_slot *slot, uint64_t dst_chunk);
+
+static void
+ingest_op_deliver(void *arg)
+{
+	struct s3_ingest_op *op = arg;
+
+	op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, op->status);
+	free(op);
+}
+
+static void
+ingest_op_complete(struct s3_ingest_op *op, int status)
+{
+	int rc;
+
+	op->status = status;
+	if (!op->submit_thread || op->submit_thread == spdk_get_thread()) {
+		ingest_op_deliver(op);
+		return;
+	}
+	rc = spdk_thread_send_msg(op->submit_thread, ingest_op_deliver, op);
+	if (rc != 0) {
+		SPDK_ERRLOG("ingest copy complete bounce failed: %s\n",
+			    spdk_strerror(-rc));
+		ingest_op_deliver(op);
+	}
+}
 
 static struct s3_ingest_slot *
 ingest_find_slot(struct s3_ingest *in, uint64_t src_chunk, bool alloc_free)
@@ -2211,6 +2251,20 @@ ingest_abandon_copy(struct s3_ingest_slot *slot)
 	ingest_slot_reset(slot);
 }
 
+static bool
+ingest_has_async_slots(struct s3_ingest *in)
+{
+	uint32_t i;
+
+	for (i = 0; i < S3_INGEST_SLOTS; i++) {
+		if (in->slots[i].state == S3_INGEST_COPYING ||
+		    in->slots[i].state == S3_INGEST_BINDING) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static void
 ingest_try_finish_end(struct s3_ctx *ctx)
 {
@@ -2219,7 +2273,10 @@ ingest_try_finish_end(struct s3_ctx *ctx)
 	void *arg;
 	uint32_t i;
 
-	if (!in || !in->ending || in->inflight != 0) {
+	/* Do not free while a CopyObject or a chunk-map bind is still using a
+	 * slot. inflight should already cover both; the slot walk is in case a
+	 * bind was issued without a matching increment. */
+	if (!in || !in->ending || in->inflight != 0 || ingest_has_async_slots(in)) {
 		return;
 	}
 
@@ -2241,30 +2298,48 @@ ingest_try_finish_end(struct s3_ctx *ctx)
 }
 
 static void
+ingest_start_bind(struct s3_ingest_slot *slot, uint64_t dst_chunk)
+{
+	struct s3_ctx *ctx = slot->ctx;
+	struct s3_ingest *in = ctx->ingest;
+
+	slot->state = S3_INGEST_BINDING;
+	in->inflight++;
+	s3_chunk_map_insert(ctx->chunk_map, dst_chunk, &slot->uuid,
+			    slot->valid_bytes, ingest_bound, slot);
+}
+
+static void
 ingest_bound(void *cb_arg, const struct spdk_uuid *old_uuid, int status)
 {
 	struct s3_ingest_slot *slot = cb_arg;
-	struct s3_ingest_op *op = slot->waiter;
 	struct s3_ctx *ctx = slot->ctx;
+	struct s3_ingest *in;
+	struct s3_ingest_op *op;
 	uint32_t bpc;
 
+	if (!ctx || !ctx->ingest) {
+		return;
+	}
+	in = ctx->ingest;
+	if (in->inflight > 0) {
+		in->inflight--;
+	}
+
+	op = slot->waiter;
 	slot->waiter = NULL;
 
 	if (status != 0) {
 		/* Insert did not take: dest_key is unreferenced. */
 		ingest_abandon_copy(slot);
 		if (op) {
-			op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, status);
-			free(op);
+			ingest_op_complete(op, status);
 		}
+		ingest_try_finish_end(ctx);
 		return;
 	}
 
-	if (!ctx && op) {
-		ctx = op->ctx;
-	}
-
-	if (old_uuid && !spdk_uuid_is_null(old_uuid) && ctx) {
+	if (old_uuid && !spdk_uuid_is_null(old_uuid)) {
 		char old_key[S3_KEY_MAX];
 
 		s3_data_key(ctx, old_uuid, old_key, sizeof(old_key));
@@ -2273,23 +2348,25 @@ ingest_bound(void *cb_arg, const struct spdk_uuid *old_uuid, int status)
 
 	ingest_slot_reset(slot);
 	if (!op) {
+		ingest_try_finish_end(ctx);
 		return;
 	}
 
 	bpc = s3_blocks_per_chunk(ctx);
 	op->pos += bpc;
 	ingest_op_next(op);
+	ingest_try_finish_end(ctx);
 }
 
 static void
-ingest_slot_headed(void *cb_arg, int status)
+ingest_slot_copied(void *cb_arg, int status)
 {
 	struct s3_ingest_slot *slot = cb_arg;
 	struct s3_ctx *ctx = slot->ctx;
 	struct s3_ingest *in;
 
 	if (!ctx || !ctx->ingest) {
-		ingest_slot_reset(slot);
+		/* End already freed the parent struct that contains this slot. */
 		return;
 	}
 	in = ctx->ingest;
@@ -2298,18 +2375,13 @@ ingest_slot_headed(void *cb_arg, int status)
 		in->inflight--;
 	}
 
-	if (status == 0 && slot->head_size < slot->valid_bytes) {
-		status = -EIO;
-	}
-
 	if (status != 0) {
 		struct s3_ingest_op *op = slot->waiter;
 
 		slot->waiter = NULL;
 		ingest_abandon_copy(slot);
 		if (op) {
-			op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, status);
-			free(op);
+			ingest_op_complete(op, status);
 		}
 		ingest_try_finish_end(ctx);
 		return;
@@ -2321,34 +2393,9 @@ ingest_slot_headed(void *cb_arg, int status)
 					     slot->waiter->dst_lba + slot->waiter->pos,
 					     ctx->chunk_shift);
 
-		slot->state = S3_INGEST_BINDING;
-		s3_chunk_map_insert(ctx->chunk_map, dst_chunk, &slot->uuid,
-				    slot->valid_bytes, ingest_bound, slot);
+		ingest_start_bind(slot, dst_chunk);
 	}
 	ingest_try_finish_end(ctx);
-}
-
-static void
-ingest_slot_copied(void *cb_arg, int status)
-{
-	struct s3_ingest_slot *slot = cb_arg;
-	struct s3_ctx *ctx = slot->ctx;
-	int rc;
-
-	if (status != 0) {
-		ingest_slot_headed(slot, status);
-		return;
-	}
-	if (!ctx) {
-		ingest_slot_reset(slot);
-		return;
-	}
-
-	rc = s3_head(ctx->client, slot->dest_key, &slot->head_size,
-		     ingest_slot_headed, slot);
-	if (rc != 0) {
-		ingest_slot_headed(slot, rc);
-	}
 }
 
 static int
@@ -2392,30 +2439,26 @@ ingest_op_next(struct s3_ingest_op *op)
 	int rc;
 
 	if (op->pos >= op->lba_count) {
-		op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, 0);
-		free(op);
+		ingest_op_complete(op, 0);
 		return;
 	}
 
 	if (!in) {
-		op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, -EINVAL);
-		free(op);
+		ingest_op_complete(op, -EINVAL);
 		return;
 	}
 
 	dst_off = op->dst_lba + op->pos;
 	if (s3_lba_offset_in_chunk(dst_off, ctx->chunk_shift) != 0 ||
 	    s3_lba_offset_in_chunk(op->src_lba + op->pos, ctx->chunk_shift) != 0) {
-		op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, -EINVAL);
-		free(op);
+		ingest_op_complete(op, -EINVAL);
 		return;
 	}
 
 	src_chunk = s3_lba_to_chunk_index(op->src_lba + op->pos, ctx->chunk_shift);
 	slot = ingest_find_slot(in, src_chunk, true);
 	if (!slot) {
-		op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, -ENOMEM);
-		free(op);
+		ingest_op_complete(op, -ENOMEM);
 		return;
 	}
 
@@ -2424,16 +2467,14 @@ ingest_op_next(struct s3_ingest_op *op)
 		slot->waiter = op;
 		rc = ingest_start_slot(slot, src_chunk);
 		if (rc != 0) {
-			op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, rc);
-			free(op);
+			ingest_op_complete(op, rc);
 		}
 		return;
 	}
 
 	if (slot->state == S3_INGEST_COPYING) {
 		if (slot->waiter) {
-			op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, -EBUSY);
-			free(op);
+			ingest_op_complete(op, -EBUSY);
 			return;
 		}
 		slot->waiter = op;
@@ -2444,14 +2485,17 @@ ingest_op_next(struct s3_ingest_op *op)
 		uint64_t dst_chunk = s3_lba_to_chunk_index(dst_off, ctx->chunk_shift);
 
 		slot->waiter = op;
-		slot->state = S3_INGEST_BINDING;
-		s3_chunk_map_insert(ctx->chunk_map, dst_chunk, &slot->uuid,
-				    slot->valid_bytes, ingest_bound, slot);
+		ingest_start_bind(slot, dst_chunk);
 		return;
 	}
 
-	op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, -EBUSY);
-	free(op);
+	ingest_op_complete(op, -EBUSY);
+}
+
+static void
+ingest_op_on_owner(void *arg)
+{
+	ingest_op_next(arg);
 }
 
 static void
@@ -2461,6 +2505,7 @@ s3_bs_dev_copy(struct spdk_bs_dev *dev, struct spdk_io_channel *channel,
 {
 	struct s3_ctx *ctx = (struct s3_ctx *)dev;
 	struct s3_ingest_op *op;
+	int rc;
 
 	(void)channel;
 
@@ -2476,10 +2521,20 @@ s3_bs_dev_copy(struct spdk_bs_dev *dev, struct spdk_io_channel *channel,
 	}
 	op->ctx = ctx;
 	op->cb_args = cb_args;
+	op->submit_thread = spdk_get_thread();
 	op->dst_lba = dst_lba;
 	op->src_lba = src_lba;
 	op->lba_count = lba_count;
-	ingest_op_next(op);
+
+	if (ctx->owner_thread == NULL ||
+	    ctx->owner_thread == op->submit_thread) {
+		ingest_op_next(op);
+		return;
+	}
+	rc = spdk_thread_send_msg(ctx->owner_thread, ingest_op_on_owner, op);
+	if (rc != 0) {
+		ingest_op_complete(op, rc);
+	}
 }
 
 int
@@ -2508,20 +2563,14 @@ s3_bs_dev_ingest_begin(struct spdk_bs_dev *bs_dev, const char *src_bucket,
 	return 0;
 }
 
-void
-s3_bs_dev_ingest_prefetch(struct spdk_bs_dev *bs_dev, uint64_t src_lba,
-			  uint64_t lba_count)
+static void
+ingest_prefetch_work(struct s3_ctx *ctx, uint64_t src_lba, uint64_t lba_count)
 {
-	struct s3_ctx *ctx = (struct s3_ctx *)bs_dev;
-	struct s3_ingest *in;
+	struct s3_ingest *in = ctx->ingest;
 	uint32_t bpc;
 	uint64_t pos = 0;
 
-	if (!ctx || !ctx->ingest || lba_count == 0) {
-		return;
-	}
-	in = ctx->ingest;
-	if (in->ending) {
+	if (!in || in->ending) {
 		return;
 	}
 	bpc = s3_blocks_per_chunk(ctx);
@@ -2542,6 +2591,44 @@ s3_bs_dev_ingest_prefetch(struct spdk_bs_dev *bs_dev, uint64_t src_lba,
 			}
 		}
 		pos += bpc;
+	}
+}
+
+static void
+ingest_prefetch_on_owner(void *arg)
+{
+	struct ingest_prefetch_msg *m = arg;
+
+	ingest_prefetch_work(m->ctx, m->src_lba, m->lba_count);
+	free(m);
+}
+
+void
+s3_bs_dev_ingest_prefetch(struct spdk_bs_dev *bs_dev, uint64_t src_lba,
+			  uint64_t lba_count)
+{
+	struct s3_ctx *ctx = (struct s3_ctx *)bs_dev;
+	struct ingest_prefetch_msg *m;
+	int rc;
+
+	if (!ctx || !ctx->ingest || lba_count == 0) {
+		return;
+	}
+	if (ctx->owner_thread == NULL ||
+	    ctx->owner_thread == spdk_get_thread()) {
+		ingest_prefetch_work(ctx, src_lba, lba_count);
+		return;
+	}
+	m = calloc(1, sizeof(*m));
+	if (!m) {
+		return;
+	}
+	m->ctx = ctx;
+	m->src_lba = src_lba;
+	m->lba_count = lba_count;
+	rc = spdk_thread_send_msg(ctx->owner_thread, ingest_prefetch_on_owner, m);
+	if (rc != 0) {
+		free(m);
 	}
 }
 

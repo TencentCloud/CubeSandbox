@@ -27,6 +27,7 @@
 
 #include "s3lvol/s3_client.h"
 #include "s3lvol/s3_spawner.h"
+#include "s3_copy_xml.h"
 
 /* ==========================================================================
  * Internal structures
@@ -154,6 +155,11 @@ struct s3_request {
 	uint64_t                         bytes_read;
 
 	bool                             if_none_match;
+
+	/* CopyObject: the body was larger than S3_COPY_XML_MAX. The prefix can
+	 * still be a valid CopyObjectResult; without that opening tag it is
+	 * incomplete XML, not success. */
+	bool                             xml_truncated;
 
 	/* HEAD: where to store Content-Length (may be NULL) */
 	uint64_t                        *out_size;
@@ -2084,6 +2090,50 @@ submit_failed:
  * COPY OBJECT (server-side)
  * ========================================================================== */
 
+static int
+s3_copy_body_callback(struct aws_s3_meta_request *meta_request,
+		      const struct aws_byte_cursor *body,
+		      uint64_t range_start, void *user_data)
+{
+	struct s3_request *req = user_data;
+	bool truncated = false;
+
+	(void)meta_request;
+	(void)range_start;
+
+	if (!req->buf || !body) {
+		return AWS_OP_SUCCESS;
+	}
+	req->bytes_read = s3_copy_xml_append((char *)req->buf, (size_t)req->len,
+					     (size_t)req->bytes_read,
+					     body->ptr, body->len, &truncated);
+	if (truncated) {
+		req->xml_truncated = true;
+	}
+	return AWS_OP_SUCCESS;
+}
+
+static int
+s3_copy_status_from_xml(const char *xml, size_t len, bool truncated,
+			const char *src_bucket, const char *src_key,
+			const char *dst_key)
+{
+	int rc = s3_copy_xml_status(xml, len, truncated);
+
+	if (rc == 0) {
+		return 0;
+	}
+	if (s3_xml_has_open_tag(xml, len, "Error")) {
+		SPDK_ERRLOG("CopyObject returned HTTP 200 with <Error> in the body: "
+			    "%s/%s -> %s\n", src_bucket, src_key, dst_key);
+		return -EIO;
+	}
+	SPDK_ERRLOG("CopyObject response had no CopyObjectResult: %s/%s -> %s "
+		    "(%zu byte body%s)\n", src_bucket, src_key, dst_key, len,
+		    truncated ? ", truncated" : "");
+	return -EIO;
+}
+
 static void
 s3_copy_finished(struct aws_s3_meta_request *meta_request,
 		 const struct aws_s3_meta_request_result *result,
@@ -2100,19 +2150,25 @@ s3_copy_finished(struct aws_s3_meta_request *meta_request,
 						result->response_status);
 		s3_stats_record_error(req->client, result->response_status);
 	} else {
-		/* NOTE: CopyObject can return 200 with an <Error> in the body
-		 * (S3 keeps the connection alive during a long server-side
-		 * copy). Callers that must be certain should HEAD the
-		 * destination afterwards. */
-		req->status = 0;
+		/* HTTP 200 is not success: S3 can park an <Error> in the body
+		 * while the copy runs. CRT does not parse that for DEFAULT. */
+		req->status = s3_copy_status_from_xml(
+				      req->buf ? (const char *)req->buf : "",
+				      (size_t)req->bytes_read,
+				      req->xml_truncated,
+				      req->src_bucket, req->src_key, req->key_buf);
 	}
 
 	S3_STAT_INC(req->client, copy_ops);
 	assert(S3_STAT_GET(req->client, inflight) > 0);
 	S3_STAT_DEC(req->client, inflight);
 
-	/* Release CRT state before the callback may hop threads. */
 	aws_s3_meta_request_release(meta_request);
+
+	if (req->buf) {
+		aws_mem_release(req->allocator, req->buf);
+		req->buf = NULL;
+	}
 
 	s3_request_complete(req);
 }
@@ -2151,9 +2207,16 @@ s3_copy_object(struct s3_client *client,
 	req->cb.op_cb  = cb;
 	req->cb_arg    = cb_arg;
 	req->owner_thread = spdk_get_thread();
+	req->len = S3_COPY_XML_MAX;
+	req->buf = aws_mem_calloc(client->app_ctx->allocator, 1, S3_COPY_XML_MAX);
+	if (!req->buf) {
+		aws_mem_release(client->app_ctx->allocator, req);
+		return -ENOMEM;
+	}
 
 	rc = s3_request_set_key(req, dst_key);
 	if (rc) {
+		aws_mem_release(client->app_ctx->allocator, req->buf);
 		aws_mem_release(client->app_ctx->allocator, req);
 		return rc;
 	}
@@ -2170,11 +2233,13 @@ s3_copy_object(struct s3_client *client,
 		.operation_name  = aws_byte_cursor_from_c_str("PutObjectCopy"),
 		.user_data       = req,
 		.signing_config  = &client->signing_config,
+		.body_callback   = s3_copy_body_callback,
 		.finish_callback = s3_copy_finished,
 	};
 
 	options.message = aws_http_message_new_request(client->app_ctx->allocator);
 	if (!options.message) {
+		aws_mem_release(client->app_ctx->allocator, req->buf);
 		aws_mem_release(client->app_ctx->allocator, req);
 		return -ENOMEM;
 	}
@@ -2193,6 +2258,7 @@ s3_copy_object(struct s3_client *client,
 				 client, req->key);
 	if (rc != AWS_OP_SUCCESS) {
 		aws_http_message_release(options.message);
+		aws_mem_release(client->app_ctx->allocator, req->buf);
 		aws_mem_release(client->app_ctx->allocator, req);
 		return -ENOMEM;
 	}
@@ -2207,6 +2273,7 @@ s3_copy_object(struct s3_client *client,
 		SPDK_ERRLOG("CopyObject: failed to create meta request for %s -> %s: %s\n",
 			    src_key, dst_key, aws_error_str(aws_last_error()));
 		S3_STAT_DEC(client, inflight);
+		aws_mem_release(client->app_ctx->allocator, req->buf);
 		aws_mem_release(client->app_ctx->allocator, req);
 		return -EIO;
 	}

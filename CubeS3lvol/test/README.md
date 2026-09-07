@@ -13,18 +13,15 @@ them in this order -- the earlier ones are faster and need less environment.
 
 ```sh
 make check           # 24 suites (= test/run_all.sh; dataplane needs root + S3)
-make check-offline   # only the suites needing no credentials and no root: 11, 491 assertions, about 40 seconds
+make check-offline   # suites needing no credentials and no root (see `test/run_all.sh --list`)
 test/run_all.sh --list          # show what would run and what the environment has
 test/run_all.sh --no-dataplane  # both integration layers, no dataplane
 ```
 
 The reason `run_all.sh` exists is that the suites' preconditions had drifted
-apart: ten integration tests run anywhere, two need real credentials, ten
-dataplane scripts need root + credentials + a writable `/data` + exclusive use
-of the machine's nvme stack; and the arguments differ too (seven take
-`-e/-b/-r`, six read `s3.cfg` themselves). So "run the tests" had become
-"remember twenty-two invocations", and in practice meant running only the two
-or three related to whatever had just changed.
+apart: which tests need credentials, root, or a writable `/data` lives in
+`run_all.sh --list` (and the skip reasons it prints), not in a count that
+rots every time a suite is added.
 
 A few design decisions, each corresponding to a way a run can "look green while
 testing nothing":

@@ -3408,6 +3408,15 @@ SPDK_RPC_REGISTER("rcow_deactive_bdev", rpc_rcow_deactive_bdev,
 #define GET_BDEV_WAIT_MS_DEFAULT 5000
 #define GET_BDEV_POLL_US         (20 * 1000)
 
+/* A path that passed once can still vanish: udev processes the previous
+ * namespace's REMOVE after the new sysfs is already visible, unlinks /dev,
+ * then creates the node again. An empty udev queue rules that out, so the
+ * usual answer costs nothing beyond one access(2). This fallback is for the
+ * case where the queue never looks quiet because unrelated devices keep it
+ * busy: accept a path that passed two polls in a row instead of waiting out
+ * traffic that has nothing to do with this lvol. */
+#define GET_BDEV_CONFIRM_POLLS   2
+
 /* A path is "/dev/nvme31n64" and change; PATH_MAX here would make the snapshot
  * of a full registry (32 x 64 namespaces) eight megabytes. */
 #define GET_BDEV_PATH_MAX        64
@@ -3454,25 +3463,30 @@ struct get_bdev_ctx {
 	uint32_t                     wait_ms;
 };
 
-/* Resolve one entry, reporting success only once the /dev node is there.
+/*
+ * Resolve one entry only once /dev is the live block device for this uuid.
  *
- * sysfs carries the namespace first and udev creates the node afterwards, so a
- * path taken straight from sysfs can still fail to open -- which is the whole
- * reason this RPC does the waiting rather than its callers.
- *
- * Touches sysfs and /dev only, no shared state: safe on the wait thread. */
+ * sysfs publishes the namespace before udev creates the node, so a path taken
+ * from sysfs can still fail to open -- which is why this RPC waits. Checking
+ * that the name exists, or even that it is a block device, is not enough:
+ * after deactive then reactivate at the same nsid, the /dev node can still
+ * belong to the previous occupant while sysfs already names the new uuid.
+ */
 static bool
 get_bdev_resolve(struct get_bdev_entry *e)
 {
 	char dev[GET_BDEV_PATH_MAX];
 
 	if (e->path[0] != '\0') {
-		return true;
+		if (s3lvol_nvmf_device_is_ready(e->path, e->uuid)) {
+			return true;
+		}
+		e->path[0] = '\0';
 	}
 	if (s3lvol_nvmf_resolve_device(e->uuid, dev, sizeof(dev)) != 0) {
 		return false;
 	}
-	if (access(dev, F_OK) != 0) {
+	if (!s3lvol_nvmf_device_is_ready(dev, e->uuid)) {
 		return false;
 	}
 
@@ -3605,11 +3619,21 @@ get_bdev_wait_thread(void *arg)
 {
 	struct get_bdev_ctx *ctx = arg;
 	uint32_t waited_ms = 0;
+	uint32_t consecutive = 0;
 
 	/* Nobody joins this thread -- see s3_spawner_pthread_create_async. */
 	pthread_detach(pthread_self());
 
-	while (get_bdev_resolve_all(ctx) > 0 && waited_ms < ctx->wait_ms) {
+	while (waited_ms < ctx->wait_ms) {
+		if (get_bdev_resolve_all(ctx) == 0) {
+			consecutive++;
+			if (s3lvol_nvmf_udev_settled() ||
+			    consecutive >= GET_BDEV_CONFIRM_POLLS) {
+				break;
+			}
+		} else {
+			consecutive = 0;
+		}
 		usleep(GET_BDEV_POLL_US);
 		waited_ms += GET_BDEV_POLL_US / 1000;
 	}
@@ -3718,11 +3742,22 @@ rpc_rcow_get_bdev(struct spdk_jsonrpc_request *request,
 		ctx->count = i;
 	}
 
-	/* The common case by a wide margin: everything is already up, so answer
-	 * without a thread. This is also what a caller asking wait_ms=0 gets,
-	 * and what happens once the cap on concurrent waits is reached. */
-	if (get_bdev_resolve_all(ctx) == 0 || ctx->wait_ms == 0 ||
-	    g_get_bdev_waiters >= GET_BDEV_MAX_WAITERS) {
+	/* wait_ms=0 is the historical unwaited answer. The cap is the same:
+	 * better an unconfirmed path than one thread per concurrent caller. */
+	if (ctx->wait_ms == 0 || g_get_bdev_waiters >= GET_BDEV_MAX_WAITERS) {
+		get_bdev_resolve_all(ctx);
+		get_bdev_respond(ctx);
+		ctx = NULL;
+		goto cleanup;
+	}
+
+	/* Answer on this thread whenever the answer is already good: every path
+	 * resolved and udev idle. That is the steady state, it costs one
+	 * access(2), and it keeps repeat queries as cheap as they were before
+	 * there was a wait at all -- callers are expected to come back for the
+	 * path after an active, so the wait below is for those few moments
+	 * rather than something every query pays for. */
+	if (get_bdev_resolve_all(ctx) == 0 && s3lvol_nvmf_udev_settled()) {
 		get_bdev_respond(ctx);
 		ctx = NULL;
 		goto cleanup;

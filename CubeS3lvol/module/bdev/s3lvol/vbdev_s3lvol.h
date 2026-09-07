@@ -353,6 +353,27 @@ int s3lvol_nvmf_remove_ns(const char *nqn, uint32_t nsid,
 int s3lvol_nvmf_resolve_device(const char *uuid_str, char *out, size_t out_len);
 
 /**
+ * True when \p dev is the live host node for \p uuid_str.
+ *
+ * sysfs can publish a namespace before udev creates (or replaces) /dev, and
+ * after deactive then reactivate at the same nsid the leftover node can still
+ * belong to the previous occupant. Ready means: it is a block device, its
+ * major:minor matches /sys/block/<name>/dev, and that sysfs directory names
+ * this uuid.
+ */
+bool s3lvol_nvmf_device_is_ready(const char *dev, const char *uuid_str);
+
+/**
+ * True when udev has no events left to apply.
+ *
+ * A ready node is only stable once udev is done: a pending REMOVE for the
+ * previous occupant of the same nsid can still unlink /dev after the checks
+ * above pass. Steady state answers from a single access(2), so callers can
+ * test this before deciding to wait at all.
+ */
+bool s3lvol_nvmf_udev_settled(void);
+
+/**
  * Readahead, in KiB, to apply to a freshly discovered host device.
  *
  * The chunk size, and for the same reason the transport's max_io_size is: what a
