@@ -1062,6 +1062,12 @@ s3_client_shutdown_complete(void *user_data)
 	free(client);
 }
 
+const char *
+s3_client_bucket(const struct s3_client *client)
+{
+	return client ? client->bucket : "";
+}
+
 void
 s3_client_get(struct s3_client *client)
 {

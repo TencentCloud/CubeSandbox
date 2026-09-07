@@ -253,6 +253,30 @@ int s3_bs_dev_journal_apply(struct spdk_bs_dev *bs_dev,
 			    const struct s3_journal_record *rec);
 
 /* ==========================================================================
+ * Server-side ingest (CopyObject into the chunk map)
+ *
+ * Installed for the duration of a decouple of a same-bucket export. blobstore's
+ * allocate_and_copy_cluster then calls dest->copy instead of GET+write. copy()
+ * treats src_lba as an LBA on the export parent and dst_lba as the newly
+ * allocated cluster on this device.
+ * ========================================================================== */
+
+typedef int (*s3_ingest_src_fn)(void *cb_arg, uint64_t chunk_index,
+				char *src_key, size_t key_len,
+				uint32_t *valid_bytes);
+
+int s3_bs_dev_ingest_begin(struct spdk_bs_dev *bs_dev, const char *src_bucket,
+			   s3_ingest_src_fn src_fn, void *src_arg);
+
+/* Start CopyObject for this parent range if a slot is free. Harmless if the
+ * chunk is already in flight or ready. */
+void s3_bs_dev_ingest_prefetch(struct spdk_bs_dev *bs_dev, uint64_t src_lba,
+			       uint64_t lba_count);
+
+void s3_bs_dev_ingest_end(struct spdk_bs_dev *bs_dev, s3_bs_dev_cb cb_fn,
+			  void *cb_arg);
+
+/* ==========================================================================
  * Diagnostics
  * ========================================================================== */
 

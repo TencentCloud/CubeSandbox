@@ -37,6 +37,7 @@
 #include "spdk/util.h"
 
 #include "s3lvol/s3_export.h"
+#include "s3lvol/s3_chunk_map.h"
 
 SPDK_LOG_REGISTER_COMPONENT(s3lvol_export)
 
@@ -626,6 +627,41 @@ s3_export_manifest_get_ref(const struct s3_export_manifest *m, uint64_t chunk_in
 		return NULL;
 	}
 	return &m->refs[chunk_index];
+}
+
+int
+s3_export_manifest_object_key(const struct s3_export_manifest *m,
+			      uint64_t chunk_index, char *out, size_t out_len,
+			      uint32_t *valid_bytes)
+{
+	const struct s3_export_ref *ref;
+	const char *prefix;
+
+	if (!m || !out || out_len == 0) {
+		return -EINVAL;
+	}
+	if (!s3_export_manifest_is_present(m, chunk_index)) {
+		return -ENOENT;
+	}
+
+	if (m->layout == S3_EXPORT_LAYOUT_DENSE) {
+		s3_export_chunk_key(m->src.prefix, m->uuid_str, chunk_index, out, out_len);
+		if (valid_bytes) {
+			*valid_bytes = m->chunk_size;
+		}
+		return 0;
+	}
+
+	ref = s3_export_manifest_get_ref(m, chunk_index);
+	prefix = s3_export_manifest_chunk_prefix(m, chunk_index);
+	if (!ref || prefix[0] == '\0') {
+		return -EINVAL;
+	}
+	s3_chunk_data_key(prefix, &ref->uuid, out, out_len);
+	if (valid_bytes) {
+		*valid_bytes = ref->valid_bytes;
+	}
+	return 0;
 }
 
 bool

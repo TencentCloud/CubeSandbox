@@ -47,9 +47,11 @@ patch here must satisfy:
 3. **It can be proposed upstream on its own.** If a patch is not suitable for
    upstream, that is usually a sign the design went astray.
 
-0004 is the **only patch that modifies an existing function**; the reason for the
-exception is written in its own section. Read that section before adding a
-second such patch, and make sure the reason is of the same kind.
+0004 is the **only patch that modifies an existing function for a behaviour
+change on an existing path**; 0006 also edits an existing function, but only
+removes an exclusion that is idle until a device installs `copy` (see that
+section). Read both sections before adding a third such patch, and make sure
+the reason is of the same kind.
 
 ## 0001-blob-add-spdk_blob_get_io_unit_lba.patch
 
@@ -256,3 +258,27 @@ which just makes the next person step on the same rake.
 
 **Rule 3 still holds**: this change can be proposed upstream on its own; it
 reads more like a bug fix.
+
+## 0006-blob-allow-esnap-dev-copy.patch
+
+Changes `blob_can_copy()` so an esnap clone may use `dest->copy` only while
+`spdk_blob_allow_esnap_copy(blob, true)` is in effect for that blob.
+
+**This is a second patch that modifies an existing function.** The gate is
+`dest->copy != NULL` plus a per-blob flag. The second half is essential because
+`dest` is the blobstore-wide device: CopyObject ingest for volume X installs
+its manifest-bound callback there, while another esnap volume Y in the same
+lvstore remains writable. Gating only on the pointer would route Y's ordinary
+CoW through X's manifest and silently bind the wrong object.
+
+**Why.** `blob_can_copy()` assumed a copy is an offload on one disk (`src_lba`
+and `dst_lba` on the same device) and therefore excluded esnap clones, whose
+parent is a different `bs_dev`. s3lvol's destination `copy()` during a
+same-bucket decouple treats `src_lba` as an LBA on the export parent and
+`dst_lba` as the newly allocated cluster, and implements the copy as S3
+CopyObject plus a chunk-map insert. Without this, `allocate_and_copy_cluster()`
+always GET+writes an esnap cluster, which is the slow decouple path.
+
+Ordinary blobs retain the original device-copy behaviour. Ordinary CoW on an
+esnap clone remains GET+write. s3lvol raises the blob-local gate around each
+`spdk_blob_materialize_cluster()` and clears it from the completion callback.

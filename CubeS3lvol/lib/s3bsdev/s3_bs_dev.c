@@ -258,6 +258,10 @@ struct s3_ctx {
 	uint64_t wal_writes;   /* writes acknowledged from the log */
 	uint64_t wal_retries;  /* writes parked by backpressure */
 	uint64_t overlay_hits; /* reads served without touching S3 */
+
+	/* Set only while a decouple (or similar) is ingesting export objects via
+	 * CopyObject. NULL means dest->copy is also NULL and CoW uses GET+write. */
+	struct s3_ingest *ingest;
 };
 
 /* Context for one bs_dev I/O.
@@ -2114,6 +2118,451 @@ s3_bs_dev_destroy(struct spdk_bs_dev *dev)
 	}
 
 	s3_bs_dev_teardown(ctx);
+}
+
+/* ==========================================================================
+ * CopyObject ingest (decouple of a same-bucket export)
+ * ========================================================================== */
+
+#define S3_INGEST_SLOTS 32
+
+enum s3_ingest_slot_state {
+	S3_INGEST_FREE = 0,
+	S3_INGEST_COPYING,
+	S3_INGEST_READY,
+	S3_INGEST_BINDING,
+};
+
+struct s3_ingest_op;
+
+struct s3_ingest_slot {
+	struct s3_ctx            *ctx;
+	enum s3_ingest_slot_state state;
+	uint64_t                  src_chunk;
+	struct spdk_uuid          uuid;
+	uint32_t                  valid_bytes;
+	char                      dest_key[S3_KEY_MAX];
+	uint64_t                  head_size;
+	struct s3_ingest_op      *waiter;
+};
+
+struct s3_ingest {
+	char                      src_bucket[128];
+	s3_ingest_src_fn          src_fn;
+	void                     *src_arg;
+	uint32_t                  inflight;
+	struct s3_ingest_slot     slots[S3_INGEST_SLOTS];
+	s3_bs_dev_cb              end_cb;
+	void                     *end_arg;
+	bool                      ending;
+};
+
+struct s3_ingest_op {
+	struct s3_ctx             *ctx;
+	struct spdk_bs_dev_cb_args *cb_args;
+	uint64_t                   dst_lba;
+	uint64_t                   src_lba;
+	uint64_t                   lba_count;
+	uint64_t                   pos;
+};
+
+static void s3_bs_dev_copy(struct spdk_bs_dev *dev, struct spdk_io_channel *channel,
+			   uint64_t dst_lba, uint64_t src_lba, uint64_t lba_count,
+			   struct spdk_bs_dev_cb_args *cb_args);
+static void ingest_op_next(struct s3_ingest_op *op);
+static void ingest_try_finish_end(struct s3_ctx *ctx);
+static int ingest_start_slot(struct s3_ingest_slot *slot, uint64_t src_chunk);
+
+static struct s3_ingest_slot *
+ingest_find_slot(struct s3_ingest *in, uint64_t src_chunk, bool alloc_free)
+{
+	struct s3_ingest_slot *free_slot = NULL;
+	uint32_t i;
+
+	for (i = 0; i < S3_INGEST_SLOTS; i++) {
+		if (in->slots[i].state != S3_INGEST_FREE &&
+		    in->slots[i].src_chunk == src_chunk) {
+			return &in->slots[i];
+		}
+		if (alloc_free && in->slots[i].state == S3_INGEST_FREE &&
+		    free_slot == NULL) {
+			free_slot = &in->slots[i];
+		}
+	}
+	return alloc_free ? free_slot : NULL;
+}
+
+static void
+ingest_slot_reset(struct s3_ingest_slot *slot)
+{
+	memset(slot, 0, sizeof(*slot));
+}
+
+/* Drop a CopyObject that never made it into the chunk map. Fire-and-forget
+ * delete: a missing key (copy never landed) is fine. */
+static void
+ingest_abandon_copy(struct s3_ingest_slot *slot)
+{
+	struct s3_ctx *ctx = slot->ctx;
+
+	if (ctx && ctx->client && slot->dest_key[0] != '\0') {
+		s3_delete(ctx->client, slot->dest_key, NULL, NULL);
+	}
+	ingest_slot_reset(slot);
+}
+
+static void
+ingest_try_finish_end(struct s3_ctx *ctx)
+{
+	struct s3_ingest *in = ctx->ingest;
+	s3_bs_dev_cb cb;
+	void *arg;
+	uint32_t i;
+
+	if (!in || !in->ending || in->inflight != 0) {
+		return;
+	}
+
+	for (i = 0; i < S3_INGEST_SLOTS; i++) {
+		if (in->slots[i].state == S3_INGEST_READY) {
+			s3_delete(ctx->client, in->slots[i].dest_key, NULL, NULL);
+			ingest_slot_reset(&in->slots[i]);
+		}
+	}
+
+	ctx->bs_dev.copy = NULL;
+	ctx->ingest = NULL;
+	cb = in->end_cb;
+	arg = in->end_arg;
+	free(in);
+	if (cb) {
+		cb(arg, 0);
+	}
+}
+
+static void
+ingest_bound(void *cb_arg, const struct spdk_uuid *old_uuid, int status)
+{
+	struct s3_ingest_slot *slot = cb_arg;
+	struct s3_ingest_op *op = slot->waiter;
+	struct s3_ctx *ctx = slot->ctx;
+	uint32_t bpc;
+
+	slot->waiter = NULL;
+
+	if (status != 0) {
+		/* Insert did not take: dest_key is unreferenced. */
+		ingest_abandon_copy(slot);
+		if (op) {
+			op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, status);
+			free(op);
+		}
+		return;
+	}
+
+	if (!ctx && op) {
+		ctx = op->ctx;
+	}
+
+	if (old_uuid && !spdk_uuid_is_null(old_uuid) && ctx) {
+		char old_key[S3_KEY_MAX];
+
+		s3_data_key(ctx, old_uuid, old_key, sizeof(old_key));
+		s3_delete(ctx->client, old_key, NULL, NULL);
+	}
+
+	ingest_slot_reset(slot);
+	if (!op) {
+		return;
+	}
+
+	bpc = s3_blocks_per_chunk(ctx);
+	op->pos += bpc;
+	ingest_op_next(op);
+}
+
+static void
+ingest_slot_headed(void *cb_arg, int status)
+{
+	struct s3_ingest_slot *slot = cb_arg;
+	struct s3_ctx *ctx = slot->ctx;
+	struct s3_ingest *in;
+
+	if (!ctx || !ctx->ingest) {
+		ingest_slot_reset(slot);
+		return;
+	}
+	in = ctx->ingest;
+
+	if (in->inflight > 0) {
+		in->inflight--;
+	}
+
+	if (status == 0 && slot->head_size < slot->valid_bytes) {
+		status = -EIO;
+	}
+
+	if (status != 0) {
+		struct s3_ingest_op *op = slot->waiter;
+
+		slot->waiter = NULL;
+		ingest_abandon_copy(slot);
+		if (op) {
+			op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, status);
+			free(op);
+		}
+		ingest_try_finish_end(ctx);
+		return;
+	}
+
+	slot->state = S3_INGEST_READY;
+	if (slot->waiter) {
+		uint64_t dst_chunk = s3_lba_to_chunk_index(
+					     slot->waiter->dst_lba + slot->waiter->pos,
+					     ctx->chunk_shift);
+
+		slot->state = S3_INGEST_BINDING;
+		s3_chunk_map_insert(ctx->chunk_map, dst_chunk, &slot->uuid,
+				    slot->valid_bytes, ingest_bound, slot);
+	}
+	ingest_try_finish_end(ctx);
+}
+
+static void
+ingest_slot_copied(void *cb_arg, int status)
+{
+	struct s3_ingest_slot *slot = cb_arg;
+	struct s3_ctx *ctx = slot->ctx;
+	int rc;
+
+	if (status != 0) {
+		ingest_slot_headed(slot, status);
+		return;
+	}
+	if (!ctx) {
+		ingest_slot_reset(slot);
+		return;
+	}
+
+	rc = s3_head(ctx->client, slot->dest_key, &slot->head_size,
+		     ingest_slot_headed, slot);
+	if (rc != 0) {
+		ingest_slot_headed(slot, rc);
+	}
+}
+
+static int
+ingest_start_slot(struct s3_ingest_slot *slot, uint64_t src_chunk)
+{
+	struct s3_ctx *ctx = slot->ctx;
+	struct s3_ingest *in = ctx->ingest;
+	char src_key[S3_KEY_MAX];
+	uint32_t valid_bytes = 0;
+	int rc;
+
+	rc = in->src_fn(in->src_arg, src_chunk, src_key, sizeof(src_key), &valid_bytes);
+	if (rc != 0) {
+		return rc;
+	}
+
+	slot->src_chunk = src_chunk;
+	slot->valid_bytes = valid_bytes ? valid_bytes : ctx->chunk_size;
+	slot->state = S3_INGEST_COPYING;
+	spdk_uuid_generate(&slot->uuid);
+	s3_data_key(ctx, &slot->uuid, slot->dest_key, sizeof(slot->dest_key));
+	in->inflight++;
+
+	rc = s3_copy_object(ctx->client, in->src_bucket, src_key, slot->dest_key,
+			    ingest_slot_copied, slot);
+	if (rc != 0) {
+		in->inflight--;
+		ingest_slot_reset(slot);
+		return rc;
+	}
+	return 0;
+}
+
+static void
+ingest_op_next(struct s3_ingest_op *op)
+{
+	struct s3_ctx *ctx = op->ctx;
+	struct s3_ingest *in = ctx->ingest;
+	struct s3_ingest_slot *slot;
+	uint64_t src_chunk, dst_off;
+	int rc;
+
+	if (op->pos >= op->lba_count) {
+		op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, 0);
+		free(op);
+		return;
+	}
+
+	if (!in) {
+		op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, -EINVAL);
+		free(op);
+		return;
+	}
+
+	dst_off = op->dst_lba + op->pos;
+	if (s3_lba_offset_in_chunk(dst_off, ctx->chunk_shift) != 0 ||
+	    s3_lba_offset_in_chunk(op->src_lba + op->pos, ctx->chunk_shift) != 0) {
+		op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, -EINVAL);
+		free(op);
+		return;
+	}
+
+	src_chunk = s3_lba_to_chunk_index(op->src_lba + op->pos, ctx->chunk_shift);
+	slot = ingest_find_slot(in, src_chunk, true);
+	if (!slot) {
+		op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, -ENOMEM);
+		free(op);
+		return;
+	}
+
+	if (slot->state == S3_INGEST_FREE) {
+		slot->ctx = ctx;
+		slot->waiter = op;
+		rc = ingest_start_slot(slot, src_chunk);
+		if (rc != 0) {
+			op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, rc);
+			free(op);
+		}
+		return;
+	}
+
+	if (slot->state == S3_INGEST_COPYING) {
+		if (slot->waiter) {
+			op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, -EBUSY);
+			free(op);
+			return;
+		}
+		slot->waiter = op;
+		return;
+	}
+
+	if (slot->state == S3_INGEST_READY) {
+		uint64_t dst_chunk = s3_lba_to_chunk_index(dst_off, ctx->chunk_shift);
+
+		slot->waiter = op;
+		slot->state = S3_INGEST_BINDING;
+		s3_chunk_map_insert(ctx->chunk_map, dst_chunk, &slot->uuid,
+				    slot->valid_bytes, ingest_bound, slot);
+		return;
+	}
+
+	op->cb_args->cb_fn(op->cb_args->channel, op->cb_args->cb_arg, -EBUSY);
+	free(op);
+}
+
+static void
+s3_bs_dev_copy(struct spdk_bs_dev *dev, struct spdk_io_channel *channel,
+	       uint64_t dst_lba, uint64_t src_lba, uint64_t lba_count,
+	       struct spdk_bs_dev_cb_args *cb_args)
+{
+	struct s3_ctx *ctx = (struct s3_ctx *)dev;
+	struct s3_ingest_op *op;
+
+	(void)channel;
+
+	if (!ctx->ingest || lba_count == 0) {
+		cb_args->cb_fn(cb_args->channel, cb_args->cb_arg, -EINVAL);
+		return;
+	}
+
+	op = calloc(1, sizeof(*op));
+	if (!op) {
+		cb_args->cb_fn(cb_args->channel, cb_args->cb_arg, -ENOMEM);
+		return;
+	}
+	op->ctx = ctx;
+	op->cb_args = cb_args;
+	op->dst_lba = dst_lba;
+	op->src_lba = src_lba;
+	op->lba_count = lba_count;
+	ingest_op_next(op);
+}
+
+int
+s3_bs_dev_ingest_begin(struct spdk_bs_dev *bs_dev, const char *src_bucket,
+		       s3_ingest_src_fn src_fn, void *src_arg)
+{
+	struct s3_ctx *ctx = (struct s3_ctx *)bs_dev;
+	struct s3_ingest *in;
+
+	if (!ctx || !src_bucket || !src_fn) {
+		return -EINVAL;
+	}
+	if (ctx->ingest) {
+		return -EEXIST;
+	}
+
+	in = calloc(1, sizeof(*in));
+	if (!in) {
+		return -ENOMEM;
+	}
+	snprintf(in->src_bucket, sizeof(in->src_bucket), "%s", src_bucket);
+	in->src_fn = src_fn;
+	in->src_arg = src_arg;
+	ctx->ingest = in;
+	ctx->bs_dev.copy = s3_bs_dev_copy;
+	return 0;
+}
+
+void
+s3_bs_dev_ingest_prefetch(struct spdk_bs_dev *bs_dev, uint64_t src_lba,
+			  uint64_t lba_count)
+{
+	struct s3_ctx *ctx = (struct s3_ctx *)bs_dev;
+	struct s3_ingest *in;
+	uint32_t bpc;
+	uint64_t pos = 0;
+
+	if (!ctx || !ctx->ingest || lba_count == 0) {
+		return;
+	}
+	in = ctx->ingest;
+	if (in->ending) {
+		return;
+	}
+	bpc = s3_blocks_per_chunk(ctx);
+
+	while (pos < lba_count) {
+		uint64_t src_chunk;
+		struct s3_ingest_slot *slot;
+
+		if (s3_lba_offset_in_chunk(src_lba + pos, ctx->chunk_shift) != 0) {
+			return;
+		}
+		src_chunk = s3_lba_to_chunk_index(src_lba + pos, ctx->chunk_shift);
+		slot = ingest_find_slot(in, src_chunk, true);
+		if (slot && slot->state == S3_INGEST_FREE) {
+			slot->ctx = ctx;
+			if (ingest_start_slot(slot, src_chunk) != 0) {
+				return;
+			}
+		}
+		pos += bpc;
+	}
+}
+
+void
+s3_bs_dev_ingest_end(struct spdk_bs_dev *bs_dev, s3_bs_dev_cb cb_fn, void *cb_arg)
+{
+	struct s3_ctx *ctx = (struct s3_ctx *)bs_dev;
+	struct s3_ingest *in;
+
+	if (!ctx || !ctx->ingest) {
+		if (cb_fn) {
+			cb_fn(cb_arg, 0);
+		}
+		return;
+	}
+
+	in = ctx->ingest;
+	in->ending = true;
+	in->end_cb = cb_fn;
+	in->end_arg = cb_arg;
+	ingest_try_finish_end(ctx);
 }
 
 static bool

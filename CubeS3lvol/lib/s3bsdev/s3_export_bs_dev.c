@@ -591,10 +591,13 @@ export_is_range_valid(struct spdk_bs_dev *bs_dev, uint64_t lba, uint64_t lba_cou
 static bool
 export_translate_lba(struct spdk_bs_dev *bs_dev, uint64_t lba, uint64_t *base_lba)
 {
-	/* There is no underlying bdev, so there is no LBA to translate to. Same
-	 * answer as s3_bs_dev, and for the same reason: saying "yes" here is what
-	 * makes blobstore try a device-to-device copy, which needs dev->copy. */
-	return false;
+	/* Identity: dest->copy during ingest treats src_lba as an LBA on this
+	 * export device, not as a block on the destination disk. Returning false
+	 * would force allocate_and_copy_cluster down the GET+write path even when
+	 * the destination has installed copy(). */
+	(void)bs_dev;
+	*base_lba = lba;
+	return true;
 }
 
 static bool
@@ -1131,7 +1134,7 @@ s3_export_bs_dev_create(struct s3_client *client, struct s3_export_manifest *m,
 	dev->bs_dev.is_range_valid  = export_is_range_valid;
 	dev->bs_dev.translate_lba   = export_translate_lba;
 	dev->bs_dev.is_degraded     = export_is_degraded;
-	/* copy stays NULL: see export_translate_lba. */
+	/* copy stays NULL: the destination of a CoW copy is the lvstore bs_dev. */
 
 	SPDK_NOTICELOG("Imported export %s as a read-only parent: %" PRIu64 " bytes "
 		       "(%" PRIu64 " blocks), %" PRIu64 " of %" PRIu64 " chunk(s) "

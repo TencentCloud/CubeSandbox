@@ -48,6 +48,7 @@
 #include "spdk_internal/lvolstore.h"
 
 #include "s3lvol/s3_export.h"
+#include "s3lvol/s3_client.h"
 
 #include "vbdev_s3lvol.h"
 
@@ -2962,8 +2963,10 @@ s3lvol_lvol_import(struct s3lvol_lvstore *lvs, const struct s3lvol_import_opts *
  * allocations and needs 16 TiB of free clusters to succeed at all.
  *
  * Here the manifest says which chunks exist, so only the clusters covering them
- * are copied. Everything else stays a hole, and the volume stays thin. The cost
- * is the data, once.
+ * are copied. Same-bucket imports use CopyObject plus a chunk-map insert
+ * (s3_bs_dev ingest) instead of GET+WAL; the GET path remains the fallback when
+ * the buckets differ or ingest cannot start. Everything else stays a hole, and
+ * the volume stays thin. The cost is the data, once.
  *
  * === What it costs the volume ===
  *
@@ -3015,6 +3018,7 @@ struct s3lvol_decouple {
 	 * clear_external_parent() only happens after the last cluster -- so there
 	 * is nothing to roll back and the clusters already copied are kept. */
 	bool                       cancelled;
+	bool                       ingest;
 
 	/* Told when a cancellation has taken effect, so whoever asked for it can go
 	 * on. Separate from cb_fn: that one belongs to whoever asked for the
@@ -3360,10 +3364,69 @@ decouple_cluster_is_hole(const struct s3lvol_decouple *d, uint64_t cluster)
 	return s3_export_manifest_range_is_zeroes(d->m, first, last - first + 1);
 }
 
+#define DECOUPLE_PREFETCH 16
+
+static int
+decouple_ingest_src(void *cb_arg, uint64_t chunk_index,
+		    char *src_key, size_t key_len, uint32_t *valid_bytes)
+{
+	struct s3lvol_decouple *d = cb_arg;
+
+	return s3_export_manifest_object_key(d->m, chunk_index, src_key, key_len,
+					     valid_bytes);
+}
+
+static void
+decouple_prefetch(struct s3lvol_decouple *d)
+{
+	struct spdk_bs_dev *bs = s3lvol_lvstore_get_bs_dev(d->lvs);
+	uint64_t c, io_units;
+	uint32_t n = 0;
+
+	if (!d->ingest || !bs || !d->lvol || d->cluster_size < S3LVOL_BLOCK_SIZE) {
+		return;
+	}
+	io_units = d->cluster_size / S3LVOL_BLOCK_SIZE;
+	for (c = d->cluster; c < d->num_clusters && n < DECOUPLE_PREFETCH; c++) {
+		uint64_t first_io;
+
+		if (decouple_cluster_is_hole(d, c)) {
+			continue;
+		}
+		first_io = c * io_units;
+		if (spdk_blob_get_next_allocated_io_unit(d->lvol->blob, first_io) ==
+		    first_io) {
+			continue;
+		}
+		s3_bs_dev_ingest_prefetch(bs, first_io, io_units);
+		n++;
+	}
+}
+
 static void decouple_start_next_queued(void);
+static void decouple_finish_complete(struct s3lvol_decouple *d);
+
+static void
+decouple_ingest_ended(void *arg, int status)
+{
+	(void)status;
+	decouple_finish_complete(arg);
+}
 
 static void
 decouple_finish(struct s3lvol_decouple *d)
+{
+	if (d->ingest) {
+		d->ingest = false;
+		s3_bs_dev_ingest_end(s3lvol_lvstore_get_bs_dev(d->lvs),
+				     decouple_ingest_ended, d);
+		return;
+	}
+	decouple_finish_complete(d);
+}
+
+static void
+decouple_finish_complete(struct s3lvol_decouple *d)
 {
 	spdk_lvol_op_complete cb_fn = d->cb_fn;
 	void *cb_arg = d->cb_arg;
@@ -3455,6 +3518,8 @@ decouple_cluster_done(void *cb_arg, int bserrno)
 {
 	struct s3lvol_decouple *d = cb_arg;
 
+	spdk_blob_allow_esnap_copy(d->lvol->blob, false);
+
 	if (bserrno != 0) {
 		d->status = bserrno;
 		decouple_finish(d);
@@ -3516,6 +3581,8 @@ decouple_next(struct s3lvol_decouple *d)
 		return;
 	}
 
+	decouple_prefetch(d);
+
 	while (d->cluster < d->num_clusters && decouple_cluster_is_hole(d, d->cluster)) {
 		d->cluster++;
 	}
@@ -3558,6 +3625,7 @@ decouple_next(struct s3lvol_decouple *d)
 
 	cluster = d->cluster++;
 
+	spdk_blob_allow_esnap_copy(d->lvol->blob, true);
 	spdk_blob_materialize_cluster(d->lvol->blob, d->channel, cluster,
 				      decouple_cluster_done, d);
 }
@@ -3769,9 +3837,27 @@ decouple_start(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 	lvol->action_in_progress = true;
 	TAILQ_INSERT_TAIL(&g_decouples, d, link);
 
-	SPDK_NOTICELOG("Decoupling lvol '%s' from export %s: %" PRIu64 " of %" PRIu64
-		       " cluster(s) hold data\n", d->lvol_name, d->uuid_str, d->total,
-		       d->num_clusters);
+	struct spdk_bs_dev *bs = s3lvol_lvstore_get_bs_dev(lvs);
+	struct s3_client *client = s3lvol_lvstore_get_client(lvs);
+	const char *bucket = s3_client_bucket(client);
+
+	if (bs && bucket && bucket[0] != '\0' && d->m->src.bucket[0] != '\0' &&
+	    strcmp(bucket, d->m->src.bucket) == 0 &&
+	    s3_bs_dev_get_chunk_size(bs) == d->chunk_size &&
+	    s3_bs_dev_ingest_begin(bs, d->m->src.bucket,
+				   decouple_ingest_src, d) == 0) {
+		d->ingest = true;
+		SPDK_NOTICELOG("Decoupling lvol '%s' from export %s via CopyObject "
+			       "(bucket %s): %" PRIu64 " of %" PRIu64
+			       " cluster(s) hold data\n",
+			       d->lvol_name, d->uuid_str, bucket, d->total,
+			       d->num_clusters);
+	} else {
+		SPDK_NOTICELOG("Decoupling lvol '%s' from export %s: %" PRIu64
+			       " of %" PRIu64 " cluster(s) hold data\n",
+		       d->lvol_name, d->uuid_str, d->total,
+			       d->num_clusters);
+	}
 
 	decouple_next(d);
 	return 0;

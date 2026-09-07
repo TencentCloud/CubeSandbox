@@ -460,6 +460,16 @@ const char *s3_export_manifest_chunk_prefix(const struct s3_export_manifest *m,
 const struct s3_export_ref *s3_export_manifest_get_ref(
 	const struct s3_export_manifest *m, uint64_t chunk_index);
 
+/**
+ * S3 key of one present chunk, and how many bytes of it are valid.
+ *
+ * Dense exports use `<prefix>/exports/<uuid>/<index>`; ref exports use
+ * `<chunk prefix>/data/<uuid>`. Holes return -ENOENT.
+ */
+int s3_export_manifest_object_key(const struct s3_export_manifest *m,
+				  uint64_t chunk_index, char *out, size_t out_len,
+				  uint32_t *valid_bytes);
+
 bool s3_export_manifest_is_present(const struct s3_export_manifest *m,
 				   uint64_t chunk_index);
 
