@@ -75,7 +75,7 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 	if downloadURL == "" {
 		return fmt.Errorf("artifact download url is empty")
 	}
-	downloadURL = rewriteDownloadHost(downloadURL)
+	downloadURL = rewriteDownloadHost(downloadURL, cubeMasterHTTPAddr())
 	expectedSHA := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactSHA256])
 	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
 		return err
@@ -147,17 +147,45 @@ func refreshKernelFile(ctx context.Context, instanceType, imageRef string) error
 	return pmem.RefreshKernelFile(ctx, pmem.GetSharedKernelFilePath(), pmem.GetRawKernelFilePath(instanceType, imageRef))
 }
 
-func rewriteDownloadHost(rawURL string) string {
+// isS3PresignedURL reports whether rawURL is an S3/MinIO presigned URL
+// (AWS SigV4), identified by its X-Amz-Signature query parameter. TC's
+// s3store.PresignedGetURL always signs with SigV4, so this covers every
+// S3-backed artifact URL CubeMaster can hand out.
+func isS3PresignedURL(u *url.URL) bool {
+	return u.Query().Has("X-Amz-Signature")
+}
+
+// cubeMasterHTTPAddr returns the locally configured CubeMaster HTTP address
+// used to rewrite CubeMaster's own download route, or "" when unset/unset up
+// (rewriteDownloadHost then leaves the URL untouched).
+func cubeMasterHTTPAddr() string {
 	cfg := config.GetConfig()
 	if cfg == nil || cfg.MetaServerConfig == nil {
-		return rawURL
+		return ""
 	}
-	endpoint := strings.TrimSpace(cfg.MetaServerConfig.CubeMasterHTTPAddr)
+	return strings.TrimSpace(cfg.MetaServerConfig.CubeMasterHTTPAddr)
+}
+
+// rewriteDownloadHost swaps rawURL's host for endpoint (the locally
+// configured CubeMaster HTTP address). This exists because the artifact
+// row's MasterNodeIP (used to build CubeMaster's own /cube/template/...
+// download route) may not be reachable from every cubelet's network, while
+// the cubelet-local cubemaster_http_addr config always is.
+//
+// S3/MinIO presigned URLs (artifact.ArtifactURL, set when TC uploads the
+// artifact to S3) must be passed through unchanged: the signature is only
+// valid for the original host, and CubeMaster has no route matching the S3
+// object path/query anyway -- rewriting the host here used to silently turn
+// a valid presigned URL into a 404 (Error: "download status code 404").
+func rewriteDownloadHost(rawURL, endpoint string) string {
 	if endpoint == "" {
 		return rawURL
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
+		return rawURL
+	}
+	if isS3PresignedURL(u) {
 		return rawURL
 	}
 	u.Host = endpoint
