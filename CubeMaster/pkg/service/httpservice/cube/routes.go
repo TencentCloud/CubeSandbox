@@ -57,36 +57,50 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.DELETE(SnapshotAction+"/:snapshot_id", deleteSnapshotGinHandler)
 	g.GET(OperationAction+"/:operation_id", handleSnapshotOperationAction)
 
-	// Template control plane. Every /cube/template/* route is proxied
-	// straight to CubeTemplateCenter EXCEPT the two POSTs below (from-image
-	// create, redo), which CubeMaster must handle itself.
+	// Template control plane. A /cube/template/* route runs locally on
+	// CubeMaster when its handler can reach a cubelet through the worker
+	// grpc pool; everything else is proxied to CubeTemplateCenter.
 	//
-	// Why the split: createTemplateFromImageGinHandler and
-	// handleRedoTemplateAction share code with TC (same package) and, after
-	// persisting the job, spawn forwardBuildJobToTemplateCenter /
+	// The worker conn pool (pkg/cubelet/grpcconn) is a process-local
+	// singleton that only CubeMaster initializes — TC never does, so any
+	// handler that issues a cubelet RPC fails on TC with "worker grpc conn
+	// pool is not initialized". The cubelet-touching handlers are:
+	//
+	//   - create-from-snapshot (POST /cube/template): materializes replicas
+	//     on nodes, and its rollback cleans them up.
+	//   - delete (DELETE /cube/template): CubeMaster owns the whole
+	//     control-plane delete — in-use check, failing in-flight work,
+	//     replica cleanup on nodes, artifact node-destroys, and the DB
+	//     metadata removal. Only the artifact's physical data (local ext4 /
+	//     S3 object) is removed by TC, and even then only because CubeMaster
+	//     calls TC's internal /tc/api/v1/artifact/delete endpoint after
+	//     marking the row CLEANUP_PENDING (see
+	//     templatecenter.requestTemplateCenterArtifactDelete). TC never
+	//     drives a template delete itself.
+	//   - redo (POST /cube/template/redo): resuming at the DISTRIBUTING
+	//     phase re-pushes the artifact to nodes.
+	//
+	// create-from-image and redo also stay local for a second reason: after
+	// persisting the job they spawn forwardBuildJobToTemplateCenter /
 	// forwardRedoBuildJobToTemplateCenter, which read CubeMaster's own
 	// CUBE_TEMPLATE_CENTER_ADDR to push the actual build to TC's internal
-	// /tc/api/v1/build endpoint. If these two requests were proxied to TC like
-	// every other template route, TC would run that same handler code
-	// in-process and its forward call would try to read
-	// CUBE_TEMPLATE_CENTER_ADDR from TC's OWN process environment — which is
-	// never set (only CubeMaster's process env carries it) — and TC would end
-	// up trying to forward the job back to itself over HTTP. Keeping
-	// create/redo local to CubeMaster avoids this self-forward loop entirely.
+	// /tc/api/v1/build endpoint. On TC that env is never set, so a proxied
+	// submit would try to forward the job back to TC itself over HTTP.
+	// Keeping them local avoids this self-forward loop entirely.
 	//
-	// Every other template route (status/list/compat/artifact download/CRUD
-	// GET-DELETE-alias) is a pure DB read/write with no forwarding, so it is
-	// safe to run on either process and stays proxied to TC, which owns
-	// that part of the template API surface. Routes are enumerated
-	// explicitly (mirroring RegisterTemplateRoutes) rather than via a
-	// wildcard catch-all, so the two local routes can be carved out; keep
-	// this list in sync with RegisterTemplateRoutes below.
+	// The proxied remainder (status/list/compat/artifact download/GET/alias)
+	// is pure DB read/write or file serving with no cubelet RPC and no
+	// forwarding, so it is safe on TC, which owns that part of the template
+	// API surface. Routes are enumerated explicitly (mirroring
+	// RegisterTemplateRoutes) rather than via a wildcard catch-all, so the
+	// local routes can be carved out; keep this list in sync with
+	// RegisterTemplateRoutes below.
 	g.POST(TemplateFromImageAction, createTemplateFromImageGinHandler)
 	g.POST(TemplateRedoAction, handleRedoTemplateAction)
+	g.POST(TemplateAction, createTemplateGinHandler)
+	g.DELETE(TemplateAction, deleteTemplateGinHandler)
 
-	g.POST(TemplateAction, proxyToTemplateCenter)
 	g.GET(TemplateAction, proxyToTemplateCenter)
-	g.DELETE(TemplateAction, proxyToTemplateCenter)
 	g.PUT(TemplateAction+"/:template_id/alias", proxyToTemplateCenter)
 	g.GET(TemplateCompatAction, proxyToTemplateCenter)
 	g.POST(TemplateCompatAction, proxyToTemplateCenter)
@@ -115,20 +129,27 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 // Used by the standalone CubeTemplateCenter process — sandbox / snapshot /
 // volume CRUD stay with CubeMaster and are NOT registered here.
 //
-// Mirrors the Template + Artifact/CA + RootfsArtifact block of
-// RegisterCubeRoutes. Keep in sync with that function.
+// Only pure-DB / file-serving handlers are registered here. TC never
+// initializes the worker (cubelet) grpc conn pool, so every handler that can
+// issue a cubelet RPC — create-from-snapshot (replica materialization and
+// rollback cleanup), delete (node replica/artifact cleanup), redo
+// (DISTRIBUTING resume) — is served by CubeMaster instead, as are the two
+// build-submit POSTs whose forwarding reads CUBE_TEMPLATE_CENTER_ADDR from
+// CubeMaster's own environment (see RegisterCubeRoutes). CubeMaster reaches
+// TC's data plane exclusively through the internal /tc/api/v1/* endpoints
+// (build submit, artifact delete), never by sending these writes here.
+//
+// Mirrors the proxied subset of the Template + Artifact/CA + RootfsArtifact
+// block of RegisterCubeRoutes. Keep in sync with that function.
 func RegisterTemplateRoutes(g *gin.RouterGroup) {
-	// Template CRUD + build status
-	g.POST(TemplateAction, createTemplateGinHandler)
+	// Template reads + build status. The writes (create/delete/redo/
+	// from-image submit) live on CubeMaster — see the doc comment above.
 	g.GET(TemplateAction, getTemplateGinHandler)
-	g.DELETE(TemplateAction, deleteTemplateGinHandler)
 	g.PUT(TemplateAction+"/:template_id/alias", setTemplateAliasGinHandler)
 	g.GET(TemplateCompatAction, getTemplateCompatGinHandler)
 	g.POST(TemplateCompatAction, updateTemplateCompatGinHandler)
-	g.POST(TemplateRedoAction, handleRedoTemplateAction)
 	g.GET(TemplateBuildStatusAction+"/:build_id/status", handleTemplateBuildStatusAction)
 	g.GET(TemplateFromImageAction, getTemplateFromImageGinHandler)
-	g.POST(TemplateFromImageAction, createTemplateFromImageGinHandler)
 	g.GET(TemplateArtifactDownloadAction, downloadTemplateArtifactGinHandler)
 	g.HEAD(TemplateArtifactDownloadAction, headTemplateArtifactGinHandler)
 

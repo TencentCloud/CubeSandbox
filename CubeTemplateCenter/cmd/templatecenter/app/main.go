@@ -171,6 +171,14 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 
 	errorcode.InitCubeCodeRetryMap(cfg)
 
+	// Deliberately no worker (cubelet) grpc conn pool: every handler or
+	// background sweep that could reach a cubelet (template delete's node
+	// replica cleanup, artifact GC's node destroys, redo distribution
+	// resume) is served by CubeMaster, which owns the pool. TC's data plane
+	// is limited to building artifacts and removing their local/S3 data
+	// when CubeMaster calls the internal /tc/api/v1/artifact/delete
+	// endpoint or the reconciler backstop fires.
+
 	if cfg.InstanceDBConfig == nil {
 		return fmt.Errorf("instance_db_config is required for template center")
 	}

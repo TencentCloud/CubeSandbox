@@ -322,8 +322,14 @@ func Init(ctx context.Context) error {
 //   - store.db (the canonical handle for template_* tables)
 //   - compat hooks (template compat table maintenance)
 //   - warm ready template locality (so CreateSandbox can hit locality quickly)
-//   - artifact GC (orphan/expired rootfs_artifact sweeper)
 //   - initial compat scan
+//
+// Artifact GC is deliberately NOT started here: its passes destroy artifacts
+// on nodes over the worker (cubelet) grpc pool, which only CubeMaster
+// initializes. Running it on TC would strand every candidate in
+// CLEANUP_PENDING and let the reconciler backstop drop the rows while the
+// node-side ext4 files leak. CubeMaster runs the GC; TC's reconciler keeps
+// only the data-deletion backstop for rows CubeMaster already marked.
 func InitForTemplateCenter(ctx context.Context) error {
 	return initCommon(ctx, false /* includeSnapshotSide */)
 }
@@ -367,9 +373,12 @@ func initCommon(ctx context.Context, includeSnapshotSide bool) error {
 			// so a missed write-path invalidation never leaves stale data for
 			// longer than one refresh period.
 			startTemplateQueryCacheRefresh(ctx)
-		}
-		startArtifactGC(ctx)
-		scheduleInitialCompatScan(ctx)
+			// CubeMaster only: artifact GC destroys node-side ext4 files over
+			// the worker (cubelet) grpc pool, which TC never initializes. See
+			// InitForTemplateCenter.
+			startArtifactGC(ctx)
+			}
+			scheduleInitialCompatScan(ctx)
 	})
 	return initErr
 }
