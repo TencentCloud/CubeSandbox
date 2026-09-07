@@ -72,6 +72,7 @@ func probeReflink(dir string) error {
 }
 
 func TestParam(t *testing.T) {
+	requireRoot(t)
 	cfg := makeTestConfig(t)
 
 	s := &local{}
@@ -92,6 +93,7 @@ func TestParam(t *testing.T) {
 }
 
 func TestCreateDestroy(t *testing.T) {
+	requireRoot(t)
 	cfg := makeTestConfig(t)
 
 	s := &local{}
@@ -145,6 +147,7 @@ func TestCreateDestroy(t *testing.T) {
 	assert.Error(t, s.Destroy(ctx, nil))
 }
 func TestCreateDestroyInvalidVolume(t *testing.T) {
+	requireRoot(t)
 	cfg := makeTestConfig(t)
 
 	s := &local{}
@@ -454,6 +457,7 @@ func (m *fakeCowVolumeManager) GetMetrics(ctx context.Context) (map[string]uint6
 }
 
 func TestCleanupTemplateLocalDataIsIdempotent(t *testing.T) {
+	requireRoot(t)
 	cfg := makeTestConfig(t)
 
 	s := &local{}
@@ -502,6 +506,7 @@ func TestCleanupTemplateLocalDataIsIdempotent(t *testing.T) {
 }
 
 func TestCleanupTemplateLocalDataRemovesSnapIDParentDir(t *testing.T) {
+	requireRoot(t)
 	cfg := makeTestConfig(t)
 
 	s := &local{}
@@ -530,6 +535,7 @@ func TestCleanupTemplateLocalDataRemovesSnapIDParentDir(t *testing.T) {
 }
 
 func TestCreateWithTimeoutCtx(t *testing.T) {
+	requireRoot(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
 	defer cancel()
 	time.Sleep(2 * time.Millisecond)
@@ -561,6 +567,7 @@ func TestCreateWithTimeoutCtx(t *testing.T) {
 }
 
 func TestCreateWithInvalidParam(t *testing.T) {
+	requireRoot(t)
 	ctx := context.Background()
 
 	s := &local{}
@@ -733,6 +740,7 @@ func TestSnapCreateCubebox(t *testing.T) {
 
 func TestCreateCubeboxBySnap(t *testing.T) {
 
+	requireRoot(t)
 	cfg := makeTestConfig(t)
 
 	s := &local{}
@@ -821,6 +829,7 @@ func TestCreateCubeboxBySnap(t *testing.T) {
 
 func TestInit(t *testing.T) {
 
+	requireRoot(t)
 	cfg := makeTestConfig(t)
 
 	s := &local{}

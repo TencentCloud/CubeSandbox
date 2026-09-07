@@ -25,6 +25,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telnet"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -35,6 +36,26 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
+}
+
+// requirePing skips the test when ICMP ping is not usable in this environment,
+// e.g. unprivileged containers without CAP_NET_RAW / ping_group_range.
+func requirePing(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ch := telnet.Telnet(ctx, &telnet.ProbeConfig{
+		Addr:             "127.0.0.1",
+		Timeout:          2 * time.Second,
+		Period:           100 * time.Millisecond,
+		SuccessThreshold: 1,
+		FailureThreshold: 3,
+		ProbeTimeout:     500 * time.Millisecond,
+		Action:           telnet.ActionPing,
+	})
+	if err := <-ch; err != nil {
+		t.Skipf("ping not available in this environment: %v", err)
+	}
 }
 
 func TestProbeErrIp(t *testing.T) {
@@ -734,6 +755,7 @@ func TestProbeTimeoutMsWithHttpProbe(t *testing.T) {
 }
 
 func TestProbeTimeoutMsWithPing(t *testing.T) {
+	requirePing(t)
 	testHost := "127.0.0.1"
 
 	tests := []struct {
@@ -1017,6 +1039,7 @@ func TestProbeConcurrent(t *testing.T) {
 }
 
 func TestProbeConcurrentMixed(t *testing.T) {
+	requirePing(t)
 
 	httpPort := 9100
 	mux := http.NewServeMux()

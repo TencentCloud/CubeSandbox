@@ -171,7 +171,6 @@ help:
 	@printf "  cubedb-test   Run CubeDB unit tests on the host\n"
 	@printf "  proto-test    Run pkgs/proto unit tests on the host\n"
 	@printf "  cube-lifecycle-manager-test Run cube-lifecycle-manager unit tests in Docker\n"
-	@printf "  cubelet-pkg-test Run Cubelet ./pkg/... unit tests in Docker (no coverage)\n"
 	@printf "  agent-test    Run cube-agent unit tests in Docker\n"
 	@printf "  hypervisor-test Run hypervisor --lib --bins unit tests in Docker\n"
 	@printf "  guest-kernel  Build guest kernel vmlinux/Image (KERNEL_SRC=...; native or cross x86_64<->aarch64)\n"
@@ -470,9 +469,11 @@ cube-volume-cos-rpc-test: builder-image
 cubemaster-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make test'
 
+# cubecow-sdk (CGO) and cubevs's generated BPF code are build prerequisites
+# for several Cubelet packages.
 .PHONY: cubelet-test
 cubelet-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make test'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make proto && make test'
 
 .PHONY: cube-proxy-test
 cube-proxy-test:
@@ -509,14 +510,6 @@ proto-test:
 .PHONY: cube-lifecycle-manager-test
 cube-lifecycle-manager-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-lifecycle-manager && go mod download && go test ./...'
-
-# cubelet-pkg-test bypasses cubelet-test: that target runs `go test
-# -coverprofile`, and the builder's Go toolchain lacks the `covdata` tool, so
-# any coverage build fails. Run only ./pkg/... with -short (skips the
-# Redis/KVM-dependent cases), which is self-contained in the builder.
-.PHONY: cubelet-pkg-test
-cubelet-pkg-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && go test -short ./pkg/...'
 
 # cubevs-test runs the CubeNet/cubevs module's own unit tests (dataplane policy,
 # DNS learning, migration, dump, classify), which the cubelet targets never
