@@ -71,8 +71,10 @@ RUN apt-get update \
         util-linux \
     && rm -rf /var/lib/apt/lists/*
 
-# envd defaults to running file/command operations as the `user` account
-# (uid=1000) — the same convention used by e2b's official sandbox templates.
+# Requests without an Authorization header run as root, matching the Go
+# envd default (defaultUser = "root"). SDK clients older than envd 0.4.0
+# send "Basic user:", which resolves to the uid 1000 account provisioned
+# below; newer SDKs omit the header and therefore run as root.
 RUN useradd --create-home --uid 1000 --shell /bin/bash user \
     && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/user \
     && chmod 0440 /etc/sudoers.d/user
