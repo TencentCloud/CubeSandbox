@@ -31,7 +31,7 @@ func RequiresRoot(t testing.TB) {
 		return
 	}
 	if os.Getuid() != 0 {
-		t.Error("This test must be run as root.")
+		t.Skip("skipping test that requires root")
 	}
 }
 

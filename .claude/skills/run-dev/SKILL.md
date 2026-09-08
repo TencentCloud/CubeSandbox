@@ -84,8 +84,9 @@ make builder-run BUILDER_CMD='cd /workspace/agent && make test'
 # CubeMaster tests (Go) — needs Redis at minimum
 make builder-run BUILDER_CMD='cd /workspace/CubeMaster && make proto && CI=true CUBE_MASTER_CONFIG_PATH=/workspace/CubeMaster/test/conf.yaml go test -short ./api/... ./pkg/...'
 
-# Cubelet tests (Go)
-make builder-run BUILDER_CMD='cd /workspace/Cubelet && make proto && go test -short ./pkg/...'
+# Cubelet tests (Go) — full self-contained set (all packages except api/ and
+# integration/); root/host-capability tests probe and skip themselves
+make cubelet-test
 
 # CubeCoW native tests (Go + CGO, needs cubecow SDK built)
 make cubecow-test-native

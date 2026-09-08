@@ -4,69 +4,37 @@ Cube Sandbox 运行在轻量级 MicroVM 内，默认情况下沙箱内写入的�
 
 ## 概念模型
 
-```
-沙箱宿主机节点
-┌────────────────────────────────────────────────────────────────┐
-│  /data/shared/models  ────────► /models   (只读)               │
-│  /data/shared/output  ────────► /output   (读写)               │
-│                                                                │
-│              KVM MicroVM（沙箱）                                │
-└────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph Host["沙箱宿主机节点"]
+        HostModels["/data/shared/models"]
+        HostOutput["/data/shared/output"]
+
+        subgraph VM["KVM MicroVM（沙箱）"]
+            VMModels["内部目录<br/>/models"]
+            VMOutput["内部目录<br/>/output"]
+        end
+
+        HostModels -->|"只读映射"| VMModels
+        HostOutput -->|"读写映射"| VMOutput
+    end
 ```
 
 Host Mount 将**沙箱宿主机节点上的绝对路径**映射到**沙箱 VM 内的路径**。读写挂载的变更在两侧立即可见——无需同步、无需上传、零延迟。
 
-| 属性 | 说明 |
-|------|------|
-| **机制** | Linux bind-mount，由 Cubelet 在 VM 启动前执行 |
-| **作用域** | 节点本地——`hostPath` 必须存在于运行沙箱的宿主机节点上 |
-| **数量** | 一次 `Sandbox.create()` 调用可以指定多个挂载 |
-| **访问模式** | 每个挂载可独立设置 `readOnly: true`（只读）或 `readOnly: false`（读写） |
-| **路径限制** | `hostPath` 必须位于允许的目录前缀下（默认 `/data/shared/`） |
-| **兼容性** | 同时支持 E2B SDK（`e2b_code_interpreter`）和 Cube SDK（`cubesandbox`） |
-
-::: tip Volume Plugin（e2b Volume API）
-若需要**用户级持久卷**（`POST /volumes` + `volumeMounts`）并接入 COS/NFS 等后端，请参阅 [Volume 插件开发指南](./volume-plugin.md)。Host Mount 适合节点上已有目录的快速共享；Volume Plugin 适合跨沙箱生命周期管理的云存储场景。
-:::
-
 ## 使用场景
 
-- **大型数据集** —— 将多 GB 的数据目录挂载到多个沙箱中，无需逐一复制
-- **模型权重** —— 在多个并发推理沙箱间共享只读模型目录
-- **输出持久化** —— 将沙箱运行结果写入宿主路径，沙箱销毁后数据仍然保留
-- **源码工作区** —— 挂载代码仓库供沙箱按需执行或分析
+Host Mount 适合让沙箱直接访问宿主机上的已有数据，或将沙箱产生的数据保留在宿主机上。典型场景包括：
 
-## 挂载描述符
+- **共享数据集和模型权重**：以只读方式挂载大型数据目录，供同一节点上的多个沙箱复用，无需重复复制。
+- **持久化任务输出**：以读写方式挂载输出目录，使日志、构建产物和计算结果在沙箱销毁后仍然保留。
+- **复用源码工作区**：将代码仓库挂载到沙箱中，供开发、构建、测试或代码分析任务直接使用。
+- **共享依赖与缓存**：复用宿主机上的依赖包、工具链或构建缓存，减少重复下载和初始化时间。
 
-Host Mount 通过 `Sandbox.create()` 的 `metadata` 字段中的 `host-mount` 键来指定。值为 **JSON 编码的数组**，每个元素是一个挂载描述符：
+> Host Mount 适合节点上已有目录的快速共享，针对跨沙箱生命周期管理的云存储场景，可以考虑使用**用户级持久卷**并接入 COS/NFS 等后端，请参阅 [Volume 插件开发指南](./volume-plugin.md)。
 
-```json
-[
-  {
-    "hostPath":  "/data/shared/mydir",
-    "mountPath": "/mnt/data",
-    "readOnly":  false
-  }
-]
-```
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `hostPath` | string | 是 | **沙箱宿主机节点**上的绝对路径，必须位于允许的前缀下 |
-| `mountPath` | string | 是 | 沙箱 VM 内的目标路径 |
-| `readOnly` | bool | 是 | `true` = 只读；`false` = 读写 |
-
-::: warning
-`hostPath` 指的是**运行沙箱的宿主机节点**的文件系统路径，而不是执行 SDK 脚本的机器。如果你从远程机器调用 API，请确保该路径存在于沙箱宿主机节点上，而不是你的本地电脑上。
-:::
 
 ## 快速开始
-
-### 前置条件
-
-- 已部署的 Cube Sandbox 集群
-- Python 3.8+
-- 宿主目录在创建沙箱前必须已存在于沙箱宿主机节点上
 
 在沙箱宿主机节点上准备目录：
 
@@ -76,25 +44,19 @@ echo "hello from host" | sudo tee /data/shared/ro/greeting.txt
 sudo chown -R 1000:1000 /data/shared/rw
 ```
 
-安装 SDK：
-
-```bash
-pip install e2b-code-interpreter
-# 或者
-pip install cubesandbox
-```
-
 ### 创建带 Host Mount 的沙箱
+
+Host Mount 通过 `Sandbox.create()` 的 `metadata` 字段中的 `host-mount` 键来指定。值为 **JSON 编码的数组**，每个元素是一个挂载描述符，支持同时指定多个挂载：
+
+每个挂载描述符都必须包含三个字段：`hostPath` 是沙箱宿主机节点上的绝对路径，且必须位于允许的目录前缀下；`mountPath` 是沙箱 VM 内的目标路径；`readOnly` 用于设置访问模式，`true` 表示只读，`false` 表示读写。
 
 ```python
 import json
 import os
-from e2b_code_interpreter import Sandbox
-
-template_id = os.environ["CUBE_TEMPLATE_ID"]
+from cubesandbox import Sandbox
 
 with Sandbox.create(
-    template=template_id,
+    template=os.environ["CUBE_TEMPLATE_ID"],
     metadata={
         "host-mount": json.dumps([
             {
@@ -127,34 +89,46 @@ greeting.txt
 ```python
 import json
 from cubesandbox import Sandbox
+import os
 
 mounts = json.dumps([
     {"hostPath": "/data/shared/rw", "mountPath": "/mnt/rw", "readOnly": False},
 ])
 
 with Sandbox.create(
-    template=template_id,
+    template=os.environ["CUBE_TEMPLATE_ID"],
     metadata={"host-mount": mounts},
 ) as sandbox:
-    sandbox.commands.run("echo 'result data' > /mnt/rw/output.txt")
-
-# 沙箱已销毁，但文件保留在宿主机上：
-# cat /data/shared/rw/output.txt  →  result data
+    sandbox.commands.run("echo 'persist data' > /mnt/rw/output.txt")
 ```
 
-## 工作原理
+```bash
+# 沙箱已销毁，但文件保留在宿主机上：
+$ cat /data/shared/rw/output.txt
+persist data
+```
 
-| 步骤 | 发生了什么 |
-|------|-----------|
-| `Sandbox.create(metadata=...)` | CubeAPI 将 `host-mount` JSON 传递给 CubeMaster |
-| CubeMaster 校验路径 | 检查 `hostPath` 是否在允许的前缀下，解析 `..` 防止路径穿越 |
-| Cubelet 收到请求 | 解析挂载列表，在 VM 启动前执行 bind-mount |
-| VM 启动 | 挂载路径在沙箱内的 `mountPath` 位置可见 |
-| 只读挂载 | 内核强制 `MS_RDONLY`，写操作返回 `EROFS` |
+## Host Mount 沙箱的快照
+
+Host Mount 是对宿主机目录的**外部引用**。创建 Snapshot 时，Cube 只保存 VM 的内存、根文件系统状态和挂载配置，不会把 `hostPath` 中的文件复制进 Snapshot。因此，宿主目录中的数据始终保持独立，并遵循以下语义：
+
+- **Pause / Resume 和 FromSnap**：恢复时会沿用原来的挂载配置，并在源节点重新挂载相同的 `hostPath`。带 Host Mount 的沙箱会固定在源节点，不会跨节点恢复；如果源节点不可用或宿主目录不存在，恢复将失败。
+- **Rollback**：VM 内存以及 Host Mount 路径之外的根文件系统状态会回到 Snapshot 创建时的状态，但 Host Mount 中的数据不会回滚。Snapshot 创建后在宿主目录中新增、修改或删除的文件仍保持最新状态。
+- **Clone**：每个克隆拥有独立的 VM 状态，但会引用相同的宿主目录。任一沙箱对读写挂载所做的修改都可通过共享目录被源沙箱和其他克隆访问，具体一致性遵循底层文件系统语义；只读挂载在克隆中仍保持只读。
+- **销毁沙箱或删除 Snapshot**：不会删除 Host Mount 指向的宿主目录及其文件。
+
+::: warning 并发写入
+FromSnap 或 Clone 可能使多个运行中的沙箱同时访问同一个读写 `hostPath`。Host Mount 不会自动提供锁、版本控制或写入冲突协调；应用需要自行保证并发访问安全，也可以使用底层文件系统支持的锁机制。
+:::
 
 ## 路径安全限制
 
 出于安全考虑，`hostPath` 被限制在一组**允许的目录前缀**之内。默认情况下，只有 `/data/shared/` 下的路径被允许。尝试挂载该范围之外的路径会在**沙箱创建时被拒绝**。
+
+::: warning
+`hostPath` 指的是**运行沙箱的宿主机节点**的文件系统路径，而不是执行 SDK 脚本的机器。如果你从远程机器调用 API，请确保该路径存在于沙箱宿主机节点上，而不是你的本地电脑上。
+:::
+
 
 ### 默认行为
 
@@ -176,19 +150,22 @@ with Sandbox.create(
 如果指定了不允许的路径，SDK 会抛出 `ApiError` 异常：
 
 ```python
+from cubesandbox import Sandbox
 from cubesandbox import ApiError
+import os
+import json
 
 try:
     sandbox = Sandbox.create(
-        template=template_id,
+        template=os.environ["CUBE_TEMPLATE_ID"],
         metadata={"host-mount": json.dumps([
             {"hostPath": "/etc/passwd", "mountPath": "/mnt/x", "readOnly": True}
         ])}
     )
 except ApiError as e:
-    print(e.status_code)  # 500
+    print(e.status_code)  # 400
     print(str(e))
-    # "host-mount" entry[0]: hostPath "/etc/passwd" is not within an allowed mount prefix
+    # CubeMaster returned error code 130400: "host-mount" entry[0]: hostPath "/etc/passwd" is not within an allowed mount prefix
 ```
 
 ### 自定义允许的前缀
@@ -205,14 +182,9 @@ extra_conf:
 
 列表为空或未配置时，默认值为 `["/data/shared/"]`。根路径 `/` 被明确禁止——如果出现在列表中，CubeMaster 将拒绝启动。
 
-### 安全机制
-
-| 机制 | 用途 |
-|------|------|
-| `filepath.Clean` | 解析 `..` 路径段，防止路径穿越绕过 |
-| 前缀末尾 `/` 匹配 | 防止前缀伪造（如 `/data/shared_evil` 不会匹配 `/data/shared/`） |
-| 启动时校验 | 拒绝配置中包含 `/`，防止意外暴露整个宿主机 |
-| 双重验证 | annotation 路径（CubeAPI → CubeMaster）和直接 volume 路径均受保护 |
+> CubeMaster 会先通过 `filepath.Clean` 规范化 `hostPath`，消除 `..` 等路径成分，再使用带末尾 `/` 的目录前缀进行匹配，避免 `/data/shared_evil` 之类的路径伪装成 `/data/shared/` 的子目录。CubeMaster 启动时还会拒绝将根目录 `/` 配置为允许前缀，防止整个宿主机文件系统被意外暴露。
+>
+> 无论挂载请求来自 CubeAPI 传递的 annotation，还是直接指定的 volume 路径，都会执行相同的路径校验，避免通过不同入口绕过限制。
 
 ## 权限管理
 
@@ -300,6 +272,7 @@ s3fs my-bucket /data/shared \
 
 ```python
 import json
+import os
 from cubesandbox import Sandbox
 
 tenant_id = "tenant-a"
@@ -318,7 +291,7 @@ mounts = json.dumps([
 ])
 
 with Sandbox.create(
-    template=template_id,
+    template=os.environ["CUBE_TEMPLATE_ID"],
     metadata={"host-mount": mounts},
 ) as sandbox:
     sandbox.commands.run("ls /datasets /output")
@@ -361,11 +334,11 @@ sudo chmod 0700 /data/shared/tenant-b
 
 ### 隔离层次总结
 
-| 层次 | 机制 | 作用 |
-|------|------|------|
+| 层次     | 机制                                               | 作用                           |
+| -------- | -------------------------------------------------- | ------------------------------ |
 | 目录规划 | 按租户 ID 划分独立子目录，每个沙箱只挂载本租户路径 | 结构上隔离数据，租户间互不可见 |
-| 应用层 | 平台代码拼接路径，不信任用户输入 | 正常场景下的租户隔离 |
-| 操作系统 | 目录 owner/mode 权限 | 兜底防护，防止任何绕过 |
+| 应用层   | 平台代码拼接路径，不信任用户输入                   | 正常场景下的租户隔离           |
+| 操作系统 | 目录 owner/mode 权限                               | 兜底防护，防止任何绕过         |
 
 ## 嵌套挂载：共享可读、写入范围独立
 
@@ -402,12 +375,12 @@ mounts = json.dumps([
 
 Agent B 使用相同的只读父挂载，只把 `members/agent-b` 挂载为读写。各 Agent 可以使用不同的沙箱模板，存储目录和访问模式不需要因此改变。
 
-| Agent A 可见的路径 | 可读 | 可写 | 原因 |
-|--------------------|------|------|------|
-| `/workspace/shared-input.txt` | 是 | 否 | 来自共享的只读父挂载 |
-| `/workspace/members/agent-a/` | 是 | 是 | 该位置被 Agent A 的读写子挂载替换 |
-| `/workspace/members/agent-b/` | 是 | 否 | 仍然来自共享的只读父挂载 |
-| 其他租户的工作区 | 否 | 否 | 对应宿主机路径没有挂载到当前沙箱 |
+| Agent A 可见的路径            | 可读 | 可写 | 原因                              |
+| ----------------------------- | ---- | ---- | --------------------------------- |
+| `/workspace/shared-input.txt` | 是   | 否   | 来自共享的只读父挂载              |
+| `/workspace/members/agent-a/` | 是   | 是   | 该位置被 Agent A 的读写子挂载替换 |
+| `/workspace/members/agent-b/` | 是   | 否   | 仍然来自共享的只读父挂载          |
+| 其他租户的工作区              | 否   | 否   | 对应宿主机路径没有挂载到当前沙箱  |
 
 这是一种**共享可读、写入范围独立**的模型。“写入范围独立”表示只有指定沙箱会获得该目录的可写挂载；如果只读父挂载暴露了这个目录，并不代表其他成员无法读取它。
 
@@ -418,7 +391,7 @@ Agent B 使用相同的只读父挂载，只把 `members/agent-b` 挂载为读�
 - `readOnly` 对每个挂载独立生效，但仍需满足 Linux 的 UID、GID、mode 和 ACL 权限。即使子挂载是读写模式，如果宿主机权限不允许沙箱用户写入，仍会返回 `Permission denied`。
 - 推荐使用一个只读父挂载和明确的读写子挂载。避免重复目标路径或相互重叠的读写挂载，否则目录归属和最终可见结果会变得难以判断。
 - `mountPath` 应使用不含 `.` 或 `..` 路径段的规范绝对路径。不要依赖输入顺序处理相互重叠的目标路径。
-- Host Mount 是节点本地的，并且数据位于沙箱快照之外。恢复时，每个 `hostPath` 都必须在调度节点上可用；如需多节点运行，应在所有节点的同一路径挂载共享文件系统。
+- Host Mount 是节点本地的，并且数据位于沙箱快照之外。带 raw host mount 的 Snapshot FromSnap 和 Pause/Resume 会固定在源节点；其他节点上的同名路径不会被视为同一份存储。如需可移植的跨机快照恢复，应使用由所有候选节点都能 Attach 的共享存储所支持的 Plugin Volume。
 
 ::: warning 鉴权边界
 调用 `Sandbox.create()` 的平台必须根据已经认证的沙箱归属主体和适用的组边界（如租户、团队或项目）生成 `hostPath`。不要接受用户任意传入的宿主机路径，也不要把 `/data/shared/tenants/` 之类的全局根目录挂载到某个租户的沙箱中：只读挂载只能阻止写入，不能阻止该沙箱读取其他租户的数据。
@@ -434,14 +407,14 @@ Agent B 使用相同的只读父挂载，只把 `members/agent-b` 挂载为读�
 
 ## 故障排查
 
-| 现象 | 可能原因 | 解决方法 |
-|------|---------|---------|
-| `hostPath "..." is not within an allowed mount prefix` | 路径不在允许的前缀范围内 | 将数据放到 `/data/shared/` 下，或在 CubeMaster 配置中更新 `allowed_host_mount_prefixes` |
-| 沙箱内 `No such file or directory` | 沙箱宿主机节点上 `hostPath` 不存在 | 在运行前在节点上创建目录 |
-| 写入时 `Read-only file system` | 使用了 `readOnly: true` 挂载 | 改为 `readOnly: false` |
-| 写入时 `Permission denied` | 宿主目录所有者与沙箱用户不匹配 | 参见上方[权限管理](#权限管理) |
-| `Template not found` | 模板 ID 错误 | 运行 `cubemastercli tpl list` 确认 |
-| `Connection refused` | CubeAPI 不可达 | 检查 `E2B_API_URL` 及端口 3000 是否开放 |
+| 现象                                                   | 可能原因                           | 解决方法                                                                                |
+| ------------------------------------------------------ | ---------------------------------- | --------------------------------------------------------------------------------------- |
+| `hostPath "..." is not within an allowed mount prefix` | 路径不在允许的前缀范围内           | 将数据放到 `/data/shared/` 下，或在 CubeMaster 配置中更新 `allowed_host_mount_prefixes` |
+| 沙箱内 `No such file or directory`                     | 沙箱宿主机节点上 `hostPath` 不存在 | 在运行前在节点上创建目录                                                                |
+| 写入时 `Read-only file system`                         | 使用了 `readOnly: true` 挂载       | 改为 `readOnly: false`                                                                  |
+| 写入时 `Permission denied`                             | 宿主目录所有者与沙箱用户不匹配     | 参见上方[权限管理](#权限管理)                                                           |
+| `Template not found`                                   | 模板 ID 错误                       | 运行 `cubemastercli tpl list` 确认                                                      |
+| `Connection refused`                                   | CubeAPI 不可达                     | 检查 `E2B_API_URL` 及端口 3000 是否开放                                                 |
 
 ## 参考
 

@@ -541,6 +541,7 @@ type CubeletConf struct {
 	Grpc                    *GrpcConf `yaml:"grpc"`
 	CommonTimeoutInsec      int       `yaml:"common_timeout_insec"`
 	CreateImageTimeoutInSec int       `yaml:"create_image_timeout_insec"`
+	AppSnapshotTimeoutInSec int       `yaml:"app_snapshot_timeout_insec"`
 	// Server default idle TTL when the client omits timeout. See docs/guide/lifecycle.md.
 	DefaultTimeoutInsec int `yaml:"default_timeout_insec"`
 	// Create RPC / scheduling deadline; decoupled from idle TTL.
@@ -894,6 +895,10 @@ func preHandleCubeletConf(config *Config) error {
 	}
 	if config.CubeletConf.CreateImageTimeoutInSec == 0 {
 		config.CubeletConf.CreateImageTimeoutInSec = 300
+	}
+
+	if config.CubeletConf.AppSnapshotTimeoutInSec <= 0 {
+		config.CubeletConf.AppSnapshotTimeoutInSec = 300
 	}
 
 	if config.CubeletConf.BufferQueueMinJob == 0 {

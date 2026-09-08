@@ -25,6 +25,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telnet"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -35,6 +36,32 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
+}
+
+// pingAvailable reports whether ICMP ping works in this environment. Ping
+// needs CAP_NET_RAW or a permissive ping_group_range, which unprivileged
+// containers (e.g. the CI builder) usually lack.
+func pingAvailable() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ch := telnet.Telnet(ctx, &telnet.ProbeConfig{
+		Addr:             "127.0.0.1",
+		Timeout:          2 * time.Second,
+		Period:           100 * time.Millisecond,
+		SuccessThreshold: 1,
+		FailureThreshold: 3,
+		ProbeTimeout:     500 * time.Millisecond,
+		Action:           telnet.ActionPing,
+	})
+	return <-ch == nil
+}
+
+// requirePing skips ping-only tests when ping is unavailable.
+func requirePing(t *testing.T) {
+	t.Helper()
+	if !pingAvailable() {
+		t.Skip("ping not available in this environment")
+	}
 }
 
 func TestProbeErrIp(t *testing.T) {
@@ -734,6 +761,7 @@ func TestProbeTimeoutMsWithHttpProbe(t *testing.T) {
 }
 
 func TestProbeTimeoutMsWithPing(t *testing.T) {
+	requirePing(t)
 	testHost := "127.0.0.1"
 
 	tests := []struct {
@@ -1017,6 +1045,7 @@ func TestProbeConcurrent(t *testing.T) {
 }
 
 func TestProbeConcurrentMixed(t *testing.T) {
+	pingOK := pingAvailable()
 
 	httpPort := 9100
 	mux := http.NewServeMux()
@@ -1038,63 +1067,55 @@ func TestProbeConcurrentMixed(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
+	tcpHandler := func() *cubebox.ProbeHandler {
+		return &cubebox.ProbeHandler{
+			TcpSocket: &cubebox.TCPSocketAction{
+				Port: int32(tcpPort),
+			},
+		}
+	}
+	// probeHandlerFor rotates HTTP/TCP/Ping across goroutines. Where ping is
+	// unavailable the ping slot degrades to TCP, so the mixed-concurrency
+	// assertion still exercises the probe types this environment supports.
+	probeHandlerFor := func(index int) *cubebox.ProbeHandler {
+		switch index % 3 {
+		case 0:
+			return &cubebox.ProbeHandler{
+				HttpGet: &cubebox.HTTPGetAction{
+					Port: int32(httpPort),
+					Path: pointer.String("/health"),
+				},
+			}
+		case 1:
+			return tcpHandler()
+		case 2:
+			if pingOK {
+				return &cubebox.ProbeHandler{
+					Ping: &cubebox.PingAction{
+						Udp: false,
+					},
+				}
+			}
+			return tcpHandler()
+		}
+		return nil
+	}
+
 	concurrentCount := 15
 	errCh := make(chan error, concurrentCount)
 
 	for i := 0; i < concurrentCount; i++ {
 		go func(index int) {
-			var cnt *cubebox.ContainerConfig
-
-			switch index % 3 {
-			case 0:
-				cnt = &cubebox.ContainerConfig{
-					Probe: &cubebox.Probe{
-						InitialDelayMs:   0,
-						TimeoutMs:        200,
-						PeriodMs:         10,
-						SuccessThreshold: 1,
-						FailureThreshold: 1,
-						ProbeTimeoutMs:   50,
-						ProbeHandler: &cubebox.ProbeHandler{
-							HttpGet: &cubebox.HTTPGetAction{
-								Port: int32(httpPort),
-								Path: pointer.String("/health"),
-							},
-						},
-					},
-				}
-			case 1:
-				cnt = &cubebox.ContainerConfig{
-					Probe: &cubebox.Probe{
-						InitialDelayMs:   0,
-						TimeoutMs:        200,
-						PeriodMs:         10,
-						SuccessThreshold: 1,
-						FailureThreshold: 1,
-						ProbeTimeoutMs:   50,
-						ProbeHandler: &cubebox.ProbeHandler{
-							TcpSocket: &cubebox.TCPSocketAction{
-								Port: int32(tcpPort),
-							},
-						},
-					},
-				}
-			case 2:
-				cnt = &cubebox.ContainerConfig{
-					Probe: &cubebox.Probe{
-						InitialDelayMs:   0,
-						TimeoutMs:        200,
-						PeriodMs:         10,
-						SuccessThreshold: 1,
-						FailureThreshold: 1,
-						ProbeTimeoutMs:   50,
-						ProbeHandler: &cubebox.ProbeHandler{
-							Ping: &cubebox.PingAction{
-								Udp: false,
-							},
-						},
-					},
-				}
+			cnt := &cubebox.ContainerConfig{
+				Probe: &cubebox.Probe{
+					InitialDelayMs:   0,
+					TimeoutMs:        200,
+					PeriodMs:         10,
+					SuccessThreshold: 1,
+					FailureThreshold: 1,
+					ProbeTimeoutMs:   50,
+					ProbeHandler:     probeHandlerFor(index),
+				},
 			}
 
 			req := &cubebox.RunCubeSandboxRequest{

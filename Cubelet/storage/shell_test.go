@@ -16,7 +16,18 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
 
+// requireRoot skips tests that format and mount ext4 images, which need root
+// (the builder container runs tests as the host UID, where mount(2) fails
+// with "only root can do that").
+func requireRoot(t *testing.T) {
+	t.Helper()
+	if os.Getuid() != 0 {
+		t.Skip("skipping test that requires root (mkfs/mount)")
+	}
+}
+
 func TestNewExt4BaseRaw(t *testing.T) {
+	requireRoot(t)
 	testDir := t.TempDir()
 
 	filePath := filepath.Join(testDir, "base.raw")
@@ -26,6 +37,7 @@ func TestNewExt4BaseRaw(t *testing.T) {
 }
 
 func TestNewExt4RawByCopy(t *testing.T) {
+	requireRoot(t)
 	testDir := t.TempDir()
 
 	fmt.Println(testDir)
@@ -52,6 +64,7 @@ func TestNewExt4RawByCopy(t *testing.T) {
 
 func TestNewExt4RawByReflinkCopy(t *testing.T) {
 	utils.SkipCI(t)
+	requireRoot(t)
 
 	testDir := t.TempDir()
 

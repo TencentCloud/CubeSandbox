@@ -12,7 +12,7 @@
 #
 # By default it runs only the self-contained components (the green gate) and
 # skips "gated" components that need a live database or a full VM. Naming a
-# gated component explicitly (e.g. `run.sh cubelet`) forces it to run.
+# gated component explicitly (e.g. `run.sh hypervisor-kvm`) forces it to run.
 #
 # Usage:
 #   tests/unittest/run.sh                 # run the default (self-contained) gate
@@ -76,10 +76,6 @@ cd "$REPO_ROOT"
 # NO_TESTS: "name|reason" — printed as an explicit skip so the absence of unit
 #   tests is visible rather than silently missing from the sweep.
 
-# cubelet does NOT use `make cubelet-test`: that target runs `go test
-# -coverprofile`, and the builder's Go toolchain lacks the `covdata` tool, so
-# any coverage build fails. Bypass coverage with a direct `go test` over the
-# same package set (`-short` skips the Redis/KVM-dependent cases).
 WITH_TESTS=(
 	"cubeops|Go|0|make cubeops-test"
 	# -gcflags=all=-l disables inlining, which is REQUIRED by the gomonkey-based
@@ -93,16 +89,10 @@ WITH_TESTS=(
 	# (Linux-only syscall constants), so its tests go through the builder like
 	# every other Go component. The Makefile target wraps builder-run.
 	"cubetemplatecenter|Go|0|make cubetemplatecenter-test"
-	# cubelet-network: the standalone network-agent module was removed in #1285 and
-	# folded into Cubelet/network/runtime (NetworkController). Its tests moved there
-	# and need the generated CubeNet/cubevs code but no cubecow/CGO, so build cubevs
-	# then run just the runtime package rather than the whole Cubelet suite.
-	"cubelet-network|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && go test ./network/runtime/...'"
 	# cubevs: the CubeNet/cubevs module's OWN unit tests (dataplane policy, DNS
-	# learning, migration, dump, classify). cubelet-network builds cubevs's
-	# generated code but runs Cubelet's tests, so these never ran. cubevs-test
-	# regenerates the BPF objects (make gen) and runs the full module set in a
-	# privileged root builder (eBPF load + bpffs mount need the privilege).
+	# learning, migration, dump, classify). cubevs-test regenerates the BPF
+	# objects (make gen) and runs the full module set in a privileged root
+	# builder (eBPF load + bpffs mount need the privilege).
 	"cubevs|Go|0|make cubevs-test"
 	"cubecow|Go+CGO|0|make cubecow-test-native"
 	"cube-lifecycle-manager|Go|0|make builder-run BUILDER_CMD='cd /workspace/cube-lifecycle-manager && go mod download && go test ./...'"
@@ -115,10 +105,8 @@ WITH_TESTS=(
 	# toolchain is sufficient and skipping the container is faster.
 	"cubelog|Go|0|cd pkgs/CubeLog && go test -short ./..."
 	"cubedb|Go|0|cd pkgs/cubedb && go mod download && go test ./..."
-	# cubelet runs only ./pkg/... here; the cgroupfs/host-cap-dependent tests
-	# live under ./plugins/... and ./services/... and are not in this set, so
-	# the pkg tests are self-contained in the builder.
-	"cubelet|Go|0|make builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && make proto && go test -short ./pkg/...'"
+	# Same entry point as CI (unit-test-check).
+	"cubelet|Go|0|make cubelet-test"
 	# Only unit tests (--lib --bins) run here; the tests/integration.rs target
 	# needs a full VM (OS disk images, sudo/ip networking, VFIO, windows guest)
 	# and is excluded so `run.sh hypervisor` exercises the self-contained tests.

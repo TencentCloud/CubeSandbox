@@ -150,6 +150,13 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- if hasKey (.Values.images | default dict) "pause" }}
 {{- fail "images.pause was removed; Big Pod placeholder slots (cube-slot-*) are gone. Remove images.pause from your values." }}
 {{- end }}
+{{- /* Only fail on non-zero nested db: old chart defaults shipped db:0, and helm upgrade keeps those keys in release values. */}}
+{{- if and (hasKey ((.Values.cubeProxy).redis | default dict) "db") (ne (((.Values.cubeProxy).redis).db | default 0 | int) 0) }}
+{{- fail "cubeProxy.redis.db was removed; set top-level redis.db instead (Master / Proxy / LCM / Ops share one logical DB)." }}
+{{- end }}
+{{- if and (hasKey ((.Values.lifecycleManager).redis | default dict) "db") (ne (((.Values.lifecycleManager).redis).db | default 0 | int) 0) }}
+{{- fail "lifecycleManager.redis.db was removed; set top-level redis.db instead (Master / Proxy / LCM / Ops share one logical DB)." }}
+{{- end }}
 {{- if hasKey (.Values.cubeNode | default dict) "placeholderSlots" }}
 {{- fail "cubeNode.placeholderSlots was removed; Big Pod no longer reserves cube-slot-1..6. Remove cubeNode.placeholderSlots from your values." }}
 {{- end }}
@@ -207,6 +214,12 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- end }}
 {{- if and (or (eq (include "cube.redisBuiltinEnabled" .) "true") .Values.redis.host (eq (include "cube.redisSentinelEnabled" .) "true")) (hasPrefix "CHANGE_ME" (default "" .Values.redis.password)) }}
 {{- fail "redis.password still equals the CHANGE_ME_* default sentinel. Override it before deploying." }}
+{{- end }}
+{{- /* redis.db fans out to Master / Proxy / LCM / Ops; reject non-integer and out-of-range values at render time. */ -}}
+{{- $redisDBRaw := .Values.redis.db | default 0 -}}
+{{- $redisDB := $redisDBRaw | int -}}
+{{- if or (not (eq ($redisDBRaw | toString) ($redisDB | toString))) (lt $redisDB 0) (gt $redisDB 15) }}
+{{- fail (printf "redis.db must be an integer in 0-15 (got %v)" $redisDBRaw) }}
 {{- end }}
 {{- /* Fixed Service nodePorts are only valid for NodePort / LoadBalancer. */ -}}
 {{- $apiSvcType := .Values.controlPlane.api.service.type | default "ClusterIP" -}}

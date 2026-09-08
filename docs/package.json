@@ -4,6 +4,7 @@
   "description": "VitePress Documentation",
   "type": "module",
   "scripts": {
+    "docs:test": "node --test tests/*.test.mjs",
     "docs:dev": "vitepress dev",
     "docs:build": "vitepress build",
     "docs:preview": "vitepress preview"
@@ -17,5 +18,8 @@
     "vitepress-plugin-llms": "^1.13.5",
     "vitepress-plugin-mermaid": "^2.0.17",
     "vue": "^3.5.31"
+  },
+  "dependencies": {
+    "three": "0.183.2"
   }
 }

@@ -34,6 +34,7 @@ cubelet_conf:
     grpc_port: 9999
   common_timeout_insec: 30
   create_image_timeout_insec: 300
+  app_snapshot_timeout_insec: {{ .Values.controlPlane.master.appSnapshotTimeoutSeconds }}
   create_timeout_insec: 600
   create_concurrent_limit: 100
   destroy_concurent_limit: 100
@@ -82,7 +83,7 @@ redis:
   sentinel_nodes: {{ .Values.redis.sentinelNodes | default "" | quote }}
   sentinel_password: {{ .Values.redis.sentinelPassword | default "" | quote }}
   password: {{ .Values.redis.password | quote }}
-  db_no: 0
+  db_no: {{ include "cube.redisDB" . }}
   max_idle: 8
   max_active: 32
   idle_timeout: 30

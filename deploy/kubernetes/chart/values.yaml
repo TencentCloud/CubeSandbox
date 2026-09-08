@@ -226,6 +226,9 @@ controlPlane:
     # multiple replicas can run concurrently without coordination. Increase
     # for higher API throughput and availability.
     replicas: 1
+    # CubeMaster -> Cubelet AppSnapshot RPC timeout. Increase for large
+    # templates or slow networks/disks.
+    appSnapshotTimeoutSeconds: 300
     # Default PVC is ReadWriteOnce: RollingUpdate with maxSurge would start a
     # second Pod before the old one releases the volume and hang on multi-attach.
     # Recreate deletes the old Pod first so the PVC can remount cleanly.
@@ -565,7 +568,6 @@ lifecycleManager:
     # Empty host uses redis.host or chart-managed cube-redis.
     host: ""
     port: ""
-    db: 0
   defaultIdleTimeout: 5m
   heartbeatTTL: 15s
   discoveryRefresh: 3s
@@ -677,6 +679,9 @@ redis:
   # AUTH against Sentinel instances only. Leave empty when Sentinel has no requirepass
   # (master password still uses redis.password).
   sentinelPassword: ""
+  # Logical Redis DB (0-15 on standalone/Sentinel masters). Master / Proxy / LCM / Ops share this.
+  # Use a distinct db per Cube cluster when sharing one Redis instance.
+  db: 0
   # SECURITY: Override before any non-throwaway deployment. templates/validate.yaml
   # refuses to render when this equals the CHANGE_ME_* sentinel.
   password: CHANGE_ME_REDIS_PASSWORD
@@ -941,7 +946,6 @@ cubeProxy:
     # Overrides must be an FQDN or IP literal (nginx resolver has no search domains).
     host: ""
     port: ""
-    db: 0
   timeout:
     min: 500
     max: 700

@@ -1,13 +1,635 @@
-/* Keep the Chinese home-page tagline on one line when the viewport has room.
-   Narrow screens retain VitePress's responsive wrapping behavior. */
-@media (min-width: 768px) {
-  .VPHomeHero .text {
-    max-width: none;
-    white-space: nowrap;
-  }
+/* Scope the composition to home pages that opt into the brand illustration. */
+.VPHomeHero:has(.home-logo) .container { align-items: center; gap: 32px; }
+.VPHomeHero:has(.home-logo) .main { order: 1; width: 100%; min-width: 0; flex-shrink: 1; }
+.VPHomeHero:has(.home-logo) .image { order: 2; margin: 0; width: 100%; min-width: 0; }
+.VPHomeHero:has(.home-logo) .image-container { width: 100%; height: auto; transform: none; }
+.VPHomeHero:has(.home-logo) .image-bg { display: none; }
+.VPHomeHero:has(.home-logo) .name,
+.VPHomeHero:has(.home-logo) .text,
+.VPHomeHero:has(.home-logo) .tagline { white-space: normal; text-wrap: balance; }
+.VPHomeHero:has(.home-logo) .text { text-wrap: pretty; }
 
-  html[lang^='zh'] .VPHomeHero .tagline {
-    max-width: none;
-    white-space: nowrap;
+@media (min-width: 960px) {
+  .VPHomeHero:has(.home-logo) {
+    padding-top: calc(var(--vp-nav-height) + var(--vp-layout-top-height, 0px) + 36px);
+    padding-bottom: 44px;
+  }
+  .VPHomeHero:has(.home-logo) .main { flex: 1.15; max-width: 608px; }
+  .VPHomeHero:has(.home-logo) .image { flex: 1; }
+  .VPHomeHero:has(.home-logo) .text { max-width: 520px; }
+  .VPHomeHero:has(.home-logo) .tagline { max-width: 520px; font-size: 20px; line-height: 1.65; }
+}
+
+@media (min-width: 960px) and (max-width: 1199px) {
+  .VPHomeHero:has(.home-logo) .name,
+  .VPHomeHero:has(.home-logo) .text { font-size: 44px; line-height: 1.12; }
+}
+
+@media (max-width: 959px) {
+  .VPHomeHero:has(.home-logo) { padding-bottom: 32px; }
+  .VPHomeHero:has(.home-logo) .container { gap: 20px; }
+}
+
+/* This site's long navigation needs the existing mobile menu on smaller homes. */
+@media (min-width: 768px) and (max-width: 1439px) {
+  body:has(.home-logo) .VPNavBarMenu,
+  body:has(.home-logo) .VPNavBarTranslations,
+  body:has(.home-logo) .VPNavBarAppearance,
+  body:has(.home-logo) .VPNavBarSocialLinks,
+  body:has(.home-logo) .VPNavBarExtra { display: none; }
+  body:has(.home-logo) .VPNavBarHamburger { display: flex; }
+  body:has(.home-logo) .VPNavScreen { display: block; }
+}
+
+/* ==========================================================================
+   Home Hero Precision Action Buttons (Blueprint Instrument Aesthetic)
+   ========================================================================== */
+
+.VPHomeHero .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 26px;
+}
+
+.VPHomeHero .action {
+  flex-shrink: 0;
+}
+
+/* Master Precision Instrument Button Override */
+.VPHomeHero .VPButton {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 42px;
+  line-height: 40px;
+  padding: 0 22px;
+  border-radius: 4px !important; /* Discard rounded pill capsule, adopt precision 4px chassis bevel */
+  font-family: var(--vp-font-family-base);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-decoration: none !important;
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease, box-shadow 180ms ease, transform 120ms ease;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+/* Precision Engineering Arrow Indicator */
+.VPHomeHero .VPButton::after {
+  content: '→';
+  display: inline-block;
+  margin-left: 8px;
+  font-family: var(--vp-font-family-mono);
+  font-size: 13.5px;
+  line-height: 1;
+  transition: transform 180ms ease;
+}
+
+.VPHomeHero .VPButton:hover::after {
+  transform: translateX(4px);
+}
+
+.VPHomeHero .VPButton:active {
+  transform: translateY(1px);
+}
+
+/* Primary Brand Action Button (Vibrant Brand Blue with Precision Form) */
+.VPHomeHero .VPButton.brand {
+  background-color: var(--vp-button-brand-bg);
+  border: 1px solid var(--vp-button-brand-border, transparent);
+  color: var(--vp-button-brand-text) !important;
+  box-shadow: 0 2px 10px -2px rgba(58, 92, 204, 0.35);
+}
+
+.VPHomeHero .VPButton.brand:hover {
+  background-color: var(--vp-button-brand-hover-bg);
+  border-color: var(--vp-button-brand-hover-border, transparent);
+  color: var(--vp-button-brand-hover-text) !important;
+  box-shadow: 0 6px 18px -3px rgba(58, 92, 204, 0.45);
+}
+
+.dark .VPHomeHero .VPButton.brand {
+  background-color: var(--vp-button-brand-bg);
+  border: 1px solid var(--vp-button-brand-border, transparent);
+  color: var(--vp-button-brand-text) !important;
+  box-shadow: 0 4px 14px -2px rgba(62, 99, 221, 0.4);
+}
+
+.dark .VPHomeHero .VPButton.brand:hover {
+  background-color: var(--vp-button-brand-hover-bg);
+  border-color: var(--vp-button-brand-hover-border, transparent);
+  color: var(--vp-button-brand-hover-text) !important;
+  box-shadow: 0 6px 20px -2px rgba(92, 115, 231, 0.55);
+}
+
+/* Secondary / Alt Action Button (Monochrome Wireframe) */
+.VPHomeHero .VPButton.alt {
+  background-color: #ffffff;
+  border: 1px solid var(--chassis-border);
+  color: var(--vp-c-text-1) !important;
+  box-shadow: 0 1px 4px -1px rgba(0, 0, 0, 0.05);
+}
+
+.VPHomeHero .VPButton.alt:hover {
+  background-color: var(--cell-hover-bg);
+  border-color: var(--laser-flare);
+  color: var(--vp-c-text-1) !important;
+}
+
+.dark .VPHomeHero .VPButton.alt {
+  background-color: #0b1019;
+  border: 1px solid var(--chassis-border);
+  color: var(--vp-c-text-1) !important;
+}
+
+.dark .VPHomeHero .VPButton.alt:hover {
+  background-color: #0f1724;
+  border-color: var(--laser-flare);
+  color: var(--vp-c-text-1) !important;
+}
+
+/* ==========================================================================
+   Home Blueprint Instrument - Precision Architectural System Showcase
+   ========================================================================== */
+
+:root {
+  --chassis-border: rgba(15, 23, 42, 0.1);
+  --chassis-bg: #f8fafc;
+  --cell-bg: #ffffff;
+  --cell-hover-bg: #fbfcfe;
+  --laser-flare: rgba(15, 23, 42, 0.35);
+  --schematic-color: #475569;
+  --schematic-active: #0f172a;
+  --spec-tag-bg: rgba(15, 23, 42, 0.05);
+  --spec-tag-border: rgba(15, 23, 42, 0.15);
+}
+
+.dark {
+  --chassis-border: rgba(255, 255, 255, 0.08);
+  --chassis-bg: #070a10;
+  --cell-bg: #0b1019;
+  --cell-hover-bg: #0f1724;
+  --laser-flare: rgba(255, 255, 255, 0.45);
+  --schematic-color: #8192a8;
+  --schematic-active: #e2e8f0;
+  --spec-tag-bg: rgba(255, 255, 255, 0.04);
+  --spec-tag-border: rgba(255, 255, 255, 0.12);
+}
+
+.blueprint-section {
+  position: relative;
+  width: 100%;
+  padding: 32px 24px 64px;
+  isolation: isolate;
+}
+
+@media (min-width: 640px) {
+  .blueprint-section {
+    padding: 32px 48px 64px;
   }
 }
+
+@media (min-width: 960px) {
+  .blueprint-section {
+    padding: 32px 64px 64px;
+  }
+}
+
+.blueprint-container {
+  max-width: 1152px;
+  margin: 0 auto;
+  padding: 0;
+}
+
+/* Metadata Bar & Calibration Header */
+.blueprint-meta-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  font-family: var(--vp-font-family-mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: var(--vp-c-text-3);
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--chassis-border);
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.blueprint-meta-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.meta-tag {
+  padding: 2px 7px;
+  background: var(--spec-tag-bg);
+  border: 1px solid var(--spec-tag-border);
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+
+.meta-tag--primary {
+  color: var(--vp-c-brand-1);
+}
+
+.meta-engine {
+  color: var(--vp-c-text-2);
+  font-size: 11.5px;
+}
+
+.blueprint-trust-group {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 11px;
+  color: var(--vp-c-text-2);
+  flex-wrap: wrap;
+}
+
+.trust-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.trust-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--vp-c-brand-1);
+  opacity: 0.8;
+}
+
+/* Section Title & Description (Swiss Style) */
+.blueprint-intro {
+  margin-bottom: 24px;
+}
+
+.blueprint-title {
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.25;
+  color: var(--vp-c-text-1);
+  margin: 0 0 10px;
+  text-wrap: balance;
+}
+
+.blueprint-description {
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--vp-c-text-2);
+  margin: 0;
+  max-width: 820px;
+  text-wrap: balance;
+}
+
+/* 4-Pillar Hardcore Benchmark Metrics Strip */
+.benchmark-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  background: var(--chassis-border);
+  border: 1px solid var(--chassis-border);
+  border-radius: 4px;
+  margin-bottom: 24px;
+  overflow: hidden;
+  box-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.03);
+}
+
+.dark .benchmark-strip {
+  box-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.35);
+}
+
+.benchmark-item {
+  position: relative;
+  background: var(--cell-bg);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  transition: background 180ms ease;
+}
+
+.benchmark-item:hover {
+  background: var(--cell-hover-bg);
+}
+
+.benchmark-val-box {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.benchmark-val {
+  font-family: var(--vp-font-family-mono);
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: var(--vp-c-brand-1);
+  line-height: 1.1;
+}
+
+.benchmark-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--vp-c-text-1);
+  margin-bottom: 4px;
+  line-height: 1.3;
+}
+
+.benchmark-sub {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--vp-c-text-3);
+}
+
+/* Monolithic Blueprint Chassis */
+.blueprint-chassis {
+  position: relative;
+  border: 1px solid var(--chassis-border);
+  background: var(--chassis-border);
+  border-radius: 4px;
+  overflow: visible;
+  box-shadow: 0 12px 36px -8px rgba(0, 0, 0, 0.08);
+}
+
+.dark .blueprint-chassis {
+  box-shadow: 0 12px 36px -8px rgba(0, 0, 0, 0.45);
+}
+
+/* Corner Reticle Crosshairs */
+.chassis-crosshair {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  line-height: 14px;
+  text-align: center;
+  font-family: var(--vp-font-family-mono);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--vp-c-text-3);
+  pointer-events: none;
+  z-index: 10;
+}
+
+.ch-top-left { top: -7px; left: -7px; }
+.ch-top-right { top: -7px; right: -7px; }
+.ch-bottom-left { bottom: -7px; left: -7px; }
+.ch-bottom-right { bottom: -7px; right: -7px; }
+
+/* 12-Column Hairline Grid */
+.blueprint-grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 1px;
+}
+
+.grid-span-7 { grid-column: span 7; }
+.grid-span-5 { grid-column: span 5; }
+.grid-span-4 { grid-column: span 4; }
+.grid-span-3 { grid-column: span 3; }
+
+/* Cell Panel Base */
+.cell-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--cell-bg);
+  padding: 24px;
+  text-decoration: none !important;
+  color: inherit;
+  transition: background 180ms ease, color 180ms ease;
+  overflow: hidden;
+}
+
+.grid-span-7.cell-panel,
+.grid-span-5.cell-panel {
+  padding: 26px;
+}
+
+.grid-span-3.cell-panel {
+  padding: 22px 20px 24px;
+}
+
+.grid-span-3 .cell-metric {
+  font-size: 9px;
+  padding: 1.5px 5px;
+}
+
+.cell-panel:hover {
+  background: var(--cell-hover-bg);
+}
+
+/* Laser-Etched Border Flare */
+.cell-border-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px transparent;
+  opacity: 0;
+  transition: opacity 220ms ease, box-shadow 220ms ease;
+  z-index: 5;
+}
+
+.cell-panel:hover .cell-border-glow {
+  box-shadow: inset 0 0 0 1px var(--laser-flare);
+  opacity: 1;
+}
+
+/* Header Plate inside Cell */
+.cell-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.cell-index-box {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.cell-index {
+  font-family: var(--vp-font-family-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--vp-c-brand-1);
+}
+
+.cell-category {
+  font-family: var(--vp-font-family-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--vp-c-text-3);
+  text-transform: uppercase;
+}
+
+.cell-metric {
+  font-family: var(--vp-font-family-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--vp-c-text-2);
+  background: var(--spec-tag-bg);
+  border: 1px solid var(--spec-tag-border);
+  padding: 2px 6px;
+  border-radius: 2px;
+  white-space: nowrap;
+}
+
+/* Schematic Graphic Slot */
+.cell-schematic {
+  margin: 10px 0 16px;
+  width: 100%;
+  color: var(--schematic-color);
+  transition: color 220ms ease;
+}
+
+.cell-panel:hover .cell-schematic {
+  color: var(--schematic-active);
+}
+
+.schematic-svg {
+  width: 100%;
+  height: auto;
+  max-height: 88px;
+  display: block;
+}
+
+.cell--startup .schematic-svg {
+  max-height: 105px;
+}
+
+.cell--isolation .schematic-svg {
+  max-height: 105px;
+}
+
+/* Cell Body (Title & Technical Summary) */
+.cell-body {
+  margin-top: auto;
+  margin-bottom: 14px;
+}
+
+.cell-title {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.35;
+  color: var(--vp-c-text-1);
+  margin: 0 0 8px;
+}
+
+.cell-summary {
+  font-size: 12.5px;
+  line-height: 1.62;
+  color: var(--vp-c-text-2);
+  margin: 0;
+}
+
+/* Bottom Technical Action Indicator */
+.cell-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 10px;
+  border-top: 1px dashed var(--chassis-border);
+  font-family: var(--vp-font-family-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--vp-c-brand-1);
+}
+
+.action-arrow {
+  font-size: 13px;
+  transition: transform 180ms ease;
+}
+
+.cell-panel:hover .action-arrow {
+  transform: translateX(4px);
+}
+
+/* ==========================================================================
+   Responsive Architecture
+   ========================================================================== */
+
+@media (max-width: 1024px) {
+  .benchmark-strip {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .grid-span-7,
+  .grid-span-5 {
+    grid-column: span 12;
+  }
+  .grid-span-4 {
+    grid-column: span 6;
+  }
+  .cell--density {
+    grid-column: span 12;
+  }
+  .grid-span-3 {
+    grid-column: span 6;
+  }
+}
+
+@media (max-width: 640px) {
+  .blueprint-section {
+    padding: 24px 24px 40px;
+  }
+  .blueprint-meta-bar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .benchmark-strip {
+    grid-template-columns: 1fr;
+  }
+  .benchmark-item {
+    padding: 14px 16px;
+  }
+  .blueprint-title {
+    font-size: 22px;
+  }
+  .blueprint-description {
+    font-size: 13.5px;
+  }
+  .blueprint-grid {
+    grid-template-columns: 1fr;
+  }
+  .grid-span-7,
+  .grid-span-5,
+  .grid-span-4,
+  .grid-span-3,
+  .cell--density {
+    grid-column: span 1;
+  }
+  .cell-panel,
+  .grid-span-7.cell-panel,
+  .grid-span-5.cell-panel {
+    padding: 16px;
+  }
+}
+
+/* Reduced Motion Mode */
+@media (prefers-reduced-motion: reduce) {
+  .cell-panel,
+  .cell-border-glow,
+  .cell-schematic,
+  .action-arrow,
+  .VPHomeHero .VPButton,
+  .VPHomeHero .VPButton::after {
+    transition: none !important;
+    transform: none !important;
+  }
+}
+
+

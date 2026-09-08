@@ -13,6 +13,9 @@ Cube Sandbox 在每台宿主机上部署一个透明出网代理 —— **CubeEg
 - **访问审计** —— 每一次决策（放行 / 拒绝 / 注入 / TLS 握手结果）
   都落到主机本地的 JSONL 审计日志
 
+上游 `proxy_read_timeout` / `proxy_send_timeout` 为 2h（与 CubeProxy
+同量级）。`proxy_connect_timeout` 仍是 10s。
+
 ## 拦截链路
 
 CubeEgress 是一个 host-network 容器，在面向沙箱的 IP 上 bind 两个

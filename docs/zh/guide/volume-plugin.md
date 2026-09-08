@@ -543,6 +543,19 @@ Volume.destroy(vol.volume_id)
 
 同一 Volume 可被多个沙箱同时挂载；一个沙箱写入的数据对其他沙箱可见。调用 `Volume.destroy()` 前须销毁**所有**挂载该 Volume 的沙箱（平台如何跟踪共享引用见 [RefCount](#refcount)）。
 
+### 快照、回滚、克隆与跨机恢复
+
+Snapshot 会保存稳定的 Volume ID、容器挂载路径和只读属性，但不会复制 Volume 数据，也不会持久化运行时 `private_data`。FromSnap 由 Master 查询当前 Volume 记录，并把 driver 元数据发送给目标 Cubelet 执行 `Attach`；Pause/Resume 会校验已记录的 Volume ID，并根据 pause package 重新 Attach；原地 Rollback 则保留沙箱现有的外部挂载。
+
+因此它采用 **external-reference（外部引用）**语义：
+
+- FromSnap 和回滚会恢复 VM/rootfs 状态，但挂载后的 Volume 展示当前数据。
+- 克隆继续共享同一个 Volume；读写挂载中的写入对源沙箱和其他克隆可见。
+- Plugin Volume 不会把原本支持跨机的 VM Snapshot 固定到源节点。对于 `remote_status=ready` 的 S3 VM Snapshot，目标 Cubelet 会在启动 VM 前尝试 Attach Volume。
+- 调度器当前只检查 VM 兼容性，不检查 Volume portability、topology、multi-attach 能力或目标节点 driver。Volume 不存在、目标节点未注册 driver 或 `Attach` 返回错误时，沙箱创建失败。运维方需要在每个候选节点配置相同 driver，并确保它们能够访问目标后端。
+
+Volume backend 与 VM Snapshot backend 相互独立。VM Snapshot 包必须使用 S3 backend 才能跨机；Plugin Volume 可以使用目标节点 driver 能够 Attach 的任意后端。raw host mount 与此不同，始终固定在源节点。
+
 ### 常见异常（SDK）
 
 | 场景 | SDK 异常 | 典型原因 |

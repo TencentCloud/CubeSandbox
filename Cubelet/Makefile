@@ -34,12 +34,10 @@ PKG=github.com/tencentcloud/CubeSandbox/Cubelet/pkg
 
 PWD = $(shell pwd)
 
-# COVERAGE_PACKAGES is the coverage we care about.
+# COVERAGE_PACKAGES excludes generated api/ code and integration/ (needs a
+# live cluster); everything else is unit-testable in the builder.
 COVERAGE_PACKAGES=$(shell go list ./... \
 	| grep -v github.com/tencentcloud/CubeSandbox/Cubelet/api \
-	| grep -v github.com/tencentcloud/CubeSandbox/Cubelet/cmd \
-	| grep -v github.com/tencentcloud/CubeSandbox/Cubelet/shimlog \
-	| grep -v github.com/tencentcloud/CubeSandbox/Cubelet/runtime \
 	| grep -v /integration)
 
 # Version — injected at build time via ldflags.

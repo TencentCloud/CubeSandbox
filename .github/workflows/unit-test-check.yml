@@ -217,8 +217,9 @@ jobs:
                   add_component "cubelet"
                   ;;
                 CubeNet/*)
-                  # Embedded network runtime lives under Cubelet; CubeNet eBPF
-                  # helper changes still need the cubelet test set.
+                  # The embedded network runtime lives under
+                  # Cubelet/network/runtime and is exercised by cubelet-test,
+                  # so CubeNet eBPF helper changes re-run the cubelet test set.
                   add_component "cubelet"
                   ;;
                 pkgs/CubeLog/*)
@@ -314,7 +315,7 @@ jobs:
                     elif . == "cubelog" then "cubelog-test"
                     elif . == "cubedb" then "cubedb-test"
                     elif . == "cube-lifecycle-manager" then "cube-lifecycle-manager-test"
-                    elif . == "cubelet" then "cubelet-pkg-test"
+                    elif . == "cubelet" then "cubelet-test"
                     elif . == "cubevs" then "cubevs-test"
                     elif . == "agent" then "agent-test"
                     elif . == "hypervisor" then "hypervisor-test"

@@ -166,10 +166,9 @@ func TestScaleInt64(t *testing.T) {
 	assert.Equal(t, int64(0), scaleInt64(1000, 0))
 	assert.Equal(t, int64(1000), scaleInt64(1000, 1))
 	assert.Equal(t, int64(7), scaleInt64(10, 0.75), "truncates toward zero")
-	// Guard the load-bearing contract that callers must pass a clamped factor:
-	// a non-finite factor collapses int64(v*NaN) to math.MinInt64, which is why
-	// clampRatio sanitises the ratio before it ever reaches scaleInt64.
-	assert.Equal(t, int64(math.MinInt64), scaleInt64(4096, math.NaN()))
+	// Callers must pass a clamped factor: int64(v*NaN) is architecture-specific
+	// (MinInt64 on amd64, 0 on arm64), so no cross-arch assertion is possible
+	// here. The contract is guarded by TestClampRatio's NaN/Inf cases instead.
 }
 
 func TestAdmitResumeNoOpWhenPolicyDisabled(t *testing.T) {

@@ -1048,6 +1048,11 @@ CUBE_SANDBOX_MYSQL_* alone is always assembled as mysql://.
 {{- if eq (include "cube.redisSentinelEnabled" .) "true" -}}{{- else -}}{{ printf "%s:%v" (include "cube.redisHost" .) .Values.redis.port }}{{- end -}}
 {{- end -}}
 
+{{- /* Logical Redis DB for Master / Proxy / LCM / Ops (same instance isolation). */ -}}
+{{- define "cube.redisDB" -}}
+{{- .Values.redis.db | default 0 | int -}}
+{{- end -}}
+
 {{- define "cube.egressNetProbeCommand" -}}
 set -e
 iface="${CUBE_INGRESS_IFACE:-cube-dev}"

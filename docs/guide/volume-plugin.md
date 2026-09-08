@@ -545,6 +545,19 @@ Volume.destroy(vol.volume_id)
 
 One Volume may be mounted by multiple sandboxes simultaneously; data written from one sandbox is visible to others. Destroy **all** sandboxes using the Volume before calling `Volume.destroy()` (see [RefCount](#refcount) for how the platform tracks shared usage).
 
+### Snapshot, rollback, clone, and cross-node restore
+
+Snapshots store the stable Volume ID, container mount path, and read-only flag. They do not copy Volume data or persist runtime `private_data`. FromSnap asks Master to resolve the current Volume record and sends that driver metadata to the target Cubelet for `Attach`. Pause/Resume validates the recorded Volume IDs and reattaches from the pause package, while in-place rollback keeps the sandbox's existing external attachment.
+
+This produces **external-reference** behavior:
+
+- FromSnap and rollback restore VM/rootfs state, but the mounted Volume exposes its current data.
+- Clones continue to share the same Volume. Writes through a read-write mount are visible to the source and other clones.
+- A plugin Volume does not pin an otherwise cross-node-capable VM snapshot to its origin. For an S3 VM snapshot with `remote_status=ready`, the target Cubelet attempts to attach the Volume before starting the VM.
+- The scheduler currently checks VM compatibility, not Volume portability, topology, multi-attach support, or target driver availability. A missing Volume, unregistered target driver, or `Attach` error fails sandbox creation. Configure every eligible node with the same driver and access to the intended backend.
+
+The Volume backend and VM snapshot backend are independent. The VM snapshot package must use the S3 backend for cross-node restore; the plugin Volume may use any backend that its target-side driver can attach. Raw host mounts are different and remain pinned to their origin node.
+
 ### Common SDK Errors
 
 | Scenario | SDK exception | Typical cause |
