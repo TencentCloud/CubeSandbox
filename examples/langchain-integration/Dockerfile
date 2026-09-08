@@ -1,7 +1,7 @@
 # examples/langchain-integration/Dockerfile
 # Stacks a Python data-science stack on top of cubesandbox-base so LangChain
 # agents can execute pandas / numpy / matplotlib code inside the MicroVM.
-ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16
+ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:latest
 FROM ${CUBE_BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive

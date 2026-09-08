@@ -41,7 +41,7 @@ Python 3.10+ and starting fresh (or already on LangChain 1.x) → use **1.x**.
 | langchain-openai | `langchain-openai==0.3.12` | `langchain-openai>=1.0,<2.0` |
 | LangGraph (create_agent runtime) | — (not used; `AgentExecutor` + `create_react_agent` have no LangGraph dep) | `langgraph>=0.2` (declared in `1.x/requirements.txt` so the sample is self-contained) |
 | cubesandbox SDK (main driver) | `cubesandbox>=0.6.0` | `cubesandbox>=0.6.0` |
-| CubeSandbox base image | `ghcr.io/tencentcloud/cubesandbox-base:2026.16` | same |
+| CubeSandbox base image | `ghcr.io/tencentcloud/cubesandbox-base:latest` | same |
 | CubeSandbox platform | `>= 0.3.0` (core); higher for optional features below | `>= 0.3.0` (core); higher for optional features below |
 
 Per-feature platform minimums (the SDK floor above covers the base workflow; raise
@@ -88,7 +88,7 @@ Layer a Python data-science stack on top of `cubesandbox-base` (envd listens on 
 
 ```dockerfile
 # examples/langchain-integration/Dockerfile
-ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16
+ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:latest
 FROM ${CUBE_BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive

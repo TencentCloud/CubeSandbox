@@ -39,7 +39,7 @@ Agent 生成的每一行代码获得 KVM 级隔离。本文附带可运行的
 | langchain-openai | `langchain-openai==0.3.12` | `langchain-openai>=1.0,<2.0` |
 | LangGraph（`create_agent` 运行时） | —（未使用；`AgentExecutor` + `create_react_agent` 不依赖 LangGraph） | `langgraph>=0.2`（已在 `1.x/requirements.txt` 显式声明，保证示例自包含） |
 | cubesandbox SDK（主驱动） | `cubesandbox>=0.6.0` | `cubesandbox>=0.6.0` |
-| CubeSandbox 基础镜像 | `ghcr.io/tencentcloud/cubesandbox-base:2026.16` | 相同 |
+| CubeSandbox 基础镜像 | `ghcr.io/tencentcloud/cubesandbox-base:latest` | 相同 |
 | CubeSandbox 平台 | `>= 0.3.0`（核心）；可选特性见下表 | `>= 0.3.0`（核心）；可选特性见下表 |
 
 各特性的平台最低版本（上面的 SDK 下限覆盖基础工作流；仅当你使用该特性时才提高
@@ -84,7 +84,7 @@ LangChain Agent 经常会暴露代码执行工具（数据分析、文件转换�
 
 ```dockerfile
 # examples/langchain-integration/Dockerfile
-ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16
+ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:latest
 FROM ${CUBE_BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
