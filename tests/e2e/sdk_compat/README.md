@@ -535,3 +535,9 @@ Set `SDK_E2E_KEEP_SANDBOX_ON_FAILURE=true` to preserve sandboxes while debugging
 It only preserves sandboxes of *failed* tests created through the `sdk_sandbox`
 fixture; passed and skipped tests are always cleaned up, and boundary tests that
 create sandboxes directly (via their own helpers) always clean up regardless.
+
+## Kubernetes post-install validation
+
+Use `pytest --run-e2e --k8s-post-install` to run deployment preflight plus a small
+functional profile using the existing SDK adapters. See
+[setup, permissions, coverage and reports](docs/kubernetes-post-install.md).
