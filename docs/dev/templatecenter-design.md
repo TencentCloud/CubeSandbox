@@ -147,17 +147,22 @@ forged BUILT report's artifact id/sha becomes the rootfs nodes boot from. The
 endpoint therefore requires a shared secret: TC sends
 `X-Cube-Template-Callback-Token`, CubeMaster compares it against
 `CUBE_TEMPLATE_CALLBACK_TOKEN` in constant time and rejects mismatches with
-401. When the variable is unset on CubeMaster the endpoint stays open (with a
-one-time warning) so an older TC keeps working during a rolling upgrade; Helm
+401. Both ends fail closed when the variable is unset (503) — Helm
 (auto-generated `cube-template-callback-token` Secret key), one-click
 (generated into `.one-click.env`), and terraform (`random_password`) all wire
-it by default.
+it by default, so unset means misconfiguration; the only exception is the
+explicit single-binary-dev opt-in `CUBE_TEMPLATE_CALLBACK_INSECURE_NO_TOKEN=true`.
+Both the Master callback route and TC's internal routes are registered
+outside `GinRequestMiddleware`, so `checkAuth` can never answer them with an
+HTTP-200 business error that a `StatusCode == 200` client would read as
+success.
 
 ### 6.2 TC build endpoint
 
-TC's internal `/tc/api/v1/*` endpoints are unauthenticated and must stay on a
-cluster-internal / VPC-internal address (the chart renders the optional CLB as
-internal-only; one-click binds TC to loopback by default).
+TC's internal `/tc/api/v1/*` endpoints require the same shared token (see
+§6.1) and must additionally stay on a cluster-internal / VPC-internal address
+(the chart renders the optional CLB as internal-only; one-click binds TC to
+loopback by default).
 
 ## 7. Reconciliation
 
@@ -263,10 +268,6 @@ Released with full awareness; each item lists the planned follow-up.
 - **37-day presigned URLs are not refreshed.** Artifacts uploaded to S3 get a
   long-lived presigned URL recorded at build time; there is no refresh job, so
   a template older than the presign TTL needs a redo to mint a new URL.
-- **`hasActiveJob` does not count BUILT.** The idempotency window (§3.6)
-  covers PENDING/RUNNING; a BUILT job whose resume pipeline is still
-  distributing is outside it, so a duplicate create in that window starts a
-  second distribution instead of attaching to the first.
 - **envd-era redo goes straight to FAILED.** Redoing a template built by the
   legacy in-process builder has no reusable artifact record and fails fast
   rather than rebuilding; recreate such templates from the source image.

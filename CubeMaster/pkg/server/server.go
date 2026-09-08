@@ -101,13 +101,21 @@ func NewInternalHttp(ctx context.Context, cfg *config.Config) (*internalHttp, er
 // previous gorilla/mux router-level middleware — while leaving the engine-level
 // NoRoute / NoMethod handlers bare.
 func (s *internalHttp) registerRoutes() {
+	// The internal template callback (TC -> Master build status) sits OUTSIDE
+	// GinRequestMiddleware: when AuthConf.Enable is on, checkAuth would reject
+	// the unsigned callback with an HTTP-200 business error, and TC's reporter
+	// treats StatusCode == 200 as success — the shared-token gate in the
+	// handler would never run. gin.Recovery keeps panic handling; the token
+	// gate is the only auth on these routes (same shape as TC's internal API).
+	internal := s.engine.Group("", gin.Recovery())
+	cube.RegisterInternalTemplateRoutes(internal)
+
 	root := s.engine.Group("")
 	root.Use(middleware.GinRequestMiddleware())
 	root.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	notify.RegisterNotifyRoutes(root.Group(notify.NotifyURI()))
 	cube.RegisterCubeRoutes(root.Group(cube.CubeURI()))
-	cube.RegisterInternalTemplateRoutes(root)
 	inner.RegisterInnerRoutes(root.Group(inner.InnerURI()))
 }
 

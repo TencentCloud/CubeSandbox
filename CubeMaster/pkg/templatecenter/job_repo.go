@@ -138,10 +138,17 @@ func getActiveTemplateImageJobByTemplateID(ctx context.Context, templateID strin
 	return getActiveTemplateImageJobByTemplateIDTx(store.db.WithContext(ctx), templateID)
 }
 
+// getActiveTemplateImageJobByTemplateIDTx finds the template's in-flight
+// create/redo job. BUILT counts as in-flight (same as the delete path's
+// hasActiveJob): the resume pipeline (register + distribute) still runs for
+// a BUILT job, and one whose callback response was lost is replayed by the
+// image-job reconciler — so a duplicate create/redo in that window must
+// attach to / be rejected by the existing job instead of opening a second
+// build and a second distribution.
 func getActiveTemplateImageJobByTemplateIDTx(tx *gorm.DB, templateID string) (*models.TemplateImageJob, error) {
 	record := &models.TemplateImageJob{}
 	err := tx.Table(constants.TemplateImageJobTableName).
-		Where("template_id = ? AND status IN ?", templateID, []string{JobStatusPending, JobStatusRunning}).
+		Where("template_id = ? AND status IN ?", templateID, []string{JobStatusPending, JobStatusRunning, JobStatusBuilt}).
 		Order("attempt_no desc, id desc").First(record).Error
 	if err != nil {
 		return nil, err

@@ -329,12 +329,13 @@ controlPlane:
   # are wired automatically on both sides -- no manual conf editing, and no
   # way to end up with a CubeMaster that has nowhere to forward builds.
   templateCenter:
-    # Replica count. Must stay 1 while artifactStore.s3Backed=false (the
-    # artifact store is a node-local disk with no cross-node sharing layer, so
-    # a second replica could neither read the first one's ext4 nor take over
-    # its builds). Values > 1 require artifactStore.s3Backed=true, where
-    # replicas coordinate duplicate builds of one spec through DB session
-    # locks and every replica reads/writes the shared S3 bucket.
+    # Replica count. Recommended >1 setup is artifactStore.s3Backed=true,
+    # where replicas coordinate duplicate builds of one spec through DB
+    # session locks and every replica reads/writes the shared S3 bucket.
+    # Without S3, values > 1 are allowed but DEGRADED (the install notes print
+    # a warning): the artifact store is node-local, so replicas cannot read
+    # each other's ext4 or take over each other's builds, and duplicate builds
+    # of one spec run in parallel. See the artifactStore comment above.
     replicas: 1
     # Bypass the migration content preflight. Rarely needed: an applied version
     # that is absent from this image's migrations tree is only reported, so a

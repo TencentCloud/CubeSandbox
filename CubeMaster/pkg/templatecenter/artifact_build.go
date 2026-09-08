@@ -35,18 +35,22 @@ import (
 // build in image.BuildExt4.
 // claimRootfsArtifactForBuild atomically ensures the artifact row exists and is
 // marked BUILDING while holding its FOR UPDATE lock. It resurrects a
-// soft-deleted or CLEANUP_PENDING row (raced with a concurrent
-// last-owner-cleanup) instead of letting the build proceed against a row that
-// is about to vanish. Because the deleter takes the same row lock in both its
-// decision (TX1) and finalisation (TX2) phases, after this commit the deleter's
-// phase-3 re-check observes a live BUILDING row plus the active build job and
-// backs off without deleting or overwriting the in-flight build status.
+// soft-deleted row (raced with a concurrent last-owner-cleanup) instead of
+// letting the build proceed against a row that is about to vanish.
 //
-// A DELETING row is the one state it must NOT resurrect: the TC deleter has
-// claimed that row and its final row DELETE is guarded on status=DELETING, so
-// flipping the row back to BUILDING here would orphan the delete in flight
-// (data removed, row alive). The claim defers instead; the caller leaves the
-// job BUILT and the image-job reconciler replays once the row is gone.
+// Two states it must NOT resurrect (both defer via
+// errArtifactRegisterRetryable — the job stays BUILT and the image-job
+// reconciler replays):
+//   - DELETING: the TC deleter has claimed the row and its final row DELETE
+//     is guarded on status=DELETING; flipping back to BUILDING would orphan
+//     the delete in flight (data removed, row alive). The TC deleter claims
+//     / releases / deletes data OUTSIDE any transaction — it holds no row
+//     lock — so this status check is the only coordination point.
+//   - CLEANUP_PENDING: Master phase 2 deliberately leaves that status while
+//     node copies are still being drained (and the TC backstop now skips
+//     exactly those rows). Pulling the row back to BUILDING would race the
+//     in-flight node removal. The row becomes claimable once cleanup
+//     finishes and deletes it.
 //
 // Master uses this when registering an artifact reported by TC in the BUILT
 // callback (remote_build_resume.go).
@@ -75,7 +79,7 @@ func claimRootfsArtifactForBuild(ctx context.Context, artifactID, fingerprint st
 		case err != nil:
 			return err
 		default:
-			if strings.EqualFold(strings.TrimSpace(existing.Status), ArtifactStatusDeleting) {
+			if s := strings.ToUpper(strings.TrimSpace(existing.Status)); s == ArtifactStatusDeleting || s == ArtifactStatusCleanupPending {
 				return errArtifactRegisterRetryable
 			}
 			if updErr := tx.Unscoped().Table(constants.RootfsArtifactTableName).

@@ -37,14 +37,16 @@ instance_db_config:
   max_conn_life_time_seconds: 300
 
 # Redis carries the live pull-progress snapshots, written through localcache with
-# the same keys CubeMaster reads when answering a progress query.
+# the same keys CubeMaster reads when answering a progress query. The logical DB
+# must therefore follow cube.redisDB (top-level redis.db), same as cube-master's
+# conf — a mismatch (Master on N, TC on 0) breaks progress queries.
 redis:
   nodes: {{ include "cube.redisNodes" . | quote }}
   master_name: {{ .Values.redis.masterName | default "" | quote }}
   sentinel_nodes: {{ .Values.redis.sentinelNodes | default "" | quote }}
   sentinel_password: {{ .Values.redis.sentinelPassword | default "" | quote }}
   password: {{ .Values.redis.password | quote }}
-  db_no: 0
+  db_no: {{ include "cube.redisDB" . }}
   max_idle: 8
   max_active: 32
   idle_timeout: 30
@@ -56,7 +58,7 @@ redis_read:
   sentinel_nodes: {{ .Values.redis.sentinelNodes | default "" | quote }}
   sentinel_password: {{ .Values.redis.sentinelPassword | default "" | quote }}
   password: {{ .Values.redis.password | quote }}
-  db_no: 0
+  db_no: {{ include "cube.redisDB" . }}
   max_idle: 8
   max_active: 32
   idle_timeout: 30
@@ -68,7 +70,7 @@ redis_write:
   sentinel_nodes: {{ .Values.redis.sentinelNodes | default "" | quote }}
   sentinel_password: {{ .Values.redis.sentinelPassword | default "" | quote }}
   password: {{ .Values.redis.password | quote }}
-  db_no: 0
+  db_no: {{ include "cube.redisDB" . }}
   max_idle: 8
   max_active: 32
   idle_timeout: 30
