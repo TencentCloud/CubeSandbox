@@ -5,13 +5,17 @@
 package cube
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 )
@@ -49,14 +53,42 @@ var templateJobIntColumns = map[string]bool{
 	"pull_speed_bps":        true,
 }
 
+// callbackTokenWarnOnce rate-limits the "unauthenticated endpoint" warning.
+var callbackTokenWarnOnce sync.Once
+
+// templateCallbackAuthorized gates the status callback on the shared secret
+// from constants.TemplateCallbackTokenEnv. When the env is empty the request
+// is allowed (rolling-upgrade compatibility with an older TC) and a warning
+// is logged once; when it is set, a missing/mismatched header is rejected
+// with 401 so a forged BUILT report cannot poison the rootfs pipeline.
+func templateCallbackAuthorized(c *gin.Context) bool {
+	want := strings.TrimSpace(os.Getenv(constants.TemplateCallbackTokenEnv))
+	if want == "" {
+		callbackTokenWarnOnce.Do(func() {
+			log.G(c.Request.Context()).Warnf(
+				"%s is not set: template job status callback is unauthenticated; set it on both CubeMaster and CubeTemplateCenter",
+				constants.TemplateCallbackTokenEnv)
+		})
+		return true
+	}
+	got := strings.TrimSpace(c.GetHeader(constants.TemplateCallbackTokenHeader))
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
 // handleTemplateJobStatusCallback receives build status reports from
 // CubeTemplateCenter (remote build mode) and persists them to image_jobs.
 //
 // Route: POST /internal/template/jobs/:job_id/status
 //
-// The endpoint is internal-only: it trusts the payload because it is not
-// exposed outside the cluster network (same trust model as the inner API).
+// The endpoint trusts the payload wholesale (a BUILT report's artifact id /
+// sha / path become the rootfs nodes boot from), so it is gated on the shared
+// callback token — see templateCallbackAuthorized.
 func handleTemplateJobStatusCallback(c *gin.Context) {
+	if !templateCallbackAuthorized(c) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or missing callback token"})
+		return
+	}
+
 	jobID := strings.TrimSpace(c.Param("job_id"))
 	if jobID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "job_id is required"})

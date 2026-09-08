@@ -6,6 +6,7 @@ package templatecenter
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -54,11 +55,15 @@ func TestRootfsArtifactIDFromCreateRequest(t *testing.T) {
 
 // requestTemplateCenterArtifactDelete is the ONLY thing allowed to remove an
 // artifact's S3 object/local file/row (see CubeTemplateCenter/pkg/build/
-// deleter.go). This pins that CubeMaster's artifact cleanup calls it exactly
-// once per finalized artifact, with the artifact_id it just finished
-// counting references for -- regression test for the S3-leak bug where
-// CubeMaster used to hard-delete the row itself without ever notifying TC.
-func TestRequestTemplateCenterArtifactDeleteIsCalledOnFinalize(t *testing.T) {
+// deleter.go). cleanupArtifactFully reaches it via
+// notifyTemplateCenterArtifactDelete exactly once per finalized artifact --
+// regression test for the S3-leak bug where CubeMaster used to hard-delete the
+// row itself without ever notifying TC.
+//
+// The DB-bound phases of cleanupArtifactFully (1 and 3) are not unit-testable
+// without a live database, so this exercises the production notify step
+// directly instead of asserting on the stub itself.
+func TestNotifyTemplateCenterArtifactDeleteCallsSeamOnce(t *testing.T) {
 	orig := requestTemplateCenterArtifactDelete
 	defer func() { requestTemplateCenterArtifactDelete = orig }()
 
@@ -68,17 +73,24 @@ func TestRequestTemplateCenterArtifactDeleteIsCalledOnFinalize(t *testing.T) {
 		return nil
 	}
 
-	// Directly exercising cleanupArtifactFully needs a DB (Phase 1/3 both run
-	// transactions); that path is covered by the mysql/postgres integration
-	// suite. Here we pin the seam's contract in isolation: it must be a
-	// package-level var (stubbable) taking (ctx, artifactID) and returning
-	// error, and a stub swap must not leak across tests.
-	if err := requestTemplateCenterArtifactDelete(context.Background(), "rfs-1"); err != nil {
-		t.Fatalf("stubbed seam returned error: %v", err)
-	}
+	notifyTemplateCenterArtifactDelete(context.Background(), "rfs-1")
 	if len(calledWith) != 1 || calledWith[0] != "rfs-1" {
-		t.Fatalf("calledWith = %v, want [rfs-1]", calledWith)
+		t.Fatalf("calledWith = %v, want exactly [rfs-1]", calledWith)
 	}
+}
+
+// A notify failure must not propagate: the artifact row stays CLEANUP_PENDING
+// and TC's reconciler backstop-sweeps it later, so template deletion proceeds.
+func TestNotifyTemplateCenterArtifactDeleteSwallowsErrors(t *testing.T) {
+	orig := requestTemplateCenterArtifactDelete
+	defer func() { requestTemplateCenterArtifactDelete = orig }()
+
+	requestTemplateCenterArtifactDelete = func(ctx context.Context, artifactID string) error {
+		return errors.New("tc unreachable")
+	}
+
+	// Must not panic; there is no return value to check by design.
+	notifyTemplateCenterArtifactDelete(context.Background(), "rfs-2")
 }
 
 // When TC's endpoint is not configured, the seam must fail loudly (not

@@ -4,6 +4,21 @@
 
 package constants
 
+const (
+	// TemplateCallbackTokenHeader carries the shared secret on
+	// CubeTemplateCenter -> CubeMaster build-status callbacks
+	// (POST /internal/template/jobs/:job_id/status). The callback payload is
+	// trusted wholesale by the resume pipeline (artifact id/sha become the
+	// rootfs nodes boot from), so the endpoint must not stay anonymous on the
+	// public HTTP port.
+	TemplateCallbackTokenHeader = "X-Cube-Template-Callback-Token"
+	// TemplateCallbackTokenEnv is the environment variable both sides read the
+	// shared secret from. When unset on CubeMaster the callback stays open
+	// (with a warning) so an older TC keeps working during a rolling upgrade;
+	// the chart and one-click installers always generate one.
+	TemplateCallbackTokenEnv = "CUBE_TEMPLATE_CALLBACK_TOKEN"
+)
+
 func GetAppSnapshotVersion(annotations map[string]string) string {
 	if annotations == nil {
 		return ""

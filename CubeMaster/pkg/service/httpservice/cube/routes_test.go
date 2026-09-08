@@ -41,7 +41,10 @@ func newRouteInspectEngine(t *testing.T, register func(g *gin.RouterGroup)) *gin
 // data-plane split: every template route whose handler can reach a cubelet
 // over the worker grpc pool (create/delete/redo) or that goes through the
 // process-local template query caches (info/list read, alias write) MUST be
-// served by CubeMaster itself, never proxied to CubeTemplateCenter.
+// served by CubeMaster itself, never proxied to CubeTemplateCenter. The
+// build-status / from-image polls are local too: they read job rows
+// CubeMaster owns, and proxying them made a successful create look broken
+// when TC was unreachable (create 200, poll 502).
 //
 // Regression being guarded: DELETE /cube/template used to be proxied to TC,
 // where the uninitialized grpc conn pool failed every delete with "worker
@@ -53,12 +56,14 @@ func TestCubeRoutesTemplateWritesStayOnCubeMaster(t *testing.T) {
 	r := newRouteInspectEngine(t, RegisterCubeRoutes)
 
 	localRoutes := map[string]string{
-		"POST /cube/template":                   "createTemplateGinHandler",
-		"DELETE /cube/template":                 "deleteTemplateGinHandler",
-		"GET /cube/template":                    "getTemplateGinHandler",
-		"PUT /cube/template/:template_id/alias": "setTemplateAliasGinHandler",
-		"POST /cube/template/from-image":        "createTemplateFromImageGinHandler",
-		"POST /cube/template/redo":              "handleRedoTemplateAction",
+		"POST /cube/template":                       "createTemplateGinHandler",
+		"DELETE /cube/template":                     "deleteTemplateGinHandler",
+		"GET /cube/template":                        "getTemplateGinHandler",
+		"PUT /cube/template/:template_id/alias":     "setTemplateAliasGinHandler",
+		"POST /cube/template/from-image":            "createTemplateFromImageGinHandler",
+		"POST /cube/template/redo":                  "handleRedoTemplateAction",
+		"GET /cube/template/build/:build_id/status": "handleTemplateBuildStatusAction",
+		"GET /cube/template/from-image":             "getTemplateFromImageGinHandler",
 	}
 	for route, wantHandler := range localRoutes {
 		method, path, _ := strings.Cut(route, " ")
@@ -77,17 +82,15 @@ func TestCubeRoutesTemplateWritesStayOnCubeMaster(t *testing.T) {
 }
 
 // TestCubeRoutesTemplateProxyRemainder pins the routes that are still proxied
-// to CubeTemplateCenter: all of them are uncached plain DB reads (compat
-// matrix, job/build status polls) or file serving (artifact download), so
-// cross-process cache coherency does not apply to them.
+// to CubeTemplateCenter: the compat matrix (plain DB read/write) and the
+// artifact download (file serving / S3 redirect). Neither goes through the
+// process-local template caches, so cross-process coherency does not apply.
 func TestCubeRoutesTemplateProxyRemainder(t *testing.T) {
 	r := newRouteInspectEngine(t, RegisterCubeRoutes)
 
 	proxiedRoutes := []string{
 		"GET /cube/template/compat",
 		"POST /cube/template/compat",
-		"GET /cube/template/build/:build_id/status",
-		"GET /cube/template/from-image",
 		"GET /cube/template/artifact/download",
 		"HEAD /cube/template/artifact/download",
 	}

@@ -98,23 +98,28 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	// expired. Serving reads on the process that writes keeps
 	// read-your-writes coherent.
 	//
-	// The proxied remainder is uncached and safe on TC: the compat matrix
-	// and the job/build-status polls are plain DB reads, and the artifact
-	// download is file serving (or an S3 redirect). Routes are enumerated
-	// explicitly (mirroring RegisterTemplateRoutes) rather than via a
-	// wildcard catch-all, so the local routes can be carved out; keep this
-	// list in sync with RegisterTemplateRoutes below.
+	// Build-status / from-image polls are also local: they are plain DB reads
+	// against the job rows CubeMaster itself writes, and proxying them made a
+	// successful create look broken whenever TC was unreachable (create
+	// returned 200, the follow-up poll 502'd). Serve them where the rows live.
+	//
+	// The proxied remainder is uncached and safe on TC: the compat matrix is
+	// a plain DB read/write and the artifact download is file serving (or an
+	// S3 redirect). Routes are enumerated explicitly (mirroring
+	// RegisterTemplateRoutes) rather than via a wildcard catch-all, so the
+	// local routes can be carved out; keep this list in sync with
+	// RegisterTemplateRoutes below.
 	g.POST(TemplateFromImageAction, createTemplateFromImageGinHandler)
 	g.POST(TemplateRedoAction, handleRedoTemplateAction)
 	g.POST(TemplateAction, createTemplateGinHandler)
 	g.DELETE(TemplateAction, deleteTemplateGinHandler)
 	g.GET(TemplateAction, getTemplateGinHandler)
 	g.PUT(TemplateAction+"/:template_id/alias", setTemplateAliasGinHandler)
+	g.GET(TemplateBuildStatusAction+"/:build_id/status", handleTemplateBuildStatusAction)
+	g.GET(TemplateFromImageAction, getTemplateFromImageGinHandler)
 
 	g.GET(TemplateCompatAction, proxyToTemplateCenter)
 	g.POST(TemplateCompatAction, proxyToTemplateCenter)
-	g.GET(TemplateBuildStatusAction+"/:build_id/status", proxyToTemplateCenter)
-	g.GET(TemplateFromImageAction, proxyToTemplateCenter)
 	g.GET(TemplateArtifactDownloadAction, proxyToTemplateCenter)
 	g.HEAD(TemplateArtifactDownloadAction, proxyToTemplateCenter)
 

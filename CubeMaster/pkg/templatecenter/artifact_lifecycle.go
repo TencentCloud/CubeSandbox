@@ -255,12 +255,20 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 	if !finalized {
 		return nil
 	}
-	if err := requestTemplateCenterArtifactDelete(ctx, artifactID); err != nil {
-		// Do not fail template deletion over this: the row stays
-		// CLEANUP_PENDING and TC's reconciler backstop-sweeps it later.
-		logger.Warnf("artifact cleanup: notify templatecenter to delete artifact failed (row stays CLEANUP_PENDING, TC reconciler will retry): %v", err)
-	}
+	notifyTemplateCenterArtifactDelete(ctx, artifactID)
 	return nil
+}
+
+// notifyTemplateCenterArtifactDelete is the post-finalize step of
+// cleanupArtifactFully: exactly one requestTemplateCenterArtifactDelete call
+// per finalized artifact, and only after phase 3 committed. A notify failure
+// is swallowed on purpose — the row stays CLEANUP_PENDING and TC's reconciler
+// backstop-sweeps it later, so template deletion must not fail over it.
+func notifyTemplateCenterArtifactDelete(ctx context.Context, artifactID string) {
+	if err := requestTemplateCenterArtifactDelete(ctx, artifactID); err != nil {
+		log.G(ctx).WithFields(map[string]any{"artifact_id": artifactID}).
+			Warnf("artifact cleanup: notify templatecenter to delete artifact failed (row stays CLEANUP_PENDING, TC reconciler will retry): %v", err)
+	}
 }
 
 // placementToNode resolves a placement row to a node with a usable host ip,

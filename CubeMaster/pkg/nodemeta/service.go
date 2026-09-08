@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -30,6 +31,12 @@ type ComponentVersion = node.ComponentVersion
 var (
 	declaredVersionsMu sync.RWMutex
 	declaredVersions   = map[string]string{}
+	// initialized flips true only after Init completes successfully. It is the
+	// readiness signal, NOT len(declaredVersions): the release manifest is
+	// absent in Kubernetes deployments (only the one-click bundle installs
+	// release-manifest.json), and CubeMaster runs fine there, so an empty
+	// declaredVersions map must not report the subsystem as down.
+	initialized atomic.Bool
 )
 
 // Init loads declared component versions and registers the CubeOps node
@@ -56,6 +63,7 @@ func Init(ctx context.Context) error {
 		log.G(ctx).Warnf("nodemeta: cube_ops_addr not configured; localcache will fall back to its own DB loader")
 	}
 
+	initialized.Store(true)
 	return nil
 }
 
@@ -63,13 +71,13 @@ func Init(ctx context.Context) error {
 // to serve node queries. It is used by CubeTemplateCenter's health check when
 // TC serves the public template API (and therefore needs the node view to pick
 // distribution targets).
+//
+// Readiness means Init completed (the node loader is registered or the DB
+// fallback was selected), matching CubeMaster, which never gates its own
+// health on the release manifest. Declared component versions are a compat
+// scan input only; their absence must not fail readiness.
 func Ready() bool {
-	// nodemeta is ready when it has been initialized (declared versions loaded)
-	// and the localcache node loader has been registered. The declaredVersions
-	// map is populated at Init, so a non-empty map is a reliable signal.
-	declaredVersionsMu.RLock()
-	defer declaredVersionsMu.RUnlock()
-	return len(declaredVersions) > 0
+	return initialized.Load()
 }
 
 // DeclaredVersions returns a snapshot of the release-declared component versions.

@@ -40,6 +40,7 @@ import (
 	"sync"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 )
 
 // Variables read by shared CubeMaster code. These CANNOT be renamed at the read
@@ -263,6 +264,15 @@ func MasterEndpoint() string {
 		}
 	}
 	return defaultMasterEndpoint
+}
+
+// CallbackToken returns the shared secret TC attaches to build-status
+// callbacks (header constants.TemplateCallbackTokenHeader). CubeMaster rejects
+// callbacks without it once the same variable is set there. Empty means "no
+// token configured", which only works against a CubeMaster that also has none.
+func CallbackToken() string {
+	v, _ := lookup(constants.TemplateCallbackTokenEnv, "CUBE_TC_CALLBACK_TOKEN")
+	return v
 }
 
 // ReconcileDisabled reports whether the background sweep is switched off.

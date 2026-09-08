@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/tcconfig"
 )
@@ -41,6 +42,7 @@ var (
 // CubeMaster receives the callback and writes DB.
 type Reporter struct {
 	masterURL  string
+	token      string
 	httpClient *http.Client
 }
 
@@ -48,9 +50,13 @@ type Reporter struct {
 // CUBE_MASTER_ADDR (default http://localhost:8089, which is correct for the
 // single-host one-click layout). The retired CUBE_TEMPLATE_CENTER_MASTER_ENDPOINT
 // and CUBE_MASTER_ENDPOINT spellings still work; see pkg/tcconfig.
+//
+// The callback token (CUBE_TEMPLATE_CALLBACK_TOKEN) authenticates the report:
+// CubeMaster rejects callbacks without it once the variable is set there.
 func NewReporter() *Reporter {
 	return &Reporter{
 		masterURL: tcconfig.MasterEndpoint(),
+		token:     tcconfig.CallbackToken(),
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -123,6 +129,9 @@ func (r *Reporter) postOnce(ctx context.Context, url string, body []byte) (retry
 		return false, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if r.token != "" {
+		req.Header.Set(constants.TemplateCallbackTokenHeader, r.token)
+	}
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
