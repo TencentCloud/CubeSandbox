@@ -347,7 +347,9 @@ def optional_sha256(path):
 components = {}
 
 # ── Go binaries from CORE_BIN_DIR ──
-for name in ["cubemaster", "cubemastercli", "cubelet", "cubecli"]:
+# templatecenter ships in every package (CubeMaster has no in-process build
+# fallback), so it must be manifest-tracked like every other Go component.
+for name in ["cubemaster", "cubemastercli", "templatecenter", "cubelet", "cubecli"]:
     path = os.path.join(core_bin_dir, name)
     components[name] = {
         "version": cube_version,
