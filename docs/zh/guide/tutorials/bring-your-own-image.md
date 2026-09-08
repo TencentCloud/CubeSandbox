@@ -113,6 +113,10 @@ COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
 COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
      /usr/local/bin/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir fastapi uvicorn
 
 COPY app.py /srv/app.py
@@ -121,6 +125,9 @@ EXPOSE 49983 8000
 ENTRYPOINT ["/usr/local/bin/cube-entrypoint.sh"]
 CMD ["uvicorn", "app:app", "--app-dir", "/srv", "--host", "0.0.0.0", "--port", "8000"]
 ```
+
+第 5 节会在容器内执行 `curl`。如果你使用的基础镜像没有预装
+`curl`，请在构建镜像时先将它安装好，再执行这项检查。
 
 构建、推送、创建模板的流程和第 2.2 / 2.3 节一致。
 
@@ -228,7 +235,15 @@ docker exec "$cid" /usr/bin/envd -version
 
 探活请求必须执行成功并输出 `204`；其他 HTTP 状态码，包括 `200` 或 `500`，都不算通过。如果 envd 仍在启动，等几秒后重试探活命令；持续失败时转到第 3 步。版本命令也应成功，并确认输出与你安装的 envd 版本一致，例如上文 base 镜像的 `2026.16`。
 
-容器保持运行、探活成功返回 `204`、版本符合预期，表示基本的本地启动和 envd 就绪检查通过。全部通过后，跳到第 4 步删除测试容器，再创建模板并验证应用需要的 SDK 操作。本地检查不覆盖集群拉取镜像、sandbox 网络和 envd `/init`。
+两项探测完成后，再次检查容器状态：
+
+```bash
+docker inspect --format '{{json .State}}' "$cid"
+```
+
+状态仍应显示 `"Status":"running"` 和 `"Running":true`。如果容器已经退出，即使两项探测都成功，也应转到第 3 步排查。
+
+容器保持运行、探活成功返回 `204`、版本符合预期，表示基本的本地启动和 envd 就绪检查通过。最终状态检查也通过后，跳到第 4 步删除测试容器，再创建模板并验证应用需要的 SDK 操作。本地检查不覆盖集群拉取镜像、sandbox 网络和 envd `/init`。
 
 **3. 检查失败时，在删除容器前查看状态和日志。**
 

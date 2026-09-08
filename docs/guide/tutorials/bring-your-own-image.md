@@ -117,6 +117,10 @@ COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
 COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
      /usr/local/bin/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir fastapi uvicorn
 
 COPY app.py /srv/app.py
@@ -125,6 +129,10 @@ EXPOSE 49983 8000
 ENTRYPOINT ["/usr/local/bin/cube-entrypoint.sh"]
 CMD ["uvicorn", "app:app", "--app-dir", "/srv", "--host", "0.0.0.0", "--port", "8000"]
 ```
+
+Section 5 runs `curl` inside the container. If your base image does not
+include `curl`, install it as part of the image build before running that
+check.
 
 Build, push and template creation are identical to sections 2.2 / 2.3.
 
@@ -237,7 +245,15 @@ docker exec "$cid" /usr/bin/envd -version
 
 The health request must complete successfully and print `204`; any other HTTP code, including `200` or `500`, is a failed check. If envd is still starting, wait a few seconds and retry the health request. If it still fails, go to step 3. The version command must also succeed; compare its output with the envd version you installed (`2026.16` for the base image used above).
 
-A running container, a successful `204` response, and the expected version confirm basic local startup and envd readiness. If all checks pass, skip to step 4 to remove the test container. Then create a template and verify the SDK operations your application uses. Local checks do not exercise cluster image pulling, sandbox networking, or envd `/init`.
+Run the state check once more after both probes:
+
+```bash
+docker inspect --format '{{json .State}}' "$cid"
+```
+
+The state must still show `"Status":"running"` and `"Running":true`. If the container has exited, go to step 3 even if both probes succeeded.
+
+A running container, a successful `204` response, and the expected version confirm basic local startup and envd readiness. If the final state check also passes, skip to step 4 to remove the test container. Then create a template and verify the SDK operations your application uses. Local checks do not exercise cluster image pulling, sandbox networking, or envd `/init`.
 
 **3. If a check fails, inspect the state and logs before removing the container.**
 
