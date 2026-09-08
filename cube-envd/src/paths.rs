@@ -17,6 +17,9 @@ pub fn resolve_path(path: impl AsRef<Path>, user: &LocalUser) -> Result<PathBuf,
     if let Some(rest) = path.strip_prefix("~/") {
         return Ok(user.home.join(rest));
     }
+    if path == "~" {
+        return Ok(user.home.clone());
+    }
     if path.starts_with('~') {
         return Err(PathError::OtherUserHome);
     }
