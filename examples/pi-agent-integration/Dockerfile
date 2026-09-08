@@ -17,7 +17,7 @@
 #     --probe       49983 \
 #     --probe-path  /health
 
-ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16
+ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:latest
 FROM ${CUBE_BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive

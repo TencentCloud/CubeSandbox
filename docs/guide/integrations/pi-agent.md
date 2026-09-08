@@ -25,7 +25,7 @@ project.
 |---|---|
 | Pi coding agent | `@earendil-works/pi-coding-agent` (pinned via `--build-arg PI_VERSION=x.y.z`) |
 | Node.js | 24 (installed via NodeSource) |
-| CubeSandbox base image | `ghcr.io/tencentcloud/cubesandbox-base:2026.16` |
+| CubeSandbox base image | `ghcr.io/tencentcloud/cubesandbox-base:latest` |
 | E2B SDK (host driver) | `e2b` (latest) |
 | CubeSandbox platform | `>= 0.3.0` (pause/resume) / `>= 0.4.0` (CubeEgress credential vault) |
 
@@ -62,7 +62,7 @@ envd is already listening on `:49983`.
 
 ```dockerfile
 # examples/pi-agent-integration/Dockerfile (excerpt)
-ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16
+ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:latest
 FROM ${CUBE_BASE_IMAGE}
 
 ARG NODE_MAJOR=24
@@ -287,7 +287,7 @@ version = sandbox.commands.run("pi --version", timeout=60)
 | `403 Forbidden - CubeEgress` | Default-deny with no matching allow rule | Add the LLM host (and any extra hosts) to the rules |
 | `Connection error` / TLS failure from Pi (vault) | Pi's Node runtime ignores the system CA store, so it won't trust the CubeEgress CA | The example sets `NODE_EXTRA_CA_CERTS`; override with `PI_NODE_EXTRA_CA_CERTS` if the CA lives elsewhere |
 | Template creation stuck in `PULLING` | Registry unreachable from Cube nodes | Push to a registry the cluster can reach; supply auth if needed |
-| Readiness probe timeout | Base image without envd | Ensure `FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16` |
+| Readiness probe timeout | Base image without envd | Ensure `FROM ghcr.io/tencentcloud/cubesandbox-base:latest` |
 | `pause()` / `connect()` errors | Platform too old for snapshots | Upgrade the CubeSandbox platform |
 
 ## References
