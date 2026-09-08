@@ -80,16 +80,9 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*Lo
 	}
 	stored, err := s.store.GetUserPassword(ctx, username)
 	if err != nil {
-		// Distinguish "user not found" (→ ErrInvalidCredentials, safe to
-		// expose) from infrastructure errors (→ return verbatim). We do this
-		// by checking whether stored is empty — the store layer returns "" +
-		// a "not found" error when the row is missing.
-		if stored == "" {
-			return nil, ErrInvalidCredentials
-		}
 		return nil, fmt.Errorf("failed to read user: %w", err)
 	}
-	if !crypto.VerifyPassword(stored, password) {
+	if stored == "" || !crypto.VerifyPassword(stored, password) {
 		return nil, ErrInvalidCredentials
 	}
 	accessToken, err := s.jm.GenerateAccessToken(username)
@@ -180,7 +173,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, username, oldPassword,
 	if err != nil {
 		return fmt.Errorf("failed to read user: %w", err)
 	}
-	if !crypto.VerifyPassword(stored, oldPassword) {
+	if stored == "" || !crypto.VerifyPassword(stored, oldPassword) {
 		return ErrInvalidOldPassword
 	}
 	newHash, err := crypto.HashPassword(newPassword)
