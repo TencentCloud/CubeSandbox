@@ -133,6 +133,12 @@
 {{- if and (or (eq (include "cube.redisBuiltinEnabled" .) "true") .Values.redis.host (eq (include "cube.redisSentinelEnabled" .) "true")) (hasPrefix "CHANGE_ME" (default "" .Values.redis.password)) }}
 {{- fail "redis.password still equals the CHANGE_ME_* default sentinel. Override it before deploying." }}
 {{- end }}
+{{- /* redis.db fans out to Master / Proxy / LCM / Ops; reject non-integer and out-of-range values at render time. */ -}}
+{{- $redisDBRaw := .Values.redis.db | default 0 -}}
+{{- $redisDB := $redisDBRaw | int -}}
+{{- if or (not (eq ($redisDBRaw | toString) ($redisDB | toString))) (lt $redisDB 0) (gt $redisDB 15) }}
+{{- fail (printf "redis.db must be an integer in 0-15 (got %v)" $redisDBRaw) }}
+{{- end }}
 {{- /* Fixed Service nodePorts are only valid for NodePort / LoadBalancer. */ -}}
 {{- $apiSvcType := .Values.controlPlane.api.service.type | default "ClusterIP" -}}
 {{- $apiNodePort := .Values.controlPlane.api.service.nodePort | default "" | toString -}}

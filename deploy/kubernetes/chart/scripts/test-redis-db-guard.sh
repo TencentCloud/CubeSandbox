@@ -60,7 +60,7 @@ helm template redis-db-default "$CHART_DIR" $COMMON_SETS \
   --set cubeOps.enabled=true \
   > "$TMP_DIR/default.yaml"
 
-grep -q 'db_no: 0' "$TMP_DIR/default.yaml" || {
+grep -Eq '^[[:space:]]*db_no: 0[[:space:]]*$' "$TMP_DIR/default.yaml" || {
   echo "CubeMaster conf missing default db_no: 0" >&2
   exit 1
 }
@@ -82,7 +82,7 @@ helm template redis-db-override "$CHART_DIR" $COMMON_SETS \
   --set cubeOps.enabled=true \
   > "$TMP_DIR/override.yaml"
 
-grep -q 'db_no: 3' "$TMP_DIR/override.yaml" || {
+grep -Eq '^[[:space:]]*db_no: 3[[:space:]]*$' "$TMP_DIR/override.yaml" || {
   echo "CubeMaster conf missing db_no: 3" >&2
   exit 1
 }
@@ -124,9 +124,39 @@ helm template redis-db-upgrade-leftover "$CHART_DIR" $COMMON_SETS \
   --set lifecycleManager.redis.db=0 \
   > "$TMP_DIR/upgrade-leftover.yaml"
 
-grep -q 'db_no: 0' "$TMP_DIR/upgrade-leftover.yaml" || {
+grep -Eq '^[[:space:]]*db_no: 0[[:space:]]*$' "$TMP_DIR/upgrade-leftover.yaml" || {
   echo "upgrade leftover db:0 should still render Master db_no: 0" >&2
   exit 1
 }
+
+# Leftover nested db:0 must not block overriding to a non-zero top-level db.
+helm template redis-db-leftover-override "$CHART_DIR" $COMMON_SETS \
+  --set redis.db=3 \
+  --set cubeProxy.enabled=true \
+  --set lifecycleManager.enabled=true \
+  --set cubeProxy.redis.db=0 \
+  --set lifecycleManager.redis.db=0 \
+  > "$TMP_DIR/leftover-override.yaml"
+
+grep -Eq '^[[:space:]]*db_no: 3[[:space:]]*$' "$TMP_DIR/leftover-override.yaml" || {
+  echo "leftover db:0 + redis.db=3 should render Master db_no: 3" >&2
+  exit 1
+}
+assert_all_redis_db_env "$TMP_DIR/leftover-override.yaml" 3 REDIS_DB
+assert_all_redis_db_env "$TMP_DIR/leftover-override.yaml" 3 CUBE_PROXY_REGISTRY_REDIS_DB
+assert_all_redis_db_env "$TMP_DIR/leftover-override.yaml" 3 CUBE_LCM_REDIS_DB
+
+# Invalid redis.db values must fail at render time.
+expect_fail redis-db-non-integer "$TMP_DIR/db-foo.err" \
+  'redis.db must be an integer' \
+  --set redis.db=foo
+
+expect_fail redis-db-negative "$TMP_DIR/db-neg.err" \
+  'redis.db must be an integer' \
+  --set redis.db=-1
+
+expect_fail redis-db-out-of-range "$TMP_DIR/db-16.err" \
+  'redis.db must be an integer' \
+  --set redis.db=16
 
 echo "ok: redis.db wires Master/Proxy/LCM/Ops; non-zero nested db fails even without Ops"
