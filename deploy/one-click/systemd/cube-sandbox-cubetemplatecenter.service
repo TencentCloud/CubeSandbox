@@ -32,10 +32,7 @@ TimeoutStartSec=60s
 TimeoutStopSec=30s
 
 [Install]
-# Deliberately NOT listed in cube-sandbox-control.target's Wants: this unit is
-# installed but stays inactive until an operator runs
-#   systemctl enable --now cube-sandbox-cubetemplatecenter.service
-# NOTE: CubeMaster no longer builds templates in-process and has no fallback,
-# so template-from-image requests will fail with all replicas until this unit
-# is enabled and running.
+# Listed in cube-sandbox-control.target's Wants: CubeMaster no longer builds
+# templates in-process and has no fallback, so TC is part of the default
+# control-plane stack, not an opt-in extra.
 WantedBy=cube-sandbox-control.target

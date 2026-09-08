@@ -295,6 +295,22 @@ fi
 check_minio_not_combined_with_user_s3
 ensure_minio_init_credentials
 
+# Shared secret authenticating CubeTemplateCenter's build-status callbacks to
+# CubeMaster (POST /internal/template/jobs/:job_id/status, whose BUILT payload
+# is trusted wholesale by the resume pipeline). Generated once and persisted in
+# .one-click.env, which both units load via EnvironmentFile. Control-plane only;
+# an upgrade merge carries the existing value forward, so generation happens
+# only when the key is still empty.
+ensure_template_callback_token() {
+  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
+  CUBE_TEMPLATE_CALLBACK_TOKEN="${CUBE_TEMPLATE_CALLBACK_TOKEN:-}"
+  if [[ -z "${CUBE_TEMPLATE_CALLBACK_TOKEN}" ]]; then
+    CUBE_TEMPLATE_CALLBACK_TOKEN="$(generate_alnum_secret 32)"
+    log "generated CUBE_TEMPLATE_CALLBACK_TOKEN (32 chars); it will be saved to .one-click.env"
+  fi
+}
+ensure_template_callback_token
+
 CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-0}"
 case "${CUBE_PVM_ENABLE}" in
   0|1) ;;
@@ -1529,6 +1545,15 @@ start_systemd_target() {
     systemctl reset-failed cube-sandbox-s3lvol.service >/dev/null 2>&1 || true
   fi
 
+  # CubeTemplateCenter is part of the default control-plane stack (CubeMaster
+  # has no in-process build fallback). The control target's Wants= already
+  # pulls it up; the explicit enable creates the .wants symlink so the unit
+  # also reports is-enabled for quickcheck and boot audits.
+  if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
+    systemctl enable cube-sandbox-cubetemplatecenter.service >/dev/null 2>&1 \
+      || log "WARN: could not enable cube-sandbox-cubetemplatecenter.service"
+  fi
+
   systemctl enable --now "${target}"
 }
 
@@ -1951,6 +1976,12 @@ persist_one_click_redis_runtime_env "${RUNTIME_ENV_FILE}"
 
 # Persist MinIO deploy settings (control node) independently from CUBE_S3_*
 # (volume plugin). Local MinIO fills CUBE_S3_* before this block.
+# CubeTemplateCenter callback token (control plane): both cubemaster and
+# cubetemplatecenter units read it from this file via EnvironmentFile.
+if [[ -n "${CUBE_TEMPLATE_CALLBACK_TOKEN:-}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_TEMPLATE_CALLBACK_TOKEN" "${CUBE_TEMPLATE_CALLBACK_TOKEN}"
+fi
+
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_ENABLED" "${CUBE_SANDBOX_MINIO_ENABLED}"
 if [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "1" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_ROOT_USER" "${CUBE_SANDBOX_MINIO_ROOT_USER}"

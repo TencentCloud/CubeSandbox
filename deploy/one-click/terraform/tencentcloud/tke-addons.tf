@@ -142,6 +142,15 @@ resource "random_password" "cube_admin_token" {
   special = false
 }
 
+# Shared secret gating CubeTemplateCenter -> CubeMaster build-status callbacks
+# (POST /internal/template/jobs/:job_id/status; both sides read it as
+# CUBE_TEMPLATE_CALLBACK_TOKEN).
+resource "random_password" "template_callback_token" {
+  count   = local.deploy_addons ? 1 : 0
+  length  = 32
+  special = false
+}
+
 # Write the kubeconfig to a local file (written as soon as TKE is created, independent of the addons).
 # The apiserver is intranet-only, so use the intranet kubeconfig. create.sh then
 # rewrites this local file to reach the endpoint through the jumpserver tunnel.
@@ -263,6 +272,9 @@ resource "kubernetes_secret" "cubemaster_conf" {
   }
 
   data = {
+    # Shared with the templatecenter Deployment: TC presents it as
+    # X-Cube-Template-Callback-Token on build-status callbacks.
+    "cube-template-callback-token" = random_password.template_callback_token[0].result
     "conf.yaml" = yamlencode({
       common = {
         http_port                          = 8089
@@ -407,6 +419,24 @@ resource "kubernetes_deployment" "cubemaster" {
             name  = "CUBE_MASTER_CONFIG_PATH"
             value = "/usr/local/services/cubetoolbox/CubeMaster/conf.yaml"
           }
+          # Every template-from-image build is forwarded to CubeTemplateCenter;
+          # without this address the requests fail with "CUBE_TEMPLATE_CENTER_ADDR
+          # is not configured".
+          env {
+            name  = "CUBE_TEMPLATE_CENTER_ADDR"
+            value = "http://cube-templatecenter.cubesandbox.svc.cluster.local:8090"
+          }
+          # Rejects forged TC build-status callbacks (the BUILT payload becomes
+          # the rootfs nodes boot from).
+          env {
+            name = "CUBE_TEMPLATE_CALLBACK_TOKEN"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.cubemaster_conf[0].metadata[0].name
+                key  = "cube-template-callback-token"
+              }
+            }
+          }
           port {
             name           = "http"
             container_port = 8089
@@ -531,12 +561,13 @@ resource "kubernetes_service" "cubemaster" {
 
 # ---------------------------------------------------------------
 # CubeTemplateCenter: Deployment → ClusterIP Service
-# Only deployed when templatecenter_enabled=true. TC is the data-plane half of
+# Always deployed with the addons (TC is mandatory: CubeMaster has no
+# in-process build fallback). TC is the data-plane half of
 # template building: it pulls the image, builds the ext4, and reports status
 # back to CubeMaster. CubeMaster keeps the control plane (DB, distribution).
 # ---------------------------------------------------------------
 resource "kubernetes_deployment" "templatecenter" {
-  count      = local.deploy_addons && var.templatecenter_enabled ? 1 : 0
+  count      = local.deploy_addons ? 1 : 0
   depends_on = [kubernetes_deployment.cubemaster]
 
   metadata {
@@ -564,6 +595,17 @@ resource "kubernetes_deployment" "templatecenter" {
           env {
             name  = "CUBE_MASTER_ADDR"
             value = "http://cubemaster.cubesandbox.svc.cluster.local:8089"
+          }
+          # Presented as X-Cube-Template-Callback-Token on build-status
+          # callbacks; must match CubeMaster's CUBE_TEMPLATE_CALLBACK_TOKEN.
+          env {
+            name = "CUBE_TEMPLATE_CALLBACK_TOKEN"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.cubemaster_conf[0].metadata[0].name
+                key  = "cube-template-callback-token"
+              }
+            }
           }
           # TC writes the ext4 into the same shared store CubeMaster serves
           # downloads from. When use_cfs=false (single-replica emptyDir), TC
@@ -629,7 +671,7 @@ resource "kubernetes_deployment" "templatecenter" {
 }
 
 resource "kubernetes_service" "templatecenter" {
-  count = local.deploy_addons && var.templatecenter_enabled ? 1 : 0
+  count = local.deploy_addons ? 1 : 0
   metadata {
     name      = "cube-templatecenter"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name

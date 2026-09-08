@@ -330,9 +330,14 @@ variable "templatecenter_image" {
 }
 
 variable "templatecenter_enabled" {
-  description = "Deploy CubeTemplateCenter. REQUIRED for template builds. CubeMaster does NOT build locally; it only orchestrates. Disabling TC will cause all template build requests to fail."
+  description = "DEPRECATED, must stay true: CubeTemplateCenter is mandatory (CubeMaster has no in-process build fallback) and now deploys unconditionally with the addons. The variable remains only so existing tfvars keep parsing."
   type        = bool
   default     = true
+
+  validation {
+    condition     = var.templatecenter_enabled
+    error_message = "templatecenter_enabled=false is no longer supported: CubeMaster cannot build templates in-process, so disabling CubeTemplateCenter breaks every template build. Remove the variable; TC deploys unconditionally."
+  }
 }
 
 variable "templatecenter_replicas" {
