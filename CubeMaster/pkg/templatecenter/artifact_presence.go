@@ -361,6 +361,25 @@ func rootfsArtifactReuseVerdict(ctx context.Context, record *models.RootfsArtifa
 		// presence/size must not gate reuse (see resolveMissingArtifact).
 		return nil
 	}
+	if artifactServedByRemoteTier() {
+		// The ext4 lives in the CubeTemplateCenter tier; this process's disk
+		// never holds it, so the node-local probe below would always report
+		// the artifact missing, and the recorded base URL (the master service
+		// address) matches no local host identity, so the verdict could only
+		// ever be ErrRootfsArtifactForeign — which refused every redo and
+		// every reuse check in a Kubernetes deployment even when the file
+		// was healthy on the TC pod. Ask the download path — the same URL a
+		// cubelet would pull — instead.
+		switch verdict, reason := probeArtifactServability(ctx, record); verdict {
+		case artifactServabilityServable:
+			return nil
+		case artifactServabilityMissing:
+			demoteUnservableRootfsArtifact(ctx, record.ArtifactID, reason)
+			return errors.New("artifact not servable from the download endpoint; row demoted")
+		default:
+			return fmt.Errorf("artifact servability unknown: %s", reason)
+		}
+	}
 	if !rootfsArtifactSizeMatches(record) {
 		log.G(ctx).Warnf("rootfs artifact %s: on-disk size does not match the row (path=%q recorded=%d); rebuilding",
 			record.ArtifactID, record.Ext4Path, record.Ext4SizeBytes)

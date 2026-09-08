@@ -169,16 +169,19 @@ func ensureArtifactDistributable(ctx context.Context, artifact *models.RootfsArt
 		)
 	}
 	// The five checks above only read the artifact row. A row can be perfectly
-	// READY while the ext4 it points at is not on this node — either because the
-	// artifact store did not survive a restart (issue #852) or because another
-	// CubeMaster built it and the store is node-local (issue #1005).
-	// Distributing either way hands every cubelet a download URL that can only
-	// 404 or serve a stale file, so fail here with the drift spelled out instead
-	// of collecting N identical per-node sha256 mismatches.
-	if verdict := resolveMissingArtifact(ctx, artifact); verdict != artifactMissingVerdictNone {
-		return missingArtifactError(artifact, verdict)
-	}
-	return nil
+	// READY while the ext4 it points at is not servable — either because the
+	// artifact store did not survive a restart (issue #852) or because the
+	// store is node-local and the pull would land on a node that never had
+	// the file (issue #1005). Distributing either way hands every cubelet a
+	// download URL that can only 404 or serve a stale file, so fail here with
+	// the drift spelled out instead of collecting N identical per-node sha256
+	// mismatches.
+	//
+	// Where the file lives depends on the topology: in the standalone-TC
+	// architecture it is ALWAYS in the CubeTemplateCenter tier (CubeMaster's
+	// disk holds nothing), so verifyArtifactServability probes the download
+	// URL a cubelet would use rather than this process's disk.
+	return verifyArtifactServability(ctx, artifact)
 }
 
 // distributeRootfsArtifactToNodes is distributeRootfsArtifact with an
