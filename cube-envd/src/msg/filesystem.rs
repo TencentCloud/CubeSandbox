@@ -255,7 +255,10 @@ fn group_name(gid: u32) -> String {
 }
 
 fn name_from_table(path: &str, id: u32) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
+    // Cached read (dev/ino/mtime re-validated per call): this used to re-read
+    // the whole table for EVERY entry (owner_name + group_name per ListDir
+    // row — 2N full file reads).
+    let content = crate::auth::read_user_table(path).ok()?;
     for line in content.lines() {
         let fields: Vec<&str> = line.split(':').collect();
         if fields.len() >= 3 && fields[2].parse::<u32>().ok() == Some(id) {

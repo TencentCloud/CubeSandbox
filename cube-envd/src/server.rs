@@ -419,7 +419,12 @@ macro_rules! fs_unary {
             // mirroring upstream WrapUnary's early err-return (interceptor.go:33-36):
             // errors never reach shouldHideChanges, so no header and no narrowing.
             let legacy = legacy::is_legacy(&headers);
-            match $svc(&req, &user) {
+            // One blocking-pool crossing per request (blocking.rs): the whole
+            // service body — stat/mkdir/rename/… — runs sequentially on a
+            // pool thread, mirroring the baseline's blocking goroutine
+            // per handler. Never cross per syscall (~29µs each).
+            let fut = crate::blocking::run(stringify!($name), move || $svc(&req, &user));
+            match fut.await {
                 Ok(mut v) => {
                     if legacy {
                         legacy::narrow(&mut v);

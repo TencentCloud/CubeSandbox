@@ -572,6 +572,10 @@ def cap_fs():
                   "/home/user/zz_legacy_a.txt", "/home/user/zz_legacy_dir",
                   "/home/user/zz_legacy_link", "/home/user/zz_legacy_dir_link",
                   "/home/user/zz_legacy_dangling",
+                  # PR-A① error-contract scenarios self-seed these; sweep
+                  # them so reruns start clean (fs_listdir_eloop re-creates
+                  # the loop link, fs_move_into_newdir the parent chain).
+                  "/home/user/eloop", "/home/user/mv_src.txt", "/home/user/mv_newdir",
                   # cap_files_negotiation self-uploads these (item 1.3);
                   # sweep them so an interrupted/rerun capture cannot leak
                   # them into fs_listdir_*.
@@ -648,6 +652,52 @@ def cap_fs():
         "filesystem.Filesystem/Stat", {"path": "/home/user/zz_suid"}))
     record("fs_stat_sticky", connect_unary(
         "filesystem.Filesystem/Stat", {"path": "/home/user/zz_sticky"}))
+
+    # ---- PR-A① error contract: non-ENOENT errno paths --------------------
+    # Every shape below was measured on go1.26 (plan §4.1); the texts come
+    # from Go's own errno table (lowercase) via cube-envd's go_compat module.
+    # EACCES/EROFS variants are NOT recordable here: both envd processes run
+    # as root, so CAP_DAC_OVERRIDE makes those branches unreachable in the
+    # harness — they are covered by unit tests against the errno table.
+
+    # Stat through a file component: lstat -> ENOTDIR -> internal
+    # "error getting file info: lstat <p>: not a directory".
+    record("fs_stat_enotdir", connect_unary(
+        "filesystem.Filesystem/Stat", {"path": "/home/user/base_a.txt/sub"}))
+
+    # 300-char component: ENAMETOOLONG -> internal
+    # "error getting file info: lstat <p>: file name too long".
+    record("fs_stat_enametoolong", connect_unary(
+        "filesystem.Filesystem/Stat", {"path": "/home/user/" + "n" * 300}))
+
+    # MakeDir through a file: the precheck os.Stat returns ENOTDIR (not
+    # ENOENT), failing in dir.go:69 before EnsureDirs is ever reached ->
+    # internal "error getting file info: stat <p>: not a directory".
+    record("fs_makedir_through_file", connect_unary(
+        "filesystem.Filesystem/MakeDir", {"path": "/home/user/base_a.txt/sub"}))
+
+    # move.go:36 — EnsureDirs runs on the destination parent before the
+    # rename, so moving into a missing directory SUCCEEDS and hands the
+    # created levels to the requesting user.
+    http_req("POST", "/files?path=/home/user/mv_src.txt&username=user", b"mv",
+             {"Content-Type": "application/octet-stream"})
+    record("fs_move_into_newdir", connect_unary("filesystem.Filesystem/Move",
+                                                {"source": "/home/user/mv_src.txt",
+                                                 "destination": "/home/user/mv_newdir/sub/x.txt"}))
+
+    # ListDir root ELOOP: EvalSymlinks hits "too many links" ->
+    # failed_precondition "cyclic symlink or chain >255 links at \"<p>\""
+    # (dir.go:109-111); the EvalSymlinks error itself never appears.
+    connect_stream("process.Process/Start",
+                   start_req("ln -sf /home/user/eloop /home/user/eloop"), user="user")
+    record("fs_listdir_eloop", connect_unary(
+        "filesystem.Filesystem/ListDir", {"path": "/home/user/eloop"}))
+
+    # ListDir onto a file: checkIfDirectory runs on the RESOLVED path and
+    # the message carries it (dir.go:131) -> invalid_argument
+    # "path is not a directory: <p>".
+    record("fs_listdir_on_file", connect_unary(
+        "filesystem.Filesystem/ListDir", {"path": "/home/user/base_a.txt"}))
 
 
 def cap_fs_legacy():

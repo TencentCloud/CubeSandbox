@@ -18,6 +18,7 @@ pub enum ConnectCode {
     NotFound,
     AlreadyExists,
     PermissionDenied,
+    FailedPrecondition,
     ResourceExhausted,
     Unauthenticated,
     Unimplemented,
@@ -33,6 +34,7 @@ impl ConnectCode {
             ConnectCode::NotFound => "not_found",
             ConnectCode::AlreadyExists => "already_exists",
             ConnectCode::PermissionDenied => "permission_denied",
+            ConnectCode::FailedPrecondition => "failed_precondition",
             ConnectCode::ResourceExhausted => "resource_exhausted",
             ConnectCode::Unauthenticated => "unauthenticated",
             ConnectCode::Unimplemented => "unimplemented",
@@ -49,6 +51,7 @@ impl ConnectCode {
             ConnectCode::NotFound => StatusCode::NOT_FOUND,
             ConnectCode::AlreadyExists => StatusCode::CONFLICT,
             ConnectCode::PermissionDenied => StatusCode::FORBIDDEN,
+            ConnectCode::FailedPrecondition => StatusCode::BAD_REQUEST,
             ConnectCode::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
             ConnectCode::Unauthenticated => StatusCode::UNAUTHORIZED,
             ConnectCode::Unimplemented => StatusCode::NOT_IMPLEMENTED,
@@ -89,15 +92,44 @@ impl ConnectError {
     }
 
     /// Map an I/O error on `path` to the baseline error vocabulary.
-    pub fn from_io(context: &str, path: &str, err: &std::io::Error) -> Self {
+    ///
+    /// `op` is the Go syscall name (`stat`/`lstat`/`mkdir`/`readdirent`/…)
+    /// so the message renders exactly like Go's `*os.PathError`
+    /// (`stat /x: not a directory`) via `go_compat::errno`. Before the
+    /// go_compat table this rendered `strerror` text (capitalized) with no
+    /// op prefix — a systematic divergence invisible to the conformance
+    /// harness, which only covered the ENOENT branch.
+    ///
+    /// No ENOSPC arm: the Go baseline has no ENOSPC mapping on the
+    /// filesystem RPC surface (it would be `internal` there); ENOSPC is
+    /// handled as 507 only on the REST surface (`rest/files.rs`).
+    pub fn from_io(context: &str, op: &str, path: &str, err: &std::io::Error) -> Self {
         let code = match err.kind() {
             std::io::ErrorKind::NotFound => ConnectCode::NotFound,
             std::io::ErrorKind::PermissionDenied => ConnectCode::PermissionDenied,
             std::io::ErrorKind::AlreadyExists => ConnectCode::AlreadyExists,
-            _ if err.raw_os_error() == Some(libc::ENOSPC) => ConnectCode::ResourceExhausted,
             _ => ConnectCode::Internal,
         };
-        Self::new(code, format!("{context}: {path}: {err}"))
+        Self::new(
+            code,
+            format!(
+                "{context}: {}",
+                crate::go_compat::errno::go_path_error(op, path, err)
+            ),
+        )
+    }
+
+    /// Two-path variant rendering Go's `*os.LinkError`
+    /// (`rename /old /new: …`). `rename` failures are always `internal`
+    /// upstream (move.go:47).
+    pub fn from_io_link(context: &str, old: &str, new: &str, err: &std::io::Error) -> Self {
+        Self::new(
+            ConnectCode::Internal,
+            format!(
+                "{context}: {}",
+                crate::go_compat::errno::go_link_error("rename", old, new, err)
+            ),
+        )
     }
 }
 

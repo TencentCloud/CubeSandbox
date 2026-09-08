@@ -4,23 +4,32 @@
 //! `filesystem.Filesystem` unary RPC implementations.
 //!
 //! Error vocabulary is aligned with the Go envd 0.5.13 baseline, including
-//! the Go-syscall-flavored messages SDK users may match on:
+//! the Go-syscall-flavored messages SDK users may match on. Every (context,
+//! op) pair below is derived from the upstream call site listed next to it;
+//! errno texts come from `go_compat::errno` (go1.26 table, lowercase).
+//! Verified shapes:
 //! - Stat missing:    404 not_found  "file not found: lstat <p>: no such file or directory"
+//! - Stat other:      500 internal   "error getting file info: lstat <p>: <errno>"   (utils.go:49)
 //! - ListDir missing: 404 not_found  "path not found: lstat <p>: no such file or directory"
-//! - MakeDir exists:  409 already_exists "directory already exists: <p>"
+//! - ListDir ELOOP:   400 failed_precondition "cyclic symlink or chain >255 links at \"<p>\"" (dir.go:109-111)
+//! - ListDir walk:    500 internal   "error reading directory <d>: <inner>"          (dir.go:180)
+//! - MakeDir exists:  409 already_exists "directory already exists: <p>"            (dir.go:74)
+//! - MakeDir levels:  500 internal   "failed to create directory: mkdir <p>: <errno>" / "path is a file: <p>" (path.go:77-94)
 //! - Move missing:    404 not_found  "source file not found: rename <s> <d>: no such file or directory"
-//! - Remove missing:  200 {} (idempotent — baseline-verified)
+//! - Move other:      500 internal   "error renaming: rename <s> <d>: <errno>"       (move.go:47)
 //! - Watch family:    not implemented by cube-envd (MVP scope, issue #1227)
 
 use crate::auth::User;
 use crate::error::{ConnectCode, ConnectError};
+use crate::go_compat::errno::{go_link_error, go_path_error};
 use crate::msg::filesystem::{
     entry_info, EntryInfo, EntryResponse, ListDirRequest, ListDirResponse, MoveRequest, PathRequest,
 };
+use std::os::unix::fs::DirBuilderExt;
 
 pub fn stat(req: &PathRequest, user: &User) -> Result<serde_json::Value, ConnectError> {
     let path = crate::auth::resolve_path(&req.path, user);
-    let meta = std::fs::symlink_metadata(&path).map_err(|e| stat_error("file", &path, &e))?;
+    let meta = std::fs::symlink_metadata(&path).map_err(|e| entry_error(&path, &e))?;
     to_json(EntryResponse {
         entry: entry_info(&path, &meta),
     })
@@ -46,28 +55,19 @@ pub fn make_dir(req: &PathRequest, user: &User) -> Result<serde_json::Value, Con
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
-            return Err(ConnectError::from_io("error getting file info", &path, &e));
+            return Err(ConnectError::from_io(
+                "error getting file info",
+                "stat",
+                &path,
+                &e,
+            ));
         }
     }
-    // Track every component about to be created so ownership can be handed
-    // to the requesting user on all of them (baseline: `MakeDir a/b` chowns
-    // both `a` and `a/b`).
-    let mut missing = Vec::new();
-    let mut cursor = std::path::PathBuf::from(&path);
-    while !cursor.exists() {
-        missing.push(cursor.clone());
-        match cursor.parent() {
-            Some(p) => cursor = p.to_path_buf(),
-            None => break,
-        }
-    }
-    std::fs::create_dir_all(&path)
-        .map_err(|e| ConnectError::from_io("error creating directory", &path, &e))?;
-    for created in missing.iter().rev() {
-        chown_path(created, user);
-    }
-    let meta = std::fs::symlink_metadata(&path)
-        .map_err(|e| ConnectError::from_io("error reading created directory", &path, &e))?;
+    // Upstream EnsureDirs (dir.go:85 → path.go:68-98): create every missing
+    // component root→leaf and chown each to the requesting user — so
+    // `MakeDir a/b` hands ownership of both `a` and `a/b`.
+    ensure_dirs(&path, user)?;
+    let meta = std::fs::symlink_metadata(&path).map_err(|e| entry_error(&path, &e))?;
     to_json(EntryResponse {
         entry: entry_info(&path, &meta),
     })
@@ -76,18 +76,34 @@ pub fn make_dir(req: &PathRequest, user: &User) -> Result<serde_json::Value, Con
 pub fn move_entry(req: &MoveRequest, user: &User) -> Result<serde_json::Value, ConnectError> {
     let source = crate::auth::resolve_path(&req.source, user);
     let destination = crate::auth::resolve_path(&req.destination, user);
-    if !std::path::Path::new(&source).exists() {
-        return Err(ConnectError::new(
-            ConnectCode::NotFound,
-            format!(
-                "source file not found: rename {source} {destination}: no such file or directory"
-            ),
-        ));
-    }
-    std::fs::rename(&source, &destination)
-        .map_err(|e| ConnectError::from_io("error moving file", &source, &e))?;
-    let meta = std::fs::symlink_metadata(&destination)
-        .map_err(|e| ConnectError::from_io("error reading moved file", &destination, &e))?;
+    // move.go:36 — the destination's parent chain is created (and chowned)
+    // before the rename, so moving into a not-yet-existing directory
+    // succeeds upstream. Skipping this made us fail with `internal` where
+    // the baseline returns 200.
+    let parent = std::path::Path::new(&destination)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/".to_string());
+    ensure_dirs(&parent, user)?;
+    std::fs::rename(&source, &destination).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            // move.go:43-45. No `exists()` pre-check: rename(2) does not
+            // follow symlinks, so — like upstream — a dangling source
+            // symlink is renamed successfully rather than reported missing.
+            ConnectError::new(
+                ConnectCode::NotFound,
+                format!(
+                    "source file not found: {}",
+                    go_link_error("rename", &source, &destination, &e)
+                ),
+            )
+        } else {
+            // move.go:47 — `*os.LinkError` carries both paths.
+            ConnectError::from_io_link("error renaming", &source, &destination, &e)
+        }
+    })?;
+    let meta =
+        std::fs::symlink_metadata(&destination).map_err(|e| entry_error(&destination, &e))?;
     to_json(EntryResponse {
         entry: entry_info(&destination, &meta),
     })
@@ -100,14 +116,32 @@ pub fn remove(req: &PathRequest, user: &User) -> Result<serde_json::Value, Conne
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(serde_json::json!({}));
         }
-        Err(e) => return Err(ConnectError::from_io("error removing path", &path, &e)),
+        Err(e) => {
+            // Upstream has no pre-check (remove.go:25 goes straight to
+            // RemoveAll), so this branch has no exact baseline shape; as root
+            // it is unreachable (CAP_DAC_OVERRIDE). Rendered in the baseline
+            // vocabulary, best-effort.
+            return Err(ConnectError::from_io(
+                "error removing file or directory",
+                "lstat",
+                &path,
+                &e,
+            ));
+        }
         Ok(meta) => {
             let res = if meta.is_dir() {
                 std::fs::remove_dir_all(&path)
             } else {
                 std::fs::remove_file(&path)
             };
-            res.map_err(|e| ConnectError::from_io("error removing path", &path, &e))?;
+            // remove.go:27 wraps RemoveAll failures as
+            // "error removing file or directory: %w". The inner PathError op
+            // varies inside Go's RemoveAll (`open` for parent traversal,
+            // `unlinkat` for the actual unlink); `unlinkat` is the common
+            // terminal case.
+            res.map_err(|e| {
+                ConnectError::from_io("error removing file or directory", "unlinkat", &path, &e)
+            })?;
         }
     }
     Ok(serde_json::json!({}))
@@ -133,18 +167,35 @@ fn walk_dir(
     if cur > max {
         return Ok(());
     }
-    let read = std::fs::read_dir(dir)
-        .map_err(|e| ConnectError::from_io("error listing directory", dir, &e))?;
+    let read = std::fs::read_dir(dir).map_err(|e| {
+        // dir.go:180 wraps every WalkDir failure as
+        // "error reading directory %s: %w"; the inner PathError for reading
+        // a directory is `readdirent {dir}: …` (go1.26 os/dir_unix.go:89).
+        ConnectError::from_io("error reading directory", "readdirent", dir, &e)
+    })?;
     let mut children: Vec<_> = read.filter_map(|e| e.ok()).collect();
     children.sort_by_key(|e| e.file_name());
     for child in children {
         let child_path = child.path().to_string_lossy().into_owned();
-        // Upstream skips entries that vanish between readdir and lstat
-        // (walkDir :146-152: entryInfo NotFound -> continue).
-        if let Ok(meta) = std::fs::symlink_metadata(&child_path) {
-            entries.push(entry_info(&child_path, &meta));
-            if meta.is_dir() && cur < max {
-                walk_dir(&child_path, cur + 1, max, entries)?;
+        // dir.go:163-169: entries that vanish between readdir and lstat are
+        // skipped (NotFound), but any other lstat failure aborts the whole
+        // walk — the entryInfo error surfaces nested inside dir.go:180's
+        // "error reading directory" wrapper.
+        match std::fs::symlink_metadata(&child_path) {
+            Ok(meta) => {
+                entries.push(entry_info(&child_path, &meta));
+                if meta.is_dir() && cur < max {
+                    walk_dir(&child_path, cur + 1, max, entries)?;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(ConnectError::from_io(
+                    &format!("error reading directory {dir}: error getting file info"),
+                    "lstat",
+                    &child_path,
+                    &e,
+                ));
             }
         }
     }
@@ -154,22 +205,36 @@ fn walk_dir(
 /// DFS listing with the proto `depth` semantics (0/absent behaves as 1).
 pub fn list_dir(req: &ListDirRequest, user: &User) -> Result<serde_json::Value, ConnectError> {
     let root = crate::auth::resolve_path(&req.path, user);
-    // The ROOT is resolved with a following stat (upstream ListDir:
-    // followSymlink on the requested path, then checkIfDirectory with
-    // os.Stat, dir.go:44-56) — a symlink-to-directory root lists fine, while
-    // a DANGLING root is NotFound (EvalSymlinks fails) rather than
-    // InvalidArgument. Only the root is resolved; children below are walked
-    // with lstat semantics (walk_dir) so links are never descended into.
-    //
-    // The NotFound message keeps upstream's `lstat` wording even though this
-    // call follows links: upstream's text comes from EvalSymlinks' error,
-    // which is an lstat failure. Do not "correct" it to `stat` — the string
-    // is baseline-verified.
-    let root_meta = std::fs::metadata(&root).map_err(|e| stat_error("path", &root, &e))?;
+    // Upstream ListDir resolves the root through EvalSymlinks (dir.go:36),
+    // stats the resolved path (checkIfDirectory, dir.go:41-56) and walks it
+    // (dir.go:46) while naming entries after the *requested* path
+    // (dir.go:172). `canonicalize` is the Rust equivalent of EvalSymlinks
+    // and is what makes the ELOOP branch reachable.
+    let canonical = match std::fs::canonicalize(&root) {
+        Ok(p) => p,
+        Err(e) => return Err(listdir_root_error(&root, &e)),
+    };
+    let root_meta = std::fs::metadata(&canonical).map_err(|e| {
+        // checkIfDirectory (dir.go:120-135) on the resolved path.
+        let canonical_str = canonical.to_string_lossy();
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ConnectError::new(
+                ConnectCode::NotFound,
+                format!(
+                    "directory not found: {}",
+                    go_path_error("stat", &canonical_str, &e)
+                ),
+            )
+        } else {
+            ConnectError::from_io("error getting file info", "stat", &canonical_str, &e)
+        }
+    })?;
     if !root_meta.is_dir() {
+        // dir.go:131 — the message carries the *resolved* path (upstream
+        // passes resolvedPath into checkIfDirectory).
         return Err(ConnectError::new(
             ConnectCode::InvalidArgument,
-            format!("path is not a directory: {root}"),
+            format!("path is not a directory: {}", canonical.display()),
         ));
     }
     let max_depth = if req.depth == 0 { 1 } else { req.depth };
@@ -179,26 +244,111 @@ pub fn list_dir(req: &ListDirRequest, user: &User) -> Result<serde_json::Value, 
     to_json(ListDirResponse { entries })
 }
 
-fn stat_error(noun: &str, path: &str, err: &std::io::Error) -> ConnectError {
+/// Baseline entryInfo error vocabulary (upstream `utils.go:42-50`):
+/// - ENOENT        -> NotFound  "file not found: lstat {p}: …"
+/// - anything else -> Internal  "error getting file info: lstat {p}: …"
+fn entry_error(path: &str, err: &std::io::Error) -> ConnectError {
     if err.kind() == std::io::ErrorKind::NotFound {
         ConnectError::new(
             ConnectCode::NotFound,
-            format!("{noun} not found: lstat {path}: no such file or directory"),
+            format!("file not found: {}", go_path_error("lstat", path, err)),
         )
     } else {
-        ConnectError::from_io(&format!("error reading {noun}"), path, err)
+        ConnectError::from_io("error getting file info", "lstat", path, err)
     }
 }
 
-/// Give a newly-created path to the requesting user, best-effort.
-fn chown_path(path: &std::path::Path, user: &User) {
-    if let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) {
-        unsafe {
-            // lchown so a symlink swapped in at `path` cannot redirect the
-            // ownership change onto an unrelated target.
-            libc::lchown(c_path.as_ptr(), user.uid, user.gid);
+/// Baseline ListDir root error vocabulary (upstream `followSymlink`,
+/// `dir.go:36-113`):
+/// - ENOENT -> NotFound           "path not found: lstat {p}: …"
+/// - ELOOP  -> FailedPrecondition "cyclic symlink or chain >255 links at \"{p}\"" —
+///   dir.go:109-111; the EvalSymlinks error itself never appears (go1.26
+///   renders it as `EvalSymlinks: too many links`, no path)
+/// - else   -> Internal           "error resolving symlink: lstat {p}: …"
+fn listdir_root_error(path: &str, err: &std::io::Error) -> ConnectError {
+    if err.raw_os_error() == Some(libc::ELOOP) {
+        ConnectError::new(
+            ConnectCode::FailedPrecondition,
+            format!("cyclic symlink or chain >255 links at \"{path}\""),
+        )
+    } else if err.kind() == std::io::ErrorKind::NotFound {
+        ConnectError::new(
+            ConnectCode::NotFound,
+            format!("path not found: {}", go_path_error("lstat", path, err)),
+        )
+    } else {
+        ConnectError::from_io("error resolving symlink", "lstat", path, err)
+    }
+}
+
+/// Upstream `permissions.EnsureDirs` (dir.go:85 → path.go:68-98): walk the
+/// components root→leaf, stat each (following links), create missing ones
+/// with mode 0o755 and chown each to the requesting user. Failure shapes,
+/// all `internal` (dir.go:87):
+/// - `failed to stat directory: stat {p}: …`      (path.go:72-74)
+/// - `failed to create directory: mkdir {p}: …`   (path.go:77-81)
+/// - `failed to chown directory: chown {p}: …`    (path.go:82-87, hard error)
+/// - `path is a file: {p}`                        (path.go:92-94)
+fn ensure_dirs(path: &str, user: &User) -> Result<(), ConnectError> {
+    let mut subpaths: Vec<String> = Vec::new();
+    let mut cur = path.to_string();
+    loop {
+        subpaths.push(cur.clone());
+        // getSubpaths (path.go:53-66) stops before "/" — it is never created.
+        match std::path::Path::new(&cur).parent() {
+            Some(p) if !p.as_os_str().is_empty() && p != std::path::Path::new("/") => {
+                cur = p.to_string_lossy().into_owned();
+            }
+            _ => break,
         }
     }
+    subpaths.reverse();
+    for sp in subpaths {
+        match std::fs::metadata(&sp) {
+            Ok(info) => {
+                if !info.is_dir() {
+                    return Err(ConnectError::new(
+                        ConnectCode::Internal,
+                        format!("path is a file: {sp}"),
+                    ));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Upstream os.Mkdir mode 0o755 (path.go:77).
+                std::fs::DirBuilder::new()
+                    .mode(0o755)
+                    .create(&sp)
+                    .map_err(|e| {
+                        ConnectError::from_io("failed to create directory", "mkdir", &sp, &e)
+                    })?;
+                // lchown rather than upstream's os.Chown: the component was
+                // just created by us, so the two agree on the happy path, and
+                // lchown cannot be redirected by a swapped-in symlink.
+                if let Ok(c_path) = std::ffi::CString::new(sp.as_bytes()) {
+                    unsafe {
+                        if libc::lchown(c_path.as_ptr(), user.uid, user.gid) != 0 {
+                            let e = std::io::Error::last_os_error();
+                            return Err(ConnectError::from_io(
+                                "failed to chown directory",
+                                "chown",
+                                &sp,
+                                &e,
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(ConnectError::from_io(
+                    "failed to stat directory",
+                    "stat",
+                    &sp,
+                    &e,
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn to_json<T: serde::Serialize>(value: T) -> Result<serde_json::Value, ConnectError> {
@@ -476,5 +626,128 @@ mod tests {
             vec!["lsub", "sub", "deep.txt", "top.txt"],
             "real sub is entered, symlinked lsub is not"
         );
+    }
+
+    /// dir.go:109-111 — a cyclic root is FailedPrecondition with the %q
+    /// message; the underlying EvalSymlinks error never appears.
+    #[test]
+    fn listdir_eloop_is_failed_precondition() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = test_user(dir.path().to_str().unwrap());
+        std::os::unix::fs::symlink("loop", dir.path().join("loop")).unwrap();
+
+        let err = list_dir(
+            &ListDirRequest {
+                path: "loop".into(),
+                depth: 1,
+            },
+            &user,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ConnectCode::FailedPrecondition);
+        assert_eq!(
+            err.message,
+            format!(
+                "cyclic symlink or chain >255 links at \"{}\"",
+                dir.path().join("loop").display()
+            )
+        );
+    }
+
+    /// Non-ENOENT errno texts come from the go_compat table (go1.26), not
+    /// from strerror — this is the exact divergence the conformance harness
+    /// never covered.
+    #[test]
+    fn stat_enotdir_renders_go_table_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = test_user(dir.path().to_str().unwrap());
+        std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
+
+        let err = stat(
+            &PathRequest {
+                path: "f.txt/sub".into(),
+            },
+            &user,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ConnectCode::Internal);
+        assert_eq!(
+            err.message,
+            format!(
+                "error getting file info: lstat {}/f.txt/sub: not a directory",
+                dir.path().display()
+            )
+        );
+    }
+
+    /// MakeDir whose parent chain crosses a file: the precheck os.Stat
+    /// returns ENOTDIR (not ENOENT), so upstream fails in dir.go:69 before
+    /// EnsureDirs is ever reached.
+    #[test]
+    fn makedir_through_file_uses_precheck_vocabulary() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = test_user(dir.path().to_str().unwrap());
+        std::fs::write(dir.path().join("blocker"), b"x").unwrap();
+
+        let err = make_dir(
+            &PathRequest {
+                path: "blocker/sub".into(),
+            },
+            &user,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ConnectCode::Internal);
+        assert_eq!(
+            err.message,
+            format!(
+                "error getting file info: stat {}/blocker/sub: not a directory",
+                dir.path().display()
+            )
+        );
+    }
+
+    /// move.go:36 — EnsureDirs on the destination's parent runs before the
+    /// rename, so moving into a missing directory succeeds (and chowns it).
+    #[test]
+    fn move_into_missing_parent_succeeds_like_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = test_user(dir.path().to_str().unwrap());
+        std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
+
+        let v = move_entry(
+            &MoveRequest {
+                source: "f.txt".into(),
+                destination: "newdir/sub/x.txt".into(),
+            },
+            &user,
+        )
+        .unwrap();
+        assert_eq!(v["entry"]["name"], "x.txt");
+        assert!(dir.path().join("newdir/sub/x.txt").exists());
+    }
+
+    /// rename(2) does not follow symlinks: a dangling source symlink is
+    /// renamed successfully upstream (no exists() pre-check exists there).
+    #[test]
+    fn move_dangling_symlink_source_succeeds_like_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = test_user(dir.path().to_str().unwrap());
+        std::os::unix::fs::symlink(dir.path().join("nope"), dir.path().join("dangling")).unwrap();
+
+        let v = move_entry(
+            &MoveRequest {
+                source: "dangling".into(),
+                destination: "renamed".into(),
+            },
+            &user,
+        )
+        .unwrap();
+        assert_eq!(v["entry"]["name"], "renamed");
+        // Dangling links type as UNSPECIFIED, which proto3 JSON omits
+        // (baseline-verified: default enum values are not serialized).
+        assert!(v["entry"].get("type").is_none());
+        // "renamed" is itself a dangling symlink — exists() (following)
+        // would be false; lstat sees the link.
+        assert!(dir.path().join("renamed").symlink_metadata().is_ok());
     }
 }

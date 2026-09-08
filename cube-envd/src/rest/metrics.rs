@@ -17,10 +17,16 @@ pub async fn metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
     if super::check_token(&state, &headers).is_err() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let cpu = cpu_used_pct().await;
-    let (mem_total, mem_available, mem_cache) = meminfo();
+    // One blocking-pool crossing for the whole sample (proc reads + the
+    // 100ms cpu window + statvfs): /metrics is polled at most a few times
+    // per minute per client, so the occupied pool thread is negligible.
+    let (cpu, (mem_total, mem_available, mem_cache), (disk_total, disk_used)) =
+        crate::blocking::run("rest.metrics", || {
+            let cpu = cpu_used_pct();
+            (cpu, meminfo(), disk_usage("/"))
+        })
+        .await;
     let mem_used = mem_total.saturating_sub(mem_available);
-    let (disk_total, disk_used) = disk_usage("/");
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -52,12 +58,16 @@ fn cpu_count() -> u64 {
 }
 
 /// Sample /proc/stat twice over a short window, like gopsutil's cpu.Percent
-/// with a non-zero interval.
-async fn cpu_used_pct() -> f64 {
+/// with a non-zero interval. Synchronous on purpose: it runs on the blocking
+/// pool inside one `blocking::run` crossing (see rest/metrics handler), so
+/// the 100ms window occupies a pool thread, never an async worker. Splitting
+/// it back into an async sleep would add two extra crossings and scatter the
+/// sampling window.
+fn cpu_used_pct() -> f64 {
     let Some(first) = read_cpu_totals() else {
         return 0.0;
     };
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    std::thread::sleep(std::time::Duration::from_millis(100));
     let Some(second) = read_cpu_totals() else {
         return 0.0;
     };
