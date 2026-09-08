@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"unicode"
 )
 
 // L7 egress policy types — host/path/SNI matching, audit, credential
@@ -229,9 +230,13 @@ func isValidDNSDomainName(domain string) bool {
 			return false
 		}
 		for _, ch := range label {
-			if !(ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-') {
-				return false
+			if ch == '-' || ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' {
+				continue
 			}
+			if unicode.IsLetter(ch) || unicode.IsDigit(ch) || unicode.IsNumber(ch) {
+				continue
+			}
+			return false
 		}
 	}
 	return true

@@ -322,7 +322,7 @@ function isValidDnsDomainName(domain: string): boolean {
       label.length <= 63 &&
       !label.startsWith("-") &&
       !label.endsWith("-") &&
-      /^[a-zA-Z0-9-]+$/.test(label),
+      /^[\p{L}\p{N}0-9-]+$/u.test(label),
   );
 }
 
