@@ -346,6 +346,7 @@ fn validate_request_frame(frame: Frame) -> Result<Frame, RpcError> {
 }
 
 /// 构造正常结束或携带错误的 Connect 流结束帧。
+/// 根据 https://connectrpc.com/docs/protocol/#error-end-stream
 pub fn end_stream(error: Option<RpcError>) -> Vec<u8> {
     let payload = match error {
         Some(error) => serde_json::to_vec(&serde_json::json!({
