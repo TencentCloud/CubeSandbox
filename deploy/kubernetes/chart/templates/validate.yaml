@@ -36,19 +36,25 @@ S3 and every replica builds to its own node-local disk. */ -}}
 {{- if and .Values.controlPlane.enabled .Values.externalControlPlane.enabled (not $s3Backed) }}
 {{- fail "controlPlane.enabled=true is not supported with externalControlPlane.enabled=true: TC (which deploys automatically) must share the artifact directory with the CubeMaster that serves downloads, which an out-of-cluster master cannot do (unless controlPlane.artifactStore.s3Backed=true and the external master also has CUBE_S3_* configured)" }}
 {{- end }}
-{{- if and .Values.controlPlane.enabled $templateCenter.colocateWithMaster (gt (int .Values.controlPlane.master.replicas) 1) (not $s3Backed) }}
-{{- fail "controlPlane.templateCenter.colocateWithMaster=true requires controlPlane.master.replicas=1: the artifact store is node-local, so with several master replicas a download can land on a node that never built the artifact. Multi-replica master is supported with controlPlane.artifactStore.s3Backed=true (artifacts live in S3; local disk is scratch)" }}
-{{- end }}
-{{- if and .Values.controlPlane.enabled (not $templateCenter.colocateWithMaster) (not $templateCenter.affinity) (not $s3Backed) }}
-{{- fail "controlPlane.templateCenter.colocateWithMaster=false requires controlPlane.templateCenter.affinity: without it TC may be scheduled away from the CubeMaster holding the artifact volume (not required with controlPlane.artifactStore.s3Backed=true)" }}
-{{- end }}
-{{- if and (gt (int ($templateCenter.replicas | default 1)) 1) (not $s3Backed) }}
-{{- fail (printf "controlPlane.templateCenter.replicas=%v requires controlPlane.artifactStore.s3Backed=true: with a node-local artifact store a second TC replica could neither read the first one's ext4 nor take over its builds. With s3Backed, replicas coordinate duplicate builds through DB session locks and share the S3 bucket" ($templateCenter.replicas | default 1)) }}
+{{- $masterPersistence := .Values.controlPlane.master.persistence -}}
+{{- /* A genuinely shared artifact volume (a ReadWriteMany claim, e.g. CFS/NFS —
+TC mounts the SAME claim by default, see cube.templateCenterStorageClaimName)
+makes the store non-node-local: every master replica and TC see every
+artifact. hostPath stays node-local by definition, and a
+templateCenter.persistence.existingClaim we cannot prove is the same share
+does not count (conservative).
+
+Multi-replica master/TC without S3 and without a shared volume is ALLOWED but
+degraded (downloads may hit a master that never built the artifact; TC
+replicas duplicate builds): NOTES.txt prints a loud warning for that
+combination instead of failing the install. */ -}}
+{{- $sharedArtifactStore := and $masterPersistence.enabled (not $masterPersistence.hostPath) (has "ReadWriteMany" ($masterPersistence.accessModes | default list)) (not $templateCenter.persistence.existingClaim) -}}
+{{- if and .Values.controlPlane.enabled (not $templateCenter.colocateWithMaster) (not $templateCenter.affinity) (not $s3Backed) (not $sharedArtifactStore) }}
+{{- fail "controlPlane.templateCenter.colocateWithMaster=false requires controlPlane.templateCenter.affinity: without it TC may be scheduled away from the CubeMaster holding the artifact volume (not required with controlPlane.artifactStore.s3Backed=true or a ReadWriteMany shared artifact volume)" }}
 {{- end }}
 {{- /* Multi-replica in S3 mode needs the local volume to be per-Pod scratch,
 not a shared RWO claim (which cannot attach on several nodes). hostPath and
 emptyDir are fine -- each Pod gets its own scratch. */ -}}
-{{- $masterPersistence := .Values.controlPlane.master.persistence -}}
 {{- $anyMultiReplica := or (gt (int .Values.controlPlane.master.replicas) 1) (gt (int ($templateCenter.replicas | default 1)) 1) -}}
 {{- if and $s3Backed $anyMultiReplica $masterPersistence.enabled (not $masterPersistence.hostPath) (not (has "ReadWriteMany" ($masterPersistence.accessModes | default list))) }}
 {{- fail "artifactStore.s3Backed=true with master.replicas>1 or templateCenter.replicas>1 requires controlPlane.master.persistence.enabled=false: in S3 mode the local disk is build scratch only and S3 is the durable store, so the ReadWriteOnce artifact PVC (which cannot attach on several nodes) only gets in the way. Set enabled=false, or use a ReadWriteMany claim" }}

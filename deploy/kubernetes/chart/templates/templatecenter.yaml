@@ -8,9 +8,10 @@ metadata:
     {{- include "cube.labels" . | nindent 4 }}
     app.kubernetes.io/component: templatecenter
 spec:
-  # With artifactStore.s3Backed=false TC is a singleton builder (the artifact
-  # store is node-local; validate.yaml rejects replicas>1). With s3Backed=true
-  # the durable copy lives in S3, local disk is scratch, and replicas coordinate
+  # With artifactStore.s3Backed=false the artifact store is node-local and TC
+  # should stay a singleton builder (NOTES.txt warns when replicas>1 is set
+  # anyway: replicas cannot read each other's ext4). With s3Backed=true the
+  # durable copy lives in S3, local disk is scratch, and replicas coordinate
   # duplicate builds through DB session locks.
   replicas: {{ .Values.controlPlane.templateCenter.replicas | default 1 }}
   {{- if gt (int (.Values.controlPlane.templateCenter.replicas | default 1)) 1 }}
