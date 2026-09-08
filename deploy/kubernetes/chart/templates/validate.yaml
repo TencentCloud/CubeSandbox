@@ -4,6 +4,19 @@
 {{- fail "controlPlane.enabled=true requires placement.controlPlane.nodeSelector" }}
 {{- end }}
 {{- $templateCenter := .Values.controlPlane.templateCenter -}}
+{{- $s3Backed := ((.Values.controlPlane.artifactStore).s3Backed) | default false -}}
+{{- if $s3Backed }}
+{{- /* s3Backed only works when S3 credentials actually reach the pods.
+Best-effort evidence check: builtin minio, volumeS3 endpoint, or an explicit
+CUBE_S3_ENDPOINT in global.env. */ -}}
+{{- $hasS3Env := false -}}
+{{- range ((.Values.global).env | default list) -}}
+{{- if eq (.name | default "") "CUBE_S3_ENDPOINT" }}{{- $hasS3Env = true }}{{- end }}
+{{- end }}
+{{- if and (not $hasS3Env) (ne (include "cube.minioBuiltinEnabled" .) "true") (eq (((.Values.volumeS3).endpoint) | default "") "") }}
+{{- fail "controlPlane.artifactStore.s3Backed=true requires S3/MinIO configuration: set CUBE_S3_ENDPOINT (+bucket/credentials) in global.env, configure volumeS3.endpoint, or enable the chart's builtin minio -- the credentials must reach BOTH the cube-master and cube-templatecenter pods" }}
+{{- end }}
+{{- end }}
 {{- if hasKey $templateCenter "buildMode" }}
 {{- fail "controlPlane.templateCenter.buildMode no longer exists: template builds always go to CubeTemplateCenter, which deploys automatically whenever controlPlane.enabled=true. Remove controlPlane.templateCenter.buildMode from your values" }}
 {{- end }}
@@ -16,17 +29,25 @@
 {{- if and .Values.controlPlane.enabled (not .Values.controlPlane.master.enabled) }}
 {{- fail "controlPlane.enabled=true requires controlPlane.master.enabled=true: TC (which deploys automatically) writes the ext4 but CubeMaster is what serves it to Cubelet and owns every business-state write" }}
 {{- end }}
-{{- if and .Values.controlPlane.enabled .Values.externalControlPlane.enabled }}
-{{- fail "controlPlane.enabled=true is not supported with externalControlPlane.enabled=true: TC (which deploys automatically) must share the artifact directory with the CubeMaster that serves downloads, which an out-of-cluster master cannot do" }}
+{{- if and .Values.controlPlane.enabled .Values.externalControlPlane.enabled (not $s3Backed) }}
+{{- fail "controlPlane.enabled=true is not supported with externalControlPlane.enabled=true: TC (which deploys automatically) must share the artifact directory with the CubeMaster that serves downloads, which an out-of-cluster master cannot do (unless controlPlane.artifactStore.s3Backed=true and the external master also has CUBE_S3_* configured)" }}
 {{- end }}
-{{- if and .Values.controlPlane.enabled $templateCenter.colocateWithMaster (gt (int .Values.controlPlane.master.replicas) 1) }}
-{{- fail "controlPlane.templateCenter.colocateWithMaster=true requires controlPlane.master.replicas=1: the artifact store is node-local, so with several master replicas a download can land on a node that never built the artifact" }}
+{{- if and .Values.controlPlane.enabled $templateCenter.colocateWithMaster (gt (int .Values.controlPlane.master.replicas) 1) (not $s3Backed) }}
+{{- fail "controlPlane.templateCenter.colocateWithMaster=true requires controlPlane.master.replicas=1: the artifact store is node-local, so with several master replicas a download can land on a node that never built the artifact. Multi-replica master is supported with controlPlane.artifactStore.s3Backed=true (artifacts live in S3; local disk is scratch)" }}
 {{- end }}
-{{- if and .Values.controlPlane.enabled (not $templateCenter.colocateWithMaster) (not $templateCenter.affinity) }}
-{{- fail "controlPlane.templateCenter.colocateWithMaster=false requires controlPlane.templateCenter.affinity: without it TC may be scheduled away from the CubeMaster holding the artifact volume" }}
+{{- if and .Values.controlPlane.enabled (not $templateCenter.colocateWithMaster) (not $templateCenter.affinity) (not $s3Backed) }}
+{{- fail "controlPlane.templateCenter.colocateWithMaster=false requires controlPlane.templateCenter.affinity: without it TC may be scheduled away from the CubeMaster holding the artifact volume (not required with controlPlane.artifactStore.s3Backed=true)" }}
 {{- end }}
-{{- if hasKey $templateCenter "replicas" }}
-{{- fail (printf "controlPlane.templateCenter.replicas is not supported (got %v): CubeTemplateCenter is always exactly one instance. Artifacts live on a node-local disk behind a ReadWriteOnce PVC with no cross-node sharing layer, so a second replica could neither read the first one's ext4 files nor take over its builds, and the two would race on the same artifact directory. Remove the key; scale CubeMaster instead, which is the stateless half" $templateCenter.replicas) }}
+{{- if and (gt (int ($templateCenter.replicas | default 1)) 1) (not $s3Backed) }}
+{{- fail (printf "controlPlane.templateCenter.replicas=%v requires controlPlane.artifactStore.s3Backed=true: with a node-local artifact store a second TC replica could neither read the first one's ext4 nor take over its builds. With s3Backed, replicas coordinate duplicate builds through DB session locks and share the S3 bucket" ($templateCenter.replicas | default 1)) }}
+{{- end }}
+{{- /* Multi-replica in S3 mode needs the local volume to be per-Pod scratch,
+not a shared RWO claim (which cannot attach on several nodes). hostPath and
+emptyDir are fine -- each Pod gets its own scratch. */ -}}
+{{- $masterPersistence := .Values.controlPlane.master.persistence -}}
+{{- $anyMultiReplica := or (gt (int .Values.controlPlane.master.replicas) 1) (gt (int ($templateCenter.replicas | default 1)) 1) -}}
+{{- if and $s3Backed $anyMultiReplica $masterPersistence.enabled (not $masterPersistence.hostPath) (not (has "ReadWriteMany" ($masterPersistence.accessModes | default list))) }}
+{{- fail "artifactStore.s3Backed=true with master.replicas>1 or templateCenter.replicas>1 requires controlPlane.master.persistence.enabled=false: in S3 mode the local disk is build scratch only and S3 is the durable store, so the ReadWriteOnce artifact PVC (which cannot attach on several nodes) only gets in the way. Set enabled=false, or use a ReadWriteMany claim" }}
 {{- end }}
 {{- /*
 TC shares CubeMaster's artifact volume, so CubeMaster's access mode decides
@@ -34,17 +55,16 @@ whether co-location is merely required or physically unavoidable. Reject the
 combination that cannot work at all: a ReadWriteOnce claim plus TC scheduled
 away from CubeMaster means one of the two Pods cannot attach the volume.
 */ -}}
-{{- if and .Values.controlPlane.enabled (not $templateCenter.colocateWithMaster) }}
-{{- $masterPersistence := .Values.controlPlane.master.persistence -}}
+{{- if and .Values.controlPlane.enabled (not $templateCenter.colocateWithMaster) (not $s3Backed) }}
 {{- if and $masterPersistence.enabled (not $masterPersistence.hostPath) }}
 {{- $modes := $masterPersistence.accessModes | default list -}}
 {{- if and (not (has "ReadWriteMany" $modes)) (not $templateCenter.persistence.existingClaim) }}
-{{- fail (printf "controlPlane.templateCenter.colocateWithMaster=false requires a ReadWriteMany artifact volume, but controlPlane.master.persistence.accessModes is %v. TC writes the ext4 and CubeMaster serves it from the same directory; with ReadWriteOnce (CBS and most block CSI drivers) only one node can attach the volume, so an un-colocated TC either fails to attach or builds into a different disk and every artifact download 404s. Either keep colocateWithMaster=true, or provide a genuinely shared volume (e.g. CFS/NFS with ReadWriteMany) via controlPlane.master.persistence.accessModes and controlPlane.templateCenter.persistence.existingClaim" $modes) }}
+{{- fail (printf "controlPlane.templateCenter.colocateWithMaster=false requires a ReadWriteMany artifact volume, but controlPlane.master.persistence.accessModes is %v. TC writes the ext4 and CubeMaster serves it from the same directory; with ReadWriteOnce (CBS and most block CSI drivers) only one node can attach the volume, so an un-colocated TC either fails to attach or builds into a different disk and every artifact download 404s. Either keep colocateWithMaster=true, provide a genuinely shared volume (e.g. CFS/NFS with ReadWriteMany) via controlPlane.master.persistence.accessModes and controlPlane.templateCenter.persistence.existingClaim, or set controlPlane.artifactStore.s3Backed=true" $modes) }}
 {{- end }}
 {{- end }}
 {{- end }}
-{{- if and .Values.controlPlane.enabled .Values.controlPlane.master.persistence.enabled .Values.controlPlane.master.persistence.hostPath (not $templateCenter.colocateWithMaster) }}
-{{- fail "controlPlane.templateCenter.colocateWithMaster=false cannot work with controlPlane.master.persistence.hostPath: a hostPath artifact store exists only on one node, so TC must run on that same node as CubeMaster" }}
+{{- if and .Values.controlPlane.enabled .Values.controlPlane.master.persistence.enabled .Values.controlPlane.master.persistence.hostPath (not $templateCenter.colocateWithMaster) (not $s3Backed) }}
+{{- fail "controlPlane.templateCenter.colocateWithMaster=false cannot work with controlPlane.master.persistence.hostPath: a hostPath artifact store exists only on one node, so TC must run on that same node as CubeMaster (not required with controlPlane.artifactStore.s3Backed=true, where the local disk is scratch)" }}
 {{- end }}
 {{- if and .Values.controlPlane.enabled (eq $templateCenter.service.type "ClusterIP") $templateCenter.service.nodePort }}
 {{- fail "controlPlane.templateCenter.service.nodePort must be empty when service.type is ClusterIP" }}

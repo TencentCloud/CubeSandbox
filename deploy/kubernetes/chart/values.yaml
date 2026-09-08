@@ -282,6 +282,32 @@ controlPlane:
         failureThreshold: 6
     resources: {}
 
+  # Template artifact storage semantics. This declares WHERE the durable copy
+  # of a built ext4 lives, which in turn decides whether CubeMaster and
+  # CubeTemplateCenter can scale beyond one replica:
+  #
+  #   s3Backed=false (default): artifacts live on the local/shared disk
+  #     (master.persistence PVC or hostPath). TC is locked to one replica,
+  #     colocateWithMaster=true requires master.replicas=1, and a
+  #     non-colocated TC requires a ReadWriteMany volume -- because artifact
+  #     availability is tied to one node's disk.
+  #
+  #   s3Backed=true: the durable copy is the S3/MinIO object. TC uploads the
+  #     ext4 after building; Cubelet downloads straight from S3 via presigned
+  #     URLs that CubeMaster re-signs at each use; the local disk on both
+  #     master and TC is build scratch / cache only. In this mode BOTH
+  #     master and TC may run any replica count on any node -- no shared
+  #     volume and no co-location required.
+  #
+  # Requirements when s3Backed=true:
+  #   - CUBE_S3_* must reach BOTH the master and TC pods (via global.env,
+  #     volumeS3.*, or the chart's builtin minio), and
+  #   - with master.replicas>1 or templateCenter.replicas>1, set
+  #     master.persistence.enabled=false (S3 is durable; the RWO PVC cannot
+  #     attach on several nodes anyway) unless the claim is ReadWriteMany.
+  artifactStore:
+    s3Backed: false
+
   # Standalone template build service (CubeTemplateCenter). REQUIRED.
   #
   # CubeTemplateCenter is the ONLY component that builds template ext4 images
@@ -295,11 +321,13 @@ controlPlane:
   # are wired automatically on both sides -- no manual conf editing, and no
   # way to end up with a CubeMaster that has nowhere to forward builds.
   templateCenter:
-    # TC always runs exactly one instance. Artifacts live on a node-local disk
-    # behind a ReadWriteOnce PVC with no cross-node sharing layer, so a second
-    # replica could neither read the first one's ext4 files nor take over its
-    # builds, and the two would race on the same artifact directory. There is no
-    # `replicas` key: scale CubeMaster (the stateless half) instead.
+    # Replica count. Must stay 1 while artifactStore.s3Backed=false (the
+    # artifact store is a node-local disk with no cross-node sharing layer, so
+    # a second replica could neither read the first one's ext4 nor take over
+    # its builds). Values > 1 require artifactStore.s3Backed=true, where
+    # replicas coordinate duplicate builds of one spec through DB session
+    # locks and every replica reads/writes the shared S3 bucket.
+    replicas: 1
     # Bypass the migration content preflight. Rarely needed: an applied version
     # that is absent from this image's migrations tree is only reported, so a
     # database ahead of the binary no longer blocks startup. Enable this only to

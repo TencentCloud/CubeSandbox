@@ -1,4 +1,5 @@
 {{- if .Values.controlPlane.enabled }}
+{{- $s3Backed := ((.Values.controlPlane.artifactStore).s3Backed) | default false -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,11 +8,11 @@ metadata:
     {{- include "cube.labels" . | nindent 4 }}
     app.kubernetes.io/component: templatecenter
 spec:
-  # TC is a singleton builder: artifacts live on a node-local disk behind a
-  # ReadWriteOnce PVC, so a second replica could neither read the first one's
-  # ext4 nor take over its builds. validate.yaml rejects a `replicas` key under
-  # controlPlane.templateCenter; scale CubeMaster (the stateless half) instead.
-  replicas: 1
+  # With artifactStore.s3Backed=false TC is a singleton builder (the artifact
+  # store is node-local; validate.yaml rejects replicas>1). With s3Backed=true
+  # the durable copy lives in S3, local disk is scratch, and replicas coordinate
+  # duplicate builds through DB session locks.
+  replicas: {{ .Values.controlPlane.templateCenter.replicas | default 1 }}
   # Recreate, never RollingUpdate: a build is in-memory progress state, so a
   # surge Pod cannot take over an interrupted build from the outgoing Pod. The
   # reconciler (pkg/reconcile) marks stale builds as FAILED after a timeout;
@@ -33,7 +34,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- include "cube.controlPlanePlacement" . | nindent 6 }}
-      {{- if .Values.controlPlane.templateCenter.colocateWithMaster }}
+      {{- if and .Values.controlPlane.templateCenter.colocateWithMaster (not $s3Backed) }}
       # TC must land on the same NODE as CubeMaster. ReadWriteOnce is a
       # single-node constraint rather than a single-Pod one, so co-located Pods
       # can share the artifact PVC — and they have to, because TC writes the ext4
@@ -42,7 +43,9 @@ spec:
       #
       # required, not preferred: a TC scheduled elsewhere would either fail to
       # attach the volume or silently build into a different disk, leaving every
-      # download 404ing.
+      # download 404ing. Not rendered with artifactStore.s3Backed=true: there
+      # the durable copy is the S3 object and the local disk is scratch, so
+      # co-location buys nothing.
       affinity:
         podAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -187,6 +190,9 @@ spec:
         # The SAME volume CubeMaster mounts. hostPath and PVC are both honoured so
         # this follows whatever the master is configured with; an emptyDir here
         # would be pod-local and CubeMaster could never serve the result.
+        # With artifactStore.s3Backed=true and master.persistence.enabled=false
+        # that emptyDir is exactly right: the durable copy is the S3 object and
+        # this directory is build scratch only.
         - name: cube-master-storage
           {{- if and .Values.controlPlane.master.persistence.enabled .Values.controlPlane.master.persistence.hostPath }}
           hostPath:

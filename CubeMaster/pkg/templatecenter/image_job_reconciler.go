@@ -306,8 +306,16 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 	// The ext4 must still be on disk. CubeMaster and CubeTemplateCenter share
 	// the artifact directory (design §9.7), so this holds even if TC has since
 	// been shut down -- but not if GC already reclaimed the artifact.
-	if _, err := os.Stat(result.Ext4Path); err != nil {
-		return nil, fmt.Errorf("artifact file %s is gone: %w", result.Ext4Path, err)
+	//
+	// S3-backed results (ArtifactURL set) skip the probe: the durable copy is
+	// the bucket object and cubelets pull from the presigned URL, so the local
+	// file is a cache that may legitimately be absent -- on a multi-replica /
+	// un-colocated deployment the resume replay can land on a master that
+	// never shared TC's disk at all.
+	if result.ArtifactURL == "" {
+		if _, err := os.Stat(result.Ext4Path); err != nil {
+			return nil, fmt.Errorf("artifact file %s is gone: %w", result.Ext4Path, err)
+		}
 	}
 	return result, nil
 }
