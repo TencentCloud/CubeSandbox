@@ -1,9 +1,10 @@
 ---
 layout: home
+logo3d: true
 
 hero:
   name: "Cube Sandbox"
-  text: "Empowering your AI Agents."
+  text: "Empowering your AI&nbsp;Agents."
   tagline: "极速启动、高并发、安全且轻量化的 AI Agent 沙箱服务"
   actions:
     - theme: brand

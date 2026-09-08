@@ -1,13 +1,42 @@
-/* Keep the Chinese home-page tagline on one line when the viewport has room.
-   Narrow screens retain VitePress's responsive wrapping behavior. */
-@media (min-width: 768px) {
-  .VPHomeHero .text {
-    max-width: none;
-    white-space: nowrap;
-  }
+/* Scope the composition to home pages that opt into the brand illustration. */
+.VPHomeHero:has(.home-logo) .container { align-items: center; gap: 32px; }
+.VPHomeHero:has(.home-logo) .main { order: 1; width: 100%; min-width: 0; flex-shrink: 1; }
+.VPHomeHero:has(.home-logo) .image { order: 2; margin: 0; width: 100%; min-width: 0; }
+.VPHomeHero:has(.home-logo) .image-container { width: 100%; height: auto; transform: none; }
+.VPHomeHero:has(.home-logo) .image-bg { display: none; }
+.VPHomeHero:has(.home-logo) .name,
+.VPHomeHero:has(.home-logo) .text,
+.VPHomeHero:has(.home-logo) .tagline { white-space: normal; text-wrap: balance; }
+.VPHomeHero:has(.home-logo) .text { text-wrap: pretty; }
 
-  html[lang^='zh'] .VPHomeHero .tagline {
-    max-width: none;
-    white-space: nowrap;
+@media (min-width: 960px) {
+  .VPHomeHero:has(.home-logo) {
+    padding-top: calc(var(--vp-nav-height) + var(--vp-layout-top-height, 0px) + 36px);
+    padding-bottom: 44px;
   }
+  .VPHomeHero:has(.home-logo) .main { flex: 1.15; max-width: 608px; }
+  .VPHomeHero:has(.home-logo) .image { flex: 1; }
+  .VPHomeHero:has(.home-logo) .text { max-width: 520px; }
+  .VPHomeHero:has(.home-logo) .tagline { max-width: 520px; font-size: 20px; line-height: 1.65; }
+}
+
+@media (min-width: 960px) and (max-width: 1199px) {
+  .VPHomeHero:has(.home-logo) .name,
+  .VPHomeHero:has(.home-logo) .text { font-size: 44px; line-height: 1.12; }
+}
+
+@media (max-width: 959px) {
+  .VPHomeHero:has(.home-logo) { padding-bottom: 32px; }
+  .VPHomeHero:has(.home-logo) .container { gap: 20px; }
+}
+
+/* This site's long navigation needs the existing mobile menu on smaller homes. */
+@media (min-width: 768px) and (max-width: 1439px) {
+  body:has(.home-logo) .VPNavBarMenu,
+  body:has(.home-logo) .VPNavBarTranslations,
+  body:has(.home-logo) .VPNavBarAppearance,
+  body:has(.home-logo) .VPNavBarSocialLinks,
+  body:has(.home-logo) .VPNavBarExtra { display: none; }
+  body:has(.home-logo) .VPNavBarHamburger { display: flex; }
+  body:has(.home-logo) .VPNavScreen { display: block; }
 }
