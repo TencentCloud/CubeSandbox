@@ -20,7 +20,7 @@ tokio-stream = "0.1"
 libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-time = { version = "0.3.55", default-features = false, features = ["parsing"] }
+time = { version = "0.3.55", default-features = false, features = ["parsing", "formatting"] }
 
 [dev-dependencies]
 tempfile = "3"

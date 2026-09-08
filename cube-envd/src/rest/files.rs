@@ -11,8 +11,8 @@
 //! - upload: multipart (part filename = target path) or raw octet-stream
 //!   (`path` query required); parents are created; the file is chowned to
 //!   the requesting user; response is `[{"name","path","type":"file"}]`;
-//! - gzip response encoding is NOT implemented (declared difference —
-//!   identity responses are valid HTTP for any Accept-Encoding).
+//! - gzip response encoding is not implemented: responses are always
+//!   identity (valid HTTP for any Accept-Encoding).
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -25,7 +25,21 @@ use axum::response::IntoResponse;
 
 use crate::auth::{self, User};
 use crate::error::RestError;
+use crate::rest::{content_disposition, encoding, httpdate, preconditions, ranges};
 use crate::state::AppState;
+
+/// Upload size cap for both upload paths (raw octet-stream and multipart).
+///
+/// Upstream envd's upload handler is unbounded (it streams to disk); in
+/// production the cap is enforced by the proxy layer, which rejects bodies
+/// over 256 MiB. Mirroring that external cap keeps the 64 MiB - 256 MiB
+/// range functional (a proxy-passed 100 MiB upload must succeed here too)
+/// while still bounding memory: unlike upstream, the body is buffered
+/// before the atomic temp-file write, so the cap is also the memory
+/// ceiling. (Streaming to disk would remove that trade-off — future work.)
+/// Deliberately NOT `connect::MAX_ENVELOPE_SIZE` (64 MiB): that constant
+/// bounds Connect envelopes, not file uploads.
+const MAX_UPLOAD_SIZE: usize = 256 * 1024 * 1024;
 
 fn resolve_request_user(
     state: &AppState,
@@ -52,18 +66,153 @@ fn check_token_rest(state: &AppState, headers: &HeaderMap) -> Result<(), RestErr
         .map_err(|_| RestError::new(StatusCode::UNAUTHORIZED, "invalid access token".to_string()))
 }
 
-/// GET /files — stream a file back as application/octet-stream.
+/// GET /files — stream a file back with upstream `http.ServeContent`
+/// semantics: Last-Modified, conditional requests (If-Match / If-Unmodified-
+/// Since / If-None-Match / If-Modified-Since / If-Range → 304/412), Range
+/// (single range → 206, unsatisfiable → 416), Accept-Ranges, and the two 406
+/// Accept-Encoding exits — in upstream download.go's exact order. The stages
+/// below are extracted as helpers so each mirrors one upstream step; the
+/// order of the calls *is* the pipeline order.
 pub async fn download(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    if let Err(e) = check_token_rest(&state, &headers) {
-        return e.into_response();
+    // Stage 1: token → user → path → stat/isdir (error order unchanged).
+    let ResolvedFile { path, meta } = match resolve_download(&state, &params, &headers).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    // Stage 2: Accept-Encoding gates (parse 406 before Vary is set, identity
+    // gate after it — upstream's order).
+    if let Err(resp) = gate_accept_encoding(&headers) {
+        return resp;
     }
-    let user = match resolve_request_user(&state, &params, &headers) {
+    // Stage 3: open once; the handle is reused for sniffing, seek and stream.
+    let mut file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(e) => {
+            return RestError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("error opening file '{path}': {e}"),
+            )
+            .into_response();
+        }
+    };
+    // Stage 4: preset headers (Vary / Content-Disposition / Last-Modified)
+    // and the modtime the conditional steps key off.
+    let preset = Preset::new(&path, &meta);
+    // Stage 5: conditional requests → 304/412. Runs before the Content-Type
+    // probe so those answers carry no Content-Type, exactly like upstream.
+    if let Some(resp) = preset.condition_response(&headers) {
+        return resp;
+    }
+    // Stage 6: Content-Type sniff (approximates Go's DetectContentType); a
+    // failed rewind reopens the file so the body still starts at byte 0.
+    // Known difference, left deliberately: fs.go's sniff path 500s on a
+    // rewind failure, we reopen and continue — unreachable for practical
+    // files, and a genuinely non-seekable handle is caught by the Seek(End)
+    // in stage 6b below anyway. Do not "fix" this toward Go.
+    let content_type = match sniff_content_type_or_reopen(&mut file, &path).await {
+        Ok(ct) => ct,
+        Err(resp) => return resp,
+    };
+    // Stage 6b: response size from the open handle — Go's sizeFunc is
+    // Seek(End) + Seek(Start), NOT the earlier path stat (fs.go serveContent
+    // via ServeContent's sizeFunc). This makes /dev/zero-style devices
+    // (SeekEnd = 0) answer Content-Length: 0 with an empty body instead of
+    // streaming forever, and a non-seekable file (/proc/* reports EINVAL on
+    // SeekEnd) fail exactly like Go's errSeeker path. It also closes the
+    // stat-vs-handle size race: only the modtime still comes from the path
+    // stat, like download.go.
+    use tokio::io::AsyncSeekExt;
+    // Either seek failing is Go's errSeeker → serveError(500, "seeker can't
+    // seek") — including the (unreachable on Linux) case of Seek(End)
+    // succeeding but Seek(Start) failing. Never panic here: this is the
+    // request path's only non-builder expect, and the panic handler answers
+    // a JSON shape, not Go's text/plain serveError.
+    let seek_end = file.seek(std::io::SeekFrom::End(0)).await;
+    let size = match seek_end {
+        Ok(s) => s,
+        Err(_) => {
+            // fs.go: serveError(w, "seeker can't seek", 500) — plain_error
+            // is that exact shape (Vary/Disposition kept, Last-Modified
+            // stripped, text/plain + nosniff, "text\n").
+            return preset.plain_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                None,
+                "seeker can't seek\n".to_string(),
+            );
+        }
+    };
+    if file.seek(std::io::SeekFrom::Start(0)).await.is_err() {
+        return preset.plain_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            None,
+            "seeker can't seek\n".to_string(),
+        );
+    }
+    // Stage 7: Range dispatch — If-Range gate, parse, single-range seek.
+    let single = match plan_range(&mut file, &headers, &preset, size).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    // Stage 8: assemble the success response (200 full / 206 range).
+    // Both arms stream exactly their send size: Go io.CopyN(sendSize) reads
+    // nothing for size 0 (/dev/zero → CL: 0, empty body) and never overruns
+    // the Seek(End) size.
+    let (code, stream_limit) = match &single {
+        Some(r) => (StatusCode::PARTIAL_CONTENT, Some(r.length as u64)),
+        None => (StatusCode::OK, Some(size)),
+    };
+
+    // Common success headers: Content-Type always; Content-Range only on
+    // 206; Accept-Ranges always; Content-Length always on 200 — Go's
+    // serveContent sets it unconditionally for identity responses, so a
+    // size-0 answer (empty file, /dev/zero) carries an explicit CL: 0.
+    let mut b = axum::response::Response::builder().status(code);
+    b = preset.apply(b);
+    b = b.header(axum::http::header::CONTENT_TYPE, content_type);
+    if let Some(r) = single {
+        b = b.header(
+            axum::http::header::CONTENT_RANGE,
+            r.content_range(size as i64),
+        );
+    }
+    b = b.header(axum::http::header::ACCEPT_RANGES, "bytes");
+    let body_len = match single {
+        Some(r) => Some(r.length as u64),
+        None => Some(size),
+    };
+    if let Some(len) = body_len {
+        b = b.header(axum::http::header::CONTENT_LENGTH, len);
+    }
+    let stream = reader_stream(file, stream_limit);
+    b.body(axum::body::Body::from_stream(stream))
+        .expect("build download response")
+}
+
+/// Stage 1 result: the request resolved to a path whose stat succeeded and
+/// which is not a directory.
+struct ResolvedFile {
+    path: String,
+    meta: std::fs::Metadata,
+}
+
+/// Stage 1 — token → user → path → stat. Mirrors download.go's order; every
+/// error exit keeps its baseline status and message.
+#[allow(clippy::result_large_err)] // axum helpers propagate prebuilt responses, not an error type
+async fn resolve_download(
+    state: &Arc<AppState>,
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+) -> Result<ResolvedFile, axum::response::Response> {
+    if let Err(e) = check_token_rest(state, headers) {
+        return Err(e.into_response());
+    }
+    let user = match resolve_request_user(state, params, headers) {
         Ok(u) => u,
-        Err(e) => return e.into_response(),
+        Err(e) => return Err(e.into_response()),
     };
     // Baseline: a missing `path` parameter falls back to the user's home
     // directory (which then fails with the "is a directory" error). A
@@ -81,82 +230,337 @@ pub async fn download(
     let meta = match tokio::fs::metadata(&path).await {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return RestError::new(
+            return Err(RestError::new(
                 StatusCode::NOT_FOUND,
                 format!("path '{path}' does not exist"),
             )
-            .into_response();
+            .into_response());
         }
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            return RestError::new(
+            return Err(RestError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("error opening file '{path}': permission denied"),
             )
-            .into_response();
+            .into_response());
         }
         Err(e) => {
-            return RestError::new(
+            return Err(RestError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("error opening file '{path}': {e}"),
             )
-            .into_response();
+            .into_response());
         }
     };
     if meta.is_dir() {
-        return RestError::new(
+        return Err(RestError::new(
             StatusCode::BAD_REQUEST,
             format!("path '{path}' is a directory"),
         )
-        .into_response();
+        .into_response());
+    }
+    Ok(ResolvedFile { path, meta })
+}
+
+/// Stage 2 — the two Accept-Encoding 406 exits, in upstream order: the parse
+/// failure answers before `Vary` is set; the Range/conditional identity gate
+/// answers after it and therefore carries `Vary` itself (nginx's `add_header
+/// Vary` has no `always`, so error responses must carry it when upstream
+/// does).
+#[allow(clippy::result_large_err)] // axum helpers propagate prebuilt responses, not an error type
+fn gate_accept_encoding(headers: &HeaderMap) -> Result<(), axum::response::Response> {
+    let ae_value = header_str(headers, axum::http::header::ACCEPT_ENCODING);
+    let ae = ae_value.as_deref().unwrap_or("");
+    if encoding::parse_accept_encoding(ae).is_err() {
+        return Err(RestError::new(
+            StatusCode::NOT_ACCEPTABLE,
+            "error parsing Accept-Encoding: no acceptable encoding found, supported: [gzip]",
+        )
+        .into_response());
+    }
+    // cube-envd serves identity only: the parsed best encoding is
+    // deliberately unused, but the rejection above must stay.
+    let has_range_or_conditional = [
+        axum::http::header::RANGE,
+        axum::http::header::IF_MODIFIED_SINCE,
+        axum::http::header::IF_NONE_MATCH,
+        axum::http::header::IF_RANGE,
+    ]
+    .iter()
+    .any(|h| {
+        header_str(headers, h.clone())
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    });
+    if has_range_or_conditional && !encoding::is_identity_acceptable(ae) {
+        // This 406 answers AFTER Vary was set, so it must carry Vary itself
+        // (see fn doc). Body shape matches RestError / upstream jsonError.
+        let body = serde_json::json!({
+            "code": 406,
+            "message": "identity encoding not acceptable for Range or conditional request",
+        })
+        .to_string();
+        return Err(axum::response::Response::builder()
+            .status(StatusCode::NOT_ACCEPTABLE)
+            .header(axum::http::header::VARY, "Accept-Encoding")
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            )
+            .body(axum::body::Body::from(body))
+            .expect("build 406 response"));
+    }
+    Ok(())
+}
+
+/// The header set shared by every download answer: Vary + Content-Disposition
+/// (+ Last-Modified when the mtime is meaningful), plus the variant that
+/// drops Last-Modified for 416 (fs.go serveError).
+struct Preset {
+    /// fs.go `checkPreconditions`/`setLastModified` view of the mtime:
+    /// `None` = `isZeroTime` (exactly the epoch, or unavailable) — no
+    /// Last-Modified and the date-based conditions do not apply.
+    modtime: Option<i64>,
+    /// fs.go `checkIfRange` view: no zero-time gate there, only
+    /// `t.Unix() == modtime.Unix()` — so this is the floor seconds whenever
+    /// the mtime is known at all (epoch included).
+    if_range_secs: Option<i64>,
+    headers: Vec<(axum::http::HeaderName, String)>,
+    no_last_modified: Vec<(axum::http::HeaderName, String)>,
+}
+
+/// fs.go's mtime semantics (net/http): the raw mtime is compared against the
+/// exact epoch (`isZeroTime`) *before* any truncation, so a sub-second mtime
+/// near 1970 is not "no time" — Last-Modified prints its floor second and
+/// the date conditions compare the floor (`Truncate(time.Second)`, which
+/// floors). A pre-epoch mtime is kept too: Go `Truncate` floors on the
+/// absolute timeline, so -1.5s lands on -2s. Only an exactly-epoch (or
+/// unreportable) mtime means "no time".
+fn modtime_of(res: std::io::Result<std::time::SystemTime>) -> (Option<i64>, Option<i64>) {
+    let Ok(t) = res else {
+        // Go: a failed ModTime() is the zero Time → isZeroTime.
+        return (None, None);
+    };
+    let (secs, is_exact_epoch) = match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => (d.as_secs() as i64, d.is_zero()),
+        Err(e) => {
+            // Pre-epoch: duration_since yields the distance back to the
+            // epoch; floor on the epoch axis (Go Truncate floors).
+            let d = e.duration();
+            let mut s = -(d.as_secs() as i64);
+            if d.subsec_nanos() > 0 {
+                s -= 1;
+            }
+            (s, false)
+        }
+    };
+    let precondition_secs = if is_exact_epoch { None } else { Some(secs) };
+    (precondition_secs, Some(secs))
+}
+
+impl Preset {
+    /// Upstream sets Content-Disposition before http.ServeContent, which then
+    /// adds Last-Modified from the stat mtime (unless isZeroTime).
+    fn new(path: &str, meta: &std::fs::Metadata) -> Preset {
+        let disposition = content_disposition::format_content_disposition(
+            std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("download"),
+        );
+        let (modtime, if_range_secs) = modtime_of(meta.modified());
+        let mut headers = Vec::with_capacity(3);
+        headers.push((axum::http::header::VARY, "Accept-Encoding".to_string()));
+        headers.push((axum::http::header::CONTENT_DISPOSITION, disposition));
+        if let Some(mt) = modtime {
+            headers.push((
+                axum::http::header::LAST_MODIFIED,
+                httpdate::format_http_date(mt),
+            ));
+        }
+        let no_last_modified = headers
+            .iter()
+            .filter(|(k, _)| *k != axum::http::header::LAST_MODIFIED)
+            .cloned()
+            .collect();
+        Preset {
+            modtime,
+            if_range_secs,
+            headers,
+            no_last_modified,
+        }
     }
 
-    let mut file = match tokio::fs::File::open(&path).await {
-        Ok(f) => f,
-        Err(e) => {
-            return RestError::new(
+    fn apply(&self, mut b: axum::http::response::Builder) -> axum::http::response::Builder {
+        for (k, v) in &self.headers {
+            b = b.header(k.clone(), v.clone());
+        }
+        b
+    }
+
+    fn apply_without_last_modified(
+        &self,
+        mut b: axum::http::response::Builder,
+    ) -> axum::http::response::Builder {
+        for (k, v) in &self.no_last_modified {
+            b = b.header(k.clone(), v.clone());
+        }
+        b
+    }
+
+    /// Stage 5 — fs.go checkPreconditions: 304 (writeNotModified header set)
+    /// or 412 (bare) when a condition fires, else the download continues.
+    fn condition_response(&self, headers: &HeaderMap) -> Option<axum::response::Response> {
+        use preconditions::CondOutcome;
+        match preconditions::check_preconditions(
+            header_str(headers, axum::http::header::IF_MATCH).as_deref(),
+            header_str(headers, axum::http::header::IF_UNMODIFIED_SINCE).as_deref(),
+            header_str(headers, axum::http::header::IF_NONE_MATCH).as_deref(),
+            header_str(headers, axum::http::header::IF_MODIFIED_SINCE).as_deref(),
+            self.modtime,
+        ) {
+            CondOutcome::NotModified => {
+                // fs.go writeNotModified: strips Content-Type/Content-Length/
+                // Content-Encoding (none set yet here) and keeps Last-Modified
+                // (no ETag).
+                Some(self.empty(StatusCode::NOT_MODIFIED))
+            }
+            CondOutcome::PreconditionFailed => {
+                // fs.go: bare 412, no body, no Content-Type.
+                Some(self.empty(StatusCode::PRECONDITION_FAILED))
+            }
+            CondOutcome::Serve => None,
+        }
+    }
+
+    /// Empty-bodied 304/412 answer carrying the preset headers.
+    fn empty(&self, code: StatusCode) -> axum::response::Response {
+        self.apply(axum::response::Response::builder().status(code))
+            .body(axum::body::Body::empty())
+            .expect("build error response")
+    }
+
+    /// fs.go serveError shape: text/plain + nosniff, optional Content-Range,
+    /// explicit Content-Length, Last-Modified stripped (416 and the 206 seek
+    /// failure both answer this way).
+    fn plain_error(
+        &self,
+        code: StatusCode,
+        content_range: Option<String>,
+        body: String,
+    ) -> axum::response::Response {
+        let mut b =
+            self.apply_without_last_modified(axum::response::Response::builder().status(code));
+        if let Some(cr) = content_range {
+            b = b.header(axum::http::header::CONTENT_RANGE, cr);
+        }
+        b.header(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )
+        .header(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(axum::http::header::CONTENT_LENGTH, body.len())
+        .body(axum::body::Body::from(body))
+        .expect("build plain error response")
+    }
+}
+
+/// Stage 6 — approximate Go's DetectContentType with a text/binary split
+/// (the full table is a non-goal). A failed rewind means a non-seekable
+/// special file: reopen so the stream still starts at byte 0.
+#[allow(clippy::result_large_err)] // axum helpers propagate prebuilt responses, not an error type
+async fn sniff_content_type_or_reopen(
+    file: &mut tokio::fs::File,
+    path: &str,
+) -> Result<&'static str, axum::response::Response> {
+    match sniff_content_type(file).await {
+        Ok(ct) => Ok(ct),
+        Err(_) => match tokio::fs::File::open(path).await {
+            Ok(f) => {
+                *file = f;
+                Ok("application/octet-stream")
+            }
+            Err(e) => Err(RestError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("error opening file '{path}': {e}"),
             )
-            .into_response();
-        }
+            .into_response()),
+        },
+    }
+}
+
+/// Stage 7 — fs.go serveContent Range dispatch: an If-Range that fails drops
+/// the Range header (full 200); a single range is seeked for the 206; any
+/// multi-range request is answered with the full file; the 416 shapes and the
+/// seek-error 416 are emitted here.
+#[allow(clippy::result_large_err)] // axum helpers propagate prebuilt responses, not an error type
+async fn plan_range(
+    file: &mut tokio::fs::File,
+    headers: &HeaderMap,
+    preset: &Preset,
+    size: u64,
+) -> Result<Option<ranges::ByteRange>, axum::response::Response> {
+    let range_value = header_str(headers, axum::http::header::RANGE);
+    let range_hdr = range_value.as_deref();
+    let range_kept = range_hdr.is_some_and(|_| {
+        preconditions::if_range_keeps_range(
+            header_str(headers, axum::http::header::IF_RANGE).as_deref(),
+            preset.if_range_secs,
+        )
+    });
+    let ranges = if range_kept {
+        ranges::parse_range(range_hdr, size as i64)
+    } else {
+        Ok(None)
     };
-    // Baseline serves downloads through Go's content sniffer; approximate it
-    // with a text/binary split, which covers what SDK users observe. The
-    // full DetectContentType table is a declared non-goal.
-    let content_type = match sniff_content_type(&mut file).await {
-        Ok(ct) => ct,
-        Err(_) => {
-            // Rewind failed (non-seekable special file): reopen so the body
-            // still starts at byte 0 instead of after the sniffed prefix.
-            match tokio::fs::File::open(&path).await {
-                Ok(f) => {
-                    file = f;
-                    "application/octet-stream"
-                }
-                Err(e) => {
-                    return RestError::new(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("error opening file '{path}': {e}"),
-                    )
-                    .into_response();
-                }
+    let single = match ranges {
+        Ok(ranges) => {
+            // A single-range request is served as 206; any multi-range
+            // request is answered with the full file instead.
+            if ranges.as_ref().is_some_and(|r| r.len() == 1) {
+                ranges.unwrap().pop()
+            } else {
+                None
             }
         }
+        // errNoOverlap with an empty file is ignored (fs.go: some clients
+        // always send Range; answer 200 rather than 416).
+        Err(ranges::RangeError::NoOverlap) if size == 0 => None,
+        Err(e) => {
+            let cr = match e {
+                ranges::RangeError::NoOverlap => Some(format!("bytes */{size}")),
+                ranges::RangeError::Invalid => None,
+            };
+            let body = format!("{}\n", e.message());
+            return Err(preset.plain_error(StatusCode::RANGE_NOT_SATISFIABLE, cr, body));
+        }
     };
-    let stream = tokio_util_reader_stream(file);
-    let mut builder = axum::response::Response::builder()
-        .status(StatusCode::OK)
-        .header(axum::http::header::CONTENT_TYPE, content_type);
-    // stat-size-0 but readable files (/proc/*, some sysfs) would get a
-    // Content-Length: 0 header that truncates the real body — stream those
-    // chunked instead. Regular files keep the explicit length (baseline
-    // sends one).
-    if meta.len() > 0 {
-        builder = builder.header(axum::http::header::CONTENT_LENGTH, meta.len());
+    if let Some(r) = single {
+        use tokio::io::AsyncSeekExt;
+        if let Err(e) = file.seek(std::io::SeekFrom::Start(r.start as u64)).await {
+            let body = format!("{e}\n");
+            return Err(preset.plain_error(StatusCode::RANGE_NOT_SATISFIABLE, None, body));
+        }
     }
-    builder
-        .body(axum::body::Body::from_stream(stream))
-        .expect("build download response")
+    Ok(single)
+}
+
+/// Header value as text. Go's `Header.Get` is byte-oriented and feeds raw
+/// bytes to the parsers, where non-ASCII is just garbage — and garbage (a
+/// present value) deliberately has different outcomes from absent here
+/// (scan break vs. condNone, 416 vs. 200, 406 vs. pass). hyper accepts
+/// obs-text (0x80-0xFF) in header values, so `to_str()`-based extraction
+/// would silently reclassify garbage as "absent"; lossy UTF-8 keeps the
+/// value present and maps every invalid byte to U+FFFD, which every parser
+/// below treats exactly like Go treats the raw byte (an ETag tag-char that
+/// never terminates, a name/literal/digit mismatch in dates and ranges, a
+/// plain token in Accept-Encoding).
+fn header_str(
+    headers: &HeaderMap,
+    name: axum::http::HeaderName,
+) -> Option<std::borrow::Cow<'_, str>> {
+    headers
+        .get(name)
+        .map(|v| String::from_utf8_lossy(v.as_bytes()))
 }
 
 /// text/plain for valid-UTF-8, NUL-free content (first 512 bytes), else
@@ -191,20 +595,31 @@ async fn sniff_content_type(f: &mut tokio::fs::File) -> std::io::Result<&'static
     }
 }
 
-/// 64 KiB chunked reader stream without pulling in tokio-util.
-fn tokio_util_reader_stream(
+/// Chunked reader stream (64 KiB) without pulling in tokio-util. `limit`
+/// bounds the total bytes produced (single-range 206 bodies); `None` streams
+/// to EOF.
+fn reader_stream(
     file: tokio::fs::File,
+    limit: Option<u64>,
 ) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send {
     use tokio::io::AsyncReadExt;
-    futures::stream::unfold(file, |mut file| async move {
-        let mut buf = vec![0u8; 64 * 1024];
+    futures::stream::unfold((file, limit), |(mut file, mut remaining)| async move {
+        let want = match remaining {
+            Some(0) => return None,
+            Some(r) => r.min(64 * 1024) as usize,
+            None => 64 * 1024,
+        };
+        let mut buf = vec![0u8; want];
         match file.read(&mut buf).await {
             Ok(0) => None,
             Ok(n) => {
                 buf.truncate(n);
-                Some((Ok(bytes::Bytes::from(buf)), file))
+                if let Some(r) = remaining.as_mut() {
+                    *r -= n as u64;
+                }
+                Some((Ok(bytes::Bytes::from(buf)), (file, remaining)))
             }
-            Err(e) => Some((Err(e), file)),
+            Err(e) => Some((Err(e), (file, remaining))),
         }
     })
 }
@@ -224,16 +639,21 @@ pub async fn upload(
         Err(e) => return e.into_response(),
     };
 
+    // Byte-oriented like Go's Header.Get: an obs-text byte in the boundary
+    // must not misroute a multipart request into the raw path.
     let content_type = headers
         .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .unwrap_or_default();
 
     let result = if content_type.starts_with("multipart/form-data") {
         upload_multipart(&content_type, body, &user).await
     } else {
-        upload_raw(body, &params, &user).await
+        let content_length = headers
+            .get(axum::http::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+        upload_raw(body, &params, &user, content_length).await
     };
 
     match result {
@@ -264,6 +684,7 @@ async fn upload_raw(
     body: axum::body::Body,
     params: &HashMap<String, String>,
     user: &User,
+    content_length: Option<u64>,
 ) -> Result<Vec<UploadEntry>, RestError> {
     let Some(raw_path) = params.get("path") else {
         return Err(RestError::new(
@@ -272,7 +693,19 @@ async fn upload_raw(
         ));
     };
     let path = auth::resolve_path(raw_path, user);
-    let data = axum::body::to_bytes(body, crate::connect::MAX_ENVELOPE_SIZE)
+    // Typed fast path for the common case: a declared Content-Length over
+    // the cap is rejected without reading the body. (axum 0.7's to_bytes
+    // error has no public typed accessor, so chunked bodies still rely on
+    // the string match below.)
+    if let Some(len) = content_length {
+        if len > MAX_UPLOAD_SIZE as u64 {
+            return Err(RestError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("the upload exceeds the {MAX_UPLOAD_SIZE}-byte limit"),
+            ));
+        }
+    }
+    let data = axum::body::to_bytes(body, MAX_UPLOAD_SIZE)
         .await
         .map_err(|e| {
             // A body over the cap must report 413 like the multipart path
@@ -281,10 +714,7 @@ async fn upload_raw(
             if msg.contains("length limit") {
                 RestError::new(
                     StatusCode::PAYLOAD_TOO_LARGE,
-                    format!(
-                        "the upload exceeds the {}-byte limit",
-                        crate::connect::MAX_ENVELOPE_SIZE
-                    ),
+                    format!("the upload exceeds the {MAX_UPLOAD_SIZE}-byte limit"),
                 )
             } else {
                 RestError::new(
@@ -332,12 +762,12 @@ async fn upload_multipart(
     let stream = body.into_data_stream();
     // Bound the whole multipart payload so an unbounded upload cannot OOM the
     // daemon. Matches the cap the raw octet-stream path already enforces
-    // (upload_raw uses MAX_ENVELOPE_SIZE); without this, multer defaults to
+    // (upload_raw uses MAX_UPLOAD_SIZE); without this, multer defaults to
     // unlimited and bypasses axum's DefaultBodyLimit on a streamed body.
     let constraints = multer::Constraints::new().size_limit(
         multer::SizeLimit::new()
-            .whole_stream(crate::connect::MAX_ENVELOPE_SIZE as u64)
-            .per_field(crate::connect::MAX_ENVELOPE_SIZE as u64),
+            .whole_stream(MAX_UPLOAD_SIZE as u64)
+            .per_field(MAX_UPLOAD_SIZE as u64),
     );
     let mut multipart = multer::Multipart::with_constraints(stream, boundary, constraints);
 
@@ -384,10 +814,7 @@ fn map_multipart_error(e: multer::Error) -> RestError {
     ) {
         RestError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
-            format!(
-                "multipart upload exceeds the {}-byte limit",
-                crate::connect::MAX_ENVELOPE_SIZE
-            ),
+            format!("multipart upload exceeds the {MAX_UPLOAD_SIZE}-byte limit",),
         )
     } else {
         RestError::new(
@@ -460,6 +887,15 @@ fn write_file(path: &str, data: &[u8], user: &User) -> Result<(), RestError> {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(map_write_error(path, &e));
     }
+    // Crash-durability of the rename itself: sync the containing directory
+    // (the file was already sync_all()-ed before the rename). Upstream's
+    // O_TRUNC path never fsyncs anything, so this is strictly stronger; a
+    // filesystem that refuses directory fsync must not fail the upload.
+    if let Ok(d) = std::fs::File::open(dir) {
+        if let Err(e) = d.sync_all() {
+            tracing::warn!("upload: could not fsync directory {}: {e}", dir.display());
+        }
+    }
     Ok(())
 }
 
@@ -487,7 +923,18 @@ fn chown(path: &std::path::Path, user: &User) {
             // lchown, not chown: never follow a symlink when setting ownership,
             // so a planted symlink at `path` cannot redirect the chown onto an
             // arbitrary target the caller shouldn't be able to take over.
-            libc::lchown(c_path.as_ptr(), user.uid, user.gid);
+            let rc = libc::lchown(c_path.as_ptr(), user.uid, user.gid);
+            if rc != 0 {
+                // Silent failure would break the ownership contract: the
+                // upload "succeeds" while the file stays daemon-owned.
+                tracing::warn!(
+                    "upload: lchown({}) to uid={} gid={} failed: {}",
+                    path.display(),
+                    user.uid,
+                    user.gid,
+                    std::io::Error::last_os_error()
+                );
+            }
         }
     }
 }
@@ -590,5 +1037,610 @@ mod tests {
             v,
             serde_json::json!({"name":"hello.txt","path":"/home/user/hello.txt","type":"file"})
         );
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::extract::Query;
+    use axum::http::header;
+    use std::collections::HashMap;
+
+    /// Drive the real GET /files handler against a tempdir file. The default
+    /// user is root (present in /etc/passwd everywhere this suite runs); an
+    /// absolute `path` query bypasses home anchoring. AppState has no access
+    /// token set, so the token gate passes.
+    async fn get(path: &str, extra: &[(&str, &str)]) -> axum::response::Response {
+        let state = State(std::sync::Arc::new(AppState::new()));
+        let mut params = HashMap::new();
+        params.insert("path".to_string(), path.to_string());
+        let mut headers = HeaderMap::new();
+        for (k, v) in extra {
+            headers.insert(k.parse::<header::HeaderName>().unwrap(), v.parse().unwrap());
+        }
+        download(state, Query(params), headers).await
+    }
+
+    async fn body(
+        resp: axum::response::Response,
+    ) -> (axum::http::StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let (parts, b) = resp.into_parts();
+        let bytes = to_bytes(b, 1 << 20).await.unwrap();
+        (parts.status, parts.headers, bytes.to_vec())
+    }
+
+    /// 406 responses use the REST error shape (JSON code+message, like
+    /// upstream jsonError) — the human message rides inside `message`.
+    fn json_message(body: &[u8]) -> String {
+        let v: serde_json::Value = serde_json::from_slice(body).unwrap();
+        v["message"].as_str().unwrap().to_string()
+    }
+
+    fn tmp_file(name: &str, content: &[u8]) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(name);
+        std::fs::write(&p, content).unwrap();
+        (dir, p.to_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn plain_get_has_negotiation_headers() {
+        let (_d, p) = tmp_file("base_a.txt", b"hello-octet\n");
+        let resp = get(&p, &[]).await;
+        let (status, h, b) = body(resp).await;
+        assert_eq!(status, 200);
+        assert_eq!(&b[..], b"hello-octet\n");
+        assert_eq!(h[header::VARY], "Accept-Encoding");
+        assert_eq!(h[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(h[header::CONTENT_TYPE], "text/plain; charset=utf-8");
+        assert_eq!(h[header::CONTENT_LENGTH], "12");
+        assert!(h.contains_key(header::LAST_MODIFIED)); // mtime is present
+        assert_eq!(
+            h[header::CONTENT_DISPOSITION],
+            "inline; filename=base_a.txt"
+        );
+    }
+
+    #[tokio::test]
+    async fn range_returns_206_slice() {
+        let (_d, p) = tmp_file("r.bin", b"0123456789");
+        let resp = get(&p, &[("Range", "bytes=2-5")]).await;
+        let (status, h, b) = body(resp).await;
+        assert_eq!(status, 206);
+        assert_eq!(&b[..], b"2345");
+        assert_eq!(h[header::CONTENT_RANGE], "bytes 2-5/10");
+        assert_eq!(h[header::CONTENT_LENGTH], "4");
+        assert_eq!(h[header::ACCEPT_RANGES], "bytes");
+    }
+
+    #[tokio::test]
+    async fn range_open_ended_and_suffix() {
+        let (_d, p) = tmp_file("r.bin", b"0123456789");
+        let resp = get(&p, &[("Range", "bytes=7-")]).await;
+        let (status, h, b) = body(resp).await;
+        assert_eq!(status, 206);
+        assert_eq!(&b[..], b"789");
+        assert_eq!(h[header::CONTENT_RANGE], "bytes 7-9/10");
+
+        let resp = get(&p, &[("Range", "bytes=-3")]).await;
+        let (_s, h, b) = body(resp).await;
+        assert_eq!(&b[..], b"789");
+        assert_eq!(h[header::CONTENT_RANGE], "bytes 7-9/10");
+    }
+
+    #[tokio::test]
+    async fn if_modified_since_roundtrip_304() {
+        let (_d, p) = tmp_file("c.txt", b"cache-me");
+        let resp = get(&p, &[]).await;
+        let (_s, h, _b) = body(resp).await;
+        let lm = h[header::LAST_MODIFIED].to_str().unwrap().to_string();
+
+        // Same Last-Modified → not modified.
+        let resp = get(&p, &[("If-Modified-Since", &lm)]).await;
+        let (status, h304, b) = body(resp).await;
+        assert_eq!(status, 304);
+        assert!(b.is_empty());
+        assert_eq!(h304[header::LAST_MODIFIED], lm); // kept on 304
+        assert_eq!(h304[header::VARY], "Accept-Encoding"); // preset survives
+        assert!(!h304.contains_key(header::CONTENT_TYPE)); // none on 304
+        assert!(!h304.contains_key(header::CONTENT_LENGTH));
+
+        // Stale IMS (before the file's mtime) → full 200.
+        let resp = get(
+            &p,
+            &[("If-Modified-Since", "Thu, 01 Jan 1970 00:00:00 GMT")],
+        )
+        .await;
+        let (status, _h, b) = body(resp).await;
+        assert_eq!(status, 200);
+        assert_eq!(&b[..], b"cache-me");
+    }
+
+    #[tokio::test]
+    async fn if_none_match_concrete_etag_serves_full_200() {
+        // No ETag on the representation: a concrete If-None-Match never
+        // matches → 200 full body, and If-Modified-Since is skipped (the
+        // client's "changed" signal wins) — fs.go condTrue semantics.
+        let (_d, p) = tmp_file("c.txt", b"etag-test");
+        let resp = get(
+            &p,
+            &[
+                ("If-None-Match", "\"deadbeef\""),
+                ("If-Modified-Since", "Thu, 01 Jan 2099 00:00:00 GMT"),
+            ],
+        )
+        .await;
+        let (status, _h, b) = body(resp).await;
+        assert_eq!(status, 200);
+        assert_eq!(&b[..], b"etag-test");
+    }
+
+    #[tokio::test]
+    async fn if_none_match_star_is_304() {
+        let (_d, p) = tmp_file("c.txt", b"etag-test");
+        let resp = get(&p, &[("If-None-Match", "*")]).await;
+        let (status, _h, b) = body(resp).await;
+        assert_eq!(status, 304);
+        assert!(b.is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_conditional_headers_are_absent_like_go() {
+        // Go reads conditional headers with Header.Get, so a present-but-
+        // empty header is the same as a missing one. Empty If-Match must not
+        // 412 (a concrete etag would); empty If-None-Match must not
+        // short-circuit If-Modified-Since.
+        let (_d, p) = tmp_file("e.txt", b"0123456789");
+        let (status, _h, _b) = body(get(&p, &[("If-Match", "")]).await).await;
+        assert_eq!(status, 200);
+        let lm = body(get(&p, &[]).await).await;
+        let last_modified = lm.1[header::LAST_MODIFIED].to_str().unwrap().to_string();
+        let resp = get(
+            &p,
+            &[("If-None-Match", ""), ("If-Modified-Since", &last_modified)],
+        )
+        .await;
+        let (status, _h, b) = body(resp).await;
+        assert_eq!(status, 304);
+        assert!(b.is_empty());
+    }
+
+    #[tokio::test]
+    async fn range_no_overlap_416_shape() {
+        let (_d, p) = tmp_file("r.bin", b"0123456789");
+        let resp = get(&p, &[("Range", "bytes=100-")]).await;
+        let (status, h, b) = body(resp).await;
+        assert_eq!(status, 416);
+        assert_eq!(&b[..], b"invalid range: failed to overlap\n");
+        assert_eq!(h[header::CONTENT_RANGE], "bytes */10");
+        assert_eq!(h[header::CONTENT_TYPE], "text/plain; charset=utf-8");
+        assert_eq!(h[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        // fs.go serveError strips Last-Modified from the 416 header set.
+        assert!(!h.contains_key(header::LAST_MODIFIED));
+        // Vary + Content-Disposition survive.
+        assert_eq!(h[header::VARY], "Accept-Encoding");
+        assert!(h.contains_key(header::CONTENT_DISPOSITION));
+    }
+
+    #[tokio::test]
+    async fn range_bad_syntax_416_without_content_range() {
+        let (_d, p) = tmp_file("r.bin", b"0123456789");
+        let resp = get(&p, &[("Range", "bytes=abc")]).await;
+        let (status, h, b) = body(resp).await;
+        assert_eq!(status, 416);
+        assert_eq!(&b[..], b"invalid range\n");
+        assert!(!h.contains_key(header::CONTENT_RANGE));
+    }
+
+    #[tokio::test]
+    async fn range_on_empty_file_ignored_200() {
+        let (_d, p) = tmp_file("empty.bin", b"");
+        // errNoOverlap + size == 0 → ignore Range, answer 200 (fs.go).
+        let resp = get(&p, &[("Range", "bytes=0-")]).await;
+        let (status, _h, b) = body(resp).await;
+        assert_eq!(status, 200);
+        assert!(b.is_empty());
+    }
+
+    /// Round-2 review: a true empty file must send `Content-Length: 0`
+    /// exactly like Go's Seek(End)-sized ServeContent — not chunked (the
+    /// conformance normalizer hides framing, so this was invisible there).
+    #[tokio::test]
+    async fn empty_file_sends_content_length_zero() {
+        let (_d, p) = tmp_file("empty.bin", b"");
+        let resp = get(&p, &[]).await;
+        let (status, h, b) = body(resp).await;
+        assert_eq!(status, 200);
+        assert!(b.is_empty());
+        assert_eq!(h[header::CONTENT_LENGTH], "0");
+    }
+
+    /// The other half of the Seek(End) model: /proc files seek fine at the
+    /// start but report EINVAL on Seek(End) — Go's sizeFunc fails and
+    /// ServeContent answers 500 "seeker can't seek" (fs.go errSeeker path).
+    #[tokio::test]
+    async fn proc_pseudo_file_answers_500_seeker_cant_seek() {
+        // The 500 relies on the kernel answering EINVAL to SEEK_END on
+        // procfs. Probe the actual seek behavior rather than trusting the
+        // file type: if a runtime ever allowed it, both sides would answer
+        // CL: 0 and this test must not assert cube-envd's mapping.
+        match tokio::fs::File::open("/proc/self/status").await {
+            Ok(mut f) => {
+                use tokio::io::AsyncSeekExt;
+                if f.seek(std::io::SeekFrom::End(0)).await.is_ok() {
+                    return; // kernel allows SEEK_END here: skip
+                }
+            }
+            Err(_) => return, // no procfs: nothing to assert
+        }
+        let resp = get("/proc/self/status", &[]).await;
+        let (status, h, b) = body(resp).await;
+        assert_eq!(status, 500);
+        assert_eq!(&b[..], b"seeker can't seek\n");
+        // fs.go serveError shape: text/plain + nosniff, Last-Modified
+        // stripped, Vary/Content-Disposition kept.
+        assert_eq!(h[header::CONTENT_TYPE], "text/plain; charset=utf-8");
+        assert!(h.contains_key(header::X_CONTENT_TYPE_OPTIONS));
+        assert!(!h.contains_key(header::LAST_MODIFIED));
+        assert_eq!(h[header::VARY], "Accept-Encoding");
+        assert!(h.contains_key(header::CONTENT_DISPOSITION));
+    }
+
+    /// Round-5: an obs-text byte after a fractional second used to panic the
+    /// date parser (byte index inside U+FFFD) and answer 500 instead of
+    /// treating the unparseable date as "condition does not apply".
+    #[tokio::test]
+    async fn obs_text_after_fractional_second_does_not_500() {
+        let (_d, p) = tmp_file("c.bin", b"cache-me");
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::IF_MODIFIED_SINCE,
+            header::HeaderValue::from_bytes(b"Sun, 06 Sep 2026 07:00:00.5\xFF1 GMT").unwrap(),
+        );
+        let (status, _h, b) = body(get_headers(&p, h).await).await;
+        assert_eq!(status, 200);
+        assert_eq!(&b[..], b"cache-me");
+    }
+
+    /// Round-5: an asctime If-Modified-Since with a fractional second — the
+    /// digit run must not swallow the year (Go answers 304).
+    #[tokio::test]
+    async fn asctime_fractional_second_ims_304s() {
+        let t = std::time::UNIX_EPOCH
+            .checked_add(std::time::Duration::from_secs(1_788_678_000))
+            .unwrap();
+        let (_d, p, kept) = tmp_file_with_mtime("f.txt", b"cache-me", t);
+        if !kept {
+            return; // filesystem clamped the stamp: nothing to assert
+        }
+        let resp = get(&p, &[("If-Modified-Since", "Sun Sep  6 07:00:00.5 2026")]).await;
+        let (status, _h, _b) = body(resp).await;
+        assert_eq!(status, 304);
+    }
+
+    /// Char devices with stat size 0 (Go Seek(End) = 0): the answer is an
+    /// explicit CL: 0 with an empty body — never an unbounded chunked
+    /// stream. (Round-4 hardening; verified against ServeContent directly.)
+    #[tokio::test]
+    async fn char_device_answers_empty_cl0_like_go() {
+        if tokio::fs::metadata("/dev/zero")
+            .await
+            .map(|m| m.is_file())
+            .unwrap_or(true)
+        {
+            return; // no /dev/zero here: nothing to assert
+        }
+        let resp = get("/dev/zero", &[]).await;
+        let (status, h, b) = body(resp).await;
+        assert_eq!(status, 200);
+        assert!(b.is_empty());
+        assert_eq!(h[header::CONTENT_LENGTH], "0");
+    }
+
+    #[tokio::test]
+    async fn if_match_concrete_fails_412() {
+        let (_d, p) = tmp_file("c.txt", b"412-body");
+        let resp = get(&p, &[("If-Match", "\"etag\"")]).await;
+        let (status, h, b) = body(resp).await;
+        assert_eq!(status, 412);
+        assert!(b.is_empty());
+        assert!(!h.contains_key(header::CONTENT_TYPE));
+        assert_eq!(h[header::VARY], "Accept-Encoding");
+        // 412 keeps Last-Modified (bare WriteHeader, no serveError).
+        assert!(h.contains_key(header::LAST_MODIFIED));
+    }
+
+    #[tokio::test]
+    async fn range_with_identity_rejected_is_406_with_vary() {
+        let (_d, p) = tmp_file("r.bin", b"0123456789");
+        // `identity;q=0, gzip` parses fine (gzip acceptable) but rejects
+        // identity → the Range/conditional gate's 406b, which carries Vary
+        // (it answers after Vary was set).
+        let resp = get(
+            &p,
+            &[
+                ("Range", "bytes=0-1"),
+                ("Accept-Encoding", "identity;q=0, gzip"),
+            ],
+        )
+        .await;
+        let (status, h, b) = body(resp).await;
+        assert_eq!(status, 406);
+        assert_eq!(
+            json_message(&b),
+            "identity encoding not acceptable for Range or conditional request"
+        );
+        assert_eq!(h[header::VARY], "Accept-Encoding");
+    }
+
+    #[tokio::test]
+    async fn multi_range_served_as_full_200() {
+        // No multipart writer: a multi-range request gets the whole file.
+        let (_d, p) = tmp_file("r.bin", b"0123456789");
+        let resp = get(&p, &[("Range", "bytes=0-1, 5-6")]).await;
+        let (status, _h, b) = body(resp).await;
+        assert_eq!(status, 200);
+        assert_eq!(&b[..], b"0123456789");
+    }
+
+    #[tokio::test]
+    async fn if_range_mismatched_etag_drops_range() {
+        let (_d, p) = tmp_file("r.bin", b"0123456789");
+        // If-Range with an etag never matches (no current etag) → Range is
+        // dropped and the whole file is served.
+        let resp = get(&p, &[("Range", "bytes=0-1"), ("If-Range", "\"old-etag\"")]).await;
+        let (status, _h, b) = body(resp).await;
+        assert_eq!(status, 200);
+        assert_eq!(&b[..], b"0123456789");
+    }
+
+    #[tokio::test]
+    async fn gzip_rejected_406_before_vary() {
+        let (_d, p) = tmp_file("g.txt", b"x");
+        // *;q=0 without an identity entry rejects everything → 406 answers
+        // BEFORE Vary is set (upstream order).
+        let resp = get(&p, &[("Accept-Encoding", "*;q=0")]).await;
+        let (status, h, b) = body(resp).await;
+        assert_eq!(status, 406);
+        assert_eq!(
+            json_message(&b),
+            "error parsing Accept-Encoding: no acceptable encoding found, supported: [gzip]"
+        );
+        assert!(!h.contains_key(header::VARY));
+    }
+
+    // ---- mtime edge cases (review findings #2/#3, PR #13) ------------------
+
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    /// Create a file and stamp it with an exact mtime (std File::set_modified
+    /// → futimens, nanosecond precision on Linux). Prefer /dev/shm: some
+    /// filesystems (e.g. ext4) silently clamp far-future stamps. Returns
+    /// whether the filesystem actually kept the stamp.
+    fn tmp_file_with_mtime(
+        name: &str,
+        content: &[u8],
+        mtime: SystemTime,
+    ) -> (tempfile::TempDir, String, bool) {
+        let dir = match tempfile::tempdir_in("/dev/shm") {
+            Ok(d) => d,
+            Err(_) => tempfile::tempdir().unwrap(),
+        };
+        let p = dir.path().join(name);
+        std::fs::write(&p, content).unwrap();
+        std::fs::File::open(&p)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let got = dir
+            .path()
+            .join(name)
+            .metadata()
+            .unwrap()
+            .modified()
+            .unwrap();
+        let kept = got == mtime;
+        (dir, p.to_str().unwrap().to_string(), kept)
+    }
+
+    #[test]
+    fn modtime_of_matches_go_is_zero_time_and_floor() {
+        // Exactly the epoch → isZeroTime: no date conditions, but If-Range
+        // still knows the floor second.
+        assert_eq!(modtime_of(Ok(UNIX_EPOCH)), (None, Some(0)));
+        // Sub-second after the epoch: NOT zero — Last-Modified prints the
+        // floor (epoch date) and the date conditions compare the floor.
+        let t = UNIX_EPOCH.checked_add(Duration::from_millis(500)).unwrap();
+        assert_eq!(modtime_of(Ok(t)), (Some(0), Some(0)));
+        // Pre-epoch mtimes are kept (the old duration_since().ok() dropped
+        // them); Go Truncate floors: -1.5s → -2s.
+        let t = UNIX_EPOCH.checked_sub(Duration::from_secs(1)).unwrap();
+        assert_eq!(modtime_of(Ok(t)), (Some(-1), Some(-1)));
+        let t = UNIX_EPOCH.checked_sub(Duration::from_millis(500)).unwrap();
+        assert_eq!(modtime_of(Ok(t)), (Some(-1), Some(-1)));
+        let t = UNIX_EPOCH.checked_sub(Duration::from_millis(1500)).unwrap();
+        assert_eq!(modtime_of(Ok(t)), (Some(-2), Some(-2)));
+    }
+
+    /// `touch -d '@253402300800'` (year 10000, beyond the time crate's
+    /// range): Go answers 200 with the file; the old `expect()` panicked →
+    /// 500.
+    #[tokio::test]
+    async fn out_of_range_mtime_downloads_without_panic() {
+        let t = UNIX_EPOCH
+            .checked_add(Duration::from_secs(253_402_300_800))
+            .unwrap();
+        let (_d, p, kept) = tmp_file_with_mtime("far.txt", b"0123456789abcdefghij", t);
+        let resp = get(&p, &[]).await;
+        let (status, h, b) = body(resp).await;
+        assert_eq!(status, 200);
+        assert_eq!(&b[..], b"0123456789abcdefghij");
+        if kept {
+            assert_eq!(h[header::LAST_MODIFIED], "Sat, 01 Jan 10000 00:00:00 GMT");
+        }
+        // (A filesystem that clamps the stamp keeps the test to the
+        // no-panic/200 contract; tmpfs keeps it verbatim.)
+    }
+
+    /// mtime = epoch + 0.5s: isZeroTime does NOT fire (the raw time is not
+    /// the epoch), so Last-Modified is present and a matching If-Modified-
+    /// Since (the epoch date, which is what the header truncates to) 304s.
+    #[tokio::test]
+    async fn subsecond_epoch_mtime_keeps_last_modified_and_304s() {
+        let t = UNIX_EPOCH.checked_add(Duration::from_millis(500)).unwrap();
+        let (_d, p, _kept) = tmp_file_with_mtime("half.txt", b"cache-me", t);
+        let resp = get(&p, &[]).await;
+        let (_s, h, _b) = body(resp).await;
+        assert_eq!(h[header::LAST_MODIFIED], "Thu, 01 Jan 1970 00:00:00 GMT");
+
+        let resp = get(
+            &p,
+            &[("If-Modified-Since", "Thu, 01 Jan 1970 00:00:00 GMT")],
+        )
+        .await;
+        let (status, _h, _b) = body(resp).await;
+        assert_eq!(status, 304);
+    }
+
+    /// Pre-epoch mtime: Last-Modified is kept (floored) and round-trips.
+    #[tokio::test]
+    async fn pre_epoch_mtime_kept_and_304s() {
+        let t = UNIX_EPOCH.checked_sub(Duration::from_millis(1500)).unwrap();
+        let (_d, p, _kept) = tmp_file_with_mtime("old.txt", b"cache-me", t);
+        let resp = get(&p, &[]).await;
+        let (_s, h, _b) = body(resp).await;
+        // -1.5s floors to -2s (Go Truncate).
+        assert_eq!(h[header::LAST_MODIFIED], "Wed, 31 Dec 1969 23:59:58 GMT");
+
+        let resp = get(
+            &p,
+            &[("If-Modified-Since", "Wed, 31 Dec 1969 23:59:58 GMT")],
+        )
+        .await;
+        let (status, _h, _b) = body(resp).await;
+        assert_eq!(status, 304);
+
+        // An earlier IMS (before the mtime) → full 200.
+        let resp = get(
+            &p,
+            &[("If-Modified-Since", "Wed, 31 Dec 1969 23:59:57 GMT")],
+        )
+        .await;
+        let (status, _h, _b) = body(resp).await;
+        assert_eq!(status, 200);
+    }
+
+    /// Exactly-epoch mtime: no Last-Modified, date conditions condNone — but
+    /// If-Range has no zero-time gate in fs.go, so a matching epoch date
+    /// keeps the Range → 206.
+    #[tokio::test]
+    async fn exact_epoch_mtime_hides_last_modified_but_keeps_if_range() {
+        let (_d, p, _kept) = tmp_file_with_mtime("epoch.bin", b"0123456789", UNIX_EPOCH);
+        let resp = get(&p, &[]).await;
+        let (_s, h, _b) = body(resp).await;
+        assert!(!h.contains_key(header::LAST_MODIFIED));
+
+        // IMS on the epoch date must NOT 304 (condNone).
+        let resp = get(
+            &p,
+            &[("If-Modified-Since", "Thu, 01 Jan 1970 00:00:00 GMT")],
+        )
+        .await;
+        let (status, _h, _b) = body(resp).await;
+        assert_eq!(status, 200);
+
+        // If-Range date compare: t.Unix() == modtime.Unix() → Range kept.
+        let resp = get(
+            &p,
+            &[
+                ("Range", "bytes=0-1"),
+                ("If-Range", "Thu, 01 Jan 1970 00:00:00 GMT"),
+            ],
+        )
+        .await;
+        let (status, h, b) = body(resp).await;
+        assert_eq!(status, 206);
+        assert_eq!(&b[..], b"01");
+        assert_eq!(h[header::CONTENT_RANGE], "bytes 0-1/10");
+    }
+
+    /// Drive GET /files with a pre-built header map (obs-text values need
+    /// HeaderValue::from_bytes; `from_str` rejects non-ASCII).
+    async fn get_headers(path: &str, headers: HeaderMap) -> axum::response::Response {
+        let state = State(std::sync::Arc::new(AppState::new()));
+        let mut params = HashMap::new();
+        params.insert("path".to_string(), path.to_string());
+        download(state, Query(params), headers).await
+    }
+
+    // ---- obs-text header bytes: garbage, not absent (review finding #1) ----
+
+    #[tokio::test]
+    async fn obs_text_range_is_garbage_416_not_absent_200() {
+        let (_d, p) = tmp_file("r.bin", b"0123456789");
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::RANGE,
+            header::HeaderValue::from_bytes(b"bytes=5-6\xFF").unwrap(),
+        );
+        let (status, _h, _b) = body(get_headers(&p, h).await).await;
+        assert_eq!(status, 416);
+    }
+
+    #[tokio::test]
+    async fn obs_text_inm_is_garbage_serve_not_ims_304() {
+        let (_d, p) = tmp_file("c.txt", b"cache-me");
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::IF_NONE_MATCH,
+            header::HeaderValue::from_bytes(b"\xFF").unwrap(),
+        );
+        h.insert(
+            header::IF_MODIFIED_SINCE,
+            "Sun, 06 Sep 2099 07:00:00 GMT".parse().unwrap(),
+        );
+        // Go: INM garbage → scan break → condTrue → serve; IMS is skipped,
+        // so the fresh IMS date must NOT produce 304.
+        let (status, _h, _b) = body(get_headers(&p, h).await).await;
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn obs_text_if_range_drops_range() {
+        let (_d, p) = tmp_file("r.bin", b"0123456789");
+        let mut h = HeaderMap::new();
+        h.insert(header::RANGE, "bytes=0-1".parse().unwrap());
+        h.insert(
+            header::IF_RANGE,
+            header::HeaderValue::from_bytes(b"\xFF").unwrap(),
+        );
+        // Go: neither a valid etag nor a parseable date → condFalse → Range
+        // dropped → full 200, never 206.
+        let (status, _h, _b) = body(get_headers(&p, h).await).await;
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn obs_text_accept_encoding_is_garbage_406() {
+        let (_d, p) = tmp_file("r.bin", b"0123456789");
+        let mut h = HeaderMap::new();
+        h.insert(header::RANGE, "bytes=0-1".parse().unwrap());
+        h.insert(
+            header::ACCEPT_ENCODING,
+            header::HeaderValue::from_bytes(b"identity;q=0,\xFF").unwrap(),
+        );
+        // Go encoding.go: the garbage token is neither identity nor a
+        // supported encoding, identity is q=0-rejected → parse error
+        // ("no acceptable encoding found") → 406 before Vary is set.
+        let resp = get_headers(&p, h).await;
+        let (status, hvary, b) = body(resp).await;
+        assert_eq!(status, 406);
+        assert_eq!(
+            json_message(&b),
+            "error parsing Accept-Encoding: no acceptable encoding found, supported: [gzip]"
+        );
+        assert!(!hvary.contains_key(header::VARY));
     }
 }

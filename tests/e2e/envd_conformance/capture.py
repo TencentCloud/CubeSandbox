@@ -52,6 +52,29 @@ def http_req(method, path, body=None, headers=None, timeout=10):
         }
 
 
+def asctime_fraction(imf_date):
+    """Turn an IMF-fixdate into asctime with a fractional second ("Sun Sep  6
+    07:00:00.5 2026"), so the year sits directly behind the digit run — the
+    case where a wrong fraction scan swallows it. None if unparseable."""
+    from email.utils import parsedate_to_datetime
+
+    try:
+        dt = parsedate_to_datetime(imf_date)
+        return dt.strftime("%a %b %d %H:%M:%S") + ".5 " + str(dt.year)
+    except Exception:
+        return None
+
+
+def header_get(headers, name):
+    """Case-insensitive header lookup (rust hyper serializes header names in
+    lowercase on the wire; go uses canonical Title-Case)."""
+    low = name.lower()
+    for k, v in headers.items():
+        if k.lower() == low:
+            return v
+    return None
+
+
 def basic_user(user):
     return "Basic " + base64.b64encode(f"{user}:".encode()).decode()
 
@@ -305,6 +328,117 @@ def cap_rest():
 # Runs LAST: compose deletes its source files on the Go implementation,
 # which would fork the container filesystem state between implementations
 # for every scenario that follows it.
+def cap_files_negotiation():
+    """Range / conditional-request download scenarios (item 1.3).
+
+    Self-contained: uploads its own deterministic files first, so the group
+    can run standalone (`python3 capture.py files-negotiation`) or as part of
+    `all`. File contents and sizes are identical on both sides, so 206 body
+    slices, Content-Range values and the Last-Modified round-trip compare
+    exactly.
+    """
+    text = "/home/user/neg_range.txt"
+    empty = "/home/user/neg_empty.txt"
+
+    def upload(path, content):
+        http_req("POST", f"/files?path={path}&username=user", content,
+                 {"Content-Type": "application/octet-stream"})
+
+    # 20 printable ASCII bytes; no trailing newline.
+    upload(text, b"0123456789abcdefghij")
+    upload(empty, b"")
+
+    # --- single-range 206, byte-exact with Content-Range ---
+    record("rest_files_range_single", http_req(
+        "GET", f"/files?path={text}&username=user",
+        headers={"Range": "bytes=2-11"}))
+    record("rest_files_range_open", http_req(
+        "GET", f"/files?path={text}&username=user",
+        headers={"Range": "bytes=5-"}))
+    record("rest_files_range_suffix", http_req(
+        "GET", f"/files?path={text}&username=user",
+        headers={"Range": "bytes=-10"}))
+    # --- 416 shapes: no-overlap carries bytes */N, syntax errors do not ---
+    record("rest_files_range_nooverlap", http_req(
+        "GET", f"/files?path={text}&username=user",
+        headers={"Range": "bytes=999-"}))
+    record("rest_files_range_invalid", http_req(
+        "GET", f"/files?path={text}&username=user",
+        headers={"Range": "bytes=abc"}))
+    # Empty file: an unsatisfiable Range is ignored → plain 200 (fs.go).
+    record("rest_files_range_empty_file", http_req(
+        "GET", f"/files?path={empty}&username=user",
+        headers={"Range": "bytes=0-"}))
+
+    # --- conditional requests ---
+    # If-Modified-Since round-trip: revalidate with the real Last-Modified
+    # → 304 with the Last-Modified header kept (values are normalized to
+    # <time> by conformance.py; existence is compared). Header names differ
+    # in case on the wire between the two implementations, so look up
+    # case-insensitively.
+    lm = http_req("GET", f"/files?path={text}&username=user")
+    last_modified = header_get(lm["headers"], "Last-Modified")
+    record("rest_files_cond_ims_304", http_req(
+        "GET", f"/files?path={text}&username=user",
+        headers={"If-Modified-Since": last_modified}))
+    # Stale IMS (before the file's mtime) → full 200.
+    record("rest_files_cond_ims_stale", http_req(
+        "GET", f"/files?path={text}&username=user",
+        headers={"If-Modified-Since": "Thu, 01 Jan 1970 00:00:00 GMT"}))
+    # If-None-Match: * matches → 304; a concrete etag never matches the
+    # absent current etag → full 200 and If-Modified-Since is skipped.
+    record("rest_files_cond_inm_star", http_req(
+        "GET", f"/files?path={text}&username=user",
+        headers={"If-None-Match": "*"}))
+    record("rest_files_cond_inm_etag", http_req(
+        "GET", f"/files?path={text}&username=user",
+        headers={"If-None-Match": '"deadbeef"',
+                 "If-Modified-Since": "Thu, 01 Jan 2099 00:00:00 GMT"}))
+    # If-Match with a concrete etag fails (no current etag) → 412.
+    record("rest_files_cond_ifmatch", http_req(
+        "GET", f"/files?path={text}&username=user",
+        headers={"If-Match": '"etag"'}))
+    # If-Range with a non-matching etag drops the Range header → full 200.
+    record("rest_files_cond_ifrange_etag", http_req(
+        "GET", f"/files?path={text}&username=user",
+        headers={"Range": "bytes=0-1", "If-Range": '"old-etag"'}))
+
+    # --- Accept-Encoding gates ---
+    # identity rejected but gzip acceptable, on a Range request → 406 that
+    # carries Vary (the gate answers after Vary was set).
+    record("rest_files_406_identity_gate", http_req(
+        "GET", f"/files?path={text}&username=user",
+        headers={"Range": "bytes=0-1", "Accept-Encoding": "identity;q=0, gzip"}))
+    # Everything rejected → the parse 406, answered BEFORE Vary is set.
+    record("rest_files_406_parse", http_req(
+        "GET", f"/files?path={text}&username=user",
+        headers={"Accept-Encoding": "*;q=0"}))
+
+    # --- fractional seconds in the revalidation date (round-5) ---
+    # The digit run after "." must not swallow the following field: Go answers
+    # 304 for both the IMF and the asctime form (asctime puts the year right
+    # after the fraction).
+    record("rest_files_cond_ims_fraction", http_req(
+        "GET", f"/files?path={text}&username=user",
+        headers={"If-Modified-Since": last_modified.replace(" GMT", ".5 GMT")}))
+    asctime_frac = asctime_fraction(last_modified)
+    if asctime_frac:
+        record("rest_files_cond_ims_asctime_fraction", http_req(
+            "GET", f"/files?path={text}&username=user",
+            headers={"If-Modified-Since": asctime_frac}))
+
+    # --- Seek(End)-sized responses (round-4, both deterministic) ---
+    # /proc files report EINVAL on Seek(End): Go's sizeFunc fails →
+    # serveError 500 "seeker can't seek" (fs.go errSeeker path).
+    record("rest_files_proc_seeker", http_req(
+        "GET", f"/files?path=/proc/self/status&username=user"))
+    # Char devices with Seek(End) = 0: an explicit Content-Length: 0 with an
+    # empty body — never an unbounded stream. Last-Modified values differ
+    # between containers and are normalized to <time> by conformance.py.
+    record("rest_files_devzero", http_req(
+        "GET", f"/files?path=/dev/zero&username=user"))
+
+
 def cap_compose():
     record("rest_files_compose_probe", http_req(
         "POST", "/files/compose",
@@ -437,7 +571,11 @@ def cap_fs():
                   "/home/user/zz_suid", "/home/user/zz_sticky",
                   "/home/user/zz_legacy_a.txt", "/home/user/zz_legacy_dir",
                   "/home/user/zz_legacy_link", "/home/user/zz_legacy_dir_link",
-                  "/home/user/zz_legacy_dangling"):
+                  "/home/user/zz_legacy_dangling",
+                  # cap_files_negotiation self-uploads these (item 1.3);
+                  # sweep them so an interrupted/rerun capture cannot leak
+                  # them into fs_listdir_*.
+                  "/home/user/neg_range.txt", "/home/user/neg_empty.txt"):
         try:
             connect_unary("filesystem.Filesystem/Remove", {"path": stale})
         except Exception:
@@ -834,6 +972,8 @@ if __name__ == "__main__":
         cap_cors()
     if which in ("all", "rest"):
         cap_rest()
+    if which in ("all", "files-negotiation"):
+        cap_files_negotiation()
     if which in ("all", "fs"):
         cap_fs()
     if which in ("all", "fs-legacy"):

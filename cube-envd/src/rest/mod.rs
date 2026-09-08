@@ -1,10 +1,20 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! REST endpoints: /health /init /envs /metrics /files.
+//! REST/HTTP API 面：/health /init /envs /metrics /files 端点 + 下载协商原语
+//! （镜像上游 `internal/api/`：handler 与协议函数同包）。协商原语是纯函数、
+//! 无 I/O：encoding.rs（Accept-Encoding ↔ encoding.go）、ranges.rs（Range /
+//! Content-Range ↔ net/http fs.go parseRange）、httpdate.rs（RFC 1123 ↔
+//! TimeFormat）、content_disposition.rs（↔ mime.FormatMediaType）、
+//! preconditions.rs（条件请求决策 ↔ fs.go checkPreconditions）。
 
+pub mod content_disposition;
+pub mod encoding;
 pub mod files;
+pub mod httpdate;
 pub mod metrics;
+pub mod preconditions;
+pub mod ranges;
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -66,7 +66,7 @@ load-bearing ones, and why cube-envd differs:
   signalling or attaching to any process (#1227). An empty flat selector `{}`
   returns `unimplemented`, matching the upstream service default branch.
 - **Uploads buffer in memory (bounded).** Both upload paths hold the payload
-  (≤ 64 MiB) in memory before the atomic temp-file write; Go streams to disk.
+  (≤ 256 MiB) in memory before the atomic temp-file write; Go streams to disk.
   Worst case is bounded and rejected cleanly with 413 above the cap, but very
   memory-tight sandboxes doing several concurrent max-size uploads should be
   aware. Overwriting an existing file preserves its mode bits. Multipart

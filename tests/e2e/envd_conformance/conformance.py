@@ -45,8 +45,18 @@ TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z")
 HEADERS_KEPT = {"Content-Type", "Content-Encoding", "Cache-Control",
                 "Access-Control-Allow-Origin", "Access-Control-Expose-Headers",
                 "Access-Control-Allow-Methods", "Access-Control-Allow-Headers",
-                "Access-Control-Max-Age", "X-E2B-Legacy-SDK"}
+                "Access-Control-Max-Age", "X-E2B-Legacy-SDK",
+                # item 1.3 (Range/conditional downloads): the negotiation
+                # header set is now compared too.
+                "Vary", "Accept-Ranges", "Content-Range", "Content-Disposition",
+                # Last-Modified existence is compared; its value is dynamic
+                # (per-container mtimes) and normalized to <time> below.
+                "Last-Modified"}
 
+# Go renders Last-Modified as RFC 1123 (`Sun, 06 Sep 2026 07:00:00 GMT`),
+# which TIME_RE (ISO 8601) does not match; both sides' values are per-
+# container mtimes, so the header value never compares equal and must be
+# normalized (existence is what item 1.3 asserts at the wire level).
 
 def normalize(obj, path=""):
     if isinstance(obj, dict):
@@ -54,8 +64,14 @@ def normalize(obj, path=""):
         for k, v in obj.items():
             if k == "headers" and isinstance(v, dict):
                 kept_lower = {h.lower() for h in HEADERS_KEPT}
-                out[k] = {hk.title(): hv for hk, hv in v.items()
-                          if hk.lower() in kept_lower and hv != ""}
+                kept = {}
+                for hk, hv in v.items():
+                    if hk.lower() not in kept_lower or hv == "":
+                        continue
+                    if hk.lower() == "last-modified":
+                        hv = "<time>"
+                    kept[hk.title()] = hv
+                out[k] = kept
             elif k in VOLATILE_KEYS:
                 out[k] = f"<{type(v).__name__}>"
             elif k in ("modifiedTime",):
