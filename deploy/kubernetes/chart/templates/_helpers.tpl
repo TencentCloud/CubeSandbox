@@ -746,6 +746,27 @@ cannot feed env injection -- combine it with global.env instead.
 {{- end -}}
 
 {{/*
+Path style for the artifact store S3 client (CUBE_S3_USE_PATH_STYLE). The
+builtin MinIO is only reachable path-style: virtual-host addressing would
+resolve <bucket>.cube-minio.<ns>.svc..., which cluster DNS cannot resolve
+(the chart already writes -ouse_path_request_style into volume-s3.conf for
+the same reason). An external volumeS3 endpoint keeps the binary default
+(false = virtual-host, AWS-style) unless the operator sets volumeS3.pathStyle.
+*/}}
+{{- define "cube.artifactS3PathStyle" -}}
+{{- $volumeS3 := default dict .Values.volumeS3 -}}
+{{- if ne (($volumeS3.endpoint) | default "") "" -}}
+{{- if hasKey $volumeS3 "pathStyle" -}}
+{{- $volumeS3.pathStyle | toString -}}
+{{- else -}}
+false
+{{- end -}}
+{{- else -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
 The CUBE_S3_* env block rendered into BOTH the cube-master and
 cube-templatecenter Deployments. Emitted only when s3Backed=true and
 global.env does not already carry the set; placed BEFORE the global.env block
@@ -758,6 +779,8 @@ kubelet keeps the last one).
   value: {{ include "cube.volumeS3EffectiveEndpoint" . | quote }}
 - name: CUBE_S3_BUCKET
   value: {{ include "cube.artifactS3Bucket" . | quote }}
+- name: CUBE_S3_USE_PATH_STYLE
+  value: {{ include "cube.artifactS3PathStyle" . | quote }}
 - name: CUBE_S3_ACCESS_KEY_ID
   valueFrom:
     secretKeyRef:

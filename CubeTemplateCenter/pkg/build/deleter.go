@@ -53,6 +53,19 @@ func NewArtifactDeleter(db *gorm.DB, s3Client *s3store.Client) *ArtifactDeleter 
 // package-level var so tests can stub it if needed.
 var artifactTableName = constants.RootfsArtifactTableName
 
+// artifactStatusClaimableForDelete reports whether the deleter may claim a
+// row in this status. DELETING is included so a peer can pick up a delete
+// whose first owner crashed mid-flight (the reconciler sweeps stale DELETING
+// rows for exactly this); the (status, updated_at) CAS makes the handoff
+// unambiguous.
+func artifactStatusClaimableForDelete(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "CLEANUP_PENDING", "DELETING", "FAILED", "ORPHANED":
+		return true
+	}
+	return false
+}
+
 // Delete removes the artifact identified by artifactID.
 //
 // Idempotent: deleting an already-deleted artifact returns nil. Concurrent
@@ -79,30 +92,41 @@ func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 	}
 	logger := log.G(ctx).WithFields(map[string]any{"artifact_id": artifactID, "component": "artifact_delete"})
 
-	// Claim the row: flip CLEANUP_PENDING -> DELETING atomically. If no row
-	// was updated, either it does not exist or someone else is deleting it.
-	tx := d.db.WithContext(ctx).Table(artifactTableName).
-		Where("artifact_id = ?", artifactID).
-		Where("status IN ?", []string{"CLEANUP_PENDING", "DELETING", "FAILED", "ORPHANED"}).
-		Updates(map[string]any{"status": "DELETING"})
-	if tx.Error != nil {
-		return fmt.Errorf("claim artifact row: %w", tx.Error)
-	}
-	if tx.RowsAffected == 0 {
-		// Already gone or being deleted by a peer replica — treat as success.
-		logger.Infof("artifact already deleted or being deleted, skipping")
-		return nil
-	}
-
-	// Load the row (for S3 URL + ext4 path) after claiming.
+	// Claim the row with a CAS on (status, updated_at): read first, then flip
+	// to DELETING only if the row is still exactly as read. The previous
+	// status-only UPDATE could not tell "row gone" from "matched but
+	// unchanged" — MySQL reports RowsAffected=0 for a same-value update
+	// (DELETING -> DELETING), which the old code misread as "a peer owns it"
+	// and returned success without deleting anything.
 	var artifact models.RootfsArtifact
 	if err := d.db.WithContext(ctx).Table(artifactTableName).
 		Where("artifact_id = ?", artifactID).First(&artifact).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			logger.Infof("artifact row vanished after claim, nothing to delete")
+			logger.Infof("artifact already deleted, skipping")
 			return nil
 		}
 		return fmt.Errorf("load artifact row: %w", err)
+	}
+	if !artifactStatusClaimableForDelete(artifact.Status) {
+		// Live (READY/BUILDING) or otherwise not the deleter's to take.
+		logger.Infof("artifact status %s is not deletable, skipping", artifact.Status)
+		return nil
+	}
+	tx := d.db.WithContext(ctx).Table(artifactTableName).
+		Where("artifact_id = ?", artifactID).
+		Where("status = ?", artifact.Status).
+		Where("updated_at = ?", artifact.UpdatedAt).
+		Updates(map[string]any{"status": "DELETING", "last_error": "", "updated_at": time.Now()})
+	if tx.Error != nil {
+		return fmt.Errorf("claim artifact row: %w", tx.Error)
+	}
+	if tx.RowsAffected == 0 {
+		// Lost the race: a peer re-claimed the row (or CubeMaster resurrected
+		// it) between our read and our CAS. InnoDB re-evaluates the WHERE on
+		// the latest committed version after waiting on the row lock, so this
+		// is unambiguous.
+		logger.Infof("artifact claim lost to a peer, skipping")
+		return nil
 	}
 
 	// Delete the S3 object when the artifact was uploaded.

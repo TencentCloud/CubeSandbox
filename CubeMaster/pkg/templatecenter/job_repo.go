@@ -258,6 +258,50 @@ func UpdateTemplateImageJob(ctx context.Context, jobID string, values map[string
 	return updateTemplateImageJob(ctx, jobID, values)
 }
 
+// UpdateTemplateImageJobIfTransitionAllowed applies a status-carrying
+// callback update with the terminal-state guard folded into the UPDATE's
+// WHERE (a conditional update, not SELECT-then-update): a terminal job
+// (READY/FAILED) only accepts a rewrite with the SAME status, so a late
+// RUNNING/BUILT report can never resurrect a job that distribution or
+// force-delete already finished — and a lookup error can no longer fail open
+// into an unguarded write. A refused write is read back once for a precise
+// error; that read failing is safe because nothing was written.
+func UpdateTemplateImageJobIfTransitionAllowed(ctx context.Context, jobID string, values map[string]any, newStatus string) error {
+	values["updated_at"] = time.Now()
+	tx := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("job_id = ?", jobID).
+		Where("status NOT IN ? OR status = ?", []string{JobStatusReady, JobStatusFailed}, newStatus).
+		Updates(values)
+	if tx.Error != nil {
+		return tx.Error
+	}
+	if tx.RowsAffected == 0 {
+		job, err := getTemplateImageJobRecordByID(ctx, jobID)
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: job %s is %s, cannot move to %s", ErrTerminalJobStatusFlip, jobID, job.Status, newStatus)
+	}
+	return nil
+}
+
+// updateRootfsArtifactIfStatus applies values only while the row is still in
+// fromStatus — a compare-and-swap so a duplicate finalizer (a second BUILT
+// replay on another master that skipped the named register lock) cannot
+// rotate the download_token of a row a peer already finalized. Returns false
+// when the row was not in fromStatus.
+func updateRootfsArtifactIfStatus(ctx context.Context, artifactID, fromStatus string, values map[string]any) (bool, error) {
+	values["updated_at"] = time.Now()
+	tx := store.db.WithContext(ctx).Table(constants.RootfsArtifactTableName).
+		Where("artifact_id = ?", artifactID).
+		Where("status = ?", fromStatus).
+		Updates(values)
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+	return tx.RowsAffected > 0, nil
+}
+
 func updateRootfsArtifact(ctx context.Context, artifactID string, values map[string]any) error {
 	values["updated_at"] = time.Now()
 	tx := store.db.WithContext(ctx).Table(constants.RootfsArtifactTableName).

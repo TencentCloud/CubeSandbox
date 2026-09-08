@@ -7,6 +7,7 @@ package cube
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"runtime/debug"
@@ -160,21 +161,28 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	// Transition guard: this endpoint is unauthenticated, so refuse to flip a
-	// terminal job back to a non-terminal status. Evaluated only when the
-	// report carries a status change.
+	// Conditional update: when the report carries a status change, the
+	// terminal-state guard lives in the UPDATE's WHERE (not a preceding
+	// SELECT), so a late RUNNING/BUILT report can never rewrite a job that
+	// distribution or force-delete already finished — and a lookup error can
+	// no longer fail open into an unguarded write.
 	if newStatus, ok := values["status"].(string); ok && newStatus != "" {
-		if err := templatecenter.ValidateTemplateJobStatusTransition(ctx, jobID, newStatus); err != nil {
-			log.G(ctx).Warnf("template job status callback rejected: job_id=%s err=%v", jobID, err)
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		if err := templatecenter.UpdateTemplateImageJobIfTransitionAllowed(ctx, jobID, values, newStatus); err != nil {
+			if errors.Is(err, templatecenter.ErrTerminalJobStatusFlip) {
+				log.G(ctx).Warnf("template job status callback rejected: job_id=%s err=%v", jobID, err)
+				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+				return
+			}
+			log.G(ctx).Errorf("template job status callback: update fail: job_id=%s err=%v", jobID, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-	}
-
-	if err := templatecenter.UpdateTemplateImageJob(ctx, jobID, values); err != nil {
-		log.G(ctx).Errorf("template job status callback: update fail: job_id=%s err=%v", jobID, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+	} else {
+		if err := templatecenter.UpdateTemplateImageJob(ctx, jobID, values); err != nil {
+			log.G(ctx).Errorf("template job status callback: update fail: job_id=%s err=%v", jobID, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	log.G(ctx).Infof("template job status callback applied: job_id=%s status=%v phase=%v",

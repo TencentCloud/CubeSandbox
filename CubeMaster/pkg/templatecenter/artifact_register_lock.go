@@ -60,6 +60,12 @@ const (
 // half-registered row still holding the fingerprint).
 var errArtifactRegisterRetryable = errors.New("artifact registration deferred; reconciler will retry")
 
+// errArtifactFinalizeLostCAS means the final status-guarded UPDATE found the
+// row already finalized by a duplicate BUILT replay that skipped the named
+// register lock. The caller re-reads the row and adopts the winner's READY
+// version instead of rotating its download_token.
+var errArtifactFinalizeLostCAS = errors.New("artifact finalized by a concurrent replay")
+
 // normalizeArtifactLockName mirrors CubeTemplateCenter pkg/lock's
 // normalizeLockName EXACTLY. "tc_build_<64-char sha256>" is 73 bytes, over
 // MySQL's 64-char GET_LOCK limit (Error 4163), so both sides shorten long

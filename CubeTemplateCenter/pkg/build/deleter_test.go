@@ -70,9 +70,12 @@ func TestManagedArtifactDir(t *testing.T) {
 	if managedArtifactDir(outside) {
 		t.Fatalf("expected %q recognized as NOT managed", outside)
 	}
-	// Root itself is managed.
-	if !managedArtifactDir(root) {
-		t.Fatalf("expected root %q recognized as managed", root)
+	// The root itself is deliberately NOT managed: deleteLocalExt4 runs
+	// RemoveAll(dir), so treating the store root as managed would wipe every
+	// artifact on the node (and the callback-side path validator accepts
+	// exactly such top-level paths).
+	if managedArtifactDir(root) {
+		t.Fatalf("expected root %q recognized as NOT managed (RemoveAll would wipe the whole store)", root)
 	}
 }
 

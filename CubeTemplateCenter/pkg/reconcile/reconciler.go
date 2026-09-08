@@ -168,9 +168,17 @@ func (r *Reconciler) SweepOnce(ctx context.Context) error {
 
 // cleanupPendingArtifacts deletes artifact rows that CubeMaster marked
 // CLEANUP_PENDING more than cleanupPendingGrace ago but whose immediate
-// delete never arrived (CubeMaster crashed between marking and notifying).
-// The immediate delete path (POST /tc/api/v1/artifact/delete) handles the
-// common case; this sweep is purely the backstop.
+// delete never arrived (CubeMaster crashed between marking and notifying),
+// plus stale DELETING rows whose owner crashed mid-delete (the deleter's CAS
+// re-claims them safely).
+//
+// A row is only source-deletable once its node placements are gone.
+// CubeMaster phase 2 leaves CLEANUP_PENDING on purpose while node cleanup is
+// unfinished (node RPC failure, artifact still in use, unresolvable
+// address); deleting the S3/local object and the row in that state leaks the
+// node copies and destroys the recovery trail — Master GC can no longer
+// enumerate them once the row is gone. Rows with remaining placements are
+// skipped, not failed.
 //
 // Runs under the same session lock as failStaleJobs so exactly one replica
 // sweeps, and is skipped entirely when no deleter is installed.
@@ -185,7 +193,7 @@ func (r *Reconciler) cleanupPendingArtifacts(ctx context.Context) error {
 	if err := r.db.WithContext(ctx).
 		Table(constants.RootfsArtifactTableName).
 		Select("artifact_id").
-		Where("status = ?", "CLEANUP_PENDING").
+		Where("status IN ?", []string{"CLEANUP_PENDING", "DELETING"}).
 		Where("updated_at < ?", cutoff).
 		Limit(maxRowsPerSweep).
 		Find(&rows).Error; err != nil {
@@ -194,8 +202,21 @@ func (r *Reconciler) cleanupPendingArtifacts(ctx context.Context) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	log.G(ctx).Warnf("reconciler: found %d cleanup-pending artifact(s) to delete (backstop)", len(rows))
+	log.G(ctx).Warnf("reconciler: found %d cleanup-pending/stale-deleting artifact(s) to delete (backstop)", len(rows))
 	for _, row := range rows {
+		// Placements remaining means node cleanup has not drained — the row
+		// stays until CubeMaster finishes (or its GC retries) the node side.
+		var placements int64
+		if err := r.db.WithContext(ctx).
+			Table(constants.ArtifactNodePlacementTableName).
+			Where("artifact_id = ?", row.ArtifactID).
+			Count(&placements).Error; err != nil {
+			return fmt.Errorf("count placements for artifact %s: %w", row.ArtifactID, err)
+		}
+		if placements > 0 {
+			log.G(ctx).Warnf("reconciler: artifact %s still has %d node placement(s); skipping source delete until node cleanup drains", row.ArtifactID, placements)
+			continue
+		}
 		if err := r.deleter.Delete(ctx, row.ArtifactID); err != nil {
 			log.G(ctx).Warnf("reconciler: backstop delete artifact %s fail: %v", row.ArtifactID, err)
 		}

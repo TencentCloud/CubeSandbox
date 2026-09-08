@@ -441,10 +441,19 @@ func registerRemoteBuiltArtifact(ctx context.Context, req *types.CreateTemplateF
 		return nil, nil, false, fmt.Errorf("remote build result is missing template_spec_fingerprint")
 	}
 
+	imageCfg, err := decodeImageConfigJSON(result.ImageConfigJSON)
+	if err != nil {
+		return nil, nil, false, err
+	}
+
 	err = withArtifactRegisterLock(ctx, fingerprint, func(sess *gorm.DB) error {
 		existing, findErr := findRootfsArtifactByFingerprintForUpdate(sess, fingerprint)
 		switch {
-		case findErr == nil && existing.ArtifactID != result.ArtifactID && existing.Status == ArtifactStatusReady && !existing.DeletedAt.Valid:
+		case findErr == nil && existing.Status == ArtifactStatusReady && !existing.DeletedAt.Valid:
+			// Adopt — INCLUDING our own artifact_id: a duplicate BUILT replay
+			// (callback + reconciler, possibly on different masters) must not
+			// re-finalize an already-READY row and rotate the download_token
+			// its in-flight pulls are using.
 			record = existing
 			adopted = true
 			return nil
@@ -461,7 +470,7 @@ func registerRemoteBuiltArtifact(ctx context.Context, req *types.CreateTemplateF
 		}
 
 		// Our own row (same artifact_id — replay/redo) or no row at all: the
-		// pre-existing claim path, now running under the fingerprint lock.
+		// pre-existing claim path, under the fingerprint lock.
 		claimed, claimErr := claimRootfsArtifactForBuild(ctx, result.ArtifactID, fingerprint, req, result.SourceImageDigest)
 		if claimErr != nil {
 			// Defense in depth: a 1062 on idx_artifact_fingerprint here means
@@ -484,13 +493,31 @@ func registerRemoteBuiltArtifact(ctx context.Context, req *types.CreateTemplateF
 				return fmt.Errorf("load claimed artifact row: %w", err)
 			}
 		}
+
+		// Finalize INSIDE the register lock (the lock's critical section is
+		// claim + finalize, so a peer can never observe a half-registered
+		// row). The final UPDATE is additionally a status CAS: a duplicate
+		// finalizer that somehow skipped the named lock still loses.
+		finRec, finReq, finErr := finalizeRemoteArtifact(ctx, record, req, result, imageCfg)
+		if errors.Is(finErr, errArtifactFinalizeLostCAS) {
+			winner, werr := getRootfsArtifactByID(ctx, result.ArtifactID)
+			if werr == nil && winner.Status == ArtifactStatusReady {
+				record = winner
+				adopted = true
+				return nil
+			}
+			if werr != nil {
+				return fmt.Errorf("finalize lost CAS and reload failed: %w", werr)
+			}
+			return fmt.Errorf("finalize lost CAS but row %s is %s", result.ArtifactID, winner.Status)
+		}
+		if finErr != nil {
+			return finErr
+		}
+		record = finRec
+		generatedReq = finReq
 		return nil
 	})
-	if err != nil {
-		return nil, nil, false, err
-	}
-
-	imageCfg, err := decodeImageConfigJSON(result.ImageConfigJSON)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -507,11 +534,6 @@ func registerRemoteBuiltArtifact(ctx context.Context, req *types.CreateTemplateF
 			return nil, nil, false, fmt.Errorf("generate template create request: %w", err)
 		}
 		return record, generatedReq, true, nil
-	}
-
-	record, generatedReq, err = finalizeRemoteArtifact(ctx, record, req, result, imageCfg)
-	if err != nil {
-		return nil, nil, false, err
 	}
 	return record, generatedReq, false, nil
 }
@@ -553,7 +575,12 @@ func finalizeRemoteArtifact(
 	}
 	record.GeneratedRequestJSON = string(reqPayload)
 
-	if err := updateRootfsArtifact(ctx, record.ArtifactID, map[string]any{
+	// Status CAS: the row only becomes READY while it is still the BUILDING
+	// row this registration claimed. A duplicate BUILT replay that skipped
+	// the named register lock finds the row already READY and loses, so the
+	// winner's download_token (already handed to Cubelet pulls) is never
+	// rotated underneath it.
+	ok, err := updateRootfsArtifactIfStatus(ctx, record.ArtifactID, ArtifactStatusBuilding, map[string]any{
 		"source_image_digest":            record.SourceImageDigest,
 		"master_node_ip":                 record.MasterNodeIP,
 		"ext4_path":                      record.Ext4Path,
@@ -569,8 +596,12 @@ func finalizeRemoteArtifact(
 		"cube_egress_ca_baked":           record.CubeEgressCABaked,
 		"cube_egress_ca_fingerprint":     record.CubeEgressCAFingerprint,
 		"cube_egress_ca_targets_written": record.CubeEgressCATargetsWritten,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, nil, err
+	}
+	if !ok {
+		return nil, nil, errArtifactFinalizeLostCAS
 	}
 
 	latest, err := getRootfsArtifactByID(ctx, record.ArtifactID)

@@ -324,7 +324,14 @@ func (t *templateCleanupTargets) hasActiveJob() bool {
 		return false
 	}
 	for _, job := range t.Jobs {
-		if strings.EqualFold(job.Status, JobStatusPending) || strings.EqualFold(job.Status, JobStatusRunning) {
+		// BUILT is in-flight too: the resume pipeline (register + distribute)
+		// runs after TC's BUILT callback, and a BUILT job whose callback
+		// response was lost is replayed by the image-job reconciler. Treating
+		// it as idle would let a delete (or a second create) run inside the
+		// resume window.
+		if strings.EqualFold(job.Status, JobStatusPending) ||
+			strings.EqualFold(job.Status, JobStatusRunning) ||
+			strings.EqualFold(job.Status, JobStatusBuilt) {
 			return true
 		}
 	}
