@@ -46,9 +46,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -88,7 +85,6 @@ jobs:
             echo "${IMAGE_NAME}:sha-${short_sha}-${ARCH}"
             if [[ "${IS_RELEASE_PUSH}" == "true" ]]; then
               echo "${IMAGE_NAME}:latest-${ARCH}"
-              echo "${IMAGE_NAME}:${ENVD_VERSION}-${ARCH}"
               echo "${IMAGE_NAME}:${ENVD_VERSION}-${BASE_OS_TAG_SUFFIX}-${ARCH}"
             fi
             echo "EOF"
@@ -190,7 +186,6 @@ jobs:
           short_sha="${GITHUB_SHA::7}"
           docker buildx imagetools create \
             -t "${IMAGE_NAME}:latest" \
-            -t "${IMAGE_NAME}:${ENVD_VERSION}" \
             -t "${IMAGE_NAME}:${ENVD_VERSION}-${BASE_OS_TAG_SUFFIX}" \
             -t "${IMAGE_NAME}:sha-${short_sha}" \
             "${IMAGE_NAME}:sha-${short_sha}-amd64" \
