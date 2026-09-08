@@ -5,7 +5,7 @@
 {{- end }}
 {{- $templateCenter := .Values.controlPlane.templateCenter -}}
 {{- if hasKey $templateCenter "buildMode" }}
-{{- fail "controlPlane.templateCenter.buildMode no longer exists: template offload is now a single boolean. Use controlPlane.templateCenter.enabled only -- it renders templatecenter_enabled into CubeMaster's conf, and builds go to TC when that is true" }}
+{{- fail "controlPlane.templateCenter.buildMode no longer exists: template builds always go to CubeTemplateCenter, which deploys automatically whenever controlPlane.enabled=true. Remove controlPlane.templateCenter.buildMode from your values" }}
 {{- end }}
 {{- if hasKey $templateCenter "routeMode" }}
 {{- fail "controlPlane.templateCenter.routeMode no longer exists: the route proxy was removed along with the build-mode string. CubeMaster always serves the public template API" }}
@@ -34,7 +34,7 @@ whether co-location is merely required or physically unavoidable. Reject the
 combination that cannot work at all: a ReadWriteOnce claim plus TC scheduled
 away from CubeMaster means one of the two Pods cannot attach the volume.
 */ -}}
-{{- if and $templateCenter.enabled (not $templateCenter.colocateWithMaster) }}
+{{- if and .Values.controlPlane.enabled (not $templateCenter.colocateWithMaster) }}
 {{- $masterPersistence := .Values.controlPlane.master.persistence -}}
 {{- if and $masterPersistence.enabled (not $masterPersistence.hostPath) }}
 {{- $modes := $masterPersistence.accessModes | default list -}}
@@ -43,10 +43,10 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- end }}
 {{- end }}
 {{- end }}
-{{- if and $templateCenter.enabled .Values.controlPlane.master.persistence.enabled .Values.controlPlane.master.persistence.hostPath (not $templateCenter.colocateWithMaster) }}
+{{- if and .Values.controlPlane.enabled .Values.controlPlane.master.persistence.enabled .Values.controlPlane.master.persistence.hostPath (not $templateCenter.colocateWithMaster) }}
 {{- fail "controlPlane.templateCenter.colocateWithMaster=false cannot work with controlPlane.master.persistence.hostPath: a hostPath artifact store exists only on one node, so TC must run on that same node as CubeMaster" }}
 {{- end }}
-{{- if and $templateCenter.enabled (eq $templateCenter.service.type "ClusterIP") $templateCenter.service.nodePort }}
+{{- if and .Values.controlPlane.enabled (eq $templateCenter.service.type "ClusterIP") $templateCenter.service.nodePort }}
 {{- fail "controlPlane.templateCenter.service.nodePort must be empty when service.type is ClusterIP" }}
 {{- end }}
 {{- if .Values.cubeNode.enabled }}

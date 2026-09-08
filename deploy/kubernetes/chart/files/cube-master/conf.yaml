@@ -18,8 +18,8 @@ common:
   # or overridden by the CUBE_TEMPLATE_CENTER_ADDR environment variable
   # (ad-hoc debugging). Env wins over yaml. Both empty means "not configured"
   # and all template builds will fail.
-  {{- if .Values.controlPlane.templateCenter.enabled }}
-  template_center_addr: "http://{{ include "cube.templateCenterEndpoint" . }}"
+  {{- if .Values.controlPlane.enabled }}
+  template_center_addr: "{{ include "cube.templateCenterEndpoint" . }}"
   {{- end }}
 
 log:

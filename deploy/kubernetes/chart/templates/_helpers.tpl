@@ -485,6 +485,23 @@ see validate.yaml) to avoid the double generation entirely.
 {{- printf "%s-templatecenter-config" (include "cube.fullname" .) -}}
 {{- end -}}
 
+{{/*
+cube.templateCallbackToken resolves the shared secret gating CubeTemplateCenter's
+build-status callbacks to CubeMaster (POST /internal/template/jobs/:job_id/status;
+both sides read it as CUBE_TEMPLATE_CALLBACK_TOKEN). Persisted as the
+cube-template-callback-token key in the release Secret, looked up first so
+upgrades keep the value stable. Unlike cube.adminToken every consumer reads it
+via secretKeyRef at runtime, so there is no fresh-install double generation.
+*/}}
+{{- define "cube.templateCallbackToken" -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace (include "cube.secretName" .) -}}
+{{- if and $existing $existing.data (index $existing.data "cube-template-callback-token") -}}
+{{- index $existing.data "cube-template-callback-token" | b64dec -}}
+{{- else -}}
+{{- randAlphaNum 32 -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "cube.masterStoragePVCName" -}}
 {{- if .Values.controlPlane.master.persistence.existingClaim -}}
 {{- .Values.controlPlane.master.persistence.existingClaim -}}
@@ -731,7 +748,7 @@ routing control-plane-internal traffic through a load balancer would add a hop
 and a failure domain for no benefit.
 */ -}}
 {{- define "cube.templateCenterEndpoint" -}}
-{{- if and .Values.controlPlane.templateCenter.enabled (not .Values.externalControlPlane.enabled) -}}
+{{- if and .Values.controlPlane.enabled (not .Values.externalControlPlane.enabled) -}}
 {{- printf "http://%s.%s.svc.%s:%v" (include "cube.templateCenterName" .) .Release.Namespace (include "cube.clusterDomain" .) .Values.controlPlane.templateCenter.service.port -}}
 {{- end -}}
 {{- end -}}

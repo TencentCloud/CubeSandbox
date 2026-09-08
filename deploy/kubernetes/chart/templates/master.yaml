@@ -54,6 +54,14 @@ spec:
             {{- if $tcAddr }}
             - name: CUBE_TEMPLATE_CENTER_ADDR
               value: {{ $tcAddr | quote }}
+            # Shared secret gating TC's build-status callbacks
+            # (/internal/template/jobs/:job_id/status); without it the handler
+            # only warns and accepts anything.
+            - name: CUBE_TEMPLATE_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: cube-template-callback-token
             {{- end }}
             {{- if .Values.controlPlane.master.skipMigrationFingerprintCheck }}
             # Escape hatch for a database that was migrated by a DIFFERENT build

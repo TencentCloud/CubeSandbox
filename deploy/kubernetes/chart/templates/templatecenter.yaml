@@ -1,4 +1,4 @@
-{{- if and .Values.controlPlane.enabled .Values.controlPlane.templateCenter.enabled }}
+{{- if .Values.controlPlane.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -93,6 +93,14 @@ spec:
             # only fallbacks in tcconfig.
             - name: CUBE_MASTER_ADDR
               value: {{ printf "http://%s" (include "cube.masterEndpoint" .) | quote }}
+            # Presented as X-Cube-Template-Callback-Token on every build-status
+            # callback; CubeMaster rejects the callback when this does not
+            # match its own CUBE_TEMPLATE_CALLBACK_TOKEN.
+            - name: CUBE_TEMPLATE_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: cube-template-callback-token
             # S3/MinIO artifact storage. TC reads the SAME CUBE_S3_* variables
             # that Cubelet / s3lvol / volume plugins use, so S3 is configured
             # once for the whole deployment (typically via .Values.global.env or
