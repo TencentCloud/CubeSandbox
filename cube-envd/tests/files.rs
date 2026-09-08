@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 
 use axum::{
     body::Body,
@@ -84,13 +85,14 @@ async fn raw_upload_requires_path_and_rejects_directory_reads() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
-// 验证流式原始上传会用新内容原子替换已有目标文件。
+// 验证流式原始上传会用新内容原子替换已有目标文件，并保留目标的权限位。
 #[tokio::test]
 async fn raw_upload_replaces_the_target_atomically_after_streaming() {
     let user = common::current_username();
     let directory = tempdir().unwrap();
     let path = directory.path().join("old.txt");
     fs::write(&path, "old content").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o751)).unwrap();
     let target = format!("/files?path={}&username={user}", path.display());
 
     let response = router()
@@ -104,7 +106,9 @@ async fn raw_upload_replaces_the_target_atomically_after_streaming() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(fs::read(path).unwrap(), b"new content");
+    assert_eq!(fs::read(&path).unwrap(), b"new content");
+    // 覆盖上传必须保留目标原有的可执行权限位（此前会被临时文件的 0644 重置）。
+    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o751);
 }
 
 // 验证 multipart 上传在缺少查询路径时使用每个字段的文件名。

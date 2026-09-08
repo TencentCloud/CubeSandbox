@@ -129,6 +129,10 @@ async fn write_atomically(path: &Path, user: &LocalUser, body: Body) -> Result<(
         let _ = fs::remove_file(&temporary).await;
         return Err(error);
     }
+    if let Err(error) = preserve_target_mode(&temporary, path).await {
+        let _ = fs::remove_file(&temporary).await;
+        return Err(error);
+    }
     if let Err(error) = fs::rename(&temporary, path).await {
         let _ = fs::remove_file(&temporary).await;
         return Err(file_error(path, error));
@@ -188,6 +192,10 @@ async fn write_multipart_field_atomically(
         return Err(error);
     }
     if let Err(error) = chown(&temporary, user).await {
+        let _ = fs::remove_file(&temporary).await;
+        return Err(error);
+    }
+    if let Err(error) = preserve_target_mode(&temporary, path).await {
         let _ = fs::remove_file(&temporary).await;
         return Err(error);
     }
@@ -301,6 +309,21 @@ async fn write_temporary_file(path: &Path, body: Body) -> Result<(), RpcError> {
         .await
         .map_err(|error| file_error(path, error))?;
 
+    Ok(())
+}
+
+/// 覆盖已有目标文件时保留其权限位：rename 会用临时文件的默认位替换目标，
+/// 若不还原，可执行脚本或 0600 私钥会被重置为 0666 & umask（通常 0644）。
+async fn preserve_target_mode(temporary: &Path, target: &Path) -> Result<(), RpcError> {
+    let Ok(metadata) = fs::metadata(target).await else {
+        return Ok(());
+    };
+    if !metadata.is_file() {
+        return Ok(());
+    }
+    fs::set_permissions(temporary, metadata.permissions())
+        .await
+        .map_err(|error| file_error(temporary, error))?;
     Ok(())
 }
 
