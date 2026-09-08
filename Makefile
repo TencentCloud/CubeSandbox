@@ -552,6 +552,10 @@ cubevs-test: builder-image
 agent-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/agent && make test'
 
+.PHONY: cube-envd-test
+cube-envd-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-envd && make test'
+
 # Only unit tests (--lib --bins) run here; the tests/integration.rs target
 # needs a full VM. This does not pass /dev/kvm into the builder, so the
 # runtime-KVM vmm tests are not reached (see tests/unittest/run.sh
@@ -642,6 +646,8 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C agent fmt
 	@printf '  %-8s %s\n' "FMT" "guest-init"
 	@$(MAKE) -C guest-init fmt
+	@printf '  %-8s %s\n' "FMT" "cube-envd"
+	@$(MAKE) -C cube-envd fmt
 	@printf '  %-8s %s\n' "FMT" "cubecow"
 	@$(MAKE) -C cubecow fmt
 	@printf '  %-8s %s\n' "FMT" "CubeAPI"

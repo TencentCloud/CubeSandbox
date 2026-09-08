@@ -14,6 +14,7 @@ on:
       - 'Cubelet/**'
       - 'CubeShim/**'
       - 'agent/**'
+      - 'cube-envd/**'
       - 'examples/volume/s3/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
@@ -31,6 +32,7 @@ on:
       - 'Cubelet/**'
       - 'CubeShim/**'
       - 'agent/**'
+      - 'cube-envd/**'
       - 'examples/volume/s3/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
@@ -63,7 +65,7 @@ jobs:
         # make target + expected binaries. Architecture coverage catches
         # arch-specific regressions (e.g. cfg(target_arch) code in the shim /
         # hypervisor) that an amd64-only build would miss.
-        component: [CubeAPI, CubeOps, CubeMaster, CubeTemplateCenter, Cubelet, agent, CubeShim, volume-s3]
+        component: [CubeAPI, CubeOps, CubeMaster, CubeTemplateCenter, Cubelet, agent, cube-envd, CubeShim, volume-s3]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -97,6 +99,10 @@ jobs:
             make_target: agent
             expected_bins: |
               _output/bin/cube-agent
+          - component: cube-envd
+            make_target: cube-envd
+            expected_bins: |
+              _output/bin/cube-envd
           - component: CubeShim
             make_target: shim
             expected_bins: |
