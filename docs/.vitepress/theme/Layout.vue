@@ -1,6 +1,7 @@
 <script setup>
 import DefaultTheme from 'vitepress/theme'
 import BlogPostMeta from './BlogPostMeta.vue'
+import HomeFeatures from './components/HomeFeatures.vue'
 import { useRoute, useData } from 'vitepress'
 import { computed, defineAsyncComponent, onMounted, watch } from 'vue'
 
@@ -11,6 +12,7 @@ const { Layout } = DefaultTheme
 const route = useRoute()
 const { frontmatter } = useData()
 const hasHomeLogo = computed(() => frontmatter.value.layout === 'home' && frontmatter.value.logo3d !== undefined)
+const isHome = computed(() => frontmatter.value.layout === 'home')
 
 const isBlogPost = computed(() =>
   /\/(zh\/)?blog\/posts\//.test(route.path)
@@ -47,6 +49,9 @@ watch(() => frontmatter.value?.externalUrl, (url) => {
   <Layout>
     <template v-if="hasHomeLogo" #home-hero-image>
       <HomeLogo3D :enabled="frontmatter.logo3d !== false" />
+    </template>
+    <template v-if="isHome" #home-hero-after>
+      <HomeFeatures />
     </template>
     <template v-if="isBlogPost" #doc-before>
       <BlogPostMeta />
