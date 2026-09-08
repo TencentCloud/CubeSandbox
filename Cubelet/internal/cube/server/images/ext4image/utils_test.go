@@ -9,6 +9,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,7 +48,13 @@ func writeRawKernelFile(t *testing.T, instanceType, imageRef string, content []b
 
 func TestRefreshArtifactRuntimeFilesRefreshesKernelWhenSharedKernelChanges(t *testing.T) {
 	baseDir := t.TempDir()
-	pmem.Init(baseDir)
+	paths, pathErr := pmem.ResolvePaths(baseDir, filepath.Join(t.TempDir(), "artifacts"), filepath.Join(t.TempDir(), "vmlinux"))
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	previous := pmem.CurrentPaths()
+	pmem.InitPaths(paths)
+	t.Cleanup(func() { pmem.InitPaths(previous) })
 
 	kernelV1 := bytes.Repeat([]byte("a"), 2048)
 	writeSharedKernelFile(t, kernelV1)
@@ -254,5 +262,43 @@ func TestDestroyPmemArtifactMissingBaseIsIdempotent(t *testing.T) {
 
 	if err := DestroyPmemArtifact(context.Background(), "cubebox", "artifact-8", nil); err != nil {
 		t.Fatalf("missing pmem base should be success, got %v", err)
+	}
+}
+
+func TestDownloadArtifactWithIndependentKernelSource(t *testing.T) {
+	paths, err := pmem.ResolvePaths(t.TempDir(), filepath.Join(t.TempDir(), "images"), filepath.Join(t.TempDir(), "vmlinux"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := pmem.CurrentPaths()
+	pmem.InitPaths(paths)
+	t.Cleanup(func() { pmem.InitPaths(previous) })
+	rootfs := bytes.Repeat([]byte("r"), 2048)
+	kernel := bytes.Repeat([]byte("k"), 2048)
+	writeSharedKernelFile(t, kernel)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(rootfs) }))
+	defer server.Close()
+	sum := sha256.Sum256(rootfs)
+	ctx := constants.WithImageSpec(context.Background(), &cubeimages.ImageSpec{Annotations: map[string]string{
+		constants.MasterAnnotationRootfsArtifactURL:    server.URL,
+		constants.MasterAnnotationRootfsArtifactSHA256: hex.EncodeToString(sum[:]),
+	}})
+	if err := EnsurePmemFile(ctx, "cubebox", "rfs-download"); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string][]byte{paths.ImageFile("cubebox", "rfs-download"): rootfs, paths.KernelFile("cubebox", "rfs-download"): kernel} {
+		got, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("artifact %s: err=%v, content matches=%v", path, err, bytes.Equal(got, want))
+		}
+	}
+	if err := DestroyPmemArtifact(ctx, "cubebox", "rfs-download", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(paths.ImageFile("cubebox", "rfs-download")); !os.IsNotExist(err) {
+		t.Fatalf("artifact was not deleted: %v", err)
+	}
+	if _, err := os.Stat(paths.SharedKernelPath); err != nil {
+		t.Fatalf("shared kernel must survive artifact deletion: %v", err)
 	}
 }

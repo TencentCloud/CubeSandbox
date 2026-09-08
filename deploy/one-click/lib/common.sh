@@ -1424,6 +1424,52 @@ generate_alnum_secret() {
   printf '%s' "${pass}"
 }
 
+# Render only the images plugin's paths; identically named cbri keys are not
+# installation settings. Pass strings as argv and encode them as TOML strings.
+write_cubelet_artifact_paths() {
+  local config_path="$1" image_dir="$2" shared_kernel="$3"
+  ensure_file "${config_path}"
+  [[ ! -L "${config_path}" ]] || die "refusing to patch a symlink: ${config_path}"
+  require_cmd python3
+  python3 - "${config_path}" "${image_dir}" "${shared_kernel}" <<'PYCODE' || die "failed to configure Cubelet artifact paths"
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+config_path, image_dir, shared_kernel = sys.argv[1:]
+for name, value in (("ONE_CLICK_OS_IMAGE_DIR", image_dir), ("shared_kernel_path", shared_kernel)):
+    if not os.path.isabs(value) or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise SystemExit("%s must be an absolute path without control characters" % name)
+path = Path(config_path)
+lines = path.read_text().splitlines(keepends=True)
+header = re.compile(r'^\s*\[plugins\."io\.cubelet\.internal\.v1\.images"\]\s*(?:#.*)?$')
+starts = [i for i, line in enumerate(lines) if header.match(line)]
+if len(starts) != 1:
+    raise SystemExit("expected exactly one images plugin table")
+start = starts[0] + 1
+end = next((i for i in range(start, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
+body = lines[start:end]
+for key, value in (("image_base_path", image_dir), ("shared_kernel_path", shared_kernel)):
+    pattern = re.compile(r'^\s*' + key + r'\s*=')
+    matches = [i for i, line in enumerate(body) if pattern.match(line)]
+    if len(matches) > 1:
+        raise SystemExit("duplicate images." + key)
+    replacement = "    %s = %s\n" % (key, json.dumps(value, ensure_ascii=False))
+    if matches:
+        body[matches[0]] = replacement
+    else:
+        if body and not body[-1].endswith("\n"):
+            body[-1] += "\n"
+        body.append(replacement)
+# No mutation until all input/section checks have passed.
+if start and not lines[start - 1].endswith("\n"):
+    lines[start - 1] += "\n"
+path.write_text("".join(lines[:start] + body + lines[end:]))
+PYCODE
+}
+
 patch_cubelet_config_template() {
   local cubelet_config="$1"
   local eth_name="${2:-}"

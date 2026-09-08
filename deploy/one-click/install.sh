@@ -42,6 +42,8 @@ esac
 
 require_root
 
+# Remember explicit process input before .env and upgrade merging can replace it.
+os_image_dir_from_process="${ONE_CLICK_OS_IMAGE_DIR+x}"
 ENV_FILE="${ONE_CLICK_ENV_FILE:-${SCRIPT_DIR}/.env}"
 # Snapshot this-run toggle intent (ONE_CLICK_TOGGLE_KEYS) before any file is
 # sourced: the upgrade merge later loads the old .one-click.env, which would
@@ -59,6 +61,11 @@ if [[ -f "${ENV_FILE}" ]]; then
     ""|install|upgrade|auto) ;;
     *) die "unsupported --mode: ${ONE_CLICK_MODE} (expected install|upgrade|auto)" ;;
   esac
+fi
+
+# Capture after .env loading so its value retains precedence over process input.
+if [[ "${os_image_dir_from_process}" == x ]]; then
+  os_image_dir_override="${ONE_CLICK_OS_IMAGE_DIR:-}"
 fi
 
 DEPLOY_ROLE="$(one_click_deploy_role)"
@@ -271,6 +278,9 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   load_env_file "${MERGED_ENV}"
   apply_cli_overrides
   DEPLOY_ROLE="$(one_click_deploy_role)"
+fi
+if [[ "${os_image_dir_from_process}" == x ]]; then
+  ONE_CLICK_OS_IMAGE_DIR="${os_image_dir_override}"
 fi
 # Re-apply this-run toggle intent (harmless on fresh install): the merged env
 # above preserves the old runtime values for keys whose .env value equals the
@@ -1686,6 +1696,12 @@ patch_cubelet_config_template \
   "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}" \
   "${CUBE_EGRESS_ADMIN_PORT}"
 
+ONE_CLICK_OS_IMAGE_DIR="${ONE_CLICK_OS_IMAGE_DIR:-/data/cubelet/cubebox_os_image}"
+write_cubelet_artifact_paths \
+  "${PKG_ROOT}/Cubelet/config/config.toml" \
+  "${ONE_CLICK_OS_IMAGE_DIR}" \
+  "${INSTALL_PREFIX}/cube-kernel-scf/vmlinux"
+
 installed_role="${DEPLOY_ROLE}"
 detected_installed_role="$(detect_installed_role)"
 if [[ -n "${detected_installed_role}" ]]; then
@@ -1824,6 +1840,8 @@ fi
 # mktemp+mv, which replaces the inode; it sets 0600 on its temp file so this
 # mode is preserved across every later upsert rather than reverting to 0644.
 chmod 600 "${RUNTIME_ENV_FILE}"
+# Preserve the effective cache path even when supplied only via the process environment.
+upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_OS_IMAGE_DIR" "${ONE_CLICK_OS_IMAGE_DIR}"
 
 # Install version files so the installed system can report its version.
 if [[ -f "${SCRIPT_DIR}/VERSION.txt" ]]; then

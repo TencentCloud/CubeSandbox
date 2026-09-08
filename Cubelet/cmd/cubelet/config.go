@@ -34,6 +34,7 @@ import (
 	"github.com/containerd/plugin/registry"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pelletier/go-toml"
+	imageplugin "github.com/tencentcloud/CubeSandbox/Cubelet/services/images"
 	srvconfig "github.com/tencentcloud/CubeSandbox/Cubelet/services/server/config"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/net/context"
@@ -52,6 +53,9 @@ func (c *Config) WriteTo(w io.Writer) (int64, error) {
 }
 
 func outputConfig(ctx context.Context, cfg *srvconfig.Config) error {
+	if _, err := imageplugin.ResolveConfiguredPaths(ctx, cfg); err != nil {
+		return err
+	}
 	config := &Config{
 		Config: cfg,
 	}
@@ -72,6 +76,11 @@ func outputConfig(ctx context.Context, cfg *srvconfig.Config) error {
 				return err
 			}
 
+			if imageConfig, ok := pc.(*imageplugin.Config); ok {
+				if _, err := imageConfig.ResolvePaths(); err != nil {
+					return err
+				}
+			}
 			config.Plugins[p.URI()] = pc
 		}
 	}
