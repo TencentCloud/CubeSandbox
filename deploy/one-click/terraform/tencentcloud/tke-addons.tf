@@ -41,6 +41,12 @@ locals {
   # var.cubemaster_replicas docs in variables.tf for why under-reporting the
   # master count oversubscribes the compute nodes.
   cubemaster_replicas = var.cubemaster_replicas
+  # Fixed host directory backing cubemaster's and cube-templatecenter's
+  # "data" volume when use_cfs=false. A hostPath (not emptyDir -- emptyDir is
+  # per-Pod and never shared) at the SAME path lets both Pods see the same
+  # files as long as they land on the same node, which the templatecenter
+  # deployment's required podAffinity guarantees.
+  artifact_store_host_path = "/data/cube-sandbox/cubemaster-artifact-store"
   # Multi-node scheduling: pick randomly from the top scored compute nodes.
   # The multi-node guide recommends 3 as a small-cluster starting point; cap at
   # the actual compute-node count so the default 2-node POC uses 2.
@@ -478,9 +484,15 @@ resource "kubernetes_deployment" "cubemaster" {
             secret_name = kubernetes_secret.cubemaster_conf[0].metadata[0].name
           }
         }
-        # Default no-CFS mode uses pod-local emptyDir storage, suitable for the
-        # default single-replica cube-master. Set use_cfs=true when scaling
-        # cube-master beyond one replica or when persistent shared storage is needed.
+        # Default no-CFS mode uses a hostPath volume, NOT emptyDir: emptyDir is
+        # per-Pod and is NEVER shared between two Pods even when they land on
+        # the same node, which is exactly what cubemaster and cube-templatecenter
+        # need (TC writes the ext4, cubemaster serves the download -- design
+        # 9.7). hostPath at a fixed path is genuinely shared by every Pod
+        # scheduled onto that node. This only works for a single cubemaster
+        # replica pinned to one node (enforced by the templatecenter
+        # deployment's lifecycle.precondition below); set use_cfs=true for
+        # multi-replica cube-master or real cross-node shared storage.
         dynamic "volume" {
           for_each = var.use_cfs ? [1] : []
           content {
@@ -495,7 +507,10 @@ resource "kubernetes_deployment" "cubemaster" {
           for_each = var.use_cfs ? [] : [1]
           content {
             name = "data"
-            empty_dir {}
+            host_path {
+              path = local.artifact_store_host_path
+              type = "DirectoryOrCreate"
+            }
           }
         }
         # Both the public cert and the private key are projected here:
@@ -570,12 +585,37 @@ resource "kubernetes_deployment" "templatecenter" {
   count      = local.deploy_addons ? 1 : 0
   depends_on = [kubernetes_deployment.cubemaster]
 
+  # use_cfs=false backs the shared "data" volume with a hostPath, which only
+  # exists on one node, so both cubemaster and TC must stay single-replica
+  # there: with several master replicas the required podAffinity below could
+  # co-locate TC with ANY of them (an artifact cubemaster #2 built might sit
+  # on a node TC never shares), and a second TC replica could neither read
+  # the first one's ext4 files nor take over its builds. use_cfs=true switches
+  # the store to a shared NFS export, which lifts both limits -- replicas
+  # coordinate duplicate builds through DB session locks (see
+  # CubeTemplateCenter/pkg/build). Fail the plan instead of deploying
+  # something that 404s downloads intermittently.
+  lifecycle {
+    precondition {
+      condition     = var.use_cfs || local.cubemaster_replicas == 1
+      error_message = "use_cfs=false requires cubemaster_replicas=1: the artifact store is a node-local hostPath with no cross-node sharing, so with several master replicas cube-templatecenter could co-locate with a master replica that never built the artifact. Set use_cfs=true for a multi-replica cube-master."
+    }
+    precondition {
+      condition     = var.use_cfs || var.templatecenter_replicas == 1
+      error_message = "use_cfs=false requires templatecenter_replicas=1: the artifact store is a node-local hostPath with no cross-node sharing, so a second replica could neither read the first one's ext4 files nor take over its builds. Set use_cfs=true for multiple cube-templatecenter replicas."
+    }
+  }
+
   metadata {
     name      = "cube-templatecenter"
     namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
     labels    = { app = "cube-templatecenter" }
   }
   spec {
+    # Single replica with the default node-local hostPath store (enforced by
+    # the lifecycle preconditions above); multiple replicas are allowed with
+    # use_cfs=true, where every replica mounts the same NFS export and
+    # duplicate builds of one spec are coordinated through DB session locks.
     replicas = var.templatecenter_replicas
     selector {
       match_labels = { app = "cube-templatecenter" }
@@ -585,6 +625,27 @@ resource "kubernetes_deployment" "templatecenter" {
         labels = { app = "cube-templatecenter" }
       }
       spec {
+        # With use_cfs=false TC must land on the SAME NODE as a cubemaster
+        # Pod: the "data" volume below is a hostPath, which only that node
+        # can see. required, not preferred: a TC scheduled elsewhere would
+        # find an empty hostPath directory and build into a disk cubemaster
+        # never serves from, so every download would 404. With use_cfs=true
+        # the store is a shared NFS export any node can mount, so no
+        # co-location constraint is needed (and one would only pointlessly
+        # pile every replica onto the master node).
+        dynamic "affinity" {
+          for_each = var.use_cfs ? [] : [1]
+          content {
+            pod_affinity {
+              required_during_scheduling_ignored_during_execution {
+                topology_key = "kubernetes.io/hostname"
+                label_selector {
+                  match_labels = { app = "cubemaster" }
+                }
+              }
+            }
+          }
+        }
         container {
           name  = "cube-templatecenter"
           image = local.templatecenter_image
@@ -608,8 +669,9 @@ resource "kubernetes_deployment" "templatecenter" {
             }
           }
           # TC writes the ext4 into the same shared store CubeMaster serves
-          # downloads from. When use_cfs=false (single-replica emptyDir), TC
-          # must run on the same node as CubeMaster to share the volume.
+          # downloads from. When use_cfs=false, that store is a hostPath, so
+          # TC must run on the same node as CubeMaster (enforced by the
+          # required podAffinity below) to see the same directory.
           env {
             name  = "CUBE_TEMPLATE_CENTER_ARTIFACT_STORE_DIR"
             value = "/data/CubeMaster/storage"
@@ -636,8 +698,10 @@ resource "kubernetes_deployment" "templatecenter" {
             read_only  = true
           }
         }
-        # Share the same storage backend as CubeMaster: CFS when enabled,
-        # otherwise pod-local emptyDir (single-replica only).
+        # Share the same storage backend as CubeMaster: the same NFS export
+        # when use_cfs=true, or the same fixed hostPath directory otherwise
+        # (never emptyDir -- see the required podAffinity above and the
+        # comment on cubemaster's own "data" volume for why).
         dynamic "volume" {
           for_each = var.use_cfs ? [1] : []
           content {
@@ -652,7 +716,10 @@ resource "kubernetes_deployment" "templatecenter" {
           for_each = var.use_cfs ? [] : [1]
           content {
             name = "data"
-            empty_dir {}
+            host_path {
+              path = local.artifact_store_host_path
+              type = "DirectoryOrCreate"
+            }
           }
         }
         volume {

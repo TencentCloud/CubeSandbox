@@ -13,8 +13,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
@@ -47,6 +50,20 @@ func NewClient(endpoint string) *Client {
 	}
 }
 
+// setSharedTokenHeader authenticates the call with the same shared secret TC
+// attaches to its status callbacks (constants.TemplateCallbackTokenEnv /
+// constants.TemplateCallbackTokenHeader). TC rejects requests without it once
+// the variable is set there; when it is unset here the header is simply
+// omitted, matching a TC that also has none (rolling-upgrade window).
+//
+// Read per request rather than cached at construction so tests and config
+// reloads observe the current environment.
+func setSharedTokenHeader(req *http.Request) {
+	if token := strings.TrimSpace(os.Getenv(constants.TemplateCallbackTokenEnv)); token != "" {
+		req.Header.Set(constants.TemplateCallbackTokenHeader, token)
+	}
+}
+
 // SubmitBuildJob submits a build job to TC.
 // TC will pull the image, build ext4, upload to cbs, and report status back
 // to CubeMaster via POST /internal/template/jobs/:job_id/status.
@@ -70,6 +87,7 @@ func (c *Client) SubmitBuildJob(ctx context.Context, jobID string, req *types.Cr
 		return fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	setSharedTokenHeader(httpReq)
 
 	log.G(ctx).Infof("submit build job to TC: job_id=%s url=%s", jobID, url)
 
@@ -114,6 +132,7 @@ func (c *Client) DeleteArtifact(ctx context.Context, artifactID string) error {
 		return fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	setSharedTokenHeader(httpReq)
 
 	log.G(ctx).Infof("request TC to delete artifact: artifact_id=%s url=%s", artifactID, url)
 

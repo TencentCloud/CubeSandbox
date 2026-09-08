@@ -412,7 +412,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 			return
 		}
 	}
-	generatedReq, err := generateTemplateCreateRequest(&workingReq, artifact, imageCfg, downloadBaseURL)
+	generatedReq, err := generateTemplateCreateRequest(ctx, &workingReq, artifact, imageCfg, downloadBaseURL)
 	if err != nil {
 		failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
 		return

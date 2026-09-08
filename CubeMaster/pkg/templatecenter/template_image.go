@@ -97,23 +97,31 @@ func newRedoTemplateImageJobRecord(jobID string, normalized *types.RedoTemplateF
 // locally; the caller (HTTP handler) forwards the job to CubeTemplateCenter,
 // which builds the artifact and reports status back via the internal callback.
 func SubmitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string) (*types.TemplateImageJobInfo, error) {
-	return submitTemplateFromImage(ctx, req, downloadBaseURL, nil)
+	job, _, err := submitTemplateFromImage(ctx, req, downloadBaseURL, nil)
+	return job, err
 }
 
 // SubmitTemplateFromImageWithoutBuild is the explicit remote-build entry point.
 // Kept as a separate name so callers state the intent ("no local build") rather
 // than relying on a flag.
-func SubmitTemplateFromImageWithoutBuild(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string) (*types.TemplateImageJobInfo, error) {
+//
+// It also returns the NORMALIZED request — the exact object persisted into the
+// job's request_json snapshot. The caller MUST forward this object (not the
+// raw client request) to CubeTemplateCenter: TC binds the submitted payload to
+// the persisted snapshot (build.ErrBuildJobRequestMismatch), and the raw
+// client request differs from it (fresh template_id, defaults, trimmed
+// fields), so forwarding the raw request would be rejected.
+func SubmitTemplateFromImageWithoutBuild(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string) (*types.TemplateImageJobInfo, *types.CreateTemplateFromImageReq, error) {
 	return submitTemplateFromImage(ctx, req, downloadBaseURL, nil)
 }
 
-func submitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdPayload *EnvdInjectionPayload) (*types.TemplateImageJobInfo, error) {
+func submitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdPayload *EnvdInjectionPayload) (*types.TemplateImageJobInfo, *types.CreateTemplateFromImageReq, error) {
 	if !isReady() {
-		return nil, ErrTemplateStoreNotInitialized
+		return nil, nil, ErrTemplateStoreNotInitialized
 	}
 	normalized, err := normalizeTemplateImageRequest(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	log.G(ctx).Infof(
 		"SubmitTemplateFromImage: template_id=%s image=%s network_type=%s cube_network_config=%s",
@@ -124,7 +132,7 @@ func submitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromI
 	)
 	requestSnapshot, err := marshalTemplateImageJobRequest(normalized)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	jobID := uuid.New().String()
@@ -198,14 +206,19 @@ func submitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromI
 		record := newCreateTemplateImageJobRecord(jobID, normalized, requestSnapshot, attemptNo, retryOfJobID)
 		return store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).Create(record).Error
 	}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if reusedExistingJob {
-		return GetTemplateImageJobInfo(ctx, jobID)
+		// The request being reused is identical to the one that created the
+		// existing job (that is how the reuse was matched), so returning this
+		// submission's normalized form still describes the persisted snapshot.
+		info, infoErr := GetTemplateImageJobInfo(ctx, jobID)
+		return info, normalized, infoErr
 	}
 	// No local build goroutine: CubeMaster only persists the job. The HTTP
 	// handler forwards it to CubeTemplateCenter, which builds and calls back.
-	return GetTemplateImageJobInfo(ctx, jobID)
+	info, err := GetTemplateImageJobInfo(ctx, jobID)
+	return info, normalized, err
 }
 
 // RedoNeedsFullRebuild reports whether a redo job requires a full rootfs

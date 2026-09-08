@@ -466,7 +466,7 @@ func finalizeRemoteArtifact(
 	// Same base URL local mode uses (CubeMaster's own request base URL, echoed
 	// back by TC), so the generated request and the distribution annotations
 	// are byte-identical across build modes: Cubelet pulls from CubeMaster.
-	generatedReq, err := generateTemplateCreateRequest(req, record, imageCfg, record.MasterNodeIP)
+	generatedReq, err := generateTemplateCreateRequest(ctx, req, record, imageCfg, record.MasterNodeIP)
 	if err != nil {
 		return nil, nil, fmt.Errorf("generate template create request: %w", err)
 	}

@@ -6,6 +6,7 @@ package build
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -39,8 +40,10 @@ type Executor struct {
 	// build is the work to run per job; a field so tests can substitute a fake
 	// that blocks on ctx instead of doing real image pulls and mkfs.
 	build func(ctx context.Context, jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL, envdSHA string, envdData []byte) error
-	// lookupJob verifies a job is buildable; a field so tests can bypass the DB.
-	lookupJob func(ctx context.Context, jobID string) error
+	// lookupJob verifies a job is buildable AND that the submitted request
+	// matches the snapshot CubeMaster persisted for it; a field so tests can
+	// bypass the DB.
+	lookupJob func(ctx context.Context, jobID string, req *types.CreateTemplateFromImageReq) error
 
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
@@ -61,7 +64,7 @@ func (e *Executor) SetBuildFunc(fn func(ctx context.Context, jobID string, req *
 	e.build = fn
 }
 
-func (e *Executor) SetLookupFunc(fn func(ctx context.Context, jobID string) error) {
+func (e *Executor) SetLookupFunc(fn func(ctx context.Context, jobID string, req *types.CreateTemplateFromImageReq) error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.lookupJob = fn
@@ -82,6 +85,12 @@ var (
 	ErrBuildConcurrencyLimit = errors.New("too many concurrent builds")
 	// ErrBuildJobNotFound means no such job (or it is not in a buildable state).
 	ErrBuildJobNotFound = errors.New("build job not found or not in a buildable state")
+	// ErrBuildJobRequestMismatch means the submitted request does not match the
+	// request_json CubeMaster persisted for this job. The build must run
+	// exactly what CubeMaster recorded (the status callback, fingerprint and
+	// artifact dedup all key off that snapshot), so a divergent payload is
+	// rejected rather than built.
+	ErrBuildJobRequestMismatch = errors.New("build request does not match the persisted job snapshot")
 )
 
 // NewExecutor creates an Executor. maxConcurrent <= 0 means "no limit".
@@ -111,17 +120,25 @@ func buildableJobStatus(status string) bool {
 // lookupBuildableJob verifies the job exists and is buildable, without trusting
 // the caller's payload. Submitting against a fabricated or finished job would
 // otherwise burn a full image pull + mkfs for nothing.
-func lookupBuildableJob(ctx context.Context, jobID string) error {
+//
+// It also binds the submitted request to the request_json snapshot CubeMaster
+// persisted for this job: the build input must be exactly what CubeMaster
+// recorded, because the fingerprint, artifact dedup, status callback and
+// resume pipeline all key off that snapshot. A caller that can reach this
+// endpoint could otherwise submit an arbitrary request under someone else's
+// job_id and have the result registered as that job's artifact.
+func lookupBuildableJob(ctx context.Context, jobID string, req *types.CreateTemplateFromImageReq) error {
 	db := templatecenter.GetDB()
 	if db == nil {
-		// No DB handle: skip the existence check rather than reject every build.
-		// This keeps TC usable in DB-less test setups; the reconciler already
-		// refuses to run in that state, so behaviour stays consistent.
+		// No DB handle: skip the existence and snapshot checks rather than
+		// reject every build. This keeps TC usable in DB-less test setups; the
+		// reconciler already refuses to run in that state, so behaviour stays
+		// consistent.
 		return nil
 	}
 	record := &models.TemplateImageJob{}
 	err := db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
-		Select("job_id", "status").
+		Select("job_id", "status", "request_json").
 		Where("job_id = ?", jobID).
 		First(record).Error
 	if err != nil {
@@ -132,6 +149,40 @@ func lookupBuildableJob(ctx context.Context, jobID string) error {
 	}
 	if !buildableJobStatus(record.Status) {
 		return fmt.Errorf("%w: job %s status is %q", ErrBuildJobNotFound, jobID, record.Status)
+	}
+	if err := verifyRequestMatchesSnapshot(record.RequestJSON, req); err != nil {
+		return fmt.Errorf("job %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// verifyRequestMatchesSnapshot compares the submitted request with the job's
+// persisted request_json in canonical form (credential and transport envelope
+// zeroed on both sides, then marshaled through the same deterministic encoder
+// CubeMaster used to write the snapshot). Empty snapshots are tolerated: very
+// old rows and rows written by other job operations may lack one, and
+// rejecting them would break redo of pre-existing jobs.
+func verifyRequestMatchesSnapshot(requestJSON string, req *types.CreateTemplateFromImageReq) error {
+	if requestJSON == "" {
+		return nil
+	}
+	if req == nil {
+		return ErrBuildJobRequestMismatch
+	}
+	var persisted types.CreateTemplateFromImageReq
+	if err := json.Unmarshal([]byte(requestJSON), &persisted); err != nil {
+		return fmt.Errorf("decode persisted request snapshot: %w", err)
+	}
+	want, err := templatecenter.MarshalTemplateImageJobRequestCanonical(&persisted)
+	if err != nil {
+		return fmt.Errorf("canonicalize persisted request: %w", err)
+	}
+	got, err := templatecenter.MarshalTemplateImageJobRequestCanonical(req)
+	if err != nil {
+		return fmt.Errorf("canonicalize submitted request: %w", err)
+	}
+	if want != got {
+		return ErrBuildJobRequestMismatch
 	}
 	return nil
 }
@@ -144,7 +195,7 @@ func lookupBuildableJob(ctx context.Context, jobID string) error {
 // Background, which nothing can cancel). Shutdown cancels every in-flight
 // build and waits for them.
 func (e *Executor) Submit(jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL, envdSHA string, envdData []byte) error {
-	if err := e.lookupJob(e.rootCtx, jobID); err != nil {
+	if err := e.lookupJob(e.rootCtx, jobID, req); err != nil {
 		return err
 	}
 

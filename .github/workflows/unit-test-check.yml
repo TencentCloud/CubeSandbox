@@ -9,6 +9,7 @@ on:
       - 'pkgs/cubedb/**'
       - 'CubeProxy/**'
       - 'CubeMaster/**'
+      - 'CubeTemplateCenter/**'
       - 'CubeShim/**'
       - 'CubeNet/**'
       - 'pkgs/CubeLog/**'
@@ -29,6 +30,7 @@ on:
       - 'pkgs/cubedb/**'
       - 'CubeProxy/**'
       - 'CubeMaster/**'
+      - 'CubeTemplateCenter/**'
       - 'CubeShim/**'
       - 'CubeNet/**'
       - 'pkgs/CubeLog/**'
@@ -55,6 +57,7 @@ on:
           - cubeops
           - cubeproxy
           - cubemaster
+          - cubetemplatecenter
           - cubeshim
           - cubecow
           - cubelog
@@ -114,6 +117,7 @@ jobs:
             add_component "CubeOps"
             add_component "CubeProxy"
             add_component "CubeMaster"
+            add_component "CubeTemplateCenter"
             add_component "CubeShim"
             add_component "cubecow"
             add_component "cubelog"
@@ -135,6 +139,7 @@ jobs:
               cubeops) add_component "CubeOps" ;;
               cubeproxy) add_component "CubeProxy" ;;
               cubemaster) add_component "CubeMaster" ;;
+              cubetemplatecenter) add_component "CubeTemplateCenter" ;;
               cubeshim) add_component "CubeShim" ;;
               cubecow) add_component "cubecow" ;;
               cubelog) add_component "cubelog" ;;
@@ -181,17 +186,26 @@ jobs:
                   add_component "CubeOps"
                   ;;
                 pkgs/cubedb/*)
-                  # cubedb is consumed locally by CubeOps and CubeMaster, so
-                  # its changes must re-run their test sets too.
+                  # cubedb is consumed locally by CubeOps, CubeMaster and
+                  # CubeTemplateCenter (replace => ../pkgs/cubedb), so its
+                  # changes must re-run their test sets too.
                   add_component "cubedb"
                   add_component "CubeOps"
                   add_component "CubeMaster"
+                  add_component "CubeTemplateCenter"
                   ;;
                 CubeProxy/*)
                   add_component "CubeProxy"
                   ;;
                 CubeMaster/*)
+                  # CubeTemplateCenter imports CubeMaster's pkg/* via
+                  # replace => ../CubeMaster, so CubeMaster changes must
+                  # re-run the TC test set too.
                   add_component "CubeMaster"
+                  add_component "CubeTemplateCenter"
+                  ;;
+                CubeTemplateCenter/*)
+                  add_component "CubeTemplateCenter"
                   ;;
                 CubeShim/*)
                   add_component "CubeShim"
@@ -212,6 +226,7 @@ jobs:
                   # CubeLog changes must re-run those test sets too.
                   add_component "cubelog"
                   add_component "CubeMaster"
+                  add_component "CubeTemplateCenter"
                   add_component "cubelet"
                   add_component "CubeOps"
                   ;;
@@ -272,6 +287,7 @@ jobs:
                     elif . == "CubeOps" then "CubeOps"
                     elif . == "CubeProxy" then "CubeProxy"
                     elif . == "CubeMaster" then "CubeMaster"
+                    elif . == "CubeTemplateCenter" then "CubeTemplateCenter"
                     elif . == "CubeShim" then "CubeShim"
                     elif . == "cubecow" then "CubeCow"
                     elif . == "cubelog" then "CubeLog"
@@ -292,6 +308,7 @@ jobs:
                     elif . == "CubeOps" then "cubeops-test"
                     elif . == "CubeProxy" then "cube-proxy-test"
                     elif . == "CubeMaster" then "cubemaster-test"
+                    elif . == "CubeTemplateCenter" then "cubetemplatecenter-test"
                     elif . == "CubeShim" then "shim-test"
                     elif . == "cubecow" then "cubecow-test-native"
                     elif . == "cubelog" then "cubelog-test"

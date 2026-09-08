@@ -802,6 +802,11 @@ chmod +x "${PACKAGE_ROOT}/CubeMaster/docker-install-volume-deps.sh"
 # and install.sh enables it explicitly, because CubeMaster no longer builds
 # templates in-process (every template-from-image build is forwarded to TC,
 # with no local fallback) -- a disabled TC would fail every build.
+# Same ordering as CubeMaster: the package Dockerfile lands first so the
+# copy_dir_contents wipe cannot remove the binary copied on top, and
+# terraform/tencentcloud/build_images.sh can build cube-templatecenter from
+# the extracted sandbox-package without the full source tree.
+copy_dir_contents "${SCRIPT_DIR}/CubeTemplateCenter" "${PACKAGE_ROOT}/CubeTemplateCenter"
 copy_file "${CORE_BIN_DIR}/templatecenter" "${PACKAGE_ROOT}/CubeTemplateCenter/bin/templatecenter"
 # The repo-root CubeTemplateCenter/conf.yaml is the Helm template (its db/redis/
 # port fields are {{ }} placeholders that are never rendered on a bare host), so

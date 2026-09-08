@@ -148,7 +148,9 @@ test_image_names_match() {
   # component image on one side but not the other is caught as drift. The `^`
   # anchor on build_images.sh skips its `#   CUBE_*_IMAGE=...` comment header.
   built="$(extract_image_names "${BUILD_IMAGES_SH}" '^CUBE_[A-Z0-9]+_IMAGE=')"
-  composed="$(extract_image_names "${TKE_ADDONS_TF}" 'cube_[a-z0-9]+_image[[:space:]]*=')"
+  # tke-addons.tf names its locals cube_*_image EXCEPT templatecenter_image
+  # (the TF variable is var.templatecenter_image), so both spellings match.
+  composed="$(extract_image_names "${TKE_ADDONS_TF}" '(cube_[a-z0-9]+_image|templatecenter_image)[[:space:]]*=')"
 
   if [[ -z "${built}" ]]; then
     fail "could not extract image names from build_images.sh"
@@ -159,8 +161,8 @@ test_image_names_match() {
   # Guard against a regex that silently matches too few/many lines.
   local built_n
   built_n="$(printf '%s\n' "${built}" | grep -c .)"
-  if [[ "${built_n}" -ne 6 ]]; then
-    fail "expected 6 component images in build_images.sh, found ${built_n}: $(echo "${built}" | tr '\n' ' ')"
+  if [[ "${built_n}" -ne 7 ]]; then
+    fail "expected 7 component images in build_images.sh, found ${built_n}: $(echo "${built}" | tr '\n' ' ')"
   fi
   if [[ "${built}" != "${composed}" ]]; then
     fail "image name drift between build_images.sh and tke-addons.tf:

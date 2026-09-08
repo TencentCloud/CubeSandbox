@@ -15,6 +15,8 @@
 # Cubelet / CubeMaster: overall system/orchestration flow
 /Cubelet/ @fslongjin @ls-ggg @chenhengqi
 /CubeMaster/ @fslongjin @ls-ggg @chenhengqi
+# CubeTemplateCenter: template build pipeline split out of CubeMaster
+/CubeTemplateCenter/ @fslongjin @ls-ggg @chenhengqi
 
 # Shim: containerd shim
 /CubeShim/ @ls-ggg

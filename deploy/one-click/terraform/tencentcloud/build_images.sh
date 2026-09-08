@@ -15,10 +15,11 @@
 #   tar xzf assets/package/sandbox-package.tar.gz -C assets/package/
 #   assets/package/sandbox-package/terraform/tencentcloud/build_images.sh
 #
-# It builds six images straight from the package contents:
+# It builds seven images straight from the package contents:
 #   cube-api                <- CubeAPI/Dockerfile          (prebuilt CubeAPI/bin/cube-api)
 #   cube-ops                <- CubeOps/Dockerfile          (prebuilt CubeOps/bin/cubeops)
 #   cubemaster              <- CubeMaster/Dockerfile       (prebuilt CubeMaster/bin/cubemaster)
+#   cube-templatecenter     <- CubeTemplateCenter/Dockerfile (prebuilt CubeTemplateCenter/bin/templatecenter)
 #   cubeproxy               <- cubeproxy/build-context/Dockerfile
 #   cube-lifecycle-manager  <- cube-lifecycle-manager/build-context/Dockerfile
 #   cube-webui              <- webui/Dockerfile.package    (prebuilt webui/dist)
@@ -76,6 +77,7 @@ TAG="${TAG:-v0.7.0}"
 CUBE_API_IMAGE="${CUBE_API_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-api:${TAG}}"
 CUBE_OPS_IMAGE="${CUBE_OPS_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-ops:${TAG}}"
 CUBE_MASTER_IMAGE="${CUBE_MASTER_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-master:${TAG}}"
+CUBE_TEMPLATECENTER_IMAGE="${CUBE_TEMPLATECENTER_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-templatecenter:${TAG}}"
 CUBE_PROXY_IMAGE="${CUBE_PROXY_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-proxy:${TAG}}"
 CUBE_LCM_IMAGE="${CUBE_LCM_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-lifecycle-manager:${TAG}}"
 CUBE_WEBUI_IMAGE="${CUBE_WEBUI_IMAGE:-${REGISTRY}/${NAMESPACE}/cube-webui:${TAG}}"
@@ -241,6 +243,11 @@ build_cube_master() {
 		"${PKG_ROOT}/CubeMaster/Dockerfile" "${PKG_ROOT}/CubeMaster"
 }
 
+build_cube_templatecenter() {
+	docker_build "${CUBE_TEMPLATECENTER_IMAGE}" \
+		"${PKG_ROOT}/CubeTemplateCenter/Dockerfile" "${PKG_ROOT}/CubeTemplateCenter"
+}
+
 build_cube_proxy() {
 	docker_build "${CUBE_PROXY_IMAGE}" \
 		"${PKG_ROOT}/cubeproxy/build-context/Dockerfile" \
@@ -266,10 +273,11 @@ main() {
 		case "${arg}" in
 		-h | --help) usage 0 ;;
 		--push) PUSH=1 ;;
-		all) targets+=(cube-api cube-ops cube-master cube-proxy cube-lifecycle-manager cube-webui) ;;
+		all) targets+=(cube-api cube-ops cube-master cube-templatecenter cube-proxy cube-lifecycle-manager cube-webui) ;;
 		cube-api | cubeapi) targets+=(cube-api) ;;
 		cube-ops | cubeops | ops) targets+=(cube-ops) ;;
 		cube-master | cubemaster | master) targets+=(cube-master) ;;
+		cube-templatecenter | cubetemplatecenter | templatecenter | tc) targets+=(cube-templatecenter) ;;
 		cube-proxy | cubeproxy | proxy) targets+=(cube-proxy) ;;
 		cube-lifecycle-manager | lifecycle-manager | lcm) targets+=(cube-lifecycle-manager) ;;
 		webui | cube-webui) targets+=(cube-webui) ;;
@@ -278,7 +286,7 @@ main() {
 	done
 
 	if [[ "${#targets[@]}" -eq 0 ]]; then
-		targets=(cube-api cube-ops cube-master cube-proxy cube-lifecycle-manager cube-webui)
+		targets=(cube-api cube-ops cube-master cube-templatecenter cube-proxy cube-lifecycle-manager cube-webui)
 	fi
 
 	command -v docker >/dev/null 2>&1 || die "docker is required but was not found in PATH"
@@ -290,6 +298,7 @@ main() {
 		cube-api) build_cube_api ;;
 		cube-ops) build_cube_ops ;;
 		cube-master) build_cube_master ;;
+		cube-templatecenter) build_cube_templatecenter ;;
 		cube-proxy) build_cube_proxy ;;
 		cube-lifecycle-manager) build_cube_lifecycle_manager ;;
 		cube-webui) build_cube_webui ;;

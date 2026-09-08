@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 )
 
 // DeleteArtifact must POST the artifact_id to /tc/api/v1/artifact/delete and
@@ -61,5 +63,47 @@ func TestDeleteArtifactUnreachable(t *testing.T) {
 	c := NewClient("http://127.0.0.1:1") // nothing listens here
 	if err := c.DeleteArtifact(context.Background(), "art-3"); err == nil {
 		t.Fatal("DeleteArtifact() error = nil, want non-nil when TC is unreachable")
+	}
+}
+
+// When the shared token env is set, every call to TC must carry it in the
+// shared-token header so TC's auth middleware accepts the request; when the
+// env is empty the header must be absent (matching a token-less TC).
+func TestSharedTokenHeader(t *testing.T) {
+	var gotDelete, gotSubmit string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tc/api/v1/artifact/delete":
+			gotDelete = r.Header.Get(constants.TemplateCallbackTokenHeader)
+		case "/tc/api/v1/build":
+			gotSubmit = r.Header.Get(constants.TemplateCallbackTokenHeader)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv(constants.TemplateCallbackTokenEnv, "s3cr3t")
+	c := NewClient(srv.URL)
+	if err := c.DeleteArtifact(context.Background(), "art-1"); err != nil {
+		t.Fatalf("DeleteArtifact() error = %v", err)
+	}
+	if err := c.SubmitBuildJob(context.Background(), "job-1", nil, "", "", nil); err != nil {
+		t.Fatalf("SubmitBuildJob() error = %v", err)
+	}
+	if gotDelete != "s3cr3t" || gotSubmit != "s3cr3t" {
+		t.Fatalf("token header = %q/%q, want s3cr3t on both", gotDelete, gotSubmit)
+	}
+
+	t.Setenv(constants.TemplateCallbackTokenEnv, "")
+	gotDelete, gotSubmit = "", ""
+	if err := c.DeleteArtifact(context.Background(), "art-1"); err != nil {
+		t.Fatalf("DeleteArtifact() error = %v", err)
+	}
+	if err := c.SubmitBuildJob(context.Background(), "job-1", nil, "", "", nil); err != nil {
+		t.Fatalf("SubmitBuildJob() error = %v", err)
+	}
+	if gotDelete != "" || gotSubmit != "" {
+		t.Fatalf("token header must be absent when env unset, got %q/%q", gotDelete, gotSubmit)
 	}
 }

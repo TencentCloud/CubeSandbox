@@ -63,6 +63,15 @@ spec:
                   name: {{ include "cube.secretName" . }}
                   key: cube-template-callback-token
             {{- end }}
+            # Deployment-wide env (CUBE_S3_* among them). CubeMaster re-signs
+            # S3 artifact download URLs at the point of use
+            # (templatecenter.artifactDownloadURL), so it needs the same S3
+            # credentials TC / cubelet / s3lvol read; without them it can only
+            # hand out the stored presigned URL, which dies 7 days after the
+            # build.
+            {{- with .Values.global.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
             {{- if .Values.controlPlane.master.skipMigrationFingerprintCheck }}
             # Escape hatch for a database that was migrated by a DIFFERENT build
             # line than this image: versions applied there are absent from this

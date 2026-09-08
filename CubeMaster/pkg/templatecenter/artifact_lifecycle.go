@@ -137,8 +137,14 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 			return err
 		}
 		if excludeTemplateID != "" {
+			// Rows with cleanup_required=true are kept: their cubelet-side
+			// cleanup failed earlier in the delete flow and the orphan-replica
+			// sweep retries it using the row's node identity. Deleting them
+			// here would lose the only durable record that the node still
+			// holds the template's data (same filter as
+			// cleanupTemplateMetadata).
 			if err := tx.Unscoped().Table(constants.TemplateReplicaTableName).
-				Where("template_id = ? AND artifact_id = ?", excludeTemplateID, artifactID).
+				Where("template_id = ? AND artifact_id = ? AND cleanup_required = ?", excludeTemplateID, artifactID, false).
 				Delete(&models.TemplateReplica{}).Error; err != nil {
 				return err
 			}

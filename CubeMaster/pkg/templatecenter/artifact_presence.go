@@ -278,6 +278,18 @@ func resolveMissingArtifact(ctx context.Context, record *models.RootfsArtifact) 
 	if record == nil {
 		return artifactMissingVerdictNone
 	}
+	if strings.TrimSpace(record.ArtifactURL) != "" {
+		// S3/MinIO-backed: the durable copy is the object behind artifact_url
+		// and cubelets pull straight from it, so the local ext4 is only a
+		// build-time cache. Its absence (node-local disk wiped, artifact
+		// built by another replica) must neither demote the row nor block
+		// distribution -- doing so stranded perfectly usable artifacts
+		// whenever the builder's local store did not survive a restart. The
+		// object itself is liveness-checked where the S3 credentials live:
+		// CubeTemplateCenter's reuse path HEADs the bucket, and its
+		// reconciler keeps the presigned URL from expiring.
+		return artifactMissingVerdictNone
+	}
 	if probeArtifactPresence(record.Ext4Path) != artifactPresenceMissing {
 		return artifactMissingVerdictNone
 	}
@@ -342,6 +354,12 @@ func readyArtifactUsableForReuse(ctx context.Context, record *models.RootfsArtif
 func rootfsArtifactReuseVerdict(ctx context.Context, record *models.RootfsArtifact) error {
 	if record == nil {
 		return errors.New("no artifact record")
+	}
+	if strings.TrimSpace(record.ArtifactURL) != "" {
+		// S3/MinIO-backed: the object behind artifact_url is the durable copy
+		// and cubelets download from it directly, so the local ext4's
+		// presence/size must not gate reuse (see resolveMissingArtifact).
+		return nil
 	}
 	if !rootfsArtifactSizeMatches(record) {
 		log.G(ctx).Warnf("rootfs artifact %s: on-disk size does not match the row (path=%q recorded=%d); rebuilding",

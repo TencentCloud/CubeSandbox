@@ -5,6 +5,7 @@
 package templatecenter
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -19,7 +20,7 @@ import (
 	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
-func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifact *models.RootfsArtifact, imageCfg DockerImageConfig, downloadBaseURL string) (*types.CreateCubeSandboxReq, error) {
+func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplateFromImageReq, artifact *models.RootfsArtifact, imageCfg DockerImageConfig, downloadBaseURL string) (*types.CreateCubeSandboxReq, error) {
 	annotations := map[string]string{
 		constants.CubeAnnotationAppSnapshotTemplateID:      req.TemplateID,
 		constants.CubeAnnotationsAppSnapshotCreate:         "true",
@@ -50,7 +51,11 @@ func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifa
 			},
 		},
 	}
-	downloadURL := strings.TrimSpace(artifact.ArtifactURL)
+	// Re-sign S3-backed artifact URLs at the point of use; the stored
+	// presigned URL expires (7d) while the artifact lives longer. Falls back
+	// to the stored URL when this process cannot sign (see
+	// artifactDownloadURL).
+	downloadURL := artifactDownloadURL(ctx, artifact)
 	if downloadURL == "" {
 		downloadURL = buildDownloadURL(downloadBaseURL, artifact.ArtifactID, artifact.DownloadToken)
 	}

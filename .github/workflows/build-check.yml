@@ -6,6 +6,7 @@ on:
     paths:
       - 'CubeAPI/**'
       - 'CubeMaster/**'
+      - 'CubeTemplateCenter/**'
       - 'CubeOps/**'
       - 'pkgs/cubedb/**'
       - 'pkgs/CubeLog/**'
@@ -22,6 +23,7 @@ on:
     paths:
       - 'CubeAPI/**'
       - 'CubeMaster/**'
+      - 'CubeTemplateCenter/**'
       - 'CubeOps/**'
       - 'pkgs/cubedb/**'
       - 'pkgs/CubeLog/**'
@@ -61,7 +63,7 @@ jobs:
         # make target + expected binaries. Architecture coverage catches
         # arch-specific regressions (e.g. cfg(target_arch) code in the shim /
         # hypervisor) that an amd64-only build would miss.
-        component: [CubeAPI, CubeOps, CubeMaster, Cubelet, agent, CubeShim, volume-s3]
+        component: [CubeAPI, CubeOps, CubeMaster, CubeTemplateCenter, Cubelet, agent, CubeShim, volume-s3]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -82,6 +84,10 @@ jobs:
             expected_bins: |
               _output/bin/cubemaster
               _output/bin/cubemastercli
+          - component: CubeTemplateCenter
+            make_target: cubetemplatecenter
+            expected_bins: |
+              _output/bin/templatecenter
           - component: Cubelet
             make_target: cubelet
             expected_bins: |
@@ -245,6 +251,14 @@ jobs:
         with:
           context: .
           file: CubeMaster/docker/Dockerfile.cubemastercli
+          push: false
+          load: false
+
+      - name: Build cube-templatecenter image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: CubeTemplateCenter/docker/Dockerfile
           push: false
           load: false
 

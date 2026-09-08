@@ -107,7 +107,13 @@ func createTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interfac
 	}))
 	// CubeMaster no longer builds templates in-process. All template builds are
 	// forwarded to the standalone CubeTemplateCenter process.
-	job, err := templatecenter.SubmitTemplateFromImageWithoutBuild(ctx, req, requestBaseURL(r))
+	//
+	// Forward the NORMALIZED request (the exact object persisted into the
+	// job's request_json snapshot), not the raw client request: TC binds the
+	// submitted payload to that snapshot, and the raw request differs from it
+	// (client requests carry no generated template_id / defaults), so
+	// forwarding `req` here would be rejected as a payload mismatch.
+	job, normalizedReq, err := templatecenter.SubmitTemplateFromImageWithoutBuild(ctx, req, requestBaseURL(r))
 	if err != nil {
 		return &types.CreateTemplateFromImageRes{
 			RequestID: req.RequestID,
@@ -124,7 +130,7 @@ func createTemplateFromImage(r *http.Request, rt *CubeLog.RequestTrace) interfac
 	// only ever accepts PENDING/RUNNING build jobs it created, so a
 	// non-PENDING job forwarded here would 404 and get wrongly marked FAILED.
 	if job != nil && job.Status == templatecenter.JobStatusPending {
-		go forwardBuildJobToTemplateCenter(job.JobID, req, requestBaseURL(r), envdPayload)
+		go forwardBuildJobToTemplateCenter(job.JobID, normalizedReq, requestBaseURL(r), envdPayload)
 	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
 	return &types.CreateTemplateFromImageRes{
@@ -287,9 +293,17 @@ func redirectToS3Artifact(c *gin.Context) bool {
 	if record.ArtifactURL == "" {
 		return false
 	}
+	// Redirect to a FRESH presigned URL: the one stored at build time expires
+	// (7d) while the artifact lives longer. artifactDownloadURL re-signs when
+	// this process holds the S3 credentials and falls back to the stored URL
+	// otherwise.
+	downloadURL := templatecenter.ArtifactDownloadURL(c.Request.Context(), record)
+	if downloadURL == "" {
+		return false
+	}
 	c.Writer.Header().Set("X-Cube-Artifact-Id", record.ArtifactID)
 	c.Writer.Header().Set("ETag", record.Ext4SHA256)
-	c.Redirect(http.StatusFound, record.ArtifactURL)
+	c.Redirect(http.StatusFound, downloadURL)
 	return true
 }
 

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/build"
 )
 
@@ -111,5 +112,60 @@ func TestHandleArtifactDeleteNilDB(t *testing.T) {
 	w := doArtifactDelete(t, map[string]string{"artifact_id": "rfs-valid-id"})
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500 for nil-db deleter, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// doInternalDelete routes through RegisterInternalRoutes (the real wiring,
+// including the shared-token middleware) rather than the bare handler.
+func doInternalDelete(t *testing.T, tokenHeader string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := setupRouter()
+	RegisterInternalRoutes(r.Group(""))
+
+	payload, err := json.Marshal(map[string]string{"artifact_id": "rfs-x"})
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/tc/api/v1/artifact/delete", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	if tokenHeader != "" {
+		req.Header.Set(constants.TemplateCallbackTokenHeader, tokenHeader)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// With the shared token configured, a request without the header (or with the
+// wrong one) must be rejected with 401 before reaching the handler.
+func TestInternalAPIRequiresTokenWhenConfigured(t *testing.T) {
+	t.Setenv(constants.TemplateCallbackTokenEnv, "s3cr3t")
+	old := artifactDeleter
+	defer func() { artifactDeleter = old }()
+	artifactDeleter = build.NewArtifactDeleter(nil, nil)
+
+	if w := doInternalDelete(t, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("no token: expected 401, got %d body=%s", w.Code, w.Body.String())
+	}
+	if w := doInternalDelete(t, "wrong"); w.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong token: expected 401, got %d body=%s", w.Code, w.Body.String())
+	}
+	// Correct token reaches the handler (which then fails on the nil-db
+	// deleter -- any status other than 401 proves the gate passed).
+	if w := doInternalDelete(t, "s3cr3t"); w.Code == http.StatusUnauthorized {
+		t.Fatalf("correct token rejected: got 401 body=%s", w.Body.String())
+	}
+}
+
+// With no token configured the endpoint stays open (rolling-upgrade
+// compatibility), matching CubeMaster's callback gate.
+func TestInternalAPIOpenWhenTokenUnset(t *testing.T) {
+	t.Setenv(constants.TemplateCallbackTokenEnv, "")
+	old := artifactDeleter
+	defer func() { artifactDeleter = old }()
+	artifactDeleter = build.NewArtifactDeleter(nil, nil)
+
+	if w := doInternalDelete(t, ""); w.Code == http.StatusUnauthorized {
+		t.Fatalf("token unset must not gate: got 401 body=%s", w.Body.String())
 	}
 }

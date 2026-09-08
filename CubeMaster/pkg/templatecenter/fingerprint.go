@@ -131,6 +131,16 @@ func marshalTemplateImageJobRequest(req *types.CreateTemplateFromImageReq) (stri
 	return string(payload), nil
 }
 
+// MarshalTemplateImageJobRequestCanonical exports marshalTemplateImageJobRequest
+// so the standalone CubeTemplateCenter process can compare a submitted build
+// payload against CubeMaster's persisted request_json snapshot byte-for-byte:
+// both sides zero the credential and the transport-only Request envelope
+// before marshaling, and Go's struct-based json.Marshal is deterministic, so
+// equal requests produce identical bytes.
+func MarshalTemplateImageJobRequestCanonical(req *types.CreateTemplateFromImageReq) (string, error) {
+	return marshalTemplateImageJobRequest(req)
+}
+
 func marshalTemplateCommitJobRequest(req *types.CreateCubeSandboxReq) (string, error) {
 	if req == nil {
 		return "", errors.New("request is nil")

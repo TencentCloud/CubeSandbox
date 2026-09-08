@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 )
 
 // testExecutor returns an Executor whose build and job-lookup are faked, so the
@@ -21,7 +22,7 @@ func testExecutor(t *testing.T, maxConcurrent int, buildFn func(ctx context.Cont
 	t.Helper()
 	e := NewExecutor(maxConcurrent)
 	started := make(chan string, 64)
-	e.lookupJob = func(context.Context, string) error { return nil }
+	e.lookupJob = func(context.Context, string, *types.CreateTemplateFromImageReq) error { return nil }
 	e.build = func(ctx context.Context, jobID string, _ *types.CreateTemplateFromImageReq, _, _ string, _ []byte) error {
 		started <- jobID
 		return buildFn(ctx, jobID)
@@ -109,7 +110,7 @@ func TestExecutorShutdownCancelsInFlightBuilds(t *testing.T) {
 	buildStarted := make(chan struct{}, 1)
 	var sawCancel int32
 	e := NewExecutor(0)
-	e.lookupJob = func(context.Context, string) error { return nil }
+	e.lookupJob = func(context.Context, string, *types.CreateTemplateFromImageReq) error { return nil }
 	e.build = func(ctx context.Context, jobID string, _ *types.CreateTemplateFromImageReq, _, _ string, _ []byte) error {
 		buildStarted <- struct{}{}
 		<-ctx.Done() // block until Shutdown cancels the root context
@@ -174,7 +175,7 @@ func TestExecutorRunsBuildsConcurrentlyUpToLimit(t *testing.T) {
 func TestExecutorSubmitPropagatesLookupError(t *testing.T) {
 	e := NewExecutor(0)
 	want := errors.New("job lookup failed")
-	e.lookupJob = func(context.Context, string) error { return want }
+	e.lookupJob = func(context.Context, string, *types.CreateTemplateFromImageReq) error { return want }
 	t.Cleanup(e.Shutdown)
 
 	if err := e.Submit("job-1", req(), "", "", nil); !errors.Is(err, want) {
@@ -186,6 +187,52 @@ func TestExecutorSubmitPropagatesLookupError(t *testing.T) {
 	e.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("failed lookup left %d in-flight entries", n)
+	}
+}
+
+// The submitted request must match the job's persisted request_json snapshot
+// in canonical form: credential and Request envelope stripped, then marshaled
+// through the same deterministic encoder CubeMaster used. A request that
+// carries the live registry password and the transport RequestID (which the
+// snapshot never contains) must still match; one that changes any build-affecting
+// field must be rejected.
+func TestVerifyRequestMatchesSnapshot(t *testing.T) {
+	persisted := &types.CreateTemplateFromImageReq{
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "tpl-abc",
+		WritableLayerSize: "20Gi",
+		InstanceType:      "cubebox",
+		NetworkType:       "tap",
+	}
+	snapshot, err := templatecenter.MarshalTemplateImageJobRequestCanonical(persisted)
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+
+	// Same request, but with the live credential and the transport envelope
+	// attached -- exactly what CubeMaster forwards over the wire.
+	submitted := *persisted
+	submitted.RegistryPassword = "secret"
+	submitted.Request = &types.Request{RequestID: "req-1"}
+	if err := verifyRequestMatchesSnapshot(snapshot, &submitted); err != nil {
+		t.Fatalf("matching request rejected: %v", err)
+	}
+
+	// A tampered build-affecting field must be rejected.
+	tampered := *persisted
+	tampered.WritableLayerSize = "100Gi"
+	if err := verifyRequestMatchesSnapshot(snapshot, &tampered); !errors.Is(err, ErrBuildJobRequestMismatch) {
+		t.Fatalf("tampered request: got %v, want ErrBuildJobRequestMismatch", err)
+	}
+
+	// A nil request against a non-empty snapshot cannot match.
+	if err := verifyRequestMatchesSnapshot(snapshot, nil); !errors.Is(err, ErrBuildJobRequestMismatch) {
+		t.Fatalf("nil request: got %v, want ErrBuildJobRequestMismatch", err)
+	}
+
+	// An empty snapshot (legacy rows) is tolerated.
+	if err := verifyRequestMatchesSnapshot("", &submitted); err != nil {
+		t.Fatalf("empty snapshot must be tolerated: %v", err)
 	}
 }
 

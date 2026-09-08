@@ -5,12 +5,17 @@
 package api
 
 import (
+	"crypto/subtle"
 	"errors"
 	"net/http"
+	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/build"
+	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/tcconfig"
 )
 
 // buildExecutor is the process-wide build owner. Set by RegisterInternalRoutes'
@@ -62,6 +67,11 @@ func handleBuildSubmit(c *gin.Context) {
 			status = http.StatusConflict
 		case errors.Is(err, build.ErrBuildConcurrencyLimit):
 			status = http.StatusTooManyRequests
+		case errors.Is(err, build.ErrBuildJobRequestMismatch):
+			// The submitted payload diverges from the request_json CubeMaster
+			// persisted for this job; building it would register an artifact
+			// the job never asked for.
+			status = http.StatusBadRequest
 		}
 		log.G(c.Request.Context()).Warnf("build submit rejected: job_id=%s err=%v", req.JobID, err)
 		c.JSON(status, ErrorResponse{Error: err.Error()})
@@ -95,8 +105,50 @@ func handleArtifactDelete(c *gin.Context) {
 	c.JSON(http.StatusOK, ArtifactDeleteResponse{Status: "deleted", ArtifactID: req.ArtifactID})
 }
 
-// RegisterInternalRoutes registers TC's internal API routes.
+// sharedTokenWarnOnce rate-limits the "unauthenticated endpoint" warning.
+var sharedTokenWarnOnce sync.Once
+
+// internalAPIAuthorized gates the internal build/artifact endpoints on the
+// same shared secret TC attaches to its build-status callbacks
+// (constants.TemplateCallbackTokenEnv / constants.TemplateCallbackTokenHeader).
+// These endpoints can start builds and delete artifacts, so they must not
+// stay anonymous to anything that can reach the HTTP listener. When the env
+// is unset the request is allowed (rolling-upgrade compatibility with a
+// CubeMaster that does not send the header yet) and a warning is logged
+// once; when it is set, a missing/mismatched header is rejected with 401.
+// The chart, one-click installer and Terraform all generate the secret on
+// both sides, so deployed environments always enforce it.
+func internalAPIAuthorized(c *gin.Context) bool {
+	want := strings.TrimSpace(tcconfig.CallbackToken())
+	if want == "" {
+		sharedTokenWarnOnce.Do(func() {
+			log.G(c.Request.Context()).Warnf(
+				"%s is not set: TC internal API (build submit / artifact delete) is unauthenticated; set it on both CubeMaster and CubeTemplateCenter",
+				constants.TemplateCallbackTokenEnv)
+		})
+		return true
+	}
+	got := strings.TrimSpace(c.GetHeader(constants.TemplateCallbackTokenHeader))
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+// internalAuthMiddleware rejects unauthenticated calls to the internal API.
+func internalAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !internalAPIAuthorized(c) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "invalid or missing shared token"})
+			return
+		}
+		c.Next()
+	}
+}
+
+// RegisterInternalRoutes registers TC's internal API routes. All of them sit
+// behind the shared-token middleware: a forged build submit would burn image
+// pulls and register attacker-controlled rootfs content, and a forged
+// artifact delete destroys template data.
 func RegisterInternalRoutes(g *gin.RouterGroup) {
-	g.POST("/tc/api/v1/build", handleBuildSubmit)
-	g.POST("/tc/api/v1/artifact/delete", handleArtifactDelete)
+	internal := g.Group("/tc/api/v1", internalAuthMiddleware())
+	internal.POST("/build", handleBuildSubmit)
+	internal.POST("/artifact/delete", handleArtifactDelete)
 }

@@ -575,7 +575,7 @@ func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.
 		Ext4SizeBytes:           1024,
 		DownloadToken:           "token-1",
 	}
-	got, err := generateTemplateCreateRequest(req, artifact, DockerImageConfig{
+	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{
 		Entrypoint: []string{"/bin/sh"},
 		Cmd:        []string{"-c", "echo ok"},
 		Env:        []string{"A=B"},
@@ -632,7 +632,7 @@ func TestGenerateTemplateCreateRequestAppliesDNSConfigOverride(t *testing.T) {
 		Ext4SizeBytes:           1024,
 		DownloadToken:           "token-1",
 	}
-	got, err := generateTemplateCreateRequest(req, artifact, DockerImageConfig{}, "http://master.example")
+	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
 	if err != nil {
 		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
 	}
@@ -696,7 +696,7 @@ func TestGenerateTemplateCreateRequestClonesCubeNetworkRules(t *testing.T) {
 		DownloadToken:           "token-1",
 	}
 
-	got, err := generateTemplateCreateRequest(req, artifact, DockerImageConfig{}, "http://master.example")
+	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
 	require.NoError(t, err)
 	require.NotNil(t, got.CubeNetworkConfig)
 	require.NotNil(t, got.CubeNetworkConfig.MaskRequestHost)
@@ -752,7 +752,7 @@ func TestGenerateTemplateCreateRequestAddsIvshmemAnnotation(t *testing.T) {
 		Ext4SizeBytes:           1024,
 		DownloadToken:           "token-1",
 	}
-	got, err := generateTemplateCreateRequest(req, artifact, DockerImageConfig{}, "http://master.example")
+	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
 	if err != nil {
 		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
 	}

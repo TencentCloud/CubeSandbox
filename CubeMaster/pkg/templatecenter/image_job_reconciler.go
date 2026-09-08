@@ -135,6 +135,12 @@ func runImageJobReconcilePass(ctx context.Context) {
 		if err := resumeStuckBuiltJobs(ctx); err != nil {
 			logger.Errorf("resume stuck BUILT jobs: %v", err)
 		}
+		if err := reconcileOrphanReplicaCleanups(ctx); err != nil {
+			logger.Errorf("orphan replica cleanup sweep: %v", err)
+		}
+		if err := reconcileTemplateReplicaBackfill(ctx); err != nil {
+			logger.Errorf("template replica backfill sweep: %v", err)
+		}
 		return nil
 	}); err != nil {
 		logger.Errorf("image job reconcile pass: %v", err)

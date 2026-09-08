@@ -341,7 +341,7 @@ variable "templatecenter_enabled" {
 }
 
 variable "templatecenter_replicas" {
-  description = "CubeTemplateCenter replica count. Increase for higher build throughput. Multi-replica requires shared artifact storage: either (1) CBS PVC with ReadWriteMany access mode (shared cloud disk), or (2) S3/MinIO object storage (CUBE_S3_* env vars). TC replicas coordinate via DB session locks to prevent duplicate builds of the same spec."
+  description = "CubeTemplateCenter replica count. Increase for higher build throughput. Values > 1 require use_cfs=true: replicas coordinate duplicate builds of the same spec through DB session locks, but the artifact store must be the shared NFS export for every replica (and every cube-master) to see every ext4. With the default node-local hostPath store a second replica could neither read the first one's files nor take over its builds, and the templatecenter deployment's lifecycle precondition fails the plan in that combination."
   type        = number
   default     = 1
 
