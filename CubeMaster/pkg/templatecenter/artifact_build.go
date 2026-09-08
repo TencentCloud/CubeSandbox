@@ -42,6 +42,12 @@ import (
 // phase-3 re-check observes a live BUILDING row plus the active build job and
 // backs off without deleting or overwriting the in-flight build status.
 //
+// A DELETING row is the one state it must NOT resurrect: the TC deleter has
+// claimed that row and its final row DELETE is guarded on status=DELETING, so
+// flipping the row back to BUILDING here would orphan the delete in flight
+// (data removed, row alive). The claim defers instead; the caller leaves the
+// job BUILT and the image-job reconciler replays once the row is gone.
+//
 // Master uses this when registering an artifact reported by TC in the BUILT
 // callback (remote_build_resume.go).
 func claimRootfsArtifactForBuild(ctx context.Context, artifactID, fingerprint string, req *types.CreateTemplateFromImageReq, sourceDigest string) (*models.RootfsArtifact, error) {
@@ -69,6 +75,9 @@ func claimRootfsArtifactForBuild(ctx context.Context, artifactID, fingerprint st
 		case err != nil:
 			return err
 		default:
+			if strings.EqualFold(strings.TrimSpace(existing.Status), ArtifactStatusDeleting) {
+				return errArtifactRegisterRetryable
+			}
 			if updErr := tx.Unscoped().Table(constants.RootfsArtifactTableName).
 				Where("artifact_id = ?", artifactID).
 				Updates(map[string]any{

@@ -55,9 +55,12 @@ var artifactTableName = constants.RootfsArtifactTableName
 
 // Delete removes the artifact identified by artifactID.
 //
-// Idempotent: deleting an already-deleted artifact returns nil. Safe against
-// concurrent deletes: the row status transition to DELETING acts as the
-// claim; a second caller sees status != CLEANUP_PENDING and returns nil.
+// Idempotent: deleting an already-deleted artifact returns nil. Concurrent
+// deletes: the row status transition to DELETING acts as the claim. The
+// allow-list deliberately includes DELETING so a peer can pick up a delete
+// whose first owner crashed mid-flight; the data deletes are idempotent and
+// the final row DELETE is guarded on status=DELETING, so only the current
+// owner actually removes the row.
 //
 // Failure handling: if a data-delete step fails (S3 object, local file), the
 // row is NOT removed. It is flipped back to CLEANUP_PENDING with the error
@@ -145,10 +148,20 @@ func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 
 	// Finally remove the row. Hard delete: the row carries no history worth
 	// keeping, and soft-deleting would keep the fingerprint reuse check alive.
-	if err := d.db.WithContext(ctx).Table(artifactTableName).
+	// The status predicate is a CAS: we only delete the row while we still own
+	// it. A concurrent CubeMaster claim that flipped it back to BUILDING must
+	// win — deleting the row out from under a live build loses its only
+	// record.
+	res := d.db.WithContext(ctx).Table(artifactTableName).
 		Where("artifact_id = ?", artifactID).
-		Delete(nil).Error; err != nil {
-		return fmt.Errorf("delete artifact row: %w", err)
+		Where("status = ?", "DELETING").
+		Delete(nil)
+	if res.Error != nil {
+		return fmt.Errorf("delete artifact row: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		logger.Warnf("artifact row left DELETING by this delete was reclaimed by a concurrent claim; keeping the row")
+		return nil
 	}
 	logger.Infof("artifact deleted")
 	return nil
@@ -185,7 +198,12 @@ func managedArtifactDir(dir string) bool {
 		if err != nil {
 			continue
 		}
-		if dir == rootAbs || strings.HasPrefix(dir, rootAbs+string(os.PathSeparator)) {
+		// Strictly BELOW the root only. dir == root would make
+		// deleteLocalExt4's RemoveAll(dir) wipe the ENTIRE store (every
+		// artifact on the node), and the callback-side path validator accepts
+		// exactly such top-level paths (it only rejects escapes via
+		// filepath.Rel), so equality must fail here.
+		if dir != rootAbs && strings.HasPrefix(dir, rootAbs+string(os.PathSeparator)) {
 			return true
 		}
 	}
