@@ -1708,6 +1708,18 @@ validate_declared_release_manifest "${SCRIPT_DIR}"
 log "extracting package ${PACKAGE_TAR}"
 tar -xzf "${PACKAGE_TAR}" -C "${WORK_DIR}"
 PKG_ROOT="${WORK_DIR}/sandbox-package"
+if [[ ! -d "${PKG_ROOT}" ]]; then
+	# PACKAGE_TAR pointed at the OUTER release bundle
+	# (cube-sandbox-one-click-*.tar.gz), which nests the real package at
+	# <bundle>/assets/package/sandbox-package.tar.gz. Descend into it
+	# transparently instead of dying with a confusing
+	# "required directory not found: .../sandbox-package".
+	inner_tar="$(find "${WORK_DIR}" -maxdepth 4 -path '*/assets/package/sandbox-package.tar.gz' -print -quit 2>/dev/null || true)"
+	if [[ -n "${inner_tar}" ]]; then
+		log "outer release bundle detected; extracting nested package ${inner_tar}"
+		tar -xzf "${inner_tar}" -C "${WORK_DIR}"
+	fi
+fi
 ensure_dir "${PKG_ROOT}"
 validate_cubelet_cow_startup_deps "${PKG_ROOT}/Cubelet/config/config.toml"
 CUBE_EGRESS_ADMIN_PORT="${CUBE_EGRESS_ADMIN_PORT:-9091}"
