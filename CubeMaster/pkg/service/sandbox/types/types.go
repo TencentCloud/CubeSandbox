@@ -825,7 +825,7 @@ type UpdateRequest struct {
 	RequestID    string `json:"requestID"`
 	SandboxID    string `json:"sandbox_id"`
 	InstanceType string `json:"instance_type"`
-	Action string `json:"action"`
+	Action       string `json:"action"`
 	// Timeout is the optional idle TTL for resume. nil or 0 keeps the stored
 	// timeout; -1 (NeverTimeout) disables expiry; N>0 opens an N-second
 	// window from now. Values below -1 are rejected. Immediate expiry is

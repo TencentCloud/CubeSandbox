@@ -138,6 +138,15 @@ sandbox.connect()                     # restore from snapshot
 sandbox.run_code("print('back!')")    # carry on as if never paused
 ```
 
+`connect()` does not change the sandbox's idle timeout — the value set at create (or later via `set_timeout`) is preserved across pause/resume. To change it at resume time, use the deprecated `resume(timeout=...)`:
+
+| `resume(timeout=...)` | Effect |
+|---|---|
+| omitted / `None` | keep the current timeout (same as `connect()`) |
+| `0` | keep the current timeout (use `set_timeout(0)` for immediate expiry) |
+| `NEVER_TIMEOUT` (`-1`) | never time out after resume |
+| `N > 0` | start a new N-second window from resume |
+
 See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py) for a full demo. Cross-node Resume (S3 backend, `remote_status=ready`) is documented in [Cross-Node Snapshots](./cross-node-snapshot.md).
 
 ### CubeProxy cache after Resume
@@ -176,7 +185,7 @@ sandbox = Sandbox.create(
 
 ### Timeout reset on auto-resume
 
-Each successful auto-resume gives the sandbox a **fresh** `timeout` countdown (matching e2b semantics). The "resume → short use → idle out → pause again" loop can repeat indefinitely.
+Each successful auto-resume **resets the idle clock** while keeping the same timeout length. The "resume → short use → idle out → pause again" loop can repeat indefinitely.
 
 ### What counts as activity
 

@@ -204,6 +204,19 @@ class TracingSandboxAdapter(SandboxAdapter):
         )
         return wrap_adapter(resumed, self._trace)
 
+    def resume_idle_timeout(self, timeout: int | None) -> SandboxAdapter:
+        resumed = self._trace.capture(
+            "resume_idle_timeout",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "timeout": timeout,
+            },
+            lambda: self._wrapped.resume_idle_timeout(timeout),
+            output=lambda result: {"sandbox_id": result.sandbox_id},
+        )
+        return wrap_adapter(resumed, self._trace)
+
     def set_timeout(self, timeout: int) -> None:
         return self._trace.capture(
             "set_timeout",

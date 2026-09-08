@@ -138,6 +138,15 @@ sandbox.connect()                     # 从快照恢复
 sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 ```
 
+`connect()` 不会改变沙箱的空闲超时——创建时设置的值（或之后用 `set_timeout` 改的值）在暂停/恢复过程中保持不变。若要在恢复时改超时，用已弃用的 `resume(timeout=...)`：
+
+| `resume(timeout=...)` | 效果 |
+|---|---|
+| 不传 / `None` | 保持当前超时（与 `connect()` 相同） |
+| `0` | 保持当前超时（立刻到期请用 `set_timeout(0)`） |
+| `NEVER_TIMEOUT`（`-1`） | 恢复后永不超时 |
+| `N > 0` | 从恢复时刻起重新开 N 秒窗口 |
+
 可参考示例：[`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py)。跨机 Resume（S3 后端且 `remote_status=ready`）见 [跨机快照](./cross-node-snapshot.md)。
 
 ### Resume 后的 CubeProxy 缓存
@@ -176,7 +185,7 @@ sandbox = Sandbox.create(
 
 ### 自动恢复后的 timeout 重置
 
-每次自动恢复成功后，沙箱获得一个**全新的 `timeout` 计时窗口**（与 e2b 同样语义），所以"恢复 → 短暂使用 → 再次空闲超时 → 再次暂停"的循环可以无缝持续。
+每次自动恢复成功后，**空闲计时重置**，但超时时长不变。所以"恢复 → 短暂使用 → 再次空闲超时 → 再次暂停"的循环可以无缝持续。
 
 ### 何时算"活跃"
 
