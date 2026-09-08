@@ -18,7 +18,7 @@ pub struct ServerConfig {
     #[serde(default = "default_worker_threads")]
     pub worker_threads: usize,
 
-    /// Rate limit: max requests per second per API key
+    /// Rate limit: max requests per second per validated identity
     #[serde(default = "default_rate_limit")]
     pub rate_limit_per_sec: u32,
 
@@ -111,6 +111,13 @@ fn default_log_prefix() -> String {
 }
 
 impl ServerConfig {
+    pub fn auth_is_configured(&self) -> bool {
+        self.auth_callback_url
+            .as_deref()
+            .is_some_and(|u| !u.is_empty())
+            || self.cube_api_key.as_deref().is_some_and(|k| !k.is_empty())
+    }
+
     pub fn from_env() -> anyhow::Result<Self> {
         let _ = dotenvy::dotenv();
         let cfg = config::Config::builder()

@@ -10,21 +10,27 @@ use axum::{
     response::Response,
 };
 
-/// Per-API-key token bucket rate limiter middleware.
-/// Reads the X-API-Key header and checks the shared governor limiter.
-/// Returns 429 if the key has exceeded its quota.
+/// Per-identity token bucket rate limiter middleware.
+/// Reads the `RateLimitIdentity` published by `unified_auth` after it validated
+/// the credential, and checks the shared governor limiter.
+/// Returns 429 if that identity has exceeded its quota.
 pub async fn rate_limit(
     State(state): State<AppState>,
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    // Extract key; fall back to IP or "anonymous"
-    let key = request
-        .headers()
-        .get("X-API-Key")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("anonymous")
-        .to_string();
+    let identity = request
+        .extensions()
+        .get::<crate::middleware::auth::RateLimitIdentity>()
+        .map(|id| id.0.clone());
+
+    debug_assert!(
+        identity.is_some() || !state.config.auth_is_configured(),
+        "unified_auth must run before rate_limit: no RateLimitIdentity was published, \
+         so every request would share one bucket"
+    );
+
+    let key = identity.unwrap_or_else(|| "unauthenticated".to_string());
 
     match state.rate_limiter.check_key(&key) {
         Ok(_) => Ok(next.run(request).await),
