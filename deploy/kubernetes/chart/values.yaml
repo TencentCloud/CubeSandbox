@@ -287,10 +287,15 @@ controlPlane:
   # CubeTemplateCenter can scale beyond one replica:
   #
   #   s3Backed=false (default): artifacts live on the local/shared disk
-  #     (master.persistence PVC or hostPath). TC is locked to one replica,
-  #     colocateWithMaster=true requires master.replicas=1, and a
-  #     non-colocated TC requires a ReadWriteMany volume -- because artifact
-  #     availability is tied to one node's disk.
+  #     (master.persistence PVC or hostPath). Multi-replica master/TC is
+  #     allowed but DEGRADED (install notes print a warning): artifacts are
+  #     node-local, so a download may hit a master that never built it and TC
+  #     replicas duplicate builds. The default ReadWriteOnce artifact PVC is
+  #     the exception that still fails validation — it cannot attach on
+  #     several nodes, so a second master replica would stay Pending forever.
+  #     Use persistence.enabled=false (per-pod scratch) or a ReadWriteMany
+  #     claim for multi-replica without S3, and a non-colocated TC still
+  #     requires a ReadWriteMany volume.
   #
   #   s3Backed=true: the durable copy is the S3/MinIO object. TC uploads the
   #     ext4 after building; Cubelet downloads straight from S3 via presigned

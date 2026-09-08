@@ -126,6 +126,9 @@ WARNING (template artifact store is node-local with multiple control-plane repli
   genuinely shared artifact volume
   (controlPlane.master.persistence.accessModes=[ReadWriteMany], e.g. CFS/NFS, with
   TC mounting the same claim).
+  (Mounting the default ReadWriteOnce artifact PVC with several master replicas
+  is rejected at install time — it cannot attach on several nodes — so this
+  warning covers per-pod scratch / hostPath stores only.)
 {{- end }}
 {{- end }}
 

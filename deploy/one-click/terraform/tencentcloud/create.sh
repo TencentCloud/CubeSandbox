@@ -5049,18 +5049,21 @@ _reconcile_addons() {
 	local entries='
 kubernetes_secret.cube_egress_ca|-n cubesandbox delete secret cube-egress-ca
 kubernetes_secret.cubemaster_conf|-n cubesandbox delete secret cubemaster-conf
+kubernetes_secret.templatecenter_conf|-n cubesandbox delete secret cube-templatecenter-conf
 kubernetes_secret.cube_lifecycle_manager_conf|-n cubesandbox delete secret cube-lifecycle-manager-conf
 kubernetes_secret.cubeproxy_global|-n cubesandbox delete secret cubeproxy-global
 kubernetes_secret.cubeproxy_certs|-n cubesandbox delete secret cubeproxy-certs
 kubernetes_config_map.cubeproxy_nginx_conf|-n cubesandbox delete configmap cubeproxy-nginx-conf
 kubernetes_config_map.cube_webui_nginx_conf|-n cubesandbox delete configmap cube-webui-nginx-conf
 kubernetes_service.cubemaster|-n cubesandbox delete svc cubemaster
+kubernetes_service.templatecenter|-n cubesandbox delete svc cube-templatecenter
 kubernetes_service.cube_api|-n cubesandbox delete svc cube-api
 kubernetes_service.cube_ops|-n cubesandbox delete svc cube-ops
 kubernetes_service.cube_lifecycle_manager|-n cubesandbox delete svc cube-lifecycle-manager
 kubernetes_service.cube_proxy|-n cubesandbox delete svc cube-proxy
 kubernetes_service.cube_webui|-n cubesandbox delete svc cube-webui
 kubernetes_deployment.cubemaster|-n cubesandbox delete deploy cubemaster
+kubernetes_deployment.templatecenter|-n cubesandbox delete deploy cube-templatecenter
 kubernetes_deployment.cube_api|-n cubesandbox delete deploy cube-api
 kubernetes_deployment.cube_ops|-n cubesandbox delete deploy cube-ops
 kubernetes_deployment.cube_lifecycle_manager|-n cubesandbox delete deploy cube-lifecycle-manager
@@ -5619,8 +5622,11 @@ main() {
 		tls_self_signed_cert.cube_egress_ca[0]
 		kubernetes_secret.cube_egress_ca[0]
 		kubernetes_secret.cubemaster_conf[0]
+		kubernetes_secret.templatecenter_conf[0]
 		kubernetes_deployment.cubemaster[0]
 		kubernetes_service.cubemaster[0]
+		kubernetes_deployment.templatecenter[0]
+		kubernetes_service.templatecenter[0]
 		kubernetes_deployment.cube_api[0]
 		kubernetes_service.cube_api[0]
 		kubernetes_deployment.cube_ops[0]
@@ -5651,7 +5657,7 @@ main() {
 	# Restart the Deployments so any ConfigMap changes take effect.
 	if _js_kubectl get ns cubesandbox 2>/dev/null | grep -q Active; then
 		echo -e "  ${CYAN}Restarting Deployments...${NC}"
-		for _dep in cubemaster cube-api cube-ops cube-lifecycle-manager cube-proxy cube-webui; do
+		for _dep in cubemaster cube-templatecenter cube-api cube-ops cube-lifecycle-manager cube-proxy cube-webui; do
 			_js_kubectl -n cubesandbox rollout restart deploy ${_dep} 2>/dev/null || true
 		done
 	fi

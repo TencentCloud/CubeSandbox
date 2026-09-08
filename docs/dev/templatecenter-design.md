@@ -194,18 +194,21 @@ template forever behind invariant I1 (§3.6).
 
 ### 9.1 Replica count
 
-With the default node-local artifact store TC runs exactly one instance:
-artifacts live behind a ReadWriteOnce PVC; a second replica could neither
-read the first one's ext4 nor take over its builds, and two would race on the
-same artifact directory.
-
 With `artifactStore.s3Backed=true` the durable copy lives in S3/MinIO and
-local disk is per-Pod build scratch, so multiple TC replicas are supported:
-duplicate builds of the same spec are coordinated through DB session locks
-(§9.2, keyed by the template-spec fingerprint) and the losing replica reuses
-the winner's READY row instead of rebuilding. The Helm chart's validate step
-rejects replicas>1 unless s3Backed is on and the local volume is per-Pod
-scratch (persistence disabled, hostPath, or emptyDir).
+local disk is per-Pod build scratch, so multiple TC (and CubeMaster)
+replicas are supported: duplicate builds of the same spec are coordinated
+through DB session locks (§9.2, keyed by the template-spec fingerprint) and
+the losing replica reuses the winner's READY row instead of rebuilding.
+
+Without S3 the artifact store is node-local. Multi-replica is then ALLOWED
+but degraded, and the chart prints an install-notes warning: a download may
+land on a master that never built the artifact (foreign-artifact retry) and
+TC replicas duplicate builds of the same spec. The one combination validate
+still rejects is a mounted ReadWriteOnce artifact PVC with master.replicas>1
+— it cannot attach on several nodes, so the extra replica stays Pending
+forever (a scheduling failure, not a degradation). A ReadWriteMany claim
+(CFS/NFS — TC mounts the master's claim by default) is genuinely shared and
+is neither rejected nor warned.
 
 ### 9.2 DB locks
 

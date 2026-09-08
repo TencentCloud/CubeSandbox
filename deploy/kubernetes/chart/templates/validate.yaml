@@ -44,11 +44,17 @@ artifact. hostPath stays node-local by definition, and a
 templateCenter.persistence.existingClaim we cannot prove is the same share
 does not count (conservative).
 
-Multi-replica master/TC without S3 and without a shared volume is ALLOWED but
-degraded (downloads may hit a master that never built the artifact; TC
-replicas duplicate builds): NOTES.txt prints a loud warning for that
-combination instead of failing the install. */ -}}
+Multi-replica master/TC without S3 and without a shared volume is allowed but
+degraded ONLY when the artifact disk is per-pod scratch (persistence disabled
+→ emptyDir) or node-pinned (hostPath): NOTES.txt prints a loud warning for
+that combination. The one combination that must still fail is a mounted
+ReadWriteOnce claim: it cannot attach on several nodes, so the second master
+replica never even schedules (Pending) — a hard failure, not a degradation
+the foreign-artifact retry can absorb. */ -}}
 {{- $sharedArtifactStore := and $masterPersistence.enabled (not $masterPersistence.hostPath) (has "ReadWriteMany" ($masterPersistence.accessModes | default list)) (not $templateCenter.persistence.existingClaim) -}}
+{{- if and .Values.controlPlane.enabled (gt (int .Values.controlPlane.master.replicas) 1) (not $s3Backed) $masterPersistence.enabled (not $masterPersistence.hostPath) (not $sharedArtifactStore) }}
+{{- fail (printf "controlPlane.master.replicas=%v cannot mount the default ReadWriteOnce artifact PVC on several nodes — the second replica stays Pending forever. Choose one: controlPlane.master.persistence.enabled=false (per-pod emptyDir scratch; degraded, see the install-notes warning), controlPlane.master.persistence.accessModes=[ReadWriteMany] (a genuinely shared CFS/NFS volume), or controlPlane.artifactStore.s3Backed=true (S3/MinIO as the durable store)" .Values.controlPlane.master.replicas) }}
+{{- end }}
 {{- if and .Values.controlPlane.enabled (not $templateCenter.colocateWithMaster) (not $templateCenter.affinity) (not $s3Backed) (not $sharedArtifactStore) }}
 {{- fail "controlPlane.templateCenter.colocateWithMaster=false requires controlPlane.templateCenter.affinity: without it TC may be scheduled away from the CubeMaster holding the artifact volume (not required with controlPlane.artifactStore.s3Backed=true or a ReadWriteMany shared artifact volume)" }}
 {{- end }}

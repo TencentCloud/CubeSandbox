@@ -111,12 +111,17 @@ func TestActiveWorkBlocker(t *testing.T) {
 			wantReason: "build job is still active",
 		},
 		{
-			// BUILT is the remote-build handoff state: the ext4 exists and the
-			// job is waiting for distribution. It is NOT treated as active.
-			name: "built job does not block",
+			// BUILT is the remote-build handoff state: the ext4 exists, but the
+			// resume pipeline (register + distribute) still runs for it — and a
+			// BUILT job whose callback response was lost is replayed by the
+			// image-job reconciler. It IS treated as active: deleting inside
+			// the resume window would race the registration/distribution.
+			name: "built job blocks",
 			targets: &templateCleanupTargets{
 				Jobs: []models.TemplateImageJob{{Status: JobStatusBuilt}},
 			},
+			wantBlock:  true,
+			wantReason: "build job is still active",
 		},
 		{
 			name: "terminal jobs do not block",

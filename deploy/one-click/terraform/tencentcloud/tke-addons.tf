@@ -581,9 +581,91 @@ resource "kubernetes_service" "cubemaster" {
 # template building: it pulls the image, builds the ext4, and reports status
 # back to CubeMaster. CubeMaster keeps the control plane (DB, distribution).
 # ---------------------------------------------------------------
+# cube-templatecenter configuration file. Like cubemaster's, it embeds the
+# MySQL and Redis credentials, so it is a Secret (not a ConfigMap) mounted as
+# a file into the pod at CUBE_TEMPLATE_CENTER_CONFIG_PATH. Same database as
+# CubeMaster, deliberately: TC uses it for schema migration and the DB
+# session locks (build dedup / reconciler) that must be shared with
+# CubeMaster's registration path.
+resource "kubernetes_secret" "templatecenter_conf" {
+  count = local.deploy_addons ? 1 : 0
+  type  = "Opaque"
+  metadata {
+    name      = "cube-templatecenter-conf"
+    namespace = kubernetes_namespace.cubesandbox[0].metadata[0].name
+  }
+
+  data = {
+    "conf.yaml" = yamlencode({
+      common = {
+        http_port                 = 8090
+        http_readtimeout          = 120
+        http_writetimeout         = 360
+        http_idletimeout          = 360
+        sync_meta_data_interval   = "30s"
+        sync_metric_data_interval = "1s"
+        collect_metric_interval   = "1s"
+        # CUBE_MASTER_ADDR env (set on the Deployment) wins over this value.
+        master_addr = "http://cubemaster.cubesandbox.svc.cluster.local:8089"
+      }
+      log = {
+        module    = "templatecenter"
+        path      = "/data/log/CubeTemplateCenter"
+        file_size = 100
+        file_num  = 10
+        level     = "info"
+      }
+      instance_db_config = {
+        addr                       = "${tencentcloud_mysql_instance.mysql.intranet_ip}:3306"
+        user                       = local.cube_user
+        pwd                        = local.cube_password
+        db_name                    = local.cube_db
+        conn_timeout               = 5
+        read_timeout               = 5
+        write_timeout              = 5
+        max_idle_conns             = 5
+        max_open_conns             = 20
+        max_conn_life_time_seconds = 300
+      }
+      # TC's config loader reads redis / redis_read / redis_write (the chart
+      # ships all three); keep them identical.
+      redis = {
+        nodes        = "${tencentcloud_redis_instance.redis.ip}:6379"
+        password     = var.redis_password
+        db_no        = 0
+        max_idle     = 8
+        max_active   = 32
+        idle_timeout = 30
+        max_retry    = 2
+      }
+      redis_read = {
+        nodes        = "${tencentcloud_redis_instance.redis.ip}:6379"
+        password     = var.redis_password
+        db_no        = 0
+        max_idle     = 8
+        max_active   = 32
+        idle_timeout = 30
+        max_retry    = 2
+      }
+      redis_write = {
+        nodes        = "${tencentcloud_redis_instance.redis.ip}:6379"
+        password     = var.redis_password
+        db_no        = 0
+        max_idle     = 8
+        max_active   = 32
+        idle_timeout = 30
+        max_retry    = 2
+      }
+      auth = {
+        enable = false
+      }
+    })
+  }
+}
+
 resource "kubernetes_deployment" "templatecenter" {
   count      = local.deploy_addons ? 1 : 0
-  depends_on = [kubernetes_deployment.cubemaster]
+  depends_on = [kubernetes_deployment.cubemaster, kubernetes_secret.templatecenter_conf]
 
   # use_cfs=false backs the shared "data" volume with a hostPath, which only
   # exists on one node, so both cubemaster and TC must stay single-replica
@@ -692,6 +774,14 @@ resource "kubernetes_deployment" "templatecenter" {
             name       = "data"
             mount_path = "/data/CubeMaster/storage"
           }
+          # The process refuses to start without its conf
+          # (CUBE_TEMPLATE_CENTER_CONFIG_PATH); mount it from the Secret.
+          volume_mount {
+            name       = "cube-templatecenter-conf"
+            mount_path = "/usr/local/services/cubetoolbox/CubeTemplateCenter/conf.yaml"
+            sub_path   = "conf.yaml"
+            read_only  = true
+          }
           volume_mount {
             name       = "cube-egress-ca"
             mount_path = "/etc/cube/ca"
@@ -729,6 +819,16 @@ resource "kubernetes_deployment" "templatecenter" {
             items {
               key  = "cube-root-ca.crt"
               path = "cube-root-ca.crt"
+            }
+          }
+        }
+        volume {
+          name = "cube-templatecenter-conf"
+          secret {
+            secret_name = kubernetes_secret.templatecenter_conf[0].metadata[0].name
+            items {
+              key  = "conf.yaml"
+              path = "conf.yaml"
             }
           }
         }
