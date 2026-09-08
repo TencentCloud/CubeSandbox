@@ -509,3 +509,8 @@ export SDK_E2E_KEEP_SANDBOX_ON_FAILURE=true
 
 该开关仅保留通过 `sdk_sandbox` fixture 创建、且**失败**的测试的 sandbox；通过和
 跳过的测试始终会被清理，直接创建 sandbox 的边界用例（使用各自的 helper）也始终清理。
+
+## Kubernetes 安装后功能验证
+
+使用 `pytest --run-e2e --k8s-post-install` 运行部署检查与基础功能用例，沿用现有
+SDK adapter。环境要求、权限及报告说明见 [运行指南](docs/kubernetes-post-install_zh.md)。

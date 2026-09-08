@@ -64,6 +64,8 @@ _load_dotenv(SDK_COMPAT_ROOT / ".env")
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     group = parser.getgroup("sdk compat e2e")
+    group.addoption("--k8s-post-install", action="store_true", default=False,
+                    help="select the Kubernetes post-install suite; requires --run-e2e")
     group.addoption(
         "--run-e2e",
         action="store_true",
@@ -150,6 +152,8 @@ def pytest_configure(config: pytest.Config):
     # the ``dsession`` controller when distribution mode activates). That lets
     # ``_verify_xdist_activated`` observe the real activation state below.
     for marker in (
+        "k8s_post_install: Kubernetes post-install functional validation",
+        "k8s_service: test needs a temporary Kubernetes Service and explicit DNS allow-list",
         "sdk_compat: SDK compatibility E2E tests",
         "requires_capability(name): current SDK backend must support this capability",
         "sandbox_create_options(**kwargs): SDK sandbox create options for this test",
@@ -196,6 +200,16 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if config.getoption("--k8s-post-install"):
+        from framework.kubernetes_suite import select_post_install_tests
+
+        selected, deselected = select_post_install_tests(items)
+        items[:] = selected
+        config.hook.pytest_deselected(items=deselected)
+    else:
+        for item in items:
+            if item.get_closest_marker("k8s_post_install"):
+                item.add_marker(pytest.mark.skip(reason="requires --k8s-post-install"))
     config._sdk_e2e_template_ids = {
         template_id
         for item in items
@@ -333,6 +347,11 @@ def sdk_e2e_preflight(pytestconfig: pytest.Config, sdk_e2e_config: SdkE2EConfig,
     if not pytestconfig.getoption("--run-e2e"):
         return
     try:
+        if pytestconfig.getoption("--k8s-post-install"):
+            from framework.kubernetes import KubernetesConfig, run_kubernetes_preflight
+
+            pytestconfig._k8s_environment = run_kubernetes_preflight(
+                KubernetesConfig.from_env(), sdk_e2e_reporter)
         run_preflight(
             sdk_e2e_config,
             sdk_e2e_reporter,
@@ -367,12 +386,19 @@ def gate_internet_tests(request: pytest.FixtureRequest) -> None:
 
 
 @pytest.fixture()
+def sdk_create_options(request: pytest.FixtureRequest) -> dict:
+    """Extension point for environment-discovered create options."""
+    return _create_options_for_node(request.node)
+
+
+@pytest.fixture()
 def sdk_sandbox(
     request: pytest.FixtureRequest,
     sdk_backend: str,
     sdk_e2e_config: SdkE2EConfig,
     sdk_e2e_reporter: JsonlReporter,
     sdk_e2e_trace: TraceCollector,
+    sdk_create_options: dict,
 ):
     for marker in request.node.iter_markers("requires_capability"):
         capability = marker.args[0]
@@ -401,7 +427,7 @@ def sdk_sandbox(
         pytest.skip("CUBE_TEMPLATE_ID or --cube-template-id is required for SDK E2E")
     node_config = replace(sdk_e2e_config, cube_template_id=template_id)
 
-    create_options = _create_options_for_node(request.node)
+    create_options = dict(sdk_create_options)
 
     metadata = {
         "test_suite": "sdk_compat",
@@ -553,7 +579,10 @@ def _cleanup_sdk_sandbox(
         )
         return
 
-    errors = safe_kill(adapter, sdk_e2e_config)
+    errors = safe_kill(
+        adapter, sdk_e2e_config,
+        verify_absent=request.config.getoption("--k8s-post-install"),
+    )
     sdk_e2e_reporter.record(
         "sandbox_cleanup",
         backend=sdk_backend,
@@ -561,6 +590,8 @@ def _cleanup_sdk_sandbox(
         nodeid=request.node.nodeid,
         errors=errors,
     )
+    if errors and request.config.getoption("--k8s-post-install"):
+        raise RuntimeError("post-install sandbox cleanup failed: " + "; ".join(errors))
 
 
 def _test_failed(node: pytest.Item) -> bool:
