@@ -110,26 +110,30 @@ class CubeSandboxAdapter(SandboxAdapter):
     def read_file(self, path: str, *, user: str = "root") -> str:
         return self._sandbox.files.read(path, user=user)
 
-    def list_files(self, path: str) -> list[dict[str, Any]]:
-        return list(self._sandbox.files.list(path))
+    def list_files(self, path: str, *, user: str = "root") -> list[dict[str, Any]]:
+        return list(self._sandbox.files.list(path, user=user))
 
-    def stat_file(self, path: str) -> dict[str, Any]:
-        return dict(self._sandbox.files.stat(path))
+    def stat_file(self, path: str, *, user: str = "root") -> dict[str, Any]:
+        return dict(self._sandbox.files.stat(path, user=user))
 
-    def file_exists(self, path: str) -> bool:
-        return bool(self._sandbox.files.exists(path))
+    def file_exists(self, path: str, *, user: str = "root") -> bool:
+        return bool(self._sandbox.files.exists(path, user=user))
 
-    def remove_file(self, path: str) -> None:
-        self._sandbox.files.remove(path)
+    def remove_file(self, path: str, *, user: str = "root") -> None:
+        self._sandbox.files.remove(path, user=user)
 
-    def rename_file(self, old_path: str, new_path: str) -> dict[str, Any]:
-        return dict(self._sandbox.files.rename(old_path, new_path))
+    def rename_file(self, old_path: str, new_path: str, *, user: str = "root") -> dict[str, Any]:
+        return dict(self._sandbox.files.rename(old_path, new_path, user=user))
 
-    def make_dir(self, path: str) -> None:
-        self._sandbox.files.make_dir(path)
+    def make_dir(self, path: str, *, user: str = "root") -> None:
+        self._sandbox.files.make_dir(path, user=user)
 
-    def write_files(self, files: list[tuple[str, str | bytes]]) -> int:
-        return int(self._sandbox.files.write_files(files))
+    def list_dir(self, path: str, *, user: str = "root") -> list[str]:
+        entries = self._sandbox.files.list(path, user=user)
+        return [entry["name"] for entry in entries]
+
+    def write_files(self, files: list[tuple[str, str | bytes]], *, user: str = "root") -> int:
+        return int(self._sandbox.files.write_files(files, user=user))
 
     def watch_dir_events(
         self,
@@ -252,6 +256,8 @@ class CubeSandboxAdapter(SandboxAdapter):
 
     def update_network(self, network: dict | None = None) -> None:
         self._sandbox.update_network(network)
+
+    # ── lifecycle ──────────────────────────────────────────────────────────
 
     def kill(self) -> None:
         self._sandbox.kill()
