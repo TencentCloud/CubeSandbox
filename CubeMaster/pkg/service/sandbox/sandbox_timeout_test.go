@@ -119,6 +119,7 @@ func TestSetTimeoutValidationAllowsNeverTimeout(t *testing.T) {
 }
 
 type mockTimeoutProvider struct {
+	called             bool
 	lastSandboxID      string
 	lastTimeoutSeconds int
 	returnEndAt        int64
@@ -126,6 +127,7 @@ type mockTimeoutProvider struct {
 }
 
 func (m *mockTimeoutProvider) RefreshTimeout(ctx context.Context, sandboxID string, timeoutSeconds int) (int64, error) {
+	m.called = true
 	m.lastSandboxID = sandboxID
 	m.lastTimeoutSeconds = timeoutSeconds
 	return m.returnEndAt, m.returnErr

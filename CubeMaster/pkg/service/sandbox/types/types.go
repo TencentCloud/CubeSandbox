@@ -825,8 +825,12 @@ type UpdateRequest struct {
 	RequestID    string `json:"requestID"`
 	SandboxID    string `json:"sandbox_id"`
 	InstanceType string `json:"instance_type"`
-	Action       string `json:"action"`
-	Timeout      *int   `json:"timeout,omitempty"`
+	Action string `json:"action"`
+	// Timeout is the optional idle TTL for resume. nil or 0 keeps the stored
+	// timeout; -1 (NeverTimeout) disables expiry; N>0 opens an N-second
+	// window from now. Values below -1 are rejected. Immediate expiry is
+	// set_timeout(0) only. See docs/guide/lifecycle.md — Timeout semantics (canonical).
+	Timeout *int `json:"timeout,omitempty"`
 	// Backend is the CoW store (xfs｜s3) forwarded to Cubelet as
 	// cube.master.storage.backend. Empty means xfs.
 	Backend string `json:"backend,omitempty"`
