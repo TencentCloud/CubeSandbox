@@ -203,9 +203,11 @@ def static_checks(res: Results) -> None:
     res.check(exists(tcconf) and "{{" not in read(tcconf) and "__CUBE_SANDBOX_" in read(tcconf),
               "F14 single-node TC conf has placeholders, not Helm template markers", tcconf)
 
-    # F15: chart wires the switch and both address envs.
-    res.check(contains("deploy/kubernetes/chart/files/cube-master/conf.yaml", "templatecenter_enabled"),
-              "F15 chart renders templatecenter_enabled")
+    # F15: chart wires the TC address into master's conf and both address envs.
+    # (The templatecenter_enabled switch is gone: TC is mandatory and renders
+    # whenever controlPlane.enabled=true.)
+    res.check(contains("deploy/kubernetes/chart/files/cube-master/conf.yaml", "template_center_addr"),
+              "F15 chart renders template_center_addr")
     res.check(contains("deploy/kubernetes/chart/templates/master.yaml", "CUBE_TEMPLATE_CENTER_ADDR"),
               "F15 chart injects CUBE_TEMPLATE_CENTER_ADDR into cubemaster")
     res.check(contains("deploy/kubernetes/chart/templates/templatecenter.yaml", "CUBE_MASTER_ADDR"),
