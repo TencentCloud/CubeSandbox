@@ -19,7 +19,7 @@ func TestConfiguredArtifactPaths(t *testing.T) {
 		name, config, image, kernel string
 		fail                        bool
 	}{
-		{name: "defaults", image: "/usr/local/services/cubetoolbox/cubebox_os_image", kernel: "/usr/local/services/cubetoolbox/cube-kernel-scf/vmlinux"},
+		{name: "defaults", image: "/data/cubelet/cubebox_os_image", kernel: "/usr/local/services/cubetoolbox/cube-kernel-scf/vmlinux"},
 		{name: "separate", config: `[plugins."io.cubelet.internal.v1.images"]
 image_base_path = "/data/images"
 shared_kernel_path = "/opt/kernel/vmlinux"
@@ -43,7 +43,7 @@ image_base_path = "/data/images"
 		{name: "unrelated cbri installation", config: `[plugins."io.cubelet.cbri.v1.cubebox"]
 base_path = "/opt/tools"
 snapshot_base_path = "/data/snapshots"
-`, image: "/usr/local/services/cubetoolbox/cubebox_os_image", kernel: "/usr/local/services/cubetoolbox/cube-kernel-scf/vmlinux"},
+`, image: "/data/cubelet/cubebox_os_image", kernel: "/usr/local/services/cubetoolbox/cube-kernel-scf/vmlinux"},
 		{name: "relative", config: `[plugins."io.cubelet.internal.v1.images"]
 image_base_path = "relative"
 `, fail: true},
@@ -85,4 +85,19 @@ image_base_path = "/base/images"
 	require.NoError(t, err)
 	require.Equal(t, "/imported/images", paths.ImageBasePath)
 	require.Equal(t, "/installed/vmlinux", paths.SharedKernelPath)
+}
+
+// Resolving an effective config again must preserve the selected artifact root.
+func TestResolvePathsPopulatesEffectiveConfig(t *testing.T) {
+	for _, base := range []string{"", "/old/../tools"} {
+		c := &Config{CubeToolBaseDir: base}
+		paths, err := c.ResolvePaths()
+		require.NoError(t, err)
+		require.Equal(t, paths.ToolBaseDir, c.CubeToolBaseDir)
+		require.Equal(t, paths.ImageBasePath, c.ImageBasePath)
+		require.Equal(t, paths.SharedKernelPath, c.SharedKernelPath)
+		again, err := c.ResolvePaths()
+		require.NoError(t, err)
+		require.Equal(t, paths, again)
+	}
 }

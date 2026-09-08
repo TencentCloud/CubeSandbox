@@ -52,6 +52,7 @@ type Config struct {
 func (c *Config) ResolvePaths() (pmem.Paths, error) {
 	p, err := pmem.ResolvePaths(c.CubeToolBaseDir, c.ImageBasePath, c.SharedKernelPath)
 	if err == nil {
+		c.CubeToolBaseDir = p.ToolBaseDir
 		c.ImageBasePath = p.ImageBasePath
 		c.SharedKernelPath = p.SharedKernelPath
 	}

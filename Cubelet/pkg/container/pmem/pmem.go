@@ -6,11 +6,11 @@ package pmem
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 )
 
 const DefaultToolBaseDir = "/usr/local/services/cubetoolbox"
+const DefaultImageBasePath = "/data/cubelet/cubebox_os_image"
 
 // Paths separates installed kernel sources from node-local rootfs artifacts.
 // ImageBasePath is the final cubebox artifact directory, without another suffix.
@@ -22,11 +22,15 @@ type Paths struct {
 
 var paths = Paths{
 	ToolBaseDir:      DefaultToolBaseDir,
-	ImageBasePath:    DefaultToolBaseDir + "/cubebox_os_image",
+	ImageBasePath:    DefaultImageBasePath,
 	SharedKernelPath: DefaultToolBaseDir + "/cube-kernel-scf/vmlinux",
 }
 
 func ResolvePaths(toolBaseDir, imageBasePath, sharedKernelPath string) (Paths, error) {
+	// Preserve the old layout only when the legacy base was explicitly set.
+	if imageBasePath == "" && toolBaseDir == "" {
+		imageBasePath = DefaultImageBasePath
+	}
 	if toolBaseDir == "" {
 		toolBaseDir = DefaultToolBaseDir
 	}
@@ -53,16 +57,6 @@ func ResolvePaths(toolBaseDir, imageBasePath, sharedKernelPath string) (Paths, e
 func InitPaths(resolved Paths) { paths = resolved }
 
 func CurrentPaths() Paths { return paths }
-
-func Init(dataDir string) {
-	// Compatibility helper for callers using the original directory layout.
-	resolved, err := ResolvePaths(dataDir, "", "")
-	if err != nil {
-		panic(err)
-	}
-	InitPaths(resolved)
-	_ = os.MkdirAll(resolved.ToolBaseDir, os.ModeDir|0755)
-}
 
 func GetRawImageFilePath(instanceType, imageID string) string {
 	return paths.ImageFile(instanceType, imageID)

@@ -21,6 +21,17 @@ import (
 	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
+func initTestPmemPaths(t *testing.T, baseDir string) {
+	t.Helper()
+	paths, err := pmem.ResolvePaths(baseDir, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := pmem.CurrentPaths()
+	pmem.InitPaths(paths)
+	t.Cleanup(func() { pmem.InitPaths(previous) })
+}
+
 func writeTestFile(t *testing.T, path string, content []byte) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -91,7 +102,7 @@ func TestRefreshArtifactRuntimeFilesRefreshesKernelWhenSharedKernelChanges(t *te
 
 func TestEnsurePmemFilePreservesExistingRuntimeFiles(t *testing.T) {
 	baseDir := t.TempDir()
-	pmem.Init(baseDir)
+	initTestPmemPaths(t, baseDir)
 
 	writeSharedKernelFile(t, bytes.Repeat([]byte("s"), 3072))
 	writeRawImageFile(t, "cubebox", "artifact-2", bytes.Repeat([]byte("e"), 2048))
@@ -123,7 +134,7 @@ func TestEnsurePmemFilePreservesExistingRuntimeFiles(t *testing.T) {
 
 func TestEnsurePmemFileMaterializesFreshArtifactKernel(t *testing.T) {
 	baseDir := t.TempDir()
-	pmem.Init(baseDir)
+	initTestPmemPaths(t, baseDir)
 
 	sharedKernel := bytes.Repeat([]byte("s"), 3072)
 	writeSharedKernelFile(t, sharedKernel)
@@ -145,7 +156,7 @@ func TestEnsurePmemFileMaterializesFreshArtifactKernel(t *testing.T) {
 
 func TestEnsurePmemRootfsDoesNotRequireKernelFile(t *testing.T) {
 	baseDir := t.TempDir()
-	pmem.Init(baseDir)
+	initTestPmemPaths(t, baseDir)
 
 	writeRawImageFile(t, "cubebox", "artifact-4", bytes.Repeat([]byte("e"), 2048))
 
@@ -156,7 +167,7 @@ func TestEnsurePmemRootfsDoesNotRequireKernelFile(t *testing.T) {
 
 func TestEnsurePmemFileDoesNotRequireCubeImageVersionFile(t *testing.T) {
 	baseDir := t.TempDir()
-	pmem.Init(baseDir)
+	initTestPmemPaths(t, baseDir)
 
 	sharedKernel := bytes.Repeat([]byte("s"), 3072)
 	writeSharedKernelFile(t, sharedKernel)
@@ -178,7 +189,7 @@ func TestEnsurePmemFileDoesNotRequireCubeImageVersionFile(t *testing.T) {
 
 func TestEnsureKernelFilePresentRequiresSharedKernel(t *testing.T) {
 	baseDir := t.TempDir()
-	pmem.Init(baseDir)
+	initTestPmemPaths(t, baseDir)
 
 	err := ensureKernelFilePresent(context.Background(), "cubebox", "artifact-2")
 	if err == nil {
@@ -215,7 +226,7 @@ func TestDestroyPmemArtifactResolvesSymlinkedBase(t *testing.T) {
 	if err := os.Symlink(realBase, filepath.Join(dataDir, "cubebox_os_image")); err != nil {
 		t.Fatalf("Symlink base error=%v", err)
 	}
-	pmem.Init(dataDir)
+	initTestPmemPaths(t, dataDir)
 
 	artifactDir := filepath.Join(realBase, "artifact-6")
 	writeTestFile(t, filepath.Join(artifactDir, "artifact-6.ext4"), []byte("rootfs"))
@@ -230,7 +241,7 @@ func TestDestroyPmemArtifactResolvesSymlinkedBase(t *testing.T) {
 
 func TestDestroyPmemArtifactUnlinksLeafSymlinkOnly(t *testing.T) {
 	dataDir := t.TempDir()
-	pmem.Init(dataDir)
+	initTestPmemPaths(t, dataDir)
 	base := pmem.GetPmemBasePath("cubebox")
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		t.Fatalf("MkdirAll base error=%v", err)
@@ -258,7 +269,7 @@ func TestDestroyPmemArtifactUnlinksLeafSymlinkOnly(t *testing.T) {
 
 func TestDestroyPmemArtifactMissingBaseIsIdempotent(t *testing.T) {
 	dataDir := t.TempDir()
-	pmem.Init(dataDir)
+	initTestPmemPaths(t, dataDir)
 
 	if err := DestroyPmemArtifact(context.Background(), "cubebox", "artifact-8", nil); err != nil {
 		t.Fatalf("missing pmem base should be success, got %v", err)

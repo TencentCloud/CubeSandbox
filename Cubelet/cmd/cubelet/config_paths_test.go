@@ -20,8 +20,10 @@ func TestConfigDumpArtifactPaths(t *testing.T) {
 	for _, tc := range []struct {
 		name, extra string
 		fail        bool
+		defaults    bool
 	}{
 		{name: "shipped"},
+		{name: "defaults", defaults: true},
 		{name: "conflicting legacy path", extra: "\n[plugins.\"io.cubelet.cbri.v1.cubebox\"]\nimage_base_path = \"/other/images\"\n", fail: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -33,7 +35,9 @@ func TestConfigDumpArtifactPaths(t *testing.T) {
 			os.Stdout = output
 			defer func() { os.Stdout = original; _ = output.Close() }()
 			cfg := defaultConfig()
-			require.NoError(t, srvconfig.LoadConfig(context.Background(), path, cfg))
+			if !tc.defaults {
+				require.NoError(t, srvconfig.LoadConfig(context.Background(), path, cfg))
+			}
 			err = outputConfig(context.Background(), cfg)
 			os.Stdout = original
 			if tc.fail {
@@ -48,6 +52,7 @@ func TestConfigDumpArtifactPaths(t *testing.T) {
 			}
 			require.NoError(t, toml.Unmarshal(data, &decoded))
 			images := decoded.Plugins["io.cubelet.internal.v1.images"]
+			require.Equal(t, "/usr/local/services/cubetoolbox", images["cubetool_base_dir"])
 			require.Equal(t, "/data/cubelet/cubebox_os_image", images["image_base_path"])
 			require.Equal(t, "/usr/local/services/cubetoolbox/cube-kernel-scf/vmlinux", images["shared_kernel_path"])
 		})
