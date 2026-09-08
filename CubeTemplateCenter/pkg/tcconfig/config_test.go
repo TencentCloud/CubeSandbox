@@ -56,6 +56,40 @@ func TestLegacyNamesStillWork(t *testing.T) {
 			t.Fatalf("the legacy %s must still be honoured", legacyEnvReconcileDisabled)
 		}
 	})
+
+	t.Run("s3-keys-legacy", func(t *testing.T) {
+		clearEnv(t, EnvS3AccessKey, legacyEnvS3AccessKey, EnvS3SecretKey, legacyEnvS3SecretKey)
+		t.Setenv(EnvS3Endpoint, "http://minio:9000")
+		t.Setenv(EnvS3Bucket, "cube-volumes")
+		t.Setenv(legacyEnvS3AccessKey, "legacy-ak")
+		t.Setenv(legacyEnvS3SecretKey, "legacy-sk")
+		enabled, _, _, ak, sk, _, _, _, _ := S3Config()
+		if !enabled || ak != "legacy-ak" || sk != "legacy-sk" {
+			t.Fatalf("S3Config() = enabled=%v ak=%q sk=%q, want legacy names honoured", enabled, ak, sk)
+		}
+	})
+}
+
+// The canonical S3 key names carry the _ID suffix shared with the volume
+// plugin, s3lvol and one-click's MinIO autofill; the suffix-less spellings are
+// the legacy fallback.
+func TestS3ConfigCanonicalKeyNames(t *testing.T) {
+	clearEnv(t, EnvS3AccessKey, legacyEnvS3AccessKey, EnvS3SecretKey, legacyEnvS3SecretKey)
+	t.Setenv(EnvS3Endpoint, "http://minio:9000")
+	t.Setenv(EnvS3Bucket, "cube-volumes")
+	t.Setenv(EnvS3AccessKey, "ak-id")
+	t.Setenv(EnvS3SecretKey, "sk-id")
+	// Legacy names must not override the canonical ones.
+	t.Setenv(legacyEnvS3AccessKey, "legacy-ak")
+	t.Setenv(legacyEnvS3SecretKey, "legacy-sk")
+
+	enabled, _, _, ak, sk, _, _, _, _ := S3Config()
+	if !enabled {
+		t.Fatal("S3Config() disabled despite complete canonical configuration")
+	}
+	if ak != "ak-id" || sk != "sk-id" {
+		t.Fatalf("S3Config() = ak=%q sk=%q, want the canonical _ID names to win", ak, sk)
+	}
 }
 
 func TestNewNameWinsOverLegacy(t *testing.T) {

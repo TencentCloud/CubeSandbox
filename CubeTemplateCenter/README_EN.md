@@ -50,7 +50,7 @@ helm upgrade --install cube deploy/kubernetes/chart \
 
 Conf, both addresses, PVC, and same-node affinity are wired automatically.
 
-**Bare metal / one-click**: `cube-sandbox-cubetemplatecenter.service` is installed but not started by default, in which case every template build fails. Enable it with `systemctl enable --now cube-sandbox-cubetemplatecenter.service` (the default address `http://127.0.0.1:8090` is already exported by `cubemaster-start.sh`; only override `CUBE_TEMPLATE_CENTER_ADDR` in `.one-click.env` for a split deployment).
+**Bare metal / one-click**: `cube-sandbox-cube-templatecenter.service` is part of the default control-plane stack (the control target `Wants=` it and install.sh enables it), so template builds work out of the box. The default address `http://127.0.0.1:8090` is already exported by `cubemaster-start.sh`; only override `CUBE_TEMPLATE_CENTER_ADDR` in `.one-click.env` for a split deployment.
 
 **Why single-replica**: artifacts live on a node-local disk with no cross-node sharing. A second replica can't read the first one's files, can't take over its build, and races it on the same directory. For availability, scale CubeMaster.
 

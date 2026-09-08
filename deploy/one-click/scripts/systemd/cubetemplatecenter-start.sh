@@ -50,8 +50,13 @@ TC_NODE_IP="${CUBE_TEMPLATE_CENTER_NODE_IP:-${CUBE_SANDBOX_NODE_IP:-}}"
 #
 # No extra export needed: the process reads CUBE_S3_* directly. This block is
 # only a guard to warn when S3 is partially configured.
-if [[ -n "${CUBE_S3_ENDPOINT:-}" && ( -z "${CUBE_S3_BUCKET:-}" || -z "${CUBE_S3_ACCESS_KEY:-}" || -z "${CUBE_S3_SECRET_KEY:-}" ) ]]; then
-  log "warning: CUBE_S3_ENDPOINT is set but CUBE_S3_BUCKET / CUBE_S3_ACCESS_KEY / CUBE_S3_SECRET_KEY are incomplete; templatecenter will use local disk"
+# The canonical key names carry the _ID suffix shared with the volume plugin
+# (one-click fills them from the local MinIO); the suffix-less legacy spellings
+# still satisfy the check so an old .one-click.env does not regress.
+_s3_ak="${CUBE_S3_ACCESS_KEY_ID:-${CUBE_S3_ACCESS_KEY:-}}"
+_s3_sk="${CUBE_S3_SECRET_ACCESS_KEY:-${CUBE_S3_SECRET_KEY:-}}"
+if [[ -n "${CUBE_S3_ENDPOINT:-}" && ( -z "${CUBE_S3_BUCKET:-}" || -z "${_s3_ak}" || -z "${_s3_sk}" ) ]]; then
+  log "warning: CUBE_S3_ENDPOINT is set but CUBE_S3_BUCKET / CUBE_S3_ACCESS_KEY_ID / CUBE_S3_SECRET_ACCESS_KEY are incomplete; templatecenter will use local disk"
 fi
 
 ensure_executable "${TC_BIN}"

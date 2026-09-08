@@ -23,12 +23,11 @@ common:
   # deployment fact, so CubeMaster reads it from the CUBE_TEMPLATE_CENTER_ADDR
   # environment variable (the counterpart of CUBE_MASTER_ADDR, which TC uses to
   # call back). cubemaster-start.sh already exports CUBE_TEMPLATE_CENTER_ADDR
-  # with a default of http://127.0.0.1:8090, but that only works once TC is
-  # actually running. To make template builds work on this host:
-  #   1. enable and start the TC unit:
-  #      systemctl enable --now cube-sandbox-cubetemplatecenter.service
-  #   2. (optional) override CUBE_TEMPLATE_CENTER_ADDR in
-  #      /usr/local/services/cubetoolbox/.one-click.env for a split deployment.
+  # with a default of http://127.0.0.1:8090, and the TC unit
+  # (cube-sandbox-cube-templatecenter.service) is part of the default
+  # control-plane target, so template builds work out of the box.
+  #   * (optional) override CUBE_TEMPLATE_CENTER_ADDR in
+  #     /usr/local/services/cubetoolbox/.one-click.env for a split deployment.
   # TC reports build status back over http://127.0.0.1:8089.
 
 log:

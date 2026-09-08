@@ -115,13 +115,19 @@ const (
 	// Cubelet / s3lvol / volume plugins already read, so a deployment configures
 	// S3 once and every component picks it up. When the variables are absent or
 	// incomplete TC falls back to local disk storage.
-	EnvS3Endpoint     = "CUBE_S3_ENDPOINT"
-	EnvS3Bucket       = "CUBE_S3_BUCKET"
-	EnvS3AccessKey    = "CUBE_S3_ACCESS_KEY"
-	EnvS3SecretKey    = "CUBE_S3_SECRET_KEY"
-	EnvS3Region       = "CUBE_S3_REGION"
-	EnvS3UsePathStyle = "CUBE_S3_USE_PATH_STYLE"
-	EnvS3UseSSL       = "CUBE_S3_USE_SSL"
+	//
+	// The key names carry the _ID suffix used everywhere else (one-click fills
+	// them from the local MinIO automatically); the suffix-less spellings this
+	// process used before the alignment are still honoured as legacy fallbacks.
+	EnvS3Endpoint        = "CUBE_S3_ENDPOINT"
+	EnvS3Bucket          = "CUBE_S3_BUCKET"
+	EnvS3AccessKey       = "CUBE_S3_ACCESS_KEY_ID"
+	legacyEnvS3AccessKey = "CUBE_S3_ACCESS_KEY"
+	EnvS3SecretKey       = "CUBE_S3_SECRET_ACCESS_KEY"
+	legacyEnvS3SecretKey = "CUBE_S3_SECRET_KEY"
+	EnvS3Region          = "CUBE_S3_REGION"
+	EnvS3UsePathStyle    = "CUBE_S3_USE_PATH_STYLE"
+	EnvS3UseSSL          = "CUBE_S3_USE_SSL"
 
 	// Optional object key prefix inside the bucket.
 	EnvS3ArtifactPrefix = "CUBE_S3_ARTIFACT_PREFIX"
@@ -158,8 +164,8 @@ func MaxConcurrentBuilds() int {
 func S3Config() (enabled bool, endpoint, bucket, accessKey, secretKey, region string, usePathStyle, useSSL bool, artifactPrefix string) {
 	endpoint = strings.TrimSpace(os.Getenv(EnvS3Endpoint))
 	bucket = strings.TrimSpace(os.Getenv(EnvS3Bucket))
-	accessKey = strings.TrimSpace(os.Getenv(EnvS3AccessKey))
-	secretKey = strings.TrimSpace(os.Getenv(EnvS3SecretKey))
+	accessKey, _ = lookup(EnvS3AccessKey, legacyEnvS3AccessKey)
+	secretKey, _ = lookup(EnvS3SecretKey, legacyEnvS3SecretKey)
 	region = strings.TrimSpace(os.Getenv(EnvS3Region))
 	usePathStyle = boolValue(os.Getenv(EnvS3UsePathStyle))
 	useSSL = boolValue(os.Getenv(EnvS3UseSSL))

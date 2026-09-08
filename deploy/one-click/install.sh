@@ -1515,10 +1515,25 @@ remove_obsolete_network_agent_unit() {
   systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
 }
 
+# The TC unit was renamed to cube-sandbox-cube-templatecenter.service to match
+# the cube-templatecenter naming used by the image, the Helm chart, and
+# terraform. Remove the pre-rename unit so an upgrade does not leave two units
+# managing the same process.
+remove_obsolete_templatecenter_unit() {
+  local unit="cube-sandbox-cubetemplatecenter.service"
+  systemctl disable --now "${unit}" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/${unit}"
+  rm -f "/etc/systemd/system/cube-sandbox-control.target.wants/${unit}"
+  rm -f "/etc/systemd/system/cube-sandbox-compute.target.wants/${unit}"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
+}
+
 install_systemd_units() {
   local install_units_script="${INSTALL_PREFIX}/scripts/systemd/install-units.sh"
   ensure_file "${install_units_script}"
   remove_obsolete_network_agent_unit
+  remove_obsolete_templatecenter_unit
   "${install_units_script}"
 }
 
@@ -1550,8 +1565,8 @@ start_systemd_target() {
   # pulls it up; the explicit enable creates the .wants symlink so the unit
   # also reports is-enabled for quickcheck and boot audits.
   if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
-    systemctl enable cube-sandbox-cubetemplatecenter.service >/dev/null 2>&1 \
-      || log "WARN: could not enable cube-sandbox-cubetemplatecenter.service"
+    systemctl enable cube-sandbox-cube-templatecenter.service >/dev/null 2>&1 \
+      || log "WARN: could not enable cube-sandbox-cube-templatecenter.service"
   fi
 
   systemctl enable --now "${target}"

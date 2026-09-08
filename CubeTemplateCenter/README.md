@@ -50,7 +50,7 @@ helm upgrade --install cube deploy/kubernetes/chart \
 
 conf、双向地址、PVC、同节点亲和都自动配好。
 
-**裸机 / one-click**：`cube-sandbox-cubetemplatecenter.service` 已装好但默认不启动，此时所有模板构建都会失败。启用：`systemctl enable --now cube-sandbox-cubetemplatecenter.service`（默认地址 `http://127.0.0.1:8090` 已经由 `cubemaster-start.sh` 导出，跨机部署才需要在 `.one-click.env` 覆盖 `CUBE_TEMPLATE_CENTER_ADDR`）。
+**裸机 / one-click**：`cube-sandbox-cube-templatecenter.service` 属于默认管控面组件（control target 的 `Wants=` 已包含，install.sh 会显式 enable），模板构建开箱即用。默认地址 `http://127.0.0.1:8090` 已经由 `cubemaster-start.sh` 导出，跨机部署才需要在 `.one-click.env` 覆盖 `CUBE_TEMPLATE_CENTER_ADDR`。
 
 **为什么只能单副本**：产物在节点本地盘，没有跨节点共享。起第二个副本，读不到第一个的文件，也接不了它的构建，还会抢同一个目录。要高可用，扩 CubeMaster。
 

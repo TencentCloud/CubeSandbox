@@ -797,13 +797,11 @@ copy_file "${ROOT_DIR}/deploy/scripts/docker-install-volume-deps.sh" \
   "${PACKAGE_ROOT}/CubeMaster/docker-install-volume-deps.sh"
 chmod +x "${PACKAGE_ROOT}/CubeMaster/docker-install-volume-deps.sh"
 
-# CubeTemplateCenter. Shipped in every package but inert until an operator
-# enables cube-sandbox-cubetemplatecenter.service: CubeMaster no longer builds
+# CubeTemplateCenter. Shipped in every package and enabled by default:
+# cube-sandbox-control.target Wants cube-sandbox-cube-templatecenter.service
+# and install.sh enables it explicitly, because CubeMaster no longer builds
 # templates in-process (every template-from-image build is forwarded to TC,
-# with no local fallback), so template builds fail until this unit is
-# enabled. It still ships disabled by default -- an unused binary and conf on
-# disk cost nothing, whereas a missing one would make enabling the unit a
-# re-install.
+# with no local fallback) -- a disabled TC would fail every build.
 copy_file "${CORE_BIN_DIR}/templatecenter" "${PACKAGE_ROOT}/CubeTemplateCenter/bin/templatecenter"
 # The repo-root CubeTemplateCenter/conf.yaml is the Helm template (its db/redis/
 # port fields are {{ }} placeholders that are never rendered on a bare host), so
