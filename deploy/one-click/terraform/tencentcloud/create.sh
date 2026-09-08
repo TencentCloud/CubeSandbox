@@ -907,8 +907,10 @@ setup_env() {
 	export TF_VAR_tke_node_count="$TKE_NODE_COUNT"
 	export TF_VAR_cubemaster_replicas="${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}"
 	# TC 默认单副本（hostPath 模式强制）；use_cfs=true 时可调大，见
-	# variables.tf 的 templatecenter_replicas 说明。
-	export TF_VAR_templatecenter_replicas="${TENCENTCLOUD_TEMPLATECENTER_REPLICAS:-1}"
+	# variables.tf 的 templatecenter_replicas 说明。旧名
+	# TENCENTCLOUD_TEMPLATECENTER_REPLICAS 仍作 fallback（env.example 已改用
+	# 与 TENCENTCLOUD_CUBETEMPLATECENTER_IMAGE 一致的 CUBE 前缀命名）。
+	export TF_VAR_templatecenter_replicas="${TENCENTCLOUD_CUBETEMPLATECENTER_REPLICAS:-${TENCENTCLOUD_TEMPLATECENTER_REPLICAS:-1}}"
 	export TF_VAR_cube_api_replicas="${TENCENTCLOUD_CUBE_API_REPLICAS:-1}"
 	export TF_VAR_cube_ops_replicas="${TENCENTCLOUD_CUBE_OPS_REPLICAS:-2}"
 	export TF_VAR_cube_proxy_replicas="${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}"
@@ -4389,7 +4391,7 @@ TENCENTCLOUD_WEBUI_IMAGE='${TF_VAR_webui_image:-${TENCENTCLOUD_WEBUI_IMAGE:-}}'
 TENCENTCLOUD_TKE_CLUSTER_VERSION='${TKE_CLUSTER_VERSION:-1.34.1}'
 TENCENTCLOUD_TKE_NODE_COUNT='${TKE_NODE_COUNT:-2}'
 TENCENTCLOUD_CUBEMASTER_REPLICAS='${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}'
-TENCENTCLOUD_TEMPLATECENTER_REPLICAS='${TF_VAR_templatecenter_replicas:-${TENCENTCLOUD_TEMPLATECENTER_REPLICAS:-1}}'
+TENCENTCLOUD_CUBETEMPLATECENTER_REPLICAS='${TF_VAR_templatecenter_replicas:-${TENCENTCLOUD_CUBETEMPLATECENTER_REPLICAS:-${TENCENTCLOUD_TEMPLATECENTER_REPLICAS:-1}}}'
 TENCENTCLOUD_CUBE_API_REPLICAS='${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-1}}'
 TENCENTCLOUD_CUBE_OPS_REPLICAS='${TF_VAR_cube_ops_replicas:-${TENCENTCLOUD_CUBE_OPS_REPLICAS:-2}}'
 TENCENTCLOUD_CUBE_PROXY_REPLICAS='${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}}'
@@ -4606,7 +4608,7 @@ write_resolved_tfvars_file() {
 		--arg cube_lifecycle_manager_image "${TF_VAR_cube_lifecycle_manager_image:-${TENCENTCLOUD_CUBE_LIFECYCLE_MANAGER_IMAGE:-}}" \
 		--arg webui_image "${TF_VAR_webui_image:-${TENCENTCLOUD_WEBUI_IMAGE:-}}" \
 		--argjson cubemaster_replicas "$(_number_or_default "${TF_VAR_cubemaster_replicas:-${TENCENTCLOUD_CUBEMASTER_REPLICAS:-1}}" 1)" \
-		--argjson templatecenter_replicas "$(_number_or_default "${TF_VAR_templatecenter_replicas:-${TENCENTCLOUD_TEMPLATECENTER_REPLICAS:-1}}" 1)" \
+		--argjson templatecenter_replicas "$(_number_or_default "${TF_VAR_templatecenter_replicas:-${TENCENTCLOUD_CUBETEMPLATECENTER_REPLICAS:-${TENCENTCLOUD_TEMPLATECENTER_REPLICAS:-1}}}" 1)" \
 		--argjson cube_api_replicas "$(_number_or_default "${TF_VAR_cube_api_replicas:-${TENCENTCLOUD_CUBE_API_REPLICAS:-1}}" 1)" \
 		--argjson cube_ops_replicas "$(_number_or_default "${TF_VAR_cube_ops_replicas:-${TENCENTCLOUD_CUBE_OPS_REPLICAS:-2}}" 2)" \
 		--argjson cube_proxy_replicas "$(_number_or_default "${TF_VAR_cube_proxy_replicas:-${TENCENTCLOUD_CUBE_PROXY_REPLICAS:-1}}" 1)" \

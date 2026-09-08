@@ -589,6 +589,12 @@ func (l testCompressedLayer) Compressed() (io.ReadCloser, error) {
 	return l.rc, nil
 }
 
+// Digest must exist because StreamRegistryToDir builds its layer-cache key
+// from layer.Digest(); the embedded nil v1.Layer would panic there.
+func (l testCompressedLayer) Digest() (v1.Hash, error) {
+	return v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("a", 64)}, nil
+}
+
 type cancelOnReadCloser struct {
 	cancel   context.CancelFunc
 	canceled chan struct{}
@@ -737,6 +743,12 @@ type gatedCompressedLayer struct {
 
 func (l gatedCompressedLayer) Compressed() (io.ReadCloser, error) {
 	return &gatedReader{data: l.data, gate: l.gate, started: l.started}, nil
+}
+
+// Digest must exist because StreamRegistryToDir builds its layer-cache key
+// from layer.Digest(); the embedded nil v1.Layer would panic there.
+func (l gatedCompressedLayer) Digest() (v1.Hash, error) {
+	return v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("b", 64)}, nil
 }
 
 type gatedReader struct {

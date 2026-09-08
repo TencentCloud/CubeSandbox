@@ -13,12 +13,28 @@ spec:
   # the durable copy lives in S3, local disk is scratch, and replicas coordinate
   # duplicate builds through DB session locks.
   replicas: {{ .Values.controlPlane.templateCenter.replicas | default 1 }}
-  # Recreate, never RollingUpdate: a build is in-memory progress state, so a
-  # surge Pod cannot take over an interrupted build from the outgoing Pod. The
-  # reconciler (pkg/reconcile) marks stale builds as FAILED after a timeout;
-  # the client must retry.
+  {{- if gt (int (.Values.controlPlane.templateCenter.replicas | default 1)) 1 }}
+  # Multi-replica (s3Backed) mode: RollingUpdate with maxUnavailable=0 keeps
+  # the fleet at full strength through an upgrade -- Recreate would stop ALL
+  # replicas before starting the new ones, killing every in-flight build at
+  # once. The build running on a terminated Pod is still lost (builds are
+  # in-memory progress state; the reconciler marks them FAILED after a
+  # timeout and the client retries), but the other replicas keep building
+  # and a surge Pod picks up new submissions immediately.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  {{- else }}
+  # Single replica: Recreate, never RollingUpdate -- a surge Pod cannot take
+  # over an interrupted build from the outgoing Pod (builds are in-memory
+  # progress state), and with one replica there is no fleet availability to
+  # preserve anyway. The reconciler (pkg/reconcile) marks stale builds as
+  # FAILED after a timeout; the client must retry.
   strategy:
     type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "cube.selectorLabels" . | nindent 6 }}
@@ -106,8 +122,11 @@ spec:
                   key: cube-template-callback-token
             # S3/MinIO artifact storage. TC reads the SAME CUBE_S3_* variables
             # that Cubelet / s3lvol / volume plugins use, so S3 is configured
-            # once for the whole deployment (typically via .Values.global.env or
-            # the s3lvol section). No templateCenter-specific S3 settings needed.
+            # once for the whole deployment. cube.artifactS3Env injects the
+            # s3Backed set from volumeS3.* / builtin MinIO when global.env does
+            # not carry it; placed before global.env so an operator entry still
+            # wins.
+            {{- include "cube.artifactS3Env" . | nindent 12 }}
             {{- with .Values.global.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

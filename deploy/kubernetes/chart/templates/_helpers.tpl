@@ -694,6 +694,84 @@ us-east-1
 {{- end -}}
 
 {{/*
+Artifact-store S3 env (CUBE_S3_*) for the cube-master and cube-templatecenter
+pods when controlPlane.artifactStore.s3Backed=true. These are the exact names
+TC's S3Config and CubeMaster's artifact_url_refresh read. Resolution mirrors
+the one-click fill: volumeS3.* is the source of truth, chart MinIO the
+fallback. AK/SK go through the release Secret (s3-artifact-* keys rendered in
+secret.yaml) so they never appear in pod YAML.
+*/}}
+{{- define "cube.artifactS3Bucket" -}}
+{{- $volumeS3 := default dict .Values.volumeS3 -}}
+{{- if ne (($volumeS3.bucket) | default "") "" -}}
+{{- $volumeS3.bucket -}}
+{{- else -}}
+{{- (.Values.minio).bucket | default "cube-volumes" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+True when global.env already carries a COMPLETE CUBE_S3_* set (operator-managed
+S3 env; the chart then injects nothing). Both the modern key names and the
+legacy CUBE_S3_ACCESS_KEY / CUBE_S3_SECRET_KEY fallbacks the binaries still
+read count as complete.
+*/}}
+{{- define "cube.globalEnvS3State" -}}
+{{- $endpoint := false -}}
+{{- $bucket := false -}}
+{{- $ak := false -}}
+{{- $sk := false -}}
+{{- range ((.Values.global).env | default list) -}}
+{{- $n := .name | default "" -}}
+{{- if eq $n "CUBE_S3_ENDPOINT" }}{{- $endpoint = true -}}{{- end -}}
+{{- if eq $n "CUBE_S3_BUCKET" }}{{- $bucket = true -}}{{- end -}}
+{{- if or (eq $n "CUBE_S3_ACCESS_KEY_ID") (eq $n "CUBE_S3_ACCESS_KEY") }}{{- $ak = true -}}{{- end -}}
+{{- if or (eq $n "CUBE_S3_SECRET_ACCESS_KEY") (eq $n "CUBE_S3_SECRET_KEY") }}{{- $sk = true -}}{{- end -}}
+{{- end -}}
+{{- if and $endpoint $bucket $ak $sk -}}complete{{- else if $endpoint -}}partial{{- else -}}absent{{- end -}}
+{{- end -}}
+
+{{/*
+True when the chart can inject a COMPLETE CUBE_S3_* set into the master/TC
+pods: endpoint resolvable (volumeS3.endpoint or builtin MinIO) and credentials
+available in env-injectable form (volumeS3.accessKeyId + secretAccessKey
+rendered into the release Secret, or the builtin MinIO root credentials).
+volumeS3.existingSecret ships a volume-s3.conf FILE, not env keys, so it
+cannot feed env injection -- combine it with global.env instead.
+*/}}
+{{- define "cube.artifactS3Injectable" -}}
+{{- $volumeS3 := default dict .Values.volumeS3 -}}
+{{- $hasPlainCreds := and (ne (($volumeS3.accessKeyId) | default "") "") (ne (($volumeS3.secretAccessKey) | default "") "") -}}
+{{- if and (ne (include "cube.volumeS3EffectiveEndpoint" .) "") (or $hasPlainCreds (eq (include "cube.minioBuiltinEnabled" .) "true")) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{/*
+The CUBE_S3_* env block rendered into BOTH the cube-master and
+cube-templatecenter Deployments. Emitted only when s3Backed=true and
+global.env does not already carry the set; placed BEFORE the global.env block
+so an operator entry with the same name still wins (on duplicate env names
+kubelet keeps the last one).
+*/}}
+{{- define "cube.artifactS3Env" -}}
+{{- if and (((.Values.controlPlane.artifactStore).s3Backed) | default false) (eq (include "cube.globalEnvS3State" .) "absent") (eq (include "cube.artifactS3Injectable" .) "true") }}
+- name: CUBE_S3_ENDPOINT
+  value: {{ include "cube.volumeS3EffectiveEndpoint" . | quote }}
+- name: CUBE_S3_BUCKET
+  value: {{ include "cube.artifactS3Bucket" . | quote }}
+- name: CUBE_S3_ACCESS_KEY_ID
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "cube.secretName" . }}
+      key: s3-artifact-access-key-id
+- name: CUBE_S3_SECRET_ACCESS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "cube.secretName" . }}
+      key: s3-artifact-secret-access-key
+{{- end }}
+{{- end -}}
+
+{{/*
 Effective S3 plugin endpoint. volumeS3.* is the source of truth; when MinIO is
 enabled and the operator left volumeS3.endpoint empty, fill from chart MinIO
 (same as one-click filling CUBE_S3_* after deploying MinIO).

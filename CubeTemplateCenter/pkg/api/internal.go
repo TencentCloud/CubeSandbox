@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 
@@ -112,29 +113,48 @@ var sharedTokenWarnOnce sync.Once
 // same shared secret TC attaches to its build-status callbacks
 // (constants.TemplateCallbackTokenEnv / constants.TemplateCallbackTokenHeader).
 // These endpoints can start builds and delete artifacts, so they must not
-// stay anonymous to anything that can reach the HTTP listener. When the env
-// is unset the request is allowed (rolling-upgrade compatibility with a
-// CubeMaster that does not send the header yet) and a warning is logged
-// once; when it is set, a missing/mismatched header is rejected with 401.
-// The chart, one-click installer and Terraform all generate the secret on
-// both sides, so deployed environments always enforce it.
+// stay anonymous to anything that can reach the HTTP listener.
+//
+// Fail closed: the chart, one-click installer and Terraform all generate the
+// secret on both sides, so an unset token is a misconfiguration, not a
+// supported mode. Allowing requests through would leave build submit and
+// artifact delete anonymous.
 func internalAPIAuthorized(c *gin.Context) bool {
 	want := strings.TrimSpace(tcconfig.CallbackToken())
 	if want == "" {
-		sharedTokenWarnOnce.Do(func() {
-			log.G(c.Request.Context()).Warnf(
-				"%s is not set: TC internal API (build submit / artifact delete) is unauthenticated; set it on both CubeMaster and CubeTemplateCenter",
-				constants.TemplateCallbackTokenEnv)
-		})
-		return true
+		return false
 	}
 	got := strings.TrimSpace(c.GetHeader(constants.TemplateCallbackTokenHeader))
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 // internalAuthMiddleware rejects unauthenticated calls to the internal API.
+//
+// Token unset fails CLOSED: the chart, one-click installer and Terraform all
+// generate the shared secret on both sides, so an unset token is a
+// misconfiguration. The only exception is the explicit dev opt-in
+// (constants.TemplateCallbackInsecureNoTokenEnv, single-binary local runs
+// only) — matching CubeMaster's callback gate.
 func internalAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if strings.TrimSpace(tcconfig.CallbackToken()) == "" {
+			if strings.EqualFold(strings.TrimSpace(os.Getenv(constants.TemplateCallbackInsecureNoTokenEnv)), "true") {
+				sharedTokenWarnOnce.Do(func() {
+					log.G(c.Request.Context()).Warnf(
+						"%s is not set and %s=true: TC internal API (build submit / artifact delete) is UNAUTHENTICATED (single-binary dev mode); never enable this in a deployed environment",
+						constants.TemplateCallbackTokenEnv, constants.TemplateCallbackInsecureNoTokenEnv)
+				})
+				c.Next()
+				return
+			}
+			sharedTokenWarnOnce.Do(func() {
+				log.G(c.Request.Context()).Errorf(
+					"%s is not set: TC internal API (build submit / artifact delete) refuses all calls; set it on both CubeMaster and CubeTemplateCenter (or %s=true for single-binary local dev)",
+					constants.TemplateCallbackTokenEnv, constants.TemplateCallbackInsecureNoTokenEnv)
+			})
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, ErrorResponse{Error: constants.TemplateCallbackTokenEnv + " is not configured on template center"})
+			return
+		}
 		if !internalAPIAuthorized(c) {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "invalid or missing shared token"})
 			return

@@ -69,6 +69,10 @@ spec:
             # credentials TC / cubelet / s3lvol read; without them it can only
             # hand out the stored presigned URL, which dies 7 days after the
             # build.
+            # cube.artifactS3Env injects the s3Backed CUBE_S3_* set from
+            # volumeS3.* / builtin MinIO when global.env does not carry it;
+            # placed before global.env so an operator entry still wins.
+            {{- include "cube.artifactS3Env" . | nindent 12 }}
             {{- with .Values.global.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

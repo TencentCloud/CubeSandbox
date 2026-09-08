@@ -1428,6 +1428,10 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 	artifactData := []byte("artifact-data")
 	artifactPath, artifactSHA := writeRootfsArtifactTestFile(t, artifactData)
 	targets := []*node.Node{{InsID: "node-a", IP: "10.0.0.1", Healthy: true}}
+	// The row as this redo first observes it: the previous build FAILED, so
+	// the reusability gate rejects it and the redo downgrades to the
+	// BUILDING_EXT4 branch -- the only path that still reloads the row under
+	// artifactBuildLocks (prepareRootfsArtifactForRedoBuild).
 	staleArtifact := &models.RootfsArtifact{
 		ArtifactID:              artifactID,
 		TemplateSpecFingerprint: "fingerprint-1",
@@ -1435,12 +1439,15 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 		Ext4SHA256:              artifactSHA,
 		Ext4SizeBytes:           int64(len(artifactData)),
 		DownloadToken:           staleToken,
-		Status:                  ArtifactStatusReady,
+		Status:                  ArtifactStatusFailed,
 		GeneratedRequestJSON:    `{}`,
 		ImageConfigJSON:         `{}`,
 		SourceImageDigest:       "sha256:digest",
 	}
+	// The row a concurrent rebuild commits while this redo waits on the build
+	// lock: READY again with a fresh token/sha the redo must pick up.
 	freshArtifact := *staleArtifact
+	freshArtifact.Status = ArtifactStatusReady
 	freshArtifact.DownloadToken = freshToken
 	freshArtifact.Ext4SHA256 = strings.Repeat("b", 64)
 
@@ -1494,10 +1501,20 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 		lookupCalls++
 		switch lookupCalls {
 		case 1:
+			// Reusability gate (unlocked): previous build failed -> not
+			// reusable, so the redo downgrades to BUILDING_EXT4.
 			close(initialRead)
 			copy := *staleArtifact
 			return &copy, nil
 		case 2:
+			// Foreign-artifact re-check on the downgrade path (unlocked): a
+			// plain local failure, not held by another CubeMaster.
+			copy := *staleArtifact
+			return &copy, nil
+		case 3:
+			// Locked reload inside prepareRootfsArtifactForRedoBuild. This is
+			// the lookup the build lock exists for: it must observe the row
+			// the concurrent rebuild committed.
 			close(lockedReload)
 			copy := freshArtifact
 			return &copy, nil
@@ -1517,7 +1534,7 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 		}
 		return targets, 1, 1, 0, nil
 	})
-	patches.ApplyFunc(cleanupTemplateReplicasOnNodes, func(ctx context.Context, templateID string, replicas []models.TemplateReplica, targets []*node.Node) error {
+	patches.ApplyFunc(cleanupTemplateReplicasOnNodes, func(ctx context.Context, templateID string, replicas []models.TemplateReplica, targets []*node.Node, backend string) error {
 		return nil
 	})
 	patches.ApplyFunc(ensureTemplateDefinitionWithOptions, func(ctx context.Context, templateID string, storedReq *types.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) (bool, error) {
@@ -1547,6 +1564,10 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("redo did not read the stale artifact")
 	}
+	// The decisive reload must happen under the build lock. The gate and the
+	// foreign re-check (lookups 1-2) may run unlocked, but the lookup that
+	// decides which artifact version gets distributed (lookup 3, inside
+	// prepareRootfsArtifactForRedoBuild) must not fire before the lock.
 	select {
 	case <-lockedReload:
 		t.Fatal("redo reloaded the artifact before acquiring the build lock")
@@ -1563,8 +1584,8 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("redo did not finish after the build lock was released")
 	}
-	if lookupCalls != 2 {
-		t.Fatalf("artifact lookups = %d, want initial read plus locked reload", lookupCalls)
+	if lookupCalls != 3 {
+		t.Fatalf("artifact lookups = %d, want reusability gate + foreign re-check + locked reload", lookupCalls)
 	}
 	if distributedToken != freshToken || generatedToken != freshToken {
 		t.Fatalf("distributed token=%q generated token=%q, want refreshed %q", distributedToken, generatedToken, freshToken)
@@ -1627,13 +1648,22 @@ func TestRunRedoTemplateImageJobFailsOnArtifactReloadError(t *testing.T) {
 		TemplateID: "tpl-1",
 	}, "http://master.example")
 
-	if lookupCalls != 2 {
-		t.Fatalf("artifact lookups = %d, want initial read plus locked reload", lookupCalls)
+	// Current lookup ordering: (1) the reusability gate, (2) the
+	// foreign-artifact re-check on the downgrade path, (3) the locked reload
+	// inside prepareRootfsArtifactForRedoBuild. The injected DB error hits
+	// lookups 2-3, so the locked reload fails as well: the redo must fail
+	// closed rather than reuse bytes it could not verify.
+	if lookupCalls != 3 {
+		t.Fatalf("artifact lookups = %d, want reusability gate + foreign re-check + locked reload", lookupCalls)
 	}
-	if lastUpdate == nil || lastUpdate["status"] != JobStatusFailed || lastUpdate["phase"] != JobPhaseDistributing {
+	if lastUpdate == nil || lastUpdate["status"] != JobStatusFailed || lastUpdate["phase"] != JobPhaseBuildingExt4 {
 		t.Fatalf("unexpected redo failure update: %+v", lastUpdate)
 	}
-	if got, _ := lastUpdate["error_message"].(string); !strings.Contains(got, reloadErr.Error()) || !strings.Contains(got, "after acquiring build lock") {
+	// prepareRootfsArtifactForRedoBuild deliberately collapses the reload
+	// error into "not reusable", and with local ext4 builds disabled in
+	// CubeMaster the only honest outcome is failing the job so the caller
+	// forwards a full rebuild to CubeTemplateCenter.
+	if got, _ := lastUpdate["error_message"].(string); !strings.Contains(got, "full rebuild") || !strings.Contains(got, "CubeTemplateCenter") {
 		t.Fatalf("unexpected reload failure message: %q", got)
 	}
 }

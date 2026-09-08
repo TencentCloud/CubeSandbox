@@ -56,19 +56,44 @@ var templateJobIntColumns = map[string]bool{
 // callbackTokenWarnOnce rate-limits the "unauthenticated endpoint" warning.
 var callbackTokenWarnOnce sync.Once
 
+// templateCallbackConfigured reports whether the shared callback token is
+// set. When it is not, the endpoint fails CLOSED: this handler trusts the
+// BUILT payload wholesale (artifact_url / ext4_path / image config become
+// the rootfs every node boots from), so an anonymous caller could point
+// Cubelet at an attacker-controlled rootfs. The chart, one-click installer
+// and Terraform all generate the token on both sides, so an unset token is
+// a misconfiguration, not a supported mode. The only accepted exception is
+// an explicit opt-in via constants.TemplateCallbackInsecureNoTokenEnv,
+// intended for single-binary local development.
+func templateCallbackConfigured(c *gin.Context) bool {
+	if strings.TrimSpace(os.Getenv(constants.TemplateCallbackTokenEnv)) != "" {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv(constants.TemplateCallbackInsecureNoTokenEnv)), "true") {
+		callbackTokenWarnOnce.Do(func() {
+			log.G(c.Request.Context()).Warnf(
+				"%s is not set and %s=true: template job status callback is UNAUTHENTICATED (single-binary dev mode); never enable this in a deployed environment",
+				constants.TemplateCallbackTokenEnv, constants.TemplateCallbackInsecureNoTokenEnv)
+		})
+		return true
+	}
+	callbackTokenWarnOnce.Do(func() {
+		log.G(c.Request.Context()).Errorf(
+			"%s is not set: refusing template job status callbacks; set it on both CubeMaster and CubeTemplateCenter (or %s=true for single-binary local dev)",
+			constants.TemplateCallbackTokenEnv, constants.TemplateCallbackInsecureNoTokenEnv)
+	})
+	return false
+}
+
 // templateCallbackAuthorized gates the status callback on the shared secret
-// from constants.TemplateCallbackTokenEnv. When the env is empty the request
-// is allowed (rolling-upgrade compatibility with an older TC) and a warning
-// is logged once; when it is set, a missing/mismatched header is rejected
-// with 401 so a forged BUILT report cannot poison the rootfs pipeline.
+// from constants.TemplateCallbackTokenEnv: a missing/mismatched header is
+// rejected with 401 so a forged BUILT report cannot poison the rootfs
+// pipeline. Callers must check templateCallbackConfigured first.
 func templateCallbackAuthorized(c *gin.Context) bool {
 	want := strings.TrimSpace(os.Getenv(constants.TemplateCallbackTokenEnv))
 	if want == "" {
-		callbackTokenWarnOnce.Do(func() {
-			log.G(c.Request.Context()).Warnf(
-				"%s is not set: template job status callback is unauthenticated; set it on both CubeMaster and CubeTemplateCenter",
-				constants.TemplateCallbackTokenEnv)
-		})
+		// Token-less mode is only reachable through the explicit dev opt-in
+		// (templateCallbackConfigured), which already logged its warning.
 		return true
 	}
 	got := strings.TrimSpace(c.GetHeader(constants.TemplateCallbackTokenHeader))
@@ -84,6 +109,10 @@ func templateCallbackAuthorized(c *gin.Context) bool {
 // sha / path become the rootfs nodes boot from), so it is gated on the shared
 // callback token — see templateCallbackAuthorized.
 func handleTemplateJobStatusCallback(c *gin.Context) {
+	if !templateCallbackConfigured(c) {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": constants.TemplateCallbackTokenEnv + " is not configured on CubeMaster"})
+		return
+	}
 	if !templateCallbackAuthorized(c) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or missing callback token"})
 		return

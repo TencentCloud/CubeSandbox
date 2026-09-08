@@ -157,12 +157,14 @@ func (c *layerCache) Put(ctx context.Context, digest string, data io.Reader, siz
 		return "", fmt.Errorf("layer cache disabled")
 	}
 	finalPath := c.blobPath(digest)
-	tmpPath := finalPath + layerCacheTmpSuffix + "-" + strconv.Itoa(os.Getpid())
-
-	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	// Unique tmp path per writer. The previous <digest>.tmp-<pid> form was
+	// shared by every in-process build of the same digest, so one side's
+	// Abort/cleanup unlinked the other's not-yet-renamed file.
+	f, err := os.CreateTemp(filepath.Dir(finalPath), filepath.Base(finalPath)+layerCacheTmpSuffix+"-*")
 	if err != nil {
 		return "", fmt.Errorf("create tmp blob: %w", err)
 	}
+	tmpPath := f.Name()
 	h := sha256.New()
 	w := io.MultiWriter(f, h)
 	n, err := io.Copy(w, data)
@@ -317,14 +319,16 @@ func newLayerCacheTeeWriter(ctx context.Context, c *layerCache, digest string) *
 		digest: digest,
 		hash:   sha256.New(),
 	}
-	tmpPath := c.blobPath(digest) + layerCacheTmpSuffix + "-" + strconv.Itoa(os.Getpid())
-	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	// Unique tmp path per writer (see Put): a shared <digest>.tmp-<pid> path
+	// let a concurrent build's Abort unlink this writer's in-flight file.
+	blobPath := c.blobPath(digest)
+	f, err := os.CreateTemp(filepath.Dir(blobPath), filepath.Base(blobPath)+layerCacheTmpSuffix+"-*")
 	if err != nil {
 		w.err = err
 		return w
 	}
 	w.tmp = f
-	w.tmpPath = tmpPath
+	w.tmpPath = f.Name()
 	return w
 }
 
@@ -421,7 +425,10 @@ func (c *layerCache) scanBlobs() (int64, []blobEntry, error) {
 	var entries []blobEntry
 	for _, fi := range files {
 		name := fi.Name()
-		if strings.HasSuffix(name, layerCacheMetaSuffix) || strings.HasSuffix(name, layerCacheTmpSuffix) {
+		// Skip sidecars and in-flight tmp files. Tmp names carry a random
+		// suffix (<digest>.tmp-NNN), so matching only the ".tmp" suffix would
+		// count them as blobs and could evict a file mid-write.
+		if strings.HasSuffix(name, layerCacheMetaSuffix) || strings.HasSuffix(name, layerCacheTmpSuffix) || strings.Contains(name, layerCacheTmpSuffix+"-") {
 			continue
 		}
 		info, err := fi.Info()

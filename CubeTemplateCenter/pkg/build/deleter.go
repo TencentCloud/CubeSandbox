@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
@@ -58,11 +59,13 @@ var artifactTableName = constants.RootfsArtifactTableName
 // concurrent deletes: the row status transition to DELETING acts as the
 // claim; a second caller sees status != CLEANUP_PENDING and returns nil.
 //
-// Failure handling: individual step failures (S3, local file) are logged but
-// do NOT abort the row deletion — leaving the row behind would block template
-// re-creation forever (fingerprint reuse check would keep finding it), which
-// is strictly worse than leaking an orphaned S3 object. Orphaned objects are
-// reclaimed by bucket lifecycle rules.
+// Failure handling: if a data-delete step fails (S3 object, local file), the
+// row is NOT removed. It is flipped back to CLEANUP_PENDING with the error
+// recorded in last_error, so the reconciler's backstop sweep retries it after
+// the grace period instead of the leak becoming invisible. Destroying the row
+// to unblock a same-spec rebuild would orphan the very data the row was the
+// only record of; rebuilds are unblocked by the claim path instead (a new
+// build mints a fresh artifact_id — see buildArtifactID's UUID suffix).
 func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 	artifactID = strings.TrimSpace(artifactID)
 	if artifactID == "" {
@@ -100,9 +103,11 @@ func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 	}
 
 	// Delete the S3 object when the artifact was uploaded.
+	var dataErrs []error
 	if d.s3Client != nil && artifact.ArtifactURL != "" {
 		if err := d.s3Client.Delete(ctx, artifact.ArtifactID); err != nil {
-			logger.Warnf("delete s3 object fail (row will still be removed): %v", err)
+			logger.Warnf("delete s3 object fail: %v", err)
+			dataErrs = append(dataErrs, fmt.Errorf("delete s3 object: %w", err))
 		} else {
 			logger.Infof("deleted s3 object for artifact")
 		}
@@ -112,10 +117,30 @@ func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 	// artifact root (path-traversal guard).
 	if artifact.Ext4Path != "" {
 		if err := deleteLocalExt4(artifact.Ext4Path); err != nil {
-			logger.Warnf("delete local ext4 fail (row will still be removed): %v", err)
+			logger.Warnf("delete local ext4 fail: %v", err)
+			dataErrs = append(dataErrs, fmt.Errorf("delete local ext4: %w", err))
 		} else {
 			logger.Infof("deleted local ext4 %s", artifact.Ext4Path)
 		}
+	}
+
+	if len(dataErrs) > 0 {
+		// Fail closed: restore the row as a retryable CLEANUP_PENDING marker
+		// (with the error recorded) instead of deleting it and orphaning the
+		// data it describes. updated_at restarts the reconciler's grace
+		// period, so the backstop sweep retries instead of wedging.
+		dataErr := errors.Join(dataErrs...)
+		if uerr := d.db.WithContext(ctx).Table(artifactTableName).
+			Where("artifact_id = ?", artifactID).
+			Where("status = ?", "DELETING").
+			Updates(map[string]any{
+				"status":     "CLEANUP_PENDING",
+				"last_error": dataErr.Error(),
+				"updated_at": time.Now(),
+			}).Error; uerr != nil {
+			return errors.Join(dataErr, fmt.Errorf("restore cleanup-pending marker: %w", uerr))
+		}
+		return fmt.Errorf("artifact data delete incomplete; row kept for retry: %w", dataErr)
 	}
 
 	// Finally remove the row. Hard delete: the row carries no history worth

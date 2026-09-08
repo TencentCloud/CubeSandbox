@@ -18,7 +18,8 @@ The split exists for three reasons:
   answers public API calls shrinks the blast radius.
 - **Resource isolation.** A build spikes CPU/IO; the control plane's latency
   SLO should not depend on how many builds are running.
-- **Independent lifecycle.** TC is a singleton with node-local state; CubeMaster
+- **Independent lifecycle.** TC runs with node-local state (singleton by
+  default; multi-replica in S3-backed mode, §9.1); CubeMaster
   is stateless and horizontally scalable (see §9).
 
 ## 2. Process topology
@@ -29,7 +30,8 @@ The split exists for three reasons:
   receives status callbacks, distributes artifacts to nodes, serves all
   template writes and cached reads.
 - **CubeTemplateCenter** — data plane: pulls images, builds ext4, uploads to
-  S3, reports status back. Exactly one instance (§9.1).
+  S3, reports status back. Singleton by default; multiple replicas are
+  supported in S3-backed mode (§9.1).
 
 ### 2.2 Communication
 
@@ -190,12 +192,20 @@ template forever behind invariant I1 (§3.6).
 
 ## 9. Storage and concurrency
 
-### 9.1 Singleton
+### 9.1 Replica count
 
-TC always runs exactly one instance. Artifacts live on a node-local disk
-behind a ReadWriteOnce PVC; a second replica could neither read the first
-one's ext4 nor take over its builds, and two would race on the same artifact
-directory. Scale CubeMaster (the stateless half) instead.
+With the default node-local artifact store TC runs exactly one instance:
+artifacts live behind a ReadWriteOnce PVC; a second replica could neither
+read the first one's ext4 nor take over its builds, and two would race on the
+same artifact directory.
+
+With `artifactStore.s3Backed=true` the durable copy lives in S3/MinIO and
+local disk is per-Pod build scratch, so multiple TC replicas are supported:
+duplicate builds of the same spec are coordinated through DB session locks
+(§9.2, keyed by the template-spec fingerprint) and the losing replica reuses
+the winner's READY row instead of rebuilding. The Helm chart's validate step
+rejects replicas>1 unless s3Backed is on and the local volume is per-Pod
+scratch (persistence disabled, hostPath, or emptyDir).
 
 ### 9.2 DB locks
 
@@ -212,9 +222,10 @@ running the same three-phase cleanup as online deletion (§9.5).
 
 ### 9.4 Job ownership
 
-The jobs table has no owner column: after a TC restart any TC instance (there
-is only one, §9.1) reconciles every stale job. Progress reports refresh the
-staleness clock.
+The jobs table has no owner column: after a TC restart any TC instance
+reconciles every stale job (the sweep itself is singleton per tick via the
+session lock, §9.2, regardless of replica count). Progress reports refresh
+the staleness clock.
 
 ### 9.5 Artifact deletion
 

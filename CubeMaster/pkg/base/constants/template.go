@@ -13,10 +13,18 @@ const (
 	// public HTTP port.
 	TemplateCallbackTokenHeader = "X-Cube-Template-Callback-Token"
 	// TemplateCallbackTokenEnv is the environment variable both sides read the
-	// shared secret from. When unset on CubeMaster the callback stays open
-	// (with a warning) so an older TC keeps working during a rolling upgrade;
-	// the chart and one-click installers always generate one.
+	// shared secret from. The chart, one-click installer and Terraform always
+	// generate one; when it is unset both ends fail CLOSED (the callback and
+	// TC's internal API refuse all calls) unless the operator explicitly opts
+	// into token-less mode via TemplateCallbackInsecureNoTokenEnv.
 	TemplateCallbackTokenEnv = "CUBE_TEMPLATE_CALLBACK_TOKEN"
+	// TemplateCallbackInsecureNoTokenEnv is the explicit escape hatch for
+	// running WITHOUT the callback token: only acceptable in a single-binary
+	// local dev setup where the listener never leaves the loopback host. Set
+	// to "true" on BOTH CubeMaster and CubeTemplateCenter. Never set it in a
+	// deployed environment — a forged BUILT report becomes the rootfs every
+	// node boots from.
+	TemplateCallbackInsecureNoTokenEnv = "CUBE_TEMPLATE_CALLBACK_INSECURE_NO_TOKEN"
 )
 
 func GetAppSnapshotVersion(annotations map[string]string) string {

@@ -7,6 +7,7 @@ package templatecenter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,23 +19,25 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"gorm.io/gorm"
 )
 
 // resumeArtifactLocks serializes concurrent resume attempts for the same
-// rootfs artifact. A resume can be triggered from two sources at once: the
-// internal status callback goroutine (TC reports BUILT) and the image-job
-// reconciler (which replays jobs stuck in BUILT). Without a mutex both would
-// run the register/distribute pipeline concurrently and regenerate the
-// artifact's DownloadToken -- the in-flight download from the first attempt
-// then 404s.
+// template-spec fingerprint. A resume can be triggered from two sources at
+// once: the internal status callback goroutine (TC reports BUILT) and the
+// image-job reconciler (which replays jobs stuck in BUILT). Without a mutex
+// both would run the register/distribute pipeline concurrently and
+// regenerate the artifact's DownloadToken -- the in-flight download from the
+// first attempt then 404s.
 //
-// Keyed by artifact_id, NOT job_id: the resource actually being mutated by
-// registerRemoteBuiltArtifact/finalizeRemoteArtifact is the rootfs_artifacts
-// row, and two DIFFERENT job_ids can resolve to the SAME artifact_id (e.g. a
-// dedup/reuse hit, or a redo job that redistributes an already-built
-// artifact). A per-job_id lock does not serialize those cases at all, so the
-// DownloadToken race the lock exists to prevent could still happen across
-// job_id boundaries. Locking by artifact_id closes that gap.
+// Keyed by FINGERPRINT, not artifact_id or job_id: buildArtifactID mints a
+// UUID-suffixed artifact_id per build, so two concurrent same-spec builds
+// report BUILT with DIFFERENT artifact_ids, and the resource they collide on
+// is the fingerprint unique index (idx_artifact_fingerprint) — the second
+// registration's insert fails with Error 1062. Locking by fingerprint
+// serializes exactly that collision (and matches the cluster-wide DB lock
+// withArtifactRegisterLock takes inside registerRemoteBuiltArtifact, which
+// covers the cross-process case this mutex cannot).
 //
 // Entries are reference-counted and removed once no goroutine holds/awaits
 // the lock for that artifact_id. Without this, resumeArtifactLocks used to
@@ -294,14 +297,14 @@ func ResumeTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, r
 		return err
 	}
 
-	// Serialize concurrent resumes of this artifact (callback goroutine +
-	// reconciler replay, possibly from different job_ids that resolved to the
-	// same artifact_id) and re-check the job state under the lock, so a
-	// duplicate or late BUILT report cannot flip an already-terminal job back
-	// through the pipeline or double-register the artifact (which would
+	// Serialize concurrent resumes of this fingerprint (callback goroutine +
+	// reconciler replay, including DIFFERENT job_ids/artifact_ids from
+	// concurrent same-spec builds) and re-check the job state under the lock,
+	// so a duplicate or late BUILT report cannot flip an already-terminal job
+	// back through the pipeline or double-register the artifact (which would
 	// regenerate DownloadToken and break the in-flight download of the first
-	// attempt).
-	release := acquireResumeArtifactLock(result.ArtifactID)
+	// attempt, or hit the fingerprint unique index).
+	release := acquireResumeArtifactLock(result.TemplateSpecFingerprint)
 	defer release()
 
 	job, err := getTemplateImageJobRecordByID(ctx, jobID)
@@ -369,8 +372,14 @@ func ResumeTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, r
 
 	// Step 1 + 2: register the artifact row and derive the create request.
 	logger.Infof("resume step 1/3: register remote-built artifact")
-	artifact, generatedReq, err := registerRemoteBuiltArtifact(ctx, req, result)
+	artifact, generatedReq, adopted, err := registerRemoteBuiltArtifact(ctx, req, result)
 	if err != nil {
+		if errors.Is(err, errArtifactRegisterRetryable) {
+			// Lock contention or a crashed predecessor's row: leave the job in
+			// BUILT — the image-job reconciler replays the resume later.
+			logger.Warnf("resume step 1/3 deferred: %v", err)
+			return err
+		}
 		failErr := fmt.Errorf("register remote artifact: %w", err)
 		logger.Errorf("%v", failErr)
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
@@ -396,11 +405,13 @@ func ResumeTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, r
 		logger.Errorf("update job artifact fail: %v", err)
 	}
 
-	// Step 3: distribute to nodes. builtFreshArtifact is always true here: TC
-	// just produced this ext4, so on failure the artifact is ours to clean up.
-	logger.Infof("resume step 2/3: artifact registered, entering distribution: artifact_status=%s ext4_size_bytes=%d",
-		artifact.Status, artifact.Ext4SizeBytes)
-	err = finishTemplateImageJobAfterArtifact(ctx, jobID, req, artifact, generatedReq, true)
+	// Step 3: distribute to nodes. builtFreshArtifact is true only when THIS
+	// job's build produced the artifact; an adopted row belongs to a peer
+	// build whose replicas may already reference it, so a distribution
+	// failure here must not clean it up.
+	logger.Infof("resume step 2/3: artifact registered, entering distribution: artifact_status=%s ext4_size_bytes=%d adopted=%v",
+		artifact.Status, artifact.Ext4SizeBytes, adopted)
+	err = finishTemplateImageJobAfterArtifact(ctx, jobID, req, artifact, generatedReq, !adopted)
 	if err != nil {
 		logger.Errorf("resume step 3/3 failed: %v", err)
 		return err
@@ -409,34 +420,100 @@ func ResumeTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, r
 	return nil
 }
 
-// registerRemoteBuiltArtifact claims the artifact row (same FOR UPDATE guard
-// local mode uses, so a concurrent delete cannot remove it mid-flight) and
-// finalizes it with the metadata TC reported, instead of building the ext4
-// locally.
-func registerRemoteBuiltArtifact(ctx context.Context, req *types.CreateTemplateFromImageReq, result *RemoteBuildResult) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, error) {
+// registerRemoteBuiltArtifact registers the artifact TC reported in the
+// BUILT callback, instead of building the ext4 locally.
+//
+// The claim+lookup runs under the cluster-wide fingerprint lock
+// (withArtifactRegisterLock, same named lock TC builds hold), and the lookup
+// is fingerprint-FIRST: two concurrent same-spec builds report BUILT with
+// different UUID-suffixed artifact_ids, so an artifact_id-keyed claim cannot
+// see the winner's row and the second insert dies on the fingerprint unique
+// index (Error 1062 / idx_artifact_fingerprint). Under the lock the loser
+// instead ADOPTS the winner's READY row as-is — finalizing it again would
+// regenerate download_token and break the winner's in-flight pulls.
+//
+// adopted=true means the returned artifact was registered by a peer build of
+// the same spec: the caller must NOT treat it as freshly built (no cleanup
+// of it on distribution failure — the winner's replicas may already exist).
+func registerRemoteBuiltArtifact(ctx context.Context, req *types.CreateTemplateFromImageReq, result *RemoteBuildResult) (record *models.RootfsArtifact, generatedReq *types.CreateCubeSandboxReq, adopted bool, err error) {
 	fingerprint := result.TemplateSpecFingerprint
 	if strings.TrimSpace(fingerprint) == "" {
-		return nil, nil, fmt.Errorf("remote build result is missing template_spec_fingerprint")
+		return nil, nil, false, fmt.Errorf("remote build result is missing template_spec_fingerprint")
 	}
 
-	claimed, err := claimRootfsArtifactForBuild(ctx, result.ArtifactID, fingerprint, req, result.SourceImageDigest)
-	if err != nil {
-		return nil, nil, fmt.Errorf("claim artifact row: %w", err)
-	}
-	record := claimed
-	if record == nil {
-		record, err = getRootfsArtifactByID(ctx, result.ArtifactID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("load claimed artifact row: %w", err)
+	err = withArtifactRegisterLock(ctx, fingerprint, func(sess *gorm.DB) error {
+		existing, findErr := findRootfsArtifactByFingerprintForUpdate(sess, fingerprint)
+		switch {
+		case findErr == nil && existing.ArtifactID != result.ArtifactID && existing.Status == ArtifactStatusReady && !existing.DeletedAt.Valid:
+			record = existing
+			adopted = true
+			return nil
+		case findErr == nil && existing.ArtifactID != result.ArtifactID:
+			// A non-READY row under a DIFFERENT artifact_id is a crashed
+			// predecessor's half-registration: a live peer finalizes inside
+			// this same lock, so one cannot be observed mid-flight. The
+			// artifact GC owns that row's lifecycle; leave the job BUILT and
+			// let the image-job reconciler replay once the row is resolved.
+			return fmt.Errorf("%w: fingerprint %.16s held by non-ready artifact %s (status %s, deleted=%v)",
+				errArtifactRegisterRetryable, fingerprint, existing.ArtifactID, existing.Status, existing.DeletedAt.Valid)
+		case findErr != nil && !errors.Is(findErr, gorm.ErrRecordNotFound):
+			return fmt.Errorf("lookup artifact by fingerprint: %w", findErr)
 		}
+
+		// Our own row (same artifact_id — replay/redo) or no row at all: the
+		// pre-existing claim path, now running under the fingerprint lock.
+		claimed, claimErr := claimRootfsArtifactForBuild(ctx, result.ArtifactID, fingerprint, req, result.SourceImageDigest)
+		if claimErr != nil {
+			// Defense in depth: a 1062 on idx_artifact_fingerprint here means
+			// a writer skipped the named lock. Re-read by fingerprint and
+			// adopt a READY winner instead of failing the job.
+			if isDuplicateKeyError(claimErr) {
+				winner, werr := findRootfsArtifactByFingerprintForUpdate(sess, fingerprint)
+				if werr == nil && winner.Status == ArtifactStatusReady && !winner.DeletedAt.Valid {
+					record = winner
+					adopted = true
+					return nil
+				}
+			}
+			return fmt.Errorf("claim artifact row: %w", claimErr)
+		}
+		record = claimed
+		if record == nil {
+			record, err = getRootfsArtifactByID(ctx, result.ArtifactID)
+			if err != nil {
+				return fmt.Errorf("load claimed artifact row: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, false, err
 	}
 
 	imageCfg, err := decodeImageConfigJSON(result.ImageConfigJSON)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 
-	return finalizeRemoteArtifact(ctx, record, req, result, imageCfg)
+	if adopted {
+		// Reuse the winner's finalized row verbatim; only the per-job create
+		// request is derived fresh, from the winner's metadata and THIS job's
+		// request (template_id differs between the two jobs).
+		if cfg, derr := decodeImageConfigJSON(record.ImageConfigJSON); derr == nil {
+			imageCfg = cfg
+		}
+		generatedReq, err = generateTemplateCreateRequest(ctx, req, record, imageCfg, record.MasterNodeIP)
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("generate template create request: %w", err)
+		}
+		return record, generatedReq, true, nil
+	}
+
+	record, generatedReq, err = finalizeRemoteArtifact(ctx, record, req, result, imageCfg)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return record, generatedReq, false, nil
 }
 
 // finalizeRemoteArtifact mirrors finalizeArtifact but sources its values from

@@ -412,6 +412,11 @@ quickcheck_main() {
       check_unit_active cube-sandbox-minio.service
     fi
     check_unit_active cube-sandbox-cubemaster.service
+    # CubeTemplateCenter is mandatory exactly like cubemaster: CubeMaster has
+    # no in-process build fallback, so an inactive/missing TC unit must fail
+    # the quickcheck here rather than surface later as builds dialing a dead
+    # :8090.
+    check_unit_active cube-sandbox-cube-templatecenter.service
     check_unit_active cube-sandbox-cube-api.service
     check_unit_active cube-sandbox-cubeops.service
     check_unit_active cube-sandbox-cube-proxy.service
@@ -440,17 +445,14 @@ quickcheck_main() {
   echo "[quickcheck] 2/4 check cubemaster /notify/health"
   check_http "http://${MASTER_ADDR}/notify/health"
 
-  # CubeTemplateCenter is part of the default control-plane stack
-  # (cube-sandbox-control.target Wants it; CubeMaster has no in-process build
-  # fallback), so every template-from-image build depends on it being up and
-  # reachable at CUBE_TEMPLATE_CENTER_ADDR. Probed whenever the unit is
-  # enabled, so a compute-only or deliberately-stripped deployment is not
-  # failed for a component it does not run.
-  if [[ "${ROLE}" != "compute" ]] \
-      && systemctl is-enabled --quiet cube-sandbox-cube-templatecenter.service 2>/dev/null; then
-    echo "[quickcheck] check cube-sandbox-cube-templatecenter.service + /health"
-    check_unit_active cube-sandbox-cube-templatecenter.service
+  # TC's /health, probed exactly like cubemaster's above: every
+  # template-from-image build is forwarded to CUBE_TEMPLATE_CENTER_ADDR, so
+  # the endpoint the master dials must answer. Runs on the control plane only
+  # (the unit check above already covers the service state there).
+  if [[ "${ROLE}" != "compute" ]]; then
     local TC_ADDR="${CUBE_TEMPLATE_CENTER_ADDR:-http://127.0.0.1:8090}"
+    validate_http_url "${TC_ADDR%/}/health" "CUBE_TEMPLATE_CENTER_ADDR"
+    echo "[quickcheck] check cube-templatecenter /health"
     check_http "${TC_ADDR%/}/health"
   fi
 

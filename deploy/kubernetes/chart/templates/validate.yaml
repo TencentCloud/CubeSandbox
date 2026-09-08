@@ -6,15 +6,19 @@
 {{- $templateCenter := .Values.controlPlane.templateCenter -}}
 {{- $s3Backed := ((.Values.controlPlane.artifactStore).s3Backed) | default false -}}
 {{- if $s3Backed }}
-{{- /* s3Backed only works when S3 credentials actually reach the pods.
-Best-effort evidence check: builtin minio, volumeS3 endpoint, or an explicit
-CUBE_S3_ENDPOINT in global.env. */ -}}
-{{- $hasS3Env := false -}}
-{{- range ((.Values.global).env | default list) -}}
-{{- if eq (.name | default "") "CUBE_S3_ENDPOINT" }}{{- $hasS3Env = true }}{{- end }}
+{{- /* s3Backed only works when a COMPLETE CUBE_S3_* set
+(ENDPOINT+BUCKET+ACCESS_KEY_ID+SECRET_ACCESS_KEY) actually reaches BOTH the
+cube-master and cube-templatecenter pods. The pods get it from exactly two
+places, so validate those -- not "some S3 exists somewhere": operator-rendered
+global.env (cube.globalEnvS3State), or the chart's own injection from
+volumeS3.* / builtin MinIO (cube.artifactS3Env, gated by
+cube.artifactS3Injectable). Without one of them S3Config() silently disables
+S3 and every replica builds to its own node-local disk. */ -}}
+{{- if eq (include "cube.globalEnvS3State" .) "partial" }}
+{{- fail "controlPlane.artifactStore.s3Backed=true: global.env sets CUBE_S3_ENDPOINT but the set is incomplete -- CUBE_S3_BUCKET / CUBE_S3_ACCESS_KEY_ID / CUBE_S3_SECRET_ACCESS_KEY must all be present (the binaries fall back to local disk when any piece is missing)" }}
 {{- end }}
-{{- if and (not $hasS3Env) (ne (include "cube.minioBuiltinEnabled" .) "true") (eq (((.Values.volumeS3).endpoint) | default "") "") }}
-{{- fail "controlPlane.artifactStore.s3Backed=true requires S3/MinIO configuration: set CUBE_S3_ENDPOINT (+bucket/credentials) in global.env, configure volumeS3.endpoint, or enable the chart's builtin minio -- the credentials must reach BOTH the cube-master and cube-templatecenter pods" }}
+{{- if and (eq (include "cube.globalEnvS3State" .) "absent") (ne (include "cube.artifactS3Injectable" .) "true") }}
+{{- fail "controlPlane.artifactStore.s3Backed=true requires a complete CUBE_S3_* set to reach BOTH the cube-master and cube-templatecenter pods: set CUBE_S3_ENDPOINT+BUCKET+ACCESS_KEY_ID+SECRET_ACCESS_KEY in global.env, or make them chart-injectable via volumeS3.endpoint+accessKeyId+secretAccessKey or the builtin minio (volumeS3.existingSecret only ships a volume-s3.conf file and cannot feed env injection -- combine it with global.env)" }}
 {{- end }}
 {{- end }}
 {{- if hasKey $templateCenter "buildMode" }}

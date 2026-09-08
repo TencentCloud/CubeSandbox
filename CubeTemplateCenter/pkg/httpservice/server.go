@@ -114,14 +114,21 @@ func NewInternalHttp(ctx context.Context, cfg *config.Config) (*internalHttp, er
 // files from CubeMaster, which shares TC's artifact directory (one CBS disk /
 // PVC). See docs/dev/templatecenter-design.md §9.7.
 func (s *internalHttp) registerRoutes() {
+	// The internal service-to-service API sits OUTSIDE GinRequestMiddleware:
+	// that middleware's checkAuth rejects unauthenticated calls with an HTTP
+	// 200 business error and never reaches the shared-token gate, and
+	// CubeMaster's tcclient treats StatusCode == 200 as success — with
+	// AuthConf.Enable on, every auth rejection would look like an accepted
+	// build/delete. The shared-token middleware (RegisterInternalRoutes) is
+	// the only gate on these routes; gin.Recovery replaces the panic handling
+	// GinRequestMiddleware provided.
+	internal := s.engine.Group("", gin.Recovery())
+	api.RegisterInternalRoutes(internal)
+
 	root := s.engine.Group("")
 	root.Use(middleware.GinRequestMiddleware())
 	root.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	root.GET("/health", s.healthHandler)
-
-	// Internal build-submission API: CubeMaster pushes jobs to
-	// POST /tc/api/v1/build; TC builds and reports status back.
-	api.RegisterInternalRoutes(root)
 
 	cube.RegisterTemplateRoutes(root.Group(cube.CubeURI()))
 }

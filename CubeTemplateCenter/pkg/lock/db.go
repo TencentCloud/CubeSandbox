@@ -195,13 +195,22 @@ func PinConn(db *gorm.DB) (*sql.Conn, *gorm.DB, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("pin conn: %w", err)
 	}
-	// Pin the gorm.DB to this single *sql.Conn by overriding ConnPool on a
-	// fresh *gorm.DB derived from the caller. Session{NewDB: true} keeps the
-	// Statement clean (no leftover clauses / Error) while db.ConnPool = conn
-	// is the actual pinning — gorm.Session has no ConnPool field, that lives
-	// on *gorm.DB itself (gorm/gorm.go:56).
-	sess := db.Session(&gorm.Session{NewDB: true})
-	sess.ConnPool = conn
+	// Pin the gorm.DB to this single *sql.Conn. Two traps matter here:
+	//
+	//  1. GORM's Raw path reads sess.Statement.ConnPool, NOT the (Config)
+	//     ConnPool field on *gorm.DB. Setting sess.ConnPool alone leaves
+	//     Statement.ConnPool pointing at the original *sql.DB pool, so
+	//     GET_LOCK and RELEASE_LOCK could run on two different physical
+	//     connections and never actually exclude a peer replica.
+	//  2. Session{NewDB: true} does NOT materialize a private Statement — the
+	//     returned handle still shares Statement with its parent until the
+	//     first getInstance() (triggered here via WithContext). Pinning before
+	//     that would mutate the SHARED parent Statement and redirect the whole
+	//     pool through this one connection.
+	//
+	// CubeMaster's image_job_reconciler.go pins the same way.
+	sess := db.Session(&gorm.Session{NewDB: true}).WithContext(context.Background())
+	sess.Statement.ConnPool = conn
 	return conn, sess, nil
 }
 

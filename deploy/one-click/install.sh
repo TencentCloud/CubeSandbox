@@ -2073,9 +2073,10 @@ if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   chmod +x "${INSTALL_PREFIX}/CubeAPI/bin/cube-api"
   chmod +x "${INSTALL_PREFIX}/CubeOps/bin/cubeops" "${INSTALL_PREFIX}/CubeOps/bin/cubeopscli"
   chmod +x "${INSTALL_PREFIX}/CubeMaster/bin/cubemaster" "${INSTALL_PREFIX}/CubeMaster/bin/cubemastercli"
-  # CubeTemplateCenter ships inert: its unit is installed but not enabled, since
-  # CubeMaster defaults to building templates in-process. Guarded with -f so an
-  # older package without the binary still installs.
+  # CubeTemplateCenter is mandatory: CubeMaster no longer builds templates
+  # in-process, so the unit is enabled and started with the control target
+  # (see start_systemd_target). Guarded with -f so an older package without
+  # the binary still installs.
   if [[ -f "${INSTALL_PREFIX}/CubeTemplateCenter/bin/templatecenter" ]]; then
     chmod +x "${INSTALL_PREFIX}/CubeTemplateCenter/bin/templatecenter"
   fi

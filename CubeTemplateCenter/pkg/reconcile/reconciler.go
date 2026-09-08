@@ -259,12 +259,17 @@ func (r *Reconciler) failStaleJobs(ctx context.Context) error {
 
 		msg := r.staleMessage(job, staleAfter)
 
-		// Guard the write with the same status predicate so a job that
-		// finished between the scan and this update is left alone.
+		// Guard the write with the scanned state: the status predicate covers
+		// "finished between scan and update", and the updated_at predicate
+		// covers "reported progress between scan and update" (a progress
+		// report refreshes updated_at while keeping status RUNNING, so
+		// without it a live job is marked FAILED and its later BUILT callback
+		// is rejected by the terminal-state guard).
 		tx := r.db.WithContext(ctx).
 			Table(constants.TemplateImageJobTableName).
 			Where("job_id = ?", job.JobID).
 			Where("status IN ?", []string{templatecenter.JobStatusPending, templatecenter.JobStatusRunning}).
+			Where("updated_at = ?", job.UpdatedAt).
 			Updates(map[string]any{
 				"status":        templatecenter.JobStatusFailed,
 				"progress":      100,
@@ -277,7 +282,7 @@ func (r *Reconciler) failStaleJobs(ctx context.Context) error {
 			continue
 		}
 		if tx.RowsAffected == 0 {
-			log.G(ctx).Infof("reconciler: job %s converged before update, skipped", job.JobID)
+			log.G(ctx).Infof("reconciler: job %s converged or reported progress before update, skipped", job.JobID)
 			continue
 		}
 		log.G(ctx).Warnf("reconciler: marked job %s (template %s) FAILED after %s without progress (status=%s phase=%s)",

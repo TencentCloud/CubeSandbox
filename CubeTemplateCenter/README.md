@@ -14,7 +14,7 @@
 | 产物发给 Cubelet | 从共享磁盘读 | 只写盘 |
 | 跨节点分发 / redo | 负责 | 不负责 |
 
-产物不走网络：两者挂同一块磁盘（`/data/CubeMaster/storage`），TC 写、CubeMaster 读。所以必须同机、单副本。
+产物默认不走网络：两者挂同一块磁盘（`/data/CubeMaster/storage`），TC 写、CubeMaster 读，所以默认必须同机、单副本。配置 S3/MinIO（`controlPlane.artifactStore.s3Backed=true`）后持久副本在对象存储里，本地盘只是构建临时区，此时 TC 和 CubeMaster 都可以多副本（见下文"多副本"）。
 
 ## 配置
 
@@ -41,18 +41,17 @@ export CUBE_MASTER_ADDR=http://127.0.0.1:8089
 
 ## 部署
 
-**Kubernetes（推荐）**，Helm 一个参数：
+**Kubernetes（推荐）**，Helm 直接装（TC 是管控面默认组件，`controlPlane.enabled=true` 时自动部署，没有独立开关）：
 
 ```bash
-helm upgrade --install cube deploy/kubernetes/chart \
-  -n cube-system --set controlPlane.templateCenter.enabled=true
+helm upgrade --install cube deploy/kubernetes/chart -n cube-system
 ```
 
 conf、双向地址、PVC、同节点亲和都自动配好。
 
 **裸机 / one-click**：`cube-sandbox-cube-templatecenter.service` 属于默认管控面组件（control target 的 `Wants=` 已包含，install.sh 会显式 enable），模板构建开箱即用。默认地址 `http://127.0.0.1:8090` 已经由 `cubemaster-start.sh` 导出，跨机部署才需要在 `.one-click.env` 覆盖 `CUBE_TEMPLATE_CENTER_ADDR`。
 
-**为什么只能单副本**：产物在节点本地盘，没有跨节点共享。起第二个副本，读不到第一个的文件，也接不了它的构建，还会抢同一个目录。要高可用，扩 CubeMaster。
+**多副本**：默认节点本地盘模式下只能单副本——产物没有跨节点共享，第二个副本读不到第一个的文件，也接不了它的构建。设置 `controlPlane.artifactStore.s3Backed=true`（持久副本在 S3/MinIO，本地盘只做临时区）后可以多副本：副本之间通过数据库会话锁（`GET_LOCK`，按构建指纹）协调同规格的去重构建，chart 的 validate 会校验前置条件（S3 凭据到达 master 和 TC Pod、本地盘为 per-Pod scratch 等）。
 
 ## API
 

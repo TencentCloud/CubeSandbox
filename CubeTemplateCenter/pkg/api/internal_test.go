@@ -157,15 +157,35 @@ func TestInternalAPIRequiresTokenWhenConfigured(t *testing.T) {
 	}
 }
 
-// With no token configured the endpoint stays open (rolling-upgrade
-// compatibility), matching CubeMaster's callback gate.
-func TestInternalAPIOpenWhenTokenUnset(t *testing.T) {
+// With no token configured the endpoint fails closed: the chart, one-click
+// installer and Terraform all generate the secret on both sides, so an unset
+// token is a misconfiguration. Every call — with or without a header — gets
+// 503 rather than anonymous access to build submit / artifact delete.
+func TestInternalAPIClosedWhenTokenUnset(t *testing.T) {
 	t.Setenv(constants.TemplateCallbackTokenEnv, "")
 	old := artifactDeleter
 	defer func() { artifactDeleter = old }()
 	artifactDeleter = build.NewArtifactDeleter(nil, nil)
 
-	if w := doInternalDelete(t, ""); w.Code == http.StatusUnauthorized {
-		t.Fatalf("token unset must not gate: got 401 body=%s", w.Body.String())
+	if w := doInternalDelete(t, ""); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("token unset must fail closed: expected 503, got %d body=%s", w.Code, w.Body.String())
+	}
+	if w := doInternalDelete(t, "anything"); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("token unset must fail closed even with a header: expected 503, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// The explicit dev opt-in (CUBE_TEMPLATE_CALLBACK_INSECURE_NO_TOKEN=true)
+// re-opens the endpoint for single-binary local runs — the only mode where
+// token-less operation is acceptable.
+func TestInternalAPIOpenWithInsecureDevOptIn(t *testing.T) {
+	t.Setenv(constants.TemplateCallbackTokenEnv, "")
+	t.Setenv(constants.TemplateCallbackInsecureNoTokenEnv, "true")
+	old := artifactDeleter
+	defer func() { artifactDeleter = old }()
+	artifactDeleter = build.NewArtifactDeleter(nil, nil)
+
+	if w := doInternalDelete(t, ""); w.Code == http.StatusUnauthorized || w.Code == http.StatusServiceUnavailable {
+		t.Fatalf("dev opt-in must pass the gate: got %d body=%s", w.Code, w.Body.String())
 	}
 }
