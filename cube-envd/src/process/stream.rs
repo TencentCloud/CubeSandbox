@@ -18,10 +18,8 @@ use serde::Serialize;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::Command,
-    sync::broadcast,
     time,
 };
-use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 
 use crate::{
     auth::{request_user, LocalUser},
@@ -31,15 +29,18 @@ use crate::{
     wire,
 };
 
-use super::model::{
-    EndEvent, Input, OUTPUT_CHUNK_BYTES, PTY_OUTPUT_CHUNK_BYTES, ProcessConfig, ProcessEvent,
-    ProcessInput, ProcessRegistry, PtyRequest, Selector, TerminalRecord,
+use super::{
+    fanout::{OutputFanout, OutputSubscription},
+    model::{
+        EndEvent, Input, ProcessConfig, ProcessEvent, ProcessInput, ProcessRegistry, PtyRequest,
+        Selector, TerminalRecord, OUTPUT_CHUNK_BYTES, PTY_OUTPUT_CHUNK_BYTES,
+    },
 };
 
 /// 启动异步任务读取普通进程的 stdout 或 stderr，并返回等待输出耗尽的句柄。
 pub(super) fn spawn_reader<R>(
     mut reader: R,
-    sender: broadcast::Sender<ProcessEvent>,
+    fanout: OutputFanout,
     stdout: bool,
 ) -> tokio::task::JoinHandle<()>
 where
@@ -56,7 +57,7 @@ where
                     } else {
                         ProcessEvent::Stderr(buffer[..size].to_vec())
                     };
-                    let _ = sender.send(event);
+                    fanout.send(event).await;
                 }
             }
         }
@@ -64,17 +65,22 @@ where
 }
 
 /// 在线程池中阻塞读取 PTY 输出，并返回等待输出耗尽的句柄。
+///
+/// 投递经 `Handle::block_on` 走扇出器：慢订阅者时该阻塞线程停读 PTY，
+/// PTY 缓冲随之填满，把背压传导给子进程。Handle 在调用线程（runtime
+/// 上下文内）获取后移入，避免依赖阻塞池线程的 runtime 上下文。
 pub(super) fn spawn_pty_reader(
     mut reader: Box<dyn Read + Send>,
-    sender: broadcast::Sender<ProcessEvent>,
+    fanout: OutputFanout,
 ) -> tokio::task::JoinHandle<()> {
+    let runtime = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
         let mut buffer = vec![0; PTY_OUTPUT_CHUNK_BYTES];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) | Err(_) => return,
                 Ok(size) => {
-                    let _ = sender.send(ProcessEvent::Pty(buffer[..size].to_vec()));
+                    runtime.block_on(fanout.send(ProcessEvent::Pty(buffer[..size].to_vec())));
                 }
             }
         }
@@ -313,13 +319,13 @@ pub(super) fn send_group_signal(pid: u32, signal: i32) -> nix::Result<()> {
 /// 将进程事件订阅包装为 Connect 流式 HTTP 响应。
 pub(super) fn process_response(
     pid: u32,
-    receiver: broadcast::Receiver<ProcessEvent>,
+    receiver: OutputSubscription,
     keepalive: Duration,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> Response {
     let stream = ProcessStream {
         start: Some(pid),
-        receiver: BroadcastStream::new(receiver),
+        receiver,
         shutdown_wait: Box::pin(shutdown.cancelled_owned()),
         keepalive,
         keepalive_sleep: Box::pin(time::sleep(keepalive)),
@@ -347,12 +353,12 @@ pub(super) fn terminal_response(record: TerminalRecord) -> Response {
         .into_response()
 }
 
-/// 将存活进程广播事件转换为 Connect 服务端流。
+/// 将存活进程事件队列转换为 Connect 服务端流。
 struct ProcessStream {
     /// 尚未发送的初始 PID 事件。
     start: Option<u32>,
-    /// 接收进程输出和结束事件的广播流。
-    receiver: BroadcastStream<ProcessEvent>,
+    /// 接收进程输出和结束事件的订阅队列。
+    receiver: OutputSubscription,
     /// 等待应用全局关闭信号。
     shutdown_wait: Pin<Box<dyn Future<Output = ()> + Send>>,
     /// 两次保活事件之间的间隔。
@@ -375,9 +381,9 @@ impl Stream for ProcessStream {
         context: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         if let Some(pid) = self.start.take() {
-            return std::task::Poll::Ready(Some(Ok(Bytes::from(encode_output(
-                &start_response(pid),
-            )))));
+            return std::task::Poll::Ready(Some(Ok(Bytes::from(encode_output(&start_response(
+                pid,
+            ))))));
         }
         if self.terminal && !self.end_sent {
             self.end_sent = true;
@@ -399,8 +405,8 @@ impl Stream for ProcessStream {
                 &keepalive_response(),
             )))));
         }
-        match std::pin::Pin::new(&mut self.receiver).poll_next(context) {
-            std::task::Poll::Ready(Some(Ok(event))) => {
+        match self.receiver.poll_recv(context) {
+            std::task::Poll::Ready(Some(event)) => {
                 let terminal = matches!(event, ProcessEvent::End(_));
                 let payload = event_response(event);
                 let keepalive = self.keepalive;
@@ -412,14 +418,11 @@ impl Stream for ProcessStream {
                 }
                 std::task::Poll::Ready(Some(Ok(Bytes::from(encode_output(&payload)))))
             }
-            std::task::Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(_)))) => {
+            // 队列关闭：正常路径 End 帧已先行发送，此处仅作异常兜底结束流。
+            std::task::Poll::Ready(None) => {
                 self.end_sent = true;
-                std::task::Poll::Ready(Some(Ok(Bytes::from(end_stream(Some(RpcError::new(
-                    Code::ResourceExhausted,
-                    "process subscriber is too slow",
-                )))))))
+                std::task::Poll::Ready(Some(Ok(Bytes::from(end_stream(None)))))
             }
-            std::task::Poll::Ready(None) => std::task::Poll::Pending,
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
@@ -446,9 +449,7 @@ impl Stream for TerminalStream {
         let message = match self.state {
             0 => {
                 self.state = 1;
-                Some(encode_output(
-                    &start_response(self.pid),
-                ))
+                Some(encode_output(&start_response(self.pid)))
             }
             1 => {
                 self.state = 2;
@@ -491,29 +492,29 @@ fn keepalive_response() -> proto::StartResponse {
 /// 将内部进程事件转换为由生成 protobuf 类型表示的流响应。
 fn event_response(event: ProcessEvent) -> proto::StartResponse {
     let event = match event {
-        ProcessEvent::Stdout(bytes) => proto::process_event::Event::Data(
-            proto::process_event::DataEvent {
+        ProcessEvent::Stdout(bytes) => {
+            proto::process_event::Event::Data(proto::process_event::DataEvent {
                 output: Some(proto::process_event::data_event::Output::Stdout(bytes)),
-            },
-        ),
-        ProcessEvent::Stderr(bytes) => proto::process_event::Event::Data(
-            proto::process_event::DataEvent {
+            })
+        }
+        ProcessEvent::Stderr(bytes) => {
+            proto::process_event::Event::Data(proto::process_event::DataEvent {
                 output: Some(proto::process_event::data_event::Output::Stderr(bytes)),
-            },
-        ),
-        ProcessEvent::Pty(bytes) => proto::process_event::Event::Data(
-            proto::process_event::DataEvent {
+            })
+        }
+        ProcessEvent::Pty(bytes) => {
+            proto::process_event::Event::Data(proto::process_event::DataEvent {
                 output: Some(proto::process_event::data_event::Output::Pty(bytes)),
-            },
-        ),
-        ProcessEvent::End(end) => proto::process_event::Event::End(
-            proto::process_event::EndEvent {
+            })
+        }
+        ProcessEvent::End(end) => {
+            proto::process_event::Event::End(proto::process_event::EndEvent {
                 exit_code: end.exit_code,
                 exited: end.exited,
                 status: end.status,
                 error: end.error,
-            },
-        ),
+            })
+        }
     };
     proto::StartResponse {
         event: Some(proto::ProcessEvent { event: Some(event) }),
