@@ -6,8 +6,8 @@
 //! Mirrors upstream `packages/envd/internal/services/legacy/{interceptor,conversion}.go`
 //! (Go envd 0.5.13). Scope note: upstream registers the interceptor ONLY on the
 //! filesystem handler (`filesystem/service.go:28-31`), so this only affects
-//! filesystem unary RPCs — in cube-envd that is exactly the `fs_unary!` macro in
-//! `server.rs`. Process RPCs are untouched (the legacy process service is
+//! filesystem unary RPCs — in cube-envd that is exactly the shared
+//! `fs_unary_endpoint` pipeline in `server.rs`. Process RPCs are untouched (the legacy process service is
 //! defined in `legacyprocess.proto` but never mounted — dead code).
 
 use axum::http::header::{HeaderMap, USER_AGENT};
@@ -26,7 +26,8 @@ pub fn is_legacy(headers: &HeaderMap) -> bool {
 }
 
 /// Downgrade a filesystem unary success response in place (upstream
-/// `conversion.go:57-129`). Reached only via the `fs_unary!` macro, i.e. the
+/// `conversion.go:57-129`). Reached only via the shared `fs_unary_endpoint`
+/// pipeline, i.e. the
 /// five filesystem unary RPCs cube-envd implements (Stat/ListDir/MakeDir/
 /// Move/Remove — CreateWatcher and the rest of the watch family still answer
 /// `unimplemented`, so they never reach here; when 1.1 mounts CreateWatcher its
@@ -52,7 +53,7 @@ pub fn narrow(v: &mut Value) {
     // `narrow_entry` / a `narrow_event` at that point. Header timing also differs
     // for streaming: upstream `interceptor.go:51-57` sets X-E2B-Legacy-SDK BEFORE
     // the handler runs, so streaming ERROR frames also carry the header — unlike
-    // unary (see server.rs `fs_unary!`). 1.1 must align that timing, not just the
+    // unary (see server.rs `fs_unary_endpoint`). 1.1 must align that timing, not just the
     // body narrowing.
 }
 

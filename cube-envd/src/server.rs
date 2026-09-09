@@ -403,77 +403,101 @@ async fn process_update(
 
 // ---------- filesystem handlers ----------
 
-macro_rules! fs_unary {
-    ($name:ident, $req:ty, $svc:path) => {
-        async fn $name(
-            State(state): State<Arc<AppState>>,
-            headers: HeaderMap,
-            body: axum::body::Body,
-        ) -> axum::response::Response {
-            if let Err(e) = rpc_token_check(&state, &headers) {
-                return e.into_response();
-            }
-            let req: $req = match read_unary_request(&headers, body).await {
-                Ok(r) => r,
-                Err(e) => return e.into_response(),
-            };
-            let user = match rpc_user(&state, &headers) {
-                Ok(u) => u,
-                Err(e) => return e.into_response(),
-            };
-            // Legacy downgrade applies ONLY to success (200) filesystem responses,
-            // mirroring upstream WrapUnary's early err-return (interceptor.go:33-36):
-            // errors never reach shouldHideChanges, so no header and no narrowing.
-            let legacy = legacy::is_legacy(&headers);
-            // One blocking-pool crossing per request (blocking.rs): the whole
-            // service body — stat/mkdir/rename/… — runs sequentially on a
-            // pool thread, mirroring the baseline's blocking goroutine
-            // per handler. Never cross per syscall (~29µs each).
-            let fut = crate::blocking::run(stringify!($name), move || $svc(&req, &user));
-            match fut.await {
-                Ok(mut v) => {
-                    if legacy {
-                        legacy::narrow(&mut v);
-                    }
-                    let mut resp = unary_json(v);
-                    if legacy {
-                        resp.headers_mut()
-                            .insert(legacy::LEGACY_HEADER, HeaderValue::from_static("true"));
-                    }
-                    resp
-                }
-                Err(e) => e.into_response(),
-            }
-        }
+/// The shared unary pipeline for the filesystem RPC handlers (previously the
+/// `fs_unary!` macro — a plain generic function keeps the whole pipeline
+/// readable and GitHub-diff-visible, per the monorepo convention of zero
+/// handler macros in CubeAPI).
+async fn fs_unary_endpoint<T, F>(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+    label: &'static str,
+    svc: F,
+) -> axum::response::Response
+where
+    T: serde::de::DeserializeOwned + Send + 'static,
+    F: FnOnce(&T, &User) -> Result<serde_json::Value, ConnectError> + Send + 'static,
+{
+    if let Err(e) = rpc_token_check(&state, &headers) {
+        return e.into_response();
+    }
+    let req: T = match read_unary_request(&headers, body).await {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
     };
+    let user = match rpc_user(&state, &headers) {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+    // Legacy downgrade applies ONLY to success (200) filesystem responses,
+    // mirroring upstream WrapUnary's early err-return (interceptor.go:33-36):
+    // errors never reach shouldHideChanges, so no header and no narrowing.
+    let legacy = legacy::is_legacy(&headers);
+    // One blocking-pool crossing per request (blocking.rs): the whole
+    // service body — stat/mkdir/rename/… — runs sequentially on a
+    // pool thread, mirroring the baseline's blocking goroutine
+    // per handler. Never cross per syscall (~29µs each).
+    let fut = crate::blocking::run(label, move || svc(&req, &user));
+    match fut.await {
+        Ok(mut v) => {
+            if legacy {
+                legacy::narrow(&mut v);
+            }
+            let mut resp = unary_json(v);
+            if legacy {
+                resp.headers_mut()
+                    .insert(legacy::LEGACY_HEADER, HeaderValue::from_static("true"));
+            }
+            resp
+        }
+        Err(e) => e.into_response(),
+    }
 }
 
-fs_unary!(fs_stat, crate::msg::filesystem::PathRequest, fs_svc::stat);
-fs_unary!(
-    fs_list_dir,
-    crate::msg::filesystem::ListDirRequest,
-    fs_svc::list_dir
-);
-fs_unary!(
-    fs_make_dir,
-    crate::msg::filesystem::PathRequest,
-    fs_svc::make_dir
-);
-fs_unary!(
-    fs_move,
-    crate::msg::filesystem::MoveRequest,
-    fs_svc::move_entry
-);
-fs_unary!(
-    fs_remove,
-    crate::msg::filesystem::PathRequest,
-    fs_svc::remove
-);
+async fn fs_stat(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    fs_unary_endpoint(state, headers, body, "fs_stat", fs_svc::stat).await
+}
+
+async fn fs_list_dir(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    fs_unary_endpoint(state, headers, body, "fs_list_dir", fs_svc::list_dir).await
+}
+
+async fn fs_make_dir(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    fs_unary_endpoint(state, headers, body, "fs_make_dir", fs_svc::make_dir).await
+}
+
+async fn fs_move(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    fs_unary_endpoint(state, headers, body, "fs_move", fs_svc::move_entry).await
+}
+
+async fn fs_remove(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    fs_unary_endpoint(state, headers, body, "fs_remove", fs_svc::remove).await
+}
 
 // ---------- filesystem watch handlers ----------
 
 // The upstream legacy filesystem surface has no watch family, so none of
-// these get the legacy downgrade/narrowing the fs_unary! unaries apply.
+// these get the legacy downgrade/narrowing the fs unaries apply.
 
 /// Streaming WatchDir: prechecks + tree build cross the blocking pool once
 /// (a deep recursive initial walk is syscall-heavy), then the async pump owns
