@@ -101,9 +101,10 @@ func (s *service) listCubeboxes() []*cubeboxstore.CubeBox {
 
 // keepLiveXFSPausePackage is true when Master's Resume-time CleanupTemplate
 // must leave this pause catalog on disk. XFS Resume mmaps the package file;
-// S3 already cloned onto sb-*-memory and must drop the package. PAUSED /
-// EXITED / UNKNOWN do not hold a live mmap, so DelPaused and leftover GC
-// still delete.
+// S3 Resume also keeps it so CommitSandbox can still resolve a last-restore
+// memory base (Snapshot does not clone sb-*-memory). PAUSED / EXITED /
+// UNKNOWN do not hold a live restore, so DelPaused and leftover GC still
+// delete.
 //
 // Only Cubelet-stamped Labels count (not user Create annotations). Match
 // the current pause id or the restore-base: Pause overwrites the pause id
@@ -111,10 +112,7 @@ func (s *service) listCubeboxes() []*cubeboxstore.CubeBox {
 // must still see the mmap / incremental source. cleanupTemplate also
 // requires catalog Kind=pause_snapshot so a forged label cannot pin a
 // template or customer snap.
-func keepLiveXFSPausePackage(boxes []*cubeboxstore.CubeBox, snapID, backend string) bool {
-	if storage.IsS3Backend(backend) {
-		return false
-	}
+func keepLiveXFSPausePackage(boxes []*cubeboxstore.CubeBox, snapID string) bool {
 	snapID = strings.TrimSpace(snapID)
 	if snapID == "" {
 		return false
@@ -668,7 +666,7 @@ func cleanupBackendForPauseSnap(preferred, snapID string) string {
 // PAUSED without those flags is not expected on the user Destroy path; skip
 // GC so we cannot drop a live pause snap if someone cubecli-destroys a
 // tombstone. UNKNOWN / FAILED / RUNNING / PAUSING may hold half-finished
-// or leftover snaps. After XFS Resume Master's CleanupTemplate no-ops
+// or leftover snaps. After Resume Master's CleanupTemplate no-ops
 // while this RUNNING sandbox still holds the pause id; a user Destroy
 // GCs it here (honorLiveXFSPause=false).
 func pauseSnapIDToGCOnDestroy(req *cubebox.DestroyCubeSandboxRequest, sb *cubeboxstore.CubeBox) string {

@@ -222,35 +222,32 @@ func TestKeepLiveXFSPausePackage(t *testing.T) {
 	snap := "snap-keepxfs000000000000000001"
 	running := newCubeboxWithStatusForTest("sb-run", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(running, snap)
-	if !keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{running}, snap, "xfs") {
-		t.Fatal("XFS running resume must keep the pause package")
-	}
-	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{running}, snap, "s3") {
-		t.Fatal("S3 resume must drop the pause package")
+	if !keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{running}, snap) {
+		t.Fatal("running resume must keep the pause package")
 	}
 
 	paused := newCubeboxWithStatusForTest("sb-paused", cubeboxstore.Status{PausedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(paused, snap)
-	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{paused}, snap, "xfs") {
+	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{paused}, snap) {
 		t.Fatal("PAUSED DelPaused must be allowed to delete the package")
 	}
 
 	other := newCubeboxWithStatusForTest("sb-other", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(other, "snap-other00000000000000000001")
-	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{other}, snap, "xfs") {
+	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{other}, snap) {
 		t.Fatal("unrelated sandbox must not pin this package")
 	}
 
 	forged := newCubeboxWithStatusForTest("sb-forged", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	forged.AddAnnotations(map[string]string{constants.MasterAnnotationPauseSnapshotID: snap})
-	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{forged}, snap, "xfs") {
-		t.Fatal("user Create annotation must not pin an XFS pause package")
+	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{forged}, snap) {
+		t.Fatal("user Create annotation must not pin a pause package")
 	}
 
 	nextPause := newCubeboxWithStatusForTest("sb-next", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(nextPause, "snap-new000000000000000000000001")
 	nextPause.AddLabels(map[string]string{constants.MasterAnnotationRuntimeRestoreSnapshotID: snap})
-	if !keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{nextPause}, snap, "xfs") {
+	if !keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{nextPause}, snap) {
 		t.Fatal("restore-base must keep the previous package while Pause stamps a new id")
 	}
 }

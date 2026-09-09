@@ -315,7 +315,7 @@ func preparePauseMemoryArtifact(
 // cube-runtime (CommitSandbox) will write its memory snapshot into, plus
 // the snapshot type flag for this capture.
 //
-// Three-tier degradation:
+// Four-tier degradation:
 //
 // Tier 1 — soft-dirty + reflink from previous snapshot (the happy path).
 // resolveBaseMemoryObject returns the runtime-binding snapshot's memory
@@ -339,6 +339,11 @@ func preparePauseMemoryArtifact(
 // invalidates this label so this tier is skipped. Pause uses
 // preparePauseMemoryArtifact: own vol, then ancestor only when it is
 // the last restore, otherwise last-restore catalog or full.
+//
+// Tier 2b — incremental(pagemap_anon) + clone of the S3 own volume.
+// Cross-node Resume never writes a local pause catalog; the imported
+// sb-*-memory disk is the restore image. Pause already uses this volume.
+// Same-node S3 Resume keeps the pause catalog, so this tier is unused there.
 //
 // Tier 3 — full + fresh empty volume. The last-resort fallback when even
 // the last-restore base file is gone (e.g. the source template was deleted
@@ -396,6 +401,24 @@ func prepareCommitMemoryArtifact(
 		return nil, "", restoreErr
 	}
 
+	// ─── Tier 2b: S3 own volume when the pause catalog is gone ────────
+	// Same-node S3 Resume keeps the pause catalog (tier 1/2). Cross-node
+	// Resume imports onto sb-*-memory and never writes a local pause
+	// package, so Snapshot would otherwise full-dump. Pause already
+	// clones this volume; Commit uses the same base.
+	if live, liveErr := importedSandboxMemoryForCommit(ctx, cb, backend); liveErr != nil {
+		stepLog.Warnf("memory artifact: own volume lookup failed (%v); falling back to full snapshot", liveErr)
+	} else if live != nil {
+		memoryObject, err := storage.CommitMemoryFromBaseFor(ctx, backend, live, templateID, memorySizeBytes)
+		if err != nil {
+			return nil, "", err
+		}
+		stepLog.Warnf("memory artifact: catalog bases unavailable (%v; %v); "+
+			"falling back to incremental(pagemap_anon) over own volume %s/%s -> %s",
+			baseErr, restoreErr, live.Name, live.Kind, memoryObject.Name)
+		return memoryObject, snapshotTypeIncremental, nil
+	}
+
 	// ─── Tier 3: full + fresh empty volume ────────────────────────────
 	stepLog.Warnf("memory artifact: both previous-snapshot base (%v) and last-restore base (%v) "+
 		"unavailable; falling back to full snapshot", baseErr, restoreErr)
@@ -406,4 +429,19 @@ func prepareCommitMemoryArtifact(
 	stepLog.Infof("memory artifact: created empty memory volume %s/%s, snapshot type=%s",
 		memoryObject.Name, memoryObject.Kind, snapshotTypeFull)
 	return memoryObject, snapshotTypeFull, nil
+}
+
+func importedSandboxMemoryForCommit(
+	ctx context.Context,
+	cb *cubeboxstore.CubeBox,
+	backend string,
+) (*storage.CowSnapshotObject, error) {
+	if cb == nil {
+		return nil, nil
+	}
+	sandboxID := strings.TrimSpace(cb.ID)
+	if sandboxID == "" {
+		sandboxID = strings.TrimSpace(cb.SandboxID)
+	}
+	return storage.GetImportedSandboxMemoryFor(ctx, backend, sandboxID)
 }
