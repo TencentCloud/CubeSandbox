@@ -4,10 +4,7 @@ use std::{
 };
 
 use portable_pty::{native_pty_system, PtySize};
-use tokio::{
-    sync::{broadcast, Mutex},
-    time,
-};
+use tokio::{sync::Mutex, time};
 
 use crate::{
     connect::{Code, RpcError},
@@ -15,17 +12,17 @@ use crate::{
 };
 
 use super::{
+    fanout::{OutputFanout, OutputSubscription},
     model::{
-        config_to_proto, EndEvent, OUTPUT_CAPACITY, ProcessEvent, ProcessHandle, ProcessInput,
-        ProcessRegistry, Selector, SHUTDOWN_GRACE, StartOptions, TERMINAL_CACHE_LIMIT,
-        TERMINAL_CACHE_TTL, TerminalRecord,
+        config_to_proto, EndEvent, ProcessEvent, ProcessHandle, ProcessInput, ProcessRegistry,
+        Selector, StartOptions, TerminalRecord, SHUTDOWN_GRACE, TERMINAL_CACHE_LIMIT,
+        TERMINAL_CACHE_TTL,
     },
     stream::{
         end_event, parse_pty_size, pipe_command, process_cwd, pty_command, pty_end_event,
         send_group_signal, spawn_pty_reader, spawn_reader,
     },
 };
-
 
 impl ProcessRegistry {
     /// 按 TERM 后 KILL 的顺序关闭全部存活进程组。
@@ -84,10 +81,10 @@ impl ProcessRegistry {
             }
         }
 
-        let (sender, receiver) = broadcast::channel(OUTPUT_CAPACITY);
+        let (fanout, subscription) = OutputFanout::new();
         if let Some(pty) = options.pty.take() {
             return self
-                .start_pty(options, parse_pty_size(Some(pty))?, sender, receiver)
+                .start_pty(options, parse_pty_size(Some(pty))?, fanout, subscription)
                 .await;
         }
         let mut command = pipe_command(
@@ -123,14 +120,14 @@ impl ProcessRegistry {
             config: options.config.clone(),
             input: Mutex::new(input),
             pty: None,
-            output: sender.clone(),
+            output: fanout.clone(),
         });
         self.live.write().await.insert(pid, handle.clone());
         self.bind_tag_reservation(options.tag.as_deref(), pid).await;
         self.remove_terminal_for(pid, options.tag.as_deref()).await;
 
-        let stdout_reader = spawn_reader(stdout, sender.clone(), true);
-        let stderr_reader = spawn_reader(stderr, sender.clone(), false);
+        let stdout_reader = spawn_reader(stdout, fanout.clone(), true);
+        let stderr_reader = spawn_reader(stderr, fanout.clone(), false);
         let registry = self.clone();
         tokio::spawn(async move {
             let status = child.wait().await;
@@ -138,13 +135,17 @@ impl ProcessRegistry {
             let _ = stderr_reader.await;
             let end = end_event(status);
             let event = ProcessEvent::End(end);
-            let _ = sender.send(event.clone());
+            fanout.send(event.clone()).await;
             registry.finish(handle, event).await;
+            fanout.close();
         });
         if let Some(timeout) = options.timeout {
             self.arm_timeout(pid, timeout);
         }
-        Ok(Launch { pid, receiver })
+        Ok(Launch {
+            pid,
+            receiver: subscription,
+        })
     }
 
     /// 在线程池中创建 PTY、启动子进程并建立 PTY 输入输出通道。
@@ -152,8 +153,8 @@ impl ProcessRegistry {
         &self,
         options: StartOptions,
         size: PtySize,
-        sender: broadcast::Sender<ProcessEvent>,
-        receiver: broadcast::Receiver<ProcessEvent>,
+        fanout: OutputFanout,
+        subscription: OutputSubscription,
     ) -> Result<Launch, RpcError> {
         let StartOptions {
             config,
@@ -200,7 +201,7 @@ impl ProcessRegistry {
             config: config.clone(),
             input: Mutex::new(ProcessInput::Pty(Arc::clone(&writer))),
             pty: Some(Arc::clone(&master)),
-            output: sender.clone(),
+            output: fanout.clone(),
         });
         self.live.write().await.insert(pid, handle.clone());
         if let Some(tag) = &tag {
@@ -208,7 +209,7 @@ impl ProcessRegistry {
         }
         self.remove_terminal_for(pid, tag.as_deref()).await;
 
-        let pty_reader = spawn_pty_reader(reader, sender.clone());
+        let pty_reader = spawn_pty_reader(reader, fanout.clone());
         let registry = self.clone();
         tokio::spawn(async move {
             let end = match tokio::task::spawn_blocking(move || child.wait()).await {
@@ -228,13 +229,17 @@ impl ProcessRegistry {
             };
             let _ = pty_reader.await;
             let event = ProcessEvent::End(end);
-            let _ = sender.send(event.clone());
+            fanout.send(event.clone()).await;
             registry.finish(handle, event).await;
+            fanout.close();
         });
         if let Some(timeout) = timeout {
             self.arm_timeout(pid, timeout);
         }
-        Ok(Launch { pid, receiver })
+        Ok(Launch {
+            pid,
+            receiver: subscription,
+        })
     }
 
     /// 为存活进程安排超时后的 TERM 和兜底 KILL。
@@ -409,8 +414,8 @@ pub(super) enum Subscription {
     Live {
         /// 存活进程的 PID。
         pid: u32,
-        /// 接收输出和结束事件的广播订阅者。
-        receiver: broadcast::Receiver<ProcessEvent>,
+        /// 接收输出和结束事件的订阅队列。
+        receiver: OutputSubscription,
     },
     /// 已结束进程的可回放记录。
     Terminal(TerminalRecord),
@@ -421,7 +426,7 @@ pub(super) struct Launch {
     /// 新启动进程的 PID。
     pub(super) pid: u32,
     /// 订阅该进程输出的接收者。
-    pub(super) receiver: broadcast::Receiver<ProcessEvent>,
+    pub(super) receiver: OutputSubscription,
 }
 
 // 启动异步任务读取普通进程的 stdout 或 stderr 并广播输出片段。

@@ -1,25 +1,19 @@
-use std::{
-    collections::HashMap,
-    io::Write,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, io::Write, sync::Arc, time::Duration};
 
 use portable_pty::MasterPty;
 use serde::{Deserialize, Serialize};
 use tokio::{
     process::ChildStdin,
-    sync::{broadcast, Mutex, RwLock},
+    sync::{Mutex, RwLock},
     time,
 };
 
-use crate::{
-    auth::LocalUser,
-    generated::process as proto,
-};
+use crate::{auth::LocalUser, generated::process as proto};
 
-/// 限制每个进程事件订阅者可积压的输出事件数。
-pub(super) const OUTPUT_CAPACITY: usize = 64;
+use super::fanout::OutputFanout;
+
+/// 限制每个进程事件订阅者队列可积压的事件数；满则投递挂起，背压到生产者。
+pub(super) const SUBSCRIBER_CAPACITY: usize = 8;
 /// 限制普通 stdout 和 stderr 单次读取的最大字节数。
 pub(super) const OUTPUT_CHUNK_BYTES: usize = 32 * 1024;
 /// 限制 PTY 单次阻塞读取的最大字节数。
@@ -55,7 +49,7 @@ pub(crate) struct ProcessHandle {
     /// PTY 进程的主端，用于调整终端大小。
     pub(crate) pty: Option<Arc<std::sync::Mutex<Box<dyn MasterPty + Send>>>>,
     /// 广播输出和结束事件给所有订阅者。
-    pub(crate) output: broadcast::Sender<ProcessEvent>,
+    pub(crate) output: OutputFanout,
 }
 
 /// 表示进程当前可写入的输入端或已关闭状态。
@@ -335,7 +329,9 @@ pub(super) fn update_request_from_proto(request: proto::UpdateRequest) -> Update
 }
 
 /// 将生成的 protobuf 选择请求转换为领域模型。
-pub(super) fn selector_request_from_proto(process: Option<proto::ProcessSelector>) -> SelectorRequest {
+pub(super) fn selector_request_from_proto(
+    process: Option<proto::ProcessSelector>,
+) -> SelectorRequest {
     SelectorRequest {
         process: process.map(selector_from_proto),
     }
@@ -350,7 +346,9 @@ pub(super) fn send_input_request_from_proto(request: proto::SendInputRequest) ->
 }
 
 /// 将生成的 protobuf 信号请求转换为领域模型。
-pub(super) fn send_signal_request_from_proto(request: proto::SendSignalRequest) -> SendSignalRequest {
+pub(super) fn send_signal_request_from_proto(
+    request: proto::SendSignalRequest,
+) -> SendSignalRequest {
     SendSignalRequest {
         process: request.process.map(selector_from_proto),
         signal: proto::Signal::try_from(request.signal)
@@ -360,7 +358,9 @@ pub(super) fn send_signal_request_from_proto(request: proto::SendSignalRequest) 
 }
 
 /// 将生成的 protobuf 流输入请求转换为领域模型。
-pub(super) fn stream_input_request_from_proto(request: proto::StreamInputRequest) -> StreamInputRequest {
+pub(super) fn stream_input_request_from_proto(
+    request: proto::StreamInputRequest,
+) -> StreamInputRequest {
     match request.event {
         Some(proto::stream_input_request::Event::Start(start)) => StreamInputRequest {
             start: Some(StreamInputStart {

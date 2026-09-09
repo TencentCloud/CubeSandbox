@@ -1,7 +1,8 @@
+mod fanout;
 mod model;
-mod stream;
 mod registry;
 mod routes;
+mod stream;
 
 pub use model::ProcessRegistry;
 pub use routes::{
