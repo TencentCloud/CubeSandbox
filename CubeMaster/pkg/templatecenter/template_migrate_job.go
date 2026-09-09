@@ -102,7 +102,40 @@ func SubmitTemplateMigrate(ctx context.Context, templateID, requestID string) (*
 			Phase:        JobPhaseMigratingArtifact,
 			Progress:     0,
 		}
-		return store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).Create(record).Error
+		if err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).Create(record).Error; err != nil {
+			return err
+		}
+
+		// Cross-replica race guard. withTemplateWriteLock only serializes
+		// submissions within THIS CubeMaster process; the
+		// getActiveTemplateMigrateJobByTemplateID check above reads the
+		// shared DB, but two replicas can still both observe "no active job"
+		// before either INSERT commits, and both create a row here. Re-check
+		// right after the insert and yield to whichever row is earliest by
+		// id: every racing replica runs this same query and every loser sees
+		// a smaller-id winner, so at most one of them proceeds to spawn a
+		// migrate goroutine.
+		earliest := &models.TemplateImageJob{}
+		qerr := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+			Where("template_id = ? AND operation = ? AND status IN ?", templateID, JobOperationMigrate, []string{JobStatusPending, JobStatusRunning}).
+			Order("id asc").First(earliest).Error
+		if qerr != nil && !errors.Is(qerr, gorm.ErrRecordNotFound) {
+			return qerr
+		}
+		if earliest.JobID != "" && earliest.JobID != jobID {
+			if uerr := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+				Where("job_id = ?", jobID).
+				Updates(map[string]any{
+					"status":        JobStatusFailed,
+					"progress":      100,
+					"error_message": fmt.Sprintf("superseded by concurrently-created migrate job %s on another replica", earliest.JobID),
+				}).Error; uerr != nil {
+				return uerr
+			}
+			jobID = earliest.JobID
+			reusedExistingJob = true
+		}
+		return nil
 	}); err != nil {
 		return nil, err
 	}

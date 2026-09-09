@@ -202,7 +202,18 @@ func deleteLocalExt4(ext4Path string) error {
 	}
 	dir := filepath.Dir(abs)
 	if !managedArtifactDir(dir) {
-		return fmt.Errorf("ext4 path %q is outside managed artifact roots; refusing to delete", ext4Path)
+		// This is the "legacy, never migrated" shape: the row still points at
+		// wherever CubeMaster stored the ext4 before the TC-backed store
+		// existed, which does not sit under any root TC manages. Refusing is
+		// correct (we must not delete arbitrary paths named by the DB), but a
+		// bare refusal leaves the row retried forever by the reconciler with
+		// no way for an operator to tell that it is retrying a no-op. Name the
+		// fix explicitly so this never silently wedges in CLEANUP_PENDING.
+		return fmt.Errorf(
+			"ext4 path %q is outside managed artifact roots (work=%q store=%q); refusing to delete -- "+
+				"this artifact was never migrated to the template-center store; run "+
+				"`cubemastercli tpl migrate --template-id <template-id>` first, then retry the delete",
+			ext4Path, image.ArtifactWorkRootDir(), image.ArtifactStoreRootDir())
 	}
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("remove artifact dir %s: %w", dir, err)
