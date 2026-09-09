@@ -1,35 +1,18 @@
 # CubeTemplateCenter
 
-模板中心的独立进程，负责构建模板：拉镜像、在 envd 沙箱里跑构建、生成 rootfs ext4、算指纹，再把结果回报给 CubeMaster。CubeMaster 负责剩下的：任务落库、对外 API、跨节点分发。
+The standalone process that builds templates: pulls the image, runs the build in an envd sandbox, produces the rootfs ext4, computes the fingerprint, and reports the result back to CubeMaster. CubeMaster handles the rest: job persistence, the public API, and cross-node distribution.
 
-逻辑代码在 `CubeMaster/pkg/templatecenter`，TC 只是把它跑成独立进程。
+The route layer is shared from `CubeMaster/pkg/service/httpservice` (`RegisterTemplateRoutes`); the build and storage logic lives in TC's own `pkg/build`, `pkg/image`, and `pkg/s3store`.
 
-## 和 CubeMaster 的分工
+## Split with CubeMaster
 
-| 职责 | CubeMaster | TC |
-|---|---|---|
-| 模板 API（`/cube/template*`） | 提供 | 不提供 |
-| 任务落库 / 状态机 | 负责 | 不负责 |
-| 构建（拉镜像、建 ext4、指纹） | 不做 | 负责 |
-| 产物发给 Cubelet | 从共享磁盘读 | 只写盘 |
-| 跨节点分发 / redo | 负责 | 不负责 |
+TC owns the build (pull, ext4, fingerprint, S3 upload) and the artifact data (local file + S3 object).
+CubeMaster owns the template API, job state, cross-node distribution, and deletion orchestration.
+Compat matrix and download routes: CubeMaster reverse-proxies to TC (302 to S3 for downloads).
 
-产物默认不走网络：两者挂同一块磁盘（`/data/CubeMaster/storage`），TC 写、CubeMaster 读，所以默认必须同机、单副本。配置 S3/MinIO（`controlPlane.artifactStore.s3Backed=true`）后持久副本在对象存储里，本地盘只是构建临时区，此时 TC 和 CubeMaster 都可以多副本（见下文"多副本"）。
+## Run
 
-## 配置
-
-没有开关：CubeMaster 已经不能本地构建模板，所有 `template-from-image` 都会转发给 TC，TC 不可达就直接失败。只需要两个地址：
-
-| 项 | 在哪 | 值 |
-|---|---|---|
-| CubeMaster 找 TC | 环境变量 | `CUBE_TEMPLATE_CENTER_ADDR`，如 `http://127.0.0.1:8090` |
-| TC 回报 CubeMaster | 环境变量 | `CUBE_MASTER_ADDR`，如 `http://127.0.0.1:8089` |
-
-地址随部署变，所以走环境变量（也可以在 CubeMaster `conf.yaml` 用 `common.template_center_addr` 持久化配置，环境变量优先）。
-
-## 启动
-
-没有 `-conf` 参数，靠环境变量找配置：
+No `-conf` flag; config is located via env var:
 
 ```bash
 export CUBE_TEMPLATE_CENTER_CONFIG_PATH=/path/to/conf.yaml
@@ -37,43 +20,81 @@ export CUBE_MASTER_ADDR=http://127.0.0.1:8089
 ./templatecenter
 ```
 
-默认监听 `:8090`（CubeMaster 是 `:8089`）。监听地址和端口在 conf.yaml 的 `common.http_bind`、`common.http_port`。
+Listens on `:8090` by default (CubeMaster uses `:8089`). Bind address and port come from `common.http_bind` and `common.http_port` in conf.yaml.
 
-## 部署
+## Deploy
 
-**Kubernetes（推荐）**，Helm 直接装（TC 是管控面默认组件，`controlPlane.enabled=true` 时自动部署，没有独立开关）：
+**Kubernetes (recommended)**, plain Helm install (TC is a default control-plane component and deploys automatically with `controlPlane.enabled=true`; there is no separate switch):
 
 ```bash
 helm upgrade --install cube deploy/kubernetes/chart -n cube-system
 ```
 
-conf、双向地址、PVC、同节点亲和都自动配好。
+Conf, both addresses, PVC, and same-node affinity are wired automatically.
 
-**裸机 / one-click**：`cube-sandbox-cube-templatecenter.service` 属于默认管控面组件（control target 的 `Wants=` 已包含，install.sh 会显式 enable），模板构建开箱即用。默认地址 `http://127.0.0.1:8090` 已经由 `cubemaster-start.sh` 导出，跨机部署才需要在 `.one-click.env` 覆盖 `CUBE_TEMPLATE_CENTER_ADDR`。
+**Bare metal / one-click**: `cube-sandbox-cube-templatecenter.service` is part of the default control-plane stack (the control target `Wants=` it and install.sh enables it), so template builds work out of the box. The default address `http://127.0.0.1:8090` is already exported by `cubemaster-start.sh`; only override `CUBE_TEMPLATE_CENTER_ADDR` in `.one-click.env` for a split deployment.
 
-**多副本**：推荐 `controlPlane.artifactStore.s3Backed=true`（持久副本在 S3/MinIO，本地盘只做临时区）：副本之间通过数据库会话锁（`GET_LOCK`，按构建指纹）协调同规格的去重构建，chart 的 validate 会校验前置条件（S3 凭据到达 master 和 TC Pod、本地盘为 per-Pod scratch 等）。不用 S3 时多副本也允许但属于**降级模式**（安装时会打印告警）：产物在节点本地盘，下载可能落到没构建过该产物的 master 副本上，TC 副本间也无法去重构建。注意：默认的 ReadWriteOnce 产物 PVC 无法多节点挂载，多副本 master 挂着它会被 validate 直接拒绝（第二个副本永远 Pending）——不用 S3 又要多副本时，请 `controlPlane.master.persistence.enabled=false`（每 Pod 临时盘）或用 ReadWriteMany 共享卷（CFS/NFS，TC 默认挂 master 的同一张 claim）。
+## Usage scenarios (topology matrix)
+
+| Scenario | TC replicas | Artifact store | OK? |
+|---|---|---|---|
+| Bare metal / one-click co-located | 1 | host disk shared with CubeMaster | ✅ |
+| One-click multi-node (1 control + N compute) | 1 on the control node | host disk on the control node | ✅ — set `ONE_CLICK_DEPLOY_ROLE=compute` on every worker node |
+| K8s single replica | 1 | node-local disk (PVC recommended; emptyDir loses artifacts on restart) | ✅ — **keep at 1 replica**; forcing multi-replica here is broken (each replica only has its own builds, any load balancer routes downloads to non-builders → 404) |
+| K8s multi-replica TC | ≥2 | **requires** `s3Backed=true` **or** ReadWriteMany | ✅ |
+| K8s multi-replica master only | 1 | node-local disk | ✅ — downloads proxy to the single TC |
+
+**Not supported** — every TC replica must see the same bytes, and a load
+balancer that points external traffic at "any" replica only works when the
+artifact store is shared. The chart refuses these on `helm install`:
+
+- **K8s + Internal CLB + multi-replica TC + node-local disk.** The CLB
+  load-balances external requests across TC replicas, but each replica's
+  builds only live on its own disk → 404 on any non-builder replica.
+  Fix: `s3Backed=true`, ReadWriteMany, or `templateCenter.replicas=1`.
+- **K8s + multi-replica master + default ReadWriteOnce artifact PVC.** The
+  second master replica stays `Pending` forever. Fix:
+  `master.persistence.enabled=false` or ReadWriteMany.
+- **One-click multi-control-plane** (full install on two hosts, each with
+  its own storage). The installer only models control + compute, never
+  two controls. Migrate to Helm + `s3Backed=true` first.
 
 ## API
 
-主要是 CubeMaster 内部调用：
+Internal endpoints (called by CubeMaster):
 
-| 方法 | 路径 | 用途 |
+| Method | Path | Purpose |
 |---|---|---|
-| POST | `/tc/api/v1/build` | 提交构建任务 |
-| GET | `/health` | 探针 |
-| GET | `/metrics` | Prometheus 指标 |
+| POST | `/tc/api/v1/build` | submit a build job |
+| POST | `/tc/api/v1/artifact/delete` | delete artifact data (local file / S3 object) |
 
-构建完成后 TC 主动回报：`POST $CUBE_MASTER_ADDR/internal/template/jobs/:job_id/status`。
+Public routes reverse-proxied from CubeMaster (actually served by TC):
 
-## 目录
+| Method | Path | Purpose |
+|---|---|---|
+| GET / HEAD | `/cube/template/artifact/download` | artifact download (streams from local disk; 302 to the presigned URL for S3 artifacts) |
+| GET / POST | `/cube/template/compat` | template compat matrix read/write |
+
+Build-status polls (`/cube/template/build/:build_id/status`, `/cube/template/from-image?job_id=`) stay local on CubeMaster (they read the job rows Master writes); TC registers them too for direct-to-TC access.
+
+Probes and metrics: `GET /health`, `GET /metrics` (Prometheus).
+
+When a build finishes, TC reports back: `POST $CUBE_MASTER_ADDR/internal/template/jobs/:job_id/status`.
+
+## Layout
 
 ```
-pkg/tcconfig/     环境变量读取
-pkg/build/        构建执行 + 状态回报
-pkg/reconcile/    任务对账
-pkg/httpservice/  gin server（只注册模板路由）
+pkg/tcconfig/     env-var reading
+pkg/build/        build execution + status reporting + artifact deletion
+pkg/image/        image pull and ext4 production
+pkg/s3store/      S3/MinIO artifact store
+pkg/lock/         cross-replica DB session locks (build dedup / reconciler mutual exclusion)
+pkg/cube_egress_ca/  bakes the CubeEgress root CA into template rootfs
+pkg/reconcile/    job reconciliation
+pkg/api/          internal endpoints (/tc/api/v1/*)
+pkg/httpservice/  gin server (health/metrics + proxied route registration)
 ```
 
 ---
 
-[English](README_EN.md)
+[中文文档](README_zh.md)

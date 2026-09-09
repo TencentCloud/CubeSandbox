@@ -216,6 +216,11 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("templatecenter init: %w", err)
 	}
 
+	// Surface a misconfigured/unreachable artifact S3 store at boot, not at
+	// the first failed upload (which silently degrades to node-local
+	// storage and breaks multi-replica downloads).
+	build.WarnIfS3Unreachable(ctx)
+
 	return nil
 }
 

@@ -167,6 +167,10 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 	_, _, ready, failed, distErr := backfillDistribute(ctx, &req, &generatedReq, artifact, def.TemplateID, job.JobID, missing)
 	logger.Infof("template replica backfill: %d node(s) missing a READY replica, distributed ready=%d failed=%d err=%v",
 		len(missing), ready, failed, distErr)
+	// The distribution upserted replica rows, which the cached info/list
+	// payloads report (replica counts, READY set) — drop them so the next
+	// read reflects the backfill instead of the pre-sweep state.
+	invalidateTemplateCaches(def.TemplateID)
 	return distErr
 }
 

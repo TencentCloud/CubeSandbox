@@ -223,6 +223,19 @@ func artifactAuthoritativeHere(record *models.RootfsArtifact) bool {
 	if record == nil {
 		return false
 	}
+	if !artifactServedByRemoteTier() {
+		// This process IS the download-serving tier (CubeTemplateCenter; a
+		// CubeMaster without CUBE_TEMPLATE_CENTER_ADDR can neither build nor
+		// serve anything, so it does not exist as a working deployment). For
+		// a node-local artifact the only place the file can live is this
+		// tier's disk, so a missing file here is authoritative regardless of
+		// the URL prefix recorded on the row: master_node_ip names the
+		// address cubelets pull through (a service name reverse-proxied to
+		// this tier), not a holder identity. Matching it against local hosts
+		// misclassified every artifact as foreign in Kubernetes — downloads
+		// 404'd forever and the row was never demoted.
+		return true
+	}
 	return artifactServedLocally(record.MasterNodeIP, localArtifactHostsFn())
 }
 
@@ -341,6 +354,11 @@ func missingArtifactError(record *models.RootfsArtifact, verdict artifactMissing
 // sha256), invalidating every in-flight pull and already-distributed replica on
 // the holder -- the exact #1005 failure this package exists to avoid. Callers
 // must surface it rather than rebuild.
+//
+// In the standalone-TC topology this sentinel is unreachable: every node-local
+// artifact lives in the TC tier, and CubeMaster's reuse checks probe the
+// download path instead of local hosts (see artifact_servability.go). It is
+// retained for the local serving tier and as defense in depth for callers.
 var ErrRootfsArtifactForeign = errors.New("rootfs artifact is held by another cubemaster")
 
 func readyArtifactUsableForReuse(ctx context.Context, record *models.RootfsArtifact) bool {
@@ -377,7 +395,7 @@ func rootfsArtifactReuseVerdict(ctx context.Context, record *models.RootfsArtifa
 			demoteUnservableRootfsArtifact(ctx, record.ArtifactID, reason)
 			return errors.New("artifact not servable from the download endpoint; row demoted")
 		default:
-			return fmt.Errorf("artifact servability unknown: %s", reason)
+			return fmt.Errorf("%w: %s", ErrArtifactServabilityUnknown, reason)
 		}
 	}
 	if !rootfsArtifactSizeMatches(record) {

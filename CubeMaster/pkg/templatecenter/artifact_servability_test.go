@@ -39,6 +39,27 @@ func servableProbe(status int, artifactID string) func(ctx context.Context, url 
 	}
 }
 
+// failingDownloadProbe simulates a serving tier that cannot be reached at
+// all (the probe must come back "unknown", never "missing").
+func failingDownloadProbe(err error) func(ctx context.Context, url string) (int, http.Header, []byte, error) {
+	return func(ctx context.Context, url string) (int, http.Header, []byte, error) {
+		return 0, nil, nil, err
+	}
+}
+
+// captureUnservableDemotions swaps the remote-tier demotion seam for a
+// recorder and restores it when the test ends.
+func captureUnservableDemotions(t *testing.T) *[]string {
+	t.Helper()
+	var demoted []string
+	orig := demoteUnservableRootfsArtifact
+	demoteUnservableRootfsArtifact = func(_ context.Context, artifactID, _ string) {
+		demoted = append(demoted, artifactID)
+	}
+	t.Cleanup(func() { demoteUnservableRootfsArtifact = orig })
+	return &demoted
+}
+
 func envelopeProbe(code int, msg string) func(ctx context.Context, url string) (int, http.Header, []byte, error) {
 	return func(ctx context.Context, url string) (int, http.Header, []byte, error) {
 		body := fmt.Sprintf(`{"ret":{"ret_code":%d,"ret_msg":%q}}`, code, msg)

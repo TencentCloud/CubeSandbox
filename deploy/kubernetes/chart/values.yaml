@@ -290,15 +290,15 @@ controlPlane:
   # CubeTemplateCenter can scale beyond one replica:
   #
   #   s3Backed=false (default): artifacts live on the local/shared disk
-  #     (master.persistence PVC or hostPath). Multi-replica master/TC is
-  #     allowed but DEGRADED (install notes print a warning): artifacts are
-  #     node-local, so a download may hit a master that never built it and TC
-  #     replicas duplicate builds. The default ReadWriteOnce artifact PVC is
-  #     the exception that still fails validation — it cannot attach on
-  #     several nodes, so a second master replica would stay Pending forever.
-  #     Use persistence.enabled=false (per-pod scratch) or a ReadWriteMany
-  #     claim for multi-replica without S3, and a non-colocated TC still
-  #     requires a ReadWriteMany volume.
+  #     (master.persistence PVC or hostPath). Single-replica TC only:
+  #     multi-replica TC with a node-local store is REFUSED by validate
+  #     (each replica builds into its own disk while downloads are
+  #     load-balanced across replicas → 404). Multi-replica MASTER is
+  #     allowed (downloads proxy to the TC tier), except with the default
+  #     ReadWriteOnce artifact PVC — it cannot attach on several nodes, so
+  #     a second master replica would stay Pending forever: use
+  #     persistence.enabled=false (per-pod scratch) or a ReadWriteMany
+  #     claim. A non-colocated TC still requires a ReadWriteMany volume.
   #
   #   s3Backed=true: the durable copy is the S3/MinIO object. TC uploads the
   #     ext4 after building; Cubelet downloads straight from S3 via presigned
@@ -329,12 +329,13 @@ controlPlane:
   # are wired automatically on both sides -- no manual conf editing, and no
   # way to end up with a CubeMaster that has nowhere to forward builds.
   templateCenter:
-    # Replica count. Recommended >1 setup is artifactStore.s3Backed=true,
-    # where replicas coordinate duplicate builds of one spec through DB
-    # session locks and every replica reads/writes the shared S3 bucket.
-    # Without S3, values > 1 are allowed but DEGRADED (the install notes print
-    # a warning): the artifact store is node-local, so replicas cannot read
-    # each other's ext4 or take over each other's builds, and duplicate builds
+    # Replica count. Values >1 REQUIRE artifactStore.s3Backed=true (or a
+    # ReadWriteMany shared artifact volume): with a node-local store each
+    # replica's builds land on its own disk while downloads are load-balanced
+    # across replicas, so a pull can hit a replica that never built the
+    # artifact (404) — validate refuses that combination. In S3 mode replicas
+    # coordinate duplicate builds of one spec through DB session locks and
+    # every replica reads/writes the shared bucket.
     # of one spec run in parallel. See the artifactStore comment above.
     replicas: 1
     # Bypass the migration content preflight. Rarely needed: an applied version
@@ -1317,6 +1318,13 @@ volumeS3:
   secretAccessKey: ""
   bucket: ""
   region: us-east-1
+  # S3 addressing mode for the artifact-store client (CUBE_S3_USE_PATH_STYLE),
+  # used when controlPlane.artifactStore.s3Backed=true. Unset → heuristic:
+  # known public-cloud endpoints (amazonaws.com / myqcloud.com / aliyuncs.com
+  # / googleapis.com) default to virtual-host (false); everything else
+  # (external MinIO, Ceph, IP literals, in-cluster DNS) defaults to path-style
+  # (true). Set explicitly to override the heuristic.
+  # pathStyle: true
   extraOpts: ""
 
 serviceAccount:

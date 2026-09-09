@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 )
 
 // writeBuildMarker creates the in-progress marker file that TC's build writes
@@ -400,7 +401,10 @@ func TestResolveMissingArtifactDemotesOwnedArtifact(t *testing.T) {
 
 // The #1005 shape: two CubeMasters, node-local artifact store, request landed on
 // the node that never built the artifact. The shared row must survive untouched.
+// The master tier keeps the host-identity check (artifactServedLocally), so the
+// test pins the remote-tier discriminator on.
 func TestResolveMissingArtifactLeavesForeignArtifactAlone(t *testing.T) {
+	stubRemoteTier(t, true, nil)
 	stubLocalArtifactHosts(t, "10.228.161.10")
 	record := &models.RootfsArtifact{
 		ArtifactID:   "rfs-foreign",
@@ -462,23 +466,26 @@ func TestResolveMissingArtifactNilRecord(t *testing.T) {
 	}
 }
 
-// A foreign artifact must not be reused either: this node would hand cubelets a
-// download URL it cannot serve.
-func TestReadyArtifactUsableForReuseRejectsForeignArtifact(t *testing.T) {
-	stubLocalArtifactHosts(t, "10.228.161.10")
+// An artifact whose servability cannot be verified must not be reused either:
+// this node would hand cubelets a download URL it cannot prove works. Just as
+// importantly it must NOT be demoted — the artifact may be perfectly healthy
+// behind a transient serving-tier failure.
+func TestReadyArtifactUsableForReuseRejectsUnverifiableArtifact(t *testing.T) {
+	stubRemoteTier(t, true, failingDownloadProbe(errors.New("connection refused")))
 	record := &models.RootfsArtifact{
-		ArtifactID:   "rfs-foreign-reuse",
+		ArtifactID:   "rfs-unverifiable-reuse",
 		Status:       ArtifactStatusReady,
-		Ext4Path:     filepath.Join(t.TempDir(), "rfs-foreign-reuse.ext4"),
+		Ext4Path:     filepath.Join(t.TempDir(), "rfs-unverifiable-reuse.ext4"),
 		MasterNodeIP: "http://10.228.161.14:8080",
 	}
 	demoted := captureArtifactDemotions(t)
+	unservableDemoted := captureUnservableDemotions(t)
 
 	if readyArtifactUsableForReuse(context.Background(), record) {
-		t.Fatal("foreign artifact must not be reusable on this node")
+		t.Fatal("unverifiable artifact must not be reusable on this node")
 	}
-	if len(*demoted) != 0 {
-		t.Fatalf("foreign artifact must not be demoted, got %v", *demoted)
+	if len(*demoted) != 0 || len(*unservableDemoted) != 0 {
+		t.Fatalf("unverifiable artifact must not be demoted, got local=%v remote=%v", *demoted, *unservableDemoted)
 	}
 	if record.Status != ArtifactStatusReady {
 		t.Fatalf("status=%q, want %q", record.Status, ArtifactStatusReady)
@@ -555,27 +562,42 @@ func TestRootfsArtifactReuseVerdictZeroRecordedSize(t *testing.T) {
 	}
 }
 
-// rootfsArtifactReuseVerdict must surface ErrRootfsArtifactForeign so callers
-// can refuse to rebuild instead of overwriting the shared row.
-func TestRootfsArtifactReuseVerdictForeignIsSentinel(t *testing.T) {
-	stubLocalArtifactHosts(t, "10.228.161.10")
+// On the master tier the foreign sentinel must NOT fire: the recorded base
+// URL is a service address, not a holder identity, so the verdict comes from
+// the download-path probe. A definitive "missing" answer demotes the row; an
+// undecidable one leaves it untouched.
+func TestRootfsArtifactReuseVerdictRemoteTierHasNoForeign(t *testing.T) {
 	record := &models.RootfsArtifact{
-		ArtifactID:   "rfs-foreign-sentinel",
+		ArtifactID:   "rfs-remote-sentinel",
 		Status:       ArtifactStatusReady,
 		Ext4Path:     filepath.Join(t.TempDir(), "absent.ext4"),
-		MasterNodeIP: "http://10.228.161.14:8080",
+		MasterNodeIP: "http://cube-sandbox-master.cube-sandbox.svc.cluster.local:8089",
 	}
-	demoted := captureArtifactDemotions(t)
 
-	err := rootfsArtifactReuseVerdict(context.Background(), record)
-	if !errors.Is(err, ErrRootfsArtifactForeign) {
-		t.Fatalf("expected ErrRootfsArtifactForeign, got %v", err)
-	}
-	// The holder's row must be left untouched.
-	if len(*demoted) != 0 {
-		t.Fatalf("foreign artifact must not be demoted, got %v", *demoted)
-	}
-	if record.Status != ArtifactStatusReady {
-		t.Fatalf("status=%q, want %q", record.Status, ArtifactStatusReady)
-	}
+	t.Run("missing demotes instead of foreign", func(t *testing.T) {
+		stubRemoteTier(t, true, envelopeProbe(int(errorcode.ErrorCode_NotFound), "artifact source missing"))
+		demoted := captureUnservableDemotions(t)
+		err := rootfsArtifactReuseVerdict(context.Background(), record)
+		if err == nil || errors.Is(err, ErrRootfsArtifactForeign) {
+			t.Fatalf("expected a rebuild verdict, got %v", err)
+		}
+		if len(*demoted) != 1 || (*demoted)[0] != "rfs-remote-sentinel" {
+			t.Fatalf("expected demotion, got %v", *demoted)
+		}
+	})
+
+	t.Run("unknown refuses without foreign or demote", func(t *testing.T) {
+		stubRemoteTier(t, true, failingDownloadProbe(errors.New("timeout")))
+		demoted := captureUnservableDemotions(t)
+		err := rootfsArtifactReuseVerdict(context.Background(), record)
+		if !errors.Is(err, ErrArtifactServabilityUnknown) {
+			t.Fatalf("expected ErrArtifactServabilityUnknown, got %v", err)
+		}
+		if errors.Is(err, ErrRootfsArtifactForeign) {
+			t.Fatalf("the foreign sentinel must not fire on the master tier: %v", err)
+		}
+		if len(*demoted) != 0 {
+			t.Fatalf("unknown must not demote, got %v", *demoted)
+		}
+	})
 }

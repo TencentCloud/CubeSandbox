@@ -380,7 +380,11 @@ func runBuildLocked(
 	artifactURL := ""
 	if s3CfgEnabled && s3Client != nil {
 		if _, err := s3Client.Upload(ctx, artifactID, result.Ext4Path); err != nil {
-			logger.Warnf("upload artifact to s3 fail, falling back to local storage: %v", err)
+			// The fallback keeps single-replica deployments working, but the
+			// operator asked for S3: log the degraded-mode consequence loudly
+			// or a path-style/credential mistake hides until downloads 404.
+			logger.Errorf("upload artifact to s3 fail, falling back to NODE-LOCAL storage "+
+				"(artifact downloads will 404 on any pod that did not build it): %v", err)
 		} else {
 			artifactURL = artifactPresignedURL(ctx, s3CfgEnabled, s3Client, artifactID, logger)
 		}

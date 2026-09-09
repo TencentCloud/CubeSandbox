@@ -7,6 +7,7 @@ package templatecenter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,12 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 )
+
+// ErrArtifactServabilityUnknown is returned (wrapped) when the download-path
+// probe cannot decide whether an artifact is servable. Callers must treat it
+// as "refuse retryably": never demote, never rebuild — the artifact may be
+// perfectly healthy behind a transient serving-tier/network failure.
+var ErrArtifactServabilityUnknown = errors.New("artifact servability is unknown")
 
 // This file decides "will the download URL distribution is about to hand to
 // cubelets actually serve the artifact?" for the standalone-CubeTemplateCenter

@@ -199,9 +199,9 @@ func TestFinalizeTemplateReplicasClaimsAliasBeforePublishingReady(t *testing.T) 
 	defer patches.Reset()
 
 	var order []string
-	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, error) {
+	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, string, error) {
 		order = append(order, "publish:"+status)
-		return "my-alias", "", nil
+		return "my-alias", "", "", nil
 	})
 	patches.ApplyFunc(setTemplateLocalityCache, func(templateID string, replicas []ReplicaStatus) {})
 	patches.ApplyFunc(registerReadyTemplateReplicas, func(templateID string, replicas []ReplicaStatus) {})
@@ -233,9 +233,9 @@ func TestFinalizeTemplateReplicasSkipsAliasClaimWhenFailed(t *testing.T) {
 	defer patches.Reset()
 
 	publishedStatus := ""
-	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, error) {
+	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, string, error) {
 		publishedStatus = status
-		return "", "", nil
+		return "", "", "", nil
 	})
 	patches.ApplyFunc(setTemplateLocalityCache, func(templateID string, replicas []ReplicaStatus) {})
 	patches.ApplyFunc(registerReadyTemplateReplicas, func(templateID string, replicas []ReplicaStatus) {})
@@ -259,9 +259,9 @@ func TestFinalizeTemplateReplicasClaimsAliasForPartiallyReady(t *testing.T) {
 	defer patches.Reset()
 
 	var order []string
-	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, error) {
+	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, string, error) {
 		order = append(order, "publish:"+status)
-		return "my-alias", "", nil
+		return "my-alias", "", "", nil
 	})
 	patches.ApplyFunc(setTemplateLocalityCache, func(templateID string, replicas []ReplicaStatus) {})
 	patches.ApplyFunc(registerReadyTemplateReplicas, func(templateID string, replicas []ReplicaStatus) {})
@@ -294,9 +294,9 @@ func TestFinalizeTemplateReplicasSurfacesClaimWarningOnNonDuplicateError(t *test
 	defer patches.Reset()
 
 	published := false
-	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, error) {
+	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, string, error) {
 		published = true
-		return "", "template is ready but alias could not be claimed", nil
+		return "", "template is ready but alias could not be claimed", "", nil
 	})
 	patches.ApplyFunc(UpdateDefinitionStatus, func(ctx context.Context, templateID, status, lastError string) error {
 		published = true
@@ -329,8 +329,8 @@ func TestFinalizeTemplateReplicasSwallowsDuplicateAliasError(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
-	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, error) {
-		return "", "", nil
+	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, string, error) {
+		return "", "", "", nil
 	})
 	patches.ApplyFunc(UpdateDefinitionStatus, func(ctx context.Context, templateID, status, lastError string) error {
 		return nil
@@ -359,9 +359,9 @@ func TestFinalizeTemplateReplicasSkipsClaimForEmptyAlias(t *testing.T) {
 	defer patches.Reset()
 
 	published := false
-	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, error) {
+	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, string, error) {
 		published = true
-		return "", "", nil
+		return "", "", "", nil
 	})
 	patches.ApplyFunc(setTemplateLocalityCache, func(templateID string, replicas []ReplicaStatus) {})
 	patches.ApplyFunc(registerReadyTemplateReplicas, func(templateID string, replicas []ReplicaStatus) {})
@@ -389,9 +389,9 @@ func TestRefreshTemplateReplicaSummaryClaimsAliasBeforePublishingReady(t *testin
 	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
 		return []models.TemplateReplica{{NodeID: "node-a", Status: ReplicaStatusReady}}, nil
 	})
-	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, error) {
+	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, string, error) {
 		order = append(order, "publish:"+status)
-		return "my-alias", "", nil
+		return "my-alias", "", "", nil
 	})
 	patches.ApplyFunc(setTemplateLocalityCache, func(templateID string, replicas []ReplicaStatus) {})
 	patches.ApplyFunc(registerReadyTemplateReplicas, func(templateID string, replicas []ReplicaStatus) {})
@@ -418,9 +418,9 @@ func TestRefreshTemplateReplicaSummarySkipsAliasClaimWhenFailed(t *testing.T) {
 	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
 		return []models.TemplateReplica{{NodeID: "node-a", Status: ReplicaStatusFailed, ErrorMessage: "boom"}}, nil
 	})
-	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, error) {
+	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, string, error) {
 		publishedStatus = status
-		return "", "", nil
+		return "", "", "", nil
 	})
 	patches.ApplyFunc(setTemplateLocalityCache, func(templateID string, replicas []ReplicaStatus) {})
 	patches.ApplyFunc(registerReadyTemplateReplicas, func(templateID string, replicas []ReplicaStatus) {})

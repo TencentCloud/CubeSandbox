@@ -849,11 +849,17 @@ func refreshTemplateReplicaSummary(ctx context.Context, templateID, jobID string
 		current = append(current, replicaModelToStatus(replica))
 	}
 	status, lastError := summarizeStatus(current)
-	_, claimWarning, err = publishTemplateStatusWithAlias(ctx, templateID, jobID, status, lastError)
+	_, claimWarning, displacedTemplateID, err := publishTemplateStatusWithAlias(ctx, templateID, jobID, status, lastError)
 	if err != nil {
 		return "", err
 	}
-	localcache.InvalidateImageState(templateID)
+	// Same discipline as finalizeTemplateReplicas: the publish is committed,
+	// so drop the query caches (and the displaced alias holder's) before
+	// re-warming locality.
+	invalidateTemplateCaches(templateID)
+	if displacedTemplateID != "" {
+		invalidateTemplateCaches(displacedTemplateID)
+	}
 	setTemplateLocalityCache(templateID, current)
 	registerReadyTemplateReplicas(templateID, current)
 	return claimWarning, nil
@@ -914,18 +920,22 @@ func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string,
 // TemplateInfo.DisplayName and the warning is empty; on a non-duplicate claim
 // failure the warning is set and DisplayName stays empty.
 func finalizeTemplateReplicas(ctx context.Context, templateID, jobID, instanceType, version string, replicas []ReplicaStatus) (*TemplateInfo, string, error) {
-	setTemplateLocalityCache(templateID, replicas)
-	registerReadyTemplateReplicas(templateID, replicas)
-	// Replica/status changes alter both the per-template info (replica counts,
-	// status) and the aggregate list, so drop the query caches alongside the
-	// locality cache refresh above.
-	invalidateTemplateCaches(templateID)
-
 	status, lastError := summarizeStatus(replicas)
-	displayName, claimWarning, err := publishTemplateStatusWithAlias(ctx, templateID, jobID, status, lastError)
+	displayName, claimWarning, displacedTemplateID, err := publishTemplateStatusWithAlias(ctx, templateID, jobID, status, lastError)
 	if err != nil {
 		return nil, "", err
 	}
+	// The status/alias write above is committed, so the cached reads must go
+	// NOW — invalidating before the publish (the old order) left a window for
+	// a concurrent read to repopulate the caches with the pre-publish state.
+	// An alias transfer also rewrites the displaced holder's display_name in
+	// the same transaction, so its caches go too.
+	invalidateTemplateCaches(templateID)
+	if displacedTemplateID != "" {
+		invalidateTemplateCaches(displacedTemplateID)
+	}
+	setTemplateLocalityCache(templateID, replicas)
+	registerReadyTemplateReplicas(templateID, replicas)
 	info := &TemplateInfo{
 		TemplateID:   templateID,
 		InstanceType: instanceType,
@@ -1191,15 +1201,19 @@ func claimTemplateAliasTx(tx *gorm.DB, templateID, alias string) error {
 	return ErrTemplateNotFound
 }
 
-func publishTemplateStatusWithAlias(ctx context.Context, templateID, jobID, status, lastError string) (displayName, claimWarning string, err error) {
+// publishTemplateStatusWithAlias publishes the aggregate status and claims the
+// alias in one transaction. displacedTemplateID names the template the alias
+// was taken away from ("" when none): callers MUST invalidate its query
+// caches too, since its display_name just changed without going through its
+// own write path.
+func publishTemplateStatusWithAlias(ctx context.Context, templateID, jobID, status, lastError string) (displayName, claimWarning, displacedTemplateID string, err error) {
 	if !isReady() {
-		return "", "", ErrTemplateStoreNotInitialized
+		return "", "", "", ErrTemplateStoreNotInitialized
 	}
 	alias := ""
 	claimantJobRowID := uint(0)
 	expectedStatus := ""
 	claimed := false
-	displacedTemplateID := ""
 	claimWarning = ""
 	var claimErr error
 	run := func() error {
@@ -1263,27 +1277,27 @@ func publishTemplateStatusWithAlias(ctx context.Context, templateID, jobID, stat
 			if displacedTemplateID != "" {
 				log.G(ctx).Warnf("alias %q transferred from template %s to newer template build %s", alias, displacedTemplateID, templateID)
 			}
-			return alias, claimWarning, nil
+			return alias, claimWarning, displacedTemplateID, nil
 		}
 		if claimWarning != "" {
 			log.G(ctx).Warnf("template %s is %s without alias %q: %s", templateID, status, alias, claimWarning)
-			return "", claimWarning, nil
+			return "", claimWarning, "", nil
 		}
 		if alias != "" && status != StatusFailed {
 			log.G(ctx).Infof("alias %q belongs to a newer template build; template %s is %s without alias", alias, templateID, status)
 		}
-		return "", "", nil
+		return "", "", "", nil
 	}
 	if claimErr == nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if statusErr := publishTemplateStatusWithoutAlias(ctx, templateID, expectedStatus, status, lastError); statusErr != nil {
-		return "", "", statusErr
+		return "", "", "", statusErr
 	}
 	if isDuplicateAliasError(claimErr) {
-		return "", "", nil
+		return "", "", "", nil
 	}
-	return "", fmt.Sprintf("template is ready but alias %q could not be claimed: %v", alias, claimErr), nil
+	return "", fmt.Sprintf("template is ready but alias %q could not be claimed: %v", alias, claimErr), "", nil
 }
 
 func publishTemplateStatusWithoutAlias(ctx context.Context, templateID, expectedStatus, status, lastError string) error {
@@ -1542,7 +1556,10 @@ func setTemplateAliasLocked(ctx context.Context, templateID, alias string) error
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
 	}
-	return retryOnceOnDeadlock(func() error {
+	// oldHolder is captured inside the transaction so the post-commit cache
+	// invalidation can drop the released holder's entries too.
+	var oldHolder string
+	if err := retryOnceOnDeadlock(func() error {
 		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			def, err := lockTemplateDefinitionTx(tx, templateID)
 			if err != nil {
@@ -1571,7 +1588,7 @@ func setTemplateAliasLocked(ctx context.Context, templateID, alias string) error
 			if def.Status != StatusReady {
 				return ErrTemplateNotReady
 			}
-			oldHolder := ""
+			oldHolder = ""
 			if cur, err := getTemplateByAliasTx(tx, alias); err == nil && cur != nil && cur.TemplateID != templateID {
 				oldHolder = cur.TemplateID
 			} else if err != nil && !errors.Is(err, ErrTemplateNotFound) {
@@ -1590,7 +1607,19 @@ func setTemplateAliasLocked(ctx context.Context, templateID, alias string) error
 			}
 			return nil
 		})
-	})
+	}); err != nil {
+		return err
+	}
+	// The alias is part of the cached info/list payloads (display_name), so a
+	// committed set/clear/transfer must drop the affected entries — otherwise
+	// GET and list keep serving the previous alias for up to the cache TTL
+	// (e2e test_alias failures). Resolution itself (GetTemplateByAlias) reads
+	// the DB directly and needs no invalidation.
+	invalidateTemplateCaches(templateID)
+	if oldHolder != "" {
+		invalidateTemplateCaches(oldHolder)
+	}
+	return nil
 }
 
 // applyAliasToRequestJSON returns payload with its "alias" field set to alias

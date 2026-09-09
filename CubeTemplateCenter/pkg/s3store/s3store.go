@@ -79,6 +79,27 @@ func NewClient(cfg Config) (*Client, error) {
 	return &Client{cfg: cfg, client: client}, nil
 }
 
+// ProbeTimeout bounds the startup connectivity check.
+const ProbeTimeout = 10 * time.Second
+
+// Probe checks that the configured bucket is reachable with the configured
+// credentials. It exists so startup can surface "CUBE_S3_* is set but the
+// store is not actually usable" early, instead of at the first failed
+// upload — an upload failure silently falls back to node-local storage,
+// which breaks artifact downloads in any multi-replica deployment.
+func (c *Client) Probe(ctx context.Context) error {
+	probeCtx, cancel := context.WithTimeout(ctx, ProbeTimeout)
+	defer cancel()
+	exists, err := c.client.BucketExists(probeCtx, c.cfg.Bucket)
+	if err != nil {
+		return fmt.Errorf("head bucket %q: %w", c.cfg.Bucket, err)
+	}
+	if !exists {
+		return fmt.Errorf("bucket %q does not exist", c.cfg.Bucket)
+	}
+	return nil
+}
+
 // ObjectKey returns the full object key for an artifact.
 func (c *Client) ObjectKey(artifactID string) string {
 	prefix := strings.TrimRight(c.cfg.ArtifactPrefix, "/")

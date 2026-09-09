@@ -183,12 +183,13 @@ func testNewerBuildTransfersAlias(t *testing.T, db *gorm.DB) {
 	})
 	cleanupTemplatesAndJobs(t, db, []string{oldTemplateID, newTemplateID}, []string{oldJobID, newJobID})
 
-	displayName, warning, err := publishTemplateStatusWithAlias(
+	displayName, warning, displaced, err := publishTemplateStatusWithAlias(
 		context.Background(), newTemplateID, newJobID, StatusReady, "",
 	)
 	require.NoError(t, err)
 	assert.Empty(t, warning)
 	assert.Equal(t, alias, displayName)
+	assert.Equal(t, oldTemplateID, displaced)
 
 	holder, err := GetTemplateByAlias(context.Background(), alias)
 	require.NoError(t, err)
@@ -218,7 +219,7 @@ func testOlderBuildCannotReclaimAlias(t *testing.T, db *gorm.DB) {
 	insertCreateJob(t, db, newTemplateID, newJobID, alias)
 	cleanupTemplatesAndJobs(t, db, []string{oldTemplateID, newTemplateID}, []string{oldJobID, newJobID})
 
-	displayName, warning, err := publishTemplateStatusWithAlias(
+	displayName, warning, _, err := publishTemplateStatusWithAlias(
 		context.Background(), oldTemplateID, oldJobID, StatusReady, "",
 	)
 	require.NoError(t, err)
@@ -245,11 +246,11 @@ func testConcurrentBuildClaimsConvergeToNewer(t *testing.T, db *gorm.DB) {
 
 	errCh := make(chan error, 2)
 	go func() {
-		_, _, err := publishTemplateStatusWithAlias(context.Background(), oldTemplateID, oldJobID, StatusReady, "")
+		_, _, _, err := publishTemplateStatusWithAlias(context.Background(), oldTemplateID, oldJobID, StatusReady, "")
 		errCh <- err
 	}()
 	go func() {
-		_, _, err := publishTemplateStatusWithAlias(context.Background(), newTemplateID, newJobID, StatusReady, "")
+		_, _, _, err := publishTemplateStatusWithAlias(context.Background(), newTemplateID, newJobID, StatusReady, "")
 		errCh <- err
 	}()
 	require.NoError(t, <-errCh)
@@ -271,7 +272,7 @@ func testUnorderedBuildDoesNotStealAlias(t *testing.T, db *gorm.DB) {
 	insertCreateJob(t, db, claimantID, claimantJobID, alias)
 	cleanupTemplatesAndJobs(t, db, []string{holderID, claimantID}, []string{claimantJobID})
 
-	displayName, warning, err := publishTemplateStatusWithAlias(
+	displayName, warning, _, err := publishTemplateStatusWithAlias(
 		context.Background(), claimantID, claimantJobID, StatusReady, "",
 	)
 	require.NoError(t, err)
@@ -294,7 +295,7 @@ func testBuildClaimsAliasFromDeletingHolderWithoutJob(t *testing.T, db *gorm.DB)
 	insertCreateJob(t, db, claimantID, claimantJobID, alias)
 	cleanupTemplatesAndJobs(t, db, []string{holderID, claimantID}, []string{claimantJobID})
 
-	displayName, warning, err := publishTemplateStatusWithAlias(
+	displayName, warning, _, err := publishTemplateStatusWithAlias(
 		context.Background(), claimantID, claimantJobID, StatusReady, "",
 	)
 	require.NoError(t, err)
@@ -322,7 +323,7 @@ func testBuildClearsDeletingHolderJobAlias(t *testing.T, db *gorm.DB) {
 	insertCreateJob(t, db, claimantID, claimantJobID, alias)
 	cleanupTemplatesAndJobs(t, db, []string{holderID, claimantID}, []string{holderJobID, claimantJobID})
 
-	displayName, warning, err := publishTemplateStatusWithAlias(
+	displayName, warning, _, err := publishTemplateStatusWithAlias(
 		context.Background(), claimantID, claimantJobID, StatusReady, "",
 	)
 	require.NoError(t, err)
@@ -350,7 +351,7 @@ func testPublishStatusClaimsTrimmedAlias(t *testing.T, db *gorm.DB) {
 	})
 	cleanupTemplatesAndJobs(t, db, []string{templateID}, []string{jobID})
 
-	displayName, warning, err := publishTemplateStatusWithAlias(
+	displayName, warning, _, err := publishTemplateStatusWithAlias(
 		context.Background(), templateID, jobID, StatusReady, "",
 	)
 	require.NoError(t, err)

@@ -176,36 +176,50 @@ func resolveRedoTargets(instanceType string, req *types.RedoTemplateFromImageReq
 	return filtered, nil
 }
 
-// rootfsArtifactReusableForRedo reports whether a redo may skip the rebuild and
-// reuse the artifact recorded on the previous job.
+// rootfsArtifactReuseVerdictForRedo is the redo reuse gate, checked before
+// honouring a resume phase of DISTRIBUTING or later because the
+// "distribution failed on every node" path deletes the artifact it just
+// built (files, node copies and the DB row) on its way out. A job that
+// failed that way records phase=DISTRIBUTING, so determining the resume
+// phase from the phase alone sends every redo straight into
+// getRootfsArtifactByID on an artifact that no longer exists — the redo
+// fails with "record not found" and the template can never be retried at
+// all.
 //
-// This must be checked before honouring a resume phase of DISTRIBUTING or
-// later, because the "distribution failed on every node" path deletes the
-// artifact it just built (files, node copies and the DB row) on its way out.
-// A job that failed that way records phase=DISTRIBUTING, so determining the
-// resume phase from the phase alone sends every redo straight into
-// getRootfsArtifactByID on an artifact that no longer exists — the redo fails
-// with "record not found" and the template can never be retried at all.
-func rootfsArtifactReusableForRedo(ctx context.Context, artifactID string) bool {
+// nil means the artifact may be reused (skip the rebuild). Two sentinel
+// errors mean the redo must REFUSE rather than fall through to the rebuild
+// branch:
+//
+//   - ErrRootfsArtifactForeign: another holder owns the artifact; a rebuild
+//     would overwrite the shared row (fresh token/sha) and break every
+//     replica the holder already served (issue #1005).
+//   - ErrArtifactServabilityUnknown: the download-path probe could not
+//     decide (serving tier unreachable, ...). The rebuild branch marks the
+//     row FAILED, which would destroy a perfectly healthy artifact over a
+//     transient network blip.
+//
+// Any other error means the artifact is genuinely unusable and the redo
+// falls back to a full rebuild.
+func rootfsArtifactReuseVerdictForRedo(ctx context.Context, artifactID string) error {
 	artifactID = strings.TrimSpace(artifactID)
 	if artifactID == "" {
-		return false
+		return errors.New("no artifact id recorded on the job")
 	}
 	artifact, err := getRootfsArtifactByID(ctx, artifactID)
 	if err != nil || artifact == nil {
 		// Includes gorm.ErrRecordNotFound, which is the exact state the
 		// all-nodes-failed cleanup leaves behind.
-		return false
+		return errors.New("artifact row missing")
 	}
 	if !artifactStatusReusableForRedo(artifact.Status) {
-		return false
+		return fmt.Errorf("artifact status %q is not reusable", artifact.Status)
 	}
-	// A READY row still has to be backed by its ext4 file. When the artifact
-	// store did not survive a restart the row outlives the file, and reusing it
-	// here would make the redo re-distribute a phantom artifact — which is the
-	// one thing a redo exists to fix. Demote it so this redo falls through to the
-	// full-rebuild branch instead.
-	return readyArtifactUsableForReuse(ctx, artifact)
+	// A READY row still has to be backed by servable data. When the artifact
+	// store did not survive a restart the row outlives the file, and reusing
+	// it here would make the redo re-distribute a phantom artifact — which is
+	// the one thing a redo exists to fix. Demote it so this redo falls
+	// through to the full-rebuild branch instead.
+	return rootfsArtifactReuseVerdict(ctx, artifact)
 }
 
 // artifactStatusReusableForRedo is the status half of the decision above, kept
@@ -323,25 +337,35 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 	// reuse is no longer usable. Without this, a job that failed distribution
 	// on all nodes is unretryable forever: that path deletes the artifact, so
 	// the reuse branch below can only ever report "record not found".
-	if resumePhase != JobPhaseBuildingExt4 && !rootfsArtifactReusableForRedo(ctx, jobRecord.ArtifactID) {
-		// But never rebuild an artifact another CubeMaster holds: the rebuild
-		// would overwrite the shared row (fresh token/sha) and break every
-		// replica the holder already served (issue #1005). Surface it instead.
-		if artifact, aerr := getRootfsArtifactByID(ctx, jobRecord.ArtifactID); aerr == nil && artifact != nil {
-			if reuseErr := rootfsArtifactReuseVerdict(ctx, artifact); errors.Is(reuseErr, ErrRootfsArtifactForeign) {
-				failRedoTemplateImageJob(ctx, jobID, resumePhase,
-					fmt.Sprintf("redo cannot rebuild artifact %s here: %v", artifact.ArtifactID, reuseErr))
-				return
+	if resumePhase != JobPhaseBuildingExt4 {
+		switch reuseVerdict := rootfsArtifactReuseVerdictForRedo(ctx, jobRecord.ArtifactID); {
+		case reuseVerdict == nil:
+			// Reusable: keep the recorded resume phase.
+		case errors.Is(reuseVerdict, ErrRootfsArtifactForeign):
+			// Never rebuild an artifact another holder owns: the rebuild
+			// would overwrite the shared row (fresh token/sha) and break
+			// every replica the holder already served (issue #1005).
+			failRedoTemplateImageJob(ctx, jobID, resumePhase,
+				fmt.Sprintf("redo cannot rebuild artifact %s here: %v", jobRecord.ArtifactID, reuseVerdict))
+			return
+		case errors.Is(reuseVerdict, ErrArtifactServabilityUnknown):
+			// An undecidable probe must not reach the rebuild branch:
+			// prepareRootfsArtifactForRedoBuild marks the row FAILED there,
+			// which would destroy a perfectly healthy artifact over a
+			// transient serving-tier blip. Refuse retryably instead.
+			failRedoTemplateImageJob(ctx, jobID, resumePhase,
+				fmt.Sprintf("redo cannot verify artifact %s is servable: %v; the row was left untouched — retry the redo", jobRecord.ArtifactID, reuseVerdict))
+			return
+		default:
+			logger.Infof("redo: artifact %q is not reusable (%v), falling back to a full rebuild (resume_phase %s -> %s)",
+				jobRecord.ArtifactID, reuseVerdict, resumePhase, JobPhaseBuildingExt4)
+			resumePhase = JobPhaseBuildingExt4
+			if err := updateTemplateImageJob(ctx, jobID, map[string]any{
+				"phase":        JobPhaseBuildingExt4,
+				"resume_phase": JobPhaseBuildingExt4,
+			}); err != nil {
+				logger.Warnf("update redo resume phase fail: %v", err)
 			}
-		}
-		logger.Infof("redo: artifact %q is not reusable, falling back to a full rebuild (resume_phase %s -> %s)",
-			jobRecord.ArtifactID, resumePhase, JobPhaseBuildingExt4)
-		resumePhase = JobPhaseBuildingExt4
-		if err := updateTemplateImageJob(ctx, jobID, map[string]any{
-			"phase":        JobPhaseBuildingExt4,
-			"resume_phase": JobPhaseBuildingExt4,
-		}); err != nil {
-			logger.Warnf("update redo resume phase fail: %v", err)
 		}
 	}
 	if resumePhase == JobPhaseBuildingExt4 {
@@ -380,13 +404,16 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 				logger.Errorf("update redo reusable artifact fail: %v", err)
 			}
 		} else {
-			// Full rebuild path is disabled in CubeMaster. Redo jobs requiring a
-			// full rebuild must be forwarded to CubeTemplateCenter by the caller
-			// (template_from_image.go:72). Reaching here means the caller's
-			// forwarding logic has a bug.
+			// Full rebuild path is disabled in CubeMaster. Redo jobs KNOWN to
+			// need a rebuild are forwarded to CubeTemplateCenter by the caller
+			// (template_from_image.go:72), but a redistribution-only redo can
+			// still land here legitimately: the artifact row was READY at
+			// submit time, then the servability gate found the data gone and
+			// demoted the row. The next redo sees the FAILED row and is
+			// forwarded to TC for a real rebuild — say so in the message.
 			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingExt4,
 				"redo requires a full rebuild but local ext4 build is disabled in CubeMaster; "+
-					"this job should have been forwarded to CubeTemplateCenter")
+					"the artifact row has been demoted, so retrying the redo forwards it to CubeTemplateCenter")
 			return
 		}
 	} else {

@@ -44,16 +44,30 @@ artifact. hostPath stays node-local by definition, and a
 templateCenter.persistence.existingClaim we cannot prove is the same share
 does not count (conservative).
 
-Multi-replica master/TC without S3 and without a shared volume is allowed but
+Multi-replica MASTER without S3 and without a shared volume is allowed but
 degraded ONLY when the artifact disk is per-pod scratch (persistence disabled
 → emptyDir) or node-pinned (hostPath): NOTES.txt prints a loud warning for
-that combination. The one combination that must still fail is a mounted
-ReadWriteOnce claim: it cannot attach on several nodes, so the second master
+that combination, and downloads are proxied to the single TC tier so any
+master replica can serve any artifact. Multi-replica TC without S3/a shared
+volume is REFUSED below (builds land on per-replica disks but downloads are
+load-balanced across replicas). A mounted ReadWriteOnce claim always fails
+for multi-replica master: it cannot attach on several nodes, so the second
 replica never even schedules (Pending) — a hard failure, not a degradation
 the foreign-artifact retry can absorb. */ -}}
 {{- $sharedArtifactStore := and $masterPersistence.enabled (not $masterPersistence.hostPath) (has "ReadWriteMany" ($masterPersistence.accessModes | default list)) (not $templateCenter.persistence.existingClaim) -}}
 {{- if and .Values.controlPlane.enabled (gt (int .Values.controlPlane.master.replicas) 1) (not $s3Backed) $masterPersistence.enabled (not $masterPersistence.hostPath) (not $sharedArtifactStore) }}
 {{- fail (printf "controlPlane.master.replicas=%v cannot mount the default ReadWriteOnce artifact PVC on several nodes — the second replica stays Pending forever. Choose one: controlPlane.master.persistence.enabled=false (per-pod emptyDir scratch; degraded, see the install-notes warning), controlPlane.master.persistence.accessModes=[ReadWriteMany] (a genuinely shared CFS/NFS volume), or controlPlane.artifactStore.s3Backed=true (S3/MinIO as the durable store)" .Values.controlPlane.master.replicas) }}
+{{- end }}
+{{- /* Multi-replica TC is different from multi-replica master: every master
+replica can serve any artifact (downloads are reverse-proxied to the single
+TC tier), but each TC replica builds into its OWN local disk while the build
+lock deduplicates across replicas — so with a node-local store a download
+routed to a replica that never built the artifact 404s, and the
+distribution servability probe may even demote the healthy row. Multi-TC
+therefore requires a durable shared store: S3 (s3Backed) or a genuinely
+shared ReadWriteMany volume. */ -}}
+{{- if and .Values.controlPlane.enabled (gt (int ($templateCenter.replicas | default 1)) 1) (not $s3Backed) (not $sharedArtifactStore) }}
+{{- fail (printf "controlPlane.templateCenter.replicas=%v is not supported with a node-local artifact store: each TC replica's builds land on its own disk, but downloads are load-balanced across replicas, so a pull can hit a replica that never built the artifact (404). Choose one: controlPlane.artifactStore.s3Backed=true (S3/MinIO as the durable store; replicas coordinate duplicate builds via DB session locks), controlPlane.master.persistence.accessModes=[ReadWriteMany] (a genuinely shared CFS/NFS volume), or keep templateCenter.replicas=1" ($templateCenter.replicas | default 1)) }}
 {{- end }}
 {{- if and .Values.controlPlane.enabled (not $templateCenter.colocateWithMaster) (not $templateCenter.affinity) (not $s3Backed) (not $sharedArtifactStore) }}
 {{- fail "controlPlane.templateCenter.colocateWithMaster=false requires controlPlane.templateCenter.affinity: without it TC may be scheduled away from the CubeMaster holding the artifact volume (not required with controlPlane.artifactStore.s3Backed=true or a ReadWriteMany shared artifact volume)" }}

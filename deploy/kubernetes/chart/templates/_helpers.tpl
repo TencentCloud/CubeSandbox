@@ -746,12 +746,35 @@ cannot feed env injection -- combine it with global.env instead.
 {{- end -}}
 
 {{/*
+Default path-style decision for an external artifact-store endpoint when the
+operator did not set volumeS3.pathStyle. Known public-cloud S3 endpoints
+(AWS, Tencent COS, Aliyun OSS, GCS) use virtual-host addressing; everything
+else — IP literals, in-cluster / private DNS names, self-hosted
+S3-compatible stores such as MinIO or Ceph — is served path-style, and
+path-style is the only mode most of them accept (virtual-host would resolve
+<bucket>.<host>, which private DNS cannot resolve).
+*/}}
+{{- define "cube.s3PathStyleDefaultForEndpoint" -}}
+{{- $host := . | toString | trim | trimPrefix "https://" | trimPrefix "http://" -}}
+{{- $host = first (splitList "/" $host) -}}
+{{- $host = first (splitList ":" $host) -}}
+{{- if or (hasSuffix ".amazonaws.com" $host) (hasSuffix ".myqcloud.com" $host) (hasSuffix ".aliyuncs.com" $host) (hasSuffix ".googleapis.com" $host) (hasSuffix ".amazonaws.com.cn" $host) -}}
+false
+{{- else -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
 Path style for the artifact store S3 client (CUBE_S3_USE_PATH_STYLE). The
 builtin MinIO is only reachable path-style: virtual-host addressing would
 resolve <bucket>.cube-minio.<ns>.svc..., which cluster DNS cannot resolve
 (the chart already writes -ouse_path_request_style into volume-s3.conf for
-the same reason). An external volumeS3 endpoint keeps the binary default
-(false = virtual-host, AWS-style) unless the operator sets volumeS3.pathStyle.
+the same reason). An external volumeS3 endpoint without an explicit
+volumeS3.pathStyle gets the endpoint-shape heuristic above — external
+MinIO used to hard-default to virtual-host here, which silently broke
+uploads (artifact fell back to node-local disk, then multi-replica
+downloads 404'd).
 */}}
 {{- define "cube.artifactS3PathStyle" -}}
 {{- $volumeS3 := default dict .Values.volumeS3 -}}
@@ -759,7 +782,7 @@ the same reason). An external volumeS3 endpoint keeps the binary default
 {{- if hasKey $volumeS3 "pathStyle" -}}
 {{- $volumeS3.pathStyle | toString -}}
 {{- else -}}
-false
+{{- include "cube.s3PathStyleDefaultForEndpoint" $volumeS3.endpoint -}}
 {{- end -}}
 {{- else -}}
 true
