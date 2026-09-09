@@ -154,6 +154,8 @@ rpc_lvol_respond_err(struct spdk_jsonrpc_request *request, int err,
 
 	if (msg && msg[0] != '\0') {
 		snprintf(buf, sizeof(buf), "%s", msg);
+	} else if (err == -EEXIST) {
+		snprintf(buf, sizeof(buf), "name already exists");
 	} else {
 		sys = spdk_strerror(-err);
 		snprintf(buf, sizeof(buf), "%s", sys);
