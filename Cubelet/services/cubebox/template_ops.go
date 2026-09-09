@@ -607,12 +607,12 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 	return s.cleanupTemplate(ctx, req, true)
 }
 
-// cleanupTemplate removes a catalog package. honorLiveXFSPause is true for
+// cleanupTemplate removes a catalog package. honorLivePauseKeep is true for
 // the Master RPC: Resume still needs the pause catalog (XFS mmap, S3
 // Snapshot last-restore), so a Cleanup of that snap while a live sandbox
 // holds cube.master.pause.snapshot.id is a successful no-op. Cubelet's own
 // next-Pause / Destroy GC passes false.
-func (s *service) cleanupTemplate(ctx context.Context, req *cubebox.CleanupTemplateRequest, honorLiveXFSPause bool) (*cubebox.CleanupTemplateResponse, error) {
+func (s *service) cleanupTemplate(ctx context.Context, req *cubebox.CleanupTemplateRequest, honorLivePauseKeep bool) (*cubebox.CleanupTemplateResponse, error) {
 	rsp := &cubebox.CleanupTemplateResponse{
 		RequestID:  req.GetRequestID(),
 		TemplateID: strings.TrimSpace(req.GetTemplateID()),
@@ -653,8 +653,7 @@ func (s *service) cleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 			}
 		}
 	}
-	if honorLiveXFSPause && keepLiveXFSPausePackage(s.listCubeboxes(), rsp.TemplateID) &&
-		entry != nil && isPauseSnapshotCatalogKind(entry.Kind) {
+	if shouldKeepLivePausePackage(honorLivePauseKeep, s.listCubeboxes(), rsp.TemplateID, catalogKindForKeep(entry)) {
 		log.G(ctx).Infof("CleanupTemplate %s: keeping pause package; a live sandbox still restores from it",
 			rsp.TemplateID)
 		return rsp, nil

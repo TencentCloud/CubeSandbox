@@ -144,8 +144,8 @@ func resolveLaunchAncestorSnapshotID(cb *cubeboxstore.CubeBox) string {
 // satisfies that when the VM was last restored from the same image — the
 // first Pause after Create-from-template.
 //
-// After Resume the restore-base is the pause package. XFS keeps that
-// catalog so the next Pause clones it (S3 already has a live memory
+// After Resume the restore-base is the pause package. Resume keeps that
+// catalog so the next Pause can clone it (S3 also has a live memory
 // volume). Cloning the template and asking for incremental would drop
 // every page that landed in the pause image and stayed clean. The next
 // restore then comes up holey: agent health can still answer, then
@@ -227,13 +227,14 @@ func resolveMemoryObjectFromSnapshotID(ctx context.Context, backend, snapshotID 
 // overlay into.
 //
 //  1. Own memory volume (S3 same-node resume clone or cross-node import).
-//     S3 Resume deletes the pause package after cloning onto this disk.
+//     Resume keeps the pause catalog; this volume is the live clone of
+//     that image (or the cross-node import when no local catalog exists).
 //  2. Launch ancestor, but only when that image is the VM's last restore
 //     (first Pause after Create-from-template). See
 //     [launchAncestorIsLastRestore].
-//  3. Last-restore catalog. XFS Resume keeps the pause package so this
-//     Pause can incremental-overlay onto that image; Cubelet GCs the
-//     old package after this Pause succeeds (or on Destroy).
+//  3. Last-restore catalog. Resume keeps the pause package so this Pause
+//     can incremental-overlay onto that image; Cubelet GCs the old
+//     package after this Pause succeeds (or on Destroy).
 //  4. Full dump into an empty volume when no catalog/volume base is
 //     left (template gone, or an S3 own-volume clone that failed).
 func preparePauseMemoryArtifact(
@@ -342,8 +343,12 @@ func preparePauseMemoryArtifact(
 //
 // Tier 2b — incremental(pagemap_anon) + clone of the S3 own volume.
 // Cross-node Resume never writes a local pause catalog; the imported
-// sb-*-memory disk is the restore image. Pause already uses this volume.
-// Same-node S3 Resume keeps the pause catalog, so this tier is unused there.
+// sb-*-memory disk is the restore image. Same-node Resume keeps the
+// pause catalog (tier 1/2); 2b is also the fallback if that catalog is
+// later lost. Only used when ImportedMemoryVol is still the last
+// restore (restore-base label equals the pause id). Rollback restamps
+// restore-base and opaque resume invalidates it; both leave a stale
+// import that must not become a pagemap_anon dest.
 //
 // Tier 3 — full + fresh empty volume. The last-resort fallback when even
 // the last-restore base file is gone (e.g. the source template was deleted
@@ -402,10 +407,10 @@ func prepareCommitMemoryArtifact(
 	}
 
 	// ─── Tier 2b: S3 own volume when the pause catalog is gone ────────
-	// Same-node S3 Resume keeps the pause catalog (tier 1/2). Cross-node
-	// Resume imports onto sb-*-memory and never writes a local pause
-	// package, so Snapshot would otherwise full-dump. Pause already
-	// clones this volume; Commit uses the same base.
+	// Cross-node Resume imports onto sb-*-memory and never writes a
+	// local pause package. Same-node catalog miss uses the same volume
+	// only while it is still the last restore (see
+	// importedMemoryIsCurrentRestore).
 	if live, liveErr := importedSandboxMemoryForCommit(ctx, cb, backend); liveErr != nil {
 		stepLog.Warnf("memory artifact: own volume lookup failed (%v); falling back to full snapshot", liveErr)
 	} else if live != nil {
@@ -436,7 +441,7 @@ func importedSandboxMemoryForCommit(
 	cb *cubeboxstore.CubeBox,
 	backend string,
 ) (*storage.CowSnapshotObject, error) {
-	if cb == nil {
+	if !importedMemoryIsCurrentRestore(cb) {
 		return nil, nil
 	}
 	sandboxID := strings.TrimSpace(cb.ID)
@@ -444,4 +449,39 @@ func importedSandboxMemoryForCommit(
 		sandboxID = strings.TrimSpace(cb.SandboxID)
 	}
 	return storage.GetImportedSandboxMemoryFor(ctx, backend, sandboxID)
+}
+
+// importedMemoryIsCurrentRestore is the Tier 2b gate. ImportedMemoryVol
+// is minted at Create/Resume (same-node clone or cross-node import).
+// Rollback restamps RuntimeRestoreSnapshotID onto the rollback target
+// and leaves the import pointing at the pre-rollback disk. Opaque
+// resume writes invalid-runtime-restore-base and also leaves the vol
+// stale. Incremental onto that disk would drop pages that landed in
+// the new restore image.
+//
+// Require Cubelet-stamped Labels only, and require restore-base ==
+// pause id: that is the Resume path this fallback is for. FromSnap
+// without a pause binding stays on catalog / full.
+func importedMemoryIsCurrentRestore(cb *cubeboxstore.CubeBox) bool {
+	if cb == nil {
+		return false
+	}
+	restoreID := cubeBoxLabel(cb, constants.MasterAnnotationRuntimeRestoreSnapshotID)
+	if restoreID == "" || restoreID == runtimeSnapshotBindingInvalidID {
+		return false
+	}
+	pauseID := cubeBoxLabel(cb, constants.MasterAnnotationPauseSnapshotID)
+	if pauseID == "" || pauseID == runtimeSnapshotBindingInvalidID {
+		return false
+	}
+	return restoreID == pauseID
+}
+
+// shouldUseImportedMemoryForCommit is the testable Tier 2b decision:
+// a non-empty imported volume plus importedMemoryIsCurrentRestore.
+func shouldUseImportedMemoryForCommit(cb *cubeboxstore.CubeBox, live *storage.CowSnapshotObject) bool {
+	if live == nil || strings.TrimSpace(live.Name) == "" {
+		return false
+	}
+	return importedMemoryIsCurrentRestore(cb)
 }

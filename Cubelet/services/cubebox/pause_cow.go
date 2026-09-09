@@ -99,12 +99,12 @@ func (s *service) listCubeboxes() []*cubeboxstore.CubeBox {
 	return s.cubeboxMgr.cubeboxManger.List()
 }
 
-// keepLiveXFSPausePackage is true when Master's Resume-time CleanupTemplate
-// must leave this pause catalog on disk. XFS Resume mmaps the package file;
-// S3 Resume also keeps it so CommitSandbox can still resolve a last-restore
-// memory base (Snapshot does not clone sb-*-memory). PAUSED / EXITED /
-// UNKNOWN do not hold a live restore, so DelPaused and leftover GC still
-// delete.
+// keepLivePausePackage is true when Master's Resume-time CleanupTemplate
+// must leave this pause catalog on disk. XFS Resume mmaps the package
+// file; S3 Resume keeps it so CommitSandbox can still resolve a
+// last-restore memory base (Snapshot does not clone sb-*-memory).
+// PAUSED / EXITED / UNKNOWN do not hold a live restore, so DelPaused
+// and leftover GC still delete.
 //
 // Only Cubelet-stamped Labels count (not user Create annotations). Match
 // the current pause id or the restore-base: Pause overwrites the pause id
@@ -112,21 +112,21 @@ func (s *service) listCubeboxes() []*cubeboxstore.CubeBox {
 // must still see the mmap / incremental source. cleanupTemplate also
 // requires catalog Kind=pause_snapshot so a forged label cannot pin a
 // template or customer snap.
-func keepLiveXFSPausePackage(boxes []*cubeboxstore.CubeBox, snapID string) bool {
+func keepLivePausePackage(boxes []*cubeboxstore.CubeBox, snapID string) bool {
 	snapID = strings.TrimSpace(snapID)
 	if snapID == "" {
 		return false
 	}
 	for _, sb := range boxes {
-		if sandboxHoldsLiveXFSPausePackage(sb, snapID) {
+		if sandboxHoldsLivePausePackage(sb, snapID) {
 			return true
 		}
 	}
 	return false
 }
 
-func sandboxHoldsLiveXFSPausePackage(sb *cubeboxstore.CubeBox, snapID string) bool {
-	if sb == nil || !sandboxLiveForXFSPauseKeep(sb) {
+func sandboxHoldsLivePausePackage(sb *cubeboxstore.CubeBox, snapID string) bool {
+	if sb == nil || !sandboxLiveForPauseKeep(sb) {
 		return false
 	}
 	if cubeBoxLabel(sb, constants.MasterAnnotationPauseSnapshotID) == snapID {
@@ -135,7 +135,7 @@ func sandboxHoldsLiveXFSPausePackage(sb *cubeboxstore.CubeBox, snapID string) bo
 	return cubeBoxLabel(sb, constants.MasterAnnotationRuntimeRestoreSnapshotID) == snapID
 }
 
-func sandboxLiveForXFSPauseKeep(sb *cubeboxstore.CubeBox) bool {
+func sandboxLiveForPauseKeep(sb *cubeboxstore.CubeBox) bool {
 	st := sb.GetStatus()
 	if st == nil {
 		return false
@@ -166,10 +166,25 @@ func isPauseSnapshotCatalogKind(kind string) bool {
 	return strings.EqualFold(strings.TrimSpace(kind), storage.CatalogKindPauseSnapshot)
 }
 
+// shouldKeepLivePausePackage is the CleanupTemplate keep gate: Master's
+// Resume-time RPC (honorLive=true) no-ops while a live sandbox still
+// restores from this pause catalog. Cubelet's next-Pause / Destroy GC
+// passes honorLive=false and still deletes.
+func shouldKeepLivePausePackage(honorLive bool, boxes []*cubeboxstore.CubeBox, snapID, catalogKind string) bool {
+	return honorLive && keepLivePausePackage(boxes, snapID) && isPauseSnapshotCatalogKind(catalogKind)
+}
+
+func catalogKindForKeep(entry *storage.SnapshotCatalogEntry) string {
+	if entry == nil {
+		return ""
+	}
+	return entry.Kind
+}
+
 // replacedLivePauseSnapshotID is the pause snap Resume left as live. After a
 // new Pause succeeds, Cubelet CleanupTemplate's it (keep_tombstone already
 // tore down the running overlay). Empty on the first Pause from a template.
-// XFS Resume keeps that package on disk so this Pause can incremental-
+// Resume keeps that package on disk so this Pause can incremental-
 // overlay onto it; this GC is what finally removes it.
 func replacedLivePauseSnapshotID(prev, newID string) string {
 	prev = strings.TrimSpace(prev)
@@ -668,7 +683,7 @@ func cleanupBackendForPauseSnap(preferred, snapID string) string {
 // tombstone. UNKNOWN / FAILED / RUNNING / PAUSING may hold half-finished
 // or leftover snaps. After Resume Master's CleanupTemplate no-ops
 // while this RUNNING sandbox still holds the pause id; a user Destroy
-// GCs it here (honorLiveXFSPause=false).
+// GCs it here (honorLivePauseKeep=false).
 func pauseSnapIDToGCOnDestroy(req *cubebox.DestroyCubeSandboxRequest, sb *cubeboxstore.CubeBox) string {
 	if sb == nil || isPauseKeepTombstone(req) || isPauseDeleteTombstone(req) {
 		return ""

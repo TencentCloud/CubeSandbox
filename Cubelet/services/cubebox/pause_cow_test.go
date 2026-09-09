@@ -217,38 +217,59 @@ func TestNewPauseSnapshotConfigCarriesSnapshotType(t *testing.T) {
 	}
 }
 
-func TestKeepLiveXFSPausePackage(t *testing.T) {
+func TestKeepLivePausePackage(t *testing.T) {
 	t.Parallel()
-	snap := "snap-keepxfs000000000000000001"
+	snap := "snap-keeppause0000000000000001"
 	running := newCubeboxWithStatusForTest("sb-run", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(running, snap)
-	if !keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{running}, snap) {
+	if !keepLivePausePackage([]*cubeboxstore.CubeBox{running}, snap) {
 		t.Fatal("running resume must keep the pause package")
 	}
 
 	paused := newCubeboxWithStatusForTest("sb-paused", cubeboxstore.Status{PausedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(paused, snap)
-	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{paused}, snap) {
+	if keepLivePausePackage([]*cubeboxstore.CubeBox{paused}, snap) {
 		t.Fatal("PAUSED DelPaused must be allowed to delete the package")
 	}
 
 	other := newCubeboxWithStatusForTest("sb-other", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(other, "snap-other00000000000000000001")
-	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{other}, snap) {
+	if keepLivePausePackage([]*cubeboxstore.CubeBox{other}, snap) {
 		t.Fatal("unrelated sandbox must not pin this package")
 	}
 
 	forged := newCubeboxWithStatusForTest("sb-forged", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	forged.AddAnnotations(map[string]string{constants.MasterAnnotationPauseSnapshotID: snap})
-	if keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{forged}, snap) {
+	if keepLivePausePackage([]*cubeboxstore.CubeBox{forged}, snap) {
 		t.Fatal("user Create annotation must not pin a pause package")
 	}
 
 	nextPause := newCubeboxWithStatusForTest("sb-next", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(nextPause, "snap-new000000000000000000000001")
 	nextPause.AddLabels(map[string]string{constants.MasterAnnotationRuntimeRestoreSnapshotID: snap})
-	if !keepLiveXFSPausePackage([]*cubeboxstore.CubeBox{nextPause}, snap) {
+	if !keepLivePausePackage([]*cubeboxstore.CubeBox{nextPause}, snap) {
 		t.Fatal("restore-base must keep the previous package while Pause stamps a new id")
+	}
+}
+
+func TestShouldKeepLivePausePackageHonorLive(t *testing.T) {
+	t.Parallel()
+	snap := "snap-keepgate00000000000000001"
+	running := newCubeboxWithStatusForTest("sb-s3-live", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	stampPauseSnapshotID(running, snap)
+	boxes := []*cubeboxstore.CubeBox{running}
+
+	if !shouldKeepLivePausePackage(true, boxes, snap, "pause_snapshot") {
+		t.Fatal("Master Resume Cleanup of a live S3/XFS pause package must no-op")
+	}
+	if shouldKeepLivePausePackage(false, boxes, snap, "pause_snapshot") {
+		t.Fatal("Cubelet next-Pause / Destroy GC must still delete")
+	}
+	if shouldKeepLivePausePackage(true, boxes, snap, "snapshot") {
+		t.Fatal("customer snap kind must not be pinned by a pause label")
+	}
+	if shouldKeepLivePausePackage(true, boxes, snap, "") {
+		t.Fatal("missing catalog kind must not keep")
 	}
 }
 

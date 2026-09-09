@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 )
 
 // TestErrNoBaseMemoryForIncrementalIsSentinel locks in that
@@ -360,4 +361,56 @@ func TestLaunchAncestorIsLastRestore(t *testing.T) {
 
 	assert.False(t, launchAncestorIsLastRestore(fromTpl, ""),
 		"empty ancestor is never a valid incremental dest")
+}
+
+func TestImportedMemoryIsCurrentRestore(t *testing.T) {
+	pauseID := "snap-pause-keep-2b"
+	cb := newCubeboxWithStatusForTest("sb-2b", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	stampPauseSnapshotID(cb, pauseID)
+	setRuntimeRestoreBaseLabels(cb, pauseID, time.Now().UTC())
+	assert.True(t, importedMemoryIsCurrentRestore(cb),
+		"Resume stamps restore-base to the pause id; 2b may use the import")
+
+	setRuntimeRestoreBaseLabels(cb, "snap-rollback-target", time.Now().UTC())
+	assert.False(t, importedMemoryIsCurrentRestore(cb),
+		"Rollback restamps restore-base; stale ImportedMemoryVol must not be 2b")
+
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(cb, time.Now().UTC())
+	assert.False(t, importedMemoryIsCurrentRestore(cb),
+		"opaque resume invalidates restore-base; stale import must not be 2b")
+
+	fromSnap := newCubeboxWithStatusForTest("sb-fromsnap", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	setRuntimeRestoreBaseLabels(fromSnap, "snap-customer", time.Now().UTC())
+	assert.False(t, importedMemoryIsCurrentRestore(fromSnap),
+		"FromSnap without a pause binding stays on catalog / full")
+
+	forged := newCubeboxWithStatusForTest("sb-forged-2b", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	forged.AddAnnotations(map[string]string{
+		constants.MasterAnnotationPauseSnapshotID:          pauseID,
+		constants.MasterAnnotationRuntimeRestoreSnapshotID: pauseID,
+	})
+	assert.False(t, importedMemoryIsCurrentRestore(forged),
+		"user Create annotations must not open Tier 2b")
+}
+
+func TestShouldUseImportedMemoryForCommit(t *testing.T) {
+	pauseID := "snap-pause-keep-2b-vol"
+	cb := newCubeboxWithStatusForTest("sb-2b-vol", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	stampPauseSnapshotID(cb, pauseID)
+	setRuntimeRestoreBaseLabels(cb, pauseID, time.Now().UTC())
+
+	assert.True(t, shouldUseImportedMemoryForCommit(cb, &storage.CowSnapshotObject{
+		Name: "sb-2b-vol-memory",
+		Kind: storage.CowKindVolume,
+	}), "imported vol + current restore → incremental 2b")
+	assert.False(t, shouldUseImportedMemoryForCommit(cb, nil),
+		"empty import must fall through to full")
+	assert.False(t, shouldUseImportedMemoryForCommit(cb, &storage.CowSnapshotObject{}),
+		"nameless import must fall through to full")
+
+	setRuntimeRestoreBaseLabels(cb, "snap-after-rollback", time.Now().UTC())
+	assert.False(t, shouldUseImportedMemoryForCommit(cb, &storage.CowSnapshotObject{
+		Name: "sb-2b-vol-memory",
+		Kind: storage.CowKindVolume,
+	}), "stale import after rollback must full-dump")
 }
