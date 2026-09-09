@@ -79,6 +79,7 @@ VOLUME_S3_BUILD_MODE="${ONE_CLICK_VOLUME_S3_BUILD_MODE:-local}"
 
 CUBEMASTER_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTER_BIN:-}"
 CUBEMASTERCLI_BIN_OVERRIDE="${ONE_CLICK_CUBEMASTERCLI_BIN:-}"
+TEMPLATECENTER_BIN_OVERRIDE="${ONE_CLICK_TEMPLATECENTER_BIN:-}"
 CUBELET_BIN_OVERRIDE="${ONE_CLICK_CUBELET_BIN:-}"
 CUBECLI_BIN_OVERRIDE="${ONE_CLICK_CUBECLI_BIN:-}"
 API_BIN_OVERRIDE="${ONE_CLICK_CUBE_API_BIN:-}"
@@ -346,7 +347,9 @@ def optional_sha256(path):
 components = {}
 
 # ── Go binaries from CORE_BIN_DIR ──
-for name in ["cubemaster", "cubemastercli", "cubelet", "cubecli"]:
+# templatecenter ships in every package (CubeMaster has no in-process build
+# fallback), so it must be manifest-tracked like every other Go component.
+for name in ["cubemaster", "cubemastercli", "templatecenter", "cubelet", "cubecli"]:
     path = os.path.join(core_bin_dir, name)
     components[name] = {
         "version": cube_version,
@@ -712,6 +715,12 @@ build_or_copy_go_binary \
   "cubemastercli" "${CUBEMASTERCLI_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeMaster" "${CUBEMASTER_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cubemastercli" ./cmd/cubemastercli "${CUBEMASTER_VERSION_PKG}"
+# Separate module, but its ldflags target CubeMaster's version package because
+# that is what its go.mod pulls in for version reporting.
+build_or_copy_go_binary \
+  "templatecenter" "${TEMPLATECENTER_BIN_OVERRIDE}" \
+  "${ROOT_DIR}/CubeTemplateCenter" "${CUBEMASTER_BUILD_MODE}" \
+  "${CORE_BIN_DIR}/templatecenter" ./cmd/templatecenter "${CUBEMASTER_VERSION_PKG}"
 build_or_copy_go_binary \
   "cubelet" "${CUBELET_BIN_OVERRIDE}" \
   "${ROOT_DIR}/Cubelet" "${CUBELET_BUILD_MODE}" \
@@ -742,6 +751,7 @@ mkdir -p \
   "${PACKAGE_ROOT}/CubeOps/bin" \
   "${PACKAGE_ROOT}/CubeMaster/bin" \
   "${PACKAGE_ROOT}/CubeMaster/plugin" \
+  "${PACKAGE_ROOT}/CubeTemplateCenter/bin" \
   "${PACKAGE_ROOT}/Cubelet/bin" \
   "${PACKAGE_ROOT}/Cubelet/plugin" \
   "${PACKAGE_ROOT}/Cubelet/config" \
@@ -788,6 +798,23 @@ copy_file "${ROOT_DIR}/configs/single-node/cubemaster.yaml" "${PACKAGE_ROOT}/Cub
 copy_file "${ROOT_DIR}/deploy/scripts/docker-install-volume-deps.sh" \
   "${PACKAGE_ROOT}/CubeMaster/docker-install-volume-deps.sh"
 chmod +x "${PACKAGE_ROOT}/CubeMaster/docker-install-volume-deps.sh"
+
+# CubeTemplateCenter. Shipped in every package and enabled by default:
+# cube-sandbox-control.target Wants cube-sandbox-cube-templatecenter.service
+# and install.sh enables it explicitly, because CubeMaster no longer builds
+# templates in-process (every template-from-image build is forwarded to TC,
+# with no local fallback) -- a disabled TC would fail every build.
+# Same ordering as CubeMaster: the package Dockerfile lands first so the
+# copy_dir_contents wipe cannot remove the binary copied on top, and
+# terraform/tencentcloud/build_images.sh can build cube-templatecenter from
+# the extracted sandbox-package without the full source tree.
+copy_dir_contents "${SCRIPT_DIR}/CubeTemplateCenter" "${PACKAGE_ROOT}/CubeTemplateCenter"
+copy_file "${CORE_BIN_DIR}/templatecenter" "${PACKAGE_ROOT}/CubeTemplateCenter/bin/templatecenter"
+# The repo-root CubeTemplateCenter/conf.yaml is the Helm template (its db/redis/
+# port fields are {{ }} placeholders that are never rendered on a bare host), so
+# ship the single-node template, which install.sh resolves the same way it does
+# CubeMaster's.
+copy_file "${ROOT_DIR}/configs/single-node/templatecenter.yaml" "${PACKAGE_ROOT}/CubeTemplateCenter/conf.yaml"
 
 copy_file "${CORE_BIN_DIR}/cubelet" "${PACKAGE_ROOT}/Cubelet/bin/cubelet"
 copy_file "${CORE_BIN_DIR}/cubecli" "${PACKAGE_ROOT}/Cubelet/bin/cubecli"

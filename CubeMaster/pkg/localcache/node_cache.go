@@ -53,6 +53,34 @@ var l = &local{
 	sortedNodesByClusters: make(map[string]node.NodeList),
 }
 
+// OnGuestAgentVersionChanged is registered by template compatibility
+// management. It is called when a node's guest-image or cube-agent version
+// changes during a metadata sync. Kept in localcache to avoid a package
+// import cycle: localcache never imports templatecenter.
+var OnGuestAgentVersionChanged func(nodeID string)
+
+// compatVersionsChanged reports whether guest-image or cube-agent versions
+// changed between two heartbeats. Only these two components participate in
+// template compatibility; kernel/shim are stored but do not trigger a rescan.
+func compatVersionsChanged(prev, next []node.ComponentVersion) bool {
+	prevMap := versionsToMap(prev)
+	nextMap := versionsToMap(next)
+	for _, component := range []string{"guest-image", "cube-agent"} {
+		if prevMap[component] != nextMap[component] {
+			return true
+		}
+	}
+	return false
+}
+
+func versionsToMap(versions []node.ComponentVersion) map[string]string {
+	out := make(map[string]string, len(versions))
+	for _, v := range versions {
+		out[v.Component] = v.Version
+	}
+	return out
+}
+
 func (l *local) loopSelfNodes(ctx context.Context) {
 	loadNum := func() int64 {
 
@@ -350,10 +378,18 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 		old.NodeLabels = labels
 		old.InvalidateLabelsCache()
 		old.SetSchedulingDisabled(n.SchedulingDisabled())
+		prevVersions := old.Versions
 		old.Versions = n.Versions
 		l.lockMetaData.Unlock()
 
 		l.updateSortedNodes(old)
+
+		// Notify template compatibility management when guest-image or
+		// cube-agent versions change. Runs outside the metadata lock so the
+		// callback can schedule a compat scan without deadlocking.
+		if OnGuestAgentVersionChanged != nil && compatVersionsChanged(prevVersions, n.Versions) {
+			go OnGuestAgentVersionChanged(n.ID())
+		}
 		return nil
 	} else {
 		return fmt.Errorf("item [%s:%s] doesn't exist", n.ID(), n.IP)

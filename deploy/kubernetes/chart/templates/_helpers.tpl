@@ -195,6 +195,10 @@ tolerations:
 {{- printf "%s-api" (include "cube.fullname" .) -}}
 {{- end -}}
 
+{{- define "cube.templateCenterName" -}}
+{{- printf "%s-templatecenter" (include "cube.fullname" .) -}}
+{{- end -}}
+
 {{- define "cube.cubemastercliName" -}}
 {{- printf "%s-cubemastercli" (include "cube.fullname" .) -}}
 {{- end -}}
@@ -477,6 +481,27 @@ see validate.yaml) to avoid the double generation entirely.
 {{- end -}}
 {{- end -}}
 
+{{- define "cube.templateCenterConfigSecretName" -}}
+{{- printf "%s-templatecenter-config" (include "cube.fullname" .) -}}
+{{- end -}}
+
+{{/*
+cube.templateCallbackToken resolves the shared secret gating CubeTemplateCenter's
+build-status callbacks to CubeMaster (POST /internal/template/jobs/:job_id/status;
+both sides read it as CUBE_TEMPLATE_CALLBACK_TOKEN). Persisted as the
+cube-template-callback-token key in the release Secret, looked up first so
+upgrades keep the value stable. Unlike cube.adminToken every consumer reads it
+via secretKeyRef at runtime, so there is no fresh-install double generation.
+*/}}
+{{- define "cube.templateCallbackToken" -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace (include "cube.secretName" .) -}}
+{{- if and $existing $existing.data (index $existing.data "cube-template-callback-token") -}}
+{{- index $existing.data "cube-template-callback-token" | b64dec -}}
+{{- else -}}
+{{- randAlphaNum 32 -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "cube.masterStoragePVCName" -}}
 {{- if .Values.controlPlane.master.persistence.existingClaim -}}
 {{- .Values.controlPlane.master.persistence.existingClaim -}}
@@ -669,6 +694,130 @@ us-east-1
 {{- end -}}
 
 {{/*
+Artifact-store S3 env (CUBE_S3_*) for the cube-master and cube-templatecenter
+pods when controlPlane.artifactStore.s3Backed=true. These are the exact names
+TC's S3Config and CubeMaster's artifact_url_refresh read. Resolution mirrors
+the one-click fill: volumeS3.* is the source of truth, chart MinIO the
+fallback. AK/SK go through the release Secret (s3-artifact-* keys rendered in
+secret.yaml) so they never appear in pod YAML.
+*/}}
+{{- define "cube.artifactS3Bucket" -}}
+{{- $volumeS3 := default dict .Values.volumeS3 -}}
+{{- if ne (($volumeS3.bucket) | default "") "" -}}
+{{- $volumeS3.bucket -}}
+{{- else -}}
+{{- (.Values.minio).bucket | default "cube-volumes" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+True when global.env already carries a COMPLETE CUBE_S3_* set (operator-managed
+S3 env; the chart then injects nothing). Both the modern key names and the
+legacy CUBE_S3_ACCESS_KEY / CUBE_S3_SECRET_KEY fallbacks the binaries still
+read count as complete.
+*/}}
+{{- define "cube.globalEnvS3State" -}}
+{{- $endpoint := false -}}
+{{- $bucket := false -}}
+{{- $ak := false -}}
+{{- $sk := false -}}
+{{- range ((.Values.global).env | default list) -}}
+{{- $n := .name | default "" -}}
+{{- if eq $n "CUBE_S3_ENDPOINT" }}{{- $endpoint = true -}}{{- end -}}
+{{- if eq $n "CUBE_S3_BUCKET" }}{{- $bucket = true -}}{{- end -}}
+{{- if or (eq $n "CUBE_S3_ACCESS_KEY_ID") (eq $n "CUBE_S3_ACCESS_KEY") }}{{- $ak = true -}}{{- end -}}
+{{- if or (eq $n "CUBE_S3_SECRET_ACCESS_KEY") (eq $n "CUBE_S3_SECRET_KEY") }}{{- $sk = true -}}{{- end -}}
+{{- end -}}
+{{- if and $endpoint $bucket $ak $sk -}}complete{{- else if $endpoint -}}partial{{- else -}}absent{{- end -}}
+{{- end -}}
+
+{{/*
+True when the chart can inject a COMPLETE CUBE_S3_* set into the master/TC
+pods: endpoint resolvable (volumeS3.endpoint or builtin MinIO) and credentials
+available in env-injectable form (volumeS3.accessKeyId + secretAccessKey
+rendered into the release Secret, or the builtin MinIO root credentials).
+volumeS3.existingSecret ships a volume-s3.conf FILE, not env keys, so it
+cannot feed env injection -- combine it with global.env instead.
+*/}}
+{{- define "cube.artifactS3Injectable" -}}
+{{- $volumeS3 := default dict .Values.volumeS3 -}}
+{{- $hasPlainCreds := and (ne (($volumeS3.accessKeyId) | default "") "") (ne (($volumeS3.secretAccessKey) | default "") "") -}}
+{{- if and (ne (include "cube.volumeS3EffectiveEndpoint" .) "") (or $hasPlainCreds (eq (include "cube.minioBuiltinEnabled" .) "true")) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{/*
+Default path-style decision for an external artifact-store endpoint when the
+operator did not set volumeS3.pathStyle. Known public-cloud S3 endpoints
+(AWS, Tencent COS, Aliyun OSS, GCS) use virtual-host addressing; everything
+else — IP literals, in-cluster / private DNS names, self-hosted
+S3-compatible stores such as MinIO or Ceph — is served path-style, and
+path-style is the only mode most of them accept (virtual-host would resolve
+<bucket>.<host>, which private DNS cannot resolve).
+*/}}
+{{- define "cube.s3PathStyleDefaultForEndpoint" -}}
+{{- $host := . | toString | trim | trimPrefix "https://" | trimPrefix "http://" -}}
+{{- $host = first (splitList "/" $host) -}}
+{{- $host = first (splitList ":" $host) -}}
+{{- if or (hasSuffix ".amazonaws.com" $host) (hasSuffix ".myqcloud.com" $host) (hasSuffix ".aliyuncs.com" $host) (hasSuffix ".googleapis.com" $host) (hasSuffix ".amazonaws.com.cn" $host) -}}
+false
+{{- else -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+Path style for the artifact store S3 client (CUBE_S3_USE_PATH_STYLE). The
+builtin MinIO is only reachable path-style: virtual-host addressing would
+resolve <bucket>.cube-minio.<ns>.svc..., which cluster DNS cannot resolve
+(the chart already writes -ouse_path_request_style into volume-s3.conf for
+the same reason). An external volumeS3 endpoint without an explicit
+volumeS3.pathStyle gets the endpoint-shape heuristic above — external
+MinIO used to hard-default to virtual-host here, which silently broke
+uploads (artifact fell back to node-local disk, then multi-replica
+downloads 404'd).
+*/}}
+{{- define "cube.artifactS3PathStyle" -}}
+{{- $volumeS3 := default dict .Values.volumeS3 -}}
+{{- if ne (($volumeS3.endpoint) | default "") "" -}}
+{{- if hasKey $volumeS3 "pathStyle" -}}
+{{- $volumeS3.pathStyle | toString -}}
+{{- else -}}
+{{- include "cube.s3PathStyleDefaultForEndpoint" $volumeS3.endpoint -}}
+{{- end -}}
+{{- else -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+The CUBE_S3_* env block rendered into BOTH the cube-master and
+cube-templatecenter Deployments. Emitted only when s3Backed=true and
+global.env does not already carry the set; placed BEFORE the global.env block
+so an operator entry with the same name still wins (on duplicate env names
+kubelet keeps the last one).
+*/}}
+{{- define "cube.artifactS3Env" -}}
+{{- if and (((.Values.controlPlane.artifactStore).s3Backed) | default false) (eq (include "cube.globalEnvS3State" .) "absent") (eq (include "cube.artifactS3Injectable" .) "true") }}
+- name: CUBE_S3_ENDPOINT
+  value: {{ include "cube.volumeS3EffectiveEndpoint" . | quote }}
+- name: CUBE_S3_BUCKET
+  value: {{ include "cube.artifactS3Bucket" . | quote }}
+- name: CUBE_S3_USE_PATH_STYLE
+  value: {{ include "cube.artifactS3PathStyle" . | quote }}
+- name: CUBE_S3_ACCESS_KEY_ID
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "cube.secretName" . }}
+      key: s3-artifact-access-key-id
+- name: CUBE_S3_SECRET_ACCESS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "cube.secretName" . }}
+      key: s3-artifact-secret-access-key
+{{- end }}
+{{- end -}}
+
+{{/*
 Effective S3 plugin endpoint. volumeS3.* is the source of truth; when MinIO is
 enabled and the operator left volumeS3.endpoint empty, fill from chart MinIO
 (same as one-click filling CUBE_S3_* after deploying MinIO).
@@ -714,6 +863,47 @@ enabled and the operator left volumeS3.endpoint empty, fill from chart MinIO
 {{- include "cube.masterEndpoint" . -}}
 {{- end -}}
 {{- end -}}
+
+{{- /*
+Base URL CubeMaster uses for CUBE_TEMPLATE_CENTER_ADDR, and that TC's reporter
+uses in reverse for CUBE_MASTER_ADDR. Always the in-cluster ClusterIP
+Service: the optional CLB below is for reaching TC from OUTSIDE the cluster, and
+routing control-plane-internal traffic through a load balancer would add a hop
+and a failure domain for no benefit.
+*/ -}}
+{{- define "cube.templateCenterEndpoint" -}}
+{{- if and .Values.controlPlane.enabled (not .Values.externalControlPlane.enabled) -}}
+{{- printf "http://%s.%s.svc.%s:%v" (include "cube.templateCenterName" .) .Release.Namespace (include "cube.clusterDomain" .) .Values.controlPlane.templateCenter.service.port -}}
+{{- end -}}
+{{- end -}}
+
+{{- /*
+CubeMaster no longer has a templatecenter_enabled switch: every template build
+is forwarded to CubeTemplateCenter. This helper is kept only so existing chart
+values do not break; it always renders "true" because there is no local build
+mode left to gate.
+*/ -}}
+{{- define "cube.templateCenterEnabledConf" -}}
+{{- "true" -}}
+{{- end -}}
+
+{{- /*
+Claim backing TC's artifact store.
+
+Defaults to CubeMaster's claim, because the two processes MUST see the same
+directory: TC writes the ext4 and CubeMaster serves it over
+/cube/template/artifact/download (design 9.7). ReadWriteOnce means single NODE,
+not single Pod, so co-located Pods can both mount it — which is what the
+podAffinity in templatecenter.yaml enforces.
+*/ -}}
+{{- define "cube.templateCenterStorageClaimName" -}}
+{{- if .Values.controlPlane.templateCenter.persistence.existingClaim -}}
+{{- .Values.controlPlane.templateCenter.persistence.existingClaim -}}
+{{- else -}}
+{{- include "cube.masterStoragePVCName" . -}}
+{{- end -}}
+{{- end -}}
+
 
 {{- define "cube.cubemastercliMasterAddress" -}}
 {{- $endpoint := include "cube.cubemastercliMasterEndpoint" . -}}

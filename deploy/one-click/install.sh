@@ -295,6 +295,22 @@ fi
 check_minio_not_combined_with_user_s3
 ensure_minio_init_credentials
 
+# Shared secret authenticating CubeTemplateCenter's build-status callbacks to
+# CubeMaster (POST /internal/template/jobs/:job_id/status, whose BUILT payload
+# is trusted wholesale by the resume pipeline). Generated once and persisted in
+# .one-click.env, which both units load via EnvironmentFile. Control-plane only;
+# an upgrade merge carries the existing value forward, so generation happens
+# only when the key is still empty.
+ensure_template_callback_token() {
+  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
+  CUBE_TEMPLATE_CALLBACK_TOKEN="${CUBE_TEMPLATE_CALLBACK_TOKEN:-}"
+  if [[ -z "${CUBE_TEMPLATE_CALLBACK_TOKEN}" ]]; then
+    CUBE_TEMPLATE_CALLBACK_TOKEN="$(generate_alnum_secret 32)"
+    log "generated CUBE_TEMPLATE_CALLBACK_TOKEN (32 chars); it will be saved to .one-click.env"
+  fi
+}
+ensure_template_callback_token
+
 CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-0}"
 case "${CUBE_PVM_ENABLE}" in
   0|1) ;;
@@ -442,6 +458,45 @@ check_runtime_file_paths_not_directories() {
     fi
     die "runtime file path is a non-empty directory: ${path}; move it away and retry"
   done < <(one_click_runtime_file_paths)
+}
+
+# Resolve the placeholders in CubeTemplateCenter's conf.yaml. Runs alongside
+# generate_cubemaster_config_ports and uses the same CUBE_SANDBOX_* inputs, so
+# TC and CubeMaster always point at the same MySQL/Redis -- they share the
+# CubeDB and the progress-snapshot keyspace, so mismatched credentials would be
+# a silent split-brain.
+generate_templatecenter_config() {
+  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
+
+  local cfg="${PKG_ROOT}/CubeTemplateCenter/conf.yaml"
+  [[ -f "${cfg}" ]] || return 0
+
+  local mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
+  local mysql_user="${CUBE_SANDBOX_MYSQL_USER:-cube}"
+  local mysql_password="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
+  local mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
+  local redis_port="${CUBE_SANDBOX_REDIS_PORT:-6379}"
+  local redis_password="${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}"
+  # TC is co-located with CubeMaster and only the local master calls it, so
+  # loopback is the safe default. CUBETEMPLATECENTER_HTTP_BIND overrides for a
+  # split deployment; the build endpoint is unauthenticated, so exposing it is
+  # the operator's explicit choice.
+  local http_bind="${CUBETEMPLATECENTER_HTTP_BIND:-127.0.0.1}"
+  # CubeMaster's HTTP base URL for TC to report build results. Defaults to the
+  # local CubeMaster (co-located in one-click); override for split deployments.
+  # Can also be set via CUBE_MASTER_ADDR env (env wins over this yaml value).
+  local master_addr="${CUBETEMPLATECENTER_MASTER_ADDR:-http://127.0.0.1:8089}"
+
+  sed -i \
+    -e "s|__CUBE_SANDBOX_MYSQL_PORT__|${mysql_port}|g" \
+    -e "s|__CUBE_SANDBOX_MYSQL_USER__|$(escape_sed "${mysql_user}")|g" \
+    -e "s|__CUBE_SANDBOX_MYSQL_PASSWORD__|$(escape_sed "${mysql_password}")|g" \
+    -e "s|__CUBE_SANDBOX_MYSQL_DB__|$(escape_sed "${mysql_db}")|g" \
+    -e "s|__CUBE_SANDBOX_REDIS_PORT__|${redis_port}|g" \
+    -e "s|__CUBE_SANDBOX_REDIS_PASSWORD__|$(escape_sed "${redis_password}")|g" \
+    -e "s|__CUBETEMPLATECENTER_HTTP_BIND__|$(escape_sed "${http_bind}")|g" \
+    -e "s|__CUBETEMPLATECENTER_MASTER_ADDR__|$(escape_sed "${master_addr}")|g" \
+    "${cfg}"
 }
 
 generate_cubemaster_config_ports() {
@@ -1460,10 +1515,25 @@ remove_obsolete_network_agent_unit() {
   systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
 }
 
+# The TC unit was renamed to cube-sandbox-cube-templatecenter.service to match
+# the cube-templatecenter naming used by the image, the Helm chart, and
+# terraform. Remove the pre-rename unit so an upgrade does not leave two units
+# managing the same process.
+remove_obsolete_templatecenter_unit() {
+  local unit="cube-sandbox-cubetemplatecenter.service"
+  systemctl disable --now "${unit}" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/${unit}"
+  rm -f "/etc/systemd/system/cube-sandbox-control.target.wants/${unit}"
+  rm -f "/etc/systemd/system/cube-sandbox-compute.target.wants/${unit}"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
+}
+
 install_systemd_units() {
   local install_units_script="${INSTALL_PREFIX}/scripts/systemd/install-units.sh"
   ensure_file "${install_units_script}"
   remove_obsolete_network_agent_unit
+  remove_obsolete_templatecenter_unit
   "${install_units_script}"
 }
 
@@ -1488,6 +1558,15 @@ start_systemd_target() {
   else
     systemctl disable cube-sandbox-s3lvol.service >/dev/null 2>&1 || true
     systemctl reset-failed cube-sandbox-s3lvol.service >/dev/null 2>&1 || true
+  fi
+
+  # CubeTemplateCenter is part of the default control-plane stack (CubeMaster
+  # has no in-process build fallback). The control target's Wants= already
+  # pulls it up; the explicit enable creates the .wants symlink so the unit
+  # also reports is-enabled for quickcheck and boot audits.
+  if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
+    systemctl enable cube-sandbox-cube-templatecenter.service >/dev/null 2>&1 \
+      || log "WARN: could not enable cube-sandbox-cube-templatecenter.service"
   fi
 
   systemctl enable --now "${target}"
@@ -1629,6 +1708,18 @@ validate_declared_release_manifest "${SCRIPT_DIR}"
 log "extracting package ${PACKAGE_TAR}"
 tar -xzf "${PACKAGE_TAR}" -C "${WORK_DIR}"
 PKG_ROOT="${WORK_DIR}/sandbox-package"
+if [[ ! -d "${PKG_ROOT}" ]]; then
+	# PACKAGE_TAR pointed at the OUTER release bundle
+	# (cube-sandbox-one-click-*.tar.gz), which nests the real package at
+	# <bundle>/assets/package/sandbox-package.tar.gz. Descend into it
+	# transparently instead of dying with a confusing
+	# "required directory not found: .../sandbox-package".
+	inner_tar="$(find "${WORK_DIR}" -maxdepth 4 -path '*/assets/package/sandbox-package.tar.gz' -print -quit 2>/dev/null || true)"
+	if [[ -n "${inner_tar}" ]]; then
+		log "outer release bundle detected; extracting nested package ${inner_tar}"
+		tar -xzf "${inner_tar}" -C "${WORK_DIR}"
+	fi
+fi
 ensure_dir "${PKG_ROOT}"
 validate_cubelet_cow_startup_deps "${PKG_ROOT}/Cubelet/config/config.toml"
 CUBE_EGRESS_ADMIN_PORT="${CUBE_EGRESS_ADMIN_PORT:-9091}"
@@ -1716,6 +1807,7 @@ rm -rf \
   "${INSTALL_PREFIX}/CubeAPI" \
   "${INSTALL_PREFIX}/CubeOps" \
   "${INSTALL_PREFIX}/CubeMaster" \
+  "${INSTALL_PREFIX}/CubeTemplateCenter" \
   "${INSTALL_PREFIX}/Cubelet" \
   "${INSTALL_PREFIX}/CubeS3lvol" \
   "${INSTALL_PREFIX}/cubeproxy" \
@@ -1754,6 +1846,7 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"
 else
   generate_cubemaster_config_ports
+  generate_templatecenter_config
   patch_cubemaster_external_deps
   cp -a "${PKG_ROOT}/." "${INSTALL_PREFIX}/"
 fi
@@ -1910,6 +2003,12 @@ persist_one_click_redis_runtime_env "${RUNTIME_ENV_FILE}"
 
 # Persist MinIO deploy settings (control node) independently from CUBE_S3_*
 # (volume plugin). Local MinIO fills CUBE_S3_* before this block.
+# CubeTemplateCenter callback token (control plane): both cubemaster and
+# cubetemplatecenter units read it from this file via EnvironmentFile.
+if [[ -n "${CUBE_TEMPLATE_CALLBACK_TOKEN:-}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_TEMPLATE_CALLBACK_TOKEN" "${CUBE_TEMPLATE_CALLBACK_TOKEN}"
+fi
+
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_ENABLED" "${CUBE_SANDBOX_MINIO_ENABLED}"
 if [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "1" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_MINIO_ROOT_USER" "${CUBE_SANDBOX_MINIO_ROOT_USER}"
@@ -1974,6 +2073,13 @@ if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
   chmod +x "${INSTALL_PREFIX}/CubeAPI/bin/cube-api"
   chmod +x "${INSTALL_PREFIX}/CubeOps/bin/cubeops" "${INSTALL_PREFIX}/CubeOps/bin/cubeopscli"
   chmod +x "${INSTALL_PREFIX}/CubeMaster/bin/cubemaster" "${INSTALL_PREFIX}/CubeMaster/bin/cubemastercli"
+  # CubeTemplateCenter is mandatory: CubeMaster no longer builds templates
+  # in-process, so the unit is enabled and started with the control target
+  # (see start_systemd_target). Guarded with -f so an older package without
+  # the binary still installs.
+  if [[ -f "${INSTALL_PREFIX}/CubeTemplateCenter/bin/templatecenter" ]]; then
+    chmod +x "${INSTALL_PREFIX}/CubeTemplateCenter/bin/templatecenter"
+  fi
 fi
 
 ln -sf "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" /usr/local/bin/containerd-shim-cube-rs

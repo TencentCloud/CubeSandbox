@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-package templatecenter
+package build
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/cube_egress_ca"
+	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/cube_egress_ca"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
@@ -94,6 +94,19 @@ func loadCubeEgressCAFromPath(ctx context.Context, withCubeCA bool, caPath strin
 // only trips on a genuinely degenerate result (no write AND nothing
 // already present AND no seed), which in practice means the rootfs was
 // unwritable in a way Bake didn't already surface as an error.
+// LoadCubeEgressCA exports loadCubeEgressCA so the standalone
+// CubeTemplateCenter process resolves the same host-side CA during remote
+// builds (remote mode bakes the CA on the TC host instead).
+func LoadCubeEgressCA(ctx context.Context, withCubeCA bool) ([]byte, string, error) {
+	return loadCubeEgressCA(ctx, withCubeCA)
+}
+
+// ApplyCubeEgressCAToRootfs exports applyCubeEgressCAToRootfs for
+// CubeTemplateCenter remote builds.
+func ApplyCubeEgressCAToRootfs(ctx context.Context, rootfsDir string, pemBytes []byte, fingerprint string) (cube_egress_ca.Result, error) {
+	return applyCubeEgressCAToRootfs(ctx, rootfsDir, pemBytes, fingerprint)
+}
+
 func applyCubeEgressCAToRootfs(ctx context.Context, rootfsDir string, pemBytes []byte, fingerprint string) (cube_egress_ca.Result, error) {
 	if len(pemBytes) == 0 {
 		return cube_egress_ca.Result{Fingerprint: fingerprint}, nil

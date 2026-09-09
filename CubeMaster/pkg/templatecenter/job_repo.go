@@ -6,6 +6,8 @@ package templatecenter
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -23,6 +25,13 @@ func getTemplateImageJobRecordByID(ctx context.Context, jobID string) (*models.T
 	return record, nil
 }
 
+// GetTemplateImageJobRecordByID exports getTemplateImageJobRecordByID for the
+// HTTP handler layer, which needs the persisted request_json to forward redo
+// jobs to CubeTemplateCenter.
+func GetTemplateImageJobRecordByID(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+	return getTemplateImageJobRecordByID(ctx, jobID)
+}
+
 func getCreateRedoImageJobByIDTx(tx *gorm.DB, templateID, jobID string) (*models.TemplateImageJob, error) {
 	record := &models.TemplateImageJob{}
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -33,6 +42,44 @@ func getCreateRedoImageJobByIDTx(tx *gorm.DB, templateID, jobID string) (*models
 		return nil, err
 	}
 	return record, nil
+}
+
+// ErrTerminalJobStatusFlip is returned when a status callback tries to move a
+// job OUT of a terminal state. The callback endpoint is unauthenticated, so its
+// payloads are untrusted: without this guard any caller that can reach the
+// internal route could flip an already-READY or already-FAILED job back to
+// RUNNING/BUILT, resurrecting completed work or re-triggering the pipeline.
+var ErrTerminalJobStatusFlip = errors.New("refusing to move a terminal template job back to a non-terminal status")
+
+// templateJobTerminal reports whether a job status is terminal.
+func templateJobTerminal(status string) bool {
+	return status == JobStatusReady || status == JobStatusFailed
+}
+
+// ValidateTemplateJobStatusTransition checks that applying `newStatus` to job
+// `jobID` is a legal transition. It exists to stop an unauthenticated status
+// callback from flipping a terminal job back to life. The check is best-effort:
+// a missing job (or an unreadable store) does not block the update, since the
+// callback must still work for the very first report of a job.
+//
+// Allowed: any transition whose current state is NOT terminal, plus idempotent
+// re-reporting of the same terminal state (a retried READY/FAILED callback is
+// harmless). Forbidden: terminal -> a DIFFERENT status.
+func ValidateTemplateJobStatusTransition(ctx context.Context, jobID, newStatus string) error {
+	if !isReady() {
+		return nil
+	}
+	job, err := getTemplateImageJobRecordByID(ctx, jobID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return nil // unreadable store: do not block the callback on a lookup error
+	}
+	if templateJobTerminal(job.Status) && job.Status != newStatus {
+		return fmt.Errorf("%w: job %s is %s, cannot move to %s", ErrTerminalJobStatusFlip, jobID, job.Status, newStatus)
+	}
+	return nil
 }
 
 func getLatestTemplateImageJobByTemplateID(ctx context.Context, templateID string) (*models.TemplateImageJob, error) {
@@ -91,10 +138,17 @@ func getActiveTemplateImageJobByTemplateID(ctx context.Context, templateID strin
 	return getActiveTemplateImageJobByTemplateIDTx(store.db.WithContext(ctx), templateID)
 }
 
+// getActiveTemplateImageJobByTemplateIDTx finds the template's in-flight
+// create/redo job. BUILT counts as in-flight (same as the delete path's
+// hasActiveJob): the resume pipeline (register + distribute) still runs for
+// a BUILT job, and one whose callback response was lost is replayed by the
+// image-job reconciler — so a duplicate create/redo in that window must
+// attach to / be rejected by the existing job instead of opening a second
+// build and a second distribution.
 func getActiveTemplateImageJobByTemplateIDTx(tx *gorm.DB, templateID string) (*models.TemplateImageJob, error) {
 	record := &models.TemplateImageJob{}
 	err := tx.Table(constants.TemplateImageJobTableName).
-		Where("template_id = ? AND status IN ?", templateID, []string{JobStatusPending, JobStatusRunning}).
+		Where("template_id = ? AND status IN ?", templateID, []string{JobStatusPending, JobStatusRunning, JobStatusBuilt}).
 		Order("attempt_no desc, id desc").First(record).Error
 	if err != nil {
 		return nil, err
@@ -202,6 +256,57 @@ func updateTemplateImageJobTx(tx *gorm.DB, jobID string, values map[string]any) 
 		return gorm.ErrRecordNotFound
 	}
 	return nil
+}
+
+// UpdateTemplateImageJob exports updateTemplateImageJob for the internal
+// status-callback handler used by the remote build mode (CubeTemplateCenter
+// reports job progress back to CubeMaster).
+func UpdateTemplateImageJob(ctx context.Context, jobID string, values map[string]any) error {
+	return updateTemplateImageJob(ctx, jobID, values)
+}
+
+// UpdateTemplateImageJobIfTransitionAllowed applies a status-carrying
+// callback update with the terminal-state guard folded into the UPDATE's
+// WHERE (a conditional update, not SELECT-then-update): a terminal job
+// (READY/FAILED) only accepts a rewrite with the SAME status, so a late
+// RUNNING/BUILT report can never resurrect a job that distribution or
+// force-delete already finished — and a lookup error can no longer fail open
+// into an unguarded write. A refused write is read back once for a precise
+// error; that read failing is safe because nothing was written.
+func UpdateTemplateImageJobIfTransitionAllowed(ctx context.Context, jobID string, values map[string]any, newStatus string) error {
+	values["updated_at"] = time.Now()
+	tx := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("job_id = ?", jobID).
+		Where("status NOT IN ? OR status = ?", []string{JobStatusReady, JobStatusFailed}, newStatus).
+		Updates(values)
+	if tx.Error != nil {
+		return tx.Error
+	}
+	if tx.RowsAffected == 0 {
+		job, err := getTemplateImageJobRecordByID(ctx, jobID)
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: job %s is %s, cannot move to %s", ErrTerminalJobStatusFlip, jobID, job.Status, newStatus)
+	}
+	return nil
+}
+
+// updateRootfsArtifactIfStatus applies values only while the row is still in
+// fromStatus — a compare-and-swap so a duplicate finalizer (a second BUILT
+// replay on another master that skipped the named register lock) cannot
+// rotate the download_token of a row a peer already finalized. Returns false
+// when the row was not in fromStatus.
+func updateRootfsArtifactIfStatus(ctx context.Context, artifactID, fromStatus string, values map[string]any) (bool, error) {
+	values["updated_at"] = time.Now()
+	tx := store.db.WithContext(ctx).Table(constants.RootfsArtifactTableName).
+		Where("artifact_id = ?", artifactID).
+		Where("status = ?", fromStatus).
+		Updates(values)
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+	return tx.RowsAffected > 0, nil
 }
 
 func updateRootfsArtifact(ctx context.Context, artifactID string, values map[string]any) error {

@@ -5,6 +5,7 @@
 package templatecenter
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -15,12 +16,11 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
-func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifact *models.RootfsArtifact, imageCfg image.DockerImageConfig, downloadBaseURL string) (*types.CreateCubeSandboxReq, error) {
+func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplateFromImageReq, artifact *models.RootfsArtifact, imageCfg DockerImageConfig, downloadBaseURL string) (*types.CreateCubeSandboxReq, error) {
 	annotations := map[string]string{
 		constants.CubeAnnotationAppSnapshotTemplateID:      req.TemplateID,
 		constants.CubeAnnotationsAppSnapshotCreate:         "true",
@@ -51,9 +51,17 @@ func generateTemplateCreateRequest(req *types.CreateTemplateFromImageReq, artifa
 			},
 		},
 	}
+	// Re-sign S3-backed artifact URLs at the point of use; the stored
+	// presigned URL expires (7d) while the artifact lives longer. Falls back
+	// to the stored URL when this process cannot sign (see
+	// artifactDownloadURL).
+	downloadURL := artifactDownloadURL(ctx, artifact)
+	if downloadURL == "" {
+		downloadURL = buildDownloadURL(downloadBaseURL, artifact.ArtifactID, artifact.DownloadToken)
+	}
 	imageAnnotations := map[string]string{
 		constants.CubeAnnotationRootfsArtifactID:        artifact.ArtifactID,
-		constants.CubeAnnotationRootfsArtifactURL:       buildDownloadURL(downloadBaseURL, artifact.ArtifactID, artifact.DownloadToken),
+		constants.CubeAnnotationRootfsArtifactURL:       downloadURL,
 		constants.CubeAnnotationRootfsArtifactToken:     artifact.DownloadToken,
 		constants.CubeAnnotationRootfsArtifactSHA256:    artifact.Ext4SHA256,
 		constants.CubeAnnotationRootfsArtifactSizeBytes: strconv.FormatInt(artifact.Ext4SizeBytes, 10),
@@ -195,7 +203,7 @@ func probeOrNil(overrides *types.ContainerOverrides) *types.Probe {
 }
 
 func buildDownloadURL(baseURL, artifactID, token string) string {
-	trimmed := strings.TrimRight(image.NormalizeBaseURL(baseURL), "/")
+	trimmed := strings.TrimRight(NormalizeBaseURL(baseURL), "/")
 	if trimmed == "" {
 		trimmed = "http://" + artifactRootHostHint()
 	}

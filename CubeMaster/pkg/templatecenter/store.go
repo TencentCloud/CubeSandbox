@@ -75,8 +75,12 @@ const (
 )
 
 var (
-	ErrTemplateStoreNotInitialized  = errors.New("template store is not initialized")
-	ErrTemplateNotFound             = errors.New("template not found")
+	ErrTemplateStoreNotInitialized = errors.New("template store is not initialized")
+	ErrTemplateNotFound            = errors.New("template not found")
+	// ErrTemplateImageJobNotFound is the domain-level "no such build job".
+	// Handlers must be able to answer NotFound without importing gorm, so the
+	// repository translates gorm.ErrRecordNotFound into this.
+	ErrTemplateImageJobNotFound     = errors.New("template image job not found")
 	ErrTemplateIDRequired           = errors.New("template id is required")
 	ErrTemplateHasNoReadyReplica    = errors.New("template has no ready replica")
 	ErrNoTemplateNodes              = errors.New("no healthy nodes available for template creation")
@@ -190,6 +194,17 @@ func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
 	}
+	if cached, ok := getCachedTemplateList(); ok {
+		return cached, nil
+	}
+	return listTemplatesFromDB(ctx)
+}
+
+// listTemplatesFromDB is the uncached ListTemplates implementation. Called by
+// ListTemplates on a cache miss and by the backstop refresh goroutine (which
+// must bypass the cache to avoid a self-hit). Re-caches the result before
+// returning so the next read hits the cache.
+func listTemplatesFromDB(ctx context.Context) ([]TemplateInfo, error) {
 	var defs []models.TemplateDefinition
 	if err := store.db.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
 		Order("updated_at desc").Find(&defs).Error; err != nil {
@@ -250,6 +265,7 @@ func ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
 		out = append(out, templateInfoFromJob(&job))
 		seen[job.TemplateID] = struct{}{}
 	}
+	setTemplateListCache(out)
 	return out, nil
 }
 
@@ -284,7 +300,41 @@ func errIfHiddenSnapshot(ctx context.Context, templateID string) error {
 	return nil
 }
 
+// Init boots templatecenter for CubeMaster (the in-process monolith case).
+// It wires BOTH snapshot-side and template-side concerns — see
+// docs/dev/templatecenter-design.md §2.3 for the ownership split.
+//
+// When the standalone CubeTemplateCenter process calls Init, it gets
+// snapshot hooks it does not own (sandbox.SetAfterDestroySandboxSuccessHook
+// etc.) which only CubeMaster should set. Use InitForTemplateCenter instead
+// for that process.
 func Init(ctx context.Context) error {
+	return initCommon(ctx, true /* includeSnapshotSide */)
+}
+
+// InitForTemplateCenter boots templatecenter for the standalone
+// CubeTemplateCenter process. Skips snapshot-side wiring (snapshot
+// runtime-ref hooks, sandboxspec hooks, sandboxspec init, snapshot
+// reconciler) — those belong to CubeMaster and would otherwise double-register
+// hooks or leak goroutines that only CubeMaster should own.
+//
+// Template-side wiring kept here:
+//   - store.db (the canonical handle for template_* tables)
+//   - compat hooks (template compat table maintenance)
+//   - warm ready template locality (so CreateSandbox can hit locality quickly)
+//   - initial compat scan
+//
+// Artifact GC is deliberately NOT started here: its passes destroy artifacts
+// on nodes over the worker (cubelet) grpc pool, which only CubeMaster
+// initializes. Running it on TC would strand every candidate in
+// CLEANUP_PENDING and let the reconciler backstop drop the rows while the
+// node-side ext4 files leak. CubeMaster runs the GC; TC's reconciler keeps
+// only the data-deletion backstop for rows CubeMaster already marked.
+func InitForTemplateCenter(ctx context.Context) error {
+	return initCommon(ctx, false /* includeSnapshotSide */)
+}
+
+func initCommon(ctx context.Context, includeSnapshotSide bool) error {
 	_ = ctx
 	if config.GetDbConfig() == nil {
 		return ErrTemplateStoreNotInitialized
@@ -296,18 +346,38 @@ func Init(ctx context.Context) error {
 		// the existing *gorm.DB.
 		store.db = db.Init(config.GetDbConfig())
 		store.dbAddr = config.GetDbConfig().Addr
-		if initErr = sandboxspec.Init(store.db); initErr != nil {
-			return
+		if includeSnapshotSide {
+			if initErr = sandboxspec.Init(store.db); initErr != nil {
+				return
+			}
+			configureSnapshotRuntimeRefHooks()
+			configureSandboxSpecHooks()
 		}
-		pausesnap.Init(store.db)
-		configureSnapshotRuntimeRefHooks()
-		configureSandboxSpecHooks()
+		if includeSnapshotSide {
+			pausesnap.Init(store.db)
+		}
+		configureCompatHooks()
 		if warmErr := warmReadyTemplateLocality(ctx); warmErr != nil {
 			log.G(ctx).Warnf("warm ready template locality fail:%v", warmErr)
 		}
-		startSnapshotReconciler(ctx)
-		remotestatus.Start(ctx, store.db)
-		startArtifactGC(ctx)
+		if includeSnapshotSide {
+			startSnapshotReconciler(ctx)
+			// CubeMaster only. The stuck-job sweep replays the post-build
+			// pipeline (artifact registration + distribution + template
+			// definition), which is CubeMaster's responsibility -- the
+			// standalone CubeTemplateCenter process must never write that
+			// state, so it does not run this.
+			startImageJobReconciler(ctx)
+			remotestatus.Start(ctx, store.db)
+			// CubeMaster only: backstop refresh for the template query caches
+			// so a missed write-path invalidation never leaves stale data for
+			// longer than one refresh period.
+			startTemplateQueryCacheRefresh(ctx)
+			// CubeMaster only: artifact GC destroys node-side ext4 files over
+			// the worker (cubelet) grpc pool, which TC never initializes. See
+			// InitForTemplateCenter.
+			startArtifactGC(ctx)
+		}
 		scheduleInitialCompatScan(ctx)
 	})
 	return initErr
@@ -360,6 +430,20 @@ func configureSandboxSpecHooks() {
 
 func isReady() bool {
 	return store.db != nil
+}
+
+// IsReady reports whether the templatecenter store has been initialized.
+// Exported so the standalone CubeTemplateCenter process can use it in
+// its /health endpoint without probing via ListTemplates.
+func IsReady() bool {
+	return isReady()
+}
+
+// GetDB exposes the initialized gorm handle. The standalone
+// CubeTemplateCenter process needs it for the DB session locks used by its
+// background reconciler (design §7.2 / §9.3). Returns nil before Init.
+func GetDB() *gorm.DB {
+	return store.db
 }
 
 func NormalizeRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.CreateCubeSandboxReq, string, error) {
@@ -765,11 +849,17 @@ func refreshTemplateReplicaSummary(ctx context.Context, templateID, jobID string
 		current = append(current, replicaModelToStatus(replica))
 	}
 	status, lastError := summarizeStatus(current)
-	_, claimWarning, err = publishTemplateStatusWithAlias(ctx, templateID, jobID, status, lastError)
+	_, claimWarning, displacedTemplateID, err := publishTemplateStatusWithAlias(ctx, templateID, jobID, status, lastError)
 	if err != nil {
 		return "", err
 	}
-	localcache.InvalidateImageState(templateID)
+	// Same discipline as finalizeTemplateReplicas: the publish is committed,
+	// so drop the query caches (and the displaced alias holder's) before
+	// re-warming locality.
+	invalidateTemplateCaches(templateID)
+	if displacedTemplateID != "" {
+		invalidateTemplateCaches(displacedTemplateID)
+	}
 	setTemplateLocalityCache(templateID, current)
 	registerReadyTemplateReplicas(templateID, current)
 	return claimWarning, nil
@@ -808,6 +898,8 @@ func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string,
 	if cacheErr := setTemplateRequestCache(templateID, storedReq); cacheErr != nil {
 		log.G(ctx).Warnf("set template request cache fail, template=%s err=%v", templateID, cacheErr)
 	}
+	// A new definition changes the aggregate list and the per-template info.
+	invalidateTemplateCaches(templateID)
 	return true, nil
 }
 
@@ -828,14 +920,22 @@ func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string,
 // TemplateInfo.DisplayName and the warning is empty; on a non-duplicate claim
 // failure the warning is set and DisplayName stays empty.
 func finalizeTemplateReplicas(ctx context.Context, templateID, jobID, instanceType, version string, replicas []ReplicaStatus) (*TemplateInfo, string, error) {
-	setTemplateLocalityCache(templateID, replicas)
-	registerReadyTemplateReplicas(templateID, replicas)
-
 	status, lastError := summarizeStatus(replicas)
-	displayName, claimWarning, err := publishTemplateStatusWithAlias(ctx, templateID, jobID, status, lastError)
+	displayName, claimWarning, displacedTemplateID, err := publishTemplateStatusWithAlias(ctx, templateID, jobID, status, lastError)
 	if err != nil {
 		return nil, "", err
 	}
+	// The status/alias write above is committed, so the cached reads must go
+	// NOW — invalidating before the publish (the old order) left a window for
+	// a concurrent read to repopulate the caches with the pre-publish state.
+	// An alias transfer also rewrites the displaced holder's display_name in
+	// the same transaction, so its caches go too.
+	invalidateTemplateCaches(templateID)
+	if displacedTemplateID != "" {
+		invalidateTemplateCaches(displacedTemplateID)
+	}
+	setTemplateLocalityCache(templateID, replicas)
+	registerReadyTemplateReplicas(templateID, replicas)
 	info := &TemplateInfo{
 		TemplateID:   templateID,
 		InstanceType: instanceType,
@@ -868,6 +968,17 @@ func UpdateDefinitionStatus(ctx context.Context, templateID, status, lastError s
 }
 
 func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, error) {
+	templateID = strings.TrimSpace(templateID)
+	if cached, ok := getCachedTemplateInfo(templateID); ok {
+		return cached, nil
+	}
+	return getTemplateInfoFromDB(ctx, templateID)
+}
+
+// getTemplateInfoFromDB is the uncached GetTemplateInfo implementation. Called
+// by GetTemplateInfo on a cache miss and by the backstop refresh goroutine.
+// Re-caches the result before returning so the next read hits the cache.
+func getTemplateInfoFromDB(ctx context.Context, templateID string) (*TemplateInfo, error) {
 	def, defErr := GetDefinition(ctx, templateID)
 	if defErr != nil && !errors.Is(defErr, ErrTemplateNotFound) {
 		return nil, defErr
@@ -881,6 +992,7 @@ func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, err
 			return nil, defErr
 		}
 		info := templateInfoFromJob(job)
+		setTemplateInfoCache(templateID, &info)
 		return &info, nil
 	}
 	// Pause snaps are not user-visible templates/snapshots.
@@ -920,6 +1032,7 @@ func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, err
 		out.CubeEgressCATargetsWritten = artifact.CubeEgressCATargetsWritten
 		break
 	}
+	setTemplateInfoCache(templateID, out)
 	return out, nil
 }
 
@@ -1088,15 +1201,19 @@ func claimTemplateAliasTx(tx *gorm.DB, templateID, alias string) error {
 	return ErrTemplateNotFound
 }
 
-func publishTemplateStatusWithAlias(ctx context.Context, templateID, jobID, status, lastError string) (displayName, claimWarning string, err error) {
+// publishTemplateStatusWithAlias publishes the aggregate status and claims the
+// alias in one transaction. displacedTemplateID names the template the alias
+// was taken away from ("" when none): callers MUST invalidate its query
+// caches too, since its display_name just changed without going through its
+// own write path.
+func publishTemplateStatusWithAlias(ctx context.Context, templateID, jobID, status, lastError string) (displayName, claimWarning, displacedTemplateID string, err error) {
 	if !isReady() {
-		return "", "", ErrTemplateStoreNotInitialized
+		return "", "", "", ErrTemplateStoreNotInitialized
 	}
 	alias := ""
 	claimantJobRowID := uint(0)
 	expectedStatus := ""
 	claimed := false
-	displacedTemplateID := ""
 	claimWarning = ""
 	var claimErr error
 	run := func() error {
@@ -1160,27 +1277,27 @@ func publishTemplateStatusWithAlias(ctx context.Context, templateID, jobID, stat
 			if displacedTemplateID != "" {
 				log.G(ctx).Warnf("alias %q transferred from template %s to newer template build %s", alias, displacedTemplateID, templateID)
 			}
-			return alias, claimWarning, nil
+			return alias, claimWarning, displacedTemplateID, nil
 		}
 		if claimWarning != "" {
 			log.G(ctx).Warnf("template %s is %s without alias %q: %s", templateID, status, alias, claimWarning)
-			return "", claimWarning, nil
+			return "", claimWarning, "", nil
 		}
 		if alias != "" && status != StatusFailed {
 			log.G(ctx).Infof("alias %q belongs to a newer template build; template %s is %s without alias", alias, templateID, status)
 		}
-		return "", "", nil
+		return "", "", "", nil
 	}
 	if claimErr == nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if statusErr := publishTemplateStatusWithoutAlias(ctx, templateID, expectedStatus, status, lastError); statusErr != nil {
-		return "", "", statusErr
+		return "", "", "", statusErr
 	}
 	if isDuplicateAliasError(claimErr) {
-		return "", "", nil
+		return "", "", "", nil
 	}
-	return "", fmt.Sprintf("template is ready but alias %q could not be claimed: %v", alias, claimErr), nil
+	return "", fmt.Sprintf("template is ready but alias %q could not be claimed: %v", alias, claimErr), "", nil
 }
 
 func publishTemplateStatusWithoutAlias(ctx context.Context, templateID, expectedStatus, status, lastError string) error {
@@ -1439,7 +1556,10 @@ func setTemplateAliasLocked(ctx context.Context, templateID, alias string) error
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
 	}
-	return retryOnceOnDeadlock(func() error {
+	// oldHolder is captured inside the transaction so the post-commit cache
+	// invalidation can drop the released holder's entries too.
+	var oldHolder string
+	if err := retryOnceOnDeadlock(func() error {
 		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			def, err := lockTemplateDefinitionTx(tx, templateID)
 			if err != nil {
@@ -1468,7 +1588,7 @@ func setTemplateAliasLocked(ctx context.Context, templateID, alias string) error
 			if def.Status != StatusReady {
 				return ErrTemplateNotReady
 			}
-			oldHolder := ""
+			oldHolder = ""
 			if cur, err := getTemplateByAliasTx(tx, alias); err == nil && cur != nil && cur.TemplateID != templateID {
 				oldHolder = cur.TemplateID
 			} else if err != nil && !errors.Is(err, ErrTemplateNotFound) {
@@ -1487,7 +1607,19 @@ func setTemplateAliasLocked(ctx context.Context, templateID, alias string) error
 			}
 			return nil
 		})
-	})
+	}); err != nil {
+		return err
+	}
+	// The alias is part of the cached info/list payloads (display_name), so a
+	// committed set/clear/transfer must drop the affected entries — otherwise
+	// GET and list keep serving the previous alias for up to the cache TTL
+	// (e2e test_alias failures). Resolution itself (GetTemplateByAlias) reads
+	// the DB directly and needs no invalidation.
+	invalidateTemplateCaches(templateID)
+	if oldHolder != "" {
+		invalidateTemplateCaches(oldHolder)
+	}
+	return nil
 }
 
 // applyAliasToRequestJSON returns payload with its "alias" field set to alias

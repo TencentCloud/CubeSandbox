@@ -335,6 +335,10 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		cleanupOnFailure(err)
 		return
 	}
+	// The status write is committed; cached info/list entries populated by
+	// status polling during the build (PENDING/FAILED from a previous
+	// attempt) must not outlive it.
+	invalidateTemplateCaches(templateID)
 
 	localcache.RegisterTemplateReplica(templateID, nodeID, 1)
 	_ = updateTemplateImageJob(ctx, jobID, map[string]any{

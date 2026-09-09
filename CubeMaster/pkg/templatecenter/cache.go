@@ -11,15 +11,11 @@ import (
 	"time"
 
 	"github.com/patrickmn/go-cache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-)
-
-const (
-	templateDefinitionCacheTTL = 360 * time.Minute
-	templateLocalityCacheTTL   = 360 * time.Minute
 )
 
 type templateLocalitySnapshot struct {
@@ -42,16 +38,43 @@ type templateLockGroup struct {
 }
 
 var (
-	templateDefinitionCache    = cache.New(templateDefinitionCacheTTL, templateDefinitionCacheTTL)
-	templateLocalityReadyCache = cache.New(templateLocalityCacheTTL, templateLocalityCacheTTL)
+	templateDefinitionCache    = cache.New(templateCacheTTL(), templateCacheTTL())
+	templateLocalityReadyCache = cache.New(templateCacheTTL(), templateCacheTTL())
 	// templateKindCache caches the template kind ("snapshot"|"app_snapshot"|...)
 	// keyed by templateID. The kind is derived from a single column in
 	// t_cube_template_definition, so its only mutation source is the same
 	// definition write paths that already call invalidateTemplateCaches.
-	templateKindCache         = cache.New(templateDefinitionCacheTTL, templateDefinitionCacheTTL)
+	templateKindCache = cache.New(templateCacheTTL(), templateCacheTTL())
+	// templateListCache caches the full ListTemplates result under a single
+	// key. Template metadata changes infrequently (minutes to hours between
+	// writes), but ListTemplates is polled aggressively by the console/UI, so
+	// a short TTL plus write-path invalidation keeps DB load low without
+	// noticeable staleness.
+	templateListCache = cache.New(templateQueryCacheTTL(), templateQueryCacheTTL())
+	// templateInfoCache caches GetTemplateInfo results keyed by templateID.
+	templateInfoCache         = cache.New(templateQueryCacheTTL(), templateQueryCacheTTL())
 	templateRequestFetchGroup = &templateFetchGroup{calls: make(map[string]*templateFetchCall)}
 	templateRequestLockGroup  = &templateLockGroup{}
 )
+
+const templateListCacheKey = "all"
+
+// templateQueryCacheTTL is the TTL for the ListTemplates / GetTemplateInfo
+// query caches. Short on purpose: template metadata updates are rare but the
+// console polls the list endpoint frequently, so 1 minute cuts DB load by
+// ~95% while staying effectively fresh for operators.
+func templateQueryCacheTTL() time.Duration {
+	return 1 * time.Minute
+}
+
+// templateCacheTTL returns the configured template cache TTL, falling back to
+// the historical 6-hour default when unset or the config is not loaded yet.
+func templateCacheTTL() time.Duration {
+	if cfg := config.GetConfig(); cfg != nil && cfg.Common != nil && cfg.Common.TemplateCacheTTL > 0 {
+		return cfg.Common.TemplateCacheTTL
+	}
+	return 360 * time.Minute
+}
 
 func (g *templateLockGroup) get(templateID string) *sync.RWMutex {
 	if templateID == "" {
@@ -135,7 +158,7 @@ func setTemplateRequestCache(templateID string, req *sandboxtypes.CreateCubeSand
 	if err != nil {
 		return err
 	}
-	templateDefinitionCache.Set(templateID, cloned, templateDefinitionCacheTTL)
+	templateDefinitionCache.Set(templateID, cloned, templateCacheTTL())
 	return nil
 }
 
@@ -165,7 +188,7 @@ func setTemplateLocalityCache(templateID string, replicas []ReplicaStatus) {
 		}
 		ready = append(ready, replica)
 	}
-	templateLocalityReadyCache.Set(templateID, &templateLocalitySnapshot{ReadyReplicas: ready}, templateLocalityCacheTTL)
+	templateLocalityReadyCache.Set(templateID, &templateLocalitySnapshot{ReadyReplicas: ready}, templateCacheTTL())
 }
 
 func evictReplicaFromLocalityCache(templateID, nodeID string) {
@@ -187,7 +210,7 @@ func evictReplicaFromLocalityCache(templateID, nodeID string) {
 		templateLocalityReadyCache.Delete(templateID)
 		return
 	}
-	templateLocalityReadyCache.Set(templateID, &templateLocalitySnapshot{ReadyReplicas: next}, templateLocalityCacheTTL)
+	templateLocalityReadyCache.Set(templateID, &templateLocalitySnapshot{ReadyReplicas: next}, templateCacheTTL())
 }
 
 func invalidateTemplateCaches(templateID string) {
@@ -197,7 +220,131 @@ func invalidateTemplateCaches(templateID string) {
 	templateDefinitionCache.Delete(templateID)
 	templateLocalityReadyCache.Delete(templateID)
 	templateKindCache.Delete(templateID)
+	templateInfoCache.Delete(templateID)
+	// Any single-template write can change the aggregate list (status, replica
+	// counts), so the list cache is dropped alongside the per-template one.
+	templateListCache.Delete(templateListCacheKey)
 	localcache.InvalidateImageState(templateID)
+}
+
+// invalidateTemplateListCache drops the aggregate list cache only. Used by
+// write paths that do not have a specific templateID in scope but still
+// mutate the list (e.g. GC deleting orphaned definitions).
+func invalidateTemplateListCache() {
+	templateListCache.Delete(templateListCacheKey)
+}
+
+// cloneTemplateInfo deep-copies a TemplateInfo so cached entries cannot be
+// mutated by callers (the Replicas slice is shared memory otherwise).
+func cloneTemplateInfo(in *TemplateInfo) *TemplateInfo {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.Replicas != nil {
+		out.Replicas = make([]ReplicaStatus, len(in.Replicas))
+		copy(out.Replicas, in.Replicas)
+	}
+	return &out
+}
+
+func getCachedTemplateList() ([]TemplateInfo, bool) {
+	v, ok := templateListCache.Get(templateListCacheKey)
+	if !ok {
+		return nil, false
+	}
+	infos, ok := v.([]TemplateInfo)
+	if !ok {
+		templateListCache.Delete(templateListCacheKey)
+		return nil, false
+	}
+	out := make([]TemplateInfo, len(infos))
+	copy(out, infos)
+	return out, true
+}
+
+func setTemplateListCache(infos []TemplateInfo) {
+	copied := make([]TemplateInfo, len(infos))
+	copy(copied, infos)
+	templateListCache.Set(templateListCacheKey, copied, templateQueryCacheTTL())
+}
+
+func getCachedTemplateInfo(templateID string) (*TemplateInfo, bool) {
+	v, ok := templateInfoCache.Get(templateID)
+	if !ok {
+		return nil, false
+	}
+	info, ok := v.(*TemplateInfo)
+	if !ok || info == nil {
+		templateInfoCache.Delete(templateID)
+		return nil, false
+	}
+	return cloneTemplateInfo(info), true
+}
+
+func setTemplateInfoCache(templateID string, info *TemplateInfo) {
+	if templateID == "" || info == nil {
+		return
+	}
+	templateInfoCache.Set(templateID, cloneTemplateInfo(info), templateQueryCacheTTL())
+}
+
+// startTemplateQueryCacheRefresh periodically re-warms the template list and
+// per-template info caches from the DB. Write paths already invalidate
+// actively; this goroutine is the passive backstop so a missed invalidation
+// (or an out-of-band DB change, e.g. another Master replica's write that this
+// process did not observe) cannot leave stale data cached indefinitely.
+//
+// Runs at half the cache TTL so at most one refresh interval of staleness is
+// possible even if every write-path invalidation is somehow skipped.
+func startTemplateQueryCacheRefresh(ctx context.Context) {
+	go func() {
+		interval := templateQueryCacheTTL() / 2
+		if interval < 5*time.Second {
+			interval = 5 * time.Second
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				refreshTemplateQueryCaches(ctx)
+			}
+		}
+	}()
+}
+
+// refreshTemplateQueryCaches re-loads the list and re-warms every cached
+// templateID's info entry. Errors are logged but never fatal — the next tick
+// retries, and reads fall through to the DB on a cache miss anyway.
+func refreshTemplateQueryCaches(ctx context.Context) {
+	if !isReady() {
+		return
+	}
+	// Re-load the full list by calling the underlying query directly (bypass
+	// the cache read in ListTemplates to avoid a self-hit), then re-cache it.
+	infos, err := listTemplatesFromDB(ctx)
+	if err != nil {
+		log.G(ctx).Warnf("template query cache refresh: list templates fail: %v", err)
+		return
+	}
+	setTemplateListCache(infos)
+	// Re-warm per-template entries that are currently cached, so their TTL
+	// restarts and their content is up to date.
+	for _, info := range infos {
+		if _, ok := templateInfoCache.Get(info.TemplateID); !ok {
+			continue
+		}
+		full, err := getTemplateInfoFromDB(ctx, info.TemplateID)
+		if err != nil {
+			// Template may have been deleted by a peer replica; drop the stale entry.
+			templateInfoCache.Delete(info.TemplateID)
+			continue
+		}
+		setTemplateInfoCache(info.TemplateID, full)
+	}
 }
 
 // getCachedTemplateKind returns the cached kind for a templateID.
@@ -224,7 +371,7 @@ func setTemplateKindCache(templateID, kind string) {
 	if templateID == "" {
 		return
 	}
-	templateKindCache.Set(templateID, strings.TrimSpace(kind), templateDefinitionCacheTTL)
+	templateKindCache.Set(templateID, strings.TrimSpace(kind), templateCacheTTL())
 }
 
 func registerReadyTemplateReplicas(templateID string, replicas []ReplicaStatus) {

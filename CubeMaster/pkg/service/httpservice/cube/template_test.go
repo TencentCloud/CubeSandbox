@@ -59,7 +59,7 @@ func TestDeleteTemplateMapsAttemptInProgressToConflict(t *testing.T) {
 	t.Cleanup(func() {
 		deleteTemplateFn = origDeleteTemplateFn
 	})
-	deleteTemplateFn = func(ctx context.Context, templateID, instanceType string) error {
+	deleteTemplateFn = func(ctx context.Context, templateID, instanceType string, _ templatecenter.DeleteTemplateOptions) error {
 		return fmtWrapped(templatecenter.ErrTemplateAttemptInProgress, "build still running")
 	}
 
@@ -81,7 +81,7 @@ func TestDeleteTemplateMapsCleanupLocatorMissingToNotFound(t *testing.T) {
 	t.Cleanup(func() {
 		deleteTemplateFn = origDeleteTemplateFn
 	})
-	deleteTemplateFn = func(ctx context.Context, templateID, instanceType string) error {
+	deleteTemplateFn = func(ctx context.Context, templateID, instanceType string, _ templatecenter.DeleteTemplateOptions) error {
 		return fmtWrapped(templatecenter.ErrTemplateCleanupLocatorMissing, "historical locator missing")
 	}
 
@@ -103,7 +103,7 @@ func TestDeleteTemplateSuccessResponse(t *testing.T) {
 	t.Cleanup(func() {
 		deleteTemplateFn = origDeleteTemplateFn
 	})
-	deleteTemplateFn = func(ctx context.Context, templateID, instanceType string) error {
+	deleteTemplateFn = func(ctx context.Context, templateID, instanceType string, _ templatecenter.DeleteTemplateOptions) error {
 		return nil
 	}
 

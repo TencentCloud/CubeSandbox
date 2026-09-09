@@ -6,11 +6,11 @@ package templatecenter
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
@@ -53,37 +53,52 @@ func TestRootfsArtifactIDFromCreateRequest(t *testing.T) {
 	}
 }
 
-func TestCleanupMasterLocalArtifactForFinalDeleteOnlyWhenStillPending(t *testing.T) {
-	orig := cleanupLocalRootfsArtifactForLifecycle
-	defer func() { cleanupLocalRootfsArtifactForLifecycle = orig }()
+// requestTemplateCenterArtifactDelete is the ONLY thing allowed to remove an
+// artifact's S3 object/local file/row (see CubeTemplateCenter/pkg/build/
+// deleter.go). cleanupArtifactFully reaches it via
+// notifyTemplateCenterArtifactDelete exactly once per finalized artifact --
+// regression test for the S3-leak bug where CubeMaster used to hard-delete the
+// row itself without ever notifying TC.
+//
+// The DB-bound phases of cleanupArtifactFully (1 and 3) are not unit-testable
+// without a live database, so this exercises the production notify step
+// directly instead of asserting on the stub itself.
+func TestNotifyTemplateCenterArtifactDeleteCallsSeamOnce(t *testing.T) {
+	orig := requestTemplateCenterArtifactDelete
+	defer func() { requestTemplateCenterArtifactDelete = orig }()
 
-	calls := 0
-	cleanupLocalRootfsArtifactForLifecycle = func(artifactID, ext4Path string) error {
-		calls++
-		if artifactID != "rfs-1" || ext4Path != "/managed/rfs-1/rootfs.ext4" {
-			t.Fatalf("unexpected cleanup args artifact=%q path=%q", artifactID, ext4Path)
-		}
+	var calledWith []string
+	requestTemplateCenterArtifactDelete = func(ctx context.Context, artifactID string) error {
+		calledWith = append(calledWith, artifactID)
 		return nil
 	}
 
-	artifact := models.RootfsArtifact{
-		ArtifactID: "rfs-1",
-		Ext4Path:   "/managed/rfs-1/rootfs.ext4",
-		Status:     ArtifactStatusBuilding,
+	notifyTemplateCenterArtifactDelete(context.Background(), "rfs-1")
+	if len(calledWith) != 1 || calledWith[0] != "rfs-1" {
+		t.Fatalf("calledWith = %v, want exactly [rfs-1]", calledWith)
 	}
-	canFinalize, err := cleanupMasterLocalArtifactForFinalDelete(artifact, 0)
-	if err != nil || canFinalize || calls != 0 {
-		t.Fatalf("building artifact should skip local cleanup, canFinalize=%v err=%v calls=%d", canFinalize, err, calls)
+}
+
+// A notify failure must not propagate: the artifact row stays CLEANUP_PENDING
+// and TC's reconciler backstop-sweeps it later, so template deletion proceeds.
+func TestNotifyTemplateCenterArtifactDeleteSwallowsErrors(t *testing.T) {
+	orig := requestTemplateCenterArtifactDelete
+	defer func() { requestTemplateCenterArtifactDelete = orig }()
+
+	requestTemplateCenterArtifactDelete = func(ctx context.Context, artifactID string) error {
+		return errors.New("tc unreachable")
 	}
 
-	artifact.Status = ArtifactStatusCleanupPending
-	canFinalize, err = cleanupMasterLocalArtifactForFinalDelete(artifact, 1)
-	if err != nil || canFinalize || calls != 0 {
-		t.Fatalf("referenced artifact should skip local cleanup, canFinalize=%v err=%v calls=%d", canFinalize, err, calls)
-	}
+	// Must not panic; there is no return value to check by design.
+	notifyTemplateCenterArtifactDelete(context.Background(), "rfs-2")
+}
 
-	canFinalize, err = cleanupMasterLocalArtifactForFinalDelete(artifact, 0)
-	if err != nil || !canFinalize || calls != 1 {
-		t.Fatalf("unreferenced cleanup-pending artifact should be locally cleaned, canFinalize=%v err=%v calls=%d", canFinalize, err, calls)
+// When TC's endpoint is not configured, the seam must fail loudly (not
+// silently pretend success) so the caller knows to leave the row
+// CLEANUP_PENDING rather than assume cleanup happened.
+func TestRequestTemplateCenterArtifactDeleteRequiresEndpoint(t *testing.T) {
+	t.Setenv("CUBE_TEMPLATE_CENTER_ADDR", "")
+	if err := requestTemplateCenterArtifactDelete(context.Background(), "rfs-2"); err == nil {
+		t.Fatal("expected error when template center endpoint is not configured")
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -19,8 +21,28 @@ func unmarshalTemplateImageJobRequest(payload string) (*types.CreateTemplateFrom
 	if err := json.Unmarshal([]byte(payload), req); err != nil {
 		return nil, err
 	}
+	// Preserve the TemplateID exactly as it was persisted in this job's
+	// RequestJSON snapshot. normalizeTemplateImageRequest unconditionally
+	// overwrites TemplateID with a FRESH random value (by design, for the
+	// create-submission path, where a client-supplied ID must always be
+	// ignored) -- but this function decodes an ALREADY-SUBMITTED job's
+	// snapshot, whose TemplateID was already generated once at submit time
+	// and is the same ID the job row, template definition, and replicas were
+	// created under. Letting normalize regenerate it here silently produced a
+	// SECOND, different template_id (e.g. remote_build_resume.go's resume
+	// path used it to register the definition + replicas), leaving the
+	// original job's template_id orphaned with no matching definition row
+	// while the real template ended up under the regenerated ID instead.
+	originalTemplateID := strings.TrimSpace(req.TemplateID)
 	req.Request = &types.Request{RequestID: uuid.NewString()}
-	return normalizeTemplateImageRequest(req)
+	normalized, err := normalizeTemplateImageRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	if originalTemplateID != "" {
+		normalized.TemplateID = originalTemplateID
+	}
+	return normalized, nil
 }
 
 func buildTemplateSpecFingerprint(req *types.CreateTemplateFromImageReq, sourceImageDigest string) string {
@@ -64,8 +86,35 @@ func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageR
 	return hex.EncodeToString(sum[:])
 }
 
+// buildArtifactID generates a unique artifact ID for a given spec fingerprint.
+//
+// The ID includes a UUID suffix to avoid collisions when the same template
+// spec is rebuilt after a previous artifact was deleted. Without the UUID,
+// rebuilding the same spec would produce the same artifact ID, causing the
+// new ext4 file to overwrite (or be confused with) the old one on shared
+// storage or on nodes that still have the old file cached.
+//
+// Deduplication across concurrent builds of the same spec is handled at the
+// Master layer (submitTemplateFromImage checks for existing READY artifacts
+// by fingerprint before creating a job) and at the TC layer (build.go checks
+// the DB for a READY artifact with the same fingerprint before building), NOT
+// by artifact ID equality. This allows artifact IDs to be unique per build
+// while still preventing redundant builds of the same spec.
 func buildArtifactID(fingerprint string) string {
-	return "rfs-" + fingerprint[:24]
+	return fmt.Sprintf("rfs-%s-%s", fingerprint[:24], uuid.New().String()[:8])
+}
+
+// BuildTemplateSpecFingerprintWithEnvdSHA exports the fingerprint builder so
+// the standalone CubeTemplateCenter process computes the exact same value
+// during remote builds (keeping artifact dedup compatible with local mode).
+func BuildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageReq, sourceImageDigest, cubeEgressCAFingerprint, envdSHA string) string {
+	return buildTemplateSpecFingerprintWithEnvdSHA(req, sourceImageDigest, cubeEgressCAFingerprint, envdSHA)
+}
+
+// BuildArtifactID exports buildArtifactID for CubeTemplateCenter (remote
+// build mode), so artifact IDs are derived identically in both modes.
+func BuildArtifactID(fingerprint string) string {
+	return buildArtifactID(fingerprint)
 }
 
 func marshalTemplateImageJobRequest(req *types.CreateTemplateFromImageReq) (string, error) {
@@ -80,6 +129,16 @@ func marshalTemplateImageJobRequest(req *types.CreateTemplateFromImageReq) (stri
 		return "", err
 	}
 	return string(payload), nil
+}
+
+// MarshalTemplateImageJobRequestCanonical exports marshalTemplateImageJobRequest
+// so the standalone CubeTemplateCenter process can compare a submitted build
+// payload against CubeMaster's persisted request_json snapshot byte-for-byte:
+// both sides zero the credential and the transport-only Request envelope
+// before marshaling, and Go's struct-based json.Marshal is deterministic, so
+// equal requests produce identical bytes.
+func MarshalTemplateImageJobRequestCanonical(req *types.CreateTemplateFromImageReq) (string, error) {
+	return marshalTemplateImageJobRequest(req)
 }
 
 func marshalTemplateCommitJobRequest(req *types.CreateCubeSandboxReq) (string, error) {

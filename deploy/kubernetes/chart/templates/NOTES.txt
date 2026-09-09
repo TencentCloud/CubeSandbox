@@ -93,6 +93,44 @@ WARNING (host change; helm rollback does NOT undo kernel/GRUB):
   With bootstrap.pvmHostKernel.enabled=true, this release may install a host kernel
   and reboot nodes labeled allow-pvm-bootstrap (via cube-node-pvm).
 {{- end }}
+{{- /* Artifact-store HA warning: multi-replica master/TC without S3 and without
+a shared RWX volume runs on a node-local artifact store. Allowed (the runtime
+survives via foreign-artifact retries), but production HA should use s3Backed
+or RWX — warn loudly instead of failing the install. */}}
+{{- if .Values.controlPlane.enabled }}
+{{- $tcNotes := .Values.controlPlane.templateCenter -}}
+{{- $mpNotes := .Values.controlPlane.master.persistence | default dict -}}
+{{- $sharedStoreNotes := and $mpNotes.enabled (not $mpNotes.hostPath) (has "ReadWriteMany" ($mpNotes.accessModes | default list)) (not $tcNotes.persistence.existingClaim) -}}
+{{- $s3bNotes := ((.Values.controlPlane.artifactStore).s3Backed) | default false -}}
+{{- $multiMasterNotes := gt (int .Values.controlPlane.master.replicas) 1 -}}
+{{- $multiTCNotes := gt (int ($tcNotes.replicas | default 1)) 1 -}}
+{{- if and (or $multiMasterNotes $multiTCNotes) (not $s3bNotes) (not $sharedStoreNotes) }}
+
+WARNING (template artifact store is node-local with multiple control-plane replicas):
+{{- if $multiMasterNotes }}
+  controlPlane.master.replicas={{ .Values.controlPlane.master.replicas }} without
+  controlPlane.artifactStore.s3Backed=true or a shared ReadWriteMany artifact volume:
+  a template artifact exists only on the master pod that registered it, so a
+  download routed to another replica fails (foreign artifact) until retried
+  against the right pod.
+{{- end }}
+{{- if $multiTCNotes }}
+  controlPlane.templateCenter.replicas={{ $tcNotes.replicas | default 1 }} without
+  controlPlane.artifactStore.s3Backed=true: TC replicas cannot read each other's
+  ext4 output, so duplicate builds of the same image spec run in parallel instead
+  of being deduplicated, and an interrupted build cannot be taken over by another
+  replica.
+{{- end }}
+  Acceptable for evaluation. For production HA use either
+  controlPlane.artifactStore.s3Backed=true (S3/MinIO as the durable store) or a
+  genuinely shared artifact volume
+  (controlPlane.master.persistence.accessModes=[ReadWriteMany], e.g. CFS/NFS, with
+  TC mounting the same claim).
+  (Mounting the default ReadWriteOnce artifact PVC with several master replicas
+  is rejected at install time — it cannot attach on several nodes — so this
+  warning covers per-pod scratch / hostPath stores only.)
+{{- end }}
+{{- end }}
 
 Useful commands:
   kubectl get pods -n {{ .Release.Namespace }} -o wide

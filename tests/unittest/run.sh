@@ -85,6 +85,10 @@ WITH_TESTS=(
 	# flaky "template store is not initialized" failures). The repo already uses
 	# this flag for the integration tests (CubeMaster/Makefile testlocal/testtt).
 	"cubemaster|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && make proto && if [ -f test/conf.yaml ]; then export CUBE_MASTER_CONFIG_PATH=/workspace/CubeMaster/test/conf.yaml; fi && CI=true go test -short -gcflags=all=-l -timeout=20m ./api/... ./pkg/...'"
+	# CubeTemplateCenter shares CubeMaster's pkg/templatecenter image code
+	# (Linux-only syscall constants), so its tests go through the builder like
+	# every other Go component. The Makefile target wraps builder-run.
+	"cubetemplatecenter|Go|0|make cubetemplatecenter-test"
 	# cubevs: the CubeNet/cubevs module's OWN unit tests (dataplane policy, DNS
 	# learning, migration, dump, classify). cubevs-test regenerates the BPF
 	# objects (make gen) and runs the full module set in a privileged root

@@ -3,6 +3,102 @@
 {{- if and .Values.controlPlane.enabled (not $controlPlaneSelector) }}
 {{- fail "controlPlane.enabled=true requires placement.controlPlane.nodeSelector" }}
 {{- end }}
+{{- $templateCenter := .Values.controlPlane.templateCenter -}}
+{{- $s3Backed := ((.Values.controlPlane.artifactStore).s3Backed) | default false -}}
+{{- if $s3Backed }}
+{{- /* s3Backed only works when a COMPLETE CUBE_S3_* set
+(ENDPOINT+BUCKET+ACCESS_KEY_ID+SECRET_ACCESS_KEY) actually reaches BOTH the
+cube-master and cube-templatecenter pods. The pods get it from exactly two
+places, so validate those -- not "some S3 exists somewhere": operator-rendered
+global.env (cube.globalEnvS3State), or the chart's own injection from
+volumeS3.* / builtin MinIO (cube.artifactS3Env, gated by
+cube.artifactS3Injectable). Without one of them S3Config() silently disables
+S3 and every replica builds to its own node-local disk. */ -}}
+{{- if eq (include "cube.globalEnvS3State" .) "partial" }}
+{{- fail "controlPlane.artifactStore.s3Backed=true: global.env sets CUBE_S3_ENDPOINT but the set is incomplete -- CUBE_S3_BUCKET / CUBE_S3_ACCESS_KEY_ID / CUBE_S3_SECRET_ACCESS_KEY must all be present (the binaries fall back to local disk when any piece is missing)" }}
+{{- end }}
+{{- if and (eq (include "cube.globalEnvS3State" .) "absent") (ne (include "cube.artifactS3Injectable" .) "true") }}
+{{- fail "controlPlane.artifactStore.s3Backed=true requires a complete CUBE_S3_* set to reach BOTH the cube-master and cube-templatecenter pods: set CUBE_S3_ENDPOINT+BUCKET+ACCESS_KEY_ID+SECRET_ACCESS_KEY in global.env, or make them chart-injectable via volumeS3.endpoint+accessKeyId+secretAccessKey or the builtin minio (volumeS3.existingSecret only ships a volume-s3.conf file and cannot feed env injection -- combine it with global.env)" }}
+{{- end }}
+{{- end }}
+{{- if hasKey $templateCenter "buildMode" }}
+{{- fail "controlPlane.templateCenter.buildMode no longer exists: template builds always go to CubeTemplateCenter, which deploys automatically whenever controlPlane.enabled=true. Remove controlPlane.templateCenter.buildMode from your values" }}
+{{- end }}
+{{- if hasKey $templateCenter "routeMode" }}
+{{- fail "controlPlane.templateCenter.routeMode no longer exists: the route proxy was removed along with the build-mode string. CubeMaster always serves the public template API" }}
+{{- end }}
+{{- if hasKey $templateCenter "enabled" }}
+{{- fail "controlPlane.templateCenter.enabled no longer exists: TC is mandatory and deploys automatically whenever controlPlane.enabled=true (CubeMaster no longer builds templates in-process). Remove controlPlane.templateCenter.enabled from your values" }}
+{{- end }}
+{{- if and .Values.controlPlane.enabled (not .Values.controlPlane.master.enabled) }}
+{{- fail "controlPlane.enabled=true requires controlPlane.master.enabled=true: TC (which deploys automatically) writes the ext4 but CubeMaster is what serves it to Cubelet and owns every business-state write" }}
+{{- end }}
+{{- if and .Values.controlPlane.enabled .Values.externalControlPlane.enabled (not $s3Backed) }}
+{{- fail "controlPlane.enabled=true is not supported with externalControlPlane.enabled=true: TC (which deploys automatically) must share the artifact directory with the CubeMaster that serves downloads, which an out-of-cluster master cannot do (unless controlPlane.artifactStore.s3Backed=true and the external master also has CUBE_S3_* configured)" }}
+{{- end }}
+{{- $masterPersistence := .Values.controlPlane.master.persistence -}}
+{{- /* A genuinely shared artifact volume (a ReadWriteMany claim, e.g. CFS/NFS —
+TC mounts the SAME claim by default, see cube.templateCenterStorageClaimName)
+makes the store non-node-local: every master replica and TC see every
+artifact. hostPath stays node-local by definition, and a
+templateCenter.persistence.existingClaim we cannot prove is the same share
+does not count (conservative).
+
+Multi-replica MASTER without S3 and without a shared volume is allowed but
+degraded ONLY when the artifact disk is per-pod scratch (persistence disabled
+→ emptyDir) or node-pinned (hostPath): NOTES.txt prints a loud warning for
+that combination, and downloads are proxied to the single TC tier so any
+master replica can serve any artifact. Multi-replica TC without S3/a shared
+volume is REFUSED below (builds land on per-replica disks but downloads are
+load-balanced across replicas). A mounted ReadWriteOnce claim always fails
+for multi-replica master: it cannot attach on several nodes, so the second
+replica never even schedules (Pending) — a hard failure, not a degradation
+the foreign-artifact retry can absorb. */ -}}
+{{- $sharedArtifactStore := and $masterPersistence.enabled (not $masterPersistence.hostPath) (has "ReadWriteMany" ($masterPersistence.accessModes | default list)) (not $templateCenter.persistence.existingClaim) -}}
+{{- if and .Values.controlPlane.enabled (gt (int .Values.controlPlane.master.replicas) 1) (not $s3Backed) $masterPersistence.enabled (not $masterPersistence.hostPath) (not $sharedArtifactStore) }}
+{{- fail (printf "controlPlane.master.replicas=%v cannot mount the default ReadWriteOnce artifact PVC on several nodes — the second replica stays Pending forever. Choose one: controlPlane.master.persistence.enabled=false (per-pod emptyDir scratch; degraded, see the install-notes warning), controlPlane.master.persistence.accessModes=[ReadWriteMany] (a genuinely shared CFS/NFS volume), or controlPlane.artifactStore.s3Backed=true (S3/MinIO as the durable store)" .Values.controlPlane.master.replicas) }}
+{{- end }}
+{{- /* Multi-replica TC is different from multi-replica master: every master
+replica can serve any artifact (downloads are reverse-proxied to the single
+TC tier), but each TC replica builds into its OWN local disk while the build
+lock deduplicates across replicas — so with a node-local store a download
+routed to a replica that never built the artifact 404s, and the
+distribution servability probe may even demote the healthy row. Multi-TC
+therefore requires a durable shared store: S3 (s3Backed) or a genuinely
+shared ReadWriteMany volume. */ -}}
+{{- if and .Values.controlPlane.enabled (gt (int ($templateCenter.replicas | default 1)) 1) (not $s3Backed) (not $sharedArtifactStore) }}
+{{- fail (printf "controlPlane.templateCenter.replicas=%v is not supported with a node-local artifact store: each TC replica's builds land on its own disk, but downloads are load-balanced across replicas, so a pull can hit a replica that never built the artifact (404). Choose one: controlPlane.artifactStore.s3Backed=true (S3/MinIO as the durable store; replicas coordinate duplicate builds via DB session locks), controlPlane.master.persistence.accessModes=[ReadWriteMany] (a genuinely shared CFS/NFS volume), or keep templateCenter.replicas=1" ($templateCenter.replicas | default 1)) }}
+{{- end }}
+{{- if and .Values.controlPlane.enabled (not $templateCenter.colocateWithMaster) (not $templateCenter.affinity) (not $s3Backed) (not $sharedArtifactStore) }}
+{{- fail "controlPlane.templateCenter.colocateWithMaster=false requires controlPlane.templateCenter.affinity: without it TC may be scheduled away from the CubeMaster holding the artifact volume (not required with controlPlane.artifactStore.s3Backed=true or a ReadWriteMany shared artifact volume)" }}
+{{- end }}
+{{- /* Multi-replica in S3 mode needs the local volume to be per-Pod scratch,
+not a shared RWO claim (which cannot attach on several nodes). hostPath and
+emptyDir are fine -- each Pod gets its own scratch. */ -}}
+{{- $anyMultiReplica := or (gt (int .Values.controlPlane.master.replicas) 1) (gt (int ($templateCenter.replicas | default 1)) 1) -}}
+{{- if and $s3Backed $anyMultiReplica $masterPersistence.enabled (not $masterPersistence.hostPath) (not (has "ReadWriteMany" ($masterPersistence.accessModes | default list))) }}
+{{- fail "artifactStore.s3Backed=true with master.replicas>1 or templateCenter.replicas>1 requires controlPlane.master.persistence.enabled=false: in S3 mode the local disk is build scratch only and S3 is the durable store, so the ReadWriteOnce artifact PVC (which cannot attach on several nodes) only gets in the way. Set enabled=false, or use a ReadWriteMany claim" }}
+{{- end }}
+{{- /*
+TC shares CubeMaster's artifact volume, so CubeMaster's access mode decides
+whether co-location is merely required or physically unavoidable. Reject the
+combination that cannot work at all: a ReadWriteOnce claim plus TC scheduled
+away from CubeMaster means one of the two Pods cannot attach the volume.
+*/ -}}
+{{- if and .Values.controlPlane.enabled (not $templateCenter.colocateWithMaster) (not $s3Backed) }}
+{{- if and $masterPersistence.enabled (not $masterPersistence.hostPath) }}
+{{- $modes := $masterPersistence.accessModes | default list -}}
+{{- if and (not (has "ReadWriteMany" $modes)) (not $templateCenter.persistence.existingClaim) }}
+{{- fail (printf "controlPlane.templateCenter.colocateWithMaster=false requires a ReadWriteMany artifact volume, but controlPlane.master.persistence.accessModes is %v. TC writes the ext4 and CubeMaster serves it from the same directory; with ReadWriteOnce (CBS and most block CSI drivers) only one node can attach the volume, so an un-colocated TC either fails to attach or builds into a different disk and every artifact download 404s. Either keep colocateWithMaster=true, provide a genuinely shared volume (e.g. CFS/NFS with ReadWriteMany) via controlPlane.master.persistence.accessModes and controlPlane.templateCenter.persistence.existingClaim, or set controlPlane.artifactStore.s3Backed=true" $modes) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if and .Values.controlPlane.enabled .Values.controlPlane.master.persistence.enabled .Values.controlPlane.master.persistence.hostPath (not $templateCenter.colocateWithMaster) (not $s3Backed) }}
+{{- fail "controlPlane.templateCenter.colocateWithMaster=false cannot work with controlPlane.master.persistence.hostPath: a hostPath artifact store exists only on one node, so TC must run on that same node as CubeMaster (not required with controlPlane.artifactStore.s3Backed=true, where the local disk is scratch)" }}
+{{- end }}
+{{- if and .Values.controlPlane.enabled (eq $templateCenter.service.type "ClusterIP") $templateCenter.service.nodePort }}
+{{- fail "controlPlane.templateCenter.service.nodePort must be empty when service.type is ClusterIP" }}
+{{- end }}
 {{- if .Values.cubeNode.enabled }}
 {{- if not $computeSelector }}
 {{- fail "cube-node requires placement.compute.nodeSelector, otherwise host-mutating bootstrap may run on all nodes" }}

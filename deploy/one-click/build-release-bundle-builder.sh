@@ -69,6 +69,7 @@ mkdir -p "${PREBUILT_DIR}"
 rm -f \
   "${PREBUILT_DIR}/cubemaster" \
   "${PREBUILT_DIR}/cubemastercli" \
+  "${PREBUILT_DIR}/templatecenter" \
   "${PREBUILT_DIR}/cubelet" \
   "${PREBUILT_DIR}/cubecli" \
   "${PREBUILT_DIR}/cube-api" \
@@ -318,6 +319,16 @@ track_cubemaster() {
   go build -ldflags "${CUBEMASTER_LDFLAGS}" -o "${PREBUILT_DIR}/cubemaster" ./cmd/cubemaster
 }
 
+track_templatecenter() {
+  # Separate Go module (go.mod replace ../CubeMaster, ../CubeDB, etc., all
+  # read-only), so it can build fully in parallel with track_cubemaster. Its
+  # ldflags target CubeMaster's version package because that is what its
+  # go.mod pulls in for version reporting (see build-release-bundle.sh).
+  cd /workspace/CubeTemplateCenter
+  go mod download
+  go build -ldflags "${CUBEMASTER_LDFLAGS}" -o "${PREBUILT_DIR}/templatecenter" ./cmd/templatecenter
+}
+
 track_cubelet() {
   mkdir -p /workspace/_output/bin
   ( cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk )
@@ -439,6 +450,7 @@ queue_track agent      track_agent
 queue_track cube-init  track_cube_init
 queue_track cubelet    track_cubelet
 queue_track cubemaster track_cubemaster
+queue_track templatecenter track_templatecenter
 queue_track netstack   track_netstack
 queue_track cubeops    track_cubeops
 queue_track volume-s3 track_volume_s3
@@ -461,6 +473,7 @@ make -C "${ROOT_DIR}" builder-run \
 for artifact in \
   cubemaster \
   cubemastercli \
+  templatecenter \
   cubelet \
   cubecli \
   cube-api \
@@ -483,6 +496,7 @@ ensure_file "${PREBUILT_DIR}/s3lvol/bin/s3lvol_tgt"
 log "packaging one-click release bundle on host with prebuilt artifacts"
 ONE_CLICK_CUBEMASTER_BIN="${PREBUILT_DIR}/cubemaster" \
 ONE_CLICK_CUBEMASTERCLI_BIN="${PREBUILT_DIR}/cubemastercli" \
+ONE_CLICK_TEMPLATECENTER_BIN="${PREBUILT_DIR}/templatecenter" \
 ONE_CLICK_CUBELET_BIN="${PREBUILT_DIR}/cubelet" \
 ONE_CLICK_CUBECLI_BIN="${PREBUILT_DIR}/cubecli" \
 ONE_CLICK_CUBE_API_BIN="${PREBUILT_DIR}/cube-api" \

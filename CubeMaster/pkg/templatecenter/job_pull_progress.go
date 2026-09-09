@@ -12,7 +12,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	basetypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter/image"
 )
 
 var (
@@ -35,7 +34,7 @@ type jobPullProgressSink struct {
 	mu          sync.Mutex
 	lastBytes   int64
 	lastSpeedAt time.Time
-	lastSnap    image.PullProgress
+	lastSnap    PullProgress
 	cacheTTLSet bool
 }
 
@@ -45,7 +44,7 @@ func newJobPullProgressSink(ctx context.Context, jobID string) *jobPullProgressS
 
 // onProgress is the image.ProgressFunc handed to PrepareSource. It is invoked
 // from the subprocess-streaming goroutines, so it is fully synchronised.
-func (s *jobPullProgressSink) onProgress(p image.PullProgress) {
+func (s *jobPullProgressSink) onProgress(p PullProgress) {
 	now := time.Now()
 
 	s.mu.Lock()
@@ -130,7 +129,7 @@ func (s *jobPullProgressSink) computeSpeedLocked(downloaded int64, now time.Time
 	return int64(float64(delta) / dt)
 }
 
-func pullProgressMap(jobID string, p image.PullProgress, now time.Time) *basetypes.TemplateImageJobPullProgressMap {
+func pullProgressMap(jobID string, p PullProgress, now time.Time) *basetypes.TemplateImageJobPullProgressMap {
 	return &basetypes.TemplateImageJobPullProgressMap{
 		JobID:               jobID,
 		PullTotalBytes:      p.TotalBytes,

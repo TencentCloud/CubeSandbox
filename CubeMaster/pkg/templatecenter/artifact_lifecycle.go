@@ -7,19 +7,43 @@ package templatecenter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/tcclient"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-var cleanupLocalRootfsArtifactForLifecycle = cleanupLocalRootfsArtifact
+// requestTemplateCenterArtifactDelete asks CubeTemplateCenter to remove an
+// artifact's data (S3 object, local/shared ext4 file) and its own copy of the
+// row. This is a seam so tests can stub the network call.
+//
+// Boundary: CubeMaster never touches the filesystem or S3 for an artifact
+// directly -- only TC, which wrote the data, is allowed to remove it (see
+// CubeTemplateCenter/pkg/build/deleter.go). If this call fails (TC down,
+// network error), the caller must leave the row CLEANUP_PENDING; TC's own
+// reconciler sweeps CLEANUP_PENDING rows as a backstop, so nothing is
+// permanently orphaned as long as the row survives.
+var requestTemplateCenterArtifactDelete = func(ctx context.Context, artifactID string) error {
+	endpoint := ""
+	if cfg := config.GetConfig(); cfg != nil {
+		endpoint = cfg.TemplateCenterAddr()
+	}
+	if endpoint == "" {
+		return fmt.Errorf("template center endpoint is not configured")
+	}
+	callCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return tcclient.NewClient(endpoint).DeleteArtifact(callCtx, artifactID)
+}
 
 // countArtifactReferencesTx counts the live references to artifactID inside the
 // given transaction: surviving template replicas, active (PENDING/RUNNING)
@@ -113,8 +137,14 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 			return err
 		}
 		if excludeTemplateID != "" {
+			// Rows with cleanup_required=true are kept: their cubelet-side
+			// cleanup failed earlier in the delete flow and the orphan-replica
+			// sweep retries it using the row's node identity. Deleting them
+			// here would lose the only durable record that the node still
+			// holds the template's data (same filter as
+			// cleanupTemplateMetadata).
 			if err := tx.Unscoped().Table(constants.TemplateReplicaTableName).
-				Where("template_id = ? AND artifact_id = ?", excludeTemplateID, artifactID).
+				Where("template_id = ? AND artifact_id = ? AND cleanup_required = ?", excludeTemplateID, artifactID, false).
 				Delete(&models.TemplateReplica{}).Error; err != nil {
 				return err
 			}
@@ -180,7 +210,17 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 	}
 
 	// ── Phase 3 ──────────────────────────────────────────────────────────────
-	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	// CubeMaster no longer removes the ext4 file or the artifact row itself
+	// here: only CubeTemplateCenter (which wrote the S3 object and the local
+	// file) is allowed to do that (see requestTemplateCenterArtifactDelete).
+	// Doing it here used to hard-delete the row in the SAME transaction that
+	// removed the local file WITHOUT ever telling TC to delete the S3
+	// object, so the S3 object leaked forever: there was no CLEANUP_PENDING
+	// row left for TC's reconciler backstop to sweep. Phase 3 now only drops
+	// Master's own bookkeeping (placement rows) and leaves the artifact row
+	// as CLEANUP_PENDING for the notify-then-backstop flow below.
+	var finalized bool
+	if err := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var artifact models.RootfsArtifact
 		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Table(constants.RootfsArtifactTableName).
@@ -207,30 +247,34 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 		// NOT clobber that build's status (reverting to READY would expose a row
 		// pointing at the files we just deleted). Back off and let the build /
 		// GC converge.
-		canFinalize, err := cleanupMasterLocalArtifactForFinalDelete(artifact, remaining)
-		if err != nil {
-			logger.Warnf("artifact cleanup: master-local ext4 removal failed: %v", err)
-			return nil
-		}
-		if !canFinalize {
+		if remaining > 0 || artifact.Status != ArtifactStatusCleanupPending {
 			return nil
 		}
 		if err := deleteArtifactNodePlacementsTx(tx, artifactID); err != nil {
 			return err
 		}
-		return tx.Unscoped().Table(constants.RootfsArtifactTableName).
-			Where("artifact_id = ?", artifactID).Delete(&models.RootfsArtifact{}).Error
-	})
+		finalized = true
+		return nil
+	}); err != nil {
+		return err
+	}
+	if !finalized {
+		return nil
+	}
+	notifyTemplateCenterArtifactDelete(ctx, artifactID)
+	return nil
 }
 
-func cleanupMasterLocalArtifactForFinalDelete(artifact models.RootfsArtifact, remaining int64) (bool, error) {
-	if remaining > 0 || artifact.Status != ArtifactStatusCleanupPending {
-		return false, nil
+// notifyTemplateCenterArtifactDelete is the post-finalize step of
+// cleanupArtifactFully: exactly one requestTemplateCenterArtifactDelete call
+// per finalized artifact, and only after phase 3 committed. A notify failure
+// is swallowed on purpose — the row stays CLEANUP_PENDING and TC's reconciler
+// backstop-sweeps it later, so template deletion must not fail over it.
+func notifyTemplateCenterArtifactDelete(ctx context.Context, artifactID string) {
+	if err := requestTemplateCenterArtifactDelete(ctx, artifactID); err != nil {
+		log.G(ctx).WithFields(map[string]any{"artifact_id": artifactID}).
+			Warnf("artifact cleanup: notify templatecenter to delete artifact failed (row stays CLEANUP_PENDING, TC reconciler will retry): %v", err)
 	}
-	if err := cleanupLocalRootfsArtifactForLifecycle(artifact.ArtifactID, artifact.Ext4Path); err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 // placementToNode resolves a placement row to a node with a usable host ip,

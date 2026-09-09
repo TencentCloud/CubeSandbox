@@ -325,6 +325,7 @@ var TemplateCommand = cli.Command{
 		TemplateCommitCommand,
 		TemplateCreateFromImageCommand,
 		TemplateRedoCommand,
+		TemplateMigrateCommand,
 		TemplateDeleteCommand,
 		TemplateSetAliasCommand,
 		TemplateStatusCommand,
@@ -681,6 +682,17 @@ type templateSetAliasRequest struct {
 	Alias string `json:"alias,omitempty"`
 }
 
+type templateMigrateRequest struct {
+	RequestID  string `json:"requestID,omitempty"`
+	TemplateID string `json:"template_id,omitempty"`
+}
+
+type templateMigrateResponse struct {
+	RequestID string                      `json:"requestID,omitempty"`
+	Ret       *types.Ret                  `json:"ret,omitempty"`
+	Job       *types.TemplateImageJobInfo `json:"job,omitempty"`
+}
+
 var TemplateSetAliasCommand = cli.Command{
 	Name:      "set-alias",
 	Usage:     "set, change, or clear the alias of an existing template",
@@ -991,7 +1003,7 @@ var TemplateRedoCommand = cli.Command{
 	Usage:     "redo a template on all, specific, or failed nodes",
 	ArgsUsage: "<template-id>",
 	Flags: []cli.Flag{
-		cli.StringFlag{Name: "template-id", Usage: "template id to redo"},
+		cli.StringFlag{Name: "template-id", Usage: "template id or alias to redo"},
 		cli.StringSliceFlag{Name: "node", Usage: "redo only the specified node id or host ip; repeat to specify multiple nodes"},
 		cli.BoolFlag{Name: "failed-only", Usage: "redo only failed nodes"},
 		cli.BoolFlag{Name: "wait", Usage: "deprecated: redo now waits by default; use --detach to opt out"},
@@ -1042,6 +1054,96 @@ var TemplateRedoCommand = cli.Command{
 		}
 		log.Printf("submitted redo job: job_id=%s template_id=%s\n", rsp.Job.JobID, rsp.Job.TemplateID)
 		return runImageJobWatch(c, rsp.Job.JobID)
+	},
+}
+
+var TemplateMigrateCommand = cli.Command{
+	Name:      "migrate",
+	Usage:     "submit one template migration job to TC and return job id",
+	ArgsUsage: "<template-id>",
+	Flags: []cli.Flag{
+		cli.StringFlag{Name: "template-id", Usage: "template id or alias to migrate"},
+		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
+	},
+	Subcommands: cli.Commands{
+		TemplateMigrateStatusCommand,
+		TemplateMigrateWatchCommand,
+	},
+	Action: func(c *cli.Context) error {
+		templateID := resolveTemplateID(c)
+		if templateID == "" {
+			return errors.New("template-id is required")
+		}
+		serverList = getServerAddrs(c)
+		if len(serverList) == 0 {
+			return errors.New("no server addr")
+		}
+		port = c.GlobalString("port")
+		host := serverList[rand.Int()%len(serverList)]
+		req := &templateMigrateRequest{RequestID: uuid.New().String(), TemplateID: templateID}
+		body, err := jsoniter.Marshal(req)
+		if err != nil {
+			return err
+		}
+		url := fmt.Sprintf("http://%s/cube/template/migrate", net.JoinHostPort(host, port))
+		rsp := &templateMigrateResponse{}
+		if err := doHttpReq(c, url, http.MethodPost, req.RequestID, bytes.NewBuffer(body), rsp); err != nil {
+			return err
+		}
+		if rsp.Ret == nil {
+			return errors.New("empty response")
+		}
+		if rsp.Ret.RetCode != 200 {
+			return errors.New(rsp.Ret.RetMsg)
+		}
+		if c.Bool("json") {
+			commands.PrintAsJSON(rsp)
+			return nil
+		}
+		printTemplateImageJob(rsp.Job)
+		return nil
+	},
+}
+
+var TemplateMigrateStatusCommand = cli.Command{
+	Name:  "status",
+	Usage: "show migrate job status",
+	Flags: []cli.Flag{
+		cli.StringFlag{Name: "job-id", Usage: "migrate job id"},
+		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
+	},
+	Action: func(c *cli.Context) error {
+		jobID := strings.TrimSpace(c.String("job-id"))
+		if jobID == "" {
+			return errors.New("job-id is required")
+		}
+		rsp, err := fetchTemplateMigrateJob(c, jobID)
+		if err != nil {
+			return err
+		}
+		if c.Bool("json") {
+			commands.PrintAsJSON(rsp)
+			return nil
+		}
+		printTemplateImageJob(rsp.Job)
+		return nil
+	},
+}
+
+var TemplateMigrateWatchCommand = cli.Command{
+	Name:  "watch",
+	Usage: "watch migrate job progress until completion",
+	Flags: []cli.Flag{
+		cli.StringFlag{Name: "job-id", Usage: "migrate job id"},
+		cli.DurationFlag{Name: "interval", Value: 2 * time.Second, Usage: "poll interval"},
+		cli.BoolFlag{Name: "json", Usage: "print final raw json response"},
+	},
+	Action: func(c *cli.Context) error {
+		jobID := strings.TrimSpace(c.String("job-id"))
+		if jobID == "" {
+			return errors.New("job-id is required")
+		}
+		return runTemplateMigrateWatch(c, jobID)
 	},
 }
 
@@ -1301,6 +1403,62 @@ func fetchTemplateImageJob(c *cli.Context, jobID string) (*templateImageJobRespo
 		return nil, errors.New(rsp.Ret.RetMsg)
 	}
 	return rsp, nil
+}
+
+func fetchTemplateMigrateJob(c *cli.Context, jobID string) (*templateMigrateResponse, error) {
+	serverList = getServerAddrs(c)
+	if len(serverList) == 0 {
+		return nil, errors.New("no server addr")
+	}
+	port = c.GlobalString("port")
+	requestID := uuid.New().String()
+	host := serverList[rand.Int()%len(serverList)]
+	url := fmt.Sprintf("http://%s/cube/template/migrate?job_id=%s", net.JoinHostPort(host, port), jobID)
+	rsp := &templateMigrateResponse{}
+	if err := doHttpReq(c, url, http.MethodGet, requestID, nil, rsp); err != nil {
+		return nil, err
+	}
+	if rsp.Ret == nil {
+		return nil, errors.New("empty response")
+	}
+	if rsp.Ret.RetCode != 200 {
+		return nil, errors.New(rsp.Ret.RetMsg)
+	}
+	return rsp, nil
+}
+
+func runTemplateMigrateWatch(c *cli.Context, jobID string) error {
+	interval := c.Duration("interval")
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	for {
+		rsp, err := fetchTemplateMigrateJob(c, jobID)
+		if err != nil {
+			return err
+		}
+		job := rsp.Job
+		if c.Bool("json") {
+			commands.PrintAsJSON(rsp)
+		} else {
+			printTemplateImageJobWatchLine(job)
+		}
+		if job != nil && (job.Status == "READY" || job.Status == "FAILED") {
+			if c.Bool("json") {
+				commands.PrintAsJSON(rsp)
+			} else {
+				printTemplateImageJobCompletionSummary(job)
+			}
+			if job.Status == "FAILED" {
+				if strings.TrimSpace(job.ErrorMessage) != "" {
+					return errors.New(job.ErrorMessage)
+				}
+				return errors.New("migrate job failed")
+			}
+			return nil
+		}
+		time.Sleep(interval)
+	}
 }
 
 func printTemplateImageJob(job *types.TemplateImageJobInfo) {

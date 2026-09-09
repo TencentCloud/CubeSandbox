@@ -107,8 +107,8 @@ ENVD_LOCAL_PATH=/abs/path/to/envd \
 
 这个入口会先：
 
-- 通过根目录 builder 镜像在容器内编译 `cubemaster`、`cubemastercli`、`cubelet`、`cubecli`、`cube-api`、`cube-agent`、`containerd-shim-cube-rs`、`cube-runtime`；network runtime 已内置到 `cubelet`，不再构建独立网络运行时二进制
-- 在 builder 内对 `CubeMaster`、`Cubelet` 执行 `go mod download`，首次构建会在线拉取 Go modules，后续复用 builder HOME 下的模块缓存
+- 通过根目录 builder 镜像在容器内编译 `cubemaster`、`cubemastercli`、`templatecenter`、`cubelet`、`cubecli`、`cube-api`、`cube-agent`、`containerd-shim-cube-rs`、`cube-runtime`；network runtime 已内置到 `cubelet`，不再构建独立网络运行时二进制
+- 在 builder 内对 `CubeMaster`、`CubeTemplateCenter`、`Cubelet` 执行 `go mod download`，首次构建会在线拉取 Go modules，后续复用 builder HOME 下的模块缓存
 - 将预编译产物落到 `deploy/one-click/.work/prebuilt/`
 - 回到宿主机调用 `build-release-bundle.sh`，构建 WebUI 静态资源，继续 guest image 和最终打包
 

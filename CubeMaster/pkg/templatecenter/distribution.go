@@ -140,34 +140,70 @@ func cleanupTemplateReplicasOnNodes(ctx context.Context, templateID string, repl
 }
 
 func distributeRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {
-	// Defense-in-depth: refuse to push a CreateImage to cubelets when the
-	// artifact record is obviously incomplete. Without this guard the call
-	// proceeds with ext4_size_bytes=0 / download_token=""; cubelet then
-	// tries to pull with an empty token against a URL that falls back to
-	// os.Hostname() (buildDownloadURL) and reports "invalid size:0", which
-	// marks the template FAILED and masks the real cause (concurrent build
-	// race; see artifactBuildLocks). Fail here with a clear diagnostic
-	// instead.
+	if err := ensureArtifactDistributable(ctx, artifact); err != nil {
+		return nil, 0, 0, 0, err
+	}
+	targets, err := resolveTemplateNodes(req.InstanceType, req.DistributionScope)
+	if err != nil {
+		return nil, 0, 0, 0, err
+	}
+	return distributeRootfsArtifactToNodes(ctx, req, generatedReq, artifact, templateID, jobID, targets)
+}
+
+// ensureArtifactDistributable refuses to push a CreateImage to cubelets when
+// the artifact record is obviously incomplete. Without this guard the call
+// proceeds with ext4_size_bytes=0 / download_token=""; cubelet then tries to
+// pull with an empty token against a URL that falls back to os.Hostname()
+// (buildDownloadURL) and reports "invalid size:0", which marks the template
+// FAILED and masks the real cause (concurrent build race; see
+// artifactBuildLocks). Fail here with a clear diagnostic instead.
+func ensureArtifactDistributable(ctx context.Context, artifact *models.RootfsArtifact) error {
 	if artifact == nil {
-		return nil, 0, 0, 0, fmt.Errorf("distributeRootfsArtifact: artifact is nil")
+		return fmt.Errorf("distributeRootfsArtifact: artifact is nil")
 	}
 	if artifact.Status != ArtifactStatusReady || artifact.Ext4SizeBytes == 0 || strings.TrimSpace(artifact.Ext4SHA256) == "" || strings.TrimSpace(artifact.DownloadToken) == "" || strings.TrimSpace(artifact.MasterNodeIP) == "" {
-		return nil, 0, 0, 0, fmt.Errorf(
+		return fmt.Errorf(
 			"artifact %s is not ready for distribution (status=%s size_bytes=%d sha256_set=%t token_set=%t master_node_ip=%q); template build likely did not complete — check cubemaster logs for buildRootfsArtifact errors",
 			artifact.ArtifactID, artifact.Status, artifact.Ext4SizeBytes,
 			strings.TrimSpace(artifact.Ext4SHA256) != "", strings.TrimSpace(artifact.DownloadToken) != "", artifact.MasterNodeIP,
 		)
 	}
-	targets, err := resolveTemplateNodes(req.InstanceType, req.DistributionScope)
-	if err != nil {
-		return nil, 0, 0, 0, err
+	// The five checks above only read the artifact row. A row can be perfectly
+	// READY while the ext4 it points at is not servable — either because the
+	// artifact store did not survive a restart (issue #852) or because the
+	// store is node-local and the pull would land on a node that never had
+	// the file (issue #1005). Distributing either way hands every cubelet a
+	// download URL that can only 404 or serve a stale file, so fail here with
+	// the drift spelled out instead of collecting N identical per-node sha256
+	// mismatches.
+	//
+	// Where the file lives depends on the topology: in the standalone-TC
+	// architecture it is ALWAYS in the CubeTemplateCenter tier (CubeMaster's
+	// disk holds nothing), so verifyArtifactServability probes the download
+	// URL a cubelet would use rather than this process's disk.
+	return verifyArtifactServability(ctx, artifact)
+}
+
+// distributeRootfsArtifactToNodes is distributeRootfsArtifact with an
+// explicit target set, so the replica-backfill sweep can push an artifact to
+// exactly the nodes that lack a READY replica instead of re-resolving the
+// full healthy-node set. Callers must run ensureArtifactDistributable first.
+func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node) ([]*node.Node, int32, int32, int32, error) {
+	// S3-backed artifacts get a FRESH presigned URL here, not the one stored
+	// at build time: the stored signature expires (7d) while the artifact
+	// lives on, and this distribution may be a redo / scale-out / re-push
+	// long after the build. artifactDownloadURL re-signs when this process
+	// holds the S3 credentials and otherwise falls back to the stored URL.
+	downloadURL := artifactDownloadURL(ctx, artifact)
+	if downloadURL == "" {
+		downloadURL = buildDownloadURL(artifact.MasterNodeIP, artifact.ArtifactID, artifact.DownloadToken)
 	}
 	spec := &imagev1.ImageSpec{
 		Image:        artifact.ArtifactID,
 		StorageMedia: imagev1.ImageStorageMediaType_ext4.String(),
 		Annotations: map[string]string{
 			constants.CubeAnnotationRootfsArtifactID:        artifact.ArtifactID,
-			constants.CubeAnnotationRootfsArtifactURL:       buildDownloadURL(artifact.MasterNodeIP, artifact.ArtifactID, artifact.DownloadToken),
+			constants.CubeAnnotationRootfsArtifactURL:       downloadURL,
 			constants.CubeAnnotationRootfsArtifactToken:     artifact.DownloadToken,
 			constants.CubeAnnotationRootfsArtifactSHA256:    artifact.Ext4SHA256,
 			constants.CubeAnnotationRootfsArtifactSizeBytes: strconv.FormatInt(artifact.Ext4SizeBytes, 10),

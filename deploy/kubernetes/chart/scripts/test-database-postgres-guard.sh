@@ -156,6 +156,11 @@ grep -q 'driver: "postgres"' "$TMP_DIR/pg.yaml" || {
   echo "postgres render missing driver: postgres in CubeMaster config" >&2
   exit 1
 }
+# TODO: this only checks that driver: "postgres" appears somewhere in the
+# combined multi-doc render; it does not isolate the templatecenter Secret
+# document the way extract_component_doc does for ops/api below. A regression
+# that hardcodes CubeTemplateCenter's own driver to mysql while CubeMaster's
+# stays correct would slip through this guard.
 extract_component_doc ops "$TMP_DIR/pg.yaml" "$TMP_DIR/pg-ops.yaml"
 grep -q 'name: DATABASE_URL' "$TMP_DIR/pg-ops.yaml" || {
   echo "postgres render missing DATABASE_URL for CubeOps" >&2

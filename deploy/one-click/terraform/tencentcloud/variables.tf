@@ -322,6 +322,34 @@ variable "cube_lifecycle_manager_image" {
   type        = string
   default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.7.0"
 }
+
+variable "templatecenter_image" {
+  description = "Full cube-templatecenter image override."
+  type        = string
+  default     = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-templatecenter:v0.7.0"
+}
+
+variable "templatecenter_enabled" {
+  description = "DEPRECATED, must stay true: CubeTemplateCenter is mandatory (CubeMaster has no in-process build fallback) and now deploys unconditionally with the addons. The variable remains only so existing tfvars keep parsing."
+  type        = bool
+  default     = true
+
+  validation {
+    condition     = var.templatecenter_enabled
+    error_message = "templatecenter_enabled=false is no longer supported: CubeMaster cannot build templates in-process, so disabling CubeTemplateCenter breaks every template build. Remove the variable; TC deploys unconditionally."
+  }
+}
+
+variable "templatecenter_replicas" {
+  description = "CubeTemplateCenter replica count. Increase for higher build throughput. Values > 1 require use_cfs=true: replicas coordinate duplicate builds of the same spec through DB session locks, but the artifact store must be the shared NFS export for every replica (and every cube-master) to see every ext4. With the default node-local hostPath store a second replica could neither read the first one's files nor take over its builds, and the templatecenter deployment's lifecycle precondition fails the plan in that combination."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.templatecenter_replicas >= 1 && floor(var.templatecenter_replicas) == var.templatecenter_replicas
+    error_message = "templatecenter_replicas must be an integer >= 1."
+  }
+}
 # Per-component replica counts. All four default to 1 in env.example / variables.tf
 # and are independently tunable via -var / TF_VAR_* / the TENCENTCLOUD_*_REPLICAS
 # env knobs wired by create.sh.

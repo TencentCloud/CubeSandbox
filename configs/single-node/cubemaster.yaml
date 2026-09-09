@@ -14,6 +14,21 @@ common:
   collect_metric_interval: 1s
   default_headless_service_nodes_num: 1
   enable_check_com_net_id_param: false
+  # CubeMaster no longer builds templates in-process: every template-from-image
+  # build is forwarded to the standalone CubeTemplateCenter process. There is
+  # no local fallback and no "templatecenter_enabled" switch anymore -- a
+  # template build fails outright if CubeTemplateCenter is unreachable.
+  #
+  # CubeTemplateCenter's address is deliberately NOT a key here: it is a
+  # deployment fact, so CubeMaster reads it from the CUBE_TEMPLATE_CENTER_ADDR
+  # environment variable (the counterpart of CUBE_MASTER_ADDR, which TC uses to
+  # call back). cubemaster-start.sh already exports CUBE_TEMPLATE_CENTER_ADDR
+  # with a default of http://127.0.0.1:8090, and the TC unit
+  # (cube-sandbox-cube-templatecenter.service) is part of the default
+  # control-plane target, so template builds work out of the box.
+  #   * (optional) override CUBE_TEMPLATE_CENTER_ADDR in
+  #     /usr/local/services/cubetoolbox/.one-click.env for a split deployment.
+  # TC reports build status back over http://127.0.0.1:8089.
 
 log:
   module: "cubemaster"

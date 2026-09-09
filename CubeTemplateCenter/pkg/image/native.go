@@ -211,6 +211,10 @@ func StreamRegistryToDir(ctx context.Context, source *PreparedSource, destDir st
 	}
 	defer os.RemoveAll(prefetchDir)
 
+	// Layer cache (optional): shared blobs across related images are served
+	// from local disk instead of re-downloading. Nil when disabled.
+	cache := getLayerCache(ctx)
+
 	jobs := nativeExportConcurrency()
 	sem := make(chan struct{}, jobs)
 
@@ -239,19 +243,43 @@ func StreamRegistryToDir(ctx context.Context, source *PreparedSource, destDir st
 			}
 			defer func() { <-sem }()
 
-			rc, err := layer.Compressed()
-			if err != nil {
-				err = fmt.Errorf("failed to open compressed stream for layer %d: %w", layerIdx, err)
-				fetches[layerIdx].err = err
-				close(fetches[layerIdx].done)
-				return err
+			// Resolve the layer's digest for the content-addressed cache. Layers
+			// are shared across images, so caching by digest lets repeated builds
+			// of related images skip the network entirely for shared blobs.
+			digest, derr := layer.Digest()
+			var cacheKey string
+			if derr == nil {
+				cacheKey = digest.String()
+			}
+
+			// Try the layer cache first: a hit means we copy from local disk
+			// instead of downloading from the registry.
+			var src io.ReadCloser
+			fromCache := false
+			if cache != nil && cacheKey != "" {
+				if rc, _, err := cache.Get(egCtx, cacheKey); err == nil && rc != nil {
+					src = rc
+					fromCache = true
+				}
+			}
+
+			if src == nil {
+				// Cache miss (or cache disabled): open the network stream.
+				rc, err := layer.Compressed()
+				if err != nil {
+					err = fmt.Errorf("failed to open compressed stream for layer %d: %w", layerIdx, err)
+					fetches[layerIdx].err = err
+					close(fetches[layerIdx].done)
+					return err
+				}
+				src = rc
 			}
 			var closeOnce sync.Once
-			closeRC := func() { closeOnce.Do(func() { _ = rc.Close() }) }
-			defer closeRC()
+			closeSrc := func() { closeOnce.Do(func() { _ = src.Close() }) }
+			defer closeSrc()
 
 			// Bridge context to explicitly abort network read if context cancels early.
-			stopWatch := context.AfterFunc(egCtx, closeRC)
+			stopWatch := context.AfterFunc(egCtx, closeSrc)
 			defer stopWatch()
 
 			f, err := os.CreateTemp(prefetchDir, fmt.Sprintf("layer-%03d-*.tar", layerIdx))
@@ -267,15 +295,30 @@ func StreamRegistryToDir(ctx context.Context, source *PreparedSource, destDir st
 			defer nativeCopyBufferPool.Put(buf)
 
 			pr := &progressReader{
-				Reader: rc,
+				Reader: src,
 				onRead: func(n int) {
 					atomic.AddInt64(&downloadedBytes, int64(n))
 					reportProgress(false)
 				},
 			}
 
-			if _, err := io.CopyBuffer(f, pr, buf); err != nil {
+			// On a cache miss, tee the stream into the cache as we write the
+			// prefetch file, so the next build of a related image hits the cache.
+			// On a hit we skip re-caching (the blob is already there).
+			var writers []io.Writer
+			writers = append(writers, f)
+			var cacheWriter *layerCacheTeeWriter
+			if !fromCache && cache != nil && cacheKey != "" {
+				cacheWriter = newLayerCacheTeeWriter(egCtx, cache, cacheKey)
+				writers = append(writers, cacheWriter)
+			}
+			dest := io.MultiWriter(writers...)
+
+			if _, err := io.CopyBuffer(dest, pr, buf); err != nil {
 				_ = f.Close()
+				if cacheWriter != nil {
+					cacheWriter.Abort()
+				}
 				if ctxErr := egCtx.Err(); ctxErr != nil {
 					err = fmt.Errorf("failed to download layer %d: %v (context canceled: %w)", layerIdx, err, ctxErr)
 				} else {
@@ -287,10 +330,21 @@ func StreamRegistryToDir(ctx context.Context, source *PreparedSource, destDir st
 			}
 
 			if err := f.Close(); err != nil {
+				if cacheWriter != nil {
+					cacheWriter.Abort()
+				}
 				err = fmt.Errorf("failed to close temp file for layer %d: %w", layerIdx, err)
 				fetches[layerIdx].err = err
 				close(fetches[layerIdx].done)
 				return err
+			}
+
+			// Commit the cache entry (tmp -> final rename) now that the layer is
+			// fully written. Failure only loses this caching opportunity.
+			if cacheWriter != nil {
+				if err := cacheWriter.Commit(); err != nil {
+					log.G(egCtx).Warnf("layer cache commit %s fail (build continues): %v", cacheKey, err)
+				}
 			}
 
 			atomic.AddInt32(&completedLayers, 1)
