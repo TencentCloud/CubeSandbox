@@ -89,4 +89,3 @@ web/tsconfig.tsbuildinfo
 
 # Local Helm runtime values (passwords / advertiseIP / TLS). Example is tracked.
 runtime-values.yaml
-temp_docs
