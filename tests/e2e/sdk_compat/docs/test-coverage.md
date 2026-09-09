@@ -97,10 +97,10 @@ covered yet.
 - expression result text;
 - stdout and stderr capture;
 - Python errors and syntax errors;
+- create-time env inheritance and temporary per-call env overrides, enabled with `SDK_E2E_RUN_CODE_ENV_INHERITANCE=true` for compatible templates;
 - stateful kernel variable preservation.
 
-These scenarios require Code Interpreter support and validate normalized
-`CodeResult` values rather than SDK-private response objects.
+These scenarios require Code Interpreter support and validate normalized `CodeResult` values rather than SDK-private response objects. The environment-inheritance case is skipped unless explicitly enabled because the default template may not provide that behavior.
 
 ### 2.5 Network
 

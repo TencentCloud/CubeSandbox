@@ -155,6 +155,7 @@ def pytest_configure(config: pytest.Config):
         "sandbox_create_options(**kwargs): SDK sandbox create options for this test",
         "sandbox_template_id(template_id): override template ID for this test or module",
         "requires_code_interpreter: test requires a stateful Code Interpreter kernel",
+        "requires_run_code_env_inheritance: test requires an opt-in template whose run_code inherits create-time envs",
         "requires_internet: test requires public internet access from the sandbox",
         "requires_cubeproxy: test requires CubeProxy routing to the sandbox",
         "auth: CUBE_API_KEY simple-key authentication control-plane tests",
@@ -385,6 +386,15 @@ def sdk_sandbox(
                 f"backend {sdk_backend!r} does not support stateful Code Interpreter"
             )
 
+    if (
+        request.node.get_closest_marker("requires_run_code_env_inheritance")
+        and not sdk_e2e_config.run_code_env_inheritance_enabled
+    ):
+        pytest.skip(
+            "run_code env inheritance requires "
+            "SDK_E2E_RUN_CODE_ENV_INHERITANCE=true and a compatible template"
+        )
+
     if request.node.get_closest_marker("requires_cubeproxy") and not sdk_e2e_config.platform_lifecycle_enabled:
         pytest.skip(
             "platform lifecycle tests require SDK_E2E_PLATFORM_LIFECYCLE=true "
@@ -586,6 +596,9 @@ def _log_effective_environment(cfg: SdkE2EConfig) -> None:
         "CUBE_PROXY_NODE_IP": cfg.cube_proxy_node_ip,
         "CUBE_PROXY_PORT_HTTP": str(cfg.cube_proxy_port_http),
         "CUBE_SANDBOX_DOMAIN": cfg.cube_sandbox_domain,
+        "SDK_E2E_RUN_CODE_ENV_INHERITANCE": str(
+            cfg.run_code_env_inheritance_enabled
+        ).lower(),
         "SDK_E2E_PLATFORM_LIFECYCLE": str(cfg.platform_lifecycle_enabled).lower(),
         "SDK_E2E_VOLUME_PLUGIN": str(cfg.volume_plugin_enabled).lower(),
         "SDK_E2E_VOLUME_DRIVER": cfg.volume_driver,

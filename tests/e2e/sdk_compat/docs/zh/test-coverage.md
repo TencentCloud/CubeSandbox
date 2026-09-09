@@ -87,10 +87,10 @@ pytest --run-e2e -m "lifecycle and slow"
 - 表达式结果文本；
 - stdout 与 stderr 捕获；
 - Python 错误和语法错误；
+- 创建时环境变量继承与临时 per-call env 覆盖，仅在兼容 template 上设置 `SDK_E2E_RUN_CODE_ENV_INHERITANCE=true` 时启用；
 - stateful kernel 变量保留。
 
-这些场景要求 Code Interpreter 能力。它们验证的是框架归一化后的 `CodeResult`，
-而非单个 SDK 的内部响应格式。
+这些场景要求 Code Interpreter 能力。它们验证的是框架归一化后的 `CodeResult`，而非单个 SDK 的内部响应格式。环境变量继承用例默认跳过，因为默认 template 不一定提供该行为，必须显式开启。
 
 ### 2.5 Network
 
