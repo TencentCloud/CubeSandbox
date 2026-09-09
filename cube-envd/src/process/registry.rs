@@ -15,8 +15,8 @@ use super::{
     fanout::{OutputFanout, OutputSubscription},
     model::{
         config_to_proto, EndEvent, ProcessEvent, ProcessHandle, ProcessInput, ProcessRegistry,
-        Selector, StartOptions, TerminalRecord, SHUTDOWN_GRACE, TERMINAL_CACHE_LIMIT,
-        TERMINAL_CACHE_TTL,
+        Selector, StartOptions, TerminalRecord, EVENT_CHILD_FLUSH_GRACE, SHUTDOWN_GRACE,
+        TERMINAL_CACHE_LIMIT, TERMINAL_CACHE_TTL,
     },
     stream::{
         end_event, parse_pty_size, pipe_command, process_cwd, pty_command, pty_end_event,
@@ -126,13 +126,25 @@ impl ProcessRegistry {
         self.bind_tag_reservation(options.tag.as_deref(), pid).await;
         self.remove_terminal_for(pid, options.tag.as_deref()).await;
 
-        let stdout_reader = spawn_reader(stdout, fanout.clone(), true);
-        let stderr_reader = spawn_reader(stderr, fanout.clone(), false);
+        let mut stdout_reader = spawn_reader(stdout, fanout.clone(), true);
+        let mut stderr_reader = spawn_reader(stderr, fanout.clone(), false);
         let registry = self.clone();
         tokio::spawn(async move {
             let status = child.wait().await;
-            let _ = stdout_reader.await;
-            let _ = stderr_reader.await;
+
+            // 排空已写入的输出再发 End：正常退出时子进程是写端唯一持有者，
+            // 退出即 EOF，宽限内完成；孙进程仍持有写端（如 `sleep 300 &`）时
+            // 超时——封住输出并中断 reader，让 End 及时发出而非无限挂起。
+            let drain = async {
+                let _ = (&mut stdout_reader).await;
+                let _ = (&mut stderr_reader).await;
+            };
+            if time::timeout(EVENT_CHILD_FLUSH_GRACE, drain).await.is_err() {
+                fanout.seal();
+                stdout_reader.abort();
+                stderr_reader.abort();
+            }
+
             let end = end_event(status);
             let event = ProcessEvent::End(end);
             fanout.send(event.clone()).await;
@@ -209,7 +221,7 @@ impl ProcessRegistry {
         }
         self.remove_terminal_for(pid, tag.as_deref()).await;
 
-        let pty_reader = spawn_pty_reader(reader, fanout.clone());
+        let mut pty_reader = spawn_pty_reader(reader, fanout.clone());
         let registry = self.clone();
         tokio::spawn(async move {
             let end = match tokio::task::spawn_blocking(move || child.wait()).await {
@@ -227,7 +239,17 @@ impl ProcessRegistry {
                     error: Some(error.to_string()),
                 },
             };
-            let _ = pty_reader.await;
+
+            // 与普通 reaper 相同的宽限语义：孙进程持有 PTY slave 时 master
+            // 读端不会 EIO，宽限超时后封住输出并发出 End。
+            let drain = async {
+                let _ = (&mut pty_reader).await;
+            };
+            if time::timeout(EVENT_CHILD_FLUSH_GRACE, drain).await.is_err() {
+                fanout.seal();
+                pty_reader.abort();
+            }
+
             let event = ProcessEvent::End(end);
             fanout.send(event.clone()).await;
             registry.finish(handle, event).await;

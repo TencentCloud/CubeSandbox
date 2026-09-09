@@ -14,6 +14,12 @@ use super::fanout::OutputFanout;
 
 /// 限制每个进程事件订阅者队列可积压的事件数；满则投递挂起，背压到生产者。
 pub(super) const SUBSCRIBER_CAPACITY: usize = 8;
+/// 子进程被回收后等待输出管道排空的宽限。
+///
+/// 正常退出时子进程是管道写端的唯一持有者，退出即 EOF，reader 毫秒级
+/// 完成；只有孙进程仍持有写端时才会超时——超时后封住输出并发出 End，
+/// 避免 `sh -c 'sleep 300 & ...'` 这类命令把 End 无限拖住。
+pub(super) const EVENT_CHILD_FLUSH_GRACE: Duration = Duration::from_millis(500);
 /// 限制普通 stdout 和 stderr 单次读取的最大字节数。
 pub(super) const OUTPUT_CHUNK_BYTES: usize = 32 * 1024;
 /// 限制 PTY 单次阻塞读取的最大字节数。

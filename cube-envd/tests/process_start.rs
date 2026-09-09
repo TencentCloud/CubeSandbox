@@ -176,6 +176,56 @@ async fn process_start_preserves_request_environment_for_pipe_processes() {
         .any(|frame| { frame["event"]["data"]["stdout"] == "cmVxdWVzdC1lbnY=" }));
 }
 
+// 验证 Start 的结束事件在孙进程仍持有输出管道时也会及时送达。
+//
+// `sh -c 'sleep 30 & echo done'` 中 sleep 继承 stdout 管道写端，sh 退出后
+// 管道不 EOF——若无宽限机制 End 会被无限拖住（直到 sleep 退出或 SDK 超时）。
+// 断言 End 在远小于 sleep 时长内到达，且 stdout 的 "done" 未被截断。
+#[tokio::test]
+async fn process_start_publishes_end_promptly_when_a_grandchild_holds_the_pipe() {
+    let payload = json!({
+        "process": {
+            "cmd": "/bin/sh",
+            "args": ["-c", "sleep 30 & printf done"],
+            "envs": {}
+        },
+        "stdin": false
+    });
+    let response = router()
+        .oneshot(
+            Request::post("/process.Process/Start")
+                .header(CONTENT_TYPE, "application/connect+json")
+                .header("Connect-Protocol-Version", "1")
+                .header("Authorization", common::basic_auth_header())
+                .body(Body::from(
+                    encode_frame(0, payload.to_string().as_bytes()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        response.into_body().collect(),
+    )
+    .await
+    .expect("stream must end long before the grandchild sleep exits")
+    .unwrap()
+    .to_bytes();
+    let frames = split_frames(&bytes);
+
+    // "done" 输出保留（grace 内已 flush），End 存在，且流以结束帧收尾。
+    assert!(frames
+        .iter()
+        .any(|frame| frame["event"]["data"]["stdout"] == "ZG9uZQ=="));
+    assert!(frames
+        .iter()
+        .any(|frame| frame["event"]["end"]["exited"] == true));
+    assert_eq!(frames.last().unwrap(), &json!({"end": {}}));
+}
+
 // 将连续 Connect 帧拆分为普通事件或流结束 JSON 值。
 fn split_frames(bytes: &[u8]) -> Vec<Value> {
     let mut frames = Vec::new();
