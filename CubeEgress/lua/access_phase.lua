@@ -34,7 +34,8 @@
 --
 -- G5 is an allow-path authorization gate: if the sandbox connects to an
 -- original dst IP that proxy-side DNS does not return for the matched
--- Host/SNI, the request is denied before upstream proxying. G1/G4 stay scoped
+-- Host/SNI, the request is denied before upstream proxying. HTTPS Host rules
+-- also require Host == SNI, since upstream routing uses SNI. G1/G4 stay scoped
 -- to credential injection: a G4 mismatch on an otherwise allowed rule means we
 -- proxy the traffic upstream WITHOUT the secret, and tag the decision as a
 -- security_event.

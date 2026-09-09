@@ -110,9 +110,47 @@ curl --resolve bypass.blob.core.windows.net:80:203.0.113.66 \
 `security_event`，reason 例如 `g5_dst_ip_not_in_dns`，审计记录中
 也会包含 `dns_auth` 细节。
 
+此校验作用于已被导入 CubeEgress 的流量。CubeVS 先按原始 IP/端口
+分类，被其拒绝的连接不会到达此处，普通 SNAT 流量也不进入 L7 代理。
+
 默认情况下，CubeEgress 使用代理容器自己的 `/etc/resolv.conf`
 发现 resolver。运维侧也可以通过 `CUBE_EGRESS_DNS_RESOLVER_ADDRS`
 显式指定，格式为逗号或空白分隔的 IPv4 地址，可选 `:port`。
+
+resolver 必须由运维控制、在代理容器中可达，并与 sandbox 使用一致的
+DNS 视图。显式配置非法时拒绝请求；修改配置后需重载 worker。解析使用
+OpenResty cosocket 异步完成，不启动 shell，也不使用 guest 的
+`/etc/hosts`、NSS 或 DNS search suffix。目前数据平面与此校验只支持 IPv4。
+
+仅接受查询域名或其合法 CNAME 链所属的 A 记录，最多跟随 5 个别名，
+整个解析操作限时 5 秒。每个 worker 最多同时执行 16 个解析，相同域名
+的重叠请求（最多 256 个）共享一次解析，包括失败和 TTL=0 的结果。
+解析由 timer 持有，客户端断开不会导致解析槽无法释放。成功结果在 worker
+间共享缓存，采用 A/CNAME 链最短 TTL，上限 300 秒并扣除解析耗时；
+TTL=0 不缓存。缓存命中不发 DNS 请求。解析失败或并发容量耗尽均返回
+403，不继续匹配后面的 allow 规则。同域并发合并限于单个 worker，
+不同 worker 同时发生冷缓存未命中时仍可能各发起一次查询。
+
+HTTPS 规则只要包含 `host` 约束，就要求 Host 与 SNI 指向同一域名，
+否则以 `g5_host_sni_mismatch` 拒绝，即使该规则不注入凭据也一样。
+这是因为 HTTPS 上游 TLS 和转发的 Host 都使用 SNI。只约束 SNI 的规则
+仍以此上游身份授权；不含 `host` 或 `sni` 的规则保持原有行为。
+
+代理保留原始目的 IP 和端口，不将其替换为新解析出来的地址，否则必须
+重新执行新目的地的 L4/CIDR 策略。因此，CDN、分区 DNS 或 DNS 轮换时，
+guest 与代理获取不同 IP 集合可能导致正常请求被拒绝。DNS 归属不是
+证书、租户归属或私网 IP 校验：共享 IP、放行通配符范围内的攻击者可控
+子域名仍属于该通配符的授权范围，应保留上游 TLS 验证及相应目的地限制。
+
+仓库验证入口为 `make -C CubeEgress test-lua` 和
+`make -C CubeEgress test-dns-integration`。集成测试需要 Docker、
+Python 3 和宿主机 `openssl`，可通过 `OPENRESTY_TEST_IMAGE`、
+`PYTHON_TEST_IMAGE`、`CURL_TEST_IMAGE` 选择镜像来源。测试运行真实的
+access/audit 模块与代理 location，覆盖 DNS、TLS、curl 的
+`/etc/hosts` 和 `--resolve` 覆盖、TTL 与并发边界。策略存储和证书签发
+使用测试适配，直接 socket 代替 TPROXY，上游使用不同测试端口；因此
+不代表真实 guest、CubeVS/eBPF 拦截或生产补丁镜像验证完成。
+旧行为可通过 `python3 CubeEgress/tests/dns_auth_integration.py --baseline-ref <修复前提交>` 复现。
 
 ### 自定义 L7 端口
 

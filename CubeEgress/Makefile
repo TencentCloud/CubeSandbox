@@ -35,6 +35,10 @@ test-lua:
 		$$LUA_BIN tests/port_scheme_extra_test.lua && \
 		$$LUA_BIN tests/dns_auth_test.lua
 
+.PHONY: test-dns-integration
+test-dns-integration:
+	$(Q)python3 tests/dns_auth_integration.py
+
 .PHONY: build
 build:
 	$(call msg,BUILD IMAGE $(IMAGE_LOCAL):$(IMAGE_TAG)-$(ARCH))

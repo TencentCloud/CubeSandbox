@@ -8,10 +8,14 @@
 local _M = {}
 
 local RESOLV_CONF = "/etc/resolv.conf"
-local CACHE_TTL_MIN = 5
 local CACHE_TTL_MAX = 300
-
-local test_resolver
+local MAX_CNAME_HOPS = 5
+local LOOKUP_TIMEOUT = 5
+local MAX_INFLIGHT = 16
+local MAX_WAITERS = 256
+local configured_nameservers, configuration_error
+local cache_prefix
+local inflight, active_lookups = {}, 0
 
 local function lower(s)
     if type(s) ~= "string" then return nil end
@@ -40,9 +44,16 @@ local function parse_ipv4(s)
 end
 
 local function normalize_domain(name)
-    name = trim(name)
-    if not name or name == "" then return nil end
-    return string.gsub(lower(name), "%.$", "")
+    if type(name) ~= "string" then return nil end
+    name = string.gsub(lower(name), "%.$", "")
+    if #name == 0 or #name > 253 or string.find(name, "[^a-z0-9.%-]")
+        or string.find(name, "..", 1, true) then return nil end
+    for label in string.gmatch(name, "[^.]+") do
+        if #label > 63 or not string.match(label, "^[a-z0-9]")
+            or not string.match(label, "[a-z0-9]$") then return nil end
+    end
+    if string.sub(name, 1, 1) == "." or string.sub(name, -1) == "." then return nil end
+    return name
 end
 
 local function normalize_resolver_address(addr)
@@ -67,11 +78,12 @@ end
 
 local function append_nameserver(out, seen, ns)
     local normalized = normalize_resolver_address(ns)
-    if not normalized then return end
+    if not normalized then return false end
     local key = resolver_key(normalized)
-    if seen[key] then return end
+    if seen[key] then return true end
     seen[key] = true
     out[#out + 1] = normalized
+    return true
 end
 
 local function nameservers_from_env()
@@ -79,9 +91,11 @@ local function nameservers_from_env()
     if not raw or raw == "" then return nil end
     local out, seen = {}, {}
     for token in string.gmatch(raw, "[^,%s]+") do
-        append_nameserver(out, seen, token)
+        if not append_nameserver(out, seen, token) then
+            return nil, "invalid_proxy_dns_resolver"
+        end
     end
-    if #out == 0 then return nil end
+    if #out == 0 then return nil, "invalid_proxy_dns_resolver" end
     return out
 end
 
@@ -102,60 +116,101 @@ local function cache()
     return ngx and ngx.shared and ngx.shared.dns_auth_cache or nil
 end
 
+local function nameservers()
+    if not configured_nameservers and not configuration_error then
+        configured_nameservers, configuration_error = nameservers_from_env()
+        if not configured_nameservers and not configuration_error then
+            configured_nameservers = nameservers_from_resolv_conf()
+        end
+        if not configured_nameservers and not configuration_error then
+            configuration_error = "no_proxy_dns_resolver"
+        end
+        if configured_nameservers then
+            local keys = {}
+            for _, ns in ipairs(configured_nameservers) do keys[#keys + 1] = resolver_key(ns) end
+            -- Shared dictionaries survive reloads. A changed resolver view
+            -- must not inherit entries from the previous configuration.
+            cache_prefix = "dns-v2:" .. table.concat(keys, ",") .. ":"
+        end
+    end
+    return configured_nameservers, configuration_error
+end
+
 local function clamp_ttl(ttl)
-    ttl = tonumber(ttl) or CACHE_TTL_MIN
-    if ttl < CACHE_TTL_MIN then return CACHE_TTL_MIN end
+    ttl = tonumber(ttl) or 0
+    if ttl < 0 then return 0 end
     if ttl > CACHE_TTL_MAX then return CACHE_TTL_MAX end
     return math.floor(ttl)
 end
 
 local function resolve_ipv4s_uncached(name)
-    if test_resolver then return test_resolver(name) end
-
     local ok_lib, resolver_lib = pcall(require, "resty.dns.resolver")
     if not ok_lib or not resolver_lib then
         return nil, "resolver_module_unavailable:" .. tostring(resolver_lib)
     end
-    local nameservers = nameservers_from_env() or nameservers_from_resolv_conf()
-    if not nameservers then return nil, "no_proxy_dns_resolver" end
+    -- Resolver configuration is process-owned and read once per worker.
+    local servers, config_err = nameservers()
+    if not servers then return nil, config_err end
     local resolver, err = resolver_lib:new({
-        nameservers = nameservers,
+        nameservers = servers,
         retrans = 2,
         timeout = 2000,
     })
     if not resolver then return nil, "resolver_init_failed:" .. tostring(err) end
 
     local qname = name
-    local out, seen = {}, {}
+    local visited = {[name] = true}
     local min_ttl = CACHE_TTL_MAX
-    for _ = 1, 5 do
+    local hops = 0
+    while true do
         local answers, qerr = resolver:query(qname, {qtype = resolver.TYPE_A})
         if not answers then return nil, "dns_query_failed:" .. tostring(qerr) end
         if answers.errcode then return nil, "dns_rcode_" .. tostring(answers.errcode) end
 
-        local cname
-        for _, ans in ipairs(answers) do
-            if ans.address then
-                local ip = parse_ipv4(ans.address)
-                if ip and not seen[ip] then
-                    seen[ip] = true
-                    out[#out + 1] = ip
+        -- Accept only IN records owned by the queried name or its CNAME
+        -- chain. Unrelated answers must never authorize a destination.
+        while true do
+            local out, seen, cname = {}, {}, nil
+            for _, ans in ipairs(answers) do
+                if ans.section == 1 and ans.class == 1 and normalize_domain(ans.name) == qname then
+                    if ans.type == resolver.TYPE_A then
+                        local ip = parse_ipv4(ans.address)
+                        if not ip then return nil, "invalid_dns_address" end
+                        if not seen[ip] then out[#out + 1] = ip; seen[ip] = true end
+                        min_ttl = math.min(min_ttl, clamp_ttl(ans.ttl))
+                    elseif ans.type == resolver.TYPE_CNAME then
+                        local target = normalize_domain(ans.cname)
+                        if not target or (cname and cname ~= target) then
+                            return nil, "invalid_dns_cname"
+                        end
+                        cname = target
+                        min_ttl = math.min(min_ttl, clamp_ttl(ans.ttl))
+                    end
                 end
-                if ans.ttl then min_ttl = math.min(min_ttl, clamp_ttl(ans.ttl)) end
-            elseif ans.cname and not cname then
-                cname = normalize_domain(ans.cname)
-                if ans.ttl then min_ttl = math.min(min_ttl, clamp_ttl(ans.ttl)) end
             end
+            if #out > 0 then
+                if cname then return nil, "conflicting_dns_cname" end
+                return out, nil, min_ttl
+            end
+            if not cname then
+                if qname == name or visited[qname] == "queried" then
+                    return nil, "dns_no_a_records"
+                end
+                break
+            end
+            hops = hops + 1
+            if visited[cname] then return nil, "dns_cname_loop" end
+            if hops > MAX_CNAME_HOPS then return nil, "dns_cname_limit" end
+            visited[cname] = true
+            qname = cname
         end
-        if #out > 0 or not cname or cname == qname then break end
-        qname = cname
+        visited[qname] = "queried"
     end
-    return out, nil, clamp_ttl(min_ttl)
 end
 
-local function resolve_ipv4s(name)
+local function cached_ipv4s(name)
     local c = cache()
-    local list_key = "name:" .. name
+    local list_key = cache_prefix .. name
     if c then
         local cached = c:get(list_key)
         if cached and cached ~= "" then
@@ -166,13 +221,96 @@ local function resolve_ipv4s(name)
             return out
         end
     end
+end
 
-    local ips, err, ttl = resolve_ipv4s_uncached(name)
-    if not ips then return nil, err end
-    if c and #ips > 0 then
-        c:set(list_key, table.concat(ips, ","), ttl or CACHE_TTL_MIN)
+local function run_lookup(name, deadline)
+    -- The watchdog covers the entire CNAME chain, retries and TCP fallback,
+    -- not just one socket read. Cancelling the query releases its cosockets.
+    local started = ngx.now()
+    local query = ngx.thread.spawn(resolve_ipv4s_uncached, name)
+    local watchdog = ngx.thread.spawn(function()
+        ngx.sleep(math.max(0, deadline - ngx.now()))
+        return nil, "dns_deadline_exceeded"
+    end)
+    local ran, ips, err, ttl = ngx.thread.wait(query, watchdog)
+    ngx.thread.kill(query)
+    ngx.thread.kill(watchdog)
+    if not ran then ips, err = nil, "dns_query_exception" end
+
+    if ttl then ttl = math.max(0, ttl - (ngx.now() - started)) end
+    return ips, err, ttl
+end
+
+local function finish_lookup(name, pending, ips, err)
+    if inflight[name] ~= pending then return end
+    pending.ips, pending.err = ips, err
+    inflight[name] = nil
+    active_lookups = active_lookups - 1
+    if pending.waiters > 0 then pending.ready:post(pending.waiters) end
+end
+
+local function complete_lookup(premature, name, pending)
+    if inflight[name] ~= pending then return end
+    if premature or ngx.now() >= pending.deadline then
+        return finish_lookup(name, pending, nil, "dns_deadline_exceeded")
     end
-    return ips
+    local ran, ips, err, ttl
+    ran, ips, err, ttl = pcall(run_lookup, name, pending.deadline)
+    if not ran then ips, err = nil, "dns_query_exception" end
+    if inflight[name] ~= pending then return end
+    if ngx.now() >= pending.deadline then ips, err = nil, "dns_deadline_exceeded" end
+    local c = cache()
+    -- shared_dict uses millisecond expiry; a sub-millisecond TTL can round
+    -- down to its special "never expire" value.
+    if c and ips and #ips > 0 and ttl and ttl >= 0.001 then
+        c:set(cache_prefix .. name, table.concat(ips, ","), ttl)
+    end
+    finish_lookup(name, pending, ips, err)
+end
+
+local function resolve_ipv4s(name)
+    local servers, config_err = nameservers()
+    if not servers then return nil, config_err end
+    local cached = cached_ipv4s(name)
+    if cached then return cached end
+
+    -- A successfully registered timer can still be dropped if nginx cannot
+    -- allocate its fake connection. Reap independently of callback execution.
+    local now = ngx.now()
+    for key, item in pairs(inflight) do
+        if now >= item.deadline then
+            finish_lookup(key, item, nil, "dns_deadline_exceeded")
+        end
+    end
+
+    -- Timer ownership keeps shared work and slot cleanup alive even if the
+    -- initiating client disconnects. Results are retained only while in flight.
+    local pending = inflight[name]
+    if not pending then
+        if active_lookups >= MAX_INFLIGHT then return nil, "dns_concurrency_limit" end
+        local ready, sem_err = require("ngx.semaphore").new()
+        if not ready then return nil, "dns_semaphore_failed:" .. tostring(sem_err) end
+        pending = {ready = ready, waiters = 0, deadline = now + LOOKUP_TIMEOUT}
+        inflight[name] = pending
+        active_lookups = active_lookups + 1
+        local ok = ngx.timer.at(0, complete_lookup, name, pending)
+        if not ok then
+            inflight[name] = nil
+            active_lookups = active_lookups - 1
+            return nil, "dns_timer_unavailable"
+        end
+    end
+    if pending.waiters >= MAX_WAITERS then return nil, "dns_waiter_limit" end
+    pending.waiters = pending.waiters + 1
+    local ok = pending.ready:wait(math.max(0, pending.deadline - ngx.now()))
+    pending.waiters = pending.waiters - 1
+    if not ok then
+        if ngx.now() >= pending.deadline then
+            finish_lookup(name, pending, nil, "dns_deadline_exceeded")
+        end
+        return nil, "dns_deadline_exceeded"
+    end
+    return pending.ips, pending.err
 end
 
 local function list_contains(list, value)
@@ -186,7 +324,9 @@ local function verify_name(name, dst_ip)
     dst_ip = parse_ipv4(dst_ip)
     if not dst_ip then return false, "g5_missing_original_dst", {name = name} end
 
-    local literal = parse_ipv4(name)
+    local domain = normalize_domain(name)
+    if not domain then return false, "g5_missing_domain_identity", {name = name} end
+    local literal = parse_ipv4(domain)
     if literal then
         if literal == dst_ip then return true, nil, {name = name, ips = {literal}} end
         return false, "g5_ip_literal_mismatch", {
@@ -196,8 +336,6 @@ local function verify_name(name, dst_ip)
         }
     end
 
-    local domain = normalize_domain(name)
-    if not domain then return false, "g5_missing_domain_identity", {name = name} end
     local ips, err = resolve_ipv4s(domain)
     if not ips then
         return false, "g5_dns_resolve_failed", {
@@ -218,6 +356,15 @@ end
 
 function _M.verify_rule(match, ctx)
     if type(match) ~= "table" then return true end
+    -- HTTPS forwards SNI as Host and uses SNI for upstream verification.
+    -- A Host-constrained allow must authorize that same routing identity,
+    -- including on shared hosting where unrelated names resolve to one IP.
+    if ctx.scheme == "https" and match.host ~= nil then
+        local host, sni = normalize_domain(ctx.host), normalize_domain(ctx.sni)
+        if not host or not sni or host ~= sni then
+            return false, "g5_host_sni_mismatch", {host = ctx.host, sni = ctx.sni}
+        end
+    end
     local names = {}
     if match.host ~= nil then
         if not ctx.host or ctx.host == "" then
@@ -246,18 +393,6 @@ function _M.verify_rule(match, ctx)
         end
     end
     return true, nil, {checks = checked}
-end
-
-function _M._set_test_resolver(fn)
-    test_resolver = fn
-end
-
-function _M._parse_ipv4(s)
-    return parse_ipv4(s)
-end
-
-function _M._nameservers_from_resolv_conf(path)
-    return nameservers_from_resolv_conf(path)
 end
 
 return _M
