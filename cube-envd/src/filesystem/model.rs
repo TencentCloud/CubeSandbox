@@ -1,8 +1,4 @@
-use crate::{
-    connect::encode_frame,
-    generated::filesystem as proto,
-    wire,
-};
+use crate::{connect::encode_frame, generated::filesystem as proto, wire};
 
 /// 表示文件系统条目的 JSON 元数据。
 pub(super) struct EntryInfo {

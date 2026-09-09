@@ -108,7 +108,10 @@ async fn raw_upload_replaces_the_target_atomically_after_streaming() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(fs::read(&path).unwrap(), b"new content");
     // 覆盖上传必须保留目标原有的可执行权限位（此前会被临时文件的 0644 重置）。
-    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o751);
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o751
+    );
 }
 
 // 验证 multipart 上传在缺少查询路径时使用每个字段的文件名。

@@ -1,8 +1,4 @@
-use super::{
-    model::*,
-    registry::Subscription,
-    stream::*,
-};
+use super::{model::*, registry::Subscription, stream::*};
 
 #[path = "handlers.rs"]
 mod handlers;

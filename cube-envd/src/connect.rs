@@ -191,14 +191,17 @@ impl RpcError {
 impl IntoResponse for RpcError {
     /// 根据错误码选择 HTTP 状态并序列化错误主体。
     fn into_response(self) -> Response {
-        let status = self.status.unwrap_or_else(|| match self.code {
-            Code::InvalidArgument => StatusCode::BAD_REQUEST,
-            Code::NotFound => StatusCode::NOT_FOUND,
-            Code::Unauthenticated => StatusCode::UNAUTHORIZED,
-            Code::Unimplemented => StatusCode::NOT_IMPLEMENTED,
-            Code::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
-            Code::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-        });
+        let status = match self.status {
+            Some(status) => status,
+            None => match self.code {
+                Code::InvalidArgument => StatusCode::BAD_REQUEST,
+                Code::NotFound => StatusCode::NOT_FOUND,
+                Code::Unauthenticated => StatusCode::UNAUTHORIZED,
+                Code::Unimplemented => StatusCode::NOT_IMPLEMENTED,
+                Code::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
+                Code::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            },
+        };
         (
             status,
             Json(ErrorBody {

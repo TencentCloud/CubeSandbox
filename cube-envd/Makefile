@@ -35,9 +35,9 @@ build:
 install: build
 	install -D -m 0755 target/$(TRIPLE)/release/cube-envd "$(BINDIR)/cube-envd"
 
-##TARGET fmt: check formatting
+##TARGET fmt: format the crate sources in place
 fmt:
-	$(CARGO) fmt --check
+	$(CARGO) fmt
 
 ##TARGET lint: formatting and clippy
 lint:

@@ -1,6 +1,6 @@
+use crate::auth::LocalUser;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use crate::auth::LocalUser;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 /// 描述用户主目录展开时的安全性错误。

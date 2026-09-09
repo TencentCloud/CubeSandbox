@@ -1,6 +1,6 @@
-mod model;
 mod entries;
 mod error;
+mod model;
 
 pub mod files;
 mod routes;
