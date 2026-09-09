@@ -607,6 +607,15 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 	return s.cleanupTemplate(ctx, req, true)
 }
 
+// Test hooks so cleanupTemplate keep vs delete can run without cubecow.
+var (
+	getLocalSnapshotForFn      = storage.GetLocalSnapshotFor
+	cleanupIsCowBackend        = storage.IsCowBackend
+	cleanupReleaseS3Metadata   = storage.ReleaseS3MetadataVolume
+	cleanupObjectsFor          = storage.CleanupObjectsFor
+	cleanupTemplateLocalDataFn = storage.CleanupTemplateLocalData
+)
+
 // cleanupTemplate removes a catalog package. honorLivePauseKeep is true for
 // the Master RPC: Resume still needs the pause catalog (XFS mmap, S3
 // Snapshot last-restore), so a Cleanup of that snap while a live sandbox
@@ -644,10 +653,10 @@ func (s *service) cleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
-	entry, catErr := storage.GetLocalSnapshotFor(ctx, backend, rsp.TemplateID)
+	entry, catErr := getLocalSnapshotForFn(ctx, backend, rsp.TemplateID)
 	if errors.Is(catErr, storage.ErrSnapshotCatalogNotFound) {
 		if other := otherCowBackend(backend); other != backend {
-			if alt, altErr := storage.GetLocalSnapshotFor(ctx, other, rsp.TemplateID); altErr == nil {
+			if alt, altErr := getLocalSnapshotForFn(ctx, other, rsp.TemplateID); altErr == nil {
 				backend = other
 				entry = alt
 			}
@@ -669,11 +678,11 @@ func (s *service) cleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 	// they outlive a failed object sweep and a retry can pick up where this
 	// one stopped. Objects already gone count as cleaned, so a Resume that
 	// consumed the pause package still drops the dir here.
-	if storage.IsCowBackend() {
-		if err := storage.ReleaseS3MetadataVolume(ctx, backend, rsp.TemplateID); err != nil {
+	if cleanupIsCowBackend() {
+		if err := cleanupReleaseS3Metadata(ctx, backend, rsp.TemplateID); err != nil {
 			log.G(ctx).Warnf("CleanupTemplate %s: s3 metadata umount: %v", rsp.TemplateID, err)
 		}
-		if err := storage.CleanupObjectsFor(ctx, backend, refs); err != nil {
+		if err := cleanupObjectsFor(ctx, backend, refs); err != nil {
 			log.G(ctx).Warnf("CleanupTemplate %s: cubecow object cleanup, keeping package for retry: %v",
 				rsp.TemplateID, err)
 			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
@@ -681,7 +690,7 @@ func (s *service) cleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 			return rsp, nil
 		}
 	}
-	if err := storage.CleanupTemplateLocalData(ctx, rsp.TemplateID, snapshotPath); err != nil {
+	if err := cleanupTemplateLocalDataFn(ctx, rsp.TemplateID, snapshotPath); err != nil {
 		rerr, _ := ret.FromError(err)
 		if rerr == nil || rerr.Code() == 0 {
 			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown

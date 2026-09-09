@@ -281,7 +281,7 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 
 	out := &cubebox.RunCubeSandboxRequest{
 		RequestID:         req.RequestID,
-		Labels:            req.Labels,
+		Labels:            stripUserCubeMasterLabels(req.Labels),
 		InstanceType:      req.InstanceType,
 		NetworkType:       req.NetworkType,
 		Annotations:       make(map[string]string),
@@ -325,8 +325,12 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 		delete(out.Annotations, AnnotationPluginVolumeSources)
 	}
 	// Sync any annotations added by checkAndGetVolumes (e.g. plugin-volume-sources)
-	// into the outgoing RunCubeSandboxRequest.
+	// into the outgoing RunCubeSandboxRequest. Do not re-add keys
+	// checkAndGetAnnotation already dropped (pause / restore-base).
 	for k, v := range req.Annotations {
+		if rejectUserCubeMasterAnnotation(k) {
+			continue
+		}
 		if _, exists := out.Annotations[k]; !exists {
 			out.Annotations[k] = v
 		}
@@ -966,10 +970,10 @@ func setCreateTimeEnvVarsAnnotation(out map[string]string, envVars map[string]st
 	return nil
 }
 
-// rejectUserCubeMasterAnnotation drops Create annotations that only Master
-// or Cubelet may stamp. Forwarding them lets a client pin
-// cube.master.pause.snapshot.id on a running sandbox and make XFS
-// CleanupTemplate no-op for another tenant's pause catalog.
+// rejectUserCubeMasterAnnotation drops Create annotations (and the same
+// keys on Labels) that only Master or Cubelet may stamp. Forwarding them
+// lets a client pin cube.master.pause.snapshot.id on a running sandbox
+// and make CleanupTemplate no-op for another tenant's pause catalog.
 func rejectUserCubeMasterAnnotation(key string) bool {
 	switch strings.TrimSpace(key) {
 	case constants.CubeAnnotationPauseSnapshotID,
@@ -980,6 +984,22 @@ func rejectUserCubeMasterAnnotation(key string) bool {
 	default:
 		return false
 	}
+}
+
+// stripUserCubeMasterLabels copies user Labels without the platform keys
+// rejectUserCubeMasterAnnotation already drops from Annotations.
+func stripUserCubeMasterLabels(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if rejectUserCubeMasterAnnotation(k) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func getBlkQosAnnotation(req *types.CreateCubeSandboxReq) string {

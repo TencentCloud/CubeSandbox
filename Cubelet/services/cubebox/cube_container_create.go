@@ -228,7 +228,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		Metadata: cubeboxstore.Metadata{
 			ID:           flowOpts.SandboxID,
 			SandboxID:    flowOpts.SandboxID,
-			Labels:       deepCopyStringMap(realReq.GetLabels()),
+			Labels:       stripUserCubeMasterLabels(deepCopyStringMap(realReq.GetLabels())),
 			Annotations:  realReq.GetAnnotations(),
 			CreatedAt:    time.Now().UnixNano(),
 			InstanceType: flowOpts.GetInstanceType(),

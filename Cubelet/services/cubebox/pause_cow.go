@@ -93,10 +93,46 @@ func stampedPauseSnapshotID(sb *cubeboxstore.CubeBox) string {
 }
 
 func (s *service) listCubeboxes() []*cubeboxstore.CubeBox {
+	if listCubeboxesForTest != nil {
+		return listCubeboxesForTest()
+	}
 	if s == nil || s.cubeboxMgr == nil || s.cubeboxMgr.cubeboxManger == nil {
 		return nil
 	}
 	return s.cubeboxMgr.cubeboxManger.List()
+}
+
+// listCubeboxesForTest, when set, replaces the live CubeBox list so
+// cleanupTemplate keep/GC tests can run without a cubebox manager.
+var listCubeboxesForTest func() []*cubeboxstore.CubeBox
+
+// rejectUserCubeMasterLabel drops Create Labels that only Cubelet may
+// stamp after Resume / Pause. Master strips the same keys; this is the
+// Cubelet-side guard for cubecli-direct Create.
+func rejectUserCubeMasterLabel(key string) bool {
+	switch strings.TrimSpace(key) {
+	case constants.MasterAnnotationPauseSnapshotID,
+		constants.MasterAnnotationLaunchMemorySnapshotID,
+		constants.MasterAnnotationRuntimeRestoreSnapshotID,
+		constants.MasterAnnotationRuntimeRestoreSnapshotAttachedAt:
+		return true
+	default:
+		return false
+	}
+}
+
+func stripUserCubeMasterLabels(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if rejectUserCubeMasterLabel(k) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // keepLivePausePackage is true when Master's Resume-time CleanupTemplate
@@ -106,12 +142,13 @@ func (s *service) listCubeboxes() []*cubeboxstore.CubeBox {
 // PAUSED / EXITED / UNKNOWN do not hold a live restore, so DelPaused
 // and leftover GC still delete.
 //
-// Only Cubelet-stamped Labels count (not user Create annotations). Match
-// the current pause id or the restore-base: Pause overwrites the pause id
-// before the overlay finishes, so a delayed Cleanup of the previous package
-// must still see the mmap / incremental source. cleanupTemplate also
-// requires catalog Kind=pause_snapshot so a forged label cannot pin a
-// template or customer snap.
+// Only Cubelet-stamped Labels count (not user Create annotations or
+// Labels). Pin by restore-base, not pause id: Pause overwrites the pause
+// id before the overlay finishes, while restore-base still names the
+// previous package. A forged pause-id Label therefore cannot pin another
+// tenant's catalog. cleanupTemplate also requires catalog
+// Kind=pause_snapshot so a forged label cannot pin a template or
+// customer snap.
 func keepLivePausePackage(boxes []*cubeboxstore.CubeBox, snapID string) bool {
 	snapID = strings.TrimSpace(snapID)
 	if snapID == "" {
@@ -128,9 +165,6 @@ func keepLivePausePackage(boxes []*cubeboxstore.CubeBox, snapID string) bool {
 func sandboxHoldsLivePausePackage(sb *cubeboxstore.CubeBox, snapID string) bool {
 	if sb == nil || !sandboxLiveForPauseKeep(sb) {
 		return false
-	}
-	if cubeBoxLabel(sb, constants.MasterAnnotationPauseSnapshotID) == snapID {
-		return true
 	}
 	return cubeBoxLabel(sb, constants.MasterAnnotationRuntimeRestoreSnapshotID) == snapID
 }

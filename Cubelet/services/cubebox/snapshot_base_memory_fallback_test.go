@@ -5,13 +5,16 @@
 package cubebox
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 )
@@ -413,4 +416,96 @@ func TestShouldUseImportedMemoryForCommit(t *testing.T) {
 		Name: "sb-2b-vol-memory",
 		Kind: storage.CowKindVolume,
 	}), "stale import after rollback must full-dump")
+}
+
+func installCommitMemoryTestHooks(t *testing.T) {
+	t.Helper()
+	origBase := resolveBaseMemoryObjectFn
+	origRestore := resolveRestoreBaseMemoryObjectFn
+	origCommit := commitMemoryFromBaseFor
+	origCreate := createMemoryVolumeFor
+	origImport := getImportedSandboxMemoryFor
+	t.Cleanup(func() {
+		resolveBaseMemoryObjectFn = origBase
+		resolveRestoreBaseMemoryObjectFn = origRestore
+		commitMemoryFromBaseFor = origCommit
+		createMemoryVolumeFor = origCreate
+		getImportedSandboxMemoryFor = origImport
+	})
+	resolveBaseMemoryObjectFn = func(context.Context, *cubeboxstore.CubeBox, string) (*storage.CowSnapshotObject, error) {
+		return nil, ErrNoBaseMemoryForIncremental
+	}
+	resolveRestoreBaseMemoryObjectFn = func(context.Context, *cubeboxstore.CubeBox, string) (*storage.CowSnapshotObject, error) {
+		return nil, ErrNoBaseMemoryForIncremental
+	}
+}
+
+func resumeBoxForCommit2b(id, pauseID string) *cubeboxstore.CubeBox {
+	cb := newCubeboxWithStatusForTest(id, cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	stampPauseSnapshotID(cb, pauseID)
+	setRuntimeRestoreBaseLabels(cb, pauseID, time.Now().UTC())
+	return cb
+}
+
+func TestPrepareCommitMemoryArtifactTier2bIncremental(t *testing.T) {
+	installCommitMemoryTestHooks(t)
+	pauseID := "snap-commit-2b-000000000000001"
+	cb := resumeBoxForCommit2b("sb-commit-2b", pauseID)
+	getImportedSandboxMemoryFor = func(_ context.Context, _, sandboxID string) (*storage.CowSnapshotObject, error) {
+		return &storage.CowSnapshotObject{Name: "sb-" + sandboxID + "-memory", Kind: storage.CowKindVolume}, nil
+	}
+	var clonedFrom string
+	commitMemoryFromBaseFor = func(_ context.Context, _ string, src *storage.CowSnapshotObject, id string, _ uint64) (*storage.CowSnapshotObject, error) {
+		clonedFrom = src.Name
+		return &storage.CowSnapshotObject{Name: "clone-" + id, Kind: storage.CowKindVolume}, nil
+	}
+	createMemoryVolumeFor = func(context.Context, string, string, uint64) (*storage.CowSnapshotObject, error) {
+		t.Fatal("catalog miss + imported vol must not full-dump")
+		return nil, errors.New("unexpected full")
+	}
+
+	obj, snapType, err := prepareCommitMemoryArtifact(context.Background(), log.G(context.Background()), cb, "snap-new", 4096, "s3")
+	require.NoError(t, err)
+	assert.Equal(t, snapshotTypeIncremental, snapType)
+	assert.Equal(t, "sb-sb-commit-2b-memory", clonedFrom)
+	assert.Equal(t, "clone-snap-new", obj.Name)
+}
+
+func TestPrepareCommitMemoryArtifactFullWhenImportedEmpty(t *testing.T) {
+	installCommitMemoryTestHooks(t)
+	cb := resumeBoxForCommit2b("sb-commit-full", "snap-commit-full-00000000001")
+	getImportedSandboxMemoryFor = func(context.Context, string, string) (*storage.CowSnapshotObject, error) {
+		return nil, nil
+	}
+	commitMemoryFromBaseFor = func(context.Context, string, *storage.CowSnapshotObject, string, uint64) (*storage.CowSnapshotObject, error) {
+		t.Fatal("empty import must not clone")
+		return nil, errors.New("unexpected clone")
+	}
+	createMemoryVolumeFor = func(_ context.Context, _, id string, _ uint64) (*storage.CowSnapshotObject, error) {
+		return &storage.CowSnapshotObject{Name: "empty-" + id, Kind: storage.CowKindVolume}, nil
+	}
+
+	obj, snapType, err := prepareCommitMemoryArtifact(context.Background(), log.G(context.Background()), cb, "snap-new", 4096, "s3")
+	require.NoError(t, err)
+	assert.Equal(t, snapshotTypeFull, snapType)
+	assert.Equal(t, "empty-snap-new", obj.Name)
+}
+
+func TestPrepareCommitMemoryArtifact2bCloneFailFallsToFull(t *testing.T) {
+	installCommitMemoryTestHooks(t)
+	cb := resumeBoxForCommit2b("sb-commit-2b-fail", "snap-commit-2bfail-00000001")
+	getImportedSandboxMemoryFor = func(context.Context, string, string) (*storage.CowSnapshotObject, error) {
+		return &storage.CowSnapshotObject{Name: "sb-commit-2b-fail-memory", Kind: storage.CowKindVolume}, nil
+	}
+	commitMemoryFromBaseFor = func(context.Context, string, *storage.CowSnapshotObject, string, uint64) (*storage.CowSnapshotObject, error) {
+		return nil, errors.New("clone busy")
+	}
+	createMemoryVolumeFor = func(_ context.Context, _, id string, _ uint64) (*storage.CowSnapshotObject, error) {
+		return &storage.CowSnapshotObject{Name: "empty-" + id, Kind: storage.CowKindVolume}, nil
+	}
+
+	obj, snapType, err := prepareCommitMemoryArtifact(context.Background(), log.G(context.Background()), cb, "snap-new", 4096, "s3")
+	require.NoError(t, err)
+	assert.Equal(t, snapshotTypeFull, snapType, "2b clone failure must fall through like Pause")
+	assert.Equal(t, "empty-snap-new", obj.Name)
 }

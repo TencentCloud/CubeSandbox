@@ -222,18 +222,21 @@ func TestKeepLivePausePackage(t *testing.T) {
 	snap := "snap-keeppause0000000000000001"
 	running := newCubeboxWithStatusForTest("sb-run", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(running, snap)
+	running.AddLabels(map[string]string{constants.MasterAnnotationRuntimeRestoreSnapshotID: snap})
 	if !keepLivePausePackage([]*cubeboxstore.CubeBox{running}, snap) {
 		t.Fatal("running resume must keep the pause package")
 	}
 
 	paused := newCubeboxWithStatusForTest("sb-paused", cubeboxstore.Status{PausedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(paused, snap)
+	paused.AddLabels(map[string]string{constants.MasterAnnotationRuntimeRestoreSnapshotID: snap})
 	if keepLivePausePackage([]*cubeboxstore.CubeBox{paused}, snap) {
 		t.Fatal("PAUSED DelPaused must be allowed to delete the package")
 	}
 
 	other := newCubeboxWithStatusForTest("sb-other", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(other, "snap-other00000000000000000001")
+	other.AddLabels(map[string]string{constants.MasterAnnotationRuntimeRestoreSnapshotID: "snap-other00000000000000000001"})
 	if keepLivePausePackage([]*cubeboxstore.CubeBox{other}, snap) {
 		t.Fatal("unrelated sandbox must not pin this package")
 	}
@@ -244,6 +247,12 @@ func TestKeepLivePausePackage(t *testing.T) {
 		t.Fatal("user Create annotation must not pin a pause package")
 	}
 
+	forgedLabel := newCubeboxWithStatusForTest("sb-forged-label", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+	stampPauseSnapshotID(forgedLabel, snap)
+	if keepLivePausePackage([]*cubeboxstore.CubeBox{forgedLabel}, snap) {
+		t.Fatal("pause-id Label without restore-base must not pin another tenant's package")
+	}
+
 	nextPause := newCubeboxWithStatusForTest("sb-next", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(nextPause, "snap-new000000000000000000000001")
 	nextPause.AddLabels(map[string]string{constants.MasterAnnotationRuntimeRestoreSnapshotID: snap})
@@ -252,11 +261,30 @@ func TestKeepLivePausePackage(t *testing.T) {
 	}
 }
 
+func TestStripUserCubeMasterLabels(t *testing.T) {
+	t.Parallel()
+	got := stripUserCubeMasterLabels(map[string]string{
+		constants.MasterAnnotationPauseSnapshotID:          "snap-forged",
+		constants.MasterAnnotationRuntimeRestoreSnapshotID: "snap-restore",
+		"app": "ok",
+	})
+	if _, ok := got[constants.MasterAnnotationPauseSnapshotID]; ok {
+		t.Fatal("forged pause id must be stripped from Create Labels")
+	}
+	if _, ok := got[constants.MasterAnnotationRuntimeRestoreSnapshotID]; ok {
+		t.Fatal("forged restore-base must be stripped from Create Labels")
+	}
+	if got["app"] != "ok" {
+		t.Fatalf("ordinary labels must pass through, got %#v", got)
+	}
+}
+
 func TestShouldKeepLivePausePackageHonorLive(t *testing.T) {
 	t.Parallel()
 	snap := "snap-keepgate00000000000000001"
 	running := newCubeboxWithStatusForTest("sb-s3-live", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(running, snap)
+	running.AddLabels(map[string]string{constants.MasterAnnotationRuntimeRestoreSnapshotID: snap})
 	boxes := []*cubeboxstore.CubeBox{running}
 
 	if !shouldKeepLivePausePackage(true, boxes, snap, "pause_snapshot") {

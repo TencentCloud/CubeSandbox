@@ -16,6 +16,15 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 )
 
+// Test hooks so prepareCommitMemoryArtifact's ladder can be driven without cubecow.
+var (
+	resolveBaseMemoryObjectFn        = resolveBaseMemoryObject
+	resolveRestoreBaseMemoryObjectFn = resolveRestoreBaseMemoryObject
+	commitMemoryFromBaseFor          = storage.CommitMemoryFromBaseFor
+	createMemoryVolumeFor            = storage.CreateMemoryVolumeFor
+	getImportedSandboxMemoryFor      = storage.GetImportedSandboxMemoryFor
+)
+
 // ErrNoBaseMemoryForIncremental is returned when CommitSandbox cannot
 // determine a base memory object for the running sandbox. Without a base the
 // hypervisor's incremental memory snapshot cannot be produced (it would have
@@ -370,9 +379,9 @@ func prepareCommitMemoryArtifact(
 	backend string,
 ) (*storage.CowSnapshotObject, string, error) {
 	// ─── Tier 1: soft-dirty over previous-snapshot base ───────────────
-	baseMemoryObject, baseErr := resolveBaseMemoryObject(ctx, cb, backend)
+	baseMemoryObject, baseErr := resolveBaseMemoryObjectFn(ctx, cb, backend)
 	if baseErr == nil {
-		memoryObject, err := storage.CommitMemoryFromBaseFor(ctx, backend, baseMemoryObject, templateID, memorySizeBytes)
+		memoryObject, err := commitMemoryFromBaseFor(ctx, backend, baseMemoryObject, templateID, memorySizeBytes)
 		if err != nil {
 			return nil, "", err
 		}
@@ -391,9 +400,9 @@ func prepareCommitMemoryArtifact(
 	// hand, was last reset at the VM's last restore — exactly the moment
 	// captured by the snapshot id stored in the restore-base label —
 	// which makes its bitmap consistent with this base.
-	restoreBase, restoreErr := resolveRestoreBaseMemoryObject(ctx, cb, backend)
+	restoreBase, restoreErr := resolveRestoreBaseMemoryObjectFn(ctx, cb, backend)
 	if restoreErr == nil {
-		memoryObject, err := storage.CommitMemoryFromBaseFor(ctx, backend, restoreBase, templateID, memorySizeBytes)
+		memoryObject, err := commitMemoryFromBaseFor(ctx, backend, restoreBase, templateID, memorySizeBytes)
 		if err != nil {
 			return nil, "", err
 		}
@@ -414,20 +423,21 @@ func prepareCommitMemoryArtifact(
 	if live, liveErr := importedSandboxMemoryForCommit(ctx, cb, backend); liveErr != nil {
 		stepLog.Warnf("memory artifact: own volume lookup failed (%v); falling back to full snapshot", liveErr)
 	} else if live != nil {
-		memoryObject, err := storage.CommitMemoryFromBaseFor(ctx, backend, live, templateID, memorySizeBytes)
-		if err != nil {
-			return nil, "", err
+		memoryObject, err := commitMemoryFromBaseFor(ctx, backend, live, templateID, memorySizeBytes)
+		if err == nil {
+			stepLog.Warnf("memory artifact: catalog bases unavailable (%v; %v); "+
+				"falling back to incremental(pagemap_anon) over own volume %s/%s -> %s",
+				baseErr, restoreErr, live.Name, live.Kind, memoryObject.Name)
+			return memoryObject, snapshotTypeIncremental, nil
 		}
-		stepLog.Warnf("memory artifact: catalog bases unavailable (%v; %v); "+
-			"falling back to incremental(pagemap_anon) over own volume %s/%s -> %s",
-			baseErr, restoreErr, live.Name, live.Kind, memoryObject.Name)
-		return memoryObject, snapshotTypeIncremental, nil
+		stepLog.Warnf("memory artifact: own volume %s clone failed (%v); falling back to full snapshot",
+			live.Name, err)
 	}
 
 	// ─── Tier 3: full + fresh empty volume ────────────────────────────
 	stepLog.Warnf("memory artifact: both previous-snapshot base (%v) and last-restore base (%v) "+
 		"unavailable; falling back to full snapshot", baseErr, restoreErr)
-	memoryObject, err := storage.CreateMemoryVolumeFor(ctx, backend, templateID, memorySizeBytes)
+	memoryObject, err := createMemoryVolumeFor(ctx, backend, templateID, memorySizeBytes)
 	if err != nil {
 		return nil, "", err
 	}
@@ -441,14 +451,21 @@ func importedSandboxMemoryForCommit(
 	cb *cubeboxstore.CubeBox,
 	backend string,
 ) (*storage.CowSnapshotObject, error) {
-	if !importedMemoryIsCurrentRestore(cb) {
+	sandboxID := ""
+	if cb != nil {
+		sandboxID = strings.TrimSpace(cb.ID)
+		if sandboxID == "" {
+			sandboxID = strings.TrimSpace(cb.SandboxID)
+		}
+	}
+	live, err := getImportedSandboxMemoryFor(ctx, backend, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if !shouldUseImportedMemoryForCommit(cb, live) {
 		return nil, nil
 	}
-	sandboxID := strings.TrimSpace(cb.ID)
-	if sandboxID == "" {
-		sandboxID = strings.TrimSpace(cb.SandboxID)
-	}
-	return storage.GetImportedSandboxMemoryFor(ctx, backend, sandboxID)
+	return live, nil
 }
 
 // importedMemoryIsCurrentRestore is the Tier 2b gate. ImportedMemoryVol
