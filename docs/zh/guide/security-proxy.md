@@ -93,6 +93,27 @@ with Sandbox.create(network={"rules": rules}) as sb:
 
 请求要同时满足所有出现的字段；未出现的字段视作通配。
 
+带 `host` 或 `sni` 的 allow 规则在真正转发前，还会由 CubeEgress 在
+代理侧解析请求中呈现的域名，并校验透明代理拿到的原始目的 IP 是否
+属于该域名的 DNS A 记录。这样可以阻断伪造域名的流量，例如：
+
+```bash
+curl --resolve bypass.blob.core.windows.net:80:203.0.113.66 \
+  http://bypass.blob.core.windows.net/
+```
+
+即使策略放行 `*.blob.core.windows.net`，只要代理侧 DNS 解析
+`bypass.blob.core.windows.net` 时没有返回 `203.0.113.66`，该请求
+就会被 403 拒绝。同样的校验也作用于基于 TLS SNI 的 allow 规则，
+并且发生在连接上游之前；HTTPS 的证书校验仍然保留，但只是额外的
+上游真实性检查，不再是唯一兜底。DNS 绑定失败会写入
+`security_event`，reason 例如 `g5_dst_ip_not_in_dns`，审计记录中
+也会包含 `dns_auth` 细节。
+
+默认情况下，CubeEgress 使用代理容器自己的 `/etc/resolv.conf`
+发现 resolver。运维侧也可以通过 `CUBE_EGRESS_DNS_RESOLVER_ADDRS`
+显式指定，格式为逗号或空白分隔的 IPv4 地址，可选 `:port`。
+
 ### 自定义 L7 端口
 
 默认情况下，一条规则拦截经典的 `{80/http, 443/https}` 集合。可选

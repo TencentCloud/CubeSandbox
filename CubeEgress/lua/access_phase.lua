@@ -5,7 +5,9 @@
 --      method, path, dst_ip, scheme).
 --   2. Look up the policy for the sandbox source IP.
 --   3. Walk policy.rules in order, first-match-wins.
---   4. On allow: enforce gates G1 (scheme is http or https) and
+--   4. On allow: enforce G5 (original dst IP belongs to the matched
+--      Host/SNI according to proxy-side DNS). If the rule also injects
+--      credentials, enforce gates G1 (scheme is http or https) and
 --      G4 (HTTPS: Host == SNI; HTTP: Host present), then for each
 --      inject{header, secret, format} run
 --      ngx.req.set_header. The secret value is embedded inline in the
@@ -23,16 +25,19 @@
 --   G3 SNI matches rule — by rule_matches() above (HTTPS only; HTTP has no SNI)
 --   G4 Host == SNI      — checked here, before any inject
 --                         (HTTPS: Host==SNI; HTTP: Host present)
---   G5 dst IP authentic — implicit via G6 (proxy_ssl_verify)
+--   G5 dst IP authentic — checked here for allow rules with Host/SNI
+--                         constraints, before proxying
 --   G6 upstream cert    — Pδ; nginx proxy_ssl_verify on (already in
 --                         http {}-level config)
 --   G7 method/path      — by rule_matches()
 --   G8 policy authorise — implicit (we are inside the matched rule)
 --
--- "any G1-G8 failure → drop inject; the request continues
--- based on action.allow". That is what we do: a G4 mismatch on an
--- otherwise allowed rule means we proxy the traffic upstream WITHOUT
--- the secret, and tag the decision as a security_event.
+-- G5 is an allow-path authorization gate: if the sandbox connects to an
+-- original dst IP that proxy-side DNS does not return for the matched
+-- Host/SNI, the request is denied before upstream proxying. G1/G4 stay scoped
+-- to credential injection: a G4 mismatch on an otherwise allowed rule means we
+-- proxy the traffic upstream WITHOUT the secret, and tag the decision as a
+-- security_event.
 --
 -- Match-field semantics (all optional; missing field → matches anything):
 --   sni             string (exact or leading "*." wildcard, case-insensitive)
@@ -69,6 +74,7 @@
 
 local policy = require "policy"
 local port_scheme = require "port_scheme"
+local dns_auth = require "dns_auth"
 
 local _M = {}
 
@@ -345,6 +351,21 @@ local function deny(reason, decision)
     return ngx.exit(403)
 end
 
+local function enforce_dns_auth(match, ctx, decision)
+    local ok, reason, detail = dns_auth.verify_rule(match, ctx)
+    decision.dns_auth = detail
+    if ok then return true end
+    decision.security_event = true
+    ngx.log(ngx.NOTICE, "[access] DNS auth failed reason=", tostring(reason),
+                       " sandbox=", tostring(decision.sandbox_ip),
+                       " policy=", tostring(decision.policy_id),
+                       " rule=", tostring(decision.rule_id),
+                       " dst_ip=", tostring(decision.dst_ip),
+                       " host=", tostring(decision.host),
+                       " sni=", tostring(decision.sni))
+    return false, reason
+end
+
 local function allow(decision)
     decision.allow = true
     -- If the matched rule wants credential injection, run G1/G4
@@ -493,6 +514,10 @@ function _M.decide()
             decision.audit_level = (r.action and r.action.audit) or "metadata"
             decision.inject      = r.action and r.action.inject  -- consumed in Pγ
             if r.action and r.action.allow == true then
+                local dns_ok, dns_reason = enforce_dns_auth(r.match, ctx, decision)
+                if not dns_ok then
+                    return deny(dns_reason, decision)
+                end
                 return allow(decision)
             else
                 return deny("rule_deny", decision)

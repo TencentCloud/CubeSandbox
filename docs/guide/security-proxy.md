@@ -105,6 +105,29 @@ Match fields (all optional, AND'd together):
 A request must match every present field; absent fields are
 wildcarded.
 
+Before an allow rule with `host` or `sni` is proxied, CubeEgress
+resolves the presented identity from the proxy side and verifies that
+the transparent proxy's original destination IP is one of the DNS A
+records for that identity. This blocks forged-name flows such as:
+
+```bash
+curl --resolve bypass.blob.core.windows.net:80:203.0.113.66 \
+  http://bypass.blob.core.windows.net/
+```
+
+Even if a policy allows `*.blob.core.windows.net`, the request above is
+denied unless proxy-side DNS for `bypass.blob.core.windows.net` returns
+`203.0.113.66`. The same check runs for TLS SNI based allow rules before
+the upstream connection is attempted; HTTPS certificate verification
+remains an additional upstream authenticity check, not the only guard.
+DNS-auth failures return 403 and write a `security_event` reason such as
+`g5_dst_ip_not_in_dns` with `dns_auth` details in the audit record.
+
+By default CubeEgress reads resolver addresses from its own
+`/etc/resolv.conf`. Operators can override them with
+`CUBE_EGRESS_DNS_RESOLVER_ADDRS` (comma or whitespace separated IPv4
+addresses, optionally with `:port`).
+
 ### Custom L7 ports
 
 By default a rule intercepts the classic `{80/http, 443/https}`
