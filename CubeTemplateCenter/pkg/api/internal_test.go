@@ -6,8 +6,11 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -43,6 +46,38 @@ func doArtifactDelete(t *testing.T, body any) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	return w
+}
+
+func doArtifactUpload(t *testing.T, artifactID string, fileContent []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	r := setupRouter()
+	r.POST("/tc/api/v1/artifact/upload", handleArtifactUpload)
+
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	if artifactID != "" {
+		if err := w.WriteField("artifact_id", artifactID); err != nil {
+			t.Fatalf("write field: %v", err)
+		}
+	}
+	if fileContent != nil {
+		part, err := w.CreateFormFile("file", "artifact.ext4")
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		if _, err := part.Write(fileContent); err != nil {
+			t.Fatalf("write file content: %v", err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/tc/api/v1/artifact/upload", &body)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	resp := httptest.NewRecorder()
+	r.ServeHTTP(resp, req)
+	return resp
 }
 
 func TestHandleArtifactDeleteInvalidJSON(t *testing.T) {
@@ -187,5 +222,43 @@ func TestInternalAPIOpenWithInsecureDevOptIn(t *testing.T) {
 
 	if w := doInternalDelete(t, ""); w.Code == http.StatusUnauthorized || w.Code == http.StatusServiceUnavailable {
 		t.Fatalf("dev opt-in must pass the gate: got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleArtifactUploadRequiresFields(t *testing.T) {
+	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", t.TempDir())
+
+	if w := doArtifactUpload(t, "", []byte("abc")); w.Code != http.StatusBadRequest {
+		t.Fatalf("missing artifact_id: expected 400, got %d body=%s", w.Code, w.Body.String())
+	}
+	if w := doArtifactUpload(t, "rfs-1", nil); w.Code != http.StatusBadRequest {
+		t.Fatalf("missing file: expected 400, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleArtifactUploadStoresFile(t *testing.T) {
+	storeRoot := t.TempDir()
+	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", storeRoot)
+
+	w := doArtifactUpload(t, "rfs-1", []byte("artifact-content"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp ArtifactUploadResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ArtifactID != "rfs-1" {
+		t.Fatalf("artifact_id=%q, want rfs-1", resp.ArtifactID)
+	}
+	if resp.Ext4Path == "" {
+		t.Fatalf("ext4_path is empty")
+	}
+	if _, err := os.Stat(resp.Ext4Path); err != nil {
+		t.Fatalf("uploaded file not found at %s: %v", resp.Ext4Path, err)
+	}
+	wantPrefix := filepath.Join(storeRoot, "rfs-1")
+	if len(resp.Ext4Path) < len(wantPrefix) || resp.Ext4Path[:len(wantPrefix)] != wantPrefix {
+		t.Fatalf("ext4_path=%q, want under %q", resp.Ext4Path, wantPrefix)
 	}
 }

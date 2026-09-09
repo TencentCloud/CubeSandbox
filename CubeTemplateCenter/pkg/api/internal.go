@@ -5,10 +5,15 @@
 package api
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -16,6 +21,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/build"
+	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/image"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/tcconfig"
 )
 
@@ -106,6 +112,114 @@ func handleArtifactDelete(c *gin.Context) {
 	c.JSON(http.StatusOK, ArtifactDeleteResponse{Status: "deleted", ArtifactID: req.ArtifactID})
 }
 
+// handleArtifactUpload ingests a local ext4 uploaded by CubeMaster and stores
+// it into CubeTemplateCenter's own artifact store.
+func handleArtifactUpload(c *gin.Context) {
+	artifactID := strings.TrimSpace(c.PostForm("artifact_id"))
+	if artifactID == "" {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "artifact_id is required"})
+		return
+	}
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "file is required"})
+		return
+	}
+	reader, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf("open uploaded file: %v", err)})
+		return
+	}
+	defer reader.Close()
+
+	ctx := c.Request.Context()
+	storeDir, err := image.ResolveArtifactStoreDir(ctx, artifactID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("resolve artifact store dir: %v", err)})
+		return
+	}
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("create artifact store dir: %v", err)})
+		return
+	}
+
+	tmpFile, err := os.CreateTemp(storeDir, artifactID+".upload-*.tmp")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("create temp file: %v", err)})
+		return
+	}
+	tmpPath := tmpFile.Name()
+	cleanupTmp := true
+	defer func() {
+		_ = tmpFile.Close()
+		if cleanupTmp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	hasher := sha256.New()
+	size, err := io.Copy(io.MultiWriter(tmpFile, hasher), reader)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("save uploaded file: %v", err)})
+		return
+	}
+	sha := hex.EncodeToString(hasher.Sum(nil))
+	if size <= 0 {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "uploaded file is empty"})
+		return
+	}
+	if err := tmpFile.Close(); err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("close temp file: %v", err)})
+		return
+	}
+
+	dstPath := filepath.Join(storeDir, artifactID+".ext4")
+	if st, statErr := os.Stat(dstPath); statErr == nil && st.Mode().IsRegular() {
+		dstSha, shaErr := fileSHA256(dstPath)
+		if shaErr == nil && st.Size() == size && dstSha == sha {
+			cleanupTmp = true
+			c.JSON(http.StatusOK, ArtifactUploadResponse{
+				Status:        "reused",
+				ArtifactID:    artifactID,
+				Ext4Path:      dstPath,
+				Ext4SHA256:    dstSha,
+				Ext4SizeBytes: st.Size(),
+			})
+			return
+		}
+	}
+
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("promote uploaded artifact file: %v", err)})
+		return
+	}
+	cleanupTmp = false
+	if err := os.Chmod(dstPath, 0o644); err != nil {
+		log.G(ctx).Warnf("artifact upload: chmod %s failed: %v", dstPath, err)
+	}
+
+	c.JSON(http.StatusOK, ArtifactUploadResponse{
+		Status:        "uploaded",
+		ArtifactID:    artifactID,
+		Ext4Path:      dstPath,
+		Ext4SHA256:    sha,
+		Ext4SizeBytes: size,
+	})
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // sharedTokenWarnOnce rate-limits the "unauthenticated endpoint" warning.
 var sharedTokenWarnOnce sync.Once
 
@@ -171,4 +285,5 @@ func RegisterInternalRoutes(g *gin.RouterGroup) {
 	internal := g.Group("/tc/api/v1", internalAuthMiddleware())
 	internal.POST("/build", handleBuildSubmit)
 	internal.POST("/artifact/delete", handleArtifactDelete)
+	internal.POST("/artifact/upload", handleArtifactUpload)
 }

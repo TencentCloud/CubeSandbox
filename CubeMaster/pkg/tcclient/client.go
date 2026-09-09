@@ -12,8 +12,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,6 +30,14 @@ import (
 type StatusError struct {
 	StatusCode int
 	Body       string
+}
+
+type UploadArtifactResponse struct {
+	Status        string `json:"status"`
+	ArtifactID    string `json:"artifact_id"`
+	Ext4Path      string `json:"ext4_path"`
+	Ext4SHA256    string `json:"ext4_sha256"`
+	Ext4SizeBytes int64  `json:"ext4_size_bytes"`
 }
 
 func (e *StatusError) Error() string {
@@ -149,4 +159,58 @@ func (c *Client) DeleteArtifact(ctx context.Context, artifactID string) error {
 
 	log.G(ctx).Infof("artifact delete requested from TC successfully: artifact_id=%s", artifactID)
 	return nil
+}
+
+// UploadArtifact uploads one local ext4 file into CubeTemplateCenter's own
+// artifact store and returns the stored metadata.
+func (c *Client) UploadArtifact(ctx context.Context, artifactID, localFilePath string) (*UploadArtifactResponse, error) {
+	f, err := os.Open(localFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("open local artifact file: %w", err)
+	}
+	defer f.Close()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("artifact_id", artifactID); err != nil {
+		return nil, fmt.Errorf("write multipart artifact_id: %w", err)
+	}
+	part, err := writer.CreateFormFile("file", filepath.Base(localFilePath))
+	if err != nil {
+		return nil, fmt.Errorf("create multipart file field: %w", err)
+	}
+	if _, err := io.Copy(part, f); err != nil {
+		return nil, fmt.Errorf("copy local artifact into multipart body: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("close multipart body: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/tc/api/v1/artifact/upload", c.endpoint)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &body)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
+	setSharedTokenHeader(httpReq)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("http post: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, fmt.Errorf("read upload response body: %w", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
+	}
+
+	out := &UploadArtifactResponse{}
+	if err := json.Unmarshal(respBody, out); err != nil {
+		return nil, fmt.Errorf("decode upload artifact response: %w", err)
+	}
+	return out, nil
 }

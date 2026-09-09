@@ -57,6 +57,22 @@ func handleRedoTemplateAction(c *gin.Context) {
 		"Action":     "RedoTemplate",
 		"TemplateID": req.TemplateID,
 	}))
+	resolvedTemplateID, err := resolveTemplateIdentifierFn(ctx, req.TemplateID)
+	if err != nil {
+		code := int(errorcode.ErrorCode_MasterInternalError)
+		if errors.Is(err, templatecenter.ErrTemplateNotFound) {
+			code = int(errorcode.ErrorCode_NotFound)
+		}
+		common.WriteAPI(c, &types.CreateTemplateFromImageRes{
+			RequestID: req.RequestID,
+			Ret: &types.Ret{
+				RetCode: code,
+				RetMsg:  err.Error(),
+			},
+		})
+		return
+	}
+	req.TemplateID = resolvedTemplateID
 	// CubeMaster no longer builds templates in-process, including redo full
 	// rebuilds. The redo job is persisted here and forwarded to
 	// CubeTemplateCenter for the actual build work.

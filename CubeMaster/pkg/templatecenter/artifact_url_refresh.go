@@ -164,6 +164,45 @@ var presignArtifactGetURL = func(ctx context.Context, artifactID string) (string
 
 var errS3PresignNotConfigured = fmt.Errorf("s3 presign not configured on cubemaster")
 
+// statArtifactObjectInS3 checks whether the S3 object for artifactID exists.
+// Returns (false, nil) only for a definitive "not found".
+var statArtifactObjectInS3 = func(ctx context.Context, artifactID string) (bool, error) {
+	s3PresignerOnce.Do(func() {
+		s3PresignerInst = loadS3Presigner()
+	})
+	if s3PresignerInst == nil {
+		return false, errS3PresignNotConfigured
+	}
+	s := s3PresignerInst
+	_, err := s.client.StatObject(ctx, s.bucket, s3ArtifactObjectKey(s.prefix, artifactID), minio.StatObjectOptions{})
+	if err != nil {
+		code := minio.ToErrorResponse(err).Code
+		if code == "NoSuchKey" || code == "NotFound" {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat s3 object for artifact %s: %w", artifactID, err)
+	}
+	return true, nil
+}
+
+// uploadArtifactFileToS3 uploads filePath as the object of artifactID.
+var uploadArtifactFileToS3 = func(ctx context.Context, artifactID, filePath string) error {
+	s3PresignerOnce.Do(func() {
+		s3PresignerInst = loadS3Presigner()
+	})
+	if s3PresignerInst == nil {
+		return errS3PresignNotConfigured
+	}
+	s := s3PresignerInst
+	_, err := s.client.FPutObject(ctx, s.bucket, s3ArtifactObjectKey(s.prefix, artifactID), filePath, minio.PutObjectOptions{
+		ContentType: "application/octet-stream",
+	})
+	if err != nil {
+		return fmt.Errorf("upload artifact %s to s3 from %s: %w", artifactID, filePath, err)
+	}
+	return nil
+}
+
 // ArtifactDownloadURL exports artifactDownloadURL for the HTTP layer (the
 // download redirect endpoint), which lives in a different package.
 func ArtifactDownloadURL(ctx context.Context, artifact *models.RootfsArtifact) string {

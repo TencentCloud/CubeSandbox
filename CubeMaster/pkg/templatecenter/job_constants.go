@@ -44,6 +44,7 @@ const (
 	JobOperationCreate           = "CREATE"
 	JobOperationRedo             = "REDO"
 	JobOperationCommit           = "COMMIT"
+	JobOperationMigrate          = "MIGRATE"
 	JobOperationLegacy           = "LEGACY"
 	JobOperationSnapshotCreate   = "SNAPSHOT_CREATE"
 	JobOperationSnapshotRollback = "SNAPSHOT_ROLLBACK"
@@ -69,6 +70,7 @@ const (
 	JobPhaseRollbackDriving    = "ROLLBACK_DRIVING"
 	JobPhaseRollbackRecovering = "ROLLBACK_RECOVERING"
 	JobPhaseDeleting           = "DELETING"
+	JobPhaseMigratingArtifact  = "MIGRATING_ARTIFACT"
 	JobPhaseReady              = "READY"
 
 	defaultTemplateCPU         = "2000m"

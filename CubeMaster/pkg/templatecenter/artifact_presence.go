@@ -377,6 +377,13 @@ func rootfsArtifactReuseVerdict(ctx context.Context, record *models.RootfsArtifa
 		// S3/MinIO-backed: the object behind artifact_url is the durable copy
 		// and cubelets download from it directly, so the local ext4's
 		// presence/size must not gate reuse (see resolveMissingArtifact).
+		exists, err := statArtifactObjectInS3(ctx, record.ArtifactID)
+		if err != nil {
+			return fmt.Errorf("%w: unable to verify s3 object for artifact %s: %v", ErrArtifactServabilityUnknown, record.ArtifactID, err)
+		}
+		if !exists {
+			return fmt.Errorf("s3 object for artifact %s is missing; run `cubemastercli tpl migrate --template-id <template-id>` to repair existing templates", record.ArtifactID)
+		}
 		return nil
 	}
 	if artifactServedByRemoteTier() {

@@ -111,6 +111,8 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	// RegisterTemplateRoutes below.
 	g.POST(TemplateFromImageAction, createTemplateFromImageGinHandler)
 	g.POST(TemplateRedoAction, handleRedoTemplateAction)
+	g.POST(TemplateMigrateAction, handleTemplateMigrateAction)
+	g.GET(TemplateMigrateAction, getTemplateMigrateStatusAction)
 	g.POST(TemplateAction, createTemplateGinHandler)
 	g.DELETE(TemplateAction, deleteTemplateGinHandler)
 	g.GET(TemplateAction, getTemplateGinHandler)
