@@ -5,11 +5,7 @@ use axum::{
 };
 use tokio::fs;
 
-use crate::{
-    connect::RpcError,
-    generated::filesystem as proto,
-    wire,
-};
+use crate::{connect::RpcError, generated::filesystem as proto, wire};
 
 use super::{
     entries::{collect_entries, ensure_owned_dirs, entry_info, resolve, unary_request},

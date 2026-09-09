@@ -25,9 +25,7 @@ use crate::{
 };
 
 use super::{
-    entries::{
-        entry_info_sync, is_network_mount, record_watch_failure, resolve, watch_event_kind,
-    },
+    entries::{entry_info_sync, is_network_mount, record_watch_failure, resolve, watch_event_kind},
     error::filesystem_error,
     model::{proto_entry, watch_frame},
 };
