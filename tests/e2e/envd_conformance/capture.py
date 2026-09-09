@@ -89,6 +89,63 @@ def envelope(payload_bytes, flags=0):
     return bytes([flags]) + struct.pack(">I", len(payload_bytes)) + payload_bytes
 
 
+def _read_stream_frames(s, f, chunked, result, read_deadline=None, close_after_frames=None):
+    """Frame reader shared by connect_stream / watch_stream: reads Connect
+    frames until EOF, EndStream flag, deadline, or the close_after_frames cut.
+    """
+    def read_n(n):
+        buf = b""
+        while len(buf) < n:
+            if chunked:
+                chunk = read_chunked(n - len(buf))
+            else:
+                chunk = f.read(n - len(buf))
+            if not chunk:
+                return buf
+            buf += chunk
+        return buf
+
+    chunk_rest = [b""]
+
+    def read_chunked(want):
+        if chunk_rest[0]:
+            out, chunk_rest[0] = chunk_rest[0][:want], chunk_rest[0][want:]
+            return out
+        size_line = f.readline().strip()
+        if not size_line:
+            return b""
+        size = int(size_line, 16)
+        if size == 0:
+            f.readline()
+            return b""
+        data = f.read(size)
+        f.read(2)  # CRLF
+        out, chunk_rest[0] = data[:want], data[want:]
+        return out
+
+    start = time.time()
+    while True:
+        if read_deadline and time.time() - start > read_deadline:
+            result["stopped_by_deadline"] = True
+            break
+        hdr = read_n(5)
+        if len(hdr) < 5:
+            break
+        flags = hdr[0]
+        size = struct.unpack(">I", hdr[1:5])[0]
+        payload_b = read_n(size)
+        try:
+            payload_j = json.loads(payload_b)
+        except Exception:
+            payload_j = {"_raw_b64": base64.b64encode(payload_b).decode()}
+        result["frames"].append({"flags": flags, "size": size, "payload": payload_j})
+        if close_after_frames and len(result["frames"]) >= close_after_frames:
+            result["closed_early"] = True
+            break
+        if flags & 0x02:
+            break
+
+
 def connect_stream(service_method, payload, user="user", timeout=30,
                    extra_headers=None, close_after_frames=None, read_deadline=None):
     """Raw HTTP/1.1 streaming client recording every Connect frame.
@@ -126,58 +183,60 @@ def connect_stream(service_method, payload, user="user", timeout=30,
         result["headers"] = resp_headers
         chunked = any(k.lower() == "transfer-encoding" and v.lower() == "chunked"
                       for k, v in resp_headers.items())
+        _read_stream_frames(s, f, chunked, result,
+                            read_deadline=read_deadline,
+                            close_after_frames=close_after_frames)
+    except socket.timeout:
+        result["socket_timeout"] = True
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+    return result
 
-        def read_n(n):
-            buf = b""
-            while len(buf) < n:
-                if chunked:
-                    chunk = read_chunked(n - len(buf))
-                else:
-                    chunk = f.read(n - len(buf))
-                if not chunk:
-                    return buf
-                buf += chunk
-            return buf
 
-        chunk_rest = [b""]
+def watch_stream(payload, on_open=None, user="user", timeout=10, read_deadline=2.5,
+                 extra_headers=None):
+    """WatchDir capture: open the stream, mutate the watched directory while
+    it is open (on_open runs after the response headers arrive), then read
+    frames until the deadline. Events queued during on_open arrive
+    deterministically before the deadline fires. The keepalive cadence (>=30s)
+    is longer than the deadline, so no keepalive frames appear — the frame
+    sequence stays deterministic.
+    """
+    body = envelope(json.dumps(payload).encode())
+    headers = {
+        "Host": f"{HOST}:{PORT}",
+        "Content-Type": "application/connect+json",
+        "Connect-Protocol-Version": "1",
+        "Authorization": basic_user(user),
+        "Content-Length": str(len(body)),
+        "Connection": "close",
+    }
+    headers.update(extra_headers or {})
+    head = "POST /filesystem.Filesystem/WatchDir HTTP/1.1\r\n" + "".join(
+        f"{k}: {v}\r\n" for k, v in headers.items()) + "\r\n"
 
-        def read_chunked(want):
-            if chunk_rest[0]:
-                out, chunk_rest[0] = chunk_rest[0][:want], chunk_rest[0][want:]
-                return out
-            size_line = f.readline().strip()
-            if not size_line:
-                return b""
-            size = int(size_line, 16)
-            if size == 0:
-                f.readline()
-                return b""
-            data = f.read(size)
-            f.read(2)  # CRLF
-            out, chunk_rest[0] = data[:want], data[want:]
-            return out
-
-        start = time.time()
+    s = socket.create_connection((HOST, PORT), timeout=timeout)
+    result = {"frames": [], "closed_early": False}
+    try:
+        s.sendall(head.encode() + body)
+        f = s.makefile("rb")
+        result["status_line"] = f.readline().decode().strip()
+        resp_headers = {}
         while True:
-            if read_deadline and time.time() - start > read_deadline:
-                result["stopped_by_deadline"] = True
+            line = f.readline().decode().strip()
+            if not line:
                 break
-            hdr = read_n(5)
-            if len(hdr) < 5:
-                break
-            flags = hdr[0]
-            size = struct.unpack(">I", hdr[1:5])[0]
-            payload_b = read_n(size)
-            try:
-                payload_j = json.loads(payload_b)
-            except Exception:
-                payload_j = {"_raw_b64": base64.b64encode(payload_b).decode()}
-            result["frames"].append({"flags": flags, "size": size, "payload": payload_j})
-            if close_after_frames and len(result["frames"]) >= close_after_frames:
-                result["closed_early"] = True
-                break
-            if flags & 0x02:
-                break
+            k, _, v = line.partition(":")
+            resp_headers[k.strip()] = v.strip()
+        result["headers"] = resp_headers
+        chunked = any(k.lower() == "transfer-encoding" and v.lower() == "chunked"
+                      for k, v in resp_headers.items())
+        if on_open:
+            on_open()
+        _read_stream_frames(s, f, chunked, result, read_deadline=read_deadline)
     except socket.timeout:
         result["socket_timeout"] = True
     finally:
@@ -613,7 +672,19 @@ def cap_fs():
     record("fs_remove", connect_unary("filesystem.Filesystem/Remove", {"path": "/home/user/base_dir"}))
     record("fs_remove_missing", connect_unary("filesystem.Filesystem/Remove", {"path": "/home/user/base_dir"}))
     record("fs_stat_baduser", connect_unary("filesystem.Filesystem/Stat", {"path": "/tmp"}, user="ghost9"))
-    record("fs_watch_unary_probe", connect_unary("filesystem.Filesystem/CreateWatcher", {"path": "/home/user"}))
+    # watch family is now implemented (PR-B): the probe pairs CreateWatcher
+    # with RemoveWatcher so no watcher leaks; the random watcherId is
+    # normalized for comparison (VOLATILE_KEYS).
+    probe = {"create": connect_unary(
+        "filesystem.Filesystem/CreateWatcher", {"path": "/home/user"})}
+    try:
+        _wid = json.loads(probe["create"]["body"]).get("watcherId")
+        if _wid:
+            probe["remove"] = connect_unary(
+                "filesystem.Filesystem/RemoveWatcher", {"watcherId": _wid})
+    except Exception:
+        pass
+    record("fs_watch_unary_probe", probe)
     record("fs_bad_json", http_req(
         "POST", "/filesystem.Filesystem/Stat", b"{not json",
         {"Content-Type": "application/json", "Authorization": basic_user("user")}))
@@ -654,7 +725,7 @@ def cap_fs():
         "filesystem.Filesystem/Stat", {"path": "/home/user/zz_sticky"}))
 
     # ---- PR-A① error contract: non-ENOENT errno paths --------------------
-    # Every shape below was measured on go1.26 (plan §4.1); the texts come
+    # Every shape below was measured on go1.26; the texts come
     # from Go's own errno table (lowercase) via cube-envd's go_compat module.
     # EACCES/EROFS variants are NOT recordable here: both envd processes run
     # as root, so CAP_DAC_OVERRIDE makes those branches unreachable in the
@@ -1016,6 +1087,123 @@ def cap_process():
     # version endpoints via docker exec are captured outside this script
 
 
+def cap_watch():
+    """WatchDir family — standalone group, deliberately NOT part of `all`.
+
+    The watch family is new capability gated separately during rollout:
+    its PASS tally is tracked apart from the main conformance
+    count, and a regression here never blocks the byte-stable surfaces.
+
+    Scenario notes:
+    - no chmod RPC exists, so IN_ATTRIB is triggered by an in-sandbox process
+      running chmod (the only path that reaches ATTRIB over the wire);
+    - the keepalive cadence (>=30s) exceeds every read deadline here, so
+      keepalive frames never appear and sequences stay deterministic.
+    """
+    W = "/home/user/zz_watch"
+    RW = "/home/user/zz_watch_r"
+
+    def sweep():
+        connect_unary("filesystem.Filesystem/Remove", {"path": RW})
+        connect_unary("filesystem.Filesystem/Remove", {"path": W})
+
+    sweep()
+    connect_unary("filesystem.Filesystem/MakeDir", {"path": W})
+    # RW must exist BEFORE the recursive watch opens: the server checks the
+    # path first, and a missing directory would make both sides record an
+    # identical not_found — a false-positive PASS that never exercises
+    # recursion (caught in PR #16 review).
+    connect_unary("filesystem.Filesystem/MakeDir", {"path": RW})
+    # Seed file for the write/chmod/rename scenarios; created before any
+    # watch opens so no CREATE event for it leaks into those sequences.
+    http_req("POST", f"/files?path={W}/seed.txt&username=user", b"seed\n",
+             {"Content-Type": "application/octet-stream"})
+
+    def mk(watch_path, recursive=False, on_open=None, read_deadline=2.5):
+        return watch_stream(
+            {"path": watch_path, "recursive": recursive},
+            on_open=on_open, read_deadline=read_deadline)
+
+    # create: MakeDir inside the watched directory → one CREATE frame.
+    record("watch_create", mk(W, on_open=lambda: connect_unary(
+        "filesystem.Filesystem/MakeDir", {"path": f"{W}/d1"})))
+
+    # write: append in-sandbox (echo >>) → IN_MODIFY. Deliberately NOT the
+    # /files upload: upload's temp-file-then-rename path produces
+    # implementation-specific events (Go writes in place; cube-envd's data
+    # plane is PR-C scope), which would test the upload path, not the watch.
+    record("watch_write", mk(W, on_open=lambda: connect_stream(
+        "process.Process/Start", start_req(f"echo written >> {W}/seed.txt"))))
+
+    # chmod: in-sandbox process (IN_ATTRIB is otherwise unreachable over the wire).
+    record("watch_chmod", mk(W, on_open=lambda: connect_stream(
+        "process.Process/Start", start_req(f"chmod 600 {W}/seed.txt"))))
+
+    # rename: upstream maps MOVED_FROM→Rename and MOVED_TO→Create, so one
+    # Move must produce RENAME(old) followed by CREATE(new) — two frames.
+    record("watch_rename", mk(W, on_open=lambda: connect_unary(
+        "filesystem.Filesystem/Move",
+        {"source": f"{W}/seed.txt", "destination": f"{W}/renamed.txt"})))
+
+    # remove
+    record("watch_remove", mk(W, on_open=lambda: connect_unary(
+        "filesystem.Filesystem/Remove", {"path": f"{W}/renamed.txt"})))
+
+    # recursive: mkdir a then a/b — the second lands inside a directory whose
+    # watch was just registered; both CREATEs surface with relative names.
+    def rec_open():
+        connect_unary("filesystem.Filesystem/MakeDir", {"path": f"{RW}/a"})
+        connect_unary("filesystem.Filesystem/MakeDir", {"path": f"{RW}/a/b"})
+
+    record("watch_recursive", mk(RW, recursive=True, on_open=rec_open))
+
+    # disconnect: the client hangs up right after the Start frame. The
+    # recorded frames prove the pre-hangup sequence is identical on both
+    # sides; server-side teardown (fd/watch count back to baseline) is
+    # covered by the resource-leak gate, not by fixtures.
+    record("watch_disconnect", connect_stream(
+        "filesystem.Filesystem/WatchDir",
+        {"path": W, "recursive": False},
+        close_after_frames=1, read_deadline=5.0))
+
+    # keepalive: the cadence is header-tunable on both sides. A quiet watch
+    # with a 1s interval yields exactly two keepalive frames inside the 2.5s
+    # window (ticks at ~1s and ~2s; the next would be ~3s) — this makes the
+    # mechanism explicit; the 30s default itself is not fixtureable.
+    record("watch_keepalive", watch_stream(
+        {"path": W, "recursive": False},
+        read_deadline=2.5, extra_headers={"Keepalive-Ping-Interval": "1"}))
+
+    # pull-watcher trio, following upstream's watcher_test flow:
+    # create → get (empty) → mutate → get (events) → get (drained) →
+    # remove → get (not found).
+    trio = {}
+    trio["create"] = connect_unary(
+        "filesystem.Filesystem/CreateWatcher", {"path": W})
+    wid = None
+    try:
+        wid = json.loads(trio["create"]["body"]).get("watcherId")
+    except Exception:
+        pass
+    if wid:
+        trio["get_empty"] = connect_unary(
+            "filesystem.Filesystem/GetWatcherEvents", {"watcherId": wid})
+        connect_unary("filesystem.Filesystem/MakeDir", {"path": f"{W}/d2"})
+        trio["get_events"] = connect_unary(
+            "filesystem.Filesystem/GetWatcherEvents", {"watcherId": wid})
+        trio["get_drained"] = connect_unary(
+            "filesystem.Filesystem/GetWatcherEvents", {"watcherId": wid})
+        trio["remove"] = connect_unary(
+            "filesystem.Filesystem/RemoveWatcher", {"watcherId": wid})
+        trio["get_after_remove"] = connect_unary(
+            "filesystem.Filesystem/GetWatcherEvents", {"watcherId": wid})
+    else:
+        trio["skipped"] = "no watcherId in create response"
+    record("watch_trio", trio)
+
+    sweep()
+
+
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     if which in ("all", "cors"):
@@ -1034,4 +1222,7 @@ if __name__ == "__main__":
         cap_compose()
     if which in ("all", "init_token"):
         cap_init_token()
+    if which == "watch":
+        # Standalone rollout gate: never mixed into `all`.
+        cap_watch()
     print(f"\n{len(FIXTURES)} fixtures written to {OUTDIR}")

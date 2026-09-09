@@ -1140,13 +1140,22 @@ mod tests {
     }
 
     #[test]
-    fn malformed_nested_selector_cannot_reach_control_dispatch() {
-        // Decode before entering any selector-based service. This is the
-        // important side-effect boundary: malformed input must be rejected,
-        // never normalized to an empty selector or combined with a valid pid.
-        assert!(
-            serde_json::from_str::<ProcessSelector>(r#"{"selector":{"pid":7},"pid":8}"#).is_err()
-        );
+    fn nested_selector_decode_matches_upstream_discard_unknown() {
+        // connect-go's JSON codec drops unknown fields, so the legacy nested
+        // shape decodes to an empty selector and a flat pid survives a mixed
+        // payload — exactly like protojson DiscardUnknown upstream. Every
+        // selector consumer runs validated_selector before any side effect,
+        // so an empty selector fails with upstream's Unimplemented text and
+        // never reaches control dispatch.
+        let nested_only: ProcessSelector =
+            serde_json::from_str(r#"{"selector":{"pid":7}}"#).unwrap();
+        let err = validated_selector(&nested_only).unwrap_err();
+        assert_eq!(err.code, ConnectCode::Unimplemented);
+        assert_eq!(err.message, "invalid input type *process.ProcessSelector");
+
+        let mixed: ProcessSelector =
+            serde_json::from_str(r#"{"selector":{"pid":7},"pid":8}"#).unwrap();
+        assert_eq!(mixed.flatten(), (Some(8), None));
     }
 
     #[test]

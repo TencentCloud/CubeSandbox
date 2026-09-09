@@ -24,13 +24,14 @@ GO_DIR = sys.argv[1] if len(sys.argv) > 1 else "fixtures"
 RS_DIR = sys.argv[2] if len(sys.argv) > 2 else "fixtures-rust"
 
 # Fixtures where cube-envd intentionally differs (cube-envd/README.md).
+# (fs_watch_unary_probe left this list when PR-B implemented the watch
+# family; proc_sendinput_probe / proc_connect_missing /
+# proc_sendsignal_nested_probe left it when selector decoding switched to
+# connect-go's DiscardUnknown behavior. The remaining entries are the
+# still-standing differences.)
 DECLARED_DIFFERENT = {
-    "fs_watch_unary_probe": "CreateWatcher: implemented upstream, unimplemented in cube-envd",
     "rest_files_gzip_accept": "gzip download encoding: upstream supports, cube-envd identity-only",
     "rest_files_compose_probe": "/files/compose: implemented upstream, 501 in cube-envd",
-    "proc_sendinput_probe": "nested selector: upstream returns unimplemented (501); cube-envd rejects the unknown field during decoding (400 invalid_argument); neither writes input",
-    "proc_connect_missing": "nested selector: upstream streams unimplemented; cube-envd streams invalid_argument for the unknown field; neither attaches",
-    "proc_sendsignal_nested_probe": "nested selector: upstream returns unimplemented (501); cube-envd rejects the unknown field during decoding (400 invalid_argument); neither signals a process (#1227)",
     "fs_bad_json": "JSON parse error wording is parser-specific (code and status equal)",
     "rest_init_timestamp_out_of_range": "timestamp outside i64-nanosecond range (9999): upstream UnixNano() wraps and drops as stale (204); cube-envd rejects as a caller bug (400). Neither applies anything nor moves the gate",
 }
@@ -92,6 +93,10 @@ def normalize(obj, path=""):
         s = TIME_RE.sub("<time>", obj)
         s = re.sub(r'"pid": \d+', '"pid": <int>', s)
         s = re.sub(r'"watcherId": "\w+"', '"watcherId": "<id>"', s)
+        # watcher ids also surface inside error messages (GetWatcherEvents on
+        # a removed watcher: "watcher with id <random> not found").
+        s = re.sub(r'watcher with id [0-9a-zA-Z]+ not found',
+                   'watcher with id <id> not found', s)
         s = re.sub(r'"ts":\d+', '"ts":<int>', s)
         s = re.sub(r"\d{4}-\d{2}-\d{2}T[\d:.]+Z", "<time>", s)
         # Raw JSON bodies: parse and re-normalize when possible.

@@ -13,7 +13,7 @@ use axum::extract::State;
 use axum::http::header::{HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Extension, Router};
 use futures::StreamExt;
 
 use crate::auth::{self, User};
@@ -22,12 +22,18 @@ use crate::cors;
 use crate::error::{ConnectCode, ConnectError};
 use crate::legacy;
 use crate::rest;
+use crate::services::watch as watch_svc;
 use crate::services::{filesystem as fs_svc, process as proc_svc};
 use crate::state::AppState;
 
 pub(crate) const MAX_UNARY_BODY: usize = 4 * 1024 * 1024;
 
 pub fn router(state: Arc<AppState>) -> Router {
+    // Pull-watcher registry: constructed here and shared via Extension,
+    // mirroring upstream's `Service.watchers` (`service.go:15-19`). It lives
+    // with its only users in `services/watch.rs` instead of `AppState`, so
+    // the shared state layer carries no watch-specific entries.
+    let watchers = Arc::new(watch_svc::WatchRegistry::new());
     Router::new()
         // REST
         .route("/health", get(rest::health))
@@ -54,22 +60,22 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/filesystem.Filesystem/MakeDir", post(fs_make_dir))
         .route("/filesystem.Filesystem/Move", post(fs_move))
         .route("/filesystem.Filesystem/Remove", post(fs_remove))
-        .route(
-            "/filesystem.Filesystem/WatchDir",
-            post(stream_unimplemented("Filesystem/WatchDir")),
-        )
+        .route("/filesystem.Filesystem/WatchDir", post(fs_watch_dir))
         .route(
             "/filesystem.Filesystem/CreateWatcher",
-            post(unary_unimplemented("Filesystem/CreateWatcher")),
+            post(fs_create_watcher),
         )
         .route(
             "/filesystem.Filesystem/GetWatcherEvents",
-            post(unary_unimplemented("Filesystem/GetWatcherEvents")),
+            post(fs_get_watcher_events),
         )
         .route(
             "/filesystem.Filesystem/RemoveWatcher",
-            post(unary_unimplemented("Filesystem/RemoveWatcher")),
+            post(fs_remove_watcher),
         )
+        // Pull-watcher registry (see above). Applied to every route; only
+        // the watch unaries actually extract it.
+        .layer(Extension(watchers))
         .layer(tower_http::catch_panic::CatchPanicLayer::custom(
             panic_handler,
         ))
@@ -464,32 +470,84 @@ fs_unary!(
     fs_svc::remove
 );
 
+// ---------- filesystem watch handlers ----------
+
+// The upstream legacy filesystem surface has no watch family, so none of
+// these get the legacy downgrade/narrowing the fs_unary! unaries apply.
+
+/// Streaming WatchDir: prechecks + tree build cross the blocking pool once
+/// (a deep recursive initial walk is syscall-heavy), then the async pump owns
+/// the inotify fd until the client disconnects or a watcher error kills the
+/// stream. All failures — precheck or mid-stream — surface as EndStream error
+/// frames on HTTP 200, like every upstream streaming error.
+async fn fs_watch_dir(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    if let Err(e) = rpc_token_check(&state, &headers) {
+        return e.into_response();
+    }
+    let req: crate::msg::filesystem::WatchDirRequest =
+        match read_unary_request(&headers, body).await {
+            Ok(r) => r,
+            Err(e) => return e.into_response(),
+        };
+    let user = match rpc_user(&state, &headers) {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+    crate::blocking::run("fs_watch_dir", move || {
+        watch_svc::watch_dir(&req, &user, &headers)
+    })
+    .await
+}
+
+macro_rules! watch_unary {
+    ($name:ident, $req:ty, $svc:path) => {
+        async fn $name(
+            State(state): State<Arc<AppState>>,
+            Extension(watchers): Extension<Arc<watch_svc::WatchRegistry>>,
+            headers: HeaderMap,
+            body: axum::body::Body,
+        ) -> axum::response::Response {
+            if let Err(e) = rpc_token_check(&state, &headers) {
+                return e.into_response();
+            }
+            let req: $req = match read_unary_request(&headers, body).await {
+                Ok(r) => r,
+                Err(e) => return e.into_response(),
+            };
+            let user = match rpc_user(&state, &headers) {
+                Ok(u) => u,
+                Err(e) => return e.into_response(),
+            };
+            let fut = crate::blocking::run(stringify!($name), move || $svc(&req, &user, &watchers));
+            match fut.await {
+                Ok(v) => unary_json(v),
+                Err(e) => e.into_response(),
+            }
+        }
+    };
+}
+
+watch_unary!(
+    fs_create_watcher,
+    crate::msg::filesystem::CreateWatcherRequest,
+    watch_svc::create_watcher
+);
+watch_unary!(
+    fs_get_watcher_events,
+    crate::msg::filesystem::GetWatcherEventsRequest,
+    watch_svc::get_watcher_events
+);
+watch_unary!(
+    fs_remove_watcher,
+    crate::msg::filesystem::RemoveWatcherRequest,
+    watch_svc::remove_watcher
+);
+
 // ---------- unimplemented surfaces ----------
-
-/// Unary RPCs outside the MVP: HTTP 501 + `{"code":"unimplemented",...}`.
-fn unary_unimplemented(
-    what: &'static str,
-) -> impl Fn(
-    HeaderMap,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = axum::response::Response> + Send>>
-       + Clone {
-    move |_headers: HeaderMap| {
-        Box::pin(async move { ConnectError::unimplemented(what).into_response() })
-    }
-}
-
-/// Streaming RPCs outside the MVP: HTTP 200 + EndStream error frame,
-/// matching how upstream reports errors on streaming surfaces.
-fn stream_unimplemented(
-    what: &'static str,
-) -> impl Fn(
-    HeaderMap,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = axum::response::Response> + Send>>
-       + Clone {
-    move |_headers: HeaderMap| {
-        Box::pin(async move { proc_svc::stream_error_response(ConnectError::unimplemented(what)) })
-    }
-}
 
 async fn compose_unimplemented() -> axum::response::Response {
     crate::error::RestError::new(

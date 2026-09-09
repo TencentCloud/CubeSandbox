@@ -8,16 +8,15 @@
 //! Go baseline runs each handler as a blocking goroutine, and the closest
 //! faithful analogue is one `spawn_blocking` crossing **per request**, never
 //! one per syscall (`tokio::fs`'s mistake — each crossing costs ~29µs
-//! measured, while the syscall itself is ~0.3µs; see
-//! docs/cube-envd/fs-counterproposal-2026-09-08.md §1.4-1.6).
+//! measured, while the syscall itself is ~0.3µs).
 //!
-//! Minimal version (plan §5): in-flight counting + peak tracking only. The
+//! Minimal version: in-flight counting + peak tracking only. The
 //! long-op semaphore is deliberately absent until queueing is actually
 //! observed. `/metrics` is wire-compatible with the Go baseline, so the
 //! counters are NOT exposed there — the unit tests and the worker-heartbeat
 //! guard below assert on them directly.
 //!
-//! Removal clause (plan §5.3): if `blocking::run` ever has fewer than five
+//! Removal clause: if `blocking::run` ever has fewer than five
 //! call sites, delete this module and go back to bare `spawn_blocking`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -38,7 +37,7 @@ pub fn peak() -> usize {
 fn enter() {
     let n = IN_FLIGHT.fetch_add(1, Ordering::Relaxed) + 1;
     PEAK.fetch_max(n, Ordering::Relaxed);
-    // The observability surface for "is the pool being touched" (plan §5):
+    // The observability surface for "is the pool being touched":
     // a new peak is logged, but /metrics stays byte-identical with the Go
     // baseline, so nothing is added to the wire.
     if n > 1 && n == peak() {
@@ -104,7 +103,7 @@ mod tests {
     /// assertions never observe each other's tasks.
     static TEST_SERIAL: Mutex<()> = Mutex::new(());
 
-    /// The guardrail from plan §5: while blocking tasks occupy the pool,
+    /// The guardrail: while blocking tasks occupy the pool,
     /// the async workers must keep ticking. A regression that runs blocking
     /// work on a worker (the pre-PR-A bug) makes this gap explode.
     /// CI-safe: the bound is an order of magnitude above the expected tick.

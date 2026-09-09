@@ -83,6 +83,104 @@ pub struct ListDirResponse {
     pub entries: Vec<EntryInfo>,
 }
 
+// ---- Watch family (spec/filesystem/filesystem.proto:83-135) ----
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WatchDirRequest {
+    #[serde(default)]
+    pub path: String,
+    /// Upstream encodes recursion by appending `/...` to the watched path
+    /// (`utils/rfsnotify.go:6-12`); here it stays a bool and drives the
+    /// per-directory watch walk instead.
+    #[serde(default)]
+    pub recursive: bool,
+}
+
+/// `WatchDirResponse` proto3 JSON: the oneof flattens, so each frame is a
+/// single-key object — `{"start":{}}` / `{"filesystem":{...}}` /
+/// `{"keepalive":{}}` (verified against the SDKs: `filesystem.ts:289` reads
+/// `data.filesystem` at top level). Externally-tagged enum gives exactly
+/// that shape. Note this differs from the process stream, whose proto wraps
+/// the oneof in an explicit `event` field.
+#[derive(Debug, Clone, Serialize)]
+pub enum WatchDirResponse {
+    #[serde(rename = "start")]
+    Start(StartEvent),
+    #[serde(rename = "filesystem")]
+    Filesystem(FilesystemEvent),
+    #[serde(rename = "keepalive")]
+    KeepAlive(serde_json::Map<String, serde_json::Value>),
+}
+
+/// Empty proto message — serializes as `{}`.
+#[derive(Debug, Clone, Serialize)]
+pub struct StartEvent {}
+
+/// proto3 JSON omits the default enum value, so `EVENT_TYPE_UNSPECIFIED`
+/// never reaches the wire: every emitted event carries a concrete type.
+///
+/// ⚠️ The declaration order here is the proto numbering (CREATE=1, WRITE=2,
+/// REMOVE=3, RENAME=4, CHMOD=5) and is NOT the emission order. Upstream
+/// expands one kernel event in the fixed order Create → Rename → Chmod →
+/// Write → Remove (`watch.go:105-123`); see `services/watch.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum EventType {
+    #[serde(rename = "EVENT_TYPE_CREATE")]
+    Create,
+    #[serde(rename = "EVENT_TYPE_WRITE")]
+    Write,
+    #[serde(rename = "EVENT_TYPE_REMOVE")]
+    Remove,
+    #[serde(rename = "EVENT_TYPE_RENAME")]
+    Rename,
+    #[serde(rename = "EVENT_TYPE_CHMOD")]
+    Chmod,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FilesystemEvent {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub event_type: EventType,
+}
+
+// ---- Pull watchers (proto:105-126) ----
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateWatcherRequest {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub recursive: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateWatcherResponse {
+    #[serde(rename = "watcherId")]
+    pub watcher_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GetWatcherEventsRequest {
+    #[serde(default, rename = "watcherId")]
+    pub watcher_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GetWatcherEventsResponse {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<FilesystemEvent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoveWatcherRequest {
+    #[serde(default, rename = "watcherId")]
+    pub watcher_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoveWatcherResponse {}
+
 pub fn file_type_of(meta: &std::fs::Metadata) -> &'static str {
     // shared `getEntryType` (entry.go:72-82): regular -> FILE, dir ->
     // DIRECTORY, symlink -> SYMLINK, anything else -> UnknownFileType.

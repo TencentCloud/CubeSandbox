@@ -58,11 +58,14 @@ pub struct StartRequest {
 
 /// Flat oneof selector: `{"pid":1}` or `{"tag":"t"}`.
 ///
-/// The nested `{"selector":{...}}` shape is deliberately NOT understood.
-/// Upstream Go envd rejects that shape outright; a nested-only selector
-/// is rejected before control dispatch (#1227: no destructive side effects).
+/// Unknown fields are ignored by the decoder, matching connect-go's JSON
+/// codec (`DiscardUnknown`). Older SDKs send the nested
+/// `{"selector":{...}}` shape — the unknown `selector` key is dropped and
+/// the empty selector fails later in `validated_selector` with the same
+/// Unimplemented text as upstream's default branch (`service.go:80`,
+/// `invalid input type *process.ProcessSelector`); verified byte-identical
+/// against the Go baseline (proc_*_probe fixtures).
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProcessSelector {
     #[serde(default)]
     pub pid: Option<u32>,
@@ -322,12 +325,16 @@ mod tests {
     }
 
     #[test]
-    fn selector_flat_only_nested_rejected() {
+    fn nested_selector_key_is_ignored_like_connect_go() {
         let flat: ProcessSelector = serde_json::from_str(r#"{"tag":"t1"}"#).unwrap();
         assert_eq!(flat.flatten(), (None, Some("t1".to_string())));
         let flat_pid: ProcessSelector = serde_json::from_str(r#"{"pid":42}"#).unwrap();
         assert_eq!(flat_pid.flatten(), (Some(42), None));
-        assert!(serde_json::from_str::<ProcessSelector>(r#"{"selector":{"pid":7}}"#).is_err());
+        // The legacy nested shape decodes to an EMPTY selector: connect-go's
+        // JSON codec discards unknown fields, and the empty selector then
+        // fails validated_selector with upstream's Unimplemented text.
+        let nested: ProcessSelector = serde_json::from_str(r#"{"selector":{"pid":7}}"#).unwrap();
+        assert_eq!(nested.flatten(), (None, None));
     }
 
     #[test]

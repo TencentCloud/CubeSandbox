@@ -76,13 +76,6 @@ impl ConnectError {
         }
     }
 
-    pub fn unimplemented(what: &str) -> Self {
-        Self::new(
-            ConnectCode::Unimplemented,
-            format!("{what} is not implemented by cube-envd (see CubeSandbox issue #1227 for the MVP scope)"),
-        )
-    }
-
     pub fn body_json(&self) -> String {
         serde_json::json!({
             "code": self.code.as_str(),
