@@ -256,4 +256,4 @@ bakes it into the image as `/usr/bin/envd`, runs a `:49983/health`
 smoke test plus `envd -version`/`-commit` checks on native
 `linux/amd64` and `linux/arm64` runners, then publishes a multi-arch
 manifest list to `ghcr.io/tencentcloud/cubesandbox-base` (tags:
-`latest` and `<sha>-ubuntu22.04` on `master`).
+`latest`, `sha-<short>`, and `sha-<short>-ubuntu22.04` on `master`).

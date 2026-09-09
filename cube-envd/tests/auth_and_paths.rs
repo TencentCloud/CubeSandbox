@@ -52,6 +52,11 @@ fn paths_resolve_relative_and_tilde_forms_under_the_user_home() {
         resolve_path("~/workspace/a", &user()).unwrap(),
         PathBuf::from("/home/alice/workspace/a")
     );
+    // 单独的 ~ 指调用者自己的家目录（对齐上游 Go envd 的 expand）。
+    assert_eq!(
+        resolve_path("~", &user()).unwrap(),
+        PathBuf::from("/home/alice")
+    );
     assert_eq!(
         resolve_path("/tmp/a", &user()).unwrap(),
         PathBuf::from("/tmp/a")

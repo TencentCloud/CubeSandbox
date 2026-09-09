@@ -244,5 +244,5 @@ docker exec "$cid" cat /var/log/envd.log
 `/usr/bin/envd` 打进镜像，在原生 `linux/amd64` 与 `linux/arm64`
 runner 上分别对 `:49983/health` 做 smoke test 并验证
 `envd -version`/`-commit`，再合成 multi-arch manifest list 推送到
-`ghcr.io/tencentcloud/cubesandbox-base`（`master` 上推送 `latest` 与
-`<sha>-ubuntu22.04` 标签）。
+`ghcr.io/tencentcloud/cubesandbox-base`（`master` 上推送 `latest`、
+`sha-<short>` 与 `sha-<short>-ubuntu22.04` 标签）。
