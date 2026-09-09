@@ -207,3 +207,54 @@ async fn multiple_subscribers_receive_identical_ordered_events() {
     assert_eq!(a, (0..16).collect::<Vec<_>>());
     assert_eq!(b, a);
 }
+
+/// 验证 seal 之后普通输出事件被丢弃，而 End 事件仍能投递到队尾。
+#[tokio::test]
+async fn sealed_fanout_drops_output_but_still_delivers_end() {
+    let (fanout, mut subscription) = OutputFanout::new();
+
+    // seal 前的事件正常送达。
+    fanout.send(ProcessEvent::Stdout(vec![1])).await;
+    fanout.seal();
+
+    // seal 后的普通输出被丢弃：send 立即返回且订阅者收不到它。
+    let send = time::timeout(
+        Duration::from_secs(1),
+        fanout.send(ProcessEvent::Stdout(vec![2])),
+    )
+    .await;
+    assert!(send.is_ok(), "sealed send must not block");
+    fanout
+        .send(ProcessEvent::End(EndEvent {
+            exit_code: 0,
+            exited: true,
+            status: "exit status 0".into(),
+            error: None,
+        }))
+        .await;
+
+    // 订阅者依次收到：seal 前的 Stdout，然后是 End——中间没有 seal 后的输出。
+    match time::timeout(Duration::from_secs(1), subscription.recv())
+        .await
+        .expect("pre-seal stdout in time")
+        .expect("event delivered")
+    {
+        ProcessEvent::Stdout(bytes) => assert_eq!(bytes, vec![1]),
+        _other => panic!("expected the pre-seal stdout first"),
+    }
+    match time::timeout(Duration::from_secs(1), subscription.recv())
+        .await
+        .expect("End in time")
+        .expect("event delivered")
+    {
+        ProcessEvent::End(end) => assert!(end.exited),
+        _other => panic!("expected End after seal"),
+    }
+    // seal 后不应再有第四个事件：stdout 在 seal 后已被丢弃。
+    assert!(
+        time::timeout(Duration::from_millis(100), subscription.recv())
+            .await
+            .is_err(),
+        "no output event may follow End after seal"
+    );
+}
