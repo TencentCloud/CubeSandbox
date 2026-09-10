@@ -294,6 +294,27 @@ pub(super) fn watch_event_kind(kind: EventKind) -> Option<proto::EventType> {
     }
 }
 
+/// 判断路径是否为文件系统根目录或挂载点。
+///
+/// 挂载点判定用"父目录的 `st_dev` 与自身不同"这一标准做法：跨设备意味着该目录是另一个
+/// 文件系统的挂载根。递归删除这类路径会越过本次操作的语义边界（例如清空 guest 根
+/// 文件系统的子树、或删进某个卷），因此 `Remove` 必须拒绝。
+pub(super) async fn is_filesystem_root_or_mount_point(path: &Path) -> Result<bool, RpcError> {
+    let Some(parent) = path.parent() else {
+        // 形如 "/"：没有父目录即为根。
+        return Ok(true);
+    };
+
+    let target = fs::metadata(path)
+        .await
+        .map_err(|error| filesystem_error(path, error))?;
+    let parent = fs::metadata(parent)
+        .await
+        .map_err(|error| filesystem_error(parent, error))?;
+
+    Ok(target.dev() != parent.dev())
+}
+
 /// 在线程池中依据文件系统 magic number 判断路径是否位于网络挂载上。
 pub(super) async fn is_network_mount(path: &Path) -> Result<bool, RpcError> {
     let path = path.to_path_buf();

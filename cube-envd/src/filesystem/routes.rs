@@ -12,7 +12,10 @@ use crate::{
 };
 
 use super::{
-    entries::{collect_entries, ensure_owned_dirs, entry_info, resolve, unary_request},
+    entries::{
+        collect_entries, ensure_owned_dirs, entry_info, is_filesystem_root_or_mount_point, resolve,
+        unary_request,
+    },
     error::filesystem_error,
     model::proto_entry,
 };
@@ -106,6 +109,7 @@ pub async fn list_dir(request: Request) -> Result<Response, RpcError> {
 /// 删除文件或递归删除目录。
 ///
 /// 与上游 `os.RemoveAll` 一致：路径不存在视为成功（幂等），因此重复删除不会报错。
+/// 另外拒绝删除文件系统根目录与挂载点——递归删除会越过本次操作的语义边界。
 pub async fn remove(request: Request) -> Result<Response, RpcError> {
     let (user, body) = unary_request(request).await?;
     let request: proto::RemoveRequest = wire::decode_json(&body, "Remove request")?;
@@ -119,6 +123,12 @@ pub async fn remove(request: Request) -> Result<Response, RpcError> {
         Err(error) => return Err(filesystem_error(&path, error)),
     };
     if metadata.file_type().is_dir() {
+        if is_filesystem_root_or_mount_point(&path).await? {
+            return Err(RpcError::invalid_argument(format!(
+                "refusing to remove filesystem root or mount point {}",
+                path.display()
+            )));
+        }
         fs::remove_dir_all(&path)
             .await
             .map_err(|error| filesystem_error(&path, error))?;
