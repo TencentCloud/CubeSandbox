@@ -6,13 +6,85 @@ Assumes envd-go2 (:49985) and envd-rust (:49984) containers are running.
 import json
 import statistics
 import subprocess
+import threading
 import time
+
+import http.client
 
 import capture  # reuse the raw connect client (module-level HOST/PORT)
 
 
 def sh(cmd):
     return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout.strip()
+
+
+def rss_kib_during_upload(container, size_mib=256, port=49984):
+    """Stream a `size_mib` upload to /files while sampling the daemon's RSS.
+
+    Returns (status, peak_rss_delta_kib, seconds). The payload never sits in
+    memory when uploads stream to disk (PR-C), so the delta stays at
+    buffer-sized levels; a whole-body-buffering regression shows up as a
+    delta equal to the upload size.
+    """
+    def rss_kib():
+        out = subprocess.check_output(
+            ["docker", "exec", container, "sh", "-c",
+             "grep VmRSS /proc/$(pidof cube-envd)/status"])
+        return int(out.decode().split()[1])
+
+    baseline = rss_kib()
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=600)
+    total = size_mib * 1024 * 1024
+    conn.putrequest("POST", "/files?path=/home/user/rss_probe.bin&username=user")
+    conn.putheader("Content-Type", "application/octet-stream")
+    conn.putheader("Content-Length", str(total))
+    conn.endheaders()
+    peak = baseline
+    stop = False
+
+    def sampler():
+        nonlocal peak
+        while not stop:
+            try:
+                peak = max(peak, rss_kib())
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+    t = threading.Thread(target=sampler)
+    t.start()
+    t0 = time.time()
+    chunk = b"x" * (1024 * 1024)
+    for _ in range(size_mib):
+        conn.send(chunk)
+    resp = conn.getresponse()
+    resp.read()
+    stop = True
+    t.join()
+    return resp.status, peak - baseline, time.time() - t0
+
+
+def download_throughput(mib=100, port=49984):
+    """Download a mib-MiB file from /files and return throughput in MiB/s.
+
+    The file must already exist in the sandbox (created by the caller via
+    docker exec dd).
+    """
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=300)
+    conn.putrequest(
+        "GET", f"/files?path=/home/user/throughput_{mib}m.bin&username=user")
+    conn.putheader("Authorization", "Basic dXNlcjo=")
+    conn.endheaders()
+    r = conn.getresponse()
+    total = 0
+    t0 = time.time()
+    while True:
+        chunk = r.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+    dt = time.time() - t0
+    return r.status, total / dt / 1024 / 1024
 
 
 def startup_ms(container, binary, runs=10):
@@ -69,6 +141,28 @@ if __name__ == "__main__":
 
     result["cmd_latency_go"] = cmd_latency_ms(49985)
     result["cmd_latency_rust"] = cmd_latency_ms(49984)
+
+    # PR-C data plane: upload must stream to disk (RSS delta stays at
+    # buffer levels, not the upload size) and download throughput must not
+    # regress against the Go baseline on the same host.
+    status, delta_kib, secs = rss_kib_during_upload("envd-rust", 256, 49984)
+    result["upload_256m_rust"] = {
+        "status": status,
+        "rss_delta_kib": delta_kib,
+        "seconds": round(secs, 2),
+    }
+    for c in ("envd-go2", "envd-rust"):
+        sh(f"docker exec {c} sh -c "
+           "'dd if=/dev/zero of=/home/user/throughput_100m.bin bs=1M count=100 2>/dev/null'")
+    _, tp_go = download_throughput(100, 49985)
+    _, tp_rust = download_throughput(100, 49984)
+    result["download_mibs_go"] = round(tp_go)
+    result["download_mibs_rust"] = round(tp_rust)
+    # Leftover artifacts would leak into the next conformance ListDir
+    # capture (they live in /home/user next to the fixture files).
+    for c in ("envd-go2", "envd-rust"):
+        sh(f"docker exec {c} rm -f /home/user/rss_probe.bin "
+           "/home/user/throughput_100m.bin")
 
     go_start = startup_ms("envd-go2", "/usr/bin/envd")
     rust_start = startup_ms("envd-rust", "/usr/bin/cube-envd")

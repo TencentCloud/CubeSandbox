@@ -73,13 +73,16 @@ load-bearing ones, and why cube-envd differs:
   `{"selector":{...}}` shape decodes to an empty selector that fails with the
   same `unimplemented` as the upstream service default branch — nothing is
   signalled, attached to, or otherwise side-effected (#1227).
-- **Uploads buffer in memory (bounded).** Both upload paths hold the payload
-  (≤ 256 MiB) in memory before the atomic temp-file write; Go streams to disk.
-  Worst case is bounded and rejected cleanly with 413 above the cap, but very
-  memory-tight sandboxes doing several concurrent max-size uploads should be
-  aware. Overwriting an existing file preserves its mode bits. Multipart
-  parts without a filename are ignored as form fields (only the raw
-  octet-stream path uses the `?path` query target).
+- **Uploads stream to disk in place (matching upstream).** Both upload paths
+  stream the request body straight into the target file
+  (`O_WRONLY|O_CREATE|O_TRUNC`, `upload.go:68`) — the payload never sits in
+  memory (a 256 MiB upload adds ~6 MiB to the daemon's RSS). As in upstream,
+  the write is **not atomic**: an interrupted upload leaves partial content
+  in the target, concurrent readers see it grow, and a failed upload is not
+  rolled back. Above the 256 MiB cap the upload stops mid-stream with 413.
+  Overwriting an existing file preserves its mode bits (`O_TRUNC` never
+  touches the mode). Multipart parts without a filename are ignored as form
+  fields (only the raw octet-stream path uses the `?path` query target).
 - **CLI parsing is stricter than Go's `flag` (documented).** *Unlike the
   upstream Go envd, cube-envd strictly validates every command-line argument:
   an invalid flag, a positional argument or a malformed value terminates

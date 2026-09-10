@@ -16,7 +16,6 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
@@ -33,12 +32,13 @@ use crate::state::AppState;
 /// Upstream envd's upload handler is unbounded (it streams to disk); in
 /// production the cap is enforced by the proxy layer, which rejects bodies
 /// over 256 MiB. Mirroring that external cap keeps the 64 MiB - 256 MiB
-/// range functional (a proxy-passed 100 MiB upload must succeed here too)
-/// while still bounding memory: unlike upstream, the body is buffered
-/// before the atomic temp-file write, so the cap is also the memory
-/// ceiling. (Streaming to disk would remove that trade-off — future work.)
-/// Deliberately NOT `connect::MAX_ENVELOPE_SIZE` (64 MiB): that constant
-/// bounds Connect envelopes, not file uploads.
+/// range functional (a proxy-passed 100 MiB upload must succeed here too).
+/// Both upload paths stream straight to disk, so the cap is enforced by
+/// counting bytes mid-stream — crossing it stops the write with 413 and the
+/// partial content stays in the target, like an interrupted upstream upload;
+/// the payload never sits in memory. Deliberately NOT
+/// `connect::MAX_ENVELOPE_SIZE` (64 MiB): that constant bounds Connect
+/// envelopes, not file uploads.
 const MAX_UPLOAD_SIZE: usize = 256 * 1024 * 1024;
 
 fn resolve_request_user(
@@ -598,6 +598,12 @@ async fn sniff_content_type(f: &mut tokio::fs::File) -> std::io::Result<&'static
 /// Chunked reader stream (64 KiB) without pulling in tokio-util. `limit`
 /// bounds the total bytes produced (single-range 206 bodies); `None` streams
 /// to EOF.
+///
+/// Deliberately NOT a blocking-task pump: a measured alternative (channel +
+/// dedicated reader task, 256 KiB chunks) peaked at ~570-670 MiB/s on
+/// loopback while this unfold version sustains ~870-900 MiB/s — the
+/// per-read spawn_blocking dispatch overlaps with IO instead of serializing
+/// behind a cross-task handoff. Measured, not assumed (PR-C, 2026-09-09).
 fn reader_stream(
     file: tokio::fs::File,
     limit: Option<u64>,
@@ -694,9 +700,7 @@ async fn upload_raw(
     };
     let path = auth::resolve_path(raw_path, user);
     // Typed fast path for the common case: a declared Content-Length over
-    // the cap is rejected without reading the body. (axum 0.7's to_bytes
-    // error has no public typed accessor, so chunked bodies still rely on
-    // the string match below.)
+    // the cap is rejected without reading the body.
     if let Some(len) = content_length {
         if len > MAX_UPLOAD_SIZE as u64 {
             return Err(RestError::new(
@@ -705,36 +709,45 @@ async fn upload_raw(
             ));
         }
     }
-    let data = axum::body::to_bytes(body, MAX_UPLOAD_SIZE)
-        .await
-        .map_err(|e| {
-            // A body over the cap must report 413 like the multipart path
-            // (and the documented contract), not a generic 400.
-            let msg = e.to_string();
-            if msg.contains("length limit") {
-                RestError::new(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    format!("the upload exceeds the {MAX_UPLOAD_SIZE}-byte limit"),
-                )
-            } else {
-                RestError::new(
-                    StatusCode::BAD_REQUEST,
-                    format!("error reading body: {msg}"),
-                )
+    // Stream the body into the in-place writer through a bounded channel:
+    // network-paced reads backpressure against disk-paced writes, and the
+    // payload never sits in memory (one blocking crossing per upload).
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, RestError>>(16);
+    let writer = spawn_upload_writer(path.clone(), user.clone(), rx);
+    let mut stream = std::pin::pin!(body.into_data_stream());
+    {
+        use futures::StreamExt as _;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(c) => {
+                    if tx.send(Ok(c)).await.is_err() {
+                        // The writer finished early (413/write error) — its
+                        // result is the authoritative outcome.
+                        break;
+                    }
+                }
+                Err(e) => {
+                    // Forward as the writer's terminal error; the partial
+                    // content stays in the target, like upstream's io.Copy
+                    // failure mid-stream.
+                    let _ = tx
+                        .send(Err(RestError::new(
+                            StatusCode::BAD_REQUEST,
+                            format!("error reading body: {e}"),
+                        )))
+                        .await;
+                    break;
+                }
             }
-        })?;
-    let user_owned = user.clone();
-    let path_owned = path.clone();
-    // Disk writes (up to 64 MiB + fsync) must not block the small tokio
-    // worker pool — a stalled worker would also stall /health.
-    tokio::task::spawn_blocking(move || write_file(&path_owned, &data, &user_owned))
-        .await
-        .map_err(|e| {
-            RestError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("write task: {e}"),
-            )
-        })??;
+        }
+    }
+    drop(tx);
+    writer.await.map_err(|e| {
+        RestError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("write task: {e}"),
+        )
+    })??;
     Ok(vec![entry_for(&path)])
 }
 
@@ -772,7 +785,7 @@ async fn upload_multipart(
     let mut multipart = multer::Multipart::with_constraints(stream, boundary, constraints);
 
     let mut entries = Vec::new();
-    while let Some(field) = multipart.next_field().await.map_err(map_multipart_error)? {
+    while let Some(mut field) = multipart.next_field().await.map_err(map_multipart_error)? {
         // Only parts carrying a filename are file uploads (part filename =
         // target path, matching upstream). A plain form field must not fall
         // back to the `?path` query target — that would let a stray text
@@ -782,18 +795,47 @@ async fn upload_multipart(
             continue;
         };
         let path = auth::resolve_path(&target, user);
-        let data = field.bytes().await.map_err(map_multipart_error)?;
-        let user_owned = user.clone();
-        let path_owned = path.clone();
-        // Same reasoning as upload_raw: keep big writes off the async workers.
-        tokio::task::spawn_blocking(move || write_file(&path_owned, &data, &user_owned))
-            .await
-            .map_err(|e| {
-                RestError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("write task: {e}"),
-                )
-            })??;
+        // Stream the part chunk-by-chunk into the in-place writer; multer's
+        // whole-stream/per-field limits keep counting as data flows
+        // (StreamSizeExceeded still maps to 413). Fields are handled
+        // serially — each writer finishes before the next field starts — to
+        // preserve the entries order and error propagation, like upstream's
+        // part loop.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, RestError>>(16);
+        let writer = spawn_upload_writer(path.clone(), user.clone(), rx);
+        // Stream the part chunk-by-chunk into the in-place writer; multer's
+        // whole-stream/per-field limits keep counting as data flows
+        // (StreamSizeExceeded still maps to 413). Fields are handled
+        // serially — each writer finishes before the next field starts — to
+        // preserve the entries order and error propagation, like upstream's
+        // part loop.
+        //
+        // A part read error is forwarded as the writer's terminal error
+        // (like the raw path) instead of returning early: the writer is
+        // ALWAYS awaited below, so its result — a mid-stream write error,
+        // ENOSPC, or this parser error, whichever lands first — is never
+        // discarded and the file is finalized before the response goes out.
+        loop {
+            match field.chunk().await {
+                Ok(Some(chunk)) => {
+                    if tx.send(Ok(chunk)).await.is_err() {
+                        break; // writer finished early (413/write error) — its result wins
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = tx.send(Err(map_multipart_error(e))).await;
+                    break;
+                }
+            }
+        }
+        drop(tx);
+        writer.await.map_err(|e| {
+            RestError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("write task: {e}"),
+            )
+        })??;
         entries.push(entry_for(&path));
     }
     if entries.is_empty() {
@@ -836,67 +878,58 @@ fn entry_for(path: &str) -> UploadEntry {
     }
 }
 
-/// Create parents (owned by the user), write via temp file + rename, chown.
-/// Overwriting an existing file preserves its mode bits (upstream envd writes
-/// in place with O_TRUNC, which never touches the mode; the temp-file path
-/// must copy it explicitly or an executable script would lose its x bits).
-fn write_file(path: &str, data: &[u8], user: &User) -> Result<(), RestError> {
-    let target = std::path::Path::new(path);
-    if let Some(parent) = target.parent() {
-        if !parent.exists() {
-            create_dirs_owned(parent, user)?;
+/// Streaming upload sink: owns the target file and pulls chunks through a
+/// bounded channel — network-paced reads backpressure against disk-paced
+/// writes, one blocking crossing per upload. The write is **in-place
+/// `O_TRUNC` at the target path**, matching upstream `upload.go:68`
+/// (`os.OpenFile(path, O_WRONLY|O_CREATE|O_TRUNC, 0o666)`): no temp file, no
+/// rename, partial content visible on interruption (upstream contract),
+/// symlinks followed (upstream contract), and an existing file's mode
+/// untouched by `O_TRUNC`.
+///
+/// A chunk arriving after the size cap is exceeded stops the write and
+/// returns 413 — the partial content stays in the target, like an in-place
+/// upload that dies mid-stream. A body-read failure (sent as the `Err` arm)
+/// behaves the same way, like upstream's io.Copy failing mid-copy.
+fn spawn_upload_writer(
+    path: String,
+    user: User,
+    mut chunks: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, RestError>>,
+) -> tokio::task::JoinHandle<Result<(), RestError>> {
+    tokio::task::spawn_blocking(move || {
+        let target = std::path::Path::new(&path);
+        if let Some(parent) = target.parent() {
+            if !parent.exists() {
+                create_dirs_owned(parent, &user)?;
+            }
         }
-    }
-    // lstat, not stat: if the target is a symlink we replace the link itself,
-    // so the mode to preserve is the link entry's, never the followed target's.
-    let existing_mode = std::fs::symlink_metadata(target)
-        .ok()
-        .filter(|m| m.is_file())
-        .map(|m| m.permissions().mode());
-
-    let dir = target.parent().unwrap_or(std::path::Path::new("/"));
-    let tmp_path = dir.join(format!(
-        ".cube-envd-upload-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-
-    let write_result = (|| -> std::io::Result<()> {
-        // create_new (O_EXCL): never follow or reuse a pre-planted path at
-        // the (predictable) temp name.
+        // mode 0o666 with umask applied, exactly like Go's OpenFile — a
+        // fresh file gets default create permissions, an existing file's
+        // mode is untouched by O_TRUNC.
+        use std::os::unix::fs::OpenOptionsExt;
         let mut f = std::fs::OpenOptions::new()
             .write(true)
-            .create_new(true)
-            .open(&tmp_path)?;
-        f.write_all(data)?;
-        if let Some(mode) = existing_mode {
-            f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+            .create(true)
+            .truncate(true)
+            .mode(0o666)
+            .open(target)
+            .map_err(|e| map_write_error(&path, &e))?;
+        let mut written: u64 = 0;
+        while let Some(item) = chunks.blocking_recv() {
+            let chunk = item?;
+            written += chunk.len() as u64;
+            if written > MAX_UPLOAD_SIZE as u64 {
+                return Err(RestError::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("the upload exceeds the {MAX_UPLOAD_SIZE}-byte limit"),
+                ));
+            }
+            f.write_all(&chunk)
+                .map_err(|e| map_write_error(&path, &e))?;
         }
-        f.sync_all()?;
+        chown(target, &user);
         Ok(())
-    })();
-    if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(map_write_error(path, &e));
-    }
-    chown(&tmp_path, user);
-    if let Err(e) = std::fs::rename(&tmp_path, target) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(map_write_error(path, &e));
-    }
-    // Crash-durability of the rename itself: sync the containing directory
-    // (the file was already sync_all()-ed before the rename). Upstream's
-    // O_TRUNC path never fsyncs anything, so this is strictly stronger; a
-    // filesystem that refuses directory fsync must not fail the upload.
-    if let Ok(d) = std::fs::File::open(dir) {
-        if let Err(e) = d.sync_all() {
-            tracing::warn!("upload: could not fsync directory {}: {e}", dir.display());
-        }
-    }
-    Ok(())
+    })
 }
 
 fn create_dirs_owned(dir: &std::path::Path, user: &User) -> Result<(), RestError> {
@@ -920,15 +953,19 @@ fn create_dirs_owned(dir: &std::path::Path, user: &User) -> Result<(), RestError
 fn chown(path: &std::path::Path, user: &User) {
     if let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) {
         unsafe {
-            // lchown, not chown: never follow a symlink when setting ownership,
-            // so a planted symlink at `path` cannot redirect the chown onto an
-            // arbitrary target the caller shouldn't be able to take over.
-            let rc = libc::lchown(c_path.as_ptr(), user.uid, user.gid);
+            // chown (FOLLOWS symlinks), not lchown — matching upstream's
+            // `os.Chown(path, uid, gid)` (upload.go:56/:84): an upload through
+            // a symlink writes the link's destination, and ownership lands on
+            // that same destination. lchown would leave a daemon-owned target
+            // behind while chowning the link itself (caught by the PR-C
+            // symlink probe). Following adds no takeover risk beyond the
+            // write, which already followed the same link.
+            let rc = libc::chown(c_path.as_ptr(), user.uid, user.gid);
             if rc != 0 {
                 // Silent failure would break the ownership contract: the
                 // upload "succeeds" while the file stays daemon-owned.
                 tracing::warn!(
-                    "upload: lchown({}) to uid={} gid={} failed: {}",
+                    "upload: chown({}) to uid={} gid={} failed: {}",
                     path.display(),
                     user.uid,
                     user.gid,
@@ -961,6 +998,7 @@ fn map_write_error(path: &str, e: &std::io::Error) -> RestError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn test_user(home: &str) -> User {
         User {
@@ -972,16 +1010,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn write_file_creates_parents_and_is_atomic() {
+    #[tokio::test]
+    async fn upload_writer_creates_parents_and_writes_all_chunks() {
         let dir = tempfile::tempdir().unwrap();
         let user = test_user(dir.path().to_str().unwrap());
         let target = dir.path().join("a/b/c.txt");
-        write_file(target.to_str().unwrap(), b"hello", &user).unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let jh = spawn_upload_writer(target.to_str().unwrap().to_string(), user.clone(), rx);
+        // Chunk boundaries must not affect the content.
+        for part in [&b"hel"[..], &b"lo"[..]] {
+            tx.send(Ok(bytes::Bytes::copy_from_slice(part)))
+                .await
+                .unwrap();
+        }
+        drop(tx);
+        jh.await.unwrap().unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"hello");
-        // Overwrite works and leaves no temp files behind.
-        write_file(target.to_str().unwrap(), b"world", &user).unwrap();
-        assert_eq!(std::fs::read(&target).unwrap(), b"world");
+        // In-place write: no `.cube-envd-upload` temp files ever exist.
         let leftovers: Vec<_> = std::fs::read_dir(target.parent().unwrap())
             .unwrap()
             .filter_map(|e| e.ok())
@@ -994,21 +1039,166 @@ mod tests {
         assert!(leftovers.is_empty());
     }
 
-    #[test]
-    fn overwrite_preserves_mode_bits() {
+    #[tokio::test]
+    async fn overwrite_keeps_mode_bits_automatically() {
         let dir = tempfile::tempdir().unwrap();
         let user = test_user(dir.path().to_str().unwrap());
         let target = dir.path().join("script.sh");
-        write_file(target.to_str().unwrap(), b"#!/bin/sh\n", &user).unwrap();
+        // O_TRUNC never touches the mode of an existing file, so an
+        // executable script keeps its x bits across an overwrite — the
+        // upstream behavior the old mode-copy logic worked around.
+        std::fs::write(&target, b"#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // Overwriting through the temp-file+rename path must keep 0755.
-        write_file(target.to_str().unwrap(), b"#!/bin/sh\necho v2\n", &user).unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let jh = spawn_upload_writer(target.to_str().unwrap().to_string(), user.clone(), rx);
+        tx.send(Ok(bytes::Bytes::from_static(b"#!/bin/sh\necho v2\n")))
+            .await
+            .unwrap();
+        drop(tx);
+        jh.await.unwrap().unwrap();
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o755);
-        // A fresh file still gets default create permissions.
+        // A fresh file gets 0o666 & ~umask — no x bits.
         let fresh = dir.path().join("plain.txt");
-        write_file(fresh.to_str().unwrap(), b"x", &user).unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let jh = spawn_upload_writer(fresh.to_str().unwrap().to_string(), user.clone(), rx);
+        tx.send(Ok(bytes::Bytes::from_static(b"x"))).await.unwrap();
+        drop(tx);
+        jh.await.unwrap().unwrap();
         assert!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o111 == 0);
+    }
+
+    #[tokio::test]
+    async fn cap_exceeded_mid_stream_reports_413_and_keeps_partial_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = test_user(dir.path().to_str().unwrap());
+        let target = dir.path().join("cap.bin");
+        // Two halves: the second chunk crosses the line and stops the write
+        // before any of it lands — interrupted-write semantics (upstream has
+        // no cap of its own; this is our documented 413 behavior).
+        let half = MAX_UPLOAD_SIZE / 2 + 1;
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let jh = spawn_upload_writer(target.to_str().unwrap().to_string(), user.clone(), rx);
+        tx.send(Ok(bytes::Bytes::from(vec![b'a'; half])))
+            .await
+            .unwrap();
+        tx.send(Ok(bytes::Bytes::from(vec![b'b'; half])))
+            .await
+            .unwrap();
+        drop(tx);
+        let err = jh.await.unwrap().unwrap_err();
+        assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE);
+        // The partial content (everything before the cap) stays in the
+        // target — in-place, like an interrupted upstream upload.
+        let content = std::fs::read(&target).unwrap();
+        assert_eq!(content.len(), half);
+        assert!(content.iter().all(|&b| b == b'a'));
+    }
+
+    #[tokio::test]
+    async fn multipart_read_error_awaits_writer_and_propagates() {
+        // PR-C review, High: a body read failure while a field's writer is
+        // ACTIVE must be forwarded as that writer's terminal error — the
+        // writer is awaited before the handler returns, so its result is
+        // never discarded and the partial content is finalized before the
+        // error response goes out.
+        //
+        // The stream paces its items with sleeps: a ready in-memory stream
+        // would be drained eagerly by multer's next_field (the error would
+        // surface before any writer exists), while the sleeps make each
+        // stage surface separately — head → next_field returns the field →
+        // data chunk (writer writes) → read error (forwarded to the writer).
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("part.bin");
+        let head = format!(
+            "--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n\
+             Content-Type: application/octet-stream\r\n\r\n",
+            target.to_str().unwrap()
+        );
+        let stream = futures::stream::unfold((0u8, Some(head)), |(step, head)| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            match step {
+                0 => Some((
+                    Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(head.unwrap())),
+                    (1u8, None),
+                )),
+                1 => Some((Ok(bytes::Bytes::from_static(b"more")), (2u8, None))),
+                _ => Some((Err(std::io::Error::other("body died")), (3u8, None))),
+            }
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            "multipart/form-data; boundary=X".parse().unwrap(),
+        );
+        let resp = upload(
+            State(std::sync::Arc::new(AppState::new())),
+            Query(HashMap::new()),
+            headers,
+            axum::body::Body::from_stream(stream),
+        )
+        .await;
+        let (parts, body) = resp.into_parts();
+        let db = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+        assert!(String::from_utf8_lossy(&db).contains("error reading multipart"));
+        assert_eq!(parts.status, StatusCode::BAD_REQUEST);
+        // The partial content written before the failure is finalized — the
+        // writer completed before the error response went out.
+        assert_eq!(std::fs::read(&target).unwrap(), b"more");
+    }
+
+    #[tokio::test]
+    async fn upload_through_symlink_writes_target_and_leaves_link() {
+        // In-place write follows a symlink (like upstream os.OpenFile), and
+        // chown follows too (like upstream os.Chown): content lands on the
+        // link's destination and the link itself survives. The ownership
+        // differential (daemon-owned target without the fix) needs a
+        // root-owned pre-existing target to observe — covered by the
+        // container probe recorded in RESULTS.md.
+        let dir = tempfile::tempdir().unwrap();
+        let user = test_user(dir.path().to_str().unwrap());
+        let real = dir.path().join("real.bin");
+        std::fs::write(&real, b"old").unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("lnk.bin")).unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let jh = spawn_upload_writer(
+            dir.path().join("lnk.bin").to_str().unwrap().to_string(),
+            user.clone(),
+            rx,
+        );
+        tx.send(Ok(bytes::Bytes::from_static(b"new")))
+            .await
+            .unwrap();
+        drop(tx);
+        jh.await.unwrap().unwrap();
+        assert_eq!(std::fs::read(&real).unwrap(), b"new");
+        let link_meta = std::fs::symlink_metadata(dir.path().join("lnk.bin")).unwrap();
+        assert!(link_meta.file_type().is_symlink());
+    }
+
+    #[tokio::test]
+    async fn body_read_error_keeps_partial_content_and_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = test_user(dir.path().to_str().unwrap());
+        let target = dir.path().join("err.bin");
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let jh = spawn_upload_writer(target.to_str().unwrap().to_string(), user.clone(), rx);
+        tx.send(Ok(bytes::Bytes::from_static(b"partial")))
+            .await
+            .unwrap();
+        // A body-read failure arrives as the terminal Err arm: the writer
+        // stops, leaves the partial content (upstream io.Copy semantics),
+        // and the handler surfaces the error.
+        tx.send(Err(RestError::new(
+            StatusCode::BAD_REQUEST,
+            "error reading body: boom",
+        )))
+        .await
+        .unwrap();
+        drop(tx);
+        let err = jh.await.unwrap().unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(std::fs::read(&target).unwrap(), b"partial");
     }
 
     #[test]

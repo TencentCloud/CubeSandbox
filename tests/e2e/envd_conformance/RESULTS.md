@@ -456,6 +456,44 @@ Rust+Go 对照，3 项发现全部修复）**：
 keepalive 沿用进程流的 30s 默认（上游文件 watch 为 90s，同 LB 空闲超时理由），
 `Keepalive-Ping-Interval` 头覆盖语义一致。**注意**：`watch` 组须在未跑
 `init_token` 的实例上采集（令牌闸门设置后所有无令牌请求 401，两侧措辞不同）。
+## 9. PR-C 数据面（2026-09-09，feat/cube-envd-dataplane）
+
+上传**原地流式写**（对齐上游 `upload.go:68` 的 `O_WRONLY|O_CREATE|O_TRUNC`，
+放弃 MVP 期自加的 temp+rename 原子性——三仓 issue 考古零需求、HA failover
+重启模型使原子性保护窗口失去意义）。单测 293 passed（基线 9aa30f49 为 289：
++4 数据面测试，−2 旧 write_file 测试改造；复审轮 +2 回归测试。初稿的 263 是
+变基前基线 02e9f7e9 的口径）；clippy `-D warnings` 与 fmt 干净。
+
+**RSS 门（实测）**：256MiB 流式上传（1MiB 客户端分块）0.2-0.5s 完成，
+daemon RSS 峰值增量 **0-6 MiB**——修复前为 +256MiB 级整包缓冲。
+
+**吞吐门（实测，100MiB 下载 loopback）**：本分支 848-895 MiB/s，与改前基线
+（worktree 构建 02e9f7e9 实测 866-899 MiB/s）持平——"下载单任务化"尝试
+（通道+专用读任务，256KiB 块）实测仅 535-670 MiB/s，**被测量否决并回退**，
+回退理由记录于 `reader_stream` 注释；Go 对照 6333-6969 MiB/s（loopback 上限，
+非实现间可比瓶颈）。`all` 全量双录（#16 合入后的 base）**118 PASS / 0 FAIL /
+DIFF 4**，上传/下载/条件请求场景零回归。注意：对拍须在**全新容器**上采集——
+同容器重复跑 `all` 时，上一轮 `init_token` 的令牌闸门会让下一轮全 401，
+perf 制品文件也会污染 ListDir。
+
+落位语义变更（README 已知差异表同步）：上传中并发读可见部分内容、失败留
+截断文件、不再 fsync、符号链接跟随（写穿至目标）——全部为上游既有行为。
+
+**复审轮（2026-09-09，chaojixinren 4 项发现全部处置）**：
+1. **[High] multipart 写任务未等待**——part 读错误经 `?` 提前返回，写任务
+   脱管、结果被丢弃。修复：读错误转发为 writer 终态（与 raw 路径同构），
+   writer 必等待；回归测试 = field 1 完整上传 + field 2 数据中途流错误，
+   断言 400 + 两个文件的落盘终态。
+2. **[Medium] 符号链接属主**——容器探针证实（target=root:root、link 被摸成
+   user:user，Go 侧 target=user:user）：lchown 是 temp+rename 时代的产物。
+   修复：chown 跟随（对齐上游 `os.Chown`），探针复测双侧一致
+   （target=user:user、link=user:user）；单测锁定"内容跟随 + 链接存活"。
+3. **[Low] MAX_UPLOAD_SIZE 注释过时**——已改写为流式口径。
+4. **[Low] 测试数口径**——见本节开头（263 = 变基前基线，293 = PR head）。
+
+另：harness 修复一处固有 flaky——`VOLATILE_KEYS` 原按 JSON 类型名归一
+（Go 整数渲染 vs Rust 浮点），rest_metrics 在宿主负载凑整时必挂；改为
+值无关的 `<volatile>`。
 
 ## 复现
 

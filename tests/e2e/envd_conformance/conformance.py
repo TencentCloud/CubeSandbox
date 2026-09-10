@@ -9,7 +9,8 @@ Usage:
 Normalized away (legitimately dynamic):
   - HTTP Date/Content-Length/Connection headers, chunked framing details
   - pids, timestamps (ts / modifiedTime), watcher ids, machine-specific
-    metrics values (only key sets and types are compared)
+    metrics values (only key presence is compared — int/float rendering
+    differs between runtimes)
   - hostnames in downloaded /etc/hostname content
 Declared differences (allowlisted, documented in cube-envd/README.md):
   - gzip: cube-envd always identity
@@ -74,7 +75,11 @@ def normalize(obj, path=""):
                     kept[hk.title()] = hv
                 out[k] = kept
             elif k in VOLATILE_KEYS:
-                out[k] = f"<{type(v).__name__}>"
+                # Value- and type-agnostic: Go's json trims trailing zeros
+                # (a whole-number float renders as an int) while Rust keeps
+                # the decimal point — comparing type names made rest_metrics
+                # flaky whenever the host load rounded to a whole number.
+                out[k] = "<volatile>"
             elif k in ("modifiedTime",):
                 out[k] = "<time>"
             elif k in ("owner", "group") and path.endswith("entry"):
