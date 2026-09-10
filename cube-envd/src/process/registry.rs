@@ -26,15 +26,23 @@ use super::{
 
 impl ProcessRegistry {
     /// 按 TERM 后 KILL 的顺序关闭全部存活进程组。
+    ///
+    /// 以句柄快照为操作对象并在 KILL 前按 Arc 身份复核，避免信号落到
+    /// 已退出并被内核复用 PID 的新进程组上。
     pub async fn shutdown(&self) {
-        let pids = self.live_pids().await;
-        for pid in pids {
-            let _ = send_group_signal(pid, libc::SIGTERM);
+        let handles: Vec<Arc<ProcessHandle>> =
+            { self.live.read().await.values().cloned().collect() };
+        for handle in &handles {
+            let _ = send_group_signal(handle.pid, libc::SIGTERM);
         }
 
         if !self.wait_for_empty(SHUTDOWN_GRACE).await {
-            for pid in self.live_pids().await {
-                let _ = send_group_signal(pid, libc::SIGKILL);
+            let handles: Vec<Arc<ProcessHandle>> =
+                { self.live.read().await.values().cloned().collect() };
+            for handle in &handles {
+                if self.is_live_handle(handle).await {
+                    let _ = send_group_signal(handle.pid, libc::SIGKILL);
+                }
             }
             let _ = self.wait_for_empty(SHUTDOWN_GRACE).await;
         }
@@ -122,6 +130,7 @@ impl ProcessRegistry {
             pty: None,
             output: fanout.clone(),
         });
+        let arm_handle = Arc::clone(&handle);
         self.live.write().await.insert(pid, handle.clone());
         self.bind_tag_reservation(options.tag.as_deref(), pid).await;
         self.remove_terminal_for(pid, options.tag.as_deref()).await;
@@ -132,9 +141,12 @@ impl ProcessRegistry {
         tokio::spawn(async move {
             let status = child.wait().await;
 
-            // 排空已写入的输出再发 End：正常退出时子进程是写端唯一持有者，
+            // 进入结束排空：订阅者停读时投递按 EOL_SEND_BUDGET 放弃，绝不卡死 End/收尾。
+            fanout.begin_eol();
+            // 排空已写入的输出再收尾：正常退出时子进程是写端唯一持有者，
             // 退出即 EOF，宽限内完成；孙进程仍持有写端（如 `sleep 300 &`）时
-            // 超时——封住输出并中断 reader，让 End 及时发出而非无限挂起。
+            // reader 阻塞在 read，超时——封住输出并中断 reader，让 End 及时发出
+            // 而非无限挂起。订阅者背压导致的 reader 阻塞会被 EOL 预算提前解除。
             let drain = async {
                 let _ = (&mut stdout_reader).await;
                 let _ = (&mut stderr_reader).await;
@@ -147,12 +159,12 @@ impl ProcessRegistry {
 
             let end = end_event(status);
             let event = ProcessEvent::End(end);
-            fanout.send(event.clone()).await;
+            // finish 内部完成：记录写入 → End 槽广播 → 身份摘除 → 队列关闭，
+            // 全程不等待任何订阅者排空。
             registry.finish(handle, event).await;
-            fanout.close();
         });
         if let Some(timeout) = options.timeout {
-            self.arm_timeout(pid, timeout);
+            self.arm_timeout(arm_handle, timeout);
         }
         Ok(Launch {
             pid,
@@ -221,6 +233,7 @@ impl ProcessRegistry {
         }
         self.remove_terminal_for(pid, tag.as_deref()).await;
 
+        let arm_handle = Arc::clone(&handle);
         let mut pty_reader = spawn_pty_reader(reader, fanout.clone());
         let registry = self.clone();
         tokio::spawn(async move {
@@ -240,8 +253,10 @@ impl ProcessRegistry {
                 },
             };
 
-            // 与普通 reaper 相同的宽限语义：孙进程持有 PTY slave 时 master
-            // 读端不会 EIO，宽限超时后封住输出并发出 End。
+            // 与普通 reaper 相同的语义：孙进程持有 PTY slave 时 master 读端不会 EIO，
+            // 宽限超时后封住输出。pty reader 运行在线程池中无法被 abort 中断，
+            // 但 End/收尾不依赖它：finish 只做同步登记，阻塞线程最终自行退出。
+            fanout.begin_eol();
             let drain = async {
                 let _ = (&mut pty_reader).await;
             };
@@ -251,12 +266,10 @@ impl ProcessRegistry {
             }
 
             let event = ProcessEvent::End(end);
-            fanout.send(event.clone()).await;
             registry.finish(handle, event).await;
-            fanout.close();
         });
         if let Some(timeout) = timeout {
-            self.arm_timeout(pid, timeout);
+            self.arm_timeout(arm_handle, timeout);
         }
         Ok(Launch {
             pid,
@@ -265,44 +278,82 @@ impl ProcessRegistry {
     }
 
     /// 为存活进程安排超时后的 TERM 和兜底 KILL。
-    fn arm_timeout(&self, pid: u32, timeout: Duration) {
+    ///
+    /// 直接捕获进程句柄并按 Arc 身份复核：即使进程退出后 PID 被内核复用于
+    /// 新进程，也绝不会把信号发到新进程的进程组上。
+    fn arm_timeout(&self, handle: Arc<ProcessHandle>, timeout: Duration) {
         let registry = self.clone();
         tokio::spawn(async move {
             time::sleep(timeout).await;
-            let handle = {
-                let live = registry.live.read().await;
-                live.get(&pid).cloned()
-            };
-            if let Some(handle) = handle {
-                let _ = send_group_signal(handle.pid, libc::SIGTERM);
-                time::sleep(Duration::from_secs(2)).await;
-                if registry.live.read().await.contains_key(&pid) {
-                    let _ = send_group_signal(pid, libc::SIGKILL);
-                }
+            if !registry.is_live_handle(&handle).await {
+                return;
+            }
+            let _ = send_group_signal(handle.pid, libc::SIGTERM);
+            time::sleep(Duration::from_secs(2)).await;
+            if registry.is_live_handle(&handle).await {
+                let _ = send_group_signal(handle.pid, libc::SIGKILL);
             }
         });
     }
 
-    /// 从存活表移除进程，缓存结束事件后才释放关联标签。
+    /// 判断句柄是否仍是 live 表中该 PID 的当前所有者（Arc 身份比较）。
+    async fn is_live_handle(&self, handle: &Arc<ProcessHandle>) -> bool {
+        self.live
+            .read()
+            .await
+            .get(&handle.pid)
+            .is_some_and(|owner| Arc::ptr_eq(owner, handle))
+    }
+
+    /// 收尾一个已结束进程：写回放记录、广播 End、按身份摘除并关闭扇出。
+    ///
+    /// 加锁顺序保持 live → tags → terminal（与既有约定一致，标签在记录写入前
+    /// 保持占用，杜绝新旧进程的标签竞态）。收尾**不等待任何订阅者排空**：
+    /// End 经 End 槽广播（同步登记），因此停读订阅者无法阻塞本函数。
+    ///
+    /// PID 复用防护：仅当 live 表中该 PID 的当前所有者就是本句柄（Arc 身份）
+    /// 时才摘除并写入回放记录；若 PID 已被更新的进程占用，则保留新句柄，
+    /// 也不写入可能遮蔽新进程的陈旧记录。
     pub(crate) async fn finish(&self, handle: Arc<ProcessHandle>, event: ProcessEvent) {
-        self.live.write().await.remove(&handle.pid);
+        let mut live = self.live.write().await;
+        let matched = live
+            .get(&handle.pid)
+            .is_some_and(|owner| Arc::ptr_eq(owner, &handle));
         let mut tags = self.tags.write().await;
         let mut terminal = self.terminal.lock().await;
-        terminal.retain(|record| record.expires > time::Instant::now());
-        terminal.push(TerminalRecord {
-            pid: handle.pid,
-            tag: handle.tag.clone(),
-            event,
-            expires: time::Instant::now() + TERMINAL_CACHE_TTL,
-        });
-        if terminal.len() > TERMINAL_CACHE_LIMIT {
-            terminal.remove(0);
+        if matched {
+            // 同 PID 的陈旧记录先清理（同一 PID 同一时刻至多一条记录），
+            // 记录在本临界区内先于摘除写入：摘除后按 PID 的 Connect 必然命中回放。
+            terminal
+                .retain(|record| record.expires > time::Instant::now() && record.pid != handle.pid);
+            terminal.push(TerminalRecord {
+                pid: handle.pid,
+                tag: handle.tag.clone(),
+                event: event.clone(),
+                expires: time::Instant::now() + TERMINAL_CACHE_TTL,
+            });
+            if terminal.len() > TERMINAL_CACHE_LIMIT {
+                terminal.remove(0);
+            }
+        } else {
+            terminal.retain(|record| record.expires > time::Instant::now());
+        }
+        drop(terminal);
+        if matched {
+            live.remove(&handle.pid);
         }
         if let Some(tag) = &handle.tag {
             if tags.get(tag) == Some(&handle.pid) {
                 tags.remove(tag);
             }
         }
+        drop(tags);
+        drop(live);
+
+        // 无论身份是否匹配（PID 被复用不影响本进程自己的订阅者），
+        // 都向本句柄的订阅者广播 End 并关闭扇出。
+        handle.output.mark_ended(&event);
+        handle.output.close();
     }
 
     /// 删除同一 PID 或标签的旧结束缓存，避免新旧进程混淆。
@@ -327,11 +378,6 @@ impl ProcessRegistry {
                 tags.remove(tag);
             }
         }
-    }
-
-    /// 返回当前存活进程 PID 的快照。
-    async fn live_pids(&self) -> Vec<u32> {
-        self.live.read().await.keys().copied().collect()
     }
 
     /// 轮询等待存活进程表清空，超时则返回 false。
@@ -368,11 +414,14 @@ impl ProcessRegistry {
         selector: Option<&Selector>,
     ) -> Result<Subscription, RpcError> {
         let pid = self.resolve_selector(selector).await?;
-        if let Some(handle) = self.live.read().await.get(&pid).cloned() {
-            return Ok(Subscription::Live {
-                pid: handle.pid,
-                receiver: handle.output.subscribe(),
-            });
+        let handle = self.live.read().await.get(&pid).cloned();
+        if let Some(handle) = handle {
+            let (receiver, ended) = handle.output.subscribe();
+            if !ended {
+                return Ok(Subscription::Live { pid, receiver });
+            }
+            // 进程在"查 live 表"与"挂载订阅者"之间完成了收尾：End 已广播且
+            // 记录必然已写入（finish 先写记录、后摘除），转终端回放路径。
         }
         let mut terminal = self.terminal.lock().await;
         terminal.retain(|record| record.expires > time::Instant::now());
