@@ -276,11 +276,19 @@ panic（与 `real_time_weighted_average` 相同）。
 
 ### 配置
 
+当前 CubeMaster 在处理 `enable_scorers`（包括单独启用 `external_http_score`）
+之前，要求 `score.resource_weights` 为非空映射。这是**加载器前置条件**，不是
+HTTP 传输协议的一部分：若省略 `resource_weights`，CubeMaster 会构造空的
+scorer 列表，sidecar **不会**被调用。下面的权重项是已有合法 key；
+`external_http_score` 本身不会消费它。
+
 ```yaml
 scheduler:
   score:
     enable_scorers:
       - external_http_score
+    resource_weights:
+      mvm_num: 1
     plugin_conf:
       external_http_score:
         weight: 1.0
@@ -320,9 +328,11 @@ scheduler:
 ```
 
 - `scores` 必须包含**每一个**请求候选的 `node_id`。额外的 key 会被忽略（不会因此失败）；
-  日志最多记录被忽略 key 的**数量**，不记录 key 名或响应正文。
-- 已知候选的每个分数须为有限数值，范围 **`[0, 100]`**，越大越好（与内置 scorer 方向一致）。
-  仅出现在未知/额外 key 上的非法值会被忽略。
+  日志最多记录被忽略 key 的**数量**，不记录 key 名或响应正文。额外 key 上的 JSON
+  `null` 或越界数值同样会被忽略。
+- 已知候选的每个分数必须是**非 null** 的有限数值，范围 **`[0, 100]`**（数值 `0`
+  合法；JSON `null` 不合法），越大越好（与内置 scorer 方向一致）。`scores` 下任意
+  非数值 JSON（字符串、对象、数组）会在解码阶段视为畸形响应。
 - 响应体超过 **1 MiB** 会被拒绝；**不跟随** HTTP 重定向。
 
 ### 失败 / 回退语义

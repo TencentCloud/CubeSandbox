@@ -277,11 +277,20 @@ constructing scorers at startup (same pattern as `real_time_weighted_average`).
 
 ### Configuration
 
+Current CubeMaster scorer loading requires a non-nil `score.resource_weights`
+map before it processes `enable_scorers` (including a standalone
+`external_http_score`). This is a **loader prerequisite**, not part of the
+HTTP wire protocol: if `resource_weights` is omitted, CubeMaster builds an
+empty scorer list and the sidecar is never contacted. The entry below is a
+valid existing weight key; `external_http_score` does not consume it.
+
 ```yaml
 scheduler:
   score:
     enable_scorers:
       - external_http_score
+    resource_weights:
+      mvm_num: 1
     plugin_conf:
       external_http_score:
         weight: 1.0
@@ -322,10 +331,12 @@ Response:
 
 - `scores` must include **every** requested candidate `node_id`. Additional keys
   are ignored (they do not fail the response); only the ignored-key **count** may
-  be logged, never the key names or body.
-- Each score for a known candidate must be a finite number in **`[0, 100]`**,
-  higher is better (same direction as built-in scorers). Invalid values on
-  unknown/extra keys are ignored.
+  be logged, never the key names or body. Extra keys with JSON `null` or
+  out-of-range numbers are ignored the same way.
+- Each score for a known candidate must be a **non-null** finite number in
+  **`[0, 100]`** (numeric `0` is valid; JSON `null` is not). Higher is better
+  (same direction as built-in scorers). Non-numeric JSON values (string, object,
+  array) anywhere under `scores` make the response malformed at decode time.
 - Response bodies larger than **1 MiB** are rejected; HTTP redirects are not followed.
 
 ### Failure / fallback semantics

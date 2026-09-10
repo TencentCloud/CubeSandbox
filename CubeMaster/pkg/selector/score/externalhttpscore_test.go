@@ -45,9 +45,9 @@ func TestExternalHTTPScoreSelectUsesSidecarScores(t *testing.T) {
 		obs.req = req
 		ch <- obs
 		_ = json.NewEncoder(w).Encode(externalHTTPScoreResponse{
-			Scores: map[string]float64{
-				"node-a": 10,
-				"node-b": 90,
+			Scores: map[string]*float64{
+				"node-a": float64Ptr(10),
+				"node-b": float64Ptr(90),
 			},
 		})
 	}))
@@ -100,9 +100,9 @@ func TestExternalHTTPScoreSelectUsesSidecarScores(t *testing.T) {
 func TestExternalHTTPScoreRejectsInvalidScore(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(externalHTTPScoreResponse{
-			Scores: map[string]float64{
-				"node-a": 101,
-				"node-b": 90,
+			Scores: map[string]*float64{
+				"node-a": float64Ptr(101),
+				"node-b": float64Ptr(90),
 			},
 		})
 	}))
@@ -122,9 +122,9 @@ func TestExternalHTTPScoreFilterResponseContract(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("exact candidate set succeeds", func(t *testing.T) {
-		got, err := filterExternalHTTPScoreResponse(ctx, map[string]float64{
-			"node-a": 10,
-			"node-b": 90,
+		got, err := filterExternalHTTPScoreResponse(ctx, map[string]*float64{
+			"node-a": float64Ptr(10),
+			"node-b": float64Ptr(90),
 		}, knownNodes)
 		if err != nil {
 			t.Fatalf("filterExternalHTTPScoreResponse() error = %v", err)
@@ -135,10 +135,10 @@ func TestExternalHTTPScoreFilterResponseContract(t *testing.T) {
 	})
 
 	t.Run("valid extra key ignored from returned map", func(t *testing.T) {
-		got, err := filterExternalHTTPScoreResponse(ctx, map[string]float64{
-			"node-a":  10,
-			"node-b":  90,
-			"stale-x": 50,
+		got, err := filterExternalHTTPScoreResponse(ctx, map[string]*float64{
+			"node-a":  float64Ptr(10),
+			"node-b":  float64Ptr(90),
+			"stale-x": float64Ptr(50),
 		}, knownNodes)
 		if err != nil {
 			t.Fatalf("filterExternalHTTPScoreResponse() error = %v", err)
@@ -152,10 +152,11 @@ func TestExternalHTTPScoreFilterResponseContract(t *testing.T) {
 	})
 
 	t.Run("extra key with invalid score ignored", func(t *testing.T) {
-		got, err := filterExternalHTTPScoreResponse(ctx, map[string]float64{
-			"node-a":  10,
-			"node-b":  90,
-			"stale-x": math.NaN(),
+		nan := math.NaN()
+		got, err := filterExternalHTTPScoreResponse(ctx, map[string]*float64{
+			"node-a":  float64Ptr(10),
+			"node-b":  float64Ptr(90),
+			"stale-x": &nan,
 		}, knownNodes)
 		if err != nil {
 			t.Fatalf("filterExternalHTTPScoreResponse() error = %v, want nil when only extras are invalid", err)
@@ -165,9 +166,46 @@ func TestExternalHTTPScoreFilterResponseContract(t *testing.T) {
 		}
 	})
 
+	t.Run("extra key with null ignored", func(t *testing.T) {
+		got, err := filterExternalHTTPScoreResponse(ctx, map[string]*float64{
+			"node-a":  float64Ptr(10),
+			"node-b":  float64Ptr(90),
+			"stale-x": nil,
+		}, knownNodes)
+		if err != nil {
+			t.Fatalf("error = %v, want nil when only extras are null", err)
+		}
+		if _, ok := got["stale-x"]; ok {
+			t.Fatalf("null extra key leaked: %#v", got)
+		}
+	})
+
+	t.Run("known candidate null fails", func(t *testing.T) {
+		_, err := filterExternalHTTPScoreResponse(ctx, map[string]*float64{
+			"node-a": nil,
+			"node-b": float64Ptr(90),
+		}, knownNodes)
+		if err == nil {
+			t.Fatal("error = nil, want invalid known null")
+		}
+	})
+
+	t.Run("known candidate numeric zero succeeds", func(t *testing.T) {
+		got, err := filterExternalHTTPScoreResponse(ctx, map[string]*float64{
+			"node-a": float64Ptr(0),
+			"node-b": float64Ptr(100),
+		}, knownNodes)
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		if got["node-a"] != 0 || got["node-b"] != 100 {
+			t.Fatalf("got = %#v", got)
+		}
+	})
+
 	t.Run("missing known candidate fails", func(t *testing.T) {
-		_, err := filterExternalHTTPScoreResponse(ctx, map[string]float64{
-			"node-a": 10,
+		_, err := filterExternalHTTPScoreResponse(ctx, map[string]*float64{
+			"node-a": float64Ptr(10),
 		}, knownNodes)
 		if err == nil {
 			t.Fatal("error = nil, want missing candidate")
@@ -175,9 +213,9 @@ func TestExternalHTTPScoreFilterResponseContract(t *testing.T) {
 	})
 
 	t.Run("invalid known candidate score fails", func(t *testing.T) {
-		_, err := filterExternalHTTPScoreResponse(ctx, map[string]float64{
-			"node-a": 101,
-			"node-b": 90,
+		_, err := filterExternalHTTPScoreResponse(ctx, map[string]*float64{
+			"node-a": float64Ptr(101),
+			"node-b": float64Ptr(90),
 		}, knownNodes)
 		if err == nil {
 			t.Fatal("error = nil, want invalid known score")
@@ -185,8 +223,8 @@ func TestExternalHTTPScoreFilterResponseContract(t *testing.T) {
 	})
 
 	t.Run("empty known set returns empty map like Select", func(t *testing.T) {
-		got, err := filterExternalHTTPScoreResponse(ctx, map[string]float64{
-			"stale-x": 1,
+		got, err := filterExternalHTTPScoreResponse(ctx, map[string]*float64{
+			"stale-x": float64Ptr(1),
 		}, map[string]struct{}{})
 		if err != nil {
 			t.Fatalf("error = %v, want nil", err)
@@ -197,9 +235,9 @@ func TestExternalHTTPScoreFilterResponseContract(t *testing.T) {
 	})
 
 	t.Run("boundary scores accepted", func(t *testing.T) {
-		got, err := filterExternalHTTPScoreResponse(ctx, map[string]float64{
-			"node-a": 0,
-			"node-b": 100,
+		got, err := filterExternalHTTPScoreResponse(ctx, map[string]*float64{
+			"node-a": float64Ptr(0),
+			"node-b": float64Ptr(100),
 		}, knownNodes)
 		if err != nil {
 			t.Fatalf("error = %v", err)
@@ -213,10 +251,10 @@ func TestExternalHTTPScoreFilterResponseContract(t *testing.T) {
 func TestExternalHTTPScoreSelectIgnoresExtraResponseKeys(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(externalHTTPScoreResponse{
-			Scores: map[string]float64{
-				"node-a":  10,
-				"node-b":  90,
-				"stale-x": 55,
+			Scores: map[string]*float64{
+				"node-a":  float64Ptr(10),
+				"node-b":  float64Ptr(90),
+				"stale-x": float64Ptr(55),
 			},
 		})
 	}))
@@ -259,11 +297,93 @@ func TestExternalHTTPScoreSelectIgnoresInvalidExtraKeys(t *testing.T) {
 	}
 }
 
+func TestExternalHTTPScoreSelectRejectsKnownNullScore(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"scores":{"node-a":null,"node-b":90}}`)
+	}))
+	defer server.Close()
+
+	_, err := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL)).Select(externalHTTPScoreTestCtx())
+	if err == nil {
+		t.Fatal("Select() error = nil, want known null score error")
+	}
+}
+
+func TestExternalHTTPScoreSelectIgnoresExtraNullKeys(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"scores":{"node-a":10,"node-b":90,"stale-x":null}}`)
+	}))
+	defer server.Close()
+
+	got, err := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL)).Select(externalHTTPScoreTestCtx())
+	if err != nil {
+		t.Fatalf("Select() error = %v, want success when only extras are null", err)
+	}
+	if got.Len() != 2 {
+		t.Fatalf("len(scores) = %d, want 2", got.Len())
+	}
+	for _, n := range got {
+		if n.ID() == "stale-x" {
+			t.Fatal("extra null key present in Select result")
+		}
+	}
+}
+
+func TestExternalHTTPScoreSelectAcceptsKnownNumericZero(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"scores":{"node-a":0,"node-b":100}}`)
+	}))
+	defer server.Close()
+
+	got, err := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL)).Select(externalHTTPScoreTestCtx())
+	if err != nil {
+		t.Fatalf("Select() error = %v", err)
+	}
+	if got.Len() != 2 {
+		t.Fatalf("len(scores) = %d, want 2", got.Len())
+	}
+	byID := map[string]float64{}
+	for _, n := range got {
+		byID[n.ID()] = n.Score
+	}
+	if byID["node-a"] != 0 || byID["node-b"] != 100 {
+		t.Fatalf("scores = %#v, want node-a=0 node-b=100", byID)
+	}
+}
+
+func TestExternalHTTPScoreRejectsNonNumericScoreValue(t *testing.T) {
+	cases := []string{
+		`{"scores":{"node-a":"10","node-b":90}}`,
+		`{"scores":{"node-a":{"v":10},"node-b":90}}`,
+		`{"scores":{"node-a":[10],"node-b":90}}`,
+	}
+	for _, body := range cases {
+		body := body
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, body)
+			}))
+			defer server.Close()
+			_, err := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL)).Select(externalHTTPScoreTestCtx())
+			if err == nil {
+				t.Fatal("Select() error = nil, want malformed decode error")
+			}
+			if !strings.Contains(err.Error(), "malformed") {
+				t.Fatalf("error = %q, want malformed", err)
+			}
+		})
+	}
+}
+
 func TestExternalHTTPScoreRejectsMissingNode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(externalHTTPScoreResponse{
-			Scores: map[string]float64{
-				"node-a": 10,
+			Scores: map[string]*float64{
+				"node-a": float64Ptr(10),
 			},
 		})
 	}))
@@ -290,7 +410,7 @@ func TestExternalHTTPScoreRejectsHTTPError(t *testing.T) {
 func TestExternalHTTPScoreRejectsEmptyScores(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(externalHTTPScoreResponse{
-			Scores: map[string]float64{},
+			Scores: map[string]*float64{},
 		})
 	}))
 	defer server.Close()
@@ -317,9 +437,9 @@ func TestExternalHTTPScoreTimesOut(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(100 * time.Millisecond)
 		_ = json.NewEncoder(w).Encode(externalHTTPScoreResponse{
-			Scores: map[string]float64{
-				"node-a": 10,
-				"node-b": 90,
+			Scores: map[string]*float64{
+				"node-a": float64Ptr(10),
+				"node-b": float64Ptr(90),
 			},
 		})
 	}))
@@ -399,9 +519,9 @@ func TestExternalHTTPScoreDoesNotFollowRedirects(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		redirectTargetHit.Store(true)
 		_ = json.NewEncoder(w).Encode(externalHTTPScoreResponse{
-			Scores: map[string]float64{
-				"node-a": 10,
-				"node-b": 90,
+			Scores: map[string]*float64{
+				"node-a": float64Ptr(10),
+				"node-b": float64Ptr(90),
 			},
 		})
 	}))
@@ -802,4 +922,8 @@ func externalHTTPScoreTestCtx() *selctx.SelectorCtx {
 		},
 	})
 	return ctx
+}
+
+func float64Ptr(v float64) *float64 {
+	return &v
 }

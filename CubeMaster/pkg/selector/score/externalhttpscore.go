@@ -103,7 +103,8 @@ type externalHTTPScoreNode struct {
 }
 
 type externalHTTPScoreResponse struct {
-	Scores map[string]float64 `json:"scores"`
+	// Scores uses pointers so JSON null is distinguishable from numeric 0.
+	Scores map[string]*float64 `json:"scores"`
 }
 
 func NewExternalHTTPScore() *externalHTTPScore {
@@ -334,20 +335,25 @@ func isDNSOrTransport(err error) bool {
 }
 
 // filterExternalHTTPScoreResponse is the single response contract: every known
-// candidate must be present with a valid score; keys outside knownNodes are
-// ignored (and never returned). Invalid scores on unknown keys are ignored.
-func filterExternalHTTPScoreResponse(ctx context.Context, scores map[string]float64, knownNodes map[string]struct{}) (map[string]float64, error) {
+// candidate must be present with a non-null finite score in [0,100]; keys
+// outside knownNodes are ignored (and never returned), including extras whose
+// value is null or otherwise invalid as a candidate score.
+func filterExternalHTTPScoreResponse(ctx context.Context, scores map[string]*float64, knownNodes map[string]struct{}) (map[string]float64, error) {
 	if len(knownNodes) == 0 {
 		// Consistent with Select: an empty candidate set yields no scores.
 		return map[string]float64{}, nil
 	}
 	out := make(map[string]float64, len(knownNodes))
 	ignored := 0
-	for nodeID, score := range scores {
+	for nodeID, scorePtr := range scores {
 		if _, ok := knownNodes[nodeID]; !ok {
 			ignored++
 			continue
 		}
+		if scorePtr == nil {
+			return nil, fmt.Errorf("external_http_score invalid score for known candidate")
+		}
+		score := *scorePtr
 		if math.IsNaN(score) || math.IsInf(score, 0) || score < 0 || score > 100 {
 			return nil, fmt.Errorf("external_http_score invalid score for known candidate")
 		}
@@ -401,7 +407,7 @@ func buildExternalHTTPScoreRequest(selCtx *selctx.SelectorCtx, mode string, inLi
 	return req, knownNodes
 }
 
-func requestExternalHTTPScores(ctx context.Context, endpoint string, timeout time.Duration, reqBody externalHTTPScoreRequest) (map[string]float64, error) {
+func requestExternalHTTPScores(ctx context.Context, endpoint string, timeout time.Duration, reqBody externalHTTPScoreRequest) (map[string]*float64, error) {
 	if timeout <= 0 {
 		timeout = defaultExternalHTTPScoreTimeout
 	}
