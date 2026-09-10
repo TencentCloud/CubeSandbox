@@ -56,6 +56,10 @@ fn main() {
     pbjson_build::Builder::new()
         .register_descriptors(&descriptors)
         .expect("register protobuf descriptors")
+        // 与上游 connect-go 一致（protojson.UnmarshalOptions{DiscardUnknown: true}）：
+        // 请求体里的未知字段按前向兼容忽略，而不是 400。否则客户端 proto 比本服务
+        // 新一个版本就会导致全部 RPC 失败。
+        .ignore_unknown_fields()
         .build(&[".process", ".filesystem"])
         .expect("generate protobuf JSON mappings");
 

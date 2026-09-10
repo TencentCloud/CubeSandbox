@@ -179,7 +179,42 @@ async fn stream_input_consumes_an_ordered_connect_client_stream() {
         .any(|frame| frame["event"]["end"]["exited"] == true));
 }
 
-// 验证 Process.Connect 拒绝带压缩标志的请求帧。
+// 验证 Update 未携带 pty 时是无操作成功，与上游一致。
+#[tokio::test]
+async fn process_update_without_pty_is_a_no_op_success() {
+    let app = router();
+    let response = app
+        .clone()
+        .oneshot(stream_request(
+            "Start",
+            json!({
+                "process": {"cmd":"/bin/sleep", "args":["30"], "envs": {}},
+                "tag": "update-noop",
+                "stdin": false
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // 上游只在请求携带 pty 时才要求目标是 PTY 进程；未携带时直接成功。
+    let (status, body) = unary(
+        app.clone(),
+        "Update",
+        json!({"process":{"tag":"update-noop"},"pty":{"size":{"cols":0,"rows":0}}}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a PTY size must still be rejected when present: {body}"
+    );
+
+    let (status, body) = unary(app, "Update", json!({"process":{"tag":"update-noop"}})).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+}
+
+// 验证 Connect 拒绝带压缩标志的请求帧。
 #[tokio::test]
 async fn connect_rejects_compressed_request_frames() {
     let response = router()

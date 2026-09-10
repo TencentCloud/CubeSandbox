@@ -126,6 +126,8 @@ pub enum Code {
     InvalidArgument,
     /// 请求的资源不存在。
     NotFound,
+    /// 目标资源已存在（与上游 envd 的 AlreadyExists 一致）。
+    AlreadyExists,
     /// 请求认证失败。
     Unauthenticated,
     /// 服务尚未支持该调用。
@@ -196,6 +198,7 @@ impl IntoResponse for RpcError {
             None => match self.code {
                 Code::InvalidArgument => StatusCode::BAD_REQUEST,
                 Code::NotFound => StatusCode::NOT_FOUND,
+                Code::AlreadyExists => StatusCode::CONFLICT,
                 Code::Unauthenticated => StatusCode::UNAUTHORIZED,
                 Code::Unimplemented => StatusCode::NOT_IMPLEMENTED,
                 Code::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,

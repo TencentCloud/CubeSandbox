@@ -84,6 +84,70 @@ async fn filesystem_rpc_creates_lists_moves_stats_and_removes_entries() {
     assert!(!directory.path().exists());
 }
 
+// 验证删除不存在的路径是幂等成功，与上游 os.RemoveAll 一致。
+#[tokio::test]
+async fn filesystem_remove_is_idempotent_for_missing_paths() {
+    let directory = tempdir().unwrap();
+    let missing = directory.path().join("never-existed");
+
+    let (status, body) = rpc(router(), "Remove", json!({"path": missing})).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({}));
+}
+
+// 验证已存在目录返回 409，已存在非目录返回 400，与上游一致。
+#[tokio::test]
+async fn filesystem_make_dir_distinguishes_conflict_from_invalid_path() {
+    let directory = tempdir().unwrap();
+    let existing_directory = directory.path().join("exists");
+    let existing_file = directory.path().join("file.txt");
+    fs::create_dir(&existing_directory).unwrap();
+    fs::write(&existing_file, b"x").unwrap();
+
+    let (status, body) = rpc(router(), "MakeDir", json!({"path": existing_directory})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert_eq!(body["code"], "already_exists");
+
+    let (status, body) = rpc(router(), "MakeDir", json!({"path": existing_file})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["code"], "invalid_argument");
+}
+
+// 验证空路径与上游一致地解析为请求用户的主目录。
+#[tokio::test]
+async fn filesystem_stat_resolves_the_empty_path_to_the_user_home() {
+    let current = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .expect("look up current local user")
+        .expect("current uid has a passwd entry");
+
+    let (status, body) = rpc(router(), "Stat", json!({"path": ""})).await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["entry"]["type"], "FILE_TYPE_DIRECTORY");
+    assert_eq!(body["entry"]["path"], current.dir.display().to_string());
+}
+
+// 验证 RPC 请求体中的未知字段被忽略，而不是 400（上游 protojson DiscardUnknown）。
+#[tokio::test]
+async fn filesystem_rpc_ignores_unknown_json_fields() {
+    let directory = tempdir().unwrap();
+
+    let (status, body) = rpc(
+        router(),
+        "ListDir",
+        json!({"path": directory.path(), "depth": 1, "futureField": {"nested": true}}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    // 空 repeated 字段是零值，proto3 JSON 会省略。
+    assert!(
+        body.get("entries").is_none(),
+        "empty entry list must be omitted: {body}"
+    );
+}
+
 // 验证文件系统 RPC 会拒绝未知 Basic 用户。
 #[tokio::test]
 async fn filesystem_rpc_rejects_unknown_basic_users() {
