@@ -1,108 +1,96 @@
 ---
-title: Scheduler Profile Configuration Example
-description: Copyable CubeMaster runtime scheduler.profile / scheduler.profiles YAML examples, including built-in presets and binpack_score. Runtime overlay is not equivalent to offline simulator strategy profiles.
+title: Scheduler Profile 配置示例
+description: 可复制的 CubeMaster 运行时 scheduler.profile / scheduler.profiles YAML 示例，含内置预设与 binpack_score。运行时覆盖层不等于离线模拟器 strategy profile。
 status: working_guide
 source: CubeMaster/pkg/base/config/config.go
 updated: 2026-09-10
 ---
 
-# Scheduler Profile Configuration Example
+# Scheduler Profile 配置示例
 
-Copyable YAML for CubeMaster **runtime** Profile overlay and `binpack_score`.
-This page covers what ships in the runtime Profiles + binpack PR. An HTTP
-plugin scorer (`external_http_score`) is related open work tracked in #1700
-and is **not** registered or allowed here.
+本文提供 CubeMaster **运行时** Profile 覆盖层与 `binpack_score` 的可复制 YAML。
+内容覆盖本运行时 Profiles + binpack 变更所交付的能力。HTTP 插件评分器
+（`external_http_score`）属于 #1700 跟踪的相关开放工作，**未**在此注册或允许。
+#1699 / #1700 仍为相关开放工作，**不会**随本变更集合并。
 
-## Scope
+## 范围
 
-This document shows how to set `scheduler.profile` and `scheduler.profiles` so
-config `preHandle` applies Filter/Score selector lists and merges Profile
-`resource_weights` over the base `scheduler.score.resource_weights` map.
+本文说明如何配置 `scheduler.profile` 与 `scheduler.profiles`，使配置
+`preHandle` 应用 Filter/Score 选择器列表，并将 Profile 的
+`resource_weights` 合并到基础 `scheduler.score.resource_weights` 映射上。
 
-In scope:
+范围内：
 
-- user-defined runtime Profile overlay;
-- built-in presets `balanced_spread`, `template_locality_first`,
-  `binpack_utilization` (empty `scheduler.profile` still leaves defaults);
-- enabling `binpack_score` by name (directly or via Profile);
-- keeping `plugin_conf` on `scheduler.score.plugin_conf`.
+- 用户自定义运行时 Profile 覆盖；
+- 内置预设 `balanced_spread`、`template_locality_first`、
+  `binpack_utilization`（空 `scheduler.profile` 仍保留默认）；
+- 按名称启用 `binpack_score`（直接或经 Profile）；
+- 将 `plugin_conf` 保留在 `scheduler.score.plugin_conf`。
 
-Out of scope:
+范围外：
 
-- treating runtime presets as formula-equivalent to offline simulator
-  `weightsForProfile` / `schedulerbench`;
-- putting `plugin_conf` under `scheduler.profiles.<name>.score`;
-- changing production Filter/Score defaults when `scheduler.profile` is empty;
-- shipping or documenting `external_http_score` as part of this PR
-  (see #1700);
-- live multi-node performance claims.
+- 将运行时预设视为与离线模拟器 `weightsForProfile` / `schedulerbench`
+  公式等价；
+- 在 `scheduler.profiles.<name>.score` 下放置 `plugin_conf`；
+- 在 `scheduler.profile` 为空时改变生产 Filter/Score 默认值；
+- 将 `external_http_score` 作为本 PR 的一部分交付或文档化
+  （见 #1700；相关开放工作，未合并）；
+- 对真实多机性能作任何宣称。
 
-## Runtime Profile Contract
+## 运行时 Profile 契约
 
-Source: `CubeMaster/pkg/base/config/config.go`
-(`SchedulerConf`, `SchedulerProfileConf`, `SchedulerProfileScoreConf`,
-`applySchedulerProfile`, `builtinSchedulerProfiles`,
-`validateSchedulerProfileSelectors`).
+源码：`CubeMaster/pkg/base/config/config.go`
+（`SchedulerConf`、`SchedulerProfileConf`、`SchedulerProfileScoreConf`、
+`applySchedulerProfile`、`builtinSchedulerProfiles`、
+`validateSchedulerProfileSelectors`）。
 
-| YAML path | Role |
+| YAML 路径 | 作用 |
 |---|---|
-| `scheduler.profile` | Name of the active overlay. Empty string (default) means no expansion. Built-in names apply without a user map key. |
-| `scheduler.profiles` | User-defined map of named overlays. A user key with the same name as a built-in **overrides** the built-in. |
-| `scheduler.profiles.<name>.filter.enable_filters` | Replaces `scheduler.filter.enable_filters` when the profile provides a non-nil list. |
-| `scheduler.profiles.<name>.score.enable_scorers` | Replaces `scheduler.score.enable_scorers` when the profile provides a non-nil list. |
-| `scheduler.profiles.<name>.score.resource_weights` | Merged over `scheduler.score.resource_weights`; Profile keys win and unrelated base keys remain. These are factor weights, not plugin weights. |
-| `scheduler.score.plugin_conf.*` | Per-scorer params. **Not** a profile overlay field. |
+| `scheduler.profile` | 当前生效覆盖层名称。空字符串（默认）表示不展开。内置名无需用户 map key 即可应用。 |
+| `scheduler.profiles` | 用户自定义命名覆盖层。与内置同名的用户 key **完全覆盖**该内置。 |
+| `scheduler.profiles.<name>.filter.enable_filters` | 当 Profile 提供非 nil 列表时，**替换** `scheduler.filter.enable_filters`。 |
+| `scheduler.profiles.<name>.score.enable_scorers` | 当 Profile 提供非 nil 列表时，**替换** `scheduler.score.enable_scorers`。 |
+| `scheduler.profiles.<name>.score.resource_weights` | 合并覆盖到 `scheduler.score.resource_weights`；Profile 同名键胜出，无关基础键保留。这些是因子权重，不是插件权重。 |
+| `scheduler.score.plugin_conf.*` | 各评分器参数。**不是** Profile 覆盖字段。 |
 
-A runtime Profile is a **selector overlay**. It does not change
-`Select()` phase order. Built-in presets are scene-oriented combinations of
-existing filters/scores (plus thin `binpack_score`). They are **not**
-offline simulator models and share names with simulator strategy profiles
-only as strings.
+运行时 Profile 是**选择器覆盖层**，不改变 `Select()` 阶段顺序。内置预设是
+面向场景的现有 filter/score 组合（外加薄的 `binpack_score`）。它们**不是**
+离线模拟器模型，与模拟器 strategy profile 仅共享名称字符串。
 
-`SchedulerProfileScoreConf` intentionally omits `plugin_conf`. When
-`scheduler.profile` is set, every registered scorer listed in the final
-effective `enable_scorers` requires its corresponding
-`scheduler.score.plugin_conf` block; missing configuration, or a factor
-scorer with no positive `resource_weights` entry, fails before scheduler
-construction. Built-in presets additionally reject an explicitly disabled
-required scorer (`disable: true` / `weight: 0`). User Profiles may keep an
-enabled name with an intentional disable. Empty `scheduler.profile` keeps
-the pre-upgrade load path: ineffective factor/plugin combinations may still
-load and become runtime no-ops.
+`SchedulerProfileScoreConf` 有意省略 `plugin_conf`。当设置了
+`scheduler.profile` 时，最终生效 `enable_scorers` 中每个已注册评分器都必须有
+对应的 `scheduler.score.plugin_conf` 块；配置缺失，或因子型评分器没有任何正的
+`resource_weights` 项，会在调度器构建前失败。内置预设还会拒绝其必需评分器被
+显式禁用（`disable: true` / `weight: 0`）。用户 Profile 可以保留启用名同时故意
+禁用。空 `scheduler.profile` 保持升级前加载路径：无效的因子/插件组合仍可能加载并
+在运行时成为空操作。
 
-The three built-ins inject self-contained defaults **only when** the
-corresponding `plugin_conf` entry is `nil`: `balanced_spread` for
-`real_time_weighted_average`, `template_locality_first` for `image_score`,
-and `binpack_utilization` for `binpack_score`. An operator-supplied
-`plugin_conf` / `enable_weight_factors` block is never overwritten by
-built-in defaults.
+三个内置仅在对应 `plugin_conf` 条目为 `nil` 时注入自包含默认值：
+`balanced_spread` 对应 `real_time_weighted_average`，
+`template_locality_first` 对应 `image_score`，
+`binpack_utilization` 对应 `binpack_score`。运维已提供的
+`plugin_conf` / `enable_weight_factors` 块不会被内置默认覆盖。
 
-### Precedence
+### 优先级
 
-1. **User `scheduler.profiles.<name>`** with the same key as a built-in
-   replaces the built-in overlay entirely.
-2. **Explicit `scheduler.score.plugin_conf.*`** wins over built-in injected
-   defaults (defaults apply only when the pointer is `nil`).
-3. **Profile `resource_weights` same-key override**: base map is copied
-   first, then Profile keys are written last (Profile wins for colliding
-   keys; unrelated base keys remain).
+1. **用户 `scheduler.profiles.<name>`** 与内置同名时，完全替换该内置覆盖层。
+2. **显式 `scheduler.score.plugin_conf.*`** 优先于内置注入默认值（仅当指针为
+   `nil` 时才注入）。
+3. **Profile `resource_weights` 同名覆盖**：先复制基础 map，再写入 Profile 键
+   （冲突键以 Profile 为准；无关基础键保留）。
 
-Factor-based `real_time_weighted_average`,
-`multi_factor_weighted_average`, and `image_score` are constructed only when
-at least one of their `enable_weight_factors` has a positive
-`resource_weights` value. Plugin-only `binpack_score` does not use that map
-as a construction gate and does not require a fake `resource_weights`
-block. Legacy `affinity_score` keeps empty-profile compatibility: with no
-Profile and `resource_weights: null` (omitted), it is not constructed; with
-a Profile or a non-nil `resource_weights` map it constructs normally.
-`plugin_conf.binpack_score.weight < 0` is always rejected at config load;
-`weight: 0` disables Select; omitting the block keeps the runtime default.
+因子型 `real_time_weighted_average`、`multi_factor_weighted_average` 与
+`image_score` 仅在其某个 `enable_weight_factors` 对应正的 `resource_weights`
+值时才会被构造。纯插件型 `binpack_score` 不以该 map 作为构造门禁，也不需要伪造
+`resource_weights` 块。遗留的 `affinity_score` 保持空 Profile 兼容：无 Profile 且
+`resource_weights: null`（省略）时不构造；有 Profile 或非 nil `resource_weights`
+map 时正常构造。`plugin_conf.binpack_score.weight < 0` 一律在配置加载阶段拒绝；
+`weight: 0` 禁用 Select；省略整个块则保留运行时默认。
 
-Unknown `scheduler.profile` names (not user-defined and not built-in) and
-unknown filter/score names in the selected overlay fail closed in
-`preHandleScheduler` before the scheduler runs.
+未知的 `scheduler.profile` 名称（既非用户定义也非内置），以及所选覆盖层中未知的
+filter/score 名称，会在调度器运行前于 `preHandleScheduler` 中失败关闭。
 
-Allowed filter names (must match `CubeMaster/pkg/selector/filter/init.go`):
+允许的 filter 名称（须与 `CubeMaster/pkg/selector/filter/init.go` 一致）：
 
 - `cpu`
 - `mem`
@@ -111,7 +99,7 @@ Allowed filter names (must match `CubeMaster/pkg/selector/filter/init.go`):
 - `disk`
 - `thirtparty`
 
-Allowed score names (must match `CubeMaster/pkg/selector/score/init.go`):
+允许的 score 名称（须与 `CubeMaster/pkg/selector/score/init.go` 一致）：
 
 - `real_time_weighted_average`
 - `multi_factor_weighted_average`
@@ -119,46 +107,92 @@ Allowed score names (must match `CubeMaster/pkg/selector/score/init.go`):
 - `image_score`
 - `binpack_score`
 
-## Built-in Profile Examples
+### 运维注意事项
 
-Leave `scheduler.profile` empty to keep the current Filter/Score config.
-Setting a built-in name does **not** require a matching key under
-`scheduler.profiles`.
+**Filter 列表替换（准入风险）。** 当 Profile（内置或用户）提供非 nil 的
+`filter.enable_filters` 列表时，该列表会**整体替换**
+`scheduler.filter.enable_filters`，**不会**与基础列表合并。内置预设即可说明风险：
+`balanced_spread` 仅设置 `cpu` / `mem` / `realtime_create_num`；
+`template_locality_first` 仅设置 `cpu` / `mem` / `template_locality`；
+`binpack_utilization` 仅设置 `cpu` / `mem`。选择其中任一预设都会**丢掉**基础配置中
+原先启用、但未出现在 Profile 列表中的准入过滤器（例如 `disk`、`thirtparty` 等）。
+应用 Profile 后请审查生效的 `enable_filters`，并通过显式列出所需过滤器的用户
+Profile 恢复必要准入项。
 
-`balanced_spread` (high-concurrency short-lived sandboxes) supplies a default
-`real_time_weighted_average` block:
+**`weight: 0` 禁用评分器。** 对每个已注册 Score 插件
+（`real_time_weighted_average`、`multi_factor_weighted_average`、
+`affinity_score`、`image_score` 以及 `binpack_score`），插件级
+`weight: 0`（或 `disable: true`）会禁用该评分器并跳过其 `Select`。由于 `weight`
+是 YAML `float64`，在已存在的 `plugin_conf.<scorer>` 块中省略 `weight` 键也会解码为
+`0` 并禁用该评分器。要保持评分器活跃，请显式设置正的 `weight`。省略整个
+`plugin_conf.<scorer>` 块则不同：在非空 Profile 且启用了该评分器时，缺失块会校验失败
+（内置在指针仍为 `nil` 时可能注入默认）；空 Profile 下部分评分器保留遗留默认行为。
+
+**`binpack_score` 占用权重。** `cpu_weight` / `mem_weight` / `mvm_weight` 取值
+`<= 0` 时，运行时回退为默认 `1`。**不能**通过把某维因子权重设为 `0` 来排除该维。
+只有插件级 `weight: 0`（或 `disable: true`）才会禁用该评分器。负的插件 `weight`
+在配置加载时失败（`validateBinpackScoreWeight`）。
+
+**非空 Profile 下因子型评分器失败关闭。** 当 `scheduler.profile` 非空时，最终
+`enable_scorers` 中的每个因子型评分器（`real_time_weighted_average`、
+`multi_factor_weighted_average`、`image_score`）都要求非空的
+`enable_weight_factors`，且这些因子中至少有一个正的 `resource_weights` 项。空或省略的
+因子列表，或全部为零/缺失的因子权重，会在调度器运行前于 `preHandleScheduler`
+中失败关闭。
+
+**MVM 占用容量。** `binpack_score`（以及共享同一 helper 的其他评分器）使用
+`localcache.MaxMvmLimit(n)` 计算 MVM 占用——该 helper 是权威的按节点容量回退
+（实例类型 / `node_max_mvm_num` 路径）。**不要**假设单独使用原始
+`node.MaxMvmLimit` 就是分母。
+
+**重启 vs 热更新。** Profile 展开发生在配置 `Init` / `preHandle` 中
+（经 `preHandleScheduler` 调用 `applySchedulerProfile`）。CubeMaster **确实**通过
+文件监视器热加载 `conf.yaml`：变更时 `listener.OnEvent` 会再次执行 `preHandle` 并更新
+内存中的 `Config`（因此 Profile 覆盖会重新应用到 Config 对象）。但是，调度器的
+Filter/Score 插件切片只在 `scheduler.InitScheduler` 中构建一次
+（`filter.NewSelector` / `score.NewSelector`），**不会**在配置热加载时重建。因此，更改
+`scheduler.profile`、Profile 的 `enable_filters` / `enable_scorers`，或以其他方式切换
+已注册选择器集合，都需要**重启 CubeMaster** 才能在调度管线上生效。已构造评分器上
+实时读取的插件参数（例如 `weight` / `disable`）可能随热加载的 Config 更新而无需重启，
+但选择器集合变更不会。
+
+## 内置 Profile 示例
+
+保持 `scheduler.profile` 为空即可保留当前 Filter/Score 配置。设置内置名
+**不**要求在 `scheduler.profiles` 下有对应 key。
+
+`balanced_spread`（高并发短生命周期 sandbox）在缺失时提供默认
+`real_time_weighted_average` 块：
 
 ```yaml
 scheduler:
   profile: balanced_spread
 ```
 
-`template_locality_first` (repeated same-template creates) likewise supplies
-safe `image_score` defaults:
+`template_locality_first`（重复同模板创建）同样提供安全的 `image_score` 默认：
 
 ```yaml
 scheduler:
   profile: template_locality_first
 ```
 
-`binpack_utilization` (mixed-size / long-lived) injects plugin weight 1 and
-equal CPU/memory/MVM occupancy weights when its plugin block is omitted:
+`binpack_utilization`（混合规格 / 长生命周期）在省略插件块时注入插件权重 1 以及
+相等的 CPU/内存/MVM 占用权重：
 
 ```yaml
 scheduler:
   profile: binpack_utilization
 ```
 
-These overlays are scene-oriented selector combinations. They are **not**
-the same as simulator `weightsForProfile`, and they make **no** live
-performance claims.
+这些覆盖层是面向场景的选择器组合。它们**不是**模拟器 `weightsForProfile`，也
+**不做**任何真实性能宣称。请记住上文的 filter 替换警告：内置会用更短列表替换
+`enable_filters`，可能丢掉基础配置中的 `disk` / `thirtparty` 等准入过滤器。
 
-## Minimal Profile Example
+## 最小 Profile 示例
 
-Leave `scheduler.profile` empty to keep the current Filter/Score config.
-When a name is set, it must exist in `scheduler.profiles` unless it is a
-built-in. The name below (`locality_combo`) is an operator-chosen key, not a
-CubeMaster built-in.
+保持 `scheduler.profile` 为空即可保留当前 Filter/Score 配置。一旦设置名称，除非是
+内置名，否则必须存在于 `scheduler.profiles`。下面的名称（`locality_combo`）是运维自选
+key，不是 CubeMaster 内置。
 
 ```yaml
 scheduler:
@@ -188,24 +222,22 @@ scheduler:
         weight: 1
 ```
 
-What this overlay copies at `preHandle`:
+该覆盖在 `preHandle` 时复制的内容：
 
-- `scheduler.filter.enable_filters` becomes `cpu`, `mem`, `template_locality`;
-- `scheduler.score.enable_scorers` becomes `image_score`, `affinity_score`;
-- the Profile factor weights merge over existing
-  `scheduler.score.resource_weights`; plugin weights remain under
-  `plugin_conf`.
+- `scheduler.filter.enable_filters` 变为 `cpu`、`mem`、`template_locality`；
+- `scheduler.score.enable_scorers` 变为 `image_score`、`affinity_score`；
+- Profile 因子权重合并覆盖现有 `scheduler.score.resource_weights`；插件权重仍在
+  `plugin_conf` 下。
 
-Omitted overlay sections are left untouched. A filter-only profile does not
-clear existing `enable_scorers`; a score-only profile does not clear existing
-`enable_filters`.
+省略的覆盖段保持不动。仅 filter 的 Profile 不会清空现有 `enable_scorers`；仅 score 的
+Profile 不会清空现有 `enable_filters`。当 Profile **确实**提供 `enable_filters` 时，该列表
+会替换基础列表（见运维注意事项）。
 
-## BinpackScore Example
+## BinpackScore 示例
 
-A profile (or direct `enable_scorers`) may enable `binpack_score`. Plugin
-weight and occupancy factor weights stay on
-`scheduler.score.plugin_conf.binpack_score`. Do **not** put `plugin_conf`
-under `scheduler.profiles.<name>.score`.
+Profile（或直接的 `enable_scorers`）可以启用 `binpack_score`。插件权重与占用因子权重
+仍放在 `scheduler.score.plugin_conf.binpack_score`。**不要**把 `plugin_conf` 放在
+`scheduler.profiles.<name>.score` 下。
 
 ```yaml
 scheduler:
@@ -229,13 +261,13 @@ scheduler:
         disable: false
 ```
 
-If `binpack_score` is listed in the final `enable_scorers` under a non-empty
-Profile but `plugin_conf.binpack_score` is omitted, built-in
-`binpack_utilization` injects defaults; a user Profile without that block
-fails fast. Explicit `weight: 0` disables Select. Negative weight is always
-rejected at config load.
+若非空 Profile 下最终 `enable_scorers` 列出了 `binpack_score` 但省略了
+`plugin_conf.binpack_score`，内置 `binpack_utilization` 会注入默认值；没有该块的用户
+Profile 会快速失败。显式 `weight: 0` 禁用 Select。负权重一律在配置加载时拒绝。
+`cpu_weight` / `mem_weight` / `mvm_weight` 取值 `<= 0` 回退为 `1`（不能靠 `0` 排除某维）。
+MVM 占用使用 `localcache.MaxMvmLimit`，而非单独的原始 `node.MaxMvmLimit`。
 
-Invalid (will not overlay `plugin_conf`; the Go type has no such field):
+无效写法（不会覆盖 `plugin_conf`；Go 类型无此字段）：
 
 ```yaml
 # Do not do this. scheduler.profiles.<name>.score has no plugin_conf.
@@ -250,80 +282,80 @@ scheduler:
             weight: 1
 ```
 
-## Related open work
+## 相关开放工作
 
-`external_http_score` (HTTP plugin scorer) is tracked separately in #1700 and
-is not part of this runtime Profiles + binpack change set. Do not list it in
-`enable_scorers` on this branch; unknown score names fail closed.
+`external_http_score`（HTTP 插件评分器）在 #1700 单独跟踪，不属于本运行时 Profiles +
+binpack 变更集合。#1699 / #1700 为相关开放工作，**未**在此合并。不要在本分支的
+`enable_scorers` 中列出 `external_http_score`；未知 score 名称会失败关闭。
 
-## Runtime Profile vs Simulator Profile
+## 运行时 Profile vs 模拟器 Profile
 
-Runtime Profile and simulator strategy profiles share the word "profile"
-but are **not equivalent**.
+运行时 Profile 与模拟器 strategy profile 都叫 “profile”，但**不等价**。
 
-| | Runtime Profile | Simulator strategy profile |
+| | 运行时 Profile | 模拟器 strategy profile |
 |---|---|---|
-| Where | CubeMaster config: `scheduler.profile` / `scheduler.profiles` | Offline simulator / `schedulerbench` `weightsForProfile` |
-| What it is | User-defined overlay of existing filter/score selector names and factor `resource_weights` | Scoring-weight preset inside the offline placement model |
-| Built-in names | `balanced_spread`, `template_locality_first`, `binpack_utilization` (selector overlay; user map key overrides). Operators may also choose other map keys. | Simulator-only weights that may reuse the same strings |
-| `plugin_conf` | Not overlayable. Params stay on `scheduler.score.plugin_conf` | Not CubeMaster scheduler YAML |
+| 位置 | CubeMaster 配置：`scheduler.profile` / `scheduler.profiles` | 离线模拟器 / `schedulerbench` 的 `weightsForProfile` |
+| 是什么 | 对现有 filter/score 选择器名与因子 `resource_weights` 的用户覆盖层 | 离线放置模型内部的评分权重预设 |
+| 内置名 | `balanced_spread`、`template_locality_first`、`binpack_utilization`（选择器覆盖；用户同名 key 覆盖）。运维也可自选其他 map key。 | 仅模拟器侧的权重，可能复用相同字符串 |
+| `plugin_conf` | 不可覆盖。参数仍在 `scheduler.score.plugin_conf` | 不是 CubeMaster 调度 YAML |
 
-**Runtime built-in preset names** (selector overlay, not simulator weights):
+**运行时内置预设名**（选择器覆盖，不是模拟器权重）：
 
 - `balanced_spread`
 - `template_locality_first`
 - `binpack_utilization`
 
-Copying one of those strings into `scheduler.profile` loads the CubeMaster
-built-in overlay unless you also define a matching user key under
-`scheduler.profiles` (user wins). Offline simulator workloads do not prove a
-real multi-node deployment, CubeAPI/Cubelet create path, real create latency,
-or production performance.
+把上述字符串之一写入 `scheduler.profile` 会加载 CubeMaster 内置覆盖，除非你还在
+`scheduler.profiles` 下定义了同名用户 key（用户胜出）。离线模拟器负载不能证明真实多机部署、
+CubeAPI/Cubelet 创建路径、真实创建延迟或生产性能。
 
-## Do / Do Not
+## 应做 / 不应做
 
-**Do**
+**应做**
 
-- User-define extra profile map keys (`locality_combo`, `binpack_combo`, or any
-  other operator-chosen name).
-- Use only registered selector names listed above.
-- Keep `plugin_conf` on `scheduler.score.plugin_conf`.
-- Put scorer/plugin weights under `plugin_conf.<scorer>.weight`; do not use a
-  scorer name as a `resource_weights` key.
-- Leave `scheduler.profile` empty when you want existing Filter/Score config
-  unchanged.
-- Treat runtime built-in presets and simulator `weightsForProfile` as two
-  paths that share names but are **not** formula-equivalent.
+- 用户自定义额外 profile map key（`locality_combo`、`binpack_combo` 或任意运维自选名）。
+- 仅使用上文列出的已注册选择器名。
+- 将 `plugin_conf` 保留在 `scheduler.score.plugin_conf`。
+- 将评分器/插件权重放在 `plugin_conf.<scorer>.weight`；不要用评分器名作为
+  `resource_weights` 键。
+- 若希望现有 Filter/Score 配置不变，保持 `scheduler.profile` 为空。
+- 将运行时内置预设与模拟器 `weightsForProfile` 视为两条共享名称但**公式不等价**的路径。
+- 选定 Profile 后审计生效的 `enable_filters`，确认所需准入过滤器（`disk`、
+  `thirtparty` 等）未被替换丢掉。
+- 对每个打算保持活跃的 `plugin_conf.<scorer>` 显式设置正的 `weight`；在更改 Profile /
+  选择器列表后重启 CubeMaster。
 
-**Do Not**
+**不应做**
 
-- Claim runtime presets use the same scoring formula as the offline simulator.
-- Put `plugin_conf` under `scheduler.profiles.<name>.score`.
-- Invent filter or score names outside the allowed sets above.
-- Equate runtime `scheduler.profiles` with simulator `weightsForProfile`.
-- Treat a Profile overlay as a change to
-  `PreFilter -> Filter -> Score -> PostScore`.
-- Claim #1699 / #1700 is merged via this PR.
+- 声称运行时预设使用与离线模拟器相同的评分公式。
+- 在 `scheduler.profiles.<name>.score` 下放置 `plugin_conf`。
+- 发明上文允许集合之外的 filter 或 score 名称。
+- 将运行时 `scheduler.profiles` 等同于模拟器 `weightsForProfile`。
+- 把 Profile 覆盖当作对 `PreFilter -> Filter -> Score -> PostScore` 的改动。
+- 声称 #1699 / #1700 已通过本 PR 合并（它们仍是相关开放工作）。
+- 假设 `cpu_weight: 0` / `mem_weight: 0` / `mvm_weight: 0` 能排除 binpack 某维
+  （它们会回退为 `1`）。
+- 期望在不重启 CubeMaster 的情况下，Profile / `enable_filters` / `enable_scorers`
+  切换会重建活跃选择器集合。
 
-## Verification
+## 验证
 
-These checks confirm the YAML contract against current source. They are not
-live-cluster proof.
+以下检查对照当前源码确认 YAML 契约，不是真实集群证明。
 
-From the repository root:
+在仓库根目录：
 
 ```bash
 rg -n "scheduler.profile|scheduler.profiles|binpack_score" CubeMaster/pkg/base/config/config.go
 rg -n "binpack_score" CubeMaster/pkg/selector/score/init.go
 ```
 
-From `CubeMaster`:
+在 `CubeMaster` 下：
 
 ```bash
 go test ./pkg/base/config ./pkg/selector/score ./pkg/scheduler -count=1
 ```
 
-Relevant tests:
+相关测试：
 
 - `TestPreHandleScheduler_NoProfileLeavesSchedulerUnchanged`
 - `TestPreHandleScheduler_ProfileAppliesFilterAndScore`

@@ -95,6 +95,16 @@ CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 会展开到选择器列表，并在对应 `plugin_conf` 缺失时注入自包含默认值。
 `scheduler.profiles` 下与内置同名的用户条目会完全覆盖内置。
 
+**注意：** 当 Profile 提供 `filter.enable_filters` 时，该列表会**整体替换**基础
+`scheduler.filter.enable_filters`（不会合并）。内置预设使用较短列表，可能丢掉此前已启用的
+准入过滤器（如 `disk`、`thirtparty`）。选定 Profile 后请审查生效的 filter 列表。
+
+对每个 Score 插件（含既有四个评分器以及 `binpack_score`），
+`plugin_conf.<scorer>.weight: 0` 会禁用该评分器并跳过 Select；在已存在的插件块中省略
+`weight` 也会 YAML 解码为 `0` 并禁用。要保持评分器活跃，请显式设置正的 `weight`。
+更改 Profile / 选择器列表需要重启 CubeMaster：配置热加载会把 Profile 覆盖重新应用到内存
+`Config`，但 `InitScheduler` 不会重建 Filter/Score 切片。
+
 `binpack_score` 是偏好更满节点的薄 Score 插件，通过在 `enable_scorers`
 中列出（直接或经 Profile）启用。插件参数仍放在
 `scheduler.score.plugin_conf.binpack_score`。

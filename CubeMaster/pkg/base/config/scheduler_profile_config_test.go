@@ -49,10 +49,14 @@ func TestPreHandleScheduler_ProfileAppliesFilterAndScore(t *testing.T) {
 				EnableScorers:   []string{"affinity_score"},
 				ResourceWeights: map[string]float64{"cpu": 1.0, "disk": 7.0},
 				ScorePluginConf: ScorePluginConf{
-					RealTimeWeightedAverage: &RealTimeWeightedAverage{Weight: 1},
+					RealTimeWeightedAverage: &RealTimeWeightedAverage{
+						Weight:              1,
+						EnableWeightFactors: []string{"cpu"},
+					},
 					MultiFactorWeightedAverage: &MultiFactorWeightedAverage{
-						Weight:        1,
-						ScoreInterval: time.Second,
+						Weight:              1,
+						ScoreInterval:       time.Second,
+						EnableWeightFactors: []string{"mem"},
 					},
 				},
 			},
@@ -185,7 +189,10 @@ func TestPreHandleScheduler_ProfileFilterOnlyDoesNotClearScore(t *testing.T) {
 				EnableScorers:   []string{"image_score"},
 				ResourceWeights: map[string]float64{"mem": 2.0},
 				ScorePluginConf: ScorePluginConf{
-					ImageScore: &ImageScore{Weight: 1},
+					ImageScore: &ImageScore{
+						Weight:              1,
+						EnableWeightFactors: []string{"mem"},
+					},
 				},
 			},
 			Profiles: map[string]SchedulerProfileConf{
@@ -733,6 +740,47 @@ scheduler:
         enable_weight_factors: [image_id, template_id]
 `,
 			wantSub: []string{"ineffective_image", "image_score", "no positive resource weight"},
+		},
+		{
+			name: "realtime_empty_enable_weight_factors",
+			yaml: `common: {}
+log: {}
+scheduler:
+  profile: empty_factors
+  profiles:
+    empty_factors:
+      score:
+        enable_scorers:
+          - real_time_weighted_average
+        resource_weights:
+          realtime_create_num: 2
+  score:
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1
+`,
+			wantSub: []string{"empty_factors", "real_time_weighted_average", "enable_weight_factors is empty"},
+		},
+		{
+			name: "realtime_explicit_empty_enable_weight_factors",
+			yaml: `common: {}
+log: {}
+scheduler:
+  profile: empty_factors_list
+  profiles:
+    empty_factors_list:
+      score:
+        enable_scorers:
+          - real_time_weighted_average
+        resource_weights:
+          realtime_create_num: 2
+  score:
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1
+        enable_weight_factors: []
+`,
+			wantSub: []string{"empty_factors_list", "real_time_weighted_average", "enable_weight_factors is empty"},
 		},
 	}
 	for _, tc := range cases {
