@@ -183,6 +183,44 @@ async fn process_start_request_envs_override_injected_base_environment() {
     );
 }
 
+// 验证未指定 cwd 时子进程在目标用户的主目录下启动。
+#[tokio::test]
+async fn process_start_defaults_to_the_user_home_directory() {
+    let current = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .expect("look up current local user")
+        .expect("current uid has a passwd entry");
+    let payload = json!({
+        "process": {
+            "cmd": "/bin/sh",
+            "args": ["-c", "test \"$PWD\" = \"$EXPECTED_HOME\"; exit 7"],
+            "envs": {"EXPECTED_HOME": current.dir.display().to_string()}
+        },
+        "stdin": false
+    });
+    let response = router()
+        .oneshot(
+            Request::post("/process.Process/Start")
+                .header(CONTENT_TYPE, "application/connect+json")
+                .header("Connect-Protocol-Version", "1")
+                .header("Authorization", common::basic_auth_header())
+                .body(Body::from(
+                    encode_frame(0, payload.to_string().as_bytes()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let frames = split_frames(&response.into_body().collect().await.unwrap().to_bytes());
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame["event"]["end"]["exitCode"] == 7),
+        "process did not start in the user home directory: {frames:?}"
+    );
+}
+
 // 验证空闲进程的 Start 流会按客户端请求发送保活事件。
 #[tokio::test]
 async fn process_start_sends_keepalives_during_idle_periods() {

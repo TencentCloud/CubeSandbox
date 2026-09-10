@@ -135,6 +135,10 @@ request are applied on top, in that order, so a request can override any of
 them. When the selected user differs from the user running `cube-envd`, it
 switches credentials via `setpriv`.
 
+A started process runs in the selected user's home directory unless the request
+sets `cwd`; a relative or `~/...` `cwd` is resolved against that same home. The
+directory must exist.
+
 ## Repository Layout
 
 ```
