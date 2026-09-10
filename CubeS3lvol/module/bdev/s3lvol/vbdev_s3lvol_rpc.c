@@ -1091,6 +1091,7 @@ rpc_resize_lvol_cb(void *cb_arg, int lvolerrno)
 	struct spdk_lvol *lvol = ctx->lvol;
 
 	lvol->action_in_progress = false;
+	s3lvol_decouple_kick_queue();
 
 	if (lvolerrno != 0) {
 		SPDK_ERRLOG("rcow_resize_lvol '%s' failed: %s\n", lvol->name,
@@ -1166,6 +1167,7 @@ rpc_rcow_resize_lvol(struct spdk_jsonrpc_request *request,
 				rpc_resize_lvol_cb, ctx);
 	if (rc != 0) {
 		lvol->action_in_progress = false;
+		s3lvol_decouple_kick_queue();
 		free(ctx);
 		SPDK_ERRLOG("rcow_resize_lvol '%s' failed: %s\n", lvol->name,
 			    spdk_strerror(-rc));
@@ -1939,9 +1941,8 @@ struct rpc_export_lvol {
 	char *snapshot_name;
 	char *export_id;
 
-	/* How long the source promises to keep the snapshot, in seconds. 0 asks for
-	 * the default; a zero-copy export without a deadline would pin a snapshot for
-	 * as long as this node lives. */
+	/* Retained for wire compatibility. Snapshot-backed exports now remain valid
+	 * until their snapshot is explicitly deleted, so this value is ignored. */
 	uint32_t ttl_sec;
 };
 
@@ -1994,9 +1995,13 @@ rpc_rcow_export_snapshot(struct spdk_jsonrpc_request *request,
 	 * running in the background and is polled with rcow_get_snapshot_status.
 	 * There is no completion callback: a later failure surfaces there as
 	 * NONE. */
-	rc = s3lvol_lvol_export(lvs, lvol, req.export_id,
-			req.ttl_sec ? req.ttl_sec : S3LVOL_EXPORT_DEFAULT_TTL_SEC,
-			uuid, sizeof(uuid), NULL, NULL);
+	if (req.ttl_sec != 0) {
+		SPDK_NOTICELOG("rcow_export_snapshot '%s': ttl_sec is deprecated and "
+			       "ignored; the export follows the snapshot lifetime\n",
+			       req.snapshot_name);
+	}
+	rc = s3lvol_lvol_export(lvs, lvol, req.export_id, uuid, sizeof(uuid),
+				NULL, NULL);
 	if (rc != 0) {
 		/* Named rather than left as a bare errno. The failure reaches the
 		 * caller as whatever spdk_strerror makes of rc, and "Invalid argument"
@@ -2061,8 +2066,8 @@ export_state_str(enum s3lvol_export_state state)
  *
  * Takes either export_uuid or snapshot_name. The snapshot form exists because a
  * snapshot that was never exported still has a deletable worth asking about, and
- * there is no uuid to ask with; it also covers a snapshot exported more than
- * once, which no single uuid describes.
+ * there is no uuid to ask with. A snapshot has at most one live export; older
+ * registries may still list more than one, which this folds together.
  *
  * A failed reply means the named thing does not exist, in both forms. What
  * differs is what was named: an uuid matching no export is refused, while a
@@ -2160,10 +2165,9 @@ struct rpc_import_lvol {
 	 * volume reading through to the export until somebody asks. The import still
 	 * answers as soon as the volume is usable.
 	 *
-	 * On by default. A volume left reading through to the export keeps depending
-	 * on it past the export's TTL -- which the importer does not renew -- so the
-	 * source could delete the snapshot out from under it. Reading through is the
-	 * explicit opt-out, for callers that will manage that dependency themselves. */
+	 * On by default. A volume left reading through keeps a lease renewed at the
+	 * source, so a source-side snapshot delete is deferred. Reading through is
+	 * the explicit opt-out from eager materialisation. */
 	bool  decouple;
 };
 
@@ -2595,7 +2599,7 @@ SPDK_RPC_REGISTER("rcow_materialise_export", rpc_rcow_materialise_export,
  * *bucket* holds -- that needs s3_list_objects(), which is still -ENOTSUP.
  *
  * rcow_get_exports is the source side: every reference (and dense) export this
- * node still owes, including ones whose TTL has passed. The uuid is what
+ * node still owes. The uuid is what
  * rcow_release_export takes; rcow_get_lvstores only reports export_status on
  * the snapshot, which is why a leaked registry used to be visible only in the
  * attach log.
@@ -2644,13 +2648,18 @@ rpc_rcow_get_exports(struct spdk_jsonrpc_request *request,
 						     s3lvol_lvstore_get_name(lvs));
 			spdk_json_write_named_string(w, "export_uuid", e.export_uuid);
 			spdk_json_write_named_string(w, "snapshot", e.snapshot);
+			if (e.snapshot_uuid && e.snapshot_uuid[0] != '\0') {
+				spdk_json_write_named_string(w, "snapshot_uuid",
+							     e.snapshot_uuid);
+			}
 			spdk_json_write_named_uint64(w, "blob_id", e.blob_id);
 			spdk_json_write_named_string(w, "layout",
 						     e.is_ref ? S3_EXPORT_LAYOUT_REF_STR :
 						     S3_EXPORT_LAYOUT_DENSE_STR);
 			spdk_json_write_named_uint32(w, "generation", e.generation);
 			spdk_json_write_named_uint64(w, "expires_at", e.expires_at);
-			spdk_json_write_named_bool(w, "expired", e.expired);
+			/* Always false: snapshot-backed exports no longer TTL-expire. */
+			spdk_json_write_named_bool(w, "expired", false);
 			spdk_json_write_named_bool(w, "lease_aware", e.lease_aware);
 			spdk_json_write_named_bool(w, "lease_checked", e.lease_checked);
 			spdk_json_write_named_bool(w, "lease_absent", e.lease_absent);

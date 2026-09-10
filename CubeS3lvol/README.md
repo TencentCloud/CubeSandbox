@@ -228,14 +228,29 @@ copying them:
   does not try to restore it. A snapshot that is still pinned is recorded as an
   intent rather than carried out. When the blocker is one the poller can finish
   on its own, the reply is the usual success envelope plus `deferred: true`. A
-  lease-less export (`export_legacy`) still returns EBUSY; the mark is recorded
-  either way. `rcow_cancel_pending_delete` withdraws it.
+  live or still-unknown lease still returns EBUSY; a stale lease-aware export
+  and a pre-lease (`export_legacy`) export are released internally by the delete.
+  `rcow_cancel_pending_delete` withdraws it.
 
 **Exporting a snapshot** (cross-node transfer):
 
 ```sh
 scripts/s3lvol_rpc.py rcow_export_snapshot '{"snapshot_name":"snap0"}'
 ```
+
+`ttl_sec` is accepted for compatibility but ignored. New reference manifests use
+`expires_at: 0`; their lifetime follows the source snapshot.
+
+Rolling upgrade: bring **importers** to this build before sources that publish
+`expires_at: 0`. An older importer skips writing a lease for that shape, so a
+source-first upgrade would treat a still-reading node as absent after the
+grace window. Same-version importers renew every 20 s. A confirmed miss younger
+than 60 s still pins — that covers a first lease PUT that arrives in the first
+minute after publish (or after a live lease disappears). Once the export has
+been idle longer than that, the miss is already older than the grace: a newly
+admitted importer is unprotected until the source's next lease poll (20 s),
+when the source first sees the PUT. The delete path uses that cached
+poll; it does not HEAD S3 itself.
 
 `rcow_export_snapshot` returns an **export uuid immediately**; the export itself
 keeps running in the background. The uuid is not a completion signal — poll it:
@@ -244,18 +259,23 @@ keeps running in the background. The uuid is not a completion signal — poll it
 scripts/s3lvol_rpc.py rcow_get_snapshot_status '{"export_uuid":"<uuid>"}'
 # -> {"export_status":"INPROGRESS","deletable":"NO","delete_pending":false}
 #    ... then, eventually
-# -> {"export_status":"DONE","deletable":"NO","delete_pending":false}
-#    (still pinned while exported)
+# -> {"export_status":"DONE","deletable":"YES","delete_pending":false}
+#    (when no live/unknown reader or other blocker remains)
 ```
 
 `rcow_get_snapshot_status` returns three fields:
 
 - `export_status`: `INPROGRESS` / `DONE` / `NONE`.
-- `deletable`: `YES` / `NO`, computed on the spot each time (never cached) and
-  mirroring what `rcow_delete_lvol` would actually refuse: a snapshot is **not
-  deletable** while an export is in progress or pins it, while a decouple is
-  running on it, while it is active over NVMf, or when it has more than one
-  clone.
+- `deletable`: `YES` / `NO`, computed on the spot each time from the cached
+  lease poll (the query itself does not HEAD S3) and mirroring what
+  `rcow_delete_lvol` would actually refuse: a snapshot is **not
+  deletable** while an export is in progress, has a live lease, has a miss
+  younger than the source grace (`S3LVOL_LEASE_MIN_GRACE_SEC`), or is read by a
+  local esnap clone; also while a decouple runs, while active over NVMf, or when
+  it has more than one clone. An idle lease-aware ref export, and a pre-lease
+  legacy export, are released internally by the delete — `deletable: YES` in
+  those cases is the signal that an operator delete will revoke the export even
+  if a pre-lease reader cannot be observed.
 - `delete_pending`: whether a delete was asked for and refused — see
   [Retrying a refused snapshot delete](#retrying-a-refused-snapshot-delete---retry-pending).
   Only meaningful when the query names a `snapshot_name`; queried by
@@ -376,11 +396,11 @@ is not disturbed by scheduler contention.
 
 ### Deleting snapshots / lvols
 
-- A snapshot that is **behind an export** cannot be deleted while the export is
-  alive: `s3lvol_lvol_destroy` refuses with *"the snapshot behind export
-  \<uuid\>, which another node may be reading through. Release that export, or
-  wait for it to expire, before deleting this."* — call `rcow_release_export`
-  first (or wait for the export TTL to lapse).
+- Deleting a snapshot also releases its zero-copy reference exports. If an
+  importer still has a live lease, or a local esnap clone still reads through
+  one, the delete is recorded as pending and completes after those readers stop.
+  Callers do not need to sequence `rcow_release_export` themselves. Dense exports
+  keep their independent copies and remain valid.
 - An **active** (attached) lvol cannot be deleted; deactivate it first
   (`rcow_deactive_bdev`).
 - The delete-time cluster-count log line needs the blob to still be open: if
@@ -449,16 +469,15 @@ anything:
 
 - a **leased** export (`export`) — the importer stops renewing, the lease goes
   stale, that is evidence nobody is reading;
+- a **pre-lease** export (`export_legacy`) once a snapshot delete has been
+  recorded — the intent is the revocation (including marks restored from an
+  older build);
 - an export still **publishing** (`export_inflight`);
 - extra **clones** (`clone_count`);
 - a running **decouple** (`decouple`).
 
 It will **not** complete:
 
-- an export with **no lease at all** (`export_legacy`). Its TTL lapsing only
-  means time passed, not that an importer stopped reading; auto-completing that
-  would delete objects out from under a live reader. Those marks stay until a
-  human (or `--retry-pending`) decides;
 - a destroy that already **failed asynchronously** (`failed`). Retrying it every
   minute would only repeat the same failure.
 
@@ -511,10 +530,11 @@ still go away. Check `rcow_get_lvstores` afterwards if that race matters.
   `s3lvol_lvol_destroy()` itself identifies — an export pin (published or still
   in flight), more than one clone, a running decouple — plus an asynchronous
   destroy failure. Not recorded: the RPC-layer refusals that run before it (an
-  NVMf-active volume, an unreadable active registry), a bdev unregister that
-  fails, and the case where `spdk_blob_get_clones()` answers an unknown error.
-  Those are either the caller's own precondition to fix (deactivate first) or a
-  failure that has to be looked at rather than retried blindly.
+  NVMf-active volume, an unreadable active registry), and the case where
+  `spdk_blob_get_clones()` answers an unknown error. A bdev unregister that fails
+  **is** recorded as `failed`. Those unrecorded refusals are either the caller's
+  own precondition to fix (deactivate first) or a failure that has to be looked
+  at rather than retried blindly.
 
   The recording does not re-check that the volume is a snapshot: with the blob
   closed that is not reliably answerable, and only the three blockers above get
@@ -529,7 +549,9 @@ still go away. Check `rcow_get_lvstores` afterwards if that race matters.
   object leak on the cluster path is a separate change.
 
 `deletable: YES` means every blocker the delete path checks is clear right now —
-export pins, a running decouple, an NVMf-active volume, and more than one clone.
+export pins (live lease or a miss younger than grace, from the last lease poll),
+a running decouple, an NVMf-active volume, and more than one clone. A local
+esnap reader of an export of the snapshot also keeps it `NO`.
 It is a snapshot of the current state, not a promise: something can pin the
 snapshot again between the query and the delete, and a retry that is refused
 again is reported by `--retry-pending` (exit status 1) rather than hidden.

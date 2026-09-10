@@ -5,11 +5,11 @@
  *
  *   === Why an intent has to be recorded at all ===
  *
- *   `rcow_delete_lvol` on a snapshot is refused when something still references
- *   it: an export names it, it has more than one clone, or a decouple is copying
- *   through it. Some of those blockers clear with no further action from anyone
- *   -- the extra clone is deleted, the copy finishes -- and at that point the
- *   delete the caller asked for would simply succeed.
+ *   `rcow_delete_lvol` on a snapshot is deferred while something still reads or
+ *   mutates it: an export has a live lease or a miss younger than the source
+ *   grace, it has a local esnap reader, it has more than one clone, or a
+ *   decouple is copying through it. Those blockers clear without another delete
+ *   request, at which point the original request should finish.
  *
  *   Without a record, that request is gone the moment the RPC answers. The
  *   caller has to remember it and come back, and nothing on this node can say
@@ -20,27 +20,12 @@
  *
  *   === Why the poller does not act on every kind of blocker ===
  *
- *   An export whose importers left a *lease* is finished automatically: the
- *   lease goes stale once nobody renews it, which is positive evidence that
- *   nobody is reading, and the delete is then exactly as safe as it would have
- *   been by hand.
- *
- *   An export with *no lease at all* is the exception, and deliberately so. Its
- *   TTL lapsing already makes `s3lvol_export_pinning()` stop reporting a pin, so
- *   a delete becomes *permitted* on expiry -- but an importer that is still
- *   reading has no way to say so, and the objects the delete releases are the
- *   ones it is reading. Completing that automatically would turn expiry into the
- *   normal path for destroying data somebody may still need; the cheap fix is
- *   for GC to treat a reference manifest as live (constraint 4b,
- *   lib/s3bsdev/s3_gc.c), which does not exist yet.
- *
- *   So a lease-less export's intent is recorded and reported, and waits for a
- *   human (or `--retry-pending`) to decide. Everything else -- a live export's
- *   lease going stale, an export still publishing, extra clones, a running
- *   decouple -- is completed by the poller. `pending_reason_auto()` is that
- *   distinction, and `pending_lvol_deletable()` re-checks it against the live
- *   pin state so an intent recorded before the first lease GET cannot be
- *   completed on legacy evidence later.
+ *   A lease-aware export becomes releasable when no importer renews it (the miss
+ *   is older than the source grace) and no local esnap clone still reads through
+ *   it. The poller then re-enters the normal delete path, which releases the
+ *   export internally before destroying the snapshot. A pre-lease export is
+ *   the same once a delete has been recorded: absence cannot prove an old
+ *   importer has stopped, but the recorded intent is the revocation.
  *
  *   === Why the marks are keyed by uuid, and the queue is unbounded ===
  *
@@ -158,24 +143,19 @@ s3lvol_pending_reason_str(enum s3lvol_pending_reason reason)
 
 /* Whether the poller may finish this delete on its own.
  *
- * Only the blockers that clear without anyone deciding anything. An export
- * counts: the importer's lease goes stale once it stops renewing, and that is
- * positive evidence nobody is reading any more -- which is the condition the
- * poller waits for. An export with *no lease at all* does not: the only signal
- * there is a TTL that lapses whether or not somebody is reading, so completing
- * on that basis would delete data out from under a live importer (constraint 4b,
- * lib/s3bsdev/s3_gc.c). A destroy that already failed asynchronously is excluded
- * too -- the failure was not a reference count, and retrying it every minute
- * forever would only repeat it.
+ * Only blockers that clear without another lifecycle decision. A live lease
+ * going stale is one; a pre-lease export is another, because the recorded
+ * snapshot delete is itself the revocation. A destroy that already failed
+ * asynchronously is excluded.
  *
  * This decides how the *intent* is reported. Whether a delete actually goes
  * ahead is decided again, against the live pin state, in
- * pending_lvol_deletable() -- so an entry recorded before the first lease GET
- * completed cannot be completed on legacy evidence later. */
+ * pending_lvol_deletable(). */
 static bool
 pending_reason_auto(enum s3lvol_pending_reason reason)
 {
 	return reason == S3LVOL_PENDING_EXPORT ||
+	       reason == S3LVOL_PENDING_EXPORT_LEGACY ||
 	       reason == S3LVOL_PENDING_EXPORT_INFLIGHT ||
 	       reason == S3LVOL_PENDING_CLONE_COUNT ||
 	       reason == S3LVOL_PENDING_DECOUPLE;
@@ -409,20 +389,12 @@ pending_destroy_done(void *cb_arg, int lvolerrno)
 		 * the line that says the *queue* is what finished it. */
 		SPDK_NOTICELOG("pending delete of '%s' completed\n", ctx->name);
 	} else {
-		/* The pre-checks below are the same ones the immediate path
-		 * applies, so a failure here is something they cannot see -- a
-		 * bdev that would not unregister, blobstore refusing for a
-		 * reason of its own. Retrying it every minute forever would only
-		 * repeat it, so the entry is dropped and the failure reported
-		 * once. The snapshot is still there and the caller can ask
-		 * again.
-		 *
-		 * The destroy's own error path has just re-recorded the mark
-		 * (s3lvol_lvol_destroyed), which is why this clears rather than
-		 * simply leaves it out. */
-		s3lvol_snapshot_pending_clear(&ctx->lvs_uuid, &ctx->lvol_uuid);
-		SPDK_ERRLOG("pending delete of '%s' failed: %s. Dropped from the "
-			    "queue; retry it explicitly if it is still wanted.\n",
+		/* Keep the intent. The destroy/release path records FAILED for a
+		 * non-reference error (which stops automatic retries), or refreshes
+		 * the current blocker when a race returns -EBUSY. Clearing here would
+		 * lose a delete the caller was already told was deferred. */
+		SPDK_ERRLOG("pending delete of '%s' failed: %s. The intent remains "
+			    "queued for inspection or an explicit retry.\n",
 			    ctx->name, spdk_strerror(-lvolerrno));
 	}
 	free(ctx);
@@ -449,23 +421,18 @@ pending_lvol_deletable(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 		*why = "an export is still publishing";
 		return false;
 	}
+	if (s3lvol_snapshot_exports_have_local_readers(lvs, lvol->name)) {
+		*why = "a local esnap clone still reads an export of it";
+		return false;
+	}
 
-	/* Asked as a state rather than a yes/no, because the two ways an export
-	 * stops pinning are not equally good. A stale lease is evidence: an
-	 * importer wrote it and stopped renewing, so nobody is reading. An export
-	 * with no lease is not -- its TTL lapses on its own, and completing a
-	 * delete on that basis is exactly the hazard that refuses to automate.
-	 * So LEGACY is skipped whether or not the TTL has passed, which also
-	 * covers an entry that was recorded before the first lease GET had
-	 * answered. */
+	/* A stale or missing lease, and a pre-lease export, let the pending
+	 * delete proceed: the recorded intent is the revocation. */
 	switch (s3lvol_export_pin_state(lvs, lvol->name)) {
 	case S3LVOL_EXPORT_PIN_LEASE:
 		*why = "an importer may still be reading an export of it";
 		return false;
 	case S3LVOL_EXPORT_PIN_LEGACY:
-		*why = "an export with no lease names it; only an explicit retry "
-		       "can complete this";
-		return false;
 	case S3LVOL_EXPORT_PIN_STALE:
 	case S3LVOL_EXPORT_PIN_NONE:
 	default:

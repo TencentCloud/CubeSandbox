@@ -212,11 +212,9 @@ struct s3_export_manifest {
 	 * handling in s3_export_bs_dev.c. */
 	uint32_t generation;
 
-	/* When the source stops honouring this export, in unix seconds; 0 means
-	 * never. Not a courtesy: without it an importer that never arrives, or that
-	 * died, pins a snapshot on the source forever, and the source cannot tell
-	 * that case apart from a slow one. An importer renews while it still needs
-	 * the export. */
+	/* Retained in the manifest for wire compatibility. Snapshot-backed exports
+	 * use 0 and remain valid until explicit export/snapshot deletion; importer
+	 * leases protect readers during that deletion workflow. */
 	uint64_t expires_at;
 
 	char     uuid_str[SPDK_UUID_STRING_LEN];

@@ -2767,6 +2767,7 @@ struct lvol_destroy_ctx {
 	uint64_t                 total_clusters;
 	bool                     have_cluster_counts;
 	bool                     is_snapshot;
+	bool                     release_chain;
 
 	spdk_lvol_op_complete    cb_fn;
 	void                    *cb_arg;
@@ -2844,6 +2845,10 @@ s3lvol_lvol_destroyed(void *cb_arg, int lvolerrno)
 			s3lvol_imports_recheck(ctx->owner, ctx->esnap_uuid);
 		}
 	} else {
+		if (ctx->release_chain && ctx->lvol) {
+			ctx->lvol->action_in_progress = false;
+			s3lvol_decouple_kick_queue();
+		}
 		/* The refusal paths in s3lvol_lvol_destroy() log before returning, but
 		 * an asynchronous failure -- the unregister, or spdk_lvol_destroy --
 		 * lands here instead and would otherwise be silent. A blocked
@@ -2879,6 +2884,18 @@ s3lvol_lvol_bdev_unregistered(void *cb_arg, int bdeverrno)
 	struct lvol_destroy_ctx *ctx = cb_arg;
 
 	if (bdeverrno != 0) {
+		if (ctx->release_chain && ctx->lvol) {
+			ctx->lvol->action_in_progress = false;
+			s3lvol_decouple_kick_queue();
+		}
+		if (ctx->is_snapshot) {
+			s3lvol_snapshot_pending_set(&ctx->lvs_uuid, &ctx->lvol_uuid,
+						    ctx->owner
+						    ? s3lvol_lvstore_get_name(ctx->owner)
+						    : NULL,
+						    ctx->name,
+						    S3LVOL_PENDING_FAILED);
+		}
 		SPDK_ERRLOG("Failed to unregister bdev: %d\n", bdeverrno);
 		if (ctx->cb_fn) {
 			ctx->cb_fn(ctx->cb_arg, bdeverrno);
@@ -2891,36 +2908,98 @@ s3lvol_lvol_bdev_unregistered(void *cb_arg, int bdeverrno)
 	spdk_lvol_destroy(ctx->lvol, s3lvol_lvol_destroyed, ctx);
 }
 
-int
-s3lvol_lvol_destroy(struct spdk_lvol *lvol,
-		    spdk_lvol_op_complete cb_fn, void *cb_arg)
+struct snapshot_export_release_ctx {
+	struct spdk_lvol      *lvol;
+	spdk_lvol_op_complete  cb_fn;
+	void                  *cb_arg;
+};
+
+static int
+snapshot_destroy_check_clones(struct spdk_lvol *lvol)
+{
+	struct spdk_blob_store *bs;
+	size_t clone_count = 0;
+	int rc;
+
+	if (!lvol->blob) {
+		return 0;
+	}
+	bs = lvol->lvol_store->blobstore;
+	rc = spdk_blob_get_clones(bs, lvol->blob_id, NULL, &clone_count);
+	if (rc != 0 && rc != -ENOMEM) {
+		SPDK_ERRLOG("cannot tell how many clones snapshot '%s' has (%s); "
+			    "refusing to delete it\n", lvol->name,
+			    spdk_strerror(-rc));
+		return -EBUSY;
+	}
+	if (clone_count > 1) {
+		SPDK_ERRLOG("lvol '%s' is a snapshot with %zu clones; blobstore can "
+			    "only merge a snapshot into a single clone\n",
+			    lvol->name, clone_count);
+		destroy_mark_pending(lvol, S3LVOL_PENDING_CLONE_COUNT);
+		return -EBUSY;
+	}
+	return 0;
+}
+
+static int s3lvol_lvol_destroy_impl(struct spdk_lvol *lvol,
+				    spdk_lvol_op_complete cb_fn, void *cb_arg,
+				    bool release_chain);
+
+static void
+snapshot_export_released(void *cb_arg, int status)
+{
+	struct snapshot_export_release_ctx *ctx = cb_arg;
+	spdk_lvol_op_complete cb_fn = ctx->cb_fn;
+	void *op_arg = ctx->cb_arg;
+	struct spdk_lvol *lvol = ctx->lvol;
+	int rc;
+
+	if (status != 0) {
+		lvol->action_in_progress = false;
+		s3lvol_decouple_kick_queue();
+		destroy_mark_pending(lvol, S3LVOL_PENDING_FAILED);
+		free(ctx);
+		if (cb_fn) {
+			cb_fn(op_arg, status);
+		}
+		return;
+	}
+
+	/* There may be several exports of one snapshot. Re-entering releases the
+	 * next one; once none remain it follows the ordinary destroy path. */
+	free(ctx);
+	rc = s3lvol_lvol_destroy_impl(lvol, cb_fn, op_arg, true);
+	if (rc != 0) {
+		lvol->action_in_progress = false;
+		s3lvol_decouple_kick_queue();
+		if (cb_fn) {
+			cb_fn(op_arg, rc);
+		}
+	}
+}
+
+static int
+s3lvol_lvol_destroy_impl(struct spdk_lvol *lvol,
+			 spdk_lvol_op_complete cb_fn, void *cb_arg,
+			 bool release_chain)
 {
 	struct s3lvol_lvstore *owner;
 	struct s3lvol_export *pin;
+	int rc;
+
+	if (!lvol) {
+		return -EINVAL;
+	}
 
 	/* A snapshot another machine is reading through must not go away. Deleting it
 	 * would release its clusters, and the objects behind them would then be
 	 * deleted by an overwrite or by GC -- leaving an importer reading holes that
 	 * are not holes, and unable to open its clone at all after a restart.
 	 *
-	 * Refused rather than materialised, and that is now a decision rather than a
-	 * gap. Materialising -- server-side copying the objects into the
-	 * export's own prefix and rewriting the manifest as dense -- founders on the
-	 * rewrite: an importer caches the manifest verbatim in its imports registry
-	 * and reloads it from there on attach, never re-fetching, so it would go on
-	 * reading data/<uuid> keys that are about to be collected. Teaching it to
-	 * refresh means giving up the immutable manifest that s3_export_bs_dev.c's
-	 * lock-free reads are built on.
-	 *
-	 * The cheap answer is for GC to treat a ref manifest's references as live,
-	 * which needs no copying and no importer changes -- see the header of
-	 * lib/s3bsdev/s3_gc.c. Until that exists, the honest answer is that the export
-	 * has to be released or left to expire.
-	 *
-	 * Note that expiry reaches the same hazard by itself: s3lvol_export_pinning()
-	 * reports an expired export as not pinning, so this path opens up on its own
-	 * once the TTL passes. It has not bitten anyone only because GC does not exist
-	 * yet and nothing collects the orphans. */
+	 * A live lease therefore defers this explicit delete. Once no reader remains,
+	 * the path below releases every export before destroying the snapshot; export
+	 * lifetime never ends merely because wall-clock time passed. */
 	owner = lvol ? s3lvol_lvstore_find_by_lvs(lvol->lvol_store) : NULL;
 
 	/* An export that has not published its manifest yet is not in the registry,
@@ -2947,27 +3026,77 @@ s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 
 		s3lvol_export_get(pin, &info);
 		SPDK_ERRLOG("lvol '%s' is the snapshot behind export %s, which another "
-			    "node may be reading through. Release that export, or wait "
-			    "for it to expire, before deleting this.\n",
+			    "node may still be reading through; delete is deferred "
+			    "until its lease is no longer live\n",
 			    lvol->name, info.export_uuid);
-		/* Recorded either way -- the caller asked, and the request must not
-		 * be lost -- but which kind of blocker decides whether the queue
-		 * finishes it. An export whose importers keep a lease says so when
-		 * they stop; one with no lease can only ever be judged by a TTL,
-		 * and a delete on that basis stays a decision. */
-		destroy_mark_pending(lvol,
-				     s3lvol_export_pin_state(owner, lvol->name) ==
-				     S3LVOL_EXPORT_PIN_LEGACY
-				     ? S3LVOL_PENDING_EXPORT_LEGACY
-				     : S3LVOL_PENDING_EXPORT);
+		destroy_mark_pending(lvol, S3LVOL_PENDING_EXPORT);
 		return -EBUSY;
 	}
 
-	struct lvol_destroy_ctx *ctx;
-
-	if (!lvol) {
-		return -EINVAL;
+	/* Do not mistake another operation's action flag for the release chain's
+	 * own serialization. Only a continuation may bypass it. */
+	if (lvol->action_in_progress && !release_chain) {
+		SPDK_ERRLOG("another operation is in progress on lvol '%s'; it cannot "
+			    "be deleted yet\n", lvol->name);
+		destroy_mark_pending(lvol, S3LVOL_PENDING_DECOUPLE);
+		return -EBUSY;
 	}
+	rc = snapshot_destroy_check_clones(lvol);
+	if (rc != 0) {
+		return rc;
+	}
+
+	/* An explicit snapshot delete also revokes every export of that snapshot.
+	 * The release is deliberately internal: callers own snapshot lifetime, not
+	 * the ref-export/lease/esnap dependency graph below it.
+	 *
+	 * A live remote lease was refused above. A same-process esnap reader is
+	 * checked by s3lvol_export_release(); if its background decouple has not
+	 * finished yet, record the delete and let the pending poller retry. */
+	if (owner) {
+		struct s3lvol_export *exp =
+			s3lvol_export_first_ref_for_snapshot(owner, lvol->name);
+
+		if (exp) {
+			struct snapshot_export_release_ctx *release_ctx;
+			struct s3lvol_export_entry info;
+			int rc;
+
+			s3lvol_export_get(exp, &info);
+			release_ctx = calloc(1, sizeof(*release_ctx));
+			if (!release_ctx) {
+				return -ENOMEM;
+			}
+			release_ctx->lvol = lvol;
+			release_ctx->cb_fn = cb_fn;
+			release_ctx->cb_arg = cb_arg;
+
+			/* Hold action_in_progress across the entire release chain and
+			 * final unregister. The delete-specific release entry point knows
+			 * that this flag belongs to its own operation. Drop a queued
+			 * decouple now: it does not hold the flag, and the drain would
+			 * otherwise start it during the S3 round-trips below. */
+			lvol->action_in_progress = true;
+			s3lvol_decouple_dequeue_lvol(lvol);
+			rc = s3lvol_export_release_for_delete(
+				owner, info.export_uuid, snapshot_export_released,
+				release_ctx);
+			if (rc != 0) {
+				lvol->action_in_progress = false;
+				s3lvol_decouple_kick_queue();
+				free(release_ctx);
+				if (rc == -EBUSY) {
+					destroy_mark_pending(lvol,
+							 S3LVOL_PENDING_EXPORT);
+				}
+				return rc;
+			}
+
+			return 0;
+		}
+	}
+
+	struct lvol_destroy_ctx *ctx;
 
 	/* A snapshot with *more than one* clone cannot be deleted, and that has to be
 	 * established here rather than left to blobstore.
@@ -3008,47 +3137,10 @@ s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 	 * spdk_blob_is_snapshot() test is needed. lvol->blob_id rather than
 	 * spdk_blob_get_id(lvol->blob), because blob_id stays valid even once the
 	 * blob is closed -- which is what upstream does at lvol.c:1584. */
-	if (lvol->blob) {
-		struct spdk_blob_store *bs = lvol->lvol_store->blobstore;
-		size_t clone_count = 0;
-		int rc;
-
-		rc = spdk_blob_get_clones(bs, lvol->blob_id, NULL, &clone_count);
-		if (rc != 0 && rc != -ENOMEM) {
-			/* Not reachable today -- the function returns only those two
-			 * -- but treating an unknown answer as "go ahead and format"
-			 * is the wrong default if that ever changes. */
-			SPDK_ERRLOG("cannot tell how many clones snapshot '%s' has "
-				    "(%s); refusing to delete it\n", lvol->name,
-				    spdk_strerror(-rc));
-			return -EBUSY;
-		}
-		if (clone_count > 1) {
-			SPDK_ERRLOG("lvol '%s' is a snapshot with %zu clones; "
-				    "blobstore can only merge a snapshot into a "
-				    "single clone, so delete the others first\n",
-				    lvol->name, clone_count);
-			/* Same "record the intent so the queue can pick it up
-			 * once the blocker (the extra clones) clears" contract as
-			 * the export-pin refusals above. */
-			destroy_mark_pending(lvol, S3LVOL_PENDING_CLONE_COUNT);
-			return -EBUSY;
-		}
-	}
-
-	/* Nothing upstream stops a delete from running under a decouple:
-	 * spdk_lvol_destroy() does not look at action_in_progress, unlike
-	 * spdk_lvol_open() and the lvstore unload paths. Left unchecked, the copy loop
-	 * would carry on against a blob that has been freed. */
-	if (lvol->action_in_progress) {
-		SPDK_ERRLOG("another operation is in progress on lvol '%s'; it cannot "
-			    "be deleted yet\n", lvol->name);
-		/* The decouple that is running will clear, after which the delete can
-		 * succeed; record the intent for --retry-pending, same contract as
-		 * the export-pin refusals above. */
-		destroy_mark_pending(lvol, S3LVOL_PENDING_DECOUPLE);
-		return -EBUSY;
-	}
+	/* snapshot_destroy_check_clones() runs before any export is released, so a
+	 * synchronous clone-count refusal leaves every manifest intact. Once the
+	 * release chain has started there is no rollback: an asynchronous blob
+	 * failure leaves the snapshot without the export that was already revoked. */
 
 	/* Past the check above, so this volume is not materialising anything -- but it
 	 * may be *waiting* to. A queued decouple deliberately does not hold
@@ -3082,6 +3174,7 @@ s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 	ctx->owner  = owner;
 	ctx->cb_fn  = cb_fn;
 	ctx->cb_arg = cb_arg;
+	ctx->release_chain = release_chain;
 
 	/* Copied now: the destroy frees the lvol and its name with it. */
 	snprintf(ctx->name, sizeof(ctx->name), "%s", lvol->name);
@@ -3131,6 +3224,13 @@ s3lvol_lvol_destroy(struct spdk_lvol *lvol,
 
 	spdk_lvol_destroy(lvol, s3lvol_lvol_destroyed, ctx);
 	return 0;
+}
+
+int
+s3lvol_lvol_destroy(struct spdk_lvol *lvol,
+		    spdk_lvol_op_complete cb_fn, void *cb_arg)
+{
+	return s3lvol_lvol_destroy_impl(lvol, cb_fn, cb_arg, false);
 }
 
 /* ==========================================================================

@@ -18,9 +18,8 @@
 #      again, with `<prefix>/data/<uuid>` returning 404 while the exported snapshot
 #      is still present. Step [6] pins that a local clone does not have this
 #      problem, which is the whole point.
-#    - an esnap clone's parent is pinned by the export, which can be released or can
-#      pass a TTL. A local clone's parent is pinned by blobstore, which refuses to
-#      delete a snapshot that has clones. The local path is the safer one.
+#    - an esnap clone depends on a distributed export lease. A local clone's parent
+#      is pinned directly by blobstore. The local path is the safer one.
 #
 #  The decision cannot be made when the export is written: whether a manifest will
 #  be consumed here or on another node is the caller's business and unknowable at
@@ -29,20 +28,9 @@
 #
 #  === What is actually asserted ===
 #
-#  The positive case is easy and not where the risk is. The risk is the guard
-#  admitting something it should not, so each of the three conditions is falsified
-#  in turn and the result must be the esnap path:
-#
-#    [3] the snapshot is gone            -> esnap (this is what DENSE exists for)
-#    [4] the name resolves to a *different* blob -> esnap
-#    [5] the source is writable again    -> esnap
-#
-#  [4] is the one that matters most and is easiest to leave out. Delete the snapshot
-#  and create another with the same name, and a guard that matched on the name alone
-#  would clone a volume the caller never asked for, silently and with the right
-#  name. It is asserted by content, not just by mode: the clone must read the *new*
-#  snapshot's data if it cloned locally, and the *exported* data if it went through
-#  the export. Those differ, so the assertion can tell them apart.
+#  Besides the positive local-clone path, steps [3]-[5] assert the lifecycle
+#  invariant: deleting a source snapshot revokes its ref export, and reusing that
+#  snapshot name for another blob or writable lvol does not revive the export.
 #
 #  Usage:
 #    sudo -E ./test/dataplane/run_selfimport_test.sh
@@ -114,13 +102,12 @@ wait_export_done()
 	done
 }
 
-# A lease-aware export stays pinned until a lease HEAD submitted at or after
-# expires_at misses. The poller is floored at S3LVOL_LEASE_RENEW_MIN_SEC (20s),
-# so ttl_sec=2 plus a few seconds of sleep is not enough for the pin to lift.
+# Wait until the source has completed its first lease check and sees no live
+# reader, so an explicit snapshot delete may release the export.
 wait_export_deletable()
 {
 	local uuid="$1"
-	local deadline=$(( $(date +%s) + 90 ))
+	local deadline=$(( $(date +%s) + 150 ))
 	local out got
 
 	while :; do
@@ -137,7 +124,7 @@ wait_export_deletable()
 			return 0
 		fi
 		if [ "$(date +%s)" -ge "${deadline}" ]; then
-			fail "export ${uuid} still deletable=${got:-?} after 90s"
+			fail "export ${uuid} still deletable=${got:-?} after 150s"
 			return 1
 		fi
 		sleep 1
@@ -256,7 +243,7 @@ cleanup()
 	echo "=== cleanup"
 
 	if rcow_target_alive; then
-		for n in c_local c_gone c_replaced c_writable vol0; do
+		for n in c_local c_gone c_replaced c_writable c_dup_live vol0; do
 			rpc rcow_deactive_bdev "$(printf '{"device_name":"%s"}' "$n")" \
 				>/dev/null 2>&1
 		done
@@ -384,7 +371,7 @@ else
 fi
 
 # The parent is pinned by the clone relationship instead -- a stronger guarantee
-# than the export gave, since an export can be released or expire.
+# than the export gave, since an export can be released explicitly.
 #
 # Precisely: snap0 now has *two* clones, vol0 and c_local, and two is the one case
 # blobstore refuses outright (bs_is_blob_deletable, blobstore.c:8714) because it can
@@ -415,10 +402,9 @@ python3 "${RPC_PY}" --sock "${RCOW_RPC_SOCK}" \
 
 # ==========================================================================
 echo ""
-echo "=== [3] first negative: the source snapshot is gone -> esnap"
+echo "=== [3] deleting a source snapshot also revokes its export"
 #
-# The case the DENSE layout exists for. The export's own data is all that is left,
-# so the import has to read through it.
+# A ref export cannot outlive the source snapshot it names.
 
 rpc rcow_create_lvol '{"lvol_name":"tmp1","size_gib":1}' >/dev/null 2>&1
 T="$(resolve tmp1)"
@@ -428,20 +414,11 @@ sync
 rpc rcow_create_snapshot '{"lvol_name":"tmp1","snapshot_name":"snap_gone"}' >/dev/null
 rpc rcow_flush_lvstore "$(printf '{"lvs_name":"%s"}' "${RCOW_LVS_NAME}")" >/dev/null 2>&1
 
-# Getting to "the snapshot is gone" takes a detour, and the reason is worth stating:
-# a live REF export *pins* its source snapshot, so the delete is refused outright
-# ("is the snapshot behind export ..., which another node may be reading through").
-# The layout cannot be chosen over RPC either -- the decoders take snapshot_name,
-# export_id and ttl_sec, and same-bucket always means REF.
-#
-# What does work is waiting out the pin. s3lvol_export_pinning() reports a
-# lease-aware export as not pinning only after a lease HEAD submitted at or after
-# expires_at misses -- ttl_sec=2 is the deadline, not the wait. Import does not
-# reject an expired manifest. The snapshot is then actually gone, not merely
-# queued as a deferred delete.
+# ttl_sec is retained only for compatibility. The explicit snapshot delete is
+# what releases the export manifest.
 U2="$(rpc rcow_export_snapshot '{"snapshot_name":"snap_gone","ttl_sec":2}' | tr -d '"')"
 EXPORTS="${EXPORTS} ${U2}"
-[ -n "${U2}" ] && pass "exported snap_gone as ${U2} with a 2s TTL" \
+[ -n "${U2}" ] && pass "exported snap_gone as ${U2}" \
 	|| { fail "export of snap_gone failed"; exit 1; }
 wait_export_done "${U2}" || exit 1
 wait_export_deletable "${U2}" || exit 1
@@ -450,25 +427,22 @@ wait_export_deletable "${U2}" || exit 1
 del_vol tmp1
 if rpc rcow_delete_lvol '{"lvol_name":"snap_gone"}' >/dev/null 2>&1 \
 	&& wait_lvol_gone snap_gone; then
-	pass "with the export unpinned, the source snapshot could be deleted"
+	pass "the source snapshot and its export were deleted together"
 else
-	fail "could not delete snap_gone even after its export unpinned"
+	fail "could not delete snap_gone"
 	grep "snap_gone" "${RCOW_LOG}" | tail -2 | sed 's/^/       /'
 fi
 
-OUT="$(rpc rcow_import_lvol \
-	"$(printf '{"lvol_name":"c_gone","export_uuid":"%s"}' "${U2}")" 2>&1)"
-MODE="$(import_mode "${OUT}")"
-if [ "${MODE}" = "esnap" ]; then
-	pass "mode=esnap: with no local snapshot it reads through the export"
+if OUT="$(rpc rcow_import_lvol \
+	"$(printf '{"lvol_name":"c_gone","export_uuid":"%s"}' "${U2}")" 2>&1)"; then
+	fail "the export remained importable after snapshot deletion: ${OUT}"
 else
-	fail "mode='${MODE}', expected esnap -- it cloned something it should not have"
-	info "reply: ${OUT}"
+	pass "the released export can no longer be imported"
 fi
 
 # ==========================================================================
 echo ""
-echo "=== [4] second negative: same name, different blob -> esnap"
+echo "=== [4] recreating the snapshot name does not revive an export"
 #
 # The condition most easily left out and worst to get wrong. A guard matching on the
 # name alone would clone the replacement, and it would look right: correct name,
@@ -482,14 +456,32 @@ write_dev "${T}" "${WORKDIR}/pattern" 16 || exit 1
 sync
 rpc rcow_create_snapshot '{"lvol_name":"tmp2","snapshot_name":"snap_dup"}' >/dev/null
 rpc rcow_flush_lvstore "$(printf '{"lvs_name":"%s"}' "${RCOW_LVS_NAME}")" >/dev/null 2>&1
-# Two-second TTL for the same reason as step [3]: the export would otherwise pin
-# snap_dup and the replacement below could not happen. Wait for the pin to lift,
-# not merely for the deadline to pass.
+# ttl_sec does not govern this export; the delete below releases it.
 U3="$(rpc rcow_export_snapshot '{"snapshot_name":"snap_dup","ttl_sec":2}' | tr -d '"')"
 wait_export_done "${U3}" || exit 1
 wait_export_deletable "${U3}" || exit 1
 EXPORTS="${EXPORTS} ${U3}"
 pass "exported snap_dup as ${U3}"
+
+# The identity check in import_local_parent() runs while the original snapshot
+# still exists. Snapshot delete now releases the export, so the replacement
+# below cannot reach that guard; this import is what still exercises it.
+OUT="$(rpc rcow_import_lvol \
+	"$(printf '{"lvol_name":"c_dup_live","export_uuid":"%s"}' "${U3}")" 2>&1)" || {
+	fail "import of the live snap_dup export failed: ${OUT}"; exit 1; }
+if [ "$(import_mode "${OUT}")" = "local_clone" ]; then
+	pass "live snap_dup import is a local clone (uuid/blob identity matched)"
+else
+	fail "mode='$(import_mode "${OUT}")', expected local_clone"
+	info "reply: ${OUT}"
+fi
+if grep -q "cloning it locally instead" "${RCOW_LOG}" 2>/dev/null; then
+	pass "and the log names the local clone"
+else
+	fail "no 'cloning it locally' line for the live snap_dup import"
+fi
+rpc rcow_delete_lvol '{"lvol_name":"c_dup_live"}' >/dev/null 2>&1 \
+	|| fail "could not remove c_dup_live before replacing snap_dup"
 
 # Replace it: same name, different blob, different content.
 del_vol tmp2
@@ -508,20 +500,12 @@ rpc rcow_create_snapshot '{"lvol_name":"tmp3","snapshot_name":"snap_dup"}' >/dev
 
 rpc rcow_deactive_bdev '{"device_name":"tmp3"}' >/dev/null 2>&1
 
-OUT="$(rpc rcow_import_lvol \
-	"$(printf '{"lvol_name":"c_replaced","export_uuid":"%s"}' "${U3}")" 2>&1)"
-MODE="$(import_mode "${OUT}")"
-if [ "${MODE}" = "esnap" ]; then
-	pass "mode=esnap: the blob id did not match, so the name was not trusted"
-else
-	fail "mode='${MODE}': it cloned the replacement, which is not what was exported"
+if OUT="$(rpc rcow_import_lvol \
+	"$(printf '{"lvol_name":"c_replaced","export_uuid":"%s"}' "${U3}")" 2>&1)"; then
+	fail "the deleted export imported after its snapshot name was reused"
 	info "reply: ${OUT}"
-fi
-
-if grep -q "it was replaced, so reading through the export" "${RCOW_LOG}" 2>/dev/null; then
-	pass "and the log names the blob id mismatch"
 else
-	fail "no blob id mismatch message in the log"
+	pass "the deleted export was not revived by reusing its snapshot name"
 fi
 
 # What the content can and cannot show here. Getting "same name, different blob"
@@ -554,7 +538,7 @@ fi
 
 # ==========================================================================
 echo ""
-echo "=== [5] third negative: the source is writable again -> esnap"
+echo "=== [5] a writable same-named lvol does not revive an export"
 #
 # A read-only parent is not optional: s3lvol_lvol_create_clone refuses a writable
 # one, because parent and clone would then share clusters both could modify. The
@@ -583,14 +567,12 @@ else
 	fail "could not create a writable snap_rw"
 fi
 
-OUT="$(rpc rcow_import_lvol \
-	"$(printf '{"lvol_name":"c_writable","export_uuid":"%s"}' "${U4}")" 2>&1)"
-MODE="$(import_mode "${OUT}")"
-if [ "${MODE}" = "esnap" ]; then
-	pass "mode=esnap: a writable source is not clonable, so it read through"
-else
-	fail "mode='${MODE}': it cloned a writable parent, which shares mutable clusters"
+if OUT="$(rpc rcow_import_lvol \
+	"$(printf '{"lvol_name":"c_writable","export_uuid":"%s"}' "${U4}")" 2>&1)"; then
+	fail "the deleted export imported through a writable same-named lvol"
 	info "reply: ${OUT}"
+else
+	pass "the deleted export stayed revoked after writable name reuse"
 fi
 
 # ==========================================================================
@@ -601,26 +583,11 @@ echo "=== [6] the local clone survives a restart; this is the payoff"
 # reads returned EIO because <prefix>/data/<uuid> had 404'd while the snapshot was
 # still present. A local clone depends on nothing in the export.
 
-# The esnap clones from steps [3] to [5] are deliberately dangling -- their exports
-# were expired and their source snapshots deleted, so their backing objects are gone.
-# They are removed here rather than carried into the restart, for two reasons: this
-# step is about the *local* clone surviving, and an lvstore holding dangling esnap
-# clones fails to unload with "not every lvol could be closed (-22)". That may well
-# be worth looking at on its own, but it is a different question from this one and
-# the state was manufactured here; smuggling it in would make this step fail for a
-# reason it is not testing.
+# Steps [3] to [5] deliberately attempted imports through exports revoked by
+# snapshot deletion. Remove their temporary name-reuse objects before restart.
 for n in c_gone c_replaced c_writable tmp3; do
 	del_vol "${n}"
 done
-# The snapshots these clones referenced are still pinned by the *lease* their
-# dangling imports renewed -- deleting the clones stopped the renewer, but the
-# source keeps the export pinned for a grace period (3x the renew interval)
-# before it considers the lease stale. That grace is the point of the liveness
-# lease: the source must not delete a snapshot while an importer *might* still
-# be reading it. Wait it out, then the delete goes through -- the same sequence
-# the control plane follows: stop the reader, let the lease lapse, then remove
-# the source.
-sleep 8
 for n in snap_rw snap_dup; do
 	del_vol "${n}"
 done
@@ -685,9 +652,9 @@ else
 	pass "no asserts, no faults"
 fi
 
-# A local clone must not have gone anywhere near the export chunk reader.
+# No test path should read through a revoked export.
 if grep -q "Failed to read export chunk" "${RCOW_LOG}" 2>/dev/null; then
-	info "export chunk read failures present (expected for the esnap cases):"
+	fail "a revoked export reached the chunk reader"
 	grep -c "Failed to read export chunk" "${RCOW_LOG}" | sed 's/^/       count=/'
 else
 	pass "no export chunk read failures"

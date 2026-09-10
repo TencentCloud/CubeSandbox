@@ -678,8 +678,8 @@ struct s3lvol_export_info {
 	 * source nothing to produce, and obliges it to keep the snapshot. */
 	bool     zero_copy;
 
-	/* When the source stops honouring it; 0 for never. Only a zero-copy export
-	 * has one. */
+	/* Kept in the wire format for compatibility. New exports use 0 because
+	 * their lifetime follows the source snapshot. */
 	uint64_t expires_at;
 };
 
@@ -705,21 +705,24 @@ typedef void (*s3lvol_export_cb)(void *cb_arg, const struct s3lvol_export_info *
  * snapshot, whose data is not in this lvstore's chunk map.
  *
  * A zero-copy export obliges this node to keep \c snapshot until the export is
- * released or expires -- it is the snapshot's existence that keeps those objects
- * out of reach of GC. Ancestors of it may still be deleted freely: blobstore
+ * released or the snapshot owner explicitly deletes it -- it is the snapshot's
+ * existence that keeps those objects out of reach of GC. Ancestors of it may
+ * still be deleted freely: blobstore
  * merges a deleted snapshot's clusters into its only clone without moving them,
  * so the objects the manifest names stay exactly where they are.
  *
- * \param export_uuid    NULL to generate one. Supplying it is what makes an
- *                       export idempotent, and is how two nodes can be given
- *                       the same identifier deliberately.
+ * \param export_uuid    NULL to generate one, or to reuse the snapshot's existing
+ *                       export. Supplying it is how a caller asks for a specific
+ *                       identifier; if this snapshot is already exported under a
+ *                       different uuid the call is refused.
  * \param uuid_out       optional buffer receiving the uuid as soon as it is
  *                       known, before the export completes. \p uuid_out_len
- *                       is its size in bytes.
+ *                       is its size in bytes. A snapshot already exported (or
+ *                       with an export still in flight) fills this with that
+ *                       uuid and starts nothing.
  */
 int s3lvol_lvol_export(struct s3lvol_lvstore *lvs, struct spdk_lvol *snapshot,
-		       const char *export_uuid, uint32_t ttl_sec,
-		       char *uuid_out, size_t uuid_out_len,
+		       const char *export_uuid, char *uuid_out, size_t uuid_out_len,
 		       s3lvol_export_cb cb_fn, void *cb_arg);
 
 /* The states an export can be observed in. Queried live, never stored.
@@ -741,9 +744,11 @@ enum s3lvol_export_state {
  * published reports INPROGRESS, a recorded one DONE, anything else NONE.
  *
  * \c deletable answers whether the snapshot behind the export may be deleted
- * right now. It is computed live and never cached: false while the export is
- * still in progress, or while the snapshot has more than one clone (blobstore
- * can merge a snapshot into only one clone).
+ * right now. It is computed on the spot from the current export pin and clone
+ * count (the query does not HEAD S3; lease liveness is the last poll). False
+ * while the export is still in progress, while a live or in-grace lease pins
+ * it, or while the snapshot has more than one clone (blobstore can merge a
+ * snapshot into only one clone).
  *
  * \return 0 on success, -EINVAL for a NULL/bad argument.
  */
@@ -819,12 +824,13 @@ uint32_t s3lvol_lvol_chain_depth(struct s3lvol_lvstore *lvs,
  * is what decides if the poller may finish the job -- see
  * vbdev_s3lvol_pending.c. EXPORT does: an importer's lease goes stale once it
  * stops renewing, and that is positive evidence nobody is reading any more.
- * EXPORT_LEGACY is the deliberate exception -- an export with no lease at all,
- * where only a TTL speaks and it lapses whether or not somebody is reading.
+ * EXPORT_LEGACY is a compatibility reason for restored queue entries whose
+ * export predates leases. The recorded snapshot-delete intent authorises
+ * releasing that old export; the poller may finish it.
  */
 enum s3lvol_pending_reason {
 	S3LVOL_PENDING_EXPORT,		/* an export pins it; its lease will say when */
-	S3LVOL_PENDING_EXPORT_LEGACY,	/* an export with no lease pins it */
+	S3LVOL_PENDING_EXPORT_LEGACY,	/* a pre-lease export; delete intent releases it */
 	S3LVOL_PENDING_EXPORT_INFLIGHT,	/* an export is publishing right now */
 	S3LVOL_PENDING_CLONE_COUNT,	/* more than one clone */
 	S3LVOL_PENDING_DECOUPLE,	/* a decouple is running on it */
@@ -865,9 +871,9 @@ void s3lvol_snapshot_pending_clear(const struct spdk_uuid *lvs_uuid,
  * Whether a recorded intent is one the poller will finish on its own.
  *
  * This is what rcow_delete_lvol reports as \c deferred: the delete was accepted
- * as an intent and needs nothing further from the caller. A mark whose blocker
- * needs a decision (a published export) answers false, and the RPC reports the
- * refusal as it always has.
+ * as an intent and needs nothing further from the caller. A live-lease pin
+ * answers false until the lease goes stale; a pre-lease export is deferred
+ * because the recorded intent is the revocation.
  */
 bool s3lvol_snapshot_pending_deferred(const struct spdk_uuid *lvs_uuid,
 				      const struct spdk_uuid *lvol_uuid);
@@ -948,28 +954,16 @@ void s3lvol_snapshot_pending_clear_lvs(const struct spdk_uuid *lvs_uuid);
 bool s3lvol_export_inflight_pinning(struct s3lvol_lvstore *lvs,
 				    const char *snapshot_name);
 
-/* How long a zero-copy export is honoured if nobody renews it.
- *
- * It bounds how long a snapshot can be pinned by an importer that never arrives,
- * so it wants to be comfortably longer than an import takes and far shorter than
- * "forever". An importer renews while it still needs the export. */
-#define S3LVOL_EXPORT_DEFAULT_TTL_SEC 3600
-
 /* The two ends of the lease clock, together because they are one decision.
  *
- * An importer renews every max(remaining_ttl/3, RENEW_MIN); the source treats a
- * lease as fresh for 3x the cadence the importer reports, but never less than
- * MIN_GRACE. The two numbers are chosen so that 3 * RENEW_MIN == MIN_GRACE: an
- * import at the floor and a source at its floor agree exactly, rather than by two
- * values happening to be compatible. Change one and the other has to move.
+ * An importer renews every RENEW_MIN seconds; the source treats a lease as fresh
+ * for 3x the cadence the importer reports, but never less than MIN_GRACE. The
+ * two constants deliberately satisfy 3 * RENEW_MIN == MIN_GRACE.
  *
  * Why the source clamps at all, rather than believing renew_s: the verdict it
  * feeds, STALE, is carried out by a poller with nobody watching, and renew_s is a
- * number the importer chose. An importer whose export was already past its
- * deadline used to derive a one-second interval -- remaining_ttl of zero -- and
- * so asked to be declared dead after three seconds. Nothing refuses an expired
- * export at import, so that was reachable, and three seconds is inside the
- * ordinary jitter of a WAN and an object store.
+ * number the importer chose; the floor keeps ordinary WAN/object-store jitter
+ * from looking like a dead reader.
  *
  * The direction of the error is what settles the values. Too long only delays
  * reclaiming a snapshot nobody is reading; too short deletes one somebody is. */
@@ -993,9 +987,8 @@ struct s3lvol_import_opts {
 	 * about the *export*, not about availability.
 	 *
 	 * On by default. An import that stays reading through keeps depending on the
-	 * export past its TTL, and the importer does not renew that TTL, so the
-	 * exporting side could delete the snapshot out from under the volume. The
-	 * opt-out exists for callers that will manage that dependency themselves.
+	 * export and continuously renews a lease at the source. The opt-out exists
+	 * for callers that intentionally retain that dependency.
 	 * It is a copy of everything the export holds, and it runs whenever it runs;
 	 * the volume is usable either way.
 	 *
@@ -1020,9 +1013,8 @@ struct s3lvol_import_opts {
  *    writable copy of a snapshot, and it should not cost more than a clone.
  *
  *    Worth knowing: it is *safer*, not just cheaper. An esnap clone's parent is
- *    pinned by the export, which can be released or can pass its TTL; a local
- *    clone's parent is pinned by blobstore, which will not delete a snapshot that
- *    has clones.
+ *    protected by a distributed lease, while a local clone's parent is pinned
+ *    directly by blobstore.
  *
  * 2. Anything else -- another node's export, another bucket, or a snapshot that
  *    is gone or has been replaced -- is an esnap clone that reads through to the
@@ -1111,6 +1103,12 @@ int s3lvol_lvol_decouple(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
  * materialiser. A no-op when the volume is not queued. */
 void s3lvol_decouple_dequeue_lvol(struct spdk_lvol *lvol);
 
+/* Try the next queued decouple, if any. Called when an action_in_progress
+ * holder that is not itself a decouple (resize, a failed snapshot-delete
+ * release) has cleared the flag: decouple_start() refuses those with -EBUSY
+ * and leaves the entry queued, so something has to look again. */
+void s3lvol_decouple_kick_queue(void);
+
 /* A decouple in flight. clusters_done counts the clusters copied so far, out of the
  * clusters_total the manifest says hold data -- not out of the volume's size. */
 struct s3lvol_decouple;
@@ -1165,6 +1163,9 @@ void s3lvol_imports_recheck(struct s3lvol_lvstore *lvs, const char *export_uuid)
  */
 int s3lvol_export_release(struct s3lvol_lvstore *lvs, const char *export_uuid,
 			  spdk_lvol_op_complete cb_fn, void *cb_arg);
+int s3lvol_export_release_for_delete(struct s3lvol_lvstore *lvs,
+				     const char *export_uuid,
+				     spdk_lvol_op_complete cb_fn, void *cb_arg);
 
 /**
  * Fetch this lvstore's imports registry into memory.
@@ -1213,18 +1214,16 @@ struct s3lvol_export;
  * Ordered by how restrictive the answer is, so aggregating several exports over
  * one snapshot is a max().
  *
- * The distinction that matters is STALE versus LEGACY, and it is the reason this
- * exists alongside s3lvol_export_pinning(): both let a delete through, but only
- * STALE is *evidence* that nobody is reading (an importer wrote the lease and
- * stopped renewing it). LEGACY is an export that predates the lease machinery,
- * where a TTL lapses on its own whether or not somebody is still reading -- so a
- * delete on that basis stays a decision the caller makes, and is never carried
- * out unattended, until GC treats a reference manifest as live.
+ * The distinction that matters is STALE versus LEGACY. STALE is evidence that
+ * no importer currently holds the export. LEGACY predates leases, so reader
+ * liveness is unknown: status still reports it, but an explicit snapshot delete
+ * is the revocation (the same statement Cubelet used to make with
+ * rcow_release_export).
  */
 enum s3lvol_export_pin {
 	S3LVOL_EXPORT_PIN_NONE,		/* no reference export names it */
 	S3LVOL_EXPORT_PIN_STALE,	/* named, but its lease says nobody reads */
-	S3LVOL_EXPORT_PIN_LEGACY,	/* named, no lease at all: only the TTL speaks */
+	S3LVOL_EXPORT_PIN_LEGACY,	/* named, no trustworthy lease evidence */
 	S3LVOL_EXPORT_PIN_LEASE,	/* an importer is reading, or may be */
 };
 
@@ -1247,11 +1246,11 @@ s3lvol_export_pin_str(enum s3lvol_export_pin pin)
 struct s3lvol_export_entry {
 	const char *export_uuid;
 	const char *snapshot;
+	const char *snapshot_uuid;
 	uint64_t    blob_id;
 	uint64_t    expires_at;
 	uint32_t    generation;
 	bool    is_ref;
-	bool    expired;
 	bool    lease_aware;
 	bool    lease_checked;
 	bool    lease_absent;
@@ -1266,9 +1265,10 @@ struct s3lvol_export_entry {
 /**
  * The export that still pins \c snapshot_name, or NULL if it may be deleted.
  *
- * Only a live reference counts: a dense export holds copies of its own, and an
- * expired one has stopped being honoured. Both answer NULL, which is what lets a
- * delete proceed without any special case.
+ * Only a reference export with a live or still-unknown reader counts. A
+ * confirmed lease miss older than the source grace, and a pre-lease (LEGACY)
+ * export, do not pin: they remain importable until the snapshot is deleted, and
+ * that delete releases them internally.
  */
 struct s3lvol_export *s3lvol_export_pinning(struct s3lvol_lvstore *lvs,
 					    const char *snapshot_name);
@@ -1278,7 +1278,6 @@ enum s3lvol_export_pin s3lvol_export_pin_state(struct s3lvol_lvstore *lvs,
 
 struct s3lvol_export *s3lvol_export_find(struct s3lvol_lvstore *lvs,
 					 const char *uuid_str);
-bool s3lvol_export_is_expired(const struct s3lvol_export *exp);
 
 struct s3lvol_export *s3lvol_export_add(struct s3lvol_lvstore *lvs,
 					const struct s3_export_manifest *m,
@@ -1289,6 +1288,15 @@ void s3lvol_export_set_local_ref(struct s3lvol_export *exp, uint32_t generation)
 
 struct s3lvol_export *s3lvol_export_first(struct s3lvol_lvstore *lvs);
 struct s3lvol_export *s3lvol_export_next(struct s3lvol_export *prev);
+/** First REF export of this live snapshot (uuid, else blob_id). Skips reaper. */
+struct s3lvol_export *s3lvol_export_first_ref_for_snapshot(
+	struct s3lvol_lvstore *lvs, const char *snapshot_name);
+/** Published export of this live snapshot, including a materialised rewrite
+ *  of the same uuid. Skips only the reaper. Release in flight is -EBUSY above. */
+struct s3lvol_export *s3lvol_export_find_for_snapshot(
+	struct s3lvol_lvstore *lvs, const char *snapshot_name);
+bool s3lvol_snapshot_exports_have_local_readers(struct s3lvol_lvstore *lvs,
+						 const char *snapshot_name);
 void s3lvol_export_get(const struct s3lvol_export *exp,
 		     struct s3lvol_export_entry *out);
 
@@ -1317,14 +1325,13 @@ void s3lvol_xfer_exports_fini(struct s3lvol_lvstore *lvs);
  *
  * A reference export names this lvstore's live chunk objects, which is why it
  * pins the snapshot behind it: those objects cannot be reclaimed while an
- * importer may read them. There is no way out of that today -- the snapshot
- * stays undeletable for as long as any importer keeps renewing, however little
- * it still needs the data. Materialising is the way out: read the snapshot,
- * upload the export's own copies, and publish the manifest again as dense with
- * `generation` bumped.
+ * importer may read them. Snapshot deletion waits for readers and then releases
+ * the ref export. Materialising is the alternative when the export itself must
+ * survive: copy the snapshot and publish the manifest as dense with `generation`
+ * bumped.
  *
- * Afterwards the export owes nothing. It holds copies, so the pin goes, the
- * lease watch stops, and the TTL is meaningless -- see
+ * Afterwards the export owes nothing. It holds copies, so the pin and lease
+ * watch go away -- see
  * s3lvol_export_set_materialised().
  *
  * **Importers are not told, and do not have to be.** The manifest is replaced in

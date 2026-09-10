@@ -238,15 +238,58 @@ check_deletable()
 	fi
 }
 
-# Lease-aware: a 404 recorded before expires_at does not unpin, and the lease
-# poller is floored at 20s. Poll until the field matches rather than sleeping
-# a TTL-sized margin.
+export_list_field()
+{
+	# Unwrapped: get_exports answers the array as string_value.
+	raw_rpc rcow_get_exports 2>/dev/null | python3 -c '
+import json, sys
+want, field = sys.argv[1:3]
+try:
+    for e in json.load(sys.stdin):
+        if e.get("export_uuid") == want:
+            v = e.get(field, "")
+            print("" if v is None else v)
+            sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+' "$1" "$2"
+}
+
+export_pin_field()
+{
+	export_list_field "$1" pin
+}
+
+wait_export_pin()
+{
+	local uuid="$1"
+	local want="$2"
+	local where="$3"
+	local deadline=$(( $(date +%s) + 40 ))
+	local got=""
+
+	while :; do
+		got="$(export_pin_field "${uuid}" 2>/dev/null || true)"
+		if [ "${got}" = "${want}" ]; then
+			return 0
+		fi
+		if [ "$(date +%s)" -ge "${deadline}" ]; then
+			fail "pin=${got:-missing}, expected ${want} for ${uuid} (${where})"
+			return 1
+		fi
+		sleep 1
+	done
+}
+
+# Lease checks run at a fixed 20-second cadence. Poll until the field matches
+# rather than assuming when the source has observed a reader or its absence.
 wait_deletable()
 {
 	local uuid="$1"
 	local want="$2"
 	local where="$3"
-	local deadline=$(( $(date +%s) + 90 ))
+	local deadline=$(( $(date +%s) + 150 ))
 	local got
 
 	while :; do
@@ -860,56 +903,99 @@ wait_export_done "${EXPORT_UUID}" "step 3" || exit 1
 EXPORT_MS="$(since_ms "${EXPORT_T0}")"
 report_timing "export/1-layer" "${EXPORT_MS}"
 
-# A live zero-copy export pins its snapshot, so deletable must say NO -- and it
-# must say so for the same reason rcow_delete_lvol refuses, which is why the two
-# are checked against each other. This is the case a clone count on its own gets
-# wrong: there is exactly one clone here, and the snapshot is still undeletable.
-check_deletable "${EXPORT_UUID}" "NO" "live zero-copy export"
+# An idle REF export does not pin its snapshot. Cubelet deletes the snapshot
+# without rcow_release_export; the delete path releases the export itself. The
+# rest of this suite still needs ${EXPORT_SNAP_NAME}, so the actual delete is
+# exercised on a throwaway snapshot, then a live lease is shown to pin.
+wait_deletable "${EXPORT_UUID}" "YES" "idle zero-copy export" || exit 1
+check_deletable "${EXPORT_UUID}" "YES" "idle zero-copy export"
 
-# The same snapshot, asked for by name: the two forms must agree, since they are
-# answering about one thing. It also proves the snapshot form notices an export
-# without being told its uuid.
 SNAP_ST2="$(snapshot_status_field "${EXPORT_SNAP_NAME}" export_status)" \
 	&& [ "${SNAP_ST2}" = "DONE" ] \
 	&& pass "the snapshot form reports DONE for an exported snapshot" \
 	|| fail "the snapshot form reports '${SNAP_ST2}', expected DONE"
 SNAP_DEL2="$(snapshot_status_field "${EXPORT_SNAP_NAME}" deletable)" \
-	&& [ "${SNAP_DEL2}" = "NO" ] \
-	&& pass "both forms agree that it is not deletable" \
-	|| fail "the snapshot form says deletable='${SNAP_DEL2}', expected NO"
+	&& [ "${SNAP_DEL2}" = "YES" ] \
+	&& pass "both forms agree that an idle export does not pin the snapshot" \
+	|| fail "the snapshot form says deletable='${SNAP_DEL2}', expected YES"
 
-# The delete does not go through -- deletable said NO and the delete path agrees
-# -- but how that is reported depends on whether the export's liveness can be
-# decided. An export this fresh has not had its first lease check answered yet,
-# so the target assumes an importer may arrive, records the intent, and reports
-# it as deferred: the delete completes by itself once the lease goes stale, with
-# no release_export and no retry. Only an export known to have no lease at all
-# (the pre-lease case, where a TTL is the sole signal) is refused outright.
-#
-# Either way the snapshot must still be here, which is the property this step
-# exists for.
+IDLE_SNAP="${SRC_VOL}-idle"
+if ! raw_rpc rcow_create_snapshot \
+		"$(printf '{"lvol_name":"%s","snapshot_name":"%s"}' \
+			"${SRC_VOL}" "${IDLE_SNAP}")" >/dev/null 2>&1; then
+	fail "could not take throwaway snapshot ${IDLE_SNAP}"
+	exit 1
+fi
+IDLE_UUID="$(raw_rpc rcow_export_snapshot \
+	"$(printf '{"snapshot_name":"%s"}' "${IDLE_SNAP}")" \
+	2>/dev/null | tr -d ' \t\r\n')"
+if [ -z "${IDLE_UUID}" ]; then
+	fail "rcow_export_snapshot (${IDLE_SNAP})"
+	exit 1
+fi
+wait_export_done "${IDLE_UUID}" "idle export" || exit 1
+wait_deletable "${IDLE_UUID}" "YES" "throwaway idle export" || exit 1
+
+IDLE_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${IDLE_SNAP}")" 2>&1)"
+if echo "${IDLE_DEL}" | grep -q '"deferred": *true'; then
+	fail "idle snapshot delete was deferred: ${IDLE_DEL}"
+	exit 1
+elif echo "${IDLE_DEL}" | grep -q '"bool_value": *false'; then
+	fail "idle snapshot delete was refused: ${IDLE_DEL}"
+	exit 1
+else
+	pass "snapshot delete of an idle export completed without release_export"
+fi
+for _ in $(seq 40); do
+	export_status_field "${IDLE_UUID}" export_status >/dev/null 2>&1 || break
+	sleep 0.5
+done
+if export_status_field "${IDLE_UUID}" export_status >/dev/null 2>&1; then
+	fail "the throwaway export survived its snapshot delete"
+	exit 1
+else
+	pass "snapshot delete released the throwaway export"
+fi
+
+if ! python3 "${TOOLS_DIR}/s3_put_lease.py" \
+		"${ENDPOINT}" "${BUCKET}" "${REGION}" \
+		"${SRC_LVS}/meta/exports/${EXPORT_UUID}.lease" 20 0 \
+		>"${WORKDIR}/put_lease.log" 2>&1; then
+	fail "could not write an importer lease: $(tail -1 "${WORKDIR}/put_lease.log")"
+	exit 1
+fi
+wait_export_pin "${EXPORT_UUID}" "lease" "live importer" || exit 1
+pass "the source observed a live importer lease"
+wait_deletable "${EXPORT_UUID}" "NO" "leased zero-copy export" || exit 1
+check_deletable "${EXPORT_UUID}" "NO" "leased zero-copy export"
+SNAP_DEL3="$(snapshot_status_field "${EXPORT_SNAP_NAME}" deletable)" \
+	&& [ "${SNAP_DEL3}" = "NO" ] \
+	&& pass "both forms agree that a live lease pins the snapshot" \
+	|| fail "the snapshot form says deletable='${SNAP_DEL3}', expected NO"
+
 # --raw, not raw_rpc: that helper unwraps the {bool_value, string_value}
 # envelope, which is what hides the deferred flag this has to look at.
 DEL_OUT="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
 	rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${EXPORT_SNAP_NAME}")" 2>&1)"
 if echo "${DEL_OUT}" | grep -q '"deferred": *true'; then
-	pass "rcow_delete_lvol defers it (the export still pins it)"
+	pass "rcow_delete_lvol defers it while a live lease pins the snapshot"
 elif echo "${DEL_OUT}" | grep -q '"bool_value": *false'; then
-	pass "rcow_delete_lvol refuses it too (deletable agrees with the delete path)"
+	pass "rcow_delete_lvol refuses it while a live lease pins the snapshot"
 else
-	fail "deleting the snapshot behind a live export was accepted outright: ${DEL_OUT}"
+	fail "deleting the snapshot behind a leased export was accepted: ${DEL_OUT}"
 	exit 1
 fi
 
 if snapshot_status_field "${EXPORT_SNAP_NAME}" export_status >/dev/null 2>&1; then
-	pass "the exported snapshot is still there"
+	pass "the leased snapshot is still there"
 else
-	fail "the snapshot behind a live export is gone"
+	fail "the snapshot behind a live lease is gone"
 	exit 1
 fi
 
-# Withdraw the intent, or the poller would delete this snapshot as soon as the
-# export stops pinning it -- the rest of this suite still needs it.
+# Withdraw the intent: the rest of this suite still needs the snapshot. The
+# importer below will keep the lease alive itself.
 raw_rpc rcow_cancel_pending_delete \
 	"$(printf '{"lvol_name":"%s"}' "${EXPORT_SNAP_NAME}")" >/dev/null 2>&1
 check_target "step 3, deletable" || exit 1
@@ -1830,7 +1916,7 @@ fi
 check_target "step 11c" || exit 1
 
 # ==========================================================================
-# [11d] default decouple, idempotent export, TTL expiry
+# [11d] default decouple, idempotent export, snapshot-bound lifetime
 #
 # Three behaviours the suite did not cover:
 #
@@ -1840,16 +1926,15 @@ check_target "step 11c" || exit 1
 #      call is now the common case, and only the explicit decouple:true and
 #      decouple:false forms were being exercised.
 #
-#   2. exporting the same snapshot twice while the first export is still in
-#      flight answers the same uuid (idempotence, so a timed-out caller that
-#      retries keeps polling the right uuid), and a fresh export after DONE gets
-#      a fresh uuid (re-exporting is deliberately legal).
+#   2. exporting the same snapshot twice always answers the same uuid: in flight
+#      and after DONE. Releasing it is what allows a later export to mint a new
+#      one.
 #
-#   3. a reference export with a ttl stops pinning its snapshot once the ttl
-#      expires -- deletable flips to YES while the export status stays DONE.
+#   3. ttl_sec is ignored: a reference export has expires_at=0 and remains DONE
+#      while its snapshot exists.
 # ==========================================================================
 echo
-echo "[11d] default decouple, idempotent export, TTL expiry"
+echo "[11d] default decouple, idempotent export, snapshot-bound lifetime"
 
 IDEM_VOL="${SRC_VOL}-idem"
 IDEM_SNAP="${IDEM_VOL}-snap"
@@ -1995,29 +2080,59 @@ else
 fi
 wait_export_done "${IDEM_U1}" "step 11d.3" || exit 1
 
-# A completed export is not blocked from re-exporting: a fresh call gets a fresh
-# uuid, which is what exporting to a second target wants.
+# A completed export is still the snapshot's only export. A retry, or a second
+# importer, must keep using that uuid; releasing it is what allows a new one.
 IDEM_U3="$(raw_rpc rcow_export_snapshot \
 		"$(printf '{"snapshot_name":"%s"}' "${IDEM_SNAP}")" \
 		2>"${WORKDIR}/idem_export3.err" | tr -d ' \t\r\n')"
-if [ -n "${IDEM_U3}" ] && [ "${IDEM_U3}" != "${IDEM_U1}" ]; then
-	pass "a fresh export after DONE got a fresh uuid (${IDEM_U3})"
+if [ -n "${IDEM_U3}" ] && [ "${IDEM_U3}" = "${IDEM_U1}" ]; then
+	pass "a re-export after DONE returned the same uuid (${IDEM_U3})"
 else
-	fail "a re-export after DONE answered '${IDEM_U3}'"
+	fail "a re-export after DONE answered '${IDEM_U3}', expected ${IDEM_U1}"
 fi
-wait_export_done "${IDEM_U3}" "step 11d.3" || exit 1
+
+IDEM_SAME="$(raw_rpc rcow_export_snapshot \
+		"$(printf '{"snapshot_name":"%s","export_id":"%s"}' \
+			"${IDEM_SNAP}" "${IDEM_U1}")" \
+		2>"${WORKDIR}/idem_export_same.err" | tr -d ' \t\r\n')"
+if [ -n "${IDEM_SAME}" ] && [ "${IDEM_SAME}" = "${IDEM_U1}" ]; then
+	pass "an explicit export_id matching the live uuid is idempotent"
+else
+	fail "matching export_id answered '${IDEM_SAME}', expected ${IDEM_U1}"
+fi
+if IDEM_MISMATCH_ERR="$(raw_rpc rcow_export_snapshot \
+		"$(printf '{"snapshot_name":"%s","export_id":"%s"}' \
+			"${IDEM_SNAP}" "ffffffff-ffff-ffff-ffff-ffffffffffff")" \
+		2>&1 >/dev/null)"; then
+	fail "a mismatched export_id was accepted"
+else
+	case "${IDEM_MISMATCH_ERR}" in
+	*"File exists"*)
+		pass "a mismatched export_id is refused with EEXIST"
+		;;
+	*)
+		fail "mismatched export_id refused with an unexpected message: ${IDEM_MISMATCH_ERR}"
+		;;
+	esac
+fi
 check_target "step 11d.3" || exit 1
 
 # --------------------------------------------------------------------------
-# 11d.4 TTL expiry: the pin lifts on its own
+# 11d.4 snapshot lifetime, not ttl_sec, governs the export
 # --------------------------------------------------------------------------
-# Release the two above first so deletable is driven by this export alone.
-for _u in "${IDEM_U1}" "${IDEM_U3}"; do
-	if ! raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
-			"${_u}" "${SRC_LVS}")" >/dev/null 2>&1; then
-		fail "rcow_release_export (${_u}) before the TTL check"
-	fi
+# Release the one above first so this export is observed on its own.
+if ! raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
+		"${IDEM_U1}" "${SRC_LVS}")" >/dev/null 2>&1; then
+	fail "rcow_release_export (${IDEM_U1}) before the TTL check"
+fi
+for _ in $(seq 40); do
+	export_status_field "${IDEM_U1}" export_status >/dev/null 2>&1 || break
+	sleep 0.5
 done
+if export_status_field "${IDEM_U1}" export_status >/dev/null 2>&1; then
+	fail "export ${IDEM_U1} was still present after release"
+	exit 1
+fi
 
 TTL_U="$(raw_rpc rcow_export_snapshot \
 		"$(printf '{"snapshot_name":"%s","ttl_sec":3}' "${IDEM_SNAP}")" \
@@ -2030,18 +2145,17 @@ if [ -z "${TTL_U}" ]; then
 fi
 wait_export_done "${TTL_U}" "step 11d.4" || exit 1
 
-check_deletable "${TTL_U}" NO "step 11d.4, within TTL"
+EXP_AT="$(export_list_field "${TTL_U}" expires_at)"
+[ "${EXP_AT}" = "0" ] \
+	&& pass "ttl_sec is ignored and the export has no deadline" \
+	|| fail "the export still has expires_at=${EXP_AT}, expected 0"
 
-# 3 s ttl plus margin is not the unpin: a miss from before expires_at must be
-# followed by a poll at or after the deadline, at the 20s lease cadence.
-wait_deletable "${TTL_U}" YES "step 11d.4, after TTL" || {
-	check_target "step 11d.4" || exit 1
-}
+sleep 5
 ST_TTL="$(export_status_field "${TTL_U}" export_status)"
 [ "${ST_TTL}" = "DONE" ] \
-	&& pass "the expired export still reports DONE" \
-	|| fail "the expired export reports '${ST_TTL}', expected DONE"
-check_deletable "${TTL_U}" YES "step 11d.4, after TTL"
+	&& pass "the export remains DONE after the requested TTL elapsed" \
+	|| fail "the export reports '${ST_TTL}' after ttl_sec elapsed"
+
 check_target "step 11d.4" || exit 1
 
 # --------------------------------------------------------------------------
@@ -2245,11 +2359,17 @@ check_target "step 11d.6" || exit 1
 # --------------------------------------------------------------------------
 # 11d.7 cleanup of the idempotence volume
 # --------------------------------------------------------------------------
-if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
-		"${TTL_U}" "${SRC_LVS}")" >/dev/null 2>&1; then
-	pass "the expired export could still be released"
+# 11d.5/11d.6 re-export IDEM_SNAP, which is the same uuid as TTL_U, and already
+# released it. Releasing a missing export is not the property under test.
+if export_status_field "${TTL_U}" export_status >/dev/null 2>&1; then
+	if raw_rpc rcow_release_export "$(printf '{"export_uuid":"%s","lvs_name":"%s"}' \
+			"${TTL_U}" "${SRC_LVS}")" >/dev/null 2>&1; then
+		pass "the no-deadline export could be released explicitly"
+	else
+		fail "rcow_release_export (the no-deadline export)"
+	fi
 else
-	fail "rcow_release_export (the expired export)"
+	pass "the no-deadline export was already released with the contention exports"
 fi
 IDEM_NSID="$(nsid_of "${SRC_LVS}/${IDEM_VOL}")"
 if [ -n "${IDEM_NSID}" ]; then

@@ -26,18 +26,23 @@
 #    4. an unmarked snapshot is never deleted by --retry-pending, however
 #       deletable it is
 #
-#  Step [10] covers the other half of the registry leak: a lease-aware export
-#  nobody imported, past its TTL, with no pending delete. The snapshot stays;
-#  the export must not.
+#  Step [10] verifies the new lifetime contract: ttl_sec does not invalidate an
+#  export while its snapshot exists; deleting the snapshot releases all exports.
 #
 #  Step [11] delays the pending-delete registry HEAD and GET around unload. A
 #  late callback must not use a freed wrapper, and must not restore marks until
 #  a later attach's own load (a same-name replacement has a new uuid and is
 #  ignored).
 #
-#  Step [12] writes a lease after the first 404 and before the deadline. The
-#  reaper must not treat that historical miss as "nobody imported" once the
-#  TTL lapses.
+#  Step [12] writes a lease after the first 404 and verifies that a late reader
+#  is still recognised without any export deadline.
+#
+#  Step [13] restores a pre-lease (lease_aware=false) registry entry and checks
+#  that an explicit snapshot delete still releases it -- Cubelet does not need
+#  rcow_release_export for inherited exports.
+#
+#  Step [14] deletes the manifest out of band, then deletes the snapshot: a 404
+#  on release must drop the registry entry and finish the destroy.
 #
 #  === Why an export is used as the blocker ===
 #
@@ -121,6 +126,25 @@ print("")
 lvol_exists()
 {
 	[ -n "$(lvol_field "$1" name)" ]
+}
+
+# An idle lease-aware export still pins until the first miss is older than
+# S3LVOL_LEASE_MIN_GRACE_SEC, so a delete asked immediately after DONE is deferred.
+wait_snapshot_deletable()
+{
+	local name="$1"
+	local deadline=$(( $(date +%s) + 150 ))
+
+	while :; do
+		if [ "$(lvol_field "${name}" deletable)" = "YES" ]; then
+			return 0
+		fi
+		if [ "$(date +%s)" -ge "${deadline}" ]; then
+			fail "${name} still deletable=$(lvol_field "${name}" deletable) after 150s"
+			return 1
+		fi
+		sleep 1
+	done
 }
 
 pendel_ns()
@@ -319,11 +343,46 @@ sys.exit(1)
 ' "${uuid}"
 }
 
+export_field()
+{
+	local uuid="$1" field="$2"
+
+	rpc rcow_get_exports 2>/dev/null | python3 -c '
+import json, sys
+want, field = sys.argv[1:3]
+try:
+    for e in json.load(sys.stdin):
+        if e.get("export_uuid") == want:
+            print(e.get(field, ""))
+            sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+' "${uuid}" "${field}"
+}
+
 if SNAP="$(exports_has "${EXPORT_UUID}")" && [ "${SNAP}" = "pinned0" ]; then
 	pass "rcow_get_exports lists pinned0 as ${EXPORT_UUID}"
 else
 	fail "rcow_get_exports does not list the new export"
 fi
+
+# Give this export a live reader. An export with no lease remains importable,
+# but an explicit snapshot delete may revoke it immediately.
+rcow_load_credentials
+python3 "${ROOT}/test/tools/s3_put_lease.py" \
+	"$(rcow_cfg_get endpoint)" "${BUCKET}" "$(rcow_cfg_get region)" \
+	"${RCOW_LVS_NAME}/meta/exports/${EXPORT_UUID}.lease" 20 0 \
+	>"${WORKDIR}/put_initial_lease.log" 2>&1 \
+	&& pass "a live importer lease was written" \
+	|| fail "could not write the importer lease"
+for _ in $(seq 30); do
+	[ "$(export_field "${EXPORT_UUID}" pin)" = "lease" ] && break
+	sleep 1
+done
+[ "$(export_field "${EXPORT_UUID}" pin)" = "lease" ] \
+	&& pass "the source observed the live importer" \
+	|| fail "the export never became lease-pinned"
 
 # ==========================================================================
 echo ""
@@ -502,6 +561,16 @@ except Exception:
 	sleep 1
 done
 
+python3 "${ROOT}/test/tools/s3_put_lease.py" \
+	"$(rcow_cfg_get endpoint)" "${BUCKET}" "$(rcow_cfg_get region)" \
+	"${RCOW_LVS_NAME}/meta/exports/${EXP2}.lease" 20 0 \
+	>"${WORKDIR}/put_marked_lease.log" 2>&1 \
+	|| fail "could not write marked1's importer lease"
+for _ in $(seq 30); do
+	[ "$(export_field "${EXP2}" pin)" = "lease" ] && break
+	sleep 1
+done
+
 rpc rcow_delete_lvol '{"lvol_name":"marked1"}' >/dev/null 2>&1
 [ "$(lvol_field marked1 delete_pending)" = "true" ] \
 	&& pass "marked1 is marked after the refused delete" \
@@ -553,13 +622,10 @@ done
 	|| fail "the intent was lost across the unload (delete_pending='$(lvol_field marked1 delete_pending)')"
 
 # The restored entry has to name the same object and carry an export blocker.
-#
-# Which one depends on whether the export's first lease check has been answered
-# by now: nothing imported this export, so once it has, the entry is the "legacy"
-# case (no lease at all, only a TTL speaks, never completed unattended). Until
-# then the target assumes an importer may arrive and reports it as
-# self-completing. Both are accepted here -- the timing of one S3 HEAD is not
-# what this step is about -- and the retry below works either way.
+# Both "export" (lease not yet checked, or a live/stale lease-aware pin) and
+# "export_legacy" (a restored pre-lease entry) are accepted here -- this step
+# is about the intent surviving unload, not about which pin the first HEAD
+# produced.
 if rpc rcow_get_pending_deletes 2>/dev/null | \
 	python3 -c 'import json,sys
 try:
@@ -718,7 +784,7 @@ lvol_exists cansnap \
 # ==========================================================================
 echo ""
 echo "=== [9] an export whose importer stopped renewing is completed, and the"
-echo "        dead export is then reaped"
+echo "        snapshot delete releases its export internally"
 #
 # The cross-node case, and the one the deployment actually runs: the control
 # plane deletes the snapshot and never calls rcow_release_export. For that to
@@ -729,22 +795,20 @@ echo "        dead export is then reaped"
 #      goes stale, and a stale lease is *evidence* nobody is reading -- unlike a
 #      TTL, which lapses on its own whether or not somebody is. So the poller
 #      finishes the delete on that basis.
-#   2. The export entry has to go, or the registry grows without bound until it
-#      crosses S3LVOL_MAX_EXPORTS and the lvstore stops being attachable. Once
-#      the snapshot is gone the export can never be imported by anyone, so the
-#      reaper releases it: manifest deleted, entry dropped.
+#   2. The delete path releases the export first: manifest deleted, entry
+#      dropped, then snapshot destroyed.
 #
 # The importer here is s3_put_lease.py rather than a second target: what the
-# source side consumes is the lease object, and writing it directly is what lets
-# this control the timing (a real importer's cadence comes from the TTL).
+# source side consumes is the lease object, and writing it directly controls the
+# timing. Real importers renew every 20 seconds.
 
-LEASE_TTL=30       # importer renews every ttl/3 = 10 s, source's grace is 3x that
+IGNORED_TTL=30
 rpc rcow_create_snapshot \
 	"$(printf '{"lvol_name":"%s","snapshot_name":"leased"}' "${VOL}")" \
 	>/dev/null && pass "leased taken" || fail "could not take leased"
 
 LEASE_UU="$(rpc rcow_export_snapshot \
-	"$(printf '{"snapshot_name":"leased","ttl_sec":%d}' "${LEASE_TTL}")" \
+	"$(printf '{"snapshot_name":"leased","ttl_sec":%d}' "${IGNORED_TTL}")" \
 	2>/dev/null | tr -d ' \t\r\n"')"
 [ -n "${LEASE_UU}" ] && pass "leased exported (${LEASE_UU})" \
 	|| fail "export of leased failed"
@@ -774,14 +838,15 @@ else
 	fail "could not write the lease object: $(tail -1 "${WORKDIR}/put_lease.log")"
 fi
 
-# Wait for the source to read it, so the delete below sees a *fresh* lease rather
-# than the "not checked yet" state.
+# Wait for the source to read it, so the delete below sees a fresh lease.
 info "waiting for the source to pick the lease up"
 for _ in $(seq 40); do
-	[ "$(rpc rcow_get_pending_deletes 2>/dev/null | wc -c)" -gt 0 ] && break
+	[ "$(export_field "${LEASE_UU}" pin)" = "lease" ] && break
 	sleep 1
 done
-sleep "$((LEASE_TTL / 3 + 3))"
+[ "$(export_field "${LEASE_UU}" pin)" = "lease" ] \
+	&& pass "the source observed the fresh lease" \
+	|| fail "the source did not observe the fresh lease"
 
 # A fresh lease must still record the intent -- that is what makes the delete
 # happen later without anyone asking again.
@@ -818,9 +883,8 @@ else
 	pass "the poller completed the delete once the lease went stale"
 fi
 
-# And the export it left behind: unreachable for ever (its manifest names chunks
-# the snapshot owned), so the reaper drops it.
-info "waiting for the reaper to collect the dead export"
+# The delete must already have released the export before removing the snapshot.
+info "checking that the snapshot delete released the export"
 for _ in $(seq 150); do
 	rpc rcow_get_snapshot_status \
 		"$(printf '{"export_uuid":"%s"}' "${LEASE_UU}")" >/dev/null 2>&1 || break
@@ -828,33 +892,31 @@ for _ in $(seq 150); do
 done
 if rpc rcow_get_snapshot_status \
 		"$(printf '{"export_uuid":"%s"}' "${LEASE_UU}")" >/dev/null 2>&1; then
-	fail "the export entry outlived the snapshot it referenced"
+	fail "the export entry outlived the snapshot delete"
 else
-	pass "the dead export was reaped from the registry"
+	pass "the export was released from the registry"
 fi
 
 if python3 "${PREFIX_RM}" -e "$(rcow_cfg_get endpoint)" -b "${BUCKET}" \
 		-r "$(rcow_cfg_get region)" -p "exports/${LEASE_UU}.json" \
 		--list 2>/dev/null | grep -q .; then
-	fail "the reaped export's manifest is still in the bucket"
+	fail "the released export's manifest is still in the bucket"
 else
 	pass "and its manifest is gone from the bucket"
 fi
 
-grep -q "reaped" "${RCOW_LOG}" \
-	&& pass "the log names the reaper" \
-	|| info "no reaper line in the log (the entry went all the same)"
+grep -q "Released export ${LEASE_UU}" "${RCOW_LOG}" \
+	&& pass "the log names the internal export release" \
+	|| info "no release line in the log (the entry went all the same)"
 
 # ==========================================================================
 echo ""
-echo "=== [10] an export nobody imported is reaped past the deadline,"
-echo "         without deleting its snapshot"
+echo "=== [10] an export remains valid while its snapshot exists,"
+echo "         and snapshot delete releases it"
 #
-# The production leak the lease-stale path in [9] does not cover: a reference
-# export, never imported, TTL elapsed, snapshot still here because nobody
-# recorded a pending delete (the control plane treated an earlier refusal as
-# success and stopped tracking it). The lease HEAD is a permanent 404. The
-# watch has to stop and the registry entry has to go; the snapshot stays.
+# ttl_sec is accepted for wire compatibility but no longer limits a snapshot
+# export. If nobody asks to delete the snapshot, both it and its export remain
+# usable. The delete request is the lifecycle event that releases the export.
 
 UNIMP_TTL=20
 rpc rcow_create_snapshot \
@@ -886,24 +948,29 @@ done
 	&& pass "unimported export is DONE" \
 	|| fail "unimported export did not reach DONE"
 
-# The first lease check is immediate and 404s, but the deadline has not passed,
-# so the entry must stay: the TTL is still a promise to an importer that may
-# not have started yet.
+UNIMP_UU2="$(rpc rcow_export_snapshot '{"snapshot_name":"unimported"}' \
+	2>/dev/null | tr -d ' \t\r\n"')"
+[ -n "${UNIMP_UU2}" ] && [ "${UNIMP_UU2}" = "${UNIMP_UU}" ] \
+	&& pass "a second export of the snapshot returns the same uuid" \
+	|| fail "a second export answered '${UNIMP_UU2}', expected ${UNIMP_UU}"
+
+# The first lease check is immediate and 404s. That means no importer is
+# currently known; it does not make the export expire.
 sleep 3
 if rpc rcow_get_snapshot_status \
 		"$(printf '{"export_uuid":"%s"}' "${UNIMP_UU}")" >/dev/null 2>&1; then
-	pass "the export is still in the registry before the deadline"
+	pass "the export is still in the registry"
 else
-	fail "the export was reaped before the deadline"
+	fail "the export disappeared while its snapshot exists"
 fi
 if SNAP="$(exports_has "${UNIMP_UU}")" && [ "${SNAP}" = "unimported" ]; then
-	pass "rcow_get_exports lists the unimported export before the deadline"
+	pass "rcow_get_exports lists the unimported export"
 else
 	fail "rcow_get_exports does not list the unimported export"
 fi
 lvol_exists unimported \
-	&& pass "the snapshot is still there before the deadline" \
-	|| fail "the snapshot disappeared before the deadline"
+	&& pass "the snapshot is still there" \
+	|| fail "the snapshot disappeared"
 
 # Do not ask to delete it. That is the production path: delete_pending stays
 # false, and --retry-pending would not see this snapshot.
@@ -911,48 +978,41 @@ lvol_exists unimported \
 	&& pass "no pending delete was recorded" \
 	|| fail "unimported was queued without anyone asking"
 
-info "waiting for the deadline (${UNIMP_TTL}s) and the reaper"
-for _ in $(seq 150); do
-	rpc rcow_get_snapshot_status \
-		"$(printf '{"export_uuid":"%s"}' "${UNIMP_UU}")" >/dev/null 2>&1 || break
-	sleep 1
-done
+info "waiting past the deprecated ttl_sec (${UNIMP_TTL}s)"
+sleep "$((UNIMP_TTL + 3))"
 if rpc rcow_get_snapshot_status \
 		"$(printf '{"export_uuid":"%s"}' "${UNIMP_UU}")" >/dev/null 2>&1; then
-	fail "the unimported export outlived its deadline"
+	pass "the export remains valid past ttl_sec"
 else
-	pass "the unimported export was reaped past the deadline"
-fi
-if exports_has "${UNIMP_UU}" >/dev/null; then
-	fail "rcow_get_exports still lists the reaped export"
-else
-	pass "rcow_get_exports no longer lists the reaped export"
+	fail "the export expired while its snapshot still exists"
 fi
 
+if rpc rcow_import_lvol \
+		"$(printf '{"lvol_name":"unimported_clone","export_uuid":"%s","decouple":false}' \
+		   "${UNIMP_UU}")" >/dev/null 2>&1; then
+	pass "the export can still be imported after the old ttl_sec"
+else
+	fail "the post-ttl_sec import failed"
+fi
+rpc rcow_delete_lvol '{"lvol_name":"unimported_clone"}' >/dev/null 2>&1 \
+	|| fail "could not remove the post-ttl_sec import"
+
+wait_snapshot_deletable unimported || exit 1
+
+if rpc rcow_delete_lvol '{"lvol_name":"unimported"}' >/dev/null 2>&1; then
+	pass "snapshot delete completed"
+else
+	fail "snapshot delete did not release its export"
+fi
 lvol_exists unimported \
-	&& pass "the snapshot was left in place" \
-	|| fail "the snapshot was deleted along with the export"
-[ "$(lvol_field unimported delete_pending)" = "false" ] \
-	&& pass "still no pending delete" \
-	|| fail "a pending delete appeared on its own"
-[ "$(unimported_status)" = "NONE" ] \
-	&& pass "the snapshot's export_status is NONE" \
-	|| fail "export_status after reap: $(unimported_status)"
-
-if python3 "${PREFIX_RM}" -e "$(rcow_cfg_get endpoint)" -b "${BUCKET}" \
-		-r "$(rcow_cfg_get region)" -p "exports/${UNIMP_UU}.json" \
-		--list 2>/dev/null | grep -q .; then
-	fail "the reaped export's manifest is still in the bucket"
+	&& fail "the snapshot survived its delete" \
+	|| pass "the snapshot was deleted"
+if rpc rcow_get_snapshot_status \
+		"$(printf '{"export_uuid":"%s"}' "${UNIMP_UU}")" >/dev/null 2>&1; then
+	fail "the export survived its snapshot delete"
 else
-	pass "and its manifest is gone from the bucket"
+	pass "snapshot delete released the export"
 fi
-
-grep -q "stopping the watch" "${RCOW_LOG}" \
-	&& pass "the log stopped the lease watch" \
-	|| info "no stop-watch line (the poller may have been torn down by the reaper)"
-grep -q "nobody imported it past the deadline" "${RCOW_LOG}" \
-	&& pass "the log names the absent-lease reaper" \
-	|| fail "the reaper did not log the absent-lease path"
 
 # ==========================================================================
 echo ""
@@ -1096,12 +1156,11 @@ done
 
 # ==========================================================================
 echo ""
-echo "=== [12] a 404 before the deadline does not reap a late importer"
+echo "=== [12] a late importer keeps its lease protection"
 #
-# The first lease HEAD is immediate and 404s. An importer can still PUT before
-# expires_at. Combining that historical miss with "now past the deadline"
-# would delete the manifest under a live import. The miss has to be observed
-# on a check submitted after the deadline.
+# The first lease HEAD is immediate and 404s. An importer can still arrive
+# later because the export remains valid for the snapshot's lifetime. Once its
+# lease appears, a snapshot delete must treat it as a live reader.
 
 LATE_TTL=20
 rpc rcow_create_snapshot \
@@ -1153,7 +1212,7 @@ for _ in $(seq 30); do
 	sleep 1
 done
 [ "$(export_lease_absent "${LATE_UU}")" = "true" ] \
-	&& pass "the first lease check missed (404 before the deadline)" \
+	&& pass "the first lease check missed before the importer arrived" \
 	|| fail "lease_absent never became true (got '$(export_lease_absent "${LATE_UU}")')"
 
 rcow_load_credentials
@@ -1161,30 +1220,20 @@ if python3 "${ROOT}/test/tools/s3_put_lease.py" \
 		"$(rcow_cfg_get endpoint)" "${BUCKET}" "$(rcow_cfg_get region)" \
 		"${RCOW_LVS_NAME}/meta/exports/${LATE_UU}.lease" 20 0 \
 		>"${WORKDIR}/put_late_lease.log" 2>&1; then
-	pass "a lease was written after that 404, still inside the TTL"
+	pass "a lease was written after that 404"
 else
 	fail "could not write the late lease: $(tail -1 "${WORKDIR}/put_late_lease.log")"
 fi
 
-# Past the deadline and at least one reaper tick (60 s). The old 404 must not
-# be enough to drop the entry; the live lease must.
-info "waiting past the deadline (${LATE_TTL}s) and a reaper tick"
-survived=0
-for _ in $(seq 90); do
-	if ! rpc rcow_get_snapshot_status \
-			"$(printf '{"export_uuid":"%s"}' "${LATE_UU}")" \
-			>/dev/null 2>&1; then
-		survived=0
-		break
-	fi
-	survived=1
-	sleep 1
-done
-if [ "${survived}" = "1" ] && rpc rcow_get_snapshot_status \
+# The deprecated ttl_sec must not reap the export, regardless of the historical
+# miss or the later lease.
+info "waiting past the deprecated ttl_sec (${LATE_TTL}s)"
+sleep "$((LATE_TTL + 3))"
+if rpc rcow_get_snapshot_status \
 		"$(printf '{"export_uuid":"%s"}' "${LATE_UU}")" >/dev/null 2>&1; then
-	pass "the export was not reaped after a pre-deadline 404 plus expiry"
+	pass "the export remains valid after the old ttl_sec"
 else
-	fail "the export was reaped despite a lease PUT after the 404"
+	fail "the export was reaped while its snapshot still exists"
 fi
 lvol_exists lateimp \
 	&& pass "the snapshot was left in place" \
@@ -1193,10 +1242,261 @@ lvol_exists lateimp \
 if SNAP="$(exports_has "${LATE_UU}")" && [ "${SNAP}" = "lateimp" ]; then
 	pass "rcow_get_exports still lists the late-imported export"
 else
-	fail "rcow_get_exports lost the export after the historical 404"
+	fail "rcow_get_exports lost the late-imported export"
 fi
+
+info "waiting for the source to pick the late lease up"
+for _ in $(seq 40); do
+	[ "$(export_field "${LATE_UU}" pin)" = "lease" ] && break
+	sleep 1
+done
+[ "$(export_field "${LATE_UU}" pin)" = "lease" ] \
+	&& pass "the source observed the late lease" \
+	|| fail "the source did not observe the late lease (pin='$(export_field "${LATE_UU}" pin)')"
+
+LATE_DEL="$(python3 "${RPC_PY}" --sock "${RCOW_RPC_SOCK}" --raw \
+	rcow_delete_lvol '{"lvol_name":"lateimp"}' 2>&1)"
+lvol_exists lateimp \
+	&& pass "snapshot delete was refused while the late importer's lease is live" \
+	|| fail "lateimp was deleted under a live late lease: ${LATE_DEL}"
+[ "$(lvol_field lateimp delete_pending)" = "true" ] \
+	&& pass "the refused delete was recorded" \
+	|| fail "no pending delete for lateimp: ${LATE_DEL}"
+python3 "${RPC_PY}" --sock "${RCOW_RPC_SOCK}" \
+	rcow_cancel_pending_delete '{"lvol_name":"lateimp"}' >/dev/null 2>&1 \
+	&& pass "lateimp pending delete cancelled" \
+	|| fail "could not cancel the lateimp pending delete"
 
 rpc rcow_release_export "$(printf '{"export_uuid":"%s"}' "${LATE_UU}")" \
 	>/dev/null 2>&1 \
 	&& pass "lateimp export released" \
 	|| fail "could not release the lateimp export"
+
+# ==========================================================================
+echo ""
+echo "=== [13] an explicit snapshot delete releases a pre-lease export"
+#
+# A registry entry written before lease_aware existed restores with
+# lease_aware=false. Status reports pin=legacy because absence proves nothing
+# about a reader that never wrote a lease. The snapshot delete is still the
+# revocation: Cubelet does not call rcow_release_export.
+
+rpc rcow_active_bdev "$(printf '{"device_name":"%s"}' "${VOL}")" >/dev/null 2>&1
+rcow_verify_active 30 >/dev/null 2>&1
+rpc rcow_create_snapshot \
+	"$(printf '{"lvol_name":"%s","snapshot_name":"legsnap"}' "${VOL}")" \
+	>/dev/null && pass "legsnap taken" || fail "could not take legsnap"
+rpc rcow_deactive_bdev "$(printf '{"device_name":"%s"}' "${VOL}")" >/dev/null 2>&1
+
+LEG_UU="$(rpc rcow_export_snapshot '{"snapshot_name":"legsnap"}' \
+	2>/dev/null | tr -d ' \t\r\n"')"
+[ -n "${LEG_UU}" ] && pass "legsnap exported (${LEG_UU})" \
+	|| fail "export of legsnap failed"
+EXPORT_UUIDS_SEEN="${EXPORT_UUIDS_SEEN:-} ${LEG_UU}"
+for _ in $(seq 60); do
+	[ "$(rpc rcow_get_snapshot_status '{"snapshot_name":"legsnap"}' 2>/dev/null | \
+		python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("export_status",""))
+except Exception:
+    print("")')" = "DONE" ] && break
+	sleep 1
+done
+[ "$(rpc rcow_get_snapshot_status '{"snapshot_name":"legsnap"}' 2>/dev/null | \
+	python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("export_status",""))
+except Exception:
+    print("")')" = "DONE" ] \
+	&& pass "legsnap export is DONE" || fail "legsnap export did not reach DONE"
+
+echo "  ---- unload, rewrite the registry as pre-lease, re-attach"
+pendel_unload >/dev/null 2>&1 && pass "lvstore unloaded to rewrite the registry" \
+	|| { fail "unload failed"; exit 1; }
+
+rcow_load_credentials
+S3_ENDPOINT="$(rcow_cfg_get endpoint)" \
+S3_BUCKET="${BUCKET}" \
+S3_REGION="$(rcow_cfg_get region)" \
+S3_EXPORTS_KEY="${RCOW_LVS_NAME}/meta/exports.json" \
+S3_TOOLS="${ROOT}/test/tools" \
+python3 - "${LEG_UU}" <<'PY'
+import datetime, hashlib, hmac, http.client, json, os, sys
+
+uuid = sys.argv[1]
+endpoint = os.environ["S3_ENDPOINT"]
+bucket = os.environ["S3_BUCKET"]
+region = os.environ["S3_REGION"]
+key = os.environ["S3_EXPORTS_KEY"]
+ak = os.environ["AWS_ACCESS_KEY_ID"]
+sk = os.environ["AWS_SECRET_ACCESS_KEY"]
+host = "%s.%s" % (bucket, endpoint)
+sys.path.insert(0, os.environ["S3_TOOLS"])
+from s3_prefix_rm import Client  # noqa: E402
+
+s3 = Client(endpoint, bucket, region, False, ak, sk, False)
+status, body = s3.request("GET", s3._base_path() + "/" + key)
+if status != 200:
+    sys.exit("GET %s -> HTTP %s" % (key, status))
+reg = json.loads(body)
+found = False
+for e in reg.get("exports") or []:
+    if e.get("export_uuid") == uuid:
+        e["lease_aware"] = False
+        found = True
+if not found:
+    sys.exit("export %s not in %s" % (uuid, key))
+payload = json.dumps(reg, separators=(",", ":")).encode()
+payload_sha = hashlib.sha256(payload).hexdigest()
+now = datetime.datetime.now(datetime.timezone.utc)
+amzdate = now.strftime("%Y%m%dT%H%M%SZ")
+datestamp = now.strftime("%Y%m%d")
+path = "/" + key
+
+def _sign(k, msg):
+    return hmac.new(k, msg.encode(), hashlib.sha256).digest()
+
+canonical_headers = ("host:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\n"
+                     % (host, payload_sha, amzdate))
+signed_headers = "host;x-amz-content-sha256;x-amz-date"
+canonical_request = "\n".join(["PUT", path, "", canonical_headers,
+                               signed_headers, payload_sha])
+scope = "%s/%s/s3/aws4_request" % (datestamp, region)
+to_sign = "\n".join(["AWS4-HMAC-SHA256", amzdate, scope,
+                     hashlib.sha256(canonical_request.encode()).hexdigest()])
+k = _sign(("AWS4" + sk).encode(), datestamp)
+k = _sign(k, region)
+k = _sign(k, "s3")
+k = _sign(k, "aws4_request")
+signature = hmac.new(k, to_sign.encode(), hashlib.sha256).hexdigest()
+auth = ("AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s"
+        % (ak, scope, signed_headers, signature))
+conn = http.client.HTTPSConnection(host, timeout=60)
+try:
+    conn.request("PUT", path, body=payload, headers={
+        "Host": host,
+        "x-amz-date": amzdate,
+        "x-amz-content-sha256": payload_sha,
+        "Authorization": auth,
+        "Content-Type": "application/json",
+    })
+    resp = conn.getresponse()
+    if resp.status not in (200, 204):
+        sys.exit("PUT %s -> HTTP %s" % (key, resp.status))
+finally:
+    conn.close()
+PY
+if [ $? -eq 0 ]; then
+	pass "registry rewritten with lease_aware=false for ${LEG_UU}"
+else
+	fail "could not rewrite exports.json as pre-lease"
+	exit 1
+fi
+
+LVS_NS="$(pendel_ns)"
+[ -n "${LVS_NS}" ] || LVS_NS="${BUCKET}"
+if pendel_attach >/dev/null 2>&1; then
+	pass "lvstore re-attached with the pre-lease registry"
+else
+	fail "re-attach failed"
+	exit 1
+fi
+
+for _ in $(seq 40); do
+	[ "$(export_field "${LEG_UU}" pin)" = "legacy" ] && break
+	sleep 1
+done
+[ "$(export_field "${LEG_UU}" pin)" = "legacy" ] \
+	&& pass "the restored export reports pin=legacy" \
+	|| fail "pin is '$(export_field "${LEG_UU}" pin)', expected legacy"
+[ "$(export_field "${LEG_UU}" lease_aware)" = "False" ] \
+	&& pass "lease_aware is false after restore" \
+	|| fail "lease_aware='$(export_field "${LEG_UU}" lease_aware)', expected False"
+
+[ "$(lvol_field legsnap deletable)" = "YES" ] \
+	&& pass "legsnap reports deletable=YES despite pin=legacy" \
+	|| fail "legsnap deletable='$(lvol_field legsnap deletable)', expected YES"
+
+LEG_DEL="$(python3 "${RPC_PY}" --sock "${RCOW_RPC_SOCK}" --raw \
+	rcow_delete_lvol '{"lvol_name":"legsnap"}' 2>&1)"
+if echo "${LEG_DEL}" | grep -q '"deferred": *true'; then
+	fail "legacy snapshot delete was deferred: ${LEG_DEL}"
+elif ! lvol_exists legsnap; then
+	pass "snapshot delete of a pre-lease export completed without release_export"
+else
+	fail "legsnap is still there: ${LEG_DEL}"
+fi
+
+if rpc rcow_get_snapshot_status \
+		"$(printf '{"export_uuid":"%s"}' "${LEG_UU}")" >/dev/null 2>&1; then
+	fail "the pre-lease export is still in the registry"
+else
+	pass "snapshot delete released the pre-lease export"
+fi
+
+# ==========================================================================
+echo ""
+echo "=== [14] a missing manifest does not wedge snapshot delete"
+#
+# Bucket lifecycle, another node's release, or a fire-and-forget registry
+# rewrite can leave a registry entry whose manifest is already gone. HEAD 404
+# used to record PENDING_FAILED without forgetting the entry, so neither the
+# poller nor a retry could finish. A 404 means the obligation is already
+# discharged: drop the entry and destroy the snapshot.
+
+rpc rcow_active_bdev "$(printf '{"device_name":"%s"}' "${VOL}")" >/dev/null 2>&1
+rcow_verify_active 30 >/dev/null 2>&1
+rpc rcow_create_snapshot \
+	"$(printf '{"lvol_name":"%s","snapshot_name":"missman"}' "${VOL}")" \
+	>/dev/null && pass "missman taken" || fail "could not take missman"
+rpc rcow_deactive_bdev "$(printf '{"device_name":"%s"}' "${VOL}")" >/dev/null 2>&1
+
+MISS_UU="$(rpc rcow_export_snapshot '{"snapshot_name":"missman"}' \
+	2>/dev/null | tr -d ' \t\r\n"')"
+[ -n "${MISS_UU}" ] && pass "missman exported (${MISS_UU})" \
+	|| fail "export of missman failed"
+EXPORT_UUIDS_SEEN="${EXPORT_UUIDS_SEEN:-} ${MISS_UU}"
+for _ in $(seq 60); do
+	[ "$(rpc rcow_get_snapshot_status '{"snapshot_name":"missman"}' 2>/dev/null | \
+		python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("export_status",""))
+except Exception:
+    print("")')" = "DONE" ] && break
+	sleep 1
+done
+[ "$(rpc rcow_get_snapshot_status '{"snapshot_name":"missman"}' 2>/dev/null | \
+	python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("export_status",""))
+except Exception:
+    print("")')" = "DONE" ] \
+	&& pass "missman export is DONE" || fail "missman export did not reach DONE"
+
+rcow_load_credentials
+if python3 "${PREFIX_RM}" -e "$(rcow_cfg_get endpoint)" -b "${BUCKET}" \
+	-r "$(rcow_cfg_get region)" -p "exports/${MISS_UU}.json" \
+	>/dev/null 2>&1; then
+	pass "manifest removed out of band"
+else
+	fail "could not delete exports/${MISS_UU}.json"
+fi
+
+wait_snapshot_deletable missman || exit 1
+
+MISS_DEL="$(python3 "${RPC_PY}" --sock "${RCOW_RPC_SOCK}" --raw \
+	rcow_delete_lvol '{"lvol_name":"missman"}' 2>&1)"
+if echo "${MISS_DEL}" | grep -q '"deferred": *true'; then
+	fail "missing-manifest snapshot delete was deferred: ${MISS_DEL}"
+elif ! lvol_exists missman; then
+	pass "snapshot delete completed after the manifest 404"
+else
+	fail "missman is still there: ${MISS_DEL}"
+fi
+
+if rpc rcow_get_snapshot_status \
+		"$(printf '{"export_uuid":"%s"}' "${MISS_UU}")" >/dev/null 2>&1; then
+	fail "the export is still in the registry after a missing manifest"
+else
+	pass "the registry entry was dropped on the missing manifest"
+fi

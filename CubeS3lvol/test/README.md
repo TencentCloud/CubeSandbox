@@ -227,8 +227,10 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   `rcow_get_snapshot_status` takes `export_uuid` or `snapshot_name` (exactly
   one; giving both is refused) and on success returns `export_status`
   (INPROGRESS / DONE / NONE) and `deletable` (YES / NO, computed on the spot:
-  NO while an export is in progress, when the snapshot is referenced by a
-  zero-copy export, or when it has more than one clone).
+  NO while an export is in progress, when a live/unknown lease or local esnap
+  reader still references a zero-copy export, or when it has more than one
+  clone). An idle REF export does not pin the snapshot: deleting the snapshot
+  releases that export.
 
   The two forms differ only in what "does not exist" means: queried by uuid, an
   export that matches nothing follows the failure path (`bool_value` false,
@@ -238,32 +240,22 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   form exists: a never-exported snapshot still needs its `deletable` asked, and
   there is no uuid to ask with.
 
-- `run_selfimport_test.sh` -- 28 assertions. `export_snapshot` + `import_lvol`
+- `run_selfimport_test.sh` -- `export_snapshot` + `import_lvol`
   inside the same lvstore now degenerates into a **local clone** (the RPC reply's
   `mode` field says whether it is `local_clone` or `esnap`). `export_snapshot`
   was not changed at all: the manifest cannot know at write time whether it will
   be consumed locally or on another machine, so the decision has to sit on the
   import side.
 
-  The degeneration holds only when all three criteria match: `endpoint`+`bucket`
-  +`prefix` all equal, the snapshot still exists and is read-only, and the
-  `snapshot_uuid` is the same. **The point of the test is not the happy path but
-  that the inverse of each criterion falls back to esnap** -- the first version
-  used `blob_id` as identity and step [4] caught it immediately cloning a
-  recreated same-name volume: the blobstore derives blob ids from the lowest
-  free md page, so delete-then-create hands out the same id. Identity is the
-  lvol uuid.
-
-  Step [4] judges by **content** rather than just the mode, but it cannot assert
-  "reads the exported data": creating a "same name, different blob" requires
-  deleting the original snapshot, which frees the objects the REF export
-  references. So it asserts "**not** the replaced data" -- reading empty is the
-  correct result.
+  The local-clone optimisation requires matching endpoint, bucket, prefix,
+  snapshot name and lvol uuid. The suite also verifies the lifecycle invariant:
+  deleting the source snapshot releases its export, and reusing the snapshot
+  name for another blob or writable lvol does not revive that export.
 
   Why the degeneration is worth it: a local clone's parent is pinned by the
   blobstore (a snapshot with a clone cannot be deleted), while an esnap clone's
-  parent is pinned by the export, which can be released and also expires (the
-  REF default TTL is only 3600 s). So it is safer, not just faster.
+  parent is protected by the export lease until the esnap clone decouples or is
+  deleted. So it is safer, not just faster.
 
 - `run_cubecow_client_test.sh` -- the cubecow / Cubelet client contract. Cubelet
   never calls JSON-RPC itself; cubecow always uses the same 11 `rcow_*` methods

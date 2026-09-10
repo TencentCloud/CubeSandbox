@@ -73,7 +73,7 @@ MODULE_DIR   = ../../module/bdev/s3lvol
 APPS = s3_client_test s3_spawner_test s3_thread_bounce_test s3_bs_dev_test \
        s3_journal_test s3_wal_test s3_cache_test s3_flush_test s3_export_test \
        s3_statefile_test s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
-       s3_copy_xml_test s3_lease_term_test s3_pending_persist_test
+       s3_copy_xml_test s3_pending_persist_test
 
 # (a) minimal library set for the stubbed path
 STUB_SRCS      = spdk_thread_stub.c
@@ -158,10 +158,6 @@ s3_export_swap_test: s3_export_swap_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 # CopyObject XML delimiter / truncation. Header-only, no S3, no SPDK.
 s3_copy_xml_test: s3_copy_xml_test.c $(S3BSDEV_DIR)/s3_copy_xml.h
 	$(CC) $(COMMON_CFLAGS) -I$(S3BSDEV_DIR) s3_copy_xml_test.c -o $@
-
-# Lease-miss-after-deadline predicate. Header-only, no S3, no SPDK.
-s3_lease_term_test: s3_lease_term_test.c $(MODULE_DIR)/export_lease_term.h
-	$(CC) $(COMMON_CFLAGS) -I$(MODULE_DIR) s3_lease_term_test.c -o $@
 
 # Pending-delete registry PUT coalescing. Header-only, no S3, no SPDK.
 s3_pending_persist_test: s3_pending_persist_test.c $(MODULE_DIR)/pending_persist_ctl.h
@@ -302,7 +298,7 @@ s3_checkpoint_test: s3_checkpoint_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 # Run only the tests that need no S3 credentials
 check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cache_test \
        s3_flush_test s3_export_test s3_statefile_test s3_local_dev_test \
-       s3_checkpoint_test s3_export_swap_test s3_copy_xml_test s3_lease_term_test \
+       s3_checkpoint_test s3_export_swap_test s3_copy_xml_test \
        s3_pending_persist_test
 	./s3_spawner_test
 	./s3_thread_bounce_test
@@ -316,7 +312,6 @@ check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cach
 	./s3_checkpoint_test
 	./s3_export_swap_test
 	./s3_copy_xml_test
-	./s3_lease_term_test
 	./s3_pending_persist_test
 
 .PHONY: $(S3BSDEV_DIR)/libs3bsdev.a

@@ -357,30 +357,29 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
 1. **S3 快照对象由 S3lvol 异步删除，被引用的快照会拒绝删除。** 删除 S3 快照后，CubeS3lvol 在后台回收对象。
    删除接口返回时，对象不一定已经从 S3 上消失。
 
-   此外，快照在被引用时**无法删除**，CubeS3lvol 会以 `EBUSY` 拒绝：正在或已经导出（其他节点可能正
-   在读取）、存在多个 clone、正在 decouple。此时 CubeS3lvol 会记录一条 **pending-delete 标记**
+   此外，快照在被引用时**不能立刻删除**，CubeS3lvol 会以 `EBUSY` 拒绝：export 仍在发布、有 live lease、lease miss 还不到 source grace（约 60 秒）、本地 esnap clone 仍在读、存在多个 clone、正在 decouple。此时 CubeS3lvol 会记录一条 **pending-delete 标记**
    （按 lvstore uuid + lvol uuid 记录，不按名字，避免同名快照被误删），可通过 `rcow_get_lvstores` 的
-   `delete_pending` 字段查看，`deletable` 字段则表示当前是否可删。
+   `delete_pending` 字段查看，`deletable` 字段则表示当前是否可删（依据最近一次 lease poll，查询本身不去 HEAD）。空闲的 lease-aware export 以及 pre-lease
+   export **不 pin**：删除快照会在内部释放 export。已经 idle 超过 grace 的 export，新 importer 在 source 下一次 20 秒 poll 看到 PUT 之前不受保护。
 
    注意另一种拒绝：卷仍作为 NVMe-oF 命名空间处于 **active** 时，删除会在 RPC 层就被拒绝（提示先执行
    `rcow_deactive_bdev`），这一路径**不会**记录标记——它是调用方自己可以立即纠正的前置条件，而不是需要
    等待的阻塞原因。
 
    之后约 60 秒一次的 poller 会在阻塞消失后自动完成删除，覆盖：**带 lease 的 export**（importer 停止续约、
-   lease 变 stale）、多余 clone、已经结束的 decouple、以及仍在 publish 的 export。**没有 lease 的
-   export 不会自动删**：TTL 到期只说明时间过了，不能证明没有人在读，这类标记要等人工（或 `--retry-pending`）
-   决定。异步 destroy 已经失败的，也不会每分钟重试。
+   miss 超过 grace）、多余 clone、已经结束的 decouple、仍在 publish 的 export，以及已经记下删除意图的
+   **pre-lease export**。异步 destroy 已经失败的，不会每分钟重试。
 
    标记会写入 `<prefix>/meta/pending-deletes.json`，下次 attach 时恢复。删除 RPC **先返回、再 PUT**；若在
    窗口内崩溃，意图会丢失，需要再发一次删除。poller 能自行完成的阻塞会返回成功，并带 **`deferred: true`**。
-   **没有 lease 的 export 仍返回 EBUSY**，标记两种情况都会记下。
+   live 或仍未知的 lease 仍返回 EBUSY；stale 或 pre-lease 的 export 由删除路径自己释放。
    用 `rcow_cancel_pending_delete` 撤回意图（必填 `lvol_name`，可选 `lvs_name` 消歧义），该 RPC 幂等。
    若 poller 已经提交了 destroy，cancel 只丢掉标记，快照仍可能被删掉。
 
    对仍在从 import decouple 的卷做快照会保留外部 parent，`rcow_create_snapshot` 此时返回
    **`decouple_cancelled: true`**。
 
-   `--retry-pending` 仍用于无 lease 的 export、失败的 destroy，以及不想等 poller 的场景：
+   `--retry-pending` 仍用于失败的 destroy，以及不想等 poller 的场景：
 
    ```sh
    # 在 CubeS3lvol 目录下

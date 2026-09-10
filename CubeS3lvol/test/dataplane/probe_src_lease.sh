@@ -78,9 +78,7 @@ mfield() { python3 "${GET_MANIFEST}" -e "${EP}" -b "${BK}" -r "${RG}" -u "$1" \
 # differently (a bare lvstore name from import_lease_renew(), "export:<uuid>"
 # from export_src_lease_renew()), so the writer is checkable rather than
 # inferred. Without that check this probe would pass on the strength of the
-# importer's renewals, which run at ttl/3 -- 1200 s at the default TTL, i.e.
-# outside every window below, which is precisely the sort of unwritten timing
-# assumption that makes a probe agree with a broken implementation.
+# importer's own 20-second renewals.
 lease_field()
 {
 	python3 - "$1" "$2" <<'PY' 2>/dev/null
@@ -266,30 +264,17 @@ if [ -z "${T1}" ]; then
 	bad "no lease object at ${UP_KEY}"
 else
 	ok "the lease exists, updated_at=${T1}"
-	# Decisive, and cheap: vb renews this same key at ttl/3, so a timestamp
-	# that moved does not by itself say the export moved it.
+	# Decisive, and cheap: vb renews this same key too, so a timestamp that
+	# moved does not by itself say the export moved it.
 	want "and it was written by the export, not the import" \
 		"$(lease_field "${UP_KEY}" importer_id)" "export:${EXP_B}"
-	# renew_s is what the upstream turns into its grace period (3x it), and it
-	# must describe the protection wanted rather than how often this node writes.
-	# The two differ here: E writes every 20 s but needs A held until E's own
-	# promise to its readers runs out, ttl/3 = 1200 s at the default 3600 s TTL.
-	#
-	# Reporting the write rate is not a cosmetic error. E and any importer of E
-	# write this same key and the object keeps only the last writer, and E writes
-	# 60x more often -- so a cadence here would set A's grace from E's rate and
-	# then apply it to an importer that speaks every 1200 s. Losing E would make
-	# A's snapshot STALE within a minute, which the pending-delete poller acts on
-	# unattended, under a reader that is still there. Asserted on the number
-	# because the failure it guards needs A, B and C up at once plus a wait past
-	# the grace period, and this is the same fact one GET earlier.
+	# Derived exports and importers use the same fixed cadence now that export
+	# lifetime is independent of a deadline.
 	RS="$(lease_field "${UP_KEY}" renew_s)"
-	if [ "${RS:-0}" -ge 1200 ] 2>/dev/null; then
-		ok "and asks for protection to E's own deadline, not its write rate "\
-"(renew_s=${RS} => grace ${RS}x3 s)"
+	if [ "${RS:-0}" = 20 ] 2>/dev/null; then
+		ok "and reports the fixed lease cadence (renew_s=${RS})"
 	else
-		bad "renew_s=${RS:-<none>}: E is asking A for a grace period of "\
-"$(( ${RS:-0} * 3 ))s, but an importer of E renews only every 1200s"
+		bad "renew_s=${RS:-<none>}, expected 20"
 	fi
 	# The renew interval is the floor, 20 s. Wait past one tick.
 	info "waiting for the next renewal (interval is the 20 s floor)"

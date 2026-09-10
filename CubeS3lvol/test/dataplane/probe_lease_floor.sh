@@ -1,21 +1,10 @@
 #!/usr/bin/env bash
-# Lease-floor probe: does importing a short-TTL export still renew every
-# second, and does the lease object appear immediately?
+# Lease cadence probe: does a ref import renew at the fixed cadence, and does
+# the lease object appear immediately?
 #
-# Two things that never show up at a normal TTL:
-#
-#   1. After importing an export whose TTL has a few seconds left (or has
-#      already expired), what is the renew interval? Before the change it
-#      was max(1, remaining/3) -- collapsing to 1 second, with renew_s:1
-#      written into the lease, from which the source computes a 3-second
-#      grace. Three seconds is the scale of one slow PUT, and after the
-#      source marks STALE it deletes the snapshot unattended.
-#   2. How soon after import does the lease object appear? The poller waits
-#      one period before the first tick, so raising the interval from 1 s
-#      to 20 s would also stretch that empty window to 20 s -- and while it
-#      is empty, lease_updated_at is 0, which for an already-expired
-#      lease-aware export is also STALE. Raising the floor therefore has to
-#      write the first lease immediately; this checks that it does.
+# ttl_sec is deliberately supplied and then waited out: it is a compatibility
+# field and must affect neither export validity nor the 20-second lease cadence.
+# The first lease must still be written immediately rather than after one tick.
 #
 # One lvstore is not enough: importing into the same lvstore degrades to a
 # local clone and never takes the esnap path. Two are used (unload after
@@ -38,9 +27,7 @@ RPC_SOCK=/tmp/please.sock
 TGT_LOG=/tmp/please_target.log
 WORKDIR="$(mktemp -d /tmp/please.XXXXXX)"
 
-# Short enough that remaining/3 lands well under the floor, so the floor is what
-# decides. Not zero: an expired export is the other case and is checked separately
-# below by waiting the TTL out before importing.
+# A short deprecated value makes accidental TTL behavior easy to detect.
 SHORT_TTL=6
 
 TGT_PID=""
@@ -131,10 +118,9 @@ sleep 2
 rpc rcow_create_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":4,"wal_bdev":"dst_wal0","journal_size_mb":64,"wal_size_mb":128,"force":true}' \
 	"${DST_LVS}" "${BK}")" >/dev/null || { echo "create dst failed"; exit 1; }
 
-# Waited out deliberately: this is the case that used to derive remaining = 0 and
-# therefore a one-second renew. Nothing refuses an expired export at import.
+# Wait it out deliberately: the export must remain importable.
 echo
-info "[2] letting the TTL lapse, then importing the expired export"
+info "[2] waiting past ttl_sec, then importing the still-valid export"
 sleep "$((SHORT_TTL + 2))"
 
 MARK="$(wc -l <"${TGT_LOG}")"
@@ -145,7 +131,7 @@ INTERVAL="$(tail -n "+${MARK}" "${TGT_LOG}" \
 	| grep -aoE 'renewing [0-9]+ lease\(s\) every [0-9]+ second' \
 	| grep -aoE 'every [0-9]+' | grep -aoE '[0-9]+' | head -1)"
 info "renew interval reported: ${INTERVAL:-<none>} s"
-want "an expired export renews at the floor, not every second" "${INTERVAL:-0}" "20"
+want "a ref export renews at the fixed cadence" "${INTERVAL:-0}" "20"
 
 # The lease has to exist now, not one period from now. Checked at 5 s: comfortably
 # inside the 20 s period, so a pass means it was written at start rather than by
@@ -191,7 +177,7 @@ fi
 echo
 echo "===== SUMMARY"
 if [ "${FAILED}" = "0" ]; then
-	echo "  importing an expired export no longer renews every second;"
+	echo "  importing after the deprecated ttl_sec still renews every 20 seconds;"
 	echo "  the lease is written at import."
 else
 	echo "  ${FAILED} failure(s) -- see [FAIL] above"
