@@ -41,7 +41,8 @@ func (l *realTimeWeightedAverageScore) Weight() float64 {
 	return l.weight
 }
 func (l *realTimeWeightedAverageScore) Disable() bool {
-	return config.GetConfig().Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage.Disable
+	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage
+	return cfg.Disable || cfg.Weight == 0
 }
 
 func (l *realTimeWeightedAverageScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList,

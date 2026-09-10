@@ -39,7 +39,8 @@ func (l *multiFactorWeightedAverageScore) Weight() float64 {
 }
 
 func (l *multiFactorWeightedAverageScore) Disable() bool {
-	return config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage.Disable
+	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage
+	return cfg.Disable || cfg.Weight == 0
 }
 
 func (l *multiFactorWeightedAverageScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList,

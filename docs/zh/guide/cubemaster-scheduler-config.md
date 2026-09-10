@@ -79,11 +79,29 @@ scheduler:
 | `metric_update_timeout` | 节点资源指标多久未更新后视为不可调度。应明显大于 Cubelet 上报周期。 |
 | `local_metric_update_timeout` | 预留的本地指标超时字段。当前 prefilter 对全局指标和本地指标的新鲜度检查都使用 `metric_update_timeout`。 |
 | `filter.enable_filters` | 启用调度过滤器。常见过滤器包括 CPU、内存、模板本地性和实时创建并发。 |
-| `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`；启用时必须同时配置 `score.plugin_conf.real_time_weighted_average`，否则 CubeMaster 可能在 scheduler 启动阶段 panic。 |
-| `score.resource_weights` | 控制 MVM 数、创建并发、CPU/内存 quota 使用率等因子的权重。权重越高，该因子对分数影响越大；对应因子也必须列在 `score.plugin_conf.real_time_weighted_average.enable_weight_factors` 中。 |
+| `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`；启用时必须同时配置 `score.plugin_conf.real_time_weighted_average`，否则 CubeMaster 可能在 scheduler 启动阶段 panic。当设置了 `scheduler.profile` 时，最终生效列表中的每个已注册评分器都必须有对应 `plugin_conf`（因子型评分器还需至少一个正的 `resource_weights`）；空 Profile 保持升级前加载兼容。 |
+| `score.resource_weights` | 控制 MVM 数、创建并发、CPU/内存 quota 使用率等因子的权重。权重越高，该因子对分数影响越大；对应因子也必须列在 `score.plugin_conf.real_time_weighted_average.enable_weight_factors` 中。Profile 展开时同名键覆盖基础权重。 |
+| `score.plugin_conf.binpack_score` | 可选的插件型评分器，偏好更满的节点。`weight: 0` 禁用 Select；负权重在任意 Profile 状态下都会在配置加载阶段被拒绝。 |
+| `profile` / `profiles` | 可选的运行时 Profile 覆盖层。空 `profile` 不改变现有 Filter/Score。内置名：`balanced_spread`、`template_locality_first`、`binpack_utilization`。用户同名 key 完全覆盖内置。运行时 Profile 是选择器覆盖，不是离线模拟器模型。详见 [Scheduler Profile 配置示例](../dev/scheduler-profile-config-example.md)。 |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | 全局或按实例类型限制单节点 MVM 数。Cubelet 上报的 `max_mvm_num` 也会参与实际上限计算。 |
 | `disk_usage_max_percent` | `disk` filter 和 backoff 路径使用的磁盘水位阈值，用于避免继续调度到快满的机器。 |
 | `affinityconf` / `node_affinity_selector_allowed_keys` | 控制按 cluster label、zone、CPU 类型、机型等做亲和或约束选择。 |
+
+## 运行时 Profile 与 binpack_score
+
+CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
+空 Profile 在生效配置上按字节保持现有 Filter/Score。内置名
+（`balanced_spread`、`template_locality_first`、`binpack_utilization`）
+会展开到选择器列表，并在对应 `plugin_conf` 缺失时注入自包含默认值。
+`scheduler.profiles` 下与内置同名的用户条目会完全覆盖内置。
+
+`binpack_score` 是偏好更满节点的薄 Score 插件，通过在 `enable_scorers`
+中列出（直接或经 Profile）启用。插件参数仍放在
+`scheduler.score.plugin_conf.binpack_score`。
+
+运行时 Profile **不是**离线模拟器 / `schedulerbench` 模型，即使预设名字符串相同。
+可复制 YAML 与完整契约见
+[Scheduler Profile 配置示例](../dev/scheduler-profile-config-example.md)。
 
 ## 节点元数据如何影响调度
 
