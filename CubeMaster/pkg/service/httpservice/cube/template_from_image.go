@@ -426,12 +426,16 @@ func handleRootfsArtifactAction(c *gin.Context) {
 // Do NOT guess another address from local interfaces here: the deployment must
 // decide which address other components should use.
 func requestBaseURL(r *http.Request) string {
-	configured := ""
-	if cfg := config.GetConfig(); cfg != nil {
-		configured = strings.TrimSpace(cfg.MasterAddr())
+	if addr := strings.TrimSpace(os.Getenv(config.EnvMasterAddr)); addr != "" {
+		return templatecenter.NormalizeBaseURL(addr)
 	}
-	if configured != "" {
-		return templatecenter.NormalizeBaseURL(configured)
+	if cfg := config.GetConfig(); cfg != nil && cfg.Common != nil {
+		if addr := strings.TrimSpace(cfg.Common.MasterAddr); addr != "" {
+			if rewritten := templatecenter.RewriteLoopbackBaseURLWithSharedNodeIP(addr); rewritten != "" {
+				return rewritten
+			}
+			return templatecenter.NormalizeBaseURL(addr)
+		}
 	}
 	if r == nil {
 		return ""
@@ -441,7 +445,11 @@ func requestBaseURL(r *http.Request) string {
 		scheme = "https"
 	}
 	if host := strings.TrimSpace(r.Host); host != "" {
-		return scheme + "://" + host
+		raw := scheme + "://" + host
+		if rewritten := templatecenter.RewriteLoopbackBaseURLWithSharedNodeIP(raw); rewritten != "" {
+			return rewritten
+		}
+		return raw
 	}
 	return ""
 }

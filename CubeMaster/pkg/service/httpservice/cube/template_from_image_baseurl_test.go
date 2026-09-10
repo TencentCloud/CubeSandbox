@@ -64,6 +64,7 @@ func TestRequestBaseURLNilRequestDoesNotPanic(t *testing.T) {
 
 func TestRequestBaseURLKeepsConfiguredLoopbackAddr(t *testing.T) {
 	t.Setenv("CUBE_MASTER_ADDR", "http://127.0.0.1:8089")
+	t.Setenv("CUBE_SANDBOX_NODE_IP", "10.0.0.8")
 	r := httptest.NewRequest(http.MethodPost, "/cube/template/from-image", nil)
 	r.Host = "9.135.79.34:8089"
 	if got, want := requestBaseURL(r), "http://127.0.0.1:8089"; got != want {
@@ -71,7 +72,16 @@ func TestRequestBaseURLKeepsConfiguredLoopbackAddr(t *testing.T) {
 	}
 }
 
-func TestRequestBaseURLFallsBackToRequestHostWhenUnset(t *testing.T) {
+func TestRequestBaseURLUsesSharedNodeIPForLoopbackRequestHostWhenUnset(t *testing.T) {
+	t.Setenv("CUBE_SANDBOX_NODE_IP", "10.0.0.8")
+	r := httptest.NewRequest(http.MethodPost, "/cube/template/from-image", nil)
+	r.Host = "127.0.0.1:8089"
+	if got, want := requestBaseURL(r), "http://10.0.0.8:8089"; got != want {
+		t.Fatalf("requestBaseURL() = %q, want %q", got, want)
+	}
+}
+
+func TestRequestBaseURLFallsBackToRequestHostWhenSharedNodeIPUnset(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/cube/template/from-image", nil)
 	r.Host = "0.0.0.0:8089"
 	if got, want := requestBaseURL(r), "http://0.0.0.0:8089"; got != want {

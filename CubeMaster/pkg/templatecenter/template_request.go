@@ -7,6 +7,7 @@ package templatecenter
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"sort"
@@ -245,6 +246,8 @@ func HostReachableByOtherNodes(host string) bool {
 	return true
 }
 
+const sharedEnvNodeIP = "CUBE_SANDBOX_NODE_IP"
+
 // ExternallyUsableBaseURL reports whether raw is a base URL other nodes can
 // dial: non-empty, parseable, and not wildcard/loopback.
 func ExternallyUsableBaseURL(raw string) bool {
@@ -259,6 +262,53 @@ func ExternallyUsableBaseURL(raw string) bool {
 	return HostReachableByOtherNodes(u.Host)
 }
 
+// RewriteLoopbackBaseURLWithSharedNodeIP rewrites a loopback/wildcard base URL
+// (127.0.0.1 / localhost / 0.0.0.0 / ::) to the routable node IP already
+// exported in CUBE_SANDBOX_NODE_IP, preserving scheme and port.
+//
+// Returns "" when raw does not need rewriting, the node IP env is absent, or
+// the env itself is unusable.
+func RewriteLoopbackBaseURLWithSharedNodeIP(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	nodeIP := strings.TrimSpace(os.Getenv(sharedEnvNodeIP))
+	if nodeIP == "" {
+		return ""
+	}
+	parsedNodeIP := net.ParseIP(nodeIP)
+	if parsedNodeIP == nil || parsedNodeIP.IsLoopback() || parsedNodeIP.IsUnspecified() {
+		return ""
+	}
+	u, err := url.Parse(NormalizeBaseURL(raw))
+	if err != nil {
+		return ""
+	}
+	host := strings.TrimSpace(strings.ToLower(u.Hostname()))
+	if !baseURLHostNeedsSharedNodeIP(host) {
+		return ""
+	}
+	if port := strings.TrimSpace(u.Port()); port != "" {
+		u.Host = net.JoinHostPort(nodeIP, port)
+	} else {
+		u.Host = nodeIP
+	}
+	return strings.TrimRight(u.String(), "/")
+}
+
+func baseURLHostNeedsSharedNodeIP(host string) bool {
+	switch host {
+	case "", "localhost", "localhost.localdomain", "ip6-localhost":
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsUnspecified()
+}
+
 // effectiveArtifactDownloadBaseURL picks the CubeMaster base URL embedded into
 // Cubelet-facing download URLs. Every candidate must be externally usable:
 // one-click historically ships CUBE_MASTER_ADDR=http://127.0.0.1:8089, and old
@@ -268,32 +318,38 @@ func ExternallyUsableBaseURL(raw string) bool {
 // warning so resolution falls through to the next source (or "" , which
 // callers already treat as "not ready for distribution").
 func effectiveArtifactDownloadBaseURL(fallback string, artifact *models.RootfsArtifact) string {
-	if cfg := config.GetConfig(); cfg != nil {
-		if addr := strings.TrimSpace(cfg.MasterAddr()); addr != "" {
+	if addr := strings.TrimSpace(os.Getenv(config.EnvMasterAddr)); addr != "" {
+		return NormalizeBaseURL(addr)
+	}
+	if cfg := config.GetConfig(); cfg != nil && cfg.Common != nil {
+		if addr := strings.TrimSpace(cfg.Common.MasterAddr); addr != "" {
+			if rewritten := RewriteLoopbackBaseURLWithSharedNodeIP(addr); rewritten != "" {
+				return rewritten
+			}
 			if ExternallyUsableBaseURL(addr) {
 				return NormalizeBaseURL(addr)
 			}
-			log.G(context.Background()).Warnf("configured master addr %q is wildcard/loopback; not usable as the cubelet-facing download base URL, falling through", addr)
+			log.G(context.Background()).Warnf("configured master addr %q is wildcard/loopback and %s is unavailable; falling through", addr, sharedEnvNodeIP)
 		}
-	}
-	if addr := strings.TrimSpace(os.Getenv(config.EnvMasterAddr)); addr != "" {
-		if ExternallyUsableBaseURL(addr) {
-			return NormalizeBaseURL(addr)
-		}
-		log.G(context.Background()).Warnf("%s=%q is wildcard/loopback; not usable as the cubelet-facing download base URL, falling through", config.EnvMasterAddr, addr)
 	}
 	if trimmed := strings.TrimSpace(fallback); trimmed != "" {
+		if rewritten := RewriteLoopbackBaseURLWithSharedNodeIP(trimmed); rewritten != "" {
+			return rewritten
+		}
 		if ExternallyUsableBaseURL(trimmed) {
 			return NormalizeBaseURL(trimmed)
 		}
-		log.G(context.Background()).Warnf("request-derived download base URL %q is wildcard/loopback; falling through to the artifact row", trimmed)
+		log.G(context.Background()).Warnf("request-derived download base URL %q is wildcard/loopback and %s is unavailable; falling through to the artifact row", trimmed, sharedEnvNodeIP)
 	}
 	if artifact != nil {
 		if trimmed := strings.TrimSpace(artifact.MasterNodeIP); trimmed != "" {
+			if rewritten := RewriteLoopbackBaseURLWithSharedNodeIP(trimmed); rewritten != "" {
+				return rewritten
+			}
 			if ExternallyUsableBaseURL(trimmed) {
 				return NormalizeBaseURL(trimmed)
 			}
-			log.G(context.Background()).Warnf("artifact %s master_node_ip %q is wildcard/loopback; no usable download base URL", artifact.ArtifactID, trimmed)
+			log.G(context.Background()).Warnf("artifact %s master_node_ip %q is wildcard/loopback and %s is unavailable; no usable download base URL", artifact.ArtifactID, trimmed, sharedEnvNodeIP)
 		}
 	}
 	return ""

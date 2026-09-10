@@ -22,6 +22,14 @@ func TestEffectiveArtifactDownloadBaseURLFallsBackToArtifactRow(t *testing.T) {
 	}
 }
 
+func TestEffectiveArtifactDownloadBaseURLRewritesLoopbackArtifactRowWithSharedNodeIP(t *testing.T) {
+	t.Setenv("CUBE_SANDBOX_NODE_IP", "10.0.0.8")
+	artifact := &models.RootfsArtifact{MasterNodeIP: "http://127.0.0.1:8089"}
+	if got, want := effectiveArtifactDownloadBaseURL("", artifact), "http://10.0.0.8:8089"; got != want {
+		t.Fatalf("effectiveArtifactDownloadBaseURL() = %q, want %q", got, want)
+	}
+}
+
 func TestCloneEgressRuleDeepCopiesPort(t *testing.T) {
 	port := 8443
 	rule := &types.EgressRule{
