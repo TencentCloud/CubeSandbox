@@ -319,7 +319,13 @@ func baseURLHostNeedsSharedNodeIP(host string) bool {
 // callers already treat as "not ready for distribution").
 func effectiveArtifactDownloadBaseURL(fallback string, artifact *models.RootfsArtifact) string {
 	if addr := strings.TrimSpace(os.Getenv(config.EnvMasterAddr)); addr != "" {
-		return NormalizeBaseURL(addr)
+		if rewritten := RewriteLoopbackBaseURLWithSharedNodeIP(addr); rewritten != "" {
+			return rewritten
+		}
+		if ExternallyUsableBaseURL(addr) {
+			return NormalizeBaseURL(addr)
+		}
+		log.G(context.Background()).Warnf("environment %s=%q is wildcard/loopback and %s is unavailable; falling through", config.EnvMasterAddr, addr, sharedEnvNodeIP)
 	}
 	if cfg := config.GetConfig(); cfg != nil && cfg.Common != nil {
 		if addr := strings.TrimSpace(cfg.Common.MasterAddr); addr != "" {

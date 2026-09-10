@@ -421,20 +421,31 @@ func handleRootfsArtifactAction(c *gin.Context) {
 // requestBaseURL returns the base URL other components must use to reach this
 // CubeMaster.
 //
-// The source is intentionally simple and explicit: prefer CUBE_MASTER_ADDR (or
-// common.master_addr), otherwise fall back to the current request's Host/addr.
-// Do NOT guess another address from local interfaces here: the deployment must
-// decide which address other components should use.
+// Prefer CUBE_MASTER_ADDR (or common.master_addr), otherwise fall back to the
+// current request's Host. Every candidate uses the same node-facing rule: rewrite
+// wildcard/loopback through CUBE_SANDBOX_NODE_IP when possible, otherwise skip it
+// so Cubelets are never asked to download from 127.0.0.1 or 0.0.0.0.
 func requestBaseURL(r *http.Request) string {
+	resolve := func(raw string) string {
+		if rewritten := templatecenter.RewriteLoopbackBaseURLWithSharedNodeIP(raw); rewritten != "" {
+			return rewritten
+		}
+		if templatecenter.ExternallyUsableBaseURL(raw) {
+			return templatecenter.NormalizeBaseURL(raw)
+		}
+		return ""
+	}
+
 	if addr := strings.TrimSpace(os.Getenv(config.EnvMasterAddr)); addr != "" {
-		return templatecenter.NormalizeBaseURL(addr)
+		if resolved := resolve(addr); resolved != "" {
+			return resolved
+		}
 	}
 	if cfg := config.GetConfig(); cfg != nil && cfg.Common != nil {
 		if addr := strings.TrimSpace(cfg.Common.MasterAddr); addr != "" {
-			if rewritten := templatecenter.RewriteLoopbackBaseURLWithSharedNodeIP(addr); rewritten != "" {
-				return rewritten
+			if resolved := resolve(addr); resolved != "" {
+				return resolved
 			}
-			return templatecenter.NormalizeBaseURL(addr)
 		}
 	}
 	if r == nil {
@@ -445,11 +456,7 @@ func requestBaseURL(r *http.Request) string {
 		scheme = "https"
 	}
 	if host := strings.TrimSpace(r.Host); host != "" {
-		raw := scheme + "://" + host
-		if rewritten := templatecenter.RewriteLoopbackBaseURLWithSharedNodeIP(raw); rewritten != "" {
-			return rewritten
-		}
-		return raw
+		return resolve(scheme + "://" + host)
 	}
 	return ""
 }
