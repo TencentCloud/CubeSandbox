@@ -164,7 +164,10 @@ func externalHTTPScoreConfigFrom(global *config.Config) *config.ExternalHTTPScor
 
 func (l *externalHTTPScore) Disable() bool {
 	cfg := l.pluginConfig()
-	return cfg == nil || cfg.Disable
+	// weight defaults to 0 when omitted; treat non-positive weight like disable
+	// so Select does not pay for a synchronous HTTP round trip that cannot
+	// contribute to runScoreFilter's weighted average.
+	return cfg == nil || cfg.Disable || cfg.Weight <= 0
 }
 
 func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList, err error) {
@@ -186,7 +189,7 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 	}
 
 	cfg := l.pluginConfig()
-	if cfg == nil || l.Disable() || cfg.Endpoint == "" {
+	if cfg == nil || l.Disable() || cfg.Weight <= 0 || cfg.Endpoint == "" {
 		return nil, nil
 	}
 
@@ -296,10 +299,8 @@ func classifyExternalHTTPScoreURLError(err error, op string) (string, bool) {
 		return fmt.Sprintf("http_%s_failed", nextOp), true
 	}
 	// Recurse into nested *url.Error without ever interpolating Err text.
-	if cat, ok := classifyExternalHTTPScoreURLError(urlErr.Err, nextOp); ok {
-		return cat, true
-	}
-	return httpFailureCategory(nextOp, urlErr.Err), true
+	// nextOp is non-empty above, so the recursive call always classifies.
+	return classifyExternalHTTPScoreURLError(urlErr.Err, nextOp)
 }
 
 func httpFailureCategory(op string, cause error) string {
@@ -365,11 +366,10 @@ func filterExternalHTTPScoreResponse(ctx context.Context, scores map[string]*flo
 		}
 	}
 	if ignored > 0 {
-		if log.IsDebug() {
-			log.G(ctx).Debugf("external_http_score ignored %d unknown score keys", ignored)
-		} else {
-			log.G(ctx).Warnf("external_http_score ignored %d unknown score keys", ignored)
-		}
+		// Extra keys are an expected, documented condition (sidecar may echo a
+		// wider node table than this request's candidate set). Log at Debug only
+		// to avoid Warn spam on every scheduling attempt.
+		log.G(ctx).Debugf("external_http_score ignored %d unknown score keys", ignored)
 	}
 	return out, nil
 }

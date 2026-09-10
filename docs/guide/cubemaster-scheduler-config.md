@@ -302,7 +302,7 @@ scheduler:
 
 | Field | Meaning |
 |-------|---------|
-| `weight` | Relative weight in `runScoreFilter`'s weighted average. |
+| `weight` | Relative weight in `runScoreFilter`'s weighted average (`Σ(score × weight) / Σ(weight)`). Returned scores must use the same **`[0, 100]`** scale as built-in scorers; a sidecar that returns normalised `0.0–1.0` values contributes ~1% of a built-in scorer at equal weight. Omitting `weight` (or any value `<= 0`) skips the HTTP call, same as `disable: true`. |
 | `endpoint` | Sidecar URL. Empty endpoint skips the plugin (returns no scores). |
 | `timeout` | Per-request HTTP timeout. Zero/omitted uses the default **200ms**. |
 | `mode` | Optional operator-defined mode string included in the JSON request. |

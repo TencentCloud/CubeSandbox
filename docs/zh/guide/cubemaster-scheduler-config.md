@@ -300,7 +300,7 @@ scheduler:
 
 | 字段 | 含义 |
 |------|------|
-| `weight` | 在 `runScoreFilter` 加权平均中的相对权重。 |
+| `weight` | 在 `runScoreFilter` 加权平均（`Σ(score × weight) / Σ(weight)`）中的相对权重。返回分数必须与内置 scorer 使用相同的 **`[0, 100]`** 量纲；若 sidecar 返回归一化的 `0.0–1.0`，在相同 weight 下贡献大约只有内置 scorer 的 1%。省略 `weight`（或任意 `<= 0`）会跳过 HTTP 调用，效果与 `disable: true` 相同。 |
 | `endpoint` | Sidecar URL。为空则跳过该插件（不返回分数）。 |
 | `timeout` | 单次 HTTP 超时。为 0/省略时使用默认 **200ms**。 |
 | `mode` | 可选的运营自定义字符串，写入请求 JSON。 |

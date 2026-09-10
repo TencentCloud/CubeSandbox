@@ -496,6 +496,36 @@ func TestExternalHTTPScoreSkipsWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestExternalHTTPScoreSkipsWhenWeightNonPositive(t *testing.T) {
+	var contacted atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contacted.Store(true)
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	for _, weight := range []float64{0, -1} {
+		scorer := newExternalHTTPScoreWithConfig(&config.ExternalHTTPScore{
+			Weight:   weight,
+			Endpoint: server.URL,
+			Timeout:  time.Second,
+		})
+		if !scorer.Disable() {
+			t.Fatalf("Disable() = false for weight %v, want true", weight)
+		}
+		got, err := scorer.Select(externalHTTPScoreTestCtx())
+		if err != nil {
+			t.Fatalf("weight %v: Select() error = %v, want nil", weight, err)
+		}
+		if got != nil {
+			t.Fatalf("weight %v: Select() = %+v, want nil scores", weight, got)
+		}
+	}
+	if contacted.Load() {
+		t.Fatal("non-positive weight external HTTP scorer contacted endpoint")
+	}
+}
+
 func TestExternalHTTPScoreRejectsOversizedResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -554,14 +584,11 @@ func TestExternalHTTPScoreRegistryMapsToNewExternalHTTPScore(t *testing.T) {
 	}
 }
 
-func TestExternalHTTPScoreRegistryFactoryPanicsWhenExternalPluginMissing(t *testing.T) {
-	// Ideal unit-test state is GetConfig()==nil. This package's asyncscore_test
-	// init() always loads conf.yaml, so the global is usually non-nil here.
-	// Require only that plugin_conf.external_http_score stays absent so the
-	// production constructor panic can run without mutating globals.
-	if externalHTTPScoreConfigFrom(config.GetConfig()) != nil {
-		t.Fatal("global config already defines external_http_score; refusing to mutate it")
-	}
+func TestExternalHTTPScoreRegistryFactorySignature(t *testing.T) {
+	// Signature / Implements(Selector) coverage only. Panic-on-missing-plugin
+	// across nil config levels is covered by
+	// TestNewExternalHTTPScoreFromConfigPanicsWhenPluginMissing without
+	// coupling to process-global conf.yaml / CUBE_MASTER_CONFIG_PATH.
 	ctor, ok := scores[externalHTTPScoreName]
 	if !ok || ctor == nil {
 		t.Fatal("external_http_score missing from package registry")
@@ -578,18 +605,6 @@ func TestExternalHTTPScoreRegistryFactoryPanicsWhenExternalPluginMissing(t *test
 	if !ft.Out(0).Implements(selType) {
 		t.Fatalf("registry factory returns %s, which does not implement Selector", ft.Out(0))
 	}
-
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("want panic from invoking registered factory when external_http_score plugin is missing")
-		}
-		if !strings.Contains(fmt.Sprint(r), "ExternalHTTPScore is nil") {
-			t.Fatalf("panic = %v, want ExternalHTTPScore is nil", r)
-		}
-	}()
-	// Same mechanics as NewSelector: reflect.ValueOf(scores[name]).Call(nil).
-	_ = fn.Call(nil)
 }
 
 func TestNewExternalHTTPScoreFromConfigPanicsWhenPluginMissing(t *testing.T) {
