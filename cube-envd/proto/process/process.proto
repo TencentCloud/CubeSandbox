@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 syntax = "proto3";
 
 // 定义进程管理 RPC 的 protobuf 包。
