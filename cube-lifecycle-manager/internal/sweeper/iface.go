@@ -21,12 +21,14 @@ type stateStore interface {
 	// WriteState / ClearStateNotify are the notify-emitting equivalents.
 	// See internal/resumer/iface.go for the same contract.
 	WriteState(ctx context.Context, sandboxID, state string, ttl time.Duration) error
+	WriteStateCAS(ctx context.Context, sandboxID, expected, state string, ttl time.Duration) (bool, error)
 	ClearStateNotify(ctx context.Context, sandboxID string) error
 }
 
 // pauseKiller is the subset of cubemasterclient.Client that the sweeper needs.
 // Pause + Kill are the two terminal transitions the sweeper can trigger.
 type pauseKiller interface {
+	SandboxState(ctx context.Context, sandboxID, instanceType string) (string, error)
 	Pause(ctx context.Context, sandboxID, instanceType string) error
 	Kill(ctx context.Context, sandboxID, instanceType, reason string) error
 }

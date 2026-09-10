@@ -65,6 +65,11 @@ type Options struct {
 // its own goroutine; Run returns when ctx is cancelled.
 type Sweeper struct {
 	o Options
+	// Owned by the sweep goroutine. Failed repairs survive individual action
+	// deadlines and are retried before the paused fast path on later ticks.
+	pending map[string]struct{}
+	// Notification retries never gate lifecycle decisions or extend activity.
+	notifications map[string]struct{}
 	// metrics — exposed for testing rather than via Prometheus for now.
 	pauseTriggered atomic.Int64
 	pauseFailed    atomic.Int64
@@ -79,7 +84,7 @@ func New(o Options) *Sweeper {
 	if o.StartedAt.IsZero() {
 		o.StartedAt = o.Now()
 	}
-	return &Sweeper{o: o}
+	return &Sweeper{o: o, pending: make(map[string]struct{}), notifications: make(map[string]struct{})}
 }
 
 // Run blocks until ctx is cancelled, sweeping every Interval.
@@ -104,6 +109,45 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 	if s.o.Leader != nil && !s.o.Leader.IsLeader() {
 		return
 	}
+	// Bound the whole retry phase, not just each RPC, so a slow fleet cannot
+	// delay idle decisions in proportion to the number of pending sandboxes.
+	// Separate budgets prevent either queue from starving the other, while
+	// preserving the time previously allowed for an individual attempt.
+	retryCtx, retryCancel := context.WithTimeout(ctx, advisoryPushTimeout)
+	remaining := retryBatchLimit
+	for sid := range s.notifications {
+		if retryCtx.Err() != nil || remaining == 0 {
+			break
+		}
+		if _, repairing := s.pending[sid]; repairing {
+			continue
+		}
+		if ctx.Err() != nil || (s.o.Leader != nil && !s.o.Leader.IsLeader()) {
+			retryCancel()
+			return
+		}
+		remaining--
+		if err := s.retryNotification(retryCtx, sid); err != nil {
+			s.o.Log.Warn("state notification pending", zap.String("sandbox_id", sid), zap.Error(err))
+		}
+	}
+	retryCancel()
+	retryCtx, retryCancel = context.WithTimeout(ctx, reconciliationTimeout)
+	remaining = retryBatchLimit
+	for sid := range s.pending {
+		if retryCtx.Err() != nil || remaining == 0 {
+			break
+		}
+		if ctx.Err() != nil || (s.o.Leader != nil && !s.o.Leader.IsLeader()) {
+			retryCancel()
+			return
+		}
+		remaining--
+		if err := s.reconcilePause(retryCtx, sid); err != nil {
+			s.o.Log.Warn("pause reconciliation pending", zap.String("sandbox_id", sid), zap.Error(err))
+		}
+	}
+	retryCancel()
 
 	now := s.o.Now()
 	nowMs := now.UnixMilli()
@@ -122,6 +166,9 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 	withinWarmup := now.Sub(s.o.StartedAt) < s.o.BootstrapWarmup
 
 	for _, e := range s.o.Registry.Snapshot() {
+		if _, pending := s.pending[e.Meta.SandboxID]; pending {
+			continue
+		}
 		// Bootstrap entries during warmup → skip. `FirstSeenAt <= StartedAt`
 		// (we backdate FirstSeenAt during bootstrap, so equality means
 		// "loaded from HGETALL", inequality means "new event").
@@ -217,8 +264,10 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 }
 
 const (
-	advisoryPushTimeout  = time.Second
-	terminalWriteReserve = 2 * time.Second
+	advisoryPushTimeout   = time.Second
+	reconciliationTimeout = 3 * time.Second
+	retryBatchLimit       = 16
+	terminalWriteReserve  = 2 * time.Second
 )
 
 // rpcContext carves the CubeMaster call out of the action budget, holding
@@ -279,6 +328,9 @@ func (s *Sweeper) tryPause(ctx context.Context, e registry.Entry) error {
 	if pauseErr != nil {
 		var apiErr *cubemasterclient.APIError
 		switch {
+		case errors.As(pauseErr, &apiErr) && apiErr.IsPauseSuperseded():
+			s.pending[sid] = struct{}{}
+			return s.reconcileSupersededPause(ctx, sid)
 		case errors.As(pauseErr, &apiErr) && apiErr.IsNotFound():
 			// Sandbox doesn't exist on CubeMaster anymore. Clean up local
 			// state and stop chasing it.
@@ -318,20 +370,128 @@ func (s *Sweeper) tryPause(ctx context.Context, e registry.Entry) error {
 		}
 	}
 
-	if err := s.o.Redis.WriteState(ctx, sid, "paused", s.o.StateLockTTL); err != nil {
-		s.o.Log.Warn("write paused state failed",
-			zap.String("sandbox_id", sid), zap.Error(err))
-	}
+	s.pending[sid] = struct{}{}
 	s.o.Registry.SetRuntimeState(sid, lifecycle.StatePaused)
+	var pushErr error
 	if err := s.o.ProxyPush.SetState(ctx, sid, "paused"); err != nil {
+		pushErr = err
 		s.o.Log.Warn("push paused state failed",
 			zap.String("sandbox_id", sid), zap.Error(err))
+	}
+	// A resume may complete after the pause RPC but before this bookkeeping.
+	// Finish proxy writes before the CAS so a failed CAS can repair them, and
+	// never overwrite the newer running marker with this stale paused result.
+	updated, err := s.o.Redis.WriteStateCAS(ctx, sid, "pausing", "paused", s.o.StateLockTTL)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return s.reconcileSupersededPause(ctx, sid)
+	}
+	delete(s.pending, sid)
+	if pushErr != nil {
+		s.notifications[sid] = struct{}{}
+	} else {
+		delete(s.notifications, sid)
 	}
 
 	s.pauseTriggered.Add(1)
 	s.o.Log.Info("auto-paused sandbox",
 		zap.String("sandbox_id", sid),
 		zap.Intp("timeout_seconds", e.Meta.TimeoutSeconds))
+	return nil
+}
+
+func (s *Sweeper) reconcileSupersededPause(ctx context.Context, sid string) error {
+	// The pause's action context may already have expired. Bound each repair
+	// independently; retain unresolved state repairs across Redis failures.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reconciliationTimeout)
+	defer cancel()
+	return s.reconcilePause(ctx, sid)
+}
+
+// Scheduled retries inherit the sweep's shared budget; immediate post-RPC
+// repairs use the independent context above when the action has expired.
+func (s *Sweeper) reconcilePause(ctx context.Context, sid string) error {
+	entry := s.o.Registry.Get(sid)
+	if entry == nil {
+		delete(s.pending, sid)
+		return nil
+	}
+	state, _, err := s.o.Redis.GetState(ctx, sid)
+	if err != nil {
+		return err
+	}
+	if state == "" {
+		state, err = s.o.CubeMaster.SandboxState(ctx, sid, entry.Meta.InstanceType)
+		if err != nil {
+			return err
+		}
+		updated, err := s.o.Redis.WriteStateCAS(ctx, sid, "", state, s.o.StateLockTTL)
+		if err != nil {
+			return err
+		}
+		if !updated {
+			return errors.New("lifecycle state changed during reconciliation")
+		}
+	}
+	if state != lifecycle.StateRunning && state != lifecycle.StatePaused {
+		return errors.New("lifecycle transition still in progress")
+	}
+	if state == lifecycle.StateRunning && entry.RuntimeState != lifecycle.StateRunning {
+		s.o.Registry.MergeLastActive(sid, s.o.Now().UnixMilli())
+	}
+	s.o.Registry.SetRuntimeState(sid, state)
+	current, _, err := s.o.Redis.GetState(ctx, sid)
+	if err != nil {
+		return err
+	}
+	if current != state {
+		return errors.New("lifecycle state changed during reconciliation")
+	}
+	delete(s.pending, sid)
+	s.notifications[sid] = struct{}{}
+	return s.retryNotification(ctx, sid)
+}
+
+// Resolve the latest state on every attempt; a queued notification must not
+// replay running after a subsequent pause or extend the Redis ownership TTL.
+func (s *Sweeper) retryNotification(ctx context.Context, sid string) error {
+	ctx, cancel := context.WithTimeout(ctx, advisoryPushTimeout)
+	defer cancel()
+	currentState := func() (string, error) {
+		entry := s.o.Registry.Get(sid)
+		if entry == nil {
+			return "", nil
+		}
+		state, _, err := s.o.Redis.GetState(ctx, sid)
+		if err == nil && state == "" {
+			state = entry.RuntimeState
+		}
+		return state, err
+	}
+	state, err := currentState()
+	if err != nil {
+		return err
+	}
+	if state == "" {
+		if s.o.Registry.Get(sid) != nil {
+			return errors.New("sandbox state not yet known")
+		}
+		delete(s.notifications, sid)
+		return nil
+	}
+	if err := s.o.ProxyPush.SetState(ctx, sid, state); err != nil {
+		return err
+	}
+	current, err := currentState()
+	if err != nil {
+		return err
+	}
+	if current != state {
+		return errors.New("lifecycle state changed during proxy notification")
+	}
+	delete(s.notifications, sid)
 	return nil
 }
 
