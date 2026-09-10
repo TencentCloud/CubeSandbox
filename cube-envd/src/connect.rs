@@ -17,6 +17,8 @@
 //! Binary protobuf codecs (`application/proto`, `application/connect+proto`)
 //! are rejected with `unimplemented` — a declared MVP difference.
 
+pub mod stream;
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::error::{ConnectCode, ConnectError};
