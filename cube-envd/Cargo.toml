@@ -20,6 +20,8 @@ clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
 http = "1"
 http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 libc = "0.2"
 multer = "3"
 nix = { version = "0.30", features = ["fs", "process", "signal", "term", "user"] }

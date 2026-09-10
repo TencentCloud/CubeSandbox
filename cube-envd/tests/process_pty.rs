@@ -186,6 +186,46 @@ async fn pty_normal_exit_reports_exit_status_and_exited() {
     );
 }
 
+// 验证孙进程持有 PTY slave 时，End 仍会在宽限内发出并完成流。
+//
+// PTY 读线程在孙进程持有 slave 期间会阻塞在 read 上且无法被 abort 中断；收尾因此
+// 依赖"宽限超时后置中断标志并封住输出"，而不是等待该线程退出。
+#[cfg(unix)]
+#[tokio::test]
+async fn pty_end_is_published_when_a_grandchild_holds_the_slave() {
+    let app = router();
+    let response = app
+        .oneshot(stream_request(
+            "Start",
+            json!({
+                "process": {
+                    "cmd": "/bin/sh",
+                    "args": ["-c", "sleep 30 & printf done"],
+                    "envs": {}
+                },
+                "pty": {"size": {"cols": 80, "rows": 24}}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        response.into_body().collect(),
+    )
+    .await
+    .expect("PTY End must not wait for the grandchild holding the slave")
+    .unwrap()
+    .to_bytes();
+    let frames = frames(&bytes);
+    assert!(
+        frames.iter().any(|frame| frame["event"]["end"].is_object()),
+        "PTY stream must end with an end event: {frames:?}"
+    );
+    assert_eq!(frames.last(), Some(&json!({"end": {}})));
+}
+
 // 构造带认证和 Connect 协议头的单帧流式进程 RPC 请求。
 fn stream_request(method: &str, payload: Value) -> Request<Body> {
     Request::post(format!("/process.Process/{method}"))
