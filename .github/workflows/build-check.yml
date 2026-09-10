@@ -224,6 +224,31 @@ jobs:
             fi
           done <<< "${EXPECTED_BINS}"
 
+      # cube-envd 的 protobuf 绑定在构建时由 build.rs 生成并写回 src/generated/，
+      # 而生成物同时纳入版本控制（与 CubeShim/agent 的同类 crate 一致），因此存在
+      # "提交的生成物"与"生成器输出"两个事实源。构建只在内容不同时写回，所以构建后
+      # 工作区若出现改动，就说明提交的生成物已经过期：要么改了 .proto 没重新生成，
+      # 要么手工改过生成文件，要么 prost/pbjson/protoc 版本变化改变了输出。
+      - name: Verify generated protobuf code is up to date
+        if: matrix.component == 'cube-envd'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- cube-envd/src/generated; then
+            echo "cube-envd/src/generated matches the generator output"
+            exit 0
+          fi
+
+          echo "::error::cube-envd/src/generated is out of date: the build regenerated it"
+          git --no-pager diff --stat -- cube-envd/src/generated
+          {
+            echo "### cube-envd generated protobuf code is out of date"
+            echo
+            echo 'The build rewrote `cube-envd/src/generated`. Run `make -C cube-envd proto-gen` locally and commit the result (`make -C cube-envd proto-gen-check` reproduces this check).'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit 1
+
   # Docker smoke build for release images that use repo-root context +
   # adjacent Dockerfile.dockerignore (catches context/ignore regressions).
   docker-smoke:
