@@ -60,7 +60,7 @@ CubeAPI/Cubelet 的真实创建延迟或生产性能。
 
 1. 请求按 `Arrival` 升序处理；同一 tick 内先释放 `EndsAt <= tick` 的 sandbox，再调度该 tick 到达的请求。
 2. 节点不可行条件遵循本 simulator 建模的硬资源形态（sandbox 数达到上限，或 CPU/内存配额放不下本次请求）。这是带 simulator 本地约束的 Filter→Score→bind *形态*，并不宣称与 CubeMaster 生产 Filter 插件集合等价。不可行节点不进入 Score。
-3. 可行节点按 Profile 权重打分后，绑定最高分节点（确定性 argmax，同分按节点 ID 稳定打破）。生产 CubeMaster 会按 `scheduler.priority_select_num` 截断，再在截断集合上做按分数加权的随机选择，因此本报告中的放置结果与 Profile 排名是该 simulator 绑定规则下的性质。
+3. 可行节点按 Profile 权重打分后，绑定最高分节点（确定性 argmax，同分按节点 ID 稳定打破）。生产 CubeMaster 会按 `scheduler.priority_select_num` 截断（发行配置为 `1`），再按 `scheduler.least_select_name` 在截断集合内选择——默认 `random` 为均匀随机，`sw`/`rw`/`rrw` 为按分数加权。发行配置 `priority_select_num: 1` 时截断集合只有一个节点，因此生产选择与本 simulator 的 argmax 一致（同分打破规则可能不同）。
 4. `average_score_margin` 是上述 argmax 绑定下的 simulator 本地决策差距代理，不是生产选择指标。
 5. 配额利用率、峰值利用率和负载均衡度使用**最后一次请求到达后的节点快照**，不是全时段平均，也不是历史峰值。
 6. 模板命中率和估算延迟只统计成功调度的请求。
@@ -141,9 +141,11 @@ Markdown 结果表列名与 JSON 字段对应关系（`Report.Markdown()`）：
 | `MemUtilization` | `mem_utilization` |
 
 `scoreCandidates` 对全部可行节点打分排序，并绑定最高分节点（确定性 argmax）。
-生产 CubeMaster 可用 `scheduler.priority_select_num` 截断，再按分数加权随机选择，
-因此保留/截断后候选指标在那里会对应真实生产旋钮。在本 simulator 的绑定规则下，
-全量排序后再截断不会改变最终绑定节点，所以报告只暴露
+生产 CubeMaster 会按 `scheduler.priority_select_num` 截断（发行配置为 `1`），再按
+`scheduler.least_select_name` 在截断集合内选择——默认 `random` 为均匀随机，
+`sw`/`rw`/`rrw` 为按分数加权。发行配置 `priority_select_num: 1` 时生产选择与本
+argmax 一致（同分打破规则可能不同）。在本 simulator 的绑定规则下，全量排序后再
+截断不会改变最终绑定节点，所以报告只暴露
 `feasible_candidate_evaluations` / `average_feasible_candidates` 作为
 simulator 本地候选宽度代理（最大为节点数）。
 

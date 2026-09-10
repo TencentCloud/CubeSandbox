@@ -36,7 +36,7 @@ go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
 
 ```json
 {
-  "run_id": "scheduler-sim-seed-20260903-nodes-4-4b1a18ca3c7b",
+  "run_id": "scheduler-sim-seed-20260903-nodes-4-b2af389f1d2d",
   "config": {
     "seed": 20260903,
     "node_count": 4,
@@ -196,10 +196,11 @@ go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
 `feasible_candidate_evaluations / scheduled_requests`，按每个成功调度请求统计可行
 节点，因此最大为 `node_count`。它是 simulator 本地候选宽度代理，不是调度器 CPU
 开销或延迟。本 simulator 绑定全局最高分的可行节点（确定性 argmax）。生产
-CubeMaster 可能按 `scheduler.priority_select_num` 截断，再按分数加权随机选择；
-在本 simulator 绑定规则下，全量排序后再截断不会改变放置结果，因此报告不包含单独的
-截断后保留候选指标。`average_score_margin` 是该 argmax 绑定下的 simulator 本地
-决策差距代理，不是生产选择指标。
+CubeMaster 会按 `scheduler.priority_select_num` 截断（发行配置为 `1`），再按
+`scheduler.least_select_name` 在截断集合内选择——默认 `random` 为均匀随机，
+`sw`/`rw`/`rrw` 为按分数加权。发行配置 `priority_select_num: 1` 时生产选择与本
+argmax 一致（同分打破规则可能不同），因此报告不包含单独的截断后保留候选指标。
+`average_score_margin` 是该 argmax 绑定下的 simulator 本地决策差距代理，不是生产选择指标。
 
 发出的 `Metrics` 对象上每个 JSON 字段都有对应的 `metric_schema[]` 条目（包括
 `total_requests`、`placement_counts`、`peak_mem_utilization`、

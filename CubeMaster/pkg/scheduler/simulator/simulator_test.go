@@ -880,6 +880,22 @@ func TestNodeCountContractLibraryAndEffectiveSet(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigRunIDMatchesDocumentedDigest(t *testing.T) {
+	// Pins the published example in docs/dev/scheduler-benchmark-report-schema.md
+	// (and its ZH mirror): DefaultConfig + unknown provenance.
+	const want = "scheduler-sim-seed-20260903-nodes-4-b2af389f1d2d"
+	report, err := Run(DefaultConfig())
+	if err != nil {
+		t.Fatalf("Run(DefaultConfig()) error = %v", err)
+	}
+	if report.Provenance.GitRevision != UnknownRevision {
+		t.Fatalf("Provenance.GitRevision = %q, want %q", report.Provenance.GitRevision, UnknownRevision)
+	}
+	if report.RunID != want {
+		t.Fatalf("RunID = %q, want the documented default digest %q", report.RunID, want)
+	}
+}
+
 func TestRunIDIncludesEffectiveSelectionAndProvenance(t *testing.T) {
 	base := DefaultConfig()
 	base.Provenance = Provenance{GitRevision: "abc123", GitDirty: boolPtr(false)}
