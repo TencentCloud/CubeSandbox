@@ -174,7 +174,7 @@ make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
 | 变量               | 默认值              | 说明                                                   |
 | ------------------ | ------------------- | ------------------------------------------------------ |
 | `ENVD_PORT`        | `49983`             | envd 监听的端口                                        |
-| `ENVD_EXTRA_ARGS`  | *(空)*              | 追加到 `-port` 之后的额外参数。若未包含 `-isnotfc`，脚本会自动追加以跳过 Firecracker MMDS 查询。 |
+| `ENVD_EXTRA_ARGS`  | *(空)*              | 追加到 `-port` 之后的额外参数。若未包含 `-isnotfc`，脚本会自动追加，仅为兼容 E2B 命令行习惯；在 cube-envd 中它是 no-op。 |
 | `ENVD_LOG_FILE`    | `/var/log/envd.log` | envd stdout/stderr 落盘位置；设为 `-` 则继承容器 stdio |
 | `ENVD_BIN`         | `/usr/bin/envd`     | 当 envd 安装在别处时覆盖                               |
 
@@ -188,10 +188,9 @@ make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
 # your-entrypoint.sh
 
 # 后台启动 envd
-# -isnotfc 是必须的：它让 envd 跳过对 169.254.169.254 的 Firecracker MMDS
-# 查询。CubeSandbox 不使用 Firecracker，MMDS 服务不存在。缺少此参数时
-# envd 会尝试访问不存在的 MMDS，可能引发网络超时、/init 延迟、
-# env_vars 注入失败等各种问题。
+# -isnotfc 是可选的，仅为兼容 E2B 命令行习惯而保留。cube-envd 完全不含
+# Firecracker MMDS 逻辑（CubeSandbox 在 Cloud Hypervisor 上运行工作负载，
+# 169.254.169.254 并不存在），因此该参数是 no-op：带不带行为完全一致。
 /usr/bin/envd -port 49983 -isnotfc >/var/log/envd.log 2>&1 &
 
 # ... 你原本的启动流程 ...
@@ -232,10 +231,13 @@ docker exec "$cid" cat /var/log/envd.log
 | 模板创建探活失败                       | envd 未启动 / 起在错误端口                                  | 确认 `ENTRYPOINT` 为 `cube-entrypoint.sh`，或你自己的脚本里有 `envd -port 49983 &`      |
 | `curl :49983/health` 返回 `000`        | 端口无人监听；入口被用户 CMD 整个替换                      | 检查 <code v-pre>docker inspect --format '{{json .Config.Entrypoint}}'</code>，保留 `cube-entrypoint.sh` |
 | envd 立刻退出                          | 二进制版本与容器预期不匹配                                 | `docker exec ... /usr/bin/envd -version` 确认版本；从 pin 的 base tag 重新拷贝          |
-| envd `/init` 异常缓慢 / `create_time env_vars` 失败 | 缺少 `-isnotfc` 参数；envd 尝试访问不存在的 MMDS (`169.254.169.254`) | 使用 `cube-entrypoint.sh`（会自动追加 `-isnotfc`），或在手动拉起 envd 时自行加上 `-isnotfc` |
 | 49983 端口冲突                         | 你自己的应用也在监听 49983                                 | 把自家应用迁到别的端口，并一起 `--expose-port` 暴露                                     |
 | `sudo: command not found`              | 基于 `-slim` / `-alpine` 这种无 sudo 的镜像构建            | `apt-get install -y sudo`，或直接把 `sudo` 从 CMD 里去掉——`cube-entrypoint.sh` 不依赖它 |
 | 模板创建长时间卡在 `PULLING`           | registry 从 Cube 节点不可达                                | 推送到集群可访问的 registry，或用 `--registry-username` / `--registry-password`         |
+
+> **`-isnotfc` 不会是任何问题的原因。** 它在 cube-envd 中是 no-op（不存在
+> Firecracker MMDS 相关代码），因此缺少该参数不可能导致 `/init` 延迟、网络超时
+> 或 `create_time env_vars` 失败。请改为排查入口脚本、端口和镜像本身。
 
 ## 7. 进阶 —— 自己重建基础镜像
 

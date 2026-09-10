@@ -270,7 +270,7 @@ envd [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-port`, `--port` | `49983` | Port for the HTTP server. |
-| `-isnotfc`, `--isnotfc` | — | Kept for Firecracker compatibility. In CubeSandbox it tells envd to skip the Firecracker MMDS lookup at `169.254.169.254`; use it when starting manually. |
+| `-isnotfc`, `--isnotfc` | — | Kept for E2B command-line compatibility only. `cube-envd` has no Firecracker MMDS code (CubeSandbox uses Cloud Hypervisor, so `169.254.169.254` does not exist), so the flag is a **no-op**: with or without it, behaviour is identical. |
 | `-version`, `--version` | — | Print the version and exit. |
 | `-commit`, `--commit` | — | Print the build commit and exit. |
 
