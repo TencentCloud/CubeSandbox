@@ -161,6 +161,38 @@ A started process runs in the selected user's home directory unless the request
 sets `cwd`; a relative or `~/...` `cwd` is resolved against that same home. The
 directory must exist.
 
+## Security Model
+
+`cube-envd` executes requests with **its own credentials** (root in the
+`cubesandbox-base` image) and the selected user is *not* an authorization
+boundary. Be precise about what each mechanism does:
+
+- **Process execution** runs as the selected user: when that user differs from
+  the user running `cube-envd`, the child is started through
+  `setpriv --reuid --regid --init-groups`, so the kernel constrains what the
+  command itself can touch.
+- **Filesystem RPCs and `/files` execute as `cube-envd`** — that is, as root in
+  the standard image. The selected user decides the path base (its home for
+  relative paths) and the ownership applied to created files and directories; it
+  does not restrict which paths can be read, written or deleted. `Stat`,
+  `ListDir`, `Move` and `Remove` are not confined to the user's home, and
+  `GET /files` can stream any file `cube-envd` can open.
+- **There is no per-request token.** The `Authorization: Basic` header only
+  names a user to act as; it does not authenticate the caller, and any process
+  inside the sandbox can name any account.
+- **Access control is expected at the network boundary.** `cube-envd` listens on
+  `0.0.0.0:49983` and must not be reachable by untrusted clients: the sandbox IP
+  lives on a private segment and `CubeProxy` is the only public entry point,
+  where the per-sandbox traffic token is enforced. Anything that can reach
+  `49983` directly (including any process inside the sandbox) effectively holds
+  `cube-envd`'s own privileges.
+
+Requests are resource-bounded so a single client cannot exhaust the sandbox:
+unary JSON bodies are capped at 1 MiB and stream frames at 16 MiB,
+`/files` uploads are streamed, connections are capped at 1024 with a header-read
+timeout, and per-process subscriber queues are bounded with slow subscribers
+dropped.
+
 ## Repository Layout
 
 ```
