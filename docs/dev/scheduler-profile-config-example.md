@@ -151,6 +151,10 @@ validation (built-ins may inject defaults when the pointer is still
 **cannot** exclude a dimension by setting its factor weight to `0`. Only
 the plugin-level `weight: 0` (or `disable: true`) disables the scorer.
 Negative plugin `weight` fails at config load (`validateBinpackScoreWeight`).
+Do not mix `binpack_score` with remaining-capacity / spread scorers in the
+same `enable_scorers` list; occupancy polarity is inverted relative to
+`real_time_weighted_average` / `multi_factor_weighted_average`, so the
+blend can cancel. Built-in `binpack_utilization` only enables `binpack_score`.
 
 **Factor scorers fail closed under a Profile.** When `scheduler.profile` is
 non-empty, each factor-based scorer in the final `enable_scorers` list
