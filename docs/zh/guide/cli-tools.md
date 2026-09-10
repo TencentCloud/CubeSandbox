@@ -54,7 +54,30 @@ cubemastercli --address <cubemaster-host> --port 8089 tpl create-from-image \
   --writable-layer-size 1G \
   --expose-port 49983 \
   --probe 49983
+
+# 把一个 READY 模板的 rootfs artifact 迁入 TC 存储。
+# CLI 叫 merge，对应 API 是 /cube/template/migrate。
+# 存量模板如果不迁移，artifact 仍留在 CubeMaster 本地盘上。
+cubemastercli --address <cubemaster-host> --port 8089 tpl merge <template-id>
+
+# 存量镜像 / 历史模板的标准顺序：merge 完成后，再 redo。
+# 否则后续 redo / 分发仍会继续依赖那份历史本地 ext4。
+cubemastercli --address <cubemaster-host> --port 8089 tpl redo --template-id <template-id>
+
+# 只提交 migrate job，不等待结束。
+cubemastercli --address <cubemaster-host> --port 8089 tpl merge <template-id> --detach
 ```
+
+对于**存量镜像 / 历史模板**，这里建议把顺序理解成：**先 `tpl merge`，再 `tpl redo`**。
+
+- **先 `tpl merge`**：把历史模板还留在 `CubeMaster` 本地盘上的 rootfs artifact 迁进 TC 管理的 artifact store。
+- **再 `tpl redo`**：让后续续跑 / 分发基于**迁移后的 artifact** 继续执行，而不是继续依赖旧的本地 ext4。
+
+> **高亮提醒**
+> 如果跳过 `tpl merge`，这些存量模板的 artifact 仍然会停留在 **`CubeMaster` 本地磁盘**，不会自动收敛到 TC 管理的存储。
+>
+> - **运行风险**：后续 `redo` / 分发仍会继续依赖这份历史本地 ext4。
+> - **恢复风险**：如果本地 ext4 已经丢失，再补跑 `tpl merge` 也修不回来，因为已经没有可上传的文件；这时只能执行 `tpl redo` 去重新构建 rootfs。
 
 破坏性操作需要谨慎执行：
 
