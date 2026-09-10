@@ -5,14 +5,18 @@
 package cube
 
 import (
+	"context"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
@@ -235,15 +239,27 @@ func openTemplateArtifactForDownload(c *gin.Context) (name string, file *os.File
 	return filepath.Base(record.Ext4Path), f, st, true
 }
 
+// artifactProxyHTTPClient has no total Timeout on purpose: artifact streams
+// are GB-scale, so a whole-request deadline would abort healthy downloads.
+// ResponseHeaderTimeout bounds the only phase that can hang silently (waiting
+// on a stalled S3/TC response), after which the stream is driven by the
+// downstream client's disconnect via the request context.
+var artifactProxyHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		ResponseHeaderTimeout: 60 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	},
+}
+
 func downloadTemplateArtifactGinHandler(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 
-	// S3-backed artifacts redirect to the presigned URL; local-disk artifacts
-	// (legacy, or S3-disabled builds) are streamed from the store. The
-	// artifact row's artifact_url is the discriminator: TC writes it after a
-	// successful S3 upload, so its presence means the object lives in S3.
-	if redirectToS3Artifact(c) {
-		rt.RetCode = int64(errorcode.ErrorCode_Success)
+	// S3-backed artifacts are proxied through this endpoint rather than 302
+	// redirected to the object store. Nodes therefore only need reachability to
+	// CubeMaster's public address; Master/TC absorb any S3 endpoint topology.
+	if handled, ok := proxyS3Artifact(c); handled {
+		rt.RetCode = artifactProxyRetCode(ok)
 		return
 	}
 
@@ -259,11 +275,10 @@ func downloadTemplateArtifactGinHandler(c *gin.Context) {
 func headTemplateArtifactGinHandler(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 
-	// Same S3-vs-local split as downloadTemplateArtifactGinHandler: a HEAD on
-	// an S3-backed artifact redirects so the caller can probe the presigned
-	// URL directly.
-	if redirectToS3Artifact(c) {
-		rt.RetCode = int64(errorcode.ErrorCode_Success)
+	// HEAD follows the same S3 proxy-vs-local split as GET so servability probes
+	// exercise the exact node-facing download path.
+	if handled, ok := proxyS3Artifact(c); handled {
+		rt.RetCode = artifactProxyRetCode(ok)
 		return
 	}
 
@@ -275,36 +290,93 @@ func headTemplateArtifactGinHandler(c *gin.Context) {
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
 }
 
-// redirectToS3Artifact issues a 302 to the artifact's presigned S3 URL when
-// the artifact row has one. Returns true when a redirect was written (caller
-// must not write anything else), false when the artifact is local-disk or the
-// row/token is invalid (caller falls through to the local-file path, which
-// produces the appropriate error response).
-func redirectToS3Artifact(c *gin.Context) bool {
+// artifactProxyRetCode keeps the request log honest: an upstream proxy failure
+// wrote a 502 to the client and must not be recorded as a success.
+func artifactProxyRetCode(ok bool) int64 {
+	if ok {
+		return int64(errorcode.ErrorCode_Success)
+	}
+	return int64(errorcode.ErrorCode_MasterInternalError)
+}
+
+// proxyS3Artifact streams an S3-backed artifact through the current handler
+// instead of redirecting the caller to the presigned URL. handled=false means
+// the artifact is local-disk or the row/token lookup failed, so the caller
+// should fall through to the local-file path which writes its own error
+// response. Once handled=true a response has been written; ok reports whether
+// the upstream fetch/stream succeeded (false -> we wrote 502, or the stream
+// broke mid-flight).
+func proxyS3Artifact(c *gin.Context) (handled bool, ok bool) {
 	artifactID := strings.TrimSpace(c.Query("artifact_id"))
 	token := strings.TrimSpace(c.Query("token"))
 	if artifactID == "" {
-		return false
+		return false, false
 	}
 	record, err := getRootfsArtifactForRedirectFn(c.Request.Context(), artifactID, token)
 	if err != nil || record == nil {
-		return false
+		return false, false
 	}
 	if record.ArtifactURL == "" {
-		return false
+		return false, false
 	}
-	// Redirect to a FRESH presigned URL: the one stored at build time expires
-	// (7d) while the artifact lives longer. artifactDownloadURL re-signs when
-	// this process holds the S3 credentials and falls back to the stored URL
-	// otherwise.
 	downloadURL := templatecenter.ArtifactDownloadURL(c.Request.Context(), record)
 	if downloadURL == "" {
-		return false
+		log.G(c.Request.Context()).Warnf("artifact proxy: empty download url for s3-backed artifact %s", record.ArtifactID)
+		c.AbortWithStatus(http.StatusBadGateway)
+		return true, false
 	}
+	// The presigned URL is signed for GET (SigV4 covers the method), so a HEAD
+	// probe must be proxied as a GET whose body we simply do not forward --
+	// forwarding HEAD verbatim gets a 403 from S3/MinIO.
+	upstreamMethod := c.Request.Method
+	if upstreamMethod == http.MethodHead {
+		upstreamMethod = http.MethodGet
+	}
+	upstreamReq, err := http.NewRequestWithContext(c.Request.Context(), upstreamMethod, downloadURL, nil)
+	if err != nil {
+		log.G(c.Request.Context()).Warnf("artifact proxy: build upstream request for %s failed: %v", record.ArtifactID, err)
+		c.AbortWithStatus(http.StatusBadGateway)
+		return true, false
+	}
+	for _, key := range []string{"Range", "If-Range", "If-Modified-Since", "If-None-Match"} {
+		if value := strings.TrimSpace(c.Request.Header.Get(key)); value != "" {
+			upstreamReq.Header.Set(key, value)
+		}
+	}
+	resp, err := artifactProxyHTTPClient.Do(upstreamReq)
+	if err != nil {
+		log.G(c.Request.Context()).Warnf("artifact proxy: fetch %s failed: %v", record.ArtifactID, err)
+		c.AbortWithStatus(http.StatusBadGateway)
+		return true, false
+	}
+	defer resp.Body.Close()
+	copyArtifactProxyHeaders(c.Writer.Header(), resp.Header)
 	c.Writer.Header().Set("X-Cube-Artifact-Id", record.ArtifactID)
 	c.Writer.Header().Set("ETag", record.Ext4SHA256)
-	c.Redirect(http.StatusFound, downloadURL)
-	return true
+	c.Status(resp.StatusCode)
+	if c.Request.Method == http.MethodHead {
+		// Drain nothing: the body is discarded so the connection can reuse or
+		// close promptly; the caller only wanted headers.
+		return true, resp.StatusCode < http.StatusBadRequest
+	}
+	if _, err := io.Copy(c.Writer, resp.Body); err != nil {
+		log.G(c.Request.Context()).Warnf("artifact proxy: stream %s failed: %v", record.ArtifactID, err)
+		return true, false
+	}
+	return true, resp.StatusCode < http.StatusBadRequest
+}
+
+func copyArtifactProxyHeaders(dst, src http.Header) {
+	for _, key := range []string{"Accept-Ranges", "Cache-Control", "Content-Disposition", "Content-Encoding", "Content-Length", "Content-Range", "Content-Type", "Last-Modified"} {
+		values := src.Values(key)
+		if len(values) == 0 {
+			continue
+		}
+		dst.Del(key)
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
 }
 
 func handleRootfsArtifactAction(c *gin.Context) {
@@ -347,10 +419,46 @@ func handleRootfsArtifactAction(c *gin.Context) {
 	})
 }
 
+// requestBaseURL returns the base URL other components must use to reach this
+// CubeMaster. An empty return means "nothing externally usable was found" and
+// callers must fall back to the artifact row / hostname hint rather than
+// persist a value no Cubelet can dial.
+//
+// It is NOT simply scheme+Host: the Host header reflects how the CALLER
+// addressed this process, which is frequently unreachable for everyone else.
+// `curl http://0.0.0.0:8089` (or localhost) yields a Host of 0.0.0.0 /
+// localhost, and that value used to be persisted into
+// rootfs_artifacts.master_node_ip and then handed to every Cubelet as the
+// artifact download URL -- so the artifact download failed on every node while
+// the build job itself reported success.
+//
+// Priority:
+//  1. CUBE_MASTER_ADDR (or common.master_addr), but only when it is externally
+//     usable -- one-click historically ships a loopback value here, which is
+//     fine for co-located components finding CubeMaster but wrong as the
+//     Cubelet-facing download address.
+//  2. The request Host, but only when it is a real, externally-usable host
+//     (not empty, not a wildcard bind address, not loopback).
 func requestBaseURL(r *http.Request) string {
+	configured := ""
+	if cfg := config.GetConfig(); cfg != nil {
+		configured = strings.TrimSpace(cfg.MasterAddr())
+	}
+	if configured != "" {
+		if templatecenter.ExternallyUsableBaseURL(configured) {
+			return templatecenter.NormalizeBaseURL(configured)
+		}
+		log.G(context.Background()).Warnf("configured master addr %q is wildcard/loopback; ignoring it for cubelet-facing URLs (set CUBE_MASTER_ADDR to the address other nodes can dial)", configured)
+	}
 	scheme := "http"
-	if r.TLS != nil {
+	if r != nil && r.TLS != nil {
 		scheme = "https"
 	}
-	return scheme + "://" + r.Host
+	if r != nil && templatecenter.HostReachableByOtherNodes(r.Host) {
+		return scheme + "://" + r.Host
+	}
+	if r != nil {
+		log.G(context.Background()).Warnf("request Host %q is wildcard/loopback; no externally-usable base URL for cubelet-facing downloads (configure CUBE_MASTER_ADDR)", r.Host)
+	}
+	return ""
 }

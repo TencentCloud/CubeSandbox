@@ -38,3 +38,12 @@ type ArtifactDeleteResponse struct {
 	Status     string `json:"status"`
 	ArtifactID string `json:"artifact_id"`
 }
+
+// ArtifactUploadResponse is the response returned after ingesting an ext4 upload.
+type ArtifactUploadResponse struct {
+	Status        string `json:"status"`
+	ArtifactID    string `json:"artifact_id"`
+	Ext4Path      string `json:"ext4_path"`
+	Ext4SHA256    string `json:"ext4_sha256"`
+	Ext4SizeBytes int64  `json:"ext4_size_bytes"`
+}

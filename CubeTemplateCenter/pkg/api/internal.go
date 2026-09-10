@@ -5,10 +5,16 @@
 package api
 
 import (
+	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -16,6 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/build"
+	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/image"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/tcconfig"
 )
 
@@ -106,6 +113,165 @@ func handleArtifactDelete(c *gin.Context) {
 	c.JSON(http.StatusOK, ArtifactDeleteResponse{Status: "deleted", ArtifactID: req.ArtifactID})
 }
 
+// handleArtifactUpload ingests a local ext4 uploaded by CubeMaster and stores
+// it into CubeTemplateCenter's own artifact store.
+//
+// The body is consumed with a single streaming MultipartReader pass rather
+// than c.PostForm/c.FormFile: those parse the whole form first, buffering up
+// to MaxMultipartMemory in RAM and spooling the rest into os.TempDir() -- for
+// GB-scale ext4 artifacts that means a full extra copy in /tmp (often tmpfs,
+// i.e. RAM) before a single byte reaches the artifact store.
+//
+// artifact_id must arrive BEFORE the file part (tcclient writes it first):
+// the id shapes the destination path, so it is validated before any payload
+// byte touches the filesystem.
+// maxArtifactUploadBytes caps the upload body so a stolen callback token (or
+// a buggy Master) cannot fill TC's disk. Ext4 artifacts are single-digit GiB
+// in practice; 32 GiB leaves ample headroom while still failing closed.
+const maxArtifactUploadBytes = 32 << 30
+
+func handleArtifactUpload(c *gin.Context) {
+	ctx := c.Request.Context()
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxArtifactUploadBytes)
+	mr, err := c.Request.MultipartReader()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf("read multipart body: %v", err)})
+		return
+	}
+
+	artifactID := ""
+	for {
+		part, nextErr := mr.NextPart()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf("read multipart part: %v", nextErr)})
+			return
+		}
+		switch part.FormName() {
+		case "artifact_id":
+			data, readErr := io.ReadAll(io.LimitReader(part, 1024))
+			part.Close()
+			if readErr != nil {
+				c.JSON(http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf("read artifact_id field: %v", readErr)})
+				return
+			}
+			artifactID = strings.TrimSpace(string(data))
+			if !image.ValidArtifactID(artifactID) {
+				c.JSON(http.StatusBadRequest, ErrorResponse{Error: "artifact_id has an invalid shape"})
+				return
+			}
+		case "file":
+			if artifactID == "" {
+				part.Close()
+				c.JSON(http.StatusBadRequest, ErrorResponse{Error: "artifact_id field must precede the file part"})
+				return
+			}
+			handleArtifactUploadFilePart(c, ctx, artifactID, part)
+			part.Close()
+			return
+		default:
+			part.Close()
+		}
+	}
+	if artifactID == "" {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "artifact_id is required"})
+		return
+	}
+	c.JSON(http.StatusBadRequest, ErrorResponse{Error: "file is required"})
+}
+
+// handleArtifactUploadFilePart streams one validated file part into the
+// artifact store, deduping on identical content already in place.
+func handleArtifactUploadFilePart(c *gin.Context, ctx context.Context, artifactID string, reader io.Reader) {
+	storeDir, err := image.ResolveArtifactStoreDir(ctx, artifactID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("resolve artifact store dir: %v", err)})
+		return
+	}
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("create artifact store dir: %v", err)})
+		return
+	}
+
+	tmpFile, err := os.CreateTemp(storeDir, artifactID+".upload-*.tmp")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("create temp file: %v", err)})
+		return
+	}
+	tmpPath := tmpFile.Name()
+	cleanupTmp := true
+	defer func() {
+		_ = tmpFile.Close()
+		if cleanupTmp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	hasher := sha256.New()
+	size, err := io.Copy(io.MultiWriter(tmpFile, hasher), reader)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("save uploaded file: %v", err)})
+		return
+	}
+	sha := hex.EncodeToString(hasher.Sum(nil))
+	if size <= 0 {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "uploaded file is empty"})
+		return
+	}
+	if err := tmpFile.Close(); err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("close temp file: %v", err)})
+		return
+	}
+
+	dstPath := filepath.Join(storeDir, artifactID+".ext4")
+	if st, statErr := os.Stat(dstPath); statErr == nil && st.Mode().IsRegular() {
+		dstSha, shaErr := fileSHA256(dstPath)
+		if shaErr == nil && st.Size() == size && dstSha == sha {
+			cleanupTmp = true
+			c.JSON(http.StatusOK, ArtifactUploadResponse{
+				Status:        "reused",
+				ArtifactID:    artifactID,
+				Ext4Path:      dstPath,
+				Ext4SHA256:    dstSha,
+				Ext4SizeBytes: st.Size(),
+			})
+			return
+		}
+	}
+
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("promote uploaded artifact file: %v", err)})
+		return
+	}
+	cleanupTmp = false
+	if err := os.Chmod(dstPath, 0o644); err != nil {
+		log.G(ctx).Warnf("artifact upload: chmod %s failed: %v", dstPath, err)
+	}
+
+	c.JSON(http.StatusOK, ArtifactUploadResponse{
+		Status:        "uploaded",
+		ArtifactID:    artifactID,
+		Ext4Path:      dstPath,
+		Ext4SHA256:    sha,
+		Ext4SizeBytes: size,
+	})
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // sharedTokenWarnOnce rate-limits the "unauthenticated endpoint" warning.
 var sharedTokenWarnOnce sync.Once
 
@@ -171,4 +337,5 @@ func RegisterInternalRoutes(g *gin.RouterGroup) {
 	internal := g.Group("/tc/api/v1", internalAuthMiddleware())
 	internal.POST("/build", handleBuildSubmit)
 	internal.POST("/artifact/delete", handleArtifactDelete)
+	internal.POST("/artifact/upload", handleArtifactUpload)
 }

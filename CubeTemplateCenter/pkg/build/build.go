@@ -451,10 +451,35 @@ func reportArtifactBuilt(
 	return nil
 }
 
+// artifactS3Ops is the subset of s3store.Client artifactPresignedURL needs;
+// an interface so tests can fake the bucket.
+type artifactS3Ops interface {
+	Stat(ctx context.Context, artifactID string) (bool, error)
+	PresignedGetURL(ctx context.Context, artifactID string) (string, error)
+}
+
 // artifactPresignedURL returns a presigned URL for an S3-backed artifact, or
-// an empty string when S3 is disabled or URL generation fails.
-func artifactPresignedURL(ctx context.Context, s3CfgEnabled bool, s3Client *s3store.Client, artifactID string, logger *cubelog.Entry) string {
+// an empty string when S3 is disabled, the object is missing, or URL
+// generation fails.
+//
+// The Stat guard matters on the REUSE path: reuseExistingArtifact can match a
+// legacy artifact that predates S3 (built local-only, artifact_url empty,
+// ext4 still on disk). Presigning a URL for an object that was never uploaded
+// hands Cubelets a signed URL that 404s (NoSuchKey) -- worse than no URL at
+// all, because the row then looks S3-backed and the local-file serving path
+// is skipped. Returning "" keeps the artifact on the local-disk download path
+// (and `tpl merge` can migrate it to S3 later).
+func artifactPresignedURL(ctx context.Context, s3CfgEnabled bool, s3Client artifactS3Ops, artifactID string, logger *cubelog.Entry) string {
 	if !s3CfgEnabled || s3Client == nil {
+		return ""
+	}
+	exists, err := s3Client.Stat(ctx, artifactID)
+	if err != nil {
+		logger.Warnf("stat s3 object before presign fail: %v", err)
+		return ""
+	}
+	if !exists {
+		logger.Warnf("artifact %s has no s3 object (predates s3 or was never uploaded); not presigning, keeping the local-disk download path", artifactID)
 		return ""
 	}
 	url, err := s3Client.PresignedGetURL(ctx, artifactID)

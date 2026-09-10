@@ -227,6 +227,17 @@ func invalidateTemplateCaches(templateID string) {
 	localcache.InvalidateImageState(templateID)
 }
 
+// invalidateTemplateAliasMutationCaches clears the query/runtime caches for an
+// alias write. Alias transfers mutate two definitions (the new holder and the
+// displaced holder), so both IDs must be invalidated after the DB transaction
+// commits; otherwise detail/list reads can keep serving the previous alias.
+func invalidateTemplateAliasMutationCaches(templateID, displacedTemplateID string) {
+	invalidateTemplateCaches(templateID)
+	if displacedTemplateID != "" && displacedTemplateID != templateID {
+		invalidateTemplateCaches(displacedTemplateID)
+	}
+}
+
 // invalidateTemplateListCache drops the aggregate list cache only. Used by
 // write paths that do not have a specific templateID in scope but still
 // mutate the list (e.g. GC deleting orphaned definitions).

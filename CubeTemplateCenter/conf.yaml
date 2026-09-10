@@ -1,6 +1,8 @@
 common:
   http_port: 8090
-  http_readtimeout: 120
+  # Generous read timeout: artifact upload streams multi-GB ext4 bodies through
+  # this server, and ReadTimeout covers the whole request body read.
+  http_readtimeout: 600
   http_writetimeout: 360
   http_idletimeout: 360
   sync_meta_data_interval: 30s

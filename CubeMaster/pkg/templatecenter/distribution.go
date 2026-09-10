@@ -161,11 +161,12 @@ func ensureArtifactDistributable(ctx context.Context, artifact *models.RootfsArt
 	if artifact == nil {
 		return fmt.Errorf("distributeRootfsArtifact: artifact is nil")
 	}
-	if artifact.Status != ArtifactStatusReady || artifact.Ext4SizeBytes == 0 || strings.TrimSpace(artifact.Ext4SHA256) == "" || strings.TrimSpace(artifact.DownloadToken) == "" || strings.TrimSpace(artifact.MasterNodeIP) == "" {
+	downloadBaseURL := effectiveArtifactDownloadBaseURL("", artifact)
+	if artifact.Status != ArtifactStatusReady || artifact.Ext4SizeBytes == 0 || strings.TrimSpace(artifact.Ext4SHA256) == "" || strings.TrimSpace(artifact.DownloadToken) == "" || downloadBaseURL == "" {
 		return fmt.Errorf(
-			"artifact %s is not ready for distribution (status=%s size_bytes=%d sha256_set=%t token_set=%t master_node_ip=%q); template build likely did not complete — check cubemaster logs for buildRootfsArtifact errors",
+			"artifact %s is not ready for distribution (status=%s size_bytes=%d sha256_set=%t token_set=%t download_base_url=%q master_node_ip=%q); template build likely did not complete — check cubemaster logs for buildRootfsArtifact errors",
 			artifact.ArtifactID, artifact.Status, artifact.Ext4SizeBytes,
-			strings.TrimSpace(artifact.Ext4SHA256) != "", strings.TrimSpace(artifact.DownloadToken) != "", artifact.MasterNodeIP,
+			strings.TrimSpace(artifact.Ext4SHA256) != "", strings.TrimSpace(artifact.DownloadToken) != "", downloadBaseURL, artifact.MasterNodeIP,
 		)
 	}
 	// The five checks above only read the artifact row. A row can be perfectly
@@ -189,15 +190,10 @@ func ensureArtifactDistributable(ctx context.Context, artifact *models.RootfsArt
 // exactly the nodes that lack a READY replica instead of re-resolving the
 // full healthy-node set. Callers must run ensureArtifactDistributable first.
 func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node) ([]*node.Node, int32, int32, int32, error) {
-	// S3-backed artifacts get a FRESH presigned URL here, not the one stored
-	// at build time: the stored signature expires (7d) while the artifact
-	// lives on, and this distribution may be a redo / scale-out / re-push
-	// long after the build. artifactDownloadURL re-signs when this process
-	// holds the S3 credentials and otherwise falls back to the stored URL.
-	downloadURL := artifactDownloadURL(ctx, artifact)
-	if downloadURL == "" {
-		downloadURL = buildDownloadURL(artifact.MasterNodeIP, artifact.ArtifactID, artifact.DownloadToken)
-	}
+	// Always give Cubelets the CubeMaster download endpoint. That keeps the
+	// node-facing address uniform across local-disk and S3-backed artifacts and
+	// avoids per-node dependence on the object-store endpoint's reachability.
+	downloadURL := buildDownloadURL(effectiveArtifactDownloadBaseURL("", artifact), artifact.ArtifactID, artifact.DownloadToken)
 	spec := &imagev1.ImageSpec{
 		Image:        artifact.ArtifactID,
 		StorageMedia: imagev1.ImageStorageMediaType_ext4.String(),

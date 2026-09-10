@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
@@ -143,13 +144,68 @@ func classifyArtifactServability(status int, header http.Header, body []byte) (a
 	return artifactServabilityUnknown, fmt.Sprintf("http status %d", status)
 }
 
+const (
+	// servabilityProbeTTL bounds how long a positive servability answer is
+	// reused. The preflight runs once per artifact per distribution/redo, and a
+	// batch distribution repeats it for every target, so without this the
+	// download endpoint sees one ranged GET per artifact per operation.
+	servabilityProbeTTL = 30 * time.Second
+	// servabilityProbeCacheMax bounds the map: artifact ids are bounded by
+	// live templates, but a long-lived master must not grow it without limit.
+	servabilityProbeCacheMax = 4096
+)
+
+var (
+	servabilityProbeMu    sync.Mutex
+	servabilityProbeCache = map[string]artifactServabilityProbe{}
+)
+
+type artifactServabilityProbe struct {
+	verdict artifactServability
+	reason  string
+	at      time.Time
+}
+
+// probeServabilityOnce reuses a recent positive answer, then probes.
+//
+// Only artifactServabilityServable is cached. Caching Missing would keep
+// handing out an artifact the serving tier has already lost, and caching
+// Unknown would extend a transient outage by the TTL -- both are exactly the
+// failure modes the probe exists to catch.
+func probeServabilityOnce(ctx context.Context, artifact *models.RootfsArtifact) (artifactServability, string) {
+	if artifact == nil {
+		return artifactServabilityUnknown, "nil artifact"
+	}
+	now := time.Now()
+	servabilityProbeMu.Lock()
+	cached, ok := servabilityProbeCache[artifact.ArtifactID]
+	servabilityProbeMu.Unlock()
+	if ok && now.Sub(cached.at) < servabilityProbeTTL {
+		return cached.verdict, cached.reason
+	}
+
+	verdict, reason := probeArtifactServability(ctx, artifact)
+	if verdict == artifactServabilityServable {
+		servabilityProbeMu.Lock()
+		if len(servabilityProbeCache) >= servabilityProbeCacheMax {
+			// Cheap full reset rather than an LRU: entries expire on their own
+			// within servabilityProbeTTL, so dropping all of them only costs
+			// one extra probe per live artifact.
+			servabilityProbeCache = map[string]artifactServabilityProbe{}
+		}
+		servabilityProbeCache[artifact.ArtifactID] = artifactServabilityProbe{verdict: verdict, reason: reason, at: now}
+		servabilityProbeMu.Unlock()
+	}
+	return verdict, reason
+}
+
 // probeArtifactServability issues the same request a cubelet would issue for
 // this artifact and classifies the answer.
 func probeArtifactServability(ctx context.Context, artifact *models.RootfsArtifact) (artifactServability, string) {
 	if artifact == nil {
 		return artifactServabilityUnknown, "nil artifact"
 	}
-	rawURL := buildDownloadURL(artifact.MasterNodeIP, artifact.ArtifactID, artifact.DownloadToken)
+	rawURL := buildDownloadURL(effectiveArtifactDownloadBaseURL("", artifact), artifact.ArtifactID, artifact.DownloadToken)
 	status, header, body, err := getArtifactDownloadRange(ctx, rawURL)
 	if err != nil {
 		return artifactServabilityUnknown, fmt.Sprintf("get %q: %v", rawURL, err)
@@ -166,13 +222,28 @@ func probeArtifactServability(ctx context.Context, artifact *models.RootfsArtifa
 var demoteUnservableRootfsArtifact = func(ctx context.Context, artifactID, reason string) {
 	log.G(ctx).Errorf("rootfs artifact %s: download path reports missing (%s); demoting to %s so the next create rebuilds it",
 		artifactID, reason, ArtifactStatusFailed)
-	if err := updateRootfsArtifact(ctx, artifactID, map[string]any{
+	// Read the current status and demote with a CAS rather than a blind update:
+	// the row may have been claimed for deletion (or rebuilt) between the probe
+	// and this write, and overwriting it would either resurrect a deleted
+	// artifact or discard a fresh rebuild. Losing the demotion only costs
+	// another failed attempt that retries this same probe, so it must not fail
+	// the caller.
+	artifact, err := getRootfsArtifactByID(ctx, artifactID)
+	if err != nil {
+		log.G(ctx).Warnf("rootfs artifact %s: demote to %s skipped, cannot re-read row: %v", artifactID, ArtifactStatusFailed, err)
+		return
+	}
+	ok, err := updateRootfsArtifactIfStatus(ctx, artifactID, artifact.Status, map[string]any{
 		"status":     ArtifactStatusFailed,
 		"last_error": fmt.Sprintf("download endpoint reports the artifact missing (%s); artifact must be rebuilt", reason),
-	}); err != nil {
-		// Losing the demotion only costs another failed attempt that retries
-		// this same probe, so it must not fail the caller.
+	})
+	if err != nil {
 		log.G(ctx).Warnf("rootfs artifact %s: demote to %s fail: %v", artifactID, ArtifactStatusFailed, err)
+		return
+	}
+	if !ok {
+		log.G(ctx).Infof("rootfs artifact %s: demote skipped, status changed to %s while the probe was in flight",
+			artifactID, artifact.Status)
 	}
 }
 
@@ -192,24 +263,51 @@ func artifactServabilityUnknownError(artifact *models.RootfsArtifact, reason str
 	return fmt.Errorf(
 		"cannot verify rootfs artifact %s is servable at %q: %s; "+
 			"leaving the row untouched (the serving tier may be unreachable) — retry or redo",
-		artifact.ArtifactID, artifact.MasterNodeIP, reason)
+		artifact.ArtifactID, effectiveArtifactDownloadBaseURL("", artifact), reason)
 }
 
 // verifyArtifactServability is the distribution/redo preflight: the artifact
-// row must be backed by data the download path can actually serve.
+// row must be backed by data the node-facing download path can actually serve.
 //
-//   - S3-backed rows (artifact_url set): the durable copy is the bucket
-//     object; no probe needed (see resolveMissingArtifact).
-//   - Remote-TC topology (this process is CubeMaster): its own disk is never
-//     the holder, so the check probes the download URL end-to-end.
-//   - Otherwise this process IS the serving tier and the classic node-local
-//     probe runs.
+//   - Remote-TC topology with a resolvable download base URL: probe the
+//     CubeMaster download endpoint end-to-end, regardless of whether the
+//     artifact data ultimately lives on TC-local disk or in S3/MinIO. The
+//     endpoint is what Cubelets dial after the K8s multi-node fix, so this is
+//     the only probe that matches reality.
+//   - Otherwise (no remote tier, or a legacy row predating the download
+//     base URL column) this process IS assumed to be the serving tier and
+//     the classic node-local probe runs.
+//
+// WHY OWNERSHIP MUST NOT GATE THE REMOTE PROBE
+// ---------------------------------------------
+// artifactOwnershipOf classifies a row as Local whenever its recorded
+// MasterNodeIP matches THIS host's own identity. That is true far more often
+// than it looks: MasterNodeIP is populated from the inbound request's Host
+// header (requestBaseURL), so in a single-node / one-click deployment where
+// clients simply call this same CubeMaster's own address, ownership resolves
+// to Local -- even though CUBE_TEMPLATE_CENTER_ADDR is configured and the
+// build was forwarded to the standalone CubeTemplateCenter tier. Once
+// artifactServedByRemoteTier() is true, TC is the ONLY thing that ever
+// builds a fresh ext4 (see the file header comment), so "Local" here just
+// means "this host answered the HTTP request", not "this host holds the
+// file". Gating on ownership made the node-local disk probe run in exactly
+// that case, which used to accidentally work only because CubeMaster and TC
+// shared one physical artifact-store directory; once they use independent
+// directories the stat always misses and every distribution/redo wrongly
+// demotes a perfectly healthy artifact to FAILED. This mirrors the fix in
+// rootfsArtifactReuseVerdict (artifact_presence.go), which checks
+// artifactServedByRemoteTier() alone for the same reason.
+//
+// The one case that must still fall through to the node-local probe is a
+// legacy row from before the download-base-url column existed
+// (MasterNodeIP == ""): those may genuinely have their ext4 sitting on this
+// node's disk from before this CubeMaster started delegating builds to TC.
 func verifyArtifactServability(ctx context.Context, artifact *models.RootfsArtifact) error {
 	if artifact == nil {
 		return fmt.Errorf("verifyArtifactServability: artifact is nil")
 	}
-	if strings.TrimSpace(artifact.ArtifactURL) == "" && artifactServedByRemoteTier() {
-		switch verdict, reason := probeArtifactServability(ctx, artifact); verdict {
+	if artifactServedByRemoteTier() && strings.TrimSpace(effectiveArtifactDownloadBaseURL("", artifact)) != "" {
+		switch verdict, reason := probeServabilityOnce(ctx, artifact); verdict {
 		case artifactServabilityServable:
 			return nil
 		case artifactServabilityMissing:

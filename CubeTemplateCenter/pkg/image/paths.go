@@ -7,14 +7,18 @@ package image
 import (
 	"context"
 	"fmt"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 )
 
 const (
+	// TC shares CubeMaster's artifact store (design §9.7): TC writes the ext4,
+	// CubeMaster serves the download, and both resolve the same directory.
 	defaultArtifactStoreDir  = "/data/CubeMaster/storage"
 	fallbackArtifactStoreDir = "cubemaster-rootfs-artifacts-store"
 )
@@ -26,8 +30,12 @@ func ArtifactWorkRootDir() string {
 	return filepath.Join(os.TempDir(), "cubemaster-rootfs-artifacts")
 }
 
+func artifactStoreRootOverride() string {
+	return strings.TrimSpace(os.Getenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR"))
+}
+
 func ArtifactStoreRootDir() string {
-	if value := strings.TrimSpace(os.Getenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR")); value != "" {
+	if value := artifactStoreRootOverride(); value != "" {
 		return value
 	}
 	return defaultArtifactStoreDir
@@ -72,12 +80,27 @@ func ArtifactFallbackStoreRootDir() string {
 	return filepath.Join(os.TempDir(), fallbackArtifactStoreDir)
 }
 
+// artifactIDShape is the strict whitelist for artifact IDs used in filesystem
+// paths. Anything with separators or ".." would let a caller escape the
+// artifact store root via filepath.Join, so the shape is enforced both at the
+// upload handler (400) and here (defense in depth for every other caller).
+var artifactIDShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// ValidArtifactID reports whether artifactID is safe to use as a filesystem
+// path component inside the artifact store.
+func ValidArtifactID(artifactID string) bool {
+	return artifactIDShape.MatchString(artifactID) && !strings.Contains(artifactID, "..")
+}
+
 func artifactStoreDir(artifactID string) string {
 	return filepath.Join(ArtifactStoreRootDir(), artifactID)
 }
 
 func ResolveArtifactStoreDir(ctx context.Context, artifactID string) (string, error) {
-	if configured := strings.TrimSpace(os.Getenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR")); configured != "" {
+	if !ValidArtifactID(artifactID) {
+		return "", fmt.Errorf("invalid artifact id %q: must match %s without path separators or '..'", artifactID, artifactIDShape)
+	}
+	if configured := artifactStoreRootOverride(); configured != "" {
 		dir := filepath.Join(configured, artifactID)
 		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 			return "", fmt.Errorf("prepare configured artifact store root %s failed: %w", configured, err)

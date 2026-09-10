@@ -111,6 +111,38 @@ func runImageJobWatchPlain(c *cli.Context, jobID string) error {
 	}
 }
 
+func runMigrateJobWatch(c *cli.Context, jobID string) error {
+	interval := watchInterval(c)
+	var lastPrinted string
+	for {
+		rsp, err := fetchTemplateMigrateJob(c, jobID)
+		if err != nil {
+			return err
+		}
+		if rsp.Job == nil {
+			printTemplateImageJobWatchLine(nil)
+			printTemplateImageJobCompletionSummary(nil)
+			return errors.New("empty job")
+		}
+		current := formatTemplateImageJobWatchLine(rsp.Job)
+		if current != lastPrinted {
+			printTemplateImageJobWatchLine(rsp.Job)
+			lastPrinted = current
+		}
+		if rsp.Job.Status == "READY" || rsp.Job.Status == "FAILED" {
+			printTemplateImageJobCompletionSummary(rsp.Job)
+			if c.Bool("json") {
+				commands.PrintAsJSON(rsp)
+			}
+			if rsp.Job.Status == "FAILED" {
+				return errors.New(imageJobFailureMessage(rsp.Job))
+			}
+			return nil
+		}
+		time.Sleep(interval)
+	}
+}
+
 // runBuildWatch follows a sandbox commit build to completion.
 func runBuildWatch(c *cli.Context, buildID string) error {
 	if !shouldUseTUI(c) {

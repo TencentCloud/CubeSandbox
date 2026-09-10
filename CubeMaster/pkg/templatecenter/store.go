@@ -210,8 +210,12 @@ func listTemplatesFromDB(ctx context.Context) ([]TemplateInfo, error) {
 		Order("updated_at desc").Find(&defs).Error; err != nil {
 		return nil, err
 	}
+	// Only CREATE/REDO jobs carry the source image identity used for display.
+	// A COMMIT/MIGRATE/snapshot row carries no source image ref, and a MIGRATE
+	// row would otherwise win the attempt_no ordering and blank image_info.
 	var jobs []models.TemplateImageJob
 	if err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("operation IN ?", createRedoJobOperations).
 		Order("template_id asc, attempt_no desc, id desc").Find(&jobs).Error; err != nil {
 		return nil, err
 	}
@@ -997,7 +1001,10 @@ func getTemplateInfoFromDB(ctx context.Context, templateID string) (*TemplateInf
 	out := &info
 	out.CreatedAt = formatUTCRFC3339(def.CreatedAt)
 	out.ImageInfo = extractImageInfoFromRequestJSON(def.RequestJSON)
-	if latestJob, jobErr := getLatestTemplateImageJobByTemplateID(ctx, templateID); jobErr == nil && latestJob != nil {
+	// Display fields come from the latest CREATE/REDO job only: a MIGRATE job
+	// carries no source image ref, and letting it win the attempt_no ordering
+	// would blank image_info right after `tpl merge`.
+	if latestJob, jobErr := getLatestCreateRedoImageJobByTemplateIDTx(store.db.WithContext(ctx), templateID); jobErr == nil && latestJob != nil {
 		out.ImageInfo = composeImageInfo(latestJob.SourceImageRef, latestJob.SourceImageDigest)
 		out.JobID = latestJobIDFromJob(latestJob)
 	}
@@ -1259,6 +1266,7 @@ func publishTemplateStatusWithAlias(ctx context.Context, templateID, jobID, stat
 		err = run()
 	}
 	if err == nil {
+		invalidateTemplateAliasMutationCaches(templateID, displacedTemplateID)
 		if claimed {
 			if displacedTemplateID != "" {
 				log.G(ctx).Warnf("alias %q transferred from template %s to newer template build %s", alias, displacedTemplateID, templateID)
@@ -1280,6 +1288,7 @@ func publishTemplateStatusWithAlias(ctx context.Context, templateID, jobID, stat
 	if statusErr := publishTemplateStatusWithoutAlias(ctx, templateID, expectedStatus, status, lastError); statusErr != nil {
 		return "", "", statusErr
 	}
+	invalidateTemplateAliasMutationCaches(templateID, "")
 	if isDuplicateAliasError(claimErr) {
 		return "", "", nil
 	}
@@ -1542,7 +1551,9 @@ func setTemplateAliasLocked(ctx context.Context, templateID, alias string) error
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
 	}
-	return retryOnceOnDeadlock(func() error {
+	oldHolderToInvalidate := ""
+	err := retryOnceOnDeadlock(func() error {
+		oldHolderToInvalidate = ""
 		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			def, err := lockTemplateDefinitionTx(tx, templateID)
 			if err != nil {
@@ -1587,10 +1598,16 @@ func setTemplateAliasLocked(ctx context.Context, templateID, alias string) error
 				if err := syncCreateRedoImageJobAliasTx(tx, oldHolder, ""); err != nil {
 					return err
 				}
+				oldHolderToInvalidate = oldHolder
 			}
 			return nil
 		})
 	})
+	if err != nil {
+		return err
+	}
+	invalidateTemplateAliasMutationCaches(templateID, oldHolderToInvalidate)
+	return nil
 }
 
 // applyAliasToRequestJSON returns payload with its "alias" field set to alias

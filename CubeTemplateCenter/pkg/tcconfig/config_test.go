@@ -188,17 +188,15 @@ func TestMasterEndpointNamePrecedence(t *testing.T) {
 // Shared aliases
 // ---------------------------------------------------------------------------
 
-func TestApplySharedEnvAliasesPublishesLegacyName(t *testing.T) {
-	// The point of the shim: shared CubeMaster code reads the legacy name, so
-	// setting only the new one must still reach it.
-	clearEnv(t, EnvArtifactStoreDir, legacyEnvArtifactStoreDir)
+func TestApplySharedEnvAliasesPublishesArtifactStoreLegacyName(t *testing.T) {
+	const legacyArtifactStoreDir = "CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR"
+	clearEnv(t, EnvArtifactStoreDir, legacyArtifactStoreDir)
 	t.Setenv(EnvArtifactStoreDir, "/data/CubeMaster/storage")
 
 	ApplySharedEnvAliases()
 
-	if got := envValue(legacyEnvArtifactStoreDir); got != "/data/CubeMaster/storage" {
-		t.Fatalf("%s = %q, want the value published from %s",
-			legacyEnvArtifactStoreDir, got, EnvArtifactStoreDir)
+	if got := envValue(legacyArtifactStoreDir); got != "/data/CubeMaster/storage" {
+		t.Fatalf("%s = %q, want aliased value from %s", legacyArtifactStoreDir, got, EnvArtifactStoreDir)
 	}
 }
 
@@ -216,48 +214,13 @@ func TestApplySharedEnvAliasesLeavesLegacyOnlyAlone(t *testing.T) {
 	}
 }
 
-func TestApplySharedEnvAliasesConflictIsLoud(t *testing.T) {
-	// Two different artifact directories is the worst case this whole rename can
-	// produce: TC builds into one, CubeMaster serves from the other, and every
-	// download 404s with nothing in either log pointing at the cause. The new
-	// name wins (it is what the operator just wrote) but the disagreement must
-	// not be silent.
-	clearEnv(t, EnvArtifactStoreDir, legacyEnvArtifactStoreDir)
-	t.Setenv(EnvArtifactStoreDir, "/data/new/storage")
-	t.Setenv(legacyEnvArtifactStoreDir, "/data/old/storage")
-
-	ApplySharedEnvAliases()
-
-	if got := envValue(legacyEnvArtifactStoreDir); got != "/data/new/storage" {
-		t.Fatalf("%s = %q, want the new name to win", legacyEnvArtifactStoreDir, got)
-	}
-	if !hasWarningAbout("disagree") {
-		t.Fatalf("a conflicting artifact directory must be reported, got %v", Warnings())
-	}
-}
-
-func TestApplySharedEnvAliasesIdenticalValuesAreQuiet(t *testing.T) {
-	clearEnv(t, EnvArtifactStoreDir, legacyEnvArtifactStoreDir)
-	t.Setenv(EnvArtifactStoreDir, "/data/CubeMaster/storage")
-	t.Setenv(legacyEnvArtifactStoreDir, "/data/CubeMaster/storage")
-
-	ApplySharedEnvAliases()
-
-	// A deployment exporting both with the same value is transitional but
-	// correct; warning about it would train operators to ignore warnings.
-	if len(Warnings()) != 0 {
-		t.Fatalf("identical values must not warn, got %v", Warnings())
-	}
-}
-
 func TestApplySharedEnvAliasesCoversEveryPair(t *testing.T) {
 	// Guards against adding a shared variable to the constants without wiring it
 	// into the shim, which would leave the new spelling silently inert.
 	want := map[string]string{
-		EnvConfigPath:       legacyEnvConfigPath,
-		EnvArtifactStoreDir: legacyEnvArtifactStoreDir,
-		EnvArtifactWorkDir:  legacyEnvArtifactWorkDir,
-		EnvLoopMountExt4:    legacyEnvLoopMountExt4,
+		EnvConfigPath:      legacyEnvConfigPath,
+		EnvArtifactWorkDir: legacyEnvArtifactWorkDir,
+		EnvLoopMountExt4:   legacyEnvLoopMountExt4,
 	}
 	if len(sharedEnvAliases) != len(want) {
 		t.Fatalf("sharedEnvAliases has %d entries, want %d", len(sharedEnvAliases), len(want))

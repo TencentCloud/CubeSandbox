@@ -921,10 +921,10 @@ func TestArtifactStoreRootDirDefaultAndEnvOverride(t *testing.T) {
 		t.Fatalf("ArtifactStoreRootDir default=%q, want %q", got, defaultArtifactStoreDir)
 	}
 
-	customDir := filepath.Join(t.TempDir(), "artifact-store")
-	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", customDir)
-	if got := ArtifactStoreRootDir(); got != customDir {
-		t.Fatalf("ArtifactStoreRootDir=%q, want %q", got, customDir)
+	sharedDir := filepath.Join(t.TempDir(), "artifact-store-shared")
+	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", sharedDir)
+	if got := ArtifactStoreRootDir(); got != sharedDir {
+		t.Fatalf("ArtifactStoreRootDir override=%q, want %q", got, sharedDir)
 	}
 }
 

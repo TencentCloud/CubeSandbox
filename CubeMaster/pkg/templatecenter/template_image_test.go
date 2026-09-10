@@ -599,6 +599,9 @@ func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.
 	if got.Containers[0].Image == nil || got.Containers[0].Image.Image != "artifact-1" {
 		t.Fatalf("artifact image was not injected")
 	}
+	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL] != "http://master.example/cube/template/artifact/download?artifact_id=artifact-1&token=token-1" {
+		t.Fatalf("unexpected artifact download url: %q", got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL])
+	}
 	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactSHA256] != "sha256-1" {
 		t.Fatalf("unexpected artifact sha annotation")
 	}
@@ -610,6 +613,62 @@ func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.
 	}
 	if _, ok := got.Annotations[constants.CubeAnnotationStorageBackend]; ok {
 		t.Fatal("omitted backend must not inject cube.master.storage.backend")
+	}
+}
+
+func TestGenerateTemplateCreateRequestUsesMasterDownloadEndpointForS3Artifacts(t *testing.T) {
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-s3"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-s3",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+	}
+	artifact := &models.RootfsArtifact{
+		ArtifactID:              "artifact-s3",
+		TemplateSpecFingerprint: "fingerprint-s3",
+		Ext4SHA256:              "sha256-s3",
+		Ext4SizeBytes:           2048,
+		DownloadToken:           "token-s3",
+		MasterNodeIP:            "http://0.0.0.0:8089",
+		ArtifactURL:             "http://minio:9000/cube-volumes/artifact-s3.ext4?sig=stale",
+	}
+	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	want := "http://master.example/cube/template/artifact/download?artifact_id=artifact-s3&token=token-s3"
+	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL] != want {
+		t.Fatalf("artifact download url=%q, want %q", got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL], want)
+	}
+}
+
+func TestGenerateTemplateCreateRequestFallsBackToArtifactRowForS3WhenNoExplicitBase(t *testing.T) {
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-s3-row"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-s3-row",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+	}
+	artifact := &models.RootfsArtifact{
+		ArtifactID:              "artifact-s3-row",
+		TemplateSpecFingerprint: "fingerprint-s3-row",
+		Ext4SHA256:              "sha256-s3-row",
+		Ext4SizeBytes:           2048,
+		DownloadToken:           "token-s3-row",
+		MasterNodeIP:            "http://master-from-row:8089",
+		ArtifactURL:             "http://minio:9000/cube-volumes/artifact-s3-row.ext4?sig=stale",
+	}
+	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	want := "http://master-from-row:8089/cube/template/artifact/download?artifact_id=artifact-s3-row&token=token-s3-row"
+	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL] != want {
+		t.Fatalf("artifact download url=%q, want %q", got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL], want)
 	}
 }
 

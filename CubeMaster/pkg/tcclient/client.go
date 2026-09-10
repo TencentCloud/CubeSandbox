@@ -12,8 +12,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,6 +30,14 @@ import (
 type StatusError struct {
 	StatusCode int
 	Body       string
+}
+
+type UploadArtifactResponse struct {
+	Status        string `json:"status"`
+	ArtifactID    string `json:"artifact_id"`
+	Ext4Path      string `json:"ext4_path"`
+	Ext4SHA256    string `json:"ext4_sha256"`
+	Ext4SizeBytes int64  `json:"ext4_size_bytes"`
 }
 
 func (e *StatusError) Error() string {
@@ -149,4 +159,76 @@ func (c *Client) DeleteArtifact(ctx context.Context, artifactID string) error {
 
 	log.G(ctx).Infof("artifact delete requested from TC successfully: artifact_id=%s", artifactID)
 	return nil
+}
+
+// UploadArtifact uploads one local ext4 file into CubeTemplateCenter's own
+// artifact store and returns the stored metadata.
+func (c *Client) UploadArtifact(ctx context.Context, artifactID, localFilePath string) (*UploadArtifactResponse, error) {
+	f, err := os.Open(localFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("open local artifact file: %w", err)
+	}
+	defer f.Close()
+
+	pr, pw := io.Pipe()
+	// Closing the reader on every exit path unblocks the writer goroutine
+	// (its writes fail with ErrClosedPipe) when the request never happens --
+	// e.g. NewRequestWithContext fails below -- instead of leaking it.
+	defer pr.Close()
+	writer := multipart.NewWriter(pw)
+	writeErrCh := make(chan error, 1)
+	go func() {
+		defer pw.Close()
+		if err := writer.WriteField("artifact_id", artifactID); err != nil {
+			writeErrCh <- fmt.Errorf("write multipart artifact_id: %w", err)
+			return
+		}
+		part, err := writer.CreateFormFile("file", filepath.Base(localFilePath))
+		if err != nil {
+			writeErrCh <- fmt.Errorf("create multipart file field: %w", err)
+			return
+		}
+		if _, err := io.Copy(part, f); err != nil {
+			writeErrCh <- fmt.Errorf("copy local artifact into multipart body: %w", err)
+			return
+		}
+		if err := writer.Close(); err != nil {
+			writeErrCh <- fmt.Errorf("close multipart body: %w", err)
+			return
+		}
+		writeErrCh <- nil
+	}()
+
+	url := fmt.Sprintf("%s/tc/api/v1/artifact/upload", c.endpoint)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, pr)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
+	setSharedTokenHeader(httpReq)
+
+	uploadClient := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := uploadClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("http post: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := <-writeErrCh; err != nil {
+		return nil, err
+	}
+
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, fmt.Errorf("read upload response body: %w", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
+	}
+
+	out := &UploadArtifactResponse{}
+	if err := json.Unmarshal(respBody, out); err != nil {
+		return nil, fmt.Errorf("decode upload artifact response: %w", err)
+	}
+	return out, nil
 }

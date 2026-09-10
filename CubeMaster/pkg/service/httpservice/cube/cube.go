@@ -34,6 +34,7 @@ const (
 	TemplateAction                         = "/template"
 	TemplateCompatAction                   = "/template/compat"
 	TemplateRedoAction                     = "/template/redo"
+	TemplateMigrateAction                  = "/template/migrate"
 	TemplateBuildStatusAction              = "/template/build"
 	TemplateFromImageAction                = "/template/from-image"
 	TemplateArtifactDownloadAction         = "/template/artifact/download"

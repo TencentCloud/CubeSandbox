@@ -799,6 +799,12 @@ func TestResolveTemplateIDFromAllTemplateCommands(t *testing.T) {
 			want: "tpl-redo-1",
 		},
 		{
+			name: "merge via positional arg",
+			cmd:  TemplateMergeCommand,
+			args: []string{"tpl-merge-1"},
+			want: "tpl-merge-1",
+		},
+		{
 			name: "set-alias via positional arg",
 			cmd:  TemplateSetAliasCommand,
 			args: []string{"tpl-set-1"},
@@ -819,6 +825,12 @@ func TestResolveTemplateIDFromAllTemplateCommands(t *testing.T) {
 		{
 			name: "redo flag overrides positional",
 			cmd:  TemplateRedoCommand,
+			args: []string{"--template-id", "flag-id", "positional-id"},
+			want: "flag-id",
+		},
+		{
+			name: "merge flag overrides positional",
+			cmd:  TemplateMergeCommand,
 			args: []string{"--template-id", "flag-id", "positional-id"},
 			want: "flag-id",
 		},

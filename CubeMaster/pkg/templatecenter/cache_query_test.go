@@ -202,3 +202,43 @@ func TestInvalidateTemplateCachesClearsListAndInfo(t *testing.T) {
 		t.Fatalf("expected info cache cleared by invalidateTemplateCaches")
 	}
 }
+
+func TestInvalidateTemplateAliasMutationCachesClearsTargetAndDisplaced(t *testing.T) {
+	templateListCache.Flush()
+	templateInfoCache.Flush()
+
+	setTemplateListCache([]TemplateInfo{
+		{TemplateID: "tpl-new", DisplayName: "alias"},
+		{TemplateID: "tpl-old", DisplayName: "alias"},
+	})
+	setTemplateInfoCache("tpl-new", &TemplateInfo{TemplateID: "tpl-new", DisplayName: "alias"})
+	setTemplateInfoCache("tpl-old", &TemplateInfo{TemplateID: "tpl-old", DisplayName: "alias"})
+
+	invalidateTemplateAliasMutationCaches("tpl-new", "tpl-old")
+
+	for _, templateID := range []string{"tpl-new", "tpl-old"} {
+		if _, ok := getCachedTemplateInfo(templateID); ok {
+			t.Fatalf("expected info cache cleared for %s", templateID)
+		}
+	}
+	if _, ok := getCachedTemplateList(); ok {
+		t.Fatalf("expected list cache cleared for alias transfer")
+	}
+}
+
+func TestInvalidateTemplateAliasMutationCachesSkipsDuplicateDisplacedID(t *testing.T) {
+	templateListCache.Flush()
+	templateInfoCache.Flush()
+
+	setTemplateListCache([]TemplateInfo{{TemplateID: "tpl-same"}})
+	setTemplateInfoCache("tpl-same", &TemplateInfo{TemplateID: "tpl-same"})
+
+	invalidateTemplateAliasMutationCaches("tpl-same", "tpl-same")
+
+	if _, ok := getCachedTemplateInfo("tpl-same"); ok {
+		t.Fatalf("expected info cache cleared for target")
+	}
+	if _, ok := getCachedTemplateList(); ok {
+		t.Fatalf("expected list cache cleared for target")
+	}
+}

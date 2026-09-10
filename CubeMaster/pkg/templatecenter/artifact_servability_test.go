@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -92,6 +93,32 @@ func TestVerifyArtifactServabilityRemoteServable(t *testing.T) {
 	}
 }
 
+func TestVerifyArtifactServabilityLocalOwnershipSkipsRemoteProbe(t *testing.T) {
+	probeCalled := false
+	stubRemoteTier(t, true, func(ctx context.Context, url string) (int, http.Header, []byte, error) {
+		probeCalled = true
+		return 0, nil, nil, errors.New("must not be called for local ownership")
+	})
+	artDir := t.TempDir()
+	ext4Path := artDir + "/rfs-local.ext4"
+	if err := os.WriteFile(ext4Path, []byte("ok"), 0o644); err != nil {
+		t.Fatalf("write ext4: %v", err)
+	}
+	artifact := &models.RootfsArtifact{
+		ArtifactID:    "rfs-local",
+		Status:        ArtifactStatusReady,
+		Ext4Path:      ext4Path,
+		MasterNodeIP:  "",
+		DownloadToken: "tok",
+	}
+	if err := verifyArtifactServability(context.Background(), artifact); err != nil {
+		t.Fatalf("local-owned artifact must use local check, got %v", err)
+	}
+	if probeCalled {
+		t.Fatal("local-owned artifact must not use remote servability probe")
+	}
+}
+
 func TestVerifyArtifactServabilityRemoteMissingDemotes(t *testing.T) {
 	stubRemoteTier(t, true, envelopeProbe(int(errorcode.ErrorCode_NotFound), "artifact source missing"))
 	demoted := ""
@@ -146,23 +173,25 @@ func TestVerifyArtifactServabilityRemoteUnknownKeepsRow(t *testing.T) {
 	}
 }
 
-func TestVerifyArtifactServabilitySkipsS3Backed(t *testing.T) {
-	probeCalled := false
+func TestVerifyArtifactServabilityProbesS3BackedDownloadEndpoint(t *testing.T) {
+	probedURL := ""
 	stubRemoteTier(t, true, func(ctx context.Context, url string) (int, http.Header, []byte, error) {
-		probeCalled = true
-		return 0, nil, nil, errors.New("must not be called")
+		probedURL = url
+		return servableProbe(http.StatusPartialContent, "rfs-s3")(ctx, url)
 	})
 	artifact := &models.RootfsArtifact{
-		ArtifactID:   "rfs-s3",
-		Status:       ArtifactStatusReady,
-		ArtifactURL:  "http://minio:9000/bucket/rfs-s3.ext4?sig=...",
-		MasterNodeIP: "http://master:8089",
+		ArtifactID:    "rfs-s3",
+		Status:        ArtifactStatusReady,
+		ArtifactURL:   "http://minio:9000/bucket/rfs-s3.ext4?sig=...",
+		MasterNodeIP:  "http://master:8089",
+		DownloadToken: "tok-s3",
 	}
 	if err := verifyArtifactServability(context.Background(), artifact); err != nil {
-		t.Fatalf("S3-backed artifact must not be probed, got %v", err)
+		t.Fatalf("S3-backed artifact should be probed through the unified download endpoint, got %v", err)
 	}
-	if probeCalled {
-		t.Fatal("S3-backed artifact must skip the download-path probe")
+	want := "http://master:8089/cube/template/artifact/download?artifact_id=rfs-s3&token=tok-s3"
+	if probedURL != want {
+		t.Fatalf("probe url=%q, want %q", probedURL, want)
 	}
 }
 

@@ -462,6 +462,57 @@ func TestResolveMissingArtifactNilRecord(t *testing.T) {
 	}
 }
 
+func TestArtifactOwnershipOf(t *testing.T) {
+	localHosts := map[string]bool{"localhost": true, "127.0.0.1": true, "node-a": true}
+	orig := localArtifactHostsFn
+	localArtifactHostsFn = func() map[string]bool { return localHosts }
+	t.Cleanup(func() { localArtifactHostsFn = orig })
+
+	tests := []struct {
+		name   string
+		record *models.RootfsArtifact
+		want   artifactOwnership
+	}{
+		{
+			name:   "nil record",
+			record: nil,
+			want:   artifactOwnershipUnknown,
+		},
+		{
+			name: "s3 backed",
+			record: &models.RootfsArtifact{
+				ArtifactURL:  "https://minio:9000/bucket/rfs-1.ext4?sig=1",
+				MasterNodeIP: "http://node-a:8089",
+			},
+			want: artifactOwnershipObjectStore,
+		},
+		{
+			name: "local holder",
+			record: &models.RootfsArtifact{
+				ArtifactURL:  "",
+				MasterNodeIP: "http://node-a:8089",
+			},
+			want: artifactOwnershipLocal,
+		},
+		{
+			name: "remote holder",
+			record: &models.RootfsArtifact{
+				ArtifactURL:  "",
+				MasterNodeIP: "http://node-b:8089",
+			},
+			want: artifactOwnershipRemote,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := artifactOwnershipOf(tt.record); got != tt.want {
+				t.Fatalf("artifactOwnershipOf()=%v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // A foreign artifact must not be reused either: this node would hand cubelets a
 // download URL it cannot serve.
 func TestReadyArtifactUsableForReuseRejectsForeignArtifact(t *testing.T) {

@@ -105,12 +105,14 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	//
 	// The proxied remainder is uncached and safe on TC: the compat matrix is
 	// a plain DB read/write and the artifact download is file serving (or an
-	// S3 redirect). Routes are enumerated explicitly (mirroring
+	// S3 proxy stream). Routes are enumerated explicitly (mirroring
 	// RegisterTemplateRoutes) rather than via a wildcard catch-all, so the
 	// local routes can be carved out; keep this list in sync with
 	// RegisterTemplateRoutes below.
 	g.POST(TemplateFromImageAction, createTemplateFromImageGinHandler)
 	g.POST(TemplateRedoAction, handleRedoTemplateAction)
+	g.POST(TemplateMigrateAction, handleTemplateMigrateAction)
+	g.GET(TemplateMigrateAction, getTemplateMigrateStatusAction)
 	g.POST(TemplateAction, createTemplateGinHandler)
 	g.DELETE(TemplateAction, deleteTemplateGinHandler)
 	g.GET(TemplateAction, getTemplateGinHandler)

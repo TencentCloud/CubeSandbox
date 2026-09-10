@@ -62,6 +62,8 @@ func TestCubeRoutesTemplateWritesStayOnCubeMaster(t *testing.T) {
 		"PUT /cube/template/:template_id/alias":     "setTemplateAliasGinHandler",
 		"POST /cube/template/from-image":            "createTemplateFromImageGinHandler",
 		"POST /cube/template/redo":                  "handleRedoTemplateAction",
+		"POST /cube/template/migrate":               "handleTemplateMigrateAction",
+		"GET /cube/template/migrate":                "getTemplateMigrateStatusAction",
 		"GET /cube/template/build/:build_id/status": "handleTemplateBuildStatusAction",
 		"GET /cube/template/from-image":             "getTemplateFromImageGinHandler",
 	}
@@ -122,6 +124,8 @@ func TestTemplateCenterRoutesExcludeWritesAndCachedReads(t *testing.T) {
 		"PUT /cube/template/:template_id/alias",
 		"POST /cube/template/from-image",
 		"POST /cube/template/redo",
+		"POST /cube/template/migrate",
+		"GET /cube/template/migrate",
 	}
 	for _, route := range absent {
 		method, path, _ := strings.Cut(route, " ")

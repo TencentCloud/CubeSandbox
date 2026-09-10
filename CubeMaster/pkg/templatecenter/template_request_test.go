@@ -3,8 +3,24 @@ package templatecenter
 import (
 	"testing"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
+
+func TestEffectiveArtifactDownloadBaseURLPrefersConfiguredMasterAddr(t *testing.T) {
+	t.Setenv("CUBE_MASTER_ADDR", "http://cube-master.cube-system.svc:8089")
+	artifact := &models.RootfsArtifact{MasterNodeIP: "http://0.0.0.0:8089"}
+	if got, want := effectiveArtifactDownloadBaseURL("http://fallback.example", artifact), "http://cube-master.cube-system.svc:8089"; got != want {
+		t.Fatalf("effectiveArtifactDownloadBaseURL() = %q, want %q", got, want)
+	}
+}
+
+func TestEffectiveArtifactDownloadBaseURLFallsBackToArtifactRow(t *testing.T) {
+	artifact := &models.RootfsArtifact{MasterNodeIP: "http://master-from-row:8089"}
+	if got, want := effectiveArtifactDownloadBaseURL("", artifact), "http://master-from-row:8089"; got != want {
+		t.Fatalf("effectiveArtifactDownloadBaseURL() = %q, want %q", got, want)
+	}
+}
 
 func TestCloneEgressRuleDeepCopiesPort(t *testing.T) {
 	port := 8443

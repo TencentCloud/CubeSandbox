@@ -24,9 +24,9 @@ type RootfsArtifact struct {
 	GeneratedRequestJSON    string `json:"generated_request_json" gorm:"column:generated_request_json"`
 	WritableLayerSize       string `json:"writable_layer_size" gorm:"column:writable_layer_size"`
 	DownloadToken           string `json:"download_token" gorm:"column:download_token"`
-	// ArtifactURL is the S3/MinIO presigned download URL. When non-empty,
-	// distribution uses this URL directly instead of building a local HTTP URL
-	// from MasterNodeIP. Empty means the legacy local download path.
+	// ArtifactURL is the S3/MinIO presigned download URL persisted at build time.
+	// CubeMaster/TC may re-sign it when proxying downloads, but Cubelets now
+	// receive the stable CubeMaster download endpoint rather than this raw URL.
 	ArtifactURL string `json:"artifact_url" gorm:"column:artifact_url"`
 	Status      string `json:"status" gorm:"column:status"`
 	LastError   string `json:"last_error" gorm:"column:last_error"`

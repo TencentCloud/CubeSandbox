@@ -135,6 +135,12 @@ func runImageJobReconcilePass(ctx context.Context) {
 		if err := resumeStuckBuiltJobs(ctx); err != nil {
 			logger.Errorf("resume stuck BUILT jobs: %v", err)
 		}
+		// MIGRATE jobs run on CubeMaster itself (unlike PENDING/RUNNING build
+		// jobs, which are TC's responsibility), so this reconciler IS the
+		// right owner for sweeping the ones a crash stranded.
+		if err := failAllStaleTemplateMigrateJobs(ctx, migrateJobStaleAfter); err != nil {
+			logger.Errorf("stale migrate job sweep: %v", err)
+		}
 		if err := reconcileOrphanReplicaCleanups(ctx); err != nil {
 			logger.Errorf("orphan replica cleanup sweep: %v", err)
 		}
@@ -304,8 +310,10 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 		return nil, err
 	}
 	// The ext4 must still be on disk. CubeMaster and CubeTemplateCenter share
-	// the artifact directory (design §9.7), so this holds even if TC has since
-	// been shut down -- but not if GC already reclaimed the artifact.
+	// the artifact volume, mounted at possibly different roots (design §9.7),
+	// so localize the TC-reported path onto Master's own mount first; this
+	// holds even if TC has since been shut down -- but not if GC already
+	// reclaimed the artifact.
 	//
 	// S3-backed results (ArtifactURL set) skip the probe: the durable copy is
 	// the bucket object and cubelets pull from the presigned URL, so the local

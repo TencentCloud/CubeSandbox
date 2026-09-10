@@ -84,7 +84,13 @@ type CommonConf struct {
 	// CubeMaster's HTTP base URL, used by CubeTemplateCenter to report build
 	// results. Can be set here (persistent, per-deployment) or overridden by
 	// the CUBE_MASTER_ADDR environment variable (ad-hoc debugging). Env wins
-	// over yaml. Only CubeTemplateCenter reads this; CubeMaster itself ignores it.
+	// over yaml.
+	//
+	// CubeMaster also reads it (Config.MasterAddr()): it is the address every
+	// other component must use to reach this process, so it is the only
+	// trustworthy value when the incoming request's Host header is a
+	// wildcard/loopback (e.g. `curl http://0.0.0.0:8089`), which is
+	// unreachable from any other node.
 	MasterAddr string `yaml:"master_addr"`
 	// CubeOpsBootRetries: additional LoadNodes attempts (0 = single-shot).
 	// Bridges the systemd startup window.
@@ -1182,6 +1188,31 @@ func validate(cfg *Config) error {
 //go:noinline
 func GetConfig() *Config {
 	return cfg
+}
+
+// EnvMasterAddr is the deployment-wide "how to reach CubeMaster" address.
+// Read on every call so it can be changed without reloading conf.yaml.
+const EnvMasterAddr = "CUBE_MASTER_ADDR"
+
+// MasterAddr returns CubeMaster's own externally-reachable HTTP base URL with
+// no trailing slash, or "" when unset.
+//
+// CubeMaster needs it for one specific job: the artifact download base URL it
+// hands to CubeTemplateCenter (and stores in
+// rootfs_artifacts.master_node_ip) must be an address every Cubelet can
+// actually reach. Deriving it from the incoming request's Host header is
+// wrong whenever the caller used a wildcard/loopback address (`curl
+// http://0.0.0.0:8089`, `curl http://localhost:8089`): that value is
+// meaningless to any other node, so Cubelet's artifact download 404s/fails
+// while the build itself looks perfectly healthy.
+func (c *Config) MasterAddr() string {
+	if addr := strings.TrimSpace(os.Getenv(EnvMasterAddr)); addr != "" {
+		return strings.TrimRight(addr, "/")
+	}
+	if c != nil && c.Common != nil {
+		return strings.TrimRight(strings.TrimSpace(c.Common.MasterAddr), "/")
+	}
+	return ""
 }
 
 // EnvTemplateCenterAddr is how CubeMaster finds CubeTemplateCenter. It mirrors

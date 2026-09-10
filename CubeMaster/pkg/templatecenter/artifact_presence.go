@@ -219,11 +219,33 @@ func artifactServedLocally(downloadBaseURL string, localHosts map[string]bool) b
 
 // artifactAuthoritativeHere reports whether this node may rewrite the shared
 // database row for an artifact whose file it cannot find.
+type artifactOwnership int
+
+const (
+	artifactOwnershipUnknown artifactOwnership = iota
+	artifactOwnershipLocal
+	artifactOwnershipRemote
+	artifactOwnershipObjectStore
+)
+
+func artifactOwnershipOf(record *models.RootfsArtifact) artifactOwnership {
+	if record == nil {
+		return artifactOwnershipUnknown
+	}
+	if strings.TrimSpace(record.ArtifactURL) != "" {
+		return artifactOwnershipObjectStore
+	}
+	if artifactServedLocally(record.MasterNodeIP, localArtifactHostsFn()) {
+		return artifactOwnershipLocal
+	}
+	return artifactOwnershipRemote
+}
+
 func artifactAuthoritativeHere(record *models.RootfsArtifact) bool {
 	if record == nil {
 		return false
 	}
-	return artifactServedLocally(record.MasterNodeIP, localArtifactHostsFn())
+	return artifactOwnershipOf(record) == artifactOwnershipLocal
 }
 
 // demoteMissingRootfsArtifact flips a READY row whose file vanished to FAILED so
@@ -278,7 +300,7 @@ func resolveMissingArtifact(ctx context.Context, record *models.RootfsArtifact) 
 	if record == nil {
 		return artifactMissingVerdictNone
 	}
-	if strings.TrimSpace(record.ArtifactURL) != "" {
+	if artifactOwnershipOf(record) == artifactOwnershipObjectStore {
 		// S3/MinIO-backed: the durable copy is the object behind artifact_url
 		// and cubelets pull straight from it, so the local ext4 is only a
 		// build-time cache. Its absence (node-local disk wiped, artifact
@@ -356,9 +378,10 @@ func rootfsArtifactReuseVerdict(ctx context.Context, record *models.RootfsArtifa
 		return errors.New("no artifact record")
 	}
 	if strings.TrimSpace(record.ArtifactURL) != "" {
-		// S3/MinIO-backed: the object behind artifact_url is the durable copy
-		// and cubelets download from it directly, so the local ext4's
-		// presence/size must not gate reuse (see resolveMissingArtifact).
+		// S3/MinIO-backed: the object behind artifact_url is the durable copy,
+		// so the local ext4's presence/size must not gate reuse (see
+		// resolveMissingArtifact). Distribution/create later probe the unified
+		// download endpoint separately.
 		return nil
 	}
 	if artifactServedByRemoteTier() {

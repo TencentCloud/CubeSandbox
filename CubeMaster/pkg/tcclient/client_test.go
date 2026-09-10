@@ -1,23 +1,20 @@
-// Copyright (c) 2026 Tencent Inc.
-// SPDX-License-Identifier: Apache-2.0
-//
-
 package tcclient
 
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 )
 
 // DeleteArtifact must POST the artifact_id to /tc/api/v1/artifact/delete and
-// treat a 200 response as success. This is the piece that was entirely
-// missing before: CubeMaster could Submit a build job but had no way to ask
-// TC to delete the artifact's S3 object, which is how S3 objects leaked.
+// treat a 200 response as success.
 func TestDeleteArtifactSuccess(t *testing.T) {
 	var gotPath string
 	var gotBody map[string]any
@@ -70,18 +67,28 @@ func TestDeleteArtifactUnreachable(t *testing.T) {
 // shared-token header so TC's auth middleware accepts the request; when the
 // env is empty the header must be absent (matching a token-less TC).
 func TestSharedTokenHeader(t *testing.T) {
-	var gotDelete, gotSubmit string
+	var gotDelete, gotSubmit, gotUpload string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/tc/api/v1/artifact/delete":
 			gotDelete = r.Header.Get(constants.TemplateCallbackTokenHeader)
 		case "/tc/api/v1/build":
 			gotSubmit = r.Header.Get(constants.TemplateCallbackTokenHeader)
+		case "/tc/api/v1/artifact/upload":
+			gotUpload = r.Header.Get(constants.TemplateCallbackTokenHeader)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(UploadArtifactResponse{Status: "uploaded", ArtifactID: "art-1"})
+			return
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	}))
 	defer srv.Close()
+
+	artifactPath := filepath.Join(t.TempDir(), "art-1.ext4")
+	if err := os.WriteFile(artifactPath, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write artifact file: %v", err)
+	}
 
 	t.Setenv(constants.TemplateCallbackTokenEnv, "s3cr3t")
 	c := NewClient(srv.URL)
@@ -91,19 +98,81 @@ func TestSharedTokenHeader(t *testing.T) {
 	if err := c.SubmitBuildJob(context.Background(), "job-1", nil, "", "", nil); err != nil {
 		t.Fatalf("SubmitBuildJob() error = %v", err)
 	}
-	if gotDelete != "s3cr3t" || gotSubmit != "s3cr3t" {
-		t.Fatalf("token header = %q/%q, want s3cr3t on both", gotDelete, gotSubmit)
+	if _, err := c.UploadArtifact(context.Background(), "art-1", artifactPath); err != nil {
+		t.Fatalf("UploadArtifact() error = %v", err)
+	}
+	if gotDelete != "s3cr3t" || gotSubmit != "s3cr3t" || gotUpload != "s3cr3t" {
+		t.Fatalf("token header = %q/%q/%q, want s3cr3t on all three", gotDelete, gotSubmit, gotUpload)
 	}
 
 	t.Setenv(constants.TemplateCallbackTokenEnv, "")
-	gotDelete, gotSubmit = "", ""
+	gotDelete, gotSubmit, gotUpload = "", "", ""
 	if err := c.DeleteArtifact(context.Background(), "art-1"); err != nil {
 		t.Fatalf("DeleteArtifact() error = %v", err)
 	}
 	if err := c.SubmitBuildJob(context.Background(), "job-1", nil, "", "", nil); err != nil {
 		t.Fatalf("SubmitBuildJob() error = %v", err)
 	}
-	if gotDelete != "" || gotSubmit != "" {
-		t.Fatalf("token header must be absent when env unset, got %q/%q", gotDelete, gotSubmit)
+	if _, err := c.UploadArtifact(context.Background(), "art-1", artifactPath); err != nil {
+		t.Fatalf("UploadArtifact() error = %v", err)
+	}
+	if gotDelete != "" || gotSubmit != "" || gotUpload != "" {
+		t.Fatalf("token header must be absent when env unset, got %q/%q/%q", gotDelete, gotSubmit, gotUpload)
+	}
+}
+
+func TestUploadArtifactStreamsMultipart(t *testing.T) {
+	tmpDir := t.TempDir()
+	artifactPath := filepath.Join(tmpDir, "rfs-test.ext4")
+	payload := []byte("test-ext4-content")
+	if err := os.WriteFile(artifactPath, payload, 0o644); err != nil {
+		t.Fatalf("write artifact file: %v", err)
+	}
+
+	var gotArtifactID string
+	var gotFileBytes []byte
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tc/api/v1/artifact/upload" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if err := r.ParseMultipartForm(8 << 20); err != nil {
+			t.Fatalf("parse multipart form: %v", err)
+		}
+		gotArtifactID = r.FormValue("artifact_id")
+		f, _, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("form file: %v", err)
+		}
+		defer f.Close()
+		gotFileBytes, err = io.ReadAll(f)
+		if err != nil {
+			t.Fatalf("read uploaded file: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(UploadArtifactResponse{
+			Status:        "uploaded",
+			ArtifactID:    gotArtifactID,
+			Ext4Path:      artifactPath,
+			Ext4SHA256:    "sha256",
+			Ext4SizeBytes: int64(len(gotFileBytes)),
+		})
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL)
+	resp, err := client.UploadArtifact(context.Background(), "rfs-test", artifactPath)
+	if err != nil {
+		t.Fatalf("UploadArtifact failed: %v", err)
+	}
+	if gotArtifactID != "rfs-test" {
+		t.Fatalf("artifact_id=%q, want rfs-test", gotArtifactID)
+	}
+	if string(gotFileBytes) != string(payload) {
+		t.Fatalf("uploaded bytes=%q, want %q", string(gotFileBytes), string(payload))
+	}
+	if resp.Ext4SizeBytes != int64(len(payload)) {
+		t.Fatalf("resp.Ext4SizeBytes=%d, want %d", resp.Ext4SizeBytes, len(payload))
 	}
 }

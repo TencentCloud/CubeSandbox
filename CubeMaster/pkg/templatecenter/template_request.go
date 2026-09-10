@@ -13,8 +13,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
@@ -51,14 +53,12 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 			},
 		},
 	}
-	// Re-sign S3-backed artifact URLs at the point of use; the stored
-	// presigned URL expires (7d) while the artifact lives longer. Falls back
-	// to the stored URL when this process cannot sign (see
-	// artifactDownloadURL).
-	downloadURL := artifactDownloadURL(ctx, artifact)
-	if downloadURL == "" {
-		downloadURL = buildDownloadURL(downloadBaseURL, artifact.ArtifactID, artifact.DownloadToken)
-	}
+	// Always hand Cubelets / create-requests the CubeMaster download endpoint,
+	// never a direct S3 presigned URL. The endpoint is the one address the
+	// deployment guarantees every node can reach; it can then proxy to
+	// CubeTemplateCenter / S3 as needed. This avoids K8s multi-node drift where
+	// some nodes can dial the object store endpoint and others cannot.
+	downloadURL := buildDownloadURL(effectiveArtifactDownloadBaseURL(downloadBaseURL, artifact), artifact.ArtifactID, artifact.DownloadToken)
 	imageAnnotations := map[string]string{
 		constants.CubeAnnotationRootfsArtifactID:        artifact.ArtifactID,
 		constants.CubeAnnotationRootfsArtifactURL:       downloadURL,
@@ -216,6 +216,87 @@ func buildDownloadURL(baseURL, artifactID, token string) string {
 	query.Set("token", token)
 	u.RawQuery = query.Encode()
 	return u.String()
+}
+
+// HostReachableByOtherNodes reports whether a host[:port] value can be dialed
+// from another node. Wildcard binds (0.0.0.0, [::], ::) and loopback
+// (localhost, 127.0.0.0/8, ::1) are only meaningful on this host, so they must
+// never be handed to a Cubelet as a download address.
+func HostReachableByOtherNodes(host string) bool {
+	host = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if host == "" {
+		return false
+	}
+	if host[0] == '[' {
+		if end := strings.Index(host, "]"); end > 0 {
+			host = host[1:end]
+		}
+	} else if idx := strings.LastIndex(host, ":"); idx > 0 && !strings.Contains(host[idx+1:], "]") {
+		host = host[:idx]
+	}
+	host = strings.ToLower(host)
+	switch host {
+	case "", "0.0.0.0", "::", "localhost", "localhost.localdomain", "ip6-localhost":
+		return false
+	}
+	if strings.HasPrefix(host, "127.") || host == "::1" {
+		return false
+	}
+	return true
+}
+
+// ExternallyUsableBaseURL reports whether raw is a base URL other nodes can
+// dial: non-empty, parseable, and not wildcard/loopback.
+func ExternallyUsableBaseURL(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return false
+	}
+	u, err := url.Parse(NormalizeBaseURL(trimmed))
+	if err != nil {
+		return false
+	}
+	return HostReachableByOtherNodes(u.Host)
+}
+
+// effectiveArtifactDownloadBaseURL picks the CubeMaster base URL embedded into
+// Cubelet-facing download URLs. Every candidate must be externally usable:
+// one-click historically ships CUBE_MASTER_ADDR=http://127.0.0.1:8089, and old
+// artifact rows may carry a wildcard master_node_ip (http://0.0.0.0:8089) --
+// handing either to a remote Cubelet makes every artifact download fail while
+// the build job itself reports success. Unusable candidates are skipped with a
+// warning so resolution falls through to the next source (or "" , which
+// callers already treat as "not ready for distribution").
+func effectiveArtifactDownloadBaseURL(fallback string, artifact *models.RootfsArtifact) string {
+	if cfg := config.GetConfig(); cfg != nil {
+		if addr := strings.TrimSpace(cfg.MasterAddr()); addr != "" {
+			if ExternallyUsableBaseURL(addr) {
+				return NormalizeBaseURL(addr)
+			}
+			log.G(context.Background()).Warnf("configured master addr %q is wildcard/loopback; not usable as the cubelet-facing download base URL, falling through", addr)
+		}
+	}
+	if addr := strings.TrimSpace(os.Getenv(config.EnvMasterAddr)); addr != "" {
+		if ExternallyUsableBaseURL(addr) {
+			return NormalizeBaseURL(addr)
+		}
+		log.G(context.Background()).Warnf("%s=%q is wildcard/loopback; not usable as the cubelet-facing download base URL, falling through", config.EnvMasterAddr, addr)
+	}
+	if trimmed := strings.TrimSpace(fallback); trimmed != "" {
+		if ExternallyUsableBaseURL(trimmed) {
+			return NormalizeBaseURL(trimmed)
+		}
+		log.G(context.Background()).Warnf("request-derived download base URL %q is wildcard/loopback; falling through to the artifact row", trimmed)
+	}
+	if artifact != nil {
+		if trimmed := strings.TrimSpace(artifact.MasterNodeIP); trimmed != "" {
+			if ExternallyUsableBaseURL(trimmed) {
+				return NormalizeBaseURL(trimmed)
+			}
+			log.G(context.Background()).Warnf("artifact %s master_node_ip %q is wildcard/loopback; no usable download base URL", artifact.ArtifactID, trimmed)
+		}
+	}
+	return ""
 }
 
 func artifactRootHostHint() string {
