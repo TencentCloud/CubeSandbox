@@ -302,8 +302,8 @@ scheduler:
 
 | Field | Meaning |
 |-------|---------|
-| `weight` | Relative weight in `runScoreFilter`'s weighted average (`Σ(score × weight) / Σ(weight)`). Returned scores must use the same **`[0, 100]`** scale as built-in scorers; a sidecar that returns normalised `0.0–1.0` values contributes ~1% of a built-in scorer at equal weight. Omitting `weight` (or any value `<= 0`) skips the HTTP call, same as `disable: true`. Read live from `plugin_conf` on each `Weight()` / `Select` (hot-reload applies without restart). |
-| `endpoint` | Sidecar URL. Empty endpoint skips the plugin. Non-empty values must be absolute `http://` or `https://` URLs with a host; missing scheme, `file://`, `unix://`, and other schemes fail construction (or fail-open at Select after hot-reload). |
+| `weight` | Relative weight in `runScoreFilter`'s weighted average (`Σ(score × weight) / Σ(weight)`). Returned scores must use the same **`[0, 100]`** scale as built-in scorers; a sidecar that returns normalised `0.0–1.0` values contributes ~1% of a built-in scorer at equal weight. Zero/omitted `weight` defaults to **`1.0`** when `disable` is false (so a partial plugin block still scores). Use `disable: true` to turn the plugin off. Negative weights are rejected at construction. Read live from `plugin_conf` on each `Weight()` / `Select` (hot-reload applies without restart). |
+| `endpoint` | Sidecar URL. Empty endpoint skips the plugin. Non-empty values must be absolute `http://` or `https://` URLs with a host; missing scheme, `file://`, `unix://`, and other schemes fail construction (or fail-open at Select after hot-reload). Leading/trailing whitespace is trimmed before the request. |
 | `timeout` | Per-request HTTP timeout. Zero/omitted uses the default **200ms**. Negative values are rejected at construction (not silently coerced). |
 | `mode` | Optional operator-defined mode string included in the JSON request. |
 | `disable` | When true, the plugin is a no-op even if enabled in `enable_scorers`. Read live like `weight`. |
@@ -343,11 +343,15 @@ Response:
 
 Scorer failures (timeout, non-2xx, redirect, malformed/oversized body, validation
 errors) return an error from the plugin. `runScoreFilter` skips failed scorers
-and continues scheduling (**fail-open** for sandbox creation). Failures are
-logged once at the scorer boundary without endpoint URLs, URL userinfo, query
-tokens, or request/response bodies; secrets are not logged. The call is
-**synchronous** on the create path; this PR does not add a circuit breaker,
-cache, async execution, retry loop, or concurrency limiter.
+and continues scheduling (**fail-open** for sandbox creation). Failures increment
+`cubemaster_scheduler_external_http_score_failures_total` and are logged at the
+scorer boundary without endpoint URLs, URL userinfo, query tokens, or
+request/response bodies; Warn is rate-limited to about one line per sanitized
+failure category per minute (further failures stay at Debug) so a down sidecar
+does not flood create-path logs. Missing scores for any requested candidate fail
+the whole attempt (anti-bias: scoring only a subset would systematically skew
+ranking). The call is **synchronous** on the create path; this PR does not add a
+circuit breaker, cache, async execution, retry loop, or concurrency limiter.
 
 ## See also
 

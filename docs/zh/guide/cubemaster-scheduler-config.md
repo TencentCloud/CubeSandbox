@@ -300,8 +300,8 @@ scheduler:
 
 | 字段 | 含义 |
 |------|------|
-| `weight` | 在 `runScoreFilter` 加权平均（`Σ(score × weight) / Σ(weight)`）中的相对权重。返回分数必须与内置 scorer 使用相同的 **`[0, 100]`** 量纲；若 sidecar 返回归一化的 `0.0–1.0`，在相同 weight 下贡献大约只有内置 scorer 的 1%。省略 `weight`（或任意 `<= 0`）会跳过 HTTP 调用，效果与 `disable: true` 相同。每次 `Weight()` / `Select` 都会从 `plugin_conf` 热读（热更新无需重启）。 |
-| `endpoint` | Sidecar URL。为空则跳过该插件。非空时必须是带 host 的绝对 `http://` 或 `https://` URL；缺 scheme、`file://`、`unix://` 等会在构造时失败（热更新后则在 Select 上 fail-open）。 |
+| `weight` | 在 `runScoreFilter` 加权平均（`Σ(score × weight) / Σ(weight)`）中的相对权重。返回分数必须与内置 scorer 使用相同的 **`[0, 100]`** 量纲；若 sidecar 返回归一化的 `0.0–1.0`，在相同 weight 下贡献大约只有内置 scorer 的 1%。在 `disable` 为 false 时，为 0/省略的 `weight` 默认 **`1.0`**（避免只写了 plugin 块却漏写 weight 时静默失效）。关闭插件请用 `disable: true`。负 weight 会在构造阶段被拒绝。每次 `Weight()` / `Select` 都会从 `plugin_conf` 热读（热更新无需重启）。 |
+| `endpoint` | Sidecar URL。为空则跳过该插件。非空时必须是带 host 的绝对 `http://` 或 `https://` URL；缺 scheme、`file://`、`unix://` 等会在构造时失败（热更新后则在 Select 上 fail-open）。请求前会 trim 首尾空白。 |
 | `timeout` | 单次 HTTP 超时。为 0/省略时使用默认 **200ms**。负值会在构造阶段被拒绝（不会被静默改写成默认值）。 |
 | `mode` | 可选的运营自定义字符串，写入请求 JSON。 |
 | `disable` | 为 true 时即使已 enable 也是空操作；与 `weight` 一样热读。 |
@@ -339,9 +339,12 @@ scheduler:
 
 scorer 失败（超时、非 2xx、重定向、畸形/过大响应、校验错误）会返回错误。
 `runScoreFilter` 会跳过失败的 scorer 并继续调度（对 sandbox 创建保持
-**fail-open**）。失败在 scorer 边界记录一次日志，不记录 endpoint URL、URL userinfo、
-query token，也不记录请求/响应正文或密钥。该调用在创建路径上是**同步**的；本 PR
-不引入熔断、缓存、异步执行、重试循环或并发限制。
+**fail-open**）。失败会递增 `cubemaster_scheduler_external_http_score_failures_total`，
+并在 scorer 边界记录日志（不记录 endpoint URL、URL userinfo、query token，也不记录
+请求/响应正文或密钥）。Warn 按脱敏后的失败类别大约每分钟至多一条（同类别后续失败
+降为 Debug），避免 sidecar 宕机时刷爆 create 路径日志。任一请求候选缺少分数会使整次
+尝试失败（反偏差：只给子集打分会系统性扭曲排序）。该调用在创建路径上是**同步**的；
+本 PR 不引入熔断、缓存、异步执行、重试循环或并发限制。
 
 ## 相关文档
 

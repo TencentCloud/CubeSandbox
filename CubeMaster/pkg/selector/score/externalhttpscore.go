@@ -178,13 +178,21 @@ func externalHTTPScoreConfigFrom(global *config.Config) *config.ExternalHTTPScor
 
 // validateExternalHTTPScoreConfig checks timeout and, when endpoint is set,
 // that it is an absolute http(s) URL with a host. Empty endpoint remains a
-// documented no-op (Select skips the HTTP call).
+// documented no-op (Select skips the HTTP call). A zero weight with disable
+// false defaults to 1.0 so omitting weight: does not silently disable the only
+// network scorer; use disable: true to turn it off.
 func validateExternalHTTPScoreConfig(cfg *config.ExternalHTTPScore) error {
 	if cfg == nil {
 		return fmt.Errorf("external_http_score: config is nil")
 	}
 	if cfg.Timeout < 0 {
 		return fmt.Errorf("external_http_score: timeout must be non-negative")
+	}
+	if cfg.Weight < 0 {
+		return fmt.Errorf("external_http_score: weight must be non-negative")
+	}
+	if cfg.Weight == 0 && !cfg.Disable {
+		cfg.Weight = 1
 	}
 	endpoint := strings.TrimSpace(cfg.Endpoint)
 	if endpoint == "" {
@@ -206,10 +214,9 @@ func validateExternalHTTPScoreConfig(cfg *config.ExternalHTTPScore) error {
 
 func (l *externalHTTPScore) Disable() bool {
 	cfg := l.pluginConfig()
-	// weight defaults to 0 when omitted; treat non-positive weight like disable
-	// so Select does not pay for a synchronous HTTP round trip that cannot
-	// contribute to runScoreFilter's weighted average.
-	return cfg == nil || cfg.Disable || cfg.Weight <= 0
+	// Match other scorers: Disable reflects only the disable flag. Zero/omitted
+	// weight is defaulted to 1.0 in validateExternalHTTPScoreConfig.
+	return cfg == nil || cfg.Disable
 }
 
 func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList, err error) {
@@ -232,7 +239,7 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 	}
 
 	cfg := l.pluginConfig()
-	if cfg == nil || l.Disable() || cfg.Weight <= 0 || strings.TrimSpace(cfg.Endpoint) == "" {
+	if cfg == nil || l.Disable() || strings.TrimSpace(cfg.Endpoint) == "" {
 		return nil, nil
 	}
 	if err := validateExternalHTTPScoreConfig(cfg); err != nil {
@@ -240,6 +247,9 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		// open with one sanitized log line rather than a silent no-op.
 		logExternalHTTPScoreFailure(ctx, err)
 		return nil, err
+	}
+	if cfg.Weight <= 0 {
+		return nil, nil
 	}
 
 	inList := selCtx.Nodes()
@@ -280,7 +290,15 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 }
 
 func logExternalHTTPScoreFailure(ctx context.Context, err error) {
-	log.G(ctx).Warnf("external_http_score fail-open: %s", sanitizeExternalHTTPScoreFailure(err))
+	cat := sanitizeExternalHTTPScoreFailure(err)
+	observeExternalHTTPScoreFailure(cat)
+	if shouldWarnExternalHTTPScoreFailure(cat) {
+		externalHTTPScoreWarnCount.Add(1)
+		log.G(ctx).Warnf("external_http_score fail-open: %s", cat)
+		return
+	}
+	// Same category recently warned; keep create-path noise at Debug.
+	log.G(ctx).Debugf("external_http_score fail-open: %s", cat)
 }
 
 // sanitizeExternalHTTPScoreFailure returns a log-safe failure summary that never
@@ -322,6 +340,8 @@ func classifyExternalHTTPScoreMessage(msg string) string {
 		return "external_http_score empty_scores"
 	case strings.HasPrefix(msg, "external_http_score: timeout"):
 		return "external_http_score invalid_timeout"
+	case strings.HasPrefix(msg, "external_http_score: weight"):
+		return "external_http_score invalid_weight"
 	case strings.HasPrefix(msg, "external_http_score: invalid endpoint"):
 		return "external_http_score invalid_endpoint"
 	case strings.HasPrefix(msg, "external_http_score:"):

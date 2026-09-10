@@ -481,33 +481,36 @@ func TestExternalHTTPScoreSkipsWhenDisabled(t *testing.T) {
 	}
 }
 
-func TestExternalHTTPScoreSkipsWhenWeightNonPositive(t *testing.T) {
-	var contacted atomic.Bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		contacted.Store(true)
-		http.Error(w, "should not be called", http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	for _, weight := range []float64{0, -1} {
-		scorer := newExternalHTTPScoreWithConfig(&config.ExternalHTTPScore{
-			Weight:   weight,
-			Endpoint: server.URL,
-			Timeout:  time.Second,
-		})
-		if !scorer.Disable() {
-			t.Fatalf("Disable() = false for weight %v, want true", weight)
-		}
-		got, err := scorer.Select(externalHTTPScoreTestCtx())
-		if err != nil {
-			t.Fatalf("weight %v: Select() error = %v, want nil", weight, err)
-		}
-		if got != nil {
-			t.Fatalf("weight %v: Select() = %+v, want nil scores", weight, got)
-		}
+func TestExternalHTTPScoreDefaultsZeroWeightToOne(t *testing.T) {
+	cfg := &config.ExternalHTTPScore{
+		Weight:   0,
+		Endpoint: "http://example.invalid",
 	}
-	if contacted.Load() {
-		t.Fatal("non-positive weight external HTTP scorer contacted endpoint")
+	if err := validateExternalHTTPScoreConfig(cfg); err != nil {
+		t.Fatalf("validate error = %v", err)
+	}
+	if cfg.Weight != 1 {
+		t.Fatalf("Weight after validate = %v, want default 1", cfg.Weight)
+	}
+	scorer := newExternalHTTPScoreWithConfig(&config.ExternalHTTPScore{
+		Weight:   0,
+		Endpoint: "http://example.invalid",
+	})
+	if scorer.Disable() {
+		t.Fatal("Disable() = true for weight 0 with disable=false, want false")
+	}
+	if scorer.Weight() != 1 {
+		t.Fatalf("Weight() = %v, want defaulted 1", scorer.Weight())
+	}
+}
+
+func TestExternalHTTPScoreRejectsNegativeWeight(t *testing.T) {
+	err := validateExternalHTTPScoreConfig(&config.ExternalHTTPScore{
+		Weight:   -1,
+		Endpoint: "http://example.invalid",
+	})
+	if err == nil || !strings.Contains(err.Error(), "weight") {
+		t.Fatalf("error = %v, want weight validation", err)
 	}
 }
 
@@ -655,6 +658,8 @@ func TestValidateExternalHTTPScoreConfig(t *testing.T) {
 	}{
 		{name: "nil", cfg: nil, wantErr: "config is nil"},
 		{name: "empty endpoint ok", cfg: &config.ExternalHTTPScore{Weight: 1}, wantErr: ""},
+		{name: "zero weight defaults", cfg: &config.ExternalHTTPScore{Endpoint: "http://127.0.0.1:9"}, wantErr: ""},
+		{name: "negative weight", cfg: &config.ExternalHTTPScore{Weight: -1, Endpoint: "http://127.0.0.1:9"}, wantErr: "weight"},
 		{name: "valid http", cfg: &config.ExternalHTTPScore{Endpoint: "http://127.0.0.1:18080/score"}, wantErr: ""},
 		{name: "valid https", cfg: &config.ExternalHTTPScore{Endpoint: "https://sidecar.example/score"}, wantErr: ""},
 		{name: "missing scheme", cfg: &config.ExternalHTTPScore{Endpoint: "127.0.0.1:18080/score"}, wantErr: "invalid endpoint"},
@@ -886,6 +891,26 @@ func TestExternalHTTPScoreSelectNilContextIsSafe(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "nil") {
 		t.Fatalf("Select(nil) error = %q, want nil-context message", err)
+	}
+}
+
+func TestExternalHTTPScoreFailureWarnIsRateLimited(t *testing.T) {
+	resetExternalHTTPScoreFailureLogStateForTest()
+	t.Cleanup(resetExternalHTTPScoreFailureLogStateForTest)
+
+	now := time.Unix(1_700_000_000, 0)
+	externalHTTPScoreNow = func() time.Time { return now }
+
+	err := fmt.Errorf("external_http_score unexpected status: 502")
+	logExternalHTTPScoreFailure(context.Background(), err)
+	logExternalHTTPScoreFailure(context.Background(), err)
+	if got := externalHTTPScoreWarnCount.Load(); got != 1 {
+		t.Fatalf("warn count = %d after two failures in window, want 1", got)
+	}
+	now = now.Add(externalHTTPScoreWarnInterval)
+	logExternalHTTPScoreFailure(context.Background(), err)
+	if got := externalHTTPScoreWarnCount.Load(); got != 2 {
+		t.Fatalf("warn count = %d after interval elapsed, want 2", got)
 	}
 }
 
