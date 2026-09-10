@@ -19,8 +19,8 @@ use super::{
         TERMINAL_CACHE_LIMIT, TERMINAL_CACHE_TTL,
     },
     stream::{
-        end_event, parse_pty_size, pipe_command, process_cwd, pty_command, pty_end_event,
-        send_group_signal, spawn_pty_reader, spawn_reader,
+        end_event, parse_pty_size, pipe_command, process_cwd, pty_command, send_group_signal,
+        spawn_pty_reader, spawn_reader, wait_pty_child,
     },
 };
 
@@ -222,7 +222,7 @@ impl ProcessRegistry {
         .await
         .map_err(|error| RpcError::new(Code::Internal, format!("join PTY setup task: {error}")))?
         .map_err(RpcError::invalid_argument)?;
-        let (pid, mut child, master, reader, writer) = setup;
+        let (pid, child, master, reader, writer) = setup;
         let master = Arc::new(StdMutex::new(master));
         let writer = Arc::new(StdMutex::new(writer));
         let handle = Arc::new(ProcessHandle {
@@ -243,8 +243,8 @@ impl ProcessRegistry {
         let mut pty_reader = spawn_pty_reader(reader, fanout.clone());
         let registry = self.clone();
         tokio::spawn(async move {
-            let end = match tokio::task::spawn_blocking(move || child.wait()).await {
-                Ok(Ok(status)) => pty_end_event(status),
+            let end = match tokio::task::spawn_blocking(move || wait_pty_child(child)).await {
+                Ok(Ok(event)) => event,
                 Ok(Err(error)) => EndEvent {
                     exit_code: -1,
                     exited: false,
