@@ -102,6 +102,120 @@ async fn watch_dir_sends_keepalives_during_idle_periods() {
     );
 }
 
+// 验证 chmod 上报为 CHMOD（此前因映射分支不可达而被误报为 WRITE）。
+#[cfg(unix)]
+#[tokio::test]
+async fn watch_dir_reports_chmod_events() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempdir().unwrap();
+    let file = directory.path().join("mode.txt");
+    fs::write(&file, "watched").unwrap();
+
+    let mut stream = open_watch(directory.path()).await;
+
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    let kind = wait_for_event(&mut stream, "mode.txt").await;
+
+    assert_eq!(
+        kind, "EVENT_TYPE_CHMOD",
+        "chmod must not be reported as another event type"
+    );
+}
+
+// 验证目录内改名产生上游语义的两条事件：源端 RENAME、目标端 CREATE。
+#[cfg(unix)]
+#[tokio::test]
+async fn watch_dir_reports_rename_as_rename_and_create() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("before.txt");
+    fs::write(&source, "watched").unwrap();
+
+    let mut stream = open_watch(directory.path()).await;
+
+    let destination = directory.path().join("after.txt");
+    fs::rename(&source, &destination).unwrap();
+
+    let mut seen = Vec::new();
+    for _ in 0..2 {
+        let event = next_filesystem_event(&mut stream).await;
+        seen.push((
+            event["name"].as_str().unwrap_or_default().to_owned(),
+            event["type"].as_str().unwrap_or_default().to_owned(),
+        ));
+    }
+
+    assert!(
+        seen.contains(&("before.txt".to_owned(), "EVENT_TYPE_RENAME".to_owned())),
+        "rename source event missing: {seen:?}"
+    );
+    assert!(
+        seen.contains(&("after.txt".to_owned(), "EVENT_TYPE_CREATE".to_owned())),
+        "rename destination must be reported as CREATE: {seen:?}"
+    );
+}
+
+// 打开一个 WatchDir 流并消费掉 start 帧。
+#[cfg(unix)]
+async fn open_watch(
+    path: &std::path::Path,
+) -> impl futures_util::Stream<Item = Result<bytes::Bytes, axum::Error>> + Unpin {
+    let request_body = encode_frame(0, json!({"path": path}).to_string().as_bytes()).unwrap();
+    let response = router()
+        .oneshot(
+            Request::post("/filesystem.Filesystem/WatchDir")
+                .header(CONTENT_TYPE, "application/connect+json")
+                .header("Connect-Protocol-Version", "1")
+                .header("Authorization", common::basic_auth_header())
+                .body(Body::from(request_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut stream = response.into_body().into_data_stream();
+    let start = decode_frame(&stream.next().await.unwrap().unwrap()).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&start.payload).unwrap(),
+        json!({"start": {}})
+    );
+    stream
+}
+
+// 等待指定名称的文件系统事件并返回其协议类型。
+#[cfg(unix)]
+async fn wait_for_event(
+    stream: &mut (impl futures_util::Stream<Item = Result<bytes::Bytes, axum::Error>> + Unpin),
+    name: &str,
+) -> String {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let event = next_filesystem_event(stream).await;
+            if event["name"] == name {
+                return event["type"].as_str().unwrap_or_default().to_owned();
+            }
+        }
+    })
+    .await
+    .expect("watch event before timeout")
+}
+
+// 读取下一个文件系统事件，跳过保活帧。
+#[cfg(unix)]
+async fn next_filesystem_event(
+    stream: &mut (impl futures_util::Stream<Item = Result<bytes::Bytes, axum::Error>> + Unpin),
+) -> serde_json::Value {
+    loop {
+        let bytes = stream.next().await.unwrap().unwrap();
+        let frame = decode_frame(&bytes).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&frame.payload).unwrap();
+        if let Some(filesystem) = payload.get("filesystem") {
+            return filesystem.clone();
+        }
+    }
+}
+
 // 验证压缩请求帧会在创建 watcher 前被拒绝。
 #[tokio::test]
 async fn watch_dir_rejects_compressed_requests_before_creating_a_watcher() {
