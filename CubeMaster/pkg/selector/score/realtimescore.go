@@ -16,17 +16,13 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-type realTimeWeightedAverageScore struct {
-	weight float64
-}
+type realTimeWeightedAverageScore struct{}
 
 func NewRealTimeWeightedAverageScore() *realTimeWeightedAverageScore {
 	if config.GetConfig().Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage == nil {
 		panic("config.Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage is nil")
 	}
-	return &realTimeWeightedAverageScore{
-		weight: config.GetConfig().Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage.Weight,
-	}
+	return &realTimeWeightedAverageScore{}
 }
 
 func (l *realTimeWeightedAverageScore) ID() string {

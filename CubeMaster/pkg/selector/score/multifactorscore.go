@@ -13,17 +13,13 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
-type multiFactorWeightedAverageScore struct {
-	weight float64
-}
+type multiFactorWeightedAverageScore struct{}
 
 func NewMultiFactorWeightedAverageScore() *multiFactorWeightedAverageScore {
 	if config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage == nil {
 		panic("config.Scheduler.Score.ScorePluginConf.AsyncMultiFactor is nil")
 	}
-	return &multiFactorWeightedAverageScore{
-		weight: config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage.Weight,
-	}
+	return &multiFactorWeightedAverageScore{}
 }
 
 func (l *multiFactorWeightedAverageScore) ID() string {
