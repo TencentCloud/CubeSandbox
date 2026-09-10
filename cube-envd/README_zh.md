@@ -223,7 +223,7 @@ envd [OPTIONS]
 | 选项 | 默认值 | 说明 |
 |--------|---------|-------------|
 | `-port`, `--port` | `49983` | HTTP 服务监听端口。 |
-| `-isnotfc`, `--isnotfc` | — | 保留用于 Firecracker 兼容。在 CubeSandbox 中用于跳过 Firecracker MMDS 查找（`169.254.169.254`）；手动启动时应使用。 |
+| `-isnotfc`, `--isnotfc` | — | 仅为兼容 E2B 命令行习惯而保留。cube-envd 不含 Firecracker MMDS 逻辑（CubeSandbox 使用 Cloud Hypervisor，`169.254.169.254` 不存在），因此它是 no-op：带不带行为完全一致。 |
 | `-version`, `--version` | — | 输出版本并退出。 |
 | `-commit`, `--commit` | — | 输出构建提交哈希并退出。 |
 
