@@ -218,9 +218,10 @@ func TestApplySharedEnvAliasesCoversEveryPair(t *testing.T) {
 	// Guards against adding a shared variable to the constants without wiring it
 	// into the shim, which would leave the new spelling silently inert.
 	want := map[string]string{
-		EnvConfigPath:      legacyEnvConfigPath,
-		EnvArtifactWorkDir: legacyEnvArtifactWorkDir,
-		EnvLoopMountExt4:   legacyEnvLoopMountExt4,
+		EnvConfigPath:       legacyEnvConfigPath,
+		EnvArtifactStoreDir: legacyEnvArtifactStoreDir,
+		EnvArtifactWorkDir:  legacyEnvArtifactWorkDir,
+		EnvLoopMountExt4:    legacyEnvLoopMountExt4,
 	}
 	if len(sharedEnvAliases) != len(want) {
 		t.Fatalf("sharedEnvAliases has %d entries, want %d", len(sharedEnvAliases), len(want))
