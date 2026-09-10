@@ -4,17 +4,16 @@
 
 //! PagemapAnon snapshot support
 //!
-//! This module provides functionality for creating pagemap-anon-based snapshots
-//! that only save CoW anonymous pages (pages actually written by the Guest)
-//! by inspecting `/proc/self/pagemap` and `/proc/kpageflags`.
+//! Incremental snapshots only rewrite pages the guest CoW-dirtied on a
+//! `MAP_PRIVATE` mmap of the base image:
+//! - never touched: no PTE (`present=0`) — keep the reflink base
+//! - read only: still file-backed (pagemap bit 61) — keep the reflink base
+//! - written: exclusive anonymous (bit 61 clear) or swapped — overwrite
 //!
-//! In a `MAP_PRIVATE` mmap restore scenario:
-//! - Pages only read by Guest remain as file-backed page cache (KPF_ANON=0)
-//! - Pages written by Guest trigger CoW and become anonymous pages (KPF_ANON=1)
-//! - Pages never accessed have no PTE (present=0)
-//!
-//! This module filters out only the anonymous pages, significantly reducing
-//! snapshot size compared to mincore which also saves read-only page cache pages.
+//! Classification uses one `/proc/self/pagemap` read (bit 61 / 62 / 63).
+//! Do not follow the PFN into `/proc/kpageflags`: that walk is not atomic
+//! with the pagemap snapshot, and compaction can move the page before the
+//! flags are read, dropping dirty pages from the dest file.
 
 use log::{debug, trace};
 use once_cell::sync::Lazy;
@@ -27,10 +26,10 @@ use vm_migration::protocol::{MemoryRange, MemoryRangeTable};
 /// Host page size in bytes, probed once from `sysconf(_SC_PAGESIZE)`.
 ///
 /// This is 4 KiB on x86_64 but 64 KiB on ARM64 hosts configured with 64 KiB
-/// base pages. `/proc/self/pagemap` and `/proc/kpageflags` are indexed in
-/// units of the kernel's real page size, so every page-index, seek-offset and
-/// range-length computation must use this value — hardcoding 4096 would
-/// mis-index the pagemap and silently corrupt snapshots on 64 KiB kernels.
+/// base pages. `/proc/self/pagemap` is indexed in units of the kernel's real
+/// page size, so every page-index, seek-offset and range-length computation
+/// must use this value — hardcoding 4096 would mis-index the pagemap and
+/// silently corrupt snapshots on 64 KiB kernels.
 ///
 /// The value is fixed for the process lifetime, so probe it once and cache it.
 static HOST_PAGE_SIZE: Lazy<u64> = Lazy::new(|| {
@@ -98,20 +97,27 @@ pub(crate) fn coalesce_pages_to_ranges(
 /// Size of a pagemap entry in bytes
 const PAGEMAP_ENTRY_SIZE: u64 = 8;
 
-/// Size of a kpageflags entry in bytes
-const KPAGEFLAGS_ENTRY_SIZE: u64 = 8;
-
 /// Bit 63: page is present in RAM
 const PAGEMAP_PRESENT_BIT: u64 = 1 << 63;
 
 /// Bit 62: page is in swap
 const PAGEMAP_SWAPPED_BIT: u64 = 1 << 62;
 
-/// Mask for PFN (bits 0-54)
-const PAGEMAP_PFN_MASK: u64 = (1 << 55) - 1;
+/// Bit 61: file-backed page or KSM shared-anon (`Documentation/admin-guide/mm/pagemap.rst`).
+/// Exclusive MAP_PRIVATE CoW pages have this bit clear.
+const PAGEMAP_FILE_OR_SHARED_ANON_BIT: u64 = 1 << 61;
 
-/// Bit 12 in kpageflags: KPF_ANON (anonymous page)
-const KPF_ANON: u64 = 1 << 12;
+/// Whether this pagemap entry is a guest-written page that incremental
+/// snapshot must overlay onto the reflink base.
+pub(crate) fn pagemap_entry_is_cow_anon(entry: u64) -> bool {
+    if (entry & PAGEMAP_SWAPPED_BIT) != 0 {
+        return true;
+    }
+    if (entry & PAGEMAP_PRESENT_BIT) == 0 {
+        return false;
+    }
+    (entry & PAGEMAP_FILE_OR_SHARED_ANON_BIT) == 0
+}
 
 /// Errors related to pagemap_anon operations
 #[derive(Debug, Error)]
@@ -175,8 +181,7 @@ impl PagemapAnonStats {
     }
 }
 
-/// Get the anonymous page bitmap for a memory region by reading
-/// `/proc/self/pagemap` and `/proc/kpageflags`.
+/// Get the anonymous page bitmap for a memory region from `/proc/self/pagemap`.
 ///
 /// # Arguments
 /// * `host_addr` - Host virtual address of the memory region (must be page-aligned)
@@ -184,7 +189,7 @@ impl PagemapAnonStats {
 ///
 /// # Returns
 /// A vector of bools where each bool indicates if the corresponding page
-/// is an anonymous page (CoW written by Guest).
+/// is an exclusive anonymous / swapped page that must be written out.
 pub fn get_anon_pages(host_addr: u64, length: u64) -> Result<Vec<bool>> {
     let page_size = host_page_size();
     if host_addr % page_size != 0 {
@@ -194,20 +199,12 @@ pub fn get_anon_pages(host_addr: u64, length: u64) -> Result<Vec<bool>> {
     let num_pages = length.div_ceil(page_size) as usize;
     let start_page = host_addr / page_size;
 
-    // Open /proc/self/pagemap and /proc/kpageflags
     let mut pagemap_file =
         File::open("/proc/self/pagemap").map_err(|e| PagemapAnonError::OpenFailed {
             path: "/proc/self/pagemap".to_string(),
             source: e,
         })?;
 
-    let mut kpageflags_file =
-        File::open("/proc/kpageflags").map_err(|e| PagemapAnonError::OpenFailed {
-            path: "/proc/kpageflags".to_string(),
-            source: e,
-        })?;
-
-    // Batch read all pagemap entries for this region
     let pagemap_offset = start_page * PAGEMAP_ENTRY_SIZE;
     pagemap_file
         .seek(SeekFrom::Start(pagemap_offset))
@@ -226,8 +223,6 @@ pub fn get_anon_pages(host_addr: u64, length: u64) -> Result<Vec<bool>> {
         })?;
 
     let mut result = vec![false; num_pages];
-    let mut kpageflags_buf = [0u8; KPAGEFLAGS_ENTRY_SIZE as usize];
-
     for (i, item) in result.iter_mut().enumerate().take(num_pages) {
         let entry_offset = i * PAGEMAP_ENTRY_SIZE as usize;
         let entry = u64::from_ne_bytes(
@@ -235,51 +230,7 @@ pub fn get_anon_pages(host_addr: u64, length: u64) -> Result<Vec<bool>> {
                 .try_into()
                 .unwrap(),
         );
-
-        let present = (entry & PAGEMAP_PRESENT_BIT) != 0;
-        let swapped = (entry & PAGEMAP_SWAPPED_BIT) != 0;
-
-        // Swapped anonymous pages are also Guest-written pages that must be saved.
-        // When an anonymous page is swapped out, present=0 but swapped=1.
-        if swapped {
-            *item = true;
-            continue;
-        }
-
-        if !present {
-            continue;
-        }
-
-        let pfn = entry & PAGEMAP_PFN_MASK;
-        if pfn == 0 {
-            // PFN is zero for a present page — this means we don't have
-            // CAP_SYS_ADMIN permission to read PFN from pagemap.
-            return Err(PagemapAnonError::NoCapSysAdmin);
-        }
-
-        // Read kpageflags for this PFN
-        let kpageflags_offset = pfn * KPAGEFLAGS_ENTRY_SIZE;
-        kpageflags_file
-            .seek(SeekFrom::Start(kpageflags_offset))
-            .map_err(|e| PagemapAnonError::SeekFailed {
-                path: "/proc/kpageflags".to_string(),
-                source: e,
-            })?;
-
-        kpageflags_file
-            .read_exact(&mut kpageflags_buf)
-            .map_err(|e| PagemapAnonError::ReadFailed {
-                path: "/proc/kpageflags".to_string(),
-                source: e,
-            })?;
-
-        let flags = u64::from_ne_bytes(kpageflags_buf);
-
-        // KPF_ANON (bit 12) indicates this is an anonymous page,
-        // meaning it was created by CoW when Guest wrote to it.
-        if (flags & KPF_ANON) != 0 {
-            *item = true;
-        }
+        *item = pagemap_entry_is_cow_anon(entry);
     }
 
     Ok(result)
@@ -329,7 +280,6 @@ pub fn filter_memory_ranges_by_pagemap_anon<B: vm_memory::bitmap::Bitmap + 'stat
             .get_host_address(GuestAddress(gpa))
             .map_err(|_| PagemapAnonError::GetHostAddressFailed)?;
 
-        // Get anonymous page bitmap via pagemap + kpageflags
         let anon_pages = get_anon_pages(host_addr as u64, length)?;
 
         // Convert bitmap to memory ranges (merge consecutive anonymous pages)
@@ -415,11 +365,28 @@ mod tests {
 
     #[test]
     fn test_pagemap_constants() {
-        // Verify bit positions are correct
         assert_eq!(PAGEMAP_PRESENT_BIT, 1u64 << 63);
         assert_eq!(PAGEMAP_SWAPPED_BIT, 1u64 << 62);
-        assert_eq!(PAGEMAP_PFN_MASK, (1u64 << 55) - 1);
-        assert_eq!(KPF_ANON, 1u64 << 12);
+        assert_eq!(PAGEMAP_FILE_OR_SHARED_ANON_BIT, 1u64 << 61);
+    }
+
+    #[test]
+    fn test_pagemap_entry_is_cow_anon() {
+        assert!(!pagemap_entry_is_cow_anon(0), "not present");
+        assert!(
+            !pagemap_entry_is_cow_anon(
+                PAGEMAP_PRESENT_BIT | PAGEMAP_FILE_OR_SHARED_ANON_BIT | 0x100
+            ),
+            "present file-backed / shared-anon stays on the reflink base"
+        );
+        assert!(
+            pagemap_entry_is_cow_anon(PAGEMAP_PRESENT_BIT | 0x100),
+            "present exclusive anon is CoW"
+        );
+        assert!(
+            pagemap_entry_is_cow_anon(PAGEMAP_SWAPPED_BIT),
+            "swapped pages were guest-written"
+        );
     }
 
     /// Coalescing must produce byte offsets/lengths scaled by the *injected*
