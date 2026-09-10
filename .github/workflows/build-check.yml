@@ -249,6 +249,19 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
           exit 1
 
+      # cube-envd 的 `make lint` 是 fmt --check + clippy -D warnings。此前 CI 只跑
+      # 构建与单测，clippy 从未被任何 workflow 调用（agent 的 lint 目标同样只在本地
+      # 手动使用），这里补上这道门禁。builder 镜像为每个 toolchain 都装了 clippy
+      # （docker/Dockerfile.builder），因此不需要额外的工具链准备步骤。
+      - name: Lint cube-envd (fmt + clippy)
+        if: matrix.component == 'cube-envd'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          make cube-envd-lint \
+            BUILDER_IMAGE="${{ steps.builder_image.outputs.image }}"
+
   # Docker smoke build for release images that use repo-root context +
   # adjacent Dockerfile.dockerignore (catches context/ignore regressions).
   docker-smoke:

@@ -556,6 +556,13 @@ agent-test: builder-image
 cube-envd-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-envd && make test'
 
+# Clippy runs with -D warnings, so this target is a hard gate: any new lint
+# fails it. It is intentionally separate from `cube-envd` to keep the plain
+# build fast.
+.PHONY: cube-envd-lint
+cube-envd-lint: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-envd && make lint'
+
 # Only unit tests (--lib --bins) run here; the tests/integration.rs target
 # needs a full VM. This does not pass /dev/kvm into the builder, so the
 # runtime-KVM vmm tests are not reached (see tests/unittest/run.sh
