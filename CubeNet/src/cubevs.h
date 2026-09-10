@@ -40,9 +40,9 @@
 #define DNS_POLICY_FLAG_LEARNING_ENABLED	1
 #define NET_POLICY_FLAG_L7_REQUIRED	1
 /* Set alongside NET_POLICY_FLAG_L7_REQUIRED when a domain is present in BOTH
- * a plain (L3) allow_out rule and an L7 rule. Tells dns_learn_response_ip to
- * learn the plain /32 any-port entry in addition to the L7 (ip, port)/48
- * entries, so non-rule ports keep plain SNAT access while the rule's ports are
+ * a plain (L3) allow_out rule and an L7 rule. Tells the user-space DNS learner
+ * to derive the plain /32 any-port row in addition to the L7 (ip, port)/48
+ * rows, so non-rule ports keep plain SNAT access while the rule's ports are
  * L7-intercepted. Without it an L7 rule silently narrows a same-domain plain
  * allow_out to only the rule's ports.
  */
@@ -79,6 +79,24 @@ const volatile __u32 cube_l7_mark_mask = 0xFFFF0000u;
 const volatile __u32 cube_l7_mark_http = 0xCE010000u;
 const volatile __u32 cube_l7_mark_https = 0xCE020000u;
 #define DNS_QUERY_TRACK_TTL_NS		(10ULL * NSEC_PER_SEC)
+
+/* Per-sandbox ceiling on tracked DNS queries. Only queries that matched a
+ * dns_allow_v2 rule consume budget, so ordinary DNS traffic is unaffected.
+ * Over budget the query is forwarded but not tracked, so its response is not
+ * uploaded and nothing is learned — the sandbox cannot reach the address it
+ * just resolved, which is fail-closed and self-inflicted.
+ */
+#define DNS_TRACK_QPS_LIMIT		100
+#define DNS_TRACK_WINDOW_NS		(1ULL * NSEC_PER_SEC)
+
+/* Upper bound on a frame handed to user space on dns_events.
+ *
+ * Large enough for a typical EDNS0 reply. A response bigger than this is not
+ * uploaded at all and takes the ordinary reverse-NAT path: truncating it would
+ * make the user-space parse fail, and since an uploaded frame is dropped from
+ * the datapath the sandbox would lose the reply entirely.
+ */
+#define DNS_EVENT_MAX_FRAME		2048
 /* Positive cache lifetime for a fib-learned neighbor MAC. Must be well below
  * the userspace keepalive period (16s) so the cache is re-validated against the
  * kernel neighbor table at least once per keepalive cycle. */
@@ -289,12 +307,21 @@ struct dns_query_track_key {
 	__u64 qname_hash;
 };
 
+/* A pending query, recorded so its response can be recognised.
+ *
+ * The response path only asks "did we track this query"; it does not need to
+ * know what the query matched. The (port, scheme) set the matched rule carried
+ * used to be copied in here so the BPF learner could rebuild an allow_out_v3
+ * row without a second dns_allow_v2 lookup. Learning is in user space now, and
+ * it derives the ports from its own domain index — deliberately, so a policy
+ * update applies to replies that are already in flight rather than to whatever
+ * the rule said when the query left. flags is kept only because a map dump of
+ * pending queries is easier to read when it shows what each one matched.
+ */
 struct dns_query_track_value {
 	__u64 expires_at_ns;
 	__u8 flags;
-	__u8 port_count;
-	__u8 reserved[6];
-	struct l7_port_entry ports[MAX_L7_PORTS_PER_HOST];
+	__u8 reserved[7];
 };
 
 /* Per-packet query parser state shared by the DNS tail-call pipeline. */
@@ -404,8 +431,38 @@ struct dns_response_state {
 	__u32 ifindex;		/* sandbox tap ifindex (sess->vm_ifindex) */
 	__u32 server_ip;	/* DNS server IP (l3->saddr in network byte order) */
 	__u16 source_port;	/* sandbox-side UDP port (sess->vm_port in nbo) */
-	__u16 reserved;
+	/* Set by dns_handle_response_prog when this reply answers a tracked
+	 * query, i.e. when user space owns both the allow_out_v3 write and the
+	 * delivery of this frame. dns_response_finish_prog reads it after the
+	 * reverse NAT to choose between uploading the frame and redirecting it.
+	 */
+	__u16 upload;
 };
+
+/* Per-sandbox DNS query tracking rate limit: a fixed 1s window.
+ *
+ * Coarse by design — a burst can straddle a window boundary and admit up to
+ * 2 * DNS_TRACK_QPS_LIMIT. That is fine: this exists to bound how fast a
+ * sandbox can drive the user-space learning path, not to shape DNS traffic.
+ */
+struct dns_track_rl_state {
+	struct bpf_spin_lock lock;
+	__u32 count;
+	__u64 window_end_ns;
+	__u64 reserved[2];
+};
+
+/* Prefix on every dns_events record, followed by the raw Ethernet frame.
+ *
+ * ifindex is carried in-band so user space injects onto the right TAP without
+ * having to resolve the frame's destination back to a sandbox — after reverse
+ * NAT the destination is mvm_inner_ip, which every sandbox shares.
+ */
+struct dns_event_prefix {
+	__u16 frame_len;
+	__u16 reserved;
+	__u32 ifindex;
+} __attribute__((packed));
 
 /* skb->cb[0] is reserved as a per-invocation NAT status word used by
  * create_nat_session() to communicate the failure reason back to callers
@@ -439,15 +496,19 @@ static __always_inline int _()
 	int f[sizeof(struct dns_allow_key) == MAX_DNS_NAME_LEN + 4 ? 1 : -1] = {};
 	int g[sizeof(struct dns_allow_value) == 40 ? 1 : -1] = {};
 	int h[sizeof(struct dns_query_track_key) == 24 ? 1 : -1] = {};
-	int i[sizeof(struct dns_query_track_value) == 48 ? 1 : -1] = {};
+	int i[sizeof(struct dns_query_track_value) == 16 ? 1 : -1] = {};
 	int l[sizeof(struct mvm_port) == 8 ? 1 : -1] = {};
 	int n[sizeof(struct session_key) % 20 == 0 ? 1 : -1] = {};
 	int o[sizeof(struct nat_session) == 64 ? 1 : -1] = {};
 	int p[sizeof(struct ingress_session) % 16 == 0 ? 1 : -1] = {};
 	int q[sizeof(struct snat_ip) % 16 == 0 ? 1 : -1] = {};
 	int s[sizeof(struct l7_port_entry) == 4 ? 1 : -1] = {};
+	int t[sizeof(struct dns_track_rl_state) == 32 ? 1 : -1] = {};
+	int u[sizeof(struct dns_event_prefix) == 8 ? 1 : -1] = {};
+	int v[sizeof(struct dns_response_state) == 16 ? 1 : -1] = {};
 
-	return b[0] + d[0] + dv3[0] + r[0] + rv3[0] + f[0] + g[0] + h[0] + i[0] + l[0] + n[0] + o[0] + p[0] + q[0] + s[0];
+	return b[0] + d[0] + dv3[0] + r[0] + rv3[0] + f[0] + g[0] + h[0] + i[0] + l[0] + n[0] + o[0] + p[0] + q[0] + s[0] +
+	       t[0] + u[0] + v[0];
 }
 
 static __always_inline __attribute__((used)) __u32 __btf_pin(void)

@@ -324,6 +324,14 @@ func Init(params Params) (retErr error) {
 	_ = os.Remove(pinPath("tungrp_to_tuns")) // NOCC:Path Traversal()
 	// dns_query_track is runtime pending-query state, not persisted policy.
 	_ = os.Remove(pinPath(MapNameDNSQueryTrack)) // NOCC:Path Traversal()
+	// dns_events slots hold references to the perf ring buffers of whichever
+	// process installed them. Reusing a stale pin would send DNS uploads to
+	// rings nobody reads, so always start from a fresh array.
+	_ = os.Remove(pinPath(MapNameDNSEvents)) // NOCC:Path Traversal()
+	// dns_track_rl is per-sandbox runtime counter state, re-installed by
+	// AddTAPDevice. Dropping the pin also sheds any stale map whose value size
+	// differs after a rollback.
+	_ = os.Remove(pinPath(MapNameDNSTrackRL)) // NOCC:Path Traversal()
 	// direct_neigh is runtime neighbor trigger/cache state; its content is
 	// re-learned from the kernel neighbor table via fib, so always start from a
 	// fresh map. This also drops any stale pin with a different value size.

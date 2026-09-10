@@ -237,4 +237,40 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } dns_tail_calls SEC(".maps");
 
+/* Per-sandbox rate limit on DNS query tracking.
+ *
+ * key:   TAP ifindex
+ * value: fixed-window counter guarded by a spin lock
+ *
+ * A tracked query is what authorizes a response to be uploaded to user space,
+ * where learning costs a full desired-state recomputation per response. This
+ * caps how fast a sandbox can drive that path. A missing entry means "no
+ * limit", so a sandbox whose entry has not been installed yet still learns.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, MAX_ENTRIES);
+	__type(key, __u32);
+	__type(value, struct dns_track_rl_state);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} dns_track_rl SEC(".maps");
+
+/* DNS responses handed to user space for learning.
+ *
+ * Each record is a struct dns_event_prefix followed by the post-NAT Ethernet
+ * frame verbatim. max_entries is left at 0; both libbpf and cilium/ebpf fix it
+ * up to the number of possible CPUs at load time.
+ *
+ * The pin is removed on every Init (see miscs.go): a perf event array's slots
+ * hold references to the ring buffers of whichever process installed them, so
+ * reusing a stale pin would send output to rings nobody reads.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+	__uint(max_entries, 0);
+	__type(key, __u32);
+	__type(value, __u32);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} dns_events SEC(".maps");
+
 #endif /* __MAP_H */
