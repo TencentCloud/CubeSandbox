@@ -91,9 +91,7 @@ or semantic equivalence to production scheduling.
             "average_cpu_headroom": 0.58,
             "average_score_margin": 1.47,
             "average_feasible_candidates": 4.0,
-            "average_ranked_candidates_retained": 2.88,
             "feasible_candidate_evaluations": 320,
-            "ranked_candidates_retained": 230,
             "node_final_state": {
               "node-a": {
                 "running_sandbox_count": 12,
@@ -187,9 +185,7 @@ Every `results[].workloads[].metrics` object contains these keys:
 - `average_cpu_headroom`
 - `average_score_margin` (mean first–second score gap over multi-candidate decisions only; 0 when none)
 - `average_feasible_candidates`
-- `average_ranked_candidates_retained`
 - `feasible_candidate_evaluations`
-- `ranked_candidates_retained`
 - `node_final_state`
 
 When at least one request is rejected, the metrics object also includes:
@@ -203,11 +199,11 @@ the command before a report is produced.
 
 `average_feasible_candidates` is
 `feasible_candidate_evaluations / scheduled_requests` and counts feasible
-nodes before the ranked-candidate cap, so it is at most `node_count`.
-`average_ranked_candidates_retained` is
-`ranked_candidates_retained / scheduled_requests` and counts the post-cap
-ranked set, so it is currently at most 3. Both are simulator-local
-candidate-breadth proxies, not scheduler CPU cost or latency.
+nodes for each scheduled request, so it is at most `node_count`. It is a
+simulator-local candidate-breadth proxy, not scheduler CPU cost or latency.
+Because the simulator binds the globally best scored feasible node, truncating
+after a full sort would not change placement, and the report does not include a
+separate post-cap retained-candidate metric.
 
 If both build information and the CLI Git fallback are unavailable,
 `git_revision` is `unknown` and `git_dirty` is `null`. This state cannot

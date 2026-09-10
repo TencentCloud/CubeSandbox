@@ -126,7 +126,6 @@ Markdown result-table columns map to JSON fields (`Report.Markdown()`):
 | `latency p50 ms` | `create_latency_p50_ms` |
 | `latency p95 ms` | `create_latency_p95_ms` |
 | `avg feasible` | `average_feasible_candidates` |
-| `avg retained` | `average_ranked_candidates_retained` |
 
 `Metrics` JSON fields match `simulator.go` struct tags **one-to-one**; there are
 no other metrics keys:
@@ -149,10 +148,8 @@ no other metrics keys:
 | `UsesEstimatedLatency` | `uses_estimated_latency` | Always `true` in the simulator |
 | `AverageCPUHeadroom` | `average_cpu_headroom` | Mean CPU headroom after each successful placement |
 | `AverageScoreMargin` | `average_score_margin` | Mean score gap between first and second place, averaged only over scheduled decisions that had at least two scored candidates; **0** when no such observations exist |
-| `AverageFeasibleCandidates` | `average_feasible_candidates` | `feasible_candidate_evaluations / scheduled_requests`; counted before the candidate cap |
-| `AverageRankedCandidatesRetained` | `average_ranked_candidates_retained` | `ranked_candidates_retained / scheduled_requests` |
-| `FeasibleEvaluations` | `feasible_candidate_evaluations` | Sum of feasible-node counts before the candidate cap |
-| `RankedCandidatesRetained` | `ranked_candidates_retained` | Sum of ranked candidate counts retained after the cap |
+| `AverageFeasibleCandidates` | `average_feasible_candidates` | `feasible_candidate_evaluations / scheduled_requests` |
+| `FeasibleEvaluations` | `feasible_candidate_evaluations` | Sum of feasible-node counts over scheduled requests |
 | `FailureReasons` | `failure_reasons` | Present when there are rejections; currently only `no_feasible_node` (`omitempty`) |
 | `Warnings` | `warnings` | Capacity hints when there are rejections (`omitempty`) |
 | `NodeFinalState` | `node_final_state` | Final occupancy per node; values are `NodeLoad` |
@@ -167,13 +164,11 @@ no other metrics keys:
 | `CPUUtilization` | `cpu_utilization` |
 | `MemUtilization` | `mem_utilization` |
 
-`scoreCandidates` counts all feasible nodes before keeping at most
-`defaultPriorityCandidateNum` (currently 3) ranked candidates. Therefore
-`feasible_candidate_evaluations` / `average_feasible_candidates` measure
-pre-cap feasible breadth (at most node count), while
-`ranked_candidates_retained` / `average_ranked_candidates_retained` measure
-post-cap ranked breadth (at most 3).
-Both are simulator-local breadth proxies, not scheduler CPU cost or latency.
+`scoreCandidates` scores and ranks every feasible node, then binds the top
+scored node. Truncating after a full sort would not change the selected node,
+so the report exposes only `feasible_candidate_evaluations` /
+`average_feasible_candidates` as the simulator-local breadth proxy (at most
+node count), not a separate post-cap retained-candidate metric.
 
 `docs/dev/scheduler-benchmark-report-schema.md` describes the profile × workload
 matrix and `comparisons[]` shape emitted by the current CLI. This document is

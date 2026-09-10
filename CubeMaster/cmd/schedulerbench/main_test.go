@@ -275,9 +275,7 @@ func TestRunCLIDefaultReportJSONContract(t *testing.T) {
 		"create_latency_p95_ms",
 		"uses_estimated_latency",
 		"average_feasible_candidates",
-		"average_ranked_candidates_retained",
 		"feasible_candidate_evaluations",
-		"ranked_candidates_retained",
 		"node_final_state",
 	}
 	for _, item := range results {
@@ -296,7 +294,12 @@ func TestRunCLIDefaultReportJSONContract(t *testing.T) {
 					t.Fatalf("CLI %s/%s metrics missing %q", profileName, workloadName, key)
 				}
 			}
-			for _, oldKey := range []string{"average_candidates_scored", "score_evaluations"} {
+			for _, oldKey := range []string{
+				"average_candidates_scored",
+				"score_evaluations",
+				"average_ranked_candidates_retained",
+				"ranked_candidates_retained",
+			} {
 				if _, ok := metrics[oldKey]; ok {
 					t.Fatalf("CLI %s/%s metrics retains removed key %q", profileName, workloadName, oldKey)
 				}

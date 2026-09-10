@@ -102,7 +102,6 @@ Markdown 结果表列名与 JSON 字段对应关系（`Report.Markdown()`）：
 | `latency p50 ms` | `create_latency_p50_ms` |
 | `latency p95 ms` | `create_latency_p95_ms` |
 | `avg feasible` | `average_feasible_candidates` |
-| `avg retained` | `average_ranked_candidates_retained` |
 
 `Metrics` 的 JSON 字段与 `simulator.go` 中 struct tag **一一对应**，没有其它 metrics 键：
 
@@ -124,10 +123,8 @@ Markdown 结果表列名与 JSON 字段对应关系（`Report.Markdown()`）：
 | `UsesEstimatedLatency` | `uses_estimated_latency` | simulator 中恒为 `true` |
 | `AverageCPUHeadroom` | `average_cpu_headroom` | 每次成功放置后的平均 CPU 余量 |
 | `AverageScoreMargin` | `average_score_margin` | 第一名与第二名分数差的均值，仅对至少有两个已打分候选的调度决策取平均；无此类观测时为 **0** |
-| `AverageFeasibleCandidates` | `average_feasible_candidates` | `feasible_candidate_evaluations / scheduled_requests`；在候选上限截断前计数 |
-| `AverageRankedCandidatesRetained` | `average_ranked_candidates_retained` | `ranked_candidates_retained / scheduled_requests` |
-| `FeasibleEvaluations` | `feasible_candidate_evaluations` | 候选上限截断前的可行节点数之和 |
-| `RankedCandidatesRetained` | `ranked_candidates_retained` | 截断后保留的已排序候选节点数之和 |
+| `AverageFeasibleCandidates` | `average_feasible_candidates` | `feasible_candidate_evaluations / scheduled_requests` |
+| `FeasibleEvaluations` | `feasible_candidate_evaluations` | 成功调度请求上的可行节点数之和 |
 | `FailureReasons` | `failure_reasons` | 有拒绝时出现；当前只记 `no_feasible_node`（`omitempty`） |
 | `Warnings` | `warnings` | 有拒绝时出现容量提示（`omitempty`） |
 | `NodeFinalState` | `node_final_state` | 各节点最终占用；值为 `NodeLoad` |
@@ -142,12 +139,10 @@ Markdown 结果表列名与 JSON 字段对应关系（`Report.Markdown()`）：
 | `CPUUtilization` | `cpu_utilization` |
 | `MemUtilization` | `mem_utilization` |
 
-`scoreCandidates` 先统计全部可行节点，再最多保留 `defaultPriorityCandidateNum`
-（当前为 3）个已排序候选。因此 `feasible_candidate_evaluations` /
-`average_feasible_candidates` 表示截断前可行宽度（最大为节点数），
-`ranked_candidates_retained` / `average_ranked_candidates_retained`
-表示截断后保留的排序宽度（最大为 3）。
-两者都是 simulator 本地宽度代理，不是调度器 CPU 开销或延迟。
+`scoreCandidates` 对全部可行节点打分排序，并绑定最高分节点。全量排序后再截断
+不会改变最终绑定节点，因此报告只暴露 `feasible_candidate_evaluations` /
+`average_feasible_candidates` 作为 simulator 本地候选宽度代理（最大为节点数），
+不再单独报告截断后保留候选指标。
 
 `docs/dev/scheduler-benchmark-report-schema.md` 描述当前 CLI 输出的 profile × workload 矩阵和 `comparisons[]` 对比结构。本文以当前 `Metrics` 字段为准。
 

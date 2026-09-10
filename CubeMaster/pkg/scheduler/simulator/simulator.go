@@ -23,10 +23,9 @@ const (
 	ProfileTemplateLocalityFirst = "template_locality_first"
 	ProfileBinpackUtilization    = "binpack_utilization"
 
-	WorkloadBurstShortLived     = "burst_short_lived"
-	WorkloadSameTemplateRepeat  = "same_template_repeated"
-	WorkloadMixedSizeCreate     = "mixed_size"
-	defaultPriorityCandidateNum = 3
+	WorkloadBurstShortLived    = "burst_short_lived"
+	WorkloadSameTemplateRepeat = "same_template_repeated"
+	WorkloadMixedSizeCreate    = "mixed_size"
 
 	// MinNodeCount and MaxNodeCount bound the simulated node set. The four
 	// declared node specs are the only supported topology; reports must
@@ -125,19 +124,19 @@ type Metrics struct {
 	CreateLatencyP50MS      float64        `json:"create_latency_p50_ms"`
 	CreateLatencyP95MS      float64        `json:"create_latency_p95_ms"`
 	UsesEstimatedLatency    bool           `json:"uses_estimated_latency"`
-	AverageCPUHeadroom      float64        `json:"average_cpu_headroom"`
-	AverageScoreMargin      float64        `json:"average_score_margin"`
-	// AverageFeasibleCandidates is pre-cap feasible breadth;
-	// AverageRankedCandidatesRetained is the post-cap ranked count. Both are
-	// averaged over scheduled requests and are simulator-local
-	// candidate-breadth proxies, not measurements of scheduler work or latency.
-	AverageFeasibleCandidates       float64             `json:"average_feasible_candidates"`
-	AverageRankedCandidatesRetained float64             `json:"average_ranked_candidates_retained"`
-	FeasibleEvaluations             int                 `json:"feasible_candidate_evaluations"`
-	RankedCandidatesRetained        int                 `json:"ranked_candidates_retained"`
-	FailureReasons                  map[string]int      `json:"failure_reasons,omitempty"`
-	Warnings                        []string            `json:"warnings,omitempty"`
-	NodeFinalState                  map[string]NodeLoad `json:"node_final_state"`
+	AverageCPUHeadroom float64 `json:"average_cpu_headroom"`
+	AverageScoreMargin float64 `json:"average_score_margin"`
+	// AverageFeasibleCandidates is the mean number of feasible nodes per
+	// scheduled request. It is a simulator-local candidate-breadth proxy, not
+	// a measurement of scheduler work or latency. The simulator binds the
+	// globally best scored feasible node, so there is no post-score priority
+	// cap that would change the selected node or justify a second breadth
+	// metric.
+	AverageFeasibleCandidates float64             `json:"average_feasible_candidates"`
+	FeasibleEvaluations       int                 `json:"feasible_candidate_evaluations"`
+	FailureReasons            map[string]int      `json:"failure_reasons,omitempty"`
+	Warnings                  []string            `json:"warnings,omitempty"`
+	NodeFinalState            map[string]NodeLoad `json:"node_final_state"`
 }
 
 type NodeLoad struct {
@@ -307,7 +306,6 @@ var requiredMetricSchemaNames = []string{
 	"create_latency_p95_ms",
 	"uses_estimated_latency",
 	"average_feasible_candidates",
-	"average_ranked_candidates_retained",
 }
 
 // VerifyDefaultReport checks that a report produced from the default
@@ -546,33 +544,30 @@ func verifyMetrics(m Metrics, expectedNodeIDs map[string]struct{}) error {
 	finite := []struct {
 		name  string
 		value float64
+		ratio bool
 	}{
-		{"schedule_success_rate", m.SuccessRate},
-		{"node_load_balance", m.NodeLoadBalance},
-		{"template_locality_hit_rate", m.TemplateLocalityHitRate},
-		{"cpu_quota_utilization", m.AverageCPUUtilization},
-		{"peak_cpu_utilization", m.PeakCPUUtilization},
-		{"mem_quota_utilization", m.AverageMemUtilization},
-		{"peak_mem_utilization", m.PeakMemUtilization},
-		{"create_latency_p50_ms", m.CreateLatencyP50MS},
-		{"create_latency_p95_ms", m.CreateLatencyP95MS},
-		{"average_cpu_headroom", m.AverageCPUHeadroom},
-		{"average_score_margin", m.AverageScoreMargin},
-		{"average_feasible_candidates", m.AverageFeasibleCandidates},
-		{"average_ranked_candidates_retained", m.AverageRankedCandidatesRetained},
+		{"schedule_success_rate", m.SuccessRate, true},
+		{"node_load_balance", m.NodeLoadBalance, true},
+		{"template_locality_hit_rate", m.TemplateLocalityHitRate, true},
+		{"cpu_quota_utilization", m.AverageCPUUtilization, true},
+		{"peak_cpu_utilization", m.PeakCPUUtilization, true},
+		{"mem_quota_utilization", m.AverageMemUtilization, true},
+		{"peak_mem_utilization", m.PeakMemUtilization, true},
+		{"create_latency_p50_ms", m.CreateLatencyP50MS, false},
+		{"create_latency_p95_ms", m.CreateLatencyP95MS, false},
+		{"average_cpu_headroom", m.AverageCPUHeadroom, true},
+		{"average_score_margin", m.AverageScoreMargin, false},
+		{"average_feasible_candidates", m.AverageFeasibleCandidates, false},
 	}
 	for _, metric := range finite {
 		if math.IsNaN(metric.value) || math.IsInf(metric.value, 0) {
 			return fmt.Errorf("%s is not finite (%v)", metric.name, metric.value)
 		}
-	}
-	for _, metric := range finite[:7] {
-		if err := verifyRatio(metric.name, metric.value); err != nil {
-			return err
+		if metric.ratio {
+			if err := verifyRatio(metric.name, metric.value); err != nil {
+				return err
+			}
 		}
-	}
-	if err := verifyRatio("average_cpu_headroom", m.AverageCPUHeadroom); err != nil {
-		return err
 	}
 	if m.CreateLatencyP50MS < 0 || m.CreateLatencyP95MS < 0 {
 		return fmt.Errorf("create latency percentiles are negative (p50=%v p95=%v)", m.CreateLatencyP50MS, m.CreateLatencyP95MS)
@@ -585,17 +580,11 @@ func verifyMetrics(m Metrics, expectedNodeIDs map[string]struct{}) error {
 			m.SuccessRate, diff, verifyFloatTolerance)
 	}
 
-	if m.AverageFeasibleCandidates < 0 || m.AverageRankedCandidatesRetained < 0 {
-		return fmt.Errorf("candidate averages are negative (feasible=%v retained=%v)",
-			m.AverageFeasibleCandidates, m.AverageRankedCandidatesRetained)
+	if m.AverageFeasibleCandidates < 0 {
+		return fmt.Errorf("average_feasible_candidates is negative (%v)", m.AverageFeasibleCandidates)
 	}
-	if m.FeasibleEvaluations < 0 || m.RankedCandidatesRetained < 0 {
-		return fmt.Errorf("candidate counters are negative (feasible=%d retained=%d)",
-			m.FeasibleEvaluations, m.RankedCandidatesRetained)
-	}
-	if m.FeasibleEvaluations < m.RankedCandidatesRetained {
-		return fmt.Errorf("feasible_candidate_evaluations %d is below post-cap ranked_candidates_retained %d",
-			m.FeasibleEvaluations, m.RankedCandidatesRetained)
+	if m.FeasibleEvaluations < 0 {
+		return fmt.Errorf("feasible_candidate_evaluations is negative (%d)", m.FeasibleEvaluations)
 	}
 	if m.ScheduledRequests == 0 {
 		observed := []struct {
@@ -608,51 +597,30 @@ func verifyMetrics(m Metrics, expectedNodeIDs map[string]struct{}) error {
 			{"average_cpu_headroom", m.AverageCPUHeadroom},
 			{"average_score_margin", m.AverageScoreMargin},
 			{"average_feasible_candidates", m.AverageFeasibleCandidates},
-			{"average_ranked_candidates_retained", m.AverageRankedCandidatesRetained},
 		}
 		for _, metric := range observed {
 			if metric.value != 0 {
 				return fmt.Errorf("%s is %v with zero scheduled_requests, want 0", metric.name, metric.value)
 			}
 		}
-		if m.FeasibleEvaluations != 0 || m.RankedCandidatesRetained != 0 {
-			return fmt.Errorf("candidate counters are non-zero with zero scheduled_requests (feasible=%d retained=%d)",
-				m.FeasibleEvaluations, m.RankedCandidatesRetained)
+		if m.FeasibleEvaluations != 0 {
+			return fmt.Errorf("feasible_candidate_evaluations is non-zero with zero scheduled_requests (%d)",
+				m.FeasibleEvaluations)
 		}
 	} else {
 		if m.FeasibleEvaluations < m.ScheduledRequests {
 			return fmt.Errorf("feasible_candidate_evaluations %d is below scheduled_requests %d",
 				m.FeasibleEvaluations, m.ScheduledRequests)
 		}
-		if m.RankedCandidatesRetained < m.ScheduledRequests {
-			return fmt.Errorf("ranked_candidates_retained %d is below scheduled_requests %d",
-				m.RankedCandidatesRetained, m.ScheduledRequests)
-		}
 		if max := m.ScheduledRequests * nodeCount; m.FeasibleEvaluations > max {
 			return fmt.Errorf("feasible_candidate_evaluations %d exceeds scheduled_requests*node_count bound %d",
 				m.FeasibleEvaluations, max)
 		}
-		if max := m.ScheduledRequests * defaultPriorityCandidateNum; m.RankedCandidatesRetained > max {
-			return fmt.Errorf("ranked_candidates_retained %d exceeds scheduled_requests*ranked-candidate-cap bound %d",
-				m.RankedCandidatesRetained, max)
-		}
 		denom := float64(m.ScheduledRequests)
-		if diff := math.Abs(m.AverageRankedCandidatesRetained - float64(m.RankedCandidatesRetained)/denom); diff > verifyFloatTolerance {
-			return fmt.Errorf("average_ranked_candidates_retained %v disagrees with ranked_candidates_retained/scheduled_requests by %v",
-				m.AverageRankedCandidatesRetained, diff)
-		}
 		if diff := math.Abs(m.AverageFeasibleCandidates - float64(m.FeasibleEvaluations)/denom); diff > verifyFloatTolerance {
 			return fmt.Errorf("average_feasible_candidates %v disagrees with feasible_candidate_evaluations/scheduled_requests by %v",
 				m.AverageFeasibleCandidates, diff)
 		}
-	}
-	if m.AverageRankedCandidatesRetained > float64(defaultPriorityCandidateNum)+verifyFloatTolerance {
-		return fmt.Errorf("average_ranked_candidates_retained %v exceeds the simulator ranked-candidate cap %d",
-			m.AverageRankedCandidatesRetained, defaultPriorityCandidateNum)
-	}
-	if m.AverageFeasibleCandidates+verifyFloatTolerance < m.AverageRankedCandidatesRetained {
-		return fmt.Errorf("average_feasible_candidates %v is below post-cap average_ranked_candidates_retained %v",
-			m.AverageFeasibleCandidates, m.AverageRankedCandidatesRetained)
 	}
 	if m.AverageFeasibleCandidates > float64(nodeCount)+verifyFloatTolerance {
 		return fmt.Errorf("average_feasible_candidates %v exceeds the simulated node count %d",
@@ -806,12 +774,12 @@ func (r Report) Markdown() string {
 	fmt.Fprintf(&b, "- git_dirty: `%s`\n\n", formatOptionalBool(r.Provenance.GitDirty))
 
 	fmt.Fprintf(&b, "## Results\n\n")
-	fmt.Fprintf(&b, "| profile | workload | success | rejected | locality hit | load balance | cpu util | mem util | latency p50 ms | latency p95 ms | avg feasible | avg retained |\n")
-	fmt.Fprintf(&b, "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+	fmt.Fprintf(&b, "| profile | workload | success | rejected | locality hit | load balance | cpu util | mem util | latency p50 ms | latency p95 ms | avg feasible |\n")
+	fmt.Fprintf(&b, "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 	for _, profile := range r.Results {
 		for _, workload := range profile.Workloads {
 			m := workload.Metrics
-			fmt.Fprintf(&b, "| %s | %s | %.2f | %d | %.2f | %.3f | %.2f | %.2f | %.1f | %.1f | %.2f | %.2f |\n",
+			fmt.Fprintf(&b, "| %s | %s | %.2f | %d | %.2f | %.3f | %.2f | %.2f | %.1f | %.1f | %.2f |\n",
 				profile.Profile,
 				workload.Workload,
 				m.SuccessRate,
@@ -822,8 +790,7 @@ func (r Report) Markdown() string {
 				m.AverageMemUtilization,
 				m.CreateLatencyP50MS,
 				m.CreateLatencyP95MS,
-				m.AverageFeasibleCandidates,
-				m.AverageRankedCandidatesRetained)
+				m.AverageFeasibleCandidates)
 		}
 	}
 
@@ -1079,8 +1046,7 @@ func defaultMetricSchema() []MetricSchema {
 		{Name: "peak_cpu_utilization", Direction: "lower is safer", Description: "Highest final CPU utilization across nodes."},
 		{Name: "average_cpu_headroom", Direction: "higher is safer", Description: "Average remaining CPU capacity after each placement."},
 		{Name: "average_score_margin", Direction: "higher means clearer decisions", Description: "Mean score gap between the selected node and second-ranked candidate, averaged only over scheduled requests that had at least two scored candidates. Zero when no such decisions exist."},
-		{Name: "average_feasible_candidates", Direction: "no better/worse direction; breadth only", Description: "Average number of feasible simulated nodes per scheduled request, counted before the ranked-candidate cap, so its maximum is the simulated node count. Simulator-local candidate breadth, not scheduler CPU cost or latency."},
-		{Name: "average_ranked_candidates_retained", Direction: "no better/worse direction; breadth only", Description: "Average number of ranked candidates retained per scheduled request after the simulator's priority-candidate cap, so its maximum is that cap (currently 3). Simulator-local decision-path breadth, not scheduler CPU cost or latency."},
+		{Name: "average_feasible_candidates", Direction: "no better/worse direction; breadth only", Description: "Average number of feasible simulated nodes per scheduled request; maximum is the simulated node count. Simulator-local candidate breadth, not scheduler CPU cost or latency."},
 	}
 }
 
@@ -1202,9 +1168,8 @@ func runWorkload(profile string, nodes []simNode, requests []Request) (Metrics, 
 	marginObservations := 0
 	for _, req := range requestsByArrival {
 		releaseCompleted(nodes, req.Arrival)
-		ranked, feasible := scoreCandidates(nodes, req, weights)
-		metrics.FeasibleEvaluations += feasible
-		metrics.RankedCandidatesRetained += len(ranked)
+		ranked := scoreCandidates(nodes, req, weights)
+		metrics.FeasibleEvaluations += len(ranked)
 		if len(ranked) == 0 {
 			metrics.RejectedRequests++
 			metrics.FailureReasons["no_feasible_node"]++
@@ -1233,7 +1198,6 @@ func runWorkload(profile string, nodes []simNode, requests []Request) (Metrics, 
 		metrics.TemplateLocalityHitRate /= denom
 		metrics.AverageCPUHeadroom /= denom
 		metrics.AverageFeasibleCandidates = float64(metrics.FeasibleEvaluations) / denom
-		metrics.AverageRankedCandidatesRetained = float64(metrics.RankedCandidatesRetained) / denom
 	}
 	if marginObservations > 0 {
 		metrics.AverageScoreMargin /= float64(marginObservations)
@@ -1267,12 +1231,11 @@ type scoredNode struct {
 	score float64
 }
 
-// scoreCandidates returns the ranked candidate slice the simulator actually
-// binds from, truncated to defaultPriorityCandidateNum, plus the number of
-// feasible nodes counted before that truncation. Reporting both keeps
-// feasible-set breadth distinguishable from the post-cap ranked count.
-func scoreCandidates(nodes []simNode, req Request, weights profileWeights) (ranked []scoredNode, feasible int) {
-	ranked = make([]scoredNode, 0, len(nodes))
+// scoreCandidates returns every feasible node scored and sorted descending.
+// The simulator binds ranked[0], so truncating after a full sort would not
+// change the selected node and is intentionally omitted.
+func scoreCandidates(nodes []simNode, req Request, weights profileWeights) []scoredNode {
+	ranked := make([]scoredNode, 0, len(nodes))
 	for i := range nodes {
 		if !fits(nodes[i], req) {
 			continue
@@ -1282,17 +1245,13 @@ func scoreCandidates(nodes []simNode, req Request, weights profileWeights) (rank
 			score: scoreNode(nodes[i], req, weights),
 		})
 	}
-	feasible = len(ranked)
 	sort.SliceStable(ranked, func(i, j int) bool {
 		if ranked[i].score == ranked[j].score {
 			return nodes[ranked[i].index].spec.ID < nodes[ranked[j].index].spec.ID
 		}
 		return ranked[i].score > ranked[j].score
 	})
-	if len(ranked) > defaultPriorityCandidateNum {
-		return ranked[:defaultPriorityCandidateNum], feasible
-	}
-	return ranked, feasible
+	return ranked
 }
 
 func scoreNode(n simNode, req Request, weights profileWeights) float64 {

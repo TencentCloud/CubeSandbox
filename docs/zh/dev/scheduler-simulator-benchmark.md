@@ -83,12 +83,9 @@ default-vs-candidate 对比。指标描述与 comparison notes 等人类可读�
 - `peak_cpu_utilization`
 - `average_cpu_headroom`
 - `average_score_margin`：所选节点与第二名候选的分数差均值，仅对至少有两个已打分候选的成功调度请求取平均；无此类观测时为 `0`。
-- `average_feasible_candidates`：每个成功调度请求的可行模拟节点均值，在候选
-  上限截断前计数，最大为模拟节点数。
-- `average_ranked_candidates_retained`：每个成功调度请求在截断后平均保留的
-  已排序候选数，当前
-  最大为 3。两个候选指标都是 simulator 本地的候选宽度代理，不是调度器 CPU
-  开销或延迟实测。
+- `average_feasible_candidates`：每个成功调度请求的可行模拟节点均值，最大为
+  模拟节点数。这是 simulator 本地的候选宽度代理，不是调度器 CPU 开销或延迟实测。
+  simulator 绑定全局最高分的可行节点，因此不再单独报告截断后保留候选数。
 
 Markdown 结果表包含 `latency p50 ms` 与 `latency p95 ms`。估算器是确定性的：
 

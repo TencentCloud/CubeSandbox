@@ -89,9 +89,7 @@ go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
             "average_cpu_headroom": 0.58,
             "average_score_margin": 1.47,
             "average_feasible_candidates": 4.0,
-            "average_ranked_candidates_retained": 2.88,
             "feasible_candidate_evaluations": 320,
-            "ranked_candidates_retained": 230,
             "node_final_state": {
               "node-a": {
                 "running_sandbox_count": 12,
@@ -184,9 +182,7 @@ go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
 - `average_cpu_headroom`
 - `average_score_margin`（仅对多候选决策取第一名与第二名分差均值；无观测时为 0）
 - `average_feasible_candidates`
-- `average_ranked_candidates_retained`
 - `feasible_candidate_evaluations`
-- `ranked_candidates_retained`
 - `node_final_state`
 
 当至少有一个请求被拒绝时，metrics 对象还会包含：
@@ -197,10 +193,10 @@ go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
 `failure_reasons` 当前只使用 `no_feasible_node`，把 CPU、内存与 sandbox 数容量失败归为一类。未知 workload/profile 名称会在生成报告前使命令失败。
 
 `average_feasible_candidates` 等于
-`feasible_candidate_evaluations / scheduled_requests`，在排序候选上限前统计可行
-节点，因此最大为 `node_count`。`average_ranked_candidates_retained` 等于
-`ranked_candidates_retained / scheduled_requests`，统计截断后保留的有序候选集，
-当前最大为 3。两者都是 simulator 本地候选宽度代理，不是调度器 CPU 开销或延迟。
+`feasible_candidate_evaluations / scheduled_requests`，按每个成功调度请求统计可行
+节点，因此最大为 `node_count`。它是 simulator 本地候选宽度代理，不是调度器 CPU
+开销或延迟。因为 simulator 绑定全局最高分的可行节点，全量排序后再截断不会改变
+放置结果，报告也不再包含单独的截断后保留候选指标。
 
 如果 build info 与 CLI Git 回退都不可用，`git_revision` 为 `unknown`，
 `git_dirty` 为 `null`；该状态无法区分不同代码版本。报告不包含 Git 错误、

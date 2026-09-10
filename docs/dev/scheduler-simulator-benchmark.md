@@ -105,12 +105,11 @@ The report includes more than five scheduling-quality metrics:
 - `average_score_margin`: mean score gap between the selected node and the
   second-ranked candidate, averaged only over scheduled requests that had at
   least two scored candidates; `0` when no such observations exist.
-- `average_feasible_candidates`: feasible simulated nodes per scheduled request,
-  counted before the ranked-candidate cap; at most the simulated node count.
-- `average_ranked_candidates_retained`: average number of ranked candidates
-  retained for each scheduled request after the cap; currently at most 3.
-  Both candidate metrics are simulator-local breadth proxies, not scheduler CPU
-  cost or latency measurements.
+- `average_feasible_candidates`: feasible simulated nodes per scheduled request;
+  at most the simulated node count. Simulator-local candidate breadth, not
+  scheduler CPU cost or latency. The simulator binds the globally best scored
+  feasible node, so it does not report a separate post-cap retained-candidate
+  metric.
 
 The Markdown results table includes `latency p50 ms` and `latency p95 ms`.
 The estimator is deterministic:

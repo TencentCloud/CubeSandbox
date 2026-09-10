@@ -42,13 +42,9 @@ func TestRunCoversMinimumWorkloadsProfilesAndMetrics(t *testing.T) {
 					profile.Profile, workload.Workload,
 					m.ScheduledRequests+m.RejectedRequests, m.TotalRequests)
 			}
-			if m.AverageRankedCandidatesRetained <= 0 {
-				t.Fatalf("%s/%s AverageRankedCandidatesRetained = %f, want > 0",
-					profile.Profile, workload.Workload, m.AverageRankedCandidatesRetained)
-			}
-			if m.AverageFeasibleCandidates < m.AverageRankedCandidatesRetained {
-				t.Fatalf("%s/%s AverageFeasibleCandidates = %f, want >= AverageRankedCandidatesRetained %f",
-					profile.Profile, workload.Workload, m.AverageFeasibleCandidates, m.AverageRankedCandidatesRetained)
+			if m.AverageFeasibleCandidates <= 0 {
+				t.Fatalf("%s/%s AverageFeasibleCandidates = %f, want > 0",
+					profile.Profile, workload.Workload, m.AverageFeasibleCandidates)
 			}
 			if m.CreateLatencyP50MS <= 0 || m.CreateLatencyP95MS <= 0 {
 				t.Fatalf("%s/%s latency p50/p95 = %f/%f, want > 0",
@@ -199,7 +195,7 @@ func TestVerifyDefaultReportRejectsContractGaps(t *testing.T) {
 			mutate: func(report *Report) {
 				report.Results[0].Workloads[0].Metrics.AverageFeasibleCandidates = -0.1
 			},
-			want: "candidate averages are negative",
+			want: "average_feasible_candidates is negative",
 		},
 		{
 			name: "feasible counter below scheduled requests",
@@ -219,17 +215,6 @@ func TestVerifyDefaultReportRejectsContractGaps(t *testing.T) {
 			want: "scheduled_requests*node_count bound",
 		},
 		{
-			name: "retained counter exceeds per-request cap",
-			mutate: func(report *Report) {
-				m := &report.Results[0].Workloads[0].Metrics
-				m.RankedCandidatesRetained = m.ScheduledRequests*defaultPriorityCandidateNum + 1
-				m.FeasibleEvaluations = m.RankedCandidatesRetained
-				m.AverageRankedCandidatesRetained = float64(m.RankedCandidatesRetained) / float64(m.ScheduledRequests)
-				m.AverageFeasibleCandidates = m.AverageRankedCandidatesRetained
-			},
-			want: "ranked-candidate-cap bound",
-		},
-		{
 			name: "zero scheduled request has stale average",
 			mutate: func(report *Report) {
 				m := &report.Results[0].Workloads[0].Metrics
@@ -243,9 +228,7 @@ func TestVerifyDefaultReportRejectsContractGaps(t *testing.T) {
 				m.AverageCPUHeadroom = 0
 				m.AverageScoreMargin = 0.25
 				m.AverageFeasibleCandidates = 0
-				m.AverageRankedCandidatesRetained = 0
 				m.FeasibleEvaluations = 0
-				m.RankedCandidatesRetained = 0
 				m.SuccessRate = 0
 			},
 			want: "average_score_margin is 0.25 with zero scheduled_requests",
@@ -300,7 +283,7 @@ func TestVerifyDefaultReportIgnoresHarmlessDescriptionRewording(t *testing.T) {
 	}
 }
 
-func TestFeasibleCandidatesAreCountedBeforeRankedCandidateCap(t *testing.T) {
+func TestFeasibleCandidatesCountAllFittingNodes(t *testing.T) {
 	nodes := defaultNodes(4)
 	metrics, err := runWorkload(ProfileDefault, nodes, []Request{{
 		ID: "fits-everywhere", Arrival: 0, Lifetime: 1,
@@ -312,12 +295,8 @@ func TestFeasibleCandidatesAreCountedBeforeRankedCandidateCap(t *testing.T) {
 	if metrics.AverageFeasibleCandidates != 4 {
 		t.Fatalf("AverageFeasibleCandidates = %v, want 4", metrics.AverageFeasibleCandidates)
 	}
-	if metrics.AverageRankedCandidatesRetained != 3 {
-		t.Fatalf("AverageRankedCandidatesRetained = %v, want 3", metrics.AverageRankedCandidatesRetained)
-	}
-	if metrics.FeasibleEvaluations != 4 || metrics.RankedCandidatesRetained != 3 {
-		t.Fatalf("candidate counters feasible/retained = %d/%d, want 4/3",
-			metrics.FeasibleEvaluations, metrics.RankedCandidatesRetained)
+	if metrics.FeasibleEvaluations != 4 {
+		t.Fatalf("FeasibleEvaluations = %d, want 4", metrics.FeasibleEvaluations)
 	}
 }
 
@@ -367,9 +346,9 @@ func TestBinpackProfileTradesBalanceForHeadroomAndDecisionCost(t *testing.T) {
 		t.Fatalf("spread average cpu headroom = %f, want higher than binpack headroom %f",
 			spreadMetrics.AverageCPUHeadroom, binpackMetrics.AverageCPUHeadroom)
 	}
-	if spreadMetrics.AverageRankedCandidatesRetained <= binpackMetrics.AverageRankedCandidatesRetained {
-		t.Fatalf("spread average retained candidates = %f, want higher than binpack retained candidates %f",
-			spreadMetrics.AverageRankedCandidatesRetained, binpackMetrics.AverageRankedCandidatesRetained)
+	if spreadMetrics.AverageFeasibleCandidates <= binpackMetrics.AverageFeasibleCandidates {
+		t.Fatalf("spread average feasible candidates = %f, want higher than binpack feasible candidates %f",
+			spreadMetrics.AverageFeasibleCandidates, binpackMetrics.AverageFeasibleCandidates)
 	}
 }
 
@@ -679,9 +658,7 @@ func TestDefaultReportJSONContractLocksSchema(t *testing.T) {
 		"create_latency_p95_ms",
 		"uses_estimated_latency",
 		"average_feasible_candidates",
-		"average_ranked_candidates_retained",
 		"feasible_candidate_evaluations",
-		"ranked_candidates_retained",
 		"node_final_state",
 	}
 	for i, item := range results {
