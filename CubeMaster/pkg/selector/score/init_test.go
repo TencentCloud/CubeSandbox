@@ -225,6 +225,33 @@ scheduler:
 	}
 }
 
+func TestEmptyProfileMissingFactorPluginConfSkipsWithoutPanic(t *testing.T) {
+	// Empty-profile compatibility: listing a factor scorer without plugin_conf
+	// must not panic during NewSelector. It warns and skips so placement falls
+	// back to remaining scorers / equal-weight random rather than crashing.
+	if runIsolatedScoreConfigTest(t) {
+		return
+	}
+	initSelectorTestConfig(t, `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - real_time_weighted_average
+      - binpack_score
+    resource_weights:
+      realtime_create_num: 1
+    plugin_conf:
+      binpack_score:
+        weight: 1
+`)
+
+	selectors := NewSelector(context.Background())
+	if len(selectors) != 1 || selectors[0].ID() != constants.SelectorScoreID+"/binpack_score" {
+		t.Fatalf("selectors = %v, want only binpack_score (realtime skipped)", selectorIDs(selectors))
+	}
+}
+
 func TestProfileConstructsPluginScorersWithoutResourceWeights(t *testing.T) {
 	if runIsolatedScoreConfigTest(t) {
 		return
