@@ -169,6 +169,25 @@ fn same_identity(user: &LocalUser) -> bool {
     nix::unistd::getuid().as_raw() == user.uid && nix::unistd::getgid().as_raw() == user.gid
 }
 
+/// envd 自身未设置 PATH 时使用的兜底搜索路径。
+const FALLBACK_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// 构造上游 envd 语义的基础环境：PATH 取 envd 自身的值，HOME/USER/LOGNAME 取
+/// 目标用户的 passwd 条目；随后由 `/init` 快照与请求级 `envs` 依次覆盖。
+///
+/// 上游取 `os.Getenv("PATH")` 并原样注入（含未设置时的空值）；这里唯一的有意
+/// 差别是在 envd 自身 PATH 缺失时退化为标准搜索路径，避免子进程完全无法查找
+/// 可执行文件。
+fn base_environment(user: &LocalUser) -> Vec<(&'static str, String)> {
+    let path = std::env::var("PATH").unwrap_or_else(|_| FALLBACK_PATH.to_owned());
+    vec![
+        ("PATH", path),
+        ("HOME", user.home.display().to_string()),
+        ("USER", user.name.clone()),
+        ("LOGNAME", user.name.clone()),
+    ]
+}
+
 /// 为普通管道进程构建清空环境且已切换用户的 Tokio Command。
 pub(super) fn pipe_command(
     config: &ProcessConfig,
@@ -191,7 +210,11 @@ pub(super) fn pipe_command(
             .args(&config.args);
         command
     };
-    command.env_clear().envs(defaults).envs(&config.envs);
+    command.env_clear();
+    for (key, value) in base_environment(user) {
+        command.env(key, value);
+    }
+    command.envs(defaults).envs(&config.envs);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
@@ -222,6 +245,9 @@ pub(super) fn pty_command(
         command
     };
     command.env_clear();
+    for (key, value) in base_environment(user) {
+        command.env(key, value);
+    }
     for (key, value) in defaults.iter().chain(config.envs.iter()) {
         command.env(key, value);
     }
