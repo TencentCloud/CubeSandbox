@@ -31,7 +31,6 @@ func NewSelector(ctx context.Context) []Selector {
 		return []Selector{}
 	}
 	ss := make([]Selector, 0)
-	multiFactorConstructed := false
 	for _, name := range conf.Score.EnableScorers {
 		registration, ok := scores[name]
 		if !ok {
@@ -64,20 +63,17 @@ func NewSelector(ctx context.Context) []Selector {
 			log.G(ctx).Warnf("scheduler score selector %s skipped: required plugin_conf is missing", name)
 			continue
 		}
-		selector := registration.new()
-		ss = append(ss, selector)
-		if name == "multi_factor_weighted_average" {
-			multiFactorConstructed = true
-		}
+		ss = append(ss, registration.new())
 	}
 
 	multiFactorConf := conf.Score.ScorePluginConf.MultiFactorWeightedAverage
-	if multiFactorConstructed && multiFactorConf != nil && !multiFactorConf.Disable && multiFactorConf.Weight != 0 {
+	// Preserve master behavior: start the background feeder whenever the
+	// plugin_conf block exists. node.Score / pscore are operator-visible and
+	// must keep updating even if the scorer is disabled or not selected.
+	if multiFactorConf != nil {
 		recov.GoWithRecover(func() {
 			loopAsyncScore(ctx)
 		})
-	} else if multiFactorConf != nil && !multiFactorConstructed {
-		log.G(ctx).Warnf("scheduler multi_factor_weighted_average plugin_conf is present but scorer was not constructed; background node.Score / pscore updates will not run")
 	}
 	return ss
 }
