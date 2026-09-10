@@ -1332,16 +1332,32 @@ func validateSchedulerScorePluginConfig(s *SchedulerConf) error {
 		if disabled {
 			continue
 		}
-		factors := scorerEnableWeightFactors(s, name)
-		if factors == nil {
-			continue
-		}
-		if !hasPositiveResourceWeight(s.Score.ResourceWeights, factors) {
-			return fmt.Errorf("scheduler profile %q enables %q but no positive resource weight is set for its enabled factors",
-				s.Profile, name)
+		// Factor-based scorers must declare at least one enable_weight_factors
+		// entry with a positive resource_weights value. An omitted / empty
+		// factor list previously fell through as factors==nil and silently
+		// became a runtime no-op; fail closed under a selected Profile.
+		if isFactorBasedSchedulerScore(name) {
+			factors := scorerEnableWeightFactors(s, name)
+			if len(factors) == 0 {
+				return fmt.Errorf("scheduler profile %q enables %q but plugin_conf.%s.enable_weight_factors is empty",
+					s.Profile, name, name)
+			}
+			if !hasPositiveResourceWeight(s.Score.ResourceWeights, factors) {
+				return fmt.Errorf("scheduler profile %q enables %q but no positive resource weight is set for its enabled factors",
+					s.Profile, name)
+			}
 		}
 	}
 	return nil
+}
+
+func isFactorBasedSchedulerScore(name string) bool {
+	switch name {
+	case "real_time_weighted_average", "multi_factor_weighted_average", "image_score":
+		return true
+	default:
+		return false
+	}
 }
 
 func isBuiltinSchedulerProfile(name string) bool {

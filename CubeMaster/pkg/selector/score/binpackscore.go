@@ -10,6 +10,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
@@ -132,7 +133,9 @@ func binpackOccupancyScore(n *node.Node, cpuW, memW, mvmW float64) float64 {
 		totalW += memW
 	}
 	if mvmW > 0 {
-		mvmUtil := occupancyRatio(n.MvmNum, n.MaxMvmLimit)
+		// Use the same authoritative per-node capacity helper as other
+		// scorers (falls back to instance-type / global NodeMaxMvmNum).
+		mvmUtil := occupancyRatio(n.MvmNum, localcache.MaxMvmLimit(n))
 		weighted += mvmUtil * mvmW
 		totalW += mvmW
 	}

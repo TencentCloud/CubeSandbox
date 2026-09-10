@@ -97,6 +97,20 @@ and inject self-contained plugin defaults when the matching `plugin_conf`
 block is absent. User entries under `scheduler.profiles` with the same name
 override a built-in entirely.
 
+**Warning:** when a Profile provides `filter.enable_filters`, that list
+**replaces** the base `scheduler.filter.enable_filters` (no merge). Built-ins
+use short lists and can drop admission filters such as `disk` or `thirtparty`
+that were previously enabled. Audit the effective filter list after selecting
+a Profile.
+
+For every Score plugin (including the four existing scorers and
+`binpack_score`), `plugin_conf.<scorer>.weight: 0` disables the scorer and
+skips Select; omitting `weight` inside a present plugin block YAML-decodes to
+`0` and also disables. Set an explicit positive `weight` to keep a scorer
+active. Profile / selector-list changes require a CubeMaster restart: config
+hot-reload re-applies Profile overlays to the in-memory Config, but
+`InitScheduler` does not rebuild the Filter/Score slices.
+
 `binpack_score` is a thin Score-phase plugin that prefers fuller nodes. It is
 enabled by listing `binpack_score` in `enable_scorers` (directly or via a
 Profile). Plugin params stay under `scheduler.score.plugin_conf.binpack_score`.

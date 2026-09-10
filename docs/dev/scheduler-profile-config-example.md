@@ -11,7 +11,8 @@ updated: 2026-09-10
 Copyable YAML for CubeMaster **runtime** Profile overlay and `binpack_score`.
 This page covers what ships in the runtime Profiles + binpack PR. An HTTP
 plugin scorer (`external_http_score`) is related open work tracked in #1700
-and is **not** registered or allowed here.
+and is **not** registered or allowed here. #1699 / #1700 remain related open
+work and are **not** merged via this change set.
 
 ## Scope
 
@@ -34,7 +35,7 @@ Out of scope:
 - putting `plugin_conf` under `scheduler.profiles.<name>.score`;
 - changing production Filter/Score defaults when `scheduler.profile` is empty;
 - shipping or documenting `external_http_score` as part of this PR
-  (see #1700);
+  (see #1700; related open work, not merged);
 - live multi-node performance claims.
 
 ## Runtime Profile Contract
@@ -119,6 +120,66 @@ Allowed score names (must match `CubeMaster/pkg/selector/score/init.go`):
 - `image_score`
 - `binpack_score`
 
+### Operator notes
+
+**Filter list replace (admission risk).** When a Profile (built-in or user)
+provides a non-nil `filter.enable_filters` list, that list **replaces**
+`scheduler.filter.enable_filters` entirely. It does **not** merge with the
+base list. Built-in presets illustrate the risk: `balanced_spread` sets
+`cpu` / `mem` / `realtime_create_num` only; `template_locality_first` sets
+`cpu` / `mem` / `template_locality`; `binpack_utilization` sets `cpu` /
+`mem` only. Selecting any of those **drops** admission filters that were
+previously enabled in the base config (for example `disk`, `thirtparty`,
+or other names not listed by the Profile). Review the effective
+`enable_filters` after applying a Profile, and restore any required
+admission filters via a user Profile that lists them explicitly.
+
+**`weight: 0` disables scorers.** For every registered Score plugin
+(`real_time_weighted_average`, `multi_factor_weighted_average`,
+`affinity_score`, `image_score`, and `binpack_score`), plugin
+`weight: 0` (or `disable: true`) disables the scorer and skips its
+`Select`. Because `weight` is a YAML `float64`, omitting the `weight` key
+inside a present `plugin_conf.<scorer>` block also decodes to `0` and
+disables the scorer. To keep a scorer active, set an explicit positive
+`weight`. Omitting the entire `plugin_conf.<scorer>` block is different:
+under a non-empty Profile that enables the scorer, a missing block fails
+validation (built-ins may inject defaults when the pointer is still
+`nil`); with an empty Profile, some scorers keep legacy defaults.
+
+**`binpack_score` occupancy weights.** `cpu_weight` / `mem_weight` /
+`mvm_weight` values `<= 0` fall back to default `1` at runtime. You
+**cannot** exclude a dimension by setting its factor weight to `0`. Only
+the plugin-level `weight: 0` (or `disable: true`) disables the scorer.
+Negative plugin `weight` fails at config load (`validateBinpackScoreWeight`).
+
+**Factor scorers fail closed under a Profile.** When `scheduler.profile` is
+non-empty, each factor-based scorer in the final `enable_scorers` list
+(`real_time_weighted_average`, `multi_factor_weighted_average`,
+`image_score`) requires a non-empty `enable_weight_factors` and at least
+one positive `resource_weights` entry for those factors. Empty or omitted
+factor lists, or all-zero / missing factor weights, fail closed in
+`preHandleScheduler` before the scheduler runs.
+
+**MVM occupancy capacity.** `binpack_score` (and other scorers that share
+the helper) compute MVM occupancy with `localcache.MaxMvmLimit(n)`, the
+authoritative per-node capacity fallback (instance-type /
+`node_max_mvm_num` path). Do **not** assume raw `node.MaxMvmLimit` alone
+is the denominator.
+
+**Restart vs hot-update.** Profile expansion runs inside config
+`Init` / `preHandle` (`applySchedulerProfile` via `preHandleScheduler`).
+CubeMaster **does** hot-reload `conf.yaml` through the file watcher: on
+change, `listener.OnEvent` re-runs `preHandle` and updates the in-memory
+`Config` (so Profile overlays are re-applied to the Config object).
+However, the scheduler Filter/Score plugin slices are built once in
+`scheduler.InitScheduler` (`filter.NewSelector` / `score.NewSelector`) and
+are **not** rebuilt on config hot-reload. Changing `scheduler.profile`,
+Profile `enable_filters` / `enable_scorers`, or otherwise swapping which
+selectors are registered therefore requires a **CubeMaster restart** to
+take effect on the scheduling pipeline. Live-read plugin params (for
+example `weight` / `disable` on an already-constructed scorer) may update
+from the reloaded Config without restart, but selector-set changes do not.
+
 ## Built-in Profile Examples
 
 Leave `scheduler.profile` empty to keep the current Filter/Score config.
@@ -151,7 +212,9 @@ scheduler:
 
 These overlays are scene-oriented selector combinations. They are **not**
 the same as simulator `weightsForProfile`, and they make **no** live
-performance claims.
+performance claims. Remember the filter-replace warning above: built-ins
+replace `enable_filters` with a shorter list and can drop `disk` /
+`thirtparty` / other base admission filters.
 
 ## Minimal Profile Example
 
@@ -198,7 +261,8 @@ What this overlay copies at `preHandle`:
 
 Omitted overlay sections are left untouched. A filter-only profile does not
 clear existing `enable_scorers`; a score-only profile does not clear existing
-`enable_filters`.
+`enable_filters`. When the Profile **does** provide `enable_filters`, that
+list replaces the base list (see Operator notes).
 
 ## BinpackScore Example
 
@@ -233,7 +297,9 @@ If `binpack_score` is listed in the final `enable_scorers` under a non-empty
 Profile but `plugin_conf.binpack_score` is omitted, built-in
 `binpack_utilization` injects defaults; a user Profile without that block
 fails fast. Explicit `weight: 0` disables Select. Negative weight is always
-rejected at config load.
+rejected at config load. `cpu_weight` / `mem_weight` / `mvm_weight` values
+`<= 0` fall back to `1` (cannot exclude a dimension via `0`). MVM occupancy
+uses `localcache.MaxMvmLimit`, not raw `node.MaxMvmLimit` alone.
 
 Invalid (will not overlay `plugin_conf`; the Go type has no such field):
 
@@ -253,8 +319,10 @@ scheduler:
 ## Related open work
 
 `external_http_score` (HTTP plugin scorer) is tracked separately in #1700 and
-is not part of this runtime Profiles + binpack change set. Do not list it in
-`enable_scorers` on this branch; unknown score names fail closed.
+is not part of this runtime Profiles + binpack change set. #1699 / #1700 are
+related open work and are **not** merged here. Do not list
+`external_http_score` in `enable_scorers` on this branch; unknown score names
+fail closed.
 
 ## Runtime Profile vs Simulator Profile
 
@@ -294,6 +362,10 @@ or production performance.
   unchanged.
 - Treat runtime built-in presets and simulator `weightsForProfile` as two
   paths that share names but are **not** formula-equivalent.
+- After selecting a Profile, audit effective `enable_filters` so required
+  admission filters (`disk`, `thirtparty`, …) were not dropped by replace.
+- Set explicit positive `weight` on every `plugin_conf.<scorer>` you intend
+  to keep active; restart CubeMaster after Profile / selector-list changes.
 
 **Do Not**
 
@@ -303,7 +375,11 @@ or production performance.
 - Equate runtime `scheduler.profiles` with simulator `weightsForProfile`.
 - Treat a Profile overlay as a change to
   `PreFilter -> Filter -> Score -> PostScore`.
-- Claim #1699 / #1700 is merged via this PR.
+- Claim #1699 / #1700 is merged via this PR (they remain related open work).
+- Assume `cpu_weight: 0` / `mem_weight: 0` / `mvm_weight: 0` excludes a
+  binpack dimension (they fall back to `1`).
+- Expect Profile / `enable_filters` / `enable_scorers` swaps to rebuild the
+  live selector set without a CubeMaster restart.
 
 ## Verification
 
