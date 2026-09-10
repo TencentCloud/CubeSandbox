@@ -431,6 +431,30 @@ func TestExternalHTTPScoreSkipsWhenEndpointEmpty(t *testing.T) {
 	}
 }
 
+func TestExternalHTTPScoreSelectTrimsEndpointWhitespace(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(externalHTTPScoreResponse{
+			Scores: map[string]*float64{
+				"node-a": float64Ptr(10),
+				"node-b": float64Ptr(90),
+			},
+		})
+	}))
+	defer server.Close()
+
+	got, err := newExternalHTTPScoreWithConfig(&config.ExternalHTTPScore{
+		Weight:   1,
+		Endpoint: "  " + server.URL + "  ",
+		Timeout:  time.Second,
+	}).Select(externalHTTPScoreTestCtx())
+	if err != nil {
+		t.Fatalf("Select() error = %v, want nil with trimmed endpoint", err)
+	}
+	if got.Len() != 2 {
+		t.Fatalf("len(scores) = %d, want 2", got.Len())
+	}
+}
+
 func TestExternalHTTPScoreSkipsWhenDisabled(t *testing.T) {
 	var contacted atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

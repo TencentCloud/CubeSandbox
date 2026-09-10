@@ -37,6 +37,10 @@ const defaultExternalHTTPScoreTimeout = 200 * time.Millisecond
 // path. Bodies larger than this are rejected entirely (no partial JSON accept).
 const maxExternalHTTPScoreResponseBytes = 1 << 20 // 1 MiB
 
+// externalHTTPScoreErrorBodyDrainBytes is how much of a failed response body to
+// read before Close so HTTP/1.1 can return the connection to the idle pool.
+const externalHTTPScoreErrorBodyDrainBytes = 4 << 10
+
 // Shared client for the synchronous create-path scorer within one CubeMaster
 // process. Concurrent scheduling attempts in that process may reuse idle
 // connections to the same sidecar host, so MaxIdleConnsPerHost is raised above
@@ -244,7 +248,7 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 	}
 
 	reqBody, knownNodes := buildExternalHTTPScoreRequest(selCtx, cfg.Mode, inList)
-	respScores, err := requestExternalHTTPScores(ctx, cfg.Endpoint, cfg.Timeout, reqBody)
+	respScores, err := requestExternalHTTPScores(ctx, strings.TrimSpace(cfg.Endpoint), cfg.Timeout, reqBody)
 	if err != nil {
 		logExternalHTTPScoreFailure(ctx, err)
 		return nil, err
@@ -485,6 +489,7 @@ func requestExternalHTTPScores(ctx context.Context, endpoint string, timeout tim
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		drainExternalHTTPScoreResponseBody(resp.Body)
 		return nil, fmt.Errorf("external_http_score unexpected status: %d", resp.StatusCode)
 	}
 
@@ -494,6 +499,7 @@ func requestExternalHTTPScores(ctx context.Context, endpoint string, timeout tim
 		return nil, err
 	}
 	if len(body) > maxExternalHTTPScoreResponseBytes {
+		drainExternalHTTPScoreResponseBody(resp.Body)
 		return nil, fmt.Errorf("external_http_score response exceeds %d bytes", maxExternalHTTPScoreResponseBytes)
 	}
 
@@ -505,4 +511,13 @@ func requestExternalHTTPScores(ctx context.Context, endpoint string, timeout tim
 		return nil, fmt.Errorf("external_http_score response scores is empty")
 	}
 	return out.Scores, nil
+}
+
+// drainExternalHTTPScoreResponseBody reads a bounded prefix of the response so
+// HTTP/1.1 keep-alive can reuse the connection after non-success paths.
+func drainExternalHTTPScoreResponseBody(body io.Reader) {
+	if body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, externalHTTPScoreErrorBodyDrainBytes))
 }
