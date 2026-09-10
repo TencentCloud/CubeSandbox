@@ -84,6 +84,25 @@ pub async fn watch_dir(
                 return;
             }
         };
+
+        // 内核 inotify 队列溢出（IN_Q_OVERFLOW）：notify 以 Flag::Rescan 标记上报。
+        // 事件此后已不可信，与上游一样让该流以错误结束，而不是静默丢弃后让客户端
+        // 以为收到的事件是完整的。
+        if event.need_rescan() {
+            record_watch_failure(
+                &callback_failure,
+                RpcError::new(
+                    Code::Internal,
+                    "filesystem watcher event queue overflowed; events were lost",
+                ),
+            );
+            let _ = callback_sender.try_send(Err(RpcError::new(
+                Code::Internal,
+                "filesystem watcher event queue overflowed",
+            )));
+            return;
+        }
+
         for path in event.paths {
             let Some(kind) = watch_event_kind(event.kind) else {
                 continue;

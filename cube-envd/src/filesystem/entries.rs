@@ -9,7 +9,10 @@ use axum::{
     extract::Request,
 };
 use nix::unistd::{Gid, Group, Uid, User};
-use notify::{event::ModifyKind, EventKind};
+use notify::{
+    event::{ModifyKind, RenameMode},
+    EventKind,
+};
 use tokio::{fs, task};
 
 use crate::{
@@ -270,14 +273,23 @@ pub(super) fn entry_info_sync(path: &Path) -> std::io::Result<EntryInfo> {
 }
 
 /// 将 notify 事件类型映射为 Filesystem 协议事件类型。
+///
+/// 映射对齐上游 envd 的 fsnotify 语义（`fsnotify` 把 `IN_MOVED_TO` 记为 Create、
+/// `IN_ATTRIB` 记为 Chmod）：
+/// - `Name(From)` → RENAME，`Name(To)` → CREATE；
+/// - `Name(Both)` 是 notify 在两端匹配后额外合成的重复帧，必须丢弃，否则一次改名会
+///   产生四条事件（上游只有 RENAME + CREATE 两条）；
+/// - `Metadata(_)` → CHMOD：notify 的 inotify 后端对 `IN_ATTRIB` 只发
+///   `Metadata(Any)`，此前的 `Permissions|Ownership` 分支因此永远不可达，chmod/chown/
+///   touch 全被误报为 WRITE。
 pub(super) fn watch_event_kind(kind: EventKind) -> Option<proto::EventType> {
     match kind {
         EventKind::Create(_) => Some(proto::EventType::Create),
         EventKind::Remove(_) => Some(proto::EventType::Remove),
-        EventKind::Modify(ModifyKind::Name(_)) => Some(proto::EventType::Rename),
-        EventKind::Modify(ModifyKind::Metadata(
-            notify::event::MetadataKind::Permissions | notify::event::MetadataKind::Ownership,
-        )) => Some(proto::EventType::Chmod),
+        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => Some(proto::EventType::Rename),
+        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => Some(proto::EventType::Create),
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => None,
+        EventKind::Modify(ModifyKind::Metadata(_)) => Some(proto::EventType::Chmod),
         EventKind::Modify(_) => Some(proto::EventType::Write),
         _ => None,
     }
