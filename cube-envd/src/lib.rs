@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 #![forbid(unsafe_code)]
 
 /// 提供 HTTP 路由和应用状态。

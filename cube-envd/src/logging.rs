@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 use tracing_subscriber::EnvFilter;
 
 /// 从可选的 RUST_LOG 指令创建过滤器，缺失或无效时回退到 info。

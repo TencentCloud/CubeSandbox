@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 use std::{
     hash::{BuildHasher, Hasher},
     os::unix::fs::PermissionsExt,

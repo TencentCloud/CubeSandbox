@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 use crate::{connect::encode_frame, generated::filesystem as proto, wire};
 
 /// 表示文件系统条目的 JSON 元数据。
