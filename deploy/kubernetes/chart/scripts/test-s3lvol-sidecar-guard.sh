@@ -61,6 +61,10 @@ if grep -q 'CUBE_S3LVOL_SOCKET' "$TMP_DIR/default-node.yaml"; then
   echo "default render must not set CUBE_S3LVOL_SOCKET on cubelet" >&2
   exit 1
 fi
+if grep -q 'RCOW_TGT_CPUMASK' "$TMP_DIR/default-node.yaml"; then
+  echo "default render must not set an explicit s3lvol CPU mask" >&2
+  exit 1
+fi
 if grep -q 'app.kubernetes.io/component: cube-s3lvol' "$TMP_DIR/default.yaml"; then
   echo "default render must not create the cube-s3lvol Secret" >&2
   exit 1
@@ -104,6 +108,8 @@ if "fieldPath: spec.nodeName" not in body:
     raise SystemExit("cube-s3lvol NODE_NAME must use spec.nodeName")
 if "RCOW_LVS_NAME" in body:
     raise SystemExit("default RCOW_LVS_NAME must be derived at runtime by rcow_common, not rendered")
+if "RCOW_TGT_CPUMASK" in body:
+    raise SystemExit("default reactor CPUs must be selected at runtime, not rendered")
 if "livenessProbe:" in body:
     raise SystemExit("cube-s3lvol must not have a livenessProbe")
 if "timeoutSeconds: 8" not in body:
@@ -159,5 +165,25 @@ grep -q 'name: RCOW_LVS_NAME' "$TMP_DIR/lvs.yaml" \
 grep -q 'rcow-explicit' "$TMP_DIR/lvs.yaml" \
   || { echo "explicit lvsName must appear in the sidecar env" >&2; exit 1; }
 echo "ok: cubeS3lvol.lvsName override is rendered"
+
+helm template s3lvol-cpumask "$CHART_DIR" $COMMON_SETS \
+  --set cubeS3lvol.enabled=true \
+  --set-string 'cubeS3lvol.cpuMask=[4\,9]' \
+  > "$TMP_DIR/cpumask.yaml"
+extract_big_pod "$TMP_DIR/cpumask.yaml" "$TMP_DIR/cpumask-node.yaml"
+python3 - "$TMP_DIR/cpumask-node.yaml" <<'PY'
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text()
+block = re.search(r"- name: cube-s3lvol\n(.*?)(?:\n      volumes:|\Z)", text, re.S)
+if not block:
+    raise SystemExit("cube-s3lvol container block not found")
+body = block.group(1)
+if not re.search(r'name: RCOW_TGT_CPUMASK\n\s+value: "?\[4,9\]"?', body):
+    raise SystemExit("explicit cubeS3lvol.cpuMask must render unchanged")
+PY
+echo "ok: cubeS3lvol.cpuMask override is rendered unchanged"
 
 echo "cube-s3lvol sidecar guard passed"

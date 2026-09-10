@@ -335,12 +335,44 @@ main(void)
 	}
 
 	printf("\n[9] repeated start/stop is idempotent\n");
+	{
+		cpu_set_t empty;
+
+		CPU_ZERO(&empty);
+		rc = s3_spawner_set_cpuset(&empty, sizeof(empty));
+		check_true("empty preconfigured cpuset is rejected", rc == -EINVAL, NULL);
+	}
 	check_true("stop is idempotent (a second call does not crash)",
 		   (s3_spawner_stop(), true), NULL);
-	rc = s3_spawner_start(&allowed);
-	check_true("start works again after stop", rc == 0, NULL);
+	rc = s3_spawner_set_cpuset(&allowed, sizeof(allowed));
+	check_true("cpuset can be preconfigured before start", rc == 0, NULL);
+	rc = s3_spawner_start(&single);
+	check_true("preconfigured start works after stop", rc == 0, NULL);
+	if (rc == 0) {
+		pthread_t t;
+		int cpus = -1;
+		rc = s3_spawner_pthread_create(&t, report_affinity, &cpus);
+		if (rc == 0) {
+			pthread_join(t, NULL);
+		}
+		check_true("preconfigured cpuset overrides start argument",
+			   rc == 0 && cpus == CPU_COUNT(&allowed), NULL);
+	}
 	rc = s3_spawner_start(&allowed);
 	check_true("repeated start returns 0", rc == 0, NULL);
+	s3_spawner_stop();
+	rc = s3_spawner_start(NULL);
+	check_true("preconfigured cpuset survives stop/start", rc == 0, NULL);
+	if (rc == 0) {
+		pthread_t t;
+		int cpus = -1;
+		rc = s3_spawner_pthread_create(&t, report_affinity, &cpus);
+		if (rc == 0) {
+			pthread_join(t, NULL);
+		}
+		check_true("restart still uses preconfigured cpuset",
+			   rc == 0 && cpus == CPU_COUNT(&allowed), NULL);
+	}
 	s3_spawner_stop();
 
 	/* Restore the main thread's affinity, to avoid affecting anything

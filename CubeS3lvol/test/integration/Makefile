@@ -73,7 +73,7 @@ MODULE_DIR   = ../../module/bdev/s3lvol
 APPS = s3_client_test s3_spawner_test s3_thread_bounce_test s3_bs_dev_test \
        s3_journal_test s3_wal_test s3_cache_test s3_flush_test s3_export_test \
        s3_statefile_test s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
-       s3_copy_xml_test s3_pending_persist_test
+       s3_copy_xml_test s3_pending_persist_test s3_tgt_cpumask_test
 
 # (a) minimal library set for the stubbed path
 STUB_SRCS      = spdk_thread_stub.c
@@ -162,6 +162,12 @@ s3_copy_xml_test: s3_copy_xml_test.c $(S3BSDEV_DIR)/s3_copy_xml.h
 # Pending-delete registry PUT coalescing. Header-only, no S3, no SPDK.
 s3_pending_persist_test: s3_pending_persist_test.c $(MODULE_DIR)/pending_persist_ctl.h
 	$(CC) $(COMMON_CFLAGS) -I$(MODULE_DIR) s3_pending_persist_test.c -o $@
+
+# Reactor selection is pure scheduler-affinity handling: no SPDK libraries.
+s3_tgt_cpumask_test: s3_tgt_cpumask_test.c \
+		../../app/s3lvol_tgt/s3lvol_tgt_cpumask.c
+	$(CC) $(COMMON_CFLAGS) -I../../app/s3lvol_tgt s3_tgt_cpumask_test.c \
+		../../app/s3lvol_tgt/s3lvol_tgt_cpumask.c -o $@
 
 # chunk map persistence check: no S3, but it does need the bdev layer.
 #
@@ -299,7 +305,7 @@ s3_checkpoint_test: s3_checkpoint_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cache_test \
        s3_flush_test s3_export_test s3_statefile_test s3_local_dev_test \
        s3_checkpoint_test s3_export_swap_test s3_copy_xml_test \
-       s3_pending_persist_test
+       s3_pending_persist_test s3_tgt_cpumask_test
 	./s3_spawner_test
 	./s3_thread_bounce_test
 	./s3_journal_test
@@ -313,6 +319,7 @@ check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cach
 	./s3_export_swap_test
 	./s3_copy_xml_test
 	./s3_pending_persist_test
+	./s3_tgt_cpumask_test
 
 .PHONY: $(S3BSDEV_DIR)/libs3bsdev.a
 $(S3BSDEV_DIR)/libs3bsdev.a:

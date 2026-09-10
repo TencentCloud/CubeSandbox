@@ -317,13 +317,14 @@ run_suite s3_bucket_selftest python3 ./test/tools/s3_bucket.py --self-test
 run_suite isa_baseline ./test/tools/test_isa_baseline.sh
 run_suite rpc_py38_compat ./test/tools/test_rpc_py38_compat.sh
 run_suite lvs_identity ./test/tools/test_lvs_identity.sh
+run_suite rcow_cpumask ./test/tools/test_rcow_cpumask.sh
 echo ""
 
 echo "--- integration (no S3, no root)"
 for t in s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test \
 	 s3_cache_test s3_flush_test s3_export_test s3_statefile_test \
 	 s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
-	 s3_copy_xml_test s3_pending_persist_test; do
+	 s3_copy_xml_test s3_pending_persist_test s3_tgt_cpumask_test; do
 	run_suite "${t}" "./test/integration/${t}"
 done
 echo ""

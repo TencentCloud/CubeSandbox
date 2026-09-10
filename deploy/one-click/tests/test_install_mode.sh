@@ -579,6 +579,15 @@ test_install_sh_wires_upgrade_flow() {
   assert_contains "${f}" "snapshot_one_click_toggles"
   assert_contains "${f}" "apply_one_click_toggles"
   assert_contains "${f}" "ONE_CLICK_TOGGLE_KEYS"
+  # An absent s3lvol CPU mask must reach the target as automatic selection;
+  # explicit and legacy non-empty values are still persisted unchanged.
+  assert_contains "${f}" 'RCOW_TGT_CPUMASK="${RCOW_TGT_CPUMASK:-}"'
+  assert_contains "${f}" 'if [[ -n "${RCOW_TGT_CPUMASK}" ]]; then'
+  assert_contains "${f}" 'upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_CPUMASK" "${RCOW_TGT_CPUMASK}"'
+  assert_contains "${f}" 'remove_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_CPUMASK"'
+  if grep -Fq 'RCOW_TGT_CPUMASK="${RCOW_TGT_CPUMASK:-0x3}"' "${f}"; then
+    fail "install.sh must not manufacture the old 0x3 CPU mask"
+  fi
   # Stop s3lvol before the target/glob stop so it can flush while MinIO is up.
   assert_contains "${f}" "systemctl stop cube-sandbox-s3lvol.service"
   # Disable must clear leftover failed state.

@@ -403,11 +403,15 @@ ONE_CLICK_ENABLE_S3LVOL=0
 EOF
   cat > "${old}" <<'EOF'
 ONE_CLICK_ENABLE_S3LVOL=1
+RCOW_TGT_CPUMASK=0x3
 EOF
 
   merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
 
   assert_value "${out}" ONE_CLICK_ENABLE_S3LVOL 1
+  # The old installer generated 0x3, but it is indistinguishable from an
+  # operator override. Preserve it rather than silently moving reactor CPUs.
+  assert_value "${out}" RCOW_TGT_CPUMASK 0x3
   assert_contains "${diff}" "[preserved]"
   assert_contains "${diff}" "= ONE_CLICK_ENABLE_S3LVOL=1"
 }
