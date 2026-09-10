@@ -13,13 +13,22 @@ use crate::{auth::LocalUser, generated::process as proto};
 use super::fanout::OutputFanout;
 
 /// 限制每个进程事件订阅者队列可积压的事件数；满则投递挂起，背压到生产者。
-pub(super) const SUBSCRIBER_CAPACITY: usize = 8;
+/// 容量较大（约 1 MiB/订阅者）是为了给健康订阅者留出缓冲滑窗：一个停读的
+/// 订阅者填满自己的队列之前，不会对同进程的其他订阅者造成事件级饥饿。
+pub(super) const SUBSCRIBER_CAPACITY: usize = 32;
 /// 子进程被回收后等待输出管道排空的宽限。
 ///
 /// 正常退出时子进程是管道写端的唯一持有者，退出即 EOF，reader 毫秒级
-/// 完成；只有孙进程仍持有写端时才会超时——超时后封住输出并发出 End，
-/// 避免 `sh -c 'sleep 300 & ...'` 这类命令把 End 无限拖住。
-pub(super) const EVENT_CHILD_FLUSH_GRACE: Duration = Duration::from_millis(500);
+/// 完成；只有孙进程仍持有写端时（reader 阻塞在 read）才会超时——超时后
+/// 封住输出并中断 reader，避免 `sh -c 'sleep 300 & ...'` 这类命令把
+/// End 无限拖住。订阅者背压造成的 reader 阻塞不会撑到该宽限：结束排空
+/// 阶段对订阅者的投递受 EOL_SEND_BUDGET 约束，超时即放弃该停读订阅者。
+pub(super) const EVENT_CHILD_FLUSH_GRACE: Duration = Duration::from_millis(600);
+/// 结束排空阶段单次投递的预算：子进程已退出后，向一个订阅者投递事件最多
+/// 等待这么久；仍无进展（队列满且未被消费）则放弃该订阅者的后续输出。
+/// End 事件不经过订阅者队列（由订阅者端 End 槽合成），因此此预算只影响
+/// 尾部输出，永不阻塞进程收尾。
+pub(super) const EOL_SEND_BUDGET: Duration = Duration::from_millis(300);
 /// 限制普通 stdout 和 stderr 单次读取的最大字节数。
 pub(super) const OUTPUT_CHUNK_BYTES: usize = 32 * 1024;
 /// 限制 PTY 单次阻塞读取的最大字节数。
