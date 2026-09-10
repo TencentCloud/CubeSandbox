@@ -79,8 +79,9 @@ scheduler:
 | `metric_update_timeout` | 节点资源指标多久未更新后视为不可调度。应明显大于 Cubelet 上报周期。 |
 | `local_metric_update_timeout` | 预留的本地指标超时字段。当前 prefilter 对全局指标和本地指标的新鲜度检查都使用 `metric_update_timeout`。 |
 | `filter.enable_filters` | 启用调度过滤器。常见过滤器包括 CPU、内存、模板本地性和实时创建并发。 |
-| `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`；启用时必须同时配置 `score.plugin_conf.real_time_weighted_average`，否则 CubeMaster 可能在 scheduler 启动阶段 panic。 |
+| `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`；启用时必须同时配置 `score.plugin_conf.real_time_weighted_average`，否则 CubeMaster 可能在 scheduler 启动阶段 panic。对 `external_http_score` 同样适用：写入 `enable_scorers` 时必须提供匹配的 `score.plugin_conf.external_http_score`。 |
 | `score.resource_weights` | 控制 MVM 数、创建并发、CPU/内存 quota 使用率等因子的权重。权重越高，该因子对分数影响越大；对应因子也必须列在 `score.plugin_conf.real_time_weighted_average.enable_weight_factors` 中。 |
+| `score.plugin_conf.external_http_score` | 可选的 HTTP sidecar 评分器。见 [External HTTP score 插件](#external-http-score-插件)。 |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | 全局或按实例类型限制单节点 MVM 数。Cubelet 上报的 `max_mvm_num` 也会参与实际上限计算。 |
 | `disk_usage_max_percent` | `disk` filter 和 backoff 路径使用的磁盘水位阈值，用于避免继续调度到快满的机器。 |
 | `affinityconf` / `node_affinity_selector_allowed_keys` | 控制按 cluster label、zone、CPU 类型、机型等做亲和或约束选择。 |
@@ -263,6 +264,72 @@ sudo tail -F /data/log/Cubelet/Cubelet-req.log
 - 将 `priority_select_num` 设置为大于 `1`。
 - 检查 `local_create_num`、`mvm_num`、`quota_cpu_usage`、`quota_mem_usage` 权重是否存在。
 - 确认各节点模板副本都可用，否则 `template_locality` 会让候选节点集合变小。
+
+## External HTTP score 插件
+
+`external_http_score` 是可选评分插件。当它出现在 `score.enable_scorers` 中时，
+CubeMaster 会把**当前候选节点列表**（经过 filter 之后）以 HTTP POST 发给运营配置的
+sidecar，并把返回的逐节点分数并入加权总分。启用
+`enable_scorers: external_http_score` **必须**同时提供匹配的
+`score.plugin_conf.external_http_score`；否则 CubeMaster 在启动构造 scorer 时会
+panic（与 `real_time_weighted_average` 相同）。
+
+### 配置
+
+```yaml
+scheduler:
+  score:
+    enable_scorers:
+      - external_http_score
+    plugin_conf:
+      external_http_score:
+        weight: 1.0
+        endpoint: "http://127.0.0.1:18080/score"
+        timeout: 200ms   # 可选；为 0/省略时默认 200ms
+        mode: ""         # 可选，原样转发给 sidecar
+        disable: false
+```
+
+| 字段 | 含义 |
+|------|------|
+| `weight` | 在 `runScoreFilter` 加权平均中的相对权重。 |
+| `endpoint` | Sidecar URL。为空则跳过该插件（不返回分数）。 |
+| `timeout` | 单次 HTTP 超时。为 0/省略时使用默认 **200ms**。 |
+| `mode` | 可选的运营自定义字符串，写入请求 JSON。 |
+| `disable` | 为 true 时即使已 enable 也是空操作。 |
+
+### 传输协议
+
+请求（`POST`，`Content-Type: application/json`）：
+
+| 字段 | 单位 / 说明 |
+|------|-------------|
+| `mode` | 可选，来自配置。 |
+| `instance_type` | 请求实例类型。 |
+| `template_id` | 若存在则为请求模板 ID。 |
+| `nodes[]` | scorer 收到的**完整**候选集合；每个节点一条。 |
+| `nodes[].node_id` | 节点身份；响应 key 必须与该集合精确一致。 |
+| `nodes[].quota_cpu` / `quota_mem` | 节点快照中的容量计数。 |
+| `nodes[].quota_cpu_usage` / `quota_mem_usage` | **原始**上报占用计数（不经过 `EffectiveAllocated`）。当 `ignore_redis_allocation: true` 时，内置 scorer 可能把 allocated 视为 0，但这些传输协议字段仍携带 Redis 上报的原始值。 |
+| 其他 `nodes[]` 字段 | `mvm_num`、创建计数、`cpu_util`、`mem_usage`、IP/类型等快照可用字段。 |
+
+响应：
+
+```json
+{ "scores": { "node-a": 10.0, "node-b": 90.0 } }
+```
+
+- `scores` 必须**恰好**覆盖候选 `node_id` 集合（不能少、不能多）。
+- 每个分数须为有限数值，范围 **`[0, 100]`**，越大越好（与内置 scorer 方向一致）。
+- 响应体超过 **1 MiB** 会被拒绝；**不跟随** HTTP 重定向。
+
+### 失败 / 回退语义
+
+scorer 失败（超时、非 2xx、重定向、畸形/过大响应、校验错误）会返回错误。
+`runScoreFilter` 会跳过失败的 scorer 并继续调度（对 sandbox 创建保持
+**fail-open**）。失败在 scorer 边界记录一次日志，不记录 endpoint URL、URL userinfo、
+query token，也不记录请求/响应正文或密钥。该调用在创建路径上是**同步**的；本 PR
+不引入熔断、缓存、异步执行、重试循环或并发限制。
 
 ## 相关文档
 

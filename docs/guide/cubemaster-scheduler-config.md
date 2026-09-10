@@ -79,8 +79,9 @@ scheduler:
 | `metric_update_timeout` | Treat resource metrics as stale after this duration. It should be much larger than the Cubelet report interval. |
 | `local_metric_update_timeout` | Reserved local-metric timeout field. Current prefilter logic gates both global and local metric freshness with `metric_update_timeout`. |
 | `filter.enable_filters` | Enables scheduling filters. Common filters include CPU, memory, template locality, and real-time create concurrency. |
-| `score.enable_scorers` | Enables scoring plugins. Multi-node deployments usually enable `real_time_weighted_average`; when it is enabled, the matching `score.plugin_conf.real_time_weighted_average` block is required or CubeMaster can panic during scheduler startup. |
+| `score.enable_scorers` | Enables scoring plugins. Multi-node deployments usually enable `real_time_weighted_average`; when it is enabled, the matching `score.plugin_conf.real_time_weighted_average` block is required or CubeMaster can panic during scheduler startup. The same rule applies to `external_http_score`: listing it under `enable_scorers` requires a matching `score.plugin_conf.external_http_score` block. |
 | `score.resource_weights` | Controls the influence of MVM count, create concurrency, CPU quota usage, and memory quota usage. Higher weight means stronger influence; factors must also be listed under `score.plugin_conf.real_time_weighted_average.enable_weight_factors`. |
+| `score.plugin_conf.external_http_score` | Optional HTTP sidecar scorer. See [External HTTP score plugin](#external-http-score-plugin). |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | Global or per-instance-type single-node MVM limits. Cubelet-reported `max_mvm_num` also participates in the effective limit. |
 | `disk_usage_max_percent` | Threshold used by the `disk` filter and backoff path to avoid placing more sandboxes on nearly full machines. |
 | `affinityconf` / `node_affinity_selector_allowed_keys` | Controls affinity and constraints by cluster label, zone, CPU type, instance type, and other allowed selector keys. |
@@ -263,6 +264,75 @@ If new sandboxes still concentrate on one machine in a multi-node cluster:
 - Set `priority_select_num` to a value greater than `1`.
 - Check that weights for `local_create_num`, `mvm_num`, `quota_cpu_usage`, and `quota_mem_usage` are configured.
 - Confirm templates are available on all intended nodes; otherwise `template_locality` shrinks the candidate set.
+
+## External HTTP score plugin
+
+`external_http_score` is an opt-in scoring plugin. When it appears in
+`score.enable_scorers`, CubeMaster POSTs a snapshot of the **current candidate
+node list** (after filters) to an operator-configured HTTP endpoint and blends
+the returned per-node scores into the weighted score sum. Enabling
+`enable_scorers: external_http_score` **requires** a matching
+`score.plugin_conf.external_http_score` block; otherwise CubeMaster panics while
+constructing scorers at startup (same pattern as `real_time_weighted_average`).
+
+### Configuration
+
+```yaml
+scheduler:
+  score:
+    enable_scorers:
+      - external_http_score
+    plugin_conf:
+      external_http_score:
+        weight: 1.0
+        endpoint: "http://127.0.0.1:18080/score"
+        timeout: 200ms   # optional; default 200ms when zero/omitted
+        mode: ""         # optional opaque string forwarded to the sidecar
+        disable: false
+```
+
+| Field | Meaning |
+|-------|---------|
+| `weight` | Relative weight in `runScoreFilter`'s weighted average. |
+| `endpoint` | Sidecar URL. Empty endpoint skips the plugin (returns no scores). |
+| `timeout` | Per-request HTTP timeout. Zero/omitted uses the default **200ms**. |
+| `mode` | Optional operator-defined mode string included in the JSON request. |
+| `disable` | When true, the plugin is a no-op even if enabled in `enable_scorers`. |
+
+### Wire contract
+
+Request (`POST`, `Content-Type: application/json`):
+
+| Field | Units / notes |
+|-------|----------------|
+| `mode` | Optional string from config. |
+| `instance_type` | Request instance type. |
+| `template_id` | Request template id when present. |
+| `nodes[]` | **Exact** candidate set passed into the scorer; one entry per node. |
+| `nodes[].node_id` | Node identity; response keys must match this set exactly. |
+| `nodes[].quota_cpu` / `quota_mem` | Capacity counters from the node snapshot. |
+| `nodes[].quota_cpu_usage` / `quota_mem_usage` | **Raw** reported usage counters (not `EffectiveAllocated`). When `ignore_redis_allocation: true`, built-in scorers may treat allocated usage as 0 while these wire fields still carry the raw Redis-reported values. |
+| other `nodes[]` fields | `mvm_num`, create counters, `cpu_util`, `mem_usage`, IPs/types as available on the snapshot. |
+
+Response:
+
+```json
+{ "scores": { "node-a": 10.0, "node-b": 90.0 } }
+```
+
+- `scores` must cover **exactly** the candidate `node_id` set (no missing/extra keys).
+- Each score must be a finite number in **`[0, 100]`**, higher is better (same direction as built-in scorers).
+- Response bodies larger than **1 MiB** are rejected; HTTP redirects are not followed.
+
+### Failure / fallback semantics
+
+Scorer failures (timeout, non-2xx, redirect, malformed/oversized body, validation
+errors) return an error from the plugin. `runScoreFilter` skips failed scorers
+and continues scheduling (**fail-open** for sandbox creation). Failures are
+logged once at the scorer boundary without endpoint URLs, URL userinfo, query
+tokens, or request/response bodies; secrets are not logged. The call is
+**synchronous** on the create path; this PR does not add a circuit breaker,
+cache, async execution, retry loop, or concurrency limiter.
 
 ## See also
 
