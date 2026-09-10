@@ -21,6 +21,9 @@ FROM rust:${RUST_TOOLCHAIN}-slim-bookworm AS envd-builder
 
 ARG RUST_TOOLCHAIN
 ARG TARGETARCH
+# 版本唯一事实源是 cube-envd/src/version.rs 的常量；这两个 ARG 只用于镜像 LABEL 与
+# 构建注入（commit）。构建阶段会校验 CUBE_ENVD_VERSION 与二进制自报版本一致，避免
+# 标签与产物分叉。
 ARG CUBE_ENVD_VERSION=0.1.0
 ARG CUBE_ENVD_COMMIT=unknown
 
@@ -48,6 +51,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     CUBE_ENVD_VERSION="${CUBE_ENVD_VERSION}" CUBE_ENVD_COMMIT="${CUBE_ENVD_COMMIT}" \
       cargo "+${RUST_TOOLCHAIN}" build --release --locked --target "${rust_target}" --bin cube-envd; \
     install -Dm0755 "target/${rust_target}/release/cube-envd" /out/envd; \
+    reported="$(/out/envd -version)"; \
+    if [ "${reported}" != "${CUBE_ENVD_VERSION}" ]; then \
+        echo "CUBE_ENVD_VERSION (${CUBE_ENVD_VERSION}) does not match the version the binary reports (${reported});" >&2; \
+        echo "the version comes from cube-envd/src/version.rs — pass that value, or omit the build arg" >&2; \
+        exit 1; \
+    fi; \
     /out/envd -version; \
     /out/envd -commit
 

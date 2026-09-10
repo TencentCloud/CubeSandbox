@@ -229,6 +229,21 @@ envd [OPTIONS]
 
 单横线旧式参数（`-port`、`-isnotfc`、`-version`、`-commit`）会被规范化为双横线形式以兼容调用。
 
+### 版本号
+
+`-version` 输出 [`src/version.rs`](./src/version.rs) 中的 semver 常量，它是本组件版本的
+**唯一事实源**，形态与参考实现 envd 的 `packages/envd/pkg/version.go` 一致。该值**有意**
+不从 git tag 或 CI 运行派生，因为下游会解析它：
+
+- Cubelet 与 CubeMaster 按 `\d+\.\d+\.\d+` 提取该值，写入
+  `cube.master.components.envd.version` 注解，并作为沙箱信息上的公开字段 `envdVersion` 暴露；
+- 参考实现 envd 还会用该值做最低版本门禁比较，且把非法格式判为 error 而非"更旧"，因此
+  `sha-1a2b3c4` 这类构建标识在这里不是"没用"而是**有害**。
+
+构建标识走单独的 `CUBE_ENVD_COMMIT`，由 `-commit` 输出。`CUBE_ENVD_VERSION` 仍作为发布
+工具链的显式覆盖保留，但默认没有任何渠道注入它，空值会回落到常量。发版只需 bump 该常量；
+`make version-check` 会断言它是 semver 且二进制自报版本与之一致。
+
 手动启动示例：
 
 ```bash

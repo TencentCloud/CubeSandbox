@@ -382,7 +382,7 @@ cubecow-test-native: builder-image
 .PHONY: cubemaster
 cubemaster: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/cube-envd && CUBE_ENVD_VERSION=$(CUBE_VERSION) CUBE_ENVD_COMMIT=$(CUBE_COMMIT) TARGET_ARCH=$(TARGET_ARCH) make install BINDIR=/workspace/_output/bin && cd /workspace/CubeMaster && CGO_ENABLED=0 make cubemaster && CGO_ENABLED=0 make cubemastercli ENVD_LOCAL_PATH=/workspace/_output/bin/cube-envd && cp build/cubemaster build/cubemastercli /workspace/_output/bin/'
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/cube-envd && CUBE_ENVD_COMMIT=$(CUBE_COMMIT) TARGET_ARCH=$(TARGET_ARCH) make install BINDIR=/workspace/_output/bin && cd /workspace/CubeMaster && CGO_ENABLED=0 make cubemaster && CGO_ENABLED=0 make cubemastercli ENVD_LOCAL_PATH=/workspace/_output/bin/cube-envd && cp build/cubemaster build/cubemastercli /workspace/_output/bin/'
 
 # CubeTemplateCenter is a separate module whose go.mod replaces CubeMaster,
 # CubeDB, Cubelet and cubelog with local paths, so it builds inside the same
@@ -424,7 +424,7 @@ agent: builder-image
 .PHONY: cube-envd
 cube-envd: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/cube-envd && CUBE_ENVD_VERSION=$(CUBE_VERSION) CUBE_ENVD_COMMIT=$(CUBE_COMMIT) TARGET_ARCH=$(TARGET_ARCH) make install BINDIR=/workspace/_output/bin'
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/cube-envd && CUBE_ENVD_COMMIT=$(CUBE_COMMIT) TARGET_ARCH=$(TARGET_ARCH) make install BINDIR=/workspace/_output/bin'
 
 .PHONY: cube-init guest-init
 cube-init guest-init: builder-image

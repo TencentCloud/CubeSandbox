@@ -221,7 +221,10 @@ docker exec "$cid" curl -s -o /dev/null -w "envd /health => %{http_code}\n" \
 # => envd /health => 204
 
 docker exec "$cid" /usr/bin/envd -version
-# => v0.5.1   (semver of the cube-envd build baked into the image)
+# => 0.1.0   (cube-envd's own semver, from cube-envd/src/version.rs)
+
+docker exec "$cid" /usr/bin/envd -commit
+# => the git sha the image was built from
 
 docker rm -f "$cid"
 ```

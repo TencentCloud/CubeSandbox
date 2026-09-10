@@ -434,9 +434,12 @@ else
   esac
   (
     cd /workspace/cube-envd
-    CUBE_ENVD_VERSION="${CUBE_VERSION}" CUBE_ENVD_COMMIT="${CUBE_COMMIT}" \
+    # 版本来自 src/version.rs 的常量（唯一事实源），这里只注入 commit。
+    CUBE_ENVD_COMMIT="${CUBE_COMMIT}" \
       cargo +1.89 build --release --locked --target "${CUBE_ENVD_TARGET}" --bin cube-envd
     install -m 0755 "target/${CUBE_ENVD_TARGET}/release/cube-envd" "${ENVD_EMBED_PATH}"
+    "${ENVD_EMBED_PATH}" -version
+    "${ENVD_EMBED_PATH}" -commit
   )
 fi
 (cd /workspace/CubeMaster && make cubemastercli ENVD_LOCAL_PATH="${ENVD_EMBED_PATH}")

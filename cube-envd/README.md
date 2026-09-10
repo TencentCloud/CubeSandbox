@@ -277,6 +277,27 @@ envd [OPTIONS]
 Single-dash legacy flags (`-port`, `-isnotfc`, `-version`, `-commit`) are
 normalized to their long forms for compatibility.
 
+### Versioning
+
+`-version` prints the semver constant in
+[`src/version.rs`](./src/version.rs), which is the single source of truth for
+this component's version — the same shape as the reference envd's
+`packages/envd/pkg/version.go`. It is deliberately **not** derived from the git
+tag or the CI run, because downstream consumers parse it:
+
+- Cubelet and CubeMaster extract it with `\d+\.\d+\.\d+` and persist it as the
+  `cube.master.components.envd.version` annotation, which is surfaced as the
+  public `envdVersion` field on sandbox info.
+- The reference envd also compares this value against minimum-version gates and
+  treats a malformed value as an error rather than as "older", so a build
+  identifier such as `sha-1a2b3c4` is worse than useless here.
+
+Build identity travels separately through `CUBE_ENVD_COMMIT` and is printed by
+`-commit`. `CUBE_ENVD_VERSION` still exists as an explicit override for release
+tooling, but nothing injects it by default and an empty value falls back to the
+constant. To release, bump the constant; `make version-check` asserts it is a
+semver and that the built binary agrees with it.
+
 Example manual start:
 
 ```bash

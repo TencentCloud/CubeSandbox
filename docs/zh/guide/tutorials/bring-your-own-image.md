@@ -211,7 +211,10 @@ docker exec "$cid" curl -s -o /dev/null -w "envd /health => %{http_code}\n" \
 # => envd /health => 204
 
 docker exec "$cid" /usr/bin/envd -version
-# => v0.5.1   （镜像内嵌的 cube-envd 构建版本）
+# => 0.1.0   （cube-envd 自身的 semver，来自 cube-envd/src/version.rs）
+
+docker exec "$cid" /usr/bin/envd -commit
+# => 构建镜像所用的 git sha
 
 docker rm -f "$cid"
 ```
