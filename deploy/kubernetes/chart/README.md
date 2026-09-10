@@ -668,7 +668,7 @@ When enabled, the sidecar:
 - reads S3 config from a chart Secret mounted at `/etc/s3lvol/s3.cfg`; an `existingSecret` must contain that key in s3lvol format (not `volume-s3.conf`);
 - reuses chart MinIO or `volumeS3` endpoint and credentials by default. The bucket is `cube-s3lvol` and must not be the volume plugin's `cube-volumes` (Helm fails on a shared bucket);
 - identifies the node by hashing the full Kubernetes node name (`spec.nodeName`) to `rcow-<8hex>`, so a Pod recreate is not a new machine and IP / dotted node names stay unique. `cubeS3lvol.lvsName` pins the same name on every node — do not set it when more than one node runs the sidecar;
-- uses rcow's default CPU mask (`0x3`); set `cubeS3lvol.cpuMask` when cores are isolated.
+- maps two SPDK reactors to the two highest allowed CPU IDs below `CPU_SETSIZE` in the sidecar's effective startup affinity by default (one reactor if only one supported CPU is allowed; no supported CPU is a startup error); set an exact `cubeS3lvol.cpuMask` when cores are isolated. Background threads use the remaining affinity, but share it when reactors consume every CPU, so leave at least one additional CPU for separation. Selection does not isolate CPUs from other workloads.
 
 ```yaml
 cubeS3lvol:
@@ -722,6 +722,12 @@ Override `helmTest.image` with curl+sh+awk+getent. `helmTest.dnsImage` is
 busybox for node-runtime-test only.
 
 ## Upgrade policy
+
+Upgrading from a chart release where `cubeS3lvol.cpuMask` was empty changes
+s3lvol reactor placement from the former implicit `0x3` (CPUs 0-1) to automatic
+selection. If those CPUs were isolated for the sidecar, set
+`cubeS3lvol.cpuMask: "0x3"` before upgrading; leave it empty only to opt into the
+new affinity-based placement.
 
 `cube-node` is a native `apps/v1` DaemonSet. Bumping Big Pod runtime images
 (`images.cubelet`, `images.waitNodePrep`, …) or changing the Pod template

@@ -150,7 +150,7 @@ used ones:
 | `RCOW_CAPACITY_GB` | `16384` | used only at first create; thin, unused space costs nothing |
 | `RCOW_CACHE_MB` | `490496` | chunk cache on the WAL image; only matters before the first start |
 | `RCOW_LISTEN_ADDR` / `RCOW_LISTEN_PORT` | `127.0.0.1` / `4420` | |
-| `RCOW_TGT_CPUMASK` | `0x3` | |
+| `RCOW_TGT_CPUMASK` | empty (automatic) | exact SPDK mask/list override; automatic mode maps two reactors to the two highest allowed CPU IDs below `CPU_SETSIZE` |
 | `RCOW_NO_HUGE` | `1` | no hugepages by default, a deliberate choice |
 | `RCOW_RPC_SOCK` | `/var/run/s3lvol.sock` | |
 
@@ -385,12 +385,29 @@ For a local MinIO the config must also set `path_style = "true"` and
 ### Busy-polling threads and CPU affinity
 
 `s3lvol_tgt` runs SPDK reactor threads in busy-poll mode: they spin at 100% of
-the cores they are pinned to and never sleep. The current deployment starts
-with **2 reactors on 2 dedicated cores** (e.g. `-m 0x3` pins them to CPU 0 and
-CPU 1). Those two cores are fully consumed by the target, so **other
-(application/business) processes must be kept off them** — pin them elsewhere
-with `taskset`/`numactl` (or a cpuset/cgroup) so the target's request latency
-is not disturbed by scheduler contention.
+the cores they are pinned to and never sleep. Unless an explicit SPDK reactor
+mask or lcore map is supplied (`-m`, `--lcores`, or `RCOW_TGT_CPUMASK`), the
+target maps two dense SPDK lcores to the two highest-numbered logical CPUs below
+`CPU_SETSIZE` in its effective scheduler affinity at startup. Higher CPU IDs can
+still host background/CRT threads, but DPDK cannot select them as reactors.
+That affinity already reflects `taskset`, cpuset/cgroup, and container runtime
+restrictions; if only one supported CPU is available, the target starts one
+reactor, and if none is available startup fails.
+
+Background/CRT threads are restricted to the startup affinity minus the reactor
+CPUs. If the reactors consume every allowed CPU, they instead share the full
+affinity and the target logs a warning; leave at least one additional CPU allowed
+when reactor/background separation is required.
+
+The selected CPUs are fully consumed by the target, but selecting them does
+**not** isolate them from other workloads or guarantee separate physical cores;
+on SMT hosts the two highest logical CPUs may be sibling threads on one core.
+Keep other application/business processes off them with `taskset`/`numactl`
+(or a cpuset/cgroup), or set an exact
+SPDK mask/list such as `RCOW_TGT_CPUMASK=0x30` or `[4,5]` for pre-isolated
+cores. Existing one-click installations retain any persisted mask (including
+the former `0x3` default); remove or empty `RCOW_TGT_CPUMASK` before upgrading
+to opt into automatic selection.
 
 ## LIMITATIONS and TODOs
 

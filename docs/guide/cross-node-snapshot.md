@@ -140,7 +140,7 @@ Identity comes from the full Kubernetes node name, hashed to `rcow-<8hex>`. A Po
 Extra settings are only needed when:
 
 - the S3 endpoint is external and path-style — set `cubeS3lvol.s3.pathStyle: true`;
-- cores are isolated — set `cubeS3lvol.cpuMask` (default is rcow's `0x3`).
+- cores are isolated — set an exact `cubeS3lvol.cpuMask`; otherwise the target maps two SPDK reactors to the two highest allowed CPU IDs below `CPU_SETSIZE` in the sidecar's effective startup affinity (one reactor if only one supported CPU is allowed; no supported CPU is a startup error). Automatic selection honors cpusets but does not itself isolate those CPUs from other workloads.
 
 ```yaml
 cubeS3lvol:

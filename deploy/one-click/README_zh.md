@@ -200,7 +200,7 @@ sudo ./down.sh
 CubeS3lvol（s3lvol）作为 `cube-sandbox-*` 角色 target 的 `Wants=` 成员被统一管理：
 
 - **停止（`down.sh` / `systemctl stop cube-sandbox-{control,compute}.target`）**：s3lvol 单元会走 `cube-s3lvol-stop.sh` 的**条件卸载**——target 进程存活时完整执行 `rcow_stop.sh`（断开 initiator → 卸载 lvstore/回刷 → 终止 target），target 已崩溃时只清理 target 侧残留、绝不断开 NVMf initiator。`down.sh` 只停止服务，**不删除任何数据**（`/data/cubelet/rcow/wal_bdev.img` 与 bstore 元数据保留），再次启动走 attach/replay 恢复。
-- **升级（`install.sh` 升级模式）**：旧 `CubeS3lvol/` 目录被替换（新二进制自动生效），随后 target 随角色 target 重启。`wal_bdev.img` **永不覆盖**（仅首次安装创建，其尺寸固定 journal/WAL 布局），`.one-click.env` 中 `RCOW_*` 配置经升级合并保留。
+- **升级（`install.sh` 升级模式）**：旧 `CubeS3lvol/` 目录被替换（新二进制自动生效），随后 target 随角色 target 重启。`wal_bdev.img` **永不覆盖**（仅首次安装创建，其尺寸固定 journal/WAL 布局），`.one-click.env` 中 `RCOW_*` 配置经升级合并保留；这也包括旧版自动写入的 `RCOW_TGT_CPUMASK=0x3`。若要启用新版“自动映射 reactor 到 `CPU_SETSIZE` 以下编号最大的两个允许 CPU”的行为，请在升级前删除该项。
 - **启停开关**：推荐 `ONE_CLICK_ENABLE_S3LVOL=0|1 ./install.sh`（upgrade 同样生效）。或在包内 `.env` **只写这一项** 再重跑 `install.sh`。不要整份 `cp env.example .env` 再 upgrade，否则这个开关会被重置成 `0`。不必再手改 `.one-click.env`。也可以直接 `systemctl enable/disable cube-sandbox-s3lvol.service`。`CUBE_PVM_ENABLE` 遵循同样规则：出现在 `.env` 或进程环境中即视为显式设置（整份 `cp` 同样会把它重置为 `0`）。
 - **S3 后端**：启用后 `install.sh` 用 `CUBE_S3_*` 自动写出 `/data/cubelet/s3.cfg`（默认对接内置 MinIO；配了外部 S3 就跟外部走）。s3lvol 使用独立桶 `CUBE_S3LVOL_BUCKET`（默认 `cube-s3lvol`），与 volume 插件的 `cube-volumes` 分开。supervisor 启动前会用 stdlib SigV4 工具幂等建桶，不依赖 awscli。手写且不含 one-click sentinel 的 `s3.cfg` 不会被覆盖。开发机上旧的 `/data/cubelet/cos.cfg` **不会回落**，请改名为 `s3.cfg` 并换成新字段名。
 

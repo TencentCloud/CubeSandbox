@@ -237,7 +237,10 @@ role target:
   replaced (the new binary takes effect), then the target restarts with the
   role target. `wal_bdev.img` is **never overwritten** (created only on first
   install; its size fixes the journal/WAL layout), and the `RCOW_*` settings in
-  `.one-click.env` are merged and kept across the upgrade.
+  `.one-click.env` are merged and kept across the upgrade. This includes the
+  former generated `RCOW_TGT_CPUMASK=0x3`; remove that key before upgrading to
+  opt into mapping reactors to the two highest allowed CPU IDs below
+  `CPU_SETSIZE` automatically.
 - **Enable/disable**: preferred `ONE_CLICK_ENABLE_S3LVOL=0|1 ./install.sh`
   (honored on upgrade as well). Or put only that key in the bundle `.env`
   and re-run `install.sh`. Do not `cp env.example .env` as a full copy

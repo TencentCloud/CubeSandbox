@@ -163,7 +163,7 @@ Cube 安装时默认安装 MinIO 作为 S3 服务，方便开箱体验。
 只有以下情况需要额外设置：
 
 - 外部 S3 端点为 path-style——显式设 `cubeS3lvol.s3.pathStyle: true`；
-- CPU 核做了隔离——设置 `cubeS3lvol.cpuMask`（默认 rcow 的 `0x3`）。
+- CPU 核做了隔离——设置精确的 `cubeS3lvol.cpuMask`；否则 target 默认把两个 SPDK reactor 映射到 sidecar 启动时有效 affinity 中 `CPU_SETSIZE` 以下编号最大的两个允许 CPU（仅有一个受支持 CPU 时使用一个 reactor；没有受支持 CPU 时启动失败）。自动选择会遵守 cpuset，但不会替你隔离这些 CPU 上的其他负载。
 
 ```yaml
 cubeS3lvol:
