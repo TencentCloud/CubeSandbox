@@ -94,7 +94,7 @@ s3lvol_derived_lvs_name() {
 
 # An explicit RCOW_LVS_NAME (cubeS3lvol.lvsName) wins; otherwise derive
 # rcow-<hash of NODE_NAME> now, before rcow_common.sh resolves the name at
-# source time. RCOW_TGT_CPUMASK is exported only when set (rcow default 0x3).
+# source time. RCOW_TGT_CPUMASK is exported only when explicitly set.
 s3lvol_export_optional_knobs() {
   if [[ -n "${RCOW_LVS_NAME:-}" ]]; then
     export RCOW_LVS_NAME
@@ -111,7 +111,7 @@ s3lvol_export_optional_knobs() {
     export RCOW_TGT_CPUMASK
     log "RCOW_TGT_CPUMASK=${RCOW_TGT_CPUMASK} (explicit)"
   else
-    log "RCOW_TGT_CPUMASK unset; rcow_common default is 0x3"
+    log "RCOW_TGT_CPUMASK unset; s3lvol_tgt will use the two highest supported allowed CPUs"
   fi
 }
 

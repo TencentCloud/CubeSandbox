@@ -1730,7 +1730,8 @@ case "${CUBE_EGRESS_ADMIN_PORT}" in
 esac
 
 # CubeS3lvol (s3lvol) options. Defaults mirror rcow_common.sh so the data
-# plane behaves out of the box. ONE_CLICK_ENABLE_S3LVOL only records the
+# plane behaves out of the box. An empty CPU mask delegates selection to the
+# target at each start. ONE_CLICK_ENABLE_S3LVOL only records the
 # intent here; the systemd unit wiring is done by install-units.sh when the
 # switch is 1 (the unit itself is always shipped).
 ONE_CLICK_ENABLE_S3LVOL="${ONE_CLICK_ENABLE_S3LVOL:-0}"
@@ -1746,7 +1747,7 @@ RCOW_JOURNAL_MB="${RCOW_JOURNAL_MB:-1024}"
 # total. Tuning RCOW_CACHE_MB only matters before the first start.
 RCOW_CACHE_MB="${RCOW_CACHE_MB:-490496}"
 RCOW_CAPACITY_GB="${RCOW_CAPACITY_GB:-16384}"
-RCOW_TGT_CPUMASK="${RCOW_TGT_CPUMASK:-0x3}"
+RCOW_TGT_CPUMASK="${RCOW_TGT_CPUMASK:-}"
 RCOW_TGT_MEM_MB="${RCOW_TGT_MEM_MB:-16384}"
 RCOW_LISTEN_ADDR="${RCOW_LISTEN_ADDR:-127.0.0.1}"
 RCOW_LISTEN_PORT="${RCOW_LISTEN_PORT:-4420}"
@@ -2034,9 +2035,9 @@ else
   remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_S3FS_EXTRA_OPTS"
 fi
 
-# CubeS3lvol (s3lvol) runtime env: persist the resolved defaults (mirroring
-# rcow_common.sh) so the systemd unit picks them up via EnvironmentFile
-# without re-deriving them, and so `down.sh` / upgrade knows the intent.
+# CubeS3lvol (s3lvol) runtime env: persist resolved sizing and listener defaults.
+# The CPU mask is different: an absent key means that s3lvol_tgt selects from its
+# effective affinity at every start; a non-empty key records an operator override.
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_ENABLE_S3LVOL" "${ONE_CLICK_ENABLE_S3LVOL}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3LVOL_BUCKET" "${CUBE_S3LVOL_BUCKET}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_S3_BUCKET" "${CUBE_OPS_S3_BUCKET:-cube-ops}"
@@ -2049,7 +2050,11 @@ upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_WAL_MB" "${RCOW_WAL_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_JOURNAL_MB" "${RCOW_JOURNAL_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CACHE_MB" "${RCOW_CACHE_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CAPACITY_GB" "${RCOW_CAPACITY_GB}"
-upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_CPUMASK" "${RCOW_TGT_CPUMASK}"
+if [[ -n "${RCOW_TGT_CPUMASK}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_CPUMASK" "${RCOW_TGT_CPUMASK}"
+else
+  remove_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_CPUMASK"
+fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_MEM_MB" "${RCOW_TGT_MEM_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_LISTEN_ADDR" "${RCOW_LISTEN_ADDR}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_LISTEN_PORT" "${RCOW_LISTEN_PORT}"

@@ -229,8 +229,10 @@ printf '\n==== %s: starting %s\n' "$(date -Is)" "${RCOW_TGT_BIN}" >>"${RCOW_LOG}
 # -r must match RCOW_RPC_SOCK: s3lvol_tgt defaults to /var/run/s3lvol.sock,
 # and rcow_wait_rpc below probes RCOW_RPC_SOCK -- a mismatch just times out.
 #
+rcow_set_tgt_cpumask_args
 # shellcheck disable=SC2086
-TGT_PID="$(rcow_start_target_detached "${RCOW_TGT_BIN}" -m "${RCOW_TGT_CPUMASK}" \
+TGT_PID="$(rcow_start_target_detached "${RCOW_TGT_BIN}" \
+	${RCOW_TGT_CPUMASK_ARGS[@]+"${RCOW_TGT_CPUMASK_ARGS[@]}"} \
 	-r "${RCOW_RPC_SOCK}" --wait-for-rpc ${TGT_ARGS})" ||
 	bail "the target did not come up far enough to record its pid"
 

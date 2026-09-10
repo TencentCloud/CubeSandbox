@@ -261,7 +261,10 @@ RCOW_IOBUF_LARGE_POOL="${RCOW_IOBUF_LARGE_POOL:-512}"
 RCOW_READ_AHEAD_KB="${RCOW_READ_AHEAD_KB:-1024}"
 export S3LVOL_READ_AHEAD_KB="${RCOW_READ_AHEAD_KB}"
 
-RCOW_TGT_CPUMASK="${RCOW_TGT_CPUMASK:-0x3}"
+# Empty delegates reactor selection to s3lvol_tgt, which uses the two
+# highest-numbered SPDK-supported CPUs in its effective scheduler affinity. An
+# explicit SPDK mask or CPU list is passed through unchanged by rcow_start.sh.
+RCOW_TGT_CPUMASK="${RCOW_TGT_CPUMASK:-}"
 RCOW_TGT_MEM_MB="${RCOW_TGT_MEM_MB:-16384}"
 
 # Run without hugepages, deliberately, rather than as a fallback for a node
@@ -579,6 +582,16 @@ rcow_target_pid()
 rcow_target_alive()
 {
 	rcow_target_pid >/dev/null
+}
+
+# Populate RCOW_TGT_CPUMASK_ARGS for a target launch. Keeping this as an array is
+# what makes an SPDK CPU list such as [4,9] one opaque argument.
+rcow_set_tgt_cpumask_args()
+{
+	RCOW_TGT_CPUMASK_ARGS=()
+	if [ -n "${RCOW_TGT_CPUMASK:-}" ]; then
+		RCOW_TGT_CPUMASK_ARGS=(-m "${RCOW_TGT_CPUMASK}")
+	fi
 }
 
 # Start the target detached and echo its pid.
