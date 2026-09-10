@@ -1086,6 +1086,9 @@ func preHandleScheduler(config *Config) error {
 	// configs keep pre-upgrade load behavior (ineffective factor scorers stay
 	// runtime no-ops rather than Init failures).
 	if config.Scheduler.Profile != "" {
+		if err := validateEffectiveSchedulerSelectors(&config.Scheduler.SchedulerConf); err != nil {
+			return err
+		}
 		if err := validateSchedulerScorePluginConfig(&config.Scheduler.SchedulerConf); err != nil {
 			return err
 		}
@@ -1336,6 +1339,30 @@ func validateBinpackScoreWeight(s *SchedulerConf) error {
 	}
 	if cfg.MvmWeight < 0 {
 		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.mvm_weight must be >= 0, got %v", cfg.MvmWeight)
+	}
+	return nil
+}
+
+// validateEffectiveSchedulerSelectors checks the final Filter/Score name lists
+// after Profile overlay. Empty-profile configs keep legacy warn-and-skip for
+// unknown base enable_scorers names at NewSelector time.
+func validateEffectiveSchedulerSelectors(s *SchedulerConf) error {
+	if s == nil {
+		return nil
+	}
+	if s.Filter != nil {
+		for _, name := range s.Filter.EnableFilters {
+			if _, ok := allowedSchedulerFilterNames[name]; !ok {
+				return fmt.Errorf("scheduler profile %q: unknown filter %q in effective enable_filters", s.Profile, name)
+			}
+		}
+	}
+	if s.Score != nil {
+		for _, name := range s.Score.EnableScorers {
+			if _, ok := allowedSchedulerScoreNames[name]; !ok {
+				return fmt.Errorf("scheduler profile %q: unknown score %q in effective enable_scorers", s.Profile, name)
+			}
+		}
 	}
 	return nil
 }

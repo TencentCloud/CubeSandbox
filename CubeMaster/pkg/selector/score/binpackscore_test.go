@@ -100,7 +100,7 @@ scheduler:
 			if cfg == nil {
 				t.Fatal("plugin_conf.binpack_score = nil, want explicit config preserved")
 			}
-			if cfg.Weight != tt.wantWeight && !tt.wantDisable {
+			if cfg.Weight != tt.wantWeight {
 				t.Fatalf("config weight = %v, want %v", cfg.Weight, tt.wantWeight)
 			}
 			if tt.name == "custom weight" && cfg.CPUWeight != 2 {

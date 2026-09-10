@@ -321,8 +321,11 @@ scheduler:
 `external_http_score` (HTTP plugin scorer) is tracked separately in #1700 and
 is not part of this runtime Profiles + binpack change set. #1699 / #1700 are
 related open work and are **not** merged here. Do not list
-`external_http_score` in `enable_scorers` on this branch; unknown score names
-fail closed.
+`external_http_score` in `enable_scorers` on this branch. With a selected
+Profile, unknown names in the **effective** `enable_filters` /
+`enable_scorers` lists fail closed at config load; with an empty Profile,
+unknown base `enable_scorers` names are still warn-skipped at `NewSelector`
+(legacy compatibility).
 
 ## Runtime Profile vs Simulator Profile
 

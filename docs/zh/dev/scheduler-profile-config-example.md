@@ -286,7 +286,10 @@ scheduler:
 
 `external_http_score`（HTTP 插件评分器）在 #1700 单独跟踪，不属于本运行时 Profiles +
 binpack 变更集合。#1699 / #1700 为相关开放工作，**未**在此合并。不要在本分支的
-`enable_scorers` 中列出 `external_http_score`；未知 score 名称会失败关闭。
+`enable_scorers` 中列出 `external_http_score`。选中 Profile 时，最终生效的
+`enable_filters` / `enable_scorers` 中的未知名称会在配置加载阶段失败关闭；空
+Profile 下，base `enable_scorers` 中的未知名仍在 `NewSelector` 时告警并跳过
+（升级兼容）。
 
 ## 运行时 Profile vs 模拟器 Profile
 

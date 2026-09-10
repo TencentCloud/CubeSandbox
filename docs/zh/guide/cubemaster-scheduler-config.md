@@ -81,7 +81,7 @@ scheduler:
 | `filter.enable_filters` | 启用调度过滤器。常见过滤器包括 CPU、内存、模板本地性和实时创建并发。 |
 | `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`。当设置了非空 `scheduler.profile` 时，最终生效列表中的每个已注册评分器都必须有对应 `plugin_conf`（因子型评分器还需已知的 `enable_weight_factors` 与至少一个正的 `resource_weights`），否则配置加载失败。空 Profile 下，列出但缺少 `plugin_conf`/因子的因子型评分器会在选择器构造时告警并跳过（不再 panic）；需补齐配置才会真正生效。 |
 | `score.resource_weights` | 控制 MVM 数、创建并发、CPU/内存 quota 使用率等因子的权重。权重越高，该因子对分数影响越大；对应因子也必须列在 `score.plugin_conf.real_time_weighted_average.enable_weight_factors` 中。Profile 展开时同名键覆盖基础权重。 |
-| `score.plugin_conf.binpack_score` | 可选的插件型评分器，偏好更满的节点。在 `enable_scorers` 中列出但省略该块时，会启用安全默认（插件权重 1，CPU/内存/MVM 等权）。`weight: 0` 禁用 Select；负的插件/子权重在配置加载阶段被拒绝。因 YAML `float64` 无法区分“省略”与 `0`，`cpu_weight`/`mem_weight`/`mvm_weight` 为 `<= 0` 时回退为默认 `1`（不能用 0 排除某一维）。 |
+| `score.plugin_conf.binpack_score` | 可选的插件型评分器，偏好更满的节点。在 `enable_scorers` 中列出但省略该块时，会启用安全默认（插件权重 1，CPU/内存/MVM 等权）。`weight: 0` 禁用 Select；负的插件/子权重在配置加载阶段被拒绝。因 YAML `float64` 无法区分“省略”与 `0`，`cpu_weight`/`mem_weight`/`mvm_weight` 为 `0` 时回退为默认 `1`（不能用 0 排除某一维）；负值在配置加载阶段被拒绝。 |
 | `profile` / `profiles` | 可选的运行时 Profile 覆盖层。空 `profile` 不改变现有 Filter/Score。内置名：`balanced_spread`、`template_locality_first`、`binpack_utilization`。用户同名 key 完全覆盖内置。运行时 Profile 是选择器覆盖，不是离线模拟器模型。详见 [Scheduler Profile 配置示例](../dev/scheduler-profile-config-example.md)。 |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | 全局或按实例类型限制单节点 MVM 数。Cubelet 上报的 `max_mvm_num` 也会参与实际上限计算。 |
 | `disk_usage_max_percent` | `disk` filter 和 backoff 路径使用的磁盘水位阈值，用于避免继续调度到快满的机器。 |
