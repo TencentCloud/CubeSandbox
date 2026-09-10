@@ -201,9 +201,18 @@ the command before a report is produced.
 `feasible_candidate_evaluations / scheduled_requests` and counts feasible
 nodes for each scheduled request, so it is at most `node_count`. It is a
 simulator-local candidate-breadth proxy, not scheduler CPU cost or latency.
-Because the simulator binds the globally best scored feasible node, truncating
-after a full sort would not change placement, and the report does not include a
-separate post-cap retained-candidate metric.
+This simulator binds the globally best scored feasible node (deterministic
+argmax). Production CubeMaster may truncate to `scheduler.priority_select_num`
+and then select with score-weighted randomness; under this simulator's bind
+rule, truncating after a full sort would not change placement, so the report
+does not include a separate post-cap retained-candidate metric.
+`average_score_margin` is a simulator-local decision-gap proxy under that
+argmax bind, not a production selection metric.
+
+Every JSON field on the emitted `Metrics` object has a matching
+`metric_schema[]` entry (including accounting fields such as `total_requests`,
+`placement_counts`, `peak_mem_utilization`, `feasible_candidate_evaluations`,
+and `node_final_state`).
 
 If both build information and the CLI Git fallback are unavailable,
 `git_revision` is `unknown` and `git_dirty` is `null`. This state cannot

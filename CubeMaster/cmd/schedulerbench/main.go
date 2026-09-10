@@ -176,19 +176,32 @@ func writeReports(outDir, format string, report simulator.Report) error {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
 	}
+	jsonPath := filepath.Join(outDir, "report.json")
+	mdPath := filepath.Join(outDir, "report.md")
 	if format == formatJSON || format == formatBoth {
 		jsonReport, err := report.JSON()
 		if err != nil {
 			return fmt.Errorf("marshal json report: %w", err)
 		}
-		if err := os.WriteFile(filepath.Join(outDir, "report.json"), jsonReport, 0o644); err != nil {
+		if err := os.WriteFile(jsonPath, jsonReport, 0o644); err != nil {
 			return fmt.Errorf("write json report: %w", err)
 		}
+	} else if err := removeReportFile(jsonPath); err != nil {
+		return fmt.Errorf("remove stale json report: %w", err)
 	}
 	if format == formatMarkdown || format == formatBoth {
-		if err := os.WriteFile(filepath.Join(outDir, "report.md"), []byte(report.Markdown()), 0o644); err != nil {
+		if err := os.WriteFile(mdPath, []byte(report.Markdown()), 0o644); err != nil {
 			return fmt.Errorf("write markdown report: %w", err)
 		}
+	} else if err := removeReportFile(mdPath); err != nil {
+		return fmt.Errorf("remove stale markdown report: %w", err)
+	}
+	return nil
+}
+
+func removeReportFile(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }

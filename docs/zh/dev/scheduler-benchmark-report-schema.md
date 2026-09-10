@@ -195,8 +195,15 @@ go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
 `average_feasible_candidates` 等于
 `feasible_candidate_evaluations / scheduled_requests`，按每个成功调度请求统计可行
 节点，因此最大为 `node_count`。它是 simulator 本地候选宽度代理，不是调度器 CPU
-开销或延迟。因为 simulator 绑定全局最高分的可行节点，全量排序后再截断不会改变
-放置结果，报告也不再包含单独的截断后保留候选指标。
+开销或延迟。本 simulator 绑定全局最高分的可行节点（确定性 argmax）。生产
+CubeMaster 可能按 `scheduler.priority_select_num` 截断，再按分数加权随机选择；
+在本 simulator 绑定规则下，全量排序后再截断不会改变放置结果，因此报告不包含单独的
+截断后保留候选指标。`average_score_margin` 是该 argmax 绑定下的 simulator 本地
+决策差距代理，不是生产选择指标。
+
+发出的 `Metrics` 对象上每个 JSON 字段都有对应的 `metric_schema[]` 条目（包括
+`total_requests`、`placement_counts`、`peak_mem_utilization`、
+`feasible_candidate_evaluations`、`node_final_state` 等记账字段）。
 
 如果 build info 与 CLI Git 回退都不可用，`git_revision` 为 `unknown`，
 `git_dirty` 为 `null`；该状态无法区分不同代码版本。报告不包含 Git 错误、

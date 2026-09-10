@@ -102,14 +102,17 @@ The report includes more than five scheduling-quality metrics:
   do not treat P50/P95 as measured create latency.
 - `peak_cpu_utilization`
 - `average_cpu_headroom`
-- `average_score_margin`: mean score gap between the selected node and the
-  second-ranked candidate, averaged only over scheduled requests that had at
-  least two scored candidates; `0` when no such observations exist.
+- `average_score_margin`: simulator-local decision-gap proxy under deterministic
+  argmax bind: mean score gap between the selected node and the second-ranked
+  candidate, averaged only over scheduled requests that had at least two scored
+  candidates; `0` when no such observations exist. Not a production selection
+  metric.
 - `average_feasible_candidates`: feasible simulated nodes per scheduled request;
   at most the simulated node count. Simulator-local candidate breadth, not
-  scheduler CPU cost or latency. The simulator binds the globally best scored
-  feasible node, so it does not report a separate post-cap retained-candidate
-  metric.
+  scheduler CPU cost or latency. This simulator binds the globally best scored
+  feasible node; production may truncate with `priority_select_num` and then
+  score-weighted-random select, so the report does not claim a retained-candidate
+  metric that would track that production knob.
 
 The Markdown results table includes `latency p50 ms` and `latency p95 ms`.
 The estimator is deterministic:

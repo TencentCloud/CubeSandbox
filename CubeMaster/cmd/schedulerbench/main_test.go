@@ -618,6 +618,67 @@ func TestWriteReportsSelectsFilesByFormat(t *testing.T) {
 	}
 }
 
+func TestWriteReportsRemovesStaleFormatFiles(t *testing.T) {
+	t.Parallel()
+
+	report := simulator.Report{RunID: "test-run"}
+	outDir := t.TempDir()
+	if err := writeReports(outDir, formatBoth, report); err != nil {
+		t.Fatalf("seed both formats: %v", err)
+	}
+	jsonPath := filepath.Join(outDir, "report.json")
+	mdPath := filepath.Join(outDir, "report.md")
+	if !fileExists(t, jsonPath) || !fileExists(t, mdPath) {
+		t.Fatal("seed write did not create both report files")
+	}
+
+	if err := writeReports(outDir, formatJSON, report); err != nil {
+		t.Fatalf("writeReports(json) into populated dir: %v", err)
+	}
+	if !fileExists(t, jsonPath) {
+		t.Fatal("report.json missing after json-only rewrite")
+	}
+	if fileExists(t, mdPath) {
+		t.Fatal("stale report.md left after json-only rewrite")
+	}
+
+	if err := writeReports(outDir, formatMarkdown, report); err != nil {
+		t.Fatalf("writeReports(markdown) into populated dir: %v", err)
+	}
+	if !fileExists(t, mdPath) {
+		t.Fatal("report.md missing after markdown-only rewrite")
+	}
+	if fileExists(t, jsonPath) {
+		t.Fatal("stale report.json left after markdown-only rewrite")
+	}
+}
+
+func TestRunCLIRemovesStaleFormatOnRerun(t *testing.T) {
+	t.Parallel()
+
+	outDir := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := runCLI([]string{"--format", formatBoth, "--out", outDir}, &stdout, &stderr); err != nil {
+		t.Fatalf("seed runCLI(both) error = %v, stderr = %q", err, stderr.String())
+	}
+	if !fileExists(t, filepath.Join(outDir, "report.json")) || !fileExists(t, filepath.Join(outDir, "report.md")) {
+		t.Fatal("seed runCLI(both) did not create both report files")
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runCLI([]string{"--format", formatJSON, "--out", outDir}, &stdout, &stderr); err != nil {
+		t.Fatalf("rerun runCLI(json) error = %v, stderr = %q", err, stderr.String())
+	}
+	if !fileExists(t, filepath.Join(outDir, "report.json")) {
+		t.Fatal("report.json missing after json-only rerun")
+	}
+	if fileExists(t, filepath.Join(outDir, "report.md")) {
+		t.Fatal("stale report.md left after json-only rerun")
+	}
+}
+
 func fileExists(t *testing.T, path string) bool {
 	t.Helper()
 	_, err := os.Stat(path)

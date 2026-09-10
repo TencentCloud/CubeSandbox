@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math"
 	mrand "math/rand"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -124,14 +125,16 @@ type Metrics struct {
 	CreateLatencyP50MS      float64        `json:"create_latency_p50_ms"`
 	CreateLatencyP95MS      float64        `json:"create_latency_p95_ms"`
 	UsesEstimatedLatency    bool           `json:"uses_estimated_latency"`
-	AverageCPUHeadroom float64 `json:"average_cpu_headroom"`
-	AverageScoreMargin float64 `json:"average_score_margin"`
+	AverageCPUHeadroom      float64        `json:"average_cpu_headroom"`
+	AverageScoreMargin      float64        `json:"average_score_margin"`
 	// AverageFeasibleCandidates is the mean number of feasible nodes per
 	// scheduled request. It is a simulator-local candidate-breadth proxy, not
-	// a measurement of scheduler work or latency. The simulator binds the
-	// globally best scored feasible node, so there is no post-score priority
-	// cap that would change the selected node or justify a second breadth
-	// metric.
+	// a measurement of scheduler work or latency. This simulator binds the
+	// globally best scored feasible node (deterministic argmax), so a separate
+	// post-cap retained-candidate metric would not change the selected node
+	// here. Production CubeMaster may truncate with priority_select_num and
+	// then score-weighted-random select; that bind rule is intentionally not
+	// modeled.
 	AverageFeasibleCandidates float64             `json:"average_feasible_candidates"`
 	FeasibleEvaluations       int                 `json:"feasible_candidate_evaluations"`
 	FailureReasons            map[string]int      `json:"failure_reasons,omitempty"`
@@ -413,7 +416,33 @@ func verifyMetricSchema(schema []MetricSchema) error {
 			return fmt.Errorf("verify default benchmark: metric schema missing %q", name)
 		}
 	}
+	// Every Metrics JSON field the generator can emit must have a schema entry
+	// so the contract cannot silently drift from the report object.
+	for _, name := range metricsJSONFieldNames() {
+		if _, ok := seen[name]; !ok {
+			return fmt.Errorf("verify default benchmark: metric schema missing emitted metrics key %q", name)
+		}
+	}
 	return nil
+}
+
+// metricsJSONFieldNames returns every json-tagged Metrics field name, including
+// omitempty fields, so schema coverage cannot drop behind the emitted object.
+func metricsJSONFieldNames() []string {
+	t := reflect.TypeOf(Metrics{})
+	names := make([]string, 0, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		tag := t.Field(i).Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		name := strings.Split(tag, ",")[0]
+		if name == "" || name == "-" {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
 }
 
 // verifyResults requires exactly one result entry for every expected
@@ -1034,19 +1063,27 @@ func runID(cfg Config) string {
 
 func defaultMetricSchema() []MetricSchema {
 	return []MetricSchema{
-		{Name: "schedule_success_rate", Direction: "higher is better", Description: "Scheduled requests divided by total workload requests."},
+		{Name: "total_requests", Direction: "context only", Description: "Total workload requests considered in this profile/workload result."},
+		{Name: "scheduled_requests", Direction: "higher is better", Description: "Requests that selected a feasible node and completed a simulated bind."},
 		{Name: "rejected_requests", Direction: "lower is better", Description: "Requests rejected because no candidate node had enough simulated capacity."},
+		{Name: "schedule_success_rate", Direction: "higher is better", Description: "Scheduled requests divided by total workload requests."},
+		{Name: "placement_counts", Direction: "context only", Description: "Per-node count of successfully scheduled requests."},
 		{Name: "node_load_balance", Direction: "higher is better", Description: "One minus the coefficient of variation across per-node resource load, clamped to [0,1]."},
 		{Name: "template_locality_hit_rate", Direction: "higher is better", Description: "Fraction of scheduled requests placed on a node that already has the request template."},
 		{Name: "cpu_quota_utilization", Direction: "higher is better", Description: "Average final CPU quota utilization across nodes."},
+		{Name: "peak_cpu_utilization", Direction: "lower is safer", Description: "Highest final CPU utilization across nodes."},
 		{Name: "mem_quota_utilization", Direction: "higher is better", Description: "Average final memory quota utilization across nodes."},
+		{Name: "peak_mem_utilization", Direction: "lower is safer", Description: "Highest final memory utilization across nodes."},
 		{Name: "create_latency_p50_ms", Direction: "lower is better", Description: "Estimated create latency P50 from template locality, create pressure, and resource pressure. Not measured CubeAPI/Cubelet create time."},
 		{Name: "create_latency_p95_ms", Direction: "lower is better", Description: "Estimated create latency P95 from template locality, create pressure, and resource pressure. Not measured CubeAPI/Cubelet create time."},
 		{Name: "uses_estimated_latency", Direction: "true means estimated", Description: "Always true in this simulator: create_latency_p50_ms and create_latency_p95_ms are deterministic estimates, not live create latency."},
-		{Name: "peak_cpu_utilization", Direction: "lower is safer", Description: "Highest final CPU utilization across nodes."},
 		{Name: "average_cpu_headroom", Direction: "higher is safer", Description: "Average remaining CPU capacity after each placement."},
-		{Name: "average_score_margin", Direction: "higher means clearer decisions", Description: "Mean score gap between the selected node and second-ranked candidate, averaged only over scheduled requests that had at least two scored candidates. Zero when no such decisions exist."},
+		{Name: "average_score_margin", Direction: "higher means clearer decisions", Description: "Simulator-local decision-gap proxy under deterministic argmax bind: mean score gap between the selected node and second-ranked candidate, averaged only over scheduled requests that had at least two scored candidates. Zero when no such decisions exist. Not a production selection metric."},
 		{Name: "average_feasible_candidates", Direction: "no better/worse direction; breadth only", Description: "Average number of feasible simulated nodes per scheduled request; maximum is the simulated node count. Simulator-local candidate breadth, not scheduler CPU cost or latency."},
+		{Name: "feasible_candidate_evaluations", Direction: "context only", Description: "Sum of feasible-node counts over scheduled requests."},
+		{Name: "failure_reasons", Direction: "context only", Description: "Counts of rejected requests grouped by rejection reason."},
+		{Name: "warnings", Direction: "context only", Description: "Optional non-fatal notes attached to a metrics object."},
+		{Name: "node_final_state", Direction: "context only", Description: "Final per-node occupancy snapshot after the workload finishes."},
 	}
 }
 
@@ -1232,8 +1269,11 @@ type scoredNode struct {
 }
 
 // scoreCandidates returns every feasible node scored and sorted descending.
-// The simulator binds ranked[0], so truncating after a full sort would not
-// change the selected node and is intentionally omitted.
+// This simulator binds ranked[0] (deterministic argmax with stable node-ID
+// tie-break). Production CubeMaster may truncate to priority_select_num and
+// then select with score-weighted randomness; truncating after a full sort
+// would not change the selected node under this simulator's bind rule, so a
+// separate retained-candidate metric is intentionally omitted.
 func scoreCandidates(nodes []simNode, req Request, weights profileWeights) []scoredNode {
 	ranked := make([]scoredNode, 0, len(nodes))
 	for i := range nodes {

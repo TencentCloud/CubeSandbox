@@ -82,10 +82,11 @@ default-vs-candidate 对比。指标描述与 comparison notes 等人类可读�
 - `uses_estimated_latency`：在本 simulator 中恒为 `true`，避免读者把 P50/P95 当成实测创建延迟。
 - `peak_cpu_utilization`
 - `average_cpu_headroom`
-- `average_score_margin`：所选节点与第二名候选的分数差均值，仅对至少有两个已打分候选的成功调度请求取平均；无此类观测时为 `0`。
+- `average_score_margin`：确定性 argmax 绑定下的 simulator 本地决策差距代理：所选节点与第二名候选的分数差均值，仅对至少有两个已打分候选的成功调度请求取平均；无此类观测时为 `0`。不是生产选择指标。
 - `average_feasible_candidates`：每个成功调度请求的可行模拟节点均值，最大为
   模拟节点数。这是 simulator 本地的候选宽度代理，不是调度器 CPU 开销或延迟实测。
-  simulator 绑定全局最高分的可行节点，因此不再单独报告截断后保留候选数。
+  本 simulator 绑定全局最高分的可行节点；生产可能用 `priority_select_num` 截断后再
+  按分数加权随机选择，因此报告不声称会跟踪该生产旋钮的保留候选指标。
 
 Markdown 结果表包含 `latency p50 ms` 与 `latency p95 ms`。估算器是确定性的：
 

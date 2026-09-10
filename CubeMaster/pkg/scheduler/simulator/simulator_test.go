@@ -100,6 +100,18 @@ func TestVerifyDefaultReportRejectsContractGaps(t *testing.T) {
 			want: "metric schema missing",
 		},
 		{
+			name: "missing emitted metrics schema key",
+			mutate: func(report *Report) {
+				for i, metric := range report.MetricSchema {
+					if metric.Name == "peak_mem_utilization" {
+						report.MetricSchema = append(report.MetricSchema[:i], report.MetricSchema[i+1:]...)
+						return
+					}
+				}
+			},
+			want: "metric schema missing emitted metrics key \"peak_mem_utilization\"",
+		},
+		{
 			name: "missing comparison",
 			mutate: func(report *Report) {
 				report.Comparisons = report.Comparisons[1:]

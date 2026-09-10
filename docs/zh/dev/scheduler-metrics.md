@@ -60,10 +60,11 @@ CubeAPI/Cubelet 的真实创建延迟或生产性能。
 
 1. 请求按 `Arrival` 升序处理；同一 tick 内先释放 `EndsAt <= tick` 的 sandbox，再调度该 tick 到达的请求。
 2. 节点不可行条件遵循本 simulator 建模的硬资源形态（sandbox 数达到上限，或 CPU/内存配额放不下本次请求）。这是带 simulator 本地约束的 Filter→Score→bind *形态*，并不宣称与 CubeMaster 生产 Filter 插件集合等价。不可行节点不进入 Score。
-3. 可行节点按 Profile 权重打分后，取最高分节点绑定。同分时按节点 ID 稳定排序。
-4. 配额利用率、峰值利用率和负载均衡度使用**最后一次请求到达后的节点快照**，不是全时段平均，也不是历史峰值。
-5. 模板命中率和估算延迟只统计成功调度的请求。
-6. 节点初始模板缓存是静态的。成功放置不会把模板加入该节点缓存。
+3. 可行节点按 Profile 权重打分后，绑定最高分节点（确定性 argmax，同分按节点 ID 稳定打破）。生产 CubeMaster 会按 `scheduler.priority_select_num` 截断，再在截断集合上做按分数加权的随机选择，因此本报告中的放置结果与 Profile 排名是该 simulator 绑定规则下的性质。
+4. `average_score_margin` 是上述 argmax 绑定下的 simulator 本地决策差距代理，不是生产选择指标。
+5. 配额利用率、峰值利用率和负载均衡度使用**最后一次请求到达后的节点快照**，不是全时段平均，也不是历史峰值。
+6. 模板命中率和估算延迟只统计成功调度的请求。
+7. 节点初始模板缓存是静态的。成功放置不会把模板加入该节点缓存。
 
 因此，短生命周期 workload 结束时节点上可能只剩尚未到期的请求。装箱率和均衡度反映的是这次快照，而不是高峰占用。
 
@@ -139,10 +140,15 @@ Markdown 结果表列名与 JSON 字段对应关系（`Report.Markdown()`）：
 | `CPUUtilization` | `cpu_utilization` |
 | `MemUtilization` | `mem_utilization` |
 
-`scoreCandidates` 对全部可行节点打分排序，并绑定最高分节点。全量排序后再截断
-不会改变最终绑定节点，因此报告只暴露 `feasible_candidate_evaluations` /
-`average_feasible_candidates` 作为 simulator 本地候选宽度代理（最大为节点数），
-不再单独报告截断后保留候选指标。
+`scoreCandidates` 对全部可行节点打分排序，并绑定最高分节点（确定性 argmax）。
+生产 CubeMaster 可用 `scheduler.priority_select_num` 截断，再按分数加权随机选择，
+因此保留/截断后候选指标在那里会对应真实生产旋钮。在本 simulator 的绑定规则下，
+全量排序后再截断不会改变最终绑定节点，所以报告只暴露
+`feasible_candidate_evaluations` / `average_feasible_candidates` 作为
+simulator 本地候选宽度代理（最大为节点数）。
+
+`average_score_margin` 同样是 argmax 绑定下的 simulator 本地决策差距代理，
+不是生产选择指标。
 
 `docs/dev/scheduler-benchmark-report-schema.md` 描述当前 CLI 输出的 profile × workload 矩阵和 `comparisons[]` 对比结构。本文以当前 `Metrics` 字段为准。
 
