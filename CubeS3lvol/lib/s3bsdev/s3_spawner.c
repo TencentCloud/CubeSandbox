@@ -46,6 +46,8 @@ struct spawner_request {
 };
 
 static cpu_set_t       g_cpuset;
+static cpu_set_t       *g_preconfigured_cpuset;
+static size_t          g_preconfigured_cpuset_size;
 static bool            g_cpuset_valid = false;
 
 static pthread_t       g_spawner_thread;
@@ -72,8 +74,11 @@ spawner_thread_main(void *arg)
 
 	/* Set affinity on itself so every child it creates inherits the same set. */
 	if (g_cpuset_valid) {
-		int rc = pthread_setaffinity_np(pthread_self(),
-						sizeof(cpu_set_t), &g_cpuset);
+		const cpu_set_t *cpuset = g_preconfigured_cpuset != NULL ?
+					  g_preconfigured_cpuset : &g_cpuset;
+		size_t cpuset_size = g_preconfigured_cpuset != NULL ?
+				     g_preconfigured_cpuset_size : sizeof(g_cpuset);
+		int rc = pthread_setaffinity_np(pthread_self(), cpuset_size, cpuset);
 		if (rc != 0) {
 			/* Not fatal: falls back to inheriting the caller's affinity,
 			 * degraded performance but still functional. */
@@ -143,6 +148,46 @@ spawner_thread_main(void *arg)
 }
 
 int
+s3_spawner_set_cpuset(const cpu_set_t *cpuset, size_t cpuset_size)
+{
+	cpu_set_t *copy;
+
+	if (cpuset == NULL || cpuset_size == 0 ||
+	    CPU_COUNT_S(cpuset_size, cpuset) == 0) {
+		return -EINVAL;
+	}
+	copy = CPU_ALLOC(cpuset_size * CHAR_BIT);
+	if (copy == NULL) {
+		return -ENOMEM;
+	}
+	CPU_ZERO_S(CPU_ALLOC_SIZE(cpuset_size * CHAR_BIT), copy);
+	memcpy(copy, cpuset, cpuset_size);
+
+	pthread_mutex_lock(&g_spawner_mutex);
+	if (g_spawner_started) {
+		pthread_mutex_unlock(&g_spawner_mutex);
+		CPU_FREE(copy);
+		return -EBUSY;
+	}
+	CPU_FREE(g_preconfigured_cpuset);
+	g_preconfigured_cpuset = copy;
+	g_preconfigured_cpuset_size = cpuset_size;
+	pthread_mutex_unlock(&g_spawner_mutex);
+	return 0;
+}
+
+bool
+s3_spawner_has_cpuset(void)
+{
+	bool has_cpuset;
+
+	pthread_mutex_lock(&g_spawner_mutex);
+	has_cpuset = g_preconfigured_cpuset != NULL;
+	pthread_mutex_unlock(&g_spawner_mutex);
+	return has_cpuset;
+}
+
+int
 s3_spawner_start(const cpu_set_t *cpuset)
 {
 	int rc;
@@ -153,7 +198,10 @@ s3_spawner_start(const cpu_set_t *cpuset)
 		return 0;
 	}
 
-	if (cpuset) {
+	if (g_preconfigured_cpuset != NULL) {
+		g_cpuset_valid = CPU_COUNT_S(g_preconfigured_cpuset_size,
+						g_preconfigured_cpuset) != 0;
+	} else if (cpuset) {
 		memcpy(&g_cpuset, cpuset, sizeof(g_cpuset));
 		g_cpuset_valid = true;
 		if (CPU_COUNT(&g_cpuset) == 0) {
@@ -180,8 +228,36 @@ s3_spawner_start(const cpu_set_t *cpuset)
 	g_spawner_started = true;
 	pthread_mutex_unlock(&g_spawner_mutex);
 
-	SPDK_NOTICELOG("Thread spawner started (%d cores allowed)\n",
-		       g_cpuset_valid ? CPU_COUNT(&g_cpuset) : -1);
+	if (g_preconfigured_cpuset != NULL) {
+		char cpus[256];
+		size_t used = 0;
+
+		cpus[0] = '\0';
+		for (size_t cpu = 0; cpu < g_preconfigured_cpuset_size * CHAR_BIT; cpu++) {
+			int written;
+
+			if (!CPU_ISSET_S(cpu, g_preconfigured_cpuset_size,
+					 g_preconfigured_cpuset)) {
+				continue;
+			}
+			written = snprintf(cpus + used, sizeof(cpus) - used, "%s%zu",
+					   used == 0 ? "" : ",", cpu);
+			if (written < 0 || (size_t)written >= sizeof(cpus) - used) {
+				while (used > 0 && cpus[used - 1] != ',') {
+					used--;
+				}
+				strcpy(cpus + used, "...");
+				break;
+			}
+			used += (size_t)written;
+		}
+		SPDK_NOTICELOG("Thread spawner started (%d cores allowed: %s)\n",
+			       CPU_COUNT_S(g_preconfigured_cpuset_size,
+					   g_preconfigured_cpuset), cpus);
+	} else {
+		SPDK_NOTICELOG("Thread spawner started (%d cores allowed)\n",
+			       g_cpuset_valid ? CPU_COUNT(&g_cpuset) : -1);
+	}
 	return 0;
 }
 
@@ -214,6 +290,7 @@ s3_spawner_stop(void)
 	}
 	g_spawner_started = false;
 	g_spawner_stop = false;
+	/* Keep the preconfigured set for a later module init/start cycle. */
 	pthread_mutex_unlock(&g_spawner_mutex);
 
 	TAILQ_FOREACH_SAFE(req, &drain_list, link, tmp) {

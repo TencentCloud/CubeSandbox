@@ -41,6 +41,25 @@
 #include "spdk/event.h"
 #include "spdk/log.h"
 
+#include "s3lvol/s3_spawner.h"
+
+#include "s3lvol_tgt_cpumask.h"
+
+static struct s3lvol_tgt_cpu_selection g_cpu_selection;
+
+static void
+s3lvol_tgt_restore_original_affinity(void)
+{
+	if (g_cpu_selection.original == NULL) {
+		return;
+	}
+	if (sched_setaffinity(0, g_cpu_selection.cpuset_size,
+			      g_cpu_selection.original) != 0) {
+		SPDK_WARNLOG("could not restore startup affinity: %s\n",
+			     strerror(errno));
+	}
+}
+
 static void
 s3lvol_tgt_started(void *arg1)
 {
@@ -53,6 +72,7 @@ int
 main(int argc, char **argv)
 {
 	struct spdk_app_opts opts = {};
+	char lcore_map[64];
 	int rc;
 
 	spdk_app_opts_init(&opts, sizeof(opts));
@@ -64,11 +84,71 @@ main(int argc, char **argv)
 		return rc == SPDK_APP_PARSE_ARGS_HELP ? 0 : 1;
 	}
 
+	if (opts.reactor_mask == NULL && opts.lcore_map == NULL) {
+		rc = s3lvol_tgt_lcore_map_from_affinity(2,
+						    lcore_map, sizeof(lcore_map),
+						    &g_cpu_selection);
+		if (rc != 0) {
+			if (rc == -ENODEV) {
+				fprintf(stderr, "process affinity contains no CPU below "
+					"CPU_SETSIZE for a DPDK reactor\n");
+			} else {
+				fprintf(stderr, "could not select reactor CPUs from process "
+					"affinity: %s\n", strerror(-rc));
+			}
+			return 1;
+		}
+		opts.lcore_map = lcore_map;
+		fprintf(stderr, "automatic reactor lcore map: %s\n", lcore_map);
+	} else {
+		size_t num_cpus;
+
+		rc = s3lvol_tgt_capture_affinity(&g_cpu_selection);
+		if (rc != 0) {
+			fprintf(stderr, "could not read process affinity: %s\n",
+				strerror(-rc));
+			return 1;
+		}
+		num_cpus = g_cpu_selection.cpuset_size * CHAR_BIT;
+		g_cpu_selection.reactors = CPU_ALLOC(num_cpus);
+		g_cpu_selection.background = CPU_ALLOC(num_cpus);
+		if (g_cpu_selection.reactors == NULL ||
+		    g_cpu_selection.background == NULL) {
+			s3lvol_tgt_cpu_selection_fini(&g_cpu_selection);
+			return 1;
+		}
+		rc = s3lvol_tgt_background_from_options(
+			g_cpu_selection.original, g_cpu_selection.cpuset_size, num_cpus,
+			opts.reactor_mask, opts.lcore_map, g_cpu_selection.reactors,
+			g_cpu_selection.background);
+		if (rc != 0) {
+			fprintf(stderr, "could not derive background CPUs from explicit "
+				"SPDK placement: %s\n", strerror(-rc));
+			s3lvol_tgt_cpu_selection_fini(&g_cpu_selection);
+			return 1;
+		}
+	}
+
+	if (s3lvol_tgt_cpu_selection_shares_reactors(&g_cpu_selection)) {
+		fprintf(stderr, "warning: reactors occupy every available CPU; "
+			"background threads will share them\n");
+	}
+	rc = s3_spawner_set_cpuset(g_cpu_selection.background,
+				   g_cpu_selection.cpuset_size);
+	if (rc != 0) {
+		fprintf(stderr, "could not preserve background CPU affinity: %s\n",
+			strerror(-rc));
+		s3lvol_tgt_cpu_selection_fini(&g_cpu_selection);
+		return 1;
+	}
+
 	rc = spdk_app_start(&opts, s3lvol_tgt_started, NULL);
 	if (rc) {
 		SPDK_ERRLOG("spdk_app_start failed: %d\n", rc);
 	}
 
+	s3lvol_tgt_restore_original_affinity();
 	spdk_app_fini();
+	s3lvol_tgt_cpu_selection_fini(&g_cpu_selection);
 	return rc;
 }

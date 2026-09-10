@@ -37,9 +37,9 @@
  *
  *   The cpuset is **injected by the caller**; this file never calls
  *   `spdk_app_get_core_mask()` -- that is a spdk_event-layer API, and
- *   `lib/s3bsdev/` must be unit-testable outside the app framework. The logic
- *   that computes the complement of the reactor coremask lives in
- *   `module/bdev/s3lvol/`.
+ *   `lib/s3bsdev/` must be unit-testable outside the app framework. Normally
+ *   `s3lvol_tgt` injects the physical-CPU complement before DPDK narrows the
+ *   calling thread's affinity. The module layer supplies a fixed-size fallback.
  */
 
 #ifndef S3LVOL_SPAWNER_H
@@ -53,17 +53,36 @@
  * Start the spawner thread.
  *
  * \param cpuset  the set of cores background threads may run on. Typically
- *                "all cores minus the reactor cores of this process", computed
- *                by the module layer with spdk_app_get_core_mask().
- *                NULL means no affinity is set (inherits the caller's -- for
- *                unit tests only; NULL on a production path is a no-op that
- *                fixes nothing). A copy is taken internally; the caller does
- *                not need to keep it alive.
+ *                "all cores minus the reactor cores of this process". The
+ *                target normally preconfigures the physical CPU set; the module
+ *                argument is a fallback.
+ *                NULL uses a set previously supplied by
+ *                s3_spawner_set_cpuset(); without one it means no affinity is
+ *                set and the caller's affinity is inherited. A copy is taken
+ *                internally; the caller does not need to keep it alive.
  *
  * \return 0 on success; negative errno on failure. Repeated calls return 0
  *         (idempotent).
  */
 int s3_spawner_start(const cpu_set_t *cpuset);
+
+/**
+ * Preconfigure the affinity used by a later s3_spawner_start().
+ *
+ * This preserves a dynamically sized scheduler affinity before DPDK pins the
+ * calling thread. Every later start uses this set instead of its cpuset
+ * argument; stop does not discard it. A later call replaces the saved set
+ * while the spawner is stopped.
+ *
+ * \return 0 on success; -EINVAL for NULL, zero-sized, or empty sets; -ENOMEM
+ *         on allocation failure; -EBUSY once the spawner has started.
+ */
+int s3_spawner_set_cpuset(const cpu_set_t *cpuset, size_t cpuset_size);
+
+/**
+ * Whether a preconfigured set has been supplied.
+ */
+bool s3_spawner_has_cpuset(void);
 
 /**
  * Stop the spawner thread and wake/cancel every queued request.

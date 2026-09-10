@@ -6,12 +6,11 @@
  *   This file owns two things that must happen at module init and can only
  *   happen at this layer:
  *
- *   1. **Start the thread spawner and compute its cpuset.**
- *      cpuset = all usable cores - this process's reactor cores. Computing the
- *      complement needs spdk_env_get_core_mask(), which is an env-layer API,
- *      while lib/s3bsdev must stay unit-testable outside the app framework,
- *      so the computation lives in the module layer and the cpuset is injected
- *      into s3_spawner_start().
+ *   1. **Start the thread spawner with its cpuset.**
+ *      s3lvol_tgt normally captures the physical CPU complement before DPDK
+ *      narrows the calling thread's affinity. For other applications, this
+ *      module computes a fixed-size fallback from the current affinity and
+ *      enabled SPDK cores. lib/s3bsdev stays independent of the app/env layers.
  *
  *   2. **Initialise CRT.** s3_crt_global_init() must be called after the
  *      spawner -- it pthread_creates the event loop / resolver / logger
@@ -101,21 +100,26 @@ vbdev_s3lvol_init(void)
 		return 0;
 	}
 
-	rc = s3lvol_build_spawner_cpuset(&cpuset);
-	if (rc != 0) {
-		return rc;
-	}
+	if (s3_spawner_has_cpuset()) {
+		/* s3lvol_tgt captured the real physical reactor placement before
+		 * DPDK pinned this thread; do not recompute it from lcore IDs. */
+		rc = s3_spawner_start(NULL);
+	} else {
+		rc = s3lvol_build_spawner_cpuset(&cpuset);
+		if (rc != 0) {
+			return rc;
+		}
 
-	SPDK_ENV_FOREACH_CORE(core) {
-		num_reactors++;
+		SPDK_ENV_FOREACH_CORE(core) {
+			num_reactors++;
+		}
+		SPDK_NOTICELOG("s3lvol: %d reactor cores, %d cores left for "
+			       "background threads\n", num_reactors, CPU_COUNT(&cpuset));
+		rc = s3_spawner_start(&cpuset);
 	}
-
-	SPDK_NOTICELOG("s3lvol: %d reactor cores, %d cores left for background "
-		       "threads\n", num_reactors, CPU_COUNT(&cpuset));
 
 	/* The spawner must start first: CRT init runs on it, or CRT's I/O
 	 * threads inherit the reactor's single-core affinity. */
-	rc = s3_spawner_start(&cpuset);
 	if (rc != 0) {
 		SPDK_ERRLOG("Failed to start thread spawner: %d\n", rc);
 		return rc;

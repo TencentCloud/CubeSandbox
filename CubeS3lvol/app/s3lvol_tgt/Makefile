@@ -8,7 +8,8 @@
 #
 #  Running (credentials are read from the environment):
 #    export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
-#    ./s3lvol_tgt -m 0x3            # needs root (DPDK)
+#    ./s3lvol_tgt                    # auto-maps two reactors to allowed CPUs
+#    ./s3lvol_tgt -m 0x30            # explicit mask overrides the default
 #
 #  === --whole-archive must cover SPDK's own libraries, not just ours ===
 #
@@ -88,9 +89,16 @@ DPDK_STATIC_LIBS = $(call dpdk_static_libs,$(SPDK_APP_LIBS))
 
 .PHONY: all clean
 
+APP_SRCS = s3lvol_tgt.c s3lvol_tgt_cpumask.c
+APP_OBJS = $(APP_SRCS:.c=.o)
+
 all: $(APP)
-$(APP): s3lvol_tgt.c $(MODULE_DIR)/libs3lvol_bdev.a $(S3BSDEV_DIR)/libs3bsdev.a
-	$(CC) $(COMMON_CFLAGS) s3lvol_tgt.c \
+
+%.o: %.c
+	$(CC) $(COMMON_CFLAGS) -c $< -o $@
+
+$(APP): $(APP_OBJS) $(MODULE_DIR)/libs3lvol_bdev.a $(S3BSDEV_DIR)/libs3bsdev.a
+	$(CC) $(COMMON_CFLAGS) $(APP_OBJS) \
 	    -Wl,--whole-archive \
 	        $(MODULE_DIR)/libs3lvol_bdev.a \
 	        $(S3BSDEV_DIR)/libs3bsdev.a \
@@ -108,8 +116,8 @@ $(APP): s3lvol_tgt.c $(MODULE_DIR)/libs3lvol_bdev.a $(S3BSDEV_DIR)/libs3bsdev.a
 
 # The build flags are not part of the dependencies, so switching
 # S3LVOL_BUILD_TYPE has to go through this stamp (see mk/). The libraries hang
-# their own copy of the dependency; this line covers s3lvol_tgt.c itself.
-$(APP): $(S3LVOL_BUILD_STAMP)
+# their own copy of the dependency; this line covers the application objects.
+$(APP_OBJS): $(S3LVOL_BUILD_STAMP)
 
 $(MODULE_DIR)/libs3lvol_bdev.a:
 	$(MAKE) --directory=$(MODULE_DIR) static
@@ -117,9 +125,8 @@ $(MODULE_DIR)/libs3lvol_bdev.a:
 $(S3BSDEV_DIR)/libs3bsdev.a:
 	$(MAKE) --directory=$(S3BSDEV_DIR) static
 
-# Header dependencies for s3lvol_tgt.c itself, recorded by -MMD. The name comes
-# from -o, so it is $(APP).d.
--include $(APP).d
+# Header dependencies recorded by -MMD (see mk/s3lvol.common.mk).
+-include $(APP_OBJS:.o=.d)
 
 clean:
 	rm -f $(APP) *.o *.d
