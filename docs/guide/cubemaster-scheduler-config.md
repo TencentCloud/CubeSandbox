@@ -302,11 +302,11 @@ scheduler:
 
 | Field | Meaning |
 |-------|---------|
-| `weight` | Relative weight in `runScoreFilter`'s weighted average (`Σ(score × weight) / Σ(weight)`). Returned scores must use the same **`[0, 100]`** scale as built-in scorers; a sidecar that returns normalised `0.0–1.0` values contributes ~1% of a built-in scorer at equal weight. Omitting `weight` (or any value `<= 0`) skips the HTTP call, same as `disable: true`. |
-| `endpoint` | Sidecar URL. Empty endpoint skips the plugin (returns no scores). |
-| `timeout` | Per-request HTTP timeout. Zero/omitted uses the default **200ms**. |
+| `weight` | Relative weight in `runScoreFilter`'s weighted average (`Σ(score × weight) / Σ(weight)`). Returned scores must use the same **`[0, 100]`** scale as built-in scorers; a sidecar that returns normalised `0.0–1.0` values contributes ~1% of a built-in scorer at equal weight. Omitting `weight` (or any value `<= 0`) skips the HTTP call, same as `disable: true`. Read live from `plugin_conf` on each `Weight()` / `Select` (hot-reload applies without restart). |
+| `endpoint` | Sidecar URL. Empty endpoint skips the plugin. Non-empty values must be absolute `http://` or `https://` URLs with a host; missing scheme, `file://`, `unix://`, and other schemes fail construction (or fail-open at Select after hot-reload). |
+| `timeout` | Per-request HTTP timeout. Zero/omitted uses the default **200ms**. Negative values are rejected at construction (not silently coerced). |
 | `mode` | Optional operator-defined mode string included in the JSON request. |
-| `disable` | When true, the plugin is a no-op even if enabled in `enable_scorers`. |
+| `disable` | When true, the plugin is a no-op even if enabled in `enable_scorers`. Read live like `weight`. |
 
 ### Wire contract
 

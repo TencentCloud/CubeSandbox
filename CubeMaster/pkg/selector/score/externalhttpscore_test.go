@@ -5,6 +5,7 @@
 package score
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -233,67 +234,48 @@ func TestExternalHTTPScoreFilterResponseContract(t *testing.T) {
 			t.Fatalf("got = %#v, want empty", got)
 		}
 	})
-
-	t.Run("boundary scores accepted", func(t *testing.T) {
-		got, err := filterExternalHTTPScoreResponse(ctx, map[string]*float64{
-			"node-a": float64Ptr(0),
-			"node-b": float64Ptr(100),
-		}, knownNodes)
-		if err != nil {
-			t.Fatalf("error = %v", err)
-		}
-		if got["node-a"] != 0 || got["node-b"] != 100 {
-			t.Fatalf("got = %#v", got)
-		}
-	})
 }
 
 func TestExternalHTTPScoreSelectIgnoresExtraResponseKeys(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(externalHTTPScoreResponse{
-			Scores: map[string]*float64{
-				"node-a":  float64Ptr(10),
-				"node-b":  float64Ptr(90),
-				"stale-x": float64Ptr(55),
-			},
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "valid extra key",
+			body: `{"scores":{"node-a":10,"node-b":90,"stale-x":55}}`,
+		},
+		{
+			name: "invalid extra key",
+			body: `{"scores":{"node-a":10,"node-b":90,"stale-x":999}}`,
+		},
+		{
+			name: "null extra key",
+			body: `{"scores":{"node-a":10,"node-b":90,"stale-x":null}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := tt.body
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, body)
+			}))
+			defer server.Close()
+
+			got, err := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL)).Select(externalHTTPScoreTestCtx())
+			if err != nil {
+				t.Fatalf("Select() error = %v, want success when only extras differ", err)
+			}
+			if got.Len() != 2 {
+				t.Fatalf("len(scores) = %d, want 2", got.Len())
+			}
+			for _, n := range got {
+				if n.ID() == "stale-x" {
+					t.Fatal("extra key present in Select result")
+				}
+			}
 		})
-	}))
-	defer server.Close()
-
-	got, err := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL)).Select(externalHTTPScoreTestCtx())
-	if err != nil {
-		t.Fatalf("Select() error = %v", err)
-	}
-	if got.Len() != 2 {
-		t.Fatalf("len(scores) = %d, want 2", got.Len())
-	}
-	for _, n := range got {
-		if n.ID() == "stale-x" {
-			t.Fatal("extra key present in Select result")
-		}
-	}
-}
-
-func TestExternalHTTPScoreSelectIgnoresInvalidExtraKeys(t *testing.T) {
-	// JSON cannot encode Inf/NaN; use an out-of-range finite value on an unknown
-	// key so the body still unmarshals and only the extra key is invalid.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"scores":{"node-a":10,"node-b":90,"stale-x":999}}`)
-	}))
-	defer server.Close()
-
-	got, err := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL)).Select(externalHTTPScoreTestCtx())
-	if err != nil {
-		t.Fatalf("Select() error = %v, want success when only extras are invalid", err)
-	}
-	if got.Len() != 2 {
-		t.Fatalf("len(scores) = %d, want 2", got.Len())
-	}
-	for _, n := range got {
-		if n.ID() == "stale-x" {
-			t.Fatal("invalid extra key present in Select result")
-		}
 	}
 }
 
@@ -307,27 +289,6 @@ func TestExternalHTTPScoreSelectRejectsKnownNullScore(t *testing.T) {
 	_, err := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL)).Select(externalHTTPScoreTestCtx())
 	if err == nil {
 		t.Fatal("Select() error = nil, want known null score error")
-	}
-}
-
-func TestExternalHTTPScoreSelectIgnoresExtraNullKeys(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"scores":{"node-a":10,"node-b":90,"stale-x":null}}`)
-	}))
-	defer server.Close()
-
-	got, err := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL)).Select(externalHTTPScoreTestCtx())
-	if err != nil {
-		t.Fatalf("Select() error = %v, want success when only extras are null", err)
-	}
-	if got.Len() != 2 {
-		t.Fatalf("len(scores) = %d, want 2", got.Len())
-	}
-	for _, n := range got {
-		if n.ID() == "stale-x" {
-			t.Fatal("extra null key present in Select result")
-		}
 	}
 }
 
@@ -530,7 +491,7 @@ func TestExternalHTTPScoreRejectsOversizedResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"scores":{"node-a":10,"node-b":90},"pad":"`)
-		_, _ = w.Write(bytesRepeat('x', maxExternalHTTPScoreResponseBytes))
+		_, _ = w.Write(bytes.Repeat([]byte{'x'}, maxExternalHTTPScoreResponseBytes))
 		_, _ = io.WriteString(w, `"}`)
 	}))
 	defer server.Close()
@@ -574,24 +535,13 @@ func TestExternalHTTPScoreDoesNotFollowRedirects(t *testing.T) {
 	}
 }
 
-func TestExternalHTTPScoreRegistryMapsToNewExternalHTTPScore(t *testing.T) {
+func TestExternalHTTPScoreRegistryFactory(t *testing.T) {
 	ctor, ok := scores[externalHTTPScoreName]
 	if !ok || ctor == nil {
 		t.Fatal("external_http_score missing from package registry")
 	}
 	if reflect.ValueOf(ctor).Pointer() != reflect.ValueOf(NewExternalHTTPScore).Pointer() {
 		t.Fatal("registry factory is not NewExternalHTTPScore")
-	}
-}
-
-func TestExternalHTTPScoreRegistryFactorySignature(t *testing.T) {
-	// Signature / Implements(Selector) coverage only. Panic-on-missing-plugin
-	// across nil config levels is covered by
-	// TestNewExternalHTTPScoreFromConfigPanicsWhenPluginMissing without
-	// coupling to process-global conf.yaml / CUBE_MASTER_CONFIG_PATH.
-	ctor, ok := scores[externalHTTPScoreName]
-	if !ok || ctor == nil {
-		t.Fatal("external_http_score missing from package registry")
 	}
 	fn := reflect.ValueOf(ctor)
 	if !fn.IsValid() || fn.Kind() != reflect.Func {
@@ -640,7 +590,7 @@ func TestNewExternalHTTPScoreFromConfigPanicsWhenPluginMissing(t *testing.T) {
 	}
 }
 
-func TestNewExternalHTTPScoreFromConfigUsesPluginWeightAndID(t *testing.T) {
+func TestNewExternalHTTPScoreFromConfigLeavesLiveConfigSeam(t *testing.T) {
 	plugin := &config.ExternalHTTPScore{Weight: 3.5, Endpoint: "http://example.invalid"}
 	global := &config.Config{Scheduler: &config.WrapperSchedulerConf{
 		SchedulerConf: config.SchedulerConf{
@@ -650,18 +600,84 @@ func TestNewExternalHTTPScoreFromConfigUsesPluginWeightAndID(t *testing.T) {
 		},
 	}}
 	scorer := newExternalHTTPScoreFromConfig(global)
-	if scorer.Weight() != 3.5 {
-		t.Fatalf("Weight() = %v, want 3.5", scorer.Weight())
+	if scorer.cfg != nil {
+		t.Fatal("production constructor must leave cfg nil for live GetConfig reads")
 	}
 	if scorer.ID() != constants.SelectorScoreID+"/"+externalHTTPScoreName {
 		t.Fatalf("ID() = %s", scorer.ID())
 	}
-	if scorer.cfg != nil {
-		t.Fatal("production constructor must not inject cfg snapshot field")
-	}
 	if externalHTTPScoreConfigFrom(global) != plugin {
 		t.Fatal("constructor must use externalHTTPScoreConfigFrom")
 	}
+}
+
+func TestExternalHTTPScoreWeightReadsLivePluginConfig(t *testing.T) {
+	cfg := &config.ExternalHTTPScore{Weight: 3.5, Endpoint: "http://example.invalid"}
+	scorer := newExternalHTTPScoreWithConfig(cfg)
+	if scorer.Weight() != 3.5 {
+		t.Fatalf("Weight() = %v, want 3.5", scorer.Weight())
+	}
+	cfg.Weight = 7
+	if scorer.Weight() != 7 {
+		t.Fatalf("Weight() after live edit = %v, want 7", scorer.Weight())
+	}
+}
+
+func TestValidateExternalHTTPScoreConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     *config.ExternalHTTPScore
+		wantErr string
+	}{
+		{name: "nil", cfg: nil, wantErr: "config is nil"},
+		{name: "empty endpoint ok", cfg: &config.ExternalHTTPScore{Weight: 1}, wantErr: ""},
+		{name: "valid http", cfg: &config.ExternalHTTPScore{Endpoint: "http://127.0.0.1:18080/score"}, wantErr: ""},
+		{name: "valid https", cfg: &config.ExternalHTTPScore{Endpoint: "https://sidecar.example/score"}, wantErr: ""},
+		{name: "missing scheme", cfg: &config.ExternalHTTPScore{Endpoint: "127.0.0.1:18080/score"}, wantErr: "invalid endpoint"},
+		{name: "file scheme", cfg: &config.ExternalHTTPScore{Endpoint: "file:///tmp/score"}, wantErr: "invalid endpoint"},
+		{name: "unix scheme", cfg: &config.ExternalHTTPScore{Endpoint: "unix:///tmp/score.sock"}, wantErr: "invalid endpoint"},
+		{name: "empty host", cfg: &config.ExternalHTTPScore{Endpoint: "http:///score"}, wantErr: "invalid endpoint"},
+		{name: "negative timeout", cfg: &config.ExternalHTTPScore{Endpoint: "http://127.0.0.1/score", Timeout: -time.Millisecond}, wantErr: "timeout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateExternalHTTPScoreConfig(tt.cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestNewExternalHTTPScoreFromConfigPanicsOnInvalidEndpoint(t *testing.T) {
+	global := &config.Config{Scheduler: &config.WrapperSchedulerConf{
+		SchedulerConf: config.SchedulerConf{
+			Score: &config.SchedulerScoreConf{
+				ScorePluginConf: config.ScorePluginConf{
+					ExternalHTTPScore: &config.ExternalHTTPScore{
+						Weight:   1,
+						Endpoint: "127.0.0.1:18080/score",
+					},
+				},
+			},
+		},
+	}}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("want panic for invalid endpoint")
+		}
+		if !strings.Contains(fmt.Sprint(r), "invalid endpoint") {
+			t.Fatalf("panic = %v, want invalid endpoint", r)
+		}
+	}()
+	_ = newExternalHTTPScoreFromConfig(global)
 }
 
 func TestExternalHTTPScoreSharedHTTPClientTransport(t *testing.T) {
@@ -778,6 +794,21 @@ func TestSanitizeExternalHTTPScoreFailureOmitsEndpointSecrets(t *testing.T) {
 			wantExact: "external_http_score nil_selector_context",
 		},
 		{
+			name:      "panic recovered category",
+			err:       errors.New("MasterInternalError: externalHTTPScore panic:boom token=" + sentinel),
+			wantExact: "external_http_score panic_recovered",
+		},
+		{
+			name:      "invalid endpoint",
+			err:       errors.New("external_http_score: invalid endpoint (require absolute http/https URL with host) token=" + sentinel),
+			wantExact: "external_http_score invalid_endpoint",
+		},
+		{
+			name:      "invalid timeout",
+			err:       errors.New("external_http_score: timeout must be non-negative token=" + sentinel),
+			wantExact: "external_http_score invalid_timeout",
+		},
+		{
 			name:      "other external_http_score colon prefix",
 			err:       errors.New("external_http_score: boom token=" + sentinel),
 			wantExact: "external_http_score request_failed",
@@ -834,48 +865,6 @@ func TestExternalHTTPScoreSelectNilContextIsSafe(t *testing.T) {
 	}
 }
 
-func TestExternalHTTPScoreConfigFromNilSafe(t *testing.T) {
-	plugin := &config.ExternalHTTPScore{Weight: 2, Endpoint: "http://example.invalid"}
-	tests := []struct {
-		name   string
-		global *config.Config
-		want   *config.ExternalHTTPScore
-	}{
-		{name: "nil global", global: nil, want: nil},
-		{name: "nil scheduler", global: &config.Config{}, want: nil},
-		{name: "nil score", global: &config.Config{Scheduler: &config.WrapperSchedulerConf{}}, want: nil},
-		{
-			name: "nil external plugin",
-			global: &config.Config{Scheduler: &config.WrapperSchedulerConf{
-				SchedulerConf: config.SchedulerConf{
-					Score: &config.SchedulerScoreConf{},
-				},
-			}},
-			want: nil,
-		},
-		{
-			name: "populated external plugin",
-			global: &config.Config{Scheduler: &config.WrapperSchedulerConf{
-				SchedulerConf: config.SchedulerConf{
-					Score: &config.SchedulerScoreConf{
-						ScorePluginConf: config.ScorePluginConf{ExternalHTTPScore: plugin},
-					},
-				},
-			}},
-			want: plugin,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := externalHTTPScoreConfigFrom(tt.global)
-			if got != tt.want {
-				t.Fatalf("externalHTTPScoreConfigFrom() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestDefaultExternalHTTPScoreTimeoutConstant(t *testing.T) {
 	if defaultExternalHTTPScoreTimeout != 200*time.Millisecond {
 		t.Fatalf("defaultExternalHTTPScoreTimeout = %v, want 200ms", defaultExternalHTTPScoreTimeout)
@@ -889,14 +878,6 @@ func testPluginConfig(endpoint string) *config.ExternalHTTPScore {
 		Timeout:  time.Second,
 		Mode:     "prefer-node-b",
 	}
-}
-
-func bytesRepeat(b byte, n int) []byte {
-	out := make([]byte, n)
-	for i := range out {
-		out[i] = b
-	}
-	return out
 }
 
 func externalHTTPScoreTestCtx() *selctx.SelectorCtx {

@@ -539,11 +539,16 @@ type TemplateScore struct {
 }
 
 type ExternalHTTPScore struct {
-	Weight   float64       `yaml:"weight"`
-	Endpoint string        `yaml:"endpoint"`
-	Timeout  time.Duration `yaml:"timeout"`
-	Mode     string        `yaml:"mode"`
-	Disable  bool          `yaml:"disable"`
+	Weight float64 `yaml:"weight"`
+	// Endpoint is the sidecar URL. Empty skips the plugin. Non-empty values must
+	// be absolute http:// or https:// URLs with a host; other schemes (file,
+	// unix, missing scheme) fail construction / are rejected at Select.
+	Endpoint string `yaml:"endpoint"`
+	// Timeout is the per-request deadline. Zero/omitted defaults to 200ms at
+	// request time; negative values are rejected at construction.
+	Timeout time.Duration `yaml:"timeout"`
+	Mode    string        `yaml:"mode"`
+	Disable bool          `yaml:"disable"`
 }
 
 type CubeletConf struct {

@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -69,9 +70,9 @@ func newExternalHTTPScoreHTTPClient() *http.Client {
 }
 
 type externalHTTPScore struct {
-	weight float64
 	// cfg is an optional immutable plugin config used by tests. Production
-	// constructors leave it nil and read live config on each Select call.
+	// constructors leave it nil and read live config on each call so weight,
+	// disable, endpoint, timeout, and mode pick up conf.yaml hot-reloads.
 	cfg *config.ExternalHTTPScore
 }
 
@@ -113,13 +114,18 @@ func NewExternalHTTPScore() *externalHTTPScore {
 
 // newExternalHTTPScoreFromConfig constructs the production scorer from a config
 // snapshot. Panics when plugin_conf.external_http_score is absent (same contract
-// as other score plugins that require matching plugin_conf).
+// as other score plugins that require matching plugin_conf), or when a non-empty
+// endpoint / timeout fails validation.
 func newExternalHTTPScoreFromConfig(global *config.Config) *externalHTTPScore {
 	cfg := externalHTTPScoreConfigFrom(global)
 	if cfg == nil {
 		panic("config.Scheduler.Score.ScorePluginConf.ExternalHTTPScore is nil")
 	}
-	return &externalHTTPScore{weight: cfg.Weight}
+	if err := validateExternalHTTPScoreConfig(cfg); err != nil {
+		panic(err.Error())
+	}
+	// Leave cfg nil so Weight/Disable/Select re-read live GetConfig().
+	return &externalHTTPScore{}
 }
 
 // newExternalHTTPScoreWithConfig constructs a scorer with an immutable config
@@ -128,10 +134,10 @@ func newExternalHTTPScoreWithConfig(cfg *config.ExternalHTTPScore) *externalHTTP
 	if cfg == nil {
 		panic("external_http_score config is nil")
 	}
-	return &externalHTTPScore{
-		weight: cfg.Weight,
-		cfg:    cfg,
+	if err := validateExternalHTTPScoreConfig(cfg); err != nil {
+		panic(err.Error())
 	}
+	return &externalHTTPScore{cfg: cfg}
 }
 
 func (l *externalHTTPScore) ID() string {
@@ -143,7 +149,11 @@ func (l *externalHTTPScore) String() string {
 }
 
 func (l *externalHTTPScore) Weight() float64 {
-	return l.weight
+	cfg := l.pluginConfig()
+	if cfg == nil {
+		return 0
+	}
+	return cfg.Weight
 }
 
 func (l *externalHTTPScore) pluginConfig() *config.ExternalHTTPScore {
@@ -162,6 +172,34 @@ func externalHTTPScoreConfigFrom(global *config.Config) *config.ExternalHTTPScor
 	return global.Scheduler.Score.ScorePluginConf.ExternalHTTPScore
 }
 
+// validateExternalHTTPScoreConfig checks timeout and, when endpoint is set,
+// that it is an absolute http(s) URL with a host. Empty endpoint remains a
+// documented no-op (Select skips the HTTP call).
+func validateExternalHTTPScoreConfig(cfg *config.ExternalHTTPScore) error {
+	if cfg == nil {
+		return fmt.Errorf("external_http_score: config is nil")
+	}
+	if cfg.Timeout < 0 {
+		return fmt.Errorf("external_http_score: timeout must be non-negative")
+	}
+	endpoint := strings.TrimSpace(cfg.Endpoint)
+	if endpoint == "" {
+		return nil
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u == nil {
+		return fmt.Errorf("external_http_score: invalid endpoint (require absolute http/https URL with host)")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("external_http_score: invalid endpoint (require absolute http/https URL with host)")
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return fmt.Errorf("external_http_score: invalid endpoint (require absolute http/https URL with host)")
+	}
+	return nil
+}
+
 func (l *externalHTTPScore) Disable() bool {
 	cfg := l.pluginConfig()
 	// weight defaults to 0 when omitted; treat non-positive weight like disable
@@ -171,16 +209,17 @@ func (l *externalHTTPScore) Disable() bool {
 }
 
 func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = ret.Errorf(errorcode.ErrorCode_MasterInternalError, "externalHTTPScore panic:%s", r)
-		}
-	}()
-
 	ctx := context.Background()
 	if selCtx != nil && selCtx.Ctx != nil {
 		ctx = selCtx.Ctx
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ret.Errorf(errorcode.ErrorCode_MasterInternalError, "externalHTTPScore panic:%s", r)
+			logExternalHTTPScoreFailure(ctx, err)
+			log.G(ctx).Debugf("external_http_score panic stack:\n%s", debug.Stack())
+		}
+	}()
 
 	if selCtx == nil {
 		err = fmt.Errorf("external_http_score: selector context is nil")
@@ -189,8 +228,14 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 	}
 
 	cfg := l.pluginConfig()
-	if cfg == nil || l.Disable() || cfg.Weight <= 0 || cfg.Endpoint == "" {
+	if cfg == nil || l.Disable() || cfg.Weight <= 0 || strings.TrimSpace(cfg.Endpoint) == "" {
 		return nil, nil
+	}
+	if err := validateExternalHTTPScoreConfig(cfg); err != nil {
+		// Hot-reload can introduce a bad endpoint/timeout after startup; fail
+		// open with one sanitized log line rather than a silent no-op.
+		logExternalHTTPScoreFailure(ctx, err)
+		return nil, err
 	}
 
 	inList := selCtx.Nodes()
@@ -257,6 +302,8 @@ func sanitizeExternalHTTPScoreFailure(err error) string {
 // categories. msg is inspected only for classification and never returned.
 func classifyExternalHTTPScoreMessage(msg string) string {
 	switch {
+	case strings.Contains(msg, "externalHTTPScore panic"):
+		return "external_http_score panic_recovered"
 	case strings.HasPrefix(msg, "external_http_score missing"):
 		return "external_http_score missing_candidate"
 	case strings.HasPrefix(msg, "external_http_score invalid score"):
@@ -269,6 +316,10 @@ func classifyExternalHTTPScoreMessage(msg string) string {
 		return "external_http_score malformed_response"
 	case strings.HasPrefix(msg, "external_http_score response scores is empty"):
 		return "external_http_score empty_scores"
+	case strings.HasPrefix(msg, "external_http_score: timeout"):
+		return "external_http_score invalid_timeout"
+	case strings.HasPrefix(msg, "external_http_score: invalid endpoint"):
+		return "external_http_score invalid_endpoint"
 	case strings.HasPrefix(msg, "external_http_score:"):
 		if strings.Contains(msg, "nil") {
 			return "external_http_score nil_selector_context"
