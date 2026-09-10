@@ -308,8 +308,8 @@ Request (`POST`, `Content-Type: application/json`):
 | `mode` | Optional string from config. |
 | `instance_type` | Request instance type. |
 | `template_id` | Request template id when present. |
-| `nodes[]` | **Exact** candidate set passed into the scorer; one entry per node. |
-| `nodes[].node_id` | Node identity; response keys must match this set exactly. |
+| `nodes[]` | Candidate set passed into the scorer after filters; one entry per node. |
+| `nodes[].node_id` | Node identity; every requested candidate must appear in `scores`. |
 | `nodes[].quota_cpu` / `quota_mem` | Capacity counters from the node snapshot. |
 | `nodes[].quota_cpu_usage` / `quota_mem_usage` | **Raw** reported usage counters (not `EffectiveAllocated`). When `ignore_redis_allocation: true`, built-in scorers may treat allocated usage as 0 while these wire fields still carry the raw Redis-reported values. |
 | other `nodes[]` fields | `mvm_num`, create counters, `cpu_util`, `mem_usage`, IPs/types as available on the snapshot. |
@@ -320,8 +320,12 @@ Response:
 { "scores": { "node-a": 10.0, "node-b": 90.0 } }
 ```
 
-- `scores` must cover **exactly** the candidate `node_id` set (no missing/extra keys).
-- Each score must be a finite number in **`[0, 100]`**, higher is better (same direction as built-in scorers).
+- `scores` must include **every** requested candidate `node_id`. Additional keys
+  are ignored (they do not fail the response); only the ignored-key **count** may
+  be logged, never the key names or body.
+- Each score for a known candidate must be a finite number in **`[0, 100]`**,
+  higher is better (same direction as built-in scorers). Invalid values on
+  unknown/extra keys are ignored.
 - Response bodies larger than **1 MiB** are rejected; HTTP redirects are not followed.
 
 ### Failure / fallback semantics

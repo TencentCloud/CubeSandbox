@@ -36,6 +36,38 @@ const defaultExternalHTTPScoreTimeout = 200 * time.Millisecond
 // path. Bodies larger than this are rejected entirely (no partial JSON accept).
 const maxExternalHTTPScoreResponseBytes = 1 << 20 // 1 MiB
 
+// Shared client for the synchronous create-path scorer within one CubeMaster
+// process. Concurrent scheduling attempts in that process may reuse idle
+// connections to the same sidecar host, so MaxIdleConnsPerHost is raised above
+// the Go default of 2 while MaxIdleConns stays modest to avoid unbounded growth.
+const (
+	externalHTTPScoreMaxIdleConns        = 64
+	externalHTTPScoreMaxIdleConnsPerHost = 8
+	externalHTTPScoreIdleConnTimeout     = 90 * time.Second
+)
+
+var externalHTTPScoreHTTPClient = newExternalHTTPScoreHTTPClient()
+
+func newExternalHTTPScoreHTTPClient() *http.Client {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		panic("external_http_score: http.DefaultTransport is not *http.Transport")
+	}
+	transport := base.Clone()
+	transport.MaxIdleConns = externalHTTPScoreMaxIdleConns
+	transport.MaxIdleConnsPerHost = externalHTTPScoreMaxIdleConnsPerHost
+	transport.IdleConnTimeout = externalHTTPScoreIdleConnTimeout
+	return &http.Client{
+		Transport: transport,
+		// Timeout stays on the per-call context; the shared client must not pin a
+		// configuration-dependent deadline.
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			// Do not follow redirects for the fixed sidecar endpoint.
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 type externalHTTPScore struct {
 	weight float64
 	// cfg is an optional immutable plugin config used by tests. Production
@@ -75,12 +107,18 @@ type externalHTTPScoreResponse struct {
 }
 
 func NewExternalHTTPScore() *externalHTTPScore {
-	if config.GetConfig().Scheduler.Score.ScorePluginConf.ExternalHTTPScore == nil {
+	return newExternalHTTPScoreFromConfig(config.GetConfig())
+}
+
+// newExternalHTTPScoreFromConfig constructs the production scorer from a config
+// snapshot. Panics when plugin_conf.external_http_score is absent (same contract
+// as other score plugins that require matching plugin_conf).
+func newExternalHTTPScoreFromConfig(global *config.Config) *externalHTTPScore {
+	cfg := externalHTTPScoreConfigFrom(global)
+	if cfg == nil {
 		panic("config.Scheduler.Score.ScorePluginConf.ExternalHTTPScore is nil")
 	}
-	return &externalHTTPScore{
-		weight: config.GetConfig().Scheduler.Score.ScorePluginConf.ExternalHTTPScore.Weight,
-	}
+	return &externalHTTPScore{weight: cfg.Weight}
 }
 
 // newExternalHTTPScoreWithConfig constructs a scorer with an immutable config
@@ -162,16 +200,19 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		logExternalHTTPScoreFailure(ctx, err)
 		return nil, err
 	}
-	if err := validateExternalHTTPScoreResponse(respScores, knownNodes); err != nil {
+	filtered, err := filterExternalHTTPScoreResponse(ctx, respScores, knownNodes)
+	if err != nil {
 		logExternalHTTPScoreFailure(ctx, err)
 		return nil, err
 	}
 
 	nodes = make(node.NodeScoreList, 0, inList.Len())
 	for _, n := range inList {
-		score, ok := respScores[n.ID()]
+		score, ok := filtered[n.ID()]
 		if !ok {
-			err := fmt.Errorf("external_http_score missing node score: %s", n.ID())
+			// filterExternalHTTPScoreResponse already requires every known node;
+			// this is a defensive invariant check.
+			err := fmt.Errorf("external_http_score missing candidate score")
 			logExternalHTTPScoreFailure(ctx, err)
 			return nil, err
 		}
@@ -190,8 +231,9 @@ func logExternalHTTPScoreFailure(ctx context.Context, err error) {
 }
 
 // sanitizeExternalHTTPScoreFailure returns a log-safe failure summary that never
-// includes raw endpoints, URL userinfo, query parameters, or arbitrary nested
-// error text that may embed those values. Categories are allow-listed.
+// includes raw endpoints, URL userinfo, query parameters, node IDs, or arbitrary
+// nested error text that may embed those values. Categories are allow-listed;
+// no branch returns err.Error() or concatenates attacker-controlled text.
 func sanitizeExternalHTTPScoreFailure(err error) string {
 	if err == nil {
 		return "unknown_error"
@@ -199,12 +241,38 @@ func sanitizeExternalHTTPScoreFailure(err error) string {
 	if cat, ok := classifyExternalHTTPScoreURLError(err, ""); ok {
 		return cat
 	}
-	// Non-URL errors that already look like our own validation messages are safe.
-	msg := err.Error()
-	if strings.HasPrefix(msg, "external_http_score ") || strings.HasPrefix(msg, "external_http_score:") {
-		return msg
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if cat := classifyExternalHTTPScoreMessage(e.Error()); cat != "" {
+			return cat
+		}
 	}
 	return "http_request_failed"
+}
+
+// classifyExternalHTTPScoreMessage maps known internal message prefixes to fixed
+// categories. msg is inspected only for classification and never returned.
+func classifyExternalHTTPScoreMessage(msg string) string {
+	switch {
+	case strings.HasPrefix(msg, "external_http_score missing"):
+		return "external_http_score missing_candidate"
+	case strings.HasPrefix(msg, "external_http_score invalid score"):
+		return "external_http_score invalid_candidate_score"
+	case strings.HasPrefix(msg, "external_http_score unexpected status"):
+		return "external_http_score unexpected_status"
+	case strings.HasPrefix(msg, "external_http_score response exceeds"):
+		return "external_http_score response_too_large"
+	case strings.HasPrefix(msg, "external_http_score malformed"):
+		return "external_http_score malformed_response"
+	case strings.HasPrefix(msg, "external_http_score response scores is empty"):
+		return "external_http_score empty_scores"
+	case strings.HasPrefix(msg, "external_http_score:"):
+		if strings.Contains(msg, "nil") {
+			return "external_http_score nil_selector_context"
+		}
+		return "external_http_score request_failed"
+	default:
+		return ""
+	}
 }
 
 func classifyExternalHTTPScoreURLError(err error, op string) (string, bool) {
@@ -265,19 +333,39 @@ func isDNSOrTransport(err error) bool {
 	return errors.As(err, &opErr)
 }
 
-func validateExternalHTTPScoreResponse(scores map[string]float64, knownNodes map[string]struct{}) error {
-	if len(scores) != len(knownNodes) {
-		return fmt.Errorf("external_http_score score count mismatch: got %d want %d", len(scores), len(knownNodes))
+// filterExternalHTTPScoreResponse is the single response contract: every known
+// candidate must be present with a valid score; keys outside knownNodes are
+// ignored (and never returned). Invalid scores on unknown keys are ignored.
+func filterExternalHTTPScoreResponse(ctx context.Context, scores map[string]float64, knownNodes map[string]struct{}) (map[string]float64, error) {
+	if len(knownNodes) == 0 {
+		// Consistent with Select: an empty candidate set yields no scores.
+		return map[string]float64{}, nil
 	}
+	out := make(map[string]float64, len(knownNodes))
+	ignored := 0
 	for nodeID, score := range scores {
 		if _, ok := knownNodes[nodeID]; !ok {
-			return fmt.Errorf("external_http_score unknown node: %s", nodeID)
+			ignored++
+			continue
 		}
 		if math.IsNaN(score) || math.IsInf(score, 0) || score < 0 || score > 100 {
-			return fmt.Errorf("external_http_score invalid score for node %s: %f", nodeID, score)
+			return nil, fmt.Errorf("external_http_score invalid score for known candidate")
+		}
+		out[nodeID] = score
+	}
+	for nodeID := range knownNodes {
+		if _, ok := out[nodeID]; !ok {
+			return nil, fmt.Errorf("external_http_score missing candidate score")
 		}
 	}
-	return nil
+	if ignored > 0 {
+		if log.IsDebug() {
+			log.G(ctx).Debugf("external_http_score ignored %d unknown score keys", ignored)
+		} else {
+			log.G(ctx).Warnf("external_http_score ignored %d unknown score keys", ignored)
+		}
+	}
+	return out, nil
 }
 
 func buildExternalHTTPScoreRequest(selCtx *selctx.SelectorCtx, mode string, inList node.NodeList) (externalHTTPScoreRequest, map[string]struct{}) {
@@ -333,14 +421,7 @@ func requestExternalHTTPScores(ctx context.Context, endpoint string, timeout tim
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{
-		Timeout: timeout,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			// Do not follow redirects for the fixed sidecar endpoint.
-			return http.ErrUseLastResponse
-		},
-	}
-	resp, err := client.Do(req)
+	resp, err := externalHTTPScoreHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

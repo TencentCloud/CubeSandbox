@@ -307,8 +307,8 @@ scheduler:
 | `mode` | 可选，来自配置。 |
 | `instance_type` | 请求实例类型。 |
 | `template_id` | 若存在则为请求模板 ID。 |
-| `nodes[]` | scorer 收到的**完整**候选集合；每个节点一条。 |
-| `nodes[].node_id` | 节点身份；响应 key 必须与该集合精确一致。 |
+| `nodes[]` | filter 之后传给 scorer 的候选集合；每个节点一条。 |
+| `nodes[].node_id` | 节点身份；请求中的每个候选都必须出现在 `scores` 中。 |
 | `nodes[].quota_cpu` / `quota_mem` | 节点快照中的容量计数。 |
 | `nodes[].quota_cpu_usage` / `quota_mem_usage` | **原始**上报占用计数（不经过 `EffectiveAllocated`）。当 `ignore_redis_allocation: true` 时，内置 scorer 可能把 allocated 视为 0，但这些传输协议字段仍携带 Redis 上报的原始值。 |
 | 其他 `nodes[]` 字段 | `mvm_num`、创建计数、`cpu_util`、`mem_usage`、IP/类型等快照可用字段。 |
@@ -319,8 +319,10 @@ scheduler:
 { "scores": { "node-a": 10.0, "node-b": 90.0 } }
 ```
 
-- `scores` 必须**恰好**覆盖候选 `node_id` 集合（不能少、不能多）。
-- 每个分数须为有限数值，范围 **`[0, 100]`**，越大越好（与内置 scorer 方向一致）。
+- `scores` 必须包含**每一个**请求候选的 `node_id`。额外的 key 会被忽略（不会因此失败）；
+  日志最多记录被忽略 key 的**数量**，不记录 key 名或响应正文。
+- 已知候选的每个分数须为有限数值，范围 **`[0, 100]`**，越大越好（与内置 scorer 方向一致）。
+  仅出现在未知/额外 key 上的非法值会被忽略。
 - 响应体超过 **1 MiB** 会被拒绝；**不跟随** HTTP 重定向。
 
 ### 失败 / 回退语义

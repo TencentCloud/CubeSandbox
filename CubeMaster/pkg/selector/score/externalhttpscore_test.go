@@ -14,12 +14,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
@@ -112,94 +114,148 @@ func TestExternalHTTPScoreRejectsInvalidScore(t *testing.T) {
 	}
 }
 
-func TestExternalHTTPScoreValidateResponseBoundaries(t *testing.T) {
+func TestExternalHTTPScoreFilterResponseContract(t *testing.T) {
 	knownNodes := map[string]struct{}{
 		"node-a": {},
 		"node-b": {},
 	}
+	ctx := context.Background()
 
-	tests := []struct {
-		name    string
-		scores  map[string]float64
-		wantErr bool
-	}{
-		{
-			name: "accepts zero and one hundred",
-			scores: map[string]float64{
-				"node-a": 0,
-				"node-b": 100,
-			},
-		},
-		{
-			name: "rejects negative score",
-			scores: map[string]float64{
-				"node-a": -1,
-				"node-b": 100,
-			},
-			wantErr: true,
-		},
-		{
-			name: "rejects NaN score",
-			scores: map[string]float64{
-				"node-a": math.NaN(),
-				"node-b": 100,
-			},
-			wantErr: true,
-		},
-		{
-			name: "rejects positive infinity score",
-			scores: map[string]float64{
-				"node-a": math.Inf(1),
-				"node-b": 100,
-			},
-			wantErr: true,
-		},
-		{
-			name: "rejects negative infinity score",
-			scores: map[string]float64{
-				"node-a": math.Inf(-1),
-				"node-b": 100,
-			},
-			wantErr: true,
-		},
-	}
+	t.Run("exact candidate set succeeds", func(t *testing.T) {
+		got, err := filterExternalHTTPScoreResponse(ctx, map[string]float64{
+			"node-a": 10,
+			"node-b": 90,
+		}, knownNodes)
+		if err != nil {
+			t.Fatalf("filterExternalHTTPScoreResponse() error = %v", err)
+		}
+		if len(got) != 2 || got["node-a"] != 10 || got["node-b"] != 90 {
+			t.Fatalf("got = %#v, want exact known scores", got)
+		}
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateExternalHTTPScoreResponse(tt.scores, knownNodes)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("validateExternalHTTPScoreResponse() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
+	t.Run("valid extra key ignored from returned map", func(t *testing.T) {
+		got, err := filterExternalHTTPScoreResponse(ctx, map[string]float64{
+			"node-a":  10,
+			"node-b":  90,
+			"stale-x": 50,
+		}, knownNodes)
+		if err != nil {
+			t.Fatalf("filterExternalHTTPScoreResponse() error = %v", err)
+		}
+		if _, ok := got["stale-x"]; ok {
+			t.Fatalf("extra key leaked into returned scores: %#v", got)
+		}
+		if len(got) != 2 {
+			t.Fatalf("got = %#v, want only known candidates", got)
+		}
+	})
+
+	t.Run("extra key with invalid score ignored", func(t *testing.T) {
+		got, err := filterExternalHTTPScoreResponse(ctx, map[string]float64{
+			"node-a":  10,
+			"node-b":  90,
+			"stale-x": math.NaN(),
+		}, knownNodes)
+		if err != nil {
+			t.Fatalf("filterExternalHTTPScoreResponse() error = %v, want nil when only extras are invalid", err)
+		}
+		if _, ok := got["stale-x"]; ok {
+			t.Fatalf("invalid extra key leaked: %#v", got)
+		}
+	})
+
+	t.Run("missing known candidate fails", func(t *testing.T) {
+		_, err := filterExternalHTTPScoreResponse(ctx, map[string]float64{
+			"node-a": 10,
+		}, knownNodes)
+		if err == nil {
+			t.Fatal("error = nil, want missing candidate")
+		}
+	})
+
+	t.Run("invalid known candidate score fails", func(t *testing.T) {
+		_, err := filterExternalHTTPScoreResponse(ctx, map[string]float64{
+			"node-a": 101,
+			"node-b": 90,
+		}, knownNodes)
+		if err == nil {
+			t.Fatal("error = nil, want invalid known score")
+		}
+	})
+
+	t.Run("empty known set returns empty map like Select", func(t *testing.T) {
+		got, err := filterExternalHTTPScoreResponse(ctx, map[string]float64{
+			"stale-x": 1,
+		}, map[string]struct{}{})
+		if err != nil {
+			t.Fatalf("error = %v, want nil", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("got = %#v, want empty", got)
+		}
+	})
+
+	t.Run("boundary scores accepted", func(t *testing.T) {
+		got, err := filterExternalHTTPScoreResponse(ctx, map[string]float64{
+			"node-a": 0,
+			"node-b": 100,
+		}, knownNodes)
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		if got["node-a"] != 0 || got["node-b"] != 100 {
+			t.Fatalf("got = %#v", got)
+		}
+	})
 }
 
-func TestExternalHTTPScoreRejectsHTTPError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "boom", http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	_, err := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL)).Select(externalHTTPScoreTestCtx())
-	if err == nil {
-		t.Fatal("Select() error = nil, want HTTP status error")
-	}
-}
-
-func TestExternalHTTPScoreRejectsUnknownNode(t *testing.T) {
+func TestExternalHTTPScoreSelectIgnoresExtraResponseKeys(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(externalHTTPScoreResponse{
 			Scores: map[string]float64{
 				"node-a":  10,
-				"unknown": 90,
+				"node-b":  90,
+				"stale-x": 55,
 			},
 		})
 	}))
 	defer server.Close()
 
-	_, err := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL)).Select(externalHTTPScoreTestCtx())
-	if err == nil {
-		t.Fatal("Select() error = nil, want unknown node error")
+	got, err := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL)).Select(externalHTTPScoreTestCtx())
+	if err != nil {
+		t.Fatalf("Select() error = %v", err)
+	}
+	if got.Len() != 2 {
+		t.Fatalf("len(scores) = %d, want 2", got.Len())
+	}
+	for _, n := range got {
+		if n.ID() == "stale-x" {
+			t.Fatal("extra key present in Select result")
+		}
+	}
+}
+
+func TestExternalHTTPScoreSelectIgnoresInvalidExtraKeys(t *testing.T) {
+	// JSON cannot encode Inf/NaN; use an out-of-range finite value on an unknown
+	// key so the body still unmarshals and only the extra key is invalid.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"scores":{"node-a":10,"node-b":90,"stale-x":999}}`)
+	}))
+	defer server.Close()
+
+	got, err := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL)).Select(externalHTTPScoreTestCtx())
+	if err != nil {
+		t.Fatalf("Select() error = %v, want success when only extras are invalid", err)
+	}
+	if got.Len() != 2 {
+		t.Fatalf("len(scores) = %d, want 2", got.Len())
+	}
+	for _, n := range got {
+		if n.ID() == "stale-x" {
+			t.Fatal("invalid extra key present in Select result")
+		}
 	}
 }
 
@@ -216,6 +272,18 @@ func TestExternalHTTPScoreRejectsMissingNode(t *testing.T) {
 	_, err := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL)).Select(externalHTTPScoreTestCtx())
 	if err == nil {
 		t.Fatal("Select() error = nil, want missing node error")
+	}
+}
+
+func TestExternalHTTPScoreRejectsHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	_, err := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL)).Select(externalHTTPScoreTestCtx())
+	if err == nil {
+		t.Fatal("Select() error = nil, want HTTP status error")
 	}
 }
 
@@ -356,40 +424,136 @@ func TestExternalHTTPScoreDoesNotFollowRedirects(t *testing.T) {
 	}
 }
 
-func TestExternalHTTPScoreRegistryPresenceDoesNotEnableExecution(t *testing.T) {
+func TestExternalHTTPScoreRegistryMapsToNewExternalHTTPScore(t *testing.T) {
 	ctor, ok := scores[externalHTTPScoreName]
 	if !ok || ctor == nil {
 		t.Fatal("external_http_score missing from package registry")
 	}
+	if reflect.ValueOf(ctor).Pointer() != reflect.ValueOf(NewExternalHTTPScore).Pointer() {
+		t.Fatal("registry factory is not NewExternalHTTPScore")
+	}
+}
 
-	var contacted atomic.Bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		contacted.Store(true)
-	}))
-	defer server.Close()
-
-	// Registry presence alone must not cause HTTP traffic: empty endpoint and
-	// disable both short-circuit without contacting a sidecar.
-	empty := newExternalHTTPScoreWithConfig(&config.ExternalHTTPScore{
-		Weight:   1,
-		Endpoint: "",
-		Timeout:  time.Second,
-	})
-	if got, err := empty.Select(externalHTTPScoreTestCtx()); err != nil || got != nil {
-		t.Fatalf("empty endpoint Select() = (%v, %v), want (nil, nil)", got, err)
+func TestExternalHTTPScoreRegistryFactoryPanicsWhenExternalPluginMissing(t *testing.T) {
+	// Ideal unit-test state is GetConfig()==nil. This package's asyncscore_test
+	// init() always loads conf.yaml, so the global is usually non-nil here.
+	// Require only that plugin_conf.external_http_score stays absent so the
+	// production constructor panic can run without mutating globals.
+	if externalHTTPScoreConfigFrom(config.GetConfig()) != nil {
+		t.Fatal("global config already defines external_http_score; refusing to mutate it")
+	}
+	ctor, ok := scores[externalHTTPScoreName]
+	if !ok || ctor == nil {
+		t.Fatal("external_http_score missing from package registry")
+	}
+	fn := reflect.ValueOf(ctor)
+	if !fn.IsValid() || fn.Kind() != reflect.Func {
+		t.Fatalf("registry factory kind = %v, want func", fn.Kind())
+	}
+	ft := fn.Type()
+	if ft.NumIn() != 0 || ft.NumOut() != 1 {
+		t.Fatalf("registry factory signature = %s, want func() T matching NewSelector Call(nil)", ft)
+	}
+	selType := reflect.TypeOf((*Selector)(nil)).Elem()
+	if !ft.Out(0).Implements(selType) {
+		t.Fatalf("registry factory returns %s, which does not implement Selector", ft.Out(0))
 	}
 
-	disabled := newExternalHTTPScoreWithConfig(&config.ExternalHTTPScore{
-		Weight:   1,
-		Endpoint: server.URL,
-		Timeout:  time.Second,
-		Disable:  true,
-	})
-	if got, err := disabled.Select(externalHTTPScoreTestCtx()); err != nil || got != nil {
-		t.Fatalf("disabled Select() = (%v, %v), want (nil, nil)", got, err)
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("want panic from invoking registered factory when external_http_score plugin is missing")
+		}
+		if !strings.Contains(fmt.Sprint(r), "ExternalHTTPScore is nil") {
+			t.Fatalf("panic = %v, want ExternalHTTPScore is nil", r)
+		}
+	}()
+	// Same mechanics as NewSelector: reflect.ValueOf(scores[name]).Call(nil).
+	_ = fn.Call(nil)
+}
+
+func TestNewExternalHTTPScoreFromConfigPanicsWhenPluginMissing(t *testing.T) {
+	tests := []struct {
+		name   string
+		global *config.Config
+	}{
+		{name: "nil global", global: nil},
+		{name: "nil scheduler", global: &config.Config{}},
+		{name: "nil score", global: &config.Config{Scheduler: &config.WrapperSchedulerConf{}}},
+		{
+			name: "nil external plugin",
+			global: &config.Config{Scheduler: &config.WrapperSchedulerConf{
+				SchedulerConf: config.SchedulerConf{
+					Score: &config.SchedulerScoreConf{},
+				},
+			}},
+		},
 	}
-	if contacted.Load() {
-		t.Fatal("registry presence / inactive config must not contact endpoint")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatal("want panic")
+				}
+				if !strings.Contains(fmt.Sprint(r), "ExternalHTTPScore is nil") {
+					t.Fatalf("panic = %v, want ExternalHTTPScore is nil", r)
+				}
+			}()
+			_ = newExternalHTTPScoreFromConfig(tt.global)
+		})
+	}
+}
+
+func TestNewExternalHTTPScoreFromConfigUsesPluginWeightAndID(t *testing.T) {
+	plugin := &config.ExternalHTTPScore{Weight: 3.5, Endpoint: "http://example.invalid"}
+	global := &config.Config{Scheduler: &config.WrapperSchedulerConf{
+		SchedulerConf: config.SchedulerConf{
+			Score: &config.SchedulerScoreConf{
+				ScorePluginConf: config.ScorePluginConf{ExternalHTTPScore: plugin},
+			},
+		},
+	}}
+	scorer := newExternalHTTPScoreFromConfig(global)
+	if scorer.Weight() != 3.5 {
+		t.Fatalf("Weight() = %v, want 3.5", scorer.Weight())
+	}
+	if scorer.ID() != constants.SelectorScoreID+"/"+externalHTTPScoreName {
+		t.Fatalf("ID() = %s", scorer.ID())
+	}
+	if scorer.cfg != nil {
+		t.Fatal("production constructor must not inject cfg snapshot field")
+	}
+	if externalHTTPScoreConfigFrom(global) != plugin {
+		t.Fatal("constructor must use externalHTTPScoreConfigFrom")
+	}
+}
+
+func TestExternalHTTPScoreSharedHTTPClientTransport(t *testing.T) {
+	if externalHTTPScoreHTTPClient == nil {
+		t.Fatal("shared client is nil")
+	}
+	if externalHTTPScoreHTTPClient.Timeout != 0 {
+		t.Fatalf("shared client Timeout = %v, want 0 (per-request context only)", externalHTTPScoreHTTPClient.Timeout)
+	}
+	tr, ok := externalHTTPScoreHTTPClient.Transport.(*http.Transport)
+	if !ok || tr == nil {
+		t.Fatalf("Transport = %T, want dedicated *http.Transport", externalHTTPScoreHTTPClient.Transport)
+	}
+	if tr == http.DefaultTransport {
+		t.Fatal("shared transport must not be http.DefaultTransport")
+	}
+	if def, ok := http.DefaultTransport.(*http.Transport); ok && tr == def {
+		t.Fatal("shared transport must be a clone, not DefaultTransport")
+	}
+	if tr.MaxIdleConns != externalHTTPScoreMaxIdleConns {
+		t.Fatalf("MaxIdleConns = %d, want %d", tr.MaxIdleConns, externalHTTPScoreMaxIdleConns)
+	}
+	if tr.MaxIdleConnsPerHost != externalHTTPScoreMaxIdleConnsPerHost {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want %d", tr.MaxIdleConnsPerHost, externalHTTPScoreMaxIdleConnsPerHost)
+	}
+	if tr.IdleConnTimeout != externalHTTPScoreIdleConnTimeout {
+		t.Fatalf("IdleConnTimeout = %v, want %v", tr.IdleConnTimeout, externalHTTPScoreIdleConnTimeout)
 	}
 }
 
@@ -399,9 +563,9 @@ func TestSanitizeExternalHTTPScoreFailureOmitsEndpointSecrets(t *testing.T) {
 	secretURL := "https://user:pass@" + host + "/score?token=" + sentinel
 
 	tests := []struct {
-		name       string
-		err        error
-		wantSubstr string
+		name      string
+		err       error
+		wantExact string
 	}{
 		{
 			name: "deadline exceeded",
@@ -410,7 +574,7 @@ func TestSanitizeExternalHTTPScoreFailureOmitsEndpointSecrets(t *testing.T) {
 				URL: secretURL,
 				Err: context.DeadlineExceeded,
 			},
-			wantSubstr: "http_Post_timeout",
+			wantExact: "http_Post_timeout",
 		},
 		{
 			name: "nested dial text with sentinel",
@@ -419,7 +583,7 @@ func TestSanitizeExternalHTTPScoreFailureOmitsEndpointSecrets(t *testing.T) {
 				URL: secretURL,
 				Err: errors.New("dial " + secretURL + " token=" + sentinel),
 			},
-			wantSubstr: "http_Post_failed",
+			wantExact: "http_Post_failed",
 		},
 		{
 			name: "nested url.Error with sentinel inner text",
@@ -432,7 +596,7 @@ func TestSanitizeExternalHTTPScoreFailureOmitsEndpointSecrets(t *testing.T) {
 					Err: errors.New("upstream token=" + sentinel + " host=" + host),
 				},
 			},
-			wantSubstr: "http_Get_failed",
+			wantExact: "http_Get_failed",
 		},
 		{
 			name: "context canceled",
@@ -441,26 +605,81 @@ func TestSanitizeExternalHTTPScoreFailureOmitsEndpointSecrets(t *testing.T) {
 				URL: secretURL,
 				Err: context.Canceled,
 			},
-			wantSubstr: "http_Post_canceled",
+			wantExact: "http_Post_canceled",
 		},
 		{
-			name:       "safe validation status",
-			err:        fmt.Errorf("external_http_score unexpected status: 502"),
-			wantSubstr: "external_http_score unexpected status: 502",
+			name:      "missing candidate with secret suffix",
+			err:       errors.New("external_http_score missing candidate score token=" + sentinel),
+			wantExact: "external_http_score missing_candidate",
+		},
+		{
+			name:      "invalid score with secret suffix",
+			err:       errors.New("external_http_score invalid score for known candidate token=" + sentinel),
+			wantExact: "external_http_score invalid_candidate_score",
+		},
+		{
+			name:      "unexpected status with secret suffix",
+			err:       errors.New("external_http_score unexpected status token=" + sentinel),
+			wantExact: "external_http_score unexpected_status",
+		},
+		{
+			name:      "response exceeds with secret and byte count",
+			err:       errors.New("external_http_score response exceeds 1048576 bytes token=" + sentinel),
+			wantExact: "external_http_score response_too_large",
+		},
+		{
+			name:      "malformed with secret suffix",
+			err:       errors.New("external_http_score malformed response: " + sentinel),
+			wantExact: "external_http_score malformed_response",
+		},
+		{
+			name:      "empty scores with secret suffix",
+			err:       errors.New("external_http_score response scores is empty token=" + sentinel),
+			wantExact: "external_http_score empty_scores",
+		},
+		{
+			name:      "nil selector context with secret",
+			err:       errors.New("external_http_score: selector context is nil token=" + sentinel),
+			wantExact: "external_http_score nil_selector_context",
+		},
+		{
+			name:      "other external_http_score colon prefix",
+			err:       errors.New("external_http_score: boom token=" + sentinel),
+			wantExact: "external_http_score request_failed",
+		},
+		{
+			name:      "wrapped unexpected status",
+			err:       fmt.Errorf("wrap-%s: %w", sentinel, errors.New("external_http_score unexpected status: 502 token="+sentinel)),
+			wantExact: "external_http_score unexpected_status",
+		},
+		{
+			name:      "wrapped malformed with nested cause",
+			err:       fmt.Errorf("external_http_score malformed response: %w", errors.New("json token="+sentinel)),
+			wantExact: "external_http_score malformed_response",
+		},
+		{
+			name:      "unknown error with secret must not leak",
+			err:       errors.New("totally unknown failure token=" + sentinel),
+			wantExact: "http_request_failed",
 		},
 	}
 
-	forbidden := []string{sentinel, secretURL, host, "user:pass", "token="}
+	forbidden := []string{sentinel, secretURL, host, "user:pass", "token=", "502", "1048576"}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := sanitizeExternalHTTPScoreFailure(tt.err)
-			if !strings.Contains(got, tt.wantSubstr) {
-				t.Fatalf("sanitized = %q, want substring %q", got, tt.wantSubstr)
+			if got != tt.wantExact {
+				t.Fatalf("sanitized = %q, want exact %q", got, tt.wantExact)
 			}
 			for _, bad := range forbidden {
 				if strings.Contains(got, bad) {
 					t.Fatalf("sanitized = %q, must not contain %q", got, bad)
 				}
+			}
+			// Guard against a future return-msg regression: output must be a
+			// short fixed token without the original error text.
+			if strings.Contains(got, "token=") || strings.Contains(got, sentinel) {
+				t.Fatalf("sanitized leaked marker text: %q", got)
 			}
 		})
 	}
