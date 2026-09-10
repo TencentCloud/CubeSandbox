@@ -863,7 +863,7 @@ scheduler:
 `
 	_, err := initConfigFromYAML(t, yamlBody)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown weight factor")
+	assert.Contains(t, err.Error(), "unsupported weight factor")
 	assert.Contains(t, err.Error(), "not_a_real_factor")
 }
 

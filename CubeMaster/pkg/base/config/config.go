@@ -1393,9 +1393,10 @@ func validateSchedulerScorePluginConfig(s *SchedulerConf) error {
 				return fmt.Errorf("scheduler profile %q enables %q but plugin_conf.%s.enable_weight_factors is empty",
 					s.Profile, name, name)
 			}
+			allowedFactors := allowedWeightFactorsForScorer(name)
 			for _, factor := range factors {
-				if _, ok := allowedSchedulerWeightFactorNames[factor]; !ok {
-					return fmt.Errorf("scheduler profile %q enables %q with unknown weight factor %q",
+				if _, ok := allowedFactors[factor]; !ok {
+					return fmt.Errorf("scheduler profile %q enables %q with unsupported weight factor %q for that scorer",
 						s.Profile, name, factor)
 				}
 			}
@@ -1406,6 +1407,28 @@ func validateSchedulerScorePluginConfig(s *SchedulerConf) error {
 		}
 	}
 	return nil
+}
+
+func allowedWeightFactorsForScorer(name string) map[string]struct{} {
+	switch name {
+	case "image_score":
+		return map[string]struct{}{
+			constants.WeightFactorImageID:    {},
+			constants.WeightFactorTemplateID: {},
+		}
+	case "real_time_weighted_average", "multi_factor_weighted_average":
+		// Shared utilization / load / locality factors used by average scorers.
+		out := make(map[string]struct{}, len(allowedSchedulerWeightFactorNames))
+		for k := range allowedSchedulerWeightFactorNames {
+			if k == constants.WeightFactorImageID || k == constants.WeightFactorTemplateID {
+				continue
+			}
+			out[k] = struct{}{}
+		}
+		return out
+	default:
+		return allowedSchedulerWeightFactorNames
+	}
 }
 
 func isFactorBasedSchedulerScore(name string) bool {
