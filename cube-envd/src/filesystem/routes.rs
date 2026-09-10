@@ -5,7 +5,11 @@ use axum::{
 };
 use tokio::fs;
 
-use crate::{connect::RpcError, generated::filesystem as proto, wire};
+use crate::{
+    connect::{Code, RpcError},
+    generated::filesystem as proto,
+    wire,
+};
 
 use super::{
     entries::{collect_entries, ensure_owned_dirs, entry_info, resolve, unary_request},
@@ -25,15 +29,28 @@ pub async fn stat(request: Request) -> Result<Response, RpcError> {
 }
 
 /// 创建目录及缺失父目录，并将它们归属给请求用户。
+///
+/// 已存在目录返回 `AlreadyExists`(409)、已存在非目录返回 `invalid_argument`(400)，
+/// 与上游 envd 一致。
 pub async fn make_dir(request: Request) -> Result<Response, RpcError> {
     let (user, body) = unary_request(request).await?;
     let request: proto::MakeDirRequest = wire::decode_json(&body, "MakeDir request")?;
     let path = resolve(&request.path, &user)?;
-    if fs::symlink_metadata(&path).await.is_ok() {
-        return Err(RpcError::invalid_argument(format!(
-            "path {} already exists",
-            path.display()
-        )));
+    match fs::metadata(&path).await {
+        Ok(metadata) if metadata.is_dir() => {
+            return Err(RpcError::new(
+                Code::AlreadyExists,
+                format!("directory already exists: {}", path.display()),
+            ));
+        }
+        Ok(_) => {
+            return Err(RpcError::invalid_argument(format!(
+                "path already exists but it is not a directory: {}",
+                path.display()
+            )));
+        }
+        // 不存在（以及 stat 因其他原因失败）时继续创建，由 mkdir 报告真实错误。
+        Err(_) => {}
     }
 
     ensure_owned_dirs(&path, &user).await?;
@@ -87,13 +104,20 @@ pub async fn list_dir(request: Request) -> Result<Response, RpcError> {
 }
 
 /// 删除文件或递归删除目录。
+///
+/// 与上游 `os.RemoveAll` 一致：路径不存在视为成功（幂等），因此重复删除不会报错。
 pub async fn remove(request: Request) -> Result<Response, RpcError> {
     let (user, body) = unary_request(request).await?;
     let request: proto::RemoveRequest = wire::decode_json(&body, "Remove request")?;
     let path = resolve(&request.path, &user)?;
-    let metadata = fs::symlink_metadata(&path)
-        .await
-        .map_err(|error| filesystem_error(&path, error))?;
+    let metadata = match fs::symlink_metadata(&path).await {
+        Ok(metadata) => metadata,
+        // 已经不在了：与 os.RemoveAll 一样返回成功，保证删除可重试。
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Json(proto::RemoveResponse {}).into_response())
+        }
+        Err(error) => return Err(filesystem_error(&path, error)),
+    };
     if metadata.file_type().is_dir() {
         fs::remove_dir_all(&path)
             .await

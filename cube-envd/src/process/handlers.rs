@@ -200,6 +200,9 @@ pub async fn send_signal(
 }
 
 /// 更新 PTY 进程的终端尺寸。
+///
+/// 与上游一致：请求未携带 `pty` 时是无操作成功；携带 `pty` 但目标是普通进程时
+/// 报错（上游为 Internal，这里保留语义更准确的 `invalid_argument`）。
 pub async fn update(
     axum::extract::State(state): axum::extract::State<AppState>,
     request: Request,
@@ -207,6 +210,10 @@ pub async fn update(
     let (_, body) = unary_with_user(request).await?;
     let request: proto::UpdateRequest = wire::decode_json(&body, "Update request")?;
     let request = update_request_from_proto(request);
+    if request.pty.is_none() {
+        return Ok(axum::Json(proto::UpdateResponse {}).into_response());
+    }
+
     let handle = state.processes.get_live(request.process.as_ref()).await?;
     let pty = handle
         .pty

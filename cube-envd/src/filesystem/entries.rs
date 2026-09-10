@@ -45,11 +45,10 @@ pub(super) async fn unary_request(request: Request) -> Result<(LocalUser, Bytes)
     Ok((user, body))
 }
 
-/// 拒绝空路径并按请求用户的主目录规则解析路径。
+/// 按请求用户的主目录规则解析路径。
+///
+/// 空路径与上游一致地解析为请求用户的主目录（`filepath.Join(home, "")`）。
 pub(super) fn resolve(path: &str, user: &LocalUser) -> Result<PathBuf, RpcError> {
-    if path.is_empty() {
-        return Err(RpcError::invalid_argument("path must not be empty"));
-    }
     resolve_path(path, user).map_err(|error| RpcError::invalid_argument(error.to_string()))
 }
 

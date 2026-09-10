@@ -10,12 +10,22 @@ pub enum PathError {
 }
 
 /// 将相对路径和 ~/ 路径限制在请求用户的主目录下解析。
+///
+/// 空路径与 `~/` 都解析为用户主目录本身，且不带尾部分隔符——上游用
+/// `filepath.Join(home, "")` 表达同一语义，Join 会清理尾部斜杠。
 pub fn resolve_path(path: impl AsRef<Path>, user: &LocalUser) -> Result<PathBuf, PathError> {
     let path = path.as_ref();
     let path = path.to_string_lossy();
 
+    if path.is_empty() {
+        return Ok(user.home.clone());
+    }
     if let Some(rest) = path.strip_prefix("~/") {
-        return Ok(user.home.join(rest));
+        return Ok(if rest.is_empty() {
+            user.home.clone()
+        } else {
+            user.home.join(rest)
+        });
     }
     if path == "~" {
         return Ok(user.home.clone());
