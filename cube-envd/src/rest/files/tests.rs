@@ -4,6 +4,7 @@
 use crate::auth::User;
 use std::os::unix::fs::PermissionsExt;
 
+use super::errors::MAX_UPLOAD_SIZE;
 use super::{download, entry_for, modtime_of, parse_boundary, spawn_upload_writer};
 
 fn test_user(home: &str) -> User {
@@ -17,27 +18,22 @@ fn test_user(home: &str) -> User {
 }
 
 #[tokio::test]
-async fn write_file_creates_parents_and_is_atomic() {
+async fn upload_writer_creates_parents_and_writes_all_chunks() {
     let dir = tempfile::tempdir().unwrap();
     let user = test_user(dir.path().to_str().unwrap());
     let target = dir.path().join("a/b/c.txt");
     let (tx, rx) = tokio::sync::mpsc::channel(4);
     let writer = spawn_upload_writer(target.to_str().unwrap().to_string(), user.clone(), rx);
-    tx.send(Ok(bytes::Bytes::from_static(b"hello")))
-        .await
-        .unwrap();
+    // Chunk boundaries must not affect the content.
+    for part in [&b"hel"[..], &b"lo"[..]] {
+        tx.send(Ok(bytes::Bytes::copy_from_slice(part)))
+            .await
+            .unwrap();
+    }
     drop(tx);
     writer.await.unwrap().unwrap();
     assert_eq!(std::fs::read(&target).unwrap(), b"hello");
-    // Overwrite works and leaves no temp files behind.
-    let (tx, rx) = tokio::sync::mpsc::channel(4);
-    let writer = spawn_upload_writer(target.to_str().unwrap().to_string(), user.clone(), rx);
-    tx.send(Ok(bytes::Bytes::from_static(b"world")))
-        .await
-        .unwrap();
-    drop(tx);
-    writer.await.unwrap().unwrap();
-    assert_eq!(std::fs::read(&target).unwrap(), b"world");
+    // In-place write: no `.cube-envd-upload` temp files ever exist.
     let leftovers: Vec<_> = std::fs::read_dir(target.parent().unwrap())
         .unwrap()
         .filter_map(|e| e.ok())
@@ -51,19 +47,23 @@ async fn write_file_creates_parents_and_is_atomic() {
 }
 
 #[tokio::test]
-async fn overwrite_preserves_mode_bits() {
+async fn overwrite_keeps_mode_bits_automatically() {
     let dir = tempfile::tempdir().unwrap();
     let user = test_user(dir.path().to_str().unwrap());
     let target = dir.path().join("script.sh");
+    // O_TRUNC never touches the mode of an existing file, so an
+    // executable script keeps its x bits across an overwrite — the
+    // upstream behavior the old mode-copy logic worked around.
+    std::fs::write(&target, b"#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
     let (tx, rx) = tokio::sync::mpsc::channel(4);
     let writer = spawn_upload_writer(target.to_str().unwrap().to_string(), user.clone(), rx);
-    tx.send(Ok(bytes::Bytes::from_static(b"#!/bin/sh\n")))
+    tx.send(Ok(bytes::Bytes::from_static(b"#!/bin/sh\necho v1\n")))
         .await
         .unwrap();
     drop(tx);
     writer.await.unwrap().unwrap();
-    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
-    // Overwriting through the temp-file+rename path must keep 0755.
+    // O_TRUNC never touches the mode of an existing file.
     let (tx, rx) = tokio::sync::mpsc::channel(4);
     let writer = spawn_upload_writer(target.to_str().unwrap().to_string(), user.clone(), rx);
     tx.send(Ok(bytes::Bytes::from_static(b"#!/bin/sh\necho v2\n")))
@@ -81,6 +81,119 @@ async fn overwrite_preserves_mode_bits() {
     drop(tx);
     writer.await.unwrap().unwrap();
     assert!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o111 == 0);
+}
+
+#[tokio::test]
+async fn cap_exceeded_mid_stream_reports_413_and_keeps_partial_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = test_user(dir.path().to_str().unwrap());
+    let target = dir.path().join("cap.bin");
+    // Two halves: the second chunk crosses the line and stops the write
+    // before any of it lands — interrupted-write semantics (upstream has
+    // no cap of its own; this is our documented 413 behavior).
+    let half = MAX_UPLOAD_SIZE / 2 + 1;
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let writer = spawn_upload_writer(target.to_str().unwrap().to_string(), user, rx);
+    tx.send(Ok(bytes::Bytes::from(vec![b'a'; half])))
+        .await
+        .unwrap();
+    tx.send(Ok(bytes::Bytes::from(vec![b'b'; half])))
+        .await
+        .unwrap();
+    drop(tx);
+    let error = writer.await.unwrap().unwrap_err();
+    assert_eq!(error.status, axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+    let content = std::fs::read(target).unwrap();
+    assert_eq!(content.len(), half);
+    assert!(content.iter().all(|&byte| byte == b'a'));
+}
+
+#[tokio::test]
+async fn body_read_error_keeps_partial_content_and_propagates() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = test_user(dir.path().to_str().unwrap());
+    let target = dir.path().join("err.bin");
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let writer = spawn_upload_writer(target.to_str().unwrap().to_string(), user, rx);
+    tx.send(Ok(bytes::Bytes::from_static(b"partial")))
+        .await
+        .unwrap();
+    tx.send(Err(crate::error::RestError::new(
+        axum::http::StatusCode::BAD_REQUEST,
+        "error reading body: boom",
+    )))
+    .await
+    .unwrap();
+    drop(tx);
+    let error = writer.await.unwrap().unwrap_err();
+    assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(std::fs::read(target).unwrap(), b"partial");
+}
+
+#[tokio::test]
+async fn upload_through_symlink_writes_target_and_leaves_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = test_user(dir.path().to_str().unwrap());
+    let real = dir.path().join("real.bin");
+    let link = dir.path().join("lnk.bin");
+    // In-place write follows a symlink (like upstream os.OpenFile), and
+    // chown follows too (like upstream os.Chown): content lands on the
+    // link's destination and the link itself survives. The ownership
+    // differential (daemon-owned target without the fix) needs a
+    // root-owned pre-existing target to observe — covered by the
+    // container probe recorded in RESULTS.md.
+    std::fs::write(&real, b"old").unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let writer = spawn_upload_writer(link.to_str().unwrap().to_string(), user, rx);
+    tx.send(Ok(bytes::Bytes::from_static(b"new")))
+        .await
+        .unwrap();
+    drop(tx);
+    writer.await.unwrap().unwrap();
+    assert_eq!(std::fs::read(real).unwrap(), b"new");
+    assert!(std::fs::symlink_metadata(link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[tokio::test]
+async fn multipart_read_error_awaits_writer_and_propagates() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("part.bin");
+    let head = format!(
+        "--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n\r\n",
+        target.display()
+    );
+    let stream = futures::stream::unfold((0u8, Some(head)), |(step, head)| async move {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        match step {
+            0 => Some((
+                Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(head.unwrap())),
+                (1, None),
+            )),
+            1 => Some((Ok(bytes::Bytes::from_static(b"more")), (2, None))),
+            _ => Some((Err(std::io::Error::other("body died")), (3, None))),
+        }
+    });
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "multipart/form-data; boundary=X".parse().unwrap(),
+    );
+    let response = super::upload(
+        axum::extract::State(std::sync::Arc::new(crate::state::AppState::new())),
+        axum::extract::Query(std::collections::HashMap::new()),
+        headers,
+        axum::body::Body::from_stream(stream),
+    )
+    .await;
+    let (parts, body) = response.into_parts();
+    let body = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+    assert_eq!(parts.status, axum::http::StatusCode::BAD_REQUEST);
+    assert!(String::from_utf8_lossy(&body).contains("error reading multipart"));
+    assert_eq!(std::fs::read(target).unwrap(), b"more");
 }
 
 #[test]

@@ -25,18 +25,19 @@ GO_DIR = sys.argv[1] if len(sys.argv) > 1 else "fixtures"
 RS_DIR = sys.argv[2] if len(sys.argv) > 2 else "fixtures-rust"
 
 # Fixtures where cube-envd intentionally differs (cube-envd/README.md).
-# These scenarios remain intentional MVP differences: the watch family is
-# not implemented in cube-envd, and nested/invalid selectors use Rust's
-# strict decoder instead of connect-go's unimplemented response.
+# Do not re-add entries for fixtures that currently PASS: an allowlisted
+# fixture reports DECLARED-DIFF instead of FAIL, so listing a passing
+# fixture silently downgrades the gate for every future regression.
+# (fs_watch_unary_probe left this list when PR-B implemented the watch
+# family; proc_sendinput_probe / proc_connect_missing /
+# proc_sendsignal_nested_probe left it when selector decoding switched to
+# connect-go's DiscardUnknown behavior. The remaining entries are the
+# still-standing differences.)
 DECLARED_DIFFERENT = {
     "rest_files_gzip_accept": "gzip download encoding: upstream supports, cube-envd identity-only",
     "rest_files_compose_probe": "/files/compose: implemented upstream, 501 in cube-envd",
     "fs_bad_json": "JSON parse error wording is parser-specific (code and status equal)",
     "rest_init_timestamp_out_of_range": "timestamp outside i64-nanosecond range (9999): upstream UnixNano() wraps and drops as stale (204); cube-envd rejects as a caller bug (400). Neither applies anything nor moves the gate",
-    "fs_watch_unary_probe": "watch family is not implemented in cube-envd",
-    "proc_connect_missing": "invalid nested selector is rejected by cube-envd's strict decoder",
-    "proc_sendinput_probe": "invalid nested selector is rejected by cube-envd's strict decoder",
-    "proc_sendsignal_nested_probe": "invalid nested selector is rejected by cube-envd's strict decoder",
 }
 # Fixtures that depend on prior state in ways the rerun reproduces
 # differently. Currently empty; kept for the next scenario that needs it.

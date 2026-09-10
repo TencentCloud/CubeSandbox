@@ -302,15 +302,19 @@ fn create_dirs_owned(dir: &std::path::Path, user: &User) -> Result<(), RestError
 fn chown(path: &std::path::Path, user: &User) {
     if let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) {
         unsafe {
-            // lchown, not chown: never follow a symlink when setting ownership,
-            // so a planted symlink at `path` cannot redirect the chown onto an
-            // arbitrary target the caller shouldn't be able to take over.
-            let rc = libc::lchown(c_path.as_ptr(), user.uid, user.gid);
+            // chown (FOLLOWS symlinks), not lchown — matching upstream's
+            // `os.Chown(path, uid, gid)` (upload.go:56/:84): an upload through
+            // a symlink writes the link's destination, and ownership lands on
+            // that same destination. lchown would leave a daemon-owned target
+            // behind while chowning the link itself (caught by the PR-C
+            // symlink probe). Following adds no takeover risk beyond the
+            // write, which already followed the same link.
+            let rc = libc::chown(c_path.as_ptr(), user.uid, user.gid);
             if rc != 0 {
                 // Silent failure would break the ownership contract: the
                 // upload "succeeds" while the file stays daemon-owned.
                 tracing::warn!(
-                    "upload: lchown({}) to uid={} gid={} failed: {}",
+                    "upload: chown({}) to uid={} gid={} failed: {}",
                     path.display(),
                     user.uid,
                     user.gid,
