@@ -130,7 +130,9 @@ validate a real multi-node run or measured CubeAPI/Cubelet create latency.
       ],
       "regressed_metrics": [],
       "notes": [
-        "Observed in this simulated workload; these numbers are offline estimates, not live cluster measurements."
+        "Observed in this simulated workload \"burst_short_lived\": candidate profile \"template_locality_first\" versus baseline \"default\" is classified as improved.",
+        "Latency metrics are estimated by the simulator, not measured from a live cluster.",
+        "Deltas are candidate minus baseline; latency decreases are improvements. These numbers are offline estimates, not live cluster measurements."
       ]
     }
   ]
@@ -146,7 +148,7 @@ needed; generated benchmark reports are not checked into the repository.
 |---|---|---|---|
 | `run_id` | string | yes | Deterministic run identifier derived from seed and node count. |
 | `config.seed` | number | yes | Deterministic workload seed. |
-| `config.node_count` | number | yes | Simulated node count. |
+| `config.node_count` | number | yes | Simulated node count (**1–4**). |
 | `config.profiles` | string array | yes | Profiles included in the run. |
 | `config.workloads` | string array | yes | Workloads included in the run. |
 | `acceptance_path.*` | object | yes | Claim-evidence and review-scope context for the report. |
@@ -182,7 +184,7 @@ Every `results[].workloads[].metrics` object contains these keys:
 - `create_latency_p95_ms`
 - `uses_estimated_latency`
 - `average_cpu_headroom`
-- `average_score_margin`
+- `average_score_margin` (mean first–second score gap over multi-candidate decisions only; 0 when none)
 - `average_candidates_scored`
 - `score_evaluations`
 - `node_final_state`

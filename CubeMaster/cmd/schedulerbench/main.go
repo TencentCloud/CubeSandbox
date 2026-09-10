@@ -20,7 +20,7 @@ const (
 	formatMarkdown = "markdown"
 	formatBoth     = "both"
 	defaultFormat  = formatBoth
-	verifyScope    = "default workload/profile acceptance contract"
+	verifyScope    = "default report structure/terminology contract"
 )
 
 func main() {
@@ -37,11 +37,11 @@ func runCLI(args []string, stdout, stderr io.Writer) error {
 	var (
 		outDir    = flags.String("out", "schedulerbench-report", "directory for report.json and report.md")
 		seed      = flags.Int64("seed", defaultConfig.Seed, "deterministic workload seed recorded in the report")
-		nodeCount = flags.Int("nodes", defaultConfig.NodeCount, "simulated node count")
+		nodeCount = flags.Int("nodes", defaultConfig.NodeCount, "simulated node count (1-4)")
 		profiles  = flags.String("profiles", strings.Join(defaultConfig.Profiles, ","), "comma-separated profile list")
 		workloads = flags.String("workloads", strings.Join(defaultConfig.Workloads, ","), "comma-separated workload list")
 		format    = flags.String("format", defaultFormat, "report format: json, markdown, or both")
-		verify    = flags.Bool("verify", false, "verify the default workload/profile acceptance contract (not arbitrary --profiles/--workloads subsets)")
+		verify    = flags.Bool("verify", false, "verify the default report structure/terminology contract (not arbitrary --profiles/--workloads subsets; does not prove live scheduling performance)")
 	)
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -53,12 +53,26 @@ func runCLI(args []string, stdout, stderr io.Writer) error {
 	if err := validateFormat(*format); err != nil {
 		return err
 	}
+	// Explicit CLI --nodes 0 must fail rather than silently becoming the
+	// library default via normalizeConfig.
+	if err := simulator.ValidateNodeCount(*nodeCount); err != nil {
+		return fmt.Errorf("invalid --nodes: %w", err)
+	}
+
+	profileList, err := splitCSV(*profiles, "profile")
+	if err != nil {
+		return err
+	}
+	workloadList, err := splitCSV(*workloads, "workload")
+	if err != nil {
+		return err
+	}
 
 	cfg := simulator.Config{
 		Seed:      *seed,
 		NodeCount: *nodeCount,
-		Profiles:  splitCSV(*profiles),
-		Workloads: splitCSV(*workloads),
+		Profiles:  profileList,
+		Workloads: workloadList,
 	}
 	report, err := simulator.Run(cfg)
 	if err != nil {
@@ -74,7 +88,7 @@ func runCLI(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if *verify {
-		fmt.Fprintf(stdout, "scheduler benchmark %s verification passed\n", verifyScope)
+		fmt.Fprintf(stdout, "scheduler benchmark %s passed (structure and terminology only; not live scheduling performance)\n", verifyScope)
 	}
 	fmt.Fprintf(stdout, "scheduler benchmark report written to %s\n", *outDir)
 	return nil
@@ -110,14 +124,23 @@ func writeReports(outDir, format string, report simulator.Report) error {
 	return nil
 }
 
-func splitCSV(in string) []string {
+func splitCSV(in, kind string) ([]string, error) {
 	parts := strings.Split(in, ",")
 	result := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
-		if part != "" {
-			result = append(result, part)
+		if part == "" {
+			return nil, fmt.Errorf("invalid --%ss: empty %s name", kind, kind)
 		}
+		if _, ok := seen[part]; ok {
+			return nil, fmt.Errorf("invalid --%ss: duplicate %s %q", kind, kind, part)
+		}
+		seen[part] = struct{}{}
+		result = append(result, part)
 	}
-	return result
+	if len(result) == 0 {
+		return nil, fmt.Errorf("invalid --%ss: at least one %s is required", kind, kind)
+	}
+	return result, nil
 }

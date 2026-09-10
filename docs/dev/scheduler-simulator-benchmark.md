@@ -33,7 +33,9 @@ Use `--format json`, `--format markdown`, or `--format both` to select the
 output file set. The default is `both`.
 
 The default run is deterministic and records the seed, node count, workloads,
-profiles, metric schema, and acceptance map in both reports.
+profiles, metric schema, and acceptance map in both reports. `--nodes` accepts
+only **1–4**; an explicit CLI `--nodes 0` is rejected rather than silently
+becoming the default.
 
 Use `--verify` to run the benchmark and check the in-memory report against the
 default topic 1 acceptance contract before writing it:
@@ -63,10 +65,11 @@ or real create latency.
 
 ## Profiles
 
-These names are **simulator-only** scoring-weight presets. They share strings
-with CubeMaster runtime `scheduler.profile` built-in overlays but are **not**
-the same execution path. Runtime overlays expand onto existing filter/score
-selector config and do not copy these weights.
+These names are **simulator-only** scoring-weight presets used by the offline
+benchmark. The profile name strings intentionally align with the separate
+integrated work tracked in Draft PR #1666 so naming stays consistent across
+related changes. This PR does not ship runtime `scheduler.profile` overlays and
+does not imply a standalone runtime dependency on that draft work.
 
 - `default`: balanced resource-headroom and spread scoring with light template
   locality.
@@ -95,7 +98,9 @@ The report includes more than five scheduling-quality metrics:
   do not treat P50/P95 as measured create latency.
 - `peak_cpu_utilization`
 - `average_cpu_headroom`
-- `average_score_margin`
+- `average_score_margin`: mean score gap between the selected node and the
+  second-ranked candidate, averaged only over scheduled requests that had at
+  least two scored candidates; `0` when no such observations exist.
 - `average_candidates_scored`: average number of truncated ranked candidates
   considered for each scheduled request. This is capped by the simulator's
   priority candidate limit after filtering and scoring; it is not the total

@@ -36,8 +36,11 @@ func TestRunCLIVerifySucceeds(t *testing.T) {
 	if !fileExists(t, filepath.Join(outDir, "report.md")) {
 		t.Fatal("runCLI(--verify) did not write report.md")
 	}
-	if !bytes.Contains(stdout.Bytes(), []byte(verifyScope+" verification passed")) {
+	if !bytes.Contains(stdout.Bytes(), []byte(verifyScope+" passed")) {
 		t.Fatalf("runCLI(--verify) stdout = %q, want verification success", stdout.String())
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte("structure and terminology only")) {
+		t.Fatalf("runCLI(--verify) stdout = %q, want structure/terminology framing", stdout.String())
 	}
 }
 
@@ -604,4 +607,109 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func TestRunCLINodeCountBoundary(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		nodes   string
+		wantErr bool
+		want    int
+	}{
+		{name: "reject negative", nodes: "-1", wantErr: true},
+		{name: "reject zero", nodes: "0", wantErr: true},
+		{name: "accept one", nodes: "1", want: 1},
+		{name: "accept four", nodes: "4", want: 4},
+		{name: "reject five", nodes: "5", wantErr: true},
+		{name: "reject eight", nodes: "8", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			outDir := filepath.Join(t.TempDir(), "nodes-report")
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			err := runCLI([]string{
+				"--out", outDir,
+				"--nodes", tt.nodes,
+				"--profiles", simulator.ProfileDefault,
+				"--workloads", simulator.WorkloadBurstShortLived,
+			}, &stdout, &stderr)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("runCLI() error = nil, want invalid --nodes")
+				}
+				if !strings.Contains(err.Error(), "nodes") {
+					t.Fatalf("runCLI() error = %q, want nodes message", err)
+				}
+				if fileExists(t, outDir) {
+					t.Fatal("report written despite invalid --nodes")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("runCLI() error = %v, stderr = %q", err, stderr.String())
+			}
+			report := loadCLIReportJSON(t, outDir)
+			if report.Config.NodeCount != tt.want {
+				t.Fatalf("Config.NodeCount = %d, want %d", report.Config.NodeCount, tt.want)
+			}
+			if len(report.Results[0].Workloads[0].Metrics.NodeFinalState) != tt.want {
+				t.Fatalf("node_final_state size = %d, want %d", len(report.Results[0].Workloads[0].Metrics.NodeFinalState), tt.want)
+			}
+		})
+	}
+}
+
+func TestRunCLIRejectsEmptyAndDuplicateCSV(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "empty profile item",
+			args: []string{"--profiles", "default,,balanced_spread"},
+			want: "empty profile",
+		},
+		{
+			name: "duplicate profile",
+			args: []string{"--profiles", "default,default"},
+			want: "duplicate profile",
+		},
+		{
+			name: "empty workload item",
+			args: []string{"--workloads", "burst_short_lived,,mixed_size"},
+			want: "empty workload",
+		},
+		{
+			name: "duplicate workload",
+			args: []string{"--workloads", "mixed_size,mixed_size"},
+			want: "duplicate workload",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			outDir := filepath.Join(t.TempDir(), "csv-report")
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			err := runCLI(append([]string{"--out", outDir}, tt.args...), &stdout, &stderr)
+			if err == nil {
+				t.Fatal("runCLI() error = nil, want CSV validation failure")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("runCLI() error = %q, want %q", err, tt.want)
+			}
+			if fileExists(t, outDir) {
+				t.Fatal("report written despite invalid CSV")
+			}
+		})
+	}
 }

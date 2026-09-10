@@ -12,8 +12,6 @@ import (
 	mrand "math/rand"
 	"sort"
 	"strings"
-
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 )
 
 const (
@@ -26,6 +24,12 @@ const (
 	WorkloadSameTemplateRepeat  = "same_template_repeated"
 	WorkloadMixedSizeCreate     = "mixed_size"
 	defaultPriorityCandidateNum = 3
+
+	// MinNodeCount and MaxNodeCount bound the simulated node set. The four
+	// declared node specs are the only supported topology; reports must
+	// describe exactly the count that was simulated.
+	MinNodeCount = 1
+	MaxNodeCount = 4
 
 	ComparisonImproved  = "improved"
 	ComparisonTradeOff  = "trade_off"
@@ -175,6 +179,13 @@ func DefaultConfig() Config {
 
 func Run(cfg Config) (Report, error) {
 	cfg = normalizeConfig(cfg)
+	if err := validateNodeCount(cfg.NodeCount); err != nil {
+		return Report{}, err
+	}
+	nodes := defaultNodes(cfg.NodeCount)
+	if len(nodes) != cfg.NodeCount {
+		return Report{}, fmt.Errorf("simulated node count %d disagrees with config node_count %d", len(nodes), cfg.NodeCount)
+	}
 	report := Report{
 		RunID:          fmt.Sprintf("scheduler-sim-seed-%d-nodes-%d", cfg.Seed, cfg.NodeCount),
 		Config:         cfg,
@@ -193,7 +204,8 @@ func Run(cfg Config) (Report, error) {
 			if err != nil {
 				return Report{}, err
 			}
-			metrics := runWorkload(profile, defaultNodes(cfg.NodeCount), requests)
+			// Copy the node set per workload so placement state does not leak.
+			metrics := runWorkload(profile, cloneSimNodes(nodes), requests)
 			result.Workloads = append(result.Workloads, WorkloadResult{
 				Workload: workload,
 				Metrics:  metrics,
@@ -203,6 +215,30 @@ func Run(cfg Config) (Report, error) {
 	}
 	report.Comparisons = buildComparisons(cfg, report.Results)
 	return report, nil
+}
+
+// ValidateNodeCount reports whether count is a supported effective simulated
+// node count (1 through MaxNodeCount inclusive). Zero is not valid here;
+// normalizeConfig maps an unset library zero-value to the default before Run
+// calls this helper. CLI callers that receive an explicit 0 should reject it
+// before invoking Run.
+func ValidateNodeCount(count int) error {
+	return validateNodeCount(count)
+}
+
+func validateNodeCount(count int) error {
+	if count < MinNodeCount || count > MaxNodeCount {
+		return fmt.Errorf("unsupported node count %d: must be between %d and %d", count, MinNodeCount, MaxNodeCount)
+	}
+	return nil
+}
+
+func cloneSimNodes(nodes []simNode) []simNode {
+	out := make([]simNode, len(nodes))
+	for i := range nodes {
+		out[i] = simNode{spec: nodes[i].spec}
+	}
+	return out
 }
 
 // VerifyDefaultReport checks the acceptance contract of the default offline
@@ -594,7 +630,7 @@ func defaultMetricSchema() []MetricSchema {
 		{Name: "uses_estimated_latency", Direction: "true means estimated", Description: "Always true in this simulator: create_latency_p50_ms and create_latency_p95_ms are deterministic estimates, not live create latency."},
 		{Name: "peak_cpu_utilization", Direction: "lower is safer", Description: "Highest final CPU utilization across nodes."},
 		{Name: "average_cpu_headroom", Direction: "higher is safer", Description: "Average remaining CPU capacity after each placement."},
-		{Name: "average_score_margin", Direction: "higher means clearer decisions", Description: "Mean score gap between the selected node and second-ranked candidate."},
+		{Name: "average_score_margin", Direction: "higher means clearer decisions", Description: "Mean score gap between the selected node and second-ranked candidate, averaged only over scheduled requests that had at least two scored candidates. Zero when no such decisions exist."},
 		{Name: "average_candidates_scored", Direction: "lower means lower simulated decision cost", Description: "Average truncated ranked candidates considered per scheduled request after filtering and scoring."},
 	}
 }
@@ -606,8 +642,11 @@ func defaultNodes(count int) []simNode {
 		{ID: "node-c", CPUMilli: 6000, MemMB: 12288, MaxSandboxes: 16, WarmTemplates: map[string]bool{"data-notebook": true}},
 		{ID: "node-d", CPUMilli: 8000, MemMB: 16384, MaxSandboxes: 20, WarmTemplates: map[string]bool{"gpu-build": true, "data-notebook": true}},
 	}
-	if count <= 0 || count > len(base) {
-		count = len(base)
+	// Precondition: count must already be in [MinNodeCount, MaxNodeCount].
+	// Invalid input returns nil so Run's length check fails closed instead of
+	// silently rewriting the requested node set.
+	if count < MinNodeCount || count > len(base) {
+		return nil
 	}
 	nodes := make([]simNode, 0, count)
 	for i := 0; i < count; i++ {
@@ -708,6 +747,7 @@ func runWorkload(profile string, nodes []simNode, requests []Request) Metrics {
 		return requestsByArrival[i].Arrival < requestsByArrival[j].Arrival
 	})
 
+	marginObservations := 0
 	for _, req := range requestsByArrival {
 		releaseCompleted(nodes, req.Arrival)
 		ranked := scoreCandidates(nodes, req, weights)
@@ -730,6 +770,7 @@ func runWorkload(profile string, nodes []simNode, requests []Request) Metrics {
 		}
 		if len(ranked) > 1 {
 			metrics.AverageScoreMargin += ranked[0].score - ranked[1].score
+			marginObservations++
 		}
 		metrics.AverageCPUHeadroom += cpuHeadroom(nodes[selected.index])
 	}
@@ -737,9 +778,13 @@ func runWorkload(profile string, nodes []simNode, requests []Request) Metrics {
 	if metrics.ScheduledRequests > 0 {
 		denom := float64(metrics.ScheduledRequests)
 		metrics.TemplateLocalityHitRate /= denom
-		metrics.AverageScoreMargin /= denom
 		metrics.AverageCPUHeadroom /= denom
 		metrics.AverageCandidatesScored = float64(metrics.ScoreEvaluations) / denom
+	}
+	if marginObservations > 0 {
+		metrics.AverageScoreMargin /= float64(marginObservations)
+	} else {
+		metrics.AverageScoreMargin = 0
 	}
 	metrics.SuccessRate = ratio(metrics.ScheduledRequests, metrics.TotalRequests)
 	metrics.NodeLoadBalance = nodeLoadBalance(nodes)
@@ -978,18 +1023,4 @@ func percentile(values []float64, p float64) float64 {
 	}
 	weight := rank - float64(lo)
 	return sorted[lo]*(1-weight) + sorted[hi]*weight
-}
-
-func ToNodeList(specs []NodeSpec) node.NodeList {
-	result := make(node.NodeList, 0, len(specs))
-	for _, spec := range specs {
-		result = append(result, &node.Node{
-			InsID:       spec.ID,
-			QuotaCpu:    spec.CPUMilli,
-			QuotaMem:    spec.MemMB,
-			MaxMvmLimit: int64(spec.MaxSandboxes),
-			Healthy:     true,
-		})
-	}
-	return result
 }

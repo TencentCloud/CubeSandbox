@@ -651,3 +651,98 @@ func equalCounts(a, b map[string]int) bool {
 	}
 	return true
 }
+
+func TestNodeCountContractLibraryAndEffectiveSet(t *testing.T) {
+	tests := []struct {
+		name      string
+		cfg       Config
+		wantErr   bool
+		wantNodes int
+	}{
+		{name: "zero-value Config defaults to four nodes", cfg: Config{}, wantNodes: 4},
+		{name: "explicit one node", cfg: Config{NodeCount: 1, Profiles: []string{ProfileDefault}, Workloads: []string{WorkloadBurstShortLived}}, wantNodes: 1},
+		{name: "explicit four nodes", cfg: Config{NodeCount: 4, Profiles: []string{ProfileDefault}, Workloads: []string{WorkloadBurstShortLived}}, wantNodes: 4},
+		{name: "reject negative", cfg: Config{NodeCount: -1, Profiles: []string{ProfileDefault}, Workloads: []string{WorkloadBurstShortLived}}, wantErr: true},
+		{name: "reject five", cfg: Config{NodeCount: 5, Profiles: []string{ProfileDefault}, Workloads: []string{WorkloadBurstShortLived}}, wantErr: true},
+		{name: "reject eight", cfg: Config{NodeCount: 8, Profiles: []string{ProfileDefault}, Workloads: []string{WorkloadBurstShortLived}}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			report, err := Run(tt.cfg)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Run() error = nil, want unsupported node count")
+				}
+				if !strings.Contains(err.Error(), "node count") {
+					t.Fatalf("Run() error = %q, want node count message", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			if report.Config.NodeCount != tt.wantNodes {
+				t.Fatalf("Config.NodeCount = %d, want %d", report.Config.NodeCount, tt.wantNodes)
+			}
+			wantID := fmt.Sprintf("scheduler-sim-seed-%d-nodes-%d", report.Config.Seed, tt.wantNodes)
+			if report.RunID != wantID {
+				t.Fatalf("RunID = %q, want %q", report.RunID, wantID)
+			}
+			for _, profile := range report.Results {
+				for _, workload := range profile.Workloads {
+					if len(workload.Metrics.PlacementCounts) > tt.wantNodes {
+						t.Fatalf("placement_counts has %d keys, want <= %d", len(workload.Metrics.PlacementCounts), tt.wantNodes)
+					}
+					if len(workload.Metrics.NodeFinalState) != tt.wantNodes {
+						t.Fatalf("node_final_state has %d entries, want %d", len(workload.Metrics.NodeFinalState), tt.wantNodes)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestAverageScoreMarginDenominatorIgnoresSingleCandidate(t *testing.T) {
+	newNodes := func() []simNode {
+		return []simNode{
+			{spec: NodeSpec{ID: "small", CPUMilli: 1000, MemMB: 2048, MaxSandboxes: 8, WarmTemplates: map[string]bool{}}},
+			{spec: NodeSpec{ID: "large", CPUMilli: 8000, MemMB: 16384, MaxSandboxes: 20, WarmTemplates: map[string]bool{}}},
+		}
+	}
+	multiRequests := []Request{
+		{ID: "multi-a", Arrival: 0, Lifetime: 1, CPUMilli: 100, MemMB: 100, Template: "t"},
+		{ID: "multi-b", Arrival: 1, Lifetime: 1, CPUMilli: 100, MemMB: 100, Template: "t"},
+	}
+	singleRequests := []Request{
+		{ID: "single-a", Arrival: 2, Lifetime: 1, CPUMilli: 7000, MemMB: 100, Template: "t"},
+		{ID: "single-b", Arrival: 3, Lifetime: 1, CPUMilli: 7000, MemMB: 100, Template: "t"},
+	}
+	mixed := append(append([]Request(nil), multiRequests...), singleRequests...)
+
+	multiOnly := runWorkload(ProfileDefault, newNodes(), multiRequests)
+	mixedMetrics := runWorkload(ProfileDefault, newNodes(), mixed)
+	if multiOnly.ScheduledRequests != 2 || mixedMetrics.ScheduledRequests != 4 {
+		t.Fatalf("scheduled multi=%d mixed=%d, want 2 and 4", multiOnly.ScheduledRequests, mixedMetrics.ScheduledRequests)
+	}
+	if multiOnly.AverageScoreMargin <= 0 {
+		t.Fatalf("multi-candidate AverageScoreMargin = %v, want > 0", multiOnly.AverageScoreMargin)
+	}
+	if mixedMetrics.AverageScoreMargin != multiOnly.AverageScoreMargin {
+		t.Fatalf("mixed AverageScoreMargin = %v, want %v (single-candidate placements must not change the denominator)",
+			mixedMetrics.AverageScoreMargin, multiOnly.AverageScoreMargin)
+	}
+	diluted := multiOnly.AverageScoreMargin * 2 / 4
+	if mixedMetrics.AverageScoreMargin == diluted {
+		t.Fatalf("AverageScoreMargin unexpectedly equals diluted value %v", diluted)
+	}
+
+	onlySingle := runWorkload(ProfileDefault, []simNode{
+		{spec: NodeSpec{ID: "large", CPUMilli: 8000, MemMB: 16384, MaxSandboxes: 20, WarmTemplates: map[string]bool{}}},
+	}, []Request{
+		{ID: "only", Arrival: 0, Lifetime: 1, CPUMilli: 100, MemMB: 100, Template: "t"},
+	})
+	if onlySingle.AverageScoreMargin != 0 {
+		t.Fatalf("single-candidate AverageScoreMargin = %v, want 0", onlySingle.AverageScoreMargin)
+	}
+}
