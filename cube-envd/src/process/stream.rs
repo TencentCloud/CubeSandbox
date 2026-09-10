@@ -150,18 +150,21 @@ pub(super) fn parse_pty_size(pty: Option<PtyRequest>) -> Result<PtySize, RpcErro
     })
 }
 
-/// 按执行用户的路径规则解析可选工作目录。
+/// 按执行用户的路径规则解析工作目录，缺省时回落到该用户的主目录。
+///
+/// 上游 envd 在 cwd 为空时使用 `/init` 的 defaultWorkdir，未设置时回落到用户
+/// HOME；cube-envd 不实现 defaultWorkdir，因此缺省值恒为 HOME——而不是继承
+/// cube-envd 自身进程的工作目录。
 pub(super) fn process_cwd(
     config: &ProcessConfig,
     user: &LocalUser,
 ) -> Result<Option<std::path::PathBuf>, RpcError> {
-    config
-        .cwd
-        .as_deref()
-        .map(|path| {
-            resolve_path(path, user).map_err(|error| RpcError::invalid_argument(error.to_string()))
-        })
-        .transpose()
+    let Some(path) = config.cwd.as_deref() else {
+        return Ok(Some(user.home.clone()));
+    };
+    resolve_path(path, user)
+        .map(Some)
+        .map_err(|error| RpcError::invalid_argument(error.to_string()))
 }
 
 /// 判断目标用户是否就是当前 envd 进程的用户。

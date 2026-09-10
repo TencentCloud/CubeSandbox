@@ -82,8 +82,12 @@ async fn sigterm_terminates_processes_started_by_envd() {
     let mut response = Vec::new();
     for _ in 0..20 {
         if let Ok(mut stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+            // 以当前用户发请求：本用例只验证 SIGTERM 会回收受管进程组，与用户
+            // 切换无关；不带认证头会选中 root，从而要求调用方具备切换到 root 的
+            // 权限（非 root 环境下 spawn 阶段的 chdir/setpriv 会失败）。
             let request = format!(
-                "POST /process.Process/Start HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/connect+json\r\nConnect-Protocol-Version: 1\r\nContent-Length: {}\r\n\r\n",
+                "POST /process.Process/Start HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/connect+json\r\nConnect-Protocol-Version: 1\r\nAuthorization: {}\r\nContent-Length: {}\r\n\r\n",
+                common::basic_auth_header(),
                 frame.len()
             );
             stream.write_all(request.as_bytes()).await.unwrap();

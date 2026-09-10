@@ -75,17 +75,23 @@ impl ProcessRegistry {
     async fn start_reserved(&self, mut options: StartOptions) -> Result<Launch, RpcError> {
         let cwd = process_cwd(&options.config, &options.user)?;
         if let Some(cwd) = &cwd {
-            let metadata = tokio::fs::metadata(cwd).await.map_err(|error| {
-                RpcError::invalid_argument(format!(
-                    "invalid process cwd {}: {error}",
-                    cwd.display()
-                ))
-            })?;
-            if !metadata.is_dir() {
-                return Err(RpcError::invalid_argument(format!(
-                    "process cwd {} is not a directory",
-                    cwd.display()
-                )));
+            // 与上游一致：只有"路径不存在"才在启动前拒绝。校验使用 envd 自身
+            // 凭据，因此其余 stat 失败（例如以非 root 身份校验 root 的 0700 主
+            // 目录）一律放行，真正的失败由子进程 exec 阶段上报。
+            match tokio::fs::metadata(cwd).await {
+                Ok(metadata) if !metadata.is_dir() => {
+                    return Err(RpcError::invalid_argument(format!(
+                        "process cwd {} is not a directory",
+                        cwd.display()
+                    )));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(RpcError::invalid_argument(format!(
+                        "process cwd {} does not exist",
+                        cwd.display()
+                    )));
+                }
+                Ok(_) | Err(_) => {}
             }
         }
 
