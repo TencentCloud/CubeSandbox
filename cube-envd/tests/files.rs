@@ -114,6 +114,73 @@ async fn raw_upload_replaces_the_target_atomically_after_streaming() {
     );
 }
 
+// 验证上传采用"同目录临时文件 + 原子 rename"，目标为符号链接时替换的是链接本身，
+// 链接指向的原文件保持不变（与上游"写穿符号链接"的已知差异）。
+#[cfg(unix)]
+#[tokio::test]
+async fn raw_upload_replaces_a_symlink_instead_of_writing_through_it() {
+    let user = common::current_username();
+    let directory = tempdir().unwrap();
+    let real = directory.path().join("real.txt");
+    let link = directory.path().join("link.txt");
+    fs::write(&real, "real content").unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let target = format!("/files?path={}&username={user}", link.display());
+
+    let response = router()
+        .oneshot(
+            Request::post(target)
+                .header(CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from("uploaded"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read(&link).unwrap(), b"uploaded");
+    assert_eq!(fs::read(&real).unwrap(), b"real content");
+}
+
+// 验证 multipart 上传同样以原子替换收尾并保留目标权限位。
+#[tokio::test]
+async fn multipart_upload_preserves_target_permissions() {
+    let user = common::current_username();
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("script.sh");
+    fs::write(&path, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    let target = format!("/files?path={}&username={user}", path.display());
+
+    let boundary = "cube-envd-test-boundary";
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"script.sh\"\r\n\r\nnew body\r\n--{boundary}--\r\n"
+    );
+    let response = router()
+        .oneshot(
+            Request::post(target)
+                .header(
+                    CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(fs::read(&path).unwrap(), b"new body");
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}
+
 // 验证 multipart 上传在缺少查询路径时使用每个字段的文件名。
 #[tokio::test]
 async fn multipart_upload_uses_each_part_filename_when_path_is_absent() {

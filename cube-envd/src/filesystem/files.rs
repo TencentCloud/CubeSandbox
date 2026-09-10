@@ -1,4 +1,6 @@
 use std::{
+    hash::{BuildHasher, Hasher},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -118,24 +120,14 @@ async fn write_atomically(path: &Path, user: &LocalUser, body: Body) -> Result<(
         .ok_or_else(|| RpcError::invalid_argument("file path must have a parent directory"))?;
     ensure_parent_dirs(parent, user).await?;
 
-    let temporary = create_temporary_file(parent).await?;
-    let outcome = write_temporary_file(&temporary, body).await;
-    if let Err(error) = outcome {
-        let _ = fs::remove_file(&temporary).await;
+    let mut temporary = create_temporary_file(parent).await?;
+    if let Err(error) = write_temporary_file(&mut temporary, body).await {
+        temporary.discard().await;
         return Err(error);
     }
-
-    if let Err(error) = chown(&temporary, user).await {
-        let _ = fs::remove_file(&temporary).await;
+    if let Err(error) = temporary.finish(path, user).await {
+        temporary.discard().await;
         return Err(error);
-    }
-    if let Err(error) = preserve_target_mode(&temporary, path).await {
-        let _ = fs::remove_file(&temporary).await;
-        return Err(error);
-    }
-    if let Err(error) = fs::rename(&temporary, path).await {
-        let _ = fs::remove_file(&temporary).await;
-        return Err(file_error(path, error));
     }
 
     Ok(())
@@ -185,46 +177,31 @@ async fn write_multipart_field_atomically(
         .parent()
         .ok_or_else(|| RpcError::invalid_argument("file path must have a parent directory"))?;
     ensure_parent_dirs(parent, user).await?;
-    let temporary = create_temporary_file(parent).await?;
-    let result = write_multipart_field(&temporary, field).await;
-    if let Err(error) = result {
-        let _ = fs::remove_file(&temporary).await;
+    let mut temporary = create_temporary_file(parent).await?;
+    if let Err(error) = write_multipart_field(&mut temporary, field).await {
+        temporary.discard().await;
         return Err(error);
     }
-    if let Err(error) = chown(&temporary, user).await {
-        let _ = fs::remove_file(&temporary).await;
+    if let Err(error) = temporary.finish(path, user).await {
+        temporary.discard().await;
         return Err(error);
-    }
-    if let Err(error) = preserve_target_mode(&temporary, path).await {
-        let _ = fs::remove_file(&temporary).await;
-        return Err(error);
-    }
-    if let Err(error) = fs::rename(&temporary, path).await {
-        let _ = fs::remove_file(&temporary).await;
-        return Err(file_error(path, error));
     }
 
     Ok(())
 }
 
-/// 将 multipart 字段分块写入预先创建的临时文件并同步到磁盘。
-async fn write_multipart_field(path: &Path, field: &mut multer::Field<'_>) -> Result<(), RpcError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .await
-        .map_err(|error| file_error(path, error))?;
+/// 将 multipart 字段分块写入已预留的临时文件并同步到磁盘。
+async fn write_multipart_field(
+    temporary: &mut TemporaryUpload,
+    field: &mut multer::Field<'_>,
+) -> Result<(), RpcError> {
     while let Some(chunk) = field.chunk().await.map_err(multipart_error)? {
-        file.write_all(&chunk)
+        temporary
+            .write_all(&chunk)
             .await
-            .map_err(|error| file_error(path, error))?;
+            .map_err(|error| file_error(&temporary.path, error))?;
     }
-    file.sync_all()
-        .await
-        .map_err(|error| file_error(path, error))?;
-
-    Ok(())
+    temporary.sync_all().await
 }
 
 /// 为上传响应构造文件条目元数据。
@@ -261,14 +238,92 @@ async fn ensure_parent_dirs(parent: &Path, user: &LocalUser) -> Result<(), RpcEr
     Ok(())
 }
 
+/// 已预留的临时上传文件：从创建到 rename 全程持有 fd。
+///
+/// 写入、改属主（`fchown`）与改权限（`fchmod`）都作用在这个 fd 上，不再按路径重开
+/// 或用路径版 `chown`——后者会被目标目录中有写权限的第三方用符号链接替换，从而让
+/// 以 root 运行的 envd 把内容写进任意文件、或把任意 inode 改属主。
+struct TemporaryUpload {
+    /// 临时文件路径，仅用于最终 rename 与错误清理。
+    path: PathBuf,
+    /// 持有写入与属性修改所依赖的 fd。
+    file: File,
+}
+
+impl TemporaryUpload {
+    /// 分块写入请求体数据。
+    async fn write_all(&mut self, chunk: &[u8]) -> std::io::Result<()> {
+        self.file.write_all(chunk).await
+    }
+
+    /// 将数据刷入磁盘。
+    async fn sync_all(&self) -> Result<(), RpcError> {
+        self.file
+            .sync_all()
+            .await
+            .map_err(|error| file_error(&self.path, error))
+    }
+
+    /// 收尾：冻结 fd 上的写入、改属主与权限，然后原子替换目标。
+    ///
+    /// 顺序与既有行为一致：先 chown（会清掉 setuid/setgid），再按目标原有权限位
+    /// 设置 fchmod，最后 rename。
+    async fn finish(&mut self, target: &Path, user: &LocalUser) -> Result<(), RpcError> {
+        self.fchown(user).await?;
+        if let Some(mode) = target_mode(target).await {
+            nix::sys::stat::fchmod(&self.file, nix::sys::stat::Mode::from_bits_truncate(mode))
+                .map_err(|error| {
+                    RpcError::new(
+                        Code::Internal,
+                        format!("set permissions for {}: {error}", self.path.display()),
+                    )
+                })?;
+        }
+        fs::rename(&self.path, target)
+            .await
+            .map_err(|error| file_error(target, error))
+    }
+
+    /// 在线程池中按 fd 修改文件所有权，避免阻塞异步运行时。
+    async fn fchown(&self, user: &LocalUser) -> Result<(), RpcError> {
+        let file =
+            self.file.try_clone().await.map_err(|error| {
+                RpcError::new(Code::Internal, format!("clone upload fd: {error}"))
+            })?;
+        let uid = nix::unistd::Uid::from_raw(user.uid);
+        let gid = nix::unistd::Gid::from_raw(user.gid);
+        let path = self.path.clone();
+        task::spawn_blocking(move || nix::unistd::fchown(&file, Some(uid), Some(gid)))
+            .await
+            .map_err(|error| {
+                RpcError::new(Code::Internal, format!("join ownership task: {error}"))
+            })?
+            .map_err(|error| {
+                RpcError::new(
+                    Code::Internal,
+                    format!("set ownership for {}: {error}", path.display()),
+                )
+            })
+    }
+
+    /// 删除临时文件（失败路径清理）。忽略清理本身的错误。
+    async fn discard(self) {
+        drop(self.file);
+        let _ = fs::remove_file(&self.path).await;
+    }
+}
+
 /// 在目标目录中预留唯一临时文件以保证后续 rename 原子性。
-async fn create_temporary_file(parent: &Path) -> Result<PathBuf, RpcError> {
+///
+/// 文件名带每线程随机种子（`RandomState`）与进程内序号，避免可预测的名字被他人
+/// 抢先占位或替换；`create_new` 保证不会复用已存在的路径。
+async fn create_temporary_file(parent: &Path) -> Result<TemporaryUpload, RpcError> {
     for _ in 0..32 {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let candidate = parent.join(format!(
-            ".cube-envd-upload-{}-{sequence}",
-            std::process::id()
-        ));
+        let entropy = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish();
+        let candidate = parent.join(format!(".cube-envd-upload-{entropy:016x}-{sequence}"));
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -276,8 +331,10 @@ async fn create_temporary_file(parent: &Path) -> Result<PathBuf, RpcError> {
             .await
         {
             Ok(file) => {
-                drop(file);
-                return Ok(candidate);
+                return Ok(TemporaryUpload {
+                    path: candidate,
+                    file,
+                })
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(file_error(&candidate, error)),
@@ -291,40 +348,28 @@ async fn create_temporary_file(parent: &Path) -> Result<PathBuf, RpcError> {
 }
 
 /// 将原始请求体流式写入已预留的临时文件并同步到磁盘。
-async fn write_temporary_file(path: &Path, body: Body) -> Result<(), RpcError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .await
-        .map_err(|error| file_error(path, error))?;
+async fn write_temporary_file(temporary: &mut TemporaryUpload, body: Body) -> Result<(), RpcError> {
     let mut stream = body.into_data_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| RpcError::new(Code::Internal, error.to_string()))?;
-        file.write_all(&chunk)
+        temporary
+            .write_all(&chunk)
             .await
-            .map_err(|error| file_error(path, error))?;
+            .map_err(|error| file_error(&temporary.path, error))?;
     }
-    file.sync_all()
-        .await
-        .map_err(|error| file_error(path, error))?;
-
-    Ok(())
+    temporary.sync_all().await
 }
 
-/// 覆盖已有目标文件时保留其权限位：rename 会用临时文件的默认位替换目标，
-/// 若不还原，可执行脚本或 0600 私钥会被重置为 0666 & umask（通常 0644）。
-async fn preserve_target_mode(temporary: &Path, target: &Path) -> Result<(), RpcError> {
-    let Ok(metadata) = fs::metadata(target).await else {
-        return Ok(());
-    };
+/// 读取目标文件当前的权限位；目标不存在时返回 None。
+///
+/// 覆盖已有目标时保留其权限位：rename 会用临时文件的默认位替换目标，若不还原，
+/// 可执行脚本或 0600 私钥会被重置为 0666 & umask（通常 0644）。
+async fn target_mode(target: &Path) -> Option<u32> {
+    let metadata = fs::metadata(target).await.ok()?;
     if !metadata.is_file() {
-        return Ok(());
+        return None;
     }
-    fs::set_permissions(temporary, metadata.permissions())
-        .await
-        .map_err(|error| file_error(temporary, error))?;
-    Ok(())
+    Some(metadata.permissions().mode())
 }
 
 /// 在线程池中修改文件所有权，避免阻塞异步运行时。

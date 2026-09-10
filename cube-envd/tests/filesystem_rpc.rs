@@ -148,6 +148,34 @@ async fn filesystem_rpc_ignores_unknown_json_fields() {
     );
 }
 
+// 验证递归删除拒绝文件系统根目录，避免一句 RPC 清空 guest 文件系统。
+#[tokio::test]
+async fn filesystem_remove_refuses_the_filesystem_root() {
+    let (status, body) = rpc(router(), "Remove", json!({"path": "/"})).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["code"], "invalid_argument");
+    assert!(
+        std::path::Path::new("/etc").exists(),
+        "the guest filesystem must be untouched"
+    );
+}
+
+// 验证拒绝的是根/挂载点，普通目录仍可递归删除。
+#[tokio::test]
+async fn filesystem_remove_still_deletes_ordinary_directories() {
+    let directory = tempdir().unwrap();
+    let nested = directory.path().join("nested/deep");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("file.txt"), b"x").unwrap();
+
+    let (status, body) = rpc(router(), "Remove", json!({"path": nested})).await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(!nested.exists());
+    assert!(directory.path().exists());
+}
+
 // 验证文件系统 RPC 会拒绝未知 Basic 用户。
 #[tokio::test]
 async fn filesystem_rpc_rejects_unknown_basic_users() {
