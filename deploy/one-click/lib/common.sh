@@ -567,13 +567,18 @@ apply_one_click_toggles() {
   return 0
 }
 
-# Database engine keys are commented out of env.example, so merge_env_three_way
-# always re-appends the previous .one-click.env markers as "preserved custom
-# settings". Without a this-run snapshot, MySQL↔Postgres (or external→bundled)
-# switches expressed only in the new .env die as "mutually exclusive" or keep
-# the old engine. Mirror the toggle snapshot: capture .env / process intent
-# before merge, then scrub the opposite engine after merge.
-ONE_CLICK_DB_INTENT_KEYS=(
+# Database engine keys (and CUBE_EXTERNAL_REDIS_DB) are commented out of
+# env.example, so merge_env_three_way always re-appends the previous
+# .one-click.env markers as "preserved custom settings". Without a this-run
+# snapshot, MySQL↔Postgres (or external→bundled) switches expressed only in
+# the new .env die as "mutually exclusive" or keep the old engine; the same
+# trap pins CUBE_EXTERNAL_REDIS_DB to the prior runtime value on upgrade.
+# Mirror the toggle snapshot: capture .env / process intent before merge,
+# then scrub the opposite engine after merge (Redis DB is re-applied only).
+#
+# Engine keys alone drive the MySQL↔Postgres scrub; Redis DB is in the full
+# intent list so it survives upgrade merge, but must not trigger scrubbing.
+ONE_CLICK_DB_ENGINE_INTENT_KEYS=(
   CUBE_DATABASE_DRIVER
   CUBE_EXTERNAL_MYSQL_HOST
   CUBE_EXTERNAL_MYSQL_PORT
@@ -585,6 +590,10 @@ ONE_CLICK_DB_INTENT_KEYS=(
   CUBE_EXTERNAL_POSTGRES_USER
   CUBE_EXTERNAL_POSTGRES_PASSWORD
   CUBE_EXTERNAL_POSTGRES_DB
+)
+ONE_CLICK_DB_INTENT_KEYS=(
+  "${ONE_CLICK_DB_ENGINE_INTENT_KEYS[@]}"
+  CUBE_EXTERNAL_REDIS_DB
 )
 
 # snapshot_one_click_database_intent records process-env values and which DB
@@ -715,15 +724,30 @@ apply_one_click_database_intent() {
     fi
   fi
 
-  if [[ "${CUBE_DATABASE_DRIVER}" == "postgres" ]]; then
-    _clear_one_click_external_mysql_env
-    log "database intent: driver=postgres host=${CUBE_EXTERNAL_POSTGRES_HOST:-}; cleared opposite CUBE_EXTERNAL_MYSQL_*"
-  else
-    _clear_one_click_external_postgres_env
-    if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST:-}" ]]; then
-      log "database intent: external MySQL host=${CUBE_EXTERNAL_MYSQL_HOST}; cleared opposite CUBE_EXTERNAL_POSTGRES_*"
+  # Only scrub opposite-engine markers when this run declared an engine key.
+  # CUBE_EXTERNAL_REDIS_DB alone must not enter the MySQL↔Postgres scrub path
+  # (otherwise a redis-DB-only .env upgrade would clear preserved engine hosts).
+  # Drive the predicate from ONE_CLICK_DB_ENGINE_INTENT_KEYS so new engine keys
+  # cannot silently fall out of this guard.
+  local has_engine_intent=0
+  local engine_key
+  for engine_key in "${ONE_CLICK_DB_ENGINE_INTENT_KEYS[@]}"; do
+    if _one_click_db_intent_declared "${engine_key}"; then
+      has_engine_intent=1
+      break
+    fi
+  done
+  if [[ "${has_engine_intent}" -eq 1 ]]; then
+    if [[ "${CUBE_DATABASE_DRIVER}" == "postgres" ]]; then
+      _clear_one_click_external_mysql_env
+      log "database intent: driver=postgres host=${CUBE_EXTERNAL_POSTGRES_HOST:-}; cleared opposite CUBE_EXTERNAL_MYSQL_*"
     else
-      log "database intent: driver=mysql (no external host); cleared opposite CUBE_EXTERNAL_POSTGRES_*"
+      _clear_one_click_external_postgres_env
+      if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST:-}" ]]; then
+        log "database intent: external MySQL host=${CUBE_EXTERNAL_MYSQL_HOST}; cleared opposite CUBE_EXTERNAL_POSTGRES_*"
+      else
+        log "database intent: driver=mysql (no external host); cleared opposite CUBE_EXTERNAL_POSTGRES_*"
+      fi
     fi
   fi
   return 0
@@ -1282,6 +1306,249 @@ persist_one_click_database_runtime_env() {
   fi
 }
 
+# one_click_redis_db returns the single operator Redis DB index
+# (CUBE_EXTERNAL_REDIS_DB, default 0). Valid range is 0-15.
+# normalize_redis_db strips leading zeros without octal/overflow arithmetic.
+one_click_redis_db() {
+  local db="${CUBE_EXTERNAL_REDIS_DB:-0}"
+  normalize_redis_db "${db}" "CUBE_EXTERNAL_REDIS_DB"
+}
+
+# Read redis.db_no from a YAML file without matching similarly named keys in
+# other blocks. The redis block may itself be indented.
+one_click_conf_redis_db() {
+  local cfg="$1"
+  [[ -f "${cfg}" ]] || return 1
+  awk '
+    function indentation(line) {
+      match(line, /^[[:space:]]*/)
+      return RLENGTH
+    }
+    /^[[:space:]]*redis:[[:space:]]*(#.*)?$/ {
+      redis_count++
+      in_redis = 1
+      redis_indent = indentation($0)
+      next
+    }
+    in_redis {
+      if ($0 !~ /^[[:space:]]*(#.*)?$/ && indentation($0) <= redis_indent) {
+        in_redis = 0
+      } else if ($0 ~ /^[[:space:]]*db_no:[[:space:]]*/) {
+        value = $0
+        sub(/^[[:space:]]*db_no:[[:space:]]*/, "", value)
+        sub(/[[:space:]]*(#.*)?$/, "", value)
+        print value
+        db_count++
+      }
+    }
+    END {
+      if (redis_count != 1 || db_count != 1) {
+        exit 1
+      }
+    }
+  ' "${cfg}"
+}
+
+# Preserve the logical DB selected by older one-click packages. Before the
+# unified knob existed, Master conf.yaml and per-component env keys were the
+# only persisted intent. Prefer a non-zero Master value when old keys conflict,
+# because Master owns the scheduler reads; otherwise require all non-zero
+# legacy values to agree.
+derive_one_click_redis_db_from_legacy() {
+  local env_file="$1"
+  local master_cfg="$2"
+
+  _one_click_db_intent_declared CUBE_EXTERNAL_REDIS_DB && return 0
+
+  local old_unified=""
+  if [[ -f "${env_file}" ]] && grep -q '^CUBE_EXTERNAL_REDIS_DB=' "${env_file}"; then
+    old_unified="$(read_env_key "${env_file}" CUBE_EXTERNAL_REDIS_DB)"
+  fi
+  if [[ -n "${old_unified}" ]]; then
+    CUBE_EXTERNAL_REDIS_DB="$(normalize_redis_db "${old_unified}" "persisted CUBE_EXTERNAL_REDIS_DB")"
+    return 0
+  fi
+
+  local master_db="" master_rc=0
+  if [[ -f "${master_cfg}" ]]; then
+    master_db="$(one_click_conf_redis_db "${master_cfg}")" || master_rc=$?
+    if [[ "${master_rc}" -ne 0 ]]; then
+      [[ -z "${master_db}" ]] \
+        || die "ambiguous redis.db_no in ${master_cfg}: got '${master_db}'"
+      log "WARNING: no redis.db_no found in ${master_cfg}; falling back to .one-click.env"
+      master_db=""
+    else
+      master_db="$(normalize_redis_db "${master_db}" "legacy CubeMaster redis.db_no")"
+    fi
+  fi
+
+  local selected="" key value
+  local legacy_keys=(REDIS_DB CUBE_PROXY_REGISTRY_REDIS_DB CUBE_LCM_REDIS_DB)
+  for key in "${legacy_keys[@]}"; do
+    [[ -f "${env_file}" ]] || continue
+    grep -q "^${key}=" "${env_file}" || continue
+    value="$(read_env_key "${env_file}" "${key}")"
+    [[ -n "${value}" ]] || continue
+    value="$(normalize_redis_db "${value}" "legacy ${key}")"
+    [[ "${value}" != "0" ]] || continue
+    if [[ -z "${selected}" ]]; then
+      selected="${value}"
+    elif [[ "${selected}" != "${value}" ]]; then
+      if [[ -n "${master_db}" && "${master_db}" != "0" ]]; then
+        log "WARNING: conflicting legacy Redis DB values; using CubeMaster redis.db_no=${master_db}"
+        CUBE_EXTERNAL_REDIS_DB="${master_db}"
+        return 0
+      fi
+      die "conflicting legacy Redis DB values in ${env_file}; set CUBE_EXTERNAL_REDIS_DB explicitly"
+    fi
+  done
+
+  if [[ -n "${master_db}" && "${master_db}" != "0" ]]; then
+    if [[ -n "${selected}" && "${selected}" != "${master_db}" ]]; then
+      log "WARNING: legacy Redis DB differs from CubeMaster; using CubeMaster redis.db_no=${master_db}"
+    fi
+    CUBE_EXTERNAL_REDIS_DB="${master_db}"
+  elif [[ -n "${selected}" ]]; then
+    CUBE_EXTERNAL_REDIS_DB="${selected}"
+  fi
+
+  if [[ -n "${CUBE_EXTERNAL_REDIS_DB:-}" ]]; then
+    log "derived CUBE_EXTERNAL_REDIS_DB=${CUBE_EXTERNAL_REDIS_DB} from the previous installation"
+  fi
+}
+
+# one_click_patch_conf_redis_db writes db_no under redis: in a CubeMaster /
+# CubeTemplateCenter conf.yaml from CUBE_EXTERNAL_REDIS_DB. Uses awk (not
+# sed a\ / sed -i -E) so indent and backrefs stay portable on GNU and BSD.
+one_click_patch_conf_redis_db() {
+  local cfg="$1"
+  local redis_db tmp
+  [[ -n "${cfg}" && -f "${cfg}" ]] || die "one_click_patch_conf_redis_db: conf path required"
+  redis_db="$(one_click_redis_db)"
+  tmp="$(mktemp "${cfg}.XXXXXX")"
+  if ! awk -v db="${redis_db}" '
+    function indentation(line) {
+      match(line, /^[[:space:]]*/)
+      return RLENGTH
+    }
+    function finish_redis_block() {
+      if (in_redis && db_count == 0) {
+        print redis_prefix "  db_no: " db
+        db_count = 1
+      }
+      in_redis = 0
+    }
+    /^[[:space:]]*redis:[[:space:]]*(#.*)?$/ {
+      finish_redis_block()
+      redis_count++
+      in_redis = 1
+      match($0, /^[[:space:]]*/)
+      redis_prefix = substr($0, 1, RLENGTH)
+      redis_indent = RLENGTH
+      print
+      next
+    }
+    {
+      if (in_redis && $0 !~ /^[[:space:]]*(#.*)?$/ && indentation($0) <= redis_indent) {
+        finish_redis_block()
+      }
+      if (in_redis && $0 ~ /^[[:space:]]*db_no:[[:space:]]*/) {
+        match($0, /^[[:space:]]*/)
+        print substr($0, 1, RLENGTH) "db_no: " db
+        db_count++
+        next
+      }
+      print
+    }
+    END {
+      finish_redis_block()
+      if (redis_count != 1 || db_count != 1) {
+        exit 1
+      }
+    }
+  ' "${cfg}" > "${tmp}"; then
+    rm -f "${tmp}"
+    die "failed to patch redis.db_no in ${cfg}: expected exactly one redis block and db_no"
+  fi
+
+  local written_db
+  written_db="$(one_click_conf_redis_db "${tmp}" || true)"
+  if [[ "${written_db}" != "${redis_db}" ]]; then
+    rm -f "${tmp}"
+    die "failed to verify redis.db_no=${redis_db} in ${cfg}"
+  fi
+  mv -f "${tmp}" "${cfg}"
+  printf '%s' "${redis_db}"
+}
+
+one_click_sed_in_place() {
+  local cfg="$1"
+  shift
+  local tmp
+  tmp="$(mktemp "${cfg}.XXXXXX")"
+  cp -p "${cfg}" "${tmp}"
+  if ! sed "$@" "${cfg}" > "${tmp}"; then
+    rm -f "${tmp}"
+    die "failed to patch ${cfg}"
+  fi
+  mv -f "${tmp}" "${cfg}"
+}
+
+one_click_patch_conf_redis_endpoint() {
+  local cfg="$1"
+  local component="$2"
+  local restore_bundled="${3:-0}"
+  [[ -f "${cfg}" ]] || die "Redis config not found for ${component}: ${cfg}"
+
+  if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" ]]; then
+    [[ -n "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}" ]] \
+      || die "CUBE_EXTERNAL_REDIS_SENTINEL_NODES is required when CUBE_EXTERNAL_REDIS_MASTER_NAME is set"
+    log "patching ${component} conf.yaml for external Redis Sentinel: master=${CUBE_EXTERNAL_REDIS_MASTER_NAME} sentinels=${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}"
+    local redis_master_esc redis_sentinel_esc redis_pwd_esc redis_sentinel_pwd_esc
+    redis_master_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_MASTER_NAME}")"
+    redis_sentinel_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}")"
+    redis_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_PASSWORD:-}")"
+    redis_sentinel_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD:-}")"
+    one_click_sed_in_place "${cfg}" \
+      -e "s|password: \".*\"|password: \"${redis_pwd_esc}\"|"
+    if grep -q 'master_name:' "${cfg}"; then
+      one_click_sed_in_place "${cfg}" \
+        -e "s|nodes: \".*\"|nodes: \"\"|" \
+        -e "s|master_name: \".*\"|master_name: \"${redis_master_esc}\"|" \
+        -e "s|sentinel_nodes: \".*\"|sentinel_nodes: \"${redis_sentinel_esc}\"|" \
+        -e "s|sentinel_password: \".*\"|sentinel_password: \"${redis_sentinel_pwd_esc}\"|"
+    else
+      one_click_sed_in_place "${cfg}" \
+        -e "s|nodes: \".*\"|nodes: \"\"\\
+  master_name: \"${redis_master_esc}\"\\
+  sentinel_nodes: \"${redis_sentinel_esc}\"\\
+  sentinel_password: \"${redis_sentinel_pwd_esc}\"|"
+    fi
+  elif [[ -n "${CUBE_EXTERNAL_REDIS_HOST:-}" ]]; then
+    log "patching ${component} conf.yaml for external Redis: ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}"
+    one_click_sed_in_place "${cfg}" \
+      -e '/^  master_name:/d' \
+      -e '/^  sentinel_nodes:/d' \
+      -e '/^  sentinel_password:/d'
+    local redis_nodes_esc redis_pwd_esc
+    redis_nodes_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}")"
+    redis_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_PASSWORD:-}")"
+    one_click_sed_in_place "${cfg}" \
+      -e "s|nodes: \".*\"|nodes: \"${redis_nodes_esc}\"|" \
+      -e "s|password: \".*\"|password: \"${redis_pwd_esc}\"|"
+  elif [[ "${restore_bundled}" == "1" ]]; then
+    local redis_port="${CUBE_SANDBOX_REDIS_PORT:-6379}"
+    local redis_password="${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}"
+    local redis_nodes_esc redis_pwd_esc
+    redis_nodes_esc="$(escape_sed "127.0.0.1:${redis_port}")"
+    redis_pwd_esc="$(escape_sed "${redis_password}")"
+    log "restoring bundled Redis nodes/password in ${component} conf.yaml: 127.0.0.1:${redis_port}"
+    one_click_sed_in_place "${cfg}" \
+      -e "s|nodes: \".*\"|nodes: \"${redis_nodes_esc}\"|" \
+      -e "s|password: \".*\"|password: \"${redis_pwd_esc}\"|"
+  fi
+}
+
 # persist_one_click_redis_runtime_env writes Redis keys for systemd
 # EnvironmentFile consumers (cubeops, cubemaster, cube-proxy, LCM).
 # --mode=install often starts from an empty .one-click.env; without
@@ -1293,9 +1560,23 @@ persist_one_click_database_runtime_env() {
 # Sentinel and standalone external branches persist
 # CUBE_EXTERNAL_REDIS_PASSWORD; the local branch persists the resolved
 # sandbox password.
+#
+# Logical DB: operators set only CUBE_EXTERNAL_REDIS_DB. Install/start
+# scripts derive Master/TC db_no, Ops REDIS_DB, Proxy registry DB, and LCM
+# DB from it. Stale per-component DB keys are stripped so old packages
+# cannot leave Master/Ops/TC on different databases.
 persist_one_click_redis_runtime_env() {
   local env_file="$1"
   [[ -n "${env_file}" ]] || die "persist_one_click_redis_runtime_env: env file path required"
+
+  local redis_db
+  redis_db="$(one_click_redis_db)"
+  upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_DB" "${redis_db}"
+  _remove_env_keys "${env_file}" \
+    REDIS_URL \
+    REDIS_DB \
+    CUBE_PROXY_REGISTRY_REDIS_DB \
+    CUBE_LCM_REDIS_DB
 
   if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" ]]; then
     upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_MASTER_NAME" "${CUBE_EXTERNAL_REDIS_MASTER_NAME}"
@@ -1330,6 +1611,8 @@ persist_one_click_redis_runtime_env() {
     # up-support / proxy / LCM do not keep skipping the local container or
     # wiring Sentinel from a previous install. Persist the password the
     # local container actually uses (operator override or ceuhvu123).
+    # Keep CUBE_EXTERNAL_REDIS_DB — it is the shared logical-DB knob even
+    # when using the bundled Redis instance.
     _remove_env_keys "${env_file}" \
       CUBE_EXTERNAL_REDIS_MASTER_NAME \
       CUBE_EXTERNAL_REDIS_SENTINEL_NODES \

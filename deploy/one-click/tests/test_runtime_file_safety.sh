@@ -1058,10 +1058,12 @@ test_external_redis_sentinel_wiring() {
   assert_contains "${install_sh}" 'persist_one_click_redis_runtime_env "${RUNTIME_ENV_FILE}"'
   # SENTINEL lookup must reuse credentials without putting the password in argv.
   assert_contains "${install_sh}" 'REDISCLI_AUTH="${sentinel_pd}"'
+  # Redis endpoint patching is shared by Master and TemplateCenter in lib/common.sh.
   # Leaving Sentinel for bundled Redis must restore password as well as nodes.
-  assert_contains "${install_sh}" "restoring bundled Redis nodes/password in conf.yaml"
+  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" 'restoring bundled Redis nodes/password in ${component} conf.yaml'
   # Sentinel → external standalone must scrub leftover master_name/sentinel_* keys.
-  assert_contains "${install_sh}" "Sentinel → standalone: drop leftover master_name/sentinel_*"
+  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" "patching \${component} conf.yaml for external Redis:"
+  assert_contains "${ONE_CLICK_DIR}/lib/common.sh" "-e '/^  master_name:/d'"
   # Empty CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD must not AUTH with the master password.
   if grep -E 'sentinel_pd="\$\{CUBE_EXTERNAL_REDIS_PASSWORD\}"' "${install_sh}" >/dev/null; then
     fail "install.sh must not fall back Sentinel AUTH to CUBE_EXTERNAL_REDIS_PASSWORD"
