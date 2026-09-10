@@ -5,7 +5,6 @@
 package cube
 
 import (
-	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -420,45 +419,29 @@ func handleRootfsArtifactAction(c *gin.Context) {
 }
 
 // requestBaseURL returns the base URL other components must use to reach this
-// CubeMaster. An empty return means "nothing externally usable was found" and
-// callers must fall back to the artifact row / hostname hint rather than
-// persist a value no Cubelet can dial.
+// CubeMaster.
 //
-// It is NOT simply scheme+Host: the Host header reflects how the CALLER
-// addressed this process, which is frequently unreachable for everyone else.
-// `curl http://0.0.0.0:8089` (or localhost) yields a Host of 0.0.0.0 /
-// localhost, and that value used to be persisted into
-// rootfs_artifacts.master_node_ip and then handed to every Cubelet as the
-// artifact download URL -- so the artifact download failed on every node while
-// the build job itself reported success.
-//
-// Priority:
-//  1. CUBE_MASTER_ADDR (or common.master_addr), but only when it is externally
-//     usable -- one-click historically ships a loopback value here, which is
-//     fine for co-located components finding CubeMaster but wrong as the
-//     Cubelet-facing download address.
-//  2. The request Host, but only when it is a real, externally-usable host
-//     (not empty, not a wildcard bind address, not loopback).
+// The source is intentionally simple and explicit: prefer CUBE_MASTER_ADDR (or
+// common.master_addr), otherwise fall back to the current request's Host/addr.
+// Do NOT guess another address from local interfaces here: the deployment must
+// decide which address other components should use.
 func requestBaseURL(r *http.Request) string {
 	configured := ""
 	if cfg := config.GetConfig(); cfg != nil {
 		configured = strings.TrimSpace(cfg.MasterAddr())
 	}
 	if configured != "" {
-		if templatecenter.ExternallyUsableBaseURL(configured) {
-			return templatecenter.NormalizeBaseURL(configured)
-		}
-		log.G(context.Background()).Warnf("configured master addr %q is wildcard/loopback; ignoring it for cubelet-facing URLs (set CUBE_MASTER_ADDR to the address other nodes can dial)", configured)
+		return templatecenter.NormalizeBaseURL(configured)
+	}
+	if r == nil {
+		return ""
 	}
 	scheme := "http"
-	if r != nil && r.TLS != nil {
+	if r.TLS != nil {
 		scheme = "https"
 	}
-	if r != nil && templatecenter.HostReachableByOtherNodes(r.Host) {
-		return scheme + "://" + r.Host
-	}
-	if r != nil {
-		log.G(context.Background()).Warnf("request Host %q is wildcard/loopback; no externally-usable base URL for cubelet-facing downloads (configure CUBE_MASTER_ADDR)", r.Host)
+	if host := strings.TrimSpace(r.Host); host != "" {
+		return scheme + "://" + host
 	}
 	return ""
 }

@@ -188,18 +188,6 @@ func TestMasterEndpointNamePrecedence(t *testing.T) {
 // Shared aliases
 // ---------------------------------------------------------------------------
 
-func TestApplySharedEnvAliasesPublishesArtifactStoreLegacyName(t *testing.T) {
-	const legacyArtifactStoreDir = "CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR"
-	clearEnv(t, EnvArtifactStoreDir, legacyArtifactStoreDir)
-	t.Setenv(EnvArtifactStoreDir, "/data/CubeMaster/storage")
-
-	ApplySharedEnvAliases()
-
-	if got := envValue(legacyArtifactStoreDir); got != "/data/CubeMaster/storage" {
-		t.Fatalf("%s = %q, want aliased value from %s", legacyArtifactStoreDir, got, EnvArtifactStoreDir)
-	}
-}
-
 func TestApplySharedEnvAliasesLeavesLegacyOnlyAlone(t *testing.T) {
 	clearEnv(t, EnvConfigPath, legacyEnvConfigPath)
 	t.Setenv(legacyEnvConfigPath, "/etc/cube/conf.yaml")
@@ -218,10 +206,9 @@ func TestApplySharedEnvAliasesCoversEveryPair(t *testing.T) {
 	// Guards against adding a shared variable to the constants without wiring it
 	// into the shim, which would leave the new spelling silently inert.
 	want := map[string]string{
-		EnvConfigPath:       legacyEnvConfigPath,
-		EnvArtifactStoreDir: legacyEnvArtifactStoreDir,
-		EnvArtifactWorkDir:  legacyEnvArtifactWorkDir,
-		EnvLoopMountExt4:    legacyEnvLoopMountExt4,
+		EnvConfigPath:      legacyEnvConfigPath,
+		EnvArtifactWorkDir: legacyEnvArtifactWorkDir,
+		EnvLoopMountExt4:   legacyEnvLoopMountExt4,
 	}
 	if len(sharedEnvAliases) != len(want) {
 		t.Fatalf("sharedEnvAliases has %d entries, want %d", len(sharedEnvAliases), len(want))

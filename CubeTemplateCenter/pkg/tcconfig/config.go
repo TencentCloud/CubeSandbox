@@ -52,10 +52,9 @@ const (
 	EnvConfigPath       = "CUBE_TEMPLATE_CENTER_CONFIG_PATH"
 	legacyEnvConfigPath = "CUBE_MASTER_CONFIG_PATH"
 
-	// EnvArtifactStoreDir is where finished ext4 artifacts land. It MUST resolve
-	// to the same directory CubeMaster serves downloads from (design §9.7).
-	EnvArtifactStoreDir       = "CUBE_TEMPLATE_CENTER_ARTIFACT_STORE_DIR"
-	legacyEnvArtifactStoreDir = "CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR"
+	// The finished-artifact store dir is owned by shared CubeMaster code and is
+	// configured only via CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR. TC and
+	// CubeMaster must always resolve the exact same directory (design §9.7).
 
 	// EnvArtifactWorkDir is the scratch directory for layer unpacking. Unlike
 	// the store dir this one is genuinely private to the building process.
@@ -340,13 +339,12 @@ func NodeIP() string {
 // sharedEnvAliases maps a new name to the legacy name a shared reader expects.
 var sharedEnvAliases = []struct{ newName, legacyName string }{
 	{EnvConfigPath, legacyEnvConfigPath},
-	{EnvArtifactStoreDir, legacyEnvArtifactStoreDir},
 	{EnvArtifactWorkDir, legacyEnvArtifactWorkDir},
 	{EnvLoopMountExt4, legacyEnvLoopMountExt4},
 }
 
-// ApplySharedEnvAliases publishes the CUBE_TEMPLATE_CENTER_* values under the
-// legacy names that shared CubeMaster code reads.
+// ApplySharedEnvAliases publishes the remaining CUBE_TEMPLATE_CENTER_* values
+// under the legacy names that shared CubeMaster code reads.
 //
 // MUST be called before config.Init and before any artifact path is resolved:
 // the config loader reads its variable during Init, and the path helpers cache
