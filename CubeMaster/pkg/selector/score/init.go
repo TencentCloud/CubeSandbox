@@ -49,9 +49,16 @@ func NewSelector(ctx context.Context) []Selector {
 			log.G(ctx).Warnf("scheduler score selector %s skipped: resource_weights is nil (legacy empty-profile compatibility)", name)
 			continue
 		}
-		if registration.factors != nil && !hasEffectiveFactorWeight(conf.Score, registration.factors(conf.Score.ScorePluginConf)) {
-			log.G(ctx).Warnf("scheduler score selector %s skipped: no positive resource weight for its enabled factors", name)
-			continue
+		if registration.factors != nil {
+			factors := registration.factors(conf.Score.ScorePluginConf)
+			if len(factors) == 0 {
+				log.G(ctx).Warnf("scheduler score selector %s skipped: missing plugin_conf or empty enable_weight_factors (empty profile keeps load; fix plugin_conf to activate)", name)
+				continue
+			}
+			if !hasEffectiveFactorWeight(conf.Score, factors) {
+				log.G(ctx).Warnf("scheduler score selector %s skipped: no positive resource weight for its enabled factors", name)
+				continue
+			}
 		}
 		selector := registration.new()
 		ss = append(ss, selector)

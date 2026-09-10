@@ -56,7 +56,7 @@ func (l *imageScore) Weight() float64 {
 }
 func (l *imageScore) Disable() bool {
 	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore
-	return cfg.Disable || cfg.Weight == 0
+	return cfg == nil || cfg.Disable || cfg.Weight == 0
 }
 
 func (l *imageScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList,

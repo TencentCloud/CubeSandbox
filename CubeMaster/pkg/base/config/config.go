@@ -1234,13 +1234,18 @@ func applySchedulerProfile(s *SchedulerConf) error {
 	}
 
 	if profile.Filter != nil && profile.Filter.EnableFilters != nil {
+		var previous []string
+		if s.Filter != nil {
+			previous = append([]string(nil), s.Filter.EnableFilters...)
+		}
 		if s.Filter == nil {
 			s.Filter = &SchedulerFilterConf{}
 		}
 		s.Filter.EnableFilters = append([]string(nil), profile.Filter.EnableFilters...)
 		if builtin {
-			CubeLog.Warnf("scheduler builtin profile %q replaced enable_filters with %v",
-				s.Profile, s.Filter.EnableFilters)
+			dropped := filterNamesOnlyIn(previous, s.Filter.EnableFilters)
+			CubeLog.Warnf("scheduler builtin profile %q replaced enable_filters: previous=%v new=%v dropped=%v",
+				s.Profile, previous, s.Filter.EnableFilters, dropped)
 		}
 	}
 
@@ -1412,14 +1417,6 @@ func isFactorBasedSchedulerScore(name string) bool {
 	}
 }
 
-func isBuiltinSchedulerProfile(name string) bool {
-	if name == "" {
-		return false
-	}
-	_, ok := builtinSchedulerProfiles()[name]
-	return ok
-}
-
 func scorerPluginExplicitlyDisabled(s *SchedulerConf, name string) bool {
 	if s == nil || s.Score == nil {
 		return false
@@ -1478,6 +1475,20 @@ func hasPositiveResourceWeight(weights map[string]float64, factors []string) boo
 		}
 	}
 	return false
+}
+
+func filterNamesOnlyIn(previous, current []string) []string {
+	keep := make(map[string]struct{}, len(current))
+	for _, name := range current {
+		keep[name] = struct{}{}
+	}
+	var dropped []string
+	for _, name := range previous {
+		if _, ok := keep[name]; !ok {
+			dropped = append(dropped, name)
+		}
+	}
+	return dropped
 }
 
 func resolveSchedulerProfile(s *SchedulerConf) (SchedulerProfileConf, bool, error) {
