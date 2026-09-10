@@ -5,8 +5,10 @@
 # `install` 目标（BINDIR=/workspace/_output/bin）；单独在子目录运行亦可，
 # 版本与架构变量均有本地兜底。
 
-# 版本注入：根 Makefile 构建时通过环境变量覆盖为 CUBE_VERSION / CUBE_COMMIT。
-CUBE_ENVD_VERSION ?= $(shell git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo 0.0.0-dev)
+# 版本唯一事实源是 src/version.rs 里的 semver 常量（与上游 e2b envd 的 pkg/version.go
+# 同构）。这里把它机械提取出来，**仅**供镜像 LABEL / tag 等需要字符串的场合使用；
+# 二进制自身的 -version 直接读该常量，构建不再注入版本，因此取值不可能与源码漂移。
+CUBE_ENVD_VERSION ?= $(shell sed -n 's/.*CUBE_ENVD_VERSION: &str = "\([^"]*\)".*/\1/p' src/version.rs)
 CUBE_ENVD_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 
 # 与根 Makefile TARGET_ARCH 保持一致。
@@ -24,16 +26,30 @@ BINDIR ?= ../../_output/bin
 # 只导出业务 proto；google/ 下的 vendored well-known 类型仅作 import 依赖。
 PROTO_DOC_FILES := $(shell find proto -path '*/google/*' -prune -o -name '*.proto' -print | sort)
 
-.PHONY: build install fmt lint test proto-gen proto-gen-check proto-doc clean
+.PHONY: build install version version-check fmt lint test proto-gen proto-gen-check proto-doc clean
 
 ##TARGET build: build static musl release cube-envd
 build:
-	CUBE_ENVD_VERSION=$(CUBE_ENVD_VERSION) CUBE_ENVD_COMMIT=$(CUBE_ENVD_COMMIT) \
+	CUBE_ENVD_COMMIT=$(CUBE_ENVD_COMMIT) \
 		$(CARGO) build --release --locked --target $(TRIPLE) --bin cube-envd
 
 ##TARGET install: build and install cube-envd into $(BINDIR)
 install: build
 	install -D -m 0755 target/$(TRIPLE)/release/cube-envd "$(BINDIR)/cube-envd"
+
+##TARGET version: print the version extracted from src/version.rs
+version:
+	@echo "$(CUBE_ENVD_VERSION)"
+
+##TARGET version-check: assert the extracted version is a semver and matches the binary
+version-check: build
+	@printf '%s' "$(CUBE_ENVD_VERSION)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' || { \
+		printf '  %-8s %s\n' "FAIL" "src/version.rs does not hold a semver: '$(CUBE_ENVD_VERSION)'" >&2; exit 1; }
+	@reported="$$(target/$(TRIPLE)/release/cube-envd -version)"; \
+	if [ "$$reported" != "$(CUBE_ENVD_VERSION)" ]; then \
+		printf '  %-8s %s\n' "FAIL" "binary reports '$$reported' but src/version.rs holds '$(CUBE_ENVD_VERSION)'" >&2; exit 1; \
+	fi
+	@printf '  %-8s %s\n' "OK" "envd version $(CUBE_ENVD_VERSION) is a semver and matches the binary"
 
 ##TARGET fmt: format the crate sources in place
 fmt:

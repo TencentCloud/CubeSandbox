@@ -11,13 +11,37 @@ use serde_json::json;
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-// 验证兼容版本和提交参数都会输出内容并正常退出。
+// 验证兼容版本和提交参数都会输出内容并正常退出，且 -version 是一个 semver。
+//
+// 版本必须可被下游按 \d+\.\d+\.\d+ 解析（Cubelet/CubeMaster 用它写模板注解并作为
+// SDK 的 envdVersion 暴露）；sha 之类的构建标识会被丢弃，因此这里锁死形状。
 #[test]
 fn version_and_commit_flags_print_and_exit() {
     let binary = env!("CARGO_BIN_EXE_cube-envd");
     let version = Command::new(binary).arg("-version").output().unwrap();
     assert!(version.status.success());
-    assert!(!String::from_utf8(version.stdout).unwrap().trim().is_empty());
+    let printed = String::from_utf8(version.stdout).unwrap();
+    let printed = printed.trim();
+    assert!(!printed.is_empty());
+    assert_eq!(
+        printed,
+        cube_envd::version::CUBE_ENVD_VERSION,
+        "-version must print the version constant from src/version.rs"
+    );
+
+    let semver = printed.split(['-', '+']).next().unwrap_or_default();
+    let parts: Vec<&str> = semver.split('.').collect();
+    assert_eq!(
+        parts.len(),
+        3,
+        "expected major.minor.patch, got {printed:?}"
+    );
+    assert!(
+        parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())),
+        "expected numeric semver components, got {printed:?}"
+    );
 
     let commit = Command::new(binary).arg("-commit").output().unwrap();
     assert!(commit.status.success());

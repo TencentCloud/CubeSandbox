@@ -233,10 +233,13 @@ docker exec "$cid" curl -sS --noproxy '*' --connect-timeout 1 --max-time 3 \
 # 预期: envd /health => 204
 
 docker exec "$cid" /usr/bin/envd -version
-# => v0.5.1   （镜像内嵌的 cube-envd 构建版本）
+# => 0.1.0   （cube-envd 自身的 semver，来自 cube-envd/src/version.rs）
+
+docker exec "$cid" /usr/bin/envd -commit
+# => 构建镜像所用的 git sha
 ```
 
-探活请求必须执行成功并输出 `204`；其他 HTTP 状态码，包括 `200` 或 `500`，都不算通过。如果 envd 仍在启动，等几秒后重试探活命令；持续失败时转到第 3 步。版本命令也应成功，并确认输出与你安装的 envd 版本一致，例如上文 base 镜像的 `v0.5.1`。
+探活请求必须执行成功并输出 `204`；其他 HTTP 状态码，包括 `200` 或 `500`，都不算通过。如果 envd 仍在启动，等几秒后重试探活命令；持续失败时转到第 3 步。版本命令也应成功，并确认输出与你安装的 envd 版本一致，——仓库内实现的 `cube-envd` 上报的是 `cube-envd/src/version.rs` 里的 semver 常量，而不是上游 tag。
 
 两项探测完成后，再次检查容器状态：
 

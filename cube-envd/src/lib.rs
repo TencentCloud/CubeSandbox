@@ -18,5 +18,7 @@ pub mod logging;
 pub mod paths;
 /// 提供进程管理和进程 RPC 接口。
 pub mod process;
+/// 提供 cube-envd 自身的语义化版本常量。
+pub mod version;
 /// 提供 protobuf JSON 与内部领域类型间的协议转换。
 pub mod wire;

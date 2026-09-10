@@ -6,11 +6,21 @@ use hyper_util::{
     server::conn::auto::Builder as ConnectionBuilder,
 };
 
-/// 优先使用构建注入的发布版本，否则回退到 Cargo 包版本。
-const VERSION: &str = match option_env!("CUBE_ENVD_VERSION") {
-    Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
-};
+/// 解析 `-version` 输出的版本号。
+///
+/// 默认值是源码常量（见 [`cube_envd::version`]，与上游 e2b envd 的 `pkg/version.go`
+/// 同构，是版本的唯一事实源），因此任何构建渠道都得到同一个真 semver。
+/// `CUBE_ENVD_VERSION` 仅作为**显式覆盖**保留（发布渠道如有需要可 stamp），空串按未设置
+/// 处理，避免把空值当成版本输出。
+const fn resolve_version(injected: Option<&str>) -> &str {
+    match injected {
+        Some(version) if !version.is_empty() => version,
+        _ => cube_envd::version::CUBE_ENVD_VERSION,
+    }
+}
+
+/// `-version` 与启动日志使用的版本号。
+const VERSION: &str = resolve_version(option_env!("CUBE_ENVD_VERSION"));
 /// 优先使用构建注入的提交哈希，否则标记为未知。
 const COMMIT: &str = match option_env!("CUBE_ENVD_COMMIT") {
     Some(commit) => commit,

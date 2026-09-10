@@ -243,10 +243,13 @@ docker exec "$cid" curl -sS --noproxy '*' --connect-timeout 1 --max-time 3 \
 # Expected: envd /health => 204
 
 docker exec "$cid" /usr/bin/envd -version
-# => v0.5.1   (semver of the cube-envd build baked into the image)
+# => 0.1.0   (cube-envd's own semver, from cube-envd/src/version.rs)
+
+docker exec "$cid" /usr/bin/envd -commit
+# => the git sha the image was built from
 ```
 
-The health request must complete successfully and print `204`; any other HTTP code, including `200` or `500`, is a failed check. If envd is still starting, wait a few seconds and retry the health request. If it still fails, go to step 3. The version command must also succeed; compare its output with the envd version you installed (`v0.5.1` for the base image used above).
+The health request must complete successfully and print `204`; any other HTTP code, including `200` or `500`, is a failed check. If envd is still starting, wait a few seconds and retry the health request. If it still fails, go to step 3. The version command must also succeed; compare its output with the envd version you installed — the in-repo `cube-envd` reports the semver constant in `cube-envd/src/version.rs`, not the upstream envd tag.
 
 Run the state check once more after both probes:
 

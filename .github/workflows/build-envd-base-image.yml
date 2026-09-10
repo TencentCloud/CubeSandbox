@@ -28,6 +28,11 @@ jobs:
   build:
     name: Build ${{ matrix.arch }} base image
     runs-on: ${{ matrix.runner }}
+    # 版本只在这里计算一次（读 cube-envd/src/version.rs），publish_manifest 复用该输出，
+    # 避免两处各自派生同一取值而漂移。
+    outputs:
+      envd_version: ${{ steps.envd.outputs.envd_version }}
+      envd_commit: ${{ steps.envd.outputs.envd_commit }}
     strategy:
       fail-fast: false
       matrix:
@@ -60,7 +65,17 @@ jobs:
       - name: Compute envd build identifiers
         id: envd
         run: |
-          echo "envd_version=sha-${GITHUB_SHA::7}" >> "${GITHUB_OUTPUT}"
+          set -euo pipefail
+          # 版本唯一事实源是 cube-envd/src/version.rs 的 semver 常量（与上游 e2b envd 的
+          # packages/envd/pkg/version.go 同构）。这里只读取，不派生：下游
+          # （Cubelet/CubeMaster）按 \d+\.\d+\.\d+ 提取该值写入模板/快照注解，并作为公开
+          # SDK 字段 envdVersion 暴露，sha 之类的构建标识会被直接丢弃。
+          version="$(sed -n 's/.*CUBE_ENVD_VERSION: &str = "\([^"]*\)".*/\1/p' cube-envd/src/version.rs | head -1)"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::cube-envd/src/version.rs does not hold a semver (got '${version}')"
+            exit 1
+          fi
+          echo "envd_version=${version}" >> "${GITHUB_OUTPUT}"
           echo "envd_commit=${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
 
       - name: Extract image metadata
@@ -163,12 +178,6 @@ jobs:
       packages: write
 
     steps:
-      - name: Compute envd build identifiers
-        id: envd
-        run: |
-          echo "envd_version=sha-${GITHUB_SHA::7}" >> "${GITHUB_OUTPUT}"
-          echo "envd_commit=${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -181,8 +190,10 @@ jobs:
 
       - name: Create multi-arch manifests
         env:
-          ENVD_VERSION: ${{ steps.envd.outputs.envd_version }}
+          # 复用 build 任务读到的版本，避免此处再次派生同一取值。
+          ENVD_VERSION: ${{ needs.build.outputs.envd_version }}
         run: |
+          set -euo pipefail
           short_sha="${GITHUB_SHA::7}"
           docker buildx imagetools create \
             -t "${IMAGE_NAME}:latest" \
