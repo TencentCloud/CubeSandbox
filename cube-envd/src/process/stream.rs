@@ -64,27 +64,49 @@ where
     })
 }
 
-/// 在线程池中阻塞读取 PTY 输出，并返回等待输出耗尽的句柄。
+/// 在专用 OS 线程中阻塞读取 PTY 输出。
 ///
-/// 投递经 `Handle::block_on` 走扇出器：慢订阅者时该阻塞线程停读 PTY，
-/// PTY 缓冲随之填满，把背压传导给子进程。Handle 在调用线程（runtime
-/// 上下文内）获取后移入，避免依赖阻塞池线程的 runtime 上下文。
+/// 投递经 `Handle::block_on` 走扇出器：慢订阅者时该线程停读 PTY，PTY 缓冲随之填满，
+/// 把背压传导给子进程。
+///
+/// 之所以用专用线程而不是 `spawn_blocking`：子进程已回收但孙进程仍持有 PTY slave
+/// 时，master 读端会一直阻塞，阻塞线程无法被 `abort()` 中断。若这类线程落在 tokio
+/// 的阻塞池里，重复启动 `ptyt 命令 &` 就能耗尽池槽位，从而拖垮所有依赖阻塞池的操作
+/// （PTY 创建/写入/resize、上传 chown 等）。专用线程把影响限制为"每个被 pin 的 PTY
+/// 一个线程"，不再挤占共享池。
+///
+/// `interrupt` 置位后线程会在下一次循环检查时退出（无法中断阻塞中的 read，但配合
+/// `done` 通知，reaper 无需等待它即可继续收尾）。退出前通过 `done` 唤醒等待者。
 pub(super) fn spawn_pty_reader(
     mut reader: Box<dyn Read + Send>,
+    interrupt: Arc<std::sync::atomic::AtomicBool>,
+    done: Arc<tokio::sync::Notify>,
     fanout: OutputFanout,
-) -> tokio::task::JoinHandle<()> {
+) {
     let runtime = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || {
-        let mut buffer = vec![0; PTY_OUTPUT_CHUNK_BYTES];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) | Err(_) => return,
-                Ok(size) => {
-                    runtime.block_on(fanout.send(ProcessEvent::Pty(buffer[..size].to_vec())));
+    let thread_done = Arc::clone(&done);
+    let spawned = std::thread::Builder::new()
+        .name("cube-envd-pty".into())
+        .spawn(move || {
+            let mut buffer = vec![0; PTY_OUTPUT_CHUNK_BYTES];
+            loop {
+                if interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(size) => {
+                        runtime.block_on(fanout.send(ProcessEvent::Pty(buffer[..size].to_vec())));
+                    }
                 }
             }
-        }
-    })
+            thread_done.notify_one();
+        });
+
+    if spawned.is_err() {
+        // 线程创建失败（极端资源枯竭）：立即唤醒等待者，让收尾流程继续。
+        done.notify_one();
+    }
 }
 
 /// 将 Tokio 子进程回收结果转换为协议结束事件。

@@ -92,7 +92,9 @@ async fn sigterm_terminates_processes_started_by_envd() {
             );
             stream.write_all(request.as_bytes()).await.unwrap();
             stream.write_all(&frame).await.unwrap();
-            for _ in 0..20 {
+            // 读取预算放宽到 10s：本机二进制启动与首帧返回在满载的测试机上可能明显
+            // 慢于 2s，过紧的预算会让该用例随机失败。
+            for _ in 0..100 {
                 let mut chunk = [0_u8; 4096];
                 let read =
                     tokio::time::timeout(Duration::from_millis(100), stream.read(&mut chunk))

@@ -240,7 +240,14 @@ impl ProcessRegistry {
         self.remove_terminal_for(pid, tag.as_deref()).await;
 
         let arm_handle = Arc::clone(&handle);
-        let mut pty_reader = spawn_pty_reader(reader, fanout.clone());
+        let interrupt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_done = Arc::new(tokio::sync::Notify::new());
+        spawn_pty_reader(
+            reader,
+            Arc::clone(&interrupt),
+            Arc::clone(&reader_done),
+            fanout.clone(),
+        );
         let registry = self.clone();
         tokio::spawn(async move {
             let end = match tokio::task::spawn_blocking(move || wait_pty_child(child)).await {
@@ -260,15 +267,15 @@ impl ProcessRegistry {
             };
 
             // 与普通 reaper 相同的语义：孙进程持有 PTY slave 时 master 读端不会 EIO，
-            // 宽限超时后封住输出。pty reader 运行在线程池中无法被 abort 中断，
-            // 但 End/收尾不依赖它：finish 只做同步登记，阻塞线程最终自行退出。
+            // 宽限超时后封住输出。读线程必须结束才说明尾部输出已投递完毕；通知丢失
+            // 或线程被 pin 时不会拖住收尾——超时即置中断标志并封住输出，End 照发。
             fanout.begin_eol();
-            let drain = async {
-                let _ = (&mut pty_reader).await;
-            };
-            if time::timeout(EVENT_CHILD_FLUSH_GRACE, drain).await.is_err() {
+            if time::timeout(EVENT_CHILD_FLUSH_GRACE, reader_done.notified())
+                .await
+                .is_err()
+            {
+                interrupt.store(true, std::sync::atomic::Ordering::Relaxed);
                 fanout.seal();
-                pty_reader.abort();
             }
 
             let event = ProcessEvent::End(end);
