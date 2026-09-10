@@ -466,6 +466,8 @@ func TestGetTemplateRequestAssignsRuntimeRequestID(t *testing.T) {
 }
 
 func TestGetTemplateInfoPopulatesCreatedAtAndImageInfoFromDefinitionAndLatestJob(t *testing.T) {
+	stubSweepStore(t)
+
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
@@ -487,7 +489,7 @@ func TestGetTemplateInfoPopulatesCreatedAtAndImageInfoFromDefinitionAndLatestJob
 	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
 		return nil, nil
 	})
-	patches.ApplyFunc(getLatestTemplateImageJobByTemplateID, func(ctx context.Context, templateID string) (*models.TemplateImageJob, error) {
+	patches.ApplyFunc(getLatestCreateRedoImageJobByTemplateIDTx, func(tx *gorm.DB, templateID string) (*models.TemplateImageJob, error) {
 		return &models.TemplateImageJob{
 			TemplateID:        templateID,
 			SourceImageRef:    "docker.io/library/python:3.12",
