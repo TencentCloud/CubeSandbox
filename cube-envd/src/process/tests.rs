@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use tokio::{sync::Mutex, time};

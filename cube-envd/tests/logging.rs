@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 use cube_envd::logging;
 
 // 验证未设置 RUST_LOG 时结构化日志使用 info 默认级别。

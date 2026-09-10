@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 use serde::{de::DeserializeOwned, Serialize};
 
 /// 按 protobuf JSON 规则反序列化由生成类型表示的协议消息。

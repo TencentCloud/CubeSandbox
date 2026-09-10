@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 //! cube-envd 自身的版本标识。
 //!
 //! 与参考实现 e2b envd 的 `packages/envd/pkg/version.go` 同构：**版本属于构建产物

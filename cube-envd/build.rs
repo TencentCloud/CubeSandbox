@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};

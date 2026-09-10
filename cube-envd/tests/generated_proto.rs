@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 use cube_envd::generated::{filesystem, process};
 
 // 验证 vendored protobuf 已生成可用的进程和文件系统类型。

@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 use cube_envd::{generated::process, wire};
 
 // 验证 wire 层以 protobuf JSON 规则处理生成的请求和响应类型。

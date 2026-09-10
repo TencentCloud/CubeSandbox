@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 // 回归测试：Connect 与进程收尾（live → terminal）交错时，任何成功建立的
 // 连接流都必须以 End 事件收尾——live 挂载经 End 槽合成，或回放终端记录——
 // 不允许出现"无 End 的空流"或本应命中的回放丢失（PID 复用记录遮蔽防护）。

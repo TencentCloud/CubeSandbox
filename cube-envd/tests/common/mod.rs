@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 use base64::{engine::general_purpose::STANDARD, Engine};
 use nix::unistd::{getuid, User};
 
