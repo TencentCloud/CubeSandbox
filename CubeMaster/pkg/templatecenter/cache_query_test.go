@@ -233,6 +233,13 @@ func TestInvalidateTemplateAliasMutationCachesSkipsDuplicateDisplacedID(t *testi
 	setTemplateListCache([]TemplateInfo{{TemplateID: "tpl-same"}})
 	setTemplateInfoCache("tpl-same", &TemplateInfo{TemplateID: "tpl-same"})
 
+	// (x, x) and (x, "") clear the same cache keys, and invalidation is
+	// idempotent, so cache-state assertions cannot distinguish "cleared once"
+	// from "cleared twice" — they only assert the entry is actually cleared.
+	// Verifying the guard runs exactly once would require counting
+	// invalidateTemplateCaches calls; gomonkey-based patching replaces the real
+	// body (so the cache is never cleared under some -race builds) and panics
+	// on macOS, so we deliberately keep this as a state assertion only.
 	invalidateTemplateAliasMutationCaches("tpl-same", "tpl-same")
 
 	if _, ok := getCachedTemplateInfo("tpl-same"); ok {

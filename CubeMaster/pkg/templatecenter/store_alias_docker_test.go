@@ -85,6 +85,9 @@ func runAliasStoreCases(t *testing.T, db *gorm.DB) {
 	t.Run("SetAliasTransferInvalidatesBothQueryCaches", func(t *testing.T) {
 		testSetAliasTransferInvalidatesBothQueryCaches(t, db)
 	})
+	t.Run("SetAliasTransferFromDeletingHolderInvalidatesBothQueryCaches", func(t *testing.T) {
+		testSetAliasTransferFromDeletingHolderInvalidatesBothQueryCaches(t, db)
+	})
 	t.Run("PublishStatusTransferInvalidatesBothQueryCaches", func(t *testing.T) {
 		testPublishStatusTransferInvalidatesBothQueryCaches(t, db)
 	})
@@ -598,6 +601,46 @@ func testSetAliasTransferInvalidatesBothQueryCaches(t *testing.T, db *gorm.DB) {
 	newDef, err := GetDefinition(context.Background(), newTemplateID)
 	require.NoError(t, err)
 	assert.Equal(t, alias, newDef.DisplayName)
+}
+
+func testSetAliasTransferFromDeletingHolderInvalidatesBothQueryCaches(t *testing.T, db *gorm.DB) {
+	suf := aliasCaseSuffix()
+	oldTemplateID := "tpl-cache-transfer-deleting-" + suf
+	newTemplateID := "tpl-cache-transfer-claimant-" + suf
+	oldJobID := "job-cache-transfer-deleting-" + suf
+	alias := "alias-cache-transfer-deleting-" + suf
+	// A DELETING holder is invisible to the status-filtered alias lookup, but
+	// claimTemplateAliasTx still clears it by alias_key. This pins the
+	// unfiltered holder resolution: the displaced DELETING holder's caches must
+	// be invalidated too, not just the claimant's. The job row additionally pins
+	// the behavior change that SetTemplateAlias now rewrites the deleting
+	// holder's CREATE/REDO request JSON.
+	insertTemplate(t, db, oldTemplateID, StatusDeleting, alias)
+	insertReadyTemplate(t, db, newTemplateID, "")
+	insertCreateJob(t, db, oldTemplateID, oldJobID, alias)
+	cleanupTemplatesAndJobs(t, db, []string{oldTemplateID, newTemplateID}, []string{oldJobID})
+	t.Cleanup(func() {
+		invalidateTemplateCaches(oldTemplateID)
+		invalidateTemplateCaches(newTemplateID)
+	})
+
+	primeTemplateQueryCaches(oldTemplateID, newTemplateID)
+	requireTemplateQueryCachesHit(t, oldTemplateID, newTemplateID)
+	require.NoError(t, SetTemplateAlias(context.Background(), newTemplateID, alias))
+	requireTemplateQueryCachesMiss(t, oldTemplateID, newTemplateID)
+
+	oldDef, err := GetDefinition(context.Background(), oldTemplateID)
+	require.NoError(t, err)
+	assert.Empty(t, oldDef.DisplayName)
+	newDef, err := GetDefinition(context.Background(), newTemplateID)
+	require.NoError(t, err)
+	assert.Equal(t, alias, newDef.DisplayName)
+
+	// With the unfiltered lookup, SetTemplateAlias now also rewrites the
+	// deleting holder's CREATE/REDO request JSON (dropping the alias).
+	var oldJob models.TemplateImageJob
+	require.NoError(t, db.Where("job_id = ?", oldJobID).First(&oldJob).Error)
+	assert.Empty(t, aliasFromRequestJSON(oldJob.RequestJSON))
 }
 
 func testPublishStatusTransferInvalidatesBothQueryCaches(t *testing.T, db *gorm.DB) {
