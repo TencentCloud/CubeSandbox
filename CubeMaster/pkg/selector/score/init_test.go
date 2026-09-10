@@ -9,12 +9,31 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 )
+
+func TestScoresRegistryKeysMatchAllowedSchedulerScoreNames(t *testing.T) {
+	// Keep in sync with config.allowedSchedulerScoreNames / score registry keys.
+	want := map[string]struct{}{
+		"real_time_weighted_average":    {},
+		"multi_factor_weighted_average": {},
+		"affinity_score":                {},
+		"image_score":                   {},
+		"binpack_score":                 {},
+	}
+	got := make(map[string]struct{}, len(scores))
+	for name := range scores {
+		got[name] = struct{}{}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("scores registry keys = %#v, want %#v (must match allowedSchedulerScoreNames)", got, want)
+	}
+}
 
 func TestBuiltinProfilesConstructWithoutPluginConfig(t *testing.T) {
 	if runIsolatedScoreConfigTest(t) {

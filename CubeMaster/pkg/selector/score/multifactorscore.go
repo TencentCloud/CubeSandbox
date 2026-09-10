@@ -35,7 +35,11 @@ func (l *multiFactorWeightedAverageScore) String() string {
 }
 
 func (l *multiFactorWeightedAverageScore) Weight() float64 {
-	return l.weight
+	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage
+	if cfg == nil || cfg.Disable || cfg.Weight == 0 {
+		return 0
+	}
+	return cfg.Weight
 }
 
 func (l *multiFactorWeightedAverageScore) Disable() bool {

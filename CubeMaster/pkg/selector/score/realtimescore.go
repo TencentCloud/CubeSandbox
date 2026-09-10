@@ -38,7 +38,11 @@ func (l *realTimeWeightedAverageScore) String() string {
 }
 
 func (l *realTimeWeightedAverageScore) Weight() float64 {
-	return l.weight
+	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage
+	if cfg == nil || cfg.Disable || cfg.Weight == 0 {
+		return 0
+	}
+	return cfg.Weight
 }
 func (l *realTimeWeightedAverageScore) Disable() bool {
 	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage

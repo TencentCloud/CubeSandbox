@@ -327,6 +327,30 @@ var allowedSchedulerScoreNames = map[string]struct{}{
 	"binpack_score":                 {},
 }
 
+// allowedSchedulerWeightFactorNames must stay in sync with constants.WeightFactor*.
+var allowedSchedulerWeightFactorNames = map[string]struct{}{
+	constants.WeightFactorReqCpu:                {},
+	constants.WeightFactorReqMem:                {},
+	constants.WeightFactorMvmNum:                {},
+	constants.WeightFactorQuotaCpu:              {},
+	constants.WeightFactorQuotaMem:              {},
+	constants.WeightFactorCpuUtil:               {},
+	constants.WeightFactorMemUsage:              {},
+	constants.WeightFactorCpuLoadUsage:          {},
+	constants.WeightFactorMetricUpdate:          {},
+	constants.WeightFactorLocalMetricUpdate:     {},
+	constants.WeightFactorCreateConcurrentLimit: {},
+	constants.WeightFactorRealTimeCreateNum:     {},
+	constants.WeightFactorLocalCreateNum:        {},
+	constants.WeightFactorActiveWhiteList:       {},
+	constants.WeightFactorNegativeWhiteList:     {},
+	constants.WeightFactorDataDiskUsage:         {},
+	constants.WeightFactorStorageDiskUsage:      {},
+	constants.WeightFactorSysDiskUsage:          {},
+	constants.WeightFactorImageID:               {},
+	constants.WeightFactorTemplateID:            {},
+}
+
 var defaultNodeAffinitySelectorAllowedKeys = []string{
 	constants.AffinityKeyZone,
 	constants.AffinityKeyClusterID,
@@ -1214,6 +1238,10 @@ func applySchedulerProfile(s *SchedulerConf) error {
 			s.Filter = &SchedulerFilterConf{}
 		}
 		s.Filter.EnableFilters = append([]string(nil), profile.Filter.EnableFilters...)
+		if builtin {
+			CubeLog.Warnf("scheduler builtin profile %q replaced enable_filters with %v",
+				s.Profile, s.Filter.EnableFilters)
+		}
 	}
 
 	if profile.Score != nil {
@@ -1288,9 +1316,21 @@ func validateBinpackScoreWeight(s *SchedulerConf) error {
 		return nil
 	}
 	cfg := s.Score.ScorePluginConf.BinpackScore
-	if cfg != nil && cfg.Weight < 0 {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.Weight < 0 {
 		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.weight must be >= 0, got %v (weight:0 disables; omit the block for the default)",
 			cfg.Weight)
+	}
+	if cfg.CPUWeight < 0 {
+		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.cpu_weight must be >= 0, got %v", cfg.CPUWeight)
+	}
+	if cfg.MemWeight < 0 {
+		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.mem_weight must be >= 0, got %v", cfg.MemWeight)
+	}
+	if cfg.MvmWeight < 0 {
+		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.mvm_weight must be >= 0, got %v", cfg.MvmWeight)
 	}
 	return nil
 }
@@ -1302,7 +1342,13 @@ func validateSchedulerScorePluginConfig(s *SchedulerConf) error {
 	if s == nil || s.Score == nil {
 		return nil
 	}
-	builtin := isBuiltinSchedulerProfile(s.Profile)
+	// Re-resolve so "builtin" matches applySchedulerProfile: a user map key
+	// with the same name as a built-in is NOT treated as a built-in preset
+	// (intentional disable / weight:0 remains allowed).
+	_, builtin, err := resolveSchedulerProfile(s)
+	if err != nil {
+		return err
+	}
 	for _, name := range s.Score.EnableScorers {
 		missing := false
 		switch name {
@@ -1341,6 +1387,12 @@ func validateSchedulerScorePluginConfig(s *SchedulerConf) error {
 			if len(factors) == 0 {
 				return fmt.Errorf("scheduler profile %q enables %q but plugin_conf.%s.enable_weight_factors is empty",
 					s.Profile, name, name)
+			}
+			for _, factor := range factors {
+				if _, ok := allowedSchedulerWeightFactorNames[factor]; !ok {
+					return fmt.Errorf("scheduler profile %q enables %q with unknown weight factor %q",
+						s.Profile, name, factor)
+				}
 			}
 			if !hasPositiveResourceWeight(s.Score.ResourceWeights, factors) {
 				return fmt.Errorf("scheduler profile %q enables %q but no positive resource weight is set for its enabled factors",
