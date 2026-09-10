@@ -24,7 +24,7 @@ BINDIR ?= ../../_output/bin
 # 只导出业务 proto；google/ 下的 vendored well-known 类型仅作 import 依赖。
 PROTO_DOC_FILES := $(shell find proto -path '*/google/*' -prune -o -name '*.proto' -print | sort)
 
-.PHONY: build install fmt lint test proto-doc clean
+.PHONY: build install fmt lint test proto-gen proto-gen-check proto-doc clean
 
 ##TARGET build: build static musl release cube-envd
 build:
@@ -47,6 +47,24 @@ lint:
 ##TARGET test: run tests
 test:
 	$(CARGO) test --locked
+
+# protobuf 绑定由 build.rs 在构建时生成并写回 src/generated/；生成物同时纳入版本控制
+# （与 CubeShim/agent 的同类 crate 一致）。构建只在内容变化时写回，于是"构建后工作区
+# 有改动"就等价于"提交的生成物已过期"。
+
+##TARGET proto-gen: regenerate src/generated from proto/ (build.rs write-back)
+proto-gen:
+	$(CARGO) build --locked --quiet --bin cube-envd
+	@printf '  %-8s %s\n' "OK" "src/generated regenerated; commit any change"
+
+##TARGET proto-gen-check: fail when src/generated drifts from the generator output
+proto-gen-check: proto-gen
+	@if ! git diff --quiet -- src/generated; then \
+		printf '  %-8s %s\n' "FAIL" "src/generated is out of date; commit the regenerated files" >&2; \
+		git --no-pager diff --stat -- src/generated >&2; \
+		exit 1; \
+	fi
+	@printf '  %-8s %s\n' "OK" "src/generated matches the generator output"
 
 ##TARGET proto-doc: regenerate the interface doc from .proto (protoc-gen-doc)
 proto-doc:
