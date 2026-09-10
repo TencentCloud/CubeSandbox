@@ -108,7 +108,7 @@ fn test_user_name_is_available_for_filesystem_requests() {
     assert!(!common::current_username().is_empty());
 }
 
-// 验证 Filesystem.Stat 返回符号链接类型及其目标路径。
+// 验证 Filesystem.Stat 对符号链接上报目标的类型、绝对解析路径与 lstat 权限串。
 #[cfg(unix)]
 #[tokio::test]
 async fn filesystem_stat_reports_symbolic_link_metadata() {
@@ -121,6 +121,81 @@ async fn filesystem_stat_reports_symbolic_link_metadata() {
     let (status, body) = rpc(router(), "Stat", json!({"path": link})).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["entry"]["type"], "FILE_TYPE_SYMLINK");
+    // 与上游一致：type/mode 取自目标，permissions 取自 lstat 且含类型前缀字符。
+    assert_eq!(body["entry"]["type"], "FILE_TYPE_FILE");
     assert_eq!(body["entry"]["symlinkTarget"], target.display().to_string());
+    assert_eq!(body["entry"]["permissions"], "Lrwxrwxrwx");
+    assert_eq!(body["entry"]["mode"], 0o644);
+}
+
+// 验证指向目录的符号链接按目录类型上报，使 SDK 的 IsDir 判定与上游一致。
+#[cfg(unix)]
+#[tokio::test]
+async fn filesystem_stat_reports_a_directory_symlink_as_a_directory() {
+    let directory = tempdir().unwrap();
+    let target = directory.path().join("target-dir");
+    let link = directory.path().join("link-dir");
+    fs::create_dir(&target).unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let (status, body) = rpc(router(), "Stat", json!({"path": link})).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["entry"]["type"], "FILE_TYPE_DIRECTORY");
+}
+
+// 验证悬空符号链接上报未指定类型、mode 0，且 symlinkTarget 回退为原路径。
+#[cfg(unix)]
+#[tokio::test]
+async fn filesystem_stat_reports_a_dangling_symlink_as_unspecified() {
+    let directory = tempdir().unwrap();
+    let link = directory.path().join("dangling");
+    std::os::unix::fs::symlink(directory.path().join("missing"), &link).unwrap();
+
+    let (status, body) = rpc(router(), "Stat", json!({"path": link})).await;
+
+    assert_eq!(status, StatusCode::OK);
+    // FILE_TYPE_UNSPECIFIED 与 mode 0 都是零值，proto3 JSON 会省略它们；解析失败时
+    // symlinkTarget 与上游一样回退为传入路径。
+    assert!(
+        body["entry"].get("type").is_none(),
+        "unspecified type must be omitted: {body}"
+    );
+    assert!(
+        body["entry"].get("mode").is_none(),
+        "zero mode must be omitted: {body}"
+    );
+    assert_eq!(body["entry"]["permissions"], "Lrwxrwxrwx");
+    assert_eq!(body["entry"]["symlinkTarget"], link.display().to_string());
+}
+
+// 验证普通文件与目录的权限串带类型前缀字符且不含 suid/sticky 位。
+#[cfg(unix)]
+#[tokio::test]
+async fn filesystem_stat_renders_permissions_like_the_reference_envd() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempdir().unwrap();
+    let file = directory.path().join("file.txt");
+    fs::write(&file, b"x").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+
+    let (status, body) = rpc(router(), "Stat", json!({"path": file})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["entry"]["permissions"], "-rw-r-----");
+    assert_eq!(body["entry"]["type"], "FILE_TYPE_FILE");
+
+    let (status, body) = rpc(router(), "Stat", json!({"path": directory.path()})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["entry"]["type"], "FILE_TYPE_DIRECTORY");
+    let permissions = body["entry"]["permissions"].as_str().unwrap();
+    assert!(permissions.starts_with('d'), "permissions: {permissions}");
+    assert_eq!(permissions.len(), 10, "permissions: {permissions}");
+
+    // 数值 mode 只保留 0o777：setuid 只体现在 permissions 的前缀字符上。
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o4755)).unwrap();
+    let (status, body) = rpc(router(), "Stat", json!({"path": file})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["entry"]["mode"], 0o755);
+    assert_eq!(body["entry"]["permissions"], "urwxr-xr-x");
 }

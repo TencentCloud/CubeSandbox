@@ -130,33 +130,23 @@ pub(super) async fn ensure_owned_dirs(path: &Path, user: &LocalUser) -> Result<(
 }
 
 /// 异步读取条目元数据，并在线程池中解析属主和属组名称。
+///
+/// 符号链接按上游语义处理：`type` 与数值 `mode` 取自**解析后的目标**（悬空链接
+/// 为未指定类型、mode 0），`symlinkTarget` 为规范化后的绝对路径；`permissions`
+/// 与 `size` 始终取自 lstat。
 pub(super) async fn entry_info(path: &Path) -> Result<EntryInfo, RpcError> {
     let metadata = fs::symlink_metadata(path)
         .await
         .map_err(|error| filesystem_error(path, error))?;
-    let mode = metadata.mode();
-    let file_type = if metadata.file_type().is_symlink() {
-        proto::FileType::Symlink as i32
-    } else if metadata.is_dir() {
-        proto::FileType::Directory as i32
-    } else if metadata.is_file() {
-        proto::FileType::File as i32
-    } else {
-        proto::FileType::Unspecified as i32
-    };
     let path_for_lookup = path.to_path_buf();
     let uid = metadata.uid();
     let gid = metadata.gid();
-    let symlink_target = if metadata.file_type().is_symlink() {
-        Some(
-            fs::read_link(path)
-                .await
-                .map_err(|error| filesystem_error(path, error))?
-                .display()
-                .to_string(),
-        )
+    let (symlink_target, target) = if metadata.file_type().is_symlink() {
+        let resolved = resolve_symlink(path).await;
+        let target = fs::metadata(&resolved).await.ok();
+        (Some(resolved.display().to_string()), target)
     } else {
-        None
+        (None, None)
     };
     let (owner, group) = task::spawn_blocking(move || ownership_names(uid, gid))
         .await
@@ -164,23 +154,50 @@ pub(super) async fn entry_info(path: &Path) -> Result<EntryInfo, RpcError> {
             RpcError::new(Code::Internal, format!("join ownership lookup: {error}"))
         })?;
 
+    entry_from_metadata(
+        &path_for_lookup,
+        &metadata,
+        symlink_target,
+        target.as_ref(),
+        owner,
+        group,
+    )
+    .map_err(|error| filesystem_error(&path_for_lookup, error))
+}
+
+/// 解析符号链接为规范化绝对路径；失败（例如悬空链接）时回退为原路径。
+///
+/// 对应上游 `filepath.EvalSymlinks`，后者在出错时同样返回传入的路径。
+async fn resolve_symlink(path: &Path) -> PathBuf {
+    fs::canonicalize(path)
+        .await
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// 由 lstat 元数据（以及符号链接目标元数据）构造协议条目。
+///
+/// 字段来源与上游一致：`type`/`mode` 取符号链接目标，`permissions`/`size`/`owner`/
+/// `group`/`modifiedTime` 取 lstat。
+fn entry_from_metadata(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    symlink_target: Option<String>,
+    target: Option<&std::fs::Metadata>,
+    owner: String,
+    group: String,
+) -> std::io::Result<EntryInfo> {
+    let raw_mode = metadata.mode();
+    let (file_type, mode) = match &symlink_target {
+        None => (file_type_of(raw_mode), raw_mode & 0o777),
+        Some(_) => match target {
+            Some(target) => (file_type_of(target.mode()), target.mode() & 0o777),
+            None => (proto::FileType::Unspecified as i32, 0),
+        },
+    };
     let modified_time = metadata
-        .modified()
-        .map_err(|error| {
-            RpcError::new(
-                Code::Internal,
-                format!("read mtime for {}: {error}", path_for_lookup.display()),
-            )
-        })?
+        .modified()?
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| {
-            RpcError::new(
-                Code::Internal,
-                format!("invalid mtime for {}: {error}", path_for_lookup.display()),
-            )
-        })?;
-    let seconds = modified_time.as_secs() as i64;
-    let nanos = modified_time.subsec_nanos();
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
 
     Ok(EntryInfo {
         name: path
@@ -191,16 +208,26 @@ pub(super) async fn entry_info(path: &Path) -> Result<EntryInfo, RpcError> {
         r#type: file_type,
         path: path.display().to_string(),
         size: metadata.len() as i64,
-        mode: mode & 0o7777,
-        permissions: permission_string(mode),
+        mode,
+        permissions: permission_string(raw_mode),
         owner,
         group,
         modified_time: pbjson_types::Timestamp {
-            seconds,
-            nanos: nanos as i32,
+            seconds: modified_time.as_secs() as i64,
+            nanos: modified_time.subsec_nanos() as i32,
         },
         symlink_target,
     })
+}
+
+/// 将 `st_mode` 的文件类型位映射为协议条目类型。
+fn file_type_of(mode: u32) -> i32 {
+    match mode & libc::S_IFMT {
+        libc::S_IFDIR => proto::FileType::Directory as i32,
+        libc::S_IFLNK => proto::FileType::Symlink as i32,
+        libc::S_IFREG => proto::FileType::File as i32,
+        _ => proto::FileType::Unspecified as i32,
+    }
 }
 
 /// 将 UID 和 GID 映射为名称，找不到时回退为数字字符串。
@@ -219,48 +246,27 @@ fn ownership_names(uid: u32, gid: u32) -> (String, String) {
 }
 
 /// 为 notify 回调同步读取条目元数据，避免在回调中进入异步运行时。
+///
+/// 与 [`entry_info`] 共用同一套上游语义（见 [`entry_from_metadata`]）。
 pub(super) fn entry_info_sync(path: &Path) -> std::io::Result<EntryInfo> {
     let metadata = std::fs::symlink_metadata(path)?;
-    let mode = metadata.mode();
-    let file_type = if metadata.file_type().is_symlink() {
-        proto::FileType::Symlink as i32
-    } else if metadata.is_dir() {
-        proto::FileType::Directory as i32
-    } else if metadata.is_file() {
-        proto::FileType::File as i32
+    let (symlink_target, target) = if metadata.file_type().is_symlink() {
+        let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let target = std::fs::metadata(&resolved).ok();
+        (Some(resolved.display().to_string()), target)
     } else {
-        proto::FileType::Unspecified as i32
+        (None, None)
     };
-    let symlink_target = if metadata.file_type().is_symlink() {
-        Some(std::fs::read_link(path)?.display().to_string())
-    } else {
-        None
-    };
-    let modified_time = metadata
-        .modified()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let (owner, group) = ownership_names(metadata.uid(), metadata.gid());
 
-    Ok(EntryInfo {
-        name: path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .into(),
-        r#type: file_type,
-        path: path.display().to_string(),
-        size: metadata.len() as i64,
-        mode: mode & 0o7777,
-        permissions: permission_string(mode),
+    entry_from_metadata(
+        path,
+        &metadata,
+        symlink_target,
+        target.as_ref(),
         owner,
         group,
-        modified_time: pbjson_types::Timestamp {
-            seconds: modified_time.as_secs() as i64,
-            nanos: modified_time.subsec_nanos() as i32,
-        },
-        symlink_target,
-    })
+    )
 }
 
 /// 将 notify 事件类型映射为 Filesystem 协议事件类型。
@@ -292,9 +298,46 @@ pub(super) async fn is_network_mount(path: &Path) -> Result<bool, RpcError> {
     .map_err(|error| RpcError::new(Code::Internal, format!("inspect filesystem type: {error}")))
 }
 
-/// 将 Unix 权限位渲染为九位 rwx 字符串。
+/// 按上游 `os.FileMode.String()` 渲染权限字符串：先输出类型与特殊位前缀字符
+/// （至少一个），再输出九位 `rwx`。
+///
+/// 前缀顺序与 Go 的 `"dalTLDpSugct?"` 一致；字符设备同时带 `D` 与 `c`。因此普通
+/// 文件是 `-rw-r--r--`、目录是 `drwxr-xr-x`、符号链接是 `Lrwxrwxrwx`——描述的是
+/// lstat 自身，而非符号链接的目标。
 fn permission_string(mode: u32) -> String {
-    let mut permissions = String::with_capacity(9);
+    let mut permissions = String::with_capacity(10);
+    let file_type = mode & libc::S_IFMT;
+    if file_type == libc::S_IFDIR {
+        permissions.push('d');
+    }
+    if file_type == libc::S_IFLNK {
+        permissions.push('L');
+    }
+    if file_type == libc::S_IFBLK || file_type == libc::S_IFCHR {
+        permissions.push('D');
+    }
+    if file_type == libc::S_IFIFO {
+        permissions.push('p');
+    }
+    if file_type == libc::S_IFSOCK {
+        permissions.push('S');
+    }
+    if mode & libc::S_ISUID != 0 {
+        permissions.push('u');
+    }
+    if mode & libc::S_ISGID != 0 {
+        permissions.push('g');
+    }
+    if file_type == libc::S_IFCHR {
+        permissions.push('c');
+    }
+    if mode & libc::S_ISVTX != 0 {
+        permissions.push('t');
+    }
+    if permissions.is_empty() {
+        permissions.push('-');
+    }
+
     for bit in [
         0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001,
     ] {
