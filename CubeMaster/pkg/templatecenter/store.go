@@ -1200,6 +1200,7 @@ func publishTemplateStatusWithAlias(ctx context.Context, templateID, jobID, stat
 	expectedStatus := ""
 	claimed := false
 	displacedTemplateID := ""
+	displacedHolderDeleting := false
 	claimWarning = ""
 	var claimErr error
 	run := func() error {
@@ -1209,6 +1210,7 @@ func publishTemplateStatusWithAlias(ctx context.Context, templateID, jobID, stat
 			expectedStatus = ""
 			claimed = false
 			displacedTemplateID = ""
+			displacedHolderDeleting = false
 			claimWarning = ""
 			claimErr = nil
 			return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -1242,6 +1244,7 @@ func publishTemplateStatusWithAlias(ctx context.Context, templateID, jobID, stat
 					}
 					claimed = claimResult.Claimed
 					displacedTemplateID = claimResult.DisplacedTemplateID
+					displacedHolderDeleting = claimResult.DisplacedHolderDeleting
 					claimWarning = claimResult.Warning
 				}
 				return tx.Table(constants.TemplateDefinitionTableName).
@@ -1259,9 +1262,17 @@ func publishTemplateStatusWithAlias(ctx context.Context, templateID, jobID, stat
 		err = run()
 	}
 	if err == nil {
+		invalidateTemplateAliasMutationCaches(templateID, displacedTemplateID)
 		if claimed {
 			if displacedTemplateID != "" {
-				log.G(ctx).Warnf("alias %q transferred from template %s to newer template build %s", alias, displacedTemplateID, templateID)
+				// The DELETING branch never compares job order, so calling the
+				// released template a "newer template build" would assert an
+				// ordering that was never evaluated.
+				if displacedHolderDeleting {
+					log.G(ctx).Warnf("alias %q released from deleting template %s to template %s", alias, displacedTemplateID, templateID)
+				} else {
+					log.G(ctx).Warnf("alias %q transferred from template %s to newer template build %s", alias, displacedTemplateID, templateID)
+				}
 			}
 			return alias, claimWarning, nil
 		}
@@ -1280,6 +1291,7 @@ func publishTemplateStatusWithAlias(ctx context.Context, templateID, jobID, stat
 	if statusErr := publishTemplateStatusWithoutAlias(ctx, templateID, expectedStatus, status, lastError); statusErr != nil {
 		return "", "", statusErr
 	}
+	invalidateTemplateAliasMutationCaches(templateID, "")
 	if isDuplicateAliasError(claimErr) {
 		return "", "", nil
 	}
@@ -1324,9 +1336,10 @@ func publishTemplateStatusWithoutAlias(ctx context.Context, templateID, expected
 }
 
 type orderedAliasClaimResult struct {
-	Claimed             bool
-	DisplacedTemplateID string
-	Warning             string
+	Claimed                 bool
+	DisplacedTemplateID     string
+	DisplacedHolderDeleting bool
+	Warning                 string
 }
 
 func claimTemplateAliasByJobOrderTx(tx *gorm.DB, templateID string, claimantJobRowID uint, alias string) (orderedAliasClaimResult, error) {
@@ -1362,6 +1375,11 @@ func claimTemplateAliasByJobOrderTx(tx *gorm.DB, templateID string, claimantJobR
 		if err := syncCreateRedoImageJobAliasTx(tx, holder.TemplateID, ""); err != nil {
 			return result, err
 		}
+		// The DELETING holder's display_name and job alias were cleared above,
+		// so it is a displaced holder regardless of whether the claimant ends
+		// up claiming the alias. Report it so the caller invalidates both IDs.
+		result.DisplacedTemplateID = holder.TemplateID
+		result.DisplacedHolderDeleting = true
 		update := tx.Table(constants.TemplateDefinitionTableName).
 			Where("template_id = ? AND status <> ?", templateID, StatusDeleting).
 			Update("display_name", alias)
@@ -1421,15 +1439,41 @@ func lockTemplateDefinitionTx(tx *gorm.DB, templateID string) (*models.TemplateD
 	return def, nil
 }
 
+// getTemplateByAliasTx resolves the current alias holder, excluding DELETING
+// templates: read paths (sandbox create by alias, detail/list display) must
+// never treat a template that is being deleted as the alias holder.
 func getTemplateByAliasTx(tx *gorm.DB, alias string) (*models.TemplateDefinition, error) {
+	return getTemplateByAliasFilteredTx(tx, alias, true)
+}
+
+// getTemplateByAliasAnyStatusTx resolves the alias holder without filtering
+// DELETING rows. Alias writes release the previous holder by alias_key alone
+// (claimTemplateAliasTx matches every row whose alias_key matches, with no
+// status predicate), so callers that must invalidate the displaced holder need
+// this unfiltered view: getTemplateByAliasTx would report "not found" for a
+// DELETING holder and silently skip invalidating a row that the write did
+// mutate.
+func getTemplateByAliasAnyStatusTx(tx *gorm.DB, alias string) (*models.TemplateDefinition, error) {
+	return getTemplateByAliasFilteredTx(tx, alias, false)
+}
+
+// getTemplateByAliasFilteredTx is the shared implementation behind both alias
+// lookups. They differ only in whether DELETING rows are excluded — the
+// distinction between "who currently holds this alias" (reads) and "which rows
+// an alias write actually mutated" (cache invalidation). Rows are matched by
+// alias_key, not display_name, because alias_key is the unique constraint the
+// write path actually updates.
+func getTemplateByAliasFilteredTx(tx *gorm.DB, alias string, excludeDeleting bool) (*models.TemplateDefinition, error) {
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
 		return nil, ErrTemplateNotFound
 	}
+	query := tx.Table(constants.TemplateDefinitionTableName).Where("alias_key = ?", alias)
+	if excludeDeleting {
+		query = query.Where("status <> ?", StatusDeleting)
+	}
 	def := &models.TemplateDefinition{}
-	err := tx.Table(constants.TemplateDefinitionTableName).
-		Where("alias_key = ? AND status <> ?", alias, StatusDeleting).
-		First(def).Error
+	err := query.First(def).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrTemplateNotFound
@@ -1542,7 +1586,9 @@ func setTemplateAliasLocked(ctx context.Context, templateID, alias string) error
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
 	}
-	return retryOnceOnDeadlock(func() error {
+	oldHolderToInvalidate := ""
+	err := retryOnceOnDeadlock(func() error {
+		oldHolderToInvalidate = ""
 		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			def, err := lockTemplateDefinitionTx(tx, templateID)
 			if err != nil {
@@ -1572,7 +1618,7 @@ func setTemplateAliasLocked(ctx context.Context, templateID, alias string) error
 				return ErrTemplateNotReady
 			}
 			oldHolder := ""
-			if cur, err := getTemplateByAliasTx(tx, alias); err == nil && cur != nil && cur.TemplateID != templateID {
+			if cur, err := getTemplateByAliasAnyStatusTx(tx, alias); err == nil && cur != nil && cur.TemplateID != templateID {
 				oldHolder = cur.TemplateID
 			} else if err != nil && !errors.Is(err, ErrTemplateNotFound) {
 				return err
@@ -1587,10 +1633,16 @@ func setTemplateAliasLocked(ctx context.Context, templateID, alias string) error
 				if err := syncCreateRedoImageJobAliasTx(tx, oldHolder, ""); err != nil {
 					return err
 				}
+				oldHolderToInvalidate = oldHolder
 			}
 			return nil
 		})
 	})
+	if err != nil {
+		return err
+	}
+	invalidateTemplateAliasMutationCaches(templateID, oldHolderToInvalidate)
+	return nil
 }
 
 // applyAliasToRequestJSON returns payload with its "alias" field set to alias

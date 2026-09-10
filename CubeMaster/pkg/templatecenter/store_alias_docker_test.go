@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,6 +78,21 @@ func runAliasStoreCases(t *testing.T, db *gorm.DB) {
 	})
 	t.Run("ClearAliasSyncsCreateRedoLeavesCommit", func(t *testing.T) {
 		testClearAliasSyncsCreateRedoLeavesCommit(t, db)
+	})
+	t.Run("SetAliasInvalidatesQueryCaches", func(t *testing.T) {
+		testSetAliasInvalidatesQueryCaches(t, db)
+	})
+	t.Run("SetAliasTransferInvalidatesBothQueryCaches", func(t *testing.T) {
+		testSetAliasTransferInvalidatesBothQueryCaches(t, db)
+	})
+	t.Run("SetAliasTransferFromDeletingHolderInvalidatesBothQueryCaches", func(t *testing.T) {
+		testSetAliasTransferFromDeletingHolderInvalidatesBothQueryCaches(t, db)
+	})
+	t.Run("PublishStatusTransferInvalidatesBothQueryCaches", func(t *testing.T) {
+		testPublishStatusTransferInvalidatesBothQueryCaches(t, db)
+	})
+	t.Run("PublishStatusClaimFailureInvalidatesQueryCaches", func(t *testing.T) {
+		testPublishStatusClaimFailureInvalidatesQueryCaches(t, db)
 	})
 }
 
@@ -510,4 +526,194 @@ func testClearAliasSyncsCreateRedoLeavesCommit(t *testing.T, db *gorm.DB) {
 	assert.NotContains(t, loadJob(createID).RequestJSON, `"alias"`)
 	assert.NotContains(t, loadJob(redoID).RequestJSON, `"alias"`)
 	assert.Equal(t, commitJSON, loadJob(commitID).RequestJSON, "COMMIT RequestJSON must be byte-identical after clear")
+}
+
+func primeTemplateQueryCaches(templateIDs ...string) {
+	infos := make([]TemplateInfo, 0, len(templateIDs))
+	for _, templateID := range templateIDs {
+		info := &TemplateInfo{TemplateID: templateID, Status: StatusReady, DisplayName: "cached-alias"}
+		setTemplateInfoCache(templateID, info)
+		infos = append(infos, *info)
+	}
+	setTemplateListCache(infos)
+}
+
+func requireTemplateQueryCachesHit(t *testing.T, templateIDs ...string) {
+	t.Helper()
+	for _, templateID := range templateIDs {
+		_, ok := getCachedTemplateInfo(templateID)
+		require.Truef(t, ok, "expected info cache hit for %s", templateID)
+	}
+	_, ok := getCachedTemplateList()
+	require.True(t, ok, "expected list cache hit")
+}
+
+func requireTemplateQueryCachesMiss(t *testing.T, templateIDs ...string) {
+	t.Helper()
+	for _, templateID := range templateIDs {
+		_, ok := getCachedTemplateInfo(templateID)
+		require.Falsef(t, ok, "expected info cache miss for %s", templateID)
+	}
+	_, ok := getCachedTemplateList()
+	require.False(t, ok, "expected list cache miss")
+}
+
+func testSetAliasInvalidatesQueryCaches(t *testing.T, db *gorm.DB) {
+	suf := aliasCaseSuffix()
+	tplID := "tpl-cache-set-" + suf
+	alias := "alias-cache-set-" + suf
+	insertReadyTemplate(t, db, tplID, "")
+	cleanupTemplatesAndJobs(t, db, []string{tplID}, nil)
+	t.Cleanup(func() { invalidateTemplateCaches(tplID) })
+
+	primeTemplateQueryCaches(tplID)
+	requireTemplateQueryCachesHit(t, tplID)
+	require.NoError(t, SetTemplateAlias(context.Background(), tplID, alias))
+	requireTemplateQueryCachesMiss(t, tplID)
+
+	primeTemplateQueryCaches(tplID)
+	requireTemplateQueryCachesHit(t, tplID)
+	require.NoError(t, SetTemplateAlias(context.Background(), tplID, ""))
+	requireTemplateQueryCachesMiss(t, tplID)
+}
+
+func testSetAliasTransferInvalidatesBothQueryCaches(t *testing.T, db *gorm.DB) {
+	suf := aliasCaseSuffix()
+	oldTemplateID := "tpl-cache-transfer-old-" + suf
+	newTemplateID := "tpl-cache-transfer-new-" + suf
+	alias := "alias-cache-transfer-" + suf
+	insertReadyTemplate(t, db, oldTemplateID, alias)
+	insertReadyTemplate(t, db, newTemplateID, "")
+	cleanupTemplatesAndJobs(t, db, []string{oldTemplateID, newTemplateID}, nil)
+	t.Cleanup(func() {
+		invalidateTemplateCaches(oldTemplateID)
+		invalidateTemplateCaches(newTemplateID)
+	})
+
+	primeTemplateQueryCaches(oldTemplateID, newTemplateID)
+	requireTemplateQueryCachesHit(t, oldTemplateID, newTemplateID)
+	require.NoError(t, SetTemplateAlias(context.Background(), newTemplateID, alias))
+	requireTemplateQueryCachesMiss(t, oldTemplateID, newTemplateID)
+
+	oldDef, err := GetDefinition(context.Background(), oldTemplateID)
+	require.NoError(t, err)
+	assert.Empty(t, oldDef.DisplayName)
+	newDef, err := GetDefinition(context.Background(), newTemplateID)
+	require.NoError(t, err)
+	assert.Equal(t, alias, newDef.DisplayName)
+}
+
+func testSetAliasTransferFromDeletingHolderInvalidatesBothQueryCaches(t *testing.T, db *gorm.DB) {
+	suf := aliasCaseSuffix()
+	oldTemplateID := "tpl-cache-transfer-deleting-" + suf
+	newTemplateID := "tpl-cache-transfer-claimant-" + suf
+	oldJobID := "job-cache-transfer-deleting-" + suf
+	alias := "alias-cache-transfer-deleting-" + suf
+	// A DELETING holder is invisible to the status-filtered alias lookup, but
+	// claimTemplateAliasTx still clears it by alias_key. This pins the
+	// unfiltered holder resolution: the displaced DELETING holder's caches must
+	// be invalidated too, not just the claimant's. The job row additionally pins
+	// the behavior change that SetTemplateAlias now rewrites the deleting
+	// holder's CREATE/REDO request JSON.
+	insertTemplate(t, db, oldTemplateID, StatusDeleting, alias)
+	insertReadyTemplate(t, db, newTemplateID, "")
+	insertCreateJob(t, db, oldTemplateID, oldJobID, alias)
+	cleanupTemplatesAndJobs(t, db, []string{oldTemplateID, newTemplateID}, []string{oldJobID})
+	t.Cleanup(func() {
+		invalidateTemplateCaches(oldTemplateID)
+		invalidateTemplateCaches(newTemplateID)
+	})
+
+	primeTemplateQueryCaches(oldTemplateID, newTemplateID)
+	requireTemplateQueryCachesHit(t, oldTemplateID, newTemplateID)
+	require.NoError(t, SetTemplateAlias(context.Background(), newTemplateID, alias))
+	requireTemplateQueryCachesMiss(t, oldTemplateID, newTemplateID)
+
+	oldDef, err := GetDefinition(context.Background(), oldTemplateID)
+	require.NoError(t, err)
+	assert.Empty(t, oldDef.DisplayName)
+	newDef, err := GetDefinition(context.Background(), newTemplateID)
+	require.NoError(t, err)
+	assert.Equal(t, alias, newDef.DisplayName)
+
+	// With the unfiltered lookup, SetTemplateAlias now also rewrites the
+	// deleting holder's CREATE/REDO request JSON (dropping the alias).
+	var oldJob models.TemplateImageJob
+	require.NoError(t, db.Where("job_id = ?", oldJobID).First(&oldJob).Error)
+	assert.Empty(t, aliasFromRequestJSON(oldJob.RequestJSON))
+}
+
+func testPublishStatusTransferInvalidatesBothQueryCaches(t *testing.T, db *gorm.DB) {
+	suf := aliasCaseSuffix()
+	oldTemplateID := "tpl-cache-publish-old-" + suf
+	newTemplateID := "tpl-cache-publish-new-" + suf
+	oldJobID := "job-cache-publish-old-" + suf
+	newJobID := "job-cache-publish-new-" + suf
+	alias := "alias-cache-publish-" + suf
+	insertReadyTemplate(t, db, oldTemplateID, alias)
+	insertTemplate(t, db, newTemplateID, StatusPending, "")
+	insertCreateJob(t, db, oldTemplateID, oldJobID, alias)
+	insertImageJob(t, db, &models.TemplateImageJob{
+		JobID:       newJobID,
+		TemplateID:  newTemplateID,
+		RequestID:   "req-" + newJobID,
+		Operation:   JobOperationCreate,
+		Status:      JobStatusRunning,
+		RequestJSON: `{"alias":"` + alias + `"}`,
+	})
+	cleanupTemplatesAndJobs(t, db, []string{oldTemplateID, newTemplateID}, []string{oldJobID, newJobID})
+	t.Cleanup(func() {
+		invalidateTemplateCaches(oldTemplateID)
+		invalidateTemplateCaches(newTemplateID)
+	})
+
+	primeTemplateQueryCaches(oldTemplateID, newTemplateID)
+	requireTemplateQueryCachesHit(t, oldTemplateID, newTemplateID)
+	displayName, warning, err := publishTemplateStatusWithAlias(context.Background(), newTemplateID, newJobID, StatusReady, "")
+	require.NoError(t, err)
+	require.Empty(t, warning)
+	require.Equal(t, alias, displayName)
+	requireTemplateQueryCachesMiss(t, oldTemplateID, newTemplateID)
+
+	holder, err := GetTemplateByAlias(context.Background(), alias)
+	require.NoError(t, err)
+	assert.Equal(t, newTemplateID, holder.TemplateID)
+	oldDef, err := GetDefinition(context.Background(), oldTemplateID)
+	require.NoError(t, err)
+	assert.Empty(t, oldDef.DisplayName)
+}
+
+func testPublishStatusClaimFailureInvalidatesQueryCaches(t *testing.T, db *gorm.DB) {
+	suf := aliasCaseSuffix()
+	templateID := "tpl-cache-claim-fail-" + suf
+	jobID := "job-cache-claim-fail-" + suf
+	// publishTemplateStatusWithAlias does not validate job aliases itself; an
+	// over-length value makes the claim fail inside the transaction, forcing
+	// the fallback status publish. This exercises its cache invalidation path
+	// against both MySQL and PostgreSQL varchar(256) display_name columns.
+	alias := strings.Repeat("a", 300)
+	insertTemplate(t, db, templateID, StatusPending, "")
+	insertImageJob(t, db, &models.TemplateImageJob{
+		JobID:       jobID,
+		TemplateID:  templateID,
+		RequestID:   "req-" + jobID,
+		Operation:   JobOperationCreate,
+		Status:      JobStatusRunning,
+		RequestJSON: `{"alias":"` + alias + `"}`,
+	})
+	cleanupTemplatesAndJobs(t, db, []string{templateID}, []string{jobID})
+	t.Cleanup(func() { invalidateTemplateCaches(templateID) })
+
+	primeTemplateQueryCaches(templateID)
+	requireTemplateQueryCachesHit(t, templateID)
+	displayName, warning, err := publishTemplateStatusWithAlias(context.Background(), templateID, jobID, StatusReady, "")
+	require.NoError(t, err)
+	assert.Empty(t, displayName)
+	assert.Contains(t, warning, "could not be claimed")
+	requireTemplateQueryCachesMiss(t, templateID)
+
+	def, err := GetDefinition(context.Background(), templateID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusReady, def.Status)
+	assert.Empty(t, def.DisplayName)
 }

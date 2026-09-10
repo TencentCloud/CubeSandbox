@@ -202,3 +202,50 @@ func TestInvalidateTemplateCachesClearsListAndInfo(t *testing.T) {
 		t.Fatalf("expected info cache cleared by invalidateTemplateCaches")
 	}
 }
+
+func TestInvalidateTemplateAliasMutationCachesClearsTargetAndDisplaced(t *testing.T) {
+	templateListCache.Flush()
+	templateInfoCache.Flush()
+
+	setTemplateListCache([]TemplateInfo{
+		{TemplateID: "tpl-new", DisplayName: "alias"},
+		{TemplateID: "tpl-old", DisplayName: "alias"},
+	})
+	setTemplateInfoCache("tpl-new", &TemplateInfo{TemplateID: "tpl-new", DisplayName: "alias"})
+	setTemplateInfoCache("tpl-old", &TemplateInfo{TemplateID: "tpl-old", DisplayName: "alias"})
+
+	invalidateTemplateAliasMutationCaches("tpl-new", "tpl-old")
+
+	for _, templateID := range []string{"tpl-new", "tpl-old"} {
+		if _, ok := getCachedTemplateInfo(templateID); ok {
+			t.Fatalf("expected info cache cleared for %s", templateID)
+		}
+	}
+	if _, ok := getCachedTemplateList(); ok {
+		t.Fatalf("expected list cache cleared for alias transfer")
+	}
+}
+
+func TestInvalidateTemplateAliasMutationCachesSkipsDuplicateDisplacedID(t *testing.T) {
+	templateListCache.Flush()
+	templateInfoCache.Flush()
+
+	setTemplateListCache([]TemplateInfo{{TemplateID: "tpl-same"}})
+	setTemplateInfoCache("tpl-same", &TemplateInfo{TemplateID: "tpl-same"})
+
+	// (x, x) and (x, "") clear the same cache keys, and invalidation is
+	// idempotent, so cache-state assertions cannot distinguish "cleared once"
+	// from "cleared twice" — they only assert the entry is actually cleared.
+	// Verifying the guard runs exactly once would require counting
+	// invalidateTemplateCaches calls; gomonkey-based patching replaces the real
+	// body (so the cache is never cleared under some -race builds) and panics
+	// on macOS, so we deliberately keep this as a state assertion only.
+	invalidateTemplateAliasMutationCaches("tpl-same", "tpl-same")
+
+	if _, ok := getCachedTemplateInfo("tpl-same"); ok {
+		t.Fatalf("expected info cache cleared for target")
+	}
+	if _, ok := getCachedTemplateList(); ok {
+		t.Fatalf("expected list cache cleared for target")
+	}
+}
