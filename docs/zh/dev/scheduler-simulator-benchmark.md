@@ -4,7 +4,8 @@
 
 ## 范围
 
-simulator 刻意保持精简。它只建模 CubeMaster 调度器的高层语义：
+simulator 刻意保持精简。它遵循 filter → score → bind 形态，并使用
+simulator 本地规则：
 
 1. 拒绝放不下请求的节点；
 2. 对可行候选打分；
@@ -28,15 +29,25 @@ go run ./cmd/schedulerbench --out ./schedulerbench-report
 
 可用 `--format json`、`--format markdown` 或 `--format both` 选择输出文件集合；默认是 `both`。
 
-默认运行是确定性的，并在两份报告中记录 seed、节点数、workload、profile、指标 schema 与验收映射。`--nodes` 仅接受 **1–4**；CLI 显式 `--nodes 0` 会被拒绝，而不会静默改成默认值。
+默认运行是确定性的，并在两份报告中记录 seed、节点数、workload、profile、
+源码 provenance 与指标 schema。`--nodes` 仅接受 **1–4**；CLI 显式
+`--nodes 0` 会被拒绝。`--seed 0` 也非法，因为零是库侧未设置哨兵值。
 
-使用 `--verify` 可在写文件前，对照课题一默认验收合同检查内存中的报告：
+源码 provenance 优先使用 Go build info 中完整的 `vcs.revision` 与
+`vcs.modified` 设置；不可用时，CLI 执行有超时限制的只读
+`git rev-parse HEAD` 和 porcelain status 命令。如果 revision 仍不可得，
+报告记录 `git_revision: "unknown"` 与 `git_dirty: null`，此状态无法区分
+不同代码版本。
+
+使用 `--verify` 可在写文件前检查默认报告的结构与内部一致性：
 
 ```bash
 go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
 ```
 
-校验要求：文档约定的默认 workload 与 profile 已跑完整矩阵；关键指标 schema 与估算延迟标记存在；每个非 default profile 在每个 workload 上都有 default-vs-candidate 对比；报告用语须标明延迟是 simulator 估算而非实测。
+校验要求：默认 workload/profile 矩阵完整；必需指标 schema 键存在；请求与候选
+计数内部一致；provenance/run identity 有效；每个预期组合都有内部一致的
+default-vs-candidate 对比。指标描述与 comparison notes 等人类可读文字可自由改写。
 
 该检查仅覆盖 simulator。它不会部署真实多节点环境，不会经 CubeAPI/Cubelet 创建资源，也不会验证生产性能或真实创建延迟。
 
@@ -48,7 +59,8 @@ go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
 
 ## Profiles
 
-这些名称是离线基准使用的 **仅限 simulator** 打分权重预设。Profile 名称字符串有意与 Draft PR #1666 中另行跟踪的集成工作对齐，以便相关改动保持命名一致。本 PR **不**交付运行时 `scheduler.profile` overlay，也不暗示对该 draft 工作存在独立运行时依赖。
+这些名称是 simulator 自己公开的离线打分权重词汇，不代表运行时
+`scheduler.profile` overlay，也不表示与生产调度插件等价。
 
 - `default`：资源余量与打散打分均衡，并带轻度模板本地性。
 - `balanced_spread`：更倾向在节点间均匀放置。
@@ -71,7 +83,12 @@ go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
 - `peak_cpu_utilization`
 - `average_cpu_headroom`
 - `average_score_margin`：所选节点与第二名候选的分数差均值，仅对至少有两个已打分候选的成功调度请求取平均；无此类观测时为 `0`。
-- `average_candidates_scored`：每个成功调度请求平均考虑的截断后候选数。过滤与打分后受 simulator 优先级候选上限约束；不是内部检查过的全部可行节点数。
+- `average_feasible_candidates`：每个成功调度请求的可行模拟节点均值，在候选
+  上限截断前计数，最大为模拟节点数。
+- `average_ranked_candidates_retained`：每个成功调度请求在截断后平均保留的
+  已排序候选数，当前
+  最大为 3。两个候选指标都是 simulator 本地的候选宽度代理，不是调度器 CPU
+  开销或延迟实测。
 
 Markdown 结果表包含 `latency p50 ms` 与 `latency p95 ms`。估算器是确定性的：
 
@@ -115,7 +132,8 @@ Markdown 报告有 `## Comparisons` 表，含 workload、candidate、result 以�
 ## 验收映射
 
 - 验收路径：每个 workload 对每个 profile 跑一次，并报告 baseline-vs-profile 的放置与质量指标。
-- 领域视角：先过滤不可行节点，再对可行候选打分，最后绑定最高分；遵循与 CubeMaster selector 相同的 filter → score → bind *形态*，使用 simulator 本地打分权重（并非生产 Filter/Score 插件等价）。
+- 领域视角：先过滤不可行节点，再对可行候选打分，最后绑定最高分；这是
+  simulator 本地的 filter → score → bind 形态，并非生产 Filter/Score 插件等价。
 - 失败路径：非法 profile/workload 名称会使运行失败；不可行请求计入拒绝并带明确原因。
 - 证据路径：JSON 与 Markdown 报告包含 seed、节点数、workload 定义、profile 名、放置计数与指标 schema。
 - 审阅路径：simulator 独立放在 `pkg/scheduler/simulator`，CLI 是 `cmd/schedulerbench` 下的薄封装；不改动生产调度默认值。
@@ -124,6 +142,6 @@ Markdown 报告有 `## Comparisons` 表，含 workload、candidate、result 以�
 ## 验证
 
 ```bash
-go test ./pkg/scheduler/simulator
-go run ./cmd/schedulerbench --out ./schedulerbench-report
+go test ./pkg/scheduler/simulator ./cmd/schedulerbench
+go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
 ```

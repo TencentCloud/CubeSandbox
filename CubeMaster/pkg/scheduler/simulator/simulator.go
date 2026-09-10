@@ -6,11 +6,14 @@
 package simulator
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
 	mrand "math/rand"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -39,22 +42,45 @@ const (
 	comparisonRateThreshold    = 0.005
 	comparisonLatencyThreshold = 1.0
 	comparisonSuccessEpsilon   = 1e-9
+
+	// UnknownRevision is the normalized value recorded when the caller could
+	// not determine the source revision. It does not distinguish code
+	// versions: two different working trees both report "unknown".
+	UnknownRevision = "unknown"
+
+	// runIDHashLength is how many hex characters of the canonical-config hash
+	// are appended to the readable run_id prefix.
+	runIDHashLength = 12
 )
+
+// Provenance records which source revision a report was generated from.
+//
+// The simulator library never shells out to Git. CLI callers resolve
+// provenance, and library callers (including tests) inject fixed values so
+// runs stay deterministic. GitDirty is nil when dirty state is unknown.
+type Provenance struct {
+	GitRevision string `json:"git_revision"`
+	GitDirty    *bool  `json:"git_dirty"`
+}
 
 type Config struct {
 	Seed      int64    `json:"seed"`
 	NodeCount int      `json:"node_count"`
 	Profiles  []string `json:"profiles"`
 	Workloads []string `json:"workloads"`
+	// Provenance is an input, not part of the benchmark selection, so it is
+	// reported once under Report.Provenance instead of being duplicated
+	// inside the serialized config.
+	Provenance Provenance `json:"-"`
 }
 
 type Report struct {
-	RunID          string             `json:"run_id"`
-	Config         Config             `json:"config"`
-	AcceptancePath AcceptancePath     `json:"acceptance_path"`
-	MetricSchema   []MetricSchema     `json:"metric_schema"`
-	Results        []ProfileResult    `json:"results"`
-	Comparisons    []ComparisonResult `json:"comparisons"`
+	RunID        string             `json:"run_id"`
+	Config       Config             `json:"config"`
+	Provenance   Provenance         `json:"provenance"`
+	MetricSchema []MetricSchema     `json:"metric_schema"`
+	Results      []ProfileResult    `json:"results"`
+	Comparisons  []ComparisonResult `json:"comparisons"`
 }
 
 type ComparisonResult struct {
@@ -66,15 +92,6 @@ type ComparisonResult struct {
 	ImprovedMetrics  []string           `json:"improved_metrics"`
 	RegressedMetrics []string           `json:"regressed_metrics"`
 	Notes            []string           `json:"notes"`
-}
-
-type AcceptancePath struct {
-	AcceptancePath   string `json:"acceptance_path"`
-	DomainLens       string `json:"domain_lens"`
-	FailurePath      string `json:"failure_path"`
-	EvidencePath     string `json:"evidence_path"`
-	ReviewPath       string `json:"review_path"`
-	DistinctiveAngle string `json:"distinctive_angle"`
 }
 
 type MetricSchema struct {
@@ -94,27 +111,33 @@ type WorkloadResult struct {
 }
 
 type Metrics struct {
-	TotalRequests           int                 `json:"total_requests"`
-	ScheduledRequests       int                 `json:"scheduled_requests"`
-	RejectedRequests        int                 `json:"rejected_requests"`
-	SuccessRate             float64             `json:"schedule_success_rate"`
-	PlacementCounts         map[string]int      `json:"placement_counts"`
-	NodeLoadBalance         float64             `json:"node_load_balance"`
-	TemplateLocalityHitRate float64             `json:"template_locality_hit_rate"`
-	AverageCPUUtilization   float64             `json:"cpu_quota_utilization"`
-	PeakCPUUtilization      float64             `json:"peak_cpu_utilization"`
-	AverageMemUtilization   float64             `json:"mem_quota_utilization"`
-	PeakMemUtilization      float64             `json:"peak_mem_utilization"`
-	CreateLatencyP50MS      float64             `json:"create_latency_p50_ms"`
-	CreateLatencyP95MS      float64             `json:"create_latency_p95_ms"`
-	UsesEstimatedLatency    bool                `json:"uses_estimated_latency"`
-	AverageCPUHeadroom      float64             `json:"average_cpu_headroom"`
-	AverageScoreMargin      float64             `json:"average_score_margin"`
-	AverageCandidatesScored float64             `json:"average_candidates_scored"`
-	ScoreEvaluations        int                 `json:"score_evaluations"`
-	FailureReasons          map[string]int      `json:"failure_reasons,omitempty"`
-	Warnings                []string            `json:"warnings,omitempty"`
-	NodeFinalState          map[string]NodeLoad `json:"node_final_state"`
+	TotalRequests           int            `json:"total_requests"`
+	ScheduledRequests       int            `json:"scheduled_requests"`
+	RejectedRequests        int            `json:"rejected_requests"`
+	SuccessRate             float64        `json:"schedule_success_rate"`
+	PlacementCounts         map[string]int `json:"placement_counts"`
+	NodeLoadBalance         float64        `json:"node_load_balance"`
+	TemplateLocalityHitRate float64        `json:"template_locality_hit_rate"`
+	AverageCPUUtilization   float64        `json:"cpu_quota_utilization"`
+	PeakCPUUtilization      float64        `json:"peak_cpu_utilization"`
+	AverageMemUtilization   float64        `json:"mem_quota_utilization"`
+	PeakMemUtilization      float64        `json:"peak_mem_utilization"`
+	CreateLatencyP50MS      float64        `json:"create_latency_p50_ms"`
+	CreateLatencyP95MS      float64        `json:"create_latency_p95_ms"`
+	UsesEstimatedLatency    bool           `json:"uses_estimated_latency"`
+	AverageCPUHeadroom      float64        `json:"average_cpu_headroom"`
+	AverageScoreMargin      float64        `json:"average_score_margin"`
+	// AverageFeasibleCandidates is pre-cap feasible breadth;
+	// AverageRankedCandidatesRetained is the post-cap ranked count. Both are
+	// averaged over scheduled requests and are simulator-local
+	// candidate-breadth proxies, not measurements of scheduler work or latency.
+	AverageFeasibleCandidates       float64             `json:"average_feasible_candidates"`
+	AverageRankedCandidatesRetained float64             `json:"average_ranked_candidates_retained"`
+	FeasibleEvaluations             int                 `json:"feasible_candidate_evaluations"`
+	RankedCandidatesRetained        int                 `json:"ranked_candidates_retained"`
+	FailureReasons                  map[string]int      `json:"failure_reasons,omitempty"`
+	Warnings                        []string            `json:"warnings,omitempty"`
+	NodeFinalState                  map[string]NodeLoad `json:"node_final_state"`
 }
 
 type NodeLoad struct {
@@ -192,12 +215,14 @@ func Run(cfg Config) (Report, error) {
 	if len(nodes) != cfg.NodeCount {
 		return Report{}, fmt.Errorf("simulated node count %d disagrees with config node_count %d", len(nodes), cfg.NodeCount)
 	}
+	// run_id is derived after normalization and validation so defaulted
+	// values, not raw caller input, define run identity.
 	report := Report{
-		RunID:          fmt.Sprintf("scheduler-sim-seed-%d-nodes-%d", cfg.Seed, cfg.NodeCount),
-		Config:         cfg,
-		AcceptancePath: defaultAcceptancePath(),
-		MetricSchema:   defaultMetricSchema(),
-		Results:        make([]ProfileResult, 0, len(cfg.Profiles)),
+		RunID:        runID(cfg),
+		Config:       cfg,
+		Provenance:   cfg.Provenance,
+		MetricSchema: defaultMetricSchema(),
+		Results:      make([]ProfileResult, 0, len(cfg.Profiles)),
 	}
 
 	for _, profile := range cfg.Profiles {
@@ -261,54 +286,164 @@ func cloneSimNodes(nodes []simNode) []simNode {
 	return out
 }
 
-// VerifyDefaultReport checks the acceptance contract of the default offline
-// simulator benchmark. It validates report shape and scope, not live scheduler
-// behavior or CubeAPI/Cubelet create latency.
+// verifyFloatTolerance is the absolute tolerance VerifyDefaultReport allows
+// when it recomputes a derived float (a rate, an average, or a comparison
+// delta) from the other values carried in the same report. Report values are
+// float64 sums of small magnitudes, so 1e-9 is far above accumulated rounding
+// error and far below any inconsistency worth reporting.
+const verifyFloatTolerance = 1e-9
+
+// requiredMetricSchemaNames are the metric-contract entries a default report
+// must declare. Only the keys and the structural presence of a direction and a
+// description are required; the wording of either is free to change.
+var requiredMetricSchemaNames = []string{
+	"schedule_success_rate",
+	"rejected_requests",
+	"node_load_balance",
+	"template_locality_hit_rate",
+	"cpu_quota_utilization",
+	"mem_quota_utilization",
+	"create_latency_p50_ms",
+	"create_latency_p95_ms",
+	"uses_estimated_latency",
+	"average_feasible_candidates",
+	"average_ranked_candidates_retained",
+}
+
+// VerifyDefaultReport checks that a report produced from the default
+// configuration is structurally complete and internally consistent.
+//
+// It checks structure and cross-field consistency only. It does not measure or
+// validate live scheduling performance, and it does not establish semantic
+// equivalence to production scheduling. Verification never inspects
+// human-readable text: metric descriptions and comparison notes can be
+// reworded freely without breaking it. Scope statements belong in the
+// documentation and CLI output, not in an automated check that would only
+// match the generator's own prose against itself.
 func VerifyDefaultReport(report Report) error {
 	required := DefaultConfig()
-	for _, workload := range required.Workloads {
-		if !containsString(report.Config.Workloads, workload) {
-			return fmt.Errorf("verify default benchmark: config missing workload %q", workload)
-		}
+	if err := verifyEffectiveConfig(report.Config, required); err != nil {
+		return err
+	}
+	if err := verifyRunIdentity(report); err != nil {
+		return err
+	}
+	if err := verifyMetricSchema(report.MetricSchema); err != nil {
+		return err
+	}
+	results, err := verifyResults(report, required)
+	if err != nil {
+		return err
+	}
+	return verifyComparisons(report.Comparisons, results, required)
+}
+
+// verifyEffectiveConfig requires the exact default profile and workload sets,
+// each without duplicates, plus a normalized seed and a supported node count.
+func verifyEffectiveConfig(cfg, required Config) error {
+	if err := validateUniqueNames(cfg.Profiles, "profile"); err != nil {
+		return fmt.Errorf("verify default benchmark: config %w", err)
+	}
+	if err := validateUniqueNames(cfg.Workloads, "workload"); err != nil {
+		return fmt.Errorf("verify default benchmark: config %w", err)
+	}
+	if len(cfg.Profiles) != len(required.Profiles) {
+		return fmt.Errorf("verify default benchmark: config has %d profiles, want exactly the %d default profiles",
+			len(cfg.Profiles), len(required.Profiles))
+	}
+	if len(cfg.Workloads) != len(required.Workloads) {
+		return fmt.Errorf("verify default benchmark: config has %d workloads, want exactly the %d default workloads",
+			len(cfg.Workloads), len(required.Workloads))
 	}
 	for _, profile := range required.Profiles {
-		if !containsString(report.Config.Profiles, profile) {
+		if !containsString(cfg.Profiles, profile) {
 			return fmt.Errorf("verify default benchmark: config missing profile %q", profile)
 		}
 	}
+	for _, workload := range required.Workloads {
+		if !containsString(cfg.Workloads, workload) {
+			return fmt.Errorf("verify default benchmark: config missing workload %q", workload)
+		}
+	}
+	if err := validateNodeCount(cfg.NodeCount); err != nil {
+		return fmt.Errorf("verify default benchmark: config %w", err)
+	}
+	if cfg.Seed == 0 {
+		return fmt.Errorf("verify default benchmark: config seed is 0, want the normalized non-zero effective seed")
+	}
+	return nil
+}
 
-	schemaNames := make(map[string]bool, len(report.MetricSchema))
-	for _, metric := range report.MetricSchema {
-		schemaNames[metric.Name] = true
+// verifyRunIdentity recomputes run_id from the effective config and the
+// reported provenance, so a generator that forgets to include part of the
+// selection or the revision in run identity fails verification.
+func verifyRunIdentity(report Report) error {
+	if strings.TrimSpace(report.Provenance.GitRevision) == "" {
+		return fmt.Errorf("verify default benchmark: provenance git_revision is empty, want a revision or %q", UnknownRevision)
 	}
-	requiredMetrics := []string{
-		"schedule_success_rate",
-		"cpu_quota_utilization",
-		"mem_quota_utilization",
-		"node_load_balance",
-		"template_locality_hit_rate",
-		"create_latency_p50_ms",
-		"create_latency_p95_ms",
-		"uses_estimated_latency",
+	if report.Provenance.GitRevision == UnknownRevision && report.Provenance.GitDirty != nil {
+		return fmt.Errorf("verify default benchmark: provenance git_dirty must be null when git_revision is %q", UnknownRevision)
 	}
-	if len(report.MetricSchema) < 5 {
-		return fmt.Errorf("verify default benchmark: metric schema has %d entries, want at least 5", len(report.MetricSchema))
+	cfg := report.Config
+	cfg.Provenance = report.Provenance
+	if want := runID(cfg); report.RunID != want {
+		return fmt.Errorf("verify default benchmark: run_id %q does not identify the effective config and provenance, want %q",
+			report.RunID, want)
 	}
-	for _, name := range requiredMetrics {
-		if !schemaNames[name] {
+	return nil
+}
+
+func verifyMetricSchema(schema []MetricSchema) error {
+	seen := make(map[string]struct{}, len(schema))
+	for i, metric := range schema {
+		if metric.Name == "" {
+			return fmt.Errorf("verify default benchmark: metric_schema[%d] has an empty name", i)
+		}
+		if _, ok := seen[metric.Name]; ok {
+			return fmt.Errorf("verify default benchmark: duplicate metric schema entry %q", metric.Name)
+		}
+		seen[metric.Name] = struct{}{}
+		if strings.TrimSpace(metric.Direction) == "" {
+			return fmt.Errorf("verify default benchmark: metric schema entry %q has no direction", metric.Name)
+		}
+		if strings.TrimSpace(metric.Description) == "" {
+			return fmt.Errorf("verify default benchmark: metric schema entry %q has no description", metric.Name)
+		}
+	}
+	for _, name := range requiredMetricSchemaNames {
+		if _, ok := seen[name]; !ok {
 			return fmt.Errorf("verify default benchmark: metric schema missing %q", name)
 		}
 	}
+	return nil
+}
 
+// verifyResults requires exactly one result entry for every expected
+// (profile, workload) pair with no extras, and checks each metrics object for
+// internal consistency. It returns the indexed results so comparisons can be
+// checked against the values they claim to compare.
+func verifyResults(report Report, required Config) (map[string]map[string]Metrics, error) {
+	expectedNodeIDs := make(map[string]struct{}, report.Config.NodeCount)
+	for _, node := range defaultNodes(report.Config.NodeCount) {
+		expectedNodeIDs[node.spec.ID] = struct{}{}
+	}
 	results := make(map[string]map[string]Metrics, len(report.Results))
 	for _, profile := range report.Results {
+		if !containsString(required.Profiles, profile.Profile) {
+			return nil, fmt.Errorf("verify default benchmark: unexpected profile result %q", profile.Profile)
+		}
 		if _, exists := results[profile.Profile]; exists {
-			return fmt.Errorf("verify default benchmark: duplicate profile result %q", profile.Profile)
+			return nil, fmt.Errorf("verify default benchmark: duplicate profile result %q", profile.Profile)
 		}
 		workloads := make(map[string]Metrics, len(profile.Workloads))
 		for _, workload := range profile.Workloads {
+			if !containsString(required.Workloads, workload.Workload) {
+				return nil, fmt.Errorf("verify default benchmark: unexpected workload result %s/%s",
+					profile.Profile, workload.Workload)
+			}
 			if _, exists := workloads[workload.Workload]; exists {
-				return fmt.Errorf("verify default benchmark: duplicate metrics for %s/%s", profile.Profile, workload.Workload)
+				return nil, fmt.Errorf("verify default benchmark: duplicate metrics for %s/%s",
+					profile.Profile, workload.Workload)
 			}
 			workloads[workload.Workload] = workload.Metrics
 		}
@@ -317,33 +452,285 @@ func VerifyDefaultReport(report Report) error {
 	for _, profile := range required.Profiles {
 		workloads, ok := results[profile]
 		if !ok {
-			return fmt.Errorf("verify default benchmark: profile %q was not run", profile)
+			return nil, fmt.Errorf("verify default benchmark: profile %q was not run", profile)
 		}
 		for _, workload := range required.Workloads {
 			metrics, ok := workloads[workload]
 			if !ok {
-				return fmt.Errorf("verify default benchmark: missing metrics for %s/%s", profile, workload)
+				return nil, fmt.Errorf("verify default benchmark: missing metrics for %s/%s", profile, workload)
 			}
-			if metrics.TotalRequests <= 0 {
-				return fmt.Errorf("verify default benchmark: %s/%s has no workload requests", profile, workload)
-			}
-			if metrics.ScheduledRequests+metrics.RejectedRequests != metrics.TotalRequests {
-				return fmt.Errorf("verify default benchmark: %s/%s request accounting is inconsistent", profile, workload)
-			}
-			if !metrics.UsesEstimatedLatency {
-				return fmt.Errorf("verify default benchmark: %s/%s uses_estimated_latency must be true", profile, workload)
+			if err := verifyMetrics(metrics, expectedNodeIDs); err != nil {
+				return nil, fmt.Errorf("verify default benchmark: %s/%s %w", profile, workload, err)
 			}
 		}
 	}
+	return results, nil
+}
 
-	comparisons := make(map[string]ComparisonResult, len(report.Comparisons))
-	for _, comparison := range report.Comparisons {
-		key := comparison.CandidateProfile + "\x00" + comparison.Workload
-		if comparison.BaselineProfile == ProfileDefault {
-			if _, exists := comparisons[key]; exists {
-				return fmt.Errorf("verify default benchmark: duplicate default comparison for %s/%s", comparison.CandidateProfile, comparison.Workload)
+// verifyMetrics checks one metrics object against the invariants that report
+// generation or serialization could break. Errors are phrased as sentence
+// fragments so callers can prefix them with the profile/workload pair.
+func verifyMetrics(m Metrics, expectedNodeIDs map[string]struct{}) error {
+	nodeCount := len(expectedNodeIDs)
+	if m.TotalRequests <= 0 {
+		return fmt.Errorf("has no workload requests")
+	}
+	if m.ScheduledRequests < 0 || m.RejectedRequests < 0 {
+		return fmt.Errorf("has negative request counts (scheduled=%d rejected=%d)", m.ScheduledRequests, m.RejectedRequests)
+	}
+	if m.ScheduledRequests+m.RejectedRequests != m.TotalRequests {
+		return fmt.Errorf("request accounting is inconsistent: scheduled=%d + rejected=%d != total=%d",
+			m.ScheduledRequests, m.RejectedRequests, m.TotalRequests)
+	}
+	// Estimated-latency status is a typed boolean field, never inferred from
+	// the wording of any description or note.
+	if !m.UsesEstimatedLatency {
+		return fmt.Errorf("uses_estimated_latency is false, want true for simulator-estimated create latency")
+	}
+
+	if len(m.NodeFinalState) != nodeCount {
+		return fmt.Errorf("node_final_state covers %d nodes, want config node_count %d", len(m.NodeFinalState), nodeCount)
+	}
+	for _, id := range sortedKeys(m.NodeFinalState) {
+		if _, ok := expectedNodeIDs[id]; !ok {
+			return fmt.Errorf("node_final_state contains unexpected node %q", id)
+		}
+	}
+	for _, id := range sortedKeys(expectedNodeIDs) {
+		if _, ok := m.NodeFinalState[id]; !ok {
+			return fmt.Errorf("node_final_state is missing expected node %q", id)
+		}
+	}
+	if len(m.PlacementCounts) > nodeCount {
+		return fmt.Errorf("placement_counts covers %d nodes, want at most config node_count %d", len(m.PlacementCounts), nodeCount)
+	}
+	placed := 0
+	for _, id := range sortedKeys(m.PlacementCounts) {
+		count := m.PlacementCounts[id]
+		if count < 0 {
+			return fmt.Errorf("placement_counts[%q] is negative (%d)", id, count)
+		}
+		if _, ok := m.NodeFinalState[id]; !ok {
+			return fmt.Errorf("placement_counts references node %q that is absent from node_final_state", id)
+		}
+		placed += count
+	}
+	if placed != m.ScheduledRequests {
+		return fmt.Errorf("placement_counts total %d does not equal scheduled_requests %d", placed, m.ScheduledRequests)
+	}
+	for _, id := range sortedKeys(m.NodeFinalState) {
+		load := m.NodeFinalState[id]
+		if load.RunningSandboxCount < 0 || load.UsedCPUMilli < 0 || load.UsedMemMB < 0 {
+			return fmt.Errorf("node_final_state[%q] has negative occupancy (%+v)", id, load)
+		}
+		if err := verifyRatio(fmt.Sprintf("node_final_state[%q].cpu_utilization", id), load.CPUUtilization); err != nil {
+			return err
+		}
+		if err := verifyRatio(fmt.Sprintf("node_final_state[%q].mem_utilization", id), load.MemUtilization); err != nil {
+			return err
+		}
+	}
+
+	failures := 0
+	for _, reason := range sortedKeys(m.FailureReasons) {
+		count := m.FailureReasons[reason]
+		if count <= 0 {
+			return fmt.Errorf("failure_reasons[%q] is not a positive count (%d)", reason, count)
+		}
+		failures += count
+	}
+	if failures != m.RejectedRequests {
+		return fmt.Errorf("failure_reasons total %d does not equal rejected_requests %d", failures, m.RejectedRequests)
+	}
+
+	finite := []struct {
+		name  string
+		value float64
+	}{
+		{"schedule_success_rate", m.SuccessRate},
+		{"node_load_balance", m.NodeLoadBalance},
+		{"template_locality_hit_rate", m.TemplateLocalityHitRate},
+		{"cpu_quota_utilization", m.AverageCPUUtilization},
+		{"peak_cpu_utilization", m.PeakCPUUtilization},
+		{"mem_quota_utilization", m.AverageMemUtilization},
+		{"peak_mem_utilization", m.PeakMemUtilization},
+		{"create_latency_p50_ms", m.CreateLatencyP50MS},
+		{"create_latency_p95_ms", m.CreateLatencyP95MS},
+		{"average_cpu_headroom", m.AverageCPUHeadroom},
+		{"average_score_margin", m.AverageScoreMargin},
+		{"average_feasible_candidates", m.AverageFeasibleCandidates},
+		{"average_ranked_candidates_retained", m.AverageRankedCandidatesRetained},
+	}
+	for _, metric := range finite {
+		if math.IsNaN(metric.value) || math.IsInf(metric.value, 0) {
+			return fmt.Errorf("%s is not finite (%v)", metric.name, metric.value)
+		}
+	}
+	for _, metric := range finite[:7] {
+		if err := verifyRatio(metric.name, metric.value); err != nil {
+			return err
+		}
+	}
+	if err := verifyRatio("average_cpu_headroom", m.AverageCPUHeadroom); err != nil {
+		return err
+	}
+	if m.CreateLatencyP50MS < 0 || m.CreateLatencyP95MS < 0 {
+		return fmt.Errorf("create latency percentiles are negative (p50=%v p95=%v)", m.CreateLatencyP50MS, m.CreateLatencyP95MS)
+	}
+	if m.CreateLatencyP95MS+verifyFloatTolerance < m.CreateLatencyP50MS {
+		return fmt.Errorf("create_latency_p95_ms %v is below create_latency_p50_ms %v", m.CreateLatencyP95MS, m.CreateLatencyP50MS)
+	}
+	if diff := math.Abs(m.SuccessRate - ratio(m.ScheduledRequests, m.TotalRequests)); diff > verifyFloatTolerance {
+		return fmt.Errorf("schedule_success_rate %v disagrees with scheduled/total by %v, want at most %v",
+			m.SuccessRate, diff, verifyFloatTolerance)
+	}
+
+	if m.AverageFeasibleCandidates < 0 || m.AverageRankedCandidatesRetained < 0 {
+		return fmt.Errorf("candidate averages are negative (feasible=%v retained=%v)",
+			m.AverageFeasibleCandidates, m.AverageRankedCandidatesRetained)
+	}
+	if m.FeasibleEvaluations < 0 || m.RankedCandidatesRetained < 0 {
+		return fmt.Errorf("candidate counters are negative (feasible=%d retained=%d)",
+			m.FeasibleEvaluations, m.RankedCandidatesRetained)
+	}
+	if m.FeasibleEvaluations < m.RankedCandidatesRetained {
+		return fmt.Errorf("feasible_candidate_evaluations %d is below post-cap ranked_candidates_retained %d",
+			m.FeasibleEvaluations, m.RankedCandidatesRetained)
+	}
+	if m.ScheduledRequests == 0 {
+		observed := []struct {
+			name  string
+			value float64
+		}{
+			{"template_locality_hit_rate", m.TemplateLocalityHitRate},
+			{"create_latency_p50_ms", m.CreateLatencyP50MS},
+			{"create_latency_p95_ms", m.CreateLatencyP95MS},
+			{"average_cpu_headroom", m.AverageCPUHeadroom},
+			{"average_score_margin", m.AverageScoreMargin},
+			{"average_feasible_candidates", m.AverageFeasibleCandidates},
+			{"average_ranked_candidates_retained", m.AverageRankedCandidatesRetained},
+		}
+		for _, metric := range observed {
+			if metric.value != 0 {
+				return fmt.Errorf("%s is %v with zero scheduled_requests, want 0", metric.name, metric.value)
 			}
-			comparisons[key] = comparison
+		}
+		if m.FeasibleEvaluations != 0 || m.RankedCandidatesRetained != 0 {
+			return fmt.Errorf("candidate counters are non-zero with zero scheduled_requests (feasible=%d retained=%d)",
+				m.FeasibleEvaluations, m.RankedCandidatesRetained)
+		}
+	} else {
+		if m.FeasibleEvaluations < m.ScheduledRequests {
+			return fmt.Errorf("feasible_candidate_evaluations %d is below scheduled_requests %d",
+				m.FeasibleEvaluations, m.ScheduledRequests)
+		}
+		if m.RankedCandidatesRetained < m.ScheduledRequests {
+			return fmt.Errorf("ranked_candidates_retained %d is below scheduled_requests %d",
+				m.RankedCandidatesRetained, m.ScheduledRequests)
+		}
+		if max := m.ScheduledRequests * nodeCount; m.FeasibleEvaluations > max {
+			return fmt.Errorf("feasible_candidate_evaluations %d exceeds scheduled_requests*node_count bound %d",
+				m.FeasibleEvaluations, max)
+		}
+		if max := m.ScheduledRequests * defaultPriorityCandidateNum; m.RankedCandidatesRetained > max {
+			return fmt.Errorf("ranked_candidates_retained %d exceeds scheduled_requests*ranked-candidate-cap bound %d",
+				m.RankedCandidatesRetained, max)
+		}
+		denom := float64(m.ScheduledRequests)
+		if diff := math.Abs(m.AverageRankedCandidatesRetained - float64(m.RankedCandidatesRetained)/denom); diff > verifyFloatTolerance {
+			return fmt.Errorf("average_ranked_candidates_retained %v disagrees with ranked_candidates_retained/scheduled_requests by %v",
+				m.AverageRankedCandidatesRetained, diff)
+		}
+		if diff := math.Abs(m.AverageFeasibleCandidates - float64(m.FeasibleEvaluations)/denom); diff > verifyFloatTolerance {
+			return fmt.Errorf("average_feasible_candidates %v disagrees with feasible_candidate_evaluations/scheduled_requests by %v",
+				m.AverageFeasibleCandidates, diff)
+		}
+	}
+	if m.AverageRankedCandidatesRetained > float64(defaultPriorityCandidateNum)+verifyFloatTolerance {
+		return fmt.Errorf("average_ranked_candidates_retained %v exceeds the simulator ranked-candidate cap %d",
+			m.AverageRankedCandidatesRetained, defaultPriorityCandidateNum)
+	}
+	if m.AverageFeasibleCandidates+verifyFloatTolerance < m.AverageRankedCandidatesRetained {
+		return fmt.Errorf("average_feasible_candidates %v is below post-cap average_ranked_candidates_retained %v",
+			m.AverageFeasibleCandidates, m.AverageRankedCandidatesRetained)
+	}
+	if m.AverageFeasibleCandidates > float64(nodeCount)+verifyFloatTolerance {
+		return fmt.Errorf("average_feasible_candidates %v exceeds the simulated node count %d",
+			m.AverageFeasibleCandidates, nodeCount)
+	}
+	return nil
+}
+
+// verifyComparisons requires one unique comparison per expected
+// baseline/candidate pair, each referring to results present in the same
+// report, with deltas and classifications that agree with those results.
+func verifyComparisons(comparisons []ComparisonResult, results map[string]map[string]Metrics, required Config) error {
+	expected := (len(required.Profiles) - 1) * len(required.Workloads)
+	if len(comparisons) != expected {
+		return fmt.Errorf("verify default benchmark: report has %d comparisons, want %d default-vs-candidate pairs",
+			len(comparisons), expected)
+	}
+	seen := make(map[string]struct{}, len(comparisons))
+	for i, cmp := range comparisons {
+		if cmp.BaselineProfile != ProfileDefault {
+			return fmt.Errorf("verify default benchmark: comparisons[%d] baseline_profile = %q, want %q",
+				i, cmp.BaselineProfile, ProfileDefault)
+		}
+		if cmp.CandidateProfile == cmp.BaselineProfile {
+			return fmt.Errorf("verify default benchmark: comparisons[%d] compares %q against itself", i, cmp.CandidateProfile)
+		}
+		key := cmp.CandidateProfile + "\x00" + cmp.Workload
+		if _, ok := seen[key]; ok {
+			return fmt.Errorf("verify default benchmark: duplicate comparison for %s/%s", cmp.CandidateProfile, cmp.Workload)
+		}
+		seen[key] = struct{}{}
+		baseline, ok := results[cmp.BaselineProfile][cmp.Workload]
+		if !ok {
+			return fmt.Errorf("verify default benchmark: comparisons[%d] references missing baseline result %s/%s",
+				i, cmp.BaselineProfile, cmp.Workload)
+		}
+		candidate, ok := results[cmp.CandidateProfile][cmp.Workload]
+		if !ok {
+			return fmt.Errorf("verify default benchmark: comparisons[%d] references missing candidate result %s/%s",
+				i, cmp.CandidateProfile, cmp.Workload)
+		}
+		if !validComparisonResult(cmp.Result) {
+			return fmt.Errorf("verify default benchmark: %s/%s comparison has invalid result %q",
+				cmp.CandidateProfile, cmp.Workload, cmp.Result)
+		}
+		if len(cmp.Deltas) != len(comparisonDeltaKeys) {
+			return fmt.Errorf("verify default benchmark: %s/%s comparison has %d deltas, want exactly %d",
+				cmp.CandidateProfile, cmp.Workload, len(cmp.Deltas), len(comparisonDeltaKeys))
+		}
+		want := comparisonDeltas(baseline, candidate)
+		for _, name := range comparisonDeltaKeys {
+			got, ok := cmp.Deltas[name]
+			if !ok {
+				return fmt.Errorf("verify default benchmark: %s/%s comparison missing delta %q",
+					cmp.CandidateProfile, cmp.Workload, name)
+			}
+			if math.IsNaN(got) || math.IsInf(got, 0) {
+				return fmt.Errorf("verify default benchmark: %s/%s comparison delta %q is not finite (%v)",
+					cmp.CandidateProfile, cmp.Workload, name, got)
+			}
+			if diff := math.Abs(got - want[name]); diff > verifyFloatTolerance {
+				return fmt.Errorf("verify default benchmark: %s/%s comparison delta %q = %v, want %v from the referenced results (difference %v exceeds tolerance %v)",
+					cmp.CandidateProfile, cmp.Workload, name, got, want[name], diff, verifyFloatTolerance)
+			}
+		}
+		improved, regressed := classifyDeltas(cmp.Deltas)
+		if !equalStringSlices(cmp.ImprovedMetrics, improved) {
+			return fmt.Errorf("verify default benchmark: %s/%s improved_metrics = %v, want %v from its own deltas",
+				cmp.CandidateProfile, cmp.Workload, cmp.ImprovedMetrics, improved)
+		}
+		if !equalStringSlices(cmp.RegressedMetrics, regressed) {
+			return fmt.Errorf("verify default benchmark: %s/%s regressed_metrics = %v, want %v from its own deltas",
+				cmp.CandidateProfile, cmp.Workload, cmp.RegressedMetrics, regressed)
+		}
+		successDeclined := cmp.Deltas["schedule_success_rate"] < -comparisonSuccessEpsilon
+		if wantResult := classifyComparison(successDeclined, improved, regressed); cmp.Result != wantResult {
+			return fmt.Errorf("verify default benchmark: %s/%s result = %q, want %q from its own deltas",
+				cmp.CandidateProfile, cmp.Workload, cmp.Result, wantResult)
 		}
 	}
 	for _, profile := range required.Profiles {
@@ -351,25 +738,30 @@ func VerifyDefaultReport(report Report) error {
 			continue
 		}
 		for _, workload := range required.Workloads {
-			comparison, ok := comparisons[profile+"\x00"+workload]
-			if !ok {
+			if _, ok := seen[profile+"\x00"+workload]; !ok {
 				return fmt.Errorf("verify default benchmark: missing default-vs-%s comparison for workload %q", profile, workload)
-			}
-			if !validComparisonResult(comparison.Result) {
-				return fmt.Errorf("verify default benchmark: %s/%s comparison has invalid result %q", profile, workload, comparison.Result)
-			}
-			for _, name := range comparisonDeltaKeys {
-				if _, ok := comparison.Deltas[name]; !ok {
-					return fmt.Errorf("verify default benchmark: %s/%s comparison missing delta %q", profile, workload, name)
-				}
 			}
 		}
 	}
+	return nil
+}
 
-	if !hasSimulatorOnlyEstimatedLatencyContract(report) {
-		return fmt.Errorf("verify default benchmark: report contract must identify latency as simulator-only estimates, not live measurements")
+func verifyRatio(name string, value float64) error {
+	if value < 0 || value > 1 {
+		return fmt.Errorf("%s %v is outside [0,1]", name, value)
 	}
 	return nil
+}
+
+// sortedKeys keeps verification error messages deterministic when a check has
+// to walk a map-valued metric field.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func containsString(values []string, target string) bool {
@@ -381,6 +773,18 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func validComparisonResult(result string) bool {
 	switch result {
 	case ComparisonImproved, ComparisonTradeOff, ComparisonNeutral, ComparisonRegressed:
@@ -390,41 +794,6 @@ func validComparisonResult(result string) bool {
 	}
 }
 
-func hasSimulatorOnlyEstimatedLatencyContract(report Report) bool {
-	schemaOK := false
-	for _, metric := range report.MetricSchema {
-		if metric.Name != "uses_estimated_latency" {
-			continue
-		}
-		desc := strings.ToLower(metric.Description)
-		if metric.Direction != "true means estimated" {
-			return false
-		}
-		if !(strings.Contains(desc, "simulat") &&
-			strings.Contains(desc, "estimat") &&
-			(strings.Contains(desc, "not live") || strings.Contains(desc, "not measured"))) {
-			return false
-		}
-		schemaOK = true
-		break
-	}
-	if !schemaOK {
-		return false
-	}
-	if len(report.Comparisons) == 0 {
-		return false
-	}
-	for _, comparison := range report.Comparisons {
-		text := strings.ToLower(strings.Join(comparison.Notes, " "))
-		if !(strings.Contains(text, "simulat") &&
-			strings.Contains(text, "estimat") &&
-			(strings.Contains(text, "not live") || strings.Contains(text, "not measured") || strings.Contains(text, "offline"))) {
-			return false
-		}
-	}
-	return true
-}
-
 func (r Report) Markdown() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Scheduler Simulator Benchmark\n\n")
@@ -432,23 +801,17 @@ func (r Report) Markdown() string {
 	fmt.Fprintf(&b, "- seed: `%d`\n", r.Config.Seed)
 	fmt.Fprintf(&b, "- node_count: `%d`\n", r.Config.NodeCount)
 	fmt.Fprintf(&b, "- workloads: `%s`\n", strings.Join(r.Config.Workloads, ", "))
-	fmt.Fprintf(&b, "- profiles: `%s`\n\n", strings.Join(r.Config.Profiles, ", "))
-
-	fmt.Fprintf(&b, "## Acceptance Map\n\n")
-	fmt.Fprintf(&b, "- acceptance path: %s\n", r.AcceptancePath.AcceptancePath)
-	fmt.Fprintf(&b, "- domain lens: %s\n", r.AcceptancePath.DomainLens)
-	fmt.Fprintf(&b, "- failure path: %s\n", r.AcceptancePath.FailurePath)
-	fmt.Fprintf(&b, "- evidence path: %s\n", r.AcceptancePath.EvidencePath)
-	fmt.Fprintf(&b, "- review path: %s\n", r.AcceptancePath.ReviewPath)
-	fmt.Fprintf(&b, "- distinctive angle: %s\n\n", r.AcceptancePath.DistinctiveAngle)
+	fmt.Fprintf(&b, "- profiles: `%s`\n", strings.Join(r.Config.Profiles, ", "))
+	fmt.Fprintf(&b, "- git_revision: `%s`\n", r.Provenance.GitRevision)
+	fmt.Fprintf(&b, "- git_dirty: `%s`\n\n", formatOptionalBool(r.Provenance.GitDirty))
 
 	fmt.Fprintf(&b, "## Results\n\n")
-	fmt.Fprintf(&b, "| profile | workload | success | rejected | locality hit | load balance | cpu util | mem util | latency p50 ms | latency p95 ms | avg candidates |\n")
-	fmt.Fprintf(&b, "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+	fmt.Fprintf(&b, "| profile | workload | success | rejected | locality hit | load balance | cpu util | mem util | latency p50 ms | latency p95 ms | avg feasible | avg retained |\n")
+	fmt.Fprintf(&b, "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 	for _, profile := range r.Results {
 		for _, workload := range profile.Workloads {
 			m := workload.Metrics
-			fmt.Fprintf(&b, "| %s | %s | %.2f | %d | %.2f | %.3f | %.2f | %.2f | %.1f | %.1f | %.2f |\n",
+			fmt.Fprintf(&b, "| %s | %s | %.2f | %d | %.2f | %.3f | %.2f | %.2f | %.1f | %.1f | %.2f | %.2f |\n",
 				profile.Profile,
 				workload.Workload,
 				m.SuccessRate,
@@ -459,7 +822,8 @@ func (r Report) Markdown() string {
 				m.AverageMemUtilization,
 				m.CreateLatencyP50MS,
 				m.CreateLatencyP95MS,
-				m.AverageCandidatesScored)
+				m.AverageFeasibleCandidates,
+				m.AverageRankedCandidatesRetained)
 		}
 	}
 
@@ -532,40 +896,10 @@ func buildComparisons(cfg Config, results []ProfileResult) []ComparisonResult {
 }
 
 func compareAgainstBaseline(workload, candidate string, baseline, metrics Metrics) ComparisonResult {
-	deltas := map[string]float64{
-		"schedule_success_rate":      metrics.SuccessRate - baseline.SuccessRate,
-		"cpu_quota_utilization":      metrics.AverageCPUUtilization - baseline.AverageCPUUtilization,
-		"mem_quota_utilization":      metrics.AverageMemUtilization - baseline.AverageMemUtilization,
-		"node_load_balance":          metrics.NodeLoadBalance - baseline.NodeLoadBalance,
-		"template_locality_hit_rate": metrics.TemplateLocalityHitRate - baseline.TemplateLocalityHitRate,
-		"create_latency_p50_ms":      metrics.CreateLatencyP50MS - baseline.CreateLatencyP50MS,
-		"create_latency_p95_ms":      metrics.CreateLatencyP95MS - baseline.CreateLatencyP95MS,
-	}
-	improved := make([]string, 0)
-	regressed := make([]string, 0)
-	for _, key := range comparisonDeltaKeys {
-		switch classifyDelta(key, deltas[key]) {
-		case ComparisonImproved:
-			improved = append(improved, key)
-		case ComparisonRegressed:
-			regressed = append(regressed, key)
-		}
-	}
-
+	deltas := comparisonDeltas(baseline, metrics)
+	improved, regressed := classifyDeltas(deltas)
 	successDeclined := deltas["schedule_success_rate"] < -comparisonSuccessEpsilon
-	result := ComparisonNeutral
-	switch {
-	case successDeclined && len(improved) == 0:
-		result = ComparisonRegressed
-	case successDeclined:
-		result = ComparisonTradeOff
-	case len(improved) > 0 && len(regressed) > 0:
-		result = ComparisonTradeOff
-	case len(improved) > 0:
-		result = ComparisonImproved
-	case len(regressed) > 0:
-		result = ComparisonRegressed
-	}
+	result := classifyComparison(successDeclined, improved, regressed)
 
 	return ComparisonResult{
 		Workload:         workload,
@@ -576,6 +910,54 @@ func compareAgainstBaseline(workload, candidate string, baseline, metrics Metric
 		ImprovedMetrics:  improved,
 		RegressedMetrics: regressed,
 		Notes:            comparisonNotes(workload, candidate, result, successDeclined, improved, regressed),
+	}
+}
+
+// comparisonDeltas is the single definition of candidate-minus-baseline
+// deltas. Verification reuses it to confirm the deltas a report carries agree
+// with the result metrics that report says they compare.
+func comparisonDeltas(baseline, candidate Metrics) map[string]float64 {
+	return map[string]float64{
+		"schedule_success_rate":      candidate.SuccessRate - baseline.SuccessRate,
+		"cpu_quota_utilization":      candidate.AverageCPUUtilization - baseline.AverageCPUUtilization,
+		"mem_quota_utilization":      candidate.AverageMemUtilization - baseline.AverageMemUtilization,
+		"node_load_balance":          candidate.NodeLoadBalance - baseline.NodeLoadBalance,
+		"template_locality_hit_rate": candidate.TemplateLocalityHitRate - baseline.TemplateLocalityHitRate,
+		"create_latency_p50_ms":      candidate.CreateLatencyP50MS - baseline.CreateLatencyP50MS,
+		"create_latency_p95_ms":      candidate.CreateLatencyP95MS - baseline.CreateLatencyP95MS,
+	}
+}
+
+// classifyDeltas walks comparisonDeltaKeys in declaration order so both
+// generation and verification produce identically ordered metric lists.
+func classifyDeltas(deltas map[string]float64) (improved, regressed []string) {
+	improved = make([]string, 0)
+	regressed = make([]string, 0)
+	for _, key := range comparisonDeltaKeys {
+		switch classifyDelta(key, deltas[key]) {
+		case ComparisonImproved:
+			improved = append(improved, key)
+		case ComparisonRegressed:
+			regressed = append(regressed, key)
+		}
+	}
+	return improved, regressed
+}
+
+func classifyComparison(successDeclined bool, improved, regressed []string) string {
+	switch {
+	case successDeclined && len(improved) == 0:
+		return ComparisonRegressed
+	case successDeclined:
+		return ComparisonTradeOff
+	case len(improved) > 0 && len(regressed) > 0:
+		return ComparisonTradeOff
+	case len(improved) > 0:
+		return ComparisonImproved
+	case len(regressed) > 0:
+		return ComparisonRegressed
+	default:
+		return ComparisonNeutral
 	}
 }
 
@@ -644,18 +1026,43 @@ func normalizeConfig(cfg Config) Config {
 	if len(cfg.Workloads) == 0 {
 		cfg.Workloads = def.Workloads
 	}
+	cfg.Provenance.GitRevision = strings.TrimSpace(cfg.Provenance.GitRevision)
+	if cfg.Provenance.GitRevision == "" {
+		cfg.Provenance.GitRevision = UnknownRevision
+	}
+	if cfg.Provenance.GitRevision == UnknownRevision {
+		cfg.Provenance.GitDirty = nil
+	}
 	return cfg
 }
 
-func defaultAcceptancePath() AcceptancePath {
-	return AcceptancePath{
-		AcceptancePath:   "Each workload runs once per profile and reports baseline-vs-profile placement and quality metrics.",
-		DomainLens:       "Scheduler score semantics: filter infeasible nodes first, score remaining candidates, then bind the highest score.",
-		FailurePath:      "Requests that cannot fit any node are counted as rejected with explicit failure reasons; invalid profile/workload names fail the run.",
-		EvidencePath:     "The JSON and Markdown reports include seed, node count, workload definitions, profile names, placement counts, and metric schema.",
-		ReviewPath:       "Offline deterministic benchmark package plus thin CLI; no production scheduler default behavior changes.",
-		DistinctiveAngle: "Measurement-path integrity and claim-evidence mapping are built into the generated report instead of only producing headline numbers.",
+func formatOptionalBool(value *bool) string {
+	if value == nil {
+		return "null"
 	}
+	return strconv.FormatBool(*value)
+}
+
+// runID identifies the full effective benchmark selection plus source
+// provenance. It must be called with an already-normalized Config so that
+// defaulted and caller-supplied values that mean the same thing produce the
+// same identifier.
+//
+// The hashed representation is built only from ordered scalars and slices, so
+// it never depends on Go map iteration order. Fields are separated by newlines
+// and list items by a unit separator, so no combination of names can produce
+// the canonical text of a different configuration.
+func runID(cfg Config) string {
+	var canonical strings.Builder
+	fmt.Fprintf(&canonical, "seed=%d\n", cfg.Seed)
+	fmt.Fprintf(&canonical, "node_count=%d\n", cfg.NodeCount)
+	fmt.Fprintf(&canonical, "profiles=%s\n", strings.Join(cfg.Profiles, "\x1f"))
+	fmt.Fprintf(&canonical, "workloads=%s\n", strings.Join(cfg.Workloads, "\x1f"))
+	fmt.Fprintf(&canonical, "git_revision=%s\n", cfg.Provenance.GitRevision)
+	fmt.Fprintf(&canonical, "git_dirty=%s\n", formatOptionalBool(cfg.Provenance.GitDirty))
+	sum := sha256.Sum256([]byte(canonical.String()))
+	return fmt.Sprintf("scheduler-sim-seed-%d-nodes-%d-%s",
+		cfg.Seed, cfg.NodeCount, hex.EncodeToString(sum[:])[:runIDHashLength])
 }
 
 func defaultMetricSchema() []MetricSchema {
@@ -672,7 +1079,8 @@ func defaultMetricSchema() []MetricSchema {
 		{Name: "peak_cpu_utilization", Direction: "lower is safer", Description: "Highest final CPU utilization across nodes."},
 		{Name: "average_cpu_headroom", Direction: "higher is safer", Description: "Average remaining CPU capacity after each placement."},
 		{Name: "average_score_margin", Direction: "higher means clearer decisions", Description: "Mean score gap between the selected node and second-ranked candidate, averaged only over scheduled requests that had at least two scored candidates. Zero when no such decisions exist."},
-		{Name: "average_candidates_scored", Direction: "lower means lower simulated decision cost", Description: "Average truncated ranked candidates considered per scheduled request after filtering and scoring."},
+		{Name: "average_feasible_candidates", Direction: "no better/worse direction; breadth only", Description: "Average number of feasible simulated nodes per scheduled request, counted before the ranked-candidate cap, so its maximum is the simulated node count. Simulator-local candidate breadth, not scheduler CPU cost or latency."},
+		{Name: "average_ranked_candidates_retained", Direction: "no better/worse direction; breadth only", Description: "Average number of ranked candidates retained per scheduled request after the simulator's priority-candidate cap, so its maximum is that cap (currently 3). Simulator-local decision-path breadth, not scheduler CPU cost or latency."},
 	}
 }
 
@@ -794,8 +1202,9 @@ func runWorkload(profile string, nodes []simNode, requests []Request) (Metrics, 
 	marginObservations := 0
 	for _, req := range requestsByArrival {
 		releaseCompleted(nodes, req.Arrival)
-		ranked := scoreCandidates(nodes, req, weights)
-		metrics.ScoreEvaluations += len(ranked)
+		ranked, feasible := scoreCandidates(nodes, req, weights)
+		metrics.FeasibleEvaluations += feasible
+		metrics.RankedCandidatesRetained += len(ranked)
 		if len(ranked) == 0 {
 			metrics.RejectedRequests++
 			metrics.FailureReasons["no_feasible_node"]++
@@ -823,7 +1232,8 @@ func runWorkload(profile string, nodes []simNode, requests []Request) (Metrics, 
 		denom := float64(metrics.ScheduledRequests)
 		metrics.TemplateLocalityHitRate /= denom
 		metrics.AverageCPUHeadroom /= denom
-		metrics.AverageCandidatesScored = float64(metrics.ScoreEvaluations) / denom
+		metrics.AverageFeasibleCandidates = float64(metrics.FeasibleEvaluations) / denom
+		metrics.AverageRankedCandidatesRetained = float64(metrics.RankedCandidatesRetained) / denom
 	}
 	if marginObservations > 0 {
 		metrics.AverageScoreMargin /= float64(marginObservations)
@@ -857,8 +1267,12 @@ type scoredNode struct {
 	score float64
 }
 
-func scoreCandidates(nodes []simNode, req Request, weights profileWeights) []scoredNode {
-	ranked := make([]scoredNode, 0, len(nodes))
+// scoreCandidates returns the ranked candidate slice the simulator actually
+// binds from, truncated to defaultPriorityCandidateNum, plus the number of
+// feasible nodes counted before that truncation. Reporting both keeps
+// feasible-set breadth distinguishable from the post-cap ranked count.
+func scoreCandidates(nodes []simNode, req Request, weights profileWeights) (ranked []scoredNode, feasible int) {
+	ranked = make([]scoredNode, 0, len(nodes))
 	for i := range nodes {
 		if !fits(nodes[i], req) {
 			continue
@@ -868,6 +1282,7 @@ func scoreCandidates(nodes []simNode, req Request, weights profileWeights) []sco
 			score: scoreNode(nodes[i], req, weights),
 		})
 	}
+	feasible = len(ranked)
 	sort.SliceStable(ranked, func(i, j int) bool {
 		if ranked[i].score == ranked[j].score {
 			return nodes[ranked[i].index].spec.ID < nodes[ranked[j].index].spec.ID
@@ -875,9 +1290,9 @@ func scoreCandidates(nodes []simNode, req Request, weights profileWeights) []sco
 		return ranked[i].score > ranked[j].score
 	})
 	if len(ranked) > defaultPriorityCandidateNum {
-		return ranked[:defaultPriorityCandidateNum]
+		return ranked[:defaultPriorityCandidateNum], feasible
 	}
-	return ranked
+	return ranked, feasible
 }
 
 func scoreNode(n simNode, req Request, weights profileWeights) float64 {

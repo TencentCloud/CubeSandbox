@@ -22,21 +22,23 @@ go run ./cmd/schedulerbench --out ./schedulerbench-report
 It writes `report.json` and `report.md` by default. Use `--format json`,
 `--format markdown`, or `--format both` to select output files.
 
-Run `go run ./cmd/schedulerbench --verify --out ./schedulerbench-report` to
-check the generated in-memory report against the default workload/profile
-acceptance contract, including its metric, comparison, and simulator-only
-latency requirements, before files are written. `--verify` is not a validator
-for arbitrary runs: a valid run with a reduced `--profiles` or `--workloads`
-selection fails verification because it does not contain the default acceptance
-matrix. Such reduced runs can still generate reports when `--verify` is
-omitted. Verification checks report structure and terminology only; it does not
-validate a real multi-node run or measured CubeAPI/Cubelet create latency.
+Use these verification commands from `CubeMaster`:
+
+```bash
+go test ./pkg/scheduler/simulator ./cmd/schedulerbench
+go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
+```
+
+`--verify` checks the default report's structure and internal consistency
+before files are written. It is not a validator for arbitrary reduced
+`--profiles` or `--workloads` runs, and it does not validate live performance
+or semantic equivalence to production scheduling.
 
 ## Top-Level Shape
 
 ```json
 {
-  "run_id": "scheduler-sim-seed-20260903-nodes-4",
+  "run_id": "scheduler-sim-seed-20260903-nodes-4-4b1a18ca3c7b",
   "config": {
     "seed": 20260903,
     "node_count": 4,
@@ -52,13 +54,9 @@ validate a real multi-node run or measured CubeAPI/Cubelet create latency.
       "mixed_size"
     ]
   },
-  "acceptance_path": {
-    "acceptance_path": "Each workload runs once per profile and reports baseline-vs-profile placement and quality metrics.",
-    "domain_lens": "Scheduler score semantics: filter infeasible nodes first, score remaining candidates, then bind the highest score.",
-    "failure_path": "Requests that cannot fit any node are counted as rejected with explicit failure reasons; invalid profile/workload names fail the run.",
-    "evidence_path": "The JSON and Markdown reports include seed, node count, workload definitions, profile names, placement counts, and metric schema.",
-    "review_path": "Offline deterministic benchmark package plus thin CLI; no production scheduler default behavior changes.",
-    "distinctive_angle": "Measurement-path integrity and claim-evidence mapping are built into the generated report instead of only producing headline numbers."
+  "provenance": {
+    "git_revision": "unknown",
+    "git_dirty": null
   },
   "metric_schema": [
     {
@@ -92,8 +90,10 @@ validate a real multi-node run or measured CubeAPI/Cubelet create latency.
             "uses_estimated_latency": true,
             "average_cpu_headroom": 0.58,
             "average_score_margin": 1.47,
-            "average_candidates_scored": 2.88,
-            "score_evaluations": 230,
+            "average_feasible_candidates": 4.0,
+            "average_ranked_candidates_retained": 2.88,
+            "feasible_candidate_evaluations": 320,
+            "ranked_candidates_retained": 230,
             "node_final_state": {
               "node-a": {
                 "running_sandbox_count": 12,
@@ -146,12 +146,13 @@ needed; generated benchmark reports are not checked into the repository.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `run_id` | string | yes | Deterministic run identifier derived from seed and node count. |
+| `run_id` | string | yes | Readable seed/node prefix plus a 12-hex SHA-256 prefix over effective seed, node count, ordered profiles/workloads, Git revision, and dirty state. |
 | `config.seed` | number | yes | Deterministic workload seed. |
 | `config.node_count` | number | yes | Simulated node count (**1–4**). |
 | `config.profiles` | string array | yes | Profiles included in the run. |
 | `config.workloads` | string array | yes | Workloads included in the run. |
-| `acceptance_path.*` | object | yes | Claim-evidence and review-scope context for the report. |
+| `provenance.git_revision` | string | yes | Source revision, or `unknown` when unavailable. Build-info VCS settings take priority; the CLI falls back to bounded, read-only Git commands. |
+| `provenance.git_dirty` | boolean or null | yes | Whether the source tree was modified; `null` means the state is unknown. |
 | `metric_schema[]` | array | yes | Metric contract entries with `name`, `description`, and `direction`. |
 | `results[]` | array | yes | One entry per profile. |
 | `results[].profile` | string | yes | Profile name. |
@@ -160,8 +161,8 @@ needed; generated benchmark reports are not checked into the repository.
 | `results[].workloads[].metrics` | object | yes | Metric values for this profile/workload pair. |
 | `comparisons[]` | array | yes | Baseline-vs-candidate comparisons using `default` as baseline. |
 
-The current report does not emit `generated_at`, `git_revision`, a captured
-`command`, a top-level `simulator` object, top-level `baseline`/`candidate`
+The current report does not emit `generated_at`, a captured `command`, a
+top-level `simulator` object, top-level `baseline`/`candidate`
 objects, or top-level `limitations`. Simulator-only limitations are represented
 in metric descriptions, comparison notes, and `uses_estimated_latency`.
 
@@ -185,8 +186,10 @@ Every `results[].workloads[].metrics` object contains these keys:
 - `uses_estimated_latency`
 - `average_cpu_headroom`
 - `average_score_margin` (mean first–second score gap over multi-candidate decisions only; 0 when none)
-- `average_candidates_scored`
-- `score_evaluations`
+- `average_feasible_candidates`
+- `average_ranked_candidates_retained`
+- `feasible_candidate_evaluations`
+- `ranked_candidates_retained`
 - `node_final_state`
 
 When at least one request is rejected, the metrics object also includes:
@@ -198,11 +201,18 @@ When at least one request is rejected, the metrics object also includes:
 memory, and sandbox-count capacity failures. Unknown workload/profile names fail
 the command before a report is produced.
 
-`average_candidates_scored` is `score_evaluations / scheduled_requests`.
-`score_evaluations` counts the truncated ranked candidate set returned by
-`scoreCandidates`, which is capped by `defaultPriorityCandidateNum` after
-filtering and scoring. It is a decision-path cost proxy, not the full number of
-feasible nodes examined internally.
+`average_feasible_candidates` is
+`feasible_candidate_evaluations / scheduled_requests` and counts feasible
+nodes before the ranked-candidate cap, so it is at most `node_count`.
+`average_ranked_candidates_retained` is
+`ranked_candidates_retained / scheduled_requests` and counts the post-cap
+ranked set, so it is currently at most 3. Both are simulator-local
+candidate-breadth proxies, not scheduler CPU cost or latency.
+
+If both build information and the CLI Git fallback are unavailable,
+`git_revision` is `unknown` and `git_dirty` is `null`. This state cannot
+distinguish code versions. Reports contain no Git errors, paths, remotes, or
+timestamps.
 
 ## Node Final State
 
@@ -253,7 +263,6 @@ estimated latency needs at least `1.0` ms. Any decline in
 The Markdown report mirrors the same data at a compact level:
 
 - run metadata;
-- acceptance map;
 - profile/workload result table;
 - comparison table;
 - metric contract.

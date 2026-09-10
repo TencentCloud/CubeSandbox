@@ -27,12 +27,12 @@ updated: 2026-09-03
 | `--profiles` | `default,balanced_spread,template_locality_first,binpack_utilization` | 逗号分隔的 Profile 列表 |
 | `--workloads` | `burst_short_lived,same_template_repeated,mixed_size` | 逗号分隔的 workload 列表 |
 | `--format` | `both` | 输出格式：`json`、`markdown` 或 `both` |
-| `--verify` | `false` | 写报告前检查默认 workload/Profile 矩阵、关键指标、对比项和 simulator-only 延迟口径 |
+| `--verify` | `false` | 写报告前检查默认报告的结构与内部一致性；不验证实时性能 |
 
 常用命令：
 
 ```bash
-go run ./cmd/schedulerbench --out ./schedulerbench-report
+go test ./pkg/scheduler/simulator ./cmd/schedulerbench
 go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
 ```
 
@@ -78,6 +78,7 @@ JSON 路径如下。
 
 ```text
 report.json
+  provenance                       git_revision / git_dirty
   metric_schema[]                  指标合同：name / description / direction
   results[]
     profile
@@ -100,7 +101,8 @@ Markdown 结果表列名与 JSON 字段对应关系（`Report.Markdown()`）：
 | `mem util` | `mem_quota_utilization` |
 | `latency p50 ms` | `create_latency_p50_ms` |
 | `latency p95 ms` | `create_latency_p95_ms` |
-| `avg candidates` | `average_candidates_scored` |
+| `avg feasible` | `average_feasible_candidates` |
+| `avg retained` | `average_ranked_candidates_retained` |
 
 `Metrics` 的 JSON 字段与 `simulator.go` 中 struct tag **一一对应**，没有其它 metrics 键：
 
@@ -122,8 +124,10 @@ Markdown 结果表列名与 JSON 字段对应关系（`Report.Markdown()`）：
 | `UsesEstimatedLatency` | `uses_estimated_latency` | simulator 中恒为 `true` |
 | `AverageCPUHeadroom` | `average_cpu_headroom` | 每次成功放置后的平均 CPU 余量 |
 | `AverageScoreMargin` | `average_score_margin` | 第一名与第二名分数差的均值，仅对至少有两个已打分候选的调度决策取平均；无此类观测时为 **0** |
-| `AverageCandidatesScored` | `average_candidates_scored` | `score_evaluations / scheduled_requests` |
-| `ScoreEvaluations` | `score_evaluations` | 截断后参与决策的候选节点次数之和 |
+| `AverageFeasibleCandidates` | `average_feasible_candidates` | `feasible_candidate_evaluations / scheduled_requests`；在候选上限截断前计数 |
+| `AverageRankedCandidatesRetained` | `average_ranked_candidates_retained` | `ranked_candidates_retained / scheduled_requests` |
+| `FeasibleEvaluations` | `feasible_candidate_evaluations` | 候选上限截断前的可行节点数之和 |
+| `RankedCandidatesRetained` | `ranked_candidates_retained` | 截断后保留的已排序候选节点数之和 |
 | `FailureReasons` | `failure_reasons` | 有拒绝时出现；当前只记 `no_feasible_node`（`omitempty`） |
 | `Warnings` | `warnings` | 有拒绝时出现容量提示（`omitempty`） |
 | `NodeFinalState` | `node_final_state` | 各节点最终占用；值为 `NodeLoad` |
@@ -138,7 +142,12 @@ Markdown 结果表列名与 JSON 字段对应关系（`Report.Markdown()`）：
 | `CPUUtilization` | `cpu_utilization` |
 | `MemUtilization` | `mem_utilization` |
 
-`scoreCandidates` 会先过滤并排序可行节点，再最多保留 `defaultPriorityCandidateNum`（当前为 3）个候选节点。因此 `score_evaluations` 与 `average_candidates_scored` 的分子按截断后的候选集计数，是决策路径成本的近似值，不是内部检查过的完整可行节点数。
+`scoreCandidates` 先统计全部可行节点，再最多保留 `defaultPriorityCandidateNum`
+（当前为 3）个已排序候选。因此 `feasible_candidate_evaluations` /
+`average_feasible_candidates` 表示截断前可行宽度（最大为节点数），
+`ranked_candidates_retained` / `average_ranked_candidates_retained`
+表示截断后保留的排序宽度（最大为 3）。
+两者都是 simulator 本地宽度代理，不是调度器 CPU 开销或延迟。
 
 `docs/dev/scheduler-benchmark-report-schema.md` 描述当前 CLI 输出的 profile × workload 矩阵和 `comparisons[]` 对比结构。本文以当前 `Metrics` 字段为准。
 
@@ -478,7 +487,7 @@ Profile 同样只有四个合法名：`default`、`balanced_spread`、`template_
 
 ## 已知限制
 
-- simulator 复现的是 Filter 可行集 + Score 排序 + 绑定最高分，不是完整 CubeMaster 流水线。
+- simulator 使用自己的 filter → score → bind 规则，不是完整 CubeMaster 流水线或生产插件语义。
 - 最终快照指标不代表高峰占用；短生命周期场景尤其明显。
 - 装箱率是节点等权配额利用率，不是集群加权装箱率，也不是真实资源使用率。
 - 模板命中基于静态初始缓存。

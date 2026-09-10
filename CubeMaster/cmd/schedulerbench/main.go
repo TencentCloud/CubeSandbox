@@ -5,12 +5,16 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/simulator"
 )
@@ -20,8 +24,13 @@ const (
 	formatMarkdown = "markdown"
 	formatBoth     = "both"
 	defaultFormat  = formatBoth
-	verifyScope    = "default report structure/terminology contract"
+	verifyScope    = "default report structural and internal-consistency contract"
+	gitTimeout     = 2 * time.Second
 )
+
+type provenanceResolver func() simulator.Provenance
+
+type gitCommandRunner func(context.Context, ...string) ([]byte, error)
 
 func main() {
 	if err := runCLI(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -31,17 +40,21 @@ func main() {
 }
 
 func runCLI(args []string, stdout, stderr io.Writer) error {
+	return runCLIWithProvenance(args, stdout, stderr, buildProvenance)
+}
+
+func runCLIWithProvenance(args []string, stdout, stderr io.Writer, resolve provenanceResolver) error {
 	defaultConfig := simulator.DefaultConfig()
 	flags := flag.NewFlagSet("schedulerbench", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	var (
 		outDir    = flags.String("out", "schedulerbench-report", "directory for report.json and report.md")
-		seed      = flags.Int64("seed", defaultConfig.Seed, "deterministic workload seed recorded in the report (non-zero; 0 is reserved as the library unset sentinel)")
+		seed      = flags.Int64("seed", defaultConfig.Seed, "deterministic workload seed recorded in the report; must be non-zero because 0 is reserved as the library unset sentinel and is rejected here")
 		nodeCount = flags.Int("nodes", defaultConfig.NodeCount, "simulated node count (1-4)")
 		profiles  = flags.String("profiles", strings.Join(defaultConfig.Profiles, ","), "comma-separated profile list")
 		workloads = flags.String("workloads", strings.Join(defaultConfig.Workloads, ","), "comma-separated workload list")
 		format    = flags.String("format", defaultFormat, "report format: json, markdown, or both")
-		verify    = flags.Bool("verify", false, "verify the default report structure/terminology contract (not arbitrary --profiles/--workloads subsets; does not prove live scheduling performance)")
+		verify    = flags.Bool("verify", false, "check the "+verifyScope+" (not arbitrary --profiles/--workloads subsets; checks structure and internal consistency only, not live scheduling performance or semantic equivalence to production scheduling)")
 	)
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -56,7 +69,7 @@ func runCLI(args []string, stdout, stderr io.Writer) error {
 	// Explicit CLI --seed 0 must fail rather than silently becoming the
 	// library default via normalizeConfig (0 is the unset sentinel).
 	if *seed == 0 {
-		return fmt.Errorf("invalid --seed: 0 is reserved as the unset sentinel; pass a non-zero seed")
+		return fmt.Errorf("invalid --seed: 0 is reserved; pass a non-zero seed")
 	}
 	// Explicit CLI --nodes 0 must fail rather than silently becoming the
 	// library default via normalizeConfig.
@@ -74,10 +87,11 @@ func runCLI(args []string, stdout, stderr io.Writer) error {
 	}
 
 	cfg := simulator.Config{
-		Seed:      *seed,
-		NodeCount: *nodeCount,
-		Profiles:  profileList,
-		Workloads: workloadList,
+		Seed:       *seed,
+		NodeCount:  *nodeCount,
+		Profiles:   profileList,
+		Workloads:  workloadList,
+		Provenance: resolve(),
 	}
 	report, err := simulator.Run(cfg)
 	if err != nil {
@@ -93,10 +107,60 @@ func runCLI(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if *verify {
-		fmt.Fprintf(stdout, "scheduler benchmark %s passed (structure and terminology only; not live scheduling performance)\n", verifyScope)
+		fmt.Fprintf(stdout, "scheduler benchmark %s passed (structure and internal consistency only; not live scheduling performance and not semantic equivalence to production scheduling)\n", verifyScope)
 	}
 	fmt.Fprintf(stdout, "scheduler benchmark report written to %s\n", *outDir)
 	return nil
+}
+
+// buildProvenance prefers complete VCS stamps from embedded build information,
+// including those that the Go toolchain may provide for `go run`. When those
+// stamps are unavailable, the CLI narrowly falls back to bounded, read-only
+// Git commands. Process execution remains outside the simulator library.
+func buildProvenance() simulator.Provenance {
+	return resolveProvenance(debug.ReadBuildInfo, runGitCommand)
+}
+
+func resolveProvenance(
+	readBuildInfo func() (*debug.BuildInfo, bool),
+	runGit gitCommandRunner,
+) simulator.Provenance {
+	if info, ok := readBuildInfo(); ok {
+		var revision string
+		var dirty *bool
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				revision = strings.TrimSpace(setting.Value)
+			case "vcs.modified":
+				if setting.Value == "true" || setting.Value == "false" {
+					value := setting.Value == "true"
+					dirty = &value
+				}
+			}
+		}
+		if revision != "" && dirty != nil {
+			return simulator.Provenance{GitRevision: revision, GitDirty: dirty}
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	revisionBytes, err := runGit(ctx, "rev-parse", "HEAD")
+	revision := strings.TrimSpace(string(revisionBytes))
+	if err != nil || revision == "" {
+		return simulator.Provenance{}
+	}
+	statusBytes, err := runGit(ctx, "status", "--porcelain")
+	if err != nil {
+		return simulator.Provenance{GitRevision: revision}
+	}
+	dirty := len(strings.TrimSpace(string(statusBytes))) > 0
+	return simulator.Provenance{GitRevision: revision, GitDirty: &dirty}
+}
+
+func runGitCommand(ctx context.Context, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, "git", args...).Output()
 }
 
 func validateFormat(format string) error {
@@ -143,9 +207,6 @@ func splitCSV(in, kind string) ([]string, error) {
 		}
 		seen[part] = struct{}{}
 		result = append(result, part)
-	}
-	if len(result) == 0 {
-		return nil, fmt.Errorf("invalid --%ss: at least one %s is required", kind, kind)
 	}
 	return result, nil
 }

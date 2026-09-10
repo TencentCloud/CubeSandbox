@@ -6,9 +6,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -19,6 +22,145 @@ func TestDefaultFormatIsBoth(t *testing.T) {
 	if defaultFormat != formatBoth {
 		t.Fatalf("default format = %q, want %q so both report.json and report.md are written", defaultFormat, formatBoth)
 	}
+}
+
+func TestResolveProvenancePriorityAndFallbacks(t *testing.T) {
+	t.Parallel()
+
+	buildInfo := func(revision, modified string) func() (*debug.BuildInfo, bool) {
+		return func() (*debug.BuildInfo, bool) {
+			return &debug.BuildInfo{Settings: []debug.BuildSetting{
+				{Key: "vcs.revision", Value: revision},
+				{Key: "vcs.modified", Value: modified},
+			}}, true
+		}
+	}
+	unavailableBuildInfo := func() (*debug.BuildInfo, bool) { return nil, false }
+
+	tests := []struct {
+		name          string
+		readBuildInfo func() (*debug.BuildInfo, bool)
+		runGit        gitCommandRunner
+		wantRevision  string
+		wantDirty     *bool
+		wantGitCalls  int
+	}{
+		{
+			name:          "build info success takes precedence",
+			readBuildInfo: buildInfo("build-revision", "true"),
+			runGit: func(context.Context, ...string) ([]byte, error) {
+				return nil, errors.New("must not run")
+			},
+			wantRevision: "build-revision",
+			wantDirty:    boolPointer(true),
+		},
+		{
+			name:          "git fallback clean",
+			readBuildInfo: unavailableBuildInfo,
+			runGit: sequenceGitRunner([]gitResult{
+				{output: "clean-revision\n"},
+				{output: ""},
+			}),
+			wantRevision: "clean-revision",
+			wantDirty:    boolPointer(false),
+			wantGitCalls: 2,
+		},
+		{
+			name:          "git fallback dirty",
+			readBuildInfo: unavailableBuildInfo,
+			runGit: sequenceGitRunner([]gitResult{
+				{output: "dirty-revision\n"},
+				{output: " M tracked.go\n?? new.txt\n"},
+			}),
+			wantRevision: "dirty-revision",
+			wantDirty:    boolPointer(true),
+			wantGitCalls: 2,
+		},
+		{
+			name:          "both sources unavailable",
+			readBuildInfo: unavailableBuildInfo,
+			runGit: func(context.Context, ...string) ([]byte, error) {
+				return nil, errors.New("git unavailable")
+			},
+			wantRevision: "",
+			wantDirty:    nil,
+			wantGitCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			runGit := func(ctx context.Context, args ...string) ([]byte, error) {
+				calls++
+				return tt.runGit(ctx, args...)
+			}
+			got := resolveProvenance(tt.readBuildInfo, runGit)
+			if got.GitRevision != tt.wantRevision {
+				t.Fatalf("GitRevision = %q, want %q", got.GitRevision, tt.wantRevision)
+			}
+			if !equalOptionalBool(got.GitDirty, tt.wantDirty) {
+				t.Fatalf("GitDirty = %v, want %v", optionalBoolValue(got.GitDirty), optionalBoolValue(tt.wantDirty))
+			}
+			if calls != tt.wantGitCalls {
+				t.Fatalf("Git calls = %d, want %d", calls, tt.wantGitCalls)
+			}
+		})
+	}
+}
+
+func TestRunCLIUsesInjectedProvenanceResolver(t *testing.T) {
+	t.Parallel()
+
+	outDir := t.TempDir()
+	clean := false
+	resolve := func() simulator.Provenance {
+		return simulator.Provenance{GitRevision: "injected-revision", GitDirty: &clean}
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := runCLIWithProvenance([]string{
+		"--out", outDir,
+		"--profiles", simulator.ProfileDefault,
+		"--workloads", simulator.WorkloadBurstShortLived,
+	}, &stdout, &stderr, resolve); err != nil {
+		t.Fatalf("runCLIWithProvenance() error = %v, stderr = %q", err, stderr.String())
+	}
+	report := loadCLIReportJSON(t, outDir)
+	if report.Provenance.GitRevision != "injected-revision" ||
+		!equalOptionalBool(report.Provenance.GitDirty, &clean) {
+		t.Fatalf("report provenance = %+v, want injected clean revision", report.Provenance)
+	}
+}
+
+type gitResult struct {
+	output string
+	err    error
+}
+
+func sequenceGitRunner(results []gitResult) gitCommandRunner {
+	index := 0
+	return func(context.Context, ...string) ([]byte, error) {
+		if index >= len(results) {
+			return nil, errors.New("unexpected Git call")
+		}
+		result := results[index]
+		index++
+		return []byte(result.output), result.err
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
+
+func equalOptionalBool(a, b *bool) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
+}
+
+func optionalBoolValue(value *bool) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 func TestRunCLIVerifySucceeds(t *testing.T) {
@@ -39,8 +181,8 @@ func TestRunCLIVerifySucceeds(t *testing.T) {
 	if !bytes.Contains(stdout.Bytes(), []byte(verifyScope+" passed")) {
 		t.Fatalf("runCLI(--verify) stdout = %q, want verification success", stdout.String())
 	}
-	if !bytes.Contains(stdout.Bytes(), []byte("structure and terminology only")) {
-		t.Fatalf("runCLI(--verify) stdout = %q, want structure/terminology framing", stdout.String())
+	if !bytes.Contains(stdout.Bytes(), []byte("structure and internal consistency only")) {
+		t.Fatalf("runCLI(--verify) stdout = %q, want structural/internal-consistency framing", stdout.String())
 	}
 }
 
@@ -82,10 +224,20 @@ func TestRunCLIDefaultReportJSONContract(t *testing.T) {
 		t.Fatalf("unmarshal report.json: %v", err)
 	}
 
-	for _, key := range []string{"run_id", "config", "acceptance_path", "metric_schema", "results", "comparisons"} {
+	for _, key := range []string{"run_id", "config", "provenance", "metric_schema", "results", "comparisons"} {
 		if _, ok := root[key]; !ok {
 			t.Fatalf("CLI report.json missing top-level key %q", key)
 		}
+	}
+	provenance, _ := root["provenance"].(map[string]any)
+	if provenance == nil {
+		t.Fatal("CLI report.json provenance is not an object")
+	}
+	if revision, ok := provenance["git_revision"].(string); !ok || revision == "" {
+		t.Fatalf("CLI provenance.git_revision = %v, want non-empty string", provenance["git_revision"])
+	}
+	if _, ok := provenance["git_dirty"]; !ok {
+		t.Fatal("CLI provenance missing git_dirty")
 	}
 
 	config, _ := root["config"].(map[string]any)
@@ -122,6 +274,10 @@ func TestRunCLIDefaultReportJSONContract(t *testing.T) {
 		"create_latency_p50_ms",
 		"create_latency_p95_ms",
 		"uses_estimated_latency",
+		"average_feasible_candidates",
+		"average_ranked_candidates_retained",
+		"feasible_candidate_evaluations",
+		"ranked_candidates_retained",
 		"node_final_state",
 	}
 	for _, item := range results {
@@ -138,6 +294,11 @@ func TestRunCLIDefaultReportJSONContract(t *testing.T) {
 			for _, key := range requiredMetrics {
 				if _, ok := metrics[key]; !ok {
 					t.Fatalf("CLI %s/%s metrics missing %q", profileName, workloadName, key)
+				}
+			}
+			for _, oldKey := range []string{"average_candidates_scored", "score_evaluations"} {
+				if _, ok := metrics[oldKey]; ok {
+					t.Fatalf("CLI %s/%s metrics retains removed key %q", profileName, workloadName, oldKey)
 				}
 			}
 			estimated, ok := metrics["uses_estimated_latency"].(bool)
@@ -186,13 +347,6 @@ func TestRunCLIDefaultReportJSONContract(t *testing.T) {
 			if _, ok := deltas[key]; !ok {
 				t.Fatalf("CLI comparisons[%d].deltas missing %q", i, key)
 			}
-		}
-		notes := strings.ToLower(strings.Join(jsonStrings(t, cmp["notes"]), " "))
-		if !strings.Contains(notes, "simulat") ||
-			!strings.Contains(notes, "estimat") ||
-			(!strings.Contains(notes, "not live") && !strings.Contains(notes, "not measured")) {
-			t.Fatalf("CLI comparisons[%d] notes must keep simulator-only/estimated/not-live-or-not-measured scope, got %v",
-				i, cmp["notes"])
 		}
 	}
 }
@@ -679,8 +833,9 @@ func TestRunCLIRejectsSeedZero(t *testing.T) {
 	if err == nil {
 		t.Fatal("runCLI() error = nil, want invalid --seed")
 	}
-	if !strings.Contains(err.Error(), "seed") {
-		t.Fatalf("runCLI() error = %q, want seed message", err)
+	const want = "invalid --seed: 0 is reserved; pass a non-zero seed"
+	if err.Error() != want {
+		t.Fatalf("runCLI() error = %q, want %q", err, want)
 	}
 	if fileExists(t, outDir) {
 		t.Fatal("report written despite invalid --seed")
@@ -696,9 +851,14 @@ func TestRunCLIRejectsEmptyAndDuplicateCSV(t *testing.T) {
 		want string
 	}{
 		{
+			name: "empty profiles",
+			args: []string{"--profiles", ""},
+			want: "invalid --profiles: empty profile name",
+		},
+		{
 			name: "empty profile item",
 			args: []string{"--profiles", "default,,balanced_spread"},
-			want: "empty profile",
+			want: "invalid --profiles: empty profile name",
 		},
 		{
 			name: "duplicate profile",
@@ -706,9 +866,14 @@ func TestRunCLIRejectsEmptyAndDuplicateCSV(t *testing.T) {
 			want: "duplicate profile",
 		},
 		{
+			name: "empty workloads",
+			args: []string{"--workloads", ""},
+			want: "invalid --workloads: empty workload name",
+		},
+		{
 			name: "empty workload item",
 			args: []string{"--workloads", "burst_short_lived,,mixed_size"},
-			want: "empty workload",
+			want: "invalid --workloads: empty workload name",
 		},
 		{
 			name: "duplicate workload",

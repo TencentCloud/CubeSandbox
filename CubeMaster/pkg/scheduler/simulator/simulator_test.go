@@ -7,6 +7,7 @@ package simulator
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 )
@@ -23,13 +24,8 @@ func TestRunCoversMinimumWorkloadsProfilesAndMetrics(t *testing.T) {
 	if len(report.MetricSchema) < 5 {
 		t.Fatalf("len(report.MetricSchema) = %d, want at least 5 metrics", len(report.MetricSchema))
 	}
-	if report.AcceptancePath.AcceptancePath == "" ||
-		report.AcceptancePath.DomainLens == "" ||
-		report.AcceptancePath.FailurePath == "" ||
-		report.AcceptancePath.EvidencePath == "" ||
-		report.AcceptancePath.ReviewPath == "" ||
-		report.AcceptancePath.DistinctiveAngle == "" {
-		t.Fatalf("acceptance map must include all required paths: %+v", report.AcceptancePath)
+	if report.Provenance.GitRevision != UnknownRevision {
+		t.Fatalf("Provenance.GitRevision = %q, want %q", report.Provenance.GitRevision, UnknownRevision)
 	}
 
 	for _, profile := range report.Results {
@@ -46,9 +42,13 @@ func TestRunCoversMinimumWorkloadsProfilesAndMetrics(t *testing.T) {
 					profile.Profile, workload.Workload,
 					m.ScheduledRequests+m.RejectedRequests, m.TotalRequests)
 			}
-			if m.AverageCandidatesScored <= 0 {
-				t.Fatalf("%s/%s AverageCandidatesScored = %f, want > 0",
-					profile.Profile, workload.Workload, m.AverageCandidatesScored)
+			if m.AverageRankedCandidatesRetained <= 0 {
+				t.Fatalf("%s/%s AverageRankedCandidatesRetained = %f, want > 0",
+					profile.Profile, workload.Workload, m.AverageRankedCandidatesRetained)
+			}
+			if m.AverageFeasibleCandidates < m.AverageRankedCandidatesRetained {
+				t.Fatalf("%s/%s AverageFeasibleCandidates = %f, want >= AverageRankedCandidatesRetained %f",
+					profile.Profile, workload.Workload, m.AverageFeasibleCandidates, m.AverageRankedCandidatesRetained)
 			}
 			if m.CreateLatencyP50MS <= 0 || m.CreateLatencyP95MS <= 0 {
 				t.Fatalf("%s/%s latency p50/p95 = %f/%f, want > 0",
@@ -108,42 +108,161 @@ func TestVerifyDefaultReportRejectsContractGaps(t *testing.T) {
 			mutate: func(report *Report) {
 				report.Comparisons = report.Comparisons[1:]
 			},
-			want: "missing default-vs-",
+			want: "report has 8 comparisons, want 9",
 		},
 		{
 			name: "missing comparison metric",
 			mutate: func(report *Report) {
 				delete(report.Comparisons[0].Deltas, "schedule_success_rate")
 			},
-			want: "comparison missing delta",
+			want: "comparison has 6 deltas, want exactly 7",
 		},
 		{
 			name: "missing estimated latency marker",
 			mutate: func(report *Report) {
 				report.Results[0].Workloads[0].Metrics.UsesEstimatedLatency = false
 			},
-			want: "uses_estimated_latency must be true",
+			want: "uses_estimated_latency is false",
 		},
 		{
-			name: "stripped uses_estimated_latency schema wording",
+			name: "duplicate profile result",
 			mutate: func(report *Report) {
-				for i, metric := range report.MetricSchema {
-					if metric.Name == "uses_estimated_latency" {
-						report.MetricSchema[i].Description = "latency flag"
-						return
-					}
-				}
+				report.Results = append(report.Results, report.Results[0])
 			},
-			want: "simulator-only estimates",
+			want: "duplicate profile result",
 		},
 		{
-			name: "stripped comparison notes wording",
+			name: "duplicate workload result",
 			mutate: func(report *Report) {
-				for i := range report.Comparisons {
-					report.Comparisons[i].Notes = []string{"numeric deltas only"}
+				report.Results[0].Workloads = append(report.Results[0].Workloads, report.Results[0].Workloads[0])
+			},
+			want: "duplicate metrics",
+		},
+		{
+			name: "request accounting mismatch",
+			mutate: func(report *Report) {
+				report.Results[0].Workloads[0].Metrics.ScheduledRequests--
+			},
+			want: "request accounting is inconsistent",
+		},
+		{
+			name: "non-finite metric",
+			mutate: func(report *Report) {
+				report.Results[0].Workloads[0].Metrics.AverageScoreMargin = math.NaN()
+			},
+			want: "average_score_margin is not finite",
+		},
+		{
+			name: "bad comparison baseline",
+			mutate: func(report *Report) {
+				report.Comparisons[0].BaselineProfile = ProfileBalancedSpread
+			},
+			want: "baseline_profile",
+		},
+		{
+			name: "wrong comparison delta",
+			mutate: func(report *Report) {
+				report.Comparisons[0].Deltas["schedule_success_rate"] += 0.1
+			},
+			want: "want 0 from the referenced results",
+		},
+		{
+			name: "wrong run id",
+			mutate: func(report *Report) {
+				report.RunID = "wrong"
+			},
+			want: "does not identify the effective config and provenance",
+		},
+		{
+			name: "empty git revision",
+			mutate: func(report *Report) {
+				report.Provenance.GitRevision = ""
+			},
+			want: "provenance git_revision is empty",
+		},
+		{
+			name: "average feasible candidates mismatch",
+			mutate: func(report *Report) {
+				report.Results[0].Workloads[0].Metrics.AverageFeasibleCandidates++
+			},
+			want: "average_feasible_candidates",
+		},
+		{
+			name: "cpu headroom above one",
+			mutate: func(report *Report) {
+				report.Results[0].Workloads[0].Metrics.AverageCPUHeadroom = 1.1
+			},
+			want: "average_cpu_headroom",
+		},
+		{
+			name: "negative candidate average",
+			mutate: func(report *Report) {
+				report.Results[0].Workloads[0].Metrics.AverageFeasibleCandidates = -0.1
+			},
+			want: "candidate averages are negative",
+		},
+		{
+			name: "feasible counter below scheduled requests",
+			mutate: func(report *Report) {
+				m := &report.Results[0].Workloads[0].Metrics
+				m.FeasibleEvaluations = m.ScheduledRequests - 1
+			},
+			want: "feasible_candidate_evaluations",
+		},
+		{
+			name: "feasible counter exceeds per-request node bound",
+			mutate: func(report *Report) {
+				m := &report.Results[0].Workloads[0].Metrics
+				m.FeasibleEvaluations = m.ScheduledRequests*report.Config.NodeCount + 1
+				m.AverageFeasibleCandidates = float64(m.FeasibleEvaluations) / float64(m.ScheduledRequests)
+			},
+			want: "scheduled_requests*node_count bound",
+		},
+		{
+			name: "retained counter exceeds per-request cap",
+			mutate: func(report *Report) {
+				m := &report.Results[0].Workloads[0].Metrics
+				m.RankedCandidatesRetained = m.ScheduledRequests*defaultPriorityCandidateNum + 1
+				m.FeasibleEvaluations = m.RankedCandidatesRetained
+				m.AverageRankedCandidatesRetained = float64(m.RankedCandidatesRetained) / float64(m.ScheduledRequests)
+				m.AverageFeasibleCandidates = m.AverageRankedCandidatesRetained
+			},
+			want: "ranked-candidate-cap bound",
+		},
+		{
+			name: "zero scheduled request has stale average",
+			mutate: func(report *Report) {
+				m := &report.Results[0].Workloads[0].Metrics
+				m.ScheduledRequests = 0
+				m.RejectedRequests = m.TotalRequests
+				m.PlacementCounts = map[string]int{}
+				m.FailureReasons = map[string]int{"no_feasible_node": m.TotalRequests}
+				m.TemplateLocalityHitRate = 0
+				m.CreateLatencyP50MS = 0
+				m.CreateLatencyP95MS = 0
+				m.AverageCPUHeadroom = 0
+				m.AverageScoreMargin = 0.25
+				m.AverageFeasibleCandidates = 0
+				m.AverageRankedCandidatesRetained = 0
+				m.FeasibleEvaluations = 0
+				m.RankedCandidatesRetained = 0
+				m.SuccessRate = 0
+			},
+			want: "average_score_margin is 0.25 with zero scheduled_requests",
+		},
+		{
+			name: "node final state swaps expected id",
+			mutate: func(report *Report) {
+				m := &report.Results[0].Workloads[0].Metrics
+				load := m.NodeFinalState["node-a"]
+				delete(m.NodeFinalState, "node-a")
+				m.NodeFinalState["node-unknown"] = load
+				if count, ok := m.PlacementCounts["node-a"]; ok {
+					delete(m.PlacementCounts, "node-a")
+					m.PlacementCounts["node-unknown"] = count
 				}
 			},
-			want: "simulator-only estimates",
+			want: "node_final_state contains unexpected node",
 		},
 	}
 
@@ -162,6 +281,43 @@ func TestVerifyDefaultReportRejectsContractGaps(t *testing.T) {
 				t.Fatalf("VerifyDefaultReport() error = %q, want it to contain %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestVerifyDefaultReportIgnoresHarmlessDescriptionRewording(t *testing.T) {
+	report, err := Run(DefaultConfig())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	for i := range report.MetricSchema {
+		report.MetricSchema[i].Description = "Reworded non-empty metric description."
+	}
+	for i := range report.Comparisons {
+		report.Comparisons[i].Notes = []string{"Reworded human-readable note."}
+	}
+	if err := VerifyDefaultReport(report); err != nil {
+		t.Fatalf("VerifyDefaultReport() rejected harmless prose changes: %v", err)
+	}
+}
+
+func TestFeasibleCandidatesAreCountedBeforeRankedCandidateCap(t *testing.T) {
+	nodes := defaultNodes(4)
+	metrics, err := runWorkload(ProfileDefault, nodes, []Request{{
+		ID: "fits-everywhere", Arrival: 0, Lifetime: 1,
+		CPUMilli: 100, MemMB: 100, Template: "test",
+	}})
+	if err != nil {
+		t.Fatalf("runWorkload() error = %v", err)
+	}
+	if metrics.AverageFeasibleCandidates != 4 {
+		t.Fatalf("AverageFeasibleCandidates = %v, want 4", metrics.AverageFeasibleCandidates)
+	}
+	if metrics.AverageRankedCandidatesRetained != 3 {
+		t.Fatalf("AverageRankedCandidatesRetained = %v, want 3", metrics.AverageRankedCandidatesRetained)
+	}
+	if metrics.FeasibleEvaluations != 4 || metrics.RankedCandidatesRetained != 3 {
+		t.Fatalf("candidate counters feasible/retained = %d/%d, want 4/3",
+			metrics.FeasibleEvaluations, metrics.RankedCandidatesRetained)
 	}
 }
 
@@ -211,9 +367,9 @@ func TestBinpackProfileTradesBalanceForHeadroomAndDecisionCost(t *testing.T) {
 		t.Fatalf("spread average cpu headroom = %f, want higher than binpack headroom %f",
 			spreadMetrics.AverageCPUHeadroom, binpackMetrics.AverageCPUHeadroom)
 	}
-	if spreadMetrics.AverageCandidatesScored <= binpackMetrics.AverageCandidatesScored {
-		t.Fatalf("spread average candidates = %f, want higher than binpack candidates %f",
-			spreadMetrics.AverageCandidatesScored, binpackMetrics.AverageCandidatesScored)
+	if spreadMetrics.AverageRankedCandidatesRetained <= binpackMetrics.AverageRankedCandidatesRetained {
+		t.Fatalf("spread average retained candidates = %f, want higher than binpack retained candidates %f",
+			spreadMetrics.AverageRankedCandidatesRetained, binpackMetrics.AverageRankedCandidatesRetained)
 	}
 }
 
@@ -344,7 +500,7 @@ func TestJSONIncludesEstimatedLatencyFields(t *testing.T) {
 	}
 }
 
-func TestMarkdownIncludesAcceptanceMapAndResults(t *testing.T) {
+func TestMarkdownIncludesProvenanceAndResults(t *testing.T) {
 	report, err := Run(Config{
 		Profiles:  []string{ProfileDefault},
 		Workloads: []string{WorkloadBurstShortLived},
@@ -355,10 +511,10 @@ func TestMarkdownIncludesAcceptanceMapAndResults(t *testing.T) {
 
 	md := report.Markdown()
 	for _, want := range []string{
-		"## Acceptance Map",
 		"## Results",
 		"## Comparisons",
 		"## Metric Contract",
+		"git_revision",
 		"burst_short_lived",
 		"default",
 		"latency p50 ms",
@@ -366,6 +522,7 @@ func TestMarkdownIncludesAcceptanceMapAndResults(t *testing.T) {
 		"create_latency_p50_ms",
 		"create_latency_p95_ms",
 		"uses_estimated_latency",
+		"average_feasible_candidates",
 	} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("Markdown() missing %q:\n%s", want, md)
@@ -473,7 +630,15 @@ func TestDefaultReportJSONContractLocksSchema(t *testing.T) {
 
 	root := unmarshalJSONObject(t, raw)
 	assertJSONHasKeys(t, root, "default report top-level",
-		"run_id", "config", "acceptance_path", "metric_schema", "results", "comparisons")
+		"run_id", "config", "provenance", "metric_schema", "results", "comparisons")
+	provenance := jsonObject(t, root["provenance"], "provenance")
+	assertJSONHasKeys(t, provenance, "provenance", "git_revision", "git_dirty")
+	if provenance["git_revision"] != UnknownRevision {
+		t.Fatalf("provenance.git_revision = %v, want %q", provenance["git_revision"], UnknownRevision)
+	}
+	if provenance["git_dirty"] != nil {
+		t.Fatalf("provenance.git_dirty = %v, want null when revision is unknown", provenance["git_dirty"])
+	}
 
 	config := jsonObject(t, root["config"], "config")
 	gotWorkloads := jsonStringSlice(t, config["workloads"], "config.workloads")
@@ -513,6 +678,10 @@ func TestDefaultReportJSONContractLocksSchema(t *testing.T) {
 		"create_latency_p50_ms",
 		"create_latency_p95_ms",
 		"uses_estimated_latency",
+		"average_feasible_candidates",
+		"average_ranked_candidates_retained",
+		"feasible_candidate_evaluations",
+		"ranked_candidates_retained",
 		"node_final_state",
 	}
 	for i, item := range results {
@@ -527,6 +696,11 @@ func TestDefaultReportJSONContractLocksSchema(t *testing.T) {
 			workloadName, _ := workload["workload"].(string)
 			metrics := jsonObject(t, workload["metrics"], "results[%d].workloads[%d].metrics", i, j)
 			assertJSONHasKeys(t, metrics, profileName+"/"+workloadName+" metrics", requiredMetricKeys...)
+			for _, oldKey := range []string{"average_candidates_scored", "score_evaluations"} {
+				if _, ok := metrics[oldKey]; ok {
+					t.Fatalf("%s/%s metrics retains removed key %q", profileName, workloadName, oldKey)
+				}
+			}
 			estimated, ok := metrics["uses_estimated_latency"].(bool)
 			if !ok || !estimated {
 				t.Fatalf("%s/%s uses_estimated_latency = %v, want true: create_latency_p50_ms and create_latency_p95_ms are simulator estimates, not live CubeAPI/Cubelet create latency",
@@ -573,18 +747,7 @@ func TestDefaultReportJSONContractLocksSchema(t *testing.T) {
 		}
 		deltas := jsonObject(t, cmp["deltas"], "comparisons[%d].deltas", i)
 		assertJSONHasKeys(t, deltas, label+".deltas", requiredDeltaKeys...)
-		if !notesHaveSimulatorOnlyEstimatedLatencyScope(jsonStringSlice(t, cmp["notes"], "comparisons[%d].notes", i)) {
-			t.Fatalf("comparisons[%d] notes must keep simulator-only/estimated/not-live-or-not-measured scope, got %v",
-				i, cmp["notes"])
-		}
 	}
-}
-
-func notesHaveSimulatorOnlyEstimatedLatencyScope(notes []string) bool {
-	text := strings.ToLower(strings.Join(notes, " "))
-	return strings.Contains(text, "simulat") &&
-		strings.Contains(text, "estimat") &&
-		(strings.Contains(text, "not live") || strings.Contains(text, "not measured"))
 }
 
 func unmarshalJSONObject(t *testing.T, raw []byte) map[string]any {
@@ -673,6 +836,10 @@ func equalCounts(a, b map[string]int) bool {
 	return true
 }
 
+func boolPtr(value bool) *bool {
+	return &value
+}
+
 func TestNodeCountContractLibraryAndEffectiveSet(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -706,9 +873,9 @@ func TestNodeCountContractLibraryAndEffectiveSet(t *testing.T) {
 			if report.Config.NodeCount != tt.wantNodes {
 				t.Fatalf("Config.NodeCount = %d, want %d", report.Config.NodeCount, tt.wantNodes)
 			}
-			wantID := fmt.Sprintf("scheduler-sim-seed-%d-nodes-%d", report.Config.Seed, tt.wantNodes)
-			if report.RunID != wantID {
-				t.Fatalf("RunID = %q, want %q", report.RunID, wantID)
+			wantPrefix := fmt.Sprintf("scheduler-sim-seed-%d-nodes-%d-", report.Config.Seed, tt.wantNodes)
+			if !strings.HasPrefix(report.RunID, wantPrefix) {
+				t.Fatalf("RunID = %q, want prefix %q", report.RunID, wantPrefix)
 			}
 			for _, profile := range report.Results {
 				for _, workload := range profile.Workloads {
@@ -721,6 +888,85 @@ func TestNodeCountContractLibraryAndEffectiveSet(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunIDIncludesEffectiveSelectionAndProvenance(t *testing.T) {
+	base := DefaultConfig()
+	base.Provenance = Provenance{GitRevision: "abc123", GitDirty: boolPtr(false)}
+	first, err := Run(base)
+	if err != nil {
+		t.Fatalf("Run(base) error = %v", err)
+	}
+	identical, err := Run(base)
+	if err != nil {
+		t.Fatalf("Run(identical) error = %v", err)
+	}
+	if first.RunID != identical.RunID {
+		t.Fatalf("identical configs produced run IDs %q and %q", first.RunID, identical.RunID)
+	}
+
+	mutations := []struct {
+		name string
+		edit func(*Config)
+	}{
+		{name: "seed", edit: func(cfg *Config) { cfg.Seed++ }},
+		{name: "node count", edit: func(cfg *Config) { cfg.NodeCount-- }},
+		{name: "profiles", edit: func(cfg *Config) { cfg.Profiles = cfg.Profiles[:3] }},
+		{name: "workloads", edit: func(cfg *Config) { cfg.Workloads = cfg.Workloads[:2] }},
+		{name: "revision", edit: func(cfg *Config) { cfg.Provenance.GitRevision = "def456" }},
+		{name: "dirty", edit: func(cfg *Config) { cfg.Provenance.GitDirty = boolPtr(true) }},
+	}
+	for _, tt := range mutations {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base
+			cfg.Profiles = append([]string(nil), base.Profiles...)
+			cfg.Workloads = append([]string(nil), base.Workloads...)
+			tt.edit(&cfg)
+			report, err := Run(cfg)
+			if err != nil {
+				t.Fatalf("Run(mutated) error = %v", err)
+			}
+			if report.RunID == first.RunID {
+				t.Fatalf("%s change did not change run_id %q", tt.name, first.RunID)
+			}
+		})
+	}
+}
+
+func TestRunIDUsesNormalizedProvenance(t *testing.T) {
+	clean := false
+	withWhitespace, err := Run(Config{
+		Profiles:   []string{ProfileDefault},
+		Workloads:  []string{WorkloadBurstShortLived},
+		Provenance: Provenance{GitRevision: "  abc123  ", GitDirty: &clean},
+	})
+	if err != nil {
+		t.Fatalf("Run(with whitespace) error = %v", err)
+	}
+	normalized, err := Run(Config{
+		Profiles:   []string{ProfileDefault},
+		Workloads:  []string{WorkloadBurstShortLived},
+		Provenance: Provenance{GitRevision: "abc123", GitDirty: &clean},
+	})
+	if err != nil {
+		t.Fatalf("Run(normalized) error = %v", err)
+	}
+	if withWhitespace.RunID != normalized.RunID {
+		t.Fatalf("normalized-equivalent provenance produced run IDs %q and %q", withWhitespace.RunID, normalized.RunID)
+	}
+
+	unknownDirty := true
+	unknown, err := Run(Config{
+		Profiles:   []string{ProfileDefault},
+		Workloads:  []string{WorkloadBurstShortLived},
+		Provenance: Provenance{GitRevision: " ", GitDirty: &unknownDirty},
+	})
+	if err != nil {
+		t.Fatalf("Run(unknown) error = %v", err)
+	}
+	if unknown.Provenance.GitRevision != UnknownRevision || unknown.Provenance.GitDirty != nil {
+		t.Fatalf("normalized unknown provenance = %+v, want revision unknown and nil dirty", unknown.Provenance)
 	}
 }
 

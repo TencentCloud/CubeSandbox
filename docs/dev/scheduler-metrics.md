@@ -32,12 +32,12 @@ Current CLI flags (`CubeMaster/cmd/schedulerbench/main.go`):
 | `--profiles` | `default,balanced_spread,template_locality_first,binpack_utilization` | Comma-separated profile list |
 | `--workloads` | `burst_short_lived,same_template_repeated,mixed_size` | Comma-separated workload list |
 | `--format` | `both` | Output format: `json`, `markdown`, or `both` |
-| `--verify` | `false` | Before writing, check the default workload/profile matrix, key metrics, comparisons, and simulator-only latency wording |
+| `--verify` | `false` | Before writing, check the default report's structure and internal consistency; this does not validate live performance |
 
 Common commands:
 
 ```bash
-go run ./cmd/schedulerbench --out ./schedulerbench-report
+go test ./pkg/scheduler/simulator ./cmd/schedulerbench
 go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
 ```
 
@@ -102,6 +102,7 @@ JSON paths:
 
 ```text
 report.json
+  provenance                       git_revision / git_dirty
   metric_schema[]                  metric contract: name / description / direction
   results[]
     profile
@@ -124,7 +125,8 @@ Markdown result-table columns map to JSON fields (`Report.Markdown()`):
 | `mem util` | `mem_quota_utilization` |
 | `latency p50 ms` | `create_latency_p50_ms` |
 | `latency p95 ms` | `create_latency_p95_ms` |
-| `avg candidates` | `average_candidates_scored` |
+| `avg feasible` | `average_feasible_candidates` |
+| `avg retained` | `average_ranked_candidates_retained` |
 
 `Metrics` JSON fields match `simulator.go` struct tags **one-to-one**; there are
 no other metrics keys:
@@ -147,8 +149,10 @@ no other metrics keys:
 | `UsesEstimatedLatency` | `uses_estimated_latency` | Always `true` in the simulator |
 | `AverageCPUHeadroom` | `average_cpu_headroom` | Mean CPU headroom after each successful placement |
 | `AverageScoreMargin` | `average_score_margin` | Mean score gap between first and second place, averaged only over scheduled decisions that had at least two scored candidates; **0** when no such observations exist |
-| `AverageCandidatesScored` | `average_candidates_scored` | `score_evaluations / scheduled_requests` |
-| `ScoreEvaluations` | `score_evaluations` | Sum of truncated candidate counts considered for decisions |
+| `AverageFeasibleCandidates` | `average_feasible_candidates` | `feasible_candidate_evaluations / scheduled_requests`; counted before the candidate cap |
+| `AverageRankedCandidatesRetained` | `average_ranked_candidates_retained` | `ranked_candidates_retained / scheduled_requests` |
+| `FeasibleEvaluations` | `feasible_candidate_evaluations` | Sum of feasible-node counts before the candidate cap |
+| `RankedCandidatesRetained` | `ranked_candidates_retained` | Sum of ranked candidate counts retained after the cap |
 | `FailureReasons` | `failure_reasons` | Present when there are rejections; currently only `no_feasible_node` (`omitempty`) |
 | `Warnings` | `warnings` | Capacity hints when there are rejections (`omitempty`) |
 | `NodeFinalState` | `node_final_state` | Final occupancy per node; values are `NodeLoad` |
@@ -163,11 +167,13 @@ no other metrics keys:
 | `CPUUtilization` | `cpu_utilization` |
 | `MemUtilization` | `mem_utilization` |
 
-`scoreCandidates` filters and ranks feasible nodes, then keeps at most
-`defaultPriorityCandidateNum` (currently 3) candidates. Therefore
-`score_evaluations` and the numerator of `average_candidates_scored` count the
-truncated candidate set: a decision-path cost proxy, not the full number of
-feasible nodes examined internally.
+`scoreCandidates` counts all feasible nodes before keeping at most
+`defaultPriorityCandidateNum` (currently 3) ranked candidates. Therefore
+`feasible_candidate_evaluations` / `average_feasible_candidates` measure
+pre-cap feasible breadth (at most node count), while
+`ranked_candidates_retained` / `average_ranked_candidates_retained` measure
+post-cap ranked breadth (at most 3).
+Both are simulator-local breadth proxies, not scheduler CPU cost or latency.
 
 `docs/dev/scheduler-benchmark-report-schema.md` describes the profile × workload
 matrix and `comparisons[]` shape emitted by the current CLI. This document is
@@ -579,8 +585,8 @@ profile/workload; phrase conclusions as “observed under this workload,” not
 
 ## Known Limitations
 
-- The simulator reproduces Filter feasible set + Score ranking + bind highest
-  score, not the full CubeMaster pipeline.
+- The simulator uses its own filter → score → bind rules, not the full
+  CubeMaster pipeline or production plugin semantics.
 - Final-snapshot metrics are not peak occupancy; short-lived workloads make this
   especially clear.
 - Packing rates are equal-weight node quota utilization, not capacity-weighted

@@ -21,18 +21,22 @@ go run ./cmd/schedulerbench --out ./schedulerbench-report
 默认写出 `report.json` 与 `report.md`。可用 `--format json`、
 `--format markdown` 或 `--format both` 选择输出文件。
 
-运行 `go run ./cmd/schedulerbench --verify --out ./schedulerbench-report`
-可在写文件前，对照默认 workload/profile 验收合同检查内存中的报告，包括指标、
-对比与仅限 simulator 的延迟要求。`--verify` 不是任意运行的通用校验器：合法但
-缩小了 `--profiles` 或 `--workloads` 选择的运行会因缺少默认验收矩阵而校验失败。
-省略 `--verify` 时，这类缩减运行仍可生成报告。校验只检查报告结构与用语；
-不验证真实多节点运行，也不验证实测的 CubeAPI/Cubelet 创建延迟。
+在 `CubeMaster` 下使用以下验证命令：
+
+```bash
+go test ./pkg/scheduler/simulator ./cmd/schedulerbench
+go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
+```
+
+`--verify` 在写文件前检查默认报告的结构与内部一致性。它不是任意缩减
+`--profiles` / `--workloads` 运行的通用校验器，也不验证实时性能或与生产调度
+语义等价。
 
 ## 顶层形状
 
 ```json
 {
-  "run_id": "scheduler-sim-seed-20260903-nodes-4",
+  "run_id": "scheduler-sim-seed-20260903-nodes-4-4b1a18ca3c7b",
   "config": {
     "seed": 20260903,
     "node_count": 4,
@@ -48,13 +52,9 @@ go run ./cmd/schedulerbench --out ./schedulerbench-report
       "mixed_size"
     ]
   },
-  "acceptance_path": {
-    "acceptance_path": "Each workload runs once per profile and reports baseline-vs-profile placement and quality metrics.",
-    "domain_lens": "Scheduler score semantics: filter infeasible nodes first, score remaining candidates, then bind the highest score.",
-    "failure_path": "Requests that cannot fit any node are counted as rejected with explicit failure reasons; invalid profile/workload names fail the run.",
-    "evidence_path": "The JSON and Markdown reports include seed, node count, workload definitions, profile names, placement counts, and metric schema.",
-    "review_path": "Offline deterministic benchmark package plus thin CLI; no production scheduler default behavior changes.",
-    "distinctive_angle": "Measurement-path integrity and claim-evidence mapping are built into the generated report instead of only producing headline numbers."
+  "provenance": {
+    "git_revision": "unknown",
+    "git_dirty": null
   },
   "metric_schema": [
     {
@@ -88,8 +88,10 @@ go run ./cmd/schedulerbench --out ./schedulerbench-report
             "uses_estimated_latency": true,
             "average_cpu_headroom": 0.58,
             "average_score_margin": 1.47,
-            "average_candidates_scored": 2.88,
-            "score_evaluations": 230,
+            "average_feasible_candidates": 4.0,
+            "average_ranked_candidates_retained": 2.88,
+            "feasible_candidate_evaluations": 320,
+            "ranked_candidates_retained": 230,
             "node_final_state": {
               "node-a": {
                 "running_sandbox_count": 12,
@@ -141,12 +143,13 @@ go run ./cmd/schedulerbench --out ./schedulerbench-report
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `run_id` | string | 是 | 由 seed 与节点数派生的确定性运行标识。 |
+| `run_id` | string | 是 | 可读 seed/node 前缀，加上对有效 seed、节点数、有序 profiles/workloads、Git revision 与 dirty 状态求 SHA-256 后所得的 12 位十六进制前缀。 |
 | `config.seed` | number | 是 | 确定性 workload 种子。 |
 | `config.node_count` | number | 是 | 模拟节点数（**1–4**）。 |
 | `config.profiles` | string 数组 | 是 | 本次运行包含的 profile。 |
 | `config.workloads` | string 数组 | 是 | 本次运行包含的 workload。 |
-| `acceptance_path.*` | object | 是 | 报告的结论证据与审阅范围上下文。 |
+| `provenance.git_revision` | string | 是 | 源码 revision；不可得时为 `unknown`。优先使用 build-info VCS 设置，CLI 再回退到有超时限制的只读 Git 命令。 |
+| `provenance.git_dirty` | boolean 或 null | 是 | 源码树是否已修改；`null` 表示状态未知。 |
 | `metric_schema[]` | array | 是 | 指标合同项，含 `name`、`description`、`direction`。 |
 | `results[]` | array | 是 | 每个 profile 一条。 |
 | `results[].profile` | string | 是 | Profile 名称。 |
@@ -155,7 +158,7 @@ go run ./cmd/schedulerbench --out ./schedulerbench-report
 | `results[].workloads[].metrics` | object | 是 | 该 profile/workload 对的指标值。 |
 | `comparisons[]` | array | 是 | 以 `default` 为 baseline 的 baseline-vs-candidate 对比。 |
 
-当前报告不输出 `generated_at`、`git_revision`、捕获的 `command`、顶层
+当前报告不输出 `generated_at`、捕获的 `command`、顶层
 `simulator` 对象、顶层 `baseline`/`candidate` 对象，或顶层 `limitations`。
 仅限 simulator 的限制写在指标描述、comparison notes 以及
 `uses_estimated_latency` 中。
@@ -180,8 +183,10 @@ go run ./cmd/schedulerbench --out ./schedulerbench-report
 - `uses_estimated_latency`
 - `average_cpu_headroom`
 - `average_score_margin`（仅对多候选决策取第一名与第二名分差均值；无观测时为 0）
-- `average_candidates_scored`
-- `score_evaluations`
+- `average_feasible_candidates`
+- `average_ranked_candidates_retained`
+- `feasible_candidate_evaluations`
+- `ranked_candidates_retained`
 - `node_final_state`
 
 当至少有一个请求被拒绝时，metrics 对象还会包含：
@@ -191,8 +196,15 @@ go run ./cmd/schedulerbench --out ./schedulerbench-report
 
 `failure_reasons` 当前只使用 `no_feasible_node`，把 CPU、内存与 sandbox 数容量失败归为一类。未知 workload/profile 名称会在生成报告前使命令失败。
 
-`average_candidates_scored` 等于 `score_evaluations / scheduled_requests`。
-`score_evaluations` 统计 `scoreCandidates` 返回的截断后有序候选集，过滤与打分后受 `defaultPriorityCandidateNum` 上限约束。它是决策路径成本的近似，不是内部检查过的全部可行节点数。
+`average_feasible_candidates` 等于
+`feasible_candidate_evaluations / scheduled_requests`，在排序候选上限前统计可行
+节点，因此最大为 `node_count`。`average_ranked_candidates_retained` 等于
+`ranked_candidates_retained / scheduled_requests`，统计截断后保留的有序候选集，
+当前最大为 3。两者都是 simulator 本地候选宽度代理，不是调度器 CPU 开销或延迟。
+
+如果 build info 与 CLI Git 回退都不可用，`git_revision` 为 `unknown`，
+`git_dirty` 为 `null`；该状态无法区分不同代码版本。报告不包含 Git 错误、
+路径、remote 或时间戳。
 
 ## 节点最终状态
 
@@ -241,7 +253,6 @@ profile 对比。
 Markdown 报告以紧凑形式镜像同一数据：
 
 - 运行元数据；
-- 验收映射；
 - profile/workload 结果表；
 - 对比表；
 - 指标合同。

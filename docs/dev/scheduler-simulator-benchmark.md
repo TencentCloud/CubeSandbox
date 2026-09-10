@@ -5,8 +5,8 @@ scheduler profiles without requiring a live multi-node cluster.
 
 ## Scope
 
-The simulator is intentionally small. It models the CubeMaster scheduler's
-high-level semantics:
+The simulator is intentionally small. It follows a filter → score → bind
+shape with simulator-local rules:
 
 1. reject nodes that cannot fit the request;
 2. score feasible candidates;
@@ -33,22 +33,28 @@ Use `--format json`, `--format markdown`, or `--format both` to select the
 output file set. The default is `both`.
 
 The default run is deterministic and records the seed, node count, workloads,
-profiles, metric schema, and acceptance map in both reports. `--nodes` accepts
-only **1–4**; an explicit CLI `--nodes 0` is rejected rather than silently
-becoming the default.
+profiles, source provenance, and metric schema in both reports. `--nodes`
+accepts only **1–4**. An explicit CLI `--nodes 0` is rejected, and `--seed 0`
+is invalid because zero is reserved as the library unset sentinel.
 
-Use `--verify` to run the benchmark and check the in-memory report against the
-default topic 1 acceptance contract before writing it:
+Source provenance first uses complete `vcs.revision` and `vcs.modified`
+settings from Go build information. If those are unavailable, the CLI runs
+bounded, read-only `git rev-parse HEAD` and porcelain status commands. If no
+revision can be found, the report records `git_revision: "unknown"` and
+`git_dirty: null`; this cannot distinguish code versions.
+
+Use `--verify` to check the default report's structure and internal consistency
+before writing it:
 
 ```bash
 go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
 ```
 
-Verification requires the documented default workloads and profiles to have
-run as a complete matrix, the key metric schema and estimated-latency marker
-to be present, and every non-default profile to have a default-vs-candidate
-comparison for every workload. It also requires report language that identifies
-latency as simulator estimates rather than live measurements.
+Verification requires the complete default workload/profile matrix, required
+metric schema keys, internally consistent request and candidate counters,
+valid provenance/run identity, and one internally consistent
+default-vs-candidate comparison for every expected pair. Human-readable metric
+descriptions and comparison notes may be reworded.
 
 This check is simulator-only. It does not run a real multi-node deployment,
 create resources through CubeAPI/Cubelet, or validate production performance
@@ -65,11 +71,9 @@ or real create latency.
 
 ## Profiles
 
-These names are **simulator-only** scoring-weight presets used by the offline
-benchmark. The profile name strings intentionally align with the separate
-integrated work tracked in Draft PR #1666 so naming stays consistent across
-related changes. This PR does not ship runtime `scheduler.profile` overlays and
-does not imply a standalone runtime dependency on that draft work.
+These names are the simulator's own public vocabulary for offline scoring
+weight presets. They do not imply runtime `scheduler.profile` overlays or
+equivalence to production scheduler plugins.
 
 - `default`: balanced resource-headroom and spread scoring with light template
   locality.
@@ -101,10 +105,12 @@ The report includes more than five scheduling-quality metrics:
 - `average_score_margin`: mean score gap between the selected node and the
   second-ranked candidate, averaged only over scheduled requests that had at
   least two scored candidates; `0` when no such observations exist.
-- `average_candidates_scored`: average number of truncated ranked candidates
-  considered for each scheduled request. This is capped by the simulator's
-  priority candidate limit after filtering and scoring; it is not the total
-  number of internally examined feasible nodes.
+- `average_feasible_candidates`: feasible simulated nodes per scheduled request,
+  counted before the ranked-candidate cap; at most the simulated node count.
+- `average_ranked_candidates_retained`: average number of ranked candidates
+  retained for each scheduled request after the cap; currently at most 3.
+  Both candidate metrics are simulator-local breadth proxies, not scheduler CPU
+  cost or latency measurements.
 
 The Markdown results table includes `latency p50 ms` and `latency p95 ms`.
 The estimator is deterministic:
@@ -160,9 +166,8 @@ Compared delta keys:
 - Acceptance path: every workload runs once per profile and reports
   baseline-vs-profile placement and quality metrics.
 - Domain lens: filter infeasible nodes first, score feasible candidates, then
-  bind the highest score, following the same filter → score → bind *shape* as
-  the CubeMaster selector with simulator-local scoring weights (not production
-  Filter/Score plugin equivalence).
+  bind the highest score. This is a simulator-local filter → score → bind
+  shape, not production Filter/Score plugin equivalence.
 - Failure path: invalid profile/workload names fail the run; infeasible requests
   are counted as rejected with explicit reasons.
 - Evidence path: JSON and Markdown reports include the seed, node count,
@@ -176,6 +181,6 @@ Compared delta keys:
 ## Verification
 
 ```bash
-go test ./pkg/scheduler/simulator
-go run ./cmd/schedulerbench --out ./schedulerbench-report
+go test ./pkg/scheduler/simulator ./cmd/schedulerbench
+go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
 ```
