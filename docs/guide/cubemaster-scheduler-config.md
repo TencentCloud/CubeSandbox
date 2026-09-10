@@ -90,8 +90,12 @@ scheduler:
 ## Runtime Profiles and binpack_score
 
 CubeMaster can select a named **runtime Profile** with `scheduler.profile`.
-Empty profile preserves existing Filter/Score configuration byte-for-byte at
-effective config. Built-in names (`balanced_spread`,
+Empty profile leaves the existing Filter/Score lists and `plugin_conf`
+blocks in place. That is not a byte-for-byte freeze of master behavior:
+`plugin_conf.<scorer>.weight: 0` still disables that scorer, and
+`loopAsyncScore` (the writer of `node.Score`) is gated on the selected
+scorer set rather than on the mere presence of a
+`multi_factor_weighted_average` plugin block. Built-in names (`balanced_spread`,
 `template_locality_first`, `binpack_utilization`) expand onto selector lists
 and inject self-contained plugin defaults when the matching `plugin_conf`
 block is absent. User entries under `scheduler.profiles` with the same name
@@ -114,6 +118,11 @@ hot-reload re-applies Profile overlays to the in-memory Config, but
 `binpack_score` is a thin Score-phase plugin that prefers fuller nodes. It is
 enabled by listing `binpack_score` in `enable_scorers` (directly or via a
 Profile). Plugin params stay under `scheduler.score.plugin_conf.binpack_score`.
+Do not mix `binpack_score` with spread-style scorers (`real_time_weighted_average`,
+`multi_factor_weighted_average`) in the same `enable_scorers` list: binpack
+returns occupancy (higher = fuller) while those scorers return remaining-capacity
+style scores, so the blend can cancel. Built-in `binpack_utilization` only
+enables `binpack_score`.
 
 Runtime Profiles are **not** offline simulator / `schedulerbench` models, even
 when they reuse the same preset name strings. Copyable YAML and the full

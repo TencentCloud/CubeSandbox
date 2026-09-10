@@ -1443,26 +1443,37 @@ func allowedWeightFactorsForScorer(name string) map[string]struct{} {
 			constants.WeightFactorImageID:    {},
 			constants.WeightFactorTemplateID: {},
 		}
-	case "real_time_weighted_average", "multi_factor_weighted_average":
+	case "real_time_weighted_average":
+		// getFactorWeightedAverageScore plus req_cpu/req_mem, which
+		// getRealtimeWeightedAverageScore applies after the shared helper.
+		allowed := factorWeightedAverageFactors()
+		allowed[constants.WeightFactorReqCpu] = struct{}{}
+		allowed[constants.WeightFactorReqMem] = struct{}{}
+		return allowed
+	case "multi_factor_weighted_average":
 		// Only factors implemented by getFactorWeightedAverageScore.
-		return map[string]struct{}{
-			constants.WeightFactorCreateConcurrentLimit: {},
-			constants.WeightFactorMvmNum:                {},
-			constants.WeightFactorMetricUpdate:          {},
-			constants.WeightFactorLocalMetricUpdate:     {},
-			constants.WeightFactorQuotaCpu:              {},
-			constants.WeightFactorQuotaMem:              {},
-			constants.WeightFactorCpuUtil:               {},
-			constants.WeightFactorMemUsage:              {},
-			constants.WeightFactorCpuLoadUsage:          {},
-			constants.WeightFactorRealTimeCreateNum:     {},
-			constants.WeightFactorLocalCreateNum:        {},
-			constants.WeightFactorDataDiskUsage:         {},
-			constants.WeightFactorStorageDiskUsage:      {},
-			constants.WeightFactorSysDiskUsage:          {},
-		}
+		return factorWeightedAverageFactors()
 	default:
 		return allowedSchedulerWeightFactorNames
+	}
+}
+
+func factorWeightedAverageFactors() map[string]struct{} {
+	return map[string]struct{}{
+		constants.WeightFactorCreateConcurrentLimit: {},
+		constants.WeightFactorMvmNum:                {},
+		constants.WeightFactorMetricUpdate:          {},
+		constants.WeightFactorLocalMetricUpdate:     {},
+		constants.WeightFactorQuotaCpu:              {},
+		constants.WeightFactorQuotaMem:              {},
+		constants.WeightFactorCpuUtil:               {},
+		constants.WeightFactorMemUsage:              {},
+		constants.WeightFactorCpuLoadUsage:          {},
+		constants.WeightFactorRealTimeCreateNum:     {},
+		constants.WeightFactorLocalCreateNum:        {},
+		constants.WeightFactorDataDiskUsage:         {},
+		constants.WeightFactorStorageDiskUsage:      {},
+		constants.WeightFactorSysDiskUsage:          {},
 	}
 }
 

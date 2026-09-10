@@ -131,7 +131,10 @@ Profile 恢复必要准入项。
 **`binpack_score` 占用权重。** `cpu_weight` / `mem_weight` / `mvm_weight` 取值
 `<= 0` 时，运行时回退为默认 `1`。**不能**通过把某维因子权重设为 `0` 来排除该维。
 只有插件级 `weight: 0`（或 `disable: true`）才会禁用该评分器。负的插件 `weight`
-在配置加载时失败（`validateBinpackScoreWeight`）。
+在配置加载时失败（`validateBinpackScoreWeight`）。不要把 `binpack_score` 与
+剩余容量 / spread 评分器放进同一 `enable_scorers`：占用率极性与
+`real_time_weighted_average` / `multi_factor_weighted_average` 相反，加权后会抵消。
+内置 `binpack_utilization` 只启用 `binpack_score`。
 
 **非空 Profile 下因子型评分器失败关闭。** 当 `scheduler.profile` 非空时，最终
 `enable_scorers` 中的每个因子型评分器（`real_time_weighted_average`、

@@ -90,7 +90,10 @@ scheduler:
 ## 运行时 Profile 与 binpack_score
 
 CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
-空 Profile 在生效配置上按字节保持现有 Filter/Score。内置名
+空 Profile 会保留现有 Filter/Score 列表和 `plugin_conf` 块，但这不是对 master
+行为的逐字节冻结：`plugin_conf.<scorer>.weight: 0` 仍会禁用该评分器，且
+`loopAsyncScore`（`node.Score` 的唯一写入方）按选中的评分器集合门控，
+而不是只要存在 `multi_factor_weighted_average` 插件块就启动。内置名
 （`balanced_spread`、`template_locality_first`、`binpack_utilization`）
 会展开到选择器列表，并在对应 `plugin_conf` 缺失时注入自包含默认值。
 `scheduler.profiles` 下与内置同名的用户条目会完全覆盖内置。
@@ -107,7 +110,11 @@ CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 
 `binpack_score` 是偏好更满节点的薄 Score 插件，通过在 `enable_scorers`
 中列出（直接或经 Profile）启用。插件参数仍放在
-`scheduler.score.plugin_conf.binpack_score`。
+`scheduler.score.plugin_conf.binpack_score`。不要把 `binpack_score` 与
+spread 风格评分器（`real_time_weighted_average`、
+`multi_factor_weighted_average`）放进同一 `enable_scorers`：binpack 返回占用率
+（越高越满），后者返回剩余容量风格分数，加权后会互相抵消。内置
+`binpack_utilization` 只启用 `binpack_score`。
 
 运行时 Profile **不是**离线模拟器 / `schedulerbench` 模型，即使预设名字符串相同。
 可复制 YAML 与完整契约见

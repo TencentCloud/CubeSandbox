@@ -867,6 +867,54 @@ scheduler:
 	assert.Contains(t, err.Error(), "not_a_real_factor")
 }
 
+func TestInit_RealtimeAllowsReqCpuReqMemFactors(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: realtime_req
+  profiles:
+    realtime_req:
+      score:
+        enable_scorers:
+          - real_time_weighted_average
+        resource_weights:
+          req_cpu: 1
+          req_mem: 1
+  score:
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1
+        enable_weight_factors: [req_cpu, req_mem]
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"req_cpu", "req_mem"}, got.Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage.EnableWeightFactors)
+}
+
+func TestInit_MultiFactorRejectsReqCpuFactor(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: mfwa_req
+  profiles:
+    mfwa_req:
+      score:
+        enable_scorers:
+          - multi_factor_weighted_average
+        resource_weights:
+          req_cpu: 1
+  score:
+    plugin_conf:
+      multi_factor_weighted_average:
+        weight: 1
+        enable_weight_factors: [req_cpu]
+`
+	_, err := initConfigFromYAML(t, yamlBody)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported weight factor")
+	assert.Contains(t, err.Error(), "req_cpu")
+}
+
 func TestInit_NegativeBinpackCPUWeightRejected(t *testing.T) {
 	yamlBody := `common: {}
 log: {}
