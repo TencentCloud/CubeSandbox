@@ -38,7 +38,8 @@ func (l *affinityScore) Weight() float64 {
 	return l.weight
 }
 func (l *affinityScore) Disable() bool {
-	return config.GetConfig().Scheduler.Score.ScorePluginConf.AffinityScore.Disable
+	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.AffinityScore
+	return cfg.Disable || cfg.Weight == 0
 }
 
 func (l *affinityScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList,

@@ -79,11 +79,31 @@ scheduler:
 | `metric_update_timeout` | Treat resource metrics as stale after this duration. It should be much larger than the Cubelet report interval. |
 | `local_metric_update_timeout` | Reserved local-metric timeout field. Current prefilter logic gates both global and local metric freshness with `metric_update_timeout`. |
 | `filter.enable_filters` | Enables scheduling filters. Common filters include CPU, memory, template locality, and real-time create concurrency. |
-| `score.enable_scorers` | Enables scoring plugins. Multi-node deployments usually enable `real_time_weighted_average`; when it is enabled, the matching `score.plugin_conf.real_time_weighted_average` block is required or CubeMaster can panic during scheduler startup. |
-| `score.resource_weights` | Controls the influence of MVM count, create concurrency, CPU quota usage, and memory quota usage. Higher weight means stronger influence; factors must also be listed under `score.plugin_conf.real_time_weighted_average.enable_weight_factors`. |
+| `score.enable_scorers` | Enables scoring plugins. Multi-node deployments usually enable `real_time_weighted_average`; when it is enabled, the matching `score.plugin_conf.real_time_weighted_average` block is required or CubeMaster can panic during scheduler startup. When `scheduler.profile` is non-empty, every registered scorer in the final effective list must have its `plugin_conf` block (factor scorers also need a positive factor weight); empty profile keeps the legacy load path. |
+| `score.resource_weights` | Controls the influence of MVM count, create concurrency, CPU quota usage, and memory quota usage. Higher weight means stronger influence; factors must also be listed under `score.plugin_conf.real_time_weighted_average.enable_weight_factors`. Profile overlays merge same keys over this map (Profile wins). |
+| `score.plugin_conf.binpack_score` | Optional plugin-only scorer that prefers fuller nodes. `weight: 0` disables Select; negative weight is always rejected at config load. |
+| `profile` / `profiles` | Optional runtime Profile overlay. Empty `profile` leaves Filter/Score unchanged. Built-ins: `balanced_spread`, `template_locality_first`, `binpack_utilization`. User same-name keys override built-ins. Runtime Profiles are selector overlays, not offline simulator models. See [Scheduler Profile Configuration Example](../dev/scheduler-profile-config-example.md). |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | Global or per-instance-type single-node MVM limits. Cubelet-reported `max_mvm_num` also participates in the effective limit. |
 | `disk_usage_max_percent` | Threshold used by the `disk` filter and backoff path to avoid placing more sandboxes on nearly full machines. |
 | `affinityconf` / `node_affinity_selector_allowed_keys` | Controls affinity and constraints by cluster label, zone, CPU type, instance type, and other allowed selector keys. |
+
+## Runtime Profiles and binpack_score
+
+CubeMaster can select a named **runtime Profile** with `scheduler.profile`.
+Empty profile preserves existing Filter/Score configuration byte-for-byte at
+effective config. Built-in names (`balanced_spread`,
+`template_locality_first`, `binpack_utilization`) expand onto selector lists
+and inject self-contained plugin defaults when the matching `plugin_conf`
+block is absent. User entries under `scheduler.profiles` with the same name
+override a built-in entirely.
+
+`binpack_score` is a thin Score-phase plugin that prefers fuller nodes. It is
+enabled by listing `binpack_score` in `enable_scorers` (directly or via a
+Profile). Plugin params stay under `scheduler.score.plugin_conf.binpack_score`.
+
+Runtime Profiles are **not** offline simulator / `schedulerbench` models, even
+when they reuse the same preset name strings. Copyable YAML and the full
+contract: [Scheduler Profile Configuration Example](../dev/scheduler-profile-config-example.md).
 
 ## How node metadata affects scheduling
 

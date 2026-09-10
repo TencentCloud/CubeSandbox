@@ -1,0 +1,908 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+package config
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestPreHandleScheduler_NoProfileLeavesSchedulerUnchanged(t *testing.T) {
+	cfg := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			Filter: &SchedulerFilterConf{EnableFilters: []string{"cpu", "mem"}},
+			Score: &SchedulerScoreConf{
+				EnableScorers:   []string{"affinity_score"},
+				ResourceWeights: map[string]float64{"cpu": 1.0},
+				ScorePluginConf: ScorePluginConf{
+					AffinityScore: &AffinityScore{Weight: 1},
+				},
+			},
+			Profiles: map[string]SchedulerProfileConf{
+				"unused": {
+					Filter: &SchedulerFilterConf{EnableFilters: []string{"disk"}},
+				},
+			},
+		},
+	}}
+
+	err := preHandleScheduler(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"cpu", "mem"}, cfg.Scheduler.Filter.EnableFilters)
+	assert.Equal(t, []string{"affinity_score"}, cfg.Scheduler.Score.EnableScorers)
+	assert.Equal(t, map[string]float64{"cpu": 1.0}, cfg.Scheduler.Score.ResourceWeights)
+}
+
+func TestPreHandleScheduler_ProfileAppliesFilterAndScore(t *testing.T) {
+	cfg := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			Profile: "spread_like",
+			Filter:  &SchedulerFilterConf{EnableFilters: []string{"cpu"}},
+			Score: &SchedulerScoreConf{
+				EnableScorers:   []string{"affinity_score"},
+				ResourceWeights: map[string]float64{"cpu": 1.0, "disk": 7.0},
+				ScorePluginConf: ScorePluginConf{
+					RealTimeWeightedAverage: &RealTimeWeightedAverage{Weight: 1},
+					MultiFactorWeightedAverage: &MultiFactorWeightedAverage{
+						Weight:        1,
+						ScoreInterval: time.Second,
+					},
+				},
+			},
+			Profiles: map[string]SchedulerProfileConf{
+				"spread_like": {
+					Filter: &SchedulerFilterConf{
+						EnableFilters: []string{"cpu", "mem", "realtime_create_num"},
+					},
+					Score: &SchedulerProfileScoreConf{
+						EnableScorers:   []string{"real_time_weighted_average", "multi_factor_weighted_average"},
+						ResourceWeights: map[string]float64{"cpu": 0.4, "mem": 0.6},
+					},
+				},
+			},
+		},
+	}}
+
+	err := preHandleScheduler(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"cpu", "mem", "realtime_create_num"}, cfg.Scheduler.Filter.EnableFilters)
+	assert.Equal(t, []string{"real_time_weighted_average", "multi_factor_weighted_average"}, cfg.Scheduler.Score.EnableScorers)
+	assert.Equal(t, map[string]float64{"cpu": 0.4, "mem": 0.6, "disk": 7.0}, cfg.Scheduler.Score.ResourceWeights)
+}
+
+func TestPreHandleScheduler_ProfileWeightsMergeWithNilBase(t *testing.T) {
+	cfg := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			Profile: "weights_only",
+			Profiles: map[string]SchedulerProfileConf{
+				"weights_only": {
+					Score: &SchedulerProfileScoreConf{
+						ResourceWeights: map[string]float64{"cpu": 0.4},
+					},
+				},
+			},
+		},
+	}}
+
+	err := preHandleScheduler(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]float64{"cpu": 0.4}, cfg.Scheduler.Score.ResourceWeights)
+}
+
+func TestPreHandleScheduler_ProfileWithoutWeightsLeavesBaseWeights(t *testing.T) {
+	baseWeights := map[string]float64{"cpu": 1, "mem": 2}
+	cfg := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			Profile: "scorers_only",
+			Score: &SchedulerScoreConf{
+				ResourceWeights: baseWeights,
+				ScorePluginConf: ScorePluginConf{
+					BinpackScore: &BinpackScore{Weight: 1},
+				},
+			},
+			Profiles: map[string]SchedulerProfileConf{
+				"scorers_only": {
+					Score: &SchedulerProfileScoreConf{
+						EnableScorers: []string{"binpack_score"},
+					},
+				},
+			},
+		},
+	}}
+
+	err := preHandleScheduler(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, baseWeights, cfg.Scheduler.Score.ResourceWeights)
+}
+
+func TestPreHandleScheduler_UnknownProfileReturnsError(t *testing.T) {
+	cfg := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			Profile: "missing_profile",
+			Profiles: map[string]SchedulerProfileConf{
+				"other": {},
+			},
+		},
+	}}
+
+	err := preHandleScheduler(cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "missing_profile")
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestPreHandleScheduler_UnknownFilterInProfileReturnsError(t *testing.T) {
+	cfg := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			Profile: "bad_filter",
+			Profiles: map[string]SchedulerProfileConf{
+				"bad_filter": {
+					Filter: &SchedulerFilterConf{EnableFilters: []string{"cpu", "not_a_real_filter"}},
+				},
+			},
+		},
+	}}
+
+	err := preHandleScheduler(cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not_a_real_filter")
+	assert.Contains(t, err.Error(), "unknown filter")
+}
+
+func TestPreHandleScheduler_UnknownScoreInProfileReturnsError(t *testing.T) {
+	cfg := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			Profile: "bad_score",
+			Profiles: map[string]SchedulerProfileConf{
+				"bad_score": {
+					Score: &SchedulerProfileScoreConf{
+						EnableScorers: []string{"affinity_score", "not_a_real_score"},
+					},
+				},
+			},
+		},
+	}}
+
+	err := preHandleScheduler(cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not_a_real_score")
+	assert.Contains(t, err.Error(), "unknown score")
+}
+
+func TestPreHandleScheduler_ProfileFilterOnlyDoesNotClearScore(t *testing.T) {
+	cfg := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			Profile: "filter_only",
+			Filter:  &SchedulerFilterConf{EnableFilters: []string{"cpu"}},
+			Score: &SchedulerScoreConf{
+				EnableScorers:   []string{"image_score"},
+				ResourceWeights: map[string]float64{"mem": 2.0},
+				ScorePluginConf: ScorePluginConf{
+					ImageScore: &ImageScore{Weight: 1},
+				},
+			},
+			Profiles: map[string]SchedulerProfileConf{
+				"filter_only": {
+					Filter: &SchedulerFilterConf{EnableFilters: []string{"cpu", "disk"}},
+				},
+			},
+		},
+	}}
+
+	err := preHandleScheduler(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"cpu", "disk"}, cfg.Scheduler.Filter.EnableFilters)
+	assert.Equal(t, []string{"image_score"}, cfg.Scheduler.Score.EnableScorers)
+	assert.Equal(t, map[string]float64{"mem": 2.0}, cfg.Scheduler.Score.ResourceWeights)
+}
+
+func TestPreHandleScheduler_ProfileScoreOnlyDoesNotClearFilter(t *testing.T) {
+	cfg := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			Profile: "score_only",
+			Filter:  &SchedulerFilterConf{EnableFilters: []string{"mem", "thirtparty"}},
+			Score: &SchedulerScoreConf{
+				EnableScorers:   []string{"affinity_score"},
+				ResourceWeights: map[string]float64{"cpu": 1.0},
+				ScorePluginConf: ScorePluginConf{
+					BinpackScore: &BinpackScore{Weight: 1},
+				},
+			},
+			Profiles: map[string]SchedulerProfileConf{
+				"score_only": {
+					Score: &SchedulerProfileScoreConf{
+						EnableScorers:   []string{"binpack_score"},
+						ResourceWeights: map[string]float64{"cpu": 0.2, "mem": 0.8},
+					},
+				},
+			},
+		},
+	}}
+
+	err := preHandleScheduler(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"mem", "thirtparty"}, cfg.Scheduler.Filter.EnableFilters)
+	assert.Equal(t, []string{"binpack_score"}, cfg.Scheduler.Score.EnableScorers)
+	assert.Equal(t, map[string]float64{"cpu": 0.2, "mem": 0.8}, cfg.Scheduler.Score.ResourceWeights)
+}
+
+func TestAllowedSchedulerSelectorNamesMatchRegistries(t *testing.T) {
+	// Keep these expectations aligned with filter/init.go and score/init.go.
+	assert.Equal(t, map[string]struct{}{
+		"cpu":                 {},
+		"mem":                 {},
+		"template_locality":   {},
+		"realtime_create_num": {},
+		"disk":                {},
+		"thirtparty":          {},
+	}, allowedSchedulerFilterNames)
+	assert.Equal(t, map[string]struct{}{
+		"real_time_weighted_average":    {},
+		"multi_factor_weighted_average": {},
+		"affinity_score":                {},
+		"image_score":                   {},
+		"binpack_score":                 {},
+	}, allowedSchedulerScoreNames)
+}
+
+func initConfigFromYAML(t *testing.T, yamlBody string) (*Config, error) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "cubemaster.yaml")
+	if err := os.WriteFile(path, []byte(yamlBody), 0644); err != nil {
+		t.Fatalf("write config yaml: %v", err)
+	}
+	t.Setenv("CUBE_MASTER_CONFIG_PATH", path)
+	old := cfg
+	t.Cleanup(func() { cfg = old })
+	return Init()
+}
+
+func TestInit_EmptySchedulerProfileLeavesDirectConfigUnchanged(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  filter:
+    enable_filters:
+      - cpu
+      - mem
+  score:
+    enable_scorers:
+      - affinity_score
+    resource_weights:
+      cpu: 1
+    plugin_conf:
+      affinity_score:
+        weight: 1
+      binpack_score:
+        weight: 1
+        cpu_weight: 2
+        mem_weight: 3
+        mvm_weight: 4
+        disable: false
+  profiles:
+    unused:
+      filter:
+        enable_filters:
+          - disk
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.NotNil(t, got)
+	assert.Equal(t, "", got.Scheduler.Profile)
+	assert.Equal(t, []string{"cpu", "mem"}, got.Scheduler.Filter.EnableFilters)
+	assert.Equal(t, []string{"affinity_score"}, got.Scheduler.Score.EnableScorers)
+	assert.Equal(t, map[string]float64{"cpu": 1}, got.Scheduler.Score.ResourceWeights)
+	plugin := got.Scheduler.Score.ScorePluginConf.BinpackScore
+	if assert.NotNil(t, plugin) {
+		assert.Equal(t, 1.0, plugin.Weight)
+		assert.Equal(t, 2.0, plugin.CPUWeight)
+		assert.Equal(t, 3.0, plugin.MemWeight)
+		assert.Equal(t, 4.0, plugin.MvmWeight)
+		assert.False(t, plugin.Disable)
+	}
+}
+
+func TestPreHandleScheduler_BuiltinProfilesApplyWithoutUserMap(t *testing.T) {
+	cases := []struct {
+		name            string
+		wantFilters     []string
+		wantScorers     []string
+		wantWeightKey   string
+		wantWeightValue float64
+	}{
+		{
+			name:            "balanced_spread",
+			wantFilters:     []string{"cpu", "mem", "realtime_create_num"},
+			wantScorers:     []string{"real_time_weighted_average"},
+			wantWeightKey:   "realtime_create_num",
+			wantWeightValue: 2,
+		},
+		{
+			name:            "template_locality_first",
+			wantFilters:     []string{"cpu", "mem", "template_locality"},
+			wantScorers:     []string{"image_score"},
+			wantWeightKey:   "template_id",
+			wantWeightValue: 2,
+		},
+		{
+			name:            "binpack_utilization",
+			wantFilters:     []string{"cpu", "mem"},
+			wantScorers:     []string{"binpack_score"},
+			wantWeightKey:   "",
+			wantWeightValue: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yamlBody := fmt.Sprintf(`common: {}
+log: {}
+scheduler:
+  profile: %s
+`, tc.name)
+			got, err := initConfigFromYAML(t, yamlBody)
+			assert.NoError(t, err)
+			assert.NotNil(t, got)
+			assert.Equal(t, tc.name, got.Scheduler.Profile)
+			assert.Equal(t, tc.wantFilters, got.Scheduler.Filter.EnableFilters)
+			assert.Equal(t, tc.wantScorers, got.Scheduler.Score.EnableScorers)
+			if tc.wantWeightKey == "" {
+				assert.NotContains(t, got.Scheduler.Score.ResourceWeights, "binpack_score")
+			} else {
+				assert.Equal(t, tc.wantWeightValue, got.Scheduler.Score.ResourceWeights[tc.wantWeightKey])
+			}
+			switch tc.name {
+			case RuntimeProfileBalancedSpread:
+				assert.NotNil(t, got.Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage)
+			case RuntimeProfileTemplateLocalityFirst:
+				assert.NotNil(t, got.Scheduler.Score.ScorePluginConf.ImageScore)
+			case RuntimeProfileBinpackUtilization:
+				binpack := got.Scheduler.Score.ScorePluginConf.BinpackScore
+				if assert.NotNil(t, binpack) {
+					assert.Equal(t, 1.0, binpack.Weight)
+					assert.Equal(t, 1.0, binpack.CPUWeight)
+					assert.Equal(t, 1.0, binpack.MemWeight)
+					assert.Equal(t, 1.0, binpack.MvmWeight)
+				}
+			}
+		})
+	}
+}
+
+func TestPreHandleScheduler_UnknownProfileStillFailsClosed(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: not_a_builtin_or_user_profile
+  profiles:
+    http_score_combo:
+      filter:
+        enable_filters:
+          - cpu
+`
+	_, err := initConfigFromYAML(t, yamlBody)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not_a_builtin_or_user_profile")
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestPreHandleScheduler_UserProfileOverridesBuiltin(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: balanced_spread
+  score:
+    resource_weights:
+      mem: 3
+    plugin_conf:
+      affinity_score:
+        weight: 1
+  profiles:
+    balanced_spread:
+      filter:
+        enable_filters:
+          - disk
+      score:
+        enable_scorers:
+          - affinity_score
+        resource_weights:
+          cpu: 9
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"disk"}, got.Scheduler.Filter.EnableFilters)
+	assert.Equal(t, []string{"affinity_score"}, got.Scheduler.Score.EnableScorers)
+	assert.Equal(t, map[string]float64{"cpu": 9, "mem": 3}, got.Scheduler.Score.ResourceWeights)
+	assert.Nil(t, got.Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage)
+}
+
+func TestInit_UserProfileRequiredPluginConfigFailsFast(t *testing.T) {
+	for _, scorer := range []string{
+		"real_time_weighted_average",
+		"multi_factor_weighted_average",
+		"affinity_score",
+		"image_score",
+		"binpack_score",
+	} {
+		t.Run(scorer, func(t *testing.T) {
+			yamlBody := fmt.Sprintf(`common: {}
+log: {}
+scheduler:
+  profile: missing_plugin
+  profiles:
+    missing_plugin:
+      score:
+        enable_scorers:
+          - %s
+`, scorer)
+			_, err := initConfigFromYAML(t, yamlBody)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "missing_plugin")
+			assert.Contains(t, err.Error(), "plugin_conf."+scorer)
+		})
+	}
+}
+
+func TestInit_DirectEnabledScorerMissingPluginConfigAllowedWithoutProfile(t *testing.T) {
+	// Empty-profile legacy path: missing plugin_conf does not fail Init.
+	// (Constructors may still panic later; Profile path fail-fasts instead.)
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - binpack_score
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"binpack_score"}, got.Scheduler.Score.EnableScorers)
+	assert.Nil(t, got.Scheduler.Score.ScorePluginConf.BinpackScore)
+}
+
+func TestInit_ProfileInheritedEnabledScorerMissingPluginConfigFailsFast(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: filters_only
+  score:
+    enable_scorers:
+      - image_score
+  profiles:
+    filters_only:
+      filter:
+        enable_filters:
+          - cpu
+`
+	_, err := initConfigFromYAML(t, yamlBody)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "filters_only")
+	assert.Contains(t, err.Error(), "image_score")
+	assert.Contains(t, err.Error(), "plugin_conf.image_score")
+}
+
+func TestInit_EmptySchedulerProfileDoesNotApplyBuiltin(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  filter:
+    enable_filters:
+      - cpu
+      - mem
+  score:
+    enable_scorers:
+      - affinity_score
+    resource_weights:
+      cpu: 1
+    plugin_conf:
+      affinity_score:
+        weight: 1
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.Equal(t, "", got.Scheduler.Profile)
+	assert.Equal(t, []string{"cpu", "mem"}, got.Scheduler.Filter.EnableFilters)
+	assert.Equal(t, []string{"affinity_score"}, got.Scheduler.Score.EnableScorers)
+	assert.Equal(t, map[string]float64{"cpu": 1}, got.Scheduler.Score.ResourceWeights)
+}
+
+func TestInit_BuiltinProfileConflictsWithExplicitDisableFailsFast(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantSub string
+	}{
+		{
+			name: "balanced_spread_weight0",
+			yaml: `common: {}
+log: {}
+scheduler:
+  profile: balanced_spread
+  score:
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 0
+        enable_weight_factors: [realtime_create_num]
+`,
+			wantSub: "explicitly disabled",
+		},
+		{
+			name: "balanced_spread_disable_true",
+			yaml: `common: {}
+log: {}
+scheduler:
+  profile: balanced_spread
+  score:
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1
+        disable: true
+        enable_weight_factors: [realtime_create_num]
+`,
+			wantSub: "explicitly disabled",
+		},
+		{
+			name: "template_locality_first_weight0",
+			yaml: `common: {}
+log: {}
+scheduler:
+  profile: template_locality_first
+  score:
+    plugin_conf:
+      image_score:
+        weight: 0
+        enable_weight_factors: [image_id, template_id]
+`,
+			wantSub: "explicitly disabled",
+		},
+		{
+			name: "binpack_utilization_disable_true",
+			yaml: `common: {}
+log: {}
+scheduler:
+  profile: binpack_utilization
+  score:
+    plugin_conf:
+      binpack_score:
+        weight: 1
+        disable: true
+`,
+			wantSub: "explicitly disabled",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := initConfigFromYAML(t, tc.yaml)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantSub)
+		})
+	}
+}
+
+func TestInit_DirectEnableWeightZeroStillAllowed(t *testing.T) {
+	// C40: weight:0 disables without requiring a profile conflict fail-fast.
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - binpack_score
+    plugin_conf:
+      binpack_score:
+        weight: 0
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"binpack_score"}, got.Scheduler.Score.EnableScorers)
+	assert.Equal(t, 0.0, got.Scheduler.Score.ScorePluginConf.BinpackScore.Weight)
+}
+
+func TestInit_FactorScorerWithoutPositiveFactorWeight_EmptyProfileStillLoads(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "realtime_all_factor_weights_zero",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - real_time_weighted_average
+    resource_weights:
+      realtime_create_num: 0
+      mvm_num: 0
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1
+        enable_weight_factors: [realtime_create_num, mvm_num]
+`,
+		},
+		{
+			name: "realtime_missing_resource_weights",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - real_time_weighted_average
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1
+        enable_weight_factors: [realtime_create_num]
+`,
+		},
+		{
+			name: "image_score_all_factor_weights_zero",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - image_score
+    resource_weights:
+      image_id: 0
+      template_id: 0
+    plugin_conf:
+      image_score:
+        weight: 1
+        enable_weight_factors: [image_id, template_id]
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := initConfigFromYAML(t, tc.yaml)
+			assert.NoError(t, err)
+			assert.Equal(t, "", got.Scheduler.Profile)
+		})
+	}
+}
+
+func TestInit_FactorScorerWithoutPositiveFactorWeight_WithProfileFailsFast(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantSub []string
+	}{
+		{
+			name: "realtime_all_factor_weights_zero",
+			yaml: `common: {}
+log: {}
+scheduler:
+  profile: ineffective_realtime
+  profiles:
+    ineffective_realtime:
+      score:
+        enable_scorers:
+          - real_time_weighted_average
+        resource_weights:
+          realtime_create_num: 0
+          mvm_num: 0
+  score:
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1
+        enable_weight_factors: [realtime_create_num, mvm_num]
+`,
+			wantSub: []string{"ineffective_realtime", "real_time_weighted_average", "no positive resource weight"},
+		},
+		{
+			name: "realtime_missing_resource_weights",
+			yaml: `common: {}
+log: {}
+scheduler:
+  profile: missing_weights
+  profiles:
+    missing_weights:
+      score:
+        enable_scorers:
+          - real_time_weighted_average
+  score:
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1
+        enable_weight_factors: [realtime_create_num]
+`,
+			wantSub: []string{"missing_weights", "real_time_weighted_average", "no positive resource weight"},
+		},
+		{
+			name: "image_score_all_factor_weights_zero",
+			yaml: `common: {}
+log: {}
+scheduler:
+  profile: ineffective_image
+  profiles:
+    ineffective_image:
+      score:
+        enable_scorers:
+          - image_score
+        resource_weights:
+          image_id: 0
+          template_id: 0
+  score:
+    plugin_conf:
+      image_score:
+        weight: 1
+        enable_weight_factors: [image_id, template_id]
+`,
+			wantSub: []string{"ineffective_image", "image_score", "no positive resource weight"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := initConfigFromYAML(t, tc.yaml)
+			assert.Error(t, err)
+			for _, sub := range tc.wantSub {
+				assert.Contains(t, err.Error(), sub)
+			}
+		})
+	}
+}
+
+func TestInit_UserProfileExplicitDisableRemainsAllowed(t *testing.T) {
+	// User Profiles may enable a scorer name while leaving weight:0 / disable
+	// as an intentional no-op. Only built-in presets conflict-fail on that.
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: binpack_only
+  profiles:
+    binpack_only:
+      score:
+        enable_scorers:
+          - binpack_score
+  score:
+    plugin_conf:
+      binpack_score:
+        weight: 0
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"binpack_score"}, got.Scheduler.Score.EnableScorers)
+	assert.Equal(t, 0.0, got.Scheduler.Score.ScorePluginConf.BinpackScore.Weight)
+}
+
+func TestInit_DisabledFactorScorerSkipsFactorWeightGate(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - real_time_weighted_average
+    resource_weights:
+      realtime_create_num: 0
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 0
+        enable_weight_factors: [realtime_create_num]
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.Equal(t, 0.0, got.Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage.Weight)
+}
+
+func TestInit_BinpackScoreWeightSemantics(t *testing.T) {
+	cases := []struct {
+		name       string
+		yaml       string
+		wantErr    string
+		wantWeight float64
+		wantNil    bool
+	}{
+		{
+			name: "negative_rejected",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - binpack_score
+    plugin_conf:
+      binpack_score:
+        weight: -1
+`,
+			wantErr: "binpack_score.weight must be >= 0",
+		},
+		{
+			name: "zero_disables",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - binpack_score
+    plugin_conf:
+      binpack_score:
+        weight: 0
+`,
+			wantWeight: 0,
+		},
+		{
+			name: "positive_kept",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - binpack_score
+    plugin_conf:
+      binpack_score:
+        weight: 2.5
+`,
+			wantWeight: 2.5,
+		},
+		{
+			name: "absent_uses_runtime_default",
+			yaml: `common: {}
+log: {}
+scheduler:
+  profile: binpack_utilization
+`,
+			wantWeight: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := initConfigFromYAML(t, tc.yaml)
+			if tc.wantErr != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				return
+			}
+			assert.NoError(t, err)
+			cfg := got.Scheduler.Score.ScorePluginConf.BinpackScore
+			if tc.wantNil {
+				assert.Nil(t, cfg)
+				return
+			}
+			assert.NotNil(t, cfg)
+			assert.Equal(t, tc.wantWeight, cfg.Weight)
+		})
+	}
+}
+
+func TestInit_BuiltinProfilePreservesExplicitPluginConf(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: balanced_spread
+  score:
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 3
+        enable_weight_factors: [cpu_util]
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	cfg := got.Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage
+	assert.NotNil(t, cfg)
+	assert.Equal(t, 3.0, cfg.Weight)
+	assert.Equal(t, []string{"cpu_util"}, cfg.EnableWeightFactors)
+	// Profile resource_weights still merge; operator factors stay as written.
+	assert.Equal(t, 1.0, got.Scheduler.Score.ResourceWeights["cpu_util"])
+}
+
+func TestInit_ProfileResourceWeightsSameKeyOverridesBase(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: balanced_spread
+  score:
+    resource_weights:
+      mvm_num: 10
+      custom_keep: 4
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	// Profile same-key override (built-in mvm_num: 2 wins over base 10).
+	assert.Equal(t, 2.0, got.Scheduler.Score.ResourceWeights["mvm_num"])
+	// Unrelated base keys remain.
+	assert.Equal(t, 4.0, got.Scheduler.Score.ResourceWeights["custom_keep"])
+}
