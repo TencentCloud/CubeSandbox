@@ -68,6 +68,8 @@ DISTRIBUTING). BUILT is terminal for the build itself; the resume pipeline
 
 ### 3.3 Error mapping
 
+CubeMaster also exposes `POST /cube/template/migrate` (CLI spelling: `tpl merge`) to migrate a legacy READY template artifact from CubeMaster local disk into TC-managed storage. In operational documentation, the wording should stay consistent: **`tpl merge` solves historical artifact storage convergence, while `tpl redo` solves node-side redistribution / rebuild when needed.** The typical case is that historical artifacts still live on local disk and the cluster later enables `s3Backed=true`, so those artifacts must be migrated from local disk into S3-backed storage. If the same maintenance window also needs to repopulate target nodes, run `tpl redo` after `tpl merge` completes.
+
 The HTTP layer maps domain errors to API codes: `ErrTemplateIDRequired`,
 `ErrDuplicateTemplate`, `ErrNoTemplateNodes` → params error;
 `ErrTemplateStoreNotInitialized` → DB error; not-found → 130404. The staged
@@ -77,7 +79,7 @@ split moves further error translation into the store layer over time.
 
 `POST /cube/template/redo` resumes a FAILED job. An artifact left READY by a
 job that failed during distribution is reused instead of rebuilt (reusing
-PENDING/BUILDING artifacts would read a half-written ext4).
+PENDING/BUILDING artifacts would read a half-written ext4). If the original artifact is no longer reusable, redo falls back to a full rebuild from `source_image_ref`.
 
 ### 3.5 Resume pipeline
 

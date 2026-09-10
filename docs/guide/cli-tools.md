@@ -54,7 +54,17 @@ cubemastercli --address <cubemaster-host> --port 8089 tpl create-from-image \
   --writable-layer-size 1G \
   --expose-port 49983 \
   --probe 49983
+
+# Migrate a READY template artifact into TC-managed storage.
+# Typical case: historical artifacts still live on local disk and the cluster later enables s3Backed=true.
+cubemastercli --address <cubemaster-host> --port 8089 tpl merge <template-id>
+
+# If the same maintenance also needs to repopulate nodes, run redo after merge.
+# Redo handles node-side redistribution and may rebuild when the old artifact is no longer reusable.
+cubemastercli --address <cubemaster-host> --port 8089 tpl redo --template-id <template-id>
 ```
+
+For historical image-based templates, keep the wording consistent in runbooks: **`tpl merge` solves historical artifact storage convergence, while `tpl redo` solves node-side redistribution / rebuild when needed.** The common scenario is enabling `s3Backed=true` after templates already exist on CubeMaster local disk; `tpl merge` moves those legacy artifacts into S3-backed storage, and `tpl redo` is only needed if you also want to repopulate target nodes.
 
 Destructive operations should be used carefully:
 

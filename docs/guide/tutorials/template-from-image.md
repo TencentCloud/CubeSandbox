@@ -174,8 +174,20 @@ cubemastercli tpl render --template-id tpl-748094d2f2374b0a8a37e6ec --json
 
 For a user-oriented walkthrough of what each output means and how to preview the effective request, see [Template Inspection and Request Preview](../template-inspection-and-preview.md).
 
+## Step 5 — (Optional) Migrate Legacy Local Artifacts
 
-## Deleting a Template
+Most newly created `from-image` templates already build through the current TC data plane, so you usually do **not** need to run `tpl merge` for them. The typical migration case is older templates whose rootfs artifacts still live on CubeMaster local disk, and the cluster later enables `s3Backed=true` so those historical artifacts need to be moved into S3-backed storage.
+
+Keep the wording consistent in operations docs: **`tpl merge` solves historical artifact storage convergence, while `tpl redo` solves node-side redistribution / rebuild when needed.** If the same maintenance window needs both storage migration and node repopulation, run them in this order:
+
+```bash
+cubemastercli tpl merge tpl-748094d2f2374b0a8a37e6ec
+cubemastercli tpl redo --template-id tpl-748094d2f2374b0a8a37e6ec
+```
+
+> ⚠️ In default co-located / shared-PVC deployments, skipping `tpl merge` does not usually break downloads for existing `READY` templates immediately. The real issue is that those historical artifacts have not yet converged from local disk into S3-backed storage. If the local ext4 is already gone, rerunning `tpl merge` cannot recover it; for rebuildable `from-image` templates, `tpl redo` must fall back to rebuild.
+
+## Step 6 — Deleting a Template
 
 ```bash
 cubemastercli tpl delete tpl-748094d2f2374b0a8a37e6ec

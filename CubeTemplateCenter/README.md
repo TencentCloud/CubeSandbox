@@ -60,6 +60,12 @@ artifact store is shared. The chart refuses these on `helm install`:
   its own storage). The installer only models control + compute, never
   two controls. Migrate to Helm + `s3Backed=true` first.
 
+## Migrating legacy local artifacts (`tpl merge`)
+
+`tpl merge` migrates a legacy READY template artifact from CubeMaster local disk into TC-managed storage. Keep the wording consistent in runbooks: **`tpl merge` solves historical artifact storage convergence, while `tpl redo` solves node-side redistribution / rebuild when needed.**
+
+The typical case is that historical artifacts were created before the cluster enabled `s3Backed=true`, so they still live on local disk and now need to be moved into S3-backed storage. If the same maintenance also needs to repopulate target nodes, run `tpl redo` after `tpl merge` completes.
+
 ## API
 
 Internal endpoints (called by CubeMaster):
@@ -67,7 +73,7 @@ Internal endpoints (called by CubeMaster):
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/tc/api/v1/build` | submit a build job |
-| POST | `/tc/api/v1/artifact/upload` | ingest a local ext4 uploaded by CubeMaster (`tpl merge`) into TC's artifact store |
+| POST | `/tc/api/v1/artifact/upload` | ingest a local ext4 uploaded by CubeMaster (`tpl merge`) into TC's artifact store / S3-backed storage |
 | POST | `/tc/api/v1/artifact/delete` | delete artifact data (local file / S3 object) |
 
 Public routes reverse-proxied from CubeMaster (actually served by TC):

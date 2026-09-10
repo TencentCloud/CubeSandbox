@@ -58,7 +58,7 @@ CubeSandbox 支持两种制作方式：
 - **从 OCI 镜像制作**：准备包含系统、工具和应用依赖的 OCI 镜像，再由 CubeSandbox 将其转换为模板。这是创建可复现模板的常用方式，详见[从 OCI 镜像制作模板](./tutorials/template-from-image.md)。
 - **从运行中的沙箱制作**：先在沙箱内安装软件或调整环境，再将其当前文件系统和内存状态提交为新模板。适合交互式调试和快速固化环境，详见[将运行中的沙箱提交为模板](./tutorials/template-from-sandbox.md)。
 
-无论采用哪种方式，模板制作过程都可以概括为：准备根文件系统，启动 MicroVM 并等待环境就绪，生成快照，最后注册并发布模板。模板就绪后，CubeSandbox 可以用它快速创建新的沙箱；如果是历史模板或旧部署中仍保存在 CubeMaster 本地盘上的 artifact，也可以后续再用 `cubemastercli tpl merge <template-id>` 把该 rootfs 迁入 TC 管理的 artifact 存储。对于**存量镜像对应的历史模板**，文档里的推荐顺序是：**先 `tpl merge`，再 `tpl redo`**；如果不迁移，artifact 会继续滞留在本地盘上，后续 `redo` / 分发也仍然受这份历史 ext4 的可用性约束。
+无论采用哪种方式，模板制作过程都可以概括为：准备根文件系统，启动 MicroVM 并等待环境就绪，生成快照，最后注册并发布模板。模板就绪后，CubeSandbox 可以用它快速创建新的沙箱；如果是历史模板或旧部署中仍保存在 CubeMaster 本地盘上的 artifact，也可以后续再用 `cubemastercli tpl merge <template-id>` 把该 rootfs 迁入 TC 管理的 artifact 存储。对**存量镜像对应的历史模板**，文档口径应统一为：**`tpl merge` 解决历史 artifact 的存储收敛问题，`tpl redo` 解决节点侧重新分发 / 必要时重建问题。** 典型场景是后续开启 `s3Backed=true`，需要将历史 artifact 从本地盘迁移到 **S3 托管存储**；若同一次运维还需要重新覆盖节点，则在 `merge` 完成后再执行 `redo`。
 
 ## 模板与镜像的关系
 

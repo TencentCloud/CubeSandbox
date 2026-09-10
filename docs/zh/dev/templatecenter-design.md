@@ -76,14 +76,15 @@ TC 不初始化 worker（cubelet）grpc 连接池，因此任何可能发起 cub
   - 做幂等检查
   - 尝试清理遗留的本地 ext4 副本
 
-对**存量镜像制作出来的历史模板**，本文约定的标准运维顺序是：**先 `tpl merge`，再 `tpl redo`**。原因是 `merge` 负责把旧的本地 artifact 收敛进 TC 管理的存储，而 `redo` 负责后续续跑 / 分发；两者职责不同，不应互相替代。
+对**存量镜像制作出来的历史模板**，运维文档应统一采用以下口径：**`tpl merge` 解决历史 artifact 的存储收敛问题，`tpl redo` 解决节点侧重新分发 / 必要时重建问题。**
+
+典型场景是：模板最初的 artifact 仍保存在 CubeMaster 本地盘，后续集群开启了 `s3Backed=true`，需要将这批历史 artifact 从本地盘迁移到 **S3 托管存储**。在这个场景下，应先执行 `tpl merge` 完成存储迁移；若同一次运维还需要让模板重新覆盖目标节点，再继续执行 `tpl redo`。
 
 > **高亮提醒**
-> 不迁移的直接后果，是这类历史模板的 artifact 仍旧停留在 **CubeMaster 本地盘**，而不是 TC 管理的 artifact store。
+> 在默认共盘 / 共享存储拓扑下，未执行 `tpl merge` 并不意味着现有 `READY` 模板会立即失去下载能力；真正的问题是历史 artifact 仍未完成从**本地盘到 S3 托管存储**的收敛。
 >
-> - **存储侧**：切到 `s3Backed=true` 或远端 TC 拓扑后，存量模板仍然没有完成存储收敛。
-> - **运行侧**：后续 `redo` / 分发仍会继续依赖这份历史本地 ext4，而不是迁移后的统一 artifact。
-> - **恢复侧**：如果本地 ext4 先丢了，再跑 `tpl merge` 也无法补救，因为已经“没有东西可上传”；这时只能重新 `tpl redo` 去重建 rootfs。
+> - **存储侧**：开启 `s3Backed=true` 后，旧模板不会自动补做迁移。
+> - **恢复侧**：如果本地 ext4 先丢了，再跑 `tpl merge` 也无法补救，因为已经没有可上传的文件；这时只能对可重建的 `from-image` 模板执行 `tpl redo`，回退到重建流程。
 
 migrate job 有自己独立的状态读取路径：`GET /cube/template/migrate?job_id=...`。
 
@@ -100,9 +101,9 @@ HTTP 层把领域错误映射为 API 错误码：
 
 ### 3.5 Redo
 
-`POST /cube/template/redo` 用于续跑失败的模板 job。分发阶段失败但 artifact 已为 `READY` 的 job 会复用 artifact，而不是重建；复用 `PENDING` / `BUILDING` 的 artifact 会读到半成品 ext4，因此是禁止的。
+`POST /cube/template/redo` 用于续跑失败的模板 job。分发阶段失败但 artifact 已为 `READY` 的 job 会复用 artifact，而不是重建；复用 `PENDING` / `BUILDING` 的 artifact 会读到半成品 ext4，因此是禁止的。若 artifact 不再可复用，redo 会退回到从 `source_image_ref` 做 full rebuild（该构建由 TC 执行，而不是依赖先前 `merge` 的结果）。
 
-在运维文档里，`redo` 还承担“让模板基于**已经迁移完成**的 artifact 重新续跑 / 分发”的角色。因此面对**存量模板**时，顺序应写成 **先 `merge`、后 `redo`**，而不是只写 `redo`。
+在运维文档中，`tpl merge` 应描述为**历史 artifact 从本地盘迁移到 S3 托管存储**的存储收敛动作，`tpl redo` 应描述为**节点侧重新分发 / 必要时重建**动作。只有在同一次运维同时涉及历史 artifact 迁移和节点重新覆盖时，才需要按 **先 `merge`、后 `redo`** 的顺序执行。
 
 ### 3.6 Resume 流水线
 

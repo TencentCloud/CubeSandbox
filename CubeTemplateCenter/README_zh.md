@@ -58,18 +58,17 @@ cubemastercli --address <cubemaster-host> --port 8089 tpl merge <template-id> --
 - **开启了 `s3Backed=true` 之后**：希望把旧的本地 ext4 收敛进 S3。
 - **清理残留本地副本**：当 artifact 已经是 S3-backed 时，再次执行 `tpl merge` 会做幂等检查，并尽量清理遗留的本地 ext4。
 
-对于**存量镜像对应的历史模板**，文档建议把标准迁移顺序写成：**先 `tpl merge`，再 `tpl redo`**。
+对于**存量镜像对应的历史模板**，文档口径应统一为：**`tpl merge` 解决历史 artifact 的存储收敛问题，`tpl redo` 解决节点侧重新分发 / 必要时重建问题。**
 
-- **先 `tpl merge`**：把历史模板还留在 CubeMaster 本地盘上的 rootfs artifact 迁进 TC 管理的 artifact store。
-- **再 `tpl redo`**：让后续续跑 / 分发基于迁移后的 artifact 继续进行，尤其适合切到 `s3Backed=true` 之后、需要让旧模板重新覆盖目标节点的场景。
+典型场景是：模板最初的 artifact 仍保存在 CubeMaster 本地盘，后续集群开启了 `s3Backed=true`，需要将这批历史 artifact 从本地盘迁移到 **S3 托管存储**。如果同一次运维还需要让模板重新覆盖目标节点，则在 `tpl merge` 完成后继续执行 `tpl redo`。
 
 > **高亮提醒**
-> 如果**不做迁移**，这些存量模板的 rootfs artifact 仍然只依赖 **CubeMaster 本地磁盘**，不会自动收敛到 TC 管理的存储。
+> 在默认共盘 / 共享 PVC 部署里，不执行 `tpl merge` 通常**不会立刻影响现有模板下载**；真正的问题是这些历史 artifact 仍未完成从**本地盘到 S3 托管存储**的收敛。
 >
-> - **运维风险**：后续 `redo` / 分发仍然受这份本地 ext4 的可用性约束，不能获得迁移后的统一存储路径。
-> - **恢复风险**：如果本地 ext4 已经丢失，再补跑 `tpl merge` **也修不回来**；因为已经没有可上传的文件，最终只能通过 `tpl redo` 重新构建 rootfs。
+> - **存储侧**：开启 `s3Backed=true` 后，旧模板不会自动补做迁移。
+> - **恢复侧**：如果本地 ext4 已经丢失，再补跑 `tpl merge` **也修不回来**；因为已经没有可上传的文件，这时只能对可重建的 `from-image` 模板通过 `tpl redo` 回退到重建流程。
 
-示例：
+如果你的场景**既要把旧文件迁进统一存储，又要重新覆盖节点**，可以按下面的顺序执行：
 
 ```bash
 cubemastercli --address <cubemaster-host> --port 8089 tpl merge <template-id>
