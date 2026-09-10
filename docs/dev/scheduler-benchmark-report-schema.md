@@ -1,10 +1,3 @@
----
-title: Scheduler Benchmark Report Schema
-description: JSON report contract for CubeSandbox topic 1 scheduler benchmark and simulator.
-status: draft
-updated: 2026-09-03
----
-
 # Scheduler Benchmark Report Schema
 
 This document defines the JSON report emitted by the current topic 1 offline
@@ -20,7 +13,8 @@ go run ./cmd/schedulerbench --out ./schedulerbench-report
 ```
 
 It writes `report.json` and `report.md` by default. Use `--format json`,
-`--format markdown`, or `--format both` to select output files.
+`--format markdown`, or `--format both` to select output files. Unselected
+`report.json` / `report.md` files already in `--out` are deleted.
 
 Use these verification commands from `CubeMaster`:
 

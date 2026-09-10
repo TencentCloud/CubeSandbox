@@ -53,7 +53,7 @@ func runCLIWithProvenance(args []string, stdout, stderr io.Writer, resolve prove
 		nodeCount = flags.Int("nodes", defaultConfig.NodeCount, "simulated node count (1-4)")
 		profiles  = flags.String("profiles", strings.Join(defaultConfig.Profiles, ","), "comma-separated profile list")
 		workloads = flags.String("workloads", strings.Join(defaultConfig.Workloads, ","), "comma-separated workload list")
-		format    = flags.String("format", defaultFormat, "report format: json, markdown, or both")
+		format    = flags.String("format", defaultFormat, "report format: json, markdown, or both; unselected report.json/report.md files already present in --out are deleted")
 		verify    = flags.Bool("verify", false, "check the "+verifyScope+" (not arbitrary --profiles/--workloads subsets; checks structure and internal consistency only, not live scheduling performance or semantic equivalence to production scheduling)")
 	)
 	if err := flags.Parse(args); err != nil {

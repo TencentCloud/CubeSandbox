@@ -1,5 +1,6 @@
 /build/
 /test/
 /coverage/
+# Default `go run ./cmd/schedulerbench --out ./schedulerbench-report` directory.
 /schedulerbench-report/
 cmd/cubemastercli/internal/envd/assets/envd

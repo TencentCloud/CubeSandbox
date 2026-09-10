@@ -27,7 +27,7 @@ go run ./cmd/schedulerbench --out ./schedulerbench-report
 - `schedulerbench-report/report.json`
 - `schedulerbench-report/report.md`
 
-可用 `--format json`、`--format markdown` 或 `--format both` 选择输出文件集合；默认是 `both`。
+可用 `--format json`、`--format markdown` 或 `--format both` 选择输出文件集合；默认是 `both`。`--out` 被当作 CLI 自己的目录：未选中的格式会删除该目录里已有的 `report.json` / `report.md`（因此 `--format json` 会清掉旧的 `report.md`）。若要同时保留两份文件，请换一个空目录。
 
 默认运行是确定性的，并在两份报告中记录 seed、节点数、workload、profile、
 源码 provenance 与指标 schema。`--nodes` 仅接受 **1–4**；CLI 显式

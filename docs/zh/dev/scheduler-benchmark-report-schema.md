@@ -1,10 +1,3 @@
----
-title: 调度基准报告 Schema
-description: CubeSandbox 课题一调度基准与 simulator 的 JSON 报告合同。
-status: draft
-updated: 2026-09-03
----
-
 # 调度基准报告 Schema
 
 本文定义当前课题一离线调度 simulator 输出的 JSON 报告。报告是确定性的
@@ -19,7 +12,8 @@ go run ./cmd/schedulerbench --out ./schedulerbench-report
 ```
 
 默认写出 `report.json` 与 `report.md`。可用 `--format json`、
-`--format markdown` 或 `--format both` 选择输出文件。
+`--format markdown` 或 `--format both` 选择输出文件。未选中的
+`report.json` / `report.md` 若已存在于 `--out` 目录，会被删除。
 
 在 `CubeMaster` 下使用以下验证命令：
 

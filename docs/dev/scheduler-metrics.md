@@ -1,10 +1,3 @@
----
-title: Scheduler Evaluation Metrics
-description: Metric definitions for CubeSandbox topic 1 scheduler benchmark and simulator reports.
-status: draft
-updated: 2026-09-03
----
-
 # CubeSandbox Scheduler Evaluation Metrics
 
 This document defines the topic 1 scheduling-quality metrics and how they map

@@ -30,7 +30,10 @@ The command writes:
 - `schedulerbench-report/report.md`
 
 Use `--format json`, `--format markdown`, or `--format both` to select the
-output file set. The default is `both`.
+output file set. The default is `both`. `--out` is treated as a directory the
+CLI owns: a format that is not selected deletes any pre-existing
+`report.json` or `report.md` in that directory (`--format json` therefore
+removes a stale `report.md`). Use a fresh directory if you need to keep both.
 
 The default run is deterministic and records the seed, node count, workloads,
 profiles, source provenance, and metric schema in both reports. `--nodes`

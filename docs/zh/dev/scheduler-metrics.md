@@ -1,10 +1,3 @@
----
-title: 调度评估指标
-description: CubeSandbox 课题一调度基准与 simulator 报告的指标定义。
-status: draft
-updated: 2026-09-03
----
-
 # CubeSandbox 调度评估指标
 
 本文定义课题一调度质量指标，并说明它们如何对应当前 scheduler simulator 报告。指标用于相对比较：在同一节点集、同一 workload、同一随机种子下，对比 `default` 与候选 Profile 的差异。
