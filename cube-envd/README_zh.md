@@ -104,7 +104,7 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:49983/health
 - 对于 `/files`，可以通过 `username` 查询参数选择本地用户（默认：`root`）。
 - 相对路径和 `~/...` 路径会基于所选用户的主目录解析。绝对路径直接使用。`~otheruser/...` 会被拒绝。
 
-启动的进程会先清空环境变量，然后合并当前 `/init` 环境变量快照与请求中的 `envs`。当所选用户与运行 `cube-envd` 的用户不同时，会通过 `setpriv` 切换凭据。
+启动的进程会先清空环境变量，然后按参考实现 envd 的语义构建基础环境：`PATH` 取自 `cube-envd` 自身，`HOME`、`USER`、`LOGNAME` 取自所选用户的 passwd 条目。随后依次叠加当前 `/init` 环境变量快照与请求中的 `envs`，请求可以覆盖上述任一变量。当所选用户与运行 `cube-envd` 的用户不同时，会通过 `setpriv` 切换凭据。
 
 ## 仓库结构
 

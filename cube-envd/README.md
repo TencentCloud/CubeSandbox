@@ -127,10 +127,13 @@ These endpoints implement the `filesystem.Filesystem` service:
   home directory. Absolute paths are used as-is. `~otheruser/...` is
   rejected.
 
-Started processes run with a cleared environment, then receive the current
-`/init` environment snapshot merged with any per-process `envs` from the
-request. When the selected user differs from the user running `cube-envd`,
-it switches credentials via `setpriv`.
+Started processes run with a cleared environment, then receive a base
+environment built the same way as the reference envd: `PATH` from `cube-envd`
+itself, and `HOME`, `USER` and `LOGNAME` from the selected user's passwd entry.
+The current `/init` environment snapshot and any per-process `envs` from the
+request are applied on top, in that order, so a request can override any of
+them. When the selected user differs from the user running `cube-envd`, it
+switches credentials via `setpriv`.
 
 ## Repository Layout
 

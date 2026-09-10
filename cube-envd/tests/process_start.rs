@@ -102,6 +102,87 @@ async fn process_start_drains_pipe_output_before_streaming_the_end_event() {
     }
 }
 
+// 验证子进程获得上游 envd 注入的 PATH、HOME、USER 与 LOGNAME。
+#[tokio::test]
+async fn process_start_injects_path_home_user_and_logname() {
+    let current = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .expect("look up current local user")
+        .expect("current uid has a passwd entry");
+    let payload = json!({
+        "process": {
+            "cmd": "/bin/sh",
+            "args": [
+                "-c",
+                "test \"$HOME\" = \"$EXPECTED_HOME\" \
+                 && test \"$USER\" = \"$EXPECTED_USER\" \
+                 && test \"$LOGNAME\" = \"$EXPECTED_USER\" \
+                 && test -n \"$PATH\"; exit 7"
+            ],
+            "envs": {
+                "EXPECTED_HOME": current.dir.display().to_string(),
+                "EXPECTED_USER": current.name
+            }
+        },
+        "stdin": false
+    });
+    let response = router()
+        .oneshot(
+            Request::post("/process.Process/Start")
+                .header(CONTENT_TYPE, "application/connect+json")
+                .header("Connect-Protocol-Version", "1")
+                .header("Authorization", common::basic_auth_header())
+                .body(Body::from(
+                    encode_frame(0, payload.to_string().as_bytes()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let frames = split_frames(&response.into_body().collect().await.unwrap().to_bytes());
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame["event"]["end"]["exitCode"] == 7),
+        "child did not observe the injected PATH/HOME/USER/LOGNAME: {frames:?}"
+    );
+}
+
+// 验证请求级 envs 可以覆盖 envd 注入的基础环境变量。
+#[tokio::test]
+async fn process_start_request_envs_override_injected_base_environment() {
+    let payload = json!({
+        "process": {
+            "cmd": "/bin/sh",
+            "args": ["-c", "test \"$HOME\" = \"/tmp/cube-envd-home-override\"; exit 7"],
+            "envs": {"HOME": "/tmp/cube-envd-home-override"}
+        },
+        "stdin": false
+    });
+    let response = router()
+        .oneshot(
+            Request::post("/process.Process/Start")
+                .header(CONTENT_TYPE, "application/connect+json")
+                .header("Connect-Protocol-Version", "1")
+                .header("Authorization", common::basic_auth_header())
+                .body(Body::from(
+                    encode_frame(0, payload.to_string().as_bytes()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frames = split_frames(&response.into_body().collect().await.unwrap().to_bytes());
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame["event"]["end"]["exitCode"] == 7),
+        "request envs did not override the injected base environment: {frames:?}"
+    );
+}
+
 // 验证空闲进程的 Start 流会按客户端请求发送保活事件。
 #[tokio::test]
 async fn process_start_sends_keepalives_during_idle_periods() {
