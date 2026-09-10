@@ -10,3 +10,8 @@ CubeS3lvol/deps
 CubeS3lvol/deps/**
 !cube-envd/
 !cube-envd/**
+# 构建产物：Cargo target 目录可达数 GB／数万文件。两个 Dockerfile 目前只 COPY
+# cube-envd 下的具体子路径（BuildKit 惰性加载不会传输它），但这里显式排除，避免
+# 禁用 BuildKit 或将来改成整体 COPY 时把整个 target 目录塞进构建上下文。
+cube-envd/target
+cube-envd/target/**
