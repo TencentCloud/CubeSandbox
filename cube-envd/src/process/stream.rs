@@ -117,14 +117,45 @@ pub(super) fn end_event(result: std::io::Result<std::process::ExitStatus>) -> En
     }
 }
 
+/// 等待 PTY 子进程结束并转换为终态事件。
+///
+/// portable-pty 的 `ExitStatus` 没有信号编号：信号终止时把 `code` 压成 1、只留下
+/// 一个本地化信号名。因此这里优先 downcast 回 `std::process::Child` 取原始退出
+/// 状态（portable-pty 的 unix 后端就是用它承载子进程的），使 PTY 与管道路径共用
+/// 同一套终态形状——信号终止统一上报 `128 + N`。downcast 失败时退回 portable-pty
+/// 的转换结果。
+pub(super) fn wait_pty_child(
+    mut child: Box<dyn portable_pty::Child + Send + Sync>,
+) -> std::io::Result<EndEvent> {
+    let child_ref: &mut dyn portable_pty::Child = &mut *child;
+    if let Some(std_child) = child_ref.downcast_mut::<std::process::Child>() {
+        return std_child.wait().map(|status| end_event(Ok(status)));
+    }
+
+    child.wait().map(pty_end_event)
+}
+
 /// 将 portable-pty 的退出状态转换为协议结束事件。
+///
+/// 仅在无法取得原始退出状态时使用（见 [`wait_pty_child`]）：信号终止只能退化为
+/// portable-pty 提供的描述性文案。
 pub(super) fn pty_end_event(status: portable_pty::ExitStatus) -> EndEvent {
-    let code = status.exit_code() as i32;
-    EndEvent {
-        exit_code: code,
-        exited: status.signal().is_none(),
-        status: status.to_string(),
-        error: status.signal().map(str::to_owned),
+    match status.signal() {
+        Some(name) => EndEvent {
+            exit_code: status.exit_code() as i32,
+            exited: false,
+            status: format!("terminated by signal {name}"),
+            error: Some(format!("terminated by signal {name}")),
+        },
+        None => {
+            let code = status.exit_code() as i32;
+            EndEvent {
+                exit_code: code,
+                exited: true,
+                status: format!("exit status {code}"),
+                error: None,
+            }
+        }
     }
 }
 

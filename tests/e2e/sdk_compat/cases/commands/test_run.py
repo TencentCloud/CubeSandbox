@@ -84,3 +84,23 @@ def test_command_timeout_is_enforced(sdk_sandbox):
     if result is not None:
         assert result.exit_code != 0
     assert 0.7 <= elapsed < 4, f"command timeout took {elapsed:.2f}s"
+
+
+@pytest.mark.p1
+def test_signal_death_reports_shell_exit_code(sdk_sandbox, sdk_e2e_config):
+    """A signal-killed command must surface ``128 + N`` through the SDK.
+
+    cube-envd reports ``128 + N`` for signal deaths (SIGKILL -> 137) for both
+    pipe and PTY processes, so ``exit_code`` is only meaningful when the SDK
+    exposes the platform convention. The E2B reference envd reports ``-1``
+    instead, so that backend only asserts a non-zero, non-crash result.
+    """
+    result = sdk_sandbox.run_command(
+        "kill -9 $$",
+        timeout=sdk_e2e_config.command_timeout,
+    )
+
+    if sdk_sandbox.backend == "cubesandbox":
+        assert result.exit_code == 137, f"expected 128 + SIGKILL: {result}"
+    else:
+        assert result.exit_code != 0, f"signal death must not look successful: {result}"

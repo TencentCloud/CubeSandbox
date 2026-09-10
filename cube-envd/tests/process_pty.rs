@@ -105,6 +105,87 @@ async fn pty_start_returns_promptly_after_a_timed_out_pipe_process() {
     assert_eq!(pty_response.status(), StatusCode::OK);
 }
 
+// 验证 PTY 进程被信号终止时按 128 + N 上报终态，与管道路径形状一致。
+#[tokio::test]
+async fn pty_signal_termination_reports_the_same_end_shape_as_pipe_processes() {
+    let app = router();
+    let response = app
+        .clone()
+        .oneshot(stream_request(
+            "Start",
+            json!({
+                "process": {"cmd": "/bin/sleep", "args": ["30"], "envs": {}},
+                "pty": {"size": {"cols": 80, "rows": 24}}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    let pid = start_pid(stream.next().await.unwrap().unwrap()).unwrap();
+
+    let (status, _) = unary(
+        app,
+        "SendSignal",
+        json!({"process":{"pid":pid},"signal":"SIGNAL_SIGKILL"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let bytes: Vec<Result<bytes::Bytes, axum::Error>> = StreamExt::collect(&mut stream).await;
+    let bytes = bytes.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+    let bytes = bytes.concat();
+    let frames = frames(&bytes);
+    let end = frames
+        .iter()
+        .find_map(|frame| frame["event"]["end"].as_object())
+        .expect("PTY Start stream must end with an end event");
+
+    // SIGKILL = 9，与 process_control 的管道路径断言保持同一约定。
+    assert_eq!(end["exitCode"], 137, "end event: {end:?}");
+    assert_eq!(
+        end["status"], "terminated by signal 9",
+        "end event: {end:?}"
+    );
+    assert_eq!(end["error"], "terminated by signal 9", "end event: {end:?}");
+    assert!(
+        end.get("exited").is_none(),
+        "proto JSON omits the false exited field: {end:?}"
+    );
+}
+
+// 验证 PTY 进程正常退出时与管道路径一致地报告 exit status。
+#[tokio::test]
+async fn pty_normal_exit_reports_exit_status_and_exited() {
+    let app = router();
+    let response = app
+        .oneshot(stream_request(
+            "Start",
+            json!({
+                "process": {"cmd": "/bin/sh", "args": ["-c", "exit 3"], "envs": {}},
+                "pty": {"size": {"cols": 80, "rows": 24}}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let frames = frames(&bytes);
+    let end = frames
+        .iter()
+        .find_map(|frame| frame["event"]["end"].as_object())
+        .expect("PTY Start stream must end with an end event");
+
+    assert_eq!(end["exitCode"], 3, "end event: {end:?}");
+    assert_eq!(end["exited"], true, "end event: {end:?}");
+    assert_eq!(end["status"], "exit status 3", "end event: {end:?}");
+    assert!(
+        end.get("error").is_none(),
+        "normal exit must not carry an error: {end:?}"
+    );
+}
+
 // 构造带认证和 Connect 协议头的单帧流式进程 RPC 请求。
 fn stream_request(method: &str, payload: Value) -> Request<Body> {
     Request::post(format!("/process.Process/{method}"))

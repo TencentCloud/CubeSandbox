@@ -86,6 +86,28 @@ These endpoints implement the `process.Process` service:
 | `/process.Process/SendSignal` | unary | Send `SIGNAL_SIGTERM` or `SIGNAL_SIGKILL` to a process group. |
 | `/process.Process/CloseStdin` | unary | Close a normal process stdin (EOF); not valid for PTY processes. |
 
+#### Process end events
+
+`Start` and `Connect` streams finish with an `EndEvent`. Its shape is part of the
+SDK contract and is identical for pipe and PTY processes:
+
+| Scenario | `exitCode` | `exited` | `status` | `error` |
+|----------|-----------|----------|----------|---------|
+| Normal exit with code `N` | `N` (omitted when `0`) | `true` | `exit status N` | omitted |
+| Killed by signal `N` | `128 + N` | `false` (omitted) | `terminated by signal N` | `terminated by signal N` |
+| Reaping failed | `-1` | `false` (omitted) | `failed to reap process` | error text |
+
+Notes:
+
+- Follows shell convention: a process killed by signal `N` reports `128 + N`, so
+  `SIGKILL` is `137` and `SIGTERM` is `143`. The reference envd instead reports
+  `-1` for signal deaths; negative values are reserved here for reaping failures.
+- proto3 JSON omits zero-valued fields, so `exitCode` is absent for a clean exit
+  and `exited` is absent for signal deaths. Clients must rely on `status` (and
+  `exited`) to tell "exited normally" from "killed".
+- The three SDKs shipped in this repository parse `status` for the exit code when
+  `exitCode` is unset, so the `status` wording is load-bearing.
+
 ### Filesystem RPCs
 
 These endpoints implement the `filesystem.Filesystem` service:

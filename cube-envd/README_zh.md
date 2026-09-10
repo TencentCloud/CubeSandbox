@@ -73,6 +73,26 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:49983/health
 | `/process.Process/SendSignal` | unary | 向进程组发送 `SIGNAL_SIGTERM` 或 `SIGNAL_SIGKILL`。 |
 | `/process.Process/CloseStdin` | unary | 关闭普通进程 stdin（EOF）；不适用于 PTY 进程。 |
 
+#### 进程结束事件
+
+`Start` 与 `Connect` 流都以 `EndEvent` 收尾。其字段形状属于 SDK 契约，管道进程与
+PTY 进程完全一致：
+
+| 场景 | `exitCode` | `exited` | `status` | `error` |
+|----------|-----------|----------|----------|---------|
+| 正常退出，退出码 `N` | `N`（为 `0` 时省略） | `true` | `exit status N` | 省略 |
+| 被信号 `N` 终止 | `128 + N` | `false`（省略） | `terminated by signal N` | `terminated by signal N` |
+| 回收失败 | `-1` | `false`（省略） | `failed to reap process` | 错误文本 |
+
+说明：
+
+- 遵循 shell 约定：被信号 `N` 终止的进程上报 `128 + N`，因此 `SIGKILL` 为 `137`、
+  `SIGTERM` 为 `143`。参考实现 envd 对信号终止上报 `-1`；本实现把负值保留给回收失败。
+- proto3 JSON 会省略零值字段，因此正常退出时没有 `exitCode`、被信号终止时没有
+  `exited`。客户端需要依赖 `status`（与 `exited`）区分"正常退出"与"被信号终止"。
+- 本仓库三套 SDK 在 `exitCode` 缺省时会从 `status` 解析退出码，因此 `status` 的
+  文案属于契约的一部分。
+
 ### 文件系统 RPC
 
 以下端点实现 `filesystem.Filesystem` 服务：
