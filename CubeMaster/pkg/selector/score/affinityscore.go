@@ -35,7 +35,11 @@ func (l *affinityScore) String() string {
 }
 
 func (l *affinityScore) Weight() float64 {
-	return l.weight
+	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.AffinityScore
+	if cfg == nil || cfg.Disable || cfg.Weight == 0 {
+		return 0
+	}
+	return cfg.Weight
 }
 func (l *affinityScore) Disable() bool {
 	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.AffinityScore

@@ -48,7 +48,11 @@ func (l *imageScore) String() string {
 }
 
 func (l *imageScore) Weight() float64 {
-	return l.weight
+	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore
+	if cfg == nil || cfg.Disable || cfg.Weight == 0 {
+		return 0
+	}
+	return cfg.Weight
 }
 func (l *imageScore) Disable() bool {
 	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore
