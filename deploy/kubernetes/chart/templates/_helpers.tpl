@@ -1160,6 +1160,10 @@ Toolbox is mounted whole at the fixed path.
 - name: data-cubelet
   mountPath: {{ .Values.hostPaths.dataCubelet }}
   mountPropagation: Bidirectional
+{{/* Always mount: leftover toolbox softlink must resolve to host data, not image overlay. */}}
+- name: data-cubebox-os-image
+  mountPath: {{ .Values.hostPaths.dataCubeboxOsImage }}
+  mountPropagation: Bidirectional
 - name: data-log
   mountPath: {{ .Values.hostPaths.dataLog }}
 - name: data-cube-shim
@@ -1237,6 +1241,10 @@ Installer: toolbox only (no dataplane mounts).
   value: {{ printf "%s/root/component_versions" .Values.hostPaths.dataCubelet | quote }}
 - name: CUBE_PVM_ENABLE
   value: {{ ternary "1" "0" .Values.cubeNode.pvmGuestKernel.enabled | quote }}
+- name: CUBE_CUBEBOX_OS_IMAGE_ON_DATA
+  value: {{ ternary "1" "0" .Values.hostPaths.cubeboxOsImageOnData | quote }}
+- name: CUBEBOX_OS_IMAGE_DATA_DIR
+  value: {{ .Values.hostPaths.dataCubeboxOsImage | quote }}
 {{- end -}}
 
 {{/*
@@ -1259,6 +1267,10 @@ Bootstrap: host mutation mounts for pvm / node-init.
 {{- define "cube.bootstrapDataVolumeMounts" -}}
 - name: data-cubelet
   mountPath: {{ .Values.hostPaths.dataCubelet }}
+  mountPropagation: Bidirectional
+{{/* Always mount: leftover toolbox softlink must resolve to host data, not image overlay. */}}
+- name: data-cubebox-os-image
+  mountPath: {{ .Values.hostPaths.dataCubeboxOsImage }}
   mountPropagation: Bidirectional
 - name: data-log
   mountPath: {{ .Values.hostPaths.dataLog }}
@@ -1298,6 +1310,11 @@ Bootstrap: host mutation mounts for pvm / node-init.
 - name: data-cubelet
   hostPath:
     path: {{ .Values.hostPaths.dataCubelet }}
+    type: DirectoryOrCreate
+{{/* Always create/mount host data dir (toggle only controls softlink ensure). */}}
+- name: data-cubebox-os-image
+  hostPath:
+    path: {{ .Values.hostPaths.dataCubeboxOsImage }}
     type: DirectoryOrCreate
 - name: data-log
   hostPath:
@@ -1349,6 +1366,10 @@ Bootstrap: host mutation mounts for pvm / node-init.
       fieldPath: status.podIP
 - name: CUBE_PVM_ENABLE
   value: {{ ternary "1" "0" .Values.cubeNode.pvmGuestKernel.enabled | quote }}
+- name: CUBE_CUBEBOX_OS_IMAGE_ON_DATA
+  value: {{ ternary "1" "0" .Values.hostPaths.cubeboxOsImageOnData | quote }}
+- name: CUBEBOX_OS_IMAGE_DATA_DIR
+  value: {{ .Values.hostPaths.dataCubeboxOsImage | quote }}
 - name: CUBE_SANDBOX_AUTO_DETECT_ETH
   value: {{ .Values.cubeNode.network.autoDetectEthName | quote }}
 - name: CUBE_SANDBOX_ETH_NAME

@@ -191,6 +191,11 @@ sudo ./install.sh
 ```
 
 The one-click installation path is fixed at `/usr/local/services/cubetoolbox`.
+By default, large template rootfs under `cubebox_os_image` is softlinked to
+`/data/cubebox_os_image` (`CUBE_CUBEBOX_OS_IMAGE_ON_DATA=1`) so it does not fill
+the system disk; set `CUBE_CUBEBOX_OS_IMAGE_ON_DATA=0` (and wipe/reinstall) to keep a real directory
+under the toolbox on a fresh install (disabling the toggle does not undo an
+existing redirect).
 
 New one-click installations are managed by systemd only:
 

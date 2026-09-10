@@ -34,6 +34,8 @@ die() {
 source "${ONE_CLICK_RUNTIME_SCRIPT_DIR}/../common/validation.sh"
 # shellcheck source=../common/cubelet_config.sh
 source "${ONE_CLICK_RUNTIME_SCRIPT_DIR}/../common/cubelet_config.sh"
+# shellcheck source=../common/cubebox_os_image.sh
+source "${ONE_CLICK_RUNTIME_SCRIPT_DIR}/../common/cubebox_os_image.sh"
 
 require_cmd() {
   local cmd="$1"

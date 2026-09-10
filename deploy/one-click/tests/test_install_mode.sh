@@ -198,6 +198,47 @@ test_assert_safe_install_prefix() {
     fail "assert_safe_install_prefix should reject top-level symlinks"
   fi
 
+  # Managed cubebox_os_image redirect is an allowed top-level symlink.
+  local os_image_prefix="${TMP_DIR}/os-image-prefix"
+  local os_image_data="${TMP_DIR}/data/cubebox_os_image"
+  mkdir -p "${os_image_prefix}" "${os_image_data}"
+  : > "${os_image_prefix}/.one-click.env"
+  ln -s "${os_image_data}" "${os_image_prefix}/cubebox_os_image"
+  (
+    CUBEBOX_OS_IMAGE_DATA_DIR="${os_image_data}"
+    assert_safe_install_prefix "${os_image_prefix}"
+  ) >/dev/null 2>&1 \
+    || fail "assert_safe_install_prefix should accept cubebox_os_image data-disk symlink"
+
+  # Prefix holding only the managed symlink (no marker) is treated as empty-ish.
+  local only_os_image="${TMP_DIR}/only-os-image"
+  mkdir -p "${only_os_image}" "${os_image_data}"
+  ln -sfn "${os_image_data}" "${only_os_image}/cubebox_os_image"
+  (
+    CUBEBOX_OS_IMAGE_DATA_DIR="${os_image_data}"
+    assert_safe_install_prefix "${only_os_image}"
+  ) >/dev/null 2>&1 \
+    || fail "assert_safe_install_prefix should accept a prefix holding only cubebox_os_image"
+
+  # A real directory named cubebox_os_image is foreign content, not the managed redirect.
+  local real_os_image="${TMP_DIR}/real-os-image"
+  mkdir -p "${real_os_image}/cubebox_os_image"
+  if ( assert_safe_install_prefix "${real_os_image}" ) >/dev/null 2>&1; then
+    fail "assert_safe_install_prefix should reject a real cubebox_os_image directory without markers"
+  fi
+
+  # Wrong-target symlink named cubebox_os_image is not the managed redirect.
+  local wrong_target="${TMP_DIR}/wrong-os-image-target"
+  local wrong_prefix="${TMP_DIR}/wrong-os-image"
+  mkdir -p "${wrong_target}" "${wrong_prefix}"
+  ln -sfn "${wrong_target}" "${wrong_prefix}/cubebox_os_image"
+  if (
+    CUBEBOX_OS_IMAGE_DATA_DIR="${os_image_data}"
+    assert_safe_install_prefix "${wrong_prefix}"
+  ) >/dev/null 2>&1; then
+    fail "assert_safe_install_prefix should reject cubebox_os_image symlink with wrong target"
+  fi
+
   local backup_link_prefix="${TMP_DIR}/backup-link-prefix"
   mkdir -p "${backup_link_prefix}" "${TMP_DIR}/backup-link-target"
   ln -s "${TMP_DIR}/backup-link-target" "${backup_link_prefix}/.backup"
@@ -235,6 +276,101 @@ test_wipe_custom_install_prefix_contents() {
     fail "wipe should reject a marker-bearing prefix with a top-level symlink"
   fi
   [[ -e "${external}/keep.txt" ]] || fail "wipe must not touch symlink target content"
+
+  # Managed cubebox_os_image symlink is preserved across wipe; data stays intact.
+  local with_os_image="${TMP_DIR}/wipe-with-os-image"
+  local os_image_data="${TMP_DIR}/wipe-os-image-data"
+  mkdir -p "${with_os_image}/Cubelet" "${os_image_data}"
+  : > "${with_os_image}/.one-click.env"
+  : > "${os_image_data}/rootfs.ext4"
+  ln -s "${os_image_data}" "${with_os_image}/cubebox_os_image"
+  CUBE_CUBEBOX_OS_IMAGE_ON_DATA=1 CUBEBOX_OS_IMAGE_DATA_DIR="${os_image_data}" \
+    wipe_custom_install_prefix_contents "${with_os_image}"
+  [[ -L "${with_os_image}/cubebox_os_image" ]] || fail "wipe should preserve cubebox_os_image symlink"
+  [[ -e "${os_image_data}/rootfs.ext4" ]] || fail "wipe must not remove cubebox_os_image data"
+  [[ ! -e "${with_os_image}/Cubelet" ]] || fail "wipe should still remove Cubelet when cubebox_os_image link is present"
+
+  # A real cubebox_os_image directory under a marker-bearing prefix is wiped.
+  local with_real_os_image="${TMP_DIR}/wipe-with-real-os-image"
+  mkdir -p "${with_real_os_image}/Cubelet" "${with_real_os_image}/cubebox_os_image"
+  : > "${with_real_os_image}/.one-click.env"
+  : > "${with_real_os_image}/cubebox_os_image/stale.ext4"
+  wipe_custom_install_prefix_contents "${with_real_os_image}"
+  [[ ! -e "${with_real_os_image}/cubebox_os_image" ]] \
+    || fail "wipe should remove a real cubebox_os_image directory"
+  [[ ! -e "${with_real_os_image}/Cubelet" ]] || fail "wipe should still remove Cubelet"
+
+  # With the toggle off, a leftover managed link is not preserved (fresh install
+  # can use a real toolbox-local directory after wipe).
+  local with_os_image_off="${TMP_DIR}/wipe-with-os-image-off"
+  local os_image_data_off="${TMP_DIR}/wipe-os-image-data-off"
+  mkdir -p "${with_os_image_off}/Cubelet" "${os_image_data_off}"
+  : > "${with_os_image_off}/.one-click.env"
+  : > "${os_image_data_off}/rootfs.ext4"
+  ln -s "${os_image_data_off}" "${with_os_image_off}/cubebox_os_image"
+  CUBE_CUBEBOX_OS_IMAGE_ON_DATA=0 CUBEBOX_OS_IMAGE_DATA_DIR="${os_image_data_off}"     wipe_custom_install_prefix_contents "${with_os_image_off}"
+  [[ ! -e "${with_os_image_off}/cubebox_os_image" ]]     || fail "wipe with toggle off should remove cubebox_os_image symlink"
+  [[ -e "${os_image_data_off}/rootfs.ext4" ]]     || fail "wipe must not remove cubebox_os_image data when dropping the link"
+}
+
+test_ensure_cubebox_os_image_on_data() {
+  local toolbox="${TMP_DIR}/ensure-toolbox"
+  local data_root="${TMP_DIR}/ensure-data"
+  local data_path="${data_root}/cubebox_os_image"
+  mkdir -p "${toolbox}"
+
+  CUBE_CUBEBOX_OS_IMAGE_ON_DATA=1
+  ensure_cubebox_os_image_on_data "${toolbox}" "${data_path}"
+  [[ -L "${toolbox}/cubebox_os_image" ]] || fail "expected cubebox_os_image symlink after ensure"
+  [[ "$(readlink "${toolbox}/cubebox_os_image")" == "${data_path}" ]] \
+    || fail "symlink target mismatch: $(readlink "${toolbox}/cubebox_os_image")"
+  [[ -d "${data_path}" ]] || fail "data dir should exist after ensure"
+
+  # Idempotent when already correct.
+  ensure_cubebox_os_image_on_data "${toolbox}" "${data_path}"
+  [[ "$(readlink "${toolbox}/cubebox_os_image")" == "${data_path}" ]] \
+    || fail "ensure should keep correct symlink"
+
+  # Migrate a real directory that already holds artifacts.
+  local toolbox2="${TMP_DIR}/ensure-toolbox2"
+  local data2="${TMP_DIR}/ensure-data2/cubebox_os_image"
+  mkdir -p "${toolbox2}/cubebox_os_image"
+  : > "${toolbox2}/cubebox_os_image/legacy.ext4"
+  ensure_cubebox_os_image_on_data "${toolbox2}" "${data2}"
+  [[ -L "${toolbox2}/cubebox_os_image" ]] || fail "real dir should become symlink after migrate"
+  [[ -f "${data2}/legacy.ext4" ]] || fail "legacy artifact should move to data dir"
+
+  # Merge when data dir already exists.
+  local toolbox3="${TMP_DIR}/ensure-toolbox3"
+  local data3="${TMP_DIR}/ensure-data3/cubebox_os_image"
+  mkdir -p "${toolbox3}/cubebox_os_image" "${data3}"
+  : > "${toolbox3}/cubebox_os_image/from-toolbox.ext4"
+  : > "${data3}/existing.ext4"
+  ensure_cubebox_os_image_on_data "${toolbox3}" "${data3}"
+  [[ -L "${toolbox3}/cubebox_os_image" ]] || fail "merge path should end as symlink"
+  [[ -f "${data3}/from-toolbox.ext4" ]] || fail "toolbox artifact should merge into data dir"
+  [[ -f "${data3}/existing.ext4" ]] || fail "existing data artifact must remain"
+
+  # Toggle off: do not create the softlink.
+  local toolbox4="${TMP_DIR}/ensure-toolbox4"
+  mkdir -p "${toolbox4}"
+  # Retarget a wrong-but-trusted symlink (same dirname as new data_path) and migrate.
+  local toolbox_retarget="${TMP_DIR}/ensure-toolbox-retarget"
+  local data_root="${TMP_DIR}/ensure-data-retarget"
+  local old_data="${data_root}/cubebox_os_image_old"
+  local new_data="${data_root}/cubebox_os_image"
+  mkdir -p "${toolbox_retarget}" "${old_data}"
+  : > "${old_data}/cached.ext4"
+  ln -s "${old_data}" "${toolbox_retarget}/cubebox_os_image"
+  ensure_cubebox_os_image_on_data "${toolbox_retarget}" "${new_data}"
+  [[ -L "${toolbox_retarget}/cubebox_os_image" ]] || fail "retarget should leave a symlink"
+  [[ "$(readlink "${toolbox_retarget}/cubebox_os_image")" == "${new_data}" ]]     || fail "retarget should point at the new data dir"
+  [[ -f "${new_data}/cached.ext4" ]] || fail "retarget should migrate trusted symlink content"
+
+  CUBE_CUBEBOX_OS_IMAGE_ON_DATA=0
+  ensure_cubebox_os_image_on_data "${toolbox4}" "${TMP_DIR}/ensure-data4/cubebox_os_image"
+  [[ ! -e "${toolbox4}/cubebox_os_image" ]] || fail "disabled toggle must not create cubebox_os_image"
+  CUBE_CUBEBOX_OS_IMAGE_ON_DATA=1
 }
 
 test_control_plane_validators() {
@@ -557,6 +693,7 @@ test_install_sh_wires_upgrade_flow() {
   # The install root is fixed; custom-prefix wipe is no longer part of install.sh.
   assert_contains "${f}" 'INSTALL_PREFIX="${CUBE_SANDBOX_INSTALL_ROOT}"'
   assert_contains "${f}" 'assert_safe_install_prefix "${INSTALL_PREFIX}"'
+  assert_contains "${f}" 'ensure_cubebox_os_image_on_data "${INSTALL_PREFIX}"'
   if grep -Fq 'wipe_custom_install_prefix_contents "${INSTALL_PREFIX}"' "${f}"; then
     fail "install.sh should not invoke custom-prefix wipe"
   fi
@@ -598,6 +735,7 @@ test_parse_args_unknown_is_ignored
 test_install_root_readonly
 test_assert_safe_install_prefix
 test_wipe_custom_install_prefix_contents
+test_ensure_cubebox_os_image_on_data
 test_control_plane_validators
 test_compute_control_plane_preflight
 test_patch_cubelet_config_template_refuses_symlink

@@ -23,6 +23,11 @@ STATE_DIR="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
 log() { printf '[cube-component:%s:%s] %s\n' "${CUBE_COMPONENT:-?}" "${CUBE_ROLE}" "$*"; }
 fail() { printf '[cube-component:%s:%s] ERROR: %s\n' "${CUBE_COMPONENT:-?}" "${CUBE_ROLE}" "$*" >&2; exit 1; }
 
+if [[ -f /usr/local/bin/cubebox_os_image.sh ]]; then
+  # shellcheck disable=SC1091
+  . /usr/local/bin/cubebox_os_image.sh
+fi
+
 # Components staged into COMPONENT_VERSIONS_ROOT before toolbox replace.
 is_inventory_component() {
   case "$1" in
@@ -870,6 +875,21 @@ run_cubelet() {
 
   apply_effective_pvm_from_state
   select_guest_kernel "$(preserve_guest_kernel_selection "${TOOLBOX_ROOT}/cube-kernel-scf")"
+
+  if type ensure_cubebox_os_image_on_data >/dev/null 2>&1; then
+    _cubelet_os_image_data="${CUBEBOX_OS_IMAGE_DATA_DIR:-/data/cubebox_os_image}"
+    # Same guard as stage-toolbox: never migrate into the container overlay.
+    if type _cubebox_os_image_is_mountpoint >/dev/null 2>&1 \
+      && _cubebox_os_image_is_mountpoint "${_cubelet_os_image_data}"; then
+      if ! ensure_cubebox_os_image_on_data "${TOOLBOX_ROOT}" "${_cubelet_os_image_data}"; then
+        log "WARN: cubebox_os_image data-disk softlink ensure failed; continuing"
+      fi
+    else
+      log "skipping cubebox_os_image ensure: ${_cubelet_os_image_data} is not a host mount (avoid image-layer migrate)"
+    fi
+  else
+    log "WARN: cubebox_os_image.sh not loaded; skipping data-disk softlink"
+  fi
 
   local ops_esc master_http_esc cubeops_addr_esc cubeops_addr
   ops_esc="$(sed_escape_replacement "${CUBE_OPS_ENDPOINT}")"

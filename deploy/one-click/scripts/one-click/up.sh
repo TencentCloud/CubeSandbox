@@ -31,6 +31,7 @@ test -f "${CUBELET_DYNAMICCONF}" || die "cubelet dynamic config missing: ${CUBEL
 validate_cubelet_cow_startup_deps "${CUBELET_CONFIG}"
 
 mkdir -p "${CUBE_API_LOG_DIR}" /tmp/cube
+ensure_cubebox_os_image_on_data "${TOOLBOX_ROOT}"
 
 CUBEMASTER_ARTIFACT_STORE_EXPORT=""
 if [[ -n "${CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR_CONFIGURED}" ]]; then

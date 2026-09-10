@@ -128,6 +128,7 @@ COPY examples/volume/cos/binary/cube-volume-cos.sh ${IMAGE_ROOT}/Cubelet/plugin/
 COPY examples/volume/cos/volume-cos.conf.example ${IMAGE_ROOT}/Cubelet/plugin/volume-cos.conf.example
 COPY examples/volume/s3/volume-s3.conf.example ${IMAGE_ROOT}/Cubelet/plugin/volume-s3.conf.example
 COPY deploy/kubernetes/images/scripts/component-entrypoint.sh /usr/local/bin/component-entrypoint.sh
+COPY deploy/kubernetes/images/scripts/cubebox_os_image.sh /usr/local/bin/cubebox_os_image.sh
 
 RUN printf '{"schema_version":1,"components":{"cubelet":{"version":"%s"},"cubecli":{"version":"%s"}}}\n' \
       "${CUBE_VERSION}" "${CUBE_VERSION}" > ${IMAGE_ROOT}/Cubelet/version.json \
@@ -140,8 +141,10 @@ RUN printf '{"schema_version":1,"components":{"cubelet":{"version":"%s"},"cubecl
       ${IMAGE_ROOT}/Cubelet/plugin/cube-volume-cos \
       ${IMAGE_ROOT}/Cubelet/plugin/cube-volume-s3 \
       /usr/local/bin/component-entrypoint.sh \
+    && chmod 644 /usr/local/bin/cubebox_os_image.sh \
     && mkdir -p \
       /data/cubelet \
+      /data/cubebox_os_image \
       /data/log/Cubelet \
       /data/log/CubeShim \
       /data/log/CubeVmm \
