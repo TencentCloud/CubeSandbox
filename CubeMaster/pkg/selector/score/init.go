@@ -60,6 +60,10 @@ func NewSelector(ctx context.Context) []Selector {
 				continue
 			}
 		}
+		if registration.requiresPluginConf != nil && !registration.requiresPluginConf(conf.Score.ScorePluginConf) {
+			log.G(ctx).Warnf("scheduler score selector %s skipped: required plugin_conf is missing", name)
+			continue
+		}
 		selector := registration.new()
 		ss = append(ss, selector)
 		if name == "multi_factor_weighted_average" {
@@ -72,6 +76,8 @@ func NewSelector(ctx context.Context) []Selector {
 		recov.GoWithRecover(func() {
 			loopAsyncScore(ctx)
 		})
+	} else if multiFactorConf != nil && !multiFactorConstructed {
+		log.G(ctx).Warnf("scheduler multi_factor_weighted_average plugin_conf is present but scorer was not constructed; background node.Score / pscore updates will not run")
 	}
 	return ss
 }
@@ -79,6 +85,7 @@ func NewSelector(ctx context.Context) []Selector {
 type scoreRegistration struct {
 	new                           func() Selector
 	factors                       func(config.ScorePluginConf) []string
+	requiresPluginConf            func(config.ScorePluginConf) bool
 	legacyRequiresResourceWeights bool
 }
 
@@ -115,6 +122,7 @@ var scores = map[string]scoreRegistration{
 	},
 	"affinity_score": {
 		new:                           func() Selector { return NewAffinityScore() },
+		requiresPluginConf:            func(conf config.ScorePluginConf) bool { return conf.AffinityScore != nil },
 		legacyRequiresResourceWeights: true,
 	},
 	"image_score": {

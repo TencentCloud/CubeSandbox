@@ -13,17 +13,13 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
-type affinityScore struct {
-	weight float64
-}
+type affinityScore struct{}
 
 func NewAffinityScore() *affinityScore {
 	if config.GetConfig().Scheduler.Score.ScorePluginConf.AffinityScore == nil {
 		panic("config.Scheduler.Score.ScorePluginConf.AffinityScore is nil")
 	}
-	return &affinityScore{
-		weight: config.GetConfig().Scheduler.Score.ScorePluginConf.AffinityScore.Weight,
-	}
+	return &affinityScore{}
 }
 
 func (l *affinityScore) ID() string {

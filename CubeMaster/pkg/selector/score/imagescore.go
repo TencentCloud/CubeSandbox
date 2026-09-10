@@ -24,9 +24,7 @@ const (
 	maxContainerThreshold int64 = 80000 * mb
 )
 
-type imageScore struct {
-	weight float64
-}
+type imageScore struct{}
 
 var getImageStateByNode = localcache.GetImageStateByNode
 
@@ -34,9 +32,7 @@ func NewImageScore() *imageScore {
 	if config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore == nil {
 		panic("config.Scheduler.Score.ScorePluginConf.ImageScore is nil")
 	}
-	return &imageScore{
-		weight: config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore.Weight,
-	}
+	return &imageScore{}
 }
 
 func (l *imageScore) ID() string {
