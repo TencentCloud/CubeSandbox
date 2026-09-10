@@ -1444,15 +1444,23 @@ func allowedWeightFactorsForScorer(name string) map[string]struct{} {
 			constants.WeightFactorTemplateID: {},
 		}
 	case "real_time_weighted_average", "multi_factor_weighted_average":
-		// Shared utilization / load / locality factors used by average scorers.
-		out := make(map[string]struct{}, len(allowedSchedulerWeightFactorNames))
-		for k := range allowedSchedulerWeightFactorNames {
-			if k == constants.WeightFactorImageID || k == constants.WeightFactorTemplateID {
-				continue
-			}
-			out[k] = struct{}{}
+		// Only factors implemented by getFactorWeightedAverageScore.
+		return map[string]struct{}{
+			constants.WeightFactorCreateConcurrentLimit: {},
+			constants.WeightFactorMvmNum:                {},
+			constants.WeightFactorMetricUpdate:          {},
+			constants.WeightFactorLocalMetricUpdate:     {},
+			constants.WeightFactorQuotaCpu:              {},
+			constants.WeightFactorQuotaMem:              {},
+			constants.WeightFactorCpuUtil:               {},
+			constants.WeightFactorMemUsage:              {},
+			constants.WeightFactorCpuLoadUsage:          {},
+			constants.WeightFactorRealTimeCreateNum:     {},
+			constants.WeightFactorLocalCreateNum:        {},
+			constants.WeightFactorDataDiskUsage:         {},
+			constants.WeightFactorStorageDiskUsage:      {},
+			constants.WeightFactorSysDiskUsage:          {},
 		}
-		return out
 	default:
 		return allowedSchedulerWeightFactorNames
 	}
