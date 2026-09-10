@@ -124,6 +124,27 @@ func TestVerifyDefaultReportRejectsContractGaps(t *testing.T) {
 			},
 			want: "uses_estimated_latency must be true",
 		},
+		{
+			name: "stripped uses_estimated_latency schema wording",
+			mutate: func(report *Report) {
+				for i, metric := range report.MetricSchema {
+					if metric.Name == "uses_estimated_latency" {
+						report.MetricSchema[i].Description = "latency flag"
+						return
+					}
+				}
+			},
+			want: "simulator-only estimates",
+		},
+		{
+			name: "stripped comparison notes wording",
+			mutate: func(report *Report) {
+				for i := range report.Comparisons {
+					report.Comparisons[i].Notes = []string{"numeric deltas only"}
+				}
+			},
+			want: "simulator-only estimates",
+		},
 	}
 
 	for _, tt := range tests {
@@ -720,8 +741,14 @@ func TestAverageScoreMarginDenominatorIgnoresSingleCandidate(t *testing.T) {
 	}
 	mixed := append(append([]Request(nil), multiRequests...), singleRequests...)
 
-	multiOnly := runWorkload(ProfileDefault, newNodes(), multiRequests)
-	mixedMetrics := runWorkload(ProfileDefault, newNodes(), mixed)
+	multiOnly, err := runWorkload(ProfileDefault, newNodes(), multiRequests)
+	if err != nil {
+		t.Fatalf("runWorkload(multi) error = %v", err)
+	}
+	mixedMetrics, err := runWorkload(ProfileDefault, newNodes(), mixed)
+	if err != nil {
+		t.Fatalf("runWorkload(mixed) error = %v", err)
+	}
 	if multiOnly.ScheduledRequests != 2 || mixedMetrics.ScheduledRequests != 4 {
 		t.Fatalf("scheduled multi=%d mixed=%d, want 2 and 4", multiOnly.ScheduledRequests, mixedMetrics.ScheduledRequests)
 	}
@@ -737,12 +764,63 @@ func TestAverageScoreMarginDenominatorIgnoresSingleCandidate(t *testing.T) {
 		t.Fatalf("AverageScoreMargin unexpectedly equals diluted value %v", diluted)
 	}
 
-	onlySingle := runWorkload(ProfileDefault, []simNode{
+	onlySingle, err := runWorkload(ProfileDefault, []simNode{
 		{spec: NodeSpec{ID: "large", CPUMilli: 8000, MemMB: 16384, MaxSandboxes: 20, WarmTemplates: map[string]bool{}}},
 	}, []Request{
 		{ID: "only", Arrival: 0, Lifetime: 1, CPUMilli: 100, MemMB: 100, Template: "t"},
 	})
+	if err != nil {
+		t.Fatalf("runWorkload(single) error = %v", err)
+	}
 	if onlySingle.AverageScoreMargin != 0 {
 		t.Fatalf("single-candidate AverageScoreMargin = %v, want 0", onlySingle.AverageScoreMargin)
+	}
+}
+
+func TestRunRejectsDuplicateProfilesAndWorkloads(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "duplicate profile",
+			cfg: Config{
+				Profiles:  []string{ProfileDefault, ProfileDefault},
+				Workloads: []string{WorkloadBurstShortLived},
+			},
+			want: "duplicate profile",
+		},
+		{
+			name: "duplicate workload",
+			cfg: Config{
+				Profiles:  []string{ProfileDefault},
+				Workloads: []string{WorkloadBurstShortLived, WorkloadBurstShortLived},
+			},
+			want: "duplicate workload",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Run(tt.cfg)
+			if err == nil {
+				t.Fatal("Run() error = nil, want duplicate rejection")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Run() error = %q, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunWorkloadRejectsUnknownProfile(t *testing.T) {
+	_, err := runWorkload("not-a-profile", []simNode{
+		{spec: NodeSpec{ID: "n", CPUMilli: 1000, MemMB: 1024, MaxSandboxes: 4}},
+	}, []Request{{ID: "r", Arrival: 0, Lifetime: 1, CPUMilli: 100, MemMB: 100, Template: "t"}})
+	if err == nil {
+		t.Fatal("runWorkload() error = nil, want unknown profile")
+	}
+	if !strings.Contains(err.Error(), "unknown profile") {
+		t.Fatalf("runWorkload() error = %q, want unknown profile", err)
 	}
 }

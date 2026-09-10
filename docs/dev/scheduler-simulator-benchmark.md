@@ -160,7 +160,9 @@ Compared delta keys:
 - Acceptance path: every workload runs once per profile and reports
   baseline-vs-profile placement and quality metrics.
 - Domain lens: filter infeasible nodes first, score feasible candidates, then
-  bind the highest score, matching CubeMaster selector semantics.
+  bind the highest score, following the same filter → score → bind *shape* as
+  the CubeMaster selector with simulator-local scoring weights (not production
+  Filter/Score plugin equivalence).
 - Failure path: invalid profile/workload names fail the run; infeasible requests
   are counted as rejected with explicit reasons.
 - Evidence path: JSON and Markdown reports include the seed, node count,

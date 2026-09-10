@@ -182,6 +182,12 @@ func Run(cfg Config) (Report, error) {
 	if err := validateNodeCount(cfg.NodeCount); err != nil {
 		return Report{}, err
 	}
+	if err := validateUniqueNames(cfg.Profiles, "profile"); err != nil {
+		return Report{}, err
+	}
+	if err := validateUniqueNames(cfg.Workloads, "workload"); err != nil {
+		return Report{}, err
+	}
 	nodes := defaultNodes(cfg.NodeCount)
 	if len(nodes) != cfg.NodeCount {
 		return Report{}, fmt.Errorf("simulated node count %d disagrees with config node_count %d", len(nodes), cfg.NodeCount)
@@ -205,7 +211,10 @@ func Run(cfg Config) (Report, error) {
 				return Report{}, err
 			}
 			// Copy the node set per workload so placement state does not leak.
-			metrics := runWorkload(profile, cloneSimNodes(nodes), requests)
+			metrics, err := runWorkload(profile, cloneSimNodes(nodes), requests)
+			if err != nil {
+				return Report{}, err
+			}
 			result.Workloads = append(result.Workloads, WorkloadResult{
 				Workload: workload,
 				Metrics:  metrics,
@@ -229,6 +238,17 @@ func ValidateNodeCount(count int) error {
 func validateNodeCount(count int) error {
 	if count < MinNodeCount || count > MaxNodeCount {
 		return fmt.Errorf("unsupported node count %d: must be between %d and %d", count, MinNodeCount, MaxNodeCount)
+	}
+	return nil
+}
+
+func validateUniqueNames(values []string, kind string) error {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			return fmt.Errorf("duplicate %s %q", kind, value)
+		}
+		seen[value] = struct{}{}
 	}
 	return nil
 }
@@ -371,17 +391,38 @@ func validComparisonResult(result string) bool {
 }
 
 func hasSimulatorOnlyEstimatedLatencyContract(report Report) bool {
-	var contract strings.Builder
+	schemaOK := false
 	for _, metric := range report.MetricSchema {
-		fmt.Fprintf(&contract, " %s", metric.Description)
+		if metric.Name != "uses_estimated_latency" {
+			continue
+		}
+		desc := strings.ToLower(metric.Description)
+		if metric.Direction != "true means estimated" {
+			return false
+		}
+		if !(strings.Contains(desc, "simulat") &&
+			strings.Contains(desc, "estimat") &&
+			(strings.Contains(desc, "not live") || strings.Contains(desc, "not measured"))) {
+			return false
+		}
+		schemaOK = true
+		break
+	}
+	if !schemaOK {
+		return false
+	}
+	if len(report.Comparisons) == 0 {
+		return false
 	}
 	for _, comparison := range report.Comparisons {
-		fmt.Fprintf(&contract, " %s", strings.Join(comparison.Notes, " "))
+		text := strings.ToLower(strings.Join(comparison.Notes, " "))
+		if !(strings.Contains(text, "simulat") &&
+			strings.Contains(text, "estimat") &&
+			(strings.Contains(text, "not live") || strings.Contains(text, "not measured") || strings.Contains(text, "offline"))) {
+			return false
+		}
 	}
-	text := strings.ToLower(contract.String())
-	return strings.Contains(text, "simulat") &&
-		strings.Contains(text, "estimat") &&
-		(strings.Contains(text, "not live") || strings.Contains(text, "not measured"))
+	return true
 }
 
 func (r Report) Markdown() string {
@@ -727,8 +768,11 @@ func weightsForProfile(profile string) (profileWeights, error) {
 	}
 }
 
-func runWorkload(profile string, nodes []simNode, requests []Request) Metrics {
-	weights, _ := weightsForProfile(profile)
+func runWorkload(profile string, nodes []simNode, requests []Request) (Metrics, error) {
+	weights, err := weightsForProfile(profile)
+	if err != nil {
+		return Metrics{}, err
+	}
 	metrics := Metrics{
 		TotalRequests:        len(requests),
 		PlacementCounts:      make(map[string]int),
@@ -805,7 +849,7 @@ func runWorkload(profile string, nodes []simNode, requests []Request) Metrics {
 	if metrics.RejectedRequests > 0 {
 		metrics.Warnings = append(metrics.Warnings, "workload pressure exceeded simulated node capacity for at least one request")
 	}
-	return metrics
+	return metrics, nil
 }
 
 type scoredNode struct {

@@ -27,7 +27,7 @@ Current CLI flags (`CubeMaster/cmd/schedulerbench/main.go`):
 | Flag | Default | Meaning |
 |---|---|---|
 | `--out` | `schedulerbench-report` | Directory for `report.json` and `report.md` |
-| `--seed` | `20260903` (`DefaultConfig().Seed`) | Deterministic seed recorded in the report |
+| `--seed` | `20260903` (`DefaultConfig().Seed`) | Deterministic seed recorded in the report. Explicit CLI `--seed 0` is invalid (library zero-value `Config{}` still defaults to `20260903`). |
 | `--nodes` | `4` (`DefaultConfig().NodeCount`) | Simulated node count; supported values are **1–4**. Explicit CLI `--nodes 0` is invalid (library zero-value `Config{}` still defaults to 4). |
 | `--profiles` | `default,balanced_spread,template_locality_first,binpack_utilization` | Comma-separated profile list |
 | `--workloads` | `burst_short_lived,same_template_repeated,mixed_size` | Comma-separated workload list |
@@ -73,8 +73,10 @@ metric.
 1. Requests are processed in ascending `Arrival` order. Within the same tick,
    sandboxes with `EndsAt <= tick` are released first, then requests that arrive
    at that tick are scheduled.
-2. Node infeasibility matches CubeMaster Filter hard resource constraints:
-   sandbox count at the limit, or CPU/memory quota cannot fit the request.
+2. Node infeasibility follows the same hard resource shape the simulator models
+   (sandbox count at the limit, or CPU/memory quota cannot fit the request).
+   This is a Filter→Score→bind *shape* with simulator-local constraints, not a
+   claim of equivalence to CubeMaster's production Filter plugin set.
    Infeasible nodes never enter Score.
 3. Feasible nodes are scored with profile weights, then the highest-scored node
    is bound. Ties break by stable node ID order.

@@ -664,6 +664,29 @@ func TestRunCLINodeCountBoundary(t *testing.T) {
 	}
 }
 
+func TestRunCLIRejectsSeedZero(t *testing.T) {
+	t.Parallel()
+
+	outDir := filepath.Join(t.TempDir(), "seed-report")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runCLI([]string{
+		"--out", outDir,
+		"--seed", "0",
+		"--profiles", simulator.ProfileDefault,
+		"--workloads", simulator.WorkloadBurstShortLived,
+	}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("runCLI() error = nil, want invalid --seed")
+	}
+	if !strings.Contains(err.Error(), "seed") {
+		t.Fatalf("runCLI() error = %q, want seed message", err)
+	}
+	if fileExists(t, outDir) {
+		t.Fatal("report written despite invalid --seed")
+	}
+}
+
 func TestRunCLIRejectsEmptyAndDuplicateCSV(t *testing.T) {
 	t.Parallel()
 

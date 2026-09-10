@@ -22,7 +22,7 @@ updated: 2026-09-03
 | 标志 | 默认值 | 含义 |
 |---|---|---|
 | `--out` | `schedulerbench-report` | 写入 `report.json` 和 `report.md` 的目录 |
-| `--seed` | `20260903`（`DefaultConfig().Seed`） | 记入报告的确定性种子 |
+| `--seed` | `20260903`（`DefaultConfig().Seed`） | 记入报告的确定性种子。CLI 显式传入 `--seed 0` 为非法（库侧零值 `Config{}` 仍默认到 `20260903`）。 |
 | `--nodes` | `4`（`DefaultConfig().NodeCount`） | 模拟节点数；支持范围为 **1–4**。CLI 显式传入 `--nodes 0` 为非法（库侧零值 `Config{}` 仍默认到 4）。 |
 | `--profiles` | `default,balanced_spread,template_locality_first,binpack_utilization` | 逗号分隔的 Profile 列表 |
 | `--workloads` | `burst_short_lived,same_template_repeated,mixed_size` | 逗号分隔的 workload 列表 |
@@ -59,7 +59,7 @@ CubeAPI/Cubelet 的真实创建延迟或生产性能。
 所有核心指标都在一次 workload 跑完后写入 `results[].workloads[].metrics`。需要先固定以下口径，再解释单个指标。
 
 1. 请求按 `Arrival` 升序处理；同一 tick 内先释放 `EndsAt <= tick` 的 sandbox，再调度该 tick 到达的请求。
-2. 节点不可行条件与 CubeMaster Filter 的资源硬约束同类：sandbox 数达到上限，或 CPU/内存配额放不下本次请求。不可行节点不进入 Score。
+2. 节点不可行条件遵循本 simulator 建模的硬资源形态（sandbox 数达到上限，或 CPU/内存配额放不下本次请求）。这是带 simulator 本地约束的 Filter→Score→bind *形态*，并不宣称与 CubeMaster 生产 Filter 插件集合等价。不可行节点不进入 Score。
 3. 可行节点按 Profile 权重打分后，取最高分节点绑定。同分时按节点 ID 稳定排序。
 4. 配额利用率、峰值利用率和负载均衡度使用**最后一次请求到达后的节点快照**，不是全时段平均，也不是历史峰值。
 5. 模板命中率和估算延迟只统计成功调度的请求。

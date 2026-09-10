@@ -36,7 +36,7 @@ func runCLI(args []string, stdout, stderr io.Writer) error {
 	flags.SetOutput(stderr)
 	var (
 		outDir    = flags.String("out", "schedulerbench-report", "directory for report.json and report.md")
-		seed      = flags.Int64("seed", defaultConfig.Seed, "deterministic workload seed recorded in the report")
+		seed      = flags.Int64("seed", defaultConfig.Seed, "deterministic workload seed recorded in the report (non-zero; 0 is reserved as the library unset sentinel)")
 		nodeCount = flags.Int("nodes", defaultConfig.NodeCount, "simulated node count (1-4)")
 		profiles  = flags.String("profiles", strings.Join(defaultConfig.Profiles, ","), "comma-separated profile list")
 		workloads = flags.String("workloads", strings.Join(defaultConfig.Workloads, ","), "comma-separated workload list")
@@ -52,6 +52,11 @@ func runCLI(args []string, stdout, stderr io.Writer) error {
 
 	if err := validateFormat(*format); err != nil {
 		return err
+	}
+	// Explicit CLI --seed 0 must fail rather than silently becoming the
+	// library default via normalizeConfig (0 is the unset sentinel).
+	if *seed == 0 {
+		return fmt.Errorf("invalid --seed: 0 is reserved as the unset sentinel; pass a non-zero seed")
 	}
 	// Explicit CLI --nodes 0 must fail rather than silently becoming the
 	// library default via normalizeConfig.

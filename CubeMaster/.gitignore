@@ -1,3 +1,5 @@
 /build/
 /test/
+/coverage/
+/schedulerbench-report/
 cmd/cubemastercli/internal/envd/assets/envd

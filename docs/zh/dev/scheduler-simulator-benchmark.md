@@ -115,7 +115,7 @@ Markdown 报告有 `## Comparisons` 表，含 workload、candidate、result 以�
 ## 验收映射
 
 - 验收路径：每个 workload 对每个 profile 跑一次，并报告 baseline-vs-profile 的放置与质量指标。
-- 领域视角：先过滤不可行节点，再对可行候选打分，最后绑定最高分，对齐 CubeMaster selector 语义。
+- 领域视角：先过滤不可行节点，再对可行候选打分，最后绑定最高分；遵循与 CubeMaster selector 相同的 filter → score → bind *形态*，使用 simulator 本地打分权重（并非生产 Filter/Score 插件等价）。
 - 失败路径：非法 profile/workload 名称会使运行失败；不可行请求计入拒绝并带明确原因。
 - 证据路径：JSON 与 Markdown 报告包含 seed、节点数、workload 定义、profile 名、放置计数与指标 schema。
 - 审阅路径：simulator 独立放在 `pkg/scheduler/simulator`，CLI 是 `cmd/schedulerbench` 下的薄封装；不改动生产调度默认值。
