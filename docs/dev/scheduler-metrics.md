@@ -20,7 +20,7 @@ Current CLI flags (`CubeMaster/cmd/schedulerbench/main.go`):
 | Flag | Default | Meaning |
 |---|---|---|
 | `--out` | `schedulerbench-report` | Directory for `report.json` and `report.md` |
-| `--seed` | `20260903` (`DefaultConfig().Seed`) | Deterministic seed recorded in the report. Explicit CLI `--seed 0` is invalid (library zero-value `Config{}` still defaults to `20260903`). |
+| `--seed` | `20260903` (`DefaultConfig().Seed`) | Deterministic seed recorded in the report. Explicit CLI `--seed 0` is invalid (library zero-value `Config{}` still defaults to `20260903`). Today the seed only varies the `burst_short_lived` template sequence; `same_template_repeated` and `mixed_size` use fixed request sets. |
 | `--nodes` | `4` (`DefaultConfig().NodeCount`) | Simulated node count; supported values are **1–4**. Explicit CLI `--nodes 0` is invalid (library zero-value `Config{}` still defaults to 4). |
 | `--profiles` | `default,balanced_spread,template_locality_first,binpack_utilization` | Comma-separated profile list |
 | `--workloads` | `burst_short_lived,same_template_repeated,mixed_size` | Comma-separated workload list |

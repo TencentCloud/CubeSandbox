@@ -15,7 +15,7 @@
 | 标志 | 默认值 | 含义 |
 |---|---|---|
 | `--out` | `schedulerbench-report` | 写入 `report.json` 和 `report.md` 的目录 |
-| `--seed` | `20260903`（`DefaultConfig().Seed`） | 记入报告的确定性种子。CLI 显式传入 `--seed 0` 为非法（库侧零值 `Config{}` 仍默认到 `20260903`）。 |
+| `--seed` | `20260903`（`DefaultConfig().Seed`） | 记入报告的确定性种子。CLI 显式传入 `--seed 0` 为非法（库侧零值 `Config{}` 仍默认到 `20260903`）。当前 seed 只影响 `burst_short_lived` 的模板序列；`same_template_repeated` 与 `mixed_size` 使用固定请求集。 |
 | `--nodes` | `4`（`DefaultConfig().NodeCount`） | 模拟节点数；支持范围为 **1–4**。CLI 显式传入 `--nodes 0` 为非法（库侧零值 `Config{}` 仍默认到 4）。 |
 | `--profiles` | `default,balanced_spread,template_locality_first,binpack_utilization` | 逗号分隔的 Profile 列表 |
 | `--workloads` | `burst_short_lived,same_template_repeated,mixed_size` | 逗号分隔的 workload 列表 |

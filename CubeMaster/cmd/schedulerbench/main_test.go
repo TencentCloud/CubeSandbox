@@ -624,7 +624,7 @@ func TestWriteReportsSelectsFilesByFormat(t *testing.T) {
 		t.Run(tc.format, func(t *testing.T) {
 			t.Parallel()
 			outDir := t.TempDir()
-			if err := writeReports(outDir, tc.format, report); err != nil {
+			if err := writeReports(outDir, tc.format, report, nil); err != nil {
 				t.Fatalf("writeReports(%q): %v", tc.format, err)
 			}
 
@@ -645,7 +645,7 @@ func TestWriteReportsRemovesStaleFormatFiles(t *testing.T) {
 
 	report := simulator.Report{RunID: "test-run"}
 	outDir := t.TempDir()
-	if err := writeReports(outDir, formatBoth, report); err != nil {
+	if err := writeReports(outDir, formatBoth, report, nil); err != nil {
 		t.Fatalf("seed both formats: %v", err)
 	}
 	jsonPath := filepath.Join(outDir, "report.json")
@@ -654,7 +654,8 @@ func TestWriteReportsRemovesStaleFormatFiles(t *testing.T) {
 		t.Fatal("seed write did not create both report files")
 	}
 
-	if err := writeReports(outDir, formatJSON, report); err != nil {
+	var notice bytes.Buffer
+	if err := writeReports(outDir, formatJSON, report, &notice); err != nil {
 		t.Fatalf("writeReports(json) into populated dir: %v", err)
 	}
 	if !fileExists(t, jsonPath) {
@@ -663,8 +664,12 @@ func TestWriteReportsRemovesStaleFormatFiles(t *testing.T) {
 	if fileExists(t, mdPath) {
 		t.Fatal("stale report.md left after json-only rewrite")
 	}
+	if !strings.Contains(notice.String(), mdPath) {
+		t.Fatalf("removal notice = %q, want path %q", notice.String(), mdPath)
+	}
 
-	if err := writeReports(outDir, formatMarkdown, report); err != nil {
+	notice.Reset()
+	if err := writeReports(outDir, formatMarkdown, report, &notice); err != nil {
 		t.Fatalf("writeReports(markdown) into populated dir: %v", err)
 	}
 	if !fileExists(t, mdPath) {
@@ -672,6 +677,9 @@ func TestWriteReportsRemovesStaleFormatFiles(t *testing.T) {
 	}
 	if fileExists(t, jsonPath) {
 		t.Fatal("stale report.json left after markdown-only rewrite")
+	}
+	if !strings.Contains(notice.String(), jsonPath) {
+		t.Fatalf("removal notice = %q, want path %q", notice.String(), jsonPath)
 	}
 }
 

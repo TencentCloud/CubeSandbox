@@ -49,11 +49,11 @@ func runCLIWithProvenance(args []string, stdout, stderr io.Writer, resolve prove
 	flags.SetOutput(stderr)
 	var (
 		outDir    = flags.String("out", "schedulerbench-report", "directory for report.json and report.md")
-		seed      = flags.Int64("seed", defaultConfig.Seed, "deterministic workload seed recorded in the report; must be non-zero because 0 is reserved as the library unset sentinel and is rejected here")
+		seed      = flags.Int64("seed", defaultConfig.Seed, "deterministic seed recorded in the report; currently varies only the burst_short_lived template sequence (other default workloads are fixed). Must be non-zero because 0 is reserved as the library unset sentinel")
 		nodeCount = flags.Int("nodes", defaultConfig.NodeCount, "simulated node count (1-4)")
 		profiles  = flags.String("profiles", strings.Join(defaultConfig.Profiles, ","), "comma-separated profile list")
 		workloads = flags.String("workloads", strings.Join(defaultConfig.Workloads, ","), "comma-separated workload list")
-		format    = flags.String("format", defaultFormat, "report format: json, markdown, or both; unselected report.json/report.md files already present in --out are deleted")
+		format    = flags.String("format", defaultFormat, "report format: json, markdown, or both; unselected report.json/report.md files already present in --out are deleted (paths are printed when removed)")
 		verify    = flags.Bool("verify", false, "check the "+verifyScope+" (not arbitrary --profiles/--workloads subsets; checks structure and internal consistency only, not live scheduling performance or semantic equivalence to production scheduling)")
 	)
 	if err := flags.Parse(args); err != nil {
@@ -103,7 +103,7 @@ func runCLIWithProvenance(args []string, stdout, stderr io.Writer, resolve prove
 		}
 	}
 
-	if err := writeReports(*outDir, *format, report); err != nil {
+	if err := writeReports(*outDir, *format, report, stdout); err != nil {
 		return err
 	}
 	if *verify {
@@ -148,14 +148,16 @@ func resolveProvenance(
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
-	defer cancel()
-	revisionBytes, err := runGit(ctx, "rev-parse", "HEAD")
+	revCtx, revCancel := context.WithTimeout(context.Background(), gitTimeout)
+	revisionBytes, err := runGit(revCtx, "rev-parse", "HEAD")
+	revCancel()
 	revision := strings.TrimSpace(string(revisionBytes))
 	if err != nil || revision == "" {
 		return simulator.Provenance{}
 	}
-	statusBytes, err := runGit(ctx, "status", "--porcelain")
+	statusCtx, statusCancel := context.WithTimeout(context.Background(), gitTimeout)
+	statusBytes, err := runGit(statusCtx, "status", "--porcelain")
+	statusCancel()
 	if err != nil {
 		return simulator.Provenance{GitRevision: revision}
 	}
@@ -176,7 +178,7 @@ func validateFormat(format string) error {
 	}
 }
 
-func writeReports(outDir, format string, report simulator.Report) error {
+func writeReports(outDir, format string, report simulator.Report, notice io.Writer) error {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
 	}
@@ -190,24 +192,46 @@ func writeReports(outDir, format string, report simulator.Report) error {
 		if err := os.WriteFile(jsonPath, jsonReport, 0o644); err != nil {
 			return fmt.Errorf("write json report: %w", err)
 		}
-	} else if err := removeReportFile(jsonPath); err != nil {
-		return fmt.Errorf("remove stale json report: %w", err)
+	} else {
+		removed, err := removeReportFile(jsonPath)
+		if err != nil {
+			return fmt.Errorf("remove stale json report: %w", err)
+		}
+		if removed {
+			noticeRemovedReport(notice, jsonPath)
+		}
 	}
 	if format == formatMarkdown || format == formatBoth {
 		if err := os.WriteFile(mdPath, []byte(report.Markdown()), 0o644); err != nil {
 			return fmt.Errorf("write markdown report: %w", err)
 		}
-	} else if err := removeReportFile(mdPath); err != nil {
-		return fmt.Errorf("remove stale markdown report: %w", err)
+	} else {
+		removed, err := removeReportFile(mdPath)
+		if err != nil {
+			return fmt.Errorf("remove stale markdown report: %w", err)
+		}
+		if removed {
+			noticeRemovedReport(notice, mdPath)
+		}
 	}
 	return nil
 }
 
-func removeReportFile(path string) error {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
+func noticeRemovedReport(notice io.Writer, path string) {
+	if notice == nil {
+		return
 	}
-	return nil
+	fmt.Fprintf(notice, "removed unselected report file %s\n", path)
+}
+
+func removeReportFile(path string) (bool, error) {
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func splitCSV(in, kind string) ([]string, error) {
