@@ -37,8 +37,6 @@ const (
 	DefaultSnapshotDir = "/usr/local/services/cubetoolbox/cube-snapshot"
 
 	DefaultCubeRuntimePath = "/usr/local/services/cubetoolbox/cube-shim/bin/cube-runtime"
-
-	SnapshotStatusPath = "/data/cube-shim/snapshot"
 )
 
 type CubeboxSnapshotSpec struct {
@@ -396,12 +394,6 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 
-	stepLog.Info("Step 7: Writing snapshot status flag file...")
-	if err := writeSnapshotFlag(stepLog); err != nil {
-		stepLog.Warnf("Failed to write snapshot flag: %v", err)
-
-	}
-
 	snapshotSuccess = true
 	rsp.RootfsVol = rootfsObject.Name
 	rsp.MemoryVol = memoryObject.Name
@@ -464,31 +456,6 @@ func inheritIncomingMetadata(dst context.Context, src context.Context) context.C
 	return dst
 }
 
-func writeSnapshotFlag(stepLog *log.CubeWrapperLogEntry) error {
-
-	if _, err := os.Stat(SnapshotStatusPath); err == nil {
-		stepLog.Info("Snapshot status flag file already exists, skipping")
-		return nil
-	}
-
-	if err := os.MkdirAll(filepath.Dir(SnapshotStatusPath), 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	file, err := os.Create(SnapshotStatusPath)
-	if err != nil {
-		return fmt.Errorf("failed to create flag file: %w", err)
-	}
-	file.Close()
-
-	cmd := exec.Command("chattr", "+i", SnapshotStatusPath)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to set immutable attribute: %w", err)
-	}
-
-	stepLog.Infof("Snapshot status flag file created: %s", SnapshotStatusPath)
-	return nil
-}
 
 func validateAppSnapshotAnnotations(req *cubebox.RunCubeSandboxRequest) error {
 	annotations := req.GetAnnotations()

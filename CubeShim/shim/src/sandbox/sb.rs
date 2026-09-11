@@ -39,7 +39,7 @@ use crate::container::container_mgr::ContainerInfo;
 use crate::container::{exec::Tty, Container, GUEST_DEV_SHM};
 use crate::hypervisor::config::{HypConfig, VmConfig};
 use crate::hypervisor::cube_hypervisor as CH;
-use crate::hypervisor::snapshot::{enable_snapshot, SnapshotInfo};
+use crate::hypervisor::snapshot::SnapshotInfo;
 use crate::log::{stat_defer, Log};
 use crate::sandbox::config;
 use crate::{debugf, errf, infof, warnf};
@@ -857,9 +857,6 @@ impl SandBox {
                 return false;
             }
         }
-        if !enable_snapshot() {
-            return false;
-        }
 
         !self.conf.app_snapshot_create
     }
@@ -886,6 +883,12 @@ impl SandBox {
                     }
                 }
             }
+        } else if self.conf.app_snapshot_restore {
+            return Err(
+                "app snapshot restore requested but snapshot is unavailable on this node \
+                 (cube.snapshot.disable set or selinux label set)"
+                    .to_string(),
+            );
         }
 
         if !snapshot {

@@ -245,9 +245,6 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to expose shim spec dir: %v", err)
 		return rsp, nil
 	}
-	if err := writeSnapshotFlag(stepLog); err != nil {
-		stepLog.Warnf("failed to write snapshot flag: %v", err)
-	}
 	rsp.RootfsVol = rootfsObject.Name
 	rsp.MemoryVol = memoryObject.Name
 	rsp.RootfsKind = rootfsObject.Kind
