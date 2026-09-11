@@ -848,6 +848,20 @@ jobs:
       - name: Install dependencies
         run: |
           set -euo pipefail
+          # Official archive/security HTTP is currently unreachable; this job
+          # runs on a Tencent Cloud GZ runner, so use Tencent Cloud mirrors.
+          mirror="http://mirrors.tencent.com"
+          shopt -s nullglob
+          for src in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            sed -i \
+              -e "s|http://archive.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|https://archive.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|http://security.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|https://security.ubuntu.com/ubuntu|${mirror}/ubuntu|g" \
+              -e "s|http://ports.ubuntu.com/ubuntu-ports|${mirror}/ubuntu-ports|g" \
+              -e "s|https://ports.ubuntu.com/ubuntu-ports|${mirror}/ubuntu-ports|g" \
+              "${src}"
+          done
           apt-get update
           apt-get install -y --no-install-recommends curl ca-certificates
           rm -rf /var/lib/apt/lists/*
