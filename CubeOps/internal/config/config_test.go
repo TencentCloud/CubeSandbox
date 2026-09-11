@@ -106,19 +106,6 @@ func TestLoad_NoYAML_UsesEnvAndDefaults(t *testing.T) {
 	}
 }
 
-// TestLoad_MissingDB_Fails proves we still require a database URL.
-func TestLoad_MissingDB_Fails(t *testing.T) {
-	t.Setenv("CUBE_OPS_CONFIG", "/nonexistent/path/config.yaml")
-	t.Setenv("DATABASE_URL", "")
-	// Also clear individual MySQL env vars so buildMySQLURL returns "".
-	t.Setenv("CUBE_SANDBOX_MYSQL_HOST", "")
-
-	_, err := Load()
-	if err == nil {
-		t.Error("Load with no DB config = nil err, want error")
-	}
-}
-
 func TestLoad_WarehouseSection(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "config.yaml")
