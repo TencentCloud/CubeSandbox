@@ -811,6 +811,8 @@ func TestValidateExternalHTTPScoreConfig(t *testing.T) {
 		{name: "unix scheme", cfg: &config.ExternalHTTPScore{Endpoint: "unix:///tmp/score.sock"}, wantErr: "invalid endpoint"},
 		{name: "empty host", cfg: &config.ExternalHTTPScore{Endpoint: "http:///score"}, wantErr: "invalid endpoint"},
 		{name: "negative timeout", cfg: &config.ExternalHTTPScore{Endpoint: "http://127.0.0.1/score", Timeout: -time.Millisecond}, wantErr: "timeout"},
+		{name: "sub-millisecond timeout", cfg: &config.ExternalHTTPScore{Endpoint: "http://127.0.0.1/score", Timeout: 200 * time.Nanosecond}, wantErr: "timeout"},
+		{name: "timeout at min ok", cfg: &config.ExternalHTTPScore{Endpoint: "http://127.0.0.1/score", Timeout: minExternalHTTPScoreTimeout}, wantErr: ""},
 		{name: "timeout above max", cfg: &config.ExternalHTTPScore{Endpoint: "http://127.0.0.1/score", Timeout: maxExternalHTTPScoreTimeout + time.Millisecond}, wantErr: "timeout"},
 		{name: "timeout at max ok", cfg: &config.ExternalHTTPScore{Endpoint: "http://127.0.0.1/score", Timeout: maxExternalHTTPScoreTimeout}, wantErr: ""},
 	}

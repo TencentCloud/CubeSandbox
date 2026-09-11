@@ -34,6 +34,12 @@ const externalHTTPScoreName = "external_http_score"
 // defaultExternalHTTPScoreTimeout is used when plugin_conf.timeout is zero or omitted.
 const defaultExternalHTTPScoreTimeout = 200 * time.Millisecond
 
+// minExternalHTTPScoreTimeout is the smallest positive timeout accepted.
+// YAML parses bare integers as nanoseconds (`timeout: 200` → 200ns); without
+// this floor those values would pass validation, expire instantly, and fail
+// open on every create while looking "enabled".
+const minExternalHTTPScoreTimeout = time.Millisecond
+
 // maxExternalHTTPScoreTimeout caps the synchronous create-path HTTP budget.
 // Larger values are rejected so a hung sidecar cannot add unbounded latency to
 // every sandbox create.
@@ -223,6 +229,9 @@ func validateExternalHTTPScoreConfig(cfg *config.ExternalHTTPScore) error {
 	}
 	if cfg.Timeout < 0 {
 		return fmt.Errorf("external_http_score: timeout must be non-negative")
+	}
+	if cfg.Timeout > 0 && cfg.Timeout < minExternalHTTPScoreTimeout {
+		return fmt.Errorf("external_http_score: timeout must be >= %s (YAML bare integers are nanoseconds; use e.g. 200ms)", minExternalHTTPScoreTimeout)
 	}
 	if cfg.Timeout > maxExternalHTTPScoreTimeout {
 		return fmt.Errorf("external_http_score: timeout must be <= %s", maxExternalHTTPScoreTimeout)
