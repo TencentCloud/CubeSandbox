@@ -584,6 +584,30 @@ func TestExternalHTTPScoreRejectsNegativeWeight(t *testing.T) {
 	}
 }
 
+func TestExternalHTTPScoreRejectsNonFiniteWeight(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		weight float64
+	}{
+		{name: "NaN", weight: math.NaN()},
+		{name: "+Inf", weight: math.Inf(1)},
+		{name: "-Inf", weight: math.Inf(-1)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateExternalHTTPScoreConfig(&config.ExternalHTTPScore{
+				Weight:   float64Ptr(tt.weight),
+				Endpoint: "http://example.invalid",
+			})
+			if err == nil || !strings.Contains(err.Error(), "finite") {
+				t.Fatalf("error = %v, want finite weight validation", err)
+			}
+			if cat := sanitizeExternalHTTPScoreFailure(err); cat != "external_http_score invalid_weight" {
+				t.Fatalf("category = %q, want invalid_weight", cat)
+			}
+		})
+	}
+}
+
 func TestExternalHTTPScoreRejectsOversizedResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -731,6 +755,8 @@ func TestValidateExternalHTTPScoreConfig(t *testing.T) {
 		{name: "omitted weight ok", cfg: &config.ExternalHTTPScore{Endpoint: "http://127.0.0.1:9"}, wantErr: ""},
 		{name: "explicit zero weight ok", cfg: &config.ExternalHTTPScore{Weight: float64Ptr(0), Endpoint: "http://127.0.0.1:9"}, wantErr: ""},
 		{name: "negative weight", cfg: &config.ExternalHTTPScore{Weight: float64Ptr(-1), Endpoint: "http://127.0.0.1:9"}, wantErr: "weight"},
+		{name: "NaN weight", cfg: &config.ExternalHTTPScore{Weight: float64Ptr(math.NaN()), Endpoint: "http://127.0.0.1:9"}, wantErr: "weight"},
+		{name: "Inf weight", cfg: &config.ExternalHTTPScore{Weight: float64Ptr(math.Inf(1)), Endpoint: "http://127.0.0.1:9"}, wantErr: "weight"},
 		{name: "valid http", cfg: &config.ExternalHTTPScore{Endpoint: "http://127.0.0.1:18080/score"}, wantErr: ""},
 		{name: "valid https", cfg: &config.ExternalHTTPScore{Endpoint: "https://sidecar.example/score"}, wantErr: ""},
 		{name: "missing scheme", cfg: &config.ExternalHTTPScore{Endpoint: "127.0.0.1:18080/score"}, wantErr: "invalid endpoint"},

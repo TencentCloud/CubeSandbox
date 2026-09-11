@@ -215,8 +215,8 @@ func validateExternalHTTPScoreConfig(cfg *config.ExternalHTTPScore) error {
 	if cfg.Timeout > maxExternalHTTPScoreTimeout {
 		return fmt.Errorf("external_http_score: timeout must be <= %s", maxExternalHTTPScoreTimeout)
 	}
-	if cfg.Weight != nil && *cfg.Weight < 0 {
-		return fmt.Errorf("external_http_score: weight must be non-negative")
+	if cfg.Weight != nil && (math.IsNaN(*cfg.Weight) || math.IsInf(*cfg.Weight, 0) || *cfg.Weight < 0) {
+		return fmt.Errorf("external_http_score: weight must be a finite non-negative number")
 	}
 	endpoint := strings.TrimSpace(cfg.Endpoint)
 	if endpoint == "" {
