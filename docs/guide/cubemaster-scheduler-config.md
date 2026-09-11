@@ -350,8 +350,13 @@ request/response bodies; Warn is rate-limited to about one line per sanitized
 failure category per minute (further failures stay at Debug) so a down sidecar
 does not flood create-path logs. Missing scores for any requested candidate fail
 the whole attempt (anti-bias: scoring only a subset would systematically skew
-ranking). The call is **synchronous** on the create path; this PR does not add a
-circuit breaker, cache, async execution, retry loop, or concurrency limiter.
+ranking). The call is **synchronous** on the create path. The shared HTTP
+transport caps in-flight sidecar connections with `MaxConnsPerHost = 8` (same
+as the idle pool per host) so a hung sidecar cannot open an unbounded dial
+storm; each attempt may still wait up to `timeout` (default 200ms, max 2s)
+before fail-open. This PR does not add a circuit breaker, negative cache,
+async execution, or retry loop — those remain follow-ups for higher create
+QPS deployments.
 
 ## See also
 

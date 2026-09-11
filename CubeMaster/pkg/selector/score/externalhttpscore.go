@@ -47,12 +47,16 @@ const maxExternalHTTPScoreResponseBytes = 1 << 20 // 1 MiB
 const externalHTTPScoreErrorBodyDrainBytes = 4 << 10
 
 // Shared client for the synchronous create-path scorer within one CubeMaster
-// process. Concurrent scheduling attempts in that process may reuse idle
-// connections to the same sidecar host, so MaxIdleConnsPerHost is raised above
-// the Go default of 2 while MaxIdleConns stays modest to avoid unbounded growth.
+// process. Concurrent scheduling attempts may reuse idle connections to the
+// same sidecar host. MaxIdleConnsPerHost is raised above the Go default of 2;
+// MaxConnsPerHost caps in-flight dials so a hung sidecar cannot open an
+// unbounded connection storm. There is still no failure-memory circuit breaker
+// in this extraction — each attempt may still pay up to timeout before
+// fail-open.
 const (
 	externalHTTPScoreMaxIdleConns        = 64
 	externalHTTPScoreMaxIdleConnsPerHost = 8
+	externalHTTPScoreMaxConnsPerHost     = 8
 	externalHTTPScoreIdleConnTimeout     = 90 * time.Second
 )
 
@@ -72,6 +76,7 @@ func newExternalHTTPScoreHTTPClient() *http.Client {
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          externalHTTPScoreMaxIdleConns,
 		MaxIdleConnsPerHost:   externalHTTPScoreMaxIdleConnsPerHost,
+		MaxConnsPerHost:       externalHTTPScoreMaxConnsPerHost,
 		IdleConnTimeout:       externalHTTPScoreIdleConnTimeout,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,

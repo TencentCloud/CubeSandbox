@@ -831,6 +831,9 @@ func TestExternalHTTPScoreSharedHTTPClientTransport(t *testing.T) {
 	if tr.MaxIdleConnsPerHost != externalHTTPScoreMaxIdleConnsPerHost {
 		t.Fatalf("MaxIdleConnsPerHost = %d, want %d", tr.MaxIdleConnsPerHost, externalHTTPScoreMaxIdleConnsPerHost)
 	}
+	if tr.MaxConnsPerHost != externalHTTPScoreMaxConnsPerHost {
+		t.Fatalf("MaxConnsPerHost = %d, want %d", tr.MaxConnsPerHost, externalHTTPScoreMaxConnsPerHost)
+	}
 	if tr.IdleConnTimeout != externalHTTPScoreIdleConnTimeout {
 		t.Fatalf("IdleConnTimeout = %v, want %v", tr.IdleConnTimeout, externalHTTPScoreIdleConnTimeout)
 	}
