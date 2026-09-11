@@ -38,6 +38,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/resourcemetrics"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
@@ -98,6 +99,13 @@ func CreateTopLevelDirectories(config *srvconfig.Config) error {
 func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 
 	bolt.DefaultOptions.FreelistType = bolt.FreelistMapType
+
+	// Configure shared artifact paths before either images or cbri initializes.
+	paths, err := images.ResolveConfiguredPaths(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+	pmem.InitPaths(paths)
 
 	baseServer, err := containerdserver.New(ctx, config.Config)
 	if err != nil {

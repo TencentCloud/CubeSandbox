@@ -42,7 +42,54 @@ type Config struct {
 
 	DiscardUnpackedLayers bool `toml:"discard_unpacked_layers"`
 
-	CubeToolBaseDir string `toml:"cubetool_base_dir"`
+	// Deprecated: fallback for configurations predating independent artifact paths.
+	CubeToolBaseDir  string `toml:"cubetool_base_dir"`
+	ImageBasePath    string `toml:"image_base_path"`
+	SharedKernelPath string `toml:"shared_kernel_path"`
+}
+
+// ResolvePaths also populates effective values for config dump and startup logs.
+func (c *Config) ResolvePaths() (pmem.Paths, error) {
+	p, err := pmem.ResolvePaths(c.CubeToolBaseDir, c.ImageBasePath, c.SharedKernelPath)
+	if err == nil {
+		c.CubeToolBaseDir = p.ToolBaseDir
+		c.ImageBasePath = p.ImageBasePath
+		c.SharedKernelPath = p.SharedKernelPath
+	}
+	return p, err
+}
+
+// ResolveConfiguredPaths is shared by startup and config dump. Decode must see
+// the fully merged config; legacy cbri defaults are deliberately not injected.
+func ResolveConfiguredPaths(ctx context.Context, cfg interface {
+	Decode(context.Context, string, interface{}) (interface{}, error)
+}) (pmem.Paths, error) {
+	imageConfig := &Config{}
+	if _, err := cfg.Decode(ctx, "io.cubelet.internal.v1.images", imageConfig); err != nil {
+		return pmem.Paths{}, err
+	}
+	paths, err := imageConfig.ResolvePaths()
+	if err != nil {
+		return pmem.Paths{}, err
+	}
+	legacy := &struct {
+		BasePath         string `toml:"base_path"`
+		SnapshotBasePath string `toml:"snapshot_base_path"`
+		ImageBasePath    string `toml:"image_base_path"`
+		KernelBasePath   string `toml:"kernel_base_path"`
+	}{}
+	if _, err := cfg.Decode(ctx, "io.cubelet.cbri.v1.cubebox", legacy); err != nil {
+		return pmem.Paths{}, err
+	}
+	for _, entry := range []struct{ key, value string }{
+		{"image_base_path", legacy.ImageBasePath},
+		{"kernel_base_path", legacy.KernelBasePath},
+	} {
+		if entry.value != "" && filepath.Clean(entry.value) != paths.ImageBasePath {
+			return pmem.Paths{}, fmt.Errorf("io.cubelet.cbri.v1.cubebox.%s=%q conflicts with images.image_base_path=%q; configure artifact paths in io.cubelet.internal.v1.images", entry.key, entry.value, paths.ImageBasePath)
+		}
+	}
+	return paths, nil
 }
 
 type local struct {
@@ -76,8 +123,8 @@ func init() {
 				config.StatePath = ic.Properties[plugins.PropertyStateDir]
 			}
 
-			if config.CubeToolBaseDir == "" {
-				config.CubeToolBaseDir = "/usr/local/services/cubetoolbox"
+			if _, err := config.ResolvePaths(); err != nil {
+				return nil, err
 			}
 			t, err := time.ParseDuration(config.PullDeadlineStr)
 			if err != nil || t == 0 {
@@ -122,7 +169,6 @@ func init() {
 			ois := oldimagestore.NewStore(client, config.RuntimeType, db, oldimagestore.WithUidFileDir(uidFileDir))
 			_ = ois
 
-			pmem.Init(config.CubeToolBaseDir)
 			err = imgSrv.recover()
 			if err != nil {
 				return nil, fmt.Errorf("recover images failed: %w", err)

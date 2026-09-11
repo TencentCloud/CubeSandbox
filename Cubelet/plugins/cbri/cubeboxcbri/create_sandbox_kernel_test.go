@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -31,7 +32,7 @@ func TestCreateSandboxCreateSnapshotRefreshesArtifactKernel(t *testing.T) {
 
 	plugin := newTestCubeboxPlugin(t)
 	artifactID := "artifact-1"
-	sharedKernelPath := filepath.Join(plugin.config.BasePath, "cube-kernel-scf", "vmlinux")
+	sharedKernelPath := plugin.artifactPaths.SharedKernelPath
 	targetKernelPath := plugin.getKernelFilePath(artifactID)
 	writeTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 4096))
 	writeTestFile(t, targetKernelPath, bytes.Repeat([]byte("o"), 2048))
@@ -73,7 +74,7 @@ func TestCreateSandboxRestoreDoesNotRefreshArtifactKernel(t *testing.T) {
 
 	plugin := newTestCubeboxPlugin(t)
 	artifactID := "artifact-2"
-	sharedKernelPath := filepath.Join(plugin.config.BasePath, "cube-kernel-scf", "vmlinux")
+	sharedKernelPath := plugin.artifactPaths.SharedKernelPath
 	targetKernelPath := plugin.getKernelFilePath(artifactID)
 	oldKernel := bytes.Repeat([]byte("o"), 2048)
 	writeTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 4096))
@@ -127,7 +128,7 @@ func TestCreateSandboxNormalStartDoesNotRefreshArtifactKernel(t *testing.T) {
 
 	plugin := newTestCubeboxPlugin(t)
 	artifactID := "artifact-3"
-	sharedKernelPath := filepath.Join(plugin.config.BasePath, "cube-kernel-scf", "vmlinux")
+	sharedKernelPath := plugin.artifactPaths.SharedKernelPath
 	targetKernelPath := plugin.getKernelFilePath(artifactID)
 	oldKernel := bytes.Repeat([]byte("o"), 2048)
 	writeTestFile(t, sharedKernelPath, bytes.Repeat([]byte("s"), 4096))
@@ -166,7 +167,10 @@ func newTestCubeboxPlugin(t *testing.T) *cubeboxInstancePlugin {
 	t.Helper()
 
 	basePath := t.TempDir()
+	paths, err := pmem.ResolvePaths(basePath, filepath.Join(t.TempDir(), "artifacts"), filepath.Join(t.TempDir(), "installed", "vmlinux"))
+	require.NoError(t, err)
 	return &cubeboxInstancePlugin{
+		artifactPaths: paths,
 		config: &cubeboxInstancePluginConfig{
 			BasePath:         basePath,
 			ImageBasePath:    filepath.Join(basePath, "cubebox_os_image"),
@@ -212,4 +216,15 @@ func applySpecOpts(t *testing.T, ctx context.Context, specOpts []oci.SpecOpts) *
 		require.NoError(t, specOpt(ctx, nil, &containers.Container{}, spec))
 	}
 	return spec
+}
+
+func TestCreateSandboxWithoutTemplateKeepsInstalledKernel(t *testing.T) {
+	t.Parallel()
+	plugin := newTestCubeboxPlugin(t)
+	flow := &workflow.CreateContext{ReqInfo: &cubebox.RunCubeSandboxRequest{InstanceType: "cubebox"}}
+	opts, err := plugin.CreateSandbox(context.Background(), flow)
+	require.NoError(t, err)
+	spec := applySpecOpts(t, context.Background(), opts)
+	require.Equal(t, filepath.Join(plugin.config.BasePath, "cube-kernel-scf", "vmlinux"), spec.Annotations[constants.AnnotationsVMKernelPath])
+	require.NotEqual(t, plugin.artifactPaths.SharedKernelPath, spec.Annotations[constants.AnnotationsVMKernelPath])
 }
