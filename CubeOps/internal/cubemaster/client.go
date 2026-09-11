@@ -28,6 +28,60 @@ func (e *CMError) Error() string {
 	return fmt.Sprintf("cubemaster error %d: %s", e.RetCode, e.RetMsg)
 }
 
+// HTTPError carries a CubeMaster failure that arrived as an HTTP status rather
+// than as a ret_code in a 200 body. Both shapes occur, and a caller that knows
+// only about CMError mis-handles this one silently: errors.As(&CMError) fails,
+// so the response arrives as an opaque error and collapses into a generic 502
+// regardless of what it said. Keeping it typed lets a caller ask the same
+// question of either shape.
+type HTTPError struct {
+	Status int
+	Body   string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("cubemaster returned %d: %s", e.Status, e.Body)
+}
+
+// IsNotFound reports a not-found that CubeMaster stated in its response
+// envelope, whatever status carried it — the status and the ret_code are chosen
+// independently on that side (meta's writeErr derives 130404 from
+// gorm.ErrRecordNotFound while the status comes from the call site), so keying
+// on one channel alone would make the answer depend on which one was used.
+//
+// A bare 404 with a body that is not one of CubeMaster's envelopes deliberately
+// does NOT count. CubeMaster states resource-not-found in the envelope; it does
+// not answer a missing resource with a bare HTTP 404. So an opaque 404 is
+// evidence about the *route* — a wrong base URL, a proxy in the path, gin's own
+// "404 page not found" — and treating it as a missing resource sends the caller
+// after the wrong fix while the real problem is that we never reached
+// CubeMaster at all.
+func (e *HTTPError) IsNotFound() bool {
+	// A 5xx is the server saying it failed, not that the thing is missing. Even
+	// when such a body carries a not-found envelope, the caller cannot fix it by
+	// supplying something different, so classifying it as not-found turns a
+	// transient server failure into client-correctable advice.
+	if e.Status >= http.StatusInternalServerError {
+		return false
+	}
+	cmErr := CMError{RetCode: retCodeFromBody([]byte(e.Body))}
+	return cmErr.IsNotFound()
+}
+
+// retCodeFromBody extracts CubeMaster's business ret_code from a response body,
+// returning 0 when the body is not one of its envelopes.
+func retCodeFromBody(data []byte) int {
+	var envelope struct {
+		Ret struct {
+			RetCode int `json:"ret_code"`
+		} `json:"ret"`
+	}
+	if json.Unmarshal(data, &envelope) != nil {
+		return 0
+	}
+	return envelope.Ret.RetCode
+}
+
 // IsNotFound returns true for CubeMaster "not found" ret codes.
 func (e *CMError) IsNotFound() bool {
 	return e.RetCode == 130404 || e.RetCode == 404
@@ -396,7 +450,9 @@ func readResponse(resp *http.Response) (json.RawMessage, error) {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("cubemaster returned %d: %s", resp.StatusCode, string(data))
+		// Typed; the message is byte-identical to the previous fmt.Errorf so
+		// logs and any operator greps keep working.
+		return nil, &HTTPError{Status: resp.StatusCode, Body: string(data)}
 	}
 	// Check CubeMaster business error code. CubeMaster uses ret_code=200 for
 	// success (and sometimes 0). Any other value is a failure, even when HTTP
