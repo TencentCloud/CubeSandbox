@@ -90,7 +90,8 @@ func TestRunScoreFilterSkipsFailedScorers(t *testing.T) {
 
 	err := runScoreFilter(selCtx, []sscore.Selector{
 		testScoreSelector{
-			err: errors.New("external scorer unavailable"),
+			weight: 1,
+			err:    errors.New("external scorer unavailable"),
 		},
 		testScoreSelector{
 			weight: 2,

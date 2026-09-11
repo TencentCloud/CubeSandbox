@@ -592,6 +592,10 @@ func TestExternalHTTPScoreMissingPluginConfIsObservable(t *testing.T) {
 	if scorer.Disable() {
 		t.Fatal("Disable() = true when plugin_conf absent, want false so Select can log")
 	}
+	// Must be non-zero so runScoreFilter's pre-Select Weight() gate still enters Select.
+	if got := scorer.Weight(); got != config.DefaultExternalHTTPScoreWeight {
+		t.Fatalf("Weight() = %v, want default %v so runScoreFilter reaches Select", got, config.DefaultExternalHTTPScoreWeight)
+	}
 	got, err := scorer.Select(externalHTTPScoreTestCtx())
 	if err == nil {
 		t.Fatal("Select() error = nil, want plugin_conf absent")

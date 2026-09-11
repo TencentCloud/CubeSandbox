@@ -183,7 +183,11 @@ func (l *externalHTTPScore) Weight() float64 {
 	// call after it already ran.
 	cfg := l.pluginConfig()
 	if cfg == nil {
-		return 0
+		// Block removed while enable_scorers still lists us: return the default
+		// weight so runScoreFilter still enters Select, which emits the
+		// documented plugin_conf_absent warn + counter. Reserve 0 for an
+		// explicit weight: 0 on a present block.
+		return config.DefaultExternalHTTPScoreWeight
 	}
 	if cfg.Weight == nil {
 		// Omitted weight defaults via ApplyExternalHTTPScoreDefaults. Prefer the
