@@ -438,6 +438,26 @@ func TestExternalHTTPScoreSelectReturnsSanitizedTransportError(t *testing.T) {
 	if !strings.HasPrefix(got, "http_") {
 		t.Fatalf("Select() error = %q, want sanitized http_* category", got)
 	}
+	// Select logs via sanitize again; the second pass must keep the category.
+	if cat := sanitizeExternalHTTPScoreFailure(err); cat != got {
+		t.Fatalf("logging sanitize = %q, Select error = %q, want identical", cat, got)
+	}
+}
+
+func TestSanitizeExternalHTTPScoreFailureIdempotentForTransport(t *testing.T) {
+	raw := &url.Error{
+		Op:  "Post",
+		URL: "https://user:pass@sidecar.example/score?token=should-not-leak",
+		Err: context.DeadlineExceeded,
+	}
+	once := sanitizeExternalHTTPScoreFailure(raw)
+	if once != "http_Post_timeout" {
+		t.Fatalf("first sanitize = %q, want http_Post_timeout", once)
+	}
+	twice := sanitizeExternalHTTPScoreFailure(errors.New(once))
+	if twice != once {
+		t.Fatalf("second sanitize = %q, want %q (idempotent)", twice, once)
+	}
 }
 
 func TestExternalHTTPScoreSkipsWhenEndpointEmpty(t *testing.T) {

@@ -364,9 +364,13 @@ func sanitizeExternalHTTPScoreFailure(err error) string {
 }
 
 // classifyExternalHTTPScoreMessage maps known internal message prefixes to fixed
-// categories. msg is inspected only for classification and never returned.
+// categories. msg is inspected only for classification and never returned,
+// except for already-sanitized allow-listed category strings (idempotent
+// re-entry after requestExternalHTTPScores collapses a *url.Error).
 func classifyExternalHTTPScoreMessage(msg string) string {
 	switch {
+	case isAllowListedHTTPFailureCategory(msg):
+		return msg
 	case strings.Contains(msg, "externalHTTPScore panic"):
 		return "external_http_score panic_recovered"
 	case strings.HasPrefix(msg, "external_http_score plugin_conf absent"):
@@ -396,6 +400,26 @@ func classifyExternalHTTPScoreMessage(msg string) string {
 		return "external_http_score request_failed"
 	default:
 		return ""
+	}
+}
+
+// isAllowListedHTTPFailureCategory reports whether cat is exactly one of the
+// fixed tokens produced by httpFailureCategory (http_<Op>_<kind>).
+func isAllowListedHTTPFailureCategory(cat string) bool {
+	parts := strings.SplitN(cat, "_", 3)
+	if len(parts) != 3 || parts[0] != "http" {
+		return false
+	}
+	switch parts[1] {
+	case "Post", "Get", "Head", "Put", "request":
+	default:
+		return false
+	}
+	switch parts[2] {
+	case "timeout", "canceled", "connection_refused", "transport_failed", "failed":
+		return true
+	default:
+		return false
 	}
 }
 
