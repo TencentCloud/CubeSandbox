@@ -155,11 +155,15 @@ async fn real_daemon_health_init_auth_cors_and_shutdown() {
         stat.json::<Value>().await.unwrap()["entry"]["type"],
         "FILE_TYPE_DIRECTORY"
     );
-    for path in [
-        "/conformance.echo.Echo/Unary",
-        "/__snapshot_test/runtime",
-        "/files",
-    ] {
+    let upload = client
+        .post(format!("{base}/files"))
+        .header("x-access-token", "test-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(upload.json::<Value>().await.unwrap()["code"], 400);
+    for path in ["/conformance.echo.Echo/Unary", "/__snapshot_test/runtime"] {
         let response = client
             .post(format!("{base}{path}"))
             .header("x-access-token", "test-secret")
