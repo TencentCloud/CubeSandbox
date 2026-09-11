@@ -288,7 +288,8 @@ Compared delta keys:
 Latency metrics are lower-is-better, so negative latency deltas are
 improvements. Rate-like metrics need at least `0.005` absolute change;
 estimated latency needs at least `1.0` ms. Any decline in
-`schedule_success_rate` prevents an `improved` result.
+`schedule_success_rate` of at least `0.005` prevents an
+`improved` result.
 
 ## Markdown Summary
 

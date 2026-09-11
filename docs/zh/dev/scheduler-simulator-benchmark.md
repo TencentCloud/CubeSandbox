@@ -114,7 +114,7 @@ JSON 报告包含 `comparisons` 数组。每项在同一 workload 上把 `defaul
 分类口径偏保守：
 
 - 比率类指标至少需要 `0.005` 的绝对变化；估算延迟至少需要 `1.0` ms。
-- `schedule_success_rate` 一旦下降，就不能标为 `improved`。
+- `schedule_success_rate` 绝对下降达到至少 `0.005` 时，就不能标为 `improved`。
 - `regressed`：成功率下降且没有其它改善，或只有重要指标变差。
 - `trade_off`：成功率下降但部分指标改善，或部分指标改善同时其它重要指标变差。
 - `improved`：至少一个关键指标改善，且参与对比的指标没有明显变差。

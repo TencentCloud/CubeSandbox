@@ -273,8 +273,8 @@ profile 对比。
 - `create_latency_p95_ms`
 
 延迟指标越低越好，因此负的延迟差值表示改善。比率类指标至少需要 `0.005`
-的绝对变化；估算延迟至少需要 `1.0` ms。`schedule_success_rate` 一旦下降，
-就不能得到 `improved` 结果。
+的绝对变化；估算延迟至少需要 `1.0` ms。`schedule_success_rate` 绝对下降
+达到至少 `0.005` 时，就不能得到 `improved` 结果。
 
 ## Markdown 摘要
 

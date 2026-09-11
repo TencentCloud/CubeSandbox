@@ -148,7 +148,8 @@ Classification is conservative:
 
 - Rate-like metrics need at least `0.005` absolute change; estimated latency
   needs at least `1.0` ms.
-- Any decline in `schedule_success_rate` prevents an `improved` label.
+- Any decline in `schedule_success_rate` of at least `0.005` prevents an
+  `improved` label.
 - `regressed`: success rate declined with no other improvements, or only
   important metrics got worse.
 - `trade_off`: success rate declined while some metrics improved, or some
