@@ -520,6 +520,92 @@ scheduler:
 	assert.Nil(t, got.Scheduler.Score.ScorePluginConf.BinpackScore)
 }
 
+func TestInit_ProfileDroppingBaseFiltersFailsClosed(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: drop_disk
+  filter:
+    enable_filters:
+      - cpu
+      - mem
+      - disk
+  profiles:
+    drop_disk:
+      filter:
+        enable_filters:
+          - cpu
+          - mem
+`
+	_, err := initConfigFromYAML(t, yamlBody)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "drops filters")
+	assert.Contains(t, err.Error(), "disk")
+	assert.Contains(t, err.Error(), "allow_dropped_filters")
+}
+
+func TestInit_ProfileAllowDroppedFiltersOptIn(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: drop_disk
+  filter:
+    enable_filters:
+      - cpu
+      - mem
+      - disk
+  profiles:
+    drop_disk:
+      allow_dropped_filters: true
+      filter:
+        enable_filters:
+          - cpu
+          - mem
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"cpu", "mem"}, got.Scheduler.Filter.EnableFilters)
+}
+
+func TestInit_EmptySameNameProfileFallsBackToBuiltin(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: binpack_utilization
+  profiles:
+    binpack_utilization:
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"binpack_score"}, got.Scheduler.Score.EnableScorers)
+	assert.NotNil(t, got.Scheduler.Score.ScorePluginConf.BinpackScore)
+}
+
+func TestInit_ProfilePolarityMixRejected(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: mixed
+  profiles:
+    mixed:
+      score:
+        enable_scorers:
+          - binpack_score
+          - real_time_weighted_average
+        resource_weights:
+          mvm_num: 1
+  score:
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1
+        enable_weight_factors: [mvm_num]
+`
+	_, err := initConfigFromYAML(t, yamlBody)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "mixes binpack_score")
+	assert.Contains(t, err.Error(), "polarities cancel")
+}
+
 func TestInit_DirectEnabledScorerMissingPluginConfigAllowedWithoutProfile(t *testing.T) {
 	// Empty-profile: binpack_score may omit plugin_conf and use runtime defaults.
 	yamlBody := `common: {}

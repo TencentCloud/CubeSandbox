@@ -100,8 +100,10 @@ CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 `scheduler.profiles` 下与内置同名的用户条目会完全覆盖内置。
 
 **注意：** 当 Profile 提供 `filter.enable_filters` 时，该列表会**整体替换**基础
-`scheduler.filter.enable_filters`（不会合并）。内置预设使用较短列表，可能丢掉此前已启用的
-准入过滤器（如 `disk`、`thirtparty`）。选定 Profile 后请审查生效的 filter 列表。
+`scheduler.filter.enable_filters`（不会合并）。丢掉基础过滤器会配置加载失败，除非
+设置 `allow_dropped_filters: true`。内置预设使用较短列表，可能与此前已启用的
+准入过滤器（如 `disk`、`thirtparty`）冲突——请在用户 Profile 中保留它们，或在审
+查生效列表后设置该 opt-in。
 
 对每个 Score 插件（含既有四个评分器以及 `binpack_score`），
 `plugin_conf.<scorer>.weight: 0` 会禁用该评分器并跳过 Select。**负的**
