@@ -299,11 +299,17 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 	if l.Disable() {
 		return nil, nil
 	}
+	// Explicit weight: 0 is a staged inert no-op (same silence as disable:true):
+	// do not require a valid endpoint or emit empty_endpoint / invalid_* noise.
+	// Only exact 0 — NaN/negative fall through so validate can observe them.
+	if w := l.Weight(); w == 0 {
+		return nil, nil
+	}
 	if strings.TrimSpace(cfg.Endpoint) == "" {
 		// Present block with empty endpoint is the common typo / staged-rollout
 		// footgun (yaml.v3 also ignores unknown keys like "endpont"). Keep
-		// disable:true silent (explicit intent); empty endpoint must be
-		// observable like plugin_conf_absent.
+		// disable:true and weight:0 silent (explicit intent); empty endpoint
+		// with a positive weight must be observable like plugin_conf_absent.
 		err = fmt.Errorf("external_http_score: endpoint is empty")
 		logExternalHTTPScoreFailure(ctx, err)
 		return nil, err
@@ -314,8 +320,7 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		logExternalHTTPScoreFailure(ctx, err)
 		return nil, err
 	}
-	// Explicit weight: 0 (or non-finite) skips the HTTP round trip. Prefer
-	// !(w > 0) over w <= 0 so NaN also fails closed here.
+	// Defense in depth / mid-Select hot-reload: non-positive weight skips HTTP.
 	if w := l.Weight(); !(w > 0) {
 		return nil, nil
 	}

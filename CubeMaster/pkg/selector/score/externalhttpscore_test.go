@@ -623,6 +623,26 @@ func TestExternalHTTPScoreEmptyEndpointIsObservable(t *testing.T) {
 	}
 }
 
+func TestExternalHTTPScoreWeightZeroSilentWithEmptyEndpoint(t *testing.T) {
+	resetExternalHTTPScoreFailureLogStateForTest()
+	t.Cleanup(resetExternalHTTPScoreFailureLogStateForTest)
+
+	scorer := newExternalHTTPScoreWithConfig(&config.ExternalHTTPScore{
+		Weight:   float64Ptr(0),
+		Endpoint: "",
+	})
+	got, err := scorer.Select(externalHTTPScoreTestCtx())
+	if err != nil {
+		t.Fatalf("Select() error = %v, want nil for weight 0 staging", err)
+	}
+	if got != nil {
+		t.Fatalf("Select() = %+v, want nil", got)
+	}
+	if externalHTTPScoreWarnCount.Load() != 0 {
+		t.Fatalf("warn count = %d, want 0 (weight 0 must not emit empty_endpoint)", externalHTTPScoreWarnCount.Load())
+	}
+}
+
 func TestExternalHTTPScoreValidateDoesNotMutateWeight(t *testing.T) {
 	cfg := &config.ExternalHTTPScore{Endpoint: "http://example.invalid"}
 	if err := validateExternalHTTPScoreConfig(cfg); err != nil {

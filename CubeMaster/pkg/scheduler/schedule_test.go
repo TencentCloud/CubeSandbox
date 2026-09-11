@@ -244,6 +244,51 @@ func TestRunScoreFilterSkipsNonFiniteWeightBlend(t *testing.T) {
 	}
 }
 
+func TestRunScoreFilterNegativeWeightStillBlends(t *testing.T) {
+	origPostScore := scheduler.postScore
+	defer func() {
+		scheduler.postScore = origPostScore
+	}()
+	scheduler.postScore = nil
+
+	nodeA := &node.Node{InsID: "node-a", MvmNum: 1}
+	nodeB := &node.Node{InsID: "node-b", MvmNum: 2}
+	selCtx := selctx.New("random")
+	selCtx.Ctx = context.Background()
+	selCtx.SetNodes(node.NodeList{nodeA, nodeB})
+
+	// Historical built-in behaviour: negative weight still blends (penalty).
+	penalty := testScoreSelector{
+		weight: -1,
+		scores: node.NodeScoreList{
+			{InsID: "node-a", Score: 10, MvmNum: nodeA.MvmNum, OrigNode: nodeA},
+			{InsID: "node-b", Score: 90, MvmNum: nodeB.MvmNum, OrigNode: nodeB},
+		},
+	}
+	base := testScoreSelector{
+		weight: 2,
+		scores: node.NodeScoreList{
+			{InsID: "node-a", Score: 50, MvmNum: nodeA.MvmNum, OrigNode: nodeA},
+			{InsID: "node-b", Score: 50, MvmNum: nodeB.MvmNum, OrigNode: nodeB},
+		},
+	}
+	if err := runScoreFilter(selCtx, []sscore.Selector{penalty, base}); err != nil {
+		t.Fatalf("runScoreFilter() error = %v, want nil", err)
+	}
+	got := selCtx.LeastScoreNodes(-1)
+	if got.Len() != 2 {
+		t.Fatalf("len = %d, want 2", got.Len())
+	}
+	// totalPluginWeight = -1+2 = 1
+	// node-a: (10*-1 + 50*2)/1 = 90; node-b: (90*-1 + 50*2)/1 = 10
+	if got[0].ID() != "node-a" || got[0].Score != 90 {
+		t.Fatalf("highest = %+v, want node-a=90", got[0])
+	}
+	if got[1].ID() != "node-b" || got[1].Score != 10 {
+		t.Fatalf("lowest = %+v, want node-b=10", got[1])
+	}
+}
+
 type testScoreSelector struct {
 	weight  float64
 	disable bool
