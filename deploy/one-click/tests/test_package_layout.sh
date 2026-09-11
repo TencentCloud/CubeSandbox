@@ -381,7 +381,12 @@ test_s3lvol_rpc_launcher_is_packaged() {
   require_file "${ROOT_DIR}/CubeS3lvol/scripts/rpc.py" "s3lvol rpc.py launcher"
   require_file "${ROOT_DIR}/CubeS3lvol/scripts/rpc_compat.py" \
     "s3lvol rpc.py 3.8 compat shim"
+  require_file "${ROOT_DIR}/CubeS3lvol/scripts/rcow_cpumask.sh" \
+    "s3lvol default CPU mask helper"
   require_file "${ROOT_DIR}/CubeS3lvol/make_release.sh" "s3lvol make_release.sh"
+  if ! grep -q -F 'rcow_cpumask.sh' "${ROOT_DIR}/CubeS3lvol/make_release.sh"; then
+    fail "make_release.sh must install scripts/rcow_cpumask.sh"
+  fi
   if ! grep -q -F 'scripts/spdk_rpc.py' "${ROOT_DIR}/CubeS3lvol/make_release.sh"; then
     fail "make_release.sh must install SPDK rpc.py as scripts/spdk_rpc.py"
   fi
