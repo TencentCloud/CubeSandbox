@@ -3021,7 +3021,7 @@ SPDK_RPC_REGISTER("rcow_get_build_info", rpc_rcow_get_build_info,
  * rcow_get_bdev         report the host device path it landed on
  *
  * Placement is derived rather than chosen by the caller: the subsystem is
- * crc32c(name) % RCOW_NUM_SUBSYS and the nsid is the lowest free slot in it.
+ * crc32c(name) % RCOW_NUM_SUBSYS and the nsid is the longest-idle free slot.
  * Both can be overridden, which is what recovery does -- it has to reproduce the
  * previous layout exactly rather than let it be recomputed.
  * ========================================================================== */
@@ -3321,6 +3321,11 @@ active_bdev_attach(const char *device_name, uint32_t want_subsys,
 			goto done;
 		}
 		nsid = want_nsid;
+		/* Reserve explicit placements in the same in-memory generation table
+		 * used by auto-allocation. The registry entry is written only after
+		 * NVMf attach completes, so without this touch a concurrent automatic
+		 * attach can choose the same still-unrecorded slot. */
+		s3lvol_active_note_nsid(subsys, nsid);
 	} else {
 		nsid = s3lvol_active_alloc_nsid(subsys);
 		if (nsid == 0) {
