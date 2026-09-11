@@ -552,9 +552,16 @@ cubevs-test: builder-image
 agent-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/agent && make test'
 
+# The integration tests resolve the invoking uid through /etc/passwd
+# (cube-envd/tests/common/mod.rs) to build their Authorization header, so they
+# need a uid that has an entry inside the builder image. builder-run defaults to
+# the host uid, which on GitHub-hosted runners is 1001 (`runner`) and has no
+# entry in that image, making every such test panic. Run as root instead, as
+# cubevs-test and cube-s3lvol-test already do: root exists in passwd and the
+# no-header production path (spawn as root) is exercised too.
 .PHONY: cube-envd-test
 cube-envd-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-envd && make test'
+	$(MAKE) builder-run BUILDER_USER=0:0 BUILDER_CMD='cd /workspace/cube-envd && make test'
 
 # Clippy runs with -D warnings, so this target is a hard gate: any new lint
 # fails it. It is intentionally separate from `cube-envd` to keep the plain
