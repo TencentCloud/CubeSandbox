@@ -217,7 +217,7 @@ mod tests {
             "no keepalive within 700ms after the event — ticker died: {ka_offsets_ms:?}"
         );
     }
-    // ---- PR #16 review P2: Connect-Timeout-Ms bounds the stream ----
+    // ---- review P2: Connect-Timeout-Ms bounds the stream ----
 
     #[tokio::test]
     async fn connect_timeout_ends_the_watch_stream() {

@@ -304,7 +304,7 @@ fn chown(path: &std::path::Path, user: &User) {
             // `os.Chown(path, uid, gid)` (upload.go:56/:84): an upload through
             // a symlink writes the link's destination, and ownership lands on
             // that same destination. lchown would leave a daemon-owned target
-            // behind while chowning the link itself (caught by the PR-C
+            // behind while chowning the link itself (caught by the
             // symlink probe). Following adds no takeover risk beyond the
             // write, which already followed the same link.
             let rc = libc::chown(c_path.as_ptr(), user.uid, user.gid);

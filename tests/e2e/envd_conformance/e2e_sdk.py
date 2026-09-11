@@ -158,7 +158,7 @@ def install_test_daemon(sandbox, binary):
 
     content = Path(binary).read_bytes()
     expected = hashlib.sha256(content).hexdigest()
-    target = "/tmp/pr12-review-envd"
+    target = "/tmp/candidate-review-envd"
     sandbox.files.write(target, content, user="root")
     result = sandbox.commands.run(f"chmod 755 {target}; sha256sum {target}")
     if result.stdout.split()[0] != expected:
@@ -173,8 +173,8 @@ def install_test_daemon(sandbox, binary):
     def serve():
         try:
             bootstrap.run(
-                "mkdir -p /sys/fs/cgroup/pr12-review; "
-                "CUBE_ENVD_CGROUP_ROOT=/sys/fs/cgroup/pr12-review "
+                "mkdir -p /sys/fs/cgroup/candidate-review; "
+                "CUBE_ENVD_CGROUP_ROOT=/sys/fs/cgroup/candidate-review "
                 "CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES=134217728 "
                 f"exec {target} -port 49984",
                 timeout=240,
@@ -188,8 +188,8 @@ def install_test_daemon(sandbox, binary):
         if errors:
             raise RuntimeError(f"test daemon stopped: {errors[0]}")
         try:
-            result = sandbox.commands.run("echo pr12-ready", timeout=3)
-            if result.stdout.strip() == "pr12-ready":
+            result = sandbox.commands.run("echo candidate-ready", timeout=3)
+            if result.stdout.strip() == "candidate-ready":
                 check("new daemon reachable through CubeProxy", True)
                 result = sandbox.commands.run("kill -TERM $$")
                 check("new daemon termination metadata through CubeProxy", result.signal == 15)

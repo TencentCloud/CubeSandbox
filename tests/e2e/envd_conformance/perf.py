@@ -22,7 +22,7 @@ def rss_kib_during_upload(container, size_mib=256, port=49984):
     """Stream a `size_mib` upload to /files while sampling the daemon's RSS.
 
     Returns (status, peak_rss_delta_kib, seconds). The payload never sits in
-    memory when uploads stream to disk (PR-C), so the delta stays at
+    memory when uploads stream to disk, so the delta stays at
     buffer-sized levels; a whole-body-buffering regression shows up as a
     delta equal to the upload size.
     """
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     result["cmd_latency_go"] = cmd_latency_ms(49985)
     result["cmd_latency_rust"] = cmd_latency_ms(49984)
 
-    # PR-C data plane: upload must stream to disk (RSS delta stays at
+    # data plane: upload must stream to disk (RSS delta stays at
     # buffer levels, not the upload size) and download throughput must not
     # regress against the Go baseline on the same host.
     status, delta_kib, secs = rss_kib_during_upload("envd-rust", 256, 49984)

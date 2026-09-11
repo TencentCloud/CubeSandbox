@@ -313,7 +313,7 @@ mod tests {
         );
     }
 
-    /// Review finding #4 (PR #13): malformed ETag lists must follow Go's
+    /// Review finding #4: malformed ETag lists must follow Go's
     /// scan-and-resume loop, not a naive `split(',')`.
     #[test]
     fn etag_list_parsing_follows_go_scan_loop() {

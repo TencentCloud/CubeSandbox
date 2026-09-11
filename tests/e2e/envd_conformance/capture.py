@@ -631,7 +631,7 @@ def cap_fs():
                   "/home/user/zz_legacy_a.txt", "/home/user/zz_legacy_dir",
                   "/home/user/zz_legacy_link", "/home/user/zz_legacy_dir_link",
                   "/home/user/zz_legacy_dangling",
-                  # PR-A① error-contract scenarios self-seed these; sweep
+                  # error-contract scenarios self-seed these; sweep
                   # them so reruns start clean (fs_listdir_eloop re-creates
                   # the loop link, fs_move_into_newdir the parent chain).
                   "/home/user/eloop", "/home/user/mv_src.txt", "/home/user/mv_newdir",
@@ -672,7 +672,7 @@ def cap_fs():
     record("fs_remove", connect_unary("filesystem.Filesystem/Remove", {"path": "/home/user/base_dir"}))
     record("fs_remove_missing", connect_unary("filesystem.Filesystem/Remove", {"path": "/home/user/base_dir"}))
     record("fs_stat_baduser", connect_unary("filesystem.Filesystem/Stat", {"path": "/tmp"}, user="ghost9"))
-    # watch family is now implemented (PR-B): the probe pairs CreateWatcher
+    # watch family is now implemented: the probe pairs CreateWatcher
     # with RemoveWatcher so no watcher leaks; the random watcherId is
     # normalized for comparison (VOLATILE_KEYS).
     probe = {"create": connect_unary(
@@ -724,7 +724,7 @@ def cap_fs():
     record("fs_stat_sticky", connect_unary(
         "filesystem.Filesystem/Stat", {"path": "/home/user/zz_sticky"}))
 
-    # ---- PR-A① error contract: non-ENOENT errno paths --------------------
+    # ---- error contract: non-ENOENT errno paths --------------------------
     # Every shape below was measured on go1.26; the texts come
     # from Go's own errno table (lowercase) via cube-envd's go_compat module.
     # EACCES/EROFS variants are NOT recordable here: both envd processes run
@@ -1112,7 +1112,7 @@ def cap_watch():
     # RW must exist BEFORE the recursive watch opens: the server checks the
     # path first, and a missing directory would make both sides record an
     # identical not_found — a false-positive PASS that never exercises
-    # recursion (caught in PR #16 review).
+    # recursion (caught in review).
     connect_unary("filesystem.Filesystem/MakeDir", {"path": RW})
     # Seed file for the write/chmod/rename scenarios; created before any
     # watch opens so no CREATE event for it leaks into those sequences.
@@ -1131,7 +1131,7 @@ def cap_watch():
     # write: append in-sandbox (echo >>) → IN_MODIFY. Deliberately NOT the
     # /files upload: upload's temp-file-then-rename path produces
     # implementation-specific events (Go writes in place; cube-envd's data
-    # plane is PR-C scope), which would test the upload path, not the watch.
+    # plane is out of scope here), which would test the upload path, not the watch.
     record("watch_write", mk(W, on_open=lambda: connect_stream(
         "process.Process/Start", start_req(f"echo written >> {W}/seed.txt"))))
 

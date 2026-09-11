@@ -28,8 +28,8 @@ RS_DIR = sys.argv[2] if len(sys.argv) > 2 else "fixtures-rust"
 # Do not re-add entries for fixtures that currently PASS: an allowlisted
 # fixture reports DECLARED-DIFF instead of FAIL, so listing a passing
 # fixture silently downgrades the gate for every future regression.
-# (fs_watch_unary_probe left this list when PR-B implemented the watch
-# family; proc_sendinput_probe / proc_connect_missing /
+# (fs_watch_unary_probe left this list when the watch family
+# landed; proc_sendinput_probe / proc_connect_missing /
 # proc_sendsignal_nested_probe left it when selector decoding switched to
 # connect-go's DiscardUnknown behavior. The remaining entries are the
 # still-standing differences.)

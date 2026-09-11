@@ -596,7 +596,7 @@ mod download_tests {
         assert!(!h.contains_key(header::VARY));
     }
 
-    // ---- mtime edge cases (review findings #2/#3, PR #13) ------------------
+    // ---- mtime edge cases (review findings #2/#3) --------------------------
 
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

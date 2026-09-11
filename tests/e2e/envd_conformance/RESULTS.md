@@ -214,7 +214,7 @@ CubeProxy 访问。**19 passed, 0 failed**。
 | `echo hi` 端到端延迟 P50 / P95（100 次） | 6.3 / 8.3 ms | 4.3 / 5.6 ms | −32% / −33% |
 | 静态二进制体积 | 10.5 MB | 2.6 MB | −75% |
 
-## 5. item 1.8 cgroup 真机验证（2026-09-02，feat/cube-envd-cgroup-1.8）
+## 5. item 1.8 cgroup 真机验证（2026-09-02）
 
 cgroup 行为不经 envd RPC 暴露，conformance 套件无法对拍，故以真机实测
 覆盖 init() 正向路径与 spawn 落位。
@@ -259,7 +259,7 @@ stderr 与上游字节一致 ——
 本分支未动）——§2c 记录的 88 是 1.6 开发中更早的时点。`conformance.py` 的
 `DECLARED_DIFFERENT` 现 9 条且全部命中，无孤儿条目；FAIL 恒 0。
 
-## 6. item 1.3 Range / 条件请求下载（2026-09-06，feat/cube-envd-fs-1.3）
+## 6. item 1.3 Range / 条件请求下载（2026-09-06）
 
 > 目标：GET /files 下载对齐上游 `download.go` + Go `net/http` `ServeContent`（identity 路径）：
 > Accept-Encoding 双 406 → Vary → Range/206/416 → Last-Modified → 304/412 → If-Range，顺序与
@@ -305,7 +305,7 @@ normalize 已 title-case 抹平，不构成对拍差异；但 capture.py 的 IMS
 
 ### 审查修复后回归（2026-09-07，四轮）
 
-PR #13 四轮评审整改（全部落地于单一整改提交）后全量回归：
+四轮评审整改（全部落地于单一整改提交）后全量回归：
 
 **第一轮整改（4 项发现）**：① `httpdate.rs` 手写实现对齐 Go `http.ParseTime`
 三格式（IMF-fixdate/RFC850/asctime，含大小写、空格 run、星期不校验、小数秒、
@@ -350,7 +350,7 @@ limit = size（Go CopyN(sendSize)）。此前 round-3 的 sniffed_empty 分支�
 `rest_files_proc_seeker`（500）与 `rest_files_devzero`（CL:0）。
 `cargo test` → **245 passed / 1 ignored**；clippy/fmt 干净。
 
-**第五轮（round-5，2026-09-08 复审 cd985b7e）**：仅一个真 bug——`skip_frac_second`
+**第五轮（round-5，2026-09-08 复审）**：仅一个真 bug——`skip_frac_second`
 用 `filter` 统计了小数点后**所有**数字而非紧邻的连续数字（Go 是 `for ;
 isDigit(value, n); n++`），导致 asctime 年份 / 数字时区被吞掉（`"07:00:00.5 2026"`
 解析失败 → IMS/IUS/If-Range 全部退化为 200；Go 分别是 304/412/206）；且按字节
@@ -375,7 +375,7 @@ multer str API 限制给 400（Go 会写文件）；Content-Disposition 非 UTF-
 basename 回退 `download`（query 强制 UTF-8，实际不可达）。评审建议的
 obs-text fixture 待 capture 客户端支持非 ASCII 头后补录。
 
-## 7. PR-A 错误面对齐 + 阻塞池（2026-09-08，feat/cube-envd-fs-errno，#14 已合并）
+## 7. 错误面对齐 + 阻塞池（2026-09-08）
 
 新增 6 个非 ENOENT 错误路径场景（`fs_stat_enotdir` / `fs_stat_enametoolong` /
 `fs_makedir_through_file` / `fs_move_into_newdir` / `fs_listdir_eloop` /
@@ -389,7 +389,7 @@ PASS 114  FAIL 0  DECLARED-DIFF 8  SKIP 0  MISSING 0   （122 场景）
 
 较第五轮基线（116 场景 PASS 108）+6 场景全 PASS，DECLARED-DIFF 8 条不变。
 
-## 8. PR-B WatchDir 家族（2026-09-08，feat/cube-envd-fs-errno）
+## 8. WatchDir 家族（2026-09-08）
 
 流式 `WatchDir`（含真递归：合成 Create 事件、cookie 配对改名、子 watch 路径前缀
 替换）+ pull watcher 三兄弟（CreateWatcher/GetWatcherEvents/RemoveWatcher）。
@@ -425,14 +425,14 @@ all 全量（同容器序）        PASS 118 FAIL 0  DECLARED-DIFF 4   （122 �
    `proc_sendsignal_nested_probe` 三条转 PASS，allowlist 7 → 4（无孤儿）；
    混合形状 `{"selector":…,"pid":8}` 与上游一样按 flat pid 生效（单测锁定）。
 2. watch.rs 拆分触发条件命中（非测试代码 >800 行）：按 §10 归合作者重构，
-   时序在 PR-B 之后，本 PR 不拆。
+   时序在 watch 家族之后，本 PR 不拆。
 3. keepalive 节奏由不可观测变为显式：新增 `watch_keepalive` 场景（1s 头，
    双端各两帧，逐字节一致）；30s 默认与 90s 的差异无法低成本 fixture
    （需静默 30s+），以 README 已知差异条目为声明载体。
 4. pull 缓冲上界同样无法低成本 fixture（上游会返回两万条事件的巨型 body），
    声明载体同为 README 已知差异表。
 
-**PR #16 live 评审轮（2026-09-09，chaojixinren 于 QEMU/OpenCloudOS 真沙箱
+**live 评审轮（2026-09-09，于 QEMU/OpenCloudOS 真沙箱
 Rust+Go 对照，3 项发现全部修复）**：
 1. **[P1] 递归目录改名后直属文件事件静默丢失**——`IN_MOVE_SELF` 分支在递归
    子目录判断之前就删除 wd 映射并 `inotify_rm_watch`；树内目录 a→b 改名时
@@ -456,22 +456,22 @@ Rust+Go 对照，3 项发现全部修复）**：
 keepalive 沿用进程流的 30s 默认（上游文件 watch 为 90s，同 LB 空闲超时理由），
 `Keepalive-Ping-Interval` 头覆盖语义一致。**注意**：`watch` 组须在未跑
 `init_token` 的实例上采集（令牌闸门设置后所有无令牌请求 401，两侧措辞不同）。
-## 9. PR-C 数据面（2026-09-09，feat/cube-envd-dataplane）
+## 9. 数据面（2026-09-09）
 
 上传**原地流式写**（对齐上游 `upload.go:68` 的 `O_WRONLY|O_CREATE|O_TRUNC`，
 放弃 MVP 期自加的 temp+rename 原子性——三仓 issue 考古零需求、HA failover
-重启模型使原子性保护窗口失去意义）。单测 293 passed（基线 9aa30f49 为 289：
+重启模型使原子性保护窗口失去意义）。单测 293 passed（watch 家族合入后基线为 289：
 +4 数据面测试，−2 旧 write_file 测试改造；复审轮 +2 回归测试。初稿的 263 是
-变基前基线 02e9f7e9 的口径）；clippy `-D warnings` 与 fmt 干净。
+更早的变基前基线的口径）；clippy `-D warnings` 与 fmt 干净。
 
 **RSS 门（实测）**：256MiB 流式上传（1MiB 客户端分块）0.2-0.5s 完成，
 daemon RSS 峰值增量 **0-6 MiB**——修复前为 +256MiB 级整包缓冲。
 
 **吞吐门（实测，100MiB 下载 loopback）**：本分支 848-895 MiB/s，与改前基线
-（worktree 构建 02e9f7e9 实测 866-899 MiB/s）持平——"下载单任务化"尝试
+（实测 866-899 MiB/s）持平——"下载单任务化"尝试
 （通道+专用读任务，256KiB 块）实测仅 535-670 MiB/s，**被测量否决并回退**，
 回退理由记录于 `reader_stream` 注释；Go 对照 6333-6969 MiB/s（loopback 上限，
-非实现间可比瓶颈）。`all` 全量双录（#16 合入后的 base）**118 PASS / 0 FAIL /
+非实现间可比瓶颈）。`all` 全量双录（watch 家族合入后的 base）**118 PASS / 0 FAIL /
 DIFF 4**，上传/下载/条件请求场景零回归。注意：对拍须在**全新容器**上采集——
 同容器重复跑 `all` 时，上一轮 `init_token` 的令牌闸门会让下一轮全 401，
 perf 制品文件也会污染 ListDir。
@@ -479,7 +479,7 @@ perf 制品文件也会污染 ListDir。
 落位语义变更（README 已知差异表同步）：上传中并发读可见部分内容、失败留
 截断文件、不再 fsync、符号链接跟随（写穿至目标）——全部为上游既有行为。
 
-**复审轮（2026-09-09，chaojixinren 4 项发现全部处置）**：
+**复审轮（2026-09-09，4 项发现全部处置）**：
 1. **[High] multipart 写任务未等待**——part 读错误经 `?` 提前返回，写任务
    脱管、结果被丢弃。修复：读错误转发为 writer 终态（与 raw 路径同构），
    writer 必等待；回归测试 = field 1 完整上传 + field 2 数据中途流错误，

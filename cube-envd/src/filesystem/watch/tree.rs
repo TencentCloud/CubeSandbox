@@ -5,7 +5,7 @@
 //! directory mapping / MOVE_SELF.
 //!
 //! Carries over the semantic machine of `services/watch.rs` (the layer the
-//! PR #16 review P1 fix lives in). Every contract is checked line by line
+//! review P1 fix lives in). Every contract is checked line by line
 //! against fsnotify `backend_inotify.go:568-596` and friends (see the
 //! per-item comments below).
 
@@ -682,7 +682,7 @@ mod tests {
             .values()
             .any(|p| p.ends_with("link") || p.ends_with("outside")));
     }
-    // ---- PR #16 review P1: MOVE_SELF on a recursion-added child must keep
+    // ---- review P1: MOVE_SELF on a recursion-added child must keep
     // the watch (the parent's MOVED_TO rewrites its stored path), otherwise
     // events inside the moved directory silently stop ----
 

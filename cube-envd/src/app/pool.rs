@@ -105,7 +105,8 @@ mod tests {
 
     /// The guardrail: while blocking tasks occupy the pool,
     /// the async workers must keep ticking. A regression that runs blocking
-    /// work on a worker (the pre-PR-A bug) makes this gap explode.
+    /// work on a worker (the bug the blocking pool was added to fix)
+    /// makes this gap explode.
     /// CI-safe: the bound is an order of magnitude above the expected tick.
     #[test]
     fn workers_keep_ticking_during_blocking_calls() {

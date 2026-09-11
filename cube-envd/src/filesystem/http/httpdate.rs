@@ -380,8 +380,8 @@ mod tests {
         }
     }
 
-    /// The time crate rejects these; Go formats them fine and the reviewer's
-    /// probe (PR #13) hit the panic on a real tmpfs.
+    /// The time crate rejects these; Go formats them fine and a review probe
+    /// hit the panic on a real tmpfs.
     #[test]
     fn http_date_extremes_match_go_appendint() {
         // time.Unix(-1, 0).UTC().Format(http.TimeFormat)
