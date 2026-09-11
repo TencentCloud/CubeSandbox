@@ -539,19 +539,26 @@ type TemplateScore struct {
 }
 
 type ExternalHTTPScore struct {
-	// Weight is a pointer so YAML can distinguish omit (nil → default 1.0 in
-	// preHandle) from an explicit 0 (keep off, same as other scorers).
+	// Weight is a pointer so YAML can distinguish omit (nil → default
+	// DefaultExternalHTTPScoreWeight in preHandle) from an explicit 0 (keep
+	// off, same as other scorers).
 	Weight *float64 `yaml:"weight"`
 	// Endpoint is the sidecar URL. Empty skips the plugin. Non-empty values must
 	// be absolute http:// or https:// URLs with a host; other schemes (file,
 	// unix, missing scheme) fail construction / are rejected at Select.
 	Endpoint string `yaml:"endpoint"`
-	// Timeout is the per-request deadline. Zero/omitted defaults to 200ms at
-	// request time; negative values are rejected at construction.
+	// Timeout is the per-request deadline on the synchronous create path.
+	// Zero/omitted defaults to 200ms at request time; negative values and
+	// values above 2s are rejected at construction / Select validation.
 	Timeout time.Duration `yaml:"timeout"`
 	Mode    string        `yaml:"mode"`
 	Disable bool          `yaml:"disable"`
 }
+
+// DefaultExternalHTTPScoreWeight is applied when plugin_conf.external_http_score
+// omits weight. Keep as the single source of truth for constructors, preHandle,
+// and Weight() fallbacks.
+const DefaultExternalHTTPScoreWeight = 1.0
 
 type CubeletConf struct {
 	Grpc                    *GrpcConf `yaml:"grpc"`
@@ -1119,14 +1126,15 @@ func checkInstanceTypeLabelValid(config *Config) error {
 	return nil
 }
 
-// applyExternalHTTPScoreDefaults fills an omitted weight with 1.0 once at
-// config-load / hot-reload. Explicit weight: 0 stays 0 so operators can stage
-// the sidecar without contributing to the weighted average.
-func applyExternalHTTPScoreDefaults(cfg *ExternalHTTPScore) {
+// ApplyExternalHTTPScoreDefaults fills an omitted weight with
+// DefaultExternalHTTPScoreWeight once at config-load / hot-reload. Explicit
+// weight: 0 stays 0 so operators can stage the sidecar without contributing to
+// the weighted average.
+func ApplyExternalHTTPScoreDefaults(cfg *ExternalHTTPScore) {
 	if cfg == nil || cfg.Weight != nil {
 		return
 	}
-	w := 1.0
+	w := DefaultExternalHTTPScoreWeight
 	cfg.Weight = &w
 }
 
@@ -1137,7 +1145,7 @@ func preHandSchedulerScore(config *Config) {
 				asynccfg.ScoreInterval = config.Common.SyncMetricDataInterval
 			}
 		}
-		applyExternalHTTPScoreDefaults(config.Scheduler.Score.ScorePluginConf.ExternalHTTPScore)
+		ApplyExternalHTTPScoreDefaults(config.Scheduler.Score.ScorePluginConf.ExternalHTTPScore)
 	}
 
 	if config.Scheduler.PostScore != nil {
