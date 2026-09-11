@@ -81,7 +81,7 @@ scheduler:
 | `filter.enable_filters` | 启用调度过滤器。常见过滤器包括 CPU、内存、模板本地性和实时创建并发。 |
 | `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`。当设置了非空 `scheduler.profile` 时，最终生效列表中的每个已注册评分器都必须有对应 `plugin_conf`（因子型评分器还需已知的 `enable_weight_factors` 与至少一个正的 `resource_weights`），否则配置加载失败。空 Profile 下，列出但缺少 `plugin_conf`/因子的因子型评分器会在选择器构造时告警并跳过（不再 panic）；需补齐配置才会真正生效。 |
 | `score.resource_weights` | 控制 MVM 数、创建并发、CPU/内存 quota 使用率等因子的权重。权重越高，该因子对分数影响越大；对应因子也必须列在 `score.plugin_conf.real_time_weighted_average.enable_weight_factors` 中。Profile 展开时同名键覆盖基础权重。 |
-| `score.plugin_conf.binpack_score` | 可选的插件型评分器，偏好更满的节点。在 `enable_scorers` 中列出但省略该块时，会启用安全默认（插件权重 1，CPU/内存/MVM 等权）。`weight: 0` 禁用 Select；负的插件/子权重在配置加载阶段被拒绝。因 YAML `float64` 无法区分“省略”与 `0`，`cpu_weight`/`mem_weight`/`mvm_weight` 为 `0` 时回退为默认 `1`（不能用 0 排除某一维）；负值在配置加载阶段被拒绝。 |
+| `score.plugin_conf.binpack_score` | 可选的插件型评分器，偏好更满的节点。在 `enable_scorers` 中列出但省略该块时，会启用安全默认（插件权重 1，CPU/内存/MVM 等权）。插件级 `weight` 为指针：省略 → 默认 1；显式 `0` 禁用 Select；负值在配置加载阶段被拒绝。子权重 `cpu_weight`/`mem_weight`/`mvm_weight` 仍是普通 float：`<= 0` 回退为默认 `1`（不能用 0 排除某一维）；负值在配置加载阶段被拒绝。 |
 | `profile` / `profiles` | 可选的运行时 Profile 覆盖层。空 `profile` 不改变现有 Filter/Score。内置名：`balanced_spread`、`template_locality_first`、`binpack_utilization`。用户同名 key 完全覆盖内置。运行时 Profile 是选择器覆盖，不是离线模拟器模型。详见 [Scheduler Profile 配置示例](../dev/scheduler-profile-config-example.md)。 |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | 全局或按实例类型限制单节点 MVM 数。Cubelet 上报的 `max_mvm_num` 也会参与实际上限计算。 |
 | `disk_usage_max_percent` | `disk` filter 和 backoff 路径使用的磁盘水位阈值，用于避免继续调度到快满的机器。 |
@@ -91,9 +91,10 @@ scheduler:
 
 CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 空 Profile 会保留现有 Filter/Score 列表和 `plugin_conf` 块，但这不是对 master
-行为的逐字节冻结：`plugin_conf.<scorer>.weight: 0` 仍会禁用该评分器，且
-`loopAsyncScore`（`node.Score` 的唯一写入方）按选中的评分器集合门控，
-而不是只要存在 `multi_factor_weighted_average` 插件块就启动。内置名
+行为的逐字节冻结：`plugin_conf.<scorer>.weight: 0` 仍会禁用该评分器。异步
+`loopAsyncScore` feeder（`node.Score` / `pscore` 的写入方）仍然只要存在
+`multi_factor_weighted_average` 插件块就会启动——即使空 Profile、即使该评分器
+未列入 `enable_scorers`——与 master 行为一致；它**不**按选中的评分器集合门控。内置名
 （`balanced_spread`、`template_locality_first`、`binpack_utilization`）
 会展开到选择器列表，并在对应 `plugin_conf` 缺失时注入自包含默认值。
 `scheduler.profiles` 下与内置同名的用户条目会完全覆盖内置。
@@ -103,10 +104,12 @@ CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 准入过滤器（如 `disk`、`thirtparty`）。选定 Profile 后请审查生效的 filter 列表。
 
 对每个 Score 插件（含既有四个评分器以及 `binpack_score`），
-`plugin_conf.<scorer>.weight: 0` 会禁用该评分器并跳过 Select；在已存在的插件块中省略
-`weight` 也会 YAML 解码为 `0` 并禁用。要保持评分器活跃，请显式设置正的 `weight`。
-更改 Profile / 选择器列表需要重启 CubeMaster：配置热加载会把 Profile 覆盖重新应用到内存
-`Config`，但 `InitScheduler` 不会重建 Filter/Score 切片。
+`plugin_conf.<scorer>.weight: 0` 会禁用该评分器并跳过 Select。对 `binpack_score`
+而言，`weight` 是指针字段：在已有 `plugin_conf.binpack_score` 块中省略 `weight`
+会保留运行时默认 `1`（启用）；只有显式写 `0` 才禁用。其他评分器仍是普通
+`float64`，省略 `weight` 会 YAML 解码为 `0` 并禁用——要保持活跃请显式写正的
+`weight`。更改 Profile / 选择器列表需要重启 CubeMaster：配置热加载会把 Profile
+覆盖重新应用到内存 `Config`，但 `InitScheduler` 不会重建 Filter/Score 切片。
 
 `binpack_score` 是偏好更满节点的薄 Score 插件，通过在 `enable_scorers`
 中列出（直接或经 Profile）启用。插件参数仍放在

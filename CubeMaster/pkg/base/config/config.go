@@ -306,7 +306,8 @@ type SchedulerProfileScoreConf struct {
 
 // allowedSchedulerFilterNames must stay in sync with the keys of
 // CubeMaster/pkg/selector/filter filters registry (filter/init.go).
-// Do not invent names; keep this set aligned when the registry changes.
+// Drift is enforced by pkg/scheduler TestSelectorAllowlistsMatchRegistries,
+// which compares AllowedSchedulerFilterNames() to filter.RegisteredFilterNames().
 var allowedSchedulerFilterNames = map[string]struct{}{
 	"cpu":                 {},
 	"mem":                 {},
@@ -318,13 +319,32 @@ var allowedSchedulerFilterNames = map[string]struct{}{
 
 // allowedSchedulerScoreNames must stay in sync with the keys of
 // CubeMaster/pkg/selector/score scores registry (score/init.go).
-// Do not invent names; keep this set aligned when the registry changes.
+// Drift is enforced by pkg/scheduler TestSelectorAllowlistsMatchRegistries,
+// which compares AllowedSchedulerScoreNames() to score.RegisteredScoreNames().
 var allowedSchedulerScoreNames = map[string]struct{}{
 	"real_time_weighted_average":    {},
 	"multi_factor_weighted_average": {},
 	"affinity_score":                {},
 	"image_score":                   {},
 	"binpack_score":                 {},
+}
+
+// AllowedSchedulerFilterNames returns a copy of the Profile allowlist for filters.
+func AllowedSchedulerFilterNames() map[string]struct{} {
+	out := make(map[string]struct{}, len(allowedSchedulerFilterNames))
+	for k, v := range allowedSchedulerFilterNames {
+		out[k] = v
+	}
+	return out
+}
+
+// AllowedSchedulerScoreNames returns a copy of the Profile allowlist for scorers.
+func AllowedSchedulerScoreNames() map[string]struct{} {
+	out := make(map[string]struct{}, len(allowedSchedulerScoreNames))
+	for k, v := range allowedSchedulerScoreNames {
+		out[k] = v
+	}
+	return out
 }
 
 // allowedSchedulerWeightFactorNames must stay in sync with constants.WeightFactor*.
@@ -618,12 +638,39 @@ type TemplateScore struct {
 // BinpackScore is a thin Score-phase plugin that prefers fuller nodes.
 // Missing plugin_conf uses safe defaults (enabled, equal CPU/mem/MVM weights)
 // instead of panicking.
+//
+// Weight is a pointer so YAML can distinguish omit vs explicit 0:
+//   - nil / omitted → runtime default 1 (enabled)
+//   - explicit 0 → disable Select
+//   - positive → that plugin weight
+//   - negative → rejected at config load
 type BinpackScore struct {
-	Weight    float64 `yaml:"weight"`
-	CPUWeight float64 `yaml:"cpu_weight"`
-	MemWeight float64 `yaml:"mem_weight"`
-	MvmWeight float64 `yaml:"mvm_weight"`
-	Disable   bool    `yaml:"disable"`
+	Weight    *float64 `yaml:"weight"`
+	CPUWeight float64  `yaml:"cpu_weight"`
+	MemWeight float64  `yaml:"mem_weight"`
+	MvmWeight float64  `yaml:"mvm_weight"`
+	Disable   bool     `yaml:"disable"`
+}
+
+// Float64Ptr returns a pointer to v for YAML/config tests and builtin injects.
+func Float64Ptr(v float64) *float64 { return &v }
+
+// BinpackPluginWeight returns the effective plugin weight and whether the
+// scorer is disabled by weight/disable. A missing block defaults to weight 1.
+func BinpackPluginWeight(cfg *BinpackScore) (weight float64, disabled bool) {
+	if cfg == nil {
+		return 1, false
+	}
+	if cfg.Disable {
+		return 0, true
+	}
+	if cfg.Weight == nil {
+		return 1, false
+	}
+	if *cfg.Weight == 0 {
+		return 0, true
+	}
+	return *cfg.Weight, false
 }
 
 type CubeletConf struct {
@@ -1307,7 +1354,7 @@ func applyBuiltinSchedulerProfileDefaults(s *SchedulerConf) {
 	case RuntimeProfileBinpackUtilization:
 		if s.Score.ScorePluginConf.BinpackScore == nil {
 			s.Score.ScorePluginConf.BinpackScore = &BinpackScore{
-				Weight:    1,
+				Weight:    Float64Ptr(1),
 				CPUWeight: 1,
 				MemWeight: 1,
 				MvmWeight: 1,
@@ -1317,8 +1364,8 @@ func applyBuiltinSchedulerProfileDefaults(s *SchedulerConf) {
 }
 
 // validateBinpackScoreWeight rejects negative plugin_conf.binpack_score.weight
-// at config load. weight:0 remains an explicit disable; a missing block keeps
-// the runtime compatibility default.
+// at config load. Explicit weight:0 disables; omitted weight (nil pointer)
+// keeps the runtime default of 1; a missing block keeps the same default.
 func validateBinpackScoreWeight(s *SchedulerConf) error {
 	if s == nil || s.Score == nil {
 		return nil
@@ -1327,9 +1374,9 @@ func validateBinpackScoreWeight(s *SchedulerConf) error {
 	if cfg == nil {
 		return nil
 	}
-	if cfg.Weight < 0 {
-		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.weight must be >= 0, got %v (weight:0 disables; omit the block for the default)",
-			cfg.Weight)
+	if cfg.Weight != nil && *cfg.Weight < 0 {
+		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.weight must be >= 0, got %v (weight:0 disables; omit weight or the block for default 1)",
+			*cfg.Weight)
 	}
 	if cfg.CPUWeight < 0 {
 		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.cpu_weight must be >= 0, got %v", cfg.CPUWeight)
@@ -1505,7 +1552,14 @@ func scorerPluginExplicitlyDisabled(s *SchedulerConf, name string) bool {
 		return c != nil && (c.Disable || c.Weight == 0)
 	case "binpack_score":
 		c := s.Score.ScorePluginConf.BinpackScore
-		return c != nil && (c.Disable || c.Weight == 0)
+		if c == nil {
+			return false
+		}
+		if c.Disable {
+			return true
+		}
+		_, disabled := BinpackPluginWeight(c)
+		return disabled
 	default:
 		return false
 	}

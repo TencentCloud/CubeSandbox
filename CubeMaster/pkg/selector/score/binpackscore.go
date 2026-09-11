@@ -73,18 +73,7 @@ func (l *binpackScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreL
 }
 
 func binpackScoreRuntime() (weight float64, disable bool) {
-	cfg := getBinpackScoreConfig()
-	if cfg == nil {
-		return 1, false
-	}
-	if cfg.Disable {
-		return 0, true
-	}
-	if cfg.Weight == 0 {
-		return 0, true
-	}
-	// Negative weights are rejected at config load (validateBinpackScoreWeight).
-	return cfg.Weight, false
+	return config.BinpackPluginWeight(getBinpackScoreConfig())
 }
 
 func binpackScoreFactorWeights() (cpuW, memW, mvmW float64) {

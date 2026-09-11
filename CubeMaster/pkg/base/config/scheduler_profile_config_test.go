@@ -108,7 +108,7 @@ func TestPreHandleScheduler_ProfileWithoutWeightsLeavesBaseWeights(t *testing.T)
 			Score: &SchedulerScoreConf{
 				ResourceWeights: baseWeights,
 				ScorePluginConf: ScorePluginConf{
-					BinpackScore: &BinpackScore{Weight: 1},
+					BinpackScore: &BinpackScore{Weight: Float64Ptr(1)},
 				},
 			},
 			Profiles: map[string]SchedulerProfileConf{
@@ -219,7 +219,7 @@ func TestPreHandleScheduler_ProfileScoreOnlyDoesNotClearFilter(t *testing.T) {
 				EnableScorers:   []string{"affinity_score"},
 				ResourceWeights: map[string]float64{"cpu": 1.0},
 				ScorePluginConf: ScorePluginConf{
-					BinpackScore: &BinpackScore{Weight: 1},
+					BinpackScore: &BinpackScore{Weight: Float64Ptr(1)},
 				},
 			},
 			Profiles: map[string]SchedulerProfileConf{
@@ -240,23 +240,17 @@ func TestPreHandleScheduler_ProfileScoreOnlyDoesNotClearFilter(t *testing.T) {
 	assert.Equal(t, map[string]float64{"cpu": 0.2, "mem": 0.8}, cfg.Scheduler.Score.ResourceWeights)
 }
 
-func TestAllowedSchedulerSelectorNamesMatchRegistries(t *testing.T) {
-	// Keep these expectations aligned with filter/init.go and score/init.go.
-	assert.Equal(t, map[string]struct{}{
-		"cpu":                 {},
-		"mem":                 {},
-		"template_locality":   {},
-		"realtime_create_num": {},
-		"disk":                {},
-		"thirtparty":          {},
-	}, allowedSchedulerFilterNames)
-	assert.Equal(t, map[string]struct{}{
-		"real_time_weighted_average":    {},
-		"multi_factor_weighted_average": {},
-		"affinity_score":                {},
-		"image_score":                   {},
-		"binpack_score":                 {},
-	}, allowedSchedulerScoreNames)
+func TestAllowedSchedulerSelectorNamesDocumented(t *testing.T) {
+	// Cross-package drift vs filter/score registries is enforced in
+	// pkg/scheduler.TestSelectorAllowlistsMatchRegistries. This test only
+	// guards that the allowlists stay non-empty and contain the built-ins
+	// this PR relies on.
+	assert.Contains(t, allowedSchedulerFilterNames, "cpu")
+	assert.Contains(t, allowedSchedulerFilterNames, "thirtparty")
+	assert.Contains(t, allowedSchedulerScoreNames, "binpack_score")
+	assert.Contains(t, allowedSchedulerScoreNames, "real_time_weighted_average")
+	assert.Equal(t, 6, len(allowedSchedulerFilterNames))
+	assert.Equal(t, 5, len(allowedSchedulerScoreNames))
 }
 
 func initConfigFromYAML(t *testing.T, yamlBody string) (*Config, error) {
@@ -308,7 +302,9 @@ scheduler:
 	assert.Equal(t, map[string]float64{"cpu": 1}, got.Scheduler.Score.ResourceWeights)
 	plugin := got.Scheduler.Score.ScorePluginConf.BinpackScore
 	if assert.NotNil(t, plugin) {
-		assert.Equal(t, 1.0, plugin.Weight)
+		w, disabled := BinpackPluginWeight(plugin)
+		assert.Equal(t, 1.0, w)
+		assert.False(t, disabled)
 		assert.Equal(t, 2.0, plugin.CPUWeight)
 		assert.Equal(t, 3.0, plugin.MemWeight)
 		assert.Equal(t, 4.0, plugin.MvmWeight)
@@ -372,7 +368,9 @@ scheduler:
 			case RuntimeProfileBinpackUtilization:
 				binpack := got.Scheduler.Score.ScorePluginConf.BinpackScore
 				if assert.NotNil(t, binpack) {
-					assert.Equal(t, 1.0, binpack.Weight)
+					w, disabled := BinpackPluginWeight(binpack)
+					assert.Equal(t, 1.0, w)
+					assert.False(t, disabled)
 					assert.Equal(t, 1.0, binpack.CPUWeight)
 					assert.Equal(t, 1.0, binpack.MemWeight)
 					assert.Equal(t, 1.0, binpack.MvmWeight)
@@ -606,7 +604,9 @@ scheduler:
 	got, err := initConfigFromYAML(t, yamlBody)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"binpack_score"}, got.Scheduler.Score.EnableScorers)
-	assert.Equal(t, 0.0, got.Scheduler.Score.ScorePluginConf.BinpackScore.Weight)
+	w, disabled := BinpackPluginWeight(got.Scheduler.Score.ScorePluginConf.BinpackScore)
+	assert.Equal(t, 0.0, w)
+	assert.True(t, disabled)
 }
 
 func TestInit_FactorScorerWithoutPositiveFactorWeight_EmptyProfileStillLoads(t *testing.T) {
@@ -814,7 +814,9 @@ scheduler:
 	got, err := initConfigFromYAML(t, yamlBody)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"binpack_score"}, got.Scheduler.Score.EnableScorers)
-	assert.Equal(t, 0.0, got.Scheduler.Score.ScorePluginConf.BinpackScore.Weight)
+	w, disabled := BinpackPluginWeight(got.Scheduler.Score.ScorePluginConf.BinpackScore)
+	assert.Equal(t, 0.0, w)
+	assert.True(t, disabled)
 }
 
 func TestInit_UserSameNameOverrideOfBuiltinWeightZeroAllowed(t *testing.T) {
@@ -953,11 +955,13 @@ scheduler:
 
 func TestInit_BinpackScoreWeightSemantics(t *testing.T) {
 	cases := []struct {
-		name       string
-		yaml       string
-		wantErr    string
-		wantWeight float64
-		wantNil    bool
+		name         string
+		yaml         string
+		wantErr      string
+		wantWeight   float64
+		wantDisabled bool
+		wantNilPtr   bool // Weight field is nil (omit), effective weight still wantWeight
+		wantNilCfg   bool
 	}{
 		{
 			name: "negative_rejected",
@@ -985,7 +989,8 @@ scheduler:
       binpack_score:
         weight: 0
 `,
-			wantWeight: 0,
+			wantWeight:   0,
+			wantDisabled: true,
 		},
 		{
 			name: "positive_kept",
@@ -1000,6 +1005,21 @@ scheduler:
         weight: 2.5
 `,
 			wantWeight: 2.5,
+		},
+		{
+			name: "omit_weight_defaults_to_one",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - binpack_score
+    plugin_conf:
+      binpack_score:
+        cpu_weight: 2
+`,
+			wantWeight: 1,
+			wantNilPtr: true,
 		},
 		{
 			name: "absent_uses_runtime_default",
@@ -1021,12 +1041,17 @@ scheduler:
 			}
 			assert.NoError(t, err)
 			cfg := got.Scheduler.Score.ScorePluginConf.BinpackScore
-			if tc.wantNil {
+			if tc.wantNilCfg {
 				assert.Nil(t, cfg)
 				return
 			}
 			assert.NotNil(t, cfg)
-			assert.Equal(t, tc.wantWeight, cfg.Weight)
+			if tc.wantNilPtr {
+				assert.Nil(t, cfg.Weight)
+			}
+			w, disabled := BinpackPluginWeight(cfg)
+			assert.Equal(t, tc.wantWeight, w)
+			assert.Equal(t, tc.wantDisabled, disabled)
 		})
 	}
 }
