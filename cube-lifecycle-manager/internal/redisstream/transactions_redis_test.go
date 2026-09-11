@@ -15,18 +15,23 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 )
 
-func TestRedisTransactionsProtectResumeOwnership(t *testing.T) {
+func newTestClient(t *testing.T) (*Client, *redis.Client) {
+	t.Helper()
 	server := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	client := New(rdb, zap.NewNop())
+	return New(rdb, zap.NewNop()), rdb
+}
+
+func TestRedisTransactionsProtectResumeOwnership(t *testing.T) {
+	client, rdb := newTestClient(t)
 	ctx := context.Background()
 
 	if err := client.SetState(ctx, "sbx", lifecycle.StatePaused, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	state, acquired, err := client.AcquireResume(ctx, "sbx", 10*time.Second)
-	if err != nil || !acquired || state != "resuming" {
+	if err != nil || !acquired || state != lifecycle.StatePaused {
 		t.Fatalf("AcquireResume() = (%q, %v, %v)", state, acquired, err)
 	}
 
@@ -59,11 +64,53 @@ func TestRedisTransactionsProtectResumeOwnership(t *testing.T) {
 	}
 }
 
+func TestRedisTransactionsProtectKillOwnership(t *testing.T) {
+	client, _ := newTestClient(t)
+	ctx := context.Background()
+
+	if err := client.SetState(ctx, "sbx", lifecycle.StatePaused, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	state, acquired, err := client.AcquireKill(ctx, "sbx", 10*time.Second)
+	if err != nil || !acquired || state != lifecycle.StatePaused {
+		t.Fatalf("AcquireKill() = (%q, %v, %v)", state, acquired, err)
+	}
+
+	state, acquired, err = client.AcquireKill(ctx, "sbx", 10*time.Second)
+	if err != nil || acquired || state != "killing" {
+		t.Fatalf("second AcquireKill() = (%q, %v, %v)", state, acquired, err)
+	}
+
+	state, acquired, err = client.AcquireResume(ctx, "sbx", 10*time.Second)
+	if err != nil || acquired || state != "killing" {
+		t.Fatalf("AcquireResume must not overwrite killing: (%q, %v, %v)", state, acquired, err)
+	}
+}
+
+func TestAcquireKillAndResumeAreMutuallyExclusive(t *testing.T) {
+	client, _ := newTestClient(t)
+	ctx := context.Background()
+
+	if err := client.SetState(ctx, "sbx-resume-first", lifecycle.StatePaused, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	state, acquired, err := client.AcquireResume(ctx, "sbx-resume-first", 10*time.Second)
+	if err != nil || !acquired || state != lifecycle.StatePaused {
+		t.Fatalf("AcquireResume() = (%q, %v, %v)", state, acquired, err)
+	}
+	state, acquired, err = client.AcquireKill(ctx, "sbx-resume-first", 10*time.Second)
+	if err != nil || acquired || state != "resuming" {
+		t.Fatalf("AcquireKill must not overwrite resuming: (%q, %v, %v)", state, acquired, err)
+	}
+
+	state, acquired, err = client.AcquireKill(ctx, "sbx-empty", 10*time.Second)
+	if err != nil || !acquired || state != "" {
+		t.Fatalf("AcquireKill(empty) = (%q, %v, %v)", state, acquired, err)
+	}
+}
+
 func TestGetStatesReturnsPresentKeys(t *testing.T) {
-	server := miniredis.RunT(t)
-	rdb := redis.NewClient(&redis.Options{Addr: server.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
-	client := New(rdb, zap.NewNop())
+	client, _ := newTestClient(t)
 	ctx := context.Background()
 
 	if err := client.SetState(ctx, "a", lifecycle.StatePaused, time.Minute); err != nil {
@@ -85,10 +132,7 @@ func TestGetStatesReturnsPresentKeys(t *testing.T) {
 }
 
 func TestCursorValidDetectsTrimmedHistory(t *testing.T) {
-	server := miniredis.RunT(t)
-	rdb := redis.NewClient(&redis.Options{Addr: server.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
-	client := New(rdb, zap.NewNop())
+	client, rdb := newTestClient(t)
 	ctx := context.Background()
 
 	if err := rdb.XAdd(ctx, &redis.XAddArgs{

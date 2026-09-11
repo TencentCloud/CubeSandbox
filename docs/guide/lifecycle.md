@@ -38,14 +38,17 @@ Go: `cubesandbox.NeverTimeout`; Python: `from cubesandbox import NEVER_TIMEOUT`.
    create()       ┌────▼────┐   timeout & on_timeout=pause   ┌─────────┐
   ───────────────►│ running │ ──────────────────────────────►│ paused  │
                   │         │◄──────── connect() or          │         │
-                  └─┬─────┬─┘    auto_resume-triggered req   └────┬────┘
-                    │     │                                       │
-        kill()      │     │ timeout & on_timeout=kill             │ kill()
-        ────────────┘     └─────────────────┐                     │
-                                            ▼                     ▼
-                                      ┌────────────┐
-                                      │ terminated │
-                                      └────────────┘
+                  └──┬────┬─┘    auto_resume-triggered req   └──┬────┬─┘
+                     │    │                                     │    │
+                     │    │ timeout & on_timeout=kill           │    │ timeout & on_timeout=kill
+                     │    └────────────────┐                    │    └──────────────┐
+                     │                     ▼                    │                   ▼
+                     │               ┌────────────┐◄────────────┘
+                     │               │ terminated │
+                     │               └──────▲─────┘
+                     │                      │
+                     │ kill()               │ kill()
+                     └──────────────────────┘
 ```
 
 ## Create
@@ -138,6 +141,8 @@ sandbox.connect()                     # restore from snapshot
 sandbox.run_code("print('back!')")    # carry on as if never paused
 ```
 
+`pause()` does **not** cancel idle reclamation. With the default `on_timeout="kill"`, a later-paused sandbox is still destroyed once idle exceeds `timeout`. To keep a paused sandbox, pass `timeout=NEVER_TIMEOUT`, omit `timeout` (with no positive server default), or set a high `timeout` — see [Behaviour](#behaviour) below.
+
 `connect()` does not change the sandbox's idle timeout — the value set at create (or later via `set_timeout`) is preserved across pause/resume. To change it at resume time, use the deprecated `resume(timeout=...)`:
 
 | `resume(timeout=...)` | Effect |
@@ -194,7 +199,7 @@ Any of these resets the idle clock:
 - SDK calls: `sandbox.run_code(...)`, `sandbox.commands.run(...)`, `sandbox.files.read(...)` / `write(...)`.
 - Direct HTTP traffic to a service inside the sandbox (e.g. via the URL returned by `getHost()`).
 
-Sandboxes that don't opt in (no `lifecycle` argument) default to `on_timeout="kill"`: once they sit idle for the effective `timeout` the platform destroys them. This matches e2b's `lifecycle.on_timeout="kill"` semantic. To avoid automatic reclamation, pass `timeout=NEVER_TIMEOUT`, omit `timeout` (with no positive server default), set a high `timeout`, or send periodic activity to reset the idle clock.
+Sandboxes that don't opt in (no `lifecycle` argument) default to `on_timeout="kill"`: once they sit idle for the effective `timeout` the platform destroys them. This matches e2b's `lifecycle.on_timeout="kill"` semantic. Manual `pause()` does **not** cancel that kill: a later-paused sandbox is still destroyed when idle exceeds `timeout`. To keep a paused sandbox, pass `timeout=NEVER_TIMEOUT`, omit `timeout` (with no positive server default), set a high `timeout`, or send periodic activity to reset the idle clock.
 
 ### End-to-end examples
 

@@ -38,14 +38,17 @@ Go：`cubesandbox.NeverTimeout`；Python：`from cubesandbox import NEVER_TIMEOU
    create()       ┌────▼────┐   timeout & on_timeout=pause   ┌─────────┐
   ───────────────►│ running │ ──────────────────────────────►│ paused  │
                   │         │◄──────── connect() 或          │         │
-                  └─┬─────┬─┘     auto_resume 触发的请求      └────┬────┘
-                    │     │                                       │
-        kill()      │     │ timeout & on_timeout=kill             │ kill()
-        ────────────┘     └─────────────────┐                     │
-                                            ▼                     ▼
-                                      ┌────────────┐
-                                      │ terminated │
-                                      └────────────┘
+                  └──┬────┬─┘     auto_resume 触发的请求      └──┬────┬─┘
+                     │    │                                     │    │
+                     │    │ timeout & on_timeout=kill           │    │ timeout & on_timeout=kill
+                     │    └────────────────┐                    │    └──────────────┐
+                     │                     ▼                    │                   ▼
+                     │               ┌────────────┐◄────────────┘
+                     │               │ terminated │
+                     │               └──────▲─────┘
+                     │                      │
+                     │ kill()               │ kill()
+                     └──────────────────────┘
 ```
 
 ## 创建沙箱
@@ -138,6 +141,8 @@ sandbox.connect()                     # 从快照恢复
 sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 ```
 
+`pause()` **不会取消**空闲回收。默认 `on_timeout="kill"` 时，之后被暂停的沙箱空闲仍超过 `timeout` 一样会被销毁。若要保住暂停中的沙箱，请传 `timeout=NEVER_TIMEOUT`、省略 `timeout`（且服务端未设正数默认）、或把 `timeout` 设得足够大——见下文 [行为说明](#行为说明)。
+
 `connect()` 不会改变沙箱的空闲超时——创建时设置的值（或之后用 `set_timeout` 改的值）在暂停/恢复过程中保持不变。若要在恢复时改超时，用已弃用的 `resume(timeout=...)`：
 
 | `resume(timeout=...)` | 效果 |
@@ -194,7 +199,7 @@ sandbox = Sandbox.create(
 - 通过 SDK 调用：`sandbox.run_code(...)`、`sandbox.commands.run(...)`、`sandbox.files.read(...)` / `write(...)`。
 - 通过 HTTP 直连沙箱内的服务（例如 `getHost()` 返回的 URL）。
 
-未配置 `auto_pause` / 不传 `lifecycle` 的沙箱默认行为是 `on_timeout="kill"`：空闲超过 `timeout` 秒后，平台会主动销毁该沙箱。这与 e2b `lifecycle.on_timeout="kill"` 语义一致。若不希望被自动回收，可传 `timeout=NEVER_TIMEOUT`、省略 `timeout`（且服务端未设正数默认）、把 `timeout` 设得足够大，或通过定期活动刷新空闲计时。
+未配置 `auto_pause` / 不传 `lifecycle` 的沙箱默认行为是 `on_timeout="kill"`：空闲超过 `timeout` 秒后，平台会主动销毁该沙箱。这与 e2b `lifecycle.on_timeout="kill"` 语义一致。手动 `pause()` **不会取消** auto-kill：之后被暂停的沙箱，空闲仍超过 `timeout` 时一样会被销毁。若要保住暂停中的沙箱，请传 `timeout=NEVER_TIMEOUT`、省略 `timeout`（且服务端未设正数默认）、把 `timeout` 设得足够大，或通过定期活动刷新空闲计时。
 
 ### 端到端示例
 

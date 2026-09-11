@@ -245,17 +245,43 @@ func (c *Client) AcquireState(ctx context.Context, sandboxID, state string, ttl 
 }
 
 // AcquireResume atomically changes an absent or paused state to resuming using
-// a single-key WATCH transaction. It returns acquired=true for the owner;
-// otherwise state is the value observed atomically before deciding to wait or
-// reconcile. Transactions avoid Lua/EVAL and remain single-slot safe.
+// a single-key WATCH transaction. acquired=true means this caller owns the
+// transition. state is always the value observed before the write: paused or
+// empty when acquired, otherwise the blocking marker a waiter should reconcile
+// against. Transactions avoid Lua/EVAL and remain single-slot safe.
 func (c *Client) AcquireResume(ctx context.Context, sandboxID string, ttl time.Duration) (state string, acquired bool, err error) {
+	return c.acquireIf(ctx, sandboxID, "resuming", ttl, allowEmptyOrPaused)
+}
+
+// AcquireKill atomically changes an absent or paused state to killing. It is
+// the timeout-kill counterpart of AcquireResume: the two CAS transitions
+// are mutually exclusive, so a concurrent resume wins or this kill does,
+// but neither overwrites an in-flight resuming / pausing / running lock.
+// state is the pre-CAS observation (paused or empty when acquired) so a
+// failed kill can restore the proxy to the right prior state.
+func (c *Client) AcquireKill(ctx context.Context, sandboxID string, ttl time.Duration) (state string, acquired bool, err error) {
+	return c.acquireIf(ctx, sandboxID, "killing", ttl, allowEmptyOrPaused)
+}
+
+func allowEmptyOrPaused(current string) bool {
+	return current == "" || current == lifecycle.StatePaused
+}
+
+// acquireIf CAS-writes dest when allow(current) still holds under WATCH.
+// The returned state is always the pre-write observation, including when acquired.
+func (c *Client) acquireIf(
+	ctx context.Context,
+	sandboxID, dest string,
+	ttl time.Duration,
+	allow func(current string) bool,
+) (string, bool, error) {
 	const maxAttempts = 3
 	key := lifecycle.StateKey(sandboxID)
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		state = ""
-		acquired = false
-		err = c.rdb.Watch(ctx, func(tx *redis.Tx) error {
+		var state string
+		acquired := false
+		err := c.rdb.Watch(ctx, func(tx *redis.Tx) error {
 			current, getErr := tx.Get(ctx, key).Result()
 			if errors.Is(getErr, redis.Nil) {
 				current = ""
@@ -264,16 +290,15 @@ func (c *Client) AcquireResume(ctx context.Context, sandboxID string, ttl time.D
 			}
 
 			state = current
-			if current != "" && current != lifecycle.StatePaused {
+			if !allow(current) {
 				return nil
 			}
 
 			_, txErr := tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-				pipe.Set(ctx, key, "resuming", ttl)
+				pipe.Set(ctx, key, dest, ttl)
 				return nil
 			})
 			if txErr == nil {
-				state = "resuming"
 				acquired = true
 			}
 			return txErr
@@ -282,11 +307,11 @@ func (c *Client) AcquireResume(ctx context.Context, sandboxID string, ttl time.D
 			continue
 		}
 		if err != nil {
-			return "", false, fmt.Errorf("acquire resume %s: %w", key, err)
+			return "", false, fmt.Errorf("acquire %s %s: %w", dest, key, err)
 		}
 		return state, acquired, nil
 	}
-	return "", false, fmt.Errorf("acquire resume %s: transaction conflicted after %d attempts", key, maxAttempts)
+	return "", false, fmt.Errorf("acquire %s %s: transaction conflicted after %d attempts", dest, key, maxAttempts)
 }
 
 // SetState forces the state value (overwriting any existing). Used to

@@ -158,13 +158,10 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 			continue
 		}
 
-		// Already-terminal fast path: Redis or the in-memory RuntimeState
-		// may already say the sandbox is parked at paused/pausing/killing/
-		// killed. Redis alone is not enough — the state-key TTL
-		// (StateLockTTL=60s) expires, GetState goes empty, and idle keeps
-		// growing because LastActive is frozen after pause. Without the
-		// RuntimeState check we re-issue Pause every Interval.
-		if isParkedSweepState(e.RuntimeState) {
+		// Redis state-key TTL expires while RuntimeState stays paused and
+		// LastActive is frozen, so idle keeps growing. Without this check
+		// an AutoPause sandbox would be Pause'd every Interval.
+		if skipSweepState(e.RuntimeState, e.Meta.AutoPause) {
 			continue
 		}
 		curState, _, stateErr := s.o.Redis.GetState(ctx, e.Meta.SandboxID)
@@ -172,22 +169,15 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 			s.o.Log.Warn("get state failed; will attempt action anyway",
 				zap.String("sandbox_id", e.Meta.SandboxID),
 				zap.Error(stateErr))
-		} else if isParkedSweepState(curState) {
-			// Nothing to do. "pausing" / "killing" mean a peer (or our own
-			// previous invocation) is mid-flight; let it finish.
+		} else if skipSweepState(curState, e.Meta.AutoPause) {
 			continue
 		}
 
-		switch {
-		case e.Meta.AutoPause:
-			if s.o.Leader != nil && !s.o.Leader.IsLeader() {
-				return
-			}
+		if e.Meta.AutoPause {
 			s.o.Log.Info("idle threshold exceeded; pausing",
 				zap.String("sandbox_id", e.Meta.SandboxID),
 				zap.Duration("idle_for", idleFor),
 				zap.Intp("timeout_seconds", e.Meta.TimeoutSeconds))
-
 			if err := s.tryPause(ctx, e); err != nil {
 				s.pauseFailed.Add(1)
 				s.o.Log.Warn("auto-pause failed",
@@ -195,23 +185,19 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 					zap.Duration("idle_for", idleFor),
 					zap.Error(err))
 			}
-		default:
-			if s.o.Leader != nil && !s.o.Leader.IsLeader() {
-				return
-			}
-			s.o.Log.Info("idle threshold exceeded; killing",
+			continue
+		}
+		s.o.Log.Info("idle threshold exceeded; killing",
+			zap.String("sandbox_id", e.Meta.SandboxID),
+			zap.Duration("idle_for", idleFor),
+			zap.Intp("timeout_seconds", e.Meta.TimeoutSeconds),
+			zap.String("kill_reason", cubemasterclient.KillReasonTimeout))
+		if err := s.tryKill(ctx, e); err != nil {
+			s.killFailed.Add(1)
+			s.o.Log.Warn("timeout-kill failed",
 				zap.String("sandbox_id", e.Meta.SandboxID),
 				zap.Duration("idle_for", idleFor),
-				zap.Intp("timeout_seconds", e.Meta.TimeoutSeconds),
-				zap.String("kill_reason", cubemasterclient.KillReasonTimeout))
-
-			if err := s.tryKill(ctx, e); err != nil {
-				s.killFailed.Add(1)
-				s.o.Log.Warn("timeout-kill failed",
-					zap.String("sandbox_id", e.Meta.SandboxID),
-					zap.Duration("idle_for", idleFor),
-					zap.Error(err))
-			}
+				zap.Error(err))
 		}
 	}
 }
@@ -347,24 +333,25 @@ func (s *Sweeper) KillStats() (triggered, failed int64) {
 	return s.killTriggered.Load(), s.killFailed.Load()
 }
 
-// tryKill is the kill-path counterpart of tryPause. Same coordination
-// pattern (SETNX → notify proxy → RPC → finalise), but the terminal state is
-// non-recoverable: on success we evict the registry entry and tell every
-// CubeProxy replica to forget the sandbox. The Lua gate maps `killing` /
-// `killed` to 410 Gone so any in-flight client request fails fast instead of
-// hanging on a doomed retry.
+// tryKill is the kill-path counterpart of tryPause. Coordination is
+// AcquireKill (empty/paused → killing) → notify proxy → RPC → finalise.
+// The terminal state is non-recoverable: on success we evict the registry
+// entry and tell every CubeProxy replica to forget the sandbox. The Lua
+// gate maps `killing` / `killed` to 410 Gone so any in-flight client
+// request fails fast instead of hanging on a doomed retry.
 func (s *Sweeper) tryKill(ctx context.Context, e registry.Entry) error {
 	ctx, cancel := context.WithTimeout(ctx, s.o.ActionTimeout)
 	defer cancel()
 
 	sid := e.Meta.SandboxID
-	got, err := s.o.Redis.AcquireState(ctx, sid, "killing", s.o.StateLockTTL)
+	prior, got, err := s.o.Redis.AcquireKill(ctx, sid, s.o.StateLockTTL)
 	if err != nil {
 		return err
 	}
 	if !got {
-		// A peer CLM replica (or our own resume / pause path) holds the state.
-		// Skip — the holder will drive the transition.
+		// A peer holds resuming / pausing / killing / killed / running.
+		// Skip — the holder will drive the transition (or the next sweep
+		// will retry after idle is still overdue).
 		return nil
 	}
 
@@ -380,27 +367,25 @@ func (s *Sweeper) tryKill(ctx context.Context, e registry.Entry) error {
 	rpcCancel()
 	if killErr != nil {
 		var apiErr *cubemasterclient.APIError
-		switch {
-		case errors.As(killErr, &apiErr) && apiErr.IsNotFound():
-			s.o.Log.Info("sandbox not found on cubemaster during kill; evicting from registry",
-				zap.String("sandbox_id", sid),
-				zap.Int("ret_code", apiErr.RetCode),
-				zap.String("ret_msg", apiErr.RetMsg))
-		case errors.As(killErr, &apiErr) && apiErr.IsAlreadyInState():
-			s.o.Log.Info("sandbox already in terminal state on cubemaster; reconciling",
-				zap.String("sandbox_id", sid),
-				zap.Int("ret_code", apiErr.RetCode))
-		default:
-			// A transport or timeout error has an unknown server-side result.
-			// Do NOT clear state and broadcast "running". Retain "killing"
-			// marker so proxy continues to reject requests and sweeper does not flap.
-			if !errors.As(killErr, &apiErr) {
-				return errors.New("cubemaster kill result unknown: " + killErr.Error())
-			}
+		if !errors.As(killErr, &apiErr) {
+			// Transport/timeout: unknown server-side result. Keep "killing"
+			// so the proxy keeps rejecting and the next sweep does not flap.
+			return errors.New("cubemaster kill result unknown: " + killErr.Error())
+		}
+		if !apiErr.IsNotFound() {
+			// 130490 / TaskStateInvalid is not a kill no-op: CubeMaster uses
+			// it both for "already in the desired state" and for "another
+			// lifecycle operation holds the sandbox". Evicting here would
+			// drop a live sandbox that lost a race with resume. Treat every
+			// structured non-NotFound error as retryable rollback.
 			_ = s.o.Redis.ClearStateNotify(ctx, sid)
-			_ = s.o.ProxyPush.SetState(ctx, sid, "running")
+			_ = s.o.ProxyPush.SetState(ctx, sid, killRollbackProxyState(prior))
 			return errors.New("cubemaster kill: " + killErr.Error())
 		}
+		s.o.Log.Info("sandbox not found on cubemaster during kill; evicting from registry",
+			zap.String("sandbox_id", sid),
+			zap.Int("ret_code", apiErr.RetCode),
+			zap.String("ret_msg", apiErr.RetMsg))
 	}
 
 	if err := s.o.Redis.WriteState(ctx, sid, "killed", s.o.StateLockTTL); err != nil {
@@ -421,11 +406,28 @@ func (s *Sweeper) tryKill(ctx context.Context, e registry.Entry) error {
 	return nil
 }
 
-func isParkedSweepState(state string) bool {
+// skipSweepState reports whether this sweep should leave the sandbox alone.
+// Transition markers are always skipped so we do not pile onto an in-flight
+// pause / resume / kill. `paused` is skipped only when AutoPause is set:
+// that is the desired terminal state for on_timeout=pause. For
+// on_timeout=kill a paused sandbox is not finished work.
+func skipSweepState(state string, autoPause bool) bool {
 	switch state {
-	case lifecycle.StatePaused, "pausing", "killing", lifecycle.StateKilled:
+	case "pausing", "resuming", "killing", lifecycle.StateKilled:
 		return true
+	case lifecycle.StatePaused:
+		return autoPause
 	default:
 		return false
 	}
+}
+
+// killRollbackProxyState is the CubeProxy state to restore when a kill RPC
+// fails after AcquireKill succeeded. paused must go back to paused so the
+// Lua gate still asks CLM to resume; empty/running rolls back to running.
+func killRollbackProxyState(prior string) string {
+	if prior == lifecycle.StatePaused {
+		return lifecycle.StatePaused
+	}
+	return lifecycle.StateRunning
 }

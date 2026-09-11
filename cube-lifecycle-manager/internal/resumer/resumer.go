@@ -317,15 +317,17 @@ func (r *Resumer) acquireResumeOwnership(ctx context.Context, sandboxID string) 
 		return nil
 	}
 
-	switch {
-	case cur == "running":
+	switch cur {
+	case "running":
 		// Sandbox is already running on Redis's view. No-op resume; the
 		// caller's success path will re-push running to the proxy in case
 		// the local dict drifted.
 		r.o.Log.Info("resume requested but sandbox already running; reconciling",
 			zap.String("sandbox_id", sandboxID))
 		return errAlreadyRunning
-	case cur == "pausing" || cur == "resuming":
+	case "killing", lifecycle.StateKilled:
+		return errSandboxKilled
+	case "pausing", "resuming":
 		// Active transition by a peer → wait it out. waitForRunning
 		// returning nil means the peer transitioned to "running"; treat
 		// that as a no-op resume from our perspective so we DON'T issue
@@ -335,7 +337,7 @@ func (r *Resumer) acquireResumeOwnership(ctx context.Context, sandboxID string) 
 			return err
 		}
 		return errAlreadyRunning
-	case cur == "", cur == "paused":
+	case "", "paused":
 		// AcquireResume only returns these values when its WATCH transaction
 		// repeatedly conflicted, which is surfaced as an error. Keep this
 		// defensive branch for alternate stateStore implementations.
@@ -357,6 +359,11 @@ func (r *Resumer) acquireResumeOwnership(ctx context.Context, sandboxID string) 
 // as a successful no-op (state will be re-asserted into the proxy dict).
 var errAlreadyRunning = errors.New("sandbox already running")
 
+// errSandboxKilled is returned when a racing timeout-kill owns the sandbox.
+// CubeProxy maps killing/killed to 410; CLM must fail the resume RPC the
+// same way instead of waiting out the caller's deadline.
+var errSandboxKilled = errors.New("peer killed sandbox during resume")
+
 // waitForRunning is invoked when acquireResumeOwnership observed a peer's
 // transition lock ("pausing" or "resuming") and we must not fire our own
 // duplicate RPC. It resolves the peer's outcome when:
@@ -365,7 +372,7 @@ var errAlreadyRunning = errors.New("sandbox already running")
 //   - state == "paused"     → peer gave up; bail with an error so
 //     CubeProxy returns 503 and the next request
 //     gets a fresh resume attempt.
-//   - state == "killed"     → peer (sweeper) destroyed the sandbox.
+//   - state == "killed" / "killing" → peer (sweeper) destroyed the sandbox.
 //   - key expired (!ok)     → peer crashed mid-flight; return an error so
 //     the caller re-enters Resume() cleanly.
 //
@@ -406,17 +413,18 @@ func (r *Resumer) waitForRunningLegacy(ctx context.Context, sandboxID string) er
 // classifyState maps a GetState (state, ok) pair onto a wait decision.
 // done=true means the waiter should return (err is nil on success).
 // done=false means the state is still in-flight ("pausing" / "resuming" /
-// "killing" / unknown) and the caller should keep waiting.
+// unknown) and the caller should keep waiting.
 func classifyState(state string, ok bool) (err error, done bool) {
-	switch {
-	case !ok:
+	if !ok {
 		return errors.New("peer resume lock expired without resolution"), true
-	case state == "running":
+	}
+	switch state {
+	case "running":
 		return nil, true
-	case state == "paused":
+	case "paused":
 		return errors.New("peer resume left sandbox paused"), true
-	case state == lifecycle.StateKilled:
-		return errors.New("peer killed sandbox during resume"), true
+	case "killing", lifecycle.StateKilled:
+		return errSandboxKilled, true
 	default:
 		// "pausing" / "resuming" / anything else — keep waiting.
 		return nil, false

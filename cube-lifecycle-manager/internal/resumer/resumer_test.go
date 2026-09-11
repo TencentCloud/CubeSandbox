@@ -530,6 +530,36 @@ func TestResumer_NoOpWhenStateIsAlreadyRunning(t *testing.T) {
 	}
 }
 
+func TestResumer_FailsFastWhenStateIsKilling(t *testing.T) {
+	for _, state := range []string{"killing", lifecycle.StateKilled} {
+		t.Run(state, func(t *testing.T) {
+			reg := registry.New()
+			reg.Upsert(lifecycle.SandboxLifecycleMeta{
+				SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true,
+			})
+			store := newFakeStore()
+			store.states["sbx"] = state
+			master := &fakeMaster{}
+			r := newTestResumer(reg, store, master, &fakePush{})
+
+			start := time.Now()
+			err := r.Resume(context.Background(), "sbx")
+			if err == nil {
+				t.Fatal("resume must fail when the sweeper owns killing/killed")
+			}
+			if !errors.Is(err, errSandboxKilled) {
+				t.Fatalf("got %v, want errSandboxKilled", err)
+			}
+			if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+				t.Fatalf("must fail fast, took %s", elapsed)
+			}
+			if got := atomic.LoadInt32(&master.calls); got != 0 {
+				t.Fatalf("must not call master.Resume, got %d", got)
+			}
+		})
+	}
+}
+
 func TestResumer_RunningStatePushRetriesAsynchronously(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -774,6 +804,7 @@ func TestClassifyState(t *testing.T) {
 		{name: "running", state: "running", ok: true, done: true},
 		{name: "paused", state: "paused", ok: true, wantErr: true, done: true},
 		{name: "killed", state: lifecycle.StateKilled, ok: true, wantErr: true, done: true},
+		{name: "killing", state: "killing", ok: true, wantErr: true, done: true},
 		{name: "missing", ok: false, wantErr: true, done: true},
 		{name: "resuming", state: "resuming", ok: true},
 		{name: "pausing", state: "pausing", ok: true},
