@@ -131,12 +131,12 @@ type Metrics struct {
 	// scheduled request. It is a simulator-local candidate-breadth proxy, not
 	// a measurement of scheduler work or latency. This simulator binds the
 	// globally best scored feasible node (deterministic argmax). Production
-	// CubeMaster truncates to scheduler.priority_select_num (shipped config: 1)
-	// and then picks within that set with the selector named by
-	// scheduler.least_select_name — uniform for the default random,
-	// score-weighted for sw/rw/rrw. With the shipped priority_select_num: 1 the
-	// truncated set is a single node, so production's pick coincides with this
-	// simulator's argmax (modulo tie-break).
+	// CubeMaster applies scheduler.priority_select_num / least_select_name only
+	// after a configured scheduler.score block produces scores. When scoring is
+	// enabled and priority_select_num is 1, that truncated set is a single node
+	// so production coincides with this argmax (modulo tie-break). Shipped
+	// configs currently configure filters but no score block, so production
+	// selects from the filtered list without that argmax step.
 	AverageFeasibleCandidates float64             `json:"average_feasible_candidates"`
 	FeasibleEvaluations       int                 `json:"feasible_candidate_evaluations"`
 	FailureReasons            map[string]int      `json:"failure_reasons,omitempty"`
@@ -1256,12 +1256,13 @@ type scoredNode struct {
 
 // scoreCandidates returns every feasible node scored and sorted descending.
 // This simulator binds ranked[0] (deterministic argmax with stable node-ID
-// tie-break). Production CubeMaster truncates to scheduler.priority_select_num
-// (shipped config: 1) and then picks within that set with the selector named
-// by scheduler.least_select_name — uniform for the default random,
-// score-weighted for sw/rw/rrw. With priority_select_num: 1 the truncated set
-// is a single node, so production coincides with this argmax (modulo
-// tie-break); a separate retained-candidate metric is intentionally omitted.
+// tie-break). Production CubeMaster applies scheduler.priority_select_num /
+// least_select_name only after a configured scheduler.score block produces
+// scores. When scoring is enabled and priority_select_num is 1, that truncated
+// set is a single node so production coincides with this argmax (modulo
+// tie-break). Shipped configs currently configure filters but no score block,
+// so production selects from the filtered list without that argmax step; a
+// separate retained-candidate metric is intentionally omitted.
 func scoreCandidates(nodes []simNode, req Request, weights profileWeights) []scoredNode {
 	ranked := make([]scoredNode, 0, len(nodes))
 	for i := range nodes {

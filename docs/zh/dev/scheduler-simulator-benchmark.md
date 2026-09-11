@@ -85,11 +85,13 @@ default-vs-candidate 对比。指标描述与 comparison notes 等人类可读�
 - `average_score_margin`：确定性 argmax 绑定下的 simulator 本地决策差距代理：所选节点与第二名候选的分数差均值，仅对至少有两个已打分候选的成功调度请求取平均；无此类观测时为 `0`。不是生产选择指标。
 - `average_feasible_candidates`：每个成功调度请求的可行模拟节点均值，最大为
   模拟节点数。这是 simulator 本地的候选宽度代理，不是调度器 CPU 开销或延迟实测。
-  本 simulator 绑定全局最高分的可行节点。生产 CubeMaster 会按
-  `scheduler.priority_select_num` 截断（发行配置为 `1`），再按
-  `scheduler.least_select_name` 在截断集合内选择——默认 `random` 为均匀随机，
-  `sw`/`rw`/`rrw` 为按分数加权。发行配置 `priority_select_num: 1` 时生产选择与本
-  argmax 一致（同分打破规则可能不同），因此报告不声称会跟踪该生产旋钮的保留候选指标。
+  本 simulator 绑定全局最高分的可行节点。生产 CubeMaster 只有在配置了
+  `scheduler.score` 并产生分数之后，才会按 `scheduler.priority_select_num` /
+  `scheduler.least_select_name` 做截断与最终选择。当打分已启用且
+  `priority_select_num` 为 `1` 时，截断集合只有一个节点，生产选择与本 argmax
+  一致（同分打破规则可能不同）。当前发行配置启用了 filter，但没有 `score:` 块，
+  因此生产会从过滤后的节点列表中选择，而不会走该 argmax 步骤；报告因此不声称会
+  跟踪该生产旋钮的保留候选指标。
 
 Markdown 结果表包含 `latency p50 ms` 与 `latency p95 ms`。估算器是确定性的：
 

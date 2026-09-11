@@ -218,10 +218,12 @@ profile/workload 单元，`comparisons` 只展示一对。合同按整对象检�
 `feasible_candidate_evaluations / scheduled_requests`，按每个成功调度请求统计可行
 节点，因此最大为 `node_count`。它是 simulator 本地候选宽度代理，不是调度器 CPU
 开销或延迟。本 simulator 绑定全局最高分的可行节点（确定性 argmax）。生产
-CubeMaster 会按 `scheduler.priority_select_num` 截断（发行配置为 `1`），再按
-`scheduler.least_select_name` 在截断集合内选择——默认 `random` 为均匀随机，
-`sw`/`rw`/`rrw` 为按分数加权。发行配置 `priority_select_num: 1` 时生产选择与本
-argmax 一致（同分打破规则可能不同），因此报告不包含单独的截断后保留候选指标。
+CubeMaster 只有在配置了 `scheduler.score` 并产生分数之后，才会按
+`scheduler.priority_select_num` / `scheduler.least_select_name` 做截断与最终选择。
+当打分已启用且 `priority_select_num` 为 `1` 时，截断集合只有一个节点，生产选择与本
+argmax 一致（同分打破规则可能不同）。当前发行配置启用了 filter，但没有 `score:` 块，
+因此生产会从过滤后的节点列表中选择，而不会走该 argmax 步骤；报告因此不包含单独的
+截断后保留候选指标。
 `average_score_margin` 是该 argmax 绑定下的 simulator 本地决策差距代理，不是生产选择指标。
 
 发出的 `Metrics` 对象上每个 JSON 字段都有对应的 `metric_schema[]` 条目（包括

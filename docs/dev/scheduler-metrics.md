@@ -73,11 +73,13 @@ metric.
    Infeasible nodes never enter Score.
 3. Feasible nodes are scored with profile weights, then the highest-scored node
    is bound (deterministic argmax with stable node-ID tie-break). Production
-   CubeMaster truncates to `scheduler.priority_select_num` (shipped config: `1`)
-   and selects within that set using `scheduler.least_select_name` — uniform for
-   the default `random`, score-weighted for `sw`/`rw`/`rrw`. With the shipped
-   `priority_select_num: 1` the truncated set is a single node, so production's
-   pick coincides with this simulator's argmax (modulo tie-break).
+   CubeMaster applies `scheduler.priority_select_num` /
+   `scheduler.least_select_name` only after a configured `scheduler.score`
+   block produces scores. When scoring is enabled and `priority_select_num` is
+   `1`, that truncated set is a single node, so production's pick coincides
+   with this simulator's argmax (modulo tie-break). Shipped configs currently
+   configure filters but no `score:` block, so production selects from the
+   filtered list without that argmax step.
 4. `average_score_margin` is a simulator-local decision-gap proxy under that
    argmax bind; it is not a production selection metric.
 5. Quota utilization, peak utilization, and load balance use the **node
@@ -165,13 +167,15 @@ no other metrics keys:
 | `MemUtilization` | `mem_utilization` |
 
 `scoreCandidates` scores and ranks every feasible node, then binds the top
-scored node (deterministic argmax). Production CubeMaster truncates to
-`scheduler.priority_select_num` (shipped config: `1`) and selects within that
-set using `scheduler.least_select_name` — uniform for the default `random`,
-score-weighted for `sw`/`rw`/`rrw`. With the shipped `priority_select_num: 1`
-production coincides with this argmax (modulo tie-break). Under this
-simulator's bind rule, truncating after a full sort would not change the
-selected node, so the report exposes only `feasible_candidate_evaluations` /
+scored node (deterministic argmax). Production CubeMaster applies
+`scheduler.priority_select_num` / `scheduler.least_select_name` only after a
+configured `scheduler.score` block produces scores. When scoring is enabled and
+`priority_select_num` is `1`, that truncated set is a single node, so
+production coincides with this argmax (modulo tie-break). Shipped configs
+currently configure filters but no `score:` block, so production selects from
+the filtered list without that argmax step. Under this simulator's bind rule,
+truncating after a full sort would not change the selected node, so the report
+exposes only `feasible_candidate_evaluations` /
 `average_feasible_candidates` as the simulator-local breadth proxy (at most
 node count).
 

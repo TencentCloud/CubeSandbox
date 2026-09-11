@@ -113,12 +113,14 @@ The report includes more than five scheduling-quality metrics:
 - `average_feasible_candidates`: feasible simulated nodes per scheduled request;
   at most the simulated node count. Simulator-local candidate breadth, not
   scheduler CPU cost or latency. This simulator binds the globally best scored
-  feasible node. Production CubeMaster truncates to `scheduler.priority_select_num`
-  (shipped config: `1`) and selects within that set using
-  `scheduler.least_select_name` — uniform for the default `random`,
-  score-weighted for `sw`/`rw`/`rrw`. With the shipped `priority_select_num: 1`
-  production coincides with this argmax (modulo tie-break), so the report does
-  not claim a retained-candidate metric for that production knob.
+  feasible node. Production CubeMaster applies `scheduler.priority_select_num` /
+  `scheduler.least_select_name` only after a configured `scheduler.score` block
+  produces scores. When scoring is enabled and `priority_select_num` is `1`,
+  that truncated set is a single node, so production coincides with this argmax
+  (modulo tie-break). Shipped configs currently configure filters but no
+  `score:` block, so production selects from the filtered list without that
+  argmax step; the report therefore does not claim a retained-candidate metric
+  for that production knob.
 
 The Markdown results table includes `latency p50 ms` and `latency p95 ms`.
 The estimator is deterministic:

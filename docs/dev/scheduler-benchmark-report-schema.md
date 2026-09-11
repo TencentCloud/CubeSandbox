@@ -225,12 +225,14 @@ the command before a report is produced.
 nodes for each scheduled request, so it is at most `node_count`. It is a
 simulator-local candidate-breadth proxy, not scheduler CPU cost or latency.
 This simulator binds the globally best scored feasible node (deterministic
-argmax). Production CubeMaster truncates to `scheduler.priority_select_num`
-(shipped config: `1`) and selects within that set using
-`scheduler.least_select_name` — uniform for the default `random`,
-score-weighted for `sw`/`rw`/`rrw`. With the shipped `priority_select_num: 1`
-production coincides with this argmax (modulo tie-break), so the report does
-not include a separate post-cap retained-candidate metric.
+argmax). Production CubeMaster applies `scheduler.priority_select_num` /
+`scheduler.least_select_name` only after a configured `scheduler.score` block
+produces scores. When scoring is enabled and `priority_select_num` is `1`, that
+truncated set is a single node, so production coincides with this argmax
+(modulo tie-break). Shipped configs currently configure filters but no
+`score:` block, so production selects from the filtered list without that
+argmax step; the report therefore does not include a separate post-cap
+retained-candidate metric.
 `average_score_margin` is a simulator-local decision-gap proxy under that
 argmax bind, not a production selection metric.
 
