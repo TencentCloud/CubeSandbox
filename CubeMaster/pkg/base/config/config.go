@@ -539,7 +539,9 @@ type TemplateScore struct {
 }
 
 type ExternalHTTPScore struct {
-	Weight float64 `yaml:"weight"`
+	// Weight is a pointer so YAML can distinguish omit (nil → default 1.0 in
+	// preHandle) from an explicit 0 (keep off, same as other scorers).
+	Weight *float64 `yaml:"weight"`
 	// Endpoint is the sidecar URL. Empty skips the plugin. Non-empty values must
 	// be absolute http:// or https:// URLs with a host; other schemes (file,
 	// unix, missing scheme) fail construction / are rejected at Select.
@@ -1117,6 +1119,17 @@ func checkInstanceTypeLabelValid(config *Config) error {
 	return nil
 }
 
+// applyExternalHTTPScoreDefaults fills an omitted weight with 1.0 once at
+// config-load / hot-reload. Explicit weight: 0 stays 0 so operators can stage
+// the sidecar without contributing to the weighted average.
+func applyExternalHTTPScoreDefaults(cfg *ExternalHTTPScore) {
+	if cfg == nil || cfg.Weight != nil {
+		return
+	}
+	w := 1.0
+	cfg.Weight = &w
+}
+
 func preHandSchedulerScore(config *Config) {
 	if config.Scheduler.Score != nil {
 		if asynccfg := config.Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage; asynccfg != nil {
@@ -1124,6 +1137,7 @@ func preHandSchedulerScore(config *Config) {
 				asynccfg.ScoreInterval = config.Common.SyncMetricDataInterval
 			}
 		}
+		applyExternalHTTPScoreDefaults(config.Scheduler.Score.ScorePluginConf.ExternalHTTPScore)
 	}
 
 	if config.Scheduler.PostScore != nil {

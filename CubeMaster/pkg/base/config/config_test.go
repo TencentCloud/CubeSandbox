@@ -122,6 +122,37 @@ func TestPreHandleSchedulerIgnoreRedisAllocationDefault(t *testing.T) {
 	assert.False(t, cfg.Scheduler.ShouldIgnoreRedisAllocation())
 }
 
+func TestPreHandleExternalHTTPScoreWeightDefault(t *testing.T) {
+	omitted := &ExternalHTTPScore{Endpoint: "http://127.0.0.1:9"}
+	explicitZero := 0.0
+	zero := &ExternalHTTPScore{Weight: &explicitZero, Endpoint: "http://127.0.0.1:9"}
+	explicit := 2.5
+	set := &ExternalHTTPScore{Weight: &explicit, Endpoint: "http://127.0.0.1:9"}
+
+	cfg := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			Score: &SchedulerScoreConf{
+				ScorePluginConf: ScorePluginConf{
+					ExternalHTTPScore: omitted,
+				},
+			},
+		},
+	}}
+	assert.NoError(t, preHandleScheduler(cfg))
+	assert.NotNil(t, omitted.Weight)
+	assert.Equal(t, 1.0, *omitted.Weight)
+
+	cfg.Scheduler.Score.ScorePluginConf.ExternalHTTPScore = zero
+	assert.NoError(t, preHandleScheduler(cfg))
+	assert.NotNil(t, zero.Weight)
+	assert.Equal(t, 0.0, *zero.Weight)
+
+	cfg.Scheduler.Score.ScorePluginConf.ExternalHTTPScore = set
+	assert.NoError(t, preHandleScheduler(cfg))
+	assert.NotNil(t, set.Weight)
+	assert.Equal(t, 2.5, *set.Weight)
+}
+
 func TestHasDeprecatedOvercommitConfig(t *testing.T) {
 	assert.False(t, (&SchedulerConf{}).hasDeprecatedOvercommitConfig())
 

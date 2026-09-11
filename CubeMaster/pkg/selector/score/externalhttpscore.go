@@ -54,14 +54,23 @@ const (
 var externalHTTPScoreHTTPClient = newExternalHTTPScoreHTTPClient()
 
 func newExternalHTTPScoreHTTPClient() *http.Client {
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		panic("external_http_score: http.DefaultTransport is not *http.Transport")
+	// Build a dedicated Transport instead of asserting on http.DefaultTransport.
+	// Dependencies or tests may replace DefaultTransport with a wrapper
+	// RoundTripper; panicking there would block CubeMaster startup even when
+	// this plugin is not enabled.
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          externalHTTPScoreMaxIdleConns,
+		MaxIdleConnsPerHost:   externalHTTPScoreMaxIdleConnsPerHost,
+		IdleConnTimeout:       externalHTTPScoreIdleConnTimeout,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
-	transport := base.Clone()
-	transport.MaxIdleConns = externalHTTPScoreMaxIdleConns
-	transport.MaxIdleConnsPerHost = externalHTTPScoreMaxIdleConnsPerHost
-	transport.IdleConnTimeout = externalHTTPScoreIdleConnTimeout
 	return &http.Client{
 		Transport: transport,
 		// Timeout stays on the per-call context; the shared client must not pin a
@@ -125,6 +134,9 @@ func newExternalHTTPScoreFromConfig(global *config.Config) *externalHTTPScore {
 	if cfg == nil {
 		panic("config.Scheduler.Score.ScorePluginConf.ExternalHTTPScore is nil")
 	}
+	// Defaults are normally applied in config preHandle; re-apply here so
+	// construction from a raw snapshot (tests) still sees omitted weight as 1.0.
+	applyExternalHTTPScoreWeightDefault(cfg)
 	if err := validateExternalHTTPScoreConfig(cfg); err != nil {
 		panic(err.Error())
 	}
@@ -138,6 +150,7 @@ func newExternalHTTPScoreWithConfig(cfg *config.ExternalHTTPScore) *externalHTTP
 	if cfg == nil {
 		panic("external_http_score config is nil")
 	}
+	applyExternalHTTPScoreWeightDefault(cfg)
 	if err := validateExternalHTTPScoreConfig(cfg); err != nil {
 		panic(err.Error())
 	}
@@ -157,7 +170,12 @@ func (l *externalHTTPScore) Weight() float64 {
 	if cfg == nil {
 		return 0
 	}
-	return cfg.Weight
+	if cfg.Weight == nil {
+		// Omitted weight defaults to 1.0. Prefer reading the filled pointer after
+		// preHandle / constructor defaulting; do not write the live config here.
+		return 1
+	}
+	return *cfg.Weight
 }
 
 func (l *externalHTTPScore) pluginConfig() *config.ExternalHTTPScore {
@@ -176,11 +194,21 @@ func externalHTTPScoreConfigFrom(global *config.Config) *config.ExternalHTTPScor
 	return global.Scheduler.Score.ScorePluginConf.ExternalHTTPScore
 }
 
+// applyExternalHTTPScoreWeightDefault sets omitted weight to 1.0. Explicit 0
+// stays 0. Called from config-load and constructors only — never from Select.
+func applyExternalHTTPScoreWeightDefault(cfg *config.ExternalHTTPScore) {
+	if cfg == nil || cfg.Weight != nil {
+		return
+	}
+	w := 1.0
+	cfg.Weight = &w
+}
+
 // validateExternalHTTPScoreConfig checks timeout and, when endpoint is set,
 // that it is an absolute http(s) URL with a host. Empty endpoint remains a
-// documented no-op (Select skips the HTTP call). A zero weight with disable
-// false defaults to 1.0 so omitting weight: does not silently disable the only
-// network scorer; use disable: true to turn it off.
+// documented no-op (Select skips the HTTP call). Side-effect free: omitted
+// weight is defaulted in applyExternalHTTPScoreWeightDefault / config preHandle,
+// not here.
 func validateExternalHTTPScoreConfig(cfg *config.ExternalHTTPScore) error {
 	if cfg == nil {
 		return fmt.Errorf("external_http_score: config is nil")
@@ -188,11 +216,8 @@ func validateExternalHTTPScoreConfig(cfg *config.ExternalHTTPScore) error {
 	if cfg.Timeout < 0 {
 		return fmt.Errorf("external_http_score: timeout must be non-negative")
 	}
-	if cfg.Weight < 0 {
+	if cfg.Weight != nil && *cfg.Weight < 0 {
 		return fmt.Errorf("external_http_score: weight must be non-negative")
-	}
-	if cfg.Weight == 0 && !cfg.Disable {
-		cfg.Weight = 1
 	}
 	endpoint := strings.TrimSpace(cfg.Endpoint)
 	if endpoint == "" {
@@ -214,8 +239,8 @@ func validateExternalHTTPScoreConfig(cfg *config.ExternalHTTPScore) error {
 
 func (l *externalHTTPScore) Disable() bool {
 	cfg := l.pluginConfig()
-	// Match other scorers: Disable reflects only the disable flag. Zero/omitted
-	// weight is defaulted to 1.0 in validateExternalHTTPScoreConfig.
+	// Match other scorers: Disable reflects only the disable flag. Explicit
+	// weight: 0 keeps the plugin enabled but inert via Weight()/Select skip.
 	return cfg == nil || cfg.Disable
 }
 
@@ -248,7 +273,9 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		logExternalHTTPScoreFailure(ctx, err)
 		return nil, err
 	}
-	if cfg.Weight <= 0 {
+	// Explicit weight: 0 (or a nil that somehow skipped defaulting) skips the
+	// HTTP round trip; runScoreFilter would also multiply by Weight()==0.
+	if l.Weight() <= 0 {
 		return nil, nil
 	}
 
