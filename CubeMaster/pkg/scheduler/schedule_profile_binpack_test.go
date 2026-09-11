@@ -170,6 +170,14 @@ const isolatedSchedulerConfigTestEnv = "CUBEMASTER_ISOLATED_SCHEDULER_CONFIG_TES
 // runIsolatedSchedulerConfigTest runs config-mutating tests in a child test
 // process because config exposes no setter that can restore its package-global
 // pointer, including the original nil state.
+//
+// Constraints / CI caveats:
+//   - The child is exec'd as os.Args[0] with only -test.run / -test.count; parent
+//     flags such as -test.timeout, -test.shuffle, and -test.v are intentionally
+//     not forwarded.
+//   - os.Args[0] must be a directly runnable test binary (breaks under some
+//     -exec wrappers or restricted CI sandboxes that replace the runner).
+//   - Each isolated test roughly doubles wall time versus an in-process call.
 func runIsolatedSchedulerConfigTest(t *testing.T) bool {
 	t.Helper()
 	if os.Getenv(isolatedSchedulerConfigTestEnv) == t.Name() {

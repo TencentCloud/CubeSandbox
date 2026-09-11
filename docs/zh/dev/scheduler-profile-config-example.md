@@ -150,14 +150,17 @@ Profile 恢复必要准入项。
 
 **重启 vs 热更新。** Profile 展开发生在配置 `Init` / `preHandle` 中
 （经 `preHandleScheduler` 调用 `applySchedulerProfile`）。CubeMaster **确实**通过
-文件监视器热加载 `conf.yaml`：变更时 `listener.OnEvent` 会再次执行 `preHandle` 并更新
-内存中的 `Config`（因此 Profile 覆盖会重新应用到 Config 对象）。但是，调度器的
-Filter/Score 插件切片只在 `scheduler.InitScheduler` 中构建一次
-（`filter.NewSelector` / `score.NewSelector`），**不会**在配置热加载时重建。因此，更改
-`scheduler.profile`、Profile 的 `enable_filters` / `enable_scorers`，或以其他方式切换
-已注册选择器集合，都需要**重启 CubeMaster** 才能在调度管线上生效。已构造评分器上
-实时读取的插件参数（例如 `weight` / `disable`）可能随热加载的 Config 更新而无需重启，
-但选择器集合变更不会。
+文件监视器热加载 `conf.yaml`：变更时 `listener.OnEvent` 会再次执行 `preHandle`，
+成功则更新内存中的 `Config`；`preHandle` / `validate` 失败时通过 `CubeLog.Fatalf`
+写 FATAL 日志（**不会**调用 `os.Exit`）并保留旧 Config，错误的覆盖不会生效。
+选择任意 Profile 也会让有效 `enable_filters` / `enable_scorers` 中的未知名在该热加载
+边界 fail-closed。但是，调度器的 Filter/Score 插件切片只在
+`scheduler.InitScheduler` 中构建一次（`filter.NewSelector` / `score.NewSelector`），
+**不会**在配置热加载时重建。因此，更改 `scheduler.profile`、Profile 的
+`enable_filters` / `enable_scorers`，或以其他方式切换已注册选择器集合，都需要
+**重启 CubeMaster** 才能在调度管线上生效。已构造评分器上实时读取的插件参数
+（例如 `weight` / `disable`）可能随热加载的 Config 更新而无需重启，但选择器集合
+变更不会。
 
 ## 内置 Profile 示例
 

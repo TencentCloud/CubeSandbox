@@ -66,16 +66,28 @@ func NewSelector(ctx context.Context) []Selector {
 		ss = append(ss, registration.new())
 	}
 
-	multiFactorConf := conf.Score.ScorePluginConf.MultiFactorWeightedAverage
-	// Preserve master behavior: start the background feeder whenever the
-	// plugin_conf block exists. node.Score / pscore are operator-visible and
-	// must keep updating even if the scorer is disabled or not selected.
-	if multiFactorConf != nil {
+	// Match master feeder gating: master NewSelector returned early when
+	// ResourceWeights == nil, so loopAsyncScore never started in that case.
+	// Keep that gate so empty-profile configs with omitted resource_weights do
+	// not newly populate node.Score / pscore. Plugin-only scorers (binpack)
+	// intentionally skip the ResourceWeights construction gate above.
+	if shouldStartAsyncMultiFactorFeeder(conf.Score) {
 		recov.GoWithRecover(func() {
 			loopAsyncScore(ctx)
 		})
 	}
 	return ss
+}
+
+// shouldStartAsyncMultiFactorFeeder mirrors master's ResourceWeights early-return:
+// the async feeder only starts when both the multi_factor plugin block and a
+// non-nil resource_weights map are present.
+func shouldStartAsyncMultiFactorFeeder(score *config.SchedulerScoreConf) bool {
+	if score == nil {
+		return false
+	}
+	return score.ScorePluginConf.MultiFactorWeightedAverage != nil &&
+		score.ResourceWeights != nil
 }
 
 type scoreRegistration struct {

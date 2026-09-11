@@ -873,6 +873,10 @@ type listener struct {
 }
 
 func (l *listener) OnEvent(data interface{}) {
+	// Hot-reload path: CubeLog.Fatalf here only writes a FATAL log line (it does
+	// not os.Exit). On preHandle/validate failure the previous in-memory cfg is
+	// kept and the bad overlay is not applied. Still treat Profile typos as
+	// operationally severe because selectors are not rebuilt until restart.
 	conf, err := preHandle(data.(*Config))
 	if err != nil {
 		CubeLog.Fatalf("preHandle Config:%v fail:%v", data, err)
@@ -1127,6 +1131,11 @@ func preHandleScheduler(config *Config) error {
 	}
 	// binpack negative weights are always rejected (independent of Profile).
 	if err := validateBinpackScoreWeight(&config.Scheduler.SchedulerConf); err != nil {
+		return err
+	}
+	// Negative plugin weights invert ranking in runScoreFilter; reject for every
+	// registered scorer that has an explicit plugin_conf block.
+	if err := validateSchedulerScorerPluginWeights(&config.Scheduler.SchedulerConf); err != nil {
 		return err
 	}
 	// Strict scorer validation is Profile-scoped so empty-profile legacy
@@ -1386,6 +1395,43 @@ func validateBinpackScoreWeight(s *SchedulerConf) error {
 	}
 	if cfg.MvmWeight < 0 {
 		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.mvm_weight must be >= 0, got %v", cfg.MvmWeight)
+	}
+	return nil
+}
+
+// validateSchedulerScorerPluginWeights rejects negative plugin_conf.<scorer>.weight
+// for every scorer that uses a plain float64 weight field. binpack_score is
+// handled separately by validateBinpackScoreWeight (*float64).
+func validateSchedulerScorerPluginWeights(s *SchedulerConf) error {
+	if s == nil || s.Score == nil {
+		return nil
+	}
+	check := func(name string, weight float64) error {
+		if weight < 0 {
+			return fmt.Errorf("scheduler.score.plugin_conf.%s.weight must be >= 0, got %v (weight:0 disables)", name, weight)
+		}
+		return nil
+	}
+	pc := s.Score.ScorePluginConf
+	if c := pc.RealTimeWeightedAverage; c != nil {
+		if err := check("real_time_weighted_average", c.Weight); err != nil {
+			return err
+		}
+	}
+	if c := pc.MultiFactorWeightedAverage; c != nil {
+		if err := check("multi_factor_weighted_average", c.Weight); err != nil {
+			return err
+		}
+	}
+	if c := pc.AffinityScore; c != nil {
+		if err := check("affinity_score", c.Weight); err != nil {
+			return err
+		}
+	}
+	if c := pc.ImageScore; c != nil {
+		if err := check("image_score", c.Weight); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -92,9 +92,9 @@ scheduler:
 CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 空 Profile 会保留现有 Filter/Score 列表和 `plugin_conf` 块，但这不是对 master
 行为的逐字节冻结：`plugin_conf.<scorer>.weight: 0` 仍会禁用该评分器。异步
-`loopAsyncScore` feeder（`node.Score` / `pscore` 的写入方）仍然只要存在
-`multi_factor_weighted_average` 插件块就会启动——即使空 Profile、即使该评分器
-未列入 `enable_scorers`——与 master 行为一致；它**不**按选中的评分器集合门控。内置名
+`loopAsyncScore` feeder（`node.Score` / `pscore` 的写入方）仅在存在
+`multi_factor_weighted_average` 插件块 **且** `score.resource_weights` 非 nil
+时启动——与 master 在省略 `resource_weights` 时提前返回的行为一致。内置名
 （`balanced_spread`、`template_locality_first`、`binpack_utilization`）
 会展开到选择器列表，并在对应 `plugin_conf` 缺失时注入自包含默认值。
 `scheduler.profiles` 下与内置同名的用户条目会完全覆盖内置。
@@ -108,8 +108,11 @@ CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 而言，`weight` 是指针字段：在已有 `plugin_conf.binpack_score` 块中省略 `weight`
 会保留运行时默认 `1`（启用）；只有显式写 `0` 才禁用。其他评分器仍是普通
 `float64`，省略 `weight` 会 YAML 解码为 `0` 并禁用——要保持活跃请显式写正的
-`weight`。更改 Profile / 选择器列表需要重启 CubeMaster：配置热加载会把 Profile
-覆盖重新应用到内存 `Config`，但 `InitScheduler` 不会重建 Filter/Score 切片。
+`weight`。更改 Profile / 选择器列表需要重启 CubeMaster：配置热加载会重新跑
+`preHandle`，成功则更新内存 Config；失败时写 FATAL 日志（`CubeLog.Fatalf`
+**不会** `os.Exit`）并保留旧 Config，错误的 Profile 覆盖不会生效。
+`InitScheduler` 仍不会在热加载时重建 Filter/Score 切片，因此选择器集合变更
+仍需进程重启。
 
 `binpack_score` 是偏好更满节点的薄 Score 插件，通过在 `enable_scorers`
 中列出（直接或经 Profile）启用。插件参数仍放在
