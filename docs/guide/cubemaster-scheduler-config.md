@@ -103,10 +103,11 @@ block is absent. User entries under `scheduler.profiles` with the same name
 override a built-in entirely.
 
 **Warning:** when a Profile provides `filter.enable_filters`, that list
-**replaces** the base `scheduler.filter.enable_filters` (no merge). Built-ins
-use short lists and can drop admission filters such as `disk` or `thirtparty`
-that were previously enabled. Audit the effective filter list after selecting
-a Profile.
+**replaces** the base `scheduler.filter.enable_filters` (no merge). Dropping
+base filters fails config load unless `allow_dropped_filters: true`. Built-ins
+use short lists and can conflict with admission filters such as `disk` or
+`thirtparty` that were previously enabled — keep them in a user Profile list
+or set the opt-in after auditing the effective filter list.
 
 For every Score plugin (including the four existing scorers and
 `binpack_score`), `plugin_conf.<scorer>.weight: 0` disables the scorer and

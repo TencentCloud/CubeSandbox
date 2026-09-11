@@ -294,6 +294,11 @@ type SchedulerConf struct {
 type SchedulerProfileConf struct {
 	Filter *SchedulerFilterConf       `yaml:"filter"`
 	Score  *SchedulerProfileScoreConf `yaml:"score"`
+	// AllowDroppedFilters, when true, permits a Profile's enable_filters list to
+	// drop names that were present in the base list. Default false: dropping
+	// filters fails config load (admission filters such as disk / thirtparty
+	// must be listed again or the drop must be explicit).
+	AllowDroppedFilters bool `yaml:"allow_dropped_filters"`
 }
 
 // SchedulerProfileScoreConf holds the score fields a profile may override.
@@ -1318,6 +1323,10 @@ func applySchedulerProfile(s *SchedulerConf) error {
 			}
 			CubeLog.Warnf("scheduler %s profile %q replaced enable_filters: previous=%v new=%v dropped=%v",
 				kind, s.Profile, previous, s.Filter.EnableFilters, dropped)
+			if !profile.AllowDroppedFilters {
+				return fmt.Errorf("scheduler profile %q drops filters %v from base enable_filters; keep them in the Profile list or set allow_dropped_filters: true",
+					s.Profile, dropped)
+			}
 		}
 	}
 
@@ -1326,7 +1335,17 @@ func applySchedulerProfile(s *SchedulerConf) error {
 			if s.Score == nil {
 				s.Score = &SchedulerScoreConf{}
 			}
+			previousScorers := append([]string(nil), s.Score.EnableScorers...)
 			s.Score.EnableScorers = append([]string(nil), profile.Score.EnableScorers...)
+			droppedScorers := filterNamesOnlyIn(previousScorers, s.Score.EnableScorers)
+			if len(droppedScorers) > 0 {
+				kind := "user"
+				if builtin {
+					kind = "builtin"
+				}
+				CubeLog.Warnf("scheduler %s profile %q replaced enable_scorers: previous=%v new=%v dropped=%v",
+					kind, s.Profile, previousScorers, s.Score.EnableScorers, droppedScorers)
+			}
 		}
 		if profile.Score.ResourceWeights != nil {
 			if s.Score == nil {
@@ -1568,6 +1587,33 @@ func validateSchedulerScorePluginConfig(s *SchedulerConf) error {
 			}
 		}
 	}
+	if err := validateScorerPolarityMix(s); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateScorerPolarityMix rejects listing occupancy (binpack) and remaining-
+// capacity spread scorers together under a Profile — their scores cancel in
+// runScoreFilter's weighted sum.
+func validateScorerPolarityMix(s *SchedulerConf) error {
+	if s == nil || s.Score == nil {
+		return nil
+	}
+	hasBinpack := false
+	hasSpread := false
+	for _, name := range s.Score.EnableScorers {
+		switch name {
+		case "binpack_score":
+			hasBinpack = true
+		case "real_time_weighted_average", "multi_factor_weighted_average":
+			hasSpread = true
+		}
+	}
+	if hasBinpack && hasSpread {
+		return fmt.Errorf("scheduler profile %q mixes binpack_score with remaining-capacity scorers (real_time_weighted_average / multi_factor_weighted_average); occupancy polarities cancel in runScoreFilter",
+			s.Profile)
+	}
 	return nil
 }
 
@@ -1745,6 +1791,13 @@ func filterNamesOnlyIn(previous, current []string) []string {
 func resolveSchedulerProfile(s *SchedulerConf) (SchedulerProfileConf, bool, error) {
 	if s.Profiles != nil {
 		if profile, ok := s.Profiles[s.Profile]; ok {
+			if isEmptySchedulerProfileConf(profile) {
+				if builtin, ok := builtinSchedulerProfiles()[s.Profile]; ok {
+					CubeLog.Warnf("scheduler profiles[%q] is empty; falling back to built-in preset", s.Profile)
+					return builtin, true, nil
+				}
+				CubeLog.Warnf("scheduler profiles[%q] is empty; profile applies no filter/score overlay", s.Profile)
+			}
 			return profile, false, nil
 		}
 	}
@@ -1755,6 +1808,13 @@ func resolveSchedulerProfile(s *SchedulerConf) (SchedulerProfileConf, bool, erro
 		return SchedulerProfileConf{}, false, fmt.Errorf("scheduler profile %q not found: profiles map is empty", s.Profile)
 	}
 	return SchedulerProfileConf{}, false, fmt.Errorf("scheduler profile %q not found", s.Profile)
+}
+
+// isEmptySchedulerProfileConf reports a zero-value / YAML-empty profiles map
+// entry (key present, no filter/score/opt-in fields). Such entries previously
+// shadowed built-ins and applied nothing.
+func isEmptySchedulerProfileConf(p SchedulerProfileConf) bool {
+	return p.Filter == nil && p.Score == nil && !p.AllowDroppedFilters
 }
 
 func builtinSchedulerProfiles() map[string]SchedulerProfileConf {
