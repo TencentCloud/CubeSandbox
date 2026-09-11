@@ -463,8 +463,14 @@ cube-envd: builder-image
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/cube-envd && CUBE_ENVD_COMMIT=$(CUBE_COMMIT_SHORT) CC_$(TARGET_ARCH)_unknown_linux_musl=musl-gcc cargo build --release --locked --target $(TARGET_ARCH)-unknown-linux-musl && install -m 0755 /workspace/cube-envd/target/$(TARGET_ARCH)-unknown-linux-musl/release/cube-envd /workspace/_output/bin/cube-envd'
 
 .PHONY: cube-envd-test
-cube-envd-test: builder-image
+# The layer check runs on the host first: it is a grep over the source, so
+# failing before the builder container starts is the cheap order.
+cube-envd-test: builder-image cube-envd-layers
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-envd && cargo test --locked && cargo clippy --release --all-targets --locked -- -D warnings'
+
+.PHONY: cube-envd-layers
+cube-envd-layers:
+	@$(MAKE) -C cube-envd layers
 
 .PHONY: cubeops
 cubeops: builder-image

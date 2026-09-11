@@ -1,4 +1,18 @@
-//! 【L2 共享 OS 设施】被 ≥2 域消费、自身无 wire 契约的 OS 接触点。
-//! （cgroup/ 不在此：单域独享，service 级平级——上游同构。）
-//! 来源：承接 auth.rs。
-//! （PR-1 骨架：实现待 PR-2 搬运迁入）
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Shared facilities consumed by more than one domain, with no wire contract
+//! of their own.
+//!
+//! Members: `identity` (request user/group resolution and path anchoring) and
+//! `config` (env vars, default user/workdir, access token, /init timestamp
+//! gate). Both are read from L3 domains, so they must sit below them.
+//!
+//! Not here: `cgroup/` is a single-domain resource boundary (process only) and
+//! lives in `process/cgroup/`; `auth` is the only OS-facing surface today.
+//!
+//! Source: `auth.rs` (identity) and the config/token part of `state.rs`.
+
+pub mod config;
+pub mod identity;
+pub mod lock;

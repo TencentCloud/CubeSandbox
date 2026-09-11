@@ -1,7 +1,19 @@
-//! 【L4 装配与全局面】应用装配层。
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Assembly layer: wiring and process-wide policy — the route table, the
+//! transport pipeline, the shared-state composition root, the lifecycle
+//! endpoints, the blocking-pool policy and the HTTP response adapters.
 //!
-//! 回答：daemon 的接线与全局面——路由表、共享状态、池策略、生命周期端点、
-//! 传输横切（CORS/旧版降级）。域逻辑不在这里（见 filesystem/ 与 process/）。
-//! 依赖：向下消费 filesystem/ 与 process/ 的门面；被 main.rs 装配。
-//!
-//! （PR-1 骨架：实现待 PR-2 搬运迁入）
+//! No domain logic lives here: `filesystem/` and `process/` own their
+//! contracts. This layer depends downward on both domains and is assembled by
+//! `main.rs`.
+
+pub mod cli;
+pub mod handlers;
+pub mod lifecycle;
+pub mod metrics;
+pub mod middleware;
+pub mod pool;
+pub mod routes;
+pub mod state;
