@@ -17,12 +17,12 @@ import { cn, formatBytes, formatCpu, formatRelative } from '@/lib/utils';
 import { formatSandboxActionError } from '@/lib/sandboxActionError';
 import { SandboxActionErrorBanner } from '@/components/SandboxActionErrorBanner';
 
-// ── Log level colors ────────────────────────────────────────────────────────
-const LEVEL_CLASS: Record<string, string> = {
-  debug: 'text-muted-foreground/50',
-  info: 'text-foreground/60',
-  warn: 'text-cube-warn/70',
-  error: 'text-cube-err/70',
+// ── Log level → badge tone ──────────────────────────────────────────────────
+const LOG_TONE: Record<string, 'info' | 'warn' | 'err' | 'mute'> = {
+  debug: 'mute',
+  info: 'info',
+  warn: 'warn',
+  error: 'err',
 };
 
 function isNotFoundError(error: unknown): boolean {
@@ -32,7 +32,8 @@ function isNotFoundError(error: unknown): boolean {
 function formatLogTime(ts: string): string {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return ts;
-  return d.toLocaleTimeString(undefined, { hour12: false, fractionalSecondDigits: 3 });
+  const p = (n: number, w: number) => String(n).padStart(w, '0');
+  return `${p(d.getHours(), 2)}:${p(d.getMinutes(), 2)}:${p(d.getSeconds(), 2)}.${p(d.getMilliseconds(), 3)}`;
 }
 
 // ── Main page ───────────────────────────────────────────────────────────────
@@ -63,7 +64,7 @@ export default function SandboxDetailPage() {
   // ── Logs ────────────────────────────────────────────────────────────────
   const logs = useQuery({
     queryKey: ['sandbox-logs', sandboxID],
-    queryFn: () => sandboxApi.logs(sandboxID),
+    queryFn: () => sandboxApi.logs(sandboxID, { limit: 1000 }),
     enabled: !!sandboxID && !isUnavailable,
     retry: (failureCount, error) => !isNotFoundError(error) && failureCount < 1,
     refetchInterval: (query) => (isNotFoundError(query.state.error) ? false : 10_000),
@@ -350,14 +351,19 @@ export default function SandboxDetailPage() {
           ) : (
             entries.map((entry, i) => {
               const lvl = (entry.level ?? 'info').toLowerCase();
-              const cls = LEVEL_CLASS[lvl] ?? 'text-foreground';
+              const tone = LOG_TONE[lvl] ?? 'mute';
               return (
-                <div key={i} className="flex gap-2">
-                  <span className="shrink-0 text-muted-foreground/60">
+                <div
+                  key={i}
+                  className="flex items-start gap-2 rounded px-1 py-0.5 hover:bg-muted/80"
+                >
+                  <span className="shrink-0 font-mono text-muted-foreground/60">
                     {formatLogTime(entry.timestamp as unknown as string)}
                   </span>
-                  <span className={cn('shrink-0 w-10 uppercase font-semibold', cls)}>{lvl}</span>
-                  <span className={cn('break-all', cls)}>{entry.message}</span>
+                  <Badge tone={tone} className="shrink-0 w-12 justify-center uppercase">
+                    {lvl}
+                  </Badge>
+                  <span className="break-all text-foreground/80">{entry.message}</span>
                 </div>
               );
             })

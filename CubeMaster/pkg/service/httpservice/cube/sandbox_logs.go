@@ -5,31 +5,29 @@
 package cube
 
 import (
-	"bufio"
-	"os"
 	"strconv"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	jsoniter "github.com/json-iterator/go"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	cubeletErrorCode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
 const (
-	// defaultShimLogPath is the path to the CubeShim request log file.
-	// Each line is a JSON object with fields: Module, InstanceId, Timestamp, LogContent, FunctionType.
-	defaultShimLogPath = "/data/log/CubeShim/cube-shim-req.log"
-
 	// defaultLogLimit is the default number of log entries to return.
 	defaultLogLimit = 200
 
 	// maxLogLimit caps a single request to avoid large responses.
-	maxLogLimit = 2000
+	maxLogLimit = 1000
 )
 
 // SandboxLogsReq is the request body for POST /cube/sandbox/logs.
@@ -37,20 +35,8 @@ type SandboxLogsReq struct {
 	types.Request
 	SandboxID    string `json:"sandboxID"`
 	InstanceType string `json:"instanceType,omitempty"`
-	// Cursor is a Unix millisecond timestamp; only return entries after this time.
-	Cursor int64 `json:"cursor,omitempty"`
-	// Limit is the maximum number of entries to return (default 200, max 2000).
+	// Limit is the maximum number of newest entries to return (default 200, max 1000).
 	Limit int `json:"limit,omitempty"`
-}
-
-// ShimLogLine is one parsed line from cube-shim-req.log.
-type ShimLogLine struct {
-	Module       string `json:"Module"`
-	InstanceID   string `json:"InstanceId"`
-	ContainerID  string `json:"ContainerId"`
-	Timestamp    string `json:"Timestamp"`
-	LogContent   string `json:"LogContent"`
-	FunctionType string `json:"FunctionType"`
 }
 
 // SandboxLogEntry is one log entry in the response.
@@ -63,12 +49,8 @@ type SandboxLogEntry struct {
 // SandboxLogsRes is the response for POST /cube/sandbox/logs.
 type SandboxLogsRes struct {
 	*types.Res
-	Logs       []SandboxLogEntry `json:"logs"`
-	NextCursor int64             `json:"nextCursor,omitempty"`
-	HasMore    bool              `json:"hasMore"`
+	Logs []SandboxLogEntry `json:"logs"`
 }
-
-var fastJSON = jsoniter.ConfigFastest
 
 func handleSandboxLogsAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
@@ -78,9 +60,6 @@ func handleSandboxLogsAction(c *gin.Context) {
 		req.SandboxID = c.Query("sandbox_id")
 		if req.SandboxID == "" {
 			req.SandboxID = c.Query("sandboxID")
-		}
-		if cursor := c.Query("cursor"); cursor != "" {
-			req.Cursor, _ = strconv.ParseInt(cursor, 10, 64)
 		}
 		if l := c.Query("limit"); l != "" {
 			req.Limit, _ = strconv.Atoi(l)
@@ -115,19 +94,66 @@ func handleSandboxLogsAction(c *gin.Context) {
 		limit = maxLogLimit
 	}
 
-	entries, nextCursor, hasMore, err := readShimLogs(req.SandboxID, req.Cursor, limit)
+	// Resolve the Cubelet endpoint that owns this sandbox. The shim req log
+	// file lives on the compute node, not on the CubeMaster pod, so we must
+	// proxy the read to Cubelet via gRPC.
+	hostIP := resolveSandboxHostIP(c, req.SandboxID)
+	if hostIP == "" {
+		// The sandbox was confirmed to exist above (NormalizeSandboxIDParam), so a
+		// missing host here is transient — retry instead of treating it as 404.
+		log.G(c.Request.Context()).Warnf("GetSandboxEvents: cannot resolve host for sandboxID=%s", req.SandboxID)
+		rt.RetCode = int64(errorcode.ErrorCode_ConnHostFailed)
+		common.WriteAPI(c, &SandboxLogsRes{Res: &types.Res{Ret: &types.Ret{
+			RetCode: int(errorcode.ErrorCode_ConnHostFailed),
+			RetMsg:  "cannot resolve node for sandbox",
+		}}})
+		return
+	}
+	calleeEp := cubelet.GetCubeletAddr(hostIP)
+
+	cmReq := &cubebox.GetSandboxEventsRequest{
+		RequestID: req.RequestID,
+		SandboxID: req.SandboxID,
+		Limit:     int32(limit),
+	}
+	rsp, err := cubelet.GetSandboxEvents(c.Request.Context(), calleeEp, cmReq)
 	if err != nil {
-		CubeLog.Errorf("readShimLogs sandboxID=%s err=%v", req.SandboxID, err)
+		log.G(c.Request.Context()).Errorf("GetSandboxEvents sandboxID=%s ep=%s err=%v", req.SandboxID, calleeEp, err)
 		rt.RetCode = int64(errorcode.ErrorCode_MasterInternalError)
 		common.WriteAPI(c, &SandboxLogsRes{
 			Res: &types.Res{
 				Ret: &types.Ret{
 					RetCode: int(errorcode.ErrorCode_MasterInternalError),
-					RetMsg:  err.Error(),
+					RetMsg:  "failed to fetch sandbox events from cubelet",
 				},
 			},
 		})
 		return
+	}
+
+	// Map Cubelet failures to safe public messages. The node-side response may
+	// contain paths or transport details that must stay in internal logs.
+	retCode := int32(0)
+	if rsp.GetRet() != nil {
+		retCode = int32(rsp.GetRet().GetRetCode())
+	}
+	if retCode != 0 && retCode != 200 {
+		publicCode, publicMessage := sandboxEventsPublicError(retCode)
+		rt.RetCode = int64(publicCode)
+		common.WriteAPI(c, &SandboxLogsRes{Res: &types.Res{Ret: &types.Ret{
+			RetCode: int(publicCode),
+			RetMsg:  publicMessage,
+		}}})
+		return
+	}
+
+	entries := make([]SandboxLogEntry, 0, len(rsp.GetEvents()))
+	for _, e := range rsp.GetEvents() {
+		entries = append(entries, SandboxLogEntry{
+			Timestamp: e.GetTimestamp(),
+			Message:   e.GetMessage(),
+			Level:     e.GetLevel(),
+		})
 	}
 
 	rt.RetCode = 0
@@ -135,74 +161,30 @@ func handleSandboxLogsAction(c *gin.Context) {
 		Res: &types.Res{
 			Ret: &types.Ret{RetCode: 0, RetMsg: ""},
 		},
-		Logs:       entries,
-		NextCursor: nextCursor,
-		HasMore:    hasMore,
+		Logs: entries,
 	})
 }
 
-// readShimLogs scans the shim log file and returns entries matching sandboxID.
-// cursor is a Unix millisecond timestamp; entries with Timestamp <= cursor are skipped.
-// Returns at most limit entries, plus a nextCursor and hasMore flag for pagination.
-func readShimLogs(sandboxID string, cursor int64, limit int) ([]SandboxLogEntry, int64, bool, error) {
-	f, err := os.Open(defaultShimLogPath)
-	if err != nil {
-		return nil, 0, false, err
+func sandboxEventsPublicError(retCode int32) (errorcode.ErrorCode, string) {
+	switch cubeletErrorCode.ErrorCode(retCode) {
+	case cubeletErrorCode.ErrorCode_InvalidParamFormat:
+		return errorcode.ErrorCode_MasterParamsError, "invalid sandbox event request"
+	default:
+		return errorcode.ErrorCode_MasterInternalError, "failed to read sandbox events from cubelet"
 	}
-	defer f.Close()
+}
 
-	var entries []SandboxLogEntry
-	var nextCursor int64
-	hasMore := false
-
-	scanner := bufio.NewScanner(f)
-	// Increase buffer for long lines (vmm log lines can be very large).
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		var entry ShimLogLine
-		if err := fastJSON.Unmarshal(line, &entry); err != nil {
-			continue
-		}
-
-		if entry.InstanceID != sandboxID {
-			continue
-		}
-
-		// Parse timestamp for cursor filtering.
-		ts, err := time.Parse(time.RFC3339Nano, entry.Timestamp)
-		if err != nil {
-			continue
-		}
-		tsMs := ts.UnixMilli()
-
-		// Skip entries at or before the cursor.
-		if cursor > 0 && tsMs <= cursor {
-			continue
-		}
-
-		if len(entries) >= limit {
-			// We have more entries beyond the limit.
-			hasMore = true
-			break
-		}
-
-		entries = append(entries, SandboxLogEntry{
-			Timestamp: entry.Timestamp,
-			Message:   entry.LogContent,
-			Level:     "info",
-		})
-		nextCursor = tsMs
+// resolveSandboxHostIP returns the node host IP, skipping entries with an empty HostIP.
+func resolveSandboxHostIP(c *gin.Context, sandboxID string) string {
+	ctx := c.Request.Context()
+	if v := localcache.GetSandboxCache(sandboxID); v != nil && v.HostIP != "" {
+		return v.HostIP
 	}
-
-	if err := scanner.Err(); err != nil {
-		return entries, nextCursor, hasMore, err
+	if proxyMap, ok := localcache.GetSandboxProxyMap(ctx, sandboxID); ok && proxyMap.HostIP != "" {
+		return proxyMap.HostIP
 	}
-
-	return entries, nextCursor, hasMore, nil
+	if rec, err := pausesnap.GetBySandbox(ctx, sandboxID); err == nil && rec != nil && rec.NodeIP != "" {
+		return rec.NodeIP
+	}
+	return ""
 }

@@ -43,6 +43,8 @@
     - [ExecCubeSandboxResponse](#cubelet-services-cubebox-v1-ExecCubeSandboxResponse)
     - [GetLocalSnapshotRequest](#cubelet-services-cubebox-v1-GetLocalSnapshotRequest)
     - [GetLocalSnapshotResponse](#cubelet-services-cubebox-v1-GetLocalSnapshotResponse)
+    - [GetSandboxEventsRequest](#cubelet-services-cubebox-v1-GetSandboxEventsRequest)
+    - [GetSandboxEventsResponse](#cubelet-services-cubebox-v1-GetSandboxEventsResponse)
     - [GetStorageMetricsRequest](#cubelet-services-cubebox-v1-GetStorageMetricsRequest)
     - [GetStorageMetricsResponse](#cubelet-services-cubebox-v1-GetStorageMetricsResponse)
     - [GetStorageMetricsResponse.MetricsEntry](#cubelet-services-cubebox-v1-GetStorageMetricsResponse-MetricsEntry)
@@ -85,6 +87,7 @@
     - [RunCubeSandboxResponse](#cubelet-services-cubebox-v1-RunCubeSandboxResponse)
     - [RunCubeSandboxResponse.ExtInfoEntry](#cubelet-services-cubebox-v1-RunCubeSandboxResponse-ExtInfoEntry)
     - [SELinuxOption](#cubelet-services-cubebox-v1-SELinuxOption)
+    - [SandboxEvent](#cubelet-services-cubebox-v1-SandboxEvent)
     - [SandboxPathVolumeSource](#cubelet-services-cubebox-v1-SandboxPathVolumeSource)
     - [SandboxStorageInfo](#cubelet-services-cubebox-v1-SandboxStorageInfo)
     - [StorageOrphanEntry](#cubelet-services-cubebox-v1-StorageOrphanEntry)
@@ -917,6 +920,40 @@ EmptyDirVolumeSource represents an empty directory for a sandbox.
 
 
 
+<a name="cubelet-services-cubebox-v1-GetSandboxEventsRequest"></a>
+
+### GetSandboxEventsRequest
+GetSandboxEventsRequest queries a sandbox&#39;s newest node-local events.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| sandboxID | [string](#string) |  | Sandbox ID whose events should be returned. Required. |
+| limit | [int32](#int32) |  | Limit caps the number of entries returned (default 200, max 1000). |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-GetSandboxEventsResponse"></a>
+
+### GetSandboxEventsResponse
+GetSandboxEventsResponse carries the newest matching events.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  | requestID reqID |
+| ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  | Ret. |
+| events | [SandboxEvent](#cubelet-services-cubebox-v1-SandboxEvent) | repeated | Matching events, oldest first, up to limit entries. |
+
+
+
+
+
+
 <a name="cubelet-services-cubebox-v1-GetStorageMetricsRequest"></a>
 
 ### GetStorageMetricsRequest
@@ -1664,6 +1701,24 @@ SELinuxOption are the labels to be applied to the container.
 
 
 
+<a name="cubelet-services-cubebox-v1-SandboxEvent"></a>
+
+### SandboxEvent
+SandboxEvent is one parsed line from the per-sandbox shim req log.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| timestamp | [string](#string) |  | RFC3339Nano timestamp as written by the shim. |
+| level | [string](#string) |  | Log level. The shim req log does not carry a level, so this is always &#34;info&#34; for now; the field exists for forward compatibility. |
+| message | [string](#string) |  | Raw log content of the shim log line. |
+| module | [string](#string) |  | Module field from the shim log line (e.g. &#34;Shim&#34;). May be empty. |
+
+
+
+
+
+
 <a name="cubelet-services-cubebox-v1-SandboxPathVolumeSource"></a>
 
 ### SandboxPathVolumeSource
@@ -2009,6 +2064,7 @@ Service for handling cubesandbox
 | GetStorageMetrics | [GetStorageMetricsRequest](#cubelet-services-cubebox-v1-GetStorageMetricsRequest) | [GetStorageMetricsResponse](#cubelet-services-cubebox-v1-GetStorageMetricsResponse) | GetStorageMetrics returns node-local cubecow storage metrics. |
 | InspectStorageVolumes | [InspectStorageVolumesRequest](#cubelet-services-cubebox-v1-InspectStorageVolumesRequest) | [InspectStorageVolumesResponse](#cubelet-services-cubebox-v1-InspectStorageVolumesResponse) | InspectStorageVolumes lists every sandbox storage record cubelet owns and re-resolves cubecow device paths so cubecli can render an authoritative view without touching boltdb or the cubecow SDK directly. |
 | CleanupOrphanStorageFiles | [CleanupOrphanStorageFilesRequest](#cubelet-services-cubebox-v1-CleanupOrphanStorageFilesRequest) | [CleanupOrphanStorageFilesResponse](#cubelet-services-cubebox-v1-CleanupOrphanStorageFilesResponse) | CleanupOrphanStorageFiles scans configured emptydir format roots, drops files that have no live sandbox owner, and reports the action taken. |
+| GetSandboxEvents | [GetSandboxEventsRequest](#cubelet-services-cubebox-v1-GetSandboxEventsRequest) | [GetSandboxEventsResponse](#cubelet-services-cubebox-v1-GetSandboxEventsResponse) | GetSandboxEvents returns events from the Cubelet owning the sandbox. |
 
  
 

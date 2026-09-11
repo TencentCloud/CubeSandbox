@@ -35,6 +35,8 @@ const ENV_VAR_NAME_MAX_LEN: usize = 256;
 const ENV_VAR_VALUE_MAX_LEN: usize = 4096;
 const MASK_REQUEST_HOST_MAX_LEN: usize = 512;
 const MASK_REQUEST_HOST_PORT_PLACEHOLDER: &str = "${PORT}";
+/// Matches CubeMaster's maxLogLimit / Cubelet's maxEventLimit.
+const MAX_SANDBOX_LOG_LIMIT: i32 = 1000;
 
 /// Environment variable names that may compromise sandbox isolation if injected
 /// at the runtime level (loader overrides, language runtime paths).
@@ -399,12 +401,12 @@ impl SandboxService {
     pub async fn get_logs(
         &self,
         sandbox_id: &str,
-        start: Option<i64>,
+        _start: Option<i64>,
         limit: i32,
     ) -> AppResult<SandboxLogs> {
         match self
             .cubemaster
-            .get_sandbox_logs(&self.build_logs_request(sandbox_id, start, limit))
+            .get_sandbox_logs(&self.build_logs_request(sandbox_id, limit))
             .await
         {
             Ok(resp) => {
@@ -441,12 +443,13 @@ impl SandboxService {
     pub async fn get_logs_v2(
         &self,
         sandbox_id: &str,
-        cursor: Option<i64>,
         limit: i32,
     ) -> AppResult<SandboxLogsV2Response> {
+        // Cap the upper bound only; limit<=0 is forwarded for the backend default.
+        let limit = limit.min(MAX_SANDBOX_LOG_LIMIT);
         match self
             .cubemaster
-            .get_sandbox_logs(&self.build_logs_request(sandbox_id, cursor, limit))
+            .get_sandbox_logs(&self.build_logs_request(sandbox_id, limit))
             .await
         {
             Ok(resp) => {
@@ -646,15 +649,9 @@ impl SandboxService {
         }
     }
 
-    fn build_logs_request(
-        &self,
-        sandbox_id: &str,
-        cursor: Option<i64>,
-        limit: i32,
-    ) -> SandboxLogsRequest {
+    fn build_logs_request(&self, sandbox_id: &str, limit: i32) -> SandboxLogsRequest {
         SandboxLogsRequest {
             sandbox_id: sandbox_id.to_string(),
-            cursor,
             limit,
         }
     }
