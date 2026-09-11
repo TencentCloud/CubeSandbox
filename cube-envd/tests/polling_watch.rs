@@ -496,10 +496,23 @@ async fn removed_roots_do_not_evict_older_ids_or_healthy_registry_entries() {
         ids.push(json!({"watcherId":created["watcherId"]}));
         std::fs::remove_dir(&root).unwrap();
         cleaned(daemon_pid, inode).await;
-        assert_eq!(
-            rpc(port, "GetWatcherEvents", ids.last().unwrap().clone()).await["events"],
-            json!([{"name":".","type":"EVENT_TYPE_REMOVE"}])
-        );
+        // Kernel cleanup can precede the worker enqueueing DELETE_SELF.
+        let events = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let batch = rpc(port, "GetWatcherEvents", ids.last().unwrap().clone()).await;
+                assert!(batch.get("code").is_none(), "{batch}");
+                if batch["events"]
+                    .as_array()
+                    .is_some_and(|events| !events.is_empty())
+                {
+                    return batch["events"].clone();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("root removal event queued");
+        assert_eq!(events, json!([{"name":".","type":"EVENT_TYPE_REMOVE"}]));
     }
     for id in &ids {
         assert_eq!(rpc(port, "GetWatcherEvents", id.clone()).await, json!({}));

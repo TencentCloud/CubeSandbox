@@ -199,6 +199,49 @@ pub fn write_sandbox_marker(is_sandbox: bool) -> std::io::Result<()> {
 }
 
 impl RuntimeStateStore {
+    pub(crate) fn install_metadata_refresh(&self, refresh: tokio::sync::mpsc::Sender<()>) {
+        if let Ok(mut slot) = self.metadata_refresh.lock() {
+            *slot = Some(refresh);
+        }
+    }
+
+    pub(crate) fn refresh_metadata(&self) {
+        if let Ok(slot) = self.metadata_refresh.lock() {
+            if let Some(refresh) = slot.as_ref() {
+                let _ = refresh.try_send(());
+            }
+        }
+    }
+
+    pub(crate) async fn project_metadata(&self, metadata: &crate::init::metadata::Metadata) {
+        {
+            let mut slot = self.current.write().await;
+            let mut updated = (**slot).clone();
+            updated
+                .environment
+                .insert("E2B_SANDBOX_ID".into(), metadata.sandbox_id.clone());
+            updated
+                .environment
+                .insert("E2B_TEMPLATE_ID".into(), metadata.template_id.clone());
+            if updated.environment != slot.environment {
+                updated.generation = updated.generation.saturating_add(1);
+                *slot = Arc::new(updated);
+            }
+        }
+        for (path, value) in [
+            ("/run/e2b/.E2B_SANDBOX_ID", &metadata.sandbox_id),
+            ("/run/e2b/.E2B_TEMPLATE_ID", &metadata.template_id),
+        ] {
+            if let Err(error) = tokio::fs::write(path, value).await {
+                tracing::warn!(
+                    errno = error.raw_os_error(),
+                    path,
+                    "metadata projection failed"
+                );
+            }
+        }
+    }
+
     pub async fn apply(
         &self,
         request: InitRequest,

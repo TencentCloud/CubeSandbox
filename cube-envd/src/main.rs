@@ -31,7 +31,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Ok(())
         }
         Command::Serve(config) => {
-            telemetry::init(config.log_format);
+            let logs = telemetry::init(config.log_format);
             if let Err(error) = cube_envd::init::write_sandbox_marker(!config.is_not_fc) {
                 tracing::warn!(%error, "could not write sandbox marker");
             }
@@ -50,7 +50,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 },
                 ServerRuntime::default()
                     .with_start_command(config.start_cmd)
-                    .with_cgroup_root(config.cgroup_root),
+                    .with_cgroup_root(config.cgroup_root)
+                    .with_guest_services(logs),
             )
             .await
             .map_err(Into::into)

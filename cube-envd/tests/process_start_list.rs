@@ -117,10 +117,21 @@ async fn direct_argv_start_first_and_live_list_preserve_original_config() {
         processes[0],
         json!({"config":config,"pid":pid,"tag":"original"})
     );
-    assert_eq!(
-        std::fs::read(format!("/proc/{pid}/cmdline")).unwrap(),
-        b"/bin/sleep\x000.3\x00"
-    );
+    // Start publishes the nice wrapper before it execs the requested argv.
+    // Observe that transition (including a transient empty cmdline during exec)
+    // instead of assuming the child has already been scheduled.
+    let cmdline = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap();
+            if !cmdline.is_empty() && !cmdline.starts_with(b"/usr/bin/nice\x00") {
+                return cmdline;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("nice wrapper execs the requested command");
+    assert_eq!(cmdline, b"/bin/sleep\x000.3\x00");
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         while !list(&client, port).await.is_empty() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

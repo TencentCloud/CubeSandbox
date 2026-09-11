@@ -295,6 +295,7 @@ pub struct ServerRuntime {
     critical_tasks: Vec<CriticalTask>,
     start_command: String,
     cgroup_root: String,
+    guest_logs: Option<crate::telemetry::LogReceiver>,
 }
 
 impl ServerRuntime {
@@ -305,7 +306,13 @@ impl ServerRuntime {
             critical_tasks: Vec::new(),
             start_command: String::new(),
             cgroup_root: "/sys/fs/cgroup".into(),
+            guest_logs: None,
         }
+    }
+
+    pub fn with_guest_services(mut self, logs: crate::telemetry::LogReceiver) -> Self {
+        self.guest_logs = Some(logs);
+        self
     }
 
     pub fn with_start_command(mut self, command: String) -> Self {
@@ -474,6 +481,18 @@ pub async fn run_server_with_runtime(
         !config.is_not_fc,
         processes,
     );
+    let socat_cgroup = if runtime.guest_logs.is_some() {
+        Some(
+            app_state
+                .processes
+                .socat_cgroup()
+                .await
+                .map_err(|error| ServerError::Cgroup(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+
     if !runtime.start_command.is_empty() {
         use crate::proto::process::{ProcessConfig, StartRequest};
         // Use the same managed spawn and wait owner as public Start. Dropping
@@ -506,16 +525,14 @@ pub async fn run_server_with_runtime(
     let addr = listener.local_addr()?;
 
     let router: Router = transport::build_router(app_state.clone());
-    let listener = crate::transport::idle::IdleListener::new(
-        listener,
-        crate::transport::idle::HTTP_IDLE_TIMEOUT,
-    );
+    let listener =
+        crate::guest::idle::IdleListener::new(listener, crate::guest::idle::HTTP_IDLE_TIMEOUT);
 
     transition_or_failure(&lifecycle, ServerPhase::Listening).map_err(ServerError::EnvdFailure)?;
     let (shutdown, mut shutdown_requested) = watch::channel(false);
     let mut supervisor = Supervisor::new(lifecycle.clone());
     supervisor.spawn("transport", async move {
-        axum::serve(listener, crate::transport::idle::IdleRouter::new(router))
+        axum::serve(listener, crate::guest::idle::IdleRouter::new(router))
             .with_graceful_shutdown(async move {
                 while !*shutdown_requested.borrow_and_update() {
                     if shutdown_requested.changed().await.is_err() {
@@ -525,6 +542,35 @@ pub async fn run_server_with_runtime(
             })
             .await
     });
+    if let Some(logs) = runtime.guest_logs.take() {
+        if config.is_not_fc {
+            drop(logs);
+        } else {
+            let (metadata_send, metadata_receive) = watch::channel(None);
+            let (refresh_send, refresh_receive) = crate::guest::startup::refresh_channel();
+            app_state.runtime.install_metadata_refresh(refresh_send);
+            supervisor.spawn(
+                "metadata",
+                crate::guest::startup::metadata_service(
+                    app_state.runtime.clone(),
+                    metadata_send,
+                    refresh_receive,
+                    shutdown.subscribe(),
+                ),
+            );
+            supervisor.spawn(
+                "log exporter",
+                crate::guest::startup::log_exporter(logs, metadata_receive, shutdown.subscribe()),
+            );
+        }
+        supervisor.spawn(
+            "port forwarder",
+            crate::guest::port_forward::run(
+                socat_cgroup.expect("guest services cgroup"),
+                shutdown.subscribe(),
+            ),
+        );
+    }
     for task in runtime.critical_tasks {
         supervisor.register(task);
     }

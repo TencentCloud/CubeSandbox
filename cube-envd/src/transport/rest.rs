@@ -21,6 +21,7 @@ pub struct AppState {
     pub runtime: Arc<crate::runtime::RuntimeStateStore>,
     pub filesystem: Arc<crate::filesystem::FilesystemService>,
     pub processes: Arc<crate::process::ProcessManager>,
+    pub(crate) metrics: Arc<crate::guest::metrics::Metrics>,
     pub users: crate::runtime::UserDatabase,
 }
 
@@ -48,6 +49,17 @@ pub async fn health_handler(State(state): State<Arc<AppState>>) -> Response {
             .into_response()
     } else {
         error_response(StatusCode::SERVICE_UNAVAILABLE, "unavailable")
+    }
+}
+
+pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response {
+    let headers = [
+        ("cache-control", "no-store"),
+        ("content-type", "application/json"),
+    ];
+    match state.metrics.sample().await {
+        Ok(sample) => (headers, format!("{sample}\n")).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, headers).into_response(),
     }
 }
 
@@ -134,6 +146,7 @@ pub async fn init_handler(State(state): State<Arc<AppState>>, request: Request<B
         }
         return (error.http_status(), error.public_message().to_owned()).into_response();
     }
+    state.runtime.refresh_metadata();
     (
         StatusCode::NO_CONTENT,
         [

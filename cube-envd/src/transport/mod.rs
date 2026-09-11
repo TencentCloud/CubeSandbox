@@ -8,7 +8,6 @@ pub(crate) mod encoding;
 mod end_message;
 mod framing;
 mod grpc;
-pub(crate) mod idle;
 mod json;
 mod json_error;
 pub mod limits;
@@ -87,6 +86,12 @@ pub fn build_router_with_connect(state: Arc<AppState>, connect: ConnectRouter) -
         .route(
             "/envs",
             axum::routing::get(rest::envs_handler)
+                .head(health_method_not_allowed)
+                .fallback(health_method_not_allowed),
+        )
+        .route(
+            "/metrics",
+            axum::routing::get(rest::metrics_handler)
                 .head(health_method_not_allowed)
                 .fallback(health_method_not_allowed),
         )
@@ -208,5 +213,6 @@ pub(crate) fn new_server_state_with_processes(
         processes,
         filesystem,
         users: crate::runtime::UserDatabase::system(),
+        metrics: Arc::new(crate::guest::metrics::Metrics::default()),
     })
 }

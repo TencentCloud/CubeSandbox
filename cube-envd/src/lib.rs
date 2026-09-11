@@ -11,6 +11,7 @@ pub mod cli;
 pub mod conformance;
 pub mod error;
 pub mod filesystem;
+mod guest;
 pub mod init;
 pub mod process;
 pub mod runtime;

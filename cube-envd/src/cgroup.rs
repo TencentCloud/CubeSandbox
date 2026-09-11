@@ -13,6 +13,7 @@ use crate::error::DomainError;
 #[derive(Clone, Copy)]
 pub(crate) enum ProcessClass {
     Pty,
+    Socat,
     User,
 }
 
@@ -42,6 +43,7 @@ impl Drop for CgroupDirectory {
 
 struct CgroupSet {
     ptys: Arc<ProcessCgroup>,
+    socats: Arc<ProcessCgroup>,
     user: Arc<ProcessCgroup>,
 }
 
@@ -49,6 +51,7 @@ impl CgroupSet {
     fn get(&self, class: ProcessClass) -> Arc<ProcessCgroup> {
         match class {
             ProcessClass::Pty => self.ptys.clone(),
+            ProcessClass::Socat => self.socats.clone(),
             ProcessClass::User => self.user.clone(),
         }
     }
@@ -86,6 +89,16 @@ impl CgroupManager {
         self.acquire_inner(class, deadline)
             .await
             .map_err(|_| DomainError::Internal)
+    }
+
+    pub(crate) async fn group(
+        &self,
+        class: ProcessClass,
+    ) -> Result<Arc<ProcessCgroup>, CgroupError> {
+        let mut lease = self.acquire_inner(class, None).await?;
+        let group = lease.group.clone();
+        lease.commit();
+        Ok(group)
     }
 
     async fn acquire_inner(
@@ -181,6 +194,15 @@ fn prepare(root: &Path) -> Result<CgroupSet, CgroupError> {
             ("memory.max", available.to_string()),
         ],
     )?;
+    let socats = create(
+        root,
+        "socats",
+        &[
+            ("cpu.weight", "150".into()),
+            ("memory.min", (5 * 1024 * 1024).to_string()),
+            ("memory.low", (8 * 1024 * 1024).to_string()),
+        ],
+    )?;
     let user = create(
         root,
         "user",
@@ -192,6 +214,7 @@ fn prepare(root: &Path) -> Result<CgroupSet, CgroupError> {
     )?;
     Ok(CgroupSet {
         ptys: Arc::new(ptys),
+        socats: Arc::new(socats),
         user: Arc::new(user),
     })
 }
