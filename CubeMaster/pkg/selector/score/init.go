@@ -134,3 +134,13 @@ var scores = map[string]scoreRegistration{
 		new: func() Selector { return NewBinpackScore() },
 	},
 }
+
+// RegisteredScoreNames returns the live score registry keys for cross-package
+// drift checks against config.AllowedSchedulerScoreNames().
+func RegisteredScoreNames() map[string]struct{} {
+	out := make(map[string]struct{}, len(scores))
+	for name := range scores {
+		out[name] = struct{}{}
+	}
+	return out
+}
