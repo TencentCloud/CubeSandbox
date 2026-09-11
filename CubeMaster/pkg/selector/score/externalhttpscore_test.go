@@ -415,6 +415,29 @@ func TestExternalHTTPScoreTimesOut(t *testing.T) {
 	if err == nil {
 		t.Fatal("Select() error = nil, want timeout error")
 	}
+	if strings.Contains(err.Error(), server.URL) {
+		t.Fatalf("Select() error leaked endpoint URL: %q", err)
+	}
+}
+
+func TestExternalHTTPScoreSelectReturnsSanitizedTransportError(t *testing.T) {
+	const sentinel = "secret-token-should-not-leak"
+	endpoint := "http://127.0.0.1:1/score?token=" + sentinel
+	_, err := newExternalHTTPScoreWithConfig(&config.ExternalHTTPScore{
+		Weight:   float64Ptr(1),
+		Endpoint: endpoint,
+		Timeout:  50 * time.Millisecond,
+	}).Select(externalHTTPScoreTestCtx())
+	if err == nil {
+		t.Fatal("Select() error = nil, want transport failure")
+	}
+	got := err.Error()
+	if strings.Contains(got, sentinel) || strings.Contains(got, "token=") || strings.Contains(got, endpoint) {
+		t.Fatalf("Select() error leaked endpoint material: %q", got)
+	}
+	if !strings.HasPrefix(got, "http_") {
+		t.Fatalf("Select() error = %q, want sanitized http_* category", got)
+	}
 }
 
 func TestExternalHTTPScoreSkipsWhenEndpointEmpty(t *testing.T) {

@@ -539,17 +539,21 @@ func requestExternalHTTPScores(ctx context.Context, endpoint string, timeout tim
 
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, err
+		// Marshal failures are internal and should not carry endpoint text, but
+		// sanitize anyway so Select never returns raw transport/URL material.
+		return nil, errors.New(sanitizeExternalHTTPScoreFailure(err))
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return nil, err
+		// *url.Error embeds the request URL (query included); never return it.
+		return nil, errors.New(sanitizeExternalHTTPScoreFailure(err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := externalHTTPScoreHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		// Same as NewRequest: strip endpoint/userinfo/query from the returned error.
+		return nil, errors.New(sanitizeExternalHTTPScoreFailure(err))
 	}
 	defer resp.Body.Close()
 
@@ -561,7 +565,7 @@ func requestExternalHTTPScores(ctx context.Context, endpoint string, timeout tim
 	limited := io.LimitReader(resp.Body, int64(maxExternalHTTPScoreResponseBytes)+1)
 	body, err := io.ReadAll(limited)
 	if err != nil {
-		return nil, err
+		return nil, errors.New(sanitizeExternalHTTPScoreFailure(err))
 	}
 	if len(body) > maxExternalHTTPScoreResponseBytes {
 		drainExternalHTTPScoreResponseBody(resp.Body)
