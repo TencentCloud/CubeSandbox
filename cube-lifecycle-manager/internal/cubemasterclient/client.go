@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -64,8 +65,9 @@ const (
 // non-success ret_code. Callers can errors.As-extract it to react to
 // specific conditions (e.g. "sandbox already paused" → treat as success).
 type APIError struct {
-	RetCode int
-	RetMsg  string
+	RetCode         int
+	RetMsg          string
+	ResumeCompleted bool
 }
 
 func (e *APIError) Error() string {
@@ -78,6 +80,28 @@ func (e *APIError) Error() string {
 func (e *APIError) IsNotFound() bool {
 	return e != nil && e.RetCode == RetCodeInvalidParamFormat
 }
+
+// IsPauseSuperseded means Master rejected a queued auto-pause after a resume
+// changed the shared state. It is not a successful pause.
+func (e *APIError) IsPauseSuperseded() bool {
+	return e != nil && e.RetCode == retCodeConflict && e.RetMsg == pauseSupersededMessage
+}
+
+// Wire contract mirrored from CubeMaster's ErrorCode_Conflict and
+// pkg/service/sandbox/sandbox_lifecycle_state.go. Keep both sides and their
+// literal contract tests in sync: the code also represents lock contention,
+// so the message is part of the protocol, not freely editable display text.
+const (
+	retCodeConflict        = 130409
+	pauseSupersededMessage = "auto-pause superseded by lifecycle state change"
+)
+
+// Info status values mirror ContainerState in
+// pkgs/proto/services/cubebox/v1/cubebox.proto without importing the proto module.
+const (
+	statusRunning = 1 // CONTAINER_RUNNING
+	statusPaused  = 5 // CONTAINER_PAUSED
+)
 
 // alreadyHasPauseSnapshotMarker is the pausesnap.Begin message CubeMaster
 // wraps as 130400. Other 130400 Begin failures must not be treated as success.
@@ -112,14 +136,16 @@ func New(baseURL string, timeout time.Duration) *Client {
 
 // updateRequest mirrors CubeMaster pkg/service/sandbox/types.UpdateRequest.
 type updateRequest struct {
-	RequestID    string `json:"requestID"`
-	SandboxID    string `json:"sandbox_id"`
-	InstanceType string `json:"instance_type"`
-	Action       string `json:"action"` // "pause" | "resume"
+	RequestID              string `json:"requestID"`
+	SandboxID              string `json:"sandbox_id"`
+	InstanceType           string `json:"instance_type"`
+	Action                 string `json:"action"` // "pause" | "resume"
+	ExpectedLifecycleState string `json:"expected_lifecycle_state,omitempty"`
 }
 
 type updateResponse struct {
-	Ret struct {
+	ResumeCompleted bool `json:"resume_completed"`
+	Ret             struct {
 		RetCode int    `json:"ret_code"`
 		RetMsg  string `json:"ret_msg"`
 	} `json:"ret"`
@@ -133,12 +159,12 @@ type killRequest struct {
 	KillReason   string `json:"kill_reason,omitempty"`
 }
 
-// Pause asks CubeMaster to pause the given sandbox. instanceType is required
-// by the master; for the cubebox runtime that's "cubebox".
+// Pause asks CubeMaster to auto-pause the given sandbox. The caller must first
+// acquire CLM's pausing marker; Master revalidates it under the lifecycle lock.
+// instanceType is required; for the cubebox runtime that's "cubebox".
 //
-// Returns nil on success or when the sandbox is already paused. Returns an
-// *APIError for any non-success ret_code; use APIError.IsNotFound /
-// IsAlreadyInState to classify.
+// Returns nil on success, or an *APIError for any non-success ret_code; use
+// IsNotFound, IsAlreadyInState, or IsPauseSuperseded to classify it.
 func (c *Client) Pause(ctx context.Context, sandboxID, instanceType string) error {
 	return c.update(ctx, sandboxID, instanceType, "pause")
 }
@@ -147,6 +173,49 @@ func (c *Client) Pause(ctx context.Context, sandboxID, instanceType string) erro
 // as Pause.
 func (c *Client) Resume(ctx context.Context, sandboxID, instanceType string) error {
 	return c.update(ctx, sandboxID, instanceType, "resume")
+}
+
+// SandboxState provides an authoritative fallback when a reconciliation task
+// outlives the short-lived Redis state marker.
+func (c *Client) SandboxState(ctx context.Context, sandboxID, instanceType string) (string, error) {
+	query := url.Values{"sandbox_id": {sandboxID}, "instance_type": {instanceType}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/cube/sandbox/info?"+query.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.httpc.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return "", fmt.Errorf("sandbox state: http %d", resp.StatusCode)
+	}
+	var body struct {
+		updateResponse
+		Data []struct {
+			SandboxID string `json:"sandbox_id"`
+			Status    int    `json:"status"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return "", err
+	}
+	if body.Ret.RetCode != RetCodeSuccess {
+		return "", &APIError{RetCode: body.Ret.RetCode, RetMsg: body.Ret.RetMsg}
+	}
+	for _, item := range body.Data {
+		if item.SandboxID != sandboxID {
+			continue
+		}
+		switch item.Status {
+		case statusRunning:
+			return "running", nil
+		case statusPaused:
+			return "paused", nil
+		}
+	}
+	return "", errors.New("sandbox has no confirmed running/paused state")
 }
 
 // Kill asks CubeMaster to destroy the given sandbox.
@@ -202,11 +271,16 @@ func (c *Client) update(ctx context.Context, sandboxID, instanceType, action str
 		return errors.New("sandbox_id and instance_type are required")
 	}
 
+	var expectedState string
+	if action == "pause" {
+		expectedState = "pausing"
+	}
 	body, err := json.Marshal(updateRequest{
-		RequestID:    uuid.NewString(),
-		SandboxID:    sandboxID,
-		InstanceType: instanceType,
-		Action:       action,
+		RequestID:              uuid.NewString(),
+		SandboxID:              sandboxID,
+		InstanceType:           instanceType,
+		Action:                 action,
+		ExpectedLifecycleState: expectedState,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
@@ -240,5 +314,5 @@ func (c *Client) update(ctx context.Context, sandboxID, instanceType, action str
 	if ur.Ret.RetCode == RetCodeSuccess {
 		return nil
 	}
-	return &APIError{RetCode: ur.Ret.RetCode, RetMsg: ur.Ret.RetMsg}
+	return &APIError{RetCode: ur.Ret.RetCode, RetMsg: ur.Ret.RetMsg, ResumeCompleted: action == "resume" && ur.ResumeCompleted}
 }

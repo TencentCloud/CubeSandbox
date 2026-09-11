@@ -26,10 +26,12 @@
 //     The CLM reconciles Redis state key + CubeProxy state dict so
 //     externally driven pause/resume calls do not desync the fleet.
 //
-// State keys (cube:v1:shared:sandbox:lifecycle:state:<id>) remain
-// exclusively written by the CLM — CubeMaster only signals intent
-// via the stream. This preserves the SETNX-based transition-lock semantics
-// (pausing / resuming) owned by the CLM's sweeper and resumer.
+// State keys (cube:v1:shared:sandbox:lifecycle:state:<id>) are normally written
+// by CLM, which owns transition markers and terminal-state reconciliation.
+// Exception: after restore, CubeMaster writes a 60s running marker under the
+// sandbox lifecycle lock, before publishing the running event and unlocking.
+// This invalidates queued auto-pauses; CLM must CAS its pausing -> paused write
+// and reconcile when the newer running marker supersedes its transition.
 package lifecycle
 
 import "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/rediskey"

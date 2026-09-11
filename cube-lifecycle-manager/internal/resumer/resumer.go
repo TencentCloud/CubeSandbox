@@ -110,6 +110,7 @@ func (r *Resumer) Resume(ctx context.Context, sandboxID string) error {
 
 func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 	start := time.Now()
+	var completionErr error
 	entry := r.o.Registry.Get(sandboxID)
 	if entry == nil {
 		return errors.New("sandbox not in registry")
@@ -142,7 +143,11 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 			return errors.New("auto_resume not enabled for sandbox")
 		}
 		if err := r.callCubeMasterResume(ctx, sandboxID, entry.Meta.InstanceType); err != nil {
-			return err
+			var apiErr *cubemasterclient.APIError
+			if !errors.As(err, &apiErr) || !apiErr.ResumeCompleted {
+				return err
+			}
+			completionErr = err // Restore completed; still perform all bookkeeping.
 		}
 	case errors.Is(ownErr, errAlreadyRunning):
 		// Sandbox is already running per Redis. Skip the RPC and run the
@@ -192,7 +197,7 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 	r.o.Log.Info("auto-resumed sandbox",
 		zap.String("sandbox_id", sandboxID),
 		zap.Duration("duration", time.Since(start)))
-	return nil
+	return completionErr
 }
 
 func (r *Resumer) pushRunningState(sandboxID string) {
@@ -224,8 +229,9 @@ func (r *Resumer) pushRunningState(sandboxID string) {
 // callCubeMasterResume issues the resume RPC and maps the three classes
 // of CubeMaster response (success / not-found / already-running / real
 // failure) onto the appropriate caller-side cleanup. Returns nil when the
-// caller should proceed to the success-bookkeeping path; non-nil when the
-// caller should bail with an error.
+// caller should proceed to the success-bookkeeping path. A ResumeCompleted
+// APIError also requires bookkeeping, followed by returning the original error;
+// other errors stop the operation.
 func (r *Resumer) callCubeMasterResume(ctx context.Context, sandboxID, instanceType string) error {
 	resumeErr := r.o.CubeMaster.Resume(ctx, sandboxID, instanceType)
 	if resumeErr == nil {
@@ -233,6 +239,10 @@ func (r *Resumer) callCubeMasterResume(ctx context.Context, sandboxID, instanceT
 	}
 	var apiErr *cubemasterclient.APIError
 	switch {
+	case errors.As(resumeErr, &apiErr) && apiErr.ResumeCompleted:
+		// Do not clear ownership as if the VM were still paused. The caller
+		// refreshes activity and state, but preserves the partial-failure error.
+		return apiErr
 	case errors.As(resumeErr, &apiErr) && apiErr.IsNotFound():
 		// CubeMaster doesn't know this sandbox anymore — deleted out
 		// from under us. Evict everywhere and surface as an error to

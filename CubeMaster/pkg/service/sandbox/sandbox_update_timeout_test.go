@@ -7,6 +7,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/agiledragon/gomonkey/v2"
@@ -192,6 +193,28 @@ func TestUpdateResumeSucceedsWhenTimeoutProviderFails(t *testing.T) {
 	}
 	if !provider.called {
 		t.Fatal("expected RefreshTimeout to be attempted")
+	}
+}
+
+func TestUpdateCompletedResumeStillPublishesTimeoutOnSyncFailure(t *testing.T) {
+	const sid = "sb-resume-sync-pending"
+	localcache.SetSandboxCache(sid, &localcache.SandboxCache{SandboxID: sid, HostIP: "127.0.0.1"})
+	defer localcache.DeleteSandboxCache(sid)
+	provider := &mockTimeoutProvider{}
+	SetTimeoutProvider(provider)
+	defer SetTimeoutProvider(nil)
+	for _, timeout := range []int{300, types.NeverTimeout} {
+		t.Run(fmt.Sprint(timeout), func(t *testing.T) {
+			provider.called = false
+			stubResumeUpdate(t, &types.Res{ResumeCompleted: true, Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterInternalError), RetMsg: "resume completed; Redis synchronization failed"}})
+			rsp := Update(context.Background(), resumeTimeoutReq(sid, timeout))
+			if !rsp.ResumeCompleted || rsp.Ret.RetCode != int(errorcode.ErrorCode_MasterInternalError) {
+				t.Fatal("partial success was lost or incorrectly reported as full success")
+			}
+			if !provider.called || provider.lastTimeoutSeconds != timeout {
+				t.Fatal("completed restore lost timeout update")
+			}
+		})
 	}
 }
 

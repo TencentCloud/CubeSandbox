@@ -7,6 +7,8 @@ package sweeper
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +19,70 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/registry"
 )
+
+type slowRetryPush struct {
+	*fakePush
+	calls int
+}
+
+func (p *slowRetryPush) SetState(ctx context.Context, sid, state string) error {
+	if strings.HasPrefix(sid, "notify-") {
+		p.calls++
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return p.fakePush.SetState(ctx, sid, state)
+}
+
+type slowRepairStore struct {
+	stateStore
+	calls int
+}
+
+func (s *slowRepairStore) GetState(ctx context.Context, sid string) (string, bool, error) {
+	if strings.HasPrefix(sid, "repair-") {
+		s.calls++
+		<-ctx.Done()
+		return "", false, ctx.Err()
+	}
+	return s.stateStore.GetState(ctx, sid)
+}
+
+func TestSlowRetryBacklogLeavesTimeForIdleScan(t *testing.T) {
+	reg, store, push := registry.New(), newFakeStore(), newFakePush()
+	now := time.Now()
+	master := &fakeMaster{}
+	s := newTestSweeper(reg, store, master, push, now)
+	slowPush := &slowRetryPush{fakePush: push}
+	slowStore := &slowRepairStore{stateStore: store}
+	s.o.ProxyPush, s.o.Redis = slowPush, slowStore
+	for i := 0; i < 4; i++ {
+		for _, prefix := range []string{"notify-", "repair-"} {
+			sid := fmt.Sprintf("%s%d", prefix, i)
+			reg.Upsert(lifecycle.SandboxLifecycleMeta{SandboxID: sid, CreatedAt: now.UnixMilli()})
+			reg.SetRuntimeState(sid, "paused")
+			if prefix == "notify-" {
+				s.notifications[sid] = struct{}{}
+			} else {
+				s.pending[sid] = struct{}{}
+			}
+		}
+	}
+	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{SandboxID: "idle", InstanceType: "cubebox", AutoPause: true}, now.Add(-time.Hour).UnixMilli())
+	s.sweepOnce(context.Background())
+	// A deadline-consuming retry must stop its queue, while both queues and
+	// the idle scan still get a turn. Count attempts instead of wall-clock
+	// timing so this remains stable on slow CI machines.
+	if slowPush.calls != 1 || slowStore.calls != 1 {
+		t.Fatalf("unbounded or starved retry queue: notifications=%d repairs=%d", slowPush.calls, slowStore.calls)
+	}
+	if len(s.notifications) != 4 || len(s.pending) != 4 {
+		t.Fatal("unfinished retry tasks were lost")
+	}
+	if len(master.calls) != 1 || master.calls[0] != "idle" {
+		t.Fatalf("idle scan did not pause the unrelated sandbox: %v", master.calls)
+	}
+}
 
 // fakeStore implements stateStore. It uses simple maps; lock contention isn't
 // the focus of these tests, atomicity of state transitions is.
@@ -76,6 +142,16 @@ func (f *fakeStore) WriteState(ctx context.Context, sid, state string, ttl time.
 	return f.SetState(ctx, sid, state, ttl)
 }
 
+func (f *fakeStore) WriteStateCAS(_ context.Context, sid, expected, state string, _ time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.states[sid] != expected {
+		return false, nil
+	}
+	f.states[sid] = state
+	return true, nil
+}
+
 func (f *fakeStore) ClearStateNotify(ctx context.Context, sid string) error {
 	return f.ClearState(ctx, sid)
 }
@@ -90,6 +166,7 @@ func (f *fakeStore) state(sid string) string {
 // The same struct serves both paths so a single sweeper can drive either; the
 // pause-* tests assert on `calls`, the kill-* tests on `killCalls`.
 type fakeMaster struct {
+	state     string
 	mu        sync.Mutex
 	calls     []string
 	failNext  bool
@@ -99,6 +176,13 @@ type fakeMaster struct {
 	killReasons  []string
 	failNextKill bool
 	failKillErr  error
+}
+
+func (f *fakeMaster) SandboxState(context.Context, string, string) (string, error) {
+	if f.state == "" {
+		return "running", nil
+	}
+	return f.state, nil
 }
 
 func (f *fakeMaster) Pause(_ context.Context, sid, _ string) error {
@@ -135,6 +219,150 @@ type fakePush struct {
 
 func newFakePush() *fakePush {
 	return &fakePush{pushed: make(map[string][]string)}
+}
+
+type resumeDuringPausePush struct {
+	*fakePush
+	store *fakeStore
+}
+
+func (p resumeDuringPausePush) SetState(ctx context.Context, sid, state string) error {
+	if state == "pausing" || state == "paused" {
+		// Master resumes either while the pause RPC is queued or before its
+		// successful result is reconciled by CLM.
+		_ = p.store.SetState(ctx, sid, "running", time.Minute)
+	}
+	return p.fakePush.SetState(ctx, sid, state)
+}
+
+func TestResumeSupersedesQueuedPauseAndLateBookkeeping(t *testing.T) {
+	for _, superseded := range []bool{true, false} {
+		reg, store, push := registry.New(), newFakeStore(), newFakePush()
+		reg.Upsert(lifecycle.SandboxLifecycleMeta{SandboxID: "sbx", InstanceType: "cubebox", AutoPause: true})
+		master := &fakeMaster{}
+		if superseded {
+			master.failNext = true
+			master.failError = &cubemasterclient.APIError{RetCode: 130409, RetMsg: "auto-pause superseded by lifecycle state change"}
+		}
+		now := time.Now()
+		s := newTestSweeper(reg, store, master, push, now)
+		s.o.ProxyPush = resumeDuringPausePush{push, store}
+		if err := s.tryPause(context.Background(), *reg.Get("sbx")); err != nil {
+			t.Fatal(err)
+		}
+		entry := reg.Get("sbx")
+		if store.state("sbx") != "running" || entry.RuntimeState != "running" || entry.LastActiveMs != now.UnixMilli() {
+			t.Fatalf("stale pause overwrote resume: superseded=%v entry=%+v state=%s", superseded, entry, store.state("sbx"))
+		}
+		states := push.states("sbx")
+		if states[len(states)-1] != "running" {
+			t.Fatalf("proxy retained stale pause: %v", states)
+		}
+		triggered, _ := s.Stats()
+		if triggered != 0 {
+			t.Fatal("superseded pause counted as auto-paused")
+		}
+	}
+}
+
+type flakyReconcileStore struct {
+	stateStore
+	casFailures, readFailures int
+}
+
+func (f *flakyReconcileStore) WriteStateCAS(ctx context.Context, sid, expected, state string, ttl time.Duration) (bool, error) {
+	if f.casFailures > 0 {
+		f.casFailures--
+		return false, errors.New("CAS unavailable")
+	}
+	return f.stateStore.WriteStateCAS(ctx, sid, expected, state, ttl)
+}
+
+func (f *flakyReconcileStore) GetState(ctx context.Context, sid string) (string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	if f.readFailures > 0 {
+		f.readFailures--
+		return "", false, errors.New("GET unavailable")
+	}
+	return f.stateStore.GetState(ctx, sid)
+}
+
+type flakyRunningPush struct {
+	*fakePush
+	failures  int
+	allStates bool
+}
+
+func (p *flakyRunningPush) SetState(ctx context.Context, sid, state string) error {
+	if (state == "running" || p.allStates) && p.failures > 0 {
+		p.failures--
+		return errors.New("proxy unavailable")
+	}
+	return p.fakePush.SetState(ctx, sid, state)
+}
+
+func TestPauseCASFailureRetriedBeforeParkedSkip(t *testing.T) {
+	reg, store, push := registry.New(), newFakeStore(), newFakePush()
+	now := time.Now()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{SandboxID: "sbx", InstanceType: "cubebox", AutoPause: true, CreatedAt: now.Add(-time.Hour).UnixMilli()})
+	// The running event has already been consumed, so there is no later event
+	// available to repair an obsolete paused write after a failed CAS.
+	reg.SetRuntimeState("sbx", "running")
+	reg.MergeLastActive("sbx", now.UnixMilli())
+	master := &fakeMaster{state: "running"}
+	s := newTestSweeper(reg, store, master, push, now)
+	flaky := &flakyReconcileStore{stateStore: store, casFailures: 1}
+	s.o.Redis = flaky
+	s.o.ProxyPush = resumeDuringPausePush{push, store}
+	if err := s.tryPause(context.Background(), *reg.Get("sbx")); err == nil {
+		t.Fatal("expected CAS error")
+	}
+	if reg.Get("sbx").RuntimeState != "paused" || len(s.pending) != 1 {
+		t.Fatal("failed paused write was not retained for repair")
+	}
+	flaky.readFailures = 1
+	s.sweepOnce(context.Background())
+	if len(s.pending) != 1 {
+		t.Fatal("lost repair after Redis read failure")
+	}
+	// An unresolved repair outlives the Redis key: query Master for a
+	// confirmed terminal state before repairing the Registry.
+	_ = store.ClearState(context.Background(), "sbx")
+	s.o.ProxyPush = &flakyRunningPush{fakePush: push, failures: 1}
+	s.sweepOnce(context.Background())
+	if len(s.pending) != 0 || len(s.notifications) != 1 {
+		t.Fatal("notification failure must not retain lifecycle repair")
+	}
+	// Notification retries use the already repaired Registry after expiry,
+	// without recreating a Redis ownership marker.
+	_ = store.ClearState(context.Background(), "sbx")
+	s.sweepOnce(context.Background())
+	if len(s.pending) != 0 || len(s.notifications) != 0 || reg.Get("sbx").RuntimeState != "running" || store.state("sbx") != "" {
+		t.Fatal("repair did not converge")
+	}
+	states := push.states("sbx")
+	if states[len(states)-1] != "running" || len(master.calls) != 1 {
+		t.Fatalf("repair issued another pause or left proxy stale: %v", states)
+	}
+}
+
+func TestPauseReconciliationUsesFreshContext(t *testing.T) {
+	reg, store, push := registry.New(), newFakeStore(), newFakePush()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{SandboxID: "sbx", InstanceType: "cubebox"})
+	_ = store.SetState(context.Background(), "sbx", "running", time.Minute)
+	s := newTestSweeper(reg, store, &fakeMaster{}, push, time.Now())
+	s.o.Redis = &flakyReconcileStore{stateStore: store}
+	s.pending["sbx"] = struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.reconcileSupersededPause(ctx, "sbx"); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.pending) != 0 {
+		t.Fatal("expired action context prevented repair")
+	}
 }
 
 func (f *fakePush) SetState(_ context.Context, sid, state string) error {
@@ -907,5 +1135,64 @@ func TestSweeper_AlreadyPausedReconcilesAsSuccess(t *testing.T) {
 	if triggered != 1 || failed != 0 {
 		t.Fatalf("already-paused should count as triggered, not failed: triggered=%d failed=%d",
 			triggered, failed)
+	}
+}
+
+// Failed notifications must neither refresh activity nor prevent a later
+// timeout action, and must send the new paused state when delivery recovers.
+func TestNotificationOutageDoesNotExtendIdleTimeout(t *testing.T) {
+	ctx := context.Background()
+	reg, store, push := registry.New(), newFakeStore(), newFakePush()
+	now := time.Now()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{SandboxID: "sbx", InstanceType: "cubebox", AutoPause: true, CreatedAt: now.Add(-time.Hour).UnixMilli()})
+	reg.SetRuntimeState("sbx", "paused")
+	_ = store.SetState(ctx, "sbx", "running", time.Minute)
+	master := &fakeMaster{}
+	s := newTestSweeper(reg, store, master, push, now)
+	s.o.Now = func() time.Time { return now }
+	s.o.ProxyPush = &flakyRunningPush{fakePush: push, failures: 100, allStates: true}
+	s.pending["sbx"] = struct{}{}
+	s.sweepOnce(ctx)
+	resumedAt := reg.Get("sbx").LastActiveMs
+	if len(s.pending) != 0 || len(s.notifications) != 1 || resumedAt != now.UnixMilli() {
+		t.Fatal("running repair did not finish independently of notification")
+	}
+	_ = store.ClearState(ctx, "sbx") // simulate TTL expiry
+	for i := 0; i < 4; i++ {
+		now = now.Add(time.Minute)
+		s.sweepOnce(ctx)
+		if reg.Get("sbx").LastActiveMs != resumedAt || len(master.calls) != 0 || store.state("sbx") != "" {
+			t.Fatal("notification retry changed activity or ownership")
+		}
+	}
+	now = now.Add(2 * time.Minute)
+	s.sweepOnce(ctx)
+	if len(master.calls) != 1 || reg.Get("sbx").RuntimeState != "paused" || len(s.notifications) != 1 || len(s.pending) != 0 {
+		t.Fatal("notification outage prevented idle pause or retained lifecycle repair")
+	}
+	s.o.ProxyPush = push
+	s.sweepOnce(ctx)
+	states := push.states("sbx")
+	if states[len(states)-1] != "paused" || reg.Get("sbx").LastActiveMs != resumedAt {
+		t.Fatalf("stale running notification replayed: %v", states)
+	}
+}
+
+func TestReconciliationDoesNotRefreshAlreadyAppliedResume(t *testing.T) {
+	ctx := context.Background()
+	reg, store, push := registry.New(), newFakeStore(), newFakePush()
+	now := time.Now()
+	active := now.Add(-time.Minute).UnixMilli()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{SandboxID: "sbx"})
+	reg.SetRuntimeState("sbx", "running")
+	reg.MergeLastActive("sbx", active)
+	_ = store.SetState(ctx, "sbx", "running", time.Minute)
+	s := newTestSweeper(reg, store, &fakeMaster{}, push, now)
+	s.pending["sbx"] = struct{}{}
+	if err := s.reconcileSupersededPause(ctx, "sbx"); err != nil {
+		t.Fatal(err)
+	}
+	if reg.Get("sbx").LastActiveMs != active {
+		t.Fatal("already applied resume was counted as new activity")
 	}
 }

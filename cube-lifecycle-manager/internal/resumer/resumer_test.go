@@ -225,6 +225,33 @@ func newTestResumer(reg *registry.Registry, store *fakeStore, master *fakeMaster
 	})
 }
 
+func TestCompletedResumeErrorStillRefreshesStateAndActivity(t *testing.T) {
+	reg := registry.New()
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{SandboxID: "sbx", InstanceType: "cubebox", AutoResume: true})
+	reg.SetRuntimeState("sbx", "paused")
+	store, push := newFakeStore(), &fakePush{}
+	partial := &cubemasterclient.APIError{RetCode: 130500, RetMsg: "running synchronization failed", ResumeCompleted: true}
+	master := &fakeMaster{failNext: true, failError: partial}
+	r := newTestResumer(reg, store, master, push)
+	before := time.Now().UnixMilli()
+	// No running event will be replayed: it was skipped while resuming.
+	err := r.Resume(context.Background(), "sbx")
+	if !errors.Is(err, partial) {
+		t.Fatalf("partial error lost: %v", err)
+	}
+	entry := reg.Get("sbx")
+	if store.state("sbx") != "running" || entry.RuntimeState != "running" || entry.LastActiveMs < before {
+		t.Fatalf("completed resume was rolled back: %+v state=%s", entry, store.state("sbx"))
+	}
+	if !pollUntil(time.Second, func() bool {
+		push.mu.Lock()
+		defer push.mu.Unlock()
+		return len(push.pushed) > 0 && push.pushed[len(push.pushed)-1] == "running"
+	}) {
+		t.Fatal("proxy not reconciled")
+	}
+}
+
 func TestResumer_HappyPath(t *testing.T) {
 	reg := registry.New()
 	reg.Upsert(lifecycle.SandboxLifecycleMeta{
