@@ -1080,9 +1080,9 @@ func defaultNodes(count int) []simNode {
 		{ID: "node-c", CPUMilli: 6000, MemMB: 12288, MaxSandboxes: 16, WarmTemplates: map[string]bool{"data-notebook": true}},
 		{ID: "node-d", CPUMilli: 8000, MemMB: 16384, MaxSandboxes: 20, WarmTemplates: map[string]bool{"gpu-build": true, "data-notebook": true}},
 	}
-	// Precondition: count must already be in [MinNodeCount, MaxNodeCount].
-	// Invalid input returns nil so Run's length check fails closed instead of
-	// silently rewriting the requested node set.
+	// Prefer len(base) over MaxNodeCount so a mismatched constant cannot
+	// index past the hard-coded topology. MaxNodeCount must stay equal to
+	// len(base); TestMaxNodeCountMatchesDefaultTopology pins that.
 	if count < MinNodeCount || count > len(base) {
 		return nil
 	}

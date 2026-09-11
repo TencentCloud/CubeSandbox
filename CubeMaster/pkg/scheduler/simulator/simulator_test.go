@@ -882,6 +882,17 @@ func TestNodeCountContractLibraryAndEffectiveSet(t *testing.T) {
 	}
 }
 
+func TestMaxNodeCountMatchesDefaultTopology(t *testing.T) {
+	nodes := defaultNodes(MaxNodeCount)
+	if len(nodes) != MaxNodeCount {
+		t.Fatalf("defaultNodes(MaxNodeCount=%d) len = %d, want %d so MaxNodeCount stays tied to the hard-coded topology",
+			MaxNodeCount, len(nodes), MaxNodeCount)
+	}
+	if got := defaultNodes(MaxNodeCount + 1); got != nil {
+		t.Fatalf("defaultNodes(MaxNodeCount+1) = %v nodes, want nil", len(got))
+	}
+}
+
 func TestDefaultConfigRunIDMatchesDocumentedDigest(t *testing.T) {
 	// Pins the published example in docs/dev/scheduler-benchmark-report-schema.md
 	// (and its ZH mirror): DefaultConfig + unknown provenance.

@@ -40,11 +40,11 @@ profiles, source provenance, and metric schema in both reports. `--nodes`
 accepts only **1–4**. An explicit CLI `--nodes 0` is rejected, and `--seed 0`
 is invalid because zero is reserved as the library unset sentinel.
 
-Source provenance first uses complete `vcs.revision` and `vcs.modified`
-settings from Go build information. If those are unavailable, the CLI runs
-bounded, read-only `git rev-parse HEAD` and porcelain status commands. If no
-revision can be found, the report records `git_revision: "unknown"` and
-`git_dirty: null`; this cannot distinguish code versions.
+Source provenance uses `vcs.revision` when present and `vcs.modified` when it
+is exactly `true`/`false`. The bounded git fallback runs only when no revision
+stamp is usable. A known revision with unknown dirty state is reported as
+`git_dirty: null` (and that null participates in `run_id`). If no revision can
+be found, the report records `git_revision: "unknown"` and `git_dirty: null`.
 
 Use `--verify` to check the default report's structure and internal consistency
 before writing it:

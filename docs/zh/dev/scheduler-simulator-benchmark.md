@@ -33,11 +33,11 @@ go run ./cmd/schedulerbench --out ./schedulerbench-report
 源码 provenance 与指标 schema。`--nodes` 仅接受 **1–4**；CLI 显式
 `--nodes 0` 会被拒绝。`--seed 0` 也非法，因为零是库侧未设置哨兵值。
 
-源码 provenance 优先使用 Go build info 中完整的 `vcs.revision` 与
-`vcs.modified` 设置；不可用时，CLI 执行有超时限制的只读
-`git rev-parse HEAD` 和 porcelain status 命令。如果 revision 仍不可得，
-报告记录 `git_revision: "unknown"` 与 `git_dirty: null`，此状态无法区分
-不同代码版本。
+源码 provenance 在存在 `vcs.revision` 时使用它，并在 `vcs.modified` 恰好为
+`true`/`false` 时记录 dirty 状态。仅当没有可用 revision stamp 时，才回退到有
+超时限制的只读 `git rev-parse HEAD` / porcelain status。已知 revision 但 dirty
+未知时报告 `git_dirty: null`（且该 null 参与 `run_id`）。若 revision 仍不可得，
+报告记录 `git_revision: "unknown"` 与 `git_dirty: null`。
 
 使用 `--verify` 可在写文件前检查默认报告的结构与内部一致性：
 

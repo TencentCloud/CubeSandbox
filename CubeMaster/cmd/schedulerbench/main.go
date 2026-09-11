@@ -50,7 +50,7 @@ func runCLIWithProvenance(args []string, stdout, stderr io.Writer, resolve prove
 	var (
 		outDir    = flags.String("out", "schedulerbench-report", "directory for report.json and report.md")
 		seed      = flags.Int64("seed", defaultConfig.Seed, "deterministic seed recorded in the report; currently varies only the burst_short_lived template sequence (other default workloads are fixed). Must be non-zero because 0 is reserved as the library unset sentinel")
-		nodeCount = flags.Int("nodes", defaultConfig.NodeCount, "simulated node count (1-4)")
+		nodeCount = flags.Int("nodes", defaultConfig.NodeCount, fmt.Sprintf("simulated node count (%d-%d)", simulator.MinNodeCount, simulator.MaxNodeCount))
 		profiles  = flags.String("profiles", strings.Join(defaultConfig.Profiles, ","), "comma-separated profile list")
 		workloads = flags.String("workloads", strings.Join(defaultConfig.Workloads, ","), "comma-separated workload list")
 		format    = flags.String("format", defaultFormat, "report format: json, markdown, or both; unselected report.json/report.md files already present in --out are deleted (paths are printed when removed)")
