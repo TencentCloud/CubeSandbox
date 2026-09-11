@@ -3021,7 +3021,7 @@ SPDK_RPC_REGISTER("rcow_get_build_info", rpc_rcow_get_build_info,
  * rcow_get_bdev         report the host device path it landed on
  *
  * Placement is derived rather than chosen by the caller: the subsystem is
- * crc32c(name) % RCOW_NUM_SUBSYS and the nsid is the lowest free slot in it.
+ * crc32c(name) % RCOW_NUM_SUBSYS and the nsid is the longest-idle free slot.
  * Both can be overridden, which is what recovery does -- it has to reproduce the
  * previous layout exactly rather than let it be recomputed.
  * ========================================================================== */
