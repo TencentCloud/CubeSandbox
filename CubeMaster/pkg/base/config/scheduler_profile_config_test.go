@@ -481,7 +481,6 @@ func TestInit_UserProfileRequiredPluginConfigFailsFast(t *testing.T) {
 		"multi_factor_weighted_average",
 		"affinity_score",
 		"image_score",
-		"binpack_score",
 	} {
 		t.Run(scorer, func(t *testing.T) {
 			yamlBody := fmt.Sprintf(`common: {}
@@ -498,13 +497,27 @@ scheduler:
 			assert.Error(t, err)
 			assert.Contains(t, err.Error(), "plugin_conf."+scorer)
 			assert.Contains(t, err.Error(), "is missing")
-			// Factor/affinity fail in validateListedScorerPluginConfPresent;
-			// binpack (exempt there) still fails via Profile-scoped validation.
-			if scorer == "binpack_score" {
-				assert.Contains(t, err.Error(), "missing_plugin")
-			}
 		})
 	}
+}
+
+func TestInit_UserProfileBinpackMayOmitPluginConf(t *testing.T) {
+	// Consistent with empty-Profile: binpack_score may omit plugin_conf and
+	// use runtime defaults. Built-in presets still inject when the pointer is nil.
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: user_binpack
+  profiles:
+    user_binpack:
+      score:
+        enable_scorers:
+          - binpack_score
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"binpack_score"}, got.Scheduler.Score.EnableScorers)
+	assert.Nil(t, got.Scheduler.Score.ScorePluginConf.BinpackScore)
 }
 
 func TestInit_DirectEnabledScorerMissingPluginConfigAllowedWithoutProfile(t *testing.T) {

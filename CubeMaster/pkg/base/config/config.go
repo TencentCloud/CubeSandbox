@@ -1310,10 +1310,14 @@ func applySchedulerProfile(s *SchedulerConf) error {
 			s.Filter = &SchedulerFilterConf{}
 		}
 		s.Filter.EnableFilters = append([]string(nil), profile.Filter.EnableFilters...)
-		if builtin {
-			dropped := filterNamesOnlyIn(previous, s.Filter.EnableFilters)
-			CubeLog.Warnf("scheduler builtin profile %q replaced enable_filters: previous=%v new=%v dropped=%v",
-				s.Profile, previous, s.Filter.EnableFilters, dropped)
+		dropped := filterNamesOnlyIn(previous, s.Filter.EnableFilters)
+		if len(dropped) > 0 {
+			kind := "user"
+			if builtin {
+				kind = "builtin"
+			}
+			CubeLog.Warnf("scheduler %s profile %q replaced enable_filters: previous=%v new=%v dropped=%v",
+				kind, s.Profile, previous, s.Filter.EnableFilters, dropped)
 		}
 	}
 
@@ -1510,6 +1514,16 @@ func validateSchedulerScorePluginConfig(s *SchedulerConf) error {
 		return err
 	}
 	for _, name := range s.Score.EnableScorers {
+		// binpack_score may omit plugin_conf and use runtime defaults on both
+		// empty-Profile and user-Profile paths (built-ins still inject when nil).
+		if name == "binpack_score" {
+			disabled := scorerPluginExplicitlyDisabled(s, name)
+			if builtin && disabled {
+				return fmt.Errorf("scheduler profile %q enables %q but plugin_conf.%s is explicitly disabled (disable=true or weight=0)",
+					s.Profile, name, name)
+			}
+			continue
+		}
 		missing, known := scorerPluginConfMissing(s, name)
 		if !known {
 			// Allowlist / effective-selector validation rejects unknown names
