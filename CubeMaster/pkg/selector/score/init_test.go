@@ -225,14 +225,14 @@ scheduler:
 	}
 }
 
-func TestEmptyProfileMissingFactorPluginConfSkipsWithoutPanic(t *testing.T) {
-	// Empty-profile compatibility: listing a factor scorer without plugin_conf
-	// must not panic during NewSelector. It warns and skips so placement falls
-	// back to remaining scorers / equal-weight random rather than crashing.
+func TestEmptyProfileMissingFactorPluginConfFailsAtInit(t *testing.T) {
+	// Empty-profile fail-closed: listing a factor scorer without plugin_conf
+	// must fail config.Init (master panicked in NewSelector for the same case).
 	if runIsolatedScoreConfigTest(t) {
 		return
 	}
-	initSelectorTestConfig(t, `common: {}
+	path := filepath.Join(t.TempDir(), "cubemaster.yaml")
+	yamlBody := `common: {}
 log: {}
 scheduler:
   score:
@@ -244,11 +244,15 @@ scheduler:
     plugin_conf:
       binpack_score:
         weight: 1
-`)
-
-	selectors := NewSelector(context.Background())
-	if len(selectors) != 1 || selectors[0].ID() != constants.SelectorScoreID+"/binpack_score" {
-		t.Fatalf("selectors = %v, want only binpack_score (realtime skipped)", selectorIDs(selectors))
+`
+	if err := os.WriteFile(path, []byte(yamlBody), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("CUBE_MASTER_CONFIG_PATH", path)
+	if _, err := config.Init(); err == nil {
+		t.Fatal("config.Init() error = nil, want missing plugin_conf failure")
+	} else if !strings.Contains(err.Error(), "plugin_conf.real_time_weighted_average is missing") {
+		t.Fatalf("config.Init() error = %v, want missing realtime plugin_conf", err)
 	}
 }
 

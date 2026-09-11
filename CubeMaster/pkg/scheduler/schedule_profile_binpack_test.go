@@ -172,9 +172,10 @@ const isolatedSchedulerConfigTestEnv = "CUBEMASTER_ISOLATED_SCHEDULER_CONFIG_TES
 // pointer, including the original nil state.
 //
 // Constraints / CI caveats:
-//   - The child is exec'd as os.Args[0] with only -test.run / -test.count; parent
-//     flags such as -test.timeout, -test.shuffle, and -test.v are intentionally
-//     not forwarded.
+//   - The child is exec'd via CommandContext(t.Context()) as os.Args[0] with
+//     only -test.run / -test.count; parent flags such as -test.timeout,
+//     -test.shuffle, and -test.v are intentionally not forwarded (the context
+//     still cancels the child when the parent test ends).
 //   - os.Args[0] must be a directly runnable test binary (breaks under some
 //     -exec wrappers or restricted CI sandboxes that replace the runner).
 //   - Each isolated test roughly doubles wall time versus an in-process call.
@@ -191,7 +192,8 @@ func runIsolatedSchedulerConfigTest(t *testing.T) bool {
 		}
 	})
 
-	cmd := exec.Command(
+	cmd := exec.CommandContext(
+		t.Context(),
 		os.Args[0],
 		"-test.run=^"+regexp.QuoteMeta(t.Name())+"$",
 		"-test.count=1",

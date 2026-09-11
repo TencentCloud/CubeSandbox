@@ -1134,13 +1134,22 @@ func preHandleScheduler(config *Config) error {
 		return err
 	}
 	// Negative plugin weights invert ranking in runScoreFilter; reject for every
-	// registered scorer that has an explicit plugin_conf block.
+	// registered scorer that has an explicit plugin_conf block. This is not
+	// Profile-scoped: master would load the config, but negative weights invert
+	// placement, so Init fails after upgrade (document in operator guides).
 	if err := validateSchedulerScorerPluginWeights(&config.Scheduler.SchedulerConf); err != nil {
 		return err
 	}
-	// Strict scorer validation is Profile-scoped so empty-profile legacy
-	// configs keep pre-upgrade load behavior (ineffective factor scorers stay
-	// runtime no-ops rather than Init failures).
+	// Listed factor/affinity scorers without plugin_conf used to panic in
+	// NewSelector on master. Fail at config load instead of warn-and-skip so the
+	// empty-profile path stays fail-closed. binpack_score may omit plugin_conf
+	// and use runtime defaults.
+	if err := validateListedScorerPluginConfPresent(&config.Scheduler.SchedulerConf); err != nil {
+		return err
+	}
+	// Strict factor/disable validation remains Profile-scoped so empty-profile
+	// configs with a present-but-ineffective plugin_conf block keep pre-upgrade
+	// load behavior (runtime Errorf + skip rather than Init failure).
 	if config.Scheduler.Profile != "" {
 		if err := validateEffectiveSchedulerSelectors(&config.Scheduler.SchedulerConf); err != nil {
 			return err
@@ -1431,6 +1440,41 @@ func validateSchedulerScorerPluginWeights(s *SchedulerConf) error {
 	if c := pc.ImageScore; c != nil {
 		if err := check("image_score", c.Weight); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// validateListedScorerPluginConfPresent rejects enable_scorers entries whose
+// required plugin_conf block is missing. binpack_score is exempt: omitting its
+// block keeps runtime defaults (same as NewBinpackScore). This runs for empty
+// and non-empty Profile so a typo cannot silently disable the score phase.
+func validateListedScorerPluginConfPresent(s *SchedulerConf) error {
+	if s == nil || s.Score == nil {
+		return nil
+	}
+	for _, name := range s.Score.EnableScorers {
+		if name == "binpack_score" {
+			continue
+		}
+		missing := false
+		switch name {
+		case "real_time_weighted_average":
+			missing = s.Score.ScorePluginConf.RealTimeWeightedAverage == nil
+		case "multi_factor_weighted_average":
+			missing = s.Score.ScorePluginConf.MultiFactorWeightedAverage == nil
+		case "affinity_score":
+			missing = s.Score.ScorePluginConf.AffinityScore == nil
+		case "image_score":
+			missing = s.Score.ScorePluginConf.ImageScore == nil
+		default:
+			// Unknown names are handled by validateEffectiveSchedulerSelectors
+			// under Profile; empty-profile still warns/skips at NewSelector.
+			continue
+		}
+		if missing {
+			return fmt.Errorf("scheduler.score.enable_scorers lists %q but scheduler.score.plugin_conf.%s is missing",
+				name, name)
 		}
 	}
 	return nil
