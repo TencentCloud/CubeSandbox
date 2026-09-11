@@ -105,6 +105,76 @@ Match fields (all optional, AND'd together):
 A request must match every present field; absent fields are
 wildcarded.
 
+Before an allow rule with `host` or `sni` is proxied, CubeEgress
+resolves the presented identity from the proxy side and verifies that
+the transparent proxy's original destination IP is one of the DNS A
+records for that identity. This blocks forged-name flows such as:
+
+```bash
+curl --resolve bypass.blob.core.windows.net:80:203.0.113.66 \
+  http://bypass.blob.core.windows.net/
+```
+
+Even if a policy allows `*.blob.core.windows.net`, the request above is
+denied unless proxy-side DNS for `bypass.blob.core.windows.net` returns
+`203.0.113.66`. The same check runs for TLS SNI based allow rules before
+the upstream connection is attempted; HTTPS certificate verification
+remains an additional upstream authenticity check, not the only guard.
+DNS-auth failures return 403 and write a `security_event` reason such as
+`g5_dst_ip_not_in_dns` with `dns_auth` details in the audit record.
+
+This check applies to traffic steered into CubeEgress. CubeVS first classifies
+the original IP/port: traffic rejected there never reaches this check, and
+ordinary SNAT flows do not enter the L7 proxy.
+
+By default CubeEgress reads resolver addresses from its own
+`/etc/resolv.conf`. Operators can override them with
+`CUBE_EGRESS_DNS_RESOLVER_ADDRS` (comma or whitespace separated IPv4
+addresses, optionally with `:port`).
+
+Use trusted resolvers reachable from the proxy container, with the same DNS
+view as the sandbox. An invalid explicit resolver setting fails closed; reload
+workers after changing resolver configuration. Resolution uses asynchronous
+OpenResty cosockets, not a shell process, guest `/etc/hosts`, NSS or DNS search
+suffixes. The current data plane and this check support IPv4 only.
+
+Only A records owned by the queried name or its validated CNAME chain are
+accepted. Chains are limited to five aliases and the whole lookup to five
+seconds. Each worker permits at most 16 active DNS lookups and shares an active
+lookup among at most 256 overlapping requests for the same name. A timer owns
+the lookup so client disconnection cannot strand its slot. Positive results are
+cached across workers for the shortest A/CNAME TTL, capped at 300 seconds with
+lookup time deducted; zero-TTL results are not cached. Cache hits do not issue
+DNS queries. Failures and saturation return 403; they never fall through to a
+later allow rule. In-flight coalescing is per worker, so simultaneous cold
+misses in different workers can still issue one query each.
+
+For HTTPS rules constrained by `host`, Host and SNI must also name the same
+domain (`g5_host_sni_mismatch` otherwise). This applies even without credential
+injection: the HTTPS proxy uses SNI for both upstream TLS and its forwarded
+Host header. SNI-only rules continue to authorize that upstream identity.
+Rules with neither `host` nor `sni` retain their existing behavior.
+
+The proxy keeps the original destination IP and port. Replacing them with a
+newly resolved address would require reapplying the destination's L4/CIDR
+policy. This choice can reject legitimate CDN or split-DNS requests when guest
+and proxy receive different address sets, including during DNS rotation.
+DNS membership is not a certificate, tenant-ownership or private-IP check:
+shared hosting and attacker-controlled domains inside an allowed wildcard
+remain within that wildcard's authority. Keep upstream TLS verification and
+the appropriate destination restrictions enabled.
+
+Run `make -C CubeEgress test-lua` and `make -C CubeEgress test-dns-integration`
+for repository verification. The integration suite requires Docker, Python 3
+and host `openssl`; override image sources with `OPENRESTY_TEST_IMAGE`,
+`PYTHON_TEST_IMAGE` and `CURL_TEST_IMAGE`. It exercises production access/audit
+modules and proxy locations with real DNS, TLS, curl `/etc/hosts` and
+`--resolve` overrides, TTL and concurrency checks. Policy storage and
+certificate issuance are fixtures; direct sockets replace TPROXY and backends
+use different ports. It does not verify a deployed guest, CubeVS/eBPF
+interception or the patched production image. Reproduce the old behavior with
+`python3 CubeEgress/tests/dns_auth_integration.py --baseline-ref <pre-fix-ref>`.
+
 ### Custom L7 ports
 
 By default a rule intercepts the classic `{80/http, 443/https}`
