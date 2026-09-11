@@ -225,3 +225,32 @@ fn parse_user(
         home: PathBuf::from(&fields[5]),
     })
 }
+
+impl UserDatabase {
+    pub(crate) fn resolve_file_user(
+        &self,
+        username: &str,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<ProcessUser, DomainError> {
+        if !valid_username(username) {
+            return Err(DomainError::InvalidArgument("invalid target user".into()));
+        }
+        let passwd =
+            std::fs::read_to_string(&self.passwd_path).map_err(|_| DomainError::Internal)?;
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(DomainError::Cancelled);
+        }
+        let fields = passwd
+            .lines()
+            .find(|line| {
+                line.split_once(':')
+                    .is_some_and(|(name, _)| name == username)
+            })
+            .ok_or(DomainError::Unauthenticated)?
+            .split(':')
+            .map(str::to_owned)
+            .collect();
+        let database = std::fs::read_to_string("/etc/group").map_err(|_| DomainError::Internal)?;
+        parse_user(username, fields, &database)
+    }
+}

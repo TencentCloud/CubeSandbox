@@ -434,3 +434,280 @@ impl ProcessRpc for ProcessConnectService {
         connectrpc::Response::ok(Default::default())
     }
 }
+
+use crate::proto::filesystem::{Filesystem as FilesystemRpc, WatchDirRequest, WatchDirResponse};
+
+fn legacy_entry(
+    ctx: &RequestContext,
+    entry: crate::proto::filesystem::EntryInfo,
+) -> crate::proto::filesystem::EntryInfo {
+    if ctx
+        .headers()
+        .get("user-agent")
+        .is_some_and(|value| value == "connect-python")
+    {
+        crate::proto::filesystem::EntryInfo {
+            name: entry.name,
+            path: entry.path,
+            r#type: entry.r#type,
+            ..Default::default()
+        }
+    } else {
+        entry
+    }
+}
+
+fn legacy_ok<T>(ctx: &RequestContext, value: T) -> ServiceResult<T> {
+    let mut response = connectrpc::Response::new(value);
+    if ctx
+        .headers()
+        .get("user-agent")
+        .is_some_and(|value| value == "connect-python")
+    {
+        response = response.with_header("x-e2b-legacy-sdk", "true");
+    }
+    Ok(response)
+}
+
+pub struct FilesystemConnectService(pub std::sync::Arc<super::rest::AppState>);
+
+#[allow(refining_impl_trait)]
+impl FilesystemRpc for FilesystemConnectService {
+    async fn stat(
+        &self,
+        ctx: RequestContext,
+        req: ServiceRequest<'_, crate::proto::filesystem::StatRequest>,
+    ) -> ServiceResult<crate::proto::filesystem::StatResponse> {
+        let snapshot = self.0.runtime.snapshot().await;
+        let entry = self
+            .0
+            .filesystem
+            .stat(
+                req.to_owned_message().path,
+                ctx.headers(),
+                snapshot,
+                self.0.users.clone(),
+            )
+            .await
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        legacy_ok(
+            &ctx,
+            crate::proto::filesystem::StatResponse {
+                entry: legacy_entry(&ctx, entry).into(),
+                ..Default::default()
+            },
+        )
+    }
+
+    async fn make_dir(
+        &self,
+        ctx: RequestContext,
+        req: ServiceRequest<'_, crate::proto::filesystem::MakeDirRequest>,
+    ) -> ServiceResult<crate::proto::filesystem::MakeDirResponse> {
+        let snapshot = self.0.runtime.snapshot().await;
+        let entry = self
+            .0
+            .filesystem
+            .make_dir(
+                req.to_owned_message().path,
+                ctx.headers(),
+                snapshot,
+                self.0.users.clone(),
+            )
+            .await
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        legacy_ok(
+            &ctx,
+            crate::proto::filesystem::MakeDirResponse {
+                entry: legacy_entry(&ctx, entry).into(),
+                ..Default::default()
+            },
+        )
+    }
+
+    async fn r#move(
+        &self,
+        ctx: RequestContext,
+        req: ServiceRequest<'_, crate::proto::filesystem::MoveRequest>,
+    ) -> ServiceResult<crate::proto::filesystem::MoveResponse> {
+        let snapshot = self.0.runtime.snapshot().await;
+        let request = req.to_owned_message();
+        let entry = self
+            .0
+            .filesystem
+            .move_entry(
+                request.source,
+                request.destination,
+                ctx.headers(),
+                snapshot,
+                self.0.users.clone(),
+            )
+            .await
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        legacy_ok(
+            &ctx,
+            crate::proto::filesystem::MoveResponse {
+                entry: legacy_entry(&ctx, entry).into(),
+                ..Default::default()
+            },
+        )
+    }
+
+    async fn list_dir(
+        &self,
+        ctx: RequestContext,
+        req: ServiceRequest<'_, crate::proto::filesystem::ListDirRequest>,
+    ) -> ServiceResult<crate::proto::filesystem::ListDirResponse> {
+        let snapshot = self.0.runtime.snapshot().await;
+        let request = req.to_owned_message();
+        let entries = self
+            .0
+            .filesystem
+            .list_dir(
+                request.path,
+                request.depth,
+                ctx.headers(),
+                snapshot,
+                self.0.users.clone(),
+            )
+            .await
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        legacy_ok(
+            &ctx,
+            crate::proto::filesystem::ListDirResponse {
+                entries: entries
+                    .into_iter()
+                    .map(|entry| legacy_entry(&ctx, entry))
+                    .collect(),
+                ..Default::default()
+            },
+        )
+    }
+
+    async fn remove(
+        &self,
+        ctx: RequestContext,
+        req: ServiceRequest<'_, crate::proto::filesystem::RemoveRequest>,
+    ) -> ServiceResult<crate::proto::filesystem::RemoveResponse> {
+        let snapshot = self.0.runtime.snapshot().await;
+        self.0
+            .filesystem
+            .remove(
+                req.to_owned_message().path,
+                ctx.headers(),
+                snapshot,
+                self.0.users.clone(),
+            )
+            .await
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        legacy_ok(&ctx, Default::default())
+    }
+
+    async fn watch_dir(
+        &self,
+        ctx: RequestContext,
+        req: ServiceRequest<'_, WatchDirRequest>,
+    ) -> ServiceResult<connectrpc::ServiceStream<WatchDirResponse>> {
+        let interval = crate::process::output::keepalive(ctx.headers())
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        let snapshot = self.0.runtime.snapshot().await;
+        let subscription = self
+            .0
+            .filesystem
+            .watch_dir(
+                req.to_owned_message(),
+                ctx.headers(),
+                snapshot,
+                self.0.users.clone(),
+                self.0.lifecycle.clone(),
+            )
+            .await
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        connectrpc::Response::ok(subscription.stream(interval))
+    }
+
+    async fn create_watcher(
+        &self,
+        ctx: RequestContext,
+        req: ServiceRequest<'_, crate::proto::filesystem::CreateWatcherRequest>,
+    ) -> ServiceResult<crate::proto::filesystem::CreateWatcherResponse> {
+        let snapshot = self.0.runtime.snapshot().await;
+        let watcher_id = self
+            .0
+            .filesystem
+            .create_watcher(
+                req.to_owned_message(),
+                ctx.headers(),
+                snapshot,
+                self.0.users.clone(),
+                self.0.lifecycle.clone(),
+            )
+            .await
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        #[cfg(test)]
+        let _attempt = crate::filesystem::snapshot_test::attempt_at(
+            "WatcherCreateResponse",
+            ctx.headers()
+                .get("x-snapshot-test-tag")
+                .and_then(|value| value.to_str().ok()),
+        );
+        #[cfg(test)]
+        crate::filesystem::snapshot_test::barrier(
+            "WatcherPublished",
+            ctx.headers()
+                .get("x-snapshot-test-tag")
+                .and_then(|value| value.to_str().ok()),
+        )
+        .await
+        .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        legacy_ok(
+            &ctx,
+            crate::proto::filesystem::CreateWatcherResponse {
+                watcher_id,
+                ..Default::default()
+            },
+        )
+    }
+
+    async fn get_watcher_events(
+        &self,
+        ctx: RequestContext,
+        req: ServiceRequest<'_, crate::proto::filesystem::GetWatcherEventsRequest>,
+    ) -> ServiceResult<crate::proto::filesystem::GetWatcherEventsResponse> {
+        let response = self
+            .0
+            .filesystem
+            .get_watcher_events(&req.to_owned_message().watcher_id)
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        #[cfg(test)]
+        let _attempt = crate::filesystem::snapshot_test::attempt_at(
+            "WatcherGet",
+            ctx.headers()
+                .get("x-snapshot-test-tag")
+                .and_then(|value| value.to_str().ok()),
+        );
+        #[cfg(test)]
+        crate::filesystem::snapshot_test::barrier(
+            "WatcherDrained",
+            ctx.headers()
+                .get("x-snapshot-test-tag")
+                .and_then(|value| value.to_str().ok()),
+        )
+        .await
+        .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        legacy_ok(&ctx, response)
+    }
+
+    async fn remove_watcher(
+        &self,
+        ctx: RequestContext,
+        req: ServiceRequest<'_, crate::proto::filesystem::RemoveWatcherRequest>,
+    ) -> ServiceResult<crate::proto::filesystem::RemoveWatcherResponse> {
+        self.0
+            .filesystem
+            .remove_watcher(&req.to_owned_message().watcher_id)
+            .await
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        legacy_ok(&ctx, Default::default())
+    }
+}
