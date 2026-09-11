@@ -206,7 +206,7 @@ func TestRunScoreFilterZeroWeightStillSelects(t *testing.T) {
 	}
 }
 
-func TestRunScoreFilterSkipsNonFiniteWeight(t *testing.T) {
+func TestRunScoreFilterSkipsNonFiniteWeightBlend(t *testing.T) {
 	origPostScore := scheduler.postScore
 	defer func() {
 		scheduler.postScore = origPostScore
@@ -218,7 +218,12 @@ func TestRunScoreFilterSkipsNonFiniteWeight(t *testing.T) {
 	selCtx.Ctx = context.Background()
 	selCtx.SetNodes(node.NodeList{nodeA})
 
-	nan := &countingSelectSelector{weight: math.NaN()}
+	nan := &countingSelectSelector{
+		weight: math.NaN(),
+		scores: node.NodeScoreList{
+			{InsID: "node-a", Score: 99, MvmNum: nodeA.MvmNum, OrigNode: nodeA},
+		},
+	}
 	active := testScoreSelector{
 		weight: 1,
 		scores: node.NodeScoreList{
@@ -228,8 +233,10 @@ func TestRunScoreFilterSkipsNonFiniteWeight(t *testing.T) {
 	if err := runScoreFilter(selCtx, []sscore.Selector{nan, active}); err != nil {
 		t.Fatalf("runScoreFilter() error = %v, want nil", err)
 	}
-	if nan.selects != 0 {
-		t.Fatalf("NaN-weight Select calls = %d, want 0", nan.selects)
+	// Select still runs so live-config scorers can emit their own observability;
+	// the NaN weight must not enter the blend.
+	if nan.selects != 1 {
+		t.Fatalf("NaN-weight Select calls = %d, want 1", nan.selects)
 	}
 	got := selCtx.LeastScoreNodes(-1)
 	if got.Len() != 1 || got[0].Score != 50 {

@@ -296,8 +296,17 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		logExternalHTTPScoreFailure(ctx, err)
 		return nil, err
 	}
-	if l.Disable() || strings.TrimSpace(cfg.Endpoint) == "" {
+	if l.Disable() {
 		return nil, nil
+	}
+	if strings.TrimSpace(cfg.Endpoint) == "" {
+		// Present block with empty endpoint is the common typo / staged-rollout
+		// footgun (yaml.v3 also ignores unknown keys like "endpont"). Keep
+		// disable:true silent (explicit intent); empty endpoint must be
+		// observable like plugin_conf_absent.
+		err = fmt.Errorf("external_http_score: endpoint is empty")
+		logExternalHTTPScoreFailure(ctx, err)
+		return nil, err
 	}
 	if err := validateExternalHTTPScoreConfig(cfg); err != nil {
 		// Hot-reload can introduce a bad endpoint/timeout after startup; fail
@@ -407,6 +416,8 @@ func classifyExternalHTTPScoreMessage(msg string) string {
 		return "external_http_score invalid_timeout"
 	case strings.HasPrefix(msg, "external_http_score: weight"):
 		return "external_http_score invalid_weight"
+	case strings.HasPrefix(msg, "external_http_score: endpoint is empty"):
+		return "external_http_score empty_endpoint"
 	case strings.HasPrefix(msg, "external_http_score: invalid endpoint"):
 		return "external_http_score invalid_endpoint"
 	case strings.HasPrefix(msg, "external_http_score:"):

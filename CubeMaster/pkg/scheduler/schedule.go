@@ -195,17 +195,19 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 		// (reshaping the candidate set for LeastRandomSelect). Skipping on
 		// omitted/zero float64 weights would change image_score / affinity_score
 		// / etc. external_http_score skips its HTTP round-trip inside Select.
+		//
+		// Still call Select for NaN/Inf/negative so live-config scorers can emit
+		// their own invalid_weight observability; only refuse to blend those
+		// weights so they cannot poison totalPluginWeight or node scores.
 		w := f.Weight()
-		// NaN/Inf/negative must not poison totalPluginWeight or node scores;
-		// w <= 0 is false for NaN, so reject non-finite / negative explicitly.
-		if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 {
-			continue
-		}
 		tmpResult, err := f.Select(selCtx)
 		if err != nil {
 			continue
 		}
 		if len(tmpResult) == 0 {
+			continue
+		}
+		if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 {
 			continue
 		}
 		totalPluginWeight += w

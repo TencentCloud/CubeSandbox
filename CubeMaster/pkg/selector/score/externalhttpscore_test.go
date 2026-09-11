@@ -460,20 +460,6 @@ func TestSanitizeExternalHTTPScoreFailureIdempotentForTransport(t *testing.T) {
 	}
 }
 
-func TestExternalHTTPScoreSkipsWhenEndpointEmpty(t *testing.T) {
-	got, err := newExternalHTTPScoreWithConfig(&config.ExternalHTTPScore{
-		Weight:   float64Ptr(1),
-		Endpoint: "",
-		Timeout:  time.Second,
-	}).Select(externalHTTPScoreTestCtx())
-	if err != nil {
-		t.Fatalf("Select() error = %v, want nil", err)
-	}
-	if got != nil {
-		t.Fatalf("Select() = %+v, want nil scores", got)
-	}
-}
-
 func TestExternalHTTPScoreSelectTrimsEndpointWhitespace(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(externalHTTPScoreResponse{
@@ -605,6 +591,32 @@ func TestExternalHTTPScoreMissingPluginConfIsObservable(t *testing.T) {
 	}
 	if cat := sanitizeExternalHTTPScoreFailure(err); cat != "external_http_score plugin_conf_absent" {
 		t.Fatalf("category = %q, want plugin_conf_absent", cat)
+	}
+	if externalHTTPScoreWarnCount.Load() != 1 {
+		t.Fatalf("warn count = %d, want 1", externalHTTPScoreWarnCount.Load())
+	}
+}
+
+func TestExternalHTTPScoreEmptyEndpointIsObservable(t *testing.T) {
+	resetExternalHTTPScoreFailureLogStateForTest()
+	t.Cleanup(resetExternalHTTPScoreFailureLogStateForTest)
+
+	scorer := newExternalHTTPScoreWithConfig(&config.ExternalHTTPScore{
+		Weight:   float64Ptr(1),
+		Endpoint: "   ",
+	})
+	if scorer.Disable() {
+		t.Fatal("Disable() = true for empty endpoint, want false")
+	}
+	got, err := scorer.Select(externalHTTPScoreTestCtx())
+	if err == nil {
+		t.Fatal("Select() error = nil, want empty endpoint")
+	}
+	if got != nil {
+		t.Fatalf("Select() = %+v, want nil", got)
+	}
+	if cat := sanitizeExternalHTTPScoreFailure(err); cat != "external_http_score empty_endpoint" {
+		t.Fatalf("category = %q, want empty_endpoint", cat)
 	}
 	if externalHTTPScoreWarnCount.Load() != 1 {
 		t.Fatalf("warn count = %d, want 1", externalHTTPScoreWarnCount.Load())
@@ -947,6 +959,11 @@ func TestSanitizeExternalHTTPScoreFailureOmitsEndpointSecrets(t *testing.T) {
 			name:      "plugin conf absent",
 			err:       errors.New("external_http_score plugin_conf absent token=" + sentinel),
 			wantExact: "external_http_score plugin_conf_absent",
+		},
+		{
+			name:      "empty endpoint with secret suffix",
+			err:       errors.New("external_http_score: endpoint is empty token=" + sentinel),
+			wantExact: "external_http_score empty_endpoint",
 		},
 		{
 			name:      "invalid score with secret suffix",
