@@ -116,6 +116,45 @@ func TestRunScoreFilterSkipsFailedScorers(t *testing.T) {
 	}
 }
 
+func TestRunScoreFilterUsesWeightOncePerScorer(t *testing.T) {
+	origPostScore := scheduler.postScore
+	defer func() {
+		scheduler.postScore = origPostScore
+	}()
+	scheduler.postScore = nil
+
+	nodeA := &node.Node{InsID: "node-a", MvmNum: 1}
+	nodeB := &node.Node{InsID: "node-b", MvmNum: 2}
+	selCtx := selctx.New("random")
+	selCtx.Ctx = context.Background()
+	selCtx.SetNodes(node.NodeList{nodeA, nodeB})
+
+	changing := &changingWeightSelector{
+		weights: []float64{1, 100, 100}, // first for divisor, rest would poison node scores if re-read
+		scores: node.NodeScoreList{
+			{InsID: "node-a", Score: 10, MvmNum: nodeA.MvmNum, OrigNode: nodeA},
+			{InsID: "node-b", Score: 90, MvmNum: nodeB.MvmNum, OrigNode: nodeB},
+		},
+	}
+	if err := runScoreFilter(selCtx, []sscore.Selector{changing}); err != nil {
+		t.Fatalf("runScoreFilter() error = %v, want nil", err)
+	}
+	if changing.calls != 1 {
+		t.Fatalf("Weight() calls = %d, want 1", changing.calls)
+	}
+	got := selCtx.LeastScoreNodes(-1)
+	if got.Len() != 2 {
+		t.Fatalf("len(score nodes) = %d, want 2", got.Len())
+	}
+	// With a single weight=1 read: scores stay 90 and 10 after / totalPluginWeight.
+	if got[0].ID() != "node-b" || got[0].Score != 90 {
+		t.Fatalf("highest score = %+v, want node-b=90 (stable weight=1)", got[0])
+	}
+	if got[1].ID() != "node-a" || got[1].Score != 10 {
+		t.Fatalf("lowest score = %+v, want node-a=10 (stable weight=1)", got[1])
+	}
+}
+
 type testScoreSelector struct {
 	weight  float64
 	disable bool
@@ -138,3 +177,28 @@ func (s testScoreSelector) Weight() float64 {
 func (s testScoreSelector) Disable() bool {
 	return s.disable
 }
+
+// changingWeightSelector returns a different weight on each Weight() call to
+// detect runScoreFilter re-reading mid-blend.
+type changingWeightSelector struct {
+	weights []float64
+	calls   int
+	scores  node.NodeScoreList
+}
+
+func (s *changingWeightSelector) Select(*selctx.SelectorCtx) (node.NodeScoreList, error) {
+	return s.scores, nil
+}
+
+func (s *changingWeightSelector) ID() string { return "changing_weight_score" }
+
+func (s *changingWeightSelector) Weight() float64 {
+	if s.calls >= len(s.weights) {
+		return s.weights[len(s.weights)-1]
+	}
+	w := s.weights[s.calls]
+	s.calls++
+	return w
+}
+
+func (s *changingWeightSelector) Disable() bool { return false }

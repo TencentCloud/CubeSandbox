@@ -178,6 +178,8 @@ func (l *externalHTTPScore) String() string {
 }
 
 func (l *externalHTTPScore) Weight() float64 {
+	// Live-read so conf.yaml hot-reload applies. runScoreFilter must call this
+	// once per Select result so a reload mid-blend cannot mix two generations.
 	cfg := l.pluginConfig()
 	if cfg == nil {
 		return 0

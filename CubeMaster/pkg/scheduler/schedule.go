@@ -191,10 +191,14 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 			continue
 		} else {
 			if len(tmpResult) > 0 {
-				totalPluginWeight += f.Weight()
+				// Call Weight() once: live-config scorers may observe a conf.yaml
+				// reload between calls, and mixing two weights in one average
+				// would skew that attempt's ranking.
+				w := f.Weight()
+				totalPluginWeight += w
 				for _, n := range tmpResult {
 
-					n.Score *= f.Weight()
+					n.Score *= w
 					if old, ok := resultMap[n.ID()]; ok {
 						old.Score += n.Score
 					} else {
