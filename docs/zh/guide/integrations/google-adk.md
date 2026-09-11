@@ -1,0 +1,197 @@
+---
+title: Google ADK 集成指南
+author: ztt0216
+date: 2026-08-25
+tags:
+  - integration
+  - google-adk
+  - agent
+lang: zh-CN
+---
+
+# Google ADK 集成指南
+
+[English](../../../guide/integrations/google-adk.md)
+
+本文介绍如何把 CubeSandbox 用作
+[Google Agent Development Kit](https://github.com/google/adk-python) agent 的代码执行环境。Google ADK 支持 Python 函数工具，CubeSandbox 提供 E2B-compatible API，因此 ADK agent 可以像调用普通 Python 工具一样调用 CubeSandbox，而实际生成代码会在隔离的 CubeSandbox MicroVM 中运行。
+
+这个方案采用“agent 在宿主机运行，代码进沙箱执行”的模式。ADK runtime、模型凭证和本地项目保留在宿主机上；只有工具中的代码执行进入 CubeSandbox。
+
+## 集成对象与版本
+
+| 组件 | 基线 |
+| --- | --- |
+| Google ADK | Python package `google-adk==2.7.1` |
+| Python | 3.10+ |
+| CubeSandbox | E2B-compatible CubeAPI、可访问的 CubeProxy 数据面，以及支持 `run_code` 的模板 |
+| SDK 路径 | 通过 `E2B_API_URL` 指向 CubeAPI 的 `e2b==2.26.0` 和 `e2b-code-interpreter==2.8.1` |
+
+Google ADK 仍在快速演进，因此可运行示例固定了 ADK 包版本。E2B 相关包固定到一个 plain `pip`
+可直接安装、且已记录在仓库 SDK compatibility notes 中的组合。本 PR 没有把这个精确组合连接真实
+CubeSandbox 部署做 live `run_code` 验证；修改版本或把该示例作为生产基线前，请重新验证 live 路径。
+
+## 前置条件
+
+- 一个可用的 [CubeSandbox 部署](/zh/guide/quickstart)，CubeAPI 通常位于 `http://<cube-host>:3000`。
+- 官方 E2B SDK 需要可访问的数据面。一键本地部署自带 CoreDNS；生产环境应配置泛域名 DNS；
+  本地无法配置泛域名 DNS 时，可以使用
+  [E2B 开发 sidecar](/zh/guide/connect-existing-cluster)。
+- 一个 CubeSandbox 模板 ID。请使用支持 E2B code interpreter `run_code` 路径的模板。
+- 运行 ADK agent 的机器上有 Python 3.10+。
+- Google API key，或其他 ADK 支持的模型配置。
+
+::: warning 控制面与数据面
+`E2B_API_URL` 用于选择 CubeAPI 控制平面端点。官方 E2B SDK 在执行 `run_code` 时还会访问每个沙箱的数据面域名。
+生产环境应配置泛域名 DNS；本地开发若没有泛域名 DNS，可以使用
+[E2B 开发 sidecar](/zh/guide/connect-existing-cluster)。如果你的部署使用自签 TLS 证书，请设置
+`CUBE_SSL_CERT_FILE`，示例会在打开沙箱前导出 `SSL_CERT_FILE`。`SSL_CERT_FILE` 是进程级全局设置；
+请使用同时保留模型提供商 TLS 信任的 CA bundle，或在 CubeAPI 使用公开证书时不要设置它。
+:::
+
+## 配置步骤
+
+安装示例依赖：
+
+```bash
+cd examples/google-adk-integration
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+配置 `.env`：
+
+| 变量 | 用途 |
+| --- | --- |
+| `E2B_API_URL` | CubeAPI 控制面地址，例如 `http://<cube-host>:3000` |
+| `E2B_API_KEY` | CubeAPI auth callback 接受的 E2B-compatible key；未启用认证时可用 `e2b_000000` |
+| `CUBE_TEMPLATE_ID` | 工具调用创建临时沙箱时使用的 CubeSandbox 模板 ID |
+| `GOOGLE_API_KEY` | ADK 使用的 Google 模型 API key |
+| `GOOGLE_ADK_MODEL` | ADK 模型名，例如 `gemini-2.5-flash` |
+| `CUBE_SANDBOX_TIMEOUT` | 可选的沙箱生命周期上限，单位秒，会传给 `Sandbox.create(timeout=...)`；默认值为 `300` |
+| `CUBE_RUN_CODE_TIMEOUT` | 可选的单次代码执行超时，单位秒，会传给 `sandbox.run_code(timeout=...)`；默认值为 `60` |
+| `CUBE_USE_DEV_SIDECAR` | 可选的本地开发开关。设为 `true` 时，会在创建沙箱前调用 E2B dev-sidecar |
+| `CUBE_REMOTE_PROXY_BASE` | `CUBE_USE_DEV_SIDECAR=true` 时必需；sidecar 使用的 CubeProxy 数据面地址，dev-env 中通常是 `https://127.0.0.1:11443` |
+| `CUBE_SSL_CERT_FILE` | 自签部署可选的 CubeSandbox CA bundle |
+
+## 集成代码片段
+
+把 CubeSandbox 执行函数暴露为 ADK 工具：
+
+```python
+from google.adk import Agent
+
+from cube_code_tool import run_python_in_cube
+
+root_agent = Agent(
+    name="cube_code_agent",
+    model="gemini-2.5-flash",
+    instruction=(
+        "When Python code needs to run, call run_python_in_cube so execution "
+        "happens inside an isolated CubeSandbox MicroVM."
+    ),
+    tools=[run_python_in_cube],
+)
+```
+
+这个简化工具形态把 Cube 相关逻辑集中在一处。可运行示例还包含环境加载、stderr 处理、sidecar setup
+和跨版本输出归一化：
+
+```python
+import os
+
+from e2b_code_interpreter import Sandbox
+
+def run_python_in_cube(code: str) -> dict:
+    template_id = os.environ["CUBE_TEMPLATE_ID"]
+    with Sandbox.create(template=template_id, timeout=300) as sandbox:
+        execution = sandbox.run_code(code, timeout=60)
+        stdout = "".join(str(item) for item in execution.logs.stdout)
+        stderr = "".join(str(item) for item in execution.logs.stderr)
+        return {
+            "stdout": stdout,
+            "stderr": stderr,
+            "text": execution.text,
+            "error": str(execution.error) if execution.error else None,
+        }
+```
+
+与宿主机本地 Python 工具相比，只有工具函数内部实现发生变化。ADK agent 看到的仍是一个普通的结构化函数工具。
+
+可运行示例也支持 `CUBE_USE_DEV_SIDECAR=true`，用于没有泛域名 DNS 的本地开发环境。该模式会在创建沙箱前调用
+[`examples/e2b-dev-sidecar`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar)
+中的 sidecar setup，因此也需要在本示例的 `.env` 文件中配置 `CUBE_REMOTE_PROXY_*` 变量，或把它们导出到
+ADK 进程环境中。不要只修改 `examples/e2b-dev-sidecar/.env`；本示例不会加载那个文件。
+
+### 迁移已有本地代码执行工具
+
+```diff
+- def run_python(code: str) -> dict:
+-     completed = subprocess.run(["python3", "-c", code], capture_output=True, text=True)
+-     return {"stdout": completed.stdout, "stderr": completed.stderr}
++ def run_python(code: str) -> dict:
++     return run_python_in_cube(code)
+```
+
+如果原 agent 已经引用这个代码执行工具，agent 定义可以保持不变。若原 prompt 或结果处理依赖特定字段，
+请按本示例返回的 `stdout`、`stderr`、`text`、`error`、`results_count` 结构调整。
+
+## 可运行 Demo
+
+先运行离线接线检查：
+
+```bash
+cd examples/google-adk-integration
+python smoke_test.py
+```
+
+期望输出：
+
+```text
+GOOGLE_ADK_CUBE_SMOKE_OK
+```
+
+然后从父目录运行 ADK agent：
+
+```bash
+cd examples
+adk run google-adk-integration
+```
+
+向 agent 提问：
+
+```text
+Run Python in the sandbox to calculate the first 10 Fibonacci numbers.
+```
+
+agent 会调用 `run_python_in_cube`，基于 `CUBE_TEMPLATE_ID` 创建临时 CubeSandbox，执行生成的 Python 代码，返回工具输出，并在工具调用结束后删除临时沙箱。
+
+## 进一步配置
+
+- **按会话复用沙箱：** 示例为了便于 review，每次工具调用创建一个临时沙箱。多轮 notebook 类任务可以把 sandbox handle 放入会话级服务，并在 ADK session 结束时删除。
+- **超时：** 可设置 `CUBE_SANDBOX_TIMEOUT`，或在 `Sandbox.create(...)` 中传入固定 timeout，控制沙箱生命周期。
+  可设置 `CUBE_RUN_CODE_TIMEOUT`，或给 `sandbox.run_code(...)` 传入 `timeout=...`，控制单次执行上限。
+- **网络策略：** 如果生成代码只能访问指定主机，请在创建沙箱时配置 Cube 的出站控制。参见[网络策略](/zh/guide/network-policy)。
+- **凭证处理：** 模型提供商 key 应保留在宿主机。如果沙箱内代码必须调用外部 API，优先使用 Cube 的 security proxy 和凭证注入流程，不要把原始密钥写入 VM。
+- **模板：** 把重依赖预装进模板镜像，让每次 ADK 工具调用都能从 ready snapshot 快速启动。
+
+## 注意事项
+
+- 示例离线验证导入和接线。完整 live run 需要可访问的 CubeSandbox 部署和支持 `run_code` 的模板。
+- E2B 包组合是基于仓库记录的 plain-pip 安装兼容性选择。本 PR 没有针对这个精确组合连接真实
+  CubeSandbox 部署验证 `run_code`。
+- Google ADK 原生 Agent Runtime Code Execution tool 面向 Google Cloud Agent Runtime。本文使用自定义 ADK 函数工具，让 CubeSandbox 提供执行后端。
+- 默认示例每次工具调用创建并删除一个沙箱，便于 review，但不是长多步任务的最低延迟形态。
+
+## 参考
+
+- 可运行示例：
+  [`examples/google-adk-integration`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/google-adk-integration)
+- Google ADK Python：
+  <https://github.com/google/adk-python>
+- ADK custom tools：
+  <https://adk.dev/tools-custom/>
+- ADK Agent Runtime Code Execution：
+  <https://adk.dev/integrations/code-exec-agent-runtime/>
