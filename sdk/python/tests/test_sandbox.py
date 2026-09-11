@@ -1444,7 +1444,6 @@ class TestCommands:
 
         client = _recording_client(httpx.MockTransport(handler), seen)
         with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
             patch.object(sb, "_build_data_client", return_value=client),
         ):
             result = sb.commands.run("echo hi", timeout=timeout)
@@ -1469,7 +1468,6 @@ class TestCommands:
 
         client = _recording_client(httpx.MockTransport(handler), seen)
         with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
             patch.object(sb, "_build_data_client", return_value=client),
         ):
             result = sb.commands.run("echo hi", timeout=30)
