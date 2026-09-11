@@ -10,6 +10,7 @@ pub mod cli;
 #[doc(hidden)]
 pub mod conformance;
 pub mod error;
+pub mod filesystem;
 pub mod init;
 pub mod process;
 pub mod runtime;

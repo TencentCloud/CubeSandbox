@@ -51,9 +51,15 @@ pub async fn spawn_envd_with_state(
     (port, state, handle)
 }
 
-/// Run the Cargo-built daemon for Process wire tests, including startup cgroups.
+/// Run the Cargo-built daemon for wire tests, including startup cgroups.
 #[allow(dead_code)]
 pub async fn spawn_daemon() -> (u16, tokio::task::JoinHandle<()>) {
+    let (port, _, owner) = spawn_daemon_with_pid().await;
+    (port, owner)
+}
+
+#[allow(dead_code)]
+pub async fn spawn_daemon_with_pid() -> (u16, u32, tokio::task::JoinHandle<()>) {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_cube-envd"))
         .args(["-port", "0", "-isnotfc", "--log-format", "json"])
@@ -62,6 +68,7 @@ pub async fn spawn_daemon() -> (u16, tokio::task::JoinHandle<()>) {
         .kill_on_drop(true)
         .spawn()
         .expect("spawn Cargo-built daemon");
+    let pid = child.id().expect("daemon PID");
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let port = tokio::time::timeout(std::time::Duration::from_secs(15), async {
         while let Some(line) = lines.next_line().await.unwrap() {
@@ -82,5 +89,5 @@ pub async fn spawn_daemon() -> (u16, tokio::task::JoinHandle<()>) {
         let (status, ()) = tokio::join!(child.wait(), draining);
         assert!(status.unwrap().success());
     });
-    (port, owner)
+    (port, pid, owner)
 }

@@ -53,8 +53,9 @@ impl RequestShutdown {
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let connect =
-        ConnectRouter::new().add_service(Arc::new(connect::ProcessConnectService(state.clone())));
+    let connect = ConnectRouter::new()
+        .add_service(Arc::new(connect::ProcessConnectService(state.clone())))
+        .add_service(Arc::new(connect::FilesystemConnectService(state.clone())));
     build_router_with_connect(state, connect)
 }
 
@@ -178,10 +179,12 @@ pub(crate) fn new_server_state_with_processes(
     let runtime = Arc::new(crate::runtime::RuntimeStateStore::with_sandbox_mode(
         is_sandbox,
     ));
+    let filesystem = Arc::new(crate::filesystem::FilesystemService::default());
     let request_shutdown = Arc::new(RequestShutdown::default());
     let mut checks = checks;
     checks.insert(0, runtime.clone());
     checks.push(processes.clone());
+    checks.push(filesystem.clone());
     Arc::new(AppState {
         readiness: Arc::new(crate::server::ReadinessManager::new(
             lifecycle.clone(),
@@ -191,6 +194,7 @@ pub(crate) fn new_server_state_with_processes(
         request_shutdown,
         runtime,
         processes,
+        filesystem,
         users: crate::runtime::UserDatabase::system(),
     })
 }

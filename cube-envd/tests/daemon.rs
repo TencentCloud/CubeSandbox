@@ -143,10 +143,21 @@ async fn real_daemon_health_init_auth_cors_and_shutdown() {
         .unwrap();
     assert_eq!(listed.status(), StatusCode::OK);
     assert_eq!(listed.json::<Value>().await.unwrap(), json!({}));
+    let stat = client
+        .post(format!("{base}/filesystem.Filesystem/Stat"))
+        .header("x-access-token", "test-secret")
+        .json(&json!({"path":"/"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stat.status(), StatusCode::OK);
+    assert_eq!(
+        stat.json::<Value>().await.unwrap()["entry"]["type"],
+        "FILE_TYPE_DIRECTORY"
+    );
     for path in [
         "/conformance.echo.Echo/Unary",
         "/__snapshot_test/runtime",
-        "/filesystem.Filesystem/Stat",
         "/files",
     ] {
         let response = client
