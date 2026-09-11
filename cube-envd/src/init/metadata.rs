@@ -5,17 +5,23 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-const MMDS_ADDRESS: &str = "http://169.254.169.254";
+pub(crate) const MMDS_ADDRESS: &str = "http://169.254.169.254";
 const MMDS_TOKEN_TTL_SECONDS: &str = "60";
 const MMDS_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Default, Deserialize)]
 pub(crate) struct Metadata {
+    #[serde(rename = "instanceID", default)]
+    pub(crate) sandbox_id: String,
+    #[serde(rename = "envID", default)]
+    pub(crate) template_id: String,
+    #[serde(rename = "address", default)]
+    pub(crate) collector_address: String,
     #[serde(rename = "accessTokenHash", default)]
     pub(crate) access_token_hash: zeroize::Zeroizing<String>,
 }
 
-fn mmds_client() -> Result<reqwest::Client, reqwest::Error> {
+pub(crate) fn mmds_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -29,7 +35,10 @@ pub(crate) async fn current_metadata() -> Option<Metadata> {
     fetch_metadata(&client, MMDS_ADDRESS).await.ok()
 }
 
-async fn fetch_metadata(client: &reqwest::Client, address: &str) -> Result<Metadata, ()> {
+pub(crate) async fn fetch_metadata(
+    client: &reqwest::Client,
+    address: &str,
+) -> Result<Metadata, ()> {
     let token = bounded(
         client
             .put(format!("{address}/latest/api/token"))

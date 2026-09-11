@@ -63,6 +63,7 @@ pub struct RuntimeStateStore {
     pub(crate) current: Arc<RwLock<Arc<RuntimeState>>>,
     pub(crate) updates: Arc<Mutex<crate::init::effects::InitEffects>>,
     pub(crate) is_sandbox: bool,
+    pub(crate) metadata_refresh: std::sync::Mutex<Option<tokio::sync::mpsc::Sender<()>>>,
     pub(crate) access_token: RwLock<Option<zeroize::Zeroizing<String>>>,
 }
 
@@ -84,6 +85,7 @@ impl RuntimeStateStore {
             updates: Arc::new(Mutex::new(crate::init::effects::InitEffects::default())),
             is_sandbox,
             access_token: RwLock::new(None),
+            metadata_refresh: std::sync::Mutex::new(None),
         }
     }
 

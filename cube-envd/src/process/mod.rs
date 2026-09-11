@@ -142,6 +142,12 @@ impl ProcessManager {
         }
     }
 
+    pub(crate) async fn socat_cgroup(
+        &self,
+    ) -> Result<Arc<crate::cgroup::ProcessCgroup>, crate::cgroup::CgroupError> {
+        self.cgroups.group(ProcessClass::Socat).await
+    }
+
     pub(crate) async fn initialize_cgroups(&self) -> Result<(), crate::cgroup::CgroupError> {
         self.cgroups.initialize().await
     }

@@ -367,4 +367,34 @@ mod tests {
             Some(Instant::now() + Duration::from_secs(10))
         );
     }
+    #[tokio::test(start_paused = true)]
+    async fn response_completion_error_and_disconnect_release_activity() {
+        use http_body_util::BodyExt;
+        let state = IdleState::new(Duration::from_secs(10));
+        let first = state.begin_request();
+        let second = state.begin_request();
+        let mut complete = first.track(Body::from("response"));
+        assert!(complete.frame().await.unwrap().is_ok());
+        assert!(complete.frame().await.is_none());
+        assert_eq!(state.deadline(), None);
+        let disconnected = second.track(Body::from("not consumed"));
+        drop(disconnected);
+        assert_eq!(
+            state.deadline(),
+            Some(Instant::now() + Duration::from_secs(10))
+        );
+        let mut failed = state
+            .begin_request()
+            .track(Body::from_stream(futures::stream::once(async {
+                Err::<Bytes, _>(std::io::Error::other("stream failed"))
+            })));
+        assert_eq!(state.deadline(), None);
+        assert!(failed.frame().await.unwrap().is_err());
+        assert_eq!(
+            state.deadline(),
+            Some(Instant::now() + Duration::from_secs(10))
+        );
+        drop(failed);
+        assert_eq!(state.inner.status.lock().unwrap().active, 0);
+    }
 }
