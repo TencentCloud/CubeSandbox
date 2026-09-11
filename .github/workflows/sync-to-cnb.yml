@@ -259,7 +259,10 @@ jobs:
           set -euo pipefail
           # Official archive/security HTTP is currently unreachable; this job
           # runs on a Tencent Cloud GZ runner, so use Tencent Cloud mirrors.
-          mirror="https://mirrors.tencent.com"
+          # Plain HTTP: the job container ships no CA bundle, so apt cannot
+          # verify the mirror's TLS certificate and cannot install
+          # ca-certificates to fix that.
+          mirror="http://mirrors.tencent.com"
           shopt -s nullglob
           for src in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
             sed -i \
