@@ -47,3 +47,18 @@ validate_host_port() {
   (( 10#${port} >= 1 && 10#${port} <= 65535 )) \
     || die "invalid ${name}: ${value} (port out of range)"
 }
+
+normalize_redis_db() {
+  local value="$1"
+  local name="${2:-Redis DB}"
+  [[ "${value}" =~ ^[0-9]+$ ]] \
+    || die "${name} must be an integer in 0-15, got: ${value}"
+  while [[ "${#value}" -gt 1 && "${value:0:1}" == "0" ]]; do
+    value="${value:1}"
+  done
+  case "${value}" in
+    [0-9]|1[0-5]) ;;
+    *) die "${name} must be an integer in 0-15, got: ${value}" ;;
+  esac
+  printf '%s' "${value}"
+}

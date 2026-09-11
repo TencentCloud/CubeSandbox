@@ -36,9 +36,9 @@ instance_db_config:
   max_open_conns: 20
   max_conn_life_time_seconds: 300
 
-# Redis carries the live pull-progress snapshots, written through localcache
-# with the same keys CubeMaster reads when answering a progress query. db_no
-# must stay 0 so both sides share the keyspace.
+# Redis carries live pull-progress snapshots written through localcache with
+# the same keys CubeMaster reads. one-click keeps this endpoint and db_no
+# aligned with CubeMaster.
 redis:
   nodes: "127.0.0.1:__CUBE_SANDBOX_REDIS_PORT__"
   password: "__CUBE_SANDBOX_REDIS_PASSWORD__"

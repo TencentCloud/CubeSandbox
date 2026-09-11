@@ -83,11 +83,18 @@ fi
 
 # Redis (optional). CubeProxy/LCM use the same derivation (CUBE_EXTERNAL → CUBE_SANDBOX).
 # CubeOps splits host/port/password (no REDIS_URL) and assembles the connection internally.
+# A preserved REDIS_URL has higher priority inside CubeOps and would bypass
+# REDIS_DB, so managed one-click starts must remove it.
+unset REDIS_URL
 export REDIS_HOST="${CUBE_EXTERNAL_REDIS_HOST:-${CUBE_SANDBOX_REDIS_HOST:-127.0.0.1}}"
 export REDIS_PORT="${CUBE_EXTERNAL_REDIS_PORT:-${CUBE_SANDBOX_REDIS_PORT:-6379}}"
 export REDIS_PASSWORD="${CUBE_EXTERNAL_REDIS_PASSWORD:-${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}}"
 export REDIS_MASTER_NAME="${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}"
 export REDIS_SENTINEL_NODES="${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}"
 export REDIS_SENTINEL_PASSWORD="${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD:-}"
+# Prefer CUBE_EXTERNAL_REDIS_DB; keep legacy REDIS_DB as fallback. Must match
+# CubeMaster conf.yaml db_no (patched from the same env at install).
+export REDIS_DB
+REDIS_DB="$(normalize_redis_db "${CUBE_EXTERNAL_REDIS_DB:-${REDIS_DB:-0}}" "CUBE_EXTERNAL_REDIS_DB/REDIS_DB")"
 
 exec "${CUBE_OPS_BIN}"

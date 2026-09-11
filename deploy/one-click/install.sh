@@ -280,6 +280,18 @@ apply_one_click_toggles
 # opposite-engine CUBE_EXTERNAL_* marker from .one-click.env.
 apply_one_click_database_intent
 
+# Old packages had no unified knob. Preserve a previous non-zero Master /
+# per-component DB instead of silently resetting all consumers to DB 0.
+if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
+  derive_one_click_redis_db_from_legacy \
+    "${RUNTIME_ENV_OLD}" \
+    "${INSTALL_PREFIX}/CubeMaster/conf.yaml"
+fi
+
+# Validate Redis DB before any destructive install phase (stop/rm). A typo
+# like CUBE_EXTERNAL_REDIS_DB=16 must fail here, not after toolbox is wiped.
+one_click_redis_db >/dev/null
+
 init_external_dep_defaults
 # Compute nodes never open the control-plane DB; skip driver/host validation
 # so a mirrored CUBE_DATABASE_DRIVER=postgres without local reachability works.
@@ -497,6 +509,12 @@ generate_templatecenter_config() {
     -e "s|__CUBETEMPLATECENTER_HTTP_BIND__|$(escape_sed "${http_bind}")|g" \
     -e "s|__CUBETEMPLATECENTER_MASTER_ADDR__|$(escape_sed "${master_addr}")|g" \
     "${cfg}"
+
+  # Same knob as Master: TC shares the progress-snapshot Redis keyspace.
+  # A mismatch (Master on N, TC on 0) breaks progress queries — see Helm #1638.
+  local redis_db
+  redis_db="$(one_click_patch_conf_redis_db "${cfg}")"
+  log "CubeTemplateCenter redis db_no=${redis_db} (CUBE_EXTERNAL_REDIS_DB)"
 }
 
 generate_cubemaster_config_ports() {
@@ -528,6 +546,13 @@ generate_cubemaster_config_ports() {
     -e "s|__CUBEMASTER_HTTP_BIND__|$(escape_sed "${http_bind}")|g" \
     -e "s|__CUBEMASTER_CUBE_OPS_ADDR__|$(escape_sed "${cube_ops_addr}")|g" \
     "${cfg}"
+
+  # Single operator knob CUBE_EXTERNAL_REDIS_DB → Master conf db_no (same value
+  # TC/Ops/Proxy/LCM derive). Default 0 matches the conf template. Validated
+  # early via one_click_redis_db before the destructive install phase.
+  local redis_db
+  redis_db="$(one_click_patch_conf_redis_db "${cfg}")"
+  log "CubeMaster redis db_no=${redis_db} (CUBE_EXTERNAL_REDIS_DB)"
 }
 
 # When external MySQL/PostgreSQL/Redis is configured, patch CubeMaster conf.yaml
@@ -601,63 +626,13 @@ patch_cubemaster_external_deps() {
       "${CUBE_EXTERNAL_MYSQL_DB}"
   fi
 
-  if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
-    [[ -n "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}" ]] \
-      || die "CUBE_EXTERNAL_REDIS_SENTINEL_NODES is required when CUBE_EXTERNAL_REDIS_MASTER_NAME is set"
-    log "patching conf.yaml for external Redis Sentinel: master=${CUBE_EXTERNAL_REDIS_MASTER_NAME} sentinels=${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}"
-    local redis_master_esc redis_sentinel_esc redis_pwd_esc redis_sentinel_pwd_esc
-    redis_master_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_MASTER_NAME}")"
-    redis_sentinel_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES}")"
-    redis_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_PASSWORD}")"
-    redis_sentinel_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD}")"
-    # Always use s||| substitutions (not sed a\) so escape_sed's \| / \& /
-    # \\ escapes are interpreted by the replacement engine. sed a-text would
-    # leave those backslashes literal and produce invalid YAML on first insert
-    # when master name / password / nodes contain | or &.
-    sed -i -e "s|password: \".*\"|password: \"${redis_pwd_esc}\"|" "${cfg}"
-    if grep -q 'master_name:' "${cfg}"; then
-      sed -i \
-        -e "s|nodes: \".*\"|nodes: \"\"|" \
-        -e "s|master_name: \".*\"|master_name: \"${redis_master_esc}\"|" \
-        -e "s|sentinel_nodes: \".*\"|sentinel_nodes: \"${redis_sentinel_esc}\"|" \
-        -e "s|sentinel_password: \".*\"|sentinel_password: \"${redis_sentinel_pwd_esc}\"|" \
-        "${cfg}"
-    else
-      sed -i \
-        -e "s|nodes: \".*\"|nodes: \"\"\\
-  master_name: \"${redis_master_esc}\"\\
-  sentinel_nodes: \"${redis_sentinel_esc}\"\\
-  sentinel_password: \"${redis_sentinel_pwd_esc}\"|" \
-        "${cfg}"
-    fi
-  elif [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" ]]; then
-    log "patching conf.yaml for external Redis: ${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}"
-    # Sentinel → standalone: drop leftover master_name/sentinel_* so
-    # resolveRedisAddr does not keep preferring MasterName over Nodes.
-    sed -i '/^  master_name:/d; /^  sentinel_nodes:/d; /^  sentinel_password:/d' "${cfg}"
-    local redis_nodes_esc redis_pwd_esc
-    redis_nodes_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_HOST}:${CUBE_EXTERNAL_REDIS_PORT}")"
-    redis_pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_PASSWORD}")"
-    # Match only on the YAML key prefix so these patterns survive template
-    # default changes. 'nodes:'/'password:' only appear in the redis* sections,
-    # so every Redis endpoint is repointed while MySQL fields stay untouched.
-    sed -i \
-      -e "s|nodes: \".*\"|nodes: \"${redis_nodes_esc}\"|" \
-      -e "s|password: \".*\"|password: \"${redis_pwd_esc}\"|" \
-      "${cfg}"
-  elif [[ "${restore_bundled_redis}" -eq 1 ]]; then
-    # Leaving external Redis (Sentinel or standalone) for bundled local Redis:
-    # restore nodes/password so CubeMaster matches up-support/quickcheck.
-    local redis_port="${CUBE_SANDBOX_REDIS_PORT:-6379}"
-    local redis_password="${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}"
-    local redis_nodes_esc redis_pwd_esc
-    redis_nodes_esc="$(escape_sed "127.0.0.1:${redis_port}")"
-    redis_pwd_esc="$(escape_sed "${redis_password}")"
-    log "restoring bundled Redis nodes/password in conf.yaml: 127.0.0.1:${redis_port}"
-    sed -i \
-      -e "s|nodes: \".*\"|nodes: \"${redis_nodes_esc}\"|" \
-      -e "s|password: \".*\"|password: \"${redis_pwd_esc}\"|" \
-      "${cfg}"
+  one_click_patch_conf_redis_endpoint "${cfg}" "CubeMaster" "${restore_bundled_redis}"
+
+  # TemplateCenter writes progress snapshots through the same Redis cache and
+  # has no environment override for its endpoint. Patch both endpoint and DB.
+  local tc_cfg="${PKG_ROOT}/CubeTemplateCenter/conf.yaml"
+  if [[ -f "${tc_cfg}" ]]; then
+    one_click_patch_conf_redis_endpoint "${tc_cfg}" "CubeTemplateCenter"
   fi
 }
 
