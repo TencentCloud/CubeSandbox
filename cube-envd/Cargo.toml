@@ -1,0 +1,68 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+
+[package]
+name = "cube-envd"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+license = "Apache-2.0"
+description = "CubeSandbox Rust envd data-plane daemon"
+publish = false
+
+[features]
+test-support = []
+
+[[bin]]
+name = "cube-envd"
+path = "src/main.rs"
+
+[[test]]
+name = "connect_gate"
+path = "tests/connect_gate.rs"
+required-features = ["test-support"]
+
+[dependencies]
+axum = { version = "0.8", features = ["macros"] }
+base64 = "0.22"
+bytes = "1"
+buffa = { version = "0.9", features = ["json"] }
+buffa-types = { version = "0.9", features = ["json"] }
+connectrpc = { version = "=0.9.0", default-features = false, features = ["axum", "gzip", "json"] }
+clap = { version = "4", features = ["derive"] }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+futures = "0.3"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+jiff = { version = "0.2.35", default-features = false, features = ["std"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+sha2 = "0.10"
+tempfile = "3"
+subtle = "2"
+zeroize = { version = "1", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+thiserror = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[build-dependencies]
+connectrpc-build = "=0.9.0"
+protoc-bin-vendored = "=3.1.0"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+strip = "symbols"
