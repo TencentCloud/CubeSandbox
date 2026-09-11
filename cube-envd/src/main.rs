@@ -48,7 +48,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     port: u16::try_from(config.port)?,
                     is_not_fc: config.is_not_fc,
                 },
-                ServerRuntime::default(),
+                ServerRuntime::default()
+                    .with_start_command(config.start_cmd)
+                    .with_cgroup_root(config.cgroup_root),
             )
             .await
             .map_err(Into::into)

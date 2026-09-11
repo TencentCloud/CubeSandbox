@@ -50,3 +50,37 @@ pub async fn spawn_envd_with_state(
     });
     (port, state, handle)
 }
+
+/// Run the Cargo-built daemon for Process wire tests, including startup cgroups.
+#[allow(dead_code)]
+pub async fn spawn_daemon() -> (u16, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_cube-envd"))
+        .args(["-port", "0", "-isnotfc", "--log-format", "json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn Cargo-built daemon");
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let port = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let log: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if log["fields"]["message"] == "envd listening" {
+                let address: std::net::SocketAddr =
+                    log["fields"]["addr"].as_str().unwrap().parse().unwrap();
+                return address.port();
+            }
+        }
+        panic!("daemon exited before listening");
+    })
+    .await
+    .expect("daemon startup");
+    let owner = tokio::spawn(async move {
+        // Owning Child in this task makes abort close the test daemon as well.
+        let draining = async { while lines.next_line().await.unwrap().is_some() {} };
+        let (status, ()) = tokio::join!(child.wait(), draining);
+        assert!(status.unwrap().success());
+    });
+    (port, owner)
+}

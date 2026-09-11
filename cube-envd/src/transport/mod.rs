@@ -53,7 +53,9 @@ impl RequestShutdown {
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
-    build_router_with_connect(state, ConnectRouter::new())
+    let connect =
+        ConnectRouter::new().add_service(Arc::new(connect::ProcessConnectService(state.clone())));
+    build_router_with_connect(state, connect)
 }
 
 /// Compose registered services through the same transport and authentication boundary.
@@ -118,6 +120,7 @@ pub async fn supervise_request(
             }
         }
     }
+    timeout::process_timeout(&mut request);
     let lifecycle = state.lifecycle.clone();
     let request_shutdown = state.request_shutdown.clone();
     let response = std::panic::AssertUnwindSafe(async move {
@@ -158,12 +161,27 @@ pub(crate) fn new_server_state(
     checks: Vec<Arc<dyn crate::server::ReadinessCheck>>,
     is_sandbox: bool,
 ) -> Arc<AppState> {
+    new_server_state_with_processes(
+        lifecycle,
+        checks,
+        is_sandbox,
+        Arc::new(crate::process::ProcessManager::default()),
+    )
+}
+
+pub(crate) fn new_server_state_with_processes(
+    lifecycle: Arc<crate::server::LifecycleState>,
+    checks: Vec<Arc<dyn crate::server::ReadinessCheck>>,
+    is_sandbox: bool,
+    processes: Arc<crate::process::ProcessManager>,
+) -> Arc<AppState> {
     let runtime = Arc::new(crate::runtime::RuntimeStateStore::with_sandbox_mode(
         is_sandbox,
     ));
     let request_shutdown = Arc::new(RequestShutdown::default());
     let mut checks = checks;
     checks.insert(0, runtime.clone());
+    checks.push(processes.clone());
     Arc::new(AppState {
         readiness: Arc::new(crate::server::ReadinessManager::new(
             lifecycle.clone(),
@@ -172,6 +190,7 @@ pub(crate) fn new_server_state(
         lifecycle,
         request_shutdown,
         runtime,
+        processes,
         users: crate::runtime::UserDatabase::system(),
     })
 }

@@ -18,6 +18,7 @@ pub struct AppState {
     pub readiness: Arc<crate::server::ReadinessManager>,
     pub(crate) request_shutdown: Arc<crate::transport::RequestShutdown>,
     pub runtime: Arc<crate::runtime::RuntimeStateStore>,
+    pub processes: Arc<crate::process::ProcessManager>,
     pub users: crate::runtime::UserDatabase,
 }
 
