@@ -4,6 +4,7 @@
 mod auth;
 pub mod connect;
 mod cors;
+pub(crate) mod encoding;
 mod end_message;
 mod framing;
 mod grpc;
@@ -71,6 +72,17 @@ pub fn build_router_with_connect(state: Arc<AppState>, connect: ConnectRouter) -
         .route(
             "/init",
             axum::routing::post(rest::init_handler).fallback(rest::method_not_allowed),
+        )
+        .route(
+            "/files",
+            axum::routing::get(rest::file_get_handler)
+                .post(rest::file_post_handler)
+                .head(rest::file_method_not_allowed)
+                .fallback(rest::file_method_not_allowed),
+        )
+        .route(
+            "/files/compose",
+            axum::routing::post(rest::compose_handler).fallback(rest::method_not_allowed),
         )
         .route(
             "/envs",

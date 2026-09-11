@@ -121,6 +121,56 @@ async fn init_does_not_retarget_a_file_request_blocked_in_user_lookup() {
 }
 
 #[tokio::test]
+async fn upload_keeps_captured_default_user_across_concurrent_init() {
+    let directory = tempfile::tempdir().unwrap();
+    let old = directory.path().join("old");
+    let new = directory.path().join("new");
+    std::fs::create_dir(&old).unwrap();
+    std::fs::create_dir(&new).unwrap();
+    let database = directory.path().join("passwd");
+    let name = CString::new(database.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let (port, task) = server(&database).await;
+    let pending = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/files?path=marker"))
+            .header("content-type", "application/octet-stream")
+            .timeout(Duration::from_secs(5))
+            .body("captured request")
+            .send()
+            .await
+            .unwrap()
+    });
+    // The open writer proves admission and RuntimeState capture. Replacing the
+    // database pathname allows init to validate a new user while this reader
+    // still owns the original FIFO. No sleep establishes the ordering.
+    let mut writer = writer_after_reader_started(&database).await;
+    std::fs::remove_file(&database).unwrap();
+    std::fs::write(&database, passwd(&old, &new)).unwrap();
+    init(port, json!({"defaultUser": "alice", "defaultWorkdir": new})).await;
+    writer.write_all(passwd(&old, &new).as_bytes()).unwrap();
+    drop(writer);
+    let response = pending.await.unwrap();
+    assert_eq!(response.status(), 200);
+    let entries: Value = response.json().await.unwrap();
+    assert_eq!(entries[0]["path"], old.join("marker").to_str().unwrap());
+    let client = reqwest::Client::new();
+    let read = client
+        .get(format!("http://127.0.0.1:{port}/files"))
+        .query(&[("path", old.join("marker"))])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.status(), 200);
+    assert_eq!(read.text().await.unwrap(), "captured request");
+    let fresh = rpc(port, "Stat", json!({"path": "marker"}), None).await;
+    assert_eq!(fresh["code"], "not_found", "{fresh}");
+    let captured = rpc(port, "Stat", json!({"path": old.join("marker")}), None).await;
+    assert_eq!(captured["entry"]["owner"], "root", "{captured}");
+    task.abort();
+}
+
+#[tokio::test]
 async fn selected_user_home_defaults_and_symlink_dotdot_keep_guest_path_semantics() {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path().join("home");

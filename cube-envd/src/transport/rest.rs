@@ -10,6 +10,7 @@ use axum::http::{HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use crate::error::DomainError;
+use crate::filesystem::upload::UploadError;
 use crate::server::LifecycleState;
 
 #[derive(Clone)]
@@ -159,6 +160,175 @@ pub(crate) fn unavailable() -> Response {
     error_response(StatusCode::SERVICE_UNAVAILABLE, "unavailable")
 }
 
+pub async fn file_get_handler(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+) -> Response {
+    let query = match axum::extract::Query::<Vec<(String, String)>>::try_from_uri(request.uri()) {
+        Ok(query) => query.0,
+        Err(_) => return file_error(StatusCode::BAD_REQUEST, "invalid query"),
+    };
+    if let Err(response) =
+        super::auth::signed_file(&state, request.headers(), request.method(), &query).await
+    {
+        return response;
+    }
+    let username = query
+        .iter()
+        .find(|(key, _)| key == "username")
+        .map(|(_, username)| username.clone());
+    let path = query
+        .iter()
+        .find(|(key, _)| key == "path")
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
+    let snapshot = state.runtime.snapshot().await;
+    match state
+        .filesystem
+        .download(
+            path,
+            request.headers().clone(),
+            username,
+            snapshot,
+            state.users.clone(),
+        )
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            let status = match &error {
+                DomainError::ResourceExhausted(message)
+                    if message == "filesystem jobs are full" =>
+                {
+                    StatusCode::TOO_MANY_REQUESTS
+                }
+                DomainError::ResourceExhausted(_) => StatusCode::SERVICE_UNAVAILABLE,
+                _ => error.http_status(),
+            };
+            file_error(status, error.public_message())
+        }
+    }
+}
+
+pub async fn file_post_handler(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+) -> Response {
+    let query = match axum::extract::Query::<Vec<(String, String)>>::try_from_uri(request.uri()) {
+        Ok(query) => query.0,
+        Err(_) => return file_error(StatusCode::BAD_REQUEST, "invalid query"),
+    };
+    if let Err(response) =
+        super::auth::signed_file(&state, request.headers(), request.method(), &query).await
+    {
+        return response;
+    }
+    let content_encoding = request
+        .headers()
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let gzip = match super::encoding::coding(content_encoding).0.as_str() {
+        "" | "identity" => false,
+        "gzip" => true,
+        _ => return file_error(StatusCode::BAD_REQUEST,format!("error decompressing request body: unsupported Content-Encoding: {content_encoding}, supported: [gzip]")),
+    };
+    let content_type = request
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let boundary = match request
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| crate::filesystem::multipart::parameters(value).ok())
+    {
+        Some((kind, _)) if kind == "application/octet-stream" => Ok(None),
+        Some((kind, mut params)) if kind == "multipart/form-data" || kind == "multipart/mixed" => {
+            match params.remove("boundary") {
+                Some(boundary)
+                    if !boundary.is_empty()
+                        && boundary.len() <= 70
+                        && boundary.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || b"'()+_,-./:=? ".contains(&byte)
+                        })
+                        && !boundary.ends_with(' ') =>
+                {
+                    Ok(Some(boundary))
+                }
+                Some(boundary) if !boundary.is_empty() => Err(UploadError::new(StatusCode::BAD_REQUEST,"invalid multipart boundary")),
+                _ => Err(UploadError::new(StatusCode::INTERNAL_SERVER_ERROR,"error parsing multipart form: no multipart boundary param in Content-Type")),
+            }
+        }
+        _ => {
+            Err(UploadError::new(
+                StatusCode::BAD_REQUEST,
+                format!("unsupported content type: {content_type}, expected multipart/form-data or application/octet-stream"),
+            ))
+        }
+    };
+    let username = query
+        .iter()
+        .find(|(key, _)| key == "username")
+        .map(|(_, username)| username.clone());
+    let path = query
+        .iter()
+        .find(|(key, _)| key == "path")
+        .map(|(_, value)| value.clone());
+    let snapshot = state.runtime.snapshot().await;
+    match state
+        .filesystem
+        .upload(
+            crate::filesystem::upload::Upload {
+                path,
+                boundary,
+                gzip,
+                body: request.into_body(),
+            },
+            username,
+            snapshot,
+            state.users.clone(),
+        )
+        .await
+    {
+        Ok(entries) => (
+            [("content-type", "text/plain; charset=utf-8")],
+            http_json(&entries),
+        )
+            .into_response(),
+        Err(error) => file_error(error.status, error.message),
+    }
+}
+
+pub async fn compose_handler(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+) -> Response {
+    let body = match to_bytes(request.into_body(), usize::MAX).await {
+        Ok(body) => body,
+        Err(_) => return file_error(StatusCode::BAD_REQUEST, "invalid request body"),
+    };
+    let request = match serde_json::from_slice::<Option<crate::filesystem::compose::Compose>>(&body)
+    {
+        Ok(request) => request.unwrap_or_default(),
+        Err(error) => {
+            return file_error(
+                StatusCode::BAD_REQUEST,
+                format!("invalid request body: {error}"),
+            )
+        }
+    };
+    match state
+        .filesystem
+        .compose(request, state.runtime.snapshot().await, state.users.clone())
+        .await
+    {
+        Ok(entry) => ([("content-type", "application/json")], format!("{entry}\n")).into_response(),
+        Err(error) => file_error(error.status, error.message),
+    }
+}
+
 pub async fn method_not_allowed() -> Response {
     (StatusCode::METHOD_NOT_ALLOWED, [("allow", "POST")]).into_response()
 }
@@ -181,7 +351,7 @@ fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
         .into_response()
 }
 
-pub(crate) fn auth_error(status: StatusCode, message: impl Into<String>) -> Response {
+pub(crate) fn file_error(status: StatusCode, message: impl Into<String>) -> Response {
     let body =
         http_json(&serde_json::json!({"code":status.as_u16(),"message":message.into()})) + "\n";
     (
@@ -193,6 +363,22 @@ pub(crate) fn auth_error(status: StatusCode, message: impl Into<String>) -> Resp
         body,
     )
         .into_response()
+}
+
+pub async fn file_method_not_allowed(request: Request<Body>) -> Response {
+    let body = if request.method() == http::Method::HEAD {
+        Body::from_stream(futures::stream::empty::<
+            Result<axum::body::Bytes, std::io::Error>,
+        >())
+    } else {
+        Body::empty()
+    };
+    Response::builder()
+        .status(StatusCode::METHOD_NOT_ALLOWED)
+        .header("allow", "GET")
+        .header("allow", "POST")
+        .body(body)
+        .expect("file method response")
 }
 
 fn http_json(value: &impl serde::Serialize) -> String {

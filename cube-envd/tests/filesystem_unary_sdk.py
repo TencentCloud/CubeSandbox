@@ -24,15 +24,8 @@ from e2b.envd.filesystem import filesystem_connect, filesystem_pb2 as pb
 from e2b.exceptions import FileNotFoundException, InvalidArgumentException, SandboxException
 from e2b.sandbox_sync.filesystem.filesystem import Filesystem
 
+from support.sdk import init
 from support.connect import BASE, HTTP
-
-
-def init(user, workdir):
-    payload = json.dumps({'defaultUser': user, 'defaultWorkdir': workdir}).encode()
-    with HTTP.open(Request(BASE + '/init', payload,
-                           {'Content-Type': 'application/json'})) as response:
-        assert response.status == 204
-
 
 def rejected(action, kind):
     try:

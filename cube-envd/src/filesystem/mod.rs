@@ -12,8 +12,13 @@ use std::sync::Arc;
 
 use tokio::sync::oneshot;
 
+pub(crate) mod compose;
+pub(crate) mod download;
+mod download_metadata;
+pub(crate) mod multipart;
 #[cfg(test)]
 pub(crate) mod snapshot_test;
+pub(crate) mod upload;
 pub(crate) mod watch;
 
 use crate::error::DomainError;
@@ -364,6 +369,13 @@ impl Context {
         check_cancel(&self.cancel)
     }
 
+    fn path(&self, raw: &str, write: bool) -> Result<PathBuf, DomainError> {
+        if write && raw.is_empty() {
+            return Err(invalid("path is required"));
+        }
+        resolve_path(raw, &self.snapshot, &self.user.home)
+    }
+
     fn rpc_path(&self, raw: &str) -> Result<PathBuf, DomainError> {
         // RPC handlers map invalid OS paths at the operation that uses them.
         let raw = if raw.is_empty() {
@@ -391,6 +403,14 @@ impl Context {
             }
         }
         Ok(clean)
+    }
+
+    fn destructive_path(&self, raw: &str) -> Result<PathBuf, DomainError> {
+        self.mutation_path(raw, true)
+    }
+
+    fn mutation_path(&self, raw: &str, required: bool) -> Result<PathBuf, DomainError> {
+        protect_root(self.path(raw, required)?)
     }
 
     fn list(
@@ -763,6 +783,10 @@ impl Context {
         self.check()
     }
 
+    fn directories(&self, path: &Path) -> Result<(File, bool), DomainError> {
+        self.directories_with_errors(path, false, 0o755)
+    }
+
     fn rpc_directories(&self, path: &Path) -> Result<(File, bool), DomainError> {
         self.directories_with_errors(path, true, 0o755)
     }
@@ -951,6 +975,22 @@ fn check_cancel(cancel: &AtomicBool) -> Result<(), DomainError> {
     }
 }
 
+fn resolve_path(raw: &str, snapshot: &RuntimeState, home: &Path) -> Result<PathBuf, DomainError> {
+    let raw = if raw.is_empty() {
+        snapshot.default_workdir().unwrap_or("")
+    } else {
+        raw
+    };
+    if raw.contains('\0') {
+        return Err(invalid("invalid path"));
+    }
+    let path = expand_path(raw, home)?;
+    if path.as_os_str().len() > 4096 {
+        return Err(invalid("path exceeds limit"));
+    }
+    Ok(normalize_path(path, raw))
+}
+
 fn expand_path(raw: &str, home: &Path) -> Result<PathBuf, DomainError> {
     let path = if raw == "~" {
         home.to_owned()
@@ -962,6 +1002,14 @@ fn expand_path(raw: &str, home: &Path) -> Result<PathBuf, DomainError> {
         home.join(raw)
     };
     Ok(path)
+}
+
+fn normalize_path(path: PathBuf, raw: &str) -> PathBuf {
+    if raw.starts_with('/') {
+        path
+    } else {
+        path.components().collect()
+    }
 }
 
 fn protect_root(path: PathBuf) -> Result<PathBuf, DomainError> {
