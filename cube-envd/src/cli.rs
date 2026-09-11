@@ -45,6 +45,14 @@ pub struct ServeConfig {
     /// Select non-Firecracker sandbox environment and marker values.
     #[arg(long = "isnotfc", alias = "isNotFc", action = clap::ArgAction::Set, num_args = 0..=1, require_equals = true, default_missing_value = "true", default_value = "false", value_parser = parse_go_bool)]
     pub is_not_fc: bool,
+    #[arg(long = "cmd", default_value = "")]
+    pub start_cmd: String,
+    #[arg(
+        long = "cgroup-root",
+        default_value = "/sys/fs/cgroup",
+        help = "cgroup root directory"
+    )]
+    pub cgroup_root: String,
     #[arg(long = "log-format", value_enum, default_value_t = LogFormat::Text)]
     pub log_format: LogFormat,
     #[arg(long = "version", action = clap::ArgAction::Set, num_args = 0..=1, require_equals = true, default_missing_value = "true", default_value = "false", value_parser = parse_go_bool)]
@@ -96,6 +104,8 @@ impl Cli {
                 .split_once('=')
                 .map_or((arg.as_str(), None), |(n, v)| (n, Some(v)));
             let name = match name {
+                "-cmd" => "--cmd",
+                "-cgroup-root" => "--cgroup-root",
                 "-port" => "--port",
                 "-isnotfc" => "--isnotfc",
                 "-version" => "--version",
@@ -104,7 +114,10 @@ impl Cli {
             };
             if let Some(value) = value {
                 normalized.push(format!("{name}={value}"));
-            } else if matches!(name, "--port" | "-p" | "--Port" | "--log-format") {
+            } else if matches!(
+                name,
+                "--port" | "-p" | "--Port" | "--cmd" | "--cgroup-root" | "--log-format"
+            ) {
                 if let Some(value) = arguments.next() {
                     normalized.push(format!("{name}={value}"));
                 } else {

@@ -164,3 +164,64 @@ fn valid_username(username: &str) -> bool {
             .bytes()
             .any(|byte| matches!(byte, b':' | b'/' | b'\0' | b'\n' | b'\r'))
 }
+
+pub(crate) fn explicit_username(headers: &http::HeaderMap) -> Result<Option<String>, DomainError> {
+    basic_username(headers)
+        .map(|bytes| String::from_utf8(bytes).map_err(|_| DomainError::Unauthenticated))
+        .transpose()
+}
+
+pub(crate) struct ProcessUser {
+    pub name: String,
+    pub uid: u32,
+    pub gid: u32,
+    pub groups: Vec<u32>,
+    pub home: PathBuf,
+}
+
+impl UserDatabase {
+    pub(crate) async fn resolve_process_user(
+        &self,
+        username: &str,
+    ) -> Result<ProcessUser, DomainError> {
+        if !valid_username(username) {
+            return Err(DomainError::InvalidArgument("invalid target user".into()));
+        }
+        let fields = self
+            .lookup(username)
+            .await?
+            .ok_or(DomainError::Unauthenticated)?;
+        let database = tokio::fs::read_to_string("/etc/group")
+            .await
+            .map_err(|_| DomainError::Internal)?;
+        parse_user(username, fields, &database)
+    }
+}
+
+fn parse_user(
+    username: &str,
+    fields: Vec<String>,
+    database: &str,
+) -> Result<ProcessUser, DomainError> {
+    if fields.len() != 7 {
+        return Err(DomainError::Internal);
+    }
+    let uid = fields[2].parse().map_err(|_| DomainError::Internal)?;
+    let gid = fields[3].parse().map_err(|_| DomainError::Internal)?;
+    let mut groups = vec![gid];
+    for line in database.lines() {
+        let fields: Vec<_> = line.split(':').collect();
+        if fields.len() == 4 && fields[3].split(',').any(|member| member == username) {
+            groups.push(fields[2].parse().map_err(|_| DomainError::Internal)?);
+        }
+    }
+    groups.sort_unstable();
+    groups.dedup();
+    Ok(ProcessUser {
+        name: username.to_owned(),
+        uid,
+        gid,
+        groups,
+        home: PathBuf::from(&fields[5]),
+    })
+}

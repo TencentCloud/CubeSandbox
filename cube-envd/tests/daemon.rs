@@ -10,8 +10,13 @@ use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
 async fn start() -> (Child, String) {
+    start_with(&[]).await
+}
+
+async fn start_with(extra: &[&str]) -> (Child, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_cube-envd"))
         .args(["--port", "0", "--isnotfc", "--log-format", "json"])
+        .args(extra)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
@@ -129,10 +134,18 @@ async fn real_daemon_health_init_auth_cors_and_shutdown() {
             .status(),
         StatusCode::NO_CONTENT
     );
+    let listed = client
+        .post(format!("{base}/process.Process/List"))
+        .header("x-access-token", "test-secret")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    assert_eq!(listed.json::<Value>().await.unwrap(), json!({}));
     for path in [
         "/conformance.echo.Echo/Unary",
         "/__snapshot_test/runtime",
-        "/process.Process/List",
         "/filesystem.Filesystem/Stat",
         "/files",
     ] {
@@ -201,4 +214,80 @@ fn cli_identity_and_legacy_parser() {
             .unwrap();
         assert!(!output.status.success(), "{port}");
     }
+}
+
+#[tokio::test]
+async fn non_cgroup_root_fails_before_listening_or_running_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("ran");
+    let output = Command::new(env!("CARGO_BIN_EXE_cube-envd"))
+        .args(["-port", "0", "-isnotfc", "-cgroup-root"])
+        .arg(directory.path())
+        .arg("-cmd")
+        .arg(format!("touch {}", marker.display()))
+        .output()
+        .await
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not a cgroup v2 filesystem"));
+    assert!(!marker.exists());
+    assert!(!directory.path().join("user").exists());
+}
+
+#[tokio::test]
+async fn startup_command_uses_the_managed_process_service() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("startup");
+    let command = format!("printf startup > {}; exec /bin/sleep 30", marker.display());
+    let (child, base) = start_with(&["-cmd", &command, "-cgroup-root", "/sys/fs/cgroup"]).await;
+    let client = Client::new();
+    let listed: Value = client
+        .post(format!("{base}/process.Process/List"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let process = &listed["processes"][0];
+    assert_eq!(process["tag"], "startCmd");
+    assert_eq!(process["config"]["cwd"], "/home/user");
+    timeout(Duration::from_secs(5), async {
+        while tokio::fs::read(&marker).await.unwrap_or_default() != b"startup" {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        client
+            .post(format!("{base}/process.Process/SendSignal"))
+            .json(&json!({"process":{"pid":process["pid"]},"signal":9}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let listed: Value = client
+                .post(format!("{base}/process.Process/List"))
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if listed == json!({}) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    stop(child, libc::SIGTERM).await;
 }

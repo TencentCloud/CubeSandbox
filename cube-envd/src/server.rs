@@ -293,6 +293,8 @@ pub struct ServerRuntime {
     lifecycle: Arc<LifecycleState>,
     readiness_checks: Vec<Arc<dyn ReadinessCheck>>,
     critical_tasks: Vec<CriticalTask>,
+    start_command: String,
+    cgroup_root: String,
 }
 
 impl ServerRuntime {
@@ -301,7 +303,19 @@ impl ServerRuntime {
             lifecycle,
             readiness_checks: Vec::new(),
             critical_tasks: Vec::new(),
+            start_command: String::new(),
+            cgroup_root: "/sys/fs/cgroup".into(),
         }
+    }
+
+    pub fn with_start_command(mut self, command: String) -> Self {
+        self.start_command = command;
+        self
+    }
+
+    pub fn with_cgroup_root(mut self, root: String) -> Self {
+        self.cgroup_root = root;
+        self
     }
 
     pub fn with_readiness_check(mut self, check: Arc<dyn ReadinessCheck>) -> Self {
@@ -325,6 +339,10 @@ impl Default for ServerRuntime {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
+    #[error("cgroup setup failed: {0}")]
+    Cgroup(String),
+    #[error(transparent)]
+    Process(#[from] crate::error::DomainError),
     #[error("server I/O failure")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -441,13 +459,47 @@ pub async fn run_server_with_runtime(
     mut runtime: ServerRuntime,
 ) -> Result<(), ServerError> {
     let lifecycle = runtime.lifecycle;
+    let processes = Arc::new(crate::process::ProcessManager::with_cgroup_root(
+        runtime.cgroup_root,
+    ));
+    processes
+        .initialize_cgroups()
+        .await
+        .map_err(|error| ServerError::Cgroup(error.to_string()))?;
     let listener_check = Arc::new(ListenerCheck::new());
     runtime.readiness_checks.push(listener_check.clone());
-    let app_state = transport::new_server_state(
+    let app_state = transport::new_server_state_with_processes(
         lifecycle.clone(),
         runtime.readiness_checks,
         !config.is_not_fc,
+        processes,
     );
+    if !runtime.start_command.is_empty() {
+        use crate::proto::process::{ProcessConfig, StartRequest};
+        // Use the same managed spawn and wait owner as public Start. Dropping
+        // the output subscription does not abandon process reaping.
+        app_state
+            .processes
+            .start(
+                StartRequest {
+                    process: ProcessConfig {
+                        cmd: "/bin/bash".into(),
+                        args: vec!["-l".into(), "-c".into(), runtime.start_command],
+                        cwd: Some("/home/user".into()),
+                        ..Default::default()
+                    }
+                    .into(),
+                    tag: Some("startCmd".into()),
+                    ..Default::default()
+                },
+                &http::HeaderMap::new(),
+                app_state.runtime.snapshot().await,
+                &app_state.users,
+                lifecycle.clone(),
+            )
+            .await?;
+    }
+
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     listener_check.attach(listener.as_raw_fd());

@@ -26,6 +26,10 @@ pub enum DomainError {
     FailedPrecondition(String),
     #[error("{0}")]
     UnknownMessage(String),
+    #[error(
+        "error closing stdin: cannot close stdin for PTY process — send Ctrl+D (0x04) instead"
+    )]
+    PtyCloseUnsupported,
     #[error("internal error")]
     Internal,
     #[error("{0}")]
@@ -49,9 +53,10 @@ impl DomainError {
             Self::ResourceExhausted(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Unimplemented(_) => StatusCode::NOT_IMPLEMENTED,
             Self::FailedPrecondition(_) => StatusCode::BAD_REQUEST,
-            Self::UnknownMessage(_) | Self::Internal | Self::InternalMessage(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            Self::PtyCloseUnsupported
+            | Self::UnknownMessage(_)
+            | Self::Internal
+            | Self::InternalMessage(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Cancelled => StatusCode::REQUEST_TIMEOUT,
             Self::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
@@ -68,7 +73,7 @@ impl DomainError {
             Self::ResourceExhausted(_) => ErrorCode::ResourceExhausted,
             Self::Unimplemented(_) => ErrorCode::Unimplemented,
             Self::FailedPrecondition(_) => ErrorCode::FailedPrecondition,
-            Self::UnknownMessage(_) => ErrorCode::Unknown,
+            Self::PtyCloseUnsupported | Self::UnknownMessage(_) => ErrorCode::Unknown,
             Self::Internal | Self::InternalMessage(_) => ErrorCode::Internal,
             Self::Unavailable => ErrorCode::Unavailable,
             Self::Cancelled => ErrorCode::Canceled,
@@ -87,6 +92,7 @@ impl DomainError {
             Self::Unimplemented(msg) => msg,
             Self::FailedPrecondition(msg) => msg,
             Self::UnknownMessage(message) => message,
+            Self::PtyCloseUnsupported => "error closing stdin: cannot close stdin for PTY process — send Ctrl+D (0x04) instead",
             Self::Internal => "internal error",
             Self::InternalMessage(message) => message,
             Self::Unavailable => "unavailable",

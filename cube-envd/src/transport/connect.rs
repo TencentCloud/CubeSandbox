@@ -238,3 +238,199 @@ async fn rpc_transport(
     }
     response
 }
+
+use connectrpc::{ConnectError, RequestContext, ServiceRequest, ServiceResult};
+
+use crate::proto::process::{
+    CloseStdinRequest, CloseStdinResponse, ConnectRequest, ConnectResponse, ListRequest,
+    ListResponse, Process as ProcessRpc, SendInputRequest, SendInputResponse, SendSignalRequest,
+    SendSignalResponse, StartRequest, StartResponse, StreamInputRequest, StreamInputResponse,
+    UpdateRequest, UpdateResponse,
+};
+
+fn process_io_error(error: crate::error::DomainError) -> ConnectError {
+    let code = if matches!(error, crate::error::DomainError::FailedPrecondition(_)) {
+        connectrpc::ErrorCode::Internal
+    } else {
+        error.connect_code()
+    };
+    ConnectError::new(code, error.public_message())
+}
+
+pub struct ProcessConnectService(pub std::sync::Arc<super::rest::AppState>);
+
+#[allow(refining_impl_trait)]
+impl ProcessRpc for ProcessConnectService {
+    async fn list(
+        &self,
+        _ctx: RequestContext,
+        _req: ServiceRequest<'_, ListRequest>,
+    ) -> ServiceResult<ListResponse> {
+        let response = self
+            .0
+            .processes
+            .list()
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        connectrpc::Response::ok(response)
+    }
+
+    async fn connect(
+        &self,
+        ctx: RequestContext,
+        req: ServiceRequest<'_, ConnectRequest>,
+    ) -> ServiceResult<connectrpc::ServiceStream<ConnectResponse>> {
+        let deadline = super::timeout::subscription_deadline(&ctx)?;
+        let interval = crate::process::output::keepalive(ctx.headers())
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        let subscription = self
+            .0
+            .processes
+            .connect(req.to_owned_message())
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        use futures::StreamExt;
+        connectrpc::Response::ok(super::timeout::with_subscription_deadline(
+            Box::pin(subscription.stream(interval).map(|event| {
+                event.map(|event| ConnectResponse {
+                    event: event.into(),
+                    ..Default::default()
+                })
+            })) as connectrpc::ServiceStream<ConnectResponse>,
+            deadline,
+        ))
+    }
+
+    async fn start(
+        &self,
+        ctx: RequestContext,
+        req: ServiceRequest<'_, StartRequest>,
+    ) -> ServiceResult<connectrpc::ServiceStream<StartResponse>> {
+        let deadline = super::timeout::subscription_deadline(&ctx)?;
+        let interval = crate::process::output::keepalive(ctx.headers())
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        let mut headers = ctx.headers().clone();
+        if let Some(timeout) = ctx.extensions().get::<super::timeout::ProcessTimeout>() {
+            headers.insert("connect-timeout-ms", timeout.0.clone());
+        }
+        let snapshot = self.0.runtime.snapshot().await;
+        let subscription = self
+            .0
+            .processes
+            .start(
+                req.to_owned_message(),
+                &headers,
+                snapshot,
+                &self.0.users,
+                self.0.lifecycle.clone(),
+            )
+            .await
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        use futures::StreamExt;
+        connectrpc::Response::ok(super::timeout::with_subscription_deadline(
+            Box::pin(subscription.stream(interval).map(|event| {
+                event.map(|event| StartResponse {
+                    event: event.into(),
+                    ..Default::default()
+                })
+            })) as connectrpc::ServiceStream<StartResponse>,
+            deadline,
+        ))
+    }
+
+    async fn update(
+        &self,
+        _ctx: RequestContext,
+        req: ServiceRequest<'_, UpdateRequest>,
+    ) -> ServiceResult<UpdateResponse> {
+        self.0
+            .processes
+            .update(req.to_owned_message())
+            .map_err(process_io_error)?;
+        connectrpc::Response::ok(Default::default())
+    }
+
+    async fn stream_input(
+        &self,
+        _ctx: RequestContext,
+        mut req: connectrpc::InboundStream<StreamInputRequest>,
+    ) -> ServiceResult<StreamInputResponse> {
+        use crate::proto::process::stream_input_request::Event;
+        use futures::StreamExt;
+        let mut target = None;
+        while let Some(message) = req.next().await {
+            let message = message.map_err(|error| {
+                ConnectError::new(
+                    connectrpc::ErrorCode::Unknown,
+                    format!("error streaming input: {error}"),
+                )
+            })?;
+            match message.to_owned_message().event {
+                Some(Event::Start(start)) => {
+                    target = Some(
+                        self.0
+                            .processes
+                            .input_target(&start.process)
+                            .map_err(process_io_error)?,
+                    );
+                }
+                Some(Event::Data(data)) => {
+                    let target = target.as_ref().ok_or_else(|| {
+                        ConnectError::new(
+                            connectrpc::ErrorCode::Internal,
+                            "input received before start",
+                        )
+                    })?;
+                    target
+                        .send(data.input.into_option())
+                        .await
+                        .map_err(process_io_error)?;
+                }
+                Some(Event::Keepalive(_)) => {}
+                None => {
+                    return Err(ConnectError::new(
+                        connectrpc::ErrorCode::Unimplemented,
+                        "invalid event type <nil>",
+                    ))
+                }
+            }
+        }
+        connectrpc::Response::ok(Default::default())
+    }
+
+    async fn send_input(
+        &self,
+        _ctx: RequestContext,
+        req: ServiceRequest<'_, SendInputRequest>,
+    ) -> ServiceResult<SendInputResponse> {
+        self.0
+            .processes
+            .send_input(req.to_owned_message())
+            .await
+            .map_err(process_io_error)?;
+        connectrpc::Response::ok(Default::default())
+    }
+
+    async fn send_signal(
+        &self,
+        _ctx: RequestContext,
+        req: ServiceRequest<'_, SendSignalRequest>,
+    ) -> ServiceResult<SendSignalResponse> {
+        self.0
+            .processes
+            .send_signal(req.to_owned_message())
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        connectrpc::Response::ok(Default::default())
+    }
+
+    async fn close_stdin(
+        &self,
+        _ctx: RequestContext,
+        req: ServiceRequest<'_, CloseStdinRequest>,
+    ) -> ServiceResult<CloseStdinResponse> {
+        self.0
+            .processes
+            .close_stdin(req.to_owned_message())
+            .await
+            .map_err(|error| ConnectError::new(error.connect_code(), error.public_message()))?;
+        connectrpc::Response::ok(Default::default())
+    }
+}
