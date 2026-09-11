@@ -41,7 +41,6 @@ const (
 
 	comparisonRateThreshold    = 0.005
 	comparisonLatencyThreshold = 1.0
-	comparisonSuccessEpsilon   = 1e-9
 
 	// UnknownRevision is the normalized value recorded when the caller could
 	// not determine the source revision. It does not distinguish code
@@ -710,7 +709,7 @@ func verifyComparisons(comparisons []ComparisonResult, results map[string]map[st
 			return fmt.Errorf("verify default benchmark: %s/%s regressed_metrics = %v, want %v from its own deltas",
 				cmp.CandidateProfile, cmp.Workload, cmp.RegressedMetrics, regressed)
 		}
-		successDeclined := cmp.Deltas["schedule_success_rate"] < -comparisonSuccessEpsilon
+		successDeclined := classifyDelta("schedule_success_rate", cmp.Deltas["schedule_success_rate"]) == ComparisonRegressed
 		if wantResult := classifyComparison(successDeclined, improved, regressed); cmp.Result != wantResult {
 			return fmt.Errorf("verify default benchmark: %s/%s result = %q, want %q from its own deltas",
 				cmp.CandidateProfile, cmp.Workload, cmp.Result, wantResult)
@@ -880,7 +879,7 @@ func buildComparisons(cfg Config, results []ProfileResult) []ComparisonResult {
 func compareAgainstBaseline(workload, candidate string, baseline, metrics Metrics) ComparisonResult {
 	deltas := comparisonDeltas(baseline, metrics)
 	improved, regressed := classifyDeltas(deltas)
-	successDeclined := deltas["schedule_success_rate"] < -comparisonSuccessEpsilon
+	successDeclined := classifyDelta("schedule_success_rate", deltas["schedule_success_rate"]) == ComparisonRegressed
 	result := classifyComparison(successDeclined, improved, regressed)
 
 	return ComparisonResult{

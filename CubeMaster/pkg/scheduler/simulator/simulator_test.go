@@ -952,6 +952,52 @@ func TestRunIDIncludesEffectiveSelectionAndProvenance(t *testing.T) {
 	}
 }
 
+func TestClassifyComparisonUsesSharedSuccessRateThreshold(t *testing.T) {
+	t.Parallel()
+
+	// A success-rate dip inside the documented rate threshold must stay
+	// neutral overall. The old 1e-9 epsilon treated it as successDeclined and
+	// forced regressed/trade_off while classifyDelta still called it neutral.
+	subThreshold := map[string]float64{
+		"schedule_success_rate":      -(comparisonRateThreshold / 2),
+		"cpu_quota_utilization":      0,
+		"mem_quota_utilization":      0,
+		"node_load_balance":          0,
+		"template_locality_hit_rate": 0,
+		"create_latency_p50_ms":      0,
+		"create_latency_p95_ms":      0,
+	}
+	improved, regressed := classifyDeltas(subThreshold)
+	successDeclined := classifyDelta("schedule_success_rate", subThreshold["schedule_success_rate"]) == ComparisonRegressed
+	if successDeclined {
+		t.Fatalf("successDeclined = true for delta %v, want false under comparisonRateThreshold=%v",
+			subThreshold["schedule_success_rate"], comparisonRateThreshold)
+	}
+	if got := classifyComparison(successDeclined, improved, regressed); got != ComparisonNeutral {
+		t.Fatalf("classifyComparison() = %q, want %q for sub-threshold success dip", got, ComparisonNeutral)
+	}
+
+	atThreshold := map[string]float64{
+		"schedule_success_rate":      -comparisonRateThreshold,
+		"cpu_quota_utilization":      0,
+		"mem_quota_utilization":      0,
+		"node_load_balance":          0,
+		"template_locality_hit_rate": 0,
+		"create_latency_p50_ms":      0,
+		"create_latency_p95_ms":      0,
+	}
+	improved, regressed = classifyDeltas(atThreshold)
+	successDeclined = classifyDelta("schedule_success_rate", atThreshold["schedule_success_rate"]) == ComparisonRegressed
+	// Abs(delta) < threshold is neutral; exactly at threshold is a decline.
+	if !successDeclined {
+		t.Fatalf("successDeclined = false for delta %v, want true at comparisonRateThreshold",
+			atThreshold["schedule_success_rate"])
+	}
+	if got := classifyComparison(successDeclined, improved, regressed); got != ComparisonRegressed {
+		t.Fatalf("classifyComparison() = %q, want %q for at-threshold success dip", got, ComparisonRegressed)
+	}
+}
+
 func TestRunIDUsesNormalizedProvenance(t *testing.T) {
 	clean := false
 	withWhitespace, err := Run(Config{
