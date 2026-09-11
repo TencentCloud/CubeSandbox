@@ -33,12 +33,25 @@ docker run -d --name envd-rust -p 127.0.0.1:49984:49983 \
   -v $PWD/../../../_output/bin/cube-envd:/usr/bin/cube-envd:ro \
   -e ENVD_BIN=/usr/bin/cube-envd $BASE_IMAGE
 
-# 2. Capture fixtures from both (fresh containers matter: scenarios mutate
-#    the filesystem, and both sides must see identical starting state).
+# 2. Capture fixtures. Two groups, and each needs its own freshly started
+#    containers: `capture.py all` installs an access token through /init, after
+#    which every watch RPC answers 401, and both groups mutate the filesystem,
+#    so they cannot share a container in either order.
+#
+# 2a. Watch group — on the containers started in step 1, before anything has
+#     called /init.
+ENVD_BASE=http://127.0.0.1:49985 OUTDIR=fixtures-go-w   python3 capture.py watch
+ENVD_BASE=http://127.0.0.1:49984 OUTDIR=fixtures-rust-w python3 capture.py watch
+python3 conformance.py fixtures-go-w fixtures-rust-w
+
+# 2b. Main group — restart both containers first (same docker run as step 1).
+docker rm -f envd-go2 envd-rust
+# <repeat the two docker run commands above>
 ENVD_BASE=http://127.0.0.1:49985 OUTDIR=fixtures-go   python3 capture.py all
 ENVD_BASE=http://127.0.0.1:49984 OUTDIR=fixtures-rust python3 capture.py all
 
 # 3. Diff. Exit code 0 = conformant (declared differences excluded).
+#    Main group: 122 fixtures. Watch group: 9.
 python3 conformance.py fixtures-go fixtures-rust
 
 # 4. Lifecycle regression against cube-envd. The default is :49984; ENVD_BASE
@@ -53,9 +66,11 @@ python3 perf.py
 
 - `PASS` — normalized fixtures identical.
 - `DECLARED-DIFF` — allowlisted in `conformance.py` `DECLARED_DIFFERENT`
-  with a reason; every entry maps to the "known differences" table in the
-  cube-envd design doc / PR description (watch, `/files/compose`,
-  gzip, nested-selector error differences, parser-specific error wording).
+  with a reason. There are four: gzip download encoding and `/files/compose`
+  (both unimplemented here), `fs_bad_json` (the JSON parse wording is
+  parser-specific; code and status still match), and
+  `rest_init_timestamp_out_of_range` (upstream's `UnixNano()` wraps and drops
+  the request as stale; cube-envd rejects it as a caller bug).
 - `FAIL` — a real behavioral divergence; fix cube-envd or, if the change
   is intentional, move it to the allowlist **with a reason** in the same PR.
 
@@ -67,7 +82,7 @@ python3 perf.py
 | error | bad user (REST 401 / RPC unauthenticated), missing paths, directory download, missing binary (127), malformed JSON |
 | timeout | `Connect-Timeout-Ms` expiry → `deadline_exceeded` + process killed, including an unread response whose output queue is full |
 | cancellation | client disconnect mid-stream → process keeps running (List + side-effect check) |
-| unimplemented | watch family / compose answer with stable protocol-correct errors |
+| unimplemented | `/files/compose` answers with a stable protocol-correct error; the watch family, listed here while it was still unimplemented, now has its own capture group (see **Running**) |
 
 ## Termination metadata extension
 

@@ -2,8 +2,6 @@
 
 CubeSandbox-maintained in-guest data-plane daemon, protocol-compatible with
 the E2B envd that CubeSandbox previously consumed from `e2b-dev/infra`.
-Implements the MVP scope agreed in
-[issue #1227](https://github.com/TencentCloud/CubeSandbox/issues/1227).
 
 ## Why
 
@@ -15,6 +13,97 @@ Hyperloop, NFS volume init). cube-envd replaces it with a small
 CubeSandbox-owned Rust implementation; the upstream Go envd remains available
 as an explicit rollback through the existing `ENVD_BIN` switch in
 `docker/cube-entrypoint.sh`.
+
+## Design
+
+The tree is a contract index and a dependency graph: a path states what is
+promised, an edge states who may call whom. Six layers, one allowed direction:
+
+```
+app -> {filesystem, process} -> platform -> protocol -> compat
+```
+
+```
+cube-envd/                            the component directory; everything below is inside it
+├── spec/                             protocol snapshots the wire types mirror
+│   ├── filesystem/
+│   │   └── filesystem.proto
+│   ├── process/
+│   │   └── process.proto
+│   └── envd.yaml
+├── src/
+│   ├── app/                          HTTP surface and startup wiring
+│   │   ├── middleware/               cors.rs, legacy.rs (X-E2B-Legacy-SDK)
+│   │   ├── cli.rs                    Go-flag-compatible CLI
+│   │   ├── handlers.rs               Connect + REST handler bodies
+│   │   ├── lifecycle.rs              /init /health /envs, timestamps
+│   │   ├── metrics.rs                /metrics
+│   │   ├── mod.rs
+│   │   ├── pool.rs                   blocking-thread pool
+│   │   ├── routes.rs                 the whole URL surface
+│   │   └── state.rs                  AppState { config, processes }
+│   ├── compat/                       Go stdlib emulation, as data
+│   │   ├── mod.rs
+│   │   └── vocab.rs                  go1.26 errno text table
+│   ├── filesystem/                   filesystem domain
+│   │   ├── http/                     content_disposition, encoding, httpdate, preconditions, ranges
+│   │   ├── watch/                    inotify.rs, tree.rs, pump.rs
+│   │   ├── data_plane_tests.rs       data-plane tests
+│   │   ├── download.rs
+│   │   ├── entry.rs                  disk metadata -> EntryInfo
+│   │   ├── errors.rs                 error -> gRPC status mapping
+│   │   ├── mod.rs                    stat / listDir / makeDir / move / remove
+│   │   ├── upload.rs
+│   │   └── wire.rs                   filesystem.proto shapes (pure data)
+│   ├── platform/                     host-facing services shared by both domains
+│   │   ├── config.rs                 env defaults, token, /init time
+│   │   ├── identity.rs               user/group lookup, path anchoring
+│   │   ├── lock.rs                   poison-recovering lock helpers
+│   │   └── mod.rs
+│   ├── process/                      process domain
+│   │   ├── cgroup/                   cgroup2.rs, noop.rs
+│   │   ├── engine/                   spawn.rs, io.rs, pty.rs, cleanup.rs
+│   │   ├── command.rs                Start / Connect / List / SendInput / ...
+│   │   ├── metadata.rs
+│   │   ├── mod.rs
+│   │   ├── pump.rs
+│   │   ├── supervisor.rs             one process: spawn, signals, exit
+│   │   ├── table.rs                  process table, output, cgroup leaves
+│   │   └── wire.rs                   process.proto shapes (pure data)
+│   ├── protocol/                     Connect wire layer, transport-independent
+│   │   ├── error.rs                  error model + HTTP status mapping
+│   │   ├── frames.rs                 envelope codec, unary + stream
+│   │   ├── keepalive.rs
+│   │   ├── mod.rs
+│   │   ├── stream.rs
+│   │   └── timeout.rs
+│   └── main.rs                       entry: wiring, signals, exit code
+├── Cargo.lock                        locked dependency set
+├── Cargo.toml                        crate manifest
+├── Makefile                          component targets; the repo Makefile wraps them
+└── rust-toolchain.toml               pinned toolchain
+```
+
+`spec/` is the protocol snapshot the `wire.rs` files mirror, and `tests/` holds
+the layer assertion below. Directories come first within each level, then files,
+each group alphabetically — the order an editor or GitHub renders the directory
+in. Every path in the block resolves, and leaf directories with one uniform
+purpose are summarised in the annotation rather than expanded. Not listed: `target/`
+(cargo's build directory, ignored by `cube-envd/.gitignore`), `.gitignore`
+itself, and this README.
+
+`filesystem/` and `process/` never reference each other, and nothing below
+`app/` reaches back into it. That is enforced rather than merely intended:
+`tests/layer_rule.rs` reads `src/` and fails the suite on a forbidden module
+path, so an inverted edge cannot land while `cargo test`, `clippy` and `fmt`
+stay green.
+
+Notable protocol details preserved from the baseline: proto3 JSON emits
+camelCase and omits default values (`exitCode:0` disappears; SDKs recover it
+from `status`), int64 fields serialize as strings, oneofs are flat
+(`{"process":{"pid":1}}`), streaming errors always ride the EndStream frame
+on HTTP 200, and a signal-killed process reports `exitCode:-1` with
+`status:"signal: killed"`.
 
 ## Compatibility scope
 
@@ -29,7 +118,7 @@ Implemented (behavior matched fixture-by-fixture against the baseline):
 |---|---|
 | REST | `GET /health` (204), `POST /init` (envVars merge + optional accessToken), `GET /envs`, `GET /metrics`, `GET/POST /files` (octet-stream + multipart, relative paths, ownership, error vocabulary) |
 | `process.Process` | `Start` (Connect JSON streaming: start/data/end events; optional pipe stdin defaults on; `pty` allocates a real pty with merged `data.pty` output, CRLF line discipline and initial window size; `cwd` validation and privilege drop; whole-group deadline cleanup; a client disconnect leaves the child running), `Connect` (attach by pid/tag from the current output head), `List`, `SendSignal`, `SendInput`, `StreamInput`, `CloseStdin` and `Update` |
-| `filesystem.Filesystem` | `Stat`, `ListDir` (BFS depth), `MakeDir` (ownership on every created component), `Move`, `Remove` (idempotent), `WatchDir` (Connect server streaming: `start`/`keepalive`/`filesystem` events; fsnotify-faithful op mapping with the fixed expansion order; per-directory inotify watches with optional full recursion incl. synthetic creates for pre-existing subtrees and cookie-paired rename path rewrites), `CreateWatcher` / `GetWatcherEvents` / `RemoveWatcher` (pull watchers with id lifecycle) |
+| `filesystem.Filesystem` | `Stat`, `ListDir` (depth-limited; lexical, depth-first `filepath.WalkDir` order), `MakeDir` (ownership on every created component), `Move`, `Remove` (idempotent), `WatchDir` (Connect server streaming: `start`/`keepalive`/`filesystem` events; fsnotify-faithful op mapping with the fixed expansion order; per-directory inotify watches with optional full recursion incl. synthetic creates for pre-existing subtrees and cookie-paired rename path rewrites), `CreateWatcher` / `GetWatcherEvents` / `RemoveWatcher` (pull watchers with id lifecycle) |
 | CLI | Go `flag` compatible: `-port` (u16, `-port N` or `-port=N`), `-isnotfc` (accepted and ignored; `-isnotfc=false` is **rejected** — only the non-FC mode is implemented), `-version`/`--version`, `-commit`, `-h`/`-help` (usage, exit 0); `-cmd`/`-cgroup-root` are recognized but not implemented yet (warned and skipped); **any other flag or positional argument is a usage error — Go's message + usage on stderr + exit 2** |
 | Auth | `Authorization: Basic base64("<user>:")` / `username` query, `/etc/passwd` resolution, default user `root`, privilege drop per operation, `X-Access-Token` enforced only after /init provides one |
 
@@ -129,7 +218,7 @@ baseline (asserted by the conformance fixtures, not allowlisted):
 Everything runs inside the repo builder container:
 
 ```bash
-make cube-envd        # → _output/bin/cube-envd (static musl, ~2.6 MB)
+make cube-envd        # → _output/bin/cube-envd (static musl, ~3.2 MiB)
 make cube-envd-test   # cargo test + clippy -D warnings
 ```
 
@@ -159,30 +248,6 @@ documented in [tests/e2e/envd_conformance](../tests/e2e/envd_conformance/).
   daemon surface now implements the watch family; 0.1.0 keeps the e2b SDK
   watch-related feature gates safely disabled — enabling them is an SDK-side
   change outside the daemon's scope.
-
-## Design
-
-Module layout mirrors the protocol split:
-
-```
-src/
-├── main.rs        CLI + runtime bootstrap
-├── server.rs      single-port router (REST + two Connect services)
-├── connect.rs     Connect JSON codec: unary bodies + 5-byte stream envelopes
-├── auth.rs        Basic auth / username query → /etc/passwd, path anchoring
-├── state.rs       /init env store, access token, process table
-├── exec.rs        spawn + privilege drop + stdout/stderr pump
-├── rest/          /health /init /envs /metrics /files
-├── services/      process.Process, filesystem.Filesystem
-└── msg/           hand-written proto3-JSON serde types (spec/ snapshots)
-```
-
-Notable protocol details preserved from the baseline: proto3 JSON emits
-camelCase and omits default values (`exitCode:0` disappears; SDKs recover it
-from `status`), int64 fields serialize as strings, oneofs are flat
-(`{"process":{"pid":1}}`), streaming errors always ride the EndStream frame
-on HTTP 200, and a signal-killed process reports `exitCode:-1` with
-`status:"signal: killed"`.
 
 ## Process termination metadata and cgroup policy
 
@@ -220,8 +285,10 @@ Configuration:
   `min(total/8, 128 MiB)` from the effective guest/parent memory ceiling.
 
 A Start timeout kills the command, publishes the real EndEvent, then emits a
-`deadline_exceeded` trailer. Connect ignores `Connect-Timeout-Ms`: it is an
-attachment and remains until the process ends or the client disconnects; the
-client SDKs may still apply their own idle/request timeout. Python Commands always uses the in-house
+`deadline_exceeded` trailer. `Connect-Timeout-Ms` bounds the attachment, not
+the process: on expiry the stream ends with a `deadline_exceeded` trailer while
+the command keeps running, and without the header the attachment remains until
+the process ends or the client disconnects. The client SDKs may still apply
+their own idle/request timeout. Python Commands always uses the in-house
 Connect-JSON decoder, regardless of whether the E2B package is installed;
 Go Commands copies termination fields into the public CommandResult.

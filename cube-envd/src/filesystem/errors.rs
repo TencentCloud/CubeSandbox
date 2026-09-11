@@ -16,10 +16,9 @@ use crate::protocol::RestError;
 /// Upstream envd's upload handler is unbounded (it streams to disk); in
 /// production the cap is enforced by the proxy layer, which rejects bodies
 /// over 256 MiB. Mirroring that external cap keeps the 64 MiB - 256 MiB
-/// range functional (a proxy-passed 100 MiB upload must succeed here too)
-/// while still bounding memory: unlike upstream, the body is buffered
-/// before the atomic temp-file write, so the cap is also the memory
-/// ceiling. (Streaming to disk would remove that trade-off — future work.)
+/// range functional (a proxy-passed 100 MiB upload must succeed here too).
+/// Both upload paths stream into the target file in place, so in steady state
+/// the cap bounds the request body, not resident memory.
 /// Deliberately NOT `protocol::MAX_ENVELOPE_SIZE` (64 MiB): that constant
 /// bounds Connect envelopes, not file uploads.
 pub(crate) const MAX_UPLOAD_SIZE: usize = 256 * 1024 * 1024;
