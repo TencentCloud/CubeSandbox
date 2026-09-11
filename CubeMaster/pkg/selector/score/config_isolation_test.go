@@ -19,9 +19,10 @@ const isolatedScoreConfigTestEnv = "CUBEMASTER_ISOLATED_SCORE_CONFIG_TEST"
 // process. The child owns any watcher and package-global config created by Init.
 //
 // Constraints / CI caveats:
-//   - The child is exec'd as os.Args[0] with only -test.run / -test.count; parent
-//     flags such as -test.timeout, -test.shuffle, and -test.v are intentionally
-//     not forwarded.
+//   - The child is exec'd via CommandContext(t.Context()) as os.Args[0] with
+//     only -test.run / -test.count; parent flags such as -test.timeout,
+//     -test.shuffle, and -test.v are intentionally not forwarded (the context
+//     still cancels the child when the parent test ends).
 //   - os.Args[0] must be a directly runnable test binary (breaks under some
 //     -exec wrappers or restricted CI sandboxes that replace the runner).
 //   - Each isolated test roughly doubles wall time versus an in-process call.
@@ -38,7 +39,8 @@ func runIsolatedScoreConfigTest(t *testing.T) bool {
 		}
 	})
 
-	cmd := exec.Command(
+	cmd := exec.CommandContext(
+		t.Context(),
 		os.Args[0],
 		"-test.run=^"+regexp.QuoteMeta(t.Name())+"$",
 		"-test.count=1",

@@ -51,16 +51,20 @@ func NewSelector(ctx context.Context) []Selector {
 		if registration.factors != nil {
 			factors := registration.factors(conf.Score.ScorePluginConf)
 			if len(factors) == 0 {
-				log.G(ctx).Warnf("scheduler score selector %s skipped: missing plugin_conf or empty enable_weight_factors (empty profile keeps load; fix plugin_conf to activate)", name)
+				// Missing plugin_conf is rejected at config.Init for listed
+				// factor scorers; remaining skips are empty/ineffective factor
+				// lists on the empty-profile path. Errorf so operators notice
+				// an unscored scheduler instead of a single Warn line.
+				log.G(ctx).Errorf("scheduler score selector %s skipped: missing plugin_conf or empty enable_weight_factors (fix plugin_conf to activate)", name)
 				continue
 			}
 			if !hasEffectiveFactorWeight(conf.Score, factors) {
-				log.G(ctx).Warnf("scheduler score selector %s skipped: no positive resource weight for its enabled factors", name)
+				log.G(ctx).Errorf("scheduler score selector %s skipped: no positive resource weight for its enabled factors", name)
 				continue
 			}
 		}
 		if registration.requiresPluginConf != nil && !registration.requiresPluginConf(conf.Score.ScorePluginConf) {
-			log.G(ctx).Warnf("scheduler score selector %s skipped: required plugin_conf is missing", name)
+			log.G(ctx).Errorf("scheduler score selector %s skipped: required plugin_conf is missing", name)
 			continue
 		}
 		ss = append(ss, registration.new())

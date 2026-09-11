@@ -124,14 +124,17 @@ Profile 恢复必要准入项。
 `affinity_score`、`image_score` 以及 `binpack_score`），插件级
 `weight: 0`（或 `disable: true`）会禁用该评分器并跳过其 `Select`。由于 `weight`
 是 YAML `float64`，在已存在的 `plugin_conf.<scorer>` 块中省略 `weight` 键也会解码为
-`0` 并禁用该评分器。要保持评分器活跃，请显式设置正的 `weight`。省略整个
-`plugin_conf.<scorer>` 块则不同：在非空 Profile 且启用了该评分器时，缺失块会校验失败
-（内置在指针仍为 `nil` 时可能注入默认）；空 Profile 下部分评分器保留遗留默认行为。
+`0` 并禁用该评分器。要保持评分器活跃，请显式设置正的 `weight`。**负的**插件
+`weight` 会对所有已注册评分器在配置加载阶段拒绝（不只是 `binpack_score`）；
+升级前能带着负权重启动的配置，升级后会在 `config.Init` 失败。在
+`enable_scorers` 中列出因子型 / affinity 评分器但省略整个 `plugin_conf.<scorer>`
+块时，配置加载也会失败（空 Profile 同样适用）。`binpack_score` 可省略该块并
+保留运行时默认；非空 Profile 下内置在指针仍为 `nil` 时可能注入默认。
 
 **`binpack_score` 占用权重。** `cpu_weight` / `mem_weight` / `mvm_weight` 取值
 `<= 0` 时，运行时回退为默认 `1`。**不能**通过把某维因子权重设为 `0` 来排除该维。
-只有插件级 `weight: 0`（或 `disable: true`）才会禁用该评分器。负的插件 `weight`
-在配置加载时失败（`validateBinpackScoreWeight`）。不要把 `binpack_score` 与
+只有插件级 `weight: 0`（或 `disable: true`）才会禁用该评分器。负的 binpack
+子权重与负的插件 `weight` 在配置加载时失败。不要把 `binpack_score` 与
 剩余容量 / spread 评分器放进同一 `enable_scorers`：占用率极性与
 `real_time_weighted_average` / `multi_factor_weighted_average` 相反，加权后会抵消。
 内置 `binpack_utilization` 只启用 `binpack_score`。
@@ -141,7 +144,8 @@ Profile 恢复必要准入项。
 `multi_factor_weighted_average`、`image_score`）都要求非空的
 `enable_weight_factors`，且这些因子中至少有一个正的 `resource_weights` 项。空或省略的
 因子列表，或全部为零/缺失的因子权重，会在调度器运行前于 `preHandleScheduler`
-中失败关闭。
+中失败关闭。空 Profile 下，已有但无效的因子列表会在选择器构造时以 Error 日志
+跳过，而不是让 Init 失败。
 
 **MVM 占用容量。** `binpack_score`（以及共享同一 helper 的其他评分器）使用
 `localcache.MaxMvmLimit(n)` 计算 MVM 占用——该 helper 是权威的按节点容量回退

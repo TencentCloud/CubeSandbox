@@ -448,15 +448,19 @@ scheduler:
 `, scorer)
 			_, err := initConfigFromYAML(t, yamlBody)
 			assert.Error(t, err)
-			assert.Contains(t, err.Error(), "missing_plugin")
 			assert.Contains(t, err.Error(), "plugin_conf."+scorer)
+			assert.Contains(t, err.Error(), "is missing")
+			// Factor/affinity fail in validateListedScorerPluginConfPresent;
+			// binpack (exempt there) still fails via Profile-scoped validation.
+			if scorer == "binpack_score" {
+				assert.Contains(t, err.Error(), "missing_plugin")
+			}
 		})
 	}
 }
 
 func TestInit_DirectEnabledScorerMissingPluginConfigAllowedWithoutProfile(t *testing.T) {
-	// Empty-profile legacy path: missing plugin_conf does not fail Init.
-	// (Constructors may still panic later; Profile path fail-fasts instead.)
+	// Empty-profile: binpack_score may omit plugin_conf and use runtime defaults.
 	yamlBody := `common: {}
 log: {}
 scheduler:
@@ -468,6 +472,28 @@ scheduler:
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"binpack_score"}, got.Scheduler.Score.EnableScorers)
 	assert.Nil(t, got.Scheduler.Score.ScorePluginConf.BinpackScore)
+}
+
+func TestInit_EmptyProfileMissingFactorPluginConfFails(t *testing.T) {
+	// Master NewSelector panicked when a listed factor scorer lacked plugin_conf.
+	// Fail at config load so the empty-profile path stays fail-closed.
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - real_time_weighted_average
+      - binpack_score
+    resource_weights:
+      realtime_create_num: 1
+    plugin_conf:
+      binpack_score:
+        weight: 1
+`
+	_, err := initConfigFromYAML(t, yamlBody)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "real_time_weighted_average")
+	assert.Contains(t, err.Error(), "plugin_conf.real_time_weighted_average is missing")
 }
 
 func TestInit_ProfileInheritedEnabledScorerMissingPluginConfigFailsFast(t *testing.T) {
@@ -486,9 +512,8 @@ scheduler:
 `
 	_, err := initConfigFromYAML(t, yamlBody)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "filters_only")
 	assert.Contains(t, err.Error(), "image_score")
-	assert.Contains(t, err.Error(), "plugin_conf.image_score")
+	assert.Contains(t, err.Error(), "plugin_conf.image_score is missing")
 }
 
 func TestInit_EmptySchedulerProfileDoesNotApplyBuiltin(t *testing.T) {

@@ -141,18 +141,22 @@ admission filters via a user Profile that lists them explicitly.
 `Select`. Because `weight` is a YAML `float64`, omitting the `weight` key
 inside a present `plugin_conf.<scorer>` block also decodes to `0` and
 disables the scorer. To keep a scorer active, set an explicit positive
-`weight`. Omitting the entire `plugin_conf.<scorer>` block is different:
-under a non-empty Profile that enables the scorer, a missing block fails
-validation (built-ins may inject defaults when the pointer is still
-`nil`); with an empty Profile, some scorers keep legacy defaults.
+`weight`. **Negative** plugin `weight` is rejected at config load for every
+registered scorer (not only `binpack_score`); configs that previously
+started with a negative weight fail `config.Init` after upgrade. Omitting
+the entire `plugin_conf.<scorer>` block while listing a factor/affinity
+scorer in `enable_scorers` also fails config load (empty Profile included).
+`binpack_score` may omit the block and keep runtime defaults; under a
+non-empty Profile, built-ins may inject defaults when the pointer is still
+`nil`.
 
 **`binpack_score` occupancy weights.** `cpu_weight` / `mem_weight` /
 `mvm_weight` values `<= 0` fall back to default `1` at runtime. You
 **cannot** exclude a dimension by setting its factor weight to `0`. Only
 the plugin-level `weight: 0` (or `disable: true`) disables the scorer.
-Negative plugin `weight` fails at config load (`validateBinpackScoreWeight`).
-Do not mix `binpack_score` with remaining-capacity / spread scorers in the
-same `enable_scorers` list; occupancy polarity is inverted relative to
+Negative binpack sub-weights and negative plugin `weight` fail at config
+load. Do not mix `binpack_score` with remaining-capacity / spread scorers in
+the same `enable_scorers` list; occupancy polarity is inverted relative to
 `real_time_weighted_average` / `multi_factor_weighted_average`, so the
 blend can cancel. Built-in `binpack_utilization` only enables `binpack_score`.
 
@@ -162,7 +166,9 @@ non-empty, each factor-based scorer in the final `enable_scorers` list
 `image_score`) requires a non-empty `enable_weight_factors` and at least
 one positive `resource_weights` entry for those factors. Empty or omitted
 factor lists, or all-zero / missing factor weights, fail closed in
-`preHandleScheduler` before the scheduler runs.
+`preHandleScheduler` before the scheduler runs. With an empty Profile, a
+present-but-ineffective factor list is logged at Error and skipped at
+selector construction rather than failing Init.
 
 **MVM occupancy capacity.** `binpack_score` (and other scorers that share
 the helper) compute MVM occupancy with `localcache.MaxMvmLimit(n)`, the
