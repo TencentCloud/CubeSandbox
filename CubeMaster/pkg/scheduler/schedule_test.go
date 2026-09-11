@@ -7,6 +7,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
@@ -156,7 +157,56 @@ func TestRunScoreFilterUsesWeightOncePerScorer(t *testing.T) {
 	}
 }
 
-func TestRunScoreFilterSkipsZeroWeightWithoutSelect(t *testing.T) {
+func TestRunScoreFilterZeroWeightStillSelects(t *testing.T) {
+	origPostScore := scheduler.postScore
+	defer func() {
+		scheduler.postScore = origPostScore
+	}()
+	scheduler.postScore = nil
+
+	nodeA := &node.Node{InsID: "node-a", MvmNum: 1}
+	nodeB := &node.Node{InsID: "node-b", MvmNum: 2}
+	selCtx := selctx.New("random")
+	selCtx.Ctx = context.Background()
+	selCtx.SetNodes(node.NodeList{nodeA, nodeB})
+
+	// Zero-weight scorer must still run Select so it can admit nodes (score 0)
+	// into the scored set — historical roster-scorer behaviour.
+	zero := &countingSelectSelector{
+		weight: 0,
+		scores: node.NodeScoreList{
+			{InsID: "node-b", Score: 99, MvmNum: nodeB.MvmNum, OrigNode: nodeB},
+		},
+	}
+	active := testScoreSelector{
+		weight: 1,
+		scores: node.NodeScoreList{
+			{InsID: "node-a", Score: 50, MvmNum: nodeA.MvmNum, OrigNode: nodeA},
+		},
+	}
+	if err := runScoreFilter(selCtx, []sscore.Selector{zero, active}); err != nil {
+		t.Fatalf("runScoreFilter() error = %v, want nil", err)
+	}
+	if zero.selects != 1 {
+		t.Fatalf("zero-weight Select calls = %d, want 1", zero.selects)
+	}
+	got := selCtx.LeastScoreNodes(-1)
+	if got.Len() != 2 {
+		t.Fatalf("len(score nodes) = %d, want 2 (zero-weight reshape)", got.Len())
+	}
+	byID := map[string]float64{}
+	for _, n := range got {
+		byID[n.ID()] = n.Score
+	}
+	if byID["node-a"] != 50 {
+		t.Fatalf("node-a score = %v, want 50", byID["node-a"])
+	}
+	if byID["node-b"] != 0 {
+		t.Fatalf("node-b score = %v, want 0 from zero-weight admit", byID["node-b"])
+	}
+}
+
+func TestRunScoreFilterSkipsNonFiniteWeight(t *testing.T) {
 	origPostScore := scheduler.postScore
 	defer func() {
 		scheduler.postScore = origPostScore
@@ -168,18 +218,18 @@ func TestRunScoreFilterSkipsZeroWeightWithoutSelect(t *testing.T) {
 	selCtx.Ctx = context.Background()
 	selCtx.SetNodes(node.NodeList{nodeA})
 
-	zero := &countingSelectSelector{weight: 0}
+	nan := &countingSelectSelector{weight: math.NaN()}
 	active := testScoreSelector{
 		weight: 1,
 		scores: node.NodeScoreList{
 			{InsID: "node-a", Score: 50, MvmNum: nodeA.MvmNum, OrigNode: nodeA},
 		},
 	}
-	if err := runScoreFilter(selCtx, []sscore.Selector{zero, active}); err != nil {
+	if err := runScoreFilter(selCtx, []sscore.Selector{nan, active}); err != nil {
 		t.Fatalf("runScoreFilter() error = %v, want nil", err)
 	}
-	if zero.selects != 0 {
-		t.Fatalf("zero-weight Select calls = %d, want 0", zero.selects)
+	if nan.selects != 0 {
+		t.Fatalf("NaN-weight Select calls = %d, want 0", nan.selects)
 	}
 	got := selCtx.LeastScoreNodes(-1)
 	if got.Len() != 1 || got[0].Score != 50 {
@@ -238,10 +288,14 @@ func (s *changingWeightSelector) Disable() bool { return false }
 type countingSelectSelector struct {
 	weight  float64
 	selects int
+	scores  node.NodeScoreList
 }
 
 func (s *countingSelectSelector) Select(*selctx.SelectorCtx) (node.NodeScoreList, error) {
 	s.selects++
+	if s.scores != nil {
+		return s.scores, nil
+	}
 	return node.NodeScoreList{{InsID: "node-a", Score: 1}}, nil
 }
 func (s *countingSelectSelector) ID() string      { return "counting_select" }

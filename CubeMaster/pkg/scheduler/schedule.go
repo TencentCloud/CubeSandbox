@@ -5,6 +5,7 @@
 package scheduler
 
 import (
+	"math"
 	"math/rand"
 	"runtime/debug"
 
@@ -187,12 +188,17 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 		if f.Disable() {
 			continue
 		}
-		// Sample Weight() before Select so a live-config scorer (external_http_score)
-		// cannot pay for an HTTP round trip and then be scaled by a different
-		// generation after a mid-attempt conf.yaml reload. Zero weight skips
-		// Select entirely, matching the documented "weight: 0 ⇒ inert" rule.
+		// Sample Weight() once before Select so a live-config scorer
+		// (external_http_score) cannot blend with a different generation after a
+		// mid-attempt conf.yaml reload. Do not skip Select for weight == 0:
+		// roster scorers historically still run and admit nodes with score 0
+		// (reshaping the candidate set for LeastRandomSelect). Skipping on
+		// omitted/zero float64 weights would change image_score / affinity_score
+		// / etc. external_http_score skips its HTTP round-trip inside Select.
 		w := f.Weight()
-		if w <= 0 {
+		// NaN/Inf/negative must not poison totalPluginWeight or node scores;
+		// w <= 0 is false for NaN, so reject non-finite / negative explicitly.
+		if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 {
 			continue
 		}
 		tmpResult, err := f.Select(selCtx)
