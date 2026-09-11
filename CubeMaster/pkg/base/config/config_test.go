@@ -6,15 +6,17 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
-
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -151,6 +153,28 @@ func TestPreHandleExternalHTTPScoreWeightDefault(t *testing.T) {
 	assert.NoError(t, preHandleScheduler(cfg))
 	assert.NotNil(t, set.Weight)
 	assert.Equal(t, 2.5, *set.Weight)
+}
+
+func TestExternalHTTPScoreMarshalJSONRedactsEndpointSecrets(t *testing.T) {
+	const sentinel = "secret-token-must-not-appear"
+	cfg := &ExternalHTTPScore{
+		Endpoint: "https://user:pass@sidecar.example/score?token=" + sentinel,
+		Timeout:  200 * time.Millisecond,
+		Mode:     "m",
+	}
+	body, err := json.Marshal(cfg)
+	assert.NoError(t, err)
+	got := string(body)
+	assert.NotContains(t, got, sentinel)
+	assert.NotContains(t, got, "user:pass")
+	assert.NotContains(t, got, "token=")
+	assert.Contains(t, got, "https://sidecar.example/score")
+	// Live config field must stay intact for Dial.
+	assert.Contains(t, cfg.Endpoint, sentinel)
+	// config.Init dumps via InterfaceToString (jsoniter), which also honors MarshalJSON.
+	dumped := utils.InterfaceToString(cfg)
+	assert.NotContains(t, dumped, sentinel)
+	assert.NotContains(t, dumped, "user:pass")
 }
 
 func TestHasDeprecatedOvercommitConfig(t *testing.T) {

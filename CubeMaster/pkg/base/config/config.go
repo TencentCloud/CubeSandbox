@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -546,6 +547,8 @@ type ExternalHTTPScore struct {
 	// Endpoint is the sidecar URL. Empty skips the plugin. Non-empty values must
 	// be absolute http:// or https:// URLs with a host; other schemes (file,
 	// unix, missing scheme) fail construction / are rejected at Select.
+	// May carry userinfo or query tokens; MarshalJSON redacts those for the
+	// config.Init cfg dump so startup logs match the scorer's no-secret policy.
 	Endpoint string `yaml:"endpoint"`
 	// Timeout is the per-request deadline on the synchronous create path.
 	// Zero/omitted defaults to 200ms at request time; negative values and
@@ -559,6 +562,40 @@ type ExternalHTTPScore struct {
 // omits weight. Keep as the single source of truth for constructors, preHandle,
 // and Weight() fallbacks.
 const DefaultExternalHTTPScoreWeight = 1.0
+
+// MarshalJSON redacts Endpoint userinfo and query so utils.InterfaceToString
+// dumps (config.Init) never print sidecar credentials the scorer refuses to log.
+func (c ExternalHTTPScore) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		Weight   *float64      `json:"Weight"`
+		Endpoint string        `json:"Endpoint"`
+		Timeout  time.Duration `json:"Timeout"`
+		Mode     string        `json:"Mode"`
+		Disable  bool          `json:"Disable"`
+	}
+	return json.Marshal(wire{
+		Weight:   c.Weight,
+		Endpoint: redactExternalHTTPScoreEndpoint(c.Endpoint),
+		Timeout:  c.Timeout,
+		Mode:     c.Mode,
+		Disable:  c.Disable,
+	})
+}
+
+func redactExternalHTTPScoreEndpoint(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u == nil || u.Scheme == "" || u.Host == "" {
+		return "[redacted]"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
 
 type CubeletConf struct {
 	Grpc                    *GrpcConf `yaml:"grpc"`
