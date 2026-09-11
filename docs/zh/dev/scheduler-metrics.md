@@ -492,13 +492,13 @@ Profile 同样只有四个合法名：`default`、`balanced_spread`、`template_
 - `failure_reasons` 与 `warnings` 使用 `omitempty`，全成功时 JSON 中不出现。
 - 单 seed 报告不能支持跨环境推广。
 
-## 验收对应
+## 相关覆盖范围
 
-本文件对应原始课题验收第 1、5、6 条：
+本文档覆盖：
 
-1. 定义调度评估指标；当前 simulator 报告输出不少于 5 项调度质量指标。
-5. 三种 workload 可以一键运行并生成报告。
-6. 可用同一 workload 下的 baseline vs profile 差值说明改善或 trade-off。
+- simulator 报告输出的调度质量指标定义（至少五项核心指标）；
+- 如何用一条 CLI 命令跑三种默认 workload 并生成报告；
+- 如何用同一 workload 下的 baseline vs profile 差值说明改善或 trade-off。
 
 相关文档：
 

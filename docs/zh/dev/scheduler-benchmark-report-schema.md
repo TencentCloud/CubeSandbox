@@ -69,21 +69,24 @@ go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
             "rejected_requests": 0,
             "schedule_success_rate": 1.0,
             "placement_counts": {
-              "node-a": 17
+              "node-a": 17,
+              "node-b": 16,
+              "node-c": 21,
+              "node-d": 26
             },
-            "node_load_balance": 0.92,
-            "template_locality_hit_rate": 0.40,
-            "cpu_quota_utilization": 0.70,
+            "node_load_balance": 0.9224454862282592,
+            "template_locality_hit_rate": 0.4,
+            "cpu_quota_utilization": 0.6979166666666666,
             "peak_cpu_utilization": 0.75,
-            "mem_quota_utilization": 0.70,
+            "mem_quota_utilization": 0.6979166666666666,
             "peak_mem_utilization": 0.75,
-            "create_latency_p50_ms": 226.4,
-            "create_latency_p95_ms": 312.8,
+            "create_latency_p50_ms": 226.4375,
+            "create_latency_p95_ms": 312.75,
             "uses_estimated_latency": true,
-            "average_cpu_headroom": 0.58,
-            "average_score_margin": 1.47,
-            "average_feasible_candidates": 4.0,
-            "feasible_candidate_evaluations": 320,
+            "average_cpu_headroom": 0.5759114583333333,
+            "average_score_margin": 1.509214743589745,
+            "average_feasible_candidates": 3.75,
+            "feasible_candidate_evaluations": 300,
             "node_final_state": {
               "node-a": {
                 "running_sandbox_count": 12,
@@ -91,6 +94,27 @@ go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
                 "used_mem_mb": 6144,
                 "cpu_utilization": 0.75,
                 "mem_utilization": 0.75
+              },
+              "node-b": {
+                "running_sandbox_count": 12,
+                "used_cpu_milli": 3000,
+                "used_mem_mb": 6144,
+                "cpu_utilization": 0.75,
+                "mem_utilization": 0.75
+              },
+              "node-c": {
+                "running_sandbox_count": 16,
+                "used_cpu_milli": 4000,
+                "used_mem_mb": 8192,
+                "cpu_utilization": 0.6666666666666666,
+                "mem_utilization": 0.6666666666666666
+              },
+              "node-d": {
+                "running_sandbox_count": 20,
+                "used_cpu_milli": 5000,
+                "used_mem_mb": 10240,
+                "cpu_utilization": 0.625,
+                "mem_utilization": 0.625
               }
             }
           }
@@ -129,7 +153,11 @@ go run ./cmd/schedulerbench --verify --out ./schedulerbench-report
 }
 ```
 
-以上示例为缩略版。需要时请本地生成完整报告；生成的基准报告不入库。
+以上示例只在条目之间缩略：`metric_schema` 只展示一行，`results` 只展示一个
+profile/workload 单元，`comparisons` 只展示一对。合同按整对象检查的字段
+（`placement_counts`、`node_final_state` 与请求计数）在该单元内是完整的，并与
+默认 seed 下 `default`/`burst_short_lived` 的实际输出一致。需要时请本地生成完整
+报告；生成的基准报告不入库。
 
 ## 顶层字段
 
@@ -258,12 +286,12 @@ Markdown 报告以紧凑形式镜像同一数据：
 Markdown 表不包含全部嵌套 JSON 字段。需要 `placement_counts`、
 `failure_reasons`、`warnings` 与 `node_final_state` 时请看 `report.json`。
 
-## 验收对应
+## 相关覆盖范围
 
 本报告合同支撑：
 
-- 验收 1：至少五项调度质量指标。
-- 验收 5：至少三种 workload 的一键基准报告。
-- 验收 6：量化对比与 trade-off 说明。
+- 至少五项调度质量指标；
+- 三种默认 workload 的一键基准报告；
+- 量化的 baseline-vs-profile 对比与 trade-off 说明。
 
-它仍只是 simulator 证据，本身不足以满足完整的插件/Profile 配置与自定义插件验收项。
+它仍只是 simulator 证据，本身不足以覆盖生产插件/Profile 配置或自定义插件相关工作。

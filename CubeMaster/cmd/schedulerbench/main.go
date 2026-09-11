@@ -99,7 +99,7 @@ func runCLIWithProvenance(args []string, stdout, stderr io.Writer, resolve prove
 	}
 	if *verify {
 		if err := simulator.VerifyDefaultReport(report); err != nil {
-			return fmt.Errorf("scheduler benchmark %s verification failed; use the default --profiles and --workloads values: %w", verifyScope, err)
+			return fmt.Errorf("scheduler benchmark %s verification failed; use the default --profiles and --workloads values (and the default --seed/--nodes): %w", verifyScope, err)
 		}
 	}
 

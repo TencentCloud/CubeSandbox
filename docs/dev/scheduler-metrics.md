@@ -602,15 +602,16 @@ profile/workload; phrase conclusions as “observed under this workload,” not
   all-success runs.
 - A single-seed report cannot support cross-environment generalization.
 
-## Acceptance Mapping
+## Related Coverage
 
-This file maps to original topic acceptance items 1, 5, and 6:
+This document covers:
 
-1. Define scheduling evaluation metrics; the current simulator report emits at
-   least five scheduling-quality metrics.
-5. Three workloads can be run with one command and produce a report.
-6. Baseline-vs-profile deltas under the same workload can explain improvement or
-   trade-off.
+- definitions for the scheduling-quality metrics emitted by the simulator report
+  (at least five core metrics);
+- how to run the three default workloads with one CLI command and produce a
+  report;
+- how baseline-vs-profile deltas under the same workload explain improvement or
+  trade-off.
 
 Related docs:
 

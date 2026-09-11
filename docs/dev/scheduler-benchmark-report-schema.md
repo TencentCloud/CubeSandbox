@@ -71,21 +71,24 @@ or semantic equivalence to production scheduling.
             "rejected_requests": 0,
             "schedule_success_rate": 1.0,
             "placement_counts": {
-              "node-a": 17
+              "node-a": 17,
+              "node-b": 16,
+              "node-c": 21,
+              "node-d": 26
             },
-            "node_load_balance": 0.92,
-            "template_locality_hit_rate": 0.40,
-            "cpu_quota_utilization": 0.70,
+            "node_load_balance": 0.9224454862282592,
+            "template_locality_hit_rate": 0.4,
+            "cpu_quota_utilization": 0.6979166666666666,
             "peak_cpu_utilization": 0.75,
-            "mem_quota_utilization": 0.70,
+            "mem_quota_utilization": 0.6979166666666666,
             "peak_mem_utilization": 0.75,
-            "create_latency_p50_ms": 226.4,
-            "create_latency_p95_ms": 312.8,
+            "create_latency_p50_ms": 226.4375,
+            "create_latency_p95_ms": 312.75,
             "uses_estimated_latency": true,
-            "average_cpu_headroom": 0.58,
-            "average_score_margin": 1.47,
-            "average_feasible_candidates": 4.0,
-            "feasible_candidate_evaluations": 320,
+            "average_cpu_headroom": 0.5759114583333333,
+            "average_score_margin": 1.509214743589745,
+            "average_feasible_candidates": 3.75,
+            "feasible_candidate_evaluations": 300,
             "node_final_state": {
               "node-a": {
                 "running_sandbox_count": 12,
@@ -93,6 +96,27 @@ or semantic equivalence to production scheduling.
                 "used_mem_mb": 6144,
                 "cpu_utilization": 0.75,
                 "mem_utilization": 0.75
+              },
+              "node-b": {
+                "running_sandbox_count": 12,
+                "used_cpu_milli": 3000,
+                "used_mem_mb": 6144,
+                "cpu_utilization": 0.75,
+                "mem_utilization": 0.75
+              },
+              "node-c": {
+                "running_sandbox_count": 16,
+                "used_cpu_milli": 4000,
+                "used_mem_mb": 8192,
+                "cpu_utilization": 0.6666666666666666,
+                "mem_utilization": 0.6666666666666666
+              },
+              "node-d": {
+                "running_sandbox_count": 20,
+                "used_cpu_milli": 5000,
+                "used_mem_mb": 10240,
+                "cpu_utilization": 0.625,
+                "mem_utilization": 0.625
               }
             }
           }
@@ -131,8 +155,13 @@ or semantic equivalence to production scheduling.
 }
 ```
 
-The example above is abbreviated. Generate a complete report locally when
-needed; generated benchmark reports are not checked into the repository.
+The example above abbreviates *between* entries only: `metric_schema` shows one
+row, `results` shows one profile/workload cell, and `comparisons` shows one
+pair. Whole-object fields that the contract checks in full
+(`placement_counts`, `node_final_state`, and accounting totals) are complete
+for that cell and match a default-seed `default`/`burst_short_lived` run.
+Generate a complete report locally when needed; generated benchmark reports
+are not checked into the repository.
 
 ## Top-Level Fields
 
@@ -271,13 +300,13 @@ The Markdown report mirrors the same data at a compact level:
 The Markdown table does not include every nested JSON field. Use `report.json`
 for `placement_counts`, `failure_reasons`, `warnings`, and `node_final_state`.
 
-## Acceptance Mapping
+## Related Coverage
 
 This report contract supports:
 
-- Acceptance 1: at least five scheduling quality metrics.
-- Acceptance 5: one-command benchmark report for at least three workloads.
-- Acceptance 6: quantitative comparison and trade-off explanation.
+- emitting at least five scheduling quality metrics;
+- one-command benchmark reports for the three default workloads;
+- quantitative baseline-vs-profile comparison and trade-off explanation.
 
-It is still simulator-only evidence. It does not by itself satisfy the full
-plugin/Profile configuration and custom-plugin acceptance items.
+It is still simulator-only evidence. It does not by itself cover production
+plugin/profile configuration or custom-plugin acceptance work.

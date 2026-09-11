@@ -169,22 +169,20 @@ Compared delta keys:
 - `create_latency_p50_ms`
 - `create_latency_p95_ms`
 
-## Acceptance Map
+## Scope Notes
 
-- Acceptance path: every workload runs once per profile and reports
-  baseline-vs-profile placement and quality metrics.
-- Domain lens: filter infeasible nodes first, score feasible candidates, then
-  bind the highest score. This is a simulator-local filter → score → bind
-  shape, not production Filter/Score plugin equivalence.
-- Failure path: invalid profile/workload names fail the run; infeasible requests
-  are counted as rejected with explicit reasons.
-- Evidence path: JSON and Markdown reports include the seed, node count,
-  workload definitions, profile names, placement counts, and metric schema.
-- Review path: the simulator is isolated under `pkg/scheduler/simulator` with a
-  thin CLI under `cmd/schedulerbench`; production scheduler defaults are not
-  changed.
-- Distinctive angle: the report includes measurement-path and claim-evidence
-  context instead of only presenting headline numbers.
+- Each default workload runs once per profile and reports baseline-vs-profile
+  placement and quality metrics.
+- The simulator uses a local filter → score → bind shape (not production
+  Filter/Score plugin equivalence).
+- Invalid profile/workload names fail the run; infeasible requests are counted
+  as rejected with explicit reasons.
+- JSON and Markdown reports include seed, node count, workload definitions,
+  profile names, placement counts, and metric schema.
+- The package lives under `pkg/scheduler/simulator` with a thin CLI under
+  `cmd/schedulerbench`; production scheduler defaults are unchanged.
+- Reports include measurement-path and claim-evidence context rather than only
+  headline numbers.
 
 ## Verification
 
