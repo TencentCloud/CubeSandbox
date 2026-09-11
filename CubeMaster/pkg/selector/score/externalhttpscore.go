@@ -178,8 +178,9 @@ func (l *externalHTTPScore) String() string {
 }
 
 func (l *externalHTTPScore) Weight() float64 {
-	// Live-read so conf.yaml hot-reload applies. runScoreFilter must call this
-	// once per Select result so a reload mid-blend cannot mix two generations.
+	// Live-read so conf.yaml hot-reload applies. runScoreFilter samples this
+	// once before Select so a reload cannot mix generations or skip the HTTP
+	// call after it already ran.
 	cfg := l.pluginConfig()
 	if cfg == nil {
 		return 0
@@ -292,8 +293,8 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		logExternalHTTPScoreFailure(ctx, err)
 		return nil, err
 	}
-	// Explicit weight: 0 (or a nil that somehow skipped defaulting) skips the
-	// HTTP round trip; runScoreFilter would also multiply by Weight()==0.
+	// Explicit weight: 0 skips the HTTP round trip for direct Select callers;
+	// runScoreFilter also skips this scorer when Weight() <= 0 before Select.
 	if l.Weight() <= 0 {
 		return nil, nil
 	}

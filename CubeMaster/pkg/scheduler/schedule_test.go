@@ -130,7 +130,7 @@ func TestRunScoreFilterUsesWeightOncePerScorer(t *testing.T) {
 	selCtx.SetNodes(node.NodeList{nodeA, nodeB})
 
 	changing := &changingWeightSelector{
-		weights: []float64{1, 100, 100}, // first for divisor, rest would poison node scores if re-read
+		weights: []float64{1, 100, 100}, // first for blend; later values must not be sampled
 		scores: node.NodeScoreList{
 			{InsID: "node-a", Score: 10, MvmNum: nodeA.MvmNum, OrigNode: nodeA},
 			{InsID: "node-b", Score: 90, MvmNum: nodeB.MvmNum, OrigNode: nodeB},
@@ -152,6 +152,37 @@ func TestRunScoreFilterUsesWeightOncePerScorer(t *testing.T) {
 	}
 	if got[1].ID() != "node-a" || got[1].Score != 10 {
 		t.Fatalf("lowest score = %+v, want node-a=10 (stable weight=1)", got[1])
+	}
+}
+
+func TestRunScoreFilterSkipsZeroWeightWithoutSelect(t *testing.T) {
+	origPostScore := scheduler.postScore
+	defer func() {
+		scheduler.postScore = origPostScore
+	}()
+	scheduler.postScore = nil
+
+	nodeA := &node.Node{InsID: "node-a", MvmNum: 1}
+	selCtx := selctx.New("random")
+	selCtx.Ctx = context.Background()
+	selCtx.SetNodes(node.NodeList{nodeA})
+
+	zero := &countingSelectSelector{weight: 0}
+	active := testScoreSelector{
+		weight: 1,
+		scores: node.NodeScoreList{
+			{InsID: "node-a", Score: 50, MvmNum: nodeA.MvmNum, OrigNode: nodeA},
+		},
+	}
+	if err := runScoreFilter(selCtx, []sscore.Selector{zero, active}); err != nil {
+		t.Fatalf("runScoreFilter() error = %v, want nil", err)
+	}
+	if zero.selects != 0 {
+		t.Fatalf("zero-weight Select calls = %d, want 0", zero.selects)
+	}
+	got := selCtx.LeastScoreNodes(-1)
+	if got.Len() != 1 || got[0].Score != 50 {
+		t.Fatalf("scores = %+v, want node-a=50 from active scorer only", got)
 	}
 }
 
@@ -202,3 +233,16 @@ func (s *changingWeightSelector) Weight() float64 {
 }
 
 func (s *changingWeightSelector) Disable() bool { return false }
+
+type countingSelectSelector struct {
+	weight  float64
+	selects int
+}
+
+func (s *countingSelectSelector) Select(*selctx.SelectorCtx) (node.NodeScoreList, error) {
+	s.selects++
+	return node.NodeScoreList{{InsID: "node-a", Score: 1}}, nil
+}
+func (s *countingSelectSelector) ID() string      { return "counting_select" }
+func (s *countingSelectSelector) Weight() float64 { return s.weight }
+func (s *countingSelectSelector) Disable() bool   { return false }

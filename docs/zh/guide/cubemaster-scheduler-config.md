@@ -300,7 +300,7 @@ scheduler:
 
 | 字段 | 含义 |
 |------|------|
-| `weight` | 在 `runScoreFilter` 加权平均（`Σ(score × weight) / Σ(weight)`）中的相对权重。返回分数必须与内置 scorer 使用相同的 **`[0, 100]`** 量纲；若 sidecar 返回归一化的 `0.0–1.0`，在相同 weight 下贡献大约只有内置 scorer 的 1%。**省略** `weight` 时，在配置加载 / 热更新（`preHandle`）阶段默认填为 **`1.0`**。**显式** `weight: 0` 表示插件仍启用但不贡献分数（与其他 scorer 一致，且跳过 HTTP 调用）。显式关闭请用 `disable: true`。负 weight 会在构造阶段被拒绝。每次 `Weight()` / `Select` 都会从 `plugin_conf` 热读（热更新无需重启）；`runScoreFilter` 每次尝试只采样一次 `Weight()`，避免热更新落在一次加权中间混入两代配置。 |
+| `weight` | 在 `runScoreFilter` 加权平均（`Σ(score × weight) / Σ(weight)`）中的相对权重。返回分数必须与内置 scorer 使用相同的 **`[0, 100]`** 量纲；若 sidecar 返回归一化的 `0.0–1.0`，在相同 weight 下贡献大约只有内置 scorer 的 1%。**省略** `weight` 时，在配置加载 / 热更新（`preHandle`）阶段默认填为 **`1.0`**。**显式** `weight: 0` 表示插件仍启用但不贡献分数（与其他 scorer 一致，且跳过 HTTP 调用）。显式关闭请用 `disable: true`。负 weight 会在构造阶段被拒绝。每次 `Weight()` / `Select` 都会从 `plugin_conf` 热读（热更新无需重启）；`runScoreFilter` 在 `Select` **之前**只采样一次 `Weight()`，避免热更新落在一次尝试中间混入两代配置，或 weight 变为 0 后仍先打 HTTP。 |
 | `endpoint` | Sidecar URL。为空则跳过该插件。非空时必须是带 host 的绝对 `http://` 或 `https://` URL；缺 scheme、`file://`、`unix://` 等会在构造时失败（热更新后则在 Select 上 fail-open）。请求前会 trim 首尾空白。密钥更宜放在 sidecar 侧；若 URL 含 userinfo 或 query token，scorer 不会记入日志，且 `config.Init` 的 cfg dump 只会保留 scheme/host/path。 |
 | `timeout` | **同步 create 路径**上的单次 HTTP 超时。为 0/省略时使用默认 **200ms**。正值必须 **≤ 2s**；负值与超过 **2s** 的值会在构造 / Select 校验时被拒绝（不会被静默改写）。请使用 `200ms` / `1s` 这类 duration 字符串——裸整数如 `timeout: 200` 会被 YAML 解析成 **200 纳秒**。sidecar 卡住时，每次 create 最多会多等这么久再 fail-open。 |
 | `mode` | 可选的运营自定义字符串，写入请求 JSON。 |

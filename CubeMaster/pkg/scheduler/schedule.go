@@ -187,25 +187,28 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 		if f.Disable() {
 			continue
 		}
-		if tmpResult, err := f.Select(selCtx); err != nil {
+		// Sample Weight() before Select so a live-config scorer (external_http_score)
+		// cannot pay for an HTTP round trip and then be scaled by a different
+		// generation after a mid-attempt conf.yaml reload. Zero weight skips
+		// Select entirely, matching the documented "weight: 0 ⇒ inert" rule.
+		w := f.Weight()
+		if w <= 0 {
 			continue
-		} else {
-			if len(tmpResult) > 0 {
-				// Call Weight() once: live-config scorers may observe a conf.yaml
-				// reload between calls, and mixing two weights in one average
-				// would skew that attempt's ranking.
-				w := f.Weight()
-				totalPluginWeight += w
-				for _, n := range tmpResult {
-
-					n.Score *= w
-					if old, ok := resultMap[n.ID()]; ok {
-						old.Score += n.Score
-					} else {
-
-						resultMap[n.ID()] = n
-					}
-				}
+		}
+		tmpResult, err := f.Select(selCtx)
+		if err != nil {
+			continue
+		}
+		if len(tmpResult) == 0 {
+			continue
+		}
+		totalPluginWeight += w
+		for _, n := range tmpResult {
+			n.Score *= w
+			if old, ok := resultMap[n.ID()]; ok {
+				old.Score += n.Score
+			} else {
+				resultMap[n.ID()] = n
 			}
 		}
 	}
