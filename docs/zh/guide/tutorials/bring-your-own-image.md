@@ -125,6 +125,22 @@ CMD ["uvicorn", "app:app", "--app-dir", "/srv", "--host", "0.0.0.0", "--port", "
 
 构建、推送、创建模板的流程和第 2.2 / 2.3 节一致。
 
+#### 请求用户不是 root 时需要 `setpriv`
+
+`cube-envd` 通过委派 **util-linux** 的 `setpriv` 来切换凭据：Rust 稳定版标准库无法设置附属组，PTY 后端也不提供凭据钩子（上游 Go `envd` 走 `SysProcAttr.Credential` 在进程内完成，Rust 稳定版没有对应能力）。它会在 `/usr/bin`、`/bin`、`/sbin`、`/usr/sbin` 中寻找可用的 `setpriv`。
+
+只有"请求选中的用户与运行 `cube-envd` 的用户不同"时才会用到它——例如旧版 E2B SDK 发送 `Authorization: Basic user:`。不带 `Authorization` 头的请求以 root 运行，不依赖它。
+
+多数发行版自带：Debian / Ubuntu / Fedora 里 `util-linux` 属于 required 包，因此 `python:3.11-slim` 和 `e2bdev/code-interpreter` 开箱可用。**Alpine 与 busybox 需要额外处理**，因为它们自带同名 `setpriv` applet，只支持 capabilities 相关选项、不认识 `--reuid`：
+
+```dockerfile
+# Alpine：busybox 的 setpriv applet 不够用；util-linux 会把 setpriv 装到
+# /bin/setpriv（两个位置都会被识别）。
+RUN apk add --no-cache util-linux
+```
+
+若镜像中没有可用的 `setpriv`，所有选择非 root 用户的请求都会失败，但错误信息会直接点名缺失的工具，而不是一个无从下手的报错。distroless 镜像没有包管理器，请改从自带 util-linux 的基础镜像构建，或不带 `Authorization` 头以 root 运行。
+
 ### 在模板构建阶段注入
 
 如果不希望修改 Dockerfile，可以在创建模板时通过 `--enable-inject-envd` 上传并注入 `envd`：
@@ -233,6 +249,7 @@ docker exec "$cid" cat /var/log/envd.log
 | envd 立刻退出                          | 二进制版本与容器预期不匹配                                 | `docker exec ... /usr/bin/envd -version` 确认版本；从 pin 的 base tag 重新拷贝          |
 | 49983 端口冲突                         | 你自己的应用也在监听 49983                                 | 把自家应用迁到别的端口，并一起 `--expose-port` 暴露                                     |
 | `sudo: command not found`              | 基于 `-slim` / `-alpine` 这种无 sudo 的镜像构建            | `apt-get install -y sudo`，或直接把 `sudo` 从 CMD 里去掉——`cube-entrypoint.sh` 不依赖它 |
+| 以非 root 用户执行命令报 `switching users requires a util-linux setpriv` | 镜像里没有可用的 `setpriv`（Alpine / busybox 只提供不支持 `--reuid` 的 applet） | 安装 util-linux（Alpine 上 `apk add --no-cache util-linux`）——见第 3 节。不带 `Authorization` 头的请求以 root 运行，不受影响 |
 | 模板创建长时间卡在 `PULLING`           | registry 从 Cube 节点不可达                                | 推送到集群可访问的 registry，或用 `--registry-username` / `--registry-password`         |
 
 > **`-isnotfc` 不会是任何问题的原因。** 它在 cube-envd 中是 no-op（不存在

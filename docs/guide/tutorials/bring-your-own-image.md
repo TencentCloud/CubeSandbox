@@ -129,6 +129,34 @@ CMD ["uvicorn", "app:app", "--app-dir", "/srv", "--host", "0.0.0.0", "--port", "
 
 Build, push and template creation are identical to sections 2.2 / 2.3.
 
+#### `setpriv` is required when the requested user differs from root
+
+`cube-envd` switches credentials by delegating to `setpriv` from **util-linux**,
+because Rust's stable standard library cannot set supplementary groups and the
+PTY backend exposes no credential hook (upstream Go `envd` did this in-process
+via `SysProcAttr.Credential`, which has no Rust equivalent on stable). It looks
+for a usable `setpriv` in `/usr/bin`, `/bin`, `/sbin` and `/usr/sbin`.
+
+This only matters when the request selects a user other than the one running
+`cube-envd` — for example an older E2B SDK sending `Authorization: Basic user:`.
+Requests without an `Authorization` header run as root and need nothing.
+
+Most distributions ship it: on Debian, Ubuntu and Fedora `util-linux` is a
+required package, so `python:3.11-slim` and `e2bdev/code-interpreter` are fine as
+is. **Alpine and busybox need attention**, because they provide their own
+`setpriv` applet that only handles capabilities and rejects `--reuid`:
+
+```dockerfile
+# Alpine: the busybox setpriv applet is not enough, and util-linux installs
+# its setpriv at /bin/setpriv (either location is found).
+RUN apk add --no-cache util-linux
+```
+
+If no usable `setpriv` exists, every request that selects a non-root user fails
+with a message naming the missing tool instead of an opaque error. Distroless
+images have no package manager, so build `FROM` a base that includes util-linux,
+or omit the `Authorization` header and run as root.
+
 ### Inject It During Template Creation
 
 If you do not want to modify the Dockerfile, use `--enable-inject-envd` to upload and inject `envd` while creating the template:
@@ -244,6 +272,7 @@ docker exec "$cid" cat /var/log/envd.log
 | envd exits immediately                        | Version mismatch between binary and kernel/init expectations          | Verify with `docker exec ... /usr/bin/envd -version`; re-copy from the pinned base tag. |
 | Port 49983 conflicts with your own service    | Your app also listens on 49983                                        | Move your app to a different port and expose both with `--expose-port`.             |
 | `sudo: command not found` in your CMD         | You started `FROM` a `-slim` / `-alpine` image without sudo           | Either `apt-get install -y sudo`, or drop `sudo` from your entrypoint — `cube-entrypoint.sh` doesn't require it. |
+| Commands fail as a non-root user with `switching users requires a util-linux setpriv` | The image has no usable `setpriv` (Alpine/busybox ship only an applet that rejects `--reuid`) | Install util-linux (`apk add --no-cache util-linux` on Alpine) — see section 3. Requests without an `Authorization` header run as root and are unaffected. |
 | Template creation times out in `PULLING`      | Registry unreachable from Cube nodes                                  | Push to a registry the cluster can reach, or supply `--registry-username` / `--registry-password`. |
 
 > **`-isnotfc` is never the cause of a problem.** It is a no-op in `cube-envd`
