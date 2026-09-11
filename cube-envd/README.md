@@ -170,7 +170,10 @@ boundary. Be precise about what each mechanism does:
 - **Process execution** runs as the selected user: when that user differs from
   the user running `cube-envd`, the child is started through
   `setpriv --reuid --regid --init-groups`, so the kernel constrains what the
-  command itself can touch.
+  command itself can touch. `setpriv` comes from util-linux and is looked up in
+  `/usr/bin`, `/bin`, `/sbin` and `/usr/sbin`; Alpine and busybox additionally
+  need `apk add util-linux`, because their own `setpriv` applet rejects
+  `--reuid`. Requests that select the daemon's own user skip it entirely.
 - **Filesystem RPCs and `/files` execute as `cube-envd`** — that is, as root in
   the standard image. The selected user decides the path base (its home for
   relative paths) and the ownership applied to created files and directories; it

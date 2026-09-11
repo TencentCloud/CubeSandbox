@@ -25,6 +25,13 @@ it compiles `cube-envd` from [`cube-envd/`](../cube-envd/) inside
 injected via build args), bakes it into the image as `/usr/bin/envd`,
 and runs a `:49983/health` smoke test before pushing.
 
+The runtime stage installs `util-linux` on purpose: `cube-envd` delegates
+credential switching to `setpriv` when a request selects a user other than the
+one running the daemon (upstream Go `envd` did this in-process, which stable
+Rust cannot). Images that copy only `/usr/bin/envd` out of this image must
+provide a usable `setpriv` themselves — see
+[the BYO tutorial](../docs/guide/tutorials/bring-your-own-image.md#setpriv-is-required-when-the-requested-user-differs-from-root).
+
 Minimal consumer example:
 
 ```dockerfile

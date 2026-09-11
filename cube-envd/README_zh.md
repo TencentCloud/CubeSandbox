@@ -135,6 +135,9 @@ PTY 进程完全一致：
 
 - **进程执行**以所选用户身份运行：当该用户与运行 `cube-envd` 的用户不同时，子进程经
   `setpriv --reuid --regid --init-groups` 启动，命令自身可访问的范围由内核约束。
+  `setpriv` 来自 util-linux，会依次在 `/usr/bin`、`/bin`、`/sbin`、`/usr/sbin` 中查找；
+  Alpine 与 busybox 需要额外 `apk add util-linux`，因为它们自带的同名 applet 不接受
+  `--reuid`。请求选中的就是守护进程自身用户时完全不使用它。
 - **文件系统 RPC 与 `/files` 以 `cube-envd` 自身凭据执行**（标准镜像中即 root）。所选
   用户决定路径基准（相对路径落在其主目录）以及新建文件/目录的属主，但**不限制**可读写
   删除的路径范围。`Stat`、`ListDir`、`Move`、`Remove` 均不限于用户主目录，`GET /files`
