@@ -547,8 +547,9 @@ type ExternalHTTPScore struct {
 	// Endpoint is the sidecar URL. Empty skips the plugin. Non-empty values must
 	// be absolute http:// or https:// URLs with a host; other schemes (file,
 	// unix, missing scheme) fail construction / are rejected at Select.
-	// May carry userinfo or query tokens; MarshalJSON redacts those for the
-	// config.Init cfg dump so startup logs match the scorer's no-secret policy.
+	// May carry userinfo or query tokens; MarshalJSON and String redact those
+	// so config.Init dumps and CubeLog.Fatalf("%v", cfg) paths match the
+	// scorer's no-secret logging policy.
 	Endpoint string `yaml:"endpoint"`
 	// Timeout is the per-request deadline on the synchronous create path.
 	// Zero/omitted defaults to 200ms at request time; negative values and
@@ -566,20 +567,35 @@ const DefaultExternalHTTPScoreWeight = 1.0
 // MarshalJSON redacts Endpoint userinfo and query so utils.InterfaceToString
 // dumps (config.Init) never print sidecar credentials the scorer refuses to log.
 func (c ExternalHTTPScore) MarshalJSON() ([]byte, error) {
-	type wire struct {
-		Weight   *float64      `json:"Weight"`
-		Endpoint string        `json:"Endpoint"`
-		Timeout  time.Duration `json:"Timeout"`
-		Mode     string        `json:"Mode"`
-		Disable  bool          `json:"Disable"`
+	return json.Marshal(c.redactedWire())
+}
+
+// String redacts Endpoint the same way for fmt %v/%+v (hot-reload Fatals print
+// *Config via reflection and call Stringer on nested fields).
+func (c ExternalHTTPScore) String() string {
+	b, err := json.Marshal(c.redactedWire())
+	if err != nil {
+		return "ExternalHTTPScore{Endpoint:[redacted]}"
 	}
-	return json.Marshal(wire{
+	return string(b)
+}
+
+type externalHTTPScoreWire struct {
+	Weight   *float64      `json:"Weight"`
+	Endpoint string        `json:"Endpoint"`
+	Timeout  time.Duration `json:"Timeout"`
+	Mode     string        `json:"Mode"`
+	Disable  bool          `json:"Disable"`
+}
+
+func (c ExternalHTTPScore) redactedWire() externalHTTPScoreWire {
+	return externalHTTPScoreWire{
 		Weight:   c.Weight,
 		Endpoint: redactExternalHTTPScoreEndpoint(c.Endpoint),
 		Timeout:  c.Timeout,
 		Mode:     c.Mode,
 		Disable:  c.Disable,
-	})
+	}
 }
 
 func redactExternalHTTPScoreEndpoint(raw string) string {

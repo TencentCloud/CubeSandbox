@@ -157,12 +157,12 @@ func TestPreHandleExternalHTTPScoreWeightDefault(t *testing.T) {
 
 func TestExternalHTTPScoreMarshalJSONRedactsEndpointSecrets(t *testing.T) {
 	const sentinel = "secret-token-must-not-appear"
-	cfg := &ExternalHTTPScore{
+	plugin := &ExternalHTTPScore{
 		Endpoint: "https://user:pass@sidecar.example/score?token=" + sentinel,
 		Timeout:  200 * time.Millisecond,
 		Mode:     "m",
 	}
-	body, err := json.Marshal(cfg)
+	body, err := json.Marshal(plugin)
 	assert.NoError(t, err)
 	got := string(body)
 	assert.NotContains(t, got, sentinel)
@@ -170,11 +170,25 @@ func TestExternalHTTPScoreMarshalJSONRedactsEndpointSecrets(t *testing.T) {
 	assert.NotContains(t, got, "token=")
 	assert.Contains(t, got, "https://sidecar.example/score")
 	// Live config field must stay intact for Dial.
-	assert.Contains(t, cfg.Endpoint, sentinel)
+	assert.Contains(t, plugin.Endpoint, sentinel)
 	// config.Init dumps via InterfaceToString (jsoniter), which also honors MarshalJSON.
-	dumped := utils.InterfaceToString(cfg)
+	dumped := utils.InterfaceToString(plugin)
 	assert.NotContains(t, dumped, sentinel)
 	assert.NotContains(t, dumped, "user:pass")
+	// Hot-reload Fatals use fmt %v on *Config; nested Stringer must redact.
+	printed := fmt.Sprintf("%v", plugin)
+	assert.NotContains(t, printed, sentinel)
+	assert.NotContains(t, printed, "user:pass")
+	nested := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			Score: &SchedulerScoreConf{
+				ScorePluginConf: ScorePluginConf{ExternalHTTPScore: plugin},
+			},
+		},
+	}}
+	fatalStyle := fmt.Sprintf("preHandle Config:%v fail:%v", nested, assert.AnError)
+	assert.NotContains(t, fatalStyle, sentinel)
+	assert.NotContains(t, fatalStyle, "user:pass")
 }
 
 func TestHasDeprecatedOvercommitConfig(t *testing.T) {
