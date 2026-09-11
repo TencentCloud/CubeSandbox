@@ -495,3 +495,66 @@ async fn finish_does_not_evict_a_pid_reused_by_a_newer_process() {
     assert_eq!(terminal[0].pid, 100);
     assert_eq!(terminal[0].tag.as_deref(), Some("new"));
 }
+
+/// 验证不存在的候选路径不会被当成可用的 `setpriv`。
+#[test]
+fn rejects_a_missing_credential_helper() {
+    assert!(!super::stream::supports_credential_switching(
+        std::path::Path::new("/nonexistent/bin/setpriv")
+    ));
+}
+
+/// 验证 busybox 的同名 applet 会被拒绝。
+///
+/// Alpine 与 busybox 镜像在 `/bin/setpriv` 提供这个 applet，它只支持 capabilities
+/// 相关选项，遇到 `--reuid` 会以 “unrecognized option” 失败。仅按文件名挑选助手会
+/// 选中它，从而把“缺工具”换成更难定位的失败，所以这里固定住这段探测逻辑。
+#[test]
+fn rejects_a_busybox_setpriv_applet() {
+    let Some(dir) = temp_dir("busybox-applet") else {
+        return;
+    };
+    let applet = dir.join("setpriv");
+    let script = "#!/bin/sh\n\
+         echo 'Usage: setpriv [OPTIONS] PROG ARGS' >&2\n\
+         echo '  --nnp,--no-new-privs' >&2\n\
+         exit 1\n";
+    assert!(std::fs::write(&applet, script).is_ok());
+    assert!(set_executable(&applet));
+    assert!(!super::stream::supports_credential_switching(&applet));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 验证支持所需参数的实现会被接受。
+#[test]
+fn accepts_a_util_linux_style_setpriv() {
+    let Some(dir) = temp_dir("util-linux-setpriv") else {
+        return;
+    };
+    let helper = dir.join("setpriv");
+    let script = "#!/bin/sh\n\
+         echo ' --reuid <uid>' \n\
+         echo ' --regid <gid>'\n\
+         echo ' --init-groups'\n";
+    assert!(std::fs::write(&helper, script).is_ok());
+    assert!(set_executable(&helper));
+    assert!(super::stream::supports_credential_switching(&helper));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 在临时目录下创建一个唯一命名的子目录。
+fn temp_dir(label: &str) -> Option<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join(format!(
+        "cube-envd-{label}-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// 给测试脚本加上可执行位。
+fn set_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).is_ok()
+}

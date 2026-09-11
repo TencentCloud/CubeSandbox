@@ -248,27 +248,106 @@ fn base_environment(user: &LocalUser) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// `setpriv` 的候选绝对路径，按优先级排列。
+///
+/// 刻意不做 `PATH` 查找：守护进程以 root 运行，`PATH` 可能被注入；而且 Alpine 等
+/// 镜像的 `PATH` 会先命中 busybox 自带的同名 applet（见
+/// [`supports_credential_switching`]），那正是本实现不能用的那个。
+const SETPRIV_CANDIDATES: &[&str] = &[
+    "/usr/bin/setpriv",
+    "/bin/setpriv",
+    "/sbin/setpriv",
+    "/usr/sbin/setpriv",
+];
+
+/// 判断候选文件是否为支持 `--reuid/--regid/--init-groups` 的可用 `setpriv`。
+///
+/// 只看文件名不够：busybox 与 Alpine 默认镜像在 `/bin/setpriv` 提供同名 applet，
+/// 它只支持 capabilities 相关选项，遇到 `--reuid` 会以 “unrecognized option” 失败。
+/// 这里直接问它自己是否认识这三个参数。
+pub(super) fn supports_credential_switching(candidate: &std::path::Path) -> bool {
+    if !candidate.is_file() {
+        return false;
+    }
+    let Ok(output) = std::process::Command::new(candidate).arg("--help").output() else {
+        return false;
+    };
+    let mut text = output.stdout;
+    text.extend_from_slice(&output.stderr);
+    let text = String::from_utf8_lossy(&text);
+    ["--reuid", "--regid", "--init-groups"]
+        .iter()
+        .all(|flag| text.contains(flag))
+}
+
+/// 解析可用于切换凭据的 `setpriv`，进程内只探测一次。
+///
+/// 上游 Go envd 通过 `SysProcAttr.Credential` 在进程内完成切换，不需要外部程序；
+/// Rust 稳定版只暴露 `CommandExt::uid/gid`（`groups` 仍是 unstable），而 PTY 路径
+/// 使用的 portable-pty 不提供任何凭据钩子，因此这里必须委派外部助手。
+fn credential_helper() -> Option<&'static std::path::Path> {
+    static RESOLVED: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    RESOLVED
+        .get_or_init(|| {
+            SETPRIV_CANDIDATES
+                .iter()
+                .map(std::path::Path::new)
+                .find(|candidate| supports_credential_switching(candidate))
+                .map(std::path::Path::to_path_buf)
+        })
+        .as_deref()
+}
+
+/// 镜像里没有可用的 `setpriv` 时给出的可定位错误。
+///
+/// 默认只会在 spawn 处冒出一个 `No such file or directory (os error 2)`，调用方
+/// 无从得知是缺包还是路径不对，这里点名缺失的工具与需要安装的包。
+fn missing_credential_helper() -> RpcError {
+    RpcError::invalid_argument(
+        "switching users requires a util-linux setpriv supporting \
+         --reuid/--regid/--init-groups, but none was found in \
+         /usr/bin, /bin, /sbin or /usr/sbin; install util-linux in the sandbox image \
+         (on Alpine: apk add util-linux; the busybox setpriv applet is not sufficient)",
+    )
+}
+
+/// 按目标用户解析凭据助手：同身份时返回 `None`（不 exec 任何助手，也不做探测）。
+pub(super) fn credential_helper_for(
+    user: &LocalUser,
+) -> Result<Option<&'static std::path::Path>, RpcError> {
+    if same_identity(user) {
+        return Ok(None);
+    }
+    credential_helper()
+        .map(Some)
+        .ok_or_else(missing_credential_helper)
+}
+
 /// 为普通管道进程构建清空环境且已切换用户的 Tokio Command。
 pub(super) fn pipe_command(
     config: &ProcessConfig,
     defaults: std::collections::BTreeMap<String, String>,
     cwd: Option<&std::path::Path>,
     user: &LocalUser,
+    helper: Option<&std::path::Path>,
 ) -> Command {
-    let mut command = if same_identity(user) {
-        let mut command = Command::new(&config.cmd);
-        command.args(&config.args);
-        command
-    } else {
-        let mut command = Command::new("/usr/bin/setpriv");
-        command
-            .arg(format!("--reuid={}", user.uid))
-            .arg(format!("--regid={}", user.gid))
-            .arg("--init-groups")
-            .arg("--")
-            .arg(&config.cmd)
-            .args(&config.args);
-        command
+    let mut command = match helper {
+        Some(helper) => {
+            let mut command = Command::new(helper);
+            command
+                .arg(format!("--reuid={}", user.uid))
+                .arg(format!("--regid={}", user.gid))
+                .arg("--init-groups")
+                .arg("--")
+                .arg(&config.cmd)
+                .args(&config.args);
+            command
+        }
+        None => {
+            let mut command = Command::new(&config.cmd);
+            command.args(&config.args);
+            command
+        }
     };
     command.env_clear();
     for (key, value) in base_environment(user) {
@@ -287,22 +366,26 @@ pub(super) fn pty_command(
     defaults: &std::collections::BTreeMap<String, String>,
     cwd: Option<&std::path::Path>,
     user: &LocalUser,
+    helper: Option<&std::path::Path>,
 ) -> CommandBuilder {
-    let mut command = if same_identity(user) {
-        let mut command = CommandBuilder::new(&config.cmd);
-        command.args(&config.args);
-        command
-    } else {
-        let mut command = CommandBuilder::new("/usr/bin/setpriv");
-        command.args([
-            format!("--reuid={}", user.uid),
-            format!("--regid={}", user.gid),
-            "--init-groups".into(),
-            "--".into(),
-            config.cmd.clone(),
-        ]);
-        command.args(&config.args);
-        command
+    let mut command = match helper {
+        Some(helper) => {
+            let mut command = CommandBuilder::new(helper);
+            command.args([
+                format!("--reuid={}", user.uid),
+                format!("--regid={}", user.gid),
+                "--init-groups".into(),
+                "--".into(),
+                config.cmd.clone(),
+            ]);
+            command.args(&config.args);
+            command
+        }
+        None => {
+            let mut command = CommandBuilder::new(&config.cmd);
+            command.args(&config.args);
+            command
+        }
     };
     command.env_clear();
     for (key, value) in base_environment(user) {

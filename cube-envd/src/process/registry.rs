@@ -23,8 +23,8 @@ use super::{
         TERMINAL_CACHE_LIMIT, TERMINAL_CACHE_TTL,
     },
     stream::{
-        end_event, parse_pty_size, pipe_command, process_cwd, pty_command, send_group_signal,
-        spawn_pty_reader, spawn_reader, wait_pty_child,
+        credential_helper_for, end_event, parse_pty_size, pipe_command, process_cwd, pty_command,
+        send_group_signal, spawn_pty_reader, spawn_reader, wait_pty_child,
     },
 };
 
@@ -105,11 +105,13 @@ impl ProcessRegistry {
                 .start_pty(options, parse_pty_size(Some(pty))?, fanout, subscription)
                 .await;
         }
+        let helper = credential_helper_for(&options.user)?;
         let mut command = pipe_command(
             &options.config,
             options.defaults,
             cwd.as_deref(),
             &options.user,
+            helper,
         );
         command
             .stdin(if options.keep_stdin {
@@ -199,13 +201,14 @@ impl ProcessRegistry {
             ..
         } = options;
         let cwd = process_cwd(&config, &user)?;
+        let helper = credential_helper_for(&user)?;
         let setup_config = config.clone();
         let setup = tokio::task::spawn_blocking(move || {
             let system = native_pty_system();
             let pair = system
                 .openpty(size)
                 .map_err(|error| format!("create PTY: {error}"))?;
-            let command = pty_command(&setup_config, &defaults, cwd.as_deref(), &user);
+            let command = pty_command(&setup_config, &defaults, cwd.as_deref(), &user, helper);
             let child = pair
                 .slave
                 .spawn_command(command)
