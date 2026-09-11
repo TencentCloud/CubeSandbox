@@ -139,7 +139,11 @@ func resolveProvenance(
 				}
 			}
 		}
-		if revision != "" && dirty != nil {
+		// Prefer a known embedded revision even when vcs.modified is absent
+		// or unparsable. The Git fallback below likewise keeps revision when
+		// dirty-state lookup fails; discarding a known stamp here would risk
+		// reporting git_revision "unknown" outside a work tree.
+		if revision != "" {
 			return simulator.Provenance{GitRevision: revision, GitDirty: dirty}
 		}
 	}

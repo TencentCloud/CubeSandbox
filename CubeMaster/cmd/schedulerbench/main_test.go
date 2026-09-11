@@ -55,6 +55,28 @@ func TestResolveProvenancePriorityAndFallbacks(t *testing.T) {
 			wantDirty:    boolPointer(true),
 		},
 		{
+			name: "build info revision kept without modified stamp",
+			readBuildInfo: func() (*debug.BuildInfo, bool) {
+				return &debug.BuildInfo{Settings: []debug.BuildSetting{
+					{Key: "vcs.revision", Value: "rev-only"},
+				}}, true
+			},
+			runGit: func(context.Context, ...string) ([]byte, error) {
+				return nil, errors.New("must not run")
+			},
+			wantRevision: "rev-only",
+			wantDirty:    nil,
+		},
+		{
+			name:          "build info revision kept when modified is unparsable",
+			readBuildInfo: buildInfo("rev-bad-dirty", "maybe"),
+			runGit: func(context.Context, ...string) ([]byte, error) {
+				return nil, errors.New("must not run")
+			},
+			wantRevision: "rev-bad-dirty",
+			wantDirty:    nil,
+		},
+		{
 			name:          "git fallback clean",
 			readBuildInfo: unavailableBuildInfo,
 			runGit: sequenceGitRunner([]gitResult{
