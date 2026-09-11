@@ -297,22 +297,6 @@ func cloneSimNodes(nodes []simNode) []simNode {
 // error and far below any inconsistency worth reporting.
 const verifyFloatTolerance = 1e-9
 
-// requiredMetricSchemaNames are the metric-contract entries a default report
-// must declare. Only the keys and the structural presence of a direction and a
-// description are required; the wording of either is free to change.
-var requiredMetricSchemaNames = []string{
-	"schedule_success_rate",
-	"rejected_requests",
-	"node_load_balance",
-	"template_locality_hit_rate",
-	"cpu_quota_utilization",
-	"mem_quota_utilization",
-	"create_latency_p50_ms",
-	"create_latency_p95_ms",
-	"uses_estimated_latency",
-	"average_feasible_candidates",
-}
-
 // VerifyDefaultReport checks that a report produced from the default
 // configuration is structurally complete and internally consistent.
 //
@@ -342,7 +326,9 @@ func VerifyDefaultReport(report Report) error {
 }
 
 // verifyEffectiveConfig requires the exact default profile and workload sets,
-// each without duplicates, plus a normalized seed and a supported node count.
+// each without duplicates, plus the exact default seed and node count.
+// Range-only checks are not enough: --verify must fail closed for a report that
+// ran with a non-default --nodes/--seed while still using the default profiles.
 func verifyEffectiveConfig(cfg, required Config) error {
 	if err := validateUniqueNames(cfg.Profiles, "profile"); err != nil {
 		return fmt.Errorf("verify default benchmark: config %w", err)
@@ -368,11 +354,13 @@ func verifyEffectiveConfig(cfg, required Config) error {
 			return fmt.Errorf("verify default benchmark: config missing workload %q", workload)
 		}
 	}
-	if err := validateNodeCount(cfg.NodeCount); err != nil {
-		return fmt.Errorf("verify default benchmark: config %w", err)
+	if cfg.NodeCount != required.NodeCount {
+		return fmt.Errorf("verify default benchmark: config node_count = %d, want default %d",
+			cfg.NodeCount, required.NodeCount)
 	}
-	if cfg.Seed == 0 {
-		return fmt.Errorf("verify default benchmark: config seed is 0, want the normalized non-zero effective seed")
+	if cfg.Seed != required.Seed {
+		return fmt.Errorf("verify default benchmark: config seed = %d, want default %d",
+			cfg.Seed, required.Seed)
 	}
 	return nil
 }
@@ -413,13 +401,9 @@ func verifyMetricSchema(schema []MetricSchema) error {
 			return fmt.Errorf("verify default benchmark: metric schema entry %q has no description", metric.Name)
 		}
 	}
-	for _, name := range requiredMetricSchemaNames {
-		if _, ok := seen[name]; !ok {
-			return fmt.Errorf("verify default benchmark: metric schema missing %q", name)
-		}
-	}
 	// Every Metrics JSON field the generator can emit must have a schema entry
-	// so the contract cannot silently drift from the report object.
+	// so the contract cannot silently drift from the report object. This is the
+	// sole required-name source; a parallel hardcoded list would be redundant.
 	for _, name := range metricsJSONFieldNames() {
 		if _, ok := seen[name]; !ok {
 			return fmt.Errorf("verify default benchmark: metric schema missing emitted metrics key %q", name)

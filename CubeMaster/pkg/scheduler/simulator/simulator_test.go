@@ -97,19 +97,21 @@ func TestVerifyDefaultReportRejectsContractGaps(t *testing.T) {
 					}
 				}
 			},
-			want: "metric schema missing",
+			want: "metric schema missing emitted metrics key \"schedule_success_rate\"",
 		},
 		{
-			name: "missing emitted metrics schema key",
+			name: "non-default node count",
 			mutate: func(report *Report) {
-				for i, metric := range report.MetricSchema {
-					if metric.Name == "peak_mem_utilization" {
-						report.MetricSchema = append(report.MetricSchema[:i], report.MetricSchema[i+1:]...)
-						return
-					}
-				}
+				report.Config.NodeCount = 2
 			},
-			want: "metric schema missing emitted metrics key \"peak_mem_utilization\"",
+			want: "config node_count = 2, want default 4",
+		},
+		{
+			name: "non-default seed",
+			mutate: func(report *Report) {
+				report.Config.Seed = report.Config.Seed + 1
+			},
+			want: "config seed =",
 		},
 		{
 			name: "missing comparison",
