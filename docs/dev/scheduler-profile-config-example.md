@@ -311,11 +311,12 @@ scheduler:
 
 If `binpack_score` is listed in the final `enable_scorers` under a non-empty
 Profile but `plugin_conf.binpack_score` is omitted, built-in
-`binpack_utilization` injects defaults; a user Profile without that block
-fails fast. Explicit `weight: 0` disables Select. Negative weight is always
-rejected at config load. `cpu_weight` / `mem_weight` / `mvm_weight` values
-`<= 0` fall back to `1` (cannot exclude a dimension via `0`). MVM occupancy
-uses `localcache.MaxMvmLimit`, not raw `node.MaxMvmLimit` alone.
+`binpack_utilization` injects defaults; a user Profile may also omit the block
+and keep the same runtime defaults (`BinpackPluginWeight(nil)` → weight 1).
+Explicit `weight: 0` disables Select. Negative weight is always rejected at
+config load. `cpu_weight` / `mem_weight` / `mvm_weight` values `<= 0` fall back
+to `1` (cannot exclude a dimension via `0`). MVM occupancy uses
+`localcache.MaxMvmLimit`, not raw `node.MaxMvmLimit` alone.
 
 Invalid (will not overlay `plugin_conf`; the Go type has no such field):
 

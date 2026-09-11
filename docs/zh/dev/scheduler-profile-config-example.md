@@ -273,8 +273,9 @@ scheduler:
 ```
 
 若非空 Profile 下最终 `enable_scorers` 列出了 `binpack_score` 但省略了
-`plugin_conf.binpack_score`，内置 `binpack_utilization` 会注入默认值；没有该块的用户
-Profile 会快速失败。显式 `weight: 0` 禁用 Select。负权重一律在配置加载时拒绝。
+`plugin_conf.binpack_score`，内置 `binpack_utilization` 会注入默认值；用户 Profile
+也可省略该块并保留相同的运行时默认（`BinpackPluginWeight(nil)` → weight 1）。
+显式 `weight: 0` 禁用 Select。负权重一律在配置加载时拒绝。
 `cpu_weight` / `mem_weight` / `mvm_weight` 取值 `<= 0` 回退为 `1`（不能靠 `0` 排除某维）。
 MVM 占用使用 `localcache.MaxMvmLimit`，而非单独的原始 `node.MaxMvmLimit`。
 
