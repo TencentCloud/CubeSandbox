@@ -5,9 +5,10 @@ from __future__ import annotations
 
 
 class CubeSandboxError(Exception):
-    def __init__(self, message: str, status_code: int | None = None):
+    def __init__(self, message: str, status_code: int | None = None, ret_code: int | None = None):
         super().__init__(message)
         self.status_code = status_code
+        self.ret_code = ret_code
 
 
 class SandboxNotFoundError(CubeSandboxError): ...

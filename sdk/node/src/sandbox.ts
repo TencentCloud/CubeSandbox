@@ -139,6 +139,9 @@ export interface ListSnapshotsOptions {
 
 const VALID_ON_TIMEOUT = ["kill", "pause"] as const;
 
+/** Fork request budget: CubeAPI's FORK_ROUTE_TIMEOUT (1560 s) plus headroom. */
+const FORK_REQUEST_TIMEOUT_MS = 1_600_000;
+
 function serializeLifecycle(lifecycle: LifecycleOptions): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (lifecycle.onTimeout !== undefined) {
@@ -741,28 +744,28 @@ export class Sandbox {
         }
       }
     } else {
-        // Bounded fan-out: at most min(n, concurrency) create calls are in
-        // flight at once (workers pull from a shared cursor), matching the
-        // Python (ThreadPoolExecutor) and Go (semaphore) SDKs. Every task is
-        // drained so a mid-fan-out failure never leaks a created sibling.
-        const limit = Math.min(n, concurrency);
-        let next = 0;
-        const worker = async (): Promise<void> => {
-          for (;;) {
-            const index = next++;
-            if (index >= n) {
-              return;
-            }
-            try {
-              sandboxes.push(await createOne());
-            } catch (err) {
-              if (firstError === null) {
-                firstError = err;
-              }
+      // Bounded fan-out: at most min(n, concurrency) create calls are in
+      // flight at once (workers pull from a shared cursor), matching the
+      // Python (ThreadPoolExecutor) and Go (semaphore) SDKs. Every task is
+      // drained so a mid-fan-out failure never leaks a created sibling.
+      const limit = Math.min(n, concurrency);
+      let next = 0;
+      const worker = async (): Promise<void> => {
+        for (;;) {
+          const index = next++;
+          if (index >= n) {
+            return;
+          }
+          try {
+            sandboxes.push(await createOne());
+          } catch (err) {
+            if (firstError === null) {
+              firstError = err;
             }
           }
-        };
-        await Promise.all(Array.from({ length: limit }, () => worker()));
+        }
+      };
+      await Promise.all(Array.from({ length: limit }, () => worker()));
     }
 
     const cleanup = new CloneCleanup(snapId, sandboxes.length, cfg);
@@ -785,6 +788,73 @@ export class Sandbox {
       }
     }
     return sandboxes;
+  }
+
+  /**
+   * Fork this sandbox ``count`` times, mirroring E2B's ``Sandbox.fork``.
+   *
+   * Delegates the fork to the backend: ``POST /sandboxes/{id}/fork`` asks
+   * CubeMaster to snapshot this sandbox once and derive ``count`` copies in a
+   * single round-trip. Each requested fork succeeds or fails independently: the
+   * outcome is reported in the returned array at that fork's position — a
+   * {@link Sandbox} instance or the {@link Error} that prevented it from
+   * starting. Unlike {@link clone} (all-or-nothing), successful forks are kept
+   * even when siblings fail. The temporary snapshot is managed by the server,
+   * so no client-side cleanup is needed. Fork concurrency is bounded server-side.
+   *
+   * @param options ``count`` 1..100; ``timeoutMs`` optional idle TTL in
+   *   milliseconds (E2B-compatible), converted to whole seconds on the wire;
+   *   ``requestTimeoutMs`` overrides the client-side request budget
+   *   (default 26 min 40 s, sized to the server's fork budget).
+   * @returns Exactly ``count`` entries, in request order — each a {@link Sandbox}
+   *   instance (when that fork started) or an {@link Error}.
+   */
+  async fork(
+    options: { count?: number; timeoutMs?: number; requestTimeoutMs?: number } = {},
+  ): Promise<Array<Sandbox | Error>> {
+    const count = options.count ?? 1;
+    if (count < 1 || count > 100) {
+      throw new RangeError("count must be between 1 and 100");
+    }
+
+    const payload: Record<string, unknown> = { count };
+    if (options.timeoutMs !== undefined) {
+      const ms = options.timeoutMs;
+      if (!Number.isFinite(ms) || ms < 0) {
+        throw new RangeError(`timeoutMs must be a non-negative number, got ${ms}`);
+      }
+      // Wire timeout is integer seconds; ceil so sub-second values don't collapse to 0.
+      payload.timeout = Math.ceil(ms / 1000);
+    }
+
+    const resp = await controlFetch(
+      this.config,
+      `${this.config.apiUrl}/sandboxes/${this.sandboxId}/fork`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        // Fork can legally take minutes; bypass the 30 s control default.
+        signal: AbortSignal.timeout(options.requestTimeoutMs ?? FORK_REQUEST_TIMEOUT_MS),
+      },
+    );
+    await checkControlResponse(resp);
+
+    // Body is an array with one entry per fork: {sandbox}|{error}.
+    const entries = (await resp.json()) as Array<Record<string, any>>;
+    if (!Array.isArray(entries) || entries.length !== count) {
+      throw new ApiError(
+        `fork expected ${count} results, got ${Array.isArray(entries) ? entries.length : "none"}`,
+        500,
+      );
+    }
+    return entries.map((entry): Sandbox | Error => {
+      if (entry?.sandbox) {
+        return new Sandbox(entry.sandbox, this.config);
+      }
+      const err = entry?.error ?? {};
+      return new ApiError(err?.message ?? "fork failed", undefined, err?.code);
+    });
   }
 
   /** Close pooled HTTP connections without destroying the sandbox. */

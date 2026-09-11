@@ -36,6 +36,8 @@ type APIError struct {
 	StatusCode int
 	Message    string
 	Kind       string
+	// RetCode is the CubeMaster business code; set on per-fork errors only.
+	RetCode int
 }
 
 func (e *APIError) Error() string {

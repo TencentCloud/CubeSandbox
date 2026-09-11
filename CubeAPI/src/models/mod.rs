@@ -516,6 +516,54 @@ pub struct Sandbox {
     pub domain: Option<String>,
 }
 
+// ─── Sandbox — fork request / response ─────────────────────────────────────
+
+/// Request body for POST /sandboxes/{sandboxID}/fork.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ForkRequest {
+    /// Number of fork sandboxes to derive (1..=100). Defaults to 1 when absent.
+    #[serde(default = "default_fork_count")]
+    pub count: i32,
+    /// Optional idle TTL (seconds) applied to each forked sandbox.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<i32>,
+}
+
+fn default_fork_count() -> i32 {
+    1
+}
+
+/// Per-fork error entry inside a fork response element. CubeMaster's business
+/// ret_code is carried in `code`.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ForkError {
+    pub code: i32,
+    pub message: String,
+}
+
+impl ForkError {
+    pub fn new(code: i32, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+/// One element of a fork response: exactly one of `sandbox` or `error` is
+/// present, encoding that fork's independent success/failure.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ForkResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<Sandbox>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ForkError>,
+}
+
+/// Response body for POST /sandboxes/{sandboxID}/fork — an array of length
+/// `count`, each element either a fully-connectable `Sandbox` or an `error`.
+pub type ForkResponse = Vec<ForkResult>;
+
 // ─── Sandbox — list / detail responses ────────────────────────────────────
 
 /// One entry in GET /sandboxes (RunningSandbox in OpenAPI spec).

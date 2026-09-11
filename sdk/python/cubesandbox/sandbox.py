@@ -849,6 +849,7 @@ class Sandbox:
                             first_error = exc
                         # Keep draining: another in-flight create may
                         # still succeed and we must not drop its result.
+
         cleanup = _CloneCleanup(snap_id, len(sandboxes), cfg)
         for sb in sandboxes:
             sb._clone_cleanup = cleanup
@@ -874,6 +875,69 @@ class Sandbox:
             except Exception:  # noqa: BLE001 — best-effort cleanup
                 pass
         return sandboxes
+
+    def fork(
+        self,
+        count: int = 1,
+        *,
+        timeout: int | None = None,
+    ) -> list["Sandbox" | BaseException]:
+        """Fork this sandbox *count* times (server-side).
+
+        Delegates the fork to the backend: ``POST /sandboxes/{id}/fork`` asks
+        CubeMaster to snapshot this sandbox once and derive ``count`` copies in
+        a single round-trip. Each fork succeeds or fails independently: the
+        returned list has one entry per requested fork — a :class:`Sandbox`, or
+        the ``BaseException`` that prevented it from starting. Successful forks
+        are kept even when siblings fail (unlike :meth:`clone`, which is
+        all-or-nothing). The temporary snapshot is managed by the server, so no
+        client-side cleanup is needed. Fork concurrency is bounded server-side.
+
+        Args:
+            count: Number of forks to create, 1..100 (default: 1).
+            timeout: Idle timeout in seconds per new fork (``None`` = server
+                default); only affects the forks.
+
+        Returns:
+            A list with exactly *count* entries, in request order.
+
+        Raises:
+            ValueError: If ``count`` is outside ``1..100``.
+            ApiError: If the whole fork request fails before any fork was
+                attempted (e.g. sandbox not found). Per-fork failures are not
+                raised — they appear as exception entries in the result list.
+        """
+        if count < 1 or count > 100:
+            raise ValueError("count must be between 1 and 100")
+
+        payload: dict[str, Any] = {"count": count}
+        if timeout is not None:
+            payload["timeout"] = timeout
+
+        resp = self._session.post(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}/fork",
+            json=payload,
+        )
+        _check_response(resp)
+
+        # Body is an array with one entry per fork: {sandbox}|{error}.
+        entries = resp.json() or []
+        if len(entries) != count:
+            raise ApiError(f"fork returned {len(entries)} results, expected {count}")
+
+        out: list["Sandbox" | BaseException] = []
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("sandbox"):
+                out.append(Sandbox(entry["sandbox"], config=self._config))
+            else:
+                err = entry.get("error", {}) if isinstance(entry, dict) else {}
+                out.append(
+                    ApiError(
+                        err.get("message", "fork failed"),
+                        ret_code=err.get("code"),
+                    )
+                )
+        return out
 
 
     def _build_session(self) -> requests.Session:
