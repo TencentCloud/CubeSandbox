@@ -173,8 +173,12 @@ is the denominator.
 **Restart vs hot-update.** Profile expansion runs inside config
 `Init` / `preHandle` (`applySchedulerProfile` via `preHandleScheduler`).
 CubeMaster **does** hot-reload `conf.yaml` through the file watcher: on
-change, `listener.OnEvent` re-runs `preHandle` and updates the in-memory
-`Config` (so Profile overlays are re-applied to the Config object).
+change, `listener.OnEvent` re-runs `preHandle` and, on success, updates the
+in-memory `Config`. On `preHandle` / `validate` failure it logs FATAL via
+`CubeLog.Fatalf` (which writes a FATAL line and does **not** call `os.Exit`)
+and keeps the previous Config — the bad overlay is not applied. Selecting a
+Profile makes unknown names in the **effective** `enable_filters` /
+`enable_scorers` lists fail closed at that reload boundary as well.
 However, the scheduler Filter/Score plugin slices are built once in
 `scheduler.InitScheduler` (`filter.NewSelector` / `score.NewSelector`) and
 are **not** rebuilt on config hot-reload. Changing `scheduler.profile`,

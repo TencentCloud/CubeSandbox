@@ -402,6 +402,57 @@ scheduler:
 	}
 }
 
+func TestAsyncFeederRequiresResourceWeights(t *testing.T) {
+	cases := []struct {
+		name  string
+		score *config.SchedulerScoreConf
+		want  bool
+	}{
+		{
+			name:  "nil_score",
+			score: nil,
+			want:  false,
+		},
+		{
+			name: "mfwa_without_resource_weights",
+			score: &config.SchedulerScoreConf{
+				ScorePluginConf: config.ScorePluginConf{
+					MultiFactorWeightedAverage: &config.MultiFactorWeightedAverage{
+						Weight: 1,
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "resource_weights_without_mfwa",
+			score: &config.SchedulerScoreConf{
+				ResourceWeights: map[string]float64{"mvm_num": 1},
+			},
+			want: false,
+		},
+		{
+			name: "mfwa_and_resource_weights",
+			score: &config.SchedulerScoreConf{
+				ResourceWeights: map[string]float64{"mvm_num": 1},
+				ScorePluginConf: config.ScorePluginConf{
+					MultiFactorWeightedAverage: &config.MultiFactorWeightedAverage{
+						Weight: 1,
+					},
+				},
+			},
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldStartAsyncMultiFactorFeeder(tc.score); got != tc.want {
+				t.Fatalf("shouldStartAsyncMultiFactorFeeder() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func initSelectorTestConfig(t *testing.T, yamlBody string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "cubemaster.yaml")

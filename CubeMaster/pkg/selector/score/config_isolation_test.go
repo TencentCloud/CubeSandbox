@@ -17,6 +17,14 @@ const isolatedScoreConfigTestEnv = "CUBEMASTER_ISOLATED_SCORE_CONFIG_TEST"
 
 // runIsolatedScoreConfigTest runs one exact config-mutating test in a child
 // process. The child owns any watcher and package-global config created by Init.
+//
+// Constraints / CI caveats:
+//   - The child is exec'd as os.Args[0] with only -test.run / -test.count; parent
+//     flags such as -test.timeout, -test.shuffle, and -test.v are intentionally
+//     not forwarded.
+//   - os.Args[0] must be a directly runnable test binary (breaks under some
+//     -exec wrappers or restricted CI sandboxes that replace the runner).
+//   - Each isolated test roughly doubles wall time versus an in-process call.
 func runIsolatedScoreConfigTest(t *testing.T) bool {
 	t.Helper()
 	if os.Getenv(isolatedScoreConfigTestEnv) == t.Name() {

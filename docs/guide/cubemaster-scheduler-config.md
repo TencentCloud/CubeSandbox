@@ -93,10 +93,10 @@ CubeMaster can select a named **runtime Profile** with `scheduler.profile`.
 Empty profile leaves the existing Filter/Score lists and `plugin_conf`
 blocks in place. That is not a byte-for-byte freeze of master behavior:
 `plugin_conf.<scorer>.weight: 0` still disables that scorer. The async
-`loopAsyncScore` feeder (the writer of `node.Score` / `pscore`) still
-starts whenever the `multi_factor_weighted_average` plugin block is
-present — including under an empty profile — matching master; it is not
-gated on the scorer being listed in `enable_scorers`. Built-in names (`balanced_spread`,
+`loopAsyncScore` feeder (writer of `node.Score` / `pscore`) starts only when
+the `multi_factor_weighted_average` plugin block is present **and**
+`score.resource_weights` is non-nil — matching master's early-return when
+`resource_weights` was omitted. Built-in names (`balanced_spread`,
 `template_locality_first`, `binpack_utilization`) expand onto selector lists
 and inject self-contained plugin defaults when the matching `plugin_conf`
 block is absent. User entries under `scheduler.profiles` with the same name
@@ -116,8 +116,11 @@ the runtime default of `1` (enabled); only an explicit `0` disables. Other
 scorers still use plain `float64`, so omitting `weight` there YAML-decodes
 to `0` and disables — set an explicit positive `weight` to keep them
 active. Profile / selector-list changes require a CubeMaster restart: config
-hot-reload re-applies Profile overlays to the in-memory Config, but
-`InitScheduler` does not rebuild the Filter/Score slices.
+hot-reload re-runs `preHandle` and, on success, updates the in-memory Config.
+On failure it logs FATAL (CubeLog.Fatalf does **not** `os.Exit`) and keeps the
+previous Config — the bad Profile overlay is not applied. `InitScheduler` still
+does not rebuild Filter/Score slices on reload, so selector-set changes need a
+process restart.
 
 `binpack_score` is a thin Score-phase plugin that prefers fuller nodes. It is
 enabled by listing `binpack_score` in `enable_scorers` (directly or via a

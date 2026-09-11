@@ -1094,3 +1094,91 @@ scheduler:
 	// Unrelated base keys remain.
 	assert.Equal(t, 4.0, got.Scheduler.Score.ResourceWeights["custom_keep"])
 }
+
+func TestInit_NegativeScorerPluginWeightsRejected(t *testing.T) {
+	cases := []struct {
+		name    string
+		plugin  string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name:   "realtime",
+			plugin: "real_time_weighted_average",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - real_time_weighted_average
+    resource_weights:
+      mvm_num: 1
+    plugin_conf:
+      real_time_weighted_average:
+        weight: -1
+        enable_weight_factors: [mvm_num]
+`,
+			wantErr: "real_time_weighted_average.weight must be >= 0",
+		},
+		{
+			name:   "multifactor",
+			plugin: "multi_factor_weighted_average",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - multi_factor_weighted_average
+    resource_weights:
+      mvm_num: 1
+    plugin_conf:
+      multi_factor_weighted_average:
+        weight: -1
+        enable_weight_factors: [mvm_num]
+`,
+			wantErr: "multi_factor_weighted_average.weight must be >= 0",
+		},
+		{
+			name:   "image",
+			plugin: "image_score",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - image_score
+    resource_weights:
+      image_id: 1
+    plugin_conf:
+      image_score:
+        weight: -1
+        enable_weight_factors: [image_id]
+`,
+			wantErr: "image_score.weight must be >= 0",
+		},
+		{
+			name:   "affinity",
+			plugin: "affinity_score",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - affinity_score
+    resource_weights:
+      mvm_num: 1
+    plugin_conf:
+      affinity_score:
+        weight: -1
+`,
+			wantErr: "affinity_score.weight must be >= 0",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := initConfigFromYAML(t, tc.yaml)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
