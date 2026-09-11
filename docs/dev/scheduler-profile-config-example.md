@@ -134,21 +134,23 @@ or other names not listed by the Profile). Review the effective
 `enable_filters` after applying a Profile, and restore any required
 admission filters via a user Profile that lists them explicitly.
 
-**`weight: 0` disables scorers.** For every registered Score plugin
+**`weight: 0` disables scorers.** For the four legacy Score plugins
 (`real_time_weighted_average`, `multi_factor_weighted_average`,
-`affinity_score`, `image_score`, and `binpack_score`), plugin
-`weight: 0` (or `disable: true`) disables the scorer and skips its
-`Select`. Because `weight` is a YAML `float64`, omitting the `weight` key
-inside a present `plugin_conf.<scorer>` block also decodes to `0` and
-disables the scorer. To keep a scorer active, set an explicit positive
-`weight`. **Negative** plugin `weight` is rejected at config load for every
-registered scorer (not only `binpack_score`); configs that previously
-started with a negative weight fail `config.Init` after upgrade. Omitting
-the entire `plugin_conf.<scorer>` block while listing a factor/affinity
-scorer in `enable_scorers` also fails config load (empty Profile included).
-`binpack_score` may omit the block and keep runtime defaults; under a
-non-empty Profile, built-ins may inject defaults when the pointer is still
-`nil`.
+`affinity_score`, `image_score`), plugin `weight: 0` (or `disable: true`)
+disables the scorer and skips its `Select`. Because those `weight` fields are
+YAML `float64`, omitting the `weight` key inside a present
+`plugin_conf.<scorer>` block also decodes to `0` and disables the scorer — set
+an explicit positive `weight` to keep them active. **`binpack_score` is
+different:** its `weight` is `*float64`, so omitting `weight` inside a present
+`plugin_conf.binpack_score` block keeps the runtime default of `1` (enabled);
+only an explicit `0` (or `disable: true`) disables it. **Negative** plugin
+`weight` is rejected at config load for every registered scorer (including
+`binpack_score`); configs that previously started with a negative weight fail
+`config.Init` after upgrade. Omitting the entire `plugin_conf.<scorer>` block
+while listing a factor/affinity scorer in `enable_scorers` also fails config
+load (empty Profile included). `binpack_score` may omit the whole block and
+keep runtime defaults; under a non-empty Profile, built-ins may inject defaults
+when the pointer is still `nil`.
 
 **`binpack_score` occupancy weights.** `cpu_weight` / `mem_weight` /
 `mvm_weight` values `<= 0` fall back to default `1` at runtime. You

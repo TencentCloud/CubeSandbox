@@ -119,17 +119,18 @@ filter/score 名称，会在调度器运行前于 `preHandleScheduler` 中失败
 应用 Profile 后请审查生效的 `enable_filters`，并通过显式列出所需过滤器的用户
 Profile 恢复必要准入项。
 
-**`weight: 0` 禁用评分器。** 对每个已注册 Score 插件
+**`weight: 0` 禁用评分器。** 对四个遗留 Score 插件
 （`real_time_weighted_average`、`multi_factor_weighted_average`、
-`affinity_score`、`image_score` 以及 `binpack_score`），插件级
-`weight: 0`（或 `disable: true`）会禁用该评分器并跳过其 `Select`。由于 `weight`
-是 YAML `float64`，在已存在的 `plugin_conf.<scorer>` 块中省略 `weight` 键也会解码为
-`0` 并禁用该评分器。要保持评分器活跃，请显式设置正的 `weight`。**负的**插件
-`weight` 会对所有已注册评分器在配置加载阶段拒绝（不只是 `binpack_score`）；
-升级前能带着负权重启动的配置，升级后会在 `config.Init` 失败。在
-`enable_scorers` 中列出因子型 / affinity 评分器但省略整个 `plugin_conf.<scorer>`
-块时，配置加载也会失败（空 Profile 同样适用）。`binpack_score` 可省略该块并
-保留运行时默认；非空 Profile 下内置在指针仍为 `nil` 时可能注入默认。
+`affinity_score`、`image_score`），插件级 `weight: 0`（或 `disable: true`）会禁用该
+评分器并跳过其 `Select`。由于这些 `weight` 是 YAML `float64`，在已存在的
+`plugin_conf.<scorer>` 块中省略 `weight` 键也会解码为 `0` 并禁用——要保持活跃请显式
+写正的 `weight`。**`binpack_score` 不同：** 其 `weight` 是 `*float64`，在已有
+`plugin_conf.binpack_score` 块中省略 `weight` 会保留运行时默认 `1`（启用）；只有显式
+写 `0`（或 `disable: true`）才禁用。**负的**插件 `weight` 会对所有已注册评分器
+（含 `binpack_score`）在配置加载阶段拒绝；升级前能带着负权重启动的配置，升级后会在
+`config.Init` 失败。在 `enable_scorers` 中列出因子型 / affinity 评分器但省略整个
+`plugin_conf.<scorer>` 块时，配置加载也会失败（空 Profile 同样适用）。`binpack_score`
+可省略整个块并保留运行时默认；非空 Profile 下内置在指针仍为 `nil` 时可能注入默认。
 
 **`binpack_score` 占用权重。** `cpu_weight` / `mem_weight` / `mvm_weight` 取值
 `<= 0` 时，运行时回退为默认 `1`。**不能**通过把某维因子权重设为 `0` 来排除该维。
