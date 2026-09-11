@@ -19,4 +19,8 @@ import (
 func TestSelectorAllowlistsMatchRegistries(t *testing.T) {
 	assert.Equal(t, filter.RegisteredFilterNames(), config.AllowedSchedulerFilterNames())
 	assert.Equal(t, score.RegisteredScoreNames(), config.AllowedSchedulerScoreNames())
+	// plugin_conf validation switches must cover every registry scorer; otherwise
+	// a new registration + allowlist entry compiles while fail-closed checks
+	// silently no-op (default: continue / return false).
+	assert.Equal(t, score.RegisteredScoreNames(), config.ScorerNamesWithPluginConfMissingCheck())
 }

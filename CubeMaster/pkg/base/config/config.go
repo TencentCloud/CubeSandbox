@@ -1457,17 +1457,8 @@ func validateListedScorerPluginConfPresent(s *SchedulerConf) error {
 		if name == "binpack_score" {
 			continue
 		}
-		missing := false
-		switch name {
-		case "real_time_weighted_average":
-			missing = s.Score.ScorePluginConf.RealTimeWeightedAverage == nil
-		case "multi_factor_weighted_average":
-			missing = s.Score.ScorePluginConf.MultiFactorWeightedAverage == nil
-		case "affinity_score":
-			missing = s.Score.ScorePluginConf.AffinityScore == nil
-		case "image_score":
-			missing = s.Score.ScorePluginConf.ImageScore == nil
-		default:
+		missing, known := scorerPluginConfMissing(s, name)
+		if !known {
 			// Unknown names are handled by validateEffectiveSchedulerSelectors
 			// under Profile; empty-profile still warns/skips at NewSelector.
 			continue
@@ -1519,18 +1510,11 @@ func validateSchedulerScorePluginConfig(s *SchedulerConf) error {
 		return err
 	}
 	for _, name := range s.Score.EnableScorers {
-		missing := false
-		switch name {
-		case "real_time_weighted_average":
-			missing = s.Score.ScorePluginConf.RealTimeWeightedAverage == nil
-		case "multi_factor_weighted_average":
-			missing = s.Score.ScorePluginConf.MultiFactorWeightedAverage == nil
-		case "affinity_score":
-			missing = s.Score.ScorePluginConf.AffinityScore == nil
-		case "image_score":
-			missing = s.Score.ScorePluginConf.ImageScore == nil
-		case "binpack_score":
-			missing = s.Score.ScorePluginConf.BinpackScore == nil
+		missing, known := scorerPluginConfMissing(s, name)
+		if !known {
+			// Allowlist / effective-selector validation rejects unknown names
+			// under Profile; leave unknown base names for NewSelector warn/skip.
+			continue
 		}
 		if missing {
 			return fmt.Errorf("scheduler profile %q enables %q but scheduler.score.plugin_conf.%s is missing",
@@ -1621,6 +1605,46 @@ func isFactorBasedSchedulerScore(name string) bool {
 	default:
 		return false
 	}
+}
+
+// scorerPluginConfMissing reports whether plugin_conf.<name> is absent and
+// whether name is a known scorer handled by the validation switches.
+// known=false means the name falls through default: and receives no
+// plugin_conf check — TestScorerPluginValidationCoversAllowlist fails if an
+// allowlisted scorer is unknown here.
+func scorerPluginConfMissing(s *SchedulerConf, name string) (missing bool, known bool) {
+	if s == nil || s.Score == nil {
+		return true, false
+	}
+	switch name {
+	case "real_time_weighted_average":
+		return s.Score.ScorePluginConf.RealTimeWeightedAverage == nil, true
+	case "multi_factor_weighted_average":
+		return s.Score.ScorePluginConf.MultiFactorWeightedAverage == nil, true
+	case "affinity_score":
+		return s.Score.ScorePluginConf.AffinityScore == nil, true
+	case "image_score":
+		return s.Score.ScorePluginConf.ImageScore == nil, true
+	case "binpack_score":
+		return s.Score.ScorePluginConf.BinpackScore == nil, true
+	default:
+		return false, false
+	}
+}
+
+// ScorerNamesWithPluginConfMissingCheck returns allowlisted score names that
+// scorerPluginConfMissing recognizes. Compared to the live registry via
+// pkg/scheduler.TestSelectorAllowlistsMatchRegistries after
+// TestScorerPluginValidationCoversAllowlist asserts coverage of the allowlist.
+func ScorerNamesWithPluginConfMissingCheck() map[string]struct{} {
+	probe := &SchedulerConf{Score: &SchedulerScoreConf{}}
+	out := make(map[string]struct{})
+	for name := range allowedSchedulerScoreNames {
+		if _, known := scorerPluginConfMissing(probe, name); known {
+			out[name] = struct{}{}
+		}
+	}
+	return out
 }
 
 func scorerPluginExplicitlyDisabled(s *SchedulerConf, name string) bool {

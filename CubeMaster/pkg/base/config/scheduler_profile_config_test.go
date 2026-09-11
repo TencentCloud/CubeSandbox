@@ -253,6 +253,54 @@ func TestAllowedSchedulerSelectorNamesDocumented(t *testing.T) {
 	assert.Equal(t, 5, len(allowedSchedulerScoreNames))
 }
 
+func TestScorerPluginValidationCoversAllowlist(t *testing.T) {
+	// A newly allowlisted scorer that is missing from scorerPluginConfMissing /
+	// scorerPluginExplicitlyDisabled / isFactorBasedSchedulerScore would
+	// compile and pass the registry drift test while silently skipping
+	// plugin_conf fail-closed checks. Probe every allowlisted name.
+	assert.Equal(t, allowedSchedulerScoreNames, ScorerNamesWithPluginConfMissingCheck())
+
+	wantFactorBased := map[string]bool{
+		"real_time_weighted_average":    true,
+		"multi_factor_weighted_average": true,
+		"affinity_score":                false,
+		"image_score":                   true,
+		"binpack_score":                 false,
+	}
+	assert.Equal(t, len(allowedSchedulerScoreNames), len(wantFactorBased))
+	for name := range allowedSchedulerScoreNames {
+		want, ok := wantFactorBased[name]
+		assert.True(t, ok, "wantFactorBased missing %q", name)
+		assert.Equal(t, want, isFactorBasedSchedulerScore(name), name)
+	}
+
+	for name := range allowedSchedulerScoreNames {
+		cfg := schedulerConfWithScorerExplicitlyDisabled(t, name)
+		assert.True(t, scorerPluginExplicitlyDisabled(cfg, name),
+			"scorerPluginExplicitlyDisabled does not recognize %q", name)
+	}
+}
+
+func schedulerConfWithScorerExplicitlyDisabled(t *testing.T, name string) *SchedulerConf {
+	t.Helper()
+	s := &SchedulerConf{Score: &SchedulerScoreConf{}}
+	switch name {
+	case "real_time_weighted_average":
+		s.Score.ScorePluginConf.RealTimeWeightedAverage = &RealTimeWeightedAverage{Disable: true}
+	case "multi_factor_weighted_average":
+		s.Score.ScorePluginConf.MultiFactorWeightedAverage = &MultiFactorWeightedAverage{Disable: true}
+	case "affinity_score":
+		s.Score.ScorePluginConf.AffinityScore = &AffinityScore{Disable: true}
+	case "image_score":
+		s.Score.ScorePluginConf.ImageScore = &ImageScore{Disable: true}
+	case "binpack_score":
+		s.Score.ScorePluginConf.BinpackScore = &BinpackScore{Disable: true}
+	default:
+		t.Fatalf("add disabled probe fixture for scorer %q", name)
+	}
+	return s
+}
+
 func initConfigFromYAML(t *testing.T, yamlBody string) (*Config, error) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "cubemaster.yaml")
