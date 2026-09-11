@@ -38,7 +38,7 @@ Cube Sandbox 最基础的使用方式：创建沙箱、在其中运行 Python �
 ## 2. 前置条件
 
 - 已部署的 Cube Sandbox 环境
-- Python 3.8+
+- Python 3.9+（`cubesandbox` 与 `e2b-code-interpreter` 依赖）
 
 ```bash
 pip install -r requirements.txt
@@ -72,6 +72,18 @@ cp .env.example .env
 ```
 
 之后直接运行任意示例脚本即可，无需手动 `export`。
+
+**集群外本地开发：** 若无法解析 `*.cube.app`，在 `.env` 中设置
+`CUBE_REMOTE_PROXY_BASE=https://<节点IP>:443`（CubeProxy 常用 443/8080/9090）。
+`load_local_dotenv()` 仅加载 `.env`；需要数据面的 E2B 脚本会调用
+`ensure_dev_sidecar()` 启动同级
+[`examples/e2b-dev-sidecar/`](../e2b-dev-sidecar/) 并为 **E2B SDK**
+（`e2b_code_interpreter`）打补丁，经本地 sidecar 转发数据面到 CubeProxy。
+需完整克隆本仓库；sidecar 启动失败时脚本会 warn 并继续。仅控制面的脚本
+（如 `create.py`）不会启动 sidecar。同目录下使用 `cubesandbox` SDK 的脚本
+（如 `auto-kill.py`）**不受** sidecar 补丁影响，集群外仍需 `*.cube.app` DNS
+或其它路由。`/init` 重试的单次超时可调 `CUBE_ENVD_INIT_ATTEMPT_TIMEOUT_S`
+（默认每次 `5` 秒）。
 
 或直接导出：
 
@@ -153,7 +165,7 @@ python create_with_envs.py
 预期输出:
 
 ```text
-user-session-test
+session is user-session-test
 ```
 
 ### pause.py — 暂停与恢复
@@ -256,6 +268,8 @@ requests.get(url, headers={"e2b-traffic-access-token": sandbox.traffic_access_to
 | `Template not found` | 模板 ID 错误 | 重新运行 `cubemastercli tpl list` |
 | `Connection refused` | CubeAPI 不可达 | 检查 `E2B_API_URL` 及端口 3000 |
 | `Sandbox timeout` | 沙箱超过 TTL | 增大 `Sandbox.create()` 中的 `timeout` |
+| `create_with_envs.py` 打印 `session is ` 但值为空 | cubebox/VNC 模板 create-time env 未落到 shell | 示例会 best-effort 调 `apply_create_time_envs()`（失败仅 warn）；仍为空则用 `commands.run(..., envs={...})` |
+| 设置 `CUBE_REMOTE_PROXY_BASE` 后 sidecar 未生效 | 只拷贝了 quickstart 目录或 sidecar 启动失败 | 使用完整仓库；检查 warn 信息。控制面脚本仍可运行，数据面需 sidecar 或 DNS |
 
 ## 6. 目录结构
 
