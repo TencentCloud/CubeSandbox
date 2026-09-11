@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
@@ -538,7 +539,9 @@ func buildExternalHTTPScoreRequest(selCtx *selctx.SelectorCtx, mode string, inLi
 			InstanceType:        n.InstanceType,
 			MvmNum:              n.MvmNum,
 			RealTimeCreateNum:   n.RealTimeCreateNum,
-			LocalCreateNum:      n.LocalCreateNum,
+			// LocalCreateNum is mutated via atomic.AddInt64 on the create path;
+			// load atomically to match Clone / LocalCreateConcurrentLimit.
+			LocalCreateNum:      atomic.LoadInt64(&n.LocalCreateNum),
 			CreateConcurrentNum: n.CreateConcurrentNum,
 			QuotaCPU:            n.QuotaCpu,
 			QuotaMem:            n.QuotaMem,

@@ -1070,6 +1070,24 @@ func TestDefaultExternalHTTPScoreTimeoutConstant(t *testing.T) {
 	}
 }
 
+func TestBuildExternalHTTPScoreRequestReadsLocalCreateNumAtomically(t *testing.T) {
+	n := &node.Node{InsID: "node-a", IP: "10.0.0.1"}
+	n.LocalCreateNumIncrBy(7)
+	ctx := selctx.New("random")
+	ctx.InstanceType = "cubebox"
+	ctx.SetNodes(node.NodeList{n})
+	req, known := buildExternalHTTPScoreRequest(ctx, "", ctx.Nodes())
+	if len(req.Nodes) != 1 {
+		t.Fatalf("nodes = %d, want 1", len(req.Nodes))
+	}
+	if req.Nodes[0].LocalCreateNum != 7 {
+		t.Fatalf("LocalCreateNum = %d, want 7 from atomic incr", req.Nodes[0].LocalCreateNum)
+	}
+	if _, ok := known["node-a"]; !ok {
+		t.Fatal("knownNodes missing node-a")
+	}
+}
+
 func testPluginConfig(endpoint string) *config.ExternalHTTPScore {
 	return &config.ExternalHTTPScore{
 		Weight:   float64Ptr(1),
