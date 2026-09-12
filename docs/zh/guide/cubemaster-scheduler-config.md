@@ -340,9 +340,9 @@ scheduler:
 scorer 失败（超时、非 2xx、重定向、畸形/过大响应、校验错误）会返回错误。
 `runScoreFilter` 会跳过失败的 scorer 并继续调度（对 sandbox 创建保持
 **fail-open**）。结果会递增
-`cubemaster_scheduler_external_http_score_outcomes_total{reason=...}`（含
+`cube_scheduler_external_http_score_outcomes_total{reason=...}`（含
 `reason="success"`），HTTP 往返还会观察
-`cubemaster_scheduler_external_http_score_request_duration_seconds{reason=...}`。
+`cube_scheduler_external_http_score_request_duration_seconds{reason=...}`。
 固定 `reason`：`success`、`timeout`、`connection`、`http_status`、`invalid_json`、
 `missing_candidate`、`other`（空 endpoint、非法 weight 等配置类 / 未分类失败归入
 `other`）。失败在 scorer 边界记录日志（不记录 endpoint URL、URL userinfo、query

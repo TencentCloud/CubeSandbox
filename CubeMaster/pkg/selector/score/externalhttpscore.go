@@ -196,17 +196,17 @@ func (l *externalHTTPScore) String() string {
 func (l *externalHTTPScore) Weight() float64 {
 	// Live-read so conf.yaml hot-reload applies. runScoreFilter samples this
 	// once before Select so a reload cannot mix generations when blending.
-	cfg := l.pluginConfig()
+	return externalHTTPScoreWeightFrom(l.pluginConfig())
+}
+
+// externalHTTPScoreWeightFrom reads weight from a plugin_conf snapshot. Nil cfg
+// (absent block) returns the default so Select can still emit plugin_conf_absent
+// instead of hitting the weight:0 silent no-op.
+func externalHTTPScoreWeightFrom(cfg *config.ExternalHTTPScore) float64 {
 	if cfg == nil {
-		// Block removed while enable_scorers still lists us: return the default
-		// weight so Select does not hit the weight:0 silent no-op and still
-		// emits the documented plugin_conf_absent warn + counter. Reserve 0
-		// for an explicit weight: 0 on a present block.
 		return config.DefaultExternalHTTPScoreWeight
 	}
 	if cfg.Weight == nil {
-		// Omitted weight defaults via ApplyExternalHTTPScoreDefaults. Prefer the
-		// filled pointer after preHandle / constructor; do not write live config.
 		return config.DefaultExternalHTTPScoreWeight
 	}
 	return *cfg.Weight
@@ -306,13 +306,16 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		logExternalHTTPScoreFailure(ctx, err)
 		return nil, err
 	}
-	if l.Disable() {
+	// Use this cfg snapshot for disable/weight as well as endpoint/timeout/mode so
+	// a mid-Select conf.yaml reload cannot mix generations within one attempt.
+	if cfg.Disable {
 		return nil, nil
 	}
+	w := externalHTTPScoreWeightFrom(cfg)
 	// Explicit weight: 0 is a staged inert no-op (same silence as disable:true):
 	// do not require a valid endpoint or emit empty_endpoint / invalid_* noise.
 	// Only exact 0 — NaN/negative fall through so validate can observe them.
-	if w := l.Weight(); w == 0 {
+	if w == 0 {
 		return nil, nil
 	}
 	if strings.TrimSpace(cfg.Endpoint) == "" {
@@ -330,8 +333,8 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		logExternalHTTPScoreFailure(ctx, err)
 		return nil, err
 	}
-	// Defense in depth / mid-Select hot-reload: non-positive weight skips HTTP.
-	if w := l.Weight(); !(w > 0) {
+	// Defense in depth: non-positive weight from the same snapshot skips HTTP.
+	if !(w > 0) {
 		return nil, nil
 	}
 
@@ -650,11 +653,9 @@ func requestExternalHTTPScores(ctx context.Context, endpoint string, timeout tim
 		// collapse them to http_request_failed. Prefer the request context /
 		// wrapped deadline so a hung body past timeout surfaces as
 		// http_Post_timeout (or http_Post_canceled), matching Do()-path failures.
+		// httpFailureCategory already classifies DeadlineExceeded / Canceled.
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, errors.New(httpFailureCategory("Post", ctxErr))
-		}
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return nil, errors.New(httpFailureCategory("Post", err))
+			err = ctxErr
 		}
 		return nil, errors.New(httpFailureCategory("Post", err))
 	}

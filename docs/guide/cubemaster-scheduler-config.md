@@ -344,9 +344,9 @@ Response:
 Scorer failures (timeout, non-2xx, redirect, malformed/oversized body, validation
 errors) return an error from the plugin. `runScoreFilter` skips failed scorers
 and continues scheduling (**fail-open** for sandbox creation). Outcomes increment
-`cubemaster_scheduler_external_http_score_outcomes_total{reason=...}` (including
+`cube_scheduler_external_http_score_outcomes_total{reason=...}` (including
 `reason="success"`) and HTTP round-trips also observe
-`cubemaster_scheduler_external_http_score_request_duration_seconds{reason=...}`.
+`cube_scheduler_external_http_score_request_duration_seconds{reason=...}`.
 Fixed `reason` values: `success`, `timeout`, `connection`, `http_status`,
 `invalid_json`, `missing_candidate`, `other` (config / generic failures such as
 empty endpoint, invalid weight, or unclassified errors land in `other`). Failures

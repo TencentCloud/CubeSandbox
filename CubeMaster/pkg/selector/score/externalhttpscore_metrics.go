@@ -43,12 +43,12 @@ var externalHTTPScoreMetricReasonAllowlist = map[string]struct{}{
 
 var (
 	externalHTTPScoreOutcomesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "cubemaster_scheduler_external_http_score_outcomes_total",
+		Name: "cube_scheduler_external_http_score_outcomes_total",
 		Help: "Total external_http_score outcomes by fixed reason (success, timeout, connection, http_status, invalid_json, missing_candidate, other).",
 	}, []string{"reason"})
 
 	externalHTTPScoreRequestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "cubemaster_scheduler_external_http_score_request_duration_seconds",
+		Name:    "cube_scheduler_external_http_score_request_duration_seconds",
 		Help:    "External HTTP score round-trip latency by fixed outcome reason.",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"reason"})
