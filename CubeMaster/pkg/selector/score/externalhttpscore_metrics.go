@@ -69,11 +69,16 @@ func externalHTTPScoreMetricReason(category string) string {
 		return externalHTTPScoreReasonSuccess
 	case "external_http_score missing_candidate":
 		return externalHTTPScoreReasonMissingCandidate
-	case "external_http_score unexpected_status", "external_http_score response_too_large":
+	case "external_http_score unexpected_status":
 		return externalHTTPScoreReasonHTTPStatus
-	case "external_http_score malformed_response", "external_http_score empty_scores",
-		"external_http_score invalid_candidate_score":
+	case "external_http_score malformed_response", "external_http_score empty_scores":
 		return externalHTTPScoreReasonInvalidJSON
+	case "http_request_failed", "unknown_error",
+		"external_http_score response_too_large",
+		"external_http_score invalid_candidate_score":
+		// Generic / non-transport / non-JSON-shape failures must not page as
+		// connection or invalid_json — keep connection a true dial/transport signal.
+		return externalHTTPScoreReasonOther
 	}
 	if isAllowListedHTTPFailureCategory(category) {
 		switch {
@@ -86,12 +91,7 @@ func externalHTTPScoreMetricReason(category string) string {
 			return externalHTTPScoreReasonConnection
 		}
 	}
-	switch category {
-	case "http_request_failed", "unknown_error":
-		return externalHTTPScoreReasonConnection
-	default:
-		return externalHTTPScoreReasonOther
-	}
+	return externalHTTPScoreReasonOther
 }
 
 func observeExternalHTTPScoreFailure(category string) {

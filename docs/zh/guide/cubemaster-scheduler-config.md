@@ -339,16 +339,22 @@ scheduler:
 
 scorer 失败（超时、非 2xx、重定向、畸形/过大响应、校验错误）会返回错误。
 `runScoreFilter` 会跳过失败的 scorer 并继续调度（对 sandbox 创建保持
-**fail-open**）。失败会递增 `cube_scheduler_external_http_score_failure_total`，
-并在 scorer 边界记录日志（不记录 endpoint URL、URL userinfo、query token，也不记录
-请求/响应正文或密钥）。Warn 按脱敏后的失败类别大约每分钟至多一条（同类别后续失败
-降为 Debug），避免 sidecar 宕机时刷爆 create 路径日志。任一请求候选缺少分数会使整次
-尝试失败（反偏差：只给子集打分会系统性扭曲排序）。该调用在创建路径上是**同步**的。
-共享 HTTP transport **不**遵循 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`（仅直连，
-避免环境代理看到带 token 的 sidecar URL 或节点清单 body），并用
-`MaxConnsPerHost = 8`（与每 host 空闲池同级）限制对 sidecar 的在途连接，避免挂起时
-无界拨号风暴；每次尝试仍可能等待至多 `timeout`（默认 200ms，上限 2s）再 fail-open。
-本 PR 不引入熔断、负缓存、异步执行或重试循环——更高 create QPS 场景的后续工作。
+**fail-open**）。结果会递增
+`cubemaster_scheduler_external_http_score_outcomes_total{reason=...}`（含
+`reason="success"`），HTTP 往返还会观察
+`cubemaster_scheduler_external_http_score_request_duration_seconds{reason=...}`。
+固定 `reason`：`success`、`timeout`、`connection`、`http_status`、`invalid_json`、
+`missing_candidate`、`other`（空 endpoint、非法 weight 等配置类 / 未分类失败归入
+`other`）。失败在 scorer 边界记录日志（不记录 endpoint URL、URL userinfo、query
+token，也不记录请求/响应正文或密钥）。Warn 按脱敏后的失败类别大约每分钟至多一条
+（同类别后续失败降为 Debug），避免 sidecar 宕机时刷爆 create 路径日志。任一请求
+候选缺少分数会使整次尝试失败（反偏差：只给子集打分会系统性扭曲排序）。该调用在
+创建路径上是**同步**的。共享 HTTP transport **不**遵循 `HTTP_PROXY` /
+`HTTPS_PROXY` / `ALL_PROXY`（仅直连，避免环境代理看到带 token 的 sidecar URL 或
+节点清单 body），并用 `MaxConnsPerHost = 8`（与每 host 空闲池同级）限制对 sidecar
+的在途连接，避免挂起时无界拨号风暴；每次尝试仍可能等待至多 `timeout`（默认 200ms，
+上限 2s）再 fail-open。本 PR 不引入熔断、负缓存、异步执行或重试循环——更高 create
+QPS 场景的后续工作。
 
 ## 相关文档
 

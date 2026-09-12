@@ -578,9 +578,10 @@ func TestExternalHTTPScoreMissingPluginConfIsObservable(t *testing.T) {
 	if scorer.Disable() {
 		t.Fatal("Disable() = true when plugin_conf absent, want false so Select can log")
 	}
-	// Must be non-zero so runScoreFilter's pre-Select Weight() gate still enters Select.
+	// Must be non-zero so Select does not hit the weight:0 silent no-op and still
+	// emits plugin_conf_absent observability.
 	if got := scorer.Weight(); got != config.DefaultExternalHTTPScoreWeight {
-		t.Fatalf("Weight() = %v, want default %v so runScoreFilter reaches Select", got, config.DefaultExternalHTTPScoreWeight)
+		t.Fatalf("Weight() = %v, want default %v so Select stays observable", got, config.DefaultExternalHTTPScoreWeight)
 	}
 	got, err := scorer.Select(externalHTTPScoreTestCtx())
 	if err == nil {
@@ -864,29 +865,49 @@ func TestValidateExternalHTTPScoreConfig(t *testing.T) {
 	}
 }
 
-func TestNewExternalHTTPScoreFromConfigPanicsOnInvalidEndpoint(t *testing.T) {
+func TestNewExternalHTTPScoreFromConfigInvalidEndpointFailOpen(t *testing.T) {
+	resetExternalHTTPScoreFailureLogStateForTest()
+	t.Cleanup(resetExternalHTTPScoreFailureLogStateForTest)
+
+	plugin := &config.ExternalHTTPScore{
+		Weight:   float64Ptr(1),
+		Endpoint: "127.0.0.1:18080/score", // missing scheme — value typo
+	}
 	global := &config.Config{Scheduler: &config.WrapperSchedulerConf{
 		SchedulerConf: config.SchedulerConf{
 			Score: &config.SchedulerScoreConf{
-				ScorePluginConf: config.ScorePluginConf{
-					ExternalHTTPScore: &config.ExternalHTTPScore{
-						Weight:   float64Ptr(1),
-						Endpoint: "127.0.0.1:18080/score",
-					},
-				},
+				ScorePluginConf: config.ScorePluginConf{ExternalHTTPScore: plugin},
 			},
 		},
 	}}
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("want panic for invalid endpoint")
-		}
-		if !strings.Contains(fmt.Sprint(r), "invalid endpoint") {
-			t.Fatalf("panic = %v, want invalid endpoint", r)
-		}
-	}()
-	_ = newExternalHTTPScoreFromConfig(global)
+	scorer := newExternalHTTPScoreFromConfig(global) // must not panic
+	if scorer == nil {
+		t.Fatal("constructor returned nil")
+	}
+	if scorer.cfg != nil {
+		t.Fatal("production constructor must leave cfg nil for live GetConfig reads")
+	}
+
+	live := config.GetConfig()
+	if live.Scheduler == nil || live.Scheduler.Score == nil {
+		t.Fatal("test requires Init()'d Scheduler.Score")
+	}
+	orig := live.Scheduler.Score.ScorePluginConf.ExternalHTTPScore
+	t.Cleanup(func() {
+		live.Scheduler.Score.ScorePluginConf.ExternalHTTPScore = orig
+	})
+	live.Scheduler.Score.ScorePluginConf.ExternalHTTPScore = plugin
+
+	got, err := scorer.Select(externalHTTPScoreTestCtx())
+	if err == nil {
+		t.Fatal("Select() error = nil, want invalid endpoint fail-open")
+	}
+	if got != nil {
+		t.Fatalf("Select() = %+v, want nil", got)
+	}
+	if cat := sanitizeExternalHTTPScoreFailure(err); cat != "external_http_score invalid_endpoint" {
+		t.Fatalf("category = %q, want invalid_endpoint", cat)
+	}
 }
 
 func TestExternalHTTPScoreSharedHTTPClientTransport(t *testing.T) {
@@ -1100,12 +1121,13 @@ func TestExternalHTTPScoreMetricReasonMapping(t *testing.T) {
 		{category: "http_Post_timeout", wantReason: externalHTTPScoreReasonTimeout},
 		{category: "http_Get_connection_refused", wantReason: externalHTTPScoreReasonConnection},
 		{category: "http_Post_transport_failed", wantReason: externalHTTPScoreReasonConnection},
-		{category: "http_request_failed", wantReason: externalHTTPScoreReasonConnection},
+		{category: "http_request_failed", wantReason: externalHTTPScoreReasonOther},
+		{category: "unknown_error", wantReason: externalHTTPScoreReasonOther},
 		{category: "external_http_score unexpected_status", wantReason: externalHTTPScoreReasonHTTPStatus},
-		{category: "external_http_score response_too_large", wantReason: externalHTTPScoreReasonHTTPStatus},
+		{category: "external_http_score response_too_large", wantReason: externalHTTPScoreReasonOther},
 		{category: "external_http_score malformed_response", wantReason: externalHTTPScoreReasonInvalidJSON},
 		{category: "external_http_score empty_scores", wantReason: externalHTTPScoreReasonInvalidJSON},
-		{category: "external_http_score invalid_candidate_score", wantReason: externalHTTPScoreReasonInvalidJSON},
+		{category: "external_http_score invalid_candidate_score", wantReason: externalHTTPScoreReasonOther},
 		{category: "external_http_score missing_candidate", wantReason: externalHTTPScoreReasonMissingCandidate},
 		{category: "external_http_score plugin_conf_absent", wantReason: externalHTTPScoreReasonOther},
 		{category: "external_http_score invalid_endpoint", wantReason: externalHTTPScoreReasonOther},

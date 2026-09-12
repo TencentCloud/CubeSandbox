@@ -147,9 +147,10 @@ func NewExternalHTTPScore() *externalHTTPScore {
 }
 
 // newExternalHTTPScoreFromConfig constructs the production scorer from a config
-// snapshot. Panics when plugin_conf.external_http_score is absent (same contract
-// as other score plugins that require matching plugin_conf), or when a non-empty
-// endpoint / timeout fails validation.
+// snapshot. Panics only when plugin_conf.external_http_score is absent (same
+// contract as other score plugins that require matching plugin_conf). Invalid
+// endpoint / timeout / weight values do not panic: construction Warns and
+// leaves the scorer live so Select can fail-open (matching hot-reload).
 func newExternalHTTPScoreFromConfig(global *config.Config) *externalHTTPScore {
 	cfg := externalHTTPScoreConfigFrom(global)
 	if cfg == nil {
@@ -160,7 +161,12 @@ func newExternalHTTPScoreFromConfig(global *config.Config) *externalHTTPScore {
 	// DefaultExternalHTTPScoreWeight.
 	config.ApplyExternalHTTPScoreDefaults(cfg)
 	if err := validateExternalHTTPScoreConfig(cfg); err != nil {
-		panic(err.Error())
+		cat := sanitizeExternalHTTPScoreFailure(err)
+		log.G(context.Background()).Warnf(
+			"external_http_score: invalid plugin_conf at construction (fail-open): %s", cat)
+		// Leave cfg nil so Weight/Disable/Select re-read live GetConfig(); Select
+		// re-validates and observes the same sanitized category.
+		return &externalHTTPScore{}
 	}
 	// Leave cfg nil so Weight/Disable/Select re-read live GetConfig().
 	return &externalHTTPScore{}
@@ -193,9 +199,9 @@ func (l *externalHTTPScore) Weight() float64 {
 	cfg := l.pluginConfig()
 	if cfg == nil {
 		// Block removed while enable_scorers still lists us: return the default
-		// weight so runScoreFilter still enters Select, which emits the
-		// documented plugin_conf_absent warn + counter. Reserve 0 for an
-		// explicit weight: 0 on a present block.
+		// weight so Select does not hit the weight:0 silent no-op and still
+		// emits the documented plugin_conf_absent warn + counter. Reserve 0
+		// for an explicit weight: 0 on a present block.
 		return config.DefaultExternalHTTPScoreWeight
 	}
 	if cfg.Weight == nil {
