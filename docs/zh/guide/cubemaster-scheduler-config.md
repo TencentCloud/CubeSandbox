@@ -79,11 +79,68 @@ scheduler:
 | `metric_update_timeout` | 节点资源指标多久未更新后视为不可调度。应明显大于 Cubelet 上报周期。 |
 | `local_metric_update_timeout` | 预留的本地指标超时字段。当前 prefilter 对全局指标和本地指标的新鲜度检查都使用 `metric_update_timeout`。 |
 | `filter.enable_filters` | 启用调度过滤器。常见过滤器包括 CPU、内存、模板本地性和实时创建并发。 |
-| `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`；启用时必须同时配置 `score.plugin_conf.real_time_weighted_average`，否则 CubeMaster 可能在 scheduler 启动阶段 panic。 |
-| `score.resource_weights` | 控制 MVM 数、创建并发、CPU/内存 quota 使用率等因子的权重。权重越高，该因子对分数影响越大；对应因子也必须列在 `score.plugin_conf.real_time_weighted_average.enable_weight_factors` 中。 |
+| `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`。列出因子型 / affinity 评分器但缺少对应 `plugin_conf` 块时配置加载失败（空 Profile 同样适用；`binpack_score` 可省略该块并使用默认）。当设置了非空 `scheduler.profile` 时，因子型评分器还需已知的 `enable_weight_factors` 与至少一个正的 `resource_weights`，否则配置加载失败。 |
+| `score.resource_weights` | 控制 MVM 数、创建并发、CPU/内存 quota 使用率等因子的权重。权重越高，该因子对分数影响越大；对应因子也必须列在 `score.plugin_conf.real_time_weighted_average.enable_weight_factors` 中。Profile 展开时同名键覆盖基础权重。因子名必须在允许列表内（如 `quota_cpu_usage`、`cpu_util`，**不是** `cpu_usage` 这类笔误）；非空 Profile 下 `enable_weight_factors` 出现未知名会配置加载失败。启用 Profile 前请先 grep 现有配置中的漂移因子名。 |
+| `score.plugin_conf.binpack_score` | 可选的插件型评分器，偏好更满的节点。在 `enable_scorers` 中列出但省略该块时，会启用安全默认（插件权重 1，CPU/内存/MVM 等权）。插件级 `weight` 为指针：省略 → 默认 1；显式 `0` 禁用 Select；负值在配置加载阶段被拒绝。子权重 `cpu_weight`/`mem_weight`/`mvm_weight` 仍是普通 float：`<= 0` 回退为默认 `1`（不能用 0 排除某一维）；负值在配置加载阶段被拒绝。 |
+| `profile` / `profiles` | 可选的运行时 Profile 覆盖层。空 `profile` 不改变现有 Filter/Score。内置名：`balanced_spread`、`template_locality_first`、`binpack_utilization`。用户同名 key 完全覆盖内置。运行时 Profile 是选择器覆盖，不是离线模拟器模型。详见 [Scheduler Profile 配置示例](../dev/scheduler-profile-config-example.md)。 |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | 全局或按实例类型限制单节点 MVM 数。Cubelet 上报的 `max_mvm_num` 也会参与实际上限计算。 |
 | `disk_usage_max_percent` | `disk` filter 和 backoff 路径使用的磁盘水位阈值，用于避免继续调度到快满的机器。 |
 | `affinityconf` / `node_affinity_selector_allowed_keys` | 控制按 cluster label、zone、CPU 类型、机型等做亲和或约束选择。 |
+
+## 运行时 Profile 与 binpack_score
+
+CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
+空 Profile 会保留现有 Filter/Score 列表和 `plugin_conf` 块，但这不是对 master
+行为的逐字节冻结：`plugin_conf.<scorer>.weight: 0` 仍会禁用该评分器。异步
+`loopAsyncScore` feeder（`node.Score` / `pscore` 的写入方）仅在存在
+`multi_factor_weighted_average` 插件块 **且** `score.resource_weights` 非 nil
+时启动——与 master 在省略 `resource_weights` 时提前返回的行为一致。内置名
+（`balanced_spread`、`template_locality_first`、`binpack_utilization`）
+会展开到选择器列表，并在对应 `plugin_conf` 缺失时注入自包含默认值。
+`scheduler.profiles` 下与内置同名的用户条目会完全覆盖内置。
+
+**注意：** 当 Profile 提供 `filter.enable_filters` 时，该列表会**整体替换**基础
+`scheduler.filter.enable_filters`（不会合并）。**用户** Profile 丢掉基础过滤器会
+配置加载失败，除非设置 `allow_dropped_filters: true`。内置预设已允许丢掉，因此
+现成四过滤器配置可直接按名选用；若你依赖 `disk` / `thirtparty`，仍请审查生效列表。
+
+## 升级说明（空 Profile / 重启）
+
+即使 `scheduler.profile` 为空，以下 Init 校验也会在**进程启动**时让 CubeMaster
+退出（热加载仅写 FATAL 并保留旧 Config）：
+
+- `enable_scorers` 列出了因子型 / affinity 评分器但缺少对应 `plugin_conf`
+- 任意 `plugin_conf.<scorer>.weight < 0`
+
+此前能带着静默无评分或反转排序启动的配置，升级后需先修好 YAML 才能启动。
+
+对每个 Score 插件（含既有四个评分器以及 `binpack_score`），
+`plugin_conf.<scorer>.weight: 0` 会禁用该评分器并跳过 Select。**负的**
+`plugin_conf.<scorer>.weight` 会对所有已注册评分器在配置加载阶段拒绝（不只是
+`binpack_score`）；升级前能带着负权重启动的配置，升级后会在 `config.Init`
+失败。对 `binpack_score` 而言，`weight` 是指针字段：在已有
+`plugin_conf.binpack_score` 块中省略 `weight` 会保留运行时默认 `1`（启用）；
+只有显式写 `0` 才禁用。其他评分器仍是普通 `float64`，省略 `weight` 会 YAML
+解码为 `0` 并禁用——要保持活跃请显式写正的 `weight`。在 `enable_scorers`
+中列出因子型 / affinity 评分器但缺少对应 `plugin_conf` 块时，配置加载也会失败
+（空 Profile 同样适用）；`binpack_score` 可省略该块并使用运行时默认。更改
+Profile / 选择器列表需要重启 CubeMaster：配置热加载会重新跑 `preHandle`，成功
+则更新内存 Config；失败时写 FATAL 日志（`CubeLog.Fatalf` **不会** `os.Exit`）
+并保留旧 Config，错误的 Profile 覆盖不会生效。`InitScheduler` 仍不会在热加载时
+重建 Filter/Score 切片，因此选择器集合变更仍需进程重启。
+
+`binpack_score` 是偏好更满节点的薄 Score 插件，通过在 `enable_scorers`
+中列出（直接或经 Profile）启用。插件参数仍放在
+`scheduler.score.plugin_conf.binpack_score`。不要把 `binpack_score` 与
+spread 风格评分器（`real_time_weighted_average`、
+`multi_factor_weighted_average`）放进同一 `enable_scorers`：binpack 返回占用率
+（越高越满），后者返回剩余容量风格分数，加权后会互相抵消。非空
+`scheduler.profile` 下该混用会配置加载失败；空 Profile 仍可加载（升级兼容）但
+排序接近噪声。内置 `binpack_utilization` 只启用 `binpack_score`。
+
+运行时 Profile **不是**离线模拟器 / `schedulerbench` 模型，即使预设名字符串相同。
+可复制 YAML 与完整契约见
+[Scheduler Profile 配置示例](../dev/scheduler-profile-config-example.md)。
 
 ## 节点元数据如何影响调度
 

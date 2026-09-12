@@ -79,11 +79,80 @@ scheduler:
 | `metric_update_timeout` | Treat resource metrics as stale after this duration. It should be much larger than the Cubelet report interval. |
 | `local_metric_update_timeout` | Reserved local-metric timeout field. Current prefilter logic gates both global and local metric freshness with `metric_update_timeout`. |
 | `filter.enable_filters` | Enables scheduling filters. Common filters include CPU, memory, template locality, and real-time create concurrency. |
-| `score.enable_scorers` | Enables scoring plugins. Multi-node deployments usually enable `real_time_weighted_average`; when it is enabled, the matching `score.plugin_conf.real_time_weighted_average` block is required or CubeMaster can panic during scheduler startup. |
-| `score.resource_weights` | Controls the influence of MVM count, create concurrency, CPU quota usage, and memory quota usage. Higher weight means stronger influence; factors must also be listed under `score.plugin_conf.real_time_weighted_average.enable_weight_factors`. |
+| `score.enable_scorers` | Enables scoring plugins. Multi-node deployments usually enable `real_time_weighted_average`. Listing a factor/affinity scorer without its `plugin_conf` block fails config load (empty Profile included; `binpack_score` may omit the block and use defaults). With a non-empty `scheduler.profile`, factor scorers also need known `enable_weight_factors` and a positive factor weight or config load fails. |
+| `score.resource_weights` | Controls the influence of MVM count, create concurrency, CPU quota usage, and memory quota usage. Higher weight means stronger influence; factors must also be listed under `score.plugin_conf.real_time_weighted_average.enable_weight_factors`. Profile overlays merge same keys over this map (Profile wins). Factor names must match the allowlist (`quota_cpu_usage`, `cpu_util`, … — not typos such as `cpu_usage`); under a non-empty Profile an unrecognized factor in `enable_weight_factors` fails config load. Grep existing configs for drifted names before selecting a Profile. |
+| `score.plugin_conf.binpack_score` | Optional plugin-only scorer that prefers fuller nodes. Omitting the block while listing `binpack_score` in `enable_scorers` enables safe defaults (plugin weight 1, equal CPU/mem/MVM). Plugin `weight` is a pointer: omit → default 1; explicit `0` disables Select; negatives are rejected at config load. Sub-weights `cpu_weight`/`mem_weight`/`mvm_weight` remain plain floats: `<= 0` fall back to default `1` (cannot exclude a dimension via `0`); negatives are rejected at config load. |
+| `profile` / `profiles` | Optional runtime Profile overlay. Empty `profile` leaves Filter/Score unchanged. Built-ins: `balanced_spread`, `template_locality_first`, `binpack_utilization`. User same-name keys override built-ins. Runtime Profiles are selector overlays, not offline simulator models. See [Scheduler Profile Configuration Example](../dev/scheduler-profile-config-example.md). |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | Global or per-instance-type single-node MVM limits. Cubelet-reported `max_mvm_num` also participates in the effective limit. |
 | `disk_usage_max_percent` | Threshold used by the `disk` filter and backoff path to avoid placing more sandboxes on nearly full machines. |
 | `affinityconf` / `node_affinity_selector_allowed_keys` | Controls affinity and constraints by cluster label, zone, CPU type, instance type, and other allowed selector keys. |
+
+## Runtime Profiles and binpack_score
+
+CubeMaster can select a named **runtime Profile** with `scheduler.profile`.
+Empty profile leaves the existing Filter/Score lists and `plugin_conf`
+blocks in place. That is not a byte-for-byte freeze of master behavior:
+`plugin_conf.<scorer>.weight: 0` still disables that scorer. The async
+`loopAsyncScore` feeder (writer of `node.Score` / `pscore`) starts only when
+the `multi_factor_weighted_average` plugin block is present **and**
+`score.resource_weights` is non-nil — matching master's early-return when
+`resource_weights` was omitted. Built-in names (`balanced_spread`,
+`template_locality_first`, `binpack_utilization`) expand onto selector lists
+and inject self-contained plugin defaults when the matching `plugin_conf`
+block is absent. User entries under `scheduler.profiles` with the same name
+override a built-in entirely.
+
+**Warning:** when a Profile provides `filter.enable_filters`, that list
+**replaces** the base `scheduler.filter.enable_filters` (no merge). User
+Profiles that drop base filters fail config load unless
+`allow_dropped_filters: true`. Built-in presets already allow drops so stock
+four-filter configs can select them by name; still audit effective filters if
+you relied on `disk` / `thirtparty`.
+
+## Upgrade notes (empty Profile / restart)
+
+These Init checks run even with `scheduler.profile` empty and **exit CubeMaster
+on process start** (hot-reload only logs FATAL and keeps the previous Config):
+
+- `enable_scorers` lists a factor/affinity scorer without its `plugin_conf` block
+- any `plugin_conf.<scorer>.weight < 0`
+
+Configs that previously started with a silent unscored phase or inverted
+ranking will not boot until those YAML issues are fixed.
+
+For every Score plugin (including the four existing scorers and
+`binpack_score`), `plugin_conf.<scorer>.weight: 0` disables the scorer and
+skips Select. **Negative** `plugin_conf.<scorer>.weight` is rejected at config
+load for every registered scorer (not only `binpack_score`); configs that
+previously started with a negative weight will fail `config.Init` after
+upgrade. For `binpack_score` specifically, `weight` is a pointer field:
+omitting `weight` inside a present `plugin_conf.binpack_score` block keeps
+the runtime default of `1` (enabled); only an explicit `0` disables. Other
+scorers still use plain `float64`, so omitting `weight` there YAML-decodes
+to `0` and disables — set an explicit positive `weight` to keep them
+active. Listing a factor/affinity scorer in `enable_scorers` without its
+`plugin_conf` block also fails config load (empty Profile included);
+`binpack_score` may omit the block and use runtime defaults. Profile /
+selector-list changes require a CubeMaster restart: config hot-reload re-runs
+`preHandle` and, on success, updates the in-memory Config. On failure it logs
+FATAL (CubeLog.Fatalf does **not** `os.Exit`) and keeps the previous Config —
+the bad Profile overlay is not applied. `InitScheduler` still does not rebuild
+Filter/Score slices on reload, so selector-set changes need a process restart.
+
+`binpack_score` is a thin Score-phase plugin that prefers fuller nodes. It is
+enabled by listing `binpack_score` in `enable_scorers` (directly or via a
+Profile). Plugin params stay under `scheduler.score.plugin_conf.binpack_score`.
+Do not mix `binpack_score` with spread-style scorers (`real_time_weighted_average`,
+`multi_factor_weighted_average`) in the same `enable_scorers` list: binpack
+returns occupancy (higher = fuller) while those scorers return remaining-capacity
+style scores, so the blend can cancel. Under a non-empty `scheduler.profile`
+that mix fails config load; with an empty Profile it still loads (pre-upgrade
+compat) but ranking is near-noise. Built-in `binpack_utilization` only enables
+`binpack_score`.
+
+Runtime Profiles are **not** offline simulator / `schedulerbench` models, even
+when they reuse the same preset name strings. Copyable YAML and the full
+contract: [Scheduler Profile Configuration Example](../dev/scheduler-profile-config-example.md).
 
 ## How node metadata affects scheduling
 
