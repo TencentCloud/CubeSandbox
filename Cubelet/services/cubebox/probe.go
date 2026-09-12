@@ -34,7 +34,11 @@ import (
 )
 
 const (
-	envdInitPath = "/init"
+	// A no-probe container still needs a short liveness window. Returning
+	// immediately creates a race in which an init process can exit before the
+	// caller starts snapshotting it.
+	noProbeContainerStabilityTimeout = 100 * time.Millisecond
+	envdInitPath                     = "/init"
 	// Keep create-time envd init within a bounded sub-second budget so the
 	// safeguard absorbs brief restore jitter without turning sandbox create
 	// into an unbounded slow path.
@@ -143,6 +147,13 @@ func (l *local) doProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cub
 		log.G(ctx).Debugf("probe [%s] start:%s", ci.IP, utils.InterfaceToString(cfg))
 		telnetCh = telnet.Telnet(ctx, cfg)
 	} else {
+		task, err := ci.Container.Task(ctx, nil)
+		if err != nil {
+			return ret.Errorf(errorcode.ErrorCode_StartContainerFailed, "load init task: %v", err)
+		}
+		if err := waitForTaskStability(ctx, task.Status, noProbeContainerStabilityTimeout); err != nil {
+			return ret.Errorf(errorcode.ErrorCode_StartContainerFailed, "%v", err)
+		}
 		telnetCh <- nil
 	}
 	select {

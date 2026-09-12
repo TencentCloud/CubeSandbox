@@ -673,19 +673,23 @@ impl Container {
                 .await
                 .map_err(|e| format!("start container failed:{}", e))?;
         }
-        if !self.sb_conf.app_snapshot_create {
-            if self.state.is_none() {
-                return Err("BUG: start container failed, state is none".to_string());
-            }
-            let state = self.state.as_mut().unwrap();
-            let client_wait = client.clone();
-            let cid = self.id.clone();
-            let real_id = self.real_id.clone();
-            let tx_containerd = self.tx_containerd.clone();
-            state
-                .wait_process(client_wait, cid, real_id, String::new(), tx_containerd)
-                .await;
+        // App-snapshot creation must observe the init process just like a
+        // normal sandbox. Previously this watcher was skipped when
+        // app_snapshot_create=true, so StartContainer could succeed even
+        // though the guest init process had already exited. Cubelet then
+        // produced a READY template whose recorded PID was unusable on
+        // restore.
+        if self.state.is_none() {
+            return Err("BUG: start container failed, state is none".to_string());
         }
+        let state = self.state.as_mut().unwrap();
+        let client_wait = client.clone();
+        let cid = self.id.clone();
+        let real_id = self.real_id.clone();
+        let tx_containerd = self.tx_containerd.clone();
+        state
+            .wait_process(client_wait, cid, real_id, String::new(), tx_containerd)
+            .await;
 
         Ok(())
     }
