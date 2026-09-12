@@ -5,6 +5,7 @@
 package score
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,11 +19,39 @@ import (
 // interval are Debug-only; the Prometheus counter still increments every time.
 const externalHTTPScoreWarnInterval = time.Minute
 
+// Fixed low-cardinality reason labels for Prometheus and the topic1 accept harness.
+// Log lines keep detailed sanitize categories; metrics map into this enum only.
+const (
+	externalHTTPScoreReasonSuccess          = "success"
+	externalHTTPScoreReasonTimeout          = "timeout"
+	externalHTTPScoreReasonConnection       = "connection"
+	externalHTTPScoreReasonHTTPStatus       = "http_status"
+	externalHTTPScoreReasonInvalidJSON      = "invalid_json"
+	externalHTTPScoreReasonMissingCandidate = "missing_candidate"
+	externalHTTPScoreReasonOther            = "other"
+)
+
+var externalHTTPScoreMetricReasonAllowlist = map[string]struct{}{
+	externalHTTPScoreReasonSuccess:          {},
+	externalHTTPScoreReasonTimeout:          {},
+	externalHTTPScoreReasonConnection:       {},
+	externalHTTPScoreReasonHTTPStatus:       {},
+	externalHTTPScoreReasonInvalidJSON:      {},
+	externalHTTPScoreReasonMissingCandidate: {},
+	externalHTTPScoreReasonOther:            {},
+}
+
 var (
-	externalHTTPScoreFailuresTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "cube_scheduler_external_http_score_failure_total",
-		Help: "Total external_http_score fail-open failures by sanitized category.",
-	}, []string{"category"})
+	externalHTTPScoreOutcomesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "cubemaster_scheduler_external_http_score_outcomes_total",
+		Help: "Total external_http_score outcomes by fixed reason (success, timeout, connection, http_status, invalid_json, missing_candidate, other).",
+	}, []string{"reason"})
+
+	externalHTTPScoreRequestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "cubemaster_scheduler_external_http_score_request_duration_seconds",
+		Help:    "External HTTP score round-trip latency by fixed outcome reason.",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"reason"})
 
 	externalHTTPScoreWarnMu   sync.Mutex
 	externalHTTPScoreLastWarn = map[string]time.Time{}
@@ -32,11 +61,66 @@ var (
 	externalHTTPScoreWarnCount atomic.Uint64
 )
 
-func observeExternalHTTPScoreFailure(category string) {
-	if category == "" {
-		category = "unknown_error"
+// externalHTTPScoreMetricReason maps a log-safe sanitize category to a fixed
+// Prometheus / accept-harness reason label (never includes endpoints or tokens).
+func externalHTTPScoreMetricReason(category string) string {
+	switch category {
+	case externalHTTPScoreReasonSuccess:
+		return externalHTTPScoreReasonSuccess
+	case "external_http_score missing_candidate":
+		return externalHTTPScoreReasonMissingCandidate
+	case "external_http_score unexpected_status", "external_http_score response_too_large":
+		return externalHTTPScoreReasonHTTPStatus
+	case "external_http_score malformed_response", "external_http_score empty_scores",
+		"external_http_score invalid_candidate_score":
+		return externalHTTPScoreReasonInvalidJSON
 	}
-	externalHTTPScoreFailuresTotal.WithLabelValues(category).Inc()
+	if isAllowListedHTTPFailureCategory(category) {
+		switch {
+		case strings.HasSuffix(category, "_timeout"):
+			return externalHTTPScoreReasonTimeout
+		case strings.HasSuffix(category, "_connection_refused"),
+			strings.HasSuffix(category, "_transport_failed"),
+			strings.HasSuffix(category, "_failed"),
+			strings.HasSuffix(category, "_canceled"):
+			return externalHTTPScoreReasonConnection
+		}
+	}
+	switch category {
+	case "http_request_failed", "unknown_error":
+		return externalHTTPScoreReasonConnection
+	default:
+		return externalHTTPScoreReasonOther
+	}
+}
+
+func observeExternalHTTPScoreFailure(category string) {
+	reason := externalHTTPScoreMetricReason(category)
+	if _, ok := externalHTTPScoreMetricReasonAllowlist[reason]; !ok {
+		reason = externalHTTPScoreReasonOther
+	}
+	externalHTTPScoreOutcomesTotal.WithLabelValues(reason).Inc()
+}
+
+func observeExternalHTTPScoreSuccess(duration time.Duration) {
+	externalHTTPScoreOutcomesTotal.WithLabelValues(externalHTTPScoreReasonSuccess).Inc()
+	if duration < 0 {
+		duration = 0
+	}
+	externalHTTPScoreRequestDuration.WithLabelValues(externalHTTPScoreReasonSuccess).Observe(duration.Seconds())
+}
+
+func observeExternalHTTPScoreRequestFailure(duration time.Duration, category string) {
+	reason := externalHTTPScoreMetricReason(category)
+	if _, ok := externalHTTPScoreMetricReasonAllowlist[reason]; !ok {
+		reason = externalHTTPScoreReasonOther
+	}
+	// Single counter increment per HTTP attempt; config-only failures use observeExternalHTTPScoreFailure.
+	externalHTTPScoreOutcomesTotal.WithLabelValues(reason).Inc()
+	if duration < 0 {
+		duration = 0
+	}
+	externalHTTPScoreRequestDuration.WithLabelValues(reason).Observe(duration.Seconds())
 }
 
 func shouldWarnExternalHTTPScoreFailure(category string) bool {

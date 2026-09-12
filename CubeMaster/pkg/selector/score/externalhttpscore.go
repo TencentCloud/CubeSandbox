@@ -335,14 +335,20 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 	}
 
 	reqBody, knownNodes := buildExternalHTTPScoreRequest(selCtx, cfg.Mode, inList)
+	httpStart := time.Now()
 	respScores, err := requestExternalHTTPScores(ctx, strings.TrimSpace(cfg.Endpoint), cfg.Timeout, reqBody)
+	httpElapsed := time.Since(httpStart)
 	if err != nil {
-		logExternalHTTPScoreFailure(ctx, err)
+		cat := sanitizeExternalHTTPScoreFailure(err)
+		logExternalHTTPScoreFailureCategory(ctx, cat)
+		observeExternalHTTPScoreRequestFailure(httpElapsed, cat)
 		return nil, err
 	}
 	filtered, err := filterExternalHTTPScoreResponse(ctx, respScores, knownNodes)
 	if err != nil {
-		logExternalHTTPScoreFailure(ctx, err)
+		cat := sanitizeExternalHTTPScoreFailure(err)
+		logExternalHTTPScoreFailureCategory(ctx, cat)
+		observeExternalHTTPScoreRequestFailure(httpElapsed, cat)
 		return nil, err
 	}
 
@@ -353,7 +359,9 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 			// filterExternalHTTPScoreResponse already requires every known node;
 			// this is a defensive invariant check.
 			err := fmt.Errorf("external_http_score missing candidate score")
-			logExternalHTTPScoreFailure(ctx, err)
+			cat := sanitizeExternalHTTPScoreFailure(err)
+			logExternalHTTPScoreFailureCategory(ctx, cat)
+			observeExternalHTTPScoreRequestFailure(httpElapsed, cat)
 			return nil, err
 		}
 		nodes.Append(&node.NodeScore{
@@ -363,12 +371,17 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 			OrigNode: n,
 		})
 	}
+	observeExternalHTTPScoreSuccess(httpElapsed)
 	return nodes, nil
 }
 
 func logExternalHTTPScoreFailure(ctx context.Context, err error) {
 	cat := sanitizeExternalHTTPScoreFailure(err)
 	observeExternalHTTPScoreFailure(cat)
+	logExternalHTTPScoreFailureCategory(ctx, cat)
+}
+
+func logExternalHTTPScoreFailureCategory(ctx context.Context, cat string) {
 	if shouldWarnExternalHTTPScoreFailure(cat) {
 		externalHTTPScoreWarnCount.Add(1)
 		log.G(ctx).Warnf("external_http_score fail-open: %s", cat)

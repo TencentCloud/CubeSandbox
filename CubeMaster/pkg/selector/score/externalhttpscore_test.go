@@ -1090,6 +1090,179 @@ func TestExternalHTTPScoreSelectNilContextIsSafe(t *testing.T) {
 	}
 }
 
+func TestExternalHTTPScoreMetricReasonMapping(t *testing.T) {
+	const sentinel = "METRIC_REASON_SENTINEL"
+	tests := []struct {
+		category   string
+		wantReason string
+	}{
+		{category: externalHTTPScoreReasonSuccess, wantReason: externalHTTPScoreReasonSuccess},
+		{category: "http_Post_timeout", wantReason: externalHTTPScoreReasonTimeout},
+		{category: "http_Get_connection_refused", wantReason: externalHTTPScoreReasonConnection},
+		{category: "http_Post_transport_failed", wantReason: externalHTTPScoreReasonConnection},
+		{category: "http_request_failed", wantReason: externalHTTPScoreReasonConnection},
+		{category: "external_http_score unexpected_status", wantReason: externalHTTPScoreReasonHTTPStatus},
+		{category: "external_http_score response_too_large", wantReason: externalHTTPScoreReasonHTTPStatus},
+		{category: "external_http_score malformed_response", wantReason: externalHTTPScoreReasonInvalidJSON},
+		{category: "external_http_score empty_scores", wantReason: externalHTTPScoreReasonInvalidJSON},
+		{category: "external_http_score invalid_candidate_score", wantReason: externalHTTPScoreReasonInvalidJSON},
+		{category: "external_http_score missing_candidate", wantReason: externalHTTPScoreReasonMissingCandidate},
+		{category: "external_http_score plugin_conf_absent", wantReason: externalHTTPScoreReasonOther},
+		{category: "external_http_score invalid_endpoint", wantReason: externalHTTPScoreReasonOther},
+		{category: sentinel, wantReason: externalHTTPScoreReasonOther},
+	}
+	for _, tt := range tests {
+		t.Run(tt.category, func(t *testing.T) {
+			got := externalHTTPScoreMetricReason(tt.category)
+			if got != tt.wantReason {
+				t.Fatalf("reason = %q, want %q", got, tt.wantReason)
+			}
+			if _, ok := externalHTTPScoreMetricReasonAllowlist[got]; !ok {
+				t.Fatalf("reason %q not in allowlist", got)
+			}
+			if strings.Contains(got, sentinel) {
+				t.Fatalf("reason leaked sentinel: %q", got)
+			}
+		})
+	}
+}
+
+func TestExternalHTTPScoreSelectHTTPFailureReasons(t *testing.T) {
+	const sentinel = "DO_NOT_LOG_THIS"
+	secretEndpoint := func(base string) string {
+		return base + "/score?token=" + sentinel
+	}
+
+	t.Run("timeout", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(100 * time.Millisecond)
+		}))
+		defer server.Close()
+		_, err := newExternalHTTPScoreWithConfig(&config.ExternalHTTPScore{
+			Weight: float64Ptr(1), Endpoint: secretEndpoint(server.URL), Timeout: 10 * time.Millisecond,
+		}).Select(externalHTTPScoreTestCtx())
+		if err == nil {
+			t.Fatal("want timeout error")
+		}
+		assertExternalHTTPScoreMetricReason(t, err, externalHTTPScoreReasonTimeout, sentinel)
+	})
+
+	t.Run("connection", func(t *testing.T) {
+		_, err := newExternalHTTPScoreWithConfig(&config.ExternalHTTPScore{
+			Weight: float64Ptr(1), Endpoint: secretEndpoint("http://127.0.0.1:1"), Timeout: 50 * time.Millisecond,
+		}).Select(externalHTTPScoreTestCtx())
+		if err == nil {
+			t.Fatal("want connection error")
+		}
+		assertExternalHTTPScoreMetricReason(t, err, externalHTTPScoreReasonConnection, sentinel)
+	})
+
+	t.Run("http_status_5xx", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}))
+		defer server.Close()
+		_, err := newExternalHTTPScoreWithConfig(testPluginConfig(secretEndpoint(server.URL))).Select(externalHTTPScoreTestCtx())
+		if err == nil {
+			t.Fatal("want 5xx error")
+		}
+		assertExternalHTTPScoreMetricReason(t, err, externalHTTPScoreReasonHTTPStatus, sentinel)
+	})
+
+	t.Run("invalid_json", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, "{")
+		}))
+		defer server.Close()
+		_, err := newExternalHTTPScoreWithConfig(testPluginConfig(secretEndpoint(server.URL))).Select(externalHTTPScoreTestCtx())
+		if err == nil {
+			t.Fatal("want malformed JSON error")
+		}
+		assertExternalHTTPScoreMetricReason(t, err, externalHTTPScoreReasonInvalidJSON, sentinel)
+	})
+
+	t.Run("missing_candidate", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(externalHTTPScoreResponse{
+				Scores: map[string]*float64{"node-a": float64Ptr(10)},
+			})
+		}))
+		defer server.Close()
+		_, err := newExternalHTTPScoreWithConfig(testPluginConfig(secretEndpoint(server.URL))).Select(externalHTTPScoreTestCtx())
+		if err == nil {
+			t.Fatal("want missing candidate error")
+		}
+		assertExternalHTTPScoreMetricReason(t, err, externalHTTPScoreReasonMissingCandidate, sentinel)
+	})
+}
+
+func TestExternalHTTPScoreSelectRecoveryAfterHTTPFailure(t *testing.T) {
+	var calls atomic.Uint32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			http.Error(w, "temporary", http.StatusBadGateway)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(externalHTTPScoreResponse{
+			Scores: map[string]*float64{
+				"node-a": float64Ptr(10),
+				"node-b": float64Ptr(90),
+			},
+		})
+	}))
+	defer server.Close()
+
+	scorer := newExternalHTTPScoreWithConfig(testPluginConfig(server.URL))
+	_, err := scorer.Select(externalHTTPScoreTestCtx())
+	if err == nil {
+		t.Fatal("first Select() want HTTP failure")
+	}
+	assertExternalHTTPScoreMetricReason(t, err, externalHTTPScoreReasonHTTPStatus, "")
+
+	got, err := scorer.Select(externalHTTPScoreTestCtx())
+	if err != nil {
+		t.Fatalf("second Select() error = %v, want recovery success", err)
+	}
+	if got.Len() != 2 {
+		t.Fatalf("len(scores) = %d, want 2 after recovery", got.Len())
+	}
+	if reason := externalHTTPScoreMetricReason(externalHTTPScoreReasonSuccess); reason != externalHTTPScoreReasonSuccess {
+		t.Fatalf("success reason = %q", reason)
+	}
+}
+
+func TestSanitizeCategoryMapsToMetricReasonWithoutSecrets(t *testing.T) {
+	const sentinel = "DO_NOT_LOG_THIS"
+	secretURL := "https://user:pass@sidecar.example/score?token=" + sentinel
+	raw := &url.Error{Op: "Post", URL: secretURL, Err: context.DeadlineExceeded}
+	cat := sanitizeExternalHTTPScoreFailure(raw)
+	reason := externalHTTPScoreMetricReason(cat)
+	for _, bad := range []string{sentinel, secretURL, "token=", "user:pass"} {
+		if strings.Contains(cat, bad) || strings.Contains(reason, bad) {
+			t.Fatalf("cat=%q reason=%q leaked %q", cat, reason, bad)
+		}
+	}
+	if reason != externalHTTPScoreReasonTimeout {
+		t.Fatalf("reason = %q, want timeout", reason)
+	}
+}
+
+func assertExternalHTTPScoreMetricReason(t *testing.T, err error, wantReason, sentinel string) {
+	t.Helper()
+	cat := sanitizeExternalHTTPScoreFailure(err)
+	got := externalHTTPScoreMetricReason(cat)
+	if got != wantReason {
+		t.Fatalf("metric reason = %q (category %q), want %q", got, cat, wantReason)
+	}
+	if sentinel != "" {
+		for _, bad := range []string{sentinel, "token="} {
+			if strings.Contains(cat, bad) {
+				t.Fatalf("sanitize category leaked %q: %q", bad, cat)
+			}
+		}
+	}
+}
+
 func TestExternalHTTPScoreFailureWarnIsRateLimited(t *testing.T) {
 	resetExternalHTTPScoreFailureLogStateForTest()
 	t.Cleanup(resetExternalHTTPScoreFailureLogStateForTest)
