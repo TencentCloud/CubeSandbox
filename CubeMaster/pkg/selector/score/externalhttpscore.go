@@ -75,7 +75,11 @@ func newExternalHTTPScoreHTTPClient() *http.Client {
 	// RoundTripper; panicking there would block CubeMaster startup even when
 	// this plugin is not enabled.
 	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		// Do not honor HTTP_PROXY / HTTPS_PROXY / ALL_PROXY. The sidecar URL may
+		// carry query tokens or userinfo that we redact from logs; an env proxy
+		// would still see the full URL (and the node-inventory body). Sidecars
+		// are expected to be local/direct.
+		Proxy: nil,
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -219,10 +223,10 @@ func externalHTTPScoreConfigFrom(global *config.Config) *config.ExternalHTTPScor
 }
 
 // validateExternalHTTPScoreConfig checks timeout and, when endpoint is set,
-// that it is an absolute http(s) URL with a host. Empty endpoint remains a
-// documented no-op (Select skips the HTTP call). Side-effect free: omitted
-// weight is defaulted in config.ApplyExternalHTTPScoreDefaults / preHandle,
-// not here.
+// that it is an absolute http(s) URL with a host. An empty endpoint passes
+// validation; Select then fail-opens with empty_endpoint (for positive weight)
+// or stays silent for weight:0 / disable:true. Side-effect free: omitted weight
+// is defaulted in config.ApplyExternalHTTPScoreDefaults / preHandle, not here.
 func validateExternalHTTPScoreConfig(cfg *config.ExternalHTTPScore) error {
 	if cfg == nil {
 		return fmt.Errorf("external_http_score: config is nil")

@@ -20,7 +20,7 @@ const externalHTTPScoreWarnInterval = time.Minute
 
 var (
 	externalHTTPScoreFailuresTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "cubemaster_scheduler_external_http_score_failures_total",
+		Name: "cube_scheduler_external_http_score_failure_total",
 		Help: "Total external_http_score fail-open failures by sanitized category.",
 	}, []string{"category"})
 

@@ -344,15 +344,17 @@ Response:
 Scorer failures (timeout, non-2xx, redirect, malformed/oversized body, validation
 errors) return an error from the plugin. `runScoreFilter` skips failed scorers
 and continues scheduling (**fail-open** for sandbox creation). Failures increment
-`cubemaster_scheduler_external_http_score_failures_total` and are logged at the
+`cube_scheduler_external_http_score_failure_total` and are logged at the
 scorer boundary without endpoint URLs, URL userinfo, query tokens, or
 request/response bodies; Warn is rate-limited to about one line per sanitized
 failure category per minute (further failures stay at Debug) so a down sidecar
 does not flood create-path logs. Missing scores for any requested candidate fail
 the whole attempt (anti-bias: scoring only a subset would systematically skew
 ranking). The call is **synchronous** on the create path. The shared HTTP
-transport caps in-flight sidecar connections with `MaxConnsPerHost = 8` (same
-as the idle pool per host) so a hung sidecar cannot open an unbounded dial
+transport does **not** honor `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` (direct
+dial only, so env proxies cannot see token-bearing sidecar URLs or the node
+inventory body) and caps in-flight sidecar connections with `MaxConnsPerHost = 8`
+(same as the idle pool per host) so a hung sidecar cannot open an unbounded dial
 storm; each attempt may still wait up to `timeout` (default 200ms, max 2s)
 before fail-open. This PR does not add a circuit breaker, negative cache,
 async execution, or retry loop — those remain follow-ups for higher create

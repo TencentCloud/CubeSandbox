@@ -918,6 +918,9 @@ func TestExternalHTTPScoreSharedHTTPClientTransport(t *testing.T) {
 	if tr.IdleConnTimeout != externalHTTPScoreIdleConnTimeout {
 		t.Fatalf("IdleConnTimeout = %v, want %v", tr.IdleConnTimeout, externalHTTPScoreIdleConnTimeout)
 	}
+	if tr.Proxy != nil {
+		t.Fatal("Proxy must be nil so HTTP_PROXY env cannot see token-bearing sidecar URLs")
+	}
 }
 
 func TestSanitizeExternalHTTPScoreFailureOmitsEndpointSecrets(t *testing.T) {
