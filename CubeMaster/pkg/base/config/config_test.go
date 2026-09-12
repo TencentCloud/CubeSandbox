@@ -6,18 +6,31 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
-
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+// testAbsPath builds a platform-absolute path for host-mount prefix tests.
+// On Windows filepath.IsAbs("/data/...") is false, so Unix-style fixtures
+// cannot express a "valid absolute path" there.
+func testAbsPath(elems ...string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(append([]string{"C:\\"}, elems...)...)
+	}
+	return "/" + filepath.Join(elems...)
+}
 
 func TestInit(t *testing.T) {
 	mydir, err := os.Getwd()
@@ -122,6 +135,73 @@ func TestPreHandleSchedulerIgnoreRedisAllocationDefault(t *testing.T) {
 	assert.False(t, cfg.Scheduler.ShouldIgnoreRedisAllocation())
 }
 
+func TestPreHandleExternalHTTPScoreWeightDefault(t *testing.T) {
+	omitted := &ExternalHTTPScore{Endpoint: "http://127.0.0.1:9"}
+	explicitZero := 0.0
+	zero := &ExternalHTTPScore{Weight: &explicitZero, Endpoint: "http://127.0.0.1:9"}
+	explicit := 2.5
+	set := &ExternalHTTPScore{Weight: &explicit, Endpoint: "http://127.0.0.1:9"}
+
+	cfg := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			Score: &SchedulerScoreConf{
+				ScorePluginConf: ScorePluginConf{
+					ExternalHTTPScore: omitted,
+				},
+			},
+		},
+	}}
+	assert.NoError(t, preHandleScheduler(cfg))
+	assert.NotNil(t, omitted.Weight)
+	assert.Equal(t, 1.0, *omitted.Weight)
+
+	cfg.Scheduler.Score.ScorePluginConf.ExternalHTTPScore = zero
+	assert.NoError(t, preHandleScheduler(cfg))
+	assert.NotNil(t, zero.Weight)
+	assert.Equal(t, 0.0, *zero.Weight)
+
+	cfg.Scheduler.Score.ScorePluginConf.ExternalHTTPScore = set
+	assert.NoError(t, preHandleScheduler(cfg))
+	assert.NotNil(t, set.Weight)
+	assert.Equal(t, 2.5, *set.Weight)
+}
+
+func TestExternalHTTPScoreMarshalJSONRedactsEndpointSecrets(t *testing.T) {
+	const sentinel = "secret-token-must-not-appear"
+	plugin := &ExternalHTTPScore{
+		Endpoint: "https://user:pass@sidecar.example/score?token=" + sentinel,
+		Timeout:  200 * time.Millisecond,
+		Mode:     "m",
+	}
+	body, err := json.Marshal(plugin)
+	assert.NoError(t, err)
+	got := string(body)
+	assert.NotContains(t, got, sentinel)
+	assert.NotContains(t, got, "user:pass")
+	assert.NotContains(t, got, "token=")
+	assert.Contains(t, got, "https://sidecar.example/score")
+	// Live config field must stay intact for Dial.
+	assert.Contains(t, plugin.Endpoint, sentinel)
+	// config.Init dumps via InterfaceToString (jsoniter), which also honors MarshalJSON.
+	dumped := utils.InterfaceToString(plugin)
+	assert.NotContains(t, dumped, sentinel)
+	assert.NotContains(t, dumped, "user:pass")
+	// Hot-reload Fatals use fmt %v on *Config; nested Stringer must redact.
+	printed := fmt.Sprintf("%v", plugin)
+	assert.NotContains(t, printed, sentinel)
+	assert.NotContains(t, printed, "user:pass")
+	nested := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			Score: &SchedulerScoreConf{
+				ScorePluginConf: ScorePluginConf{ExternalHTTPScore: plugin},
+			},
+		},
+	}}
+	fatalStyle := fmt.Sprintf("preHandle Config:%v fail:%v", nested, assert.AnError)
+	assert.NotContains(t, fatalStyle, sentinel)
+	assert.NotContains(t, fatalStyle, "user:pass")
+}
+
 func TestHasDeprecatedOvercommitConfig(t *testing.T) {
 	assert.False(t, (&SchedulerConf{}).hasDeprecatedOvercommitConfig())
 
@@ -187,20 +267,26 @@ func TestDefaultNodeAffinitySelectorAllowedKeySet(t *testing.T) {
 }
 
 func TestValidateAllowedHostMountPrefixes(t *testing.T) {
+	validShared := testAbsPath("data", "shared")
+	validSharedSlash := validShared + string(filepath.Separator)
+	validNFS := testAbsPath("mnt", "nfs") + string(filepath.Separator)
+
 	tests := []struct {
 		name     string
 		prefixes []string
 		wantErr  bool
 	}{
-		{"valid with trailing slash", []string{"/data/shared/"}, false},
-		{"valid without trailing slash", []string{"/data/shared"}, false},
-		{"multiple valid", []string{"/data/shared/", "/mnt/nfs/"}, false},
+		{"valid with trailing slash", []string{validSharedSlash}, false},
+		{"valid without trailing slash", []string{validShared}, false},
+		{"multiple valid", []string{validSharedSlash, validNFS}, false},
+		// "/" is rejected on Unix as root; on Windows it fails filepath.IsAbs.
 		{"reject root path /", []string{"/"}, true},
+		// "/data/.." cleans to "/" on Unix; on Windows it fails filepath.IsAbs.
 		{"reject root via traversal", []string{"/data/.."}, true},
 		{"reject empty string", []string{""}, true},
 		{"reject relative path", []string{"data/shared/"}, true},
 		{"reject dot path", []string{"."}, true},
-		{"one valid one invalid", []string{"/data/shared/", ""}, true},
+		{"one valid one invalid", []string{validSharedSlash, ""}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

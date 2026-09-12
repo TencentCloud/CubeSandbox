@@ -54,6 +54,9 @@ DEVTAG?=dev-$(APP_VERSION)-$(GIT_COMMIT_SHORT)-$(DATE)
 COVERAGE_PACKAGES=$(shell go list ./... \
 	| grep -v github.com/tencentcloud/CubeSandbox/CubeMaster/cmd \
 	| grep -v github.com/tencentcloud/CubeSandbox/CubeMaster/integration )
+# schedulerbench CLI is excluded by the cmd/ filter above; keep only that package
+# on the normal unit-test path (simulator is already covered by COVERAGE_PACKAGES).
+SCHEDULERBENCH_CLI_TEST_PACKAGE=./cmd/schedulerbench
 
 
 .PHONY: build deps fmt lint clean
@@ -109,6 +112,11 @@ lint:
 clean:
 	@rm -rf docker/cubemaster $(BUILD_DIR)
 
+.PHONY: test-schedulerbench
+test-schedulerbench:
+	$(call msg,Run schedulerbench CLI tests)
+	$(Q)CI=true go test -short -v -gcflags=all=-l -timeout=10m ${TEST_FLAGS} $(SCHEDULERBENCH_CLI_TEST_PACKAGE)
+
 .PHONY: test
 test:
 	$(call msg,Run unit tests)
@@ -124,6 +132,7 @@ test:
 			-coverprofile=coverage/unit-test-`echo $$pkg | tr "/" "_"`.cov \
 			$$pkg || exit 1 ;\
 	done )
+	@$(MAKE) test-schedulerbench
 
 .PHONY: test-race
 test-race:
@@ -133,6 +142,9 @@ test-race:
 		CI=true CGO_ENABLED=1 go test -short -v -race -count=1 \
 			-gcflags=all=-l -timeout=20m $$pkg || exit 1 ;\
 	done )
+	$(call msg,Run schedulerbench CLI race tests)
+	$(Q)CI=true CGO_ENABLED=1 go test -short -v -race -count=1 \
+		-gcflags=all=-l -timeout=10m $(SCHEDULERBENCH_CLI_TEST_PACKAGE)
 
 DOCKER_TEST_PATTERN=^(TestAliasStoreMySQL|TestAliasStorePostgreSQL|TestUpsertReplicaPostgreSQLUpdatePath|TestTrySessionLockPostgreSQL|TestArtifactGCSessionLockMySQL|TestInitReturnsDaoDefaultOnPostgreSQL)$$
 
