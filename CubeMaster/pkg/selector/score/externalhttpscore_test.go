@@ -1121,6 +1121,8 @@ func TestExternalHTTPScoreMetricReasonMapping(t *testing.T) {
 		{category: "http_Post_timeout", wantReason: externalHTTPScoreReasonTimeout},
 		{category: "http_Get_connection_refused", wantReason: externalHTTPScoreReasonConnection},
 		{category: "http_Post_transport_failed", wantReason: externalHTTPScoreReasonConnection},
+		{category: "http_Post_canceled", wantReason: externalHTTPScoreReasonOther},
+		{category: "http_Post_failed", wantReason: externalHTTPScoreReasonOther},
 		{category: "http_request_failed", wantReason: externalHTTPScoreReasonOther},
 		{category: "unknown_error", wantReason: externalHTTPScoreReasonOther},
 		{category: "external_http_score unexpected_status", wantReason: externalHTTPScoreReasonHTTPStatus},
@@ -1167,6 +1169,43 @@ func TestExternalHTTPScoreSelectHTTPFailureReasons(t *testing.T) {
 			t.Fatal("want timeout error")
 		}
 		assertExternalHTTPScoreMetricReason(t, err, externalHTTPScoreReasonTimeout, sentinel)
+	})
+
+	t.Run("body read timeout", func(t *testing.T) {
+		// Deterministic body stall: headers OK, body blocks until request ctx ends.
+		// httptest Flush timing is OS-dependent; a pipe RoundTripper pins the path.
+		origClient := externalHTTPScoreHTTPClient
+		t.Cleanup(func() { externalHTTPScoreHTTPClient = origClient })
+		externalHTTPScoreHTTPClient = &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				pr, pw := io.Pipe()
+				go func() {
+					<-req.Context().Done()
+					_ = pw.CloseWithError(req.Context().Err())
+				}()
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       pr,
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		}
+		_, err := requestExternalHTTPScores(
+			context.Background(),
+			"http://sidecar.example/score?token="+sentinel,
+			20*time.Millisecond,
+			externalHTTPScoreRequest{Nodes: []externalHTTPScoreNode{{NodeID: "node-a"}}},
+		)
+		if err == nil {
+			t.Fatal("want body-read timeout error")
+		}
+		if cat := sanitizeExternalHTTPScoreFailure(err); cat != "http_Post_timeout" {
+			t.Fatalf("category = %q, want http_Post_timeout (err=%v)", cat, err)
+		}
+		if reason := externalHTTPScoreMetricReason(sanitizeExternalHTTPScoreFailure(err)); reason != externalHTTPScoreReasonTimeout {
+			t.Fatalf("reason = %q, want timeout", reason)
+		}
 	})
 
 	t.Run("connection", func(t *testing.T) {
@@ -1380,4 +1419,10 @@ func externalHTTPScoreTestCtx() *selctx.SelectorCtx {
 
 func float64Ptr(v float64) *float64 {
 	return &v
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }

@@ -85,10 +85,12 @@ func externalHTTPScoreMetricReason(category string) string {
 		case strings.HasSuffix(category, "_timeout"):
 			return externalHTTPScoreReasonTimeout
 		case strings.HasSuffix(category, "_connection_refused"),
-			strings.HasSuffix(category, "_transport_failed"),
-			strings.HasSuffix(category, "_failed"),
-			strings.HasSuffix(category, "_canceled"):
+			strings.HasSuffix(category, "_transport_failed"):
 			return externalHTTPScoreReasonConnection
+		default:
+			// _canceled is usually caller/create cancel, not sidecar reachability.
+			// Generic _failed is also not a dial/transport signal.
+			return externalHTTPScoreReasonOther
 		}
 	}
 	return externalHTTPScoreReasonOther

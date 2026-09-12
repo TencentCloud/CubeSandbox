@@ -646,7 +646,17 @@ func requestExternalHTTPScores(ctx context.Context, endpoint string, timeout tim
 	limited := io.LimitReader(resp.Body, int64(maxExternalHTTPScoreResponseBytes)+1)
 	body, err := io.ReadAll(limited)
 	if err != nil {
-		return nil, errors.New(sanitizeExternalHTTPScoreFailure(err))
+		// Read errors are not *url.Error, so the default sanitize path would
+		// collapse them to http_request_failed. Prefer the request context /
+		// wrapped deadline so a hung body past timeout surfaces as
+		// http_Post_timeout (or http_Post_canceled), matching Do()-path failures.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, errors.New(httpFailureCategory("Post", ctxErr))
+		}
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return nil, errors.New(httpFailureCategory("Post", err))
+		}
+		return nil, errors.New(httpFailureCategory("Post", err))
 	}
 	if len(body) > maxExternalHTTPScoreResponseBytes {
 		drainExternalHTTPScoreResponseBody(resp.Body)
