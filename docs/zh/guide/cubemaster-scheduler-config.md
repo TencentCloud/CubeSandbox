@@ -100,10 +100,19 @@ CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 `scheduler.profiles` 下与内置同名的用户条目会完全覆盖内置。
 
 **注意：** 当 Profile 提供 `filter.enable_filters` 时，该列表会**整体替换**基础
-`scheduler.filter.enable_filters`（不会合并）。丢掉基础过滤器会配置加载失败，除非
-设置 `allow_dropped_filters: true`。内置预设使用较短列表，可能与此前已启用的
-准入过滤器（如 `disk`、`thirtparty`）冲突——请在用户 Profile 中保留它们，或在审
-查生效列表后设置该 opt-in。
+`scheduler.filter.enable_filters`（不会合并）。**用户** Profile 丢掉基础过滤器会
+配置加载失败，除非设置 `allow_dropped_filters: true`。内置预设已允许丢掉，因此
+现成四过滤器配置可直接按名选用；若你依赖 `disk` / `thirtparty`，仍请审查生效列表。
+
+## 升级说明（空 Profile / 重启）
+
+即使 `scheduler.profile` 为空，以下 Init 校验也会在**进程启动**时让 CubeMaster
+退出（热加载仅写 FATAL 并保留旧 Config）：
+
+- `enable_scorers` 列出了因子型 / affinity 评分器但缺少对应 `plugin_conf`
+- 任意 `plugin_conf.<scorer>.weight < 0`
+
+此前能带着静默无评分或反转排序启动的配置，升级后需先修好 YAML 才能启动。
 
 对每个 Score 插件（含既有四个评分器以及 `binpack_score`），
 `plugin_conf.<scorer>.weight: 0` 会禁用该评分器并跳过 Select。**负的**
@@ -125,8 +134,9 @@ Profile / 选择器列表需要重启 CubeMaster：配置热加载会重新跑 `
 `scheduler.score.plugin_conf.binpack_score`。不要把 `binpack_score` 与
 spread 风格评分器（`real_time_weighted_average`、
 `multi_factor_weighted_average`）放进同一 `enable_scorers`：binpack 返回占用率
-（越高越满），后者返回剩余容量风格分数，加权后会互相抵消。内置
-`binpack_utilization` 只启用 `binpack_score`。
+（越高越满），后者返回剩余容量风格分数，加权后会互相抵消。非空
+`scheduler.profile` 下该混用会配置加载失败；空 Profile 仍可加载（升级兼容）但
+排序接近噪声。内置 `binpack_utilization` 只启用 `binpack_score`。
 
 运行时 Profile **不是**离线模拟器 / `schedulerbench` 模型，即使预设名字符串相同。
 可复制 YAML 与完整契约见

@@ -103,11 +103,22 @@ block is absent. User entries under `scheduler.profiles` with the same name
 override a built-in entirely.
 
 **Warning:** when a Profile provides `filter.enable_filters`, that list
-**replaces** the base `scheduler.filter.enable_filters` (no merge). Dropping
-base filters fails config load unless `allow_dropped_filters: true`. Built-ins
-use short lists and can conflict with admission filters such as `disk` or
-`thirtparty` that were previously enabled — keep them in a user Profile list
-or set the opt-in after auditing the effective filter list.
+**replaces** the base `scheduler.filter.enable_filters` (no merge). User
+Profiles that drop base filters fail config load unless
+`allow_dropped_filters: true`. Built-in presets already allow drops so stock
+four-filter configs can select them by name; still audit effective filters if
+you relied on `disk` / `thirtparty`.
+
+## Upgrade notes (empty Profile / restart)
+
+These Init checks run even with `scheduler.profile` empty and **exit CubeMaster
+on process start** (hot-reload only logs FATAL and keeps the previous Config):
+
+- `enable_scorers` lists a factor/affinity scorer without its `plugin_conf` block
+- any `plugin_conf.<scorer>.weight < 0`
+
+Configs that previously started with a silent unscored phase or inverted
+ranking will not boot until those YAML issues are fixed.
 
 For every Score plugin (including the four existing scorers and
 `binpack_score`), `plugin_conf.<scorer>.weight: 0` disables the scorer and
@@ -134,8 +145,10 @@ Profile). Plugin params stay under `scheduler.score.plugin_conf.binpack_score`.
 Do not mix `binpack_score` with spread-style scorers (`real_time_weighted_average`,
 `multi_factor_weighted_average`) in the same `enable_scorers` list: binpack
 returns occupancy (higher = fuller) while those scorers return remaining-capacity
-style scores, so the blend can cancel. Built-in `binpack_utilization` only
-enables `binpack_score`.
+style scores, so the blend can cancel. Under a non-empty `scheduler.profile`
+that mix fails config load; with an empty Profile it still loads (pre-upgrade
+compat) but ranking is near-noise. Built-in `binpack_utilization` only enables
+`binpack_score`.
 
 Runtime Profiles are **not** offline simulator / `schedulerbench` models, even
 when they reuse the same preset name strings. Copyable YAML and the full

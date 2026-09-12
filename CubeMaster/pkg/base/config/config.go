@@ -1595,7 +1595,8 @@ func validateSchedulerScorePluginConfig(s *SchedulerConf) error {
 
 // validateScorerPolarityMix rejects listing occupancy (binpack) and remaining-
 // capacity spread scorers together under a Profile — their scores cancel in
-// runScoreFilter's weighted sum.
+// runScoreFilter's weighted sum. Empty-profile configs keep pre-upgrade load
+// behavior (docs warn; no Init failure) so this check stays Profile-scoped.
 func validateScorerPolarityMix(s *SchedulerConf) error {
 	if s == nil || s.Score == nil {
 		return nil
@@ -1791,12 +1792,21 @@ func filterNamesOnlyIn(previous, current []string) []string {
 func resolveSchedulerProfile(s *SchedulerConf) (SchedulerProfileConf, bool, error) {
 	if s.Profiles != nil {
 		if profile, ok := s.Profiles[s.Profile]; ok {
-			if isEmptySchedulerProfileConf(profile) {
+			// No filter/score sections means the entry does not contribute an
+			// overlay. Fall back to a same-name built-in when present so that
+			// profiles.<builtin>: {} or allow_dropped_filters-only cannot
+			// silently shadow the preset.
+			if profile.Filter == nil && profile.Score == nil {
 				if builtin, ok := builtinSchedulerProfiles()[s.Profile]; ok {
-					CubeLog.Warnf("scheduler profiles[%q] is empty; falling back to built-in preset", s.Profile)
+					if profile.AllowDroppedFilters {
+						builtin.AllowDroppedFilters = true
+						CubeLog.Warnf("scheduler profiles[%q] has no filter/score overlay; applying built-in with allow_dropped_filters=true", s.Profile)
+					} else {
+						CubeLog.Warnf("scheduler profiles[%q] is empty; falling back to built-in preset", s.Profile)
+					}
 					return builtin, true, nil
 				}
-				CubeLog.Warnf("scheduler profiles[%q] is empty; profile applies no filter/score overlay", s.Profile)
+				CubeLog.Warnf("scheduler profiles[%q] has no filter/score overlay; profile applies no selector changes", s.Profile)
 			}
 			return profile, false, nil
 		}
@@ -1810,16 +1820,13 @@ func resolveSchedulerProfile(s *SchedulerConf) (SchedulerProfileConf, bool, erro
 	return SchedulerProfileConf{}, false, fmt.Errorf("scheduler profile %q not found", s.Profile)
 }
 
-// isEmptySchedulerProfileConf reports a zero-value / YAML-empty profiles map
-// entry (key present, no filter/score/opt-in fields). Such entries previously
-// shadowed built-ins and applied nothing.
-func isEmptySchedulerProfileConf(p SchedulerProfileConf) bool {
-	return p.Filter == nil && p.Score == nil && !p.AllowDroppedFilters
-}
-
 func builtinSchedulerProfiles() map[string]SchedulerProfileConf {
+	// Built-ins are opinionated scene presets with short filter lists. They set
+	// AllowDroppedFilters so stock configs (cpu/mem/template_locality/
+	// realtime_create_num) can select them by name without a full user override.
 	return map[string]SchedulerProfileConf{
 		RuntimeProfileBalancedSpread: {
+			AllowDroppedFilters: true,
 			Filter: &SchedulerFilterConf{
 				EnableFilters: []string{"cpu", "mem", "realtime_create_num"},
 			},
@@ -1835,6 +1842,7 @@ func builtinSchedulerProfiles() map[string]SchedulerProfileConf {
 			},
 		},
 		RuntimeProfileTemplateLocalityFirst: {
+			AllowDroppedFilters: true,
 			Filter: &SchedulerFilterConf{
 				EnableFilters: []string{"cpu", "mem", "template_locality"},
 			},
@@ -1847,6 +1855,7 @@ func builtinSchedulerProfiles() map[string]SchedulerProfileConf {
 			},
 		},
 		RuntimeProfileBinpackUtilization: {
+			AllowDroppedFilters: true,
 			Filter: &SchedulerFilterConf{
 				EnableFilters: []string{"cpu", "mem"},
 			},

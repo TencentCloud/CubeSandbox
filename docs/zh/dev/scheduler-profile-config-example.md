@@ -49,7 +49,7 @@ updated: 2026-09-10
 | `scheduler.profile` | 当前生效覆盖层名称。空字符串（默认）表示不展开。内置名无需用户 map key 即可应用。 |
 | `scheduler.profiles` | 用户自定义命名覆盖层。与内置同名的用户 key **完全覆盖**该内置。 |
 | `scheduler.profiles.<name>.filter.enable_filters` | 当 Profile 提供非 nil 列表时，**替换** `scheduler.filter.enable_filters`。丢掉基础列表中已有名称时配置加载失败，除非该 Profile 设置 `allow_dropped_filters: true`。 |
-| `scheduler.profiles.<name>.allow_dropped_filters` | 显式允许 Profile 的 `enable_filters` 替换丢掉基础准入过滤器（如 `disk`、`thirtparty`）。默认 `false`。 |
+| `scheduler.profiles.<name>.allow_dropped_filters` | **用户** Profile 的显式 opt-in：允许 `enable_filters` 替换丢掉基础准入过滤器（如 `disk`、`thirtparty`）。默认 `false`。内置预设已允许丢掉（场景化短列表）。同名条目若只写该标志（无 filter/score）会回退到内置并带上该标志。 |
 | `scheduler.profiles.<name>.score.enable_scorers` | 当 Profile 提供非 nil 列表时，**替换** `scheduler.score.enable_scorers`。 |
 | `scheduler.profiles.<name>.score.resource_weights` | 合并覆盖到 `scheduler.score.resource_weights`；Profile 同名键胜出，无关基础键保留。这些是因子权重，不是插件权重。 |
 | `scheduler.score.plugin_conf.*` | 各评分器参数。**不是** Profile 覆盖字段。 |
@@ -112,13 +112,14 @@ filter/score 名称，会在调度器运行前于 `preHandleScheduler` 中失败
 
 **Filter 列表替换（准入风险）。** 当 Profile（内置或用户）提供非 nil 的
 `filter.enable_filters` 列表时，该列表会**整体替换**
-`scheduler.filter.enable_filters`，**不会**与基础列表合并。丢掉基础列表中已有名称
-时**配置加载失败**，除非 Profile 设置 `allow_dropped_filters: true`。内置预设即可
-说明风险：`balanced_spread` 仅设置 `cpu` / `mem` / `realtime_create_num`；
-`template_locality_first` 仅设置 `cpu` / `mem` / `template_locality`；
-`binpack_utilization` 仅设置 `cpu` / `mem`——若基础配置已启用 `disk` /
-`thirtparty`，直接选这些内置会失败，需在用户 Profile 中保留这些过滤器或设置该
-opt-in。应用 Profile 后请审查生效的 `enable_filters`。
+`scheduler.filter.enable_filters`，**不会**与基础列表合并。对**用户** Profile，
+丢掉基础列表中已有名称时**配置加载失败**，除非设置 `allow_dropped_filters: true`。
+内置预设已带该 opt-in，因此现成配置（`cpu` / `mem` / `template_locality` /
+`realtime_create_num`）可直接按名选用 `balanced_spread` /
+`template_locality_first` / `binpack_utilization`。它们仍会换成短列表——若你此前
+依赖 `disk` / `thirtparty`，请审查生效的 `enable_filters`。同名
+`profiles.<builtin>` 若只写 `allow_dropped_filters`（无 filter/score）会回退到
+内置，而不是应用空覆盖。
 
 **`weight: 0` 禁用评分器。** 对四个遗留 Score 插件
 （`real_time_weighted_average`、`multi_factor_weighted_average`、

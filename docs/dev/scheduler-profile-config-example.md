@@ -50,7 +50,7 @@ Source: `CubeMaster/pkg/base/config/config.go`
 | `scheduler.profile` | Name of the active overlay. Empty string (default) means no expansion. Built-in names apply without a user map key. |
 | `scheduler.profiles` | User-defined map of named overlays. A user key with the same name as a built-in **overrides** the built-in. |
 | `scheduler.profiles.<name>.filter.enable_filters` | Replaces `scheduler.filter.enable_filters` when the profile provides a non-nil list. Dropping names that were in the base list fails config load unless `allow_dropped_filters: true` is set on that Profile. |
-| `scheduler.profiles.<name>.allow_dropped_filters` | Opt-in: allow the Profile's `enable_filters` replace to drop base admission filters (for example `disk`, `thirtparty`). Default `false`. |
+| `scheduler.profiles.<name>.allow_dropped_filters` | Opt-in for **user** Profiles: allow `enable_filters` replace to drop base admission filters (for example `disk`, `thirtparty`). Default `false`. Built-in presets already allow drops (opinionated scene lists). A same-name entry that sets only this flag (no filter/score) falls back to the built-in and applies the flag. |
 | `scheduler.profiles.<name>.score.enable_scorers` | Replaces `scheduler.score.enable_scorers` when the profile provides a non-nil list. |
 | `scheduler.profiles.<name>.score.resource_weights` | Merged over `scheduler.score.resource_weights`; Profile keys win and unrelated base keys remain. These are factor weights, not plugin weights. |
 | `scheduler.score.plugin_conf.*` | Per-scorer params. **Not** a profile overlay field. |
@@ -126,14 +126,15 @@ Allowed score names (must match `CubeMaster/pkg/selector/score/init.go`):
 **Filter list replace (admission risk).** When a Profile (built-in or user)
 provides a non-nil `filter.enable_filters` list, that list **replaces**
 `scheduler.filter.enable_filters` entirely. It does **not** merge with the
-base list. Dropping any name that was present in the base list **fails config
-load** unless the Profile sets `allow_dropped_filters: true`. Built-in presets
-illustrate the risk: `balanced_spread` sets `cpu` / `mem` / `realtime_create_num`
-only; `template_locality_first` sets `cpu` / `mem` / `template_locality`;
-`binpack_utilization` sets `cpu` / `mem` only — selecting them on a base config
-that already enabled `disk` / `thirtparty` fails until you keep those filters in
-a user Profile list or set the opt-in. Review the effective `enable_filters`
-after applying a Profile.
+base list. For **user** Profiles, dropping any name that was present in the
+base list **fails config load** unless `allow_dropped_filters: true`. Built-in
+presets already set that opt-in so stock configs
+(`cpu` / `mem` / `template_locality` / `realtime_create_num`) can select
+`balanced_spread` / `template_locality_first` / `binpack_utilization` by name.
+They still replace with short lists — audit effective `enable_filters` if you
+previously relied on `disk` / `thirtparty`. A same-name `profiles.<builtin>`
+entry with only `allow_dropped_filters` (no filter/score) falls back to the
+built-in rather than applying an empty overlay.
 
 **`weight: 0` disables scorers.** For the four legacy Score plugins
 (`real_time_weighted_average`, `multi_factor_weighted_average`,
