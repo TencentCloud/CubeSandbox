@@ -5,10 +5,13 @@ from __future__ import annotations
 
 from adapters.api_adapter import ApiClient
 from adapters.base import SandboxAdapter
+
 from framework.config import SdkE2EConfig
 
 
-def safe_kill(adapter: SandboxAdapter, config: SdkE2EConfig) -> list[str]:
+def safe_kill(
+    adapter: SandboxAdapter, config: SdkE2EConfig, *, verify_absent: bool = False
+) -> list[str]:
     """Best-effort sandbox cleanup.
 
     Returns diagnostic messages instead of raising, so teardown never hides the
@@ -16,6 +19,7 @@ def safe_kill(adapter: SandboxAdapter, config: SdkE2EConfig) -> list[str]:
     """
 
     errors: list[str] = []
+    close_errors: list[str] = []
     kill_adapter = adapter
     kill_completed = False
     interrupt: BaseException | None = None
@@ -55,16 +59,35 @@ def safe_kill(adapter: SandboxAdapter, config: SdkE2EConfig) -> list[str]:
             if kill_adapter is not adapter:
                 kill_adapter.close()
         except Exception as exc:  # noqa: BLE001
-            errors.append(
+            close_errors.append(
                 f"{kill_adapter.backend}.close failed for {adapter.sandbox_id}: {exc}"
             )
         try:
             adapter.close()
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"{adapter.backend}.close failed for {adapter.sandbox_id}: {exc}")
+            close_errors.append(f"{adapter.backend}.close failed for {adapter.sandbox_id}: {exc}")
     if interrupt is not None:
         raise interrupt
-    return errors
+    if verify_absent:
+        api = None
+        try:
+            api = ApiClient(config)
+            if api.get_sandbox(adapter.sandbox_id):
+                errors.append(
+                    f"sandbox {adapter.sandbox_id} still exists after cleanup"
+                )
+            else:
+                # Kill tests already removed the sandbox; a confirmed 404 also
+                # validates a successful REST fallback after an SDK error.
+                errors.clear()
+        except Exception as exc:  # noqa: BLE001 - absence must be confirmed
+            errors.append(
+                f"cleanup verification failed for {adapter.sandbox_id}: {exc}"
+            )
+        finally:
+            if api is not None:
+                api.close()
+    return errors + close_errors
 
 
 def _rest_delete(adapter: SandboxAdapter, config: SdkE2EConfig, errors: list[str]) -> None:
