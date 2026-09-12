@@ -333,10 +333,6 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		logExternalHTTPScoreFailure(ctx, err)
 		return nil, err
 	}
-	// Defense in depth: non-positive weight from the same snapshot skips HTTP.
-	if !(w > 0) {
-		return nil, nil
-	}
 
 	inList := selCtx.Nodes()
 	if inList.Len() == 0 {
