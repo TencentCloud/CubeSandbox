@@ -893,13 +893,14 @@ mod tests {
         use base64::Engine;
 
         let table = ProcessTable::new(Arc::new(crate::process::cgroup::NoopManager));
-        let spawned = engine::spawn(
+        let spawned = engine::spawn_with_cgroup(
             "/bin/cat",
             &[],
             std::collections::HashMap::new(),
             "/".into(),
             &current_user(),
             true,
+            None,
             None,
         )
         .unwrap();
@@ -1061,13 +1062,14 @@ mod tests {
         let table = Arc::new(ProcessTable::new(Arc::new(
             crate::process::cgroup::NoopManager,
         )));
-        let spawned = engine::spawn(
+        let spawned = engine::spawn_with_cgroup(
             "/bin/sh",
             &["-c".into(), "sleep 1".into()],
             std::collections::HashMap::new(),
             "/".into(),
             &current_user(),
             false,
+            None,
             None,
         )
         .unwrap();
@@ -1109,13 +1111,14 @@ mod tests {
         let table = Arc::new(ProcessTable::new(Arc::new(
             crate::process::cgroup::NoopManager,
         )));
-        let spawned = engine::spawn(
+        let spawned = engine::spawn_with_cgroup(
             "/bin/sh",
             &["-c".into(), "sleep 1".into()],
             std::collections::HashMap::new(),
             "/".into(),
             &current_user(),
             false,
+            None,
             None,
         )
         .unwrap();
@@ -1178,13 +1181,14 @@ mod tests {
         let table = Arc::new(ProcessTable::new(Arc::new(
             crate::process::cgroup::NoopManager,
         )));
-        let spawned = engine::spawn(
+        let spawned = engine::spawn_with_cgroup(
             "/bin/sh",
             &["-c".into(), "sleep 1".into()],
             std::collections::HashMap::new(),
             "/".into(),
             &current_user(),
             false,
+            None,
             None,
         )
         .unwrap();
@@ -1231,13 +1235,14 @@ mod tests {
         let table = Arc::new(ProcessTable::new(Arc::new(
             crate::process::cgroup::NoopManager,
         )));
-        let spawned = engine::spawn(
+        let spawned = engine::spawn_with_cgroup(
             "/bin/sh",
             &["-c".into(), "sleep 30".into()],
             std::collections::HashMap::new(),
             "/".into(),
             &current_user(),
             false,
+            None,
             None,
         )
         .unwrap();
@@ -1288,13 +1293,14 @@ mod tests {
         let table = Arc::new(ProcessTable::new(Arc::new(
             crate::process::cgroup::NoopManager,
         )));
-        let spawned = engine::spawn(
+        let spawned = engine::spawn_with_cgroup(
             "/bin/sh",
             &["-c".into(), "sleep 1 & exit 0".into()],
             std::collections::HashMap::new(),
             "/".into(),
             &current_user(),
             false,
+            None,
             None,
         )
         .unwrap();
@@ -1352,13 +1358,14 @@ mod tests {
         let table = Arc::new(ProcessTable::new(Arc::new(
             crate::process::cgroup::NoopManager,
         )));
-        let spawned = engine::spawn(
+        let spawned = engine::spawn_with_cgroup(
             "/bin/sh",
             &["-c".into(), "while :; do printf 1234567890; done".into()],
             std::collections::HashMap::new(),
             "/".into(),
             &current_user(),
             false,
+            None,
             None,
         )
         .unwrap();

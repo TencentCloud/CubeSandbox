@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::{broadcast, oneshot, Notify};
 
+mod child;
 mod cleanup;
 mod io;
 mod pty;
@@ -28,8 +29,6 @@ pub use spawn::{merged_env, resolve_cwd, spawn_with_cgroup};
 
 #[cfg(test)]
 pub use pty::spawn_pty;
-#[cfg(test)]
-pub use spawn::spawn;
 
 #[derive(Debug)]
 pub struct SpawnedProcess {

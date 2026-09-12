@@ -13,20 +13,21 @@ use tokio::sync::{broadcast, oneshot, Notify};
 use crate::platform::config::Config;
 use crate::platform::identity::User;
 
+use super::child::{spawn_without_fork, ChildHandle, ChildSpec, SpawnFailure};
 use super::cleanup::kill_process_group;
 use super::io::{
     decorate_terminal, pump_pipe, terminal_after_output, terminal_after_wait, OUTPUT_DRAIN_GRACE,
 };
-use super::{InputWriter, PumpEvent, SpawnedProcess};
+use super::{InputHandle, InputWriter, PumpEvent, SpawnedProcess};
 
-/// Write this child's pid into `dirfd`'s `cgroup.procs`. Runs inside the
-/// forked child before exec, so it must be allocation-free and call only
-/// async-signal-safe libc. `dirfd` is a manager-owned cgroup directory fd
+/// Write this child's pid into `dirfd`'s `cgroup.procs`. Runs in the child
+/// before `execve`, so it must be allocation-free and call only async-signal-safe
+/// libc. `dirfd` is a manager-owned cgroup directory fd
 /// (borrowed for the daemon lifetime — never closed here; the open on
 /// `cgroup.procs` carries O_CLOEXEC so the fd cannot leak past exec).
 fn place_in_cgroup(dirfd: RawFd) -> std::io::Result<()> {
     let procs = b"cgroup.procs\0";
-    // SAFETY: pre_exec runs in the forked child, single-threaded; dirfd is a
+    // SAFETY: runs in the child before exec, single-threaded; dirfd is a
     // valid fd inherited from the parent.
     let fd = unsafe {
         libc::openat(
@@ -41,7 +42,7 @@ fn place_in_cgroup(dirfd: RawFd) -> std::io::Result<()> {
 
     // Format the pid without allocation: `<pid>\n`.
     let pid = unsafe { libc::getpid() };
-    debug_assert!(pid > 0, "forked child always has a pid");
+    debug_assert!(pid > 0, "a child always has a pid");
     let mut num = [0u8; 16];
     let mut n = num.len();
     let mut v = pid.max(1) as u32;
@@ -207,22 +208,23 @@ pub(super) fn child_pre_exec(
     })
 }
 
-#[cfg(test)]
-pub fn spawn(
-    cmd: &str,
-    args: &[String],
-    env: HashMap<String, String>,
-    cwd: String,
-    user: &User,
-    stdin_enabled: bool,
-    cgroup_fd: Option<RawFd>,
-) -> std::io::Result<SpawnedProcess> {
-    spawn_with_cgroup(cmd, args, env, cwd, user, stdin_enabled, cgroup_fd, None)
-}
-
 /// Spawn a pipe-backed process and seed the cgroup metadata before the pump
 /// task starts. This closes the fast-exit race where an OOM/termination event
 /// could otherwise be decorated before the process service stores its leaf.
+///
+/// The child is created with `clone(CLONE_VM|CLONE_VFORK)`, which leaves the
+/// parent's page tables alone; `fork` copy-on-writes every writable page of the
+/// parent, so the daemon re-faults each page it writes after a command (see
+/// [`super::child`] for that mechanism and its constraints). `fork` is reached
+/// only when the host rejects the clone flags or cannot map the child stack, and
+/// by the test that guards that path. A failure that came back through the
+/// child's report pipe is a real command error and is not retried, or the
+/// command would run twice.
+///
+/// `posix_spawn` itself is not usable here because it cannot express the
+/// credential drop (the daemon runs as root and commands run as the requested
+/// user), so the child-side setup runs our own code — the same
+/// [`child_pre_exec`] closure both mechanisms install.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_with_cgroup(
     cmd: &str,
@@ -234,33 +236,44 @@ pub fn spawn_with_cgroup(
     cgroup_fd: Option<RawFd>,
     process_cgroup: Option<Arc<crate::process::cgroup::ProcessCgroup>>,
 ) -> std::io::Result<SpawnedProcess> {
-    let mut command = tokio::process::Command::new(cmd);
-    command
-        .args(args)
-        .env_clear()
-        .envs(&env)
-        .stdin(if stdin_enabled {
-            Stdio::piped()
-        } else {
-            Stdio::null()
+    let fork_free = {
+        let mut before_exec = child_pre_exec(user, &cwd, cgroup_fd, false)?;
+        spawn_without_fork(ChildSpec {
+            cmd,
+            args,
+            env: &env,
+            path: env.get("PATH").map(String::as_str).unwrap_or(DEFAULT_PATH),
+            stdin_enabled,
+            before_exec: &mut before_exec,
         })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(false);
-    unsafe {
-        command.pre_exec(child_pre_exec(user, &cwd, cgroup_fd, false)?);
-    }
+    };
+    let (mut child, input, stdout, stderr) = match fork_free {
+        Ok(raw) => (
+            ChildHandle::Raw {
+                pid: raw.pid,
+                pidfd: raw.pidfd,
+            },
+            Arc::new(tokio::sync::Mutex::new(InputWriter::Pipe(raw.stdin))),
+            raw.stdout,
+            raw.stderr,
+        ),
+        Err(SpawnFailure::Child(err)) => return Err(err),
+        Err(SpawnFailure::Unsupported(err)) => {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "fork-free spawn unavailable ({err}); commands will use fork, \
+                     which costs a copy-on-write fault per page the daemon rewrites"
+                );
+            });
+            spawn_forked(cmd, args, env, cwd, user, stdin_enabled, cgroup_fd)?
+        }
+    };
 
-    let mut child = command.spawn()?;
     // A successfully spawned child always has an id until it is awaited; the
     // fallback to 0 never fires in practice, but kill_process_group guards
     // against 0/1 regardless so a bogus pid can never signal envd's own group.
     let pid = child.id().unwrap_or_default();
-    let input = Arc::new(tokio::sync::Mutex::new(InputWriter::Pipe(
-        child.stdin.take(),
-    )));
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
 
     // A bounded broadcast (capacity 64) is the per-process output bus: the
     // pump publishes here and each connection subscribes. A subscriber that
@@ -341,6 +354,53 @@ pub fn spawn_with_cgroup(
     })
 }
 
+/// The `fork` mechanism: `std::process` runs the same [`child_pre_exec`] closure
+/// between `fork` and `exec`, and hands back the same handles the fork-free
+/// mechanism produces.
+#[allow(clippy::too_many_arguments)]
+fn spawn_forked(
+    cmd: &str,
+    args: &[String],
+    env: HashMap<String, String>,
+    cwd: String,
+    user: &User,
+    stdin_enabled: bool,
+    cgroup_fd: Option<RawFd>,
+) -> std::io::Result<(
+    ChildHandle,
+    InputHandle,
+    Option<tokio::process::ChildStdout>,
+    Option<tokio::process::ChildStderr>,
+)> {
+    let mut command = tokio::process::Command::new(cmd);
+    command
+        .args(args)
+        .env_clear()
+        .envs(&env)
+        .stdin(if stdin_enabled {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(false);
+    unsafe {
+        command.pre_exec(child_pre_exec(user, &cwd, cgroup_fd, false)?);
+    }
+
+    let mut child = command.spawn()?;
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    Ok((
+        ChildHandle::Command(child),
+        Arc::new(tokio::sync::Mutex::new(InputWriter::Pipe(stdin))),
+        stdout,
+        stderr,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,13 +412,14 @@ mod tests {
     async fn spawn_captures_stdout_stderr_and_exit() {
         let user = current_user();
         let env = HashMap::from([("PATH".to_string(), DEFAULT_PATH.to_string())]);
-        let mut proc = spawn(
+        let mut proc = spawn_with_cgroup(
             "/bin/sh",
             &["-c".into(), "echo out1; echo err1 >&2; exit 3".into()],
             env,
             "/".into(),
             &user,
             false,
+            None,
             None,
         )
         .unwrap();
@@ -431,7 +492,7 @@ mod tests {
 
         let user = current_user();
         let dirfd = std::fs::File::open(&dir).unwrap();
-        let proc = spawn(
+        let proc = spawn_with_cgroup(
             "/bin/sh",
             &["-c".into(), "sleep 5".into()],
             HashMap::new(),
@@ -439,6 +500,7 @@ mod tests {
             &user,
             false,
             Some(dirfd.as_raw_fd()),
+            None,
         )
         .unwrap();
 
@@ -476,6 +538,152 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    /// The reason a per-command cgroup exists: a descendant that calls `setsid`
+    /// leaves the command's process group, so a bare `kill(-pid)` cannot reach
+    /// it and only `cgroup.kill` can. The fork-free spawn must land the whole
+    /// tree in the leaf, exactly like the fork path, or that escape reopens.
+    ///
+    /// Needs root and a writable cgroup v2 fs:
+    ///   sudo cargo test -- --ignored cgroup_kill_reaches_a_setsid_escapee
+    #[tokio::test]
+    #[ignore = "needs root + a writable cgroup v2 mount"]
+    async fn cgroup_kill_reaches_a_setsid_escapee() {
+        use std::path::{Path, PathBuf};
+        use std::time::Duration;
+
+        assert_eq!(
+            unsafe { libc::geteuid() },
+            0,
+            "needs root: sudo cargo test -- --ignored cgroup_kill_reaches_a_setsid_escapee"
+        );
+
+        let root = Path::new("/sys/fs/cgroup");
+        let name = format!("cube-escape-{}", std::process::id());
+        let dir = root.join(&name);
+        std::fs::create_dir(&dir)
+            .unwrap_or_else(|e| panic!("mkdir {dir:?} (cgroup v2 writable?): {e}"));
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+
+        let dirfd = std::fs::File::open(&dir).unwrap();
+        let cgroup = crate::process::cgroup::ProcessCgroup::new(dir.clone(), dirfd);
+        let user = current_user();
+        let proc = spawn_with_cgroup(
+            "/bin/sh",
+            &[
+                "-c".into(),
+                // `setsid` + a plain background child: one stays in the
+                // command's process group, one leaves it.
+                "setsid sleep 30 & sleep 30 & wait".into(),
+            ],
+            HashMap::new(),
+            "/".into(),
+            &user,
+            false,
+            Some(cgroup.fd()),
+            None,
+        )
+        .unwrap();
+
+        // Wait until the whole tree has landed: sh, its group child, and the
+        // escapee, which is in a session of its own.
+        let procs_path = dir.join("cgroup.procs");
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        // `group_of` is `None` for a pid that is already gone; that must not
+        // read as "a different group", or a failed /proc read would fake the
+        // escapee this test depends on.
+        let leaves_the_group = |pids: &[u32]| {
+            pids.iter()
+                .any(|p| group_of(*p).is_some_and(|g| g != proc.pid))
+        };
+        let pids: Vec<u32> = loop {
+            let pids: Vec<u32> = std::fs::read_to_string(&procs_path)
+                .unwrap_or_default()
+                .split_whitespace()
+                .filter_map(|p| p.parse().ok())
+                .collect();
+            if pids.len() >= 3 && leaves_the_group(&pids) {
+                break pids;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "never saw the whole tree in {procs_path:?} (saw {pids:?})"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+
+        // The escapee is a real one: at least one member sits outside the
+        // command's process group, so a bare `kill(-pid)` would miss it.
+        assert!(
+            leaves_the_group(&pids),
+            "no descendant left the process group; the test proves nothing: {pids:?}"
+        );
+
+        let escapee = pids
+            .iter()
+            .copied()
+            .find(|p| group_of(*p).is_some_and(|g| g != proc.pid))
+            .expect("checked above");
+
+        cgroup.kill_all().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        for pid in pids {
+            while running(pid) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "pid {pid} survived cgroup.kill"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        // The escapee is a grandchild, so nothing in this test reaps it: it has
+        // to disappear from /proc, not merely become a zombie (which `kill(pid,
+        // 0)` would still report as present).
+        while std::path::Path::new(&format!("/proc/{escapee}")).exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "escapee {escapee} left a process behind after cgroup.kill"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Whether a pid is still running, as opposed to reaped or a zombie.
+    fn running(pid: u32) -> bool {
+        let Some(state) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit(')')
+                    .next()
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .and_then(|state| state.chars().next())
+            })
+        else {
+            return false;
+        };
+        !matches!(state, 'Z' | 'X' | 'x')
+    }
+
+    /// A pid's process-group id from `/proc`, as the escape check needs it.
+    ///
+    /// `None` when the pid is gone; the caller must not fold that into a
+    /// sentinel, because any sentinel differs from the command's pid and would
+    /// look exactly like the escape this test is trying to observe.
+    fn group_of(pid: u32) -> Option<u32> {
+        // Fields after the parenthesised comm: state ppid pgrp ...
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()?
+            .rsplit(')')
+            .next()
+            .and_then(|rest| rest.split_whitespace().nth(2))
+            .and_then(|pgrp| pgrp.parse().ok())
+    }
+
     #[tokio::test]
     async fn spawn_fails_fast_when_cgroup_placement_fails() {
         // Cgroup placement runs first in pre_exec and any error aborts the
@@ -486,7 +694,7 @@ mod tests {
         let user = current_user();
         let dir = tempfile::tempdir().unwrap();
         let dirfd = std::fs::File::open(dir.path()).unwrap();
-        let err = spawn(
+        let err = spawn_with_cgroup(
             "/bin/sh",
             &["-c".into(), "echo should-not-run".into()],
             HashMap::new(),
@@ -494,12 +702,13 @@ mod tests {
             &user,
             false,
             Some(dirfd.as_raw_fd()),
+            None,
         )
         .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
 
         // An invalid fd fails the same way; the child never execs either way.
-        let err = spawn(
+        let err = spawn_with_cgroup(
             "/bin/sh",
             &["-c".into(), "echo should-not-run".into()],
             HashMap::new(),
@@ -507,6 +716,7 @@ mod tests {
             &user,
             false,
             Some(-1),
+            None,
         )
         .unwrap_err();
         assert_eq!(err.raw_os_error(), Some(libc::EBADF));
@@ -550,5 +760,35 @@ mod tests {
         assert_eq!(env["FROM_INIT"], "1");
         assert_eq!(env["E2B_SANDBOX"], "false");
         assert_eq!(env["USER"], "test");
+    }
+
+    /// The fork mechanism is reached when a host rejects the fork-free
+    /// primitive, so it keeps its own guard: the same pipes and the same exit
+    /// status the caller would see.
+    #[tokio::test]
+    async fn the_fork_fallback_spawns_identically() {
+        use tokio::io::AsyncReadExt;
+
+        let user = current_user();
+        let env = HashMap::from([("PATH".to_string(), DEFAULT_PATH.to_string())]);
+        let (mut child, _input, stdout, stderr) = spawn_forked(
+            "/bin/sh",
+            &["-c".into(), "echo out; echo err >&2; exit 4".into()],
+            env,
+            "/".into(),
+            &user,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(child.id().is_some_and(|pid| pid > 0));
+
+        let mut out = String::new();
+        let mut err = String::new();
+        stdout.unwrap().read_to_string(&mut out).await.unwrap();
+        stderr.unwrap().read_to_string(&mut err).await.unwrap();
+        assert_eq!(out, "out\n");
+        assert_eq!(err, "err\n");
+        assert_eq!(child.wait().await.unwrap().code(), Some(4));
     }
 }

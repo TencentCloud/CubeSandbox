@@ -238,7 +238,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::engine::spawn;
+    use crate::process::engine::spawn_with_cgroup;
     use crate::process::engine::tests::current_user;
     use std::collections::HashMap;
 
@@ -306,7 +306,7 @@ mod tests {
         use base64::Engine;
 
         let user = current_user();
-        let proc = spawn(
+        let proc = spawn_with_cgroup(
             "/bin/sh",
             &[
                 "-c".into(),
@@ -316,6 +316,7 @@ mod tests {
             "/".into(),
             &user,
             false,
+            None,
             None,
         )
         .unwrap();

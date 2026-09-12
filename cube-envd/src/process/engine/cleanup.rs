@@ -30,19 +30,20 @@ pub fn kill_process_group(pid: u32, signo: i32) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::process::engine::tests::current_user;
-    use crate::process::engine::{spawn, PumpEvent};
+    use crate::process::engine::{spawn_with_cgroup, PumpEvent};
     use std::collections::HashMap;
 
     #[tokio::test]
     async fn signal_end_event_shape() {
         let user = current_user();
-        let mut proc = spawn(
+        let mut proc = spawn_with_cgroup(
             "/bin/sh",
             &["-c".into(), "sleep 30".into()],
             HashMap::new(),
             "/".into(),
             &user,
             false,
+            None,
             None,
         )
         .unwrap();
