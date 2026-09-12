@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""Conformance diff: run capture.py scenarios against cube-envd, then compare
+fixture-by-fixture against the Go envd baseline with normalization.
+
+Usage:
+  ENVD_BASE=http://127.0.0.1:49984 OUTDIR=fixtures-rust python3 capture.py all
+  python3 conformance.py fixtures fixtures-rust
+
+Normalized away (legitimately dynamic):
+  - HTTP Date/Content-Length/Connection headers, chunked framing details
+  - pids, timestamps (ts / modifiedTime), watcher ids, machine-specific
+    metrics values (only key presence is compared — int/float rendering
+    differs between runtimes)
+  - hostnames in downloaded /etc/hostname content
+Declared differences (allowlisted, documented in cube-envd/README.md):
+  - gzip: cube-envd always identity
+  - CreateWatcher: unimplemented in cube-envd
+  - Connect: implemented; nested-selector shape still rejected differently
+"""
+import json
+import re
+import sys
+
+GO_DIR = sys.argv[1] if len(sys.argv) > 1 else "fixtures"
+RS_DIR = sys.argv[2] if len(sys.argv) > 2 else "fixtures-rust"
+
+# Fixtures where cube-envd intentionally differs (cube-envd/README.md).
+# Do not re-add entries for fixtures that currently PASS: an allowlisted
+# fixture reports DECLARED-DIFF instead of FAIL, so listing a passing
+# fixture silently downgrades the gate for every future regression.
+# (fs_watch_unary_probe left this list when the watch family
+# landed; proc_sendinput_probe / proc_connect_missing /
+# proc_sendsignal_nested_probe left it when selector decoding switched to
+# connect-go's DiscardUnknown behavior. The remaining entries are the
+# still-standing differences.)
+DECLARED_DIFFERENT = {
+    "rest_files_gzip_accept": "gzip download encoding: upstream supports, cube-envd identity-only",
+    "rest_files_compose_probe": "/files/compose: implemented upstream, 501 in cube-envd",
+    "fs_bad_json": "JSON parse error wording is parser-specific (code and status equal)",
+    "rest_init_timestamp_out_of_range": "timestamp outside i64-nanosecond range (9999): upstream UnixNano() wraps and drops as stale (204); cube-envd rejects as a caller bug (400). Neither applies anything nor moves the gate",
+}
+# Fixtures that depend on prior state in ways the rerun reproduces
+# differently. Currently empty; kept for the next scenario that needs it.
+SKIP = set()
+
+VOLATILE_KEYS = {"ts", "cpu_used_pct", "cpu_count", "mem_total", "mem_used", "mem_cache",
+                 "mem_total_mib", "mem_used_mib", "disk_used", "disk_total",
+                 "watcherId", "pid"}
+TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z")
+HEADERS_KEPT = {"Content-Type", "Content-Encoding", "Cache-Control",
+                "Access-Control-Allow-Origin", "Access-Control-Expose-Headers",
+                "Access-Control-Allow-Methods", "Access-Control-Allow-Headers",
+                "Access-Control-Max-Age", "X-E2B-Legacy-SDK",
+                # Range/conditional downloads: the negotiation header set is
+                # compared too.
+                "Vary", "Accept-Ranges", "Content-Range", "Content-Disposition",
+                # Last-Modified existence is compared; its value is dynamic
+                # (per-container mtimes) and normalized to <time> below.
+                "Last-Modified"}
+
+# Go renders Last-Modified as RFC 1123 (`Sun, 06 Sep 2026 07:00:00 GMT`),
+# which TIME_RE (ISO 8601) does not match; both sides' values are per-
+# container mtimes, so the header value never compares equal and must be
+# normalized (existence is what is asserted at the wire level).
+
+def normalize(obj, path=""):
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if k == "headers" and isinstance(v, dict):
+                kept_lower = {h.lower() for h in HEADERS_KEPT}
+                kept = {}
+                for hk, hv in v.items():
+                    if hk.lower() not in kept_lower or hv == "":
+                        continue
+                    if hk.lower() == "last-modified":
+                        hv = "<time>"
+                    kept[hk.title()] = hv
+                out[k] = kept
+            elif k in VOLATILE_KEYS:
+                # Value- and type-agnostic: Go's json trims trailing zeros
+                # (a whole-number float renders as an int) while Rust keeps
+                # the decimal point — comparing type names made rest_metrics
+                # flaky whenever the host load rounded to a whole number.
+                out[k] = "<volatile>"
+            elif k in ("modifiedTime",):
+                out[k] = "<time>"
+            elif k in ("owner", "group") and path.endswith("entry"):
+                out[k] = v  # keep: ownership semantics matter
+            else:
+                out[k] = normalize(v, f"{path}.{k}")
+        return out
+    if isinstance(obj, list):
+        return [normalize(v, path) for v in obj]
+    if isinstance(obj, str):
+        if obj.startswith("{") or obj.startswith("["):
+            try:
+                return json.dumps(normalize(json.loads(obj), path), sort_keys=True)
+            except (ValueError, json.JSONDecodeError):
+                pass
+        s = TIME_RE.sub("<time>", obj)
+        s = re.sub(r'"pid": \d+', '"pid": <int>', s)
+        s = re.sub(r'"watcherId": "\w+"', '"watcherId": "<id>"', s)
+        # watcher ids also surface inside error messages (GetWatcherEvents on
+        # a removed watcher: "watcher with id <random> not found").
+        s = re.sub(r'watcher with id [0-9a-zA-Z]+ not found',
+                   'watcher with id <id> not found', s)
+        s = re.sub(r'"ts":\d+', '"ts":<int>', s)
+        s = re.sub(r"\d{4}-\d{2}-\d{2}T[\d:.]+Z", "<time>", s)
+        # Raw JSON bodies: parse and re-normalize when possible.
+        if s.startswith("{") or s.startswith("["):
+            try:
+                return json.dumps(normalize(json.loads(s), path), sort_keys=True)
+            except (ValueError, json.JSONDecodeError):
+                pass
+        return s
+    return obj
+
+
+def norm_stream_frames(fx):
+    """For streaming fixtures compare the frame sequence structurally.
+
+    Data events are coalesced per stream (stdout/stderr/pty): interleaving
+    ORDER between different streams is scheduler-dependent and flip-flops
+    between runs of the same implementation; content per stream is exact.
+    """
+    import base64 as b64mod
+    if isinstance(fx, list):
+        return [norm_stream_frames(item) for item in fx]
+    if isinstance(fx, dict) and "frames" not in fx:
+        normalized = {key: norm_stream_frames(value) for key, value in fx.items()}
+        if "flags" in normalized and "payload" in normalized:
+            normalized.pop("size", None)
+        return normalized
+    if not isinstance(fx, dict):
+        return fx
+    out = dict(fx)
+    frames = []
+    streams = {}
+    for index, fr in enumerate(fx["frames"]):
+        if timeout_metadata_extension(fx["frames"], index):
+            continue
+        p = normalize(fr.get("payload"))
+        if isinstance(p, dict):
+            ev = p.get("event", {})
+            if isinstance(ev, dict) and isinstance(ev.get("end"), dict):
+                for extension in ("signal", "oomKilled", "killedBy"):
+                    ev["end"].pop(extension, None)
+            if isinstance(ev, dict) and "start" in ev and isinstance(ev["start"], dict):
+                if "pid" in ev["start"]:
+                    ev["start"]["pid"] = "<int>"
+            if isinstance(ev, dict) and "data" in ev and isinstance(ev["data"], dict):
+                for stream_name, chunk in ev["data"].items():
+                    try:
+                        streams.setdefault(stream_name, b"")
+                        streams[stream_name] += b64mod.b64decode(chunk)
+                    except Exception:
+                        streams[stream_name] = b"<decode-error>"
+                continue  # folded into `streams`
+        frames.append({"flags": fr["flags"], "payload": p})
+    out["frames"] = frames
+    out["data_streams"] = {
+        k: b64mod.b64encode(v).decode() for k, v in sorted(streams.items())
+    }
+    out.pop("headers", None)
+    out.pop("status_line", None)  # compared via http_ok flag
+    out["http_ok"] = fx.get("status_line", "").startswith("HTTP/1.1 200")
+    for k in ("closed_early", "stopped_by_deadline", "socket_timeout"):
+        out.pop(k, None)
+    return out
+
+
+def timeout_metadata_extension(frames, index):
+    if index + 1 >= len(frames):
+        return False
+    frame = frames[index]
+    following = frames[index + 1]
+    expected = {"exitCode": -1, "status": "signal: killed", "error": "signal: killed",
+                "signal": 9, "killedBy": "timeout"}
+    return (
+        frame.get("flags") == 0
+        and frame.get("payload") == {"event": {"end": expected}}
+        and following.get("flags") == 2
+        and following.get("payload", {}).get("error", {}).get("code") == "deadline_exceeded"
+    )
+
+
+def load(dirname, name):
+    with open(f"{dirname}/{name}.json") as f:
+        return json.load(f)
+
+
+def main():
+    import os
+    names = sorted(
+        n[:-5] for n in os.listdir(GO_DIR) if n.endswith(".json")
+    )
+    passed, failed, declared, skipped, missing = [], [], [], [], []
+    for name in names:
+        if name in SKIP:
+            skipped.append(name)
+            continue
+        try:
+            rs = load(RS_DIR, name)
+        except FileNotFoundError:
+            missing.append(name)
+            continue
+        go = load(GO_DIR, name)
+        go_n = normalize(norm_stream_frames(go))
+        rs_n = normalize(norm_stream_frames(rs))
+        if go_n == rs_n:
+            passed.append(name)
+        elif name in DECLARED_DIFFERENT:
+            declared.append(name)
+        else:
+            failed.append(name)
+            print(f"\n=== FAIL {name}")
+            print("  go:  ", json.dumps(go_n, ensure_ascii=False)[:400])
+            print("  rust:", json.dumps(rs_n, ensure_ascii=False)[:400])
+    print(f"\n{'='*60}")
+    print(f"PASS {len(passed)}  FAIL {len(failed)}  DECLARED-DIFF {len(declared)}  "
+          f"SKIP {len(skipped)}  MISSING {len(missing)}")
+    if missing:
+        print("missing:", ", ".join(missing))
+    if failed:
+        print("failed:", ", ".join(failed))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

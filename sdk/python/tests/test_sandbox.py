@@ -22,7 +22,7 @@ import pytest
 
 from cubesandbox import NEVER_TIMEOUT, CommandResult, Template
 from cubesandbox._template import TemplateInfo
-from cubesandbox._commands import Commands, _collect_process_events
+from cubesandbox._commands import Commands, _parse_process_start_stream
 from cubesandbox._config import Config
 from cubesandbox._exceptions import (
     ApiError,
@@ -1398,7 +1398,6 @@ class TestCommands:
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
         with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
             patch.object(sb, "_build_data_client", return_value=client),
         ):
             result = sb.commands.run("echo hello", cwd="/work", env={"A": "B"})
@@ -1445,7 +1444,6 @@ class TestCommands:
 
         client = _recording_client(httpx.MockTransport(handler), seen)
         with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
             patch.object(sb, "_build_data_client", return_value=client),
         ):
             result = sb.commands.run("echo hi", timeout=timeout)
@@ -1470,7 +1468,6 @@ class TestCommands:
 
         client = _recording_client(httpx.MockTransport(handler), seen)
         with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
             patch.object(sb, "_build_data_client", return_value=client),
         ):
             result = sb.commands.run("echo hi", timeout=30)
@@ -1496,7 +1493,6 @@ class TestCommands:
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
         with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
             patch.object(sb, "_build_data_client", return_value=client),
         ):
             result = sb.commands.run("echo warn >&2")
@@ -1520,7 +1516,6 @@ class TestCommands:
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
         with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
             patch.object(sb, "_build_data_client", return_value=client),
         ):
             result = sb.commands.run("false")
@@ -1541,7 +1536,6 @@ class TestCommands:
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
         with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
             patch.object(sb, "_build_data_client", return_value=client),
         ):
             result = sb.commands.run("false")
@@ -1565,36 +1559,37 @@ class TestCommands:
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
         with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
             patch.object(sb, "_build_data_client", return_value=client),
         ):
             result = sb.commands.run("kill")
         assert result.exit_code == 137
 
-    def test_collect_process_events_prefers_status_when_exit_code_unset(self):
-        class End:
-            exit_code = 0
-            status = "exit status 7"
-            exited = True
-            error = ""
-
-            def HasField(self, name):
-                return False
-
-        class Event:
-            end = End()
-
-            def HasField(self, name):
-                return name == "end"
-
-        class Response:
-            event = Event()
-
-            def HasField(self, name):
-                return name == "event"
-
-        result = _collect_process_events([Response()])
+    def test_process_stream_prefers_status_when_exit_code_unset(self):
+        result = _parse_process_start_stream([
+            connect_envelope(0, '{"event":{"end":{"status":"exit status 7","exited":true}}}'),
+            connect_envelope(2, '{}'),
+        ])
         assert result.exit_code == 7
+
+    @pytest.mark.parametrize("e2b_installed", [False, True])
+    def test_termination_metadata_does_not_depend_on_e2b(self, e2b_installed):
+        sandbox = make_sandbox()
+        end = {"exitCode": -1, "exited": False, "signal": 9,
+               "oomKilled": True, "killedBy": "oom"}
+        body = connect_envelope(0, json.dumps({"event": {"end": end}}))
+        body += connect_envelope(2, "{}")
+        client = httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, stream=httpx.ByteStream(body))))
+        dependency = MagicMock() if e2b_installed else None
+        with patch.dict("sys.modules", {"e2b": dependency}), patch.object(
+            sandbox, "_build_data_client", return_value=client
+        ):
+            result = sandbox.commands.run("command")
+        assert result.signal == 9
+        assert result.oom_killed is True
+        assert result.killed_by == "oom"
+        if dependency is not None:
+            assert dependency.mock_calls == []
 
     def test_run_timeout_forwarded(self):
         sb = make_sandbox()
@@ -1613,7 +1608,6 @@ class TestCommands:
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
         with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
             patch.object(sb, "_build_data_client", return_value=client),
         ):
             sb.commands.run("sleep 1", timeout=5.0)
@@ -1627,7 +1621,6 @@ class TestCommands:
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
         with (
-            patch.object(Commands, "_run_with_e2b_connect", side_effect=ImportError),
             patch.object(sb, "_build_data_client", return_value=client),
         ):
             with pytest.raises(RuntimeError, match="HTTP 400: sandbox is not ready"):

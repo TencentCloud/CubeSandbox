@@ -17,6 +17,7 @@ on:
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
       - 'agent/**'
+      - 'cube-envd/**'
       - 'hypervisor/**'
       - 'examples/volume/s3/**'
       - 'docker/Dockerfile.builder'
@@ -38,6 +39,7 @@ on:
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
       - 'agent/**'
+      - 'cube-envd/**'
       - 'hypervisor/**'
       - 'examples/volume/s3/**'
       - 'docker/Dockerfile.builder'
@@ -65,6 +67,7 @@ on:
           - cube-lifecycle-manager
           - cubelet
           - agent
+          - cube-envd
           - hypervisor
           - volume-s3
           - volume-cos-rpc
@@ -125,6 +128,7 @@ jobs:
             add_component "cube-lifecycle-manager"
             add_component "cubelet"
             add_component "agent"
+            add_component "cube-envd"
             add_component "hypervisor"
             add_component "volume-s3"
             add_component "volume-cos-rpc"
@@ -147,6 +151,7 @@ jobs:
               cube-lifecycle-manager) add_component "cube-lifecycle-manager" ;;
               cubelet) add_component "cubelet" ;;
               agent) add_component "agent" ;;
+              cube-envd) add_component "cube-envd" ;;
               hypervisor) add_component "hypervisor" ;;
               volume-s3) add_component "volume-s3" ;;
               volume-cos-rpc) add_component "volume-cos-rpc" ;;
@@ -255,6 +260,9 @@ jobs:
                 agent/*)
                   add_component "agent"
                   ;;
+                cube-envd/*)
+                  add_component "cube-envd"
+                  ;;
                 hypervisor/*)
                   add_component "hypervisor"
                   ;;
@@ -297,6 +305,7 @@ jobs:
                     elif . == "cubelet" then "Cubelet"
                     elif . == "cubevs" then "CubeVS"
                     elif . == "agent" then "Agent"
+                    elif . == "cube-envd" then "cube-envd"
                     elif . == "hypervisor" then "Hypervisor"
                     elif . == "volume-s3" then "S3 Volume Plugin"
                     elif . == "volume-cos-rpc" then "COS RPC Volume Plugin"
@@ -318,6 +327,7 @@ jobs:
                     elif . == "cubelet" then "cubelet-test"
                     elif . == "cubevs" then "cubevs-test"
                     elif . == "agent" then "agent-test"
+                    elif . == "cube-envd" then "cube-envd-test"
                     elif . == "hypervisor" then "hypervisor-test"
                     elif . == "volume-s3" then "cube-volume-s3-test"
                     elif . == "volume-cos-rpc" then "cube-volume-cos-rpc-test"

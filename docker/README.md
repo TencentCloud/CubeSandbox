@@ -17,11 +17,18 @@ with `envd` preinstalled on `:49983`, so any image built `FROM` it is
 already ready for Cube's readiness probe. Published as a multi-arch
 (`linux/amd64` + `linux/arm64`) manifest list
 `ghcr.io/tencentcloud/cubesandbox-base` by
-[`.github/workflows/build-envd-base-image.yml`](../.github/workflows/build-envd-base-image.yml),
-which compiles `envd` in-place from
+[`.github/workflows/build-envd-base-image.yml`](../.github/workflows/build-envd-base-image.yml).
+
+The default data plane is [`cube-envd`](../cube-envd/) (this repo),
+installed as `/usr/bin/envd`. The upstream Go envd from
 [`e2b-dev/infra`](https://github.com/e2b-dev/infra) at tag `2026.16`
-(override via `workflow_dispatch` input `envd_ref`) on native amd64 and
-arm64 runners, then combines the per-arch images into one tag.
+(override via `workflow_dispatch` input `envd_ref`) is still compiled and
+shipped as `/usr/bin/envd-go`, so a deployment can roll back at runtime by
+setting `ENVD_BIN=/usr/bin/envd-go` — no rebuild needed. Building with
+`--build-arg ENVD_IMPL=go` flips the image default back to Go envd.
+The build context is the repo root (not `docker/`), since the cube-envd
+sources live in the repo; both implementations are built on native amd64 and
+arm64 runners, then the per-arch images are combined into one tag.
 
 Minimal consumer example:
 
