@@ -94,5 +94,8 @@ LABEL org.opencontainers.image.source="https://github.com/TencentCloud/CubeSandb
 
 EXPOSE 49983
 
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+    CMD test "$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:${ENVD_PORT}/health)" = 204
+
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/cube-entrypoint.sh"]
 CMD []

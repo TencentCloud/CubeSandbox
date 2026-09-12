@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Tencent. All rights reserved.
 
+.DEFAULT_GOAL := all
+
 BUILDER_IMAGE ?= cube-sandbox-builder:ubuntu2004
 BUILDER_DOCKERFILE ?= docker/Dockerfile.builder
 BUILDER_HOME ?= $(HOME)/.cache/cube-sandbox-builder
@@ -29,6 +31,28 @@ CUBELET_COW_THIRD_PARTY_DIR ?= $(ROOT_DIR)/Cubelet/third_party/cubecow
 COW_STATICLIB ?= $(CUBELET_COW_THIRD_PARTY_DIR)/lib/libcubecow.a
 COW_HEADER ?= $(CUBELET_COW_THIRD_PARTY_DIR)/include/cubecow.h
 TARGET_ARCH ?= $(shell uname -m | sed 's/^arm64$$/aarch64/')
+
+# Optional sandbox daemon builds. Existing default targets are unchanged.
+ENVD_ARCH = $(subst aarch64,arm64,$(subst x86_64,amd64,$(TARGET_ARCH)))
+ENVD_BUILD_ARGS ?=
+CUBE_BASE_IMAGE ?= cubesandbox-base:local
+CUBE_BASE_RUST_IMAGE ?= cubesandbox-base:rust-local
+
+.PHONY: cube-base cube-base-rust cube-envd
+cube-base:
+	docker buildx build --platform linux/$(ENVD_ARCH) --load $(ENVD_BUILD_ARGS) \
+		-f docker/Dockerfile.cube-base -t $(CUBE_BASE_IMAGE) docker/
+
+cube-base-rust:
+	docker buildx build --platform linux/$(ENVD_ARCH) --load $(ENVD_BUILD_ARGS) \
+		--build-arg CUBE_ENVD_COMMIT=$(CUBE_COMMIT) \
+		-f docker/Dockerfile.cube-base-rust -t $(CUBE_BASE_RUST_IMAGE) .
+
+cube-envd:
+	docker buildx build --platform linux/$(ENVD_ARCH) $(ENVD_BUILD_ARGS) \
+		--build-arg CUBE_ENVD_COMMIT=$(CUBE_COMMIT) \
+		-f docker/Dockerfile.cube-base-rust --target binary \
+		--output type=local,dest=$(OUTPUT_DIR)/cube-envd/$(ENVD_ARCH) .
 
 # ---- Guest kernel image build ----
 # `make kernel KERNEL_SRC=/path/to/linux` builds a vmlinux from the in-tree
@@ -176,6 +200,9 @@ help:
 	@printf "  agent-test    Run cube-agent unit tests in Docker\n"
 	@printf "  hypervisor-test Run hypervisor --lib --bins unit tests in Docker\n"
 	@printf "  guest-kernel  Build guest kernel vmlinux/Image (KERNEL_SRC=...; native or cross x86_64<->aarch64)\n"
+	@printf "  cube-base     Build the upstream Go sandbox image (default provider)\n"
+	@printf "  cube-base-rust Build the optional repository Rust sandbox image\n"
+	@printf "  cube-envd     Export Rust envd to OUTPUT_DIR/cube-envd/{amd64,arm64}/envd\n"
 	@printf "  all           Build all default binaries in Docker\n"
 	@printf "  manual-release Build binaries and package manual update tarball\n"
 	@printf "  clean         Remove local Go/Rust build artifacts (not global caches)\n"

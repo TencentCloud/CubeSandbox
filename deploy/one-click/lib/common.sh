@@ -3181,3 +3181,31 @@ EOF
     die "ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR or ONE_CLICK_CONTROL_PLANE_IP is required for CubeOps registration"
   fi
 }
+
+# The optional CLI-embedded daemon runs in the target guest, not on the build
+# host. Bundles are native-architecture builds; reject foreign ELF inputs before
+# copying them into the existing embedding path. Do not execute supplied files.
+validate_envd_binary() {
+  require_cmd python3
+  python3 - "$1" "$2" <<'PY_ENVD'
+import pathlib
+import struct
+import sys
+
+path = pathlib.Path(sys.argv[1])
+expected = {"amd64": 62, "x86_64": 62, "arm64": 183, "aarch64": 183}.get(sys.argv[2])
+try:
+    if expected is None:
+        raise ValueError("unsupported target architecture: " + sys.argv[2])
+    if not path.is_file() or not 0 < path.stat().st_size <= 16 * 1024 * 1024:
+        raise ValueError("expected a nonempty regular file no larger than 16 MiB")
+    with path.open("rb") as source:
+        header = source.read(64)
+    if len(header) < 64 or header[:6] != b"\x7fELF\x02\x01":
+        raise ValueError("expected a 64-bit little-endian ELF executable")
+    if struct.unpack_from("<H", header, 18)[0] != expected:
+        raise ValueError("ELF architecture does not match " + sys.argv[2])
+except (OSError, ValueError) as error:
+    sys.exit(f"ENVD_LOCAL_PATH {path}: {error}")
+PY_ENVD
+}
