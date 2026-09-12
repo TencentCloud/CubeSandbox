@@ -1,5 +1,7 @@
 # Custom Template Images
 
+For the explicitly selected repository Rust alternative, see [local builds and runtime prerequisites](https://github.com/TencentCloud/CubeSandbox/blob/master/docker/README.md#optional-repository-built-rust-daemon). The Go image examples below remain the default.
+
 This tutorial shows how to add `envd` to **your own application or container image** for use with the CubeSandbox SDK and E2B SDK.
 
 For the general workflow to create templates from OCI images and configure application ports and readiness probes, see [Create Templates from OCI Image](./template-from-image.md).
@@ -168,6 +170,8 @@ make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
 For the `cubebox` instance type, CubeMaster also preserves the injection annotation and automatically wraps the main container command when creating a sandbox: it starts `/usr/local/bin/envd` in the background, executes the image's original command, and adds port `49983` to the exposed ports. The original image entrypoint therefore does not need to be changed when using this method. The command wrapper is not applied to non-`cubebox` instance types.
 
 ## 4. The entrypoint contract
+
+Source-built images from this checkout use a self-contained Bash entrypoint: keep `/bin/bash` and standard coreutils in custom images. They supervise both children, make daemon exit visible even with a user CMD, and bound shutdown to five seconds. Published tags may retain the older behavior described below; the single-file COPY examples remain valid.
 
 `cube-entrypoint.sh` implements a simple "envd-in-the-background, your
 app in the foreground" pattern:
