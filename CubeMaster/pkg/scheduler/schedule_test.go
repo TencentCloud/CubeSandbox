@@ -212,6 +212,8 @@ func TestRunScoreFilterSkipsNonFiniteWeightBlend(t *testing.T) {
 		scheduler.postScore = origPostScore
 	}()
 	scheduler.postScore = nil
+	resetScoreNonFiniteWeightWarnStateForTest()
+	t.Cleanup(resetScoreNonFiniteWeightWarnStateForTest)
 
 	nodeA := &node.Node{InsID: "node-a", MvmNum: 1}
 	selCtx := selctx.New("random")
@@ -237,6 +239,9 @@ func TestRunScoreFilterSkipsNonFiniteWeightBlend(t *testing.T) {
 	// the NaN weight must not enter the blend.
 	if nan.selects != 1 {
 		t.Fatalf("NaN-weight Select calls = %d, want 1", nan.selects)
+	}
+	if scoreNonFiniteWeightWarnCount.Load() != 1 {
+		t.Fatalf("non-finite weight warns = %d, want 1", scoreNonFiniteWeightWarnCount.Load())
 	}
 	got := selCtx.LeastScoreNodes(-1)
 	if got.Len() != 1 || got[0].Score != 50 {
