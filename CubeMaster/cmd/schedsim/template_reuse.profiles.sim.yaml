@@ -1,0 +1,102 @@
+# TemplateReuse scenario profile for schedsim.
+#
+# Goal:
+#   Prefer nodes that already hold the requested template, while allowing
+#   remote restore when shared storage is available.
+#
+# Strategy:
+#   1. Mandatory guards reject unsafe or resource-insufficient nodes.
+#   2. image_score rewards nodes with a local template replica.
+#   3. real_time_weighted_average prevents overloaded local nodes from
+#      receiving all requests.
+#   4. Top-3 spread avoids repeatedly selecting one cache node.
+#
+# Weights 0.7/0.2/0.3 (image/pressure/realtime) were validated by a multi-seed
+# schedsim A/B against the 0.1/0/0.9 alternative; see the template_reuse weight
+# comparison section in docs/dev/scheduler-sim-report.md.
+
+common:
+  http_port: 18089
+  collect_metric_interval: 1s
+  report_local_create_num: false
+  report_stdev_metric: false
+
+log:
+  module: "schedsim"
+  path: "/tmp/schedsim-log"
+  level: "error"
+  file_size: 100
+  file_num: 2
+
+cubelet_conf:
+  create_concurrent_limit: 100
+  destroy_concurent_limit: 50
+
+scheduler:
+  pre_select_num: -1
+
+  # Ignored when profiles are enabled, retained for compatibility.
+  priority_select_num: 1
+  least_select_name: "random"
+
+  metric_update_timeout: 86400s
+  local_metric_update_timeout: 86400s
+
+  ignore_redis_allocation: false
+  overcommit_ratio:
+    cpu_ratio: 3.0
+    mem_ratio: 2.0
+  node_max_mem_reserved_in_mb: 256
+
+  # image_score reads template_id; the realtime scorer reads current
+  # CPU and memory allocation.
+  score:
+    resource_weights:
+      template_id: 1.0
+      quota_cpu_usage: 1.0
+      quota_mem_usage: 1.0
+
+    plugin_conf:
+      # template_id 因子是布尔打分：节点持有该模板本地副本=100，否则=0，
+      # 与模板尺寸无关（--template-size-bytes 只影响 image_id 因子记账）
+      image_score:
+        weight: 1.0
+        enable_weight_factors:
+          - "template_id"
+
+      real_time_weighted_average:
+        weight: 1.0
+        enable_weight_factors:
+          - "quota_cpu_usage"
+          - "quota_mem_usage"
+
+  instance_type_conf:
+    sim:
+      oss_cluster_labels:
+        schedsim-sim: {}
+
+  profiles:
+    - name: template_reuse
+      default: true
+
+      scores:
+        - name: image_score
+          type: go
+          weight: 0.7
+        # 与出厂 template_reuse 对齐：同模板在途创建压力越小分越高
+        - name: template_local_pressure
+          type: go
+          weight: 0.2
+
+        - name: real_time_weighted_average
+          type: go
+          weight: 0.3
+
+      selection:
+        method: spread
+        top_n: 3
+
+      failure:
+        filter: fail-closed
+        score: fail-closed
+        no_candidate: fail

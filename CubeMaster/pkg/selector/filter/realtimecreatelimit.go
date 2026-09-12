@@ -12,6 +12,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
+// realtimecreatelimit 实时创建并发数过滤插件：
+// 剔除当前创建并发数已达上限的节点，避免单节点创建压力过大
 type realtimecreatelimit struct {
 }
 
@@ -27,6 +29,9 @@ func (l *realtimecreatelimit) String() string {
 	return l.ID()
 }
 
+// Select 过滤规则：
+// 1. 节点全局实时创建并发数（RealTimeCreateConcurrentLimit）必须小于创建并发上限；
+// 2. 节点本地创建并发数按 master 节点数折算后的全局估算值也必须小于上限
 func (l *realtimecreatelimit) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	inList := selCtx.Nodes()
 	nodes := make(node.NodeList, 0, inList.Len())
@@ -53,6 +58,12 @@ func (l *realtimecreatelimit) Select(selCtx *selctx.SelectorCtx) (node.NodeList,
 		log.G(selCtx.Ctx).Debugf("%v select:%v", l.ID(), nodes.String())
 	} else {
 		log.G(selCtx.Ctx).Infof("%v select_size:%v", l.ID(), nodes.Len())
+	}
+	// 全部候选都被创建并发上限剔除时打上拒绝原因戳：随后的 no_node 失败
+	// 在指标里归类为 concurrency_limit 而非笼统的 no_node。部分剔除属于
+	// 正常过滤，不打戳。
+	if inList.Len() > 0 && nodes.Len() == 0 {
+		selCtx.SetRejectReason(selctx.RejectReasonConcurrencyLimit)
 	}
 	return nodes, nil
 }

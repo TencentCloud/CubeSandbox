@@ -74,6 +74,13 @@ type createSandboxContext struct {
 
 	reschedule bool
 
+	// reservation holds the post-selection resource reservation (CPU / memory
+	// / MVM / create-concurrency slots) for the current attempt; it is
+	// released as soon as the Cubelet create call returns. reserveConflicts
+	// bounds how many times a reservation conflict may trigger a reselect.
+	reservation      *localcache.NodeReservation
+	reserveConflicts int
+
 	// Per-step costs of the post-create write phase, measured
 	// independently so dealMetric can emit cubemaster-post-redis /
 	// cubemaster-post-spec traces. They stay zero on retry / failure
@@ -121,6 +128,14 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 		reschedule: true,
 		retryCost:  time.Duration(0),
 	}
+	// Record the create attempt on every return path (mock / param failure
+	// included); endTime stays zero on early returns and the helper falls
+	// back to now. The profile label reflects the pipeline that actually
+	// served the request once scheduling ran.
+	defer func() {
+		scheduler.ObserveSandboxCreate(scheduler.ProfileNameOf(createCtx.selctx),
+			rsp.Ret.RetCode == int(errorcode.ErrorCode_Success), startTime, createCtx.endTime)
+	}()
 	if log.IsDebug() {
 		log.G(ctx).Debugf("CreateSandbox:%s", safePrintCreateCubeSandboxReq(req))
 	} else {
@@ -227,14 +242,46 @@ func (c *createSandboxContext) handleCubelet() {
 			}
 			c.selctx.AddLastBadNode(c.selectHost)
 			c.reschedule = true
+			status, _ := ret.FromError(err)
+			scheduler.RecordReschedule(scheduler.ProfileNameOf(c.selctx), status.Code())
 			log.G(c.ctx).Warnf("selected host blocked by scheduling admission, reschedule host=%s err=%v",
 				c.selectHost.ID(), err)
 			continue
 		}
 
-		if c.callCubelet() {
+		// Reserve CPU / memory / MVM / create-concurrency slots on the
+		// selected node so concurrent creates stop piling onto the same
+		// node before Cubelet metrics catch up. A conflict marks the node
+		// bad and reselects, a bounded number of times.
+		if err := c.reserveSelectedHost(); err != nil {
+			if c.directHost {
+				status, _ := ret.FromError(err)
+				c.setMasterRsp(int(status.Code()), status.Message())
+				return
+			}
+			c.reserveConflicts++
+			c.selctx.AddLastBadNode(c.selectHost)
+			c.reschedule = true
+			scheduler.RecordReschedule(scheduler.ProfileNameOf(c.selctx), errorcode.ErrorCode_SelectNodesNoRes)
+			if c.reserveConflicts > maxReservationConflicts {
+				log.G(c.ctx).Errorf("reservation conflicts exhausted, give up host=%s conflicts=%d err=%v",
+					c.selectHost.ID(), c.reserveConflicts, err)
+				c.setMasterRsp(int(errorcode.ErrorCode_SelectNodesNoRes),
+					fmt.Sprintf("node reservation conflicts exhausted: %v", err))
+				return
+			}
+			log.G(c.ctx).Warnf("selected host failed reservation, reschedule host=%s conflicts=%d err=%v",
+				c.selectHost.ID(), c.reserveConflicts, err)
+			continue
+		}
+
+		retry := c.callCubelet()
+		c.releaseReservation()
+		if retry {
 			c.retryCost += c.cubeletEndTime.Sub(c.cubeletStartTime)
 			c.retryTimes++
+			scheduler.RecordReschedule(scheduler.ProfileNameOf(c.selctx),
+				errorcode.MasterCode(c.cubeletRsp.GetRet().GetRetCode()))
 
 			if c.cubeletRsp != nil && c.cubeletRsp.GetRet() != nil &&
 				errorcode.IsCircutBreakCode(errorcode.MasterCode(c.cubeletRsp.GetRet().GetRetCode())) {
@@ -255,6 +302,41 @@ func (c *createSandboxContext) refreshAndAdmitHost() error {
 	}
 	c.selectHost = current
 	return nil
+}
+
+// maxReservationConflicts bounds how many times a reservation conflict may
+// drive a reselect within one create; the create deadline is the outer bound.
+const maxReservationConflicts = 4
+
+// reserveSelectedHost charges the selected node with this request's CPU,
+// memory, one MVM slot, and one create-concurrency slot until the Cubelet
+// create call returns. Direct-host debug requests skip reservation: the node
+// was pinned explicitly and admission already re-validated it.
+func (c *createSandboxContext) reserveSelectedHost() error {
+	if c.directHost {
+		return nil
+	}
+	var cpuMilli, memMB int64
+	if req := c.selctx.GetReqRes(); req != nil {
+		cpuMilli = req.Cpu.MilliValue()
+		memMB = req.Mem.Value() / 1024 / 1024
+	}
+	reservation, err := localcache.TryReserveNode(c.ctx, c.selectHost.ID(), cpuMilli, memMB)
+	if err != nil {
+		return err
+	}
+	c.reservation = reservation
+	return nil
+}
+
+// releaseReservation frees the current attempt's reservation, if any. Safe
+// to call multiple times and on all exits of the handle loop.
+func (c *createSandboxContext) releaseReservation() {
+	if c.reservation == nil {
+		return
+	}
+	c.reservation.Release(c.ctx)
+	c.reservation = nil
 }
 
 // admitSelectedHost re-reads the selected host from cache and rejects cordoned
@@ -278,11 +360,13 @@ func admitSelectedHost(selected *node.Node, getNode func(string) (*node.Node, bo
 func (c *createSandboxContext) callCubelet() bool {
 
 	localcache.IncrNodeConcurrent(c.selectHost)
+	untrackTemplateCreate := trackTemplateCreate(c.selectHost, c.selctx)
 	defer func() {
 		if r := recover(); r != nil {
 			log.G(c.ctx).Fatalf("Handle panic:%+v", string(debug.Stack()))
 			c.setMasterRsp(int(errorcode.ErrorCode_ReqCubeAPIFailed), "panic fatal error")
 		}
+		untrackTemplateCreate()
 		localcache.DecrNodeConcurrent(c.selectHost)
 		c.cubeletEndTime = time.Now()
 	}()
@@ -624,6 +708,7 @@ func (c *createSandboxContext) setProxyToRedis() error {
 func (c *createSandboxContext) newContext(ctx context.Context, req *types.CreateCubeSandboxReq) error {
 	c.selctx = selctx.New(config.GetConfig().Scheduler.LeastSelectName)
 	c.selctx.InstanceType = req.InstanceType
+	c.selctx.RequestLabels = config.GetConfig().Scheduler.ControlledProfileLabels(req.Labels)
 
 	c.constructAffanity(ctx, req)
 	c.done = make(chan struct{})

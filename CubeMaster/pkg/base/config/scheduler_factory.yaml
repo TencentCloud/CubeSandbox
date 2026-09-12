@@ -1,0 +1,126 @@
+# Built-in ("factory") scheduler profiles embedded into the CubeMaster binary.
+#
+# This file is compiled into the binary via go:embed (see schedulerFactoryYAML
+# in config.go) and injected by preHandleScheduler ONLY when the user has
+# configured nothing scheduler-policy related: no scheduler.profiles and no
+# legacy scheduler.filter / scheduler.score block. Any explicit scheduler
+# policy configuration replaces this file entirely (all-or-nothing).
+#
+# IMPORTANT: with this file injected, scheduling follows the three factory
+# profiles below (mandatory guards + factory scorers + spread selection); that
+# is NOT identical to the pre-profile legacy static registration. To keep the
+# legacy behavior on an existing deployment, configure at least one legacy key
+# (scheduler.filter.enable_filters and/or scheduler.score.enable_scorers):
+# injection is then skipped entirely and profile.Compile rebuilds the pipeline
+# from the legacy config (compileLegacy), preserving the old tolerance
+# semantics (unknown plugin names and zero-weight scorers are skipped).
+#
+# Three built-in strategies:
+#   - burst_balance   route: labels {workload: burst_balance}
+#                     突发均衡：高并发同规格请求按资源水位与创建并发在候选节点间打散
+#   - template_reuse  route: labels {workload: template_reuse}
+#                     模板复用：优先落在已持有该模板本地副本的节点，并按同模板创建压力分散
+#   - mixed_binpack   default
+#                     混合装箱（默认）：紧凑放置、保留整空节点，Top-2 打散防 herds
+#
+# The legacy `score` subtree below is NOT a pipeline definition: with profiles
+# present, compileLegacy never runs. It only feeds the factor weights that the
+# built-in scorers read from the global config at runtime
+# (pkg/selector/score/realtimescore.go, imagescore.go), and its plugin_conf
+# entries must exist because the scorer constructors panic without them.
+
+scheduler:
+  # Request labels allowed to affect profile routing.
+  profile_route_label_keys:
+    - workload
+
+  score:
+    # Factor weights referenced by enable_weight_factors below.
+    resource_weights:
+      quota_cpu_usage: 1.0
+      quota_mem_usage: 1.0
+      template_id: 1.0
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1.0
+        enable_weight_factors:
+          - "quota_cpu_usage"
+          - "quota_mem_usage"
+      image_score:
+        weight: 1.0
+        enable_weight_factors:
+          - "template_id"
+
+  profiles:
+    - name: burst_balance
+      route:
+        labels:
+          workload: burst_balance
+      scores:
+        - name: real_time_weighted_average
+          type: go
+          weight: 1.0
+        # 创建并发软偏好：在途创建越少的节点分越高，把突发创建压力打散。
+        # 该维度与配额水位正交：高并发下同规格请求资源水位相近，
+        # 仅靠 real_time_weighted_average 无法在选点前感知创建排队
+        - name: create_concurrency_score
+          type: go
+          weight: 1.0
+      # Spread burst requests among the three highest-ranked candidates.
+      selection:
+        method: spread
+        top_n: 3
+      failure:
+        filter: fail-closed
+        score: default-score
+        no_candidate: backoff
+
+    - name: template_reuse
+      route:
+        labels:
+          workload: template_reuse
+      scores:
+        # Main objective: prefer nodes holding a local template replica.
+        # 权重 0.7/0.2/0.3 经 schedsim 多 seed 对照实验裁决：压到 0.1/0/0.9
+        # 会在高负载下牺牲模板本地命中（见 docs/dev/scheduler-sim-report.md）
+        - name: image_score
+          type: go
+          weight: 0.7
+        # 同模板创建压力分散：同模板在该节点上的在途创建越少分越高，
+        # 避免同模板突发创建在单个副本节点上排队（羊群）
+        - name: template_local_pressure
+          type: go
+          weight: 0.2
+        # Secondary objective: keep overloaded cache nodes from taking all.
+        - name: real_time_weighted_average
+          type: go
+          weight: 0.3
+      selection:
+        method: spread
+        top_n: 3
+      failure:
+        filter: fail-closed
+        score: default-score
+        no_candidate: backoff
+
+    - name: mixed_binpack
+      default: true
+      scores:
+        # Main objective: tighter placement, penalizing CPU/mem imbalance.
+        - name: resource_fit_score
+          type: go
+          weight: 0.7
+          args:
+            imbalance_penalty: 0.5
+        # Secondary objective: avoid nodes with substantially higher load.
+        - name: real_time_weighted_average
+          type: go
+          weight: 0.3
+      # Select among the two highest-ranked candidates to reduce herding.
+      selection:
+        method: spread
+        top_n: 2
+      failure:
+        filter: fail-closed
+        score: default-score
+        no_candidate: backoff

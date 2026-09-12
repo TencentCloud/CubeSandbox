@@ -269,6 +269,7 @@ export default withMermaid(defineConfig({
                 { text: 'Node Operations', link: '/guide/node-operations' },
                 { text: 'Service Management & Logs', link: '/guide/service-management' },
                 { text: 'CubeMaster Scheduler Configuration', link: '/guide/cubemaster-scheduler-config' },
+                { text: 'Scheduler Plugins', link: '/guide/scheduler-plugin' },
                 { text: 'Soft-delete Purge', link: '/guide/soft-delete-purge' },
                 { text: 'Component multi-version', link: '/guide/component-multiversion' }
               ]
@@ -345,7 +346,11 @@ export default withMermaid(defineConfig({
               text: 'Developer Docs',
               items: [
                 { text: 'Overview', link: '/dev/' },
-                { text: 'Redis Key Convention', link: '/dev/redis-key-spec' }
+                { text: 'Redis Key Convention', link: '/dev/redis-key-spec' },
+                { text: 'Scheduler Eval Benchmark', link: '/dev/scheduler-eval-benchmark' },
+                { text: 'Scheduler Sim Report', link: '/dev/scheduler-sim-report' },
+                { text: 'Scheduler Strategy Mapping', link: '/dev/scheduler-strategy-mapping' },
+                { text: 'Factory Profiles Load Test', link: '/dev/scheduler-factory-loadtest' }
               ]
             }
           ]
@@ -480,6 +485,7 @@ export default withMermaid(defineConfig({
                 { text: '节点相关操作', link: '/zh/guide/node-operations' },
                 { text: '服务管理与日志', link: '/zh/guide/service-management' },
                 { text: 'CubeMaster 调度器配置', link: '/zh/guide/cubemaster-scheduler-config' },
+                { text: '调度插件扩展', link: '/zh/guide/scheduler-plugin' },
                 { text: '软删除数据清理', link: '/zh/guide/soft-delete-purge' },
                 { text: '组件多版本', link: '/zh/guide/component-multiversion' }
               ]
@@ -556,7 +562,11 @@ export default withMermaid(defineConfig({
               text: '开发者文档',
               items: [
                 { text: '概览', link: '/zh/dev/' },
-                { text: 'Redis Key 命名规范', link: '/zh/dev/redis-key-spec' }
+                { text: 'Redis Key 命名规范', link: '/zh/dev/redis-key-spec' },
+                { text: '调度策略基准报告', link: '/zh/dev/scheduler-eval-benchmark' },
+                { text: '调度仿真评测报告', link: '/zh/dev/scheduler-sim-report' },
+                { text: '调度策略与指标映射', link: '/zh/dev/scheduler-strategy-mapping' },
+                { text: '出厂策略负载压测报告', link: '/zh/dev/scheduler-factory-loadtest' }
               ]
             }
           ]

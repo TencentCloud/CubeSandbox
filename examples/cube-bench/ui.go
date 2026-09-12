@@ -225,6 +225,20 @@ func (m model) renderStats(elapsed time.Duration) string {
 	kv("QPS", T.Accent.Render(fmt.Sprintf("%.1f", qps))+" req/s")
 	kv("Avg Create", LatencyStyle(createAvg).Render(fmt.Sprintf("%.0f ms", createAvg)))
 	kv("Avg Delete", LatencyStyle(deleteAvg).Render(fmt.Sprintf("%.0f ms", deleteAvg)))
+	if m.cfg.Scheduled && len(m.cfg.sequence) > 0 {
+		// Approximate in-flight: released per schedule minus completed.
+		started := 0
+		for _, sr := range m.cfg.sequence {
+			if sr.ArrivalOffset <= elapsed {
+				started++
+			}
+		}
+		inFlight := started - m.completed
+		if inFlight < 0 {
+			inFlight = 0
+		}
+		kv("In-Flight", T.Accent.Render(fmt.Sprintf("~%d", inFlight)))
+	}
 	kv("Elapsed", fmt.Sprintf("%.1fs", elapsed.Seconds()))
 
 	return b.String()

@@ -110,7 +110,16 @@ type Node struct {
 	RealTimeCreateNum int64 `json:"RealTimeCreateNum,omitempty"`
 
 	LocalCreateNum int64 `json:"LocalCreateNum,omitempty"`
-	NicQueues      int64 `json:"nic_queues,omitempty"`
+
+	// ReservedNum counts this CubeMaster's in-flight scheduling reservations
+	// on the node (a node was selected but the create has not finished or
+	// failed yet). It is master-local, never persisted to Redis, and only
+	// best-effort: localcache's reservation registry is the authoritative
+	// accounting. Exposed so snapshots (CEL / gRPC plugins) can see pending
+	// placement pressure as SnapshotNode.reserved.
+	ReservedNum int64 `json:"ReservedNum,omitempty"`
+
+	NicQueues int64 `json:"nic_queues,omitempty"`
 
 	NodeLabels     map[string]string `json:"NodeLabels,omitempty"`
 	LocalTemplates []string          `json:"LocalTemplates,omitempty"`
@@ -206,16 +215,31 @@ func (n *Node) Clone() *Node {
 		return nil
 	}
 	// Clone provides a best-effort read-side snapshot. Mutable counters such
-	// as LocalCreateNum and schedulingDisabled are refreshed via atomic loads
-	// after the structural copy so cloned read models stay aligned with the
-	// write path under concurrent updates.
+	// as LocalCreateNum / ReservedNum and schedulingDisabled are read
+	// atomically. Fields are copied explicitly so the atomic noCopy marker is
+	// never copied by value.
 	localCreateNum := atomic.LoadInt64(&n.LocalCreateNum)
+	reservedNum := atomic.LoadInt64(&n.ReservedNum)
 	schedulingDisabled := n.SchedulingDisabled()
-	cloned := *n
-	cloned.LocalCreateNum = localCreateNum
-	cloned.schedulingDisabled = atomic.Bool{}
+	cloned := &Node{
+		Index: n.Index, InsID: n.InsID, UUID: n.UUID, IP: n.IP,
+		CpuTotal: n.CpuTotal, MemMBTotal: n.MemMBTotal, Zone: n.Zone, Region: n.Region,
+		SystemDiskSize: n.SystemDiskSize, DataDiskSize: n.DataDiskSize,
+		CPUType: n.CPUType, ClusterLabel: n.ClusterLabel, InstanceType: n.InstanceType,
+		OssClusterLabel: n.OssClusterLabel, DeviceClass: n.DeviceClass, DeviceID: n.DeviceID,
+		MachineHostIP: n.MachineHostIP, InstanceFamily: n.InstanceFamily,
+		DedicatedClusterId: n.DedicatedClusterId, HostStatus: n.HostStatus,
+		CreateConcurrentNum: n.CreateConcurrentNum, MaxMvmLimit: n.MaxMvmLimit,
+		QuotaCpu: n.QuotaCpu, QuotaMem: n.QuotaMem, MetaDataUpdateAt: n.MetaDataUpdateAt,
+		ReportedReady: n.ReportedReady, Healthy: n.Healthy, UnhealthyReason: n.UnhealthyReason,
+		Score: n.Score, QuotaCpuUsage: n.QuotaCpuUsage, QuotaMemUsage: n.QuotaMemUsage,
+		CpuUtil: n.CpuUtil, CpuLoadUsage: n.CpuLoadUsage, MemUsage: n.MemUsage,
+		DataDiskUsagePer: n.DataDiskUsagePer, StorageDiskUsagePer: n.StorageDiskUsagePer,
+		SysDiskUsagePer: n.SysDiskUsagePer, MvmNum: n.MvmNum, MetricUpdate: n.MetricUpdate,
+		MetricLocalUpdateAt: n.MetricLocalUpdateAt, RealTimeCreateNum: n.RealTimeCreateNum,
+		LocalCreateNum: localCreateNum, ReservedNum: reservedNum, NicQueues: n.NicQueues,
+	}
 	cloned.SetSchedulingDisabled(schedulingDisabled)
-	cloned.labelsCache = nil
 	if n.VirtualNodeQuotaArray != nil {
 		cloned.VirtualNodeQuotaArray = append([]int64(nil), n.VirtualNodeQuotaArray...)
 	}
@@ -225,6 +249,9 @@ func (n *Node) Clone() *Node {
 			cloned.NodeLabels[k] = v
 		}
 	}
+	if n.LocalTemplates != nil {
+		cloned.LocalTemplates = append([]string(nil), n.LocalTemplates...)
+	}
 	if n.HostFacts != nil {
 		hf := *n.HostFacts
 		cloned.HostFacts = &hf
@@ -232,7 +259,7 @@ func (n *Node) Clone() *Node {
 	if n.Versions != nil {
 		cloned.Versions = append([]ComponentVersion(nil), n.Versions...)
 	}
-	return &cloned
+	return cloned
 }
 
 func (n *Node) labelsCacheStore() *nodeLabelsCacheStore {
@@ -258,6 +285,10 @@ func (n *Node) HostIP() string { return n.IP }
 
 func (n *Node) LocalCreateNumIncrBy(i int64) int64 {
 	return atomic.AddInt64(&n.LocalCreateNum, i)
+}
+
+func (n *Node) ReservedNumIncrBy(i int64) int64 {
+	return atomic.AddInt64(&n.ReservedNum, i)
 }
 
 func (n *Node) Labels() map[string]string {

@@ -350,6 +350,15 @@ func TestNodeCloneNilHostFacts(t *testing.T) {
 	}
 }
 
+func TestNodeCloneDeepCopiesLocalTemplates(t *testing.T) {
+	source := &Node{InsID: "node-1", LocalTemplates: []string{"tpl-1"}}
+	cloned := source.Clone()
+	cloned.LocalTemplates[0] = "tpl-2"
+	if source.LocalTemplates[0] != "tpl-1" {
+		t.Fatalf("mutating cloned templates changed source: %v", source.LocalTemplates)
+	}
+}
+
 func TestNodeHostFactsJSONRoundTrip(t *testing.T) {
 	n := &Node{
 		InsID: "node-1",

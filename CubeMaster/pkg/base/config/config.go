@@ -6,6 +6,7 @@
 package config
 
 import (
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	volumeplugin "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -267,6 +269,12 @@ type SchedulerConf struct {
 	ThirtpartyFilterInstanceType     map[string]bool                   `yaml:"thirtparty_filter_instance_type"`
 	InstanceTypeConf                 map[string]InstanceTypeConf       `yaml:"instance_type_conf"`
 	NodeAffinitySelectorAllowedKeys  []string                          `yaml:"node_affinity_selector_allowed_keys"`
+	// ProfileRouteLabelKeys is the allow-list of request labels that may be
+	// used by scheduler profile routes or sent to external scheduler plugins.
+	// Route labels not present in this list make the profile configuration
+	// invalid at scheduler startup.
+	ProfileRouteLabelKeys []string               `yaml:"profile_route_label_keys"`
+	Profiles              []SchedulerProfileConf `yaml:"profiles"`
 
 	// IgnoreRedisAllocation, when true, makes the scheduler ignore the
 	// per-node allocated CPU/Mem usage recorded in Redis (treat allocated as
@@ -486,6 +494,78 @@ func (s *SchedulerConf) GetEffectiveNodeMaxMemReservedInMB(instanceType string, 
 
 type SchedulerFilterConf struct {
 	EnableFilters []string `yaml:"enable_filters"`
+}
+
+// SchedulerProfileConf selects and configures one scheduling pipeline. The
+// first matching non-default profile wins; an optional default profile is used
+// when no route matches. With no profiles configured, the scheduler compiles a
+// legacy profile from Filter, Score, PostScore and PrioritySelectNum.
+type SchedulerProfileConf struct {
+	Name      string                       `yaml:"name"`
+	Default   bool                         `yaml:"default"`
+	Route     SchedulerProfileRouteConf    `yaml:"route"`
+	Filters   []SchedulerProfilePluginConf `yaml:"filters"`
+	Scores    []SchedulerProfilePluginConf `yaml:"scores"`
+	Selection SchedulerSelectionConf       `yaml:"selection"`
+	Failure   SchedulerFailureConf         `yaml:"failure"`
+}
+
+type SchedulerProfileRouteConf struct {
+	InstanceTypes []string          `yaml:"instance_types"`
+	Labels        map[string]string `yaml:"labels"`
+}
+
+// SchedulerProfilePluginConf is shared by built-in Go, CEL expression and
+// external gRPC plugins. Type defaults to "go". External plugins use a Unix
+// socket by default, while tests and development may use a host:port target.
+type SchedulerProfilePluginConf struct {
+	Name                   string         `yaml:"name"`
+	Type                   string         `yaml:"type"`
+	Enabled                *bool          `yaml:"enabled"`
+	Weight                 float64        `yaml:"weight"`
+	DefaultScore           float64        `yaml:"default_score"`
+	Expr                   string         `yaml:"expr"`
+	SocketPath             string         `yaml:"socket_path"`
+	Timeout                time.Duration  `yaml:"timeout"`
+	CircuitBreakerFailures int            `yaml:"circuit_breaker_failures"`
+	CircuitBreakerCooldown time.Duration  `yaml:"circuit_breaker_cooldown"`
+	Args                   map[string]any `yaml:"args"`
+}
+
+type SchedulerSelectionConf struct {
+	TopN   int    `yaml:"top_n"`
+	Method string `yaml:"method"`
+}
+
+type SchedulerFailureConf struct {
+	Filter      string `yaml:"filter"`
+	Score       string `yaml:"score"`
+	NoCandidate string `yaml:"no_candidate"`
+}
+
+// ControlledProfileLabels returns a defensive copy containing only labels
+// explicitly allowed for profile routing. This prevents arbitrary user labels
+// from changing scheduler policy or leaking to external plugins.
+func (s *SchedulerConf) ControlledProfileLabels(labels map[string]string) map[string]string {
+	if s == nil || len(labels) == 0 || len(s.ProfileRouteLabelKeys) == 0 {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(s.ProfileRouteLabelKeys))
+	for _, key := range s.ProfileRouteLabelKeys {
+		if key = strings.TrimSpace(key); key != "" {
+			allowed[key] = struct{}{}
+		}
+	}
+	out := make(map[string]string, len(allowed))
+	for key := range allowed {
+		if value, ok := labels[key]; ok {
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 type PostScoreConf struct {
@@ -987,6 +1067,50 @@ func preHandOverhead(config *Config) error {
 	}
 	return nil
 }
+
+// preHandleScheduler 为调度器配置补默认值：
+// 节点上限、过滤/评分插件参数、选择算法名等
+// schedulerFactoryYAML 是嵌入二进制的出厂调度策略配置（三条内置 profile：
+// burst_balance / template_reuse / mixed_binpack）。作为单一事实来源，
+// docs/guide/scheduler-plugin.md 引用的默认行为以此文件为准。
+//
+//go:embed scheduler_factory.yaml
+var schedulerFactoryYAML []byte
+
+// injectFactorySchedulerProfiles 在用户完全没有配置调度策略时注入出厂策略：
+// 要求 scheduler.profiles 与 legacy 的 scheduler.filter / scheduler.score 全部为空。
+// 一旦用户显式配置了其中任意一项，出厂策略整体不注入（all-or-nothing），
+// 避免覆盖存量部署依赖的 legacy 编译路径（profile.Compile 有 profiles 时忽略 legacy）。
+//
+// 出厂 YAML 同时携带 legacy score 子树：profile 模式下它不参与流水线编译，
+// 但内置 scorer（real_time_weighted_average / image_score）的构造函数会读全局
+// 配置中的 plugin_conf，缺失时会 panic（见 pkg/selector/score/realtimescore.go）。
+func injectFactorySchedulerProfiles(config *Config) error {
+	sched := config.Scheduler
+	if len(sched.Profiles) != 0 || sched.Filter != nil || sched.Score != nil {
+		return nil
+	}
+	var factory struct {
+		Scheduler struct {
+			ProfileRouteLabelKeys []string               `yaml:"profile_route_label_keys"`
+			Score                 *SchedulerScoreConf    `yaml:"score"`
+			Profiles              []SchedulerProfileConf `yaml:"profiles"`
+		} `yaml:"scheduler"`
+	}
+	if err := yaml.Unmarshal(schedulerFactoryYAML, &factory); err != nil {
+		return fmt.Errorf("unmarshal embedded factory scheduler profiles: %w", err)
+	}
+	if len(factory.Scheduler.Profiles) == 0 {
+		return errors.New("embedded factory scheduler profiles is empty")
+	}
+	sched.Profiles = factory.Scheduler.Profiles
+	sched.Score = factory.Scheduler.Score
+	if len(sched.ProfileRouteLabelKeys) == 0 {
+		sched.ProfileRouteLabelKeys = factory.Scheduler.ProfileRouteLabelKeys
+	}
+	return nil
+}
+
 func preHandleScheduler(config *Config) error {
 	if config.Scheduler == nil {
 		config.Scheduler = &WrapperSchedulerConf{}
@@ -1072,6 +1196,11 @@ func preHandleScheduler(config *Config) error {
 				}
 			}
 		}
+	}
+
+	// 出厂策略注入后再走 score 默认值补全，注入的配置与用户配置走同一路径
+	if err := injectFactorySchedulerProfiles(config); err != nil {
+		return err
 	}
 
 	preHandSchedulerScore(config)
