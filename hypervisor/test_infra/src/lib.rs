@@ -652,10 +652,16 @@ pub fn ssh_command_ip_with_auth(
     timeout: u8,
 ) -> Result<String, SshCommandError> {
     let mut s = String::new();
+    let mut e = String::new();
 
     let mut counter = 0;
     loop {
-        match (|| -> Result<(), SshCommandError> {
+        // Reset captured stdout/stderr for each retry attempt so we only
+        // report the output of the final (failed) attempt.
+        s.clear();
+        e.clear();
+
+        let mut closure = || -> Result<(), SshCommandError> {
             let tcp =
                 TcpStream::connect(format!("{}:22", ip)).map_err(SshCommandError::Connection)?;
             let mut sess = Session::new().unwrap();
@@ -674,6 +680,7 @@ pub fn ssh_command_ip_with_auth(
             // Intentionally ignore these results here as their failure
             // does not precipitate a repeat
             let _ = channel.read_to_string(&mut s);
+            let _ = channel.stderr().read_to_string(&mut e);
             let _ = channel.close();
             let _ = channel.wait_close();
 
@@ -684,9 +691,11 @@ pub fn ssh_command_ip_with_auth(
             } else {
                 Ok(())
             }
-        })() {
+        };
+
+        match closure() {
             Ok(_) => break,
-            Err(e) => {
+            Err(err) => {
                 counter += 1;
                 if counter >= retries {
                     eprintln!(
@@ -694,13 +703,14 @@ pub fn ssh_command_ip_with_auth(
                          command=\"{}\"\n\
                          auth=\"{:#?}\"\n\
                          ip=\"{}\"\n\
-                         output=\"{}\"\n\
+                         stdout=\"{}\"\n\
+                         stderr=\"{}\"\n\
                          error=\"{:?}\"\n\
                          \n==== End ssh command outout ====\n\n",
-                        command, auth, ip, s, e
+                        command, auth, ip, s, e, err
                     );
 
-                    return Err(e);
+                    return Err(err);
                 }
             }
         };
