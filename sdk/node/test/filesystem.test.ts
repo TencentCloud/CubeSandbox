@@ -31,6 +31,8 @@ interface MockResponse {
   status?: number;
   json?: unknown;
   text?: string;
+  /** Raw body bytes (for binary /files responses). */
+  bytes?: Buffer;
   headers?: Record<string, string>;
 }
 
@@ -74,12 +76,17 @@ beforeAll(async () => {
       requests.push(record);
       const out = handler(record);
       const headers: Record<string, string> = { ...(out.headers ?? {}) };
-      let payload = "";
-      if (out.text !== undefined) {
+      let payload: string | Buffer = "";
+      if (out.bytes !== undefined) {
+        payload = out.bytes;
+      } else if (out.text !== undefined) {
         payload = out.text;
       } else if (out.json !== undefined) {
         payload = JSON.stringify(out.json);
         headers["content-type"] ??= "application/json";
+      }
+      if (typeof payload !== "string" && headers["content-length"] === undefined) {
+        headers["content-length"] = String(payload.length);
       }
       res.writeHead(out.status ?? 200, headers);
       res.end(payload);
@@ -109,6 +116,77 @@ describe("Filesystem.read", () => {
       return { status: 200, text: "file content" };
     };
     expect(await sb.files.read("/tmp/foo.txt")).toBe("file content");
+    sb.close();
+  });
+
+  it("returns untouched bytes when format is bytes (e2b-compatible)", async () => {
+    // PNG magic: e2b's format:'bytes' path keeps 0x89; UTF-8 text decode would
+    // turn it into EF BF BD and inflate a 4-byte payload to 6.
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const sb = await createSandbox();
+    handler = () => ({ status: 200, bytes: png });
+    const got = await sb.files.read("/tmp/x.png", { format: "bytes" });
+    expect(got).toBeInstanceOf(Uint8Array);
+    expect(Buffer.from(got)).toEqual(png);
+    sb.close();
+  });
+
+  it("returns a Blob when format is blob", async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const sb = await createSandbox();
+    handler = () => ({ status: 200, bytes: png });
+    const got = await sb.files.read("/tmp/x.png", { format: "blob" });
+    expect(got).toBeInstanceOf(Blob);
+    expect(Buffer.from(await got.arrayBuffer())).toEqual(png);
+    sb.close();
+  });
+
+  it("returns a ReadableStream when format is stream", async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const sb = await createSandbox();
+    handler = () => ({ status: 200, bytes: png });
+    const stream = await sb.files.read("/tmp/x.png", { format: "stream" });
+    const reader = stream.getReader();
+    const chunks: Uint8Array[] = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+    }
+    expect(Buffer.concat(chunks.map((c) => Buffer.from(c)))).toEqual(png);
+    sb.close();
+  });
+
+  it("returns empty values for content-length 0 across formats", async () => {
+    const sb = await createSandbox();
+    handler = () => ({ status: 200, text: "", headers: { "content-length": "0" } });
+    expect(await sb.files.read("/tmp/empty", { format: "text" })).toBe("");
+    expect(await sb.files.read("/tmp/empty", { format: "bytes" })).toEqual(new Uint8Array(0));
+    const blob = await sb.files.read("/tmp/empty", { format: "blob" });
+    expect(blob.size).toBe(0);
+    const stream = await sb.files.read("/tmp/empty", { format: "stream" });
+    const { done } = await stream.getReader().read();
+    expect(done).toBe(true);
+    sb.close();
+  });
+
+  it("still UTF-8-decodes when format is omitted (text default)", async () => {
+    // Documents the default: callers that want binary must opt into bytes.
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const sb = await createSandbox();
+    handler = () => ({ status: 200, bytes: png });
+    const text = await sb.files.read("/tmp/x.png");
+    expect(typeof text).toBe("string");
+    expect(Buffer.from(text, "utf8")).not.toEqual(png);
+    sb.close();
+  });
+
+  it("surfaces JSON error bodies when the status is not 200", async () => {
+    const sb = await createSandbox();
+    handler = () => ({ status: 404, json: { message: "No such file or directory" } });
+    await expect(sb.files.read("/tmp/missing.txt")).rejects.toThrow(
+      /Failed to read \/tmp\/missing\.txt: No such file or directory/,
+    );
     sb.close();
   });
 });

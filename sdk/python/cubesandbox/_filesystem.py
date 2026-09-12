@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import struct
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator, Literal, Union, overload
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +65,47 @@ class Filesystem:
             return {}
         return resp.json()
 
-    def read(self, path: str, *, user: str | None = None) -> str:
-        """Read a file through envd's HTTP file API."""
+    @overload
+    def read(
+        self,
+        path: str,
+        *,
+        format: Literal["text"] = "text",
+        user: str | None = None,
+    ) -> str: ...
+
+    @overload
+    def read(
+        self,
+        path: str,
+        *,
+        format: Literal["bytes"],
+        user: str | None = None,
+    ) -> bytearray: ...
+
+    @overload
+    def read(
+        self,
+        path: str,
+        *,
+        format: Literal["stream"],
+        user: str | None = None,
+    ) -> Iterator[bytes]: ...
+
+    def read(
+        self,
+        path: str,
+        *,
+        format: Literal["text", "bytes", "stream"] = "text",
+        user: str | None = None,
+    ) -> Union[str, bytearray, Iterator[bytes]]:
+        """Read a file through envd's HTTP file API.
+
+        Matches the e2b Python SDK surface: ``format`` is ``text`` (default),
+        ``bytes`` (``bytearray``), or ``stream`` (``Iterator[bytes]``). Without
+        ``format="bytes"``, a binary file is UTF-8-decoded and corrupted — a
+        PNG's ``0x89`` magic becomes the U+FFFD replacement character.
+        """
         self._ensure_client()
         effective_user = user or DEFAULT_ENVD_USER
 
@@ -85,6 +124,25 @@ class Filesystem:
                 body = {}
             message = body.get("message") or body.get("detail") or message
             raise IOError(f"Failed to read {path}: {message}")
+
+        # Mirror e2b: an explicit zero-length response short-circuits.
+        if resp.headers.get("content-length") == "0":
+            if format == "bytes":
+                return bytearray()
+            if format == "stream":
+                return iter(())
+            return ""
+
+        if format == "bytes":
+            return bytearray(resp.content)
+        if format == "stream":
+            data = resp.content
+
+            def _chunks() -> Iterator[bytes]:
+                if data:
+                    yield bytes(data)
+
+            return _chunks()
         return resp.text
 
     def write(self, path: str, data: str | bytes, *, user: str | None = None) -> None:
