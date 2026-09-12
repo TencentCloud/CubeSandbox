@@ -24,9 +24,7 @@ const (
 	maxContainerThreshold int64 = 80000 * mb
 )
 
-type imageScore struct {
-	weight float64
-}
+type imageScore struct{}
 
 var getImageStateByNode = localcache.GetImageStateByNode
 
@@ -34,9 +32,7 @@ func NewImageScore() *imageScore {
 	if config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore == nil {
 		panic("config.Scheduler.Score.ScorePluginConf.ImageScore is nil")
 	}
-	return &imageScore{
-		weight: config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore.Weight,
-	}
+	return &imageScore{}
 }
 
 func (l *imageScore) ID() string {
@@ -48,10 +44,15 @@ func (l *imageScore) String() string {
 }
 
 func (l *imageScore) Weight() float64 {
-	return l.weight
+	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore
+	if cfg == nil || cfg.Disable || cfg.Weight == 0 {
+		return 0
+	}
+	return cfg.Weight
 }
 func (l *imageScore) Disable() bool {
-	return config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore.Disable
+	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore
+	return cfg == nil || cfg.Disable || cfg.Weight == 0
 }
 
 func (l *imageScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList,
