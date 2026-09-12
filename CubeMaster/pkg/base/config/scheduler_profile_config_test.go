@@ -581,6 +581,57 @@ scheduler:
 	assert.NotNil(t, got.Scheduler.Score.ScorePluginConf.BinpackScore)
 }
 
+func TestInit_OptInOnlySameNameAppliesBuiltin(t *testing.T) {
+	// allow_dropped_filters alone must not silent-no-op a built-in name.
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: binpack_utilization
+  filter:
+    enable_filters:
+      - cpu
+      - mem
+      - template_locality
+      - realtime_create_num
+  profiles:
+    binpack_utilization:
+      allow_dropped_filters: true
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"cpu", "mem"}, got.Scheduler.Filter.EnableFilters)
+	assert.Equal(t, []string{"binpack_score"}, got.Scheduler.Score.EnableScorers)
+	assert.NotNil(t, got.Scheduler.Score.ScorePluginConf.BinpackScore)
+}
+
+func TestInit_BuiltinOnStockFiltersSucceeds(t *testing.T) {
+	// Stock CubeMaster configs enable cpu/mem/template_locality/realtime_create_num.
+	// Built-ins carry AllowDroppedFilters so selecting by name still loads.
+	for _, profile := range []string{
+		"balanced_spread",
+		"template_locality_first",
+		"binpack_utilization",
+	} {
+		t.Run(profile, func(t *testing.T) {
+			yamlBody := fmt.Sprintf(`common: {}
+log: {}
+scheduler:
+  profile: %s
+  filter:
+    enable_filters:
+      - cpu
+      - mem
+      - template_locality
+      - realtime_create_num
+`, profile)
+			got, err := initConfigFromYAML(t, yamlBody)
+			assert.NoError(t, err)
+			assert.Equal(t, profile, got.Scheduler.Profile)
+			assert.NotEmpty(t, got.Scheduler.Score.EnableScorers)
+		})
+	}
+}
+
 func TestInit_ProfilePolarityMixRejected(t *testing.T) {
 	yamlBody := `common: {}
 log: {}
