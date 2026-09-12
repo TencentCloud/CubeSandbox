@@ -533,6 +533,8 @@ pub const DEFAULT_IVSHMEM_SIZE: usize = 128;
 pub struct IvshmemConfig {
     pub path: PathBuf,
     pub size: usize,
+    #[serde(default)]
+    pub subsystem_id: u16,
 }
 
 impl Default for IvshmemConfig {
@@ -540,6 +542,7 @@ impl Default for IvshmemConfig {
         Self {
             path: PathBuf::new(),
             size: DEFAULT_IVSHMEM_SIZE << 20,
+            subsystem_id: 0,
         }
     }
 }

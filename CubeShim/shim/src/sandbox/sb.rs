@@ -47,8 +47,8 @@ use crate::{debugf, errf, infof, warnf};
 //use tokio_uring::fs::UnixStream;
 
 const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
-const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
-const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
+const PERF_SHMEM_SIZE: usize = 4096; // 4KB
+const PERF_SUBSYSTEM_ID: u16 = 0x0101;
 
 #[derive(PartialEq, Eq)]
 enum SandBoxState {
@@ -757,10 +757,9 @@ impl SandBox {
             .add_virtiofs(&self.conf.virtiofs)
             .add_vsock(self.id.clone());
 
-        // Enable ivshmem device when the template build path sets the internal annotation.
-        if self.is_ivshmem_enabled() {
+        if self.conf.perf_metric {
             Self::enable_default_ivshmem(&mut vc, &self.id)
-                .map_err(|e| format!("failed to enable ivshmem: {}", e))?;
+                .map_err(|e| format!("failed to enable perf ivshmem: {}", e))?;
         }
 
         if let Some(fs) = self.conf.fs.as_ref() {
@@ -804,42 +803,34 @@ impl SandBox {
         Ok(())
     }
 
-    fn is_ivshmem_enabled(&self) -> bool {
-        self.spec
-            .annotations()
-            .as_ref()
-            .and_then(|anno| anno.get(ANNO_ENABLE_IVSHMEM))
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false)
-    }
-
-    /// Enable the default ivshmem backend at `/dev/shm/ivshmem-{sandbox_id}`.
+    /// Attach the GAUGE ivshmem device at `/run/vc/vm/{id}/gauge.shmem`.
     fn enable_default_ivshmem(vc: &mut VmConfig, sandbox_id: &str) -> CResult<()> {
-        let path = Utils::ivshmem_path(sandbox_id)?;
-        Utils::create_ivshmem_file(&path, IVSHMEM_DEFAULT_SIZE)?;
-        vc.enable_ivshmem(path, IVSHMEM_DEFAULT_SIZE);
+        let path = Utils::perf_shmem_path(sandbox_id)?;
+        Utils::create_ivshmem_file(&path, PERF_SHMEM_SIZE)?;
+        vc.enable_ivshmem_with_subsystem(path, PERF_SHMEM_SIZE, PERF_SUBSYSTEM_ID);
         Ok(())
     }
 
-    /// Build restore-time ivshmem config with the default backend path.
+    /// Restore-time GAUGE config: rebind `/run/vc/vm/{id}/gauge.shmem`.
     fn default_ivshmem_config(sandbox_id: &str) -> CResult<IvshmemConfig> {
-        let path = Utils::ivshmem_path(sandbox_id)?;
+        let path = Utils::perf_shmem_path(sandbox_id)?;
         Ok(IvshmemConfig {
             path,
-            size: IVSHMEM_DEFAULT_SIZE,
+            size: PERF_SHMEM_SIZE,
+            subsystem_id: PERF_SUBSYSTEM_ID,
         })
     }
 
-    /// Ensure the default ivshmem backend file exists before restore.
+    /// Ensure the GAUGE backing file exists before restore.
     fn ensure_ivshmem_file(sandbox_id: &str) -> CResult<()> {
-        let path = Utils::ivshmem_path(sandbox_id)?;
+        let path = Utils::perf_shmem_path(sandbox_id)?;
         match stdfs::metadata(&path) {
             Ok(_) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Utils::create_ivshmem_file(&path, IVSHMEM_DEFAULT_SIZE)
+                Utils::create_ivshmem_file(&path, PERF_SHMEM_SIZE)
             }
             Err(e) => Err(format!(
-                "failed to stat ivshmem file {}: {}",
+                "failed to stat perf shmem file {}: {}",
                 path.display(),
                 e
             )),
@@ -924,10 +915,8 @@ impl SandBox {
     }
 
     async fn restore_vm(&mut self) -> CResult<()> {
-        // Ensure the sandbox-specific ivshmem shm file exists when enabled by template annotation.
-        let enable_ivshmem = self.is_ivshmem_enabled();
-
-        if enable_ivshmem {
+        let enable_perf = self.conf.perf_metric;
+        if enable_perf {
             Self::ensure_ivshmem_file(&self.id)?;
         }
 
@@ -980,7 +969,7 @@ impl SandBox {
             pmem: Some(pmems),
             vsock: Some(vsock),
             memory_vol_url: restore_memory_vol_url,
-            ivshmem: if enable_ivshmem {
+            ivshmem: if enable_perf {
                 Some(Self::default_ivshmem_config(&self.id)?)
             } else {
                 None

@@ -133,6 +133,7 @@ pub const DISK_DEVICE_ID_PRE: &str = "disk";
 // ivshmem shared memory configuration
 const IVSHMEM_SHM_DIR: &str = "/dev/shm";
 const IVSHMEM_PREFIX: &str = "ivshmem-";
+const PERF_SHMEM_NAME: &str = "gauge.shmem";
 
 pub struct Utils {}
 pub struct AsyncUtils {}
@@ -155,6 +156,16 @@ impl Utils {
             "{}/{}{}",
             IVSHMEM_SHM_DIR, IVSHMEM_PREFIX, sandbox_id
         )))
+    }
+
+    /// Return `/run/vc/vm/{sandbox_id}/gauge.shmem` (GAUGE backing). Living
+    /// in the per-sandbox run dir means `clean_sandbox_resource` reclaims it
+    /// along with the rest of the directory.
+    pub fn perf_shmem_path(sandbox_id: &str) -> CResult<PathBuf> {
+        Self::validate_sandbox_id(sandbox_id)?;
+        Ok(PathBuf::from(VM_PATH)
+            .join(sandbox_id)
+            .join(PERF_SHMEM_NAME))
     }
 
     /// Create or truncate an ivshmem backend file with 0o600 permissions.

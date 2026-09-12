@@ -206,7 +206,17 @@ impl VmConfig {
     /// file before calling this. This keeps the shim agnostic of the
     /// backend naming convention.
     pub fn enable_ivshmem(&mut self, path: PathBuf, size: usize) {
-        self.ivshmem = Some(IvshmemConfig { path, size });
+        self.enable_ivshmem_with_subsystem(path, size, 0);
+    }
+
+    /// Same as `enable_ivshmem`, plus PCI `subsystem_id` so the guest can tell
+    /// backends apart: 0 is the demo channel, 0x0101 is GAUGE.
+    pub fn enable_ivshmem_with_subsystem(&mut self, path: PathBuf, size: usize, subsystem_id: u16) {
+        self.ivshmem = Some(IvshmemConfig {
+            path,
+            size,
+            subsystem_id,
+        });
     }
 
     pub fn add_cmdline(&mut self, cmd: String) -> &mut Self {

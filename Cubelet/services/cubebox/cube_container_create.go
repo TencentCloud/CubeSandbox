@@ -349,6 +349,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 
 			if ci.IsPod {
 				additionalOpt = append(additionalOpt, additionalSandboxOpt...)
+				additionalOpt = append(additionalOpt, withPerfMetricRuntimeAnnotation(flowOpts.ReqInfo))
 			}
 		} else {
 			containerLog.Errorf("create container oci spec failed.%s", err.Error())

@@ -92,7 +92,12 @@ pub struct IvshmemDeviceState {
 }
 
 impl IvshmemDevice {
-    pub fn new(id: String, state: Option<IvshmemDeviceState>, region_size: u64) -> Self {
+    pub fn new(
+        id: String,
+        state: Option<IvshmemDeviceState>,
+        region_size: u64,
+        subsystem_id: u16,
+    ) -> Self {
         let configuration = PciConfiguration::new(
             IVSHMEM_VENDOR_ID,
             IVSHMEM_DEVICE_ID,
@@ -102,7 +107,7 @@ impl IvshmemDevice {
             None,
             PciHeaderType::Device,
             0,
-            0,
+            subsystem_id,
             None,
         );
 

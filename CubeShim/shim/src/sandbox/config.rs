@@ -24,6 +24,7 @@ pub const ANNO_SNAPSHOT_NOTIFY: &str = "cube.snapshot.healthcheck";
 pub const ANNO_VM_KERNEL: &str = "cube.vm.kernel.path";
 /// Annotation key used to append extra kernel cmdline parameters.
 pub const ANNO_VM_KERNEL_CMDLINE_APPEND: &str = "cube.vm.kernel.cmdline.append";
+pub const ANNO_PERF_METRIC: &str = "cube.perf.metric";
 /// Override path to cube-agent.ext4 (virtio-pmem1).
 pub const ANNO_VM_AGENT: &str = "cube.vm.agent.path";
 /// Override path to guest OS image (virtio-pmem0).
@@ -74,6 +75,11 @@ pub struct Config {
     pub use_passfd_io: bool,
     /// Extra kernel cmdline parameters injected through annotations.
     pub extra_kernel_params: Vec<String>,
+    /// Attaches the GAUGE metrics ivshmem device. Read identically on cold boot
+    /// and on restore: the PCI device tree is frozen into the snapshot, and a
+    /// restore can only rebind the backing path of a device the snapshot
+    /// already carries.
+    pub perf_metric: bool,
 }
 
 impl Default for Config {
@@ -103,6 +109,7 @@ impl Default for Config {
             app_snapshot_restore: false,
             use_passfd_io: false,
             extra_kernel_params: Vec::new(),
+            perf_metric: false,
         }
     }
 }
@@ -233,6 +240,9 @@ impl Config {
         if let Some(anno) = anno.get(ANNO_VIRTIOFS) {
             virtiofs = Utils::anno_to_obj::<Vec<VirtioFs>>(anno)?;
         }
+        let perf_metric = anno
+            .get(ANNO_PERF_METRIC)
+            .is_some_and(|value| value == "true");
         let extra_kernel_params = if let Some(params) = anno.get(ANNO_VM_KERNEL_CMDLINE_APPEND) {
             let params_vec = Utils::anno_to_obj::<Vec<String>>(params)?;
             params_vec
@@ -275,6 +285,7 @@ impl Config {
             app_snapshot_restore,
             use_passfd_io,
             extra_kernel_params,
+            perf_metric,
         };
         Ok(c)
     }

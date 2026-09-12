@@ -324,17 +324,17 @@ func TestCreateFromImageCommandParsesNodeScope(t *testing.T) {
 	}
 }
 
-func TestApplyCreateFromImageIvshmemFlag(t *testing.T) {
+func TestApplyCreateFromImageMetricFlag(t *testing.T) {
 	withoutFlag := &types.CreateTemplateFromImageReq{}
-	applyCreateFromImageIvshmemFlag(newCreateFromImageContext(t, nil), withoutFlag)
-	if withoutFlag.EnableIvshmem != nil {
-		t.Fatalf("EnableIvshmem=%v, want nil when flag is not set", *withoutFlag.EnableIvshmem)
+	applyCreateFromImageMetricFlag(newCreateFromImageContext(t, nil), withoutFlag)
+	if withoutFlag.EnableMetric != nil {
+		t.Fatalf("EnableMetric=%v, want nil when flag is not set", *withoutFlag.EnableMetric)
 	}
 
 	withFlag := &types.CreateTemplateFromImageReq{}
-	applyCreateFromImageIvshmemFlag(newCreateFromImageContext(t, []string{"--enable-ivshmem"}), withFlag)
-	if withFlag.EnableIvshmem == nil || !*withFlag.EnableIvshmem {
-		t.Fatalf("EnableIvshmem=%v, want true", withFlag.EnableIvshmem)
+	applyCreateFromImageMetricFlag(newCreateFromImageContext(t, []string{"--enable-metric"}), withFlag)
+	if withFlag.EnableMetric == nil || !*withFlag.EnableMetric {
+		t.Fatalf("EnableMetric=%v, want true", withFlag.EnableMetric)
 	}
 }
 

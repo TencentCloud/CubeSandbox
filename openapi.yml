@@ -1306,11 +1306,11 @@ components:
           items:
             type: string
           description: Container DNS nameservers.
-        enableIvshmem:
+        enableMetric:
           type:
           - boolean
           - 'null'
-          description: Enable ivshmem when building the template snapshot.
+          description: Attach the GAUGE metrics ivshmem device when building the template snapshot.
         env:
           type:
           - array
