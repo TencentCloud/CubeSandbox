@@ -3,9 +3,6 @@
 
 //! Daemon lifecycle REST surface: `/health`, `/init`, `/envs` and the access
 //! token helpers shared by every surface (mirrors upstream `internal/api/`).
-//!
-//! The download/data plane that used to live in this module is now under
-//! `filesystem/`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,7 +32,7 @@ pub async fn health() -> impl IntoResponse {
 /// /init request body. CubeSandbox's Cubelet only ever sends `envVars`;
 /// the remaining upstream fields are accepted and logged so foreign callers
 /// are not broken. Of those, `volumeMounts` / `hyperloopIP` / `caBundle`
-/// carry no behavior (declared MVP differences), while `defaultUser`,
+/// carry no behavior (declared differences), while `defaultUser`,
 /// `defaultWorkdir`, `timestamp` and `accessToken` do — see `init`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]

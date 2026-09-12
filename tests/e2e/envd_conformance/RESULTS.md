@@ -47,7 +47,7 @@ PASS 60  FAIL 0  DECLARED-DIFF 11  SKIP 0  MISSING 0
 > 注：`rest_init_timestamp_out_of_range` 为手写解析器换 `time` crate + 越界改 400
 > 重构后的实测（本行上方数字为 2026-08-31 重跑实测值，71 场景全录）。
 
-其中 11 项 DECLARED-DIFF 均为设计声明的 MVP 差异（PTY、watch 家族、
+其中 11 项 DECLARED-DIFF 均为设计声明的差异（PTY、watch 家族、
 /files/compose、gzip 编码、嵌套 selector 宽容性、解析器错误措辞、
 符号链接 lstat vs follow、以及越界 timestamp 的 400 vs 204），allowlist 见 `conformance.py`
 `DECLARED_DIFFERENT`——本次 allowlist 11 条全部命中（gzip 下载场景
@@ -263,8 +263,7 @@ stderr 与上游字节一致 ——
 
 > 目标：GET /files 下载对齐上游 `download.go` + Go `net/http` `ServeContent`（identity 路径）：
 > Accept-Encoding 双 406 → Vary → Range/206/416 → Last-Modified → 304/412 → If-Range，顺序与
-> 头集合逐字节一致（决策：导师 2026-09-05「完全兼容做」）。实施见
-> `docs/cube-envd/item-1.3-implementation-plan.md`。
+> 头集合逐字节一致（决策：导师 2026-09-05「完全兼容做」）。
 
 ### 单测
 
@@ -459,7 +458,7 @@ keepalive 沿用进程流的 30s 默认（上游文件 watch 为 90s，同 LB �
 ## 9. 数据面（2026-09-09）
 
 上传**原地流式写**（对齐上游 `upload.go:68` 的 `O_WRONLY|O_CREATE|O_TRUNC`，
-放弃 MVP 期自加的 temp+rename 原子性——三仓 issue 考古零需求、HA failover
+放弃早期自加的 temp+rename 原子性——三仓 issue 考古零需求、HA failover
 重启模型使原子性保护窗口失去意义）。单测 293 passed（watch 家族合入后基线为 289：
 +4 数据面测试，−2 旧 write_file 测试改造；复审轮 +2 回归测试。初稿的 263 是
 更早的变基前基线的口径）；clippy `-D warnings` 与 fmt 干净。

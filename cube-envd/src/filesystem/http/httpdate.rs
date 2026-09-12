@@ -227,8 +227,8 @@ fn skip_frac_second(rest: &str) -> &str {
         // e.g. "07:00:00.5 2026" into "2026" leftover → parse failure.
         let n = 2 + b[2..].iter().take_while(|c| c.is_ascii_digit()).count();
         // n counts ASCII bytes only, so it always lands on a char boundary;
-        // `get` keeps that invariant explicit (a mid-character index used to
-        // panic on obs-text bytes surviving as U+FFFD).
+        // `get` keeps that invariant explicit (a mid-character index panics
+        // on obs-text bytes surviving as U+FFFD).
         return rest.get(n..).unwrap_or(rest);
     }
     rest
@@ -380,8 +380,8 @@ mod tests {
         }
     }
 
-    /// The time crate rejects these; Go formats them fine and a review probe
-    /// hit the panic on a real tmpfs.
+    /// The time crate rejects these; Go formats them fine, and the time crate
+    /// would panic on them, so they are formatted without it.
     #[test]
     fn http_date_extremes_match_go_appendint() {
         // time.Unix(-1, 0).UTC().Format(http.TimeFormat)
@@ -435,9 +435,9 @@ mod tests {
         }
     }
 
-    /// Round-5 review: the fractional-second scan must stop at the first
-    /// non-digit, not consume every digit in the remainder — otherwise the
-    /// asctime year or a numeric zone gets swallowed.
+    /// The fractional-second scan must stop at the first non-digit, not
+    /// consume every digit in the remainder — otherwise the asctime year or a
+    /// numeric zone gets swallowed.
     #[test]
     fn fractional_second_consumes_only_the_adjacent_digit_run() {
         let ts = 1_788_678_000; // Sun, 06 Sep 2026 07:00:00 GMT

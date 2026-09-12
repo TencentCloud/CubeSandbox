@@ -187,9 +187,9 @@ fn group_name(gid: u32) -> String {
 }
 
 fn name_from_table(path: &str, id: u32) -> Option<String> {
-    // Cached read (dev/ino/mtime re-validated per call): this used to re-read
-    // the whole table for EVERY entry (owner_name + group_name per ListDir
-    // row — 2N full file reads).
+    // Cached read (dev/ino/mtime re-validated per call) rather than reading
+    // the whole table per lookup: owner_name and group_name are resolved for
+    // every ListDir row, so an uncached read would be 2N full file reads.
     let content = crate::platform::identity::read_user_table(path).ok()?;
     for line in content.lines() {
         let fields: Vec<&str> = line.split(':').collect();

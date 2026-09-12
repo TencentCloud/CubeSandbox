@@ -4,10 +4,9 @@
 //! How events become semantics: expansion order / recursion / cookie pairing /
 //! directory mapping / MOVE_SELF.
 //!
-//! Carries over the semantic machine of `services/watch.rs` (the layer the
-//! review P1 fix lives in). Every contract is checked line by line
-//! against fsnotify `backend_inotify.go:568-596` and friends (see the
-//! per-item comments below).
+//! Carries over the semantic machine of `services/watch.rs`. Every contract
+//! is checked line by line against fsnotify `backend_inotify.go:568-596` and
+//! friends (see the per-item comments below).
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
@@ -682,9 +681,9 @@ mod tests {
             .values()
             .any(|p| p.ends_with("link") || p.ends_with("outside")));
     }
-    // ---- review P1: MOVE_SELF on a recursion-added child must keep
-    // the watch (the parent's MOVED_TO rewrites its stored path), otherwise
-    // events inside the moved directory silently stop ----
+    // ---- MOVE_SELF on a recursion-added child must keep the watch (the
+    // parent's MOVED_TO rewrites its stored path), otherwise events inside
+    // the moved directory silently stop ----
 
     #[test]
     fn in_tree_dir_rename_keeps_child_watch_reporting() {

@@ -548,10 +548,9 @@ mod tests {
     #[test]
     fn list_dir_dangling_root_is_not_found() {
         // The root is resolved with a following stat, so a dangling link is
-        // NotFound — NOT InvalidArgument ("path is not a directory"), which
-        // is what the previous non-following lstat produced. The `lstat`
-        // wording is upstream's (EvalSymlinks fails with an lstat error);
-        // see the comment on `list_dir` before "correcting" it.
+        // NotFound — NOT InvalidArgument ("path is not a directory"). The
+        // `lstat` wording is upstream's (EvalSymlinks fails with an lstat
+        // error); see the comment on `list_dir` before "correcting" it.
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();
         let user = test_user(dir.path().to_str().unwrap());

@@ -42,11 +42,11 @@ fn main() {
         .worker_threads(2)
         // Blocking pool (see app/pool.rs): the default 512 threads at
         // ~13KiB touched RSS each is a ~6.6MiB worst case — larger than the
-        // whole #1311 memory budget. 64 leaves ample headroom for the
-        // sandbox's dozens-of-ops workload. Deliberate divergence from the
-        // unbounded-goroutine baseline: over the cap, requests queue
-        // (never error). `thread_keep_alive` is tokio's 10s default, written
-        // out so the burst-reuse behavior is explicit.
+        // whole memory budget for this in-guest daemon. 64 leaves ample
+        // headroom for the sandbox's dozens-of-ops workload. Deliberate
+        // divergence from the unbounded-goroutine baseline: over the cap,
+        // requests queue (never error). `thread_keep_alive` is tokio's 10s
+        // default, written out so the burst-reuse behavior is explicit.
         .max_blocking_threads(64)
         .thread_keep_alive(std::time::Duration::from_secs(10))
         .enable_all()

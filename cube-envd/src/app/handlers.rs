@@ -329,10 +329,10 @@ pub(crate) async fn process_update(
 
 // ---------- filesystem handlers ----------
 
-/// The shared unary pipeline for the filesystem RPC handlers (previously the
-/// `fs_unary!` macro — a plain generic function keeps the whole pipeline
-/// readable and GitHub-diff-visible, per the monorepo convention of zero
-/// handler macros in CubeAPI).
+/// The shared unary pipeline for the filesystem RPC handlers. A plain generic
+/// function (not a macro) keeps the whole pipeline readable and
+/// GitHub-diff-visible, per the monorepo convention of zero handler macros in
+/// CubeAPI.
 pub(crate) async fn fs_unary_endpoint<T, F>(
     state: State<Arc<AppState>>,
     headers: HeaderMap,

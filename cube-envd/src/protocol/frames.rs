@@ -8,7 +8,7 @@
 //! (flags bit 0x02) always terminates a stream, carrying `{}` on success or
 //! `{"error":{"code","message"}}` on failure. Binary protobuf codecs
 //! (`application/proto`, `application/connect+proto`) are rejected with
-//! `unimplemented` — a declared MVP difference.
+//! `unimplemented` — a declared difference.
 //!
 //! Source: `connect.rs` (framing half; split out by responsibility).
 

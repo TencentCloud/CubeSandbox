@@ -118,9 +118,9 @@ pub fn merged_env(
 /// - An explicit `cwd` (relative anchored at the user's home) must name an
 ///   existing directory; otherwise this returns `Err(message)` which the
 ///   caller surfaces as `invalid_argument`. Upstream Go envd rejects a missing
-///   or non-directory cwd the same way — cube-envd used to silently fall back
-///   to `/` and run the command anyway, which #1227 forbids (no silent success
-///   on invalid input).
+///   or non-directory cwd the same way; cube-envd must not silently fall back
+///   to `/` and run the command anyway (#1227: no silent success on invalid
+///   input).
 /// - With no `cwd`, default to the user's home, tolerating a missing home like
 ///   upstream by falling back to `/`.
 ///
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "A1 probe (plan §5): needs root + a writable cgroup v2 mount"]
+    #[ignore = "A1 probe: needs root + a writable cgroup v2 mount"]
     async fn spawn_lands_child_in_its_cgroup() {
         // Locks the "dir fd is still live at pre_exec time" ordering
         // assumption against toolchain upgrades: with a real cgroup dir fd,

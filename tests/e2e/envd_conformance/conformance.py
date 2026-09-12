@@ -51,8 +51,8 @@ HEADERS_KEPT = {"Content-Type", "Content-Encoding", "Cache-Control",
                 "Access-Control-Allow-Origin", "Access-Control-Expose-Headers",
                 "Access-Control-Allow-Methods", "Access-Control-Allow-Headers",
                 "Access-Control-Max-Age", "X-E2B-Legacy-SDK",
-                # item 1.3 (Range/conditional downloads): the negotiation
-                # header set is now compared too.
+                # Range/conditional downloads: the negotiation header set is
+                # compared too.
                 "Vary", "Accept-Ranges", "Content-Range", "Content-Disposition",
                 # Last-Modified existence is compared; its value is dynamic
                 # (per-container mtimes) and normalized to <time> below.
@@ -61,7 +61,7 @@ HEADERS_KEPT = {"Content-Type", "Content-Encoding", "Cache-Control",
 # Go renders Last-Modified as RFC 1123 (`Sun, 06 Sep 2026 07:00:00 GMT`),
 # which TIME_RE (ISO 8601) does not match; both sides' values are per-
 # container mtimes, so the header value never compares equal and must be
-# normalized (existence is what item 1.3 asserts at the wire level).
+# normalized (existence is what is asserted at the wire level).
 
 def normalize(obj, path=""):
     if isinstance(obj, dict):

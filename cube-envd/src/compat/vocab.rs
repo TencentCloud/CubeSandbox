@@ -8,8 +8,7 @@
 //! table, while Rust's `io::Error` Display goes through `strerror`, which
 //! capitalizes ("Not a directory" vs Go's "not a directory"). That is a
 //! systematic per-errno divergence; the conformance harness only exercises
-//! the ENOENT path (which used to be hardcoded), so every other errno
-//! drifted unnoticed.
+//! the ENOENT path, so every other errno can drift unnoticed.
 //!
 //! Source of truth: `/usr/local/go/src/syscall/zerrors_linux_amd64.go`
 //! (linux/amd64, go1.26.5). Every entry below was extracted verbatim from
@@ -80,7 +79,7 @@ mod tests {
     use super::*;
 
     /// Every table entry must match go1.26.5's `zerrors_linux_amd64.go`
-    /// verbatim (verified empirically on this machine; see the plan doc).
+    /// verbatim.
     #[test]
     fn go_errno_texts_match_go_baseline() {
         let cases = [

@@ -47,7 +47,7 @@ cube-envd/                            the component directory; everything below 
 │   │   └── vocab.rs                  go1.26 errno text table
 │   ├── filesystem/                   filesystem domain
 │   │   ├── http/                     content_disposition, encoding, httpdate, preconditions, ranges
-│   │   ├── watch/                    inotify.rs, tree.rs, pump.rs
+│   │   ├── watch/                    inotify.rs, pump.rs, tree.rs
 │   │   ├── data_plane_tests.rs       data-plane tests
 │   │   ├── download.rs
 │   │   ├── entry.rs                  disk metadata -> EntryInfo
@@ -62,7 +62,7 @@ cube-envd/                            the component directory; everything below 
 │   │   └── mod.rs
 │   ├── process/                      process domain
 │   │   ├── cgroup/                   cgroup2.rs, noop.rs
-│   │   ├── engine/                   spawn.rs, io.rs, pty.rs, cleanup.rs
+│   │   ├── engine/                   child.rs, cleanup.rs, io.rs, pty.rs, spawn.rs
 │   │   ├── command.rs                Start / Connect / List / SendInput / ...
 │   │   ├── metadata.rs
 │   │   ├── mod.rs
@@ -78,6 +78,7 @@ cube-envd/                            the component directory; everything below 
 │   │   ├── stream.rs
 │   │   └── timeout.rs
 │   └── main.rs                       entry: wiring, signals, exit code
+├── tests/                            layer assertion (layer_rule.rs)
 ├── Cargo.lock                        locked dependency set
 ├── Cargo.toml                        crate manifest
 ├── Makefile                          component targets; the repo Makefile wraps them
@@ -122,7 +123,7 @@ Implemented (behavior matched fixture-by-fixture against the baseline):
 | CLI | Go `flag` compatible: `-port` (u16, `-port N` or `-port=N`), `-isnotfc` (accepted and ignored; `-isnotfc=false` is **rejected** — only the non-FC mode is implemented), `-version`/`--version`, `-commit`, `-h`/`-help` (usage, exit 0); `-cmd`/`-cgroup-root` are recognized but not implemented yet (warned and skipped); **any other flag or positional argument is a usage error — Go's message + usage on stderr + exit 2** |
 | Auth | `Authorization: Basic base64("<user>:")` / `username` query, `/etc/passwd` resolution, default user `root`, privilege drop per operation, `X-Access-Token` enforced only after /init provides one |
 
-Out of MVP scope — these return stable, protocol-correct `unimplemented`
+Out of scope — these return stable, protocol-correct `unimplemented`
 errors (HTTP 501 on unary surfaces, EndStream error frames on streaming
 surfaces), never panics or silent success:
 

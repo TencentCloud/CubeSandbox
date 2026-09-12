@@ -65,7 +65,7 @@ impl Cgroup2Manager {
             }
         }
 
-        // Deviation from upstream (declared, plan §6): upstream never writes
+        // Deviation from upstream (declared): upstream never writes
         // cgroup.subtree_control, so in nested/guest deployments where the
         // parent group has controllers disabled the property files below are
         // ENOENT and everything falls back to Noop. Enabling them here is
@@ -196,8 +196,8 @@ fn build_subtrees(
         // cpu.weight are exposed on a child only after the controller is
         // enabled on its parent.  Create the directory and enable its
         // subtree before writing resource properties; plain-directory test
-        // fixtures do not enforce this kernel ordering, which previously hid
-        // the bug.
+        // fixtures do not enforce this kernel ordering, so unit tests alone
+        // would not catch a wrong sequence.
         if let Err(e) = std::fs::create_dir_all(&parent) {
             let name = match t {
                 ProcType::Pty => "pty",
@@ -473,7 +473,7 @@ mod tests {
     #[test]
     fn fd_is_close_on_exec() {
         // CLOEXEC means the dir fd never leaks into user code past exec
-        // (plan §6; upstream's O_RDONLY open without O_CLOEXEC leaks it).
+        // (upstream's O_RDONLY open without O_CLOEXEC leaks it).
         let dir = tempfile::tempdir().unwrap();
         let mgr = manager_in(dir.path());
         let fd = mgr.fd(ProcType::User).unwrap();

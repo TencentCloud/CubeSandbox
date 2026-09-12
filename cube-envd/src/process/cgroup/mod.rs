@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! cgroup v2 manager (item 1.8). Mirrors upstream
+//! cgroup v2 manager. Mirrors upstream
 //! `packages/envd/internal/services/cgroups` (iface.go / cgroup2.go /
 //! noop.go) and the startup wiring of upstream `createCgroupManager`
 //! (`cmd/envd/main.go:244-293`). Only the `ptys` and `user` subtrees are
@@ -49,12 +49,12 @@ pub enum ProcType {
 /// semantics are taken over by `Cgroup2Manager`'s `Drop` (daemon shutdown
 /// cleanup), so observable behaviour is unchanged. Startup failure fallback =
 /// constructing a `NoopManager` instance (not an `Option`), matching upstream
-/// `createCgroupManager`'s named-return + defer (plan §0.1).
+/// `createCgroupManager`'s named-return + defer.
 pub trait Manager: Send + Sync {
     /// Returns the cgroup dir fd for `t`, or `None` when that subtree was not
     /// created (cgroup v2 unavailable → NoopManager). The fd is **borrowed**:
     /// the manager owns it for the daemon lifetime; the spawned child
-    /// inherits it via fork and must never close it (plan §3.4).
+    /// inherits it via fork and must never close it.
     #[cfg(test)]
     fn fd(&self, t: ProcType) -> Option<RawFd>;
 

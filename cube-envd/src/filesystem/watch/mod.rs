@@ -260,7 +260,7 @@ async fn run_pull(
     Ok(())
 }
 
-/// id → watcher. Held by the router (server.rs constructs the Arc),
+/// id → watcher. Held by the router (`app/routes.rs` constructs the Arc),
 /// mirroring upstream's `Service.watchers` (`service.go:15-19`): the
 /// registry and its only users live together in this module, so the shared
 /// state layer stays free of watch-specific entries.

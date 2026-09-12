@@ -28,8 +28,8 @@ const DEFAULT_PORT: u16 = 49983;
 /// -cmd is upstream's "run this command at daemon start" hook for template
 /// builds (`main.go:206-226`, `InitializeStartProcess`). Upstream itself marks
 /// it `TODO: Not used anymore in template build`, and the CubeSandbox template
-/// path never passes it. It stays unimplemented; see the "known gaps" section
-/// of the tree-refactor PR description for where that is recorded.
+/// path never passes it. It stays unimplemented (see README "Compatibility
+/// scope").
 const UNIMPLEMENTED: &[&str] = &["cmd", "cgroup-root"];
 
 pub(crate) struct Cli {

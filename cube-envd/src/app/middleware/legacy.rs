@@ -30,8 +30,8 @@ pub fn is_legacy(headers: &HeaderMap) -> bool {
 /// pipeline, i.e. the
 /// five filesystem unary RPCs cube-envd implements (Stat/ListDir/MakeDir/
 /// Move/Remove — CreateWatcher and the rest of the watch family still answer
-/// `unimplemented`, so they never reach here; when 1.1 mounts CreateWatcher its
-/// `{watcherId}` has no entry/entries key and passes through untouched).
+/// `unimplemented`, so they never reach here; CreateWatcher's `{watcherId}`
+/// response carries no entry/entries key, so it would pass through untouched).
 /// Only `entry` (Stat/Move/MakeDir) and `entries` (ListDir) are narrowed;
 /// `Remove` already returns `{}`, which needs no code.
 pub fn narrow(v: &mut Value) {
@@ -46,15 +46,15 @@ pub fn narrow(v: &mut Value) {
             }
         }
     }
-    // NOTE(1.1): WatchDir/GetWatcherEvents event narrowing is intentionally NOT
-    // pre-coded here. The legacy event JSON shape (single `type` string vs the
-    // current `eventTypes` list) is unresolved until 1.1 lands, so any placeholder
-    // written now would be rewritten then (YAGNI). 1.1 adds the branch and reuses
-    // `narrow_entry` / a `narrow_event` at that point. Header timing also differs
-    // for streaming: upstream `interceptor.go:51-57` sets X-E2B-Legacy-SDK BEFORE
-    // the handler runs, so streaming ERROR frames also carry the header — unlike
-    // unary (see `app/handlers.rs` `fs_unary_endpoint`). 1.1 must align that timing, not just the
-    // body narrowing.
+    // NOTE: WatchDir/GetWatcherEvents event narrowing is intentionally not
+    // pre-coded here: the legacy event JSON shape (single `type` string vs the
+    // current `eventTypes` list) is unresolved, so a placeholder would be
+    // rewritten as soon as the shape is fixed (YAGNI). Whoever adds it should
+    // reuse `narrow_entry` / a `narrow_event`. Header timing also differs for
+    // streaming: upstream `interceptor.go:51-57` sets X-E2B-Legacy-SDK BEFORE
+    // the handler runs, so streaming ERROR frames also carry the header —
+    // unlike unary (see `app/handlers.rs` `fs_unary_endpoint`); narrowing the
+    // body without matching that timing would still diverge.
 }
 
 /// Keep ONLY `{name, type, path}`; drop every other field (size/mode/permissions/
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn narrow_passes_through_watcher_id() {
         // Shapes without entry/entries are untouched — e.g. CreateWatcher's
-        // `{watcherId}` once 1.1 implements it (today it answers 501).
+        // `{watcherId}` (CreateWatcher currently answers 501).
         let mut v = serde_json::json!({"watcherId": "abc123"});
         narrow(&mut v);
         assert_eq!(v, serde_json::json!({"watcherId": "abc123"}));

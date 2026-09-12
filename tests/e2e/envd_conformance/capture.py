@@ -388,7 +388,7 @@ def cap_rest():
 # which would fork the container filesystem state between implementations
 # for every scenario that follows it.
 def cap_files_negotiation():
-    """Range / conditional-request download scenarios (item 1.3).
+    """Range / conditional-request download scenarios.
 
     Self-contained: uploads its own deterministic files first, so the group
     can run standalone (`python3 capture.py files-negotiation`) or as part of
@@ -618,8 +618,8 @@ def cap_fs():
     # Self-contained fixture set: base_a.txt / base_b.bin are uploaded HERE
     # (cap_rest creates the same files for its download scenarios, but
     # `--which fs` must not depend on a preceding rest run — recording on a
-    # bare container used to capture 404s for the Stat/Move golden paths
-    # while the comparison still "passed").
+    # bare container would capture 404s for the Stat/Move golden paths
+    # while the comparison still "passes").
     # Sweep first so a rerun on a reused container sees the same /home/user
     # on both sides: residue from compose (base_c.txt) and from this group's
     # own probes (base_b2.bin left by fs_move, zz_empty/zz_link/zz_suid/
@@ -635,7 +635,7 @@ def cap_fs():
                   # them so reruns start clean (fs_listdir_eloop re-creates
                   # the loop link, fs_move_into_newdir the parent chain).
                   "/home/user/eloop", "/home/user/mv_src.txt", "/home/user/mv_newdir",
-                  # cap_files_negotiation self-uploads these (item 1.3);
+                  # cap_files_negotiation self-uploads these;
                   # sweep them so an interrupted/rerun capture cannot leak
                   # them into fs_listdir_*.
                   "/home/user/neg_range.txt", "/home/user/neg_empty.txt"):
@@ -772,7 +772,7 @@ def cap_fs():
 
 
 def cap_fs_legacy():
-    # Legacy SDK (User-Agent "connect-python") conformance (item 1.6).
+    # Legacy SDK (User-Agent "connect-python") conformance.
     # Self-contained BY DESIGN: every path it reads is created right here, so
     # `--which fs-legacy` reproduces on its own.
     UA = {"User-Agent": "connect-python"}
@@ -1112,7 +1112,7 @@ def cap_watch():
     # RW must exist BEFORE the recursive watch opens: the server checks the
     # path first, and a missing directory would make both sides record an
     # identical not_found — a false-positive PASS that never exercises
-    # recursion (caught in review).
+    # recursion.
     connect_unary("filesystem.Filesystem/MakeDir", {"path": RW})
     # Seed file for the write/chmod/rename scenarios; created before any
     # watch opens so no CREATE event for it leaks into those sequences.

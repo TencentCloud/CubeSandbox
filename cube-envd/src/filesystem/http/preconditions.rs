@@ -313,8 +313,8 @@ mod tests {
         );
     }
 
-    /// Review finding #4: malformed ETag lists must follow Go's
-    /// scan-and-resume loop, not a naive `split(',')`.
+    /// Malformed ETag lists must follow Go's scan-and-resume loop, not a naive
+    /// `split(',')`.
     #[test]
     fn etag_list_parsing_follows_go_scan_loop() {
         // `"a"garbage, *`: Go scans `"a"`, resumes at `garbage, *`; that scan

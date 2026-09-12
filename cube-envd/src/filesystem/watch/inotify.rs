@@ -26,7 +26,7 @@ const WATCH_MASK: u32 = libc::IN_CREATE
     | libc::IN_MOVE_SELF
     | libc::IN_ATTRIB;
 
-// ---------- inotify (raw libc — no inotify crate, see plan) ----------
+// ---------- inotify ----------
 
 pub(super) struct Inotify {
     fd: RawFd,

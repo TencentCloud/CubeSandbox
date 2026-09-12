@@ -11,7 +11,7 @@ suite gates cube-envd changes, `ENVD_REF` bumps, and SDK-matrix updates.
 | File | Purpose |
 |---|---|
 | `capture.py` | Runs REST, filesystem RPC, and process streaming scenarios against a live envd, including pipe/PTY input, fragmented StreamInput, CloseStdin, stdin-default, timeout, and disconnect paths; records raw wire fixtures |
-| `conformance.py` | Normalizes two fixture directories (volatile values, header case, chunking) and diffs them; declared MVP differences are allowlisted with reasons |
+| `conformance.py` | Normalizes two fixture directories (volatile values, header case, chunking) and diffs them; declared differences are allowlisted with reasons |
 | `lifecycle_smoke.go` | Assertion-based black-box regression for interactive input and slow-client process cleanup against one live envd; these checks complement, but do not replace, Go-vs-Rust fixture capture |
 | `perf.py` | Startup-to-/health latency, RSS, and command round-trip comparison |
 | `termination_e2e.py` | Real cgroupfs OOM, fail-closed allocation/recovery, escaped descendants, wire metadata and Python SDK checks in an isolated Linux/QEMU guest |
@@ -82,7 +82,7 @@ python3 perf.py
 | error | bad user (REST 401 / RPC unauthenticated), missing paths, directory download, missing binary (127), malformed JSON |
 | timeout | `Connect-Timeout-Ms` expiry → `deadline_exceeded` + process killed, including an unread response whose output queue is full |
 | cancellation | client disconnect mid-stream → process keeps running (List + side-effect check) |
-| unimplemented | `/files/compose` answers with a stable protocol-correct error; the watch family, listed here while it was still unimplemented, now has its own capture group (see **Running**) |
+| unimplemented | `/files/compose` answers with a stable protocol-correct error; the watch family has its own capture group (see **Running**) |
 
 ## Termination metadata extension
 

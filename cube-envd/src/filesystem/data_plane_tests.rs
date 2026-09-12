@@ -52,8 +52,8 @@ async fn overwrite_keeps_mode_bits_automatically() {
     let user = test_user(dir.path().to_str().unwrap());
     let target = dir.path().join("script.sh");
     // O_TRUNC never touches the mode of an existing file, so an
-    // executable script keeps its x bits across an overwrite — the
-    // upstream behavior the old mode-copy logic worked around.
+    // executable script keeps its x bits across an overwrite — matching
+    // upstream, which carries no explicit mode copy.
     std::fs::write(&target, b"#!/bin/sh\n").unwrap();
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
     let (tx, rx) = tokio::sync::mpsc::channel(4);
@@ -139,8 +139,8 @@ async fn upload_through_symlink_writes_target_and_leaves_link() {
     // In-place write follows a symlink (like upstream os.OpenFile), and
     // chown follows too (like upstream os.Chown): content lands on the
     // link's destination and the link itself survives. The ownership
-    // differential (daemon-owned target without the fix) needs a
-    // root-owned pre-existing target to observe — covered by the
+    // differential (a daemon-owned target rather than the caller's uid)
+    // needs a root-owned pre-existing target to observe — covered by the
     // container probe recorded in RESULTS.md.
     std::fs::write(&real, b"old").unwrap();
     std::os::unix::fs::symlink(&real, &link).unwrap();
@@ -429,9 +429,9 @@ mod download_tests {
         assert!(b.is_empty());
     }
 
-    /// Round-2 review: a true empty file must send `Content-Length: 0`
-    /// exactly like Go's Seek(End)-sized ServeContent — not chunked (the
-    /// conformance normalizer hides framing, so this was invisible there).
+    /// A true empty file must send `Content-Length: 0` exactly like Go's
+    /// Seek(End)-sized ServeContent — not chunked (the conformance normalizer
+    /// hides framing, so it cannot catch this).
     #[tokio::test]
     async fn empty_file_sends_content_length_zero() {
         let (_d, p) = tmp_file("empty.bin", b"");
@@ -473,9 +473,9 @@ mod download_tests {
         assert!(h.contains_key(header::CONTENT_DISPOSITION));
     }
 
-    /// Round-5: an obs-text byte after a fractional second used to panic the
-    /// date parser (byte index inside U+FFFD) and answer 500 instead of
-    /// treating the unparseable date as "condition does not apply".
+    /// An obs-text byte after a fractional second must not panic the date
+    /// parser (byte index inside U+FFFD); the unparseable date is treated as
+    /// "condition does not apply", not a 500.
     #[tokio::test]
     async fn obs_text_after_fractional_second_does_not_500() {
         let (_d, p) = tmp_file("c.bin", b"cache-me");
@@ -489,8 +489,8 @@ mod download_tests {
         assert_eq!(&b[..], b"cache-me");
     }
 
-    /// Round-5: an asctime If-Modified-Since with a fractional second — the
-    /// digit run must not swallow the year (Go answers 304).
+    /// An asctime If-Modified-Since with a fractional second — the digit run
+    /// must not swallow the year (Go answers 304).
     #[tokio::test]
     async fn asctime_fractional_second_ims_304s() {
         let t = std::time::UNIX_EPOCH
@@ -506,8 +506,8 @@ mod download_tests {
     }
 
     /// Char devices with stat size 0 (Go Seek(End) = 0): the answer is an
-    /// explicit CL: 0 with an empty body — never an unbounded chunked
-    /// stream. (Round-4 hardening; verified against ServeContent directly.)
+    /// explicit CL: 0 with an empty body — never an unbounded chunked stream
+    /// (verified against Go's ServeContent).
     #[tokio::test]
     async fn char_device_answers_empty_cl0_like_go() {
         if tokio::fs::metadata("/dev/zero")
@@ -596,7 +596,7 @@ mod download_tests {
         assert!(!h.contains_key(header::VARY));
     }
 
-    // ---- mtime edge cases (review findings #2/#3) --------------------------
+    // ---- mtime edge cases --------------------------------------------------
 
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -639,8 +639,8 @@ mod download_tests {
         // floor (epoch date) and the date conditions compare the floor.
         let t = UNIX_EPOCH.checked_add(Duration::from_millis(500)).unwrap();
         assert_eq!(modtime_of(Ok(t)), (Some(0), Some(0)));
-        // Pre-epoch mtimes are kept (the old duration_since().ok() dropped
-        // them); Go Truncate floors: -1.5s → -2s.
+        // Pre-epoch mtimes are kept (not dropped); Go Truncate floors:
+        // -1.5s → -2s.
         let t = UNIX_EPOCH.checked_sub(Duration::from_secs(1)).unwrap();
         assert_eq!(modtime_of(Ok(t)), (Some(-1), Some(-1)));
         let t = UNIX_EPOCH.checked_sub(Duration::from_millis(500)).unwrap();
@@ -650,7 +650,7 @@ mod download_tests {
     }
 
     /// `touch -d '@253402300800'` (year 10000, beyond the time crate's
-    /// range): Go answers 200 with the file; the old `expect()` panicked →
+    /// range): Go answers 200 with the file, so this must not panic into a
     /// 500.
     #[tokio::test]
     async fn out_of_range_mtime_downloads_without_panic() {
@@ -760,7 +760,7 @@ mod download_tests {
         download(&config, params, headers).await
     }
 
-    // ---- obs-text header bytes: garbage, not absent (review finding #1) ----
+    // ---- obs-text header bytes: garbage, not absent ------------------------
 
     #[tokio::test]
     async fn obs_text_range_is_garbage_416_not_absent_200() {

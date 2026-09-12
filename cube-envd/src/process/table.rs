@@ -93,7 +93,7 @@ fn find_entry<'a>(
 pub struct ProcessTable {
     processes: Mutex<HashMap<ProcHandle, ProcEntry>>,
     next_handle: AtomicU64,
-    /// cgroup v2 subtree manager (item 1.8). Non-`Option`: startup failure is
+    /// cgroup v2 subtree manager. Non-`Option`: startup failure is
     /// a `NoopManager` instance, not an absent value (mirrors upstream
     /// `createCgroupManager`'s named return + defer swap). `new()` always
     /// starts with the no-op fallback so unit tests never touch
@@ -112,9 +112,6 @@ impl ProcessTable {
         }
     }
 
-    /// cgroup dir fd for `t`, or `None` under the Noop fallback. Handed to
-    /// `engine::spawn` at the process service layer (mirrors upstream
-    /// `getProcType` + `GetFileDescriptor` in handler.go).
     /// cgroup dir fd for `t`, or `None` under the Noop fallback. Handed to
     /// `engine::spawn` at the process service layer (mirrors upstream
     /// `getProcType` + `GetFileDescriptor` in handler.go).
@@ -270,7 +267,7 @@ mod tests {
         }
     }
 
-    /// The two lines the process service depends on (plan §3.4): a fresh
+    /// The two lines the process service depends on: a fresh
     /// `ProcessTable::new(NoopManager)` has no cgroup manager (`fd() == None` —
     /// unit tests never probe the host tree), and constructing it with a real
     /// manager makes the same call return `Some`. A stub manager stands in for
