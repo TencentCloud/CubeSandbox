@@ -261,7 +261,12 @@ RCOW_IOBUF_LARGE_POOL="${RCOW_IOBUF_LARGE_POOL:-512}"
 RCOW_READ_AHEAD_KB="${RCOW_READ_AHEAD_KB:-1024}"
 export S3LVOL_READ_AHEAD_KB="${RCOW_READ_AHEAD_KB}"
 
-RCOW_TGT_CPUMASK="${RCOW_TGT_CPUMASK:-0x3}"
+# Default -m: last two CPUs from this process's Cpus_allowed_list (CPU0 stays
+# free for housekeeping when the set is 0..N-1). An explicit RCOW_TGT_CPUMASK
+# always wins. See rcow_cpumask.sh.
+# shellcheck source=./rcow_cpumask.sh
+. "${RCOW_SCRIPT_DIR}/rcow_cpumask.sh"
+RCOW_TGT_CPUMASK="${RCOW_TGT_CPUMASK:-$(rcow_default_tgt_cpumask)}"
 RCOW_TGT_MEM_MB="${RCOW_TGT_MEM_MB:-16384}"
 
 # Run without hugepages, deliberately, rather than as a fallback for a node

@@ -236,7 +236,7 @@ TGT_PID="$(rcow_start_target_detached "${RCOW_TGT_BIN}" -m "${RCOW_TGT_CPUMASK}"
 
 rcow_wait_rpc 60 "${TGT_PID}" ||
 	bail "the target did not start answering RPCs within 60s"
-rcow_log "target up as pid ${TGT_PID}, log ${RCOW_LOG}"
+rcow_log "target up as pid ${TGT_PID}, mask ${RCOW_TGT_CPUMASK}, log ${RCOW_LOG}"
 
 rcow_apply_startup_opts || bail "the startup options could not be applied"
 
