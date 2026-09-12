@@ -7,9 +7,9 @@ package score
 
 import (
 	"context"
-	"reflect"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
@@ -27,21 +27,55 @@ type Selector interface {
 
 func NewSelector(ctx context.Context) []Selector {
 	conf := config.GetConfig().Scheduler
-	if conf == nil || conf.Score == nil || conf.Score.ResourceWeights == nil || len(conf.Score.EnableScorers) == 0 {
+	if conf == nil || conf.Score == nil || len(conf.Score.EnableScorers) == 0 {
 		return []Selector{}
 	}
 	ss := make([]Selector, 0)
 	for _, name := range conf.Score.EnableScorers {
-
-		fn := reflect.ValueOf(scores[name])
-
-		if !fn.IsValid() {
+		registration, ok := scores[name]
+		if !ok {
+			log.G(ctx).Warnf("unknown scheduler score selector: %s", name)
 			continue
 		}
-		ss = append(ss, fn.Call(nil)[0].Interface().(Selector))
+		// Legacy affinity_score previously depended on the global
+		// ResourceWeights != nil NewSelector guard. Keep that gate only for
+		// empty-profile configs so upgrades do not suddenly activate affinity
+		// scoring. Plugin-only scorers (e.g. binpack_score) and Profile-selected
+		// scorers intentionally skip this gate.
+		if registration.legacyRequiresResourceWeights &&
+			conf.Score.ResourceWeights == nil &&
+			conf.Profile == "" {
+			log.G(ctx).Warnf("scheduler score selector %s skipped: resource_weights is nil (legacy empty-profile compatibility)", name)
+			continue
+		}
+		if registration.factors != nil {
+			factors := registration.factors(conf.Score.ScorePluginConf)
+			if len(factors) == 0 {
+				// Missing plugin_conf is rejected at config.Init for listed
+				// factor scorers; remaining skips are empty/ineffective factor
+				// lists on the empty-profile path. Errorf so operators notice
+				// an unscored scheduler instead of a single Warn line.
+				log.G(ctx).Errorf("scheduler score selector %s skipped: missing plugin_conf or empty enable_weight_factors (fix plugin_conf to activate)", name)
+				continue
+			}
+			if !hasEffectiveFactorWeight(conf.Score, factors) {
+				log.G(ctx).Errorf("scheduler score selector %s skipped: no positive resource weight for its enabled factors", name)
+				continue
+			}
+		}
+		if registration.requiresPluginConf != nil && !registration.requiresPluginConf(conf.Score.ScorePluginConf) {
+			log.G(ctx).Errorf("scheduler score selector %s skipped: required plugin_conf is missing", name)
+			continue
+		}
+		ss = append(ss, registration.new())
 	}
 
-	if conf.Score.ScorePluginConf.MultiFactorWeightedAverage != nil {
+	// Match master feeder gating: master NewSelector returned early when
+	// ResourceWeights == nil, so loopAsyncScore never started in that case.
+	// Keep that gate so empty-profile configs with omitted resource_weights do
+	// not newly populate node.Score / pscore. Plugin-only scorers (binpack)
+	// intentionally skip the ResourceWeights construction gate above.
+	if shouldStartAsyncMultiFactorFeeder(conf.Score) {
 		recov.GoWithRecover(func() {
 			loopAsyncScore(ctx)
 		})
@@ -49,9 +83,86 @@ func NewSelector(ctx context.Context) []Selector {
 	return ss
 }
 
-var scores = map[string]interface{}{
-	"real_time_weighted_average":    NewRealTimeWeightedAverageScore,
-	"multi_factor_weighted_average": NewMultiFactorWeightedAverageScore,
-	"affinity_score":                NewAffinityScore,
-	"image_score":                   NewImageScore,
+// shouldStartAsyncMultiFactorFeeder mirrors master's ResourceWeights early-return:
+// the async feeder only starts when both the multi_factor plugin block and a
+// non-nil resource_weights map are present.
+func shouldStartAsyncMultiFactorFeeder(score *config.SchedulerScoreConf) bool {
+	if score == nil {
+		return false
+	}
+	return score.ScorePluginConf.MultiFactorWeightedAverage != nil &&
+		score.ResourceWeights != nil
+}
+
+type scoreRegistration struct {
+	new                           func() Selector
+	factors                       func(config.ScorePluginConf) []string
+	requiresPluginConf            func(config.ScorePluginConf) bool
+	legacyRequiresResourceWeights bool
+}
+
+func hasEffectiveFactorWeight(conf *config.SchedulerScoreConf, factors []string) bool {
+	if conf == nil || len(conf.ResourceWeights) == 0 || len(factors) == 0 {
+		return false
+	}
+	for _, factor := range factors {
+		if conf.ResourceWeights[factor] > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+var scores = map[string]scoreRegistration{
+	"real_time_weighted_average": {
+		new: func() Selector { return NewRealTimeWeightedAverageScore() },
+		factors: func(conf config.ScorePluginConf) []string {
+			if conf.RealTimeWeightedAverage == nil {
+				return nil
+			}
+			return conf.RealTimeWeightedAverage.EnableWeightFactors
+		},
+	},
+	"multi_factor_weighted_average": {
+		new: func() Selector { return NewMultiFactorWeightedAverageScore() },
+		factors: func(conf config.ScorePluginConf) []string {
+			if conf.MultiFactorWeightedAverage == nil {
+				return nil
+			}
+			return conf.MultiFactorWeightedAverage.EnableWeightFactors
+		},
+	},
+	"affinity_score": {
+		new:                           func() Selector { return NewAffinityScore() },
+		requiresPluginConf:            func(conf config.ScorePluginConf) bool { return conf.AffinityScore != nil },
+		legacyRequiresResourceWeights: true,
+	},
+	"image_score": {
+		new: func() Selector { return NewImageScore() },
+		factors: func(conf config.ScorePluginConf) []string {
+			if conf.ImageScore == nil {
+				return nil
+			}
+			return conf.ImageScore.EnableWeightFactors
+		},
+	},
+	"binpack_score": {
+		new: func() Selector { return NewBinpackScore() },
+	},
+	"external_http_score": {
+		new: func() Selector { return NewExternalHTTPScore() },
+		requiresPluginConf: func(conf config.ScorePluginConf) bool {
+			return conf.ExternalHTTPScore != nil
+		},
+	},
+}
+
+// RegisteredScoreNames returns the live score registry keys for cross-package
+// drift checks against config.AllowedSchedulerScoreNames().
+func RegisteredScoreNames() map[string]struct{} {
+	out := make(map[string]struct{}, len(scores))
+	for name := range scores {
+		out[name] = struct{}{}
+	}
+	return out
 }

@@ -7,10 +7,17 @@ If you are *using* CubeSandbox (deploying it, building templates, calling the AP
 ## Conventions
 
 - [Redis Key Convention](./redis-key-spec) — the unified namespace every service must use for the shared Redis instance: naming format, scope ownership, the registered key catalog, TTL policy, and the per-service key-builder modules.
+- [Scheduler Profile Configuration Example](./scheduler-profile-config-example) — copyable CubeMaster runtime `scheduler.profile` / `binpack_score` YAML contract (not offline simulator models; no live performance claims).
 
 ## Service designs
 
 - [CubeTemplateCenter Design](./templatecenter-design) — the standalone template build service: control/data plane split, routing rules, callback authentication, artifact lifecycle, deployment wiring, and known limitations.
+
+## Scheduler offline benchmark
+
+- [Scheduler Simulator Benchmark](./scheduler-simulator-benchmark) — one-command offline profile × workload runs, report outputs, and acceptance checks.
+- [Scheduler Evaluation Metrics](./scheduler-metrics) — metric definitions, measurement semantics, and what simulator numbers can and cannot prove.
+- [Scheduler Benchmark Report Schema](./scheduler-benchmark-report-schema) — JSON/Markdown report contract, including `comparisons[].notes` shape.
 
 ## What belongs here
 
