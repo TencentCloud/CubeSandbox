@@ -794,8 +794,8 @@ func TestIsDeadlockError(t *testing.T) {
 	assert.True(t, isDeadlockError(&mysql.MySQLError{Number: 1205, Message: "Lock wait timeout exceeded"}))
 	assert.True(t, isDeadlockError(&mysql.MySQLError{Number: 1213, Message: "Deadlock found when trying to get lock"}))
 	assert.True(t, isDeadlockError(fmt.Errorf("claim fail: %w", &mysql.MySQLError{Number: 1213, Message: "Deadlock found"})))
-	assert.True(t, isDeadlockError(errors.New("ERROR: deadlock detected; SQLSTATE 40P01")))
-	assert.True(t, isDeadlockError(errors.New("ERROR: lock not available; SQLSTATE 55P03")))
+	assert.True(t, isDeadlockError(&pgconn.PgError{Code: "40P01", Message: "deadlock detected"}))
+	assert.True(t, isDeadlockError(fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "55P03", Message: "lock not available"})))
 	assert.False(t, isDeadlockError(&mysql.MySQLError{Number: 1062, Message: "Duplicate entry"}))
 	assert.False(t, isDeadlockError(errors.New("Error 1062 (23000): Duplicate entry for key 'alias_key'")))
 	assert.False(t, isDeadlockError(errors.New("connection reset by peer")))
@@ -963,6 +963,36 @@ func TestIsDuplicateAliasError_WrappedPostgres23505(t *testing.T) {
 	}
 	wrapped := fmt.Errorf("claim alias %q for template %s fail: %w", "shared", "tpl-1", inner)
 	assert.True(t, isDuplicateAliasError(wrapped), "23505 must remain detectable after %%w wrap")
+}
+
+func TestIsDuplicateAliasErrorRejectsMisleadingText(t *testing.T) {
+	wrappedLengthError := fmt.Errorf(
+		"claim alias for template tpl-cache-claim-fail-23505 fail: %w",
+		&pgconn.PgError{Code: "22001", Message: "value too long"},
+	)
+	for _, err := range []error{
+		wrappedLengthError,
+		errors.New("claim alias for template tpl-cache-claim-fail-23505 failed: SQLSTATE 22001"),
+		errors.New("unique_constraint mentioned in diagnostic text"),
+		errors.New("ERROR: value too long for type character varying(256) (SQLSTATE 22001)"),
+	} {
+		assert.False(t, isDuplicateAliasError(err))
+	}
+}
+
+func TestIsDuplicateAliasErrorPostgresSQLState(t *testing.T) {
+	for _, code := range []string{"23505"} {
+		inner := &pgconn.PgError{Code: code, Message: "duplicate key"}
+		assert.True(t, isDuplicateAliasError(inner))
+		assert.True(t, isDuplicateAliasError(fmt.Errorf("wrapped: %w", inner)))
+	}
+	assert.False(t, isDuplicateAliasError(&pgconn.PgError{Code: "22001", Message: "value too long"}))
+}
+
+func TestIsDuplicateAliasErrorMySQLCodes(t *testing.T) {
+	assert.True(t, isDuplicateAliasError(&mysql.MySQLError{Number: 1062, Message: "Duplicate entry"}))
+	assert.True(t, isDuplicateAliasError(fmt.Errorf("wrapped: %w", &mysql.MySQLError{Number: 1062, Message: "Duplicate entry"})))
+	assert.False(t, isDuplicateAliasError(&mysql.MySQLError{Number: 1406, Message: "Data too long"}))
 }
 
 func TestSyncCreateRedoImageJobAliasTx_NoJobsSucceeds(t *testing.T) {

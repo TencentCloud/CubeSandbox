@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db"
@@ -1498,25 +1499,24 @@ func isDuplicateAliasError(err error) bool {
 	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
 		return true
 	}
-	// pgconn.PgError has Code == "23505" for unique_violation. We check via
-	// string matching on the error message as a fallback because the pgx
-	// driver may not be imported in all build configurations.
-	s := err.Error()
-	return strings.Contains(s, "23505") || strings.Contains(s, "unique_constraint")
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
 // isDeadlockError reports transient lock errors worth one retry in the alias
 // release+claim transaction: InnoDB deadlock (1213) / lock-wait-timeout (1205),
 // and the PostgreSQL equivalents 40P01 (deadlock_detected) / 55P03
-// (lock_not_available). PG codes are string-matched like isDuplicateAliasError
-// because pgx may not be imported in all build configurations.
+// (lock_not_available).
 func isDeadlockError(err error) bool {
 	var mysqlErr *mysql.MySQLError
 	if errors.As(err, &mysqlErr) && (mysqlErr.Number == 1205 || mysqlErr.Number == 1213) {
 		return true
 	}
-	s := err.Error()
-	return strings.Contains(s, "40P01") || strings.Contains(s, "55P03")
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == "40P01" || pgErr.Code == "55P03"
 }
 
 func retryOnceOnDeadlock(run func() error) error {
