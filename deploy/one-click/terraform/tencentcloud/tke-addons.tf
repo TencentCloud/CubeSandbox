@@ -376,7 +376,7 @@ resource "kubernetes_secret" "cubemaster_conf" {
           resource_weights = {
             mvm_num          = 2
             local_create_num = 3
-            cpu_usage        = 1
+            quota_cpu_usage  = 1
             quota_mem_usage  = 1
           }
           plugin_conf = {
@@ -385,7 +385,7 @@ resource "kubernetes_secret" "cubemaster_conf" {
               enable_weight_factors = [
                 "mvm_num",
                 "local_create_num",
-                "cpu_usage",
+                "quota_cpu_usage",
                 "quota_mem_usage",
               ]
               time_decay_seconds = 300
