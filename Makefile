@@ -51,6 +51,7 @@ RUST_PROJECT_DIRS := \
 	$(ROOT_DIR)/CubeAPI \
 	$(ROOT_DIR)/CubeShim \
 	$(ROOT_DIR)/agent \
+	$(ROOT_DIR)/cube-envd \
 	$(ROOT_DIR)/guest-init \
 	$(ROOT_DIR)/cubecow \
 	$(ROOT_DIR)/hypervisor
@@ -152,6 +153,7 @@ help:
 	@printf "  cube-volume-s3-test Run S3 Volume plugin unit tests in Docker\n"
 	@printf "  cube-volume-cos-rpc-test Run COS RPC Volume plugin unit tests in Docker\n"
 	@printf "  agent         Build cube-agent in Docker\n"
+	@printf "  cube-envd     Build static cube-envd in Docker\n"
 	@printf "  cube-init     Build cube-init (guest PID1) in Docker (alias: guest-init)\n"
 	@printf "  guest-init    Alias for cube-init (source dir guest-init/)\n"
 	@printf "  agent-ext4    Build independent cube-agent.ext4 (+ version) in Docker (alias: cube-agent-ext4)\n"
@@ -380,7 +382,7 @@ cubecow-test-native: builder-image
 .PHONY: cubemaster
 cubemaster: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeMaster && CGO_ENABLED=0 make build && mkdir -p /workspace/_output/bin && cp build/cubemaster build/cubemastercli /workspace/_output/bin/'
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/cube-envd && CUBE_ENVD_COMMIT=$(CUBE_COMMIT) TARGET_ARCH=$(TARGET_ARCH) make install BINDIR=/workspace/_output/bin && cd /workspace/CubeMaster && CGO_ENABLED=0 make cubemaster && CGO_ENABLED=0 make cubemastercli ENVD_LOCAL_PATH=/workspace/_output/bin/cube-envd && cp build/cubemaster build/cubemastercli /workspace/_output/bin/'
 
 # CubeTemplateCenter is a separate module whose go.mod replaces CubeMaster,
 # CubeDB, Cubelet and cubelog with local paths, so it builds inside the same
@@ -418,6 +420,11 @@ cube-proxy-sidecar: builder-image
 agent: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/agent && make -j1 &&  make BINDIR=/workspace/_output/bin install'
+
+.PHONY: cube-envd
+cube-envd: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/cube-envd && CUBE_ENVD_COMMIT=$(CUBE_COMMIT) TARGET_ARCH=$(TARGET_ARCH) make install BINDIR=/workspace/_output/bin'
 
 .PHONY: cube-init guest-init
 cube-init guest-init: builder-image
@@ -545,6 +552,24 @@ cubevs-test: builder-image
 agent-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/agent && make test'
 
+# The integration tests resolve the invoking uid through /etc/passwd
+# (cube-envd/tests/common/mod.rs) to build their Authorization header, so they
+# need a uid that has an entry inside the builder image. builder-run defaults to
+# the host uid, which on GitHub-hosted runners is 1001 (`runner`) and has no
+# entry in that image, making every such test panic. Run as root instead, as
+# cubevs-test and cube-s3lvol-test already do: root exists in passwd and the
+# no-header production path (spawn as root) is exercised too.
+.PHONY: cube-envd-test
+cube-envd-test: builder-image
+	$(MAKE) builder-run BUILDER_USER=0:0 BUILDER_CMD='cd /workspace/cube-envd && make test'
+
+# Clippy runs with -D warnings, so this target is a hard gate: any new lint
+# fails it. It is intentionally separate from `cube-envd` to keep the plain
+# build fast.
+.PHONY: cube-envd-lint
+cube-envd-lint: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-envd && make lint'
+
 # Only unit tests (--lib --bins) run here; the tests/integration.rs target
 # needs a full VM. This does not pass /dev/kvm into the builder, so the
 # runtime-KVM vmm tests are not reached (see tests/unittest/run.sh
@@ -635,6 +660,8 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C agent fmt
 	@printf '  %-8s %s\n' "FMT" "guest-init"
 	@$(MAKE) -C guest-init fmt
+	@printf '  %-8s %s\n' "FMT" "cube-envd"
+	@$(MAKE) -C cube-envd fmt
 	@printf '  %-8s %s\n' "FMT" "cubecow"
 	@$(MAKE) -C cubecow fmt
 	@printf '  %-8s %s\n' "FMT" "CubeAPI"

@@ -96,14 +96,14 @@ cp build.env.example build.env
 ./deploy/one-click/build-release-bundle-builder.sh
 ```
 
-如果希望发布包里的 `cubemastercli` 内嵌默认 `envd`，请先在构建机准备好 `envd` 二进制文件，然后在推荐的 builder 入口中传入 `ENVD_LOCAL_PATH`：
+发布流程默认会编译仓库自研的 Rust `cube-envd`（按当前构建架构）并内嵌到发布的 `cubemastercli` 中，因此 CLI 自带默认 `envd` 供模板注入使用。如果想用自己的 ELF 覆盖默认值，请先在构建机准备好 `envd` 二进制文件，然后在推荐的 builder 入口中传入 `ENVD_LOCAL_PATH`：
 
 ```bash
 ENVD_LOCAL_PATH=/abs/path/to/envd \
 ./deploy/one-click/build-release-bundle-builder.sh
 ```
 
-设置该变量后，宿主机 wrapper 会先把文件复制到 `deploy/one-click/.work/envd`，builder 容器再用这个文件构建内嵌 `envd` 的 `cubemastercli`。如果不设置 `ENVD_LOCAL_PATH`，发布包中的 `cubemastercli` 不包含默认 `envd`；运行时若模板构建启用 envd 注入，需要显式传入 `--envd-path`。
+设置该变量后，宿主机 wrapper 会先把文件复制到 `deploy/one-click/.work/envd`，builder 容器改用这个文件内嵌、不再现场编译 `cube-envd`（`.work/envd` 存在时始终优先）。未设置时，容器内会按当前架构（x86_64/aarch64 的 musl target）现场构建 `cube-envd` 并内嵌；此后启用 envd 注入的模板构建无需再传 `--envd-path`。
 
 这个入口会先：
 

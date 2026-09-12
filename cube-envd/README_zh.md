@@ -1,0 +1,282 @@
+# cube-envd
+
+> **English**: [README.md](./README.md)
+
+`cube-envd` 是运行在每个 CubeSandbox 沙箱内部的 E2B 兼容数据面守护进程。它为 CubeSandbox SDK 和 E2B SDK 提供沙箱内运行时能力，包括执行命令、读写文件、操作文件系统、打开 PTY 终端以及初始化创建沙箱时的环境变量。
+
+默认监听 `0.0.0.0:49983`。`GET /health` 在服务就绪后返回 `204 No Content`，因此也适合作为模板就绪探针：
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:49983/health
+# => 204
+```
+
+## 在系统中的角色
+
+```
+用户 SDK / E2B SDK
+        │  通过 CubeProxy / 沙箱数据面直连的 HTTPS
+        ▼
+   容器端口 49983
+        │
+        ▼
+   cube-envd（本组件，运行在沙箱内）
+        │  ┌───────────────────────┐
+        ├──│ 进程执行              │  命令、PTY、信号、标准输入输出
+        │  └───────────────────────┘
+        │  ┌───────────────────────┐
+        ├──│ 文件 / 文件系统 I/O    │  上传、下载、stat、watch、mkdir 等
+        │  └───────────────────────┘
+        │  ┌───────────────────────┐
+        └──│ 环境变量快照          │  /init 创建时环境变量
+           └───────────────────────┘
+```
+
+`cube-envd` 通常安装在 `cubesandbox-base` 镜像的 `/usr/bin/envd`，并由 [`docker/cube-entrypoint.sh`](../docker/cube-entrypoint.sh) 启动。也可以通过 `cubemastercli tpl create-from-image --enable-inject-envd` 注入到自定义模板中。
+
+## API
+
+`cube-envd` 在 `49983` 端口提供一个小型 HTTP API。大多数 RPC 方法使用 [Connect 协议](https://connectrpc.com/) 和 protobuf JSON 负载；协议定义位于 [`proto/`](./proto)，生成的接口参考文档位于 [`doc/cube-envd-api.md`](./doc/cube-envd-api.md)。
+
+### 健康检查
+
+| 方法 | 路径 | 说明 |
+|--------|------|-------------|
+| `GET` | `/health` | 当 `cube-envd` 可以接收 SDK/数据面请求时返回 `204`。 |
+
+### 环境变量
+
+| 方法 | 路径 | 说明 |
+|--------|------|-------------|
+| `POST` | `/init` | 原子替换默认环境变量快照。请求体：`{"envVars": {"KEY": "value"}}`。 |
+| `GET` | `/envs` | 以 JSON 返回当前环境变量快照。 |
+
+### 文件
+
+| 方法 | 路径 | 说明 |
+|--------|------|-------------|
+| `GET` | `/files?path=...&username=...` | 流式读取磁盘上的普通文件。 |
+| `POST` | `/files?path=...&username=...` | 使用 `application/octet-stream` 或 `multipart/form-data` 上传文件。写入采用原子替换（临时文件 + rename）。 |
+
+### 进程 RPC
+
+以下端点实现 `process.Process` 服务：
+
+| 端点 | 类型 | 说明 |
+|----------|------|-------------|
+| `/process.Process/Start` | streaming | 启动命令或 PTY，并流式返回输出和退出事件。 |
+| `/process.Process/List` | unary | 列出由 `cube-envd` 管理的存活进程。 |
+| `/process.Process/Connect` | streaming | 订阅存活进程，或按 PID / 标签回放刚结束的进程。 |
+| `/process.Process/Update` | unary | 调整 PTY 终端尺寸。 |
+| `/process.Process/StreamInput` | streaming | 多帧客户端输入流，写入到已选择的进程。 |
+| `/process.Process/SendInput` | unary | 写入一段 stdin 或 PTY 输入。 |
+| `/process.Process/SendSignal` | unary | 向进程组发送 `SIGNAL_SIGTERM` 或 `SIGNAL_SIGKILL`。 |
+| `/process.Process/CloseStdin` | unary | 关闭普通进程 stdin（EOF）；不适用于 PTY 进程。 |
+
+#### 进程结束事件
+
+`Start` 与 `Connect` 流都以 `EndEvent` 收尾。其字段形状属于 SDK 契约，管道进程与
+PTY 进程完全一致：
+
+| 场景 | `exitCode` | `exited` | `status` | `error` |
+|----------|-----------|----------|----------|---------|
+| 正常退出，退出码 `N` | `N`（为 `0` 时省略） | `true` | `exit status N` | 省略 |
+| 被信号 `N` 终止 | `128 + N` | `false`（省略） | `terminated by signal N` | `terminated by signal N` |
+| 回收失败 | `-1` | `false`（省略） | `failed to reap process` | 错误文本 |
+
+说明：
+
+- 遵循 shell 约定：被信号 `N` 终止的进程上报 `128 + N`，因此 `SIGKILL` 为 `137`、
+  `SIGTERM` 为 `143`。参考实现 envd 对信号终止上报 `-1`；本实现把负值保留给回收失败。
+- proto3 JSON 会省略零值字段，因此正常退出时没有 `exitCode`、被信号终止时没有
+  `exited`。客户端需要依赖 `status`（与 `exited`）区分"正常退出"与"被信号终止"。
+- 本仓库三套 SDK 在 `exitCode` 缺省时会从 `status` 解析退出码，因此 `status` 的
+  文案属于契约的一部分。
+
+### 文件系统 RPC
+
+以下端点实现 `filesystem.Filesystem` 服务：
+
+| 端点 | 类型 | 说明 |
+|----------|------|-------------|
+| `/filesystem.Filesystem/Stat` | unary | 返回文件/目录/符号链接的元数据。 |
+| `/filesystem.Filesystem/MakeDir` | unary | 创建目录及其缺失的父目录。 |
+| `/filesystem.Filesystem/Move` | unary | 重命名/移动文件或目录。 |
+| `/filesystem.Filesystem/ListDir` | unary | 列出目录，可指定递归深度。 |
+| `/filesystem.Filesystem/Remove` | unary | 删除文件，或递归删除目录。 |
+| `/filesystem.Filesystem/WatchDir` | streaming | 监听目录，并流式返回 create/write/remove/rename/chmod 事件。 |
+| `/filesystem.Filesystem/CreateWatcher` | unary | **未实现** — 返回 unimplemented RPC 错误。 |
+| `/filesystem.Filesystem/GetWatcherEvents` | unary | **未实现** — 返回 unimplemented RPC 错误。 |
+| `/filesystem.Filesystem/RemoveWatcher` | unary | **未实现** — 返回 unimplemented RPC 错误。 |
+
+### 协议说明
+
+- 一元 RPC 需要 `Content-Type: application/json` 和 `Connect-Protocol-Version: 1`；JSON 消息直接放在 HTTP body 中。
+- 流式 RPC 需要 `Content-Type: application/connect+json` 和 `Connect-Protocol-Version: 1`。
+- 流式 Connect 帧格式为：1 字节标志头 + 4 字节大端长度 + JSON 负载。结束流标志为 `0x02`。
+- 流式单帧最大 16 MiB；一元 JSON body 最大 1 MiB。
+- `Connect-Timeout-Ms` 可用于设置可选的进程超时。
+- `Keepalive-Ping-Interval` 用于控制空闲流式 RPC 的服务端保活帧。
+
+## 用户与路径解析
+
+- 对于 RPC 端点，Basic `Authorization` 请求头中的用户名用于选择执行操作的本地 Unix 用户。如果请求头缺失，默认使用 `root`。Basic 头中的密码部分会被忽略。
+- 对于 `/files`，可以通过 `username` 查询参数选择本地用户（默认：`root`）。
+- 相对路径和 `~/...` 路径会基于所选用户的主目录解析。绝对路径直接使用。`~otheruser/...` 会被拒绝。
+
+启动的进程会先清空环境变量，然后按参考实现 envd 的语义构建基础环境：`PATH` 取自 `cube-envd` 自身，`HOME`、`USER`、`LOGNAME` 取自所选用户的 passwd 条目。随后依次叠加当前 `/init` 环境变量快照与请求中的 `envs`，请求可以覆盖上述任一变量。当所选用户与运行 `cube-envd` 的用户不同时，会通过 `setpriv` 切换凭据。
+
+未指定 `cwd` 时，进程在所选用户的主目录下启动；`cwd` 为相对路径或 `~/...` 时同样基于该主目录解析。该目录必须存在。
+
+## 安全模型
+
+`cube-envd` 以**自身凭据**执行请求（在 `cubesandbox-base` 镜像中即 root），所选用户
+**不是**授权边界。各机制的准确含义如下：
+
+- **进程执行**以所选用户身份运行：当该用户与运行 `cube-envd` 的用户不同时，子进程经
+  `setpriv --reuid --regid --init-groups` 启动，命令自身可访问的范围由内核约束。
+  `setpriv` 来自 util-linux，会依次在 `/usr/bin`、`/bin`、`/sbin`、`/usr/sbin` 中查找；
+  Alpine 与 busybox 需要额外 `apk add util-linux`，因为它们自带的同名 applet 不接受
+  `--reuid`。请求选中的就是守护进程自身用户时完全不使用它。
+- **文件系统 RPC 与 `/files` 以 `cube-envd` 自身凭据执行**（标准镜像中即 root）。所选
+  用户决定路径基准（相对路径落在其主目录）以及新建文件/目录的属主，但**不限制**可读写
+  删除的路径范围。`Stat`、`ListDir`、`Move`、`Remove` 均不限于用户主目录，`GET /files`
+  可以流式读取 `cube-envd` 能打开的任何文件。
+- **没有按请求的令牌。** `Authorization: Basic` 只用于指定以哪个用户身份执行，不认证
+  调用方；沙箱内任意进程都可以声称自己是任意账户。
+- **访问控制依赖网络边界。** `cube-envd` 监听 `0.0.0.0:49983`，必须不可被不可信客户端
+  直达：沙箱 IP 位于私有网段，`CubeProxy` 是唯一公网入口并在那里校验按沙箱下发的
+  traffic token。任何能直连 `49983` 的实体（包括沙箱内的任意进程）实际上拥有
+  `cube-envd` 自身的权限。
+
+请求受资源边界保护，单个客户端无法耗尽沙箱：一元 JSON 请求体上限 1 MiB、流式帧上限
+16 MiB、`/files` 全流式、并发连接上限 1024 且带请求头读取超时、每进程订阅者队列有界并
+淘汰慢订阅者。
+
+## 仓库结构
+
+```
+cube-envd/
+├── Cargo.toml              # Rust 包清单
+├── Cargo.lock
+├── Makefile                # build/install/fmt/lint/test/proto-doc 目标
+├── build.rs                # 构建时生成 Rust protobuf 绑定
+├── rust-toolchain.toml     # 固定 Rust 工具链（1.89）
+├── proto/
+│   ├── process/            # process.Process protobuf 定义
+│   └── filesystem/         # filesystem.Filesystem protobuf 定义
+├── src/
+│   ├── main.rs             # CLI 入口和 HTTP 服务启动
+│   ├── app.rs              # Axum 路由与共享应用状态
+│   ├── auth.rs             # Basic 认证与本地用户解析
+│   ├── paths.rs            # 安全路径解析
+│   ├── connect.rs          # Connect 协议帧与错误处理
+│   ├── wire.rs             # protobuf JSON / 领域模型转换
+│   ├── logging.rs          # JSON 结构化日志初始化
+│   ├── process/            # 进程生命周期、PTY、输入输出流
+│   ├── filesystem/         # 文件系统 RPC 与文件传输
+│   └── generated/          # 生成的 protobuf Rust 类型
+├── tests/                  # CLI、HTTP、RPC、进程集成测试
+└── doc/
+    └── cube-envd-api.md    # 生成的协议参考
+```
+
+## 构建
+
+`cube-envd` 是一个 Rust 二进制，编译为静态 musl release。
+
+### 在本目录构建
+
+```bash
+# 构建静态 release
+make build
+
+# 运行测试
+make test
+
+# 格式检查 / lint
+make fmt
+make lint
+
+# 安装到自定义目录
+make install BINDIR=/path/to/bin
+
+# 重新生成 doc/cube-envd-api.md（需要 protoc-gen-doc）
+make proto-doc
+```
+
+### 在仓库根目录构建
+
+```bash
+make cube-envd
+```
+
+这会在 CubeSandbox builder 容器内构建静态 `cube-envd`，并安装到 `_output/bin/cube-envd`。
+
+### Base 镜像
+
+`cubesandbox-base` 镜像由 [`docker/Dockerfile.cube-base`](../docker/Dockerfile.cube-base) 构建；该 Dockerfile 会编译本 crate，并将生成的二进制安装为 `/usr/bin/envd`。
+
+## CLI
+
+```
+envd [OPTIONS]
+```
+
+| 选项 | 默认值 | 说明 |
+|--------|---------|-------------|
+| `-port`, `--port` | `49983` | HTTP 服务监听端口。 |
+| `-isnotfc`, `--isnotfc` | — | 仅为兼容 E2B 命令行习惯而保留。cube-envd 不含 Firecracker MMDS 逻辑（CubeSandbox 使用 Cloud Hypervisor，`169.254.169.254` 不存在），因此它是 no-op：带不带行为完全一致。 |
+| `-version`, `--version` | — | 输出版本并退出。 |
+| `-commit`, `--commit` | — | 输出构建提交哈希并退出。 |
+
+单横线旧式参数（`-port`、`-isnotfc`、`-version`、`-commit`）会被规范化为双横线形式以兼容调用。
+
+### 版本号
+
+`-version` 输出 [`src/version.rs`](./src/version.rs) 中的 semver 常量，它是本组件版本的
+**唯一事实源**，形态与参考实现 envd 的 `packages/envd/pkg/version.go` 一致。该值**有意**
+不从 git tag 或 CI 运行派生，因为下游会解析它：
+
+- Cubelet 与 CubeMaster 按 `\d+\.\d+\.\d+` 提取该值，写入
+  `cube.master.components.envd.version` 注解，并作为沙箱信息上的公开字段 `envdVersion` 暴露；
+- 参考实现 envd 还会用该值做最低版本门禁比较，且把非法格式判为 error 而非"更旧"，因此
+  `sha-1a2b3c4` 这类构建标识在这里不是"没用"而是**有害**。
+
+构建标识走单独的 `CUBE_ENVD_COMMIT`，由 `-commit` 输出。`CUBE_ENVD_VERSION` 仍作为发布
+工具链的显式覆盖保留，但默认没有任何渠道注入它，空值会回落到常量。发版只需 bump 该常量；
+`make version-check` 会断言它是 semver 且二进制自报版本与之一致。
+
+手动启动示例：
+
+```bash
+/usr/bin/envd -port 49983 -isnotfc >/var/log/envd.log 2>&1 &
+```
+
+## 开发说明
+
+### Rust 工具链
+
+仓库在 `rust-toolchain.toml` 中固定使用 Rust `1.89`，并包含 `x86_64-unknown-linux-musl` 和 `aarch64-unknown-linux-musl` 目标。
+
+### 日志
+
+通过 `RUST_LOG` 控制日志过滤级别（默认：`info`）。日志以结构化 JSON 输出。
+
+### 测试
+
+```bash
+make test
+```
+
+测试覆盖 CLI 兼容性、健康检查、Connect 帧、进程启动/PTY/输入/信号处理、文件系统 RPC、文件上传、目录监听、认证/路径解析以及优雅关闭。
+
+## 相关文档
+
+- [自定义模板镜像](../docs/zh/guide/tutorials/bring-your-own-image.md)
+- [模板概览](../docs/zh/guide/templates.md)
+- [协议文档](./doc/cube-envd-api.md)
+
+## License
+
+Apache-2.0 — 详见 [LICENSE](../LICENSE)。

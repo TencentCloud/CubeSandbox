@@ -6,32 +6,33 @@ on:
     paths:
       - 'docker/Dockerfile.cube-base'
       - 'docker/cube-entrypoint.sh'
+      - 'cube-envd/**'
       - '.github/workflows/build-envd-base-image.yml'
   pull_request:
     paths:
       - 'docker/Dockerfile.cube-base'
       - 'docker/cube-entrypoint.sh'
+      - 'cube-envd/**'
       - '.github/workflows/build-envd-base-image.yml'
   workflow_dispatch:
-    inputs:
-      envd_ref:
-        description: 'Upstream e2b-dev/infra ref (tag/branch/SHA) to compile envd from'
-        required: false
-        default: '2026.16'
 
 env:
-  ENVD_REF_DEFAULT: '2026.16'
   IMAGE_NAME: ghcr.io/tencentcloud/cubesandbox-base
   BASE_OS_TAG_SUFFIX: ubuntu22.04
 
 concurrency:
-  group: build-envd-base-image-${{ github.ref }}-${{ github.event.inputs.envd_ref || 'default' }}
+  group: build-envd-base-image-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build:
     name: Build ${{ matrix.arch }} base image
     runs-on: ${{ matrix.runner }}
+    # 版本只在这里计算一次（读 cube-envd/src/version.rs），publish_manifest 复用该输出，
+    # 避免两处各自派生同一取值而漂移。
+    outputs:
+      envd_version: ${{ steps.envd.outputs.envd_version }}
+      envd_commit: ${{ steps.envd.outputs.envd_commit }}
     strategy:
       fail-fast: false
       matrix:
@@ -50,15 +51,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve envd ref
-        id: meta_ref
-        env:
-          ENVD_REF_INPUT: ${{ github.event.inputs.envd_ref }}
-        run: |
-          envd_ref="${ENVD_REF_INPUT:-${ENVD_REF_DEFAULT}}"
-          echo "envd_ref=${envd_ref}" >> "${GITHUB_OUTPUT}"
-          echo "Compiling envd from e2b-dev/infra@${envd_ref}"
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -70,19 +62,36 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute envd build identifiers
+        id: envd
+        run: |
+          set -euo pipefail
+          # 版本唯一事实源是 cube-envd/src/version.rs 的 semver 常量（与上游 e2b envd 的
+          # packages/envd/pkg/version.go 同构）。这里只读取，不派生：下游
+          # （Cubelet/CubeMaster）按 \d+\.\d+\.\d+ 提取该值写入模板/快照注解，并作为公开
+          # SDK 字段 envdVersion 暴露，sha 之类的构建标识会被直接丢弃。
+          version="$(sed -n 's/.*CUBE_ENVD_VERSION: &str = "\([^"]*\)".*/\1/p' cube-envd/src/version.rs | head -1)"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::cube-envd/src/version.rs does not hold a semver (got '${version}')"
+            exit 1
+          fi
+          echo "envd_version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "envd_commit=${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+
       - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
           labels: |
-            io.cubesandbox.envd.ref=${{ steps.meta_ref.outputs.envd_ref }}
+            io.cubesandbox.envd.version=${{ steps.envd.outputs.envd_version }}
+            io.cubesandbox.envd.commit=${{ steps.envd.outputs.envd_commit }}
 
       - name: Prepare image tags
         id: image_tags
         env:
           ARCH: ${{ matrix.arch }}
-          ENVD_REF: ${{ steps.meta_ref.outputs.envd_ref }}
+          ENVD_VERSION: ${{ steps.envd.outputs.envd_version }}
           IS_RELEASE_PUSH: ${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
         run: |
           short_sha="${GITHUB_SHA::7}"
@@ -91,8 +100,7 @@ jobs:
             echo "${IMAGE_NAME}:sha-${short_sha}-${ARCH}"
             if [[ "${IS_RELEASE_PUSH}" == "true" ]]; then
               echo "${IMAGE_NAME}:latest-${ARCH}"
-              echo "${IMAGE_NAME}:${ENVD_REF}-${ARCH}"
-              echo "${IMAGE_NAME}:${ENVD_REF}-${BASE_OS_TAG_SUFFIX}-${ARCH}"
+              echo "${IMAGE_NAME}:${ENVD_VERSION}-${BASE_OS_TAG_SUFFIX}-${ARCH}"
             fi
             echo "EOF"
           } >> "${GITHUB_OUTPUT}"
@@ -100,7 +108,7 @@ jobs:
       - name: Build image (load locally for smoke test)
         uses: docker/build-push-action@v6
         with:
-          context: docker
+          context: .
           file: docker/Dockerfile.cube-base
           platforms: ${{ matrix.platform }}
           push: false
@@ -108,7 +116,8 @@ jobs:
           tags: cubesandbox-base:ci-smoke
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            ENVD_REF=${{ steps.meta_ref.outputs.envd_ref }}
+            CUBE_ENVD_VERSION=${{ steps.envd.outputs.envd_version }}
+            CUBE_ENVD_COMMIT=${{ steps.envd.outputs.envd_commit }}
           cache-from: type=gha,scope=cube-base-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=cube-base-${{ matrix.arch }}
 
@@ -144,7 +153,7 @@ jobs:
         if: github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master'
         uses: docker/build-push-action@v6
         with:
-          context: docker
+          context: .
           file: docker/Dockerfile.cube-base
           platforms: ${{ matrix.platform }}
           push: true
@@ -154,7 +163,8 @@ jobs:
           tags: ${{ steps.image_tags.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            ENVD_REF=${{ steps.meta_ref.outputs.envd_ref }}
+            CUBE_ENVD_VERSION=${{ steps.envd.outputs.envd_version }}
+            CUBE_ENVD_COMMIT=${{ steps.envd.outputs.envd_commit }}
           cache-from: type=gha,scope=cube-base-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=cube-base-${{ matrix.arch }}
 
@@ -168,14 +178,6 @@ jobs:
       packages: write
 
     steps:
-      - name: Resolve envd ref
-        id: meta_ref
-        env:
-          ENVD_REF_INPUT: ${{ github.event.inputs.envd_ref }}
-        run: |
-          envd_ref="${ENVD_REF_INPUT:-${ENVD_REF_DEFAULT}}"
-          echo "envd_ref=${envd_ref}" >> "${GITHUB_OUTPUT}"
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -188,13 +190,14 @@ jobs:
 
       - name: Create multi-arch manifests
         env:
-          ENVD_REF: ${{ steps.meta_ref.outputs.envd_ref }}
+          # 复用 build 任务读到的版本，避免此处再次派生同一取值。
+          ENVD_VERSION: ${{ needs.build.outputs.envd_version }}
         run: |
+          set -euo pipefail
           short_sha="${GITHUB_SHA::7}"
           docker buildx imagetools create \
             -t "${IMAGE_NAME}:latest" \
-            -t "${IMAGE_NAME}:${ENVD_REF}" \
-            -t "${IMAGE_NAME}:${ENVD_REF}-${BASE_OS_TAG_SUFFIX}" \
+            -t "${IMAGE_NAME}:${ENVD_VERSION}-${BASE_OS_TAG_SUFFIX}" \
             -t "${IMAGE_NAME}:sha-${short_sha}" \
             "${IMAGE_NAME}:sha-${short_sha}-amd64" \
             "${IMAGE_NAME}:sha-${short_sha}-arm64"

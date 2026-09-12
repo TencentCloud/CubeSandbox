@@ -14,6 +14,7 @@ on:
       - 'Cubelet/**'
       - 'CubeShim/**'
       - 'agent/**'
+      - 'cube-envd/**'
       - 'examples/volume/s3/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
@@ -31,6 +32,7 @@ on:
       - 'Cubelet/**'
       - 'CubeShim/**'
       - 'agent/**'
+      - 'cube-envd/**'
       - 'examples/volume/s3/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
@@ -63,7 +65,7 @@ jobs:
         # make target + expected binaries. Architecture coverage catches
         # arch-specific regressions (e.g. cfg(target_arch) code in the shim /
         # hypervisor) that an amd64-only build would miss.
-        component: [CubeAPI, CubeOps, CubeMaster, CubeTemplateCenter, Cubelet, agent, CubeShim, volume-s3]
+        component: [CubeAPI, CubeOps, CubeMaster, CubeTemplateCenter, Cubelet, agent, cube-envd, CubeShim, volume-s3]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -97,6 +99,10 @@ jobs:
             make_target: agent
             expected_bins: |
               _output/bin/cube-agent
+          - component: cube-envd
+            make_target: cube-envd
+            expected_bins: |
+              _output/bin/cube-envd
           - component: CubeShim
             make_target: shim
             expected_bins: |
@@ -217,6 +223,44 @@ jobs:
               exit 1
             fi
           done <<< "${EXPECTED_BINS}"
+
+      # cube-envd 的 protobuf 绑定在构建时由 build.rs 生成并写回 src/generated/，
+      # 而生成物同时纳入版本控制（与 CubeShim/agent 的同类 crate 一致），因此存在
+      # "提交的生成物"与"生成器输出"两个事实源。构建只在内容不同时写回，所以构建后
+      # 工作区若出现改动，就说明提交的生成物已经过期：要么改了 .proto 没重新生成，
+      # 要么手工改过生成文件，要么 prost/pbjson/protoc 版本变化改变了输出。
+      - name: Verify generated protobuf code is up to date
+        if: matrix.component == 'cube-envd'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- cube-envd/src/generated; then
+            echo "cube-envd/src/generated matches the generator output"
+            exit 0
+          fi
+
+          echo "::error::cube-envd/src/generated is out of date: the build regenerated it"
+          git --no-pager diff --stat -- cube-envd/src/generated
+          {
+            echo "### cube-envd generated protobuf code is out of date"
+            echo
+            echo 'The build rewrote `cube-envd/src/generated`. Run `make -C cube-envd proto-gen` locally and commit the result (`make -C cube-envd proto-gen-check` reproduces this check).'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit 1
+
+      # cube-envd 的 `make lint` 是 fmt --check + clippy -D warnings。此前 CI 只跑
+      # 构建与单测，clippy 从未被任何 workflow 调用（agent 的 lint 目标同样只在本地
+      # 手动使用），这里补上这道门禁。builder 镜像为每个 toolchain 都装了 clippy
+      # （docker/Dockerfile.builder），因此不需要额外的工具链准备步骤。
+      - name: Lint cube-envd (fmt + clippy)
+        if: matrix.component == 'cube-envd'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          make cube-envd-lint \
+            BUILDER_IMAGE="${{ steps.builder_image.outputs.image }}"
 
   # Docker smoke build for release images that use repo-root context +
   # adjacent Dockerfile.dockerignore (catches context/ignore regressions).

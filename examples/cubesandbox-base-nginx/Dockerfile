@@ -13,7 +13,7 @@
 #   curl http://127.0.0.1:8080/
 #   curl -o /dev/null -w "%{http_code}\n" http://127.0.0.1:49983/health  # => 204
 
-ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16
+ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:latest
 FROM ${CUBE_BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive

@@ -21,8 +21,9 @@
 
 ## 2. 快速开始：基于 `cubesandbox-base`
 
-`cubesandbox-base` 是一个普通的 `ubuntu:22.04`，在 `/usr/bin/envd` 预装
-了 `envd`，并附带一个通用入口脚本——后台拉起 `envd`、前台 `exec` 你
+`cubesandbox-base` 是一个普通的 `ubuntu:22.04`，预装了仓库自研的 Rust
+守护进程 `cube-envd`（安装在 `/usr/bin/envd`，命令名保持 `envd` 以兼容
+SDK），并附带一个通用入口脚本——后台拉起 `envd`、前台 `exec` 你
 提供的 `CMD`。你只需要三步：**写 Dockerfile → 构建推送 → 创建模板**。
 
 > 想看一个能直接跑通的完整示例？可以参考仓库里的
@@ -32,7 +33,7 @@
 ### 2.1 写 Dockerfile
 
 ```dockerfile
-FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16
+FROM ghcr.io/tencentcloud/cubesandbox-base:latest
 
 # 安装你自己需要的工具链
 RUN apt-get update \
@@ -92,9 +93,9 @@ FROM e2bdev/code-interpreter:latest
 USER root
 
 # 从 cubesandbox-base 拉取 envd 与通用入口脚本
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/bin/envd /usr/bin/envd
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/local/bin/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
 # 上游镜像通常已有自己的 entrypoint/CMD。推荐用 cube-entrypoint.sh 包裹它；
@@ -108,9 +109,9 @@ CMD ["/bin/sh", "-c", "sudo --preserve-env=E2B_LOCAL /root/.jupyter/start-up.sh"
 ```dockerfile
 FROM python:3.11-slim
 
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/bin/envd /usr/bin/envd
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/local/bin/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
 RUN pip install --no-cache-dir fastapi uvicorn
@@ -123,6 +124,22 @@ CMD ["uvicorn", "app:app", "--app-dir", "/srv", "--host", "0.0.0.0", "--port", "
 ```
 
 构建、推送、创建模板的流程和第 2.2 / 2.3 节一致。
+
+#### 请求用户不是 root 时需要 `setpriv`
+
+`cube-envd` 通过委派 **util-linux** 的 `setpriv` 来切换凭据：Rust 稳定版标准库无法设置附属组，PTY 后端也不提供凭据钩子（上游 Go `envd` 走 `SysProcAttr.Credential` 在进程内完成，Rust 稳定版没有对应能力）。它会在 `/usr/bin`、`/bin`、`/sbin`、`/usr/sbin` 中寻找可用的 `setpriv`。
+
+只有"请求选中的用户与运行 `cube-envd` 的用户不同"时才会用到它——例如旧版 E2B SDK 发送 `Authorization: Basic user:`。不带 `Authorization` 头的请求以 root 运行，不依赖它。
+
+多数发行版自带：Debian / Ubuntu / Fedora 里 `util-linux` 属于 required 包，因此 `python:3.11-slim` 和 `e2bdev/code-interpreter` 开箱可用。**Alpine 与 busybox 需要额外处理**，因为它们自带同名 `setpriv` applet，只支持 capabilities 相关选项、不认识 `--reuid`：
+
+```dockerfile
+# Alpine：busybox 的 setpriv applet 不够用；util-linux 会把 setpriv 装到
+# /bin/setpriv（两个位置都会被识别）。
+RUN apk add --no-cache util-linux
+```
+
+若镜像中没有可用的 `setpriv`，所有选择非 root 用户的请求都会失败，但错误信息会直接点名缺失的工具，而不是一个无从下手的报错。distroless 镜像没有包管理器，请改从自带 util-linux 的基础镜像构建，或不带 `Authorization` 头以 root 运行。
 
 ### 在模板构建阶段注入
 
@@ -141,17 +158,19 @@ cubemastercli tpl create-from-image \
 | 参数 | 说明 |
 | --- | --- |
 | `--enable-inject-envd` | 从 `cubemastercli` 上传一个 `envd` 二进制并写入模板 rootfs。 |
-| `--envd-path` | 运行 `cubemastercli` 的机器上的本地路径；仅在设置 `--enable-inject-envd` 时生效。若省略，CLI 会在可用时使用构建期内嵌的默认 `envd`。 |
+| `--envd-path` | 运行 `cubemastercli` 的机器上的本地路径；仅在设置 `--enable-inject-envd` 时生效。若省略，CLI 会在可用时使用构建期内嵌的默认 `envd`（即仓库自研的 Rust `cube-envd`）。 |
 
 `--envd-path` 是运行 CLI 的机器上的路径，不是 CubeMaster 宿主机路径。CLI 会通过 `create-from-image` 的 multipart 请求上传二进制；CubeMaster 校验上传内容后，将其写入模板 rootfs 的 `/usr/local/bin/envd`，并把二进制的 SHA-256 纳入 rootfs artifact 指纹，避免复用由不同 `envd` 构建的 artifact。
 
 上传的文件必须是非空 ELF 二进制，大小不能超过 16 MiB，并与目标 rootfs 的操作系统和 CPU 架构兼容。例如，Linux x86_64 镜像需要 Linux x86_64 版本的 `envd`。
 
-如果 `cubemastercli` 构建时没有内嵌默认 `envd`，则必须同时指定 `--envd-path`。如需构建带默认 `envd` 的 CLI，请先准备二进制并执行：
+如果 `cubemastercli` 构建时没有内嵌默认 `envd`，则必须同时指定 `--envd-path`。如需构建带默认 `envd` 的 CLI，请先准备 `envd` ELF 并执行：
 
 ```bash
 make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
 ```
+
+通过 `deploy/one-click/build-release-bundle-builder.sh` 构建的发布包会自动内嵌仓库自研的 `cube-envd`（可用 `ENVD_LOCAL_PATH` 覆盖），因此其中的 `cubemastercli` 无需再传 `--envd-path`。
 
 对于 `cubebox` 类型，CubeMaster 还会保留注入标记，在创建沙箱时自动包装主容器的启动命令：先在后台运行 `/usr/local/bin/envd`，再执行镜像原有命令，并补充暴露 `49983` 端口。因此这种方式无需修改原镜像的入口程序。非 `cubebox` 类型不会应用该启动包装。
 
@@ -171,7 +190,7 @@ make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
 | 变量               | 默认值              | 说明                                                   |
 | ------------------ | ------------------- | ------------------------------------------------------ |
 | `ENVD_PORT`        | `49983`             | envd 监听的端口                                        |
-| `ENVD_EXTRA_ARGS`  | *(空)*              | 追加到 `-port` 之后的额外参数。若未包含 `-isnotfc`，脚本会自动追加以跳过 Firecracker MMDS 查询。 |
+| `ENVD_EXTRA_ARGS`  | *(空)*              | 追加到 `-port` 之后的额外参数。若未包含 `-isnotfc`，脚本会自动追加，仅为兼容 E2B 命令行习惯；在 cube-envd 中它是 no-op。 |
 | `ENVD_LOG_FILE`    | `/var/log/envd.log` | envd stdout/stderr 落盘位置；设为 `-` 则继承容器 stdio |
 | `ENVD_BIN`         | `/usr/bin/envd`     | 当 envd 安装在别处时覆盖                               |
 
@@ -185,10 +204,9 @@ make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
 # your-entrypoint.sh
 
 # 后台启动 envd
-# -isnotfc 是必须的：它让 envd 跳过对 169.254.169.254 的 Firecracker MMDS
-# 查询。CubeSandbox 不使用 Firecracker，MMDS 服务不存在。缺少此参数时
-# envd 会尝试访问不存在的 MMDS，可能引发网络超时、/init 延迟、
-# env_vars 注入失败等各种问题。
+# -isnotfc 是可选的，仅为兼容 E2B 命令行习惯而保留。cube-envd 完全不含
+# Firecracker MMDS 逻辑（CubeSandbox 在 Cloud Hypervisor 上运行工作负载，
+# 169.254.169.254 并不存在），因此该参数是 no-op：带不带行为完全一致。
 /usr/bin/envd -port 49983 -isnotfc >/var/log/envd.log 2>&1 &
 
 # ... 你原本的启动流程 ...
@@ -208,7 +226,10 @@ docker exec "$cid" curl -s -o /dev/null -w "envd /health => %{http_code}\n" \
 # => envd /health => 204
 
 docker exec "$cid" /usr/bin/envd -version
-# => 2026.16
+# => 0.1.0   （cube-envd 自身的 semver，来自 cube-envd/src/version.rs）
+
+docker exec "$cid" /usr/bin/envd -commit
+# => 构建镜像所用的 git sha
 
 docker rm -f "$cid"
 ```
@@ -226,17 +247,24 @@ docker exec "$cid" cat /var/log/envd.log
 | 模板创建探活失败                       | envd 未启动 / 起在错误端口                                  | 确认 `ENTRYPOINT` 为 `cube-entrypoint.sh`，或你自己的脚本里有 `envd -port 49983 &`      |
 | `curl :49983/health` 返回 `000`        | 端口无人监听；入口被用户 CMD 整个替换                      | 检查 <code v-pre>docker inspect --format '{{json .Config.Entrypoint}}'</code>，保留 `cube-entrypoint.sh` |
 | envd 立刻退出                          | 二进制版本与容器预期不匹配                                 | `docker exec ... /usr/bin/envd -version` 确认版本；从 pin 的 base tag 重新拷贝          |
-| envd `/init` 异常缓慢 / `create_time env_vars` 失败 | 缺少 `-isnotfc` 参数；envd 尝试访问不存在的 MMDS (`169.254.169.254`) | 使用 `cube-entrypoint.sh`（会自动追加 `-isnotfc`），或在手动拉起 envd 时自行加上 `-isnotfc` |
 | 49983 端口冲突                         | 你自己的应用也在监听 49983                                 | 把自家应用迁到别的端口，并一起 `--expose-port` 暴露                                     |
 | `sudo: command not found`              | 基于 `-slim` / `-alpine` 这种无 sudo 的镜像构建            | `apt-get install -y sudo`，或直接把 `sudo` 从 CMD 里去掉——`cube-entrypoint.sh` 不依赖它 |
+| 以非 root 用户执行命令报 `switching users requires a util-linux setpriv` | 镜像里没有可用的 `setpriv`（Alpine / busybox 只提供不支持 `--reuid` 的 applet） | 安装 util-linux（Alpine 上 `apk add --no-cache util-linux`）——见第 3 节。不带 `Authorization` 头的请求以 root 运行，不受影响 |
 | 模板创建长时间卡在 `PULLING`           | registry 从 Cube 节点不可达                                | 推送到集群可访问的 registry，或用 `--registry-username` / `--registry-password`         |
+
+> **`-isnotfc` 不会是任何问题的原因。** 它在 cube-envd 中是 no-op（不存在
+> Firecracker MMDS 相关代码），因此缺少该参数不可能导致 `/init` 延迟、网络超时
+> 或 `create_time env_vars` 失败。请改为排查入口脚本、端口和镜像本身。
 
 ## 7. 进阶 —— 自己重建基础镜像
 
 基础镜像由仓库内单个 GitHub Actions workflow 自动构建：
 [`.github/workflows/build-envd-base-image.yml`](https://github.com/TencentCloud/CubeSandbox/blob/master/.github/workflows/build-envd-base-image.yml)。
-它会 checkout `e2b-dev/infra` 的指定 tag（默认 `2026.16`），在原生
-`linux/amd64` 与 `linux/arm64` runner 上用 Go 1.25.4 编译 envd，构建
-`docker/Dockerfile.cube-base`，分别对 `:49983/health` 做 smoke test，再
-合成 multi-arch manifest list 推送到
-`ghcr.io/tencentcloud/cubesandbox-base`。
+它构建 `docker/Dockerfile.cube-base`：其中的 `envd-builder` 编译阶段会
+编译仓库自研的 Rust `cube-envd`（musl 静态；版本与 commit 通过
+`CUBE_ENVD_VERSION` / `CUBE_ENVD_COMMIT` 构建参数注入），把产物作为
+`/usr/bin/envd` 打进镜像，在原生 `linux/amd64` 与 `linux/arm64`
+runner 上分别对 `:49983/health` 做 smoke test 并验证
+`envd -version`/`-commit`，再合成 multi-arch manifest list 推送到
+`ghcr.io/tencentcloud/cubesandbox-base`（`master` 上推送 `latest`、
+`sha-<short>` 与 `sha-<short>-ubuntu22.04` 标签）。

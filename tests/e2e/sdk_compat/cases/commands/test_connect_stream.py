@@ -55,7 +55,7 @@ def test_large_stdout_no_gzip_error(sdk_sandbox, sdk_e2e_config):
 def test_large_stderr_only(sdk_sandbox, sdk_e2e_config):
     """>1000-byte stderr alone must survive without crash."""
     result = sdk_sandbox.run_command(
-        f"python3 -c \"import sys; sys.stderr.write('E' * {LARGE_STDOUT_SIZE})\"",
+        f"head -c {LARGE_STDOUT_SIZE} /dev/zero | tr '\\0' E >&2",
         timeout=sdk_e2e_config.command_timeout,
     )
 
@@ -68,7 +68,8 @@ def test_large_stderr_only(sdk_sandbox, sdk_e2e_config):
 def test_mixed_stdout_stderr_large(sdk_sandbox, sdk_e2e_config):
     """Concurrent stdout and stderr, each >1000 bytes, must both arrive intact."""
     result = sdk_sandbox.run_command(
-        f"python3 -c \"import sys; sys.stdout.write('A' * {LARGE_STDOUT_SIZE}); sys.stderr.write('B' * {LARGE_STDOUT_SIZE})\"",
+        f"(head -c {LARGE_STDOUT_SIZE} /dev/zero | tr '\\0' A) & "
+        f"(head -c {LARGE_STDOUT_SIZE} /dev/zero | tr '\\0' B >&2) & wait",
         timeout=sdk_e2e_config.command_timeout,
     )
 
