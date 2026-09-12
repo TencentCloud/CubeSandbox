@@ -6,15 +6,17 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
-
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -120,6 +122,73 @@ func TestPreHandleSchedulerIgnoreRedisAllocationDefault(t *testing.T) {
 
 	assert.NotNil(t, cfg.Scheduler.IgnoreRedisAllocation)
 	assert.False(t, cfg.Scheduler.ShouldIgnoreRedisAllocation())
+}
+
+func TestPreHandleExternalHTTPScoreWeightDefault(t *testing.T) {
+	omitted := &ExternalHTTPScore{Endpoint: "http://127.0.0.1:9"}
+	explicitZero := 0.0
+	zero := &ExternalHTTPScore{Weight: &explicitZero, Endpoint: "http://127.0.0.1:9"}
+	explicit := 2.5
+	set := &ExternalHTTPScore{Weight: &explicit, Endpoint: "http://127.0.0.1:9"}
+
+	cfg := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			Score: &SchedulerScoreConf{
+				ScorePluginConf: ScorePluginConf{
+					ExternalHTTPScore: omitted,
+				},
+			},
+		},
+	}}
+	assert.NoError(t, preHandleScheduler(cfg))
+	assert.NotNil(t, omitted.Weight)
+	assert.Equal(t, 1.0, *omitted.Weight)
+
+	cfg.Scheduler.Score.ScorePluginConf.ExternalHTTPScore = zero
+	assert.NoError(t, preHandleScheduler(cfg))
+	assert.NotNil(t, zero.Weight)
+	assert.Equal(t, 0.0, *zero.Weight)
+
+	cfg.Scheduler.Score.ScorePluginConf.ExternalHTTPScore = set
+	assert.NoError(t, preHandleScheduler(cfg))
+	assert.NotNil(t, set.Weight)
+	assert.Equal(t, 2.5, *set.Weight)
+}
+
+func TestExternalHTTPScoreMarshalJSONRedactsEndpointSecrets(t *testing.T) {
+	const sentinel = "secret-token-must-not-appear"
+	plugin := &ExternalHTTPScore{
+		Endpoint: "https://user:pass@sidecar.example/score?token=" + sentinel,
+		Timeout:  200 * time.Millisecond,
+		Mode:     "m",
+	}
+	body, err := json.Marshal(plugin)
+	assert.NoError(t, err)
+	got := string(body)
+	assert.NotContains(t, got, sentinel)
+	assert.NotContains(t, got, "user:pass")
+	assert.NotContains(t, got, "token=")
+	assert.Contains(t, got, "https://sidecar.example/score")
+	// Live config field must stay intact for Dial.
+	assert.Contains(t, plugin.Endpoint, sentinel)
+	// config.Init dumps via InterfaceToString (jsoniter), which also honors MarshalJSON.
+	dumped := utils.InterfaceToString(plugin)
+	assert.NotContains(t, dumped, sentinel)
+	assert.NotContains(t, dumped, "user:pass")
+	// Hot-reload Fatals use fmt %v on *Config; nested Stringer must redact.
+	printed := fmt.Sprintf("%v", plugin)
+	assert.NotContains(t, printed, sentinel)
+	assert.NotContains(t, printed, "user:pass")
+	nested := &Config{Scheduler: &WrapperSchedulerConf{
+		SchedulerConf: SchedulerConf{
+			Score: &SchedulerScoreConf{
+				ScorePluginConf: ScorePluginConf{ExternalHTTPScore: plugin},
+			},
+		},
+	}}
+	fatalStyle := fmt.Sprintf("preHandle Config:%v fail:%v", nested, assert.AnError)
+	assert.NotContains(t, fatalStyle, sentinel)
+	assert.NotContains(t, fatalStyle, "user:pass")
 }
 
 func TestHasDeprecatedOvercommitConfig(t *testing.T) {

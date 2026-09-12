@@ -79,8 +79,9 @@ scheduler:
 | `metric_update_timeout` | Treat resource metrics as stale after this duration. It should be much larger than the Cubelet report interval. |
 | `local_metric_update_timeout` | Reserved local-metric timeout field. Current prefilter logic gates both global and local metric freshness with `metric_update_timeout`. |
 | `filter.enable_filters` | Enables scheduling filters. Common filters include CPU, memory, template locality, and real-time create concurrency. |
-| `score.enable_scorers` | Enables scoring plugins. Multi-node deployments usually enable `real_time_weighted_average`; when it is enabled, the matching `score.plugin_conf.real_time_weighted_average` block is required or CubeMaster can panic during scheduler startup. |
+| `score.enable_scorers` | Enables scoring plugins. Multi-node deployments usually enable `real_time_weighted_average`; when it is enabled, the matching `score.plugin_conf.real_time_weighted_average` block is required or CubeMaster can panic during scheduler startup. The same rule applies to `external_http_score`: listing it under `enable_scorers` requires a matching `score.plugin_conf.external_http_score` block. |
 | `score.resource_weights` | Controls the influence of MVM count, create concurrency, CPU quota usage, and memory quota usage. Higher weight means stronger influence; factors must also be listed under `score.plugin_conf.real_time_weighted_average.enable_weight_factors`. |
+| `score.plugin_conf.external_http_score` | Optional HTTP sidecar scorer. See [External HTTP score plugin](#external-http-score-plugin). |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | Global or per-instance-type single-node MVM limits. Cubelet-reported `max_mvm_num` also participates in the effective limit. |
 | `disk_usage_max_percent` | Threshold used by the `disk` filter and backoff path to avoid placing more sandboxes on nearly full machines. |
 | `affinityconf` / `node_affinity_selector_allowed_keys` | Controls affinity and constraints by cluster label, zone, CPU type, instance type, and other allowed selector keys. |
@@ -263,6 +264,106 @@ If new sandboxes still concentrate on one machine in a multi-node cluster:
 - Set `priority_select_num` to a value greater than `1`.
 - Check that weights for `local_create_num`, `mvm_num`, `quota_cpu_usage`, and `quota_mem_usage` are configured.
 - Confirm templates are available on all intended nodes; otherwise `template_locality` shrinks the candidate set.
+
+## External HTTP score plugin
+
+`external_http_score` is an opt-in scoring plugin. When it appears in
+`score.enable_scorers`, CubeMaster POSTs a snapshot of the **current candidate
+node list** (after filters) to an operator-configured HTTP endpoint and blends
+the returned per-node scores into the weighted score sum. Enabling
+`enable_scorers: external_http_score` **requires** a matching
+`score.plugin_conf.external_http_score` block; otherwise CubeMaster panics while
+constructing scorers at startup (same pattern as `real_time_weighted_average`).
+
+### Configuration
+
+Current CubeMaster scorer loading requires a non-nil `score.resource_weights`
+map before it processes `enable_scorers` (including a standalone
+`external_http_score`). This is a **loader prerequisite**, not part of the
+HTTP wire protocol: if `resource_weights` is omitted, CubeMaster builds an
+empty scorer list and the sidecar is never contacted. The entry below is a
+valid existing weight key; `external_http_score` does not consume it.
+
+```yaml
+scheduler:
+  score:
+    enable_scorers:
+      - external_http_score
+    resource_weights:
+      mvm_num: 1
+    plugin_conf:
+      external_http_score:
+        weight: 1.0
+        endpoint: "http://127.0.0.1:18080/score"
+        timeout: 200ms   # optional; default 200ms when zero/omitted
+        mode: ""         # optional opaque string forwarded to the sidecar
+        disable: false
+```
+
+| Field | Meaning |
+|-------|---------|
+| `weight` | Relative weight in `runScoreFilter`'s weighted average (`Σ(score × weight) / Σ(weight)`). Returned scores must use the same **`[0, 100]`** scale as built-in scorers; a sidecar that returns normalised `0.0–1.0` values contributes ~1% of a built-in scorer at equal weight. **Omitted** `weight` defaults to **`1.0`** once at config load / hot-reload (`preHandle`). An **explicit** `weight: 0` is a staged inert no-op like `disable: true`: `Select` returns immediately without requiring a valid endpoint and without emitting `empty_endpoint` / HTTP failure signals. Use `disable: true` when you want the plugin off while keeping a real endpoint configured. Negative / non-finite weights are detected at construction (one Warn) and then fail-open on each `Select` — CubeMaster still starts. Read live from `plugin_conf` on each `Weight()` / `Select` (hot-reload applies without restart); `runScoreFilter` samples `Weight()` once **before** `Select` so a mid-attempt reload cannot mix generations when blending. |
+| `endpoint` | Sidecar URL. Empty endpoint (including whitespace-only) with a **positive** weight fail-opens with a rate-limited Warn (log category `empty_endpoint`) and increments `cube_scheduler_external_http_score_outcomes_total{reason="other"}` — it does not silently skip. With `weight: 0` or `disable: true` the empty check is not reached. Non-empty values must be absolute `http://` or `https://` URLs with a host; missing scheme, `file://`, `unix://`, and other schemes are detected at construction (one Warn) and then fail-open on each `Select` (CubeMaster still starts). Leading/trailing whitespace is trimmed before the request. Prefer putting secrets in the sidecar itself rather than in the URL; if userinfo or query tokens are present, the scorer never logs them, and the `config.Init` cfg dump redacts them to scheme/host/path only. |
+| `timeout` | Per-request HTTP timeout on the **synchronous create path**. Zero/omitted uses the default **200ms**. Positive values must be **≥ 1ms** and **≤ 2s**; negative values, sub-millisecond positives, and values above **2s** are detected at construction (one Warn) and then fail-open on each `Select` (not silently coerced; CubeMaster still starts). Use a duration string such as `200ms` / `1s` — a bare integer like `timeout: 200` is parsed as **200 nanoseconds** by YAML and fails the ≥1ms check. A hung sidecar can add up to this budget to every create attempt before fail-open. |
+| `mode` | Optional operator-defined mode string included in the JSON request. |
+| `disable` | When true, the plugin is a no-op even if enabled in `enable_scorers`. Read live like `weight`. Removing the entire `plugin_conf.external_http_score` block while leaving the name in `enable_scorers` also stops scoring, but emits a rate-limited fail-open Warn (log category `plugin_conf_absent`) and increments `cube_scheduler_external_http_score_outcomes_total{reason="other"}` (scorer instances survive hot-reload). Prefer `disable: true` for a live off switch; removing the name from `enable_scorers` only takes effect after a CubeMaster restart. |
+
+### Wire contract
+
+Request (`POST`, `Content-Type: application/json`):
+
+| Field | Units / notes |
+|-------|----------------|
+| `mode` | Optional string from config. |
+| `instance_type` | Request instance type. |
+| `template_id` | Request template id when present. |
+| `nodes[]` | Candidate set passed into the scorer after filters; one entry per node. |
+| `nodes[].node_id` | Node identity; every requested candidate must appear in `scores`. |
+| `nodes[].quota_cpu` / `quota_mem` | Capacity counters from the node snapshot. |
+| `nodes[].quota_cpu_usage` / `quota_mem_usage` | **Raw** reported usage counters (not `EffectiveAllocated`). When `ignore_redis_allocation: true`, built-in scorers may treat allocated usage as 0 while these wire fields still carry the raw Redis-reported values. |
+| other `nodes[]` fields | `mvm_num`, create counters, `cpu_util`, `mem_usage`, IPs/types as available on the snapshot. |
+
+Response:
+
+```json
+{ "scores": { "node-a": 10.0, "node-b": 90.0 } }
+```
+
+- `scores` must include **every** requested candidate `node_id`. Additional keys
+  are ignored (they do not fail the response); only the ignored-key **count** may
+  be logged, never the key names or body. Extra keys with JSON `null` or
+  out-of-range numbers are ignored the same way.
+- Each score for a known candidate must be a **non-null** finite number in
+  **`[0, 100]`** (numeric `0` is valid; JSON `null` is not). Higher is better
+  (same direction as built-in scorers). Non-numeric JSON values (string, object,
+  array) anywhere under `scores` make the response malformed at decode time.
+- Response bodies larger than **1 MiB** are rejected; HTTP redirects are not followed.
+
+### Failure / fallback semantics
+
+Scorer failures (timeout, non-2xx, redirect, malformed/oversized body, validation
+errors) return an error from the plugin. `runScoreFilter` skips failed scorers
+and continues scheduling (**fail-open** for sandbox creation). Outcomes increment
+`cube_scheduler_external_http_score_outcomes_total{reason=...}` (including
+`reason="success"`) and HTTP round-trips also observe
+`cube_scheduler_external_http_score_request_duration_seconds{reason=...}`.
+Fixed `reason` values: `success`, `timeout`, `connection`, `http_status`,
+`invalid_json`, `missing_candidate`, `other` (config / generic failures such as
+empty endpoint, invalid weight, or unclassified errors land in `other`). Failures
+are logged at the scorer boundary without endpoint URLs, URL userinfo, query
+tokens, or request/response bodies; Warn is rate-limited to about one line per
+sanitized failure category per minute (further failures stay at Debug) so a down
+sidecar does not flood create-path logs. Missing scores for any requested
+candidate fail the whole attempt (anti-bias: scoring only a subset would
+systematically skew ranking). The call is **synchronous** on the create path.
+The shared HTTP transport does **not** honor `HTTP_PROXY` / `HTTPS_PROXY` /
+`ALL_PROXY` (direct dial only, so env proxies cannot see token-bearing sidecar
+URLs or the node inventory body) and caps in-flight sidecar connections with
+`MaxConnsPerHost = 8` (same as the idle pool per host) so a hung sidecar cannot
+open an unbounded dial storm; each attempt may still wait up to `timeout`
+(default 200ms, max 2s) before fail-open. This PR does not add a circuit breaker,
+negative cache, async execution, or retry loop — those remain follow-ups for
+higher create QPS deployments.
 
 ## See also
 

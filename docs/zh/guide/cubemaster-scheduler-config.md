@@ -79,8 +79,9 @@ scheduler:
 | `metric_update_timeout` | 节点资源指标多久未更新后视为不可调度。应明显大于 Cubelet 上报周期。 |
 | `local_metric_update_timeout` | 预留的本地指标超时字段。当前 prefilter 对全局指标和本地指标的新鲜度检查都使用 `metric_update_timeout`。 |
 | `filter.enable_filters` | 启用调度过滤器。常见过滤器包括 CPU、内存、模板本地性和实时创建并发。 |
-| `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`；启用时必须同时配置 `score.plugin_conf.real_time_weighted_average`，否则 CubeMaster 可能在 scheduler 启动阶段 panic。 |
+| `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`；启用时必须同时配置 `score.plugin_conf.real_time_weighted_average`，否则 CubeMaster 可能在 scheduler 启动阶段 panic。对 `external_http_score` 同样适用：写入 `enable_scorers` 时必须提供匹配的 `score.plugin_conf.external_http_score`。 |
 | `score.resource_weights` | 控制 MVM 数、创建并发、CPU/内存 quota 使用率等因子的权重。权重越高，该因子对分数影响越大；对应因子也必须列在 `score.plugin_conf.real_time_weighted_average.enable_weight_factors` 中。 |
+| `score.plugin_conf.external_http_score` | 可选的 HTTP sidecar 评分器。见 [External HTTP score 插件](#external-http-score-插件)。 |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | 全局或按实例类型限制单节点 MVM 数。Cubelet 上报的 `max_mvm_num` 也会参与实际上限计算。 |
 | `disk_usage_max_percent` | `disk` filter 和 backoff 路径使用的磁盘水位阈值，用于避免继续调度到快满的机器。 |
 | `affinityconf` / `node_affinity_selector_allowed_keys` | 控制按 cluster label、zone、CPU 类型、机型等做亲和或约束选择。 |
@@ -263,6 +264,97 @@ sudo tail -F /data/log/Cubelet/Cubelet-req.log
 - 将 `priority_select_num` 设置为大于 `1`。
 - 检查 `local_create_num`、`mvm_num`、`quota_cpu_usage`、`quota_mem_usage` 权重是否存在。
 - 确认各节点模板副本都可用，否则 `template_locality` 会让候选节点集合变小。
+
+## External HTTP score 插件
+
+`external_http_score` 是可选评分插件。当它出现在 `score.enable_scorers` 中时，
+CubeMaster 会把**当前候选节点列表**（经过 filter 之后）以 HTTP POST 发给运营配置的
+sidecar，并把返回的逐节点分数并入加权总分。启用
+`enable_scorers: external_http_score` **必须**同时提供匹配的
+`score.plugin_conf.external_http_score`；否则 CubeMaster 在启动构造 scorer 时会
+panic（与 `real_time_weighted_average` 相同）。
+
+### 配置
+
+当前 CubeMaster 在处理 `enable_scorers`（包括单独启用 `external_http_score`）
+之前，要求 `score.resource_weights` 为非空映射。这是**加载器前置条件**，不是
+HTTP 传输协议的一部分：若省略 `resource_weights`，CubeMaster 会构造空的
+scorer 列表，sidecar **不会**被调用。下面的权重项是已有合法 key；
+`external_http_score` 本身不会消费它。
+
+```yaml
+scheduler:
+  score:
+    enable_scorers:
+      - external_http_score
+    resource_weights:
+      mvm_num: 1
+    plugin_conf:
+      external_http_score:
+        weight: 1.0
+        endpoint: "http://127.0.0.1:18080/score"
+        timeout: 200ms   # 可选；为 0/省略时默认 200ms
+        mode: ""         # 可选，原样转发给 sidecar
+        disable: false
+```
+
+| 字段 | 含义 |
+|------|------|
+| `weight` | 在 `runScoreFilter` 加权平均（`Σ(score × weight) / Σ(weight)`）中的相对权重。返回分数必须与内置 scorer 使用相同的 **`[0, 100]`** 量纲；若 sidecar 返回归一化的 `0.0–1.0`，在相同 weight 下贡献大约只有内置 scorer 的 1%。**省略** `weight` 时，在配置加载 / 热更新（`preHandle`）阶段默认填为 **`1.0`**。**显式** `weight: 0` 与 `disable: true` 一样是静默空操作：`Select` 立即返回，不要求合法 endpoint，也不会发出 `empty_endpoint` / HTTP 失败信号。若要在保留真实 endpoint 的同时关闭插件，请用 `disable: true`。负 / 非有限 weight 会在构造时检出（一条 Warn），之后每次 `Select` fail-open——CubeMaster 仍会正常启动。每次 `Weight()` / `Select` 都会从 `plugin_conf` 热读（热更新无需重启）；`runScoreFilter` 在 `Select` **之前**只采样一次 `Weight()`，避免热更新落在一次尝试中间混入两代配置参与加权。 |
+| `endpoint` | Sidecar URL。在 **正 weight** 下为空（含仅空白）时 fail-open，发出限流 Warn（日志类别 `empty_endpoint`），并递增 `cube_scheduler_external_http_score_outcomes_total{reason="other"}`——不会静默跳过。`weight: 0` 或 `disable: true` 时不会走到该检查。非空时必须是带 host 的绝对 `http://` 或 `https://` URL；缺 scheme、`file://`、`unix://` 等会在构造时检出（一条 Warn），之后每次 `Select` fail-open（CubeMaster 仍会正常启动）。请求前会 trim 首尾空白。密钥更宜放在 sidecar 侧；若 URL 含 userinfo 或 query token，scorer 不会记入日志，且 `config.Init` 的 cfg dump 只会保留 scheme/host/path。 |
+| `timeout` | **同步 create 路径**上的单次 HTTP 超时。为 0/省略时使用默认 **200ms**。正值必须 **≥ 1ms** 且 **≤ 2s**；负值、亚毫秒正值与超过 **2s** 的值会在构造时检出（一条 Warn），之后每次 `Select` fail-open（不会被静默改写；CubeMaster 仍会正常启动）。请使用 `200ms` / `1s` 这类 duration 字符串——裸整数如 `timeout: 200` 会被 YAML 解析成 **200 纳秒**并触发 ≥1ms 校验失败。sidecar 卡住时，每次 create 最多会多等这么久再 fail-open。 |
+| `mode` | 可选的运营自定义字符串，写入请求 JSON。 |
+| `disable` | 为 true 时即使已 enable 也是空操作；与 `weight` 一样热读。若热更新删掉整个 `plugin_conf.external_http_score` 块但 `enable_scorers` 仍保留该名字，评分会停止，但会发出限流的 fail-open Warn（日志类别 `plugin_conf_absent`），并递增 `cube_scheduler_external_http_score_outcomes_total{reason="other"}`（scorer 实例在热更新后仍存活）。有意关闭请优先用 `disable: true`（立即生效）；从 `enable_scorers` 去掉该名字只在 CubeMaster 重启后生效。 |
+
+### 传输协议
+
+请求（`POST`，`Content-Type: application/json`）：
+
+| 字段 | 单位 / 说明 |
+|------|-------------|
+| `mode` | 可选，来自配置。 |
+| `instance_type` | 请求实例类型。 |
+| `template_id` | 若存在则为请求模板 ID。 |
+| `nodes[]` | filter 之后传给 scorer 的候选集合；每个节点一条。 |
+| `nodes[].node_id` | 节点身份；请求中的每个候选都必须出现在 `scores` 中。 |
+| `nodes[].quota_cpu` / `quota_mem` | 节点快照中的容量计数。 |
+| `nodes[].quota_cpu_usage` / `quota_mem_usage` | **原始**上报占用计数（不经过 `EffectiveAllocated`）。当 `ignore_redis_allocation: true` 时，内置 scorer 可能把 allocated 视为 0，但这些传输协议字段仍携带 Redis 上报的原始值。 |
+| 其他 `nodes[]` 字段 | `mvm_num`、创建计数、`cpu_util`、`mem_usage`、IP/类型等快照可用字段。 |
+
+响应：
+
+```json
+{ "scores": { "node-a": 10.0, "node-b": 90.0 } }
+```
+
+- `scores` 必须包含**每一个**请求候选的 `node_id`。额外的 key 会被忽略（不会因此失败）；
+  日志最多记录被忽略 key 的**数量**，不记录 key 名或响应正文。额外 key 上的 JSON
+  `null` 或越界数值同样会被忽略。
+- 已知候选的每个分数必须是**非 null** 的有限数值，范围 **`[0, 100]`**（数值 `0`
+  合法；JSON `null` 不合法），越大越好（与内置 scorer 方向一致）。`scores` 下任意
+  非数值 JSON（字符串、对象、数组）会在解码阶段视为畸形响应。
+- 响应体超过 **1 MiB** 会被拒绝；**不跟随** HTTP 重定向。
+
+### 失败 / 回退语义
+
+scorer 失败（超时、非 2xx、重定向、畸形/过大响应、校验错误）会返回错误。
+`runScoreFilter` 会跳过失败的 scorer 并继续调度（对 sandbox 创建保持
+**fail-open**）。结果会递增
+`cube_scheduler_external_http_score_outcomes_total{reason=...}`（含
+`reason="success"`），HTTP 往返还会观察
+`cube_scheduler_external_http_score_request_duration_seconds{reason=...}`。
+固定 `reason`：`success`、`timeout`、`connection`、`http_status`、`invalid_json`、
+`missing_candidate`、`other`（空 endpoint、非法 weight 等配置类 / 未分类失败归入
+`other`）。失败在 scorer 边界记录日志（不记录 endpoint URL、URL userinfo、query
+token，也不记录请求/响应正文或密钥）。Warn 按脱敏后的失败类别大约每分钟至多一条
+（同类别后续失败降为 Debug），避免 sidecar 宕机时刷爆 create 路径日志。任一请求
+候选缺少分数会使整次尝试失败（反偏差：只给子集打分会系统性扭曲排序）。该调用在
+创建路径上是**同步**的。共享 HTTP transport **不**遵循 `HTTP_PROXY` /
+`HTTPS_PROXY` / `ALL_PROXY`（仅直连，避免环境代理看到带 token 的 sidecar URL 或
+节点清单 body），并用 `MaxConnsPerHost = 8`（与每 host 空闲池同级）限制对 sidecar
+的在途连接，避免挂起时无界拨号风暴；每次尝试仍可能等待至多 `timeout`（默认 200ms，
+上限 2s）再 fail-open。本 PR 不引入熔断、负缓存、异步执行或重试循环——更高 create
+QPS 场景的后续工作。
 
 ## 相关文档
 

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -510,6 +511,7 @@ type ScorePluginConf struct {
 	AffinityScore              *AffinityScore              `yaml:"affinity_score"`
 	ImageScore                 *ImageScore                 `yaml:"image_score"`
 	TemplateScore              *TemplateScore              `yaml:"template_score"`
+	ExternalHTTPScore          *ExternalHTTPScore          `yaml:"external_http_score"`
 }
 
 type MultiFactorWeightedAverage struct {
@@ -541,6 +543,80 @@ type TemplateScore struct {
 	Weight              float64  `yaml:"weight"`
 	EnableWeightFactors []string `yaml:"enable_weight_factors"`
 	Disable             bool     `yaml:"disable"`
+}
+
+type ExternalHTTPScore struct {
+	// Weight is a pointer so YAML can distinguish omit (nil → default
+	// DefaultExternalHTTPScoreWeight in preHandle) from an explicit 0 (keep
+	// off, same as other scorers).
+	Weight *float64 `yaml:"weight"`
+	// Endpoint is the sidecar URL. Empty skips the plugin. Non-empty values must
+	// be absolute http:// or https:// URLs with a host; other schemes (file,
+	// unix, missing scheme) fail construction / are rejected at Select.
+	// May carry userinfo or query tokens; MarshalJSON and String redact those
+	// so config.Init dumps and CubeLog.Fatalf("%v", cfg) paths match the
+	// scorer's no-secret logging policy.
+	Endpoint string `yaml:"endpoint"`
+	// Timeout is the per-request deadline on the synchronous create path.
+	// Zero/omitted defaults to 200ms at request time; negative values and
+	// values above 2s are rejected at construction / Select validation.
+	Timeout time.Duration `yaml:"timeout"`
+	Mode    string        `yaml:"mode"`
+	Disable bool          `yaml:"disable"`
+}
+
+// DefaultExternalHTTPScoreWeight is applied when plugin_conf.external_http_score
+// omits weight. Keep as the single source of truth for constructors, preHandle,
+// and Weight() fallbacks.
+const DefaultExternalHTTPScoreWeight = 1.0
+
+// MarshalJSON redacts Endpoint userinfo and query so utils.InterfaceToString
+// dumps (config.Init) never print sidecar credentials the scorer refuses to log.
+func (c ExternalHTTPScore) MarshalJSON() ([]byte, error) {
+	return json.Marshal(c.redactedWire())
+}
+
+// String redacts Endpoint the same way for fmt %v/%+v (hot-reload Fatals print
+// *Config via reflection and call Stringer on nested fields).
+func (c ExternalHTTPScore) String() string {
+	b, err := json.Marshal(c.redactedWire())
+	if err != nil {
+		return "ExternalHTTPScore{Endpoint:[redacted]}"
+	}
+	return string(b)
+}
+
+type externalHTTPScoreWire struct {
+	Weight   *float64      `json:"Weight"`
+	Endpoint string        `json:"Endpoint"`
+	Timeout  time.Duration `json:"Timeout"`
+	Mode     string        `json:"Mode"`
+	Disable  bool          `json:"Disable"`
+}
+
+func (c ExternalHTTPScore) redactedWire() externalHTTPScoreWire {
+	return externalHTTPScoreWire{
+		Weight:   c.Weight,
+		Endpoint: redactExternalHTTPScoreEndpoint(c.Endpoint),
+		Timeout:  c.Timeout,
+		Mode:     c.Mode,
+		Disable:  c.Disable,
+	}
+}
+
+func redactExternalHTTPScoreEndpoint(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u == nil || u.Scheme == "" || u.Host == "" {
+		return "[redacted]"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }
 
 type CubeletConf struct {
@@ -1109,6 +1185,18 @@ func checkInstanceTypeLabelValid(config *Config) error {
 	return nil
 }
 
+// ApplyExternalHTTPScoreDefaults fills an omitted weight with
+// DefaultExternalHTTPScoreWeight once at config-load / hot-reload. Explicit
+// weight: 0 stays 0 so operators can stage the sidecar without contributing to
+// the weighted average.
+func ApplyExternalHTTPScoreDefaults(cfg *ExternalHTTPScore) {
+	if cfg == nil || cfg.Weight != nil {
+		return
+	}
+	w := DefaultExternalHTTPScoreWeight
+	cfg.Weight = &w
+}
+
 func preHandSchedulerScore(config *Config) {
 	if config.Scheduler.Score != nil {
 		if asynccfg := config.Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage; asynccfg != nil {
@@ -1116,6 +1204,7 @@ func preHandSchedulerScore(config *Config) {
 				asynccfg.ScoreInterval = config.Common.SyncMetricDataInterval
 			}
 		}
+		ApplyExternalHTTPScoreDefaults(config.Scheduler.Score.ScorePluginConf.ExternalHTTPScore)
 	}
 
 	if config.Scheduler.PostScore != nil {
