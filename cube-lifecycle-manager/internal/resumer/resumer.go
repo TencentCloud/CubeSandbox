@@ -187,7 +187,17 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 	// request context is about to be returned (and may already be cancelled).
 	go r.pushRunningState(sandboxID)
 	r.o.Registry.SetRuntimeState(sandboxID, lifecycle.StateRunning)
-	r.o.Registry.MergeLastActive(sandboxID, time.Now().UnixMilli())
+	nowMs := time.Now().UnixMilli()
+	r.o.Registry.MergeLastActive(sandboxID, nowMs)
+	// Stamp ResumedAtMs so the sweeper honours ResumeGrace for the
+	// freshly-resumed sandbox (issue #1683). Without this stamp the
+	// sweeper can fire its idle-pause decision on the very next tick
+	// because LastActiveMs is the proxy-poll value, which may still
+	// reflect the pre-Resume request and CreatedAt is from minutes
+	// ago. MergeLastActive already updates LastActiveMs, but a
+	// long-running idle baseline (CreatedAt) would still trip the
+	// pause if no further traffic arrives within the timeout.
+	r.o.Registry.MarkResumed(sandboxID, nowMs)
 
 	r.o.Log.Info("auto-resumed sandbox",
 		zap.String("sandbox_id", sandboxID),

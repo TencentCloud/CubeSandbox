@@ -192,6 +192,7 @@ func run() error {
 		ProxyPush:          pushClient,
 		DefaultIdleTimeout: cfg.DefaultIdleTimeout,
 		BootstrapWarmup:    cfg.BootstrapWarmup,
+		ResumeGrace:        cfg.ResumeGrace,
 		StateLockTTL:       cfg.StateLockTTL,
 		Interval:           cfg.IdleSweepInterval,
 		StartedAt:          startupTs,

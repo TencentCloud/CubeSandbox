@@ -6,7 +6,55 @@ package runtime
 
 import (
 	"time"
+
+	"github.com/vishvananda/netlink"
 )
+
+// EffectiveMTU returns the MTU the runtime should use when no per-sandbox
+// override is supplied. The resolution order is:
+//
+//  1. Per-sandbox override (see NetRequest.MTU → EnsureNetworkRequest).
+//  2. MvmMtu from the runtime Config (operator-configured, defaults to 1500).
+//  3. MvmMtu=0 plus MTUInterface set → live MTU of that host link
+//     (e.g. the Kubernetes parent bridge) read once at startup.
+//  4. MTUInterface missing or unreadable → fall back to DefaultGuestMTU.
+//
+// This is the fix for issue #1673: with a hardcoded 1500 the guest kernel
+// sends packets larger than the underlying overlay's transport MTU and they
+// are silently dropped (or trigger ICMP fragmentation-needed the guest has
+// no way to honour). Now the operator can either configure MvmMtu to the
+// right value, or set MTUInterface = "cbr0" and let the runtime mirror the
+// bridge MTU automatically.
+func (c Config) EffectiveMTU() int {
+	if c.MvmMtu > 0 {
+		return c.MvmMtu
+	}
+	if c.MTUInterface != "" {
+		if mtu, err := lookupLinkMTU(c.MTUInterface); err == nil && mtu > 0 {
+			return mtu
+		}
+	}
+	return DefaultGuestMTU
+}
+
+// DefaultGuestMTU is the IPv4-safe Ethernet MTU. Used as a last-resort
+// fallback when no explicit value or interface lookup is available. Matches
+// the historical default so existing deployments do not see a surprise.
+const DefaultGuestMTU = 1500
+
+// lookupLinkMTU returns the MTU of the named host link via netlink. It is
+// only consulted when the runtime is being constructed on a Linux host (the
+// tap_device.go path already assumes netlink), so a transient lookup error
+// here simply falls through to DefaultGuestMTU. We intentionally swallow
+// the error: misconfiguration should not prevent the runtime from starting,
+// only from picking the best MTU.
+func lookupLinkMTU(name string) (int, error) {
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return 0, err
+	}
+	return link.Attrs().MTU, nil
+}
 
 const (
 	// defaultObjectDir is where cube-vs objects are deployed on production nodes.
@@ -33,6 +81,13 @@ type Config struct {
 	MvmGwMacAddr   string
 	MvmMask        int
 	MvmMtu         int
+	// MTUInterface, when set to the name of a host link (e.g. the parent bridge
+	// "cbr0" used by Kubernetes, or the egress uplink), causes the runtime to
+	// read that link's MTU at startup and use it as the effective guest MTU
+	// when MvmMtu is left at zero. Per-sandbox overrides (see NetRequest.MTU)
+	// always win over both. Issue #1673: a hardcoded 1500 breaks overlay
+	// networks whose transport MTU is below the Ethernet default.
+	MTUInterface string
 	TapInitNum     int
 	StateDir       string
 	HostPortBindIP string

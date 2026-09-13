@@ -203,7 +203,7 @@ func newProductionControllerDeps(cfg Config) (networkControllerDeps, error) {
 	if err != nil {
 		return networkControllerDeps{}, err
 	}
-	cubeDev, err := systemnet.GetOrCreateCubeDev(allocator.GatewayIP(), allocator.mask, cfg.MvmMtu, cfg.MvmGwMacAddr)
+	cubeDev, err := systemnet.GetOrCreateCubeDev(allocator.GatewayIP(), allocator.mask, cfg.EffectiveMTU(), cfg.MvmGwMacAddr)
 	if err != nil {
 		return networkControllerDeps{}, err
 	}
@@ -257,7 +257,7 @@ func initCubeVS(cfg Config, device *systemnet.HostDevice, cubeDev *systemnet.Cub
 		if err := systemnet.EnsureCubeRouterMatches(routerSpec, snatPortMin); err != nil {
 			return nil, err
 		}
-		cubeRouter, err = systemnet.GetOrCreateCubeRouter(routerSpec, cfg.MvmMtu)
+		cubeRouter, err = systemnet.GetOrCreateCubeRouter(routerSpec, cfg.EffectiveMTU())
 		if err != nil {
 			return nil, err
 		}
@@ -617,7 +617,15 @@ func (s *NetworkController) createState(ctx context.Context, req *EnsureNetworkR
 	t.ensureRoute = time.Since(stageStart)
 	stageStart = time.Now()
 	requestedMappings := s.normalizePortMappings(req.PortMappings)
-	tap, entry, err := s.acquireTap(req.SandboxID)
+	// Resolve the TAP MTU once per request: per-sandbox override wins, then the
+	// runtime's effective MTU (config value or live bridge lookup). The same
+	// value flows to the host TAP (LinkSetMTU) and the shim-facing interface
+	// descriptor (actualInterfaces → guest kernel MTU) so the two never drift.
+	guestMTU := s.cfg.EffectiveMTU()
+	if len(req.Interfaces) > 0 && req.Interfaces[0].MTU > 0 {
+		guestMTU = int(req.Interfaces[0].MTU)
+	}
+	tap, entry, err := s.acquireTap(req.SandboxID, guestMTU)
 	if err != nil {
 		return nil, err
 	}
@@ -806,7 +814,7 @@ func (s *NetworkController) cleanupCreateFailure(ctx context.Context, state *man
 // acquireTap obtains a Ready tap for a new sandbox through TapPool. The entry
 // remains Ready but owner-reserved until success is committed; Active is only
 // published after creating -> success.
-func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry, error) {
+func (s *NetworkController) acquireTap(owner string, mtu int) (*tapDevice, *TapPoolEntry, error) {
 	entry, err := s.tapPool.Acquire(owner)
 	if err == nil {
 		tap, err := tapDeviceFromEntry(entry)
@@ -827,7 +835,7 @@ func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry,
 		s.allocator.Release(ip)
 		return nil, nil, err
 	}
-	tap, err := s.tapAdapter.Create(ip, s.cfg.MVMMacAddr, s.cfg.MvmMtu, s.cubeDev.Index)
+	tap, err := s.tapAdapter.Create(ip, s.cfg.MVMMacAddr, mtu, s.cubeDev.Index)
 	if err != nil {
 		s.allocator.Release(ip)
 		return nil, nil, err
@@ -1239,11 +1247,12 @@ func (s *NetworkController) normalizePortMappings(req []PortMapping) []PortMappi
 // interface is always bound to the host TAP name because that is the concrete
 // device created by the runtime.
 func (s *NetworkController) actualInterfaces(tapName string, req []Interface) []Interface {
+	effectiveMTU := int32(s.cfg.EffectiveMTU())
 	if len(req) == 0 {
 		return []Interface{{
 			Name:    tapName,
 			MAC:     s.cfg.MVMMacAddr,
-			MTU:     int32(s.cfg.MvmMtu),
+			MTU:     effectiveMTU,
 			IPs:     []string{fmt.Sprintf("%s/%d", s.cfg.MVMInnerIP, s.cfg.MvmMask)},
 			Gateway: s.cfg.MvmGwDestIP,
 		}}
@@ -1254,7 +1263,7 @@ func (s *NetworkController) actualInterfaces(tapName string, req []Interface) []
 		out[0].MAC = s.cfg.MVMMacAddr
 	}
 	if out[0].MTU == 0 {
-		out[0].MTU = int32(s.cfg.MvmMtu)
+		out[0].MTU = effectiveMTU
 	}
 	if len(out[0].IPs) == 0 {
 		out[0].IPs = []string{fmt.Sprintf("%s/%d", s.cfg.MVMInnerIP, s.cfg.MvmMask)}

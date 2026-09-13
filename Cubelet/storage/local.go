@@ -73,6 +73,14 @@ type local struct {
 	s3CowManager         cowVolumeManager // S3 Store (s3 cubecow handle)
 	s3InitCancel         context.CancelFunc
 
+	// leaseRenewer keeps the cross-node resume S3 export alive for
+	// paused sandboxes. Lazily initialised on first use so existing
+	// tests that construct a bare *local{} do not break. Issue #1690 /
+	// #1692: without this the source-side lease lapses long before
+	// cross-node Resume runs and the import fails.
+	leaseRenewer     *Renewer
+	leaseRenewerOnce sync.Once
+
 	// rcDB is the dedicated bbolt DB for the plugin-volume reference-count store.
 	// It is a sibling file to meta.db in the same db directory.
 	rcDB    *bolt.DB
@@ -2081,4 +2089,72 @@ func (l *local) deleteStorageInfo(ctx context.Context, id string, bucketName str
 		}
 	}
 	return err
+}
+
+// renewerLazyInit returns the process-wide lease renewer, allocating
+// it on first use. The renewer is safe for concurrent callers; we use
+// sync.Once so the goroutines it owns are created exactly once.
+func (l *local) renewerLazyInit() *Renewer {
+	l.leaseRenewerOnce.Do(func() {
+		l.leaseRenewer = NewRenewer()
+	})
+	return l.leaseRenewer
+}
+
+// RegisterPauseLease starts the cross-node resume lease renewer for a
+// paused sandbox's remote snapshot. Safe to call from the pause path;
+// a no-op for XFS / unknown backends.
+//
+// Issue #1690 / #1692: without an exporter-side heartbeat the S3 lease
+// lapses long before cross-node Resume runs and the import fails with
+// a missing-export error. See [storage/lease_renewer.go] for the
+// renewal mechanism.
+func (l *local) RegisterPauseLease(ctx context.Context, sandboxID, snapID, backend string) error {
+	if l == nil {
+		return errors.New("local storage is nil")
+	}
+	return l.renewerLazyInit().Register(ctx, sandboxID, snapID, backend)
+}
+
+// UnregisterPauseLease stops the renewer. Safe to call from the resume
+// and destroy paths; a no-op for unknown snap IDs.
+func (l *local) UnregisterPauseLease(ctx context.Context, snapID string) {
+	if l == nil {
+		return
+	}
+	r := l.renewerLazyInit()
+	r.Unregister(ctx, snapID)
+}
+
+// ActivePauseLeases reports how many sandboxes are currently being
+// renewed. Cheap; suitable for /metrics.
+func (l *local) ActivePauseLeases() int {
+	if l == nil {
+		return 0
+	}
+	return l.renewerLazyInit().Active()
+}
+
+// Top-level convenience wrappers so call sites in other packages do
+// not have to spell out `localStorage.RegisterPauseLease`. They match
+// the Renewer.Register / Renewer.Unregister contract — see
+// lease_renewer.go for the gory details.
+
+// RegisterPauseLease starts the cross-node resume lease renewer for
+// the given (sandboxID, snapID, backend). Safe to call concurrently
+// and idempotent across retries (issue #1690 / #1692).
+func RegisterPauseLease(ctx context.Context, sandboxID, snapID, backend string) error {
+	return localStorage.RegisterPauseLease(ctx, sandboxID, snapID, backend)
+}
+
+// UnregisterPauseLease stops the renewer for snapID. Safe to call
+// from any goroutine; no-op when the snapID was never registered.
+func UnregisterPauseLease(ctx context.Context, snapID string) {
+	localStorage.UnregisterPauseLease(ctx, snapID)
+}
+
+// ActivePauseLeases returns the number of sandboxes currently being
+// lease-renewed. Suitable for /metrics.
+func ActivePauseLeases() int {
+	return localStorage.ActivePauseLeases()
 }

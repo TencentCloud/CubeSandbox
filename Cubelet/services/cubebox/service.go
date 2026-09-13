@@ -36,6 +36,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -764,6 +765,11 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 				backend = b
 			}
 		}
+		// Stop the cross-node resume lease renewer BEFORE the snapshot
+		// is GC'd. Issue #1690 / #1692: the renewer re-exports the
+		// snapshot every RenewalInterval; a GC race could leave it
+		// trying to renew a deleted export and flood the logs.
+		storage.UnregisterPauseLease(ctx, pauseSnapToGC)
 		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, pauseSnapToGC, cleanupBackendForPauseSnap(backend, pauseSnapToGC))
 	}
 	return rsp, nil

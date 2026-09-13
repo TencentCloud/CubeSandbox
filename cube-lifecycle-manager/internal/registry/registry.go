@@ -31,6 +31,14 @@ type Entry struct {
 	// idle calculation.
 	LastActiveMs int64
 
+	// ResumedAtMs is the wall-clock time (ms since epoch) of the most
+	// recent successful Resume. The sweeper uses it as a grace gate
+	// (issue #1683): a sandbox resumed within ResumeGrace must NOT be
+	// paused, even if its LastActiveMs is stale. Zero means "never
+	// resumed on this CLM instance" (e.g. a freshly-bootstrapped
+	// sandbox that was already running).
+	ResumedAtMs int64
+
 	// FirstSeenAt is when CLM registered the sandbox locally. The
 	// sweeper compares this against config.GracePeriod so a freshly-restarted
 	// CLM doesn't pause everything in its first sweep before it has a
@@ -105,6 +113,29 @@ func (r *Registry) SetRuntimeState(sandboxID, state string) bool {
 	}
 	e.RuntimeState = state
 	return true
+}
+
+// MarkResumed stamps ResumedAtMs = tsMs on the entry. Returns true when
+// the timestamp moved forward. The sweeper reads this to honour the
+// ResumeGrace window (issue #1683): an entry whose ResumedAtMs is
+// within ResumeGrace of now is exempt from pause regardless of its
+// LastActiveMs baseline.
+//
+// Unknown sandboxes are ignored — the registry only tracks entries it
+// has seen a create event for, and a Resume from a peer CLM should be
+// preceded by the lifecycle meta arriving here.
+func (r *Registry) MarkResumed(sandboxID string, tsMs int64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[sandboxID]
+	if !ok {
+		return false
+	}
+	if tsMs > e.ResumedAtMs {
+		e.ResumedAtMs = tsMs
+		return true
+	}
+	return false
 }
 
 // ResetLastActive clears LastActiveMs back to 0 for a single sandbox.
