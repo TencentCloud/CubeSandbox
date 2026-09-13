@@ -13,8 +13,8 @@ use crate::{
     app::AppState,
     auth::request_user,
     connect::{
-        decode_request_frame, keepalive_interval, require_streaming, require_unary, Code,
-        RequestFrameReader, RpcError,
+        decode_request_frame, encode_frame, end_stream, keepalive_interval, require_streaming,
+        require_unary, Code, RequestFrameReader, RpcError,
     },
     generated::process as proto,
     wire,
@@ -155,7 +155,17 @@ pub async fn stream_input(
         ));
     }
 
-    Ok(axum::Json(proto::StreamInputResponse {}).into_response())
+    // StreamInput 是客户端流式 RPC。按 Connect 协议，只要 RPC 有一侧是流式，响应
+    // 就必须走流式编解码：content-type 为 application/connect+json、消息带五字节
+    // 信封、末尾补 end-stream 信封。返回裸 JSON（application/json + "{}"）会让
+    // connect-go 在校验流式响应 content-type 时直接失败：
+    // invalid content-type: "application/json"; expecting "application/connect+json"。
+    let payload = wire::encode_json(&proto::StreamInputResponse {})?;
+    // 载荷是常量级的 "{}"，远小于 MAX_FRAME_BYTES，与 process::stream 的
+    // encode_output 同样按"不可失败"处理。
+    let mut body = encode_frame(0, &payload).expect("bounded StreamInput frame");
+    body.extend_from_slice(&end_stream(None));
+    Ok(([("content-type", "application/connect+json")], body).into_response())
 }
 
 /// 关闭普通进程的 stdin，PTY 进程不支持此操作。

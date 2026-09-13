@@ -168,6 +168,32 @@ async fn stream_input_consumes_an_ordered_connect_client_stream() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    // StreamInput 是客户端流式 RPC，响应必须走流式编解码：content-type 为
+    // application/connect+json，体是「数据信封 + end-stream 信封」。只断言 200
+    // 会漏掉裸 JSON 响应，而 connect-go 客户端会因此在校验响应 content-type 时
+    // 直接失败。
+    assert_eq!(
+        response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/connect+json"),
+    );
+    let frames = decode_all_frames(response.into_body().collect().await.unwrap().to_bytes());
+    assert_eq!(
+        frames.len(),
+        2,
+        "expected a data envelope and an end-stream envelope: {frames:?}"
+    );
+    assert_eq!(frames[0].flags, 0);
+    assert_eq!(
+        frames[0].payload, b"{}",
+        "StreamInputResponse has no fields, so proto JSON is the empty object"
+    );
+    assert_eq!(
+        frames[1].flags, 2,
+        "last frame must set the end-stream flag"
+    );
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     let response = app
@@ -321,16 +347,25 @@ fn start_pid(bytes: bytes::Bytes) -> Option<u64> {
 
 // 将连续 Connect 帧拆分为普通事件或流结束 JSON 值。
 fn all_frames(bytes: bytes::Bytes) -> Vec<Value> {
+    decode_all_frames(bytes)
+        .into_iter()
+        .map(|frame| {
+            if frame.flags == END_STREAM_FLAG {
+                json!({"end": serde_json::from_slice::<Value>(&frame.payload).unwrap()})
+            } else {
+                serde_json::from_slice(&frame.payload).unwrap()
+            }
+        })
+        .collect()
+}
+
+// 将连续 Connect 帧原样拆解，保留标志位与原始载荷，供校验信封形状使用。
+fn decode_all_frames(bytes: bytes::Bytes) -> Vec<cube_envd::connect::Frame> {
     let mut remaining = bytes.as_ref();
     let mut frames = Vec::new();
     while !remaining.is_empty() {
         let length = u32::from_be_bytes(remaining[1..5].try_into().unwrap()) as usize;
-        let frame = decode_frame(&remaining[..5 + length]).unwrap();
-        frames.push(if frame.flags == END_STREAM_FLAG {
-            json!({"end": serde_json::from_slice::<Value>(&frame.payload).unwrap()})
-        } else {
-            serde_json::from_slice(&frame.payload).unwrap()
-        });
+        frames.push(decode_frame(&remaining[..5 + length]).unwrap());
         remaining = &remaining[5 + length..];
     }
     frames
