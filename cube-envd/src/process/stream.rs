@@ -443,6 +443,16 @@ pub(super) async fn write_input(
             ))
         }
     };
+    // 下面 stdin 分支刻意持锁跨越写入，与 PTY 分支不对称，原因有二：
+    //   * close_stdin 在同一把锁下把状态置为 ProcessInput::Closed，持锁写才能保证
+    //     "关闭"排在在途写入之后；否则 CloseStdin 可能先返回成功，而已入队的字节
+    //     还没写完，调用方看到的顺序就不成立。
+    //   * 不能像 PTY 那样先 clone 再放锁：ProcessInput::Stdin 持有的是
+    //     tokio::process::ChildStdin，它按值存放在枚举里且未实现 Clone，借用它就
+    //     必然借住整个枚举，也就是必然持锁。要放锁得先把值 mem::replace 出来、再
+    //     引入一个中间状态并在所有错误路径写回，复杂度不抵收益。
+    // 代价：子进程不读 stdin 时（管道 64 KiB 写满）锁会握到背压解除或进程退出；
+    // 影响范围限于该进程自身的输入请求，不涉及注册表锁。
     let mut input = handle.input.lock().await;
     match &mut *input {
         ProcessInput::Stdin(_) if expects_pty => Err(RpcError::invalid_argument(
