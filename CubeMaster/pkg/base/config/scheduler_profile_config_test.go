@@ -260,6 +260,17 @@ func TestScorerPluginValidationCoversAllowlist(t *testing.T) {
 	// plugin_conf fail-closed checks. Probe every allowlisted name.
 	assert.Equal(t, allowedSchedulerScoreNames, ScorerNamesWithPluginConfMissingCheck())
 
+	// Negative-weight Init must cover every allowlisted scorer: plain float64
+	// via scorerPluginFloat64Weight, pointer weight via binpack validator.
+	weightCovered := make(map[string]struct{}, len(allowedSchedulerScoreNames))
+	for name := range ScorerNamesWithFloat64WeightCheck() {
+		weightCovered[name] = struct{}{}
+	}
+	for name := range ScorerNamesWithPointerWeightCheck() {
+		weightCovered[name] = struct{}{}
+	}
+	assert.Equal(t, allowedSchedulerScoreNames, weightCovered)
+
 	wantFactorBased := map[string]bool{
 		"real_time_weighted_average":    true,
 		"multi_factor_weighted_average": true,
@@ -1415,6 +1426,14 @@ scheduler:
 			wantErr: "affinity_score.weight must be >= 0",
 		},
 	}
+	// Table must cover every plain-float64 scorer so a new registration cannot
+	// escape both the drift gate and this Init rejection.
+	covered := make(map[string]struct{}, len(cases))
+	for _, tc := range cases {
+		covered[tc.plugin] = struct{}{}
+	}
+	assert.Equal(t, ScorerNamesWithFloat64WeightCheck(), covered)
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := initConfigFromYAML(t, tc.yaml)
@@ -1422,4 +1441,32 @@ scheduler:
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
+}
+
+func TestUnrecognizedEnabledWeightFactors_EmptyProfileWarnShape(t *testing.T) {
+	// Empty Profile must still load when a factor name drifts; Init only WARNs.
+	// Profile path fail-closes (see unsupported-factor Init tests above).
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - real_time_weighted_average
+    resource_weights:
+      mvm_num: 1
+      cpu_usage: 5
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1
+        enable_weight_factors:
+          - mvm_num
+          - cpu_usage
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.Equal(t, "", got.Scheduler.Profile)
+	assert.Equal(t, []UnrecognizedWeightFactor{{
+		Scorer: "real_time_weighted_average",
+		Factor: "cpu_usage",
+	}}, UnrecognizedEnabledWeightFactors(&got.Scheduler.SchedulerConf))
 }

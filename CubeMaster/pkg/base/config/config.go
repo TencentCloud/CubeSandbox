@@ -1152,6 +1152,10 @@ func preHandleScheduler(config *Config) error {
 	if err := validateListedScorerPluginConfPresent(&config.Scheduler.SchedulerConf); err != nil {
 		return err
 	}
+	// Empty-Profile keeps pre-upgrade load behavior for unknown factor names
+	// (runtime ignores them). Still emit a WARN so operators do not need a
+	// manual grep — Profile path remains fail-closed below.
+	warnUnrecognizedWeightFactors(&config.Scheduler.SchedulerConf)
 	// Strict factor/disable validation remains Profile-scoped so empty-profile
 	// configs with a present-but-ineffective plugin_conf block keep pre-upgrade
 	// load behavior (runtime Errorf + skip rather than Init failure).
@@ -1432,40 +1436,134 @@ func validateBinpackScoreWeight(s *SchedulerConf) error {
 }
 
 // validateSchedulerScorerPluginWeights rejects negative plugin_conf.<scorer>.weight
-// for every scorer that uses a plain float64 weight field. binpack_score is
-// handled separately by validateBinpackScoreWeight (*float64).
+// for every allowlisted scorer that uses a plain float64 weight field.
+// binpack_score (*float64) is handled by validateBinpackScoreWeight. Coverage of
+// the allowlist is enforced by ScorerNamesWithFloat64WeightCheck +
+// ScorerNamesWithPointerWeightCheck drift gates.
 func validateSchedulerScorerPluginWeights(s *SchedulerConf) error {
 	if s == nil || s.Score == nil {
 		return nil
 	}
-	check := func(name string, weight float64) error {
+	for name := range allowedSchedulerScoreNames {
+		weight, hasConf, known := scorerPluginFloat64Weight(s, name)
+		if !known || !hasConf {
+			continue
+		}
 		if weight < 0 {
 			return fmt.Errorf("scheduler.score.plugin_conf.%s.weight must be >= 0, got %v (weight:0 disables)", name, weight)
 		}
-		return nil
-	}
-	pc := s.Score.ScorePluginConf
-	if c := pc.RealTimeWeightedAverage; c != nil {
-		if err := check("real_time_weighted_average", c.Weight); err != nil {
-			return err
-		}
-	}
-	if c := pc.MultiFactorWeightedAverage; c != nil {
-		if err := check("multi_factor_weighted_average", c.Weight); err != nil {
-			return err
-		}
-	}
-	if c := pc.AffinityScore; c != nil {
-		if err := check("affinity_score", c.Weight); err != nil {
-			return err
-		}
-	}
-	if c := pc.ImageScore; c != nil {
-		if err := check("image_score", c.Weight); err != nil {
-			return err
-		}
 	}
 	return nil
+}
+
+// scorerPluginFloat64Weight reports the plain float64 plugin weight when the
+// plugin_conf block is present. known=false means this scorer does not use a
+// plain float64 weight (binpack uses *float64; unknown names fall through).
+// TestScorerPluginValidationCoversAllowlist requires every allowlisted scorer
+// to be either known here or in ScorerNamesWithPointerWeightCheck.
+func scorerPluginFloat64Weight(s *SchedulerConf, name string) (weight float64, hasConf bool, known bool) {
+	if s == nil || s.Score == nil {
+		return 0, false, false
+	}
+	switch name {
+	case "real_time_weighted_average":
+		c := s.Score.ScorePluginConf.RealTimeWeightedAverage
+		if c == nil {
+			return 0, false, true
+		}
+		return c.Weight, true, true
+	case "multi_factor_weighted_average":
+		c := s.Score.ScorePluginConf.MultiFactorWeightedAverage
+		if c == nil {
+			return 0, false, true
+		}
+		return c.Weight, true, true
+	case "affinity_score":
+		c := s.Score.ScorePluginConf.AffinityScore
+		if c == nil {
+			return 0, false, true
+		}
+		return c.Weight, true, true
+	case "image_score":
+		c := s.Score.ScorePluginConf.ImageScore
+		if c == nil {
+			return 0, false, true
+		}
+		return c.Weight, true, true
+	default:
+		return 0, false, false
+	}
+}
+
+// ScorerNamesWithFloat64WeightCheck returns allowlisted scorers recognized by
+// scorerPluginFloat64Weight (negative-weight Init path for plain float64).
+func ScorerNamesWithFloat64WeightCheck() map[string]struct{} {
+	probe := &SchedulerConf{Score: &SchedulerScoreConf{}}
+	out := make(map[string]struct{})
+	for name := range allowedSchedulerScoreNames {
+		if _, _, known := scorerPluginFloat64Weight(probe, name); known {
+			out[name] = struct{}{}
+		}
+	}
+	return out
+}
+
+// ScorerNamesWithPointerWeightCheck returns allowlisted scorers whose plugin
+// weight is *float64 and is validated by validateBinpackScoreWeight instead of
+// validateSchedulerScorerPluginWeights. Union with ScorerNamesWithFloat64WeightCheck
+// must equal the score allowlist / registry.
+func ScorerNamesWithPointerWeightCheck() map[string]struct{} {
+	out := make(map[string]struct{})
+	for name := range allowedSchedulerScoreNames {
+		if name == "binpack_score" {
+			out[name] = struct{}{}
+		}
+	}
+	return out
+}
+
+// warnUnrecognizedWeightFactors logs when enable_weight_factors names are
+// outside the per-scorer allowlist. Empty-Profile keeps load success (runtime
+// ignores unknown factors); Profile path still fails closed in
+// validateSchedulerScorePluginConfig.
+func warnUnrecognizedWeightFactors(s *SchedulerConf) {
+	for _, item := range UnrecognizedEnabledWeightFactors(s) {
+		CubeLog.Warnf("scheduler.score.plugin_conf.%s.enable_weight_factors lists unrecognized factor %q (ignored at runtime; fail-closed under a non-empty scheduler.profile)",
+			item.Scorer, item.Factor)
+	}
+}
+
+// UnrecognizedWeightFactor is one scorer+factor pair reported by
+// UnrecognizedEnabledWeightFactors (exported for tests).
+type UnrecognizedWeightFactor struct {
+	Scorer string
+	Factor string
+}
+
+// UnrecognizedEnabledWeightFactors returns enable_weight_factors entries that
+// are not in allowedWeightFactorsForScorer for active factor-based scorers.
+func UnrecognizedEnabledWeightFactors(s *SchedulerConf) []UnrecognizedWeightFactor {
+	if s == nil || s.Score == nil {
+		return nil
+	}
+	var out []UnrecognizedWeightFactor
+	for _, name := range s.Score.EnableScorers {
+		if !isFactorBasedSchedulerScore(name) {
+			continue
+		}
+		missing, known := scorerPluginConfMissing(s, name)
+		if !known || missing || scorerPluginExplicitlyDisabled(s, name) {
+			continue
+		}
+		allowed := allowedWeightFactorsForScorer(name)
+		for _, factor := range scorerEnableWeightFactors(s, name) {
+			if _, ok := allowed[factor]; ok {
+				continue
+			}
+			out = append(out, UnrecognizedWeightFactor{Scorer: name, Factor: factor})
+		}
+	}
+	return out
 }
 
 // validateListedScorerPluginConfPresent rejects enable_scorers entries whose

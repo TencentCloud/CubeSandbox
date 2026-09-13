@@ -121,6 +121,11 @@ filter/score 名称，会在调度器运行前于 `preHandleScheduler` 中失败
 filter/score）会回退到内置，而不是应用空覆盖。若要故意缩短 filter 列表，请声明
 用户 Profile 并列出目标过滤器（丢掉基础名时需设置 opt-in）。
 
+**Scorer 列表替换（仅告警）。** 当 Profile（内置或用户）提供 `score.enable_scorers`
+时，该列表会**整体替换**基础 `enable_scorers`（不会合并）。与 filter 不同，丢掉评分器
+只在配置加载时 WARN，**不会**导致 Init 失败，且 `allow_dropped_filters` 不适用于
+评分器。选用 Profile 后请核对生效的评分器列表（内置会有意换掉评分集合）。
+
 **`weight: 0` 禁用评分器。** 对四个遗留 Score 插件
 （`real_time_weighted_average`、`multi_factor_weighted_average`、
 `affinity_score`、`image_score`），插件级 `weight: 0`（或 `disable: true`）会禁用该
@@ -339,6 +344,8 @@ CubeAPI/Cubelet 创建路径、真实创建延迟或生产性能。
 - 将运行时内置预设与模拟器 `weightsForProfile` 视为两条共享名称但**公式不等价**的路径。
 - 选定 Profile 后审计生效的 `enable_filters`，确认所需准入过滤器（`disk`、
   `thirtparty` 等）未被替换丢掉。
+- 选定 Profile 后同样审计生效的 `enable_scorers`：评分器替换仅为告警（内置会有意
+  换掉评分集合）。
 - 对每个打算保持活跃的 `plugin_conf.<scorer>` 显式设置正的 `weight`；在更改 Profile /
   选择器列表后重启 CubeMaster。
 

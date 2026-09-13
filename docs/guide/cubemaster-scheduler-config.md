@@ -105,7 +105,11 @@ override a built-in entirely.
 **Warning:** when a **user** Profile provides `filter.enable_filters`, that list
 **replaces** the base `scheduler.filter.enable_filters` (no merge). Dropping
 base filters fails config load unless `allow_dropped_filters: true`. Built-in
-presets are score-only and do **not** replace admission filters.
+presets are score-only and do **not** replace admission filters. Separately,
+when a Profile (built-in or user) provides `score.enable_scorers`, that list
+also **replaces** the base `enable_scorers` (no merge) but is **warn-only** —
+dropped scorers do not fail config load. Audit the effective scorer list after
+selecting a Profile; `allow_dropped_filters` does not apply to scorers.
 
 ## Upgrade notes (empty Profile / restart)
 
@@ -117,6 +121,10 @@ on process start** (hot-reload only logs FATAL and keeps the previous Config):
 
 Configs that previously started with a silent unscored phase or inverted
 ranking will not boot until those YAML issues are fixed.
+
+Unrecognized `enable_weight_factors` names still **load** on an empty Profile
+(runtime ignores them) but now emit a config-load WARN; under a non-empty
+`scheduler.profile` they continue to fail closed.
 
 For every Score plugin (including the four existing scorers and
 `binpack_score`), `plugin_conf.<scorer>.weight: 0` disables the scorer and

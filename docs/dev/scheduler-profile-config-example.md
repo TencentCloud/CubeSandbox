@@ -137,6 +137,13 @@ falls back to the built-in rather than applying an empty overlay. To shorten
 filters intentionally, declare a user Profile that lists the desired filters
 (and set the opt-in if dropping base names).
 
+**Scorer list replace (warn-only).** When a Profile (built-in or user) provides
+`score.enable_scorers`, that list **replaces** base `enable_scorers` (no merge).
+Unlike filters, dropped scorers only emit a WARN at config load — they do **not**
+fail Init, and `allow_dropped_filters` does not apply. Audit the effective
+scorer list after selecting a Profile (built-ins intentionally swap the scoring
+set).
+
 **`weight: 0` disables scorers.** For the four legacy Score plugins
 (`real_time_weighted_average`, `multi_factor_weighted_average`,
 `affinity_score`, `image_score`), plugin `weight: 0` (or `disable: true`)
@@ -386,6 +393,8 @@ or production performance.
   paths that share names but are **not** formula-equivalent.
 - After selecting a Profile, audit effective `enable_filters` so required
   admission filters (`disk`, `thirtparty`, …) were not dropped by replace.
+- After selecting a Profile, also audit effective `enable_scorers`: scorer
+  replace is warn-only (built-ins intentionally swap the scoring set).
 - Set explicit positive `weight` on every `plugin_conf.<scorer>` you intend
   to keep active; restart CubeMaster after Profile / selector-list changes.
 

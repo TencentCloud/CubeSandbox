@@ -23,4 +23,17 @@ func TestSelectorAllowlistsMatchRegistries(t *testing.T) {
 	// a new registration + allowlist entry compiles while fail-closed checks
 	// silently no-op (default: continue / return false).
 	assert.Equal(t, score.RegisteredScoreNames(), config.ScorerNamesWithPluginConfMissingCheck())
+
+	// Negative-weight rejection must also cover every registry scorer: plain
+	// float64 via ScorerNamesWithFloat64WeightCheck, *float64 via
+	// ScorerNamesWithPointerWeightCheck (binpack). A sixth scorer that only
+	// updates the plugin_conf-missing probe would otherwise escape Init.
+	weightCovered := make(map[string]struct{})
+	for name := range config.ScorerNamesWithFloat64WeightCheck() {
+		weightCovered[name] = struct{}{}
+	}
+	for name := range config.ScorerNamesWithPointerWeightCheck() {
+		weightCovered[name] = struct{}{}
+	}
+	assert.Equal(t, score.RegisteredScoreNames(), weightCovered)
 }

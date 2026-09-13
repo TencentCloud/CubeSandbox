@@ -102,7 +102,10 @@ CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 **注意：** 当**用户** Profile 提供 `filter.enable_filters` 时，该列表会**整体替换**基础
 `scheduler.filter.enable_filters`（不会合并）。丢掉基础过滤器会配置加载失败，除非
 设置 `allow_dropped_filters: true`。内置预设仅为 Score 覆盖，**不会**替换准入
-过滤器。
+过滤器。另外，当 Profile（内置或用户）提供 `score.enable_scorers` 时，该列表也会
+**整体替换**基础 `enable_scorers`（不会合并），但只是**告警**——丢掉评分器不会导致
+配置加载失败。选用 Profile 后请核对生效的评分器列表；`allow_dropped_filters`
+不适用于评分器。
 
 ## 升级说明（空 Profile / 重启）
 
@@ -113,6 +116,9 @@ CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 - 任意 `plugin_conf.<scorer>.weight < 0`
 
 此前能带着静默无评分或反转排序启动的配置，升级后需先修好 YAML 才能启动。
+
+未识别的 `enable_weight_factors` 名称在空 Profile 下仍会**加载成功**（运行时忽略），
+但配置加载时会打 WARN；非空 `scheduler.profile` 下仍会失败关闭。
 
 对每个 Score 插件（含既有四个评分器以及 `binpack_score`），
 `plugin_conf.<scorer>.weight: 0` 会禁用该评分器并跳过 Select。**负的**
