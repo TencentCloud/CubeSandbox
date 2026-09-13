@@ -25,8 +25,8 @@ return 405 after authorization.
 
 ## Execution
 
-Use the root pinned Rust toolchain, read-only source mounts, a persistent Cargo
-cache and a data-disk target directory. Before any tests, arrange a **private,
+Use the root pinned Rust toolchain, read-only source mounts, persistent Cargo
+and build caches. Before any tests, arrange a **private,
 writable cgroup v2 mount** with CPU/memory controllers delegated and all runner
 processes moved below its root. Never bind a host cgroup mount writable. Run with
 SYS_TIME absent from effective, bounding, inheritable and ambient capability
@@ -44,7 +44,7 @@ The production idle timeout takes over ten minutes, so run it explicitly against
 the newly built daemon in the same isolated validation environment:
 
 ```sh
-ENVD_TEST_BINARY="$CARGO_TARGET_DIR/debug/cube-envd" \
+ENVD_TEST_BINARY="${CARGO_TARGET_DIR:-cube-envd/target}/debug/cube-envd" \
   python3 cube-envd/tests/guest_idle.py -v
 ```
 
@@ -53,8 +53,14 @@ configuration: an idle connection closes at 640 seconds while a 650-second
 Process stream and an unused connection remain usable. Short Cargo unit tests
 also cover overlapping requests, final response completion, errors and disconnect.
 
-Run the complete component checks with:
+Run the complete component checks from the repository root inside the isolated
+validation environment defined by the
+[component workflow](../../.github/workflows/build-cube-envd-image.yml):
 
 ```sh
-make -C cube-envd ci CARGO_TARGET_DIR=/data/cubelet/dev-cache/envd-rust/targets/current
+make -C cube-envd ci
 ```
+
+The workflow stores build output in a Docker-managed volume selected through
+`CARGO_TARGET_DIR`; no host cache path is required. With no override, native
+builds use `cube-envd/target`.

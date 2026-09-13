@@ -53,12 +53,12 @@ jobs:
           docker run --rm --init --privileged --cgroupns private \
             -v "$PWD:/workspace:ro" \
             -v envd-ci-cargo:/usr/local/cargo \
-            -v envd-ci-target:/data/cubelet/dev-cache/envd-rust/targets/current \
+            -v envd-ci-target:/target \
             -e NO_PROXY=localhost,127.0.0.1,::1 -e no_proxy=localhost,127.0.0.1,::1 \
-            -e CARGO_BUILD_JOBS=2 envd-ci \
+            -e CARGO_TARGET_DIR=/target -e CARGO_BUILD_JOBS=2 envd-ci \
             bash docker/tests/prepare-cgroup.sh bash -ec '
               cargo --version; rustc --version; rustfmt --version; cargo clippy --version
-              make -C cube-envd ci CARGO_TARGET_DIR=/data/cubelet/dev-cache/envd-rust/targets/current'
+              make -C cube-envd ci'
   build_rust:
     name: Build optional Rust image (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}

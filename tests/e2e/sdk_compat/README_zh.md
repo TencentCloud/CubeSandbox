@@ -530,7 +530,7 @@ export CUBE_PROXY_PORT_HTTP=80
 export SDK_ENVD_PROVIDER=rust
 export SDK_ENVD_COMMIT=<所选构建实际输出的commit>
 export SDK_ENVD_IMAGE=<构建节点可读的nginx镜像>
-export SDK_E2E_REPORT_DIR=/absolute/local/results/rust-chain
+export SDK_E2E_REPORT_DIR=reports/envd/rust-chain
 python -m pytest tests/e2e/sdk_compat/cases/envd/test_public.py::test_new_template_chain --run-e2e --sdk-e2e-backends=cubesandbox -n 0
 ```
 
@@ -565,7 +565,7 @@ export SDK_ENVD_GO_TEMPLATE_ID=<Go模板>
 export SDK_ENVD_RUST_TEMPLATE_ID=<Rust模板>
 export SDK_ENVD_GO_COMMIT=<Go构建commit>
 export SDK_ENVD_RUST_COMMIT=<Rust构建commit>
-export SDK_E2E_REPORT_DIR=/absolute/local/results/performance
+export SDK_E2E_REPORT_DIR=reports/envd/performance
 unset SDK_E2E_TRACE
 python -m pytest tests/e2e/sdk_compat/cases/performance/test_envd_comparison.py --run-e2e --run-envd-performance --sdk-e2e-backends=cubesandbox -n 0
 ```

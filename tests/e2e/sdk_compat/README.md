@@ -562,7 +562,7 @@ export CUBE_PROXY_PORT_HTTP=80
 export SDK_ENVD_PROVIDER=rust       # default is go
 export SDK_ENVD_COMMIT=<commit-printed-by-the-selected-build>
 export SDK_ENVD_IMAGE=<nginx-image-readable-by-the-template-builder>
-export SDK_E2E_REPORT_DIR=/absolute/local/results/rust-chain
+export SDK_E2E_REPORT_DIR=reports/envd/rust-chain
 python -m pytest tests/e2e/sdk_compat/cases/envd/test_public.py::test_new_template_chain \
   --run-e2e --sdk-e2e-backends=cubesandbox -n 0
 ```
@@ -608,7 +608,7 @@ export SDK_ENVD_GO_TEMPLATE_ID=<ready-go-template>
 export SDK_ENVD_RUST_TEMPLATE_ID=<ready-rust-template>
 export SDK_ENVD_GO_COMMIT=<go-build-commit>
 export SDK_ENVD_RUST_COMMIT=<rust-build-commit>
-export SDK_E2E_REPORT_DIR=/absolute/local/results/performance
+export SDK_E2E_REPORT_DIR=reports/envd/performance
 unset SDK_E2E_TRACE
 python -m pytest tests/e2e/sdk_compat/cases/performance/test_envd_comparison.py \
   --run-e2e --run-envd-performance --sdk-e2e-backends=cubesandbox -n 0
