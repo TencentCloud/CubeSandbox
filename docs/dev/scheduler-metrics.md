@@ -606,6 +606,70 @@ profile/workload; phrase conclusions as “observed under this workload,” not
   all-success runs.
 - A single-seed report cannot support cross-environment generalization.
 
+## Live CubeMaster Prometheus metrics
+
+The sections above describe **offline simulator** report fields. Production
+CubeMaster also exports Prometheus counters on the create path. This section
+documents the live score-blend metric added with runtime Profiles / HTTP scoring
+so operators can discover it next to the simulator contract.
+
+External HTTP scorer outcomes and latency
+(`cube_scheduler_external_http_score_outcomes_total`,
+`cube_scheduler_external_http_score_request_duration_seconds`) are defined in
+`docs/guide/cubemaster-scheduler-config.md` (External HTTP score plugin).
+
+### `cube_scheduler_score_non_finite_weight_total`
+
+| | |
+|---|---|
+| Type | Counter |
+| Labels | `scorer` |
+| Code | `CubeMaster/pkg/scheduler/schedule.go` (`observeNonFiniteScoreWeight`) |
+
+#### When it increments
+
+On each create-path `runScoreFilter` pass, CubeMaster samples `Weight()` once
+before `Select`. If that weight is **NaN or ±Inf**, the scorer still runs
+`Select` (so live-config plugins can emit their own observability), but the
+result is **not blended** into `totalPluginWeight` / node scores. Every such
+skip increments this counter.
+
+Warn logs for the same event are rate-limited to about once per `scorer` label
+per minute; the counter is **not** rate-limited.
+
+#### Label: `scorer`
+
+Value is `f.ID()` for the score selector, i.e.
+`Score/<name>` where `<name>` is a **bounded allowlisted** registry key from
+`CubeMaster/pkg/selector/score` (`RegisteredScoreNames` /
+`enable_scorers`):
+
+| Allowlisted `<name>` | Example `scorer` label |
+|---|---|
+| `real_time_weighted_average` | `Score/real_time_weighted_average` |
+| `multi_factor_weighted_average` | `Score/multi_factor_weighted_average` |
+| `affinity_score` | `Score/affinity_score` |
+| `image_score` | `Score/image_score` |
+| `binpack_score` | `Score/binpack_score` |
+| `external_http_score` | `Score/external_http_score` |
+
+Empty IDs are recorded as `unknown`. Do not treat arbitrary strings as valid
+label values; cardinality stays within this registry (plus `unknown`).
+
+#### What it can show
+
+- Misconfigured or hot-reloaded `weight` values that became non-finite and were
+  dropped from the weighted blend.
+- Which allowlisted scorer is producing poison weights on the create path.
+
+#### What it cannot show
+
+- Negative weights (still blended for built-in scorers; HTTP scorer rejects them
+  in validate).
+- Zero / omitted weights that skip HTTP or admit score-0 candidates without
+  non-finite detection.
+- Offline simulator report fields in this document.
+
 ## Related Coverage
 
 This document covers:
@@ -615,9 +679,11 @@ This document covers:
 - how to run the three default workloads with one CLI command and produce a
   report;
 - how baseline-vs-profile deltas under the same workload explain improvement or
-  trade-off.
+  trade-off;
+- the live Prometheus counter `cube_scheduler_score_non_finite_weight_total`.
 
 Related docs:
 
 - Simulator usage: `docs/dev/scheduler-simulator-benchmark.md`
 - Pairwise comparison report shape: `docs/dev/scheduler-benchmark-report-schema.md`
+- Live HTTP scorer metrics / config: `docs/guide/cubemaster-scheduler-config.md`
