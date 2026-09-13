@@ -664,8 +664,8 @@ label values; cardinality stays within this registry (plus `unknown`).
 
 #### What it cannot show
 
-- Negative weights (still blended for built-in scorers; HTTP scorer rejects them
-  in validate).
+- Negative plugin weights (rejected at config load / hot-reload `preHandle` for
+  every registered scorer, including `external_http_score`).
 - Zero / omitted weights that skip HTTP or admit score-0 candidates without
   non-finite detection.
 - Offline simulator report fields in this document.

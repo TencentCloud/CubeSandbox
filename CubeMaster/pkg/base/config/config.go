@@ -1217,8 +1217,12 @@ func preHandleScheduler(config *Config) error {
 	if err := applySchedulerProfile(&config.Scheduler.SchedulerConf); err != nil {
 		return err
 	}
-	// binpack negative weights are always rejected (independent of Profile).
+	// binpack / external_http negative (*float64) weights are always rejected
+	// (independent of Profile).
 	if err := validateBinpackScoreWeight(&config.Scheduler.SchedulerConf); err != nil {
+		return err
+	}
+	if err := validateExternalHTTPScoreWeight(&config.Scheduler.SchedulerConf); err != nil {
 		return err
 	}
 	// Negative plugin weights invert ranking in runScoreFilter; reject for every
@@ -1526,9 +1530,30 @@ func validateBinpackScoreWeight(s *SchedulerConf) error {
 	return nil
 }
 
+// validateExternalHTTPScoreWeight rejects negative / non-finite
+// plugin_conf.external_http_score.weight at config load. Explicit weight:0 is a
+// staged inert no-op; omitted weight (nil pointer) is defaulted to 1 in
+// ApplyExternalHTTPScoreDefaults. Invalid endpoint/timeout remain construction
+// Warn + Select fail-open (not Init failures).
+func validateExternalHTTPScoreWeight(s *SchedulerConf) error {
+	if s == nil || s.Score == nil {
+		return nil
+	}
+	cfg := s.Score.ScorePluginConf.ExternalHTTPScore
+	if cfg == nil || cfg.Weight == nil {
+		return nil
+	}
+	w := *cfg.Weight
+	if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 {
+		return fmt.Errorf("scheduler.score.plugin_conf.external_http_score.weight must be a finite number >= 0, got %v (weight:0 is inert; omit weight for default 1)", w)
+	}
+	return nil
+}
+
 // validateSchedulerScorerPluginWeights rejects negative plugin_conf.<scorer>.weight
-// for every scorer that uses a plain float64 weight field. binpack_score is
-// handled separately by validateBinpackScoreWeight (*float64).
+// for every scorer that uses a plain float64 weight field. binpack_score and
+// external_http_score (*float64) are handled by validateBinpackScoreWeight /
+// validateExternalHTTPScoreWeight.
 func validateSchedulerScorerPluginWeights(s *SchedulerConf) error {
 	if s == nil || s.Score == nil {
 		return nil

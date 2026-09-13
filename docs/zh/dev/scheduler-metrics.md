@@ -540,7 +540,8 @@ External HTTP scorer 的结果与延迟
 
 #### 不能证明什么
 
-- 负 weight（内置 scorer 仍会参与混合；HTTP scorer 在 validate 阶段拒绝）。
+- 负的插件 weight（所有已注册评分器——含 `external_http_score`——在配置加载 /
+  热更新 `preHandle` 阶段拒绝）。
 - 为零 / 省略、因而跳过 HTTP 或以 score 0 接纳候选、但并非非有限值的 weight。
 - 本文离线 simulator 报告字段。
 
