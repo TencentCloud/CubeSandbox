@@ -12,6 +12,15 @@
 # Build from the repository root so this Dockerfile can copy cube-envd/:
 #   docker build -f docker/Dockerfile.cube-base -t cubesandbox-base .
 # Repeat with --platform linux/arm64 for ARM.
+#
+# The envd version always comes from cube-envd/src/version.rs, so the build
+# above already produces a correctly versioned binary. To also stamp the
+# io.cubesandbox.envd.version label, pass that same constant (the build fails
+# if the two disagree):
+#   docker build -f docker/Dockerfile.cube-base -t cubesandbox-base \
+#     --build-arg CUBE_ENVD_VERSION="$(sed -n \
+#       's/.*CUBE_ENVD_VERSION: &str = "\([^"]*\)".*/\1/p' \
+#       cube-envd/src/version.rs | head -1)" .
 
 ARG RUST_TOOLCHAIN=1.89
 ARG UBUNTU_VERSION=22.04
@@ -21,10 +30,15 @@ FROM rust:${RUST_TOOLCHAIN}-slim-bookworm AS envd-builder
 
 ARG RUST_TOOLCHAIN
 ARG TARGETARCH
-# 版本唯一事实源是 cube-envd/src/version.rs 的常量；这两个 ARG 只用于镜像 LABEL 与
-# 构建注入（commit）。构建阶段会校验 CUBE_ENVD_VERSION 与二进制自报版本一致，避免
-# 标签与产物分叉。
-ARG CUBE_ENVD_VERSION=0.1.0
+# 版本唯一事实源是 cube-envd/src/version.rs 的常量，它**不**注入 cargo 构建环境，
+# 因此任何构建渠道（包括不带 --build-arg 的手工 docker build）产出的二进制都自报
+# 同一个真 semver。CUBE_ENVD_VERSION 只用于镜像 LABEL，并在非空时与二进制自报版本
+# 比对：label 要么正确、要么缺省，不会出现"标签与产物分叉"。
+#
+# 注意 Docker 会把阶段内声明的 ARG 作为环境变量注入每个 RUN，`option_env!` 会因此
+# 读到它，所以构建步骤里必须显式 unset——否则"去掉注入"是假的，二进制依旧跟着
+# build-arg 走，而校验也就退化成恒真式。
+ARG CUBE_ENVD_VERSION=
 ARG CUBE_ENVD_COMMIT=unknown
 
 RUN set -eux; \
@@ -48,13 +62,15 @@ COPY cube-envd/src/ src/
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     rust_target="$(cat /tmp/rust-target)"; \
-    CUBE_ENVD_VERSION="${CUBE_ENVD_VERSION}" CUBE_ENVD_COMMIT="${CUBE_ENVD_COMMIT}" \
+    wanted_version="${CUBE_ENVD_VERSION}"; \
+    unset CUBE_ENVD_VERSION; \
+    CUBE_ENVD_COMMIT="${CUBE_ENVD_COMMIT}" \
       cargo "+${RUST_TOOLCHAIN}" build --release --locked --target "${rust_target}" --bin cube-envd; \
     install -Dm0755 "target/${rust_target}/release/cube-envd" /out/envd; \
     reported="$(/out/envd -version)"; \
-    if [ "${reported}" != "${CUBE_ENVD_VERSION}" ]; then \
-        echo "CUBE_ENVD_VERSION (${CUBE_ENVD_VERSION}) does not match the version the binary reports (${reported});" >&2; \
-        echo "the version comes from cube-envd/src/version.rs — pass that value, or omit the build arg" >&2; \
+    if [ -n "${wanted_version}" ] && [ "${reported}" != "${wanted_version}" ]; then \
+        echo "CUBE_ENVD_VERSION (${wanted_version}) does not match the version the binary reports (${reported});" >&2; \
+        echo "the version is the constant in cube-envd/src/version.rs — pass that value, or leave the build arg empty" >&2; \
         exit 1; \
     fi; \
     /out/envd -version; \
@@ -64,7 +80,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM ubuntu:${UBUNTU_VERSION}
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG CUBE_ENVD_VERSION=0.1.0
+# 只影响 LABEL：留空则不打版本 label（二进制仍自报源码常量），非空时会与二进制
+# 自报版本校验一致后才允许构建。
+ARG CUBE_ENVD_VERSION=
 ARG CUBE_ENVD_COMMIT=unknown
 
 ENV ENVD_PORT=49983 \

@@ -307,8 +307,9 @@ docker rm -f "$cid"
 基础镜像由仓库内单个 GitHub Actions workflow 自动构建：
 [`.github/workflows/build-envd-base-image.yml`](https://github.com/TencentCloud/CubeSandbox/blob/master/.github/workflows/build-envd-base-image.yml)。
 它构建 `docker/Dockerfile.cube-base`：其中的 `envd-builder` 编译阶段会
-编译仓库自研的 Rust `cube-envd`（musl 静态；版本与 commit 通过
-`CUBE_ENVD_VERSION` / `CUBE_ENVD_COMMIT` 构建参数注入），把产物作为
+编译仓库自研的 Rust `cube-envd`（musl 静态；版本取 `cube-envd/src/version.rs`
+常量，只有 commit 通过 `CUBE_ENVD_COMMIT` 构建参数注入——`CUBE_ENVD_VERSION`
+仅用于镜像 label，并与二进制自报版本互相校验），把产物作为
 `/usr/bin/envd` 打进镜像，在原生 `linux/amd64` 与 `linux/arm64`
 runner 上分别对 `:49983/health` 做 smoke test 并验证
 `envd -version`/`-commit`，再合成 multi-arch manifest list 推送到

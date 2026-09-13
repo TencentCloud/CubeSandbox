@@ -330,8 +330,10 @@ If you copied logs, they remain in `$logdir` for inspection and can be deleted w
 The base image is produced by a single GitHub Actions workflow in this
 repository: [`.github/workflows/build-envd-base-image.yml`](https://github.com/TencentCloud/CubeSandbox/blob/master/.github/workflows/build-envd-base-image.yml).
 It builds `docker/Dockerfile.cube-base`, whose `envd-builder` stage
-compiles the in-repo Rust daemon `cube-envd` (musl static; version and
-commit injected as `CUBE_ENVD_VERSION` / `CUBE_ENVD_COMMIT` build args),
+compiles the in-repo Rust daemon `cube-envd` (musl static; the version is
+the `cube-envd/src/version.rs` constant, and only the commit is injected
+as a `CUBE_ENVD_COMMIT` build arg — `CUBE_ENVD_VERSION` merely stamps the
+image label and is cross-checked against the binary),
 bakes it into the image as `/usr/bin/envd`, runs a `:49983/health`
 smoke test plus `envd -version`/`-commit` checks on native
 `linux/amd64` and `linux/arm64` runners, then publishes a multi-arch
