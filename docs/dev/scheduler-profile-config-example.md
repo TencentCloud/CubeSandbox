@@ -50,7 +50,7 @@ Source: `CubeMaster/pkg/base/config/config.go`
 | `scheduler.profile` | Name of the active overlay. Empty string (default) means no expansion. Built-in names apply without a user map key. |
 | `scheduler.profiles` | User-defined map of named overlays. A user key with the same name as a built-in **overrides** the built-in. |
 | `scheduler.profiles.<name>.filter.enable_filters` | Replaces `scheduler.filter.enable_filters` when the profile provides a non-nil list. Dropping names that were in the base list fails config load unless `allow_dropped_filters: true` is set on that Profile. |
-| `scheduler.profiles.<name>.allow_dropped_filters` | Opt-in for **user** Profiles: allow `enable_filters` replace to drop base admission filters (for example `disk`, `thirtparty`). Default `false`. Built-in presets already allow drops (opinionated scene lists). A same-name entry that sets only this flag (no filter/score) falls back to the built-in and applies the flag. |
+| `scheduler.profiles.<name>.allow_dropped_filters` | Opt-in for **user** Profiles: allow `enable_filters` replace to drop base admission filters (for example `disk`, `thirtparty`). Default `false`. Built-in presets are **score-only** (they do not replace filters). A same-name entry that sets only this flag (no filter/score) falls back to the built-in. |
 | `scheduler.profiles.<name>.score.enable_scorers` | Replaces `scheduler.score.enable_scorers` when the profile provides a non-nil list. |
 | `scheduler.profiles.<name>.score.resource_weights` | Merged over `scheduler.score.resource_weights`; Profile keys win and unrelated base keys remain. These are factor weights, not plugin weights. |
 | `scheduler.score.plugin_conf.*` | Per-scorer params. **Not** a profile overlay field. |
@@ -123,18 +123,19 @@ Allowed score names (must match `CubeMaster/pkg/selector/score/init.go`):
 
 ### Operator notes
 
-**Filter list replace (admission risk).** When a Profile (built-in or user)
-provides a non-nil `filter.enable_filters` list, that list **replaces**
+**Filter list replace (admission risk).** When a **user** Profile provides a
+non-nil `filter.enable_filters` list, that list **replaces**
 `scheduler.filter.enable_filters` entirely. It does **not** merge with the
-base list. For **user** Profiles, dropping any name that was present in the
-base list **fails config load** unless `allow_dropped_filters: true`. Built-in
-presets already set that opt-in so stock configs
-(`cpu` / `mem` / `template_locality` / `realtime_create_num`) can select
-`balanced_spread` / `template_locality_first` / `binpack_utilization` by name.
-They still replace with short lists — audit effective `enable_filters` if you
-previously relied on `disk` / `thirtparty`. A same-name `profiles.<builtin>`
-entry with only `allow_dropped_filters` (no filter/score) falls back to the
-built-in rather than applying an empty overlay.
+base list. Dropping any name that was present in the base list **fails config
+load** unless `allow_dropped_filters: true`. Built-in presets
+(`balanced_spread` / `template_locality_first` / `binpack_utilization`) are
+**score-only overlays** — they change scorers / factor weights / plugin
+defaults and **do not** replace `enable_filters`, so stock admission filters
+(`disk`, `thirtparty`, `template_locality`, …) stay in place. A same-name
+`profiles.<builtin>` entry with only `allow_dropped_filters` (no filter/score)
+falls back to the built-in rather than applying an empty overlay. To shorten
+filters intentionally, declare a user Profile that lists the desired filters
+(and set the opt-in if dropping base names).
 
 **`weight: 0` disables scorers.** For the four legacy Score plugins
 (`real_time_weighted_average`, `multi_factor_weighted_average`,
@@ -228,11 +229,10 @@ scheduler:
   profile: binpack_utilization
 ```
 
-These overlays are scene-oriented selector combinations. They are **not**
+These overlays are scene-oriented **score** combinations. They are **not**
 the same as simulator `weightsForProfile`, and they make **no** live
-performance claims. Remember the filter-replace warning above: built-ins
-replace `enable_filters` with a shorter list and can drop `disk` /
-`thirtparty` / other base admission filters.
+performance claims. Built-ins do **not** replace `enable_filters`; use a user
+Profile if you need a shorter admission filter list.
 
 ## Minimal Profile Example
 

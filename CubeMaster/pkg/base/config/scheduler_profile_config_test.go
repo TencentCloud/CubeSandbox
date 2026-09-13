@@ -363,28 +363,24 @@ scheduler:
 func TestPreHandleScheduler_BuiltinProfilesApplyWithoutUserMap(t *testing.T) {
 	cases := []struct {
 		name            string
-		wantFilters     []string
 		wantScorers     []string
 		wantWeightKey   string
 		wantWeightValue float64
 	}{
 		{
 			name:            "balanced_spread",
-			wantFilters:     []string{"cpu", "mem", "realtime_create_num"},
 			wantScorers:     []string{"real_time_weighted_average"},
 			wantWeightKey:   "realtime_create_num",
 			wantWeightValue: 2,
 		},
 		{
 			name:            "template_locality_first",
-			wantFilters:     []string{"cpu", "mem", "template_locality"},
 			wantScorers:     []string{"image_score"},
 			wantWeightKey:   "template_id",
 			wantWeightValue: 2,
 		},
 		{
 			name:            "binpack_utilization",
-			wantFilters:     []string{"cpu", "mem"},
 			wantScorers:     []string{"binpack_score"},
 			wantWeightKey:   "",
 			wantWeightValue: 0,
@@ -401,7 +397,8 @@ scheduler:
 			assert.NoError(t, err)
 			assert.NotNil(t, got)
 			assert.Equal(t, tc.name, got.Scheduler.Profile)
-			assert.Equal(t, tc.wantFilters, got.Scheduler.Filter.EnableFilters)
+			// Built-ins are score-only: they must not invent or replace filters.
+			assert.Nil(t, got.Scheduler.Filter)
 			assert.Equal(t, tc.wantScorers, got.Scheduler.Score.EnableScorers)
 			if tc.wantWeightKey == "" {
 				assert.NotContains(t, got.Scheduler.Score.ResourceWeights, "binpack_score")
@@ -583,6 +580,7 @@ scheduler:
 
 func TestInit_OptInOnlySameNameAppliesBuiltin(t *testing.T) {
 	// allow_dropped_filters alone must not silent-no-op a built-in name.
+	stockFilters := []string{"cpu", "mem", "template_locality", "realtime_create_num", "disk"}
 	yamlBody := `common: {}
 log: {}
 scheduler:
@@ -593,20 +591,23 @@ scheduler:
       - mem
       - template_locality
       - realtime_create_num
+      - disk
   profiles:
     binpack_utilization:
       allow_dropped_filters: true
 `
 	got, err := initConfigFromYAML(t, yamlBody)
 	assert.NoError(t, err)
-	assert.Equal(t, []string{"cpu", "mem"}, got.Scheduler.Filter.EnableFilters)
+	// Built-in is score-only, so base admission filters (including disk) stay.
+	assert.Equal(t, stockFilters, got.Scheduler.Filter.EnableFilters)
 	assert.Equal(t, []string{"binpack_score"}, got.Scheduler.Score.EnableScorers)
 	assert.NotNil(t, got.Scheduler.Score.ScorePluginConf.BinpackScore)
 }
 
 func TestInit_BuiltinOnStockFiltersSucceeds(t *testing.T) {
 	// Stock CubeMaster configs enable cpu/mem/template_locality/realtime_create_num.
-	// Built-ins carry AllowDroppedFilters so selecting by name still loads.
+	// Built-ins are score-only, so selecting by name keeps those admission filters.
+	stock := []string{"cpu", "mem", "template_locality", "realtime_create_num"}
 	for _, profile := range []string{
 		"balanced_spread",
 		"template_locality_first",
@@ -627,9 +628,26 @@ scheduler:
 			got, err := initConfigFromYAML(t, yamlBody)
 			assert.NoError(t, err)
 			assert.Equal(t, profile, got.Scheduler.Profile)
+			assert.Equal(t, stock, got.Scheduler.Filter.EnableFilters)
 			assert.NotEmpty(t, got.Scheduler.Score.EnableScorers)
 		})
 	}
+}
+
+func TestInit_EmptyProfileListedScorerWithoutPluginConfFails(t *testing.T) {
+	// Finding 1 tradeoff (fail-closed): master would boot with omitted
+	// resource_weights and silently skip scoring; this PR fails Init instead.
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - real_time_weighted_average
+`
+	_, err := initConfigFromYAML(t, yamlBody)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "real_time_weighted_average")
+	assert.Contains(t, err.Error(), "plugin_conf.real_time_weighted_average is missing")
 }
 
 func TestInit_ProfilePolarityMixRejected(t *testing.T) {

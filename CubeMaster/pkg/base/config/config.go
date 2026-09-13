@@ -1321,8 +1321,8 @@ func applySchedulerProfile(s *SchedulerConf) error {
 			if builtin {
 				kind = "builtin"
 			}
-			CubeLog.Warnf("scheduler %s profile %q replaced enable_filters: previous=%v new=%v dropped=%v",
-				kind, s.Profile, previous, s.Filter.EnableFilters, dropped)
+			CubeLog.Warnf("scheduler %s profile %q replaced enable_filters: previous=%v new=%v dropped=%v (allowed=%v)",
+				kind, s.Profile, previous, s.Filter.EnableFilters, dropped, profile.AllowDroppedFilters)
 			if !profile.AllowDroppedFilters {
 				return fmt.Errorf("scheduler profile %q drops filters %v from base enable_filters; keep them in the Profile list or set allow_dropped_filters: true",
 					s.Profile, dropped)
@@ -1821,15 +1821,13 @@ func resolveSchedulerProfile(s *SchedulerConf) (SchedulerProfileConf, bool, erro
 }
 
 func builtinSchedulerProfiles() map[string]SchedulerProfileConf {
-	// Built-ins are opinionated scene presets with short filter lists. They set
-	// AllowDroppedFilters so stock configs (cpu/mem/template_locality/
-	// realtime_create_num) can select them by name without a full user override.
+	// Built-ins are score-side scene presets only. They intentionally omit
+	// Filter so selecting a built-in never replaces / drops base admission
+	// filters (disk, thirtparty, template_locality, …). Operators who want a
+	// shorter filter list must use an explicit user Profile (with
+	// allow_dropped_filters if dropping base names).
 	return map[string]SchedulerProfileConf{
 		RuntimeProfileBalancedSpread: {
-			AllowDroppedFilters: true,
-			Filter: &SchedulerFilterConf{
-				EnableFilters: []string{"cpu", "mem", "realtime_create_num"},
-			},
 			Score: &SchedulerProfileScoreConf{
 				EnableScorers: []string{"real_time_weighted_average"},
 				ResourceWeights: map[string]float64{
@@ -1842,10 +1840,6 @@ func builtinSchedulerProfiles() map[string]SchedulerProfileConf {
 			},
 		},
 		RuntimeProfileTemplateLocalityFirst: {
-			AllowDroppedFilters: true,
-			Filter: &SchedulerFilterConf{
-				EnableFilters: []string{"cpu", "mem", "template_locality"},
-			},
 			Score: &SchedulerProfileScoreConf{
 				EnableScorers: []string{"image_score"},
 				ResourceWeights: map[string]float64{
@@ -1855,10 +1849,6 @@ func builtinSchedulerProfiles() map[string]SchedulerProfileConf {
 			},
 		},
 		RuntimeProfileBinpackUtilization: {
-			AllowDroppedFilters: true,
-			Filter: &SchedulerFilterConf{
-				EnableFilters: []string{"cpu", "mem"},
-			},
 			Score: &SchedulerProfileScoreConf{
 				EnableScorers: []string{"binpack_score"},
 			},

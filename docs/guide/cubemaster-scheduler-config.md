@@ -102,12 +102,10 @@ and inject self-contained plugin defaults when the matching `plugin_conf`
 block is absent. User entries under `scheduler.profiles` with the same name
 override a built-in entirely.
 
-**Warning:** when a Profile provides `filter.enable_filters`, that list
-**replaces** the base `scheduler.filter.enable_filters` (no merge). User
-Profiles that drop base filters fail config load unless
-`allow_dropped_filters: true`. Built-in presets already allow drops so stock
-four-filter configs can select them by name; still audit effective filters if
-you relied on `disk` / `thirtparty`.
+**Warning:** when a **user** Profile provides `filter.enable_filters`, that list
+**replaces** the base `scheduler.filter.enable_filters` (no merge). Dropping
+base filters fails config load unless `allow_dropped_filters: true`. Built-in
+presets are score-only and do **not** replace admission filters.
 
 ## Upgrade notes (empty Profile / restart)
 
