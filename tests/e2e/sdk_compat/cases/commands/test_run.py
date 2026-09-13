@@ -8,7 +8,7 @@ import time
 import pytest
 
 from framework.assertions import assert_command_ok
-from framework.capabilities import COMMANDS
+from framework.capabilities import COMMANDS, SIGNAL_EXIT_CODE_128_N
 
 pytestmark = [
     pytest.mark.e2e,
@@ -87,20 +87,19 @@ def test_command_timeout_is_enforced(sdk_sandbox):
 
 
 @pytest.mark.p1
+@pytest.mark.requires_capability(SIGNAL_EXIT_CODE_128_N)
 def test_signal_death_reports_shell_exit_code(sdk_sandbox, sdk_e2e_config):
     """A signal-killed command must surface ``128 + N`` through the SDK.
 
     cube-envd reports ``128 + N`` for signal deaths (SIGKILL -> 137) for both
-    pipe and PTY processes, so ``exit_code`` is only meaningful when the SDK
-    exposes the platform convention. The E2B reference envd reports ``-1``
-    instead, so that backend only asserts a non-zero, non-crash result.
+    pipe and PTY processes. The E2B reference envd reports ``-1`` instead
+    (Go's ``ProcessState.ExitCode()`` returns -1 when a process was terminated
+    by a signal), so this case is gated on ``SIGNAL_EXIT_CODE_128_N`` and is
+    skipped — not weakened — on backends without that convention.
     """
     result = sdk_sandbox.run_command(
         "kill -9 $$",
         timeout=sdk_e2e_config.command_timeout,
     )
 
-    if sdk_sandbox.backend == "cubesandbox":
-        assert result.exit_code == 137, f"expected 128 + SIGKILL: {result}"
-    else:
-        assert result.exit_code != 0, f"signal death must not look successful: {result}"
+    assert result.exit_code == 137, f"expected 128 + SIGKILL: {result}"

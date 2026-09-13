@@ -31,6 +31,10 @@ PLATFORM_LIFECYCLE = "platform_lifecycle"
 HOST_MOUNT = "host_mount"
 VOLUME_PLUGIN = "volume_plugin"
 AUTH_SIMPLE_KEY = "auth_simple_key"
+# Signal deaths are reported as the shell convention 128 + N (SIGKILL -> 137)
+# instead of the E2B reference envd's -1 (Go's ProcessState.ExitCode() returns
+# -1 when a process was terminated by a signal).
+SIGNAL_EXIT_CODE_128_N = "signal_exit_code_128_n"
 
 COMMON_CAPABILITIES = frozenset(
     {LIFECYCLE, COMMANDS, FILESYSTEM, FILESYSTEM_EXTENDED, RUN_CODE}
@@ -55,6 +59,7 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         PAUSE_RESUME,
         SET_TIMEOUT,
         ROLLBACK_CLONE,
+        SIGNAL_EXIT_CODE_128_N,
         NETWORK_ALLOW_DENY,
         NETWORK_PUBLIC_ACCESS,
         NETWORK_MASK_REQUEST_HOST,
