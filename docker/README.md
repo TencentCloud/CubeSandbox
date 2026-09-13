@@ -94,11 +94,14 @@ Go's existing upstream build arguments and `docker/` build context remain valid.
 
 ### Rust runtime prerequisites and local verification
 
-Rust requires a dedicated, writable cgroup-v2 hierarchy with CPU and memory
-controllers. Ordinary unprivileged Docker normally cannot supply it; startup
-fails visibly. Use the intended guest environment, or the disposable private
-PID/mount/network/cgroup containers created by the image tests. Never remount or
-reconfigure the host cgroups to make a test pass. The test bootstrap removes
+Rust uses a writable cgroup-v2 hierarchy with CPU and memory controllers for
+its additional PTY, command and forwarding process groups. If initialization
+fails, it logs the reason and continues with a no-op cgroup manager, matching Go.
+In fallback mode, children inherit the daemon's existing cgroup placement;
+existing VM and platform limits are separate. Once groups are enabled, a later placement failure
+still rejects that child. The image tests exercise both managed and fallback
+behavior in disposable private PID/mount/network/cgroup containers. Never remount
+or reconfigure the host cgroups to make a test pass. The test bootstrap removes
 SYS_TIME before starting the daemon; do not grant it against the host clock.
 Port forwarding additionally requires the guest's `169.254.0.21` address.
 

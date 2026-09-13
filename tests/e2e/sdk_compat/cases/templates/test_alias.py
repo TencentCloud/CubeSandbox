@@ -23,7 +23,7 @@ from cubesandbox import Config, Template
 from cubesandbox._exceptions import ApiError, TemplateNotFoundError
 from framework.auth import auth_headers
 from framework.build_throttle import template_build_slot
-from framework.parallel import scale_timeout_for_xdist
+from framework.templates import wait_for_ready as _wait_for_ready, delete_with_retry as _delete_with_retry
 
 pytestmark = [
     pytest.mark.e2e,
@@ -50,51 +50,6 @@ def _cfg(sdk_e2e_config):
     return Config(api_url=sdk_e2e_config.cube_api_url)
 
 
-def _wait_for_ready(template_id, config, timeout=None):
-    # Widen the serial-run budget for parallel (xdist) runs: every alias case
-    # builds a fresh template from the same image, so under xdist all workers
-    # submit near-identical builds that serialize on CubeMaster's per-artifactID
-    # lock. The last worker's build can then take well past the serial budget.
-    if timeout is None:
-        timeout = scale_timeout_for_xdist(120)
-    deadline = time.time() + timeout
-    last_info = None
-    while time.time() < deadline:
-        try:
-            last_info = Template.get(template_id, config=config)
-            if last_info.status == "READY":
-                return last_info
-            if last_info.status == "FAILED":
-                pytest.fail(
-                    f"template {template_id} build failed; "
-                    f"last_error={last_info.last_error!r}"
-                )
-        except TemplateNotFoundError:
-            pass
-        time.sleep(2)
-    if last_info is None:
-        pytest.fail(
-            f"template {template_id} did not reach READY within {timeout}s; "
-            "template was never observed"
-        )
-    pytest.fail(
-        f"template {template_id} did not reach READY within {timeout}s; "
-        f"last_status={last_info.status!r} last_error={last_info.last_error!r}"
-    )
-
-
-def _delete_with_retry(identifier, cfg, timeout=180):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            Template.delete(identifier, config=cfg)
-            return
-        except ApiError as e:
-            if "attempt is already in progress" in str(e):
-                time.sleep(5)
-                continue
-            raise
-
 
 def test_template_list_and_get_existing(sdk_backend, sdk_e2e_config):
     """List templates and GET one by ID."""
@@ -110,6 +65,7 @@ def test_template_list_and_get_existing(sdk_backend, sdk_e2e_config):
     assert detail.status
 
 
+@pytest.mark.creates_template
 def test_template_create_from_image_and_cleanup(sdk_backend, sdk_e2e_config):
     """Create a template from an image and clean up."""
     _require_cubesandbox(sdk_backend)
@@ -134,6 +90,7 @@ def test_template_create_from_image_and_cleanup(sdk_backend, sdk_e2e_config):
                 pass
 
 
+@pytest.mark.creates_template
 def test_template_build_preserves_advanced_create_options(
     sdk_backend,
     sdk_e2e_config,
@@ -202,6 +159,7 @@ def test_template_alias_dedicated_endpoint_rejects_invalid(sdk_e2e_config):
         assert resp.status_code == 400
 
 
+@pytest.mark.creates_template
 def test_template_alias_create_get_and_delete(sdk_backend, sdk_e2e_config):
     """Full alias lifecycle: create -> get by alias -> delete by alias -> 404."""
     _require_cubesandbox(sdk_backend)
@@ -233,6 +191,7 @@ def test_template_alias_create_get_and_delete(sdk_backend, sdk_e2e_config):
                 pass
 
 
+@pytest.mark.creates_template
 def test_template_alias_dedicated_lookup_endpoint(sdk_backend, sdk_e2e_config):
     """GET /templates/aliases/:alias (E2B compat) returns {templateID, public}."""
     _require_cubesandbox(sdk_backend)
@@ -264,6 +223,7 @@ def test_template_alias_dedicated_lookup_endpoint(sdk_backend, sdk_e2e_config):
                 pass
 
 
+@pytest.mark.creates_template
 def test_template_alias_rebuild_reassignment(sdk_backend, sdk_e2e_config):
     """Rebuild with same alias moves it to the newly READY template."""
     _require_cubesandbox(sdk_backend)
@@ -304,6 +264,7 @@ def test_template_alias_rebuild_reassignment(sdk_backend, sdk_e2e_config):
                 pass
 
 
+@pytest.mark.creates_template
 def test_template_alias_set_on_existing_template(sdk_backend, sdk_e2e_config):
     """Set an alias on an already-existing template, then clear it (PUT /templates/:id/alias)."""
     _require_cubesandbox(sdk_backend)
@@ -349,6 +310,7 @@ def test_template_alias_set_on_existing_template(sdk_backend, sdk_e2e_config):
                 pass
 
 
+@pytest.mark.creates_template
 def test_template_alias_set_reassign_between_templates(sdk_backend, sdk_e2e_config):
     """Setting an alias held by another template steals it (PUT /templates/:id/alias)."""
     _require_cubesandbox(sdk_backend)

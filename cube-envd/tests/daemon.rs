@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "support/process.rs"]
+mod process;
+
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -232,21 +235,67 @@ fn cli_identity_and_legacy_parser() {
 }
 
 #[tokio::test]
-async fn non_cgroup_root_fails_before_listening_or_running_command() {
+async fn non_cgroup_root_falls_back_for_startup_commands_and_pty() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
     let directory = tempfile::tempdir().unwrap();
     let marker = directory.path().join("ran");
-    let output = Command::new(env!("CARGO_BIN_EXE_cube-envd"))
-        .args(["-port", "0", "-isnotfc", "-cgroup-root"])
-        .arg(directory.path())
-        .arg("-cmd")
-        .arg(format!("touch {}", marker.display()))
-        .output()
-        .await
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("not a cgroup v2 filesystem"));
-    assert!(!marker.exists());
+    let command = format!("touch {}; exec sleep 30", marker.display());
+    let (child, base) = start_with(&[
+        "-cgroup-root",
+        directory.path().to_str().unwrap(),
+        "-cmd",
+        &command,
+    ])
+    .await;
+    let client = Client::new();
+    assert_eq!(
+        client
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        204
+    );
+    timeout(Duration::from_secs(5), async {
+        while !marker.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let port = reqwest::Url::parse(&base).unwrap().port().unwrap();
+    for pty in [false, true] {
+        let mut request =
+            json!({"process":{"cmd":"/bin/sh","args":["-c", "printf fallback; exit 7"]}});
+        if pty {
+            request["pty"] = json!({"size":{"rows":24,"cols":80}});
+        }
+        let mut stream = process::Stream::open(&client, port, "Start", request).await;
+        assert!(stream.next().await.1["event"].get("start").is_some());
+        let mut output = Vec::new();
+        loop {
+            let (flag, frame) = stream.next().await;
+            assert_eq!(flag, 0, "{frame}");
+            if let Some(data) = frame["event"].get("data") {
+                output.extend(
+                    STANDARD
+                        .decode(data[if pty { "pty" } else { "stdout" }].as_str().unwrap())
+                        .unwrap(),
+                );
+            }
+            if let Some(end) = frame["event"].get("end") {
+                assert_eq!(end["exitCode"], 7);
+                break;
+            }
+        }
+        assert_eq!(output, b"fallback");
+        assert_eq!(stream.next().await, (2, json!({})));
+    }
     assert!(!directory.path().join("user").exists());
+    assert!(!directory.path().join("ptys").exists());
+    stop(child, libc::SIGTERM).await;
 }
 
 #[tokio::test]

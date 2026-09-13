@@ -380,34 +380,69 @@ class StartupServices(DaemonTestCase):
             self.assertEqual(self.command('printf %s "$GUEST_TEST"', token), b'visible')
             self.assertNotIn(token, daemon.logs())
 
-    def test_missing_controller_and_read_only_cgroup_fail_before_command(self):
+    def test_missing_controller_and_readonly_cgroup_fall_back_for_commands_and_forwarding(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
-            marker = pathlib.Path(directory, 'ran')
             root = CGROUP_MOUNT / f'guest-no-controller-{os.getpid()}'
             root.mkdir()
-            try:
-                args = [BINARY, '-isnotfc', '-cgroup-root', str(root), '-cmd', f'touch {marker}']
-                result = subprocess.run(args, capture_output=True, timeout=5)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(b'cgroup setup failed', result.stderr)
-                self.assertFalse(marker.exists())
+            self.addCleanup(root.rmdir)
+
+            def check(selected_root):
+                marker = pathlib.Path(directory, 'ran')
+                marker.unlink(missing_ok=True)
+                port = free_port()
+                with tempfile.TemporaryFile() as output:
+                    daemon = subprocess.Popen(
+                        [BINARY, '-isnotfc', '-port', str(port), '-cgroup-root',
+                         str(selected_root), '-cmd', f'touch {marker}'],
+                        stdout=output, stderr=output)
+                    echo = EchoServer()
+                    echo.start()
+                    helpers = set()
+                    try:
+                        wait_for(lambda: request(port, 'GET', '/health')[0] == 204)
+                        wait_for(marker.exists)
+                        self.endpoint = f'http://127.0.0.1:{port}'
+                        self.assertEqual(self.command('printf fallback'), b'fallback')
+                        def forwarded():
+                            with socket.create_connection(('169.254.0.21', echo.port), timeout=0.2) as client:
+                                client.sendall(b'fallback-forward')
+                                return client.recv(64) == b'fallback-forward'
+                        wait_for(forwarded)
+                        for children in pathlib.Path(f'/proc/{daemon.pid}/task').glob('*/children'):
+                            for pid in children.read_text().split():
+                                try:
+                                    if b'socat' in pathlib.Path(f'/proc/{pid}/cmdline').read_bytes():
+                                        helpers.add(int(pid))
+                                except FileNotFoundError:
+                                    pass
+                        self.assertTrue(helpers)
+                    finally:
+                        echo.stop()
+                        daemon.terminate()
+                        try:
+                            daemon.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            daemon.kill()
+                            daemon.wait()
+                            raise
+                    logs = os.pread(output.fileno(), 1024 * 1024, 0).decode()
+                    self.assertEqual(daemon.returncode, 0, logs)
+                    self.assertEqual(logs.count('falling back to no-op cgroup manager'), 1, logs)
+                    self.assertIn(str(selected_root), logs)
+                    self.assertTrue(all(not pathlib.Path(f'/proc/{pid}').exists() for pid in helpers))
                 self.assertEqual(list(root.glob('ptys')), [])
-                # Remount only a bind of this dedicated subtree read-only.
-                mountpoint = pathlib.Path(directory, 'readonly')
-                mountpoint.mkdir()
-                subprocess.run(['mount', '--bind', str(root), str(mountpoint)], check=True)
-                try:
-                    subprocess.run(['mount', '-o', 'remount,bind,ro', str(mountpoint)], check=True)
-                    args[3] = str(mountpoint)
-                    result = subprocess.run(args, capture_output=True, timeout=5)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn(b'cgroup setup failed', result.stderr)
-                    self.assertFalse(marker.exists())
-                finally:
-                    subprocess.run(['umount', str(mountpoint)], check=True)
+                self.assertEqual(list(root.glob('user')), [])
+
+            check(root)
+            mountpoint = pathlib.Path(directory, 'readonly')
+            mountpoint.mkdir()
+            subprocess.run(['mount', '--bind', str(root), str(mountpoint)], check=True)
+            try:
+                subprocess.run(['mount', '-o', 'remount,bind,ro', str(mountpoint)], check=True)
+                check(mountpoint)
             finally:
-                root.rmdir()
+                subprocess.run(['umount', str(mountpoint)], check=True)
 
     def test_shutdown_interrupts_pending_metadata_request(self):
         State.mmds_hold = threading.Event()

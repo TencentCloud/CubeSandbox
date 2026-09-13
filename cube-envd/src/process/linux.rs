@@ -247,14 +247,12 @@ pub(crate) struct Spawn {
 
 impl Spawn {
     pub fn begin(self) -> Result<(Child, tokio::net::UnixStream), DomainError> {
-        let cgroup = above_stdio(
-            self.cgroup
-                .file
-                .try_clone()
-                .map_err(|error| setup_error(error, false))?
-                .into(),
-        )
-        .map_err(|error| setup_error(error, false))?;
+        let cgroup = self
+            .cgroup
+            .file()
+            .map(|file| file.try_clone().and_then(|file| above_stdio(file.into())))
+            .transpose()
+            .map_err(|error| setup_error(error, false))?;
         let (parent, child) = UnixStream::pair().map_err(|error| setup_error(error, false))?;
         let parent = UnixStream::from(
             above_stdio(parent.into()).map_err(|error| setup_error(error, false))?,
@@ -292,7 +290,7 @@ impl Spawn {
                     child.as_raw_fd(),
                     parent.as_raw_fd(),
                     null.as_raw_fd(),
-                    cgroup.as_raw_fd(),
+                    cgroup.as_ref().map(AsRawFd::as_raw_fd),
                 );
             }
         }
@@ -374,7 +372,7 @@ unsafe fn child_exec(
     report: i32,
     parent: i32,
     null: i32,
-    cgroup: i32,
+    cgroup: Option<i32>,
 ) -> ! {
     libc::close(parent);
     for (target, source) in [
@@ -390,8 +388,10 @@ unsafe fn child_exec(
         child_error(report, false);
     }
     // Establish resource policy before credentials or any user executable.
-    if libc::write(cgroup, b"0".as_ptr().cast(), 1) != 1 {
-        child_error(report, false);
+    if let Some(cgroup) = cgroup {
+        if libc::write(cgroup, b"0".as_ptr().cast(), 1) != 1 {
+            child_error(report, false);
+        }
     }
     if libc::setpriority(libc::PRIO_PROCESS, 0, 0) < 0 {
         child_error(report, false);

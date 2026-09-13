@@ -34,6 +34,6 @@ EXPOSE 80 49983
 
 # cube-entrypoint.sh (inherited from the base image) will:
 #   1. Launch envd on ${ENVD_PORT:-49983} in the background.
-#   2. exec the CMD below as the foreground process, so nginx owns PID 1
-#      logs and receives SIGTERM on `docker stop`.
+#   2. Supervise nginx alongside envd under tini, forward termination signals,
+#      and stop the container if either child exits unexpectedly.
 CMD ["nginx", "-g", "daemon off;"]

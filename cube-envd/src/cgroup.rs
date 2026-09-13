@@ -22,8 +22,13 @@ pub(crate) enum ProcessClass {
 pub struct CgroupError(String);
 
 pub(crate) struct ProcessCgroup {
-    pub(crate) file: std::fs::File,
-    _directory: CgroupDirectory,
+    managed: Option<(std::fs::File, CgroupDirectory)>,
+}
+
+impl ProcessCgroup {
+    pub(crate) fn file(&self) -> Option<&std::fs::File> {
+        self.managed.as_ref().map(|(file, _directory)| file)
+    }
 }
 
 struct CgroupDirectory {
@@ -48,6 +53,15 @@ struct CgroupSet {
 }
 
 impl CgroupSet {
+    fn noop() -> Self {
+        let group = Arc::new(ProcessCgroup { managed: None });
+        Self {
+            ptys: group.clone(),
+            socats: group.clone(),
+            user: group,
+        }
+    }
+
     fn get(&self, class: ProcessClass) -> Arc<ProcessCgroup> {
         match class {
             ProcessClass::Pty => self.ptys.clone(),
@@ -124,9 +138,7 @@ impl CgroupManager {
         let mut job = tokio::task::spawn_blocking(move || prepare(&root));
         let groups = if let Some(deadline) = deadline {
             match tokio::time::timeout_at(deadline, &mut job).await {
-                Ok(result) => {
-                    result.map_err(|_| CgroupError("cgroup setup task failed".into()))??
-                }
+                Ok(result) => result.map_err(|_| CgroupError("cgroup setup task failed".into()))?,
                 Err(_) => {
                     drop(job.await);
                     return Err(CgroupError("cgroup setup deadline exceeded".into()));
@@ -134,7 +146,18 @@ impl CgroupManager {
             }
         } else {
             job.await
-                .map_err(|_| CgroupError("cgroup setup task failed".into()))??
+                .map_err(|_| CgroupError("cgroup setup task failed".into()))?
+        };
+        let groups = match groups {
+            Ok(groups) => groups,
+            Err(error) => {
+                // Match upstream: initialization failure disables only envd's
+                // additional process groups for this daemon lifetime. A later
+                // placement failure in an enabled group still rejects the child.
+                tracing::warn!(cgroup_root = %self.root.display(), %error,
+                    "falling back to no-op cgroup manager");
+                CgroupSet::noop()
+            }
         };
         let groups = Arc::new(groups);
         *slot = Some(groups.clone());
@@ -266,8 +289,7 @@ fn create(
         .open(path.join("cgroup.procs"))
         .map_err(|error| io_error("open cgroup.procs", &path, error))?;
     Ok(ProcessCgroup {
-        file,
-        _directory: directory,
+        managed: Some((file, directory)),
     })
 }
 

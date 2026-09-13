@@ -203,18 +203,20 @@ async fn start(cgroup: &crate::cgroup::ProcessCgroup, listener: Listener) -> Opt
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     command.as_std_mut().process_group(0);
-    let mut cgroup = match cgroup.file.try_clone() {
-        Ok(file) => file,
-        Err(error) => {
-            tracing::warn!(errno = error.raw_os_error(), "could not clone socat cgroup");
-            return None;
+    if let Some(file) = cgroup.file() {
+        let mut cgroup = match file.try_clone() {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::warn!(errno = error.raw_os_error(), "could not clone socat cgroup");
+                return None;
+            }
+        };
+        unsafe {
+            command.as_std_mut().pre_exec(move || {
+                use std::io::Write;
+                cgroup.write_all(b"0")
+            });
         }
-    };
-    unsafe {
-        command.as_std_mut().pre_exec(move || {
-            use std::io::Write;
-            cgroup.write_all(b"0")
-        });
     }
     match command.spawn() {
         Ok(child) => {
