@@ -493,15 +493,68 @@ Profile 同样只有四个合法名：`default`、`balanced_spread`、`template_
 - `failure_reasons` 与 `warnings` 使用 `omitempty`，全成功时 JSON 中不出现。
 - 单 seed 报告不能支持跨环境推广。
 
+## 在线 CubeMaster Prometheus 指标
+
+以上各节描述的是**离线 simulator** 报告字段。生产 CubeMaster 在 create 路径上还会导出 Prometheus 计数器。本节记录随 runtime Profiles / HTTP scoring 引入的 live 加权指标，便于与 simulator 合同一并发现。
+
+External HTTP scorer 的结果与延迟
+（`cube_scheduler_external_http_score_outcomes_total`、
+`cube_scheduler_external_http_score_request_duration_seconds`）定义见
+`docs/zh/guide/cubemaster-scheduler-config.md`（External HTTP score 插件）。
+
+### `cube_scheduler_score_non_finite_weight_total`
+
+| | |
+|---|---|
+| 类型 | Counter |
+| 标签 | `scorer` |
+| 代码 | `CubeMaster/pkg/scheduler/schedule.go`（`observeNonFiniteScoreWeight`） |
+
+#### 何时递增
+
+每次 create 路径上的 `runScoreFilter` 会在 `Select` 之前采样一次 `Weight()`。若该 weight 为 **NaN 或 ±Inf**，仍会调用该 scorer 的 `Select`（便于 live-config 插件发出自身可观测性），但结果**不会**并入 `totalPluginWeight` / 节点分数。每次此类跳过都会递增本计数器。
+
+同一 `scorer` 标签的 Warn 日志约每分钟限流一条；**计数器本身不限流**。
+
+#### 标签：`scorer`
+
+取值为 score selector 的 `f.ID()`，即 `Score/<name>`，其中 `<name>` 来自
+`CubeMaster/pkg/selector/score` 的**有界白名单**注册表
+（`RegisteredScoreNames` / `enable_scorers`）：
+
+| 白名单 `<name>` | 示例 `scorer` 标签 |
+|---|---|
+| `real_time_weighted_average` | `Score/real_time_weighted_average` |
+| `multi_factor_weighted_average` | `Score/multi_factor_weighted_average` |
+| `affinity_score` | `Score/affinity_score` |
+| `image_score` | `Score/image_score` |
+| `binpack_score` | `Score/binpack_score` |
+| `external_http_score` | `Score/external_http_score` |
+
+空 ID 记为 `unknown`。不要把任意字符串当作合法标签值；基数保持在该注册表（外加 `unknown`）内。
+
+#### 能证明什么
+
+- 错误配置或热更新后变成非有限值、因而被踢出加权混合的 `weight`。
+- 哪个白名单 scorer 在 create 路径上产出了有毒 weight。
+
+#### 不能证明什么
+
+- 负 weight（内置 scorer 仍会参与混合；HTTP scorer 在 validate 阶段拒绝）。
+- 为零 / 省略、因而跳过 HTTP 或以 score 0 接纳候选、但并非非有限值的 weight。
+- 本文离线 simulator 报告字段。
+
 ## 相关覆盖范围
 
 本文档覆盖：
 
 - simulator 报告输出的调度质量指标定义（至少五项核心指标）；
 - 如何用一条 CLI 命令跑三种默认 workload 并生成报告；
-- 如何用同一 workload 下的 baseline vs profile 差值说明改善或 trade-off。
+- 如何用同一 workload 下的 baseline vs profile 差值说明改善或 trade-off；
+- 在线 Prometheus 计数器 `cube_scheduler_score_non_finite_weight_total`。
 
 相关文档：
 
 - simulator 用法：`docs/dev/scheduler-simulator-benchmark.md`
 - 两两对比报告形状：`docs/dev/scheduler-benchmark-report-schema.md`
+- 在线 HTTP scorer 指标 / 配置：`docs/zh/guide/cubemaster-scheduler-config.md`
