@@ -79,11 +79,9 @@ scheduler:
 | `metric_update_timeout` | 节点资源指标多久未更新后视为不可调度。应明显大于 Cubelet 上报周期。 |
 | `local_metric_update_timeout` | 预留的本地指标超时字段。当前 prefilter 对全局指标和本地指标的新鲜度检查都使用 `metric_update_timeout`。 |
 | `filter.enable_filters` | 启用调度过滤器。常见过滤器包括 CPU、内存、模板本地性和实时创建并发。 |
-| `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`；启用时必须同时配置 `score.plugin_conf.real_time_weighted_average`，否则 CubeMaster 可能在 scheduler 启动阶段 panic。对 `external_http_score` 同样适用：写入 `enable_scorers` 时必须提供匹配的 `score.plugin_conf.external_http_score`。 |
-| `score.resource_weights` | 控制 MVM 数、创建并发、CPU/内存 quota 使用率等因子的权重。权重越高，该因子对分数影响越大；对应因子也必须列在 `score.plugin_conf.real_time_weighted_average.enable_weight_factors` 中。 |
+| `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`。列出因子型 / affinity 评分器或 `external_http_score` 但缺少匹配的 `score.plugin_conf.<name>` 块时**配置加载失败**（空 Profile 同样适用；`binpack_score` 可省略该块并使用默认）。当设置了非空 `scheduler.profile` 时，因子型评分器还需已知的 `enable_weight_factors` 与至少一个正的 `resource_weights`，否则配置加载失败。 |
+| `score.resource_weights` | 占用率类评分器的因子权重（MVM 数、创建并发、CPU/内存 quota 使用率等）。权重越高影响越大；使用因子的评分器还需把对应因子列在 `plugin_conf.<name>.enable_weight_factors` 中。Profile 展开时同名键覆盖基础权重。因子名必须在允许列表内（如 `quota_cpu_usage`、`cpu_util`，**不是** `cpu_usage` 这类笔误）；非空 Profile 下 `enable_weight_factors` 出现未知名会配置加载失败。启用 Profile 前请先 grep 现有配置中的漂移因子名。插件型评分器（如 `external_http_score` / `binpack_score`）**不**再把该映射当作加载器前置条件。 |
 | `score.plugin_conf.external_http_score` | 可选的 HTTP sidecar 评分器。见 [External HTTP score 插件](#external-http-score-插件)。 |
-| `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`。列出因子型 / affinity 评分器但缺少对应 `plugin_conf` 块时配置加载失败（空 Profile 同样适用；`binpack_score` 可省略该块并使用默认）。当设置了非空 `scheduler.profile` 时，因子型评分器还需已知的 `enable_weight_factors` 与至少一个正的 `resource_weights`，否则配置加载失败。 |
-| `score.resource_weights` | 控制 MVM 数、创建并发、CPU/内存 quota 使用率等因子的权重。权重越高，该因子对分数影响越大；对应因子也必须列在 `score.plugin_conf.real_time_weighted_average.enable_weight_factors` 中。Profile 展开时同名键覆盖基础权重。因子名必须在允许列表内（如 `quota_cpu_usage`、`cpu_util`，**不是** `cpu_usage` 这类笔误）；非空 Profile 下 `enable_weight_factors` 出现未知名会配置加载失败。启用 Profile 前请先 grep 现有配置中的漂移因子名。 |
 | `score.plugin_conf.binpack_score` | 可选的插件型评分器，偏好更满的节点。在 `enable_scorers` 中列出但省略该块时，会启用安全默认（插件权重 1，CPU/内存/MVM 等权）。插件级 `weight` 为指针：省略 → 默认 1；显式 `0` 禁用 Select；负值在配置加载阶段被拒绝。子权重 `cpu_weight`/`mem_weight`/`mvm_weight` 仍是普通 float：`<= 0` 回退为默认 `1`（不能用 0 排除某一维）；负值在配置加载阶段被拒绝。 |
 | `profile` / `profiles` | 可选的运行时 Profile 覆盖层。空 `profile` 不改变现有 Filter/Score。内置名：`balanced_spread`、`template_locality_first`、`binpack_utilization`。用户同名 key 完全覆盖内置。运行时 Profile 是选择器覆盖，不是离线模拟器模型。详见 [Scheduler Profile 配置示例](../dev/scheduler-profile-config-example.md)。 |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | 全局或按实例类型限制单节点 MVM 数。Cubelet 上报的 `max_mvm_num` 也会参与实际上限计算。 |
@@ -112,21 +110,24 @@ CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 即使 `scheduler.profile` 为空，以下 Init 校验也会在**进程启动**时让 CubeMaster
 退出（热加载仅写 FATAL 并保留旧 Config）：
 
-- `enable_scorers` 列出了因子型 / affinity 评分器但缺少对应 `plugin_conf`
+- `enable_scorers` 列出了因子型 / affinity 评分器或 `external_http_score` 但缺少
+  对应 `plugin_conf`
 - 任意 `plugin_conf.<scorer>.weight < 0`
 
 此前能带着静默无评分或反转排序启动的配置，升级后需先修好 YAML 才能启动。
 
-对每个 Score 插件（含既有四个评分器以及 `binpack_score`），
-`plugin_conf.<scorer>.weight: 0` 会禁用该评分器并跳过 Select。**负的**
-`plugin_conf.<scorer>.weight` 会对所有已注册评分器在配置加载阶段拒绝（不只是
-`binpack_score`）；升级前能带着负权重启动的配置，升级后会在 `config.Init`
-失败。对 `binpack_score` 而言，`weight` 是指针字段：在已有
+对四个遗留 Score 插件以及 `binpack_score`，`plugin_conf.<scorer>.weight: 0`
+会禁用该评分器并跳过 Select。`external_http_score` 不同：`weight: 0` 时
+`Disable()` 仍为 false，但 Select 为惰性空操作（不发 HTTP）；显式关闭请用
+`disable: true`。**负的** `plugin_conf.<scorer>.weight` 会对所有已注册评分器在
+配置加载阶段拒绝（不只是 `binpack_score`）；升级前能带着负权重启动的配置，升级后
+会在 `config.Init` 失败。对 `binpack_score` 而言，`weight` 是指针字段：在已有
 `plugin_conf.binpack_score` 块中省略 `weight` 会保留运行时默认 `1`（启用）；
-只有显式写 `0` 才禁用。其他评分器仍是普通 `float64`，省略 `weight` 会 YAML
-解码为 `0` 并禁用——要保持活跃请显式写正的 `weight`。在 `enable_scorers`
-中列出因子型 / affinity 评分器但缺少对应 `plugin_conf` 块时，配置加载也会失败
-（空 Profile 同样适用）；`binpack_score` 可省略该块并使用运行时默认。更改
+只有显式写 `0` 才禁用。其他 float64 评分器（以及 `external_http_score`）省略
+`weight` 仍会 YAML 解码为 `0`——要保持活跃请显式写正的 `weight`（HTTP 在 `0`
+时是惰性空操作，而不是经 `Disable()` 跳过）。在 `enable_scorers` 中列出因子型 /
+affinity 评分器或 `external_http_score` 但缺少对应 `plugin_conf` 块时，配置加载
+也会失败（空 Profile 同样适用）；`binpack_score` 可省略该块并使用运行时默认。更改
 Profile / 选择器列表需要重启 CubeMaster：配置热加载会重新跑 `preHandle`，成功
 则更新内存 Config；失败时写 FATAL 日志（`CubeLog.Fatalf` **不会** `os.Exit`）
 并保留旧 Config，错误的 Profile 覆盖不会生效。`InitScheduler` 仍不会在热加载时
@@ -330,24 +331,18 @@ sudo tail -F /data/log/Cubelet/Cubelet-req.log
 CubeMaster 会把**当前候选节点列表**（经过 filter 之后）以 HTTP POST 发给运营配置的
 sidecar，并把返回的逐节点分数并入加权总分。启用
 `enable_scorers: external_http_score` **必须**同时提供匹配的
-`score.plugin_conf.external_http_score`；否则 CubeMaster 在启动构造 scorer 时会
-panic（与 `real_time_weighted_average` 相同）。
+`score.plugin_conf.external_http_score`；否则**配置加载失败**
+（`validateListedScorerPluginConfPresent`）。它**不**要求
+`score.resource_weights`——该映射仍只作为遗留 affinity / 因子型评分器的构造门槛
+（以及启动异步 `multi_factor_weighted_average` feeder 的门槛）。
 
 ### 配置
-
-当前 CubeMaster 在处理 `enable_scorers`（包括单独启用 `external_http_score`）
-之前，要求 `score.resource_weights` 为非空映射。这是**加载器前置条件**，不是
-HTTP 传输协议的一部分：若省略 `resource_weights`，CubeMaster 会构造空的
-scorer 列表，sidecar **不会**被调用。下面的权重项是已有合法 key；
-`external_http_score` 本身不会消费它。
 
 ```yaml
 scheduler:
   score:
     enable_scorers:
       - external_http_score
-    resource_weights:
-      mvm_num: 1
     plugin_conf:
       external_http_score:
         weight: 1.0

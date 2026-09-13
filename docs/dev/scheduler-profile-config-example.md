@@ -9,10 +9,9 @@ updated: 2026-09-10
 # Scheduler Profile Configuration Example
 
 Copyable YAML for CubeMaster **runtime** Profile overlay and `binpack_score`.
-This page covers what ships in the runtime Profiles + binpack PR. An HTTP
-plugin scorer (`external_http_score`) is related open work tracked in #1700
-and is **not** registered or allowed here. #1699 / #1700 remain related open
-work and are **not** merged via this change set.
+This page focuses on Profiles + binpack. The umbrella also registers
+`external_http_score`; wire-protocol details live in the CubeMaster scheduler
+config guide, not in the Profile overlay examples below.
 
 ## Scope
 
@@ -34,8 +33,7 @@ Out of scope:
   `weightsForProfile` / `schedulerbench`;
 - putting `plugin_conf` under `scheduler.profiles.<name>.score`;
 - changing production Filter/Score defaults when `scheduler.profile` is empty;
-- shipping or documenting `external_http_score` as part of this PR
-  (see #1700; related open work, not merged);
+- HTTP sidecar request/response examples (see the scheduler config guide);
 - live multi-node performance claims.
 
 ## Runtime Profile Contract
@@ -92,11 +90,12 @@ built-in defaults.
 Factor-based `real_time_weighted_average`,
 `multi_factor_weighted_average`, and `image_score` are constructed only when
 at least one of their `enable_weight_factors` has a positive
-`resource_weights` value. Plugin-only `binpack_score` does not use that map
-as a construction gate and does not require a fake `resource_weights`
-block. Legacy `affinity_score` keeps empty-profile compatibility: with no
-Profile and `resource_weights: null` (omitted), it is not constructed; with
-a Profile or a non-nil `resource_weights` map it constructs normally.
+`resource_weights` value. Plugin-only `binpack_score` and
+`external_http_score` do not use that map as a construction gate and do not
+require a fake `resource_weights` block. Legacy `affinity_score` keeps
+empty-profile compatibility: with no Profile and `resource_weights: null`
+(omitted), it is not constructed; with a Profile or a non-nil
+`resource_weights` map it constructs normally.
 `plugin_conf.binpack_score.weight < 0` is always rejected at config load;
 `weight: 0` disables Select; omitting the block keeps the runtime default.
 
@@ -120,6 +119,7 @@ Allowed score names (must match `CubeMaster/pkg/selector/score/init.go`):
 - `affinity_score`
 - `image_score`
 - `binpack_score`
+- `external_http_score`
 
 ### Operator notes
 
@@ -145,14 +145,17 @@ YAML `float64`, omitting the `weight` key inside a present
 an explicit positive `weight` to keep them active. **`binpack_score` is
 different:** its `weight` is `*float64`, so omitting `weight` inside a present
 `plugin_conf.binpack_score` block keeps the runtime default of `1` (enabled);
-only an explicit `0` (or `disable: true`) disables it. **Negative** plugin
-`weight` is rejected at config load for every registered scorer (including
-`binpack_score`); configs that previously started with a negative weight fail
-`config.Init` after upgrade. Omitting the entire `plugin_conf.<scorer>` block
-while listing a factor/affinity scorer in `enable_scorers` also fails config
-load (empty Profile included). `binpack_score` may omit the whole block and
-keep runtime defaults; under a non-empty Profile, built-ins may inject defaults
-when the pointer is still `nil`.
+only an explicit `0` (or `disable: true`) disables it. **`external_http_score`
+is different again:** `weight: 0` keeps `Disable()==false` but Select is an
+inert no-op (no HTTP round-trip); use `disable: true` for an explicit off
+switch. **Negative** plugin `weight` is rejected at config load for every
+registered scorer (including `binpack_score` / `external_http_score`); configs
+that previously started with a negative weight fail `config.Init` after
+upgrade. Omitting the entire `plugin_conf.<scorer>` block while listing a
+factor/affinity scorer or `external_http_score` in `enable_scorers` also fails
+config load (empty Profile included). `binpack_score` may omit the whole block
+and keep runtime defaults; under a non-empty Profile, built-ins may inject
+defaults when the pointer is still `nil`.
 
 **`binpack_score` occupancy weights.** `cpu_weight` / `mem_weight` /
 `mvm_weight` values `<= 0` fall back to default `1` at runtime. You
@@ -335,13 +338,13 @@ scheduler:
             weight: 1
 ```
 
-## Related open work
+## Related docs
 
-`external_http_score` (HTTP plugin scorer) is tracked separately in #1700 and
-is not part of this runtime Profiles + binpack change set. #1699 / #1700 are
-related open work and are **not** merged here. Do not list
-`external_http_score` in `enable_scorers` on this branch. With a selected
-Profile, unknown names in the **effective** `enable_filters` /
+`external_http_score` is registered in this umbrella. For endpoint / timeout /
+mode / fail-open semantics, see the CubeMaster scheduler config guide
+(External HTTP score plugin). Review units #1699 / #1700 / #1708 remain useful
+history for the separate topic PRs; this umbrella combines them. With a
+selected Profile, unknown names in the **effective** `enable_filters` /
 `enable_scorers` lists fail closed at config load; with an empty Profile,
 unknown base `enable_scorers` names are still warn-skipped at `NewSelector`
 (legacy compatibility).
@@ -397,7 +400,8 @@ or production performance.
 - Equate runtime `scheduler.profiles` with simulator `weightsForProfile`.
 - Treat a Profile overlay as a change to
   `PreFilter -> Filter -> Score -> PostScore`.
-- Claim #1699 / #1700 is merged via this PR (they remain related open work).
+- Treat this page as the HTTP wire-protocol / fail-open contract (use the
+  scheduler config guide instead).
 - Assume `cpu_weight: 0` / `mem_weight: 0` / `mvm_weight: 0` excludes a
   binpack dimension (they fall back to `1`).
 - Expect Profile / `enable_filters` / `enable_scorers` swaps to rebuild the
