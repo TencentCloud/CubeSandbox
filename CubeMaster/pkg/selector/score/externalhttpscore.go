@@ -149,8 +149,11 @@ func NewExternalHTTPScore() *externalHTTPScore {
 // newExternalHTTPScoreFromConfig constructs the production scorer from a config
 // snapshot. Panics only when plugin_conf.external_http_score is absent (same
 // contract as other score plugins that require matching plugin_conf). Invalid
-// endpoint / timeout / weight values do not panic: construction Warns and
-// leaves the scorer live so Select can fail-open (matching hot-reload).
+// endpoint / timeout values do not panic: construction Warns and leaves the
+// scorer live so Select can fail-open (matching hot-reload). Negative /
+// non-finite weight is rejected earlier by config.Init
+// (validateExternalHTTPScoreWeight); this path still Warns if reached from a
+// raw snapshot (tests).
 func newExternalHTTPScoreFromConfig(global *config.Config) *externalHTTPScore {
 	cfg := externalHTTPScoreConfigFrom(global)
 	if cfg == nil {

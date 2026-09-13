@@ -281,6 +281,46 @@ func TestScorerPluginValidationCoversAllowlist(t *testing.T) {
 		assert.True(t, scorerPluginExplicitlyDisabled(cfg, name),
 			"scorerPluginExplicitlyDisabled does not recognize %q", name)
 	}
+
+	// Negative plugin weight must be rejected for every allowlisted scorer
+	// (float64 validators + *float64 binpack/HTTP validators).
+	for name := range allowedSchedulerScoreNames {
+		cfg := schedulerConfWithScorerNegativeWeight(t, name)
+		var err error
+		switch name {
+		case "binpack_score":
+			err = validateBinpackScoreWeight(cfg)
+		case "external_http_score":
+			err = validateExternalHTTPScoreWeight(cfg)
+		default:
+			err = validateSchedulerScorerPluginWeights(cfg)
+		}
+		assert.Error(t, err, "negative weight must fail for %q", name)
+		assert.Contains(t, err.Error(), "weight", name)
+	}
+}
+
+func schedulerConfWithScorerNegativeWeight(t *testing.T, name string) *SchedulerConf {
+	t.Helper()
+	neg := -1.0
+	s := &SchedulerConf{Score: &SchedulerScoreConf{}}
+	switch name {
+	case "real_time_weighted_average":
+		s.Score.ScorePluginConf.RealTimeWeightedAverage = &RealTimeWeightedAverage{Weight: neg}
+	case "multi_factor_weighted_average":
+		s.Score.ScorePluginConf.MultiFactorWeightedAverage = &MultiFactorWeightedAverage{Weight: neg}
+	case "affinity_score":
+		s.Score.ScorePluginConf.AffinityScore = &AffinityScore{Weight: neg}
+	case "image_score":
+		s.Score.ScorePluginConf.ImageScore = &ImageScore{Weight: neg}
+	case "binpack_score":
+		s.Score.ScorePluginConf.BinpackScore = &BinpackScore{Weight: &neg}
+	case "external_http_score":
+		s.Score.ScorePluginConf.ExternalHTTPScore = &ExternalHTTPScore{Weight: &neg, Endpoint: "http://127.0.0.1:9"}
+	default:
+		t.Fatalf("add negative-weight probe fixture for scorer %q", name)
+	}
+	return s
 }
 
 func schedulerConfWithScorerExplicitlyDisabled(t *testing.T, name string) *SchedulerConf {
@@ -1399,6 +1439,22 @@ scheduler:
         weight: -1
 `,
 			wantErr: "affinity_score.weight must be >= 0",
+		},
+		{
+			name:   "external_http",
+			plugin: "external_http_score",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - external_http_score
+    plugin_conf:
+      external_http_score:
+        weight: -1
+        endpoint: "http://127.0.0.1:9"
+`,
+			wantErr: "external_http_score.weight must be a finite number >= 0",
 		},
 	}
 	for _, tc := range cases {
