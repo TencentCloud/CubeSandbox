@@ -263,6 +263,25 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		return rsp, nil
 	}
+	// Issue #1690/#1692 review: this node paused the sandbox, so it
+	// owns the lease renewer for the pause snap. Once the resume is
+	// committed, the importer (here, on a cross-node restore; or the
+	// next ensure-network call on a same-node resume) takes over
+	// via the importer-lease path and the renewer would only churn.
+	// Unregister as early as possible so the renewer's next 30 s
+	// UploadSnapshot does not race the importer.
+	//
+	// resumeFromPauseSandboxID is the same condition that gated the
+	// lifecycle lock above, so this branch is the same-node Resume
+	// path; cross-node restore flows through prepareCrossNodeRestore
+	// in the workflow plugin below and is handled there.
+	if sid := resumeFromPauseSandboxID(req); sid != "" {
+		if sb, sbErr := s.cubeboxMgr.cubeboxManger.Get(ctx, sid); sbErr == nil && sb != nil {
+			if snapID := pauseSnapshotIDForGC(sb); snapID != "" {
+				storage.UnregisterPauseLease(ctx, snapID)
+			}
+		}
+	}
 	// Serialize Create-from-pause with Pause/Destroy (same per-sandbox lock).
 	if sid := resumeFromPauseSandboxID(req); sid != "" {
 		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(ctx, sid)

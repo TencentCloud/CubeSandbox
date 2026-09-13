@@ -145,10 +145,19 @@ func networkRuntimeConfigFromPluginConfig(config *Config) networkruntime.Config 
 	cfg.MvmGwDestIP = config.MvmGwDestIP
 	cfg.MvmGwMacAddr = config.MvmGwMacAddr
 	cfg.MvmMask = config.MvmMask
-	cfg.MvmMtu = config.MvmMtu
+	// Only override the default MvmMtu (1500) when the plugin config
+	// explicitly set one. Issue #1673 review: an unconditional
+	// `cfg.MvmMtu = config.MvmMtu` overwrites the runtime default with
+	// zero, which then causes netlink.LinkSetMTU(tap, 0) on the create
+	// path when the operator is using `mtu_interface` mode (MvmMtu
+	// intentionally left at zero in TOML).
+	if config.MvmMtu > 0 {
+		cfg.MvmMtu = config.MvmMtu
+	}
 	// MTUInterface lets the runtime mirror a host link's MTU (typically
 	// the Kubernetes parent bridge "cbr0") when MvmMtu is left at zero.
-	// Issue #1673.
+	// Empty string is the documented "unset" sentinel and the default
+	// config's value, so a direct assignment is safe here. Issue #1673.
 	cfg.MTUInterface = config.MTUInterface
 	cfg.TapInitNum = config.TapInitNum
 	// Empty explicitly disables CubeEgress integration. Production config writes

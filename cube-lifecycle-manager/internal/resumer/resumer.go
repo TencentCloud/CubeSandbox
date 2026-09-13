@@ -190,13 +190,17 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 	nowMs := time.Now().UnixMilli()
 	r.o.Registry.MergeLastActive(sandboxID, nowMs)
 	// Stamp ResumedAtMs so the sweeper honours ResumeGrace for the
-	// freshly-resumed sandbox (issue #1683). Without this stamp the
-	// sweeper can fire its idle-pause decision on the very next tick
-	// because LastActiveMs is the proxy-poll value, which may still
-	// reflect the pre-Resume request and CreatedAt is from minutes
-	// ago. MergeLastActive already updates LastActiveMs, but a
-	// long-running idle baseline (CreatedAt) would still trip the
-	// pause if no further traffic arrives within the timeout.
+	// freshly-resumed sandbox (issue #1683). MergeLastActive
+	// updates LastActiveMs to nowMs, but LastActiveMs is the
+	// max of (current, tsMs) and the proxy-poll value can be
+	// close to nowMs without being exactly nowMs; meanwhile the
+	// sweeper's idle baseline falls back to CreatedAt when
+	// LastActiveMs is stale relative to TimeoutSeconds. For a
+	// long-lived sandbox whose CreatedAt is minutes ago and whose
+	// TimeoutSeconds is small (e.g. 60s), the sweeper would
+	// immediately decide to pause again on the very next tick
+	// because CreatedAt + TimeoutSeconds is already past. The
+	// ResumedAtMs grace gate covers that case explicitly.
 	r.o.Registry.MarkResumed(sandboxID, nowMs)
 
 	r.o.Log.Info("auto-resumed sandbox",

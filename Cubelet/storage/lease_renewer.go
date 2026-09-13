@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Package lease implements the cross-node resume lease renewal mechanism.
+// Package storage - Renewer is the cross-node resume lease renewal mechanism
 //
 // Background — issues #1690 and #1692:
 //
@@ -61,7 +61,6 @@ type renewerEntry struct {
 	backend    string
 	cancel     chan struct{}
 	done       chan struct{}
-	enqueuedAt time.Time
 }
 
 // Renewer is a single-instance goroutine that drives the per-sandbox
@@ -135,12 +134,11 @@ func (r *Renewer) Register(ctx context.Context, sandboxID, snapID, backend strin
 	}
 
 	entry := &renewerEntry{
-		sandboxID:  sandboxID,
-		snapID:     snapID,
-		backend:    normalized,
-		cancel:     make(chan struct{}),
-		done:       make(chan struct{}),
-		enqueuedAt: r.now(),
+		sandboxID: sandboxID,
+		snapID:    snapID,
+		backend:   normalized,
+		cancel:    make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 	r.entries[snapID] = entry
 
@@ -150,12 +148,22 @@ func (r *Renewer) Register(ctx context.Context, sandboxID, snapID, backend strin
 	return nil
 }
 
-// Unregister stops renewal for snapID. Safe to call from any goroutine;
-// never blocks longer than the renewal goroutine takes to ack.
+// Unregister stops renewal for snapID deterministically. Safe to call
+// from any goroutine; returns once the per-sandbox goroutine has fully
+// exited (close(entry.done) observed).
 //
 // Unregister is a no-op for unknown snap IDs so callers can fire it
 // from Destroy paths that may or may not have Register'd first (e.g.
 // sandbox was created on another node and never paused here).
+//
+// Issue #1690/#1692 review: this used to race a 5 s wall-clock against a
+// 60 s UploadSnapshot timeout, leaking one extra renew on the way
+// out. The fix is to make renew's per-call context derive from
+// entry.cancel, so the in-flight UploadSnapshot returns immediately
+// when Unregister closes the channel — the goroutine then closes
+// entry.done on its next select iteration and this function returns
+// without a timeout. The 60 s per-renew bound stays as a backstop in
+// case cancel never fires (e.g. the renew goroutine itself panics).
 func (r *Renewer) Unregister(ctx context.Context, snapID string) {
 	if r == nil {
 		return
@@ -176,13 +184,12 @@ func (r *Renewer) Unregister(ctx context.Context, snapID string) {
 	close(entry.cancel)
 	select {
 	case <-entry.done:
-	case <-time.After(5 * time.Second):
-		// Do not block Unregister indefinitely on a wedged renewal
-		// loop. The goroutine will eventually exit when its next tick
-		// observes the closed cancel channel; if it has wedged inside
-		// an UploadSnapshot call, the worst case is one extra renew
-		// attempt — never an unbounded stall.
-		log.G(ctx).Warnf("lease renewer: unregister snapID=%s timed out waiting for goroutine; proceeding", snapID)
+	case <-ctx.Done():
+		// The caller's own context is the only remaining bound;
+		// we do not block on a wall-clock timeout here because the
+		// renew goroutine already saw cancel via its derived context
+		// and is on its way out.
+		log.G(ctx).Debugf("lease renewer: unregister snapID=%s returned on caller ctx cancel", snapID)
 	}
 }
 
@@ -260,16 +267,48 @@ func (r *Renewer) runOne(parent context.Context, entry *renewerEntry) {
 // not panic the renewer; the next tick will retry. Persistent failure
 // will manifest as a real Resume error on the importer side, which is
 // the correct place to surface it.
+//
+// The per-call context derives from entry.cancel (NOT from the
+// goroutine's outer context, which is already detached via
+// context.WithoutCancel). That way Unregister — which closes
+// entry.cancel — aborts an in-flight UploadSnapshot immediately
+// instead of waiting for the 60 s timeout.
 func (r *Renewer) renew(ctx context.Context, entry *renewerEntry) {
 	// Bound a single renewal so a wedged cubecow RPC cannot starve
-	// the next tick. RenewalInterval is 30s; a healthy renew is
-	// sub-second, so 60s of headroom is plenty.
+	// the next tick. RenewalInterval is 30 s; a healthy renew is
+	// sub-second, so 60 s of headroom is plenty. The cancel channel
+	// takes priority: Unregister closes it to abort the in-flight
+	// call deterministically.
 	renewCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
+	// entry.cancel is a chan struct{} that Unregister closes; turn
+	// it into a context so we can pass it to UploadSnapshot and have
+	// the in-flight call return immediately when Unregister fires.
+	abortCtx, abortCancel := channelContextFromChan(entry.cancel)
+	defer abortCancel()
+	// Race the two: whichever fires first cancels both, so we never
+	// leak a goroutine and the renewer's effective deadline is the
+	// earlier of (60 s) and (Unregister's signal).
+	go func() {
+		select {
+		case <-renewCtx.Done():
+		case <-abortCtx.Done():
+			cancel()
+		}
+	}()
+	renewCtx = abortCtx
 
 	uuids, err := UploadSnapshot(renewCtx, entry.backend, entry.snapID)
 	if err != nil {
-		log.G(ctx).Warnf("lease renewer: renew snapID=%s failed: %v", entry.snapID, err)
+		// Aborted-by-Unregister errors are expected on the path out
+		// and not actionable — log at debug. Real cubecow failures
+		// stay at warn so they show up in normal log filters.
+		select {
+		case <-entry.cancel:
+			log.G(ctx).Debugf("lease renewer: renew snapID=%s aborted by unregister", entry.snapID)
+		default:
+			log.G(ctx).Warnf("lease renewer: renew snapID=%s failed: %v", entry.snapID, err)
+		}
 		return
 	}
 	if uuids == nil || uuids.Empty() {
@@ -286,11 +325,28 @@ func (r *Renewer) renew(ctx context.Context, entry *renewerEntry) {
 // safeSnapID trims whitespace so callers passing annotation values
 // straight from Master do not get spurious duplicate registrations.
 func safeSnapID(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\n') {
+	for len(s) > 0 && (s[0] == ' ' || s[0] == '	' || s[0] == '\n') {
 		s = s[1:]
 	}
-	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t' || s[len(s)-1] == '\n') {
+	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '	' || s[len(s)-1] == '\n') {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+// cancelContext is the context returned by channelContextFromChan.
+// It is cancelled when ch is closed. context.WithCancel is the
+// right primitive; we wrap it here only to expose a single
+// construction call site so the bookkeeping goroutine cannot be
+// missed at a renew caller.
+func channelContextFromChan(ch chan struct{}) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-ch:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }

@@ -228,7 +228,7 @@ func (s *NetworkController) cleanupTapForReuse(ctx context.Context, state *manag
 	s.recordCleanStep("fd_close")
 
 	if state.restoreBeforeCleanup {
-		restored, err := s.tapAdapter.Restore(state.tap, s.cfg.MvmMtu, s.cfg.MVMMacAddr, s.cubeDev.Index)
+		restored, err := s.tapAdapter.Restore(state.tap, s.cfg.EffectiveMTU(), s.cfg.MVMMacAddr, s.cubeDev.Index)
 		if err != nil {
 			return err
 		}

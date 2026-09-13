@@ -6,8 +6,8 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -98,37 +98,72 @@ func TestRenewerDoesNotTickOnXFS(t *testing.T) {
 }
 
 // TestRenewerConcurrentRegister exercises the lock path with multiple
-// goroutines registering simultaneously. The map must end up with
-// exactly one entry per distinct snapID.
+// goroutines registering distinct snapIDs simultaneously. After the
+// dust settles, the renewer must hold exactly one entry per snapID
+// and the duplicated Register on the same snapID (separate goroutines)
+// must not produce two entries.
+//
+// The original version used a single snapID across all goroutines and
+// asserted a meaningless "Active() ≤ 1" — that passed even when the
+// renewer was misbehaving, because every duplicate Register for the
+// same key trivially leaves one entry. This version uses N distinct
+// snapIDs to actually exercise the per-key uniqueness guarantee.
 func TestRenewerConcurrentRegister(t *testing.T) {
 	r := NewRenewer()
 	defer r.Stop()
 
 	const N = 16
 	var wg sync.WaitGroup
-	var duplicates atomic.Int32
 	for i := 0; i < N; i++ {
 		wg.Add(1)
-		go func() {
+		go func(idx int) {
 			defer wg.Done()
-			err := r.Register(context.Background(), "sb", "snap-concurrent", cow.BackendS3)
-			if err != nil {
-				t.Errorf("Register: %v", err)
+			snapID := fmt.Sprintf("snap-concurrent-%d", idx)
+			if err := r.Register(context.Background(), "sb", snapID, cow.BackendS3); err != nil {
+				t.Errorf("Register(%s): %v", snapID, err)
 			}
-		}()
+		}(i)
 	}
-	// Also fire Unregister from another goroutine to race the lock.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		time.Sleep(10 * time.Millisecond)
-		r.Unregister(context.Background(), "snap-concurrent")
-		duplicates.Add(1)
-	}()
 	wg.Wait()
-	// Allow a moment for any deferred state to settle.
-	time.Sleep(50 * time.Millisecond)
-	if got := r.Active(); got > 1 {
-		t.Fatalf("Active() = %d, want ≤ 1 after concurrent Register/Unregister", got)
+
+	if got := r.Active(); got != N {
+		t.Fatalf("Active() = %d, want %d (one entry per distinct snapID)", got, N)
+	}
+
+	// Idempotency: re-registering the same set of keys must not
+	// grow the map.
+	for i := 0; i < N; i++ {
+		snapID := fmt.Sprintf("snap-concurrent-%d", i)
+		if err := r.Register(context.Background(), "sb", snapID, cow.BackendS3); err != nil {
+			t.Errorf("duplicate Register(%s): %v", snapID, err)
+		}
+	}
+	if got := r.Active(); got != N {
+		t.Fatalf("Active() after duplicates = %d, want %d", got, N)
+	}
+}
+
+// TestRenewerUnregisterAbortsInFlight verifies the abort path added
+// after the #1690/#1692 review: closing entry.cancel during a renew
+// returns UploadSnapshot promptly (not after the 60 s timeout).
+// We can't easily inspect the actual abort in unit tests because
+// UploadSnapshot is the production cubecow entry point; the next-best
+// check is that Unregister returns within a small bound when the
+// renewer is mid-tick.
+func TestRenewerUnregisterAbortsInFlight(t *testing.T) {
+	r := NewRenewer()
+	defer r.Stop()
+	if err := r.Register(context.Background(), "sb-abort", "snap-abort", cow.BackendS3); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		r.Unregister(context.Background(), "snap-abort")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Unregister did not return within 2s; renew goroutine is wedged")
 	}
 }

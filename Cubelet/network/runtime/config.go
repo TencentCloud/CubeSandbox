@@ -25,6 +25,16 @@ import (
 // no way to honour). Now the operator can either configure MvmMtu to the
 // right value, or set MTUInterface = "cbr0" and let the runtime mirror the
 // bridge MTU automatically.
+//
+// NOTE: per-sandbox overrides (#1) are applied higher up in
+// EnsureNetwork → actualInterfaces. EffectiveMTU is the runtime-wide
+// fallback that every call site falls back to when no override exists.
+//
+// The MTUInterface lookup is performed every call. Callers that need a
+// single, consistent value across multiple sites in the same EnsureNetwork
+// (host TAP MTU + guest descriptor) should resolve it once via
+// resolveEffectiveMTU() and pass the result down — calling this method
+// twice with a transient netlink error in between can desync the two.
 func (c Config) EffectiveMTU() int {
 	if c.MvmMtu > 0 {
 		return c.MvmMtu
@@ -56,6 +66,25 @@ func lookupLinkMTU(name string) (int, error) {
 	return link.Attrs().MTU, nil
 }
 
+// resolveMTUOnce returns the MTU to use across all sites of one
+// EnsureNetwork call: the per-sandbox override (req.Interfaces[0].MTU)
+// when set, otherwise the runtime's EffectiveMTU. The resolution is
+// single-shot — a transient netlink error during EffectiveMTU cannot
+// then desync the host TAP MTU from the guest descriptor.
+//
+// The result is plain `int` (not a pointer) because there is no
+// meaningful "absent" value at this layer: 0 means "fall back to
+// DefaultGuestMTU inside netlink.LinkSetMTU", which is the existing
+// behaviour for callers that legitimately want the runtime default
+// without an override. Callers that need to know whether a per-sandbox
+// override was applied should check req.Interfaces[0].MTU directly.
+func resolveMTUOnce(cfg Config, reqMTU int32) int {
+	if reqMTU > 0 {
+		return int(reqMTU)
+	}
+	return cfg.EffectiveMTU()
+}
+
 const (
 	// defaultObjectDir is where cube-vs objects are deployed on production nodes.
 	defaultObjectDir = "/usr/local/services/cubetoolbox/cube-vs/network"
@@ -81,15 +110,16 @@ type Config struct {
 	MvmGwMacAddr   string
 	MvmMask        int
 	MvmMtu         int
-	// MTUInterface, when set to the name of a host link (e.g. the parent bridge
-	// "cbr0" used by Kubernetes, or the egress uplink), causes the runtime to
-	// read that link's MTU at startup and use it as the effective guest MTU
-	// when MvmMtu is left at zero. Per-sandbox overrides (see NetRequest.MTU)
-	// always win over both. Issue #1673: a hardcoded 1500 breaks overlay
-	// networks whose transport MTU is below the Ethernet default.
-	MTUInterface string
-	TapInitNum     int
-	StateDir       string
+	// MTUInterface, when set to the name of a host link (e.g. the parent
+	// bridge "cbr0" used by Kubernetes, or the egress uplink), causes
+	// the runtime to read that link's MTU at startup and use it as the
+	// effective guest MTU when MvmMtu is left at zero. Per-sandbox
+	// overrides (see NetRequest.MTU) always win over both. Issue #1673:
+	// a hardcoded 1500 breaks overlay networks whose transport MTU is
+	// below the Ethernet default.
+	MTUInterface  string
+	TapInitNum    int
+	StateDir      string
 	HostPortBindIP string
 
 	// CubeEgressAdminURL points at the colocated CubeEgress admin

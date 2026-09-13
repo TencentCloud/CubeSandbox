@@ -537,6 +537,12 @@ func (s *service) updateWithPauseCow(
 		// Snapshot is on disk; do not wipe it. Master records FAILED (no Resume).
 		markLocalPauseFailed(sb, err)
 		_ = s.cubeboxMgr.cubeboxManger.SyncByID(workCtx, sb.ID)
+		// Stop the lease renewer too. Issue #1690/#1692 review: a
+		// Pause failure means Master will not drive a Resume,
+		// but a runaway renewer goroutine would keep re-exporting
+		// the snapshot every 30 s for the lifetime of the process
+		// (and would fight Master's eventual GC).
+		storage.UnregisterPauseLease(workCtx, snapID)
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
