@@ -9,9 +9,8 @@ updated: 2026-09-10
 # Scheduler Profile 配置示例
 
 本文提供 CubeMaster **运行时** Profile 覆盖层与 `binpack_score` 的可复制 YAML。
-内容覆盖本运行时 Profiles + binpack 变更所交付的能力。HTTP 插件评分器
-（`external_http_score`）属于 #1700 跟踪的相关开放工作，**未**在此注册或允许。
-#1699 / #1700 仍为相关开放工作，**不会**随本变更集合并。
+重点是 Profiles + binpack。伞形变更同样注册了 `external_http_score`；HTTP
+线协议细节见 CubeMaster 调度配置指南，而不在下文的 Profile 覆盖示例中展开。
 
 ## 范围
 
@@ -33,8 +32,7 @@ updated: 2026-09-10
   公式等价；
 - 在 `scheduler.profiles.<name>.score` 下放置 `plugin_conf`；
 - 在 `scheduler.profile` 为空时改变生产 Filter/Score 默认值；
-- 将 `external_http_score` 作为本 PR 的一部分交付或文档化
-  （见 #1700；相关开放工作，未合并）；
+- HTTP sidecar 请求/响应示例（见调度配置指南）；
 - 对真实多机性能作任何宣称。
 
 ## 运行时 Profile 契约
@@ -82,11 +80,12 @@ updated: 2026-09-10
 
 因子型 `real_time_weighted_average`、`multi_factor_weighted_average` 与
 `image_score` 仅在其某个 `enable_weight_factors` 对应正的 `resource_weights`
-值时才会被构造。纯插件型 `binpack_score` 不以该 map 作为构造门禁，也不需要伪造
-`resource_weights` 块。遗留的 `affinity_score` 保持空 Profile 兼容：无 Profile 且
-`resource_weights: null`（省略）时不构造；有 Profile 或非 nil `resource_weights`
-map 时正常构造。`plugin_conf.binpack_score.weight < 0` 一律在配置加载阶段拒绝；
-`weight: 0` 禁用 Select；省略整个块则保留运行时默认。
+值时才会被构造。纯插件型 `binpack_score` 与 `external_http_score` 不以该 map
+作为构造门禁，也不需要伪造 `resource_weights` 块。遗留的 `affinity_score`
+保持空 Profile 兼容：无 Profile 且 `resource_weights: null`（省略）时不构造；有
+Profile 或非 nil `resource_weights` map 时正常构造。
+`plugin_conf.binpack_score.weight < 0` 一律在配置加载阶段拒绝；`weight: 0`
+禁用 Select；省略整个块则保留运行时默认。
 
 未知的 `scheduler.profile` 名称（既非用户定义也非内置），以及所选覆盖层中未知的
 filter/score 名称，会在调度器运行前于 `preHandleScheduler` 中失败关闭。
@@ -107,6 +106,7 @@ filter/score 名称，会在调度器运行前于 `preHandleScheduler` 中失败
 - `affinity_score`
 - `image_score`
 - `binpack_score`
+- `external_http_score`
 
 ### 运维注意事项
 
@@ -128,11 +128,14 @@ filter/score 名称，会在调度器运行前于 `preHandleScheduler` 中失败
 `plugin_conf.<scorer>` 块中省略 `weight` 键也会解码为 `0` 并禁用——要保持活跃请显式
 写正的 `weight`。**`binpack_score` 不同：** 其 `weight` 是 `*float64`，在已有
 `plugin_conf.binpack_score` 块中省略 `weight` 会保留运行时默认 `1`（启用）；只有显式
-写 `0`（或 `disable: true`）才禁用。**负的**插件 `weight` 会对所有已注册评分器
-（含 `binpack_score`）在配置加载阶段拒绝；升级前能带着负权重启动的配置，升级后会在
-`config.Init` 失败。在 `enable_scorers` 中列出因子型 / affinity 评分器但省略整个
-`plugin_conf.<scorer>` 块时，配置加载也会失败（空 Profile 同样适用）。`binpack_score`
-可省略整个块并保留运行时默认；非空 Profile 下内置在指针仍为 `nil` 时可能注入默认。
+写 `0`（或 `disable: true`）才禁用。**`external_http_score` 再次不同：**
+`weight: 0` 时 `Disable()` 仍为 false，但 Select 为惰性空操作（不发 HTTP）；显式
+关闭请用 `disable: true`。**负的**插件 `weight` 会对所有已注册评分器
+（含 `binpack_score` / `external_http_score`）在配置加载阶段拒绝；升级前能带着负
+权重启动的配置，升级后会在 `config.Init` 失败。在 `enable_scorers` 中列出因子型 /
+affinity 评分器或 `external_http_score` 但省略整个 `plugin_conf.<scorer>` 块时，
+配置加载也会失败（空 Profile 同样适用）。`binpack_score` 可省略整个块并保留运行时
+默认；非空 Profile 下内置在指针仍为 `nil` 时可能注入默认。
 
 **`binpack_score` 占用权重。** `cpu_weight` / `mem_weight` / `mvm_weight` 取值
 `<= 0` 时，运行时回退为默认 `1`。**不能**通过把某维因子权重设为 `0` 来排除该维。
@@ -296,14 +299,14 @@ scheduler:
             weight: 1
 ```
 
-## 相关开放工作
+## 相关文档
 
-`external_http_score`（HTTP 插件评分器）在 #1700 单独跟踪，不属于本运行时 Profiles +
-binpack 变更集合。#1699 / #1700 为相关开放工作，**未**在此合并。不要在本分支的
-`enable_scorers` 中列出 `external_http_score`。选中 Profile 时，最终生效的
-`enable_filters` / `enable_scorers` 中的未知名称会在配置加载阶段失败关闭；空
-Profile 下，base `enable_scorers` 中的未知名仍在 `NewSelector` 时告警并跳过
-（升级兼容）。
+`external_http_score` 已在本伞形变更中注册。endpoint / timeout / mode /
+fail-open 语义见 CubeMaster 调度配置指南（External HTTP score 插件）。#1699 /
+#1700 / #1708 仍可作为分 topic 审查单元的历史参考；本伞形将它们合并。选中
+Profile 时，最终生效的 `enable_filters` / `enable_scorers` 中的未知名称会在配置
+加载阶段失败关闭；空 Profile 下，base `enable_scorers` 中的未知名仍在
+`NewSelector` 时告警并跳过（升级兼容）。
 
 ## 运行时 Profile vs 模拟器 Profile
 
@@ -349,7 +352,7 @@ CubeAPI/Cubelet 创建路径、真实创建延迟或生产性能。
 - 发明上文允许集合之外的 filter 或 score 名称。
 - 将运行时 `scheduler.profiles` 等同于模拟器 `weightsForProfile`。
 - 把 Profile 覆盖当作对 `PreFilter -> Filter -> Score -> PostScore` 的改动。
-- 声称 #1699 / #1700 已通过本 PR 合并（它们仍是相关开放工作）。
+- 把本文当作 HTTP 线协议 / fail-open 契约（请改看调度配置指南）。
 - 假设 `cpu_weight: 0` / `mem_weight: 0` / `mvm_weight: 0` 能排除 binpack 某维
   （它们会回退为 `1`）。
 - 期望在不重启 CubeMaster 的情况下，Profile / `enable_filters` / `enable_scorers`

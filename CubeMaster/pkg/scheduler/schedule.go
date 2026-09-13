@@ -211,17 +211,14 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 		}
 		// Sample Weight() once before Select so a live-config scorer
 		// (external_http_score) cannot blend with a different generation after a
-		// mid-attempt conf.yaml reload. Do not skip Select for weight == 0:
-		// roster scorers historically still run and admit nodes with score 0
-		// (reshaping the candidate set for LeastRandomSelect). Skipping on
-		// omitted/zero float64 weights would change image_score / affinity_score
-		// / etc. external_http_score skips its HTTP round-trip inside Select.
-		//
-		// Still call Select for non-finite weights so live-config scorers can
-		// emit their own invalid_weight observability; only refuse to blend
-		// NaN/Inf so they cannot poison totalPluginWeight or node scores.
-		// Negative weights remain blended for built-in scorers (historical
-		// penalty semantics); external_http_score rejects them in validate.
+		// mid-attempt conf.yaml reload. Legacy factor/affinity scorers and
+		// binpack_score already return Disable()==true at weight==0, so this
+		// loop never reaches them. external_http_score keeps Disable()==false at
+		// weight==0 (observability / staged inert no-op) and skips the HTTP
+		// round-trip inside Select. Negative plugin weights fail config load for
+		// every registered scorer; this path still guards NaN/Inf so they cannot
+		// poison totalPluginWeight or node scores, while letting live-config
+		// scorers emit their own invalid_weight observability via Select.
 		w := f.Weight()
 		tmpResult, err := f.Select(selCtx)
 		if err != nil {
