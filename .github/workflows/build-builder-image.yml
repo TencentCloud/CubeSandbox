@@ -5,12 +5,14 @@ on:
     branches: [master]
     paths:
       - 'docker/Dockerfile.builder'
+      - 'rust-toolchain.toml'
       - '.github/workflows/build-builder-image.yml'
       - 'CubeS3lvol/setup_dep.sh'
       - 'CubeS3lvol/patches/**'
   pull_request:
     paths:
       - 'docker/Dockerfile.builder'
+      - 'rust-toolchain.toml'
       - '.github/workflows/build-builder-image.yml'
       - 'CubeS3lvol/setup_dep.sh'
       - 'CubeS3lvol/patches/**'
