@@ -9,6 +9,7 @@ on:
       - 'docker/tests/**'
       - 'cube-envd/**'
       - 'rust-toolchain.toml'
+      - 'Makefile'
       - '.dockerignore'
       - '.github/workflows/build-cube-envd-image.yml'
   pull_request:
@@ -18,6 +19,7 @@ on:
       - 'docker/tests/**'
       - 'cube-envd/**'
       - 'rust-toolchain.toml'
+      - 'Makefile'
       - '.dockerignore'
       - '.github/workflows/build-cube-envd-image.yml'
   workflow_dispatch:
@@ -29,6 +31,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  component:
+    name: Rust component CI (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build pinned validation environment
+        run: |
+          version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          docker build --build-arg RUST_VERSION="$version" -f docker/tests/Dockerfile.envd-ci -t envd-ci .
+      - name: Run complete component CI in isolated cgroups
+        run: |
+          docker run --rm --init --privileged --cgroupns private \
+            -v "$PWD:/workspace:ro" \
+            -v envd-ci-cargo:/usr/local/cargo \
+            -v envd-ci-target:/data/cubelet/dev-cache/envd-rust/targets/current \
+            -e NO_PROXY=localhost,127.0.0.1,::1 -e no_proxy=localhost,127.0.0.1,::1 \
+            -e CARGO_BUILD_JOBS=2 envd-ci \
+            bash docker/tests/prepare-cgroup.sh bash -ec '
+              cargo --version; rustc --version; rustfmt --version; cargo clippy --version
+              make -C cube-envd ci CARGO_TARGET_DIR=/data/cubelet/dev-cache/envd-rust/targets/current'
   build_rust:
     name: Build optional Rust image (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}

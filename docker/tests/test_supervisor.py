@@ -79,6 +79,13 @@ class SupervisorTests(unittest.TestCase):
             time.sleep(.01)
         self.fail('timed out waiting for ' + name)
 
+    def request_exit(self, role, status):
+        # Publish the complete command atomically so workers cannot read a
+        # newly created but empty (or partially written) exit-code file.
+        pending = self.root / (role + '.exit.pending')
+        pending.write_text(str(status))
+        pending.replace(self.root / (role + '.exit'))
+
     def finish(self, status, cause):
         _, stderr = self.process.communicate(timeout=8)
         self.assertEqual(self.process.returncode, status, stderr.decode())
@@ -87,7 +94,7 @@ class SupervisorTests(unittest.TestCase):
     def test_user_status_survives_failed_daemon_shutdown(self):
         (self.root / 'envd.stop-on-signal').touch()
         self.start()
-        (self.root / 'user.exit').write_text('23')
+        self.request_exit('user', 23)
         self.finish(23, 'UserExit')
 
 
@@ -96,7 +103,7 @@ class SupervisorTests(unittest.TestCase):
             with self.subTest(status=status):
                 (self.root / 'user.stop-on-signal').touch()
                 self.start()
-                (self.root / 'envd.exit').write_text(str(status))
+                self.request_exit('envd', status)
                 self.finish(status or 1, 'EnvdFailure')
                 user_pid = int((self.root / 'user.pid').read_text())
                 with self.assertRaises(ProcessLookupError):
@@ -115,7 +122,7 @@ class SupervisorTests(unittest.TestCase):
                 self.assertEqual(self.await_file('user.signals'), str(int(sig)) + '\n')
                 self.process.send_signal(sig)
                 self.process.send_signal(signal.SIGTERM)
-                (self.root / 'user.exit').write_text('0')
+                self.request_exit('user', 0)
                 self.finish(128 + sig, 'ExternalSignal')
                 self.assertEqual((self.root / 'user.signals').read_text(), str(int(sig)) + '\n')
                 for path in self.root.iterdir():
@@ -131,8 +138,8 @@ class SupervisorTests(unittest.TestCase):
         self.await_file('user.signals')
         time.sleep(.05)
         self.assertFalse((self.root / 'child.signals').exists())
-        (self.root / 'child.exit').write_text('0')
-        (self.root / 'user.exit').write_text('0')
+        self.request_exit('child', 0)
+        self.request_exit('user', 0)
         self.finish(129, 'ExternalSignal')
 
     def test_entrypoint_can_be_copied_alone_and_invoked_with_sh(self):
@@ -154,7 +161,7 @@ class SupervisorTests(unittest.TestCase):
 
     def test_daemon_only_clean_exit_is_failure(self):
         self.start(user=False)
-        (self.root / 'envd.exit').write_text('0')
+        self.request_exit('envd', 0)
         self.finish(1, 'EnvdFailure')
 
     def test_known_second_startup_contract_is_rejected(self):
@@ -172,7 +179,7 @@ class SupervisorTests(unittest.TestCase):
 
     def test_unresponsive_user_shutdown_is_bounded(self):
         self.start()
-        (self.root / 'envd.exit').write_text('44')
+        self.request_exit('envd', 44)
         self.finish(44, 'EnvdFailure')
         with self.assertRaises(ProcessLookupError):
             os.kill(int((self.root / 'user.pid').read_text()), 0)
@@ -186,7 +193,7 @@ class SupervisorTests(unittest.TestCase):
         argv = json.loads(self.await_file('envd.argv'))
         self.assertEqual(argv[1:], ['-port', '49984', '--log-format', 'json',
                                    '-isnotfc=false', '*', '$(touch', 'marker)', '-isnotfc'])
-        (self.root / 'envd.exit').write_text('42')
+        self.request_exit('envd', 42)
         self.finish(42, 'EnvdFailure')
 
     def test_missing_executable_and_unwritable_log_fail_before_start(self):

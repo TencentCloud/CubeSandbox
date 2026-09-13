@@ -4,7 +4,10 @@ The daemon retains Process cgroup setup, startup commands and supervision, and
 adds a `socats` cgroup for loopback TCP forwarding. It scans listening IPv4/IPv6
 loopback sockets and forwards them through `169.254.0.21`; it does not configure
 that guest address or install socat. Missing helper executables are logged and
-retried. Mandatory cgroup configuration fails before commands or listening.
+retried. If cgroup initialization fails, the daemon logs the reason and uses a
+no-op manager for commands, PTYs and forwarding for its lifetime, matching upstream.
+Existing VM/platform limits remain separate. Enabled-group placement errors still
+fail the affected child; fallback is an initialization decision.
 
 Firecracker mode polls MMDS using the token handshake, projects sandbox/template
 identifiers into runtime environment and `/run/e2b` markers, and exports JSON logs

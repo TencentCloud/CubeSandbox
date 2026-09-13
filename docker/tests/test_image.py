@@ -179,19 +179,13 @@ class ImageTests(unittest.TestCase):
         self.assertNotEqual(status, 0)
         self.assertIn('terminal cause=EnvdFailure', docker('logs', cid))
 
-    def test_readonly_cgroup_provider_behavior(self):
-        if self.provider != 'cube':
-            cid = self.container(env=('ENVD_LOG_FILE=-',), prepare=False)
-            self.ready(cid)
-            self.daemon_pid(cid)
-            docker('stop', '-t', '15', cid)
-            self.stopped(cid, 143, 'ExternalSignal')
-            return
+    def test_readonly_cgroup_falls_back_and_preserves_supervision(self):
         cid = self.container('sleep', '300', env=('ENVD_LOG_FILE=-',), prepare=False)
-        self.assertNotEqual(int(docker('wait', cid)), 0)
-        logs = docker('logs', cid)
-        self.assertIn('cgroup', logs)
-        self.assertIn('terminal cause=EnvdFailure', logs)
+        self.ready(cid)
+        self.daemon_pid(cid)
+        self.assertIn('falling back to no-op cgroup manager', docker('logs', cid))
+        docker('stop', '-t', '15', cid)
+        self.stopped(cid, 143, 'ExternalSignal')
 
     def test_duplicate_command_and_missing_binary_fail(self):
         for command, env, message in ((('/usr/bin/envd',), (), 'already starts envd'),
