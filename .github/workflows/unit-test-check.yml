@@ -20,6 +20,7 @@ on:
       - 'hypervisor/**'
       - 'examples/volume/s3/**'
       - 'docker/Dockerfile.builder'
+      - 'rust-toolchain.toml'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/unit-test-check.yml'
       - 'Makefile'
@@ -41,6 +42,7 @@ on:
       - 'hypervisor/**'
       - 'examples/volume/s3/**'
       - 'docker/Dockerfile.builder'
+      - 'rust-toolchain.toml'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/unit-test-check.yml'
       - 'Makefile'
@@ -176,7 +178,7 @@ jobs:
             while IFS= read -r file; do
               [[ -n "${file}" ]] || continue
               case "${file}" in
-                docker/Dockerfile.builder|.github/workflows/build-builder-image.yml|.github/workflows/unit-test-check.yml|Makefile)
+                rust-toolchain.toml|docker/Dockerfile.builder|.github/workflows/build-builder-image.yml|.github/workflows/unit-test-check.yml|Makefile)
                   add_all_components
                   ;;
                 CubeAPI/*)
@@ -410,7 +412,7 @@ jobs:
           builder_inputs_changed="false"
           while IFS= read -r file; do
             case "${file}" in
-              docker/Dockerfile.builder|.github/workflows/build-builder-image.yml)
+              rust-toolchain.toml|docker/Dockerfile.builder|.github/workflows/build-builder-image.yml)
                 builder_inputs_changed="true"
                 break
                 ;;
