@@ -1,0 +1,11 @@
+{
+  "exit": 0,
+  "stdout": "",
+  "stderr": "test_delete_row (test_accept.TestNegatives.test_delete_row) ... ok\ntest_duplicate_request_id (test_accept.TestNegatives.test_duplicate_request_id) ... ok\ntest_filter_resurrection_forged (test_accept.TestNegatives.test_filter_resurrection_forged) ... ok\ntest_gate2_pass_string_but_nonzero (test_accept.TestNegatives.test_gate2_pass_string_but_nonzero) ... ok\ntest_manifest_hash_drift (test_accept.TestNegatives.test_manifest_hash_drift) ... ok\ntest_manifest_missing_member (test_accept.TestNegatives.test_manifest_missing_member) ... ok\ntest_missing_sha (test_accept.TestNegatives.test_missing_sha) ... ok\ntest_missing_warmup (test_accept.TestNegatives.test_missing_warmup) ... ok\ntest_raw_latency_change_summary_unchanged (test_accept.TestNegatives.test_raw_latency_change_summary_unchanged) ... ok\ntest_reason_count_mismatch (test_accept.TestNegatives.test_reason_count_mismatch) ... ok\ntest_restore_missing_field (test_accept.TestNegatives.test_restore_missing_field) ... ok\ntest_restore_sandbox_baseline (test_accept.TestNegatives.test_restore_sandbox_baseline) ... ok\ntest_seq_gap (test_accept.TestNegatives.test_seq_gap) ... ok\ntest_sha_drift_across_rows (test_accept.TestNegatives.test_sha_drift_across_rows) ... ok\ntest_summary_change_raw_unchanged (test_accept.TestNegatives.test_summary_change_raw_unchanged) ... ok\ntest_timeout_reason_to_success (test_accept.TestNegatives.test_timeout_reason_to_success) ... ok\ntest_wrong_arm (test_accept.TestNegatives.test_wrong_arm) ... ok\n\n----------------------------------------------------------------------\nRan 17 tests in 1.656s\n\nOK\n",
+  "status": "PASS",
+  "accept_result": "ACCEPT_PASS",
+  "accept_sha256_run1": "e6fa4e7de84ca354aec0464ac9f5a34d5f70a1912a8f13e7459ec928f9653913",
+  "accept_sha256_run2": "e6fa4e7de84ca354aec0464ac9f5a34d5f70a1912a8f13e7459ec928f9653913",
+  "accept_sha_match": true,
+  "accept_result_final": "ACCEPT_PASS"
+}

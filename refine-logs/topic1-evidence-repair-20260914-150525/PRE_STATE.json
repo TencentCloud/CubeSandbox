@@ -1,0 +1,16 @@
+{
+  "schema_version": "pre_state_v1",
+  "captured_at": "2026-09-14T15:30:11.718086+08:00",
+  "repair_worktree": "D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox-worktrees\\topic1-evidence-repair-20260914-150525",
+  "repair_branch": "topic1/evidence-repair-20260914-150525",
+  "base_commit": "b3df7b23a9920e5bfc7a9f699a92384182c15cb7",
+  "source_sprint_ledger": "D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-productization-sprint-20260914-104856",
+  "source_sprint_readonly": true,
+  "sandbox_baseline": 0,
+  "pr_heads_expected": {
+    "1666": "2668a520878a1ecae1cef1aabd273796d95dca25",
+    "1699_prefix": "e0c5f1b",
+    "1700_prefix": "0ce82a64",
+    "1708_prefix": "bc29a190"
+  }
+}

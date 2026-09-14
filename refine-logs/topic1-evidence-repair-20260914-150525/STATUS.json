@@ -1,0 +1,27 @@
+{
+  "schema_version": "topic1_evidence_repair_status_v1",
+  "phase": "complete",
+  "source_preserved": true,
+  "isolated_worktree": true,
+  "operator_journey": "PASS",
+  "business_signal_live": "PARTIAL",
+  "http_hot_path_latency": "PASS",
+  "filter_before_score": "PARTIAL",
+  "failure_degradation": "PASS",
+  "binpack_probe": "NO_IMPROVEMENT",
+  "restore": "PASS",
+  "original_pr_heads_unchanged": true,
+  "github_writes": false,
+  "gate2": "PASS",
+  "gate2_race": "PASS",
+  "accept": "ACCEPT_PASS",
+  "local_commit_base": "b3df7b23a9920e5bfc7a9f699a92384182c15cb7",
+  "repair_branch": "topic1/evidence-repair-20260914-150525",
+  "pushed": false,
+  "notes": [
+    "E3 downgraded to PARTIAL (prefer_first only)",
+    "E4 PARTIAL with live/unit/unobserved split",
+    "no formal matrix re-run"
+  ],
+  "visibility": "preparing_fork_pr"
+}

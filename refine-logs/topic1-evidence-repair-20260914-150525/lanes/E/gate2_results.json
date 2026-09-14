@@ -1,0 +1,82 @@
+{
+  "commands": [
+    {
+      "name": "git_diff_check",
+      "cmd": [
+        "git",
+        "-c",
+        "safe.directory=D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox-worktrees\\topic1-evidence-repair-20260914-150525",
+        "-C",
+        "D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox-worktrees\\topic1-evidence-repair-20260914-150525",
+        "diff",
+        "--check"
+      ],
+      "cwd": "D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox-worktrees\\topic1-evidence-repair-20260914-150525",
+      "exit": 0,
+      "expect_zero": true,
+      "blocked": false,
+      "status": "PASS"
+    },
+    {
+      "name": "go_test_pkgs",
+      "cmd": [
+        "go",
+        "test",
+        "./pkg/base/config",
+        "./pkg/selector/score",
+        "./pkg/scheduler",
+        "-count=1"
+      ],
+      "cwd": "D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox-worktrees\\topic1-evidence-repair-20260914-150525\\CubeMaster",
+      "exit": 0,
+      "expect_zero": true,
+      "blocked": false,
+      "status": "PASS"
+    },
+    {
+      "name": "go_test_example",
+      "cmd": [
+        "go",
+        "test",
+        "./examples/external-http-score",
+        "-count=1"
+      ],
+      "cwd": "D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox-worktrees\\topic1-evidence-repair-20260914-150525\\CubeMaster",
+      "exit": 0,
+      "expect_zero": true,
+      "blocked": false,
+      "status": "PASS"
+    },
+    {
+      "name": "go_vet",
+      "cmd": [
+        "go",
+        "vet",
+        "./pkg/base/config",
+        "./pkg/selector/score",
+        "./pkg/scheduler"
+      ],
+      "cwd": "D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox-worktrees\\topic1-evidence-repair-20260914-150525\\CubeMaster",
+      "exit": 0,
+      "expect_zero": true,
+      "blocked": false,
+      "status": "PASS"
+    },
+    {
+      "name": "go_test_race",
+      "cmd": [
+        "go",
+        "test",
+        "-race",
+        "./pkg/selector/score",
+        "./pkg/scheduler",
+        "-count=1"
+      ],
+      "cwd": "D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox-worktrees\\topic1-evidence-repair-20260914-150525\\CubeMaster",
+      "exit": 0,
+      "expect_zero": true,
+      "blocked": false,
+      "status": "PASS"
+    }
+  ]
+}

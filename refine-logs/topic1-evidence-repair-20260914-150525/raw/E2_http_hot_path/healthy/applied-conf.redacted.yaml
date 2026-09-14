@@ -1,0 +1,119 @@
+common:
+  http_port: 8089
+  # Listen address; 0.0.0.0 = all interfaces. Set to 127.0.0.1 to harden a
+  # single all-in-one node (breaks compute nodes / host-net proxy reaching it).
+  http_bind: 0.0.0.0
+  http_readtimeout: 120
+  http_writetimeout: 360
+  http_idletimeout: 360
+  # CubeOps node-management base URL. Empty falls back to local DB loader.
+  cube_ops_addr: "http://127.0.0.1:3010"
+  # Shorter sync interval when pulling nodes from CubeOps.
+  sync_meta_data_interval: 1s
+  sync_metric_data_interval: 1s
+  collect_metric_interval: 1s
+  default_headless_service_nodes_num: 1
+  enable_check_com_net_id_param: false
+
+log:
+  module: "cubemaster"
+  path: "/data/log/CubeMaster"
+  file_size: 100
+  file_num: 10
+  level: "info"
+
+cubelet_conf:
+  grpc:
+    grpc_port: 9999
+  common_timeout_insec: 30
+  create_image_timeout_insec: 300
+  # Sandbox idle TTL when the client omits timeout; unset or <=0 = no cluster default (never idle-timeout).
+  # Shipped default: no cluster-wide idle timeout. Set e.g. 300 in production if needed.
+  default_timeout_insec: -1
+  # Create/scheduling RPC deadline only (not sandbox idle TTL).
+  create_timeout_insec: 300
+  create_concurrent_limit: 100
+  destroy_concurent_limit: 100
+  enable_exposed_port: true
+  exposed_port_list:
+    - "80"
+  disable_redis_proxy_port: true
+
+auth:
+  enable: false
+
+req_template_conf:
+  whitelist_req_tag:
+    WorkingDir: true
+    RLimit: true
+    DnsConfig: true
+    HostAliases: true
+    Poststop: true
+    Prestop: true
+  cube_box_req_template: >-
+    {"volumes":[{"name":"tmp","volume_source":{"empty_dir":{"medium":0}}}],"containers":[{"name":"cubebox-default","envs":[{"key":"TZ","value":"Asia/Shanghai"},{"key":"TERM","value":"xterm"}],"volume_mounts":[{"name":"tmp","container_path":"/"}],"security_context":{"privileged":true,"readonly_rootfs":false,"no_new_privs":false}}],"network_type":"tap","cube_network_config":{"allowInternetAccess":true,"denyOut":["10.0.0.0/8","100.64.0.0/10","172.16.0.0/12","192.168.0.0/16"]}}
+
+instance_db_config:
+  addr: "127.0.0.1:3306"
+  user: "cube"
+  pwd: "cube_pass"
+  db_name: "cube_mvp"
+  conn_timeout: 5
+  read_timeout: 5
+  write_timeout: 5
+  max_idle_conns: 5
+  max_open_conns: 20
+  max_conn_life_time_seconds: 300
+
+redis:
+  nodes: "127.0.0.1:6379"
+  password: "REDACTED"
+  db_no: 0
+  max_idle: 8
+  max_active: 32
+  idle_timeout: 30
+  max_retry: 2
+  # Safety TTL (seconds) for node-metric keys; refreshed on every heartbeat so
+  # live nodes never expire, offline nodes auto-clean. <=0 disables.
+  node_metric_ttl_sec: 600
+  # Sandbox proxy route TTL. Keep 0 (disabled): the route key has no refresh
+  # path, so any TTL below the max sandbox lifetime would break live routing.
+  # Teardown removes it via DEL. Only set > max sandbox lifetime if needed.
+  sandbox_proxy_ttl_sec: 0
+
+scheduler:
+  priority_select_num: 1
+  metric_update_timeout: 300s
+  local_metric_update_timeout: 300s
+  filter:
+    enable_filters:
+      - "cpu"
+      - "mem"
+      - "template_locality"
+      - "realtime_create_num"
+
+# Volume plugin (S3 / COS binary reference). Credentials:
+#   CubeMaster/plugin/volume-s3.conf (written by one-click from MinIO or CUBE_S3_*)
+#   CubeMaster/plugin/volume-cos.conf
+# List order sets the default driver when Volume.create() omits `driver`;
+# S3 is first so the default install (bundled MinIO) works out of the box.
+
+  score:
+    enable_scorers:
+      - external_http_score
+    resource_weights:
+      external_http_score: 1
+    plugin_conf:
+      external_http_score:
+        weight: 1
+        endpoint: http://127.0.0.1:18080/score
+        timeout: 200ms
+        mode: mock_metrics
+        disable: false
+volume_plugins:
+  - name: s3
+    type: binary
+    binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3
+  - name: cos
+    type: binary
+    binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos

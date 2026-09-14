@@ -1,0 +1,9 @@
+{
+  "kind": "unit_contract",
+  "paths": [
+    "CubeMaster/pkg/selector/score/externalhttpscore_test.go",
+    "CubeMaster/examples/external-http-score/main_test.go"
+  ],
+  "claim": "Filter-before-Score: scorer cannot resurrect nodes outside Filter candidate set",
+  "observed_in_this_repair": "static_unit_guarantee_referenced; Gate2 re-runs unit packages"
+}

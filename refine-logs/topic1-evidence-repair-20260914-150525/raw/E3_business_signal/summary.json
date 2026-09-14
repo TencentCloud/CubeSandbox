@@ -1,0 +1,24 @@
+{
+  "status": "PARTIAL",
+  "prefer": "192.168.122.142",
+  "hit": 6,
+  "n": 6,
+  "dist": {
+    "192.168.122.142": 6
+  },
+  "phases_observed": [
+    "prefer_first"
+  ],
+  "arms_observed": [
+    "signal"
+  ],
+  "supports": [
+    "mock_signal_unidirectional_prefer_first_6_of_6"
+  ],
+  "does_not_support": [
+    "prefer_a_and_prefer_b_two_arm_plan",
+    "real_business_metrics_source",
+    "broad_generalization_beyond_mock_patch"
+  ],
+  "note": "Frozen plan required prefer_a/prefer_b; only prefer_first observed. No new samples added in repair."
+}

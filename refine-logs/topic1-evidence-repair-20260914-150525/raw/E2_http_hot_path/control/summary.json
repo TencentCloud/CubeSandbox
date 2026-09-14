@@ -1,0 +1,24 @@
+{
+  "arm": "control",
+  "n": 20,
+  "warmup_n": 2,
+  "fail_n": 0,
+  "success_n": 20,
+  "api_p50_ms": 355.0,
+  "api_p95_ms": 590.8000000000001,
+  "api_max_ms": 701.0,
+  "ready_p50_ms": 800.0,
+  "ready_p95_ms": 982.3000000000002,
+  "ready_max_ms": 1159.0,
+  "node_dist": {
+    "192.168.122.55": 8,
+    "192.168.122.142": 5,
+    "192.168.122.33": 5,
+    "192.168.122.44": 2
+  },
+  "metrics_delta": {},
+  "percentile_algorithm": "linear_interpolation_on_sorted_measure_latencies; pct(xs,p)=lerp at index (n-1)*(p/100)",
+  "commit_sha": "b3df7b23a9920e5bfc7a9f699a92384182c15cb7",
+  "binary_sha256": "d5c6e2a82147d0abd9bfdcb9302287fd2638c3c0b43b28a3e8a6f6e3452202a6",
+  "config_sha256": "4e0ad466882e387c78efb961b077f844d8de155fc334c162da80bb550f2b4e1c"
+}

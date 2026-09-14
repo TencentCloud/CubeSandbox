@@ -35,7 +35,7 @@ curl -s http://127.0.0.1:18080/score \
   -d '{"mode":"mock_metrics","nodes":[{"node_id":"node-a"},{"node_id":"node-b"}]}'
 ```
 
-期望：`node-b` 分数高于 `node-a`（默认 mock 快照）。  
+期望：`node-b` 分数高于 `node-a`（默认 mock 快照）。
 业务信号翻转：
 
 ```bash
@@ -72,3 +72,15 @@ CubeMaster 指标（启用后）：`cube_scheduler_external_http_score_outcomes_
 | delayed | fault delay_ms | `/fault` 清零 |
 | timeout | delay > timeout | `/fault` 清零 |
 | signal | mock-metrics patch | `/mock-metrics/reset` |
+
+## 5) 本地验收命令（可复制）
+
+工作目录：`CubeMaster/`。
+
+```powershell
+$env:GOCACHE = "$PWD/.gocache-repair"
+git diff --check -- examples/external-http-score/VERIFY.md
+go test ./examples/external-http-score -count=1
+```
+
+期望：`git diff --check` 无 trailing whitespace 报错；example 测试 PASS。

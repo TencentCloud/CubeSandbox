@@ -1,0 +1,3 @@
+{"ts": 1789371011.6819487, "decision": "fix_VERIFY_md_trailing_ws_and_add_section"}
+{"ts": 1789371011.6842752, "decision": "copy_harness_registry_only_drain", "live_executed": false}
+{"ts": 1789371011.7144582, "decision": "e3_downgrade_PARTIAL_e4_split_evidence", "e3": "PARTIAL", "e4": "PARTIAL"}

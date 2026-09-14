@@ -1,0 +1,9 @@
+{
+  "arm": "control",
+  "source": "derived_from_original_summary_metrics_delta",
+  "before_scrape_persisted": false,
+  "after_scrape_persisted": false,
+  "queried_at": null,
+  "delta": {},
+  "note": "Original sprint did not persist raw Prometheus scrapes; delta values copied from arm summary."
+}

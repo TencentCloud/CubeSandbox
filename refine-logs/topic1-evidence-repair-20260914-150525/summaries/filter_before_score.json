@@ -1,0 +1,20 @@
+{
+  "status": "PARTIAL",
+  "live_bad_score": {
+    "observed": true,
+    "rows": 3,
+    "success": 3,
+    "phase": "bad_scores",
+    "interpretation": "live fail-open create continued under bad_scores injection; does not by itself prove Filter isolation"
+  },
+  "filter_before_score_unit": {
+    "observed": true,
+    "kind": "static_unit_contract",
+    "interpretation": "unit tests enforce scorers operate on Filter survivors only"
+  },
+  "unobserved_negatives": [
+    "live proof that a Filter-excluded node_id returned by scorer was ignored at schedule time",
+    "live multi-node Filter exclusion with adversarial scorer resurrection attempt"
+  ],
+  "note": "Not summary-only PASS. Evidence split into live bad-score/fail-open, unit Filter-before-Score, and unobserved negatives."
+}

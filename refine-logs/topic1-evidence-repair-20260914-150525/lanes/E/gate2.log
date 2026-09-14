@@ -1,0 +1,59 @@
+
+===== CMD =====
+cwd=D:\postgraduate\main-line\Job\Tencent\CubeSandbox-worktrees\topic1-evidence-repair-20260914-150525
+cmd=['git', '-c', 'safe.directory=D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox-worktrees\\topic1-evidence-repair-20260914-150525', '-C', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox-worktrees\\topic1-evidence-repair-20260914-150525', 'diff', '--check']
+exit=0
+elapsed_s=0.075
+----- STDOUT -----
+
+----- STDERR -----
+warning: in the working copy of 'CubeMaster/examples/external-http-score/VERIFY.md', LF will be replaced by CRLF the next time Git touches it
+
+
+===== CMD =====
+cwd=D:\postgraduate\main-line\Job\Tencent\CubeSandbox-worktrees\topic1-evidence-repair-20260914-150525\CubeMaster
+cmd=['go', 'test', './pkg/base/config', './pkg/selector/score', './pkg/scheduler', '-count=1']
+exit=0
+elapsed_s=187.857
+----- STDOUT -----
+ok  	github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config	1.562s
+ok  	github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/score	10.814s
+ok  	github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler	2.846s
+
+----- STDERR -----
+
+
+===== CMD =====
+cwd=D:\postgraduate\main-line\Job\Tencent\CubeSandbox-worktrees\topic1-evidence-repair-20260914-150525\CubeMaster
+cmd=['go', 'test', './examples/external-http-score', '-count=1']
+exit=0
+elapsed_s=2.495
+----- STDOUT -----
+ok  	github.com/tencentcloud/CubeSandbox/CubeMaster/examples/external-http-score	0.209s
+
+----- STDERR -----
+
+
+===== CMD =====
+cwd=D:\postgraduate\main-line\Job\Tencent\CubeSandbox-worktrees\topic1-evidence-repair-20260914-150525\CubeMaster
+cmd=['go', 'vet', './pkg/base/config', './pkg/selector/score', './pkg/scheduler']
+exit=0
+elapsed_s=82.075
+----- STDOUT -----
+
+----- STDERR -----
+
+
+===== CMD =====
+cwd=D:\postgraduate\main-line\Job\Tencent\CubeSandbox-worktrees\topic1-evidence-repair-20260914-150525\CubeMaster
+cmd=['go', 'test', '-race', './pkg/selector/score', './pkg/scheduler', '-count=1']
+exit=0
+elapsed_s=204.690
+----- STDOUT -----
+ok  	github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/score	32.679s
+ok  	github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler	8.686s
+
+----- STDERR -----
+
+
+GATE2_DONE recorded_commands=5

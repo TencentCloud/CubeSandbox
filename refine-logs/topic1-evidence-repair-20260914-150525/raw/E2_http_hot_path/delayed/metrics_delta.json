@@ -1,0 +1,15 @@
+{
+  "arm": "delayed",
+  "source": "derived_from_original_summary_metrics_delta",
+  "before_scrape_persisted": false,
+  "after_scrape_persisted": false,
+  "queried_at": null,
+  "delta": {
+    "cube_scheduler_external_http_score_outcomes_total": 22.0,
+    "cube_scheduler_external_http_score_request_duration_seconds_count": 22.0,
+    "reason:success": 22.0,
+    "cube_scheduler_external_http_score_request_duration_seconds_sum": 1.7886317249999997,
+    "cube_scheduler_external_http_score_request_duration_seconds_bucket": 22.0
+  },
+  "note": "Original sprint did not persist raw Prometheus scrapes; delta values copied from arm summary."
+}

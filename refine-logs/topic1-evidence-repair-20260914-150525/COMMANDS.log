@@ -1,0 +1,88 @@
+bootstrap start ts=20260914-150525
+
+===== CMD =====
+cwd=D:\postgraduate\main-line\Job\Tencent\CubeSandbox\refine-logs\topic1-evidence-repair-20260914-150525\audit
+cmd=['D:\\anaconda3\\python.exe', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525\\audit\\accept.py', '--ledger', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525', '--out', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525\\audit\\result-1.json']
+exit=0
+elapsed_s=0.207
+----- STDOUT -----
+ACCEPT_PASS errors= 0
+
+----- STDERR -----
+
+
+===== CMD =====
+cwd=D:\postgraduate\main-line\Job\Tencent\CubeSandbox\refine-logs\topic1-evidence-repair-20260914-150525\audit
+cmd=['D:\\anaconda3\\python.exe', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525\\audit\\accept.py', '--ledger', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525', '--out', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525\\audit\\result-1.json']
+exit=0
+elapsed_s=0.161
+----- STDOUT -----
+ACCEPT_PASS errors= 0
+
+----- STDERR -----
+
+
+===== CMD =====
+cwd=D:\postgraduate\main-line\Job\Tencent\CubeSandbox\refine-logs\topic1-evidence-repair-20260914-150525\audit
+cmd=['D:\\anaconda3\\python.exe', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525\\audit\\accept.py', '--ledger', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525', '--out', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525\\audit\\result-2.json']
+exit=0
+elapsed_s=0.160
+----- STDOUT -----
+ACCEPT_PASS errors= 0
+
+----- STDERR -----
+
+
+===== CMD =====
+cwd=D:\postgraduate\main-line\Job\Tencent\CubeSandbox\refine-logs\topic1-evidence-repair-20260914-150525\audit
+cmd=['D:\\anaconda3\\python.exe', '-m', 'unittest', 'test_accept.py', '-v']
+exit=0
+elapsed_s=1.836
+----- STDOUT -----
+
+----- STDERR -----
+test_delete_row (test_accept.TestNegatives.test_delete_row) ... ok
+test_duplicate_request_id (test_accept.TestNegatives.test_duplicate_request_id) ... ok
+test_filter_resurrection_forged (test_accept.TestNegatives.test_filter_resurrection_forged) ... ok
+test_gate2_pass_string_but_nonzero (test_accept.TestNegatives.test_gate2_pass_string_but_nonzero) ... ok
+test_manifest_hash_drift (test_accept.TestNegatives.test_manifest_hash_drift) ... ok
+test_manifest_missing_member (test_accept.TestNegatives.test_manifest_missing_member) ... ok
+test_missing_sha (test_accept.TestNegatives.test_missing_sha) ... ok
+test_missing_warmup (test_accept.TestNegatives.test_missing_warmup) ... ok
+test_raw_latency_change_summary_unchanged (test_accept.TestNegatives.test_raw_latency_change_summary_unchanged) ... ok
+test_reason_count_mismatch (test_accept.TestNegatives.test_reason_count_mismatch) ... ok
+test_restore_missing_field (test_accept.TestNegatives.test_restore_missing_field) ... ok
+test_restore_sandbox_baseline (test_accept.TestNegatives.test_restore_sandbox_baseline) ... ok
+test_seq_gap (test_accept.TestNegatives.test_seq_gap) ... ok
+test_sha_drift_across_rows (test_accept.TestNegatives.test_sha_drift_across_rows) ... ok
+test_summary_change_raw_unchanged (test_accept.TestNegatives.test_summary_change_raw_unchanged) ... ok
+test_timeout_reason_to_success (test_accept.TestNegatives.test_timeout_reason_to_success) ... ok
+test_wrong_arm (test_accept.TestNegatives.test_wrong_arm) ... ok
+
+----------------------------------------------------------------------
+Ran 17 tests in 1.656s
+
+OK
+
+
+===== CMD =====
+cwd=D:\postgraduate\main-line\Job\Tencent\CubeSandbox\refine-logs\topic1-evidence-repair-20260914-150525\audit
+cmd=['D:\\anaconda3\\python.exe', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525\\audit\\accept.py', '--ledger', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525', '--out', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525\\audit\\result-1.json']
+exit=0
+elapsed_s=0.121
+----- STDOUT -----
+ACCEPT_PASS errors= 0
+
+----- STDERR -----
+
+
+===== CMD =====
+cwd=D:\postgraduate\main-line\Job\Tencent\CubeSandbox\refine-logs\topic1-evidence-repair-20260914-150525\audit
+cmd=['D:\\anaconda3\\python.exe', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525\\audit\\accept.py', '--ledger', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525', '--out', 'D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525\\audit\\result-2.json']
+exit=0
+elapsed_s=0.088
+----- STDOUT -----
+ACCEPT_PASS errors= 0
+
+----- STDERR -----
+
