@@ -337,6 +337,14 @@ Profile 时，最终生效的 `enable_filters` / `enable_scorers` 中的未知�
 - `template_locality_first`
 - `binpack_utilization`
 
+**放置前提：** 在默认配置（`priority_select_num` → `-1`，`least_select_name` →
+`random`）下，这些预设的分数**排序不会**决定选哪台节点——最终在 Filter 后的已评分
+集合上均匀随机。只有设置 `scheduler.priority_select_num >= 1`（截断 top-n）和/或
+权重感知的 `least_select_name`（`sw` / `rw` / `rrw`）时，分数顺序才开始影响放置。
+内置对 filter 列表的替换仍可独立改变准入。离线 simulator / `schedulerbench` 的
+argmax 仅在约 `priority_select_num: 1` 时与生产等价；不要把 bench 差值当成默认
+配置下的放置差值。在惰性默认下启用 Profile 评分器时，配置加载会打 Warn。
+
 把上述字符串之一写入 `scheduler.profile` 会加载 CubeMaster 内置覆盖，除非你还在
 `scheduler.profiles` 下定义了同名用户 key（用户胜出）。离线模拟器负载不能证明真实多机部署、
 CubeAPI/Cubelet 创建路径、真实创建延迟或生产性能。

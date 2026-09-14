@@ -678,6 +678,28 @@ scheduler:
 	assert.Equal(t, float64(5), got.Scheduler.Score.ResourceWeights["mvm_num"])
 }
 
+func TestInit_ProfileWithDefaultSelectionKeepsInertRankingDefaults(t *testing.T) {
+	// Documented footgun: profile + scorers under stock priority_select_num /
+	// least_select_name still loads; ranking does not steer placement.
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: binpack_utilization
+  filter:
+    enable_filters:
+      - cpu
+      - mem
+  profiles:
+    binpack_utilization:
+      allow_dropped_filters: true
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"binpack_score"}, got.Scheduler.Score.EnableScorers)
+	assert.Equal(t, -1, got.Scheduler.PrioritySelectNum)
+	assert.Equal(t, "random", got.Scheduler.LeastSelectName)
+}
+
 func TestInit_BuiltinOnStockFiltersRequiresAllowDropped(t *testing.T) {
 	// Stock CubeMaster configs enable cpu/mem/template_locality/realtime_create_num.
 	// Built-ins keep AllowDroppedFilters false, so selecting by name on that

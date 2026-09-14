@@ -167,6 +167,13 @@ spread 风格评分器（`real_time_weighted_average`、
 `scheduler.profile` 下该混用会配置加载失败；空 Profile 仍可加载（升级兼容）但
 排序接近噪声。内置 `binpack_utilization` 只启用 `binpack_score`。
 
+**内置预设放置前提：** `balanced_spread` / `template_locality_first` /
+`binpack_utilization` 只有在 `scheduler.priority_select_num >= 1` 和/或
+`least_select_name` 为权重感知（`sw` / `rw` / `rrw`）时才会影响*选哪台节点*。
+默认（`priority_select_num: -1`，`least_select_name: random`）下分数排序仅可观测
+（在已评分集合上均匀选取）；预设对 filter 列表的变更仍可生效。离线 simulator 的
+argmax 仅在约 `priority_select_num: 1` 时与生产等价。
+
 运行时 Profile **不是**离线模拟器 / `schedulerbench` 模型，即使预设名字符串相同。
 可复制 YAML 与完整契约见
 [Scheduler Profile 配置示例](../dev/scheduler-profile-config-example.md)。

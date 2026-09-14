@@ -380,6 +380,18 @@ but are **not equivalent**.
 - `template_locality_first`
 - `binpack_utilization`
 
+**Placement prerequisite:** with shipped defaults (`priority_select_num` → `-1`,
+`least_select_name` → `random`), score **ranking** from these presets does
+**not** steer which node is chosen — final selection is uniform over the
+post-filter scored set. Score order starts to matter only when
+`scheduler.priority_select_num >= 1` (top-n truncate) and/or
+`least_select_name` is weight-aware (`sw` / `rw` / `rrw`). Filter-list replace
+from a built-in can still change admission independently. Offline simulator /
+`schedulerbench` argmax-over-score is equivalent to production only around
+`priority_select_num: 1`; do not read bench deltas as stock-default placement
+deltas. Config load Warns when a Profile enables scorers under the inert
+defaults.
+
 Copying one of those strings into `scheduler.profile` loads the CubeMaster
 built-in overlay unless you also define a matching user key under
 `scheduler.profiles` (user wins). Offline simulator workloads do not prove a
