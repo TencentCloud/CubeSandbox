@@ -32,9 +32,10 @@ func writeAttachStub(t *testing.T, dir, argsFile string) string {
 	return wrapper
 }
 
+// Not parallel: each test writes its stub script and execs it immediately, and
+// a concurrent fork elsewhere in the package can inherit the still-open write
+// descriptor, making execve fail with ETXTBSY ("text file busy").
 func TestAttachPassesPrivateDataFlag(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	argsFile := filepath.Join(dir, "args.txt")
 	wrapper := writeAttachStub(t, dir, argsFile)
@@ -71,9 +72,8 @@ func TestAttachPassesPrivateDataFlag(t *testing.T) {
 	}
 }
 
+// Not parallel, for the same reason as TestAttachPassesPrivateDataFlag.
 func TestAttachPassesEmptyPrivateDataFlag(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	argsFile := filepath.Join(dir, "args.txt")
 	wrapper := writeAttachStub(t, dir, argsFile)
