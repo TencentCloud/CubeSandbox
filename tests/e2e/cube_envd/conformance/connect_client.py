@@ -127,10 +127,23 @@ class Client:
     `compression_probe` 场景单独对照，避免它污染其余记录的头部对比。
     """
 
-    def __init__(self, endpoint: str, timeout: float = 30.0, user: str | None = None) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        timeout: float = 30.0,
+        user: str | None = None,
+        host_header: str | None = None,
+        token: str | None = None,
+        token_header: str = "e2b-traffic-access-token",
+    ) -> None:
         self.endpoint = endpoint.rstrip("/")
         self.timeout = timeout
         self.user = user
+        # 活体模式：请求打到 CubeProxy，靠虚拟 Host（`49983-<sandboxID>.<domain>`）与
+        # traffic token 路由到沙箱；本地模式两者都为 None，直连 daemon。
+        self.host_header = host_header
+        self.token = token
+        self.token_header = token_header
         self._session = requests.Session()
 
     def request(
@@ -144,7 +157,11 @@ class Client:
         timeout: float | None = None,
     ) -> requests.Response:
         """发送一个请求；`stream=True` 时不缓冲响应体。"""
-        merged = {"Accept-Encoding": "identity"}
+        merged = {"Accept-Encoding": "identity", "Connection": "close"}
+        if self.host_header:
+            merged["Host"] = self.host_header
+        if self.token:
+            merged[self.token_header] = self.token
         if headers:
             merged.update(headers)
         return self._session.request(

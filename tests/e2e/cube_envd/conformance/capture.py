@@ -42,14 +42,43 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="请求要执行的本地用户（默认当前用户）；两个实现必须用同一个取值",
     )
+    parser.add_argument(
+        "--host-header",
+        default=None,
+        help="活体模式：CubeProxy 的虚拟 Host，形如 49983-<sandboxID>.<domain>",
+    )
+    parser.add_argument(
+        "--token",
+        default=None,
+        help="活体模式：私有 sandbox 的 traffic access token",
+    )
+    parser.add_argument(
+        "--token-header",
+        default="e2b-traffic-access-token",
+        help="traffic token 的请求头名（默认 e2b-traffic-access-token）",
+    )
     return parser.parse_args(argv)
 
 
 def capture(
-    endpoint: str, implementation: str, names: list[str], timeout: float, user: str | None
+    endpoint: str,
+    implementation: str,
+    names: list[str],
+    timeout: float,
+    user: str | None,
+    host_header: str | None = None,
+    token: str | None = None,
+    token_header: str = "e2b-traffic-access-token",
 ) -> dict[str, Any]:
     """执行选中的场景并返回 fixture 结构。"""
-    client = Client(endpoint, timeout=timeout, user=user)
+    client = Client(
+        endpoint,
+        timeout=timeout,
+        user=user,
+        host_header=host_header,
+        token=token,
+        token_header=token_header,
+    )
     records: dict[str, Any] = {}
     for name in names:
         scenario = SCENARIOS[name]
@@ -70,6 +99,7 @@ def capture(
         "implementation": implementation,
         "endpoint": endpoint,
         "user": user,
+        "host_header": host_header,
         "captured_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
         "records": dict(sorted(records.items())),
     }
@@ -87,7 +117,16 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"capturing {len(names)} scenario(s) from {args.endpoint}", file=sys.stderr)
     user = args.user or getpass.getuser()
-    fixture = capture(args.endpoint, args.implementation, names, args.timeout, user)
+    fixture = capture(
+        args.endpoint,
+        args.implementation,
+        names,
+        args.timeout,
+        user,
+        host_header=args.host_header,
+        token=args.token,
+        token_header=args.token_header,
+    )
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -42,6 +42,29 @@ python3 conformance.py check-docs
 "切到别的用户"时调用 `setgroups/setgid/setuid`，非 root 环境下会 EPERM——那属于环境差异，
 不是协议差异。
 
+## 活体模式（经 CubeProxy 的真实沙箱）
+
+容器模式把两个实现放进同一镜像、直连 `:49983`；活体模式则用**部署里的两个模板**各起一个
+私有沙箱，经 CubeProxy（虚拟 Host + traffic token）采集，因此额外覆盖代理路由、token 校验
+与真实的模板/guest 组合：
+
+```bash
+python3 run_live.py --api-url http://<host>:3000 --proxy-url http://<host> --domain cube.app \
+    --cube-template <跑 cube-envd 的模板> \
+    --go-template   <同镜像 + ENVD_BIN=/usr/bin/envd-go 的模板> \
+    --user user --outdir /tmp/live-conformance
+```
+
+要求：
+- 两个模板来自**同一个镜像**，差别只在 `ENVD_BIN`（否则差异里会混入镜像差异）；
+  在模板里选实现的正确写法与"env 会整份替换镜像环境"这个坑，见 `docker/README.md`；
+- 沙箱以 `allowPublicTraffic: false` 创建，这样才拿得到 `trafficAccessToken`；
+- 脚本在 `finally` 里删除两个沙箱，`--keep-sandboxes` 可在失败时保留排查。
+
+默认跳过 `limits_probe`：它要发 65 MiB 的单帧，经代理只会撞客户端超时，测到的是网络而不是
+协议（该场景由容器模式覆盖）。被跳过的场景在结果里标成 `NOT-CAPTURED`——没有对应记录的
+清单条目既不算通过、也不算回归，不会被误判成"差异已追平"。
+
 ## 判定口径
 
 | 判定 | 含义 |
@@ -51,6 +74,7 @@ python3 conformance.py check-docs
 | `UNDECLARED-DIFF` | 未声明的差异 → **失败**（本套件存在的意义） |
 | `MISSING-BASELINE` / `MISSING-CANDIDATE` | 一侧缺少记录 → **失败** |
 | `DECLARED-BUT-EQUAL` | 清单里声明了差异、实际已一致 → 提示删除；`--strict` 下失败 |
+| `NOT-CAPTURED` | 清单条目对应的场景本轮没有采集到（例如活体模式跳过）→ 只提示，不参与判定 |
 
 最后一条是刻意设计的：把已经追平的差异留在允许清单里，等于给该场景永久放行，未来的回归
 会被静默吞掉。

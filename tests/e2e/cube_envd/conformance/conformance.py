@@ -60,11 +60,17 @@ def load_declared(path: Path) -> dict[str, list[dict[str, Any]]]:
 
 
 def covered_records(declared: dict[str, Any], all_keys: list[str]) -> set[str]:
-    """返回某条差异声明覆盖的记录键集合。"""
-    if declared.get("records"):
-        return set(declared["records"])
-    prefix = f"{declared['scenario']}/"
-    return {key for key in all_keys if key.startswith(prefix)}
+    """返回某条差异声明在本轮 fixture 里**确实存在**的记录键集合。
+
+    与 `all_keys` 求交是刻意的：活体模式会跳过需要大载荷的场景（例如 limits_probe），
+    此时清单条目"没有对应的记录"不等于"差异已追平"，不能报成 DECLARED-BUT-EQUAL。
+    """
+    wanted = (
+        set(declared["records"])
+        if declared.get("records")
+        else {key for key in all_keys if key.startswith(f"{declared['scenario']}/")}
+    )
+    return wanted & set(all_keys)
 
 
 def short(value: Any, limit: int = 160) -> str:
@@ -145,7 +151,14 @@ def compare(baseline: dict[str, Any], candidate: dict[str, Any], declared: dict[
         if not observed and keys:
             stale.append({"scenario": entry["scenario"], "records": sorted(keys)})
 
-    return {"results": results, "stale": stale, "declared": declared}
+    uncaptured = sorted(
+        {
+            entry["scenario"]
+            for entry in declared["difference"]
+            if not covered_records(entry, all_keys)
+        }
+    )
+    return {"results": results, "stale": stale, "uncaptured": uncaptured, "declared": declared}
 
 
 def summarize(report: dict[str, Any]) -> dict[str, int]:
@@ -177,6 +190,12 @@ def print_report(report: dict[str, Any], counts: dict[str, int], failing_run: bo
         print(
             f"{'DECLARED-BUT-EQUAL':<18} {entry['scenario']} "
             f"({len(entry['records'])} record(s)) — 请从差异清单删除该条目",
+            file=sys.stderr,
+        )
+    for entry in report["uncaptured"]:
+        print(
+            f"{'NOT-CAPTURED':<18} {entry} — 本轮 fixture 里没有该场景的记录"
+            "（场景被跳过或两端都采集失败），既不算通过也不算回归",
             file=sys.stderr,
         )
     summary = " ".join(f"{name} {counts.get(name, 0)}" for name in sorted(counts))
