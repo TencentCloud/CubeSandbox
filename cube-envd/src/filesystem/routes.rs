@@ -29,9 +29,11 @@ pub async fn stat(request: Request) -> Result<Response, RpcError> {
     let (user, body) = unary_request(request).await?;
     let request: proto::StatRequest = wire::decode_json(&body, "Stat request")?;
     let path = resolve(&request.path, &user)?;
-    Ok(Json(proto::StatResponse {
+    // 走 encode_json_value：含时间戳的响应需要按 protobuf JSON 规范做 Z 归一化
+    // （参考实现输出 `...Z`，pbjson 的 RFC3339 会写成 `...+00:00`）。
+    Ok(Json(wire::encode_json_value(&proto::StatResponse {
         entry: Some(proto_entry(entry_info(&path).await?)),
-    })
+    })?)
     .into_response())
 }
 
@@ -61,9 +63,9 @@ pub async fn make_dir(request: Request) -> Result<Response, RpcError> {
     }
 
     ensure_owned_dirs(&path, &user).await?;
-    Ok(Json(proto::MakeDirResponse {
+    Ok(Json(wire::encode_json_value(&proto::MakeDirResponse {
         entry: Some(proto_entry(entry_info(&path).await?)),
-    })
+    })?)
     .into_response())
 }
 
@@ -77,13 +79,30 @@ pub async fn move_entry(request: Request) -> Result<Response, RpcError> {
         .parent()
         .ok_or_else(|| RpcError::invalid_argument("destination must have a parent directory"))?;
     ensure_owned_dirs(parent, &user).await?;
-    fs::rename(&source, &destination)
-        .await
-        .map_err(|error| filesystem_error(&source, error))?;
+    fs::rename(&source, &destination).await.map_err(|error| {
+        // 基线的文案区分 source 缺失与其它 rename 失败。
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RpcError::new(
+                Code::NotFound,
+                format!(
+                    "source file not found: {}",
+                    crate::compat::go_rename_error(&source, &destination, &error)
+                ),
+            )
+        } else {
+            RpcError::new(
+                Code::Internal,
+                format!(
+                    "error renaming: {}",
+                    crate::compat::go_rename_error(&source, &destination, &error)
+                ),
+            )
+        }
+    })?;
 
-    Ok(Json(proto::MoveResponse {
+    Ok(Json(wire::encode_json_value(&proto::MoveResponse {
         entry: Some(proto_entry(entry_info(&destination).await?)),
-    })
+    })?)
     .into_response())
 }
 
@@ -92,14 +111,15 @@ pub async fn list_dir(request: Request) -> Result<Response, RpcError> {
     let (user, body) = unary_request(request).await?;
     let request: proto::ListDirRequest = wire::decode_json(&body, "ListDir request")?;
     let path = resolve(&request.path, &user)?;
-    let metadata = fs::metadata(&path)
-        .await
-        .map_err(|error| filesystem_error(&path, error))?;
+    let metadata = fs::metadata(&path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            super::error::path_not_found(&path, error)
+        } else {
+            filesystem_error(&path, error)
+        }
+    })?;
     if !metadata.is_dir() {
-        return Err(RpcError::invalid_argument(format!(
-            "path {} is not a directory",
-            path.display()
-        )));
+        return Err(super::error::not_a_directory(&path));
     }
 
     let depth = request.depth.max(1);
@@ -107,7 +127,10 @@ pub async fn list_dir(request: Request) -> Result<Response, RpcError> {
     collect_entries(&path, depth, &mut entries).await?;
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     let entries = entries.into_iter().map(proto_entry).collect();
-    Ok(Json(proto::ListDirResponse { entries }).into_response())
+    Ok(Json(wire::encode_json_value(&proto::ListDirResponse {
+        entries,
+    })?)
+    .into_response())
 }
 
 /// 删除文件或递归删除目录。

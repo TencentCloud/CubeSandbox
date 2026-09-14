@@ -127,11 +127,15 @@ pub(super) fn end_event(result: std::io::Result<std::process::ExitStatus>) -> En
                 };
             }
             let code = status.code().unwrap_or(-1);
+            // 参考实现在非零退出时把 *exec.ExitError 的文本同时写进 status 与 error
+            // （"exit status N"）；退出码 0 时 error 为空。SDK 会把 error 当作失败原因
+            // 展示，缺了它会丢掉一半诊断信息。
+            let text = format!("exit status {code}");
             EndEvent {
                 exit_code: code,
                 exited: true,
-                status: format!("exit status {code}"),
-                error: None,
+                status: text.clone(),
+                error: (code != 0).then_some(text),
             }
         }
         Err(error) => EndEvent {
@@ -175,11 +179,12 @@ pub(super) fn pty_end_event(status: portable_pty::ExitStatus) -> EndEvent {
         },
         None => {
             let code = status.exit_code() as i32;
+            let text = format!("exit status {code}");
             EndEvent {
                 exit_code: code,
                 exited: true,
-                status: format!("exit status {code}"),
-                error: None,
+                status: text.clone(),
+                error: (code != 0).then_some(text),
             }
         }
     }
@@ -422,7 +427,15 @@ pub(super) async fn unary_with_user(request: Request) -> Result<(LocalUser, Byte
         .map_err(|error| RpcError::new(Code::Unauthenticated, error.to_string()))?;
     let body = axum::body::to_bytes(request.into_body(), crate::connect::MAX_UNARY_JSON_BYTES)
         .await
-        .map_err(|_| RpcError::new(Code::ResourceExhausted, "unary JSON request exceeds 1 MiB"))?;
+        .map_err(|_| {
+            RpcError::new(
+                Code::ResourceExhausted,
+                format!(
+                    "unary JSON request exceeds {} MiB",
+                    crate::connect::MAX_UNARY_JSON_MIB
+                ),
+            )
+        })?;
     Ok((user, body))
 }
 

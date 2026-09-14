@@ -63,10 +63,38 @@ struct Cli {
     commit: bool,
 }
 
-#[tokio::main]
+/// 构建运行时：线程数按"每沙箱一个 daemon"的部署形态显式设上限。
+///
+/// - `worker_threads(2)`：daemon 的负载是"每个沙箱几条并发请求"，不是吞吐型服务；
+///   默认的"每核一个 worker"在 8 核宿主上会多出 6 个几乎不干活的线程（栈 + 调度开销
+///   乘以沙箱数）。
+/// - `max_blocking_threads(64)`：`tokio::fs` 的每次调用都要穿越阻塞线程池，
+///   默认上限 512 在满载时意味着 ~6 MiB 级别的常驻线程栈——对一个常驻 guest 的
+///   daemon 来说不成比例。64 远超实际并发（一个沙箱几十个操作），超限时排队而不是报错。
+/// - `thread_keep_alive(10s)`：tokio 的默认值，写出来是为了让"突发后复用线程"
+///   这一行为显式。
+///
+/// 取值依据见 `tests/blocking_strategy.rs` 的手工测点（本机：`tokio::fs::metadata`
+/// 中位 34.3µs/次，`spawn_blocking` + 同步 `std::fs` 中位 24.2µs/次）。换实现或换
+/// 上限时重跑该测点，并把结论写回 README 的 Development Notes。
+fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(64)
+        .thread_keep_alive(std::time::Duration::from_secs(10))
+        .enable_all()
+        .build()
+}
+
 /// 启动 HTTP 服务，并在收到终止信号后优雅回收受管进程。
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse_from(normalize_compatibility_flags(std::env::args_os()));
+    let runtime = build_runtime()?;
+    runtime.block_on(run(cli))
+}
+
+/// 运行时的主体：绑定端口、服务请求，并在停机时回收受管进程。
+async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.version {
         println!("{VERSION}");
         return Ok(());

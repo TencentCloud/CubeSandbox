@@ -147,6 +147,10 @@ impl ProcessRegistry {
         self.bind_tag_reservation(options.tag.as_deref(), pid).await;
         self.remove_terminal_for(pid, options.tag.as_deref()).await;
 
+        // stdout / stderr 各自一个读取任务：两条管道相互独立，**谁先上报不由契约规定**
+        // （`/bin/sh` 在 stdout 是管道时会缓冲输出，而 stderr 不缓冲，因此同一命令里
+        // stderr 常常先到）。对照套件对"并发数据事件的相对顺序"做归一化，只比较
+        // 事件集合与内容；这里保持自然顺序，不做人为排序。
         let mut stdout_reader = spawn_reader(stdout, fanout.clone(), true);
         let mut stderr_reader = spawn_reader(stderr, fanout.clone(), false);
         let registry = self.clone();

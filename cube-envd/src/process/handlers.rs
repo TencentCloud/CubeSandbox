@@ -14,7 +14,7 @@ use crate::{
     auth::request_user,
     connect::{
         decode_request_frame, encode_frame, end_stream, keepalive_interval, require_streaming,
-        require_unary, Code, RequestFrameReader, RpcError,
+        stream_error_response, Code, RequestFrameReader, RpcError,
     },
     generated::process as proto,
     wire,
@@ -25,8 +25,19 @@ use super::*;
 pub async fn start(
     axum::extract::State(state): axum::extract::State<AppState>,
     request: Request,
-) -> Result<Response, RpcError> {
-    require_streaming(request.headers())?;
+) -> Response {
+    // 传输层错误（媒体类型）保持 HTTP 语义，其余错误在流内报告。
+    if let Err(error) = require_streaming(request.headers()) {
+        return error.into_response();
+    }
+    match start_inner(state, request).await {
+        Ok(response) => response,
+        Err(error) => stream_error_response(error),
+    }
+}
+
+/// 处理 Start 的请求级逻辑；错误交给调用方转成流内错误帧。
+async fn start_inner(state: AppState, request: Request) -> Result<Response, RpcError> {
     let user = request_user(request.headers())
         .map_err(|error| RpcError::new(Code::Unauthenticated, error.to_string()))?;
     let timeout = parse_timeout(request.headers())?;
@@ -67,9 +78,10 @@ pub async fn list(
     axum::extract::State(state): axum::extract::State<AppState>,
     request: Request,
 ) -> Result<Response, RpcError> {
-    require_unary(request.headers())?;
-    request_user(request.headers())
-        .map_err(|error| RpcError::new(Code::Unauthenticated, error.to_string()))?;
+    // 载荷本身没有字段，但**必须真的解码**：参考实现会拒绝畸形 JSON（400
+    // invalid_argument），跳过解码就等于对畸形输入静默成功。
+    let (_, body) = unary_with_user(request).await?;
+    let _request: proto::ListRequest = wire::decode_json(&body, "List request")?;
     let processes = state.processes.list().await;
     Ok(axum::Json(proto::ListResponse { processes }).into_response())
 }
@@ -78,8 +90,18 @@ pub async fn list(
 pub async fn connect(
     axum::extract::State(state): axum::extract::State<AppState>,
     request: Request,
-) -> Result<Response, RpcError> {
-    require_streaming(request.headers())?;
+) -> Response {
+    if let Err(error) = require_streaming(request.headers()) {
+        return error.into_response();
+    }
+    match connect_inner(state, request).await {
+        Ok(response) => response,
+        Err(error) => stream_error_response(error),
+    }
+}
+
+/// 处理 Connect 的请求级逻辑；错误交给调用方转成流内错误帧。
+async fn connect_inner(state: AppState, request: Request) -> Result<Response, RpcError> {
     request_user(request.headers())
         .map_err(|error| RpcError::new(Code::Unauthenticated, error.to_string()))?;
     let keepalive = keepalive_interval(request.headers());
@@ -113,8 +135,18 @@ pub async fn send_input(
 pub async fn stream_input(
     axum::extract::State(state): axum::extract::State<AppState>,
     request: Request,
-) -> Result<Response, RpcError> {
-    require_streaming(request.headers())?;
+) -> Response {
+    if let Err(error) = require_streaming(request.headers()) {
+        return error.into_response();
+    }
+    match stream_input_inner(state, request).await {
+        Ok(response) => response,
+        Err(error) => stream_error_response(error),
+    }
+}
+
+/// 处理 StreamInput 的请求级逻辑；错误交给调用方转成流内错误帧。
+async fn stream_input_inner(state: AppState, request: Request) -> Result<Response, RpcError> {
     request_user(request.headers())
         .map_err(|error| RpcError::new(Code::Unauthenticated, error.to_string()))?;
     let mut frames = RequestFrameReader::new(request.into_body());

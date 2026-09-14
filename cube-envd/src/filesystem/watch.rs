@@ -37,8 +37,22 @@ use super::{
 pub async fn watch_dir(
     axum::extract::State(state): axum::extract::State<crate::app::AppState>,
     request: Request,
+) -> Response {
+    // 与参考实现一致：传输层错误走 HTTP，请求级错误走流内错误帧。
+    if let Err(error) = require_streaming(request.headers()) {
+        return error.into_response();
+    }
+    match watch_dir_inner(state, request).await {
+        Ok(response) => response,
+        Err(error) => crate::connect::stream_error_response(error),
+    }
+}
+
+/// 处理 WatchDir 的请求级逻辑；错误交给调用方转成流内错误帧。
+async fn watch_dir_inner(
+    state: crate::app::AppState,
+    request: Request,
 ) -> Result<Response, RpcError> {
-    require_streaming(request.headers())?;
     let keepalive = keepalive_interval(request.headers());
     let user = request_user(request.headers())
         .map_err(|error| RpcError::new(Code::Unauthenticated, error.to_string()))?;

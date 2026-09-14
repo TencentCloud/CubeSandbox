@@ -9,7 +9,11 @@ pub mod app;
 /// 提供请求用户认证和本地账户解析。
 pub mod auth;
 /// 提供 Connect 协议帧和错误处理。
+pub mod compat;
+pub mod compress;
 pub mod connect;
+/// 提供与参考实现等价的 CORS 响应头。
+pub mod cors;
 /// 提供文件系统 RPC 接口。
 pub mod filesystem;
 /// 提供 protobuf 生成的内部类型。
@@ -22,6 +26,8 @@ pub mod logging;
 pub mod paths;
 /// 提供进程管理和进程 RPC 接口。
 pub mod process;
+/// 提供 REST 面的错误体（与 Connect 面区分）。
+pub mod rest;
 /// 提供 cube-envd 自身的语义化版本常量。
 pub mod version;
 /// 提供 protobuf JSON 与内部领域类型间的协议转换。

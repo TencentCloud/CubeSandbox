@@ -16,10 +16,28 @@ use thiserror::Error;
 /// 标识 Connect 流结束消息的帧标志位。
 pub const END_STREAM_FLAG: u8 = 0x02;
 /// 限制单个 Connect 帧的最大载荷，避免无界内存分配。
-pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+///
+/// 取值与 CubeSandbox 自带 SDK 的接收上限一致：
+/// `sdk/go/connect.go`、`sdk/node/src/commands.ts` 与
+/// `sdk/python/cubesandbox/_commands.py` 都定义
+/// `MAX_CONNECT_ENVELOPE_SIZE = 64 * 1024 * 1024`。daemon 侧比 SDK 更早拒绝，
+/// 只会把"客户端本来就会失败"的帧变成一次可定位的错误；一旦小于 SDK 上限，
+/// 就会出现"SDK 允许发、daemon 拒绝收"的不对称，SDK 用户无法自救。
+pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 /// 限制一元 JSON 请求体的最大大小。
-pub const MAX_UNARY_JSON_BYTES: usize = 1024 * 1024;
+///
+/// 与流式上限同源（都是 `MAX_CONNECT_ENVELOPE_SIZE` 在不同方法类型上的体现）：
+/// 一元请求体同样由携带 JSON 的 Connect 载荷构成，取值比流式上限小一个数量级
+/// 以贴合实际请求规模，同时覆盖 `/init` 注入大批环境变量的场景。
+pub const MAX_UNARY_JSON_BYTES: usize = 4 * 1024 * 1024;
+/// 一元请求体上限的 MiB 表示，供错误文本使用，避免文本与常量分叉。
+pub const MAX_UNARY_JSON_MIB: usize = MAX_UNARY_JSON_BYTES / (1024 * 1024);
 /// 定义客户端未指定保活间隔时的默认值。
+///
+/// 与参考实现 Go envd 0.5.13 保持一致（其流式处理器使用同一节奏）；客户端可用
+/// `Keepalive-Ping-Interval` 请求头按需调小（例如链路中存在 60 s 空闲超时的 LB）。
+/// 这条刻意不改成别的默认值：默认值属于可观察行为，改它就会多出一条需要对照套件
+/// 声明的差异，而 SDK 侧本来就有可调的请求头。
 const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(90);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -65,9 +83,13 @@ impl RequestFrameReader {
         let payload_len =
             u32::from_be_bytes(header[1..].try_into().expect("frame header")) as usize;
         if payload_len > MAX_FRAME_BYTES {
+            // 文案从常量派生：上限改动后错误文本不能再停留在旧值。
             return Err(RpcError::new(
                 Code::ResourceExhausted,
-                "Connect request frame exceeds 16 MiB",
+                format!(
+                    "Connect request frame exceeds {} MiB",
+                    MAX_FRAME_BYTES / (1024 * 1024)
+                ),
             ));
         }
         let mut payload = vec![0_u8; payload_len];
@@ -160,6 +182,8 @@ pub struct RpcError {
     pub message: String,
     /// 可选的 HTTP 状态覆盖，用于媒体类型等传输层错误。
     status: Option<StatusCode>,
+    /// 是否以空响应体作答（参考实现的 415 就是这么返回的）。
+    empty_body: bool,
 }
 
 /// 提供常用 RPC 错误的构造函数。
@@ -170,6 +194,7 @@ impl RpcError {
             code,
             message: message.into(),
             status: None,
+            empty_body: false,
         }
     }
 
@@ -179,11 +204,15 @@ impl RpcError {
     }
 
     /// 创建媒体类型不受支持错误，同时保留 Connect 参数错误码。
+    ///
+    /// 参考实现（connect-go 的媒体类型校验）返回 **415 + 空响应体**，因此这里也以
+    /// 空 body 作答；SDK 只看状态码。
     pub fn unsupported_media_type(message: impl Into<String>) -> Self {
         Self {
             code: Code::InvalidArgument,
             message: message.into(),
             status: Some(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+            empty_body: true,
         }
     }
 
@@ -197,6 +226,14 @@ impl RpcError {
 impl IntoResponse for RpcError {
     /// 根据错误码选择 HTTP 状态并序列化错误主体。
     fn into_response(self) -> Response {
+        if self.empty_body {
+            // 参考实现（connect-go 的 media-type 校验）以 415 + 空 body 结束，
+            // 不带 Connect 错误体；SDK 只看状态码。
+            return self
+                .status
+                .unwrap_or(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+                .into_response();
+        }
         let status = match self.status {
             Some(status) => status,
             None => match self.code {
@@ -357,6 +394,25 @@ fn validate_request_frame(frame: Frame) -> Result<Frame, RpcError> {
 
 /// 构造正常结束或携带错误的 Connect 流结束帧。
 /// 根据 https://connectrpc.com/docs/protocol/#error-end-stream
+/// 为流式端点构造"HTTP 200 + Connect 错误帧"的响应。
+///
+/// 参考实现（connect-go）对流式 RPC 的**所有**请求级错误都在流内报告：状态码仍是
+/// 200、`Content-Type` 仍是 `application/connect+json`，错误放在 EndStream 帧
+/// （`0x02`）里。只有媒体类型不匹配这类传输层问题才返回 415。
+/// 若把请求级错误做成 4xx + `application/json`，SDK 会当成传输层失败而不是
+/// Connect 错误，错误码与详情都拿不到。
+pub fn stream_error_response(error: RpcError) -> Response {
+    (
+        StatusCode::OK,
+        [(
+            CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/connect+json"),
+        )],
+        end_stream(Some(error)),
+    )
+        .into_response()
+}
+
 pub fn end_stream(error: Option<RpcError>) -> Vec<u8> {
     let payload = match error {
         Some(error) => serde_json::to_vec(&serde_json::json!({

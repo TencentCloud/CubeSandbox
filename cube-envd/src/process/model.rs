@@ -44,6 +44,25 @@ pub(super) const TERMINAL_CACHE_TTL: Duration = Duration::from_secs(60);
 /// 定义优雅关闭时 TERM 和 KILL 之间的等待时长。
 pub(super) const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
+/// 竞态与不变量（改这里之前先读这段）
+///
+/// 进程状态分散在三张表里（`live` / `tags` / `terminal`），它们之间只有下面这几条
+/// 顺序约定在保证"任何时刻都能定位到一个进程"：
+///
+/// 1. **启动顺序**：`registry.start` 先插入 `live`，再绑定 tag 保留，最后清理同 PID
+///    的陈旧 terminal 记录。因此任何时刻"PID 在 live 里"都能被按 PID 的请求看到，
+///    不会出现"进程已经跑起来但查不到"的窗口。
+/// 2. **收尾顺序**（`registry.finish`）：在**同一个临界区**内先写 terminal 记录、
+///    再摘除 `live`、最后释放 tag；三者按 live → tags → terminal 的顺序加锁，
+///    全程不释放中间锁。所以 `Connect` 无论落在窗口的哪一侧都命中：要么在 `live`
+///    里挂到广播，要么在 `terminal` 里回放 End（`Subscribe::{Live, Terminal}`）。
+/// 3. **PID 复用**：身份校验用 `Arc::ptr_eq`，只有仍持有当前记录的句柄才能摘除它，
+///    被复用的 PID 不会误删新进程。
+/// 4. **End 不依赖身份**：即使身份不匹配（PID 已被复用），本句柄自己的订阅者仍会收到
+///    `mark_ended` + `close` 广播与封口——订阅者永远以 End 或错误收尾，不会静默断流。
+///
+/// 这几条是被 `tests/connect_after_exit.rs` 的竞态压测钉住的（Start 与 Connect 并发、
+/// 150 轮），新增状态或改动加锁顺序时必须同时确认该用例仍通过。
 #[derive(Clone, Default)]
 /// 管理存活进程、标签保留和已结束进程缓存。
 pub struct ProcessRegistry {

@@ -21,7 +21,7 @@ use tokio::{fs, task};
 
 use crate::{
     auth::{request_user, LocalUser},
-    connect::{require_unary, Code, RpcError, MAX_UNARY_JSON_BYTES},
+    connect::{require_unary, Code, RpcError, MAX_UNARY_JSON_BYTES, MAX_UNARY_JSON_MIB},
     generated::filesystem as proto,
     paths::resolve_path,
 };
@@ -44,7 +44,12 @@ pub(super) async fn unary_request(request: Request) -> Result<(LocalUser, Bytes)
         .map_err(|error| RpcError::new(Code::Unauthenticated, error.to_string()))?;
     let body = to_bytes(request.into_body(), MAX_UNARY_JSON_BYTES)
         .await
-        .map_err(|_| RpcError::new(Code::ResourceExhausted, "unary JSON request exceeds 1 MiB"))?;
+        .map_err(|_| {
+            RpcError::new(
+                Code::ResourceExhausted,
+                format!("unary JSON request exceeds {MAX_UNARY_JSON_MIB} MiB"),
+            )
+        })?;
 
     Ok((user, body))
 }
