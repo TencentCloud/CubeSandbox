@@ -109,7 +109,7 @@
  * caller's (see s3_cache_populate), so this bounds both the memory that costs
  * and how much of the local device's queue depth cache fills may take from the
  * WAL. Filling the cache is never more important than acknowledging a write. */
-#define S3_CACHE_STAGING_BUFS   4
+#define S3_CACHE_STAGING_BUFS   16
 
 struct s3_cache;
 

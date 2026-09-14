@@ -286,6 +286,9 @@ struct s3_bs_dev_stats {
 	uint64_t allocated_chunks;
 	uint64_t rmw_count;       /* uploads that had to read the old object */
 	uint64_t zero_fill_count; /* reads of an unallocated range */
+	uint64_t dest_whole_gets;       /* cache misses fetched as whole objects */
+	uint64_t dest_coalesced_reads;  /* readers joined to an in-flight GET */
+	uint64_t dest_exact_fallbacks;  /* whole-fill setup failed */
 
 	uint64_t wal_writes;      /* writes acknowledged from the log */
 	uint64_t wal_retries;     /* writes parked by backpressure */

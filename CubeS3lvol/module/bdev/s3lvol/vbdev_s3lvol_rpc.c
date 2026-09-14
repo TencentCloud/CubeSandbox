@@ -1718,6 +1718,12 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 		spdk_json_write_named_uint64(w, "rmw_count", stats.rmw_count);
 		spdk_json_write_named_uint64(w, "allocated_chunks",
 					     stats.allocated_chunks);
+		spdk_json_write_named_uint64(w, "dest_whole_gets",
+					     stats.dest_whole_gets);
+		spdk_json_write_named_uint64(w, "dest_coalesced_reads",
+					     stats.dest_coalesced_reads);
+		spdk_json_write_named_uint64(w, "dest_exact_fallbacks",
+					     stats.dest_exact_fallbacks);
 		/* Checkpoint state. journal_used vs journal_capacity is what tells
 		 * an operator whether the lvstore is heading for the -ENOSPC that
 		 * an untruncatable journal ends in. */

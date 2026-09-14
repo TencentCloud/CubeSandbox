@@ -113,6 +113,7 @@
  * checked separately and short-circuits: a quiet lvstore does not PUT a snapshot
  * every interval, it does nothing at all. */
 #define S3_CKPT_DEFAULT_INTERVAL_SEC 60
+#define S3_DEST_FILL_MAX_INFLIGHT S3_CACHE_STAGING_BUFS
 
 /* ==========================================================================
  * Internal structures
@@ -129,6 +130,27 @@ struct s3_retry_item {
 
 	STAILQ_ENTRY(s3_retry_item) link;
 };
+
+#define S3_KEY_MAX 512
+
+struct s3_ctx;
+struct s3_chunk_io;
+
+TAILQ_HEAD(s3_dest_fill_waiters, s3_chunk_io);
+
+struct s3_dest_fill {
+	struct s3_ctx            *ctx;
+	uint64_t                  chunk_index;
+	struct spdk_uuid          uuid;
+	uint32_t                  valid_bytes;
+	char                      key[S3_KEY_MAX];
+	void                     *buf;
+	bool                      token_held;
+	struct s3_dest_fill_waiters waiters;
+	TAILQ_ENTRY(s3_dest_fill) link;
+};
+
+TAILQ_HEAD(s3_dest_fills, s3_dest_fill);
 
 struct s3_ctx {
 	/* Must be the first member: blobstore gets &ctx->bs_dev, and we recover
@@ -190,6 +212,8 @@ struct s3_ctx {
 	 * treats "no cache" and "miss" identically, so nothing here has to be
 	 * conditional beyond the null check itself. */
 	struct s3_cache *cache;
+	struct s3_dest_fills read_fills;
+	uint32_t dest_fills_inflight;
 
 	/* Registered only while teardown is waiting for a cache fill to land. See
 	 * s3_bs_dev_teardown(). */
@@ -253,6 +277,9 @@ struct s3_ctx {
 	/* Diagnostics */
 	uint64_t                 rmw_count;      /* writes that needed read-modify-write */
 	uint64_t                 zero_fill_count;/* zero-filled because the chunk was unallocated */
+	uint64_t                 dest_whole_gets;
+	uint64_t                 dest_coalesced_reads;
+	uint64_t                 dest_exact_fallbacks;
 
 	/* WAL path counters */
 	uint64_t wal_writes;   /* writes acknowledged from the log */
@@ -380,9 +407,8 @@ struct s3_chunk_io {
 	 * dropped, but a slot pinned by another reader survives, and without this
 	 * the retry could hit it again. */
 	bool                     cache_tried;
+	TAILQ_ENTRY(s3_chunk_io)  fill_link;
 };
-
-#define S3_KEY_MAX 512
 
 /* ==========================================================================
  * Helpers
@@ -560,6 +586,7 @@ s3_bs_io_put(struct s3_bs_io *bs_io)
 
 static int s3_chunk_read_submit(struct s3_chunk_io *cio);
 static int s3_chunk_write_submit(struct s3_chunk_io *cio);
+static void s3_chunk_read_done(void *cb_arg, uint64_t bytes_read, int status);
 
 /* Is a 404 worth one more read?
  *
@@ -611,6 +638,180 @@ s3_chunk_read_should_reread(struct s3_chunk_io *cio)
 	SPDK_NOTICELOG("Chunk %" PRIu64 " was overwritten while being read (%s -> "
 		       "%s); rereading\n", cio->chunk_index, read_str, now_str);
 	return true;
+}
+
+static int
+s3_chunk_exact_read_submit(struct s3_chunk_io *cio)
+{
+	struct s3_ctx *ctx = cio->bs_io->ctx;
+	uint32_t want;
+	char key[S3_KEY_MAX];
+
+	want = (uint32_t)spdk_min(cio->length,
+				   cio->read_valid_bytes - cio->offset_in_chunk);
+	s3_data_key(ctx, &cio->read_uuid, key, sizeof(key));
+	return s3_get_range(ctx->client, key, cio->offset_in_chunk, want,
+			    cio->user_buf, s3_chunk_read_done, cio);
+}
+
+static void
+s3_dest_fill_done(void *cb_arg, uint64_t bytes_read, int status)
+{
+	struct s3_dest_fill *fill = cb_arg;
+	struct s3_ctx *ctx = fill->ctx;
+	struct s3_chunk_io *cio;
+	bool release_token;
+	bool exact_fallback = false;
+
+	assert(ctx->owner_thread == NULL || ctx->owner_thread == spdk_get_thread());
+	TAILQ_REMOVE(&ctx->read_fills, fill, link);
+	assert(ctx->dest_fills_inflight > 0);
+	ctx->dest_fills_inflight--;
+	release_token = fill->token_held;
+	fill->token_held = false;
+	if (release_token) {
+		s3_whole_get_token_release();
+	}
+
+	if (status == 0 && bytes_read != fill->valid_bytes) {
+		SPDK_ERRLOG("Short whole-object read of chunk %" PRIu64 ": asked for "
+			    "%u byte(s), got %" PRIu64 "\n",
+			    fill->chunk_index, fill->valid_bytes, bytes_read);
+		status = -EIO;
+		exact_fallback = true;
+	} else if (status != 0 && status != -ENOENT) {
+		exact_fallback = true;
+	}
+	if (status == 0) {
+		/* Cache immutable S3 bytes before any waiter's overlay is applied. */
+		s3_cache_populate(ctx->cache, fill->chunk_index, &fill->uuid, 0,
+				  fill->buf, fill->valid_bytes, fill->valid_bytes);
+	}
+
+	while ((cio = TAILQ_FIRST(&fill->waiters)) != NULL) {
+		int waiter_status = status;
+
+		TAILQ_REMOVE(&fill->waiters, cio, fill_link);
+		if (waiter_status == -ENOENT &&
+		    s3_chunk_read_should_reread(cio)) {
+			cio->reread = true;
+			waiter_status = s3_chunk_read_submit(cio);
+			if (waiter_status == 0) {
+				continue;
+			}
+		}
+		if (exact_fallback) {
+			ctx->dest_exact_fallbacks++;
+			waiter_status = s3_chunk_exact_read_submit(cio);
+			if (waiter_status == 0) {
+				continue;
+			}
+		}
+		if (waiter_status == 0) {
+			uint32_t copy_len = 0;
+
+			if (cio->offset_in_chunk < fill->valid_bytes) {
+				copy_len = spdk_min(cio->length,
+						    fill->valid_bytes -
+						    cio->offset_in_chunk);
+				memcpy(cio->user_buf,
+				       (uint8_t *)fill->buf + cio->offset_in_chunk,
+				       copy_len);
+			}
+			if (copy_len < cio->length) {
+				memset((uint8_t *)cio->user_buf + copy_len, 0,
+				       cio->length - copy_len);
+			}
+			s3_read_apply_overlay(cio);
+		}
+		s3_chunk_io_finish(cio, waiter_status);
+	}
+
+	free(fill->buf);
+	free(fill);
+}
+
+static void
+s3_dest_fill_token_granted(void *arg)
+{
+	struct s3_dest_fill *fill = arg;
+	struct s3_ctx *ctx = fill->ctx;
+	int rc;
+
+	if (ctx->owner_thread != NULL &&
+	    ctx->owner_thread != spdk_get_thread()) {
+		rc = spdk_thread_send_msg(ctx->owner_thread,
+					  s3_dest_fill_token_granted, fill);
+		if (rc != 0) {
+			SPDK_ERRLOG("dest whole-GET grant bounce failed: %s\n",
+				    spdk_strerror(-rc));
+			s3_whole_get_token_release();
+		}
+		return;
+	}
+
+	fill->token_held = true;
+	fill->buf = malloc(fill->valid_bytes);
+	if (!fill->buf) {
+		s3_dest_fill_done(fill, 0, -ENOMEM);
+		return;
+	}
+	fill->ctx->dest_whole_gets++;
+	rc = s3_get_range(fill->ctx->client, fill->key, 0, fill->valid_bytes,
+			  fill->buf, s3_dest_fill_done, fill);
+	if (rc != 0) {
+		s3_dest_fill_done(fill, 0, rc);
+	}
+}
+
+static int
+s3_dest_fill_submit(struct s3_chunk_io *cio, const char *key)
+{
+	struct s3_ctx *ctx = cio->bs_io->ctx;
+	struct s3_dest_fill *fill;
+	int rc;
+
+	TAILQ_FOREACH(fill, &ctx->read_fills, link) {
+		if (fill->chunk_index == cio->chunk_index &&
+		    spdk_uuid_compare(&fill->uuid, &cio->read_uuid) == 0) {
+			TAILQ_INSERT_TAIL(&fill->waiters, cio, fill_link);
+			ctx->dest_coalesced_reads++;
+			return 0;
+		}
+	}
+	if (ctx->dest_fills_inflight >= S3_DEST_FILL_MAX_INFLIGHT) {
+		return -EAGAIN;
+	}
+
+	fill = calloc(1, sizeof(*fill));
+	if (!fill) {
+		return -ENOMEM;
+	}
+	fill->ctx = ctx;
+	fill->chunk_index = cio->chunk_index;
+	spdk_uuid_copy(&fill->uuid, &cio->read_uuid);
+	fill->valid_bytes = cio->read_valid_bytes;
+	snprintf(fill->key, sizeof(fill->key), "%s", key);
+	TAILQ_INIT(&fill->waiters);
+	TAILQ_INSERT_TAIL(&fill->waiters, cio, fill_link);
+	TAILQ_INSERT_TAIL(&ctx->read_fills, fill, link);
+	ctx->dest_fills_inflight++;
+
+	rc = s3_whole_get_token_acquire(false, s3_dest_fill_token_granted, fill);
+	if (rc == 1) {
+		s3_dest_fill_token_granted(fill);
+		return 0;
+	}
+	if (rc == 0) {
+		return 0;
+	}
+
+	TAILQ_REMOVE(&ctx->read_fills, fill, link);
+	TAILQ_REMOVE(&fill->waiters, cio, fill_link);
+	assert(ctx->dest_fills_inflight > 0);
+	ctx->dest_fills_inflight--;
+	free(fill);
+	return rc;
 }
 
 static void
@@ -805,20 +1006,22 @@ s3_chunk_read_submit(struct s3_chunk_io *cio)
 		 * fall through to the GET. s3_cache_read promises nothing else. */
 	}
 
-	/* Read straight into user_buf: the range GET returns exactly the wanted
-	 * range, no staging needed. It may read short only when zero-filling past
-	 * the object's end is required, which s3_chunk_read_done handles. */
-	uint32_t want = (uint32_t)spdk_min(cio->length,
-					   valid_bytes - cio->offset_in_chunk);
-
-	rc = s3_get_range(ctx->client, key, cio->offset_in_chunk, want,
-			  cio->user_buf, s3_chunk_read_done, cio);
-	if (rc != 0) {
-		return rc;
+	/* A cache miss fetches the immutable object once, shares that GET with
+	 * concurrent readers, and populates the full local-cache slot.  Allocation
+	 * or admission bookkeeping failure is only a cache optimisation failure;
+	 * preserve forward progress through the exact-range path below. */
+	if (ctx->cache && !cio->chunk_buf) {
+		rc = s3_dest_fill_submit(cio, key);
+		if (rc == 0) {
+			return 0;
+		}
+		ctx->dest_exact_fallbacks++;
 	}
-	/* the want < length remainder is zero-filled in the completion */
 
-	return 0;
+	/* Exact range is the no-cache path and the bounded fallback when whole
+	 * staging cannot be admitted.  Its short tail is zero-filled by the
+	 * completion. */
+	return s3_chunk_exact_read_submit(cio);
 }
 
 /* ==========================================================================
@@ -1848,6 +2051,8 @@ s3_bs_dev_free_cb(void *io_device)
 			    "freed memory\n", ctx->prefix, ctx->ckpt_gen);
 		assert(false);
 	}
+	assert(TAILQ_EMPTY(&ctx->read_fills));
+	assert(ctx->dest_fills_inflight == 0);
 
 	/* Before the map goes: this is the only point where it reflects every
 	 * object the lvstore owns, blobstore's unload writes included. Destroy
@@ -3099,6 +3304,7 @@ s3_bs_dev_create(const struct s3_lvs_opts *opts,
 	ctx->ckpt_interval_tsc = ctx->ckpt_interval_sec * spdk_get_ticks_hz();
 
 	STAILQ_INIT(&ctx->retry_q);
+	TAILQ_INIT(&ctx->read_fills);
 
 	ctx->prefix = strdup(opts->lvs_name ? opts->lvs_name : "s3lvol");
 	if (!ctx->prefix) {
@@ -3740,6 +3946,9 @@ s3_bs_dev_get_stats(struct spdk_bs_dev *bs_dev, struct s3_bs_dev_stats *out)
 	out->wal_attached = (ctx->wal != NULL);
 	out->rmw_count        = ctx->rmw_count;
 	out->zero_fill_count  = ctx->zero_fill_count;
+	out->dest_whole_gets = ctx->dest_whole_gets;
+	out->dest_coalesced_reads = ctx->dest_coalesced_reads;
+	out->dest_exact_fallbacks = ctx->dest_exact_fallbacks;
 	out->wal_writes       = ctx->wal_writes;
 	out->wal_retries      = ctx->wal_retries;
 	out->overlay_hits     = ctx->overlay_hits;
