@@ -1596,8 +1596,12 @@ func validateSchedulerScorerPluginWeights(s *SchedulerConf) error {
 
 // validateListedScorerPluginConfPresent rejects enable_scorers entries whose
 // required plugin_conf block is missing. binpack_score is exempt: omitting its
-// block keeps runtime defaults (same as NewBinpackScore). This runs for empty
-// and non-empty Profile so a typo cannot silently disable the score phase.
+// block keeps runtime defaults (same as NewBinpackScore). external_http_score
+// is NOT exempt: listing it without a plugin_conf block fails load/reload even
+// though the scorer has a nil-cfg observability path (plugin_conf_absent) used
+// by unit tests / stale selector instances after a successful reload that drops
+// both the name and the block. This runs for empty and non-empty Profile so a
+// typo cannot silently disable the score phase.
 func validateListedScorerPluginConfPresent(s *SchedulerConf) error {
 	if s == nil || s.Score == nil {
 		return nil
