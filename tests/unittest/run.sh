@@ -98,6 +98,9 @@ WITH_TESTS=(
 	"cube-lifecycle-manager|Go|0|make builder-run BUILDER_CMD='cd /workspace/cube-lifecycle-manager && go mod download && go test ./...'"
 	"cube-api|Rust|0|make cube-api-test"
 	"shim|Rust|0|make shim-test"
+	# cube-envd 的用例需要 root（用户解析、PTY）——`make cube-envd-test` 自己带上
+	# BUILDER_USER=0:0，因此这里不必再传。
+	"cube-envd|Rust|0|make cube-envd-test"
 	"agent|Rust|1|make builder-run BUILDER_CMD='cd /workspace/agent && make test'"
 	"cube-proxy|Lua|0|make cube-proxy-test"
 	# cubelog/cubedb run on the host, not via builder-run: both are pure Go with
