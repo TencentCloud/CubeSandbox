@@ -159,11 +159,13 @@ func formatNetworkRuntimeCubeNetworkConfig(cfg *networkruntime.CubeNetworkConfig
 	)
 }
 
-// mergeDNSAllowOutCIDRs appends resolver /32 CIDRs when a policy contains domain
-// targets. Without this compatibility step, a sandbox with AllowInternetAccess=false
-// could be allowed to reach a domain by policy but still fail DNS resolution.
-func mergeDNSAllowOutCIDRs(ctx context.Context, cfg *networkruntime.CubeNetworkConfig, dnsServers []string) (*networkruntime.CubeNetworkConfig, []string) {
-	if !shouldAppendDNSAllowOut(cfg) || len(dnsServers) == 0 {
+// mergeDNSAllowOutCIDRs preserves the existing domain/L7 resolver behavior by
+// default. Operators can opt in to admitting default resolvers even for an
+// IP-only policy, in which case only the intersection of Cubelet defaults and
+// the guest's actual resolv.conf is eligible. Request dns_config alone never
+// enables the opt-in path.
+func mergeDNSAllowOutCIDRs(ctx context.Context, cfg *networkruntime.CubeNetworkConfig, dnsServers, trustedDNSServers []string, autoAllowDefaultResolvers bool) (*networkruntime.CubeNetworkConfig, []string) {
+	if len(dnsServers) == 0 {
 		return cfg, nil
 	}
 	if ctx == nil {
@@ -173,22 +175,44 @@ func mergeDNSAllowOutCIDRs(ctx context.Context, cfg *networkruntime.CubeNetworkC
 	if out == nil {
 		out = &networkruntime.CubeNetworkConfig{}
 	}
-	dnsAllowOutCIDRs := dnsServersToAllowOutCIDRs(ctx, dnsServers)
-	// CubeVS AllowOut entries are CIDR-only today and cannot express UDP/TCP port 53.
-	// These resolver CIDRs intentionally keep domain-based allow rules functional
-	// even when AllowInternetAccess=false; restricting them to DNS ports requires a
-	// network runtime/CubeVS policy-model extension.
-	out.AllowOut = appendUniqueString(out.AllowOut, dnsAllowOutCIDRs)
-	return out, dnsAllowOutCIDRs
+	resolverCIDRs := dnsServersToAllowOutCIDRs(ctx, dnsServers)
+	mergedCIDRs := resolverCIDRs
+	if !shouldAppendDNSAllowOut(cfg) {
+		if !autoAllowDefaultResolvers {
+			return cfg, nil
+		}
+		mergedCIDRs = intersectCIDRs(resolverCIDRs, dnsServersToAllowOutCIDRs(ctx, trustedDNSServers))
+	}
+	if len(mergedCIDRs) == 0 {
+		return cfg, nil
+	}
+	// The v0.6 policy map is CIDR-only and cannot express UDP/TCP port 53. Keep
+	// this exception limited to the configured resolver /32s; a future
+	// port-aware policy map can narrow it to DNS traffic only.
+	out.AllowOut = appendUniqueString(out.AllowOut, mergedCIDRs)
+	return out, mergedCIDRs
+}
+
+func intersectCIDRs(actual, trusted []string) []string {
+	trustedSet := make(map[string]struct{}, len(trusted))
+	for _, cidr := range trusted {
+		trustedSet[cidr] = struct{}{}
+	}
+	matched := make([]string, 0, len(actual))
+	for _, cidr := range actual {
+		if _, ok := trustedSet[cidr]; ok {
+			matched = append(matched, cidr)
+		}
+	}
+	return matched
 }
 
 // dnsServersToAllowOutCIDRs converts resolved DNS server addresses into
 // allow_out CIDRs, dropping the ones CubeVS cannot express.
 //
-// Kept separate from mergeDNSAllowOutCIDRs because the two questions are
-// different: whether to *merge* these into the policy depends on the policy
-// naming a domain, but the list itself is a property of the sandbox and is
-// recorded unconditionally so a later policy update can fold it back in.
+// Kept separate from mergeDNSAllowOutCIDRs because conversion and admission are
+// different questions. Only resolver CIDRs that were admitted are recorded, so
+// a later policy update can preserve the same operator decision.
 func dnsServersToAllowOutCIDRs(ctx context.Context, dnsServers []string) []string {
 	if ctx == nil {
 		ctx = context.Background()

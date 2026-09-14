@@ -15,9 +15,10 @@ import (
 func TestPreHandleNormalizesDefaultDNSServers(t *testing.T) {
 	cfg, err := preHandle(&Config{
 		Common: &CommonConf{
-			DefaultDNSServers:  []string{" 119.29.29.29 ", "", "1.1.1.1"},
-			DefaultDNSSearches: []string{" default.svc.cluster.local ", "", "svc.cluster.local"},
-			DefaultDNSOptions:  []string{" ndots:5 ", ""},
+			DefaultDNSServers:          []string{" 119.29.29.29 ", "", "1.1.1.1"},
+			DefaultDNSSearches:         []string{" default.svc.cluster.local ", "", "svc.cluster.local"},
+			DefaultDNSOptions:          []string{" ndots:5 ", ""},
+			AutoAllowDefaultDNSServers: true,
 		},
 	})
 	require.NoError(t, err)
@@ -25,6 +26,7 @@ func TestPreHandleNormalizesDefaultDNSServers(t *testing.T) {
 	assert.Equal(t, "119.29.29.29,1.1.1.1", strings.Join(cfg.Common.DefaultDNSServers, ","))
 	assert.Equal(t, "default.svc.cluster.local,svc.cluster.local", strings.Join(cfg.Common.DefaultDNSSearches, ","))
 	assert.Equal(t, "ndots:5", strings.Join(cfg.Common.DefaultDNSOptions, ","))
+	assert.True(t, cfg.Common.AutoAllowDefaultDNSServers)
 }
 
 func TestValidateRejectsInvalidDefaultDNSServers(t *testing.T) {
