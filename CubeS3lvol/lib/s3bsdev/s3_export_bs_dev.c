@@ -41,9 +41,10 @@
 #include "s3lvol/s3_chunk_map.h"
 #include "s3lvol/s3_export.h"
 
-#define EXPORT_FILL_MAX_GETTING 16
-#define EXPORT_FILL_MAX_READY   16
+#define EXPORT_FILL_MAX_GETTING 64
+#define EXPORT_FILL_MAX_READY   128
 #define EXPORT_FILL_MAX_LIVE    (EXPORT_FILL_MAX_GETTING + EXPORT_FILL_MAX_READY)
+#define EXPORT_PREFETCH_WINDOW  8
 
 struct s3_export_fill;
 struct s3_export_io;
@@ -61,7 +62,8 @@ struct s3_export_fill_waiter {
 TAILQ_HEAD(s3_export_fill_waiters, s3_export_fill_waiter);
 
 enum s3_export_fill_state {
-	EXPORT_FILL_GETTING = 0,
+	EXPORT_FILL_QUEUED = 0,
+	EXPORT_FILL_GETTING,
 	EXPORT_FILL_READY,
 };
 
@@ -76,9 +78,15 @@ struct s3_export_fill {
 	uint32_t                    users;
 	bool                        listed;
 	bool                        on_lru;
+	bool                        on_pending;
+	bool                        token_held;
+	bool                        prefetch;
+	bool                        background_ref;
+	uint64_t                    manifest_generation;
 	struct s3_export_fill_waiters waiters;
 	TAILQ_ENTRY(s3_export_fill) link;
 	TAILQ_ENTRY(s3_export_fill) lru_link;
+	TAILQ_ENTRY(s3_export_fill) pending_link;
 };
 
 TAILQ_HEAD(s3_export_fills, s3_export_fill);
@@ -96,6 +104,7 @@ struct s3_export_dev {
 
 	uint32_t                   chunk_shift;
 	uint32_t                   blocks_per_chunk;
+	uint64_t                   current_generation;
 
 	/* io_device name, which spdk_io_device_register() keeps a pointer to. */
 	char                       name[SPDK_UUID_STRING_LEN + 16];
@@ -122,9 +131,19 @@ struct s3_export_dev {
 	pthread_mutex_t            fill_lock;
 	struct s3_export_fills     fills;
 	struct s3_export_fills     fill_lru;
+	struct s3_export_fills     fill_pending;
 	uint32_t                   fills_getting;
 	uint32_t                   fills_ready;
 	uint32_t                   fills_live;
+	uint32_t                   prefetch_inflight;
+
+	bool                       have_last_demand;
+	uint64_t                   last_demand_chunk;
+	uint32_t                   sequential_run;
+
+	bool                       destroying;
+	bool                       unregister_started;
+	uint32_t                   async_refs;
 
 	/* Incremented from nvmf I/O threads as well as the home thread. */
 	uint64_t                   reads;
@@ -135,6 +154,8 @@ struct s3_export_dev {
 	uint64_t                   coalesced_reads;
 	uint64_t                   ready_hits;
 	uint64_t                   exact_fallbacks;
+	uint64_t                   prefetch_gets;
+	uint64_t                   prefetch_hits;
 };
 
 /* One bs_dev read, possibly spanning several chunks. */
@@ -186,6 +207,35 @@ struct s3_export_chunk_io {
 
 	char                 key[S3_EXPORT_KEY_MAX];
 };
+
+struct s3_export_prefetch_batch {
+	struct s3_export_dev       *dev;
+	struct s3_export_manifest  *m;
+	uint64_t                    first_chunk;
+	uint32_t                    count;
+};
+
+static void export_io_device_unregistered(void *io_device);
+static void export_chunk_read_done(void *cb_arg, uint64_t bytes_read, int status);
+
+static void
+export_async_put(struct s3_export_dev *dev)
+{
+	bool unregister = false;
+
+	pthread_mutex_lock(&dev->fill_lock);
+	assert(dev->async_refs > 0);
+	dev->async_refs--;
+	if (dev->destroying && dev->async_refs == 0 && !dev->unregister_started) {
+		dev->unregister_started = true;
+		unregister = true;
+	}
+	pthread_mutex_unlock(&dev->fill_lock);
+
+	if (unregister) {
+		spdk_io_device_unregister(dev, export_io_device_unregistered);
+	}
+}
 
 /* ==========================================================================
  * Key derivation
@@ -344,6 +394,55 @@ export_fill_evict_locked(struct s3_export_dev *dev)
 	}
 }
 
+static bool
+export_fill_evict_one_locked(struct s3_export_dev *dev)
+{
+	struct s3_export_fill *fill;
+
+	TAILQ_FOREACH(fill, &dev->fill_lru, lru_link) {
+		if (fill->users != 0) {
+			continue;
+		}
+		TAILQ_REMOVE(&dev->fill_lru, fill, lru_link);
+		TAILQ_REMOVE(&dev->fills, fill, link);
+		fill->on_lru = false;
+		fill->listed = false;
+		assert(dev->fills_ready > 0);
+		dev->fills_ready--;
+		assert(dev->fills_live > 0);
+		dev->fills_live--;
+		export_fill_free(fill);
+		return true;
+	}
+	return false;
+}
+
+static void
+export_fill_waiter_release_pin(struct s3_export_fill_waiter *waiter, bool put_io)
+{
+	struct s3_export_fill *fill = waiter->fill;
+	struct s3_export_io *io = waiter->io;
+	struct s3_export_dev *dev = fill->dev;
+
+	pthread_mutex_lock(&dev->fill_lock);
+	assert(fill->users > 0);
+	fill->users--;
+	if (!fill->listed && fill->users == 0) {
+		assert(dev->fills_live > 0);
+		dev->fills_live--;
+		pthread_mutex_unlock(&dev->fill_lock);
+		export_fill_free(fill);
+	} else {
+		export_fill_evict_locked(dev);
+		pthread_mutex_unlock(&dev->fill_lock);
+	}
+
+	free(waiter);
+	if (put_io) {
+		export_io_put(io);
+	}
+}
+
 static void
 export_fill_waiter_deliver(void *arg)
 {
@@ -377,30 +476,67 @@ export_fill_waiter_deliver(void *arg)
 		       waiter->length);
 	}
 
-	pthread_mutex_lock(&dev->fill_lock);
-	assert(fill->users > 0);
-	fill->users--;
-	if (!fill->listed && fill->users == 0) {
-		assert(dev->fills_live > 0);
-		dev->fills_live--;
-		pthread_mutex_unlock(&dev->fill_lock);
-		export_fill_free(fill);
-	} else {
-		export_fill_evict_locked(dev);
-		pthread_mutex_unlock(&dev->fill_lock);
+	export_fill_waiter_release_pin(waiter, true);
+}
+
+static void
+export_fill_waiter_finish(void *arg)
+{
+	struct s3_export_fill_waiter *waiter = arg;
+	struct s3_export_fill *fill = waiter->fill;
+	struct s3_export_io *io = waiter->io;
+	struct s3_export_chunk_io *cio;
+	int status;
+	int rc;
+
+	assert(waiter->origin == NULL || waiter->origin == spdk_get_thread());
+
+	pthread_mutex_lock(&fill->dev->fill_lock);
+	status = fill->status;
+	pthread_mutex_unlock(&fill->dev->fill_lock);
+
+	/* Staging OOM after admission should not fail the read: fall back to
+	 * the exact range GET. Short whole-object answers stay -EIO so they
+	 * cannot be served as zeroes. 404 still goes through deliver so the
+	 * I/O can refetch the manifest. */
+	if (status != -ENOMEM) {
+		export_fill_waiter_deliver(waiter);
+		return;
 	}
 
-	free(waiter);
-	export_io_put(io);
+	cio = calloc(1, sizeof(*cio));
+	if (!cio) {
+		export_fill_waiter_deliver(waiter);
+		return;
+	}
+	cio->io = io;
+	cio->chunk_index = fill->chunk_index;
+	cio->expected = waiter->length;
+	snprintf(cio->key, sizeof(cio->key), "%s", fill->key);
+	rc = s3_get_range(fill->dev->client, cio->key, waiter->offset,
+			  waiter->length, waiter->dst, export_chunk_read_done, cio);
+	if (rc != 0) {
+		free(cio);
+		export_fill_waiter_deliver(waiter);
+		return;
+	}
+	__atomic_fetch_add(&fill->dev->exact_fallbacks, 1, __ATOMIC_RELAXED);
+	export_fill_waiter_release_pin(waiter, false);
 }
+
+static void export_fill_request_token(struct s3_export_fill *fill);
 
 static void
 export_fill_read_done(void *cb_arg, uint64_t bytes_read, int status)
 {
 	struct s3_export_fill *fill = cb_arg;
 	struct s3_export_dev *dev = fill->dev;
+	struct s3_export_fill *next = NULL;
 	struct s3_export_fill_waiters waiters;
 	struct s3_export_fill_waiter *waiter;
+	bool release_token;
+	bool background_ref;
+	bool free_failed = false;
 
 	TAILQ_INIT(&waiters);
 	if (status == 0 && bytes_read != fill->object_len) {
@@ -411,9 +547,22 @@ export_fill_read_done(void *cb_arg, uint64_t bytes_read, int status)
 	}
 
 	pthread_mutex_lock(&dev->fill_lock);
+	if (status == 0 && fill->prefetch &&
+	    fill->manifest_generation !=
+	    __atomic_load_n(&dev->current_generation, __ATOMIC_ACQUIRE)) {
+		status = -ESTALE;
+	}
 	assert(fill->state == EXPORT_FILL_GETTING);
 	assert(dev->fills_getting > 0);
 	dev->fills_getting--;
+	release_token = fill->token_held;
+	fill->token_held = false;
+	background_ref = fill->background_ref;
+	fill->background_ref = false;
+	if (background_ref) {
+		assert(dev->prefetch_inflight > 0);
+		dev->prefetch_inflight--;
+	}
 	fill->status = status;
 
 	while ((waiter = TAILQ_FIRST(&fill->waiters)) != NULL) {
@@ -422,29 +571,79 @@ export_fill_read_done(void *cb_arg, uint64_t bytes_read, int status)
 	}
 
 	if (status == 0) {
+		bool keep = true;
+
 		fill->state = EXPORT_FILL_READY;
-		fill->on_lru = true;
-		TAILQ_INSERT_TAIL(&dev->fill_lru, fill, lru_link);
-		dev->fills_ready++;
 		dev->whole_gets++;
 		__atomic_fetch_add(&dev->bytes_read, bytes_read, __ATOMIC_RELAXED);
-		export_fill_evict_locked(dev);
+		if (fill->prefetch) {
+			/* Evict first, then insert at HEAD. Inserting a new
+			 * prefetch at the eviction front while READY is already
+			 * full would free this fill immediately. */
+			while (dev->fills_ready >= EXPORT_FILL_MAX_READY &&
+			       export_fill_evict_one_locked(dev)) {
+			}
+			keep = dev->fills_ready < EXPORT_FILL_MAX_READY;
+		}
+		if (keep) {
+			fill->on_lru = true;
+			if (fill->prefetch) {
+				TAILQ_INSERT_HEAD(&dev->fill_lru, fill, lru_link);
+			} else {
+				TAILQ_INSERT_TAIL(&dev->fill_lru, fill, lru_link);
+			}
+			dev->fills_ready++;
+			if (!fill->prefetch) {
+				export_fill_evict_locked(dev);
+			}
+		} else {
+			TAILQ_REMOVE(&dev->fills, fill, link);
+			fill->listed = false;
+			if (fill->users == 0) {
+				assert(dev->fills_live > 0);
+				dev->fills_live--;
+				free_failed = true;
+			}
+		}
 	} else {
 		TAILQ_REMOVE(&dev->fills, fill, link);
 		fill->listed = false;
+		if (fill->users == 0) {
+			assert(dev->fills_live > 0);
+			dev->fills_live--;
+			free_failed = true;
+		}
+	}
+	if (dev->fills_getting < EXPORT_FILL_MAX_GETTING) {
+		next = TAILQ_FIRST(&dev->fill_pending);
+		if (next) {
+			TAILQ_REMOVE(&dev->fill_pending, next, pending_link);
+		}
+		if (next) {
+			next->on_pending = false;
+			next->state = EXPORT_FILL_GETTING;
+			dev->fills_getting++;
+		}
 	}
 	pthread_mutex_unlock(&dev->fill_lock);
+
+	if (release_token) {
+		s3_whole_get_token_release();
+	}
+	if (next) {
+		export_fill_request_token(next);
+	}
 
 	while ((waiter = TAILQ_FIRST(&waiters)) != NULL) {
 		int rc;
 
 		TAILQ_REMOVE(&waiters, waiter, link);
 		if (waiter->origin == NULL || waiter->origin == spdk_get_thread()) {
-			export_fill_waiter_deliver(waiter);
+			export_fill_waiter_finish(waiter);
 			continue;
 		}
 		rc = spdk_thread_send_msg(waiter->origin,
-					 export_fill_waiter_deliver, waiter);
+					 export_fill_waiter_finish, waiter);
 		if (rc != 0) {
 			/* Same last-resort rule as ingest/refetch: losing the completion
 			 * hangs blobstore forever, which is worse than delivering it on
@@ -452,8 +651,14 @@ export_fill_read_done(void *cb_arg, uint64_t bytes_read, int status)
 			SPDK_ERRLOG("export fill completion bounce failed: %s\n",
 				    spdk_strerror(-rc));
 			waiter->origin = spdk_get_thread();
-			export_fill_waiter_deliver(waiter);
+			export_fill_waiter_finish(waiter);
 		}
+	}
+	if (free_failed) {
+		export_fill_free(fill);
+	}
+	if (background_ref) {
+		export_async_put(dev);
 	}
 }
 
@@ -463,7 +668,11 @@ export_fill_attach_locked(struct s3_export_dev *dev,
 			  struct s3_export_fill_waiter *waiter)
 {
 	fill->users++;
-	if (fill->state == EXPORT_FILL_GETTING) {
+	if (fill->state != EXPORT_FILL_READY) {
+		if (fill->prefetch) {
+			fill->prefetch = false;
+			dev->prefetch_hits++;
+		}
 		TAILQ_INSERT_TAIL(&fill->waiters, waiter, link);
 		dev->coalesced_reads++;
 		return;
@@ -475,9 +684,59 @@ export_fill_attach_locked(struct s3_export_dev *dev,
 	dev->ready_hits++;
 }
 
-/* Submit one logical slice through the whole-object working set.
- * -EAGAIN is private to the caller and means "bounded staging is full; use the
- * old exact-range path". Every other result has consumed waiter. */
+static void
+export_fill_token_granted(void *arg)
+{
+	struct s3_export_fill *fill = arg;
+	struct s3_export_dev *dev = fill->dev;
+	int rc;
+
+	pthread_mutex_lock(&dev->fill_lock);
+	assert(fill->state == EXPORT_FILL_GETTING);
+	assert(!fill->token_held);
+	fill->token_held = true;
+	pthread_mutex_unlock(&dev->fill_lock);
+
+	fill->buf = malloc(fill->object_len);
+	if (!fill->buf) {
+		export_fill_read_done(fill, 0, -ENOMEM);
+		return;
+	}
+	if (fill->background_ref) {
+		__atomic_fetch_add(&dev->prefetch_gets, 1, __ATOMIC_RELAXED);
+	}
+	rc = s3_get_range(dev->client, fill->key, 0, fill->object_len, fill->buf,
+			  export_fill_read_done, fill);
+	if (rc != 0) {
+		export_fill_read_done(fill, 0, rc);
+	}
+}
+
+static void
+export_fill_token_cancelled(void *arg, int status)
+{
+	/* Delivery of the grant bounce failed. The fill is still GETTING with
+	 * no token held; complete waiters the same way a GET submit failure
+	 * does, rather than leaving them in GETTING forever. */
+	export_fill_read_done(arg, 0, status);
+}
+
+static void
+export_fill_request_token(struct s3_export_fill *fill)
+{
+	int rc;
+
+	rc = s3_whole_get_token_acquire_ex(false, export_fill_token_granted,
+					   export_fill_token_cancelled, fill);
+	if (rc == 1) {
+		export_fill_token_granted(fill);
+	} else if (rc < 0) {
+		export_fill_read_done(fill, 0, rc);
+	}
+}
+
+/* Submit one logical slice through the bounded whole-object working set.
+ * Every successful return has consumed waiter. */
 static int
 export_fill_submit(struct s3_export_io *io, const char *key,
 		   uint64_t chunk_index, uint32_t object_len,
@@ -486,8 +745,7 @@ export_fill_submit(struct s3_export_io *io, const char *key,
 	struct s3_export_dev *dev = io->dev;
 	struct s3_export_fill_waiter *waiter;
 	struct s3_export_fill *fill, *candidate = NULL;
-	bool ready;
-	int rc;
+	bool ready, start;
 
 	waiter = calloc(1, sizeof(*waiter));
 	if (!waiter) {
@@ -516,12 +774,12 @@ retry:
 		}
 		return 0;
 	}
-	if (dev->fills_getting >= EXPORT_FILL_MAX_GETTING ||
-	    dev->fills_live >= EXPORT_FILL_MAX_LIVE) {
+	while (dev->fills_live >= EXPORT_FILL_MAX_LIVE &&
+	       export_fill_evict_one_locked(dev)) {
+	}
+	if (dev->fills_live >= EXPORT_FILL_MAX_LIVE) {
 		pthread_mutex_unlock(&dev->fill_lock);
-		if (candidate) {
-			free(candidate);
-		}
+		free(candidate);
 		free(waiter);
 		return -EAGAIN;
 	}
@@ -539,7 +797,6 @@ retry:
 	fill->dev = dev;
 	fill->chunk_index = chunk_index;
 	fill->object_len = object_len;
-	fill->state = EXPORT_FILL_GETTING;
 	fill->listed = true;
 	TAILQ_INIT(&fill->waiters);
 	snprintf(fill->key, sizeof(fill->key), "%s", key);
@@ -547,22 +804,22 @@ retry:
 	fill->users = 1;
 	TAILQ_INSERT_TAIL(&fill->waiters, waiter, link);
 	TAILQ_INSERT_TAIL(&dev->fills, fill, link);
-	dev->fills_getting++;
 	dev->fills_live++;
+	start = dev->fills_getting < EXPORT_FILL_MAX_GETTING;
+	if (start) {
+		fill->state = EXPORT_FILL_GETTING;
+		dev->fills_getting++;
+	} else {
+		fill->state = EXPORT_FILL_QUEUED;
+		fill->on_pending = true;
+		TAILQ_INSERT_TAIL(&dev->fill_pending, fill, pending_link);
+	}
 	pthread_mutex_unlock(&dev->fill_lock);
 
-	/* The slot was reserved before allocating its large buffer. This keeps the
-	 * 16-object limit real even when many poll groups miss simultaneously; a
-	 * competing read of this key joins the reserved entry while malloc runs. */
-	fill->buf = malloc(object_len);
-	if (!fill->buf) {
-		export_fill_read_done(fill, 0, -ENOMEM);
-		return 0;
-	}
-	rc = s3_get_range(dev->client, fill->key, 0, object_len, fill->buf,
-			  export_fill_read_done, fill);
-	if (rc != 0) {
-		export_fill_read_done(fill, 0, rc);
+	/* Reserve a local slot before asking for a process token.  The 1 MiB
+	 * staging buffer is allocated only after both limits admit this fill. */
+	if (start) {
+		export_fill_request_token(fill);
 	}
 	return 0;
 }
@@ -620,6 +877,150 @@ export_chunk_read_done(void *cb_arg, uint64_t bytes_read, int status)
 
 	free(cio);
 	export_io_put(io);
+}
+
+static void
+export_prefetch_one(struct s3_export_dev *dev, struct s3_export_manifest *m,
+		    uint64_t chunk_index)
+{
+	struct s3_export_fill *fill;
+	const struct s3_export_ref *ref;
+	uint32_t object_len;
+	char key[S3_EXPORT_KEY_MAX];
+	int rc;
+
+	if (chunk_index >= m->num_chunks ||
+	    !s3_export_manifest_is_present(m, chunk_index)) {
+		return;
+	}
+
+	object_len = m->chunk_size;
+	if (m->layout == S3_EXPORT_LAYOUT_REF) {
+		ref = s3_export_manifest_get_ref(m, chunk_index);
+		if (!ref || ref->valid_bytes == 0 ||
+		    s3_export_manifest_chunk_prefix(m, chunk_index)[0] == '\0') {
+			return;
+		}
+		object_len = ref->valid_bytes;
+	}
+	export_chunk_key(m, chunk_index, key, sizeof(key));
+
+	fill = calloc(1, sizeof(*fill));
+	if (!fill) {
+		return;
+	}
+	fill->dev = dev;
+	fill->chunk_index = chunk_index;
+	fill->object_len = object_len;
+	fill->listed = true;
+	fill->prefetch = true;
+	fill->background_ref = true;
+	fill->manifest_generation = m->generation;
+	TAILQ_INIT(&fill->waiters);
+	snprintf(fill->key, sizeof(fill->key), "%s", key);
+
+	/* Read-ahead is opportunistic: it never waits for either the process
+	 * token or a per-export GET slot.  Demand can therefore always overtake
+	 * it, and a later demand miss simply creates the fill itself. */
+	rc = s3_whole_get_token_acquire(true, export_fill_token_granted, fill);
+	if (rc != 1) {
+		free(fill);
+		return;
+	}
+
+	pthread_mutex_lock(&dev->fill_lock);
+	if (dev->destroying || dev->prefetch_inflight >= EXPORT_PREFETCH_WINDOW ||
+	    dev->fills_getting >= EXPORT_FILL_MAX_GETTING ||
+	    dev->fills_live >= EXPORT_FILL_MAX_LIVE ||
+	    export_fill_find_locked(dev, key, object_len)) {
+		pthread_mutex_unlock(&dev->fill_lock);
+		s3_whole_get_token_release();
+		free(fill);
+		return;
+	}
+	dev->async_refs++;
+	dev->prefetch_inflight++;
+	dev->fills_live++;
+	TAILQ_INSERT_TAIL(&dev->fills, fill, link);
+	fill->state = EXPORT_FILL_GETTING;
+	dev->fills_getting++;
+	pthread_mutex_unlock(&dev->fill_lock);
+
+	export_fill_token_granted(fill);
+}
+
+static void
+export_prefetch_batch_run(void *arg)
+{
+	struct s3_export_prefetch_batch *batch = arg;
+	uint32_t i;
+
+	assert(batch->dev->home_thread == NULL ||
+	       batch->dev->home_thread == spdk_get_thread());
+	for (i = 0; i < batch->count; i++) {
+		export_prefetch_one(batch->dev, batch->m,
+				    batch->first_chunk + i);
+	}
+	s3_export_manifest_unref(batch->m);
+	export_async_put(batch->dev);
+	free(batch);
+}
+
+static void
+export_maybe_prefetch(struct s3_export_dev *dev, struct s3_export_manifest *m,
+		      uint64_t demand_chunk)
+{
+	struct s3_export_prefetch_batch *batch;
+	bool sequential = false;
+	int rc;
+
+	batch = calloc(1, sizeof(*batch));
+	if (!batch) {
+		return;
+	}
+
+	pthread_mutex_lock(&dev->fill_lock);
+	if (!dev->destroying) {
+		if (dev->have_last_demand &&
+		    demand_chunk == dev->last_demand_chunk + 1) {
+			dev->sequential_run++;
+			sequential = true;
+		} else if (!dev->have_last_demand ||
+			   demand_chunk != dev->last_demand_chunk) {
+			dev->sequential_run = 1;
+		}
+		if (!dev->have_last_demand ||
+		    demand_chunk != dev->last_demand_chunk) {
+			dev->last_demand_chunk = demand_chunk;
+			dev->have_last_demand = true;
+		}
+	}
+	if (sequential) {
+		dev->async_refs++;
+	}
+	pthread_mutex_unlock(&dev->fill_lock);
+
+	if (!sequential) {
+		free(batch);
+		return;
+	}
+
+	batch->dev = dev;
+	batch->m = m;
+	batch->first_chunk = demand_chunk + 1;
+	batch->count = EXPORT_PREFETCH_WINDOW;
+	s3_export_manifest_ref(m);
+
+	if (!dev->home_thread || dev->home_thread == spdk_get_thread()) {
+		export_prefetch_batch_run(batch);
+		return;
+	}
+	rc = spdk_thread_send_msg(dev->home_thread, export_prefetch_batch_run, batch);
+	if (rc != 0) {
+		s3_export_manifest_unref(m);
+		export_async_put(dev);
+		free(batch);
+	}
 }
 
 /* ==========================================================================
@@ -750,6 +1151,7 @@ export_read_internal(struct spdk_bs_dev *bs_dev, struct spdk_io_channel *channel
 		rc = export_fill_submit(io, key, chunk_index, object_len,
 					offset_in_chunk, get_len, buf);
 		if (rc == 0) {
+			export_maybe_prefetch(dev, io->m, chunk_index);
 			goto next;
 		}
 		if (rc != -EAGAIN) {
@@ -998,7 +1400,9 @@ export_io_device_unregistered(void *io_device)
 	struct s3_export_fill *fill;
 
 	pthread_mutex_lock(&dev->fill_lock);
+	assert(dev->async_refs == 0);
 	assert(dev->fills_getting == 0);
+	assert(TAILQ_EMPTY(&dev->fill_pending));
 	while ((fill = TAILQ_FIRST(&dev->fills)) != NULL) {
 		assert(fill->state == EXPORT_FILL_READY);
 		assert(fill->users == 0);
@@ -1031,10 +1435,12 @@ export_destroy(struct spdk_bs_dev *bs_dev)
 		       "%" PRIu64 " bytes from S3, %" PRIu64 " served as zeroes, "
 		       "%" PRIu64 " whole-object GET(s), %" PRIu64
 		       " coalesced read(s), %" PRIu64 " RAM hit(s), %" PRIu64
-		       " exact fallback(s), %" PRIu64 " manifest refetch(es)\n",
+	       " exact fallback(s), %" PRIu64 " prefetch GET(s), %" PRIu64
+	       " prefetch hit(s), %" PRIu64 " manifest refetch(es)\n",
 		       dev->m->uuid_str, dev->reads, dev->bytes_read, dev->zero_fills,
 		       dev->whole_gets, dev->coalesced_reads, dev->ready_hits,
-		       dev->exact_fallbacks, dev->refetches);
+	       dev->exact_fallbacks, dev->prefetch_gets, dev->prefetch_hits,
+	       dev->refetches);
 
 	/* No wait for a refetch, deliberately.
 	 *
@@ -1048,9 +1454,18 @@ export_destroy(struct spdk_bs_dev *bs_dev)
 	 * would leave blobstore waiting for ever, and the leak would look like a
 	 * hung volume rather than like anything to do with this file. */
 
-	/* Frees in the callback: unregistering is asynchronous, and any channel
-	 * still open would otherwise be pointing at freed memory. */
-	spdk_io_device_unregister(dev, export_io_device_unregistered);
+	/* Demand GETs are covered by blobstore's outstanding I/O lifetime.
+	 * Read-ahead is not, so defer unregistering until every scheduled or
+	 * in-flight prefetch has dropped its background reference. */
+	pthread_mutex_lock(&dev->fill_lock);
+	dev->destroying = true;
+	if (dev->async_refs == 0) {
+		dev->unregister_started = true;
+		pthread_mutex_unlock(&dev->fill_lock);
+		spdk_io_device_unregister(dev, export_io_device_unregistered);
+	} else {
+		pthread_mutex_unlock(&dev->fill_lock);
+	}
 }
 
 /* ==========================================================================
@@ -1184,6 +1599,7 @@ s3_export_bs_dev_swap_manifest(struct spdk_bs_dev *bs_dev,
 	 * on which byte range a chunk index covers. */
 	dev->chunk_shift      = (uint32_t)spdk_u32log2(m->chunk_size);
 	dev->blocks_per_chunk = m->chunk_size / S3LVOL_BLOCK_SIZE;
+	__atomic_store_n(&dev->current_generation, m->generation, __ATOMIC_RELEASE);
 	__atomic_store_n(&dev->m, m, __ATOMIC_RELEASE);
 
 	if (dev->on_swap) {
@@ -1471,6 +1887,8 @@ s3_export_bs_dev_create(struct s3_client *client, struct s3_export_manifest *m,
 	}
 	TAILQ_INIT(&dev->fills);
 	TAILQ_INIT(&dev->fill_lru);
+	TAILQ_INIT(&dev->fill_pending);
+	dev->current_generation = m->generation;
 
 	dev->client           = client;
 	dev->m                = m;

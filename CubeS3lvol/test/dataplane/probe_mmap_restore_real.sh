@@ -12,12 +12,11 @@
 #
 # three_lvol still uses decouple=true to exercise the production window.
 #
-# Expectations (1 MiB objects, EXPORT_FILL_MAX_GETTING/READY = 16):
-#   cold_seq_1t     whole ≈ mapped MiB, exact ≈ 0, ready ≫ whole
-#   cold_seq_16t    whole ≈ mapped MiB, exact small, ready ≫ whole
+# Expectations (1 MiB objects, GETTING=64, READY=128, prefetch window=8):
+#   cold_seq_1t     whole ≈ mapped MiB, exact ≈ 0, prefetch hits > 0
+#   cold_seq_16t    whole ≈ mapped MiB, exact ≈ 0, ready/coalesced reuse
 #   cold_stampede   whole ≈ mapped MiB, coalesced ≈ whole*(threads-1)
-#   cold_random_Nt  whole >= mapped MiB (READY=16 causes some refetch), exact
-#                   often > 0 when first-touch concurrency exceeds GETTING=16
+#   cold_random_Nt  whole ≈ mapped MiB; READY=128 retains this working set
 #   three_lvol      mmap succeeds while rootfs/metadata fio runs during decouple
 #
 # Usage:
@@ -189,6 +188,8 @@ pat = re.compile(
     r"(?P<coalesced>\d+) coalesced read\(s\), "
     r"(?P<ready>\d+) RAM hit\(s\), "
     r"(?P<exact>\d+) exact fallback\(s\), "
+    r"(?P<prefetch_gets>\d+) prefetch GET\(s\), "
+    r"(?P<prefetch_hits>\d+) prefetch hit\(s\), "
     r"(?P<refetch>\d+) manifest refetch\(es\)"
 )
 matches = list(pat.finditer(text))
@@ -202,7 +203,8 @@ for cand in matches:
         m = cand
 print("{%s}" % ",".join(
     '"%s":%s' % (k, m.group(k))
-    for k in ("reads", "bytes", "zeroes", "whole", "coalesced", "ready", "exact", "refetch")
+    for k in ("reads", "bytes", "zeroes", "whole", "coalesced", "ready",
+              "exact", "prefetch_gets", "prefetch_hits", "refetch")
 ))
 PY
 }
@@ -215,7 +217,7 @@ run_mmap_case()
 	local expect="$5"
 	local lvol="mem_${CASE_NO}"
 	local mark nsid dev result stats
-	local whole exact coalesced ready
+local whole exact coalesced ready
 
 	local decouple="${6:-false}"
 
@@ -292,28 +294,27 @@ if expect == "seq_clean":
 elif expect == "seq_parallel":
     if whole < size_mib * 0.7:
         ok = False; reasons.append(f"whole={whole} too low")
-    # Many threads on distinct first objects can briefly exceed GETTING=16.
-    if exact > size_mib:
-        ok = False; reasons.append(f"exact={exact} unexpectedly high")
+    if exact > max(2, size_mib // 8):
+        ok = False; reasons.append(f"exact={exact} want near 0")
     if ready < size_mib * 50:
         ok = False; reasons.append(f"ready={ready} too low")
 elif expect == "stampede":
     if whole < size_mib * 0.8 or whole > size_mib * 1.5:
         ok = False; reasons.append(f"whole={whole} want ~{size_mib}")
-    if coalesced < size_mib * max(1, threads - 1) * 0.5:
-        ok = False; reasons.append(f"coalesced={coalesced} want roughly whole*(threads-1)")
+    # Depending on scheduling, followers either join GETTING or arrive after
+    # it became READY. Both prove one GET served multiple reads.
+    if coalesced + ready < size_mib * max(1, threads - 1) * 0.5:
+        ok = False; reasons.append(
+            f"coalesced+ready={coalesced + ready} too low")
     if exact > size_mib // 2:
         ok = False; reasons.append(f"exact={exact} want low under stampede")
 elif expect == "random_cap":
-    # READY is only 16, so a working set larger than that refetches some objects.
     if whole < size_mib * 0.8:
         ok = False; reasons.append(f"whole={whole} want >= ~{size_mib}")
-    # Exact fallback is expected when first-touch concurrency exceeds GETTING,
-    # but not guaranteed on every random seed; require either exact>0 or clear
-    # evidence of READY churn (whole > size).
-    if exact < 1 and whole <= size_mib:
-        ok = False; reasons.append(
-            f"exact={exact} whole={whole} did not show cap pressure")
+    if whole > size_mib * 1.5:
+        ok = False; reasons.append(f"whole={whole} shows READY churn")
+    if exact > max(2, size_mib // 8):
+        ok = False; reasons.append(f"exact={exact} want near 0")
 elif expect == "three_lvol":
     if bench.get("elapsed_ms", 0) <= 0:
         ok = False; reasons.append("mmap produced no timing")
@@ -523,12 +524,13 @@ python3 - "${RESULTS}" <<'PY'
 import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8")]
 print()
-print("case                  elapsed(ms)  MiB/s   whole  coalsc  ready  exact  verdict")
+print("case                  elapsed(ms)  MiB/s   whole  coalsc  ready  exact  pf_get pf_hit verdict")
 for r in rows:
     b = r["bench"]; e = r.get("export") or {}
     print(f"{r['case']:<21} {b['elapsed_ms']:>10.1f} {b['mib_per_sec']:>6.1f} "
           f"{e.get('whole','-'):>6} {e.get('coalesced','-'):>6} "
           f"{e.get('ready','-'):>6} {e.get('exact','-'):>6} "
+          f"{e.get('prefetch_gets','-'):>6} {e.get('prefetch_hits','-'):>6} "
           f"{'PASS' if r.get('ok') else 'FAIL'}")
 print()
 print(f"results: {sys.argv[1]}")
