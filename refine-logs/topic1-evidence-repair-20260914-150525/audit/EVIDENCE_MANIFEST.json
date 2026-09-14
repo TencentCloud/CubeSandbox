@@ -1,7 +1,7 @@
 {
   "schema_version": "evidence_manifest_v2",
   "ledger": "D:\\postgraduate\\main-line\\Job\\Tencent\\CubeSandbox\\refine-logs\\topic1-evidence-repair-20260914-150525",
-  "generated_at": "2026-09-14T07:38:09.408031+00:00",
+  "generated_at": "2026-09-14T08:32:47.789929+00:00",
   "include_rule": "all files under ledger except validator outputs and negatives fixtures",
   "exclude_paths": [
     "audit/result-1.json",
@@ -22,8 +22,8 @@
       "bytes": 738
     },
     "README.md": {
-      "sha256": "d5795bad324d6140b09d3f695a529e57b94c6975b287de22ecf591337e6dade7",
-      "bytes": 521
+      "sha256": "f9177eb17f07af6eb7b9f9abb03eafc1ed014110a6504ae932fa1b9f022e5626",
+      "bytes": 529
     },
     "RESOURCE_REGISTRY.json": {
       "sha256": "0b98466ad3bf843fdd8a3db7864846e65c4259e9c6ee3ba201a55b258543e772",
@@ -34,12 +34,12 @@
       "bytes": 589
     },
     "STATUS.json": {
-      "sha256": "27a5909015e5f3741d9be462fe7b96594f2936e74ce975ddf141c6ea97b9b9a1",
-      "bytes": 826
+      "sha256": "c8dff670d5148081d84b28567c9aa648541e78eb82dcb3d1279125ceee5563a0",
+      "bytes": 864
     },
     "analysis/ROOT_CAUSE.md": {
-      "sha256": "1a64b3484cca62022f656c382c9261f044b8c46f234cb1d1b5c1be0d67aba2ea",
-      "bytes": 1384
+      "sha256": "426ddbb7a25c606bed23fcc8557b280a9b00c3879c35cf1f57444480e5883242",
+      "bytes": 1757
     },
     "audit/accept.py": {
       "sha256": "225c53274e20efb59756075a13be7e6b02f4f3fa288f9de1ef787757de8e3715",
@@ -50,12 +50,12 @@
       "bytes": 8901
     },
     "audit/VERIFY.md": {
-      "sha256": "59f38abe7260c87ca9c354fb366caafdc74ba0feda653a9e951e8bac1d2799ad",
-      "bytes": 777
+      "sha256": "b2770d8bd88414cede3260929547a280b620982b8902e775c9517c191f781bc0",
+      "bytes": 795
     },
     "scripts/DRAIN_FIX_NOTE.md": {
-      "sha256": "f73560eff45f01589ad96dfb4aa7f4816079b4b2f5b1b5b233a7680fad61c796",
-      "bytes": 229
+      "sha256": "472810d7382316d44f6021f54fadedfdc452c10a0954fdb0ac85714b851e629a",
+      "bytes": 362
     },
     "scripts/remote_live_harness.py": {
       "sha256": "2724439681fd3d9a2462e713b37cf20cf5c0361a19600a1821adecf1a7f38c4a",
