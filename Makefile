@@ -373,9 +373,12 @@ cubecow-smoke: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && go build -a -o /workspace/_output/bin/cubecow-smoke ./pkg/cubecow/cmd/cubecow-smoke'
 
+# Both halves of the cubecow test set: the crate's own #[test]s via cargo, and
+# the Go bindings that link it. Nothing else in the tree runs the first half --
+# cubecow-sdk only builds the crate.
 .PHONY: cubecow-test-native
 cubecow-test-native: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && go test -a ./pkg/cubecow -run Test -count=1'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/cubecow && cargo test -p cubecow --lib && cd /workspace/Cubelet && go mod download && go test -a ./pkg/cubecow -run Test -count=1'
 
 .PHONY: cubemaster
 cubemaster: builder-image

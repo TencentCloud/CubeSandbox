@@ -16,6 +16,7 @@ on:
       - 'pkgs/proto/**'
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
+      - 'cubecow/**'
       - 'agent/**'
       - 'hypervisor/**'
       - 'examples/volume/s3/**'
@@ -37,6 +38,7 @@ on:
       - 'pkgs/proto/**'
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
+      - 'cubecow/**'
       - 'agent/**'
       - 'hypervisor/**'
       - 'examples/volume/s3/**'
@@ -246,9 +248,13 @@ jobs:
                 cube-lifecycle-manager/*)
                   add_component "cube-lifecycle-manager"
                   ;;
+                cubecow/*)
+                  add_component "cubecow"
+                  ;;
                 Cubelet/*)
-                  # cubecow lives under Cubelet/ (pkg/cubecow), so Cubelet
-                  # changes exercise both the cubelet and cubecow test sets.
+                  # Cubelet's Go bindings consume the cubecow crate
+                  # (Cubelet/pkg/cubecow), so Cubelet changes exercise both the
+                  # cubelet and cubecow test sets.
                   add_component "cubelet"
                   add_component "cubecow"
                   ;;
