@@ -39,8 +39,8 @@ Fields:
 - `disable`: when true, the scorer is a no-op.
 - `failure_policy`: sidecar failure handling.
   - **`fail_open` (default**, including empty/unknown values): `Select` returns a plain error; `runScoreFilter` skips this scorer and continues scheduling (historical create-path behavior).
-  - **`fail_closed`**: `Select` returns a typed `FailClosedError`; `runScoreFilter` aborts the Score phase so create fails closed.
-- `circuit_breaker`: consecutive sidecar failures open the circuit so later Score calls fail immediately instead of waiting for the full HTTP timeout. After `open_duration`, half-open probes are allowed (`half_open_max_probes`, default 1); success closes the circuit, failure reopens it. Set `disable: true` to turn the breaker off.
+  - **`fail_closed`**: `Select` returns a typed `FailClosedError`; `runScoreFilter` aborts the Score phase so create fails closed. API clients see `ErrorCode_SelectNodesFailed` with a sanitized category message (not `ErrorCode_Unknown`).
+- `circuit_breaker`: consecutive sidecar failures open the circuit so later Score calls fail immediately instead of waiting for the full HTTP timeout. After `open_duration`, half-open probes are allowed (`half_open_max_probes`, default 1); success closes the circuit, failure reopens it. Set `disable: true` to turn the breaker off. Hot-reload of a removed block or zero fields restores the defaults below (tunables do not ratchet-only upward).
 
 Default circuit breaker values when the block is omitted or a field is zero (breaker still enabled unless `disable: true`):
 
@@ -52,7 +52,9 @@ Default circuit breaker values when the block is omitted or a field is zero (bre
 
 Sidecar outages should not pin every scheduling attempt to the HTTP timeout. After `failure_threshold` consecutive request or response failures, the circuit opens and `Select` returns immediately (`fail_closed` typed error, or plain fail-open error). Open-circuit rejects do not perform HTTP and map to outcome reason `circuit_open`.
 
-Prometheus metrics (CubeMaster process, `#1700` naming):
+The shared transport caps in-flight connections with `MaxConnsPerHost = 8`. Excess concurrent Selects queue against the per-request timeout; under bursty creates this can look like sidecar timeouts and trip the breaker even when the sidecar is healthy. Prefer default `fail_open` unless concurrency is sized below roughly `8 / p50 latency`.
+
+Prometheus metrics (CubeMaster process):
 
 | Metric | Type | Meaning |
 |---|---|---|

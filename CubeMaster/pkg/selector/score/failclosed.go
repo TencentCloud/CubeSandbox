@@ -4,7 +4,12 @@
 
 package score
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+)
 
 // FailClosedError is returned by external_http_score when failure_policy is
 // fail_closed. runScoreFilter aborts scheduling only for this typed error;
@@ -25,6 +30,17 @@ func (e *FailClosedError) Unwrap() error {
 		return nil
 	}
 	return e.Err
+}
+
+// GRPCStatus maps fail_closed create failures to a schedulable error code so
+// API clients do not see ErrorCode_Unknown (-1). The message uses the same
+// sanitized category vocabulary as the plugin's Warn/metric path.
+func (e *FailClosedError) GRPCStatus() *ret.Status {
+	msg := "score plugin fail_closed"
+	if e != nil && e.Err != nil {
+		msg = sanitizeExternalHTTPScoreFailure(e.Err)
+	}
+	return ret.New(errorcode.ErrorCode_SelectNodesFailed, msg)
 }
 
 // IsFailClosed reports whether err should abort the Score phase.

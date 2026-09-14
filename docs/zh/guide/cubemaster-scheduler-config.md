@@ -311,8 +311,8 @@ scheduler:
 | `timeout` | **同步 create 路径**上的单次 HTTP 超时。为 0/省略时使用默认 **200ms**。正值必须 **≥ 1ms** 且 **≤ 2s**；负值、亚毫秒正值与超过 **2s** 的值会在构造时检出（一条 Warn），之后每次 `Select` fail-open（不会被静默改写；CubeMaster 仍会正常启动）。请使用 `200ms` / `1s` 这类 duration 字符串——裸整数如 `timeout: 200` 会被 YAML 解析成 **200 纳秒**并触发 ≥1ms 校验失败。sidecar 卡住时，每次 create 最多会多等这么久再 fail-open（电路已打开时立即短路）。 |
 | `mode` | 可选的运营自定义字符串，写入请求 JSON。 |
 | `disable` | 为 true 时即使已 enable 也是空操作；与 `weight` 一样热读。若热更新删掉整个 `plugin_conf.external_http_score` 块但 `enable_scorers` 仍保留该名字，评分会停止，但会发出限流的 fail-open Warn（日志类别 `plugin_conf_absent`），并递增 `cube_scheduler_external_http_score_outcomes_total{reason="other"}`（scorer 实例在热更新后仍存活）。有意关闭请优先用 `disable: true`（立即生效）；从 `enable_scorers` 去掉该名字只在 CubeMaster 重启后生效。 |
-| `failure_policy` | Sidecar 失败策略。**省略 / 空 / 未知默认 `fail_open`**：`Select` 返回普通错误，`runScoreFilter` 跳过该 scorer（历史 create 路径行为）。设为 `fail_closed` 时返回类型化 `FailClosedError`，`runScoreFilter` 中止 Score，创建失败关闭。 |
-| `circuit_breaker` | 连续 sidecar 失败后打开熔断，后续 Score 立即失败而不再等待完整 HTTP 超时。经过 `open_duration` 后允许最多 `half_open_max_probes` 次探测；成功则关闭熔断，失败则重新打开。省略该块时仍启用默认值（`failure_threshold: 5`，`open_duration: 5s`，`half_open_max_probes: 1`）。设 `disable: true` 可关闭熔断。 |
+| `failure_policy` | Sidecar 失败策略。**省略 / 空 / 未知默认 `fail_open`**：`Select` 返回普通错误，`runScoreFilter` 跳过该 scorer（历史 create 路径行为）。设为 `fail_closed` 时返回类型化 `FailClosedError`，`runScoreFilter` 中止 Score，创建失败关闭（`ErrorCode_SelectNodesFailed` + 脱敏类别消息）。 |
+| `circuit_breaker` | 连续 sidecar 失败后打开熔断，后续 Score 立即失败而不再等待完整 HTTP 超时。经过 `open_duration` 后允许最多 `half_open_max_probes` 次探测；成功则关闭熔断，失败则重新打开。省略该块或字段为 `0` 时，加载与热更新都会应用文档默认值（`failure_threshold: 5`，`open_duration: 5s`，`half_open_max_probes: 1`）。设 `disable: true` 可关闭熔断。 |
 
 ### 传输协议
 
@@ -364,10 +364,16 @@ endpoint URL、URL userinfo、query token，也不记录请求/响应正文或�
 子集打分会系统性扭曲排序）。该调用在创建路径上是**同步**的。共享 HTTP transport
 **不**遵循 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`（仅直连，避免环境代理看到带
 token 的 sidecar URL 或节点清单 body），并用 `MaxConnsPerHost = 8`（与每 host 空闲
-池同级）限制对 sidecar 的在途连接，避免挂起时无界拨号风暴。失败记忆熔断器
-（默认：阈值 5、打开 5s、半开探测 1 次）在连续失败后短路后续 HTTP；设
-`circuit_breaker.disable: true` 可关闭。另见
-[External HTTP score（开发）](../../dev/external-http-score.md)。
+池同级）限制对 sidecar 的在途连接，避免挂起时无界拨号风暴。超额并发的 Select 会在
+拨号队列中**阻塞**并消耗本次请求的 `timeout`（默认 200ms）：创建突发下即使 sidecar
+健康也可能呈现 `timeout` 结果并触发熔断。若配置 `failure_policy: fail_closed`，
+这会把创建突发变成创建失败；除非已按约 `MaxConnsPerHost / p50 sidecar 延迟`
+约束并发，否则请保持默认 `fail_open`。失败记忆熔断器（默认：阈值 5、打开 5s、
+半开探测 1 次）在连续失败后短路后续 HTTP；设 `circuit_breaker.disable: true` 可
+关闭。熔断字段为 0 / 省略或整块删除时，热更新会恢复文档中的默认值。
+`fail_closed` 的 create 失败以 `ErrorCode_SelectNodesFailed`（而非 `Unknown`）
+返回，消息为脱敏后的类别。另见
+[External HTTP score（开发）](../dev/external-http-score.md)。
 
 ## 相关文档
 

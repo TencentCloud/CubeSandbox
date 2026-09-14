@@ -62,9 +62,15 @@ const externalHTTPScoreErrorBodyDrainBytes = 4 << 10
 // process. Concurrent scheduling attempts may reuse idle connections to the
 // same sidecar host. MaxIdleConnsPerHost is raised above the Go default of 2;
 // MaxConnsPerHost caps in-flight dials so a hung sidecar cannot open an
-// unbounded connection storm. A failure-memory circuit breaker (defaults:
-// threshold 5, open 5s, one half-open probe) short-circuits further HTTP after
-// consecutive failures; set circuit_breaker.disable: true to turn it off.
+// unbounded connection storm. Excess concurrent Selects block in the dial
+// queue against the per-request timeout (default 200ms): under bursty create
+// load this can surface as timeout outcomes — and trip the circuit breaker —
+// even when the sidecar is healthy. With failure_policy: fail_closed that
+// turns create bursts into create failures; prefer fail_open (default) unless
+// operators have sized concurrency below MaxConnsPerHost / p50 latency.
+// A failure-memory circuit breaker (defaults: threshold 5, open 5s, one
+// half-open probe) short-circuits further HTTP after consecutive failures;
+// set circuit_breaker.disable: true to turn it off.
 const (
 	externalHTTPScoreMaxIdleConns        = 64
 	externalHTTPScoreMaxIdleConnsPerHost = 8
@@ -290,8 +296,15 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 	if selCtx != nil && selCtx.Ctx != nil {
 		ctx = selCtx.Ctx
 	}
+	// Gate accounting must outlive a panic: allow() can consume the sole
+	// half-open probe slot, and only recordSuccess/recordFailure clear it.
+	var breaker externalHTTPScoreGate
+	var gateHeld bool
 	defer func() {
 		if r := recover(); r != nil {
+			if gateHeld && breaker != nil {
+				breaker.recordFailure()
+			}
 			err = ret.Errorf(errorcode.ErrorCode_MasterInternalError, "externalHTTPScore panic:%s", r)
 			logExternalHTTPScoreFailure(ctx, err)
 			log.G(ctx).Debugf("external_http_score panic stack:\n%s", debug.Stack())
@@ -345,12 +358,16 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 	}
 
 	reqBody, knownNodes := buildExternalHTTPScoreRequest(selCtx, cfg.Mode, inList)
-	breaker := getExternalHTTPScoreBreaker(strings.TrimSpace(cfg.Endpoint), cfg.CircuitBreaker)
+	breaker = getExternalHTTPScoreBreaker(strings.TrimSpace(cfg.Endpoint), cfg.CircuitBreaker)
 	if err := breaker.allow(); err != nil {
 		cat := sanitizeExternalHTTPScoreFailure(err)
 		logExternalHTTPScoreFailureCategory(ctx, cat)
 		observeExternalHTTPScoreFailure(cat)
 		return applyExternalHTTPScoreFailure(cfg.FailurePolicy, err)
+	}
+	gateHeld = true
+	if hook := externalHTTPScoreAfterAllowForTest; hook != nil {
+		hook()
 	}
 
 	httpStart := time.Now()
@@ -361,6 +378,7 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		logExternalHTTPScoreFailureCategory(ctx, cat)
 		observeExternalHTTPScoreRequestFailure(httpElapsed, cat)
 		breaker.recordFailure()
+		gateHeld = false
 		return applyExternalHTTPScoreFailure(cfg.FailurePolicy, err)
 	}
 	filtered, err := filterExternalHTTPScoreResponse(ctx, respScores, knownNodes)
@@ -369,6 +387,7 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		logExternalHTTPScoreFailureCategory(ctx, cat)
 		observeExternalHTTPScoreRequestFailure(httpElapsed, cat)
 		breaker.recordFailure()
+		gateHeld = false
 		return applyExternalHTTPScoreFailure(cfg.FailurePolicy, err)
 	}
 
@@ -383,6 +402,7 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 			logExternalHTTPScoreFailureCategory(ctx, cat)
 			observeExternalHTTPScoreRequestFailure(httpElapsed, cat)
 			breaker.recordFailure()
+			gateHeld = false
 			return applyExternalHTTPScoreFailure(cfg.FailurePolicy, err)
 		}
 		nodes.Append(&node.NodeScore{
@@ -393,9 +413,16 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		})
 	}
 	breaker.recordSuccess()
+	gateHeld = false
 	observeExternalHTTPScoreSuccess(httpElapsed)
 	return nodes, nil
 }
+
+// externalHTTPScoreAfterAllowForTest is nil in production. Tests may set it to
+// force a panic after the circuit gate is held so recovery can prove
+// recordFailure clears the half-open probe slot.
+var externalHTTPScoreAfterAllowForTest func()
+
 
 // applyExternalHTTPScoreFailure maps a sidecar/scoring failure through
 // failure_policy. Default (omitted / empty / unknown) is fail_open: return the

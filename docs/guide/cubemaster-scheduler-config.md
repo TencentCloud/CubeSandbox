@@ -313,8 +313,8 @@ scheduler:
 | `timeout` | Per-request HTTP timeout on the **synchronous create path**. Zero/omitted uses the default **200ms**. Positive values must be **≥ 1ms** and **≤ 2s**; negative values, sub-millisecond positives, and values above **2s** are detected at construction (one Warn) and then fail-open on each `Select` (not silently coerced; CubeMaster still starts). Use a duration string such as `200ms` / `1s` — a bare integer like `timeout: 200` is parsed as **200 nanoseconds** by YAML and fails the ≥1ms check. A hung sidecar can add up to this budget to every create attempt before fail-open (unless the circuit breaker is already open). |
 | `mode` | Optional operator-defined mode string included in the JSON request. |
 | `disable` | When true, the plugin is a no-op even if enabled in `enable_scorers`. Read live like `weight`. Removing the entire `plugin_conf.external_http_score` block while leaving the name in `enable_scorers` also stops scoring, but emits a rate-limited fail-open Warn (log category `plugin_conf_absent`) and increments `cube_scheduler_external_http_score_outcomes_total{reason="other"}` (scorer instances survive hot-reload). Prefer `disable: true` for a live off switch; removing the name from `enable_scorers` only takes effect after a CubeMaster restart. |
-| `failure_policy` | Sidecar failure handling. **Omitted / empty / unknown defaults to `fail_open`**: `Select` returns a plain error and `runScoreFilter` skips this scorer (historical create-path behavior). Set `fail_closed` to return a typed `FailClosedError` so `runScoreFilter` aborts Score and create fails closed. |
-| `circuit_breaker` | Consecutive sidecar failures open the circuit so later Score calls fail immediately instead of waiting for the full HTTP timeout. After `open_duration`, up to `half_open_max_probes` probes are allowed; success closes the circuit, failure reopens it. When the block is omitted, defaults still apply (`failure_threshold: 5`, `open_duration: 5s`, `half_open_max_probes: 1`). Set `disable: true` to turn the breaker off. |
+| `failure_policy` | Sidecar failure handling. **Omitted / empty / unknown defaults to `fail_open`**: `Select` returns a plain error and `runScoreFilter` skips this scorer (historical create-path behavior). Set `fail_closed` to return a typed `FailClosedError` so `runScoreFilter` aborts Score and create fails closed (`ErrorCode_SelectNodesFailed` with a sanitized category message). |
+| `circuit_breaker` | Consecutive sidecar failures open the circuit so later Score calls fail immediately instead of waiting for the full HTTP timeout. After `open_duration`, up to `half_open_max_probes` probes are allowed; success closes the circuit, failure reopens it. When the block is omitted, or a field is `0`, documented defaults apply on load and hot-reload (`failure_threshold: 5`, `open_duration: 5s`, `half_open_max_probes: 1`). Set `disable: true` to turn the breaker off. |
 
 ### Wire contract
 
@@ -373,10 +373,19 @@ logs. Missing scores for any requested candidate fail the whole attempt
 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` (direct dial only, so env proxies cannot
 see token-bearing sidecar URLs or the node inventory body) and caps in-flight
 sidecar connections with `MaxConnsPerHost = 8` (same as the idle pool per host)
-so a hung sidecar cannot open an unbounded dial storm. A failure-memory circuit
+so a hung sidecar cannot open an unbounded dial storm. Excess concurrent Selects
+**block** in the dial queue against the per-request `timeout` (default 200ms):
+under bursty create load this can surface as `timeout` outcomes — and trip the
+circuit breaker — even when the sidecar is healthy. With
+`failure_policy: fail_closed` that turns create bursts into create failures;
+keep the default `fail_open` unless operators have sized concurrency below
+roughly `MaxConnsPerHost / p50 sidecar latency`. A failure-memory circuit
 breaker (defaults: threshold 5, open 5s, one half-open probe) short-circuits
 further HTTP after consecutive failures; set `circuit_breaker.disable: true` to
-turn it off. See also [External HTTP score (dev)](../dev/external-http-score.md).
+turn it off. Zero / omitted breaker fields and removing the block restore the
+documented defaults on hot-reload. `fail_closed` create failures surface as
+`ErrorCode_SelectNodesFailed` (not `Unknown`) with a sanitized category message.
+See also [External HTTP score (dev)](../dev/external-http-score.md).
 
 ## See also
 

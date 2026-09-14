@@ -19,6 +19,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 )
 
 func TestExternalHTTPScoreDefaultFailurePolicyIsFailOpen(t *testing.T) {
@@ -519,6 +521,142 @@ func TestExternalHTTPScoreApplyConfigConcurrentWithAllow(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestExternalHTTPScoreApplyConfigResetsToDefaults(t *testing.T) {
+	resetExternalHTTPScoreRuntimeForTest(t)
+
+	b := newExternalHTTPScoreBreaker("sidecar.example:8080", &config.ExternalHTTPScoreCircuitBreaker{
+		FailureThreshold:  20,
+		OpenDuration:      30 * time.Second,
+		HalfOpenMaxProbes: 4,
+	})
+	b.mu.Lock()
+	if b.failureThreshold != 20 || b.openDuration != 30*time.Second || b.halfOpenMaxProbes != 4 {
+		b.mu.Unlock()
+		t.Fatalf("initial tunables = threshold=%d duration=%s probes=%d", b.failureThreshold, b.openDuration, b.halfOpenMaxProbes)
+	}
+	b.mu.Unlock()
+
+	b.applyConfig(nil)
+	b.mu.Lock()
+	if b.failureThreshold != defaultCircuitFailureThreshold ||
+		b.openDuration != defaultCircuitOpenDuration ||
+		b.halfOpenMaxProbes != defaultCircuitHalfOpenMaxProbes {
+		b.mu.Unlock()
+		t.Fatalf("after nil apply: threshold=%d duration=%s probes=%d, want defaults", b.failureThreshold, b.openDuration, b.halfOpenMaxProbes)
+	}
+	b.mu.Unlock()
+
+	b.applyConfig(&config.ExternalHTTPScoreCircuitBreaker{
+		FailureThreshold:  20,
+		OpenDuration:      30 * time.Second,
+		HalfOpenMaxProbes: 4,
+	})
+	b.applyConfig(&config.ExternalHTTPScoreCircuitBreaker{}) // all zeros → defaults
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.failureThreshold != defaultCircuitFailureThreshold ||
+		b.openDuration != defaultCircuitOpenDuration ||
+		b.halfOpenMaxProbes != defaultCircuitHalfOpenMaxProbes {
+		t.Fatalf("after zero-field apply: threshold=%d duration=%s probes=%d, want defaults", b.failureThreshold, b.openDuration, b.halfOpenMaxProbes)
+	}
+}
+
+func TestExternalHTTPScoreHalfOpenReArmsAfterLeakedProbe(t *testing.T) {
+	resetExternalHTTPScoreRuntimeForTest(t)
+
+	b := newExternalHTTPScoreBreaker("sidecar.example:8080", &config.ExternalHTTPScoreCircuitBreaker{
+		FailureThreshold:  1,
+		OpenDuration:      30 * time.Millisecond,
+		HalfOpenMaxProbes: 1,
+	})
+	b.recordFailure() // open
+	if err := b.allow(); !errors.Is(err, errExternalHTTPScoreCircuitOpen) {
+		t.Fatalf("immediate allow after open = %v, want circuit open", err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	if err := b.allow(); err != nil {
+		t.Fatalf("first half-open probe allow() = %v, want nil", err)
+	}
+	// Leak the probe slot (no recordSuccess/recordFailure) — previously wedged forever.
+	if err := b.allow(); !errors.Is(err, errExternalHTTPScoreCircuitOpen) {
+		t.Fatalf("second half-open allow while slot held = %v, want circuit open", err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	if err := b.allow(); err != nil {
+		t.Fatalf("half-open re-arm after openDuration = %v, want nil", err)
+	}
+}
+
+func TestExternalHTTPScorePanicAfterAllowReleasesHalfOpenSlot(t *testing.T) {
+	resetExternalHTTPScoreRuntimeForTest(t)
+
+	var healthy atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !healthy.Load() {
+			http.Error(w, "down", http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(externalHTTPScoreResponse{
+			Scores: map[string]*float64{"node-a": float64Ptr(10), "node-b": float64Ptr(90)},
+		})
+	}))
+	defer server.Close()
+
+	cfg := &config.ExternalHTTPScore{
+		Weight:        float64Ptr(1),
+		Endpoint:      server.URL,
+		Timeout:       time.Second,
+		FailurePolicy: "fail_closed",
+		CircuitBreaker: &config.ExternalHTTPScoreCircuitBreaker{
+			FailureThreshold:  1,
+			OpenDuration:      20 * time.Millisecond,
+			HalfOpenMaxProbes: 1,
+		},
+	}
+	scorer := newExternalHTTPScoreWithConfig(cfg)
+	if _, err := scorer.Select(externalHTTPScoreTestCtx()); err == nil {
+		t.Fatal("Select() error = nil, want failure to open circuit")
+	}
+
+	time.Sleep(30 * time.Millisecond)
+	healthy.Store(true)
+
+	externalHTTPScoreAfterAllowForTest = func() { panic("forced after allow") }
+	defer func() { externalHTTPScoreAfterAllowForTest = nil }()
+
+	_, err := scorer.Select(externalHTTPScoreTestCtx())
+	if err == nil {
+		t.Fatal("Select() after forced panic = nil, want recovered error")
+	}
+	externalHTTPScoreAfterAllowForTest = nil
+
+	// Without recordFailure on panic recovery the half-open slot would wedge.
+	// After recovery the circuit should be Open again (failed probe), then
+	// after openDuration a new half-open probe must be allowed.
+	time.Sleep(30 * time.Millisecond)
+	got, err := scorer.Select(externalHTTPScoreTestCtx())
+	if err != nil {
+		t.Fatalf("Select() after panic-released half-open = %v, want success", err)
+	}
+	if got.Len() != 2 {
+		t.Fatalf("scores len = %d, want 2", got.Len())
+	}
+}
+
+func TestFailClosedErrorGRPCStatusIsSelectNodesFailed(t *testing.T) {
+	closed := &FailClosedError{Err: errExternalHTTPScoreCircuitOpen}
+	status, ok := ret.FromError(closed)
+	if !ok {
+		t.Fatal("FromError(FailClosedError) ok = false, want true via GRPCStatus")
+	}
+	if status.Code() != errorcode.ErrorCode_SelectNodesFailed {
+		t.Fatalf("RetCode = %v, want SelectNodesFailed", status.Code())
+	}
+	if status.Message() == "" || strings.Contains(status.Message(), "http://") {
+		t.Fatalf("RetMsg = %q, want sanitized non-empty category", status.Message())
+	}
 }
 
 func TestExternalHTTPScoreCircuitMetricsAreRegistered(t *testing.T) {

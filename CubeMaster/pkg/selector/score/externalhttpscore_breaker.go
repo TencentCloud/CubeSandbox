@@ -31,6 +31,7 @@ type externalHTTPScoreBreaker struct {
 	state               int
 	consecutiveFailures int
 	openedAt            time.Time
+	halfOpenSince       time.Time
 	halfOpenInFlight    int
 	failureThreshold    int
 	openDuration        time.Duration
@@ -86,11 +87,8 @@ func getExternalHTTPScoreBreaker(endpoint string, cfg *config.ExternalHTTPScoreC
 
 func newExternalHTTPScoreBreaker(target string, cfg *config.ExternalHTTPScoreCircuitBreaker) *externalHTTPScoreBreaker {
 	b := &externalHTTPScoreBreaker{
-		target:            target,
-		state:             circuitStateClosed,
-		failureThreshold:  defaultCircuitFailureThreshold,
-		openDuration:      defaultCircuitOpenDuration,
-		halfOpenMaxProbes: defaultCircuitHalfOpenMaxProbes,
+		target: target,
+		state:  circuitStateClosed,
 	}
 	b.applyConfigLocked(cfg)
 	return b
@@ -102,7 +100,13 @@ func (b *externalHTTPScoreBreaker) applyConfig(cfg *config.ExternalHTTPScoreCirc
 	b.applyConfigLocked(cfg)
 }
 
+// applyConfigLocked always restarts from package defaults so a hot-reload that
+// removes the circuit_breaker block (or sets a field to 0) restores the
+// documented defaults instead of only ratcheting tunables upward.
 func (b *externalHTTPScoreBreaker) applyConfigLocked(cfg *config.ExternalHTTPScoreCircuitBreaker) {
+	b.failureThreshold = defaultCircuitFailureThreshold
+	b.openDuration = defaultCircuitOpenDuration
+	b.halfOpenMaxProbes = defaultCircuitHalfOpenMaxProbes
 	if cfg == nil {
 		return
 	}
@@ -124,16 +128,28 @@ func (b *externalHTTPScoreBreaker) allow() error {
 	case circuitStateOpen:
 		if time.Since(b.openedAt) >= b.openDuration {
 			b.state = circuitStateHalfOpen
+			b.halfOpenSince = time.Now()
 			b.halfOpenInFlight = 1
 			setExternalHTTPScoreCircuitState(b.target, circuitStateHalfOpen)
 			return nil
 		}
 		return errExternalHTTPScoreCircuitOpen
 	case circuitStateHalfOpen:
+		// Defense in depth: if a probe slot leaked (panic without record*),
+		// re-arm after openDuration so the host is not wedged forever.
+		if b.halfOpenInFlight >= b.halfOpenMaxProbes &&
+			!b.halfOpenSince.IsZero() &&
+			time.Since(b.halfOpenSince) >= b.openDuration {
+			b.halfOpenInFlight = 0
+			b.halfOpenSince = time.Now()
+		}
 		if b.halfOpenInFlight >= b.halfOpenMaxProbes {
 			return errExternalHTTPScoreCircuitOpen
 		}
 		b.halfOpenInFlight++
+		if b.halfOpenInFlight == 1 {
+			b.halfOpenSince = time.Now()
+		}
 		return nil
 	default:
 		return nil
@@ -145,6 +161,7 @@ func (b *externalHTTPScoreBreaker) recordSuccess() {
 	defer b.mu.Unlock()
 	b.consecutiveFailures = 0
 	b.halfOpenInFlight = 0
+	b.halfOpenSince = time.Time{}
 	b.state = circuitStateClosed
 	setExternalHTTPScoreCircuitState(b.target, circuitStateClosed)
 }
@@ -153,10 +170,24 @@ func (b *externalHTTPScoreBreaker) recordFailure() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.consecutiveFailures++
-	b.halfOpenInFlight = 0
-	if b.state == circuitStateHalfOpen || b.consecutiveFailures >= b.failureThreshold {
+	if b.state == circuitStateHalfOpen {
+		// One failed half-open probe reopens the circuit. Clear in-flight so a
+		// later half-open window can admit fresh probes.
+		b.halfOpenInFlight = 0
+		b.halfOpenSince = time.Time{}
 		b.state = circuitStateOpen
 		b.openedAt = time.Now()
+		setExternalHTTPScoreCircuitState(b.target, circuitStateOpen)
+		return
+	}
+	if b.halfOpenInFlight > 0 {
+		b.halfOpenInFlight--
+	}
+	if b.consecutiveFailures >= b.failureThreshold {
+		b.state = circuitStateOpen
+		b.openedAt = time.Now()
+		b.halfOpenInFlight = 0
+		b.halfOpenSince = time.Time{}
 		setExternalHTTPScoreCircuitState(b.target, circuitStateOpen)
 	}
 }
