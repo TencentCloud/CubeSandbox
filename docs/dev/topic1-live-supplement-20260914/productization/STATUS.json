@@ -6,6 +6,9 @@
   "operator_journey": "PASS",
   "business_signal_live": "PASS",
   "http_hot_path_latency": "PASS",
+  "harness_status": "PASS",
+  "engineering_target": "NOT_MET",
+  "engineering_target_note": "healthy_api_p95_delta_ms=-141.45 does not meet <=50ms; arm variance; arms_not_rerun_on_pr_head",
   "filter_before_score": "PASS",
   "failure_degradation": "PASS",
   "binpack_probe": "NO_IMPROVEMENT",
@@ -25,5 +28,5 @@
   "pushed": true,
   "pr": "https://github.com/TencentCloud/CubeSandbox/pull/1735",
   "e5_note": "supplement_only; formal remains VALID_NO_IMPROVEMENT",
-  "note": "github_writes/pushed reflect PR publication; STATUS PASS is lab-binary evidence, not validation of the scorer commit on this PR head"
+  "note": "github_writes/pushed reflect PR publication; harness_status=PASS is lab-binary evidence (not validation of this PR head scorer); engineering_target=NOT_MET for <=50ms healthy-control delta"
 }

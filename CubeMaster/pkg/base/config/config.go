@@ -1342,6 +1342,7 @@ func preHandleScheduler(config *Config) error {
 	if err := checkInstanceTypeLabelValid(config); err != nil {
 		return err
 	}
+	warnProfileScoreRankingIneffective(&config.Scheduler.SchedulerConf)
 	return nil
 }
 
@@ -2059,13 +2060,18 @@ func preHandSchedulerScore(config *Config) {
 	}
 }
 
-// warnLegacyZeroPluginWeights surfaces omitted/zero float64 plugin weights.
-// Those fields YAML-decode omitted keys to 0, which Disable() treats as off —
-// a placement change vs master (where weight 0 still ran Select). Explicit
-// disable: true is silent; weight 0 / omit without disable logs once per load.
+// warnLegacyZeroPluginWeights surfaces omitted/zero float64 plugin weights for
+// scorers that are actually listed in enable_scorers. Those fields YAML-decode
+// omitted keys to 0, which Disable() treats as off — a placement change vs
+// master (where weight 0 still ran Select). Explicit disable: true is silent;
+// weight 0 / omit without disable logs once per load for enabled scorers only.
 func warnLegacyZeroPluginWeights(s *SchedulerConf) {
 	if s == nil || s.Score == nil {
 		return
+	}
+	enabled := make(map[string]struct{}, len(s.Score.EnableScorers))
+	for _, name := range s.Score.EnableScorers {
+		enabled[name] = struct{}{}
 	}
 	type named struct {
 		name    string
@@ -2100,8 +2106,33 @@ func warnLegacyZeroPluginWeights(s *SchedulerConf) {
 		if !c.present || c.disable || c.weight != 0 {
 			continue
 		}
+		if _, ok := enabled[c.name]; !ok {
+			continue
+		}
 		CubeLog.Warnf("scheduler.score.plugin_conf.%s.weight is 0 (or omitted): scorer is Disable()-skipped; set an explicit positive weight to keep it active after upgrade (master still ran Select at weight 0)", c.name)
 	}
+}
+
+// warnProfileScoreRankingIneffective fires when a Profile enables scorers but
+// stock final-selection defaults discard ranking: priority_select_num < 0
+// (unlimited) plus least_select_name=random picks uniformly over the scored
+// set, so score order does not steer placement (set membership still can).
+func warnProfileScoreRankingIneffective(s *SchedulerConf) {
+	if s == nil || s.Profile == "" || s.Score == nil || len(s.Score.EnableScorers) == 0 {
+		return
+	}
+	if s.PrioritySelectNum >= 1 {
+		return
+	}
+	least := s.LeastSelectName
+	if least == "" {
+		least = "random"
+	}
+	if least != "random" {
+		return
+	}
+	CubeLog.Warnf("scheduler.profile %q enables scorers but priority_select_num=%d and least_select_name=%q: score ranking does not steer placement (uniform random over post-filter candidates). Set priority_select_num >= 1 and/or a weight-aware least_select_name (sw/rw/rrw) for score order to affect placement",
+		s.Profile, s.PrioritySelectNum, least)
 }
 
 func validate(cfg *Config) error {
