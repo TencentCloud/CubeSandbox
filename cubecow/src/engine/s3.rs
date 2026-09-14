@@ -1439,7 +1439,10 @@ impl JsonRpcClient {
 /// floor keeps a down endpoint from being hammered; the ceiling bounds how
 /// stale the retry can be once the socket reappears.
 fn connect_backoff(retries: u32) -> Duration {
-    let ms = 100u64.checked_shl(retries).unwrap_or(u64::MAX).min(2_000);
+    // Clamp the shift amount, not the result: a shift that pushes every set bit
+    // of 100 out of the word truncates to 0, which is a zero-length sleep
+    // rather than the ceiling above.
+    let ms = (100u64 << retries.min(5)).min(2_000);
     Duration::from_millis(ms)
 }
 
@@ -1633,10 +1636,17 @@ mod tests {
             .map(|r| connect_backoff(r).as_millis() as u64)
             .collect();
         assert_eq!(ms, vec![100, 200, 400, 800, 1600, 2000, 2000, 2000]);
-        // Far past the point where the shift would overflow: the ceiling, not a
-        // panic and not a wrap.
-        assert_eq!(connect_backoff(64), Duration::from_millis(2000));
-        assert_eq!(connect_backoff(u32::MAX), Duration::from_millis(2000));
+        // 62 and 63 are the values that used to truncate the shift to zero;
+        // 64 is where the shift amount reaches the bit width. All four are the
+        // ceiling, none is a panic or a wrap.
+        for r in [62, 63, 64, u32::MAX] {
+            assert_eq!(
+                connect_backoff(r),
+                Duration::from_millis(2000),
+                "retries={}",
+                r
+            );
+        }
     }
 
     // The two halves of the upgrade window's control-plane contract, against a
