@@ -12,7 +12,7 @@
 
 ## 产品改动
 
-- `CubeMaster/examples/external-http-score/`（含 `/fault`、[`VERIFY.md`](../../../../CubeMaster/examples/external-http-score/VERIFY.md)）
+- `CubeMaster/examples/external-http-score/`（含 `/fault`、[`VERIFY.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeMaster/examples/external-http-score/VERIFY.md)）
 - [`docs/dev/external-http-score-operator.md`](../../external-http-score-operator.md)
 
 ## 复核

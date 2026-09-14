@@ -562,7 +562,7 @@ export default withMermaid(defineConfig({
                 { text: 'Redis Key 命名规范', link: '/zh/dev/redis-key-spec' },
                 { text: 'Scheduler Profile 配置示例', link: '/zh/dev/scheduler-profile-config-example' },
                 { text: 'External HTTP Score 运维路径', link: '/zh/dev/external-http-score-operator' },
-                { text: 'Topic1 Live Supplement', link: '/dev/topic1-live-supplement-20260914/' }
+                { text: 'Topic1 Live Supplement (EN)', link: '/dev/topic1-live-supplement-20260914/' }
               ]
             }
           ]

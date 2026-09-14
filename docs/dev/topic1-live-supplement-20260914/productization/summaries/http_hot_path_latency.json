@@ -13,10 +13,10 @@
       "ready_p95_ms": 982.3000000000002,
       "ready_max_ms": 1159.0,
       "node_dist": {
-        "192.168.122.55": 8,
-        "192.168.122.142": 5,
-        "192.168.122.33": 5,
-        "192.168.122.44": 2
+        "node-d": 8,
+        "node-a": 5,
+        "node-c": 5,
+        "node-b": 2
       },
       "metrics_delta": {}
     },
@@ -32,10 +32,10 @@
       "ready_p95_ms": 905.6500000000001,
       "ready_max_ms": 994.0,
       "node_dist": {
-        "192.168.122.44": 4,
-        "192.168.122.142": 10,
-        "192.168.122.33": 3,
-        "192.168.122.55": 3
+        "node-b": 4,
+        "node-a": 10,
+        "node-c": 3,
+        "node-d": 3
       },
       "metrics_delta": {
         "cube_scheduler_external_http_score_outcomes_total": 22.0,
@@ -57,10 +57,10 @@
       "ready_p95_ms": 1194.0500000000002,
       "ready_max_ms": 1328.0,
       "node_dist": {
-        "192.168.122.142": 6,
-        "192.168.122.55": 4,
-        "192.168.122.33": 8,
-        "192.168.122.44": 2
+        "node-a": 6,
+        "node-d": 4,
+        "node-c": 8,
+        "node-b": 2
       },
       "metrics_delta": {
         "cube_scheduler_external_http_score_outcomes_total": 22.0,
@@ -82,10 +82,10 @@
       "ready_p95_ms": 1158.95,
       "ready_max_ms": 1215.0,
       "node_dist": {
-        "192.168.122.55": 7,
-        "192.168.122.142": 7,
-        "192.168.122.44": 4,
-        "192.168.122.33": 2
+        "node-d": 7,
+        "node-a": 7,
+        "node-b": 4,
+        "node-c": 2
       },
       "metrics_delta": {
         "cube_scheduler_external_http_score_outcomes_total": 22.0,

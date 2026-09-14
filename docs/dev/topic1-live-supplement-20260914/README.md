@@ -1,4 +1,4 @@
-﻿# Topic1 Live Supplement (2026-09-14)
+# Topic1 Live Supplement (2026-09-14)
 
 Reviewer/maintainer-facing package. **No raw JSONL, task cards, or agent review drafts.**
 

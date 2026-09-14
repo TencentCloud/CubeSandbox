@@ -8,10 +8,10 @@
       "fill_success": 12,
       "fill_n": 12,
       "fill_nodes": {
-        "192.168.122.33": 1,
-        "192.168.122.142": 7,
-        "192.168.122.44": 2,
-        "192.168.122.55": 2
+        "node-c": 1,
+        "node-a": 7,
+        "node-b": 2,
+        "node-d": 2
       },
       "post_fill_empty_nodes": 1,
       "post_fill_total_mvm": 12.0,
@@ -31,7 +31,7 @@
       "fill_success": 12,
       "fill_n": 12,
       "fill_nodes": {
-        "192.168.122.55": 12
+        "node-d": 12
       },
       "post_fill_empty_nodes": 3,
       "post_fill_total_mvm": 11.0,

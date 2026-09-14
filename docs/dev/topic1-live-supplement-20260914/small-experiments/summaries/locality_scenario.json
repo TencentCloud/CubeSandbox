@@ -2,10 +2,10 @@
   "experiment": "locality_scenario",
   "status": "NO_IMPROVEMENT",
   "cache_presence": {
-    "192.168.122.33": true,
-    "192.168.122.44": false,
-    "192.168.122.55": true,
-    "192.168.122.142": true
+    "node-c": true,
+    "node-b": false,
+    "node-d": true,
+    "node-a": true
   },
   "arms": [
     {
@@ -14,9 +14,9 @@
       "success": 6,
       "cache_hit_rate": 1.0,
       "node_distribution": {
-        "192.168.122.33": 2,
-        "192.168.122.142": 3,
-        "192.168.122.55": 1
+        "node-c": 2,
+        "node-a": 3,
+        "node-d": 1
       },
       "usable_p50_ms": 2095.5,
       "usable_p95_ms": 4572.75
@@ -27,9 +27,9 @@
       "success": 6,
       "cache_hit_rate": 1.0,
       "node_distribution": {
-        "192.168.122.33": 2,
-        "192.168.122.142": 3,
-        "192.168.122.55": 1
+        "node-c": 2,
+        "node-a": 3,
+        "node-d": 1
       },
       "usable_p50_ms": 1353.5,
       "usable_p95_ms": 1538.75

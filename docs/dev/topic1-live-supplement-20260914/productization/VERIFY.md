@@ -2,7 +2,7 @@
 
 本页只核对 **本目录已入库的结论文件**。可运行的 operator 最短路径请用仓库内示例：
 
-[`CubeMaster/examples/external-http-score/VERIFY.md`](../../../../CubeMaster/examples/external-http-score/VERIFY.md)
+[`CubeMaster/examples/external-http-score/VERIFY.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeMaster/examples/external-http-score/VERIFY.md)
 
 ```powershell
 # From repo root (docs path relative to this file's package):
