@@ -1232,10 +1232,12 @@ func preHandleScheduler(config *Config) error {
 	if err := validateSchedulerScorerPluginWeights(&config.Scheduler.SchedulerConf); err != nil {
 		return err
 	}
-	// Listed factor/affinity scorers without plugin_conf used to panic in
-	// NewSelector on master. Fail at config load instead of warn-and-skip so the
-	// empty-profile path stays fail-closed. binpack_score may omit plugin_conf
-	// and use runtime defaults.
+	// Listed factor/affinity scorers without plugin_conf used to have two
+	// master outcomes: panic in NewSelector when resource_weights was set, or a
+	// silent unscored phase when resource_weights was nil (early empty return
+	// before constructors). Fail both at config load so the empty-profile path
+	// stays fail-closed. binpack_score may omit plugin_conf and use runtime
+	// defaults.
 	if err := validateListedScorerPluginConfPresent(&config.Scheduler.SchedulerConf); err != nil {
 		return err
 	}

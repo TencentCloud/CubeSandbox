@@ -209,16 +209,20 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 		if f.Disable() {
 			continue
 		}
-		// Sample Weight() once before Select so a live-config scorer
-		// (external_http_score) cannot blend with a different generation after a
-		// mid-attempt conf.yaml reload. Legacy factor/affinity scorers and
-		// binpack_score already return Disable()==true at weight==0, so this
-		// loop never reaches them. external_http_score keeps Disable()==false at
-		// weight==0 (observability / staged inert no-op) and skips the HTTP
-		// round-trip inside Select. Negative plugin weights fail config load for
-		// every registered scorer; this path still guards NaN/Inf so they cannot
-		// poison totalPluginWeight or node scores, while letting live-config
-		// scorers emit their own invalid_weight observability via Select.
+		// Sample Weight() once before Select so the NaN/Inf guard and the
+		// n.Score *= w loop use the same value. This does not freeze a config
+		// generation across Select: live-config scorers (external_http_score)
+		// may re-read plugin_conf inside Select, so a mid-attempt reload can
+		// still pair a pre-reload weight with post-reload scores. Full
+		// generation consistency would need the sampled config threaded into
+		// Select. Legacy factor/affinity scorers and binpack_score already
+		// return Disable()==true at weight==0, so this loop never reaches them.
+		// external_http_score keeps Disable()==false at weight==0 (observability
+		// / staged inert no-op) and skips the HTTP round-trip inside Select.
+		// Negative plugin weights fail config load for every registered scorer;
+		// this path still guards NaN/Inf so they cannot poison
+		// totalPluginWeight or node scores, while letting live-config scorers
+		// emit their own invalid_weight observability via Select.
 		w := f.Weight()
 		tmpResult, err := f.Select(selCtx)
 		if err != nil {
