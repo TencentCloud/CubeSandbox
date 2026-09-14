@@ -1,0 +1,47 @@
+{
+  "vm_e2e_latency": "PASS",
+  "burst_scenario": "PASS",
+  "locality_scenario": "NO_IMPROVEMENT",
+  "binpack_scenario": "NO_IMPROVEMENT",
+  "external_scorer_degradation": "PASS",
+  "restore": "PASS",
+  "repository_modified": false,
+  "github_writes": false,
+  "formal_override": false,
+  "formal_binpack_remains": "VALID_NO_IMPROVEMENT",
+  "updated_at": "2026-09-14T09:50:00+08:00",
+  "reviewer_entry": "REVIEWER_SUPPLEMENT.md",
+  "experiments": [
+    {
+      "id": "vm_e2e_latency",
+      "title": "真实多VM：创建→Ready→首命令端到端延迟",
+      "status": "PASS",
+      "summary": "summaries/vm_e2e_latency.json"
+    },
+    {
+      "id": "burst_scenario",
+      "title": "突发短创建：节点分散与启动延迟",
+      "status": "PASS",
+      "summary": "summaries/burst_scenario.json"
+    },
+    {
+      "id": "locality_scenario",
+      "title": "镜像局部性：有缓存/无缓存命中对照",
+      "status": "NO_IMPROVEMENT",
+      "summary": "summaries/locality_scenario.json"
+    },
+    {
+      "id": "binpack_scenario",
+      "title": "CPU/内存错配装箱：碎片·空节点·探针接纳·延迟",
+      "status": "NO_IMPROVEMENT",
+      "summary": "summaries/binpack_scenario.json",
+      "note": "supplement_only; formal remains VALID_NO_IMPROVEMENT"
+    },
+    {
+      "id": "external_scorer_degradation",
+      "title": "外部HTTP scorer：正常/超时/非2xx/非法分退化",
+      "status": "PASS",
+      "summary": "summaries/external_scorer_degradation.json"
+    }
+  ]
+}

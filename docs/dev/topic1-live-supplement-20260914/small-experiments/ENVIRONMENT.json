@@ -1,0 +1,26 @@
+{
+  "run_id": "topic1-small-experiments-20260913-210144",
+  "time": "2026-09-13T21:13:34+0800",
+  "binary_sha": "edf40cb9cbbbd1b32b029dcf599057803c58a41b91ae28d6074e0751a8e42fc9",
+  "conf_sha": "a0ac521bda69c1f1cfe0f849403caa0365514d90ab8919d145a35c201b9159d8",
+  "nodes": [
+    "192.168.122.142",
+    "192.168.122.44",
+    "192.168.122.33",
+    "192.168.122.55"
+  ],
+  "healthy_four": true,
+  "sandbox_count": 0,
+  "templates": {
+    "cpu_heavy": "tpl-39c86ef911744ce5aba9992e",
+    "mem_heavy": "tpl-facff89ede374fcc992881d5",
+    "small": "tpl-09456dd7eb2d4022b6a7d3a3",
+    "large": "tpl-75d3b49094674a12b5a7f449",
+    "burst_unit": "tpl-8929724a72324d9aa691a429",
+    "shape_unit": "tpl-6e4c2398ae0d4e4c84425b6c",
+    "locality_contrast": "tpl-7db81c1ba83e4e34a4a82d05"
+  },
+  "staged_sha": "d5c6e2a82147d0abd9bfdcb9302287fd2638c3c0b43b28a3e8a6f6e3452202a6",
+  "stock_sha": "edf40cb9cbbbd1b32b029dcf599057803c58a41b91ae28d6074e0751a8e42fc9",
+  "note": "supplement_only_does_not_override_VALID_NO_IMPROVEMENT"
+}
