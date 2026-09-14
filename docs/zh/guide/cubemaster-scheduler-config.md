@@ -135,6 +135,12 @@ Profile / 选择器列表需要重启 CubeMaster：配置热加载会重新跑 `
 并保留旧 Config，错误的 Profile 覆盖不会生效。`InitScheduler` 仍不会在热加载时
 重建 Filter/Score 切片，因此选择器集合变更仍需进程重启。
 
+**一键 Terraform（`deploy/one-click/terraform/tencentcloud/tke-addons.tf`）：**
+`real_time_weighted_average` 现已对 `quota_cpu_usage` 加权（此前是会被
+`getFactorWeight` 忽略的错误键 `cpu_usage`）。现有集群在 `terraform apply`
+重写 `cubemaster-conf` secret 之前不受影响；apply 之后一键部署会把该因子计入
+打分，放置结果可能变化。
+
 `binpack_score` 是偏好更满节点的薄 Score 插件，通过在 `enable_scorers`
 中列出（直接或经 Profile）启用。插件参数仍放在
 `scheduler.score.plugin_conf.binpack_score`。不要把 `binpack_score` 与

@@ -14,7 +14,7 @@
 | **突发短创建：节点分散与启动延迟** | `burst_scenario` | PASS | 8 并发 `burst_unit`；比较热点节点最大并发与 usable 延迟 |
 | **镜像局部性：部分节点有缓存 / 部分无缓存的命中对照** | `locality_scenario` | NO_IMPROVEMENT | 已证明 cache contrast；locality profile 未抬高命中率 |
 | **CPU/内存错配装箱：多维碎片、空节点、探针接纳、e2e 延迟** | `binpack_scenario` | NO_IMPROVEMENT | 同序 cpu_heavy/mem_heavy 填满后探针；binpack 空节点↑，接纳率打平；**不覆盖**正式 VALID_NO_IMPROVEMENT |
-| **外部 HTTP scorer：正常 / 超时 / 非2xx / 非法分 的退化** | `external_scorer_degradation` | PASS | ok=3/3；故障模式 fail-closed；Filter 后候选未复活 |
+| **外部 HTTP scorer：正常 / 超时 / 非2xx / 非法分 的退化** | `external_scorer_degradation` | PASS | ok=3/3；该 lab binary 故障臂 fail-closed；Filter 后候选未复活；in-tree 路径为 fail-open |
 
 恢复：`RESTORE.json` = **PASS**（stock `edf40cb9…`，conf `a0ac521b…`，sandbox=0，18080 stub 已停）。
 
@@ -38,7 +38,7 @@ Additional live multi-VM observations (in-tree conclusion pack):
   4. CPU/mem mismatch packing: fragmentation / empty nodes / probe admission — NO_IMPROVEMENT
      (does NOT override formal VALID_NO_IMPROVEMENT)
   5. External HTTP scorer degrade: ok / timeout / non-2xx / bad score — PASS
-     (fail-closed on errors; no Filter resurrection)
+     (degrade arms fail-closed on the lab binary; in-tree path is fail-open on scorer errors; no Filter resurrection)
 
 Entry: REVIEWER_SUPPLEMENT.md  Status: STATUS.json  Verify: VERIFY.md
 Runnable operator path: CubeMaster/examples/external-http-score/VERIFY.md

@@ -52,9 +52,9 @@ Business read: burst dispersion and ready latency.
       "success": 8,
       "n": 8,
       "node_distribution": {
-        "192.168.122.142": 4,
-        "192.168.122.55": 2,
-        "192.168.122.44": 2
+        "node-a": 4,
+        "node-d": 2,
+        "node-b": 2
       },
       "hot_node_max": 4,
       "usable_p50_ms": 3044.0,
@@ -65,10 +65,10 @@ Business read: burst dispersion and ready latency.
       "success": 8,
       "n": 8,
       "node_distribution": {
-        "192.168.122.55": 2,
-        "192.168.122.44": 2,
-        "192.168.122.142": 2,
-        "192.168.122.33": 2
+        "node-d": 2,
+        "node-b": 2,
+        "node-a": 2,
+        "node-c": 2
       },
       "hot_node_max": 2,
       "usable_p50_ms": 2216.5,
@@ -81,15 +81,15 @@ Business read: burst dispersion and ready latency.
 }
 
 ## 镜像局部性：有缓存/无缓存命中对照 (`locality_scenario`) — NO_IMPROVEMENT
-Cache contrast: template missing on 192.168.122.44, present on other three nodes.
+Cache contrast: template missing on node-b, present on other three nodes.
 {
   "experiment": "locality_scenario",
   "status": "NO_IMPROVEMENT",
   "cache_presence": {
-    "192.168.122.33": true,
-    "192.168.122.44": false,
-    "192.168.122.55": true,
-    "192.168.122.142": true
+    "node-c": true,
+    "node-b": false,
+    "node-d": true,
+    "node-a": true
   },
   "arms": [
     {
@@ -98,9 +98,9 @@ Cache contrast: template missing on 192.168.122.44, present on other three nodes
       "success": 6,
       "cache_hit_rate": 1.0,
       "node_distribution": {
-        "192.168.122.33": 2,
-        "192.168.122.142": 3,
-        "192.168.122.55": 1
+        "node-c": 2,
+        "node-a": 3,
+        "node-d": 1
       },
       "usable_p50_ms": 2095.5,
       "usable_p95_ms": 4572.75
@@ -111,9 +111,9 @@ Cache contrast: template missing on 192.168.122.44, present on other three nodes
       "success": 6,
       "cache_hit_rate": 1.0,
       "node_distribution": {
-        "192.168.122.33": 2,
-        "192.168.122.142": 3,
-        "192.168.122.55": 1
+        "node-c": 2,
+        "node-a": 3,
+        "node-d": 1
       },
       "usable_p50_ms": 1353.5,
       "usable_p95_ms": 1538.75
@@ -134,10 +134,10 @@ Same fill list (cpu_heavy/mem_heavy×6). Binpack packed all 12 fills onto `.55` 
       "fill_success": 12,
       "fill_n": 12,
       "fill_nodes": {
-        "192.168.122.33": 1,
-        "192.168.122.142": 7,
-        "192.168.122.44": 2,
-        "192.168.122.55": 2
+        "node-c": 1,
+        "node-a": 7,
+        "node-b": 2,
+        "node-d": 2
       },
       "post_fill_empty_nodes": 1,
       "post_fill_total_mvm": 12.0,
@@ -157,7 +157,7 @@ Same fill list (cpu_heavy/mem_heavy×6). Binpack packed all 12 fills onto `.55` 
       "fill_success": 12,
       "fill_n": 12,
       "fill_nodes": {
-        "192.168.122.55": 12
+        "node-d": 12
       },
       "post_fill_empty_nodes": 3,
       "post_fill_total_mvm": 11.0,
@@ -181,7 +181,7 @@ Same fill list (cpu_heavy/mem_heavy×6). Binpack packed all 12 fills onto `.55` 
 }
 
 ## 外部 HTTP scorer：正常/超时/非2xx/非法分退化 (`external_scorer_degradation`) — PASS
-ok=3/3 success; timeout/non2xx/bad_score fail-closed (0/3). No filter resurrection. Prometheus `outcome_delta` tables omitted (lab names were not in-tree `cube_scheduler_external_http_score_*`).
+ok=3/3 success; timeout/non2xx/bad_score fail-closed on this lab binary (0/3). No filter resurrection. In-tree path is fail-open. Prometheus `outcome_delta` tables omitted (lab names were not in-tree `cube_scheduler_external_http_score_*`).
 {
   "experiment": "external_scorer_degradation",
   "status": "PASS",
@@ -194,7 +194,7 @@ ok=3/3 success; timeout/non2xx/bad_score fail-closed (0/3). No filter resurrecti
       "fail_closed_observed": false,
       "any_resurrected_filtered": false,
       "node_distribution": {
-        "192.168.122.142": 3
+        "node-a": 3
       },
       "usable_latencies_ms": [
         863,
@@ -250,5 +250,5 @@ ok=3/3 success; timeout/non2xx/bad_score fail-closed (0/3). No filter resurrecti
 
 ## Limits
 - Small samples; no significance claims.
-- Stock scorer path in this package is fail-closed on errors (not fail-open).
+- Degradation arms were fail-closed on the **lab binary** used for this run; the in-tree path is fail-open on scorer errors (see `docs/guide/cubemaster-scheduler-config.md`). No claim is made about lab binaries generally.
 - Formal matrix not re-run.

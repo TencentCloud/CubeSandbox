@@ -372,6 +372,9 @@ resource "kubernetes_secret" "cubemaster_conf" {
           enable_filters = ["cpu", "mem", "template_locality", "realtime_create_num"]
         }
         score = {
+          # quota_cpu_usage (not cpu_usage): valid WeightFactorQuotaCpu token.
+          # Renaming a previously ignored typo changes scoring after terraform apply
+          # rewrites cubemaster-conf; existing clusters are unaffected until then.
           enable_scorers = ["real_time_weighted_average"]
           resource_weights = {
             mvm_num          = 2

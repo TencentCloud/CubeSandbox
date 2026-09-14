@@ -146,6 +146,13 @@ in-memory Config. On failure it logs FATAL (CubeLog.Fatalf does **not**
 applied. `InitScheduler` still does not rebuild Filter/Score slices on reload,
 so selector-set changes need a process restart.
 
+**One-click Terraform (`deploy/one-click/terraform/tencentcloud/tke-addons.tf`):**
+`real_time_weighted_average` now weights `quota_cpu_usage` (previously an
+ignored `cpu_usage` key that `getFactorWeight` dropped). Existing clusters are
+unaffected until `terraform apply` rewrites the `cubemaster-conf` secret;
+after apply, one-click deploys include that factor in scoring and placement
+can change.
+
 `binpack_score` is a thin Score-phase plugin that prefers fuller nodes. It is
 enabled by listing `binpack_score` in `enable_scorers` (directly or via a
 Profile). Plugin params stay under `scheduler.score.plugin_conf.binpack_score`.
