@@ -15,12 +15,15 @@
   "gate2": "PASS",
   "accept": "ACCEPT_PASS",
   "healthy_api_p95_delta_ms": -141.45,
-  "updated_at": "2026-09-14T19:10:00+0800",
+  "evidence_binary_sha": "d5c6e2a82147d0abd9bfdcb9302287fd2638c3c0b43b28a3e8a6f6e3452202a6",
+  "evidence_binary_note": "staged candidate used for hot-path/signal arms; not re-run against this PR head; see PLAN_FROZEN.json",
+  "arms_not_rerun_on_pr_head": true,
+  "updated_at": "2026-09-14T21:00:00+0800",
   "local_commit": "91429948",
   "backup_ref": "backup/topic1-productization-pre-20260914-104856",
   "productization_branch": "topic1/productization-20260914-104856",
   "pushed": true,
   "pr": "https://github.com/TencentCloud/CubeSandbox/pull/1735",
   "e5_note": "supplement_only; formal remains VALID_NO_IMPROVEMENT",
-  "note": "github_writes/pushed reflect PR publication; original authoring was local-only"
+  "note": "github_writes/pushed reflect PR publication; STATUS PASS is lab-binary evidence, not validation of the scorer commit on this PR head"
 }

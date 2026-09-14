@@ -148,10 +148,13 @@ so selector-set changes need a process restart.
 
 **One-click Terraform (`deploy/one-click/terraform/tencentcloud/tke-addons.tf`):**
 `real_time_weighted_average` now weights `quota_cpu_usage` (previously an
-ignored `cpu_usage` key that `getFactorWeight` dropped). Existing clusters are
-unaffected until `terraform apply` rewrites the `cubemaster-conf` secret;
-after apply, one-click deploys include that factor in scoring and placement
-can change.
+ignored `cpu_usage` key that `getFactorWeight` dropped). Timing: this is **not**
+tied to a CubeMaster binary rollout. The next `terraform apply` that rewrites
+the `cubemaster-conf` secret (often triggered by an unrelated infra change)
+is enough — `resource_weights` is read **live** on every score pass, so after
+hot-reload picks up the secret, placement can change **without** a CubeMaster
+restart. CubeMaster-only upgrades that leave the secret untouched keep the
+old inert `cpu_usage` behaviour.
 
 `binpack_score` is a thin Score-phase plugin that prefers fuller nodes. It is
 enabled by listing `binpack_score` in `enable_scorers` (directly or via a

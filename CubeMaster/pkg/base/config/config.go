@@ -1217,7 +1217,8 @@ func preHandleScheduler(config *Config) error {
 		config.Scheduler = &WrapperSchedulerConf{}
 	}
 
-	if err := applySchedulerProfile(&config.Scheduler.SchedulerConf); err != nil {
+	profileBuiltin, err := applySchedulerProfile(&config.Scheduler.SchedulerConf)
+	if err != nil {
 		return err
 	}
 	// binpack / external_http negative (*float64) weights are always rejected
@@ -1249,7 +1250,7 @@ func preHandleScheduler(config *Config) error {
 		if err := validateEffectiveSchedulerSelectors(&config.Scheduler.SchedulerConf); err != nil {
 			return err
 		}
-		if err := validateSchedulerScorePluginConfig(&config.Scheduler.SchedulerConf); err != nil {
+		if err := validateSchedulerScorePluginConfig(&config.Scheduler.SchedulerConf, profileBuiltin); err != nil {
 			return err
 		}
 	}
@@ -1396,16 +1397,18 @@ const (
 // Empty profile leaves existing scheduler config unchanged (default production
 // behavior). Unknown profile names and unknown selector names fail closed.
 // Built-in presets apply when the name is absent from Profiles.
-func applySchedulerProfile(s *SchedulerConf) error {
+// The returned builtin flag matches resolveSchedulerProfile so callers (e.g.
+// validateSchedulerScorePluginConfig) need not re-resolve and double-log Warns.
+func applySchedulerProfile(s *SchedulerConf) (builtin bool, err error) {
 	if s == nil || s.Profile == "" {
-		return nil
+		return false, nil
 	}
 	profile, builtin, err := resolveSchedulerProfile(s)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := validateSchedulerProfileSelectors(s.Profile, &profile); err != nil {
-		return err
+		return false, err
 	}
 
 	if profile.Filter != nil && profile.Filter.EnableFilters != nil {
@@ -1426,7 +1429,7 @@ func applySchedulerProfile(s *SchedulerConf) error {
 			CubeLog.Warnf("scheduler %s profile %q replaced enable_filters: previous=%v new=%v dropped=%v",
 				kind, s.Profile, previous, s.Filter.EnableFilters, dropped)
 			if !profile.AllowDroppedFilters {
-				return fmt.Errorf("scheduler profile %q drops filters %v from base enable_filters; keep them in the Profile list or set allow_dropped_filters: true",
+				return false, fmt.Errorf("scheduler profile %q drops filters %v from base enable_filters; keep them in the Profile list or set allow_dropped_filters: true",
 					s.Profile, dropped)
 			}
 		}
@@ -1466,7 +1469,7 @@ func applySchedulerProfile(s *SchedulerConf) error {
 	if builtin {
 		applyBuiltinSchedulerProfileDefaults(s)
 	}
-	return nil
+	return builtin, nil
 }
 
 func applyBuiltinSchedulerProfileDefaults(s *SchedulerConf) {
@@ -1651,16 +1654,11 @@ func validateEffectiveSchedulerSelectors(s *SchedulerConf) error {
 // validateSchedulerScorePluginConfig checks the final effective scorer list
 // after Profile overlays and built-in defaults have been applied.
 // Callers must only invoke this when scheduler.profile is non-empty.
-func validateSchedulerScorePluginConfig(s *SchedulerConf) error {
+// builtin must be the flag returned by applySchedulerProfile for this load
+// (do not re-resolve — that double-emits resolveSchedulerProfile Warn lines).
+func validateSchedulerScorePluginConfig(s *SchedulerConf, builtin bool) error {
 	if s == nil || s.Score == nil {
 		return nil
-	}
-	// Re-resolve so "builtin" matches applySchedulerProfile: a user map key
-	// with the same name as a built-in is NOT treated as a built-in preset
-	// (intentional disable / weight:0 remains allowed).
-	_, builtin, err := resolveSchedulerProfile(s)
-	if err != nil {
-		return err
 	}
 	for _, name := range s.Score.EnableScorers {
 		// binpack_score may omit plugin_conf and use runtime defaults on both

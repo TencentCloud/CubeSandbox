@@ -167,11 +167,10 @@ func newExternalHTTPScoreFromConfig(global *config.Config) *externalHTTPScore {
 		cat := sanitizeExternalHTTPScoreFailure(err)
 		log.G(context.Background()).Warnf(
 			"external_http_score: invalid plugin_conf at construction (fail-open): %s", cat)
-		// Leave cfg nil so Weight/Disable/Select re-read live GetConfig(); Select
-		// re-validates and observes the same sanitized category.
-		return &externalHTTPScore{}
 	}
-	// Leave cfg nil so Weight/Disable/Select re-read live GetConfig().
+	// Always leave cfg nil so Weight/Disable/Select re-read live GetConfig().
+	// Do not stash the construction-time snapshot here — that would freeze
+	// hot-reload. Invalid configs are re-validated on each Select.
 	return &externalHTTPScore{}
 }
 
