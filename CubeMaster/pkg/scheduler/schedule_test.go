@@ -8,8 +8,13 @@ import (
 	"context"
 	"errors"
 	"math"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 	sfilter "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/filter"
@@ -115,6 +120,33 @@ func TestRunScoreFilterSkipsFailedScorers(t *testing.T) {
 	}
 	if got[1].ID() != "node-a" || got[1].Score != 10 {
 		t.Fatalf("lowest score = %+v, want node-a=10", got[1])
+	}
+}
+
+func TestRunScoreFilterAbortsOnFailClosedError(t *testing.T) {
+	origPostScore := scheduler.postScore
+	defer func() {
+		scheduler.postScore = origPostScore
+	}()
+	scheduler.postScore = nil
+
+	nodeA := &node.Node{InsID: "node-a", MvmNum: 1}
+	selCtx := selctx.New("random")
+	selCtx.Ctx = context.Background()
+	selCtx.SetNodes(node.NodeList{nodeA})
+
+	closed := &sscore.FailClosedError{Err: errors.New("sidecar down")}
+	err := runScoreFilter(selCtx, []sscore.Selector{
+		testScoreSelector{err: closed},
+		testScoreSelector{
+			weight: 1,
+			scores: node.NodeScoreList{
+				{InsID: "node-a", Score: 50, MvmNum: nodeA.MvmNum, OrigNode: nodeA},
+			},
+		},
+	})
+	if !sscore.IsFailClosed(err) {
+		t.Fatalf("runScoreFilter() error = %v, want FailClosedError", err)
 	}
 }
 
@@ -358,3 +390,114 @@ func (s *countingSelectSelector) Select(*selctx.SelectorCtx) (node.NodeScoreList
 func (s *countingSelectSelector) ID() string      { return "counting_select" }
 func (s *countingSelectSelector) Weight() float64 { return s.weight }
 func (s *countingSelectSelector) Disable() bool   { return false }
+
+type passThroughPreFilter struct{}
+
+func (passThroughPreFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
+	return selCtx.Nodes(), nil
+}
+
+func (passThroughPreFilter) ID() string {
+	return "passthrough_prefilter"
+}
+
+func TestSchedulerSelectFailOpenContinues(t *testing.T) {
+	restoreSchedulerPlugins(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	initSchedulerExternalHTTPScoreFailurePolicy(t, server.URL, "fail_open")
+
+	scheduler.preSelector = passThroughPreFilter{}
+	scheduler.filter = nil
+	scheduler.score = []sscore.Selector{sscore.NewExternalHTTPScore()}
+	scheduler.postScore = nil
+
+	selCtx := schedulerSelectTestCtx()
+	got, err := Select(selCtx)
+	if err != nil {
+		t.Fatalf("fail_open scheduler.Select() error = %v, want nil", err)
+	}
+	if got == nil {
+		t.Fatal("fail_open scheduler.Select() node = nil, want a candidate")
+	}
+}
+
+func TestSchedulerSelectFailClosedReturnsError(t *testing.T) {
+	restoreSchedulerPlugins(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	initSchedulerExternalHTTPScoreFailurePolicy(t, server.URL, "fail_closed")
+
+	scheduler.preSelector = passThroughPreFilter{}
+	scheduler.filter = nil
+	scheduler.score = []sscore.Selector{sscore.NewExternalHTTPScore()}
+	scheduler.postScore = nil
+
+	selCtx := schedulerSelectTestCtx()
+	_, err := Select(selCtx)
+	if !sscore.IsFailClosed(err) {
+		t.Fatalf("fail_closed scheduler.Select() error = %v, want FailClosedError", err)
+	}
+}
+
+func restoreSchedulerPlugins(t *testing.T) {
+	t.Helper()
+	origPre := scheduler.preSelector
+	origFilter := scheduler.filter
+	origScore := scheduler.score
+	origPost := scheduler.postScore
+	t.Cleanup(func() {
+		scheduler.preSelector = origPre
+		scheduler.filter = origFilter
+		scheduler.score = origScore
+		scheduler.postScore = origPost
+	})
+}
+
+func schedulerSelectTestCtx() *selctx.SelectorCtx {
+	ctx := selctx.New("random")
+	ctx.Ctx = context.Background()
+	ctx.InstanceType = "cubebox"
+	ctx.SetNodes(node.NodeList{
+		{InsID: "node-a", IP: "10.0.0.1", InstanceType: "cubebox", MvmNum: 1},
+		{InsID: "node-b", IP: "10.0.0.2", InstanceType: "cubebox", MvmNum: 2},
+	})
+	return ctx
+}
+
+func initSchedulerExternalHTTPScoreFailurePolicy(t *testing.T, endpoint, policy string) {
+	t.Helper()
+
+	configPath := filepath.Join(t.TempDir(), "cubemaster.yaml")
+	content := `common: {}
+log: {}
+scheduler:
+  priority_select_num: 2
+  score:
+    enable_scorers:
+      - external_http_score
+    resource_weights:
+      mvm_num: 1
+    plugin_conf:
+      external_http_score:
+        weight: 1
+        endpoint: "` + endpoint + `"
+        timeout: 1s
+        failure_policy: ` + policy + `
+`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("CUBE_MASTER_CONFIG_PATH", configPath)
+	if _, err := config.Init(); err != nil {
+		t.Fatalf("config.Init(): %v", err)
+	}
+}

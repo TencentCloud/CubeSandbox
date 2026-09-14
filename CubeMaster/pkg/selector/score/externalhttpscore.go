@@ -31,6 +31,11 @@ import (
 
 const externalHTTPScoreName = "external_http_score"
 
+const (
+	externalHTTPScoreFailurePolicyOpen = "fail_open"
+	externalHTTPScoreFailurePolicyShut = "fail_closed"
+)
+
 // defaultExternalHTTPScoreTimeout is used when plugin_conf.timeout is zero or omitted.
 const defaultExternalHTTPScoreTimeout = 200 * time.Millisecond
 
@@ -57,9 +62,9 @@ const externalHTTPScoreErrorBodyDrainBytes = 4 << 10
 // process. Concurrent scheduling attempts may reuse idle connections to the
 // same sidecar host. MaxIdleConnsPerHost is raised above the Go default of 2;
 // MaxConnsPerHost caps in-flight dials so a hung sidecar cannot open an
-// unbounded connection storm. There is still no failure-memory circuit breaker
-// in this extraction — each attempt may still pay up to timeout before
-// fail-open.
+// unbounded connection storm. A failure-memory circuit breaker (defaults:
+// threshold 5, open 5s, one half-open probe) short-circuits further HTTP after
+// consecutive failures; set circuit_breaker.disable: true to turn it off.
 const (
 	externalHTTPScoreMaxIdleConns        = 64
 	externalHTTPScoreMaxIdleConnsPerHost = 8
@@ -340,6 +345,14 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 	}
 
 	reqBody, knownNodes := buildExternalHTTPScoreRequest(selCtx, cfg.Mode, inList)
+	breaker := getExternalHTTPScoreBreaker(strings.TrimSpace(cfg.Endpoint), cfg.CircuitBreaker)
+	if err := breaker.allow(); err != nil {
+		cat := sanitizeExternalHTTPScoreFailure(err)
+		logExternalHTTPScoreFailureCategory(ctx, cat)
+		observeExternalHTTPScoreFailure(cat)
+		return applyExternalHTTPScoreFailure(cfg.FailurePolicy, err)
+	}
+
 	httpStart := time.Now()
 	respScores, err := requestExternalHTTPScores(ctx, strings.TrimSpace(cfg.Endpoint), cfg.Timeout, reqBody)
 	httpElapsed := time.Since(httpStart)
@@ -347,14 +360,16 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		cat := sanitizeExternalHTTPScoreFailure(err)
 		logExternalHTTPScoreFailureCategory(ctx, cat)
 		observeExternalHTTPScoreRequestFailure(httpElapsed, cat)
-		return nil, err
+		breaker.recordFailure()
+		return applyExternalHTTPScoreFailure(cfg.FailurePolicy, err)
 	}
 	filtered, err := filterExternalHTTPScoreResponse(ctx, respScores, knownNodes)
 	if err != nil {
 		cat := sanitizeExternalHTTPScoreFailure(err)
 		logExternalHTTPScoreFailureCategory(ctx, cat)
 		observeExternalHTTPScoreRequestFailure(httpElapsed, cat)
-		return nil, err
+		breaker.recordFailure()
+		return applyExternalHTTPScoreFailure(cfg.FailurePolicy, err)
 	}
 
 	nodes = make(node.NodeScoreList, 0, inList.Len())
@@ -367,7 +382,8 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 			cat := sanitizeExternalHTTPScoreFailure(err)
 			logExternalHTTPScoreFailureCategory(ctx, cat)
 			observeExternalHTTPScoreRequestFailure(httpElapsed, cat)
-			return nil, err
+			breaker.recordFailure()
+			return applyExternalHTTPScoreFailure(cfg.FailurePolicy, err)
 		}
 		nodes.Append(&node.NodeScore{
 			InsID:    n.ID(),
@@ -376,8 +392,32 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 			OrigNode: n,
 		})
 	}
+	breaker.recordSuccess()
 	observeExternalHTTPScoreSuccess(httpElapsed)
 	return nodes, nil
+}
+
+// applyExternalHTTPScoreFailure maps a sidecar/scoring failure through
+// failure_policy. Default (omitted / empty / unknown) is fail_open: return the
+// plain error so runScoreFilter keeps its historical skip behavior. fail_closed
+// wraps in FailClosedError so runScoreFilter aborts scheduling.
+func applyExternalHTTPScoreFailure(policy string, err error) (node.NodeScoreList, error) {
+	if err == nil {
+		return nil, nil
+	}
+	if normalizedExternalHTTPScoreFailurePolicy(policy) == externalHTTPScoreFailurePolicyShut {
+		return nil, &FailClosedError{Err: err}
+	}
+	return nil, err
+}
+
+func normalizedExternalHTTPScoreFailurePolicy(policy string) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case externalHTTPScoreFailurePolicyShut:
+		return externalHTTPScoreFailurePolicyShut
+	default:
+		return externalHTTPScoreFailurePolicyOpen
+	}
 }
 
 func logExternalHTTPScoreFailure(ctx context.Context, err error) {
@@ -404,6 +444,9 @@ func sanitizeExternalHTTPScoreFailure(err error) string {
 	if err == nil {
 		return "unknown_error"
 	}
+	if errors.Is(err, errExternalHTTPScoreCircuitOpen) {
+		return "external_http_score circuit_open"
+	}
 	if cat, ok := classifyExternalHTTPScoreURLError(err, ""); ok {
 		return cat
 	}
@@ -429,6 +472,8 @@ func classifyExternalHTTPScoreMessage(msg string) string {
 		return "external_http_score plugin_conf_absent"
 	case strings.HasPrefix(msg, "external_http_score missing"):
 		return "external_http_score missing_candidate"
+	case strings.Contains(msg, "circuit is open"):
+		return "external_http_score circuit_open"
 	case strings.HasPrefix(msg, "external_http_score invalid score"):
 		return "external_http_score invalid_candidate_score"
 	case strings.HasPrefix(msg, "external_http_score unexpected status"):

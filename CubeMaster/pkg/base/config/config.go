@@ -557,6 +557,25 @@ type ExternalHTTPScore struct {
 	Timeout time.Duration `yaml:"timeout"`
 	Mode    string        `yaml:"mode"`
 	Disable bool          `yaml:"disable"`
+	// FailurePolicy controls sidecar failure handling. Omitted / empty /
+	// unknown values default to fail_open so create-path scheduling keeps the
+	// historical runScoreFilter skip behavior. Set fail_closed to abort Score
+	// via a typed FailClosedError.
+	FailurePolicy string `yaml:"failure_policy"`
+	// CircuitBreaker trips after consecutive sidecar failures so later Score
+	// calls fail fast instead of waiting for the full HTTP timeout. When the
+	// block is omitted, defaults apply (threshold 5, open 5s, one half-open
+	// probe). Set disable: true to turn the breaker off.
+	CircuitBreaker *ExternalHTTPScoreCircuitBreaker `yaml:"circuit_breaker"`
+}
+
+// ExternalHTTPScoreCircuitBreaker trips after consecutive sidecar failures so
+// later Score calls fail fast instead of waiting for the full HTTP timeout.
+type ExternalHTTPScoreCircuitBreaker struct {
+	Disable           bool          `yaml:"disable"`
+	FailureThreshold  int           `yaml:"failure_threshold"`
+	OpenDuration      time.Duration `yaml:"open_duration"`
+	HalfOpenMaxProbes int           `yaml:"half_open_max_probes"`
 }
 
 // DefaultExternalHTTPScoreWeight is applied when plugin_conf.external_http_score
@@ -581,20 +600,24 @@ func (c ExternalHTTPScore) String() string {
 }
 
 type externalHTTPScoreWire struct {
-	Weight   *float64      `json:"Weight"`
-	Endpoint string        `json:"Endpoint"`
-	Timeout  time.Duration `json:"Timeout"`
-	Mode     string        `json:"Mode"`
-	Disable  bool          `json:"Disable"`
+	Weight         *float64                         `json:"Weight"`
+	Endpoint       string                           `json:"Endpoint"`
+	Timeout        time.Duration                    `json:"Timeout"`
+	Mode           string                           `json:"Mode"`
+	Disable        bool                             `json:"Disable"`
+	FailurePolicy  string                           `json:"FailurePolicy"`
+	CircuitBreaker *ExternalHTTPScoreCircuitBreaker `json:"CircuitBreaker"`
 }
 
 func (c ExternalHTTPScore) redactedWire() externalHTTPScoreWire {
 	return externalHTTPScoreWire{
-		Weight:   c.Weight,
-		Endpoint: redactExternalHTTPScoreEndpoint(c.Endpoint),
-		Timeout:  c.Timeout,
-		Mode:     c.Mode,
-		Disable:  c.Disable,
+		Weight:         c.Weight,
+		Endpoint:       redactExternalHTTPScoreEndpoint(c.Endpoint),
+		Timeout:        c.Timeout,
+		Mode:           c.Mode,
+		Disable:        c.Disable,
+		FailurePolicy:  c.FailurePolicy,
+		CircuitBreaker: c.CircuitBreaker,
 	}
 }
 

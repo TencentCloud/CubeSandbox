@@ -296,15 +296,23 @@ scheduler:
         timeout: 200ms   # 可选；为 0/省略时默认 200ms
         mode: ""         # 可选，原样转发给 sidecar
         disable: false
+        failure_policy: fail_open   # 省略时默认；设为 fail_closed 可中止 Score
+        circuit_breaker:            # 可选；省略时仍启用默认熔断参数
+          disable: false
+          failure_threshold: 5
+          open_duration: 5s
+          half_open_max_probes: 1
 ```
 
 | 字段 | 含义 |
 |------|------|
 | `weight` | 在 `runScoreFilter` 加权平均（`Σ(score × weight) / Σ(weight)`）中的相对权重。返回分数必须与内置 scorer 使用相同的 **`[0, 100]`** 量纲；若 sidecar 返回归一化的 `0.0–1.0`，在相同 weight 下贡献大约只有内置 scorer 的 1%。**省略** `weight` 时，在配置加载 / 热更新（`preHandle`）阶段默认填为 **`1.0`**。**显式** `weight: 0` 与 `disable: true` 一样是静默空操作：`Select` 立即返回，不要求合法 endpoint，也不会发出 `empty_endpoint` / HTTP 失败信号。若要在保留真实 endpoint 的同时关闭插件，请用 `disable: true`。负 / 非有限 weight 会在构造时检出（一条 Warn），之后每次 `Select` fail-open——CubeMaster 仍会正常启动。每次 `Weight()` / `Select` 都会从 `plugin_conf` 热读（热更新无需重启）；`runScoreFilter` 在 `Select` **之前**只采样一次 `Weight()`，避免热更新落在一次尝试中间混入两代配置参与加权。 |
 | `endpoint` | Sidecar URL。在 **正 weight** 下为空（含仅空白）时 fail-open，发出限流 Warn（日志类别 `empty_endpoint`），并递增 `cube_scheduler_external_http_score_outcomes_total{reason="other"}`——不会静默跳过。`weight: 0` 或 `disable: true` 时不会走到该检查。非空时必须是带 host 的绝对 `http://` 或 `https://` URL；缺 scheme、`file://`、`unix://` 等会在构造时检出（一条 Warn），之后每次 `Select` fail-open（CubeMaster 仍会正常启动）。请求前会 trim 首尾空白。密钥更宜放在 sidecar 侧；若 URL 含 userinfo 或 query token，scorer 不会记入日志，且 `config.Init` 的 cfg dump 只会保留 scheme/host/path。 |
-| `timeout` | **同步 create 路径**上的单次 HTTP 超时。为 0/省略时使用默认 **200ms**。正值必须 **≥ 1ms** 且 **≤ 2s**；负值、亚毫秒正值与超过 **2s** 的值会在构造时检出（一条 Warn），之后每次 `Select` fail-open（不会被静默改写；CubeMaster 仍会正常启动）。请使用 `200ms` / `1s` 这类 duration 字符串——裸整数如 `timeout: 200` 会被 YAML 解析成 **200 纳秒**并触发 ≥1ms 校验失败。sidecar 卡住时，每次 create 最多会多等这么久再 fail-open。 |
+| `timeout` | **同步 create 路径**上的单次 HTTP 超时。为 0/省略时使用默认 **200ms**。正值必须 **≥ 1ms** 且 **≤ 2s**；负值、亚毫秒正值与超过 **2s** 的值会在构造时检出（一条 Warn），之后每次 `Select` fail-open（不会被静默改写；CubeMaster 仍会正常启动）。请使用 `200ms` / `1s` 这类 duration 字符串——裸整数如 `timeout: 200` 会被 YAML 解析成 **200 纳秒**并触发 ≥1ms 校验失败。sidecar 卡住时，每次 create 最多会多等这么久再 fail-open（电路已打开时立即短路）。 |
 | `mode` | 可选的运营自定义字符串，写入请求 JSON。 |
 | `disable` | 为 true 时即使已 enable 也是空操作；与 `weight` 一样热读。若热更新删掉整个 `plugin_conf.external_http_score` 块但 `enable_scorers` 仍保留该名字，评分会停止，但会发出限流的 fail-open Warn（日志类别 `plugin_conf_absent`），并递增 `cube_scheduler_external_http_score_outcomes_total{reason="other"}`（scorer 实例在热更新后仍存活）。有意关闭请优先用 `disable: true`（立即生效）；从 `enable_scorers` 去掉该名字只在 CubeMaster 重启后生效。 |
+| `failure_policy` | Sidecar 失败策略。**省略 / 空 / 未知默认 `fail_open`**：`Select` 返回普通错误，`runScoreFilter` 跳过该 scorer（历史 create 路径行为）。设为 `fail_closed` 时返回类型化 `FailClosedError`，`runScoreFilter` 中止 Score，创建失败关闭。 |
+| `circuit_breaker` | 连续 sidecar 失败后打开熔断，后续 Score 立即失败而不再等待完整 HTTP 超时。经过 `open_duration` 后允许最多 `half_open_max_probes` 次探测；成功则关闭熔断，失败则重新打开。省略该块时仍启用默认值（`failure_threshold: 5`，`open_duration: 5s`，`half_open_max_probes: 1`）。设 `disable: true` 可关闭熔断。 |
 
 ### 传输协议
 
@@ -337,24 +345,29 @@ scheduler:
 
 ### 失败 / 回退语义
 
-scorer 失败（超时、非 2xx、重定向、畸形/过大响应、校验错误）会返回错误。
-`runScoreFilter` 会跳过失败的 scorer 并继续调度（对 sandbox 创建保持
-**fail-open**）。结果会递增
+scorer 失败（超时、非 2xx、重定向、畸形/过大响应、校验错误、熔断打开）会返回错误。
+默认 **`failure_policy: fail_open`**（字段省略时亦然）下，`runScoreFilter` 会跳过失败的
+scorer 并继续调度（对 sandbox 创建保持 **fail-open**）。配置
+**`failure_policy: fail_closed`** 时，插件返回类型化 `FailClosedError`，`runScoreFilter`
+**中止** Score 阶段。结果会递增
 `cube_scheduler_external_http_score_outcomes_total{reason=...}`（含
 `reason="success"`），HTTP 往返还会观察
 `cube_scheduler_external_http_score_request_duration_seconds{reason=...}`。
 固定 `reason`：`success`、`timeout`、`connection`、`http_status`、`invalid_json`、
-`missing_candidate`、`other`（空 endpoint、非法 weight 等配置类 / 未分类失败归入
-`other`）。失败在 scorer 边界记录日志（不记录 endpoint URL、URL userinfo、query
-token，也不记录请求/响应正文或密钥）。Warn 按脱敏后的失败类别大约每分钟至多一条
-（同类别后续失败降为 Debug），避免 sidecar 宕机时刷爆 create 路径日志。任一请求
-候选缺少分数会使整次尝试失败（反偏差：只给子集打分会系统性扭曲排序）。该调用在
-创建路径上是**同步**的。共享 HTTP transport **不**遵循 `HTTP_PROXY` /
-`HTTPS_PROXY` / `ALL_PROXY`（仅直连，避免环境代理看到带 token 的 sidecar URL 或
-节点清单 body），并用 `MaxConnsPerHost = 8`（与每 host 空闲池同级）限制对 sidecar
-的在途连接，避免挂起时无界拨号风暴；每次尝试仍可能等待至多 `timeout`（默认 200ms，
-上限 2s）再 fail-open。本 PR 不引入熔断、负缓存、异步执行或重试循环——更高 create
-QPS 场景的后续工作。
+`missing_candidate`、`circuit_open`、`other`（空 endpoint、非法 weight 等配置类 /
+未分类失败归入 `other`）。熔断状态暴露为
+`cube_scheduler_external_http_score_circuit_state{target="host:port"}`
+（`0=closed`，`1=half-open`，`2=open`）。失败在 scorer 边界记录日志（不记录
+endpoint URL、URL userinfo、query token，也不记录请求/响应正文或密钥）。Warn 按
+脱敏后的失败类别大约每分钟至多一条（同类别后续失败降为 Debug），避免 sidecar
+宕机时刷爆 create 路径日志。任一请求候选缺少分数会使整次尝试失败（反偏差：只给
+子集打分会系统性扭曲排序）。该调用在创建路径上是**同步**的。共享 HTTP transport
+**不**遵循 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`（仅直连，避免环境代理看到带
+token 的 sidecar URL 或节点清单 body），并用 `MaxConnsPerHost = 8`（与每 host 空闲
+池同级）限制对 sidecar 的在途连接，避免挂起时无界拨号风暴。失败记忆熔断器
+（默认：阈值 5、打开 5s、半开探测 1 次）在连续失败后短路后续 HTTP；设
+`circuit_breaker.disable: true` 可关闭。另见
+[External HTTP score（开发）](../../dev/external-http-score.md)。
 
 ## 相关文档
 

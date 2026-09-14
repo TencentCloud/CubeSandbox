@@ -225,6 +225,9 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 		w := f.Weight()
 		tmpResult, err := f.Select(selCtx)
 		if err != nil {
+			if score.IsFailClosed(err) {
+				return err
+			}
 			continue
 		}
 		if len(tmpResult) == 0 {

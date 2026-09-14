@@ -1131,6 +1131,7 @@ func TestExternalHTTPScoreMetricReasonMapping(t *testing.T) {
 		{category: "external_http_score empty_scores", wantReason: externalHTTPScoreReasonInvalidJSON},
 		{category: "external_http_score invalid_candidate_score", wantReason: externalHTTPScoreReasonOther},
 		{category: "external_http_score missing_candidate", wantReason: externalHTTPScoreReasonMissingCandidate},
+		{category: "external_http_score circuit_open", wantReason: externalHTTPScoreReasonCircuitOpen},
 		{category: "external_http_score plugin_conf_absent", wantReason: externalHTTPScoreReasonOther},
 		{category: "external_http_score invalid_endpoint", wantReason: externalHTTPScoreReasonOther},
 		{category: sentinel, wantReason: externalHTTPScoreReasonOther},

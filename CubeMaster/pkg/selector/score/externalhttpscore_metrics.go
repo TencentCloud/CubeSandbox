@@ -28,6 +28,7 @@ const (
 	externalHTTPScoreReasonHTTPStatus       = "http_status"
 	externalHTTPScoreReasonInvalidJSON      = "invalid_json"
 	externalHTTPScoreReasonMissingCandidate = "missing_candidate"
+	externalHTTPScoreReasonCircuitOpen      = "circuit_open"
 	externalHTTPScoreReasonOther            = "other"
 )
 
@@ -38,13 +39,14 @@ var externalHTTPScoreMetricReasonAllowlist = map[string]struct{}{
 	externalHTTPScoreReasonHTTPStatus:       {},
 	externalHTTPScoreReasonInvalidJSON:      {},
 	externalHTTPScoreReasonMissingCandidate: {},
+	externalHTTPScoreReasonCircuitOpen:      {},
 	externalHTTPScoreReasonOther:            {},
 }
 
 var (
 	externalHTTPScoreOutcomesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "cube_scheduler_external_http_score_outcomes_total",
-		Help: "Total external_http_score outcomes by fixed reason (success, timeout, connection, http_status, invalid_json, missing_candidate, other).",
+		Help: "Total external_http_score outcomes by fixed reason (success, timeout, connection, http_status, invalid_json, missing_candidate, circuit_open, other).",
 	}, []string{"reason"})
 
 	externalHTTPScoreRequestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
@@ -53,12 +55,21 @@ var (
 		Buckets: prometheus.DefBuckets,
 	}, []string{"reason"})
 
+	// Label is host:port only (no userinfo, path, or query) so credentials
+	// never appear and cardinality stays bounded by distinct sidecar hosts.
+	externalHTTPScoreCircuitState = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "cube_scheduler_external_http_score_circuit_state",
+		Help: "external_http_score circuit breaker state by sidecar host:port: 0=closed, 1=half-open, 2=open.",
+	}, []string{"target"})
+
 	externalHTTPScoreWarnMu   sync.Mutex
 	externalHTTPScoreLastWarn = map[string]time.Time{}
 	// Test seam: when non-nil, overrides time.Now for warn rate-limit tests.
 	externalHTTPScoreNow func() time.Time
 	// Test seam: counts Warn emissions after rate limiting.
 	externalHTTPScoreWarnCount atomic.Uint64
+	// Test seam: last circuit state written (0/1/2); multi-host uses the GaugeVec.
+	externalHTTPScoreCircuitValue atomic.Int64
 )
 
 // externalHTTPScoreMetricReason maps a log-safe sanitize category to a fixed
@@ -73,6 +84,8 @@ func externalHTTPScoreMetricReason(category string) string {
 		return externalHTTPScoreReasonHTTPStatus
 	case "external_http_score malformed_response", "external_http_score empty_scores":
 		return externalHTTPScoreReasonInvalidJSON
+	case "external_http_score circuit_open":
+		return externalHTTPScoreReasonCircuitOpen
 	case "http_request_failed", "unknown_error",
 		"external_http_score response_too_large",
 		"external_http_score invalid_candidate_score":
@@ -94,6 +107,23 @@ func externalHTTPScoreMetricReason(category string) string {
 		}
 	}
 	return externalHTTPScoreReasonOther
+}
+
+func setExternalHTTPScoreCircuitState(target string, state int) {
+	if target == "" {
+		target = "invalid"
+	}
+	externalHTTPScoreCircuitValue.Store(int64(state))
+	externalHTTPScoreCircuitState.WithLabelValues(target).Set(float64(state))
+}
+
+func externalHTTPScoreCircuitStateValue() float64 {
+	return float64(externalHTTPScoreCircuitValue.Load())
+}
+
+func resetExternalHTTPScoreCircuitMetrics() {
+	externalHTTPScoreCircuitState.Reset()
+	externalHTTPScoreCircuitValue.Store(circuitStateClosed)
 }
 
 func observeExternalHTTPScoreFailure(category string) {
