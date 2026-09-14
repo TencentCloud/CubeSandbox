@@ -535,13 +535,13 @@ External HTTP scorer 的结果与延迟
 
 #### 能证明什么
 
-- 错误配置或热更新后变成非有限值、因而被踢出加权混合的 `weight`。
+- 加载校验已通过后，热更新或运行中途变成非有限、因而被踢出加权混合的 `weight`（运行时兜底）。
 - 哪个白名单 scorer 在 create 路径上产出了有毒 weight。
 
 #### 不能证明什么
 
-- 负的插件 weight（所有已注册评分器——含 `external_http_score`——在配置加载 /
-  热更新 `preHandle` 阶段拒绝）。
+- 负 / 非有限的插件 weight（所有已注册评分器——含 `external_http_score` 与
+  `binpack_score`——在配置加载 / 热更新 `preHandle` 阶段拒绝）。
 - 为零 / 省略、因而跳过 HTTP 或以 score 0 接纳候选、但并非非有限值的 weight。
 - 本文离线 simulator 报告字段。
 

@@ -8,6 +8,7 @@ If you are *using* CubeSandbox (deploying it, building templates, calling the AP
 
 - [Redis Key Convention](./redis-key-spec) — the unified namespace every service must use for the shared Redis instance: naming format, scope ownership, the registered key catalog, TTL policy, and the per-service key-builder modules.
 - [Scheduler Profile Configuration Example](./scheduler-profile-config-example) — copyable CubeMaster runtime `scheduler.profile` / `binpack_score` YAML contract (not offline simulator models; no live performance claims).
+- [External HTTP Score Operator Path](./external-http-score-operator) — shortest enable / observe / fault / rollback path for the HTTP scorer demo (points at `CubeMaster/examples/external-http-score/VERIFY.md`).
 
 ## Service designs
 
@@ -18,6 +19,10 @@ If you are *using* CubeSandbox (deploying it, building templates, calling the AP
 - [Scheduler Simulator Benchmark](./scheduler-simulator-benchmark) — one-command offline profile × workload runs, report outputs, and acceptance checks.
 - [Scheduler Evaluation Metrics](./scheduler-metrics) — metric definitions, measurement semantics, and what simulator numbers can and cannot prove.
 - [Scheduler Benchmark Report Schema](./scheduler-benchmark-report-schema) — JSON/Markdown report contract, including `comparisons[].notes` shape.
+
+## Topic1 live supplement
+
+- [Topic1 Live Supplement (2026-09-14)](./topic1-live-supplement-20260914/) — reviewer-facing conclusion packs for operator path and live mechanism evidence (does **not** override formal `VALID_NO_IMPROVEMENT`).
 
 ## What belongs here
 

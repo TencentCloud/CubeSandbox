@@ -2,7 +2,7 @@
 
 **给 reviewer 的一页入口**：[`REVIEWER_SUPPLEMENT.md`](./REVIEWER_SUPPLEMENT.md)（实验名突出内容；正式判定不变）
 
-Ledger: `D:\postgraduate\main-line\Job\Tencent\CubeSandbox\refine-logs\topic1-small-experiments-20260913-210144`
+本目录是 **结论包**（STATUS / summaries / VERIFY）。完整原始 ledger 未纳入本 PR。
 
 ## 五项实验（名称 = 内容）
 
@@ -19,8 +19,8 @@ Ledger: `D:\postgraduate\main-line\Job\Tencent\CubeSandbox\refine-logs\topic1-sm
 ## 边界
 
 - 补充机制证据；**不**覆盖正式 CF01–CF06 / `VALID_NO_IMPROVEMENT`
-- **未** push 到 GitHub；分享用本地路径 / 拷贝 / 摘要+哈希
+- 可复现的操作路径见 `CubeMaster/examples/external-http-score/VERIFY.md`，**不是**本目录的 ledger 脚本
 
 ## 复核
 
-见 `audit/VERIFY.md`。原始：`summaries/*.json`、`experiments/*/requests.jsonl`
+见 [`VERIFY.md`](./VERIFY.md)。结论文件：`summaries/*.json`、`STATUS.json`

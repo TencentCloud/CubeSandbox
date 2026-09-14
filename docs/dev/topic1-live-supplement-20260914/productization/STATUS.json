@@ -11,14 +11,16 @@
   "binpack_probe": "NO_IMPROVEMENT",
   "restore": "PASS",
   "original_pr_heads_unchanged": true,
-  "github_writes": false,
+  "github_writes": true,
   "gate2": "PASS",
   "accept": "ACCEPT_PASS",
   "healthy_api_p95_delta_ms": -141.45,
-  "updated_at": "2026-09-14T11:20:02+0800",
-  "local_commit": "b3df7b23a9920e5bfc7a9f699a92384182c15cb7",
+  "updated_at": "2026-09-14T19:10:00+0800",
+  "local_commit": "91429948",
   "backup_ref": "backup/topic1-productization-pre-20260914-104856",
   "productization_branch": "topic1/productization-20260914-104856",
-  "pushed": false,
-  "e5_note": "supplement_only; formal remains VALID_NO_IMPROVEMENT"
+  "pushed": true,
+  "pr": "https://github.com/TencentCloud/CubeSandbox/pull/1735",
+  "e5_note": "supplement_only; formal remains VALID_NO_IMPROVEMENT",
+  "note": "github_writes/pushed reflect PR publication; original authoring was local-only"
 }

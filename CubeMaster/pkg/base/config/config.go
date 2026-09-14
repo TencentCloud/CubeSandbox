@@ -1514,18 +1514,21 @@ func validateBinpackScoreWeight(s *SchedulerConf) error {
 	if cfg == nil {
 		return nil
 	}
-	if cfg.Weight != nil && *cfg.Weight < 0 {
-		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.weight must be >= 0, got %v (weight:0 disables; omit weight or the block for default 1)",
-			*cfg.Weight)
+	if cfg.Weight != nil {
+		w := *cfg.Weight
+		if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 {
+			return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.weight must be a finite number >= 0, got %v (weight:0 disables; omit weight or the block for default 1)",
+				w)
+		}
 	}
-	if cfg.CPUWeight < 0 {
-		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.cpu_weight must be >= 0, got %v", cfg.CPUWeight)
+	if math.IsNaN(cfg.CPUWeight) || math.IsInf(cfg.CPUWeight, 0) || cfg.CPUWeight < 0 {
+		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.cpu_weight must be a finite number >= 0, got %v", cfg.CPUWeight)
 	}
-	if cfg.MemWeight < 0 {
-		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.mem_weight must be >= 0, got %v", cfg.MemWeight)
+	if math.IsNaN(cfg.MemWeight) || math.IsInf(cfg.MemWeight, 0) || cfg.MemWeight < 0 {
+		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.mem_weight must be a finite number >= 0, got %v", cfg.MemWeight)
 	}
-	if cfg.MvmWeight < 0 {
-		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.mvm_weight must be >= 0, got %v", cfg.MvmWeight)
+	if math.IsNaN(cfg.MvmWeight) || math.IsInf(cfg.MvmWeight, 0) || cfg.MvmWeight < 0 {
+		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.mvm_weight must be a finite number >= 0, got %v", cfg.MvmWeight)
 	}
 	return nil
 }
@@ -1550,17 +1553,17 @@ func validateExternalHTTPScoreWeight(s *SchedulerConf) error {
 	return nil
 }
 
-// validateSchedulerScorerPluginWeights rejects negative plugin_conf.<scorer>.weight
-// for every scorer that uses a plain float64 weight field. binpack_score and
-// external_http_score (*float64) are handled by validateBinpackScoreWeight /
-// validateExternalHTTPScoreWeight.
+// validateSchedulerScorerPluginWeights rejects negative / non-finite
+// plugin_conf.<scorer>.weight for every scorer that uses a plain float64 weight
+// field. binpack_score and external_http_score (*float64) are handled by
+// validateBinpackScoreWeight / validateExternalHTTPScoreWeight.
 func validateSchedulerScorerPluginWeights(s *SchedulerConf) error {
 	if s == nil || s.Score == nil {
 		return nil
 	}
 	check := func(name string, weight float64) error {
-		if weight < 0 {
-			return fmt.Errorf("scheduler.score.plugin_conf.%s.weight must be >= 0, got %v (weight:0 disables)", name, weight)
+		if math.IsNaN(weight) || math.IsInf(weight, 0) || weight < 0 {
+			return fmt.Errorf("scheduler.score.plugin_conf.%s.weight must be a finite number >= 0, got %v (weight:0 disables)", name, weight)
 		}
 		return nil
 	}
