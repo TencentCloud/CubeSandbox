@@ -1,0 +1,12 @@
+{
+  "decided_at": "2026-09-14T10:53:31+0800",
+  "change": "YES_MINIMAL",
+  "rationale": "example+runbook+verifier missing at baseline; semantics already present",
+  "allowed_files": [
+    "CubeMaster/examples/external-http-score/**",
+    "docs/dev/external-http-score-operator.md",
+    "docs/dev/index.md (link only if needed)",
+    "CubeMaster/examples/external-http-score/VERIFY.md"
+  ],
+  "forbidden": "new protocol, new plugin type, new deps, change fail-open semantics for experiments"
+}

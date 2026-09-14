@@ -1,0 +1,291 @@
+# RESULTS
+
+## 真实多 VM：创建→Ready→首命令端到端延迟 (`vm_e2e_latency`) — PASS
+Source: `summaries/vm_e2e_latency.json` (client timeline; not scheduler-internal delay).
+{
+  "experiment": "vm_e2e_latency",
+  "status": "PASS",
+  "arms": [
+    {
+      "arm": "default",
+      "n": 10,
+      "fail_n": 0,
+      "api_p50_ms": 382.0,
+      "api_p95_ms": 690.9499999999998,
+      "ready_p50_ms": 813.0,
+      "ready_p95_ms": 1123.35,
+      "ready_max_ms": 1167.0,
+      "usable_p50_ms": 904.0,
+      "usable_p95_ms": 1217.5,
+      "usable_max_ms": 1249.0,
+      "burst_success": 5,
+      "burst_n": 5,
+      "metric_source": "client_timeline"
+    },
+    {
+      "arm": "binpack_utilization",
+      "n": 10,
+      "fail_n": 0,
+      "api_p50_ms": 372.0,
+      "api_p95_ms": 878.0499999999995,
+      "ready_p50_ms": 755.0,
+      "ready_p95_ms": 1257.0499999999995,
+      "ready_max_ms": 1505.0,
+      "usable_p50_ms": 869.0,
+      "usable_p95_ms": 1355.4499999999994,
+      "usable_max_ms": 1607.0,
+      "burst_success": 5,
+      "burst_n": 5,
+      "metric_source": "client_timeline"
+    }
+  ]
+}
+
+## 突发短创建：节点分散与启动延迟 (`burst_scenario`) — PASS
+Business read: burst dispersion and ready latency.
+{
+  "experiment": "burst_scenario",
+  "status": "PASS",
+  "arms": [
+    {
+      "arm": "default",
+      "success": 8,
+      "n": 8,
+      "node_distribution": {
+        "192.168.122.142": 4,
+        "192.168.122.55": 2,
+        "192.168.122.44": 2
+      },
+      "hot_node_max": 4,
+      "usable_p50_ms": 3044.0,
+      "usable_p95_ms": 3070.65
+    },
+    {
+      "arm": "binpack_utilization",
+      "success": 8,
+      "n": 8,
+      "node_distribution": {
+        "192.168.122.55": 2,
+        "192.168.122.44": 2,
+        "192.168.122.142": 2,
+        "192.168.122.33": 2
+      },
+      "hot_node_max": 2,
+      "usable_p50_ms": 2216.5,
+      "usable_p95_ms": 2296.8
+    }
+  ],
+  "business_read": "burst_dispersion_and_ready_latency",
+  "default_hot_max": 4,
+  "binpack_hot_max": 2
+}
+
+## 镜像局部性：有缓存/无缓存命中对照 (`locality_scenario`) — NO_IMPROVEMENT
+Cache contrast: template missing on 192.168.122.44, present on other three nodes.
+{
+  "experiment": "locality_scenario",
+  "status": "NO_IMPROVEMENT",
+  "cache_presence": {
+    "192.168.122.33": true,
+    "192.168.122.44": false,
+    "192.168.122.55": true,
+    "192.168.122.142": true
+  },
+  "arms": [
+    {
+      "arm": "default",
+      "n": 6,
+      "success": 6,
+      "cache_hit_rate": 1.0,
+      "node_distribution": {
+        "192.168.122.33": 2,
+        "192.168.122.142": 3,
+        "192.168.122.55": 1
+      },
+      "usable_p50_ms": 2095.5,
+      "usable_p95_ms": 4572.75
+    },
+    {
+      "arm": "template_locality_first",
+      "n": 6,
+      "success": 6,
+      "cache_hit_rate": 1.0,
+      "node_distribution": {
+        "192.168.122.33": 2,
+        "192.168.122.142": 3,
+        "192.168.122.55": 1
+      },
+      "usable_p50_ms": 1353.5,
+      "usable_p95_ms": 1538.75
+    }
+  ]
+}
+
+## CPU/内存错配装箱：碎片·空节点·探针接纳·延迟 (`binpack_scenario`) — NO_IMPROVEMENT
+Supplement only. Formal remains `VALID_NO_IMPROVEMENT`.
+Same fill list (cpu_heavy/mem_heavy×6). Binpack packed all 12 fills onto `.55` and kept 3 empty nodes vs default 1; probe admission tied at 6/6; frag_loss tied.
+{
+  "experiment": "binpack_scenario",
+  "status": "NO_IMPROVEMENT",
+  "occupancy_matched": false,
+  "arms": [
+    {
+      "arm": "default",
+      "fill_success": 12,
+      "fill_n": 12,
+      "fill_nodes": {
+        "192.168.122.33": 1,
+        "192.168.122.142": 7,
+        "192.168.122.44": 2,
+        "192.168.122.55": 2
+      },
+      "post_fill_empty_nodes": 1,
+      "post_fill_total_mvm": 12.0,
+      "fragmentation_loss": 0.1578947368421053,
+      "nodewise_slots": 16,
+      "aggregate_upper": 19,
+      "probe_success": 6,
+      "probe_n": 6,
+      "probe_admission_rate": 1.0,
+      "latency_usable_p50_ms": 1053.5,
+      "latency_usable_p95_ms": 1752.4999999999998,
+      "latency_usable_max_ms": 1829,
+      "note": "supplement_only; formal remains VALID_NO_IMPROVEMENT"
+    },
+    {
+      "arm": "binpack_utilization",
+      "fill_success": 12,
+      "fill_n": 12,
+      "fill_nodes": {
+        "192.168.122.55": 12
+      },
+      "post_fill_empty_nodes": 3,
+      "post_fill_total_mvm": 11.0,
+      "fragmentation_loss": 0.1578947368421053,
+      "nodewise_slots": 16,
+      "aggregate_upper": 19,
+      "probe_success": 6,
+      "probe_n": 6,
+      "probe_admission_rate": 1.0,
+      "latency_usable_p50_ms": 1033.0,
+      "latency_usable_p95_ms": 1280.85,
+      "latency_usable_max_ms": 1331,
+      "note": "supplement_only; formal remains VALID_NO_IMPROVEMENT"
+    }
+  ],
+  "reasons": [
+    "binpack_more_empty_nodes"
+  ],
+  "formal_override": false,
+  "formal_remains": "VALID_NO_IMPROVEMENT"
+}
+
+## 外部 HTTP scorer：正常/超时/非2xx/非法分退化 (`external_scorer_degradation`) — PASS
+ok=3/3 success; timeout/non2xx/bad_score fail-closed (0/3). No filter resurrection. Metrics: `cubemaster_scheduler_external_http_score_*`.
+{
+  "experiment": "external_scorer_degradation",
+  "status": "PASS",
+  "modes": [
+    {
+      "mode": "ok",
+      "n": 3,
+      "success": 3,
+      "fail_open_observed": false,
+      "fail_closed_observed": false,
+      "any_resurrected_filtered": false,
+      "outcome_delta": {
+        "cubemaster_scheduler_external_http_score_timeouts_total": 0.0,
+        "cubemaster_scheduler_external_http_score_circuit_state": 0.0,
+        "cubemaster_scheduler_external_http_score_latency_seconds_bucket": 3.0,
+        "cubemaster_scheduler_external_http_score_requests_total": 3.0,
+        "cubemaster_scheduler_external_http_score_latency_seconds_sum": 0.004216296,
+        "cubemaster_scheduler_external_http_score_failures_total": 0.0,
+        "cubemaster_scheduler_external_http_score_latency_seconds_count": 3.0
+      },
+      "node_distribution": {
+        "192.168.122.142": 3
+      },
+      "usable_latencies_ms": [
+        863,
+        869,
+        823
+      ],
+      "metric_names_note": "stock exposes cubemaster_scheduler_external_http_score_* (not outcomes_total)"
+    },
+    {
+      "mode": "timeout",
+      "n": 3,
+      "success": 0,
+      "fail_open_observed": false,
+      "fail_closed_observed": true,
+      "any_resurrected_filtered": false,
+      "outcome_delta": {
+        "cubemaster_scheduler_external_http_score_timeouts_total": 3.0,
+        "cubemaster_scheduler_external_http_score_latency_seconds_bucket": 3.0,
+        "cubemaster_scheduler_external_http_score_requests_total": 3.0,
+        "cubemaster_scheduler_external_http_score_latency_seconds_sum": 3.001559864,
+        "cubemaster_scheduler_external_http_score_failures_total": 3.0,
+        "cubemaster_scheduler_external_http_score_latency_seconds_count": 3.0
+      },
+      "node_distribution": {},
+      "usable_latencies_ms": [
+        null,
+        null,
+        null
+      ],
+      "metric_names_note": "stock exposes cubemaster_scheduler_external_http_score_* (not outcomes_total)"
+    },
+    {
+      "mode": "non2xx",
+      "n": 3,
+      "success": 0,
+      "fail_open_observed": false,
+      "fail_closed_observed": true,
+      "any_resurrected_filtered": false,
+      "outcome_delta": {
+        "cubemaster_scheduler_external_http_score_timeouts_total": 0.0,
+        "cubemaster_scheduler_external_http_score_latency_seconds_bucket": 3.0,
+        "cubemaster_scheduler_external_http_score_requests_total": 3.0,
+        "cubemaster_scheduler_external_http_score_latency_seconds_sum": 0.004613321,
+        "cubemaster_scheduler_external_http_score_failures_total": 3.0,
+        "cubemaster_scheduler_external_http_score_latency_seconds_count": 3.0
+      },
+      "node_distribution": {},
+      "usable_latencies_ms": [
+        null,
+        null,
+        null
+      ],
+      "metric_names_note": "stock exposes cubemaster_scheduler_external_http_score_* (not outcomes_total)"
+    },
+    {
+      "mode": "bad_score",
+      "n": 3,
+      "success": 0,
+      "fail_open_observed": false,
+      "fail_closed_observed": true,
+      "any_resurrected_filtered": false,
+      "outcome_delta": {
+        "cubemaster_scheduler_external_http_score_timeouts_total": 0.0,
+        "cubemaster_scheduler_external_http_score_latency_seconds_bucket": 3.0,
+        "cubemaster_scheduler_external_http_score_requests_total": 3.0,
+        "cubemaster_scheduler_external_http_score_latency_seconds_sum": 0.006014318,
+        "cubemaster_scheduler_external_http_score_failures_total": 3.0,
+        "cubemaster_scheduler_external_http_score_latency_seconds_count": 3.0
+      },
+      "node_distribution": {},
+      "usable_latencies_ms": [
+        null,
+        null,
+        null
+      ],
+      "metric_names_note": "stock exposes cubemaster_scheduler_external_http_score_* (not outcomes_total)"
+    }
+  ],
+  "note": "stock binary may fail-closed on scorer errors; fail-open is observational"
+}
+
+## Limits
+- Small samples; no significance claims.
+- Stock scorer path is fail-closed on errors (not fail-open).
+- Formal matrix not re-run.

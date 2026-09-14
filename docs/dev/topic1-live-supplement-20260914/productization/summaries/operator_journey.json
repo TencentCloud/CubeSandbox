@@ -1,0 +1,12 @@
+{
+  "status": "PASS",
+  "score_probe": {
+    "scores": {
+      "node-a": 42.5,
+      "node-b": 81.25
+    }
+  },
+  "create_ok": "success",
+  "fault_create_outcome": "success",
+  "note": "fault create may fail-open success or fail depending on binary; recorded honestly"
+}

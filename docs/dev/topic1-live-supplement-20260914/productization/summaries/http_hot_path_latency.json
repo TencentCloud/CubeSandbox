@@ -1,0 +1,102 @@
+{
+  "status": "PASS",
+  "arms": [
+    {
+      "arm": "control",
+      "n": 20,
+      "fail_n": 0,
+      "success_n": 20,
+      "api_p50_ms": 355.0,
+      "api_p95_ms": 590.8000000000001,
+      "api_max_ms": 701.0,
+      "ready_p50_ms": 800.0,
+      "ready_p95_ms": 982.3000000000002,
+      "ready_max_ms": 1159.0,
+      "node_dist": {
+        "192.168.122.55": 8,
+        "192.168.122.142": 5,
+        "192.168.122.33": 5,
+        "192.168.122.44": 2
+      },
+      "metrics_delta": {}
+    },
+    {
+      "arm": "healthy",
+      "n": 20,
+      "fail_n": 0,
+      "success_n": 20,
+      "api_p50_ms": 346.5,
+      "api_p95_ms": 449.3500000000001,
+      "api_max_ms": 513.0,
+      "ready_p50_ms": 766.0,
+      "ready_p95_ms": 905.6500000000001,
+      "ready_max_ms": 994.0,
+      "node_dist": {
+        "192.168.122.44": 4,
+        "192.168.122.142": 10,
+        "192.168.122.33": 3,
+        "192.168.122.55": 3
+      },
+      "metrics_delta": {
+        "cube_scheduler_external_http_score_outcomes_total": 22.0,
+        "cube_scheduler_external_http_score_request_duration_seconds_count": 22.0,
+        "reason:success": 22.0,
+        "cube_scheduler_external_http_score_request_duration_seconds_sum": 0.022666990999999997,
+        "cube_scheduler_external_http_score_request_duration_seconds_bucket": 22.0
+      }
+    },
+    {
+      "arm": "delayed",
+      "n": 20,
+      "fail_n": 0,
+      "success_n": 20,
+      "api_p50_ms": 438.5,
+      "api_p95_ms": 623.4000000000002,
+      "api_max_ms": 878.0,
+      "ready_p50_ms": 892.0,
+      "ready_p95_ms": 1194.0500000000002,
+      "ready_max_ms": 1328.0,
+      "node_dist": {
+        "192.168.122.142": 6,
+        "192.168.122.55": 4,
+        "192.168.122.33": 8,
+        "192.168.122.44": 2
+      },
+      "metrics_delta": {
+        "cube_scheduler_external_http_score_outcomes_total": 22.0,
+        "cube_scheduler_external_http_score_request_duration_seconds_count": 22.0,
+        "reason:success": 22.0,
+        "cube_scheduler_external_http_score_request_duration_seconds_sum": 1.7886317249999997,
+        "cube_scheduler_external_http_score_request_duration_seconds_bucket": 22.0
+      }
+    },
+    {
+      "arm": "timeout",
+      "n": 20,
+      "fail_n": 0,
+      "success_n": 20,
+      "api_p50_ms": 558.0,
+      "api_p95_ms": 683.8000000000001,
+      "api_max_ms": 813.0,
+      "ready_p50_ms": 994.5,
+      "ready_p95_ms": 1158.95,
+      "ready_max_ms": 1215.0,
+      "node_dist": {
+        "192.168.122.55": 7,
+        "192.168.122.142": 7,
+        "192.168.122.44": 4,
+        "192.168.122.33": 2
+      },
+      "metrics_delta": {
+        "cube_scheduler_external_http_score_outcomes_total": 22.0,
+        "cube_scheduler_external_http_score_request_duration_seconds_count": 22.0,
+        "reason:timeout": 22.0,
+        "cube_scheduler_external_http_score_request_duration_seconds_sum": 4.417560916999999,
+        "cube_scheduler_external_http_score_request_duration_seconds_bucket": 22.0
+      }
+    }
+  ],
+  "healthy_api_p95_delta_ms": -141.45,
+  "notes": [],
+  "engineering_target_ms": 50
+}
