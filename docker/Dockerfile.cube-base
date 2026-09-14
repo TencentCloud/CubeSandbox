@@ -4,10 +4,14 @@
 # that sandboxes built FROM this image expose :49983/health out of the box
 # and can be turned into Cube templates without any extra wiring.
 #
-# envd is the repository's own Rust daemon cube-envd (installed as
-# /usr/bin/envd, command name kept for E2B compatibility), compiled in a
-# builder stage as a static linux/${TARGETARCH} binary and copied into the
-# final ubuntu:22.04 runtime stage alongside a generic entrypoint.
+# Two envd implementations are built and both are shipped:
+#   * /usr/bin/envd     — the selected implementation (default: cube-envd)
+#   * /usr/bin/envd-go  — the upstream Go envd pinned by ENVD_REF
+# `ENVD_IMPL=cube|go` picks which one becomes /usr/bin/envd (build-time),
+# and `ENVD_BIN=/usr/bin/envd-go` switches back at runtime without a rebuild.
+# The literal path /usr/bin/envd matters: Cubelet collects the envd version by
+# exec'ing `envd --version`, so an ENVD_BIN override alone would leave the
+# template annotated with the other implementation's version.
 #
 # Build from the repository root so this Dockerfile can copy cube-envd/:
 #   docker build -f docker/Dockerfile.cube-base -t cubesandbox-base .
@@ -23,10 +27,49 @@
 #       cube-envd/src/version.rs | head -1)" .
 
 ARG RUST_TOOLCHAIN=1.89
+ARG GO_VERSION=1.25.4
 ARG UBUNTU_VERSION=22.04
+# 选择 /usr/bin/envd 的实现：cube（默认）或 go。两者都会进镜像。
+ARG ENVD_IMPL=cube
+ARG ENVD_REF=2026.16
 
-# -------- Stage 1: compile the local Rust envd --------
-FROM rust:${RUST_TOOLCHAIN}-slim-bookworm AS envd-builder
+# -------- Stage 1a: compile the upstream Go envd (pinned ENVD_REF) --------
+# 始终构建并安装为 /usr/bin/envd-go：这是运行期回滚的落点，删掉它回滚就需要重建镜像。
+FROM golang:${GO_VERSION}-bookworm AS envd-go-builder
+
+ARG ENVD_REF
+ARG TARGETARCH
+ARG ENVD_UPSTREAM_REPO=https://github.com/e2b-dev/infra.git
+# 模块代理可按需覆盖：默认走官方代理（GitHub Actions 上可用），
+# 网络受限的构建环境用 --build-arg GOPROXY=https://goproxy.cn,direct 切换。
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+RUN git clone --depth 1 --branch "${ENVD_REF}" "${ENVD_UPSTREAM_REPO}" infra
+
+WORKDIR /src/infra/packages/envd
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    commit_sha="$(git -C /src/infra rev-parse --short HEAD)" \
+    && echo "Building envd from ${ENVD_UPSTREAM_REPO}@${ENVD_REF} (commit=${commit_sha})" \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \
+       go build -a \
+           -ldflags "-X=main.commitSHA=${commit_sha} -s -w" \
+           -o /out/envd \
+           . \
+    && chmod +x /out/envd \
+    && /out/envd -version \
+    && /out/envd -commit
+
+# -------- Stage 1b: compile the local Rust envd --------
+FROM rust:${RUST_TOOLCHAIN}-slim-bookworm AS envd-cube-builder
 
 ARG RUST_TOOLCHAIN
 ARG TARGETARCH
@@ -76,8 +119,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     /out/envd -version; \
     /out/envd -commit
 
+# -------- Stage 1c: select which implementation is the default --------
+# envd-${ENVD_IMPL}-builder 解析为 envd-cube-builder（默认）或 envd-go-builder。
+FROM envd-${ENVD_IMPL}-builder AS envd-default
+
 # -------- Stage 2: runtime image --------
 FROM ubuntu:${UBUNTU_VERSION}
+
+ARG ENVD_IMPL=cube
+ARG ENVD_REF=2026.16
 
 ARG DEBIAN_FRONTEND=noninteractive
 # 只影响 LABEL：留空则不打版本 label（二进制仍自报源码常量），非空时会与二进制
@@ -106,20 +156,28 @@ RUN useradd --create-home --uid 1000 --shell /bin/bash user \
     && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/user \
     && chmod 0440 /etc/sudoers.d/user
 
-COPY --from=envd-builder /out/envd /usr/bin/envd
+COPY --from=envd-default /out/envd /usr/bin/envd
+COPY --from=envd-go-builder /out/envd /usr/bin/envd-go
 COPY docker/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
-RUN chmod +x /usr/bin/envd /usr/local/bin/cube-entrypoint.sh \
+RUN chmod +x /usr/bin/envd /usr/bin/envd-go /usr/local/bin/cube-entrypoint.sh \
     && mkdir -p /var/log \
+    && printf '%s\n' "${ENVD_IMPL}" > /etc/cubesandbox-envd-impl \
+    && printf '%s\n' "${ENVD_REF}" > /etc/cubesandbox-envd-ref \
+    && echo "default envd implementation: $(cat /etc/cubesandbox-envd-impl)" \
     && /usr/bin/envd -version \
-    && /usr/bin/envd -commit
+    && /usr/bin/envd -commit \
+    && /usr/bin/envd-go -version \
+    && /usr/bin/envd-go -commit
 
 LABEL org.opencontainers.image.source="https://github.com/TencentCloud/CubeSandbox" \
       org.opencontainers.image.title="cubesandbox-base" \
       org.opencontainers.image.description="CubeSandbox base image with Rust cube-envd" \
       org.opencontainers.image.licenses="Apache-2.0" \
       io.cubesandbox.envd.version="${CUBE_ENVD_VERSION}" \
-      io.cubesandbox.envd.commit="${CUBE_ENVD_COMMIT}"
+      io.cubesandbox.envd.commit="${CUBE_ENVD_COMMIT}" \
+      io.cubesandbox.envd.impl="${ENVD_IMPL}" \
+      io.cubesandbox.envd.ref="${ENVD_REF}"
 
 EXPOSE 49983
 
