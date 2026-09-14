@@ -71,9 +71,10 @@ func NewSelector(ctx context.Context) []Selector {
 	}
 
 	// Match master feeder gating: master NewSelector returned early when
-	// ResourceWeights == nil, so loopAsyncScore never started in that case.
-	// Keep that gate so empty-profile configs with omitted resource_weights do
-	// not newly populate node.Score / pscore. Plugin-only scorers (binpack)
+	// ResourceWeights == nil or enable_scorers was empty, so loopAsyncScore
+	// never started in those cases. Keep both gates so empty-profile /
+	// empty-enable_scorers configs with a lingering MFWA plugin block do not
+	// newly populate node.Score / pscore. Plugin-only scorers (binpack)
 	// intentionally skip the ResourceWeights construction gate above.
 	if shouldStartAsyncMultiFactorFeeder(conf.Score) {
 		recov.GoWithRecover(func() {
@@ -83,11 +84,11 @@ func NewSelector(ctx context.Context) []Selector {
 	return ss
 }
 
-// shouldStartAsyncMultiFactorFeeder mirrors master's ResourceWeights early-return:
-// the async feeder only starts when both the multi_factor plugin block and a
-// non-nil resource_weights map are present.
+// shouldStartAsyncMultiFactorFeeder mirrors master's NewSelector early-return:
+// the async feeder only starts when enable_scorers is non-empty, the
+// multi_factor plugin block is present, and resource_weights is non-nil.
 func shouldStartAsyncMultiFactorFeeder(score *config.SchedulerScoreConf) bool {
-	if score == nil {
+	if score == nil || len(score.EnableScorers) == 0 {
 		return false
 	}
 	return score.ScorePluginConf.MultiFactorWeightedAverage != nil &&

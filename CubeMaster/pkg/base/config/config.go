@@ -304,7 +304,10 @@ type SchedulerProfileConf struct {
 	// AllowDroppedFilters, when true, permits a Profile's enable_filters list to
 	// drop names that were present in the base list. Default false: dropping
 	// filters fails config load (admission filters such as disk / thirtparty
-	// must be listed again or the drop must be explicit).
+	// must be listed again or the drop must be explicit). Built-in presets also
+	// default to false — selecting them by name on a longer base list requires
+	// an explicit same-name profiles.<builtin>.allow_dropped_filters: true (or
+	// listing the dropped names again in the Profile filter list).
 	AllowDroppedFilters bool `yaml:"allow_dropped_filters"`
 }
 
@@ -1955,12 +1958,14 @@ func resolveSchedulerProfile(s *SchedulerConf) (SchedulerProfileConf, bool, erro
 }
 
 func builtinSchedulerProfiles() map[string]SchedulerProfileConf {
-	// Built-ins are opinionated scene presets with short filter lists. They set
-	// AllowDroppedFilters so stock configs (cpu/mem/template_locality/
-	// realtime_create_num) can select them by name without a full user override.
+	// Built-ins are opinionated scene presets with short filter lists.
+	// AllowDroppedFilters stays false: selecting a built-in by name on a longer
+	// base list (stock cpu/mem/template_locality/realtime_create_num, or
+	// admission filters such as disk/thirtparty) fails config load unless the
+	// operator opts in via profiles.<builtin>.allow_dropped_filters: true or
+	// keeps the dropped names in the effective filter list.
 	return map[string]SchedulerProfileConf{
 		RuntimeProfileBalancedSpread: {
-			AllowDroppedFilters: true,
 			Filter: &SchedulerFilterConf{
 				EnableFilters: []string{"cpu", "mem", "realtime_create_num"},
 			},
@@ -1976,7 +1981,6 @@ func builtinSchedulerProfiles() map[string]SchedulerProfileConf {
 			},
 		},
 		RuntimeProfileTemplateLocalityFirst: {
-			AllowDroppedFilters: true,
 			Filter: &SchedulerFilterConf{
 				EnableFilters: []string{"cpu", "mem", "template_locality"},
 			},
@@ -1989,7 +1993,6 @@ func builtinSchedulerProfiles() map[string]SchedulerProfileConf {
 			},
 		},
 		RuntimeProfileBinpackUtilization: {
-			AllowDroppedFilters: true,
 			Filter: &SchedulerFilterConf{
 				EnableFilters: []string{"cpu", "mem"},
 			},

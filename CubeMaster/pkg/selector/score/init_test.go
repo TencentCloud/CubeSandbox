@@ -437,8 +437,22 @@ func TestAsyncFeederRequiresResourceWeights(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "mfwa_and_resource_weights_empty_enable_scorers",
+			score: &config.SchedulerScoreConf{
+				EnableScorers:   []string{},
+				ResourceWeights: map[string]float64{"mvm_num": 1},
+				ScorePluginConf: config.ScorePluginConf{
+					MultiFactorWeightedAverage: &config.MultiFactorWeightedAverage{
+						Weight: 1,
+					},
+				},
+			},
+			want: false,
+		},
+		{
 			name: "mfwa_and_resource_weights",
 			score: &config.SchedulerScoreConf{
+				EnableScorers:   []string{"multi_factor_weighted_average"},
 				ResourceWeights: map[string]float64{"mvm_num": 1},
 				ScorePluginConf: config.ScorePluginConf{
 					MultiFactorWeightedAverage: &config.MultiFactorWeightedAverage{

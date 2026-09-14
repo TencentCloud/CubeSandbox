@@ -181,7 +181,7 @@ Same fill list (cpu_heavy/mem_heavy×6). Binpack packed all 12 fills onto `.55` 
 }
 
 ## 外部 HTTP scorer：正常/超时/非2xx/非法分退化 (`external_scorer_degradation`) — PASS
-ok=3/3 success; timeout/non2xx/bad_score fail-closed (0/3). No filter resurrection. Metrics: `cubemaster_scheduler_external_http_score_*`.
+ok=3/3 success; timeout/non2xx/bad_score fail-closed (0/3). No filter resurrection. Prometheus `outcome_delta` tables omitted (lab names were not in-tree `cube_scheduler_external_http_score_*`).
 {
   "experiment": "external_scorer_degradation",
   "status": "PASS",
@@ -193,15 +193,6 @@ ok=3/3 success; timeout/non2xx/bad_score fail-closed (0/3). No filter resurrecti
       "fail_open_observed": false,
       "fail_closed_observed": false,
       "any_resurrected_filtered": false,
-      "outcome_delta": {
-        "cubemaster_scheduler_external_http_score_timeouts_total": 0.0,
-        "cubemaster_scheduler_external_http_score_circuit_state": 0.0,
-        "cubemaster_scheduler_external_http_score_latency_seconds_bucket": 3.0,
-        "cubemaster_scheduler_external_http_score_requests_total": 3.0,
-        "cubemaster_scheduler_external_http_score_latency_seconds_sum": 0.004216296,
-        "cubemaster_scheduler_external_http_score_failures_total": 0.0,
-        "cubemaster_scheduler_external_http_score_latency_seconds_count": 3.0
-      },
       "node_distribution": {
         "192.168.122.142": 3
       },
@@ -209,8 +200,7 @@ ok=3/3 success; timeout/non2xx/bad_score fail-closed (0/3). No filter resurrecti
         863,
         869,
         823
-      ],
-      "metric_names_note": "stock exposes cubemaster_scheduler_external_http_score_* (not outcomes_total)"
+      ]
     },
     {
       "mode": "timeout",
@@ -219,21 +209,12 @@ ok=3/3 success; timeout/non2xx/bad_score fail-closed (0/3). No filter resurrecti
       "fail_open_observed": false,
       "fail_closed_observed": true,
       "any_resurrected_filtered": false,
-      "outcome_delta": {
-        "cubemaster_scheduler_external_http_score_timeouts_total": 3.0,
-        "cubemaster_scheduler_external_http_score_latency_seconds_bucket": 3.0,
-        "cubemaster_scheduler_external_http_score_requests_total": 3.0,
-        "cubemaster_scheduler_external_http_score_latency_seconds_sum": 3.001559864,
-        "cubemaster_scheduler_external_http_score_failures_total": 3.0,
-        "cubemaster_scheduler_external_http_score_latency_seconds_count": 3.0
-      },
       "node_distribution": {},
       "usable_latencies_ms": [
         null,
         null,
         null
-      ],
-      "metric_names_note": "stock exposes cubemaster_scheduler_external_http_score_* (not outcomes_total)"
+      ]
     },
     {
       "mode": "non2xx",
@@ -242,21 +223,12 @@ ok=3/3 success; timeout/non2xx/bad_score fail-closed (0/3). No filter resurrecti
       "fail_open_observed": false,
       "fail_closed_observed": true,
       "any_resurrected_filtered": false,
-      "outcome_delta": {
-        "cubemaster_scheduler_external_http_score_timeouts_total": 0.0,
-        "cubemaster_scheduler_external_http_score_latency_seconds_bucket": 3.0,
-        "cubemaster_scheduler_external_http_score_requests_total": 3.0,
-        "cubemaster_scheduler_external_http_score_latency_seconds_sum": 0.004613321,
-        "cubemaster_scheduler_external_http_score_failures_total": 3.0,
-        "cubemaster_scheduler_external_http_score_latency_seconds_count": 3.0
-      },
       "node_distribution": {},
       "usable_latencies_ms": [
         null,
         null,
         null
-      ],
-      "metric_names_note": "stock exposes cubemaster_scheduler_external_http_score_* (not outcomes_total)"
+      ]
     },
     {
       "mode": "bad_score",
@@ -265,27 +237,18 @@ ok=3/3 success; timeout/non2xx/bad_score fail-closed (0/3). No filter resurrecti
       "fail_open_observed": false,
       "fail_closed_observed": true,
       "any_resurrected_filtered": false,
-      "outcome_delta": {
-        "cubemaster_scheduler_external_http_score_timeouts_total": 0.0,
-        "cubemaster_scheduler_external_http_score_latency_seconds_bucket": 3.0,
-        "cubemaster_scheduler_external_http_score_requests_total": 3.0,
-        "cubemaster_scheduler_external_http_score_latency_seconds_sum": 0.006014318,
-        "cubemaster_scheduler_external_http_score_failures_total": 3.0,
-        "cubemaster_scheduler_external_http_score_latency_seconds_count": 3.0
-      },
       "node_distribution": {},
       "usable_latencies_ms": [
         null,
         null,
         null
-      ],
-      "metric_names_note": "stock exposes cubemaster_scheduler_external_http_score_* (not outcomes_total)"
+      ]
     }
   ],
-  "note": "stock binary may fail-closed on scorer errors; fail-open is observational"
+  "note": "Behavioral evidence only. Legacy cubemaster_scheduler_external_http_score_* counters are not the in-tree metric family."
 }
 
 ## Limits
 - Small samples; no significance claims.
-- Stock scorer path is fail-closed on errors (not fail-open).
+- Stock scorer path in this package is fail-closed on errors (not fail-open).
 - Formal matrix not re-run.

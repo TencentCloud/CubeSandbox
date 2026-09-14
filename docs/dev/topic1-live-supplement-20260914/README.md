@@ -14,11 +14,12 @@ Reviewer/maintainer-facing package. **No raw JSONL, task cards, or agent review 
 
 ## Claims you may rely on
 - Operator enable/observe/fault/rollback path exists (example + VERIFY).
-- HTTP scorer live cost measurable; this lab healthy API P95 delta met ≤50ms engineering target.
-- Business signal can reorder Filter-legal candidates; Filter isolation + fail-open observed.
+- HTTP scorer live cost is **measurable**, not a statistical ≤50 ms claim: control API P95 ≈590.8 ms vs healthy ≈449.4 ms (`healthy_api_p95_delta_ms: -141.45`, arm variance dominates); delayed/timeout arms vs healthy show injected cost (delayed P95 ≈623.4 ms, timeout ≈683.8 ms). See `productization/summaries/http_hot_path_latency.json`.
+- Business signal can reorder Filter-legal candidates; Filter isolation observed (no Filter resurrection). Scorer-error degradation is binary-dependent: small-experiment fault arms were **fail-closed**; productization timeout arm recorded successful creates with `reason:timeout` metrics (fail-open path on that binary).
 - Binpack can empty more nodes under mismatch fill; probe admission/frag not improved → still **NO_IMPROVEMENT**.
 
 ## Claims you must not infer
 - Binpack/locality business quality SUPPORTED.
-- Statistical significance or production SLO win.
+- Statistical significance, production SLO win, or a proven healthy-vs-control ≤50 ms scorer cost bound.
+- Uniform fail-open across all lab binaries / packages.
 - Override of formal CF01–CF06 / `TOPIC1_READY` adjudication.

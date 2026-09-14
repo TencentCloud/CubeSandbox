@@ -97,6 +97,10 @@
     }
   ],
   "healthy_api_p95_delta_ms": -141.45,
-  "notes": [],
-  "engineering_target_ms": 50
+  "notes": [
+    "healthy-control delta is negative (−141.45 ms); do not read as a ≤50 ms scorer-cost bound — arm variance dominates.",
+    "Use delayed/timeout vs healthy for injected-cost observability, not healthy vs control as A/B of the scorer alone."
+  ],
+  "engineering_target_ms": 50,
+  "engineering_target_met_by_healthy_control_delta": false
 }
