@@ -366,7 +366,7 @@ scheduler:
 | `endpoint` | Sidecar URL。在 **正 weight** 下为空（含仅空白）时 fail-open，发出限流 Warn（日志类别 `empty_endpoint`），并递增 `cube_scheduler_external_http_score_outcomes_total{reason="other"}`——不会静默跳过。`weight: 0` 或 `disable: true` 时不会走到该检查。非空时必须是带 host 的绝对 `http://` 或 `https://` URL；缺 scheme、`file://`、`unix://` 等会在构造时检出（一条 Warn），之后每次 `Select` fail-open（CubeMaster 仍会正常启动）。请求前会 trim 首尾空白。密钥更宜放在 sidecar 侧；若 URL 含 userinfo 或 query token，scorer 不会记入日志，且 `config.Init` 的 cfg dump 只会保留 scheme/host/path。 |
 | `timeout` | **同步 create 路径**上的单次 HTTP 超时。为 0/省略时使用默认 **200ms**。正值必须 **≥ 1ms** 且 **≤ 2s**；负值、亚毫秒正值与超过 **2s** 的值会在构造时检出（一条 Warn），之后每次 `Select` fail-open（不会被静默改写；CubeMaster 仍会正常启动）。请使用 `200ms` / `1s` 这类 duration 字符串——裸整数如 `timeout: 200` 会被 YAML 解析成 **200 纳秒**并触发 ≥1ms 校验失败。sidecar 卡住时，每次 create 最多会多等这么久再 fail-open。 |
 | `mode` | 可选的运营自定义字符串，写入请求 JSON。 |
-| `disable` | 为 true 时即使已 enable 也是空操作；与 `weight` 一样热读。若热更新删掉整个 `plugin_conf.external_http_score` 块但 `enable_scorers` 仍保留该名字，评分会停止，但会发出限流的 fail-open Warn（日志类别 `plugin_conf_absent`），并递增 `cube_scheduler_external_http_score_outcomes_total{reason="other"}`（scorer 实例在热更新后仍存活）。有意关闭请优先用 `disable: true`（立即生效）；从 `enable_scorers` 去掉该名字只在 CubeMaster 重启后生效。 |
+| `disable` | 为 true 时即使已 enable 也是空操作；与 `weight` 一样热读。有意关闭请优先用 `disable: true`（立即生效）。**不要**在 `enable_scorers` 仍保留该名字时删掉整个 `plugin_conf.external_http_score` 块：`validateListedScorerPluginConfPresent` 会在启动与热加载时**拒绝**该配置（`preHandle` 失败；`CubeLog.Fatalf` **不会** `os.Exit`，因此旧 Config 继续生效，评分仍按旧块进行）。要停用该评分器：设 `disable: true`，或从 `enable_scorers` 去掉该名字并**重启** CubeMaster（选择器集合仅在启动时构建）。nil-`plugin_conf` / 日志类别 `plugin_conf_absent` 路径实质上是**测试 / 陈旧实例**场景：只有热加载成功同时去掉名字与块、而旧 scorer 实例仍留在内存直到重启时才会触发——并非「删块但保留名字」。 |
 
 ### 传输协议
 
