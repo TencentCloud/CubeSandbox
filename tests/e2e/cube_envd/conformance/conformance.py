@@ -276,7 +276,9 @@ def render_docs_table(declared: dict[str, Any]) -> str:
         "",
         "完整清单（含机器可读的允许范围）在",
         "[`tests/e2e/cube_envd/conformance/declared_differences.toml`](../tests/e2e/cube_envd/conformance/declared_differences.toml)；",
-        "对照套件跑出的实测结果见同目录 `RESULTS.md`。",
+        "对照套件的实测结果由 `conformance.py … --results RESULTS.md` 生成到同目录的",
+        "`RESULTS.md`（**生成物，不入库**；CI 把它作为 `cube-envd-conformance-results`",
+        "artifact 上传）。",
         DOC_END,
     ]
     return "\n".join(lines)

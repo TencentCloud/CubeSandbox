@@ -17,6 +17,24 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:49983/health
 # => 204
 ```
 
+## Why
+
+`envd` runs inside every sandbox and is the compatibility boundary between the
+E2B SDKs and the CubeSandbox runtime. Consuming it from `e2b-dev/infra` meant
+the roadmap, the fix cadence and the release schedule were owned by another
+project, and that the binary carried integration paths CubeSandbox never uses
+(Firecracker MMDS, Hyperloop, NFS volume init).
+
+`cube-envd` replaces it with a CubeSandbox-owned Rust implementation that keeps
+the wire contract: the protocol definitions under [`proto/`](./proto) stay
+SDK-compatible, and every place this implementation deliberately behaves
+differently from the Go baseline is enumerated with its reasoning under
+[Declared differences](#declared-differences) — a table generated from
+[`tests/e2e/cube_envd/conformance/declared_differences.toml`](../tests/e2e/cube_envd/conformance/declared_differences.toml)
+and checked in CI, so the claim cannot drift from the measurement. The upstream
+Go envd stays in the base image as `envd-go` and remains a runtime rollback via
+`ENVD_BIN` (see [Integration notes](#integration-notes)).
+
 ## Role in the System
 
 ```
@@ -240,33 +258,62 @@ unary JSON bodies are capped at 4 MiB and stream frames at 64 MiB,
 timeout, and per-process subscriber queues are bounded with slow subscribers
 dropped.
 
-## Repository Layout
+## Design
+
+The tree is a contract index and a dependency graph: a path states what is
+promised, an edge states who may call whom. Dependencies point one way only:
+
+```text
+app ──▶ {filesystem, process} ──▶ {connect, wire, rest, cors, compress} ──▶ {auth, paths, init, logging, version, compat}
+                   └──────────────▶ generated (usable by anyone; it depends on nothing)
+```
 
 ```
 cube-envd/
 ├── Cargo.toml              # Rust package manifest
 ├── Cargo.lock
-├── Makefile                # build/install/fmt/lint/test/proto-doc targets
+├── Makefile                # build/install/fmt/lint/test/proto-gen/proto-doc targets
 ├── build.rs                # generates Rust protobuf bindings at build time
 ├── rust-toolchain.toml     # pinned Rust toolchain (1.89)
-├── proto/
-│   ├── process/            # process.Process protobuf definitions
-│   └── filesystem/         # filesystem.Filesystem protobuf definitions
+├── proto/                  # protocol definitions the wire types mirror
+│   ├── process/            # process.Process
+│   └── filesystem/         # filesystem.Filesystem
 ├── src/
-│   ├── main.rs             # CLI entry point and HTTP server bootstrap
+│   ├── main.rs             # CLI entry point, HTTP server bootstrap, accept loop
+│   ├── lib.rs              # module declarations and #![forbid(unsafe_code)]
 │   ├── app.rs              # Axum router and shared application state
 │   ├── auth.rs             # Basic auth and local user resolution
-│   ├── paths.rs            # safe path resolution
-│   ├── connect.rs          # Connect protocol framing and errors
-│   ├── wire.rs             # protobuf JSON/domain conversions
+│   ├── paths.rs            # safe path resolution anchored on the user home
+│   ├── connect.rs          # Connect framing, error model, request limits
+│   ├── wire.rs             # protobuf JSON <-> domain conversions
+│   ├── rest.rs             # REST-surface error bodies (distinct from Connect)
+│   ├── cors.rs             # CORS response headers matching the baseline
+│   ├── compress.rs         # gzip negotiation for buffered JSON surfaces
+│   ├── compat.rs           # Go-compatible error vocabulary and exit strings
+│   ├── init.rs             # /init environment snapshot state
 │   ├── logging.rs          # JSON structured logging setup
+│   ├── version.rs          # the version constant (single source of truth)
 │   ├── process/            # process lifecycle, PTY, input/output streaming
-│   ├── filesystem/         # filesystem RPCs and file transfer
-│   └── generated/          # generated protobuf Rust types
-├── tests/                  # CLI, HTTP, RPC, and process integration tests
+│   ├── filesystem/         # filesystem RPCs, file transfer, watchers
+│   └── generated/          # generated protobuf Rust types (checked in)
+├── tests/                  # CLI, HTTP, RPC, process and layer-rule tests
+│   └── layer_rule.rs       # asserts the dependency directions above
 └── doc/
     └── cube-envd-api.md    # generated protocol reference
 ```
+
+The direction is asserted by
+[`tests/layer_rule.rs`](./tests/layer_rule.rs), not by the type system:
+`pub(crate)` is visible to every module at the same level, so a `use` pointing
+the wrong way still compiles and still passes `clippy` and `rustfmt`. The gate
+is a table of `(description, owning module, forbidden modules)` in that file —
+**a new layer is unconstrained until it gets a row there**.
+
+> **Run it with a `tests` target.** `cargo test --lib` / `--bins` skip
+> `tests/layer_rule.rs` and the rule silently stops being enforced. Use
+> `make cube-envd-test` (or a plain `cargo test`), which include it. The repo
+> has a precedent for this trap: `make hypervisor-test` passes `--lib --bins`
+> and therefore never runs that component's own `tests/integration.rs`.
 
 ## Build
 
@@ -307,6 +354,29 @@ The `cubesandbox-base` image is built from
 [`docker/Dockerfile.cube-base`](../docker/Dockerfile.cube-base); that
 Dockerfile compiles this crate and installs the resulting binary as
 `/usr/bin/envd`.
+
+## Integration notes
+
+- **Entrypoint contract.** [`docker/cube-entrypoint.sh`](../docker/cube-entrypoint.sh)
+  starts `${ENVD_BIN:-/usr/bin/envd} -port ${ENVD_PORT:-49983} ${ENVD_EXTRA_ARGS}`
+  in the background, then either `exec`s the user `CMD` or waits on envd. It
+  appends `-isnotfc` for E2B command-line compatibility; that flag is a no-op
+  here (see the [CLI](#cli) table).
+- **Install path.** The image ships both implementations as `/usr/bin/envd`
+  (this crate, the default) and `/usr/bin/envd-go` (the pinned upstream), so
+  `ENVD_BIN=/usr/bin/envd-go` is a runtime rollback that needs no rebuild. This
+  must stay a literal `/usr/bin/envd`: Cubelet collects the template's envd
+  version by exec'ing `envd --version`, so an `ENVD_BIN` override on its own
+  would leave the template annotated with the *other* implementation's version.
+  The per-template mechanics are in [`docker/README.md`](../docker/README.md).
+- **Keepalive cadence.** A quiet streaming RPC emits `keepalive` events so that
+  proxies and load balancers do not idle-close the connection while a long
+  silent command runs. The default is **90 s**, matching the Go baseline;
+  `Keepalive-Ping-Interval` (request header, in seconds) lowers it per call.
+  If your LB's idle timeout is shorter than the default — 60 s is a common
+  value — send that header rather than relying on the default. The baseline
+  behaviour is kept deliberately: see the aligned rows in
+  [Declared differences](#declared-differences).
 
 ## CLI
 
@@ -427,6 +497,11 @@ directory watching, auth/path resolution, and graceful shutdown.
 - [Custom Template Images](../docs/guide/tutorials/bring-your-own-image.md)
 - [Templates Overview](../docs/guide/templates.md)
 - [Protocol Documentation](./doc/cube-envd-api.md)
+- [Conformance harness](./../tests/e2e/cube_envd/conformance/README.md) — how the
+  Go-baseline comparison is captured, normalised and gated; source of the
+  [Declared differences](#declared-differences) table
+- [docker/README.md](../docker/README.md) — base image, the two envd
+  implementations and the `ENVD_BIN` rollback
 
 ## License
 
@@ -459,5 +534,7 @@ Apache-2.0 — see [LICENSE](../LICENSE) for details.
 
 完整清单（含机器可读的允许范围）在
 [`tests/e2e/cube_envd/conformance/declared_differences.toml`](../tests/e2e/cube_envd/conformance/declared_differences.toml)；
-对照套件跑出的实测结果见同目录 `RESULTS.md`。
+对照套件的实测结果由 `conformance.py … --results RESULTS.md` 生成到同目录的
+`RESULTS.md`（**生成物，不入库**；CI 把它作为 `cube-envd-conformance-results`
+artifact 上传）。
 <!-- cube-envd-declared-differences:end -->
