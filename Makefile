@@ -570,6 +570,13 @@ cube-envd-test: builder-image
 cube-envd-lint: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-envd && make lint'
 
+# doc/cube-envd-api.md is a checked-in generated artifact, so it needs the same
+# kind of gate as src/generated. It must run in the builder image: the gate
+# fails (rather than skips) when protoc-gen-doc is absent.
+.PHONY: cube-envd-proto-doc-check
+cube-envd-proto-doc-check: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-envd && make proto-doc-check'
+
 # Only unit tests (--lib --bins) run here; the tests/integration.rs target
 # needs a full VM. This does not pass /dev/kvm into the builder, so the
 # runtime-KVM vmm tests are not reached (see tests/unittest/run.sh

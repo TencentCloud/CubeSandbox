@@ -262,6 +262,19 @@ jobs:
           make cube-envd-lint \
             BUILDER_IMAGE="${{ steps.builder_image.outputs.image }}"
 
+      # cube-envd/doc/cube-envd-api.md 与 src/generated 一样是入库的生成物，但此前
+      # 没有任何 workflow 检查它：`make proto-doc` 在缺少 protoc-gen-doc 时静默跳过，
+      # 于是这份文档可以悄悄落后于 .proto。builder 镜像装了 protoc + protoc-gen-doc
+      # （docker/Dockerfile.builder），因此这里能真正把它卡住。
+      - name: Verify the generated protocol doc is up to date
+        if: matrix.component == 'cube-envd'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          make cube-envd-proto-doc-check \
+            BUILDER_IMAGE="${{ steps.builder_image.outputs.image }}"
+
   # Docker smoke build for release images that use repo-root context +
   # adjacent Dockerfile.dockerignore (catches context/ignore regressions).
   docker-smoke:

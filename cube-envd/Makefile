@@ -26,7 +26,7 @@ BINDIR ?= ../../_output/bin
 # 只导出业务 proto；google/ 下的 vendored well-known 类型仅作 import 依赖。
 PROTO_DOC_FILES := $(shell find proto -path '*/google/*' -prune -o -name '*.proto' -print | sort)
 
-.PHONY: build install version version-check fmt lint test proto-gen proto-gen-check proto-doc clean
+.PHONY: build install version version-check fmt lint test proto-gen proto-gen-check proto-doc proto-doc-check clean
 
 ##TARGET build: build static musl release cube-envd
 build:
@@ -90,6 +90,26 @@ proto-doc:
 	else \
 		printf '  %-8s %s\n' "Skip" "proto doc (missing protoc-gen-doc; run inside builder image)"; \
 	fi
+
+##TARGET proto-doc-check: fail when doc/cube-envd-api.md drifts from the .proto files
+##
+## The doc is a checked-in generated artifact, like src/generated. Without this
+## gate it can silently fall behind the schemas: proto-doc only rewrites it, and
+## nothing compares the result. A missing protoc-gen-doc is a FAILURE here, not a
+## skip — a gate that quietly does nothing is worse than no gate, and the builder
+## image ships the plugin.
+proto-doc-check:
+	@if ! command -v protoc-gen-doc >/dev/null 2>&1; then \
+		printf '  %-8s %s\n' "FAIL" "protoc-gen-doc is required for proto-doc-check; run inside the builder image" >&2; \
+		exit 1; \
+	fi
+	@$(MAKE) --no-print-directory proto-doc >/dev/null
+	@if ! git diff --quiet -- doc/cube-envd-api.md; then \
+		printf '  %-8s %s\n' "FAIL" "doc/cube-envd-api.md is out of date; run 'make -C cube-envd proto-doc' and commit the result" >&2; \
+		git --no-pager diff --stat -- doc/cube-envd-api.md >&2; \
+		exit 1; \
+	fi
+	@printf '  %-8s %s\n' "OK" "doc/cube-envd-api.md matches the .proto files"
 
 ##TARGET clean: remove build artifacts
 clean:
