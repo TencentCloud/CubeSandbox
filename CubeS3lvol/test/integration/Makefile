@@ -73,7 +73,8 @@ MODULE_DIR   = ../../module/bdev/s3lvol
 APPS = s3_client_test s3_spawner_test s3_thread_bounce_test s3_bs_dev_test \
        s3_journal_test s3_wal_test s3_cache_test s3_flush_test s3_export_test \
        s3_statefile_test s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
-       s3_copy_xml_test s3_pending_persist_test s3_active_nsid_test
+       s3_export_read_test s3_copy_xml_test s3_pending_persist_test \
+       s3_active_nsid_test
 
 # (a) minimal library set for the stubbed path
 STUB_SRCS      = spdk_thread_stub.c
@@ -155,6 +156,16 @@ s3_export_swap_test: s3_export_swap_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	$(CC) $(COMMON_CFLAGS) s3_export_swap_test.c \
 	    $(S3BSDEV_DIR)/libs3bsdev.a \
 	    $(AWS_LIBS) \
+	    -Wl,--start-group $(BLOB_SPDK_LIBS) -Wl,--end-group \
+	    $(BLOB_DPDK_ARGS) \
+	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
+
+# Whole-object export reads and per-key single-flight. It stubs the S3 calls,
+# but uses real SPDK threads so completion delivery and io_device teardown are
+# exercised without credentials.
+s3_export_read_test: s3_export_read_test.c $(S3BSDEV_DIR)/libs3bsdev.a
+	$(CC) $(COMMON_CFLAGS) s3_export_read_test.c \
+	    $(S3BSDEV_DIR)/libs3bsdev.a \
 	    -Wl,--start-group $(BLOB_SPDK_LIBS) -Wl,--end-group \
 	    $(BLOB_DPDK_ARGS) \
 	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
@@ -314,7 +325,7 @@ s3_checkpoint_test: s3_checkpoint_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 # Run only the tests that need no S3 credentials
 check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cache_test \
        s3_flush_test s3_export_test s3_statefile_test s3_local_dev_test \
-       s3_checkpoint_test s3_export_swap_test s3_copy_xml_test \
+       s3_checkpoint_test s3_export_swap_test s3_export_read_test s3_copy_xml_test \
        s3_pending_persist_test s3_active_nsid_test
 	./s3_spawner_test
 	./s3_thread_bounce_test
@@ -327,6 +338,7 @@ check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cach
 	./s3_local_dev_test
 	./s3_checkpoint_test
 	./s3_export_swap_test
+	./s3_export_read_test
 	./s3_copy_xml_test
 	./s3_pending_persist_test
 	./s3_active_nsid_test
