@@ -658,14 +658,15 @@ label values; cardinality stays within this registry (plus `unknown`).
 
 #### What it can show
 
-- Misconfigured or hot-reloaded `weight` values that became non-finite and were
-  dropped from the weighted blend.
+- Defense-in-depth drops when a hot-reloaded or mid-flight `weight` becomes
+  non-finite after load-time validation already passed.
 - Which allowlisted scorer is producing poison weights on the create path.
 
 #### What it cannot show
 
-- Negative plugin weights (rejected at config load / hot-reload `preHandle` for
-  every registered scorer, including `external_http_score`).
+- Negative / non-finite plugin weights at config load / hot-reload `preHandle`
+  (rejected for every registered scorer, including `external_http_score` and
+  `binpack_score`).
 - Zero / omitted weights that skip HTTP or admit score-0 candidates without
   non-finite detection.
 - Offline simulator report fields in this document.

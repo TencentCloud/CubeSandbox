@@ -2,7 +2,7 @@
   "schema_version": "plan_v1",
   "goal": "productization path + hard live evidence without touching PR branches",
   "baseline_sha": "2668a520878a1ecae1cef1aabd273796d95dca25",
-  "worktree": "D:/postgraduate/main-line/Job/Tencent/CubeSandbox-worktrees/topic1-productization-20260914-104856",
+  "worktree": "(local isolated worktree; path omitted from published pack)",
   "branch": "topic1/productization-20260914-104856",
   "backup": "backup/topic1-productization-pre-20260914-104856",
   "lanes": [

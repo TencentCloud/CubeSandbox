@@ -6,7 +6,7 @@
   "external_scorer_degradation": "PASS",
   "restore": "PASS",
   "repository_modified": false,
-  "github_writes": false,
+  "github_writes": true,
   "formal_override": false,
   "formal_binpack_remains": "VALID_NO_IMPROVEMENT",
   "updated_at": "2026-09-14T09:50:00+08:00",

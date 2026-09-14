@@ -1198,7 +1198,7 @@ scheduler:
 `
 	_, err := initConfigFromYAML(t, yamlBody)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "binpack_score.cpu_weight must be >= 0")
+	assert.Contains(t, err.Error(), "binpack_score.cpu_weight must be a finite number >= 0")
 }
 
 func TestInit_DisabledFactorScorerSkipsFactorWeightGate(t *testing.T) {
@@ -1242,7 +1242,7 @@ scheduler:
       binpack_score:
         weight: -1
 `,
-			wantErr: "binpack_score.weight must be >= 0",
+			wantErr: "binpack_score.weight must be a finite number >= 0",
 		},
 		{
 			name: "zero_disables",
@@ -1385,7 +1385,7 @@ scheduler:
         weight: -1
         enable_weight_factors: [mvm_num]
 `,
-			wantErr: "real_time_weighted_average.weight must be >= 0",
+			wantErr: "real_time_weighted_average.weight must be a finite number >= 0",
 		},
 		{
 			name:   "multifactor",
@@ -1403,7 +1403,7 @@ scheduler:
         weight: -1
         enable_weight_factors: [mvm_num]
 `,
-			wantErr: "multi_factor_weighted_average.weight must be >= 0",
+			wantErr: "multi_factor_weighted_average.weight must be a finite number >= 0",
 		},
 		{
 			name:   "image",
@@ -1421,7 +1421,7 @@ scheduler:
         weight: -1
         enable_weight_factors: [image_id]
 `,
-			wantErr: "image_score.weight must be >= 0",
+			wantErr: "image_score.weight must be a finite number >= 0",
 		},
 		{
 			name:   "affinity",
@@ -1438,7 +1438,7 @@ scheduler:
       affinity_score:
         weight: -1
 `,
-			wantErr: "affinity_score.weight must be >= 0",
+			wantErr: "affinity_score.weight must be a finite number >= 0",
 		},
 		{
 			name:   "external_http",
@@ -1452,6 +1452,83 @@ scheduler:
     plugin_conf:
       external_http_score:
         weight: -1
+        endpoint: "http://127.0.0.1:9"
+`,
+			wantErr: "external_http_score.weight must be a finite number >= 0",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := initConfigFromYAML(t, tc.yaml)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+func TestInit_NonFiniteScorerWeightsRejected(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "realtime_nan",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - real_time_weighted_average
+    resource_weights:
+      mvm_num: 1
+    plugin_conf:
+      real_time_weighted_average:
+        weight: .nan
+        enable_weight_factors: [mvm_num]
+`,
+			wantErr: "real_time_weighted_average.weight must be a finite number >= 0",
+		},
+		{
+			name: "binpack_inf",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - binpack_score
+    plugin_conf:
+      binpack_score:
+        weight: .inf
+`,
+			wantErr: "binpack_score.weight must be a finite number >= 0",
+		},
+		{
+			name: "binpack_cpu_nan",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - binpack_score
+    plugin_conf:
+      binpack_score:
+        weight: 1
+        cpu_weight: .nan
+`,
+			wantErr: "binpack_score.cpu_weight must be a finite number >= 0",
+		},
+		{
+			name: "external_http_neg_inf",
+			yaml: `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - external_http_score
+    plugin_conf:
+      external_http_score:
+        weight: -.inf
         endpoint: "http://127.0.0.1:9"
 `,
 			wantErr: "external_http_score.weight must be a finite number >= 0",

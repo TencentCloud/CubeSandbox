@@ -8,6 +8,7 @@
 
 - [Redis Key 命名规范](./redis-key-spec)——所有服务在共享 Redis 实例上必须遵循的统一命名空间：命名格式、归属划分、已注册 Key 清单、TTL 策略，以及各服务的 key 构造模块。
 - [Scheduler Profile 配置示例](./scheduler-profile-config-example)——CubeMaster 运行时 `scheduler.profile` / `binpack_score` 可复制 YAML 契约（不是离线模拟器模型；无在线性能断言）。
+- [External HTTP Score 运维最短路径](./external-http-score-operator)——HTTP scorer 演示的最短启用 / 观测 / 故障 / 回滚路径（指向 `CubeMaster/examples/external-http-score/VERIFY.md`）。
 
 ## 服务设计
 
@@ -18,6 +19,10 @@
 - [调度 Simulator 基准](./scheduler-simulator-benchmark)——一键离线 profile × workload 运行、报告输出与验收检查。
 - [调度评估指标](./scheduler-metrics)——指标定义、测量口径，以及 simulator 数字能证明与不能证明什么。
 - [调度基准报告 Schema](./scheduler-benchmark-report-schema)——JSON/Markdown 报告合同，含 `comparisons[].notes` 形态。
+
+## Topic1 在线补充
+
+- [Topic1 Live Supplement（2026-09-14）](/dev/topic1-live-supplement-20260914/)——面向 reviewer 的运维路径与机制证据结论包（**不**覆盖正式 `VALID_NO_IMPROVEMENT`）。
 
 ## 适合放在这里的内容
 
