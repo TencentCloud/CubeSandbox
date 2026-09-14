@@ -29,19 +29,26 @@ impl Stream {
         assert_eq!(output, expected);
     }
     async fn finish(&mut self) -> Vec<u8> {
+        self.finish_with_status().await.0
+    }
+    async fn finish_with_status(&mut self) -> (Vec<u8>, Vec<u8>, Value) {
         let mut output = vec![];
-        loop {
+        let mut stderr = vec![];
+        let end = loop {
             let (flags, event) = self.next_with_timeout(6).await;
             assert_eq!(flags, 0, "{event}");
-            if event["event"].get("end").is_some() {
-                break;
+            if let Some(end) = event["event"].get("end") {
+                break end.clone();
             }
             if let Some(data) = event["event"]["data"]["stdout"].as_str() {
                 output.extend(STANDARD.decode(data).unwrap());
             }
-        }
+            if let Some(data) = event["event"]["data"]["stderr"].as_str() {
+                stderr.extend(STANDARD.decode(data).unwrap());
+            }
+        };
         assert_eq!(self.next_with_timeout(6).await, (2, json!({})));
-        output
+        (output, stderr, end)
     }
 }
 fn write(client: &Client, port: u16, byte: u8, size: usize) -> JoinHandle<(u16, Value)> {
@@ -284,8 +291,18 @@ async fn queued_inputs_all_complete_and_term_does_not_cancel_writer() {
             .await,
             (200, json!({}))
         );
-        let mut received: Vec<(u8, usize)> =
-            serde_json::from_slice(&stream.finish().await).unwrap();
+        let (output, stderr, end) = stream.finish_with_status().await;
+        let stderr = String::from_utf8_lossy(&stderr);
+        assert!(
+            end["exited"] == true && end["exitCode"].as_i64().unwrap_or(0) == 0,
+            "reader failed (ignored TERM: {ignored}): end={end}, stderr={stderr}"
+        );
+        let mut received: Vec<(u8, usize)> = serde_json::from_slice(&output).unwrap_or_else(|error| {
+            panic!(
+                "invalid reader output (ignored TERM: {ignored}): {error}; end={end}, stderr={stderr}, stdout={}",
+                String::from_utf8_lossy(&output)
+            )
+        });
         received.sort_unstable();
         expected.sort_unstable();
         assert_eq!(
