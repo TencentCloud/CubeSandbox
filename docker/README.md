@@ -26,7 +26,35 @@ implementations and lets the deployment pick one:
 
 Selection is build-time (`--build-arg ENVD_IMPL=cube|go`) or runtime
 (`ENVD_BIN=/usr/bin/envd-go`, honoured by `cube-entrypoint.sh`) — the latter needs
-no rebuild, which is what makes the Go envd a real rollback. Installing the
+no rebuild, which is what makes the Go envd a real rollback.
+
+### Selecting the implementation in a template
+
+A template can pick the implementation without rebuilding anything, by passing
+`ENVD_BIN` in the template's `env`. Two things to know:
+
+1. **`env` replaces the image environment, it does not append to it.** CubeMaster
+   takes the override list verbatim instead of merging with the image config
+   (`CubeMaster/pkg/templatecenter/template_request.go:82-84`), so a minimal
+   `"env": ["ENVD_BIN=/usr/bin/envd-go"]` silently drops `ENVD_PORT`, `LANG`,
+   `LC_ALL` and `PATH`. Pass the whole list:
+
+   ```json
+   "env": ["ENVD_PORT=49983", "LANG=C.UTF-8", "LC_ALL=C.UTF-8",
+           "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+           "ENVD_BIN=/usr/bin/envd-go"]
+   ```
+
+2. **Verify which daemon is actually running, not which file exists.** Both
+   binaries live at fixed paths, so `/usr/bin/envd -version` reports the same
+   thing regardless of the selection — it is a property of the file, not of the
+   running process. Use a surface the two implementations answer differently:
+   `GET /metrics` returns `200` (JSON) on the Go envd and `501` on cube-envd,
+   and `-commit` differs (`b8ca332` vs the cube-envd build). `ls -l /proc/<pid>/exe`
+   inside the sandbox works too.
+
+   Verified on the deployment: the same image with `ENVD_BIN=/usr/bin/envd-go`
+   answers `/metrics` with 200 where the default template answers 501. Installing the
 selected implementation as the literal `/usr/bin/envd` matters: Cubelet collects
 the envd version by exec'ing `envd --version`, so an `ENVD_BIN` override alone
 would leave the template annotated with the other implementation's version.
