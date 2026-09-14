@@ -215,6 +215,7 @@ scheduler:
   profile: locality_combo
   profiles:
     locality_combo:
+      allow_dropped_filters: true
       filter:
         enable_filters:
           - cpu
@@ -260,6 +261,7 @@ scheduler:
   profile: binpack_combo
   profiles:
     binpack_combo:
+      allow_dropped_filters: true
       filter:
         enable_filters:
           - cpu
