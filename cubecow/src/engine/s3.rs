@@ -1629,7 +1629,9 @@ mod tests {
     // shift arithmetic.
     #[test]
     fn connect_backoff_doubles_then_holds_at_the_ceiling() {
-        let ms: Vec<u64> = (0..8).map(|r| connect_backoff(r).as_millis() as u64).collect();
+        let ms: Vec<u64> = (0..8)
+            .map(|r| connect_backoff(r).as_millis() as u64)
+            .collect();
         assert_eq!(ms, vec![100, 200, 400, 800, 1600, 2000, 2000, 2000]);
         // Far past the point where the shift would overflow: the ceiling, not a
         // panic and not a wrap.
@@ -1655,7 +1657,10 @@ mod tests {
             .expect_err("an endpoint that never appears is not an answer");
         let spent = started.elapsed();
 
-        assert!(matches!(err, CubecowError::PreconditionFailed(_)), "{err:?}");
+        assert!(
+            matches!(err, CubecowError::PreconditionFailed(_)),
+            "{err:?}"
+        );
         // It has to have waited at least one backoff: giving up at once is the
         // behaviour the retry loop exists to replace. And it must not run past
         // the budget, which a caller sizes against the upgrade window.
@@ -1674,8 +1679,7 @@ mod tests {
         use std::io::{BufRead, BufReader};
         use std::os::unix::net::UnixListener;
 
-        let path = std::env::temp_dir()
-            .join(format!("cubecow-retry-{}.sock", std::process::id()));
+        let path = std::env::temp_dir().join(format!("cubecow-retry-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
         // Bound only after the call below is already failing, or the retry this
