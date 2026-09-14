@@ -99,8 +99,11 @@
   "healthy_api_p95_delta_ms": -141.45,
   "notes": [
     "healthy-control delta is negative (−141.45 ms); do not read as a ≤50 ms scorer-cost bound — arm variance dominates.",
-    "Use delayed/timeout vs healthy for injected-cost observability, not healthy vs control as A/B of the scorer alone."
+    "Use delayed/timeout vs healthy for injected-cost observability, not healthy vs control as A/B of the scorer alone.",
+    "Producing binary: d5c6e2a82147d0abd9bfdcb9302287fd2638c3c0b43b28a3e8a6f6e3452202a6 (staged candidate). Not re-run against this PR head."
   ],
+  "evidence_binary_sha": "d5c6e2a82147d0abd9bfdcb9302287fd2638c3c0b43b28a3e8a6f6e3452202a6",
+  "arms_not_rerun_on_pr_head": true,
   "engineering_target_ms": 50,
   "engineering_target_met_by_healthy_control_delta": false
 }

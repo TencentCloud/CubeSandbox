@@ -61,6 +61,8 @@
       ]
     }
   ],
-  "note": "Behavioral evidence only: ok succeeds; timeout/non2xx/bad_score were fail-closed on this lab binary (in-tree path is fail-open on scorer errors). Per-mode Prometheus outcome_delta tables were removed — they used lab-binary names (cubemaster_scheduler_external_http_score_*) that do not match in-tree cube_scheduler_external_http_score_outcomes_total / request_duration_seconds (see CubeMaster/pkg/selector/score/externalhttpscore_metrics.go). Do not treat those legacy counters as describing this PR's implementation.",
+  "note": "Behavioral evidence only: ok succeeds; timeout/non2xx/bad_score were fail-closed on lab binary edf40cb9… (in-tree path is fail-open on scorer errors). Not re-run against this PR head. Per-mode Prometheus outcome_delta tables were removed — they used lab-binary names (cubemaster_scheduler_external_http_score_*) that do not match in-tree cube_scheduler_external_http_score_outcomes_total / request_duration_seconds. Do not treat those legacy counters as describing this PR's implementation.",
+  "evidence_binary_sha": "edf40cb9cbbbd1b32b029dcf599057803c58a41b91ae28d6074e0751a8e42fc9",
+  "arms_not_rerun_on_pr_head": true,
   "title": "外部HTTP scorer：正常/超时/非2xx/非法分退化"
 }

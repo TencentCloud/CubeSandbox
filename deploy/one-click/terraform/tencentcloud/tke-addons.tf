@@ -373,8 +373,11 @@ resource "kubernetes_secret" "cubemaster_conf" {
         }
         score = {
           # quota_cpu_usage (not cpu_usage): valid WeightFactorQuotaCpu token.
-          # Renaming a previously ignored typo changes scoring after terraform apply
-          # rewrites cubemaster-conf; existing clusters are unaffected until then.
+          # Previously ignored typo. Timing: next terraform apply that rewrites
+          # cubemaster-conf is enough — resource_weights are read live on every
+          # score pass after hot-reload; no CubeMaster restart. Unrelated infra
+          # applies can therefore change placement. CubeMaster-only upgrades
+          # that leave the secret untouched keep the old inert behaviour.
           enable_scorers = ["real_time_weighted_average"]
           resource_weights = {
             mvm_num          = 2

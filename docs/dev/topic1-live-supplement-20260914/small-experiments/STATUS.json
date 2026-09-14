@@ -9,7 +9,10 @@
   "github_writes": true,
   "formal_override": false,
   "formal_binpack_remains": "VALID_NO_IMPROVEMENT",
-  "updated_at": "2026-09-14T09:50:00+08:00",
+  "evidence_binary_sha": "edf40cb9cbbbd1b32b029dcf599057803c58a41b91ae28d6074e0751a8e42fc9",
+  "evidence_binary_note": "stock lab binary; emits cubemaster_scheduler_external_http_score_* (not in-tree cube_scheduler_*); not re-run against this PR head",
+  "arms_not_rerun_on_pr_head": true,
+  "updated_at": "2026-09-14T21:00:00+08:00",
   "reviewer_entry": "REVIEWER_SUPPLEMENT.md",
   "experiments": [
     {
