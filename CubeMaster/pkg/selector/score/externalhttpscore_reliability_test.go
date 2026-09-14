@@ -455,44 +455,30 @@ func TestExternalHTTPScoreHalfOpenAllowsSingleProbe(t *testing.T) {
 	}
 	time.Sleep(40 * time.Millisecond)
 
-	var wg sync.WaitGroup
-	errCh := make(chan error, 2)
-	wg.Add(2)
+	probeErr := make(chan error, 1)
 	go func() {
-		defer wg.Done()
 		_, err := scorer.Select(externalHTTPScoreTestCtx())
-		errCh <- err
+		probeErr <- err
 	}()
 	<-started
+	// Second Select must be rejected while probe 1 is still blocked in HTTP.
+	secondErr := make(chan error, 1)
 	go func() {
-		defer wg.Done()
 		_, err := scorer.Select(externalHTTPScoreTestCtx())
-		errCh <- err
+		secondErr <- err
 	}()
+	second := <-secondErr
+	if !IsFailClosed(second) || !errors.Is(second, errExternalHTTPScoreCircuitOpen) {
+		close(release)
+		t.Fatalf("concurrent half-open Select() = %v, want circuit_open FailClosedError", second)
+	}
 	close(release)
-	wg.Wait()
-	close(errCh)
-
+	first := <-probeErr
+	if first != nil {
+		t.Fatalf("half-open probe Select() error = %v, want success", first)
+	}
 	if hits.Load() != 2 {
 		t.Fatalf("endpoint hits = %d, want 2 (trip + one half-open probe)", hits.Load())
-	}
-	var sawClosed, sawSuccess bool
-	for err := range errCh {
-		if err == nil {
-			sawSuccess = true
-			continue
-		}
-		if IsFailClosed(err) && errors.Is(err, errExternalHTTPScoreCircuitOpen) {
-			sawClosed = true
-			continue
-		}
-		t.Fatalf("unexpected half-open error = %v", err)
-	}
-	if !sawSuccess {
-		t.Fatal("half-open probe did not succeed")
-	}
-	if !sawClosed {
-		t.Fatal("second concurrent half-open probe was not rejected")
 	}
 }
 

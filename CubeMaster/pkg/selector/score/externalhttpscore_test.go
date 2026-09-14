@@ -1333,13 +1333,13 @@ func TestExternalHTTPScoreFailureWarnIsRateLimited(t *testing.T) {
 	externalHTTPScoreNow = func() time.Time { return now }
 
 	err := fmt.Errorf("external_http_score unexpected status: 502")
-	logExternalHTTPScoreFailure(context.Background(), err)
-	logExternalHTTPScoreFailure(context.Background(), err)
+	logExternalHTTPScoreFailure(context.Background(), err, "")
+	logExternalHTTPScoreFailure(context.Background(), err, "")
 	if got := externalHTTPScoreWarnCount.Load(); got != 1 {
 		t.Fatalf("warn count = %d after two failures in window, want 1", got)
 	}
 	now = now.Add(externalHTTPScoreWarnInterval)
-	logExternalHTTPScoreFailure(context.Background(), err)
+	logExternalHTTPScoreFailure(context.Background(), err, "")
 	if got := externalHTTPScoreWarnCount.Load(); got != 2 {
 		t.Fatalf("warn count = %d after interval elapsed, want 2", got)
 	}
