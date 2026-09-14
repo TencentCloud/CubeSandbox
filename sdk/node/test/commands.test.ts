@@ -221,6 +221,22 @@ describe("Commands.run", () => {
     sb.close();
   });
 
+  it("exposes signal, OOM, and termination cause metadata", async () => {
+    const sb = await createSandbox();
+    handler = () => ({
+      status: 200,
+      buffer: Buffer.concat([
+        connectFrame(0, '{"event":{"end":{"exitCode":-1,"signal":9,"oomKilled":true,"killedBy":"oom"}}}'),
+        connectFrame(0x02, "{}"),
+      ]),
+    });
+    const result = await sb.commands.run("oom");
+    expect(result.signal).toBe(9);
+    expect(result.oomKilled).toBe(true);
+    expect(result.killedBy).toBe("oom");
+    sb.close();
+  });
+
   it("propagates an error delivered on the end-of-stream frame", async () => {
     const sb = await createSandbox();
     handler = () => ({

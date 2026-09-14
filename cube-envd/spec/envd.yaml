@@ -1,0 +1,404 @@
+# REST API snapshot of the upstream envd OpenAPI spec (e2b-dev/infra@2026.16,
+# the ref the base image pins). Kept for conformance reference only; NOT a
+# build input.
+
+openapi: 3.0.0
+info:
+  title: envd
+  version: 0.1.1
+  description: API for managing files' content and controlling envd
+
+tags:
+  - name: files
+
+paths:
+  /health:
+    get:
+      summary: Check the health of the service
+      responses:
+        "204":
+          description: The service is healthy
+
+  /metrics:
+    get:
+      summary: Get the stats of the service
+      security:
+        - AccessTokenAuth: []
+        - {}
+      responses:
+        "200":
+          description: The resource usage metrics of the service
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Metrics"
+
+  /init:
+    post:
+      summary: Set initial vars, ensure the time and metadata is synced with the host
+      security:
+        - AccessTokenAuth: []
+        - {}
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                volumeMounts:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/VolumeMount"
+                hyperloopIP:
+                  type: string
+                  description: IP address of the hyperloop server to connect to
+                envVars:
+                  $ref: "#/components/schemas/EnvVars"
+                accessToken:
+                  type: string
+                  description: Access token for secure access to envd service
+                  x-go-type: SecureToken
+                timestamp:
+                  type: string
+                  format: date-time
+                  description: The current timestamp in RFC3339 format
+                defaultUser:
+                  type: string
+                  description: The default user to use for operations
+                defaultWorkdir:
+                  type: string
+                  description: The default working directory to use for operations
+                caBundle:
+                  type: string
+                  description: PEM-encoded CA certificates to install into the system trust store (may contain multiple concatenated PEM blocks)
+      responses:
+        "204":
+          description: Env vars set, the time and metadata is synced with the host
+
+  /envs:
+    get:
+      summary: Get the environment variables
+      security:
+        - AccessTokenAuth: []
+        - {}
+      responses:
+        "200":
+          description: Environment variables
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnvVars"
+
+  /files:
+    get:
+      summary: Download a file
+      tags: [files]
+      security:
+        - AccessTokenAuth: []
+        - {}
+      parameters:
+        - $ref: "#/components/parameters/FilePath"
+        - $ref: "#/components/parameters/User"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/SignatureExpiration"
+      responses:
+        "200":
+          $ref: "#/components/responses/DownloadSuccess"
+        "400":
+          $ref: "#/components/responses/InvalidPath"
+        "401":
+          $ref: "#/components/responses/InvalidUser"
+        "404":
+          $ref: "#/components/responses/FileNotFound"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    post:
+      summary: Upload a file and ensure the parent directories exist. If the file exists, it will be overwritten.
+      tags: [files]
+      security:
+        - AccessTokenAuth: []
+        - {}
+      parameters:
+        - $ref: "#/components/parameters/FilePath"
+        - $ref: "#/components/parameters/User"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/SignatureExpiration"
+      requestBody:
+        $ref: "#/components/requestBodies/File"
+      responses:
+        "200":
+          $ref: "#/components/responses/UploadSuccess"
+        "400":
+          $ref: "#/components/responses/InvalidPath"
+        "401":
+          $ref: "#/components/responses/InvalidUser"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "507":
+          $ref: "#/components/responses/NotEnoughDiskSpace"
+
+  /files/compose:
+    post:
+      summary: Compose multiple files into a single file using zero-copy concatenation. Source files are deleted after successful composition.
+      tags: [files]
+      security:
+        - AccessTokenAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ComposeRequest"
+      responses:
+        "200":
+          description: Files composed successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EntryInfo"
+        "400":
+          $ref: "#/components/responses/InvalidPath"
+        "401":
+          $ref: "#/components/responses/InvalidUser"
+        "404":
+          $ref: "#/components/responses/FileNotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "507":
+          $ref: "#/components/responses/NotEnoughDiskSpace"
+
+components:
+  securitySchemes:
+    AccessTokenAuth:
+      type: apiKey
+      in: header
+      name: X-Access-Token
+
+  parameters:
+    FilePath:
+      name: path
+      in: query
+      required: false
+      description: Path to the file, URL encoded. Can be relative to the user's home directory (e.g. "file.txt" resolves to ~/file.txt).
+      schema:
+        type: string
+    User:
+      name: username
+      in: query
+      required: false
+      description: User for setting file ownership and resolving relative paths. Defaults to the sandbox's default user.
+      schema:
+        type: string
+    Signature:
+      name: signature
+      in: query
+      required: false
+      description: Signature used for file access permission verification.
+      schema:
+        type: string
+    SignatureExpiration:
+      name: signature_expiration
+      in: query
+      required: false
+      description: Unix timestamp (seconds) after which the signature expires. Only used with the signature parameter.
+      schema:
+        type: integer
+
+  requestBodies:
+    File:
+      required: true
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+            properties:
+              file:
+                type: string
+                format: binary
+        application/octet-stream:
+          schema:
+            type: string
+            format: binary
+            description: Raw file content. The 'path' query parameter is required when using this content type.
+
+  responses:
+    UploadSuccess:
+      description: The file was uploaded successfully.
+      content:
+        application/json:
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/EntryInfo"
+          example:
+            - path: "/home/user/hello.txt"
+              name: "hello.txt"
+              type: "file"
+
+    DownloadSuccess:
+      description: Entire file downloaded successfully.
+      content:
+        application/octet-stream:
+          schema:
+            type: string
+            format: binary
+            description: The raw file content
+    NotAcceptable:
+      description: Requested encoding is not supported
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: "no acceptable encoding found, supported: [identity, gzip]"
+            code: 406
+    InvalidPath:
+      description: Invalid path
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: "path '/home/user/docs' is a directory"
+            code: 400
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: "error opening file '/home/user/file.txt': permission denied"
+            code: 500
+    FileNotFound:
+      description: File not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: "path '/home/user/missing.txt' does not exist"
+            code: 404
+    InvalidUser:
+      description: Invalid user
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: "error looking up user 'nonexistent': user: unknown user nonexistent"
+            code: 401
+    NotEnoughDiskSpace:
+      description: Not enough disk space
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: "not enough disk space available"
+            code: 507
+
+  schemas:
+    Error:
+      required:
+        - message
+        - code
+      properties:
+        message:
+          type: string
+          description: Error message
+        code:
+          type: integer
+          description: Error code
+    EntryInfo:
+      required:
+        - path
+        - name
+        - type
+      properties:
+        path:
+          type: string
+          description: Path to the file
+        name:
+          type: string
+          description: Name of the file
+        type:
+          type: string
+          description: Type of the file
+          enum:
+            - file
+    EnvVars:
+      type: object
+      description: Environment variables to set
+      additionalProperties:
+        type: string
+    Metrics:
+      type: object
+      description: Resource usage metrics
+      properties:
+        ts:
+          type: integer
+          format: int64
+          description: Unix timestamp in UTC for current sandbox time
+        cpu_count:
+          type: integer
+          description: Number of CPU cores
+        cpu_used_pct:
+          type: number
+          format: float
+          description: CPU usage percentage
+        mem_total:
+          type: integer
+          description: Total virtual memory in bytes
+        mem_used:
+          type: integer
+          description: Used virtual memory in bytes
+        mem_cache:
+          type: integer
+          description: Cached memory (page cache) in bytes
+        mem_total_mib:
+          type: integer
+          description: Total virtual memory in MiB
+        mem_used_mib:
+          type: integer
+          description: Used virtual memory in MiB
+        disk_used:
+          type: integer
+          description: Used disk space in bytes
+        disk_total:
+          type: integer
+          description: Total disk space in bytes
+    ComposeRequest:
+      type: object
+      required:
+        - source_paths
+        - destination
+      properties:
+        source_paths:
+          type: array
+          items:
+            type: string
+          description: Ordered list of source file paths to concatenate
+        destination:
+          type: string
+          description: Destination file path for the composed file
+        username:
+          type: string
+          description: User for setting ownership and resolving relative paths
+    VolumeMount:
+      type: object
+      description: Volume mount configuration
+      additionalProperties: false
+      properties:
+        nfs_target:
+          type: string
+          description: Server target address
+        path:
+          type: string
+          description: Mount path inside the sandbox
+      required:
+        - nfs_target
+        - path

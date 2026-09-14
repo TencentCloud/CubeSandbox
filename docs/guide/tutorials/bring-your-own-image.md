@@ -178,9 +178,39 @@ Environment variables:
 | Variable           | Default             | Purpose                                              |
 | ------------------ | ------------------- | ---------------------------------------------------- |
 | `ENVD_PORT`        | `49983`             | Port `envd` listens on.                              |
-| `ENVD_EXTRA_ARGS`  | *(empty)*           | Extra flags passed after `-port`. `-isnotfc` is appended automatically if not already present, to skip Firecracker MMDS lookup. |
+| `ENVD_EXTRA_ARGS`  | *(empty)*           | Extra flags passed after `-port`. `-isnotfc` is appended automatically if not already present, to skip Firecracker MMDS lookup. Only flags cube-envd declares are accepted — anything else (including a typo) makes envd exit 2 at startup instead of silently running on defaults. `-cgroup-memory-max-bytes` is a cube-envd extension that sets the cgroup v2 `user`/`ptys` memory cap in bytes (it wins over `CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES`, and a zero or malformed value is a usage error); `-cmd` and `-cgroup-root` are recognized but not implemented yet: they are warned about and skipped. |
 | `ENVD_LOG_FILE`    | `/var/log/envd.log` | File that captures envd stdout/stderr. Use `-` to inherit the container stdio. |
 | `ENVD_BIN`         | `/usr/bin/envd`     | Override if you install envd elsewhere.              |
+
+### Tuning envd
+
+Three deployment knobs are ordinary flags, so pass them through
+`ENVD_EXTRA_ARGS`:
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `-blocking-threads N` | `64` | Blocking-pool thread cap, clamped to `4..=256`. The pool serves process reaping, uploads, filesystem RPCs and the `/files` body pipeline: raise it on guests with more memory, lower it under memory pressure. |
+| `-download-max-bodies N` | `2 × pool` (`128`) | Global cap on concurrent *large* `/files` downloads (a body that fits in one chunk is exempt). A request over the cap is refused with `503` instead of being queued. Never below the pipeline's own concurrency (all blocking producers plus all buffered bodies, `48` at the default pool), never above `1024`. |
+| `-cgroup-memory-max-bytes N` | *(unset)* | Requested cgroup v2 `user`/`ptys` memory cap, in bytes; a zero or malformed value is a usage error. |
+
+```bash
+docker run -e ENVD_EXTRA_ARGS="-blocking-threads 8 -download-max-bodies 64" ...
+```
+
+The equivalent environment variables (`CUBE_ENVD_BLOCKING_THREADS`,
+`CUBE_ENVD_DOWNLOAD_MAX_BODIES`, `CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES`) are read
+from envd's own environment, so they are the way to set the knobs from an image
+(`ENV`) or from whatever launches the container; a flag wins when both are
+given. A deployment that only controls `ENVD_EXTRA_ARGS` can therefore also set
+the cgroup cap, e.g. `ENVD_EXTRA_ARGS="-cgroup-memory-max-bytes 268435456"`
+(256 MiB). envd logs the effective values once at startup:
+
+```
+INFO runtime limits blocking_threads=64 download_blocking_producers=16 download_buffered_bodies=32 download_max_bodies=128 download_pool_bytes=33554432
+```
+
+`cube-envd/README.md` lists the full knob set, including the two
+`CUBE_ENVD_CGROUP_*` variables the daemon also honours.
 
 ### Starting envd manually
 

@@ -171,9 +171,36 @@ make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
 | 变量               | 默认值              | 说明                                                   |
 | ------------------ | ------------------- | ------------------------------------------------------ |
 | `ENVD_PORT`        | `49983`             | envd 监听的端口                                        |
-| `ENVD_EXTRA_ARGS`  | *(空)*              | 追加到 `-port` 之后的额外参数。若未包含 `-isnotfc`，脚本会自动追加以跳过 Firecracker MMDS 查询。 |
+| `ENVD_EXTRA_ARGS`  | *(空)*              | 追加到 `-port` 之后的额外参数。若未包含 `-isnotfc`，脚本会自动追加以跳过 Firecracker MMDS 查询。只接受 cube-envd 已声明的 flag，其它参数（含拼写错误）会让 envd 启动即 exit 2，而不是静默回退默认值；`-cgroup-memory-max-bytes` 是 cube-envd 扩展，用字节设置 cgroup v2 `user`/`ptys` 子树的内存上限（优先于 `CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES`，取 0 或非法值按用法错误退出）；`-cmd` 与 `-cgroup-root` 已识别但未实现，仅警告并跳过。 |
 | `ENVD_LOG_FILE`    | `/var/log/envd.log` | envd stdout/stderr 落盘位置；设为 `-` 则继承容器 stdio |
 | `ENVD_BIN`         | `/usr/bin/envd`     | 当 envd 安装在别处时覆盖                               |
+
+### 调优 envd
+
+有三个部署旋钮，它们是普通 flag，所以通过 `ENVD_EXTRA_ARGS` 传入：
+
+| Flag | 默认值 | 作用 |
+| --- | --- | --- |
+| `-blocking-threads N` | `64` | blocking 池线程上限，clamp 到 `4..=256`。该池服务于进程收尸、上传、filesystem RPC 和 `/files` body 流水线：内存宽裕的 guest 可调大，内存紧张可调小。 |
+| `-download-max-bodies N` | `2 × 池`（`128`） | 并发**大** `/files` 下载的全局上界（≤1 chunk 的 body 豁免）。超过上界的请求直接 `503`，不排队。不会低于流水线自身所需（全部 blocking 生产者 + 全部预读 body，默认池下为 `48`），也不会高于 `1024`。 |
+| `-cgroup-memory-max-bytes N` | *(未设置)* | 请求的 cgroup v2 `user`/`ptys` 内存上限，单位字节；取 0 或非法值按用法错误退出。 |
+
+```bash
+docker run -e ENVD_EXTRA_ARGS="-blocking-threads 8 -download-max-bodies 64" ...
+```
+
+对应的环境变量（`CUBE_ENVD_BLOCKING_THREADS`、`CUBE_ENVD_DOWNLOAD_MAX_BODIES`、
+`CUBE_ENVD_CGROUP_MEMORY_MAX_BYTES`）读的是 envd 自身进程环境，因此在镜像里用
+`ENV`、或由启动容器的组件传入都可以；两者同时给出时 flag 优先。只能控制
+`ENVD_EXTRA_ARGS` 的部署，也可以用
+`ENVD_EXTRA_ARGS="-cgroup-memory-max-bytes 268435456"`（256 MiB）设置它。envd
+启动时会打印生效值：
+
+```
+INFO runtime limits blocking_threads=64 download_blocking_producers=16 download_buffered_bodies=32 download_max_bodies=128 download_pool_bytes=33554432
+```
+
+完整旋钮清单（含 daemon 同样支持的 `CUBE_ENVD_CGROUP_*`）见 `cube-envd/README.md`。
 
 ### 自己手动拉起 envd
 

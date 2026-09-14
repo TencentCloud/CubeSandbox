@@ -1,0 +1,139 @@
+// Protocol snapshot of the upstream envd filesystem service definition
+// (e2b-dev/infra@2026.16, the ref the base image pins). Kept for conformance
+// reference only; NOT a build input — cube-envd hand-writes its serde types.
+
+syntax = "proto3";
+
+package filesystem;
+
+import "google/protobuf/timestamp.proto";
+
+service Filesystem {
+  rpc Stat(StatRequest) returns (StatResponse);
+  rpc MakeDir(MakeDirRequest) returns (MakeDirResponse);
+  rpc Move(MoveRequest) returns (MoveResponse);
+  rpc ListDir(ListDirRequest) returns (ListDirResponse);
+  rpc Remove(RemoveRequest) returns (RemoveResponse);
+
+  rpc WatchDir(WatchDirRequest) returns (stream WatchDirResponse);
+
+  // Non-streaming versions of WatchDir
+  rpc CreateWatcher(CreateWatcherRequest) returns (CreateWatcherResponse);
+  rpc GetWatcherEvents(GetWatcherEventsRequest) returns (GetWatcherEventsResponse);
+  rpc RemoveWatcher(RemoveWatcherRequest) returns (RemoveWatcherResponse);
+}
+
+message MoveRequest {
+  string source = 1;
+  string destination = 2;
+}
+
+message MoveResponse {
+  EntryInfo entry = 1;
+}
+
+message MakeDirRequest {
+  string path = 1;
+}
+
+message MakeDirResponse {
+  EntryInfo entry = 1;
+}
+
+message RemoveRequest {
+  string path = 1;
+}
+
+message RemoveResponse {}
+
+message StatRequest {
+  string path = 1;
+}
+
+message StatResponse {
+  EntryInfo entry = 1;
+}
+
+message EntryInfo {
+  string name = 1;
+  FileType type = 2;
+  string path = 3;
+  int64 size = 4;
+  uint32 mode = 5;
+  string permissions = 6;
+  string owner = 7;
+  string group = 8;
+  google.protobuf.Timestamp modified_time = 9;
+  // If the entry is a symlink, this field contains the target of the symlink.
+  optional string symlink_target = 10;
+}
+
+enum FileType {
+  FILE_TYPE_UNSPECIFIED = 0;
+  FILE_TYPE_FILE = 1;
+  FILE_TYPE_DIRECTORY = 2;
+  FILE_TYPE_SYMLINK = 3;
+}
+
+message ListDirRequest {
+  string path = 1;
+  uint32 depth = 2;
+}
+
+message ListDirResponse {
+  repeated EntryInfo entries = 1;
+}
+
+message WatchDirRequest {
+  string path = 1;
+  bool recursive = 2;
+}
+
+message FilesystemEvent {
+  string name = 1;
+  EventType type = 2;
+}
+
+message WatchDirResponse {
+  oneof event {
+    StartEvent start = 1;
+    FilesystemEvent filesystem = 2;
+    KeepAlive keepalive = 3;
+  }
+
+  message StartEvent {}
+
+  message KeepAlive {}
+}
+
+message CreateWatcherRequest {
+  string path = 1;
+  bool recursive = 2;
+}
+
+message CreateWatcherResponse {
+  string watcher_id = 1;
+}
+
+message GetWatcherEventsRequest {
+  string watcher_id = 1;
+}
+
+message GetWatcherEventsResponse {
+  repeated FilesystemEvent events = 1;
+}
+
+message RemoveWatcherRequest {
+  string watcher_id = 1;
+}
+
+message RemoveWatcherResponse {}
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  EVENT_TYPE_CREATE = 1;
+  EVENT_TYPE_WRITE = 2;
+  EVENT_TYPE_REMOVE = 3;
+  EVENT_TYPE_RENAME = 4;
+  EVENT_TYPE_CHMOD = 5;
+}
