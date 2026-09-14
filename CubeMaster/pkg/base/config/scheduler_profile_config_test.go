@@ -648,6 +648,36 @@ scheduler:
 	assert.NotNil(t, got.Scheduler.Score.ScorePluginConf.BinpackScore)
 }
 
+func TestInit_PartialBuiltinOverrideDoesNotInheritFilters(t *testing.T) {
+	// Same-name user key with only score must NOT inherit the built-in's filter list.
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: balanced_spread
+  filter:
+    enable_filters:
+      - cpu
+      - mem
+      - disk
+  profiles:
+    balanced_spread:
+      score:
+        resource_weights:
+          mvm_num: 5
+  score:
+    plugin_conf:
+      real_time_weighted_average:
+        weight: 1
+        enable_weight_factors:
+          - mvm_num
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	// Base filters preserved (no built-in filter replace); disk still present.
+	assert.Equal(t, []string{"cpu", "mem", "disk"}, got.Scheduler.Filter.EnableFilters)
+	assert.Equal(t, float64(5), got.Scheduler.Score.ResourceWeights["mvm_num"])
+}
+
 func TestInit_BuiltinOnStockFiltersRequiresAllowDropped(t *testing.T) {
 	// Stock CubeMaster configs enable cpu/mem/template_locality/realtime_create_num.
 	// Built-ins keep AllowDroppedFilters false, so selecting by name on that

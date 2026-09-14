@@ -114,6 +114,23 @@ Profile list). Still audit effective filters if you relied on `disk` /
 
 ## Upgrade notes (empty Profile / restart)
 
+**Release / upgrade footguns (read before rolling out):**
+
+- Listing a factor/affinity scorer or `external_http_score` in `enable_scorers`
+  without its `plugin_conf` block, or any **negative / non-finite** plugin
+  `weight`, now **fails `config.Init`** (CubeMaster will not boot). Hot-reload
+  logs FATAL via `CubeLog.Fatalf` (**does not** `os.Exit`) and keeps the
+  previous Config.
+- For the four legacy float64 scorers (`real_time_weighted_average`,
+  `multi_factor_weighted_average`, `affinity_score`, `image_score`), omitting
+  `weight` YAML-decodes to `0` and **`Disable()` skips the scorer** (master
+  still ran Select at weight 0). Set an explicit positive `weight` to keep them
+  active; load logs a Warn when weight is 0 without `disable: true`.
+- One-click Terraform `cpu_usage` → `quota_cpu_usage`: the next `terraform
+  apply` that rewrites `cubemaster-conf` changes placement after config
+  hot-reload — **no CubeMaster restart**. Unrelated infra applies can trigger
+  this.
+
 These Init checks run even with `scheduler.profile` empty and **exit CubeMaster
 on process start** (hot-reload only logs FATAL and keeps the previous Config):
 
@@ -355,7 +372,11 @@ If new sandboxes still concentrate on one machine in a multi-node cluster:
 `external_http_score` is an opt-in scoring plugin. When it appears in
 `score.enable_scorers`, CubeMaster POSTs a snapshot of the **current candidate
 node list** (after filters) to an operator-configured HTTP endpoint and blends
-the returned per-node scores into the weighted score sum. Enabling
+the returned per-node scores into the weighted score sum. That candidate set is
+the post-`pre_filter` list whose width is controlled by
+`scheduler.pre_select_num` (default `-1` = unlimited). Enabling this plugin on
+large clusters without bounding `pre_select_num` posts the full schedulable set
+on every create (200ms default timeout, no circuit breaker). Enabling
 `enable_scorers: external_http_score` **requires** a matching
 `score.plugin_conf.external_http_score` block; otherwise **config load fails**
 (`validateListedScorerPluginConfPresent`). It does **not** require

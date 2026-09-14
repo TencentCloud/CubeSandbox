@@ -1946,6 +1946,13 @@ func resolveSchedulerProfile(s *SchedulerConf) (SchedulerProfileConf, bool, erro
 					return builtin, true, nil
 				}
 				CubeLog.Warnf("scheduler profiles[%q] has no filter/score overlay; profile applies no selector changes", s.Profile)
+			} else if _, isBuiltin := builtinSchedulerProfiles()[s.Profile]; isBuiltin {
+				// Same-name user key with only filter *or* only score replaces the
+				// built-in entirely for apply purposes (builtin==false): unset
+				// sections are NOT inherited from the preset.
+				if profile.Filter == nil || profile.Score == nil {
+					CubeLog.Warnf("scheduler profiles[%q] partially overrides built-in preset; unset filter/score sections are NOT inherited from the built-in", s.Profile)
+				}
 			}
 			return profile, false, nil
 		}
@@ -2034,6 +2041,7 @@ func preHandSchedulerScore(config *Config) {
 			}
 		}
 		ApplyExternalHTTPScoreDefaults(config.Scheduler.Score.ScorePluginConf.ExternalHTTPScore)
+		warnLegacyZeroPluginWeights(&config.Scheduler.SchedulerConf)
 	}
 
 	if config.Scheduler.PostScore != nil {
@@ -2048,6 +2056,51 @@ func preHandSchedulerScore(config *Config) {
 		for _, v := range config.Scheduler.PostScore.NegativeWhiteList {
 			config.Scheduler.PostScore.NegativeWhiteListMap[v] = true
 		}
+	}
+}
+
+// warnLegacyZeroPluginWeights surfaces omitted/zero float64 plugin weights.
+// Those fields YAML-decode omitted keys to 0, which Disable() treats as off —
+// a placement change vs master (where weight 0 still ran Select). Explicit
+// disable: true is silent; weight 0 / omit without disable logs once per load.
+func warnLegacyZeroPluginWeights(s *SchedulerConf) {
+	if s == nil || s.Score == nil {
+		return
+	}
+	type named struct {
+		name    string
+		disable bool
+		weight  float64
+		present bool
+	}
+	pc := s.Score.ScorePluginConf
+	checks := []named{
+		{name: "real_time_weighted_average", present: pc.RealTimeWeightedAverage != nil},
+		{name: "multi_factor_weighted_average", present: pc.MultiFactorWeightedAverage != nil},
+		{name: "affinity_score", present: pc.AffinityScore != nil},
+		{name: "image_score", present: pc.ImageScore != nil},
+	}
+	if pc.RealTimeWeightedAverage != nil {
+		checks[0].disable = pc.RealTimeWeightedAverage.Disable
+		checks[0].weight = pc.RealTimeWeightedAverage.Weight
+	}
+	if pc.MultiFactorWeightedAverage != nil {
+		checks[1].disable = pc.MultiFactorWeightedAverage.Disable
+		checks[1].weight = pc.MultiFactorWeightedAverage.Weight
+	}
+	if pc.AffinityScore != nil {
+		checks[2].disable = pc.AffinityScore.Disable
+		checks[2].weight = pc.AffinityScore.Weight
+	}
+	if pc.ImageScore != nil {
+		checks[3].disable = pc.ImageScore.Disable
+		checks[3].weight = pc.ImageScore.Weight
+	}
+	for _, c := range checks {
+		if !c.present || c.disable || c.weight != 0 {
+			continue
+		}
+		CubeLog.Warnf("scheduler.score.plugin_conf.%s.weight is 0 (or omitted): scorer is Disable()-skipped; set an explicit positive weight to keep it active after upgrade (master still ran Select at weight 0)", c.name)
 	}
 }
 
