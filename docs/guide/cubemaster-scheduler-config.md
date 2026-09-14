@@ -313,7 +313,7 @@ scheduler:
 | `timeout` | Per-request HTTP timeout on the **synchronous create path**. Zero/omitted uses the default **200ms**. Positive values must be **≥ 1ms** and **≤ 2s**; negative values, sub-millisecond positives, and values above **2s** are detected at construction (one Warn) and then fail-open on each `Select` (not silently coerced; CubeMaster still starts). Use a duration string such as `200ms` / `1s` — a bare integer like `timeout: 200` is parsed as **200 nanoseconds** by YAML and fails the ≥1ms check. A hung sidecar can add up to this budget to every create attempt before fail-open (unless the circuit breaker is already open). |
 | `mode` | Optional operator-defined mode string included in the JSON request. |
 | `disable` | When true, the plugin is a no-op even if enabled in `enable_scorers`. Read live like `weight`. Removing the entire `plugin_conf.external_http_score` block while leaving the name in `enable_scorers` also stops scoring, but emits a rate-limited fail-open Warn (log category `plugin_conf_absent`) and increments `cube_scheduler_external_http_score_outcomes_total{reason="other"}` (scorer instances survive hot-reload). Prefer `disable: true` for a live off switch; removing the name from `enable_scorers` only takes effect after a CubeMaster restart. |
-| `failure_policy` | Sidecar failure handling. **Omitted / empty / unknown defaults to `fail_open`**: `Select` returns a plain error and `runScoreFilter` skips this scorer (historical create-path behavior). Set `fail_closed` to return a typed `FailClosedError` so `runScoreFilter` aborts Score and create fails closed (`ErrorCode_SelectNodesFailed` with a sanitized category message). |
+| `failure_policy` | Sidecar failure handling. **Omitted / empty / unknown defaults to `fail_open`**: `Select` returns a plain error and `runScoreFilter` skips this scorer (historical create-path behavior). Set `fail_closed` to return a typed `FailClosedError` so `runScoreFilter` **aborts the entire Score phase** (scheduler-wide, not plugin-local): already-blended scores from earlier scorers are discarded and create fails closed (`ErrorCode_SelectNodesFailed` with a sanitized category message). There is no way to scope `fail_closed` to a canary-only sidecar while other scorers continue. |
 | `circuit_breaker` | Consecutive sidecar failures open the circuit so later Score calls fail immediately instead of waiting for the full HTTP timeout. After `open_duration`, up to `half_open_max_probes` probes are allowed; success closes the circuit, failure reopens it. When the block is omitted, or a field is `0`, documented defaults apply on load and hot-reload (`failure_threshold: 5`, `open_duration: 5s`, `half_open_max_probes: 1`). Set `disable: true` to turn the breaker off (also clears that host's `circuit_state` series). Changing `endpoint` to a different host abandons the previous host's in-process breaker entry and gauge; a host that is simply never selected again without a host change or `disable: true` is not swept. |
 
 ### Wire contract
@@ -356,8 +356,15 @@ default **`failure_policy: fail_open`** (also when the field is omitted),
 sandbox creation). With **`failure_policy: fail_closed`**, the plugin returns a
 typed `FailClosedError` and `runScoreFilter` **aborts** the Score phase — including
 for empty/invalid `endpoint` / out-of-range `timeout` / non-finite `weight` on
-`Select`, not only for sidecar HTTP failures. (`plugin_conf` absent / nil selector
-context stay fail-open observability paths because no policy field is readable.)
+`Select`, not only for sidecar HTTP failures. That abort is **scheduler-wide**:
+any scorer that returns `FailClosedError` short-circuits the rest of Score (and
+create), and scores already computed for earlier roster scorers are discarded —
+operators cannot scope `fail_closed` to a single canary sidecar. (`plugin_conf`
+absent / nil selector context stay fail-open observability paths because no
+policy field is readable.) Independently of this plugin, `runScoreFilter` also
+samples each scorer's `Weight()` once before `Select` and refuses to blend
+non-finite weights or non-finite per-node scores so they cannot poison the
+weighted average / sort order.
 Caller cancel and parent-deadline abandonment do **not** increment the circuit
 breaker's consecutive-failure counter (they only release a held half-open probe).
 Outcomes increment
@@ -388,9 +395,13 @@ keep the default `fail_open` unless operators have sized concurrency below
 roughly `MaxConnsPerHost / p50 sidecar latency`. A failure-memory circuit
 breaker (defaults: threshold 5, open 5s, one half-open probe) short-circuits
 further HTTP after consecutive failures; set `circuit_breaker.disable: true` to
-turn it off. Zero / omitted breaker fields and removing the block restore the
-documented defaults on hot-reload. `fail_closed` create failures surface as
-`ErrorCode_SelectNodesFailed` (not `Unknown`) with a sanitized category message.
+turn it off (also clears that host's `circuit_state` series). Changing `endpoint`
+to a different host abandons the previous host's in-process breaker entry and
+gauge; a host that is simply never selected again without a host change or
+`disable: true` is not swept. Zero / omitted breaker fields and removing the
+block restore the documented defaults on hot-reload. `fail_closed` create
+failures surface as `ErrorCode_SelectNodesFailed` (not `Unknown`) with a
+sanitized category message.
 See also [External HTTP score (dev)](../dev/external-http-score.md).
 
 ## See also

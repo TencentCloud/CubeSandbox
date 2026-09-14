@@ -222,9 +222,16 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 		//
 		// Still call Select for non-finite weights so live-config scorers can
 		// emit their own invalid_weight observability; only refuse to blend
-		// NaN/Inf so they cannot poison totalPluginWeight or node scores.
+		// NaN/Inf weights so they cannot poison totalPluginWeight. Per-node
+		// scores are checked the same way before fold — a single NaN/Inf score
+		// would otherwise poison every node's final value via the weighted
+		// average and make AllSortByScore order unspecified.
 		// Negative weights remain blended for built-in scorers (historical
 		// penalty semantics); external_http_score rejects them in validate.
+		//
+		// FailClosedError is type-based and scheduler-wide: any scorer that
+		// returns it aborts the rest of Score (and create) immediately,
+		// discarding already-blended contributions from earlier scorers.
 		w := f.Weight()
 		tmpResult, err := f.Select(selCtx)
 		if err != nil {
@@ -237,6 +244,17 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 			continue
 		}
 		if math.IsNaN(w) || math.IsInf(w, 0) {
+			observeNonFiniteScoreWeight(selCtx, f.ID())
+			continue
+		}
+		nonFiniteScore := false
+		for _, n := range tmpResult {
+			if math.IsNaN(n.Score) || math.IsInf(n.Score, 0) {
+				nonFiniteScore = true
+				break
+			}
+		}
+		if nonFiniteScore {
 			observeNonFiniteScoreWeight(selCtx, f.ID())
 			continue
 		}

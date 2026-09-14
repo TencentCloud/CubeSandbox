@@ -281,6 +281,44 @@ func TestRunScoreFilterSkipsNonFiniteWeightBlend(t *testing.T) {
 	}
 }
 
+func TestRunScoreFilterSkipsNonFiniteNodeScoreBlend(t *testing.T) {
+	origPostScore := scheduler.postScore
+	defer func() {
+		scheduler.postScore = origPostScore
+	}()
+	scheduler.postScore = nil
+	resetScoreNonFiniteWeightWarnStateForTest()
+	t.Cleanup(resetScoreNonFiniteWeightWarnStateForTest)
+
+	nodeA := &node.Node{InsID: "node-a", MvmNum: 1}
+	selCtx := selctx.New("random")
+	selCtx.Ctx = context.Background()
+	selCtx.SetNodes(node.NodeList{nodeA})
+
+	poison := testScoreSelector{
+		weight: 1,
+		scores: node.NodeScoreList{
+			{InsID: "node-a", Score: math.NaN(), MvmNum: nodeA.MvmNum, OrigNode: nodeA},
+		},
+	}
+	active := testScoreSelector{
+		weight: 1,
+		scores: node.NodeScoreList{
+			{InsID: "node-a", Score: 50, MvmNum: nodeA.MvmNum, OrigNode: nodeA},
+		},
+	}
+	if err := runScoreFilter(selCtx, []sscore.Selector{poison, active}); err != nil {
+		t.Fatalf("runScoreFilter() error = %v, want nil", err)
+	}
+	if scoreNonFiniteWeightWarnCount.Load() != 1 {
+		t.Fatalf("non-finite score warns = %d, want 1", scoreNonFiniteWeightWarnCount.Load())
+	}
+	got := selCtx.LeastScoreNodes(-1)
+	if got.Len() != 1 || got[0].Score != 50 || math.IsNaN(got[0].Score) {
+		t.Fatalf("scores = %+v, want finite node-a=50 from active scorer only", got)
+	}
+}
+
 func TestRunScoreFilterNegativeWeightStillBlends(t *testing.T) {
 	origPostScore := scheduler.postScore
 	defer func() {

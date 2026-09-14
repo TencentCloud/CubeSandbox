@@ -311,7 +311,7 @@ scheduler:
 | `timeout` | **同步 create 路径**上的单次 HTTP 超时。为 0/省略时使用默认 **200ms**。正值必须 **≥ 1ms** 且 **≤ 2s**；负值、亚毫秒正值与超过 **2s** 的值会在构造时检出（一条 Warn），之后每次 `Select` fail-open（不会被静默改写；CubeMaster 仍会正常启动）。请使用 `200ms` / `1s` 这类 duration 字符串——裸整数如 `timeout: 200` 会被 YAML 解析成 **200 纳秒**并触发 ≥1ms 校验失败。sidecar 卡住时，每次 create 最多会多等这么久再 fail-open（电路已打开时立即短路）。 |
 | `mode` | 可选的运营自定义字符串，写入请求 JSON。 |
 | `disable` | 为 true 时即使已 enable 也是空操作；与 `weight` 一样热读。若热更新删掉整个 `plugin_conf.external_http_score` 块但 `enable_scorers` 仍保留该名字，评分会停止，但会发出限流的 fail-open Warn（日志类别 `plugin_conf_absent`），并递增 `cube_scheduler_external_http_score_outcomes_total{reason="other"}`（scorer 实例在热更新后仍存活）。有意关闭请优先用 `disable: true`（立即生效）；从 `enable_scorers` 去掉该名字只在 CubeMaster 重启后生效。 |
-| `failure_policy` | Sidecar 失败策略。**省略 / 空 / 未知默认 `fail_open`**：`Select` 返回普通错误，`runScoreFilter` 跳过该 scorer（历史 create 路径行为）。设为 `fail_closed` 时返回类型化 `FailClosedError`，`runScoreFilter` 中止 Score，创建失败关闭（`ErrorCode_SelectNodesFailed` + 脱敏类别消息）。 |
+| `failure_policy` | Sidecar 失败策略。**省略 / 空 / 未知默认 `fail_open`**：`Select` 返回普通错误，`runScoreFilter` 跳过该 scorer（历史 create 路径行为）。设为 `fail_closed` 时返回类型化 `FailClosedError`，`runScoreFilter` **中止整段 Score 阶段**（调度器级，而非插件局部）：此前已加权的其他 scorer 分数会被丢弃，创建失败关闭（`ErrorCode_SelectNodesFailed` + 脱敏类别消息）。无法把 `fail_closed` 限定为仅 canary sidecar 失败而让其余 scorer 继续。 |
 | `circuit_breaker` | 连续 sidecar 失败后打开熔断，后续 Score 立即失败而不再等待完整 HTTP 超时。经过 `open_duration` 后允许最多 `half_open_max_probes` 次探测；成功则关闭熔断，失败则重新打开。省略该块或字段为 `0` 时，加载与热更新都会应用文档默认值（`failure_threshold: 5`，`open_duration: 5s`，`half_open_max_probes: 1`）。设 `disable: true` 可关闭熔断（同时清除该 host 的 `circuit_state` 序列）。将 `endpoint` 改到不同 host 时会废弃上一 host 的进程内熔断条目与 gauge；若某 host 只是不再被选中、且未改 host / 未设 `disable: true`，则不会被清扫。 |
 
 ### 传输协议
@@ -351,8 +351,13 @@ panic）会返回错误。默认 **`failure_policy: fail_open`**（字段省略�
 配置 **`failure_policy: fail_closed`** 时，插件返回类型化 `FailClosedError`，
 `runScoreFilter` **中止** Score 阶段——包括空/非法 `endpoint`、越界 `timeout`、
 非有限 `weight` 等在 `Select` 上的校验失败，而不仅是 sidecar HTTP 失败。
+该中止是**调度器级**的：任意 scorer 返回 `FailClosedError` 都会短路后续 Score
+（以及 create），此前 roster 中已算出的分数会被丢弃——无法把 `fail_closed` 限定为
+单个 canary sidecar。
 （`plugin_conf` 缺失 / nil selector context 因读不到 policy 字段，仍走 fail-open
-可观测路径。）调用方 cancel 与父级 deadline 放弃**不会**递增熔断连续失败计数
+可观测路径。）与本插件无关地，`runScoreFilter` 还会在 `Select` 前只采样一次
+`Weight()`，并拒绝把非有限 weight 或非有限逐节点 score 混入加权平均，以免污染
+排序。调用方 cancel 与父级 deadline 放弃**不会**递增熔断连续失败计数
 （仅释放已占用的半开探测槽）。结果会递增
 `cube_scheduler_external_http_score_outcomes_total{reason=...}`（含
 `reason="success"`），HTTP 往返还会观察
