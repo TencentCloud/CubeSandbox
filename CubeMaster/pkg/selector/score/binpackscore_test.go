@@ -241,7 +241,7 @@ scheduler:
 	if err == nil {
 		t.Fatal("config.Init() error = nil, want negative weight rejection")
 	}
-	if !strings.Contains(err.Error(), "binpack_score.weight must be >= 0") {
+	if !strings.Contains(err.Error(), "binpack_score.weight must be a finite number >= 0") {
 		t.Fatalf("config.Init() error = %v, want negative weight rejection", err)
 	}
 }

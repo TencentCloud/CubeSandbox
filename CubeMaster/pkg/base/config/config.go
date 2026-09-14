@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -657,10 +658,15 @@ type ExternalHTTPScore struct {
 	// Endpoint is the sidecar URL. Empty skips the plugin. Non-empty values must
 	// be absolute http:// or https:// URLs with a host; other schemes (file,
 	// unix, missing scheme) fail construction / are rejected at Select.
+	// Plain http:// to a non-loopback host also fails config load unless
+	// AllowInsecure is true (loopback http remains allowed for local sidecars).
 	// May carry userinfo or query tokens; MarshalJSON and String redact those
 	// so config.Init dumps and CubeLog.Fatalf("%v", cfg) paths match the
 	// scorer's no-secret logging policy.
 	Endpoint string `yaml:"endpoint"`
+	// AllowInsecure permits a non-loopback http:// Endpoint. Default false:
+	// remote cleartext POSTs of the candidate inventory must opt in.
+	AllowInsecure bool `yaml:"allow_insecure"`
 	// Timeout is the per-request deadline on the synchronous create path.
 	// Zero/omitted defaults to 200ms at request time; negative values and
 	// values above 2s are rejected at construction / Select validation.
@@ -691,20 +697,22 @@ func (c ExternalHTTPScore) String() string {
 }
 
 type externalHTTPScoreWire struct {
-	Weight   *float64      `json:"Weight"`
-	Endpoint string        `json:"Endpoint"`
-	Timeout  time.Duration `json:"Timeout"`
-	Mode     string        `json:"Mode"`
-	Disable  bool          `json:"Disable"`
+	Weight        *float64      `json:"weight"`
+	Endpoint      string        `json:"Endpoint"`
+	AllowInsecure bool          `json:"AllowInsecure"`
+	Timeout       time.Duration `json:"Timeout"`
+	Mode          string        `json:"Mode"`
+	Disable       bool          `json:"Disable"`
 }
 
 func (c ExternalHTTPScore) redactedWire() externalHTTPScoreWire {
 	return externalHTTPScoreWire{
-		Weight:   c.Weight,
-		Endpoint: redactExternalHTTPScoreEndpoint(c.Endpoint),
-		Timeout:  c.Timeout,
-		Mode:     c.Mode,
-		Disable:  c.Disable,
+		Weight:        c.Weight,
+		Endpoint:      redactExternalHTTPScoreEndpoint(c.Endpoint),
+		AllowInsecure: c.AllowInsecure,
+		Timeout:       c.Timeout,
+		Mode:          c.Mode,
+		Disable:       c.Disable,
 	}
 }
 
@@ -1225,6 +1233,9 @@ func preHandleScheduler(config *Config) error {
 	if err := validateExternalHTTPScoreWeight(&config.Scheduler.SchedulerConf); err != nil {
 		return err
 	}
+	if err := validateExternalHTTPScoreEndpoint(&config.Scheduler.SchedulerConf); err != nil {
+		return err
+	}
 	// Negative plugin weights invert ranking in runScoreFilter; reject for every
 	// registered scorer that has an explicit plugin_conf block. This is not
 	// Profile-scoped: master would load the config, but negative weights invert
@@ -1505,9 +1516,10 @@ func applyBuiltinSchedulerProfileDefaults(s *SchedulerConf) {
 	}
 }
 
-// validateBinpackScoreWeight rejects negative plugin_conf.binpack_score.weight
-// at config load. Explicit weight:0 disables; omitted weight (nil pointer)
-// keeps the runtime default of 1; a missing block keeps the same default.
+// validateBinpackScoreWeight rejects negative / non-finite
+// plugin_conf.binpack_score.weight at config load. Explicit weight:0 disables;
+// omitted weight (nil pointer) keeps the runtime default of 1; a missing block
+// keeps the same default.
 func validateBinpackScoreWeight(s *SchedulerConf) error {
 	if s == nil || s.Score == nil {
 		return nil
@@ -1516,18 +1528,21 @@ func validateBinpackScoreWeight(s *SchedulerConf) error {
 	if cfg == nil {
 		return nil
 	}
-	if cfg.Weight != nil && *cfg.Weight < 0 {
-		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.weight must be >= 0, got %v (weight:0 disables; omit weight or the block for default 1)",
-			*cfg.Weight)
+	if cfg.Weight != nil {
+		w := *cfg.Weight
+		if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 {
+			return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.weight must be a finite number >= 0, got %v (weight:0 disables; omit weight or the block for default 1)",
+				w)
+		}
 	}
-	if cfg.CPUWeight < 0 {
-		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.cpu_weight must be >= 0, got %v", cfg.CPUWeight)
+	if math.IsNaN(cfg.CPUWeight) || math.IsInf(cfg.CPUWeight, 0) || cfg.CPUWeight < 0 {
+		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.cpu_weight must be a finite number >= 0, got %v", cfg.CPUWeight)
 	}
-	if cfg.MemWeight < 0 {
-		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.mem_weight must be >= 0, got %v", cfg.MemWeight)
+	if math.IsNaN(cfg.MemWeight) || math.IsInf(cfg.MemWeight, 0) || cfg.MemWeight < 0 {
+		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.mem_weight must be a finite number >= 0, got %v", cfg.MemWeight)
 	}
-	if cfg.MvmWeight < 0 {
-		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.mvm_weight must be >= 0, got %v", cfg.MvmWeight)
+	if math.IsNaN(cfg.MvmWeight) || math.IsInf(cfg.MvmWeight, 0) || cfg.MvmWeight < 0 {
+		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.mvm_weight must be a finite number >= 0, got %v", cfg.MvmWeight)
 	}
 	return nil
 }
@@ -1535,8 +1550,9 @@ func validateBinpackScoreWeight(s *SchedulerConf) error {
 // validateExternalHTTPScoreWeight rejects negative / non-finite
 // plugin_conf.external_http_score.weight at config load. Explicit weight:0 is a
 // staged inert no-op; omitted weight (nil pointer) is defaulted to 1 in
-// ApplyExternalHTTPScoreDefaults. Invalid endpoint/timeout remain construction
-// Warn + Select fail-open (not Init failures).
+// ApplyExternalHTTPScoreDefaults. Invalid timeout remains construction
+// Warn + Select fail-open (not an Init failure). Non-empty endpoints are
+// checked by validateExternalHTTPScoreEndpoint.
 func validateExternalHTTPScoreWeight(s *SchedulerConf) error {
 	if s == nil || s.Score == nil {
 		return nil
@@ -1552,17 +1568,70 @@ func validateExternalHTTPScoreWeight(s *SchedulerConf) error {
 	return nil
 }
 
-// validateSchedulerScorerPluginWeights rejects negative plugin_conf.<scorer>.weight
-// for every scorer that uses a plain float64 weight field. binpack_score and
-// external_http_score (*float64) are handled by validateBinpackScoreWeight /
-// validateExternalHTTPScoreWeight.
+// validateExternalHTTPScoreEndpoint rejects a non-empty endpoint that is not an
+// absolute http(s) URL, and rejects cleartext http:// to a non-loopback host
+// unless allow_insecure: true. Empty endpoint stays a Select-time fail-open.
+func validateExternalHTTPScoreEndpoint(s *SchedulerConf) error {
+	if s == nil || s.Score == nil {
+		return nil
+	}
+	cfg := s.Score.ScorePluginConf.ExternalHTTPScore
+	if cfg == nil || strings.TrimSpace(cfg.Endpoint) == "" {
+		return nil
+	}
+	if err := CheckExternalHTTPScoreEndpoint(cfg.Endpoint, cfg.AllowInsecure); err != nil {
+		return fmt.Errorf("scheduler.score.plugin_conf.external_http_score: %w", err)
+	}
+	return nil
+}
+
+// CheckExternalHTTPScoreEndpoint validates a non-empty sidecar URL.
+// Loopback http:// is allowed; remote http:// requires allowInsecure.
+func CheckExternalHTTPScoreEndpoint(endpoint string, allowInsecure bool) error {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return nil
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u == nil {
+		return fmt.Errorf("invalid endpoint (require absolute http/https URL with host)")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("invalid endpoint (require absolute http/https URL with host)")
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return fmt.Errorf("invalid endpoint (require absolute http/https URL with host)")
+	}
+	if scheme == "http" && !allowInsecure && !isLoopbackHTTPEndpointHost(u.Hostname()) {
+		return fmt.Errorf("endpoint %q uses cleartext http to a non-loopback host; use https or set allow_insecure: true", redactExternalHTTPScoreEndpoint(endpoint))
+	}
+	return nil
+}
+
+func isLoopbackHTTPEndpointHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// validateSchedulerScorerPluginWeights rejects negative / non-finite
+// plugin_conf.<scorer>.weight for every scorer that uses a plain float64 weight
+// field. binpack_score and external_http_score (*float64) are handled by
+// validateBinpackScoreWeight / validateExternalHTTPScoreWeight.
 func validateSchedulerScorerPluginWeights(s *SchedulerConf) error {
 	if s == nil || s.Score == nil {
 		return nil
 	}
 	check := func(name string, weight float64) error {
-		if weight < 0 {
-			return fmt.Errorf("scheduler.score.plugin_conf.%s.weight must be >= 0, got %v (weight:0 disables)", name, weight)
+		if math.IsNaN(weight) || math.IsInf(weight, 0) || weight < 0 {
+			return fmt.Errorf("scheduler.score.plugin_conf.%s.weight must be a finite number >= 0, got %v (weight:0 disables)", name, weight)
 		}
 		return nil
 	}
@@ -1591,9 +1660,10 @@ func validateSchedulerScorerPluginWeights(s *SchedulerConf) error {
 }
 
 // validateListedScorerPluginConfPresent rejects enable_scorers entries whose
-// required plugin_conf block is missing. binpack_score is exempt: omitting its
-// block keeps runtime defaults (same as NewBinpackScore). This runs for empty
-// and non-empty Profile so a typo cannot silently disable the score phase.
+// required plugin_conf block is missing, and rejects unknown scorer names on
+// both empty and non-empty Profile paths so a typo cannot silently disable the
+// score phase. binpack_score is exempt from the missing-block check: omitting
+// its block keeps runtime defaults (same as NewBinpackScore).
 func validateListedScorerPluginConfPresent(s *SchedulerConf) error {
 	if s == nil || s.Score == nil {
 		return nil
@@ -1604,9 +1674,7 @@ func validateListedScorerPluginConfPresent(s *SchedulerConf) error {
 		}
 		missing, known := scorerPluginConfMissing(s, name)
 		if !known {
-			// Unknown names are handled by validateEffectiveSchedulerSelectors
-			// under Profile; empty-profile still warns/skips at NewSelector.
-			continue
+			return fmt.Errorf("scheduler.score.enable_scorers lists unknown score %q", name)
 		}
 		if missing {
 			return fmt.Errorf("scheduler.score.enable_scorers lists %q but scheduler.score.plugin_conf.%s is missing",
@@ -1617,8 +1685,8 @@ func validateListedScorerPluginConfPresent(s *SchedulerConf) error {
 }
 
 // validateEffectiveSchedulerSelectors checks the final Filter/Score name lists
-// after Profile overlay. Empty-profile configs keep legacy warn-and-skip for
-// unknown base enable_scorers names at NewSelector time.
+// after Profile overlay. Unknown score names are also rejected earlier by
+// validateListedScorerPluginConfPresent on every path (including empty Profile).
 func validateEffectiveSchedulerSelectors(s *SchedulerConf) error {
 	if s == nil {
 		return nil

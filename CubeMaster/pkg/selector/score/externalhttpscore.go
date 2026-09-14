@@ -232,7 +232,8 @@ func externalHTTPScoreConfigFrom(global *config.Config) *config.ExternalHTTPScor
 }
 
 // validateExternalHTTPScoreConfig checks timeout and, when endpoint is set,
-// that it is an absolute http(s) URL with a host. An empty endpoint passes
+// that it is an absolute http(s) URL with a host (and that cleartext http to a
+// non-loopback host opts in via allow_insecure). An empty endpoint passes
 // validation; Select then fail-opens with empty_endpoint (for positive weight)
 // or stays silent for weight:0 / disable:true. Side-effect free: omitted weight
 // is defaulted in config.ApplyExternalHTTPScoreDefaults / preHandle, not here.
@@ -256,16 +257,8 @@ func validateExternalHTTPScoreConfig(cfg *config.ExternalHTTPScore) error {
 	if endpoint == "" {
 		return nil
 	}
-	u, err := url.Parse(endpoint)
-	if err != nil || u == nil {
-		return fmt.Errorf("external_http_score: invalid endpoint (require absolute http/https URL with host)")
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if scheme != "http" && scheme != "https" {
-		return fmt.Errorf("external_http_score: invalid endpoint (require absolute http/https URL with host)")
-	}
-	if strings.TrimSpace(u.Host) == "" {
-		return fmt.Errorf("external_http_score: invalid endpoint (require absolute http/https URL with host)")
+	if err := config.CheckExternalHTTPScoreEndpoint(endpoint, cfg.AllowInsecure); err != nil {
+		return fmt.Errorf("external_http_score: %w", err)
 	}
 	return nil
 }

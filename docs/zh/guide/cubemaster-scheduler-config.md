@@ -112,7 +112,10 @@ CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 
 - `enable_scorers` 列出了因子型 / affinity 评分器或 `external_http_score` 但缺少
   对应 `plugin_conf`
-- 任意 `plugin_conf.<scorer>.weight < 0`
+- `enable_scorers` 列出未知评分器名称（含拼写错误）
+- 任意 `plugin_conf.<scorer>.weight` 为负或非有限值（`NaN` / `Inf`）
+- `external_http_score.endpoint` 对非 loopback 主机使用明文 `http://`，且未设置
+  `allow_insecure: true`
 
 此前能带着静默无评分或反转排序启动的配置，升级后需先修好 YAML 才能启动。
 
@@ -358,14 +361,16 @@ scheduler:
         endpoint: "http://127.0.0.1:18080/score"
         timeout: 200ms   # 可选；为 0/省略时默认 200ms
         mode: ""         # 可选，原样转发给 sidecar
+        allow_insecure: false
         disable: false
 ```
 
 | 字段 | 含义 |
 |------|------|
-| `weight` | 在 `runScoreFilter` 加权平均（`Σ(score × weight) / Σ(weight)`）中的相对权重。返回分数必须与内置 scorer 使用相同的 **`[0, 100]`** 量纲；若 sidecar 返回归一化的 `0.0–1.0`，在相同 weight 下贡献大约只有内置 scorer 的 1%。**省略** `weight` 时，在配置加载 / 热更新（`preHandle`）阶段默认填为 **`1.0`**。**显式** `weight: 0` 与 `disable: true` 一样是静默空操作：`Select` 立即返回，不要求合法 endpoint，也不会发出 `empty_endpoint` / HTTP 失败信号。若要在保留真实 endpoint 的同时关闭插件，请用 `disable: true`。**负 / 非有限** weight 会在 `config.Init` / 热更新 `preHandle` 失败（与其他已注册评分器相同的失败关闭规则）；不会带着永久惰性 scorer 启动。热更新成功后每次 `Weight()` / `Select` 仍从 `plugin_conf` 热读；`runScoreFilter` 在 `Select` **之前**只采样一次 `Weight()`，避免一次尝试中间混入两代配置。 |
-| `endpoint` | Sidecar URL。在 **正 weight** 下为空（含仅空白）时 fail-open，发出限流 Warn（日志类别 `empty_endpoint`），并递增 `cube_scheduler_external_http_score_outcomes_total{reason="other"}`——不会静默跳过。`weight: 0` 或 `disable: true` 时不会走到该检查。非空时必须是带 host 的绝对 `http://` 或 `https://` URL；缺 scheme、`file://`、`unix://` 等会在构造时检出（一条 Warn），之后每次 `Select` fail-open（CubeMaster 仍会正常启动）。请求前会 trim 首尾空白。密钥更宜放在 sidecar 侧；若 URL 含 userinfo 或 query token，scorer 不会记入日志，且 `config.Init` 的 cfg dump 只会保留 scheme/host/path。 |
-| `timeout` | **同步 create 路径**上的单次 HTTP 超时。为 0/省略时使用默认 **200ms**。正值必须 **≥ 1ms** 且 **≤ 2s**；负值、亚毫秒正值与超过 **2s** 的值会在构造时检出（一条 Warn），之后每次 `Select` fail-open（不会被静默改写；CubeMaster 仍会正常启动）。请使用 `200ms` / `1s` 这类 duration 字符串——裸整数如 `timeout: 200` 会被 YAML 解析成 **200 纳秒**并触发 ≥1ms 校验失败。sidecar 卡住时，每次 create 最多会多等这么久再 fail-open。 |
+| `weight` | 在 `runScoreFilter` 加权平均（`Σ(score × weight) / Σ(weight)`）中的相对权重。返回分数必须与内置 scorer 使用相同的 **`[0, 100]`** 量纲；若 sidecar 返回归一化的 `0.0–1.0`，在相同 weight 下贡献大约只有内置 scorer 的 1%。**省略** `weight` 时，在配置加载 / 热更新（`preHandle`）阶段默认填为 **`1.0`**。**显式** `weight: 0` 与 `disable: true` 一样是静默空操作：`Select` 立即返回，不要求合法 endpoint，也不会发出 `empty_endpoint` / HTTP 失败信号。若要在保留真实 endpoint 的同时关闭插件，请用 `disable: true`。**负 / 非有限** weight 会在 `config.Init` / 热更新 `preHandle` 失败（与其他已注册评分器相同的失败关闭规则）；不会带着永久惰性 scorer 启动。热更新成功后每次 `Weight()` / `Select` 仍从 `plugin_conf` 热读；`runScoreFilter` 在 `Select` **之前**只采样一次 `Weight()`，使 NaN/Inf 守卫与加权使用同一值（一次尝试中间的热更新仍可能把该 weight 与 `Select` 内重新读取的分数配对）。 |
+| `endpoint` | Sidecar URL。在 **正 weight** 下为空（含仅空白）时 fail-open，发出限流 Warn（日志类别 `empty_endpoint`），并递增 `cube_scheduler_external_http_score_outcomes_total{reason="other"}`——不会静默跳过。`weight: 0` 或 `disable: true` 时不会走到该检查。非空时必须是带 host 的绝对 `http://` 或 `https://` URL；缺 scheme、`file://`、`unix://` 等会在非空 endpoint 时于 `config.Init` / 热更新 `preHandle` 失败。对非 loopback 主机的明文 **`http://`** 也会配置加载失败，除非设置 `allow_insecure: true`（loopback 的 `http://127.0.0.1` / `localhost` / `::1` 仍允许给本机 sidecar 用）。远程 sidecar 请优先 **`https://`**：create 路径会 POST 候选节点清单。请求前会 trim 首尾空白。密钥更宜放在 sidecar 侧；若 URL 含 userinfo 或 query token，scorer 不会记入日志，且 `config.Init` 的 cfg dump 只会保留 scheme/host/path。 |
+| `allow_insecure` | 为 `true` 时允许对非 loopback 主机使用明文 `http://`。默认 `false`。不会关闭 `https://` 的 TLS 校验。 |
+| `timeout` | **同步 create 路径**上的单次 HTTP 超时。为 0/省略时使用默认 **200ms**。正值必须 **≥ 1ms** 且 **≤ 2s**；负值、亚毫秒正值与超过 **2s** 的值会在构造时检出（一条 Warn），之后每次 `Select` fail-open（不会被静默改写；CubeMaster 仍会正常启动）。请使用 `200ms` / `1s` 这类 duration 字符串——裸整数如 `timeout: 200` 会被 YAML 解析成 **200 纳秒**并触发 ≥1ms 校验失败。sidecar 卡住时，**每次** create 最多会多等这么久再 fail-open；请把它算进 create 延迟预算，而不只是 scorer 本地旋钮。 |
 | `mode` | 可选的运营自定义字符串，写入请求 JSON。 |
 | `disable` | 为 true 时即使已 enable 也是空操作；与 `weight` 一样热读。若热更新删掉整个 `plugin_conf.external_http_score` 块但 `enable_scorers` 仍保留该名字，评分会停止，但会发出限流的 fail-open Warn（日志类别 `plugin_conf_absent`），并递增 `cube_scheduler_external_http_score_outcomes_total{reason="other"}`（scorer 实例在热更新后仍存活）。有意关闭请优先用 `disable: true`（立即生效）；从 `enable_scorers` 去掉该名字只在 CubeMaster 重启后生效。 |
 

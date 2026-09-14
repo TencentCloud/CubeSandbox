@@ -701,6 +701,59 @@ scheduler:
 	assert.Contains(t, err.Error(), "polarities cancel")
 }
 
+func TestInit_ExternalHTTPScoreRemoteHTTPRequiresAllowInsecure(t *testing.T) {
+	rejectYAML := `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - external_http_score
+    plugin_conf:
+      external_http_score:
+        weight: 1
+        endpoint: "http://sidecar.example/score"
+`
+	_, err := initConfigFromYAML(t, rejectYAML)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "allow_insecure")
+
+	okYAML := `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - external_http_score
+    plugin_conf:
+      external_http_score:
+        weight: 1
+        endpoint: "http://sidecar.example/score"
+        allow_insecure: true
+`
+	got, err := initConfigFromYAML(t, okYAML)
+	assert.NoError(t, err)
+	assert.True(t, got.Scheduler.Score.ScorePluginConf.ExternalHTTPScore.AllowInsecure)
+}
+
+func TestInit_LegacyScorerNaNWeightRejected(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - image_score
+    resource_weights:
+      image_id: 1
+    plugin_conf:
+      image_score:
+        weight: .nan
+        enable_weight_factors: [image_id]
+`
+	_, err := initConfigFromYAML(t, yamlBody)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "image_score.weight")
+	assert.Contains(t, err.Error(), "finite")
+}
+
 func TestInit_DirectEnabledScorerMissingPluginConfigAllowedWithoutProfile(t *testing.T) {
 	// Empty-profile: binpack_score may omit plugin_conf and use runtime defaults.
 	yamlBody := `common: {}
@@ -714,6 +767,22 @@ scheduler:
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"binpack_score"}, got.Scheduler.Score.EnableScorers)
 	assert.Nil(t, got.Scheduler.Score.ScorePluginConf.BinpackScore)
+}
+
+func TestInit_EmptyProfileUnknownScorerNameFails(t *testing.T) {
+	// Empty-profile typos used to Warn+skip in NewSelector and leave scoring off.
+	// Fail at config load so the empty-profile path stays fail-closed.
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - image_scor
+`
+	_, err := initConfigFromYAML(t, yamlBody)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "image_scor")
+	assert.Contains(t, err.Error(), "unknown score")
 }
 
 func TestInit_EmptyProfileMissingFactorPluginConfFails(t *testing.T) {
@@ -1198,7 +1267,7 @@ scheduler:
 `
 	_, err := initConfigFromYAML(t, yamlBody)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "binpack_score.cpu_weight must be >= 0")
+	assert.Contains(t, err.Error(), "binpack_score.cpu_weight must be a finite number >= 0")
 }
 
 func TestInit_DisabledFactorScorerSkipsFactorWeightGate(t *testing.T) {
@@ -1242,7 +1311,7 @@ scheduler:
       binpack_score:
         weight: -1
 `,
-			wantErr: "binpack_score.weight must be >= 0",
+			wantErr: "binpack_score.weight must be a finite number >= 0",
 		},
 		{
 			name: "zero_disables",
@@ -1385,7 +1454,7 @@ scheduler:
         weight: -1
         enable_weight_factors: [mvm_num]
 `,
-			wantErr: "real_time_weighted_average.weight must be >= 0",
+			wantErr: "real_time_weighted_average.weight must be a finite number >= 0",
 		},
 		{
 			name:   "multifactor",
@@ -1403,7 +1472,7 @@ scheduler:
         weight: -1
         enable_weight_factors: [mvm_num]
 `,
-			wantErr: "multi_factor_weighted_average.weight must be >= 0",
+			wantErr: "multi_factor_weighted_average.weight must be a finite number >= 0",
 		},
 		{
 			name:   "image",
@@ -1421,7 +1490,7 @@ scheduler:
         weight: -1
         enable_weight_factors: [image_id]
 `,
-			wantErr: "image_score.weight must be >= 0",
+			wantErr: "image_score.weight must be a finite number >= 0",
 		},
 		{
 			name:   "affinity",
@@ -1438,7 +1507,7 @@ scheduler:
       affinity_score:
         weight: -1
 `,
-			wantErr: "affinity_score.weight must be >= 0",
+			wantErr: "affinity_score.weight must be a finite number >= 0",
 		},
 		{
 			name:   "external_http",
