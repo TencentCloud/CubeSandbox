@@ -20,9 +20,9 @@
 - [调度评估指标](./scheduler-metrics)——指标定义、测量口径，以及 simulator 数字能证明与不能证明什么。
 - [调度基准报告 Schema](./scheduler-benchmark-report-schema)——JSON/Markdown 报告合同，含 `comparisons[].notes` 形态。
 
-## Topic1 在线补充
+## Topic1 live supplement（内部研究）
 
-- [Topic1 Live Supplement（2026-09-14）](/dev/topic1-live-supplement-20260914/)——面向 reviewer 的运维路径与机制证据结论包（**不**覆盖正式 `VALID_NO_IMPROVEMENT`）。
+- [Topic1 Live Supplement（2026-09-14）](/dev/topic1-live-supplement-20260914/)——**内部 / PR 审阅证据包**（STATUS/GATE/RESTORE 结论）。不是产品参考文档；未挂在开发者侧栏。**不**覆盖正式 `VALID_NO_IMPROVEMENT`。
 
 ## 适合放在这里的内容
 

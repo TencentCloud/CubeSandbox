@@ -109,6 +109,21 @@ CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 
 ## 升级说明（空 Profile / 重启）
 
+**发版 / 升级踩坑（滚动前必读）：**
+
+- 在 `enable_scorers` 中列出因子型 / affinity / `external_http_score` 但缺少对应
+  `plugin_conf`，或任意**负 / 非有限**插件 `weight`，现在会**导致 `config.Init`
+  失败**（CubeMaster 无法启动）。热加载写 FATAL（`CubeLog.Fatalf` **不会**
+  `os.Exit`）并保留旧 Config。
+- 四个遗留 float64 评分器（`real_time_weighted_average`、
+  `multi_factor_weighted_average`、`affinity_score`、`image_score`）省略 `weight`
+  会 YAML 解码为 `0`，且 **`Disable()` 会跳过该评分器**（master 在 weight 0 时仍会
+  跑 Select）。要保持活跃请显式写正的 `weight`；weight 为 0 且未设 `disable: true`
+  时，加载会打 Warn。
+- 一键 Terraform `cpu_usage` → `quota_cpu_usage`：下一次重写 `cubemaster-conf`
+  的 `terraform apply` 经配置热加载即可改变放置——**无需**重启 CubeMaster。无关
+  infra 的 apply 也可能触发。
+
 即使 `scheduler.profile` 为空，以下 Init 校验也会在**进程启动**时让 CubeMaster
 退出（热加载仅写 FATAL 并保留旧 Config）：
 
@@ -339,7 +354,9 @@ sudo tail -F /data/log/Cubelet/Cubelet-req.log
 
 `external_http_score` 是可选评分插件。当它出现在 `score.enable_scorers` 中时，
 CubeMaster 会把**当前候选节点列表**（经过 filter 之后）以 HTTP POST 发给运营配置的
-sidecar，并把返回的逐节点分数并入加权总分。启用
+sidecar，并把返回的逐节点分数并入加权总分。候选集宽度由
+`scheduler.pre_select_num` 控制（默认 `-1` = 不限制）；大集群若不限制该值，每次
+创建都会把整批可调度节点发给 sidecar（默认超时 200ms，无熔断）。启用
 `enable_scorers: external_http_score` **必须**同时提供匹配的
 `score.plugin_conf.external_http_score`；否则**配置加载失败**
 （`validateListedScorerPluginConfPresent`）。它**不**要求

@@ -20,9 +20,9 @@ If you are *using* CubeSandbox (deploying it, building templates, calling the AP
 - [Scheduler Evaluation Metrics](./scheduler-metrics) — metric definitions, measurement semantics, and what simulator numbers can and cannot prove.
 - [Scheduler Benchmark Report Schema](./scheduler-benchmark-report-schema) — JSON/Markdown report contract, including `comparisons[].notes` shape.
 
-## Topic1 live supplement
+## Topic1 live supplement (internal research)
 
-- [Topic1 Live Supplement (2026-09-14)](./topic1-live-supplement-20260914/) — reviewer-facing conclusion packs for operator path and live mechanism evidence (does **not** override formal `VALID_NO_IMPROVEMENT`).
+- [Topic1 Live Supplement (2026-09-14)](./topic1-live-supplement-20260914/) — **internal / PR-reviewer evidence pack** (STATUS/GATE/RESTORE summaries). Not product reference docs; not linked from the Developer Docs sidebar. Does **not** override formal `VALID_NO_IMPROVEMENT`.
 
 ## What belongs here
 
