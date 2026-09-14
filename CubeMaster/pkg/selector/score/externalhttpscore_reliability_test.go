@@ -420,6 +420,45 @@ func TestExternalHTTPScoreEndpointHostChangeClearsPreviousCircuit(t *testing.T) 
 	}
 }
 
+func TestExternalHTTPScoreRetiredBreakerDoesNotResurrectGauge(t *testing.T) {
+	resetExternalHTTPScoreRuntimeForTest(t)
+
+	const target = "abandoned.example:8080"
+	b := newExternalHTTPScoreBreaker(target, &config.ExternalHTTPScoreCircuitBreaker{
+		FailureThreshold: 1,
+		OpenDuration:     time.Hour,
+	})
+	externalHTTPScoreBreakersMu.Lock()
+	externalHTTPScoreBreakers[target] = b
+	externalHTTPScoreActiveTarget = target
+	externalHTTPScoreBreakersMu.Unlock()
+
+	b.recordFailure()
+	labels := gatherCircuitStateTargets(t)
+	if labels[target] != float64(circuitStateOpen) {
+		t.Fatalf("before clear: state = %v, want open; labels=%v", labels[target], labels)
+	}
+
+	clearExternalHTTPScoreCircuitTarget(target)
+	labels = gatherCircuitStateTargets(t)
+	if _, ok := labels[target]; ok {
+		t.Fatalf("after clear: abandoned target still exported; labels=%v", labels)
+	}
+
+	// In-flight caller still holds the old pointer after endpoint host change.
+	b.recordFailure()
+	b.mu.Lock()
+	b.state = circuitStateOpen
+	b.openedAt = time.Now().Add(-2 * time.Hour)
+	b.mu.Unlock()
+	_ = b.allow() // would publish half-open if not retired
+	b.recordSuccess()
+	labels = gatherCircuitStateTargets(t)
+	if _, ok := labels[target]; ok {
+		t.Fatalf("retired breaker resurrected circuit_state; labels=%v", labels)
+	}
+}
+
 func TestExternalHTTPScoreHalfOpenAllowsSingleProbe(t *testing.T) {
 	resetExternalHTTPScoreRuntimeForTest(t)
 

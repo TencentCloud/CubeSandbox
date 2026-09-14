@@ -54,6 +54,10 @@ type externalHTTPScoreBreaker struct {
 	failureThreshold    int
 	openDuration        time.Duration
 	halfOpenMaxProbes   int
+	// retired is set when this host is abandoned (endpoint change) or the
+	// breaker is disabled. In-flight callers may still hold the pointer and
+	// call record*/allow; they must not resurrect the Prometheus series.
+	retired bool
 }
 
 type noopExternalHTTPScoreBreaker struct{}
@@ -133,6 +137,11 @@ func clearExternalHTTPScoreCircuitTargetLocked(target string) {
 	if target == "" {
 		target = "invalid"
 	}
+	if b, ok := externalHTTPScoreBreakers[target]; ok {
+		b.mu.Lock()
+		b.retired = true
+		b.mu.Unlock()
+	}
 	delete(externalHTTPScoreBreakers, target)
 	if externalHTTPScoreActiveTarget == target {
 		externalHTTPScoreActiveTarget = ""
@@ -176,6 +185,15 @@ func (b *externalHTTPScoreBreaker) applyConfigLocked(cfg *config.ExternalHTTPSco
 	}
 }
 
+// publishCircuitStateLocked writes the gauge only while this breaker is still
+// the live entry for its target. Callers must hold b.mu.
+func (b *externalHTTPScoreBreaker) publishCircuitStateLocked(state int) {
+	if b.retired {
+		return
+	}
+	setExternalHTTPScoreCircuitState(b.target, state)
+}
+
 func (b *externalHTTPScoreBreaker) allow() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -185,7 +203,7 @@ func (b *externalHTTPScoreBreaker) allow() error {
 			b.state = circuitStateHalfOpen
 			b.halfOpenSince = time.Now()
 			b.halfOpenInFlight = 1
-			setExternalHTTPScoreCircuitState(b.target, circuitStateHalfOpen)
+			b.publishCircuitStateLocked(circuitStateHalfOpen)
 			return nil
 		}
 		return errExternalHTTPScoreCircuitOpen
@@ -219,7 +237,7 @@ func (b *externalHTTPScoreBreaker) recordSuccess() {
 	b.halfOpenInFlight = 0
 	b.halfOpenSince = time.Time{}
 	b.state = circuitStateClosed
-	setExternalHTTPScoreCircuitState(b.target, circuitStateClosed)
+	b.publishCircuitStateLocked(circuitStateClosed)
 }
 
 func (b *externalHTTPScoreBreaker) recordFailure() {
@@ -233,7 +251,7 @@ func (b *externalHTTPScoreBreaker) recordFailure() {
 		b.halfOpenSince = time.Time{}
 		b.state = circuitStateOpen
 		b.openedAt = time.Now()
-		setExternalHTTPScoreCircuitState(b.target, circuitStateOpen)
+		b.publishCircuitStateLocked(circuitStateOpen)
 		return
 	}
 	if b.halfOpenInFlight > 0 {
@@ -244,7 +262,7 @@ func (b *externalHTTPScoreBreaker) recordFailure() {
 		b.openedAt = time.Now()
 		b.halfOpenInFlight = 0
 		b.halfOpenSince = time.Time{}
-		setExternalHTTPScoreCircuitState(b.target, circuitStateOpen)
+		b.publishCircuitStateLocked(circuitStateOpen)
 	}
 }
 
