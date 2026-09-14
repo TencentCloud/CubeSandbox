@@ -133,6 +133,15 @@ Profile / 选择器列表需要重启 CubeMaster：配置热加载会重新跑 `
 并保留旧 Config，错误的 Profile 覆盖不会生效。`InitScheduler` 仍不会在热加载时
 重建 Filter/Score 切片，因此选择器集合变更仍需进程重启。
 
+一键 Terraform 生成的 CubeMaster Secret
+（`deploy/one-click/terraform/tencentcloud/tke-addons.tf`）把无效笔误
+`cpu_usage` 改成了 `quota_cpu_usage`（同时改 `resource_weights` 与
+`enable_weight_factors`）。旧键对不上任何 scorer 常量，因此分子和分母权重
+都是 0。apply 之后，Terraform 管理的集群会真正计入 `quota_cpu_usage`，
+启用因子权重总和从 6 变为 7。这与运行时 Profile 无关：空
+`scheduler.profile` 仍会吃到这份生成 Secret。已经手写 `quota_cpu_usage`
+的配置不受影响。
+
 `binpack_score` 是偏好更满节点的薄 Score 插件，通过在 `enable_scorers`
 中列出（直接或经 Profile）启用。插件参数仍放在
 `scheduler.score.plugin_conf.binpack_score`。不要把 `binpack_score` 与
@@ -399,7 +408,10 @@ scorer 失败（超时、非 2xx、重定向、畸形/过大响应、校验错�
 `cube_scheduler_external_http_score_request_duration_seconds{reason=...}`。
 固定 `reason`：`success`、`timeout`、`connection`、`http_status`、`invalid_json`、
 `missing_candidate`、`other`（空 endpoint、非法 weight 等配置类 / 未分类失败归入
-`other`）。失败在 scorer 边界记录日志（不记录 endpoint URL、URL userinfo、query
+`other`）。应对非 `success` 占比升高做告警，例如
+`sum(rate(cube_scheduler_external_http_score_outcomes_total{reason!="success"}[5m])) / sum(rate(cube_scheduler_external_http_score_outcomes_total[5m]))`。
+该比例偏高时，`runScoreFilter` 已丢掉该 scorer 并对其余权重重新归一化，
+外部信号不再参与排序，但 sandbox 创建仍会成功（fail-open）。失败在 scorer 边界记录日志（不记录 endpoint URL、URL userinfo、query
 token，也不记录请求/响应正文或密钥）。Warn 按脱敏后的失败类别大约每分钟至多一条
 （同类别后续失败降为 Debug），避免 sidecar 宕机时刷爆 create 路径日志。任一请求
 候选缺少分数会使整次尝试失败（反偏差：只给子集打分会系统性扭曲排序）。该调用在

@@ -609,7 +609,7 @@ func TestValidateFormat(t *testing.T) {
 func TestWriteReportsSelectsFilesByFormat(t *testing.T) {
 	t.Parallel()
 
-	report := simulator.Report{RunID: "test-run"}
+	report := simulator.Report{RunID: "scheduler-sim-test-run"}
 	cases := []struct {
 		format       string
 		wantJSON     bool
@@ -643,7 +643,7 @@ func TestWriteReportsSelectsFilesByFormat(t *testing.T) {
 func TestWriteReportsRemovesStaleFormatFiles(t *testing.T) {
 	t.Parallel()
 
-	report := simulator.Report{RunID: "test-run"}
+	report := simulator.Report{RunID: "scheduler-sim-test-run"}
 	outDir := t.TempDir()
 	if err := writeReports(outDir, formatBoth, report, nil); err != nil {
 		t.Fatalf("seed both formats: %v", err)
@@ -706,6 +706,61 @@ func TestRunCLIRemovesStaleFormatOnRerun(t *testing.T) {
 	}
 	if fileExists(t, filepath.Join(outDir, "report.md")) {
 		t.Fatal("stale report.md left after json-only rerun")
+	}
+}
+
+func TestWriteReportsLeavesUnrelatedReportFiles(t *testing.T) {
+	t.Parallel()
+
+	outDir := t.TempDir()
+	jsonPath := filepath.Join(outDir, "report.json")
+	mdPath := filepath.Join(outDir, "report.md")
+	if err := os.WriteFile(jsonPath, []byte(`{"run_id":"other-tool","ok":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mdPath, []byte("# Unrelated report\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report := simulator.Report{RunID: "scheduler-sim-test-run"}
+	var notice bytes.Buffer
+	if err := writeReports(outDir, formatJSON, report, &notice); err != nil {
+		t.Fatalf("writeReports(json): %v", err)
+	}
+	if fileExists(t, mdPath) {
+		raw, err := os.ReadFile(mdPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(raw, []byte("# Unrelated report\n")) {
+			t.Fatalf("unrelated report.md overwritten: %q", raw)
+		}
+	} else {
+		t.Fatal("unrelated report.md was deleted")
+	}
+	if strings.Contains(notice.String(), mdPath) {
+		t.Fatalf("removal notice = %q, did not expect unrelated markdown path", notice.String())
+	}
+	if !fileExists(t, jsonPath) {
+		t.Fatal("report.json missing after json write")
+	}
+
+	notice.Reset()
+	if err := os.WriteFile(jsonPath, []byte(`{"run_id":"other-tool","ok":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeReports(outDir, formatMarkdown, report, &notice); err != nil {
+		t.Fatalf("writeReports(markdown): %v", err)
+	}
+	raw, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `{"run_id":"other-tool","ok":true}` {
+		t.Fatalf("unrelated report.json overwritten: %q", raw)
+	}
+	if strings.Contains(notice.String(), jsonPath) {
+		t.Fatalf("removal notice = %q, did not expect unrelated json path", notice.String())
 	}
 }
 

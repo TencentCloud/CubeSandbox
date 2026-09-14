@@ -14,7 +14,8 @@ go run ./cmd/schedulerbench --out ./schedulerbench-report
 
 It writes `report.json` and `report.md` by default. Use `--format json`,
 `--format markdown`, or `--format both` to select output files. Unselected
-`report.json` / `report.md` files already in `--out` are deleted.
+`report.json` / `report.md` files already in `--out` are deleted only when
+they are identifiable as previous schedulerbench output.
 
 Use these verification commands from `CubeMaster`:
 

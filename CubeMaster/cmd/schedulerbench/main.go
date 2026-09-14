@@ -5,7 +5,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -20,12 +22,14 @@ import (
 )
 
 const (
-	formatJSON     = "json"
-	formatMarkdown = "markdown"
-	formatBoth     = "both"
-	defaultFormat  = formatBoth
-	verifyScope    = "default report structural and internal-consistency contract"
-	gitTimeout     = 2 * time.Second
+	formatJSON                  = "json"
+	formatMarkdown              = "markdown"
+	formatBoth                  = "both"
+	defaultFormat               = formatBoth
+	verifyScope                 = "default report structural and internal-consistency contract"
+	gitTimeout                  = 2 * time.Second
+	schedulerBenchRunIDPrefix   = "scheduler-sim-"
+	schedulerBenchMarkdownTitle = "# Scheduler Simulator Benchmark"
 )
 
 type provenanceResolver func() simulator.Provenance
@@ -53,7 +57,7 @@ func runCLIWithProvenance(args []string, stdout, stderr io.Writer, resolve prove
 		nodeCount = flags.Int("nodes", defaultConfig.NodeCount, fmt.Sprintf("simulated node count (%d-%d)", simulator.MinNodeCount, simulator.MaxNodeCount))
 		profiles  = flags.String("profiles", strings.Join(defaultConfig.Profiles, ","), "comma-separated profile list")
 		workloads = flags.String("workloads", strings.Join(defaultConfig.Workloads, ","), "comma-separated workload list")
-		format    = flags.String("format", defaultFormat, "report format: json, markdown, or both; unselected report.json/report.md files already present in --out are deleted (paths are printed when removed)")
+		format    = flags.String("format", defaultFormat, "report format: json, markdown, or both; unselected report.json/report.md files already present in --out are deleted only when identifiable as previous schedulerbench output (paths are printed when removed)")
 		verify    = flags.Bool("verify", false, "check the "+verifyScope+" (not arbitrary --profiles/--workloads subsets; checks structure and internal consistency only, not live scheduling performance or semantic equivalence to production scheduling)")
 	)
 	if err := flags.Parse(args); err != nil {
@@ -225,6 +229,16 @@ func noticeRemovedReport(notice io.Writer, path string) {
 }
 
 func removeReportFile(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !isSchedulerBenchReport(path, data) {
+		return false, nil
+	}
 	if err := os.Remove(path); err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
@@ -232,6 +246,23 @@ func removeReportFile(path string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func isSchedulerBenchReport(path string, data []byte) bool {
+	switch filepath.Base(path) {
+	case "report.json":
+		var probe struct {
+			RunID string `json:"run_id"`
+		}
+		if json.Unmarshal(data, &probe) != nil {
+			return false
+		}
+		return strings.HasPrefix(probe.RunID, schedulerBenchRunIDPrefix)
+	case "report.md":
+		return bytes.HasPrefix(bytes.TrimSpace(data), []byte(schedulerBenchMarkdownTitle))
+	default:
+		return false
+	}
 }
 
 func splitCSV(in, kind string) ([]string, error) {

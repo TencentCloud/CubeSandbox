@@ -31,9 +31,12 @@ The command writes:
 
 Use `--format json`, `--format markdown`, or `--format both` to select the
 output file set. The default is `both`. `--out` is treated as a directory the
-CLI owns: a format that is not selected deletes any pre-existing
-`report.json` or `report.md` in that directory (`--format json` therefore
-removes a stale `report.md`). Use a fresh directory if you need to keep both.
+CLI owns: a format that is not selected deletes a pre-existing
+`report.json` or `report.md` **only when that file is identifiable as a
+previous schedulerbench report** (`run_id` prefix `scheduler-sim-` for JSON,
+title `# Scheduler Simulator Benchmark` for Markdown). Unrelated files with
+those names are left in place. `--format json` therefore removes a stale
+tool-owned `report.md`. Use a fresh directory if you need to keep both.
 
 The default run is deterministic and records the seed, node count, workloads,
 profiles, source provenance, and metric schema in both reports. `--nodes`

@@ -13,7 +13,8 @@ go run ./cmd/schedulerbench --out ./schedulerbench-report
 
 默认写出 `report.json` 与 `report.md`。可用 `--format json`、
 `--format markdown` 或 `--format both` 选择输出文件。未选中的
-`report.json` / `report.md` 若已存在于 `--out` 目录，会被删除。
+`report.json` / `report.md` 仅在能识别为先前 schedulerbench 输出时才会
+从 `--out` 目录删除。
 
 在 `CubeMaster` 下使用以下验证命令：
 

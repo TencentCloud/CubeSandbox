@@ -19,7 +19,7 @@
 | `--nodes` | `4`（`DefaultConfig().NodeCount`） | 模拟节点数；支持范围为 **1–4**。CLI 显式传入 `--nodes 0` 为非法（库侧零值 `Config{}` 仍默认到 4）。 |
 | `--profiles` | `default,balanced_spread,template_locality_first,binpack_utilization` | 逗号分隔的 Profile 列表 |
 | `--workloads` | `burst_short_lived,same_template_repeated,mixed_size` | 逗号分隔的 workload 列表 |
-| `--format` | `both` | 输出格式：`json`、`markdown` 或 `both` |
+| `--format` | `both` | 输出格式：`json`、`markdown` 或 `both`。未选中的 `report.json` / `report.md` 仅在能识别为先前 schedulerbench 输出时才会删除。 |
 | `--verify` | `false` | 写报告前检查默认报告的结构与内部一致性；不验证实时性能 |
 
 常用命令：

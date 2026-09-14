@@ -144,6 +144,17 @@ in-memory Config. On failure it logs FATAL (CubeLog.Fatalf does **not**
 applied. `InitScheduler` still does not rebuild Filter/Score slices on reload,
 so selector-set changes need a process restart.
 
+The one-click Terraform CubeMaster Secret
+(`deploy/one-click/terraform/tencentcloud/tke-addons.tf`) replaces the inert
+typo `cpu_usage` with `quota_cpu_usage` in both `resource_weights` and
+`enable_weight_factors`. The old key matched no scorer constant, so it
+contributed 0 to both the weighted numerator and the factor-weight
+denominator. After apply, Terraform-managed clusters add a
+`quota_cpu_usage` term and the enabled-factor total goes from 6 to 7.
+This is independent of runtime Profiles: an empty `scheduler.profile`
+still picks up the generated Secret. Hand-written configs that already
+used `quota_cpu_usage` are unchanged.
+
 `binpack_score` is a thin Score-phase plugin that prefers fuller nodes. It is
 enabled by listing `binpack_score` in `enable_scorers` (directly or via a
 Profile). Plugin params stay under `scheduler.score.plugin_conf.binpack_score`.
@@ -416,7 +427,12 @@ and continues scheduling (**fail-open** for sandbox creation). Outcomes incremen
 `cube_scheduler_external_http_score_request_duration_seconds{reason=...}`.
 Fixed `reason` values: `success`, `timeout`, `connection`, `http_status`,
 `invalid_json`, `missing_candidate`, `other` (config / generic failures such as
-empty endpoint, invalid weight, or unclassified errors land in `other`). Failures
+empty endpoint, invalid weight, or unclassified errors land in `other`).
+Alert on a rising share of non-`success` outcomes, for example
+`sum(rate(cube_scheduler_external_http_score_outcomes_total{reason!="success"}[5m])) / sum(rate(cube_scheduler_external_http_score_outcomes_total[5m]))`.
+When that ratio is high, `runScoreFilter` has dropped this scorer and
+renormalized the remaining weights, so ranking proceeds without the
+external signal even though sandbox creates still succeed (fail-open). Failures
 are logged at the scorer boundary without endpoint URLs, URL userinfo, query
 tokens, or request/response bodies; Warn is rate-limited to about one line per
 sanitized failure category per minute (further failures stay at Debug) so a down

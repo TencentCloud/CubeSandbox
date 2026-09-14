@@ -24,7 +24,7 @@ Current CLI flags (`CubeMaster/cmd/schedulerbench/main.go`):
 | `--nodes` | `4` (`DefaultConfig().NodeCount`) | Simulated node count; supported values are **1–4**. Explicit CLI `--nodes 0` is invalid (library zero-value `Config{}` still defaults to 4). |
 | `--profiles` | `default,balanced_spread,template_locality_first,binpack_utilization` | Comma-separated profile list |
 | `--workloads` | `burst_short_lived,same_template_repeated,mixed_size` | Comma-separated workload list |
-| `--format` | `both` | Output format: `json`, `markdown`, or `both` |
+| `--format` | `both` | Output format: `json`, `markdown`, or `both`. Unselected `report.json` / `report.md` are removed only when identifiable as previous schedulerbench output. |
 | `--verify` | `false` | Before writing, check the default report's structure and internal consistency; this does not validate live performance |
 
 Common commands:
