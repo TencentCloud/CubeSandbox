@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# Sourcing exposes helpers only; execute the script (or call main) to configure GRUB.
+
 # Re-exec under bash if the script was invoked through /bin/sh. This keeps
 # [[ ]] and pipefail working even on systems where /bin/sh is dash.
 if [ -z "${BASH_VERSION:-}" ]; then

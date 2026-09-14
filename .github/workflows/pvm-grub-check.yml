@@ -1,0 +1,46 @@
+name: PVM GRUB Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'deploy/pvm/grub/**'
+      - '.github/workflows/pvm-grub-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pvm-grub-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check shell syntax
+        run: |
+          for script in deploy/pvm/grub/*.sh; do
+            bash -n "$script"
+          done
+      - name: Run GRUB regression tests
+        shell: bash
+        run: |
+          shopt -s nullglob
+          tests=(deploy/pvm/grub/test-*.sh)
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo '::error::no GRUB tests found'
+            exit 1
+          fi
+          status=0
+          for test in "${tests[@]}"; do
+            echo "::group::${test}"
+            if ! bash "$test"; then
+              echo "::error file=${test}::test failed"
+              status=1
+            fi
+            echo '::endgroup::'
+          done
+          exit "$status"

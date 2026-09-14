@@ -103,3 +103,25 @@ if [[ "${consoles[*]}" != 'console=ttyS0,115200 console=tty0' ]]; then
     exit 1
 fi
 printf 'ok: production defaults retain both intended consoles in order\n'
+
+# Independent expectations: do not derive these from default_grub_cmdline.
+# Count by key so a conflicting second value cannot hide behind a valid one.
+for expected in mitigations=on module.sig_enforce=1 kvm.nx_huge_pages=never \
+    cgroup.memory=nokmem systemd.unified_cgroup_hierarchy=1 \
+    transparent_hugepage=never pti=off; do
+    count=0
+    for param in "${production_params[@]}"; do
+        if [[ "${param%%=*}" == "${expected%%=*}" ]]; then
+            if [[ "$param" != "$expected" ]]; then
+                printf 'FAIL: expected %s, got %s\n' "$expected" "$param" >&2
+                exit 1
+            fi
+            count=$((count + 1))
+        fi
+    done
+    if [[ "$count" -ne 1 ]]; then
+        printf 'FAIL: expected exactly one %s, got %s\n' "$expected" "$count" >&2
+        exit 1
+    fi
+done
+printf 'ok: critical production parameters match independent expectations\n'
