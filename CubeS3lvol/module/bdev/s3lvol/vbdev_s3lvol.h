@@ -470,6 +470,13 @@ struct s3lvol_active_entry {
 	char     uuid[SPDK_UUID_STRING_LEN];
 	uint32_t subsys;
 	uint32_t nsid;
+	/** Whether a namespace for this entry exists in *this* process. The file
+	 * records the layout a restart has to reproduce; it says nothing about
+	 * whether that layout is up yet, and the loader fills the list with a
+	 * backing file that predates the process. Only a completed attach sets
+	 * this, so a restore attaches instead of answering "already active" off
+	 * a record it has just read. */
+	bool     attached;
 };
 
 /**
@@ -492,7 +499,9 @@ const struct s3lvol_active_entry *s3lvol_active_find(const char *name);
 const struct s3lvol_active_entry *s3lvol_active_find_by_nsid(uint32_t subsys,
 							uint32_t nsid);
 
-/** Add or update an entry and persist. Rolls back in memory if the write fails. */
+/** Add or update an entry, mark it attached and persist. Rolls back in memory
+ * if the write fails. Called from the completion of a successful attach, which
+ * is what makes "attached" the right thing to set here. */
 int s3lvol_active_add(const char *name, const char *uuid, uint32_t subsys,
 		      uint32_t nsid);
 

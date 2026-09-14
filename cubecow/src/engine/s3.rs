@@ -9,7 +9,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -129,6 +129,7 @@ impl S3Engine {
         let rpc = Arc::new(JsonRpcClient::new(
             s3_cfg.socket_path.clone(),
             Duration::from_millis(s3_cfg.rpc_timeout_ms),
+            Duration::from_millis(s3_cfg.rpc_connect_budget_ms),
         ));
 
         let probe_name = format!("__cbc_probe_{}", uuid::Uuid::new_v4().simple());
@@ -1234,18 +1235,26 @@ impl Engine for S3Engine {
 // JSON-RPC client over UnixStream
 // ---------------------------------------------------------------------------
 
+// Connection establishment is retried (see `call_raw`) and nothing more:
+// a failure reaches the caller as an error. There is deliberately no
+// watchdog that deactivates volumes or marks the node NotReady when the
+// endpoint stays unreachable — a control-plane outage must not become a
+// data-plane action, and the upgrade orchestrator owns the decision to
+// give up.
 struct JsonRpcClient {
     socket_path: PathBuf,
     timeout: Duration,
+    connect_budget: Duration,
     next_id: AtomicU64,
     conn: Mutex<Option<UnixStream>>,
 }
 
 impl JsonRpcClient {
-    fn new(socket_path: PathBuf, timeout: Duration) -> Self {
+    fn new(socket_path: PathBuf, timeout: Duration, connect_budget: Duration) -> Self {
         Self {
             socket_path,
             timeout,
+            connect_budget,
             next_id: AtomicU64::new(1),
             conn: Mutex::new(None),
         }
@@ -1269,17 +1278,30 @@ impl JsonRpcClient {
             CubecowError::PreconditionFailed("s3lvol rpc mutex poisoned".to_string())
         })?;
 
-        let mut attempt = 0;
+        // One clock covers the whole call, so the drop-and-redial below and
+        // a fresh connect both draw from the same budget. Only connection
+        // establishment retries: a JSON-RPC error response is an answer and
+        // returns immediately, because retrying a real error would turn a
+        // fast, correct failure into a slow one.
+        let deadline = Instant::now() + self.connect_budget;
+        let mut retries = 0u32;
+        let mut redialed = false;
+
         loop {
-            attempt += 1;
             if guard.is_none() {
                 match self.dial() {
                     Ok(s) => *guard = Some(s),
                     Err(e) => {
-                        return Err(CubecowError::PreconditionFailed(format!(
-                            "s3lvol rpc: connect '{}' failed: {e}",
-                            self.socket_path.display()
-                        )));
+                        let backoff = connect_backoff(retries);
+                        retries += 1;
+                        if Instant::now() + backoff > deadline {
+                            return Err(CubecowError::PreconditionFailed(format!(
+                                "s3lvol rpc: connect '{}' failed: {e}",
+                                self.socket_path.display()
+                            )));
+                        }
+                        std::thread::sleep(backoff);
+                        continue;
                     }
                 }
             }
@@ -1293,7 +1315,7 @@ impl JsonRpcClient {
             match stream.write_all(&framed).and_then(|_| stream.flush()) {
                 Ok(()) => {}
                 Err(e)
-                    if attempt < 2
+                    if !redialed
                         && matches!(
                             e.kind(),
                             ErrorKind::BrokenPipe
@@ -1307,6 +1329,7 @@ impl JsonRpcClient {
                     // itself is still healthy but we cannot know how much of
                     // `framed` was buffered, so drop the connection and
                     // redial to guarantee a clean request boundary.
+                    redialed = true;
                     *guard = None;
                     continue;
                 }
@@ -1320,7 +1343,7 @@ impl JsonRpcClient {
             let response_bytes = match read_line(stream) {
                 Ok(v) => v,
                 Err(e)
-                    if attempt < 2
+                    if !redialed
                         && matches!(
                             e.kind(),
                             ErrorKind::BrokenPipe
@@ -1336,6 +1359,7 @@ impl JsonRpcClient {
                     // current connection is no longer trustworthy (part of a
                     // response may still be queued in the kernel buffer), so
                     // drop the socket and redial before retrying the RPC.
+                    redialed = true;
                     *guard = None;
                     continue;
                 }
@@ -1359,7 +1383,8 @@ impl JsonRpcClient {
             let resp_id = resp.get("id").and_then(|v| v.as_u64());
             if resp_id != Some(id) {
                 *guard = None;
-                if attempt < 2 {
+                if !redialed {
+                    redialed = true;
                     continue;
                 }
                 return Err(CubecowError::PreconditionFailed(format!(
@@ -1408,6 +1433,14 @@ impl JsonRpcClient {
         s.set_write_timeout(Some(self.timeout))?;
         Ok(s)
     }
+}
+
+/// Backoff between connection retries: 100ms doubling to a 2s ceiling. The
+/// floor keeps a down endpoint from being hammered; the ceiling bounds how
+/// stale the retry can be once the socket reappears.
+fn connect_backoff(retries: u32) -> Duration {
+    let ms = 100u64.checked_shl(retries).unwrap_or(u64::MAX).min(2_000);
+    Duration::from_millis(ms)
 }
 
 /// Read a single `\n`-terminated JSON line from the stream. The line
@@ -1591,12 +1624,98 @@ mod tests {
         assert!(S3Engine::validate_name("normal-name", "volume").is_ok());
     }
 
+    // The retry policy is the whole of the upgrade window's tolerance on the
+    // control plane, and it is pure: assert the shape rather than trusting the
+    // shift arithmetic.
+    #[test]
+    fn connect_backoff_doubles_then_holds_at_the_ceiling() {
+        let ms: Vec<u64> = (0..8).map(|r| connect_backoff(r).as_millis() as u64).collect();
+        assert_eq!(ms, vec![100, 200, 400, 800, 1600, 2000, 2000, 2000]);
+        // Far past the point where the shift would overflow: the ceiling, not a
+        // panic and not a wrap.
+        assert_eq!(connect_backoff(64), Duration::from_millis(2000));
+        assert_eq!(connect_backoff(u32::MAX), Duration::from_millis(2000));
+    }
+
+    // The two halves of the upgrade window's control-plane contract, against a
+    // real socket rather than a stub: while the endpoint is down a call waits,
+    // and the wait is bounded by the budget.
+    #[test]
+    fn a_call_retries_a_missing_endpoint_and_stays_within_the_budget() {
+        let budget = Duration::from_millis(300);
+        let client = JsonRpcClient::new(
+            PathBuf::from(format!("/nonexistent/cubecow-{}.sock", std::process::id())),
+            Duration::from_millis(100),
+            budget,
+        );
+
+        let started = Instant::now();
+        let err = client
+            .call_raw("rcow_get_bdev", &serde_json::json!({}))
+            .expect_err("an endpoint that never appears is not an answer");
+        let spent = started.elapsed();
+
+        assert!(matches!(err, CubecowError::PreconditionFailed(_)), "{err:?}");
+        // It has to have waited at least one backoff: giving up at once is the
+        // behaviour the retry loop exists to replace. And it must not run past
+        // the budget, which a caller sizes against the upgrade window.
+        assert!(
+            spent >= connect_backoff(0) / 2,
+            "gave up after {spent:?}: it did not retry at all"
+        );
+        assert!(
+            spent < budget + Duration::from_millis(500),
+            "overran the budget: {spent:?}"
+        );
+    }
+
+    #[test]
+    fn a_call_waits_out_a_down_endpoint_and_then_succeeds() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+
+        let path = std::env::temp_dir()
+            .join(format!("cubecow-retry-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        // Bound only after the call below is already failing, or the retry this
+        // test exists for is never reached.
+        let server_path = path.clone();
+        let server = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            let listener = UnixListener::bind(&server_path).expect("bind");
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read the request");
+            stream
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"volumes\":[]}}\n")
+                .expect("write the response");
+            stream.flush().expect("flush");
+            let _ = std::fs::remove_file(&server_path);
+        });
+
+        let client = JsonRpcClient::new(
+            path.clone(),
+            Duration::from_millis(500),
+            Duration::from_millis(5_000),
+        );
+        let result = client.call_raw("rcow_get_bdev", &serde_json::json!({}));
+        server.join().expect("the server thread");
+
+        assert_eq!(
+            result.expect("the call should have retried until the endpoint appeared"),
+            serde_json::json!({"volumes": []})
+        );
+    }
+
     #[test]
     fn size_bytes_to_gib_round_up_and_strict() {
         let cfg = S3Config {
             socket_path: PathBuf::from("/var/run/s3lvol.sock"),
             state_dir: PathBuf::from("/tmp"),
             rpc_timeout_ms: 1000,
+            rpc_connect_budget_ms: 60_000,
             size_policy: "round_up".to_string(),
         };
         let engine = S3Engine {
@@ -1604,6 +1723,7 @@ mod tests {
             rpc: Arc::new(JsonRpcClient::new(
                 cfg.socket_path.clone(),
                 Duration::from_millis(1000),
+                Duration::from_millis(cfg.rpc_connect_budget_ms),
             )),
             name_index: RwLock::new(HashMap::new()),
             metrics: Arc::new(MetricsCollector::new()),
@@ -1621,6 +1741,7 @@ mod tests {
             rpc: Arc::new(JsonRpcClient::new(
                 cfg2.socket_path.clone(),
                 Duration::from_millis(1000),
+                Duration::from_millis(cfg2.rpc_connect_budget_ms),
             )),
             name_index: RwLock::new(HashMap::new()),
             metrics: Arc::new(MetricsCollector::new()),

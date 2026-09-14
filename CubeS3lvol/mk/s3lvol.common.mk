@@ -241,6 +241,29 @@ COMMON_CFLAGS += $(s3lvol_bt_cflags)
 COMMON_CFLAGS += -D_GNU_SOURCE -fno-strict-aliasing
 
 # ---------------------------------------------------------------------------
+# Build identification, surfaced through rcow_get_build_info and
+# s3lvol_tgt --print-build-info.
+#
+# Stamped in at compile time rather than probed at run time: the candidate
+# binary is asked what it is *before* it is allowed to start, so the answer
+# cannot come from anything the process would have to come up to learn.
+#
+# ?= so a release build can pin all three; the fallbacks keep a plain `make`
+# going in a tree with no git metadata or no sibling SPDK checkout.
+#
+# Quoting: the single quotes are stripped by the shell, leaving the compiler
+# with -DS3LVOL_VERSION="...", i.e. a C string literal -- which is what the
+# #ifndef fallbacks in s3lvol/s3_build_info.h expect.
+# ---------------------------------------------------------------------------
+S3LVOL_VERSION      ?= $(shell git -C $(S3LVOL_ROOT) describe --tags --always --dirty 2>/dev/null || echo unknown)
+S3LVOL_GIT_COMMIT   ?= $(shell git -C $(S3LVOL_ROOT) rev-parse HEAD 2>/dev/null || echo unknown)
+S3LVOL_SPDK_VERSION ?= $(shell git -C $(SPDK_ROOT) describe --tags --always 2>/dev/null || echo unknown)
+
+COMMON_CFLAGS += -DS3LVOL_VERSION='"$(S3LVOL_VERSION)"'
+COMMON_CFLAGS += -DS3LVOL_GIT_COMMIT='"$(S3LVOL_GIT_COMMIT)"'
+COMMON_CFLAGS += -DS3LVOL_SPDK_VERSION='"$(S3LVOL_SPDK_VERSION)"'
+
+# ---------------------------------------------------------------------------
 # ASan build (for debugging use-after-free). Off by default. When enabled every
 # .o and the link carry -fsanitize=address. Note the sanitize flags are not part
 # of the .o dependency tracking, so toggling it requires a make clean first.

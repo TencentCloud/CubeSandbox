@@ -126,6 +126,14 @@ enum s3_journal_op {
 	S3_JOURNAL_OP_CHECKPOINT   = 3,
 };
 
+/* Highest op this build understands. The version gate compares it across
+ * versions: an op a reader does not know is indistinguishable from a torn
+ * tail, and replay stops there by design -- so a log written by a newer
+ * build would be silently truncated rather than rejected. The gate is the
+ * mitigation; replay still stops on an unknown op, which is exactly right for
+ * a torn tail. */
+#define S3_JOURNAL_OP_MAX S3_JOURNAL_OP_CHECKPOINT
+
 /* A single journal record. Fixed at 64 bytes so a sequential scan never has to
  * parse a length first.
  *

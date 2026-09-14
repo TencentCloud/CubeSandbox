@@ -146,6 +146,8 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
 ./test/dataplane/run_cubecow_client_test.sh    # same; cubecow/Cubelet RPC order
 ./test/dataplane/run_activation_test.sh    # same
 ./test/dataplane/run_fs_test.sh            # same; really does mkfs.xfs + mount
+./test/dataplane/run_hot_upgrade_test.sh            # same; I/O continuity across a hot restart
+./test/dataplane/run_hot_upgrade_negative_test.sh   # same; faults injected into the same path
 ./test/dataplane/run_guards_test.sh        # same; the two accidental-deletion guards
 ./test/dataplane/run_control_test.sh       # same; drives the scripts under scripts/
 ```
@@ -357,6 +359,30 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   log `-n` refuses to replay and reports a free-block count it cannot reconcile,
   which is complaining about the log, not the snapshot.
 
+- `run_hot_upgrade_test.sh` -- I/O continuity across a hot upgrade. One target,
+  N volumes each under a time-based fio, and one or two restarts that SIGKILL
+  the target and rebuild the same NQN/NSID/UUID layout rather than disconnecting
+  and unloading. The claim is that the host's I/O **pauses and never errors**:
+  fio must report `err 0` and `io_errors 0`, the layout captured before the stop
+  must return byte-identical (`rcow_verify_active --expect`), all 32 controllers
+  must end `live`, and dmesg must gain neither a `Buffer I/O error` nor a
+  namespace-removal line. It prints `pause_window_ms=<n>` as a regression
+  baseline. `--cross-spdk <tree>` runs the second upgrade with a target built
+  against a different SPDK -- the only way to exercise a firmware-revision
+  change; without the flag that case is skipped loudly,
+  never silently repeated with the same binary. Owns its lvstore and **must not
+  run concurrently with anything else on the machine**.
+- `run_hot_upgrade_negative_test.sh` -- the same path with faults injected, one
+  scenario per function: a new binary that crashes on start and rolls back; the
+  version gate refusing a bumped `ckpt_version` / `journal_op_max` while the
+  target and its I/O stay untouched; a stale `hot-restart` marker refused after a
+  faked boot_id change; a second target refused with the basename fallback
+  still finding an unlinked one; the three timeout faults (wrong write order
+  and a delay-only write collapse the retry budget and the read-back detects it,
+  and a `reconnect_delay` of 0 or negative is refused before it reaches sysfs);
+  and a window stretched past `ctrl_loss_tmo` so controller deletion is observed
+  and logged. The destructive scenarios run last and restore the machine. Same
+  exclusivity requirement as its sibling.
 - `run_guards_test.sh` -- 24 assertions, two guards against "creating a live
   lvstore out from under", both added after a near-miss.
 

@@ -174,6 +174,17 @@ run_suite()
 		return 0
 	fi
 
+	# rc 2 with nothing failed is the tree's "could not run" signal: a machine
+	# precondition stopped the suite short. A skip, not a red, with the reason
+	# taken from the suite's own [SKIP] lines.
+	if [ "${rc}" -eq 2 ] && [ "${f}" -eq 0 ]; then
+		local why
+		why="$(sed -n 's/^  \[SKIP\] //p' "${log}" | head -1)"
+		report_skip "${name}" \
+			"${why:-a required precondition was missing (see ${log})}" 0
+		return 0
+	fi
+
 	printf '  FAIL  %-26s %s failed of %s (rc=%d, %ds) -- %s\n' \
 	       "${name}" "${f}" "$((p + f))" "${rc}" "${elapsed}" "${log}"
 	SUITES_BAD=$((SUITES_BAD + 1))
@@ -242,6 +253,9 @@ HAVE_S3=0
 
 S3_ARGS=(-e "${ENDPOINT}" -b "${BUCKET}" -r "${REGION}")
 
+# The dataplane group is machine-bound: each suite starts a target on the fixed
+# RPC socket, touches the host's nvme controllers and the shared registries, so
+# it needs root, credentials and the box to itself -- not CI-able as wired.
 if [ "${MODE}" = list ]; then
 	echo "offline integration: spawner thread_bounce journal wal cache flush export"
 	echo "                     statefile local_dev checkpoint export_swap"
@@ -250,7 +264,8 @@ if [ "${MODE}" = list ]; then
 	echo "dataplane:           dataplane recovery snapshot export srcdel selfimport"
 	echo "                     derived decouple_queue snapshot_cancel snapshot_converge"
 	echo "                     agent_template cubecow_client snapdelete pending_delete"
-	echo "                     fs guards activation control"
+	echo "                     fs hot_upgrade hot_upgrade_negative guards activation"
+	echo "                     control"
 	echo ""
 	echo "root:        $([ "${HAVE_ROOT}" -eq 1 ] && echo yes || echo no)"
 	echo "credentials: $([ "${HAVE_CREDS}" -eq 1 ] && echo yes || echo no)"
@@ -427,7 +442,8 @@ if [ "${MODE}" != all ]; then
 	echo "--- dataplane: skipped, $([ "${MODE}" = offline ] && echo --offline || echo --no-dataplane)"
 	for t in dataplane recovery snapshot export srcdel selfimport derived \
 		 decouple_queue snapshot_cancel snapshot_converge agent_template \
-		 cubecow_client snapdelete pending_delete fs guards activation control; do
+		 cubecow_client snapdelete pending_delete fs hot_upgrade \
+		 hot_upgrade_negative guards activation control; do
 		report_skip "run_${t}_test.sh" "not requested" 1
 	done
 else
@@ -436,7 +452,8 @@ else
 		echo "--- dataplane"
 		for t in dataplane recovery snapshot export srcdel selfimport derived \
 			 decouple_queue snapshot_cancel snapshot_converge agent_template \
-			 cubecow_client snapdelete pending_delete fs guards activation control; do
+			 cubecow_client snapdelete pending_delete fs hot_upgrade \
+			 hot_upgrade_negative guards activation control; do
 			report_skip "run_${t}_test.sh" "${BLOCKER}"
 		done
 	else
@@ -508,6 +525,13 @@ else
 		# when both fail, the one that speaks in dd is the easier read.
 		run_suite run_fs_test.sh \
 			./test/dataplane/run_fs_test.sh
+		# The hot-upgrade pair SIGKILLs a live target and shortens the kernel's
+		# reconnect timeouts; they go before guards/activation/control so those
+		# still get the last word on whether the machine was left tidy.
+		run_suite run_hot_upgrade_test.sh \
+			./test/dataplane/run_hot_upgrade_test.sh "${S3_ARGS[@]}"
+		run_suite run_hot_upgrade_negative_test.sh \
+			./test/dataplane/run_hot_upgrade_negative_test.sh "${S3_ARGS[@]}"
 		# Its whole point is that it does not disturb host state, so it is
 		# safe anywhere in the order; kept next to fs because both are recent.
 		run_suite run_guards_test.sh \

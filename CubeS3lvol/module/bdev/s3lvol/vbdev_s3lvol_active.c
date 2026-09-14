@@ -250,9 +250,13 @@ static const struct spdk_json_object_decoder entry_decoders[] = {
 };
 
 /* Append without touching the file: used by the loader, which must not rewrite
- * what it is in the middle of reading. */
+ * what it is in the middle of reading, and by s3lvol_active_add, which flushes
+ * the whole registry separately. `attached` is the caller's to state: the
+ * loader records what a restart should reproduce, an attach records what it
+ * has just brought up. */
 static int
-active_insert(const char *name, const char *uuid, uint32_t subsys, uint32_t nsid)
+active_insert(const char *name, const char *uuid, uint32_t subsys, uint32_t nsid,
+	      bool attached)
 {
 	struct active_entry *e;
 
@@ -263,8 +267,9 @@ active_insert(const char *name, const char *uuid, uint32_t subsys, uint32_t nsid
 
 	snprintf(e->pub.name, sizeof(e->pub.name), "%s", name);
 	snprintf(e->pub.uuid, sizeof(e->pub.uuid), "%s", uuid ? uuid : "");
-	e->pub.subsys = subsys;
-	e->pub.nsid   = nsid;
+	e->pub.subsys   = subsys;
+	e->pub.nsid     = nsid;
+	e->pub.attached = attached;
 
 	TAILQ_INSERT_TAIL(&g_active, e, link);
 	return 0;
@@ -356,7 +361,7 @@ s3lvol_active_load(void)
 			continue;
 		}
 
-		if (active_insert(name, f.uuid, f.subsys, f.nsid) != 0) {
+		if (active_insert(name, f.uuid, f.subsys, f.nsid, false) != 0) {
 			SPDK_ERRLOG("active: out of memory loading '%s'\n", name);
 			free(f.uuid);
 			free(values);
@@ -423,18 +428,23 @@ s3lvol_active_add(const char *name, const char *uuid, uint32_t subsys,
 		return -EINVAL;
 	}
 
+	/* Reached only from the completion of a successful attach, so what this
+	 * records is up in this process. Marking attached here -- and nowhere
+	 * else -- is what keeps "recorded" and "exposed" from drifting apart. */
+
 	/* Update in place when it is already there, so that a re-activation does
 	 * not accumulate duplicates. */
 	TAILQ_FOREACH(e, &g_active, link) {
 		if (strcmp(e->pub.name, name) == 0) {
 			snprintf(e->pub.uuid, sizeof(e->pub.uuid), "%s", uuid);
-			e->pub.subsys = subsys;
-			e->pub.nsid   = nsid;
+			e->pub.subsys   = subsys;
+			e->pub.nsid     = nsid;
+			e->pub.attached = true;
 			return active_flush();
 		}
 	}
 
-	rc = active_insert(name, uuid, subsys, nsid);
+	rc = active_insert(name, uuid, subsys, nsid, true);
 	if (rc != 0) {
 		return rc;
 	}

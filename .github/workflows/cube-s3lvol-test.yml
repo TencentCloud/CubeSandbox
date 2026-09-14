@@ -5,10 +5,12 @@ on:
     branches: [master]
     paths:
       - 'CubeS3lvol/**'
+      - 'cubecow/**'
       - '.github/workflows/cube-s3lvol-test.yml'
   pull_request:
     paths:
       - 'CubeS3lvol/**'
+      - 'cubecow/**'
       - '.github/workflows/cube-s3lvol-test.yml'
   workflow_dispatch:
 

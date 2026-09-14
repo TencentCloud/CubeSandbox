@@ -35,17 +35,21 @@
 #  that can hang indefinitely is not a stop -- and the WAL means interrupting it
 #  costs a longer attach next time, not data.
 #
-#  Usage: rcow_stop.sh [--force] [--keep-connected] [--lvs-name NAME]
+#  Usage: rcow_stop.sh [--force] [--lvs-name NAME]
 #
 #    --force           skip the unload and go straight to signalling. For a
 #                      target that is wedged; the next attach replays the log.
-#    --keep-connected  leave the initiator connected. Only useful when the target
-#                      is about to be restarted immediately.
 #    --lvs-name        unload this lvstore instead of the one derived from the
 #                      hostname. Needed when the target was started with
 #                      rcow_start.sh --lvs-name; without it the unload would
 #                      miss the attached lvstore and only the WAL replay would
 #                      save the shutdown.
+#
+#  --keep-connected is accepted but refused: it reads as "leave the host
+#  connected", yet it skipped the disconnect while still unloading the lvstore,
+#  and the unload hands the host namespace-removal AENs -- a silent
+#  hot-removal, worse than the plain stop it looked like. A hot restart is
+#  rcow_hot_stop.sh.
 
 set -u
 
@@ -61,11 +65,22 @@ while [ "$#" -gt 0 ]; do
 	--force)          FORCE=1 ;;
 	--keep-connected) KEEP_CONNECTED=1 ;;
 	--lvs-name)       shift; RCOW_LVS_NAME="${1:-}" ;;
-	-h|--help)        sed -n '2,50p' "${BASH_SOURCE[0]}"; exit 0 ;;
+	-h|--help)        sed -n '2,52p' "${BASH_SOURCE[0]}"; exit 0 ;;
 	*)                rcow_die "unknown option: $1 (try --help)" ;;
 	esac
 	shift
 done
+
+# Refused rather than ignored: the flag reads as "leave the host connected", but
+# it still unloads the lvstore, and the unload is what removes the namespace and
+# AENs the host into dropping the gendisk. An old caller must not get the
+# silent-removal path while believing it asked for a pause.
+if [ "${KEEP_CONNECTED}" -eq 1 ]; then
+	rcow_err "--keep-connected is removed: it skipped the disconnect but still \
+unloaded the lvstore, which hands the host namespace-removal AENs. For a hot \
+restart use rcow_hot_stop.sh."
+	exit 2
+fi
 
 rcow_need_root
 rcow_ensure_run_dir
@@ -116,13 +131,11 @@ fi
 
 if [ -z "${TGT_PID}" ]; then
 	rcow_log "no target is running"
-	if [ "${KEEP_CONNECTED}" -eq 0 ]; then
-		# The controllers outlive the target: without a disconnect they sit
-		# there in a reconnect loop, and the next start hands them namespaces
-		# from a process they were not connected to.
-		rcow_step "initiator: disconnecting leftover controllers"
-		rcow_disconnect_all
-	fi
+	# The controllers outlive the target: without a disconnect they sit there
+	# in a reconnect loop, and the next start hands them namespaces from a
+	# process they were not connected to.
+	rcow_step "initiator: disconnecting leftover controllers"
+	rcow_disconnect_all
 	# Safe to remove only because the scan above found no live instance.
 	rm -f "${RCOW_PIDFILE}"
 	exit 0
@@ -131,12 +144,8 @@ fi
 rcow_log "target pid ${TGT_PID}, budget ${RCOW_STOP_TIMEOUT}s"
 
 # ==========================================================================
-if [ "${KEEP_CONNECTED}" -eq 0 ]; then
-	rcow_step "initiator: disconnecting"
-	rcow_disconnect_all
-else
-	rcow_step "initiator: left connected (--keep-connected)"
-fi
+rcow_step "initiator: disconnecting"
+rcow_disconnect_all
 
 # ==========================================================================
 if [ "${FORCE}" -eq 1 ]; then

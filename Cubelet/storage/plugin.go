@@ -140,11 +140,12 @@ type CowInlineConfig struct {
 
 // CowS3UserConfig is the operator-facing `[cow.s3]` block.
 type CowS3UserConfig struct {
-	Enable       bool    `toml:"enable"`
-	SocketPath   *string `toml:"socket_path"`
-	StateDir     *string `toml:"state_dir"`
-	RPCTimeoutMS *uint64 `toml:"rpc_timeout_ms"`
-	SizePolicy   *string `toml:"size_policy"`
+	Enable             bool    `toml:"enable"`
+	SocketPath         *string `toml:"socket_path"`
+	StateDir           *string `toml:"state_dir"`
+	RPCTimeoutMS       *uint64 `toml:"rpc_timeout_ms"`
+	RPCConnectBudgetMS *uint64 `toml:"rpc_connect_budget_ms"`
+	SizePolicy         *string `toml:"size_policy"`
 }
 
 type CowLogConfig struct {
@@ -165,10 +166,11 @@ type CowBackendConfig struct {
 // CowS3BackendConfig is the `[backend.s3]` payload stamped onto the
 // S3 cubecow handle.
 type CowS3BackendConfig struct {
-	SocketPath   *string
-	StateDir     *string
-	RPCTimeoutMS *uint64
-	SizePolicy   *string
+	SocketPath         *string
+	StateDir           *string
+	RPCTimeoutMS       *uint64
+	RPCConnectBudgetMS *uint64
+	SizePolicy         *string
 }
 
 // CowReflinkBackendConfig is the `[backend.reflink]` payload.
@@ -314,6 +316,9 @@ func (c *Config) s3BackendConfig() CowBackendConfig {
 	if c != nil && c.Cow.S3.RPCTimeoutMS != nil {
 		out.S3.RPCTimeoutMS = c.Cow.S3.RPCTimeoutMS
 	}
+	if c != nil && c.Cow.S3.RPCConnectBudgetMS != nil {
+		out.S3.RPCConnectBudgetMS = c.Cow.S3.RPCConnectBudgetMS
+	}
 	if c != nil && c.Cow.S3.SizePolicy != nil && strings.TrimSpace(*c.Cow.S3.SizePolicy) != "" {
 		out.S3.SizePolicy = c.Cow.S3.SizePolicy
 	}
@@ -358,6 +363,7 @@ func (c CowS3BackendConfig) toMap() map[string]any {
 	setIfNotNil(m, "socket_path", c.SocketPath)
 	setIfNotNil(m, "state_dir", c.StateDir)
 	setIfNotNil(m, "rpc_timeout_ms", c.RPCTimeoutMS)
+	setIfNotNil(m, "rpc_connect_budget_ms", c.RPCConnectBudgetMS)
 	setIfNotNil(m, "size_policy", c.SizePolicy)
 	return m
 }

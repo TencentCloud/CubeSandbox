@@ -41,6 +41,24 @@
 #include "spdk/event.h"
 #include "spdk/log.h"
 
+#include "s3lvol/s3_build_info.h"
+
+/* Answered before spdk_app_start so it works on a machine with no hugepages and
+ * no privileges: the upgrade orchestrator runs it on the candidate binary, which
+ * by definition is not the one running yet. */
+static bool
+s3lvol_tgt_wants_build_info(int argc, char **argv)
+{
+	int i;
+
+	for (i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--print-build-info") == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static void
 s3lvol_tgt_started(void *arg1)
 {
@@ -54,6 +72,22 @@ main(int argc, char **argv)
 {
 	struct spdk_app_opts opts = {};
 	int rc;
+
+	if (s3lvol_tgt_wants_build_info(argc, argv)) {
+		char buf[S3LVOL_BUILD_INFO_MAX];
+
+		rc = s3lvol_build_info_json(buf, sizeof(buf));
+		if (rc < 0) {
+			/* Silence here would be read as "the binary cannot describe
+			 * itself", the same thing the version gate reports for a
+			 * renderer failure. */
+			fprintf(stderr, "s3lvol_tgt: the build information does not "
+				"fit in %zu bytes\n", sizeof(buf));
+			return 1;
+		}
+		printf("%s\n", buf);
+		return 0;
+	}
 
 	spdk_app_opts_init(&opts, sizeof(opts));
 	opts.name     = "s3lvol_tgt";

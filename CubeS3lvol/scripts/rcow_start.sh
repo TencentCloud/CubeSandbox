@@ -158,8 +158,14 @@ is not a state to recover from automatically"
 fi
 
 # Only now that nothing is running can these be assumed dead rather than in use.
+#
+# The hot-restart marker is removed here unconditionally. RCOW_RUN_DIR is not
+# tmpfs, so a marker can outlive the boot that wrote it, and a process that never
+# intended a hot restart must not honour one; the marker is the stop path's to
+# consume, and any stop that was going to consume it has already finished by the
+# time a start runs.
 rm -f "${RCOW_RPC_SOCK}" "${RCOW_RPC_SOCK}.lock" "/var/tmp/spdk_cpu_lock_"* \
-	"${RCOW_PIDFILE}"
+	"${RCOW_PIDFILE}" "${RCOW_HOT_MARKER}"
 
 rcow_load_credentials ||
 	rcow_die "could not read access_key_id/secret_access_key from ${RCOW_S3_CFG}"
@@ -395,8 +401,9 @@ else
 	REPLAY_RC=0
 	if [ -s "${RCOW_ACTIVE_FILE}" ]; then
 		rcow_warn "${RCOW_ACTIVE_FILE} lists volumes that are not attached in \
-this process. Run rcow_recovery.sh, or the next activation of one of them will \
-be reported as already active while no namespace exists"
+this process, so they will be listed with no device path until something \
+attaches them. Run rcow_recovery.sh to have the layout checked, or activate a \
+volume to attach it at its recorded placement"
 	fi
 fi
 
@@ -413,6 +420,10 @@ if [ "${DO_CONNECT}" -eq 1 ]; then
 	# Not fatal: a subsystem that failed to connect costs the volumes hashed
 	# to it, and the ones that did connect are still worth having up. The
 	# warning names which.
+	#
+	# The timeouts ride on these connect flags. rcow_tune_initiator_timeouts is
+	# deliberately not called here: it writes to controllers that already
+	# exist, and at fresh-start time that set is empty.
 	rcow_connect_all ||
 		rcow_warn "some subsystems did not connect; volumes that hash to \
 them will activate on the target but never appear on this host"

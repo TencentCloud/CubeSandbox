@@ -7,24 +7,28 @@ RequiresMountsFor=/data/cubelet /data/log
 PartOf=cube-sandbox-control.target cube-sandbox-compute.target
 
 [Service]
-# Type=simple: the supervise script is the unit's main process and stays in
-# the foreground, so systemd sees the target die through it (exit 1 on
-# crash -> Restart=on-failure) -- Type=forking would not notice a crash of
-# the detached target.
+# Type=simple, not forking: the supervise script is the unit's main process, so
+# a crash of the detached target reaches systemd as its exit.
 Type=simple
 EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
 ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-s3lvol-supervise.sh
-# Conditional stop: full teardown (disconnect -> flush/unload -> SIGTERM)
-# when the target is alive; when it has crashed, only clean target-side
-# state and never disconnect the NVMf initiator, so nvme_tcp reconnects
-# to the rebuilt NQN/NSID grid without an I/O interruption.
+# See the header of cube-s3lvol-stop.sh: this stop never disconnects the NVMf
+# initiator, so nvme_tcp reconnects to the rebuilt NQN/NSID grid.
 ExecStop=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-s3lvol-stop.sh
 Restart=on-failure
 RestartSec=3s
+# Inert as set: five restarts cannot fit the 10s default window at RestartSec=3s.
+# Set StartLimitIntervalSec= to make the cap real.
 StartLimitBurst=5
 TimeoutStartSec=300s
-TimeoutStopSec=180s
-KillMode=control-group
+# Sized to the stop scripts' worst case, not the target's exit: the scripts bound
+# the work and are never signalled on timeout (see KillMode below).
+TimeoutStopSec=600s
+# KillMode=process, not control-group: the target is setsid-detached but still in
+# this cgroup, so systemd's post-ExecStop sweep would reach it on every stop --
+# including one that exits non-zero precisely to leave the target running. Mixed
+# is not an alternative: its final SIGKILL reaches the cgroup too.
+KillMode=process
 
 [Install]
 WantedBy=cube-sandbox-control.target

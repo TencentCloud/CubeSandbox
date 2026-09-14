@@ -166,6 +166,28 @@ RCOW_LISTEN_ADDR="${RCOW_LISTEN_ADDR:-127.0.0.1}"
 RCOW_LISTEN_PORT="${RCOW_LISTEN_PORT:-4420}"
 RCOW_IO_QUEUES="${RCOW_IO_QUEUES:-4}"
 
+# The NVMf model number, pinned. Left unset, the model is SPDK's default and
+# moves with every SPDK upgrade. The host identifies a disk by its namespace
+# UUID -- which the lvol uuid fixes -- so a changed model is not expected to
+# matter, but it is the only part of the host's view not already pinned by NQN,
+# serial or namespace UUID, and pinning it is what lets a cross-SPDK hot
+# upgrade keep every other variable out of the equation.
+RCOW_MODEL="${RCOW_MODEL:-CubeS3lvol}"
+
+# Initiator timeouts. Both go to `nvme connect` on a fresh start and to sysfs on
+# an upgrade (rcow_tune_initiator_timeouts). reconnect_delay is how long after
+# the target is ready the host takes to notice; 1 is the kernel's floor, and no
+# user-space action can wake the timer sooner. ctrl_loss_tmo is the rollback
+# budget -- what lets a failed upgrade be retried by hand instead of ending in
+# deleted controllers and EIO.
+RCOW_RECONNECT_DELAY="${RCOW_RECONNECT_DELAY:-1}"
+RCOW_CTRL_LOSS_TMO="${RCOW_CTRL_LOSS_TMO:-1800}"
+# What the budget is really worth when the kernel does not export ctrl_loss_tmo
+# at all (pre-5.7). It then uses its 600s default no matter what is configured,
+# so a deadline drawn from RCOW_CTRL_LOSS_TMO would be a promise the kernel does
+# not keep.
+RCOW_MIN_CTRL_LOSS_TMO="${RCOW_MIN_CTRL_LOSS_TMO:-300}"
+
 # The transport's max_io_size, set to the chunk size (S3LVOL_DEFAULT_CHUNK_SIZE,
 # 1 MiB) instead of the TCP default of 128 KiB.
 #
@@ -298,6 +320,15 @@ RCOW_NO_HUGE="${RCOW_NO_HUGE:-1}"
 RCOW_RUN_DIR="${RCOW_RUN_DIR:-/var/tmp/rcow}"
 RCOW_PIDFILE="${RCOW_PIDFILE:-${RCOW_RUN_DIR}/s3lvol_tgt.pid}"
 
+# The intent marker, "<boot_id> <pid>", read only by rcow_hot_marker_consume().
+# It answers one question -- was the last stop asked for by an upgrade? -- and
+# it must be impossible for a stale one to answer yes, because RCOW_RUN_DIR is
+# not tmpfs and the file outlives a reboot.
+RCOW_HOT_MARKER="${RCOW_RUN_DIR}/hot-restart"
+# The layout captured before the target is killed, which rcow_verify_active
+# --expect compares the post-upgrade layout against.
+RCOW_HOT_SNAPSHOT="${RCOW_RUN_DIR}/hot-upgrade.snapshot"
+
 # Log directory separate from the run directory: the pid lives in a tmpfs location
 # and the log is persistent under /data.
 RCOW_LOG_DIR="${RCOW_LOG_DIR:-/data/log/rcow}"
@@ -388,6 +419,49 @@ rcow_ensure_run_dir()
 {
 	mkdir -p "${RCOW_RUN_DIR}" 2>/dev/null ||
 		rcow_die "cannot create ${RCOW_RUN_DIR}"
+}
+
+# Make one file durable, its directory entry included.
+#
+# Deliberately not `sync`: that walks every block device in the system
+# (sync_bdevs), and the devices a replay is about to bring back are exactly the
+# ones that cannot take writes yet -- their controllers are still retrying, and
+# the listeners that let them in are added after the replay. A host-wide sync
+# therefore parks on the very I/O it is here to restore, and stays parked until
+# ctrl_loss_tmo expires. What has to survive a crash here is one small file.
+rcow_fsync_file()
+{
+	python3 - "$1" <<-'PY' || return 1
+	import errno, os, sys
+
+	path = os.path.abspath(sys.argv[1])
+	try:
+	    fd = os.open(path, os.O_RDONLY)
+	except OSError as e:
+	    # The caller names the step that failed; this says why.
+	    print("%s: %s" % (path, e.strerror), file=sys.stderr)
+	    sys.exit(1)
+	try:
+	    os.fsync(fd)
+	finally:
+	    os.close(fd)
+
+	# The name needs flushing as much as the contents: the file arrives by
+	# rename.
+	try:
+	    dfd = os.open(os.path.dirname(path), os.O_RDONLY)
+	except OSError:
+	    sys.exit(0)
+	try:
+	    os.fsync(dfd)
+	except OSError as e:
+	    # Not every filesystem can sync a directory, and one that cannot is not
+	    # a reason to refuse the upgrade.
+	    if e.errno != errno.EINVAL:
+	        raise
+	finally:
+	    os.close(dfd)
+	PY
 }
 
 # --------------------------------------------------------------------------
@@ -522,6 +596,14 @@ rcow_nqn()
 # rcow_start (whose RPC server unlinked the socket the live target was listening
 # on), and the first target was left holding the lvstore and the WAL with no
 # path left to reach it. The suffix is therefore stripped before comparing.
+#
+# And the exact comparison is not enough by itself, because an upgrade is exactly
+# the case where the old binary's path stops resolving: the process was started
+# from a versioned directory that is later renamed away, so readlink -f of its
+# exe lands on nothing and only the kernel's " (deleted)" name is left. A
+# basename sweep therefore follows the exact one. This function is the guard
+# against a second target over a live WAL, and the second target most worth
+# catching is the old one the upgrade means to leave behind.
 # --------------------------------------------------------------------------
 
 # Resolve /proc/<pid>/exe to a comparable path, or nothing.
@@ -550,19 +632,46 @@ rcow_pid_is_target()
 
 # Every running instance of the target binary, one pid per line. Needs root to
 # read other users' /proc/<pid>/exe, which these scripts require anyway.
+#
+# Two passes, because one comparison cannot cover both a normally-running target
+# and one whose binary was swapped away. The exact pass is the accurate one; the
+# basename pass catches the unlinked case the exact pass misses. A pid found by
+# both is reported once.
 rcow_target_instances()
 {
-	local want d pid exe
+	local want d pid exe raw p dup
+	local -a pids=()
 
-	want="$(readlink -f "${RCOW_TGT_BIN}" 2>/dev/null)" || return 0
+	want="$(readlink -f "${RCOW_TGT_BIN}" 2>/dev/null)"
+
+	if [ -n "${want}" ]; then
+		for d in /proc/[0-9]*; do
+			pid="${d#/proc/}"
+			exe="$(rcow_pid_exe "${pid}")" || continue
+			[ "${exe}" = "${want}" ] && pids+=("${pid}")
+		done
+	fi
 
 	for d in /proc/[0-9]*; do
 		pid="${d#/proc/}"
-		exe="$(rcow_pid_exe "${pid}")" || continue
-		if [ "${exe}" = "${want}" ]; then
-			printf '%s\n' "${pid}"
+
+		dup=0
+		if [ "${#pids[@]}" -gt 0 ]; then
+			for p in "${pids[@]}"; do
+				[ "${p}" = "${pid}" ] && { dup=1; break; }
+			done
 		fi
+		[ "${dup}" -eq 1 ] && continue
+
+		raw="$(readlink "/proc/${pid}/exe" 2>/dev/null)" || continue
+		raw="${raw% (deleted)}"
+		[ "${raw##*/}" = "s3lvol_tgt" ] && pids+=("${pid}")
 	done
+
+	if [ "${#pids[@]}" -gt 0 ]; then
+		printf '%s\n' "${pids[@]}"
+	fi
+	return 0
 }
 
 # Echo the pid of the running target, or nothing. The identity check is not
@@ -584,6 +693,216 @@ rcow_target_pid()
 rcow_target_alive()
 {
 	rcow_target_pid >/dev/null
+}
+
+# Record "<boot_id> <pid>" of the live target, for a stop an upgrade is about to
+# ask for. Written by the orchestrator; rcow_hot_stop.sh deliberately does not,
+# so only an intent to hot-restart can make the marker read as one.
+rcow_hot_marker_write()
+{
+	local pid boot
+
+	pid="$(rcow_target_pid)" || {
+		rcow_err "no live target to name in ${RCOW_HOT_MARKER}"
+		return 1
+	}
+	boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+	[ -n "${boot}" ] || {
+		rcow_err "cannot read /proc/sys/kernel/random/boot_id"
+		return 1
+	}
+
+	rcow_ensure_run_dir
+	printf '%s %s\n' "${boot}" "${pid}" >"${RCOW_HOT_MARKER}" || {
+		rcow_err "cannot write ${RCOW_HOT_MARKER}"
+		return 1
+	}
+	return 0
+}
+
+# Consume the marker and answer whether it is ours: this boot, and a pid that is
+# still the live target. Removed before anything is decided, so it answers once
+# and a stale one is never read twice.
+#
+# Both checks are needed. boot_id alone misses a marker whose target died before
+# a reboot and whose pid was reused after it; the pid alone misses a file that
+# outlived the boot it names, because RCOW_RUN_DIR is not tmpfs. A marker that
+# does not satisfy both reads as absent, which is the safe answer.
+rcow_hot_marker_consume()
+{
+	local boot pid now
+
+	if [ ! -s "${RCOW_HOT_MARKER}" ]; then
+		rm -f "${RCOW_HOT_MARKER}"
+		return 1
+	fi
+
+	read -r boot pid _ <"${RCOW_HOT_MARKER}"
+	rm -f "${RCOW_HOT_MARKER}"
+
+	[ -n "${boot}" ] && [ -n "${pid}" ] || return 1
+
+	now="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+	[ -n "${now}" ] && [ "${boot}" = "${now}" ] || return 1
+
+	rcow_pid_is_target "${pid}" || return 1
+	return 0
+}
+
+rcow_hot_marker_clear()
+{
+	rm -f "${RCOW_HOT_MARKER}" 2>/dev/null || true
+	return 0
+}
+
+# --------------------------------------------------------------------------
+# Version gate
+#
+# === What it guards ===
+#
+# A hot restart hands the same on-disk state to a different binary. The local
+# superblock, WAL super and checkpoint each carry a version and each fails hard
+# with -EPROTO on one they do not know, so those bumps are loud. The journal is
+# the exception: it has no version field, only an op value, and a reader that
+# meets an op it does not know treats it as the end of the log. For a torn tail
+# that is exactly right, and for a log written by a *newer* build it is silent
+# truncation of acknowledged writes.
+#
+# So the gate runs before the kill and refuses, rather than letting the new
+# binary decide: it is the only place the two formats are both known.
+#
+# === Why the comparison takes two documents ===
+#
+# One from the running target (rcow_get_build_info) and one from the candidate
+# binary (s3lvol_tgt --print-build-info). Nothing here touches the target, so
+# every refusal is testable with synthetic documents and no second build tree.
+#
+# rcow_version_gate_compare <running-json-file> <candidate-json-file>
+#
+# 0 = a hot upgrade is allowed, 1 = refused, with every reason on stderr.
+# spdk_version is reported and never compared: an SPDK bump moves the nvmf
+# firmware revision and the default model number, and the host identifies a disk
+# by namespace UUID, so drift there is expected -- refusing on it would forbid
+# the cross-SPDK upgrade the design allows.
+rcow_version_gate_compare()
+{
+	local running="${1:-}" candidate="${2:-}"
+
+	if [ ! -s "${running}" ]; then
+		rcow_err "version gate: no running build-info document at \
+'${running}'"
+		return 1
+	fi
+	if [ ! -s "${candidate}" ]; then
+		rcow_err "version gate: no candidate build-info document at \
+'${candidate}'"
+		return 1
+	fi
+
+	python3 - "${running}" "${candidate}" <<'PY'
+import json, sys
+
+# journal_op_max is here because the journal has no version field: see the note
+# above this function.
+EQUAL = ("super_version", "wal_version", "ckpt_version", "journal_op_max",
+         "num_subsys", "ns_per_subsys", "nqn_prefix")
+
+def load(path, side):
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except Exception as exc:
+        print("%s build-info is unreadable (%s)" % (side, exc), file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(d, dict):
+        print("%s build-info is not a JSON object" % side, file=sys.stderr)
+        sys.exit(1)
+    return d
+
+run = load(sys.argv[1], "the running target's")
+new = load(sys.argv[2], "the candidate binary's")
+
+bad = []
+for field in EQUAL:
+    absent = [side for side, doc in (("candidate", new), ("running", run))
+              if field not in doc]
+    if absent:
+        # A field missing from both sides would compare equal and pass. That is
+        # the worst answer a gate can give -- it reports the upgrade as checked
+        # when nothing was compared -- so absence is always a refusal.
+        bad.append("%s is missing from the %s build-info"
+                   % (field, " and ".join(absent)))
+    elif new[field] != run[field]:
+        bad.append("%s differs: candidate %r, running %r"
+                   % (field, new[field], run[field]))
+
+# A build's export_version_max is its current export version, so the running
+# side's max is the version the candidate has to accept.
+lo, hi = new.get("export_version_min"), new.get("export_version_max")
+cur = run.get("export_version_max")
+if lo is None or hi is None:
+    bad.append("export_version_min/max is missing from the candidate build-info")
+elif cur is None:
+    bad.append("export_version_max is missing from the running build-info")
+elif not (lo <= cur <= hi):
+    # Names the field, like every other refusal here: the caller has to know
+    # which knob to move.
+    bad.append("export_version: the running version %r is outside the "
+               "candidate's [%r, %r]" % (cur, lo, hi))
+
+print("version gate: running %s (%s) spdk %s -> candidate %s (%s) spdk %s"
+      % (run.get("s3lvol_version", "?"), run.get("git_commit", "?"),
+         run.get("spdk_version", "?"), new.get("s3lvol_version", "?"),
+         new.get("git_commit", "?"), new.get("spdk_version", "?")),
+      file=sys.stderr)
+
+for reason in bad:
+    print(reason, file=sys.stderr)
+sys.exit(1 if bad else 0)
+PY
+}
+
+# Gather both documents and compare them. Refuses, before anything is killed,
+# when the running target cannot describe itself: a target older than this
+# mechanism has no way to report its formats, so it cannot be hot-upgraded and
+# must go through a cold stop -- the mechanism cannot bootstrap itself.
+rcow_version_gate_check()
+{
+	local candidate="${1:-}" running_doc candidate_doc rc=0
+
+	if [ -z "${candidate}" ]; then
+		rcow_err "version gate: no candidate binary given"
+		return 1
+	fi
+	if [ ! -x "${candidate}" ]; then
+		rcow_err "version gate: '${candidate}' is not an executable"
+		return 1
+	fi
+
+	rcow_ensure_run_dir
+	running_doc="$(mktemp "${RCOW_RUN_DIR}/gate-running.XXXXXX")" || {
+		rcow_err "version gate: cannot stage a document in ${RCOW_RUN_DIR}"
+		return 1
+	}
+	candidate_doc="${running_doc}.candidate"
+
+	if ! rcow_rpc rcow_get_build_info >"${running_doc}" 2>/dev/null; then
+		rcow_err "version gate: the running target does not answer \
+rcow_get_build_info. A target older than this mechanism cannot be hot-upgraded, \
+because nothing can learn its on-disk formats before it is killed"
+		rm -f "${running_doc}" "${candidate_doc}"
+		return 1
+	fi
+	if ! "${candidate}" --print-build-info >"${candidate_doc}" 2>/dev/null; then
+		rcow_err "version gate: '${candidate} --print-build-info' failed; \
+refusing to hot-upgrade to a binary that cannot describe itself"
+		rm -f "${running_doc}" "${candidate_doc}"
+		return 1
+	fi
+
+	rcow_version_gate_compare "${running_doc}" "${candidate_doc}" || rc=1
+	rm -f "${running_doc}" "${candidate_doc}"
+	return "${rc}"
 }
 
 # Start the target detached and echo its pid.
@@ -872,7 +1191,9 @@ so this run keeps the existing one"
 		#     loopback, and a hostnqn allowlist here would have to be kept
 		#     in step with /etc/nvme/hostnqn on every boot.
 		# -m: see the header comment -- without it nsid > 32 is refused.
-		script="${script}nvmf_create_subsystem ${nqn} -a -s $(printf 'RCOW%014d' "${i}") -m ${RCOW_NS_PER_SUBSYS}
+		# -d: the model is pinned rather than left to SPDK's default, so it
+		#     cannot drift when SPDK is upgraded.
+		script="${script}nvmf_create_subsystem ${nqn} -a -s $(printf 'RCOW%014d' "${i}") -d ${RCOW_MODEL} -m ${RCOW_NS_PER_SUBSYS}
 "
 		created=$((created + 1))
 	done
@@ -987,9 +1308,17 @@ rcow_connect_all()
 			already=$((already + 1))
 			continue
 		fi
+		# The timeouts are set at connect time for a fresh start; the upgrade
+		# path writes the same values to sysfs on controllers that already
+		# exist (rcow_tune_initiator_timeouts), because connect options are
+		# fixed for a connection's lifetime. fast_io_fail_tmo is deliberately
+		# never passed: enabled, it turns every pause into a fast failure,
+		# which is the opposite of what this whole path is for.
 		if nvme connect -t tcp -a "${RCOW_LISTEN_ADDR}" \
 				-s "${RCOW_LISTEN_PORT}" -n "${nqn}" \
-				-i "${RCOW_IO_QUEUES}" >/dev/null 2>&1; then
+				-i "${RCOW_IO_QUEUES}" \
+				--reconnect-delay "${RCOW_RECONNECT_DELAY}" \
+				--ctrl-loss-tmo "${RCOW_CTRL_LOSS_TMO}" >/dev/null 2>&1; then
 			connected=$((connected + 1))
 		else
 			rcow_warn "nvme connect failed for ${nqn}"
@@ -1019,6 +1348,177 @@ rcow_disconnect_all()
 	done
 
 	rcow_log "initiator: disconnected ${gone} subsystem(s)"
+	return 0
+}
+
+# Write the initiator timeouts onto the controllers that already exist, for an
+# upgrade that is about to kill the target while leaving the connections up.
+#
+# === Why the write order is load-bearing ===
+#
+# What bounds the retry budget is not ctrl_loss_tmo's value but the count
+# max_reconnects, and only the ctrl_loss_tmo store recomputes it:
+#
+#     opts->max_reconnects = DIV_ROUND_UP(ctrl_loss_tmo, opts->reconnect_delay);
+#
+# The reconnect_delay store changes the delay and leaves the count alone. So the
+# delay has to be written first and the timeout second, so the recompute sees
+# the new delay. The other order leaves the old count in place and collapses the
+# budget -- a 1800s setting under the default 10s delay becomes 180s -- silently,
+# and at exactly the moment the budget is needed. The read-back is what makes a
+# wrong order observable: the ctrl_loss_tmo show method returns
+# max_reconnects * reconnect_delay, so the count is visible in the value.
+#
+# === Why reconnect_delay is clamped to >= 1 ===
+#
+# Its store is kstrtou32 with no lower bound, so 0 is accepted. Zero is a
+# zero-delay retry storm that spends max_reconnects in milliseconds, and it makes
+# the kernel divide by zero on the next ctrl_loss_tmo write. It never reaches
+# sysfs from here.
+#
+# Return codes: 0 tuned, 1 refused (bad input, a failed assertion, or an enabled
+# fast_io_fail_tmo), 2 the kernel exports neither attribute (pre-5.7), so the
+# host runs on its own default however this is configured: a rollback deadline
+# derived from this system's ctrl_loss_tmo has to start from
+# RCOW_MIN_CTRL_LOSS_TMO instead.
+rcow_tune_initiator_timeouts()
+{
+	local delay="${RCOW_RECONNECT_DELAY}"
+	local tmo="${RCOW_CTRL_LOSS_TMO}"
+	local soft=0
+	local d nqn rd clt fif got_rd got_clt exp tuned=0
+	local -a ctrls=()
+
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		--reconnect-delay) shift; delay="${1:-}" ;;
+		--ctrl-loss-tmo)   shift; tmo="${1:-}" ;;
+		--soft)            soft=1 ;;
+		*) rcow_err "rcow_tune_initiator_timeouts: unknown argument: $1"
+		   return 1 ;;
+		esac
+		shift
+	done
+
+	case "${delay}" in
+	''|*[!0-9]*)
+		if [ "${soft}" -eq 1 ]; then
+			rcow_warn "reconnect_delay='${delay}' is not a positive \
+integer; clamping to 1 (--soft)"
+			delay=1
+		else
+			rcow_err "refusing reconnect_delay='${delay}': it must be a \
+positive integer. sysfs accepts 0, and 0 is a retry storm plus a divide-by-zero \
+in the kernel's next ctrl_loss_tmo write"
+			return 1
+		fi
+		;;
+	*)
+		if [ "${delay}" -lt 1 ]; then
+			if [ "${soft}" -eq 1 ]; then
+				rcow_warn "reconnect_delay=0 clamped to 1 (--soft)"
+				delay=1
+			else
+				rcow_err "refusing reconnect_delay=0: sysfs accepts \
+it, and it is a retry storm plus a divide-by-zero in the kernel's next \
+ctrl_loss_tmo write"
+				return 1
+			fi
+		fi
+		;;
+	esac
+
+	case "${tmo}" in
+	''|*[!0-9]*)
+		rcow_err "refusing ctrl_loss_tmo='${tmo}': it must be a positive \
+integer"
+		return 1
+		;;
+	esac
+	if [ "${tmo}" -lt 1 ]; then
+		rcow_err "refusing ctrl_loss_tmo=0"
+		return 1
+	fi
+
+	# Only the controllers this deployment created. A controller somebody else
+	# connected must not be re-tuned from here.
+	for d in /sys/class/nvme/nvme*; do
+		[ -d "${d}" ] || continue
+		nqn="$(cat "${d}/subsysnqn" 2>/dev/null)" || continue
+		case "${nqn}" in
+		"${RCOW_NQN_PREFIX}"*) ctrls+=("${d}") ;;
+		esac
+	done
+
+	if [ "${#ctrls[@]}" -eq 0 ]; then
+		rcow_log "no ${RCOW_NQN_PREFIX}* controller to tune"
+		return 0
+	fi
+
+	# Per-controller files, but they arrive with the kernel, so probing one
+	# answers for all.
+	if [ ! -e "${ctrls[0]}/reconnect_delay" ] &&
+	   [ ! -e "${ctrls[0]}/ctrl_loss_tmo" ]; then
+		rcow_warn "this kernel does not export reconnect_delay / \
+ctrl_loss_tmo (pre-5.7); the real rollback budget is the kernel's 600s default, \
+not ${tmo}s"
+		return 2
+	fi
+
+	# The count the kernel will hold for this (delay, tmo), and so the value
+	# the read-back must equal.
+	exp=$(( (tmo + delay - 1) / delay * delay ))
+
+	for d in "${ctrls[@]}"; do
+		rd="${d}/reconnect_delay"
+		clt="${d}/ctrl_loss_tmo"
+
+		# Enabled, fast_io_fail_tmo fails every I/O the moment the
+		# transport drops -- the exact opposite of pausing until the target
+		# comes back.
+		if [ -e "${d}/fast_io_fail_tmo" ]; then
+			fif="$(cat "${d}/fast_io_fail_tmo" 2>/dev/null)"
+			case "${fif}" in
+			''|0|off|-1|none) ;;
+			*)
+				rcow_err "${d}/fast_io_fail_tmo is '${fif}'; it \
+must stay disabled or every pause becomes a fast failure"
+				return 1
+				;;
+			esac
+		fi
+
+		# reconnect_delay first -- see the header. The read-back below
+		# detects a swapped order.
+		if ! printf '%s\n' "${delay}" >"${rd}" 2>/dev/null; then
+			rcow_err "could not write reconnect_delay=${delay} to ${rd}"
+			return 1
+		fi
+		if ! printf '%s\n' "${tmo}" >"${clt}" 2>/dev/null; then
+			rcow_err "could not write ctrl_loss_tmo=${tmo} to ${clt}"
+			return 1
+		fi
+
+		got_rd="$(cat "${rd}" 2>/dev/null)"
+		got_clt="$(cat "${clt}" 2>/dev/null)"
+
+		if [ "${got_rd}" != "${delay}" ]; then
+			rcow_err "reconnect_delay on ${d} read back as \
+'${got_rd}', not '${delay}': the store did not keep what it accepted"
+			return 1
+		fi
+		if [ "${got_clt}" != "${exp}" ]; then
+			rcow_err "ctrl_loss_tmo on ${d} read back as '${got_clt}', \
+expected '${exp}' (= max_reconnects * reconnect_delay). Either the write order \
+was wrong or the kernel disagreed; the retry budget is not what was asked for"
+			return 1
+		fi
+
+		tuned=$((tuned + 1))
+	done
+
+	rcow_log "initiator: tuned ${tuned} controller(s) to \
+reconnect_delay=${delay}s, ctrl_loss_tmo=${tmo}s"
 	return 0
 }
 
@@ -1142,10 +1642,24 @@ PY
 # The copy is what makes the deletion safe: dying between the two leaves the plan
 # behind, and the next run finds it and repeats. Dying part way through leaves
 # the plan holding what is left.
+#
+# === Why the activation calls are batched ===
+#
+# One rcow_active_bdev per volume is one python interpreter and one round-trip
+# per volume, all inside the pause window. rcow_active_bdev_batch restores them
+# in a single round-trip. It does
+# not shorten any one namespace's pause: the nvmf pause names a single nsid, so
+# each volume is added under its own pause and volumes on one subsystem pay one
+# pause each. Only the round-trip is saved.
+#
+# The batch is not transactional -- earlier successes stay and the failures are
+# named. That is deliberate: the caller's retry is idempotent, and rolling a
+# successful attach back would be worse.
 rcow_replay_registry()
 {
 	local plan="${RCOW_REPLAY_FILE}"
-	local uuid_map name subsys nsid want_uuid have_uuid out
+	local uuid_map name subsys nsid want_uuid have_uuid out payload res first row
+	local -a accepted=()
 	local -a pending=()
 	local done_n=0 refused_n=0 failed_n=0
 
@@ -1160,7 +1674,11 @@ refusing to touch ${RCOW_ACTIVE_FILE}"
 			rm -f "${plan}.tmp"
 			return 1
 		fi
-		sync
+		if ! rcow_fsync_file "${plan}"; then
+			rcow_err "could not make ${plan} durable; refusing to \
+touch ${RCOW_ACTIVE_FILE}"
+			return 1
+		fi
 	else
 		rcow_log "nothing was recorded as active; no replay needed"
 		return 0
@@ -1199,22 +1717,90 @@ name; not restored, because the host would mount it believing it was the old one
 			continue
 		fi
 
-		# subsys and nsid are given explicitly. Letting them be recomputed
-		# would put a volume that had been moved somewhere else, and the whole
-		# point of the registry is that the layout comes back unchanged.
-		if out="$(rcow_rpc rcow_active_bdev \
-			"$(printf '{"device_name":"%s","subsys":%s,"nsid":%s}' \
-				"${name}" "${subsys}" "${nsid}")" 2>&1)"; then
-			done_n=$((done_n + 1))
-		else
-			rcow_warn "could not restore '${name}' at subsys ${subsys} nsid \
-${nsid}: ${out}"
-			pending+=("${name}")
-			failed_n=$((failed_n + 1))
-		fi
+		# subsys and nsid are carried along explicitly. Letting them be
+		# recomputed would put a volume that had been moved somewhere else,
+		# and the whole point of the registry is that the layout comes back
+		# unchanged.
+		accepted+=("${name}"$'\t'"${subsys}"$'\t'"${nsid}")
 	done < <(rcow_registry_tsv "${plan}")
 
 	rm -f "${uuid_map}"
+
+	if [ "${#accepted[@]}" -gt 0 ]; then
+		# python builds the payload: a volume name can hold a quote or a
+		# backslash, and the printf-concatenated form this replaces would then
+		# produce malformed JSON. rcow_rpc forwards exactly one argument, so
+		# the payload has to be one string.
+		payload="$(printf '%s\n' "${accepted[@]}" | python3 -c '
+import json, sys
+vols = []
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line:
+        continue
+    name, subsys, nsid = line.split("\t")
+    vols.append({"device_name": name, "subsys": int(subsys),
+                 "nsid": int(nsid)})
+print(json.dumps({"volumes": vols}))
+')"
+
+		# A payload that could not be built is treated as a reply that could
+		# not be read: every volume goes back to pending. It is not sent at
+		# all, because an empty params argument reaches the target as "no
+		# params" and its refusal would read as the target's fault.
+		if [ -z "${payload}" ]; then
+			out="the batch payload could not be built"
+			res="PARSE_FAIL"
+		else
+			out="$(rcow_rpc rcow_active_bdev_batch "${payload}" 2>&1)"
+
+			# The reply travels as string_value on both streams, so what is
+			# parsed below is the target's own result object whatever the exit
+			# status was.
+			res="$(printf '%s' "${out}" | python3 -c '
+import json, sys
+try:
+    r = json.load(sys.stdin)
+    if not isinstance(r, dict) or not {"restored", "already_active",
+                                       "failed"} <= set(r):
+        raise ValueError
+except Exception:
+    print("PARSE_FAIL")
+    sys.exit(0)
+print("%d\t%d" % (int(r.get("restored", 0)),
+                  int(r.get("already_active", 0))))
+for f in r.get("failed") or []:
+    print("F\t%s" % (f.get("device_name", "")))
+')"
+		fi
+
+		case "${res}" in
+		PARSE_FAIL*|'')
+			# Not the batch object: an older target answers -32601, one
+			# that cannot run answers a transport error, and neither text
+			# is a result. Every volume in the batch goes back to pending;
+			# dropping one because the reply was unreadable is the exact
+			# failure this path exists to prevent, and the retry is
+			# idempotent.
+			rcow_warn "the rcow_active_bdev_batch reply could not be read \
+as a result (${out}); treating all ${#accepted[@]} volume(s) as pending rather \
+than dropping any"
+			for row in "${accepted[@]}"; do
+				pending+=("${row%%$'\t'*}")
+			done
+			failed_n=$((failed_n + ${#accepted[@]}))
+			;;
+		*)
+			first="$(printf '%s\n' "${res}" | head -n 1)"
+			done_n=$(( ${first%%$'\t'*} + ${first##*$'\t'} ))
+			while IFS=$'\t' read -r row name; do
+				[ "${row}" = "F" ] || continue
+				pending+=("${name}")
+				failed_n=$((failed_n + 1))
+			done < <(printf '%s\n' "${res}" | tail -n +2)
+			;;
+		esac
+	fi
 
 	if [ "${#pending[@]}" -eq 0 ]; then
 		rcow_registry_keep "${plan}"
@@ -1250,9 +1836,26 @@ listed in ${plan} and will be retried by the next start or by rcow_recovery.sh"
 # Which matters beyond the tests, because rcow_start.sh calls this after a replay
 # and logs "all N active volume(s) resolve to a block device" on the strength of
 # it. Anything reading that line and opening the device would race udev.
+#
+# With --expect the same poll is a precondition rather than the answer: once the
+# devices exist, the live layout is compared byte for byte against the snapshot
+# rcow_hot_stop.sh took before the upgrade. The upgrade is only allowed to be
+# invisible, so a volume that moved subsystem, changed nsid, came back under a
+# different device node, or gained company is as much a failure as one that did
+# not come back at all -- which is why an extra live entry fails too.
 rcow_verify_active()
 {
-	local timeout="${1:-30}" deadline missing total out name path
+	local timeout="30" expect="" live_tmp
+	local deadline missing total out name path
+
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		--expect) shift; expect="${1:-}" ;;
+		*) timeout="$1" ;;
+		esac
+		shift
+	done
+	[ -n "${timeout}" ] || timeout=30
 
 	deadline=$((SECONDS + timeout))
 	while :; do
@@ -1293,6 +1896,70 @@ within ${timeout}s:"
 	fi
 
 	rcow_log "all ${total} active volume(s) resolve to an openable block device"
+
+	if [ -z "${expect}" ]; then
+		return 0
+	fi
+
+	# python rather than bash: comparing two JSON documents field by field in
+	# shell is a bug waiting to happen, and the differing rows have to name
+	# which field moved.
+	live_tmp="$(mktemp "${RCOW_RUN_DIR}/verify.XXXXXX")" || {
+		rcow_err "could not stage the live layout for comparison"
+		return 1
+	}
+	printf '%s' "${out}" >"${live_tmp}"
+
+	if ! python3 - "${expect}" "${live_tmp}" <<'PY'
+import json, sys
+
+FIELDS = ("device_name", "uuid", "subsys", "nsid", "device_path")
+
+def load(path):
+    with open(path) as f:
+        return json.load(f)
+
+def keyed(entries):
+    return {e.get("device_name", ""): e for e in entries}
+
+try:
+    want = keyed(load(sys.argv[1]))
+    live = keyed(load(sys.argv[2]))
+except Exception as e:
+    print("cannot compare layouts: %s" % e, file=sys.stderr)
+    sys.exit(2)
+
+bad = 0
+for name in sorted(want):
+    if name not in live:
+        print("%s: in the pre-upgrade snapshot but missing now" % name,
+              file=sys.stderr)
+        bad += 1
+        continue
+    for f in FIELDS:
+        if want[name].get(f) != live[name].get(f):
+            print("%s: %s changed: %r -> %r" % (
+                name, f, want[name].get(f), live[name].get(f)),
+                file=sys.stderr)
+            bad += 1
+for name in sorted(live):
+    if name not in want:
+        print("%s: appeared after the upgrade; it was not in the snapshot"
+              % name, file=sys.stderr)
+        bad += 1
+
+sys.exit(1 if bad else 0)
+PY
+	then
+		rm -f "${live_tmp}"
+		rcow_err "the live layout does not match the pre-upgrade snapshot \
+${expect}; the volumes above differ"
+		return 1
+	fi
+	rm -f "${live_tmp}"
+
+	rcow_log "layout matches ${expect}: every volume is on the same subsystem, \
+nsid and device"
 	return 0
 }
 

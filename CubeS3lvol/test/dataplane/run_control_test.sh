@@ -126,6 +126,13 @@ read_back_pattern()
 
 jget() { python3 -c 'import json,sys; print(json.loads(sys.argv[1])[sys.argv[2]])' "$1" "$2"; }
 
+# For a field that is written only when it is true, where its absence is the
+# answer: jget raises on a missing key rather than saying so.
+has_key() {
+	python3 -c 'import json,sys; print("yes" if sys.argv[2] in json.loads(sys.argv[1]) else "no")' \
+		"$1" "$2"
+}
+
 rpc() { python3 "${RPC}" "$@"; }
 
 registry_names() {
@@ -136,6 +143,38 @@ try:
 except Exception:
     print("")
 PY
+}
+
+# Where the registry says a volume belongs, as "subsys nsid". The layout a
+# replay has to reproduce comes from here, not from wherever the volume happens
+# to be, so that is what the test compares against.
+recorded_placement() {
+	python3 - "${ACTIVE_FILE}" "$1" <<'PY'
+import json, sys
+try:
+    e = json.load(open(sys.argv[1]))[sys.argv[2]]
+    print("%d %d" % (e["subsys"], e["nsid"]))
+except Exception:
+    print("")
+PY
+}
+
+# Whether the subsystem at this index exposes a namespace with this nsid, asked
+# of the target rather than the host. rcow_get_bdev's device_path would answer
+# it too, but only once the kernel has published the gendisk, and a test that
+# waits on udev reports timing as failure -- measured, see read_back_pattern.
+nsid_present() {
+	rcow_srpc nvmf_get_subsystems 2>/dev/null | python3 -c '
+import json, sys
+want_nqn, want_nsid = sys.argv[1], int(sys.argv[2])
+for s in json.load(sys.stdin):
+    if s.get("nqn") == want_nqn:
+        print(sum(1 for n in s.get("namespaces", [])
+                  if n.get("nsid") == want_nsid))
+        break
+else:
+    print(-1)
+' "$(rcow_nqn "$1")" "$2"
 }
 
 # --------------------------------------------------------------------------
@@ -596,6 +635,50 @@ fi
 grep -q "restart instead" /tmp/rcow_ctl_verify.log &&
 	pass "and said what actually fixes it, rather than re-activating" ||
 	fail "the advice on a mismatch is missing"
+
+# ==========================================================================
+# The state the two sections above have just built is the one the replay gets
+# wrong: the registry is in memory with entries in it, and nothing has attached
+# them. An activation for a volume in that state has to attach it. Reading "the
+# name is in the registry" as "the namespace is up" is how a replay over an
+# already-loaded registry builds nothing at all -- and a hot restart is exactly
+# that replay, run by a target whose registry something else had already read
+# while it was coming up. The host then reconnects to a subsystem with no
+# namespaces in it and the kernel removes its block devices, which turns the
+# pause a hot upgrade promises into I/O errors.
+echo ""
+echo "=== [7b] a recorded-but-unattached volume is attached, not reported active"
+
+read -r REC_SUB REC_NSID <<<"$(recorded_placement ctl-a)"
+info "the registry records ctl-a at subsys ${REC_SUB} nsid ${REC_NSID}"
+
+ACT="$(rpc rcow_active_bdev '{"device_name":"ctl-a"}' 2>&1)"
+
+# The placement alone does not tell the two answers apart -- a wrong answer can
+# carry the right placement too. So assert first that the reply is a reply at all (an
+# error would parse as neither field), and only then that it was the attach
+# answer rather than the already-active one.
+[ "$(jget "${ACT}" subsys)" = "${REC_SUB}" ] &&
+[ "$(jget "${ACT}" nsid)" = "${REC_NSID}" ] &&
+	pass "the activation answered for ctl-a at the recorded placement" ||
+	fail "unexpected reply for ctl-a: ${ACT}"
+
+[ "$(has_key "${ACT}" already_active)" = "yes" ] &&
+	fail "activating an inherited volume answered 'already active' off the \
+registry record alone" ||
+	pass "and it did not answer 'already active', so it attached"
+
+NS="$(nsid_present "${REC_SUB}" "${REC_NSID}")"
+[ "${NS}" = "1" ] &&
+	pass "and the namespace is really there, not just recorded" ||
+	fail "the subsystem has ${NS} namespace(s) at nsid ${REC_NSID}, wanted 1"
+
+# Only now may it be treated as a repeat, which is what a caller retrying after
+# a timeout relies on.
+ACT="$(rpc rcow_active_bdev '{"device_name":"ctl-a"}' 2>&1)"
+[ "$(has_key "${ACT}" already_active)" = "yes" ] &&
+	pass "a second activation is recognised as already active" ||
+	fail "a second activation did not see the namespace it had just created"
 
 # ==========================================================================
 echo ""

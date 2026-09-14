@@ -26,7 +26,8 @@
  *     rcow_export_snapshot / rcow_get_snapshot_status / rcow_import_lvol
  *     rcow_release_export / rcow_get_exports / rcow_get_imports / rcow_decouple_lvol
  *     rcow_get_decouple
- *     rcow_active_bdev / rcow_deactive_bdev / rcow_get_bdev
+ *     rcow_active_bdev / rcow_active_bdev_batch / rcow_deactive_bdev / rcow_get_bdev
+ *     rcow_get_build_info
  *
  *   Credentials do not travel as RPC parameters -- they are read from the
  *   environment (S3_AUTH_ENV), so secrets never land in RPC logs or shell
@@ -46,6 +47,8 @@
 
 #include "spdk_internal/lvolstore.h"
 
+#include "s3lvol/s3_build_info.h"
+#include "s3lvol/s3_checkpoint.h"
 #include "s3lvol/s3_export.h"
 #include "s3lvol/s3_spawner.h"
 #include "s3lvol/s3_types.h"
@@ -2970,6 +2973,47 @@ SPDK_RPC_REGISTER("rcow_pending_load_hold", rpc_rcow_pending_load_hold,
 		  SPDK_RPC_RUNTIME)
 
 /* ==========================================================================
+ * rcow_get_build_info
+ *
+ * What this build is, for the upgrade gate's *running* side. The candidate side
+ * is s3lvol_tgt --print-build-info, which renders the same document without
+ * starting the process. The two are compared before the binary is swapped, so
+ * the reply carries the document verbatim in string_value and no caller has to
+ * know the field set to pass it on.
+ * ========================================================================== */
+
+static void
+rpc_rcow_get_build_info(struct spdk_jsonrpc_request *request,
+			const struct spdk_json_val *params)
+{
+	char buf[S3LVOL_BUILD_INFO_MAX];
+	int rc;
+
+	/* Takes none, but an empty object is accepted as well as none, which is
+	 * what rcow_get_decouple does and for the same reason: some callers always
+	 * send one. Anything with a key in it is a typo worth reporting rather
+	 * than ignoring. */
+	if (params != NULL && spdk_json_decode_object(params, NULL, 0, NULL)) {
+		spdk_jsonrpc_send_error_response(request,
+						 SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "method takes no parameters");
+		return;
+	}
+
+	rc = s3lvol_build_info_json(buf, sizeof(buf));
+	if (rc < 0) {
+		rpc_lvol_respond_errf(request,
+				      "the build information does not fit in %u bytes",
+				      (unsigned)S3LVOL_BUILD_INFO_MAX);
+		return;
+	}
+
+	rpc_lvol_respond_ok(request, buf);
+}
+SPDK_RPC_REGISTER("rcow_get_build_info", rpc_rcow_get_build_info,
+		  SPDK_RPC_RUNTIME)
+
+/* ==========================================================================
  * Activation: exposing an lvol or snapshot as an NVMe namespace
  *
  * rcow_active_bdev      attach a volume to its subsystem
@@ -3002,12 +3046,38 @@ static const struct spdk_json_object_decoder rpc_active_bdev_decoders[] = {
 	{"nsid",        offsetof(struct rpc_active_bdev, nsid),        spdk_json_decode_uint32, true},
 };
 
+/* Diagnostics here name a volume and the subsystem it belongs to, and the NQN
+ * of the latter is by itself up to SPDK_NVMF_NQN_MAX_LEN bytes, so the buffer
+ * has to hold more than the sentence it carries. */
+#define ACTIVE_BDEV_MSG_MAX 512
+
+/* What one attach came to. `already` is success -- the idempotent retry case --
+ * while `failed` carries the message the reply would have shown. name/uuid/
+ * subsys/nsid are the same placement the single-volume document reports. */
+struct active_bdev_outcome {
+	bool     failed;
+	bool     already;
+	char     name[SPDK_LVOL_NAME_MAX];
+	char     uuid[SPDK_UUID_STRING_LEN];
+	uint32_t subsys;
+	uint32_t nsid;
+	char     msg[ACTIVE_BDEV_MSG_MAX];
+};
+
+/* The completion of one attach. May be invoked before active_bdev_attach()
+ * returns -- validation failures and the already-active case resolve
+ * synchronously -- so the caller must tolerate that and not touch anything the
+ * callback may already have freed. */
+typedef void (*active_bdev_done_cb)(void *cb_arg,
+				    const struct active_bdev_outcome *out);
+
 struct active_bdev_ctx {
-	struct spdk_jsonrpc_request *request;
-	char      name[SPDK_LVOL_NAME_MAX];
-	char      uuid[SPDK_UUID_STRING_LEN];
-	char      nqn[SPDK_NVMF_NQN_MAX_LEN + 1];
-	uint32_t  subsys;
+	active_bdev_done_cb done_fn;
+	void       *done_arg;
+	char        name[SPDK_LVOL_NAME_MAX];
+	char        uuid[SPDK_UUID_STRING_LEN];
+	char        nqn[SPDK_NVMF_NQN_MAX_LEN + 1];
+	uint32_t    subsys;
 };
 
 /* The placement, as the document that goes into string_value. Shared by the two
@@ -3048,17 +3118,17 @@ rpc_active_respond(struct spdk_jsonrpc_request *request, const char *name,
  * the host needs a moment to notice a new namespace, and waiting for it here
  * would stall the reactor for the duration. Callers poll rcow_get_bdev. */
 static void
-rpc_active_bdev_attached(void *cb_arg, uint32_t nsid, int status)
+active_bdev_attached(void *cb_arg, uint32_t nsid, int status)
 {
 	struct active_bdev_ctx *ctx = cb_arg;
+	struct active_bdev_outcome out = {};
 	int rc;
 
 	if (status != 0) {
-		rpc_lvol_respond_errf(ctx->request,
-				      "could not attach '%s' to %s: %s",
-				      ctx->name, ctx->nqn, spdk_strerror(-status));
-		free(ctx);
-		return;
+		out.failed = true;
+		snprintf(out.msg, sizeof(out.msg), "could not attach '%s' to %s: %s",
+			 ctx->name, ctx->nqn, spdk_strerror(-status));
+		goto done;
 	}
 
 	/* Persisted before answering. A namespace that is live but unrecorded gets
@@ -3071,19 +3141,250 @@ rpc_active_bdev_attached(void *cb_arg, uint32_t nsid, int status)
 			    "disagree\n", ctx->name, ctx->nqn, nsid,
 			    spdk_strerror(-rc));
 		s3lvol_nvmf_remove_ns(ctx->nqn, nsid, NULL, NULL);
-		rpc_lvol_respond_errf(ctx->request,
-				      "could not record '%s' in the active "
-				      "registry: %s", ctx->name, spdk_strerror(-rc));
-		free(ctx);
-		return;
+		out.failed = true;
+		snprintf(out.msg, sizeof(out.msg),
+			 "could not record '%s' in the active registry: %s",
+			 ctx->name, spdk_strerror(-rc));
+		goto done;
 	}
 
-	rpc_active_respond(ctx->request, ctx->name, ctx->uuid, ctx->nqn,
-			   ctx->subsys, nsid, false);
+	snprintf(out.name, sizeof(out.name), "%s", ctx->name);
+	snprintf(out.uuid, sizeof(out.uuid), "%s", ctx->uuid);
+	out.subsys = ctx->subsys;
+	out.nsid   = nsid;
 
 	SPDK_NOTICELOG("activated '%s' as %s nsid %" PRIu32 "\n", ctx->name,
 		       ctx->nqn, nsid);
+
+done:
+	ctx->done_fn(ctx->done_arg, &out);
 	free(ctx);
+}
+
+/* Attach one volume to its subsystem. This is the body rcow_active_bdev and
+ * rcow_active_bdev_batch both run; it reports through a completion rather than
+ * writing a request, because the batch has a different reply to write and that
+ * shape is no business of the attach path.
+ *
+ * want_subsys / want_nsid carry the same meaning as the RPC parameters:
+ * RCOW_SUBSYS_UNSET and 0 ask for the value to be derived. done_fn may run
+ * before this returns. */
+static void
+active_bdev_attach(const char *device_name, uint32_t want_subsys,
+		   uint32_t want_nsid, active_bdev_done_cb done_fn, void *done_arg)
+{
+	const struct s3lvol_active_entry *existing;
+	struct active_bdev_outcome out = {};
+	struct active_bdev_ctx *ctx;
+	struct s3lvol_lvstore *lvs;
+	struct spdk_lvol *lvol;
+	char bdev_name[SPDK_LVS_NAME_MAX + SPDK_LVOL_NAME_MAX + 2];
+	uint32_t subsys, nsid;
+	int rc;
+
+	snprintf(out.name, sizeof(out.name), "%s", device_name);
+
+	lvol = s3lvol_lvol_find_any(device_name);
+	if (!lvol) {
+		SPDK_WARNLOG("could not activate '%s': no such lvol or snapshot\n",
+			     device_name);
+		out.failed = true;
+		snprintf(out.msg, sizeof(out.msg), "no such lvol or snapshot: %s",
+			 device_name);
+		goto done;
+	}
+
+	lvs = s3lvol_lvstore_of_lvol(lvol);
+	if (!lvs) {
+		out.failed = true;
+		snprintf(out.msg, sizeof(out.msg), "'%s' has no lvstore",
+			 device_name);
+		goto done;
+	}
+
+	/* An entry that is already there, in one of two very different senses --
+	 * and telling them apart is what `attached` is for.
+	 *
+	 * If the namespace exists in this process, report where it is rather than
+	 * adding a second one for the same volume. Activation has to be
+	 * repeatable, because a caller that timed out will retry.
+	 *
+	 * If it does not, the entry is only the record of the layout a restart
+	 * has to reproduce, and there is nothing to report: the registry is read
+	 * lazily, so any query that reaches it first -- an rcow_get_bdev while
+	 * the process is still coming up, or this very replay -- leaves entries
+	 * here before anything is attached. Answering "already active" then
+	 * claims a namespace that does not exist and never gets created. So fall
+	 * through and attach the volume. */
+	existing = s3lvol_active_find(device_name);
+	if (existing) {
+		char nqn[SPDK_NVMF_NQN_MAX_LEN + 1];
+
+		if (strcmp(existing->uuid, lvol->uuid_str) != 0) {
+			/* Same name, different volume: the recorded namespace still
+			 * refers to whatever was there before. */
+			SPDK_WARNLOG("'%s' refused: recorded uuid %s does not match "
+				     "volume uuid %s\n", device_name, existing->uuid,
+				     lvol->uuid_str);
+			out.failed = true;
+			snprintf(out.msg, sizeof(out.msg),
+				 "'%s' is recorded as active with uuid %s but the "
+				 "volume of that name now has uuid %s; deactivate "
+				 "the stale entry first",
+				 device_name, existing->uuid, lvol->uuid_str);
+			goto done;
+		}
+
+		/* A caller that named a placement is not asking "is it up?", it is
+		 * asserting where it belongs -- which is what recovery does. Returning
+		 * success while it sits somewhere else would tell the caller the layout
+		 * was reproduced when it was not. Moving it silently would be worse
+		 * still: the host would see the namespace vanish and reappear
+		 * elsewhere. So neither; say what is wrong and let the caller decide. */
+		if ((want_subsys != RCOW_SUBSYS_UNSET && want_subsys != existing->subsys) ||
+		    (want_nsid != 0 && want_nsid != existing->nsid)) {
+			SPDK_WARNLOG("'%s' refused: already at subsys %" PRIu32
+				     " nsid %" PRIu32 "\n", existing->name,
+				     existing->subsys, existing->nsid);
+			out.failed = true;
+			snprintf(out.msg, sizeof(out.msg),
+				"'%s' is already active at subsys %" PRIu32 " nsid "
+				"%" PRIu32 ", not at the requested subsys %" PRIu32
+				" nsid %" PRIu32 "; deactivate it first to move it",
+				existing->name, existing->subsys, existing->nsid,
+				want_subsys == RCOW_SUBSYS_UNSET ? existing->subsys
+								 : want_subsys,
+				want_nsid ? want_nsid : existing->nsid);
+			goto done;
+		}
+
+		if (existing->attached) {
+			s3lvol_nvmf_subsys_nqn(existing->subsys, nqn, sizeof(nqn));
+			SPDK_NOTICELOG("'%s' already active as %s nsid %" PRIu32 "\n",
+				       existing->name, nqn, existing->nsid);
+			out.already = true;
+			snprintf(out.name, sizeof(out.name), "%s", existing->name);
+			snprintf(out.uuid, sizeof(out.uuid), "%s", existing->uuid);
+			out.subsys = existing->subsys;
+			out.nsid   = existing->nsid;
+			goto done;
+		}
+
+		/* Recorded, not up. The recorded placement is the plan, so it is also
+		 * the placement this attach reproduces -- recomputing it from the name
+		 * is what would move the volume. */
+		want_subsys = existing->subsys;
+		want_nsid   = existing->nsid;
+	}
+
+	subsys = (want_subsys != RCOW_SUBSYS_UNSET) ? want_subsys
+						    : s3lvol_active_hash_subsys(device_name);
+	if (subsys >= RCOW_NUM_SUBSYS) {
+		out.failed = true;
+		snprintf(out.msg, sizeof(out.msg),
+			 "subsys %" PRIu32 " is out of range (0..%d)",
+			 subsys, RCOW_NUM_SUBSYS - 1);
+		goto done;
+	}
+
+	if (!s3lvol_nvmf_subsys_exists(subsys)) {
+		out.failed = true;
+		snprintf(out.msg, sizeof(out.msg),
+			 "subsystem %" PRIu32 " does not exist; the startup script "
+			 "is supposed to have created all %d of them", subsys,
+			 RCOW_NUM_SUBSYS);
+		goto done;
+	}
+
+	if (want_nsid != 0) {
+		/* Recovery path: that exact slot or nothing. Falling back to a free
+		 * one would change the host-side layout, which is precisely what this
+		 * parameter exists to preserve. */
+		const struct s3lvol_active_entry *holder;
+
+		if (want_nsid > RCOW_NS_PER_SUBSYS) {
+			out.failed = true;
+			snprintf(out.msg, sizeof(out.msg),
+				 "nsid %" PRIu32 " is out of range (1..%d)",
+				 want_nsid, RCOW_NS_PER_SUBSYS);
+			goto done;
+		}
+		holder = s3lvol_active_find_by_nsid(subsys, want_nsid);
+		/* Our own record is not a conflict: it names the slot the registry
+		 * itself put this volume in, which is the slot this attach was just
+		 * told to reproduce. Any other volume holding it still is. */
+		if (holder && strcmp(holder->name, device_name) != 0) {
+			out.failed = true;
+			snprintf(out.msg, sizeof(out.msg),
+				 "subsys %" PRIu32 " nsid %" PRIu32 " is already held "
+				 "by '%s'", subsys, want_nsid, holder->name);
+			goto done;
+		}
+		nsid = want_nsid;
+	} else {
+		nsid = s3lvol_active_alloc_nsid(subsys);
+		if (nsid == 0) {
+			out.failed = true;
+			snprintf(out.msg, sizeof(out.msg),
+				 "subsystem %" PRIu32 " has no free namespace slot "
+				 "(%d in use)", subsys, RCOW_NS_PER_SUBSYS);
+			goto done;
+		}
+	}
+
+	rc = snprintf(bdev_name, sizeof(bdev_name), "%s/%s",
+		      s3lvol_lvstore_get_name(lvs), lvol->name);
+	if (rc < 0 || (size_t)rc >= sizeof(bdev_name)) {
+		out.failed = true;
+		snprintf(out.msg, sizeof(out.msg), "bdev name too long");
+		goto done;
+	}
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		out.failed = true;
+		snprintf(out.msg, sizeof(out.msg), "%s", spdk_strerror(ENOMEM));
+		goto done;
+	}
+	ctx->done_fn  = done_fn;
+	ctx->done_arg = done_arg;
+	ctx->subsys   = subsys;
+	snprintf(ctx->name, sizeof(ctx->name), "%s", device_name);
+	snprintf(ctx->uuid, sizeof(ctx->uuid), "%s", lvol->uuid_str);
+	s3lvol_nvmf_subsys_nqn(subsys, ctx->nqn, sizeof(ctx->nqn));
+
+	rc = s3lvol_nvmf_add_ns(ctx->nqn, bdev_name, nsid, active_bdev_attached, ctx);
+	if (rc != 0) {
+		out.failed = true;
+		snprintf(out.msg, sizeof(out.msg),
+			 "could not start the attach of '%s': %s",
+			 device_name, spdk_strerror(-rc));
+		free(ctx);
+		goto done;
+	}
+	return;	/* asynchronous: the outcome arrives through active_bdev_attached */
+
+done:
+	done_fn(done_arg, &out);
+}
+
+/* The single-volume reply: the outcome is the whole answer. A message may
+ * contain a percent from a volume name, so it is passed as an argument rather
+ * than as a format. */
+static void
+rpc_active_bdev_done(void *cb_arg, const struct active_bdev_outcome *out)
+{
+	struct spdk_jsonrpc_request *request = cb_arg;
+	char nqn[SPDK_NVMF_NQN_MAX_LEN + 1];
+
+	if (out->failed) {
+		rpc_lvol_respond_errf(request, "%s", out->msg);
+		return;
+	}
+
+	s3lvol_nvmf_subsys_nqn(out->subsys, nqn, sizeof(nqn));
+	rpc_active_respond(request, out->name, out->uuid, nqn, out->subsys,
+			   out->nsid, out->already);
 }
 
 static void
@@ -3091,13 +3392,6 @@ rpc_rcow_active_bdev(struct spdk_jsonrpc_request *request,
 		     const struct spdk_json_val *params)
 {
 	struct rpc_active_bdev req = { .subsys = RCOW_SUBSYS_UNSET };
-	struct active_bdev_ctx *ctx = NULL;
-	const struct s3lvol_active_entry *existing;
-	struct s3lvol_lvstore *lvs;
-	struct spdk_lvol *lvol;
-	char bdev_name[SPDK_LVS_NAME_MAX + SPDK_LVOL_NAME_MAX + 2];
-	uint32_t subsys, nsid;
-	int rc;
 
 	if (spdk_json_decode_object(params, rpc_active_bdev_decoders,
 				    SPDK_COUNTOF(rpc_active_bdev_decoders), &req)) {
@@ -3105,6 +3399,8 @@ rpc_rcow_active_bdev(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
+	/* Loaded here and not in the shared path: the batch loads once for all of
+	 * its volumes and must not re-read the file per volume. */
 	if (s3lvol_active_load() != 0) {
 		SPDK_WARNLOG("rcow_active_bdev '%s' refused: the active registry "
 			     "could not be read\n", req.device_name);
@@ -3113,154 +3409,323 @@ rpc_rcow_active_bdev(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	lvol = s3lvol_lvol_find_any(req.device_name);
-	if (!lvol) {
-		SPDK_WARNLOG("rcow_active_bdev '%s' refused: no such lvol or "
-			     "snapshot\n", req.device_name);
-		rpc_lvol_respond_errf(request, "no such lvol or snapshot: %s",
-				      req.device_name);
-		goto cleanup;
-	}
-
-	lvs = s3lvol_lvstore_of_lvol(lvol);
-	if (!lvs) {
-		rpc_lvol_respond_errf(request, "'%s' has no lvstore",
-				      req.device_name);
-		goto cleanup;
-	}
-
 	SPDK_NOTICELOG("rcow_active_bdev '%s' requested\n", req.device_name);
-
-	/* Already active: report where it is rather than adding a second namespace
-	 * for the same volume. Activation has to be repeatable, because a caller
-	 * that timed out will retry. */
-	existing = s3lvol_active_find(req.device_name);
-	if (existing) {
-		char nqn[SPDK_NVMF_NQN_MAX_LEN + 1];
-
-		if (strcmp(existing->uuid, lvol->uuid_str) != 0) {
-			/* Same name, different volume: the recorded namespace still
-			 * refers to whatever was there before. */
-			SPDK_WARNLOG("rcow_active_bdev '%s' refused: recorded uuid "
-				     "%s does not match volume uuid %s\n",
-				     req.device_name, existing->uuid, lvol->uuid_str);
-			rpc_lvol_respond_errf(request,
-				"'%s' is recorded as active with uuid %s but the "
-				"volume of that name now has uuid %s; deactivate "
-				"the stale entry first",
-				req.device_name, existing->uuid, lvol->uuid_str);
-			goto cleanup;
-		}
-
-		s3lvol_nvmf_subsys_nqn(existing->subsys, nqn, sizeof(nqn));
-
-		/* A caller that named a placement is not asking "is it up?", it is
-		 * asserting where it belongs -- which is what recovery does. Returning
-		 * success while it sits somewhere else would tell the caller the layout
-		 * was reproduced when it was not. Moving it silently would be worse
-		 * still: the host would see the namespace vanish and reappear
-		 * elsewhere. So neither; say what is wrong and let the caller decide. */
-		if ((req.subsys != RCOW_SUBSYS_UNSET && req.subsys != existing->subsys) ||
-		    (req.nsid != 0 && req.nsid != existing->nsid)) {
-			SPDK_WARNLOG("rcow_active_bdev '%s' refused: already at "
-				     "subsys %" PRIu32 " nsid %" PRIu32 "\n",
-				     existing->name, existing->subsys, existing->nsid);
-			rpc_lvol_respond_errf(request,
-				"'%s' is already active at subsys %" PRIu32 " nsid "
-				"%" PRIu32 ", not at the requested subsys %" PRIu32
-				" nsid %" PRIu32 "; deactivate it first to move it",
-				existing->name, existing->subsys, existing->nsid,
-				req.subsys == RCOW_SUBSYS_UNSET ? existing->subsys
-								: req.subsys,
-				req.nsid ? req.nsid : existing->nsid);
-			goto cleanup;
-		}
-
-		SPDK_NOTICELOG("rcow_active_bdev '%s' already active as %s nsid "
-			       "%" PRIu32 "\n", existing->name, nqn, existing->nsid);
-		rpc_active_respond(request, existing->name, existing->uuid, nqn,
-				   existing->subsys, existing->nsid, true);
-		goto cleanup;
-	}
-
-	subsys = (req.subsys != RCOW_SUBSYS_UNSET) ? req.subsys
-						: s3lvol_active_hash_subsys(req.device_name);
-	if (subsys >= RCOW_NUM_SUBSYS) {
-		rpc_lvol_respond_errf(request,
-				      "subsys %" PRIu32 " is out of range (0..%d)",
-				      subsys, RCOW_NUM_SUBSYS - 1);
-		goto cleanup;
-	}
-
-	if (!s3lvol_nvmf_subsys_exists(subsys)) {
-		rpc_lvol_respond_errf(request,
-			"subsystem %" PRIu32 " does not exist; the startup script "
-			"is supposed to have created all %d of them", subsys,
-			RCOW_NUM_SUBSYS);
-		goto cleanup;
-	}
-
-	if (req.nsid != 0) {
-		/* Recovery path: that exact slot or nothing. Falling back to a free
-		 * one would change the host-side layout, which is precisely what this
-		 * parameter exists to preserve. */
-		const struct s3lvol_active_entry *holder;
-
-		if (req.nsid > RCOW_NS_PER_SUBSYS) {
-			rpc_lvol_respond_errf(request,
-				"nsid %" PRIu32 " is out of range (1..%d)",
-				req.nsid, RCOW_NS_PER_SUBSYS);
-			goto cleanup;
-		}
-		holder = s3lvol_active_find_by_nsid(subsys, req.nsid);
-		if (holder) {
-			rpc_lvol_respond_errf(request,
-				"subsys %" PRIu32 " nsid %" PRIu32 " is already held "
-				"by '%s'", subsys, req.nsid, holder->name);
-			goto cleanup;
-		}
-		nsid = req.nsid;
-	} else {
-		nsid = s3lvol_active_alloc_nsid(subsys);
-		if (nsid == 0) {
-			rpc_lvol_respond_errf(request,
-				"subsystem %" PRIu32 " has no free namespace slot "
-				"(%d in use)", subsys, RCOW_NS_PER_SUBSYS);
-			goto cleanup;
-		}
-	}
-
-	rc = snprintf(bdev_name, sizeof(bdev_name), "%s/%s",
-		      s3lvol_lvstore_get_name(lvs), lvol->name);
-	if (rc < 0 || (size_t)rc >= sizeof(bdev_name)) {
-		rpc_lvol_respond_err(request, 0, "bdev name too long");
-		goto cleanup;
-	}
-
-	ctx = calloc(1, sizeof(*ctx));
-	if (!ctx) {
-		rpc_lvol_respond_err(request, -ENOMEM, NULL);
-		goto cleanup;
-	}
-	ctx->request = request;
-	ctx->subsys  = subsys;
-	snprintf(ctx->name, sizeof(ctx->name), "%s", req.device_name);
-	snprintf(ctx->uuid, sizeof(ctx->uuid), "%s", lvol->uuid_str);
-	s3lvol_nvmf_subsys_nqn(subsys, ctx->nqn, sizeof(ctx->nqn));
-
-	rc = s3lvol_nvmf_add_ns(ctx->nqn, bdev_name, nsid,
-				rpc_active_bdev_attached, ctx);
-	if (rc != 0) {
-		rpc_lvol_respond_errf(request,
-				      "could not start the attach of '%s': %s",
-				      req.device_name, spdk_strerror(-rc));
-		free(ctx);
-	}
+	active_bdev_attach(req.device_name, req.subsys, req.nsid,
+			   rpc_active_bdev_done, request);
 
 cleanup:
 	free(req.device_name);
 }
 SPDK_RPC_REGISTER("rcow_active_bdev", rpc_rcow_active_bdev, SPDK_RPC_RUNTIME)
+
+/* ==========================================================================
+ * rcow_active_bdev_batch
+ *
+ * Restore N volumes in one round-trip, so the caller pays one process startup
+ * instead of one per volume. That is the whole of the saving: each attach adds
+ * one namespace and pays one pause for it, so two volumes on one subsystem
+ * still pay two. Merging volumes that share a subsystem is not done here.
+ *
+ * Not transactional. A volume that attaches stays attached even if a later one
+ * fails: the caller's retry is idempotent (an already-attached volume comes
+ * back as already_active), and rolling back a successful attach would only add
+ * another way to lose a namespace the host can already see.
+ * ========================================================================== */
+
+/* One entry per possible namespace slot: a batch can never name more volumes
+ * than there are slots to put them in. */
+#define RCOW_ACTIVE_BATCH_MAX (RCOW_NUM_SUBSYS * RCOW_NS_PER_SUBSYS)
+
+struct rpc_active_batch_vol {
+	char     *device_name;
+	uint32_t  subsys;
+	uint32_t  nsid;
+};
+
+/* All three are required: the batch is the recovery path, where every volume
+ * comes with an explicit placement, so a volume missing one is a malformed
+ * request rather than a "derive it" case. Leaving them optional would decode an
+ * absent subsys or nsid as 0 out of the calloc'd struct -- a silent
+ * re-placement of a volume the host already has a device node for. */
+static const struct spdk_json_object_decoder rpc_active_batch_vol_decoders[] = {
+	{"device_name", offsetof(struct rpc_active_batch_vol, device_name), spdk_json_decode_string, false},
+	{"subsys",      offsetof(struct rpc_active_batch_vol, subsys),      spdk_json_decode_uint32, false},
+	{"nsid",        offsetof(struct rpc_active_batch_vol, nsid),        spdk_json_decode_uint32, false},
+};
+
+static int
+decode_active_batch_vol(const struct spdk_json_val *val, void *out)
+{
+	return spdk_json_decode_object(val, rpc_active_batch_vol_decoders,
+				       SPDK_COUNTOF(rpc_active_batch_vol_decoders),
+				       out);
+}
+
+struct rpc_active_batch {
+	struct rpc_active_batch_vol vols[RCOW_ACTIVE_BATCH_MAX];
+	size_t                      n;
+};
+
+static int
+decode_active_batch_vols(const struct spdk_json_val *val, void *out)
+{
+	struct rpc_active_batch *b = out;
+
+	return spdk_json_decode_array(val, decode_active_batch_vol, b->vols,
+				      RCOW_ACTIVE_BATCH_MAX, &b->n,
+				      sizeof(b->vols[0]));
+}
+
+static const struct spdk_json_object_decoder rpc_active_batch_decoders[] = {
+	{"volumes", offsetof(struct rpc_active_batch, vols), decode_active_batch_vols, false},
+};
+
+enum active_batch_kind {
+	ACTIVE_BATCH_RESTORED,
+	ACTIVE_BATCH_ALREADY,
+	ACTIVE_BATCH_FAILED,
+};
+
+struct active_batch_result {
+	uint8_t kind;
+	char    msg[ACTIVE_BDEV_MSG_MAX];
+};
+
+struct active_batch_ctx {
+	struct spdk_jsonrpc_request *request;
+	struct rpc_active_batch     *batch;
+	struct active_batch_result  *results;
+	size_t                       index;
+	uint32_t                     restored;
+	uint32_t                     already;
+	uint32_t                     failed;
+	/* Set while a step owns the loop, so a completion that arrives
+	 * synchronously does not re-enter and drive it twice. */
+	bool                         stepping;
+};
+
+static void
+active_batch_free(struct active_batch_ctx *ctx)
+{
+	size_t i;
+
+	if (ctx->batch) {
+		/* Every slot, not just the decoded ones: a decode that failed part
+		 * way through leaves the count unusable, and calloc zeroed the rest,
+		 * so the untouched entries are NULL. */
+		for (i = 0; i < RCOW_ACTIVE_BATCH_MAX; i++) {
+			free(ctx->batch->vols[i].device_name);
+		}
+		free(ctx->batch);
+	}
+	free(ctx->results);
+	free(ctx);
+}
+
+/* Answer the whole batch. A failure is still a JSON-RPC success -- bool_value
+ * says false and string_value carries the per-volume reasons -- which is how the
+ * single-volume RPCs report too. */
+static void
+active_batch_finish(struct active_batch_ctx *ctx)
+{
+	struct rpc_json_buf buf;
+	struct spdk_json_write_ctx *w;
+	bool ok = (ctx->failed == 0);
+	size_t i;
+
+	w = rpc_json_buf_begin(&buf);
+	if (!w) {
+		rpc_lvol_respond_err(ctx->request, -ENOMEM, NULL);
+		active_batch_free(ctx);
+		return;
+	}
+
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_uint32(w, "restored", ctx->restored);
+	spdk_json_write_named_uint32(w, "already_active", ctx->already);
+	spdk_json_write_named_array_begin(w, "failed");
+	for (i = 0; i < ctx->batch->n; i++) {
+		if (ctx->results[i].kind != ACTIVE_BATCH_FAILED) {
+			continue;
+		}
+		spdk_json_write_object_begin(w);
+		spdk_json_write_named_string(w, "device_name",
+					     ctx->batch->vols[i].device_name);
+		spdk_json_write_named_string(w, "error", ctx->results[i].msg);
+		spdk_json_write_object_end(w);
+	}
+	spdk_json_write_array_end(w);
+	spdk_json_write_object_end(w);
+
+	/* Not rpc_json_buf_respond: that always answers true, and this reply must
+	 * answer false when anything failed. */
+	if (spdk_json_write_end(w) != 0 || buf.failed || buf.data == NULL) {
+		rpc_lvol_respond_errf(ctx->request,
+				      "the reply could not be assembled (out of "
+				      "memory)");
+	} else {
+		rpc_lvol_write_response(ctx->request, ok, buf.data);
+	}
+	free(buf.data);
+
+	active_batch_free(ctx);
+}
+
+static void active_batch_step(struct active_batch_ctx *ctx);
+
+static void
+active_batch_done(void *cb_arg, const struct active_bdev_outcome *out)
+{
+	struct active_batch_ctx *ctx = cb_arg;
+	struct active_batch_result *r = &ctx->results[ctx->index];
+
+	if (out->failed) {
+		r->kind = ACTIVE_BATCH_FAILED;
+		snprintf(r->msg, sizeof(r->msg), "%s", out->msg);
+		ctx->failed++;
+	} else if (out->already) {
+		r->kind = ACTIVE_BATCH_ALREADY;
+		ctx->already++;
+	} else {
+		r->kind = ACTIVE_BATCH_RESTORED;
+		ctx->restored++;
+	}
+
+	ctx->index++;
+	active_batch_step(ctx);
+}
+
+/* Drive the volumes in order. One at a time, not all at once: an attach pauses
+ * its subsystem, and volumes sharing a subsystem would collide if two were in
+ * flight together. Order within the batch does not matter -- every (subsys,
+ * nsid) is explicit -- so serialising costs nothing but the pauses themselves,
+ * which are unavoidable either way. */
+static void
+active_batch_step(struct active_batch_ctx *ctx)
+{
+	if (ctx->stepping) {
+		/* A synchronous completion advanced the index; the loop already
+		 * running will pick the next volume up. */
+		return;
+	}
+
+	ctx->stepping = true;
+	while (ctx->index < ctx->batch->n) {
+		size_t at = ctx->index;
+		struct rpc_active_batch_vol *v = &ctx->batch->vols[at];
+
+		active_bdev_attach(v->device_name, v->subsys, v->nsid,
+				   active_batch_done, ctx);
+		if (ctx->index == at) {
+			/* Asynchronous: the completion re-enters here. */
+			break;
+		}
+	}
+	ctx->stepping = false;
+
+	if (ctx->index >= ctx->batch->n) {
+		active_batch_finish(ctx);
+	}
+}
+
+static void
+rpc_rcow_active_bdev_batch(struct spdk_jsonrpc_request *request,
+			   const struct spdk_json_val *params)
+{
+	struct active_batch_ctx *ctx;
+	size_t i;
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		rpc_lvol_respond_err(request, -ENOMEM, NULL);
+		return;
+	}
+	ctx->request = request;
+
+	ctx->batch = calloc(1, sizeof(*ctx->batch));
+	if (!ctx->batch) {
+		rpc_lvol_respond_err(request, -ENOMEM, NULL);
+		active_batch_free(ctx);
+		return;
+	}
+
+	if (spdk_json_decode_object(params, rpc_active_batch_decoders,
+				    SPDK_COUNTOF(rpc_active_batch_decoders),
+				    ctx->batch)) {
+		spdk_jsonrpc_send_error_response_fmt(request,
+						     SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						     "Invalid parameters");
+		active_batch_free(ctx);
+		return;
+	}
+
+	/* Refused up front, before the first attach. A batch the caller cannot
+	 * interpret -- half applied, with no way to say which half -- is worse than
+	 * a refusal, and the caller's retry is idempotent, so refusing costs it
+	 * nothing. */
+	if (ctx->batch->n == 0) {
+		spdk_jsonrpc_send_error_response(request,
+						 SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "volumes must not be empty");
+		active_batch_free(ctx);
+		return;
+	}
+
+	for (i = 0; i < ctx->batch->n; i++) {
+		struct rpc_active_batch_vol *v = &ctx->batch->vols[i];
+
+		if (!v->device_name || v->device_name[0] == '\0') {
+			spdk_jsonrpc_send_error_response_fmt(request,
+				SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+				"volumes[%zu] has no device_name", i);
+			active_batch_free(ctx);
+			return;
+		}
+		if (v->subsys >= RCOW_NUM_SUBSYS) {
+			spdk_jsonrpc_send_error_response_fmt(request,
+				SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+				"volumes[%zu] subsys %" PRIu32 " is out of range "
+				"(0..%d)", i, v->subsys, RCOW_NUM_SUBSYS - 1);
+			active_batch_free(ctx);
+			return;
+		}
+		/* 0 is the "pick a free slot" value the single-volume path
+		 * accepts, and a batch is the recovery path where every slot is
+		 * explicit: honouring 0 here would silently re-allocate and move
+		 * a volume the host already has a device node for. */
+		if (v->nsid == 0 || v->nsid > RCOW_NS_PER_SUBSYS) {
+			spdk_jsonrpc_send_error_response_fmt(request,
+				SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+				"volumes[%zu] nsid %" PRIu32 " is out of range "
+				"(1..%d)", i, v->nsid, RCOW_NS_PER_SUBSYS);
+			active_batch_free(ctx);
+			return;
+		}
+	}
+
+	/* Loaded once, and only after the request is known good: the shared attach
+	 * path assumes a loaded registry, and a refusal must not have touched it. */
+	if (s3lvol_active_load() != 0) {
+		spdk_jsonrpc_send_error_response(request,
+						 SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "the active registry could not be read");
+		active_batch_free(ctx);
+		return;
+	}
+
+	ctx->results = calloc(ctx->batch->n, sizeof(*ctx->results));
+	if (!ctx->results) {
+		rpc_lvol_respond_err(request, -ENOMEM, NULL);
+		active_batch_free(ctx);
+		return;
+	}
+
+	SPDK_NOTICELOG("rcow_active_bdev_batch: %zu volume(s) requested\n",
+		       ctx->batch->n);
+	active_batch_step(ctx);
+}
+SPDK_RPC_REGISTER("rcow_active_bdev_batch", rpc_rcow_active_bdev_batch,
+		  SPDK_RPC_RUNTIME)
 
 /* -------------------------------------------------------------------------- */
 
@@ -3384,8 +3849,8 @@ SPDK_RPC_REGISTER("rcow_deactive_bdev", rpc_rcow_deactive_bdev,
  * the lvol uuid against the namespace uuid the host publishes in sysfs (see the
  * header of vbdev_s3lvol_active.c). That lookup only succeeds once the host has
  * processed the AEN add_ns sent it, which is why rcow_active_bdev cannot answer
- * with a path (see rpc_active_bdev_attached) and why this RPC used to hand back
- * an empty device_path for the first few milliseconds after an activation.
+ * with a path (see active_bdev_attached) and why this RPC does not answer with
+ * a device_path for the first few milliseconds after an activation.
  *
  * Measured, calling both RPCs over one persistent socket: 8-24 ms between the
  * rcow_active_bdev reply and a resolvable path, and 4 out of 5 activations saw
