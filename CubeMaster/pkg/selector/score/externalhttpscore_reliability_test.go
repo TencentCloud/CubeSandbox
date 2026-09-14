@@ -566,6 +566,8 @@ func TestExternalHTTPScoreApplyConfigResetsToDefaults(t *testing.T) {
 
 func TestExternalHTTPScoreHalfOpenReArmsAfterLeakedProbe(t *testing.T) {
 	resetExternalHTTPScoreRuntimeForTest(t)
+	circuitHalfOpenProbeLeakTimeoutForTest = 30 * time.Millisecond
+	t.Cleanup(func() { circuitHalfOpenProbeLeakTimeoutForTest = 0 })
 
 	b := newExternalHTTPScoreBreaker("sidecar.example:8080", &config.ExternalHTTPScoreCircuitBreaker{
 		FailureThreshold:  1,
@@ -586,7 +588,44 @@ func TestExternalHTTPScoreHalfOpenReArmsAfterLeakedProbe(t *testing.T) {
 	}
 	time.Sleep(40 * time.Millisecond)
 	if err := b.allow(); err != nil {
-		t.Fatalf("half-open re-arm after openDuration = %v, want nil", err)
+		t.Fatalf("half-open re-arm after leak timeout = %v, want nil", err)
+	}
+}
+
+func TestExternalHTTPScoreDisableClearsCircuitStateGauge(t *testing.T) {
+	resetExternalHTTPScoreRuntimeForTest(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	cfg := &config.ExternalHTTPScore{
+		Weight:        float64Ptr(1),
+		Endpoint:      server.URL,
+		Timeout:       time.Second,
+		FailurePolicy: "fail_closed",
+		CircuitBreaker: &config.ExternalHTTPScoreCircuitBreaker{
+			FailureThreshold: 1,
+			OpenDuration:     5 * time.Second,
+		},
+	}
+	if _, err := newExternalHTTPScoreWithConfig(cfg).Select(externalHTTPScoreTestCtx()); err == nil {
+		t.Fatal("Select() error = nil, want failure to open circuit")
+	}
+	target := circuitTargetLabel(server.URL)
+	labels := gatherCircuitStateTargets(t)
+	if labels[target] != float64(circuitStateOpen) {
+		t.Fatalf("before disable: state = %v, want open", labels[target])
+	}
+
+	cfg.CircuitBreaker.Disable = true
+	if _, err := newExternalHTTPScoreWithConfig(cfg).Select(externalHTTPScoreTestCtx()); err == nil {
+		t.Fatal("disabled breaker still failed Select(); want HTTP error or success path without circuit_open")
+	}
+	labels = gatherCircuitStateTargets(t)
+	if _, ok := labels[target]; ok {
+		t.Fatalf("after disable: target %q still present in circuit_state labels=%v", target, labels)
 	}
 }
 
@@ -657,6 +696,15 @@ func TestFailClosedErrorGRPCStatusIsSelectNodesFailed(t *testing.T) {
 	}
 	if status.Message() == "" || strings.Contains(status.Message(), "http://") {
 		t.Fatalf("RetMsg = %q, want sanitized non-empty category", status.Message())
+	}
+	// Wrapping breaks ret.FromError's direct type assertion while IsFailClosed
+	// still matches — document the create-path contract.
+	wrapped := fmt.Errorf("schedule: %w", closed)
+	if !IsFailClosed(wrapped) {
+		t.Fatal("IsFailClosed(wrapped) = false, want true")
+	}
+	if _, ok := ret.FromError(wrapped); ok {
+		t.Fatal("FromError(wrapped FailClosedError) ok = true; wrapping must not pretend to carry GRPCStatus")
 	}
 }
 

@@ -117,6 +117,15 @@ func setExternalHTTPScoreCircuitState(target string, state int) {
 	externalHTTPScoreCircuitState.WithLabelValues(target).Set(float64(state))
 }
 
+func deleteExternalHTTPScoreCircuitState(target string) {
+	if target == "" {
+		target = "invalid"
+	}
+	externalHTTPScoreCircuitState.DeleteLabelValues(target)
+	// Last-write test seam: treat deletion as closed for single-host helpers.
+	externalHTTPScoreCircuitValue.Store(circuitStateClosed)
+}
+
 func externalHTTPScoreCircuitStateValue() float64 {
 	return float64(externalHTTPScoreCircuitValue.Load())
 }

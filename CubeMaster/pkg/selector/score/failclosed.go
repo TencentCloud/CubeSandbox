@@ -35,6 +35,13 @@ func (e *FailClosedError) Unwrap() error {
 // GRPCStatus maps fail_closed create failures to a schedulable error code so
 // API clients do not see ErrorCode_Unknown (-1). The message uses the same
 // sanitized category vocabulary as the plugin's Warn/metric path.
+//
+// Contract with ret.FromError: that helper matches GRPCStatus via a *direct*
+// type assertion, not errors.As. IsFailClosed uses errors.As, so wrapping this
+// value (fmt.Errorf("…: %w", err)) still aborts Score but would fall through
+// FromError to ErrorCode_Unknown with the raw Error() text on the create
+// response path. Keep FailClosedError the outermost return from Select /
+// runScoreFilter; do not wrap it before handleCubelet / ret.FromError.
 func (e *FailClosedError) GRPCStatus() *ret.Status {
 	msg := "score plugin fail_closed"
 	if e != nil && e.Err != nil {

@@ -171,15 +171,14 @@ func newExternalHTTPScoreFromConfig(global *config.Config) *externalHTTPScore {
 	// construction from a raw snapshot (tests) still sees omitted weight as
 	// DefaultExternalHTTPScoreWeight.
 	config.ApplyExternalHTTPScoreDefaults(cfg)
+	// Construction always returns a live-config scorer (cfg field nil). Invalid
+	// values only emit one Warn here; Weight/Disable/Select re-read GetConfig()
+	// and re-validate on each call (same as hot-reload, which never reconstructs).
 	if err := validateExternalHTTPScoreConfig(cfg); err != nil {
 		cat := sanitizeExternalHTTPScoreFailure(err)
 		log.G(context.Background()).Warnf(
 			"external_http_score: invalid plugin_conf at construction (fail-open): %s", cat)
-		// Leave cfg nil so Weight/Disable/Select re-read live GetConfig(); Select
-		// re-validates and observes the same sanitized category.
-		return &externalHTTPScore{}
 	}
-	// Leave cfg nil so Weight/Disable/Select re-read live GetConfig().
 	return &externalHTTPScore{}
 }
 

@@ -544,12 +544,16 @@ type ExternalHTTPScore struct {
 	// DefaultExternalHTTPScoreWeight in preHandle) from an explicit 0 (keep
 	// off, same as other scorers).
 	Weight *float64 `yaml:"weight"`
-	// Endpoint is the sidecar URL. Empty skips the plugin. Non-empty values must
-	// be absolute http:// or https:// URLs with a host; other schemes (file,
-	// unix, missing scheme) fail construction / are rejected at Select.
-	// May carry userinfo or query tokens; MarshalJSON and String redact those
-	// so config.Init dumps and CubeLog.Fatalf("%v", cfg) paths match the
-	// scorer's no-secret logging policy.
+	// Endpoint is the sidecar URL. Empty with an explicit weight:0 / disable:true
+	// is a silent no-op. Empty with a positive weight (the omit-weight default is
+	// 1.0) is a Select-time failure that honors failure_policy — under
+	// fail_closed every create aborts until a valid endpoint is set (typos like
+	// endpont: land here because yaml.v3 ignores unknown keys). Non-empty values
+	// must be absolute http:// or https:// URLs with a host; other schemes
+	// (file, unix, missing scheme) fail construction / are rejected at Select.
+	// May carry userinfo, path tokens, or query tokens; MarshalJSON and String
+	// redact to scheme+host only so config.Init dumps and CubeLog.Fatalf("%v",
+	// cfg) paths match the scorer's no-secret logging policy.
 	Endpoint string `yaml:"endpoint"`
 	// Timeout is the per-request deadline on the synchronous create path.
 	// Zero/omitted defaults to 200ms at request time; negative values and
@@ -583,8 +587,9 @@ type ExternalHTTPScoreCircuitBreaker struct {
 // and Weight() fallbacks.
 const DefaultExternalHTTPScoreWeight = 1.0
 
-// MarshalJSON redacts Endpoint userinfo and query so utils.InterfaceToString
-// dumps (config.Init) never print sidecar credentials the scorer refuses to log.
+// MarshalJSON redacts Endpoint to scheme+host (no userinfo, path, query, or
+// fragment) so utils.InterfaceToString dumps (config.Init) never print sidecar
+// credentials the scorer refuses to log — including path-borne tokens.
 func (c ExternalHTTPScore) MarshalJSON() ([]byte, error) {
 	return json.Marshal(c.redactedWire())
 }
@@ -630,7 +635,12 @@ func redactExternalHTTPScoreEndpoint(raw string) string {
 	if err != nil || u == nil || u.Scheme == "" || u.Host == "" {
 		return "[redacted]"
 	}
+	// Keep scheme+host only (same bound as circuitTargetLabel): path segments
+	// may carry bearer tokens (/score/<secret>), so they must not appear in
+	// config dumps.
 	u.User = nil
+	u.Path = ""
+	u.RawPath = ""
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String()

@@ -21,7 +21,25 @@ const (
 	defaultCircuitFailureThreshold  = 5
 	defaultCircuitOpenDuration      = 5 * time.Second
 	defaultCircuitHalfOpenMaxProbes = 1
+
+	// circuitHalfOpenProbeLeakTimeout is how long a half-open probe slot may
+	// remain held without recordSuccess/recordFailure/releaseProbe before the
+	// breaker re-arms. It is keyed off the HTTP budget (2 × max timeout), not
+	// open_duration, so an aggressively short open_duration cannot admit more
+	// than half_open_max_probes concurrent probes while a slow request is still
+	// in flight.
+	circuitHalfOpenProbeLeakTimeout = 2 * maxExternalHTTPScoreTimeout
 )
+
+// Test seam: when > 0, overrides circuitHalfOpenProbeLeakTimeout.
+var circuitHalfOpenProbeLeakTimeoutForTest time.Duration
+
+func halfOpenProbeLeakTimeout() time.Duration {
+	if circuitHalfOpenProbeLeakTimeoutForTest > 0 {
+		return circuitHalfOpenProbeLeakTimeoutForTest
+	}
+	return circuitHalfOpenProbeLeakTimeout
+}
 
 var errExternalHTTPScoreCircuitOpen = errors.New("external_http_score circuit is open")
 
@@ -72,11 +90,14 @@ func circuitTargetLabel(endpoint string) string {
 }
 
 func getExternalHTTPScoreBreaker(endpoint string, cfg *config.ExternalHTTPScoreCircuitBreaker) externalHTTPScoreGate {
+	target := circuitTargetLabel(endpoint)
 	if cfg != nil && cfg.Disable {
+		// Drop stale open/half-open gauge readings so alerts do not keep paging
+		// after the operator turns the breaker off for this host.
+		clearExternalHTTPScoreCircuitTarget(target)
 		return noopExternalHTTPScoreBreaker{}
 	}
 
-	target := circuitTargetLabel(endpoint)
 	externalHTTPScoreBreakersMu.Lock()
 	defer externalHTTPScoreBreakersMu.Unlock()
 	if b, ok := externalHTTPScoreBreakers[target]; ok {
@@ -86,6 +107,19 @@ func getExternalHTTPScoreBreaker(endpoint string, cfg *config.ExternalHTTPScoreC
 	b := newExternalHTTPScoreBreaker(target, cfg)
 	externalHTTPScoreBreakers[target] = b
 	return b
+}
+
+// clearExternalHTTPScoreCircuitTarget removes a host from the in-process breaker
+// map and deletes its Prometheus series so a disabled or abandoned target cannot
+// leave circuit_state=open published indefinitely.
+func clearExternalHTTPScoreCircuitTarget(target string) {
+	if target == "" {
+		target = "invalid"
+	}
+	externalHTTPScoreBreakersMu.Lock()
+	delete(externalHTTPScoreBreakers, target)
+	externalHTTPScoreBreakersMu.Unlock()
+	deleteExternalHTTPScoreCircuitState(target)
 }
 
 func newExternalHTTPScoreBreaker(target string, cfg *config.ExternalHTTPScoreCircuitBreaker) *externalHTTPScoreBreaker {
@@ -139,10 +173,11 @@ func (b *externalHTTPScoreBreaker) allow() error {
 		return errExternalHTTPScoreCircuitOpen
 	case circuitStateHalfOpen:
 		// Defense in depth: if a probe slot leaked (panic without record*),
-		// re-arm after openDuration so the host is not wedged forever.
+		// re-arm after the HTTP-budget leak timeout — not openDuration — so a
+		// short open_duration cannot overlap a still-in-flight probe.
 		if b.halfOpenInFlight >= b.halfOpenMaxProbes &&
 			!b.halfOpenSince.IsZero() &&
-			time.Since(b.halfOpenSince) >= b.openDuration {
+			time.Since(b.halfOpenSince) >= halfOpenProbeLeakTimeout() {
 			b.halfOpenInFlight = 0
 			b.halfOpenSince = time.Now()
 		}
