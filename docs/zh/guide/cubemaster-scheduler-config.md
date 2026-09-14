@@ -345,11 +345,15 @@ scheduler:
 
 ### 失败 / 回退语义
 
-scorer 失败（超时、非 2xx、重定向、畸形/过大响应、校验错误、熔断打开）会返回错误。
-默认 **`failure_policy: fail_open`**（字段省略时亦然）下，`runScoreFilter` 会跳过失败的
-scorer 并继续调度（对 sandbox 创建保持 **fail-open**）。配置
-**`failure_policy: fail_closed`** 时，插件返回类型化 `FailClosedError`，`runScoreFilter`
-**中止** Score 阶段。结果会递增
+scorer 失败（超时、非 2xx、重定向、畸形/过大响应、校验错误、熔断打开、recover
+panic）会返回错误。默认 **`failure_policy: fail_open`**（字段省略时亦然）下，
+`runScoreFilter` 会跳过失败的 scorer 并继续调度（对 sandbox 创建保持 **fail-open**）。
+配置 **`failure_policy: fail_closed`** 时，插件返回类型化 `FailClosedError`，
+`runScoreFilter` **中止** Score 阶段——包括空/非法 `endpoint`、越界 `timeout`、
+非有限 `weight` 等在 `Select` 上的校验失败，而不仅是 sidecar HTTP 失败。
+（`plugin_conf` 缺失 / nil selector context 因读不到 policy 字段，仍走 fail-open
+可观测路径。）调用方 cancel 与父级 deadline 放弃**不会**递增熔断连续失败计数
+（仅释放已占用的半开探测槽）。结果会递增
 `cube_scheduler_external_http_score_outcomes_total{reason=...}`（含
 `reason="success"`），HTTP 往返还会观察
 `cube_scheduler_external_http_score_request_duration_seconds{reason=...}`。

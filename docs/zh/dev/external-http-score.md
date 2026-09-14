@@ -39,7 +39,7 @@ scheduler:
 - `disable`：为 true 时 scorer 为空操作。
 - `failure_policy`：sidecar 失败处理。
   - **`fail_open`（默认**，含空/未知值）：`Select` 返回普通错误；`runScoreFilter` 跳过该 scorer 并继续调度（历史 create 路径行为）。
-  - **`fail_closed`**：`Select` 返回类型化 `FailClosedError`；`runScoreFilter` 中止 Score，create 失败关闭。API 客户端看到 `ErrorCode_SelectNodesFailed` 与脱敏类别消息（不是 `ErrorCode_Unknown`）。
+  - **`fail_closed`**：`Select` 返回类型化 `FailClosedError`；`runScoreFilter` 中止 Score，create 失败关闭。API 客户端看到 `ErrorCode_SelectNodesFailed` 与脱敏类别消息（不是 `ErrorCode_Unknown`）。覆盖 sidecar/传输失败 **以及** Select 时校验（空/非法 endpoint、非法 timeout/weight）；`plugin_conf` 缺失仍 fail-open（读不到 policy）。调用方 cancel / 父级 deadline 不触发熔断计数。
 - `circuit_breaker`：连续 sidecar 失败后打开熔断，后续 Score 立即失败而不再等待完整 HTTP 超时。经过 `open_duration` 后允许半开探测（`half_open_max_probes`，默认 1）；成功关闭熔断，失败重新打开。设 `disable: true` 可关闭熔断。热更新删除该块或将字段置 0 会恢复下列默认值（参数不会只升不降）。
 
 省略该块或字段为 0 时的默认熔断值（除非 `disable: true`，否则熔断仍启用）：

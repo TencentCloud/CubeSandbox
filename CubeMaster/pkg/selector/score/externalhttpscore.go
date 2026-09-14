@@ -297,23 +297,34 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		ctx = selCtx.Ctx
 	}
 	// Gate accounting must outlive a panic: allow() can consume the sole
-	// half-open probe slot, and only recordSuccess/recordFailure clear it.
+	// half-open probe slot, and only recordSuccess/recordFailure/releaseProbe
+	// clear it.
 	var breaker externalHTTPScoreGate
 	var gateHeld bool
+	var failurePolicy string
 	defer func() {
 		if r := recover(); r != nil {
 			if gateHeld && breaker != nil {
 				breaker.recordFailure()
+				gateHeld = false
 			}
-			err = ret.Errorf(errorcode.ErrorCode_MasterInternalError, "externalHTTPScore panic:%s", r)
-			logExternalHTTPScoreFailure(ctx, err)
+			panicErr := ret.Errorf(errorcode.ErrorCode_MasterInternalError, "externalHTTPScore panic:%s", r)
+			logExternalHTTPScoreFailure(ctx, panicErr)
 			log.G(ctx).Debugf("external_http_score panic stack:\n%s", debug.Stack())
+			if failurePolicy == "" {
+				if live := l.pluginConfig(); live != nil {
+					failurePolicy = live.FailurePolicy
+				}
+			}
+			_, err = applyExternalHTTPScoreFailure(failurePolicy, panicErr)
 		}
 	}()
 
 	if selCtx == nil {
 		err = fmt.Errorf("external_http_score: selector context is nil")
 		logExternalHTTPScoreFailure(ctx, err)
+		// No readable failure_policy without a selector/plugin block; keep
+		// historical fail-open so scheduling is not aborted for a nil context.
 		return nil, err
 	}
 
@@ -322,8 +333,10 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		// Hot-reload removed the block while enable_scorers still lists us.
 		err = fmt.Errorf("external_http_score plugin_conf absent")
 		logExternalHTTPScoreFailure(ctx, err)
+		// No FailurePolicy field without the block; fail-open observability only.
 		return nil, err
 	}
+	failurePolicy = cfg.FailurePolicy
 	// Use this cfg snapshot for disable/weight as well as endpoint/timeout/mode so
 	// a mid-Select conf.yaml reload cannot mix generations within one attempt.
 	if cfg.Disable {
@@ -343,13 +356,13 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		// with a positive weight must be observable like plugin_conf_absent.
 		err = fmt.Errorf("external_http_score: endpoint is empty")
 		logExternalHTTPScoreFailure(ctx, err)
-		return nil, err
+		return applyExternalHTTPScoreFailure(cfg.FailurePolicy, err)
 	}
 	if err := validateExternalHTTPScoreConfig(cfg); err != nil {
-		// Hot-reload can introduce a bad endpoint/timeout after startup; fail
-		// open with one sanitized log line rather than a silent no-op.
+		// Hot-reload can introduce a bad endpoint/timeout after startup; honor
+		// failure_policy the same way as sidecar/transport failures.
 		logExternalHTTPScoreFailure(ctx, err)
-		return nil, err
+		return applyExternalHTTPScoreFailure(cfg.FailurePolicy, err)
 	}
 
 	inList := selCtx.Nodes()
@@ -377,7 +390,12 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 		cat := sanitizeExternalHTTPScoreFailure(err)
 		logExternalHTTPScoreFailureCategory(ctx, cat)
 		observeExternalHTTPScoreRequestFailure(httpElapsed, cat)
-		breaker.recordFailure()
+		if isExternalHTTPScoreCallerAbandonment(ctx, cat) {
+			// Caller cancel / parent deadline is not a sidecar outage.
+			breaker.releaseProbe()
+		} else {
+			breaker.recordFailure()
+		}
 		gateHeld = false
 		return applyExternalHTTPScoreFailure(cfg.FailurePolicy, err)
 	}
@@ -423,6 +441,24 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 // recordFailure clears the half-open probe slot.
 var externalHTTPScoreAfterAllowForTest func()
 
+// isExternalHTTPScoreCallerAbandonment reports create-path cancels / parent
+// deadlines that must not count as consecutive sidecar failures. Transport
+// errors are sanitized to plain strings before Select sees them, so matching
+// uses allow-listed category tokens plus the parent context error.
+func isExternalHTTPScoreCallerAbandonment(parent context.Context, category string) bool {
+	if strings.Contains(category, "_canceled") {
+		return true
+	}
+	if parent == nil {
+		return false
+	}
+	switch parent.Err() {
+	case context.Canceled, context.DeadlineExceeded:
+		return true
+	default:
+		return false
+	}
+}
 
 // applyExternalHTTPScoreFailure maps a sidecar/scoring failure through
 // failure_policy. Default (omitted / empty / unknown) is fail_open: return the

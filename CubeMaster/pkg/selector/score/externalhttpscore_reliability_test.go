@@ -5,6 +5,7 @@
 package score
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -656,6 +657,106 @@ func TestFailClosedErrorGRPCStatusIsSelectNodesFailed(t *testing.T) {
 	}
 	if status.Message() == "" || strings.Contains(status.Message(), "http://") {
 		t.Fatalf("RetMsg = %q, want sanitized non-empty category", status.Message())
+	}
+}
+
+func TestExternalHTTPScoreFailClosedHonorsConfigValidationErrors(t *testing.T) {
+	resetExternalHTTPScoreRuntimeForTest(t)
+
+	emptyEndpoint := &config.ExternalHTTPScore{
+		Weight:        float64Ptr(1),
+		Endpoint:      "   ",
+		Timeout:       time.Second,
+		FailurePolicy: "fail_closed",
+	}
+	_, err := newExternalHTTPScoreWithConfig(emptyEndpoint).Select(externalHTTPScoreTestCtx())
+	if !IsFailClosed(err) {
+		t.Fatalf("empty endpoint under fail_closed: type=%T (%v), want FailClosedError", err, err)
+	}
+
+	// Construction rejects a permanently bad endpoint; hot-reload can still
+	// mutate the live block after a valid constructor, which Select must honor.
+	badEndpoint := &config.ExternalHTTPScore{
+		Weight:        float64Ptr(1),
+		Endpoint:      "http://127.0.0.1:9/score",
+		Timeout:       time.Second,
+		FailurePolicy: "fail_closed",
+	}
+	scorer := newExternalHTTPScoreWithConfig(badEndpoint)
+	badEndpoint.Endpoint = "127.0.0.1:18080/score" // missing scheme
+	_, err = scorer.Select(externalHTTPScoreTestCtx())
+	if !IsFailClosed(err) {
+		t.Fatalf("invalid endpoint under fail_closed: type=%T (%v), want FailClosedError", err, err)
+	}
+}
+
+func TestExternalHTTPScoreCallerCancelDoesNotTripBreaker(t *testing.T) {
+	resetExternalHTTPScoreRuntimeForTest(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(400 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(externalHTTPScoreResponse{
+			Scores: map[string]*float64{"node-a": float64Ptr(10), "node-b": float64Ptr(90)},
+		})
+	}))
+	defer server.Close()
+
+	cfg := &config.ExternalHTTPScore{
+		Weight:        float64Ptr(1),
+		Endpoint:      server.URL,
+		Timeout:       time.Second,
+		FailurePolicy: "fail_closed",
+		CircuitBreaker: &config.ExternalHTTPScoreCircuitBreaker{
+			FailureThreshold:  2,
+			OpenDuration:      time.Second,
+			HalfOpenMaxProbes: 1,
+		},
+	}
+	scorer := newExternalHTTPScoreWithConfig(cfg)
+
+	for i := 0; i < 3; i++ {
+		parent, cancel := context.WithCancel(context.Background())
+		selCtx := externalHTTPScoreTestCtx()
+		selCtx.Ctx = parent
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			cancel()
+		}()
+		_, err := scorer.Select(selCtx)
+		if err == nil {
+			t.Fatalf("attempt %d: Select() error = nil, want cancel error", i+1)
+		}
+	}
+
+	// Cancels must not open the circuit; a healthy request should still succeed.
+	got, err := scorer.Select(externalHTTPScoreTestCtx())
+	if err != nil {
+		t.Fatalf("Select() after cancels = %v, want success (breaker must stay closed)", err)
+	}
+	if got.Len() != 2 {
+		t.Fatalf("scores len = %d, want 2", got.Len())
+	}
+	if state := externalHTTPScoreCircuitStateValue(); state != 0 {
+		t.Fatalf("circuit state = %v, want 0 (closed) after caller cancels", state)
+	}
+}
+
+func TestExternalHTTPScoreReleaseProbeAllowsNextHalfOpen(t *testing.T) {
+	resetExternalHTTPScoreRuntimeForTest(t)
+
+	b := newExternalHTTPScoreBreaker("sidecar.example:8080", &config.ExternalHTTPScoreCircuitBreaker{
+		FailureThreshold:  1,
+		OpenDuration:      20 * time.Millisecond,
+		HalfOpenMaxProbes: 1,
+	})
+	b.recordFailure()
+	time.Sleep(25 * time.Millisecond)
+	if err := b.allow(); err != nil {
+		t.Fatalf("half-open allow() = %v", err)
+	}
+	b.releaseProbe()
+	if err := b.allow(); err != nil {
+		t.Fatalf("allow() after releaseProbe = %v, want nil", err)
 	}
 }
 

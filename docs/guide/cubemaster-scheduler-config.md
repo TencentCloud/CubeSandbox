@@ -350,11 +350,17 @@ Response:
 ### Failure / fallback semantics
 
 Scorer failures (timeout, non-2xx, redirect, malformed/oversized body, validation
-errors, open circuit) return an error from the plugin. With the default
-**`failure_policy: fail_open`** (also when the field is omitted), `runScoreFilter`
-skips failed scorers and continues scheduling (**fail-open** for sandbox creation).
-With **`failure_policy: fail_closed`**, the plugin returns a typed `FailClosedError`
-and `runScoreFilter` **aborts** the Score phase. Outcomes increment
+errors, open circuit, recovered panics) return an error from the plugin. With the
+default **`failure_policy: fail_open`** (also when the field is omitted),
+`runScoreFilter` skips failed scorers and continues scheduling (**fail-open** for
+sandbox creation). With **`failure_policy: fail_closed`**, the plugin returns a
+typed `FailClosedError` and `runScoreFilter` **aborts** the Score phase — including
+for empty/invalid `endpoint` / out-of-range `timeout` / non-finite `weight` on
+`Select`, not only for sidecar HTTP failures. (`plugin_conf` absent / nil selector
+context stay fail-open observability paths because no policy field is readable.)
+Caller cancel and parent-deadline abandonment do **not** increment the circuit
+breaker's consecutive-failure counter (they only release a held half-open probe).
+Outcomes increment
 `cube_scheduler_external_http_score_outcomes_total{reason=...}` (including
 `reason="success"`) and HTTP round-trips also observe
 `cube_scheduler_external_http_score_request_duration_seconds{reason=...}`.

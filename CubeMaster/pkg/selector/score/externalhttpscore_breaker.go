@@ -44,6 +44,9 @@ type externalHTTPScoreGate interface {
 	allow() error
 	recordSuccess()
 	recordFailure()
+	// releaseProbe frees a held half-open slot without counting a sidecar
+	// failure (caller cancel / parent deadline abandonment).
+	releaseProbe()
 }
 
 var (
@@ -192,6 +195,21 @@ func (b *externalHTTPScoreBreaker) recordFailure() {
 	}
 }
 
+// releaseProbe drops an in-flight half-open reservation without treating the
+// attempt as a sidecar failure. Used when the create caller abandoned the
+// request (cancel / parent deadline).
+func (b *externalHTTPScoreBreaker) releaseProbe() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.halfOpenInFlight > 0 {
+		b.halfOpenInFlight--
+	}
+	if b.halfOpenInFlight == 0 {
+		b.halfOpenSince = time.Time{}
+	}
+}
+
 func (noopExternalHTTPScoreBreaker) allow() error   { return nil }
 func (noopExternalHTTPScoreBreaker) recordSuccess() {}
 func (noopExternalHTTPScoreBreaker) recordFailure() {}
+func (noopExternalHTTPScoreBreaker) releaseProbe()  {}

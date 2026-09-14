@@ -497,6 +497,10 @@ scheduler:
 		t.Fatalf("write config: %v", err)
 	}
 	t.Setenv("CUBE_MASTER_CONFIG_PATH", configPath)
+	// config.Init() replaces the process-global cfg and starts a hotswap
+	// watcher that is not closed here. Acceptable for these two Select
+	// policy tests; do not copy this helper into broader scheduler suites
+	// without a shared setup/teardown that restores cfg and closes the watcher.
 	if _, err := config.Init(); err != nil {
 		t.Fatalf("config.Init(): %v", err)
 	}
