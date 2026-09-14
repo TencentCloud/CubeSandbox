@@ -648,15 +648,16 @@ scheduler:
 	assert.NotNil(t, got.Scheduler.Score.ScorePluginConf.BinpackScore)
 }
 
-func TestInit_BuiltinOnStockFiltersSucceeds(t *testing.T) {
+func TestInit_BuiltinOnStockFiltersRequiresAllowDropped(t *testing.T) {
 	// Stock CubeMaster configs enable cpu/mem/template_locality/realtime_create_num.
-	// Built-ins carry AllowDroppedFilters so selecting by name still loads.
+	// Built-ins keep AllowDroppedFilters false, so selecting by name on that
+	// longer list fails until the operator opts in explicitly.
 	for _, profile := range []string{
 		"balanced_spread",
 		"template_locality_first",
 		"binpack_utilization",
 	} {
-		t.Run(profile, func(t *testing.T) {
+		t.Run(profile+"_rejected", func(t *testing.T) {
 			yamlBody := fmt.Sprintf(`common: {}
 log: {}
 scheduler:
@@ -668,6 +669,26 @@ scheduler:
       - template_locality
       - realtime_create_num
 `, profile)
+			_, err := initConfigFromYAML(t, yamlBody)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "drops filters")
+			assert.Contains(t, err.Error(), "allow_dropped_filters")
+		})
+		t.Run(profile+"_opt_in", func(t *testing.T) {
+			yamlBody := fmt.Sprintf(`common: {}
+log: {}
+scheduler:
+  profile: %s
+  filter:
+    enable_filters:
+      - cpu
+      - mem
+      - template_locality
+      - realtime_create_num
+  profiles:
+    %s:
+      allow_dropped_filters: true
+`, profile, profile)
 			got, err := initConfigFromYAML(t, yamlBody)
 			assert.NoError(t, err)
 			assert.Equal(t, profile, got.Scheduler.Profile)

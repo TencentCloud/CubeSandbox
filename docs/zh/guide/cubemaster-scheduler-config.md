@@ -101,9 +101,11 @@ CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 `scheduler.profiles` 下与内置同名的用户条目会完全覆盖内置。
 
 **注意：** 当 Profile 提供 `filter.enable_filters` 时，该列表会**整体替换**基础
-`scheduler.filter.enable_filters`（不会合并）。**用户** Profile 丢掉基础过滤器会
-配置加载失败，除非设置 `allow_dropped_filters: true`。内置预设已允许丢掉，因此
-现成四过滤器配置可直接按名选用；若你依赖 `disk` / `thirtparty`，仍请审查生效列表。
+`scheduler.filter.enable_filters`（不会合并）。Profile 丢掉基础过滤器会配置加载
+失败，除非设置 `allow_dropped_filters: true`。内置预设使用短过滤器列表，且**不会**
+预置该 opt-in——在现成四过滤器配置上选用内置时，需显式写同名
+`profiles.<builtin>.allow_dropped_filters: true`（或在 Profile 列表中保留被丢掉的
+名称）。若你依赖 `disk` / `thirtparty`，仍请审查生效列表。
 
 ## 升级说明（空 Profile / 重启）
 

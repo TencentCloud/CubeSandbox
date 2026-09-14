@@ -104,11 +104,13 @@ block is absent. User entries under `scheduler.profiles` with the same name
 override a built-in entirely.
 
 **Warning:** when a Profile provides `filter.enable_filters`, that list
-**replaces** the base `scheduler.filter.enable_filters` (no merge). User
-Profiles that drop base filters fail config load unless
-`allow_dropped_filters: true`. Built-in presets already allow drops so stock
-four-filter configs can select them by name; still audit effective filters if
-you relied on `disk` / `thirtparty`.
+**replaces** the base `scheduler.filter.enable_filters` (no merge). Profiles
+that drop base filters fail config load unless `allow_dropped_filters: true`.
+Built-in presets use short filter lists and do **not** pre-set that opt-in —
+on a stock four-filter config, select a built-in with an explicit same-name
+`profiles.<builtin>.allow_dropped_filters: true` (or keep dropped names in the
+Profile list). Still audit effective filters if you relied on `disk` /
+`thirtparty`.
 
 ## Upgrade notes (empty Profile / restart)
 

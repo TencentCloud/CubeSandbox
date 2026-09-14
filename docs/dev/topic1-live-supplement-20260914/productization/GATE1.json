@@ -1,12 +1,26 @@
 {
   "decided_at": "2026-09-14T10:53:31+0800",
+  "updated_at": "2026-09-14T19:30:00+0800",
   "change": "YES_MINIMAL",
-  "rationale": "example+runbook+verifier missing at baseline; semantics already present",
+  "scope": "lane_D_productization_only",
+  "rationale": "Lane D gate: example+runbook+verifier missing at baseline; core scorer semantics already present. This record does NOT describe the full PR branch.",
   "allowed_files": [
     "CubeMaster/examples/external-http-score/**",
     "docs/dev/external-http-score-operator.md",
     "docs/dev/index.md (link only if needed)",
-    "CubeMaster/examples/external-http-score/VERIFY.md"
+    "docs/zh/dev/external-http-score-operator.md",
+    "docs/zh/dev/index.md (link only if needed)",
+    "CubeMaster/examples/external-http-score/VERIFY.md",
+    "docs/dev/topic1-live-supplement-20260914/**"
   ],
-  "forbidden": "new protocol, new plugin type, new deps, change fail-open semantics for experiments"
+  "forbidden_for_lane_D": "new protocol, new plugin type, new deps, change fail-open semantics for experiments",
+  "branch_also_includes_outside_this_gate": [
+    "CubeMaster/pkg/base/config/** (scheduler Profile model, weight validation)",
+    "CubeMaster/pkg/selector/score/** (binpack_score, external_http_score, feeder gating)",
+    "CubeMaster/pkg/scheduler/** (runScoreFilter, simulator)",
+    "CubeMaster/cmd/schedulerbench/**",
+    "deploy/one-click/terraform/tencentcloud/tke-addons.tf",
+    "docs/guide/cubemaster-scheduler-config.md (+ zh), docs/dev/scheduler-*.md, metrics docs"
+  ],
+  "note": "Review the umbrella scheduler Profile/HTTP score/benchmark commits on their own merits; GATE1 only records the Lane D productization decision."
 }

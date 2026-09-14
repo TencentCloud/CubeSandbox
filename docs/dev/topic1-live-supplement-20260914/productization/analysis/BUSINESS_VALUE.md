@@ -6,8 +6,9 @@
 ## Hot-path cost (client API latency)
 - control api_p95 ≈ 590.8 ms
 - healthy api_p95 ≈ 449.4 ms
-- delta (healthy-control) = -141.45 ms（工程目标 ≤50ms）
-- delayed/timeout arms 全成功；timeout arm 在 fail-open 下仍可创建
+- delta (healthy-control) = -141.45 ms — **not** a ≤50 ms scorer-cost proof (arm variance / uncontrolled A/B)
+- delayed api_p95 ≈ 623.4 ms；timeout api_p95 ≈ 683.8 ms（相对 healthy 可观测注入成本）
+- delayed/timeout arms 全成功；timeout arm 在该次 productization binary 上 create 仍成功（fail-open 路径）；勿与 small-experiments 的 fail-closed 混称
 
 ## Business signal
 mock_metrics 偏好节点命中 6/6，证明外部分数可改变合法候选排序。
@@ -16,7 +17,7 @@ mock_metrics 偏好节点命中 6/6，证明外部分数可改变合法候选排
 单元合同 + live bad_scores 臂记录；scorer 不能复活 Filter 外节点。
 
 ## Not claimed
-不覆盖正式 binpack VALID_NO_IMPROVEMENT；未跑可选错配 probe。
+不覆盖正式 binpack VALID_NO_IMPROVEMENT；未声明 healthy-vs-control ≤50 ms 统计界；未声明全 lab 统一 fail-open。
 
 ## E5 CPU/mem mismatch probe (NO_IMPROVEMENT)
 - default empty_nodes=1 probe_rate=1.0 frag=0.1578947368421053

@@ -48,7 +48,7 @@ Source: `CubeMaster/pkg/base/config/config.go`
 | `scheduler.profile` | Name of the active overlay. Empty string (default) means no expansion. Built-in names apply without a user map key. |
 | `scheduler.profiles` | User-defined map of named overlays. A user key with the same name as a built-in **overrides** the built-in. |
 | `scheduler.profiles.<name>.filter.enable_filters` | Replaces `scheduler.filter.enable_filters` when the profile provides a non-nil list. Dropping names that were in the base list fails config load unless `allow_dropped_filters: true` is set on that Profile. |
-| `scheduler.profiles.<name>.allow_dropped_filters` | Opt-in for **user** Profiles: allow `enable_filters` replace to drop base admission filters (for example `disk`, `thirtparty`). Default `false`. Built-in presets already allow drops (opinionated scene lists). A same-name entry that sets only this flag (no filter/score) falls back to the built-in and applies the flag. |
+| `scheduler.profiles.<name>.allow_dropped_filters` | Opt-in for Profiles: allow `enable_filters` replace to drop base admission filters (for example `disk`, `thirtparty`). Default `false` for user Profiles **and** built-in presets. Selecting a built-in on a longer base list therefore requires an explicit same-name `profiles.<builtin>.allow_dropped_filters: true` (or keeping dropped names in the Profile list). A same-name entry that sets only this flag (no filter/score) falls back to the built-in and applies the flag. |
 | `scheduler.profiles.<name>.score.enable_scorers` | Replaces `scheduler.score.enable_scorers` when the profile provides a non-nil list. |
 | `scheduler.profiles.<name>.score.resource_weights` | Merged over `scheduler.score.resource_weights`; Profile keys win and unrelated base keys remain. These are factor weights, not plugin weights. |
 | `scheduler.score.plugin_conf.*` | Per-scorer params. **Not** a profile overlay field. |
@@ -126,15 +126,16 @@ Allowed score names (must match `CubeMaster/pkg/selector/score/init.go`):
 **Filter list replace (admission risk).** When a Profile (built-in or user)
 provides a non-nil `filter.enable_filters` list, that list **replaces**
 `scheduler.filter.enable_filters` entirely. It does **not** merge with the
-base list. For **user** Profiles, dropping any name that was present in the
-base list **fails config load** unless `allow_dropped_filters: true`. Built-in
-presets already set that opt-in so stock configs
-(`cpu` / `mem` / `template_locality` / `realtime_create_num`) can select
-`balanced_spread` / `template_locality_first` / `binpack_utilization` by name.
-They still replace with short lists — audit effective `enable_filters` if you
-previously relied on `disk` / `thirtparty`. A same-name `profiles.<builtin>`
-entry with only `allow_dropped_filters` (no filter/score) falls back to the
-built-in rather than applying an empty overlay.
+base list. Dropping any name that was present in the base list **fails config
+load** unless `allow_dropped_filters: true`. Built-in presets keep that flag
+`false`, so stock configs (`cpu` / `mem` / `template_locality` /
+`realtime_create_num`) must opt in when selecting
+`balanced_spread` / `template_locality_first` / `binpack_utilization` by name
+(or keep the dropped names in the Profile list). They still replace with short
+lists — audit effective `enable_filters` if you previously relied on `disk` /
+`thirtparty`. A same-name `profiles.<builtin>` entry with only
+`allow_dropped_filters` (no filter/score) falls back to the built-in rather
+than applying an empty overlay.
 
 **`weight: 0` disables scorers.** For the four legacy Score plugins
 (`real_time_weighted_average`, `multi_factor_weighted_average`,
@@ -213,6 +214,9 @@ Setting a built-in name does **not** require a matching key under
 ```yaml
 scheduler:
   profile: balanced_spread
+  profiles:
+    balanced_spread:
+      allow_dropped_filters: true
 ```
 
 `template_locality_first` (repeated same-template creates) likewise supplies
@@ -221,6 +225,9 @@ safe `image_score` defaults:
 ```yaml
 scheduler:
   profile: template_locality_first
+  profiles:
+    template_locality_first:
+      allow_dropped_filters: true
 ```
 
 `binpack_utilization` (mixed-size / long-lived) injects plugin weight 1 and
@@ -229,13 +236,17 @@ equal CPU/memory/MVM occupancy weights when its plugin block is omitted:
 ```yaml
 scheduler:
   profile: binpack_utilization
+  profiles:
+    binpack_utilization:
+      allow_dropped_filters: true
 ```
 
 These overlays are scene-oriented selector combinations. They are **not**
 the same as simulator `weightsForProfile`, and they make **no** live
 performance claims. Remember the filter-replace warning above: built-ins
 replace `enable_filters` with a shorter list and can drop `disk` /
-`thirtparty` / other base admission filters.
+`thirtparty` / other base admission filters — the same-name
+`allow_dropped_filters: true` opt-in above is required on longer base lists.
 
 ## Minimal Profile Example
 
