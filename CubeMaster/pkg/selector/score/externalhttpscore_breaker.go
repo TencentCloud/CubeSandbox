@@ -68,13 +68,15 @@ type externalHTTPScoreGate interface {
 }
 
 var (
-	externalHTTPScoreBreakersMu sync.Mutex
-	externalHTTPScoreBreakers   = map[string]*externalHTTPScoreBreaker{}
+	externalHTTPScoreBreakersMu   sync.Mutex
+	externalHTTPScoreBreakers     = map[string]*externalHTTPScoreBreaker{}
+	externalHTTPScoreActiveTarget string // last non-disabled host from getExternalHTTPScoreBreaker
 )
 
 func resetExternalHTTPScoreRuntime() {
 	externalHTTPScoreBreakersMu.Lock()
 	externalHTTPScoreBreakers = map[string]*externalHTTPScoreBreaker{}
+	externalHTTPScoreActiveTarget = ""
 	externalHTTPScoreBreakersMu.Unlock()
 	resetExternalHTTPScoreCircuitMetrics()
 }
@@ -100,6 +102,12 @@ func getExternalHTTPScoreBreaker(endpoint string, cfg *config.ExternalHTTPScoreC
 
 	externalHTTPScoreBreakersMu.Lock()
 	defer externalHTTPScoreBreakersMu.Unlock()
+	// Production keeps a single live endpoint; when the host changes, abandon
+	// the previous target so its circuit_state series cannot page forever.
+	if prev := externalHTTPScoreActiveTarget; prev != "" && prev != target {
+		clearExternalHTTPScoreCircuitTargetLocked(prev)
+	}
+	externalHTTPScoreActiveTarget = target
 	if b, ok := externalHTTPScoreBreakers[target]; ok {
 		b.applyConfig(cfg)
 		return b
@@ -117,8 +125,18 @@ func clearExternalHTTPScoreCircuitTarget(target string) {
 		target = "invalid"
 	}
 	externalHTTPScoreBreakersMu.Lock()
-	delete(externalHTTPScoreBreakers, target)
+	clearExternalHTTPScoreCircuitTargetLocked(target)
 	externalHTTPScoreBreakersMu.Unlock()
+}
+
+func clearExternalHTTPScoreCircuitTargetLocked(target string) {
+	if target == "" {
+		target = "invalid"
+	}
+	delete(externalHTTPScoreBreakers, target)
+	if externalHTTPScoreActiveTarget == target {
+		externalHTTPScoreActiveTarget = ""
+	}
 	deleteExternalHTTPScoreCircuitState(target)
 }
 

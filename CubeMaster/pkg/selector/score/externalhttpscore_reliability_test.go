@@ -375,7 +375,7 @@ func TestExternalHTTPScoreCircuitStateUsesHostLabelNotFullURL(t *testing.T) {
 	}
 }
 
-func TestExternalHTTPScoreCircuitStateTracksMultipleHosts(t *testing.T) {
+func TestExternalHTTPScoreEndpointHostChangeClearsPreviousCircuit(t *testing.T) {
 	resetExternalHTTPScoreRuntimeForTest(t)
 
 	openCircuit := func(t *testing.T) string {
@@ -401,14 +401,19 @@ func TestExternalHTTPScoreCircuitStateTracksMultipleHosts(t *testing.T) {
 	}
 
 	hostA := openCircuit(t)
+	labels := gatherCircuitStateTargets(t)
+	if labels[hostA] != float64(circuitStateOpen) {
+		t.Fatalf("host A state = %v, want open; labels=%v", labels[hostA], labels)
+	}
+
 	hostB := openCircuit(t)
 	if hostA == hostB {
 		t.Fatalf("test servers shared host label %q", hostA)
 	}
 
-	labels := gatherCircuitStateTargets(t)
-	if labels[hostA] != float64(circuitStateOpen) {
-		t.Fatalf("host A state = %v, want open; labels=%v", labels[hostA], labels)
+	labels = gatherCircuitStateTargets(t)
+	if _, ok := labels[hostA]; ok {
+		t.Fatalf("abandoned host A still exported after endpoint change; labels=%v", labels)
 	}
 	if labels[hostB] != float64(circuitStateOpen) {
 		t.Fatalf("host B state = %v, want open; labels=%v", labels[hostB], labels)

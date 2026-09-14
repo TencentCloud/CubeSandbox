@@ -12,7 +12,7 @@ Reviewer-facing **conclusion pack** for live R011/R012 (E2 hot-path). Raw ledger
 ## Entry
 
 - Results: [`R011_R012_RESULT.md`](./R011_R012_RESULT.md)
-- Machine status: [`STATUS.json`](./STATUS.json)
+- Machine status (source artifact, not a VitePress page): [`STATUS.json`](https://github.com/tencentcloud/CubeSandbox/blob/master/docs/dev/topic1-enhancement-ablation-20260914/STATUS.json)
 
 ## Boundaries
 

@@ -209,9 +209,12 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 		if f.Disable() {
 			continue
 		}
-		// Sample Weight() once before Select so a live-config scorer
-		// (external_http_score) cannot blend with a different generation after a
-		// mid-attempt conf.yaml reload. Do not skip Select for weight == 0:
+		// Sample Weight() once before Select so the blended weight is never
+		// re-read mid-blend. Live-config scorers (external_http_score) still
+		// re-read plugin_conf inside Select, so a reload between this sample
+		// and Select can still pair weight from generation N with scores from
+		// N+1; sampling once only removes the double Weight() read within the
+		// blend arithmetic. Do not skip Select for weight == 0:
 		// roster scorers historically still run and admit nodes with score 0
 		// (reshaping the candidate set for LeastRandomSelect). Skipping on
 		// omitted/zero float64 weights would change image_score / affinity_score

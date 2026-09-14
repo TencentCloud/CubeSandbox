@@ -476,7 +476,8 @@ func schedulerSelectTestCtx() *selctx.SelectorCtx {
 func initSchedulerExternalHTTPScoreFailurePolicy(t *testing.T, endpoint, policy string) {
 	t.Helper()
 
-	configPath := filepath.Join(t.TempDir(), "cubemaster.yaml")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "cubemaster.yaml")
 	content := `common: {}
 log: {}
 scheduler:
@@ -496,11 +497,29 @@ scheduler:
 	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	neutralPath := filepath.Join(dir, "neutral.yaml")
+	neutral := `common: {}
+log: {}
+scheduler:
+  priority_select_num: -1
+`
+	if err := os.WriteFile(neutralPath, []byte(neutral), 0644); err != nil {
+		t.Fatalf("write neutral config: %v", err)
+	}
 	t.Setenv("CUBE_MASTER_CONFIG_PATH", configPath)
 	// config.Init() replaces the process-global cfg and starts a hotswap
-	// watcher that is not closed here. Acceptable for these two Select
-	// policy tests; do not copy this helper into broader scheduler suites
-	// without a shared setup/teardown that restores cfg and closes the watcher.
+	// watcher that is not closed here. Restore a neutral cfg in Cleanup so
+	// later same-package tests do not inherit priority_select_num / scorer
+	// roster from these failure_policy cases (another watcher still leaks).
+	t.Cleanup(func() {
+		if err := os.Setenv("CUBE_MASTER_CONFIG_PATH", neutralPath); err != nil {
+			t.Errorf("restore CUBE_MASTER_CONFIG_PATH: %v", err)
+			return
+		}
+		if _, err := config.Init(); err != nil {
+			t.Errorf("restore config.Init(): %v", err)
+		}
+	})
 	if _, err := config.Init(); err != nil {
 		t.Fatalf("config.Init(): %v", err)
 	}

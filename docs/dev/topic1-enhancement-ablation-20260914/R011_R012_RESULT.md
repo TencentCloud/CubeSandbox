@@ -1,6 +1,6 @@
 # R011 / R012 结果摘要（2026-09-14 live）
 
-结论包入口：[`README.md`](./README.md)。原始机房 ledger **未**纳入本 PR。
+结论包入口：[`index.md`](./index.md)。原始机房 ledger **未**纳入本 PR。
 
 ## 变体
 

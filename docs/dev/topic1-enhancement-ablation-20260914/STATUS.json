@@ -1,17 +1,10 @@
 {
   "schema_version": "topic1_enhancement_ablation_status_v1",
   "phase": "r011_r012_done",
-  "published_in_pr": 1700,
-  "github_writes": true,
   "live_runs": true,
   "results": {
-    "R001": "PASS",
-    "R010": "PASS",
     "R011": "PASS",
-    "R012": "PASS",
-    "R02x": "SKIP_NO_S2",
-    "R03x": "SKIP_NO_S3",
-    "RESTORE": "PASS"
+    "R012": "PASS"
   },
   "timeout_arm": {
     "s0_api_p95_ms": 708.05,
@@ -29,5 +22,5 @@
   "claim": "circuit_breaker_short_circuits_repeated_timeouts_under_fail_open",
   "negative_cache": false,
   "evidence": "docs/dev/topic1-enhancement-ablation-20260914/R011_R012_RESULT.md",
-  "updated_at": "2026-09-14T19:40:00+0800"
+  "updated_at": "2026-09-14T21:10:00+0800"
 }
