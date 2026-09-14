@@ -8,7 +8,7 @@ use axum::body::Body;
 use bytes::Bytes;
 use cube_envd::connect::{
     decode_frame, decode_request_frame, encode_frame, ConnectError, RequestFrameReader,
-    END_STREAM_FLAG,
+    END_STREAM_FLAG, MAX_FRAME_BYTES, MAX_UNARY_JSON_BYTES,
 };
 use futures_util::stream;
 
@@ -27,11 +27,26 @@ fn round_trips_a_connect_json_frame() {
 #[test]
 fn rejects_a_frame_larger_than_the_protocol_limit_before_allocating() {
     let mut encoded = vec![0; 5];
-    encoded[1..].copy_from_slice(&(16_u32 * 1024 * 1024 + 1).to_be_bytes());
+    encoded[1..].copy_from_slice(&(MAX_FRAME_BYTES as u32 + 1).to_be_bytes());
 
     let error = decode_frame(&encoded).unwrap_err();
 
     assert!(matches!(error, ConnectError::ResourceExhausted { .. }));
+}
+
+// 钉住协议上限的取值依据：daemon 侧必须与 CubeSandbox 自带 SDK 的接收上限一致，
+// 否则会出现"SDK 允许发、daemon 拒绝收"的不对称。
+//
+// 对端常量（三处必须同时成立才能改这里）：
+//   sdk/go/connect.go:20                      maxConnectEnvelopeSize
+//   sdk/node/src/commands.ts:14               MAX_CONNECT_ENVELOPE_SIZE
+//   sdk/python/cubesandbox/_commands.py:24    MAX_CONNECT_ENVELOPE_SIZE
+#[test]
+fn protocol_limits_match_the_sdk_envelope_size() {
+    const SDK_MAX_CONNECT_ENVELOPE_SIZE: usize = 64 * 1024 * 1024;
+
+    assert_eq!(MAX_FRAME_BYTES, SDK_MAX_CONNECT_ENVELOPE_SIZE);
+    assert_eq!(MAX_UNARY_JSON_BYTES, 4 * 1024 * 1024);
 }
 
 // 验证流结束标志会在帧编解码中保留。

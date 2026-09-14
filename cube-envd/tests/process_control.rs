@@ -261,7 +261,17 @@ async fn connect_rejects_compressed_request_frames() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    // 流式端点的请求级错误统一在流内报告（参考实现 connect-go 的行为）：
+    // HTTP 200 + `application/connect+json` + EndStream 错误帧。
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let frame = decode_frame(&body).expect("end-stream frame must decode");
+    assert_eq!(frame.flags & 0x02, 0x02, "frame must be an EndStream frame");
+    let payload: serde_json::Value = serde_json::from_slice(&frame.payload).unwrap();
+    assert_eq!(
+        payload["error"]["code"], "unimplemented",
+        "compressed frames must be rejected in-band"
+    );
 }
 
 // 验证并发 Start 请求中只有一个进程能占用相同标签。
@@ -286,20 +296,38 @@ async fn concurrent_starts_cannot_claim_the_same_tag() {
             ))
             .await
             .unwrap()
-            .status()
         });
     }
     barrier.wait().await;
 
+    // 流式端点的请求级错误在流内报告：赢家与输家都返回 200，靠帧内容区分——
+    // 赢家的首个事件帧是 start，输家是 EndStream 错误帧（tag 冲突 = invalid_argument）。
     let mut successes = 0;
+    let mut conflicts = 0;
     while let Some(result) = starts.join_next().await {
-        match result.unwrap() {
-            StatusCode::OK => successes += 1,
-            StatusCode::BAD_REQUEST => {}
-            status => panic!("unexpected Start status {status}"),
+        let response = result.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "streaming Start must answer 200"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        // 只解析首帧：赢家的响应还会带 data/end/end-stream 帧，decode_frame 要求
+        // 整段恰好一帧，这里手动取第一帧。
+        let length = u32::from_be_bytes(body[1..5].try_into().unwrap()) as usize;
+        let payload: serde_json::Value = serde_json::from_slice(&body[5..5 + length]).unwrap();
+        if payload["event"]["start"].is_object() {
+            successes += 1;
+        } else {
+            assert_eq!(
+                payload["error"]["code"], "invalid_argument",
+                "losing Start must report the tag conflict: {payload}"
+            );
+            conflicts += 1;
         }
     }
     assert_eq!(successes, 1, "only one process may claim a tag");
+    assert_eq!(conflicts, 7, "the other seven must report a tag conflict");
 }
 
 // 构造带认证和 Connect 协议头的单帧流式进程 RPC 请求。

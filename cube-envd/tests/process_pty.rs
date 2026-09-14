@@ -184,9 +184,11 @@ async fn pty_normal_exit_reports_exit_status_and_exited() {
     assert_eq!(end["exitCode"], 3, "end event: {end:?}");
     assert_eq!(end["exited"], true, "end event: {end:?}");
     assert_eq!(end["status"], "exit status 3", "end event: {end:?}");
-    assert!(
-        end.get("error").is_none(),
-        "normal exit must not carry an error: {end:?}"
+    // 非零退出与基线一致地同时给出 status 与 error（SDK 用 error 展示失败原因）；
+    // 退出码 0 时 error 才为空。
+    assert_eq!(
+        end["error"], "exit status 3",
+        "non-zero exit must carry the failure text: {end:?}"
     );
 }
 

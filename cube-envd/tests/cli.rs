@@ -52,6 +52,39 @@ fn version_and_commit_flags_print_and_exit() {
     assert!(!String::from_utf8(commit.stdout).unwrap().trim().is_empty());
 }
 
+// 验证命令行拒绝参考实现会静默接受的那几类输入。
+//
+// 这是**故意比基线更严**的一条（见 README 的 CLI 兼容矩阵）：Go 的 `flag` 会忽略
+// 位置参数、接受超出 u16 范围的 `-port`，也接受 `-isnotfc=false`，于是一个写错的
+// `ENVD_EXTRA_ARGS` 可能让 daemon 带着默认值静默启动。这里一律以退出码 2 + stderr
+// 用法提示失败。
+#[test]
+fn rejects_the_arguments_the_baseline_silently_ignores() {
+    for arguments in [
+        vec!["--isnotfc=false"],
+        vec!["--port=99999"],
+        vec!["positional-argument"],
+        vec!["--", "positional-argument"],
+        vec!["--not-a-flag"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_cube-envd"))
+            .args(&arguments)
+            .output()
+            .expect("run cube-envd");
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{arguments:?} must be a usage error, got status {:?} / stderr {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output.stderr.is_empty(),
+            "{arguments:?} must explain the usage error on stderr"
+        );
+    }
+}
+
 // 验证二进制能在指定端口启动并返回健康检查状态。
 #[tokio::test]
 async fn binary_serves_health_on_the_requested_port() {

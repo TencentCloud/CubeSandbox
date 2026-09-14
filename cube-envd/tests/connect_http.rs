@@ -74,9 +74,10 @@ async fn connect_routes_reject_an_invalid_content_type_with_unsupported_media_ty
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    // 参考实现（connect-go 的媒体类型校验）以 415 + 空 body 作答。
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
-        "invalid_argument"
+    assert!(
+        body.is_empty(),
+        "415 must carry an empty body, got {body:?}"
     );
 }

@@ -12,9 +12,10 @@ use axum::{
 };
 use cube_envd::{
     app::router,
-    connect::{decode_frame, encode_frame},
+    connect::{decode_frame, encode_frame, END_STREAM_FLAG},
 };
 use futures_util::StreamExt;
+use http_body_util::BodyExt;
 use serde_json::json;
 use tempfile::tempdir;
 use tower::ServiceExt;
@@ -241,7 +242,14 @@ async fn watch_dir_rejects_compressed_requests_before_creating_a_watcher() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    // 流式端点的请求级错误在流内报告（HTTP 200 + EndStream 错误帧），
+    // 与参考实现 connect-go 的行为一致。
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let frame = decode_frame(&body).expect("end-stream frame must decode");
+    assert_eq!(frame.flags & END_STREAM_FLAG, END_STREAM_FLAG);
+    let payload: serde_json::Value = serde_json::from_slice(&frame.payload).unwrap();
+    assert_eq!(payload["error"]["code"], "unimplemented");
 }
 
 // 验证慢订阅者导致 watcher 队列溢出时会收到资源耗尽结束帧。

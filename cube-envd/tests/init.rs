@@ -12,7 +12,7 @@ use tower::ServiceExt;
 
 // 验证 init 请求会整体替换环境变量快照。
 #[tokio::test]
-async fn init_replaces_the_environment_snapshot() {
+async fn init_merges_into_the_environment_snapshot() {
     let app = router();
 
     let response = app
@@ -46,7 +46,12 @@ async fn init_replaces_the_environment_snapshot() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(body.as_ref(), br#"{"LANG":"en_US.UTF-8"}"#);
+    // 参考实现逐键 Store（init.go:189-196），因此第一次 /init 的 PATH 仍在，
+    // 且启动时种入的 E2B_SANDBOX 不会被后续 /init 抹掉。
+    assert_eq!(
+        body.as_ref(),
+        b"{\"E2B_SANDBOX\":\"false\",\"LANG\":\"en_US.UTF-8\",\"PATH\":\"/bin\"}\n"
+    );
 }
 
 // 验证 init 请求拒绝未声明字段。
@@ -65,9 +70,9 @@ async fn init_rejects_unknown_fields() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
-// 验证超过一 MiB 的 init 请求不会替换现有环境变量。
+// 验证超过一元请求体上限的 init 请求不会改动现有环境变量。
 #[tokio::test]
-async fn init_rejects_bodies_larger_than_one_mebibyte_without_replacing_environment() {
+async fn init_rejects_bodies_larger_than_the_unary_limit_without_replacing_environment() {
     let app = router();
     let response = app
         .clone()
@@ -81,7 +86,9 @@ async fn init_rejects_bodies_larger_than_one_mebibyte_without_replacing_environm
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
-    let oversized_value = "x".repeat(1024 * 1024);
+    // 上限与 SDK 的 Connect 载荷上限同源（见 cube_envd::connect），这里从常量派生，
+    // 上限调整时本用例自动跟随。
+    let oversized_value = "x".repeat(cube_envd::connect::MAX_UNARY_JSON_BYTES);
     let oversized_body = format!(r#"{{"envVars":{{"TOO_LARGE":"{oversized_value}"}}}}"#);
     let response = app
         .clone()
@@ -100,5 +107,8 @@ async fn init_rejects_bodies_larger_than_one_mebibyte_without_replacing_environm
         .await
         .unwrap();
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(body.as_ref(), br#"{"PRESERVED":"yes"}"#);
+    assert_eq!(
+        body.as_ref(),
+        b"{\"E2B_SANDBOX\":\"false\",\"PRESERVED\":\"yes\"}\n"
+    );
 }

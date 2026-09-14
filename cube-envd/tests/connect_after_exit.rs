@@ -85,6 +85,13 @@ async fn connect_by(app: Router, selector: Value) -> Result<Vec<Value>, StatusCo
     ))
 }
 
+/// 判断帧序列是否以"未找到进程"的流内错误收尾（Connect 抢在注册之前到达）。
+fn is_not_found_end(frames: &[Value]) -> bool {
+    frames
+        .last()
+        .is_some_and(|frame| frame["end"]["error"]["code"] == "not_found")
+}
+
 fn assert_ended_with_exit(frames: &[Value], label: &str) {
     let end_events: Vec<&Value> = frames
         .iter()
@@ -142,10 +149,12 @@ async fn connect_racing_fast_exit_always_delivers_an_end_event() {
 
         match connect_by(app.clone(), json!({"tag": tag})).await {
             Ok(frames) => {
-                assert_ended_with_exit(&frames, &format!("attempt {attempt}"));
-            }
-            Err(StatusCode::NOT_FOUND) => {
-                // Connect 在进程完成注册前到达：未挂载任何状态，属正常抢先。
+                if is_not_found_end(&frames) {
+                    // 流式端点的请求级错误在流内报告（HTTP 200 + EndStream 错误帧）：
+                    // 该错误等价于旧的 404，说明 Connect 在进程注册完成前抢先到达。
+                } else {
+                    assert_ended_with_exit(&frames, &format!("attempt {attempt}"));
+                }
             }
             Err(status) => panic!("attempt {attempt}: unexpected status {status}"),
         }
