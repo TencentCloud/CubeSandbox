@@ -39,6 +39,11 @@ impl Listener for IdleListener {
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         let (stream, address) = Listener::accept(&mut self.inner).await;
+        // Streamed headers, body chunks and terminal events must not wait for
+        // an ACK of earlier bytes before a small response can finish.
+        if let Err(error) = stream.set_nodelay(true) {
+            tracing::warn!(%error, "failed to set TCP_NODELAY on HTTP connection");
+        }
         (IdleIo::new(stream, self.timeout), address)
     }
 
@@ -331,6 +336,22 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for IdleIo<T> {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn accepted_tcp_streams_disable_nagle() {
+        let socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let mut listener = IdleListener::new(socket, HTTP_IDLE_TIMEOUT);
+        let (client, (mut accepted, _)) =
+            tokio::join!(TcpStream::connect(address), listener.accept());
+        let mut client = client.unwrap();
+        assert!(accepted.inner.nodelay().unwrap());
+        accepted.write_all(b"header").await.unwrap();
+        accepted.write_all(b"end").await.unwrap();
+        let mut response = [0; 9];
+        client.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"headerend");
+    }
 
     #[tokio::test(start_paused = true)]
     async fn timeout_begins_after_a_request_and_ignores_active_requests() {

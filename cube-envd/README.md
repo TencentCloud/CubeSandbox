@@ -23,6 +23,7 @@ select the daemon: the template's image determines which implementation runs.
 - [Build a sandbox image](#build-a-sandbox-image)
 - [Create a template and use the SDK](#create-a-template-and-use-the-sdk)
 - [Runtime configuration and diagnosis](#runtime-configuration-and-diagnosis)
+- [Performance](#performance)
 - [Tests](#tests)
 
 ## Features
@@ -309,6 +310,26 @@ image accessibility and architecture, and confirm the probe targets port 49983.
 If SDK calls fail after READY, check API/proxy routing, credentials and the
 selected template. Image labels alone do not prove the running daemon's identity;
 the maintained acceptance cases inspect its running executable through the SDK.
+
+## Performance
+
+Native amd64 SDK/CubeProxy measurements produced the following
+results for Rust after the fix. Each workload/implementation has 500 measured
+samples across five independent sandbox groups, at concurrency 1.
+
+| Workload | Rust median ms | Go median ms |
+| --- | ---: | ---: |
+| Short command | 14.348 | 16.026 |
+| 4 KiB read | 1.813 | 1.451 |
+| 4 KiB write | 1.475 | 1.319 |
+| 4 MiB read | 26.965 | 33.636 |
+| 4 MiB write | 31.493 | 12.764 |
+
+Short commands and 4 KiB reads improved against Rust before the fix in all five
+groups; large writes still lag Go substantially. These are warm-cache SDK
+end-to-end latencies for fixed content, not a guarantee for all workloads or
+production. See the [detailed performance report](doc/performance.md) for
+before/after comparisons, p95, individual groups, resources and concurrency limits.
 
 ## Tests
 
