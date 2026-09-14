@@ -51,3 +51,4 @@ lang: en-US
 | [Claude Code Integration Guide](./claude-code.md) | shsaihdsaiudh | 2026-07-06 | integration, claude-code, coding-agent |
 | [LangChain Integration Guide](./langchain.md) | peerless-hero | 2026-07-07 | integration, langchain, agent |
 | [OpenAI Agents SDK Integration Guide](./openai-agents-sdk.md) | ZedingZhang | 2026-08-19 | integration, openai-agents-sdk, agent |
+| [Google ADK Integration Guide](./google-adk.md) | ztt0216 | 2026-08-25 | integration, google-adk, agent |
