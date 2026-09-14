@@ -19,6 +19,9 @@ on:
 env:
   IMAGE_NAME: ghcr.io/tencentcloud/cubesandbox-base
   BASE_OS_TAG_SUFFIX: ubuntu22.04
+  # 与 docker/Dockerfile.cube-base 的 ENVD_REF 默认值保持一致：回滚实现（Go envd）
+  # 就是按这个 ref 构建的，镜像里会留下 /etc/cubesandbox-envd-ref 作为证据。
+  ENVD_REF: "2026.16"
 
 concurrency:
   group: build-envd-base-image-${{ github.ref }}
@@ -118,36 +121,57 @@ jobs:
           build-args: |
             CUBE_ENVD_VERSION=${{ steps.envd.outputs.envd_version }}
             CUBE_ENVD_COMMIT=${{ steps.envd.outputs.envd_commit }}
+            ENVD_IMPL=cube
+            ENVD_REF=${{ env.ENVD_REF }}
           cache-from: type=gha,scope=cube-base-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=cube-base-${{ matrix.arch }}
 
       - name: Smoke test envd /health
         run: |
           set -euo pipefail
+
+          wait_for_health() {
+            local cid="$1" label="$2"
+            for attempt in {1..15}; do
+              code="$(docker exec "${cid}" curl -s -o /dev/null -w "%{http_code}" \
+                  http://127.0.0.1:49983/health || true)"
+              echo "${label} attempt ${attempt}: envd /health => ${code}"
+              if [ "${code}" = "204" ]; then
+                return 0
+              fi
+              sleep 1
+            done
+            echo "${label}: envd /health probe never returned 204" >&2
+            docker exec "${cid}" cat /var/log/envd.log >&2 || true
+            return 1
+          }
+
+          # 默认实现（ENVD_IMPL=cube）：cube-envd 装在 /usr/bin/envd。
           cid="$(docker run -d --rm cubesandbox-base:ci-smoke)"
           trap 'docker rm -f "${cid}" >/dev/null 2>&1 || true' EXIT
+          wait_for_health "${cid}" "default"
 
-          ok=""
-          for attempt in {1..10}; do
-            code="$(docker exec "${cid}" curl -s -o /dev/null -w "%{http_code}" \
-                http://127.0.0.1:49983/health || true)"
-            echo "attempt ${attempt}: envd /health => ${code}"
-            if [ "${code}" = "204" ]; then
-              ok="yes"
-              break
-            fi
-            sleep 1
-          done
+          echo "default implementation stamp: $(docker exec "${cid}" cat /etc/cubesandbox-envd-impl)"
+          test "$(docker exec "${cid}" cat /etc/cubesandbox-envd-impl)" = "cube"
+          echo "upstream ref stamp: $(docker exec "${cid}" cat /etc/cubesandbox-envd-ref)"
 
-          if [ -z "${ok}" ]; then
-            echo "envd /health probe never returned 204" >&2
-            docker exec "${cid}" cat /var/log/envd.log >&2 || true
-            exit 1
-          fi
-
-          echo "envd inside container:"
+          # 两个二进制都必须在镜像里：回滚不需要重建。
+          docker exec "${cid}" test -x /usr/bin/envd
+          docker exec "${cid}" test -x /usr/bin/envd-go
+          echo "cube-envd (/usr/bin/envd):"
           docker exec "${cid}" /usr/bin/envd -version
           docker exec "${cid}" /usr/bin/envd -commit
+          echo "go envd (/usr/bin/envd-go):"
+          docker exec "${cid}" /usr/bin/envd-go -version
+          docker exec "${cid}" /usr/bin/envd-go -commit
+
+          # ENVD_BIN 回滚：用同一个镜像、不同 ENVD_BIN 起一个容器，必须同样健康。
+          # 这条断言就是验收标准里"ENVD_BIN rollback to Go envd is verified"。
+          rollback="$(docker run -d --rm -e ENVD_BIN=/usr/bin/envd-go cubesandbox-base:ci-smoke)"
+          trap 'docker rm -f "${rollback}" "${cid}" >/dev/null 2>&1 || true' EXIT
+          wait_for_health "${rollback}" "rollback(go)"
+          echo "rollback container envd:"
+          docker exec "${rollback}" /usr/bin/envd-go -version
 
       - name: Push per-arch image
         if: github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master'
