@@ -54,6 +54,8 @@ Sidecar outages should not pin every scheduling attempt to the HTTP timeout. Aft
 
 The shared transport caps in-flight connections with `MaxConnsPerHost = 8`. Excess concurrent Selects queue against the per-request timeout; under bursty creates this can look like sidecar timeouts and trip the breaker even when the sidecar is healthy. Prefer default `fail_open` unless concurrency is sized below roughly `8 / p50 latency`.
 
+Live ablation (timeout vs healthy arms, conclusion pack only): [Topic1 Enhancement Ablation — Circuit Breaker (2026-09-14)](./topic1-enhancement-ablation-20260914/).
+
 Prometheus metrics (CubeMaster process):
 
 | Metric | Type | Meaning |

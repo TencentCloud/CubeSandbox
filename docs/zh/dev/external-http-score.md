@@ -54,6 +54,8 @@ sidecar 故障不应把每次调度尝试都钉在 HTTP 超时上。连续 `fail
 
 共享 transport 用 `MaxConnsPerHost = 8` 限制在途连接。超额并发 Select 会在拨号队列中等待并消耗单次 `timeout`；创建突发下即使 sidecar 健康也可能呈现超时并触发熔断。除非并发已按约 `8 / p50 延迟` 约束，否则请保持默认 `fail_open`。
 
+在线消融结论包（timeout / healthy 臂，不含原始 ledger）：[Topic1 Enhancement Ablation — Circuit Breaker（2026-09-14）](../../dev/topic1-enhancement-ablation-20260914/)。
+
 Prometheus 指标（CubeMaster 进程）：
 
 | 指标 | 类型 | 含义 |
