@@ -782,11 +782,11 @@ else
 	pass "ctrl_loss_tmo shortened to ${SHORT_CTRL_LOSS_TMO}s on this suite's controllers"
 
 	# I/O in flight across the window. With nothing outstanding, deleting the
-	# controller has no request to fail: dmesg stays clean and the operator's
-	# symptom never appears, which is the one thing this scenario exists to
-	# show. Resolved once -- the gendisk survives the kill, that being the whole
-	# point, so the path is good for the life of the window. Bounded, so it
-	# stops by itself if the deletion never comes.
+	# controller has no request to fail and the scenario proves nothing; the
+	# read's own failure is asserted below. Resolved once -- the gendisk
+	# survives the kill, that being the whole point, so the path is good for the
+	# life of the window. Bounded, so it stops by itself if the deletion never
+	# comes.
 	reader_dev="$(vol_dev "${VOL}")"
 	if [ ! -b "${reader_dev}" ]; then
 		fail "no block device for ${VOL} (got '${reader_dev}'): the window \
@@ -800,7 +800,10 @@ cannot be watched under I/O"
 				# ceiling from the page cache and issues no request at all,
 				# so the deletion would have nothing to fail.
 				dd if="${reader_dev}" of=/dev/null bs=1M count=64 \
-					iflag=direct 2>/dev/null || exit 0
+					iflag=direct 2>"${WORKDIR}/reader.err"
+				rc=$?
+				printf '%s\n' "${rc}" >"${WORKDIR}/reader.rc"
+				[ "${rc}" -eq 0 ] || break
 			done
 		) &
 		reader=$!
@@ -808,6 +811,7 @@ cannot be watched under I/O"
 
 	before_ctrls="$(our_controllers | wc -l)"
 	before_del="$(dmesg_count 'I/O error')"
+	before_rm="$(dmesg_count "Removing ctrl: NQN \"${RCOW_NQN_PREFIX}")"
 
 	"${SCRIPTS}/rcow_hot_stop.sh" >"${WORKDIR}/tmo_stop.log" 2>&1 ||
 		fail "rcow_hot_stop.sh failed before the window test"
@@ -835,13 +839,28 @@ cannot be watched under I/O"
 		fail "no controller deletion and no I/O error observed within ${DELETE_WATCH_SEC}s"
 	fi
 
-	# The host's own record: an I/O error in dmesg is what an operator watching
-	# the node would see. The kernel's wording varies by version, so this counts
-	# the phrase rather than matching a whole line.
-	if [ "${after_del}" -gt "${before_del}" ]; then
-		pass "dmesg gained 'I/O error' line(s): the host logged the failure"
+	# The host's own record. What an operator watching the node sees when the
+	# budget runs out is the kernel naming the controller it is deleting -- not
+	# an "I/O error" line. A *direct* read that fails on a removed controller
+	# returns EIO to its caller and never reaches the buffer cache, so only the
+	# buffered path (page-cache writeback) emits "Buffer I/O error". Measured on
+	# 6.6.69: a dd blocked for the whole window and came back short, and dmesg
+	# gained nothing but the "Removing ctrl" lines counted here.
+	after_rm="$(dmesg_count "Removing ctrl: NQN \"${RCOW_NQN_PREFIX}")"
+	if [ "${after_rm}" -gt "${before_rm}" ]; then
+		pass "dmesg names one of this suite's controllers being removed: the host logged the deletion"
 	else
-		fail "the host logged no I/O error: this failure mode would be silent to an operator"
+		fail "a controller went away but dmesg never named it"
+	fi
+
+	# The workload's half of "not silent": the read that spanned the window
+	# failed rather than hanging forever. Either the read itself failed short or
+	# the next open found the device gone; both are non-zero.
+	reader_rc="$(cat "${WORKDIR}/reader.rc" 2>/dev/null || true)"
+	if [ -n "${reader_rc}" ] && [ "${reader_rc}" -ne 0 ]; then
+		pass "the read spanning the window failed (dd rc=${reader_rc}) instead of hanging"
+	else
+		fail "no read failed across the window: the deletion had nothing outstanding to fail"
 	fi
 
 	# Served its purpose either way. A dd blocked on the deleted controller fails
