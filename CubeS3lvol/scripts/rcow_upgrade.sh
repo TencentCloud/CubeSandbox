@@ -82,7 +82,7 @@ while [ "$#" -gt 0 ]; do
 		# the caller asking for a gate is exactly the caller that must not
 		# get one silently skipped.
 		[ -n "${CANDIDATE}" ] || rcow_die "--candidate needs a binary path" ;;
-	-h|--help)   sed -n '2,65p' "${BASH_SOURCE[0]}"; exit 0 ;;
+	-h|--help)   sed -n '2,66p' "${BASH_SOURCE[0]}"; exit 0 ;;
 	*)           rcow_die "unknown option: $1 (try --help)" ;;
 	esac
 	shift
