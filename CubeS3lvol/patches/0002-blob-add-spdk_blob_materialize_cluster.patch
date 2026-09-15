@@ -84,9 +84,9 @@ Signed-off-by: Changpeng Liu <changpeliu@tencent.com>
 Assisted-by: CodeBuddy
 ---
   include/spdk/blob.h    |  33 ++++++++
-  lib/blob/blobstore.c   | 203 +++++++++++++++++++++++++++++++++++++++++++++++++
+  lib/blob/blobstore.c   | 205 +++++++++++++++++++++++++++++++++++++++++++++++++
   lib/blob/spdk_blob.map |   1 +
-  3 files changed, 237 insertions(+)
+ 3 files changed, 239 insertions(+)
 
 diff --git a/include/spdk/blob.h b/include/spdk/blob.h
 index fe98215..71b2e62 100644
@@ -136,7 +136,7 @@ diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
 index 08b7915..15699bc 100644
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
-@@ -7334,6 +7334,209 @@ spdk_bs_blob_decouple_parent(struct spdk_blob_store *bs, struct spdk_io_channel
+@@ -7334,6 +7334,211 @@ spdk_bs_blob_decouple_parent(struct spdk_blob_store *bs, struct spdk_io_channel
  }
  /* END spdk_bs_inflate_blob */
  
@@ -269,7 +269,9 @@ index 08b7915..15699bc 100644
 +		return;
 +	}
 +
-+	bs_allocate_and_copy_cluster(blob, ctx->channel, io_unit, op);
++	/* This operation alone may use the destination device's copy callback for
++	 * an esnap parent. Ordinary CoW writes must retain the GET+write path. */
++	bs_allocate_and_copy_cluster(blob, ctx->channel, io_unit, op, true);
 +}
 +
 +void

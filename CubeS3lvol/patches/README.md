@@ -261,15 +261,16 @@ reads more like a bug fix.
 
 ## 0006-blob-allow-esnap-dev-copy.patch
 
-Changes `blob_can_copy()` so an esnap clone may use `dest->copy` only while
-`spdk_blob_allow_esnap_copy(blob, true)` is in effect for that blob.
+Changes the internal allocation path so an esnap clone may use `dest->copy`
+only for the operation started by `spdk_blob_materialize_cluster()`.
 
 **This is a second patch that modifies an existing function.** The gate is
-`dest->copy != NULL` plus a per-blob flag. The second half is essential because
-`dest` is the blobstore-wide device: CopyObject ingest for volume X installs
-its manifest-bound callback there, while another esnap volume Y in the same
-lvstore remains writable. Gating only on the pointer would route Y's ordinary
-CoW through X's manifest and silently bind the wrong object.
+`dest->copy != NULL` plus an operation-local boolean passed into
+`bs_allocate_and_copy_cluster()`. The second half is essential because `dest`
+is the blobstore-wide device: CopyObject ingest for volume X installs its
+manifest-bound callback there, while another esnap volume Y in the same lvstore
+remains writable. Gating only on the pointer would route Y's ordinary CoW
+through X's manifest and silently bind the wrong object.
 
 **Why.** `blob_can_copy()` assumed a copy is an offload on one disk (`src_lba`
 and `dst_lba` on the same device) and therefore excluded esnap clones, whose
@@ -280,5 +281,7 @@ CopyObject plus a chunk-map insert. Without this, `allocate_and_copy_cluster()`
 always GET+writes an esnap cluster, which is the slow decouple path.
 
 Ordinary blobs retain the original device-copy behaviour. Ordinary CoW on an
-esnap clone remains GET+write. s3lvol raises the blob-local gate around each
-`spdk_blob_materialize_cluster()` and clears it from the completion callback.
+esnap clone remains GET+write, including a write concurrent with materializing
+the same blob. A blob-local temporal gate is not sufficient: it also redirects
+that foreground CoW into the ingest callback, where collision with the
+materializer's single waiter returns `-EBUSY` and becomes host-visible EIO.
