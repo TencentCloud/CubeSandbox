@@ -9,6 +9,7 @@ Runnable examples demonstrating CubeSandbox features and integrations. Follow ea
 | [Code Sandbox Quickstart](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/code-sandbox-quickstart) | Create a sandbox, run Python and shell commands, work with files, and try core E2B-compatible APIs. |
 | [Browser Sandbox (Playwright)](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/browser-sandbox) | Run headless Chromium in a MicroVM and control it remotely through Playwright over CDP. |
 | [Custom nginx Image](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/cubesandbox-base-nginx) | Build a minimal nginx image on top of `cubesandbox-base` and test the custom-template-image flow end to end. |
+| [Ubuntu Desktop Sandbox](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/ubuntu-desktop) | Run an Ubuntu 22.04 GNOME desktop in the browser via noVNC, with screenshots and scripted GUI automation from the SDK. |
 
 ## Agents and Framework Integrations
 
