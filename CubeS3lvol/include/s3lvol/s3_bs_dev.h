@@ -295,6 +295,11 @@ struct s3_bs_dev_stats {
 	uint64_t dest_submit_fill_joins;    /* off-owner reads coalesced */
 	uint64_t dest_direct_gets;          /* whole GETs written to user buffer */
 	uint64_t dest_direct_get_bytes;     /* bytes avoiding fill-to-user copy */
+	uint64_t dest_prefetch_gets;        /* low-priority sequential whole GETs */
+	uint64_t dest_prefetch_hits;        /* demands joining prefetched objects */
+	uint64_t dest_prefetch_skip_token;  /* no process-wide low-priority token */
+	uint64_t dest_prefetch_skip_slot;   /* per-dest fill limit reached */
+	uint64_t dest_prefetch_skip_seq;    /* random demand closed the window */
 
 	uint64_t wal_writes;      /* writes acknowledged from the log */
 	uint64_t wal_retries;     /* writes parked by backpressure */
