@@ -169,6 +169,8 @@ used ones:
 | `RCOW_LVS_NAME` | derived `rcow-<identity-hash>`; a pre-existing `rcow` entry is honoured | lvstore name, also the prefix in S3 |
 | `RCOW_CAPACITY_GB` | `16384` | used only at first create; thin, unused space costs nothing |
 | `RCOW_CACHE_MB` | `490496` | chunk cache on the WAL image; only matters before the first start |
+| `RCOW_CACHE_HOT_BUFS` | `1024` | whole-object RAM-cache slots per lvstore; 1 GiB at the default 1 MiB chunk size, `0` disables the RAM tier |
+| `RCOW_READ_AHEAD_KB` | `1024` | host block-device readahead; dense imports promote this default to 4096, `0` disables tuning |
 | `RCOW_LISTEN_ADDR` / `RCOW_LISTEN_PORT` | `127.0.0.1` / `4420` | |
 | `RCOW_TGT_CPUMASK` | last two allowed CPUs | SPDK `-m`; override with an explicit hex mask |
 | `RCOW_NO_HUGE` | `1` | no hugepages by default, a deliberate choice |
@@ -335,6 +337,19 @@ the **lvol name**, not the `<lvs>/<lvol>` bdev name. `rcow_deactive_bdev` is
 idempotent: deactivating a volume that is not active succeeds, because "not
 active" is the desired end state.
 
+Automatic namespace placement uses the free NSID that has been idle longest,
+rather than immediately reusing the lowest slot. This avoids presenting a new
+UUID at the NSID the Linux NVMe host just removed. Explicit recovery placements
+still win and reserve their NSID while the asynchronous attach is in progress.
+
+The local cache has a disk tier in the WAL image and a native whole-object RAM
+tier. The RAM tier is allocated per lvstore with `MAP_POPULATE`: the default
+`RCOW_CACHE_HOT_BUFS=1024` therefore adds 1 GiB of resident memory at the
+default 1 MiB chunk size, including during attach. Set it to `0` for disk-only
+cache operation. `rcow_get_lvstores` exposes native RAM/disk hit, miss,
+populate, eviction, residency and byte counters, plus separate imported-object
+cache and CopyObject-alias counters under each lvstore's `write_path`.
+
 Logs default to `/data/log/rcow/s3lvol_tgt.log` (overridable with `RCOW_LOG`, or
 `RCOW_LOG_DIR`). The CRT log level is set with
 `S3LVOL_CRT_LOG_LEVEL=trace|debug|info|warn|error|none`; `trace` prints every
@@ -437,6 +452,9 @@ target's request latency is not disturbed by scheduler contention. Set
   while the decouple still reads through it"*. Wait for the decouple to finish
   (`rcow_get_decouple` status -- its list emptying is the signal) before taking
   the snapshot or clone.
+- `rcow_unload_lvstore` returns `-EBUSY` while any decouple is in flight. Wait
+  for `rcow_get_decouple` to become empty; unloading cannot safely destroy the
+  export parent or its channels underneath materialisation.
 
 ## Retrying a refused snapshot delete (`--retry-pending`)
 

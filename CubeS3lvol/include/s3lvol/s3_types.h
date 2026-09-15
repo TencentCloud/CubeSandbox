@@ -103,6 +103,9 @@ struct s3_lvs_opts {
 	uint32_t             wal_size_mb;
 	uint32_t             journal_size_mb;
 	uint32_t             cache_size_mb;
+	/* Whole-object DRAM cache entries. Process policy: not persisted, and an
+	 * attach may choose a different value. Zero disables the RAM tier. */
+	uint32_t             cache_hot_bufs;
 	uint32_t             uploader_threads;
 
 	/* Longest a committed mapping may stay only in the journal, in seconds.

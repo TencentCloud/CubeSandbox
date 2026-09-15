@@ -1124,7 +1124,9 @@ cubeEgress:
 # Optional CubeS3lvol NVMe/TCP target sidecar (S3-backed cross-node snapshots)
 # in the cube-node Big Pod. Off by default, same as one-click. Enabling it
 # recreates the Big Pod (interrupting sandboxes on the node) and adds ~2 CPU
-# + 18 GiB RAM plus a ~512 GiB sparse WAL per compute node; x86_64 needs AVX2.
+# + 19 GiB RAM plus a ~512 GiB sparse WAL per compute node; x86_64 needs AVX2.
+# The 19 GiB request is 16 GiB tgtMemMB plus the default 1 GiB RAM cache and
+# process overhead, still under the 20 GiB limit.
 cubeS3lvol:
   enabled: false
   # Optional cluster-wide pin. Empty: the sidecar hashes the full Kubernetes
@@ -1136,6 +1138,9 @@ cubeS3lvol:
   # set is 0..N-1). Set a hex mask when the container is pinned to isolated cores.
   cpuMask: ""
   tgtMemMB: 16384
+  # Whole-object RAM cache slots per lvstore. With 1 MiB chunks, 1024 is
+  # 1 GiB of resident memory; set 0 to keep only the disk cache.
+  cacheHotBufs: 1024
   journalMB: 1024
   walMB: 32768
   cacheMB: 490496
@@ -1172,7 +1177,7 @@ cubeS3lvol:
   resources:
     requests:
       cpu: "2"
-      memory: "18Gi"
+      memory: "19Gi"
     limits:
       memory: "20Gi"
 

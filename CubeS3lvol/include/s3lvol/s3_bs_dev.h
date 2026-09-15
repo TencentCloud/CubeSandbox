@@ -345,16 +345,22 @@ struct s3_bs_dev_stats {
 	 * reads repeat at a coarser granularity than they arrive in. */
 	bool     cache_attached;
 	uint64_t cache_hits;
+	uint64_t cache_ram_hits;
+	uint64_t cache_disk_hits;
 	uint64_t cache_misses;
 	uint64_t cache_hits_declined;
 	uint64_t cache_populates;
 	uint64_t cache_populates_dropped;
 	uint64_t cache_evictions;
 	uint64_t cache_bytes_served;
+	uint64_t cache_ram_bytes_served;
 	uint64_t cache_bytes_populated;
 	uint64_t cache_slots_total;
 	uint64_t cache_slots_resident;
 	uint64_t cache_bytes_resident;
+	uint64_t cache_hot_slots_total;
+	uint64_t cache_hot_slots_resident;
+	uint64_t cache_hot_evictions;
 };
 
 /**

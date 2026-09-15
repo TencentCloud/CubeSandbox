@@ -283,6 +283,12 @@ RCOW_IOBUF_LARGE_POOL="${RCOW_IOBUF_LARGE_POOL:-512}"
 RCOW_READ_AHEAD_KB="${RCOW_READ_AHEAD_KB:-1024}"
 export S3LVOL_READ_AHEAD_KB="${RCOW_READ_AHEAD_KB}"
 
+# Whole-object native cache slots kept in anonymous RAM per lvstore. At the
+# default 1 MiB chunk size, 1024 slots are 1 GiB of resident memory because the
+# cache deliberately uses MAP_POPULATE. Zero keeps the disk cache but disables
+# this RAM tier; the RPC enforces the hard maximum of 8192.
+RCOW_CACHE_HOT_BUFS="${RCOW_CACHE_HOT_BUFS:-1024}"
+
 # Default -m: last two CPUs from this process's Cpus_allowed_list (CPU0 stays
 # free for housekeeping when the set is 0..N-1). An explicit RCOW_TGT_CPUMASK
 # always wins. See rcow_cpumask.sh.

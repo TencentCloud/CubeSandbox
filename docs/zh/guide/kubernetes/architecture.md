@@ -420,7 +420,7 @@ externalControlPlane:
 | `cubeProxy.enabled` / `ingress.enabled` | `true` | Proxy / Ingress |
 | `lifecycleManager.enabled` | `true` | Proxy 启用时必开 |
 | `cubeEgress.enabled` | `true` | Big Pod egress sidecar |
-| `cubeS3lvol.enabled` | `false` | Big Pod s3lvol sidecar（会重建 Pod；约 2 核 / 18 GiB / 512 GiB 稀疏 WAL） |
+| `cubeS3lvol.enabled` | `false` | Big Pod s3lvol sidecar（会重建 Pod；约 2 核 / 19 GiB / 512 GiB 稀疏 WAL，含默认 1 GiB RAM cache） |
 | `cubeOps.enabled` | `true` | CubeOps（JWT 运维 API；WebUI 上游） |
 | `webui.enabled` | `true` | WebUI（要求 `cubeOps.enabled=true`） |
 

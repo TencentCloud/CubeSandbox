@@ -307,6 +307,8 @@ spec:
               value: {{ .Values.cubeS3lvol.listenPort | quote }}
             - name: RCOW_TGT_MEM_MB
               value: {{ .Values.cubeS3lvol.tgtMemMB | quote }}
+            - name: RCOW_CACHE_HOT_BUFS
+              value: {{ .Values.cubeS3lvol.cacheHotBufs | quote }}
             - name: RCOW_JOURNAL_MB
               value: {{ .Values.cubeS3lvol.journalMB | quote }}
             - name: RCOW_WAL_MB

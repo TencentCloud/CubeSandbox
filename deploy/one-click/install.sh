@@ -1820,6 +1820,12 @@ RCOW_JOURNAL_MB="${RCOW_JOURNAL_MB:-1024}"
 # total. Tuning RCOW_CACHE_MB only matters before the first start.
 RCOW_CACHE_MB="${RCOW_CACHE_MB:-490496}"
 RCOW_CAPACITY_GB="${RCOW_CAPACITY_GB:-16384}"
+RCOW_CACHE_HOT_BUFS="${RCOW_CACHE_HOT_BUFS:-1024}"
+case "${RCOW_CACHE_HOT_BUFS}" in
+  ''|*[!0-9]*) die "RCOW_CACHE_HOT_BUFS must be an integer from 0 to 8192" ;;
+  *) (( RCOW_CACHE_HOT_BUFS <= 8192 )) ||
+       die "RCOW_CACHE_HOT_BUFS must be at most 8192" ;;
+esac
 # Leave RCOW_TGT_CPUMASK unset unless the operator (or a previous
 # .one-click.env) set it. rcow_common.sh derives last-two at service start
 # from the service's own affinity; freezing the installer's mask would be
@@ -2166,6 +2172,7 @@ upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_WAL_MB" "${RCOW_WAL_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_JOURNAL_MB" "${RCOW_JOURNAL_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CACHE_MB" "${RCOW_CACHE_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CAPACITY_GB" "${RCOW_CAPACITY_GB}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CACHE_HOT_BUFS" "${RCOW_CACHE_HOT_BUFS}"
 if [[ -n "${RCOW_TGT_CPUMASK:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_CPUMASK" "${RCOW_TGT_CPUMASK}"
 fi

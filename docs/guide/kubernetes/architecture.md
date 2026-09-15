@@ -421,7 +421,7 @@ Does not install built-in Master / API / MySQL / Redis / MinIO / WebUI; by defau
 | `cubeProxy.enabled` / `ingress.enabled` | `true` | Proxy / Ingress |
 | `lifecycleManager.enabled` | `true` | Required when Proxy is enabled |
 | `cubeEgress.enabled` | `true` | Big Pod egress sidecar |
-| `cubeS3lvol.enabled` | `false` | Big Pod s3lvol sidecar (recreates the Pod; ~2 CPU / 18 GiB / 512 GiB sparse WAL) |
+| `cubeS3lvol.enabled` | `false` | Big Pod s3lvol sidecar (recreates the Pod; ~2 CPU / 19 GiB / 512 GiB sparse WAL, including the default 1 GiB RAM cache) |
 | `cubeOps.enabled` | `true` | CubeOps (JWT ops API; WebUI upstream) |
 | `webui.enabled` | `true` | WebUI (requires `cubeOps.enabled=true`) |
 

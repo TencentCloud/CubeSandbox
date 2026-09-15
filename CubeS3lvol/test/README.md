@@ -12,7 +12,7 @@ them in this order -- the earlier ones are faster and need less environment.
 ## Running everything with one command
 
 ```sh
-make check           # 24 suites (= test/run_all.sh; dataplane needs root + S3)
+make check           # all suites in test/run_all.sh; dataplane needs root + S3
 make check-offline   # suites needing no credentials and no root (see `test/run_all.sh --list`)
 test/run_all.sh --list          # show what would run and what the environment has
 test/run_all.sh --no-dataplane  # both integration layers, no dataplane

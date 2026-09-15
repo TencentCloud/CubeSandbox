@@ -159,7 +159,7 @@ The first start creates the sparse WAL if it is missing; `journalMB` / `walMB` /
 
 ## 3. Storage requirements on every node
 
-Every node that runs the s3lvol target needs about **2 CPU + 18 GiB RAM**; x86_64 hosts need AVX2 (Haswell).
+Every node that runs the s3lvol target needs about **2 CPU + 19 GiB RAM**; x86_64 hosts need AVX2 (Haswell). This includes the default 1 GiB whole-object RAM cache (`RCOW_CACHE_HOT_BUFS=1024`); set it to `0` for disk-only caching.
 
 Snapshot objects live in shared S3, but **every node that runs the s3lvol target also needs a local WAL image**. Cross-node restore depends on it: writes to the snapshot are staged on local disk first and flushed to S3 asynchronously, and a node without the image can neither take snapshots nor restore them.
 

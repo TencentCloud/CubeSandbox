@@ -125,6 +125,15 @@ rcow_need_cmd nvme "nvme-cli provides connect/disconnect (nvme-cli package)"
 if [ "${DO_CONNECT}" -eq 1 ]; then
 	rcow_need_nvme_tcp
 fi
+case "${RCOW_CACHE_HOT_BUFS}" in
+''|*[!0-9]*)
+	rcow_die "RCOW_CACHE_HOT_BUFS must be an integer from 0 to 8192"
+	;;
+*)
+	[ "${RCOW_CACHE_HOT_BUFS}" -le 8192 ] ||
+		rcow_die "RCOW_CACHE_HOT_BUFS must be at most 8192"
+	;;
+esac
 rcow_ensure_run_dir
 
 [ -x "${RCOW_TGT_BIN}" ] || rcow_die "target binary not found: ${RCOW_TGT_BIN}"
@@ -314,9 +323,9 @@ somewhere else, stop and check which image it meant"
 	rcow_log "found in ${RCOW_BSTORE_FILE} (namespace ${LVS_NS}): attaching, \
 which replays the journal and the WAL"
 
-	ATTACH_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s","checkpoint_interval_sec":%s' \
+	ATTACH_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s","checkpoint_interval_sec":%s,"cache_hot_bufs":%s' \
 		"${RCOW_LVS_NAME}" "${LVS_NS}" "${RCOW_WAL_BDEV}" \
-		"${RCOW_CKPT_INTERVAL_SEC}")"
+		"${RCOW_CKPT_INTERVAL_SEC}" "${RCOW_CACHE_HOT_BUFS}")"
 
 	LOG_MARK="$(rcow_log_size)"
 	if ! ATTACH_OUT="$(rcow_rpc rcow_attach_lvstore \
@@ -366,10 +375,10 @@ ${RCOW_BSTORE_FILE}"
 
 	# RCOW_CAPACITY_GB goes straight through: capacity_gib is in GiB, which is
 	# the unit this script always had. It used to multiply out to bytes here.
-	CREATE_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%s,"wal_bdev":"%s","journal_size_mb":%s,"wal_size_mb":%s,"checkpoint_interval_sec":%s' \
+	CREATE_PARAMS="$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%s,"wal_bdev":"%s","journal_size_mb":%s,"wal_size_mb":%s,"checkpoint_interval_sec":%s,"cache_hot_bufs":%s' \
 		"${RCOW_LVS_NAME}" "${LVS_NS}" "${RCOW_CAPACITY_GB}" \
 		"${RCOW_WAL_BDEV}" "${RCOW_JOURNAL_MB}" "${RCOW_WAL_MB}" \
-		"${RCOW_CKPT_INTERVAL_SEC}")"
+		"${RCOW_CKPT_INTERVAL_SEC}" "${RCOW_CACHE_HOT_BUFS}")"
 
 	# A create can hit the same marker: an earlier create that died after
 	# writing it left no bstore.json entry, so this path is reached again.

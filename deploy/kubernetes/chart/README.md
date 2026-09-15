@@ -658,7 +658,7 @@ Do not rotate the CubeEgress CA casually: templates baked with the old CA and sa
 
 ## CubeS3lvol
 
-`cubeS3lvol.enabled=false` by default, same as one-click. Enabling it injects a `cube-s3lvol` sidecar into the Cube Node Big Pod and **recreates that Pod, interrupting sandboxes on the node** — budget about 2 CPU, 18 GiB RAM, and a 512 GiB sparse WAL per compute node (x86_64 needs AVX2).
+`cubeS3lvol.enabled=false` by default, same as one-click. Enabling it injects a `cube-s3lvol` sidecar into the Cube Node Big Pod and **recreates that Pod, interrupting sandboxes on the node** — budget about 2 CPU, 19 GiB RAM, and a 512 GiB sparse WAL per compute node (x86_64 needs AVX2).
 
 When enabled, the sidecar:
 
@@ -669,10 +669,13 @@ When enabled, the sidecar:
 - reuses chart MinIO or `volumeS3` endpoint and credentials by default. The bucket is `cube-s3lvol` and must not be the volume plugin's `cube-volumes` (Helm fails on a shared bucket);
 - identifies the node by hashing the full Kubernetes node name (`spec.nodeName`) to `rcow-<8hex>`, so a Pod recreate is not a new machine and IP / dotted node names stay unique. `cubeS3lvol.lvsName` pins the same name on every node — do not set it when more than one node runs the sidecar;
 - uses the last two allowed CPUs by default; set `cubeS3lvol.cpuMask` when cores are isolated.
+- reserves 1024 whole-object RAM-cache slots (1 GiB at the default chunk size)
+  per lvstore; set `cubeS3lvol.cacheHotBufs: 0` for disk-only caching.
 
 ```yaml
 cubeS3lvol:
   enabled: true
+  cacheHotBufs: 1024
   # Optional: explicit S3 (otherwise chart MinIO or volumeS3 is reused).
   # s3:
   #   existingSecret: my-s3lvol-cfg   # key must be s3.cfg
