@@ -2,6 +2,8 @@
 import { computed, onMounted, ref } from 'vue'
 import {
   emptyQualityStatus,
+  formatStatusDate,
+  formatStatusDateTime,
   normalizeQualityStatus,
   resolveBaselineUrl
 } from '../quality-status-source.js'
@@ -132,9 +134,12 @@ function text(value) {
   return value === undefined || value === null || value === '' ? '—' : String(value)
 }
 
+function dateText(statusValue) {
+  return formatStatusDate(statusValue.generatedAt) || text(statusValue.date)
+}
+
 function dateTimeText(value) {
-  if (!value) return '—'
-  return String(value).replace('T', ' ').replace(/([+-]\d{2}:\d{2}|Z)$/, ' $1')
+  return formatStatusDateTime(value) || '—'
 }
 
 function metricValue(row, key) {
@@ -208,7 +213,7 @@ onMounted(() => {
     <div v-if="hasData" class="qs-stats">
       <div class="qs-card">
         <span>{{ words.latest }}</span>
-        <strong>{{ text(status.date) }}</strong>
+        <strong>{{ dateText(status) }}</strong>
       </div>
       <div class="qs-card">
         <span>{{ words.commit }}</span>

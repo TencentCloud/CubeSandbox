@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   emptyQualityStatus,
+  formatStatusDate,
+  formatStatusDateTime,
   localizeBaselineUrl,
   normalizeQualityStatus,
   resolveBaselineUrl,
@@ -130,6 +132,11 @@ test('resolveBaselineUrl prefers locale-specific URLs and rewrites known sites',
   assert.equal(localizeBaselineUrl(zhUrl, 'en'), enUrl)
   assert.equal(localizeBaselineUrl('https://cubesandbox.com/zh', 'en'), 'https://cubesandbox.com/')
   assert.equal(localizeBaselineUrl('https://cubesandbox.com/zh', 'zh'), 'https://cubesandbox.com/zh')
+})
+
+test('status timestamps are shown in Asia/Shanghai', () => {
+  assert.equal(formatStatusDate('2026-09-14T17:55:04+00:00'), '2026-09-15')
+  assert.equal(formatStatusDateTime('2026-09-14T17:55:04+00:00'), '2026-09-15 01:55:04 +08:00')
 })
 
 test('emptyQualityStatus returns the unknown status skeleton', () => {

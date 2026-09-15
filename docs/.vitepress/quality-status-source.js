@@ -1,6 +1,39 @@
 export const DEFAULT_QUALITY_STATUS_JSON_URL =
   'https://cubesandbox-1253970226.cos.ap-singapore.myqcloud.com/page-data/quality-status.json'
 
+export const QUALITY_STATUS_TIME_ZONE = 'Asia/Shanghai'
+
+export function formatStatusDate(value) {
+  const parsed = parseTimeValue(value)
+  if (!parsed) return ''
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: QUALITY_STATUS_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(parsed)
+}
+
+export function formatStatusDateTime(value) {
+  const parsed = parseTimeValue(value)
+  if (!parsed) return ''
+  const date = formatStatusDate(value)
+  const time = new Intl.DateTimeFormat('en-GB', {
+    timeZone: QUALITY_STATUS_TIME_ZONE,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).format(parsed)
+  return `${date} ${time} +08:00`
+}
+
+function parseTimeValue(value) {
+  if (!value) return null
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
 export function safeHttpUrl(value) {
   if (!value) return ''
   try {
