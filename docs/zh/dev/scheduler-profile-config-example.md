@@ -311,8 +311,9 @@ scheduler:
 fail-open 语义见 CubeMaster 调度配置指南（External HTTP score 插件）。#1699 /
 #1700 / #1708 仍可作为分 topic 审查单元的历史参考；本伞形将它们合并。选中
 Profile 时，最终生效的 `enable_filters` / `enable_scorers` 中的未知名称会在配置
-加载阶段失败关闭；空 Profile 下，base `enable_scorers` 中的未知名仍在
-`NewSelector` 时告警并跳过（升级兼容）。
+加载阶段失败关闭。空 Profile 下，base `enable_scorers` 中的未知名同样会失败关闭
+（`validateListedScorerPluginConfPresent`）；升级后不要再期望 typo 的评分器名只在
+`NewSelector` 告警并跳过。
 
 ## 运行时 Profile vs 模拟器 Profile
 

@@ -1737,8 +1737,9 @@ func validateSchedulerScorePluginConfig(s *SchedulerConf) error {
 		}
 		missing, known := scorerPluginConfMissing(s, name)
 		if !known {
-			// Allowlist / effective-selector validation rejects unknown names
-			// under Profile; leave unknown base names for NewSelector warn/skip.
+			// Unreachable for listed names after validateListedScorerPluginConfPresent
+			// (runs on empty and non-empty Profile paths). Keep the continue so
+			// this helper stays safe if called in isolation.
 			continue
 		}
 		if missing {

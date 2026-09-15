@@ -352,9 +352,10 @@ mode / fail-open semantics, see the CubeMaster scheduler config guide
 (External HTTP score plugin). Review units #1699 / #1700 / #1708 remain useful
 history for the separate topic PRs; this umbrella combines them. With a
 selected Profile, unknown names in the **effective** `enable_filters` /
-`enable_scorers` lists fail closed at config load; with an empty Profile,
-unknown base `enable_scorers` names are still warn-skipped at `NewSelector`
-(legacy compatibility).
+`enable_scorers` lists fail closed at config load. Unknown base
+`enable_scorers` names also fail closed with an empty Profile
+(`validateListedScorerPluginConfPresent`); do not expect
+`NewSelector` warn-and-skip for a typo'd scorer name after upgrade.
 
 ## Runtime Profile vs Simulator Profile
 
