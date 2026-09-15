@@ -140,7 +140,7 @@ Identity comes from the full Kubernetes node name, hashed to `rcow-<8hex>`. A Po
 Extra settings are only needed when:
 
 - the S3 endpoint is external and path-style — set `cubeS3lvol.s3.pathStyle: true`;
-- cores are isolated — set `cubeS3lvol.cpuMask` (default is rcow's `0x3`).
+- cores are isolated — set `cubeS3lvol.cpuMask` (default is the last two allowed CPUs).
 
 ```yaml
 cubeS3lvol:

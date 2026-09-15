@@ -1132,8 +1132,8 @@ cubeS3lvol:
   # cluster — every node would share one S3 prefix.
   lvsName: ""
   socketPath: /var/run/s3lvol/s3lvol.sock
-  # Empty: rcow default 0x3 (CPU0+1). Set when the container is pinned to
-  # isolated cores.
+  # Empty: last two CPUs from Cpus_allowed_list (keeps CPU0 free when the
+  # set is 0..N-1). Set a hex mask when the container is pinned to isolated cores.
   cpuMask: ""
   tgtMemMB: 16384
   journalMB: 1024

@@ -317,6 +317,7 @@ run_suite s3_bucket_selftest python3 ./test/tools/s3_bucket.py --self-test
 run_suite isa_baseline ./test/tools/test_isa_baseline.sh
 run_suite rpc_py38_compat ./test/tools/test_rpc_py38_compat.sh
 run_suite lvs_identity ./test/tools/test_lvs_identity.sh
+run_suite tgt_cpumask ./test/tools/test_tgt_cpumask.sh
 echo ""
 
 echo "--- integration (no S3, no root)"

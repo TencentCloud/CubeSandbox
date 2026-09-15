@@ -28,6 +28,7 @@ s3lvol-<version>/
 ├── bin/s3lvol_tgt
 ├── scripts/
 │   ├── rcow_start.sh rcow_stop.sh rcow_recovery.sh rcow_common.sh
+│   ├── rcow_cpumask.sh               # default SPDK -m (last two allowed CPUs)
 │   ├── rcow_purge.sh  s3lvol_rpc.py  s3_prefix_rm.py
 │   ├── rpc.py         # this repo's launcher (3.8 argparse shim)
 │   ├── rpc_compat.py  # BooleanOptionalAction backfill for Python 3.8
@@ -150,7 +151,7 @@ used ones:
 | `RCOW_CAPACITY_GB` | `16384` | used only at first create; thin, unused space costs nothing |
 | `RCOW_CACHE_MB` | `490496` | chunk cache on the WAL image; only matters before the first start |
 | `RCOW_LISTEN_ADDR` / `RCOW_LISTEN_PORT` | `127.0.0.1` / `4420` | |
-| `RCOW_TGT_CPUMASK` | `0x3` | |
+| `RCOW_TGT_CPUMASK` | last two allowed CPUs | SPDK `-m`; override with an explicit hex mask |
 | `RCOW_NO_HUGE` | `1` | no hugepages by default, a deliberate choice |
 | `RCOW_RPC_SOCK` | `/var/run/s3lvol.sock` | |
 
@@ -386,11 +387,12 @@ For a local MinIO the config must also set `path_style = "true"` and
 
 `s3lvol_tgt` runs SPDK reactor threads in busy-poll mode: they spin at 100% of
 the cores they are pinned to and never sleep. The current deployment starts
-with **2 reactors on 2 dedicated cores** (e.g. `-m 0x3` pins them to CPU 0 and
-CPU 1). Those two cores are fully consumed by the target, so **other
-(application/business) processes must be kept off them** — pin them elsewhere
-with `taskset`/`numactl` (or a cpuset/cgroup) so the target's request latency
-is not disturbed by scheduler contention.
+with **2 reactors on the last two allowed CPUs** (for `Cpus_allowed_list: 0-7`
+that is `-m 0xc0`, CPU 6 and CPU 7). Those two cores are fully consumed by the
+target, so **other (application/business) processes must be kept off them** —
+pin them elsewhere with `taskset`/`numactl` (or a cpuset/cgroup) so the
+target's request latency is not disturbed by scheduler contention. Set
+`RCOW_TGT_CPUMASK` to an explicit hex mask when the cores are isolated.
 
 ## LIMITATIONS and TODOs
 

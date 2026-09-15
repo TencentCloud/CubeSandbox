@@ -16,13 +16,6 @@ use crate::sandbox::pmem::Pmem as SbPmem;
 use cube_hypervisor::SNAPSHOT_VERSION;
 
 use serde_json;
-pub fn enable_snapshot() -> bool {
-    let p = Path::new("/data/cube-shim/snapshot");
-    if let Ok(_stat) = fs::metadata(p) {
-        return true;
-    }
-    false
-}
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct SnapshotInfo {

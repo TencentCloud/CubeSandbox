@@ -28,6 +28,7 @@
 #    ├── bin/s3lvol_tgt
 #    ├── scripts/
 #    │   ├── rcow_start.sh rcow_stop.sh rcow_recovery.sh rcow_common.sh
+#    │   ├── rcow_cpumask.sh      default SPDK -m (last two allowed CPUs)
 #    │   ├── rcow_purge.sh        delete an lvstore outright (irreversible)
 #    │   ├── s3lvol_rpc.py        this repo's raw JSON-RPC client
 #    │   ├── s3_prefix_rm.py      bucket cleanup, what rcow_purge.sh deletes with
@@ -267,8 +268,8 @@ mkdir -p "${PKG_DIR}/bin" "${PKG_DIR}/scripts" || die "cannot create ${PKG_DIR}"
 log "bin/s3lvol_tgt"
 install -m 0755 "${TGT_BIN}" "${PKG_DIR}/bin/s3lvol_tgt" || die "install failed"
 
-log "scripts/ (start, stop, recovery, purge, common)"
-for f in rcow_common.sh rcow_start.sh rcow_stop.sh rcow_recovery.sh rcow_purge.sh; do
+log "scripts/ (start, stop, recovery, purge, common, cpumask)"
+for f in rcow_common.sh rcow_cpumask.sh rcow_start.sh rcow_stop.sh rcow_recovery.sh rcow_purge.sh; do
 	[ -f "${REPO_ROOT}/scripts/${f}" ] || die "missing scripts/${f}"
 	install -m 0755 "${REPO_ROOT}/scripts/${f}" "${PKG_DIR}/scripts/${f}" ||
 		die "install failed for ${f}"

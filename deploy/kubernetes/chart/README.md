@@ -668,7 +668,7 @@ When enabled, the sidecar:
 - reads S3 config from a chart Secret mounted at `/etc/s3lvol/s3.cfg`; an `existingSecret` must contain that key in s3lvol format (not `volume-s3.conf`);
 - reuses chart MinIO or `volumeS3` endpoint and credentials by default. The bucket is `cube-s3lvol` and must not be the volume plugin's `cube-volumes` (Helm fails on a shared bucket);
 - identifies the node by hashing the full Kubernetes node name (`spec.nodeName`) to `rcow-<8hex>`, so a Pod recreate is not a new machine and IP / dotted node names stay unique. `cubeS3lvol.lvsName` pins the same name on every node — do not set it when more than one node runs the sidecar;
-- uses rcow's default CPU mask (`0x3`); set `cubeS3lvol.cpuMask` when cores are isolated.
+- uses the last two allowed CPUs by default; set `cubeS3lvol.cpuMask` when cores are isolated.
 
 ```yaml
 cubeS3lvol:

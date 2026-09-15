@@ -2,18 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Tencent. All rights reserved.
 #
-# run_vm.sh — Boot the CubeSandbox dev VM via QEMU/KVM.
+# run_vm.sh — Boot the OpenCloudOS 9 development VM via QEMU/KVM.
 #
-# Launches the prepared qcow2 image with nested KVM enabled and sets up user
-# mode networking with port forwards:
-#   - host :10022 -> guest :22  (ssh, used by login.sh / sync_to_vm.sh / copy_logs.sh)
-#   - host :13000 -> guest :3000 (cube-api HTTP endpoint)
-#   - host :11080 -> guest :80   (cube-proxy HTTP endpoint)
-#   - host :11443 -> guest :443  (cube-proxy HTTPS endpoint)
-#   - host :12088 -> guest :12088 (webui HTTP endpoint)
+# Launches the qcow2 image created by create_vm.sh with nested KVM enabled and
+# user mode networking. Only SSH is forwarded by default:
+#   - host :10022 -> guest :22  (ssh, used by login.sh)
 #
-# Run prepare_image.sh first to produce the image. This script is the normal
-# way to start the VM for day-to-day development.
+# Need to reach a service running inside the guest? Add forwards explicitly:
+#   EXTRA_FORWARDS="13000:3000 11443:443" ./run_vm.sh
+#
+# Run create_vm.sh first to produce the image. This script is the normal way to
+# start the VM for day-to-day development.
 #
 # Usage:
 #   ./run_vm.sh
@@ -22,6 +21,9 @@
 #   WORK_DIR                   Working dir (default: dev-env/.workdir)
 #   IMAGE_URL                  Base qcow2 URL (used to derive IMAGE_NAME)
 #   IMAGE_PATH                 Full path to VM disk image (defaults to WORK_DIR/IMAGE_NAME)
+#   SSH_PORT                   Host port forwarded to guest 22 (default: 10022)
+#   EXTRA_FORWARDS             Space separated HOST_PORT:GUEST_PORT pairs to
+#                              forward in addition to SSH (default: empty)
 
 set -euo pipefail
 
@@ -36,10 +38,7 @@ VM_NAME="${VM_NAME:-opencloudos9-cubesandbox}"
 VM_MEMORY_MB="${VM_MEMORY_MB:-8192}"
 VM_CPUS="${VM_CPUS:-4}"
 SSH_PORT="${SSH_PORT:-10022}"
-CUBE_API_PORT="${CUBE_API_PORT:-13000}"
-CUBE_PROXY_HTTP_PORT="${CUBE_PROXY_HTTP_PORT:-11080}"
-CUBE_PROXY_HTTPS_PORT="${CUBE_PROXY_HTTPS_PORT:-11443}"
-WEB_UI_PORT="${WEB_UI_PORT:-12088}"
+EXTRA_FORWARDS="${EXTRA_FORWARDS:-}"
 REQUIRE_NESTED_KVM="${REQUIRE_NESTED_KVM:-1}"
 VM_BACKGROUND="${VM_BACKGROUND:-0}"
 QEMU_PIDFILE="${QEMU_PIDFILE:-${WORK_DIR}/qemu.pid}"
@@ -143,6 +142,22 @@ find_aarch64_uefi_firmware() {
 
 need_cmd qemu-system-${TARGET_ARCH}
 
+# The SSH forward is always present; EXTRA_FORWARDS entries are appended to it.
+HOSTFWD_LIST="hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22"
+EXTRA_FORWARD_ENTRIES=()
+
+read -r -a _forward_args <<<"${EXTRA_FORWARDS}"
+for entry in "${_forward_args[@]}"; do
+  if [[ ! "${entry}" =~ ^[0-9]+:[0-9]+$ ]]; then
+    log_error "Invalid EXTRA_FORWARDS entry: '${entry}'"
+    log_error "Expected space separated HOST_PORT:GUEST_PORT pairs, for example:"
+    log_error "  EXTRA_FORWARDS=\"13000:3000 11443:443\" ./run_vm.sh"
+    exit 1
+  fi
+  EXTRA_FORWARD_ENTRIES+=("${entry}")
+  HOSTFWD_LIST="${HOSTFWD_LIST},hostfwd=tcp:127.0.0.1:${entry%%:*}-:${entry##*:}"
+done
+
 if [[ ! -e /dev/kvm ]]; then
   log_error "Host has no /dev/kvm; KVM acceleration is unavailable."
   exit 1
@@ -150,7 +165,7 @@ fi
 
 if [[ ! -f "${IMAGE_PATH}" ]]; then
   log_error "Image not found: ${IMAGE_PATH}"
-  log_error "Please run ./prepare_image.sh first."
+  log_error "Please run ./create_vm.sh first."
   exit 1
 fi
 
@@ -163,10 +178,9 @@ log_info "  Image      : ${IMAGE_PATH}"
 log_info "  Login user : opencloudos"
 log_info "  Password   : opencloudos"
 log_info "  SSH        : ssh -p ${SSH_PORT} opencloudos@127.0.0.1"
-log_info "  Cube API   : http://127.0.0.1:${CUBE_API_PORT} -> guest:3000"
-log_info "  CubeProxy  : http://127.0.0.1:${CUBE_PROXY_HTTP_PORT} -> guest:80"
-log_info "  CubeProxy  : https://127.0.0.1:${CUBE_PROXY_HTTPS_PORT} -> guest:443"
-log_info "  WebUI      : http://127.0.0.1:${WEB_UI_PORT} -> guest:12088"
+for entry in "${EXTRA_FORWARD_ENTRIES[@]}"; do
+  log_info "  Extra fwd  : 127.0.0.1:${entry%%:*} -> guest:${entry##*:}"
+done
 if [[ "${VM_BACKGROUND}" == "1" ]]; then
   log_info "Background mode:"
   log_info "  PID file   : ${QEMU_PIDFILE}"
@@ -203,7 +217,7 @@ QEMU_ARGS=(
   -device virtio-rng-pci
   -drive if=none,id=drive0,format=qcow2,file="${IMAGE_PATH}"
   -device virtio-blk-pci,drive=drive0
-  -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22,hostfwd=tcp:127.0.0.1:${CUBE_API_PORT}-:3000,hostfwd=tcp:127.0.0.1:${CUBE_PROXY_HTTP_PORT}-:80,hostfwd=tcp:127.0.0.1:${CUBE_PROXY_HTTPS_PORT}-:443,hostfwd=tcp:127.0.0.1:${WEB_UI_PORT}-:12088"
+  -nic "user,model=virtio-net-pci,${HOSTFWD_LIST}"
 )
 
 if [[ "${VM_BACKGROUND}" == "1" ]]; then
