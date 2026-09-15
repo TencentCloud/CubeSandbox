@@ -248,16 +248,29 @@ COMMON_CFLAGS += -D_GNU_SOURCE -fno-strict-aliasing
 # binary is asked what it is *before* it is allowed to start, so the answer
 # cannot come from anything the process would have to come up to learn.
 #
-# ?= so a release build can pin all three; the fallbacks keep a plain `make`
-# going in a tree with no git metadata or no sibling SPDK checkout.
+# Expanded once, not on every use. These land in COMMON_CFLAGS, which is a
+# recursive variable every compile recipe expands, so a `$(shell ...)` left
+# recursive would run once per translation unit -- and could stamp different
+# objects differently if the tree went dirty part way through a build.
+#
+# The origin guard is what `?=` did and what a release build needs: a value
+# pinned on the command line or in the environment wins, and the shell only
+# runs when nothing pinned one. The fallbacks keep a plain `make` going in a
+# tree with no git metadata or no sibling SPDK checkout.
 #
 # Quoting: the single quotes are stripped by the shell, leaving the compiler
 # with -DS3LVOL_VERSION="...", i.e. a C string literal -- which is what the
 # #ifndef fallbacks in s3lvol/s3_build_info.h expect.
 # ---------------------------------------------------------------------------
-S3LVOL_VERSION      ?= $(shell git -C $(S3LVOL_ROOT) describe --tags --always --dirty 2>/dev/null || echo unknown)
-S3LVOL_GIT_COMMIT   ?= $(shell git -C $(S3LVOL_ROOT) rev-parse HEAD 2>/dev/null || echo unknown)
-S3LVOL_SPDK_VERSION ?= $(shell git -C $(SPDK_ROOT) describe --tags --always 2>/dev/null || echo unknown)
+ifeq ($(origin S3LVOL_VERSION),undefined)
+S3LVOL_VERSION := $(shell git -C $(S3LVOL_ROOT) describe --tags --always --dirty 2>/dev/null || echo unknown)
+endif
+ifeq ($(origin S3LVOL_GIT_COMMIT),undefined)
+S3LVOL_GIT_COMMIT := $(shell git -C $(S3LVOL_ROOT) rev-parse HEAD 2>/dev/null || echo unknown)
+endif
+ifeq ($(origin S3LVOL_SPDK_VERSION),undefined)
+S3LVOL_SPDK_VERSION := $(shell git -C $(SPDK_ROOT) describe --tags --always 2>/dev/null || echo unknown)
+endif
 
 COMMON_CFLAGS += -DS3LVOL_VERSION='"$(S3LVOL_VERSION)"'
 COMMON_CFLAGS += -DS3LVOL_GIT_COMMIT='"$(S3LVOL_GIT_COMMIT)"'
