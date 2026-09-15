@@ -107,7 +107,7 @@ scheduler:
 			if disabled != tt.wantDisable {
 				t.Fatalf("BinpackPluginWeight disabled = %v, want %v", disabled, tt.wantDisable)
 			}
-			if tt.name == "custom weight" && cfg.CPUWeight != 2 {
+			if tt.name == "custom weight" && config.BinpackDimWeight(cfg.CPUWeight) != 2 {
 				t.Fatalf("config cpu_weight = %v, want 2", cfg.CPUWeight)
 			}
 
@@ -241,7 +241,7 @@ scheduler:
 	if err == nil {
 		t.Fatal("config.Init() error = nil, want negative weight rejection")
 	}
-	if !strings.Contains(err.Error(), "binpack_score.weight must be >= 0") {
+	if !strings.Contains(err.Error(), "binpack_score.weight must be a finite number >= 0") {
 		t.Fatalf("config.Init() error = %v, want negative weight rejection", err)
 	}
 }
@@ -338,6 +338,37 @@ scheduler:
 			t.Fatalf("cpu occupancy not monotonic: cpu=%d score=%v prev=%v", cpu, got, prev)
 		}
 		prev = got
+	}
+}
+
+func TestBinpackExplicitZeroDimExcludesAxis(t *testing.T) {
+	if runIsolatedScoreConfigTest(t) {
+		return
+	}
+	initBinpackScoreTestConfig(t, `common: {}
+log: {}
+scheduler:
+  ignore_redis_allocation: false
+  node_max_mvm_num: 100
+  score:
+    enable_scorers:
+      - binpack_score
+    plugin_conf:
+      binpack_score:
+        weight: 1
+        cpu_weight: 0
+        mem_weight: 1
+        mvm_weight: 0
+`)
+	cpuW, memW, mvmW := binpackScoreFactorWeights()
+	if cpuW != 0 || memW != 1 || mvmW != 0 {
+		t.Fatalf("factor weights = %v/%v/%v, want 0/1/0 (explicit zero excludes)", cpuW, memW, mvmW)
+	}
+	// High CPU occupancy must not move the score when cpu_weight is 0.
+	lowMem := &node.Node{InsID: "a", QuotaCpu: 1000, QuotaMem: 1000, QuotaCpuUsage: 900, QuotaMemUsage: 100, MvmNum: 9, MaxMvmLimit: 10}
+	highMem := &node.Node{InsID: "b", QuotaCpu: 1000, QuotaMem: 1000, QuotaCpuUsage: 100, QuotaMemUsage: 900, MvmNum: 1, MaxMvmLimit: 10}
+	if binpackOccupancyScore(lowMem, cpuW, memW, mvmW) >= binpackOccupancyScore(highMem, cpuW, memW, mvmW) {
+		t.Fatalf("mem-only binpack should rank higher mem occupancy above higher cpu occupancy")
 	}
 }
 

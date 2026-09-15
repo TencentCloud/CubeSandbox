@@ -309,6 +309,12 @@ type SchedulerProfileConf struct {
 	// an explicit same-name profiles.<builtin>.allow_dropped_filters: true (or
 	// listing the dropped names again in the Profile filter list).
 	AllowDroppedFilters bool `yaml:"allow_dropped_filters"`
+	// AllowDroppedScorers mirrors AllowDroppedFilters for enable_scorers:
+	// default false fails config load when a Profile replace drops base scorers
+	// (for example an operator's external_http_score). Built-ins also default
+	// false — opt in via profiles.<name>.allow_dropped_scorers: true or keep
+	// dropped names in the Profile score list.
+	AllowDroppedScorers bool `yaml:"allow_dropped_scorers"`
 }
 
 // SchedulerProfileScoreConf holds the score fields a profile may override.
@@ -735,12 +741,27 @@ func redactExternalHTTPScoreEndpoint(raw string) string {
 //   - explicit 0 → disable Select
 //   - positive → that plugin weight
 //   - negative → rejected at config load
+//
+// CPUWeight / MemWeight / MvmWeight are likewise pointers:
+//   - nil / omitted → runtime default 1 for that dimension
+//   - explicit 0 → exclude that dimension from the occupancy blend
+//   - positive → that dimension weight
+//   - negative → rejected at config load
 type BinpackScore struct {
 	Weight    *float64 `yaml:"weight"`
-	CPUWeight float64  `yaml:"cpu_weight"`
-	MemWeight float64  `yaml:"mem_weight"`
-	MvmWeight float64  `yaml:"mvm_weight"`
+	CPUWeight *float64 `yaml:"cpu_weight"`
+	MemWeight *float64 `yaml:"mem_weight"`
+	MvmWeight *float64 `yaml:"mvm_weight"`
 	Disable   bool     `yaml:"disable"`
+}
+
+// BinpackDimWeight returns the effective occupancy-dimension weight.
+// nil → 1; explicit 0 excludes the dimension (caller skips when <= 0).
+func BinpackDimWeight(p *float64) float64 {
+	if p == nil {
+		return 1
+	}
+	return *p
 }
 
 // Float64Ptr returns a pointer to v for YAML/config tests and builtin injects.
@@ -1451,6 +1472,10 @@ func applySchedulerProfile(s *SchedulerConf) (builtin bool, err error) {
 				}
 				CubeLog.Warnf("scheduler %s profile %q replaced enable_scorers: previous=%v new=%v dropped=%v",
 					kind, s.Profile, previousScorers, s.Score.EnableScorers, droppedScorers)
+				if !profile.AllowDroppedScorers {
+					return false, fmt.Errorf("scheduler profile %q drops scorers %v from base enable_scorers; keep them in the Profile list or set allow_dropped_scorers: true",
+						s.Profile, droppedScorers)
+				}
 			}
 		}
 		if profile.Score.ResourceWeights != nil {
@@ -1502,9 +1527,9 @@ func applyBuiltinSchedulerProfileDefaults(s *SchedulerConf) {
 		if s.Score.ScorePluginConf.BinpackScore == nil {
 			s.Score.ScorePluginConf.BinpackScore = &BinpackScore{
 				Weight:    Float64Ptr(1),
-				CPUWeight: 1,
-				MemWeight: 1,
-				MvmWeight: 1,
+				CPUWeight: Float64Ptr(1),
+				MemWeight: Float64Ptr(1),
+				MvmWeight: Float64Ptr(1),
 			}
 		}
 	}
@@ -1528,14 +1553,24 @@ func validateBinpackScoreWeight(s *SchedulerConf) error {
 				w)
 		}
 	}
-	if math.IsNaN(cfg.CPUWeight) || math.IsInf(cfg.CPUWeight, 0) || cfg.CPUWeight < 0 {
-		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.cpu_weight must be a finite number >= 0, got %v", cfg.CPUWeight)
+	checkDim := func(name string, p *float64) error {
+		if p == nil {
+			return nil
+		}
+		w := *p
+		if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 {
+			return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.%s must be a finite number >= 0, got %v (0 excludes the dimension; omit for default 1)", name, w)
+		}
+		return nil
 	}
-	if math.IsNaN(cfg.MemWeight) || math.IsInf(cfg.MemWeight, 0) || cfg.MemWeight < 0 {
-		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.mem_weight must be a finite number >= 0, got %v", cfg.MemWeight)
+	if err := checkDim("cpu_weight", cfg.CPUWeight); err != nil {
+		return err
 	}
-	if math.IsNaN(cfg.MvmWeight) || math.IsInf(cfg.MvmWeight, 0) || cfg.MvmWeight < 0 {
-		return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.mvm_weight must be a finite number >= 0, got %v", cfg.MvmWeight)
+	if err := checkDim("mem_weight", cfg.MemWeight); err != nil {
+		return err
+	}
+	if err := checkDim("mvm_weight", cfg.MvmWeight); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1934,13 +1969,19 @@ func resolveSchedulerProfile(s *SchedulerConf) (SchedulerProfileConf, bool, erro
 		if profile, ok := s.Profiles[s.Profile]; ok {
 			// No filter/score sections means the entry does not contribute an
 			// overlay. Fall back to a same-name built-in when present so that
-			// profiles.<builtin>: {} or allow_dropped_filters-only cannot
+			// profiles.<builtin>: {} or allow_dropped_*-only cannot
 			// silently shadow the preset.
 			if profile.Filter == nil && profile.Score == nil {
 				if builtin, ok := builtinSchedulerProfiles()[s.Profile]; ok {
 					if profile.AllowDroppedFilters {
 						builtin.AllowDroppedFilters = true
-						CubeLog.Warnf("scheduler profiles[%q] has no filter/score overlay; applying built-in with allow_dropped_filters=true", s.Profile)
+					}
+					if profile.AllowDroppedScorers {
+						builtin.AllowDroppedScorers = true
+					}
+					if profile.AllowDroppedFilters || profile.AllowDroppedScorers {
+						CubeLog.Warnf("scheduler profiles[%q] has no filter/score overlay; applying built-in with allow_dropped_filters=%v allow_dropped_scorers=%v",
+							s.Profile, builtin.AllowDroppedFilters, builtin.AllowDroppedScorers)
 					} else {
 						CubeLog.Warnf("scheduler profiles[%q] is empty; falling back to built-in preset", s.Profile)
 					}

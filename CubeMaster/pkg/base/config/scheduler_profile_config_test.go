@@ -62,6 +62,7 @@ func TestPreHandleScheduler_ProfileAppliesFilterAndScore(t *testing.T) {
 			},
 			Profiles: map[string]SchedulerProfileConf{
 				"spread_like": {
+					AllowDroppedScorers: true,
 					Filter: &SchedulerFilterConf{
 						EnableFilters: []string{"cpu", "mem", "realtime_create_num"},
 					},
@@ -224,6 +225,7 @@ func TestPreHandleScheduler_ProfileScoreOnlyDoesNotClearFilter(t *testing.T) {
 			},
 			Profiles: map[string]SchedulerProfileConf{
 				"score_only": {
+					AllowDroppedScorers: true,
 					Score: &SchedulerProfileScoreConf{
 						EnableScorers:   []string{"binpack_score"},
 						ResourceWeights: map[string]float64{"cpu": 0.2, "mem": 0.8},
@@ -397,9 +399,9 @@ scheduler:
 		w, disabled := BinpackPluginWeight(plugin)
 		assert.Equal(t, 1.0, w)
 		assert.False(t, disabled)
-		assert.Equal(t, 2.0, plugin.CPUWeight)
-		assert.Equal(t, 3.0, plugin.MemWeight)
-		assert.Equal(t, 4.0, plugin.MvmWeight)
+		assert.Equal(t, 2.0, BinpackDimWeight(plugin.CPUWeight))
+		assert.Equal(t, 3.0, BinpackDimWeight(plugin.MemWeight))
+		assert.Equal(t, 4.0, BinpackDimWeight(plugin.MvmWeight))
 		assert.False(t, plugin.Disable)
 	}
 }
@@ -463,9 +465,9 @@ scheduler:
 					w, disabled := BinpackPluginWeight(binpack)
 					assert.Equal(t, 1.0, w)
 					assert.False(t, disabled)
-					assert.Equal(t, 1.0, binpack.CPUWeight)
-					assert.Equal(t, 1.0, binpack.MemWeight)
-					assert.Equal(t, 1.0, binpack.MvmWeight)
+					assert.Equal(t, 1.0, BinpackDimWeight(binpack.CPUWeight))
+					assert.Equal(t, 1.0, BinpackDimWeight(binpack.MemWeight))
+					assert.Equal(t, 1.0, BinpackDimWeight(binpack.MvmWeight))
 				}
 			}
 		})
@@ -586,6 +588,65 @@ scheduler:
 	assert.Contains(t, err.Error(), "drops filters")
 	assert.Contains(t, err.Error(), "disk")
 	assert.Contains(t, err.Error(), "allow_dropped_filters")
+}
+
+func TestInit_ProfileDroppingBaseScorersFailsClosed(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: drop_http
+  filter:
+    enable_filters:
+      - cpu
+      - mem
+  score:
+    enable_scorers:
+      - external_http_score
+    plugin_conf:
+      external_http_score:
+        endpoint: http://127.0.0.1:9/score
+        weight: 1
+  profiles:
+    drop_http:
+      score:
+        enable_scorers:
+          - binpack_score
+`
+	_, err := initConfigFromYAML(t, yamlBody)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "drops scorers")
+	assert.Contains(t, err.Error(), "external_http_score")
+	assert.Contains(t, err.Error(), "allow_dropped_scorers")
+}
+
+func TestInit_ProfileAllowDroppedScorersOptIn(t *testing.T) {
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: drop_http
+  filter:
+    enable_filters:
+      - cpu
+      - mem
+  score:
+    enable_scorers:
+      - external_http_score
+    plugin_conf:
+      external_http_score:
+        endpoint: http://127.0.0.1:9/score
+        weight: 1
+      binpack_score:
+        weight: 1
+  profiles:
+    drop_http:
+      allow_dropped_scorers: true
+      score:
+        enable_scorers:
+          - binpack_score
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"binpack_score"}, got.Scheduler.Score.EnableScorers)
 }
 
 func TestInit_ProfileAllowDroppedFiltersOptIn(t *testing.T) {
