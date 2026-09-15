@@ -78,20 +78,13 @@ func binpackScoreRuntime() (weight float64, disable bool) {
 
 func binpackScoreFactorWeights() (cpuW, memW, mvmW float64) {
 	cfg := getBinpackScoreConfig()
-	cpuW, memW, mvmW = 1, 1, 1
 	if cfg == nil {
-		return cpuW, memW, mvmW
+		return 1, 1, 1
 	}
-	if cfg.CPUWeight > 0 {
-		cpuW = cfg.CPUWeight
-	}
-	if cfg.MemWeight > 0 {
-		memW = cfg.MemWeight
-	}
-	if cfg.MvmWeight > 0 {
-		mvmW = cfg.MvmWeight
-	}
-	return cpuW, memW, mvmW
+	// Pointer dims: omit → 1; explicit 0 → exclude (occupancy helper skips <= 0).
+	return config.BinpackDimWeight(cfg.CPUWeight),
+		config.BinpackDimWeight(cfg.MemWeight),
+		config.BinpackDimWeight(cfg.MvmWeight)
 }
 
 func getBinpackScoreConfig() *config.BinpackScore {

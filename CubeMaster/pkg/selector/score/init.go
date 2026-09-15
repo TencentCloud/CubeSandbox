@@ -50,17 +50,15 @@ func NewSelector(ctx context.Context) []Selector {
 		}
 		if registration.factors != nil {
 			factors := registration.factors(conf.Score.ScorePluginConf)
+			// Construct even when factors/weights are currently ineffective so a
+			// later hot-reload that adds enable_weight_factors or raises a
+			// resource_weights entry can activate Select without restart
+			// (Select already no-ops at totalWeight==0). Warn so operators
+			// notice an initially inert scorer.
 			if len(factors) == 0 {
-				// Missing plugin_conf is rejected at config.Init for listed
-				// factor scorers; remaining skips are empty/ineffective factor
-				// lists on the empty-profile path. Errorf so operators notice
-				// an unscored scheduler instead of a single Warn line.
-				log.G(ctx).Errorf("scheduler score selector %s skipped: missing plugin_conf or empty enable_weight_factors (fix plugin_conf to activate)", name)
-				continue
-			}
-			if !hasEffectiveFactorWeight(conf.Score, factors) {
-				log.G(ctx).Errorf("scheduler score selector %s skipped: no positive resource weight for its enabled factors", name)
-				continue
+				log.G(ctx).Warnf("scheduler score selector %s constructed but currently inert: missing plugin_conf or empty enable_weight_factors (fix plugin_conf / factors to activate; hot-reload applies without restart)", name)
+			} else if !hasEffectiveFactorWeight(conf.Score, factors) {
+				log.G(ctx).Warnf("scheduler score selector %s constructed but currently inert: no positive resource weight for its enabled factors (hot-reload of resource_weights applies without restart)", name)
 			}
 		}
 		if registration.requiresPluginConf != nil && !registration.requiresPluginConf(conf.Score.ScorePluginConf) {

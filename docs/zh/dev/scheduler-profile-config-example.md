@@ -48,7 +48,8 @@ updated: 2026-09-10
 | `scheduler.profiles` | 用户自定义命名覆盖层。与内置同名的用户 key **完全覆盖**该内置。 |
 | `scheduler.profiles.<name>.filter.enable_filters` | 当 Profile 提供非 nil 列表时，**替换** `scheduler.filter.enable_filters`。丢掉基础列表中已有名称时配置加载失败，除非该 Profile 设置 `allow_dropped_filters: true`。 |
 | `scheduler.profiles.<name>.allow_dropped_filters` | Profile 的显式 opt-in：允许 `enable_filters` 替换丢掉基础准入过滤器（如 `disk`、`thirtparty`）。用户 Profile **与**内置预设默认均为 `false`。因此在更长基础列表上选用内置时，需显式写同名 `profiles.<builtin>.allow_dropped_filters: true`（或在 Profile 列表中保留被丢掉的名称）。同名条目若只写该标志（无 filter/score）会回退到内置并带上该标志。 |
-| `scheduler.profiles.<name>.score.enable_scorers` | 当 Profile 提供非 nil 列表时，**替换** `scheduler.score.enable_scorers`。 |
+| `scheduler.profiles.<name>.score.enable_scorers` | 当 Profile 提供非 nil 列表时，**替换** `scheduler.score.enable_scorers`。丢掉基础列表中已有名称时配置加载失败，除非该 Profile 设置 `allow_dropped_scorers: true`。 |
+| `scheduler.profiles.<name>.allow_dropped_scorers` | Profile 的显式 opt-in：允许 `enable_scorers` 替换丢掉基础评分器（如运维的 `external_http_score`）。用户 Profile **与**内置预设默认均为 `false`——与 filter 同一安全模型。 |
 | `scheduler.profiles.<name>.score.resource_weights` | 合并覆盖到 `scheduler.score.resource_weights`；Profile 同名键胜出，无关基础键保留。这些是因子权重，不是插件权重。 |
 | `scheduler.score.plugin_conf.*` | 各评分器参数。**不是** Profile 覆盖字段。 |
 
@@ -79,8 +80,9 @@ updated: 2026-09-10
    （冲突键以 Profile 为准；无关基础键保留）。
 
 因子型 `real_time_weighted_average`、`multi_factor_weighted_average` 与
-`image_score` 仅在其某个 `enable_weight_factors` 对应正的 `resource_weights`
-值时才会被构造。纯插件型 `binpack_score` 与 `external_http_score` 不以该 map
+`image_score` 在空 Profile 下即使当前因子权重无效也会被构造（Warn），以便后续热更新
+`resource_weights` / `enable_weight_factors` 无需重启即可生效；Select 在有效权重为 0
+时为空操作。纯插件型 `binpack_score` 与 `external_http_score` 不以该 map
 作为构造门禁，也不需要伪造 `resource_weights` 块。遗留的 `affinity_score`
 保持空 Profile 兼容：无 Profile 且 `resource_weights: null`（省略）时不构造；有
 Profile 或非 nil `resource_weights` map 时正常构造。
@@ -119,7 +121,12 @@ filter/score 名称，会在调度器运行前于 `preHandleScheduler` 中失败
 `template_locality_first` / `binpack_utilization` 时必须显式 opt-in（或在
 Profile 列表中保留被丢掉的名称）。它们仍会换成短列表——若你此前依赖 `disk` /
 `thirtparty`，请审查生效的 `enable_filters`。同名 `profiles.<builtin>` 若只写
-`allow_dropped_filters`（无 filter/score）会回退到内置，而不是应用空覆盖。
+`allow_dropped_filters` / `allow_dropped_scorers`（无 filter/score）会回退到内置，而不是应用空覆盖。
+
+**Score 列表替换（业务评分器风险）。** `score.enable_scorers` 同样是整体替换：丢掉
+基础评分器（例如运维的 `external_http_score`）时**配置加载失败**，除非设置
+`allow_dropped_scorers: true` 或在 Profile 列表中保留该名称。内置预设同样默认
+`false`。
 
 **`weight: 0` 禁用评分器。** 对四个遗留 Score 插件
 （`real_time_weighted_average`、`multi_factor_weighted_average`、
@@ -137,11 +144,10 @@ affinity 评分器或 `external_http_score` 但省略整个 `plugin_conf.<scorer
 配置加载也会失败（空 Profile 同样适用）。`binpack_score` 可省略整个块并保留运行时
 默认；非空 Profile 下内置在指针仍为 `nil` 时可能注入默认。
 
-**`binpack_score` 占用权重。** `cpu_weight` / `mem_weight` / `mvm_weight` 取值
-`<= 0` 时，运行时回退为默认 `1`。**不能**通过把某维因子权重设为 `0` 来排除该维。
-只有插件级 `weight: 0`（或 `disable: true`）才会禁用该评分器。负的 binpack
-子权重与负的插件 `weight` 在配置加载时失败。不要把 `binpack_score` 与
-剩余容量 / spread 评分器放进同一 `enable_scorers`：占用率极性与
+**`binpack_score` 占用权重。** `cpu_weight` / `mem_weight` / `mvm_weight` 与插件
+`weight` 一样是 `*float64`：省略 → 该维默认 `1`；显式 `0` **排除**该维；负值在配置
+加载时失败。只有插件级 `weight: 0`（或 `disable: true`）才会禁用整个评分器。不要把
+`binpack_score` 与剩余容量 / spread 评分器放进同一 `enable_scorers`：占用率极性与
 `real_time_weighted_average` / `multi_factor_weighted_average` 相反，加权后会抵消。
 内置 `binpack_utilization` 只启用 `binpack_score`。
 
@@ -150,8 +156,8 @@ affinity 评分器或 `external_http_score` 但省略整个 `plugin_conf.<scorer
 `multi_factor_weighted_average`、`image_score`）都要求非空的
 `enable_weight_factors`，且这些因子中至少有一个正的 `resource_weights` 项。空或省略的
 因子列表，或全部为零/缺失的因子权重，会在调度器运行前于 `preHandleScheduler`
-中失败关闭。空 Profile 下，已有但无效的因子列表会在选择器构造时以 Error 日志
-跳过，而不是让 Init 失败。
+中失败关闭。空 Profile 下，已有但无效的因子列表仍会构造评分器（Warn），以便后续热更新
+`resource_weights` / 因子列表无需重启即可激活；有效权重为 0 时 Select 为空操作。
 
 **MVM 占用容量。** `binpack_score`（以及共享同一 helper 的其他评分器）使用
 `localcache.MaxMvmLimit(n)` 计算 MVM 占用——该 helper 是权威的按节点容量回退
@@ -293,7 +299,7 @@ scheduler:
 `plugin_conf.binpack_score`，内置 `binpack_utilization` 会注入默认值；用户 Profile
 也可省略该块并保留相同的运行时默认（`BinpackPluginWeight(nil)` → weight 1）。
 显式 `weight: 0` 禁用 Select。负权重一律在配置加载时拒绝。
-`cpu_weight` / `mem_weight` / `mvm_weight` 取值 `<= 0` 回退为 `1`（不能靠 `0` 排除某维）。
+`cpu_weight` / `mem_weight` / `mvm_weight` 为指针：省略 → 默认 `1`；显式 `0` 排除该维。
 MVM 占用使用 `localcache.MaxMvmLimit`，而非单独的原始 `node.MaxMvmLimit`。
 
 无效写法（不会覆盖 `plugin_conf`；Go 类型无此字段）：
@@ -373,10 +379,11 @@ CubeAPI/Cubelet 创建路径、真实创建延迟或生产性能。
 - 将运行时 `scheduler.profiles` 等同于模拟器 `weightsForProfile`。
 - 把 Profile 覆盖当作对 `PreFilter -> Filter -> Score -> PostScore` 的改动。
 - 把本文当作 HTTP 线协议 / fail-open 契约（请改看调度配置指南）。
-- 假设 `cpu_weight: 0` / `mem_weight: 0` / `mvm_weight: 0` 能排除 binpack 某维
-  （它们会回退为 `1`）。
+- 假设省略 `cpu_weight` / `mem_weight` / `mvm_weight` 表示「排除」
+  （省略 → 默认 `1`；要用显式 `0` 才能排除 binpack 某维）。
 - 期望在不重启 CubeMaster 的情况下，Profile / `enable_filters` / `enable_scorers`
-  切换会重建活跃选择器集合。
+  切换会重建活跃选择器集合（选择器集合成员仍是重启作用域；`resource_weights`
+  与插件参数可热更新）。
 
 ## 验证
 

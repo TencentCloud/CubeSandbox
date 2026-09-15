@@ -82,7 +82,7 @@ scheduler:
 | `score.enable_scorers` | Enables scoring plugins. Multi-node deployments usually enable `real_time_weighted_average`. Listing a factor/affinity scorer or `external_http_score` without its matching `score.plugin_conf.<name>` block **fails config load** (empty Profile included; `binpack_score` may omit the block and use defaults). With a non-empty `scheduler.profile`, factor scorers also need known `enable_weight_factors` and a positive factor weight or config load fails. |
 | `score.resource_weights` | Factor weights for occupancy-style scorers (`mvm_num`, create concurrency, CPU/memory quota usage, …). Higher weight means stronger influence; factors must also appear under the scorer's `plugin_conf.<name>.enable_weight_factors` when that scorer uses factors. Profile overlays merge same keys over this map (Profile wins). Factor names must match the allowlist (`quota_cpu_usage`, `cpu_util`, … — not typos such as `cpu_usage`); under a non-empty Profile an unrecognized factor in `enable_weight_factors` fails config load. Grep existing configs for drifted names before selecting a Profile. Plugin-only scorers such as `external_http_score` / `binpack_score` do **not** require this map as a loader gate. |
 | `score.plugin_conf.external_http_score` | Optional HTTP sidecar scorer. See [External HTTP score plugin](#external-http-score-plugin). |
-| `score.plugin_conf.binpack_score` | Optional plugin-only scorer that prefers fuller nodes. Omitting the block while listing `binpack_score` in `enable_scorers` enables safe defaults (plugin weight 1, equal CPU/mem/MVM). Plugin `weight` is a pointer: omit → default 1; explicit `0` disables Select; negatives are rejected at config load. Sub-weights `cpu_weight`/`mem_weight`/`mvm_weight` remain plain floats: `<= 0` fall back to default `1` (cannot exclude a dimension via `0`); negatives are rejected at config load. |
+| `score.plugin_conf.binpack_score` | Optional plugin-only scorer that prefers fuller nodes. Omitting the block while listing `binpack_score` in `enable_scorers` enables safe defaults (plugin weight 1, equal CPU/mem/MVM). Plugin `weight` is a pointer: omit → default 1; explicit `0` disables Select; negatives are rejected at config load. Sub-weights `cpu_weight`/`mem_weight`/`mvm_weight` are also pointers: omit → default 1 for that dimension; explicit `0` excludes the dimension; negatives are rejected at config load. |
 | `profile` / `profiles` | Optional runtime Profile overlay. Empty `profile` leaves Filter/Score unchanged. Built-ins: `balanced_spread`, `template_locality_first`, `binpack_utilization`. User same-name keys override built-ins. Runtime Profiles are selector overlays, not offline simulator models. See [Scheduler Profile Configuration Example](../dev/scheduler-profile-config-example.md). |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | Global or per-instance-type single-node MVM limits. Cubelet-reported `max_mvm_num` also participates in the effective limit. |
 | `disk_usage_max_percent` | Threshold used by the `disk` filter and backoff path to avoid placing more sandboxes on nearly full machines. |
@@ -106,8 +106,10 @@ override a built-in entirely.
 **Warning:** when a Profile provides `filter.enable_filters`, that list
 **replaces** the base `scheduler.filter.enable_filters` (no merge). Profiles
 that drop base filters fail config load unless `allow_dropped_filters: true`.
-Built-in presets use short filter lists and do **not** pre-set that opt-in —
-on a stock four-filter config, select a built-in with an explicit same-name
+The same applies to `score.enable_scorers` / `allow_dropped_scorers` (for example
+dropping an operator's `external_http_score`). Built-in presets use short
+filter/score lists and do **not** pre-set those opt-ins — on a stock
+four-filter config, select a built-in with an explicit same-name
 `profiles.<builtin>.allow_dropped_filters: true` (or keep dropped names in the
 Profile list). Still audit effective filters if you relied on `disk` /
 `thirtparty`.

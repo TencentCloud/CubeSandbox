@@ -82,7 +82,7 @@ scheduler:
 | `score.enable_scorers` | 启用评分器。多机部署通常启用 `real_time_weighted_average`。列出因子型 / affinity 评分器或 `external_http_score` 但缺少匹配的 `score.plugin_conf.<name>` 块时**配置加载失败**（空 Profile 同样适用；`binpack_score` 可省略该块并使用默认）。当设置了非空 `scheduler.profile` 时，因子型评分器还需已知的 `enable_weight_factors` 与至少一个正的 `resource_weights`，否则配置加载失败。 |
 | `score.resource_weights` | 占用率类评分器的因子权重（MVM 数、创建并发、CPU/内存 quota 使用率等）。权重越高影响越大；使用因子的评分器还需把对应因子列在 `plugin_conf.<name>.enable_weight_factors` 中。Profile 展开时同名键覆盖基础权重。因子名必须在允许列表内（如 `quota_cpu_usage`、`cpu_util`，**不是** `cpu_usage` 这类笔误）；非空 Profile 下 `enable_weight_factors` 出现未知名会配置加载失败。启用 Profile 前请先 grep 现有配置中的漂移因子名。插件型评分器（如 `external_http_score` / `binpack_score`）**不**再把该映射当作加载器前置条件。 |
 | `score.plugin_conf.external_http_score` | 可选的 HTTP sidecar 评分器。见 [External HTTP score 插件](#external-http-score-插件)。 |
-| `score.plugin_conf.binpack_score` | 可选的插件型评分器，偏好更满的节点。在 `enable_scorers` 中列出但省略该块时，会启用安全默认（插件权重 1，CPU/内存/MVM 等权）。插件级 `weight` 为指针：省略 → 默认 1；显式 `0` 禁用 Select；负值在配置加载阶段被拒绝。子权重 `cpu_weight`/`mem_weight`/`mvm_weight` 仍是普通 float：`<= 0` 回退为默认 `1`（不能用 0 排除某一维）；负值在配置加载阶段被拒绝。 |
+| `score.plugin_conf.binpack_score` | 可选的插件型评分器，偏好更满的节点。在 `enable_scorers` 中列出但省略该块时，会启用安全默认（插件权重 1，CPU/内存/MVM 等权）。插件级 `weight` 为指针：省略 → 默认 1；显式 `0` 禁用 Select；负值在配置加载阶段被拒绝。子权重 `cpu_weight`/`mem_weight`/`mvm_weight` 同样是指针：省略 → 该维默认 1；显式 `0` 排除该维；负值在配置加载阶段被拒绝。 |
 | `profile` / `profiles` | 可选的运行时 Profile 覆盖层。空 `profile` 不改变现有 Filter/Score。内置名：`balanced_spread`、`template_locality_first`、`binpack_utilization`。用户同名 key 完全覆盖内置。运行时 Profile 是选择器覆盖，不是离线模拟器模型。详见 [Scheduler Profile 配置示例](../dev/scheduler-profile-config-example.md)。 |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | 全局或按实例类型限制单节点 MVM 数。Cubelet 上报的 `max_mvm_num` 也会参与实际上限计算。 |
 | `disk_usage_max_percent` | `disk` filter 和 backoff 路径使用的磁盘水位阈值，用于避免继续调度到快满的机器。 |
@@ -102,8 +102,9 @@ CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 
 **注意：** 当 Profile 提供 `filter.enable_filters` 时，该列表会**整体替换**基础
 `scheduler.filter.enable_filters`（不会合并）。Profile 丢掉基础过滤器会配置加载
-失败，除非设置 `allow_dropped_filters: true`。内置预设使用短过滤器列表，且**不会**
-预置该 opt-in——在现成四过滤器配置上选用内置时，需显式写同名
+失败，除非设置 `allow_dropped_filters: true`。`score.enable_scorers` /
+`allow_dropped_scorers` 同理（例如丢掉运维的 `external_http_score`）。内置预设使用
+短过滤器/评分器列表，且**不会**预置这些 opt-in——在现成四过滤器配置上选用内置时，需显式写同名
 `profiles.<builtin>.allow_dropped_filters: true`（或在 Profile 列表中保留被丢掉的
 名称）。若你依赖 `disk` / `thirtparty`，仍请审查生效列表。
 

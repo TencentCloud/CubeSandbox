@@ -206,7 +206,9 @@ scheduler:
 	if binpack == nil {
 		t.Fatal("binpack_utilization did not inject BinpackScore defaults")
 	}
-	if binpack.CPUWeight != 1 || binpack.MemWeight != 1 || binpack.MvmWeight != 1 {
+	if config.BinpackDimWeight(binpack.CPUWeight) != 1 ||
+		config.BinpackDimWeight(binpack.MemWeight) != 1 ||
+		config.BinpackDimWeight(binpack.MvmWeight) != 1 {
 		t.Fatalf("binpack default weights = cpu:%v mem:%v mvm:%v, want 1/1/1",
 			binpack.CPUWeight, binpack.MemWeight, binpack.MvmWeight)
 	}
