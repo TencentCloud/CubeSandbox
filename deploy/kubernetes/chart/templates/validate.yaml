@@ -421,6 +421,10 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- fail "cubeOps.persistence was removed; warehouse blobs are stored in S3 or cubeOps.store.fs.persistence. Remove cubeOps.persistence from your values (including values-tke.yaml)." }}
 {{- end }}
 {{- if eq (include "cube.opsStoreBackend" .) "fs" }}
+{{- $opsRoot := include "cube.opsFSRoot" . }}
+{{- if or (eq $opsRoot "/data/CubeMaster/storage") (hasPrefix "/data/CubeMaster/storage/" $opsRoot) }}
+{{- fail "cubeOps.store.fs.root must not be under /data/CubeMaster/storage (CubeMaster artifact volume); warehouse _state would collide with template artifacts" }}
+{{- end }}
 {{- $pub := include "cube.opsFSPublicURL" . | lower }}
 {{- if or (contains "127.0.0.1" $pub) (contains "localhost" $pub) (contains "[::1]" $pub) }}
 {{- fail "cubeOps.store.backend=fs requires cubeOps.store.fs.publicURL to be reachable from compute nodes (not 127.0.0.1/localhost). For in-cluster nodes leave it empty to use the CubeOps Service DNS; for nodes outside the cluster set an internal CLB URL" }}

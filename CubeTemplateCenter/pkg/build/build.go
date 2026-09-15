@@ -343,7 +343,7 @@ func runBuildLocked(
 	artifactURL := ""
 	uploaded := false
 	if s3CfgEnabled && s3Client != nil {
-		if _, err := s3Client.Upload(ctx, artifactID, result.Ext4Path); err != nil {
+		if _, err := s3Client.Upload(ctx, artifactID, result.Ext4Path, result.SHA256); err != nil {
 			if s3Client.BackendName() == "fs" {
 				reportFailed(templatecenter.JobPhaseBuildingExt4, fmt.Sprintf("upload artifact to fs store: %v", err))
 				return fmt.Errorf("upload artifact to fs store: %w", err)

@@ -129,7 +129,7 @@ func (a *Adapter) EnsureBucket(ctx context.Context) error {
 }
 
 func (a *Adapter) EnsureLifecycle(ctx context.Context) error {
-	return a.GC(ctx)
+	return a.Store.Prepare(ctx)
 }
 
 func (a *Adapter) GC(ctx context.Context) error {

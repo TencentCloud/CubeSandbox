@@ -142,6 +142,9 @@ func initWarehouseBlobs(ctx context.Context, cfg *config.Config) warehouse.BlobS
 		if err := blobs.EnsureLifecycle(lctx); err != nil {
 			slog.Warn("warehouse bucket lifecycle", "error", err)
 		}
+		if err := blobs.GC(lctx); err != nil {
+			slog.Warn("warehouse blobstore gc", "error", err)
+		}
 		return blobs
 	default:
 		slog.Error("component warehouse disabled: unsupported store.backend", "backend", cfg.Store.Backend)

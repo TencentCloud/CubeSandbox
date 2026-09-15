@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/tcclient"
 )
@@ -103,6 +104,7 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 
 	type artifactSnapshot struct {
 		artifactID  string
+		objectKey   string
 		status      string
 		artifactURL string
 		ext4Path    string
@@ -129,6 +131,7 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 		}
 		snapshot = artifactSnapshot{
 			artifactID:  artifactID,
+			objectKey:   strings.TrimSpace(artifact.ObjectKey),
 			status:      strings.TrimSpace(artifact.Status),
 			artifactURL: strings.TrimSpace(artifact.ArtifactURL),
 			ext4Path:    strings.TrimSpace(artifact.Ext4Path),
@@ -141,7 +144,10 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 
 	// Already S3-backed: verify object existence, then clean local residue.
 	if snapshot.artifactURL != "" {
-		exists, statErr := statArtifactObjectInS3(ctx, snapshot.artifactID)
+		exists, statErr := statArtifactObjectInS3(ctx, &models.RootfsArtifact{
+			ArtifactID: snapshot.artifactID,
+			ObjectKey:  snapshot.objectKey,
+		})
 		if statErr != nil {
 			return nil, fmt.Errorf("check s3 object for artifact %s: %w", snapshot.artifactID, statErr)
 		}
@@ -203,7 +209,10 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 	uploadedToS3 := false
 	targetExt4Path := ext4Path
 	if err := uploadArtifactFileToS3(ctx, snapshot.artifactID, ext4Path); err == nil {
-		presignedURL, presignErr := presignArtifactGetURL(ctx, snapshot.artifactID)
+		presignedURL, presignErr := presignArtifactGetURL(ctx, &models.RootfsArtifact{
+			ArtifactID: snapshot.artifactID,
+			ObjectKey:  snapshot.objectKey,
+		})
 		if presignErr != nil {
 			return nil, fmt.Errorf("presign migrated artifact %s: %w", snapshot.artifactID, presignErr)
 		}

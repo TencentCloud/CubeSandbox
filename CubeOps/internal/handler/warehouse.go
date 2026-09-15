@@ -81,6 +81,7 @@ func (h *WarehouseHandler) RegisterInternal(r *gin.RouterGroup) {
 	r.GET("/blob", h.GetBlob)
 	// Redeem path must match warehouse.ObjectMountPath (group is /internal/warehouse).
 	r.GET("/object", h.GetSignedObject)
+	r.HEAD("/object", h.GetSignedObject)
 	r.GET("/jobs", h.ListNodeJobs)
 	r.POST("/jobs/:id/ack", h.AckJob)
 	r.PUT("/inventory", h.PutInventory)

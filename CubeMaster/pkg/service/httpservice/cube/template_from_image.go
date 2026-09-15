@@ -260,7 +260,7 @@ func downloadTemplateArtifactGinHandler(c *gin.Context) {
 	// redirected to the object store. Nodes therefore only need reachability to
 	// CubeMaster's public address; Master/TC absorb any S3 endpoint topology.
 	if handled, ok := proxyS3Artifact(c); handled {
-		rt.RetCode = artifactProxyRetCode(ok)
+		rt.RetCode = artifactProxyRetCode(c, ok)
 		return
 	}
 
@@ -279,7 +279,7 @@ func headTemplateArtifactGinHandler(c *gin.Context) {
 	// HEAD follows the same S3 proxy-vs-local split as GET so servability probes
 	// exercise the exact node-facing download path.
 	if handled, ok := proxyS3Artifact(c); handled {
-		rt.RetCode = artifactProxyRetCode(ok)
+		rt.RetCode = artifactProxyRetCode(c, ok)
 		return
 	}
 
@@ -293,9 +293,12 @@ func headTemplateArtifactGinHandler(c *gin.Context) {
 
 // artifactProxyRetCode keeps the request log honest: an upstream proxy failure
 // wrote a 502 to the client and must not be recorded as a success.
-func artifactProxyRetCode(ok bool) int64 {
+func artifactProxyRetCode(c *gin.Context, ok bool) int64 {
 	if ok {
 		return int64(errorcode.ErrorCode_Success)
+	}
+	if c != nil && c.Writer.Status() == http.StatusNotFound {
+		return int64(errorcode.ErrorCode_NotFound)
 	}
 	return int64(errorcode.ErrorCode_MasterInternalError)
 }

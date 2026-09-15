@@ -273,8 +273,8 @@ func (s *store) Put(ctx context.Context, key string, r io.Reader, opts blobstore
 	}
 	putOpts := minio.PutObjectOptions{ContentType: ct, PartSize: PutPartSize}
 	wantSum := strings.TrimPrefix(opts.SHA256, "sha256:")
-	if wantSum != "" {
-		putOpts.UserMetadata = map[string]string{metaSHA256Key: wantSum}
+	if md := sha256UserMetadata(opts.SHA256); md != nil {
+		putOpts.UserMetadata = md
 	}
 	// If-None-Match on multipart PutObject is weak: minio-go only applies
 	// the condition header to the complete call, and some S3 implementations
@@ -307,23 +307,18 @@ func (s *store) Put(ctx context.Context, key string, r io.Reader, opts blobstore
 	if wantSum != "" && !strings.EqualFold(wantSum, sum) {
 		return blobstore.ObjectInfo{}, fmt.Errorf("blobstore/s3: sha256 mismatch for %q", full)
 	}
-	if wantSum == "" {
-		s.attachSHA256(putCtx, full, sum)
-	}
+	// SHA256 UserMetadata is only set on the original PutObject when the
+	// caller supplies a digest. CopyObject-to-attach after an empty digest
+	// used to rewrite the whole object and is intentionally not done.
 	return blobstore.ObjectInfo{Key: key, Size: cr.n, SHA256: sum, ETag: sum, ContentType: ct, LastModified: time.Now()}, nil
 }
 
-func (s *store) attachSHA256(ctx context.Context, full, sum string) {
-	src := minio.CopySrcOptions{Bucket: s.bucket, Object: full}
-	dst := minio.CopyDestOptions{
-		Bucket:          s.bucket,
-		Object:          full,
-		UserMetadata:    map[string]string{metaSHA256Key: sum},
-		ReplaceMetadata: true,
+func sha256UserMetadata(wantSum string) map[string]string {
+	wantSum = strings.TrimPrefix(wantSum, "sha256:")
+	if wantSum == "" {
+		return nil
 	}
-	if _, err := s.client.CopyObject(ctx, dst, src); err != nil {
-		slog.Warn("blobstore/s3: attach sha256 metadata", "key", full, "error", err)
-	}
+	return map[string]string{metaSHA256Key: wantSum}
 }
 
 func (s *store) Get(ctx context.Context, key string, opts blobstore.GetOptions) (*blobstore.Object, error) {

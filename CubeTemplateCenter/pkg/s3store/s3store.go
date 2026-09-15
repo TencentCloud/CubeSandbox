@@ -116,7 +116,8 @@ func (c *Client) FullObjectKey(artifactID string) string {
 }
 
 // Upload uploads a local ext4 file and returns the object key.
-func (c *Client) Upload(ctx context.Context, artifactID, localPath string) (string, error) {
+// sha256 is optional; when set it is written as UserMetadata on the original PUT.
+func (c *Client) Upload(ctx context.Context, artifactID, localPath, sha256 string) (string, error) {
 	key := c.ObjectKey(artifactID)
 	f, err := os.Open(localPath)
 	if err != nil {
@@ -130,6 +131,7 @@ func (c *Client) Upload(ctx context.Context, artifactID, localPath string) (stri
 	_, err = c.store.Put(ctx, key, f, blobstore.PutOptions{
 		ContentType: "application/octet-stream",
 		Size:        st.Size(),
+		SHA256:      sha256,
 	})
 	if err != nil {
 		return "", fmt.Errorf("put object %s: %w", key, err)

@@ -45,6 +45,7 @@ type BlobStore interface {
 	AbortMultipartUpload(ctx context.Context, key, uploadID string) error
 	EnsureBucket(ctx context.Context) error
 	EnsureLifecycle(ctx context.Context) error
+	GC(ctx context.Context) error
 }
 
 // ErrNotExist means the object (or bucket) is missing.

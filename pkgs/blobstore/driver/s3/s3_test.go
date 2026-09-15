@@ -78,3 +78,20 @@ func TestIsLifecycleUnsupported(t *testing.T) {
 		t.Fatal("transport error must not be treated as unsupported lifecycle")
 	}
 }
+
+func TestSHA256UserMetadataSkipsCopy(t *testing.T) {
+	if sha256UserMetadata("") != nil {
+		t.Fatal("empty digest must not set metadata (and must not CopyObject)")
+	}
+	if sha256UserMetadata("sha256:") != nil {
+		t.Fatal("empty sha256: prefix must not set metadata")
+	}
+	got := sha256UserMetadata("sha256:deadbeef")
+	if got[metaSHA256Key] != "deadbeef" {
+		t.Fatalf("got %#v", got)
+	}
+	got = sha256UserMetadata("cafe")
+	if got[metaSHA256Key] != "cafe" {
+		t.Fatalf("got %#v", got)
+	}
+}

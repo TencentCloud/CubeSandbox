@@ -179,6 +179,11 @@ if re.search(r"name: CUBE_OPS_S3_ACCESS_KEY_ID\n\s+valueFrom:\n\s+secretKeyRef:\
 print("ok: existingSecret + endpoint points secretKeyRef at that Secret")
 PY
 
+expect_fail ops-fs-artifact-root "$TMP_DIR/ops-art-root.err" \
+  'must not be under /data/CubeMaster/storage' \
+  --set cubeOps.store.backend=fs \
+  --set-string cubeOps.store.fs.root=/data/CubeMaster/storage/ops
+
 expect_fail ops-fs-replicas-emptydir "$TMP_DIR/fs-empty.err" \
   'emptyDir and RWO are per-replica' \
   --set cubeOps.store.backend=fs \

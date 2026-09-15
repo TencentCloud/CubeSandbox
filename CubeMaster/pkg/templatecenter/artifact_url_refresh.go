@@ -162,17 +162,20 @@ func artifactStoreColumns(artifactID string) (backend, objectKey string) {
 
 // presignArtifactGetURL is the single signing seam, indirected so tests can
 // substitute a fake without a live object store.
-var presignArtifactGetURL = func(ctx context.Context, artifactID string) (string, error) {
+var presignArtifactGetURL = func(ctx context.Context, artifact *models.RootfsArtifact) (string, error) {
+	if artifact == nil {
+		return "", errS3PresignNotConfigured
+	}
 	st := sharedArtifactStore()
 	if st == nil {
 		return "", errS3PresignNotConfigured
 	}
-	u, err := st.store.SignedGetURL(ctx, artifactUserKey(artifactID), s3PresignExpiry)
+	u, err := st.store.SignedGetURL(ctx, artifactStoreKey(artifact), s3PresignExpiry)
 	if err != nil {
 		if errors.Is(err, blobstore.ErrUnsupported) {
 			return "", nil
 		}
-		return "", fmt.Errorf("presign get %s: %w", artifactID, err)
+		return "", fmt.Errorf("presign get %s: %w", artifact.ArtifactID, err)
 	}
 	if blobstore.IsObjectLocator(u) {
 		return "", nil
@@ -182,19 +185,22 @@ var presignArtifactGetURL = func(ctx context.Context, artifactID string) (string
 
 var errS3PresignNotConfigured = fmt.Errorf("s3 presign not configured on cubemaster")
 
-// statArtifactObjectInS3 checks whether the S3 object for artifactID exists.
+// statArtifactObjectInS3 checks whether the object for this artifact row exists.
 // Returns (false, nil) only for a definitive "not found".
-var statArtifactObjectInS3 = func(ctx context.Context, artifactID string) (bool, error) {
+var statArtifactObjectInS3 = func(ctx context.Context, artifact *models.RootfsArtifact) (bool, error) {
+	if artifact == nil {
+		return false, errS3PresignNotConfigured
+	}
 	st := sharedArtifactStore()
 	if st == nil {
 		return false, errS3PresignNotConfigured
 	}
-	_, err := st.store.Stat(ctx, artifactUserKey(artifactID))
+	_, err := st.store.Stat(ctx, artifactStoreKey(artifact))
 	if err != nil {
 		if blobstore.IsNotExist(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("stat s3 object for artifact %s: %w", artifactID, err)
+		return false, fmt.Errorf("stat s3 object for artifact %s: %w", artifact.ArtifactID, err)
 	}
 	return true, nil
 }
@@ -252,11 +258,41 @@ func OpenArtifactObject(ctx context.Context, artifact *models.RootfsArtifact) (*
 }
 
 func artifactStoreKey(artifact *models.RootfsArtifact) string {
-	key := strings.TrimSpace(artifact.ObjectKey)
-	if key == "" {
-		return artifactUserKey(artifact.ArtifactID)
+	if artifact == nil {
+		return ""
 	}
-	return blobstore.BaseName(key)
+	return artifactStoreKeyWithPrefix(artifact, artifactStorePrefix())
+}
+
+func artifactStorePrefix() string {
+	return strings.Trim(configenv.EnvOr(configenv.EnvS3ArtifactPrefix), "/")
+}
+
+func artifactStoreKeyWithPrefix(artifact *models.RootfsArtifact, prefix string) string {
+	fallback := artifactUserKey(artifact.ArtifactID)
+	stored := strings.TrimSpace(artifact.ObjectKey)
+	if stored == "" {
+		return fallback
+	}
+	key := userKeyFromStoredObjectKey(stored, prefix)
+	if blobstore.ValidateKey(key) != nil {
+		return fallback
+	}
+	return key
+}
+
+func userKeyFromStoredObjectKey(stored, prefix string) string {
+	stored = strings.Trim(strings.TrimSpace(stored), "/")
+	prefix = strings.Trim(prefix, "/")
+	if prefix != "" {
+		if stored == prefix {
+			return ""
+		}
+		if p := prefix + "/"; strings.HasPrefix(stored, p) {
+			return strings.TrimPrefix(stored, p)
+		}
+	}
+	return stored
 }
 
 // artifactDownloadURL resolves the download URL to hand out for an artifact
@@ -282,7 +318,7 @@ func artifactDownloadURL(ctx context.Context, artifact *models.RootfsArtifact) s
 	if blobstore.IsObjectLocator(stored) {
 		return stored
 	}
-	fresh, err := presignArtifactGetURL(ctx, artifact.ArtifactID)
+	fresh, err := presignArtifactGetURL(ctx, artifact)
 	if err != nil {
 		if err != errS3PresignNotConfigured {
 			log.G(ctx).Warnf("re-sign artifact url fail, using stored url: artifact_id=%s err=%v", artifact.ArtifactID, err)

@@ -13,7 +13,7 @@ import (
 )
 
 // stubPresign swaps the signing seam and restores it on cleanup.
-func stubPresign(t *testing.T, fn func(ctx context.Context, artifactID string) (string, error)) {
+func stubPresign(t *testing.T, fn func(ctx context.Context, artifact *models.RootfsArtifact) (string, error)) {
 	t.Helper()
 	old := presignArtifactGetURL
 	presignArtifactGetURL = fn
@@ -39,7 +39,7 @@ func TestArtifactUsesObjectStore(t *testing.T) {
 }
 
 func TestArtifactDownloadURLLocalArtifact(t *testing.T) {
-	stubPresign(t, func(context.Context, string) (string, error) {
+	stubPresign(t, func(context.Context, *models.RootfsArtifact) (string, error) {
 		t.Fatal("presign must not be called for a local-disk artifact")
 		return "", nil
 	})
@@ -53,7 +53,7 @@ func TestArtifactDownloadURLLocalArtifact(t *testing.T) {
 }
 
 func TestArtifactDownloadURLKeepsLocator(t *testing.T) {
-	stubPresign(t, func(context.Context, string) (string, error) {
+	stubPresign(t, func(context.Context, *models.RootfsArtifact) (string, error) {
 		t.Fatal("presign must not be called for a locator")
 		return "", nil
 	})
@@ -67,8 +67,8 @@ func TestArtifactDownloadURLKeepsLocator(t *testing.T) {
 // An S3-backed artifact gets a FRESH presigned URL at the point of use, never
 // the aging one stored at build time.
 func TestArtifactDownloadURLResigns(t *testing.T) {
-	stubPresign(t, func(_ context.Context, artifactID string) (string, error) {
-		return "https://minio:9000/bucket/" + artifactID + ".ext4?X-Amz-Signature=fresh", nil
+	stubPresign(t, func(_ context.Context, artifact *models.RootfsArtifact) (string, error) {
+		return "https://minio:9000/bucket/" + artifact.ArtifactID + ".ext4?X-Amz-Signature=fresh", nil
 	})
 	stored := "https://minio:9000/bucket/rfs-9.ext4?X-Amz-Signature=stale"
 	got := artifactDownloadURL(context.Background(), &models.RootfsArtifact{ArtifactID: "rfs-9", ArtifactURL: stored})
@@ -83,10 +83,39 @@ func TestArtifactDownloadURLResigns(t *testing.T) {
 func TestArtifactDownloadURLFallsBackToStored(t *testing.T) {
 	stored := "https://minio:9000/bucket/rfs-9.ext4?X-Amz-Signature=stale"
 	for _, err := range []error{errS3PresignNotConfigured, errors.New("boom")} {
-		stubPresign(t, func(context.Context, string) (string, error) { return "", err })
+		stubPresign(t, func(context.Context, *models.RootfsArtifact) (string, error) { return "", err })
 		got := artifactDownloadURL(context.Background(), &models.RootfsArtifact{ArtifactID: "rfs-9", ArtifactURL: stored})
 		if got != stored {
 			t.Fatalf("err=%v: got %q, want stored url %q", err, got, stored)
 		}
+	}
+}
+
+func TestArtifactStoreKeyStripsConfiguredPrefix(t *testing.T) {
+	artifact := &models.RootfsArtifact{ArtifactID: "rfs-1", ObjectKey: "template-artifacts/rfs-1.ext4"}
+	got := artifactStoreKeyWithPrefix(artifact, "template-artifacts")
+	if got != "rfs-1.ext4" {
+		t.Fatalf("prefixed object_key: got %q want rfs-1.ext4", got)
+	}
+	artifact.ObjectKey = "rfs-1.ext4"
+	got = artifactStoreKeyWithPrefix(artifact, "template-artifacts")
+	if got != "rfs-1.ext4" {
+		t.Fatalf("user-key object_key: got %q", got)
+	}
+	artifact.ObjectKey = "old-prefix/nested/rfs-1.ext4"
+	got = artifactStoreKeyWithPrefix(artifact, "template-artifacts")
+	if got != "old-prefix/nested/rfs-1.ext4" {
+		t.Fatalf("foreign prefix must be kept as user key, got %q", got)
+	}
+	artifact.ObjectKey = ""
+	got = artifactStoreKeyWithPrefix(artifact, "template-artifacts")
+	if got != "rfs-1.ext4" {
+		t.Fatalf("empty object_key: got %q", got)
+	}
+	if artifactStoreKey(nil) != "" {
+		t.Fatal("nil artifact")
+	}
+	if userKeyFromStoredObjectKey("/template-artifacts/rfs-1.ext4", "template-artifacts") != "rfs-1.ext4" {
+		t.Fatal("leading slash on stored key")
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"gorm.io/gorm"
 )
 
@@ -214,5 +215,21 @@ func TestProxyS3ArtifactUpstreamFailureReportedAsFailure(t *testing.T) {
 	}
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502, got %d", w.Code)
+	}
+}
+
+func TestArtifactProxyRetCodeNotFound(t *testing.T) {
+	c, _ := newArtifactProxyContext(http.MethodGet, "artifact_id=rfs-x")
+	c.AbortWithStatus(http.StatusNotFound)
+	if got := artifactProxyRetCode(c, false); got != int64(errorcode.ErrorCode_NotFound) {
+		t.Fatalf("404 proxy retcode=%d want NotFound", got)
+	}
+	c2, _ := newArtifactProxyContext(http.MethodGet, "artifact_id=rfs-x")
+	c2.AbortWithStatus(http.StatusBadGateway)
+	if got := artifactProxyRetCode(c2, false); got != int64(errorcode.ErrorCode_MasterInternalError) {
+		t.Fatalf("502 proxy retcode=%d want InternalError", got)
+	}
+	if got := artifactProxyRetCode(c2, true); got != int64(errorcode.ErrorCode_Success) {
+		t.Fatalf("ok proxy retcode=%d want Success", got)
 	}
 }

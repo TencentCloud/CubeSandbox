@@ -226,10 +226,8 @@ func (im *Importer) maybeGC(ctx context.Context) {
 	if time.Since(im.lastGC) < every {
 		return
 	}
-	if gc, ok := im.blobs.(interface{ GC(context.Context) error }); ok {
-		if err := gc.GC(ctx); err != nil {
-			slog.Warn("warehouse blobstore gc", "error", err)
-		}
+	if err := im.blobs.GC(ctx); err != nil {
+		slog.Warn("warehouse blobstore gc", "error", err)
 	}
 	im.lastGC = time.Now()
 }
