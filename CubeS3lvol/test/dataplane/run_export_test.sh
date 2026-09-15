@@ -3899,6 +3899,7 @@ XR_SNAP_C="${XR_VOL_C}-snap"
 XR_DST_A="${DST_VOL}-xr-a"
 XR_DST_B="${DST_VOL}-xr-b"
 XR_DST_C="${DST_VOL}-xr-c"
+XR_IO_LEN_MB=64
 
 XR_SETUP_OK=1
 i=0
@@ -3913,8 +3914,9 @@ for vol in "${XR_VOL_A}" "${XR_VOL_B}" "${XR_VOL_C}"; do
 done
 [ "${XR_SETUP_OK}" = "1" ] || exit 1
 
-# One region per volume, at distinct offsets. 8 MiB each: enough clusters to
-# make the walk do real work, not so much that the step drags.
+# One region per volume, at distinct offsets. 64 MiB keeps the three destination
+# decouples running/queued long enough to exercise unload's lifetime guard below,
+# while remaining small beside the 1 GiB volumes.
 i=0
 for vol in "${XR_VOL_A}" "${XR_VOL_B}" "${XR_VOL_C}"; do
 	i=$((i + 1))
@@ -3927,7 +3929,7 @@ for vol in "${XR_VOL_A}" "${XR_VOL_B}" "${XR_VOL_C}"; do
 		exit 1
 	fi
 	write_pattern_at "${XR_DEV}" "${WORKDIR}/XR${i}.bin" \
-		"$((MULTI_DATA_OFF_MB + i * IO_LEN_MB))" "${IO_LEN_MB}"
+		"$((MULTI_DATA_OFF_MB + i * XR_IO_LEN_MB))" "${XR_IO_LEN_MB}"
 	eval "XR_DEV_${i}=\"${XR_DEV}\""
 done
 
@@ -4018,6 +4020,7 @@ fi
 DST_CREATED=1
 
 XR_DATA_OK=1
+XR_UNLOAD_GUARD_TESTED=0
 i=0
 for pair in "${XR_DST_A}:${XR_U_A}:1" "${XR_DST_B}:${XR_U_B}:2" "${XR_DST_C}:${XR_U_C}:3"; do
 	dst="$(printf '%s' "${pair}" | cut -d: -f1)"
@@ -4034,6 +4037,27 @@ for pair in "${XR_DST_A}:${XR_U_A}:1" "${XR_DST_B}:${XR_U_B}:2" "${XR_DST_C}:${X
 		continue
 	fi
 
+	# Check immediately after the third import, before reading 64 MiB from each
+	# volume gives the background decouples time to finish. At least the last
+	# one must still be running or queued here.
+	if [ "${i}" -eq 3 ]; then
+		XR_DECOUPLE_N="$(raw_rpc rcow_get_decouple 2>/dev/null | python3 -c \
+			'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)"
+		if [ "${XR_DECOUPLE_N}" -eq 0 ]; then
+			fail "all three decouples escaped the unload-during-decouple window"
+			exit 1
+		fi
+		if raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
+				>/dev/null 2>"${WORKDIR}/xr_unload_busy.err"; then
+			fail "rcow_unload_lvstore succeeded with ${XR_DECOUPLE_N} decouple(s) pending"
+			exit 1
+		else
+			pass "unload was refused while destination decouples were pending"
+			XR_UNLOAD_GUARD_TESTED=1
+		fi
+		check_target "refused unload during step 11j decouple" || exit 1
+	fi
+
 	BEFORE_XR_NS="$(ls /dev/nvme*n* 2>/dev/null | sort || true)"
 	${RPC} nvmf_subsystem_add_ns "${NQN}" "${DST_LVS}/${dst}" \
 		>/dev/null 2>&1 || { fail "nvmf_subsystem_add_ns (${dst})"; exit 1; }
@@ -4046,7 +4070,7 @@ for pair in "${XR_DST_A}:${XR_U_A}:1" "${XR_DST_B}:${XR_U_B}:2" "${XR_DST_C}:${X
 
 	want="$(md5sum "${WORKDIR}/XR${idx}.bin" | cut -d' ' -f1)"
 	got="$(read_md5_at "${XR_DST_DEV}" "${WORKDIR}/xr_got_${i}.bin" \
-		"$((MULTI_DATA_OFF_MB + idx * IO_LEN_MB))" "${IO_LEN_MB}")"
+		"$((MULTI_DATA_OFF_MB + idx * XR_IO_LEN_MB))" "${XR_IO_LEN_MB}")"
 	if [ "${got}" = "${want}" ]; then
 		pass "${dst} holds every byte of its own export"
 	else
@@ -4061,13 +4085,41 @@ else
 	exit 1
 fi
 
-# Cleanup: imported volumes, then the source volumes and snapshots.
+[ "${XR_UNLOAD_GUARD_TESTED}" = "1" ] || {
+	fail "unload-during-decouple guard was not exercised"
+	exit 1
+}
+
+# Cleanup: imported volumes, then the source volumes and snapshots. A running
+# volume's delete is deferred; queued entries are safely dequeued.
 for vol in "${XR_DST_A}" "${XR_DST_B}" "${XR_DST_C}"; do
 	XR_NSID="$(nsid_of "${DST_LVS}/${vol}")"
 	[ -n "${XR_NSID}" ] && ${RPC} nvmf_subsystem_remove_ns "${NQN}" \
 		"${XR_NSID}" >/dev/null 2>&1 || true
 	raw_rpc rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${vol}")" \
 		>/dev/null 2>&1 || fail "rcow_delete_lvol (${vol})"
+done
+
+if ! wait_for_decouple; then
+	fail "destination decouples did not finish after unload was refused"
+	exit 1
+fi
+python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --retry-pending \
+	>/dev/null 2>"${WORKDIR}/xr_retry_pending.err" || true
+for vol in "${XR_DST_A}" "${XR_DST_B}" "${XR_DST_C}"; do
+	XR_GONE=0
+	for _ in $(seq 90); do
+		if ! ${RPC} bdev_get_bdevs -b "${DST_LVS}/${vol}" \
+				>/dev/null 2>/dev/null; then
+			XR_GONE=1
+			break
+		fi
+		sleep 1
+	done
+	if [ "${XR_GONE}" != "1" ]; then
+		fail "${vol} remained after its decouple/delete completed"
+		exit 1
+	fi
 done
 raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
 	>/dev/null 2>&1 || fail "rcow_unload_lvstore (destination, after step 11j)"

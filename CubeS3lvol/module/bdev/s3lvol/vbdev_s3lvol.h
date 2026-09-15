@@ -1115,6 +1115,11 @@ int s3lvol_lvol_import(struct s3lvol_lvstore *lvs,
 int s3lvol_lvol_decouple(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 		       spdk_lvol_op_complete cb_fn, void *cb_arg);
 
+/* True while a decouple belonging to this lvstore is running or queued. Both
+ * states retain raw lvol/lvstore pointers, so the lvstore must not be unloaded
+ * until they have left their respective lists. */
+bool s3lvol_lvstore_decouple_pending(const struct s3lvol_lvstore *lvs);
+
 /* Drop a volume from the decouple queue because it is being deleted.
  *
  * A queued volume does not hold action_in_progress -- it may wait minutes behind

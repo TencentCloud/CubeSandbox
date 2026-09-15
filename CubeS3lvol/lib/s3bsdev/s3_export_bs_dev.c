@@ -180,6 +180,13 @@ struct s3_export_io {
 	uint32_t                    num_pending;
 	int                         status;
 
+	/* One device-lifetime reference belongs to every blobstore read, from
+	 * admission until its completion callback returns. A whole-object fill has
+	 * a separate reference for its GET/prefetch lifetime: that one can end
+	 * after merely queueing a cross-thread waiter, while blobstore still owns
+	 * the read and may still be using the external parent. */
+	bool                        lifetime_ref;
+
 	/* Stops the first sub-read from completing the whole I/O while the split
 	 * loop is still adding to it. */
 	bool                        submit_done;
@@ -223,6 +230,20 @@ struct s3_export_chunk_io {
 
 static void export_io_device_unregistered(void *io_device);
 static void export_chunk_read_done(void *cb_arg, uint64_t bytes_read, int status);
+
+static bool
+export_async_get_live(struct s3_export_dev *dev)
+{
+	bool live;
+
+	pthread_mutex_lock(&dev->fill_lock);
+	live = !dev->destroying;
+	if (live) {
+		dev->async_refs++;
+	}
+	pthread_mutex_unlock(&dev->fill_lock);
+	return live;
+}
 
 static void
 export_async_put(struct s3_export_dev *dev)
@@ -311,8 +332,10 @@ export_io_drop(struct s3_export_io *io)
 static void
 export_io_complete(struct s3_export_io *io)
 {
+	struct s3_export_dev *dev = io->dev;
 	struct spdk_bs_dev_cb_args *cb_args = io->cb_args;
 	int status = io->status;
+	bool lifetime_ref = io->lifetime_ref;
 
 	/* A chunk was missing and nothing worse went wrong: hold the I/O and go
 	 * looking for a newer manifest instead of failing it. Checked here rather
@@ -338,6 +361,12 @@ export_io_complete(struct s3_export_io *io)
 
 	export_io_drop(io);
 	cb_args->cb_fn(cb_args->channel, cb_args->cb_arg, status);
+	if (lifetime_ref) {
+		/* The callback may synchronously hot-unplug this parent. Keep dev
+		 * alive until it has returned, then let the last read finish
+		 * unregistering it. */
+		export_async_put(dev);
+	}
 }
 
 static void
@@ -1098,12 +1127,21 @@ export_read_internal(struct spdk_bs_dev *bs_dev, struct spdk_io_channel *channel
 		return;
 	}
 
+	/* A retry transfers the reference held by the original I/O. New reads are
+	 * admitted under the same lock destroy() uses to enter draining state. */
+	if (!is_retry && !export_async_get_live(dev)) {
+		cb_args->cb_fn(cb_args->channel, cb_args->cb_arg, -EIO);
+		return;
+	}
+
 	io = calloc(1, sizeof(*io));
 	if (!io) {
 		cb_args->cb_fn(cb_args->channel, cb_args->cb_arg, -ENOMEM);
+		export_async_put(dev);
 		return;
 	}
 	io->dev = dev;
+	io->lifetime_ref = true;
 	io->m = __atomic_load_n(&dev->m, __ATOMIC_ACQUIRE);
 	s3_export_manifest_ref(io->m);
 	io->cb_args = cb_args;

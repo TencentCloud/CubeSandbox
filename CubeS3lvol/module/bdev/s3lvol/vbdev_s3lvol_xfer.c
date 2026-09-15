@@ -3755,6 +3755,25 @@ s3lvol_lvol_decouple_pending(const struct spdk_lvol *lvol)
 	return decouple_queued_find(lvol) != NULL || decouple_find(lvol) != NULL;
 }
 
+bool
+s3lvol_lvstore_decouple_pending(const struct s3lvol_lvstore *lvs)
+{
+	struct s3lvol_decouple *d;
+	struct decouple_queued *q;
+
+	TAILQ_FOREACH(d, &g_decouples, link) {
+		if (d->lvs == lvs) {
+			return true;
+		}
+	}
+	TAILQ_FOREACH(q, &g_decouple_queue, link) {
+		if (q->lvs == lvs) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /* Start materialising now. The caller has already established that this volume is
  * an esnap clone, not already running or queued, and that nothing else is
  * decoupling the same export. It may be read-only: a snapshot is what a reference

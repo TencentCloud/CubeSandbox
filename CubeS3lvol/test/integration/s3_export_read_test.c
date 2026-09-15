@@ -42,6 +42,7 @@ static uint32_t g_nheads;
 static int g_pass, g_fail;
 static uint32_t g_token_callbacks;
 static int g_fail_next_range;
+static uint32_t g_client_puts;
 
 static void
 token_granted(void *cb_arg)
@@ -109,6 +110,7 @@ void
 s3_client_put(struct s3_client *client)
 {
 	(void)client;
+	g_client_puts++;
 }
 
 static void
@@ -266,7 +268,7 @@ main(void)
 	struct read_result missing_a, missing_b, post_swap;
 	struct read_result seq_a, seq_b, prefetch_hit;
 	struct read_result direct, direct_join, joined_slice;
-	struct read_result destroy_seq_a, destroy_seq_b;
+	struct read_result destroy_seq_a, destroy_seq_b, destroy_cross;
 	struct read_result oom;
 	struct read_result many[65];
 	char *replacement_json = NULL;
@@ -525,7 +527,7 @@ main(void)
 	check_true("exact fallback copied the requested bytes",
 		   buffer_has_pattern(&oom, 8 * 1024, oom.len));
 
-	printf("\n[12] destroy waits for in-flight prefetch GETs\n");
+	printf("\n[12] destroy waits for blobstore reads and prefetch GETs\n");
 	first = g_ngets;
 	submit_read(dev, &destroy_seq_a, 240ULL * CHUNK_SIZE, 4 * 1024);
 	check_u64("destroy case jump submits only demand", g_ngets, first + 1);
@@ -535,8 +537,15 @@ main(void)
 	submit_read(dev, &destroy_seq_b, 241ULL * CHUNK_SIZE, 4 * 1024);
 	check_u64("destroy case starts demand plus eight prefetches",
 		  g_ngets - first, 9);
+	spdk_set_thread(thread2);
+	submit_read(dev, &destroy_cross, 241ULL * CHUNK_SIZE + 4 * 1024,
+		    4 * 1024);
+	spdk_set_thread(thread);
+	check_u64("cross-thread read joins destroy-case demand",
+		  g_ngets - first, 9);
 	complete_get(first, 0, CHUNK_SIZE);
-	check_true("destroy-case demand completes", destroy_seq_b.done);
+	check_true("owner completes while cross-thread read is queued",
+		   destroy_seq_b.done && !destroy_cross.done);
 	dev->destroy(dev);
 	for (i = 1; i < 9; i++) {
 		complete_get(first + i, 0, CHUNK_SIZE);
@@ -544,6 +553,20 @@ main(void)
 	for (i = 0; i < 100; i++) {
 		spdk_thread_poll(thread, 0, 0);
 	}
+	check_u64("device stays alive for queued blobstore completion",
+		  g_client_puts, 0);
+	spdk_set_thread(thread2);
+	spdk_thread_poll(thread2, 0, 0);
+	check_true("queued blobstore read completes on its thread",
+		   destroy_cross.done && destroy_cross.status == 0);
+	for (i = 0; i < 100; i++) {
+		spdk_set_thread(thread);
+		spdk_thread_poll(thread, 0, 0);
+		spdk_set_thread(thread2);
+		spdk_thread_poll(thread2, 0, 0);
+	}
+	spdk_set_thread(thread);
+	check_u64("device is released after the last read callback", g_client_puts, 1);
 	dev = NULL;
 
 	free(a.buf);
@@ -565,6 +588,7 @@ main(void)
 	free(oom.buf);
 	free(destroy_seq_a.buf);
 	free(destroy_seq_b.buf);
+	free(destroy_cross.buf);
 	for (i = 0; i < 65; i++) {
 		free(many[i].buf);
 	}
