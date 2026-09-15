@@ -2,32 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Tencent. All rights reserved.
 #
-# prepare_image.sh — Build the ready-to-use CubeSandbox dev VM image.
+# create_vm.sh — Create the OpenCloudOS 9 development VM.
 #
 # Pipeline (high-level):
-#   1. Download the OpenCloudOS base qcow2 (if not cached) and expand it to
-#      TARGET_SIZE (default 100G) so guest / has room for nested VMs.
+#   1. Download the OpenCloudOS 9 base qcow2 (if not cached) and expand it to
+#      TARGET_SIZE (default 100G) so the guest has room for your own installs.
 #   2. Boot the VM via run_vm.sh and wait for SSH on 127.0.0.1:10022.
-#   3. Upload and run a series of in-guest provisioners under dev-env/internal/
-#      (grow rootfs, setup PATH, SELinux tweaks, install autostart unit,
-#      install login banner).
-#   4. Power the VM off cleanly, leaving a "golden" image ready for run_vm.sh.
+#   3. Upload and run the in-guest provisioners under dev-env/internal/
+#      (grow rootfs, SELinux tweaks).
+#   4. Power the VM off cleanly, leaving a ready-to-use disk image.
 #
-# The autostart systemd unit is installed but NOT enabled here; enable it
-# later via dev-env/cube-autostart.sh.
+# Everything else is left to you: run ./run_vm.sh, log in with ./login.sh and
+# install whatever you need inside the guest.
 #
 # Usage:
-#   ./prepare_image.sh
+#   ./create_vm.sh
 #
 # Common environment variables:
 #   WORK_DIR                   Working dir for downloads / disk (default: dev-env/.workdir)
 #   IMAGE_URL                  Base qcow2 URL (OpenCloudOS 9 cloud image by default)
+#   IMAGE_PATH                 Full path to the VM disk image (defaults to WORK_DIR/IMAGE_NAME)
 #   TARGET_SIZE                Resized disk size (default: 100G)
-#   AUTO_BOOT                  Auto-boot VM during provisioning (default: 1)
-#   AUTO_RESIZE_IN_GUEST       Run growpart/resize2fs inside guest (default: 1)
-#   SETUP_AUTOSTART            Install cube-sandbox-oneclick.service unit (default: 1)
 #   VM_USER, VM_PASSWORD       Guest credentials (default: opencloudos / opencloudos)
-#   SSH_HOST, SSH_PORT         Host-side forward target (default: 127.0.0.1:10022)
+#   SSH_PORT                   Host-side forward target (default: 10022)
+#   FORCE_KILL_ON_EXIT         On failure, kill a stuck QEMU instead of leaving it (default: 0)
 
 set -euo pipefail
 
@@ -36,15 +34,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="${WORK_DIR:-${SCRIPT_DIR}/.workdir}"
 IMAGE_URL="${IMAGE_URL:-https://mirrors.tencent.com/opencloudos/9.6/images/qcow2/${TARGET_ARCH}/20260514.2/OpenCloudOS-GenericCloud-9.6-20260514.2.${TARGET_ARCH}.qcow2}"
 TARGET_SIZE="${TARGET_SIZE:-100G}"
-AUTO_BOOT="${AUTO_BOOT:-1}"
-AUTO_RESIZE_IN_GUEST="${AUTO_RESIZE_IN_GUEST:-1}"
 VM_USER="${VM_USER:-opencloudos}"
 VM_PASSWORD="${VM_PASSWORD:-opencloudos}"
 SSH_PORT="${SSH_PORT:-10022}"
 SSH_WAIT_TIMEOUT_SECS="${SSH_WAIT_TIMEOUT_SECS:-180}"
 SHUTDOWN_WAIT_TIMEOUT_SECS="${SHUTDOWN_WAIT_TIMEOUT_SECS:-120}"
 FORCE_KILL_ON_EXIT="${FORCE_KILL_ON_EXIT:-0}"
-SETUP_AUTOSTART="${SETUP_AUTOSTART:-1}"
 
 IMAGE_NAME="$(basename "${IMAGE_URL}")"
 IMAGE_PATH="${IMAGE_PATH:-${WORK_DIR}/${IMAGE_NAME}}"
@@ -52,9 +47,6 @@ RUN_VM_SCRIPT="${SCRIPT_DIR}/run_vm.sh"
 INTERNAL_DIR="${SCRIPT_DIR}/internal"
 GROW_SCRIPT="${INTERNAL_DIR}/grow_rootfs.sh"
 SELINUX_SCRIPT="${INTERNAL_DIR}/setup_selinux.sh"
-PATH_SCRIPT="${INTERNAL_DIR}/setup_path.sh"
-BANNER_SCRIPT="${INTERNAL_DIR}/setup_banner.sh"
-AUTOSTART_SCRIPT="${INTERNAL_DIR}/setup_autostart.sh"
 QEMU_PIDFILE="${WORK_DIR}/qemu.pid"
 QEMU_SERIAL_LOG="${WORK_DIR}/qemu-serial.log"
 ASKPASS_SCRIPT="${WORK_DIR}/.ssh-askpass.sh"
@@ -66,7 +58,7 @@ SSH_COMMON_OPTS=(
   -o ConnectTimeout=5
 )
 
-LOG_TAG="prepare_image"
+LOG_TAG="create_vm"
 
 if [[ -t 1 && -t 2 ]]; then
   LOG_COLOR_RESET=$'\033[0m'
@@ -151,7 +143,7 @@ EOF
 }
 
 ssh_with_password() {
-  DISPLAY="${DISPLAY:-prepare-image}" \
+  DISPLAY="${DISPLAY:-create-vm}" \
   SSH_ASKPASS="${ASKPASS_SCRIPT}" \
   SSH_ASKPASS_REQUIRE=force \
   setsid -w "$@"
@@ -163,7 +155,7 @@ wait_for_ssh() {
 
   while (( SECONDS < deadline )); do
     if [[ -f "${QEMU_SERIAL_LOG}" ]] \
-      && rg -q "Failed to start .*sshd\\.service|FAILED.*sshd\\.service" \
+      && grep -qE "Failed to start .*sshd\.service|FAILED.*sshd\.service" \
         "${QEMU_SERIAL_LOG}"; then
       log_error "Guest sshd.service failed to start, SSH will never be ready."
       log_error "Please inspect serial log: ${QEMU_SERIAL_LOG}"
@@ -231,7 +223,7 @@ cleanup_vm() {
 need_cmd curl
 need_cmd qemu-img
 need_cmd qemu-system-${TARGET_ARCH}
-need_cmd rg
+need_cmd grep
 need_cmd python3
 need_cmd ssh
 need_cmd scp
@@ -259,13 +251,6 @@ fi
 log_success "Image preparation finished"
 log_info "  Image path: ${IMAGE_PATH}"
 
-if [[ "${AUTO_BOOT}" != "1" || "${AUTO_RESIZE_IN_GUEST}" != "1" ]]; then
-  log_info "Next steps:"
-  log_info "  1. ./run_vm.sh"
-  log_info "  2. scp -P ${SSH_PORT} internal/grow_rootfs.sh ${VM_USER}@127.0.0.1:~/ && ssh -p ${SSH_PORT} ${VM_USER}@127.0.0.1 'bash ~/grow_rootfs.sh'"
-  exit 0
-fi
-
 if [[ ! -x "${RUN_VM_SCRIPT}" ]]; then
   log_error "Boot helper script is missing or not executable: ${RUN_VM_SCRIPT}"
   exit 1
@@ -276,18 +261,6 @@ if [[ ! -f "${GROW_SCRIPT}" ]]; then
 fi
 if [[ ! -f "${SELINUX_SCRIPT}" ]]; then
   log_error "Guest SELinux script is missing: ${SELINUX_SCRIPT}"
-  exit 1
-fi
-if [[ ! -f "${PATH_SCRIPT}" ]]; then
-  log_error "Guest PATH script is missing: ${PATH_SCRIPT}"
-  exit 1
-fi
-if [[ ! -f "${BANNER_SCRIPT}" ]]; then
-  log_error "Guest banner script is missing: ${BANNER_SCRIPT}"
-  exit 1
-fi
-if [[ "${SETUP_AUTOSTART}" == "1" && ! -f "${AUTOSTART_SCRIPT}" ]]; then
-  log_error "Guest autostart script is missing: ${AUTOSTART_SCRIPT}"
   exit 1
 fi
 
@@ -333,43 +306,6 @@ ssh_with_password ssh "${SSH_COMMON_OPTS[@]}" -p "${SSH_PORT}" \
   'chmod +x ~/setup_selinux.sh && ~/setup_selinux.sh'
 log_success "Guest SELinux is now permissive (persistent)"
 
-log_info "Uploading setup_path.sh to the guest..."
-ssh_with_password scp "${SSH_COMMON_OPTS[@]}" -P "${SSH_PORT}" \
-  "${PATH_SCRIPT}" "${VM_USER}@127.0.0.1:~/setup_path.sh"
-log_success "setup_path.sh uploaded"
-
-log_info "Adding /usr/local/{sbin,bin} to login PATH and sudo secure_path..."
-ssh_with_password ssh "${SSH_COMMON_OPTS[@]}" -p "${SSH_PORT}" \
-  "${VM_USER}@127.0.0.1" \
-  'chmod +x ~/setup_path.sh && ~/setup_path.sh'
-log_success "Guest PATH setup finished"
-
-log_info "Uploading setup_banner.sh to the guest..."
-ssh_with_password scp "${SSH_COMMON_OPTS[@]}" -P "${SSH_PORT}" \
-  "${BANNER_SCRIPT}" "${VM_USER}@127.0.0.1:~/setup_banner.sh"
-log_success "setup_banner.sh uploaded"
-
-log_info "Installing welcome banner inside the guest..."
-ssh_with_password ssh "${SSH_COMMON_OPTS[@]}" -p "${SSH_PORT}" \
-  "${VM_USER}@127.0.0.1" \
-  'chmod +x ~/setup_banner.sh && ~/setup_banner.sh'
-log_success "Welcome banner installed inside the guest"
-
-if [[ "${SETUP_AUTOSTART}" == "1" ]]; then
-  log_info "Uploading setup_autostart.sh to the guest..."
-  ssh_with_password scp "${SSH_COMMON_OPTS[@]}" -P "${SSH_PORT}" \
-    "${AUTOSTART_SCRIPT}" "${VM_USER}@127.0.0.1:~/setup_autostart.sh"
-  log_success "setup_autostart.sh uploaded"
-
-  log_info "Installing cube-sandbox-oneclick.service unit (not enabled)..."
-  ssh_with_password ssh "${SSH_COMMON_OPTS[@]}" -p "${SSH_PORT}" \
-    "${VM_USER}@127.0.0.1" \
-    'chmod +x ~/setup_autostart.sh && ~/setup_autostart.sh'
-  log_success "Autostart unit installed inside the guest (enable it later via dev-env/cube-autostart.sh)"
-else
-  log_info "SETUP_AUTOSTART=0, skipping autostart unit installation"
-fi
-
 log_info "Requesting graceful shutdown from the guest..."
 ssh_with_password ssh "${SSH_COMMON_OPTS[@]}" -p "${SSH_PORT}" \
   "${VM_USER}@127.0.0.1" \
@@ -386,12 +322,7 @@ log_success "  1. Image downloaded"
 log_success "  2. qcow2 resized to ${TARGET_SIZE}"
 log_success "  3. VM booted and guest root filesystem expanded"
 log_success "  4. Guest SELinux set to permissive"
-log_success "  5. /usr/local/{sbin,bin} added to login PATH and sudo secure_path"
-log_success "  6. Welcome banner installed inside the guest"
-if [[ "${SETUP_AUTOSTART}" == "1" ]]; then
-  log_success "  7. cube-sandbox-oneclick.service unit installed (not enabled)"
-  log_success "  8. VM powered off cleanly"
-else
-  log_success "  7. VM powered off cleanly"
-fi
-log_info "You can now run ./run_vm.sh to start the dev VM"
+log_success "  5. VM powered off cleanly"
+log_info "Next steps:"
+log_info "  1. ./run_vm.sh    # boot the dev VM (terminal A)"
+log_info "  2. ./login.sh     # log in from another terminal (terminal B)"

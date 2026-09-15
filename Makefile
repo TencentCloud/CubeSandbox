@@ -189,7 +189,6 @@ help:
 	@printf "  web-fmt       Format WebUI sources\n"
 	@printf "  fmt           Format all component directories\n"
 	@printf "  web-api-sync  Export OpenAPI and regenerate WebUI schema types\n"
-	@printf "  web-sync-dev-env Build and deploy WebUI into dev-env VM\n"
 	@printf "\nNotes:\n"
 	@printf "  - builder-shell forwards ~/.git-credentials when present\n"
 	@printf "  - builder-run reuses the same mounted workspace and persisted HOME\n"
@@ -617,10 +616,6 @@ web-fmt:
 .PHONY: web-api-sync
 web-api-sync:
 	cd "$(WEB_DIR)" && npm run api:sync
-
-.PHONY: web-sync-dev-env
-web-sync-dev-env:
-	"$(ROOT_DIR)/dev-env/internal/sync_web_to_vm.sh"
 
 # Run make fmt in each component directory that has a fmt target.
 # Components without formattable code (e.g. CubeProxy) are skipped.
