@@ -198,6 +198,7 @@ struct s3_ctx {
 	uint32_t                 chunk_size;
 	uint32_t                 chunk_shift;
 	uint64_t                 capacity_bytes;
+	uint32_t                 cache_hot_bufs;
 
 	/* The thread that owns this bs_dev; used to verify I/O stays on it. */
 	struct spdk_thread      *owner_thread;
@@ -369,12 +370,13 @@ struct s3_ctx {
  *     (spdk/lib/blob/request.c:66, per-channel req_mem in blobstore.c:3667), so
  *     completing on the wrong thread corrupts that list.
  *
- * The exception is a one-chunk read while the overlay is empty. Chunk-map,
+ * The exception is a one-chunk read of a chunk with no overlay. Chunk-map,
  * cache and destination-fill metadata synchronize that path internally. A
  * cache hit completes on the submitting thread; a miss may join or start a
- * whole-object GET there. Fill completion visits the owner to copy coalesced
- * waiters. Cache populate is skipped when every waiter already holds the whole
- * object; an owned bounce is populated after those waiters finish.
+ * whole-object GET there. A successful fill with only off-owner waiters
+ * publishes RAM and completes those waiters on the GET thread; disk writeback
+ * is a message to the cache owner. Owner still finishes fills that have to
+ * merge the overlay or retry through s3_bs_io_submit.
  */
 struct s3_bs_io {
 	struct s3_ctx                   *ctx;
@@ -743,7 +745,7 @@ s3_dest_fill_pick_direct_waiter(struct s3_dest_fill *fill)
 }
 
 static void
-s3_dest_fill_finish_owner(void *arg)
+s3_dest_fill_finish(void *arg)
 {
 	struct s3_dest_fill *fill = arg;
 	struct s3_ctx *ctx = fill->ctx;
@@ -753,16 +755,10 @@ s3_dest_fill_finish_owner(void *arg)
 	bool exact_fallback = false;
 	bool need_cache = fill->prefetch;
 
-	assert(ctx->owner_thread == NULL || ctx->owner_thread == spdk_get_thread());
 	TAILQ_INIT(&waiters);
 	pthread_mutex_lock(&ctx->read_fill_lock);
-	TAILQ_REMOVE(&ctx->read_fills, fill, link);
-	assert(ctx->dest_fills_inflight > 0);
-	ctx->dest_fills_inflight--;
-	if (fill->prefetch) {
-		assert(ctx->dest_prefetch_inflight > 0);
-		ctx->dest_prefetch_inflight--;
-	}
+	/* Unlinked in s3_dest_fill_done. Keep dest_fills_inflight until after
+	 * overlay apply and populate so destroy cannot race this finish. */
 	direct_waiter = fill->direct_waiter;
 	while ((waiter = TAILQ_FIRST(&fill->waiters)) != NULL) {
 		TAILQ_REMOVE(&fill->waiters, waiter, link);
@@ -839,7 +835,22 @@ s3_dest_fill_finish_owner(void *arg)
 						    spdk_strerror(-rc));
 				}
 			} else {
-				s3_bs_io_submit(bs_io);
+				if (ctx->owner_thread == NULL ||
+				    ctx->owner_thread == spdk_get_thread()) {
+					s3_bs_io_submit(bs_io);
+				} else {
+					rc = spdk_thread_send_msg(ctx->owner_thread,
+								  s3_bs_io_submit,
+								  bs_io);
+					if (rc != 0) {
+						struct spdk_bs_dev_cb_args *cb_args =
+							bs_io->cb_args;
+
+						free(bs_io);
+						cb_args->cb_fn(cb_args->channel,
+							       cb_args->cb_arg, rc);
+					}
+				}
 			}
 			free(waiter);
 			continue;
@@ -895,6 +906,15 @@ s3_dest_fill_finish_owner(void *arg)
 		}
 		free(fill->buf);
 	}
+
+	pthread_mutex_lock(&ctx->read_fill_lock);
+	assert(ctx->dest_fills_inflight > 0);
+	ctx->dest_fills_inflight--;
+	if (fill->prefetch) {
+		assert(ctx->dest_prefetch_inflight > 0);
+		ctx->dest_prefetch_inflight--;
+	}
+	pthread_mutex_unlock(&ctx->read_fill_lock);
 	free(fill);
 }
 
@@ -903,6 +923,8 @@ s3_dest_fill_done(void *cb_arg, uint64_t bytes_read, int status)
 {
 	struct s3_dest_fill *fill = cb_arg;
 	struct s3_ctx *ctx = fill->ctx;
+	struct s3_dest_fill_waiter *waiter;
+	bool bounce_owner = false;
 	int rc;
 
 	fill->bytes_read = bytes_read;
@@ -911,17 +933,36 @@ s3_dest_fill_done(void *cb_arg, uint64_t bytes_read, int status)
 		fill->token_held = false;
 		s3_whole_get_token_release();
 	}
-	if (ctx->owner_thread == NULL ||
-	    ctx->owner_thread == spdk_get_thread()) {
-		s3_dest_fill_finish_owner(fill);
+
+	pthread_mutex_lock(&ctx->read_fill_lock);
+	/* Unlink before inspecting waiters. Leaving the fill on read_fills until
+	 * finish lets a cio join after this scan, then s3_dest_fill_finish would
+	 * apply overlay on the GET thread. dest_fills_inflight is dropped in
+	 * finish, not here. */
+	TAILQ_REMOVE(&ctx->read_fills, fill, link);
+	if (fill->status != 0) {
+		bounce_owner = true;
+	} else {
+		TAILQ_FOREACH(waiter, &fill->waiters, link) {
+			if (waiter->cio != NULL) {
+				bounce_owner = true;
+				break;
+			}
+		}
+	}
+	pthread_mutex_unlock(&ctx->read_fill_lock);
+
+	if (bounce_owner && ctx->owner_thread != NULL &&
+	    ctx->owner_thread != spdk_get_thread()) {
+		rc = spdk_thread_send_msg(ctx->owner_thread,
+					  s3_dest_fill_finish, fill);
+		if (rc != 0) {
+			SPDK_ERRLOG("dest fill owner bounce failed: %s "
+				    "(leaking the fill)\n", spdk_strerror(-rc));
+		}
 		return;
 	}
-	rc = spdk_thread_send_msg(ctx->owner_thread,
-				  s3_dest_fill_finish_owner, fill);
-	if (rc != 0) {
-		SPDK_ERRLOG("dest fill owner bounce failed: %s "
-			    "(leaking the fill)\n", spdk_strerror(-rc));
-	}
+	s3_dest_fill_finish(fill);
 }
 
 static void
@@ -3983,6 +4024,7 @@ s3_bs_dev_create(const struct s3_lvs_opts *opts,
 	ctx->chunk_size     = chunk_size;
 	ctx->chunk_shift    = (uint32_t)spdk_u32log2(chunk_size);
 	ctx->capacity_bytes = capacity_bytes;
+	ctx->cache_hot_bufs = opts->cache_hot_bufs;
 	ctx->owner_thread   = spdk_get_thread();
 
 	ctx->ckpt_interval_sec = opts->checkpoint_interval_sec ?
@@ -4139,6 +4181,7 @@ s3_bs_dev_attach_cache(struct spdk_bs_dev *bs_dev)
 	opts.region_size   = region->size;
 	opts.chunk_size    = ctx->chunk_size;
 	opts.block_size    = S3LVOL_BLOCK_SIZE;
+	opts.hot_bufs      = ctx->cache_hot_bufs;
 	opts.num_chunks    = s3_chunk_map_get_num_chunks(ctx->chunk_map);
 
 	if (!opts.desc || !opts.ch) {
@@ -4707,16 +4750,22 @@ s3_bs_dev_get_stats(struct spdk_bs_dev *bs_dev, struct s3_bs_dev_stats *out)
 		s3_cache_get_stats(ctx->cache, &cstats);
 		out->cache_attached           = true;
 		out->cache_hits               = cstats.hits;
+		out->cache_ram_hits           = cstats.ram_hits;
+		out->cache_disk_hits          = cstats.disk_hits;
 		out->cache_misses             = cstats.misses;
 		out->cache_hits_declined      = cstats.hits_declined;
 		out->cache_populates          = cstats.populates;
 		out->cache_populates_dropped  = cstats.populates_dropped;
 		out->cache_evictions          = cstats.evictions;
 		out->cache_bytes_served       = cstats.bytes_served;
+		out->cache_ram_bytes_served   = cstats.ram_bytes_served;
 		out->cache_bytes_populated    = cstats.bytes_populated;
 		out->cache_slots_total        = cstats.slots_total;
 		out->cache_slots_resident     = cstats.slots_resident;
 		out->cache_bytes_resident     = cstats.bytes_resident;
+		out->cache_hot_slots_total    = cstats.hot_slots_total;
+		out->cache_hot_slots_resident = cstats.hot_slots_resident;
+		out->cache_hot_evictions      = cstats.hot_evictions;
 	}
 }
 

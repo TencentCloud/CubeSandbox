@@ -733,6 +733,7 @@ PY
 		prefetch_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
 		prefetch_hits_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_hits)"
 		cache_hits_before="$(lvstore_write_stat "${DST_LVS}" dest_submit_cache_hits)"
+		ram_hits_before="$(lvstore_write_stat "${DST_LVS}" cache_ram_hits)"
 		if dd if="${DEV_PREFETCH}" of=/dev/null bs=4K count=$((2 * 256)) \
 				iflag=direct status=none; then
 			prefetch_after="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
@@ -750,13 +751,15 @@ PY
 				dest_prefetch_hits)"
 			cache_hits_after="$(lvstore_write_stat "${DST_LVS}" \
 				dest_submit_cache_hits)"
+			ram_hits_after="$(lvstore_write_stat "${DST_LVS}" \
+				cache_ram_hits)"
 			prefetch_hit_delta=$((prefetch_hits_after - prefetch_hits_before))
 			cache_hit_delta=$((cache_hits_after - cache_hits_before))
-			if [ "${prefetch_hit_delta}" -gt 0 ] ||
-			   [ "${cache_hit_delta}" -gt 0 ]; then
-				pass "dest_prefetch_hit: ${prefetch_hit_delta} joins, ${cache_hit_delta} cache hits"
+			ram_hit_delta=$((ram_hits_after - ram_hits_before))
+			if [ "${ram_hit_delta}" -gt 0 ]; then
+				pass "dest_prefetch_hit: ${prefetch_hit_delta} joins, ${cache_hit_delta} cache hits, ${ram_hit_delta} RAM hits"
 			else
-				fail "dest_prefetch_hit: prefetched range was fetched again"
+				fail "dest_prefetch_hit: no RAM hit (${prefetch_hit_delta} joins, ${cache_hit_delta} cache hits)"
 			fi
 		else
 			fail "dest_prefetch_seq: sequential read failed"

@@ -15,6 +15,8 @@
 
 #define S3_CACHE_NO_SLOT        UINT32_MAX
 
+struct cache_hot;
+
 struct cache_slot {
 	/* Which object this holds. Only meaningful while resident. */
 	struct spdk_uuid uuid;
@@ -47,8 +49,21 @@ struct cache_slot {
 
 	bool             resident;
 	bool             on_lru;
+	struct cache_hot *hot;
 
 	TAILQ_ENTRY(cache_slot) link;
+};
+
+struct cache_hot {
+	void             *buf;
+	struct cache_slot *slot;
+	struct spdk_uuid  uuid;
+	uint64_t          chunk_index;
+	uint32_t          valid_bytes;
+	uint32_t          pins;
+	bool              resident;
+	bool              on_lru;
+	TAILQ_ENTRY(cache_hot) link;
 };
 
 struct cache_staging {
@@ -66,6 +81,8 @@ struct cache_fill {
 	uint32_t                 first_block;
 	uint32_t                 n_blocks;
 	uint32_t                 bytes;      /* real object bytes, for stats */
+	uint32_t                 write_len;
+	uint64_t                 device_offset;
 };
 
 /* One in-flight read. */
@@ -112,6 +129,15 @@ struct s3_cache {
 	/* Resident, unpinned, no fill in flight. Head is the coldest. */
 	TAILQ_HEAD(, cache_slot) lru;
 	TAILQ_HEAD(, cache_slot) free_slots;
+
+	TAILQ_HEAD(, cache_hot) hot_lru;
+	TAILQ_HEAD(, cache_hot) hot_free;
+	struct cache_hot       *hot;
+	void                   *hot_map;
+	size_t                  hot_map_len;
+	uint32_t               *chunk_to_hot;
+	uint32_t                hot_count;
+	uint32_t                hot_resident;
 
 	TAILQ_HEAD(, cache_staging) staging_free;
 	struct cache_staging    *staging;
@@ -197,6 +223,93 @@ slot_lru_touch(struct s3_cache *cache, struct cache_slot *slot)
 	}
 }
 
+static void
+hot_lru_remove(struct s3_cache *cache, struct cache_hot *hot)
+{
+	if (hot->on_lru) {
+		TAILQ_REMOVE(&cache->hot_lru, hot, link);
+		hot->on_lru = false;
+	}
+}
+
+static void
+hot_lru_touch(struct s3_cache *cache, struct cache_hot *hot)
+{
+	hot_lru_remove(cache, hot);
+	if (hot->resident && hot->pins == 0) {
+		TAILQ_INSERT_TAIL(&cache->hot_lru, hot, link);
+		hot->on_lru = true;
+	}
+}
+
+static struct cache_hot *
+hot_for_chunk(struct s3_cache *cache, uint64_t chunk_index)
+{
+	uint32_t idx;
+
+	if (!cache->chunk_to_hot || chunk_index >= cache->num_chunks) {
+		return NULL;
+	}
+	idx = cache->chunk_to_hot[chunk_index];
+	if (idx == S3_CACHE_NO_SLOT) {
+		return NULL;
+	}
+	assert(idx < cache->hot_count);
+	return &cache->hot[idx];
+}
+
+/* Detach without waiting for readers. A reader pins the hot entry itself, so
+ * its mmap range cannot be reused until the final pin is dropped. */
+static void
+hot_detach(struct s3_cache *cache, struct cache_hot *hot)
+{
+	struct cache_slot *slot = hot->slot;
+
+	hot_lru_remove(cache, hot);
+	if (!hot->resident) {
+		return;
+	}
+	assert(cache->chunk_to_hot[hot->chunk_index] ==
+	       (uint32_t)(hot - cache->hot));
+	cache->chunk_to_hot[hot->chunk_index] = S3_CACHE_NO_SLOT;
+	if (slot) {
+		assert(slot->hot == hot);
+		slot->hot = NULL;
+	}
+	hot->slot = NULL;
+	hot->resident = false;
+	spdk_uuid_set_null(&hot->uuid);
+	hot->valid_bytes = 0;
+	assert(cache->hot_resident > 0);
+	cache->hot_resident--;
+	if (hot->pins == 0) {
+		TAILQ_INSERT_HEAD(&cache->hot_free, hot, link);
+	}
+}
+
+/* Reserve an unattached entry. The caller pins it to the disk slot before
+ * dropping cache->lock so a concurrent populate sees the reservation; the
+ * copy still runs unlocked, and chunk_to_hot is only written on publish. */
+static struct cache_hot *
+hot_acquire(struct s3_cache *cache)
+{
+	struct cache_hot *hot = TAILQ_FIRST(&cache->hot_free);
+
+	if (hot) {
+		TAILQ_REMOVE(&cache->hot_free, hot, link);
+		return hot;
+	}
+
+	hot = TAILQ_FIRST(&cache->hot_lru);
+	if (!hot) {
+		return NULL;
+	}
+	hot_detach(cache, hot);
+	TAILQ_REMOVE(&cache->hot_free, hot, link);
+	cache->stats.hot_evictions++;
+	return hot;
+}
+
 /* Detach a slot from its chunk and return it to the free list. */
 static void
 slot_release(struct s3_cache *cache, struct cache_slot *slot)
@@ -205,6 +318,14 @@ slot_release(struct s3_cache *cache, struct cache_slot *slot)
 	assert(slot->fills == 0);
 
 	slot_lru_remove(cache, slot);
+	if (slot->hot) {
+		/* Disk and RAM capacity have independent LRUs. Dropping a disk
+		 * slot only removes the back-reference; the hot object stays
+		 * addressable through chunk_to_hot. */
+		assert(slot->hot->slot == slot);
+		slot->hot->slot = NULL;
+		slot->hot = NULL;
+	}
 
 	if (slot->resident) {
 		assert(cache->chunk_to_slot[slot->chunk_index] ==
@@ -333,6 +454,8 @@ s3_cache_create(const struct s3_cache_opts *opts, struct s3_cache **out)
 
 	TAILQ_INIT(&cache->lru);
 	TAILQ_INIT(&cache->free_slots);
+	TAILQ_INIT(&cache->hot_lru);
+	TAILQ_INIT(&cache->hot_free);
 	TAILQ_INIT(&cache->staging_free);
 
 	cache->slots = calloc(n_slots, sizeof(*cache->slots));
@@ -356,6 +479,46 @@ s3_cache_create(const struct s3_cache_opts *opts, struct s3_cache **out)
 		cache->chunk_to_slot[c] = S3_CACHE_NO_SLOT;
 	}
 
+	if (opts->hot_bufs > S3_CACHE_HOT_BUFS_MAX ||
+	    (opts->hot_bufs != 0 &&
+	     opts->chunk_size > SIZE_MAX / opts->hot_bufs)) {
+		s3_cache_destroy(cache);
+		return -EINVAL;
+	}
+	if (opts->hot_bufs != 0) {
+		size_t map_len = (size_t)opts->hot_bufs * opts->chunk_size;
+		void *map = mmap(NULL, map_len, PROT_READ | PROT_WRITE,
+				 MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+		struct cache_hot *hot = calloc(opts->hot_bufs, sizeof(*hot));
+		uint32_t *hot_index = malloc(opts->num_chunks *
+					     sizeof(*hot_index));
+
+		if (map == MAP_FAILED || !hot || !hot_index) {
+			SPDK_WARNLOG("Could not allocate %u x %u-byte RAM cache "
+				    "slots; continuing with disk cache only\n",
+				    opts->hot_bufs, opts->chunk_size);
+			if (map != MAP_FAILED) {
+				munmap(map, map_len);
+			}
+			free(hot);
+			free(hot_index);
+		} else {
+			cache->hot = hot;
+			cache->hot_map = map;
+			cache->hot_map_len = map_len;
+			cache->chunk_to_hot = hot_index;
+			cache->hot_count = opts->hot_bufs;
+			for (uint64_t c = 0; c < opts->num_chunks; c++) {
+				hot_index[c] = S3_CACHE_NO_SLOT;
+			}
+			for (i = 0; i < opts->hot_bufs; i++) {
+				hot[i].buf = (uint8_t *)map +
+					     (size_t)i * opts->chunk_size;
+				TAILQ_INSERT_TAIL(&cache->hot_free, &hot[i], link);
+			}
+		}
+	}
+
 	/* DMA aligned, because these go straight to the local bdev. A plain
 	 * malloc'd buffer would make the bdev layer bounce every write through
 	 * iobuf, and a chunk is larger than iobuf's large buffer by default. */
@@ -370,11 +533,14 @@ s3_cache_create(const struct s3_cache_opts *opts, struct s3_cache **out)
 	}
 
 	cache->stats.slots_total = n_slots;
+	cache->stats.hot_slots_total = cache->hot_count;
 
-	SPDK_NOTICELOG("Chunk cache: %" PRIu64 " slots of %u KiB at offset %"
+	SPDK_NOTICELOG("Chunk cache: %" PRIu64 " disk slots and %u RAM slots "
+		       "of %u KiB at offset %"
 		       PRIu64 " (%" PRIu64 " MiB), %" PRIu64 " chunk index "
 		       "entries, %u blocks per slot\n",
-		       n_slots, opts->chunk_size / 1024, opts->region_offset,
+		       n_slots, cache->hot_count, opts->chunk_size / 1024,
+		       opts->region_offset,
 		       (n_slots * opts->chunk_size) / (1024 * 1024),
 		       opts->num_chunks, cache->blocks_per_chunk);
 
@@ -394,6 +560,9 @@ s3_cache_destroy(struct s3_cache *cache)
 	 * only after the flusher and the read path are quiesced. */
 	assert(cache->fills_in_flight == 0);
 	assert(cache->reads_in_flight == 0);
+	for (uint32_t i = 0; i < cache->hot_count; i++) {
+		assert(cache->hot[i].pins == 0);
+	}
 
 	if (cache->staging) {
 		for (uint32_t i = 0; i < S3_CACHE_STAGING_BUFS; i++) {
@@ -404,6 +573,11 @@ s3_cache_destroy(struct s3_cache *cache)
 	free(cache->chunk_to_slot);
 	free(cache->bitmaps);
 	free(cache->slots);
+	if (cache->hot_map) {
+		munmap(cache->hot_map, cache->hot_map_len);
+	}
+	free(cache->chunk_to_hot);
+	free(cache->hot);
 	pthread_mutex_destroy(&cache->lock);
 	free(cache);
 }
@@ -417,12 +591,18 @@ s3_cache_lookup(struct s3_cache *cache, uint64_t chunk_index,
 		const struct spdk_uuid *uuid)
 {
 	struct cache_slot *slot;
+	struct cache_hot *hot;
 
 	if (!cache || !uuid) {
 		return false;
 	}
 
 	pthread_mutex_lock(&cache->lock);
+	hot = hot_for_chunk(cache, chunk_index);
+	if (hot && spdk_uuid_compare(&hot->uuid, uuid) == 0) {
+		pthread_mutex_unlock(&cache->lock);
+		return true;
+	}
 	slot = slot_for_chunk(cache, chunk_index);
 	if (!slot || !slot->resident) {
 		pthread_mutex_unlock(&cache->lock);
@@ -485,13 +665,14 @@ s3_cache_read_on_channel(struct s3_cache *cache, struct spdk_io_channel *channel
 			 s3_cache_read_cb cb_fn, void *cb_arg)
 {
 	struct cache_slot *slot;
+	struct cache_hot *hot;
 	struct cache_read *rd;
 	uint32_t readable, read_len;
 	uint32_t first_block, n_blocks;
 	uint64_t device_offset;
 	int rc;
 
-	if (!cache || !channel || !uuid || !buf || !cb_fn || length == 0) {
+	if (!cache || !uuid || !buf || !cb_fn || length == 0) {
 		return -ENOENT;
 	}
 	assert(offset_in_chunk % cache->block_size == 0);
@@ -499,6 +680,47 @@ s3_cache_read_on_channel(struct s3_cache *cache, struct spdk_io_channel *channel
 	assert(offset_in_chunk + length <= cache->chunk_size);
 
 	pthread_mutex_lock(&cache->lock);
+	hot = hot_for_chunk(cache, chunk_index);
+	if (hot && spdk_uuid_compare(&hot->uuid, uuid) == 0) {
+		readable = offset_in_chunk < hot->valid_bytes
+			   ? spdk_min(length, hot->valid_bytes - offset_in_chunk) : 0;
+		if (readable == 0) {
+			memset(buf, 0, length);
+			cache->stats.hits++;
+			pthread_mutex_unlock(&cache->lock);
+			cb_fn(cb_arg, 0);
+			return 0;
+		}
+
+		hot->pins++;
+		hot_lru_remove(cache, hot);
+		cache->reads_in_flight++;
+		cache->stats.hits++;
+		cache->stats.ram_hits++;
+		cache->stats.bytes_served += readable;
+		cache->stats.ram_bytes_served += readable;
+		pthread_mutex_unlock(&cache->lock);
+
+		memcpy(buf, (uint8_t *)hot->buf + offset_in_chunk, readable);
+		if (readable < length) {
+			memset((uint8_t *)buf + readable, 0, length - readable);
+		}
+
+		pthread_mutex_lock(&cache->lock);
+		assert(hot->pins > 0);
+		hot->pins--;
+		assert(cache->reads_in_flight > 0);
+		cache->reads_in_flight--;
+		if (hot->resident) {
+			hot_lru_touch(cache, hot);
+		} else if (hot->pins == 0) {
+			TAILQ_INSERT_HEAD(&cache->hot_free, hot, link);
+		}
+		pthread_mutex_unlock(&cache->lock);
+		cb_fn(cb_arg, 0);
+		return 0;
+	}
+
 	slot = slot_for_chunk(cache, chunk_index);
 	if (!slot || !slot->resident) {
 		cache->stats.misses++;
@@ -550,6 +772,11 @@ s3_cache_read_on_channel(struct s3_cache *cache, struct spdk_io_channel *channel
 		pthread_mutex_unlock(&cache->lock);
 		return -ENOENT;
 	}
+	if (!channel) {
+		cache->stats.misses++;
+		pthread_mutex_unlock(&cache->lock);
+		return -ENOENT;
+	}
 
 	rd = calloc(1, sizeof(*rd));
 	if (!rd) {
@@ -577,6 +804,7 @@ s3_cache_read_on_channel(struct s3_cache *cache, struct spdk_io_channel *channel
 	slot_lru_remove(cache, slot);
 	cache->reads_in_flight++;
 	cache->stats.hits++;
+	cache->stats.disk_hits++;
 	cache->stats.bytes_served += readable;
 	device_offset = slot_offset(cache, slot) + offset_in_chunk;
 	pthread_mutex_unlock(&cache->lock);
@@ -593,8 +821,10 @@ s3_cache_read_on_channel(struct s3_cache *cache, struct spdk_io_channel *channel
 		/* Almost always -ENOMEM from the bdev_io pool. Reported as a miss
 		 * so the caller goes to S3 instead of failing the user's read. */
 		assert(cache->stats.hits > 0);
+		assert(cache->stats.disk_hits > 0);
 		assert(cache->stats.bytes_served >= readable);
 		cache->stats.hits--;
+		cache->stats.disk_hits--;
 		cache->stats.bytes_served -= readable;
 		cache->stats.misses++;
 		pthread_mutex_unlock(&cache->lock);
@@ -662,7 +892,7 @@ cache_fill_done(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 		 * half-written blocks are already unreadable. Only a slot that
 		 * ended up holding nothing at all is worth reclaiming -- keeping
 		 * it would occupy a slot that can never produce a hit. */
-		if (slot->fills == 0 && slot->pins == 0 &&
+		if (slot->fills == 0 && slot->pins == 0 && !slot->hot &&
 		    slot->filled_blocks == 0) {
 			slot_release(cache, slot);
 		} else {
@@ -677,23 +907,67 @@ cache_fill_done(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 	free(fill);
 }
 
+static void
+cache_disk_fill_abort(struct cache_fill *fill)
+{
+	struct s3_cache *cache = fill->cache;
+	struct cache_slot *slot = fill->slot;
+
+	pthread_mutex_lock(&cache->lock);
+	assert(cache->fills_in_flight > 0);
+	assert(slot->fills > 0);
+	cache->fills_in_flight--;
+	slot->fills--;
+	if (slot->fills == 0 && slot->pins == 0 && !slot->hot &&
+	    slot->filled_blocks == 0) {
+		slot_release(cache, slot);
+	} else {
+		slot_lru_touch(cache, slot);
+	}
+	TAILQ_INSERT_HEAD(&cache->staging_free, fill->staging, link);
+	free(fill);
+	cache->stats.populates_dropped++;
+	pthread_mutex_unlock(&cache->lock);
+}
+
+static void
+cache_submit_disk_fill(void *arg)
+{
+	struct cache_fill *fill = arg;
+	struct s3_cache *cache = fill->cache;
+	int rc;
+
+	assert(cache->owner_thread == NULL ||
+	       cache->owner_thread == spdk_get_thread());
+	rc = spdk_bdev_write(cache->desc, cache->ch, fill->staging->buf,
+			     fill->device_offset, fill->write_len,
+			     cache_fill_done, fill);
+	if (rc != 0) {
+		cache_disk_fill_abort(fill);
+	}
+}
+
 void
 s3_cache_populate(struct s3_cache *cache, uint64_t chunk_index,
 		  const struct spdk_uuid *uuid, uint32_t offset_in_chunk,
 		  const void *buf, uint32_t length, uint32_t object_valid_bytes)
 {
 	struct cache_slot *slot;
-	struct cache_staging *staging;
-	struct cache_fill *fill;
+	struct cache_staging *staging = NULL;
+	struct cache_fill *fill = NULL;
+	struct cache_hot *hot = NULL;
 	uint32_t first_block, last_block, n_blocks;
 	uint32_t end_byte, write_len;
 	uint64_t device_offset;
+	bool whole_object;
+	bool disk_present = false;
+	bool hot_present = false;
+	bool hot_publishing = false;
 	int rc;
 
 	if (!cache || !uuid || !buf || length == 0 || object_valid_bytes == 0) {
 		return;
 	}
-	assert(cache->owner_thread == spdk_get_thread());
 	assert(offset_in_chunk % cache->block_size == 0);
 
 	if (chunk_index >= cache->num_chunks ||
@@ -726,10 +1000,21 @@ s3_cache_populate(struct s3_cache *cache, uint64_t chunk_index,
 		return;
 	}
 	n_blocks = last_block - first_block + 1;
+	whole_object = offset_in_chunk == 0 && end_byte == object_valid_bytes;
 
 	pthread_mutex_lock(&cache->lock);
+	hot = hot_for_chunk(cache, chunk_index);
+	hot_present = whole_object && hot &&
+		      spdk_uuid_compare(&hot->uuid, uuid) == 0;
+	hot = NULL;
 	slot = slot_for_chunk(cache, chunk_index);
 	if (slot) {
+		/* Unpublished hot is on the slot, not chunk_to_hot, so lookups
+		 * cannot memcpy a half-written buf. A second populate of the
+		 * same uuid must not acquire another. */
+		hot_publishing = whole_object && slot->hot &&
+				 !slot->hot->resident &&
+				 spdk_uuid_compare(&slot->hot->uuid, uuid) == 0;
 		if (slot->resident && spdk_uuid_compare(&slot->uuid, uuid) == 0) {
 			/* Same object. Adding a range to it is the normal case
 			 * now, so this is where a sequential read stream lands
@@ -738,8 +1023,10 @@ s3_cache_populate(struct s3_cache *cache, uint64_t chunk_index,
 			 * overlapping concurrent fill can still write the same
 			 * bytes twice; harmless, since the same uuid at the same
 			 * offset is by definition the same data. */
-			if (bitmap_test_range(slot->bitmap, first_block,
-					      n_blocks)) {
+			disk_present = bitmap_test_range(slot->bitmap, first_block,
+						 n_blocks);
+			if (disk_present && (!whole_object || hot_present ||
+					     hot_publishing)) {
 				pthread_mutex_unlock(&cache->lock);
 				return;
 			}
@@ -767,32 +1054,7 @@ s3_cache_populate(struct s3_cache *cache, uint64_t chunk_index,
 		}
 	}
 
-	staging = TAILQ_FIRST(&cache->staging_free);
-	if (!staging) {
-		/* At the concurrency limit. Dropping is the right answer: a queue
-		 * here would grow without bound behind a slow device, and the data
-		 * is in S3 either way. */
-		if (!slot->resident) {
-			TAILQ_INSERT_HEAD(&cache->free_slots, slot, link);
-		}
-		cache->stats.populates_dropped++;
-		pthread_mutex_unlock(&cache->lock);
-		return;
-	}
-
-	fill = calloc(1, sizeof(*fill));
-	if (!fill) {
-		if (!slot->resident) {
-			TAILQ_INSERT_HEAD(&cache->free_slots, slot, link);
-		}
-		cache->stats.populates_dropped++;
-		pthread_mutex_unlock(&cache->lock);
-		return;
-	}
-
-	TAILQ_REMOVE(&cache->staging_free, staging, link);
-
-	/* Claim the slot before the write. valid_bytes is set now rather than on
+	/* Claim the slot before either copy. valid_bytes is set now rather than on
 	 * completion because it describes the object, not what has landed: it
 	 * comes from the chunk map, and a read entirely past it is answerable
 	 * without any block being present. */
@@ -805,52 +1067,126 @@ s3_cache_populate(struct s3_cache *cache, uint64_t chunk_index,
 	}
 	slot->valid_bytes = object_valid_bytes;
 
-	fill->cache       = cache;
-	fill->slot        = slot;
-	fill->staging     = staging;
-	fill->first_block = first_block;
-	fill->n_blocks    = n_blocks;
-	fill->bytes       = end_byte - offset_in_chunk;
+	/* Only whole immutable objects enter the RAM tier. The hot identity is
+	 * independent of the disk slot, so disk pressure cannot evict RAM. */
+	if (hot_present) {
+		struct cache_hot *existing = hot_for_chunk(cache, chunk_index);
 
-	slot->fills++;
-	/* Off the LRU while a fill is in flight, for the same reason as a pin:
-	 * eviction takes the head without looking. */
-	slot_lru_remove(cache, slot);
-	cache->fills_in_flight++;
-	write_len = n_blocks * cache->block_size;
-	device_offset = slot_offset(cache, slot) +
-			(uint64_t)first_block * cache->block_size;
-	pthread_mutex_unlock(&cache->lock);
+		assert(existing != NULL);
+		if (!existing->slot) {
+			existing->slot = slot;
+			slot->hot = existing;
+		}
+	} else if (whole_object && !hot_publishing) {
+		struct cache_hot *old = hot_for_chunk(cache, chunk_index);
 
-	/* The staging buffer is private once removed from staging_free. Copying a
-	 * whole chunk can be expensive, so do it without blocking cache lookups
-	 * on other reactors. The caller's buffer is still valid until this
-	 * synchronous function returns. */
-	memcpy(staging->buf, buf, end_byte - offset_in_chunk);
-	if (write_len > end_byte - offset_in_chunk) {
-		memset((uint8_t *)staging->buf + (end_byte - offset_in_chunk), 0,
-		       write_len - (end_byte - offset_in_chunk));
+		if (old) {
+			hot_detach(cache, old);
+		}
+		hot = hot_acquire(cache);
+		if (hot) {
+			assert(hot->slot == NULL);
+			assert(hot->pins == 0);
+			assert(slot->hot == NULL);
+			hot->pins = 1; /* private populate reservation */
+			spdk_uuid_copy(&hot->uuid, uuid);
+			hot->chunk_index = chunk_index;
+			hot->valid_bytes = object_valid_bytes;
+			hot->resident = false;
+			hot->slot = slot;
+			slot->hot = hot;
+			slot->pins++;
+			slot_lru_remove(cache, slot);
+		}
 	}
 
-	rc = spdk_bdev_write(cache->desc, cache->ch, staging->buf,
-			     device_offset,
-			     write_len, cache_fill_done, fill);
-	if (rc != 0) {
-		pthread_mutex_lock(&cache->lock);
-		assert(cache->fills_in_flight > 0);
-		assert(slot->fills > 0);
-		cache->fills_in_flight--;
-		slot->fills--;
-		if (slot->fills == 0 && slot->pins == 0 &&
+	if (!disk_present) {
+		staging = TAILQ_FIRST(&cache->staging_free);
+		if (staging) {
+			fill = calloc(1, sizeof(*fill));
+		}
+		if (staging && fill) {
+			TAILQ_REMOVE(&cache->staging_free, staging, link);
+			fill->cache       = cache;
+			fill->slot        = slot;
+			fill->staging     = staging;
+			fill->first_block = first_block;
+			fill->n_blocks    = n_blocks;
+			fill->bytes       = end_byte - offset_in_chunk;
+			fill->write_len   = 0;
+			fill->device_offset = 0;
+			slot->fills++;
+			slot_lru_remove(cache, slot);
+			cache->fills_in_flight++;
+		} else {
+			free(fill);
+			fill = NULL;
+			cache->stats.populates_dropped++;
+		}
+	}
+
+	if (!hot && !fill) {
+		if (slot->fills == 0 && slot->pins == 0 && !slot->hot &&
 		    slot->filled_blocks == 0) {
 			slot_release(cache, slot);
 		} else {
 			slot_lru_touch(cache, slot);
 		}
-		TAILQ_INSERT_HEAD(&cache->staging_free, staging, link);
-		free(fill);
-		cache->stats.populates_dropped++;
 		pthread_mutex_unlock(&cache->lock);
+		return;
+	}
+
+	write_len = n_blocks * cache->block_size;
+	device_offset = slot_offset(cache, slot) +
+			(uint64_t)first_block * cache->block_size;
+	if (fill) {
+		fill->write_len = write_len;
+		fill->device_offset = device_offset;
+	}
+	pthread_mutex_unlock(&cache->lock);
+
+	if (hot) {
+		memcpy(hot->buf, buf, object_valid_bytes);
+
+		pthread_mutex_lock(&cache->lock);
+		assert(slot->pins > 0);
+		assert(hot->pins == 1);
+		assert(hot->slot == slot);
+		assert(slot->hot == hot);
+		assert(!hot->resident);
+		assert(spdk_uuid_compare(&hot->uuid, uuid) == 0);
+		hot->valid_bytes = object_valid_bytes;
+		hot->resident = true;
+		cache->chunk_to_hot[chunk_index] =
+			(uint32_t)(hot - cache->hot);
+		hot->pins = 0;
+		cache->hot_resident++;
+		slot->pins--;
+		hot_lru_touch(cache, hot);
+		slot_lru_touch(cache, slot);
+		pthread_mutex_unlock(&cache->lock);
+	}
+
+	if (!fill) {
+		return;
+	}
+
+	/* Staging remains the only DMA source. RAM hot entries are plain mmap
+	 * memory and may be evicted independently while this write is in flight. */
+	memcpy(staging->buf, buf, end_byte - offset_in_chunk);
+	if (write_len > end_byte - offset_in_chunk) {
+		memset((uint8_t *)staging->buf + (end_byte - offset_in_chunk), 0,
+		       write_len - (end_byte - offset_in_chunk));
+	}
+	if (cache->owner_thread == NULL ||
+	    cache->owner_thread == spdk_get_thread()) {
+		cache_submit_disk_fill(fill);
+	} else {
+		rc = spdk_thread_send_msg(cache->owner_thread,
+					  cache_submit_disk_fill, fill);
+		if (rc != 0) {
+			cache_disk_fill_abort(fill);
+		}
 	}
 }
 
@@ -858,6 +1194,7 @@ void
 s3_cache_drop_chunk(struct s3_cache *cache, uint64_t chunk_index)
 {
 	struct cache_slot *slot;
+	struct cache_hot *hot;
 
 	if (!cache) {
 		return;
@@ -865,6 +1202,10 @@ s3_cache_drop_chunk(struct s3_cache *cache, uint64_t chunk_index)
 	assert(cache->owner_thread == spdk_get_thread());
 
 	pthread_mutex_lock(&cache->lock);
+	hot = hot_for_chunk(cache, chunk_index);
+	if (hot) {
+		hot_detach(cache, hot);
+	}
 	slot = slot_for_chunk(cache, chunk_index);
 	if (!slot) {
 		pthread_mutex_unlock(&cache->lock);
@@ -907,6 +1248,7 @@ s3_cache_get_stats(struct s3_cache *cache, struct s3_cache_stats *stats)
 	cache->stats.slots_resident = cache->resident;
 	cache->stats.bytes_resident = cache->resident_blocks *
 				      cache->block_size;
+	cache->stats.hot_slots_resident = cache->hot_resident;
 	*stats = cache->stats;
 	pthread_mutex_unlock(&cache->lock);
 }

@@ -31,6 +31,9 @@
  *        This is the assertion that matters most in the file: the device still
  *        holds the slot's previous tenant there, so getting it wrong does not
  *        cost a hit, it returns another volume's bytes.
+ *     9. whole objects enter an independently indexed mmap hot tier before the
+ *        aio fill lands; UUID checks, partial fills, drop, and disk-slot
+ *        eviction preserve the same safety rules there.
  *
  *   Sections [11] to [13] are all of (8): ranges in isolation, a short object's
  *   trailing partial block, and residency surviving neither a uuid change nor
@@ -140,28 +143,21 @@ poll_for_ms(uint64_t ms)
 	}
 }
 
-/* Wait for an outstanding populate to resolve.
+/* Wait for every outstanding populate to resolve.
  *
- * Populate reports nothing back by design, so what is watched is the only thing
- * it does report: the total of the three ways it can end. Waiting for a fixed
- * duration instead would either be slower than necessary or flaky, depending on
- * how the guess compares to the device. */
+ * Populate reports nothing back by design. Aggregate completion counters are
+ * not sufficient here: an off-owner populate publishes RAM before its disk fill
+ * completes, and a later populate can mistake that older fill's completion for
+ * its own. Quiescence is the actual condition the next test step needs. */
 static bool
 poll_until_populate_settled(struct s3_cache *cache)
 {
-	struct s3_cache_stats before, now;
 	uint64_t deadline = now_ms() + POLL_TIMEOUT_SEC * 1000;
-
-	s3_cache_get_stats(cache, &before);
 
 	while (now_ms() < deadline) {
 		spdk_thread_poll(g_thread, 0, 0);
 
-		s3_cache_get_stats(cache, &now);
-		if (now.populates + now.populates_failed +
-		    now.populates_dropped !=
-		    before.populates + before.populates_failed +
-		    before.populates_dropped) {
+		if (s3_cache_is_quiesced(cache)) {
 			return true;
 		}
 	}
@@ -364,6 +360,49 @@ populate_range_sync(struct s3_cache *cache, uint64_t chunk_index,
 	poll_until_populate_settled(cache);
 }
 
+struct off_owner_populate {
+	struct s3_cache *cache;
+	uint64_t chunk_index;
+	const struct spdk_uuid *uuid;
+	const void *buf;
+	uint32_t length;
+	bool done;
+};
+
+static void
+off_owner_populate_work(void *arg)
+{
+	struct off_owner_populate *msg = arg;
+
+	s3_cache_populate(msg->cache, msg->chunk_index, msg->uuid, 0,
+			  msg->buf, msg->length, msg->length);
+	msg->done = true;
+}
+
+struct conc_populate {
+	struct s3_cache *cache;
+	const struct spdk_uuid *uuid;
+	const void *buf;
+	uint64_t chunk_index;
+	uint32_t length;
+	int loops;
+	int done;
+};
+
+static void *
+conc_populate_thread(void *arg)
+{
+	struct conc_populate *job = arg;
+	int i;
+
+	for (i = 0; i < job->loops; i++) {
+		s3_cache_populate(job->cache, job->chunk_index, job->uuid, 0,
+				  job->buf, job->length, job->length);
+	}
+	__atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+	return NULL;
+}
+
 static int
 read_sync(struct s3_cache *cache, uint64_t chunk_index,
 	  const struct spdk_uuid *uuid, uint32_t off, uint32_t len, void *buf)
@@ -486,6 +525,8 @@ main(int argc, char **argv)
 		s3_cache_get_stats(cache, &stats);
 		check_u64("slot count comes from the region size",
 			  stats.slots_total, TEST_N_SLOTS);
+		check_u64("zero hot_bufs keeps the C API disk-only",
+			  stats.hot_slots_total, 0);
 
 		/* A region too small for even one chunk is a layout mistake, not
 		 * a cache with no room. */
@@ -493,6 +534,10 @@ main(int argc, char **argv)
 		struct s3_cache_opts bad = opts;
 		bad.region_size = TEST_CHUNK_SIZE - 1;
 		check_u64("a region below one chunk is rejected",
+			  (uint64_t) - s3_cache_create(&bad, &tiny), EINVAL);
+		bad = opts;
+		bad.hot_bufs = S3_CACHE_HOT_BUFS_MAX + 1;
+		check_u64("an excessive hot pool is rejected",
 			  (uint64_t) - s3_cache_create(&bad, &tiny), EINVAL);
 	}
 
@@ -1020,6 +1065,247 @@ main(int argc, char **argv)
 			spdk_thread_destroy(thread2);
 			thread2 = NULL;
 			spdk_set_thread(g_thread);
+		}
+	}
+
+	printf("\n[15] whole objects are readable from the mmap hot tier\n");
+	{
+		struct s3_cache_opts hot_opts = {
+			.desc          = desc,
+			.ch            = ch,
+			.region_offset = TEST_REGION_OFF,
+			.region_size   = TEST_REGION_SIZE,
+			.chunk_size    = TEST_CHUNK_SIZE,
+			.block_size    = AIO_BLOCK_SIZE,
+			.hot_bufs      = 2,
+			.num_chunks    = TEST_NUM_CHUNKS,
+		};
+		uint64_t ram_hits_before, disk_hits_before, ram_bytes_before;
+
+		s3_cache_destroy(cache);
+		cache = NULL;
+		rc = s3_cache_create(&hot_opts, &cache);
+		check_u64("hot cache creates", (uint64_t)-rc, 0);
+		if (rc != 0) {
+			goto out_cache;
+		}
+
+		s3_cache_get_stats(cache, &stats);
+		check_u64("configured mmap slots are reported",
+			  stats.hot_slots_total, 2);
+
+		fill_pattern(src, 50, TEST_CHUNK_SIZE, 11);
+		s3_cache_populate(cache, 50, &uuid_a, 0, src,
+				  TEST_CHUNK_SIZE, TEST_CHUNK_SIZE);
+		s3_cache_get_stats(cache, &stats);
+		ram_hits_before = stats.ram_hits;
+		disk_hits_before = stats.disk_hits;
+		ram_bytes_before = stats.ram_bytes_served;
+		check_true("lookup sees RAM before disk fill completion",
+			   s3_cache_lookup(cache, 50, &uuid_a), NULL);
+		memset(src, 0xcc, TEST_CHUNK_SIZE);
+
+		/* No poll: the aio write is still outstanding. RAM publication is
+		 * synchronous with populate and owns a copy independent of src. */
+		memset(dst, 0xee, TEST_CHUNK_SIZE);
+		check_u64("RAM hits before disk fill completion",
+			  (uint64_t)-read_sync(cache, 50, &uuid_a, 0,
+					       TEST_CHUNK_SIZE, dst), 0);
+		check_true("the immediate RAM hit returns the whole object",
+			   pattern_matches(dst, 50, 0, TEST_CHUNK_SIZE, 11),
+			   NULL);
+		s3_cache_get_stats(cache, &stats);
+		check_u64("the hit is classified as RAM",
+			  stats.ram_hits, ram_hits_before + 1);
+		check_u64("the RAM hit was not double-counted as disk",
+			  stats.disk_hits, disk_hits_before);
+		check_u64("RAM byte accounting covers the whole object",
+			  stats.ram_bytes_served,
+			  ram_bytes_before + TEST_CHUNK_SIZE);
+		check_u64("a different UUID cannot use the hot object",
+			  (uint64_t)-read_sync(cache, 50, &uuid_b, 0,
+					       AIO_BLOCK_SIZE, dst), ENOENT);
+		{
+			struct async_ctx ram_read = {0};
+
+			memset(dst, 0xee, TEST_CHUNK_SIZE);
+			rc = s3_cache_read_on_channel(
+				cache, NULL, 50, &uuid_a, 0, AIO_BLOCK_SIZE,
+				dst, read_cb, &ram_read);
+			check_true("RAM hit needs no bdev channel",
+				   rc == 0 && ram_read.done &&
+				   ram_read.status == 0, NULL);
+		}
+
+		poll_until_populate_settled(cache);
+		for (uint64_t chunk = 51; chunk <= 52; chunk++) {
+			fill_pattern(src, chunk, TEST_CHUNK_SIZE, 11);
+			populate_sync(cache, chunk, &uuid_a, src,
+				      TEST_CHUNK_SIZE);
+		}
+		s3_cache_get_stats(cache, &stats);
+		check_u64("the third whole object evicts one hot slot",
+			  stats.hot_evictions, 1);
+		check_u64("hot residency stays at its configured bound",
+			  stats.hot_slots_resident, 2);
+
+		/* Chunk 50 remains on disk after leaving the two-entry hot LRU. */
+		disk_hits_before = stats.disk_hits;
+		memset(dst, 0xee, TEST_CHUNK_SIZE);
+		check_u64("an evicted hot object falls back to disk",
+			  (uint64_t)-read_sync(cache, 50, &uuid_a, 0,
+					       AIO_BLOCK_SIZE, dst), 0);
+		s3_cache_get_stats(cache, &stats);
+		check_u64("the fallback is classified as disk",
+			  stats.disk_hits, disk_hits_before + 1);
+		check_true("disk fallback preserves the bytes",
+			   pattern_matches(dst, 50, 0, AIO_BLOCK_SIZE, 11),
+			   NULL);
+
+		/* Partial fills never enter the whole-object RAM tier. They also
+		 * force disk-slot eviction while chunks 51 and 52 stay hot. */
+		for (uint64_t chunk = 53; chunk <= 55; chunk++) {
+			fill_pattern(src, chunk, AIO_BLOCK_SIZE, 3);
+			populate_range_sync(cache, chunk, &uuid_a, 0,
+					    src, AIO_BLOCK_SIZE, TEST_CHUNK_SIZE);
+		}
+		s3_cache_get_stats(cache, &stats);
+		check_u64("partial fills did not consume hot entries",
+			  stats.hot_slots_resident, 2);
+		check_true("disk eviction leaves the independently indexed hot object",
+			   s3_cache_lookup(cache, 51, &uuid_a), NULL);
+		{
+			struct async_ctx ram_read = {0};
+
+			memset(dst, 0xee, TEST_CHUNK_SIZE);
+			rc = s3_cache_read_on_channel(
+				cache, NULL, 51, &uuid_a, 0, AIO_BLOCK_SIZE,
+				dst, read_cb, &ram_read);
+			check_true("hot object survives loss of its disk slot",
+				   rc == 0 && ram_read.done &&
+				   ram_read.status == 0 &&
+				   pattern_matches(dst, 51, 0,
+						   AIO_BLOCK_SIZE, 11), NULL);
+		}
+
+		s3_cache_drop_chunk(cache, 51);
+		check_true("drop_chunk removes an independently resident hot object",
+			   !s3_cache_lookup(cache, 51, &uuid_a), NULL);
+	}
+
+	printf("\n[16] off-owner populate publishes RAM without the owner thread\n");
+	{
+		struct spdk_thread *thread2;
+		struct off_owner_populate msg = {
+			.cache = cache,
+			.chunk_index = 40,
+			.uuid = &uuid_a,
+			.buf = src,
+			.length = TEST_CHUNK_SIZE,
+		};
+		uint64_t deadline;
+		int rc;
+
+		fill_pattern(src, 40, TEST_CHUNK_SIZE, 13);
+		thread2 = spdk_thread_create("s3_cache_pop2", NULL);
+		check_true("populate thread created", thread2 != NULL, NULL);
+		if (thread2) {
+			rc = spdk_thread_send_msg(thread2, off_owner_populate_work,
+						  &msg);
+			check_u64("off-owner populate is queued", (uint64_t)-rc, 0);
+			deadline = now_ms() + POLL_TIMEOUT_SEC * 1000;
+			while (!msg.done && now_ms() < deadline) {
+				spdk_thread_poll(thread2, 0, 0);
+			}
+			check_true("off-owner populate returns after RAM publish",
+				   msg.done, NULL);
+			check_true("lookup sees the object before owner disk fill",
+				   s3_cache_lookup(cache, 40, &uuid_a), NULL);
+			memset(src, 0xdd, TEST_CHUNK_SIZE);
+			memset(dst, 0xee, TEST_CHUNK_SIZE);
+			{
+				struct async_ctx ram_read = {0};
+
+				rc = s3_cache_read_on_channel(
+					cache, NULL, 40, &uuid_a, 0,
+					TEST_CHUNK_SIZE, dst, read_cb,
+					&ram_read);
+				check_true("RAM hit from an off-owner populate",
+					   rc == 0 && ram_read.done &&
+					   ram_read.status == 0 &&
+					   pattern_matches(dst, 40, 0,
+							   TEST_CHUNK_SIZE,
+							   13), NULL);
+			}
+			poll_until_populate_settled(cache);
+			spdk_set_thread(thread2);
+			spdk_thread_exit(thread2);
+			while (!spdk_thread_is_exited(thread2)) {
+				spdk_thread_poll(thread2, 0, 0);
+			}
+			spdk_thread_destroy(thread2);
+			spdk_set_thread(g_thread);
+		}
+	}
+
+	printf("\n[17] concurrent populates of one chunk share one unpublished hot\n");
+	{
+		pthread_t t1, t2;
+		void *src2;
+		struct conc_populate job1 = {
+			.cache = cache,
+			.uuid = &uuid_a,
+			.buf = src,
+			.chunk_index = 41,
+			.length = TEST_CHUNK_SIZE,
+			.loops = 64,
+		};
+		struct conc_populate job2;
+		uint64_t deadline;
+		int rc;
+
+		src2 = spdk_dma_zmalloc(TEST_CHUNK_SIZE, AIO_BLOCK_SIZE, NULL);
+		check_true("second populate buffer allocated", src2 != NULL, NULL);
+		if (src2) {
+			fill_pattern(src, 41, TEST_CHUNK_SIZE, 17);
+			memcpy(src2, src, TEST_CHUNK_SIZE);
+			job2 = job1;
+			job2.buf = src2;
+			rc = pthread_create(&t1, NULL, conc_populate_thread, &job1);
+			check_u64("first populate thread starts", (uint64_t)rc, 0);
+			rc = pthread_create(&t2, NULL, conc_populate_thread, &job2);
+			check_u64("second populate thread starts", (uint64_t)rc, 0);
+			deadline = now_ms() + POLL_TIMEOUT_SEC * 1000;
+			while ((!__atomic_load_n(&job1.done, __ATOMIC_ACQUIRE) ||
+				!__atomic_load_n(&job2.done, __ATOMIC_ACQUIRE)) &&
+			       now_ms() < deadline) {
+				spdk_thread_poll(g_thread, 0, 0);
+			}
+			check_true("both populate threads finished",
+				   __atomic_load_n(&job1.done, __ATOMIC_ACQUIRE) &&
+				   __atomic_load_n(&job2.done, __ATOMIC_ACQUIRE),
+				   NULL);
+			pthread_join(t1, NULL);
+			pthread_join(t2, NULL);
+			poll_until_populate_settled(cache);
+			check_true("lookup sees the concurrently populated object",
+				   s3_cache_lookup(cache, 41, &uuid_a), NULL);
+			memset(dst, 0xee, TEST_CHUNK_SIZE);
+			{
+				struct async_ctx ram_read = {0};
+
+				rc = s3_cache_read_on_channel(
+					cache, NULL, 41, &uuid_a, 0,
+					TEST_CHUNK_SIZE, dst, read_cb,
+					&ram_read);
+				check_true("concurrent populate bytes are intact",
+					   rc == 0 && ram_read.done &&
+					   ram_read.status == 0 &&
+					   pattern_matches(dst, 41, 0,
+							   TEST_CHUNK_SIZE,
+							   17), NULL);
+			}
+			spdk_dma_free(src2);
 		}
 	}
 
