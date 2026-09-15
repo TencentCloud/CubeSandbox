@@ -59,16 +59,21 @@ existing filters/scores (plus thin `binpack_score`). They are **not**
 offline simulator models and share names with simulator strategy profiles
 only as strings.
 
-`SchedulerProfileScoreConf` intentionally omits `plugin_conf`. When
-`scheduler.profile` is set, every registered scorer listed in the final
-effective `enable_scorers` requires its corresponding
-`scheduler.score.plugin_conf` block; missing configuration, or a factor
-scorer with no positive `resource_weights` entry, fails before scheduler
-construction. Built-in presets additionally reject an explicitly disabled
-required scorer (`disable: true` / `weight: 0`). User Profiles may keep an
-enabled name with an intentional disable. Empty `scheduler.profile` keeps
-the pre-upgrade load path: ineffective factor/plugin combinations may still
-load and become runtime no-ops.
+`SchedulerProfileScoreConf` intentionally omits `plugin_conf`. The missing
+`plugin_conf` check itself runs whether or not a Profile is selected: every
+registered scorer listed in the final effective `enable_scorers` (except
+`binpack_score`, which may omit the block and use runtime defaults) requires its
+corresponding `scheduler.score.plugin_conf` block, or `config.Init` / reload
+fails — see the upgrade notes in
+[CubeMaster Scheduler Configuration](../guide/cubemaster-scheduler-config.md).
+**When `scheduler.profile` is set**, factor scorers are additionally required to
+have a positive `resource_weights` entry, and built-in presets reject an
+explicitly disabled required scorer (`disable: true` / `weight: 0`). User
+Profiles may keep an enabled name with an intentional disable. Empty
+`scheduler.profile` still rejects a missing `plugin_conf` block; what it keeps
+from the pre-upgrade load path is a *present but ineffective* factor/plugin
+block (empty factor list / all-zero factor weights), which may still load and
+become a runtime no-op.
 
 The three built-ins inject self-contained defaults **only when** the
 corresponding `plugin_conf` entry is `nil`: `balanced_spread` for

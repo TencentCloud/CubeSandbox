@@ -203,8 +203,10 @@ func (l *externalHTTPScore) Weight() float64 {
 }
 
 // externalHTTPScoreWeightFrom reads weight from a plugin_conf snapshot. Nil cfg
-// (absent block) returns the default so Select can still emit plugin_conf_absent
-// instead of hitting the weight:0 silent no-op.
+// returns the default so a defensive Select path can still emit
+// plugin_conf_absent instead of the weight:0 silent no-op. Production
+// config.Init / hot-reload preHandle already reject a listed scorer with a
+// missing plugin_conf block, so nil here is mainly tests or injected cfg.
 func externalHTTPScoreWeightFrom(cfg *config.ExternalHTTPScore) float64 {
 	if cfg == nil {
 		return config.DefaultExternalHTTPScoreWeight
@@ -266,9 +268,10 @@ func validateExternalHTTPScoreConfig(cfg *config.ExternalHTTPScore) error {
 func (l *externalHTTPScore) Disable() bool {
 	cfg := l.pluginConfig()
 	if cfg == nil {
-		// Scorers are constructed once and survive conf.yaml hot-reload. A
-		// dropped plugin_conf.external_http_score block must not skip Select
-		// silently — return false so Select can emit rate-limited observability.
+		// Defensive: production reload rejects a missing listed block, so the
+		// previous Config stays live. If cfg is still nil (tests / injected),
+		// return false so Select can emit rate-limited plugin_conf_absent
+		// instead of silently skipping.
 		return false
 	}
 	// Match other scorers: Disable reflects only the disable flag. Explicit

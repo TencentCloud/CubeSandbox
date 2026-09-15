@@ -372,7 +372,7 @@ scheduler:
 | `allow_insecure` | 为 `true` 时允许对非 loopback 主机使用明文 `http://`。默认 `false`。不会关闭 `https://` 的 TLS 校验。 |
 | `timeout` | **同步 create 路径**上的单次 HTTP 超时。为 0/省略时使用默认 **200ms**。正值必须 **≥ 1ms** 且 **≤ 2s**；负值、亚毫秒正值与超过 **2s** 的值会在构造时检出（一条 Warn），之后每次 `Select` fail-open（不会被静默改写；CubeMaster 仍会正常启动）。请使用 `200ms` / `1s` 这类 duration 字符串——裸整数如 `timeout: 200` 会被 YAML 解析成 **200 纳秒**并触发 ≥1ms 校验失败。sidecar 卡住时，**每次** create 最多会多等这么久再 fail-open；请把它算进 create 延迟预算，而不只是 scorer 本地旋钮。 |
 | `mode` | 可选的运营自定义字符串，写入请求 JSON。 |
-| `disable` | 为 true 时即使已 enable 也是空操作；与 `weight` 一样热读。若热更新删掉整个 `plugin_conf.external_http_score` 块但 `enable_scorers` 仍保留该名字，评分会停止，但会发出限流的 fail-open Warn（日志类别 `plugin_conf_absent`），并递增 `cube_scheduler_external_http_score_outcomes_total{reason="other"}`（scorer 实例在热更新后仍存活）。有意关闭请优先用 `disable: true`（立即生效）；从 `enable_scorers` 去掉该名字只在 CubeMaster 重启后生效。 |
+| `disable` | 为 true 时即使已 enable 也是空操作；与 `weight` 一样热读。**在 `enable_scorers` 仍保留该名字时，这是唯一的 live 关闭开关。** 热更新删掉整个 `plugin_conf.external_http_score` 块但保留该名字**不会**停止评分：`preHandle` 会拒绝这次重载（`plugin_conf.external_http_score is missing`），旧 Config 继续生效，旧 endpoint 仍会收到 create 路径上的 POST。从 `enable_scorers` 去掉该名字只在 CubeMaster 重启后生效。 |
 
 ### 传输协议
 

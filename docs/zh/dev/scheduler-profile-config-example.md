@@ -56,13 +56,17 @@ updated: 2026-09-10
 面向场景的现有 filter/score 组合（外加薄的 `binpack_score`）。它们**不是**
 离线模拟器模型，与模拟器 strategy profile 仅共享名称字符串。
 
-`SchedulerProfileScoreConf` 有意省略 `plugin_conf`。当设置了
-`scheduler.profile` 时，最终生效 `enable_scorers` 中每个已注册评分器都必须有
-对应的 `scheduler.score.plugin_conf` 块；配置缺失，或因子型评分器没有任何正的
-`resource_weights` 项，会在调度器构建前失败。内置预设还会拒绝其必需评分器被
-显式禁用（`disable: true` / `weight: 0`）。用户 Profile 可以保留启用名同时故意
-禁用。空 `scheduler.profile` 保持升级前加载路径：无效的因子/插件组合仍可能加载并
-在运行时成为空操作。
+`SchedulerProfileScoreConf` 有意省略 `plugin_conf`。**缺少 `plugin_conf` 的校验
+本身与是否设置 Profile 无关**：最终生效 `enable_scorers` 中每个已注册评分器
+（`binpack_score` 除外，可省略块并使用运行时默认）都必须有对应的
+`scheduler.score.plugin_conf` 块，否则 `config.Init` / 热更新失败——详见
+[CubeMaster 调度配置](../guide/cubemaster-scheduler-config.md) 的升级说明。
+**当设置了 `scheduler.profile` 时**，因子型评分器还额外要求有正的
+`resource_weights` 项；内置预设还会拒绝其必需评分器被显式禁用
+（`disable: true` / `weight: 0`）。用户 Profile 可以保留启用名同时故意禁用。
+空 `scheduler.profile` 同样会拒绝缺失的 `plugin_conf` 块；它相对升级前保留的，
+是「块在但无效」的因子/插件组合（空因子列表 / 全零因子权重），仍可能加载并在
+运行时成为空操作。
 
 三个内置仅在对应 `plugin_conf` 条目为 `nil` 时注入自包含默认值：
 `balanced_spread` 对应 `real_time_weighted_average`，

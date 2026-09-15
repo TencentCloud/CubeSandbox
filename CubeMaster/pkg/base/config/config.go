@@ -696,13 +696,15 @@ func (c ExternalHTTPScore) String() string {
 	return string(b)
 }
 
+// externalHTTPScoreWire is the redacted JSON shape for config dumps. Tags match
+// the YAML field names so operators see the same keys as conf.yaml.
 type externalHTTPScoreWire struct {
 	Weight        *float64      `json:"weight"`
-	Endpoint      string        `json:"Endpoint"`
-	AllowInsecure bool          `json:"AllowInsecure"`
-	Timeout       time.Duration `json:"Timeout"`
-	Mode          string        `json:"Mode"`
-	Disable       bool          `json:"Disable"`
+	Endpoint      string        `json:"endpoint"`
+	AllowInsecure bool          `json:"allow_insecure"`
+	Timeout       time.Duration `json:"timeout"`
+	Mode          string        `json:"mode"`
+	Disable       bool          `json:"disable"`
 }
 
 func (c ExternalHTTPScore) redactedWire() externalHTTPScoreWire {
