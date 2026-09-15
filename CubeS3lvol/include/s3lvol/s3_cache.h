@@ -174,9 +174,10 @@ void s3_cache_destroy(struct s3_cache *cache);
  *
  * "Readable" means the whole object: with partial residency a slot can hold this
  * uuid and still miss a given read, so this answers a coarser question than
- * s3_cache_read() and is only meant for tests and diagnostics. The read path
- * must call s3_cache_read() and act on its return code -- there is nothing to
- * gain from asking first, and a true here does not promise a hit.
+ * s3_cache_read(). Demand reads must call s3_cache_read() and act on its return
+ * code -- a true here does not promise a later hit. Read-ahead admission may
+ * use this coarse snapshot to avoid fetching an object that is already wholly
+ * resident; racing eviction only loses that optimisation.
  */
 bool s3_cache_lookup(struct s3_cache *cache, uint64_t chunk_index,
 		     const struct spdk_uuid *uuid);

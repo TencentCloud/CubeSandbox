@@ -530,6 +530,15 @@ else
 		# map/cache. This is the Phase 2a case: no export and no live overlay,
 		# so cache hits should stay on their submitting nvmf threads.
 		wait_decouple_idle || true
+		# Decouple one dense lvol by itself so its destination clusters are
+		# physically sequential. The three production imports above are
+		# intentionally interleaved and are not a deterministic sequence
+		# detector fixture.
+		rpc rcow_import_lvol "$(printf '{"lvol_name":"prefetch_live","export_uuid":"%s","lvs_name":"%s","decouple":true}' \
+			"${UUID_rootfs}" "${DST_LVS}")" >/dev/null || {
+			fail "dest_prefetch_seq: fixture import failed"; exit 1; }
+		wait_decouple_idle || {
+			fail "dest_prefetch_seq: fixture decouple failed"; exit 1; }
 		rpc rcow_flush_lvstore \
 			"$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" >/dev/null || {
 			fail "warm_dest: destination flush failed"
@@ -580,12 +589,15 @@ else
 		NS_MEM="$(expose "${DST_LVS}/mem_live")"
 		NS_ROOT="$(expose "${DST_LVS}/root_live")"
 		NS_META="$(expose "${DST_LVS}/meta_live")"
+		NS_PREFETCH="$(expose "${DST_LVS}/prefetch_live")"
 		nvme connect -t tcp -a 127.0.0.1 -s "${PORT}" -n "${NQN}" >/dev/null 2>&1
 		CONNECTED=1
 		DEV_MEM="$(wait_dev "${NS_MEM}")" || exit 1
 		DEV_ROOT="$(wait_dev "${NS_ROOT}")" || exit 1
 		DEV_META="$(wait_dev "${NS_META}")" || exit 1
+		DEV_PREFETCH="$(wait_dev "${NS_PREFETCH}")" || exit 1
 		blockdev --setra 0 "${DEV_MEM}" >/dev/null 2>&1 || true
+		blockdev --setra 0 "${DEV_PREFETCH}" >/dev/null 2>&1 || true
 
 		stampede_size=$((SIZE_MIB / 4))
 		[ "${stampede_size}" -gt 0 ] || stampede_size=1
@@ -593,23 +605,31 @@ else
 		[ "${direct_size}" -gt 0 ] || direct_size=1
 		cold_seq_size=$((SIZE_MIB - stampede_size - direct_size))
 		[ "${cold_seq_size}" -gt 0 ] || cold_seq_size=1
+		stampede_offset=0
 		stampede_starts_before="$(lvstore_write_stat "${DST_LVS}" dest_submit_fill_starts)"
 		stampede_joins_before="$(lvstore_write_stat "${DST_LVS}" dest_submit_fill_joins)"
+		stampede_hits_before="$(lvstore_write_stat "${DST_LVS}" dest_submit_cache_hits)"
 		drop_caches
-		if stampede_result="$("${BENCH}" --device "${DEV_MEM}" --offset-mib 0 \
+		if stampede_result="$("${BENCH}" --device "${DEV_MEM}" \
+				--offset-mib "${stampede_offset}" \
 				--size-mib "${stampede_size}" --pattern stampede \
 				--threads "${THREADS}" --write-percent 0)"; then
 			printf '%s\n' "${stampede_result}"
 			stampede_starts_after="$(lvstore_write_stat "${DST_LVS}" dest_submit_fill_starts)"
 			stampede_joins_after="$(lvstore_write_stat "${DST_LVS}" dest_submit_fill_joins)"
+			stampede_hits_after="$(lvstore_write_stat "${DST_LVS}" dest_submit_cache_hits)"
 			stampede_starts=$((stampede_starts_after - stampede_starts_before))
 			stampede_joins=$((stampede_joins_after - stampede_joins_before))
+			stampede_hits=$((stampede_hits_after - stampede_hits_before))
 			stampede_ok=false
 			if [ "${stampede_starts}" -gt 0 ] && [ "${stampede_joins}" -gt 0 ]; then
 				stampede_ok=true
 				pass "cold_dest_stampede: ${stampede_starts} fills, ${stampede_joins} joins"
+			elif [ "${stampede_hits}" -ge $((stampede_size * THREADS)) ]; then
+				stampede_ok=true
+				pass "cold_dest_stampede: ${stampede_hits} reads already prefetched"
 			else
-				fail "cold_dest_stampede: fills=${stampede_starts} joins=${stampede_joins}"
+				fail "cold_dest_stampede: fills=${stampede_starts} joins=${stampede_joins} hits=${stampede_hits}"
 			fi
 			python3 - "${stampede_result}" "${stampede_starts}" "${stampede_joins}" "${stampede_ok}" <<'PY' >>"${RESULTS}"
 import json, sys
@@ -630,7 +650,7 @@ PY
 		fill_joins_after="${fill_joins_before}"
 		drop_caches
 		if cold_dest_result="$("${BENCH}" --device "${DEV_MEM}" \
-				--offset-mib "${stampede_size}" \
+				--offset-mib "$((stampede_offset + stampede_size))" \
 				--size-mib "${cold_seq_size}" --pattern sequential \
 				--threads "${THREADS}" --write-percent 0)"; then
 			printf '%s\n' "${cold_dest_result}"
@@ -658,23 +678,26 @@ PY
 			fail "cold_dest: destination cache-fill walk failed"
 		fi
 
-		direct_offset=$((stampede_size + cold_seq_size))
+		direct_offset=$((stampede_offset + stampede_size + cold_seq_size))
 		direct_before="$(lvstore_write_stat "${DST_LVS}" dest_direct_gets)"
 		direct_bytes_before="$(lvstore_write_stat "${DST_LVS}" dest_direct_get_bytes)"
+		direct_hits_before="$(lvstore_write_stat "${DST_LVS}" dest_submit_cache_hits)"
 		drop_caches
 		if dd if="${DEV_MEM}" of=/dev/null bs=1M skip="${direct_offset}" \
 				count="${direct_size}" iflag=direct status=none; then
 			direct_after="$(lvstore_write_stat "${DST_LVS}" dest_direct_gets)"
 			direct_bytes_after="$(lvstore_write_stat "${DST_LVS}" dest_direct_get_bytes)"
+			direct_hits_after="$(lvstore_write_stat "${DST_LVS}" dest_submit_cache_hits)"
 			direct_delta=$((direct_after - direct_before))
 			direct_bytes_delta=$((direct_bytes_after - direct_bytes_before))
+			direct_hits_delta=$((direct_hits_after - direct_hits_before))
 			direct_ok=false
-			if [ "${direct_delta}" -eq "${direct_size}" ] &&
-			   [ "${direct_bytes_delta}" -eq $((direct_size * 1024 * 1024)) ]; then
+			if [ $((direct_delta + direct_hits_delta)) -eq "${direct_size}" ] &&
+			   [ "${direct_bytes_delta}" -eq $((direct_delta * 1024 * 1024)) ]; then
 				direct_ok=true
-				pass "cold_dest_1m: ${direct_delta} GETs landed directly in user buffers"
+				pass "cold_dest_1m: ${direct_delta} direct GETs, ${direct_hits_delta} prefetched"
 			else
-				fail "cold_dest_1m: direct_gets=${direct_delta}, bytes=${direct_bytes_delta}"
+				fail "cold_dest_1m: direct_gets=${direct_delta}, bytes=${direct_bytes_delta}, hits=${direct_hits_delta}"
 			fi
 			python3 - "${direct_delta}" "${direct_bytes_delta}" "${direct_ok}" <<'PY' >>"${RESULTS}"
 import json, sys
@@ -686,6 +709,72 @@ print(json.dumps(row, separators=(",", ":")))
 PY
 		else
 			fail "cold_dest_1m: direct read failed"
+		fi
+
+		# Run prefetch assertions after the demand-path cases: read-ahead may
+		# populate physically adjacent clusters owned by another lvol.
+		prefetch_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
+		if dd if="${DEV_PREFETCH}" of=/dev/null bs=4K \
+				skip=$((64 * 256)) count=1 iflag=direct status=none; then
+			prefetch_after_hole="$(lvstore_write_stat "${DST_LVS}" \
+				dest_prefetch_gets)"
+			if [ "${prefetch_after_hole}" -eq "${prefetch_before}" ]; then
+				pass "dest_prefetch_holes: unallocated window issued no GET"
+			else
+				fail "dest_prefetch_holes: $((prefetch_after_hole - prefetch_before)) unexpected GETs"
+			fi
+		else
+			fail "dest_prefetch_holes: sparse read failed"
+		fi
+
+		# With kernel readahead disabled, consecutive 4K reads within the first
+		# object must open the low-priority whole-object prefetch window.
+		drop_caches
+		prefetch_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
+		prefetch_hits_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_hits)"
+		cache_hits_before="$(lvstore_write_stat "${DST_LVS}" dest_submit_cache_hits)"
+		if dd if="${DEV_PREFETCH}" of=/dev/null bs=4K count=$((2 * 256)) \
+				iflag=direct status=none; then
+			prefetch_after="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
+			prefetch_delta=$((prefetch_after - prefetch_before))
+			if [ "${prefetch_delta}" -gt 0 ]; then
+				pass "dest_prefetch_seq: ${prefetch_delta} low-priority whole GETs"
+			elif [ "${prefetch_after}" -gt 0 ]; then
+				pass "dest_prefetch_seq: range was already prefetched"
+			else
+				fail "dest_prefetch_seq: no prefetch GETs"
+			fi
+			dd if="${DEV_PREFETCH}" of=/dev/null bs=4K skip=$((2 * 256)) \
+				count=$((1 * 256)) iflag=direct status=none || true
+			prefetch_hits_after="$(lvstore_write_stat "${DST_LVS}" \
+				dest_prefetch_hits)"
+			cache_hits_after="$(lvstore_write_stat "${DST_LVS}" \
+				dest_submit_cache_hits)"
+			prefetch_hit_delta=$((prefetch_hits_after - prefetch_hits_before))
+			cache_hit_delta=$((cache_hits_after - cache_hits_before))
+			if [ "${prefetch_hit_delta}" -gt 0 ] ||
+			   [ "${cache_hit_delta}" -gt 0 ]; then
+				pass "dest_prefetch_hit: ${prefetch_hit_delta} joins, ${cache_hit_delta} cache hits"
+			else
+				fail "dest_prefetch_hit: prefetched range was fetched again"
+			fi
+		else
+			fail "dest_prefetch_seq: sequential read failed"
+		fi
+
+		# One isolated seek must close the current sequence without launching
+		# another read-ahead window.
+		prefetch_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
+		skip_seq_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_skip_seq)"
+		dd if="${DEV_PREFETCH}" of=/dev/null bs=4K skip=$((12 * 256)) \
+			count=1 iflag=direct status=none || true
+		prefetch_after="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
+		skip_seq_after="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_skip_seq)"
+		if [ "${prefetch_after}" -eq "${prefetch_before}" ] &&
+		   [ "${skip_seq_after}" -gt "${skip_seq_before}" ]; then
+			pass "dest_prefetch_random: jump suppressed read-ahead"
+		else
+			fail "dest_prefetch_random: gets=$((prefetch_after - prefetch_before)) skip_seq=$((skip_seq_after - skip_seq_before))"
 		fi
 
 		fast_hits_before="$(lvstore_write_stat "${DST_LVS}" \
@@ -723,9 +812,11 @@ PY
 
 		# Keep the memory import long enough to print release stats.
 		unexpose "${NS_MEM}"; unexpose "${NS_ROOT}"; unexpose "${NS_META}"
+		unexpose "${NS_PREFETCH}"
 		delete_lvol mem_live
 		delete_lvol root_live
 		delete_lvol meta_live
+		delete_lvol prefetch_live
 		for _ in $(seq 50); do
 			dd if="${TGT_LOG}" bs=1 skip="${MARK}" status=none 2>/dev/null |
 				grep -aq 'Releasing imported export' && break
