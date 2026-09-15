@@ -111,7 +111,7 @@ forfeited its previous state.
 ```sh
 scripts/rcow_start.sh          # start target, create/attach lvstore, export nvmf, connect host
 scripts/rcow_stop.sh           # reverse order: disconnect, flush, unload, stop process
-scripts/rcow_upgrade.sh       # stop the target alone, for upgrades: no disconnect, no unload
+scripts/rcow_upgrade.sh        # stop the target alone, for upgrades: no disconnect, no unload
 scripts/rcow_recovery.sh       # use this after an unclean exit
 scripts/rcow_purge.sh          # delete the whole lvstore back to a clean state (irreversible)
 ```
@@ -120,12 +120,22 @@ scripts/rcow_purge.sh          # delete the whole lvstore back to a clean state 
 than starting a second instance.
 
 `rcow_upgrade.sh` is the upgrade path and not a general stop. It flushes and
-checkpoints the lvstore online, then kills the target so the host keeps its
-namespaces and only pauses I/O, leaving the state for a replacement to pick up.
-With no target running, or one that does not answer RPC, there is nothing to
-pause: it clears the target-side residue and exits 0. Pass `--candidate <binary>`
-to run the version gate before anything is touched; it refuses if the two builds
-cannot share the on-disk state. Use `rcow_stop.sh` for anything else.
+checkpoints the lvstore online, pins the initiator timeouts the pause depends on,
+then kills the target so the host keeps its namespaces and only pauses I/O,
+leaving the state for a replacement to pick up.
+
+`--candidate <binary>` is required on a real run: it is the binary the upgrade
+will start, and the version gate refuses if the two builds cannot share the
+on-disk state. There is nowhere to take a default from -- an upgrade switches the
+versioned directory in only after the old process is confirmed dead, so
+`RCOW_TGT_BIN` still names the outgoing binary while the stop is running. The
+systemd path reads it from the hot-restart marker instead. `--dry-run` rehearses
+the online steps and may leave it out, because nothing is risked either way.
+
+With no target running, there is nothing to pause: it clears the target-side
+residue and exits 0. With one that does not answer RPC, it touches nothing at all
+and exits non-zero, so the operator still has a process to talk to. Use
+`rcow_stop.sh` for anything else.
 
 Credentials are read from `s3.cfg` and passed on **only through the target
 process's environment** — never on the command line, never into logs.

@@ -449,7 +449,8 @@ do_upgrade()
 	info "${label}: upgrading (new binary ${new_bin})"
 	start="$(date +%s)"
 
-	if ! "${SCRIPTS}/rcow_upgrade.sh" >"${WORKDIR}/hot_stop_${label}.log" 2>&1; then
+	if ! "${SCRIPTS}/rcow_upgrade.sh" --candidate "${new_bin}" \
+			>"${WORKDIR}/hot_stop_${label}.log" 2>&1; then
 		fail "${label}: rcow_upgrade.sh failed"
 		tail -20 "${WORKDIR}/hot_stop_${label}.log" | sed 's/^/       /'
 		return 1

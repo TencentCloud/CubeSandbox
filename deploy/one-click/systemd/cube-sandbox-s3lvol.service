@@ -12,8 +12,10 @@ PartOf=cube-sandbox-control.target cube-sandbox-compute.target
 Type=simple
 EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
 ExecStart=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-s3lvol-supervise.sh
-# See the header of cube-s3lvol-stop.sh: this stop never disconnects the NVMf
-# initiator, so nvme_tcp reconnects to the rebuilt NQN/NSID grid.
+# See the header of cube-s3lvol-stop.sh for the states it tells apart. Only a
+# planned stop of a live target disconnects the initiator; a hot restart, and a
+# target that is already gone, leave it in place so nvme_tcp reconnects to the
+# rebuilt NQN/NSID grid.
 ExecStop=/usr/bin/bash /usr/local/services/cubetoolbox/scripts/systemd/cube-s3lvol-stop.sh
 Restart=on-failure
 RestartSec=3s

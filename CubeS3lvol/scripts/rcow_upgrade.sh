@@ -15,21 +15,25 @@
 #  Order, and what each step is for:
 #
 #    1. one live target that answers RPC   two targets over one WAL cannot be
-#                                          recovered from. With none, or with one
-#                                          that cannot be reached, there is
-#                                          nothing to pause and only residue
-#                                          left to clear
+#                                          recovered from. With none, there is
+#                                          nothing to pause and only residue left
+#                                          to clear; with one that cannot be
+#                                          reached, nothing at all is touched --
+#                                          see the note at that branch
 #    2. version gate, when --candidate     the new binary has to accept the
 #                                          formats on disk; only here are both
 #                                          descriptions known at once
-#    3. rcow_flush_lvstore      push everything acknowledged to S3; online
-#    4. rcow_checkpoint_lvstore snapshot the chunk map and truncate the journal,
+#    3. pin the rollback budget             the connect flags only reach a fresh
+#                                          connection, so the controllers an
+#                                          upgrade inherits are written to here
+#    4. rcow_flush_lvstore      push everything acknowledged to S3; online
+#    5. rcow_checkpoint_lvstore snapshot the chunk map and truncate the journal,
 #                               which is what keeps the next attach short
-#    5. snapshot the layout     the file rcow_verify_active --expect compares to
-#    6. SIGKILL the target      a crash, not a shutdown: a crash is the one exit
+#    6. snapshot the layout     the file rcow_verify_active --expect compares to
+#    7. SIGKILL the target      a crash, not a shutdown: a crash is the one exit
 #                               guaranteed to leave the namespace in place and
 #                               drive the host into error recovery
-#    7. clear four leftovers    pidfile, RPC socket, its .lock, cpu locks
+#    8. clear four leftovers    pidfile, RPC socket, its .lock, cpu locks
 #
 #  === What this must never do ===
 #
@@ -46,15 +50,20 @@
 #      script consumes it. Writing it here would make an unasked-for stop look
 #      like an upgrade's.
 #
-#  Usage: rcow_upgrade.sh [--dry-run] [--candidate <binary>]
+#  Usage: rcow_upgrade.sh --candidate <binary> [--dry-run]
 #
+#    --candidate  the binary the upgrade intends to start. Required on a real
+#                 run: the version gate is the only moment both builds can
+#                 describe themselves, and it is the only guard against a new
+#                 binary that cannot read the formats already on disk. It is
+#                 deliberately not defaulted to RCOW_TGT_BIN -- an upgrade
+#                 switches the versioned directory in only after the old process
+#                 is confirmed dead, so that path still names the outgoing
+#                 binary here. The stop path takes it from the hot-restart
+#                 marker, which records it when the orchestrator writes one.
 #    --dry-run    run the online steps and print what would be killed and removed,
-#                 without killing or removing anything.
-#    --candidate  check the version gate against this binary before anything is
-#                 touched, and refuse if the two builds cannot share the on-disk
-#                 state. Optional: without it the caller is either the mechanism
-#                 test, which upgrades a binary to itself, or an operator who has
-#                 decided deliberately.
+#                 without killing or removing anything. The one thing that may be
+#                 left out here, because nothing is risked either way.
 
 set -u
 
@@ -73,7 +82,7 @@ while [ "$#" -gt 0 ]; do
 		# the caller asking for a gate is exactly the caller that must not
 		# get one silently skipped.
 		[ -n "${CANDIDATE}" ] || rcow_die "--candidate needs a binary path" ;;
-	-h|--help)   sed -n '2,57p' "${BASH_SOURCE[0]}"; exit 0 ;;
+	-h|--help)   sed -n '2,65p' "${BASH_SOURCE[0]}"; exit 0 ;;
 	*)           rcow_die "unknown option: $1 (try --help)" ;;
 	esac
 	shift
@@ -176,27 +185,68 @@ fi
 TGT_PID="${INSTANCES}"
 rcow_log "target pid ${TGT_PID}"
 
-# Also a degrade, and deliberately not a kill: a target that cannot be asked to
-# flush is not killed on this path. The residue still goes, because the stop has
-# to succeed; the live process is left to refuse the restart, which rcow_start.sh
-# does by finding it by binary and not starting a second one over the same WAL.
+# Not a kill, and now not a cleanup either. The socket is this process's only way
+# back in: unlinking it makes a live target permanently unreachable, so no flush,
+# no checkpoint and no clean shutdown through rcow_stop.sh remain and SIGKILL
+# would be the only exit left. Refusing leaves the operator a process they can
+# still talk to, and rcow_start.sh's instance guard keeps a second target from
+# starting over the same WAL meanwhile.
+#
+# The cost is worth naming: a non-zero ExecStop leaves the unit FAILED, and
+# `systemctl stop` on a failed unit is a no-op, so recovery is
+# `systemctl reset-failed` and then the stop by hand.
 if ! rcow_wait_rpc 10 "${TGT_PID}"; then
-	rcow_log "the target (pid ${TGT_PID}) does not answer RPC on \
-${RCOW_RPC_SOCK}; clearing its residue and leaving the process alone"
-	hot_clear_residue
-	exit 0
+	rcow_err "the target (pid ${TGT_PID}) does not answer RPC on \
+${RCOW_RPC_SOCK}; leaving it and its residue alone. Nothing was signalled and \
+nothing was removed"
+	exit 1
 fi
 
 # ==========================================================================
 # Before the target is touched. The running side describes itself only while it
 # is alive, and the two descriptions can only be compared while both exist, so
 # this is the last moment the decision can be made at all.
+#
+# A real run without a candidate is refused rather than let through ungated: the
+# journal carries no version field, so a new binary that does not recognise an op
+# reads it as the end of the log and silently truncates acknowledged writes, and
+# nothing else in this script can catch that.
+if [ "${DRY_RUN}" -eq 0 ] && [ -z "${CANDIDATE}" ]; then
+	fail_live "no --candidate, so the version gate has nothing to compare. \
+Pass the binary the upgrade will start, or let the orchestrator record it in \
+${RCOW_HOT_MARKER} before asking for the stop"
+fi
+
 if [ -n "${CANDIDATE}" ]; then
 	rcow_step "version gate against ${CANDIDATE}"
 	if ! rcow_version_gate_check "${CANDIDATE}"; then
 		fail_live "the version gate refused the hot upgrade"
 	fi
 fi
+
+# ==========================================================================
+# The connect flags pin these for a fresh connection, but a connection keeps
+# whatever it was made with -- and an upgrade runs against controllers that
+# already exist, which need not have been connected by rcow_start.sh at all.
+# Writing them here is what makes the unit's TimeoutStopSec mean anything.
+rcow_step "initiator: pin the rollback budget"
+rcow_tune_initiator_timeouts
+case "$?" in
+0)
+	rcow_log "initiator: ${RCOW_NUM_SUBSYS} controller(s) at \
+reconnect_delay=${RCOW_RECONNECT_DELAY}s, ctrl_loss_tmo=${RCOW_CTRL_LOSS_TMO}s" ;;
+1)
+	# Refusing rather than warning: with fast_io_fail_tmo set, every pause is a
+	# fast failure -- the opposite of what this path is for -- and writing the
+	# other two attributes does not undo it.
+	fail_live "the initiator is set to fail I/O on the first pause; clear \
+fast_io_fail_tmo before upgrading" ;;
+2)
+	# pre-5.7: the host runs on its own default whatever this is configured to.
+	# Worth saying, not worth refusing over.
+	rcow_warn "this kernel exports no reconnect_delay / ctrl_loss_tmo; the \
+pause budget is the kernel's default, not ${RCOW_CTRL_LOSS_TMO}s" ;;
+esac
 
 # ==========================================================================
 rcow_step "flush: everything acknowledged into S3"

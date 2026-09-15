@@ -320,10 +320,17 @@ RCOW_NO_HUGE="${RCOW_NO_HUGE:-1}"
 RCOW_RUN_DIR="${RCOW_RUN_DIR:-/var/tmp/rcow}"
 RCOW_PIDFILE="${RCOW_PIDFILE:-${RCOW_RUN_DIR}/s3lvol_tgt.pid}"
 
-# The intent marker, "<boot_id> <pid>", read only by rcow_hot_marker_consume().
+# The intent marker, "<boot_id> <pid> [<candidate>]", read only by
+# rcow_hot_marker_consume().
 # It answers one question -- was the last stop asked for by an upgrade? -- and
 # it must be impossible for a stale one to answer yes, because RCOW_RUN_DIR is
 # not tmpfs and the file outlives a reboot.
+#
+# The candidate is the binary the upgrade intends to start, and it travels here
+# rather than through the stop's environment because this file's writer is the
+# only side that knows it: the stop runs before the versioned directory is
+# switched into place, so at that point RCOW_TGT_BIN still names the outgoing
+# binary and comparing it would compare the running build with itself.
 RCOW_HOT_MARKER="${RCOW_RUN_DIR}/hot-restart"
 # The layout captured before the target is killed, which rcow_verify_active
 # --expect compares the post-upgrade layout against.
@@ -712,7 +719,7 @@ rcow_target_alive()
 # so only an intent to hot-restart can make the marker read as one.
 rcow_hot_marker_write()
 {
-	local pid boot
+	local pid boot candidate="${1:-}"
 
 	pid="$(rcow_target_pid)" || {
 		rcow_err "no live target to name in ${RCOW_HOT_MARKER}"
@@ -725,7 +732,8 @@ rcow_hot_marker_write()
 	}
 
 	rcow_ensure_run_dir
-	printf '%s %s\n' "${boot}" "${pid}" >"${RCOW_HOT_MARKER}" || {
+	printf '%s %s%s\n' "${boot}" "${pid}" "${candidate:+ ${candidate}}" \
+		>"${RCOW_HOT_MARKER}" || {
 		rcow_err "cannot write ${RCOW_HOT_MARKER}"
 		return 1
 	}
@@ -735,29 +743,39 @@ rcow_hot_marker_write()
 # Consume the marker and answer whether it is ours: this boot, and a pid that is
 # still the live target.
 #
-# The marker is removed only once it has been honoured, or once it is stale by
-# construction. The distinction matters because the two failures want opposite
-# handling: a marker naming another boot is junk and must go, while a marker
-# naming a target this host cannot name by path is a *live* intent that a stop
-# must not silently discard. Hence the identity check is rcow_target_instances
-# rather than rcow_pid_is_target -- an upgrade has already staged the candidate
-# by the time it writes the marker, so the strict path comparison is exactly the
-# one that fails there. A marker left in place still reads as absent, so the
-# stop falls through the same way it did before.
+#   0  honoured, and the marker is gone
+#   1  nothing to honour -- no marker, a malformed one, or one from another boot
+#   2  this boot and this marker, but the pid it names is not a running target
+#
+# The caller has to tell 1 from 2. A 1 means nobody asked for a hot restart; a 2
+# may be a live intent this host cannot confirm, and answering it by falling
+# through to the planned path takes the outage this mechanism exists to remove.
+#
+# The marker is unlinked only once it has been honoured: removing it on a
+# mismatch would discard a live intent, where the other two cases are stale by
+# construction. The identity check is rcow_target_instances rather than
+# rcow_pid_is_target because an upgrade has already been staged by the time it
+# writes the marker, and the strict path comparison is exactly the one that
+# fails there.
 #
 # Both fields are needed. boot_id alone misses a marker whose target died before
 # a reboot and whose pid was reused after it; the pid alone misses a file that
 # outlived the boot it names, because RCOW_RUN_DIR is not tmpfs.
+#
+# RCOW_HOT_CANDIDATE is set to the candidate the writer recorded, or empty when
+# it recorded none.
 rcow_hot_marker_consume()
 {
-	local boot pid now
+	local boot pid candidate now
+
+	RCOW_HOT_CANDIDATE=""
 
 	if [ ! -s "${RCOW_HOT_MARKER}" ]; then
 		rm -f "${RCOW_HOT_MARKER}"
 		return 1
 	fi
 
-	read -r boot pid _ <"${RCOW_HOT_MARKER}"
+	read -r boot pid candidate _ <"${RCOW_HOT_MARKER}"
 	now="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
 
 	if [ -z "${boot}" ] || [ -z "${pid}" ] || [ -z "${now}" ] ||
@@ -769,9 +787,10 @@ rcow_hot_marker_consume()
 	if ! printf '%s\n' "$(rcow_target_instances)" | grep -qxF -- "${pid}"; then
 		rcow_warn "${RCOW_HOT_MARKER} names pid ${pid}, which is not a running \
 target; leaving the marker in place rather than discarding the intent"
-		return 1
+		return 2
 	fi
 
+	RCOW_HOT_CANDIDATE="${candidate}"
 	rm -f "${RCOW_HOT_MARKER}"
 	return 0
 }

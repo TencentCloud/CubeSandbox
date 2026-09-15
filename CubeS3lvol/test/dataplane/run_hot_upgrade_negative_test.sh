@@ -505,7 +505,8 @@ mkdir -p "${WORKDIR}/crashbin"
 printf '#!/usr/bin/env bash\nexit 1\n' >"${WORKDIR}/crashbin/s3lvol_tgt"
 chmod +x "${WORKDIR}/crashbin/s3lvol_tgt"
 
-if "${SCRIPTS}/rcow_upgrade.sh" >"${WORKDIR}/hot_stop.log" 2>&1; then
+if "${SCRIPTS}/rcow_upgrade.sh" --candidate "${TGT_BIN}" \
+		>"${WORKDIR}/hot_stop.log" 2>&1; then
 	pass "rcow_upgrade.sh stopped the target without unloading"
 else
 	fail "rcow_upgrade.sh failed"
@@ -575,8 +576,9 @@ fi
 # ==========================================================================
 scenario "[5] a stale intent marker is not honoured"
 
-# The marker is "<boot_id> <pid>"; it answers only "did the last stop happen
-# because an upgrade asked for it". A stale one must read as absent, because
+# The marker is "<boot_id> <pid> [<candidate>]"; it answers only "did the last
+# stop happen because an upgrade asked for it", and carries the binary that
+# upgrade intends to start. A stale one must read as absent, because
 # RCOW_RUN_DIR (/var/tmp/rcow by default) survives a reboot.
 if rcow_hot_marker_write; then
 	pass "rcow_hot_marker_write recorded the live target"
@@ -587,6 +589,37 @@ if rcow_hot_marker_write; then
 	fi
 else
 	fail "rcow_hot_marker_write failed with a live target"
+fi
+
+# The candidate travels with the marker. The stop path cannot discover it any
+# other way: it runs before the versioned directory is switched in, so
+# RCOW_TGT_BIN still names the outgoing binary there, and a gate handed that
+# would compare the running build with itself.
+if rcow_hot_marker_write "${TGT_BIN}"; then
+	if rcow_hot_marker_consume; then
+		[ "${RCOW_HOT_CANDIDATE}" = "${TGT_BIN}" ] &&
+			pass "consume hands back the candidate the writer recorded" ||
+			fail "the candidate came back as '${RCOW_HOT_CANDIDATE}', not '${TGT_BIN}'"
+	else
+		fail "a marker carrying a candidate was not honoured"
+	fi
+fi
+
+# And a hot stop with no candidate is refused rather than run ungated: the gate
+# is the only guard against a new binary that cannot read the formats already on
+# disk, and the journal has no version field to catch it later.
+if rcow_hot_marker_write; then
+	if "${SCRIPTS}/rcow_upgrade.sh" >"${WORKDIR}/nocand.log" 2>&1; then
+		fail "a hot stop with no candidate was allowed to proceed"
+	else
+		pass "a hot stop with no candidate is refused"
+	fi
+	[ -e "${RCOW_HOT_MARKER}" ] &&
+		pass "the refusal left the marker alone" ||
+		fail "the refusal removed the marker"
+	rcow_target_alive &&
+		pass "the refused stop left the target running" ||
+		fail "the refused stop killed the target"
 fi
 
 # Fake a boot_id change: the pid is still the live target, only the boot differs.
@@ -601,16 +634,25 @@ if rcow_hot_marker_write; then
 	fi
 fi
 
-# A boot_id that matches but a pid that is not the live target: this is the
-# reboot-with-pid-reuse case the pid check is for.
+# A boot_id that matches but a pid that is not the live target. Two readings are
+# possible -- a reboot whose pid was reused, or a live intent this host cannot
+# confirm -- and they want opposite handling, so consume answers 2 rather than 1
+# and the caller refuses instead of falling through to the planned stop. The
+# marker has to survive: the intent is the operator's, not this script's.
 if rcow_hot_marker_write; then
 	boot="$(cat /proc/sys/kernel/random/boot_id)"
 	printf '%s %s\n' "${boot}" "999999" >"${RCOW_HOT_MARKER}"
-	if rcow_hot_marker_consume; then
-		fail "a marker naming a pid that is not the target was honoured"
-	else
-		pass "a marker naming a non-target pid is refused"
-	fi
+	rcow_hot_marker_consume
+	rc=$?
+	[ "${rc}" -eq 2 ] &&
+		pass "a marker naming a non-target pid answers 2, not 1" ||
+		fail "a non-target pid answered ${rc}, not 2"
+	[ -e "${RCOW_HOT_MARKER}" ] &&
+		pass "the marker survives a pid the host cannot confirm" ||
+		fail "the marker was discarded although the intent may be live"
+	rcow_target_alive &&
+		pass "the target is untouched by the refusal" ||
+		fail "the refusal killed the target"
 fi
 
 # Consume is one-shot: the file must be gone after it runs.
@@ -813,7 +855,8 @@ cannot be watched under I/O"
 	before_del="$(dmesg_count 'I/O error')"
 	before_rm="$(dmesg_count "Removing ctrl: NQN \"${RCOW_NQN_PREFIX}")"
 
-	"${SCRIPTS}/rcow_upgrade.sh" >"${WORKDIR}/tmo_stop.log" 2>&1 ||
+	"${SCRIPTS}/rcow_upgrade.sh" --candidate "${TGT_BIN}" \
+		>"${WORKDIR}/tmo_stop.log" 2>&1 ||
 		fail "rcow_upgrade.sh failed before the window test"
 
 	deadline=$(( $(date +%s) + DELETE_WATCH_SEC ))
