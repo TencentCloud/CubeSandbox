@@ -119,6 +119,7 @@ flowchart TB
 | Third-party Redis | Non-empty `redis.host` → do not install built-in Redis |
 | Built-in MinIO | `minio.enabled=true` → deploy StatefulSet + Headless Service (`minio.*` only deploys MinIO itself; an empty `rootPassword` is auto-generated). If `volumeS3.endpoint` / `existingSecret` are not set, the chart derives the S3 config from the built-in MinIO and writes `volume-s3.conf` |
 | External S3 | `minio.enabled=false` plus `volumeS3.endpoint` / `volumeS3.existingSecret` → do not deploy the built-in MinIO; `volume-s3.conf` is generated from `volumeS3.*` |
+| Local-disk blobstore | `artifactStore.backend=fs` / `cubeOps.store.backend=fs` for templates and warehouse (default `s3`); S3 volumes unchanged |
 
 ### 2.3 Compute plane: four DaemonSets
 

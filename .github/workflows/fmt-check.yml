@@ -19,6 +19,7 @@ on:
       - 'cubecow/Makefile'
       - 'pkgs/CubeLog/Makefile'
       - 'pkgs/proto/Makefile'
+      - 'pkgs/blobstore/Makefile'
       - 'hypervisor/Makefile'
       - 'sdk/go/Makefile'
       - 'examples/cube-bench/Makefile'

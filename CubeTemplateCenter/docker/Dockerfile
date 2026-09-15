@@ -17,12 +17,11 @@ ARG CUBE_BUILD_TIME=unknown
 
 WORKDIR /src
 
-# CubeTemplateCenter/go.mod replaces CubeMaster, pkgs/CubeLog, pkgs/cubedb,
-# Cubelet and pkgs/proto with local paths, so all six module roots have to be
-# in the build context.
+# go.mod uses local replace; COPY those module roots before go mod download.
 COPY CubeTemplateCenter/go.mod CubeTemplateCenter/go.sum ./
 COPY CubeMaster/go.mod CubeMaster/go.sum /CubeMaster/
 COPY pkgs/CubeLog/go.mod pkgs/CubeLog/go.sum /pkgs/CubeLog/
+COPY pkgs/blobstore/go.mod pkgs/blobstore/go.sum /pkgs/blobstore/
 COPY pkgs/cubedb/go.mod pkgs/cubedb/go.sum /pkgs/cubedb/
 COPY Cubelet/go.mod Cubelet/go.sum /Cubelet/
 COPY pkgs/proto/go.mod pkgs/proto/go.sum /pkgs/proto/
@@ -31,6 +30,7 @@ RUN go mod download
 COPY CubeTemplateCenter/ ./
 COPY CubeMaster/ /CubeMaster/
 COPY pkgs/CubeLog/ /pkgs/CubeLog/
+COPY pkgs/blobstore/ /pkgs/blobstore/
 COPY pkgs/cubedb/ /pkgs/cubedb/
 COPY Cubelet/ /Cubelet/
 COPY pkgs/proto/ /pkgs/proto/

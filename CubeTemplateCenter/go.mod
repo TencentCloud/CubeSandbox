@@ -7,12 +7,12 @@ require (
 	github.com/containerd/containerd v1.7.32
 	github.com/gin-gonic/gin v1.11.0
 	github.com/google/go-containerregistry v0.21.6
-	github.com/minio/minio-go/v7 v7.3.0
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/tencentcloud/CubeSandbox/CubeMaster v0.0.0-00010101000000-000000000000
 	github.com/tencentcloud/CubeSandbox/cubelog v0.0.0-20260828105459-09274501dd12
 	github.com/tencentcloud/CubeSandbox/pkgs/CubeLog v0.1.1-0.20260113105508-a996703fa42f
+	github.com/tencentcloud/CubeSandbox/pkgs/blobstore v0.0.0
 	github.com/tencentcloud/CubeSandbox/pkgs/cubedb v0.0.0-00010101000000-000000000000
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.22.0
@@ -72,6 +72,7 @@ require (
 	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
+	github.com/minio/minio-go/v7 v7.3.0 // indirect
 	github.com/moby/sys/sequential v0.7.0 // indirect
 	github.com/moby/sys/userns v0.1.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
@@ -137,6 +138,8 @@ replace github.com/tencentcloud/CubeSandbox/pkgs/cubedb => ../pkgs/cubedb
 replace github.com/tencentcloud/CubeSandbox/Cubelet => ../Cubelet
 
 replace github.com/tencentcloud/CubeSandbox/pkgs/CubeLog => ../pkgs/CubeLog
+
+replace github.com/tencentcloud/CubeSandbox/pkgs/blobstore => ../pkgs/blobstore
 
 replace github.com/tencentcloud/CubeSandbox/pkgs/proto => ../pkgs/proto
 

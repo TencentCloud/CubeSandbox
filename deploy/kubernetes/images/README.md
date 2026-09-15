@@ -107,7 +107,7 @@ By default the script pins those source trees to `${SOURCE_REF}` (defaulting to
 `cube-lifecycle-manager/`, `web/`, and `deploy/one-click/webui/` at that git
 ref into `${BUILD_ROOT}/source-tree/` via `git archive` and points `REPO_ROOT`
 there for the duration of the build. When building `cube-master` or
-`cubemastercli`, it also exports `pkgs/CubeLog/`, `pkgs/cubedb/`, and `Cubelet/`;
+`cubemastercli`, it also exports the trees those Dockerfiles COPY.
 `cube-master` additionally exports `deploy/scripts/` (volume-deps installer) and
 `examples/volume/cos/` (Controller plugin binary + example conf).
 When building `cubelet`, it also exports `Cubelet/`, `CubeNet/`, `pkgs/CubeLog/`,
@@ -116,8 +116,8 @@ When building `cubelet`, it also exports `Cubelet/`, `CubeNet/`, `pkgs/CubeLog/`
 `cubevsmapdump`. When building `cube-shim`, it also exports `CubeShim/`,
 `hypervisor/`, `deploy/one-click/config-cube.toml`, and
 `deploy/kubernetes/images/scripts/`.
-When building `cube-ops`, it also exports `CubeOps/`, the cubelog module, and `pkgs/cubedb/` (required by
-`CubeOps/Dockerfile`; not present on older release tags such as `v0.5.1` — use
+When building `cube-ops`, it also exports the trees that Dockerfile COPYs
+(not present on older release tags such as `v0.5.1` — use
 `SOURCE_REF=""` for worktree builds).
 When building `cube-s3lvol`, it also exports `CubeS3lvol/` and
 `deploy/kubernetes/images/scripts/cube-s3lvol-entrypoint.sh`.
@@ -226,7 +226,7 @@ behavior.
   `CUBE_VERSION` / `CUBE_COMMIT` / `CUBE_BUILD_TIME`. No duplicate Dockerfile is
   kept under `deploy/kubernetes/images/`.
 - `cube-ops` is built from `CubeOps/Dockerfile` with context = repository root
-  (needs sibling `pkgs/cubedb/` via `CubeOps/Dockerfile.dockerignore`); same as CI
+  (needs local replace modules via `CubeOps/Dockerfile.dockerignore`); same as CI
   `release-docker-images.yml`. No duplicate Dockerfile is kept here.
 - `cubemastercli` is built exactly like CI (`.github/workflows/release-docker-images.yml`):
   context = repository root, file = `CubeMaster/docker/Dockerfile.cubemastercli`,

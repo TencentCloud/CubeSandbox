@@ -213,6 +213,10 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 			"status":       ArtifactStatusReady,
 			"last_error":   "",
 		}
+		if backend, objectKey := artifactStoreColumns(snapshot.artifactID); backend != "" {
+			updates["storage_backend"] = backend
+			updates["object_key"] = objectKey
+		}
 	} else {
 		if !errors.Is(err, errS3PresignNotConfigured) {
 			return nil, err

@@ -65,6 +65,18 @@ func TestArtifactDataExistsS3ErrorFallsBackToLocalDisk(t *testing.T) {
 	}
 }
 
+func TestArtifactDataExistsBackendWithoutURL(t *testing.T) {
+	artifact := &models.RootfsArtifact{
+		ArtifactID:     "rfs-backend",
+		StorageBackend: "fs",
+		Ext4Path:       filepath.Join(t.TempDir(), "does-not-exist.ext4"),
+	}
+	statS3 := func() (bool, error) { return true, nil }
+	if _, ok := artifactDataExists(artifact, statS3); !ok {
+		t.Fatal("expected reuse when storage_backend is set even without artifact_url")
+	}
+}
+
 func TestArtifactDataExistsLocalOnlyArtifact(t *testing.T) {
 	dir := t.TempDir()
 	ext4Path := filepath.Join(dir, "rootfs.ext4")

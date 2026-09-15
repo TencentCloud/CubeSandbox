@@ -140,6 +140,9 @@ func TestProxyS3ArtifactSuccessHEAD(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("unexpected method %s, want GET (HEAD is proxied as GET)", r.Method)
 		}
+		if got := r.Header.Get("Range"); got != "bytes=0-0" {
+			t.Fatalf("HEAD proxy Range=%q, want bytes=0-0", got)
+		}
 		if got := r.Header.Get("If-None-Match"); got != "client-etag" {
 			t.Fatalf("If-None-Match=%q", got)
 		}

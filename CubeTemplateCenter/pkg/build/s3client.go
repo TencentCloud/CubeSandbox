@@ -5,10 +5,12 @@
 package build
 
 import (
+	"log/slog"
 	"sync"
 
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/s3store"
-	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/tcconfig"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore/configenv"
 )
 
 // SharedS3Client returns the process-wide S3 client, initializing it lazily on
@@ -31,26 +33,51 @@ type s3ClientFactory struct {
 }
 
 func (f *s3ClientFactory) instance() (*s3store.Client, bool) {
-	f.once.Do(func() {
-		enabled, endpoint, bucket, accessKey, secretKey, region, usePathStyle, useSSL, artifactPrefix := tcconfig.S3Config()
-		if !enabled {
-			return
-		}
-		client, err := s3store.NewClient(s3store.Config{
-			Endpoint:       endpoint,
-			Bucket:         bucket,
-			AccessKey:      accessKey,
-			SecretKey:      secretKey,
-			Region:         region,
-			UsePathStyle:   usePathStyle,
-			UseSSL:         useSSL,
-			ArtifactPrefix: artifactPrefix,
-		})
-		if err != nil {
-			return
-		}
-		f.client = client
-		f.enabled = true
-	})
+	f.once.Do(f.init)
 	return f.client, f.enabled
+}
+
+func (f *s3ClientFactory) init() {
+	backend := configenv.ArtifactStoreBackend()
+	s3 := configenv.ParseArtifactS3()
+	cfg := s3store.Config{
+		Driver:         backend,
+		Endpoint:       s3.Endpoint,
+		Bucket:         s3.Bucket,
+		AccessKey:      s3.AccessKey,
+		SecretKey:      s3.SecretKey,
+		Region:         s3.Region,
+		UsePathStyle:   s3.UsePathStyle,
+		UseSSL:         s3.UseSSL,
+		ArtifactPrefix: configenv.EnvOr(configenv.EnvS3ArtifactPrefix),
+		FSRoot:         configenv.ResolveArtifactFSRoot(),
+	}
+	if err := blobstore.AnnounceIfFS(cfg.FSRoot, backend); err != nil {
+		slog.Error("storage backend consistency check failed", "error", err)
+		return
+	}
+	if backend != "fs" && !s3.Enabled {
+		slog.Warn("storage backend degraded",
+			"requested", "s3", "effective", "local-disk",
+			"reason", "incomplete CUBE_S3_* credentials")
+		return
+	}
+	client, err := s3store.NewClient(cfg)
+	if err != nil {
+		if backend == "fs" {
+			slog.Error("fs artifact store failed to open", "error", err, "root", cfg.FSRoot)
+			return
+		}
+		slog.Warn("storage backend degraded",
+			"requested", "s3", "effective", "local-disk",
+			"reason", err.Error())
+		return
+	}
+	f.client = client
+	f.enabled = true
+	if backend == "fs" {
+		slog.Info("storage backend selected", "backend", "fs", "reason", "explicit", "root", cfg.FSRoot)
+		return
+	}
+	slog.Info("storage backend selected", "backend", "s3", "reason", "explicit")
 }

@@ -403,23 +403,6 @@ func TestSweepUploadsTTL(t *testing.T) {
 	}
 }
 
-func TestSweepIncompleteUploadsAgeGate(t *testing.T) {
-	blobs := NewMemBlobStore()
-	young := IncompleteUpload{Key: uploadsPrefix + "young.tar.gz", UploadID: "u-young", Initiated: time.Now()}
-	old := IncompleteUpload{Key: uploadsPrefix + "old.tar.gz", UploadID: "u-old", Initiated: time.Now().Add(-2 * time.Hour)}
-	blobs.InjectIncomplete(young)
-	blobs.InjectIncomplete(old)
-	im := newImporter(&fakeImportStore{}, blobs, FetchConfig{}, t.TempDir(), 30*time.Minute)
-	im.sweepUploads(context.Background())
-	left, err := blobs.ListIncompleteUploads(context.Background(), uploadsPrefix)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(left) != 1 || left[0].UploadID != "u-young" {
-		t.Fatalf("incomplete uploads=%v want only young", left)
-	}
-}
-
 func TestReleaseHeldRequeues(t *testing.T) {
 	fake := &fakeImportStore{job: store.ImportJob{ID: "held-1", Status: store.ImportRunning}}
 	im := newImporter(fake, NewMemBlobStore(), FetchConfig{}, t.TempDir(), time.Minute)
@@ -432,6 +415,36 @@ func TestReleaseHeldRequeues(t *testing.T) {
 	if got.Status != store.ImportPending {
 		t.Fatalf("status=%s want pending", got.Status)
 	}
+}
+
+func TestImporterGCThrottled(t *testing.T) {
+	inner := NewMemBlobStore()
+	gc := &gcCountStore{BlobStore: inner}
+	im := newImporter(&fakeImportStore{}, gc, FetchConfig{}, t.TempDir(), time.Minute)
+	ctx := context.Background()
+	im.maybeGC(ctx)
+	if gc.n != 0 {
+		t.Fatalf("GC within interval = %d want 0", gc.n)
+	}
+	im.lastGC = time.Now().Add(-2 * time.Hour)
+	im.maybeGC(ctx)
+	if gc.n != 1 {
+		t.Fatalf("GC after interval = %d want 1", gc.n)
+	}
+	im.maybeGC(ctx)
+	if gc.n != 1 {
+		t.Fatalf("GC on next call = %d want 1", gc.n)
+	}
+}
+
+type gcCountStore struct {
+	BlobStore
+	n int
+}
+
+func (g *gcCountStore) GC(context.Context) error {
+	g.n++
+	return nil
 }
 
 func TestMemBlobStorePutPartSize(t *testing.T) {

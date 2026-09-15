@@ -447,6 +447,11 @@ func assertHeadSchema(t *testing.T, db *sql.DB) {
 				"idx_snapshot_runtime_active_node_ip",
 			},
 		},
+		{
+			table:   "t_component_warehouse",
+			columns: []string{"object_key"},
+			absent:  []string{"rel_path"},
+		},
 	}
 	for _, c := range cases {
 		cols := tableColumns(ctx, t, db, c.table)

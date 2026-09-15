@@ -130,6 +130,10 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 
 	log.Init(config.GetLogConfig())
 
+	if err := templatecenter.InitArtifactStore(ctx); err != nil {
+		return fmt.Errorf("artifact store: %w", err)
+	}
+
 	errorcode.InitCubeCodeRetryMap(cfg)
 
 	task.InitTask(ctx, cfg)

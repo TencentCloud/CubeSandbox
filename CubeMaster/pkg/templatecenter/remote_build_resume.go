@@ -106,10 +106,10 @@ type RemoteBuildResult struct {
 	// This is why TC and CubeMaster must share the artifact directory (one CBS
 	// disk / PVC): the file is written by TC and served by CubeMaster.
 	MasterNodeIP string
-	// ArtifactURL is the S3/MinIO presigned download URL. When non-empty,
-	// distribution uses this URL directly instead of building a local HTTP URL
-	// from MasterNodeIP.
+	// ArtifactURL is the S3/MinIO presigned download URL or a blobstore: locator.
 	ArtifactURL             string
+	StorageBackend          string
+	ObjectKey               string
 	CubeEgressCABaked       bool
 	CubeEgressCAFingerprint string
 	CubeEgressCATargets     int
@@ -556,6 +556,8 @@ func finalizeRemoteArtifact(
 	record.ImageConfigJSON = result.ImageConfigJSON
 	record.DownloadToken = uuid.New().String()
 	record.ArtifactURL = result.ArtifactURL
+	record.StorageBackend = result.StorageBackend
+	record.ObjectKey = result.ObjectKey
 	record.Status = ArtifactStatusReady
 	record.GCDeadline = time.Now().Add(defaultTemplateArtifactTTL).Unix()
 	record.CubeEgressCABaked = result.CubeEgressCABaked
@@ -590,6 +592,8 @@ func finalizeRemoteArtifact(
 		"generated_request_json":         record.GeneratedRequestJSON,
 		"download_token":                 record.DownloadToken,
 		"artifact_url":                   record.ArtifactURL,
+		"storage_backend":                record.StorageBackend,
+		"object_key":                     record.ObjectKey,
 		"status":                         record.Status,
 		"gc_deadline":                    record.GCDeadline,
 		"last_error":                     "",

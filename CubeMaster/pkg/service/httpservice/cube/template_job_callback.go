@@ -235,6 +235,8 @@ func remoteBuildResultFromPayload(payload map[string]any) *templatecenter.Remote
 		ImageConfigJSON:         payloadString(payload, "image_config_json"),
 		MasterNodeIP:            payloadString(payload, "master_node_ip"),
 		ArtifactURL:             payloadString(payload, "artifact_url"),
+		StorageBackend:          payloadString(payload, "storage_backend"),
+		ObjectKey:               payloadString(payload, "object_key"),
 		CubeEgressCABaked:       payloadBool(payload, "cube_egress_ca_baked"),
 		CubeEgressCAFingerprint: payloadString(payload, "cube_egress_ca_fingerprint"),
 		CubeEgressCATargets:     int(payloadInt64(payload, "cube_egress_ca_targets_written")),

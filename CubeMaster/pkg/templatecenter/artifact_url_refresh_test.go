@@ -20,26 +20,24 @@ func stubPresign(t *testing.T, fn func(ctx context.Context, artifactID string) (
 	t.Cleanup(func() { presignArtifactGetURL = old })
 }
 
-func TestS3ArtifactObjectKeyMatchesS3Store(t *testing.T) {
-	// These derivations MUST stay byte-identical with
-	// CubeTemplateCenter/pkg/s3store.ObjectKey or re-signed URLs point at
-	// objects that do not exist.
-	cases := []struct{ prefix, id, want string }{
-		{"", "rfs-1", "rfs-1.ext4"},
-		{"template-artifacts/", "rfs-1", "template-artifacts/rfs-1.ext4"},
-		{"template-artifacts", "rfs-1", "template-artifacts/rfs-1.ext4"},
-		{"  ", "rfs-1", "rfs-1.ext4"},
-	}
-	for _, tc := range cases {
-		if got := s3ArtifactObjectKey(tc.prefix, tc.id); got != tc.want {
-			t.Fatalf("s3ArtifactObjectKey(%q, %q) = %q, want %q", tc.prefix, tc.id, got, tc.want)
-		}
-	}
-}
-
 // A local-disk artifact (no stored URL) must yield "" so the caller falls
 // back to the Master-served download endpoint; signing must not even be
 // attempted.
+func TestArtifactUsesObjectStore(t *testing.T) {
+	if ArtifactUsesObjectStore(nil) {
+		t.Fatal("nil")
+	}
+	if ArtifactUsesObjectStore(&models.RootfsArtifact{}) {
+		t.Fatal("empty row")
+	}
+	if !ArtifactUsesObjectStore(&models.RootfsArtifact{StorageBackend: "fs"}) {
+		t.Fatal("backend")
+	}
+	if !ArtifactUsesObjectStore(&models.RootfsArtifact{ArtifactURL: "https://s3/x"}) {
+		t.Fatal("url")
+	}
+}
+
 func TestArtifactDownloadURLLocalArtifact(t *testing.T) {
 	stubPresign(t, func(context.Context, string) (string, error) {
 		t.Fatal("presign must not be called for a local-disk artifact")
@@ -51,6 +49,18 @@ func TestArtifactDownloadURLLocalArtifact(t *testing.T) {
 	}
 	if got := artifactDownloadURL(context.Background(), nil); got != "" {
 		t.Fatalf("got %q, want empty for nil artifact", got)
+	}
+}
+
+func TestArtifactDownloadURLKeepsLocator(t *testing.T) {
+	stubPresign(t, func(context.Context, string) (string, error) {
+		t.Fatal("presign must not be called for a locator")
+		return "", nil
+	})
+	stored := "blobstore:fs:template-artifacts/rfs-1.ext4"
+	got := artifactDownloadURL(context.Background(), &models.RootfsArtifact{ArtifactID: "rfs-1", ArtifactURL: stored})
+	if got != stored {
+		t.Fatalf("got %q want locator", got)
 	}
 }
 

@@ -90,6 +90,10 @@ const (
 	Prefix        = "warehouse/"
 	uploadsPrefix = Prefix + "uploads/"
 	blobsPrefix   = Prefix + "blobs/"
+
+	// ObjectMountPath is the CubeOps HTTP path that redeems fs signed GETs.
+	// OpenFS and the internal /object route must stay in lockstep.
+	ObjectMountPath = "/internal/warehouse/object"
 )
 
 func ObjectKey(arch, component, version string) string {

@@ -26,6 +26,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/warehouse"
 	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore/gateway"
 )
 
 // Server is the CubeOps HTTP server.
@@ -171,6 +172,9 @@ func (s *Server) buildRouter() *gin.Engine {
 	agenthubH.Register(authed)
 
 	warehouseH := handler.NewWarehouseHandler(s.store, s.blobs, s.importer, s.nodeSvc, s.cfg.Warehouse.PresignTTL, s.cfg.Warehouse.UploadMaxBytes)
+	if a, ok := s.blobs.(*warehouse.Adapter); ok && a.Signer() != nil {
+		warehouseH.SetObjectGateway(&gateway.Handler{Store: a.Store, Signer: a.Signer()})
+	}
 	warehouseH.RegisterAdmin(authed)
 
 	// Internal routes — no auth. These endpoints must not be exposed through

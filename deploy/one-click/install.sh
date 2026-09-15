@@ -119,6 +119,11 @@ init_external_dep_defaults() {
   CUBE_S3LVOL_BUCKET="${CUBE_S3LVOL_BUCKET:-cube-s3lvol}"
   CUBE_S3LVOL_PATH_STYLE="${CUBE_S3LVOL_PATH_STYLE:-}"
   CUBE_OPS_S3_BUCKET="${CUBE_OPS_S3_BUCKET:-cube-ops}"
+  CUBE_ARTIFACT_STORE_BACKEND="${CUBE_ARTIFACT_STORE_BACKEND:-s3}"
+  CUBE_OPS_STORE_BACKEND="${CUBE_OPS_STORE_BACKEND:-s3}"
+  CUBE_OPS_STORE_FS_ROOT="${CUBE_OPS_STORE_FS_ROOT:-/var/lib/cubeops/blobs}"
+  CUBE_OPS_STORE_FS_PUBLIC_URL="${CUBE_OPS_STORE_FS_PUBLIC_URL:-}"
+  CUBE_OPS_STORE_FS_SIGNING_KEY="${CUBE_OPS_STORE_FS_SIGNING_KEY:-}"
 }
 
 # Guard against shipping the example/default credentials to a real external
@@ -1733,6 +1738,25 @@ warn_compute_s3_missing
 CUBE_SANDBOX_NODE_IP="$(detect_node_ip)"
 export CUBE_SANDBOX_NODE_IP
 log "using node IP: ${CUBE_SANDBOX_NODE_IP}"
+
+# fs blob backend: fill a node-reachable CubeOps URL and a durable signing key.
+# Default backend remains s3; this only runs when the operator opts in.
+CUBE_ARTIFACT_STORE_BACKEND="${CUBE_ARTIFACT_STORE_BACKEND:-s3}"
+CUBE_OPS_STORE_BACKEND="${CUBE_OPS_STORE_BACKEND:-s3}"
+if [[ "${CUBE_OPS_STORE_BACKEND}" == "fs" ]]; then
+  if [[ -z "${CUBE_OPS_STORE_FS_PUBLIC_URL:-}" ]]; then
+    CUBE_OPS_STORE_FS_PUBLIC_URL="http://${CUBE_SANDBOX_NODE_IP}:3010"
+  fi
+  if [[ -z "${CUBE_OPS_STORE_FS_SIGNING_KEY:-}" ]]; then
+    if command -v openssl >/dev/null 2>&1; then
+      CUBE_OPS_STORE_FS_SIGNING_KEY="$(openssl rand -hex 32)"
+    else
+      CUBE_OPS_STORE_FS_SIGNING_KEY="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    fi
+  fi
+  export CUBE_OPS_STORE_FS_PUBLIC_URL CUBE_OPS_STORE_FS_SIGNING_KEY
+fi
+export CUBE_ARTIFACT_STORE_BACKEND CUBE_OPS_STORE_BACKEND
 fill_s3_from_local_minio
 CUBE_SANDBOX_ETH_NAME="${CUBE_SANDBOX_ETH_NAME:-$(detect_primary_interface || true)}"
 if [[ -n "${CUBE_SANDBOX_ETH_NAME}" ]]; then
@@ -2157,6 +2181,13 @@ fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_ENABLE_S3LVOL" "${ONE_CLICK_ENABLE_S3LVOL}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3LVOL_BUCKET" "${CUBE_S3LVOL_BUCKET}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_S3_BUCKET" "${CUBE_OPS_S3_BUCKET:-cube-ops}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_ARTIFACT_STORE_BACKEND" "${CUBE_ARTIFACT_STORE_BACKEND:-s3}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_STORE_BACKEND" "${CUBE_OPS_STORE_BACKEND:-s3}"
+if [[ "${CUBE_OPS_STORE_BACKEND}" == "fs" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_STORE_FS_ROOT" "${CUBE_OPS_STORE_FS_ROOT:-/var/lib/cubeops/blobs}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_STORE_FS_PUBLIC_URL" "${CUBE_OPS_STORE_FS_PUBLIC_URL}"
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_STORE_FS_SIGNING_KEY" "${CUBE_OPS_STORE_FS_SIGNING_KEY}"
+fi
 if [[ -n "${CUBE_S3LVOL_PATH_STYLE}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3LVOL_PATH_STYLE" "${CUBE_S3LVOL_PATH_STYLE}"
 else

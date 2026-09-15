@@ -40,6 +40,7 @@ type WarehouseHandler struct {
 	nodes      nmhandler.NodeService
 	presignTTL time.Duration
 	uploadMax  int64
+	objectGW   http.Handler
 }
 
 func NewWarehouseHandler(s *store.Store, blobs warehouse.BlobStore, importer *warehouse.Importer, nodes nmhandler.NodeService, presignTTL time.Duration, uploadMax int64) *WarehouseHandler {
@@ -59,6 +60,11 @@ func NewWarehouseHandler(s *store.Store, blobs warehouse.BlobStore, importer *wa
 	}
 }
 
+// SetObjectGateway mounts the HMAC object GET handler used by the fs backend.
+func (h *WarehouseHandler) SetObjectGateway(gw http.Handler) {
+	h.objectGW = gw
+}
+
 func (h *WarehouseHandler) RegisterAdmin(r *gin.RouterGroup) {
 	r.GET("/warehouse/components", h.ListComponents)
 	r.GET("/warehouse/components/:component", h.GetComponent)
@@ -73,9 +79,19 @@ func (h *WarehouseHandler) RegisterAdmin(r *gin.RouterGroup) {
 
 func (h *WarehouseHandler) RegisterInternal(r *gin.RouterGroup) {
 	r.GET("/blob", h.GetBlob)
+	// Redeem path must match warehouse.ObjectMountPath (group is /internal/warehouse).
+	r.GET("/object", h.GetSignedObject)
 	r.GET("/jobs", h.ListNodeJobs)
 	r.POST("/jobs/:id/ack", h.AckJob)
 	r.PUT("/inventory", h.PutInventory)
+}
+
+func (h *WarehouseHandler) GetSignedObject(c *gin.Context) {
+	if h.objectGW == nil {
+		httputil.WriteError(c, http.StatusNotFound, "object gateway disabled")
+		return
+	}
+	h.objectGW.ServeHTTP(c.Writer, c.Request)
 }
 
 func (h *WarehouseHandler) requireEnabled(c *gin.Context) bool {

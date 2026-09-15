@@ -5,6 +5,10 @@
 {{- end }}
 {{- $templateCenter := .Values.controlPlane.templateCenter -}}
 {{- $s3Backed := ((.Values.controlPlane.artifactStore).s3Backed) | default false -}}
+{{- $artifactBackend := include "cube.artifactStoreBackend" . -}}
+{{- if and $s3Backed (eq $artifactBackend "fs") }}
+{{- fail "controlPlane.artifactStore.backend=fs cannot be combined with controlPlane.artifactStore.s3Backed=true" }}
+{{- end }}
 {{- if $s3Backed }}
 {{- /* s3Backed only works when a COMPLETE CUBE_S3_* set
 (ENDPOINT+BUCKET+ACCESS_KEY_ID+SECRET_ACCESS_KEY) actually reaches BOTH the
@@ -37,6 +41,16 @@ S3 and every replica builds to its own node-local disk. */ -}}
 {{- fail "controlPlane.enabled=true is not supported with externalControlPlane.enabled=true: TC (which deploys automatically) must share the artifact directory with the CubeMaster that serves downloads, which an out-of-cluster master cannot do (unless controlPlane.artifactStore.s3Backed=true and the external master also has CUBE_S3_* configured)" }}
 {{- end }}
 {{- $masterPersistence := .Values.controlPlane.master.persistence -}}
+{{- if and .Values.controlPlane.enabled (eq $artifactBackend "fs") }}
+{{- $fsRoot := ((.Values.controlPlane.artifactStore).fsRoot) | default "" | toString | trim -}}
+{{- $allowedRoot := "/data/CubeMaster/storage" -}}
+{{- if and $fsRoot (ne $fsRoot $allowedRoot) (not (hasPrefix (printf "%s/" $allowedRoot) $fsRoot)) }}
+{{- fail "controlPlane.artifactStore.fsRoot must be under /data/CubeMaster/storage (the mounted artifact volume)" }}
+{{- end }}
+{{- if not $masterPersistence.enabled }}
+{{- fail "controlPlane.artifactStore.backend=fs requires controlPlane.master.persistence.enabled=true (emptyDir loses artifacts on restart)" }}
+{{- end }}
+{{- end }}
 {{- /* A genuinely shared artifact volume (a ReadWriteMany claim, e.g. CFS/NFS —
 TC mounts the SAME claim by default, see cube.templateCenterStorageClaimName)
 makes the store non-node-local: every master replica and TC see every
@@ -64,6 +78,9 @@ emptyDir are fine -- each Pod gets its own scratch. */ -}}
 {{- $anyMultiReplica := or (gt (int .Values.controlPlane.master.replicas) 1) (gt (int ($templateCenter.replicas | default 1)) 1) -}}
 {{- if and $s3Backed $anyMultiReplica $masterPersistence.enabled (not $masterPersistence.hostPath) (not (has "ReadWriteMany" ($masterPersistence.accessModes | default list))) }}
 {{- fail "artifactStore.s3Backed=true with master.replicas>1 or templateCenter.replicas>1 requires controlPlane.master.persistence.enabled=false: in S3 mode the local disk is build scratch only and S3 is the durable store, so the ReadWriteOnce artifact PVC (which cannot attach on several nodes) only gets in the way. Set enabled=false, or use a ReadWriteMany claim" }}
+{{- end }}
+{{- if and .Values.controlPlane.enabled (eq $artifactBackend "fs") $anyMultiReplica (not $sharedArtifactStore) }}
+{{- fail "controlPlane.artifactStore.backend=fs with master.replicas>1 or templateCenter.replicas>1 requires a ReadWriteMany artifact volume (CFS/NFS). An RWO disk is local to one replica" }}
 {{- end }}
 {{- /*
 TC shares CubeMaster's artifact volume, so CubeMaster's access mode decides
@@ -401,7 +418,27 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- end }}
 {{- if eq (include "cube.opsEnabled" .) "true" }}
 {{- if hasKey (.Values.cubeOps | default dict) "persistence" }}
-{{- fail "cubeOps.persistence was removed; warehouse blobs are stored in S3. Remove cubeOps.persistence from your values (including values-tke.yaml)." }}
+{{- fail "cubeOps.persistence was removed; warehouse blobs are stored in S3 or cubeOps.store.fs.persistence. Remove cubeOps.persistence from your values (including values-tke.yaml)." }}
+{{- end }}
+{{- if eq (include "cube.opsStoreBackend" .) "fs" }}
+{{- $pub := include "cube.opsFSPublicURL" . | lower }}
+{{- if or (contains "127.0.0.1" $pub) (contains "localhost" $pub) (contains "[::1]" $pub) }}
+{{- fail "cubeOps.store.backend=fs requires cubeOps.store.fs.publicURL to be reachable from compute nodes (not 127.0.0.1/localhost). For in-cluster nodes leave it empty to use the CubeOps Service DNS; for nodes outside the cluster set an internal CLB URL" }}
+{{- end }}
+{{- if and (eq (include "cube.opsStoreBackend" .) "fs") (gt (int .Values.cubeOps.replicas) 1) }}
+{{- $shared := false }}
+{{- if eq (include "cube.opsFSPersistEnabled" .) "true" }}
+{{- $fs := default dict (((.Values.cubeOps).store).fs) }}
+{{- $persist := default dict $fs.persistence }}
+{{- $modes := $persist.accessModes | default (list "ReadWriteOnce") }}
+{{- if has "ReadWriteMany" $modes }}
+{{- $shared = true }}
+{{- end }}
+{{- end }}
+{{- if not $shared }}
+{{- fail "cubeOps.store.backend=fs with cubeOps.replicas>1 requires a shared volume: cubeOps.store.fs.persistence.enabled=true and accessModes including ReadWriteMany (emptyDir and RWO are per-replica)" }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- $opsS3 := default dict .Values.cubeOps.s3 }}
 {{- $opsEndpoint := include "cube.opsS3Endpoint" . }}

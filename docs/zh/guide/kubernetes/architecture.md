@@ -119,6 +119,7 @@ flowchart TB
 | 第三方 Redis | `redis.host` 非空 → 不装内置 Redis |
 | 内置 MinIO | `minio.enabled=true` → 部署 StatefulSet + Headless Service（`minio.*` 只负责部署 MinIO 本身；`rootPassword` 留空则自动生成）。若未设置 `volumeS3.endpoint` / `existingSecret`，Chart 从内置 MinIO 自动生成 S3 配置并写出 `volume-s3.conf` |
 | 外部 S3 | `minio.enabled=false` 且设置 `volumeS3.endpoint` / `volumeS3.existingSecret` → 不部署内置 MinIO；`volume-s3.conf` 从 `volumeS3.*` 生成 |
+| 本地盘 blobstore | `artifactStore.backend=fs` / `cubeOps.store.backend=fs` 用于模板产物与组件仓库（默认 `s3`）；S3 Volume 不受影响 |
 
 ### 2.3 计算面：四个 DaemonSet
 

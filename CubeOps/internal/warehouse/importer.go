@@ -30,7 +30,7 @@ const DefaultUploadTTL = 2 * time.Hour
 const (
 	importHeartbeatInterval = 60 * time.Second
 	orphanBlobGrace         = time.Hour
-	mpuAgeSlack             = 15 * time.Minute
+	blobstoreGCInterval     = time.Hour
 )
 
 type importStore interface {
@@ -65,6 +65,9 @@ type Importer struct {
 
 	heldMu sync.Mutex
 	held   map[string]struct{}
+
+	lastGC  time.Time
+	gcEvery time.Duration
 }
 
 func NewImporter(s *store.Store, blobs BlobStore, fetch FetchConfig, workDir string, uploadTimeout time.Duration) *Importer {
@@ -88,6 +91,8 @@ func newImporter(s importStore, blobs BlobStore, fetch FetchConfig, workDir stri
 		claimStaleAfter: DefaultImportClaimStaleAfter,
 		uploadTTL:       DefaultUploadTTL,
 		held:            map[string]struct{}{},
+		lastGC:          time.Now(),
+		gcEvery:         blobstoreGCInterval,
 	}
 }
 
@@ -175,6 +180,7 @@ func (im *Importer) drain(ctx context.Context) {
 		im.unmarkHeld(job.ID)
 	}
 	im.sweepUploads(ctx)
+	im.maybeGC(ctx)
 	im.reconcileBlobs(ctx)
 	im.sweepWorkDirs(ctx)
 }
@@ -207,21 +213,25 @@ func (im *Importer) sweepUploads(ctx context.Context) {
 		}
 		im.removeUploadIfIdle(ctx, obj.Key)
 	}
+}
 
-	mpuAge := im.putTO + mpuAgeSlack
-	uploads, err := im.blobs.ListIncompleteUploads(ctx, uploadsPrefix)
-	if err != nil {
-		slog.Warn("list incomplete warehouse uploads", "error", err)
+func (im *Importer) maybeGC(ctx context.Context) {
+	if im.blobs == nil {
 		return
 	}
-	for _, u := range uploads {
-		if now.Sub(u.Initiated) < mpuAge {
-			continue
-		}
-		if err := im.blobs.AbortMultipartUpload(ctx, u.Key, u.UploadID); err != nil {
-			slog.Warn("abort leftover multipart upload", "key", u.Key, "error", err)
+	every := im.gcEvery
+	if every <= 0 {
+		every = blobstoreGCInterval
+	}
+	if time.Since(im.lastGC) < every {
+		return
+	}
+	if gc, ok := im.blobs.(interface{ GC(context.Context) error }); ok {
+		if err := gc.GC(ctx); err != nil {
+			slog.Warn("warehouse blobstore gc", "error", err)
 		}
 	}
+	im.lastGC = time.Now()
 }
 
 func (im *Importer) removeUploadIfIdle(ctx context.Context, key string) {

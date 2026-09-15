@@ -363,6 +363,8 @@ S3 API 默认发布在节点 IP 上，目的是让计算节点的 Cubelet 能直
 `cube-sandbox-minio.service` 托管，启动后校验通过
 `curl http://<节点IP>:9000/minio/health/live`（返回 `200` 即正常）。
 
+模板产物与 CubeOps 组件仓库可用 `CUBE_ARTIFACT_STORE_BACKEND=fs`、`CUBE_OPS_STORE_BACKEND=fs` 替代 MinIO（S3 Volume 仍需要 MinIO 或外部 S3）。
+
 改用已有 S3 时，设 `CUBE_SANDBOX_MINIO_ENABLED=0` 并填写 `CUBE_S3_*`：
 
 ```bash

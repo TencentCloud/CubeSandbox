@@ -16,12 +16,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
 	"gorm.io/gorm"
 )
 
@@ -315,8 +317,11 @@ func proxyS3Artifact(c *gin.Context) (handled bool, ok bool) {
 	if err != nil || record == nil {
 		return false, false
 	}
-	if record.ArtifactURL == "" {
+	if !templatecenter.ArtifactUsesObjectStore(record) {
 		return false, false
+	}
+	if artifactStreamsFromStore(record) {
+		return streamArtifactFromStore(c, record)
 	}
 	downloadURL := templatecenter.ArtifactDownloadURL(c.Request.Context(), record)
 	if downloadURL == "" {
@@ -342,6 +347,11 @@ func proxyS3Artifact(c *gin.Context) (handled bool, ok bool) {
 			upstreamReq.Header.Set(key, value)
 		}
 	}
+	// HEAD is rewritten to GET (SigV4 binds the method). Without a Range the
+	// upstream would stream the whole object; ask for one byte and discard it.
+	if c.Request.Method == http.MethodHead && upstreamReq.Header.Get("Range") == "" {
+		upstreamReq.Header.Set("Range", "bytes=0-0")
+	}
 	resp, err := artifactProxyHTTPClient.Do(upstreamReq)
 	if err != nil {
 		log.G(c.Request.Context()).Warnf("artifact proxy: fetch %s failed: %v", record.ArtifactID, err)
@@ -350,12 +360,10 @@ func proxyS3Artifact(c *gin.Context) (handled bool, ok bool) {
 	}
 	defer resp.Body.Close()
 	copyArtifactProxyHeaders(c.Writer.Header(), resp.Header)
-	c.Writer.Header().Set("X-Cube-Artifact-Id", record.ArtifactID)
-	c.Writer.Header().Set("ETag", record.Ext4SHA256)
+	setArtifactIdentityHeaders(c, record)
 	c.Status(resp.StatusCode)
 	if c.Request.Method == http.MethodHead {
-		// Drain nothing: the body is discarded so the connection can reuse or
-		// close promptly; the caller only wanted headers.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8<<10))
 		return true, resp.StatusCode < http.StatusBadRequest
 	}
 	if _, err := io.Copy(c.Writer, resp.Body); err != nil {
@@ -363,6 +371,42 @@ func proxyS3Artifact(c *gin.Context) (handled bool, ok bool) {
 		return true, false
 	}
 	return true, resp.StatusCode < http.StatusBadRequest
+}
+
+func artifactStreamsFromStore(record *models.RootfsArtifact) bool {
+	return record.StorageBackend == "fs" || blobstore.IsObjectLocator(record.ArtifactURL)
+}
+
+func setArtifactIdentityHeaders(c *gin.Context, record *models.RootfsArtifact) {
+	c.Writer.Header().Set("X-Cube-Artifact-Id", record.ArtifactID)
+	c.Writer.Header().Set("ETag", record.Ext4SHA256)
+}
+
+func streamArtifactFromStore(c *gin.Context, record *models.RootfsArtifact) (bool, bool) {
+	obj, err := templatecenter.OpenArtifactObject(c.Request.Context(), record)
+	if err != nil {
+		log.G(c.Request.Context()).Warnf("artifact store get %s failed: %v", record.ArtifactID, err)
+		if blobstore.IsNotExist(err) {
+			c.AbortWithStatus(http.StatusNotFound)
+			return true, false
+		}
+		c.AbortWithStatus(http.StatusBadGateway)
+		return true, false
+	}
+	defer obj.Body.Close()
+	setArtifactIdentityHeaders(c, record)
+	if rs, ok := obj.Body.(io.ReadSeeker); ok {
+		http.ServeContent(c.Writer, c.Request, record.ArtifactID+".ext4", obj.LastModified, rs)
+		return true, true
+	}
+	c.Status(http.StatusOK)
+	if c.Request.Method == http.MethodHead {
+		return true, true
+	}
+	if _, err := io.Copy(c.Writer, obj.Body); err != nil {
+		return true, false
+	}
+	return true, true
 }
 
 func copyArtifactProxyHeaders(dst, src http.Header) {

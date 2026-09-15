@@ -132,6 +132,18 @@ WARNING (template artifact store is node-local with multiple control-plane repli
 {{- end }}
 {{- end }}
 
+{{- if and (eq (include "cube.opsEnabled" .) "true") (eq (include "cube.opsStoreBackend" .) "fs") }}
+
+NOTE (cubeOps fs signing key):
+  blobstore-signing-key must be hex (64 hex chars = 32 bytes). If an older
+  release persisted a non-hex value (randAlphaNum), set
+  cubeOps.store.fs.signingKey or delete that Secret key and helm upgrade
+  so CubeOps can decode it.
+{{- end }}
+{{- if eq (include "cube.artifactStoreBackend" .) "fs" }}
+
+NOTE: switching controlPlane.artifactStore.backend to fs does not require deleting _state/selected_backend.
+{{- end }}
 Useful commands:
   kubectl get pods -n {{ .Release.Namespace }} -o wide
   kubectl get daemonset -n {{ .Release.Namespace }} {{ include "cube.nodeName" . }}

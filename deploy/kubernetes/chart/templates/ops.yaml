@@ -12,7 +12,13 @@ metadata:
     app.kubernetes.io/component: ops
 spec:
   replicas: {{ .Values.cubeOps.replicas }}
-  {{- include "cube.deploymentStrategy" (dict "root" . "strategy" .Values.cubeOps.deploymentStrategy) | nindent 2 }}
+  {{- $opsStrategy := .Values.cubeOps.deploymentStrategy }}
+  {{- /* RWO (or any non-RWX) fs PVC cannot multi-attach during a surge;
+  force Recreate the same way cube-master does for its artifact volume. */}}
+  {{- if and (eq (include "cube.opsStoreBackend" .) "fs") (eq (include "cube.opsFSPersistEnabled" .) "true") (ne (include "cube.opsFSShared" .) "true") }}
+  {{- $opsStrategy = dict "type" "Recreate" }}
+  {{- end }}
+  {{- include "cube.deploymentStrategy" (dict "root" . "strategy" $opsStrategy) | nindent 2 }}
   selector:
     matchLabels:
       {{- include "cube.selectorLabels" . | nindent 6 }}
@@ -44,6 +50,21 @@ spec:
               value: {{ $workDir | quote }}
             - name: TMPDIR
               value: {{ $workDir | quote }}
+            - name: CUBE_OPS_STORE_BACKEND
+              value: {{ include "cube.opsStoreBackend" . | quote }}
+            {{- if eq (include "cube.opsStoreBackend" .) "fs" }}
+            - name: CUBE_OPS_STORE_FS_ROOT
+              value: {{ include "cube.opsFSRoot" . | quote }}
+            - name: CUBE_OPS_STORE_FS_PUBLIC_URL
+              value: {{ include "cube.opsFSPublicURL" . | quote }}
+            - name: CUBE_OPS_STORE_FS_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . | quote }}
+                  key: blobstore-signing-key
+            - name: CUBE_OPS_STORE_FS_SHARED
+              value: {{ include "cube.opsFSShared" . | quote }}
+            {{- end }}
             - name: CUBE_OPS_S3_ENDPOINT
               value: {{ include "cube.opsS3Endpoint" . | quote }}
             - name: CUBE_OPS_S3_NODE_ENDPOINT
@@ -68,7 +89,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "cube.opsS3SecretName" . | quote }}
                   key: s3-secret-access-key
-            {{- $wh := .Values.cubeOps.warehouse | default dict }}
             {{- with $wh.githubRepos }}
             - name: CUBE_OPS_WAREHOUSE_GITHUB_REPOS
               value: {{ include "cube.csvOrString" . | quote }}
@@ -181,10 +201,23 @@ spec:
           volumeMounts:
             - name: cube-ops-work
               mountPath: {{ $workDir | quote }}
+            {{- if eq (include "cube.opsStoreBackend" .) "fs" }}
+            - name: cube-ops-blobs
+              mountPath: {{ include "cube.opsFSRoot" . | quote }}
+            {{- end }}
       volumes:
         - name: cube-ops-work
           emptyDir:
             sizeLimit: {{ .Values.cubeOps.workDirSizeLimit | default "32Gi" | quote }}
+        {{- if eq (include "cube.opsStoreBackend" .) "fs" }}
+        - name: cube-ops-blobs
+          {{- if eq (include "cube.opsFSPersistEnabled" .) "true" }}
+          persistentVolumeClaim:
+            claimName: {{ include "cube.opsFSClaimName" . | quote }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -202,4 +235,27 @@ spec:
     - name: http
       port: {{ $opsPort }}
       targetPort: http
+{{- if and (eq (include "cube.opsStoreBackend" .) "fs") (eq (include "cube.opsFSPersistEnabled" .) "true") }}
+{{- $fs := default dict (((.Values.cubeOps).store).fs) }}
+{{- $persist := default dict $fs.persistence }}
+{{- if not ($persist.existingClaim | default "") }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "cube.opsFSClaimName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ops
+spec:
+  accessModes:
+    {{- toYaml ($persist.accessModes | default (list "ReadWriteOnce")) | nindent 4 }}
+  {{- with $persist.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $persist.size | default "20Gi" | quote }}
+{{- end }}
+{{- end }}
 {{- end }}

@@ -190,6 +190,31 @@ require_cubedb_module() {
   fail "missing pkgs/cubedb or legacy CubeDB sibling module in ${REPO_ROOT}"
 }
 
+# blobstore did not exist on older SOURCE_REF trees. Export/require only when
+# a consumer go.mod replace-points at it.
+blobstore_module_at_ref() {
+  local sha="$1"
+  if git -C "${WORKTREE_ROOT}" cat-file -e "${sha}:pkgs/blobstore/go.mod" 2>/dev/null; then
+    printf '%s\n' "pkgs/blobstore"
+    return 0
+  fi
+  return 1
+}
+
+require_blobstore_module() {
+  local gomod
+  for gomod in \
+    "${REPO_ROOT}/CubeMaster/go.mod" \
+    "${REPO_ROOT}/CubeOps/go.mod" \
+    "${REPO_ROOT}/CubeTemplateCenter/go.mod"; do
+    if [[ -f "${gomod}" ]] && grep -q 'pkgs/blobstore' "${gomod}"; then
+      [[ -d "${REPO_ROOT}/pkgs/blobstore" ]] \
+        || fail "missing pkgs/blobstore sibling module in ${REPO_ROOT}"
+      return 0
+    fi
+  done
+}
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [options] [image...]
@@ -432,15 +457,28 @@ ensure_source_tree() {
   # build those images (same reason CubeOps is gated below).
   CUBELOG_SRC=""
   CUBEDB_SRC=""
+  BLOBSTORE_SRC=""
   if should_build cube-master || should_build cubemastercli \
-     || should_build cubelet || should_build cube-ops; then
+     || should_build cubelet || should_build cube-ops \
+     || should_build cube-templatecenter; then
     CUBELOG_SRC="$(cubelog_module_at_ref "${SOURCE_REF_SHA}")" \
       || fail "SOURCE_REF=${SOURCE_REF} has neither pkgs/CubeLog nor cubelog"
   fi
   if should_build cube-master || should_build cubemastercli \
-     || should_build cube-ops; then
+     || should_build cube-ops || should_build cube-templatecenter; then
     CUBEDB_SRC="$(cubedb_module_at_ref "${SOURCE_REF_SHA}")" \
       || fail "SOURCE_REF=${SOURCE_REF} has neither pkgs/cubedb nor CubeDB"
+  fi
+  if should_build cube-master || should_build cubemastercli \
+     || should_build cube-ops || should_build cube-templatecenter; then
+    BLOBSTORE_SRC="$(blobstore_module_at_ref "${SOURCE_REF_SHA}" || true)"
+  fi
+  PROTO_SRC=""
+  if should_build cube-master || should_build cubemastercli \
+     || should_build cube-templatecenter; then
+    if git -C "${WORKTREE_ROOT}" cat-file -e "${SOURCE_REF_SHA}:pkgs/proto/go.mod" 2>/dev/null; then
+      PROTO_SRC="pkgs/proto"
+    fi
   fi
   # CubeOps is post-v0.5.1; only export when building cube-ops so older release
   # tags still work for cube-api / cube-proxy / webui / etc. cube-master /
@@ -454,8 +492,15 @@ ensure_source_tree() {
   if should_build cube-s3lvol; then
     SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeS3lvol deploy/kubernetes/images/scripts deploy/kubernetes/images/cube-s3lvol"
   fi
-  if should_build cube-master || should_build cubemastercli; then
-    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} ${CUBELOG_SRC} ${CUBEDB_SRC} Cubelet"
+  if should_build cube-master || should_build cubemastercli \
+     || should_build cube-templatecenter; then
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} ${CUBELOG_SRC} ${CUBEDB_SRC} Cubelet ${PROTO_SRC}"
+  fi
+  if should_build cube-templatecenter; then
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeTemplateCenter"
+  fi
+  if [[ -n "${BLOBSTORE_SRC}" ]]; then
+    SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} ${BLOBSTORE_SRC}"
   fi
   if should_build cubemastercli; then
     SOURCE_EXPORT_SET="${SOURCE_EXPORT_SET} CubeOps"
@@ -701,6 +746,7 @@ build_cube_master_image() {
   [[ -f "${REPO_ROOT}/CubeMaster/go.mod" ]] || fail "missing CubeMaster go.mod in ${REPO_ROOT}"
   require_cubelog_module
   require_cubedb_module
+  require_blobstore_module
   [[ -d "${REPO_ROOT}/Cubelet" ]] || fail "missing Cubelet sibling module in ${REPO_ROOT}"
   [[ -f "${REPO_ROOT}/deploy/scripts/docker-install-volume-deps.sh" ]] \
     || fail "missing deploy/scripts/docker-install-volume-deps.sh in ${REPO_ROOT}"
@@ -719,8 +765,7 @@ build_cube_master_image() {
 
 # Same as .github/workflows/release-docker-images.yml for component
 # "cube-templatecenter": context=., file=CubeTemplateCenter/docker/Dockerfile.
-# TC reuses CubeMaster's templatecenter package, so it needs the same sibling
-# modules (pkgs/CubeLog / pkgs/cubedb / Cubelet / pkgs/proto) as cube-master.
+# TC reuses CubeMaster packages, so it needs the same local replace modules.
 build_cube_templatecenter_image() {
   [[ -f "${REPO_ROOT}/CubeTemplateCenter/docker/Dockerfile" ]] \
     || fail "missing CubeTemplateCenter/docker/Dockerfile in ${REPO_ROOT}"
@@ -728,6 +773,7 @@ build_cube_templatecenter_image() {
   [[ -f "${REPO_ROOT}/CubeMaster/go.mod" ]] || fail "missing CubeMaster go.mod in ${REPO_ROOT}"
   require_cubelog_module
   require_cubedb_module
+  require_blobstore_module
   [[ -d "${REPO_ROOT}/pkgs/proto" ]] || fail "missing pkgs/proto sibling module in ${REPO_ROOT}"
   [[ -d "${REPO_ROOT}/Cubelet" ]] || fail "missing Cubelet sibling module in ${REPO_ROOT}"
   build_image cube-templatecenter "${REPO_ROOT}" "${REPO_ROOT}/CubeTemplateCenter/docker/Dockerfile" \
@@ -747,6 +793,7 @@ build_cubemastercli_image() {
   [[ -f "${REPO_ROOT}/CubeOps/go.mod" ]] || fail "missing CubeOps go.mod in ${REPO_ROOT}"
   require_cubelog_module
   require_cubedb_module
+  require_blobstore_module
   [[ -d "${REPO_ROOT}/Cubelet" ]] || fail "missing Cubelet sibling module in ${REPO_ROOT}"
   build_image cubemastercli "${REPO_ROOT}" "${REPO_ROOT}/CubeMaster/docker/Dockerfile.cubemastercli" \
     --build-arg "CUBE_VERSION=${IMAGE_TAG}" \
@@ -800,11 +847,13 @@ build_cube_shim_image() {
 }
 
 # Same as .github/workflows/release-docker-images.yml for component "cube-ops":
-# context=., file=CubeOps/Dockerfile (needs sibling pkgs/cubedb via Dockerfile.dockerignore).
+# context=., file=CubeOps/Dockerfile (needs local replace modules via
+# Dockerfile.dockerignore).
 build_cube_ops_image() {
   [[ -f "${REPO_ROOT}/CubeOps/go.mod" ]] || fail "missing CubeOps go.mod in ${REPO_ROOT}"
   require_cubedb_module
   require_cubelog_module
+  require_blobstore_module
   build_image cube-ops "${REPO_ROOT}" "${REPO_ROOT}/CubeOps/Dockerfile"
   record_built cube-ops
 }

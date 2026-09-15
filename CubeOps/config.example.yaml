@@ -66,6 +66,14 @@ soft_delete_purge:
   retention: "168h"   # rows with deleted_at older than now-retention are purged
   interval: "1h"      # time between purge passes
 
+# --- Blob backend (default s3; set backend: fs to skip MinIO) ---
+store:
+  backend: "s3"                          # CUBE_OPS_STORE_BACKEND  (s3|fs)
+  fs_backend:                            # used only when backend is fs
+    root: "/var/lib/cubeops/blobs"       # CUBE_OPS_STORE_FS_ROOT
+    public_url: ""                       # CUBE_OPS_STORE_FS_PUBLIC_URL (node-reachable CubeOps URL)
+    signing_key: ""                      # CUBE_OPS_STORE_FS_SIGNING_KEY (hex; auto-generated if empty)
+
 # --- Object store ---
 s3:
   endpoint: ""            # CUBE_OPS_S3_ENDPOINT

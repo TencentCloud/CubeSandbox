@@ -8,14 +8,14 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
 )
 
 const (
 	// PutPartSize is the multipart part size. Must be explicit: minio-go
 	// otherwise buffers 512MiB per concurrent unknown-length upload.
 	PutPartSize = 64 << 20
-
-	metaSHA256Key = "sha256"
 )
 
 // ObjectInfo describes one stored object.
@@ -59,7 +59,7 @@ func IsNotExist(err error) bool {
 	if _, ok := err.(objectNotFoundError); ok {
 		return true
 	}
-	return isS3NotFound(err)
+	return blobstore.IsNotExist(err)
 }
 
 func formatChecksum(sum string) string {

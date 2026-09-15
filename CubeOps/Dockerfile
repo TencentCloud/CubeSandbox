@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-# Build from repository root so sibling modules (e.g. pkgs/cubedb) are in context:
+# Build from repository root so local replace modules are in context:
 #   docker build -f CubeOps/Dockerfile -t cube-ops:latest .
 
 # ── Build stage ────────────────────────────────────────────────────────────
@@ -17,6 +17,7 @@ WORKDIR /build/CubeOps
 COPY CubeOps/go.mod CubeOps/go.sum ./
 COPY pkgs/cubedb /build/pkgs/cubedb
 COPY pkgs/CubeLog /build/pkgs/CubeLog
+COPY pkgs/blobstore /build/pkgs/blobstore
 RUN go mod download
 
 COPY CubeOps/ .

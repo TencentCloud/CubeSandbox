@@ -179,4 +179,73 @@ if re.search(r"name: CUBE_OPS_S3_ACCESS_KEY_ID\n\s+valueFrom:\n\s+secretKeyRef:\
 print("ok: existingSecret + endpoint points secretKeyRef at that Secret")
 PY
 
+expect_fail ops-fs-replicas-emptydir "$TMP_DIR/fs-empty.err" \
+  'emptyDir and RWO are per-replica' \
+  --set cubeOps.store.backend=fs \
+  --set cubeOps.replicas=2 \
+  --set cubeOps.store.fs.persistence.enabled=false
+
+expect_fail artifact-fs-no-persist "$TMP_DIR/art-nopersist.err" \
+  'emptyDir loses artifacts on restart' \
+  --set controlPlane.artifactStore.backend=fs \
+  --set controlPlane.master.persistence.enabled=false
+
+expect_fail artifact-fs-bad-root "$TMP_DIR/art-root.err" \
+  'fsRoot must be under /data/CubeMaster/storage' \
+  --set controlPlane.artifactStore.backend=fs \
+  --set-string controlPlane.artifactStore.fsRoot=/tmp/outside
+
+helm template cubeops-fs-rwo "$CHART_DIR" $COMMON_SETS \
+  --set cubeOps.store.backend=fs \
+  > "$TMP_DIR/fs-rwo.yaml"
+extract_component_doc ops "$TMP_DIR/fs-rwo.yaml" "$TMP_DIR/ops-fs-rwo.yaml"
+python3 - "$TMP_DIR/ops-fs-rwo.yaml" "$TMP_DIR/fs-rwo.yaml" <<'PY'
+import binascii, pathlib, re, sys
+
+ops, full = (pathlib.Path(p).read_text() for p in sys.argv[1:])
+
+def strategy_type(deploy):
+    m = re.search(r"(?m)^  strategy:\n(?:    .*\n)*?    type:\s*(\S+)\s*$", deploy)
+    if not m:
+        m = re.search(r"(?m)^  strategy:\n    type:\s*(\S+)\s*$", deploy)
+    if not m:
+        raise SystemExit("missing strategy.type on cube-ops")
+    return m.group(1)
+
+if strategy_type(ops) != "Recreate":
+    raise SystemExit(f"fs + RWO persist must force Recreate, got {strategy_type(ops)!r}")
+
+secret = None
+for doc in full.split("\n---\n"):
+    if "kind: Secret" in doc and "blobstore-signing-key" in doc:
+        secret = doc
+        break
+if secret is None:
+    raise SystemExit("fs backend must render blobstore-signing-key")
+m = re.search(r"(?m)^  blobstore-signing-key:\s*(\S+)\s*$", secret)
+if not m:
+    raise SystemExit("missing blobstore-signing-key value")
+raw = m.group(1).strip().strip('"')
+key = binascii.unhexlify(raw)
+if len(key) != 32:
+    raise SystemExit(f"signing key decoded to {len(key)} bytes, want 32")
+print("ok: fs RWO Recreate + hex signing key")
+if not re.search(r'name: CUBE_OPS_STORE_FS_SHARED\n\s+value: "false"', ops):
+    raise SystemExit("fs + RWO must set CUBE_OPS_STORE_FS_SHARED=false")
+PY
+
+helm template cubeops-fs-rwx "$CHART_DIR" $COMMON_SETS \
+  --set cubeOps.store.backend=fs \
+  --set cubeOps.replicas=2 \
+  --set cubeOps.store.fs.persistence.accessModes[0]=ReadWriteMany \
+  > "$TMP_DIR/fs-rwx.yaml"
+extract_component_doc ops "$TMP_DIR/fs-rwx.yaml" "$TMP_DIR/ops-fs-rwx.yaml"
+python3 - "$TMP_DIR/ops-fs-rwx.yaml" <<'PY'
+import pathlib, re, sys
+ops = pathlib.Path(sys.argv[1]).read_text()
+if not re.search(r'name: CUBE_OPS_STORE_FS_SHARED\n\s+value: "true"', ops):
+    raise SystemExit("fs + RWX must set CUBE_OPS_STORE_FS_SHARED=true")
+print("ok: fs RWX sets CUBE_OPS_STORE_FS_SHARED=true")
+PY
+
 echo "All cube-ops warehouse S3 guard tests passed"
