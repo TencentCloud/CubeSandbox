@@ -439,8 +439,19 @@ s3lvol_active_add(const char *name, const char *uuid, uint32_t subsys,
 			snprintf(e->pub.uuid, sizeof(e->pub.uuid), "%s", uuid);
 			e->pub.subsys   = subsys;
 			e->pub.nsid     = nsid;
-			e->pub.attached = true;
-			return active_flush();
+
+			/* The caller removes the namespace when this fails, so the
+			 * in-memory entry must stop claiming it is up. The insert path
+			 * below undoes its entry for the same reason; here there is
+			 * nothing to undo but the flag.
+			 *
+			 * Every replay comes through here: the loader has already put
+			 * an entry in for each volume by the time the attach runs. One
+			 * failed write would otherwise leave the volume answering
+			 * "already active" on the retry, with no namespace to back it. */
+			rc = active_flush();
+			e->pub.attached = (rc == 0);
+			return rc;
 		}
 	}
 

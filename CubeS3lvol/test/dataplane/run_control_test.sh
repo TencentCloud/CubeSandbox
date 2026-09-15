@@ -681,6 +681,58 @@ ACT="$(rpc rcow_active_bdev '{"device_name":"ctl-a"}' 2>&1)"
 	fail "a second activation did not see the namespace it had just created"
 
 # ==========================================================================
+# A volume whose recording fails must stop claiming it is attached. The caller
+# removes the namespace on any non-zero return from the add, so an entry left
+# saying "attached" answers already_active on the retry while the host has no
+# device behind it. A replay is where that bites: the loader has already put an
+# entry in for every volume by the time the attach runs, so every volume takes
+# that path, and the batch counts already_active as restored.
+#
+# ctl-b is the volume to use. The --no-replay start above recorded it without
+# attaching it, and [7b] attached only ctl-a, so it is still in exactly the
+# state this is about.
+echo ""
+echo "=== [7c] a failed recording does not leave the volume claiming to be up"
+
+# Make the write fail the way a full or read-only filesystem would. The writer
+# creates "<path>.tmp" and renames it into place, so a directory at that name is
+# EISDIR for root as well -- permissions alone would not be, since the target
+# runs as root here.
+REG="${RCOW_ACTIVE_FILE}"
+rm -f "${REG}.tmp"
+mkdir "${REG}.tmp" || fail "could not set up the write failure"
+
+# The reply to this one is an error, not a document, so it is read through the
+# exit status rather than parsed: what the caller has to report is the failure.
+if rpc rcow_active_bdev '{"device_name":"ctl-b"}' \
+		>/tmp/rcow_ctl_7c.log 2>&1; then
+	ACT_RC=0
+else
+	ACT_RC=1
+fi
+rmdir "${REG}.tmp"
+
+[ "${ACT_RC}" -ne 0 ] &&
+	pass "the attach reported the failed recording instead of claiming success" ||
+	fail "the attach was reported as succeeding although recording it failed"
+
+# The retry is the assertion with teeth: nothing is up for ctl-b, so it has to
+# attach again. Answering already_active here means the registry would be
+# counted as restored for a volume the host has no device for.
+ACT="$(rpc rcow_active_bdev '{"device_name":"ctl-b"}' 2>&1)"
+[ "$(has_key "${ACT}" already_active)" = "yes" ] &&
+	fail "the retry was answered from a record whose attach had failed, while \
+the host has no device for it" ||
+	pass "the retry attached rather than answering already active"
+
+CB_SUB="$(jget "${ACT}" subsys)"
+CB_NSID="$(jget "${ACT}" nsid)"
+CB_NS="$(nsid_present "${CB_SUB}" "${CB_NSID}")"
+[ "${CB_NS}" = "1" ] &&
+	pass "and the namespace is really there, not just recorded" ||
+	fail "the subsystem has ${CB_NS} namespace(s) at nsid ${CB_NSID}, wanted 1"
+
+# ==========================================================================
 echo ""
 echo "=== [8] the restart really does fix it"
 
