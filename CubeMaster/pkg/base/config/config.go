@@ -550,14 +550,16 @@ type ExternalHTTPScore struct {
 	// fail_closed every create aborts until a valid endpoint is set (typos like
 	// endpont: land here because yaml.v3 ignores unknown keys). Non-empty values
 	// must be absolute http:// or https:// URLs with a host; other schemes
-	// (file, unix, missing scheme) fail construction / are rejected at Select.
+	// (file, unix, missing scheme) are detected at construction (one Warn) and
+	// then rejected on each Select (CubeMaster still starts).
 	// May carry userinfo, path tokens, or query tokens; MarshalJSON and String
 	// redact to scheme+host only so config.Init dumps and CubeLog.Fatalf("%v",
 	// cfg) paths match the scorer's no-secret logging policy.
 	Endpoint string `yaml:"endpoint"`
 	// Timeout is the per-request deadline on the synchronous create path.
 	// Zero/omitted defaults to 200ms at request time; negative values and
-	// values above 2s are rejected at construction / Select validation.
+	// values above 2s are detected at construction (one Warn) and then
+	// rejected on each Select.
 	Timeout time.Duration `yaml:"timeout"`
 	Mode    string        `yaml:"mode"`
 	Disable bool          `yaml:"disable"`

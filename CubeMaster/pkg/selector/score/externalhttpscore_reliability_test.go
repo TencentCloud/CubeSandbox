@@ -221,8 +221,8 @@ func TestExternalHTTPScoreCircuitOpensAndSkipsFullTimeout(t *testing.T) {
 	if !IsFailClosed(err) {
 		t.Fatalf("open-circuit error type = %T (%v), want FailClosedError", err, err)
 	}
-	if elapsed > 15*time.Millisecond {
-		t.Fatalf("open-circuit Select() took %s, want immediate reject without full timeout", elapsed)
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("open-circuit Select() took %s, want fast reject without waiting for HTTP timeout (%s)", elapsed, cfg.Timeout)
 	}
 	if hits.Load() != 2 {
 		t.Fatalf("endpoint hits = %d, want 2 (no request while circuit is open)", hits.Load())

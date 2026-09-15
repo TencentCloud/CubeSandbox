@@ -315,7 +315,9 @@ func (l *externalHTTPScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeS
 			panicErr := ret.Errorf(errorcode.ErrorCode_MasterInternalError, "externalHTTPScore panic:%s", r)
 			logExternalHTTPScoreFailure(ctx, panicErr, failurePolicy)
 			log.G(ctx).Debugf("external_http_score panic stack:\n%s", debug.Stack())
-			_, err = applyExternalHTTPScoreFailure(failurePolicy, panicErr)
+			// Always clear named nodes so fail_open never returns a partial list
+			// if a future panic source lands after appends have started.
+			nodes, err = applyExternalHTTPScoreFailure(failurePolicy, panicErr)
 		}
 	}()
 
