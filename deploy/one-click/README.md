@@ -222,22 +222,48 @@ If `CUBE_SANDBOX_NODE_IP` is explicitly set, the installation script will use th
 
 ### CubeS3lvol stop/upgrade semantics
 
-CubeS3lvol (s3lvol) is managed as a `Wants=` member of the `cube-sandbox-*`
-role target:
+CubeS3lvol (s3lvol) is a `Wants=` member of the `cube-sandbox-*` role target. It
+is deliberately **not** `PartOf=` it (see the unit): stopping a role target does
+not stop s3lvol, because a stop here is a full teardown and an upgrade must not
+inherit one.
 
-- **Stopping** (`down.sh` / `systemctl stop cube-sandbox-{control,compute}.target`):
-  the s3lvol unit goes through `cube-s3lvol-stop.sh`'s **conditional unload** —
-  when the target process is alive it runs the full `rcow_stop.sh` (disconnect
-  initiators -> flush/unload lvstore -> stop the target); when the target has
-  already crashed it only clears target-side residue and **never disconnects
-  the NVMf initiators**. `down.sh` only stops services, it does **not delete
-  any data** (`/data/cubelet/rcow/wal_bdev.img` and the bstore metadata are
-  kept); the next start recovers via attach/replay.
-- **Upgrading** (`install.sh` upgrade mode): the old `CubeS3lvol/` directory is
-  replaced (the new binary takes effect), then the target restarts with the
-  role target. `wal_bdev.img` is **never overwritten** (created only on first
-  install; its size fixes the journal/WAL layout), and the `RCOW_*` settings in
-  `.one-click.env` are merged and kept across the upgrade.
+- **Stopping** (`down.sh`): `down.sh` stops the role target and then stops
+  s3lvol explicitly. That goes through `cube-s3lvol-stop.sh`'s **conditional
+  unload** — when the target process is alive it runs the full `rcow_stop.sh`
+  (disconnect initiators -> flush/unload lvstore -> stop the target); when the
+  target has already crashed it only clears target-side residue and **never
+  disconnects the NVMf initiators**. `down.sh` only stops services, it does
+  **not delete any data** (`/data/cubelet/rcow/wal_bdev.img` and the bstore
+  metadata are kept); the next start recovers via attach/replay.
+- **Upgrading** (`install.sh --mode=upgrade`): nothing to configure and nothing
+  to remember between releases. The component is installed into a **versioned
+  directory** (`CubeS3lvol-<version>/`) with the bare name `CubeS3lvol` as a
+  symlink to it; the version just replaced is kept beside it and older ones are
+  pruned.
+  - **The first upgrade of an install from before this**, or of a target too old
+    to describe its own on-disk formats, or one whose scripts predate the rename
+    to `rcow_upgrade.sh`: the target is **stopped and started** — an
+    interruption, for that one upgrade only. `install.sh` says why.
+  - **Every upgrade after that** is done **in place**: the target is flushed and
+    checkpointed online, killed outright, and the replacement rebuilds the same
+    NQN/(subsys, nsid)/UUID grid, so the host reconnects to the same
+    `/dev/nvmeXnY` and a sandbox's I/O only pauses (about 40s). The initiator is
+    never disconnected and the lvstore never unloaded. This runs
+    `cube-s3lvol-hot-upgrade.sh` **before** the rest of the install stops
+    anything, because an online flush needs both the running target and the S3
+    endpoint.
+  - A swap that does not come back with the layout intact is **rolled back** to
+    the previous version; `install.sh` still finishes the rest and then exits
+    non-zero. The node is complete but on the old s3lvol.
+  - `wal_bdev.img` is **never overwritten** (created only on first install; its
+    size fixes the journal/WAL layout), and the `RCOW_*` settings in
+    `.one-click.env` are merged and kept across the upgrade.
+- **If a stop is refused** — a live target the stop script will not touch, e.g.
+  a marker it cannot honour — the unit is left `failed` while the target keeps
+  running. `systemctl stop` on a failed unit is a no-op and `systemctl start` is
+  refused by `rcow_start.sh`'s instance guard, so recover by hand:
+  `systemctl reset-failed cube-sandbox-s3lvol`, then
+  `/usr/local/services/cubetoolbox/CubeS3lvol/scripts/rcow_stop.sh`.
 - **Enable/disable**: preferred `ONE_CLICK_ENABLE_S3LVOL=0|1 ./install.sh`
   (honored on upgrade as well). Or put only that key in the bundle `.env`
   and re-run `install.sh`. Do not `cp env.example .env` as a full copy

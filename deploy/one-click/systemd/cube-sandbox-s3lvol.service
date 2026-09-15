@@ -4,7 +4,12 @@ After=network-online.target cube-sandbox-minio.service
 Wants=network-online.target
 ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
 RequiresMountsFor=/data/cubelet /data/log
-PartOf=cube-sandbox-control.target cube-sandbox-compute.target
+# Deliberately NOT PartOf= the role targets. An upgrade stops those targets for
+# its whole duration, and a stop here is a full teardown -- it disconnects the
+# NVMf initiator and unloads the lvstore, which takes the block devices away
+# from every live sandbox. Leaving the relationship out is what lets an upgrade
+# bring this one service back on its own terms, so a sandbox is paused for that
+# and not for the whole install. down.sh stops it explicitly instead.
 
 [Service]
 # Type=simple, not forking: the supervise script is the unit's main process, so

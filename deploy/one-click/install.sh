@@ -1462,6 +1462,52 @@ systemd_target_for_role() {
   esac
 }
 
+# CubeS3lvol's own version, as its VERSION file records it. Empty when the file
+# is not there.
+s3lvol_component_version() {
+  sed -n 's/^version:[[:space:]]*//p' "$1/VERSION" 2>/dev/null | head -1
+}
+
+# Install CubeS3lvol under a versioned directory, with the bare name as a
+# symlink to it.
+#
+# The bare name is what every consumer resolves through -- the unit's ExecStart
+# and ExecStop, and the scripts' own RCOW_REPO_ROOT -- so a symlink keeps them
+# all working while giving an upgrade two things a plain directory cannot: the
+# new build goes in place while the old one is still running, and the previous
+# build stays reachable if the replacement has to be rolled back.
+install_cubes3lvol_versioned() {
+  local src="$1" version prev
+
+  version="$(s3lvol_component_version "${src}")"
+  [[ -n "${version}" ]] || version="legacy-$(date +%Y%m%d-%H%M%S)"
+
+  # A bare real directory is the layout from before this. Keep it under its own
+  # version, so the first upgrade of an old install can still roll back.
+  if [[ -d "${INSTALL_PREFIX}/CubeS3lvol" && ! -L "${INSTALL_PREFIX}/CubeS3lvol" ]]; then
+    prev="$(s3lvol_component_version "${INSTALL_PREFIX}/CubeS3lvol")"
+    [[ -n "${prev}" ]] || prev="legacy-$(date +%Y%m%d-%H%M%S)"
+    mv -f "${INSTALL_PREFIX}/CubeS3lvol" "${INSTALL_PREFIX}/CubeS3lvol-${prev}"
+    log "CubeS3lvol: kept the pre-versioning install as CubeS3lvol-${prev}"
+  fi
+
+  rm -rf "${INSTALL_PREFIX}/CubeS3lvol-${version}"
+  mkdir -p "${INSTALL_PREFIX}/CubeS3lvol-${version}"
+  cp -a "${src}/." "${INSTALL_PREFIX}/CubeS3lvol-${version}/"
+
+  # Put in place through a rename, so the bare name never points at nothing.
+  ln -sfn "CubeS3lvol-${version}" "${INSTALL_PREFIX}/.CubeS3lvol.new"
+  mv -Tf "${INSTALL_PREFIX}/.CubeS3lvol.new" "${INSTALL_PREFIX}/CubeS3lvol"
+
+  # Keep the build just replaced, which is the one a rollback needs, and drop
+  # anything older.
+  find "${INSTALL_PREFIX}" -maxdepth 1 -name 'CubeS3lvol-*' -type d \
+    -printf '%T@ %p\n' 2>/dev/null | sort -rn | awk 'NR>2 {print $2}' |
+    while read -r old; do rm -rf "${old}"; done
+
+  log "CubeS3lvol: installed as CubeS3lvol-${version}; the bare name points at it"
+}
+
 stop_existing_systemd_deployment() {
   # Disable + stop the targets first; PartOf= on each child service is
   # supposed to cascade the stop. In practice, units that are stuck in
@@ -1475,15 +1521,22 @@ stop_existing_systemd_deployment() {
   # and guarantees the next `enable --now <target>` actually re-runs
   # ExecStart instead of returning a "no-op, already active" exit 0.
   #
-  # Stop s3lvol before the target/glob stop so it can flush to MinIO
-  # while the S3 endpoint is still up. A glob `cube-sandbox-*.service`
-  # stop has undefined order and otherwise races MinIO down first.
-  systemctl stop cube-sandbox-s3lvol.service >/dev/null 2>&1 || true
+  # s3lvol is deliberately left running here. It is the one service whose stop
+  # takes the block devices away from a live sandbox, and that is not necessary
+  # for an upgrade: the target is killed and rebuilt in place instead. Doing so
+  # needs the new component on disk and the S3 endpoint an online flush writes
+  # to, so it happens earlier -- see cube-s3lvol-hot-upgrade.sh. The unit is
+  # deliberately not PartOf= these targets, so this stop does not reach it.
   systemctl disable --now \
     cube-sandbox-control.target \
     cube-sandbox-compute.target >/dev/null 2>&1 || true
   systemctl reset-failed 'cube-sandbox-*.service' >/dev/null 2>&1 || true
-  systemctl stop 'cube-sandbox-*.service' >/dev/null 2>&1 || true
+  # Enumerated rather than globbed: the glob would match s3lvol too.
+  systemctl list-units --plain --no-legend --all 'cube-sandbox-*.service' 2>/dev/null |
+    awk '{print $1}' | grep -vx 'cube-sandbox-s3lvol.service' |
+    while read -r unit; do
+      systemctl stop "${unit}" >/dev/null 2>&1 || true
+    done
 }
 
 stop_existing_legacy_deployment() {
@@ -1786,6 +1839,33 @@ if [[ -n "${detected_installed_role}" ]]; then
   installed_role="${detected_installed_role}"
 fi
 
+# CubeS3lvol is staged and upgraded first, in place, before anything else is
+# stopped. Both halves of that need something the steps below would take away:
+# the new component has to be on disk before its version can be compared with
+# the running one's, and the running target has to still be there to be upgraded
+# -- along with the S3 endpoint an online flush writes to. Everything after this
+# leaves s3lvol alone and only touches the other components, so a live sandbox
+# is paused for the swap and not for the whole install.
+S3LVOL_UPGRADE_RC=0
+if [[ -d "${PKG_ROOT}/CubeS3lvol" ]]; then
+  # Captured before staging: once the bare name points at the new build there is
+  # nothing left to resolve the outgoing one through.
+  S3LVOL_OLD_DIR="$(readlink -f "${INSTALL_PREFIX}/CubeS3lvol" 2>/dev/null || true)"
+
+  # Staged regardless of the enable switch, so the component is where the next
+  # enabling install expects it; the upgrade only runs when the switch is on.
+  install_cubes3lvol_versioned "${PKG_ROOT}/CubeS3lvol"
+  # Out of the package tree either way, so the whole-tree copy below cannot
+  # write through the bare name into the version directory it points at.
+  rm -rf "${PKG_ROOT}/CubeS3lvol"
+
+  if [[ "${ONE_CLICK_ENABLE_S3LVOL}" == "1" ]]; then
+    S3LVOL_NEW_DIR="$(basename "$(readlink -f "${INSTALL_PREFIX}/CubeS3lvol")")"
+    "${PKG_ROOT}/scripts/systemd/cube-s3lvol-hot-upgrade.sh" \
+      "${S3LVOL_NEW_DIR}" "${S3LVOL_OLD_DIR}" || S3LVOL_UPGRADE_RC=$?
+  fi
+fi
+
 log "stopping existing systemd deployment under ${INSTALL_PREFIX}"
 stop_existing_systemd_deployment
 stop_existing_legacy_deployment "${installed_role}"
@@ -1812,7 +1892,6 @@ rm -rf \
   "${INSTALL_PREFIX}/CubeMaster" \
   "${INSTALL_PREFIX}/CubeTemplateCenter" \
   "${INSTALL_PREFIX}/Cubelet" \
-  "${INSTALL_PREFIX}/CubeS3lvol" \
   "${INSTALL_PREFIX}/cubeproxy" \
   "${INSTALL_PREFIX}/coredns" \
   "${INSTALL_PREFIX}/webui" \
@@ -1839,12 +1918,9 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
     copy_dir_contents "${PKG_ROOT}/cube-agent" "${INSTALL_PREFIX}/cube-agent"
   fi
   copy_dir_contents "${PKG_ROOT}/cube-egress" "${INSTALL_PREFIX}/cube-egress"
-  # CubeS3lvol ships in the package only when the builder wrapper supplied
-  # ONE_CLICK_S3LVOL_DIR (build-release-bundle.sh warns+skips otherwise), so
-  # guard the directory like cube-agent does.
-  if [[ -d "${PKG_ROOT}/CubeS3lvol" ]]; then
-    copy_dir_contents "${PKG_ROOT}/CubeS3lvol" "${INSTALL_PREFIX}/CubeS3lvol"
-  fi
+  # CubeS3lvol is not copied here. It was staged under a versioned directory
+  # with the bare name switched to it, earlier, because that has to happen while
+  # the target it replaces is still running.
   copy_dir_contents "${PKG_ROOT}/systemd" "${INSTALL_PREFIX}/systemd"
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"
 else
@@ -2116,3 +2192,14 @@ print_path_hint
 # Re-print the missing-S3 warning last so an unconfigured compute node ends on
 # the remediation path (no-op for control role and for compute nodes with S3).
 warn_compute_s3_missing
+
+# And the s3lvol outcome last of all, because it is the one thing here that can
+# fail while everything else succeeded: the install is complete either way, but
+# if the target was rolled back it is running the previous build, and the caller
+# has to be able to tell. Exiting non-zero is the only channel for that -- the
+# unit, the layout and the sandbox are all healthy, so nothing else would say so.
+if [[ "${S3LVOL_UPGRADE_RC}" -ne 0 ]]; then
+  log "WARNING: the CubeS3lvol upgrade did not complete (rc=${S3LVOL_UPGRADE_RC})"
+  log "         the previous build is still running; everything else is installed"
+  exit "${S3LVOL_UPGRADE_RC}"
+fi
