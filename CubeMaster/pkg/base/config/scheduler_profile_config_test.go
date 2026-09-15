@@ -785,6 +785,23 @@ scheduler:
 	assert.Contains(t, err.Error(), "unknown score")
 }
 
+func TestInit_EmptyProfileUnknownFilterNameFails(t *testing.T) {
+	// Empty-profile filter typos used to be silently dropped in filter.NewSelector
+	// (IsValid continue, no log). Fail at config load so admission cannot vanish.
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  filter:
+    enable_filters:
+      - cpu
+      - templte_locality
+`
+	_, err := initConfigFromYAML(t, yamlBody)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "templte_locality")
+	assert.Contains(t, err.Error(), "unknown filter")
+}
+
 func TestInit_EmptyProfileMissingFactorPluginConfFails(t *testing.T) {
 	// Master NewSelector panicked when a listed factor scorer lacked plugin_conf.
 	// Fail at config load so the empty-profile path stays fail-closed.

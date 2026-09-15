@@ -113,6 +113,8 @@ CubeMaster 可通过 `scheduler.profile` 选择命名的**运行时 Profile**。
 - `enable_scorers` 列出了因子型 / affinity 评分器或 `external_http_score` 但缺少
   对应 `plugin_conf`
 - `enable_scorers` 列出未知评分器名称（含拼写错误）
+- `enable_filters` 列出未知过滤器名称（含拼写错误；此前会在 `filter.NewSelector`
+  中无日志静默丢弃）
 - 任意 `plugin_conf.<scorer>.weight` 为负或非有限值（`NaN` / `Inf`）
 - `external_http_score.endpoint` 对非 loopback 主机使用明文 `http://`，且未设置
   `allow_insecure: true`

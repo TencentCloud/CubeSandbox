@@ -118,6 +118,8 @@ on process start** (hot-reload only logs FATAL and keeps the previous Config):
 - `enable_scorers` lists a factor/affinity scorer or `external_http_score`
   without its `plugin_conf` block
 - `enable_scorers` lists an unknown scorer name (including typos)
+- `enable_filters` lists an unknown filter name (including typos; previously
+  silently dropped in `filter.NewSelector` with no log)
 - any `plugin_conf.<scorer>.weight` that is negative or non-finite (`NaN` / `Inf`)
 - `external_http_score.endpoint` is cleartext `http://` to a non-loopback host
   without `allow_insecure: true`

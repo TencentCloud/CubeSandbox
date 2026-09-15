@@ -353,9 +353,10 @@ mode / fail-open semantics, see the CubeMaster scheduler config guide
 history for the separate topic PRs; this umbrella combines them. With a
 selected Profile, unknown names in the **effective** `enable_filters` /
 `enable_scorers` lists fail closed at config load. Unknown base
-`enable_scorers` names also fail closed with an empty Profile
-(`validateListedScorerPluginConfPresent`); do not expect
-`NewSelector` warn-and-skip for a typo'd scorer name after upgrade.
+`enable_filters` / `enable_scorers` names also fail closed with an empty
+Profile (`validateListedFilterNames` /
+`validateListedScorerPluginConfPresent`); do not expect silent drops or
+`NewSelector` warn-and-skip for a typo'd selector name after upgrade.
 
 ## Runtime Profile vs Simulator Profile
 

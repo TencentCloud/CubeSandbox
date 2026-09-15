@@ -1254,6 +1254,13 @@ func preHandleScheduler(config *Config) error {
 	if err := validateListedScorerPluginConfPresent(&config.Scheduler.SchedulerConf); err != nil {
 		return err
 	}
+	// Unknown filter names used to be silently dropped in filter.NewSelector
+	// (IsValid continue, no log). Reject them at config load on every path so a
+	// typo cannot remove an admission hard filter. Score-name unknown rejects
+	// already run above via validateListedScorerPluginConfPresent.
+	if err := validateListedFilterNames(&config.Scheduler.SchedulerConf); err != nil {
+		return err
+	}
 	// Strict factor/disable validation remains Profile-scoped so empty-profile
 	// configs with a present-but-ineffective plugin_conf block keep pre-upgrade
 	// load behavior (runtime Errorf + skip rather than Init failure).
@@ -1686,19 +1693,34 @@ func validateListedScorerPluginConfPresent(s *SchedulerConf) error {
 	return nil
 }
 
+// validateListedFilterNames rejects unknown enable_filters entries on both
+// empty and non-empty Profile paths. filter.NewSelector silently skips
+// invalid names with no log; fail closed here so a typo cannot drop admission.
+func validateListedFilterNames(s *SchedulerConf) error {
+	if s == nil || s.Filter == nil {
+		return nil
+	}
+	for _, name := range s.Filter.EnableFilters {
+		if _, ok := allowedSchedulerFilterNames[name]; !ok {
+			if s.Profile != "" {
+				return fmt.Errorf("scheduler profile %q: unknown filter %q in effective enable_filters", s.Profile, name)
+			}
+			return fmt.Errorf("scheduler.filter.enable_filters lists unknown filter %q", name)
+		}
+	}
+	return nil
+}
+
 // validateEffectiveSchedulerSelectors checks the final Filter/Score name lists
-// after Profile overlay. Unknown score names are also rejected earlier by
-// validateListedScorerPluginConfPresent on every path (including empty Profile).
+// after Profile overlay. Filter names are also rejected earlier by
+// validateListedFilterNames on every path (including empty Profile); Score
+// unknown names are rejected by validateListedScorerPluginConfPresent.
 func validateEffectiveSchedulerSelectors(s *SchedulerConf) error {
 	if s == nil {
 		return nil
 	}
-	if s.Filter != nil {
-		for _, name := range s.Filter.EnableFilters {
-			if _, ok := allowedSchedulerFilterNames[name]; !ok {
-				return fmt.Errorf("scheduler profile %q: unknown filter %q in effective enable_filters", s.Profile, name)
-			}
-		}
+	if err := validateListedFilterNames(s); err != nil {
+		return err
 	}
 	if s.Score != nil {
 		for _, name := range s.Score.EnableScorers {
