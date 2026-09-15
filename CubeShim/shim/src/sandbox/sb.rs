@@ -28,7 +28,7 @@ use ttrpc::r#async::Client;
 use super::config::{Fs, ANNO_VMM_FS, VIRTIO_FS_ID, VIRTIO_FS_TAG};
 use super::device;
 use super::disk::Disk;
-use super::pmem::Pmem;
+use super::pmem::{Pmem, GAUGE_GUEST_MOUNT, HYP_GAUGE_ID};
 use crate::common::types::PropagationMount;
 use crate::common::utils::{self, AsyncUtils, CPath, Utils};
 use crate::common::{
@@ -166,6 +166,10 @@ impl SandBox {
         self.spec = spec;
         let annotations = self.spec.annotations();
         self.conf = config::Config::new(annotations)?;
+        self.conf.attach_gauge_pmem()?;
+        if self.conf.perf_metric && !self.conf.pmem.iter().any(|p| p.id == HYP_GAUGE_ID) {
+            infof!(self.log, "gauge pmem not found, skip attach and insmod");
+        }
         if self.conf.app_snapshot_restore {
             let snapshot_base = annotations
                 .as_ref()
@@ -367,18 +371,23 @@ impl SandBox {
         };
         storages.push(shm);
 
-        //pmem
+        //pmem (index 0 is cube_gauge.ext4 → /dev/pmem2, mounted by agent)
         for (i, p) in self.conf.pmem.iter().enumerate() {
             if p.placeholder {
                 continue;
             }
+            let mount_point = if p.id == HYP_GAUGE_ID {
+                GAUGE_GUEST_MOUNT.to_string()
+            } else {
+                Pmem::guest_mount_point(i as u32)
+            };
             //let dev_path = p.guest_device_path(i);
             //let g_mount_point = p.guest_mount_point(i);
             let ps = agent::Storage {
                 driver: Pmem::driver(),
                 source: Pmem::guest_device_path(i as u32),
                 fstype: p.fs_type.clone(),
-                mount_point: Pmem::guest_mount_point(i as u32),
+                mount_point,
                 options: vec!["ro".to_string(), "dax".to_string()].into(),
                 ..Default::default()
             };
@@ -511,6 +520,23 @@ impl SandBox {
 
         if snapshot {
             req.cube_preserve_mem_m = self.conf.vm_res.preserve_memory as u32;
+        }
+
+        // Template create only. Agent insmod after LinuxContainer::new (cgroup exists).
+        if self.conf.perf_metric
+            && self.app_snapshot_create()
+            && self.conf.pmem.iter().any(|p| p.id == HYP_GAUGE_ID)
+        {
+            infof!(
+                self.log,
+                "perf metric on: ask agent to insmod {} during template create",
+                Pmem::gauge_ko_guest_path()
+            );
+            req.kernel_modules = vec![agent::KernelModule {
+                name: Pmem::gauge_ko_guest_path(),
+                ..Default::default()
+            }]
+            .into();
         }
 
         let mut ctx = self.ctx.clone();
@@ -990,8 +1016,11 @@ impl SandBox {
             ));
         }*/
 
-        //update pmem seq, must occur after successful restore
+        // Align drops Shim-injected GAUGE pmem: Cubelet metadata.json only
+        // records cube.pmem (rootfs). Skip leftover so eq() length matches,
+        // then re-attach so restore still has the snapshot pmem device.
         self.conf.pmem = align_pmem;
+        self.conf.attach_gauge_pmem()?;
         let mut pmem_path_map = HashMap::new();
         for (i, p) in self.conf.pmem.iter().enumerate() {
             pmem_path_map.insert(p.file.clone(), i as u32);

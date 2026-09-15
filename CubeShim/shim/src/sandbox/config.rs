@@ -3,6 +3,7 @@
 //
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use cube_hypervisor::config::{BackendFsConfig, RateLimiterConfig};
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,7 @@ use crate::common::CResult;
 use crate::common::PRODUCT_CUBEBOX;
 use crate::sandbox::disk::{Disk, ANNO_DISK};
 use crate::sandbox::net::{Net, ANNO_NET};
-use crate::sandbox::pmem::{Pmem, ANNO_PMEM};
+use crate::sandbox::pmem::{Pmem, ANNO_PMEM, HYP_GAUGE_ID};
 
 pub const ANNO_VM_RES: &str = "cube.vmmres";
 pub const ANNO_VMM_FS: &str = "cube.fs";
@@ -289,6 +290,44 @@ impl Config {
         };
         Ok(c)
     }
+
+    /// Attach `cube_gauge.ext4` at business index 0 (`/dev/pmem2`) only when
+    /// `--enable-metric` is on and the plane file exists. Missing file or no
+    /// flag: leave the sandbox unchanged (no extra pmem, no insmod).
+    pub fn attach_gauge_pmem(&mut self) -> CResult<()> {
+        if self.pmem.iter().any(|p| p.id == HYP_GAUGE_ID) {
+            self.rebuild_pmem_path_map();
+            return Ok(());
+        }
+        if !self.perf_metric {
+            return Ok(());
+        }
+        let file = Pmem::gauge_pmem_path(&self.kernel);
+        if !Path::new(&file).is_file() {
+            return Ok(());
+        }
+        self.pmem.insert(
+            0,
+            Pmem {
+                file,
+                discard_writes: true,
+                source_dir: String::new(),
+                fs_type: "ext4".to_string(),
+                size: None,
+                id: HYP_GAUGE_ID.to_string(),
+                placeholder: false,
+            },
+        );
+        self.rebuild_pmem_path_map();
+        Ok(())
+    }
+
+    fn rebuild_pmem_path_map(&mut self) {
+        self.pmem_path_map.clear();
+        for (i, p) in self.pmem.iter().enumerate() {
+            self.pmem_path_map.insert(p.file.clone(), i as u32);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -562,5 +601,38 @@ mod tests {
                 .unwrap()
                 .use_passfd_io
         );
+    }
+
+    #[test]
+    fn attach_gauge_pmem_only_when_flag_and_file_exist() {
+        use crate::sandbox::pmem::{DEFAULT_GAUGE_PMEM_PATH, HYP_GAUGE_ID};
+        use std::path::Path;
+
+        let mut annotations = HashMap::<String, String>::new();
+        let res = r#"{"cpu": 1, "memory": 2048, "preserve_memory": 2048, "snap_memory": 2048}"#;
+        annotations.insert(ANNO_VM_RES.to_string(), res.to_string());
+        let mut config = Config::new(&Some(annotations)).unwrap();
+        assert!(config.pmem.is_empty());
+
+        config.attach_gauge_pmem().unwrap();
+        assert!(
+            config.pmem.is_empty(),
+            "no flag must not attach even if the ext4 exists"
+        );
+
+        config.perf_metric = true;
+        if !Path::new(DEFAULT_GAUGE_PMEM_PATH).is_file() {
+            config.attach_gauge_pmem().unwrap();
+            assert!(
+                config.pmem.is_empty(),
+                "flag without file must skip, not fail"
+            );
+            return;
+        }
+        config.attach_gauge_pmem().unwrap();
+        assert_eq!(config.pmem[0].id, HYP_GAUGE_ID);
+        assert_eq!(config.pmem[0].file, DEFAULT_GAUGE_PMEM_PATH);
+        config.attach_gauge_pmem().unwrap();
+        assert_eq!(config.pmem.len(), 1, "second attach must be idempotent");
     }
 }

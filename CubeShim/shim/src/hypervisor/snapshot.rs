@@ -12,7 +12,7 @@ use std::io::{BufReader, Write};
 use std::path::Path;
 
 use crate::sandbox::disk::Disk as SbDisk;
-use crate::sandbox::pmem::Pmem as SbPmem;
+use crate::sandbox::pmem::{Pmem as SbPmem, HYP_GAUGE_ID};
 use cube_hypervisor::SNAPSHOT_VERSION;
 
 use serde_json;
@@ -154,6 +154,12 @@ impl SnapshotInfo {
         }
 
         for (_, pmem) in req_pmems {
+            // Cubelet metadata.json only lists cube.pmem. Extra GAUGE pmem in
+            // the request is skipped so eq() length matches; restore_vm
+            // re-attaches the snapshot device afterward.
+            if pmem.id == HYP_GAUGE_ID {
+                continue;
+            }
             res_pmems.push(pmem);
         }
         res_pmems
