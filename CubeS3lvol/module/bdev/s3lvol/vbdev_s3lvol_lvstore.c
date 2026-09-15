@@ -2270,6 +2270,19 @@ s3lvol_lvstore_unload(struct s3lvol_lvstore *lvs,
 		return;
 	}
 
+	/* Materialisation is direct blobstore work, not lvol bdev I/O. Unregistering
+	 * the bdevs below therefore does not drain it: a completion would retain
+	 * d->lvol, d->channel and blobstore pointers after unload freed them.
+	 * Queued decouples retain the same raw pointers and must block unload too. */
+	if (s3lvol_lvstore_decouple_pending(lvs)) {
+		SPDK_WARNLOG("lvstore '%s' has a running or queued decouple; "
+			     "refusing unload until it completes\n", lvs->name);
+		if (cb_fn) {
+			cb_fn(cb_arg, -EBUSY);
+		}
+		return;
+	}
+
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) {
 		if (cb_fn) {
