@@ -11,6 +11,51 @@ export function safeHttpUrl(value) {
   }
 }
 
+export function localizeBaselineUrl(url, locale = 'en') {
+  const safe = safeHttpUrl(url)
+  if (!safe) return ''
+  const preferZh = String(locale || 'en').startsWith('zh')
+  try {
+    const parsed = new URL(safe)
+    if (parsed.hostname === 'github.com') {
+      if (preferZh) {
+        parsed.pathname = parsed.pathname.replace('/docs/blog/posts/', '/docs/zh/blog/posts/')
+      } else {
+        parsed.pathname = parsed.pathname.replace('/docs/zh/blog/posts/', '/docs/blog/posts/')
+      }
+      return parsed.href
+    }
+    if (parsed.hostname === 'cubesandbox.com' || parsed.hostname.endsWith('.cubesandbox.com')) {
+      if (preferZh) {
+        if (!parsed.pathname.startsWith('/zh/')) {
+          parsed.pathname = `/zh${parsed.pathname.startsWith('/') ? parsed.pathname : `/${parsed.pathname}`}`
+        }
+      } else if (parsed.pathname.startsWith('/zh/')) {
+        parsed.pathname = parsed.pathname.slice(3) || '/'
+      }
+      return parsed.href
+    }
+  } catch {
+    return safe
+  }
+  return safe
+}
+
+export function resolveBaselineUrl(baseline, locale = 'en') {
+  if (!baseline || typeof baseline !== 'object') return ''
+  const preferZh = String(locale || 'en').startsWith('zh')
+  if (preferZh) {
+    return (
+      safeHttpUrl(baseline.url_zh || baseline.urlZh || baseline.urls?.zh) ||
+      localizeBaselineUrl(baseline.url, 'zh')
+    )
+  }
+  return (
+    safeHttpUrl(baseline.url_en || baseline.urlEn || baseline.urls?.en || baseline.url) ||
+    localizeBaselineUrl(baseline.url, 'en')
+  )
+}
+
 export function emptyQualityStatus() {
   return {
     generatedAt: null,
@@ -82,7 +127,9 @@ export function normalizeQualityStatus(payload) {
       status: performance.status || '',
       baseline: {
         ...baseline,
-        url: safeHttpUrl(baseline.url)
+        url: safeHttpUrl(baseline.url),
+        url_zh: safeHttpUrl(baseline.url_zh || baseline.urlZh || baseline.urls?.zh),
+        url_en: safeHttpUrl(baseline.url_en || baseline.urlEn || baseline.urls?.en)
       },
       counts: comparison.counts || performance.counts || {},
       note: comparison.note || performance.note || '',

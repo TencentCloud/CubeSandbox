@@ -37,9 +37,15 @@ import { data } from '../../quality-status.data.js'
   },
   "performance": {
     "status": "passed",
-    "baseline": { "name": "v0.7.1 baseline", "url": "https://cubesandbox.com/guide/performance-benchmark" },
+    "baseline": {
+      "name": "v0.7.1 baseline",
+      "url": "https://cubesandbox.com/blog/posts/2026-06-01-cubesandbox-perf-benchmark",
+      "url_zh": "https://cubesandbox.com/zh/blog/posts/2026-06-01-cubesandbox-perf-benchmark"
+    },
     "counts": { "critical": 0, "warning": 1, "similar": 8, "improved": 2 },
     "metrics": [{ "label": "3.2 Sandbox Create Latency", "current_text": "1.24s", "baseline_text": "1.31s", "delta_pct": -5.3, "verdict": "improved" }]
   }
 }
 ```
+
+Status 页面会按当前语言选择基线链接。中文页优先使用 `baseline.url_zh`，英文页优先使用 `baseline.url` 或 `baseline.url_en`。如果 JSON 只有一个 URL，页面会改写已知的官网和 GitHub 文档路径（`cubesandbox.com/guide/...` ↔ `/zh/guide/...`，以及 GitHub `docs/blog/posts/...` ↔ `docs/zh/blog/posts/...`）。

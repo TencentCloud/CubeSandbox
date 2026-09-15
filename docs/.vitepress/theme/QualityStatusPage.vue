@@ -2,7 +2,8 @@
 import { computed, onMounted, ref } from 'vue'
 import {
   emptyQualityStatus,
-  normalizeQualityStatus
+  normalizeQualityStatus,
+  resolveBaselineUrl
 } from '../quality-status-source.js'
 
 const props = defineProps({
@@ -99,13 +100,19 @@ const modules = computed(() => Array.isArray(status.value.e2e?.modules) ? status
 const perf = computed(() => status.value.performance || {})
 const metrics = computed(() => Array.isArray(perf.value.metrics) ? perf.value.metrics : [])
 const counts = computed(() => perf.value.counts || {})
+const baselineUrl = computed(() => resolveBaselineUrl(perf.value.baseline, props.locale))
 const shouldFetchLive = computed(() => Boolean(runtimeUrl) && props.data?.live !== false)
 const hasOverallStatus = computed(() => status.value.status && status.value.status !== 'unknown')
 const hasE2EData = computed(() =>
   Boolean(status.value.e2e?.status || Object.keys(tests.value).length || modules.value.length)
 )
 const hasPerformanceData = computed(() =>
-  Boolean(perf.value.status || Object.keys(counts.value).length || metrics.value.length || perf.value.baseline?.url)
+  Boolean(
+    perf.value.status ||
+      Object.keys(counts.value).length ||
+      metrics.value.length ||
+      baselineUrl.value
+  )
 )
 const hasData = computed(() =>
   Boolean(
@@ -265,9 +272,9 @@ onMounted(() => {
           <strong>{{ text(counts[key]) }}</strong>
         </div>
       </div>
-      <p v-if="perf.baseline?.url" class="qs-note">
+      <p v-if="baselineUrl" class="qs-note">
         {{ words.baselineLink }}:
-        <a :href="perf.baseline.url" target="_blank" rel="noopener noreferrer">{{ perf.baseline.name || perf.baseline.key || perf.baseline.url }}</a>
+        <a :href="baselineUrl" target="_blank" rel="noopener noreferrer">{{ perf.baseline.name || perf.baseline.key || baselineUrl }}</a>
       </p>
       <div v-if="metrics.length" class="qs-table-wrap">
         <table>

@@ -2,7 +2,9 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   emptyQualityStatus,
+  localizeBaselineUrl,
   normalizeQualityStatus,
+  resolveBaselineUrl,
   safeHttpUrl
 } from '../.vitepress/quality-status-source.js'
 
@@ -21,7 +23,7 @@ test('normalizeQualityStatus accepts the public status payload shape', () => {
       status: 'passed',
       baseline: {
         name: 'v0.7.1 baseline',
-        url: 'https://cubesandbox.com/guide/performance-benchmark'
+        url: 'https://cubesandbox.com/blog/posts/2026-06-01-cubesandbox-perf-benchmark'
       },
       counts: { similar: 1 },
       metrics: [{ label: '3.2 Sandbox Create Latency', verdict: 'similar' }, null]
@@ -33,7 +35,10 @@ test('normalizeQualityStatus accepts the public status payload shape', () => {
   assert.equal(status.e2e.modules.length, 1)
   assert.equal(status.e2e.modules[0].module, 'lifecycle')
   assert.equal(status.performance.metrics.length, 1)
-  assert.equal(status.performance.baseline.url, 'https://cubesandbox.com/guide/performance-benchmark')
+  assert.equal(
+    status.performance.baseline.url,
+    'https://cubesandbox.com/blog/posts/2026-06-01-cubesandbox-perf-benchmark'
+  )
   assert.equal(status.performance.metrics[0].label, '3.2 Sandbox Create Latency')
 })
 
@@ -99,7 +104,35 @@ test('normalizeQualityStatus rejects invalid payloads and unsafe baseline URLs',
     }
   })
 
-  assert.deepEqual(status.performance.baseline, { url: '' })
+  assert.equal(status.performance.baseline.url, '')
+  assert.equal(status.performance.baseline.url_zh, '')
+  assert.equal(status.performance.baseline.url_en, '')
+})
+
+test('resolveBaselineUrl prefers locale-specific URLs and rewrites known sites', () => {
+  const baseline = {
+    url: 'https://cubesandbox.com/blog/posts/2026-06-01-cubesandbox-perf-benchmark',
+    url_zh: 'https://cubesandbox.com/zh/blog/posts/2026-06-01-cubesandbox-perf-benchmark'
+  }
+  assert.equal(
+    resolveBaselineUrl(baseline, 'en'),
+    'https://cubesandbox.com/blog/posts/2026-06-01-cubesandbox-perf-benchmark'
+  )
+  assert.equal(
+    resolveBaselineUrl(baseline, 'zh'),
+    'https://cubesandbox.com/zh/blog/posts/2026-06-01-cubesandbox-perf-benchmark'
+  )
+  assert.equal(
+    localizeBaselineUrl(
+      'https://github.com/TencentCloud/CubeSandbox/blob/master/docs/zh/blog/posts/2026-06-01-cubesandbox-perf-benchmark.md',
+      'en'
+    ),
+    'https://github.com/TencentCloud/CubeSandbox/blob/master/docs/blog/posts/2026-06-01-cubesandbox-perf-benchmark.md'
+  )
+  assert.equal(
+    localizeBaselineUrl('https://cubesandbox.com/guide/performance-benchmark', 'zh'),
+    'https://cubesandbox.com/zh/guide/performance-benchmark'
+  )
 })
 
 test('emptyQualityStatus returns the unknown status skeleton', () => {

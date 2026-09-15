@@ -37,9 +37,15 @@ The public JSON object should contain the following top-level fields:
   },
   "performance": {
     "status": "passed",
-    "baseline": { "name": "v0.7.1 baseline", "url": "https://cubesandbox.com/guide/performance-benchmark" },
+    "baseline": {
+      "name": "v0.7.1 baseline",
+      "url": "https://cubesandbox.com/blog/posts/2026-06-01-cubesandbox-perf-benchmark",
+      "url_zh": "https://cubesandbox.com/zh/blog/posts/2026-06-01-cubesandbox-perf-benchmark"
+    },
     "counts": { "critical": 0, "warning": 1, "similar": 8, "improved": 2 },
     "metrics": [{ "label": "3.2 Sandbox Create Latency", "current_text": "1.24s", "baseline_text": "1.31s", "delta_pct": -5.3, "verdict": "improved" }]
   }
 }
 ```
+
+The status page picks the baseline link from the current locale. The Chinese page prefers `baseline.url_zh`; the English page prefers `baseline.url` or `baseline.url_en`. If the JSON contains only one URL, the page rewrites known public site and GitHub docs paths (`cubesandbox.com/guide/...` ↔ `/zh/guide/...`, and GitHub `docs/blog/posts/...` ↔ `docs/zh/blog/posts/...`).
