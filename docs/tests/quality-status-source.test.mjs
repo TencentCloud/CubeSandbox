@@ -110,29 +110,26 @@ test('normalizeQualityStatus rejects invalid payloads and unsafe baseline URLs',
 })
 
 test('resolveBaselineUrl prefers locale-specific URLs and rewrites known sites', () => {
-  const baseline = {
-    url: 'https://cubesandbox.com/blog/posts/2026-06-01-cubesandbox-perf-benchmark',
-    url_zh: 'https://cubesandbox.com/zh/blog/posts/2026-06-01-cubesandbox-perf-benchmark'
-  }
-  assert.equal(
-    resolveBaselineUrl(baseline, 'en'),
-    'https://cubesandbox.com/blog/posts/2026-06-01-cubesandbox-perf-benchmark'
-  )
-  assert.equal(
-    resolveBaselineUrl(baseline, 'zh'),
-    'https://cubesandbox.com/zh/blog/posts/2026-06-01-cubesandbox-perf-benchmark'
-  )
-  assert.equal(
-    localizeBaselineUrl(
-      'https://github.com/TencentCloud/CubeSandbox/blob/master/docs/zh/blog/posts/2026-06-01-cubesandbox-perf-benchmark.md',
-      'en'
-    ),
+  const enUrl = 'https://cubesandbox.com/blog/posts/2026-06-01-cubesandbox-perf-benchmark'
+  const zhUrl = 'https://cubesandbox.com/zh/blog/posts/2026-06-01-cubesandbox-perf-benchmark'
+  const githubEn =
     'https://github.com/TencentCloud/CubeSandbox/blob/master/docs/blog/posts/2026-06-01-cubesandbox-perf-benchmark.md'
-  )
-  assert.equal(
-    localizeBaselineUrl('https://cubesandbox.com/guide/performance-benchmark', 'zh'),
-    'https://cubesandbox.com/zh/guide/performance-benchmark'
-  )
+  const githubZh =
+    'https://github.com/TencentCloud/CubeSandbox/blob/master/docs/zh/blog/posts/2026-06-01-cubesandbox-perf-benchmark.md'
+
+  assert.equal(resolveBaselineUrl({ url: enUrl, url_zh: zhUrl }, 'en'), enUrl)
+  assert.equal(resolveBaselineUrl({ url: enUrl, url_zh: zhUrl }, 'zh'), zhUrl)
+  assert.equal(resolveBaselineUrl({ url: enUrl }, 'zh'), zhUrl)
+  assert.equal(resolveBaselineUrl({ url: zhUrl }, 'en'), enUrl)
+  assert.equal(resolveBaselineUrl({ url_zh: zhUrl }, 'en'), enUrl)
+  assert.equal(resolveBaselineUrl({ url_en: enUrl }, 'zh'), zhUrl)
+
+  assert.equal(localizeBaselineUrl(githubZh, 'en'), githubEn)
+  assert.equal(localizeBaselineUrl(githubEn, 'zh'), githubZh)
+  assert.equal(localizeBaselineUrl(enUrl, 'zh'), zhUrl)
+  assert.equal(localizeBaselineUrl(zhUrl, 'en'), enUrl)
+  assert.equal(localizeBaselineUrl('https://cubesandbox.com/zh', 'en'), 'https://cubesandbox.com/')
+  assert.equal(localizeBaselineUrl('https://cubesandbox.com/zh', 'zh'), 'https://cubesandbox.com/zh')
 })
 
 test('emptyQualityStatus returns the unknown status skeleton', () => {

@@ -11,6 +11,10 @@ export function safeHttpUrl(value) {
   }
 }
 
+function isZhSitePath(pathname) {
+  return pathname === '/zh' || pathname.startsWith('/zh/')
+}
+
 export function localizeBaselineUrl(url, locale = 'en') {
   const safe = safeHttpUrl(url)
   if (!safe) return ''
@@ -27,11 +31,11 @@ export function localizeBaselineUrl(url, locale = 'en') {
     }
     if (parsed.hostname === 'cubesandbox.com' || parsed.hostname.endsWith('.cubesandbox.com')) {
       if (preferZh) {
-        if (!parsed.pathname.startsWith('/zh/')) {
+        if (!isZhSitePath(parsed.pathname)) {
           parsed.pathname = `/zh${parsed.pathname.startsWith('/') ? parsed.pathname : `/${parsed.pathname}`}`
         }
-      } else if (parsed.pathname.startsWith('/zh/')) {
-        parsed.pathname = parsed.pathname.slice(3) || '/'
+      } else if (isZhSitePath(parsed.pathname)) {
+        parsed.pathname = parsed.pathname === '/zh' ? '/' : parsed.pathname.slice(3) || '/'
       }
       return parsed.href
     }
@@ -44,16 +48,11 @@ export function localizeBaselineUrl(url, locale = 'en') {
 export function resolveBaselineUrl(baseline, locale = 'en') {
   if (!baseline || typeof baseline !== 'object') return ''
   const preferZh = String(locale || 'en').startsWith('zh')
-  if (preferZh) {
-    return (
-      safeHttpUrl(baseline.url_zh || baseline.urlZh || baseline.urls?.zh) ||
-      localizeBaselineUrl(baseline.url, 'zh')
-    )
-  }
-  return (
-    safeHttpUrl(baseline.url_en || baseline.urlEn || baseline.urls?.en || baseline.url) ||
-    localizeBaselineUrl(baseline.url, 'en')
-  )
+  const ordered = preferZh
+    ? [baseline.url_zh, baseline.urlZh, baseline.urls?.zh, baseline.url, baseline.url_en, baseline.urlEn, baseline.urls?.en]
+    : [baseline.url_en, baseline.urlEn, baseline.urls?.en, baseline.url, baseline.url_zh, baseline.urlZh, baseline.urls?.zh]
+  const candidate = ordered.map(safeHttpUrl).find(Boolean)
+  return candidate ? localizeBaselineUrl(candidate, preferZh ? 'zh' : 'en') : ''
 }
 
 export function emptyQualityStatus() {
