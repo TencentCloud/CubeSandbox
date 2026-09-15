@@ -38,7 +38,7 @@ The public JSON object should contain the following top-level fields:
   "performance": {
     "status": "passed",
     "baseline": {
-      "name": "v0.7.1 baseline",
+      "name": "v0.3.0 baseline",
       "url": "https://cubesandbox.com/blog/posts/2026-06-01-cubesandbox-perf-benchmark",
       "url_zh": "https://cubesandbox.com/zh/blog/posts/2026-06-01-cubesandbox-perf-benchmark"
     },

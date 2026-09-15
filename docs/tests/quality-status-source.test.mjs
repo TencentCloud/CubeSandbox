@@ -22,7 +22,7 @@ test('normalizeQualityStatus accepts the public status payload shape', () => {
     performance: {
       status: 'passed',
       baseline: {
-        name: 'v0.7.1 baseline',
+        name: 'v0.3.0 baseline',
         url: 'https://cubesandbox.com/blog/posts/2026-06-01-cubesandbox-perf-benchmark'
       },
       counts: { similar: 1 },
