@@ -3014,6 +3014,8 @@ struct s3lvol_decouple {
 	uint64_t                   done;
 
 	int                        status;
+	bool                       bdev_quiesced;
+	bool                       parent_cleared;
 
 	/* Set to abort at the next cluster boundary. Checked by decouple_next(),
 	 * which is the one place this can safely happen: it is entered only from
@@ -3457,6 +3459,12 @@ decouple_finish_complete(struct s3lvol_decouple *d)
 			       "after %" PRIu64 " of %" PRIu64 " cluster(s); the "
 			       "%" PRIu64 " already materialised are kept\n",
 			       d->lvol_name, d->uuid_str, d->done, d->total, d->done);
+	} else if (d->parent_cleared) {
+		/* Clearing the parent is the point of no return. Do not claim this
+		 * remains an esnap clone merely because a later operation failed. */
+		SPDK_ERRLOG("Lvol '%s' was detached from export %s, but post-detach "
+			    "processing failed: %s\n",
+			    d->lvol_name, d->uuid_str, spdk_strerror(-status));
 	} else {
 		SPDK_ERRLOG("Decoupling lvol '%s' from export %s failed after %" PRIu64
 			    " of %" PRIu64 " cluster(s): %s. The volume still reads "
@@ -3464,6 +3472,10 @@ decouple_finish_complete(struct s3lvol_decouple *d)
 			    d->lvol_name, d->uuid_str, d->done, d->total,
 			    spdk_strerror(-status));
 	}
+
+	/* Freeing d while the bdev is still quiesced would discard the only state
+	 * recording why host I/O is queued. */
+	assert(!d->bdev_quiesced);
 
 	if (d->lvol) {
 		d->lvol->action_in_progress = false;
@@ -3494,12 +3506,17 @@ decouple_finish_complete(struct s3lvol_decouple *d)
 }
 
 static void
-decouple_cleared(void *cb_arg, int bserrno)
+decouple_remember_status(struct s3lvol_decouple *d, int status)
 {
-	struct s3lvol_decouple *d = cb_arg;
+	if (status != 0 && d->status == 0) {
+		d->status = status;
+	}
+}
 
-	if (bserrno != 0) {
-		d->status = bserrno;
+static void
+decouple_after_unquiesce(struct s3lvol_decouple *d)
+{
+	if (!d->parent_cleared) {
 		decouple_finish(d);
 		return;
 	}
@@ -3510,6 +3527,77 @@ decouple_cleared(void *cb_arg, int bserrno)
 	 * export that no attach can resolve. */
 	s3lvol_imports_recheck(d->lvs, d->uuid_str);
 	decouple_rewrite_exports(d);
+}
+
+static void
+decouple_unquiesced(void *cb_arg, int status)
+{
+	struct s3lvol_decouple *d = cb_arg;
+
+	/* This callback runs after every channel has been unlocked and its queued
+	 * I/O resubmitted. */
+	d->bdev_quiesced = false;
+
+	if (status != 0) {
+		SPDK_ERRLOG("Failed to fully unquiesce lvol '%s' after detaching "
+			    "export %s: %s; host I/O may remain queued, restart the "
+			    "lvstore target if it does\n",
+			    d->lvol_name, d->uuid_str, spdk_strerror(-status));
+		decouple_remember_status(d, status);
+	}
+
+	decouple_after_unquiesce(d);
+}
+
+static void
+decouple_cleared(void *cb_arg, int bserrno)
+{
+	struct s3lvol_decouple *d = cb_arg;
+	int rc;
+
+	/* clear_external_parent freezes blob I/O, but that is below the bdev layer:
+	 * an unallocated 4 KiB write can already be doing its parent-read RMW when
+	 * the freeze starts. Destroying that esnap channel races the RMW and completes
+	 * the host write with -EIO. The bdev was quiesced before the clear, so release
+	 * it on both success and failure; writes submitted during this short metadata
+	 * transition have been queued by the bdev layer and resume normally. */
+	d->status = bserrno;
+	d->parent_cleared = bserrno == 0;
+	rc = spdk_bdev_unquiesce(d->lvol->bdev, vbdev_s3lvol_get_module(),
+				 decouple_unquiesced, d);
+	if (rc != 0) {
+		SPDK_ERRLOG("Could not unquiesce lvol '%s' after detaching export "
+			    "%s: %s; the public quiesce handle is gone but host I/O "
+			    "may remain queued, restart the lvstore target\n",
+			    d->lvol_name, d->uuid_str, spdk_strerror(-rc));
+		decouple_remember_status(d, rc);
+		/* spdk_bdev_unquiesce() removes the public quiesce record before
+		 * starting the unlock. If the unlock submission then fails, an
+		 * internal locked range may remain but there is no safe public retry.
+		 * Keeping d alive cannot recover that handle either: it only strands
+		 * the RPC, ingest callback and lvstore. Finish with an explicit error;
+		 * a target restart is the recovery if host I/O remains queued. */
+		d->bdev_quiesced = false;
+		decouple_after_unquiesce(d);
+	}
+}
+
+static void
+decouple_quiesced(void *cb_arg, int status)
+{
+	struct s3lvol_decouple *d = cb_arg;
+	struct spdk_lvol_store *store = s3lvol_lvstore_get_lvs(d->lvs);
+
+	if (status != 0) {
+		d->status = status;
+		decouple_finish(d);
+		return;
+	}
+
+	d->bdev_quiesced = true;
+	spdk_bs_blob_clear_external_parent(store->blobstore,
+					   spdk_blob_get_id(d->lvol->blob),
+					   decouple_cleared, d);
 }
 
 static void decouple_next(struct s3lvol_decouple *d);
@@ -3524,8 +3612,6 @@ static void
 decouple_cluster_done(void *cb_arg, int bserrno)
 {
 	struct s3lvol_decouple *d = cb_arg;
-
-	spdk_blob_allow_esnap_copy(d->lvol->blob, false);
 
 	if (bserrno != 0) {
 		d->status = bserrno;
@@ -3595,7 +3681,7 @@ decouple_next(struct s3lvol_decouple *d)
 	}
 
 	if (d->cluster >= d->num_clusters) {
-		struct spdk_lvol_store *store = s3lvol_lvstore_get_lvs(d->lvs);
+		int rc;
 
 		/* Every cluster that was supposed to be copied has to have been copied
 		 * before the tie to the export is cut, because cutting it is the point
@@ -3624,15 +3710,31 @@ decouple_next(struct s3lvol_decouple *d)
 			return;
 		}
 
-		spdk_bs_blob_clear_external_parent(store->blobstore,
-						   spdk_blob_get_id(d->lvol->blob),
-						   decouple_cleared, d);
+		/* Drain I/O that may still be using the old esnap channel before
+		 * clear_external_parent freezes the blob and destroys that channel.
+		 * New host I/O remains queued in the bdev layer until decouple_cleared()
+		 * has installed the zeroes backing device and unquiesces it. */
+		if (!d->lvol->bdev) {
+			SPDK_ERRLOG("Cannot detach lvol '%s' from export %s: its bdev is "
+				    "not registered\n", d->lvol_name, d->uuid_str);
+			d->status = -ENODEV;
+			decouple_finish(d);
+			return;
+		}
+
+		rc = spdk_bdev_quiesce(d->lvol->bdev, vbdev_s3lvol_get_module(),
+				      decouple_quiesced, d);
+		if (rc != 0) {
+			SPDK_ERRLOG("Could not quiesce lvol '%s' before detaching export %s: %s\n",
+				    d->lvol_name, d->uuid_str, spdk_strerror(-rc));
+			d->status = rc;
+			decouple_finish(d);
+		}
 		return;
 	}
 
 	cluster = d->cluster++;
 
-	spdk_blob_allow_esnap_copy(d->lvol->blob, true);
 	spdk_blob_materialize_cluster(d->lvol->blob, d->channel, cluster,
 				      decouple_cluster_done, d);
 }
