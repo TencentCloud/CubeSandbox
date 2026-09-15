@@ -54,8 +54,10 @@ type Capabilities struct {
 	// must go through this process.
 	DirectURL bool
 	// Shared reports whether all replicas and nodes observe the same
-	// namespace. False for a node-local directory: the caller must then
-	// refuse to run multiple writer replicas.
+	// namespace. False for a node-local directory. Multi-writer refusal is
+	// a deploy-time concern (the Helm chart rejects replicas>1 without
+	// ReadWriteMany); the fs driver only warns, because write-once instance
+	// marks would otherwise fail a crash-restart inside the 2-minute window.
 	Shared          bool
 	RangeRead       bool
 	ConditionalPut  bool

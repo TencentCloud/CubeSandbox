@@ -305,6 +305,9 @@ func (s *store) Put(ctx context.Context, key string, r io.Reader, opts blobstore
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
 	if wantSum != "" && !strings.EqualFold(wantSum, sum) {
+		if rmErr := s.client.RemoveObject(putCtx, s.bucket, full, minio.RemoveObjectOptions{}); rmErr != nil && !isS3NotFound(rmErr) {
+			slog.Warn("blobstore/s3: remove mismatched put", "key", full, "error", rmErr)
+		}
 		return blobstore.ObjectInfo{}, fmt.Errorf("blobstore/s3: sha256 mismatch for %q", full)
 	}
 	// SHA256 UserMetadata is only set on the original PutObject when the
@@ -330,6 +333,7 @@ func (s *store) Get(ctx context.Context, key string, opts blobstore.GetOptions) 
 	var cr *blobstore.ByteRange
 	if opts.Range != nil {
 		start, end := opts.Range.Start, opts.Range.End
+		applied := false
 		switch {
 		case end < 0 && start == 0:
 			// Whole object. minio SetRange(0, -1) means "last 1 byte".
@@ -337,12 +341,16 @@ func (s *store) Get(ctx context.Context, key string, opts blobstore.GetOptions) 
 			if err := getOpts.SetRange(start, 0); err != nil {
 				return nil, err
 			}
+			applied = true
 		default:
 			if err := getOpts.SetRange(start, end); err != nil {
 				return nil, err
 			}
+			applied = true
 		}
-		cr = opts.Range
+		if applied {
+			cr = opts.Range
+		}
 	}
 	obj, err := s.client.GetObject(ctx, s.bucket, full, getOpts)
 	if err != nil {

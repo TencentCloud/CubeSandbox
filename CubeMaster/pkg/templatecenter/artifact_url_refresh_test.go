@@ -89,30 +89,36 @@ func TestArtifactDownloadURLFallsBackToStored(t *testing.T) {
 			t.Fatalf("err=%v: got %q, want stored url %q", err, got, stored)
 		}
 	}
+	stubPresign(t, func(context.Context, *models.RootfsArtifact) (string, error) { return "", nil })
+	got := artifactDownloadURL(context.Background(), &models.RootfsArtifact{ArtifactID: "rfs-9", ArtifactURL: stored})
+	if got != stored {
+		t.Fatalf("empty fresh: got %q, want stored url %q", got, stored)
+	}
 }
 
 func TestArtifactStoreKeyStripsConfiguredPrefix(t *testing.T) {
 	artifact := &models.RootfsArtifact{ArtifactID: "rfs-1", ObjectKey: "template-artifacts/rfs-1.ext4"}
-	got := artifactStoreKeyWithPrefix(artifact, "template-artifacts")
+	ctx := context.Background()
+	got := artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
 	if got != "rfs-1.ext4" {
 		t.Fatalf("prefixed object_key: got %q want rfs-1.ext4", got)
 	}
 	artifact.ObjectKey = "rfs-1.ext4"
-	got = artifactStoreKeyWithPrefix(artifact, "template-artifacts")
+	got = artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
 	if got != "rfs-1.ext4" {
 		t.Fatalf("user-key object_key: got %q", got)
 	}
 	artifact.ObjectKey = "old-prefix/nested/rfs-1.ext4"
-	got = artifactStoreKeyWithPrefix(artifact, "template-artifacts")
-	if got != "old-prefix/nested/rfs-1.ext4" {
-		t.Fatalf("foreign prefix must be kept as user key, got %q", got)
+	got = artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
+	if got != "rfs-1.ext4" {
+		t.Fatalf("foreign prefix must fall back to derived key, got %q", got)
 	}
 	artifact.ObjectKey = ""
-	got = artifactStoreKeyWithPrefix(artifact, "template-artifacts")
+	got = artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
 	if got != "rfs-1.ext4" {
 		t.Fatalf("empty object_key: got %q", got)
 	}
-	if artifactStoreKey(nil) != "" {
+	if artifactStoreKey(ctx, nil) != "" {
 		t.Fatal("nil artifact")
 	}
 	if userKeyFromStoredObjectKey("/template-artifacts/rfs-1.ext4", "template-artifacts") != "rfs-1.ext4" {

@@ -170,7 +170,7 @@ var presignArtifactGetURL = func(ctx context.Context, artifact *models.RootfsArt
 	if st == nil {
 		return "", errS3PresignNotConfigured
 	}
-	u, err := st.store.SignedGetURL(ctx, artifactStoreKey(artifact), s3PresignExpiry)
+	u, err := st.store.SignedGetURL(ctx, artifactStoreKey(ctx, artifact), s3PresignExpiry)
 	if err != nil {
 		if errors.Is(err, blobstore.ErrUnsupported) {
 			return "", nil
@@ -195,7 +195,7 @@ var statArtifactObjectInS3 = func(ctx context.Context, artifact *models.RootfsAr
 	if st == nil {
 		return false, errS3PresignNotConfigured
 	}
-	_, err := st.store.Stat(ctx, artifactStoreKey(artifact))
+	_, err := st.store.Stat(ctx, artifactStoreKey(ctx, artifact))
 	if err != nil {
 		if blobstore.IsNotExist(err) {
 			return false, nil
@@ -254,27 +254,31 @@ func OpenArtifactObject(ctx context.Context, artifact *models.RootfsArtifact) (*
 	if st == nil {
 		return nil, errS3PresignNotConfigured
 	}
-	return st.store.Get(ctx, artifactStoreKey(artifact), blobstore.GetOptions{})
+	return st.store.Get(ctx, artifactStoreKey(ctx, artifact), blobstore.GetOptions{})
 }
 
-func artifactStoreKey(artifact *models.RootfsArtifact) string {
+func artifactStoreKey(ctx context.Context, artifact *models.RootfsArtifact) string {
 	if artifact == nil {
 		return ""
 	}
-	return artifactStoreKeyWithPrefix(artifact, artifactStorePrefix())
+	return artifactStoreKeyWithPrefix(ctx, artifact, artifactStorePrefix())
 }
 
 func artifactStorePrefix() string {
 	return strings.Trim(configenv.EnvOr(configenv.EnvS3ArtifactPrefix), "/")
 }
 
-func artifactStoreKeyWithPrefix(artifact *models.RootfsArtifact, prefix string) string {
+func artifactStoreKeyWithPrefix(ctx context.Context, artifact *models.RootfsArtifact, prefix string) string {
 	fallback := artifactUserKey(artifact.ArtifactID)
 	stored := strings.TrimSpace(artifact.ObjectKey)
 	if stored == "" {
 		return fallback
 	}
 	key := userKeyFromStoredObjectKey(stored, prefix)
+	if prefix != "" && strings.Contains(key, "/") {
+		log.G(ctx).Warnf("artifact object_key %q does not match store prefix %q; using derived key %s", stored, prefix, fallback)
+		return fallback
+	}
 	if blobstore.ValidateKey(key) != nil {
 		return fallback
 	}
@@ -325,5 +329,8 @@ func artifactDownloadURL(ctx context.Context, artifact *models.RootfsArtifact) s
 		}
 		return stored
 	}
-	return fresh
+	if fresh != "" {
+		return fresh
+	}
+	return stored
 }

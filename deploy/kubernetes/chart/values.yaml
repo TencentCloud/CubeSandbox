@@ -548,9 +548,7 @@ cubeOps:
       # Hex-encoded signing key (>=32 bytes = 64 hex chars). Leave empty to
       # generate one (32 random bytes, hex-encoded) and persist it across
       # helm upgrade via lookup on the chart Secret. Multi-replica fs must
-      # share this key. If an older release stored a non-hex value
-      # (randAlphaNum), set this field or delete Secret key
-      # blobstore-signing-key so CubeOps can decode it.
+      # share this key.
       signingKey: ""
       persistence:
         enabled: true

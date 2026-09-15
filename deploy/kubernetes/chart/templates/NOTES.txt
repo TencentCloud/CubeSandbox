@@ -135,10 +135,8 @@ WARNING (template artifact store is node-local with multiple control-plane repli
 {{- if and (eq (include "cube.opsEnabled" .) "true") (eq (include "cube.opsStoreBackend" .) "fs") }}
 
 NOTE (cubeOps fs signing key):
-  blobstore-signing-key must be hex (64 hex chars = 32 bytes). If an older
-  release persisted a non-hex value (randAlphaNum), set
-  cubeOps.store.fs.signingKey or delete that Secret key and helm upgrade
-  so CubeOps can decode it.
+  blobstore-signing-key must be hex (64 hex chars = 32 bytes). Override with
+  cubeOps.store.fs.signingKey when you need a fixed key across clusters.
 {{- end }}
 {{- if eq (include "cube.artifactStoreBackend" .) "fs" }}
 

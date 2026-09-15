@@ -352,7 +352,8 @@ func proxyS3Artifact(c *gin.Context) (handled bool, ok bool) {
 	}
 	// HEAD is rewritten to GET (SigV4 binds the method). Without a Range the
 	// upstream would stream the whole object; ask for one byte and discard it.
-	if c.Request.Method == http.MethodHead && upstreamReq.Header.Get("Range") == "" {
+	injectedHeadProbe := c.Request.Method == http.MethodHead && upstreamReq.Header.Get("Range") == ""
+	if injectedHeadProbe {
 		upstreamReq.Header.Set("Range", "bytes=0-0")
 	}
 	resp, err := artifactProxyHTTPClient.Do(upstreamReq)
@@ -364,10 +365,15 @@ func proxyS3Artifact(c *gin.Context) (handled bool, ok bool) {
 	defer resp.Body.Close()
 	copyArtifactProxyHeaders(c.Writer.Header(), resp.Header)
 	setArtifactIdentityHeaders(c, record)
-	c.Status(resp.StatusCode)
+	status := resp.StatusCode
+	if injectedHeadProbe {
+		status = restoreHeadFromRangeProbe(c.Writer.Header(), resp)
+	}
+	c.Status(status)
 	if c.Request.Method == http.MethodHead {
+		c.Writer.WriteHeaderNow()
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8<<10))
-		return true, resp.StatusCode < http.StatusBadRequest
+		return true, status < http.StatusBadRequest
 	}
 	if _, err := io.Copy(c.Writer, resp.Body); err != nil {
 		log.G(c.Request.Context()).Warnf("artifact proxy: stream %s failed: %v", record.ArtifactID, err)
@@ -403,13 +409,47 @@ func streamArtifactFromStore(c *gin.Context, record *models.RootfsArtifact) (boo
 		return true, true
 	}
 	c.Status(http.StatusOK)
+	if obj.Size >= 0 {
+		c.Header("Content-Length", strconv.FormatInt(obj.Size, 10))
+	}
 	if c.Request.Method == http.MethodHead {
+		c.Writer.WriteHeaderNow()
 		return true, true
 	}
 	if _, err := io.Copy(c.Writer, obj.Body); err != nil {
 		return true, false
 	}
 	return true, true
+}
+
+func restoreHeadFromRangeProbe(h http.Header, resp *http.Response) int {
+	if resp.StatusCode != http.StatusPartialContent {
+		return resp.StatusCode
+	}
+	total, ok := contentRangeTotal(resp.Header.Get("Content-Range"))
+	if !ok {
+		return resp.StatusCode
+	}
+	h.Del("Content-Range")
+	h.Set("Content-Length", strconv.FormatInt(total, 10))
+	return http.StatusOK
+}
+
+func contentRangeTotal(cr string) (int64, bool) {
+	cr = strings.TrimSpace(cr)
+	i := strings.LastIndex(cr, "/")
+	if i < 0 || i+1 >= len(cr) {
+		return 0, false
+	}
+	n := cr[i+1:]
+	if n == "*" {
+		return 0, false
+	}
+	total, err := strconv.ParseInt(n, 10, 64)
+	if err != nil || total < 0 {
+		return 0, false
+	}
+	return total, true
 }
 
 func copyArtifactProxyHeaders(dst, src http.Header) {

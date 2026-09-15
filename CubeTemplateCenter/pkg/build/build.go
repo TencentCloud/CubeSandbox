@@ -358,7 +358,7 @@ func runBuildLocked(
 	// Step 9: Report BUILT. CubeMaster persists the payload into result_json
 	// and resumes the job: finalize rootfs_artifacts, distribute to Cubelet
 	// nodes, register template_definitions.
-	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, artifactURL, uploaded, s3Client, logger); err != nil {
+	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, artifactURL, uploaded, s3Client, "", logger); err != nil {
 		return err
 	}
 
@@ -380,7 +380,15 @@ func reportExistingArtifact(
 	s3Client *s3store.Client,
 	logger *cubelog.Entry,
 ) error {
-	inStore := templatecenter.ArtifactUsesObjectStore(existing)
+	inStore := false
+	objectKey := ""
+	if s3Client != nil {
+		exists, err := s3Client.Stat(ctx, existing.ArtifactID)
+		if err == nil && exists {
+			inStore = true
+			objectKey = strings.TrimSpace(existing.ObjectKey)
+		}
+	}
 	artifactURL := artifactPresignedURL(ctx, s3CfgEnabled, s3Client, existing.ArtifactID, logger)
 	return reportArtifactBuilt(ctx, jobID, &image.BuildResult{
 		Ext4Path:  existing.Ext4Path,
@@ -389,7 +397,7 @@ func reportExistingArtifact(
 	}, existing.ArtifactID, fingerprint, source, reporter, cube_egress_ca.Result{
 		Baked:       len(caPEM) > 0,
 		Fingerprint: caFingerprint,
-	}, artifactURL, inStore, s3Client, logger)
+	}, artifactURL, inStore, s3Client, objectKey, logger)
 }
 
 // reportArtifactBuilt emits the BUILT callback to CubeMaster.
@@ -405,6 +413,7 @@ func reportArtifactBuilt(
 	artifactURL string,
 	inStore bool,
 	s3Client *s3store.Client,
+	objectKey string,
 	logger *cubelog.Entry,
 ) error {
 	// Two fields deserve explanation:
@@ -445,7 +454,10 @@ func reportArtifactBuilt(
 	// leave the three store columns empty so Master stays on local disk.
 	if inStore && s3Client != nil {
 		payload["storage_backend"] = s3Client.BackendName()
-		payload["object_key"] = s3Client.FullObjectKey(artifactID)
+		if objectKey == "" {
+			objectKey = s3Client.FullObjectKey(artifactID)
+		}
+		payload["object_key"] = objectKey
 	}
 	if err := reporter.Report(ctx, jobID, payload); err != nil {
 		logger.Errorf("report BUILT status fail: %v", err)

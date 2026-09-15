@@ -41,6 +41,9 @@ type BlobStore interface {
 	Delete(ctx context.Context, key string) error
 	PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error)
 	List(ctx context.Context, prefix string) ([]ObjectInfo, error)
+	// ListIncompleteUploads and AbortMultipartUpload remain for interface
+	// compatibility. Production cleanup is Store.GC / bucket lifecycle;
+	// Adapter implementations are no-op stubs.
 	ListIncompleteUploads(ctx context.Context, prefix string) ([]IncompleteUpload, error)
 	AbortMultipartUpload(ctx context.Context, key, uploadID string) error
 	EnsureBucket(ctx context.Context) error

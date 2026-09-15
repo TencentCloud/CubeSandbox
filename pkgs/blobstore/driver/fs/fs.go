@@ -62,8 +62,10 @@ type Options struct {
 	ReserveBytes     int64
 	Sync             SyncPolicy
 	RequirePublicURL bool
-	Shared           bool
-	MountPath        string
+	// Shared is a deploy-topology fact (RWX / NFS). When false the driver
+	// warns on overlapping writers; the chart, not Prepare, refuses extra replicas.
+	Shared    bool
+	MountPath string
 }
 
 // SyncPolicy controls fsync on Put.
@@ -304,19 +306,63 @@ func (s *store) ensureSigner() error {
 		return nil
 	}
 	path := filepath.Join(s.root, dirState, "signer.key")
-	if raw, err := os.ReadFile(path); err == nil && len(raw) >= 16 {
-		s.signer = &signer.Signer{Key: raw}
+	if key, err := readSignerKey(path); err == nil {
+		s.signer = &signer.Signer{Key: key}
 		return nil
 	}
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		return fmt.Errorf("blobstore/fs: generate signing key: %w", err)
 	}
-	if err := os.WriteFile(path, key, 0o600); err != nil {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			raw, rerr := readSignerKeyRetry(path)
+			if rerr != nil {
+				return rerr
+			}
+			s.signer = &signer.Signer{Key: raw}
+			return nil
+		}
 		return fmt.Errorf("blobstore/fs: write signing key: %w", err)
+	}
+	_, werr := f.Write(key)
+	cerr := f.Close()
+	if werr != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("blobstore/fs: write signing key: %w", werr)
+	}
+	if cerr != nil {
+		return fmt.Errorf("blobstore/fs: write signing key: %w", cerr)
 	}
 	s.signer = &signer.Signer{Key: key}
 	return nil
+}
+
+func readSignerKey(path string) ([]byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) < 16 {
+		return nil, errShortSignerKey
+	}
+	return raw, nil
+}
+
+var errShortSignerKey = errors.New("blobstore/fs: signing key too short")
+
+func readSignerKeyRetry(path string) ([]byte, error) {
+	var last error
+	for i := 0; i < 20; i++ {
+		raw, err := readSignerKey(path)
+		if err == nil {
+			return raw, nil
+		}
+		last = err
+		time.Sleep(5 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("blobstore/fs: read signing key: %w", last)
 }
 
 func (s *store) writeInstanceMark() {

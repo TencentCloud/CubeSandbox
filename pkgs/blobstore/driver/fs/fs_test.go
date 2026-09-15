@@ -334,3 +334,62 @@ func TestOpenViaRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestEnsureSignerConcurrent(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, dirState), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const n = 8
+	errc := make(chan error, n)
+	keys := make(chan []byte, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			st, err := open(Options{
+				Root:          root,
+				PublicBaseURL: "http://10.0.0.1:3010",
+				MountPath:     "/internal/warehouse/object",
+				Sync:          SyncNone,
+			}.Config(root, ""))
+			if err != nil {
+				errc <- err
+				return
+			}
+			if err := st.ensureSigner(); err != nil {
+				errc <- err
+				return
+			}
+			if st.signer == nil || len(st.signer.Key) < 16 {
+				errc <- errors.New("missing signing key")
+				return
+			}
+			keys <- append([]byte(nil), st.signer.Key...)
+		}()
+	}
+	wg.Wait()
+	close(errc)
+	close(keys)
+	for err := range errc {
+		t.Fatal(err)
+	}
+	var first []byte
+	for k := range keys {
+		if first == nil {
+			first = k
+			continue
+		}
+		if !bytes.Equal(first, k) {
+			t.Fatalf("replicas diverged on signing key")
+		}
+	}
+	onDisk, err := os.ReadFile(filepath.Join(root, dirState, "signer.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, onDisk) {
+		t.Fatal("in-memory key != disk")
+	}
+}
