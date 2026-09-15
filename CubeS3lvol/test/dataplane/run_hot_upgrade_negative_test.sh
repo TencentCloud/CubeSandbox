@@ -855,7 +855,12 @@ cannot be watched under I/O"
 	before_del="$(dmesg_count 'I/O error')"
 	before_rm="$(dmesg_count "Removing ctrl: NQN \"${RCOW_NQN_PREFIX}")"
 
-	"${SCRIPTS}/rcow_upgrade.sh" --candidate "${TGT_BIN}" \
+	# The hot stop pins the initiator timeouts itself, so the short budget has
+	# to be the *configured* one for this invocation: handing it the defaults
+	# would write the production value back over the window this scenario is
+	# about to watch, and the deletion would never come.
+	RCOW_RECONNECT_DELAY=1 RCOW_CTRL_LOSS_TMO="${SHORT_CTRL_LOSS_TMO}" \
+		"${SCRIPTS}/rcow_upgrade.sh" --candidate "${TGT_BIN}" \
 		>"${WORKDIR}/tmo_stop.log" 2>&1 ||
 		fail "rcow_upgrade.sh failed before the window test"
 
@@ -886,14 +891,23 @@ cannot be watched under I/O"
 	# budget runs out is the kernel naming the controller it is deleting -- not
 	# an "I/O error" line. A *direct* read that fails on a removed controller
 	# returns EIO to its caller and never reaches the buffer cache, so only the
-	# buffered path (page-cache writeback) emits "Buffer I/O error". Measured on
-	# 6.6.69: a dd blocked for the whole window and came back short, and dmesg
-	# gained nothing but the "Removing ctrl" lines counted here.
+	# buffered path (page-cache writeback) emits "Buffer I/O error".
+	#
+	# Polled rather than sampled: the kernel's record of the removal trails the
+	# state change the loop above breaks on by more than the settle that is
+	# enough for the other count -- measured at ~13s on one run. The assertion is
+	# that the removal is recorded at all, not that it is recorded quickly.
+	rm_deadline=$(( $(date +%s) + DELETE_WATCH_SEC ))
 	after_rm="$(dmesg_count "Removing ctrl: NQN \"${RCOW_NQN_PREFIX}")"
+	while [ "${after_rm}" -le "${before_rm}" ] &&
+		[ "$(date +%s)" -lt "${rm_deadline}" ]; do
+		sleep 1
+		after_rm="$(dmesg_count "Removing ctrl: NQN \"${RCOW_NQN_PREFIX}")"
+	done
 	if [ "${after_rm}" -gt "${before_rm}" ]; then
 		pass "dmesg names one of this suite's controllers being removed: the host logged the deletion"
 	else
-		fail "a controller went away but dmesg never named it"
+		fail "a controller went away but dmesg never named it within ${DELETE_WATCH_SEC}s"
 	fi
 
 	# The workload's half of "not silent": the read that spanned the window
