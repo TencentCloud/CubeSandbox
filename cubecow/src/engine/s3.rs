@@ -1274,16 +1274,19 @@ impl JsonRpcClient {
             "id": id,
         });
 
+        // One clock covers the whole call, queueing for the connection
+        // included -- so the budget a caller configured is the ceiling on how
+        // long it blocks, not a fresh allowance handed out after it has
+        // already waited behind another caller. Only connection establishment
+        // retries: a JSON-RPC error response is an answer and returns
+        // immediately, because retrying a real error would turn a fast,
+        // correct failure into a slow one.
+        let deadline = Instant::now() + self.connect_budget;
+
         let mut guard = self.conn.lock().map_err(|_| {
             CubecowError::PreconditionFailed("s3lvol rpc mutex poisoned".to_string())
         })?;
 
-        // One clock covers the whole call, so the drop-and-redial below and
-        // a fresh connect both draw from the same budget. Only connection
-        // establishment retries: a JSON-RPC error response is an answer and
-        // returns immediately, because retrying a real error would turn a
-        // fast, correct failure into a slow one.
-        let deadline = Instant::now() + self.connect_budget;
         let mut retries = 0u32;
         let mut redialed = false;
 
