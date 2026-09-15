@@ -1040,6 +1040,16 @@ func TestSanitizeExternalHTTPScoreFailureOmitsEndpointSecrets(t *testing.T) {
 			wantExact: "external_http_score nil_selector_context",
 		},
 		{
+			name:      "nil plugin config must not look like nil selector context",
+			err:       errors.New("external_http_score: config is nil token=" + sentinel),
+			wantExact: "external_http_score config_nil",
+		},
+		{
+			name:      "unrelated nil in message must not become nil_selector_context",
+			err:       errors.New("external_http_score: scores map is nil token=" + sentinel),
+			wantExact: "external_http_score request_failed",
+		},
+		{
 			name:      "panic recovered category",
 			err:       errors.New("MasterInternalError: externalHTTPScore panic:boom token=" + sentinel),
 			wantExact: "external_http_score panic_recovered",

@@ -555,10 +555,11 @@ func classifyExternalHTTPScoreMessage(msg string) string {
 		return "external_http_score empty_endpoint"
 	case strings.HasPrefix(msg, "external_http_score: invalid endpoint"):
 		return "external_http_score invalid_endpoint"
+	case strings.HasPrefix(msg, "external_http_score: selector context is nil"):
+		return "external_http_score nil_selector_context"
+	case strings.HasPrefix(msg, "external_http_score: config is nil"):
+		return "external_http_score config_nil"
 	case strings.HasPrefix(msg, "external_http_score:"):
-		if strings.Contains(msg, "nil") {
-			return "external_http_score nil_selector_context"
-		}
 		return "external_http_score request_failed"
 	default:
 		return ""
