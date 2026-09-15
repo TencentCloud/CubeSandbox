@@ -635,8 +635,10 @@ rcow_pid_is_target()
 #
 # Two passes, because one comparison cannot cover both a normally-running target
 # and one whose binary was swapped away. The exact pass is the accurate one; the
-# basename pass catches the unlinked case the exact pass misses. A pid found by
-# both is reported once.
+# fallback catches the case it misses, where the same binary sits in the
+# directory the previous version unpacked into. It matches on the basename *and*
+# on this host's RPC socket, so a target started by hand from a build tree is
+# not mistaken for one of ours. A pid found by both is reported once.
 rcow_target_instances()
 {
 	local want d pid exe raw p dup
@@ -665,7 +667,17 @@ rcow_target_instances()
 
 		raw="$(readlink "/proc/${pid}/exe" 2>/dev/null)" || continue
 		raw="${raw% (deleted)}"
-		[ "${raw##*/}" = "s3lvol_tgt" ] && pids+=("${pid}")
+		[ "${raw##*/}" = "s3lvol_tgt" ] || continue
+
+		# The basename alone would also catch a target someone started by hand
+		# from a build tree, and refusing to start over a stranger is a failure
+		# no operator can act on. Everything this host's scripts start carries
+		# its own -r, so requiring it keeps the moved-binary case without
+		# matching an unrelated instance.
+		tr '\0' '\n' <"/proc/${pid}/cmdline" 2>/dev/null |
+			grep -qxF -- "${RCOW_RPC_SOCK}" || continue
+
+		pids+=("${pid}")
 	done
 
 	if [ "${#pids[@]}" -gt 0 ]; then
@@ -721,13 +733,21 @@ rcow_hot_marker_write()
 }
 
 # Consume the marker and answer whether it is ours: this boot, and a pid that is
-# still the live target. Removed before anything is decided, so it answers once
-# and a stale one is never read twice.
+# still the live target.
 #
-# Both checks are needed. boot_id alone misses a marker whose target died before
+# The marker is removed only once it has been honoured, or once it is stale by
+# construction. The distinction matters because the two failures want opposite
+# handling: a marker naming another boot is junk and must go, while a marker
+# naming a target this host cannot name by path is a *live* intent that a stop
+# must not silently discard. Hence the identity check is rcow_target_instances
+# rather than rcow_pid_is_target -- an upgrade has already staged the candidate
+# by the time it writes the marker, so the strict path comparison is exactly the
+# one that fails there. A marker left in place still reads as absent, so the
+# stop falls through the same way it did before.
+#
+# Both fields are needed. boot_id alone misses a marker whose target died before
 # a reboot and whose pid was reused after it; the pid alone misses a file that
-# outlived the boot it names, because RCOW_RUN_DIR is not tmpfs. A marker that
-# does not satisfy both reads as absent, which is the safe answer.
+# outlived the boot it names, because RCOW_RUN_DIR is not tmpfs.
 rcow_hot_marker_consume()
 {
 	local boot pid now
@@ -738,14 +758,21 @@ rcow_hot_marker_consume()
 	fi
 
 	read -r boot pid _ <"${RCOW_HOT_MARKER}"
-	rm -f "${RCOW_HOT_MARKER}"
-
-	[ -n "${boot}" ] && [ -n "${pid}" ] || return 1
-
 	now="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
-	[ -n "${now}" ] && [ "${boot}" = "${now}" ] || return 1
 
-	rcow_pid_is_target "${pid}" || return 1
+	if [ -z "${boot}" ] || [ -z "${pid}" ] || [ -z "${now}" ] ||
+		[ "${boot}" != "${now}" ]; then
+		rm -f "${RCOW_HOT_MARKER}"
+		return 1
+	fi
+
+	if ! printf '%s\n' "$(rcow_target_instances)" | grep -qxF -- "${pid}"; then
+		rcow_warn "${RCOW_HOT_MARKER} names pid ${pid}, which is not a running \
+target; leaving the marker in place rather than discarding the intent"
+		return 1
+	fi
+
+	rm -f "${RCOW_HOT_MARKER}"
 	return 0
 }
 
