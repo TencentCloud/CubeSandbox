@@ -708,7 +708,7 @@ rcow_target_alive()
 }
 
 # Record "<boot_id> <pid>" of the live target, for a stop an upgrade is about to
-# ask for. Written by the orchestrator; rcow_hot_stop.sh deliberately does not,
+# ask for. Written by the orchestrator; rcow_upgrade.sh deliberately does not,
 # so only an intent to hot-restart can make the marker read as one.
 rcow_hot_marker_write()
 {
@@ -1866,7 +1866,7 @@ listed in ${plan} and will be retried by the next start or by rcow_recovery.sh"
 #
 # With --expect the same poll is a precondition rather than the answer: once the
 # devices exist, the live layout is compared byte for byte against the snapshot
-# rcow_hot_stop.sh took before the upgrade. The upgrade is only allowed to be
+# rcow_upgrade.sh took before the upgrade. The upgrade is only allowed to be
 # invisible, so a volume that moved subsystem, changed nsid, came back under a
 # different device node, or gained company is as much a failure as one that did
 # not come back at all -- which is why an extra live entry fails too.

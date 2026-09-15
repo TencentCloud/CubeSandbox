@@ -14,7 +14,7 @@
 #  err / io_errors are asserted per volume rather than summed into one number.
 #
 #  The mechanism is the one already proven by crash recovery: do not disconnect,
-#  do not unload. rcow_hot_stop.sh flushes and checkpoints online, then SIGKILLs
+#  do not unload. rcow_upgrade.sh flushes and checkpoints online, then SIGKILLs
 #  the target; rcow_start.sh rebuilds the same NQN/NSID/UUID grid and the kernel
 #  reconnects. Anything that disconnects or unloads instead deletes the
 #  namespace and the host tears the gendisk down -- which is the EIO this suite
@@ -22,7 +22,7 @@
 #
 #  === What the pause window means, and what is printed ===
 #
-#  pause_window_ms is measured from just before rcow_hot_stop.sh to after the
+#  pause_window_ms is measured from just before rcow_upgrade.sh to after the
 #  layout is verified live again. That deliberately *over*-states the true pause:
 #  the online flush and checkpoint happen inside it but block nothing. It is an
 #  upper bound, and a regression baseline -- a number that only grows is the
@@ -262,8 +262,8 @@ echo "=== [0] preconditions"
 # Tree and build problems are red: the code under test is wrong or absent.
 [ -x "${TGT_BIN}" ] || { echo "target not built: ${TGT_BIN}" >&2; exit 1; }
 [ -x "${SCRIPTS}/rcow_start.sh" ] || { echo "rcow_start.sh missing" >&2; exit 1; }
-[ -x "${SCRIPTS}/rcow_hot_stop.sh" ] || {
-	echo "rcow_hot_stop.sh missing: the hot path is not in this tree" >&2; exit 1; }
+[ -x "${SCRIPTS}/rcow_upgrade.sh" ] || {
+	echo "rcow_upgrade.sh missing: the hot path is not in this tree" >&2; exit 1; }
 
 # Machine prerequisites are "could not run": a counted skip, then exit 2.
 [ "$(id -u)" -eq 0 ] || cannot_run "must run as root to connect nvme controllers"
@@ -449,17 +449,17 @@ do_upgrade()
 	info "${label}: upgrading (new binary ${new_bin})"
 	start="$(date +%s)"
 
-	if ! "${SCRIPTS}/rcow_hot_stop.sh" >"${WORKDIR}/hot_stop_${label}.log" 2>&1; then
-		fail "${label}: rcow_hot_stop.sh failed"
+	if ! "${SCRIPTS}/rcow_upgrade.sh" >"${WORKDIR}/hot_stop_${label}.log" 2>&1; then
+		fail "${label}: rcow_upgrade.sh failed"
 		tail -20 "${WORKDIR}/hot_stop_${label}.log" | sed 's/^/       /'
 		return 1
 	fi
-	pass "${label}: rcow_hot_stop.sh stopped the target without unloading"
+	pass "${label}: rcow_upgrade.sh stopped the target without unloading"
 
 	# The stop is also the step that records the layout for the comparison
 	# below; an entry-less snapshot would make that comparison vacuous.
 	grep -q '"device_name"' "${RCOW_HOT_SNAPSHOT}" 2>/dev/null &&
-		pass "${label}: rcow_hot_stop.sh recorded the layout snapshot" ||
+		pass "${label}: rcow_upgrade.sh recorded the layout snapshot" ||
 		fail "${label}: no layout snapshot at ${RCOW_HOT_SNAPSHOT}"
 
 	# RCOW_TGT_BIN for this invocation only; rcow_common.sh takes a pre-set value.

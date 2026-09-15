@@ -49,7 +49,7 @@
 #  connected", yet it skipped the disconnect while still unloading the lvstore,
 #  and the unload hands the host namespace-removal AENs -- a silent
 #  hot-removal, worse than the plain stop it looked like. A hot restart is
-#  rcow_hot_stop.sh.
+#  rcow_upgrade.sh.
 
 set -u
 
@@ -78,7 +78,7 @@ done
 if [ "${KEEP_CONNECTED}" -eq 1 ]; then
 	rcow_err "--keep-connected is removed: it skipped the disconnect but still \
 unloaded the lvstore, which hands the host namespace-removal AENs. For a hot \
-restart use rcow_hot_stop.sh."
+restart use rcow_upgrade.sh."
 	exit 2
 fi
 

@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
-#  rcow_hot_stop.sh -- stop the target so the host keeps its namespaces
+#  rcow_upgrade.sh -- stop the target so the host keeps its namespaces
 #
 #  The planned shutdown (rcow_stop.sh) disconnects the initiator and then
 #  unloads the lvstore, and both of those break a live sandbox's I/O. A hot
@@ -46,7 +46,7 @@
 #      script consumes it. Writing it here would make an unasked-for stop look
 #      like an upgrade's.
 #
-#  Usage: rcow_hot_stop.sh [--dry-run] [--candidate <binary>]
+#  Usage: rcow_upgrade.sh [--dry-run] [--candidate <binary>]
 #
 #    --dry-run    run the online steps and print what would be killed and removed,
 #                 without killing or removing anything.

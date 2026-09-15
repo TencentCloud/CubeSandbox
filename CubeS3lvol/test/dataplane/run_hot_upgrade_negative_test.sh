@@ -30,7 +30,7 @@
 #  The documents are the real ones -- the running target's rcow_get_build_info
 #  against the candidate's `s3lvol_tgt --print-build-info` -- and each refusal is
 #  provoked by mutating a copy of a document, so no second build tree is needed.
-#  The last gate case runs the refusal through `rcow_hot_stop.sh --candidate`,
+#  The last gate case runs the refusal through `rcow_upgrade.sh --candidate`,
 #  the entry point that ships today, and asserts the target survived it.
 #
 #  === The wrong write order cannot be injected through rcow_tune_initiator_timeouts ===
@@ -226,8 +226,8 @@ scenario "[0] preconditions"
 
 [ -x "${TGT_BIN}" ] || { echo "target not built: ${TGT_BIN}" >&2; exit 1; }
 [ -x "${SCRIPTS}/rcow_start.sh" ] || { echo "rcow_start.sh missing" >&2; exit 1; }
-[ -x "${SCRIPTS}/rcow_hot_stop.sh" ] || {
-	echo "rcow_hot_stop.sh missing: the hot path is not in this tree" >&2; exit 1; }
+[ -x "${SCRIPTS}/rcow_upgrade.sh" ] || {
+	echo "rcow_upgrade.sh missing: the hot path is not in this tree" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || cannot_run "must run as root to connect nvme controllers"
 command -v nvme >/dev/null || cannot_run "nvme-cli is required"
@@ -463,11 +463,11 @@ if [ -s "${WORKDIR}/build-running.json" ] && [ -s "${WORKDIR}/build-new.json" ];
 		>"${WORKDIR}/candidate-gate-stub"
 	chmod +x "${WORKDIR}/candidate-gate-stub"
 
-	if "${SCRIPTS}/rcow_hot_stop.sh" --candidate "${WORKDIR}/candidate-gate-stub" \
+	if "${SCRIPTS}/rcow_upgrade.sh" --candidate "${WORKDIR}/candidate-gate-stub" \
 			>"${WORKDIR}/gate-e2e.log" 2>&1; then
-		fail "rcow_hot_stop.sh proceeded while the version gate refused"
+		fail "rcow_upgrade.sh proceeded while the version gate refused"
 	else
-		pass "rcow_hot_stop.sh exits non-zero when the gate refuses"
+		pass "rcow_upgrade.sh exits non-zero when the gate refuses"
 	fi
 	grep -q ckpt_version "${WORKDIR}/gate-e2e.log" &&
 		pass "the refusal names the field that differed" ||
@@ -505,10 +505,10 @@ mkdir -p "${WORKDIR}/crashbin"
 printf '#!/usr/bin/env bash\nexit 1\n' >"${WORKDIR}/crashbin/s3lvol_tgt"
 chmod +x "${WORKDIR}/crashbin/s3lvol_tgt"
 
-if "${SCRIPTS}/rcow_hot_stop.sh" >"${WORKDIR}/hot_stop.log" 2>&1; then
-	pass "rcow_hot_stop.sh stopped the target without unloading"
+if "${SCRIPTS}/rcow_upgrade.sh" >"${WORKDIR}/hot_stop.log" 2>&1; then
+	pass "rcow_upgrade.sh stopped the target without unloading"
 else
-	fail "rcow_hot_stop.sh failed"
+	fail "rcow_upgrade.sh failed"
 	tail -20 "${WORKDIR}/hot_stop.log" | sed 's/^/       /'
 fi
 
@@ -813,8 +813,8 @@ cannot be watched under I/O"
 	before_del="$(dmesg_count 'I/O error')"
 	before_rm="$(dmesg_count "Removing ctrl: NQN \"${RCOW_NQN_PREFIX}")"
 
-	"${SCRIPTS}/rcow_hot_stop.sh" >"${WORKDIR}/tmo_stop.log" 2>&1 ||
-		fail "rcow_hot_stop.sh failed before the window test"
+	"${SCRIPTS}/rcow_upgrade.sh" >"${WORKDIR}/tmo_stop.log" 2>&1 ||
+		fail "rcow_upgrade.sh failed before the window test"
 
 	deadline=$(( $(date +%s) + DELETE_WATCH_SEC ))
 	deleted=0
@@ -907,15 +907,15 @@ scenario "[12] the hot stop's own structure: what it must not contain"
 # The script's own header names every one of these calls and files while
 # forbidding them, so comments are stripped before looking: a check that read
 # the prose would fire on its own documentation.
-if [ ! -s "${SCRIPTS}/rcow_hot_stop.sh" ]; then
-	fail "rcow_hot_stop.sh is missing: the prohibitions cannot be checked"
+if [ ! -s "${SCRIPTS}/rcow_upgrade.sh" ]; then
+	fail "rcow_upgrade.sh is missing: the prohibitions cannot be checked"
 else
 	while IFS='|' read -r verdict what detail; do
 		case "${verdict}" in
 		ok)  pass "${what}" ;;
 		bad) fail "${what}: ${detail}" ;;
 		esac
-	done < <(python3 - "${SCRIPTS}/rcow_hot_stop.sh" <<'PY'
+	done < <(python3 - "${SCRIPTS}/rcow_upgrade.sh" <<'PY'
 import re, sys
 
 # Continuations are joined before comments are dropped: the residue list is

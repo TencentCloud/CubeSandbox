@@ -29,7 +29,7 @@ s3lvol-<version>/
 ├── scripts/
 │   ├── rcow_start.sh rcow_stop.sh rcow_recovery.sh rcow_common.sh
 │   ├── rcow_cpumask.sh               # default SPDK -m (last two allowed CPUs)
-│   ├── rcow_hot_stop.sh  rcow_purge.sh  s3lvol_rpc.py  s3_prefix_rm.py
+│   ├── rcow_upgrade.sh  rcow_purge.sh  s3lvol_rpc.py  s3_prefix_rm.py
 │   ├── rpc.py         # this repo's launcher (3.8 argparse shim)
 │   ├── rpc_compat.py  # BooleanOptionalAction backfill for Python 3.8
 │   ├── spdk_rpc.py    # SPDK's rpc.py, unmodified
@@ -111,7 +111,7 @@ forfeited its previous state.
 ```sh
 scripts/rcow_start.sh          # start target, create/attach lvstore, export nvmf, connect host
 scripts/rcow_stop.sh           # reverse order: disconnect, flush, unload, stop process
-scripts/rcow_hot_stop.sh       # stop the target alone, for upgrades: no disconnect, no unload
+scripts/rcow_upgrade.sh       # stop the target alone, for upgrades: no disconnect, no unload
 scripts/rcow_recovery.sh       # use this after an unclean exit
 scripts/rcow_purge.sh          # delete the whole lvstore back to a clean state (irreversible)
 ```
@@ -119,7 +119,7 @@ scripts/rcow_purge.sh          # delete the whole lvstore back to a clean state 
 `rcow_start.sh` is idempotent: if already running it tells you and exits rather
 than starting a second instance.
 
-`rcow_hot_stop.sh` is the upgrade path and not a general stop. It flushes and
+`rcow_upgrade.sh` is the upgrade path and not a general stop. It flushes and
 checkpoints the lvstore online, then kills the target so the host keeps its
 namespaces and only pauses I/O, leaving the state for a replacement to pick up.
 With no target running, or one that does not answer RPC, there is nothing to

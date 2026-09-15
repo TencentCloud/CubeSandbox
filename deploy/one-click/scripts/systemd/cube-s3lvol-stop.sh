@@ -8,7 +8,7 @@
 #
 #   1. Hot restart (target alive, intent marker present): the marker was written
 #      by an upgrade orchestrator, so this stop is the one an upgrade asked for.
-#      rcow_hot_stop.sh flushes and checkpoints online, then kills the target
+#      rcow_upgrade.sh flushes and checkpoints online, then kills the target
 #      outright -- no disconnect, no unload -- so the host only pauses I/O.
 #
 #   2. Planned stop (target alive, no marker): rcow_stop.sh does the full
@@ -35,7 +35,7 @@ require_root
 S3LVOL_ROOT="${TOOLBOX_ROOT}/CubeS3lvol"
 RCOW_COMMON="${S3LVOL_ROOT}/scripts/rcow_common.sh"
 RCOW_STOP="${S3LVOL_ROOT}/scripts/rcow_stop.sh"
-RCOW_HOT_STOP="${S3LVOL_ROOT}/scripts/rcow_hot_stop.sh"
+RCOW_UPGRADE="${S3LVOL_ROOT}/scripts/rcow_upgrade.sh"
 
 # Nothing installed (yet) -- nothing to stop.
 if [[ ! -f "${RCOW_COMMON}" ]]; then
@@ -49,14 +49,14 @@ source "${RCOW_COMMON}" # provides rcow_target_alive + RCOW_* path defaults
 # twice. A failure here means either no marker or one that does not name the
 # live target, and both mean the same thing: nobody asked for a hot restart.
 if rcow_hot_marker_consume; then
-  if [[ ! -x "${RCOW_HOT_STOP}" ]]; then
+  if [[ ! -x "${RCOW_UPGRADE}" ]]; then
     # Refusing rather than falling back: the full teardown drops the nvme
     # controllers, and the upgrade that wrote the marker is not expecting it.
-    log "CubeS3lvol: hot restart was requested but ${RCOW_HOT_STOP} is missing or not executable"
+    log "CubeS3lvol: hot restart was requested but ${RCOW_UPGRADE} is missing or not executable"
     exit 1
   fi
-  log "CubeS3lvol: hot restart requested; stopping via rcow_hot_stop.sh, initiator untouched"
-  "${RCOW_HOT_STOP}"
+  log "CubeS3lvol: hot restart requested; stopping via rcow_upgrade.sh, initiator untouched"
+  "${RCOW_UPGRADE}"
 elif rcow_target_alive; then
   log "CubeS3lvol: target alive, full teardown via rcow_stop.sh"
   "${RCOW_STOP}"
