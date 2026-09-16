@@ -5,6 +5,8 @@ package warehouse
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -64,19 +66,48 @@ func (a *Adapter) Put(ctx context.Context, key string, r io.Reader, contentType 
 	}
 	info, err := a.Store.Put(ctx, key, r, opts)
 	if errors.Is(err, blobstore.ErrAlreadyExists) {
-		if info.Key != "" {
-			return toInfo(info), nil
-		}
-		st, statErr := a.Stat(ctx, key)
-		if statErr != nil {
-			return ObjectInfo{}, fmt.Errorf("object already exists but stat failed: %w", statErr)
-		}
-		return st, nil
+		return a.existingOnConflict(ctx, key, info)
 	}
 	if err != nil {
 		return ObjectInfo{}, err
 	}
 	return toInfo(info), nil
+}
+
+func (a *Adapter) existingOnConflict(ctx context.Context, key string, info blobstore.ObjectInfo) (ObjectInfo, error) {
+	out := toInfo(info)
+	if out.Key == "" {
+		st, err := a.Stat(ctx, key)
+		if err != nil {
+			return ObjectInfo{}, fmt.Errorf("object already exists but stat failed: %w", err)
+		}
+		out = st
+	}
+	if out.SHA256 != "" {
+		return out, nil
+	}
+	sum, err := a.hashObject(ctx, key)
+	if err != nil {
+		return ObjectInfo{}, fmt.Errorf("object already exists but hash failed: %w", err)
+	}
+	out.SHA256 = sum
+	if out.Key == "" {
+		out.Key = key
+	}
+	return out, nil
+}
+
+func (a *Adapter) hashObject(ctx context.Context, key string) (string, error) {
+	body, err := a.Get(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	defer body.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, body); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func (a *Adapter) Get(ctx context.Context, key string) (io.ReadCloser, error) {
