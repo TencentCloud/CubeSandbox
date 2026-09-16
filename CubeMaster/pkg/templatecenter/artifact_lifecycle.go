@@ -47,7 +47,7 @@ var requestTemplateCenterArtifactDelete = func(ctx context.Context, artifactID s
 
 // countArtifactReferencesTx counts the live references to artifactID inside the
 // given transaction: surviving template replicas, active (PENDING/RUNNING)
-// build jobs, and template definitions indexed by rootfs_artifact_id. When
+// build jobs, template definitions, and snapshots indexed by rootfs_artifact_id. When
 // excludeTemplateID is non-empty its own rows are excluded so the caller can
 // decide based on "everyone else" while deleting that template.
 func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, excludeTemplateID string) (int64, error) {
@@ -90,7 +90,19 @@ func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, exc
 		return 0, err
 	}
 
-	return replicaCount + jobCount + defCount, nil
+	// Keep tombstones and failed/deleting snapshots referenced until their
+	// physical cleanup finishes and metadata is removed. Tombstones can
+	// still have live runtime bindings. A locking read also avoids a stale
+	// MySQL repeatable-read snapshot when a creator committed while we waited
+	// for the artifact row lock.
+	var snapshots []struct{ SnapshotID string }
+	sq := tx.Table(constants.SnapshotTableName).
+		Select("snapshot_id").Where("rootfs_artifact_id = ? AND deleted_at IS NULL", artifactID).
+		Clauses(clause.Locking{Strength: "UPDATE"})
+	if err := sq.Find(&snapshots).Error; err != nil {
+		return 0, err
+	}
+	return replicaCount + jobCount + defCount + int64(len(snapshots)), nil
 }
 
 // cleanupArtifactFully implements the three-phase last-owner-cleanup for one

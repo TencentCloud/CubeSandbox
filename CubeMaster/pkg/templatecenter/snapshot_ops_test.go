@@ -760,21 +760,28 @@ func TestRunSnapshotDeleteJobCleansTemplateJobs(t *testing.T) {
 	origReplicaCleanup := runReplicaCleanup
 	origMetadataCleanup := runMetadataCleanup
 	origJobCleanup := runTemplateJobCleanup
+	origArtifactCleanup := runArtifactCleanup
+	origReferenceCleanup := runSnapshotReferenceCleanup
 	t.Cleanup(func() {
 		runReplicaCleanup = origReplicaCleanup
 		runMetadataCleanup = origMetadataCleanup
 		runTemplateJobCleanup = origJobCleanup
+		runArtifactCleanup = origArtifactCleanup
+		runSnapshotReferenceCleanup = origReferenceCleanup
 	})
 
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
 	jobsCleaned := false
+	metadataCleaned := false
+	referencesReleased := false
+	artifactCleaned := false
 	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, fields map[string]any) error {
 		return nil
 	})
 	patches.ApplyFunc(discoverTemplateCleanupTargets, func(ctx context.Context, templateID, instanceType string) (*templateCleanupTargets, error) {
-		return &templateCleanupTargets{}, nil
+		return &templateCleanupTargets{ArtifactIDs: map[string]struct{}{"rfs-snapshot": {}}}, nil
 	})
 	patches.ApplyFunc(snapshotDeleteLocators, func(targets *templateCleanupTargets) ([]templateCleanupLocator, error) {
 		return nil, nil
@@ -789,6 +796,21 @@ func TestRunSnapshotDeleteJobCleansTemplateJobs(t *testing.T) {
 		return nil
 	}
 	runMetadataCleanup = func(ctx context.Context, templateID string) error {
+		metadataCleaned = true
+		return nil
+	}
+	runSnapshotReferenceCleanup = func(ctx context.Context, templateID string, targets *templateCleanupTargets) error {
+		referencesReleased = true
+		return nil
+	}
+	runArtifactCleanup = func(ctx context.Context, templateID string, targets *templateCleanupTargets) error {
+		if !referencesReleased || metadataCleaned {
+			t.Fatal("artifact cleanup must run after reference release and before metadata removal")
+		}
+		if _, ok := targets.ArtifactIDs["rfs-snapshot"]; !ok {
+			t.Fatal("artifact cleanup lost the snapshot rootfs reference")
+		}
+		artifactCleaned = true
 		return nil
 	}
 	runTemplateJobCleanup = func(ctx context.Context, templateID string) error {
@@ -801,6 +823,9 @@ func TestRunSnapshotDeleteJobCleansTemplateJobs(t *testing.T) {
 
 	if err := runSnapshotDeleteJob(context.Background(), "job-del", "snap-del"); err != nil {
 		t.Fatalf("runSnapshotDeleteJob returned error: %v", err)
+	}
+	if !artifactCleaned {
+		t.Fatal("expected snapshot artifact cleanup")
 	}
 	if !jobsCleaned {
 		t.Fatal("expected runTemplateJobCleanup to be called")

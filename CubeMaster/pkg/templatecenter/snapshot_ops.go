@@ -751,6 +751,8 @@ func DeleteSnapshot(ctx context.Context, requestID, snapshotID, instanceType str
 	return executeSnapshotDeleteJob(ctx, info, snapshotID)
 }
 
+var runSnapshotReferenceCleanup = releaseSnapshotArtifactReferences
+
 func runSnapshotDeleteJob(ctx context.Context, jobID, snapshotID string) error {
 	success := false
 	defer func() {
@@ -763,20 +765,31 @@ func runSnapshotDeleteJob(ctx context.Context, jobID, snapshotID string) error {
 	})
 	targets, err := discoverTemplateCleanupTargets(ctx, snapshotID, "")
 	if err != nil {
-		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
+		return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
 	}
 	locators, err := snapshotDeleteLocators(targets)
 	if err != nil {
-		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
+		return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
 	}
 	if err := abortSnapshotDeleteIfRefsReappeared(ctx, jobID, snapshotID); err != nil {
 		return err
 	}
-	if err := runReplicaCleanup(ctx, snapshotID, locators, cleanupBackendFromTargets(targets)); err != nil {
-		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
+	// A saved plan means replica cleanup and reference release already
+	// committed. Resume artifact cleanup without depending on those nodes
+	// still being reachable after an earlier failure or process restart.
+	if targets.Snapshot == nil || strings.TrimSpace(targets.Snapshot.CleanupArtifactIDsJSON) == "" {
+		if err := runReplicaCleanup(ctx, snapshotID, locators, cleanupBackendFromTargets(targets)); err != nil {
+			return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
+		}
+		if err := runSnapshotReferenceCleanup(ctx, snapshotID, targets); err != nil {
+			return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
+		}
+	}
+	if err := runArtifactCleanup(ctx, snapshotID, targets); err != nil {
+		return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
 	}
 	if err := runMetadataCleanup(ctx, snapshotID); err != nil {
-		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
+		return errors.Join(err, failSnapshotDeleteJob(ctx, jobID, snapshotID, err))
 	}
 	invalidateTemplateCaches(snapshotID)
 	// Mirror template delete: drop job rows so ListTemplates does not

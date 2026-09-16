@@ -6,6 +6,7 @@ package templatecenter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -251,6 +252,18 @@ func discoverTemplateCleanupTargets(ctx context.Context, templateID, instanceTyp
 
 	if rec, snapErr := getSnapshotRecord(ctx, templateID); snapErr == nil && rec != nil {
 		targets.Snapshot = rec
+		if strings.TrimSpace(rec.CleanupArtifactIDsJSON) != "" {
+			var ids []string
+			if err := json.Unmarshal([]byte(rec.CleanupArtifactIDsJSON), &ids); err != nil {
+				return nil, fmt.Errorf("snapshot %s cleanup targets: %w", templateID, err)
+			}
+			for _, id := range ids {
+				targets.ArtifactIDs[id] = struct{}{}
+			}
+		}
+		if rec.RootfsArtifactID != "" {
+			targets.ArtifactIDs[rec.RootfsArtifactID] = struct{}{}
+		}
 		if instanceType == "" {
 			instanceType = rec.InstanceType
 		}

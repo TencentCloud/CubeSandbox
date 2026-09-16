@@ -8,12 +8,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func getSnapshotRecord(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
@@ -86,6 +89,19 @@ func createSnapshotTx(ctx context.Context, tx *gorm.DB, snapshotID string, store
 	}
 	if rec == nil {
 		rec = &models.SnapshotRecord{}
+	}
+	rec.RootfsArtifactID = rootfsArtifactIDFromCreateRequest(storedReq)
+	if rec.RootfsArtifactID != "" {
+		// Serialize new references against last-owner cleanup. Once cleanup
+		// has started, its lock-free physical phase must not gain new owners.
+		var artifact models.RootfsArtifact
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("artifact_id = ?", rec.RootfsArtifactID).First(&artifact).Error; err != nil {
+			return fmt.Errorf("snapshot rootfs artifact %s: %w", rec.RootfsArtifactID, err)
+		}
+		if artifact.Status != ArtifactStatusReady {
+			return fmt.Errorf("snapshot rootfs artifact %s is not ready (status=%s)", rec.RootfsArtifactID, artifact.Status)
+		}
 	}
 	rec.SnapshotID = snapshotID
 	rec.InstanceType = instanceType
@@ -204,4 +220,52 @@ func GetSnapshotRestoreSource(ctx context.Context, snapshotID string) (*RestoreS
 		InstanceType:        rec.InstanceType,
 		ExportUUIDs:         rec.ExportUUIDs,
 	}, nil
+}
+
+// releaseSnapshotArtifactReferences preserves a durable cleanup plan on the
+// snapshot tombstone before releasing its references. Artifact cleanup runs
+// outside this transaction and may fail; discovery can recover the plan on
+// a subsequent DELETE or tombstone reconciliation, even after replicas vanish.
+func releaseSnapshotArtifactReferences(ctx context.Context, snapshotID string, targets *templateCleanupTargets) error {
+	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var rec models.SnapshotRecord
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("snapshot_id = ?", snapshotID).First(&rec).Error; err != nil {
+			return err
+		}
+		ids := make(map[string]struct{})
+		if strings.TrimSpace(rec.CleanupArtifactIDsJSON) != "" {
+			var saved []string
+			if err := json.Unmarshal([]byte(rec.CleanupArtifactIDsJSON), &saved); err != nil {
+				return err
+			}
+			for _, id := range saved {
+				ids[id] = struct{}{}
+			}
+		}
+		if rec.RootfsArtifactID != "" {
+			ids[rec.RootfsArtifactID] = struct{}{}
+		}
+		for id := range targets.ArtifactIDs {
+			ids[id] = struct{}{}
+		}
+		ordered := make([]string, 0, len(ids))
+		for id := range ids {
+			ordered = append(ordered, id)
+		}
+		sort.Strings(ordered)
+		payload, err := json.Marshal(ordered)
+		if err != nil {
+			return err
+		}
+		if err := updateSnapshotFieldsTx(tx, snapshotID, map[string]any{
+			"rootfs_artifact_id": "", "cleanup_artifact_ids_json": string(payload),
+		}); err != nil {
+			return err
+		}
+		if err := tx.Unscoped().Where("template_id = ?", snapshotID).Delete(&models.TemplateReplica{}).Error; err != nil {
+			return err
+		}
+		return tx.Unscoped().Where("template_id = ?", snapshotID).Delete(&models.TemplateDefinition{}).Error
+	})
 }
