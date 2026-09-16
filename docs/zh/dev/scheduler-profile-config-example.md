@@ -9,7 +9,7 @@ updated: 2026-09-10
 # Scheduler Profile 配置示例
 
 本文提供 CubeMaster **运行时** Profile 覆盖层与 `binpack_score` 的可复制 YAML。
-重点是 Profiles + binpack。伞形变更同样注册了 `external_http_score`；HTTP
+重点是 Profiles + binpack。CubeMaster 同样注册了 `external_http_score`；HTTP
 线协议细节见 CubeMaster 调度配置指南，而不在下文的 Profile 覆盖示例中展开。
 
 ## 范围
@@ -325,12 +325,12 @@ scheduler:
 
 ## 相关文档
 
-`external_http_score` 已在本伞形变更中注册。endpoint / timeout / mode /
+`external_http_score` 已在本变更中注册。endpoint / timeout / mode /
 fail-open 语义见 CubeMaster 调度配置指南（External HTTP score 插件）。#1699 /
-#1700 / #1708 仍可作为分 topic 审查单元的历史参考；本伞形将它们合并。选中
-Profile 时，最终生效的 `enable_filters` / `enable_scorers` 中的未知名称会在配置
-加载阶段失败关闭；空 Profile 下，base `enable_scorers` 中的未知名仍在
-`NewSelector` 时告警并跳过（升级兼容）。
+#1700 / #1708 仍可作为分 topic 审查的历史参考。选中 Profile 时，最终生效的
+`enable_filters` / `enable_scorers` 中的未知名称会在配置加载阶段失败关闭；空
+Profile 下，base `enable_scorers` 中的未知名仍在 `NewSelector` 时告警并跳过
+（升级兼容）。
 
 ## 运行时 Profile vs 模拟器 Profile
 

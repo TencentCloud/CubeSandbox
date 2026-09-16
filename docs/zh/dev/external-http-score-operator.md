@@ -1,8 +1,8 @@
-# External HTTP Score 运维最短路径
+# External HTTP Score 运维路径
 
-规范最短路径：仓库内 `CubeMaster/examples/external-http-score/VERIFY.md`。
+仓库内最短步骤见 `CubeMaster/examples/external-http-score/VERIFY.md`。
 
-本页是 docs 侧的产品化运维入口指针，不改变调度语义。字段说明见 [CubeMaster 调度配置 — External HTTP score 插件](../guide/cubemaster-scheduler-config#external-http-score-插件)。
+本页是 docs 侧入口，不改变调度语义。字段说明见 [CubeMaster 调度配置 — External HTTP score 插件](../guide/cubemaster-scheduler-config#external-http-score-插件)。
 
 ## 边界
 

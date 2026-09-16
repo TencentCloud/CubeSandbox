@@ -48,9 +48,9 @@ Default circuit breaker values when the block is omitted or a field is zero (bre
 - `open_duration`: 5s
 - `half_open_max_probes`: 1
 
-## Production reliability
+## Circuit breaker and concurrency
 
-Sidecar outages should not pin every scheduling attempt to the HTTP timeout. After `failure_threshold` consecutive request or response failures, the circuit opens and `Select` returns immediately (`fail_closed` typed error, or plain fail-open error). Open-circuit rejects do not perform HTTP and map to outcome reason `circuit_open`.
+After `failure_threshold` consecutive request or response failures, the circuit opens and `Select` returns immediately (`fail_closed` typed error, or plain fail-open error). Open-circuit rejects do not perform HTTP and map to outcome reason `circuit_open`.
 
 The shared transport caps in-flight connections with `MaxConnsPerHost = 8`. Excess concurrent Selects queue against the per-request timeout; under bursty creates this can look like sidecar timeouts and trip the breaker even when the sidecar is healthy. Prefer default `fail_open` unless concurrency is sized below roughly `8 / p50 latency`.
 

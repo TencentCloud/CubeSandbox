@@ -48,9 +48,9 @@ scheduler:
 - `open_duration`: 5s
 - `half_open_max_probes`: 1
 
-## 生产可靠性
+## 熔断与并发
 
-sidecar 故障不应把每次调度尝试都钉在 HTTP 超时上。连续 `failure_threshold` 次请求/响应失败后熔断打开，`Select` 立即返回（`fail_closed` 类型错误，或普通 fail-open 错误）。开路拒绝不发 HTTP，映射为 outcome reason `circuit_open`。
+连续 `failure_threshold` 次请求/响应失败后熔断打开，`Select` 立即返回（`fail_closed` 类型错误，或普通 fail-open 错误）。开路拒绝不发 HTTP，映射为 outcome reason `circuit_open`。
 
 共享 transport 用 `MaxConnsPerHost = 8` 限制在途连接。超额并发 Select 会在拨号队列中等待并消耗单次 `timeout`；创建突发下即使 sidecar 健康也可能呈现超时并触发熔断。除非并发已按约 `8 / p50 延迟` 约束，否则请保持默认 `fail_open`。
 

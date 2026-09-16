@@ -1,8 +1,6 @@
-# External HTTP Score — Operator VERIFY（最短路径）
+# External HTTP Score — Operator VERIFY
 
-面向陌生维护者。四步即可完成：启动 → 配置片段 → 验证 → 故障/回滚。
-
-工作目录：`CubeMaster/`。
+按启动 → 配置 → 验证 → 故障/回滚执行。工作目录：`CubeMaster/`。
 
 ## 1) 启动 scorer（一条命令）
 

@@ -9,7 +9,7 @@ updated: 2026-09-10
 # Scheduler Profile Configuration Example
 
 Copyable YAML for CubeMaster **runtime** Profile overlay and `binpack_score`.
-This page focuses on Profiles + binpack. The umbrella also registers
+This page focuses on Profiles + binpack. CubeMaster also registers
 `external_http_score`; wire-protocol details live in the CubeMaster scheduler
 config guide, not in the Profile overlay examples below.
 
@@ -368,14 +368,13 @@ scheduler:
 
 ## Related docs
 
-`external_http_score` is registered in this umbrella. For endpoint / timeout /
+`external_http_score` is registered in this change set. For endpoint / timeout /
 mode / fail-open semantics, see the CubeMaster scheduler config guide
-(External HTTP score plugin). Review units #1699 / #1700 / #1708 remain useful
-history for the separate topic PRs; this umbrella combines them. With a
-selected Profile, unknown names in the **effective** `enable_filters` /
-`enable_scorers` lists fail closed at config load; with an empty Profile,
-unknown base `enable_scorers` names are still warn-skipped at `NewSelector`
-(legacy compatibility).
+(External HTTP score plugin). #1699 / #1700 / #1708 remain separate topic PRs
+for historical review. With a selected Profile, unknown names in the
+**effective** `enable_filters` / `enable_scorers` lists fail closed at config
+load; with an empty Profile, unknown base `enable_scorers` names are still
+warn-skipped at `NewSelector` (legacy compatibility).
 
 ## Runtime Profile vs Simulator Profile
 

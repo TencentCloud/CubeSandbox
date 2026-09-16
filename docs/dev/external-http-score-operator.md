@@ -2,7 +2,7 @@
 
 Canonical short path: repository file `CubeMaster/examples/external-http-score/VERIFY.md`.
 
-This page is the docs/dev pointer for the productization operator journey. It does not change scheduler semantics. For YAML field details, see [CubeMaster Scheduler Configuration — External HTTP score plugin](../guide/cubemaster-scheduler-config#external-http-score-plugin).
+This page is the docs/dev entry that points at that VERIFY path. It does not change scheduler semantics. For YAML field details, see [CubeMaster Scheduler Configuration — External HTTP score plugin](../guide/cubemaster-scheduler-config#external-http-score-plugin).
 
 ## Boundaries
 

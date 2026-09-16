@@ -8,8 +8,8 @@ If you are *using* CubeSandbox (deploying it, building templates, calling the AP
 
 - [Redis Key Convention](./redis-key-spec) — the unified namespace every service must use for the shared Redis instance: naming format, scope ownership, the registered key catalog, TTL policy, and the per-service key-builder modules.
 - [Scheduler Profile Configuration Example](./scheduler-profile-config-example) — copyable CubeMaster runtime `scheduler.profile` / `binpack_score` YAML contract (not offline simulator models; no live performance claims).
-- [External HTTP Score Operator Path](./external-http-score-operator) — shortest enable / observe / fault / rollback path for the HTTP scorer demo (points at `CubeMaster/examples/external-http-score/VERIFY.md`).
-- [External HTTP Score](./external-http-score) — protocol, failure_policy / circuit breaker, and observability contract.
+- [External HTTP Score Operator Path](./external-http-score-operator) — enable / observe / fault / rollback steps for the HTTP scorer demo (points at `CubeMaster/examples/external-http-score/VERIFY.md`).
+- [External HTTP Score](./external-http-score) — protocol, failure_policy / circuit breaker, and metrics.
 - [Topic1 Circuit-Breaker Ablation (2026-09-14)](./topic1-enhancement-ablation-20260914/) — R011/R012 conclusion pack (no raw ledgers).
 
 ## Service designs
