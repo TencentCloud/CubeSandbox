@@ -927,6 +927,12 @@ func sandboxJSON(sandboxID, templateID string) string {
 	return fmt.Sprintf(`{"sandboxID":%q,"templateID":%q,"clientID":"client-1","envdVersion":"0.0.1","domain":"cube.app"}`, sandboxID, templateID)
 }
 
+// sandboxField renders the `"sandbox":{...}` fragment inside one element of a
+// server-side fork response array.
+func sandboxField(sandboxID string) string {
+	return `"sandbox":` + sandboxJSON(sandboxID, "tpl-test")
+}
+
 func sandboxInfoJSON(sandboxID, state string) string {
 	return fmt.Sprintf(`{"sandboxID":%q,"templateID":"tpl-test","clientID":"client-1","startedAt":"2026-05-14T00:00:00Z","endAt":"2026-05-14T01:00:00Z","envdVersion":"0.0.1","domain":"cube.app","cpuCount":2,"memoryMB":512,"state":%q}`, sandboxID, state)
 }

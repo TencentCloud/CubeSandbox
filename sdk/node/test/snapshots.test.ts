@@ -7,6 +7,7 @@ import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { Config } from "../src/config.js";
+import { ApiError } from "../src/exceptions.js";
 import { Sandbox } from "../src/index.js";
 import { stubCubeEnv } from "./_env.js";
 
@@ -296,4 +297,243 @@ describe("Sandbox.clone", () => {
     expect(snapshotDeleted).toBe(true);
     sb.close();
   });
+});
+
+describe("Sandbox.fork", () => {
+  const forkPath = `/sandboxes/${SANDBOX_ID}/fork`;
+
+  it("forks one by default, sending count=1", async () => {
+    const sb = await createSandbox();
+    let requestBody: string | undefined;
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname === forkPath) {
+        requestBody = req.body.toString();
+        return { status: 201, json: [{ sandbox: { ...SANDBOX_DATA, sandboxID: "sb-fork-0" } }] };
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+
+    const forks = await sb.fork();
+    expect(forks).toHaveLength(1);
+    expect(forks[0]).toBeInstanceOf(Sandbox);
+    expect((forks[0] as Sandbox).sandboxId).toBe("sb-fork-0");
+    expect(JSON.parse(requestBody ?? "{}")).toEqual({ count: 1 });
+    sb.close();
+  });
+
+  it("forks count sandboxes and sends count", async () => {
+    const sb = await createSandbox();
+    let requestBody: string | undefined;
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname === forkPath) {
+        requestBody = req.body.toString();
+        return {
+          status: 201,
+          json: [0, 1, 2].map((i) => ({ sandbox: { ...SANDBOX_DATA, sandboxID: `sb-fork-${i}` } })),
+        };
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+
+    const forks = await sb.fork({ count: 3 });
+    expect(forks).toHaveLength(3);
+    expect(forks.every((f) => f instanceof Sandbox)).toBe(true);
+    expect((forks as Sandbox[]).map((f) => f.sandboxId)).toEqual([
+      "sb-fork-0",
+      "sb-fork-1",
+      "sb-fork-2",
+    ]);
+    expect(JSON.parse(requestBody ?? "{}")).toEqual({ count: 3 });
+    (forks as Sandbox[]).forEach((f) => f.close());
+    sb.close();
+  });
+
+  it("sends timeoutMs as whole seconds in the fork payload", async () => {
+    const sb = await createSandbox();
+    let requestBody: string | undefined;
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname === forkPath) {
+        requestBody = req.body.toString();
+        return {
+          status: 201,
+          json: [0, 1].map((i) => ({ sandbox: { ...SANDBOX_DATA, sandboxID: `sb-fork-t${i}` } })),
+        };
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+    await sb.fork({ count: 2, timeoutMs: 90_000 });
+    expect(JSON.parse(requestBody ?? "{}")).toEqual({ count: 2, timeout: 90 });
+    sb.close();
+  });
+
+  it("ceils sub-second timeoutMs up to 1s", async () => {
+    const sb = await createSandbox();
+    let requestBody: string | undefined;
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname === forkPath) {
+        requestBody = req.body.toString();
+        return { status: 201, json: [{ sandbox: { ...SANDBOX_DATA, sandboxID: "sb-fork-t" } }] };
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+    await sb.fork({ count: 1, timeoutMs: 1 });
+    expect(JSON.parse(requestBody ?? "{}")).toEqual({ count: 1, timeout: 1 });
+    sb.close();
+  });
+
+  it("omits timeout from the payload when undefined", async () => {
+    const sb = await createSandbox();
+    let requestBody: string | undefined;
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname === forkPath) {
+        requestBody = req.body.toString();
+        return {
+          status: 201,
+          json: [0, 1].map((i) => ({ sandbox: { ...SANDBOX_DATA, sandboxID: `sb-fork-0${i}` } })),
+        };
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+    await sb.fork({ count: 2 });
+    expect(JSON.parse(requestBody ?? "{}")).toEqual({ count: 2 });
+    sb.close();
+  });
+
+  it("rejects invalid timeoutMs", async () => {
+    const sb = await createSandbox();
+    await expect(sb.fork({ timeoutMs: -1 })).rejects.toThrow(/timeoutMs/);
+    await expect(sb.fork({ timeoutMs: NaN })).rejects.toThrow(/timeoutMs/);
+    await expect(sb.fork({ timeoutMs: Number.POSITIVE_INFINITY })).rejects.toThrow(/timeoutMs/);
+    sb.close();
+  });
+
+  it("rejects count outside 1..100", async () => {
+    const sb = await createSandbox();
+    await expect(sb.fork({ count: 0 })).rejects.toThrow(/count must be between 1 and 100/);
+    await expect(sb.fork({ count: 101 })).rejects.toThrow(/count must be between 1 and 100/);
+    sb.close();
+  });
+
+  it("rejects a result array whose length differs from count", async () => {
+    const sb = await createSandbox();
+    const one = { sandbox: { ...SANDBOX_DATA, sandboxID: "sb-fork-0" } };
+    for (const json of [[one], [one, one, one, one]]) {
+      setHandler((req) => {
+        if (req.method === "POST" && req.pathname === forkPath) {
+          return { status: 201, json };
+        }
+        return { status: 500, json: { message: "unexpected" } };
+      });
+      await expect(sb.fork({ count: 3 })).rejects.toThrow(/expected 3 results/);
+    }
+    sb.close();
+  });
+
+  it("does not abort a slow fork on the control-plane default timeout", async () => {
+    const sb = await createSandbox();
+    sb.config.requestTimeoutMs = 100; // tighten the default to prove fork ignores it
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname === forkPath) {
+        return new Promise((resolve) => {
+          setTimeout(
+            () =>
+              resolve({
+                status: 201,
+                json: [{ sandbox: { ...SANDBOX_DATA, sandboxID: "sb-fork-0" } }],
+              }),
+            300,
+          );
+        });
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+
+    const forks = await sb.fork({});
+    expect(forks).toHaveLength(1);
+    expect(forks[0]).toBeInstanceOf(Sandbox);
+    sb.close();
+  });
+
+  it("honors requestTimeoutMs on fork", async () => {
+    const sb = await createSandbox();
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname === forkPath) {
+        return new Promise((resolve) => {
+          setTimeout(
+            () => resolve({ status: 201, json: [{ sandbox: { ...SANDBOX_DATA } }] }),
+            300,
+          );
+        });
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+
+    await expect(sb.fork({ requestTimeoutMs: 100 })).rejects.toThrow();
+    sb.close();
+  });
+
+  it("keeps successful forks and reports per-fork failures as errors", async () => {
+    const sb = await createSandbox();
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname === forkPath) {
+        expect(JSON.parse(req.body.toString()).count).toBe(5);
+        return {
+          status: 201,
+          json: [
+            { sandbox: { ...SANDBOX_DATA, sandboxID: "sb-fork-0" } },
+            { error: { code: 130409, message: "fork 1 failed" } },
+            { sandbox: { ...SANDBOX_DATA, sandboxID: "sb-fork-2" } },
+            { sandbox: { ...SANDBOX_DATA, sandboxID: "sb-fork-3" } },
+            { error: { code: 130409, message: "fork 4 failed" } },
+          ],
+        };
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+
+    const forks = await sb.fork({ count: 5 });
+    expect(forks).toHaveLength(5);
+    const ok = forks.filter((f): f is Sandbox => f instanceof Sandbox);
+    const errs = forks.filter((f): f is Error => f instanceof Error);
+    expect(ok.map((f) => f.sandboxId)).toEqual(["sb-fork-0", "sb-fork-2", "sb-fork-3"]);
+    expect(errs).toHaveLength(2);
+    expect(errs[0].message).toMatch(/fork 1 failed/);
+    expect(errs[1].message).toMatch(/fork 4 failed/);
+    expect((errs[0] as ApiError).retCode).toBe(130409);
+    expect((errs[0] as ApiError).statusCode).toBeUndefined();
+    ok.forEach((f) => f.close());
+    sb.close();
+  });
+
+  it("returns all errors when every fork fails", async () => {
+    const sb = await createSandbox();
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname === forkPath) {
+        return {
+          status: 201,
+          json: [0, 1, 2].map(() => ({ error: { code: 130409, message: "boom" } })),
+        };
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+
+    const forks = await sb.fork({ count: 3 });
+    expect(forks).toHaveLength(3);
+    expect(forks.every((f) => f instanceof Error)).toBe(true);
+    expect(forks.every((f) => /boom/.test((f as Error).message))).toBe(true);
+    sb.close();
+  });
+
+  it("raises when the whole fork request fails", async () => {
+    const sb = await createSandbox();
+    setHandler((req) => {
+      if (req.method === "POST" && req.pathname === forkPath) {
+        return { status: 404, json: { code: 404, message: "sandbox not found" } };
+      }
+      return { status: 500, json: { message: "unexpected" } };
+    });
+    await expect(sb.fork({ count: 3 })).rejects.toThrow(/sandbox not found/);
+    sb.close();
+  });
+
 });

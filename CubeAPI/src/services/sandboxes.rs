@@ -11,16 +11,17 @@ use crate::{
     cubemaster::{
         datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeEgressRule,
         CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
-        CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
-        SandboxLogsRequest, SandboxNetworkRequest, SandboxRefreshRequest, SandboxStatus,
-        SandboxTimeoutRequest, SandboxUpdateRequest, VolumeSpec,
+        CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ForkSandboxRequest,
+        ListSandboxRequest, SandboxInfo, SandboxLogsRequest, SandboxNetworkRequest,
+        SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest, SandboxUpdateRequest,
+        VolumeSpec,
     },
     error::{AppError, AppResult},
     models::{
-        EgressRule, EgressRuleMatch, LogLevel as ModelLogLevel, NewSandbox, Sandbox,
-        SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig, SandboxLog, SandboxLogEntry,
-        SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxOnTimeout, SandboxState,
-        SandboxVolumeMount,
+        EgressRule, EgressRuleMatch, ForkError, ForkRequest, ForkResponse, ForkResult,
+        LogLevel as ModelLogLevel, NewSandbox, Sandbox, SandboxAutoResume, SandboxDetail,
+        SandboxLifecycleConfig, SandboxLog, SandboxLogEntry, SandboxLogs, SandboxLogsV2Response,
+        SandboxNetworkConfig, SandboxOnTimeout, SandboxState, SandboxVolumeMount,
     },
 };
 
@@ -30,6 +31,9 @@ const RET_CODE_NOT_FOUND: i32 = 130404;
 const RET_CODE_CONFLICT: i32 = 130409;
 const RET_CODE_TASK_STATE_INVALID: i32 = 130490;
 const RET_CODE_TASK_RESUME_FAILED: i32 = 130589;
+/// Sentinel for a fork result with neither sandbox nor ret (130502 is
+/// unassigned; 130500 is GrpcError in the shared enum).
+const RET_CODE_UNKNOWN_DERIVE: i32 = 130502;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
 const ENV_VAR_NAME_MAX_LEN: usize = 256;
 const ENV_VAR_VALUE_MAX_LEN: usize = 4096;
@@ -394,6 +398,72 @@ impl SandboxService {
             envd_version,
             None,
         ))
+    }
+
+    /// POST /sandboxes/{sandboxID}/fork — derive `count` running copies from
+    /// one server-side snapshot.
+    ///
+    /// Forwards to CubeMaster and re-shapes each result into `{ sandbox |
+    /// error }`. Per-fork failures are independent and stay as array entries,
+    /// never a whole-request error. The source detail is fetched once (not per
+    /// fork) to seed `template_id`/`envd_version`.
+    pub async fn fork(&self, sandbox_id: &str, body: ForkRequest) -> AppResult<ForkResponse> {
+        // Source lookup seeds template/envd lineage and fails fast with 404.
+        let source = self.fetch_sandbox_detail(sandbox_id).await?;
+        let envd_version = envd_version_from_annotations(&source.annotations);
+
+        if !(1..=100).contains(&body.count) {
+            return Err(AppError::BadRequest(format!(
+                "count must be between 1 and 100, got {}",
+                body.count
+            )));
+        }
+        let req = ForkSandboxRequest {
+            request_id: new_request_id(),
+            count: body.count,
+            timeout: body.timeout,
+        };
+        let resp = self
+            .cubemaster
+            .fork_sandbox(sandbox_id, &req)
+            .await
+            .map_err(|e| map_fork_request_err(e, sandbox_id))?;
+
+        // parse_response already turned any non-zero top-level ret into an
+        // error before `Ok` here, so `resp.results` is only populated once the
+        // snapshot + derivation fan-out itself succeeded. Per-fork failures
+        // remain embedded as `ret` on individual elements.
+        let results = resp
+            .results
+            .into_iter()
+            .map(|item| match item.sandbox {
+                Some(fb) => ForkResult {
+                    sandbox: Some(self.sandbox_response(
+                        source.template_id.clone(),
+                        fb.sandbox_id,
+                        fb.host_id,
+                        envd_version.clone(),
+                        fb.traffic_access_token,
+                    )),
+                    error: None,
+                },
+                None => {
+                    let (code, message) = match item.ret {
+                        Some(ret) => (ret.ret_code, ret.ret_msg),
+                        None => (
+                            RET_CODE_UNKNOWN_DERIVE,
+                            "fork derivation produced neither sandbox nor error".to_string(),
+                        ),
+                    };
+                    ForkResult {
+                        sandbox: None,
+                        error: Some(ForkError::new(code, message)),
+                    }
+                }
+            })
+            .collect();
+
+        Ok(results)
     }
 
     pub async fn get_logs(
@@ -829,6 +899,23 @@ fn map_update_cubemaster_err(e: CubeMasterError, sandbox_id: &str) -> AppError {
     }
 }
 
+/// Map a fork-call CubeMaster error onto an `AppError` (404→NotFound,
+/// conflict→Conflict, params/validation→400, else internal).
+fn map_fork_request_err(e: CubeMasterError, sandbox_id: &str) -> AppError {
+    match e {
+        CubeMasterError::Api { ret_code, .. } if ret_code == RET_CODE_NOT_FOUND => {
+            AppError::NotFound(format!("sandbox {} not found", sandbox_id))
+        }
+        CubeMasterError::Api { ret_code, .. } if ret_code == RET_CODE_CONFLICT => {
+            AppError::Conflict(format!(
+                "sandbox {} cannot be forked (state conflict)",
+                sandbox_id
+            ))
+        }
+        _ => params_error_or_internal(e),
+    }
+}
+
 fn ensure_update_result(
     ret_code: i32,
     ret_msg: String,
@@ -1233,7 +1320,7 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::models::{
-        EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, NewSandbox,
+        EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, ForkRequest, NewSandbox,
         SandboxAutoResume, SandboxLifecycleConfig, SandboxNetworkConfig, SandboxOnTimeout,
         SandboxState, SandboxVolumeMount,
     };
@@ -1241,7 +1328,7 @@ mod tests {
         extract::State,
         http::{header::RETRY_AFTER, StatusCode},
         response::IntoResponse,
-        routing::{delete, post},
+        routing::{delete, get, post},
         Json, Router,
     };
     use serde_json::Value;
@@ -1380,6 +1467,113 @@ mod tests {
             .await
             .expect_err("rejected refresh should not succeed");
         assert_bad_request(err, reason);
+    }
+
+    // Mock the source-detail lookup and /fork: one fork succeeds, one errors.
+    #[tokio::test]
+    async fn fork_sandbox_assembles_independent_sandbox_and_error_elements() {
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-src",
+                    "host_id": "host-src",
+                    "status": 1,
+                    "template_id": "tpl-1",
+                    "annotations": { "cube.master.components.envd.version": "2.3.4" },
+                    "containers": [{ "container_id": "sb-src", "type": "sandbox" }]
+                }]
+            }))
+        }
+        async fn fork_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-fork",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "results": [
+                    { "sandbox": {
+                        "sandbox_id": "sb-f1",
+                        "sandbox_ip": "10.0.0.1",
+                        "host_id": "host-f1",
+                        "host_ip": "10.0.0.9",
+                        "traffic_access_token": "tok-1",
+                        "ext_info": {}
+                    }},
+                    { "ret": { "ret_code": 130409, "ret_msg": "derivation rejected" } }
+                ]
+            }))
+        }
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route("/cube/sandbox/info", get(info_handler))
+                .route("/cube/sandbox/sb-src/fork", post(fork_handler)),
+        )
+        .await;
+
+        let results = service
+            .fork(
+                "sb-src",
+                ForkRequest {
+                    count: 2,
+                    timeout: None,
+                },
+            )
+            .await
+            .expect("fork should succeed as a request");
+
+        assert_eq!(results.len(), 2);
+        let first = &results[0];
+        let sb = first.sandbox.as_ref().expect("first fork should succeed");
+        assert!(first.error.is_none());
+        assert_eq!(sb.sandbox_id, "sb-f1");
+        assert_eq!(sb.template_id, "tpl-1");
+        assert_eq!(sb.client_id, "host-f1");
+        assert_eq!(sb.envd_version, "2.3.4");
+        assert_eq!(sb.traffic_access_token.as_deref(), Some("tok-1"));
+        assert_eq!(sb.domain.as_deref(), Some("cube.app"));
+
+        let second = &results[1];
+        assert!(second.sandbox.is_none());
+        let err = second.error.as_ref().expect("second fork should error");
+        assert_eq!(err.code, 130409);
+        assert_eq!(err.message, "derivation rejected");
+    }
+
+    #[tokio::test]
+    async fn fork_sandbox_rejects_count_out_of_range() {
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-src",
+                    "host_id": "host-src",
+                    "status": 1,
+                    "template_id": "tpl-1",
+                    "containers": [{ "container_id": "sb-src", "type": "sandbox" }]
+                }]
+            }))
+        }
+        let service =
+            spawn_fake_cubemaster(Router::new().route("/cube/sandbox/info", get(info_handler)))
+                .await;
+
+        for bad in [0, -1, 101, 500] {
+            let err = service
+                .fork(
+                    "sb-src",
+                    ForkRequest {
+                        count: bad,
+                        timeout: None,
+                    },
+                )
+                .await
+                .expect_err("out-of-range count must be rejected");
+            assert!(
+                matches!(err, AppError::BadRequest(ref m) if m.contains("count must be between 1 and 100")),
+                "expected BadRequest for count={bad}, got {err:?}"
+            );
+        }
     }
 
     // Negative control: genuine backend faults must keep counting as 5xx, and

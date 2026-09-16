@@ -2506,6 +2506,146 @@ class TestClone:
                 sb.clone(n=1, snapshot_name="leaky")  # type: ignore[call-arg]
 
 
+class TestFork:
+    """Tests for ``Sandbox.fork(count, *, timeout)`` — server-side E2B fork:
+    one ``POST /sandboxes/{id}/fork`` round-trip returning an array of
+    ``{sandbox}|{error}``; per-fork independent success/failure, never
+    all-or-nothing."""
+
+    @staticmethod
+    def _fork_body(sb, count, timeout=None):
+        """Return a 201-style body with ``count`` all-successful fork entries."""
+        return [
+            {
+                "sandbox": {
+                    **SANDBOX_DATA,
+                    "sandboxID": f"sb-fork-{i:03d}",
+                    "clientID": "req-fork",
+                    "envdVersion": "2.3.4",
+                    "trafficAccessToken": None,
+                }
+            }
+            for i in range(count)
+        ]
+
+    @staticmethod
+    def _fork_error(code=130409, message="derivation rejected"):
+        return {"error": {"code": code, "message": message}}
+
+    def _make_ok_sandbox(self):
+        # A real instance whose `_session.post` we patch; nothing hits the network.
+        return make_sandbox()
+
+    def test_fork_default_returns_one(self):
+        sb = self._make_ok_sandbox()
+        body = self._fork_body(sb, 1)
+        with patch.object(sb._session, "post", return_value=mock_response(body)) as post:
+            result = sb.fork()
+        assert len(result) == 1
+        assert isinstance(result[0], Sandbox)
+        assert result[0].sandbox_id == "sb-fork-000"
+        post.assert_called_once_with(
+            f"http://localhost:3000/sandboxes/{sb.sandbox_id}/fork", json={"count": 1}
+        )
+
+    def test_fork_count_sequential(self):
+        sb = self._make_ok_sandbox()
+        body = self._fork_body(sb, 5)
+        with patch.object(sb._session, "post", return_value=mock_response(body)) as post:
+            result = sb.fork(count=5)
+        assert len(result) == 5
+        assert all(isinstance(r, Sandbox) for r in result)
+        post.assert_called_once_with(
+            f"http://localhost:3000/sandboxes/{sb.sandbox_id}/fork", json={"count": 5}
+        )
+
+    def test_fork_passes_timeout_in_payload(self):
+        sb = self._make_ok_sandbox()
+        body = self._fork_body(sb, 2)
+        with patch.object(sb._session, "post", return_value=mock_response(body)) as post:
+            sb.fork(count=2, timeout=60)
+        post.assert_called_once_with(
+            f"http://localhost:3000/sandboxes/{sb.sandbox_id}/fork",
+            json={"count": 2, "timeout": 60},
+        )
+
+    def test_fork_timeout_none_omits_timeout(self):
+        sb = self._make_ok_sandbox()
+        body = self._fork_body(sb, 2)
+        with patch.object(sb._session, "post", return_value=mock_response(body)) as post:
+            sb.fork(count=2)
+        post.assert_called_once_with(
+            f"http://localhost:3000/sandboxes/{sb.sandbox_id}/fork", json={"count": 2}
+        )
+
+    def test_fork_rejects_count_out_of_range(self):
+        sb = self._make_ok_sandbox()
+        for bad in (0, -1, 101):
+            with pytest.raises(ValueError, match="count must be between 1 and 100"):
+                sb.fork(count=bad)
+
+    def test_fork_rejects_result_count_mismatch(self):
+        """A response array shorter/longer than count is a contract violation."""
+        sb = self._make_ok_sandbox()
+        for body in ([self._fork_body(sb, 1)], [self._fork_body(sb, 4)]):
+            with patch.object(sb._session, "post", return_value=mock_response(body)):
+                with pytest.raises(ApiError, match="expected 3"):
+                    sb.fork(count=3)
+
+    def test_fork_partial_failure_keeps_successes(self):
+        """Server returns a mix of sandbox + error entries: successes are kept
+        (never killed) and failures surface as exception entries at their slot."""
+        sb = self._make_ok_sandbox()
+        body = [
+            {"sandbox": {**SANDBOX_DATA, "sandboxID": "sb-fork-000"}},
+            self._fork_error(),
+            {"sandbox": {**SANDBOX_DATA, "sandboxID": "sb-fork-002"}},
+            {"sandbox": {**SANDBOX_DATA, "sandboxID": "sb-fork-003"}},
+            self._fork_error(),
+        ]
+        with patch.object(sb._session, "post", return_value=mock_response(body)) as post:
+            with patch.object(Sandbox, "kill") as kill_p:
+                result = sb.fork(count=5)
+        assert len(result) == 5, "fork must report one outcome per requested slot"
+        ok = [r for r in result if isinstance(r, Sandbox)]
+        errs = [r for r in result if isinstance(r, BaseException)]
+        assert len(ok) == 3
+        assert len(errs) == 2
+        assert [r.sandbox_id for r in ok] == ["sb-fork-000", "sb-fork-002", "sb-fork-003"]
+        assert all(isinstance(e, ApiError) for e in errs)
+        assert "derivation rejected" in str(errs[0])
+        # Per-fork business code goes to ret_code, not status_code.
+        assert errs[0].ret_code == 130409
+        assert errs[0].status_code is None
+        # Successes are preserved and NOT killed by fork itself.
+        kill_p.assert_not_called()
+        post.assert_called_once()
+
+    def test_fork_all_fail_returns_exceptions(self):
+        """Every entry is an error: fork returns all Exception entries."""
+        sb = self._make_ok_sandbox()
+        body = [self._fork_error(code=130409, message="boom") for _ in range(3)]
+        with patch.object(sb._session, "post", return_value=mock_response(body)):
+            result = sb.fork(count=3)
+        assert len(result) == 3
+        assert all(isinstance(r, BaseException) for r in result)
+        assert all("boom" in str(r) for r in result)
+
+    def test_fork_request_failure_raises(self):
+        """A whole-request failure (HTTP error, e.g. sandbox not found) is raised;
+        no fork was attempted."""
+        sb = self._make_ok_sandbox()
+        with patch.object(
+            sb._session,
+            "post",
+            return_value=mock_response(
+                {"code": 404, "message": "sandbox not found"}, status=404
+            ),
+        ):
+            with pytest.raises(SandboxNotFoundError):
+                sb.fork(count=3)
+
+
 # ── Templates ─────────────────────────────────────────────────────────────────
 
 class TestTemplateAPI:
