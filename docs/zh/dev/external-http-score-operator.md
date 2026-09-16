@@ -9,7 +9,7 @@
 - 仅为演示 sidecar，不是生产打分服务。
 - 在线创建 延迟须用客户端时间线 + sandbox Ready 测量，不能用 simulator 估计值代替。
 - 运维演示不改变正式 binpack `VALID_NO_IMPROVEMENT`。
-- **候选扇出：** `external_http_score` 会把 Filter 后的完整候选集（`selCtx.Nodes()`）POST 给 sidecar；集合大小由 `scheduler.pre_select_num` 控制（默认 `-1` = 不限制）。请求体、sidecar CPU，以及「每个已知候选都必须返回有限分」的契约都会随候选数放大。大集群启用前请限制 `pre_select_num`；当前无熔断 / 负缓存。
+- **候选扇出：** `external_http_score` 会把 Filter 后的完整候选集（`selCtx.Nodes()`）POST 给 sidecar；集合大小由 `scheduler.pre_select_num` 控制（默认 `-1` = 不限制）。请求体、sidecar CPU，以及「每个已知候选都必须返回有限分」的契约都会随候选数放大。大集群启用前请限制 `pre_select_num`。没有负缓存；熔断**默认开启**（连续 `failure_threshold` 次失败后跳闸，默认 5），可用 `circuit_breaker.disable: true` 关闭。
 
 ## 相关
 

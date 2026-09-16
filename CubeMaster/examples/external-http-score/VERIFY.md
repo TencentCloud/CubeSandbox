@@ -61,6 +61,8 @@ CubeMaster 指标（启用后）：`cube_scheduler_external_http_score_outcomes_
 | bad scores | `{"bad_scores":true}` | reason=missing_candidate 等，fail-open |
 | 回滚 | `POST /fault {"delay_ms":0,"http_status":0,"bad_scores":false}` + `POST /mock-metrics/reset`；配置侧去掉 `external_http_score` 或设 `disable:true` 后按现场重启策略 | 恢复原路径 |
 
+**持续故障与默认熔断：** 上表 `timeout` / `http_status` / `missing_candidate` 等单 `reason` 描述的是熔断跳闸前的前几次尝试（默认 `failure_threshold: 5`）。若故障持续注入，熔断打开后 outcome 变为 `reason=circuit_open`（不再发 HTTP）。要再观察原始 reason，请清掉故障，或设 `circuit_breaker.disable: true`。
+
 **Filter-before-Score**：scorer 只能给 Filter 后候选打分；响应里的陌生 `node_id` 不会复活已过滤节点。
 
 ## 场景/回滚表（摘要）

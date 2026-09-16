@@ -2,7 +2,7 @@
 
 `external_http_score` 让 CubeMaster 在调度 Score 阶段调用外部 HTTP 服务。该服务为每个候选节点返回 0–100 分，CubeMaster 再把这些分数送入现有加权评分流水线。
 
-除非把该插件列入 `scheduler.score.enable_scorers`，否则它不会启用。启用 `enable_scorers: external_http_score` **必须**提供匹配的 `score.plugin_conf.external_http_score` 块；否则 CubeMaster 在启动构造 scorer 时会 panic。它不作为 Filter 运行，不会剔除候选，也不直接决定最终节点。
+除非把该插件列入 `scheduler.score.enable_scorers`，否则它不会启用。启用 `enable_scorers: external_http_score` **必须**提供匹配的 `score.plugin_conf.external_http_score` 块；否则 CubeMaster 在配置加载阶段失败（`validateListedScorerPluginConfPresent`）。它不作为 Filter 运行，不会剔除候选，也不直接决定最终节点。
 
 面向运维的配置说明见 [CubeMaster 调度配置](../guide/cubemaster-scheduler-config.md#external-http-score-插件)（中文）/ [English](../../guide/cubemaster-scheduler-config.md#external-http-score-plugin)。
 

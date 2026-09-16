@@ -2,7 +2,7 @@
 
 `external_http_score` lets CubeMaster call an external HTTP service during the scheduler Score phase. The service returns a 0-100 score for every candidate node, and CubeMaster feeds those scores into the existing weighted score pipeline.
 
-The plugin is disabled unless it is listed in `scheduler.score.enable_scorers`. Enabling `enable_scorers: external_http_score` **requires** a matching `score.plugin_conf.external_http_score` block; otherwise CubeMaster panics while constructing scorers at startup. It does not run as a Filter, does not remove candidates, and does not directly choose the final node.
+The plugin is disabled unless it is listed in `scheduler.score.enable_scorers`. Enabling `enable_scorers: external_http_score` **requires** a matching `score.plugin_conf.external_http_score` block; otherwise CubeMaster fails config load (`validateListedScorerPluginConfPresent`). It does not run as a Filter, does not remove candidates, and does not directly choose the final node.
 
 Operator-facing configuration also lives in [CubeMaster scheduler config](../guide/cubemaster-scheduler-config.md#external-http-score-plugin) (English) / [中文](../zh/guide/cubemaster-scheduler-config.md#external-http-score-插件).
 
