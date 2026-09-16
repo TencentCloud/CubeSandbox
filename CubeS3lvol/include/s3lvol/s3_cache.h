@@ -93,7 +93,9 @@
  *
  *   === Threading ===
  *
- *   Owner thread only, like the rest of s3_ctx. Asserted, not assumed.
+ *   Metadata is protected internally. Populate/drop and the convenience read
+ *   API use the owner-thread channel. Reads may instead supply a channel owned
+ *   by their calling SPDK thread through s3_cache_read_on_channel().
  */
 
 #ifndef S3LVOL_CACHE_H
@@ -117,8 +119,9 @@ typedef void (*s3_cache_read_cb)(void *cb_arg, int status);
 
 struct s3_cache_opts {
 	/* Local device region to use, and how to reach it. Channels are
-	 * per-thread; this one must belong to the calling thread, which is also
-	 * the thread every later call has to come from. */
+	 * per-thread; this one belongs to the owner thread and is used by
+	 * populate/drop and s3_cache_read(). Off-owner readers obtain their own
+	 * channel and call s3_cache_read_on_channel(). */
 	struct spdk_bdev_desc   *desc;
 	struct spdk_io_channel  *ch;
 	uint64_t                 region_offset;
@@ -197,6 +200,23 @@ int s3_cache_read(struct s3_cache *cache, uint64_t chunk_index,
 		  const struct spdk_uuid *uuid, uint32_t offset_in_chunk,
 		  uint32_t length, void *buf,
 		  s3_cache_read_cb cb_fn, void *cb_arg);
+
+/**
+ * Serve a hit through a local-device channel owned by the calling thread.
+ *
+ * Cache metadata is shared and internally synchronized; SPDK I/O channels are
+ * not. This variant lets a bs_dev poll-group channel avoid an owner-thread
+ * bounce while preserving s3_cache_read()'s hit/miss contract.
+ */
+int s3_cache_read_on_channel(struct s3_cache *cache,
+			     struct spdk_io_channel *channel,
+			     uint64_t chunk_index,
+			     const struct spdk_uuid *uuid,
+			     uint32_t offset_in_chunk, uint32_t length,
+			     void *buf, s3_cache_read_cb cb_fn, void *cb_arg);
+
+/* Obtain a local-device channel for the calling SPDK thread. */
+struct spdk_io_channel *s3_cache_get_io_channel(struct s3_cache *cache);
 
 /**
  * Offer part or all of a chunk's contents for caching.

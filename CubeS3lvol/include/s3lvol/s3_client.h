@@ -72,18 +72,22 @@ typedef void (*s3_get_cb)(void *cb_arg, uint64_t bytes_read, int status);
  * 0 when queued; in the latter case cb_fn is invoked on the submitting SPDK
  * thread once ownership is transferred.  The owner must release exactly once.
  * If that bounce cannot be queued, the callback is not run on the releaser's
- * thread: dest fills are owner-thread-only, so the token is given to the next
- * waiter instead.
+ * thread: acquire_ex invokes cancel_fn there instead, while the compatibility
+ * wrapper drops that notification. The token is then given to the next waiter.
  *
  * Low-priority users (read-ahead) never queue and leave one token available
  * for demand; they receive -EAGAIN when no opportunistic token is available.
  */
 typedef void (*s3_get_token_cb)(void *cb_arg);
+typedef void (*s3_get_token_cancel_cb)(void *cb_arg, int status);
 
 #define S3_WHOLE_GET_MAX_INFLIGHT 256
 
 int s3_whole_get_token_acquire(bool low_priority, s3_get_token_cb cb_fn,
 			       void *cb_arg);
+int s3_whole_get_token_acquire_ex(bool low_priority, s3_get_token_cb cb_fn,
+				  s3_get_token_cancel_cb cancel_fn,
+				  void *cb_arg);
 void s3_whole_get_token_release(void);
 
 /* ==========================================================================

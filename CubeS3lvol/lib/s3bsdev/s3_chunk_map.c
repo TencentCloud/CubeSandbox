@@ -105,6 +105,7 @@ struct chunk_entry {
 struct s3_chunk_map {
 	struct chunk_entry     *entries;
 	uint64_t                num_chunks;
+	pthread_rwlock_t        lock;
 
 	uint32_t                chunk_size;
 	uint32_t                block_size;
@@ -199,6 +200,7 @@ s3_chunk_map_create(uint64_t total_blocks, uint32_t block_size,
 	struct s3_chunk_map *map;
 	uint64_t num_chunks;
 	uint64_t total_bytes;
+	int rc;
 
 	if (!out_map || total_blocks == 0) {
 		return -EINVAL;
@@ -227,6 +229,12 @@ s3_chunk_map_create(uint64_t total_blocks, uint32_t block_size,
 	if (!map->entries) {
 		free(map);
 		return -ENOMEM;
+	}
+	rc = pthread_rwlock_init(&map->lock, NULL);
+	if (rc != 0) {
+		free(map->entries);
+		free(map);
+		return -rc;
 	}
 
 	map->num_chunks = num_chunks;
@@ -261,6 +269,7 @@ s3_chunk_map_destroy(struct s3_chunk_map *map)
 		return;
 	}
 
+	pthread_rwlock_destroy(&map->lock);
 	free(map->entries);
 	free(map);
 }
@@ -316,8 +325,10 @@ s3_chunk_map_lookup(struct s3_chunk_map *map, uint64_t chunk_index,
 	/* Committed state only -- an in-flight write (journal not yet durable)
 	 * has not completed as far as blobstore is concerned, and exposing it
 	 * would hand out a mapping that may never take effect. */
+	pthread_rwlock_rdlock(&map->lock);
 	e = &map->entries[chunk_index];
 	if (chunk_entry_is_empty(e)) {
+		pthread_rwlock_unlock(&map->lock);
 		return -ENOENT;
 	}
 
@@ -327,6 +338,7 @@ s3_chunk_map_lookup(struct s3_chunk_map *map, uint64_t chunk_index,
 	if (out_valid_bytes) {
 		*out_valid_bytes = e->valid_bytes;
 	}
+	pthread_rwlock_unlock(&map->lock);
 	return 0;
 }
 
@@ -391,6 +403,7 @@ chunk_map_req_finish(struct chunk_map_req *req, int status)
 	void *cb_arg = req->cb_arg;
 	struct spdk_uuid old_uuid;
 
+	pthread_rwlock_wrlock(&map->lock);
 	if (status == 0) {
 		chunk_map_req_commit(req);
 	}
@@ -409,6 +422,7 @@ chunk_map_req_finish(struct chunk_map_req *req, int status)
 	map->inflight_total--;
 
 	spdk_uuid_copy(&old_uuid, &req->old_uuid);
+	pthread_rwlock_unlock(&map->lock);
 	free(req);
 
 	if (cb_fn) {
@@ -443,7 +457,9 @@ chunk_map_submit(struct chunk_map_req *req)
 	struct chunk_entry *e = &map->entries[req->chunk_index];
 	struct spdk_uuid latest;
 	uint32_t latest_gen;
+	struct s3_journal *journal;
 
+	pthread_rwlock_wrlock(&map->lock);
 	chunk_entry_latest(e, &latest, &latest_gen);
 
 	/* old_uuid comes from the "latest intent" rather than committed state --
@@ -457,6 +473,7 @@ chunk_map_submit(struct chunk_map_req *req)
 			s3_chunk_map_cb cb_fn = req->cb_fn;
 			void *cb_arg = req->cb_arg;
 
+			pthread_rwlock_unlock(&map->lock);
 			free(req);
 			if (cb_fn) {
 				struct spdk_uuid null_uuid;
@@ -476,8 +493,10 @@ chunk_map_submit(struct chunk_map_req *req)
 
 	e->inflight++;
 	map->inflight_total++;
+	journal = map->journal;
+	pthread_rwlock_unlock(&map->lock);
 
-	if (!map->journal) {
+	if (!journal) {
 		/* Memory-only mode: there is no journal to wait for, so this takes
 		 * effect immediately. The callback runs before this function
 		 * returns, which the header documents as possible. */
@@ -494,10 +513,10 @@ chunk_map_submit(struct chunk_map_req *req)
 	 * memory not updated -- merely replays one extra record, which is
 	 * idempotent and harmless. */
 	if (req->is_remove) {
-		s3_journal_append_remove(map->journal, req->chunk_index,
+		s3_journal_append_remove(journal, req->chunk_index,
 					 &req->lsn, chunk_map_journal_done, req);
 	} else {
-		s3_journal_append_update(map->journal, req->chunk_index,
+		s3_journal_append_update(journal, req->chunk_index,
 					 &req->uuid, req->valid_bytes, req->gen,
 					 S3_CHUNK_IN_S3,
 					 &req->lsn, chunk_map_journal_done, req);
@@ -663,6 +682,7 @@ s3_chunk_map_apply_update(struct s3_chunk_map *map, uint64_t chunk_index,
 	}
 
 	e = &map->entries[chunk_index];
+	pthread_rwlock_wrlock(&map->lock);
 
 	/* Advanced before the staleness test, and for stale records too: the
 	 * question it answers is "how far has the scan got", which is true of a
@@ -677,6 +697,7 @@ s3_chunk_map_apply_update(struct s3_chunk_map *map, uint64_t chunk_index,
 		/* Superseded: a newer record for this chunk has already been
 		 * applied, and this one would move the mapping backwards to an
 		 * object that no longer exists. */
+		pthread_rwlock_unlock(&map->lock);
 		return 0;
 	}
 
@@ -692,6 +713,7 @@ s3_chunk_map_apply_update(struct s3_chunk_map *map, uint64_t chunk_index,
 		e->applied_lsn = lsn;
 	}
 
+	pthread_rwlock_unlock(&map->lock);
 	return 0;
 }
 
@@ -711,6 +733,8 @@ s3_chunk_map_apply_remove(struct s3_chunk_map *map, uint64_t chunk_index,
 		return -ERANGE;
 	}
 
+	pthread_rwlock_wrlock(&map->lock);
+
 	/* Advanced here rather than at the exits below, because there are several
 	 * successful ones: the record counts as applied even when it turns out to
 	 * be a no-op or is rejected as stale. */
@@ -723,6 +747,7 @@ s3_chunk_map_apply_remove(struct s3_chunk_map *map, uint64_t chunk_index,
 	if (!chunk_entry_accepts(e, lsn)) {
 		/* A newer record already decided what this chunk maps to;
 		 * replaying an older removal would drop a live mapping. */
+		pthread_rwlock_unlock(&map->lock);
 		return 0;
 	}
 	if (lsn > e->applied_lsn) {
@@ -733,6 +758,7 @@ s3_chunk_map_apply_remove(struct s3_chunk_map *map, uint64_t chunk_index,
 		/* Replay asked to remove something already empty -- idempotent,
 		 * not an error. This happens when the same record is replayed
 		 * twice (a crash before truncation). */
+		pthread_rwlock_unlock(&map->lock);
 		return 0;
 	}
 
@@ -743,6 +769,7 @@ s3_chunk_map_apply_remove(struct s3_chunk_map *map, uint64_t chunk_index,
 	assert(map->allocated_chunks > 0);
 	map->allocated_chunks--;
 
+	pthread_rwlock_unlock(&map->lock);
 	return 0;
 }
 

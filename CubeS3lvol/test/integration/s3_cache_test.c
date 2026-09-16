@@ -392,6 +392,8 @@ main(int argc, char **argv)
 	struct spdk_env_opts env_opts;
 	struct spdk_bdev_desc *desc = NULL;
 	struct spdk_io_channel *ch = NULL;
+	struct spdk_io_channel *ch2 = NULL;
+	struct spdk_thread *thread2 = NULL;
 	struct s3_cache *cache = NULL;
 	struct s3_cache_stats stats;
 	const char *aio_path = DEFAULT_AIO_PATH;
@@ -970,6 +972,55 @@ main(int argc, char **argv)
 		check_true("with its bytes",
 			   pattern_matches(dst, chunk, 0, AIO_BLOCK_SIZE, 5),
 			   NULL);
+	}
+
+	printf("\n[14] a cache hit can run on another SPDK thread\n");
+	{
+		struct async_ctx read = {0};
+		struct spdk_uuid uuid_d;
+		uint64_t deadline;
+
+		/* Take the range over with a fresh version so this section owns the
+		 * exact residency state it exercises. */
+		spdk_uuid_generate(&uuid_d);
+		fill_pattern(src, 42, AIO_BLOCK_SIZE, 9);
+		populate_range_sync(cache, 42, &uuid_d, 3 * AIO_BLOCK_SIZE,
+				    src, AIO_BLOCK_SIZE, TEST_CHUNK_SIZE);
+
+		thread2 = spdk_thread_create("cache_reader", NULL);
+		check_true("second SPDK thread created", thread2 != NULL, NULL);
+		if (thread2) {
+			spdk_set_thread(thread2);
+			ch2 = s3_cache_get_io_channel(cache);
+			check_true("second thread obtained a cache channel",
+				   ch2 != NULL, NULL);
+			memset(dst, 0xee, TEST_CHUNK_SIZE);
+			rc = ch2 ? s3_cache_read_on_channel(
+				      cache, ch2, 42, &uuid_d,
+				      3 * AIO_BLOCK_SIZE, AIO_BLOCK_SIZE, dst,
+				      read_cb, &read) : -ENOENT;
+			check_u64("off-owner cache read submits", (uint64_t)-rc, 0);
+			deadline = now_ms() + POLL_TIMEOUT_SEC * 1000;
+			while (!read.done && now_ms() < deadline) {
+				spdk_thread_poll(thread2, 0, 0);
+			}
+			check_true("off-owner cache read completes",
+				   read.done && read.status == 0, NULL);
+			check_true("off-owner cache read returns correct bytes",
+				   pattern_matches(dst, 42, 0, AIO_BLOCK_SIZE, 9),
+				   NULL);
+			if (ch2) {
+				spdk_put_io_channel(ch2);
+				ch2 = NULL;
+			}
+			spdk_thread_exit(thread2);
+			while (!spdk_thread_is_exited(thread2)) {
+				spdk_thread_poll(thread2, 0, 0);
+			}
+			spdk_thread_destroy(thread2);
+			thread2 = NULL;
+			spdk_set_thread(g_thread);
+		}
 	}
 
 	printf("\n=== %d passed, %d failed ===\n", g_pass, g_fail);

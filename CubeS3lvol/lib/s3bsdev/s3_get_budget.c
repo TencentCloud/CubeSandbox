@@ -16,6 +16,7 @@
 
 struct s3_get_token_waiter {
 	s3_get_token_cb cb_fn;
+	s3_get_token_cancel_cb cancel_fn;
 	void           *cb_arg;
 	struct spdk_thread *origin;
 	TAILQ_ENTRY(s3_get_token_waiter) link;
@@ -40,8 +41,8 @@ s3_get_token_deliver(void *arg)
 }
 
 int
-s3_whole_get_token_acquire(bool low_priority, s3_get_token_cb cb_fn,
-			   void *cb_arg)
+s3_whole_get_token_acquire_ex(bool low_priority, s3_get_token_cb cb_fn,
+			      s3_get_token_cancel_cb cancel_fn, void *cb_arg)
 {
 	struct s3_get_token_waiter *waiter = NULL;
 	bool immediate;
@@ -73,6 +74,7 @@ s3_whole_get_token_acquire(bool low_priority, s3_get_token_cb cb_fn,
 		return -ENOMEM;
 	}
 	waiter->cb_fn = cb_fn;
+	waiter->cancel_fn = cancel_fn;
 	waiter->cb_arg = cb_arg;
 	waiter->origin = spdk_get_thread();
 
@@ -90,10 +92,19 @@ s3_whole_get_token_acquire(bool low_priority, s3_get_token_cb cb_fn,
 	return 0;
 }
 
+int
+s3_whole_get_token_acquire(bool low_priority, s3_get_token_cb cb_fn,
+			   void *cb_arg)
+{
+	return s3_whole_get_token_acquire_ex(low_priority, cb_fn, NULL, cb_arg);
+}
+
 void
 s3_whole_get_token_release(void)
 {
 	struct s3_get_token_waiter *waiter;
+	s3_get_token_cancel_cb cancel_fn;
+	void *cb_arg;
 	int rc;
 
 	for (;;) {
@@ -120,13 +131,17 @@ s3_whole_get_token_release(void)
 			return;
 		}
 		/*
-		 * The origin has stopped accepting work.  Do not invoke the grant
-		 * callback here: dest fills mutate owner-thread-only state, and an
-		 * inline grant would race that thread.  The queued I/O is already
-		 * stranded with its origin; recycle the token to the next waiter.
+		 * The origin has stopped accepting work. Do not invoke the grant
+		 * callback on this unrelated thread. Notify callers that supplied a
+		 * cancellation hook, then recycle the token to the next waiter.
 		 */
 		SPDK_ERRLOG("whole-GET token delivery failed: %s\n",
 			    spdk_strerror(-rc));
+		cancel_fn = waiter->cancel_fn;
+		cb_arg = waiter->cb_arg;
 		free(waiter);
+		if (cancel_fn) {
+			cancel_fn(cb_arg, rc);
+		}
 	}
 }
