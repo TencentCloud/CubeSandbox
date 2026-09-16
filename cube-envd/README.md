@@ -346,6 +346,33 @@ on the host or grant access to the host clock to make a test pass. The workflow
 sets `CARGO_TARGET_DIR` inside the container; it requires no particular host
 directory layout. Native builds use `cube-envd/target` unless you override it.
 
+From the repository root on a Linux Docker host with cgroup v2, run the same
+environment as CI:
+
+```bash
+version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+docker build --build-arg RUST_VERSION="$version" \
+  -f docker/tests/Dockerfile.envd-ci -t envd-ci .
+docker run --rm --init --privileged --cgroupns private \
+  -v "$PWD:/workspace:ro" \
+  -v envd-ci-cargo:/usr/local/cargo -v envd-ci-target:/target \
+  -e NO_PROXY=localhost,127.0.0.1,::1 -e no_proxy=localhost,127.0.0.1,::1 \
+  -e CARGO_TARGET_DIR=/target -e CARGO_BUILD_JOBS=2 envd-ci \
+  bash docker/tests/prepare-cgroup.sh make -C cube-envd ci
+```
+
+Bare-host `cargo test` is not equivalent to this environment. The validation
+image creates the `user` account and `/home/user`, as both sandbox images do.
+The startup-command tests intentionally exercise `-cmd`, which runs in
+`/home/user` as root, matching [upstream Go envd](https://github.com/e2b-dev/infra/blob/2026.16/packages/envd/main.go#L206-L225).
+Both implementations reject a missing startup directory; this does not mean
+ordinary Process RPC calls always use `/home/user`.
+The bootstrap removes SYS_TIME from the capability sets before running tests;
+`--privileged --cap-drop SYS_TIME` alone is not a substitute. Keep the capability
+assertions enabled. To run a focused suite, replace the final
+`make -C cube-envd ci` with, for example,
+`cargo test --manifest-path cube-envd/Cargo.toml --locked --test daemon`.
+
 | Scope | Entry point | Coverage |
 | --- | --- | --- |
 | Component | `make -C cube-envd ci` | Formatting, Clippy, build, Rust tests and type checking. |

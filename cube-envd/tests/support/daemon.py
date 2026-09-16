@@ -19,7 +19,8 @@ class DaemonTestCase(unittest.TestCase):
             with open('/proc/self/status') as status:
                 caps = dict(line.split(':', 1) for line in status if line.startswith('Cap'))
             for name in ('CapEff', 'CapBnd', 'CapInh', 'CapAmb'):
-                self.assertFalse(int(caps[name], 16) & (1 << 25), name + ' contains SYS_TIME')
+                self.assertFalse(int(caps[name], 16) & (1 << 25),
+                                 name + ' contains SYS_TIME; use the isolated Docker command in cube-envd/README.md#tests')
             with socket.socket() as sock:
                 sock.bind(('127.0.0.1', 0))
                 port = sock.getsockname()[1]
