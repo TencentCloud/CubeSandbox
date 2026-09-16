@@ -149,7 +149,7 @@ overlay_chunk_get(struct s3_overlay *ov, uint64_t chunk_index)
 	if (chunk_index >= ov->num_chunks) {
 		return NULL;
 	}
-	return ov->chunks[chunk_index];
+	return __atomic_load_n(&ov->chunks[chunk_index], __ATOMIC_ACQUIRE);
 }
 
 static struct overlay_chunk *
@@ -168,9 +168,10 @@ overlay_chunk_create(struct s3_overlay *ov, uint64_t chunk_index)
 	c->index   = chunk_index;
 	c->min_seq = UINT64_MAX;
 
-	ov->chunks[chunk_index] = c;
 	TAILQ_INSERT_TAIL(&ov->live_q, c, live_link);
 	__atomic_fetch_add(&ov->live_chunks, 1, __ATOMIC_RELEASE);
+	/* After the struct is fully zeroed: off-owner is_live is this store. */
+	__atomic_store_n(&ov->chunks[chunk_index], c, __ATOMIC_RELEASE);
 
 	return c;
 }
@@ -266,7 +267,7 @@ overlay_chunk_maybe_free(struct s3_overlay *ov, struct overlay_chunk *c)
 	assert(__atomic_load_n(&ov->live_chunks, __ATOMIC_RELAXED) > 0);
 	__atomic_fetch_sub(&ov->live_chunks, 1, __ATOMIC_RELEASE);
 
-	ov->chunks[c->index] = NULL;
+	__atomic_store_n(&ov->chunks[c->index], NULL, __ATOMIC_RELEASE);
 	free(c);
 }
 
@@ -645,9 +646,11 @@ s3_overlay_covers(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks)
 bool
 s3_overlay_chunk_is_live(struct s3_overlay *ov, uint64_t chunk_index)
 {
-	struct overlay_chunk *c = ov ? overlay_chunk_get(ov, chunk_index) : NULL;
-
-	return c && c->n_present > 0;
+	/* Pointer presence, not n_present: off-owner must not dereference a
+	 * struct the owner may free after storing NULL. A published entry is
+	 * conservative for dest cache and is_zeroes (flush_active with no
+	 * blocks still counts as "not plain zeroes"). */
+	return ov && overlay_chunk_get(ov, chunk_index) != NULL;
 }
 
 uint64_t
