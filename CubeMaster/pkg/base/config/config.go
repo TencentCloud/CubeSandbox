@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -238,25 +239,39 @@ type RedisConf struct {
 }
 
 type SchedulerConf struct {
-	Overhead                         *OverheadConf                `yaml:"overhead"`
-	NodeMaxMvmNum                    int64                        `yaml:"node_max_mvm_num"`
-	NodeMaxMvmNumReserveNumPercent   float64                      `yaml:"node_max_mvm_num_reserve_num_percent"`
-	NodeMaxMemReservedInMB           int64                        `yaml:"node_max_mem_reserved_in_mb"`
-	NodeMaxCpuUtil                   float64                      `yaml:"node_max_cpu_util"`
-	PreSelectNum                     int                          `yaml:"pre_select_num"`
-	PrioritySelectNum                int                          `yaml:"priority_select_num"`
-	LeastSelectName                  string                       `yaml:"least_select_name"`
-	MetricUpdateTimeout              time.Duration                `yaml:"metric_update_timeout"`
-	LocalMetricUpdateTimeout         time.Duration                `yaml:"local_metric_update_timeout"`
-	Filter                           *SchedulerFilterConf         `yaml:"filter"`
-	Score                            *SchedulerScoreConf          `yaml:"score"`
-	PostScore                        *PostScoreConf               `yaml:"postscore"`
-	DisableCircuitFilter             bool                         `yaml:"disable_circuit_filter"`
-	InBackoffMode                    bool                         `yaml:"in_backoff_mode"`
-	AffinityConf                     map[string]AffinityConf      `yaml:"affinityconf"`
-	NodeMaxMvmNumConf                map[string]NodeMaxMvmNumConf `yaml:"node_max_mvm_num_conf"`
-	EnableRunInstanceHostIps         bool                         `yaml:"enable_run_instance_host_ips"`
-	MaxMvmCPU                        string                       `yaml:"max_mvm_cpu"`
+	Overhead                       *OverheadConf        `yaml:"overhead"`
+	NodeMaxMvmNum                  int64                `yaml:"node_max_mvm_num"`
+	NodeMaxMvmNumReserveNumPercent float64              `yaml:"node_max_mvm_num_reserve_num_percent"`
+	NodeMaxMemReservedInMB         int64                `yaml:"node_max_mem_reserved_in_mb"`
+	NodeMaxCpuUtil                 float64              `yaml:"node_max_cpu_util"`
+	PreSelectNum                   int                  `yaml:"pre_select_num"`
+	PrioritySelectNum              int                  `yaml:"priority_select_num"`
+	LeastSelectName                string               `yaml:"least_select_name"`
+	MetricUpdateTimeout            time.Duration        `yaml:"metric_update_timeout"`
+	LocalMetricUpdateTimeout       time.Duration        `yaml:"local_metric_update_timeout"`
+	Filter                         *SchedulerFilterConf `yaml:"filter"`
+	Score                          *SchedulerScoreConf  `yaml:"score"`
+	PostScore                      *PostScoreConf       `yaml:"postscore"`
+	// Profile is the name of the active scheduler profile from Profiles.
+	// Empty string (default) means no profile expansion: existing Filter/Score
+	// config is left unchanged. This is config-level selection only; it does
+	// not add scheduling algorithms.
+	Profile string `yaml:"profile"`
+	// Profiles maps named strategy profiles to filter/score selector settings.
+	// User-defined entries expand onto existing enable_filters / enable_scorers
+	// and merge resource_weights over the base map. When Profile names a
+	// built-in preset (balanced_spread, template_locality_first,
+	// binpack_utilization) and that key is absent from this map,
+	// applySchedulerProfile uses the built-in overlay. User keys with the same
+	// name override the built-in. Built-in presets are not equivalent to
+	// offline simulator profile scoring weights.
+	Profiles                         map[string]SchedulerProfileConf `yaml:"profiles"`
+	DisableCircuitFilter             bool                            `yaml:"disable_circuit_filter"`
+	InBackoffMode                    bool                            `yaml:"in_backoff_mode"`
+	AffinityConf                     map[string]AffinityConf         `yaml:"affinityconf"`
+	NodeMaxMvmNumConf                map[string]NodeMaxMvmNumConf    `yaml:"node_max_mvm_num_conf"`
+	EnableRunInstanceHostIps         bool                            `yaml:"enable_run_instance_host_ips"`
+	MaxMvmCPU                        string                          `yaml:"max_mvm_cpu"`
 	maxCpu                           resource.Quantity
 	MaxMvmMemory                     string `yaml:"max_mvm_memory"`
 	maxMem                           resource.Quantity
@@ -278,6 +293,104 @@ type SchedulerConf struct {
 	// the values are ignored at runtime.
 	DeprecatedOvercommitRatio       *deprecatedOvercommitRatioConf           `yaml:"overcommit_ratio"`
 	DeprecatedOvercommitRatioByType map[string]deprecatedOvercommitRatioConf `yaml:"overcommit_ratio_conf"`
+}
+
+// SchedulerProfileConf is a named, optional overlay for existing scheduler
+// filter/score selector configuration. Only fields present in the profile are
+// copied onto SchedulerConf; omitted sections are left untouched.
+type SchedulerProfileConf struct {
+	Filter *SchedulerFilterConf       `yaml:"filter"`
+	Score  *SchedulerProfileScoreConf `yaml:"score"`
+	// AllowDroppedFilters, when true, permits a Profile's enable_filters list to
+	// drop names that were present in the base list. Default false: dropping
+	// filters fails config load (admission filters such as disk / thirtparty
+	// must be listed again or the drop must be explicit). Built-in presets also
+	// default to false — selecting them by name on a longer base list requires
+	// an explicit same-name profiles.<builtin>.allow_dropped_filters: true (or
+	// listing the dropped names again in the Profile filter list).
+	AllowDroppedFilters bool `yaml:"allow_dropped_filters"`
+	// AllowDroppedScorers mirrors AllowDroppedFilters for enable_scorers:
+	// default false fails config load when a Profile replace drops base scorers
+	// (for example an operator's external_http_score). Built-ins also default
+	// false — opt in via profiles.<name>.allow_dropped_scorers: true or keep
+	// dropped names in the Profile score list.
+	AllowDroppedScorers bool `yaml:"allow_dropped_scorers"`
+}
+
+// SchedulerProfileScoreConf holds the score fields a profile may override.
+// It intentionally omits plugin_conf so profiles only select/combine existing
+// scorers and weights.
+type SchedulerProfileScoreConf struct {
+	EnableScorers   []string           `yaml:"enable_scorers"`
+	ResourceWeights map[string]float64 `yaml:"resource_weights"`
+}
+
+// allowedSchedulerFilterNames must stay in sync with the keys of
+// CubeMaster/pkg/selector/filter filters registry (filter/init.go).
+// Drift is enforced by pkg/scheduler TestSelectorAllowlistsMatchRegistries,
+// which compares AllowedSchedulerFilterNames() to filter.RegisteredFilterNames().
+var allowedSchedulerFilterNames = map[string]struct{}{
+	"cpu":                 {},
+	"mem":                 {},
+	"template_locality":   {},
+	"realtime_create_num": {},
+	"disk":                {},
+	"thirtparty":          {},
+}
+
+// allowedSchedulerScoreNames must stay in sync with the keys of
+// CubeMaster/pkg/selector/score scores registry (score/init.go).
+// Drift is enforced by pkg/scheduler TestSelectorAllowlistsMatchRegistries,
+// which compares AllowedSchedulerScoreNames() to score.RegisteredScoreNames().
+var allowedSchedulerScoreNames = map[string]struct{}{
+	"real_time_weighted_average":    {},
+	"multi_factor_weighted_average": {},
+	"affinity_score":                {},
+	"image_score":                   {},
+	"binpack_score":                 {},
+	"external_http_score":           {},
+}
+
+// AllowedSchedulerFilterNames returns a copy of the Profile allowlist for filters.
+func AllowedSchedulerFilterNames() map[string]struct{} {
+	out := make(map[string]struct{}, len(allowedSchedulerFilterNames))
+	for k, v := range allowedSchedulerFilterNames {
+		out[k] = v
+	}
+	return out
+}
+
+// AllowedSchedulerScoreNames returns a copy of the Profile allowlist for scorers.
+func AllowedSchedulerScoreNames() map[string]struct{} {
+	out := make(map[string]struct{}, len(allowedSchedulerScoreNames))
+	for k, v := range allowedSchedulerScoreNames {
+		out[k] = v
+	}
+	return out
+}
+
+// allowedSchedulerWeightFactorNames must stay in sync with constants.WeightFactor*.
+var allowedSchedulerWeightFactorNames = map[string]struct{}{
+	constants.WeightFactorReqCpu:                {},
+	constants.WeightFactorReqMem:                {},
+	constants.WeightFactorMvmNum:                {},
+	constants.WeightFactorQuotaCpu:              {},
+	constants.WeightFactorQuotaMem:              {},
+	constants.WeightFactorCpuUtil:               {},
+	constants.WeightFactorMemUsage:              {},
+	constants.WeightFactorCpuLoadUsage:          {},
+	constants.WeightFactorMetricUpdate:          {},
+	constants.WeightFactorLocalMetricUpdate:     {},
+	constants.WeightFactorCreateConcurrentLimit: {},
+	constants.WeightFactorRealTimeCreateNum:     {},
+	constants.WeightFactorLocalCreateNum:        {},
+	constants.WeightFactorActiveWhiteList:       {},
+	constants.WeightFactorNegativeWhiteList:     {},
+	constants.WeightFactorDataDiskUsage:         {},
+	constants.WeightFactorStorageDiskUsage:      {},
+	constants.WeightFactorSysDiskUsage:          {},
+	constants.WeightFactorImageID:               {},
+	constants.WeightFactorTemplateID:            {},
 }
 
 var defaultNodeAffinitySelectorAllowedKeys = []string{
@@ -510,6 +623,8 @@ type ScorePluginConf struct {
 	AffinityScore              *AffinityScore              `yaml:"affinity_score"`
 	ImageScore                 *ImageScore                 `yaml:"image_score"`
 	TemplateScore              *TemplateScore              `yaml:"template_score"`
+	ExternalHTTPScore          *ExternalHTTPScore          `yaml:"external_http_score"`
+	BinpackScore               *BinpackScore               `yaml:"binpack_score"`
 }
 
 type MultiFactorWeightedAverage struct {
@@ -541,6 +656,133 @@ type TemplateScore struct {
 	Weight              float64  `yaml:"weight"`
 	EnableWeightFactors []string `yaml:"enable_weight_factors"`
 	Disable             bool     `yaml:"disable"`
+}
+
+type ExternalHTTPScore struct {
+	// Weight is a pointer so YAML can distinguish omit (nil → default
+	// DefaultExternalHTTPScoreWeight in preHandle) from an explicit 0 (keep
+	// off, same as other scorers).
+	Weight *float64 `yaml:"weight"`
+	// Endpoint is the sidecar URL. Empty skips the plugin. Non-empty values must
+	// be absolute http:// or https:// URLs with a host; other schemes (file,
+	// unix, missing scheme) fail construction / are rejected at Select.
+	// May carry userinfo or query tokens; MarshalJSON and String redact those
+	// so config.Init dumps and CubeLog.Fatalf("%v", cfg) paths match the
+	// scorer's no-secret logging policy.
+	Endpoint string `yaml:"endpoint"`
+	// Timeout is the per-request deadline on the synchronous create path.
+	// Zero/omitted defaults to 200ms at request time; negative values and
+	// values above 2s are rejected at construction / Select validation.
+	Timeout time.Duration `yaml:"timeout"`
+	Mode    string        `yaml:"mode"`
+	Disable bool          `yaml:"disable"`
+}
+
+// DefaultExternalHTTPScoreWeight is applied when plugin_conf.external_http_score
+// omits weight. Keep as the single source of truth for constructors, preHandle,
+// and Weight() fallbacks.
+const DefaultExternalHTTPScoreWeight = 1.0
+
+// MarshalJSON redacts Endpoint userinfo and query so utils.InterfaceToString
+// dumps (config.Init) never print sidecar credentials the scorer refuses to log.
+func (c ExternalHTTPScore) MarshalJSON() ([]byte, error) {
+	return json.Marshal(c.redactedWire())
+}
+
+// String redacts Endpoint the same way for fmt %v/%+v (hot-reload Fatals print
+// *Config via reflection and call Stringer on nested fields).
+func (c ExternalHTTPScore) String() string {
+	b, err := json.Marshal(c.redactedWire())
+	if err != nil {
+		return "ExternalHTTPScore{Endpoint:[redacted]}"
+	}
+	return string(b)
+}
+
+type externalHTTPScoreWire struct {
+	Weight   *float64      `json:"Weight"`
+	Endpoint string        `json:"Endpoint"`
+	Timeout  time.Duration `json:"Timeout"`
+	Mode     string        `json:"Mode"`
+	Disable  bool          `json:"Disable"`
+}
+
+func (c ExternalHTTPScore) redactedWire() externalHTTPScoreWire {
+	return externalHTTPScoreWire{
+		Weight:   c.Weight,
+		Endpoint: redactExternalHTTPScoreEndpoint(c.Endpoint),
+		Timeout:  c.Timeout,
+		Mode:     c.Mode,
+		Disable:  c.Disable,
+	}
+}
+
+func redactExternalHTTPScoreEndpoint(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u == nil || u.Scheme == "" || u.Host == "" {
+		return "[redacted]"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
+// BinpackScore is a thin Score-phase plugin that prefers fuller nodes.
+// Missing plugin_conf uses safe defaults (enabled, equal CPU/mem/MVM weights)
+// instead of panicking.
+//
+// Weight is a pointer so YAML can distinguish omit vs explicit 0:
+//   - nil / omitted → runtime default 1 (enabled)
+//   - explicit 0 → disable Select
+//   - positive → that plugin weight
+//   - negative → rejected at config load
+//
+// CPUWeight / MemWeight / MvmWeight are likewise pointers:
+//   - nil / omitted → runtime default 1 for that dimension
+//   - explicit 0 → exclude that dimension from the occupancy blend
+//   - positive → that dimension weight
+//   - negative → rejected at config load
+type BinpackScore struct {
+	Weight    *float64 `yaml:"weight"`
+	CPUWeight *float64 `yaml:"cpu_weight"`
+	MemWeight *float64 `yaml:"mem_weight"`
+	MvmWeight *float64 `yaml:"mvm_weight"`
+	Disable   bool     `yaml:"disable"`
+}
+
+// BinpackDimWeight returns the effective occupancy-dimension weight.
+// nil → 1; explicit 0 excludes the dimension (caller skips when <= 0).
+func BinpackDimWeight(p *float64) float64 {
+	if p == nil {
+		return 1
+	}
+	return *p
+}
+
+// Float64Ptr returns a pointer to v for YAML/config tests and builtin injects.
+func Float64Ptr(v float64) *float64 { return &v }
+
+// BinpackPluginWeight returns the effective plugin weight and whether the
+// scorer is disabled by weight/disable. A missing block defaults to weight 1.
+func BinpackPluginWeight(cfg *BinpackScore) (weight float64, disabled bool) {
+	if cfg == nil {
+		return 1, false
+	}
+	if cfg.Disable {
+		return 0, true
+	}
+	if cfg.Weight == nil {
+		return 1, false
+	}
+	if *cfg.Weight == 0 {
+		return 0, true
+	}
+	return *cfg.Weight, false
 }
 
 type CubeletConf struct {
@@ -743,6 +985,10 @@ type listener struct {
 }
 
 func (l *listener) OnEvent(data interface{}) {
+	// Hot-reload path: CubeLog.Fatalf here only writes a FATAL log line (it does
+	// not os.Exit). On preHandle/validate failure the previous in-memory cfg is
+	// kept and the bad overlay is not applied. Still treat Profile typos as
+	// operationally severe because selectors are not rebuilt until restart.
 	conf, err := preHandle(data.(*Config))
 	if err != nil {
 		CubeLog.Fatalf("preHandle Config:%v fail:%v", data, err)
@@ -769,8 +1015,8 @@ func preHandle(config *Config) (*Config, error) {
 		return nil, errors.New("preHandleCubeletConf fail")
 	}
 
-	if preHandleScheduler(config) != nil {
-		return nil, errors.New("preHandleScheduler failed")
+	if err := preHandleScheduler(config); err != nil {
+		return nil, fmt.Errorf("preHandleScheduler failed: %w", err)
 	}
 	if preHandleAuthConf(config) != nil {
 		return nil, errors.New("preHandleAuthConf failed")
@@ -992,6 +1238,44 @@ func preHandleScheduler(config *Config) error {
 		config.Scheduler = &WrapperSchedulerConf{}
 	}
 
+	profileBuiltin, err := applySchedulerProfile(&config.Scheduler.SchedulerConf)
+	if err != nil {
+		return err
+	}
+	// binpack / external_http negative (*float64) weights are always rejected
+	// (independent of Profile).
+	if err := validateBinpackScoreWeight(&config.Scheduler.SchedulerConf); err != nil {
+		return err
+	}
+	if err := validateExternalHTTPScoreWeight(&config.Scheduler.SchedulerConf); err != nil {
+		return err
+	}
+	// Negative plugin weights invert ranking in runScoreFilter; reject for every
+	// registered scorer that has an explicit plugin_conf block. This is not
+	// Profile-scoped: master would load the config, but negative weights invert
+	// placement, so Init fails after upgrade (document in operator guides).
+	if err := validateSchedulerScorerPluginWeights(&config.Scheduler.SchedulerConf); err != nil {
+		return err
+	}
+	// Listed factor/affinity scorers without plugin_conf used to panic in
+	// NewSelector on master. Fail at config load instead of warn-and-skip so the
+	// empty-profile path stays fail-closed. binpack_score may omit plugin_conf
+	// and use runtime defaults.
+	if err := validateListedScorerPluginConfPresent(&config.Scheduler.SchedulerConf); err != nil {
+		return err
+	}
+	// Strict factor/disable validation remains Profile-scoped so empty-profile
+	// configs with a present-but-ineffective plugin_conf block keep pre-upgrade
+	// load behavior (runtime Errorf + skip rather than Init failure).
+	if config.Scheduler.Profile != "" {
+		if err := validateEffectiveSchedulerSelectors(&config.Scheduler.SchedulerConf); err != nil {
+			return err
+		}
+		if err := validateSchedulerScorePluginConfig(&config.Scheduler.SchedulerConf, profileBuiltin); err != nil {
+			return err
+		}
+	}
+
 	preHandOverhead(config)
 
 	// Account for Redis allocation records during scheduling by default.
@@ -1079,6 +1363,7 @@ func preHandleScheduler(config *Config) error {
 	if err := checkInstanceTypeLabelValid(config); err != nil {
 		return err
 	}
+	warnProfileScoreRankingIneffective(&config.Scheduler.SchedulerConf)
 	return nil
 }
 
@@ -1109,6 +1394,687 @@ func checkInstanceTypeLabelValid(config *Config) error {
 	return nil
 }
 
+// ApplyExternalHTTPScoreDefaults fills an omitted weight with
+// DefaultExternalHTTPScoreWeight once at config-load / hot-reload. Explicit
+// weight: 0 stays 0 so operators can stage the sidecar without contributing to
+// the weighted average.
+func ApplyExternalHTTPScoreDefaults(cfg *ExternalHTTPScore) {
+	if cfg == nil || cfg.Weight != nil {
+		return
+	}
+	w := DefaultExternalHTTPScoreWeight
+	cfg.Weight = &w
+}
+
+const (
+	// Runtime built-in Profile names. Same strings as the offline simulator
+	// strategy profiles, but they overlay existing selectors and are not
+	// equivalent to simulator weightsForProfile.
+	RuntimeProfileBalancedSpread        = "balanced_spread"
+	RuntimeProfileTemplateLocalityFirst = "template_locality_first"
+	RuntimeProfileBinpackUtilization    = "binpack_utilization"
+)
+
+// applySchedulerProfile expands scheduler.profile onto Filter/Score when set.
+// Empty profile leaves existing scheduler config unchanged (default production
+// behavior). Unknown profile names and unknown selector names fail closed.
+// Built-in presets apply when the name is absent from Profiles.
+// The returned builtin flag matches resolveSchedulerProfile so callers (e.g.
+// validateSchedulerScorePluginConfig) need not re-resolve and double-log Warns.
+func applySchedulerProfile(s *SchedulerConf) (builtin bool, err error) {
+	if s == nil || s.Profile == "" {
+		return false, nil
+	}
+	profile, builtin, err := resolveSchedulerProfile(s)
+	if err != nil {
+		return false, err
+	}
+	if err := validateSchedulerProfileSelectors(s.Profile, &profile); err != nil {
+		return false, err
+	}
+
+	if profile.Filter != nil && profile.Filter.EnableFilters != nil {
+		var previous []string
+		if s.Filter != nil {
+			previous = append([]string(nil), s.Filter.EnableFilters...)
+		}
+		if s.Filter == nil {
+			s.Filter = &SchedulerFilterConf{}
+		}
+		s.Filter.EnableFilters = append([]string(nil), profile.Filter.EnableFilters...)
+		dropped := filterNamesOnlyIn(previous, s.Filter.EnableFilters)
+		if len(dropped) > 0 {
+			kind := "user"
+			if builtin {
+				kind = "builtin"
+			}
+			CubeLog.Warnf("scheduler %s profile %q replaced enable_filters: previous=%v new=%v dropped=%v",
+				kind, s.Profile, previous, s.Filter.EnableFilters, dropped)
+			if !profile.AllowDroppedFilters {
+				return false, fmt.Errorf("scheduler profile %q drops filters %v from base enable_filters; keep them in the Profile list or set allow_dropped_filters: true",
+					s.Profile, dropped)
+			}
+		}
+	}
+
+	if profile.Score != nil {
+		if profile.Score.EnableScorers != nil {
+			if s.Score == nil {
+				s.Score = &SchedulerScoreConf{}
+			}
+			previousScorers := append([]string(nil), s.Score.EnableScorers...)
+			s.Score.EnableScorers = append([]string(nil), profile.Score.EnableScorers...)
+			droppedScorers := filterNamesOnlyIn(previousScorers, s.Score.EnableScorers)
+			if len(droppedScorers) > 0 {
+				kind := "user"
+				if builtin {
+					kind = "builtin"
+				}
+				CubeLog.Warnf("scheduler %s profile %q replaced enable_scorers: previous=%v new=%v dropped=%v",
+					kind, s.Profile, previousScorers, s.Score.EnableScorers, droppedScorers)
+				if !profile.AllowDroppedScorers {
+					return false, fmt.Errorf("scheduler profile %q drops scorers %v from base enable_scorers; keep them in the Profile list or set allow_dropped_scorers: true",
+						s.Profile, droppedScorers)
+				}
+			}
+		}
+		if profile.Score.ResourceWeights != nil {
+			if s.Score == nil {
+				s.Score = &SchedulerScoreConf{}
+			}
+			weights := make(map[string]float64, len(s.Score.ResourceWeights)+len(profile.Score.ResourceWeights))
+			for k, v := range s.Score.ResourceWeights {
+				weights[k] = v
+			}
+			for k, v := range profile.Score.ResourceWeights {
+				weights[k] = v
+			}
+			s.Score.ResourceWeights = weights
+		}
+	}
+	if builtin {
+		applyBuiltinSchedulerProfileDefaults(s)
+	}
+	return builtin, nil
+}
+
+func applyBuiltinSchedulerProfileDefaults(s *SchedulerConf) {
+	if s == nil || s.Score == nil {
+		return
+	}
+	switch s.Profile {
+	case RuntimeProfileBalancedSpread:
+		if s.Score.ScorePluginConf.RealTimeWeightedAverage == nil {
+			s.Score.ScorePluginConf.RealTimeWeightedAverage = &RealTimeWeightedAverage{
+				Weight: 1,
+				EnableWeightFactors: []string{
+					constants.WeightFactorRealTimeCreateNum,
+					constants.WeightFactorMvmNum,
+					constants.WeightFactorCpuUtil,
+					constants.WeightFactorQuotaCpu,
+					constants.WeightFactorQuotaMem,
+				},
+			}
+		}
+	case RuntimeProfileTemplateLocalityFirst:
+		if s.Score.ScorePluginConf.ImageScore == nil {
+			s.Score.ScorePluginConf.ImageScore = &ImageScore{
+				Weight:              1,
+				EnableWeightFactors: []string{constants.WeightFactorImageID, constants.WeightFactorTemplateID},
+			}
+		}
+	case RuntimeProfileBinpackUtilization:
+		if s.Score.ScorePluginConf.BinpackScore == nil {
+			s.Score.ScorePluginConf.BinpackScore = &BinpackScore{
+				Weight:    Float64Ptr(1),
+				CPUWeight: Float64Ptr(1),
+				MemWeight: Float64Ptr(1),
+				MvmWeight: Float64Ptr(1),
+			}
+		}
+	}
+}
+
+// validateBinpackScoreWeight rejects negative plugin_conf.binpack_score.weight
+// at config load. Explicit weight:0 disables; omitted weight (nil pointer)
+// keeps the runtime default of 1; a missing block keeps the same default.
+func validateBinpackScoreWeight(s *SchedulerConf) error {
+	if s == nil || s.Score == nil {
+		return nil
+	}
+	cfg := s.Score.ScorePluginConf.BinpackScore
+	if cfg == nil {
+		return nil
+	}
+	if cfg.Weight != nil {
+		w := *cfg.Weight
+		if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 {
+			return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.weight must be a finite number >= 0, got %v (weight:0 disables; omit weight or the block for default 1)",
+				w)
+		}
+	}
+	checkDim := func(name string, p *float64) error {
+		if p == nil {
+			return nil
+		}
+		w := *p
+		if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 {
+			return fmt.Errorf("scheduler.score.plugin_conf.binpack_score.%s must be a finite number >= 0, got %v (0 excludes the dimension; omit for default 1)", name, w)
+		}
+		return nil
+	}
+	if err := checkDim("cpu_weight", cfg.CPUWeight); err != nil {
+		return err
+	}
+	if err := checkDim("mem_weight", cfg.MemWeight); err != nil {
+		return err
+	}
+	if err := checkDim("mvm_weight", cfg.MvmWeight); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateExternalHTTPScoreWeight rejects negative / non-finite
+// plugin_conf.external_http_score.weight at config load. Explicit weight:0 is a
+// staged inert no-op; omitted weight (nil pointer) is defaulted to 1 in
+// ApplyExternalHTTPScoreDefaults. Invalid endpoint/timeout remain construction
+// Warn + Select fail-open (not Init failures).
+func validateExternalHTTPScoreWeight(s *SchedulerConf) error {
+	if s == nil || s.Score == nil {
+		return nil
+	}
+	cfg := s.Score.ScorePluginConf.ExternalHTTPScore
+	if cfg == nil || cfg.Weight == nil {
+		return nil
+	}
+	w := *cfg.Weight
+	if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 {
+		return fmt.Errorf("scheduler.score.plugin_conf.external_http_score.weight must be a finite number >= 0, got %v (weight:0 is inert; omit weight for default 1)", w)
+	}
+	return nil
+}
+
+// validateSchedulerScorerPluginWeights rejects negative / non-finite
+// plugin_conf.<scorer>.weight for every scorer that uses a plain float64 weight
+// field. binpack_score and external_http_score (*float64) are handled by
+// validateBinpackScoreWeight / validateExternalHTTPScoreWeight.
+func validateSchedulerScorerPluginWeights(s *SchedulerConf) error {
+	if s == nil || s.Score == nil {
+		return nil
+	}
+	check := func(name string, weight float64) error {
+		if math.IsNaN(weight) || math.IsInf(weight, 0) || weight < 0 {
+			return fmt.Errorf("scheduler.score.plugin_conf.%s.weight must be a finite number >= 0, got %v (weight:0 disables)", name, weight)
+		}
+		return nil
+	}
+	pc := s.Score.ScorePluginConf
+	if c := pc.RealTimeWeightedAverage; c != nil {
+		if err := check("real_time_weighted_average", c.Weight); err != nil {
+			return err
+		}
+	}
+	if c := pc.MultiFactorWeightedAverage; c != nil {
+		if err := check("multi_factor_weighted_average", c.Weight); err != nil {
+			return err
+		}
+	}
+	if c := pc.AffinityScore; c != nil {
+		if err := check("affinity_score", c.Weight); err != nil {
+			return err
+		}
+	}
+	if c := pc.ImageScore; c != nil {
+		if err := check("image_score", c.Weight); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateListedScorerPluginConfPresent rejects enable_scorers entries whose
+// required plugin_conf block is missing. binpack_score is exempt: omitting its
+// block keeps runtime defaults (same as NewBinpackScore). external_http_score
+// is NOT exempt: listing it without a plugin_conf block fails load/reload even
+// though the scorer has a nil-cfg observability path (plugin_conf_absent) used
+// by unit tests / stale selector instances after a successful reload that drops
+// both the name and the block. This runs for empty and non-empty Profile so a
+// typo cannot silently disable the score phase.
+func validateListedScorerPluginConfPresent(s *SchedulerConf) error {
+	if s == nil || s.Score == nil {
+		return nil
+	}
+	for _, name := range s.Score.EnableScorers {
+		if name == "binpack_score" {
+			continue
+		}
+		missing, known := scorerPluginConfMissing(s, name)
+		if !known {
+			// Unknown names are handled by validateEffectiveSchedulerSelectors
+			// under Profile; empty-profile still warns/skips at NewSelector.
+			continue
+		}
+		if missing {
+			return fmt.Errorf("scheduler.score.enable_scorers lists %q but scheduler.score.plugin_conf.%s is missing",
+				name, name)
+		}
+	}
+	return nil
+}
+
+// validateEffectiveSchedulerSelectors checks the final Filter/Score name lists
+// after Profile overlay. Empty-profile configs keep legacy warn-and-skip for
+// unknown base enable_scorers names at NewSelector time.
+func validateEffectiveSchedulerSelectors(s *SchedulerConf) error {
+	if s == nil {
+		return nil
+	}
+	if s.Filter != nil {
+		for _, name := range s.Filter.EnableFilters {
+			if _, ok := allowedSchedulerFilterNames[name]; !ok {
+				return fmt.Errorf("scheduler profile %q: unknown filter %q in effective enable_filters", s.Profile, name)
+			}
+		}
+	}
+	if s.Score != nil {
+		for _, name := range s.Score.EnableScorers {
+			if _, ok := allowedSchedulerScoreNames[name]; !ok {
+				return fmt.Errorf("scheduler profile %q: unknown score %q in effective enable_scorers", s.Profile, name)
+			}
+		}
+	}
+	return nil
+}
+
+// validateSchedulerScorePluginConfig checks the final effective scorer list
+// after Profile overlays and built-in defaults have been applied.
+// Callers must only invoke this when scheduler.profile is non-empty.
+// builtin must be the flag returned by applySchedulerProfile for this load
+// (do not re-resolve — that double-emits resolveSchedulerProfile Warn lines).
+func validateSchedulerScorePluginConfig(s *SchedulerConf, builtin bool) error {
+	if s == nil || s.Score == nil {
+		return nil
+	}
+	for _, name := range s.Score.EnableScorers {
+		// binpack_score may omit plugin_conf and use runtime defaults on both
+		// empty-Profile and user-Profile paths (built-ins still inject when nil).
+		if name == "binpack_score" {
+			disabled := scorerPluginExplicitlyDisabled(s, name)
+			if builtin && disabled {
+				return fmt.Errorf("scheduler profile %q enables %q but plugin_conf.%s is explicitly disabled (disable=true or weight=0)",
+					s.Profile, name, name)
+			}
+			continue
+		}
+		missing, known := scorerPluginConfMissing(s, name)
+		if !known {
+			// Allowlist / effective-selector validation rejects unknown names
+			// under Profile; leave unknown base names for NewSelector warn/skip.
+			continue
+		}
+		if missing {
+			return fmt.Errorf("scheduler profile %q enables %q but scheduler.score.plugin_conf.%s is missing",
+				s.Profile, name, name)
+		}
+		disabled := scorerPluginExplicitlyDisabled(s, name)
+		// Only built-in presets fail when their required scorer is explicitly
+		// disabled. User Profiles may list a scorer name while keeping
+		// weight:0 / disable:true as an intentional no-op.
+		if builtin && disabled {
+			return fmt.Errorf("scheduler profile %q enables %q but plugin_conf.%s is explicitly disabled (disable=true or weight=0)",
+				s.Profile, name, name)
+		}
+		if disabled {
+			continue
+		}
+		// Factor-based scorers must declare at least one enable_weight_factors
+		// entry with a positive resource_weights value. An omitted / empty
+		// factor list previously fell through as factors==nil and silently
+		// became a runtime no-op; fail closed under a selected Profile.
+		if isFactorBasedSchedulerScore(name) {
+			factors := scorerEnableWeightFactors(s, name)
+			if len(factors) == 0 {
+				return fmt.Errorf("scheduler profile %q enables %q but plugin_conf.%s.enable_weight_factors is empty",
+					s.Profile, name, name)
+			}
+			allowedFactors := allowedWeightFactorsForScorer(name)
+			for _, factor := range factors {
+				if _, ok := allowedFactors[factor]; !ok {
+					return fmt.Errorf("scheduler profile %q enables %q with unsupported weight factor %q for that scorer",
+						s.Profile, name, factor)
+				}
+			}
+			if !hasPositiveResourceWeight(s.Score.ResourceWeights, factors) {
+				return fmt.Errorf("scheduler profile %q enables %q but no positive resource weight is set for its enabled factors",
+					s.Profile, name)
+			}
+		}
+	}
+	if err := validateScorerPolarityMix(s); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateScorerPolarityMix rejects listing occupancy (binpack) and remaining-
+// capacity spread scorers together under a Profile — their scores cancel in
+// runScoreFilter's weighted sum. Empty-profile configs keep pre-upgrade load
+// behavior (docs warn; no Init failure) so this check stays Profile-scoped.
+func validateScorerPolarityMix(s *SchedulerConf) error {
+	if s == nil || s.Score == nil {
+		return nil
+	}
+	hasBinpack := false
+	hasSpread := false
+	for _, name := range s.Score.EnableScorers {
+		switch name {
+		case "binpack_score":
+			hasBinpack = true
+		case "real_time_weighted_average", "multi_factor_weighted_average":
+			hasSpread = true
+		}
+	}
+	if hasBinpack && hasSpread {
+		return fmt.Errorf("scheduler profile %q mixes binpack_score with remaining-capacity scorers (real_time_weighted_average / multi_factor_weighted_average); occupancy polarities cancel in runScoreFilter",
+			s.Profile)
+	}
+	return nil
+}
+
+func allowedWeightFactorsForScorer(name string) map[string]struct{} {
+	switch name {
+	case "image_score":
+		return map[string]struct{}{
+			constants.WeightFactorImageID:    {},
+			constants.WeightFactorTemplateID: {},
+		}
+	case "real_time_weighted_average":
+		// getFactorWeightedAverageScore plus req_cpu/req_mem, which
+		// getRealtimeWeightedAverageScore applies after the shared helper.
+		allowed := factorWeightedAverageFactors()
+		allowed[constants.WeightFactorReqCpu] = struct{}{}
+		allowed[constants.WeightFactorReqMem] = struct{}{}
+		return allowed
+	case "multi_factor_weighted_average":
+		// Only factors implemented by getFactorWeightedAverageScore.
+		return factorWeightedAverageFactors()
+	default:
+		return allowedSchedulerWeightFactorNames
+	}
+}
+
+func factorWeightedAverageFactors() map[string]struct{} {
+	return map[string]struct{}{
+		constants.WeightFactorCreateConcurrentLimit: {},
+		constants.WeightFactorMvmNum:                {},
+		constants.WeightFactorMetricUpdate:          {},
+		constants.WeightFactorLocalMetricUpdate:     {},
+		constants.WeightFactorQuotaCpu:              {},
+		constants.WeightFactorQuotaMem:              {},
+		constants.WeightFactorCpuUtil:               {},
+		constants.WeightFactorMemUsage:              {},
+		constants.WeightFactorCpuLoadUsage:          {},
+		constants.WeightFactorRealTimeCreateNum:     {},
+		constants.WeightFactorLocalCreateNum:        {},
+		constants.WeightFactorDataDiskUsage:         {},
+		constants.WeightFactorStorageDiskUsage:      {},
+		constants.WeightFactorSysDiskUsage:          {},
+	}
+}
+
+func isFactorBasedSchedulerScore(name string) bool {
+	switch name {
+	case "real_time_weighted_average", "multi_factor_weighted_average", "image_score":
+		return true
+	default:
+		return false
+	}
+}
+
+// scorerPluginConfMissing reports whether plugin_conf.<name> is absent and
+// whether name is a known scorer handled by the validation switches.
+// known=false means the name falls through default: and receives no
+// plugin_conf check — TestScorerPluginValidationCoversAllowlist fails if an
+// allowlisted scorer is unknown here.
+func scorerPluginConfMissing(s *SchedulerConf, name string) (missing bool, known bool) {
+	if s == nil || s.Score == nil {
+		return true, false
+	}
+	switch name {
+	case "real_time_weighted_average":
+		return s.Score.ScorePluginConf.RealTimeWeightedAverage == nil, true
+	case "multi_factor_weighted_average":
+		return s.Score.ScorePluginConf.MultiFactorWeightedAverage == nil, true
+	case "affinity_score":
+		return s.Score.ScorePluginConf.AffinityScore == nil, true
+	case "image_score":
+		return s.Score.ScorePluginConf.ImageScore == nil, true
+	case "binpack_score":
+		return s.Score.ScorePluginConf.BinpackScore == nil, true
+	case "external_http_score":
+		return s.Score.ScorePluginConf.ExternalHTTPScore == nil, true
+	default:
+		return false, false
+	}
+}
+
+// ScorerNamesWithPluginConfMissingCheck returns allowlisted score names that
+// scorerPluginConfMissing recognizes. Compared to the live registry via
+// pkg/scheduler.TestSelectorAllowlistsMatchRegistries after
+// TestScorerPluginValidationCoversAllowlist asserts coverage of the allowlist.
+func ScorerNamesWithPluginConfMissingCheck() map[string]struct{} {
+	probe := &SchedulerConf{Score: &SchedulerScoreConf{}}
+	out := make(map[string]struct{})
+	for name := range allowedSchedulerScoreNames {
+		if _, known := scorerPluginConfMissing(probe, name); known {
+			out[name] = struct{}{}
+		}
+	}
+	return out
+}
+
+func scorerPluginExplicitlyDisabled(s *SchedulerConf, name string) bool {
+	if s == nil || s.Score == nil {
+		return false
+	}
+	switch name {
+	case "real_time_weighted_average":
+		c := s.Score.ScorePluginConf.RealTimeWeightedAverage
+		return c != nil && (c.Disable || c.Weight == 0)
+	case "multi_factor_weighted_average":
+		c := s.Score.ScorePluginConf.MultiFactorWeightedAverage
+		return c != nil && (c.Disable || c.Weight == 0)
+	case "affinity_score":
+		c := s.Score.ScorePluginConf.AffinityScore
+		return c != nil && (c.Disable || c.Weight == 0)
+	case "image_score":
+		c := s.Score.ScorePluginConf.ImageScore
+		return c != nil && (c.Disable || c.Weight == 0)
+	case "binpack_score":
+		c := s.Score.ScorePluginConf.BinpackScore
+		if c == nil {
+			return false
+		}
+		if c.Disable {
+			return true
+		}
+		_, disabled := BinpackPluginWeight(c)
+		return disabled
+	case "external_http_score":
+		c := s.Score.ScorePluginConf.ExternalHTTPScore
+		if c == nil {
+			return false
+		}
+		if c.Disable {
+			return true
+		}
+		return c.Weight != nil && *c.Weight == 0
+	default:
+		return false
+	}
+}
+
+// scorerEnableWeightFactors returns the enabled factor list for factor-based
+// scorers. A nil return means the scorer is not factor-gated.
+func scorerEnableWeightFactors(s *SchedulerConf, name string) []string {
+	if s == nil || s.Score == nil {
+		return nil
+	}
+	switch name {
+	case "real_time_weighted_average":
+		if c := s.Score.ScorePluginConf.RealTimeWeightedAverage; c != nil {
+			return c.EnableWeightFactors
+		}
+	case "multi_factor_weighted_average":
+		if c := s.Score.ScorePluginConf.MultiFactorWeightedAverage; c != nil {
+			return c.EnableWeightFactors
+		}
+	case "image_score":
+		if c := s.Score.ScorePluginConf.ImageScore; c != nil {
+			return c.EnableWeightFactors
+		}
+	}
+	return nil
+}
+
+func hasPositiveResourceWeight(weights map[string]float64, factors []string) bool {
+	if len(weights) == 0 || len(factors) == 0 {
+		return false
+	}
+	for _, factor := range factors {
+		if weights[factor] > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func filterNamesOnlyIn(previous, current []string) []string {
+	keep := make(map[string]struct{}, len(current))
+	for _, name := range current {
+		keep[name] = struct{}{}
+	}
+	var dropped []string
+	for _, name := range previous {
+		if _, ok := keep[name]; !ok {
+			dropped = append(dropped, name)
+		}
+	}
+	return dropped
+}
+
+func resolveSchedulerProfile(s *SchedulerConf) (SchedulerProfileConf, bool, error) {
+	if s.Profiles != nil {
+		if profile, ok := s.Profiles[s.Profile]; ok {
+			// No filter/score sections means the entry does not contribute an
+			// overlay. Fall back to a same-name built-in when present so that
+			// profiles.<builtin>: {} or allow_dropped_*-only cannot
+			// silently shadow the preset.
+			if profile.Filter == nil && profile.Score == nil {
+				if builtin, ok := builtinSchedulerProfiles()[s.Profile]; ok {
+					if profile.AllowDroppedFilters {
+						builtin.AllowDroppedFilters = true
+					}
+					if profile.AllowDroppedScorers {
+						builtin.AllowDroppedScorers = true
+					}
+					if profile.AllowDroppedFilters || profile.AllowDroppedScorers {
+						CubeLog.Warnf("scheduler profiles[%q] has no filter/score overlay; applying built-in with allow_dropped_filters=%v allow_dropped_scorers=%v",
+							s.Profile, builtin.AllowDroppedFilters, builtin.AllowDroppedScorers)
+					} else {
+						CubeLog.Warnf("scheduler profiles[%q] is empty; falling back to built-in preset", s.Profile)
+					}
+					return builtin, true, nil
+				}
+				CubeLog.Warnf("scheduler profiles[%q] has no filter/score overlay; profile applies no selector changes", s.Profile)
+			} else if _, isBuiltin := builtinSchedulerProfiles()[s.Profile]; isBuiltin {
+				// Same-name user key with only filter *or* only score replaces the
+				// built-in entirely for apply purposes (builtin==false): unset
+				// sections are NOT inherited from the preset.
+				if profile.Filter == nil || profile.Score == nil {
+					CubeLog.Warnf("scheduler profiles[%q] partially overrides built-in preset; unset filter/score sections are NOT inherited from the built-in", s.Profile)
+				}
+			}
+			return profile, false, nil
+		}
+	}
+	if profile, ok := builtinSchedulerProfiles()[s.Profile]; ok {
+		return profile, true, nil
+	}
+	if s.Profiles == nil {
+		return SchedulerProfileConf{}, false, fmt.Errorf("scheduler profile %q not found: profiles map is empty", s.Profile)
+	}
+	return SchedulerProfileConf{}, false, fmt.Errorf("scheduler profile %q not found", s.Profile)
+}
+
+func builtinSchedulerProfiles() map[string]SchedulerProfileConf {
+	// Built-ins are opinionated scene presets with short filter lists.
+	// AllowDroppedFilters stays false: selecting a built-in by name on a longer
+	// base list (stock cpu/mem/template_locality/realtime_create_num, or
+	// admission filters such as disk/thirtparty) fails config load unless the
+	// operator opts in via profiles.<builtin>.allow_dropped_filters: true or
+	// keeps the dropped names in the effective filter list.
+	return map[string]SchedulerProfileConf{
+		RuntimeProfileBalancedSpread: {
+			Filter: &SchedulerFilterConf{
+				EnableFilters: []string{"cpu", "mem", "realtime_create_num"},
+			},
+			Score: &SchedulerProfileScoreConf{
+				EnableScorers: []string{"real_time_weighted_average"},
+				ResourceWeights: map[string]float64{
+					"realtime_create_num": 2,
+					"mvm_num":             2,
+					"cpu_util":            1,
+					"quota_cpu_usage":     1,
+					"quota_mem_usage":     1,
+				},
+			},
+		},
+		RuntimeProfileTemplateLocalityFirst: {
+			Filter: &SchedulerFilterConf{
+				EnableFilters: []string{"cpu", "mem", "template_locality"},
+			},
+			Score: &SchedulerProfileScoreConf{
+				EnableScorers: []string{"image_score"},
+				ResourceWeights: map[string]float64{
+					"image_id":    1,
+					"template_id": 2,
+				},
+			},
+		},
+		RuntimeProfileBinpackUtilization: {
+			Filter: &SchedulerFilterConf{
+				EnableFilters: []string{"cpu", "mem"},
+			},
+			Score: &SchedulerProfileScoreConf{
+				EnableScorers: []string{"binpack_score"},
+			},
+		},
+	}
+}
+
+func validateSchedulerProfileSelectors(name string, profile *SchedulerProfileConf) error {
+	if profile == nil {
+		return nil
+	}
+	if profile.Filter != nil {
+		for _, filterName := range profile.Filter.EnableFilters {
+			if _, ok := allowedSchedulerFilterNames[filterName]; !ok {
+				return fmt.Errorf("scheduler profile %q: unknown filter %q", name, filterName)
+			}
+		}
+	}
+	if profile.Score != nil {
+		for _, scoreName := range profile.Score.EnableScorers {
+			if _, ok := allowedSchedulerScoreNames[scoreName]; !ok {
+				return fmt.Errorf("scheduler profile %q: unknown score %q", name, scoreName)
+			}
+		}
+	}
+	return nil
+}
+
 func preHandSchedulerScore(config *Config) {
 	if config.Scheduler.Score != nil {
 		if asynccfg := config.Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage; asynccfg != nil {
@@ -1116,6 +2082,8 @@ func preHandSchedulerScore(config *Config) {
 				asynccfg.ScoreInterval = config.Common.SyncMetricDataInterval
 			}
 		}
+		ApplyExternalHTTPScoreDefaults(config.Scheduler.Score.ScorePluginConf.ExternalHTTPScore)
+		warnLegacyZeroPluginWeights(&config.Scheduler.SchedulerConf)
 	}
 
 	if config.Scheduler.PostScore != nil {
@@ -1131,6 +2099,81 @@ func preHandSchedulerScore(config *Config) {
 			config.Scheduler.PostScore.NegativeWhiteListMap[v] = true
 		}
 	}
+}
+
+// warnLegacyZeroPluginWeights surfaces omitted/zero float64 plugin weights for
+// scorers that are actually listed in enable_scorers. Those fields YAML-decode
+// omitted keys to 0, which Disable() treats as off — a placement change vs
+// master (where weight 0 still ran Select). Explicit disable: true is silent;
+// weight 0 / omit without disable logs once per load for enabled scorers only.
+func warnLegacyZeroPluginWeights(s *SchedulerConf) {
+	if s == nil || s.Score == nil {
+		return
+	}
+	enabled := make(map[string]struct{}, len(s.Score.EnableScorers))
+	for _, name := range s.Score.EnableScorers {
+		enabled[name] = struct{}{}
+	}
+	type named struct {
+		name    string
+		disable bool
+		weight  float64
+		present bool
+	}
+	pc := s.Score.ScorePluginConf
+	checks := []named{
+		{name: "real_time_weighted_average", present: pc.RealTimeWeightedAverage != nil},
+		{name: "multi_factor_weighted_average", present: pc.MultiFactorWeightedAverage != nil},
+		{name: "affinity_score", present: pc.AffinityScore != nil},
+		{name: "image_score", present: pc.ImageScore != nil},
+	}
+	if pc.RealTimeWeightedAverage != nil {
+		checks[0].disable = pc.RealTimeWeightedAverage.Disable
+		checks[0].weight = pc.RealTimeWeightedAverage.Weight
+	}
+	if pc.MultiFactorWeightedAverage != nil {
+		checks[1].disable = pc.MultiFactorWeightedAverage.Disable
+		checks[1].weight = pc.MultiFactorWeightedAverage.Weight
+	}
+	if pc.AffinityScore != nil {
+		checks[2].disable = pc.AffinityScore.Disable
+		checks[2].weight = pc.AffinityScore.Weight
+	}
+	if pc.ImageScore != nil {
+		checks[3].disable = pc.ImageScore.Disable
+		checks[3].weight = pc.ImageScore.Weight
+	}
+	for _, c := range checks {
+		if !c.present || c.disable || c.weight != 0 {
+			continue
+		}
+		if _, ok := enabled[c.name]; !ok {
+			continue
+		}
+		CubeLog.Warnf("scheduler.score.plugin_conf.%s.weight is 0 (or omitted): scorer is Disable()-skipped; set an explicit positive weight to keep it active after upgrade (master still ran Select at weight 0)", c.name)
+	}
+}
+
+// warnProfileScoreRankingIneffective fires when a Profile enables scorers but
+// stock final-selection defaults discard ranking: priority_select_num < 0
+// (unlimited) plus least_select_name=random picks uniformly over the scored
+// set, so score order does not steer placement (set membership still can).
+func warnProfileScoreRankingIneffective(s *SchedulerConf) {
+	if s == nil || s.Profile == "" || s.Score == nil || len(s.Score.EnableScorers) == 0 {
+		return
+	}
+	if s.PrioritySelectNum >= 1 {
+		return
+	}
+	least := s.LeastSelectName
+	if least == "" {
+		least = "random"
+	}
+	if least != "random" {
+		return
+	}
+	CubeLog.Warnf("scheduler.profile %q enables scorers but priority_select_num=%d and least_select_name=%q: score ranking does not steer placement (uniform random over post-filter candidates). Set priority_select_num >= 1 and/or a weight-aware least_select_name (sw/rw/rrw) for score order to affect placement",
+		s.Profile, s.PrioritySelectNum, least)
 }
 
 func validate(cfg *Config) error {

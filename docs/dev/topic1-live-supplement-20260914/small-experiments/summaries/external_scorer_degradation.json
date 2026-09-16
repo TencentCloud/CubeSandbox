@@ -1,0 +1,68 @@
+{
+  "experiment": "external_scorer_degradation",
+  "status": "PASS",
+  "modes": [
+    {
+      "mode": "ok",
+      "n": 3,
+      "success": 3,
+      "fail_open_observed": false,
+      "fail_closed_observed": false,
+      "any_resurrected_filtered": false,
+      "node_distribution": {
+        "node-a": 3
+      },
+      "usable_latencies_ms": [
+        863,
+        869,
+        823
+      ]
+    },
+    {
+      "mode": "timeout",
+      "n": 3,
+      "success": 0,
+      "fail_open_observed": false,
+      "fail_closed_observed": true,
+      "any_resurrected_filtered": false,
+      "node_distribution": {},
+      "usable_latencies_ms": [
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "mode": "non2xx",
+      "n": 3,
+      "success": 0,
+      "fail_open_observed": false,
+      "fail_closed_observed": true,
+      "any_resurrected_filtered": false,
+      "node_distribution": {},
+      "usable_latencies_ms": [
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "mode": "bad_score",
+      "n": 3,
+      "success": 0,
+      "fail_open_observed": false,
+      "fail_closed_observed": true,
+      "any_resurrected_filtered": false,
+      "node_distribution": {},
+      "usable_latencies_ms": [
+        null,
+        null,
+        null
+      ]
+    }
+  ],
+  "note": "Behavioral evidence only: ok succeeds; timeout/non2xx/bad_score were fail-closed on lab binary edf40cb9… (in-tree path is fail-open on scorer errors). Not re-run against this PR head. Per-mode Prometheus outcome_delta tables were removed — they used lab-binary names (cubemaster_scheduler_external_http_score_*) that do not match in-tree cube_scheduler_external_http_score_outcomes_total / request_duration_seconds. Do not treat those legacy counters as describing this PR's implementation.",
+  "evidence_binary_sha": "edf40cb9cbbbd1b32b029dcf599057803c58a41b91ae28d6074e0751a8e42fc9",
+  "arms_not_rerun_on_pr_head": true,
+  "title": "外部HTTP scorer：正常/超时/非2xx/非法分退化"
+}
