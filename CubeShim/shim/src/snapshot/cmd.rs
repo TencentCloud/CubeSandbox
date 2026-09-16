@@ -69,9 +69,26 @@ pub struct SnapshotArgs {
     #[arg(long = "force", help = "force", action = ArgAction::SetTrue, required = false)]
     pub force: bool,
 
-    /// App snapshot
-    #[arg(long = "app-snapshot", help = "app-snapshot", action = ArgAction::SetTrue, required = false)]
+    /// Snapshot an existing VM's memory and metadata, then resume it unless
+    /// --keep-paused is specified. Rootfs snapshotting is handled by the caller.
+    #[arg(
+        long = "app-snapshot",
+        help = "pause an existing VM, snapshot its memory and metadata, then resume unless --keep-paused is set",
+        action = ArgAction::SetTrue,
+        required = false
+    )]
     pub app_snapshot: bool,
+
+    /// Leave resume to the caller after an app snapshot, including failures.
+    /// The caller must explicitly resume it with `snapshot-resume`.
+    #[arg(
+        long = "keep-paused",
+        help = "keep the VM paused after app snapshot",
+        action = ArgAction::SetTrue,
+        requires = "app_snapshot",
+        required = false
+    )]
+    pub keep_paused: bool,
 
     /// Vm id
     #[arg(
@@ -142,6 +159,7 @@ impl TryFrom<SnapshotArgs> for Snapshot {
         snapshot.tap = !args.notap;
         snapshot.force = args.force;
         snapshot.app_snapshot = args.app_snapshot;
+        snapshot.keep_paused = args.keep_paused;
         snapshot.snapshot_type = args
             .snapshot_type
             .parse::<SnapshotType>()

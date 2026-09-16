@@ -206,7 +206,7 @@ func stampLaunchMemoryAncestorOnce(cb *cubeboxstore.CubeBox, id string) {
 }
 
 func resolveMemoryObjectFromSnapshotID(ctx context.Context, backend, snapshotID string) (*storage.CowSnapshotObject, error) {
-	if snapshotID == "" {
+	if snapshotID == "" || snapshotID == runtimeSnapshotBindingInvalidID {
 		return nil, fmt.Errorf("%w: sandbox is not bound to any snapshot or template", ErrNoBaseMemoryForIncremental)
 	}
 	entry, err := storage.GetLocalSnapshotFor(ctx, backend, snapshotID)
