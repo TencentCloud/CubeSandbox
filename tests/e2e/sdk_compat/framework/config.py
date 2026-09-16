@@ -40,7 +40,6 @@ class SdkE2EConfig:
     e2b_validate_api_key: bool
     keep_sandbox_on_failure: bool
     report_dir: Path
-    cube_python_sdk_path: str | None
     platform_lifecycle_enabled: bool
     platform_lifecycle_idle_timeout: int
     platform_lifecycle_wait_margin: int
@@ -84,7 +83,6 @@ class SdkE2EConfig:
             e2b_validate_api_key=_bool_env("SDK_E2E_E2B_VALIDATE_API_KEY"),
             keep_sandbox_on_failure=_bool_env("SDK_E2E_KEEP_SANDBOX_ON_FAILURE"),
             report_dir=Path(os.environ.get("SDK_E2E_REPORT_DIR", "reports/sdk-dual")),
-            cube_python_sdk_path=os.environ.get("CUBE_PYTHON_SDK_PATH") or None,
             platform_lifecycle_enabled=_bool_env("SDK_E2E_PLATFORM_LIFECYCLE"),
             platform_lifecycle_idle_timeout=int(
                 os.environ.get("SDK_E2E_PLATFORM_LIFECYCLE_IDLE_TIMEOUT", "30")

@@ -369,7 +369,9 @@ Optional:
   a build slot before a worker gives up and builds unthrottled, so one wedged
   peer cannot stall the whole suite. The effective wait scales by the worker
   count. Defaults to `1800`; `<= 0` waits forever.
-- `CUBE_PYTHON_SDK_PATH`: override local CubeSandbox Python SDK path.
+- `CUBE_PYTHON_SDK_PATH`: override the local CubeSandbox Python SDK path. The
+  directory must directly contain `cubesandbox/__init__.py` and is validated at
+  collection time; unset uses the repository's `sdk/python` directory.
 - `SDK_E2E_PLATFORM_LIFECYCLE`: enable platform-managed lifecycle cases
   (`auto-pause`, `auto-resume`, `auto-kill`). Defaults to `false`.
 - `SDK_E2E_PLATFORM_LIFECYCLE_IDLE_TIMEOUT`: idle timeout in seconds for

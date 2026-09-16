@@ -1,0 +1,52 @@
+name: SDK Compatibility Test Check
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'sdk/python/**'
+      - 'tests/e2e/sdk_compat/**'
+      - '.github/workflows/sdk-compat-test-check.yml'
+  pull_request:
+    paths:
+      - 'sdk/python/**'
+      - 'tests/e2e/sdk_compat/**'
+      - '.github/workflows/sdk-compat-test-check.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: sdk-compat-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Check SDK compatibility tests (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: tests/e2e/sdk_compat/requirements.txt
+
+      - name: Install SDK compatibility test dependencies
+        run: python -m pip install -r tests/e2e/sdk_compat/requirements.txt
+
+      - name: Run SDK compatibility test suite
+        working-directory: tests/e2e/sdk_compat
+        run: python -m pytest cases -q
