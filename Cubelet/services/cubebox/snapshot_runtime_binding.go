@@ -5,13 +5,20 @@
 package cubebox
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 )
 
 const runtimeSnapshotBindingInvalidID = "invalid-runtime-restore-base"
+
+type runtimeSnapshotBindingSyncer interface {
+	SyncByID(context.Context, string, ...cubes.UpdateCubeboxOpt) error
+}
 
 // runtimeSnapshotBindingLabels returns the labels that bind a sandbox to a
 // snapshot. v4: only the logical snapshot id (and attach timestamp) are
@@ -40,6 +47,32 @@ func setRuntimeSnapshotBindingLabels(cb *cubeboxstore.CubeBox, snapshotID string
 		return
 	}
 	cb.Metadata.AddLabels(labels)
+}
+
+// persistRuntimeSnapshotBinding advances the durable baseline before a memory
+// snapshot can clear the hypervisor's soft-dirty bitmap. If persistence fails,
+// the in-memory labels are restored so both views keep referencing the same
+// previous baseline.
+func persistRuntimeSnapshotBinding(
+	ctx context.Context,
+	syncer runtimeSnapshotBindingSyncer,
+	cb *cubeboxstore.CubeBox,
+	snapshotID string,
+	attachedAt time.Time,
+) error {
+	if syncer == nil {
+		return fmt.Errorf("runtime snapshot binding syncer is required")
+	}
+	if cb == nil {
+		return fmt.Errorf("cubebox is required")
+	}
+	previousLabels := copyCubeBoxLabels(cb)
+	setRuntimeSnapshotBindingLabels(cb, snapshotID, attachedAt)
+	if err := syncer.SyncByID(ctx, cb.ID); err != nil {
+		restoreCubeBoxLabels(cb, previousLabels)
+		return fmt.Errorf("persist runtime snapshot binding for %s: %w", cb.ID, err)
+	}
+	return nil
 }
 
 // runtimeRestoreBaseLabels records which snapshot's memory image the VM was

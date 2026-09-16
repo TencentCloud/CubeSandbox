@@ -137,17 +137,16 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve sandbox rootfs: %v", err)
 		return rsp, nil
 	}
-	rootfsObject, err := storage.CommitRootfsFor(ctx, backend, sourceRootfs, rsp.TemplateID)
-	if err != nil {
+	// Reject existing packages before preparing writable memory or metadata.
+	if err := checkCommitSnapshotDestination(ctx, backend, rsp.TemplateID, storage.InspectObjectsFor); err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
-			rsp.Ret.RetMsg = fmt.Sprintf("template rootfs already exists: %v", err)
-			return rsp, nil
 		}
-		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to create rootfs snapshot: %v", err)
+		rsp.Ret.RetMsg = fmt.Sprintf("snapshot destination unavailable: %v", err)
 		return rsp, nil
 	}
+	var rootfsObject *storage.CowSnapshotObject
 	// Resolve / build the memory artifact:
 	//   - if the sandbox is bound to a previous snapshot whose memory blob
 	//     can be resolved, reflink-clone that blob and ask cube-runtime for
@@ -157,9 +156,6 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	//     snapshot.
 	memoryObject, snapshotTypeForCmd, err := prepareCommitMemoryArtifact(ctx, stepLog, cb, rsp.TemplateID, memorySizeBytes, backend)
 	if err != nil {
-		if cleanupErr := storage.DeleteObjectFor(ctx, backend, rootfsObject.Name, rootfsObject.Kind); cleanupErr != nil {
-			stepLog.Warnf("failed to cleanup rootfs snapshot after memory artifact failure: %v", cleanupErr)
-		}
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 			rsp.Ret.RetMsg = fmt.Sprintf("template memory object already exists: %v", err)
@@ -198,24 +194,70 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	// when degrading because no base could be resolved. AppSnapshot keeps
 	// using the default full type via its own call site.
 	stepLog = stepLog.WithFields(CubeLog.Fields{"snapshotType": snapshotTypeForCmd})
-	if err := s.executeCubeRuntimeSnapshot(ctx, rsp.SandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeForCmd); err != nil {
+	frozenCtx, frozenCancel := detachedSnapshotWorkContext(ctx)
+	defer frozenCancel()
+	keepPaused, err := s.runtimeSnapshotSupportsKeepPaused(frozenCtx, rsp.SandboxID)
+	if err != nil {
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to execute cube-runtime snapshot: %v", err)
+		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
-	// cube-runtime returned success, which means the hypervisor has
-	// committed the delta to the memory file *and*, on the soft-dirty path,
-	// already issued clear_soft_dirty() to start the next tracking window.
-	// From this point on, the next CommitSandbox on the same VM must use
-	// rsp.TemplateID as its base (anything older would lose the bytes the
-	// guest just wrote into this snapshot). We stamp the in-memory binding
-	// immediately so a follow-up commit picks it up; SyncByID at the end of
-	// the success path persists it (mirroring the rollback flow). If a
-	// later step fails and cleanupArtifacts deletes memoryObject, the stale
-	// binding routes the next commit through the fallback-to-full branch
-	// in prepareCommitMemoryArtifact, which is self-contained and safe.
-	setRuntimeSnapshotBindingLabels(cb, rsp.TemplateID, time.Now().UTC())
+	var bindingErr error
+	captureStarted := false
+	snapshotErr, rootfsErr, resumeErr := runSnapshotWithRootfs(keepPaused, func() error {
+		// Invalidate only once memory capture is about to start. Legacy rootfs
+		// failures leave both the old baseline and dirty bitmap untouched.
+		bindingErr = persistRuntimeSnapshotBinding(
+			frozenCtx, s.cubeboxMgr.cubeboxManger, cb, runtimeSnapshotBindingInvalidID, time.Now().UTC(),
+		)
+		if bindingErr != nil {
+			return bindingErr
+		}
+		captureStarted = true
+		return s.executeCubeRuntimeSnapshotWithPause(frozenCtx, rsp.SandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeForCmd, keepPaused)
+	}, func() error {
+		rootfsObject, err = storage.CommitRootfsFor(frozenCtx, backend, sourceRootfs, rsp.TemplateID)
+		return err
+	}, func() error {
+		if !captureStarted {
+			return nil
+		}
+		return s.resumeCubeRuntimeSnapshot(ctx, rsp.SandboxID)
+	})
+	if snapshotErr != nil {
+		if resumeErr != nil {
+			stepLog.Warnf("best-effort resume after snapshot failure failed: %v", resumeErr)
+		}
+		cleanupArtifacts()
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		if bindingErr != nil {
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to persist runtime snapshot binding: %v", bindingErr)
+		} else {
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to execute cube-runtime snapshot: %v", snapshotErr)
+		}
+		return rsp, nil
+	}
+
+	if rootfsErr != nil {
+		cleanupArtifacts()
+		if errors.Is(rootfsErr, storage.ErrCowObjectAlreadyExists) {
+			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		} else {
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		}
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to create rootfs snapshot: %v", rootfsErr)
+		if resumeErr != nil {
+			rsp.Ret.RetMsg += fmt.Sprintf("; additionally failed to resume sandbox: %v", resumeErr)
+		}
+		return rsp, nil
+	}
+	if resumeErr != nil {
+		cleanupArtifacts()
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to resume sandbox after snapshot: %v", resumeErr)
+		return rsp, nil
+	}
 	// Do not write memory.dev — restore uses catalog vol name + ResolveDevPath.
 	if err := deactivateCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject); err != nil {
 		cleanupArtifacts()
@@ -295,13 +337,19 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	if raw := uploadRemoteUUIDsIfS3(ctx, backend, rsp.TemplateID); raw != "" {
 		rsp.RemoteUuids = raw
 	}
-	// Persist the runtime-snapshot binding update we did in-memory after
-	// cube-runtime returned. Mirrors the rollback flow's SyncByID call so
-	// that a process restart recovers the new commit lineage and so any
-	// downstream component reading the cubebox metadata sees the same
-	// ancestor as resolveBaseSnapshotID will return on the next commit.
-	s.cubeboxMgr.cubeboxManger.SyncByID(ctx, cb.ID)
+	// Publish the completed package and component versions together. On a
+	// sync failure the baseline remains invalid, so future commits degrade
+	// safely. The completed snapshot still succeeds and remains managed by
+	// Master; publishing the incremental baseline is only an optimization.
+	publishCtx, publishCancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotResumeTimeout)
+	defer publishCancel()
+	if err := persistRuntimeSnapshotBinding(publishCtx, s.cubeboxMgr.cubeboxManger, cb, rsp.TemplateID, time.Now().UTC()); err != nil {
+		stepLog.Warnf("snapshot %s completed but baseline/component version sync failed; future commits will use a safe fallback: %v", rsp.TemplateID, err)
+	}
 	stepLog.Infof("CommitSandbox completed successfully: snapshotPath=%s", snapshotPath)
+	if !keepPaused {
+		stepLog.Warn(legacyRuntimeSnapshotWarning)
+	}
 	return rsp, nil
 }
 
