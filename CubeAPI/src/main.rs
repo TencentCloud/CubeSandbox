@@ -98,7 +98,7 @@ struct Cli {
     #[arg(long, value_name = "PREFIX")]
     log_prefix: Option<String>,
 
-    /// Rate limit: max requests per second per API key (default: 100).
+    /// Rate limit: max requests per second per validated identity (default: 100).
     ///
     /// Overrides the RATE_LIMIT_PER_SEC environment variable.
     #[arg(long, value_name = "N")]
