@@ -37,10 +37,14 @@ var (
 		Name: "cube_scheduler_score_non_finite_weight_total",
 		Help: "Times runScoreFilter skipped blending a scorer because Weight() was NaN or Inf.",
 	}, []string{"scorer"})
+	scoreNonFiniteNodeScoreTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "cube_scheduler_score_non_finite_score_total",
+		Help: "Times runScoreFilter skipped blending a scorer because a returned per-node score was NaN or Inf.",
+	}, []string{"scorer"})
 
 	scoreNonFiniteWeightWarnMu   sync.Mutex
 	scoreNonFiniteWeightLastWarn = map[string]time.Time{}
-	// Test seam: counts Warn emissions after rate limiting.
+	// Test seam: counts Warn emissions after rate limiting (weight + node_score).
 	scoreNonFiniteWeightWarnCount atomic.Uint64
 )
 
@@ -219,6 +223,9 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 		// every registered scorer; this path still guards NaN/Inf so they cannot
 		// poison totalPluginWeight or node scores, while letting live-config
 		// scorers emit their own invalid_weight observability via Select.
+		// Per-node scores are checked the same way before fold — a single
+		// NaN/Inf score would otherwise poison every node's final value via
+		// the weighted average and make AllSortByScore order unspecified.
 		// FailClosedError is type-based and scheduler-wide: any scorer that
 		// returns it aborts the rest of Score (and create) immediately,
 		// discarding already-blended contributions from earlier scorers.
@@ -235,6 +242,17 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 		}
 		if math.IsNaN(w) || math.IsInf(w, 0) {
 			observeNonFiniteScoreWeight(selCtx, f.ID())
+			continue
+		}
+		nonFiniteScore := false
+		for _, n := range tmpResult {
+			if math.IsNaN(n.Score) || math.IsInf(n.Score, 0) {
+				nonFiniteScore = true
+				break
+			}
+		}
+		if nonFiniteScore {
+			observeNonFiniteNodeScore(selCtx, f.ID(), w)
 			continue
 		}
 		totalPluginWeight += w
@@ -288,21 +306,37 @@ func observeNonFiniteScoreWeight(selCtx *selctx.SelectorCtx, scorerID string) {
 		scorerID = "unknown"
 	}
 	scoreNonFiniteWeightTotal.WithLabelValues(scorerID).Inc()
+	observeNonFiniteBlendWarn(selCtx, scorerID, "weight",
+		"runScoreFilter: skipping scorer %s with non-finite weight", scorerID)
+}
+
+func observeNonFiniteNodeScore(selCtx *selctx.SelectorCtx, scorerID string, weight float64) {
+	if scorerID == "" {
+		scorerID = "unknown"
+	}
+	scoreNonFiniteNodeScoreTotal.WithLabelValues(scorerID).Inc()
+	// weight is known-finite here; include it so operators do not chase weight: config.
+	observeNonFiniteBlendWarn(selCtx, scorerID, "node_score",
+		"runScoreFilter: skipping scorer %s with non-finite node score (weight=%g)", scorerID, weight)
+}
+
+func observeNonFiniteBlendWarn(selCtx *selctx.SelectorCtx, scorerID, reason, format string, args ...any) {
+	warnKey := scorerID + ":" + reason
 	now := time.Now()
 	scoreNonFiniteWeightWarnMu.Lock()
-	last, ok := scoreNonFiniteWeightLastWarn[scorerID]
+	last, ok := scoreNonFiniteWeightLastWarn[warnKey]
 	if ok && now.Sub(last) < scoreNonFiniteWeightWarnInterval {
 		scoreNonFiniteWeightWarnMu.Unlock()
 		if selCtx != nil {
-			log.G(selCtx.Ctx).Debugf("runScoreFilter: skipping scorer %s with non-finite weight", scorerID)
+			log.G(selCtx.Ctx).Debugf(format, args...)
 		}
 		return
 	}
-	scoreNonFiniteWeightLastWarn[scorerID] = now
+	scoreNonFiniteWeightLastWarn[warnKey] = now
 	scoreNonFiniteWeightWarnMu.Unlock()
 	scoreNonFiniteWeightWarnCount.Add(1)
 	if selCtx != nil {
-		log.G(selCtx.Ctx).Warnf("runScoreFilter: skipping scorer %s with non-finite weight", scorerID)
+		log.G(selCtx.Ctx).Warnf(format, args...)
 	}
 }
 
