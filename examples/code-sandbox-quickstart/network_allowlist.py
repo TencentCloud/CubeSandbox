@@ -17,9 +17,10 @@ How it works:
 
 import os
 from e2b_code_interpreter import Sandbox
-from env_utils import load_local_dotenv
+from env_utils import ensure_dev_sidecar, load_local_dotenv
 
 load_local_dotenv()
+ensure_dev_sidecar()
 
 template_id = os.environ["CUBE_TEMPLATE_ID"]
 
