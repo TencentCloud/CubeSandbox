@@ -34,6 +34,9 @@
 #                               guaranteed to leave the namespace in place and
 #                               drive the host into error recovery
 #    8. clear four leftovers    pidfile, RPC socket, its .lock, cpu locks
+#    9. drop the marker         the intent is spent once the target it names is
+#                               gone; until then it stays, so a refused attempt
+#                               still reads as a hot one to the next stop
 #
 #  === What this must never do ===
 #
@@ -48,7 +51,9 @@
 #      in S3.
 #    - write the hot-restart marker: the orchestrator writes it and the stop
 #      script consumes it. Writing it here would make an unasked-for stop look
-#      like an upgrade's.
+#      like an upgrade's. Removing it, once the target it names is gone, is the
+#      other half of that rule: it is the upgrade's own record of intent, and
+#      this is the script that carries that intent out.
 #
 #  Usage: rcow_upgrade.sh --candidate <binary> [--dry-run]
 #
@@ -172,6 +177,8 @@ if [ -z "${INSTANCES}" ]; then
 	rcow_log "no target is running; clearing its residue. The initiator and the \
 lvstore are left as they are"
 	hot_clear_residue
+	# The intent is spent: the target it names is not there to be restarted.
+	rm -f "${RCOW_HOT_MARKER}"
 	exit 0
 fi
 
@@ -350,6 +357,11 @@ if [ "${GONE}" -ne 1 ]; then
 something outside this script is holding it, and the target is still alive"
 fi
 rcow_log "target pid ${TGT_PID} is gone"
+
+# The intent is spent: this is the moment it was recorded for. Clearing it here
+# rather than where the stop script read it is what leaves a refused attempt
+# looking like a hot one to the next stop, instead of a planned teardown.
+rm -f "${RCOW_HOT_MARKER}"
 
 # ==========================================================================
 rcow_step "cleaning up"

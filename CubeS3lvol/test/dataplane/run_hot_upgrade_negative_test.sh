@@ -623,7 +623,8 @@ if rcow_hot_marker_write; then
 fi
 
 # Fake a boot_id change: the pid is still the live target, only the boot differs.
-# Consume removes the file first, so each case writes a fresh one.
+# Nothing in the block above removed the marker any more, so each case writes a
+# fresh one.
 if rcow_hot_marker_write; then
 	real_pid="$(rcow_target_pid)"
 	printf '00000000-0000-0000-0000-000000000000 %s\n' "${real_pid}" >"${RCOW_HOT_MARKER}"
@@ -655,12 +656,16 @@ if rcow_hot_marker_write; then
 		fail "the refusal killed the target"
 fi
 
-# Consume is one-shot: the file must be gone after it runs.
+# Reading the marker is not spending it. The stop that gets a 0 still has to
+# carry the upgrade out, and that can refuse and leave the target running -- so
+# the marker has to survive for the retry, or the retry becomes the planned
+# teardown this whole path exists to avoid. rcow_upgrade.sh spends it once the
+# target it names is gone.
 rcow_hot_marker_write >/dev/null 2>&1
 rcow_hot_marker_consume >/dev/null 2>&1
-[ ! -e "${RCOW_HOT_MARKER}" ] &&
-	pass "consume removed the marker it answered" ||
-	fail "the marker survived consume"
+[ -e "${RCOW_HOT_MARKER}" ] &&
+	pass "consume leaves the marker for the upgrade to spend" ||
+	fail "consume discarded an intent the upgrade has not carried out"
 
 # The startup path removes it unconditionally, so a process that never intended
 # a hot restart does not inherit one. Prove it by writing a marker and starting.
@@ -991,7 +996,6 @@ FORBIDDEN = {
     "RCOW_ACTIVE_FILE": "the registry the next target replays from",
     "RCOW_BSTORE_FILE": "what chooses attach over create",
     "RCOW_WAL_IMG": "acknowledged writes not yet in S3",
-    "RCOW_HOT_MARKER": "the marker only the orchestrator writes",
 }
 RESIDUE = ("RCOW_PIDFILE", "RCOW_RPC_SOCK", "RCOW_RPC_SOCK}.lock",
            "spdk_cpu_lock_")
@@ -1029,6 +1033,62 @@ if hits:
         emit(False, "the hot stop never touches the state the next target needs", h)
 else:
     emit(True, "the hot stop never touches the state the next target needs")
+
+# The marker is the upgrade's own record of intent, and it is spent only once
+# the target it names is gone. Dropping it earlier would leave a refused attempt
+# looking like a planned stop to the next one, and the planned stop tears down a
+# serving target -- the outage this path exists to remove. So: never written
+# here, and every removal follows one of the two confirmations, the kill or the
+# branch that found nothing to kill.
+writes = [i for i, line in enumerate(lines, 1)
+          if REDIR.search(line) and "RCOW_HOT_MARKER" in line]
+if writes:
+    emit(False, "the hot stop never writes the marker",
+         "line %d redirects into RCOW_HOT_MARKER" % writes[0])
+else:
+    emit(True, "the hot stop never writes the marker")
+
+
+def first_line(needle):
+    for i, line in enumerate(lines, 1):
+        if needle in line:
+            return i
+    return None
+
+
+# The one branch that may drop the marker without a kill is the one that found
+# nothing to kill: it exits without touching anything. Bounded by the first "fi"
+# after it, which is that block's own as long as nothing nests inside it.
+no_target = first_line('if [ -z "${INSTANCES}" ]; then')
+no_target_end = None
+if no_target is not None:
+    for i in range(no_target + 1, len(lines) + 1):
+        if lines[i - 1].strip() == "fi":
+            no_target_end = i
+            break
+
+# A missing anchor counts as "before everything", so a renamed confirmation
+# fails loudly instead of silently passing.
+killed = first_line('is gone"') or 10 ** 9
+dropped = [i for i, line in enumerate(lines, 1)
+           if CMD.search(line) and "RCOW_HOT_MARKER" in line]
+stray = [i for i in dropped
+         if i < killed and not (no_target is not None and no_target_end is not None
+                                and no_target < i < no_target_end)]
+spent = [i for i in dropped if i > killed]
+
+if stray:
+    emit(False, "the marker is not dropped before the upgrade it records is done",
+         "line %d removes it outside the nothing-to-kill branch and before the kill"
+         % stray[0])
+else:
+    emit(True, "the marker is not dropped before the upgrade it records is done")
+
+if not spent:
+    emit(False, "the marker is dropped once the target it names is gone",
+         "no line removes it after the kill, so a spent intent would outlive it")
+else:
+    emit(True, "the marker is dropped once the target it names is gone")
 
 # The other half, which "mutates nothing" would also satisfy: what it does
 # remove is the residue and only the residue.

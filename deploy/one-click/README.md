@@ -258,12 +258,16 @@ inherit one.
   - `wal_bdev.img` is **never overwritten** (created only on first install; its
     size fixes the journal/WAL layout), and the `RCOW_*` settings in
     `.one-click.env` are merged and kept across the upgrade.
-- **If a stop is refused** — a live target the stop script will not touch, e.g.
-  a marker it cannot honour — the unit is left `failed` while the target keeps
-  running. `systemctl stop` on a failed unit is a no-op and `systemctl start` is
-  refused by `rcow_start.sh`'s instance guard, so recover by hand:
-  `systemctl reset-failed cube-sandbox-s3lvol`, then
-  `/usr/local/services/cubetoolbox/CubeS3lvol/scripts/rcow_stop.sh`.
+- **If a stop is refused** — a live target the stop script will not touch — the
+  unit ends stopped while the target keeps running and serving. Nothing was
+  disconnected and the lvstore is still loaded, and the marker is kept, so the
+  next upgrade picks the same target up and stops it in place: with no unit
+  running there is none to be asked, and the upgrade drives that stop itself.
+  `rcow_stop.sh` by hand is the **planned** stop instead — it disconnects the
+  initiator and unloads the lvstore — so it is only for when that outage is what
+  is wanted. The one refusal that asks for operator work is a marker naming a
+  target this host cannot confirm: the stop script says so, and that marker has
+  to be resolved before anything will start.
 - **Enable/disable**: preferred `ONE_CLICK_ENABLE_S3LVOL=0|1 ./install.sh`
   (honored on upgrade as well). Or put only that key in the bundle `.env`
   and re-run `install.sh`. Do not `cp env.example .env` as a full copy

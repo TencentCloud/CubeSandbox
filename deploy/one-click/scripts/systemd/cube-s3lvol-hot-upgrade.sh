@@ -197,32 +197,60 @@ fi
 if [ "${MODE}" = "hot" ]; then
   log "upgrading in place: a live sandbox's I/O pauses for the swap, nothing else"
 
-  # The candidate travels in the marker: the stop runs before the switch, so at
-  # that point RCOW_TGT_BIN still names the outgoing binary and a gate handed it
-  # would compare the running build with itself.
-  if ! rcow_hot_marker_write "${NEW_DIR}/bin/s3lvol_tgt"; then
-    warn "could not record the intent to upgrade; falling back to a cold stop"
-    MODE=cold
-    REASON="the hot-restart marker could not be written"
+  # The stop is asked of the unit, which is what carries it out. The marker is
+  # how that stop is told this is an upgrade rather than an operator's, and it
+  # carries the candidate -- which has to travel, because the stop runs before
+  # the switch, so at that point RCOW_TGT_BIN still names the outgoing binary
+  # and a gate handed it would compare the running build with itself.
+  #
+  # Failing to record it is not a reason to take the outage: without the marker
+  # the unit's stop would take the planned route, which disconnects a serving
+  # target. Nothing has been touched yet at this point.
+  if systemctl is-active --quiet "${SERVICE}"; then
+    if ! rcow_hot_marker_write "${NEW_DIR}/bin/s3lvol_tgt"; then
+      warn "could not record the intent to upgrade; leaving everything alone"
+      warn "  without ${RCOW_HOT_MARKER} the unit's stop would take the planned"
+      warn "  route, which disconnects the initiator and unloads the lvstore"
+      exit 1
+    fi
   fi
-fi
 
-if [ "${MODE}" = "hot" ]; then
   # The hot stop rewrites this before it kills, so what is there afterwards is
   # this run's. A leftover from an earlier upgrade would otherwise be compared
   # against as if it described the layout being swapped now.
   rm -f "${RCOW_HOT_SNAPSHOT}"
+
   # `reset-failed` first, as the cold path does: a stop on a failed unit is a
   # no-op that reports success, and a unit left failed by an earlier refusal or
-  # crash-loop is a state this can arrive in. Without it the stop does nothing
-  # while claiming to have done something, and the target it was asked to
-  # replace is still there for the guard below to refuse.
+  # crash-loop is a state this can arrive in.
   systemctl reset-failed "${SERVICE}" >/dev/null 2>&1 || true
-  if ! systemctl stop "${SERVICE}"; then
-    warn "the in-place stop failed; falling back to a cold stop"
-    MODE=cold
-    REASON="the stop did not succeed"
-  elif [ -n "$(rcow_target_instances)" ]; then
+
+  # A unit that is not running is the state a refused attempt leaves behind: its
+  # stop went through, the kill did not, and nothing supervises the target any
+  # more. Then there is nothing to ask, and the stop is driven here instead,
+  # with the same script the unit's stop would have run. Without that a refusal
+  # would be the end of the road: a stop has no unit to drive, and `systemctl
+  # start` is refused by rcow_start.sh's instance guard while the target lives.
+  STOP_RC=0
+  if systemctl is-active --quiet "${SERVICE}"; then
+    systemctl stop "${SERVICE}" || STOP_RC=$?
+  else
+    "${BARE}/scripts/rcow_upgrade.sh" --candidate "${NEW_DIR}/bin/s3lvol_tgt" ||
+      STOP_RC=$?
+  fi
+
+  if [ "${STOP_RC}" -ne 0 ]; then
+    # Every failure before rcow_upgrade.sh's kill leaves the target running and
+    # unsignalled -- fail_live says so -- so what is here is a healthy target
+    # after a failed attempt, not a decision to interrupt one. Falling through
+    # to a cold stop would be the outage this path exists to remove, taken
+    # automatically.
+    warn "the in-place stop failed; leaving the target alone rather than tearing it down"
+    warn "  nothing was disconnected and the lvstore is still loaded; a later"
+    warn "  attempt finds the same target and stops it in place"
+    exit 1
+  fi
+  if [ -n "$(rcow_target_instances)" ]; then
     # Should not happen: the stop's own kill is verified. If it does, the target
     # is still holding the WAL and a second one must not be started over it.
     warn "the target is still running after the stop; leaving everything alone"

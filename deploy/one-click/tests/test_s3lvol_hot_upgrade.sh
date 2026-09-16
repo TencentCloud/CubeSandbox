@@ -28,6 +28,7 @@ source "${ONE_CLICK_DIR}/lib/common.sh"
 INSTALL_SH="${ONE_CLICK_DIR}/install.sh"
 HOT_UPGRADE="${ONE_CLICK_DIR}/scripts/systemd/cube-s3lvol-hot-upgrade.sh"
 RCOW_COMMON="${REPO_ROOT}/CubeS3lvol/scripts/rcow_common.sh"
+RCOW_UPGRADE="${REPO_ROOT}/CubeS3lvol/scripts/rcow_upgrade.sh"
 NEW_VERSION="CubeS3lvol-2.0"
 OLD_VERSION="CubeS3lvol-1.0"
 
@@ -245,6 +246,92 @@ test_the_start_wait_gates_on_readiness() {
     fail "start_and_wait must wait for rcow_target_ready, not for a target process to exist"
 }
 
+# Run rcow_hot_marker_consume out of the real rcow_common.sh against a marker
+# this helper writes, with the target probe stubbed. Prints
+# "<rc> <candidate> <present|absent>".
+probe_consume() {
+  local boot="$1" pid="$2" candidate="$3" live_pid="$4"
+  RCOW_LVS_NAME=rcow-test \
+  RCOW_RUN_DIR="${TMP_DIR}/run" \
+  RCOW_ACTIVE_FILE="${TMP_DIR}/run/active_lvols" \
+  RCOW_BSTORE_FILE="${TMP_DIR}/run/bstore.json" \
+  RCOW_RPC_SOCK="${TMP_DIR}/run/no.sock" \
+  RCOW_TGT_BIN="${TMP_DIR}/gone/s3lvol_tgt" \
+  BOOT="${boot}" PID="${pid}" CAND="${candidate}" LIVE="${live_pid}" \
+    bash -c '
+      set -u
+      . "$1"
+      printf "%s %s %s\n" "${BOOT}" "${PID}" "${CAND}" >"${RCOW_HOT_MARKER}"
+      rcow_target_instances() { printf "%s\n" "${LIVE}"; }
+      rcow_hot_marker_consume
+      rc=$?
+      state=absent
+      [ -e "${RCOW_HOT_MARKER}" ] && state=present
+      printf "%s %s %s\n" "${rc}" "${RCOW_HOT_CANDIDATE:-}" "${state}"
+    ' _ "${TMP_DIR}/prefix/${NEW_VERSION}/scripts/rcow_common.sh"
+}
+
+test_the_marker_is_spent_by_the_upgrade_not_by_the_read() {
+  # Reading the marker is not spending it. The stop that gets a 0 still has to
+  # run rcow_upgrade.sh, and that can refuse and leave the target running -- so
+  # the intent has to survive for the retry, or the retry silently becomes the
+  # planned teardown, which disconnects a serving target.
+  build_trees
+  local boot out
+  boot="$(cat /proc/sys/kernel/random/boot_id)"
+
+  out="$(probe_consume "${boot}" 4242 "${TMP_DIR}/new-binary" 4242)"
+  [[ "${out}" == "0 ${TMP_DIR}/new-binary present" ]] ||
+    fail "a marker for this boot and this target must answer 0 with its candidate and stay (got: ${out})"
+
+  # Another boot's marker is stale by construction, and is discarded.
+  out="$(probe_consume "00000000-0000-0000-0000-000000000000" 4242 "" 4242)"
+  [[ "${out}" == "1  absent" ]] ||
+    fail "a marker naming another boot must answer 1 and be removed (got: ${out})"
+
+  # This boot, but a pid that is not the target: it may be a live intent this
+  # host cannot confirm, so it is kept.
+  out="$(probe_consume "${boot}" 999999 "" 4242)"
+  [[ "${out}" == "2  present" ]] ||
+    fail "a marker naming a non-target pid must answer 2 and stay (got: ${out})"
+}
+
+test_a_failed_hot_stop_refuses_rather_than_tearing_down() {
+  # Every failure before rcow_upgrade.sh's kill leaves the target running and
+  # unsignalled, so this branch runs against a healthy, serving target. Falling
+  # through to a cold stop from here is the outage this path exists to remove,
+  # taken automatically.
+  local block
+  block="$(awk '/^if \[ "\$\{MODE\}" = "hot" \]; then/,/^fi$/' "${HOT_UPGRADE}")"
+  [[ -n "${block}" ]] || fail "the in-place path is gone"
+  if printf '%s' "${block}" | grep -q 'MODE=cold'; then
+    fail "a failed in-place stop must not fall back to a cold stop"
+  fi
+  printf '%s' "${block}" | grep -q 'exit 1' ||
+    fail "a failed in-place stop must refuse (exit non-zero)"
+  printf '%s' "${block}" | grep -q 'could not record the intent to upgrade' ||
+    fail "a marker that cannot be written must refuse too"
+
+  # And refusing has to be reachable again. A refused attempt leaves the unit
+  # stopped with the target still running, so the attempt after it cannot ask a
+  # unit -- there is none left to run the stop -- and has to drive it here.
+  printf '%s' "${block}" | grep -q 'rcow_upgrade.sh" --candidate' ||
+    fail "the in-place stop must drive rcow_upgrade.sh itself when no unit is running"
+}
+
+test_the_marker_is_spent_after_the_kill() {
+  # The other half of the rule: rcow_upgrade.sh drops the marker, and only once
+  # the target it names is gone. Never dropping it would leave a spent intent
+  # behind, and the next plain stop would read as a hot one.
+  local gone drop
+  gone="$(grep -n 'is gone"' "${RCOW_UPGRADE}" | head -1 | cut -d: -f1 || true)"
+  drop="$(grep -n 'rm -f "${RCOW_HOT_MARKER}"' "${RCOW_UPGRADE}" | tail -1 | cut -d: -f1 || true)"
+  [[ -n "${gone}" ]] || fail "rcow_upgrade.sh no longer confirms the kill"
+  [[ -n "${drop}" ]] || fail "rcow_upgrade.sh never drops the marker it spent"
+  [[ "${drop}" -gt "${gone}" ]] ||
+    fail "the marker must be dropped after the kill is confirmed (kill=${gone}, drop=${drop})"
+}
+
 test_the_install_root_is_checked_before_anything_is_touched() {
   # A refused install root used to cost a half-upgraded node: the check ran after
   # the swap and after the services were stopped, so the refusal left s3lvol
@@ -273,6 +360,9 @@ test_layout_check_takes_the_snapshot_from_rcow_common
 test_the_layout_guard_reads_what_it_sources
 test_readiness_is_the_attach_not_the_process
 test_the_start_wait_gates_on_readiness
+test_the_marker_is_spent_by_the_upgrade_not_by_the_read
+test_a_failed_hot_stop_refuses_rather_than_tearing_down
+test_the_marker_is_spent_after_the_kill
 test_the_install_root_is_checked_before_anything_is_touched
 
 echo "CubeS3lvol hot upgrade tests OK"

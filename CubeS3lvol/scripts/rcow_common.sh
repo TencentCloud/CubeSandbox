@@ -775,7 +775,8 @@ rcow_hot_marker_write()
 # Consume the marker and answer whether it is ours: this boot, and a pid that is
 # still the live target.
 #
-#   0  honoured, and the marker is gone
+#   0  honoured: this boot, and a pid that is still the live target. The marker
+#      is left for rcow_upgrade.sh to clear once that target is gone
 #   1  nothing to honour -- no marker, a malformed one, or one from another boot
 #   2  this boot and this marker, but the pid it names is not a running target
 #
@@ -783,12 +784,17 @@ rcow_hot_marker_write()
 # may be a live intent this host cannot confirm, and answering it by falling
 # through to the planned path takes the outage this mechanism exists to remove.
 #
-# The marker is unlinked only once it has been honoured: removing it on a
-# mismatch would discard a live intent, where the other two cases are stale by
-# construction. The identity check is rcow_target_instances rather than
-# rcow_pid_is_target because an upgrade has already been staged by the time it
-# writes the marker, and the strict path comparison is exactly the one that
-# fails there.
+# The marker outlives the answer that recognises it. Reading it is not spending
+# it: the stop that gets a 0 still has to run rcow_upgrade.sh, and that can
+# refuse and leave the target running -- in which case the intent is unspent and
+# the next stop must see it again, or a retry would silently become the planned
+# teardown the marker was written to avoid. rcow_upgrade.sh clears it once the
+# target it names is gone. The other two answers remove it here, because a file
+# from another boot, or a malformed one, is stale by construction.
+#
+# The identity check is rcow_target_instances rather than rcow_pid_is_target
+# because an upgrade has already been staged by the time it writes the marker,
+# and the strict path comparison is exactly the one that fails there.
 #
 # Both fields are needed. boot_id alone misses a marker whose target died before
 # a reboot and whose pid was reused after it; the pid alone misses a file that
@@ -823,7 +829,6 @@ target; leaving the marker in place rather than discarding the intent"
 	fi
 
 	RCOW_HOT_CANDIDATE="${candidate}"
-	rm -f "${RCOW_HOT_MARKER}"
 	return 0
 }
 

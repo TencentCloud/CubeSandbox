@@ -30,10 +30,15 @@
 #     for one. The marker is left for the operator to resolve.
 #   - a target running that the pidfile does not name.
 #
-# A refusal exits non-zero, which leaves the unit FAILED, and `systemctl stop`
-# on a failed unit is a no-op -- so recovery is `systemctl reset-failed` and then
-# the stop by hand. That is the trade, taken deliberately: refuse and leave
-# something inspectable rather than succeed by breaking it.
+# A refusal exits non-zero, which leaves the unit FAILED -- and the unit is then
+# stopped while the target it would not kill is still running, so nothing here
+# can be asked again: `systemctl stop` has no unit left to drive, and
+# `systemctl start` is refused by rcow_start.sh's instance guard while that
+# target lives. What picks it up is the upgrade itself, which drives this stop
+# directly when there is no unit to ask, or an operator running rcow_upgrade.sh
+# by hand. Not rcow_stop.sh, unless the outage it takes is what is wanted. That
+# is the trade, taken deliberately: refuse and leave something inspectable
+# rather than succeed by breaking it.
 #
 # The marker is what separates 1 from 2, and it is deliberately not writable
 # from here: an operator asking for a plain stop must never get the path that
