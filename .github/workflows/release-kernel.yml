@@ -5,6 +5,12 @@ name: Release Kernel Assets
 # vmlinux (amd64/arm64), PVM guest vmlinux, and PVM host deb/rpm, then uploads
 # all assets onto the same GitHub Release. Cube product (v*) releases only
 # download from this Release via deploy/release-assets.yaml.
+#
+# cube_gauge.ext4 is packed in the same job that built the vmlinux, because an
+# out-of-tree module needs that kernel *tree* (Module.symvers, same toolchain)
+# and not just the vmlinux ELF. A .ko built elsewhere would fail insmod on
+# modversions CRCs even when the vermagic string matches, so the pair must
+# never be produced by separate runs.
 
 on:
   push:
@@ -24,7 +30,9 @@ env:
   KERNEL_TAG: 6.6.119-49.6
   KERNEL_ARCHIVE_URL: https://cnb.cool/CubeSandbox/OpenCloudOS-Kernel/-/git/archive/6.6.119-49.6.zip
   PVM_KERNEL_TAG: 6.6.69-1.2.cubesandbox
+  PVM_CACHE_DIR: kernel-cache
   PVM_VMLINUX_CACHE_PATH: kernel-cache/vmlinux-pvm
+  PVM_GAUGE_EXT4_CACHE_PATH: kernel-cache/cube_gauge-pvm.ext4
 
 defaults:
   run:
@@ -76,7 +84,9 @@ jobs:
       KERNEL_ARCH: ${{ matrix.kernel_arch }}
       KBUILD_ARCH: ${{ matrix.kbuild_arch }}
       BUNDLE_ARCH: ${{ matrix.bundle_arch }}
+      CACHE_DIR: kernel-cache/${{ matrix.kernel_arch }}
       VMLINUX_CACHE_PATH: kernel-cache/${{ matrix.kernel_arch }}/vmlinux
+      GAUGE_EXT4_CACHE_PATH: kernel-cache/${{ matrix.kernel_arch }}/cube_gauge.ext4
 
     steps:
       - name: Checkout
@@ -86,20 +96,33 @@ jobs:
         id: vmlinux_metadata
         run: |
           config_hash="$(sha256sum "configs/kernel-oc9.${KERNEL_ARCH}.config" | awk '{print $1}')"
-          echo "cache_key=vmlinux-opencloudos-${KERNEL_TAG}-${KERNEL_ARCH}-${config_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
+          # The cache now holds vmlinux *and* its cube_gauge.ext4, so the module
+          # sources belong in the key: a cache hit skips source extraction and
+          # there would be no kernel tree left to rebuild the .ko from.
+          gauge_hash="$(
+            sha256sum \
+              deploy/guest-modules/cube_gauge/Makefile \
+              deploy/guest-modules/cube_gauge/cube_gauge.c \
+              deploy/guest-modules/cube_gauge/gauge.h \
+              deploy/guest-modules/pack-cube-gauge-ext4.sh \
+              | sha256sum \
+              | awk '{print $1}'
+          )"
+          echo "cache_key=vmlinux-gauge-opencloudos-${KERNEL_TAG}-${KERNEL_ARCH}-${config_hash}-${gauge_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
 
       - name: Install kernel build dependencies
         run: |
           apt-get update
           apt-get install -y file sudo build-essential git bc bison flex \
             libelf-dev libssl-dev libncurses-dev dwarves cpio kmod \
-            fakeroot rsync dpkg-dev debhelper wget curl ca-certificates python3 unzip
+            fakeroot rsync dpkg-dev debhelper wget curl ca-certificates python3 unzip \
+            e2fsprogs
 
       - name: Restore cached vmlinux
         id: restore_vmlinux
         uses: actions/cache/restore@v4
         with:
-          path: ${{ env.VMLINUX_CACHE_PATH }}
+          path: ${{ env.CACHE_DIR }}
           key: ${{ steps.vmlinux_metadata.outputs.cache_key }}
 
       - name: Download kernel source archive
@@ -144,16 +167,26 @@ jobs:
           )
           install -D -m 0644 "${KERNEL_SRC}/vmlinux" "${VMLINUX_CACHE_PATH}"
 
+      - name: Pack cube_gauge.ext4 from this kernel tree
+        if: steps.restore_vmlinux.outputs.cache-hit != 'true'
+        run: |
+          KDIR="${KERNEL_SRC}" \
+          OUTPUT="${GAUGE_EXT4_CACHE_PATH}" \
+          PAIR_VMLINUX="${VMLINUX_CACHE_PATH}" \
+            bash deploy/guest-modules/pack-cube-gauge-ext4.sh
+
       - name: Verify vmlinux
         run: |
           test -f "${VMLINUX_CACHE_PATH}"
           file "${VMLINUX_CACHE_PATH}"
+          test -s "${GAUGE_EXT4_CACHE_PATH}"
+          file "${GAUGE_EXT4_CACHE_PATH}"
 
       - name: Save vmlinux cache
         if: steps.restore_vmlinux.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: ${{ env.VMLINUX_CACHE_PATH }}
+          path: ${{ env.CACHE_DIR }}
           key: ${{ steps.vmlinux_metadata.outputs.cache_key }}
 
       - name: Stage BM release asset
@@ -161,12 +194,16 @@ jobs:
           rm -rf bm-release-assets
           mkdir -p bm-release-assets
           install -D -m 0644 "${VMLINUX_CACHE_PATH}" "bm-release-assets/vmlinux-${BUNDLE_ARCH}"
+          install -D -m 0644 "${GAUGE_EXT4_CACHE_PATH}" \
+            "bm-release-assets/cube_gauge-bm-${BUNDLE_ARCH}.ext4"
 
       - name: Upload BM vmlinux artifact
         uses: actions/upload-artifact@v4
         with:
           name: kernel-bm-${{ matrix.bundle_arch }}
-          path: bm-release-assets/vmlinux-${{ matrix.bundle_arch }}
+          path: |
+            bm-release-assets/vmlinux-${{ matrix.bundle_arch }}
+            bm-release-assets/cube_gauge-bm-${{ matrix.bundle_arch }}.ext4
           if-no-files-found: error
           retention-days: 14
 
@@ -186,7 +223,8 @@ jobs:
           apt-get update
           apt-get install -y file sudo build-essential git bc bison flex \
             libelf-dev libssl-dev libncurses-dev dwarves cpio kmod \
-            fakeroot rsync dpkg-dev debhelper wget curl ca-certificates python3
+            fakeroot rsync dpkg-dev debhelper wget curl ca-certificates python3 \
+            e2fsprogs
 
       - name: Compute PVM vmlinux cache metadata
         id: pvm_vmlinux_metadata
@@ -196,16 +234,20 @@ jobs:
               deploy/pvm/build-pvm-guest-vmlinux.sh \
               deploy/pvm/common.sh \
               deploy/pvm/configs/pvm_guest \
+              deploy/guest-modules/cube_gauge/Makefile \
+              deploy/guest-modules/cube_gauge/cube_gauge.c \
+              deploy/guest-modules/cube_gauge/gauge.h \
+              deploy/guest-modules/pack-cube-gauge-ext4.sh \
               | sha256sum \
               | awk '{print $1}'
           )"
-          echo "cache_key=vmlinux-pvm-${PVM_KERNEL_TAG}-x86_64-${source_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
+          echo "cache_key=vmlinux-pvm-gauge-${PVM_KERNEL_TAG}-x86_64-${source_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
 
       - name: Restore cached PVM vmlinux
         id: restore_pvm_vmlinux
         uses: actions/cache/restore@v4
         with:
-          path: ${{ env.PVM_VMLINUX_CACHE_PATH }}
+          path: ${{ env.PVM_CACHE_DIR }}
           key: ${{ steps.pvm_vmlinux_metadata.outputs.cache_key }}
 
       - name: Build PVM guest vmlinux
@@ -218,16 +260,26 @@ jobs:
             "${GITHUB_WORKSPACE}/pvm-guest-build/output/vmlinux" \
             "${PVM_VMLINUX_CACHE_PATH}"
 
+      - name: Pack cube_gauge.ext4 from this kernel tree
+        if: steps.restore_pvm_vmlinux.outputs.cache-hit != 'true'
+        run: |
+          KDIR="${GITHUB_WORKSPACE}/pvm-guest-build/linux" \
+          OUTPUT="${PVM_GAUGE_EXT4_CACHE_PATH}" \
+          PAIR_VMLINUX="${PVM_VMLINUX_CACHE_PATH}" \
+            bash deploy/guest-modules/pack-cube-gauge-ext4.sh
+
       - name: Verify PVM vmlinux
         run: |
           test -f "${PVM_VMLINUX_CACHE_PATH}"
           file "${PVM_VMLINUX_CACHE_PATH}"
+          test -s "${PVM_GAUGE_EXT4_CACHE_PATH}"
+          file "${PVM_GAUGE_EXT4_CACHE_PATH}"
 
       - name: Save PVM vmlinux cache
         if: steps.restore_pvm_vmlinux.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: ${{ env.PVM_VMLINUX_CACHE_PATH }}
+          path: ${{ env.PVM_CACHE_DIR }}
           key: ${{ steps.pvm_vmlinux_metadata.outputs.cache_key }}
 
       - name: Stage PVM guest release asset
@@ -236,12 +288,16 @@ jobs:
           mkdir -p pvm-guest-release-assets
           install -D -m 0644 "${PVM_VMLINUX_CACHE_PATH}" \
             pvm-guest-release-assets/vmlinux-pvm-amd64
+          install -D -m 0644 "${PVM_GAUGE_EXT4_CACHE_PATH}" \
+            pvm-guest-release-assets/cube_gauge-pvm-amd64.ext4
 
       - name: Upload PVM guest artifact
         uses: actions/upload-artifact@v4
         with:
           name: kernel-pvm-guest-amd64
-          path: pvm-guest-release-assets/vmlinux-pvm-amd64
+          path: |
+            pvm-guest-release-assets/vmlinux-pvm-amd64
+            pvm-guest-release-assets/cube_gauge-pvm-amd64.ext4
           if-no-files-found: error
           retention-days: 14
 
@@ -357,6 +413,9 @@ jobs:
           test -f kernel-release-assets/vmlinux-amd64
           test -f kernel-release-assets/vmlinux-arm64
           test -f kernel-release-assets/vmlinux-pvm-amd64
+          test -s kernel-release-assets/cube_gauge-bm-amd64.ext4
+          test -s kernel-release-assets/cube_gauge-bm-arm64.ext4
+          test -s kernel-release-assets/cube_gauge-pvm-amd64.ext4
 
           has_rpm=0
           has_deb=0
@@ -425,6 +484,9 @@ jobs:
             kernel-release-assets/vmlinux-amd64
             kernel-release-assets/vmlinux-arm64
             kernel-release-assets/vmlinux-pvm-amd64
+            kernel-release-assets/cube_gauge-bm-amd64.ext4
+            kernel-release-assets/cube_gauge-bm-arm64.ext4
+            kernel-release-assets/cube_gauge-pvm-amd64.ext4
             kernel-release-assets/*.deb
             kernel-release-assets/*.rpm
           )
