@@ -759,9 +759,7 @@ mod tests {
     /// helper must produce exactly the same per-window delta as
     /// `filter_memory_ranges_by_soft_dirty` does.
     ///
-    /// Skipped silently when the host kernel lacks `CONFIG_MEM_SOFT_DIRTY=y`,
-    /// or when the kpageflags fallback needs `CAP_SYS_ADMIN` and the test
-    /// process does not have it.
+    /// Skipped silently when the host kernel lacks `CONFIG_MEM_SOFT_DIRTY=y`.
     #[test]
     fn test_filter_memory_ranges_by_anon_and_soft_dirty_end_to_end() {
         let _guard = CLEAR_REFS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -818,28 +816,8 @@ mod tests {
         dirty_page(5, 0xc1);
         dirty_page(6, 0xc2);
 
-        let (filtered, stats) =
-            match filter_memory_ranges_by_anon_and_soft_dirty(&guest_memory, &ranges) {
-                Ok(result) => result,
-                Err(SoftDirtyError::AnonProbe(pagemap_anon::PagemapAnonError::NoCapSysAdmin)) => {
-                    eprintln!(
-                        "kpageflags path needs CAP_SYS_ADMIN; skipping {}",
-                        "test_filter_memory_ranges_by_anon_and_soft_dirty_end_to_end"
-                    );
-                    return;
-                }
-                Err(SoftDirtyError::AnonProbe(pagemap_anon::PagemapAnonError::OpenFailed {
-                    path,
-                    ..
-                })) if path == "/proc/kpageflags" => {
-                    eprintln!(
-                        "cannot open /proc/kpageflags; skipping {}",
-                        "test_filter_memory_ranges_by_anon_and_soft_dirty_end_to_end"
-                    );
-                    return;
-                }
-                Err(e) => panic!("anon ∩ soft-dirty filter failed: {e}"),
-            };
+        let (filtered, stats) = filter_memory_ranges_by_anon_and_soft_dirty(&guest_memory, &ranges)
+            .expect("anon ∩ soft-dirty filter failed");
 
         // Every page in this anon MAP_PRIVATE mapping is anon, so
         // anon ∩ soft-dirty == soft-dirty exactly: only pages 5 and 6.

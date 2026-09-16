@@ -2,14 +2,15 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Privileged micro-benchmark for the pagemap bit-61 optimization.
+//! Micro-benchmark for the pagemap bit-61 CoW scan.
 //!
 //! Kept separate from `pagemap_anon.rs` so the production implementation and
 //! its ordinary unit tests are not obscured by benchmark-only scaffolding.
 //!
-//! Ignored by default (`CAP_SYS_ADMIN` is required to open `/proc/kpageflags`).
-//! Run with `--ignored`. Optional env: `CUBE_PAGEMAP_BENCH_MIB` (comma-separated
-//! sizes, default `64,256,1024`) and `CUBE_PAGEMAP_BENCH_ITERS` (default `7`).
+//! Ignored by default: it allocates up to `CUBE_PAGEMAP_BENCH_MIB` bytes of
+//! file-backed memory. Run with `--ignored`. Optional env:
+//! `CUBE_PAGEMAP_BENCH_MIB` (comma-separated sizes, default `64,256,1024`) and
+//! `CUBE_PAGEMAP_BENCH_ITERS` (default `7`).
 
 use super::*;
 use std::hint::black_box;
@@ -20,7 +21,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 struct PrivateFileMapping {
     ptr: *mut libc::c_void,
     length: usize,
+    /// Page indices the fixture CoW-wrote, i.e. the pages a snapshot must save.
+    cow_pages: Vec<usize>,
 }
+
+/// One in every `COW_STRIDE` pages is written by the fixture.
+const COW_STRIDE: usize = 10;
 
 impl PrivateFileMapping {
     fn new(size_mib: u64, page_size: u64) -> Self {
@@ -69,15 +75,17 @@ impl PrivateFileMapping {
                 ));
             }
         }
-        for page in (0..pages).step_by(10) {
+        let cow_pages: Vec<usize> = (0..pages as usize).step_by(COW_STRIDE).collect();
+        for &page in &cow_pages {
             unsafe {
-                std::ptr::write_volatile(base.add((page * page_size) as usize), 0xc2);
+                std::ptr::write_volatile(base.add(page * page_size as usize), 0xc2);
             }
         }
 
         Self {
             ptr,
             length: length as usize,
+            cow_pages,
         }
     }
 }
@@ -116,58 +124,55 @@ fn env_values(name: &str, default: &str) -> Vec<u64> {
         .collect()
 }
 
-/// Compare the actual old and new VMM implementations on the same mapping.
+/// Measure the bit-61 CoW scan on a restore-like `MAP_PRIVATE` mapping.
 #[test]
-#[ignore = "requires CAP_SYS_ADMIN; cargo test -- --ignored (CUBE_PAGEMAP_BENCH_MIB / CUBE_PAGEMAP_BENCH_ITERS)"]
-fn benchmark_get_anon_pages_before_after() {
+#[ignore = "allocates up to 1 GiB of file-backed memory; cargo test -- --ignored (CUBE_PAGEMAP_BENCH_MIB / CUBE_PAGEMAP_BENCH_ITERS)"]
+fn benchmark_get_anon_pages() {
     let page_size = host_page_size();
     let iterations = env_values("CUBE_PAGEMAP_BENCH_ITERS", "7")[0] as usize;
+    println!("pagemap_anon micro-benchmark: page_size={page_size}, iterations={iterations}");
     println!(
-        "pagemap_anon release micro-benchmark: page_size={page_size}, iterations={iterations}"
-    );
-    println!(
-        "{:<8} {:>12} {:>12} {:>10} {:>12} {:>12} {:>10} {:>10}",
-        "MiB", "old_ms", "new_ms", "speedup", "old_pages", "new_pages", "under", "over"
+        "{:<8} {:>10} {:>12} {:>12} {:>10} {:>10} {:>10}",
+        "MiB", "pages", "ms", "ns/page", "cow_pages", "saved", "saved_pct"
     );
 
     for size_mib in env_values("CUBE_PAGEMAP_BENCH_MIB", "64,256,1024") {
         let mapping = PrivateFileMapping::new(size_mib, page_size);
         let host_addr = mapping.ptr as u64;
         let length = mapping.length as u64;
+        let pages = (length / page_size) as usize;
 
-        let old_ns = measure(iterations, || {
-            scan_kpageflags_anon(host_addr, length)
-                .expect("kpageflags scan failed")
-                .0
-        });
-        let new_ns = measure(iterations, || {
+        let ns = measure(iterations, || {
             scan_pagemap_cow_anon(host_addr, length)
-                .expect("bit61 scan failed")
+                .expect("pagemap scan failed")
                 .0
         });
 
-        let old = scan_kpageflags_anon(host_addr, length)
-            .expect("kpageflags comparison failed")
-            .0;
-        let new = scan_pagemap_cow_anon(host_addr, length)
-            .expect("bit61 comparison failed")
-            .0;
-        let under = old.iter().zip(&new).filter(|(a, b)| **a && !**b).count();
-        let over = old.iter().zip(&new).filter(|(a, b)| !**a && **b).count();
-        let old_pages = old.iter().filter(|&&save| save).count();
-        let new_pages = new.iter().filter(|&&save| save).count();
+        let (bitmap, _swapped) =
+            scan_pagemap_cow_anon(host_addr, length).expect("pagemap classification failed");
+        let saved = bitmap.iter().filter(|&&save| save).count();
+
+        // The correctness-critical direction: every page the Guest actually
+        // wrote (CoW) must be classified as "save". Read-only file pages are
+        // expected to be skipped; on a host with file-backed THP and a kernel
+        // predating `3f9f022e` they may be saved as well, which only costs
+        // savings and is therefore reported rather than asserted.
+        for &page in &mapping.cow_pages {
+            assert!(
+                bitmap[page],
+                "CoW-written page {page} was not selected for saving"
+            );
+        }
 
         println!(
-            "{:<8} {:>12.3} {:>12.3} {:>9.1}x {:>12} {:>12} {:>10} {:>10}",
+            "{:<8} {:>10} {:>12.3} {:>12.1} {:>10} {:>10} {:>9.1}%",
             size_mib,
-            old_ns as f64 / 1_000_000.0,
-            new_ns as f64 / 1_000_000.0,
-            old_ns as f64 / new_ns as f64,
-            old_pages,
-            new_pages,
-            under,
-            over
+            pages,
+            ns as f64 / 1_000_000.0,
+            ns as f64 / pages as f64,
+            mapping.cow_pages.len(),
+            saved,
+            (saved as f64 / pages as f64) * 100.0
         );
-        assert_eq!(under, 0, "bit61 path under-saved legacy KPF_ANON pages");
     }
 }
