@@ -1573,14 +1573,26 @@ assert_safe_install_prefix() {
   fi
 }
 
+# A top-level symlink is refused unless it resolves inside the install root
+# itself. A link that leaves the root means this is not the tree that was meant
+# -- the wipe would delete the link, not what it points at, and the content
+# would survive somewhere else. A link that stays inside is the versioned
+# component pattern: CubeS3lvol is a symlink to the CubeS3lvol-<version>
+# directory beside it, and refusing that would abort the upgrade of a tree this
+# installer built.
 _assert_no_top_level_symlinks() {
   local dir="$1"
   local display="$2"
-  local symlink
-  symlink="$(find "${dir}" -mindepth 1 -maxdepth 1 -type l -print -quit 2>/dev/null || true)"
-  if [[ -n "${symlink}" ]]; then
-    die "refusing to wipe install root ${display}: contains top-level symlink (${symlink}); move it away and retry"
-  fi
+  local root link target
+  root="$(readlink -m -- "${display%/}" 2>/dev/null || true)"
+  [[ -n "${root}" ]] || root="${display%/}"
+  while IFS= read -r link; do
+    [[ -n "${link}" ]] || continue
+    target="$(readlink -m -- "${link}" 2>/dev/null || true)"
+    if [[ -z "${target}" || "${target}" != "${root}/"* ]]; then
+      die "refusing to wipe install root ${display}: top-level symlink ${link} resolves outside it (${target:-unresolvable}); move it away and retry"
+    fi
+  done < <(find "${dir}" -mindepth 1 -maxdepth 1 -type l -print 2>/dev/null)
 }
 
 _assert_cube_prefix_marker_or_empty() {

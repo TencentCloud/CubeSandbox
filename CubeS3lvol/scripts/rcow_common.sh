@@ -714,6 +714,38 @@ rcow_target_alive()
 	rcow_target_pid >/dev/null
 }
 
+# Is the lvstore this host runs on loaded in the target?
+#
+# rcow_get_lvstores lists what the running process holds, so a named entry is the
+# attach having completed. Nothing weaker answers the question: the process
+# answers RPCs -- rcow_get_bdev in particular -- before it has attached
+# anything, because the device paths in that answer come from the registry and
+# the host's sysfs, which both survive a hot restart.
+rcow_lvstore_attached()
+{
+	local out
+
+	out="$(RCOW_RPC_TIMEOUT=10 rcow_rpc rcow_get_lvstores 2>/dev/null)" || return 1
+	printf '%s' "${out}" | python3 -c '
+import json, sys
+name = sys.argv[1]
+try:
+    stores = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if any(st.get("lvs_name") == name for st in stores) else 1)
+' "${RCOW_LVS_NAME}"
+}
+
+# Serving, as opposed to merely running: the process is up and its lvstore is
+# attached. Waiting on the process alone is what let an upgrade report success
+# for a replacement that was still attaching, and would go on to crash-loop.
+rcow_target_ready()
+{
+	[ -n "$(rcow_target_instances)" ] || return 1
+	rcow_lvstore_attached
+}
+
 # Record "<boot_id> <pid>" of the live target, for a stop an upgrade is about to
 # ask for. Written by the orchestrator; rcow_upgrade.sh deliberately does not,
 # so only an intent to hot-restart can make the marker read as one.
@@ -1896,7 +1928,11 @@ rcow_verify_active()
 
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
-		--expect) shift; expect="${1:-}" ;;
+		--expect) shift; expect="${1:-}"
+			# An empty value would read as "no comparison asked for" below, and
+			# the caller asking for one is exactly the caller that must not get
+			# it skipped.
+			[ -n "${expect}" ] || rcow_die "--expect needs a snapshot path" ;;
 		*) timeout="$1" ;;
 		esac
 		shift

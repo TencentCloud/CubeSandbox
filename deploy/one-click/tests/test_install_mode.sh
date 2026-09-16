@@ -204,6 +204,30 @@ test_assert_safe_install_prefix() {
   if ( assert_safe_install_prefix "${backup_link_prefix}" ) >/dev/null 2>&1; then
     fail "assert_safe_install_prefix should reject a .backup symlink"
   fi
+
+  # A link that lands inside the root is the versioned-component pattern, spelled
+  # the way install_cubes3lvol_versioned spells it (a bare name pointing at the
+  # versioned directory beside it). Refusing it aborted every upgrade of a tree
+  # this installer built, and did so after the services had been stopped.
+  local inside_prefix="${TMP_DIR}/inside-link-prefix"
+  mkdir -p "${inside_prefix}/CubeS3lvol-v1"
+  : > "${inside_prefix}/.one-click.env"
+  ln -s "CubeS3lvol-v1" "${inside_prefix}/CubeS3lvol"
+  ( assert_safe_install_prefix "${inside_prefix}" ) >/dev/null 2>&1 \
+    || fail "assert_safe_install_prefix should accept a top-level symlink that resolves inside the root"
+
+  # The same, spelled with an absolute target.
+  ln -sfn "${inside_prefix}/CubeS3lvol-v1" "${inside_prefix}/CubeS3lvol"
+  ( assert_safe_install_prefix "${inside_prefix}" ) >/dev/null 2>&1 \
+    || fail "assert_safe_install_prefix should accept an absolute symlink that resolves inside the root"
+
+  # A neighbour whose name merely starts with the root's is still outside it.
+  local neighbour="${TMP_DIR}/inside-link-prefix-neighbour"
+  mkdir -p "${neighbour}"
+  ln -sfn "${neighbour}" "${inside_prefix}/neighbour"
+  if ( assert_safe_install_prefix "${inside_prefix}" ) >/dev/null 2>&1; then
+    fail "assert_safe_install_prefix should reject a link to a sibling whose path only shares a name prefix"
+  fi
 }
 
 test_wipe_custom_install_prefix_contents() {
@@ -579,8 +603,20 @@ test_install_sh_wires_upgrade_flow() {
   assert_contains "${f}" "snapshot_one_click_toggles"
   assert_contains "${f}" "apply_one_click_toggles"
   assert_contains "${f}" "ONE_CLICK_TOGGLE_KEYS"
-  # Stop s3lvol before the target/glob stop so it can flush while MinIO is up.
-  assert_contains "${f}" "systemctl stop cube-sandbox-s3lvol.service"
+  # The s3lvol swap has to happen before anything else is stopped, so its online
+  # flush still has the running target and the S3 endpoint to write through.
+  # install.sh no longer stops the unit itself -- the upgrade orchestrator does,
+  # through the stop script, and the unit is deliberately not PartOf the role
+  # targets -- so what is checked is the ordering of the two, not a stop call.
+  # The invocation shape itself (the prefix travelling with it) is covered in
+  # test_s3lvol_hot_upgrade.sh.
+  local s3lvol_line stop_line
+  s3lvol_line="$(grep -nE '^[[:space:]]*(bash )?"[$][{]PKG_ROOT[}]/scripts/systemd/cube-s3lvol-hot-upgrade[.]sh"' \
+    "${f}" | head -1 | cut -d: -f1 || true)"
+  stop_line="$(grep -nE '^stop_existing_systemd_deployment$' "${f}" | head -1 | cut -d: -f1 || true)"
+  if [[ -z "${s3lvol_line}" || -z "${stop_line}" || "${s3lvol_line}" -ge "${stop_line}" ]]; then
+    fail "install.sh must upgrade s3lvol before stopping the deployment (s3lvol=${s3lvol_line:-missing}, stop=${stop_line:-missing})"
+  fi
   # Disable must clear leftover failed state.
   assert_contains "${f}" "systemctl reset-failed cube-sandbox-s3lvol.service"
 }

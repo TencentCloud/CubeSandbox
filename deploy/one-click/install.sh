@@ -1476,27 +1476,48 @@ s3lvol_component_version() {
 # all working while giving an upgrade two things a plain directory cannot: the
 # new build goes in place while the old one is still running, and the previous
 # build stays reachable if the replacement has to be rolled back.
+# Stage the component under its own version directory, and leave the bare name
+# alone.
+#
+# The switch belongs to switch_cubes3lvol_bare_to, which runs once the build
+# being replaced is no longer running. Until then the bare name has to keep
+# pointing at that build: the unit's stop script reaches its scripts through it,
+# and so does every identity check that recognises the running target -- which
+# is why switching it here takes the running build's own supervisor down
+# mid-swap, and the stop that follows becomes a no-op.
+#
+# Sets S3LVOL_STAGED_DIR to the directory it created.
 install_cubes3lvol_versioned() {
   local src="$1" version prev
 
   version="$(s3lvol_component_version "${src}")"
   [[ -n "${version}" ]] || version="legacy-$(date +%Y%m%d-%H%M%S)"
+  S3LVOL_STAGED_DIR="CubeS3lvol-${version}"
 
   # A bare real directory is the layout from before this. Keep it under its own
-  # version, so the first upgrade of an old install can still roll back.
+  # version, so the first upgrade of an old install can still roll back, and
+  # leave the bare name on it for the reason above.
   if [[ -d "${INSTALL_PREFIX}/CubeS3lvol" && ! -L "${INSTALL_PREFIX}/CubeS3lvol" ]]; then
     prev="$(s3lvol_component_version "${INSTALL_PREFIX}/CubeS3lvol")"
     [[ -n "${prev}" ]] || prev="legacy-$(date +%Y%m%d-%H%M%S)"
     mv -f "${INSTALL_PREFIX}/CubeS3lvol" "${INSTALL_PREFIX}/CubeS3lvol-${prev}"
+    switch_cubes3lvol_bare_to "CubeS3lvol-${prev}"
     log "CubeS3lvol: kept the pre-versioning install as CubeS3lvol-${prev}"
   fi
 
-  rm -rf "${INSTALL_PREFIX}/CubeS3lvol-${version}"
-  mkdir -p "${INSTALL_PREFIX}/CubeS3lvol-${version}"
-  cp -a "${src}/." "${INSTALL_PREFIX}/CubeS3lvol-${version}/"
+  rm -rf "${INSTALL_PREFIX}/${S3LVOL_STAGED_DIR}"
+  mkdir -p "${INSTALL_PREFIX}/${S3LVOL_STAGED_DIR}"
+  cp -a "${src}/." "${INSTALL_PREFIX}/${S3LVOL_STAGED_DIR}/"
 
-  # Put in place through a rename, so the bare name never points at nothing.
-  ln -sfn "CubeS3lvol-${version}" "${INSTALL_PREFIX}/.CubeS3lvol.new"
+  log "CubeS3lvol: staged ${S3LVOL_STAGED_DIR}"
+}
+
+# Point the bare name at one of the version directories -- through a rename, so
+# it never points at nothing -- and keep the two newest for a rollback.
+switch_cubes3lvol_bare_to() {
+  local dir="$1"
+
+  ln -sfn "${dir}" "${INSTALL_PREFIX}/.CubeS3lvol.new"
   mv -Tf "${INSTALL_PREFIX}/.CubeS3lvol.new" "${INSTALL_PREFIX}/CubeS3lvol"
 
   # Keep the build just replaced, which is the one a rollback needs, and drop
@@ -1505,7 +1526,7 @@ install_cubes3lvol_versioned() {
     -printf '%T@ %p\n' 2>/dev/null | sort -rn | awk 'NR>2 {print $2}' |
     while read -r old; do rm -rf "${old}"; done
 
-  log "CubeS3lvol: installed as CubeS3lvol-${version}; the bare name points at it"
+  log "CubeS3lvol: installed as ${dir}; the bare name points at it"
 }
 
 stop_existing_systemd_deployment() {
@@ -1839,6 +1860,12 @@ if [[ -n "${detected_installed_role}" ]]; then
   installed_role="${detected_installed_role}"
 fi
 
+# Last check before anything is touched, and in particular before the services
+# are stopped: a prefix this refuses has to cost nothing, and a refusal after
+# the swap would leave the node with s3lvol upgraded and everything else
+# stopped.
+assert_safe_install_prefix "${INSTALL_PREFIX}"
+
 # CubeS3lvol is staged and upgraded first, in place, before anything else is
 # stopped. Both halves of that need something the steps below would take away:
 # the new component has to be on disk before its version can be compared with
@@ -1848,21 +1875,34 @@ fi
 # is paused for the swap and not for the whole install.
 S3LVOL_UPGRADE_RC=0
 if [[ -d "${PKG_ROOT}/CubeS3lvol" ]]; then
-  # Captured before staging: once the bare name points at the new build there is
-  # nothing left to resolve the outgoing one through.
+  # Captured before staging: the orchestrator switches the bare name itself, and
+  # once it has, there is nothing left to resolve the outgoing build through.
   S3LVOL_OLD_DIR="$(readlink -f "${INSTALL_PREFIX}/CubeS3lvol" 2>/dev/null || true)"
 
   # Staged regardless of the enable switch, so the component is where the next
   # enabling install expects it; the upgrade only runs when the switch is on.
+  # The bare name stays on the outgoing build until the swap -- see the function.
   install_cubes3lvol_versioned "${PKG_ROOT}/CubeS3lvol"
   # Out of the package tree either way, so the whole-tree copy below cannot
   # write through the bare name into the version directory it points at.
   rm -rf "${PKG_ROOT}/CubeS3lvol"
 
   if [[ "${ONE_CLICK_ENABLE_S3LVOL}" == "1" ]]; then
-    S3LVOL_NEW_DIR="$(basename "$(readlink -f "${INSTALL_PREFIX}/CubeS3lvol")")"
-    "${PKG_ROOT}/scripts/systemd/cube-s3lvol-hot-upgrade.sh" \
-      "${S3LVOL_NEW_DIR}" "${S3LVOL_OLD_DIR}" || S3LVOL_UPGRADE_RC=$?
+    # Out of the package tree, so an upgrade never runs the copy it is replacing
+    # -- an install from before this has the old script, or none. The prefix has
+    # to travel with it for that reason: this copy's own directory is the
+    # package, not the install. Through bash, so a missing exec bit in either
+    # tree cannot decide whether the upgrade happens.
+    #
+    # This also switches the bare name, and only once the target it replaces is
+    # dead. A swap that is refused or fails therefore leaves the outgoing build
+    # installed, which is the build that is still running.
+    TOOLBOX_ROOT="${INSTALL_PREFIX}" \
+      bash "${PKG_ROOT}/scripts/systemd/cube-s3lvol-hot-upgrade.sh" \
+        "${S3LVOL_STAGED_DIR}" "${S3LVOL_OLD_DIR}" || S3LVOL_UPGRADE_RC=$?
+  else
+    # Nothing is going to start it, so the bare name is put in place here.
+    switch_cubes3lvol_bare_to "${S3LVOL_STAGED_DIR}"
   fi
 fi
 
@@ -1879,8 +1919,6 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
     log "env merge diff written to ${UPGRADE_BACKUP_DIR}/env-diff.txt"
   fi
 fi
-
-assert_safe_install_prefix "${INSTALL_PREFIX}"
 
 # Inventory component_versions before replacing toolbox.
 inventory_package_component_versions

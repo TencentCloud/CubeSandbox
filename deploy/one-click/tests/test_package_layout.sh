@@ -294,6 +294,13 @@ is_reinstall_cleanup_exception() {
     terraform)
       return 0
       ;;
+    # CubeS3lvol is installed into a versioned directory with the bare name as a
+    # symlink to it, and both are staged before this cleanup runs. Removing the
+    # bare name here would leave the service with nothing to start, and the
+    # versioned directories are what a rollback needs.
+    CubeS3lvol)
+      return 0
+      ;;
     *)
       return 1
       ;;

@@ -21,6 +21,10 @@
 #
 # Usage: cube-s3lvol-hot-upgrade.sh <new-version-directory-name> [old-version-directory]
 #
+# The install prefix is TOOLBOX_ROOT, and it has to be given to any copy that
+# does not sit in the install tree itself: install.sh runs this out of the
+# package, where the directory above is the package and not the install.
+#
 # The old directory is passed in by install.sh, which has to capture it before
 # it stages the new one: once the bare name has been switched there is nothing
 # left to resolve it through. Without the argument -- a hand invocation -- it is
@@ -35,11 +39,13 @@
 set -u
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Correct as derived only for the copy that lives in the install tree; the copy
+# install.sh runs out of the package tree has to be told, because there its own
+# directory is the package.
 TOOLBOX_ROOT="${TOOLBOX_ROOT:-$(cd "${SELF_DIR}/../.." && pwd)}"
 INSTALL_PREFIX="${TOOLBOX_ROOT}"
 BARE="${INSTALL_PREFIX}/CubeS3lvol"
 SERVICE="cube-sandbox-s3lvol.service"
-SNAPSHOT="/var/tmp/rcow/hot-upgrade.snapshot"
 
 log() { echo "[one-click] CubeS3lvol: $*"; }
 warn() { echo "[one-click] CubeS3lvol: WARNING: $*" >&2; }
@@ -50,8 +56,11 @@ if [ -z "${NEW_VERSION}" ]; then
   exit 2
 fi
 NEW_DIR="${INSTALL_PREFIX}/${NEW_VERSION}"
-if [ ! -x "${NEW_DIR}/scripts/rcow_common.sh" ]; then
+if [ ! -f "${NEW_DIR}/scripts/rcow_common.sh" ]; then
   warn "'${NEW_DIR}' does not look like a CubeS3lvol install"
+  warn "  (install prefix ${INSTALL_PREFIX}; set TOOLBOX_ROOT when running this \
+copy from outside the install tree -- install.sh, which runs it out of the \
+package, passes it)"
   exit 2
 fi
 
@@ -114,29 +123,46 @@ stop_and_confirm() {
   return 1
 }
 
-# Start the service and wait for the target to be up.
+# Start the service and wait until the replacement is serving.
 #
 # `systemctl start` on a Type=simple unit returns when the supervise process is
-# running, not when the target it supervises is up -- and a supervise whose
-# rcow_start.sh failed exits and restarts, so "start returned 0" says nothing
-# about the outcome. What says something is a target being there.
+# running, not when the target it supervises is up, and a supervise whose
+# rcow_start.sh failed exits and restarts -- so "start returned 0" says nothing
+# about the outcome. Neither does a target process being there: the process
+# answers RPCs, rcow_get_bdev among them, while it is still attaching, because
+# the device paths in that answer come from the registry and the host's sysfs,
+# which the kill left in place. Returning there is what let an upgrade report
+# success for a replacement that had not attached its lvstore, and go on to stop
+# the S3 endpoint the attach still needed.
+#
+# The attach is the long part (tens of seconds with a replay), so the wait is
+# sized for it rather than for process startup.
 start_and_wait() {
   systemctl reset-failed "${SERVICE}" >/dev/null 2>&1 || true
   systemctl start "${SERVICE}" >/dev/null 2>&1 || return 1
   local i
-  for i in $(seq 1 60); do
-    if [ -n "$(rcow_target_instances)" ]; then
+  for i in $(seq 1 90); do
+    if rcow_target_ready; then
       return 0
     fi
     sleep 2
   done
+  if [ -z "$(rcow_target_instances)" ]; then
+    warn "no target came up within 180s"
+  else
+    warn "a target is running but has still not attached its lvstore after 180s"
+    warn "  it is not serving, and the rest of the install is waiting on it"
+  fi
   return 1
 }
 
 # Nothing running is not a failure: the install's own start brings the new build
-# up, and that is the upgrade.
+# up, and that is the upgrade. The bare name is still on the outgoing build here
+# -- the caller stages without switching -- and nothing is left running that
+# needs it, so this is where it moves.
 if [ -z "$(rcow_target_instances)" ]; then
-  log "no target is running; the new build comes up with the rest of the install"
+  switch_bare_to "${NEW_VERSION}"
+  log "no target is running; the bare name now points at ${NEW_VERSION}"
   exit 0
 fi
 
@@ -182,6 +208,16 @@ if [ "${MODE}" = "hot" ]; then
 fi
 
 if [ "${MODE}" = "hot" ]; then
+  # The hot stop rewrites this before it kills, so what is there afterwards is
+  # this run's. A leftover from an earlier upgrade would otherwise be compared
+  # against as if it described the layout being swapped now.
+  rm -f "${RCOW_HOT_SNAPSHOT}"
+  # `reset-failed` first, as the cold path does: a stop on a failed unit is a
+  # no-op that reports success, and a unit left failed by an earlier refusal or
+  # crash-loop is a state this can arrive in. Without it the stop does nothing
+  # while claiming to have done something, and the target it was asked to
+  # replace is still there for the guard below to refuse.
+  systemctl reset-failed "${SERVICE}" >/dev/null 2>&1 || true
   if ! systemctl stop "${SERVICE}"; then
     warn "the in-place stop failed; falling back to a cold stop"
     MODE=cold
@@ -212,17 +248,22 @@ log "the bare name now points at ${NEW_VERSION}"
 # The hot path leaves a snapshot from its own online step, so the layout can be
 # compared position by position. A cold stop has none -- its stop is the planned
 # one, which restores the grid from bstore.json and the registry -- so there the
-# check is the weaker "every recorded volume resolves".
+# check is the weaker "every recorded volume resolves". VERIFY_NOTE says which
+# one ran, so the success line cannot report the strong check for the weak one.
+VERIFY_NOTE=""
 verify() {
-  if [ "${MODE}" = "hot" ] && [ -s "${SNAPSHOT}" ]; then
-    rcow_verify_active --expect "${SNAPSHOT}" 60
+  if [ "${MODE}" = "hot" ] && [ -s "${RCOW_HOT_SNAPSHOT}" ]; then
+    VERIFY_NOTE="the layout is the one it had before"
+    rcow_verify_active --expect "${RCOW_HOT_SNAPSHOT}" 60
   else
+    VERIFY_NOTE="every recorded volume resolves; no layout snapshot was taken"
     rcow_verify_active 60
   fi
 }
 
-if start_and_wait && verify >/dev/null 2>&1; then
-  log "upgraded; the layout is the one it had before"
+# Not silenced: when this fails, which fields moved is the operator's only clue.
+if start_and_wait && verify; then
+  log "upgraded; ${VERIFY_NOTE}"
   exit 0
 fi
 

@@ -314,7 +314,18 @@ rcow_step "killing the target"
 # and a surviving target read as gone is the one mistake this script must not
 # make: the caller would start a replacement over a WAL the old process still
 # holds.
-TGT_EXE="$(rcow_pid_exe "${TGT_PID}")"
+TGT_EXE="$(rcow_pid_exe "${TGT_PID}")" || :
+if [ -z "${TGT_EXE}" ]; then
+	# An empty capture is the one answer the poll below cannot tell apart from a
+	# failed read, and reading a live target as gone is the mistake just named.
+	# Refuse rather than clean up after a process that may still hold the WAL --
+	# the same posture as the unreachable-target branch above. Not fail_live,
+	# whose second line asserts the target is running: that is the very thing
+	# this branch cannot confirm.
+	rcow_err "cannot read the identity of pid ${TGT_PID}; nothing was signalled \
+and no residue was removed"
+	exit 1
+fi
 
 if ! kill -KILL "${TGT_PID}" 2>/dev/null; then
 	rcow_warn "pid ${TGT_PID} could not be signalled; it may already have \

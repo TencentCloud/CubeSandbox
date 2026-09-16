@@ -1042,3 +1042,48 @@ else:
 PY
 	)
 fi
+
+# ---------------------------------------------------------------- [13]
+scenario "[13] the argument guards refuse rather than skip"
+
+# --expect names the pre-upgrade snapshot the live layout is compared against,
+# so an empty value is not "no comparison asked for": the caller that asks for
+# the comparison is exactly the one that must not get it skipped. Both spellings
+# have to be refused -- an empty string, and the flag with nothing after it.
+#
+# Asserted on the refusal's own message, not on its exit status: the other way
+# this can fail is having no target to talk to, which exits non-zero too, and an
+# unpatched script would then pass this check. The socket is pointed at nothing
+# for the same reason -- with a live target, an unpatched rcow_verify_active
+# would run the comparison and could well succeed.
+#
+# In a subshell: rcow_die exits, and this is the suite's shell.
+expect_arg_refused()
+{
+	local label="$1" want="$2"
+	shift 2
+	local out="" rc=0
+
+	out="$(RCOW_RPC_SOCK="${RCOW_RUN_DIR}/nonexistent.sock" \
+		RCOW_RPC_TIMEOUT=2 \
+		bash -c '
+			set -u
+			# shellcheck source=/dev/null
+			. "$1"
+			shift
+			rcow_verify_active "$@"
+		' _ "${SCRIPTS}/rcow_common.sh" "$@" 2>&1)" || rc=$?
+
+	if [ "${rc}" -eq 0 ]; then
+		fail "${label}: accepted, so the comparison it asked for is skipped"
+	elif ! printf '%s' "${out}" | grep -qF -- "${want}"; then
+		fail "${label}: refused, but not as an argument error: ${out}"
+	else
+		pass "${label} is refused as an argument error"
+	fi
+}
+
+expect_arg_refused "an empty --expect" \
+	"--expect needs a snapshot path" --expect ""
+expect_arg_refused "--expect with nothing after it" \
+	"--expect needs a snapshot path" --expect
