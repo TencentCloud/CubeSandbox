@@ -1858,8 +1858,10 @@ func validateSchedulerScorePluginConfig(s *SchedulerConf, builtin bool) error {
 
 // validateScorerPolarityMix rejects listing occupancy (binpack) and remaining-
 // capacity spread scorers together under a Profile — their scores cancel in
-// runScoreFilter's weighted sum. Empty-profile configs keep pre-upgrade load
-// behavior (docs warn; no Init failure) so this check stays Profile-scoped.
+// runScoreFilter's weighted sum. Explicitly disabled scorers (disable=true /
+// weight:0) are skipped so staging/rollback configs match runScoreFilter.
+// Empty-profile configs keep pre-upgrade load behavior (docs warn; no Init
+// failure) so this check stays Profile-scoped.
 func validateScorerPolarityMix(s *SchedulerConf) error {
 	if s == nil || s.Score == nil {
 		return nil
@@ -1867,6 +1869,9 @@ func validateScorerPolarityMix(s *SchedulerConf) error {
 	hasBinpack := false
 	hasSpread := false
 	for _, name := range s.Score.EnableScorers {
+		if scorerPluginExplicitlyDisabled(s, name) {
+			continue
+		}
 		switch name {
 		case "binpack_score":
 			hasBinpack = true

@@ -192,6 +192,8 @@ scheduler:
   profiles:
     balanced_spread:
       allow_dropped_filters: true
+      # 若基础 enable_scorers 非空（例如已有 external_http_score），需要：
+      allow_dropped_scorers: true
 ```
 
 `template_locality_first`（重复同模板创建）同样提供安全的 `image_score` 默认：
@@ -202,6 +204,7 @@ scheduler:
   profiles:
     template_locality_first:
       allow_dropped_filters: true
+      allow_dropped_scorers: true
 ```
 
 `binpack_utilization`（混合规格 / 长生命周期）在省略插件块时注入插件权重 1 以及
@@ -213,12 +216,15 @@ scheduler:
   profiles:
     binpack_utilization:
       allow_dropped_filters: true
+      allow_dropped_scorers: true
 ```
 
 这些覆盖层是面向场景的选择器组合。它们**不是**模拟器 `weightsForProfile`，也
 **不做**任何真实性能宣称。请记住上文的 filter 替换警告：内置会用更短列表替换
 `enable_filters`，可能丢掉基础配置中的 `disk` / `thirtparty` 等准入过滤器——在更长
-基础列表上需上述同名 `allow_dropped_filters: true` opt-in。
+基础列表上需上述同名 `allow_dropped_filters: true` opt-in。内置也会替换
+`enable_scorers`；若基础列表已含运维 scorer（如 `external_http_score`），请设置
+`allow_dropped_scorers: true`（见上）或把这些名称保留在 Profile 的 scorer 列表中。
 
 ## 最小 Profile 示例
 

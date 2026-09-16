@@ -835,6 +835,36 @@ scheduler:
 	assert.Contains(t, err.Error(), "polarities cancel")
 }
 
+func TestInit_ProfilePolarityMixAllowsDisabledBinpack(t *testing.T) {
+	// Documented staging: keep binpack in enable_scorers with disable:true while
+	// a spread scorer stays active — runScoreFilter skips disabled scorers, so
+	// polarity cancellation cannot occur.
+	yamlBody := `common: {}
+log: {}
+scheduler:
+  profile: staged
+  profiles:
+    staged:
+      score:
+        enable_scorers:
+          - binpack_score
+          - real_time_weighted_average
+        resource_weights:
+          mvm_num: 1
+  score:
+    plugin_conf:
+      binpack_score:
+        disable: true
+      real_time_weighted_average:
+        weight: 1
+        enable_weight_factors: [mvm_num]
+`
+	got, err := initConfigFromYAML(t, yamlBody)
+	assert.NoError(t, err)
+	assert.Equal(t, "staged", got.Scheduler.Profile)
+	assert.True(t, got.Scheduler.Score.ScorePluginConf.BinpackScore.Disable)
+}
+
 func TestInit_DirectEnabledScorerMissingPluginConfigAllowedWithoutProfile(t *testing.T) {
 	// Empty-profile: binpack_score may omit plugin_conf and use runtime defaults.
 	yamlBody := `common: {}

@@ -568,6 +568,7 @@ export default withMermaid(defineConfig({
                 { text: 'Scheduler Profile 配置示例', link: '/zh/dev/scheduler-profile-config-example' },
                 { text: 'External HTTP Score 运维路径', link: '/zh/dev/external-http-score-operator' },
                 { text: 'External HTTP Score', link: '/zh/dev/external-http-score' },
+                // EN-only pack (no docs/zh/... mirror); absolute /dev path is intentional.
                 { text: '课题一熔断消融结论', link: '/dev/topic1-enhancement-ablation-20260914/' }
               ]
             }

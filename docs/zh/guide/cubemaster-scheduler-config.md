@@ -406,7 +406,7 @@ scheduler:
 | `mode` | 可选的运营自定义字符串，写入请求 JSON。 |
 | `disable` | 为 true 时即使已 enable 也是空操作；与 `weight` 一样热读。有意关闭请优先用 `disable: true`（立即生效）。**不要**在 `enable_scorers` 仍保留该名字时删掉整个 `plugin_conf.external_http_score` 块：`validateListedScorerPluginConfPresent` 会在启动与热加载时**拒绝**该配置（`preHandle` 失败；`CubeLog.Fatalf` **不会** `os.Exit`，因此旧 Config 继续生效，评分仍按旧块进行）。要停用该评分器：设 `disable: true`，或从 `enable_scorers` 去掉该名字并**重启** CubeMaster（选择器集合仅在启动时构建）。nil-`plugin_conf` / 日志类别 `plugin_conf_absent` 路径实质上是**测试 / 陈旧实例**场景：只有热加载成功同时去掉名字与块、而旧 scorer 实例仍留在内存直到重启时才会触发——并非「删块但保留名字」。 |
 | `failure_policy` | Sidecar 失败处理。**省略 / 空 / 未知值默认 `fail_open`**：`Select` 返回普通错误，`runScoreFilter` 跳过该 scorer（历史 create 路径行为）。设为 `fail_closed` 时返回类型化 `FailClosedError`，使 `runScoreFilter` **中止整段 Score**（调度器范围，而非插件局部）：已聚合的先前 scorer 分数会被丢弃，创建以失败关闭结束（`ErrorCode_SelectNodesFailed`，消息为脱敏类别）。无法把 `fail_closed` 限定到「仅金丝雀 sidecar、其它 scorer 继续」。 |
-| `circuit_breaker` | 连续 sidecar 失败后打开熔断，后续 Score 立即失败而不再等待完整 HTTP 超时。经过 `open_duration` 后允许最多 `half_open_max_probes` 次探测；成功则关闭熔断，失败则重新打开。省略该块或字段为 `0` 时使用默认（`failure_threshold: 5`，`open_duration: 5s`，`half_open_max_probes: 1`）。设 `disable: true` 关闭熔断（同时清除该 host 的 `circuit_state` 序列）。将 `endpoint` 改到不同 host 会废弃旧 host 的进程内熔断条目与 gauge。 |
+| `circuit_breaker` | 连续 sidecar 失败后打开熔断，后续 Score 立即失败而不再等待完整 HTTP 超时。经过 `open_duration` 后允许最多 `half_open_max_probes` 次探测；**半开探测**成功才关闭熔断，失败则重新打开。在熔断仍关闭时已准入、但返回时电路已打开的请求成功，**不会**取消已打开的窗口。省略该块或字段为 `0` 时使用默认（`failure_threshold: 5`，`open_duration: 5s`，`half_open_max_probes: 1`）。设 `disable: true` 关闭熔断（同时清除该 host 的 `circuit_state` 序列）。将 `endpoint` 改到不同 host 会废弃旧 host 的进程内熔断条目与 gauge。 |
 
 ### 传输协议
 

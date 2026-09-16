@@ -224,6 +224,8 @@ scheduler:
   profiles:
     balanced_spread:
       allow_dropped_filters: true
+      # Required if base enable_scorers is non-empty (e.g. external_http_score):
+      allow_dropped_scorers: true
 ```
 
 `template_locality_first` (repeated same-template creates) likewise supplies
@@ -235,6 +237,7 @@ scheduler:
   profiles:
     template_locality_first:
       allow_dropped_filters: true
+      allow_dropped_scorers: true
 ```
 
 `binpack_utilization` (mixed-size / long-lived) injects plugin weight 1 and
@@ -246,6 +249,7 @@ scheduler:
   profiles:
     binpack_utilization:
       allow_dropped_filters: true
+      allow_dropped_scorers: true
 ```
 
 These overlays are scene-oriented selector combinations. They are **not**
@@ -254,6 +258,10 @@ performance claims. Remember the filter-replace warning above: built-ins
 replace `enable_filters` with a shorter list and can drop `disk` /
 `thirtparty` / other base admission filters — the same-name
 `allow_dropped_filters: true` opt-in above is required on longer base lists.
+Built-ins also replace `enable_scorers`; if the base list already includes
+operator scorers (for example `external_http_score`), set
+`allow_dropped_scorers: true` (as in the blocks above) or keep those names in
+the Profile scorer list.
 
 ## Minimal Profile Example
 
