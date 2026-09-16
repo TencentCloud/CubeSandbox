@@ -19,7 +19,7 @@
 #include "s3lvol/s3_client.h"
 
 #define CHUNK_SIZE (1024 * 1024)
-#define NUM_CHUNKS 160
+#define NUM_CHUNKS 256
 #define TEST_UUID  "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
 #define MAX_GETS   512
 
@@ -164,6 +164,18 @@ complete_get_data(uint32_t index, const void *data, uint64_t bytes)
 	get->cb(get->cb_arg, bytes, 0);
 }
 
+static void
+complete_outstanding(void)
+{
+	uint32_t i;
+
+	for (i = 0; i < g_ngets; i++) {
+		if (!g_gets[i].done) {
+			complete_get(i, 0, g_gets[i].len);
+		}
+	}
+}
+
 struct read_result {
 	struct spdk_bs_dev_cb_args cb_args;
 	bool done;
@@ -233,7 +245,7 @@ make_manifest(void)
 		memset(raw, (int)(i + 1), sizeof(raw));
 		memcpy(&uuid, raw, sizeof(uuid));
 		if (s3_export_manifest_set_ref(m, i, &uuid,
-					      i == 3 ? 64 * 1024 : CHUNK_SIZE) != 0) {
+					      i == 20 ? 64 * 1024 : CHUNK_SIZE) != 0) {
 			s3_export_manifest_unref(m);
 			return NULL;
 		}
@@ -253,6 +265,7 @@ main(void)
 	struct read_result a, b, hit, retained, short_ref, cross_a, cross_b;
 	struct read_result missing_a, missing_b, post_swap;
 	struct read_result seq_a, seq_b, prefetch_hit;
+	struct read_result direct, direct_join, joined_slice;
 	struct read_result destroy_seq_a, destroy_seq_b;
 	struct read_result oom;
 	struct read_result many[65];
@@ -306,9 +319,9 @@ main(void)
 	printf("\n[1] overlapping reads share one whole-object GET\n");
 	submit_read(dev, &a, 4 * 1024, 4 * 1024);
 	submit_read(dev, &b, 8 * 1024, 4 * 1024);
-	check_u64("one GET is in flight", g_ngets, 1);
+	check_u64("demand plus eight prefetches are in flight", g_ngets, 9);
 	check_u64("GET starts at object offset zero", g_gets[0].offset, 0);
-	check_u64("GET covers the whole object", g_gets[0].len, CHUNK_SIZE);
+	check_u64("demand GET covers the whole object", g_gets[0].len, CHUNK_SIZE);
 	check_true("both reads wait", !a.done && !b.done);
 	complete_get(0, 0, CHUNK_SIZE);
 	check_true("both reads complete", a.done && b.done);
@@ -320,25 +333,57 @@ main(void)
 	printf("\n[2] the completed object remains in the small RAM LRU\n");
 	submit_read(dev, &hit, 12 * 1024, 4 * 1024);
 	check_true("LRU hit completes synchronously", hit.done && hit.status == 0);
-	check_u64("LRU hit submits no GET", g_ngets, 1);
+	check_u64("LRU hit submits no GET", g_ngets, 9);
 	check_true("LRU slice is correct",
 		   buffer_has_pattern(&hit, 12 * 1024, hit.len));
+	complete_outstanding();
 
-	printf("\n[3] a short REF object is fetched only to valid_bytes\n");
-	submit_read(dev, &short_ref, 3ULL * CHUNK_SIZE + 60 * 1024, 8 * 1024);
-	check_u64("short object adds one GET", g_ngets, 2);
-	check_u64("GET is clamped to valid_bytes", g_gets[1].len, 64 * 1024);
-	complete_get(1, 0, 64 * 1024);
+	printf("\n[3] a sole whole-object read is filled directly\n");
+	first = g_ngets;
+	submit_read(dev, &direct, 18ULL * CHUNK_SIZE, CHUNK_SIZE);
+	check_u64("whole-object demand adds one GET", g_ngets, first + 1);
+	check_true("GET targets the caller's buffer",
+		   g_gets[first].buf == direct.buf);
+	complete_get(first, 0, CHUNK_SIZE);
+	check_true("direct whole-object read completes",
+		   direct.done && direct.status == 0);
+	check_true("direct whole-object bytes are correct",
+		   buffer_has_pattern(&direct, 18ULL * CHUNK_SIZE, direct.len));
+
+	printf("\n[4] a waiter joining a direct GET safely restores staging\n");
+	first = g_ngets;
+	submit_read(dev, &direct_join, 151ULL * CHUNK_SIZE, CHUNK_SIZE);
+	submit_read(dev, &joined_slice, 151ULL * CHUNK_SIZE + 4 * 1024,
+		    4 * 1024);
+	check_u64("joined whole-object demand still uses one GET",
+		  g_ngets, first + 1);
+	check_true("the GET initially targets the full request",
+		   g_gets[first].buf == direct_join.buf);
+	complete_get(first, 0, CHUNK_SIZE);
+	check_true("full request and joined slice both complete",
+		   direct_join.done && direct_join.status == 0 &&
+		   joined_slice.done && joined_slice.status == 0);
+	check_true("joined slice receives the requested bytes",
+		   buffer_has_pattern(&joined_slice,
+				      151ULL * CHUNK_SIZE + 4 * 1024,
+				      joined_slice.len));
+
+	printf("\n[5] a short REF object is fetched only to valid_bytes\n");
+	first = g_ngets;
+	submit_read(dev, &short_ref, 20ULL * CHUNK_SIZE + 60 * 1024, 8 * 1024);
+	check_u64("short object adds one GET", g_ngets, first + 1);
+	check_u64("GET is clamped to valid_bytes", g_gets[first].len, 64 * 1024);
+	complete_get(first, 0, 64 * 1024);
 	check_true("short-object read completes", short_ref.done && short_ref.status == 0);
 	check_true("bytes inside the object are copied",
 		   buffer_has_pattern(&short_ref, 60 * 1024, 4 * 1024));
 	check_true("bytes past valid_bytes are zero",
 		   short_ref.buf[4 * 1024] == 0 && short_ref.buf[short_ref.len - 1] == 0);
 
-	printf("\n[4] local admission queues beyond 64 without exact GETs\n");
+	printf("\n[6] local admission queues beyond 64 without exact GETs\n");
 	first = g_ngets;
 	for (i = 0; i < 65; i++) {
-		submit_read(dev, &many[i], (uint64_t)(i * 2 + 2) * CHUNK_SIZE,
+		submit_read(dev, &many[i], (uint64_t)(2 * i + 22) * CHUNK_SIZE,
 			    4 * 1024);
 	}
 	check_u64("only 64 whole GETs are active", g_ngets - first, 64);
@@ -364,11 +409,11 @@ main(void)
 	check_true("retained object is served from RAM",
 		   retained.done && retained.status == 0);
 
-	printf("\n[5] a waiter completes on its own SPDK thread\n");
+	printf("\n[7] a waiter completes on its own SPDK thread\n");
 	first = g_ngets;
-	submit_read(dev, &cross_a, 132ULL * CHUNK_SIZE, 4 * 1024);
+	submit_read(dev, &cross_a, 200ULL * CHUNK_SIZE, 4 * 1024);
 	spdk_set_thread(thread2);
-	submit_read(dev, &cross_b, 132ULL * CHUNK_SIZE + 4 * 1024, 4 * 1024);
+	submit_read(dev, &cross_b, 200ULL * CHUNK_SIZE + 4 * 1024, 4 * 1024);
 	spdk_set_thread(thread);
 	check_u64("cross-thread reads share one GET", g_ngets, first + 1);
 	complete_get(first, 0, CHUNK_SIZE);
@@ -379,24 +424,25 @@ main(void)
 		   cross_b.done && cross_b.status == 0);
 	spdk_set_thread(thread);
 
-	printf("\n[6] a successful short GET fails every waiter\n");
+	printf("\n[8] a successful short GET fails every waiter\n");
 	first = g_ngets;
 	free(many[0].buf);
-	submit_read(dev, &many[0], 134ULL * CHUNK_SIZE + 4 * 1024, 4 * 1024);
+	submit_read(dev, &many[0], 202ULL * CHUNK_SIZE + 4 * 1024, 4 * 1024);
 	check_u64("short-read case has an outstanding GET", g_ngets, first + 1);
 	complete_get(first, 0, CHUNK_SIZE - 4096);
 	check_true("short successful response becomes EIO",
 		   many[0].done && many[0].status == -EIO);
 
-	printf("\n[7] sequential demand starts eight low-priority prefetches\n");
+	printf("\n[9] sequential demand starts eight low-priority prefetches\n");
 	first = g_ngets;
-	submit_read(dev, &seq_a, 140ULL * CHUNK_SIZE, 4 * 1024);
+	submit_read(dev, &seq_a, 210ULL * CHUNK_SIZE, 4 * 1024);
+	check_u64("a jump does not prefetch", g_ngets, first + 1);
 	complete_get(first, 0, CHUNK_SIZE);
 	first = g_ngets;
-	submit_read(dev, &seq_b, 141ULL * CHUNK_SIZE, 4 * 1024);
+	submit_read(dev, &seq_b, 211ULL * CHUNK_SIZE, 4 * 1024);
 	check_u64("one demand plus eight prefetch GETs are submitted",
 		  g_ngets - first, 9);
-	submit_read(dev, &prefetch_hit, 142ULL * CHUNK_SIZE, 4 * 1024);
+	submit_read(dev, &prefetch_hit, 212ULL * CHUNK_SIZE, 4 * 1024);
 	check_u64("demand joins the prefetched object", g_ngets - first, 9);
 	complete_get(first, 0, CHUNK_SIZE);
 	complete_get(first + 1, 0, CHUNK_SIZE);
@@ -405,8 +451,14 @@ main(void)
 	for (i = 2; i < 9; i++) {
 		complete_get(first + i, 0, CHUNK_SIZE);
 	}
+	first = g_ngets;
+	free(seq_b.buf);
+	submit_read(dev, &seq_b, 211ULL * CHUNK_SIZE + 8 * 1024, 4 * 1024);
+	check_true("READY prefetch is served from RAM",
+		   seq_b.done && seq_b.status == 0);
+	check_u64("READY prefetch submits no GET", g_ngets, first);
 
-	printf("\n[8] a shared 404 refetches and retries on the new generation\n");
+	printf("\n[10] a shared 404 refetches and retries on the new generation\n");
 	rc = s3_export_manifest_create(TEST_UUID,
 				       (uint64_t)NUM_CHUNKS * CHUNK_SIZE,
 				       CHUNK_SIZE, S3_EXPORT_LAYOUT_DENSE,
@@ -425,8 +477,8 @@ main(void)
 		check_true("replacement manifest serialized", rc == 0);
 	}
 	first = g_ngets;
-	submit_read(dev, &missing_a, 134ULL * CHUNK_SIZE, 4 * 1024);
-	submit_read(dev, &missing_b, 134ULL * CHUNK_SIZE + 4 * 1024, 4 * 1024);
+	submit_read(dev, &missing_a, 230ULL * CHUNK_SIZE, 4 * 1024);
+	submit_read(dev, &missing_b, 230ULL * CHUNK_SIZE + 4 * 1024, 4 * 1024);
 	check_u64("missing reads share one object GET", g_ngets, first + 1);
 	complete_get(first, -ENOENT, 0);
 	spdk_thread_poll(thread, 0, 0);
@@ -446,21 +498,22 @@ main(void)
 	check_true("both retried reads complete",
 		   missing_a.done && missing_a.status == 0 &&
 		   missing_b.done && missing_b.status == 0);
+	complete_outstanding();
 
-	/* Chunk 132 still has a successful REF-layout object in the working set.
+	/* Chunk 200 still has a successful REF-layout object in the working set.
 	 * The dense generation names another key, so it must not hit that entry. */
 	first = g_ngets;
-	submit_read(dev, &post_swap, 132ULL * CHUNK_SIZE, 4 * 1024);
+	submit_read(dev, &post_swap, 200ULL * CHUNK_SIZE, 4 * 1024);
 	check_u64("post-swap read does not hit the old-key LRU entry",
 		  g_ngets, first + 1);
 	complete_get(first, 0, CHUNK_SIZE);
 	check_true("post-swap read completes from the new key",
 		   post_swap.done && post_swap.status == 0);
 
-	printf("\n[9] staging OOM after admission falls back to an exact GET\n");
+	printf("\n[11] staging OOM after admission falls back to an exact GET\n");
 	g_fail_next_range = -ENOMEM;
 	first = g_ngets;
-	submit_read(dev, &oom, 148ULL * CHUNK_SIZE + 8 * 1024, 4 * 1024);
+	submit_read(dev, &oom, 220ULL * CHUNK_SIZE + 8 * 1024, 4 * 1024);
 	check_u64("failed whole GET is replaced by one exact range GET",
 		  g_ngets, first + 1);
 	check_u64("exact fallback starts at the requested offset",
@@ -472,12 +525,14 @@ main(void)
 	check_true("exact fallback copied the requested bytes",
 		   buffer_has_pattern(&oom, 8 * 1024, oom.len));
 
-	printf("\n[10] destroy waits for in-flight prefetch GETs\n");
+	printf("\n[12] destroy waits for in-flight prefetch GETs\n");
 	first = g_ngets;
-	submit_read(dev, &destroy_seq_a, 150ULL * CHUNK_SIZE, 4 * 1024);
+	submit_read(dev, &destroy_seq_a, 240ULL * CHUNK_SIZE, 4 * 1024);
+	check_u64("destroy case jump submits only demand", g_ngets, first + 1);
 	complete_get(first, 0, CHUNK_SIZE);
+	check_true("destroy-case jump completes", destroy_seq_a.done);
 	first = g_ngets;
-	submit_read(dev, &destroy_seq_b, 151ULL * CHUNK_SIZE, 4 * 1024);
+	submit_read(dev, &destroy_seq_b, 241ULL * CHUNK_SIZE, 4 * 1024);
 	check_u64("destroy case starts demand plus eight prefetches",
 		  g_ngets - first, 9);
 	complete_get(first, 0, CHUNK_SIZE);
@@ -504,6 +559,9 @@ main(void)
 	free(seq_a.buf);
 	free(seq_b.buf);
 	free(prefetch_hit.buf);
+	free(direct.buf);
+	free(direct_join.buf);
+	free(joined_slice.buf);
 	free(oom.buf);
 	free(destroy_seq_a.buf);
 	free(destroy_seq_b.buf);
@@ -511,7 +569,7 @@ main(void)
 		free(many[i].buf);
 	}
 
-	printf("\n[11] process-wide whole-GET budget is exactly 256\n");
+	printf("\n[13] process-wide whole-GET budget is exactly 256\n");
 	bool all_immediate = true;
 	for (i = 0; i < S3_WHOLE_GET_MAX_INFLIGHT; i++) {
 		rc = s3_whole_get_token_acquire(false, token_granted,

@@ -170,7 +170,7 @@ overlay_chunk_create(struct s3_overlay *ov, uint64_t chunk_index)
 
 	ov->chunks[chunk_index] = c;
 	TAILQ_INSERT_TAIL(&ov->live_q, c, live_link);
-	ov->live_chunks++;
+	__atomic_fetch_add(&ov->live_chunks, 1, __ATOMIC_RELEASE);
 
 	return c;
 }
@@ -263,8 +263,8 @@ overlay_chunk_maybe_free(struct s3_overlay *ov, struct overlay_chunk *c)
 	}
 
 	TAILQ_REMOVE(&ov->live_q, c, live_link);
-	assert(ov->live_chunks > 0);
-	ov->live_chunks--;
+	assert(__atomic_load_n(&ov->live_chunks, __ATOMIC_RELAXED) > 0);
+	__atomic_fetch_sub(&ov->live_chunks, 1, __ATOMIC_RELEASE);
 
 	ov->chunks[c->index] = NULL;
 	free(c);
@@ -996,7 +996,7 @@ s3_overlay_get_bytes(const struct s3_overlay *ov)
 uint64_t
 s3_overlay_get_live_chunks(const struct s3_overlay *ov)
 {
-	return ov ? ov->live_chunks : 0;
+	return ov ? __atomic_load_n(&ov->live_chunks, __ATOMIC_ACQUIRE) : 0;
 }
 
 void
