@@ -1031,6 +1031,11 @@ s3_dest_prefetch_one(struct s3_ctx *ctx, uint64_t chunk_index)
 	if (rc != 0 || valid_bytes == 0) {
 		return 0;
 	}
+	if (s3_overlay_chunk_is_live(ctx->overlay, chunk_index)) {
+		/* Stale S3 must not be pulled in for a dirty chunk. Later
+		 * demand on this index takes the owner path and merges. */
+		return 1;
+	}
 	if (s3_cache_lookup(ctx->cache, chunk_index, &uuid)) {
 		return 1;
 	}
@@ -1960,7 +1965,7 @@ s3_bs_submit_fill_finish(void *arg)
 				    &current_uuid, NULL) == 0 &&
 		spdk_uuid_compare(&current_uuid, &bs_io->cache_uuid) == 0;
 	if (mapping_unchanged &&
-	    s3_overlay_get_live_chunks(ctx->overlay) == 0) {
+	    !s3_overlay_chunk_is_live(ctx->overlay, bs_io->cache_chunk_index)) {
 		cb_args = bs_io->cb_args;
 		free(bs_io);
 		cb_args->cb_fn(cb_args->channel, cb_args->cb_arg, 0);
@@ -1994,7 +1999,7 @@ s3_bs_submit_cache_finish(void *arg)
 				    &current_uuid, &valid_bytes) == 0 &&
 		spdk_uuid_compare(&current_uuid, &bs_io->cache_uuid) == 0;
 	if (bs_io->cache_status == 0 &&
-	    s3_overlay_get_live_chunks(ctx->overlay) == 0 &&
+	    !s3_overlay_chunk_is_live(ctx->overlay, bs_io->cache_chunk_index) &&
 	    mapping_unchanged) {
 		struct spdk_bs_dev_cb_args *cb_args = bs_io->cb_args;
 
@@ -2042,8 +2047,9 @@ s3_bs_submit_cache_done(void *arg, int status)
 }
 
 /* Try the conservative off-owner path: one mapped slice, wholly inside the
- * immutable object, while no acknowledged write remains in the overlay. A
- * cache miss changes no state and falls back to the existing owner path. */
+ * immutable object, for a chunk with no overlay. A write on another chunk
+ * must not disable this. A cache miss changes no state and falls back to
+ * the existing owner path. */
 static bool
 s3_bs_try_submit_cache(struct s3_bs_io *bs_io, struct spdk_io_channel *channel)
 {
@@ -2066,8 +2072,7 @@ s3_bs_try_submit_cache(struct s3_bs_io *bs_io, struct spdk_io_channel *channel)
 	 * s3_bs_dev_destroy() cannot run until that read has completed back
 	 * into blobstore. Overlay / chunk_map stay alive for the same reason. */
 	if (!cache || !channel || !ctx->owner_thread || !ctx->overlay ||
-	    __atomic_load_n(&ctx->destroying, __ATOMIC_ACQUIRE) ||
-	    s3_overlay_get_live_chunks(ctx->overlay) != 0) {
+	    __atomic_load_n(&ctx->destroying, __ATOMIC_ACQUIRE)) {
 		return false;
 	}
 
@@ -2079,6 +2084,9 @@ s3_bs_try_submit_cache(struct s3_bs_io *bs_io, struct spdk_io_channel *channel)
 	length = (uint32_t)length_bytes;
 
 	chunk_index = s3_lba_to_chunk_index(bs_io->lba, ctx->chunk_shift);
+	if (s3_overlay_chunk_is_live(ctx->overlay, chunk_index)) {
+		return false;
+	}
 	rc = s3_chunk_map_lookup(ctx->chunk_map, chunk_index, &uuid,
 				 &valid_bytes);
 	if (rc != 0 || offset_in_chunk >= valid_bytes ||
