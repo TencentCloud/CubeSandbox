@@ -19,6 +19,7 @@ on:
       - 'agent/**'
       - 'hypervisor/**'
       - 'examples/volume/s3/**'
+      - 'tests/perf/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/unit-test-check.yml'
@@ -40,6 +41,7 @@ on:
       - 'agent/**'
       - 'hypervisor/**'
       - 'examples/volume/s3/**'
+      - 'tests/perf/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/unit-test-check.yml'
@@ -69,6 +71,7 @@ on:
           - volume-s3
           - volume-cos-rpc
           - proto
+          - cubebench
 
 concurrency:
   group: unit-test-${{ github.event.pull_request.number || github.ref }}
@@ -129,6 +132,7 @@ jobs:
             add_component "volume-s3"
             add_component "volume-cos-rpc"
             add_component "proto"
+            add_component "cubebench"
           }
 
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
@@ -151,6 +155,7 @@ jobs:
               volume-s3) add_component "volume-s3" ;;
               volume-cos-rpc) add_component "volume-cos-rpc" ;;
               proto) add_component "proto" ;;
+              cubebench) add_component "cubebench" ;;
               *)
                 echo "::error::unsupported component input: ${selected_component}"
                 exit 1
@@ -268,6 +273,9 @@ jobs:
                   # component build above.
                   add_component "volume-cos-rpc"
                   ;;
+                tests/perf/*)
+                  add_component "cubebench"
+                  ;;
               esac
             done <<< "${changed_files}"
           fi
@@ -301,6 +309,7 @@ jobs:
                     elif . == "volume-s3" then "S3 Volume Plugin"
                     elif . == "volume-cos-rpc" then "COS RPC Volume Plugin"
                     elif . == "proto" then "Proto"
+                    elif . == "cubebench" then "CubeBench"
                     else error("unsupported component: " + .)
                     end
                   ),
@@ -322,10 +331,11 @@ jobs:
                     elif . == "volume-s3" then "cube-volume-s3-test"
                     elif . == "volume-cos-rpc" then "cube-volume-cos-rpc-test"
                     elif . == "proto" then "proto-test"
+                    elif . == "cubebench" then "cubebench-test"
                     else error("unsupported component: " + .)
                     end
                   ),
-                  requires_builder: (. != "CubeProxy" and . != "cubelog" and . != "cubedb" and . != "proto"),
+                  requires_builder: (. != "CubeProxy" and . != "cubelog" and . != "cubedb" and . != "proto" and . != "cubebench"),
                   run_mode: "root_make"
                 })
               | [

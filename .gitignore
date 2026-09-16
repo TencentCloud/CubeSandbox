@@ -81,6 +81,7 @@ __pycache__
 !/tests/perf/
 /tests/perf/*
 !/tests/perf/cubebench.sh
+!/tests/perf/cubebench_test.sh
 
 web/tsconfig.tsbuildinfo
 

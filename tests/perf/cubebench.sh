@@ -1570,6 +1570,45 @@ check_host_quota() {
 	color_echo "WARNING: raising host.quota lets the benchmark pack more sandboxes than the node's RAM can back; the density test (section 3.3) then risks a whole-machine OOM. Leave headroom or watch memory while it runs." >&2
 }
 
+parse_lscpu_field() {
+	local field="$1"
+	awk -F: -v field="$field" '
+		{
+			key=$1
+			value=$2
+			gsub(/^[ \t]+|[ \t]+$/, "", key)
+			if (key == field) {
+				gsub(/^[ \t]+|[ \t]+$/, "", value)
+				print value
+				exit
+			}
+		}'
+}
+
+parse_cpu_config() {
+	awk -F: '
+		{
+			key=$1
+			value=$2
+			gsub(/^[ \t]+|[ \t]+$/, "", key)
+			gsub(/^[ \t]+|[ \t]+$/, "", value)
+			if (key == "CPU(s)" && cpus == "") cpus=value
+			if (key == "Socket(s)" && sock == "") sock=value
+			if (key == "Core(s) per socket" && cps == "") cps=value
+			if (key == "Thread(s) per core" && tpc == "") tpc=value
+		}
+		END {
+			if (cpus !~ /^[1-9][0-9]*$/ || sock !~ /^[1-9][0-9]*$/ ||
+				cps !~ /^[1-9][0-9]*$/ || tpc !~ /^[1-9][0-9]*$/) {
+				print "unknown"
+				exit
+			}
+			printf "%s logical CPU%s (%s socket%s, %s core%s/socket, %s thread%s/core)",
+				cpus, cpus == 1 ? "" : "s", sock, sock == 1 ? "" : "s",
+				cps, cps == 1 ? "" : "s", tpc, tpc == 1 ? "" : "s"
+		}'
+}
+
 print_test_env() {
 	local os kernel arch cpu_model cpu_cfg numa mem disk
 	local nodes local_cubelet=0
@@ -1596,24 +1635,14 @@ print_test_env() {
 	kernel="$(uname -sr)"
 	arch="$(uname -m)"
 
-	cpu_model="$(lscpu 2>/dev/null | awk -F: '/^Model name/{gsub(/^[ \t]+/,"",$2); print $2; exit}')"
+	cpu_model="$(LC_ALL=C lscpu 2>/dev/null | parse_lscpu_field "Model name")"
 	[ -z "$cpu_model" ] && cpu_model="$(awk -F: '/model name/{gsub(/^[ \t]+/,"",$2); print $2; exit}' /proc/cpuinfo 2>/dev/null)"
 	[ -z "$cpu_model" ] && cpu_model="unknown"
 
-	cpu_cfg="$(lscpu 2>/dev/null | awk -F: '
-		/^CPU\(s\)/            {gsub(/^[ \t]+/,"",$2); cpus=$2}
-		/^Socket\(s\)/         {gsub(/^[ \t]+/,"",$2); sock=$2}
-		/^Core\(s\) per socket/{gsub(/^[ \t]+/,"",$2); cps=$2}
-		/^Thread\(s\) per core/{gsub(/^[ \t]+/,"",$2); tpc=$2}
-		END{printf "%s vCPU (%s socket x %s core/socket x %s thread/core)", cpus, sock, cps, tpc}')"
-	# lscpu absent -> the awk above still prints the template with empty fields, so
-	# test for that (a bare "vCPU" with no leading digit) as well as a truly empty
-	# string, and fall back to unknown to keep the table cell well-formed.
-	case "$cpu_cfg" in
-	'' | ' vCPU '*) cpu_cfg="unknown" ;;
-	esac
+	cpu_cfg="$(LC_ALL=C lscpu 2>/dev/null | parse_cpu_config)"
+	[ -n "$cpu_cfg" ] || cpu_cfg="unknown"
 
-	numa="$(lscpu 2>/dev/null | awk -F: '/^NUMA node\(s\)/{gsub(/^[ \t]+/,"",$2); print $2; exit}')"
+	numa="$(LC_ALL=C lscpu 2>/dev/null | parse_lscpu_field "NUMA node(s)")"
 	[ -z "$numa" ] && numa="unknown"
 
 	# LC_ALL=C so free(1) prints the C-locale "Mem:" header the awk pattern below

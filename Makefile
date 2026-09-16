@@ -523,6 +523,10 @@ cubedb-test:
 proto-test:
 	cd pkgs/proto && go mod download && go vet ./... && go test ./...
 
+.PHONY: cubebench-test
+cubebench-test:
+	bash tests/perf/cubebench_test.sh
+
 .PHONY: cube-lifecycle-manager-test
 cube-lifecycle-manager-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-lifecycle-manager && go mod download && go test ./...'
