@@ -186,7 +186,8 @@ def isolate_network():
     with open('/proc/self/status') as status:
         caps = dict(line.split(':', 1) for line in status if line.startswith('Cap'))
     for name in ('CapEff', 'CapBnd', 'CapInh', 'CapAmb'):
-        assert not int(caps[name], 16) & (1 << 25), name + ' contains SYS_TIME'
+        assert not int(caps[name], 16) & (1 << 25), (
+            name + ' contains SYS_TIME; use the isolated Docker command in cube-envd/README.md#tests')
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.unshare(0x40020000) != 0:  # CLONE_NEWNET | CLONE_NEWNS
         raise OSError(ctypes.get_errno(), 'private network namespace required')

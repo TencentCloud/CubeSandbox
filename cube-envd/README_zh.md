@@ -318,6 +318,29 @@ SYS_TIME。不要在宿主执行测试 cgroup bootstrap，也不要为通过测�
 workflow 在容器内设置 `CARGO_TARGET_DIR`，不要求宿主具有特定目录结构；
 本机构建在没有覆盖设置时使用 `cube-envd/target`。
 
+在使用 cgroup v2 的 Linux Docker 宿主上，从仓库根目录运行与 CI 相同的环境：
+
+```bash
+version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+docker build --build-arg RUST_VERSION="$version" \
+  -f docker/tests/Dockerfile.envd-ci -t envd-ci .
+docker run --rm --init --privileged --cgroupns private \
+  -v "$PWD:/workspace:ro" \
+  -v envd-ci-cargo:/usr/local/cargo -v envd-ci-target:/target \
+  -e NO_PROXY=localhost,127.0.0.1,::1 -e no_proxy=localhost,127.0.0.1,::1 \
+  -e CARGO_TARGET_DIR=/target -e CARGO_BUILD_JOBS=2 envd-ci \
+  bash docker/tests/prepare-cgroup.sh make -C cube-envd ci
+```
+
+裸机直接运行 `cargo test` 不等同于上述环境。验证镜像与两种 sandbox 镜像一样，
+会创建 `user` 账号和 `/home/user`。启动命令测试有意覆盖 `-cmd`：它以 root
+在 `/home/user` 中执行，与[上游 Go envd](https://github.com/e2b-dev/infra/blob/2026.16/packages/envd/main.go#L206-L225)一致。
+两种实现都会拒绝不存在的启动目录；这不代表普通 Process RPC 总是使用 `/home/user`。
+bootstrap 在测试前从 capability 集合移除 SYS_TIME；仅使用
+`--privileged --cap-drop SYS_TIME` 不能替代这一步。应保留权限断言。
+如需运行特定测试，可将末尾的 `make -C cube-envd ci` 替换为
+`cargo test --manifest-path cube-envd/Cargo.toml --locked --test daemon`。
+
 | 范围 | 入口 | 覆盖内容 |
 | --- | --- | --- |
 | 组件 | `make -C cube-envd ci` | 格式、Clippy、构建、Rust 测试和类型检查。 |
