@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -663,19 +664,48 @@ type ExternalHTTPScore struct {
 	// DefaultExternalHTTPScoreWeight in preHandle) from an explicit 0 (keep
 	// off, same as other scorers).
 	Weight *float64 `yaml:"weight"`
-	// Endpoint is the sidecar URL. Empty skips the plugin. Non-empty values must
-	// be absolute http:// or https:// URLs with a host; other schemes (file,
-	// unix, missing scheme) fail construction / are rejected at Select.
-	// May carry userinfo or query tokens; MarshalJSON and String redact those
-	// so config.Init dumps and CubeLog.Fatalf("%v", cfg) paths match the
-	// scorer's no-secret logging policy.
+	// Endpoint is the sidecar URL. Empty with an explicit weight:0 / disable:true
+	// is a silent no-op. Empty with a positive weight (the omit-weight default is
+	// 1.0) is a Select-time failure that honors failure_policy — under
+	// fail_closed every create aborts until a valid endpoint is set (typos like
+	// endpont: land here because yaml.v3 ignores unknown keys). Non-empty values
+	// must be absolute http:// or https:// URLs with a host; other schemes
+	// (file, unix, missing scheme) fail config load / hot-reload when non-empty.
+	// Plain http:// to a non-loopback host also fails config load unless
+	// AllowInsecure is true (loopback http remains allowed for local sidecars).
+	// May carry userinfo, path tokens, or query tokens; MarshalJSON and String
+	// redact to scheme+host only so config.Init dumps and CubeLog.Fatalf("%v",
+	// cfg) paths match the scorer's no-secret logging policy.
 	Endpoint string `yaml:"endpoint"`
+	// AllowInsecure permits a non-loopback http:// Endpoint. Default false:
+	// remote cleartext POSTs of the candidate inventory must opt in.
+	AllowInsecure bool `yaml:"allow_insecure"`
 	// Timeout is the per-request deadline on the synchronous create path.
 	// Zero/omitted defaults to 200ms at request time; negative values and
-	// values above 2s are rejected at construction / Select validation.
+	// values above 2s are detected at construction (one Warn) and then
+	// rejected on each Select.
 	Timeout time.Duration `yaml:"timeout"`
 	Mode    string        `yaml:"mode"`
 	Disable bool          `yaml:"disable"`
+	// FailurePolicy controls sidecar failure handling. Omitted / empty /
+	// unknown values default to fail_open so create-path scheduling keeps the
+	// historical runScoreFilter skip behavior. Set fail_closed to abort Score
+	// via a typed FailClosedError.
+	FailurePolicy string `yaml:"failure_policy"`
+	// CircuitBreaker trips after consecutive sidecar failures so later Score
+	// calls fail fast instead of waiting for the full HTTP timeout. When the
+	// block is omitted, defaults apply (threshold 5, open 5s, one half-open
+	// probe). Set disable: true to turn the breaker off.
+	CircuitBreaker *ExternalHTTPScoreCircuitBreaker `yaml:"circuit_breaker"`
+}
+
+// ExternalHTTPScoreCircuitBreaker trips after consecutive sidecar failures so
+// later Score calls fail fast instead of waiting for the full HTTP timeout.
+type ExternalHTTPScoreCircuitBreaker struct {
+	Disable           bool          `yaml:"disable"`
+	FailureThreshold  int           `yaml:"failure_threshold"`
+	OpenDuration      time.Duration `yaml:"open_duration"`
+	HalfOpenMaxProbes int           `yaml:"half_open_max_probes"`
 }
 
 // DefaultExternalHTTPScoreWeight is applied when plugin_conf.external_http_score
@@ -683,8 +713,9 @@ type ExternalHTTPScore struct {
 // and Weight() fallbacks.
 const DefaultExternalHTTPScoreWeight = 1.0
 
-// MarshalJSON redacts Endpoint userinfo and query so utils.InterfaceToString
-// dumps (config.Init) never print sidecar credentials the scorer refuses to log.
+// MarshalJSON redacts Endpoint to scheme+host (no userinfo, path, query, or
+// fragment) so utils.InterfaceToString dumps (config.Init) never print sidecar
+// credentials the scorer refuses to log — including path-borne tokens.
 func (c ExternalHTTPScore) MarshalJSON() ([]byte, error) {
 	return json.Marshal(c.redactedWire())
 }
@@ -700,20 +731,26 @@ func (c ExternalHTTPScore) String() string {
 }
 
 type externalHTTPScoreWire struct {
-	Weight   *float64      `json:"Weight"`
-	Endpoint string        `json:"Endpoint"`
-	Timeout  time.Duration `json:"Timeout"`
-	Mode     string        `json:"Mode"`
-	Disable  bool          `json:"Disable"`
+	Weight         *float64                         `json:"Weight"`
+	Endpoint       string                           `json:"Endpoint"`
+	AllowInsecure  bool                             `json:"AllowInsecure"`
+	Timeout        time.Duration                    `json:"Timeout"`
+	Mode           string                           `json:"Mode"`
+	Disable        bool                             `json:"Disable"`
+	FailurePolicy  string                           `json:"FailurePolicy"`
+	CircuitBreaker *ExternalHTTPScoreCircuitBreaker `json:"CircuitBreaker"`
 }
 
 func (c ExternalHTTPScore) redactedWire() externalHTTPScoreWire {
 	return externalHTTPScoreWire{
-		Weight:   c.Weight,
-		Endpoint: redactExternalHTTPScoreEndpoint(c.Endpoint),
-		Timeout:  c.Timeout,
-		Mode:     c.Mode,
-		Disable:  c.Disable,
+		Weight:         c.Weight,
+		Endpoint:       redactExternalHTTPScoreEndpoint(c.Endpoint),
+		AllowInsecure:  c.AllowInsecure,
+		Timeout:        c.Timeout,
+		Mode:           c.Mode,
+		Disable:        c.Disable,
+		FailurePolicy:  c.FailurePolicy,
+		CircuitBreaker: c.CircuitBreaker,
 	}
 }
 
@@ -726,7 +763,12 @@ func redactExternalHTTPScoreEndpoint(raw string) string {
 	if err != nil || u == nil || u.Scheme == "" || u.Host == "" {
 		return "[redacted]"
 	}
+	// Keep scheme+host only (same bound as circuitTargetLabel): path segments
+	// may carry bearer tokens (/score/<secret>), so they must not appear in
+	// config dumps.
 	u.User = nil
+	u.Path = ""
+	u.RawPath = ""
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String()
@@ -1250,6 +1292,9 @@ func preHandleScheduler(config *Config) error {
 	if err := validateExternalHTTPScoreWeight(&config.Scheduler.SchedulerConf); err != nil {
 		return err
 	}
+	if err := validateExternalHTTPScoreEndpoint(&config.Scheduler.SchedulerConf); err != nil {
+		return err
+	}
 	// Negative plugin weights invert ranking in runScoreFilter; reject for every
 	// registered scorer that has an explicit plugin_conf block. This is not
 	// Profile-scoped: master would load the config, but negative weights invert
@@ -1578,8 +1623,9 @@ func validateBinpackScoreWeight(s *SchedulerConf) error {
 // validateExternalHTTPScoreWeight rejects negative / non-finite
 // plugin_conf.external_http_score.weight at config load. Explicit weight:0 is a
 // staged inert no-op; omitted weight (nil pointer) is defaulted to 1 in
-// ApplyExternalHTTPScoreDefaults. Invalid endpoint/timeout remain construction
-// Warn + Select fail-open (not Init failures).
+// ApplyExternalHTTPScoreDefaults. Non-empty endpoint trust/scheme checks are
+// handled by validateExternalHTTPScoreEndpoint. Invalid timeout remains
+// construction Warn + Select fail-open (not Init failures).
 func validateExternalHTTPScoreWeight(s *SchedulerConf) error {
 	if s == nil || s.Score == nil {
 		return nil
@@ -1593,6 +1639,59 @@ func validateExternalHTTPScoreWeight(s *SchedulerConf) error {
 		return fmt.Errorf("scheduler.score.plugin_conf.external_http_score.weight must be a finite number >= 0, got %v (weight:0 is inert; omit weight for default 1)", w)
 	}
 	return nil
+}
+
+// validateExternalHTTPScoreEndpoint rejects a non-empty endpoint that is not an
+// absolute http(s) URL, and rejects cleartext http:// to a non-loopback host
+// unless allow_insecure: true. Empty endpoint stays a Select-time fail-open.
+func validateExternalHTTPScoreEndpoint(s *SchedulerConf) error {
+	if s == nil || s.Score == nil {
+		return nil
+	}
+	cfg := s.Score.ScorePluginConf.ExternalHTTPScore
+	if cfg == nil || strings.TrimSpace(cfg.Endpoint) == "" {
+		return nil
+	}
+	if err := CheckExternalHTTPScoreEndpoint(cfg.Endpoint, cfg.AllowInsecure); err != nil {
+		return fmt.Errorf("scheduler.score.plugin_conf.external_http_score: %w", err)
+	}
+	return nil
+}
+
+// CheckExternalHTTPScoreEndpoint validates a non-empty sidecar URL.
+// Loopback http:// is allowed; remote http:// requires allowInsecure.
+func CheckExternalHTTPScoreEndpoint(endpoint string, allowInsecure bool) error {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return nil
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u == nil {
+		return fmt.Errorf("invalid endpoint (require absolute http/https URL with host)")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("invalid endpoint (require absolute http/https URL with host)")
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return fmt.Errorf("invalid endpoint (require absolute http/https URL with host)")
+	}
+	if scheme == "http" && !allowInsecure && !isLoopbackHTTPEndpointHost(u.Hostname()) {
+		return fmt.Errorf("endpoint %q uses cleartext http to a non-loopback host; use https or set allow_insecure: true", redactExternalHTTPScoreEndpoint(endpoint))
+	}
+	return nil
+}
+
+func isLoopbackHTTPEndpointHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // validateSchedulerScorerPluginWeights rejects negative / non-finite

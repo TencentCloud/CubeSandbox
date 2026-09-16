@@ -219,9 +219,15 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 		// every registered scorer; this path still guards NaN/Inf so they cannot
 		// poison totalPluginWeight or node scores, while letting live-config
 		// scorers emit their own invalid_weight observability via Select.
+		// FailClosedError is type-based and scheduler-wide: any scorer that
+		// returns it aborts the rest of Score (and create) immediately,
+		// discarding already-blended contributions from earlier scorers.
 		w := f.Weight()
 		tmpResult, err := f.Select(selCtx)
 		if err != nil {
+			if score.IsFailClosed(err) {
+				return err
+			}
 			continue
 		}
 		if len(tmpResult) == 0 {

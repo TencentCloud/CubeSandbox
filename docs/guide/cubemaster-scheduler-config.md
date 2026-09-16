@@ -386,7 +386,8 @@ the returned per-node scores into the weighted score sum. That candidate set is
 the post-`pre_filter` list whose width is controlled by
 `scheduler.pre_select_num` (default `-1` = unlimited). Enabling this plugin on
 large clusters without bounding `pre_select_num` posts the full schedulable set
-on every create (200ms default timeout, no circuit breaker). Enabling
+on every create (200ms default timeout; circuit breaker defaults on unless
+disabled). Enabling
 `enable_scorers: external_http_score` **requires** a matching
 `score.plugin_conf.external_http_score` block; otherwise **config load fails**
 (`validateListedScorerPluginConfPresent`). It does **not** require
@@ -408,15 +409,25 @@ scheduler:
         timeout: 200ms   # optional; default 200ms when zero/omitted
         mode: ""         # optional opaque string forwarded to the sidecar
         disable: false
+        allow_insecure: false
+        failure_policy: fail_open   # default when omitted; set fail_closed to abort Score
+        circuit_breaker:            # optional; defaults apply when omitted
+          disable: false
+          failure_threshold: 5
+          open_duration: 5s
+          half_open_max_probes: 1
 ```
 
 | Field | Meaning |
 |-------|---------|
 | `weight` | Relative weight in `runScoreFilter`'s weighted average (`Σ(score × weight) / Σ(weight)`). Returned scores must use the same **`[0, 100]`** scale as built-in scorers; a sidecar that returns normalised `0.0–1.0` values contributes ~1% of a built-in scorer at equal weight. **Omitted** `weight` defaults to **`1.0`** once at config load / hot-reload (`preHandle`). An **explicit** `weight: 0` is a staged inert no-op like `disable: true`: `Select` returns immediately without requiring a valid endpoint and without emitting `empty_endpoint` / HTTP failure signals. Use `disable: true` when you want the plugin off while keeping a real endpoint configured. **Negative / non-finite** weights fail `config.Init` / hot-reload `preHandle` (same fail-closed rule as other registered scorers); they do not boot as a permanently inert scorer. Read live from `plugin_conf` on each `Weight()` / `Select` when the reload succeeded; `runScoreFilter` samples `Weight()` once **before** `Select` so a mid-attempt reload cannot mix generations. |
-| `endpoint` | Sidecar URL. Empty endpoint (including whitespace-only) with a **positive** weight fail-opens with a rate-limited Warn (log category `empty_endpoint`) and increments `cube_scheduler_external_http_score_outcomes_total{reason="other"}` — it does not silently skip. With `weight: 0` or `disable: true` the empty check is not reached. Non-empty values must be absolute `http://` or `https://` URLs with a host; missing scheme, `file://`, `unix://`, and other schemes are detected at construction (one Warn) and then fail-open on each `Select` (CubeMaster still starts). Leading/trailing whitespace is trimmed before the request. Prefer putting secrets in the sidecar itself rather than in the URL; if userinfo or query tokens are present, the scorer never logs them, and the `config.Init` cfg dump redacts them to scheme/host/path only. |
-| `timeout` | Per-request HTTP timeout on the **synchronous create path**. Zero/omitted uses the default **200ms**. Positive values must be **≥ 1ms** and **≤ 2s**; negative values, sub-millisecond positives, and values above **2s** are detected at construction (one Warn) and then fail-open on each `Select` (not silently coerced; CubeMaster still starts). Use a duration string such as `200ms` / `1s` — a bare integer like `timeout: 200` is parsed as **200 nanoseconds** by YAML and fails the ≥1ms check. A hung sidecar can add up to this budget to every create attempt before fail-open. |
+| `endpoint` | Sidecar URL. Empty endpoint (including whitespace-only) with a **positive** weight fail-opens with a rate-limited Warn (log category `empty_endpoint`) and increments `cube_scheduler_external_http_score_outcomes_total{reason="other"}` — it does not silently skip. With `weight: 0` or `disable: true` the empty check is not reached. Non-empty values must be absolute `http://` or `https://` URLs with a host; missing scheme, `file://`, `unix://`, and other schemes fail `config.Init` / hot-reload `preHandle` when the endpoint is non-empty. Plain **`http://` to a non-loopback host** also fails config load unless `allow_insecure: true` (loopback `http://127.0.0.1` / `localhost` / `::1` stays allowed for local sidecars). Prefer **`https://`** for any remote sidecar: the create path POSTs the candidate node inventory. Leading/trailing whitespace is trimmed before the request. Prefer putting secrets in the sidecar itself rather than in the URL; if userinfo, path tokens, or query tokens are present, the scorer never logs them, and the `config.Init` cfg dump redacts them to scheme/host only. |
+| `allow_insecure` | When `true`, permits cleartext `http://` to a non-loopback host. Default `false`. Does not disable TLS verification for `https://` endpoints. |
+| `timeout` | Per-request HTTP timeout on the **synchronous create path**. Zero/omitted uses the default **200ms**. Positive values must be **≥ 1ms** and **≤ 2s**; negative values, sub-millisecond positives, and values above **2s** are detected at construction (one Warn) and then fail-open on each `Select` (not silently coerced; CubeMaster still starts). Use a duration string such as `200ms` / `1s` — a bare integer like `timeout: 200` is parsed as **200 nanoseconds** by YAML and fails the ≥1ms check. A hung sidecar can add up to this budget to every create attempt before fail-open (unless the circuit breaker is already open). |
 | `mode` | Optional operator-defined mode string included in the JSON request. |
 | `disable` | When true, the plugin is a no-op even if enabled in `enable_scorers`. Read live like `weight`. Prefer `disable: true` for a live off switch. **Do not** delete the whole `plugin_conf.external_http_score` block while leaving the name in `enable_scorers`: `validateListedScorerPluginConfPresent` **rejects** that config on startup and on hot-reload (`preHandle` fails; `CubeLog.Fatalf` does **not** `os.Exit`, so the previous Config stays live and scoring continues with the old block). To stop using the scorer, set `disable: true` (immediate) or remove the name from `enable_scorers` **and** restart CubeMaster (selector sets are startup-only). The nil-`plugin_conf` / log category `plugin_conf_absent` path is effectively **test-only / stale-instance**: it is reachable only if a reload successfully drops both the name and the block while an old scorer instance remains in memory until restart — not via "delete block, keep name". |
+| `failure_policy` | Sidecar failure handling. **Omitted / empty / unknown defaults to `fail_open`**: `Select` returns a plain error and `runScoreFilter` skips this scorer (historical create-path behavior). Set `fail_closed` to return a typed `FailClosedError` so `runScoreFilter` **aborts the entire Score phase** (scheduler-wide, not plugin-local): already-blended scores from earlier scorers are discarded and create fails closed (`ErrorCode_SelectNodesFailed` with a sanitized category message). There is no way to scope `fail_closed` to a canary-only sidecar while other scorers continue. |
+| `circuit_breaker` | Consecutive sidecar failures open the circuit so later Score calls fail immediately instead of waiting for the full HTTP timeout. After `open_duration`, up to `half_open_max_probes` probes are allowed; success closes the circuit, failure reopens it. When the block is omitted, or a field is `0`, documented defaults apply (`failure_threshold: 5`, `open_duration: 5s`, `half_open_max_probes: 1`). Set `disable: true` to turn the breaker off (also clears that host's `circuit_state` series). Changing `endpoint` to a different host abandons the previous host's in-process breaker entry and gauge. |
 
 ### Wire contract
 
@@ -452,28 +463,42 @@ Response:
 ### Failure / fallback semantics
 
 Scorer failures (timeout, non-2xx, redirect, malformed/oversized body, validation
-errors) return an error from the plugin. `runScoreFilter` skips failed scorers
-and continues scheduling (**fail-open** for sandbox creation). Outcomes increment
+errors, open circuit, recovered panics) return an error from the plugin. With the
+default **`failure_policy: fail_open`** (also when the field is omitted),
+`runScoreFilter` skips failed scorers and continues scheduling (**fail-open** for
+sandbox creation). With **`failure_policy: fail_closed`**, the plugin returns a
+typed `FailClosedError` and `runScoreFilter` **aborts** the Score phase — including
+for empty/invalid `endpoint` / out-of-range `timeout` / non-finite `weight` on
+`Select`, not only for sidecar HTTP failures. That abort is **scheduler-wide**:
+any scorer that returns `FailClosedError` short-circuits the rest of Score (and
+create), and scores already computed for earlier roster scorers are discarded —
+operators cannot scope `fail_closed` to a single canary sidecar. (`plugin_conf`
+absent / nil selector context stay fail-open observability paths because no
+policy field is readable.) Caller cancel and parent-deadline abandonment do
+**not** increment the circuit breaker's consecutive-failure counter (they only
+release a held half-open probe).
+Outcomes increment
 `cube_scheduler_external_http_score_outcomes_total{reason=...}` (including
 `reason="success"`) and HTTP round-trips also observe
 `cube_scheduler_external_http_score_request_duration_seconds{reason=...}`.
 Fixed `reason` values: `success`, `timeout`, `connection`, `http_status`,
-`invalid_json`, `missing_candidate`, `other` (config / generic failures such as
-empty endpoint, invalid weight, or unclassified errors land in `other`). Failures
-are logged at the scorer boundary without endpoint URLs, URL userinfo, query
-tokens, or request/response bodies; Warn is rate-limited to about one line per
-sanitized failure category per minute (further failures stay at Debug) so a down
-sidecar does not flood create-path logs. Missing scores for any requested
-candidate fail the whole attempt (anti-bias: scoring only a subset would
-systematically skew ranking). The call is **synchronous** on the create path.
-The shared HTTP transport does **not** honor `HTTP_PROXY` / `HTTPS_PROXY` /
-`ALL_PROXY` (direct dial only, so env proxies cannot see token-bearing sidecar
-URLs or the node inventory body) and caps in-flight sidecar connections with
-`MaxConnsPerHost = 8` (same as the idle pool per host) so a hung sidecar cannot
-open an unbounded dial storm; each attempt may still wait up to `timeout`
-(default 200ms, max 2s) before fail-open. This PR does not add a circuit breaker,
-negative cache, async execution, or retry loop — those remain follow-ups for
-higher create QPS deployments.
+`invalid_json`, `missing_candidate`, `circuit_open`, `other` (config / generic
+failures such as empty endpoint, invalid weight, or unclassified errors land in
+`other`). Circuit state is exposed as
+`cube_scheduler_external_http_score_circuit_state{target="host:port"}`
+(`0=closed`, `1=half-open`, `2=open`). Failures are logged at the scorer boundary
+without endpoint URLs, URL userinfo, query tokens, or request/response bodies;
+Warn is rate-limited to about one line per sanitized failure category per minute
+(further failures stay at Debug) so a down sidecar does not flood create-path
+logs. Missing scores for any requested candidate fail the whole attempt
+(anti-bias: scoring only a subset would systematically skew ranking). The call is
+**synchronous** on the create path. The shared HTTP transport does **not** honor
+`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` (direct dial only, so env proxies cannot
+see token-bearing sidecar URLs or the node inventory body) and caps in-flight
+sidecar connections with `MaxConnsPerHost = 8` (same as the idle pool per host)
+so a hung sidecar cannot open an unbounded dial storm; each attempt may still
+wait up to `timeout` (default 200ms, max 2s) before fail-open unless the circuit
+is already open.
 
 ## See also
 

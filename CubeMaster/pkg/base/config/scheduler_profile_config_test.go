@@ -1496,6 +1496,39 @@ scheduler:
 	assert.Equal(t, 4.0, got.Scheduler.Score.ResourceWeights["custom_keep"])
 }
 
+func TestInit_ExternalHTTPScoreRemoteHTTPRequiresAllowInsecure(t *testing.T) {
+	rejectYAML := `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - external_http_score
+    plugin_conf:
+      external_http_score:
+        weight: 1
+        endpoint: "http://sidecar.example/score"
+`
+	_, err := initConfigFromYAML(t, rejectYAML)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "allow_insecure")
+
+	okYAML := `common: {}
+log: {}
+scheduler:
+  score:
+    enable_scorers:
+      - external_http_score
+    plugin_conf:
+      external_http_score:
+        weight: 1
+        endpoint: "http://sidecar.example/score"
+        allow_insecure: true
+`
+	got, err := initConfigFromYAML(t, okYAML)
+	assert.NoError(t, err)
+	assert.True(t, got.Scheduler.Score.ScorePluginConf.ExternalHTTPScore.AllowInsecure)
+}
+
 func TestInit_NegativeScorerPluginWeightsRejected(t *testing.T) {
 	cases := []struct {
 		name    string

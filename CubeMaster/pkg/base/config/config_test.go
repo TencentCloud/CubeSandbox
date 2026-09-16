@@ -179,7 +179,14 @@ func TestExternalHTTPScoreMarshalJSONRedactsEndpointSecrets(t *testing.T) {
 	assert.NotContains(t, got, sentinel)
 	assert.NotContains(t, got, "user:pass")
 	assert.NotContains(t, got, "token=")
-	assert.Contains(t, got, "https://sidecar.example/score")
+	assert.NotContains(t, got, "/score")
+	assert.Contains(t, got, "https://sidecar.example")
+	// Path-borne credentials must also be stripped.
+	pathToken := &ExternalHTTPScore{Endpoint: "https://sidecar.internal/score/" + sentinel}
+	pathBody, err := json.Marshal(pathToken)
+	assert.NoError(t, err)
+	assert.NotContains(t, string(pathBody), sentinel)
+	assert.NotContains(t, string(pathBody), "/score")
 	// Live config field must stay intact for Dial.
 	assert.Contains(t, plugin.Endpoint, sentinel)
 	// config.Init dumps via InterfaceToString (jsoniter), which also honors MarshalJSON.
