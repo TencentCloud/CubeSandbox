@@ -171,9 +171,12 @@ spread 风格评分器（`real_time_weighted_average`、
 **内置预设放置前提：** `balanced_spread` / `template_locality_first` /
 `binpack_utilization` 只有在 `scheduler.priority_select_num >= 1` 和/或
 `least_select_name` 为权重感知（`sw` / `rw` / `rrw`）时才会影响*选哪台节点*。
-默认（`priority_select_num: -1`，`least_select_name: random`）下分数排序仅可观测
-（在已评分集合上均匀选取）；预设对 filter 列表的变更仍可生效。离线 simulator 的
-argmax 仅在约 `priority_select_num: 1` 时与生产等价。
+当 `priority_select_num` **省略**（代码回退 `-1`）或小于 `1` 且
+`least_select_name: random` 时，分数排序仅可观测（在已评分集合上均匀选取）。
+**仓库交付的** `conf.yaml` / Helm / 单机配置 / 一键 Terraform 将
+`priority_select_num` 设为 `1` 或更大，因此 stock 部署上是 top-1 选点（并非仅可观测）；
+预设对 filter 列表的变更在两种情况下仍可生效。离线 simulator 的 argmax 仅在约
+`priority_select_num: 1` 时与生产等价。
 
 运行时 Profile **不是**离线模拟器 / `schedulerbench` 模型，即使预设名字符串相同。
 可复制 YAML 与完整契约见

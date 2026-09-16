@@ -189,10 +189,14 @@ compat) but ranking is near-noise. Built-in `binpack_utilization` only enables
 **Built-in preset placement prerequisite:** `balanced_spread` /
 `template_locality_first` / `binpack_utilization` only steer *which* node is
 chosen when `scheduler.priority_select_num >= 1` and/or `least_select_name` is
-weight-aware (`sw` / `rw` / `rrw`). With defaults (`priority_select_num: -1`,
-`least_select_name: random`) score ranking is observability-only (uniform pick
-over the scored set); filter-list changes from the preset can still apply.
-Offline simulator argmax matches production only near `priority_select_num: 1`.
+weight-aware (`sw` / `rw` / `rrw`). When `priority_select_num` is **omitted**
+(code fallback `-1`) or below `1` with `least_select_name: random`, score
+ranking is observability-only (uniform pick over the scored set). **Shipped**
+`conf.yaml` / Helm / single-node / one-click Terraform set
+`priority_select_num` to `1` or more, so stock deploys use top-1 scoring
+(not observability-only); filter-list changes from the preset can still apply
+either way. Offline simulator argmax matches production only near
+`priority_select_num: 1`.
 
 Runtime Profiles are **not** offline simulator / `schedulerbench` models, even
 when they reuse the same preset name strings. Copyable YAML and the full

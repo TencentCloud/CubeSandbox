@@ -671,6 +671,45 @@ label values; cardinality stays within this registry (plus `unknown`).
   non-finite detection.
 - Offline simulator report fields in this document.
 
+### `cube_scheduler_score_non_finite_score_total`
+
+| | |
+|---|---|
+| Type | Counter |
+| Labels | `scorer` |
+| Code | `CubeMaster/pkg/scheduler/schedule.go` (`observeNonFiniteNodeScore`) |
+
+#### When it increments
+
+After a finite `Weight()` sample, `runScoreFilter` inspects each per-node score
+returned by `Select`. If **any** score is **NaN or ±Inf**, that scorer's entire
+contribution is skipped (not folded into `resultMap` / `totalPluginWeight`).
+Every such skip increments this counter.
+
+Warn logs share the same ~1/minute rate limit as the weight counter, keyed by
+`scorer` + reason `node_score`. The Warn line includes `weight=<finite>` so
+operators do not chase the weight config when the poison is in node scores.
+The counter is **not** rate-limited.
+
+#### Label: `scorer`
+
+Same allowlisted `Score/<name>` set as
+`cube_scheduler_score_non_finite_weight_total` (see table above).
+
+#### What it can show
+
+- Defense-in-depth drops when a scorer returns non-finite per-node scores that
+  would otherwise poison the weighted average and make `AllSortByScore` order
+  unspecified.
+- Which allowlisted scorer emitted poison node scores on the create path.
+
+#### What it cannot show
+
+- Non-finite **weights** (those increment
+  `cube_scheduler_score_non_finite_weight_total` instead, before this check).
+- Config-load rejection of negative / non-finite plugin weights.
+- Offline simulator report fields in this document.
+
 ## Related Coverage
 
 This document covers:
@@ -681,7 +720,8 @@ This document covers:
   report;
 - how baseline-vs-profile deltas under the same workload explain improvement or
   trade-off;
-- the live Prometheus counter `cube_scheduler_score_non_finite_weight_total`.
+- the live Prometheus counters `cube_scheduler_score_non_finite_weight_total` and
+  `cube_scheduler_score_non_finite_score_total`.
 
 Related docs:
 

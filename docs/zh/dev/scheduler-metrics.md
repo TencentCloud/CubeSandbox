@@ -545,6 +545,42 @@ External HTTP scorer 的结果与延迟
 - 为零 / 省略、因而跳过 HTTP 或以 score 0 接纳候选、但并非非有限值的 weight。
 - 本文离线 simulator 报告字段。
 
+### `cube_scheduler_score_non_finite_score_total`
+
+| | |
+|---|---|
+| 类型 | Counter |
+| 标签 | `scorer` |
+| 代码 | `CubeMaster/pkg/scheduler/schedule.go`（`observeNonFiniteNodeScore`） |
+
+#### 何时递增
+
+在已采样到有限 `Weight()` 之后，`runScoreFilter` 检查 `Select` 返回的每个
+per-node score。若**任一**分数为 **NaN 或 ±Inf**，则跳过该 scorer 的整段贡献
+（不并入 `resultMap` / `totalPluginWeight`）。每次此类跳过都会递增本计数器。
+
+Warn 日志与 weight 计数器共用约每分钟一次的限流，键为 `scorer` + reason
+`node_score`。Warn 行会带上 `weight=<finite>`，避免运维误追 weight 配置。
+**计数器本身不限流**。
+
+#### 标签：`scorer`
+
+与 `cube_scheduler_score_non_finite_weight_total` 相同的白名单 `Score/<name>`
+集合（见上表）。
+
+#### 能证明什么
+
+- 某 scorer 返回非有限 per-node score、否则会污染加权平均并使
+  `AllSortByScore` 顺序不确定时的运行时兜底丢弃。
+- 哪个白名单 scorer 在 create 路径上产出了有毒 node score。
+
+#### 不能证明什么
+
+- 非有限 **weight**（改由 `cube_scheduler_score_non_finite_weight_total` 计数，
+  且发生在本检查之前）。
+- 配置加载阶段对负 / 非有限插件 weight 的拒绝。
+- 本文离线 simulator 报告字段。
+
 ## 相关覆盖范围
 
 本文档覆盖：
@@ -552,7 +588,8 @@ External HTTP scorer 的结果与延迟
 - simulator 报告输出的调度质量指标定义（至少五项核心指标）；
 - 如何用一条 CLI 命令跑三种默认 workload 并生成报告；
 - 如何用同一 workload 下的 baseline vs profile 差值说明改善或 trade-off；
-- 在线 Prometheus 计数器 `cube_scheduler_score_non_finite_weight_total`。
+- 在线 Prometheus 计数器 `cube_scheduler_score_non_finite_weight_total` 与
+  `cube_scheduler_score_non_finite_score_total`。
 
 相关文档：
 

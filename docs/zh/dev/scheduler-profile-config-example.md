@@ -343,13 +343,16 @@ Profile 时，最终生效的 `enable_filters` / `enable_scorers` 中的未知�
 - `template_locality_first`
 - `binpack_utilization`
 
-**放置前提：** 在默认配置（`priority_select_num` → `-1`，`least_select_name` →
-`random`）下，这些预设的分数**排序不会**决定选哪台节点——最终在 Filter 后的已评分
-集合上均匀随机。只有设置 `scheduler.priority_select_num >= 1`（截断 top-n）和/或
-权重感知的 `least_select_name`（`sw` / `rw` / `rrw`）时，分数顺序才开始影响放置。
-内置对 filter 列表的替换仍可独立改变准入。离线 simulator / `schedulerbench` 的
-argmax 仅在约 `priority_select_num: 1` 时与生产等价；不要把 bench 差值当成默认
-配置下的放置差值。在惰性默认下启用 Profile 评分器时，配置加载会打 Warn。
+**放置前提：** 这些预设的分数**排序**只有在 `scheduler.priority_select_num >= 1`
+（截断 top-n）和/或权重感知的 `least_select_name`（`sw` / `rw` / `rrw`）时才会
+影响选哪台节点。当 `priority_select_num` **省略**（代码回退为 `-1`）或小于 `1`，
+且 `least_select_name` 仍为 `random` 时，最终在 Filter 后的已评分集合上均匀随机——
+排序仅可观测。**仓库交付的** `CubeMaster/conf.yaml`、Helm chart、单机配置与
+一键 Terraform 均将 `priority_select_num` 设为 `1` 或更大，因此在这些 stock
+部署上最高分节点会胜出（并非仅可观测）。内置对 filter 列表的替换仍可独立改变
+准入。离线 simulator / `schedulerbench` 的 argmax 仅在约 `priority_select_num: 1`
+时与生产等价；不要把 bench 差值当成「省略 key 回退」下的放置差值。在惰性
+（省略 key）回退下启用 Profile 评分器时，配置加载会打 Warn。
 
 把上述字符串之一写入 `scheduler.profile` 会加载 CubeMaster 内置覆盖，除非你还在
 `scheduler.profiles` 下定义了同名用户 key（用户胜出）。离线模拟器负载不能证明真实多机部署、

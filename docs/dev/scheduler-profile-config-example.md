@@ -387,17 +387,20 @@ but are **not equivalent**.
 - `template_locality_first`
 - `binpack_utilization`
 
-**Placement prerequisite:** with shipped defaults (`priority_select_num` → `-1`,
-`least_select_name` → `random`), score **ranking** from these presets does
-**not** steer which node is chosen — final selection is uniform over the
-post-filter scored set. Score order starts to matter only when
-`scheduler.priority_select_num >= 1` (top-n truncate) and/or
-`least_select_name` is weight-aware (`sw` / `rw` / `rrw`). Filter-list replace
-from a built-in can still change admission independently. Offline simulator /
+**Placement prerequisite:** score **ranking** from these presets steers placement
+only when `scheduler.priority_select_num >= 1` (top-n truncate) and/or
+`least_select_name` is weight-aware (`sw` / `rw` / `rrw`). When
+`priority_select_num` is **omitted** (code fallback `-1`) or set below `1`, and
+`least_select_name` stays `random`, final selection is uniform over the
+post-filter scored set — ranking is observability-only. **Shipped**
+`CubeMaster/conf.yaml`, the Helm chart, single-node config, and one-click
+Terraform set `priority_select_num` to `1` or more, so on those stock deploys
+the top-scored node wins (not observability-only). Filter-list replace from a
+built-in can still change admission independently. Offline simulator /
 `schedulerbench` argmax-over-score is equivalent to production only around
-`priority_select_num: 1`; do not read bench deltas as stock-default placement
-deltas. Config load Warns when a Profile enables scorers under the inert
-defaults.
+`priority_select_num: 1`; do not read bench deltas as omitted-key fallback
+placement deltas. Config load Warns when a Profile enables scorers under the
+inert omitted-key fallbacks.
 
 Copying one of those strings into `scheduler.profile` loads the CubeMaster
 built-in overlay unless you also define a matching user key under
