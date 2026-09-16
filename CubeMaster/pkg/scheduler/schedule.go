@@ -213,9 +213,12 @@ func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
 		if f.Disable() {
 			continue
 		}
-		// Sample Weight() once before Select so a live-config scorer
-		// (external_http_score) cannot blend with a different generation after a
-		// mid-attempt conf.yaml reload. Legacy factor/affinity scorers and
+		// Sample Weight() once before Select so the weight folded into
+		// totalPluginWeight matches the multiplier applied to every node score
+		// in this pass (avoids disagreeing mid-pass Weight() reads). This does
+		// not freeze the whole live-config generation for external_http_score:
+		// that plugin may still re-read endpoint/timeout/policy inside Select.
+		// Legacy factor/affinity scorers and
 		// binpack_score already return Disable()==true at weight==0, so this
 		// loop never reaches them. external_http_score keeps Disable()==false at
 		// weight==0 (observability / staged inert no-op) and skips the HTTP

@@ -233,11 +233,21 @@ func (b *externalHTTPScoreBreaker) allow() error {
 func (b *externalHTTPScoreBreaker) recordSuccess() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.consecutiveFailures = 0
-	b.halfOpenInFlight = 0
-	b.halfOpenSince = time.Time{}
-	b.state = circuitStateClosed
-	b.publishCircuitStateLocked(circuitStateClosed)
+	switch b.state {
+	case circuitStateHalfOpen:
+		// Only a half-open probe may close the circuit (guide contract).
+		b.consecutiveFailures = 0
+		b.halfOpenInFlight = 0
+		b.halfOpenSince = time.Time{}
+		b.state = circuitStateClosed
+		b.publishCircuitStateLocked(circuitStateClosed)
+	case circuitStateClosed:
+		// Reset the failure streak; ignore stale half-open bookkeeping.
+		b.consecutiveFailures = 0
+	default:
+		// circuitStateOpen: success from a request admitted before the circuit
+		// opened must not cancel the open window or clear consecutiveFailures.
+	}
 }
 
 func (b *externalHTTPScoreBreaker) recordFailure() {

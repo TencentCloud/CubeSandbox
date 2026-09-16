@@ -459,6 +459,46 @@ func TestExternalHTTPScoreRetiredBreakerDoesNotResurrectGauge(t *testing.T) {
 	}
 }
 
+func TestExternalHTTPScoreStaleInFlightSuccessDoesNotCloseOpenCircuit(t *testing.T) {
+	resetExternalHTTPScoreRuntimeForTest(t)
+
+	b := newExternalHTTPScoreBreaker("sidecar.example:8080", &config.ExternalHTTPScoreCircuitBreaker{
+		FailureThreshold:  3,
+		OpenDuration:      time.Hour,
+		HalfOpenMaxProbes: 1,
+	})
+	// Admit while closed (no half-open reservation), then trip open, then a
+	// late success from the pre-open request must not cancel the open window.
+	if err := b.allow(); err != nil {
+		t.Fatalf("allow() while closed: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		b.recordFailure()
+	}
+	b.mu.Lock()
+	if b.state != circuitStateOpen {
+		b.mu.Unlock()
+		t.Fatalf("state = %d, want open", b.state)
+	}
+	openedAt := b.openedAt
+	failures := b.consecutiveFailures
+	b.mu.Unlock()
+
+	b.recordSuccess() // stale in-flight success
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state != circuitStateOpen {
+		t.Fatalf("stale success closed circuit: state = %d", b.state)
+	}
+	if b.consecutiveFailures != failures {
+		t.Fatalf("consecutiveFailures = %d, want %d", b.consecutiveFailures, failures)
+	}
+	if !b.openedAt.Equal(openedAt) {
+		t.Fatalf("openedAt mutated by stale success")
+	}
+}
+
 func TestExternalHTTPScoreHalfOpenAllowsSingleProbe(t *testing.T) {
 	resetExternalHTTPScoreRuntimeForTest(t)
 
