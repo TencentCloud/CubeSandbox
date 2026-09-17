@@ -66,8 +66,6 @@ const VIRTIO_BALLOON_F_REPORTING: u64 = 5;
 pub enum Error {
     #[error("Guest gave us bad memory addresses.: {0}")]
     GuestMemory(GuestMemoryError),
-    #[error("Fallocate fail.: {0}")]
-    FallocateFail(std::io::Error),
     #[error("Madvise fail.: {0}")]
     MadviseFail(std::io::Error),
     #[error("Failed to EventFd write.: {0}")]
@@ -159,18 +157,27 @@ impl BalloonEpollHandler {
             return Ok(());
         }
 
-        if let Some(f_off) = region.file_offset() {
-            let res = unsafe {
-                libc::fallocate64(
-                    f_off.file().as_raw_fd(),
-                    libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
-                    (offset + f_off.start()) as libc::off64_t,
-                    len as libc::off64_t,
-                )
-            };
+        // Never punch a MAP_PRIVATE backing file: it can be an immutable snapshot or a
+        // base shared by multiple VMs. MADV_DONTNEED below discards this mapping's CoW pages.
+        if region.flags() & libc::MAP_SHARED == libc::MAP_SHARED {
+            if let Some(f_off) = region.file_offset() {
+                let res = unsafe {
+                    libc::fallocate64(
+                        f_off.file().as_raw_fd(),
+                        libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+                        (offset + f_off.start()) as libc::off64_t,
+                        len as libc::off64_t,
+                    )
+                };
 
-            if res != 0 {
-                return Err(Error::FallocateFail(io::Error::last_os_error()));
+                if res != 0 {
+                    let error = io::Error::last_os_error();
+                    warn!(
+                        "Failed to punch shared backing for reported range at GPA 0x{:x}: {error}; \
+                         falling back to MADV_DONTNEED",
+                        range_base.0
+                    );
+                }
             }
         }
 
@@ -445,7 +452,7 @@ impl Balloon {
             (avail_features, 0, config)
         };
 
-        if free_page_reporting {
+        if avail_features & (1u64 << VIRTIO_BALLOON_F_REPORTING) != 0 {
             queue_sizes.push(REPORTING_QUEUE_SIZE);
         }
 
@@ -655,9 +662,11 @@ mod tests {
     use crate::{
         GuestMemoryMmap, GuestRegionMmap, MmapRegion, VirtioInterrupt, VirtioInterruptType,
     };
+    use seccompiler::SeccompAction;
     use std::fs::{self, File, OpenOptions};
     use std::io::Write;
     use std::mem::size_of;
+    use std::os::unix::io::AsRawFd;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use vm_memory::{Bytes, FileOffset, GuestAddress, GuestMemoryAtomic};
@@ -706,7 +715,7 @@ mod tests {
             Some(FileOffset::new(snapshot, 0)),
             PAGE_SIZE,
             libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE,
+            libc::MAP_SHARED,
         )
         .unwrap();
         let region = GuestRegionMmap::new(mmap, GuestAddress(0)).unwrap();
@@ -717,6 +726,27 @@ mod tests {
         let after = fs::read(&path).unwrap();
         assert_eq!(&after[..PAGE_SIZE], &vec![0; PAGE_SIZE]);
         assert_eq!(&after[PAGE_SIZE..], &contents[PAGE_SIZE..]);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn release_private_page_does_not_modify_writable_backing_file() {
+        let (path, backing) = temp_file("writable-private", &vec![0x5a; PAGE_SIZE]);
+        let mmap = MmapRegion::build(
+            Some(FileOffset::new(backing, 0)),
+            PAGE_SIZE,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE,
+        )
+        .unwrap();
+        let region = GuestRegionMmap::new(mmap, GuestAddress(0)).unwrap();
+        let memory = GuestMemoryMmap::from_regions(vec![region]).unwrap();
+
+        memory.write_obj(0xa5_u8, GuestAddress(0)).unwrap();
+        BalloonEpollHandler::release_memory_range(&memory, GuestAddress(0), PAGE_SIZE).unwrap();
+
+        assert_eq!(memory.read_obj::<u8>(GuestAddress(0)).unwrap(), 0x5a);
+        assert_eq!(fs::read(&path).unwrap(), vec![0x5a; PAGE_SIZE]);
         fs::remove_file(path).unwrap();
     }
 
@@ -808,6 +838,7 @@ mod tests {
         assert_eq!(memory.read_obj::<u8>(VALID_RANGE).unwrap(), 0);
         assert_eq!(guest_queue.used.idx.get(), 2);
     }
+
     #[test]
     fn inflate_queue_continues_after_an_invalid_pfn() {
         const QUEUE_ADDRESS: GuestAddress = GuestAddress(0x1_0000);
@@ -849,5 +880,71 @@ mod tests {
 
         assert_eq!(memory.read_obj::<u8>(VALID_RANGE).unwrap(), 0);
         assert_eq!(guest_queue.used.idx.get(), 1);
+    }
+
+    #[test]
+    fn restore_uses_saved_reporting_feature_for_queue_topology() {
+        let reporting_feature = 1u64 << VIRTIO_BALLOON_F_REPORTING;
+        let restored_with_reporting = Balloon::new(
+            "balloon0".to_string(),
+            0,
+            false,
+            false,
+            SeccompAction::Allow,
+            EventFd::new(0).unwrap(),
+            Some(BalloonState {
+                avail_features: reporting_feature,
+                acked_features: reporting_feature,
+                config: VirtioBalloonConfig::default(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            restored_with_reporting.common.queue_sizes,
+            vec![QUEUE_SIZE, QUEUE_SIZE, REPORTING_QUEUE_SIZE]
+        );
+
+        let restored_without_reporting = Balloon::new(
+            "balloon0".to_string(),
+            0,
+            false,
+            true,
+            SeccompAction::Allow,
+            EventFd::new(0).unwrap(),
+            Some(BalloonState {
+                avail_features: 0,
+                acked_features: 0,
+                config: VirtioBalloonConfig::default(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            restored_without_reporting.common.queue_sizes,
+            vec![QUEUE_SIZE, QUEUE_SIZE]
+        );
+    }
+
+    #[test]
+    fn release_private_page_with_read_only_backing_file() {
+        let (path, snapshot) = temp_file("read-only", &vec![0x5a; PAGE_SIZE]);
+        drop(snapshot);
+
+        let snapshot = OpenOptions::new().read(true).open(&path).unwrap();
+        let mmap = MmapRegion::build(
+            Some(FileOffset::new(snapshot, 0)),
+            PAGE_SIZE,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE,
+        )
+        .unwrap();
+        let region = GuestRegionMmap::new(mmap, GuestAddress(0)).unwrap();
+        let memory = GuestMemoryMmap::from_regions(vec![region]).unwrap();
+
+        memory.write_obj(0xa5_u8, GuestAddress(0)).unwrap();
+        BalloonEpollHandler::release_memory_range(&memory, GuestAddress(0), PAGE_SIZE).unwrap();
+
+        assert_eq!(memory.read_obj::<u8>(GuestAddress(0)).unwrap(), 0x5a);
+        assert_eq!(fs::read(&path).unwrap(), vec![0x5a; PAGE_SIZE]);
+        fs::remove_file(path).unwrap();
     }
 }
