@@ -2571,6 +2571,15 @@ derive_check(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol, const char *nam
 			    lvol->name, lvs->name);
 		return -EINVAL;
 	}
+	if (!lvol->blob) {
+		/* During framework shutdown the lvol can remain discoverable until
+		 * its store is removed even though its blob has already closed.
+		 * Do not pass that half-closed object to spdk_lvol_*(), whose derive
+		 * path assumes a live blob and asserts in spdk_blob_get_id(). */
+		SPDK_ERRLOG("lvol '%s' is closing and cannot be derived\n",
+			    lvol->name);
+		return -ENODEV;
+	}
 
 	/* A decouple in flight is the case this is really about. Snapshotting an lvol
 	 * halfway through one hands the esnap parent to the snapshot, and the decouple
