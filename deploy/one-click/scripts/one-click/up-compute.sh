@@ -48,6 +48,7 @@ mkdir -p \
   /data/cube-shared \
   /data/cube-shared/volume \
   /data/shared
+ensure_cubebox_os_image_on_data "${TOOLBOX_ROOT}"
 
 "${SCRIPT_DIR}/down-compute.sh" >/dev/null 2>&1 || true
 

@@ -399,6 +399,11 @@ spec:
           hostPath:
             path: {{ .Values.hostPaths.dataCubelet }}
             type: DirectoryOrCreate
+        {{/* Always present so leftover softlinks do not fall into the image overlay. */}}
+        - name: data-cubebox-os-image
+          hostPath:
+            path: {{ .Values.hostPaths.dataCubeboxOsImage }}
+            type: DirectoryOrCreate
         - name: data-log
           hostPath:
             path: {{ .Values.hostPaths.dataLog }}

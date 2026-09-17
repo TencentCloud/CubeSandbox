@@ -26,8 +26,9 @@ RUN apt-get update \
 COPY scripts/node-prep-lib.sh /scripts/node-prep-lib.sh
 COPY scripts/cube-node-init.sh /scripts/cube-node-init.sh
 COPY scripts/wait-pvm-host.sh /scripts/wait-pvm-host.sh
+COPY scripts/cubebox_os_image.sh /scripts/cubebox_os_image.sh
 
 RUN chmod +x /scripts/cube-node-init.sh /scripts/wait-pvm-host.sh \
-    && chmod 644 /scripts/node-prep-lib.sh
+    && chmod 644 /scripts/node-prep-lib.sh /scripts/cubebox_os_image.sh
 
 ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/scripts/cube-node-init.sh"]

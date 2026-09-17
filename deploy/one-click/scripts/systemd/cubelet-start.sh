@@ -33,6 +33,7 @@ mkdir -p \
   /data/snapshot_pack/disks \
   /data/cube-shared \
   /data/cube-shared/volume
+ensure_cubebox_os_image_on_data "${TOOLBOX_ROOT}"
 
 if [[ -f "${PID_FILE}" ]]; then
   existing_pid="$(<"${PID_FILE}")"
