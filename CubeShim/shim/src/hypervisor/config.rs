@@ -17,8 +17,9 @@ use crate::sandbox::pmem::{Pmem, HYP_AGENT_ID, HYP_OS_IMAGE_ID};
 
 use cube_hypervisor::config::{RateLimiterConfig, TokenBucketConfig};
 use cube_hypervisor::vm_config::{
-    ConsoleConfig, ConsoleOutputMode, CpuTopology, DiskConfig, FsConfig, IvshmemConfig, MacAddr,
-    NetConfig, PayloadConfig, PmemConfig, RngConfig, VmConfig as VC, VsockConfig,
+    BalloonConfig, ConsoleConfig, ConsoleOutputMode, CpuTopology, DiskConfig, FsConfig,
+    IvshmemConfig, MacAddr, NetConfig, PayloadConfig, PmemConfig, RngConfig, VmConfig as VC,
+    VsockConfig,
 };
 use cube_hypervisor::vmm_config::VmmConfig;
 
@@ -169,6 +170,11 @@ impl VmConfig {
 
         vc.memory.size = self.memory_size * MI_B;
         vc.memory.dirty_log = self.dirty_log;
+        vc.balloon = Some(BalloonConfig {
+            size: 0,
+            deflate_on_oom: false,
+            free_page_reporting: true,
+        });
 
         let cmds = self.cmdlines.join(" ").to_string();
         let payload = PayloadConfig {
@@ -486,6 +492,7 @@ mod tests {
     #[test]
     fn utils_config_dft() {
         let config = VmConfig::default();
+        let hypervisor_config = config.to_vm_config();
 
         //default: pmem0=OS, pmem1=agent
         assert!(config.pmems.is_some());
@@ -499,6 +506,10 @@ mod tests {
         assert!(pmem[1].discard_writes);
         assert_eq!(config.console.mode, ConsoleOutputMode::Tty);
         assert_eq!(config.rng.src, PathBuf::from("/dev/urandom"));
+        let balloon = hypervisor_config.balloon.unwrap();
+        assert_eq!(balloon.size, 0);
+        assert!(!balloon.deflate_on_oom);
+        assert!(balloon.free_page_reporting);
 
         let mut params = vec![
             "root=/dev/pmem0".to_string(),

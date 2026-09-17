@@ -1670,6 +1670,7 @@ mod tests {
         assert_eq!(vm_config.vcpus, 999);
         assert_eq!(vm_config.memory_size, 999);
         assert_eq!(vm_config.kernel, "ut_kernel".to_string());
+        assert!(vm_config.to_vm_config().balloon.is_some());
         assert!(vm_config.cmdlines.contains(&"custom.param=42".to_string()));
         assert!(vm_config
             .cmdlines
