@@ -142,14 +142,29 @@ impl BalloonEpollHandler {
         let region = memory.find_region(range_base).ok_or(Error::GuestMemory(
             GuestMemoryError::InvalidGuestAddress(range_base),
         ))?;
+
+        // No underflow possible because range_base was found in the region by `find_region`.
+        let offset = range_base.0 - region.start_addr().0;
+        let region_limit = region.len() - offset;
+        let len = std::cmp::min(range_len as u64, region_limit);
+        if len < range_len as u64 {
+            warn!(
+                "Clamping reported range at GPA 0x{:x} from {} to {} bytes \
+                 to fit inside its memory region",
+                range_base.0, range_len, len
+            );
+        }
+        if len == 0 {
+            return Ok(());
+        }
+
         if let Some(f_off) = region.file_offset() {
-            let offset = range_base.0 - region.start_addr().0;
             let res = unsafe {
                 libc::fallocate64(
                     f_off.file().as_raw_fd(),
                     libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
                     (offset + f_off.start()) as libc::off64_t,
-                    range_len as libc::off64_t,
+                    len as libc::off64_t,
                 )
             };
 
@@ -158,7 +173,7 @@ impl BalloonEpollHandler {
             }
         }
 
-        Self::advise_memory_range(memory, range_base, range_len, libc::MADV_DONTNEED)
+        Self::advise_memory_range(memory, range_base, len as usize, libc::MADV_DONTNEED)
     }
 
     fn process_queue(&mut self, queue_index: usize) -> result::Result<(), Error> {
@@ -578,3 +593,61 @@ impl Snapshottable for Balloon {
 }
 impl Transportable for Balloon {}
 impl Migratable for Balloon {}
+
+#[cfg(test)]
+mod tests {
+    use super::BalloonEpollHandler;
+    use crate::{GuestMemoryMmap, GuestRegionMmap, MmapRegion};
+    use std::fs::{self, File, OpenOptions};
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use vm_memory::{FileOffset, GuestAddress};
+
+    const PAGE_SIZE: usize = 4096;
+
+    fn temp_file(name: &str, contents: &[u8]) -> (std::path::PathBuf, File) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("balloon-{name}-{nonce}"));
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(contents).unwrap();
+        (path, file)
+    }
+
+    #[test]
+    fn release_zero_length_range_is_a_noop() {
+        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), PAGE_SIZE)]).unwrap();
+
+        BalloonEpollHandler::release_memory_range(&memory, GuestAddress(0), 0).unwrap();
+    }
+
+    #[test]
+    fn release_range_is_clamped_to_its_memory_region() {
+        let contents = vec![0x5a; PAGE_SIZE * 2];
+        let (path, snapshot) = temp_file("region-boundary", &contents);
+        let mmap = MmapRegion::build(
+            Some(FileOffset::new(snapshot, 0)),
+            PAGE_SIZE,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE,
+        )
+        .unwrap();
+        let region = GuestRegionMmap::new(mmap, GuestAddress(0)).unwrap();
+        let memory = GuestMemoryMmap::from_regions(vec![region]).unwrap();
+
+        BalloonEpollHandler::release_memory_range(&memory, GuestAddress(0), PAGE_SIZE * 2).unwrap();
+
+        let after = fs::read(&path).unwrap();
+        assert_eq!(&after[..PAGE_SIZE], &vec![0; PAGE_SIZE]);
+        assert_eq!(&after[PAGE_SIZE..], &contents[PAGE_SIZE..]);
+        fs::remove_file(path).unwrap();
+    }
+}
