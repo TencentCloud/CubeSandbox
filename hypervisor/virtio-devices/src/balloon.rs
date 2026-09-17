@@ -33,6 +33,7 @@ use vm_memory::{
     GuestMemoryError, GuestMemoryRegion,
 };
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_virtio::checked_descriptor::DescriptorChainExt;
 use vmm_sys_util::eventfd::EventFd;
 
 const QUEUE_SIZE: u16 = 128;
@@ -49,6 +50,12 @@ const REPORTING_QUEUE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 3;
 // Size of a PFN in the balloon interface.
 const VIRTIO_BALLOON_PFN_SHIFT: u64 = 12;
 
+// Upper bound on a single inflate or deflate descriptor length, in
+// bytes. Matches the Linux driver, which submits at most
+// VIRTIO_BALLOON_ARRAY_PFNS_MAX of 256 PFN entries of 4 bytes each per
+// descriptor.
+const VIRTIO_BALLOON_MAX_PFN_BYTES: u32 = 256 * 4;
+
 // Deflate balloon on OOM
 const VIRTIO_BALLOON_F_DEFLATE_ON_OOM: u64 = 2;
 // Enable an additional virtqueue to let the guest notify the host about free
@@ -59,10 +66,6 @@ const VIRTIO_BALLOON_F_REPORTING: u64 = 5;
 pub enum Error {
     #[error("Guest gave us bad memory addresses.: {0}")]
     GuestMemory(GuestMemoryError),
-    #[error("Guest gave us a write only descriptor that protocol says to read from")]
-    UnexpectedWriteOnlyDescriptor,
-    #[error("Guest sent us invalid request")]
-    InvalidRequest,
     #[error("Fallocate fail.: {0}")]
     FallocateFail(std::io::Error),
     #[error("Madvise fail.: {0}")]
@@ -73,8 +76,6 @@ pub enum Error {
     InvalidQueueIndex(usize),
     #[error("Fail tp signal: {0}")]
     FailedSignal(io::Error),
-    #[error("Descriptor chain is too short")]
-    DescriptorChainTooShort,
     #[error("Failed adding used index: {0}")]
     QueueAddUsed(virtio_queue::Error),
     #[error("Failed creating an iterator over the queue: {0}")]
@@ -181,45 +182,84 @@ impl BalloonEpollHandler {
         while let Some(mut desc_chain) =
             self.queues[queue_index].pop_descriptor_chain(self.mem.memory())
         {
-            let desc = desc_chain.next().ok_or(Error::DescriptorChainTooShort)?;
+            let desc = match desc_chain.next_checked(None) {
+                Ok(Some(desc)) => desc,
+                Ok(None) => {
+                    warn!("Skipping empty balloon descriptor chain");
+                    self.queues[queue_index]
+                        .add_used(desc_chain.memory(), desc_chain.head_index(), 0)
+                        .map_err(Error::QueueAddUsed)?;
+                    used_descs = true;
+                    continue;
+                }
+                Err(addr) => {
+                    warn!(
+                        "Skipping balloon descriptor outside guest memory at 0x{:x}",
+                        addr.0
+                    );
+                    self.queues[queue_index]
+                        .add_used(desc_chain.memory(), desc_chain.head_index(), 0)
+                        .map_err(Error::QueueAddUsed)?;
+                    used_descs = true;
+                    continue;
+                }
+            };
 
             let data_chunk_size = size_of::<u32>();
 
-            // The head contains the request type which MUST be readable.
             if desc.is_write_only() {
-                error!("The head contains the request type is not right");
-                return Err(Error::UnexpectedWriteOnlyDescriptor);
-            }
-            if desc.len() as usize % data_chunk_size != 0 {
-                error!("the request size {} is not right", desc.len());
-                return Err(Error::InvalidRequest);
-            }
+                warn!("Skipping device-writable descriptor on inflate/deflate queue");
+            } else if desc.len() as usize % data_chunk_size != 0 {
+                warn!(
+                    "Skipping descriptor with length {} not a multiple of {data_chunk_size}",
+                    desc.len()
+                );
+            } else if desc.len() > VIRTIO_BALLOON_MAX_PFN_BYTES {
+                warn!(
+                    "Skipping descriptor with length {} exceeding cap {VIRTIO_BALLOON_MAX_PFN_BYTES}",
+                    desc.len()
+                );
+            } else {
+                let mut offset = 0u64;
+                while offset < desc.len() as u64 {
+                    let Some(addr) = desc.addr().checked_add(offset) else {
+                        warn!("Address overflow in balloon descriptor");
+                        break;
+                    };
+                    let pfn: u32 = match desc_chain.memory().read_obj(addr) {
+                        Ok(value) => value,
+                        Err(e) => {
+                            warn!("Failed to read PFN from descriptor: {e}");
+                            break;
+                        }
+                    };
+                    offset += data_chunk_size as u64;
 
-            let mut offset = 0u64;
-            while offset < desc.len() as u64 {
-                let addr = desc.addr().checked_add(offset).unwrap();
-                let pfn: u32 = desc_chain
-                    .memory()
-                    .read_obj(addr)
-                    .map_err(Error::GuestMemory)?;
-                offset += data_chunk_size as u64;
+                    let range_base = GuestAddress((pfn as u64) << VIRTIO_BALLOON_PFN_SHIFT);
+                    let range_len = 1 << VIRTIO_BALLOON_PFN_SHIFT;
 
-                let range_base = GuestAddress((pfn as u64) << VIRTIO_BALLOON_PFN_SHIFT);
-                let range_len = 1 << VIRTIO_BALLOON_PFN_SHIFT;
-
-                match queue_index {
-                    0 => {
-                        Self::release_memory_range(desc_chain.memory(), range_base, range_len)?;
+                    match queue_index {
+                        0 => {
+                            if let Err(e) = Self::release_memory_range(
+                                desc_chain.memory(),
+                                range_base,
+                                range_len,
+                            ) {
+                                warn!("Failed to release memory for PFN {pfn:#x}: {e}");
+                            }
+                        }
+                        1 => {
+                            if let Err(e) = Self::advise_memory_range(
+                                desc_chain.memory(),
+                                range_base,
+                                range_len,
+                                libc::MADV_WILLNEED,
+                            ) {
+                                warn!("Failed to advise memory for PFN {pfn:#x}: {e}");
+                            }
+                        }
+                        _ => return Err(Error::InvalidQueueIndex(queue_index)),
                     }
-                    1 => {
-                        Self::advise_memory_range(
-                            desc_chain.memory(),
-                            range_base,
-                            range_len,
-                            libc::MADV_WILLNEED,
-                        )?;
-                    }
-                    _ => return Err(Error::InvalidQueueIndex(queue_index)),
                 }
             }
 
@@ -241,10 +281,21 @@ impl BalloonEpollHandler {
         while let Some(mut desc_chain) =
             self.queues[queue_index].pop_descriptor_chain(self.mem.memory())
         {
-            let mut descs_len = 0;
-            while let Some(desc) = desc_chain.next() {
-                descs_len += desc.len();
-                Self::release_memory_range(desc_chain.memory(), desc.addr(), desc.len() as usize)?;
+            let mut descs_len: u32 = 0;
+            let results: Vec<_> = desc_chain.checked_iter(None).collect();
+            for result in results {
+                let desc = match result {
+                    Ok(desc) => desc,
+                    Err(_) => break,
+                };
+                descs_len = descs_len.saturating_add(desc.len());
+                if let Err(e) = Self::release_memory_range(
+                    desc_chain.memory(),
+                    desc.addr(),
+                    desc.len() as usize,
+                ) {
+                    warn!("Failed to release reported memory range: {e}");
+                }
             }
 
             self.queues[queue_index]
@@ -596,14 +647,32 @@ impl Migratable for Balloon {}
 
 #[cfg(test)]
 mod tests {
-    use super::BalloonEpollHandler;
-    use crate::{GuestMemoryMmap, GuestRegionMmap, MmapRegion};
+    use super::{
+        Balloon, BalloonEpollHandler, BalloonState, VirtioBalloonConfig, QUEUE_SIZE,
+        REPORTING_QUEUE_SIZE, VIRTIO_BALLOON_F_REPORTING, VIRTIO_BALLOON_MAX_PFN_BYTES,
+        VIRTIO_BALLOON_PFN_SHIFT,
+    };
+    use crate::{
+        GuestMemoryMmap, GuestRegionMmap, MmapRegion, VirtioInterrupt, VirtioInterruptType,
+    };
     use std::fs::{self, File, OpenOptions};
     use std::io::Write;
+    use std::mem::size_of;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use vm_memory::{FileOffset, GuestAddress};
+    use vm_memory::{Bytes, FileOffset, GuestAddress, GuestMemoryAtomic};
+    use vm_virtio::queue::testing::VirtQueue as GuestQ;
+    use vmm_sys_util::eventfd::EventFd;
 
     const PAGE_SIZE: usize = 4096;
+
+    struct NoopVirtioInterrupt;
+
+    impl VirtioInterrupt for NoopVirtioInterrupt {
+        fn trigger(&self, _int_type: VirtioInterruptType) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn temp_file(name: &str, contents: &[u8]) -> (std::path::PathBuf, File) {
         let nonce = SystemTime::now()
@@ -649,5 +718,136 @@ mod tests {
         assert_eq!(&after[..PAGE_SIZE], &vec![0; PAGE_SIZE]);
         assert_eq!(&after[PAGE_SIZE..], &contents[PAGE_SIZE..]);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn reporting_queue_continues_after_an_invalid_range() {
+        const QUEUE_ADDRESS: GuestAddress = GuestAddress(0x1_0000);
+        const VALID_RANGE: GuestAddress = GuestAddress(0x2_0000);
+        const INVALID_RANGE: GuestAddress = GuestAddress(0x8_0000);
+
+        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x4_0000)]).unwrap();
+        memory.write_obj(0xa5_u8, VALID_RANGE).unwrap();
+        let guest_queue = GuestQ::new(QUEUE_ADDRESS, &memory, 16);
+        guest_queue.dtable[0].set(INVALID_RANGE.0, PAGE_SIZE as u32, 0, 0);
+        guest_queue.dtable[1].set(VALID_RANGE.0, PAGE_SIZE as u32, 0, 0);
+        guest_queue.avail.ring[0].set(0);
+        guest_queue.avail.ring[1].set(1);
+        guest_queue.avail.idx.set(2);
+
+        let mut handler = BalloonEpollHandler {
+            mem: GuestMemoryAtomic::new(memory.clone()),
+            queues: vec![guest_queue.create_queue()],
+            interrupt_cb: Arc::new(NoopVirtioInterrupt),
+            inflate_queue_evt: EventFd::new(0).unwrap(),
+            deflate_queue_evt: EventFd::new(0).unwrap(),
+            reporting_queue_evt: None,
+            kill_evt: EventFd::new(0).unwrap(),
+            pause_evt: EventFd::new(0).unwrap(),
+        };
+
+        handler.process_reporting_queue(0).unwrap();
+
+        assert_eq!(memory.read_obj::<u8>(VALID_RANGE).unwrap(), 0);
+        assert_eq!(guest_queue.used.idx.get(), 2);
+    }
+
+    #[test]
+    fn inflate_queue_skips_oversized_descriptor_and_continues() {
+        const QUEUE_ADDRESS: GuestAddress = GuestAddress(0x1_0000);
+        const OVERSIZED_PFN_LIST: GuestAddress = GuestAddress(0x2_0000);
+        const VALID_PFN_LIST: GuestAddress = GuestAddress(0x2_1000);
+        const PROTECTED_RANGE: GuestAddress = GuestAddress(0x3_0000);
+        const VALID_RANGE: GuestAddress = GuestAddress(0x4_0000);
+
+        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x5_0000)]).unwrap();
+        memory.write_obj(0xa5_u8, PROTECTED_RANGE).unwrap();
+        memory.write_obj(0xa5_u8, VALID_RANGE).unwrap();
+        let protected_pfn = (PROTECTED_RANGE.0 >> VIRTIO_BALLOON_PFN_SHIFT) as u32;
+        for offset in (0..=VIRTIO_BALLOON_MAX_PFN_BYTES).step_by(size_of::<u32>()) {
+            memory
+                .write_obj(
+                    protected_pfn,
+                    GuestAddress(OVERSIZED_PFN_LIST.0 + offset as u64),
+                )
+                .unwrap();
+        }
+        memory
+            .write_obj(
+                (VALID_RANGE.0 >> VIRTIO_BALLOON_PFN_SHIFT) as u32,
+                VALID_PFN_LIST,
+            )
+            .unwrap();
+
+        let guest_queue = GuestQ::new(QUEUE_ADDRESS, &memory, 16);
+        guest_queue.dtable[0].set(
+            OVERSIZED_PFN_LIST.0,
+            VIRTIO_BALLOON_MAX_PFN_BYTES + size_of::<u32>() as u32,
+            0,
+            0,
+        );
+        guest_queue.dtable[1].set(VALID_PFN_LIST.0, size_of::<u32>() as u32, 0, 0);
+        guest_queue.avail.ring[0].set(0);
+        guest_queue.avail.ring[1].set(1);
+        guest_queue.avail.idx.set(2);
+
+        let mut handler = BalloonEpollHandler {
+            mem: GuestMemoryAtomic::new(memory.clone()),
+            queues: vec![guest_queue.create_queue()],
+            interrupt_cb: Arc::new(NoopVirtioInterrupt),
+            inflate_queue_evt: EventFd::new(0).unwrap(),
+            deflate_queue_evt: EventFd::new(0).unwrap(),
+            reporting_queue_evt: None,
+            kill_evt: EventFd::new(0).unwrap(),
+            pause_evt: EventFd::new(0).unwrap(),
+        };
+
+        handler.process_queue(0).unwrap();
+
+        assert_eq!(memory.read_obj::<u8>(PROTECTED_RANGE).unwrap(), 0xa5);
+        assert_eq!(memory.read_obj::<u8>(VALID_RANGE).unwrap(), 0);
+        assert_eq!(guest_queue.used.idx.get(), 2);
+    }
+    #[test]
+    fn inflate_queue_continues_after_an_invalid_pfn() {
+        const QUEUE_ADDRESS: GuestAddress = GuestAddress(0x1_0000);
+        const PFN_LIST: GuestAddress = GuestAddress(0x2_0000);
+        const VALID_RANGE: GuestAddress = GuestAddress(0x3_0000);
+        const INVALID_RANGE: GuestAddress = GuestAddress(0x8_0000);
+
+        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x4_0000)]).unwrap();
+        memory.write_obj(0xa5_u8, VALID_RANGE).unwrap();
+        memory
+            .write_obj(
+                (INVALID_RANGE.0 >> VIRTIO_BALLOON_PFN_SHIFT) as u32,
+                PFN_LIST,
+            )
+            .unwrap();
+        memory
+            .write_obj(
+                (VALID_RANGE.0 >> VIRTIO_BALLOON_PFN_SHIFT) as u32,
+                GuestAddress(PFN_LIST.0 + size_of::<u32>() as u64),
+            )
+            .unwrap();
+        let guest_queue = GuestQ::new(QUEUE_ADDRESS, &memory, 16);
+        guest_queue.dtable[0].set(PFN_LIST.0, (size_of::<u32>() * 2) as u32, 0, 0);
+        guest_queue.avail.ring[0].set(0);
+        guest_queue.avail.idx.set(1);
+
+        let mut handler = BalloonEpollHandler {
+            mem: GuestMemoryAtomic::new(memory.clone()),
+            queues: vec![guest_queue.create_queue()],
+            interrupt_cb: Arc::new(NoopVirtioInterrupt),
+            inflate_queue_evt: EventFd::new(0).unwrap(),
+            deflate_queue_evt: EventFd::new(0).unwrap(),
+            reporting_queue_evt: None,
+            kill_evt: EventFd::new(0).unwrap(),
+            pause_evt: EventFd::new(0).unwrap(),
+        };
+
+        handler.process_queue(0).unwrap();
+
+        assert_eq!(memory.read_obj::<u8>(VALID_RANGE).unwrap(), 0);
+        assert_eq!(guest_queue.used.idx.get(), 1);
     }
 }
