@@ -377,6 +377,13 @@ RCOW_REPLAY_FILE="${RCOW_REPLAY_FILE:-${RCOW_ACTIVE_FILE}.replay}"
 RCOW_STOP_TIMEOUT="${RCOW_STOP_TIMEOUT:-120}"
 RCOW_RPC_TIMEOUT="${RCOW_RPC_TIMEOUT:-300}"
 
+# How long rcow_upgrade.sh lets the pre-kill flush run. Host I/O is paused for
+# the whole of it. 0 skips the flush: acknowledged writes are already in the WAL
+# and are replayed after SIGKILL, so the call only buys a shorter replay at the
+# cost of waiting out in-flight GET+PUT. A positive value is a drain deadline;
+# under a write load the overlay never goes clean and the RPC returns -ETIMEDOUT.
+RCOW_HOT_FLUSH_MS="${RCOW_HOT_FLUSH_MS:-0}"
+
 # --------------------------------------------------------------------------
 # Output
 # --------------------------------------------------------------------------

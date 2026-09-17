@@ -1521,17 +1521,33 @@ SPDK_RPC_REGISTER("rcow_delete_lvstore", rpc_rcow_delete_lvstore,
  * empty, so any subsequent read has to come from S3. Without it a verify pass
  * could be satisfied entirely out of RAM and would prove nothing about the
  * objects actually written.
+ *
+ * timeout_ms is for the one caller that is not a test: rcow_upgrade.sh, which
+ * pauses I/O for as long as this call takes. A workload that keeps writing never
+ * lets the overlay go clean, so the drain runs to its deadline no matter how
+ * long that is, and every second of it is a second of paused I/O for a flush
+ * that ends in -ETIMEDOUT anyway. Omitted, the flusher's own 30 s applies.
  * ========================================================================== */
+
+struct rpc_lvstore_flush {
+	char *lvs_name;
+	uint64_t timeout_ms;
+};
+
+static const struct spdk_json_object_decoder rpc_lvstore_flush_decoders[] = {
+	{"lvs_name", offsetof(struct rpc_lvstore_flush, lvs_name), spdk_json_decode_string, false},
+	{"timeout_ms", offsetof(struct rpc_lvstore_flush, timeout_ms), spdk_json_decode_uint64, true},
+};
 
 static void
 rpc_rcow_flush_lvstore(struct spdk_jsonrpc_request *request,
 			      const struct spdk_json_val *params)
 {
-	struct rpc_lvstore_name req = {0};
+	struct rpc_lvstore_flush req = {0};
 	struct s3lvol_lvstore *lvs;
 
-	if (spdk_json_decode_object(params, rpc_lvstore_name_decoders,
-				    SPDK_COUNTOF(rpc_lvstore_name_decoders), &req)) {
+	if (spdk_json_decode_object(params, rpc_lvstore_flush_decoders,
+				    SPDK_COUNTOF(rpc_lvstore_flush_decoders), &req)) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
 						 "Invalid parameters");
 		goto cleanup;
@@ -1545,7 +1561,7 @@ rpc_rcow_flush_lvstore(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	s3lvol_lvstore_flush(lvs, rpc_lvstore_op_cb, request);
+	s3lvol_lvstore_flush(lvs, req.timeout_ms * 1000, rpc_lvstore_op_cb, request);
 
 cleanup:
 	free(req.lvs_name);
@@ -1598,6 +1614,49 @@ cleanup:
 }
 SPDK_RPC_REGISTER("rcow_checkpoint_lvstore",
 		  rpc_rcow_checkpoint_lvstore, SPDK_RPC_RUNTIME)
+
+/* ==========================================================================
+ * rcow_prepare_hot_upgrade
+ *
+ * Quiesce every RCOW namespace and hold the flushers. Blobstore stays dirty so
+ * the replacement attach recovers it instead of taking a clean-load shortcut.
+ * The subsystems deliberately remain paused: rcow_upgrade.sh invokes this as
+ * its final online operation and SIGKILLs the process immediately afterwards,
+ * preserving the host namespace layout.
+ * ========================================================================== */
+
+static void
+rpc_rcow_prepare_hot_upgrade(struct spdk_jsonrpc_request *request,
+			     const struct spdk_json_val *params)
+{
+	if (params != NULL && spdk_json_decode_object(params, NULL, 0, NULL)) {
+		spdk_jsonrpc_send_error_response(request,
+						 SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "This method takes no parameters");
+		return;
+	}
+
+	s3lvol_prepare_hot_upgrade(rpc_lvstore_op_cb, request);
+}
+SPDK_RPC_REGISTER("rcow_prepare_hot_upgrade",
+		  rpc_rcow_prepare_hot_upgrade, SPDK_RPC_RUNTIME)
+
+static void
+rpc_rcow_resume_flushers(struct spdk_jsonrpc_request *request,
+			 const struct spdk_json_val *params)
+{
+	if (params != NULL && spdk_json_decode_object(params, NULL, 0, NULL)) {
+		spdk_jsonrpc_send_error_response(request,
+						 SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "This method takes no parameters");
+		return;
+	}
+
+	s3lvol_resume_flushers();
+	spdk_jsonrpc_send_bool_response(request, true);
+}
+SPDK_RPC_REGISTER("rcow_resume_flushers",
+		  rpc_rcow_resume_flushers, SPDK_RPC_RUNTIME)
 
 /* ==========================================================================
  * rcow_add_s3_config

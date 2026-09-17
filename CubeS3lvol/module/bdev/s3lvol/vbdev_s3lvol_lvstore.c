@@ -1430,6 +1430,14 @@ lvs_attach_lvols_done(struct lvs_setup_ctx *ctx)
 {
 	struct s3lvol_lvstore *lvs = ctx->lvs;
 
+	/* Blobstore and lvol metadata have been read from the overlay. Keep the
+	 * replay backlog held while rcow_start restores active namespaces and
+	 * listeners; 32 S3 uploads on the owner reactor can otherwise delay that
+	 * I/O recovery path by seconds. rcow_start resumes on that real milestone.
+	 * This long fallback only protects direct RPC users and startup-script
+	 * version skew; it must not normally race restore. */
+	s3_bs_dev_schedule_flusher_resume(lvs->bs_dev, 30 * 1000 * 1000);
+
 	SPDK_NOTICELOG("lvstore '%s': %u lvol(s) exported as bdevs%s\n",
 		       lvs->name, ctx->lvols_ok,
 		       ctx->lvols_failed ? " (some could not be opened or "
@@ -1743,9 +1751,12 @@ lvs_attach_wal_replayed(void *cb_arg, int status)
 		       "dropped %" PRIu64 " unclosed batch(es)\n",
 		       ctx->lvs->name, st.replayed_entries,
 		       st.dropped_batches);
+	s3_bs_dev_log_overlay(ctx->lvs->bs_dev);
 
 	lvs_attach_start_blobstore(ctx);
 }
+
+static void lvs_attach_flusher_held(void *cb_arg, int status);
 
 static void
 lvs_attach_journal_replayed(void *cb_arg, int status)
@@ -1769,6 +1780,24 @@ lvs_attach_journal_replayed(void *cb_arg, int status)
 		SPDK_ERRLOG("Failed to attach the WAL to '%s': %d\n",
 			    lvs->name, rc);
 		lvs_setup_fail(ctx, rc);
+		return;
+	}
+
+	/* Hold uploads until lvols are exported. Otherwise the flusher can
+	 * PUT+delete a metadata chunk while blobstore is still reading it. */
+	s3_bs_dev_suspend_flusher(lvs->bs_dev, lvs_attach_flusher_held, ctx);
+}
+
+static void
+lvs_attach_flusher_held(void *cb_arg, int status)
+{
+	struct lvs_setup_ctx *ctx = cb_arg;
+	struct s3lvol_lvstore *lvs = ctx->lvs;
+
+	if (status != 0) {
+		SPDK_ERRLOG("Failed to hold the flusher for '%s' during attach: %s\n",
+			    lvs->name, spdk_strerror(-status));
+		lvs_setup_fail(ctx, status);
 		return;
 	}
 
@@ -2298,17 +2327,19 @@ s3lvol_lvstore_unload(struct s3lvol_lvstore *lvs,
 	 * internally, and this is the only signal for when that finished. */
 	s3_bs_dev_set_destroy_cb(lvs->bs_dev, lvs_unload_bs_dev_gone, ctx);
 
-	s3_bs_dev_drain(lvs->bs_dev, lvs_unload_drained, ctx);
+	s3_bs_dev_drain(lvs->bs_dev, 0, lvs_unload_drained, ctx);
 }
 
 /* Push everything acknowledged so far into S3 without unloading.
  *
  * Exists for testing: after this returns the overlay is empty, so a subsequent
  * read has to come from S3 rather than from RAM. That is the difference between
- * "the data is in the process" and "the data is in the object store". */
+ * "the data is in the process" and "the data is in the object store".
+ *
+ * timeout_us of 0 takes the flusher's default; see s3_bs_dev_drain(). */
 void
-s3lvol_lvstore_flush(struct s3lvol_lvstore *lvs, spdk_lvs_op_complete cb_fn,
-		     void *cb_arg)
+s3lvol_lvstore_flush(struct s3lvol_lvstore *lvs, uint64_t timeout_us,
+		     spdk_lvs_op_complete cb_fn, void *cb_arg)
 {
 	if (!lvs || !lvs->bs_dev) {
 		if (cb_fn) {
@@ -2317,7 +2348,7 @@ s3lvol_lvstore_flush(struct s3lvol_lvstore *lvs, spdk_lvs_op_complete cb_fn,
 		return;
 	}
 
-	s3_bs_dev_drain(lvs->bs_dev, (s3_bs_dev_cb)cb_fn, cb_arg);
+	s3_bs_dev_drain(lvs->bs_dev, timeout_us, (s3_bs_dev_cb)cb_fn, cb_arg);
 }
 
 void
@@ -2332,6 +2363,171 @@ s3lvol_lvstore_checkpoint(struct s3lvol_lvstore *lvs, spdk_lvs_op_complete cb_fn
 	}
 
 	s3_bs_dev_checkpoint(lvs->bs_dev, (s3_bs_dev_cb)cb_fn, cb_arg);
+}
+
+struct lvs_hot_prepare_ctx {
+	struct s3lvol_lvstore *suspend_next;
+	spdk_lvs_op_complete cb_fn;
+	void *cb_arg;
+	int status;
+};
+
+static bool g_hot_prepare_active;
+static bool g_hot_prepare_done;
+
+static void
+lvs_hot_prepare_finish(struct lvs_hot_prepare_ctx *ctx, int status)
+{
+	spdk_lvs_op_complete cb_fn = ctx->cb_fn;
+	void *cb_arg = ctx->cb_arg;
+
+	g_hot_prepare_active = false;
+	if (status == 0) {
+		g_hot_prepare_done = true;
+	}
+	free(ctx);
+	if (cb_fn) {
+		cb_fn(cb_arg, status);
+	}
+}
+
+static void
+lvs_hot_prepare_resumed(void *cb_arg, int status)
+{
+	struct lvs_hot_prepare_ctx *ctx = cb_arg;
+
+	if (status != 0) {
+		SPDK_ERRLOG("not every RCOW subsystem resumed after hot prepare "
+			    "failed: %s\n", spdk_strerror(-status));
+	}
+	lvs_hot_prepare_finish(ctx, ctx->status != 0 ? ctx->status : status);
+}
+
+static void
+lvs_hot_prepare_fail(struct lvs_hot_prepare_ctx *ctx, int status)
+{
+	struct s3lvol_lvstore *lvs;
+	int rc;
+
+	ctx->status = status;
+	TAILQ_FOREACH(lvs, &g_lvstores, link) {
+		s3_bs_dev_resume_flusher(lvs->bs_dev);
+	}
+	rc = s3lvol_nvmf_resume_all(lvs_hot_prepare_resumed, ctx);
+	if (rc != 0) {
+		SPDK_ERRLOG("could not resume RCOW subsystems after hot prepare "
+			    "failed: %s\n", spdk_strerror(-rc));
+		lvs_hot_prepare_finish(ctx, status);
+	}
+}
+
+static void lvs_hot_prepare_suspend_next(struct lvs_hot_prepare_ctx *ctx);
+
+static void
+lvs_hot_prepare_flusher_suspended(void *cb_arg, int status)
+{
+	struct lvs_hot_prepare_ctx *ctx = cb_arg;
+
+	if (status != 0) {
+		SPDK_ERRLOG("failed to suspend flusher for '%s': %s\n",
+			    ctx->suspend_next->name, spdk_strerror(-status));
+		lvs_hot_prepare_fail(ctx, status);
+		return;
+	}
+
+	ctx->suspend_next = s3lvol_lvstore_next(ctx->suspend_next);
+	lvs_hot_prepare_suspend_next(ctx);
+}
+
+static void
+lvs_hot_prepare_suspend_next(struct lvs_hot_prepare_ctx *ctx)
+{
+	if (!ctx->suspend_next) {
+		/* Leave blobstore dirty. A live clean-sync can persist a used-blob
+		 * mask that the next clean load cannot open, and the replacement
+		 * then comes up short a volume. Dirty recovery is slower and proven. */
+		SPDK_NOTICELOG("hot prepare: namespaces paused and flushers held; "
+			       "blobstore stays dirty for the next attach\n");
+		lvs_hot_prepare_finish(ctx, 0);
+		return;
+	}
+
+	s3_bs_dev_suspend_flusher(ctx->suspend_next->bs_dev,
+				 lvs_hot_prepare_flusher_suspended, ctx);
+}
+
+static void
+lvs_hot_prepare_paused(void *cb_arg, int status)
+{
+	struct lvs_hot_prepare_ctx *ctx = cb_arg;
+
+	if (status != 0) {
+		/* pause_all has already resumed the subsystems it paused. */
+		lvs_hot_prepare_finish(ctx, status);
+		return;
+	}
+
+	ctx->suspend_next = s3lvol_lvstore_first();
+	lvs_hot_prepare_suspend_next(ctx);
+}
+
+void
+s3lvol_prepare_hot_upgrade(spdk_lvs_op_complete cb_fn, void *cb_arg)
+{
+	struct lvs_hot_prepare_ctx *ctx;
+	struct s3lvol_lvstore *lvs;
+	int rc;
+
+	/* The successful state is intentionally sticky until process exit:
+	 * subsystems and flushers remain paused. A timed-out caller may retry the
+	 * RPC, and that retry must not enter rollback and resume data-plane I/O. */
+	if (g_hot_prepare_done) {
+		if (cb_fn) {
+			cb_fn(cb_arg, 0);
+		}
+		return;
+	}
+	if (g_hot_prepare_active) {
+		if (cb_fn) {
+			cb_fn(cb_arg, -EBUSY);
+		}
+		return;
+	}
+
+	TAILQ_FOREACH(lvs, &g_lvstores, link) {
+		if (!lvs->lvs || s3lvol_lvstore_decouple_pending(lvs)) {
+			if (cb_fn) {
+				cb_fn(cb_arg, -EBUSY);
+			}
+			return;
+		}
+	}
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		if (cb_fn) {
+			cb_fn(cb_arg, -ENOMEM);
+		}
+		return;
+	}
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+	g_hot_prepare_active = true;
+
+	rc = s3lvol_nvmf_pause_all(lvs_hot_prepare_paused, ctx);
+	if (rc != 0) {
+		lvs_hot_prepare_finish(ctx, rc);
+	}
+}
+
+void
+s3lvol_resume_flushers(void)
+{
+	struct s3lvol_lvstore *lvs;
+
+	TAILQ_FOREACH(lvs, &g_lvstores, link) {
+		s3_bs_dev_resume_flusher(lvs->bs_dev);
+	}
 }
 
 void

@@ -258,6 +258,21 @@ s3_wal_is_backpressured(const struct s3_wal *wal)
 	return wal && wal->state == S3_WAL_BACKPRESSURE;
 }
 
+bool
+s3_wal_should_force_flush(const struct s3_wal *wal)
+{
+	uint64_t cap;
+
+	if (!wal) {
+		return false;
+	}
+	cap = wal_capacity(wal);
+	if (cap == 0) {
+		return false;
+	}
+	return wal_used(wal) * 100 >= cap * S3_WAL_FLUSH_FORCE_PCT;
+}
+
 /* ==========================================================================
  * Batch assembly and submission
  * ========================================================================== */

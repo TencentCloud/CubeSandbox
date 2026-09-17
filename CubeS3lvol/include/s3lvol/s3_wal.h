@@ -117,6 +117,14 @@
 #define S3_WAL_BACKPRESSURE_ON_PCT  85
 #define S3_WAL_BACKPRESSURE_OFF_PCT 65
 
+/* Occupancy at which the flusher ignores overlay hold-back and starts draining.
+ *
+ * Backpressure (85%) is too late for a small WAL: 4K random never fills a 1 MiB
+ * chunk, overlay holds for 45 s, and a 512 MiB log hits 85% first. Forcing at
+ * half full keeps the log a buffer instead of a cliff, without changing when
+ * writes are actually refused. */
+#define S3_WAL_FLUSH_FORCE_PCT 50
+
 enum s3_wal_entry_type {
 	S3_WAL_WRITE        = 0,
 	S3_WAL_WRITE_ZEROES = 1,
@@ -316,6 +324,10 @@ void s3_wal_sync_super(struct s3_wal *wal, uint64_t ckpt_seq,
 
 /* Backpressure is on: callers should stop submitting and retry later (W5). */
 bool s3_wal_is_backpressured(const struct s3_wal *wal);
+
+/* The log is at least S3_WAL_FLUSH_FORCE_PCT full. The flusher should ignore
+ * overlay hold-back so occupancy falls before writes have to be refused. */
+bool s3_wal_should_force_flush(const struct s3_wal *wal);
 
 uint64_t s3_wal_get_used_bytes(const struct s3_wal *wal);
 uint64_t s3_wal_get_next_seq(const struct s3_wal *wal);

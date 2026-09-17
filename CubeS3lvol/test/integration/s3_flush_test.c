@@ -871,6 +871,41 @@ overlay", probe.done, NULL);
 		}
 	}
 
+	/* --- suspend / resume --- */
+	printf("\n[11] suspend is reversible and distinct from destroy\n");
+	{
+		struct drain_probe probe = { .status = -1, .done = false };
+		uint32_t started;
+
+		s3_flusher_suspend(fl, drain_cb, &probe);
+		check_true("an idle flusher suspends immediately",
+			   probe.done && probe.status == 0, NULL);
+
+		started = fake.started;
+		fill_pattern(blk, 1, 4 * BLOCKS_PER_CHUNK, 0xC1);
+		s3_overlay_write(ov, 4 * BLOCKS_PER_CHUNK, 1, blk, 900);
+		s3_flusher_kick(fl);
+		check_u64("suspend starts no new upload", fake.started, started);
+
+		s3_flusher_resume(fl);
+		check_u64("resume restarts scheduling", fake.started, started + 1);
+		fake_complete_all(&fake, 0);
+		check_true("resumed upload completed", !s3_overlay_has_dirty(ov),
+			   NULL);
+
+		probe = (struct drain_probe){ .status = -1, .done = false };
+		fill_pattern(blk, 1, 5 * BLOCKS_PER_CHUNK, 0xC2);
+		s3_overlay_write(ov, 5 * BLOCKS_PER_CHUNK, 1, blk, 901);
+		s3_flusher_kick(fl);
+		s3_flusher_suspend(fl, drain_cb, &probe);
+		check_true("suspend waits for an in-flight upload", !probe.done,
+			   NULL);
+		s3_flusher_resume(fl);
+		fake_complete_all(&fake, 0);
+		check_true("an early resume is applied after suspend completes",
+			   probe.done && probe.status == 0, NULL);
+	}
+
 	s3_flusher_destroy(fl);
 	s3_overlay_destroy(ov);
 

@@ -54,11 +54,17 @@ struct s3_flusher {
 
 	struct spdk_poller *poller;
 
-	/* Set by destroy/drain so no new upload is started. */
+	/* Set only by destroy so no new upload is started. */
 	bool                        stopping;
+
+	/* Reversible scheduling gate used by attach and hot prepare. */
+	bool                        suspended;
+	bool                        resume_pending;
 
 	s3_flusher_cb drain_cb;
 	void *drain_arg;
+	s3_flusher_cb suspend_cb;
+	void *suspend_arg;
 
 	/* Tick at which a drain gives up on dirty data. */
 	uint64_t drain_deadline;
@@ -88,6 +94,7 @@ struct flush_req {
 };
 
 static void flusher_check_drain(struct s3_flusher *f);
+static void flusher_check_suspend(struct s3_flusher *f);
 
 /* ==========================================================================
  * WAL truncation
@@ -117,6 +124,7 @@ flusher_super_synced(void *cb_arg, int status)
 	 * every upload completion also re-check, but there is no reason to wait for
 	 * the next one when the very state the drain was waiting on just changed. */
 	flusher_check_drain(f);
+	flusher_check_suspend(f);
 }
 
 /* Report progress to the WAL so it can release segments.
@@ -197,6 +205,7 @@ flusher_upload_done(void *cb_arg, int status)
 	}
 
 	s3_flusher_kick(f);
+	flusher_check_suspend(f);
 }
 
 static void
@@ -250,17 +259,17 @@ s3_flusher_kick(struct s3_flusher *f)
 	 * default hold-back age (45s), so honouring the policy here would make
 	 * every unload, checkpoint and export time out instead of flushing.
 	 *
-	 * A backpressured WAL, because the log is only truncated once the data has
-	 * reached S3 (flusher_advance_wal below). Holding a chunk back therefore
-	 * holds on to log space, and the WAL refusing writes is a worse outcome
-	 * than an early upload. In the shipped configuration the overlay's own
-	 * high water mark is reached long first -- 4 GiB of RAM against 32 GiB of
-	 * log -- so this is the guard for a configuration where it is not. */
-	force = (f->drain_cb != NULL) || s3_wal_is_backpressured(f->wal);
+	 * A WAL that is already half full, because the log is only truncated once
+	 * the data has reached S3 (flusher_advance_wal below). Holding a chunk
+	 * back therefore holds on to log space. Waiting for true backpressure
+	 * (85%) is too late on a small WAL: 4K random never fills a chunk, the
+	 * overlay's 45 s age has not expired, and writes hit the cliff with the
+	 * flusher still idle. Half full is still a buffer, not a refusal. */
+	force = (f->drain_cb != NULL) || s3_wal_should_force_flush(f->wal);
 
 	/* An expired drain starts no further round either: refilling would push the
 	 * moment it can report as far away as the writes keep coming. */
-	while (!f->stopping && !f->drain_expired &&
+	while (!f->stopping && !f->suspended && !f->drain_expired &&
 	       f->in_flight < f->max_concurrent) {
 		uint64_t chunk_index;
 
@@ -282,6 +291,7 @@ flusher_poll(void *arg)
 
 	if (f->in_flight == 0 && !s3_overlay_has_dirty(f->overlay)) {
 		flusher_check_drain(f);
+		flusher_check_suspend(f);
 		return SPDK_POLLER_IDLE;
 	}
 
@@ -289,6 +299,7 @@ flusher_poll(void *arg)
 	 * deadline, so it has to be re-checked on every tick, not just when an
 	 * upload completes. */
 	flusher_check_drain(f);
+	flusher_check_suspend(f);
 
 	s3_flusher_kick(f);
 	return SPDK_POLLER_BUSY;
@@ -369,7 +380,7 @@ s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
 		}
 		return;
 	}
-	if (f->drain_cb) {
+	if (f->drain_cb || f->suspend_cb || f->stopping) {
 		/* One drain at a time. A second caller is told -EBUSY rather than
 		 * queued: the drain already running is the one it wanted, so waiting
 		 * for it and asking again gets the same answer as a waiter list
@@ -380,6 +391,9 @@ s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
 		}
 		return;
 	}
+	/* A drain supersedes an established scheduling hold: it explicitly asks
+	 * for dirty data to be uploaded and has its own completion boundary. */
+	f->suspended = false;
 
 	if (timeout_us == 0) {
 		timeout_us = S3_FLUSHER_DRAIN_TIMEOUT_US;
@@ -392,6 +406,68 @@ s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
 	f->drain_expired = false;
 
 	/* Push everything through rather than waiting for the poller tick. */
+	s3_flusher_kick(f);
+}
+
+static void
+flusher_check_suspend(struct s3_flusher *f)
+{
+	s3_flusher_cb cb_fn;
+	void *cb_arg;
+	bool resume;
+
+	if (!f->suspend_cb || f->in_flight != 0 || f->super_sync_active) {
+		return;
+	}
+
+	cb_fn = f->suspend_cb;
+	cb_arg = f->suspend_arg;
+	f->suspend_cb = NULL;
+	f->suspend_arg = NULL;
+	resume = f->resume_pending;
+	f->resume_pending = false;
+	if (resume) {
+		f->suspended = false;
+	}
+	cb_fn(cb_arg, 0);
+	if (resume) {
+		s3_flusher_kick(f);
+	}
+}
+
+void
+s3_flusher_suspend(struct s3_flusher *f, s3_flusher_cb cb_fn, void *cb_arg)
+{
+	if (!f || !cb_fn) {
+		if (cb_fn) {
+			cb_fn(cb_arg, -EINVAL);
+		}
+		return;
+	}
+	if (f->drain_cb || f->suspend_cb || f->suspended || f->stopping) {
+		cb_fn(cb_arg, -EBUSY);
+		return;
+	}
+
+	/* Stop scheduling before waiting: existing uploads and their final WAL
+	 * super update may complete, but no new upload can enter the gap. */
+	f->suspended = true;
+	f->suspend_cb = cb_fn;
+	f->suspend_arg = cb_arg;
+	flusher_check_suspend(f);
+}
+
+void
+s3_flusher_resume(struct s3_flusher *f)
+{
+	if (!f || !f->suspended || f->stopping) {
+		return;
+	}
+	if (f->suspend_cb) {
+		f->resume_pending = true;
+		return;
+	}
+	f->suspended = false;
 	s3_flusher_kick(f);
 }
 

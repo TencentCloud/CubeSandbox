@@ -157,8 +157,29 @@ void s3lvol_lvstore_destroy(struct s3lvol_lvstore *lvs,
 void s3lvol_lvstore_checkpoint(struct s3lvol_lvstore *lvs,
 			       spdk_lvs_op_complete cb_fn, void *cb_arg);
 
-void s3lvol_lvstore_flush(struct s3lvol_lvstore *lvs,
+void s3lvol_lvstore_flush(struct s3lvol_lvstore *lvs, uint64_t timeout_us,
 			  spdk_lvs_op_complete cb_fn, void *cb_arg);
+
+/**
+ * Quiesce exported I/O for every loaded lvstore.
+ *
+ * Pause every RCOW NVMf subsystem and hold the flushers. Blobstore is left
+ * dirty on purpose: a live clean-sync can persist a used-blob mask that a later
+ * clean load cannot open, and the replacement then comes up short a volume.
+ * The next attach recovers from the dirty super. On success the subsystems
+ * stay paused; the caller must terminate the process immediately. On failure
+ * they are resumed first.
+ */
+void s3lvol_prepare_hot_upgrade(spdk_lvs_op_complete cb_fn, void *cb_arg);
+
+/**
+ * Resume background upload on every loaded lvstore.
+ *
+ * rcow_start calls this after active namespaces and listeners are restored;
+ * attach also keeps a short fallback timer for callers that do not use the
+ * startup script.
+ */
+void s3lvol_resume_flushers(void);
 
 /**
  * Snapshot the write-path counters (WAL, overlay, flusher).
@@ -313,12 +334,24 @@ const char *s3lvol_statefile_path(const char *env_name, const char *fallback);
  * \param status 0, or a negative errno
  */
 typedef void (*s3lvol_nvmf_op_cb)(void *cb_arg, uint32_t nsid, int status);
+typedef void (*s3lvol_nvmf_state_cb)(void *cb_arg, int status);
 
 /** Build the NQN of subsystem \c index. */
 void s3lvol_nvmf_subsys_nqn(uint32_t index, char *out, size_t out_len);
 
 /** True when that subsystem has been created on the target. */
 bool s3lvol_nvmf_subsys_exists(uint32_t index);
+
+/**
+ * Pause every RCOW subsystem and quiesce all of its namespaces.
+ *
+ * Successful subsystems remain paused. If any pause fails, subsystems already
+ * paused by this call are resumed before the error is reported.
+ */
+int s3lvol_nvmf_pause_all(s3lvol_nvmf_state_cb cb_fn, void *cb_arg);
+
+/** Resume every RCOW subsystem previously paused for a hot upgrade. */
+int s3lvol_nvmf_resume_all(s3lvol_nvmf_state_cb cb_fn, void *cb_arg);
 
 /**
  * Expose \c bdev_name as namespace \c nsid of \c nqn.
