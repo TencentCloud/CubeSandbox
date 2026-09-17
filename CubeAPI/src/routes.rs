@@ -373,6 +373,12 @@ mod tests {
                 "path={path}"
             );
         }
+
+        let response = server
+            .post("/sandboxes/sb-1/connect")
+            .json(&serde_json::json!({ "timeout": 0 }))
+            .await;
+        assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

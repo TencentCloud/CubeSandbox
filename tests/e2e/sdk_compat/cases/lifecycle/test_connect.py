@@ -113,12 +113,18 @@ def test_connect_existing_running_sandbox_applies_explicit_timeout(
 )
 def test_connect_paused_sandbox_applies_explicit_timeout(
     sdk_sandbox,
+    sdk_backend,
     sdk_e2e_config,
 ):
     sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
     assert wait_until_paused(sdk_sandbox, timeout=sdk_e2e_config.default_timeout) == "paused"
 
-    connected = sdk_sandbox.resume_or_connect(timeout=_EXPLICIT_TIMEOUT)
+    connected = connect_adapter(
+        sdk_backend,
+        sdk_sandbox.sandbox_id,
+        sdk_e2e_config,
+        timeout=_EXPLICIT_TIMEOUT,
+    )
     try:
         assert wait_until_running(connected, timeout=sdk_e2e_config.default_timeout) == "running"
         _assert_timeout_visible(

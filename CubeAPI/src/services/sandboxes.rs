@@ -370,12 +370,9 @@ impl SandboxService {
         let mut d = self.fetch_sandbox_detail(sandbox_id).await?;
 
         if d.status == SandboxStatus::Paused {
-            // Resume keeps timeout=0 unchanged by contract. Connect treats an
-            // explicit 0 like set_timeout(0), so apply it after the resume.
-            let resume_timeout = timeout.filter(|value| *value != 0);
             let resp = self
                 .cubemaster
-                .update_sandbox(&self.build_update_request(sandbox_id, "resume", resume_timeout))
+                .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout))
                 .await
                 .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
 
@@ -386,9 +383,6 @@ impl SandboxService {
                 "is already running",
             )?;
 
-            if timeout == Some(0) {
-                self.set_timeout(sandbox_id, 0).await?;
-            }
             d = self.fetch_sandbox_detail(sandbox_id).await?;
         } else if d.status == SandboxStatus::Running {
             if let Some(timeout) = timeout {
@@ -1561,71 +1555,6 @@ mod tests {
         assert_eq!(update_bodies[0]["action"], "resume");
         assert_eq!(update_bodies[0]["timeout"], 120);
         assert_eq!(*capture.timeout_calls.lock().await, 0);
-    }
-
-    #[tokio::test]
-    async fn connect_paused_sandbox_applies_zero_after_resume() {
-        #[derive(Clone, Default)]
-        struct Capture {
-            update_body: Arc<Mutex<Option<Value>>>,
-            timeout_body: Arc<Mutex<Option<Value>>>,
-        }
-
-        async fn info_handler() -> Json<Value> {
-            Json(serde_json::json!({
-                "requestID": "req-info",
-                "ret": { "ret_code": 0, "ret_msg": "ok" },
-                "data": [{
-                    "sandbox_id": "sb-paused-zero",
-                    "host_id": "host-1",
-                    "template_id": "tpl-1",
-                    "status": 5,
-                    "annotations": {}
-                }]
-            }))
-        }
-
-        async fn update_handler(
-            State(capture): State<Capture>,
-            Json(body): Json<Value>,
-        ) -> Json<Value> {
-            *capture.update_body.lock().await = Some(body);
-            Json(serde_json::json!({
-                "ret": { "ret_code": 0, "ret_msg": "ok" }
-            }))
-        }
-
-        async fn timeout_handler(
-            State(capture): State<Capture>,
-            Json(body): Json<Value>,
-        ) -> Json<Value> {
-            *capture.timeout_body.lock().await = Some(body);
-            Json(serde_json::json!({
-                "requestID": "req-timeout",
-                "sandboxID": "sb-paused-zero",
-                "ret": { "ret_code": 0, "ret_msg": "ok" }
-            }))
-        }
-
-        let capture = Capture::default();
-        let service = spawn_fake_cubemaster(
-            Router::new()
-                .route("/cube/sandbox/info", get(info_handler))
-                .route("/cube/sandbox/update", post(update_handler))
-                .route("/cube/sandbox/timeout", post(timeout_handler))
-                .with_state(capture.clone()),
-        )
-        .await;
-
-        service
-            .connect_sandbox("sb-paused-zero", Some(0))
-            .await
-            .expect("connect should succeed");
-
-        let update_body = capture.update_body.lock().await.clone().unwrap();
-        assert!(update_body.get("timeout").is_none());
-        let timeout_body = capture.timeout_body.lock().await.clone().unwrap();
-        assert_eq!(timeout_body["timeout"], 0);
     }
 
     #[tokio::test]

@@ -721,7 +721,7 @@ class TestConnect:
         body = m.call_args.kwargs["json"]
         assert "timeout" not in body
 
-    @pytest.mark.parametrize("timeout", [0, -1, 120])
+    @pytest.mark.parametrize("timeout", [-1, 120])
     def test_connect_sends_explicit_timeout(self, timeout):
         with patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA)) as m:
             Sandbox.connect(SANDBOX_ID, timeout, config=make_config())

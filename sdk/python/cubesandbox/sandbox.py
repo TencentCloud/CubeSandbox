@@ -319,7 +319,9 @@ class Sandbox:
         Args:
             sandbox_id: Sandbox identifier.
             timeout: Sandbox idle timeout in seconds after connecting. ``None``
-                keeps the sandbox's current timeout policy.
+                keeps the current timeout, ``-1`` disables idle expiry, and a
+                positive value starts a new timeout window. ``0`` and values
+                below ``-1`` are rejected.
             config: SDK config. Uses default (env-based) config if omitted.
 
         Returns:
@@ -327,8 +329,9 @@ class Sandbox:
 
         Raises:
             SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
-            ApiError: If an explicit timeout cannot be applied in the current
-                sandbox state (HTTP 409), or on unexpected backend error.
+            ApiError: If the timeout is ``0`` or below ``-1`` (HTTP 400), an
+                explicit nonzero timeout cannot be applied in the current
+                sandbox state (HTTP 409), or an unexpected backend error occurs.
         """
         cfg = config or Config()
         s = requests.Session()

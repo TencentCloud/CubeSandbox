@@ -184,8 +184,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Sandbox'
+        '400':
+          description: Invalid timeout value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '404':
           description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Explicit timeout cannot be applied in the current sandbox state
           content:
             application/json:
               schema:
@@ -381,6 +393,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Sandbox'
+        '400':
+          description: Invalid timeout value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '404':
           description: Sandbox not found
           content:
@@ -1239,7 +1257,7 @@ components:
           - integer
           - 'null'
           format: int32
-          description: Idle timeout in seconds; None when the client did not send one.
+          description: Idle timeout in seconds; omitted to keep the current value, -1 for no expiry. Zero and values below -1 are invalid.
     CreateSnapshotRequest:
       type: object
       description: Request body for POST /sandboxes/{id}/snapshots.

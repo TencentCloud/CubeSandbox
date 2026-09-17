@@ -143,9 +143,16 @@ sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 
 `pause()` **不会取消**空闲回收。默认 `on_timeout="kill"` 时，之后被暂停的沙箱空闲仍超过 `timeout` 一样会被销毁。若要保住暂停中的沙箱，请传 `timeout=NEVER_TIMEOUT`、省略 `timeout`（且服务端未设正数默认）、或把 `timeout` 设得足够大——见下文 [行为说明](#行为说明)。
 
-`connect(timeout=...)` 会重置空闲超时，无论沙箱已经在运行，还是需要先从暂停状态恢复。省略 `timeout` 时保持当前超时。
+`connect(timeout=...)` 可以更新空闲超时，无论沙箱已经在运行，还是需要先从暂停状态恢复：
 
-已弃用的 `resume(timeout=...)` 对 `0` 的处理略有不同：
+| `connect(timeout=...)` | 效果 |
+|---|---|
+| 不传 / `None` | 保持当前超时 |
+| `NEVER_TIMEOUT`（`-1`） | 连接后永不超时 |
+| `N > 0` | 从连接时刻起重新开 N 秒窗口 |
+| `0` 或 `N < -1` | 拒绝请求并返回 HTTP 400 |
+
+已弃用的 `resume(timeout=...)` 保留原有的 `0` 语义：
 
 | `resume(timeout=...)` | 效果 |
 |---|---|
@@ -153,6 +160,7 @@ sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 | `0` | 保持当前超时（立刻到期请用 `set_timeout(0)`） |
 | `NEVER_TIMEOUT`（`-1`） | 恢复后永不超时 |
 | `N > 0` | 从恢复时刻起重新开 N 秒窗口 |
+| `N < -1` | 拒绝请求并返回 HTTP 400 |
 
 可参考示例：[`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py)。跨机 Resume（S3 后端且 `remote_status=ready`）见 [跨机快照](./cross-node-snapshot.md)。
 

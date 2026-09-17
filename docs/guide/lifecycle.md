@@ -143,9 +143,16 @@ sandbox.run_code("print('back!')")    # carry on as if never paused
 
 `pause()` does **not** cancel idle reclamation. With the default `on_timeout="kill"`, a later-paused sandbox is still destroyed once idle exceeds `timeout`. To keep a paused sandbox, pass `timeout=NEVER_TIMEOUT`, omit `timeout` (with no positive server default), or set a high `timeout` — see [Behaviour](#behaviour) below.
 
-`connect(timeout=...)` resets the idle timeout whether the sandbox is already running or must first resume from a pause. Omitting `timeout` preserves the current timeout.
+`connect(timeout=...)` can update the idle timeout whether the sandbox is already running or must first resume from a pause:
 
-The deprecated `resume(timeout=...)` has slightly different `0` handling:
+| `connect(timeout=...)` | Effect |
+|---|---|
+| omitted / `None` | keep the current timeout |
+| `NEVER_TIMEOUT` (`-1`) | never time out after connecting |
+| `N > 0` | start a new N-second window from connect |
+| `0` or `N < -1` | reject the request with HTTP 400 |
+
+The deprecated `resume(timeout=...)` keeps its legacy `0` behavior:
 
 | `resume(timeout=...)` | Effect |
 |---|---|
@@ -153,6 +160,7 @@ The deprecated `resume(timeout=...)` has slightly different `0` handling:
 | `0` | keep the current timeout (use `set_timeout(0)` for immediate expiry) |
 | `NEVER_TIMEOUT` (`-1`) | never time out after resume |
 | `N > 0` | start a new N-second window from resume |
+| `N < -1` | reject the request with HTTP 400 |
 
 See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py) for a full demo. Cross-node Resume (S3 backend, `remote_status=ready`) is documented in [Cross-Node Snapshots](./cross-node-snapshot.md).
 

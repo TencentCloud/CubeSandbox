@@ -205,11 +205,7 @@ class CubeSandboxAdapter(SandboxAdapter):
         self._sandbox.pause(timeout=timeout)
 
     def resume_or_connect(self, *, timeout: int = 60) -> "CubeSandboxAdapter":
-        return type(self).connect(
-            self.sandbox_id,
-            self._e2e_config or SdkE2EConfig.from_env(),
-            timeout=timeout,
-        )
+        return type(self).connect(self.sandbox_id, self._e2e_config or SdkE2EConfig.from_env())
 
     def resume_idle_timeout(self, timeout: int | None) -> "CubeSandboxAdapter":
         self._sandbox.resume(timeout=timeout)
