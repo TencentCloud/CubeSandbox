@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 
 	sandboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/sandbox"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
 
 func TestReadPidFile(t *testing.T) {
@@ -117,4 +119,41 @@ func TestWaitSandboxRuntimeGoneTimesOut(t *testing.T) {
 func TestSandboxShimLookupIDsDedups(t *testing.T) {
 	sb := newCubeboxWithStatusForTest("same-id", cubeboxstore.Status{Pid: 9})
 	assert.Equal(t, []string{"same-id"}, sandboxShimLookupIDs(sb))
+}
+
+func TestReapSandboxRuntimeNoOpWhenNothingAlive(t *testing.T) {
+	sb := newCubeboxWithStatusForTest("sb-reap-empty", cubeboxstore.Status{Pid: 0})
+	l := &local{}
+	require.NoError(t, l.reapSandboxRuntime(context.Background(), sb))
+}
+
+func TestReapSandboxRuntimeKillsLiveShimFromBundle(t *testing.T) {
+	root := t.TempDir()
+	id := "sb-reap-live"
+	require.NoError(t, os.MkdirAll(filepath.Join(root, id), 0o755))
+
+	cmd := exec.Command("sleep", "10")
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	require.NoError(t, os.WriteFile(
+		filepath.Join(root, id, shimPidFileName),
+		[]byte(strconv.Itoa(cmd.Process.Pid)),
+		0o644,
+	))
+
+	orig := cubeletBundleRoot
+	cubeletBundleRoot = root
+	t.Cleanup(func() { cubeletBundleRoot = orig })
+
+	sb := newCubeboxWithStatusForTest(id, cubeboxstore.Status{Pid: 0})
+	l := &local{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, l.reapSandboxRuntime(ctx, sb))
+	assert.False(t, utils.ProcessAlive(cmd.Process.Pid),
+		"pid should be gone after reap")
 }
