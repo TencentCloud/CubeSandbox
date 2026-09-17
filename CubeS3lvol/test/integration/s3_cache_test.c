@@ -34,10 +34,13 @@
  *     9. whole objects enter an independently indexed mmap hot tier before the
  *        aio fill lands; UUID checks, partial fills, drop, and disk-slot
  *        eviction preserve the same safety rules there.
+ *    10. dest cache plus overlay: a dirty chunk must not be served as the stale
+ *        dest object; a clean neighbour may still hit cache; a flush that
+ *        publishes a new uuid makes the old cache entry a miss.
  *
  *   Sections [11] to [13] are all of (8): ranges in isolation, a short object's
  *   trailing partial block, and residency surviving neither a uuid change nor
- *   slot reuse.
+ *   slot reuse. Section [18] is (10).
  *
  *   Like the WAL and journal tests this runs on the upstream bdev_aio over a
  *   sparse file and brings up iobuf, accel and bdev by hand. poll_until() turns
@@ -57,6 +60,7 @@
 #include "spdk/uuid.h"
 
 #include "s3lvol/s3_cache.h"
+#include "s3lvol/s3_overlay.h"
 
 #include "bdev/aio/bdev_aio.h"
 
@@ -1306,6 +1310,184 @@ main(int argc, char **argv)
 							   17), NULL);
 			}
 			spdk_dma_free(src2);
+		}
+	}
+
+	printf("\n[18] dest cache plus overlay must not serve stale dest bytes\n");
+	{
+		struct s3_overlay *ov = NULL;
+		struct s3_overlay_flush_view view;
+		uint64_t total_blocks;
+		const uint64_t ch0 = 20;
+		const uint64_t ch1 = 21;
+		const uint32_t blocks_per_chunk =
+			TEST_CHUNK_SIZE / AIO_BLOCK_SIZE;
+		const uint64_t lba0 = ch0 * blocks_per_chunk;
+		uint8_t *ov_block = NULL;
+		void *merged = NULL;
+
+		total_blocks = (uint64_t)TEST_NUM_CHUNKS * blocks_per_chunk;
+		rc = s3_overlay_create(total_blocks, AIO_BLOCK_SIZE,
+				       TEST_CHUNK_SIZE, 0, &ov);
+		check_true("overlay for dest-cache consistency",
+			   rc == 0 && ov != NULL, NULL);
+		if (rc == 0 && ov != NULL) {
+			fill_pattern(src, ch0, TEST_CHUNK_SIZE, 31);
+			populate_sync(cache, ch0, &uuid_a, src,
+				      TEST_CHUNK_SIZE);
+			fill_pattern(src, ch1, TEST_CHUNK_SIZE, 32);
+			populate_sync(cache, ch1, &uuid_a, src,
+				      TEST_CHUNK_SIZE);
+
+			ov_block = calloc(1, AIO_BLOCK_SIZE);
+			merged = spdk_dma_malloc(TEST_CHUNK_SIZE,
+						 AIO_BLOCK_SIZE, NULL);
+			check_true("overlay and merge buffers",
+				   ov_block != NULL && merged != NULL, NULL);
+			if (ov_block != NULL && merged != NULL) {
+				memset(ov_block, 0x5A, AIO_BLOCK_SIZE);
+				rc = s3_overlay_write(ov, lba0 + 1, 1,
+						      ov_block, 1);
+				check_u64("overlay write one dirty block",
+					  (uint64_t)-rc, 0);
+
+				check_true("dirty chunk is live for dest-cache bypass",
+					   s3_overlay_chunk_is_live(ov, ch0),
+					   NULL);
+				check_true("clean neighbour is not live",
+					   !s3_overlay_chunk_is_live(ov, ch1),
+					   NULL);
+				check_true("the dirty 4k is fully covered",
+					   s3_overlay_covers(ov, lba0 + 1, 1),
+					   NULL);
+				check_true("the whole dest object is not covered",
+					   !s3_overlay_covers(ov, lba0,
+							     blocks_per_chunk),
+					   NULL);
+
+				memset(dst, 0xee, TEST_CHUNK_SIZE);
+				rc = read_sync(cache, ch0, &uuid_a, 0,
+					       TEST_CHUNK_SIZE, dst);
+				check_u64("cache still holds the dest object",
+					  (uint64_t)-rc, 0);
+				check_true("cache alone is the old dest version",
+					   pattern_matches(dst, ch0, 0,
+							   TEST_CHUNK_SIZE, 31),
+					   NULL);
+
+				s3_overlay_apply(ov, lba0, blocks_per_chunk,
+						 dst);
+				check_true("merged read is not the stale dest object",
+					   !pattern_matches(dst, ch0, 0,
+							    TEST_CHUNK_SIZE, 31),
+					   NULL);
+				check_true("unwritten prefix still matches dest cache",
+					   pattern_matches(dst, ch0, 0,
+							   AIO_BLOCK_SIZE, 31),
+					   NULL);
+				check_true("dirty block is overlay, not dest cache",
+					   memcmp((uint8_t *)dst + AIO_BLOCK_SIZE,
+						  ov_block, AIO_BLOCK_SIZE) == 0,
+					   NULL);
+				check_true("unwritten suffix still matches dest cache",
+					   pattern_matches((uint8_t *)dst +
+							   2 * AIO_BLOCK_SIZE,
+							   ch0,
+							   2 * AIO_BLOCK_SIZE,
+							   TEST_CHUNK_SIZE -
+							   2 * AIO_BLOCK_SIZE,
+							   31),
+					   NULL);
+
+				memset(dst, 0xee, AIO_BLOCK_SIZE);
+				s3_overlay_apply(ov, lba0 + 1, 1, dst);
+				check_true("covered 4k read is overlay without dest",
+					   memcmp(dst, ov_block,
+						  AIO_BLOCK_SIZE) == 0,
+					   NULL);
+
+				memset(dst, 0xee, TEST_CHUNK_SIZE);
+				rc = read_sync(cache, ch1, &uuid_a, 0,
+					       TEST_CHUNK_SIZE, dst);
+				check_true("clean neighbour is served from dest cache",
+					   rc == 0 &&
+					   pattern_matches(dst, ch1, 0,
+							   TEST_CHUNK_SIZE, 32),
+					   NULL);
+
+				fill_pattern(src, ch0, TEST_CHUNK_SIZE, 99);
+				rc = s3_overlay_write(ov, lba0, blocks_per_chunk,
+						      src, 2);
+				check_u64("overlay write the whole dest object",
+					  (uint64_t)-rc, 0);
+				check_true("full overlay covers the dest object",
+					   s3_overlay_covers(ov, lba0,
+							    blocks_per_chunk),
+					   NULL);
+				memset(dst, 0xee, TEST_CHUNK_SIZE);
+				s3_overlay_apply(ov, lba0, blocks_per_chunk,
+						 dst);
+				check_true("full-cover read matches overlay, not dest cache",
+					   pattern_matches(dst, ch0, 0,
+							   TEST_CHUNK_SIZE, 99),
+					   NULL);
+
+				rc = s3_overlay_flush_begin(ov, ch0, &view);
+				check_u64("flush_begin after dest merge",
+					  (uint64_t)-rc, 0);
+				if (rc == 0) {
+					memset(merged, 0xcc, TEST_CHUNK_SIZE);
+					s3_overlay_flush_merge(ov, &view,
+							       merged);
+					s3_overlay_flush_end(ov, ch0, true);
+					check_true("flush drops overlay so dest cache may be used again",
+						   !s3_overlay_chunk_is_live(ov, ch0),
+						   NULL);
+					check_true("merged dest object is the overlay version",
+						   pattern_matches(merged, ch0,
+								   0,
+								   TEST_CHUNK_SIZE,
+								   99),
+						   NULL);
+
+					check_true("stale dest uuid is still in cache until replaced",
+						   s3_cache_lookup(cache, ch0,
+								   &uuid_a),
+						   NULL);
+					check_true("new dest uuid is a miss until populate",
+						   !s3_cache_lookup(cache, ch0,
+								    &uuid_b),
+						   NULL);
+					check_u64("read of the new dest uuid is -ENOENT",
+						  (uint64_t) - read_sync(
+							  cache, ch0, &uuid_b,
+							  0, AIO_BLOCK_SIZE,
+							  dst),
+						  ENOENT);
+
+					populate_sync(cache, ch0, &uuid_b,
+						      merged, TEST_CHUNK_SIZE);
+					memset(dst, 0, TEST_CHUNK_SIZE);
+					rc = read_sync(cache, ch0, &uuid_b, 0,
+						       TEST_CHUNK_SIZE, dst);
+					check_true("new dest object reads the flushed bytes",
+						   rc == 0 &&
+						   pattern_matches(dst, ch0, 0,
+								   TEST_CHUNK_SIZE,
+								   99),
+						   NULL);
+					check_u64("old dest uuid is a miss after new populate",
+						  (uint64_t) - read_sync(
+							  cache, ch0, &uuid_a,
+							  0, AIO_BLOCK_SIZE,
+							  dst),
+						  ENOENT);
+				}
+			}
+
+			free(ov_block);
+			spdk_dma_free(merged);
+			s3_overlay_destroy(ov);
 		}
 	}
 
