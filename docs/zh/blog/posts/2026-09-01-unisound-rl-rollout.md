@@ -3,8 +3,7 @@ title: "云知声工程实践：RL rollout 场景下的 CubeSandbox 密度边界
 date: 2026-09-01
 author: 云知声 Atlas 智算团队
 description: "Agent RL rollout 对沙箱的需求和普通 Agent 服务不同：每条轨迹都需要干净隔离的执行环境，生命周期分钟级，数量规模化并行，沙箱里可能运行模型生成的任意代码。云知声团队基于 128 核 251 GiB 单机配置、1 核 4096 MiB 沙箱规格，推导出调度上限 117、不超卖安全边界 58、实测稳态 80-100 三组数值。本文记录了从规格配置、调度参数推导到实测瓶颈的完整过程。"
-featured: true
-weight: 2
+featured: false
 ---
 
 # 云知声工程实践：RL rollout 场景下的 CubeSandbox 密度边界压测

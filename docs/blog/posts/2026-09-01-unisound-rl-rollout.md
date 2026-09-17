@@ -3,8 +3,7 @@ title: "Unisound Engineering Practice: Stress-Testing CubeSandbox Density Limits
 date: 2026-09-01
 author: Unisound Atlas Intelligent Computing Team
 description: "Agent RL rollout places different demands on sandboxes than ordinary Agent services: every trajectory needs a clean, isolated execution environment; lifecycles are minute-scale; volume is massively parallel; and the sandbox may run arbitrary model-generated code. Based on a 128-core 251 GiB machine and 1-core 4096 MiB sandbox specs, the Unisound team derived three sets of numbers: a scheduling ceiling of 117, a no-oversell safety boundary of 58, and a measured steady state of 80-100. This article records the full process from spec configuration and scheduling parameter derivation to measured bottlenecks."
-featured: true
-weight: 2
+featured: false
 ---
 
 # Unisound Engineering Practice: Stress-Testing CubeSandbox Density Limits for RL Rollout

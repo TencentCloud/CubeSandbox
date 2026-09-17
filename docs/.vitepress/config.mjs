@@ -321,7 +321,10 @@ export default withMermaid(defineConfig({
                     { text: 'Lenovo Cloud Agent', link: '/guide/usecases/lenovo-cloud-agent' },
                     { text: 'Horizon Insights', link: '/guide/usecases/horizon-insights' },
                     { text: 'Guangdong Rising', link: '/guide/usecases/guangdong-rising' },
-                    { text: 'unisound', link: '/guide/usecases/unisound-rl-rollout' }
+                    { text: 'unisound', link: '/guide/usecases/unisound-rl-rollout' },
+                    { text: 'WeKnora', link: '/guide/usecases/weknora' },
+                    { text: 'Huajiao', link: '/guide/usecases/huajiao' },
+                    { text: 'OpenFuyao', link: '/guide/usecases/openfuyao' }
                   ]
                 }
               ]
@@ -534,7 +537,10 @@ export default withMermaid(defineConfig({
                     { text: 'Lenovo Cloud Agent', link: '/zh/guide/usecases/lenovo-cloud-agent' },
                     { text: 'Horizon Insights', link: '/zh/guide/usecases/horizon-insights' },
                     { text: 'Guangdong Rising', link: '/zh/guide/usecases/guangdong-rising' },
-                    { text: 'unisound', link: '/zh/guide/usecases/unisound-rl-rollout' }
+                    { text: 'unisound', link: '/zh/guide/usecases/unisound-rl-rollout' },
+                    { text: 'WeKnora', link: '/zh/guide/usecases/weknora' },
+                    { text: 'Huajiao', link: '/zh/guide/usecases/huajiao' },
+                    { text: 'OpenFuyao', link: '/zh/guide/usecases/openfuyao' }
                   ]
                 }
               ]

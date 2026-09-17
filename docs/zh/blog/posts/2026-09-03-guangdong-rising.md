@@ -3,8 +3,7 @@ title: "谁有权删掉一个沙箱：在 CubeSandbox 上构建多租户沙箱�
 date: 2026-09-03
 author: 冯佳奇（广晟数科 资深算法工程师）
 description: "创建一个沙箱只需要一次 API 调用，删掉一个沙箱却要回答一串问题：它还有活跃会话吗？这条清理请求会不会是迟到的那一个？崩溃的副本留下的沙箱谁来收？广晟数科团队把两条产品线的沙箱能力收敛成 SIN PaaS 的独立沙箱执行层，用租约、fencing token、三色标记回收和准入控制回应了这串问题。"
-featured: true
-weight: 3
+featured: false
 ---
 
 # 谁有权删掉一个沙箱：在 CubeSandbox 上构建多租户沙箱平台

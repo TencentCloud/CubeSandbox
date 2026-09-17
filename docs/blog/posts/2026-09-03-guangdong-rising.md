@@ -3,8 +3,7 @@ title: "Who Has the Right to Delete a Sandbox: Building a Multi-Tenant Sandbox P
 date: 2026-09-03
 author: Feng Jiaqi (Senior Algorithm Engineer, Guangdong Rising)
 description: "Creating a sandbox takes a single API call. Deleting one requires answering a string of questions: does it still have an active session? Is this cleanup request a latecomer? Who collects sandboxes left behind by crashed replicas? The Guangdong Rising team consolidated the sandbox capabilities of two product lines into a standalone service — the sandbox execution layer of the SIN PaaS (AI platform) — and answered these questions with leases, fencing tokens, tri-color mark-and-sweep collection, and admission control."
-featured: true
-weight: 3
+featured: false
 ---
 
 # Who Has the Right to Delete a Sandbox: Building a Multi-Tenant Sandbox Platform on CubeSandbox
