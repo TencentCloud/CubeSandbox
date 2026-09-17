@@ -23,11 +23,21 @@ const (
 	vmmPidFileName  = "vmm.pid"
 )
 
+// cubeletBundleRoot mirrors cmd/cubecli/commands/cubebox/logs.go:cubeletStateDir.
+// Overridable in tests. See collectSandboxRuntimePIDs for the rationale.
+var cubeletBundleRoot = "/data/cubelet/state/io.containerd.runtime.v2.task/default"
+
 // collectSandboxRuntimePIDs snapshots every host pid that may still hold
 // sandbox disks: recorded task/endpoint pids plus the shim bundle's
 // shim.pid / vmm.pid. Call this BEFORE DeleteTask — containerd removes the
 // bundle on Delete, and TaskExit only means the task slot is gone, not that
 // the shim process has released NVMe fds.
+//
+// The in-memory shim tracker (l.shims) is only the fast path. If a VMM
+// crashed and containerd dropped the task record, l.shims.Get returns nil
+// while the shim process is still alive — that leak causes IP/tap reuse
+// after resume-timesync failures. As a fallback we also read the bundle
+// pid files directly by sandbox ID convention (<cubeletBundleRoot>/<id>/).
 func (l *local) collectSandboxRuntimePIDs(ctx context.Context, sb *cubeboxstore.CubeBox) []int {
 	if sb == nil {
 		return nil
@@ -43,6 +53,11 @@ func (l *local) collectSandboxRuntimePIDs(ctx context.Context, sb *cubeboxstore.
 		add(pid)
 	}
 	for _, bundle := range l.shimBundlePaths(ctx, sb) {
+		add(readPidFile(filepath.Join(bundle, shimPidFileName)))
+		add(readPidFile(filepath.Join(bundle, vmmPidFileName)))
+	}
+	for _, id := range sandboxShimLookupIDs(sb) {
+		bundle := filepath.Join(cubeletBundleRoot, id)
 		add(readPidFile(filepath.Join(bundle, shimPidFileName)))
 		add(readPidFile(filepath.Join(bundle, vmmPidFileName)))
 	}

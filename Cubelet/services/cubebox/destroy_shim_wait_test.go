@@ -61,6 +61,30 @@ func TestCollectSandboxRuntimePIDsReadsBundlePidFiles(t *testing.T) {
 	assert.Contains(t, got, 88002)
 }
 
+// Fallback path: when l.shims is nil (in-memory tracker miss / cubelet
+// restart before shim GC), pids must still be recovered via the on-disk
+// bundle root by sandbox ID convention. This is the exact scenario in the
+// 130459 leak — containerd dropped the task record after VMM crash but the
+// shim process is still holding fds.
+func TestCollectSandboxRuntimePIDsFallbackByBundleConvention(t *testing.T) {
+	root := t.TempDir()
+	id := "sb-orphan"
+	require.NoError(t, os.MkdirAll(filepath.Join(root, id), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, id, shimPidFileName), []byte("99001"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, id, vmmPidFileName), []byte("99002"), 0o644))
+
+	orig := cubeletBundleRoot
+	cubeletBundleRoot = root
+	t.Cleanup(func() { cubeletBundleRoot = orig })
+
+	sb := newCubeboxWithStatusForTest(id, cubeboxstore.Status{Pid: 0})
+	l := &local{} // l.shims == nil, so the fast path yields nothing
+
+	pids := l.collectSandboxRuntimePIDs(context.Background(), sb)
+	assert.Contains(t, pids, 99001)
+	assert.Contains(t, pids, 99002)
+}
+
 func TestWaitSandboxRuntimeGoneNoPIDs(t *testing.T) {
 	require.NoError(t, waitSandboxRuntimeGone(context.Background(), "sb-empty", nil))
 }
