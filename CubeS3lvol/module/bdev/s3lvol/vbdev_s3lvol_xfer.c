@@ -1752,7 +1752,7 @@ export_ref(struct export_ctx *ctx)
 static void
 export_drain(struct export_ctx *ctx)
 {
-	s3lvol_lvstore_flush(ctx->lvs, export_drained, ctx);
+	s3lvol_lvstore_flush(ctx->lvs, 0, export_drained, ctx);
 }
 
 /* One-shot: unregisters itself, then resubmits the drain. */
@@ -3342,7 +3342,7 @@ decouple_rewrite_drain_retry(void *arg)
 	struct decouple_rewrite_ctx *ctx = arg;
 
 	spdk_poller_unregister(&ctx->drain_retry_poller);
-	s3lvol_lvstore_flush(ctx->decouple->lvs, decouple_rewrite_flush_done, ctx);
+	s3lvol_lvstore_flush(ctx->decouple->lvs, 0, decouple_rewrite_flush_done, ctx);
 	return SPDK_POLLER_BUSY;
 }
 
@@ -3428,7 +3428,7 @@ decouple_rewrite_exports(struct s3lvol_decouple *d)
 
 	SPDK_NOTICELOG("snapshot '%s' is local; redirecting %zu reference export(s) "
 		       "before completing its decouple\n", d->lvol_name, count);
-	s3lvol_lvstore_flush(d->lvs, decouple_rewrite_flush_done, ctx);
+	s3lvol_lvstore_flush(d->lvs, 0, decouple_rewrite_flush_done, ctx);
 }
 
 /* True when the manifest has no object anywhere under this cluster, i.e. the

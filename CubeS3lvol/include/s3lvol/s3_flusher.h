@@ -21,9 +21,12 @@
 
 #include "s3lvol/s3_overlay.h"
 
-/* Chunks uploaded at once. Each one is an S3 round trip measured in tens of
- * milliseconds, so some concurrency is needed to get any throughput at all. */
-#define S3_FLUSHER_DEFAULT_MAX_CONCURRENT 8
+/* Chunks uploaded at once. Each one is an S3 round trip measured in tens to
+ * hundreds of milliseconds, so concurrency is the main lever on drain rate:
+ * eight in flight at ~170 ms is only ~48 MiB/s of 1 MiB objects. Thirty-two
+ * keeps the per-chunk single-flight rule and is still well inside the CRT
+ * client pool. */
+#define S3_FLUSHER_DEFAULT_MAX_CONCURRENT 32
 
 /* Tick interval: roughly a millisecond. */
 #define S3_FLUSHER_DEFAULT_POLL_US 1000
@@ -118,6 +121,16 @@ void s3_flusher_kick(struct s3_flusher *f);
  */
 void s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
 		      s3_flusher_cb cb_fn, void *cb_arg);
+
+/**
+ * Stop starting uploads and complete after current uploads and WAL super
+ * updates finish. Dirty overlay data remains protected by the WAL. The pause is
+ * reversible with s3_flusher_resume().
+ */
+void s3_flusher_suspend(struct s3_flusher *f, s3_flusher_cb cb_fn, void *cb_arg);
+
+/** Re-enable uploads after a completed suspend. */
+void s3_flusher_resume(struct s3_flusher *f);
 
 void s3_flusher_get_stats(const struct s3_flusher *f, struct s3_flusher_stats *out);
 

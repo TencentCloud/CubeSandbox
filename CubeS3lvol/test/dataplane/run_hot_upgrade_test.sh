@@ -84,11 +84,17 @@ LVOL_GIB=1
 # be genuinely busy and for the checkpoint/flush path to have work, and short
 # enough that both upgrades fit inside one fio runtime.
 UPGRADE_AT_SEC=60
-SECOND_AT_SEC=120
-FIO_RUNTIME_SEC=300
+SECOND_AT_SEC=105
+FIO_RUNTIME_SEC=150
 # The window's upper bound includes SPDK cold start and the lvstore attach, so it
 # is deliberately generous. Never lower it to make a run pass.
 VERIFY_TIMEOUT_SEC=180
+
+# How long the controllers are given to finish reconnecting once the layout is
+# back. Generous against RCOW_RECONNECT_DELAY (1 s) on purpose: a controller
+# that is going to come back does so in the first few seconds, and one that was
+# deleted never does, so a long deadline costs nothing but catches the same bug.
+CTRL_SETTLE_SEC=30
 
 # Max clat for a single fio command that straddles the window, tiered by volume
 # count. A cold S3 round trip and the reconnect timer both scale with how much
@@ -199,6 +205,29 @@ live_controller_count()
 	printf '%s' "${n}"
 }
 
+# The count once it stops changing, or at the deadline.
+#
+# Reconnection is asynchronous and rate-limited: a controller the target dropped
+# on a keep-alive timeout goes through error recovery and waits out
+# reconnect_delay before it tries, so at any single instant after the restart
+# some of them are legitimately still 'connecting'. Sampling once turns that
+# into a failure that dmesg then contradicts with 'Successfully reconnected'.
+# Waiting does not weaken the assertion -- a controller that was *deleted* never
+# comes back, so the deadline still catches it -- it only stops the suite from
+# reading the pause as a loss.
+settled_controller_count()
+{
+	local deadline=$(($(date +%s) + $1)) live
+
+	while :; do
+		live="$(live_controller_count)"
+		[ "${live}" = "${RCOW_NUM_SUBSYS}" ] && break
+		[ "$(date +%s)" -ge "${deadline}" ] && break
+		sleep 1
+	done
+	printf '%s' "${live}"
+}
+
 # Block-device names the host currently has. Set comparison across the upgrade is
 # the detector for a namespace that was removed and rescanned: it does not depend
 # on the kernel's exact wording, so a silent removal cannot hide the way it can
@@ -302,7 +331,9 @@ command -v fio >/dev/null 2>&1 && HAVE_FIO=1
 rm -rf "${RCOW_RUN_DIR}"
 mkdir -p "${RCOW_RUN_DIR}"
 rm -f "${RCOW_WAL_IMG}"
-truncate -s 2G "${RCOW_WAL_IMG}" ||
+# Remainder after journal+WAL is the dest/object cache region. 32 GiB
+# covers a 16 x 1 GiB working set on disk.
+truncate -s 32G "${RCOW_WAL_IMG}" ||
 	cannot_run "could not create the WAL image at ${RCOW_WAL_IMG}"
 
 info "volumes ${VOLUMES}, endpoint ${ENDPOINT}, bucket ${BUCKET}, region ${REGION}"
@@ -400,13 +431,18 @@ echo "=== [3] starting fio on ${VOLUMES} volume(s), runtime ${FIO_RUNTIME_SEC}s"
 
 if [ "${HAVE_FIO}" -eq 1 ]; then
 	mkdir -p "${WORKDIR}/fio"
+	# Sequential 128 KiB, not 4 KiB randrw: sixteen volumes at QD=32 of
+	# small random mixed I/O overflowed nvme_core.io_timeout (30s) *before*
+	# the upgrade, so the clat gate and pause_window_ms measured an
+	# overloaded array rather than I/O continuity across SIGKILL. This
+	# pattern keeps queues busy without that host-side timeout.
 	for idx in "${!VOL_NAMES[@]}"; do
 		name="${VOL_NAMES[${idx}]}"
 		dev="${VOL_DEVS[${idx}]}"
 		[ -b "${dev}" ] || continue
 		fio --name="${name}" --filename="${dev}" \
 			--ioengine=libaio --direct=1 \
-			--rw=randrw --bs=4k --iodepth=32 \
+			--rw=readwrite --bs=128k --iodepth=32 \
 			--time_based --runtime="${FIO_RUNTIME_SEC}" \
 			--continue_on_error=none --error_dump=1 \
 			--output-format=json --output="${WORKDIR}/fio/${name}.json" \
@@ -491,8 +527,10 @@ do_upgrade()
 
 	# All 32 controllers back to live. Fewer than 32 means one was deleted --
 	# the gendisk is gone and the volumes hashed to it are unrecoverable.
+	# Counted after the pause window above, so waiting for the stragglers
+	# cannot flatter the number this suite exists to track.
 	local live
-	live="$(live_controller_count)"
+	live="$(settled_controller_count "${CTRL_SETTLE_SEC}")"
 	[ "${live}" = "${RCOW_NUM_SUBSYS}" ] &&
 		pass "${label}: all ${RCOW_NUM_SUBSYS} controllers are live" ||
 		fail "${label}: only ${live} of ${RCOW_NUM_SUBSYS} controllers are live"

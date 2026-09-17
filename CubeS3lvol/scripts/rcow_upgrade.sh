@@ -26,15 +26,18 @@
 #    3. pin the rollback budget             the connect flags only reach a fresh
 #                                          connection, so the controllers an
 #                                          upgrade inherits are written to here
-#    4. rcow_flush_lvstore      push everything acknowledged to S3; online
-#    5. rcow_checkpoint_lvstore snapshot the chunk map and truncate the journal,
+#    4. rcow_flush_lvstore      optionally push acknowledged data to S3
+#    5. rcow_checkpoint_lvstore snapshot the chunk map and truncate the journal
 #                               which is what keeps the next attach short
 #    6. snapshot the layout     the file rcow_verify_active --expect compares to
-#    7. SIGKILL the target      a crash, not a shutdown: a crash is the one exit
+#    7. prepare hot upgrade     pause every subsystem, drain its namespace I/O,
+#                              and hold the flushers. Blobstore stays dirty so
+#                              the next attach recovers it.
+#    8. SIGKILL the target      a crash, not a shutdown: a crash is the one exit
 #                               guaranteed to leave the namespace in place and
 #                               drive the host into error recovery
-#    8. clear four leftovers    pidfile, RPC socket, its .lock, cpu locks
-#    9. drop the marker         the intent is spent once the target it names is
+#    9. clear four leftovers    pidfile, RPC socket, its .lock, cpu locks
+#   10. drop the marker         the intent is spent once the target it names is
 #                               gone; until then it stays, so a refused attempt
 #                               still reads as a hot one to the next stop
 #
@@ -256,18 +259,23 @@ pause budget is the kernel's default, not ${RCOW_CTRL_LOSS_TMO}s" ;;
 esac
 
 # ==========================================================================
-rcow_step "flush: everything acknowledged into S3"
 LVS_JSON="$(printf '{"lvs_name":"%s"}' "${RCOW_LVS_NAME}")"
 
 # The flush is a lever on the length of the paused window, not a precondition for
-# the restart: what it cannot push is in the WAL and gets replayed. -ETIMEDOUT
-# (-110) is what a sandbox that keeps writing produces -- its overlay never goes
-# clean, so the drain runs out of time -- and refusing the upgrade there would
-# make every busy sandbox un-upgradable. The same reading is taken on the destroy
-# path, in s3_bs_dev_flusher_drained(). The checkpoint below still runs, so what
-# the pause pays for is a longer replay, and that is reported, not hidden.
-hot_online_op "flush" rcow_flush_lvstore "${LVS_JSON}" '"code": -110' ||
-	fail_live "could not flush the lvstore"
+# the restart: what it cannot push is in the WAL and gets replayed. Under a write
+# load the overlay never goes clean, so a bounded drain still waits out every
+# in-flight GET+PUT after the deadline and adds that to the pause. RCOW_HOT_FLUSH_MS=0
+# skips it: checkpoint, then SIGKILL. Idle lvstores can still pass a positive
+# deadline to shrink replay.
+if [ "${RCOW_HOT_FLUSH_MS}" -eq 0 ]; then
+	rcow_step "flush: skipped (RCOW_HOT_FLUSH_MS=0); WAL replay covers the tail"
+else
+	rcow_step "flush: everything acknowledged into S3"
+	hot_online_op "flush" rcow_flush_lvstore \
+		"$(printf '{"lvs_name":"%s","timeout_ms":%s}' \
+			"${RCOW_LVS_NAME}" "${RCOW_HOT_FLUSH_MS}")" '"code": -110' ||
+		fail_live "could not flush the lvstore"
+fi
 
 # ==========================================================================
 rcow_step "checkpoint: chunk map to S3, journal truncated"
@@ -305,6 +313,19 @@ if [ "${DRY_RUN}" -eq 1 ]; then
 	rcow_log "nothing was killed and no residue was removed"
 	exit 0
 fi
+
+# ==========================================================================
+# This is the last RPC the old process may answer. It globally quiesces every
+# RCOW namespace, so all data-plane I/O that reached the target has completed,
+# and holds the flushers. Blobstore is left dirty: the replacement attach
+# recovers it. A live clean-sync can persist a used-blob mask that the next
+# load cannot open, and then a volume is missing. It intentionally does not
+# resume the subsystems. The host keeps the same namespaces while commands
+# queue, and the SIGKILL below turns that pause into the normal reconnect
+# window.
+rcow_step "prepare: quiesce namespaces; blobstore stays dirty"
+hot_online_op "hot prepare" rcow_prepare_hot_upgrade '{}' ||
+	fail_live "could not prepare the target for hot upgrade"
 
 # ==========================================================================
 rcow_step "killing the target"

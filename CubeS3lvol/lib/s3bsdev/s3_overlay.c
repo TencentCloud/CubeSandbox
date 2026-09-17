@@ -643,6 +643,38 @@ s3_overlay_covers(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks)
 	return true;
 }
 
+uint32_t
+s3_overlay_covered_count(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks)
+{
+	uint64_t cur = lba;
+	uint32_t left = nblocks;
+	uint32_t covered = 0;
+
+	if (!ov || nblocks == 0) {
+		return 0;
+	}
+
+	while (left > 0) {
+		uint64_t chunk_index = cur / ov->blocks_per_chunk;
+		uint32_t first       = (uint32_t)(cur % ov->blocks_per_chunk);
+		uint32_t this_blocks = spdk_min(left, ov->blocks_per_chunk - first);
+		struct overlay_chunk *c = overlay_chunk_get(ov, chunk_index);
+
+		if (c) {
+			for (uint32_t i = 0; i < this_blocks; i++) {
+				if (c->blocks[first + i].state != OVERLAY_ABSENT) {
+					covered++;
+				}
+			}
+		}
+
+		cur  += this_blocks;
+		left -= this_blocks;
+	}
+
+	return covered;
+}
+
 bool
 s3_overlay_chunk_is_live(struct s3_overlay *ov, uint64_t chunk_index)
 {
