@@ -300,6 +300,7 @@ struct s3_bs_dev_stats {
 	uint64_t dest_prefetch_skip_token;  /* no process-wide low-priority token */
 	uint64_t dest_prefetch_skip_slot;   /* per-dest fill limit reached */
 	uint64_t dest_prefetch_skip_seq;    /* random demand closed the window */
+	uint64_t dest_prefetch_skip_host;   /* host readahead already covers a chunk */
 
 	uint64_t wal_writes;      /* writes acknowledged from the log */
 	uint64_t wal_retries;     /* writes parked by backpressure */

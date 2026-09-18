@@ -15,6 +15,8 @@
 # Expectations (1 MiB objects, GETTING=64, READY=128, prefetch window=8):
 #   cold_seq_1t     whole ≈ mapped MiB, exact ≈ 0, prefetch hits > 0
 #   cold_seq_16t    whole ≈ mapped MiB, exact ≈ 0, ready/coalesced reuse
+#   cold_ch_vcpu_*  one synchronous fault stream per vCPU; shuffled 64 KiB
+#                   guest-physical runs model startup locality without QD>1
 #   cold_stampede   whole ≈ mapped MiB, coalesced ≈ whole*(threads-1)
 #   cold_random_Nt  whole ≈ mapped MiB; READY=128 retains this working set
 #   three_lvol      mmap succeeds while rootfs/metadata fio runs during decouple
@@ -43,7 +45,23 @@ NQN="nqn.2026-08.io.spdk:pmmap"
 PORT="4487"
 SIZE_MIB="${SIZE_MIB:-64}"
 THREADS="${THREADS:-32}"
-VOL_GIB=1
+CH_RUN_KIB="${CH_RUN_KIB:-64}"
+MEMORY_GIB="${MEMORY_GIB:-1}"
+IMPORT_ONLY="${IMPORT_ONLY:-0}"
+IMPORT_THREADS="${IMPORT_THREADS:-${THREADS}}"
+EXPORT_WAIT_SEC="${EXPORT_WAIT_SEC:-600}"
+BENCH_TIMEOUT="${BENCH_TIMEOUT:-180}"
+LVS_CAPACITY_GIB=$((MEMORY_GIB + 4))
+# Host readahead in KiB. 0 isolates the per-fault path, which is what the
+# whole-object GET cases want to measure. A production node runs
+# RCOW_READ_AHEAD_KB=1024 so one fault pulls a whole chunk, so a restore
+# estimate has to be taken at the production value, not at 0.
+READ_AHEAD_KIB="${READ_AHEAD_KIB:-0}"
+JOURNAL_MIB="${JOURNAL_MIB:-64}"
+WAL_MIB="${WAL_MIB:-256}"
+# Leave cache room for the whole memory volume plus slack, mirroring a
+# production node whose cache region dwarfs any single volume.
+WAL_IMG_MIB="${WAL_IMG_MIB:-$((JOURNAL_MIB + WAL_MIB + MEMORY_GIB * 1024 * 2 + 512))}"
 
 WORKDIR="$(mktemp -d /tmp/pmmap.XXXXXX)"
 TGT_LOG="${WORKDIR}/target.log"
@@ -212,6 +230,8 @@ pat = re.compile(
     r"(?P<prefetch_skip_slot>\d+) prefetch slot skip\(s\), "
     r"(?P<prefetch_skip_stale>\d+) prefetch stale skip\(s\), "
     r"(?P<prefetch_skip_seq>\d+) prefetch seq skip\(s\), "
+    r"(?P<prefetch_skip_full>\d+) prefetch full-demand skip\(s\), "
+    r"(?P<prefetch_skip_host>\d+) prefetch host-readahead skip\(s\), "
     r"(?P<refetch>\d+) manifest refetch\(es\)"
 )
 matches = list(pat.finditer(text))
@@ -228,7 +248,8 @@ print("{%s}" % ",".join(
     for k in ("reads", "bytes", "zeroes", "whole", "coalesced", "ready",
               "exact", "prefetch_gets", "prefetch_hits", "prefetch_ready",
               "prefetch_skip_token", "prefetch_skip_slot",
-              "prefetch_skip_stale", "prefetch_skip_seq", "refetch")
+              "prefetch_skip_stale", "prefetch_skip_seq",
+              "prefetch_skip_full", "prefetch_skip_host", "refetch")
 ))
 PY
 }
@@ -257,15 +278,16 @@ local whole exact coalesced ready
 	dev="$(wait_dev "${nsid}")" || {
 		unexpose "${nsid}"; fail "${name}: device missing"; return 1; }
 
-	blockdev --setra 0 "${dev}" >/dev/null 2>&1 || true
+	blockdev --setra $((READ_AHEAD_KIB * 2)) "${dev}" >/dev/null 2>&1 || true
 	drop_caches
 	mark="$(wc -c <"${TGT_LOG}")"
 
 	# Bound the fault run so a dest-path regression cannot hang the probe for
 	# minutes the way the first decouple=true sequential case did.
-	if ! result="$(timeout 180s "${BENCH}" --device "${dev}" --offset-mib 0 \
+	if ! result="$(timeout "${BENCH_TIMEOUT}s" "${BENCH}" --device "${dev}" --offset-mib 0 \
 			--size-mib "${SIZE_MIB}" --pattern "${pattern}" \
-			--threads "${threads}" --write-percent "${write_pct}")"; then
+			--threads "${threads}" --run-kib "${CH_RUN_KIB}" \
+			--write-percent "${write_pct}")"; then
 		unexpose "${nsid}"
 		delete_lvol "${lvol}"
 		fail "${name}: mmap bench failed or timed out"
@@ -274,6 +296,12 @@ local whole exact coalesced ready
 	printf '%s\n' "${result}"
 
 	unexpose "${nsid}"
+	if [ "${decouple}" = "true" ]; then
+		wait_decouple_idle || {
+			fail "${name}: decouple did not finish after mmap"
+			return 1
+		}
+	fi
 	# Destroying the import releases the export bs_dev and prints counters.
 	delete_lvol "${lvol}"
 	# Give the async unregister path a moment to log.
@@ -299,6 +327,12 @@ stats = json.loads(stats_s)
 size_mib = int(size_mib)
 threads = int(threads)
 row = {"case": name, "expect": expect, "bench": bench, "export": stats}
+elapsed_s = bench.get("elapsed_ms", 0) / 1000
+touched = bench.get("touched_bytes", 0)
+row["export_bytes_per_touched_byte"] = stats["bytes"] / touched if touched else 0
+row["export_mib_per_sec"] = (
+    stats["bytes"] / 1048576 / elapsed_s if elapsed_s else 0
+)
 
 whole = stats["whole"]
 exact = stats["exact"]
@@ -322,6 +356,24 @@ elif expect == "seq_parallel":
         ok = False; reasons.append(f"exact={exact} want near 0")
     if ready < size_mib * 50:
         ok = False; reasons.append(f"ready={ready} too low")
+elif expect == "ch_vcpu":
+    # A small fixture can retain every object in the export LRU and fetch each
+    # MiB once. A production-sized shuffled working set cannot: revisiting a
+    # partially touched object after eviction legitimately causes another whole
+    # GET. Record that as read amplification instead of treating it as failure.
+    if whole < size_mib * 0.8:
+        ok = False; reasons.append(f"whole={whole} want >= ~{size_mib}")
+    if exact > max(2, size_mib // 8):
+        ok = False; reasons.append(f"exact={exact} want near 0")
+    if ready + coalesced < size_mib * 100:
+        ok = False; reasons.append(
+            f"ready+coalesced={ready + coalesced} too low")
+elif expect == "ch_vcpu_live":
+    # Production import: reads race decouple=true. Some faults hit the export
+    # parent while later faults may hit the materialized destination, so an
+    # export-only whole-GET count cannot describe or gate the mixed path.
+    if bench.get("elapsed_ms", 0) <= 0:
+        ok = False; reasons.append("mmap produced no timing")
 elif expect == "stampede":
     if whole < size_mib * 0.8 or whole > size_mib * 1.5:
         ok = False; reasons.append(f"whole={whole} want ~{size_mib}")
@@ -371,13 +423,25 @@ BK="$(rcow_s3_buckets | head -1)"
 RG="$(rcow_cfg_get region)"
 [ -n "${EP}" ] && [ -n "${BK}" ] && [ -n "${RG}" ] || {
 	echo "incomplete S3 config" >&2; exit 1; }
-info "bucket ready; size_mib=${SIZE_MIB} threads=${THREADS}"
+info "bucket ready; memory_gib=${MEMORY_GIB} dense_mib=${SIZE_MIB} threads=${THREADS} ch_run_kib=${CH_RUN_KIB}"
+info "local device ${WAL_IMG_MIB} MiB: journal ${JOURNAL_MIB}, WAL ${WAL_MIB}, cache $((WAL_IMG_MIB - JOURNAL_MIB - WAL_MIB)) MiB"
+info "host readahead ${READ_AHEAD_KIB} KiB (production default is 1024)"
+[ "${SIZE_MIB}" -le $((MEMORY_GIB * 1024)) ] || {
+	echo "SIZE_MIB exceeds the ${MEMORY_GIB} GiB memory lvol" >&2
+	exit 1
+}
 
 pkill -9 -f s3lvol_tgt >/dev/null 2>&1 || true
 sleep 2
 rm -f "${RPC_SOCK}" "${SRC_WAL}" "${DST_WAL}"
-truncate -s 512M "${SRC_WAL}"
-truncate -s 512M "${DST_WAL}"
+# The chunk cache is whatever is left of the local device after the journal and
+# the WAL, so the image size -- not a cache option -- is what decides whether the
+# destination can retain a working set. A production node runs a 512 GiB image
+# against a 1 GiB journal and a 32 GiB WAL, leaving ~479 GiB of cache; an image
+# sized for the journal alone silently turns every revisited chunk into another
+# whole-object GET.
+truncate -s "${WAL_IMG_MIB}M" "${SRC_WAL}"
+truncate -s "${WAL_IMG_MIB}M" "${DST_WAL}"
 for p in "${SRC_LVS}" "${DST_LVS}"; do
 	python3 "${PREFIX_RM}" -e "${EP}" -b "${BK}" -r "${RG}" -p "${p}/" >/dev/null 2>&1 || true
 done
@@ -386,6 +450,7 @@ cc -O2 -g -Wall -Wextra -Werror -pthread "${BENCH_SRC}" -o "${BENCH}" || exit 1
 
 info "starting target"
 AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+	S3LVOL_READ_AHEAD_KB="${READ_AHEAD_KIB}" \
 	"${TGT_BIN}" -m 0x3 --no-huge -s 2048 --wait-for-rpc \
 	-r "${RPC_SOCK}" >"${TGT_LOG}" 2>&1 &
 TGT_PID=$!
@@ -404,8 +469,9 @@ raw bdev_aio_create "$(printf '{"filename":"%s","name":"src_wal0","block_size":4
 	>/dev/null 2>&1
 raw bdev_aio_create "$(printf '{"filename":"%s","name":"dst_wal0","block_size":4096}' "${DST_WAL}")" \
 	>/dev/null 2>&1
-rpc rcow_create_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":4,"wal_bdev":"src_wal0","journal_size_mb":64,"wal_size_mb":256,"force":true}' \
-	"${SRC_LVS}" "${BK}")" >/dev/null || { echo "create src lvstore failed"; exit 1; }
+rpc rcow_create_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%d,"wal_bdev":"src_wal0","journal_size_mb":%d,"wal_size_mb":%d,"force":true}' \
+	"${SRC_LVS}" "${BK}" "${LVS_CAPACITY_GIB}" "${JOURNAL_MIB}" "${WAL_MIB}")" \
+	>/dev/null || { echo "create src lvstore failed"; exit 1; }
 
 raw nvmf_create_transport \
 	'{"trtype":"TCP","max_io_size":1048576}' >/dev/null 2>&1
@@ -417,7 +483,9 @@ raw nvmf_subsystem_add_listener "$(printf '{"nqn":"%s","listen_address":{"trtype
 # --------------------------------------------------------------------------
 info "[1] densely fill memory/rootfs/metadata templates and export them"
 for name in memory rootfs metadata; do
-	rpc rcow_create_lvol "$(printf '{"lvol_name":"%s","size_gib":%d}' "${name}" "${VOL_GIB}")" \
+	size_gib=1
+	[ "${name}" = "memory" ] && size_gib="${MEMORY_GIB}"
+	rpc rcow_create_lvol "$(printf '{"lvol_name":"%s","size_gib":%d}' "${name}" "${size_gib}")" \
 		>/dev/null || { echo "create ${name}"; exit 1; }
 done
 
@@ -457,7 +525,7 @@ for name in memory rootfs metadata; do
 done
 for name in memory rootfs metadata; do
 	eval "uuid=\${UUID_${name}}"
-	for _ in $(seq 180); do
+	for _ in $(seq "${EXPORT_WAIT_SEC}"); do
 		st="$(rpc rcow_get_snapshot_status "$(printf '{"export_uuid":"%s"}' "${uuid}")" \
 			2>/dev/null | tr -d '"[:space:]\n')"
 		case "${st}" in *DONE*) break ;; esac
@@ -472,19 +540,34 @@ sleep 1
 rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${SRC_LVS}")" >/dev/null || {
 	echo "unload source failed"; exit 1; }
 sleep 1
-rpc rcow_create_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":4,"wal_bdev":"dst_wal0","journal_size_mb":64,"wal_size_mb":256,"force":true}' \
-	"${DST_LVS}" "${BK}")" >/dev/null || { echo "create dst lvstore failed"; exit 1; }
+rpc rcow_create_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","capacity_gib":%d,"wal_bdev":"dst_wal0","journal_size_mb":%d,"wal_size_mb":%d,"force":true}' \
+	"${DST_LVS}" "${BK}" "${LVS_CAPACITY_GIB}" "${JOURNAL_MIB}" "${WAL_MIB}")" \
+	>/dev/null || { echo "create dst lvstore failed"; exit 1; }
 pass "destination lvstore ready"
 MEM_UUID="${UUID_memory}"
 
 # --------------------------------------------------------------------------
-info "[2] per-case fresh imports on the export path (decouple=false)"
-run_mmap_case cold_seq_1t sequential 1 0 seq_clean false
-run_mmap_case cold_seq_16t sequential 16 0 seq_parallel false
-run_mmap_case cold_stampede stampede "${THREADS}" 0 stampede false
-run_mmap_case cold_random_cap random "${THREADS}" 0 random_cap false
+if [ "${IMPORT_ONLY}" = "1" ]; then
+	info "[2] production fresh imports racing decouple=true"
+	for import_threads in ${IMPORT_THREADS}; do
+		run_mmap_case "cold_ch_vcpu_${import_threads}t" ch-vcpu \
+			"${import_threads}" 0 ch_vcpu_live true
+	done
+else
+	info "[2] per-case fresh imports on the export path (decouple=false)"
+	run_mmap_case cold_seq_1t sequential 1 0 seq_clean false
+	run_mmap_case cold_seq_16t sequential 16 0 seq_parallel false
+	run_mmap_case cold_ch_vcpu_1t ch-vcpu 1 0 ch_vcpu false
+	run_mmap_case cold_ch_vcpu_2t ch-vcpu 2 0 ch_vcpu false
+	run_mmap_case cold_ch_vcpu_4t ch-vcpu 4 0 ch_vcpu false
+	run_mmap_case cold_ch_vcpu_8t ch-vcpu 8 0 ch_vcpu false
+	run_mmap_case cold_ch_vcpu_16t ch-vcpu 16 0 ch_vcpu false
+	run_mmap_case cold_stampede stampede "${THREADS}" 0 stampede false
+	run_mmap_case cold_random_cap random "${THREADS}" 0 random_cap false
+fi
 
 # --------------------------------------------------------------------------
+if [ "${IMPORT_ONLY}" != "1" ]; then
 info "[3] three-lvol production window: mmap memory + fio rootfs/metadata"
 CASE_NO=$((CASE_NO + 1))
 name=three_lvol
@@ -515,7 +598,8 @@ fio --name=metadata --filename="${DEV_META}" --direct=1 --rw=randwrite \
 META_PID=$!
 
 if ! result="$("${BENCH}" --device "${DEV_MEM}" --offset-mib 0 --size-mib "${SIZE_MIB}" \
-		--pattern sequential --threads "${THREADS}" --write-percent 0)"; then
+		--pattern ch-vcpu --threads "${THREADS}" --run-kib "${CH_RUN_KIB}" \
+		--write-percent 0)"; then
 	kill "${ROOT_PID}" "${META_PID}" >/dev/null 2>&1 || true
 	wait >/dev/null 2>&1 || true
 	fail "${name}: mmap failed"
@@ -559,6 +643,7 @@ else
 		rm -f "${RPC_SOCK}"
 
 		AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+			S3LVOL_READ_AHEAD_KB="${READ_AHEAD_KIB}" \
 			"${TGT_BIN}" -m 0x3 --no-huge -s 2048 --wait-for-rpc \
 			-r "${RPC_SOCK}" >>"${TGT_LOG}" 2>&1 &
 		TGT_PID=$!
@@ -727,18 +812,28 @@ PY
 			fail "dest_prefetch_holes: sparse read failed"
 		fi
 
-		# With kernel readahead disabled, consecutive 4K reads within the first
-		# object must open the low-priority whole-object prefetch window.
+		# Host readahead of at least one chunk suppresses dest software
+		# prefetch; demand still fills the cache, so later 4K pages hit RAM.
 		drop_caches
 		prefetch_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
 		prefetch_hits_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_hits)"
+		skip_host_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_skip_host)"
 		cache_hits_before="$(lvstore_write_stat "${DST_LVS}" dest_submit_cache_hits)"
 		ram_hits_before="$(lvstore_write_stat "${DST_LVS}" cache_ram_hits)"
 		if dd if="${DEV_PREFETCH}" of=/dev/null bs=4K count=$((2 * 256)) \
 				iflag=direct status=none; then
 			prefetch_after="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
 			prefetch_delta=$((prefetch_after - prefetch_before))
-			if [ "${prefetch_delta}" -gt 0 ]; then
+			skip_host_after="$(lvstore_write_stat "${DST_LVS}" \
+				dest_prefetch_skip_host)"
+			if [ "${READ_AHEAD_KIB}" -ge 1024 ]; then
+				if [ "${prefetch_delta}" -eq 0 ] &&
+				   [ "${skip_host_after}" -gt "${skip_host_before}" ]; then
+					pass "dest_prefetch_seq: host readahead suppressed software prefetch"
+				else
+					fail "dest_prefetch_seq: gets=${prefetch_delta} skip_host=$((skip_host_after - skip_host_before))"
+				fi
+			elif [ "${prefetch_delta}" -gt 0 ]; then
 				pass "dest_prefetch_seq: ${prefetch_delta} low-priority whole GETs"
 			elif [ "${prefetch_after}" -gt 0 ]; then
 				pass "dest_prefetch_seq: range was already prefetched"
@@ -765,16 +860,23 @@ PY
 			fail "dest_prefetch_seq: sequential read failed"
 		fi
 
-		# One isolated seek must close the current sequence without launching
-		# another read-ahead window.
 		prefetch_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
 		skip_seq_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_skip_seq)"
+		skip_host_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_skip_host)"
 		dd if="${DEV_PREFETCH}" of=/dev/null bs=4K skip=$((12 * 256)) \
 			count=1 iflag=direct status=none || true
 		prefetch_after="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
 		skip_seq_after="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_skip_seq)"
-		if [ "${prefetch_after}" -eq "${prefetch_before}" ] &&
-		   [ "${skip_seq_after}" -gt "${skip_seq_before}" ]; then
+		skip_host_after="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_skip_host)"
+		if [ "${READ_AHEAD_KIB}" -ge 1024 ]; then
+			if [ "${prefetch_after}" -eq "${prefetch_before}" ] &&
+			   [ "${skip_host_after}" -gt "${skip_host_before}" ]; then
+				pass "dest_prefetch_random: host readahead skipped software window"
+			else
+				fail "dest_prefetch_random: gets=$((prefetch_after - prefetch_before)) skip_host=$((skip_host_after - skip_host_before))"
+			fi
+		elif [ "${prefetch_after}" -eq "${prefetch_before}" ] &&
+		     [ "${skip_seq_after}" -gt "${skip_seq_before}" ]; then
 			pass "dest_prefetch_random: jump suppressed read-ahead"
 		else
 			fail "dest_prefetch_random: gets=$((prefetch_after - prefetch_before)) skip_seq=$((skip_seq_after - skip_seq_before))"
@@ -838,6 +940,7 @@ PY
 		pass "${name}: mmap + concurrent rootfs/metadata IO completed"
 	fi
 fi
+fi
 
 # --------------------------------------------------------------------------
 # Remove the destination from the persistent registry before killing the target.
@@ -851,14 +954,19 @@ python3 - "${RESULTS}" <<'PY'
 import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8")]
 print()
-print("case                  elapsed(ms)  MiB/s   whole  coalsc  ready  exact  pf_get pf_hit pf_ram tok_sk slot_sk seq_sk fast_hit sb_fill sb_join direct directMiB verdict")
+print("case                  elapsed(ms)  MiB/s expMiB/s exp/t  whole  coalsc  ready  exact  pf_get pf_hit pf_ram tok_sk slot_sk seq_sk full_sk host_sk fast_hit sb_fill sb_join direct directMiB verdict")
 for r in rows:
     b = r.get("bench") or {}; e = r.get("export") or {}
     elapsed = f"{b['elapsed_ms']:.1f}" if "elapsed_ms" in b else "-"
     mibps = f"{b['mib_per_sec']:.1f}" if "mib_per_sec" in b else "-"
+    export_mibps = f"{r['export_mib_per_sec']:.1f}" \
+                   if "export_mib_per_sec" in r else "-"
+    export_ratio = f"{r['export_bytes_per_touched_byte']:.2f}" \
+                   if "export_bytes_per_touched_byte" in r else "-"
     direct_mib = r.get("direct_bytes", 0) // (1024 * 1024) \
                  if "direct_bytes" in r else "-"
     print(f"{r['case']:<21} {elapsed:>10} {mibps:>6} "
+          f"{export_mibps:>8} {export_ratio:>5} "
           f"{e.get('whole','-'):>6} {e.get('coalesced','-'):>6} "
           f"{e.get('ready','-'):>6} {e.get('exact','-'):>6} "
           f"{e.get('prefetch_gets','-'):>6} {e.get('prefetch_hits','-'):>6} "
@@ -866,6 +974,8 @@ for r in rows:
           f"{e.get('prefetch_skip_token','-'):>6} "
           f"{e.get('prefetch_skip_slot','-'):>7} "
           f"{e.get('prefetch_skip_seq','-'):>6} "
+          f"{e.get('prefetch_skip_full','-'):>7} "
+          f"{e.get('prefetch_skip_host','-'):>7} "
           f"{r.get('fast_hits','-'):>8} "
           f"{r.get('submit_fills','-'):>7} "
           f"{r.get('submit_joins','-'):>7} "

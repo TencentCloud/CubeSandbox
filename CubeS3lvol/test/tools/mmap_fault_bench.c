@@ -32,6 +32,7 @@ enum access_pattern {
 	PATTERN_SEQUENTIAL,
 	PATTERN_RANDOM,
 	PATTERN_STAMPEDE,
+	PATTERN_VCPU,
 };
 
 struct bench;
@@ -58,6 +59,7 @@ struct bench {
 	unsigned int write_percent;
 	uint32_t page_size;
 	uint32_t chunk_size;
+	uint32_t run_size;
 	enum access_pattern pattern;
 	pthread_barrier_t start;
 	pthread_barrier_t cohort;
@@ -162,6 +164,28 @@ worker_main(void *arg)
 		return NULL;
 	}
 
+	if (bench->pattern == PATTERN_VCPU) {
+		uint64_t pages_per_run = bench->run_size / bench->page_size;
+		uint64_t nruns = bench->length / bench->run_size;
+
+		/*
+		 * A vCPU blocks on each host page fault, so every worker has only
+		 * one outstanding access.  Runs are shuffled globally and assigned
+		 * round-robin: each worker jumps between guest-physical regions,
+		 * then consumes a short locally sequential run within each region.
+		 */
+		for (i = worker->id; i < nruns; i += bench->threads) {
+			uint64_t run = bench->pages[i];
+			uint64_t first_page = run * pages_per_run;
+			uint64_t j;
+
+			for (j = 0; j < pages_per_run; j++) {
+				touch_page(worker, first_page + j);
+			}
+		}
+		return NULL;
+	}
+
 	for (i = bench->npages * worker->id / bench->threads;
 	     i < bench->npages * (worker->id + 1) / bench->threads; i++) {
 		touch_page(worker, bench->pages[i]);
@@ -200,6 +224,8 @@ pattern_name(enum access_pattern pattern)
 		return "random";
 	case PATTERN_STAMPEDE:
 		return "stampede";
+	case PATTERN_VCPU:
+		return "ch-vcpu";
 	}
 	return "unknown";
 }
@@ -212,7 +238,9 @@ usage(const char *prog)
 		"  --offset-mib N     mapping offset (default: 0)\n"
 		"  --size-mib N       mapped bytes to touch (default: device size)\n"
 		"  --threads N        faulting threads (default: 1)\n"
-		"  --pattern NAME     sequential, random, or stampede (default: sequential)\n"
+		"  --pattern NAME     sequential, random, stampede, or ch-vcpu\n"
+		"                     (default: sequential)\n"
+		"  --run-kib N        local sequential run for ch-vcpu (default: 64)\n"
 		"  --chunk-kib N      stampede boundary (default: 1024)\n"
 		"  --write-percent N  MAP_PRIVATE CoW percentage, 0..100 (default: 0)\n"
 		"  --seed N           random permutation seed (default: 1)\n",
@@ -228,6 +256,7 @@ main(int argc, char **argv)
 		{"size-mib", required_argument, NULL, 's'},
 		{"threads", required_argument, NULL, 't'},
 		{"pattern", required_argument, NULL, 'p'},
+		{"run-kib", required_argument, NULL, 'R'},
 		{"chunk-kib", required_argument, NULL, 'c'},
 		{"write-percent", required_argument, NULL, 'w'},
 		{"seed", required_argument, NULL, 'r'},
@@ -248,9 +277,10 @@ main(int argc, char **argv)
 
 	bench.threads = 1;
 	bench.chunk_size = DEFAULT_CHUNK_SIZE;
+	bench.run_size = 64U * 1024U;
 	bench.pattern = PATTERN_SEQUENTIAL;
 
-	while ((opt = getopt_long(argc, argv, "d:o:s:t:p:c:w:r:h", options,
+	while ((opt = getopt_long(argc, argv, "d:o:s:t:p:R:c:w:r:h", options,
 				  NULL)) != -1) {
 		switch (opt) {
 		case 'd':
@@ -279,10 +309,17 @@ main(int argc, char **argv)
 			} else if (strcmp(optarg, "stampede") == 0 ||
 				   strcmp(optarg, "cohort") == 0) {
 				bench.pattern = PATTERN_STAMPEDE;
+			} else if (strcmp(optarg, "ch-vcpu") == 0 ||
+				   strcmp(optarg, "vcpu") == 0) {
+				bench.pattern = PATTERN_VCPU;
 			} else {
 				fprintf(stderr, "unknown pattern: %s\n", optarg);
 				goto out;
 			}
+			break;
+		case 'R':
+			bench.run_size =
+				(uint32_t)strtoul(optarg, NULL, 10) * 1024U;
 			break;
 		case 'c':
 			bench.chunk_size = (uint32_t)strtoul(optarg, NULL, 10) * 1024U;
@@ -346,6 +383,16 @@ main(int argc, char **argv)
 		fprintf(stderr, "chunk size must be page aligned and at least one page\n");
 		goto out;
 	}
+	if (bench.run_size < bench.page_size ||
+	    bench.run_size % bench.page_size != 0) {
+		fprintf(stderr, "run size must be page aligned and at least one page\n");
+		goto out;
+	}
+	if (bench.pattern == PATTERN_VCPU &&
+	    bench.length % bench.run_size != 0) {
+		fprintf(stderr, "ch-vcpu length must be a multiple of run size\n");
+		goto out;
+	}
 	if (bench.pattern == PATTERN_STAMPEDE &&
 	    bench.length % bench.chunk_size != 0) {
 		fprintf(stderr, "stampede length must be a multiple of chunk size\n");
@@ -369,7 +416,20 @@ main(int argc, char **argv)
 		fprintf(stderr, "allocation failed\n");
 		goto out;
 	}
-	if (bench.pattern != PATTERN_STAMPEDE) {
+	if (bench.pattern == PATTERN_VCPU) {
+		uint64_t n;
+		uint64_t nruns = bench.length / bench.run_size;
+
+		bench.pages = malloc(nruns * sizeof(*bench.pages));
+		if (!bench.pages) {
+			fprintf(stderr, "run-list allocation failed\n");
+			goto out;
+		}
+		for (n = 0; n < nruns; n++) {
+			bench.pages[n] = n;
+		}
+		shuffle_pages(bench.pages, nruns, seed);
+	} else if (bench.pattern != PATTERN_STAMPEDE) {
 		uint64_t n;
 
 		bench.pages = malloc(bench.npages * sizeof(*bench.pages));
@@ -451,13 +511,14 @@ main(int argc, char **argv)
 	printf("{\"device\":\"%s\",\"pattern\":\"%s\",\"threads\":%u,"
 	       "\"offset_bytes\":%" PRIu64 ",\"mapped_bytes\":%" PRIu64 ","
 	       "\"touched_bytes\":%" PRIu64 ",\"samples\":%" PRIu64 ","
-	       "\"write_percent\":%u,\"elapsed_ms\":%.3f,\"mib_per_sec\":%.3f,"
+	       "\"run_kib\":%u,\"write_percent\":%u,"
+	       "\"elapsed_ms\":%.3f,\"mib_per_sec\":%.3f,"
 	       "\"latency_us\":{\"p50\":%.3f,\"p95\":%.3f,\"p99\":%.3f,"
 	       "\"max\":%.3f},\"faults\":{\"major\":%ld,\"minor\":%ld},"
 	       "\"checksum\":%" PRIu64 "}\n",
 	       device, pattern_name(bench.pattern), bench.threads, bench.map_offset,
 	       bench.length, total_samples * bench.page_size, total_samples,
-	       bench.write_percent, (double)elapsed / 1e6,
+	       bench.run_size / 1024, bench.write_percent, (double)elapsed / 1e6,
 	       ((double)(total_samples * bench.page_size) / (1024.0 * 1024.0)) /
 		       ((double)elapsed / 1e9),
 	       (double)percentile(bench.latencies, bench.npages, 50) / 1e3,

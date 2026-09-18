@@ -148,6 +148,7 @@ struct s3_export_dev {
 	uint64_t                   last_demand_chunk;
 	bool                       have_prefetch_frontier;
 	uint64_t                   prefetch_frontier;
+	bool                       host_readahead_covers_chunk;
 
 	bool                       destroying;
 	bool                       unregister_started;
@@ -169,6 +170,8 @@ struct s3_export_dev {
 	uint64_t                   prefetch_skip_slot;
 	uint64_t                   prefetch_skip_stale;
 	uint64_t                   prefetch_skip_seq;
+	uint64_t                   prefetch_skip_full;
+	uint64_t                   prefetch_skip_host;
 };
 
 /* One bs_dev read, possibly spanning several chunks. */
@@ -1041,6 +1044,11 @@ export_maybe_prefetch(struct s3_export_dev *dev, struct s3_export_manifest *m,
 	uint64_t idx;
 	bool sequential = false;
 
+	if (dev->host_readahead_covers_chunk) {
+		__atomic_fetch_add(&dev->prefetch_skip_host, 1, __ATOMIC_RELAXED);
+		return;
+	}
+
 	pthread_mutex_lock(&dev->fill_lock);
 	if (dev->destroying) {
 		pthread_mutex_unlock(&dev->fill_lock);
@@ -1235,7 +1243,20 @@ export_read_internal(struct spdk_bs_dev *bs_dev, struct spdk_io_channel *channel
 		rc = export_fill_submit(io, key, chunk_index, object_len,
 					offset_in_chunk, get_len, buf);
 		if (rc == 0) {
-			export_maybe_prefetch(dev, io->m, chunk_index);
+			/*
+			 * A full aligned demand means the host/kernel is already
+			 * reading at object granularity. Starting another eight-object
+			 * window here duplicates kernel readahead and, on mmap restore,
+			 * spends more bandwidth than demand itself for almost no hits.
+			 * Keep userspace prefetch for small reads where it can hide the
+			 * next object's RTT.
+			 */
+			if (offset_in_chunk == 0 && get_len == object_len) {
+				__atomic_fetch_add(&dev->prefetch_skip_full, 1,
+						   __ATOMIC_RELAXED);
+			} else {
+				export_maybe_prefetch(dev, io->m, chunk_index);
+			}
 			goto next;
 		}
 		if (rc != -EAGAIN) {
@@ -1523,13 +1544,17 @@ export_destroy(struct spdk_bs_dev *bs_dev)
 	       " prefetch hit(s), %" PRIu64 " prefetch RAM hit(s), %" PRIu64
 	       " prefetch token skip(s), %" PRIu64 " prefetch slot skip(s), "
 	       "%" PRIu64 " prefetch stale skip(s), %" PRIu64
-	       " prefetch seq skip(s), %" PRIu64 " manifest refetch(es)\n",
+	       " prefetch seq skip(s), %" PRIu64
+	       " prefetch full-demand skip(s), %" PRIu64
+	       " prefetch host-readahead skip(s), %" PRIu64
+	       " manifest refetch(es)\n",
 		       dev->m->uuid_str, dev->reads, dev->bytes_read, dev->zero_fills,
 		       dev->whole_gets, dev->coalesced_reads, dev->ready_hits,
 	       dev->exact_fallbacks, dev->prefetch_gets, dev->prefetch_hits,
 	       dev->prefetch_ready_hits, dev->prefetch_skip_token,
 	       dev->prefetch_skip_slot, dev->prefetch_skip_stale,
-	       dev->prefetch_skip_seq, dev->refetches);
+	       dev->prefetch_skip_seq, dev->prefetch_skip_full,
+	       dev->prefetch_skip_host, dev->refetches);
 
 	/* No wait for a refetch, deliberately.
 	 *
@@ -1985,6 +2010,8 @@ s3_export_bs_dev_create(struct s3_client *client, struct s3_export_manifest *m,
 	dev->m                = m;
 	dev->chunk_shift      = (uint32_t)spdk_u32log2(m->chunk_size);
 	dev->blocks_per_chunk = m->chunk_size / S3LVOL_BLOCK_SIZE;
+	dev->host_readahead_covers_chunk =
+		s3_host_readahead_covers_chunk(m->chunk_size);
 	snprintf(dev->name, sizeof(dev->name), "esnap:%s", m->uuid_str);
 
 	/* The refetch machinery's thread. Taken here rather than from the first

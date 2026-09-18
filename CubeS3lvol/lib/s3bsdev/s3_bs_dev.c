@@ -256,6 +256,7 @@ struct s3_ctx {
 	bool have_dest_prefetch_frontier;
 	uint64_t dest_prefetch_frontier;
 	uint64_t dest_prefetch_step;
+	bool host_readahead_covers_chunk;
 
 	/* Registered only while teardown is waiting for a cache fill to land. See
 	 * s3_bs_dev_teardown(). */
@@ -333,6 +334,7 @@ struct s3_ctx {
 	uint64_t                 dest_prefetch_skip_token;
 	uint64_t                 dest_prefetch_skip_slot;
 	uint64_t                 dest_prefetch_skip_seq;
+	uint64_t                 dest_prefetch_skip_host;
 
 	/* WAL path counters */
 	uint64_t wal_writes;   /* writes acknowledged from the log */
@@ -1156,6 +1158,11 @@ s3_dest_maybe_prefetch(struct s3_ctx *ctx, uint64_t demand_chunk,
 	bool sequential = false;
 
 	if (!ctx->cache) {
+		return;
+	}
+	if (ctx->host_readahead_covers_chunk) {
+		__atomic_fetch_add(&ctx->dest_prefetch_skip_host, 1,
+				   __ATOMIC_RELAXED);
 		return;
 	}
 
@@ -4101,6 +4108,8 @@ s3_bs_dev_create(const struct s3_lvs_opts *opts,
 	ctx->chunk_shift    = (uint32_t)spdk_u32log2(chunk_size);
 	ctx->capacity_bytes = capacity_bytes;
 	ctx->cache_hot_bufs = opts->cache_hot_bufs;
+	ctx->host_readahead_covers_chunk =
+		s3_host_readahead_covers_chunk(chunk_size);
 	ctx->owner_thread   = spdk_get_thread();
 
 	ctx->ckpt_interval_sec = opts->checkpoint_interval_sec ?
@@ -4788,6 +4797,8 @@ s3_bs_dev_get_stats(struct spdk_bs_dev *bs_dev, struct s3_bs_dev_stats *out)
 		__atomic_load_n(&ctx->dest_prefetch_skip_slot, __ATOMIC_RELAXED);
 	out->dest_prefetch_skip_seq =
 		__atomic_load_n(&ctx->dest_prefetch_skip_seq, __ATOMIC_RELAXED);
+	out->dest_prefetch_skip_host =
+		__atomic_load_n(&ctx->dest_prefetch_skip_host, __ATOMIC_RELAXED);
 	out->wal_writes       = ctx->wal_writes;
 	out->wal_retries      = ctx->wal_retries;
 	out->overlay_hits     = ctx->overlay_hits;

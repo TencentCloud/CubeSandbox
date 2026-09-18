@@ -279,6 +279,11 @@ main(void)
 	spdk_log_set_print_level(SPDK_LOG_NOTICE);
 	spdk_log_open(NULL);
 	printf("=== s3lvol export whole-object read test ===\n");
+	/* This suite explicitly verifies the userspace prefetch state machine.
+	 * Production normally exports 1024 KiB host readahead, which suppresses
+	 * that redundant layer; do not let the developer's environment silently
+	 * turn the requests asserted below off. */
+	setenv("S3LVOL_READ_AHEAD_KB", "0", 1);
 
 	opts.opts_size = sizeof(opts);
 	spdk_env_opts_init(&opts);

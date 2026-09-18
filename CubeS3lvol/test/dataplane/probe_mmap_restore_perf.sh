@@ -5,6 +5,8 @@
 # Hypervisor-shaped restore benchmark for an already activated imported memory
 # lvol.  The helper maps the block device MAP_PRIVATE | MAP_NORESERVE and faults
 # 4 KiB pages without MAP_POPULATE, matching create_ram_region(snap_file).
+# Its primary ch-vcpu pattern gives every vCPU one synchronous fault stream:
+# shuffled guest-physical regions with a short sequential run inside each.
 #
 # This is deliberately a probe rather than a run_all.sh test: timings depend on
 # the S3 endpoint and dropping the host page cache is machine-wide.
@@ -35,6 +37,7 @@ ROOTFS_DEV=""
 METADATA_DEV=""
 SIZE_MIB=64
 THREADS=32
+RUN_KIB=64
 OUTPUT=""
 TARGET_LOG=""
 CONCURRENT_WRITES=0
@@ -50,6 +53,7 @@ usage()
 	echo
 	echo "Options:"
 	echo "  --threads N           mmap faulting threads (default: 32)"
+	echo "  --run-kib N           local ch-vcpu sequential run (default: 64)"
 	echo "  --read-ahead N        block read-ahead sectors (default: 0)"
 	echo "  --target-log PATH     save matching export release statistics"
 	echo "  --keep-bin            retain the compiled helper in output dir"
@@ -57,7 +61,7 @@ usage()
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
-	--memory-dev|--rootfs-dev|--metadata-dev|--size-mib|--threads|--read-ahead|--output|--target-log)
+	--memory-dev|--rootfs-dev|--metadata-dev|--size-mib|--threads|--run-kib|--read-ahead|--output|--target-log)
 		[ "$#" -ge 2 ] || { echo "$1 requires a value" >&2; exit 2; }
 		case "$1" in
 		--memory-dev) MEMORY_DEV="$2" ;;
@@ -65,6 +69,7 @@ while [ "$#" -gt 0 ]; do
 		--metadata-dev) METADATA_DEV="$2" ;;
 		--size-mib) SIZE_MIB="$2" ;;
 		--threads) THREADS="$2" ;;
+		--run-kib) RUN_KIB="$2" ;;
 		--read-ahead) READ_AHEAD="$2" ;;
 		--output) OUTPUT="$2" ;;
 		--target-log) TARGET_LOG="$2" ;;
@@ -85,11 +90,11 @@ for cmd in "${CC:-cc}" python3 blockdev; do
 done
 [ -n "${MEMORY_DEV}" ] || { echo "--memory-dev is required" >&2; exit 2; }
 [ -b "${MEMORY_DEV}" ] || { echo "${MEMORY_DEV} is not a block device" >&2; exit 1; }
-case "${SIZE_MIB}:${THREADS}:${READ_AHEAD}" in
+case "${SIZE_MIB}:${THREADS}:${RUN_KIB}:${READ_AHEAD}" in
 *[!0-9:]*|:*|*:) echo "size and threads must be positive integers" >&2; exit 2 ;;
 esac
-[ "${SIZE_MIB}" -gt 0 ] && [ "${THREADS}" -gt 0 ] || {
-	echo "size and threads must be positive" >&2; exit 2; }
+[ "${SIZE_MIB}" -gt 0 ] && [ "${THREADS}" -gt 0 ] && [ "${RUN_KIB}" -gt 0 ] || {
+	echo "size, threads, and run-kib must be positive" >&2; exit 2; }
 
 if [ "${CONCURRENT_WRITES}" -eq 1 ]; then
 	[ -b "${ROOTFS_DEV}" ] && [ -b "${METADATA_DEV}" ] || {
@@ -138,15 +143,16 @@ fi
 
 ORIGINAL_READ_AHEAD="$(blockdev --getra "${MEMORY_DEV}")" || exit 1
 blockdev --setra "${READ_AHEAD}" "${MEMORY_DEV}" || exit 1
-python3 - "${MEMORY_DEV}" "${SIZE_MIB}" "${THREADS}" "${READ_AHEAD}" \
+python3 - "${MEMORY_DEV}" "${SIZE_MIB}" "${THREADS}" "${RUN_KIB}" "${READ_AHEAD}" \
 	"${ORIGINAL_READ_AHEAD}" <<'PY' >"${OUTPUT}/environment.json"
 import json, os, platform, sys
 print(json.dumps({
     "device": sys.argv[1],
     "size_mib": int(sys.argv[2]),
     "threads": int(sys.argv[3]),
-    "read_ahead_sectors": int(sys.argv[4]),
-    "original_read_ahead_sectors": int(sys.argv[5]),
+    "run_kib": int(sys.argv[4]),
+    "read_ahead_sectors": int(sys.argv[5]),
+    "original_read_ahead_sectors": int(sys.argv[6]),
     "kernel": platform.release(),
     "cpu_count": os.cpu_count(),
 }, separators=(",", ":")))
@@ -167,7 +173,7 @@ run_case()
 	echo "---- ${name}: offset=${offset}MiB size=${size}MiB ${pattern}/${threads}"
 	if ! result="$("${BIN}" --device "${MEMORY_DEV}" --offset-mib "${offset}" \
 			--size-mib "${size}" --pattern "${pattern}" --threads "${threads}" \
-			--write-percent "${writes}")"; then
+			--run-kib "${RUN_KIB}" --write-percent "${writes}")"; then
 		echo "${name} failed" >&2
 		exit 1
 	fi
@@ -184,7 +190,7 @@ PY
 # immediately before this script. Later disjoint regions avoid hits but still
 # represent a steady-state LRU containing 16 unrelated objects. The final pair
 # deliberately reuses one 16 MiB region.
-REQUIRED_MIB=$((SIZE_MIB * 6 + 16))
+REQUIRED_MIB=$((SIZE_MIB * 7 + 16))
 DEVICE_MIB=$(( $(blockdev --getsize64 "${MEMORY_DEV}") / 1024 / 1024 ))
 [ "${DEVICE_MIB}" -ge "${REQUIRED_MIB}" ] || {
 	echo "memory device is ${DEVICE_MIB} MiB; ${REQUIRED_MIB} MiB required" >&2
@@ -210,8 +216,9 @@ if [ "${CONCURRENT_WRITES}" -eq 1 ]; then
 	# Start mmap immediately: production does not wait for either guest disk I/O
 	# or decouple to settle after activation.
 	if ! result="$("${BIN}" --device "${MEMORY_DEV}" \
-			--offset-mib "$((SIZE_MIB * 5))" --size-mib "${SIZE_MIB}" \
-			--pattern random --threads "${THREADS}")"; then
+			--offset-mib "$((SIZE_MIB * 6))" --size-mib "${SIZE_MIB}" \
+			--pattern ch-vcpu --threads "${THREADS}" \
+			--run-kib "${RUN_KIB}")"; then
 		echo "concurrent mmap benchmark failed" >&2
 		exit 1
 	fi
@@ -231,20 +238,19 @@ PY
 	}
 fi
 
-if [ "${CONCURRENT_WRITES}" -eq 0 ]; then
-	echo "NOTE: cold_restore_seq requires a newly activated import with an empty export LRU."
-	run_case cold_restore_seq 0 "${SIZE_MIB}" sequential "${THREADS}" 0
-else
-	run_case steady_restore_seq 0 "${SIZE_MIB}" sequential "${THREADS}" 0
-fi
-run_case steady_seq1 "${SIZE_MIB}" "${SIZE_MIB}" sequential 1 0
+echo "NOTE: restore_ch_vcpu is the primary Cloud Hypervisor-shaped result."
+run_case restore_ch_vcpu 0 "${SIZE_MIB}" ch-vcpu "${THREADS}" 0
+# Keep pure sequential cases as upper/lower-bound comparisons, not as the
+# production restore model.
+run_case steady_seq_parallel "${SIZE_MIB}" "${SIZE_MIB}" sequential "${THREADS}" 0
+run_case steady_ch_vcpu_1t "$((SIZE_MIB * 2))" "${SIZE_MIB}" ch-vcpu 1 0
 # stampede touches one page per thread per object. It is a single-flight
 # microbenchmark, not a full-memory throughput result.
-run_case steady_stampede "$((SIZE_MIB * 2))" "${SIZE_MIB}" stampede "${THREADS}" 0
-run_case steady_random_cap "$((SIZE_MIB * 3))" "${SIZE_MIB}" random "${THREADS}" 0
-run_case private_cow_10pct "$((SIZE_MIB * 4))" "${SIZE_MIB}" random "${THREADS}" 10
+run_case steady_stampede "$((SIZE_MIB * 3))" "${SIZE_MIB}" stampede "${THREADS}" 0
+run_case steady_random_cap "$((SIZE_MIB * 4))" "${SIZE_MIB}" random "${THREADS}" 0
+run_case private_cow_10pct "$((SIZE_MIB * 5))" "${SIZE_MIB}" random "${THREADS}" 10
 
-WARM_OFFSET=$((SIZE_MIB * 6))
+WARM_OFFSET=$((SIZE_MIB * 7))
 run_case lru_prime "${WARM_OFFSET}" 16 sequential "${THREADS}" 0
 run_case lru_reuse "${WARM_OFFSET}" 16 sequential "${THREADS}" 0
 
