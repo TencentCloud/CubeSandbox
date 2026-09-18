@@ -146,7 +146,7 @@ func TestNodeStore_HostFacts(t *testing.T) {
 
 	// Update HostFacts via UpdateHostFacts.
 	newFactsJSON := `{"cpu_vendor":"AuthenticAMD","cpuid_hash":"sha256:xyz","host_kernel_release":"6.6.0","kvm_api_version":12}`
-	if err := s.UpdateHostFacts(ctx, "node-hf", newFactsJSON, "sha256:xyz", "6.6.0"); err != nil {
+	if err := s.UpdateHostFacts(ctx, "node-hf", newFactsJSON, "sha256:xyz", "6.6.0", 16, 65536); err != nil {
 		t.Fatalf("update host facts: %v", err)
 	}
 	got, err = s.GetRegistration(ctx, "node-hf")
@@ -287,5 +287,135 @@ func TestNodeStore_DeleteNode_AllowsReRegister(t *testing.T) {
 	}
 	if got.HostIP != "10.0.0.2" {
 		t.Fatalf("hostIP = %s, want 10.0.0.2", got.HostIP)
+	}
+}
+
+func floatPtr(v float64) *float64 { return &v }
+
+func TestNodeStore_QuotaSpecLifecycle(t *testing.T) {
+	env := newTestStore(t)
+	defer env.teardown()
+
+	ctx := context.Background()
+	s := nmstore.NewNodeStore(env.store.DB())
+
+	// CreateQuotaSpecIfAbsent: first insert succeeds.
+	row := &nmstore.NodeQuotaSpec{NodeID: "node-a", MCpuLimit: 64000, MemLimit: "64Gi", Revision: 1, UpdatedBy: "alice", NodeManaged: true}
+	if err := s.CreateQuotaSpecIfAbsent(ctx, row); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Second insert of the same node must surface ErrQuotaSpecExists.
+	if err := s.CreateQuotaSpecIfAbsent(ctx, &nmstore.NodeQuotaSpec{NodeID: "node-a"}); !errors.Is(err, nmstore.ErrQuotaSpecExists) {
+		t.Fatalf("want ErrQuotaSpecExists, got %v", err)
+	}
+
+	// GetQuotaSpec returns the row.
+	got, err := s.GetQuotaSpec(ctx, "node-a")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.MCpuLimit != 64000 || got.MemLimit != "64Gi" || got.Revision != 1 {
+		t.Fatalf("got = %+v", got)
+	}
+	// Missing node returns ErrNotFound.
+	if _, err := s.GetQuotaSpec(ctx, "ghost"); !errors.Is(err, nmstore.ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+
+	// UpdateQuotaSpecIfRevision: matching revision bumps and applies.
+	next := &nmstore.NodeQuotaSpec{NodeID: "node-a", MCpuLimit: 80000, MemLimit: "64Gi", UpdatedBy: "bob", NodeManaged: true}
+	applied, err := s.UpdateQuotaSpecIfRevision(ctx, next, 1)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !applied {
+		t.Fatal("matching revision must apply")
+	}
+	got, _ = s.GetQuotaSpec(ctx, "node-a")
+	if got.MCpuLimit != 80000 || got.Revision != 2 {
+		t.Fatalf("after update got = %+v", got)
+	}
+
+	// Stale revision must be a no-op (RowsAffected == 0).
+	stale := &nmstore.NodeQuotaSpec{NodeID: "node-a", MCpuLimit: 99999, UpdatedBy: "carol", NodeManaged: true}
+	applied, err = s.UpdateQuotaSpecIfRevision(ctx, stale, 1)
+	if err != nil {
+		t.Fatalf("stale update: %v", err)
+	}
+	if applied {
+		t.Fatal("stale revision must not apply")
+	}
+	got, _ = s.GetQuotaSpec(ctx, "node-a")
+	if got.MCpuLimit != 80000 || got.Revision != 2 {
+		t.Fatalf("stale update changed row: %+v", got)
+	}
+}
+
+func TestNodeStore_QuotaSpecUpsertBumpsRevision(t *testing.T) {
+	env := newTestStore(t)
+	defer env.teardown()
+
+	ctx := context.Background()
+	s := nmstore.NewNodeStore(env.store.DB())
+
+	if err := s.UpsertQuotaSpec(ctx, &nmstore.NodeQuotaSpec{NodeID: "node-a", MCpuLimit: 64000, Revision: 1, UpdatedBy: "alice"}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	// Upsert on the same node_id bumps revision and replaces fields.
+	if err := s.UpsertQuotaSpec(ctx, &nmstore.NodeQuotaSpec{NodeID: "node-a", MCpuLimit: 80000, UpdatedBy: "bob"}); err != nil {
+		t.Fatalf("upsert again: %v", err)
+	}
+	got, err := s.GetQuotaSpec(ctx, "node-a")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.MCpuLimit != 80000 || got.Revision != 2 {
+		t.Fatalf("got = %+v", got)
+	}
+}
+
+func TestNodeStore_QuotaSpecFollowersAndBump(t *testing.T) {
+	env := newTestStore(t)
+	defer env.teardown()
+
+	ctx := context.Background()
+	s := nmstore.NewNodeStore(env.store.DB())
+
+	// Sentinel (cluster default) with an explicit ratio.
+	s.UpsertQuotaSpec(ctx, &nmstore.NodeQuotaSpec{NodeID: nmstore.ClusterQuotaSentinelID, PausedReleaseRatio: floatPtr(0.5), Revision: 1})
+	// Follower with NULL ratio (inherits cluster default).
+	s.UpsertQuotaSpec(ctx, &nmstore.NodeQuotaSpec{NodeID: "node-a", Revision: 1})
+	// Node-managed row with an explicit ratio (not a follower).
+	s.UpsertQuotaSpec(ctx, &nmstore.NodeQuotaSpec{NodeID: "node-b", PausedReleaseRatio: floatPtr(0.8), Revision: 1})
+
+	// Followers: only the NULL-ratio, non-sentinel row.
+	followers, err := s.ListClusterQuotaFollowers(ctx)
+	if err != nil {
+		t.Fatalf("list followers: %v", err)
+	}
+	if len(followers) != 1 || followers[0].NodeID != "node-a" {
+		t.Fatalf("followers = %+v", followers)
+	}
+
+	// Bump advances only follower rows.
+	bumped, err := s.BumpClusterQuotaFollowers(ctx)
+	if err != nil {
+		t.Fatalf("bump: %v", err)
+	}
+	if bumped != 1 {
+		t.Fatalf("bumped = %d, want 1", bumped)
+	}
+	got, _ := s.GetQuotaSpec(ctx, "node-a")
+	if got.Revision != 2 {
+		t.Fatalf("follower revision = %d, want 2", got.Revision)
+	}
+
+	// ListQuotaSpecs returns every row (sentinel included).
+	all, err := s.ListQuotaSpecs(ctx)
+	if err != nil {
+		t.Fatalf("list specs: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("specs = %d, want 3", len(all))
 	}
 }

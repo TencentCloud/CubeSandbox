@@ -151,6 +151,9 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- if not .Values.externalControlPlane.opsEndpoint }}
 {{- fail "externalControlPlane.enabled=true requires externalControlPlane.opsEndpoint" }}
 {{- end }}
+{{- if and (eq (include "cube.opsAgentEnabled" .) "true") (ne (include "cube.opsEnabled" .) "true") (not (((.Values.opsAgent).tokenSecret).name | default "")) }}
+{{- fail "externalControlPlane.enabled with cubeNode.enabled requires opsAgent.tokenSecret.name (the release Secret is not rendered without the control plane)" }}
+{{- end }}
 {{- end }}
 {{- if and .Values.cubeNode.enabled (not .Values.controlPlane.enabled) (not .Values.externalControlPlane.enabled) }}
 {{- fail "cubeNode.enabled=true with controlPlane.enabled=false requires externalControlPlane.enabled=true" }}
