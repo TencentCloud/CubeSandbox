@@ -51,17 +51,29 @@ SPDK_ROOT   ?= $(abspath $(S3LVOL_ROOT)/../spdk)
 # unpatched SPDK.
 # ---------------------------------------------------------------------------
 ifeq ($(filter clean help,$(MAKECMDGOALS)),)
-SPDK_PATCH_PROBE := $(shell grep -c spdk_blob_get_io_unit_lba \
+SPDK_PATCH_PROBE_IO_UNIT := $(shell grep -c spdk_blob_get_io_unit_lba \
            $(SPDK_ROOT)/include/spdk/blob.h 2>/dev/null)
-ifeq ($(SPDK_PATCH_PROBE),0)
+SPDK_PATCH_PROBE_ESNAP_COPY := $(shell grep -c spdk_blob_allow_esnap_copy \
+           $(SPDK_ROOT)/include/spdk/blob.h 2>/dev/null)
+ifeq ($(SPDK_PATCH_PROBE_IO_UNIT),)
+$(error No SPDK headers at $(SPDK_ROOT)/include. Run './setup_dep.sh' to build \
+        one under deps/, or set SPDK_ROOT to an existing checkout)
+endif
+ifeq ($(SPDK_PATCH_PROBE_ESNAP_COPY),)
+$(error No SPDK headers at $(SPDK_ROOT)/include. Run './setup_dep.sh' to build \
+        one under deps/, or set SPDK_ROOT to an existing checkout)
+endif
+ifeq ($(SPDK_PATCH_PROBE_IO_UNIT),0)
 $(error SPDK at $(SPDK_ROOT) is missing the patches in patches/. Run \
         '$(S3LVOL_ROOT)/patches/apply.sh' and then rebuild SPDK \
         ('make -C $(SPDK_ROOT) -j'), or let './setup_dep.sh' do both. \
         See patches/README.md)
 endif
-ifeq ($(SPDK_PATCH_PROBE),)
-$(error No SPDK headers at $(SPDK_ROOT)/include. Run './setup_dep.sh' to build \
-        one under deps/, or set SPDK_ROOT to an existing checkout)
+ifeq ($(SPDK_PATCH_PROBE_ESNAP_COPY),0)
+$(error SPDK at $(SPDK_ROOT) is missing the patches in patches/. Run \
+        '$(S3LVOL_ROOT)/patches/apply.sh' and then rebuild SPDK \
+        ('make -C $(SPDK_ROOT) -j'), or let './setup_dep.sh' do both. \
+        See patches/README.md)
 endif
 endif
 

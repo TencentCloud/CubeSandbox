@@ -475,6 +475,15 @@ setup_spdk()
 		# populate deps/spdk. An explicit SPDK_DIR is left alone.
 		if [ "${SPDK_DIR}" = "${DEPS_DIR}/spdk" ] && prebuilt_spdk_usable; then
 			log "spdk: using builder prebuilt at ${S3LVOL_SPDK_PREBUILT}"
+			# make prefers deps/spdk over /opt whenever blob.h exists
+			# there. A warm CICD slot can leave an older tree that is
+			# missing later patches, and compile then ignores the
+			# prebuilt this function just selected.
+			if [ ! "${SPDK_DIR}" -ef "${S3LVOL_SPDK_PREBUILT}" ]; then
+				rm -rf "${SPDK_DIR}"
+				ln -sfn "${S3LVOL_SPDK_PREBUILT}" "${SPDK_DIR}" || return 1
+				log "spdk: ${SPDK_DIR} -> ${S3LVOL_SPDK_PREBUILT}"
+			fi
 			return 0
 		fi
 		if spdk_is_built "${SPDK_DIR}"; then
