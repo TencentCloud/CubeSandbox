@@ -137,20 +137,30 @@ Existing `404 Not Found`, `408 Request Timeout`, and `running` sandbox delete be
 ```python
 sandbox.pause()                       # snapshot manually, free CPU/memory
 # ... time passes ...
-sandbox.connect()                     # restore from snapshot
+sandbox.connect(timeout=300)          # restore and reset the idle timeout
 sandbox.run_code("print('back!')")    # carry on as if never paused
 ```
 
 `pause()` does **not** cancel idle reclamation. With the default `on_timeout="kill"`, a later-paused sandbox is still destroyed once idle exceeds `timeout`. To keep a paused sandbox, pass `timeout=NEVER_TIMEOUT`, omit `timeout` (with no positive server default), or set a high `timeout` — see [Behaviour](#behaviour) below.
 
-`connect()` does not change the sandbox's idle timeout — the value set at create (or later via `set_timeout`) is preserved across pause/resume. To change it at resume time, use the deprecated `resume(timeout=...)`:
+`connect(timeout=...)` can update the idle timeout whether the sandbox is already running or must first resume from a pause:
+
+| `connect(timeout=...)` | Effect |
+|---|---|
+| omitted / `None` | keep the current timeout |
+| `NEVER_TIMEOUT` (`-1`) | never time out after connecting |
+| `N > 0` | start a new N-second window from connect |
+| `0` or `N < -1` | reject the request with HTTP 400 |
+
+The deprecated `resume(timeout=...)` keeps its legacy `0` behavior:
 
 | `resume(timeout=...)` | Effect |
 |---|---|
-| omitted / `None` | keep the current timeout (same as `connect()`) |
+| omitted / `None` | keep the current timeout |
 | `0` | keep the current timeout (use `set_timeout(0)` for immediate expiry) |
 | `NEVER_TIMEOUT` (`-1`) | never time out after resume |
 | `N > 0` | start a new N-second window from resume |
+| `N < -1` | reject the request with HTTP 400 |
 
 See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py) for a full demo. Cross-node Resume (S3 backend, `remote_status=ready`) is documented in [Cross-Node Snapshots](./cross-node-snapshot.md).
 

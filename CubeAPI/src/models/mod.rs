@@ -597,11 +597,12 @@ pub struct SandboxDetail {
 // ─── Sandbox — pause/resume/connect/snapshot ──────────────────────────────
 
 /// Request body for POST /sandboxes/{id}/resume (deprecated).
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 #[allow(dead_code)]
 pub struct ResumedSandbox {
     /// Idle timeout in seconds; None when the client did not send one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[validate(custom(function = "validate_timeout_value"))]
     pub timeout: Option<i32>,
     #[serde(rename = "autoPause", default)]
     pub auto_pause: bool,
@@ -610,8 +611,10 @@ pub struct ResumedSandbox {
 /// Request body for POST /sandboxes/{id}/connect.
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct ConnectSandbox {
-    /// Idle timeout in seconds; None when the client did not send one.
+    /// Idle timeout in seconds; omitted to keep the current value, -1 for no expiry.
+    /// Zero and values below -1 are invalid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[validate(custom(function = "validate_connect_timeout_value"))]
     pub timeout: Option<i32>,
 }
 
@@ -866,6 +869,19 @@ fn validate_timeout_value(timeout: i32) -> Result<(), validator::ValidationError
     }
 }
 
+/// Connect accepts the never-timeout sentinel or a positive timeout. An
+/// omitted value keeps the current timeout; zero is intentionally rejected so
+/// it cannot trigger an immediate lifecycle action while connecting.
+fn validate_connect_timeout_value(timeout: i32) -> Result<(), validator::ValidationError> {
+    if timeout == -1 || timeout > 0 {
+        Ok(())
+    } else {
+        Err(validator::ValidationError::new(
+            "connect_timeout_must_be_positive_or_never",
+        ))
+    }
+}
+
 /// Request body for POST /sandboxes/{id}/refreshes
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct RefreshRequest {
@@ -902,8 +918,8 @@ fn default_page_limit() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateTemplateRequest, NewSandbox, SandboxNetworkConfig, SetTimeoutRequest,
-        TemplateAliasLookupResponse, UpdateSandboxNetworkRequest,
+        ConnectSandbox, CreateTemplateRequest, NewSandbox, ResumedSandbox, SandboxNetworkConfig,
+        SetTimeoutRequest, TemplateAliasLookupResponse, UpdateSandboxNetworkRequest,
     };
     use validator::Validate;
 
@@ -1046,6 +1062,42 @@ mod tests {
             req.validate()
                 .unwrap_or_else(|e| panic!("timeout={timeout} should be valid: {e}"));
         }
+    }
+
+    #[test]
+    fn resume_and_connect_accept_omitted_never_and_positive_timeouts() {
+        for timeout in [None, Some(-1), Some(60)] {
+            ConnectSandbox { timeout }
+                .validate()
+                .unwrap_or_else(|e| panic!("connect timeout={timeout:?} should be valid: {e}"));
+            ResumedSandbox {
+                timeout,
+                auto_pause: false,
+            }
+            .validate()
+            .unwrap_or_else(|e| panic!("resume timeout={timeout:?} should be valid: {e}"));
+        }
+
+        ResumedSandbox {
+            timeout: Some(0),
+            auto_pause: false,
+        }
+        .validate()
+        .expect("deprecated resume keeps the current timeout for zero");
+
+        for timeout in [0, -2] {
+            assert!(ConnectSandbox {
+                timeout: Some(timeout)
+            }
+            .validate()
+            .is_err());
+        }
+        assert!(ResumedSandbox {
+            timeout: Some(-2),
+            auto_pause: false,
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]
