@@ -300,6 +300,7 @@ render "$TMP_DIR/compute-only.yaml" \
   --set externalControlPlane.enabled=true \
   --set-string externalControlPlane.masterEndpoint=http://10.0.0.1:8080 \
   --set-string externalControlPlane.opsEndpoint=http://10.0.0.1:3010 \
+  --set-string opsAgent.tokenSecret.name=compute-only-token \
   --set mysql.enabled=false \
   --set redis.enabled=false
 python_check "$TMP_DIR/compute-only.yaml"
