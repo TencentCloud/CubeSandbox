@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/patrickmn/go-cache"
@@ -69,7 +70,7 @@ func TestSyncAllFromDB_EmptyStreakEvictsAfterThreshold(t *testing.T) {
 
 	// Stub delNodeCache side-effects so eviction runs without external deps.
 	patches := gomonkey.NewPatches()
-	patches.ApplyFunc(SyncNodeTemplates, func(context.Context, string, []string) {})
+	patches.ApplyFunc(SyncNodeTemplates, func(context.Context, string, []string, time.Time) {})
 	patches.ApplyFunc(grpcconn.CloseWorkerConn, func(string) {})
 	defer patches.Reset()
 

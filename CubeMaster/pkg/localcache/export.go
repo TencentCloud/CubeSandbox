@@ -465,14 +465,23 @@ func GetImageStateByNode(imageName string, nodeName string) *fwk.ImageStateSumma
 }
 
 func RegisterTemplateReplica(templateID, nodeID string, sizeBytes int64) {
-	registerTemplateReplica(templateID, nodeID, sizeBytes, true)
+	l.lockTemplateLocality.Lock()
+	defer l.lockTemplateLocality.Unlock()
+	state := l.getImageCache(templateID)
+	knownReplica := state != nil && state.HasNode(nodeID)
+	refreshSize := !knownReplica || sizeBytes != 1
+	registerTemplateReplicaLocked(templateID, nodeID, sizeBytes, refreshSize)
+	recordNodeTemplateMembershipLocked(nodeID, templateID)
 }
 
 func DeregisterTemplateReplica(templateID, nodeID string) {
-	deregisterTemplateReplica(templateID, nodeID, true)
+	l.lockTemplateLocality.Lock()
+	defer l.lockTemplateLocality.Unlock()
+	deregisterTemplateReplicaLocked(templateID, nodeID)
+	removeNodeTemplateMembershipLocked(nodeID, templateID)
 }
 
-func registerTemplateReplica(templateID, nodeID string, sizeBytes int64, syncNodeTemplates bool) {
+func registerTemplateReplicaLocked(templateID, nodeID string, sizeBytes int64, refreshSize bool) {
 	if templateID == "" || nodeID == "" {
 		return
 	}
@@ -485,7 +494,7 @@ func registerTemplateReplica(templateID, nodeID string, sizeBytes int64, syncNod
 		state = fwk.NewImageStateSummary(sizeBytes, ossClusterLabel, nodeID)
 		l.addImageCache(templateID, state)
 	} else {
-		if sizeBytes > 0 {
+		if refreshSize && sizeBytes > 0 {
 			state.Size = sizeBytes
 		}
 		state.AddNode(nodeID)
@@ -494,12 +503,9 @@ func registerTemplateReplica(templateID, nodeID string, sizeBytes int64, syncNod
 	if state.OssClusterLabel != "" {
 		state.ScaledImageScore = scaledImageScore(state, GetHealthyNodesByInstanceType(-1, state.OssClusterLabel).Len())
 	}
-	if syncNodeTemplates {
-		recordNodeTemplateMembership(nodeID, templateID)
-	}
 }
 
-func deregisterTemplateReplica(templateID, nodeID string, syncNodeTemplates bool) {
+func deregisterTemplateReplicaLocked(templateID, nodeID string) {
 	if templateID == "" || nodeID == "" {
 		return
 	}
@@ -510,15 +516,14 @@ func deregisterTemplateReplica(templateID, nodeID string, syncNodeTemplates bool
 			l.imageCache.Delete(templateID)
 		}
 	}
-	if syncNodeTemplates {
-		removeNodeTemplateMembership(nodeID, templateID)
-	}
 }
 
 func InvalidateImageState(imageName string) {
 	if imageName == "" || l.imageCache == nil {
 		return
 	}
+	l.lockTemplateLocality.Lock()
+	defer l.lockTemplateLocality.Unlock()
 	l.imageCache.Delete(imageName)
-	removeTemplateMembershipFromAllNodes(imageName)
+	removeTemplateMembershipFromAllNodesLocked(imageName)
 }

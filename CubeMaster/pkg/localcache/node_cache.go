@@ -27,14 +27,15 @@ import (
 )
 
 type local struct {
-	cache             *cache.Cache
-	imageCache        *cache.Cache
-	templateNodeCache *cache.Cache
-	event             chan *Event
-	db                *gorm.DB
-	dbAddr            string
-	lockMetaData      sync.Mutex
-	lockSortedNodes   sync.RWMutex
+	cache                *cache.Cache
+	imageCache           *cache.Cache
+	templateNodeCache    *cache.Cache
+	event                chan *Event
+	db                   *gorm.DB
+	dbAddr               string
+	lockMetaData         sync.Mutex
+	lockSortedNodes      sync.RWMutex
+	lockTemplateLocality sync.Mutex
 
 	sortedNodesByClusters map[string]node.NodeList
 	totalSelfNodes        int64
@@ -237,11 +238,8 @@ func (l *local) delNodeCache(ctx context.Context, n *node.Node) {
 		CubeLog.WithContext(context.Background()).Warnf("node is nil")
 		return
 	}
-	// Clean template locality: empty list deregisters all replicas.
-	SyncNodeTemplates(ctx, n.ID(), nil)
-	if l.templateNodeCache != nil {
-		l.templateNodeCache.Delete(n.ID())
-	}
+	// Node deletion is authoritative; do not wait for heartbeat omission confirmation.
+	forceRemoveNodeTemplates(ctx, n.ID())
 	l.cache.Delete(n.ID())
 	l.delSortedNodes(n)
 
@@ -354,6 +352,10 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 		old.CreateConcurrentNum = n.CreateConcurrentNum
 		old.MaxMvmLimit = n.MaxMvmLimit
 		old.MetaDataUpdateAt = n.MetaDataUpdateAt
+		if n.LocalTemplatesReported {
+			old.LocalTemplates = append([]string(nil), n.LocalTemplates...)
+			old.LocalTemplatesReported = true
+		}
 		old.DeviceClass = n.DeviceClass
 		old.DeviceID = n.DeviceID
 		old.MachineHostIP = n.MachineHostIP
