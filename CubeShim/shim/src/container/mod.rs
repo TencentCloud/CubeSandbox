@@ -35,6 +35,22 @@ use crate::{infof, warnf};
 
 pub const GUEST_DEV_SHM: &str = "/run/cube-containers/sandbox/shm";
 pub const ANNO_APP_SNAPSHOT_CONTAINER_ID: &str = "cube.appsnapshot.container.id";
+const ANNO_PROPAGATION_EXEC_MOUNTS: &str = "cube.propagation.exec.mounts";
+const ANNO_PROPAGATION_CONTAINER_UMOUNTS: &str = "cube.propagation.container.umounts";
+
+fn should_skip_app_snapshot_create_rpc(
+    is_cold_start: bool,
+    annotations: Option<&HashMap<String, String>>,
+) -> bool {
+    if is_cold_start {
+        return false;
+    }
+
+    !annotations.is_some_and(|annos| {
+        annos.contains_key(ANNO_PROPAGATION_EXEC_MOUNTS)
+            || annos.contains_key(ANNO_PROPAGATION_CONTAINER_UMOUNTS)
+    })
+}
 
 /// Upper bound on the dedicated vsock connect in start_log_forward.  It runs
 /// while holding log_forward_lifecycle, so an unbounded connect would serialize
@@ -593,6 +609,20 @@ impl Container {
         } else {
             (0, 0, 0)
         };
+
+        if should_skip_app_snapshot_create_rpc(
+            self.is_cold_start(),
+            self.spec.annotations().as_ref(),
+        ) {
+            // App-snapshot restore without mount annotations: the container
+            // already exists in the restored guest, so re-creating it in the
+            // agent would be a no-op round trip. Register the local state
+            // and return; storage mounts that would need agent-side setup
+            // are exactly the propagation annotations excluded above.
+            self.state = Some(ContainerState::new(self.log.clone()));
+            stat.set_ok();
+            return Ok(());
+        }
 
         let req = agent::CreateContainerRequest {
             container_id: self.id.clone(),
