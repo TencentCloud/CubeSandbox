@@ -141,7 +141,7 @@ install_kernel() {
       curl -fL --retry 3 -o "$DEB_PATH" "$DEB_URL"
     fi
   fi
-  if [ -f "$RPM_PATH" ]; then
+  if [ -f "$RPM_PATH" ] && host_sh 'command -v rpm >/dev/null 2>&1'; then
     log "installing PVM host kernel rpm from ${RPM_PATH}"
     cp "$RPM_PATH" "$(host_path /tmp/cube-pvm-host-kernel.rpm)"
     host_sh "rpm -ivh --oldpackage --replacepkgs /tmp/cube-pvm-host-kernel.rpm || rpm -Uvh --oldpackage --replacepkgs /tmp/cube-pvm-host-kernel.rpm"
