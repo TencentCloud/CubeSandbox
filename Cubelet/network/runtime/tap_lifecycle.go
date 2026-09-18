@@ -340,7 +340,7 @@ func (s *NetworkController) createPoolTap() error {
 	if err != nil {
 		return err
 	}
-	tap, err := s.tapAdapter.Create(ip, s.cfg.MVMMacAddr, s.cfg.MvmMtu, s.cubeDev.Index)
+	tap, err := s.tapAdapter.Create(ip, s.cfg.MVMMacAddr, s.cfg.EffectiveMTU(), s.cubeDev.Index)
 	if err != nil {
 		s.allocator.Release(ip)
 		return err

@@ -45,6 +45,11 @@ type Options struct {
 	StateLockTTL time.Duration
 	Interval     time.Duration
 
+	// ResumeGrace: when non-zero, the sweeper skips sandboxes that
+	// were resumed within the last ResumeGrace. See sweeper.sweepOnce
+	// for the rationale and issue #1683 for the bug it fixes.
+	ResumeGrace time.Duration
+
 	// StartedAt is CLM's process start time. Used as the boundary
 	// between "bootstrap" and "stream" entries for the warmup gate. When
 	// zero, defaults to Now() at construction time.
@@ -127,6 +132,19 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 		// "loaded from HGETALL", inequality means "new event").
 		if withinWarmup && !e.FirstSeenAt.After(s.o.StartedAt) {
 			continue
+		}
+
+		// ResumeGrace gate (issue #1683): a sandbox that was just resumed
+		// must not be paused, even if LastActiveMs is stale (proxy poll
+		// hasn't landed yet) and CreatedAt is older than the idle timeout.
+		// The grace is from ResumedAtMs, which the resumer stamps on
+		// successful Resume success-bookkeeping. Setting ResumeGrace to 0
+		// disables the gate (e.g. for tests).
+		if e.ResumedAtMs > 0 && s.o.ResumeGrace > 0 {
+			sinceResume := time.Duration(nowMs-e.ResumedAtMs) * time.Millisecond
+			if sinceResume < s.o.ResumeGrace {
+				continue
+			}
 		}
 
 		// Baseline = the most recent of (LastActiveMs, CreatedAt). For a

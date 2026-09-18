@@ -509,6 +509,17 @@ func (s *service) updateWithPauseCow(
 
 	remoteUUIDsJSON := uploadRemoteUUIDsIfS3(workCtx, backend, snapID)
 
+	// Start the cross-node resume lease renewer. Issue #1690 / #1692:
+	// without an exporter-side heartbeat the S3 lease lapses long
+	// before cross-node Resume runs and the import fails with a
+	// missing-export error. Register is idempotent so a Pause retry
+	// is harmless. The renewer is stopped on Resume / Destroy.
+	if remoteUUIDsJSON != "" {
+		if err := storage.RegisterPauseLease(workCtx, req.SandboxID, snapID, backend); err != nil {
+			stepLog.Warnf("pause lease renewer register failed (non-fatal): snapID=%s err=%v", snapID, err)
+		}
+	}
+
 	stepLog.Infof("PauseToSnapshot completed: snapID=%s path=%s; running in-process keep_tombstone Destroy", snapID, snapshotPath)
 	extInfo, err := s.destroyLiveAfterPause(workCtx, req, sb)
 	// Always attach whatever volume ref events were observed — Detach may have
@@ -526,6 +537,12 @@ func (s *service) updateWithPauseCow(
 		// Snapshot is on disk; do not wipe it. Master records FAILED (no Resume).
 		markLocalPauseFailed(sb, err)
 		_ = s.cubeboxMgr.cubeboxManger.SyncByID(workCtx, sb.ID)
+		// Stop the lease renewer too. Issue #1690/#1692 review: a
+		// Pause failure means Master will not drive a Resume,
+		// but a runaway renewer goroutine would keep re-exporting
+		// the snapshot every 30 s for the lifetime of the process
+		// (and would fight Master's eventual GC).
+		storage.UnregisterPauseLease(workCtx, snapID)
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil

@@ -60,6 +60,12 @@ type Config struct {
 	// that arrive AFTER startup are not affected by this delay.
 	BootstrapWarmup time.Duration
 
+	// ResumeGrace: a sandbox that resumed within the last ResumeGrace
+	// is exempt from the idle sweep. Issue #1683: without this gate,
+	// the sweeper sees LastActiveMs from a stale proxy poll and pauses
+	// a sandbox an agent is actively connecting to. Set to 0 to disable.
+	ResumeGrace time.Duration
+
 	// Pause/resume locks (SETNX TTL). Long enough to outlive a slow
 	// CubeMaster RPC, short enough that a crashed CLM replica releases the lock.
 	StateLockTTL time.Duration
@@ -118,7 +124,13 @@ func Default() *Config {
 		LastActivePoll:     5 * time.Second,
 		IdleSweepInterval:  5 * time.Second,
 		BootstrapWarmup:    30 * time.Second,
-		StateLockTTL:       60 * time.Second,
+		// 60s sits between the IdleSweepInterval (5s) and the
+		// DefaultIdleTimeout (5min): long enough that 12 consecutive
+		// sweep ticks will all skip a freshly-resumed sandbox, short
+		// enough that an actively-idle sandbox resumes normal sweep
+		// behaviour after one minute.
+		ResumeGrace:       60 * time.Second,
+		StateLockTTL:      60 * time.Second,
 		// ConsumerGroup name is intentionally the legacy "cube-proxy-sidecar"
 		// value so an in-place upgrade (old sidecar -> CLM) keeps consuming
 		// from the same pending-entries list without reprocessing history.
@@ -209,6 +221,13 @@ func Load() (*Config, error) {
 			addErr("CUBE_LCM_BOOTSTRAP_WARMUP", err)
 		} else {
 			c.BootstrapWarmup = d
+		}
+	}
+	if v := os.Getenv("CUBE_LCM_RESUME_GRACE"); v != "" {
+		if d, err := time.ParseDuration(v); err != nil {
+			addErr("CUBE_LCM_RESUME_GRACE", err)
+		} else {
+			c.ResumeGrace = d
 		}
 	}
 	if v := os.Getenv("CUBE_LCM_STATE_LOCK_TTL"); v != "" {

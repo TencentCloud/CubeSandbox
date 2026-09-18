@@ -1057,3 +1057,99 @@ func TestSweeper_AlreadyPausedReconcilesAsSuccess(t *testing.T) {
 			triggered, failed)
 	}
 }
+
+// TestSweeper_ResumeGraceSkipsFreshlyResumed verifies the gate added
+// for issue #1683: a sandbox whose ResumedAtMs is within ResumeGrace
+// of "now" must NOT be paused, even if CreatedAt is ancient and the
+// idle timeout has elapsed.
+func TestSweeper_ResumeGraceSkipsFreshlyResumed(t *testing.T) {
+	reg := registry.New()
+	store := newFakeStore()
+	master := &fakeMaster{}
+	push := newFakePush()
+
+	startedAt := time.Now()
+	now := startedAt.Add(time.Minute)
+
+	// CreatedAt 1h ago, idle timeout 60s — the sweeper would
+	// otherwise pause this entry on the very first tick.
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx-resumed", InstanceType: "cubebox",
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
+		CreatedAt: now.Add(-time.Hour).UnixMilli(),
+	})
+	reg.SetFirstSeenAt("sbx-resumed", startedAt)
+	// Mark as resumed 10s before "now" — well inside the 60s grace.
+	reg.MarkResumed("sbx-resumed", now.Add(-10*time.Second).UnixMilli())
+
+	mkSweeper := func() *Sweeper {
+		return New(Options{
+			Registry:           reg,
+			Redis:              store,
+			CubeMaster:         master,
+			ProxyPush:          push,
+			DefaultIdleTimeout: 5 * time.Minute,
+			BootstrapWarmup:    0, // disable bootstrap gate for this test
+			ResumeGrace:        60 * time.Second,
+			StateLockTTL:       30 * time.Second,
+			Interval:           time.Second,
+			StartedAt:          startedAt,
+			Now:                func() time.Time { return now },
+			Log:                zap.NewNop(),
+		})
+	}
+
+	// Within the grace window → skipped.
+	mkSweeper().sweepOnce(context.Background())
+	if len(master.calls) != 0 {
+		t.Fatalf("Pause must NOT fire during ResumeGrace: %v", master.calls)
+	}
+
+	// Past the grace window → sweeper acts.
+	now = now.Add(2 * time.Minute)
+	mkSweeper().sweepOnce(context.Background())
+	if len(master.calls) != 1 {
+		t.Fatalf("after ResumeGrace elapsed, sweeper should pause the entry: %v", master.calls)
+	}
+}
+
+// TestSweeper_ResumeGraceZeroDisablesGate verifies that setting
+// ResumeGrace to 0 disables the gate (legacy behaviour preserved).
+func TestSweeper_ResumeGraceZeroDisablesGate(t *testing.T) {
+	reg := registry.New()
+	store := newFakeStore()
+	master := &fakeMaster{}
+	push := newFakePush()
+
+	startedAt := time.Now()
+	now := startedAt.Add(time.Minute)
+
+	reg.Upsert(lifecycle.SandboxLifecycleMeta{
+		SandboxID: "sbx-zerograce", InstanceType: "cubebox",
+		AutoPause: true, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
+		CreatedAt: now.Add(-time.Hour).UnixMilli(),
+	})
+	reg.SetFirstSeenAt("sbx-zerograce", startedAt)
+	// Resumed 1s ago — would normally grant a 60s grace.
+	reg.MarkResumed("sbx-zerograce", now.Add(-1*time.Second).UnixMilli())
+
+	s := New(Options{
+		Registry:           reg,
+		Redis:              store,
+		CubeMaster:         master,
+		ProxyPush:          push,
+		DefaultIdleTimeout: 5 * time.Minute,
+		BootstrapWarmup:    0,
+		ResumeGrace:        0, // disabled
+		StateLockTTL:       30 * time.Second,
+		Interval:           time.Second,
+		StartedAt:          startedAt,
+		Now:                func() time.Time { return now },
+		Log:                zap.NewNop(),
+	})
+
+	s.sweepOnce(context.Background())
+	if len(master.calls) != 1 {
+		t.Fatalf("ResumeGrace=0 must let the sweeper act on a stale-but-resumed entry: %v", master.calls)
+	}
+}

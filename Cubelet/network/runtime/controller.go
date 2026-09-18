@@ -203,7 +203,7 @@ func newProductionControllerDeps(cfg Config) (networkControllerDeps, error) {
 	if err != nil {
 		return networkControllerDeps{}, err
 	}
-	cubeDev, err := systemnet.GetOrCreateCubeDev(allocator.GatewayIP(), allocator.mask, cfg.MvmMtu, cfg.MvmGwMacAddr)
+	cubeDev, err := systemnet.GetOrCreateCubeDev(allocator.GatewayIP(), allocator.mask, cfg.EffectiveMTU(), cfg.MvmGwMacAddr)
 	if err != nil {
 		return networkControllerDeps{}, err
 	}
@@ -257,7 +257,7 @@ func initCubeVS(cfg Config, device *systemnet.HostDevice, cubeDev *systemnet.Cub
 		if err := systemnet.EnsureCubeRouterMatches(routerSpec, snatPortMin); err != nil {
 			return nil, err
 		}
-		cubeRouter, err = systemnet.GetOrCreateCubeRouter(routerSpec, cfg.MvmMtu)
+		cubeRouter, err = systemnet.GetOrCreateCubeRouter(routerSpec, cfg.EffectiveMTU())
 		if err != nil {
 			return nil, err
 		}
@@ -617,7 +617,17 @@ func (s *NetworkController) createState(ctx context.Context, req *EnsureNetworkR
 	t.ensureRoute = time.Since(stageStart)
 	stageStart = time.Now()
 	requestedMappings := s.normalizePortMappings(req.PortMappings)
-	tap, entry, err := s.acquireTap(req.SandboxID)
+	// Resolve the TAP MTU once per request. resolveMTUOnce does a
+	// single EffectiveMTU() call so the host TAP (LinkSetMTU) and the
+	// shim-facing descriptor (actualInterfaces → guest kernel MTU)
+	// cannot drift from a transient netlink error between two
+	// independent reads.
+	var reqMTU int32
+	if len(req.Interfaces) > 0 {
+		reqMTU = req.Interfaces[0].MTU
+	}
+	guestMTU := resolveMTUOnce(s.cfg, reqMTU)
+	tap, entry, err := s.acquireTap(req.SandboxID, guestMTU)
 	if err != nil {
 		return nil, err
 	}
@@ -637,7 +647,7 @@ func (s *NetworkController) createState(ctx context.Context, req *EnsureNetworkR
 			TapName:           tap.Name,
 			TapIfIndex:        tap.Index,
 			SandboxIP:         tap.IP.String(),
-			Interfaces:        s.actualInterfaces(tap.Name, req.Interfaces),
+			Interfaces:        s.actualInterfaces(tap.Name, req.Interfaces, int32(guestMTU)),
 			Routes:            slices.Clone(req.Routes),
 			ARPNeighbors:      slices.Clone(req.ARPNeighbors),
 			PortMappings:      actualMappings,
@@ -806,7 +816,7 @@ func (s *NetworkController) cleanupCreateFailure(ctx context.Context, state *man
 // acquireTap obtains a Ready tap for a new sandbox through TapPool. The entry
 // remains Ready but owner-reserved until success is committed; Active is only
 // published after creating -> success.
-func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry, error) {
+func (s *NetworkController) acquireTap(owner string, mtu int) (*tapDevice, *TapPoolEntry, error) {
 	entry, err := s.tapPool.Acquire(owner)
 	if err == nil {
 		tap, err := tapDeviceFromEntry(entry)
@@ -817,6 +827,21 @@ func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry,
 		// GetTapFile handoff is a cache hit. Nil after a runtime restart;
 		// GetTapFile then falls back to a lazy open.
 		tap.File = s.takePooledTapFD(entry.TapName)
+		// The pooled tap was originally created with whatever MTU was
+		// current when it warmed the pool. Issue #1673 review: a later
+		// sandbox asking for a different MTU must not silently inherit
+		// the previous value, because the guest descriptor in
+		// actualInterfaces() will end up carrying the new value while
+		// the host TAP keeps the old one. Read the live MTU, and if it
+		// disagrees with the requested one, push the new value down via
+		// netlink. Failures are non-fatal: a transient netlink error
+		// here just means the next caller may pay the same cost, but
+		// the runtime's pool invariants are intact.
+		if err := ensureTapMTU(tap, mtu); err != nil {
+			CubeLog.WithContext(context.Background()).Warnf(
+				"network runtime could not re-MTU pooled tap %s to %d: %v",
+				tap.Name, mtu, err)
+		}
 		return tap, entry, nil
 	}
 	ip, err := s.allocator.Allocate()
@@ -827,7 +852,7 @@ func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry,
 		s.allocator.Release(ip)
 		return nil, nil, err
 	}
-	tap, err := s.tapAdapter.Create(ip, s.cfg.MVMMacAddr, s.cfg.MvmMtu, s.cubeDev.Index)
+	tap, err := s.tapAdapter.Create(ip, s.cfg.MVMMacAddr, mtu, s.cubeDev.Index)
 	if err != nil {
 		s.allocator.Release(ip)
 		return nil, nil, err
@@ -1235,15 +1260,29 @@ func (s *NetworkController) normalizePortMappings(req []PortMapping) []PortMappi
 	return result
 }
 
-// actualInterfaces returns the interface contract visible to Cubelet. The first
-// interface is always bound to the host TAP name because that is the concrete
-// device created by the runtime.
-func (s *NetworkController) actualInterfaces(tapName string, req []Interface) []Interface {
+// actualInterfaces returns the interface contract visible to Cubelet.
+// The first interface is always bound to the host TAP name because that
+// is the concrete device created by the runtime.
+//
+// resolvedMTU is the value EnsureNetwork already applied to the host
+// TAP (LinkSetMTU). It is passed in (rather than re-resolved here) so
+// the host TAP and the guest eth0 carry the same MTU even when a
+// transient netlink error would otherwise split them across two
+// independent EffectiveMTU() calls.
+//
+// 0 means "the caller did not request a specific MTU; fall back to
+// the runtime-wide default" — preserved for callers (startup recover,
+// tests) that legitimately want the default and have no per-request
+// MTU in scope.
+func (s *NetworkController) actualInterfaces(tapName string, req []Interface, resolvedMTU int32) []Interface {
+	if resolvedMTU <= 0 {
+		resolvedMTU = int32(s.cfg.EffectiveMTU())
+	}
 	if len(req) == 0 {
 		return []Interface{{
 			Name:    tapName,
 			MAC:     s.cfg.MVMMacAddr,
-			MTU:     int32(s.cfg.MvmMtu),
+			MTU:     resolvedMTU,
 			IPs:     []string{fmt.Sprintf("%s/%d", s.cfg.MVMInnerIP, s.cfg.MvmMask)},
 			Gateway: s.cfg.MvmGwDestIP,
 		}}
@@ -1254,7 +1293,7 @@ func (s *NetworkController) actualInterfaces(tapName string, req []Interface) []
 		out[0].MAC = s.cfg.MVMMacAddr
 	}
 	if out[0].MTU == 0 {
-		out[0].MTU = int32(s.cfg.MvmMtu)
+		out[0].MTU = resolvedMTU
 	}
 	if len(out[0].IPs) == 0 {
 		out[0].IPs = []string{fmt.Sprintf("%s/%d", s.cfg.MVMInnerIP, s.cfg.MvmMask)}
@@ -1263,6 +1302,34 @@ func (s *NetworkController) actualInterfaces(tapName string, req []Interface) []
 		out[0].Gateway = s.cfg.MvmGwDestIP
 	}
 	return out
+}
+
+// ensureTapMTU brings a pooled tap's MTU in line with the value the
+// current EnsureNetwork caller asked for. It is a no-op when the
+// live MTU already matches. Read failures and write failures are
+// returned so the caller can log; the call itself does not abort
+// EnsureNetwork because the alternative (leaving a wrong MTU on
+// the host TAP) is worse than logging and continuing — the next
+// EnsureNetwork will retry the LinkSetMTU.
+//
+// mtu <= 0 is treated as "no override" and skipped: callers that
+// pass 0 explicitly want the runtime default and we should not
+// race the runtime's own tap creation MTU write inside newTap.
+func ensureTapMTU(tap *tapDevice, mtu int) error {
+	if mtu <= 0 {
+		return nil
+	}
+	if tap == nil {
+		return nil
+	}
+	link, err := netlinkLinkByIndex(tap.Index)
+	if err != nil {
+		return err
+	}
+	if link.Attrs().MTU == mtu {
+		return nil
+	}
+	return netlinkLinkSetMTU(link, mtu)
 }
 
 // persistMetadata merges caller metadata with runtime-generated fields that are

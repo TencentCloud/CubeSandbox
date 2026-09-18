@@ -726,7 +726,7 @@ func (s *NetworkController) restoreRecoveredTap(state *managedState) error {
 		}
 	}
 	baseTap.PortMappings = append([]PortMapping(nil), state.PortMappings...)
-	tap, err := s.tapAdapter.Restore(baseTap, s.cfg.MvmMtu, s.cfg.MVMMacAddr, s.cubeDev.Index)
+	tap, err := s.tapAdapter.Restore(baseTap, s.cfg.EffectiveMTU(), s.cfg.MVMMacAddr, s.cubeDev.Index)
 	if err != nil {
 		return err
 	}

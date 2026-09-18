@@ -115,8 +115,13 @@ func (r *ShimNetReq) OCISpecOpts() oci.SpecOpts {
 }
 
 type NetRequest struct {
-	Mode    string
-	Qos     *NetQosConfig
+	Mode string
+	Qos  *NetQosConfig
+	// MTU is an optional per-sandbox override for the guest's eth0.
+	// 0 leaves the runtime default in effect (MvmMtu, then MTUInterface,
+	// then 1500). Issue #1673: hardcoding 1500 breaks overlay networks
+	// whose transport MTU is below the Ethernet default.
+	MTU     int
 	Version uint64
 }
 

@@ -16,14 +16,31 @@ import (
 // buildEnsureNetworkRequestFromIntent converts the old workflow/shim intent into
 // the declarative runtime request. It keeps guest-side defaults such as eth0,
 // gateway ARP and loopback host-port bindings in one place.
+//
+// The MTU on the requested interface is resolved in three tiers, matching the
+// runtime's EffectiveMTU logic so the host TAP, the shim-facing descriptor and
+// the guest kernel all agree:
+//
+//  1. NetRequest.MTU (operator-set per-sandbox override, issue #1673).
+//  2. The plugin's MvmMtu (operator-set runtime default).
+//  3. The runtime's effective MTU, which itself may consult a host link.
+//
+// Setting MTU to 0 at any tier falls through to the next; the runtime will not
+// regress to a hardcoded 1500 unless every config value is missing.
 func (l *local) buildEnsureNetworkRequestFromIntent(sandboxID, requestID string, exposedPorts []int64, shimReq *NetRequest, cubeNetworkConfig *networkruntime.CubeNetworkConfig, dnsAllowOutCIDRs []string) *networkruntime.EnsureNetworkRequest {
+	requestedMTU := int32(0)
+	if shimReq != nil && shimReq.MTU > 0 {
+		requestedMTU = int32(shimReq.MTU)
+	} else if l.Config.MvmMtu > 0 {
+		requestedMTU = int32(l.Config.MvmMtu)
+	}
 	desired := &networkruntime.EnsureNetworkRequest{
 		SandboxID:      sandboxID,
 		IdempotencyKey: requestID,
 		Interfaces: []networkruntime.Interface{
 			{
 				MAC:     l.Config.MVMMacAddr,
-				MTU:     int32(l.Config.MvmMtu),
+				MTU:     requestedMTU,
 				IPs:     []string{fmt.Sprintf("%s/%d", l.Config.MVMInnerIP, l.Config.MvmMask)},
 				Gateway: l.Config.MvmGwDestIP,
 			},

@@ -37,6 +37,14 @@ var netlinkLinkList = func() ([]netlink.Link, error) {
 	return systemnet.WithDumpRetry(netlink.LinkList)
 }
 var netlinkLinkDel = netlink.LinkDel
+
+// netlinkLinkSetMTU is the same indirection pattern as netlinkLinkDel:
+// production binds it to netlink.LinkSetMTU and tests can swap in a
+// fake. Issue #1673 review: this is what controller.ensureTapMTU calls
+// to re-write a pooled tap's MTU when the current EnsureNetwork asked
+// for a different value than the one originally used at pool-warm
+// time.
+var netlinkLinkSetMTU = netlink.LinkSetMTU
 var deleteTAPDevicePolicyMaps = cubevs.DeleteTAPDevicePolicyMaps
 var unixOpen = unix.Open
 var unixClose = unix.Close

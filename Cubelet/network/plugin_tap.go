@@ -47,6 +47,11 @@ type Config struct {
 	MvmGwMacAddr string `toml:"mvm_gw_mac_addr"`
 	MvmMask      int    `toml:"mvm_mask"`
 	MvmMtu       int    `toml:"mvm_mtu"`
+	// MTUInterface is the host link whose live MTU is used as the
+	// default guest MTU when MvmMtu is zero. Set to "cbr0" (or your
+	// Kubernetes parent bridge) so overlay transport MTU propagates
+	// automatically. Issue #1673.
+	MTUInterface string `toml:"mtu_interface"`
 
 	CheckIntervalTime      tomlext.Duration `toml:"check_interval_in_sec"`
 	ReportStatIntervalTime tomlext.Duration `toml:"report_stat_interval_in_sec"`
@@ -140,7 +145,20 @@ func networkRuntimeConfigFromPluginConfig(config *Config) networkruntime.Config 
 	cfg.MvmGwDestIP = config.MvmGwDestIP
 	cfg.MvmGwMacAddr = config.MvmGwMacAddr
 	cfg.MvmMask = config.MvmMask
-	cfg.MvmMtu = config.MvmMtu
+	// Only override the default MvmMtu (1500) when the plugin config
+	// explicitly set one. Issue #1673 review: an unconditional
+	// `cfg.MvmMtu = config.MvmMtu` overwrites the runtime default with
+	// zero, which then causes netlink.LinkSetMTU(tap, 0) on the create
+	// path when the operator is using `mtu_interface` mode (MvmMtu
+	// intentionally left at zero in TOML).
+	if config.MvmMtu > 0 {
+		cfg.MvmMtu = config.MvmMtu
+	}
+	// MTUInterface lets the runtime mirror a host link's MTU (typically
+	// the Kubernetes parent bridge "cbr0") when MvmMtu is left at zero.
+	// Empty string is the documented "unset" sentinel and the default
+	// config's value, so a direct assignment is safe here. Issue #1673.
+	cfg.MTUInterface = config.MTUInterface
 	cfg.TapInitNum = config.TapInitNum
 	// Empty explicitly disables CubeEgress integration. Production config writes
 	// the default loopback URL, so silently restoring a hidden default here would
