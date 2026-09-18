@@ -209,7 +209,7 @@ fn create_vsock_fcntl_seccomp_rule() -> Vec<SeccompRule> {
     ]
 }
 
-fn create_vsock_getsockopt_seccomp_rule() -> Vec<SeccompRule> {
+pub fn create_virtio_device_getsockopt_seccomp_rule() -> Vec<SeccompRule> {
     vec![and![
         Cond::new(1, ArgLen::Dword, Eq, libc::SOL_SOCKET as u64).unwrap(),
         Cond::new(2, ArgLen::Dword, Eq, libc::SO_PEERCRED as u64).unwrap()
@@ -230,7 +230,10 @@ fn virtio_vsock_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
         // VsockMuxer validates every host-side UDS peer with
         // getsockopt(SO_PEERCRED) before accepting its connect/passfd command.
         (libc::SYS_geteuid, vec![]),
-        (libc::SYS_getsockopt, create_vsock_getsockopt_seccomp_rule()),
+        (
+            libc::SYS_getsockopt,
+            create_virtio_device_getsockopt_seccomp_rule(),
+        ),
         (libc::SYS_ioctl, create_vsock_ioctl_seccomp_rule()),
         (libc::SYS_recvfrom, vec![]),
         // recv_with_fd() receives passfd commands and SCM_RIGHTS.
@@ -399,6 +402,7 @@ pub fn virtio_device_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
         (libc::SYS_prlimit64, vec![]),
     ];
 
+    rules.append(&mut virtio_balloon_thread_rules());
     rules.append(&mut virtio_block_thread_rules());
     rules.retain(|(num, _)| *num != libc::SYS_ioctl);
     rules.append(&mut virtio_net_thread_rules());
@@ -495,5 +499,79 @@ pub fn get_seccomp_filter(
         )
         .and_then(|filter| filter.try_into())
         .map_err(Error::Backend),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        get_seccomp_filter, virtio_balloon_thread_rules, virtio_device_thread_rules, Thread,
+    };
+    #[cfg(target_os = "linux")]
+    use seccompiler::apply_filter;
+    use seccompiler::SeccompAction;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::io::AsRawFd;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn balloon_rules_cover_shared_backing_release() {
+        let rules = virtio_balloon_thread_rules();
+        assert!(rules
+            .iter()
+            .any(|(syscall, _)| *syscall == libc::SYS_fallocate));
+    }
+
+    #[test]
+    fn process_wide_rules_include_balloon_syscalls() {
+        let rules = virtio_device_thread_rules();
+        assert!(rules
+            .iter()
+            .any(|(syscall, _)| *syscall == libc::SYS_fallocate));
+    }
+
+    #[test]
+    fn strict_balloon_filter_compiles() {
+        let filter = get_seccomp_filter(&SeccompAction::Trap, Thread::VirtioBalloon).unwrap();
+        assert!(!filter.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strict_vsock_filter_allows_peer_credentials() {
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let filter = get_seccomp_filter(&SeccompAction::Trap, Thread::VirtioVsock).unwrap();
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+
+        if pid == 0 {
+            if apply_filter(&filter).is_err() {
+                unsafe { libc::syscall(libc::SYS_exit, 3) };
+            }
+            let mut credentials = std::mem::MaybeUninit::<libc::ucred>::uninit();
+            let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+            let result = unsafe {
+                libc::getsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_PEERCRED,
+                    credentials.as_mut_ptr().cast(),
+                    &mut length,
+                )
+            };
+            let exit_code = if result == 0 { 0 } else { 2 };
+            unsafe {
+                libc::syscall(libc::SYS_exit, exit_code);
+            }
+            unreachable!();
+        }
+
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "strict vsock filter rejected getsockopt(SOL_SOCKET, SO_PEERCRED): wait status {status:#x}"
+        );
     }
 }

@@ -25,6 +25,7 @@ use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::sync::Mutex;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use net_util::MacAddr;
 use test_infra::*;
@@ -1888,6 +1889,81 @@ fn process_rss_kib(pid: u32) -> usize {
     let command = format!("ps -q {} -o rss=", pid);
     let rss = exec_host_command_output(&command);
     String::from_utf8_lossy(&rss.stdout).trim().parse().unwrap()
+}
+
+const FREE_PAGE_REPORTING_BASELINE_LIMIT_KIB: usize = 512 * 1024;
+const FREE_PAGE_REPORTING_PEAK_DELTA_KIB: usize = 1024 * 1024;
+const FREE_PAGE_REPORTING_RELEASE_SLACK_KIB: usize = 384 * 1024;
+
+fn wait_for_process_rss<F>(
+    pid: u32,
+    description: &str,
+    timeout: Duration,
+    mut predicate: F,
+) -> usize
+where
+    F: FnMut(usize) -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    let mut last_rss = process_rss_kib(pid);
+    loop {
+        if predicate(last_rss) {
+            return last_rss;
+        }
+        if Instant::now() >= deadline {
+            panic!("Timed out waiting for {description}; last VMM RSS was {last_rss} KiB");
+        }
+        thread::sleep(Duration::from_secs(1));
+        last_rss = process_rss_kib(pid);
+    }
+}
+
+fn verify_free_page_reporting(guest: &Guest, vmm_pid: u32, phase: &str) {
+    let baseline = wait_for_process_rss(
+        vmm_pid,
+        &format!("{phase} RSS baseline"),
+        Duration::from_secs(90),
+        |rss| rss <= FREE_PAGE_REPORTING_BASELINE_LIMIT_KIB,
+    );
+
+    let stress_pid = guest
+        .ssh_command(
+            "nohup stress --vm 1 --vm-bytes 1536M --vm-keep --timeout 120s \
+             >/tmp/free-page-reporting-stress.log 2>&1 </dev/null & echo $!",
+        )
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+
+    let peak = wait_for_process_rss(
+        vmm_pid,
+        &format!("{phase} RSS increase"),
+        Duration::from_secs(90),
+        |rss| rss >= baseline + FREE_PAGE_REPORTING_PEAK_DELTA_KIB,
+    );
+
+    guest
+        .ssh_command(&format!(
+            "kill -TERM {stress_pid}; \
+             for i in $(seq 1 100); do \
+               kill -0 {stress_pid} 2>/dev/null || exit 0; \
+               sleep 0.1; \
+             done; \
+             kill -KILL {stress_pid}"
+        ))
+        .unwrap();
+
+    let released = wait_for_process_rss(
+        vmm_pid,
+        &format!("{phase} RSS reclamation"),
+        Duration::from_secs(90),
+        |rss| rss <= baseline + FREE_PAGE_REPORTING_RELEASE_SLACK_KIB,
+    );
+
+    println!(
+        "Free page reporting ({phase}): baseline={baseline} KiB peak={peak} KiB released={released} KiB"
+    );
 }
 
 // 10MB is our maximum accepted overhead.
@@ -5940,69 +6016,6 @@ mod common_parallel {
     }
 
     #[test]
-    fn test_virtio_balloon_free_page_reporting() {
-        let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-        let guest = Guest::new(Box::new(focal));
-
-        //Let's start a 4G guest with balloon occupied 2G memory
-        let mut child = GuestCommand::new(&guest)
-            .args(["--cpus", "boot=1"])
-            .args(["--memory", "size=4G"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
-            .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-            .args(["--balloon", "size=0,free_page_reporting=on"])
-            .default_disks()
-            .default_net()
-            .capture_output()
-            .spawn()
-            .unwrap();
-
-        let pid = child.id();
-        let r = std::panic::catch_unwind(|| {
-            guest.wait_vm_boot(None).unwrap();
-
-            // Check the initial RSS is less than 1GiB
-            let rss = process_rss_kib(pid);
-            println!("RSS {} < 1048576", rss);
-            assert!(rss < 1048576);
-
-            // Spawn a command inside the guest to consume 2GiB of RAM for 60
-            // seconds
-            let guest_ip = guest.network.guest_ip.clone();
-            thread::spawn(move || {
-                ssh_command_ip(
-                    "stress --vm 1 --vm-bytes 2G --vm-keep --timeout 60",
-                    &guest_ip,
-                    DEFAULT_SSH_RETRIES,
-                    DEFAULT_SSH_TIMEOUT,
-                )
-                .unwrap();
-            });
-
-            // Wait for 50 seconds to make sure the stress command is consuming
-            // the expected amount of memory.
-            thread::sleep(std::time::Duration::new(50, 0));
-            let rss = process_rss_kib(pid);
-            println!("RSS {} >= 2097152", rss);
-            assert!(rss >= 2097152);
-
-            // Wait for an extra minute to make sure the stress command has
-            // completed and that the guest reported the free pages to the VMM
-            // through the virtio-balloon device. We expect the RSS to be under
-            // 2GiB.
-            thread::sleep(std::time::Duration::new(60, 0));
-            let rss = process_rss_kib(pid);
-            println!("RSS {} < 2097152", rss);
-            assert!(rss < 2097152);
-        });
-
-        kill_child(&mut child);
-        let output = child.wait_with_output().unwrap();
-
-        handle_child_output(r, &output);
-    }
-
-    #[test]
     fn test_pmem_hotplug() {
         _test_pmem_hotplug(None)
     }
@@ -7730,6 +7743,86 @@ mod common_sequential {
     use vmm::vm_config::{DiskConfig, FsConfig, NetConfig, PmemConfig, VsockConfig};
 
     use crate::*;
+
+    #[test]
+    fn test_virtio_balloon_free_page_reporting() {
+        let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(Box::new(focal));
+
+        let mut child = GuestCommand::new(&guest)
+            .args(["--cpus", "boot=1"])
+            .args(["--memory", "size=2G"])
+            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(["--balloon", "size=0,free_page_reporting=on"])
+            .default_disks()
+            .default_net()
+            .capture_output()
+            .spawn()
+            .unwrap();
+
+        let pid = child.id();
+        let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
+            verify_free_page_reporting(&guest, pid, "cold boot");
+        });
+
+        kill_child(&mut child);
+        let output = child.wait_with_output().unwrap();
+        handle_child_output(r, &output);
+    }
+
+    #[test]
+    fn test_virtio_balloon_free_page_reporting_after_snapshot_restore_with_seccomp() {
+        let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(Box::new(focal));
+        let api_socket = format!("{}.source", temp_api_path(&guest.tmp_dir));
+        let event_path = format!("{}.source", temp_event_monitor_path(&guest.tmp_dir));
+        let snapshot_dir = temp_snapshot_dir_path(&guest.tmp_dir);
+
+        let mut source = GuestCommand::new(&guest)
+            .args(["--api-socket", &api_socket])
+            .args(["--event-monitor", format!("path={event_path}").as_str()])
+            .args(["--cpus", "boot=1"])
+            .args(["--memory", "size=2G"])
+            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(["--balloon", "size=0,free_page_reporting=on"])
+            .args(["--seccomp", "true"])
+            .default_disks()
+            .default_net()
+            .capture_output()
+            .spawn()
+            .unwrap();
+
+        let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
+            snapshot_and_check_events(&api_socket, &snapshot_dir, &event_path);
+        });
+        kill_child(&mut source);
+        let output = source.wait_with_output().unwrap();
+        handle_child_output(r, &output);
+
+        let mut restored = GuestCommand::new(&guest)
+            .args([
+                "--restore",
+                format!("source_url=file://{snapshot_dir}").as_str(),
+            ])
+            .args(["--seccomp", "true"])
+            .capture_output()
+            .spawn()
+            .unwrap();
+
+        let pid = restored.id();
+        let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(Some(120)).unwrap();
+            verify_free_page_reporting(&guest, pid, "snapshot restore");
+        });
+
+        kill_child(&mut restored);
+        let output = restored.wait_with_output().unwrap();
+        handle_child_output(r, &output);
+    }
 
     #[test]
     fn test_memory_mergeable_on() {

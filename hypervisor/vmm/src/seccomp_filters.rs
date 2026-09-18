@@ -534,6 +534,12 @@ fn vmm_thread_rules(
         (libc::SYS_getpgrp, vec![]),
         (libc::SYS_getpid, vec![]),
         (libc::SYS_getrandom, vec![]),
+        // Device threads inherit this filter before installing their own
+        // narrower per-device filter.
+        (
+            libc::SYS_getsockopt,
+            virtio_devices::seccomp_filters::create_virtio_device_getsockopt_seccomp_rule(),
+        ),
         (libc::SYS_gettid, vec![]),
         (libc::SYS_gettimeofday, vec![]),
         (libc::SYS_getuid, vec![]),
@@ -942,5 +948,57 @@ pub fn get_seccomp_filter(
             .and_then(|filter| filter.try_into())
             .map_err(Error::Backend),
         },
+    }
+}
+
+#[cfg(all(test, target_os = "linux", feature = "kvm"))]
+mod tests {
+    use super::{get_seccomp_filter, Thread};
+    use hypervisor::HypervisorType;
+    use seccompiler::{apply_filter, SeccompAction};
+    use std::os::unix::io::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use virtio_devices::seccomp_filters::{
+        get_seccomp_filter as get_virtio_filter, Thread as VirtioThread,
+    };
+
+    #[test]
+    fn strict_vmm_parent_filter_allows_vsock_peer_credentials() {
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let parent_filter =
+            get_seccomp_filter(&SeccompAction::Trap, Thread::Vmm, HypervisorType::Kvm).unwrap();
+        let child_filter =
+            get_virtio_filter(&SeccompAction::Trap, VirtioThread::VirtioVsock).unwrap();
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+
+        if pid == 0 {
+            if apply_filter(&parent_filter).is_err() || apply_filter(&child_filter).is_err() {
+                unsafe { libc::syscall(libc::SYS_exit, 3) };
+            }
+            let mut credentials = std::mem::MaybeUninit::<libc::ucred>::uninit();
+            let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+            let result = unsafe {
+                libc::getsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_PEERCRED,
+                    credentials.as_mut_ptr().cast(),
+                    &mut length,
+                )
+            };
+            let exit_code = if result == 0 { 0 } else { 2 };
+            unsafe {
+                libc::syscall(libc::SYS_exit, exit_code);
+            }
+            unreachable!();
+        }
+
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "inherited VMM filter rejected getsockopt(SOL_SOCKET, SO_PEERCRED): wait status {status:#x}"
+        );
     }
 }
