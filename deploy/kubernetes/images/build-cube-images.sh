@@ -95,6 +95,7 @@ ALL_IMAGES=(
   cube-templatecenter
   cube-api
   cube-ops
+  cube-ops-agent
   cubemastercli
   cube-proxy
   cube-lifecycle-manager
@@ -125,6 +126,7 @@ SOURCE_IMAGES=(
   cube-shim
   cube-api
   cube-ops
+  cube-ops-agent
   cube-proxy
   cube-lifecycle-manager
   cube-egress
@@ -858,6 +860,15 @@ build_cube_ops_image() {
   record_built cube-ops
 }
 
+# Same as cube-ops: context=repo root, file=OpsAgent/Dockerfile (sibling
+# pkgs/CubeLog via the Dockerfile.dockerignore allowlist).
+build_cube_ops_agent_image() {
+  [[ -f "${REPO_ROOT}/OpsAgent/go.mod" ]] || fail "missing OpsAgent go.mod in ${REPO_ROOT}"
+  require_cubelog_module
+  build_image cube-ops-agent "${REPO_ROOT}" "${REPO_ROOT}/OpsAgent/Dockerfile"
+  record_built cube-ops-agent
+}
+
 build_cube_egress_openresty_base_image() {
   local image="cube-egress/openresty:1.29.2.5-tproxy"
   local docker_args=(
@@ -1209,6 +1220,11 @@ run_selected_builds() {
   if should_build cube-ops; then
     ensure_source_tree
     build_cube_ops_image
+  fi
+
+  if should_build cube-ops-agent; then
+    ensure_source_tree
+    build_cube_ops_agent_image
   fi
 
   if should_build cubemastercli; then

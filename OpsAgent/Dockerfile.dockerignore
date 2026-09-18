@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Build-context filter for OpsAgent/Dockerfile (context = repository root).
+# The repo-root .dockerignore excludes everything except docker/ builder files,
+# so OpsAgent and its sibling pkgs/CubeLog module must be allowed here.
+**
+!OpsAgent
+!OpsAgent/**
+!pkgs
+!pkgs/CubeLog
+!pkgs/CubeLog/**

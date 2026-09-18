@@ -85,6 +85,7 @@ CUBECLI_BIN_OVERRIDE="${ONE_CLICK_CUBECLI_BIN:-}"
 API_BIN_OVERRIDE="${ONE_CLICK_CUBE_API_BIN:-}"
 CUBE_OPS_BIN_OVERRIDE="${ONE_CLICK_CUBE_OPS_BIN:-}"
 CUBE_OPS_CLI_BIN_OVERRIDE="${ONE_CLICK_CUBE_OPS_CLI_BIN:-}"
+OPS_AGENT_BIN_OVERRIDE="${ONE_CLICK_OPS_AGENT_BIN:-}"
 CUBEVSMAPDUMP_BIN_OVERRIDE="${ONE_CLICK_CUBEVSMAPDUMP_BIN:-}"
 VOLUME_S3_BIN_OVERRIDE="${ONE_CLICK_VOLUME_S3_BIN:-}"
 S3LVOL_DIR="${ONE_CLICK_S3LVOL_DIR:-}"
@@ -380,6 +381,14 @@ components["cubeopscli"] = {
     "commit": cube_commit,
     "build_time": cube_build_time,
     "digest_sha256": required_sha256(os.path.join(core_bin_dir, "cubeopscli")),
+}
+
+# ── ops-agent from CORE_BIN_DIR ──
+components["ops-agent"] = {
+    "version": cube_version,
+    "commit": cube_commit,
+    "build_time": cube_build_time,
+    "digest_sha256": required_sha256(os.path.join(core_bin_dir, "ops-agent")),
 }
 
 # ── Rust binaries from build-vm-assets.sh ──
@@ -741,6 +750,11 @@ build_or_copy_go_binary \
   "cubeopscli" "${CUBE_OPS_CLI_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeOps" "${CUBE_OPS_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cubeopscli" ./cmd/cubeopscli "${CUBEOPS_VERSION_PKG}"
+OPSAgent_VERSION_PKG="github.com/tencentcloud/CubeSandbox/OpsAgent/internal/version"
+build_or_copy_go_binary \
+  "ops-agent" "${OPS_AGENT_BIN_OVERRIDE}" \
+  "${ROOT_DIR}/OpsAgent" "${OPS_AGENT_BUILD_MODE:-local}" \
+  "${CORE_BIN_DIR}/ops-agent" ./cmd/ops-agent "${OPSAgent_VERSION_PKG}" static_linux
 build_or_copy_go_binary \
   "cubevsmapdump" "${CUBEVSMAPDUMP_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeNet/cubevs" "${CUBEVSMAPDUMP_BUILD_MODE}" \
@@ -756,6 +770,8 @@ mkdir -p \
   "${PACKAGE_ROOT}/Cubelet/plugin" \
   "${PACKAGE_ROOT}/Cubelet/config" \
   "${PACKAGE_ROOT}/Cubelet/dynamicconf" \
+  "${PACKAGE_ROOT}/ops-agent/bin" \
+  "${PACKAGE_ROOT}/ops-agent/conf" \
   "${PACKAGE_ROOT}/cubeproxy" \
   "${PACKAGE_ROOT}/cube-lifecycle-manager" \
   "${PACKAGE_ROOT}/coredns" \
@@ -787,6 +803,11 @@ copy_file "${CORE_BIN_DIR}/cube-api" "${PACKAGE_ROOT}/CubeAPI/bin/cube-api"
 copy_dir_contents "${SCRIPT_DIR}/CubeOps" "${PACKAGE_ROOT}/CubeOps"
 copy_file "${CORE_BIN_DIR}/cubeops" "${PACKAGE_ROOT}/CubeOps/bin/cubeops"
 copy_file "${CORE_BIN_DIR}/cubeopscli" "${PACKAGE_ROOT}/CubeOps/bin/cubeopscli"
+
+# ops-agent: node-local agent binary plus the config template. The runtime
+# config is generated per node by prepare-compute-role.sh.
+copy_file "${CORE_BIN_DIR}/ops-agent" "${PACKAGE_ROOT}/ops-agent/bin/ops-agent"
+copy_file "${ROOT_DIR}/OpsAgent/config/config.example.yaml" "${PACKAGE_ROOT}/ops-agent/conf/config.example.yaml"
 
 # Same ordering for CubeMaster so cubemaster/cubemastercli binaries survive the
 # copy_dir_contents wipe and coexist with the one-click CubeMaster assets.

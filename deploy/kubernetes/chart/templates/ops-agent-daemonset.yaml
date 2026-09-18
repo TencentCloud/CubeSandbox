@@ -1,0 +1,85 @@
+{{/*
+Node-local ops-agent: pulls the desired quota spec from CubeOps and applies it
+to the cubelet dynamicconf under the shared toolbox hostPath. Runs on the same
+nodes as the cubelet DaemonSet (shared compute placement) with hostNetwork so
+CubeOps pushes reach it on the node IP.
+*/}}
+{{- if and .Values.cubeNode.enabled (eq (include "cube.opsEnabled" .) "true") }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "cube.opsAgentName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ops-agent
+  template:
+    metadata:
+      labels:
+        {{- include "cube.labels" . | nindent 8 }}
+        app.kubernetes.io/component: ops-agent
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- include "cube.computePlacement" . | nindent 6 }}
+      containers:
+        - name: ops-agent
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.opsAgent "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.opsAgent.pullPolicy }}
+          args:
+            - --config
+            - /etc/ops-agent/config.yaml
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            # Identity matches the cubelet registration (nodeIDSource default).
+            - name: OPS_AGENT_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: OPS_AGENT_LISTEN_ADDR
+              value: {{ printf "0.0.0.0:%v" .Values.opsAgent.port | quote }}
+            - name: OPS_AGENT_CUBEOPS_URL
+              value: {{ printf "http://%s" (include "cube.opsEndpoint" .) | quote }}
+            - name: OPS_AGENT_DYNAMICCONF_PATH
+              value: /usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.yaml
+            - name: OPS_AGENT_SHARED_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: cube-ops-agent-token
+            {{- with .Values.opsAgent.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.opsAgent.port }}
+              hostPort: {{ .Values.opsAgent.port }}
+              protocol: TCP
+          volumeMounts:
+            - name: toolbox
+              mountPath: /usr/local/services/cubetoolbox
+            - name: data-log
+              mountPath: {{ .Values.hostPaths.dataLog }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.opsAgent.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          {{- with .Values.opsAgent.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: toolbox
+          hostPath:
+            path: {{ .Values.hostPaths.toolbox }}
+            type: DirectoryOrCreate
+        - name: data-log
+          hostPath:
+            path: {{ .Values.hostPaths.dataLog }}
+            type: DirectoryOrCreate
+{{- end }}

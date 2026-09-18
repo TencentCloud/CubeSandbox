@@ -53,6 +53,21 @@ func (f *fakeClusterNodeService) ListOperations(ctx context.Context, nodeID stri
 func (f *fakeClusterNodeService) DeleteNode(ctx context.Context, nodeID string, force bool) (*model.NodeSnapshot, error) {
 	return nil, errors.New("not implemented")
 }
+func (f *fakeClusterNodeService) GetNodeQuotaView(ctx context.Context, nodeID string) (*model.QuotaView, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) SetNodeQuota(ctx context.Context, nodeID string, spec *model.QuotaSpec, operator string) (*model.QuotaView, *model.PushResult, error) {
+	return nil, nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) GetOpsAgentSpec(ctx context.Context, nodeID string) (*model.OpsAgentSpecResponse, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) GetClusterQuotaDefaults(ctx context.Context) (*model.ClusterQuotaDefaults, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) SetClusterQuotaDefaults(ctx context.Context, ratio *float64, operator string) (*model.ClusterQuotaDefaults, *model.QuotaPropagation, error) {
+	return nil, nil, errors.New("not implemented")
+}
 
 func newClusterRouter(t *testing.T, cm CubeMasterClient, svc nmhandler.NodeService) *gin.Engine {
 	t.Helper()

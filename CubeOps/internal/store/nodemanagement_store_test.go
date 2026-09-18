@@ -146,7 +146,7 @@ func TestNodeStore_HostFacts(t *testing.T) {
 
 	// Update HostFacts via UpdateHostFacts.
 	newFactsJSON := `{"cpu_vendor":"AuthenticAMD","cpuid_hash":"sha256:xyz","host_kernel_release":"6.6.0","kvm_api_version":12}`
-	if err := s.UpdateHostFacts(ctx, "node-hf", newFactsJSON, "sha256:xyz", "6.6.0"); err != nil {
+	if err := s.UpdateHostFacts(ctx, "node-hf", newFactsJSON, "sha256:xyz", "6.6.0", 16, 65536); err != nil {
 		t.Fatalf("update host facts: %v", err)
 	}
 	got, err = s.GetRegistration(ctx, "node-hf")
