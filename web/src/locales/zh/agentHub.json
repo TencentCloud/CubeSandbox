@@ -41,7 +41,7 @@
       "label": "网关域名",
       "hint": "可选。配置后助手网关将通过 端口-沙箱ID.域名（如 cube.app）以独立子域访问，可彻底避免多个助手 WebSocket 串台；留空则继续使用同源代理路径。需要为该域名配置泛域名解析与证书。"
     },
-    "persistenceDisabled": "未配置数据库，无法保存模型服务配置。请先为 CubeAPI 配置 DATABASE_URL 后再试。",
+    "persistenceDisabled": "未配置数据库，无法保存模型服务配置。请先为 CubeOps 配置 DATABASE_URL 后再试。",
     "status": {
       "configured": "已配置 {{provider}} / {{model}}（Key：{{masked}}，来源：{{source}}，方式：{{mode}}）",
       "missing": "尚未配置 LLM API Key，暂时无法创建数字助手。"

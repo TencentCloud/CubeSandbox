@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -42,6 +43,13 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// A whitespace-only DATABASE_URL counts as unset; warn so a mis-quoted
+	// env file doesn't silently fall back to the split fields (possibly the
+	// one-click defaults pointing at a local database).
+	if cfg.DatabaseURL != "" && strings.TrimSpace(cfg.DatabaseURL) == "" {
+		slog.Warn("database_url is blank (whitespace only); using the CUBE_SANDBOX_MYSQL_* split fields")
+	}
 
 	// Initialise database + migrations + master key
 	daoCfg, err := cfg.DaoConfig()

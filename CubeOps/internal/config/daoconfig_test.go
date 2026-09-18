@@ -247,6 +247,57 @@ func TestDaoConfig_SpecialCharsInFieldPassword(t *testing.T) {
 	}
 }
 
+// TestDaoConfig_BracketedHostIsNormalized proves a host copied out of a URL
+// in bracketed IPv6 form ([2001:db8::1]) is normalized before JoinHostPort,
+// instead of being double-bracketed into an invalid address.
+func TestDaoConfig_BracketedHostIsNormalized(t *testing.T) {
+	cfg := &Config{
+		MySQLHost:     "[2001:db8::1]",
+		MySQLPort:     3306,
+		MySQLUser:     "svc",
+		MySQLPassword: "svcpass",
+		MySQLDB:       "svcdb",
+	}
+	dc := mustDaoConfig(t, cfg)
+	if dc.Addr != "[2001:db8::1]:3306" {
+		t.Errorf("Addr = %q, want [2001:db8::1]:3306", dc.Addr)
+	}
+
+	// Brackets alone must not slip past the empty-host check: JoinHostPort
+	// would emit ":3306", which normalizeAddr silently localises.
+	cfg = &Config{MySQLHost: "[]", MySQLUser: "svc", MySQLDB: "svcdb"}
+	if _, err := cfg.DaoConfig(); err == nil || !strings.Contains(err.Error(), "mysql_host") {
+		t.Errorf("DaoConfig() on host %q = %v, want mysql_host error", "[]", err)
+	}
+}
+
+// TestDaoConfig_HostWithPortFailsFast proves a host field carrying a port
+// (host:3306, or bracketed IPv6 [host]:port) is rejected instead of
+// producing a garbage address.
+func TestDaoConfig_HostWithPortFailsFast(t *testing.T) {
+	for _, host := range []string{"10.0.0.1:3306", "[2001:db8::1]:3306"} {
+		t.Run(host, func(t *testing.T) {
+			cfg := &Config{MySQLHost: host, MySQLUser: "svc", MySQLDB: "svcdb"}
+			if _, err := cfg.DaoConfig(); err == nil || !strings.Contains(err.Error(), "must not include a port") {
+				t.Errorf("DaoConfig() = %v, want 'must not include a port' error", err)
+			}
+		})
+	}
+}
+
+// TestDaoConfig_FieldPortOutOfRangeFailsFast proves the split-field path
+// rejects ports outside 1-65535 instead of surfacing an opaque dial error.
+func TestDaoConfig_FieldPortOutOfRangeFailsFast(t *testing.T) {
+	for _, port := range []int{99999, -1} {
+		t.Run(strconv.Itoa(port), func(t *testing.T) {
+			cfg := &Config{MySQLHost: "db.internal", MySQLPort: port, MySQLUser: "svc", MySQLDB: "svcdb"}
+			if _, err := cfg.DaoConfig(); err == nil || !strings.Contains(err.Error(), "mysql_port") {
+				t.Errorf("DaoConfig() = %v, want mysql_port range error", err)
+			}
+		})
+	}
+}
+
 // TestDaoConfig_DefaultPort proves that a URL without an explicit port
 // defaults to 3306 — a common omission in DATABASE_URL strings.
 func TestDaoConfig_DefaultPort(t *testing.T) {
@@ -296,6 +347,77 @@ func TestDaoConfig_OverflowPortFailsFast(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid port") {
 		t.Errorf("error = %v, want to mention 'invalid port'", err)
+	}
+}
+
+// TestDaoConfig_URLPortOutOfRangeFailsFast proves the URL path rejects ports
+// outside 1-65535 at config time instead of failing at dial time.
+func TestDaoConfig_URLPortOutOfRangeFailsFast(t *testing.T) {
+	for _, raw := range []string{
+		"mysql://u:p@10.0.0.1:0/db",
+		"mysql://u:p@10.0.0.1:99999/db",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			cfg := &Config{DatabaseURL: raw}
+			if _, err := cfg.DaoConfig(); err == nil || !strings.Contains(err.Error(), "invalid port") {
+				t.Errorf("DaoConfig() = %v, want 'invalid port' error", err)
+			}
+		})
+	}
+}
+
+// TestDaoConfig_URLSSLModeIsHonored proves a postgres URL's sslmode reaches
+// the driver via Extra instead of being silently dropped (the driver defaults
+// to sslmode=disable, so dropping it meant connecting in plaintext).
+func TestDaoConfig_URLSSLModeIsHonored(t *testing.T) {
+	dc := mustDaoConfig(t, &Config{DatabaseURL: "postgres://alice:s3cret@10.0.0.5:5432/mydb?sslmode=require"})
+	if dc.Driver != "postgres" {
+		t.Errorf("Driver = %q, want postgres", dc.Driver)
+	}
+	if dc.Extra["sslmode"] != "require" {
+		t.Errorf("Extra[sslmode] = %q, want require", dc.Extra["sslmode"])
+	}
+	if dc.Addr != "10.0.0.5:5432" || dc.DBName != "mydb" {
+		t.Errorf("Addr/DBName = %q/%q, want 10.0.0.5:5432/mydb", dc.Addr, dc.DBName)
+	}
+}
+
+// TestDaoConfig_URLUnknownQueryParamFailsFast proves query parameters other
+// than postgres sslmode are rejected instead of silently ignored — including
+// sslmode on a mysql URL, where it never applied.
+func TestDaoConfig_URLUnknownQueryParamFailsFast(t *testing.T) {
+	for _, raw := range []string{
+		"mysql://u:p@10.0.0.1:3306/db?connect_timeout=10",
+		"mysql://u:p@10.0.0.1:3306/db?sslmode=require",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			cfg := &Config{DatabaseURL: raw}
+			if _, err := cfg.DaoConfig(); err == nil || !strings.Contains(err.Error(), "unsupported query parameter") {
+				t.Errorf("DaoConfig() = %v, want 'unsupported query parameter' error", err)
+			}
+		})
+	}
+}
+
+// TestDaoConfig_URLFragmentFailsFast proves a URL fragment is rejected
+// instead of silently dropped.
+func TestDaoConfig_URLFragmentFailsFast(t *testing.T) {
+	cfg := &Config{DatabaseURL: "mysql://u:p@10.0.0.1:3306/db#x"}
+	if _, err := cfg.DaoConfig(); err == nil || !strings.Contains(err.Error(), "unsupported fragment") {
+		t.Errorf("DaoConfig() = %v, want 'unsupported fragment' error", err)
+	}
+}
+
+// TestDaoConfig_URLPasswordIsDecoded pins the URL contract: a percent-encoded
+// password is decoded to its literal value (p%23a%3Fb%2Fc → p#a?b/c), the
+// encoding operators must use for URL-reserved characters.
+func TestDaoConfig_URLPasswordIsDecoded(t *testing.T) {
+	dc := mustDaoConfig(t, &Config{DatabaseURL: "mysql://cube:p%23a%3Fb%2Fc@10.0.0.5:3306/mydb"})
+	if dc.Pwd != "p#a?b/c" {
+		t.Errorf("Pwd = %q, want p#a?b/c", dc.Pwd)
+	}
+	if dc.User != "cube" || dc.Addr != "10.0.0.5:3306" || dc.DBName != "mydb" {
+		t.Errorf("User/Addr/DBName = %q/%q/%q, want cube/10.0.0.5:3306/mydb", dc.User, dc.Addr, dc.DBName)
 	}
 }
 

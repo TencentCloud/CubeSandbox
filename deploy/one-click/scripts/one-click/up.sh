@@ -54,6 +54,7 @@ else
   # No URL: export the split fields instead of building one, so
   # URL-reserved characters in the password survive intact. Defaults match
   # the bundled one-click MySQL.
+  # CubeAPI currently ignores these; cubeops-start.sh is the consumer.
   CUBE_API_OPTIONAL_EXPORTS+="export CUBE_SANDBOX_MYSQL_HOST=\"${CUBE_SANDBOX_MYSQL_HOST:-127.0.0.1}\"; "
   CUBE_API_OPTIONAL_EXPORTS+="export CUBE_SANDBOX_MYSQL_PORT=\"${CUBE_SANDBOX_MYSQL_PORT:-3306}\"; "
   CUBE_API_OPTIONAL_EXPORTS+="export CUBE_SANDBOX_MYSQL_USER=\"${CUBE_SANDBOX_MYSQL_USER:-cube}\"; "

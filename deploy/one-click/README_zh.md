@@ -220,10 +220,10 @@ http://<target-host>:12088
 
 ### 数字助手环境变量
 
-数字助手（AgentHub）需要 CubeAPI 连接 MySQL 保存助手实例、存档、模板和操作流水。one-click 默认会根据 `CUBE_SANDBOX_MYSQL_HOST`、`CUBE_SANDBOX_MYSQL_PORT`、`CUBE_SANDBOX_MYSQL_USER`、`CUBE_SANDBOX_MYSQL_PASSWORD`、`CUBE_SANDBOX_MYSQL_DB` 拼出 `DATABASE_URL`，指向随 one-click 启动的 MySQL：
+数字助手（AgentHub）需要 CubeOps 连接 MySQL 保存助手实例、存档、模板和操作流水。one-click 默认会根据 `CUBE_SANDBOX_MYSQL_HOST`、`CUBE_SANDBOX_MYSQL_PORT`、`CUBE_SANDBOX_MYSQL_USER`、`CUBE_SANDBOX_MYSQL_PASSWORD`、`CUBE_SANDBOX_MYSQL_DB` 生成 `DATABASE_URL`（经百分号编码写入 `.one-click.env`；启动脚本回退时直接导出拆分字段，由 CubeOps 直接映射），指向随 one-click 启动的 MySQL：
 
 ```bash
-# 可选；未设置时由 one-click 自动拼接。
+# 可选；未设置时由 CUBE_SANDBOX_MYSQL_* 生成。
 DATABASE_URL=mysql://cube:cube_pass@127.0.0.1:3306/cube_mvp
 ```
 

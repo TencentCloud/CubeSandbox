@@ -18,20 +18,22 @@ jwt_secret: ""                  # JWT_SECRET; leave empty to auto-generate on fi
 # before deploying. The defaults shown here are EXAMPLES ONLY and will not
 # connect to a real database.
 #
-# Two equivalent ways to configure:
+# Two ways to configure:
 #
-# (a) Full URL (recommended):
+# (a) Full URL (the password must be percent-encoded):
 # database_url: "mysql://USER:PASSWORD@HOST:PORT/DBNAME"   # DATABASE_URL
 #
-# (b) Individual fields (URL takes precedence if both are set):
+# (b) Individual fields (URL takes precedence if both are set; preferred
+#     when the password contains URL-reserved characters like # ? / %):
 # mysql_host: "127.0.0.1"          # CUBE_SANDBOX_MYSQL_HOST
 # mysql_port: 3306                 # CUBE_SANDBOX_MYSQL_PORT
 # mysql_user: "REPLACE_ME"         # CUBE_SANDBOX_MYSQL_USER
 # mysql_password: "REPLACE_ME"     # CUBE_SANDBOX_MYSQL_PASSWORD
 # mysql_db: "REPLACE_ME"           # CUBE_SANDBOX_MYSQL_DB
 #
-# When neither is set, CubeOps falls back to the CUBE_SANDBOX_MYSQL_*
-# environment variables (legacy behavior).
+# Either (a) or (b) may be set in this YAML or via env (DATABASE_URL /
+# CUBE_SANDBOX_MYSQL_*); env wins. If neither form is set, CubeOps fails
+# at startup.
 
 # --- JWT ---
 # Access tokens are short-lived; refresh tokens are long-lived.
