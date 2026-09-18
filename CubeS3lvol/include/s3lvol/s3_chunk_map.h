@@ -18,10 +18,10 @@
  *
  *   === Threading ===
  *
- *   *No internal locking.* The caller must guarantee that a given map is only
- *   accessed from one SPDK thread. s3_bs_dev satisfies this naturally: one
- *   bs_dev belongs to one lvstore and all its I/O runs on that lvstore's owner
- *   thread (callbacks are already bounced there; see s3_client.h).
+ *   Lookup is safe from multiple SPDK threads and is synchronized against
+ *   insert/remove commits by an internal rwlock. Mutation still belongs to the
+ *   lvstore owner thread: pending intent and journal callback ordering rely on
+ *   that single submitter even though committed readers may run elsewhere.
  */
 
 #ifndef S3LVOL_CHUNK_MAP_H

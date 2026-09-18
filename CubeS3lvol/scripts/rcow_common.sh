@@ -1207,7 +1207,7 @@ print(sum(1 for s in subs if s.get("nqn", "").startswith(sys.argv[1])))
 # has to run only once the namespaces are in place.
 rcow_create_subsystems()
 {
-	local existing i nqn created=0
+	local existing i nqn transport_err created=0
 	local script=""
 
 	# The grid is exported with -a (any host): on a non-loopback listener
@@ -1240,11 +1240,14 @@ for s in subs:
 	# options are fixed at creation. If it was created elsewhere with the
 	# default 128 KiB max_io_size, that is worth knowing about, hence the check.
 	if ! rcow_srpc nvmf_get_transports 2>/dev/null | grep -qi '"TCP"'; then
-		rcow_srpc nvmf_create_transport -t TCP -i "${RCOW_MAX_IO_SIZE}" \
-			>/dev/null 2>&1 ||
-			{ rcow_err "nvmf_create_transport -t TCP -i ${RCOW_MAX_IO_SIZE} \
-failed. max_io_size divided by iobuf's large_bufsize must not exceed 16, the \
-SGL entry limit (tcp.c:835)"; return 1; }
+		if ! transport_err="$(rcow_srpc nvmf_create_transport -t TCP \
+				-i "${RCOW_MAX_IO_SIZE}" 2>&1)"; then
+			rcow_err "nvmf_create_transport -t TCP -i \
+${RCOW_MAX_IO_SIZE} failed:"
+			[ -z "${transport_err}" ] ||
+				printf '%s\n' "${transport_err}" | sed 's/^/    /' >&2
+			return 1
+		fi
 	else
 		local have_mis
 		have_mis="$(rcow_srpc nvmf_get_transports 2>/dev/null | python3 -c '

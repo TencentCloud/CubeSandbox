@@ -1,105 +1,88 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: CubeS3lvol <cubes3lvol@local>
 Date: Fri, 4 Sep 2026 16:55:00 +0800
-Subject: [PATCH] blob: scope esnap bs_dev->copy to an explicit per-blob gate
+Subject: [PATCH] blob: scope esnap bs_dev->copy to materialize operation
 
 blob_can_copy() normally refuses a device-level copy for every external-
-snapshot clone. A materialiser whose destination implements copy() needs
-to opt the blob in so it can bind a server-side copied object instead of
-doing GET+write.
+snapshot clone. A materialize operation whose destination implements
+copy() needs to opt in so it can bind a server-side copied object instead
+of doing GET+write.
 
-The copy callback is installed on the blobstore's shared destination
-device, however, so its presence cannot be the opt-in: while blob X is
-being materialised, an ordinary CoW on unrelated esnap blob Y would also
-enter X's callback and resolve Y's parent LBA against X's manifest.
+The authorization must belong to that operation, not to the blob. A
+blob-wide gate also redirects an ordinary CoW write submitted while
+materialization is running. If the materializer already owns the ingest
+slot, that foreground write receives -EBUSY and surfaces EIO to the host.
 
-spdk_blob_allow_esnap_copy() raises a per-blob flag. Ordinary blobs
-retain the old device-copy path; an esnap clone can use dest->copy only
-while that flag is set.
+Pass the opt-in through the internal allocation call. Existing writes and
+inflate operations retain the old behavior; only
+spdk_blob_materialize_cluster() may use copy() for an esnap.
 
 Assisted-by: Cursor:Grok-4.6
 ---
 
-diff --git a/include/spdk/blob.h b/include/spdk/blob.h
-index b5f4980..d56f0e3 100644
---- a/include/spdk/blob.h
-+++ b/include/spdk/blob.h
-@@ -787,6 +787,17 @@ bool spdk_blob_is_thin_provisioned(struct spdk_blob *blob);
-  */
- bool spdk_blob_is_esnap_clone(const struct spdk_blob *blob);
- 
-+/**
-+ * Permit (or forbid) this esnap clone to use the destination blobstore's
-+ * optional copy() callback.
-+ *
-+ * dest->copy is device-wide. An ingest that installs it for one clone would
-+ * otherwise also catch ordinary CoW on every other esnap clone that shares the
-+ * blobstore. Call this with true only around the copy that is meant to use
-+ * that callback, and with false from every completion path.
-+ */
-+void spdk_blob_allow_esnap_copy(struct spdk_blob *blob, bool allow);
-+
- /**
-  * Delete an existing blob from the given blobstore.
-  *
 diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
-index 4050a18..c832593 100644
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
-@@ -2842,10 +2842,26 @@ blob_can_copy(struct spdk_blob *blob, uint64_t cluster_start_io_unit, uint64_t *
+@@ -2838,11 +2838,13 @@ blob_write_copy_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+ }
+ 
+ static bool
+-blob_can_copy(struct spdk_blob *blob, uint64_t cluster_start_io_unit, uint64_t *base_lba)
++blob_can_copy(struct spdk_blob *blob, uint64_t cluster_start_io_unit, uint64_t *base_lba,
++	      bool allow_esnap_copy)
  {
  	uint64_t lba = bs_dev_io_unit_to_lba(blob, blob->back_bs_dev, cluster_start_io_unit);
  
 -	return (!blob_is_esnap_clone(blob) && blob->bs->dev->copy != NULL) &&
-+	/*
-+	 * dest->copy is device-wide, while an esnap parent belongs to one blob.
-+	 * Let ordinary blobs keep the original device-copy path, but let an esnap
-+	 * use it only while spdk_blob_allow_esnap_copy() has opted that exact blob
-+	 * in. Otherwise an ingest installed for blob X would catch an unrelated CoW
-+	 * on blob Y and resolve Y's parent LBA against X's manifest.
-+	 */
-+	return (!blob_is_esnap_clone(blob) ||
-+		__atomic_load_n(&blob->esnap_copy_refcnt, __ATOMIC_ACQUIRE) != 0) &&
-+	       (blob->bs->dev->copy != NULL) &&
++	return (!blob_is_esnap_clone(blob) || allow_esnap_copy) &&
++	       blob->bs->dev->copy != NULL &&
  	       blob->back_bs_dev->translate_lba(blob->back_bs_dev, lba, base_lba);
  }
  
-+void
-+spdk_blob_allow_esnap_copy(struct spdk_blob *blob, bool allow)
-+{
-+	assert(blob != NULL);
-+	__atomic_store_n(&blob->esnap_copy_refcnt, allow ? 1u : 0u, __ATOMIC_RELEASE);
-+}
-+
+@@ -2862,7 +2864,8 @@ blob_copy(struct spdk_blob_copy_cluster_ctx *ctx, spdk_bs_user_op_t *op, uint64_
  static void
- blob_copy(struct spdk_blob_copy_cluster_ctx *ctx, spdk_bs_user_op_t *op, uint64_t src_lba)
+ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ 			     struct spdk_io_channel *_ch,
+-			     uint64_t io_unit, spdk_bs_user_op_t *op)
++			     uint64_t io_unit, spdk_bs_user_op_t *op,
++			     bool allow_esnap_copy)
  {
-diff --git a/lib/blob/blobstore.h b/lib/blob/blobstore.h
-index 0338a24..8b514b5 100644
---- a/lib/blob/blobstore.h
-+++ b/lib/blob/blobstore.h
-@@ -123,6 +123,12 @@ struct spdk_blob {
- 	bool		data_ro;
- 	bool		md_ro;
+ 	struct spdk_bs_cpl cpl;
+ 	struct spdk_bs_channel *ch;
+@@ -2912,7 +2915,8 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ 			 bs_dev_io_unit_to_lba(blob, blob->back_bs_dev, cluster_start_io_unit),
+ 			 bs_dev_byte_to_lba(blob->back_bs_dev, blob->bs->cluster_sz));
  
-+	/* Non-zero while this esnap blob is allowed to use dest->copy.
-+	 * blob_can_copy() uses it so a device-wide copy callback installed for
-+	 * one ingest cannot catch CoW on another esnap blob in the same
-+	 * blobstore. Raised by spdk_blob_allow_esnap_copy(). */
-+	uint32_t	esnap_copy_refcnt;
-+
- 	uint64_t	invalid_flags;
- 	uint64_t	data_ro_flags;
- 	uint64_t	md_ro_flags;
-diff --git a/lib/blob/spdk_blob.map b/lib/blob/spdk_blob.map
-index 6c92965..95a6447 100644
---- a/lib/blob/spdk_blob.map
-+++ b/lib/blob/spdk_blob.map
-@@ -38,6 +38,7 @@
- 	spdk_blob_is_clone;
- 	spdk_blob_is_thin_provisioned;
- 	spdk_blob_is_esnap_clone;
-+	spdk_blob_allow_esnap_copy;
- 	spdk_bs_delete_blob;
- 	spdk_bs_inflate_blob;
- 	spdk_bs_blob_decouple_parent;
+-	can_copy = is_valid_range && blob_can_copy(blob, cluster_start_io_unit, &copy_src_lba);
++	can_copy = is_valid_range && blob_can_copy(blob, cluster_start_io_unit, &copy_src_lba,
++						   allow_esnap_copy);
+ 
+ 	is_zeroes = is_valid_range && blob->back_bs_dev->is_zeroes(blob->back_bs_dev,
+ 			bs_dev_io_unit_to_lba(blob, blob->back_bs_dev, cluster_start_io_unit),
+@@ -3252,7 +3256,7 @@ blob_request_submit_op(struct spdk_blob *blob, struct spdk_io_channel *_ch,
+ 				return;
+ 			}
+ 
+-			bs_allocate_and_copy_cluster(blob, _ch, offset, op);
++			bs_allocate_and_copy_cluster(blob, _ch, offset, op, false);
+ 		}
+ 		break;
+ 	}
+@@ -3575,7 +3579,7 @@ blob_request_submit_rw_iov(struct spdk_blob *blob, struct spdk_io_channel *_ch,
+ 
+ 				op->ext_io_opts = ext_io_opts;
+ 
+-				bs_allocate_and_copy_cluster(blob, _channel, offset, op);
++				bs_allocate_and_copy_cluster(blob, _channel, offset, op, false);
+ 			}
+ 		}
+ 	} else {
+@@ -7238,7 +7242,7 @@ bs_inflate_blob_touch_next(void *cb_arg, int bserrno)
+ 			return;
+ 		}
+ 
+-		bs_allocate_and_copy_cluster(_blob, ctx->channel, offset, op);
++		bs_allocate_and_copy_cluster(_blob, ctx->channel, offset, op, false);
+ 	} else {
+ 		bs_inflate_blob_done(ctx);
+ 	}

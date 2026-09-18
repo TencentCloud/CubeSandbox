@@ -103,6 +103,15 @@ static TAILQ_HEAD(, active_entry) g_active = TAILQ_HEAD_INITIALIZER(g_active);
  * and an empty registry is not mistaken for "not loaded yet". */
 static bool g_loaded;
 
+/* Monotonic clock and per-nsid last-touch. 0 means this slot has never been
+ * handed out or freed in this process. Auto-alloc picks the free nsid with the
+ * oldest stamp so a just-vacated slot is the last one reused -- the Linux NVMe
+ * host treats an in-place UUID change as "identifiers changed" and may never
+ * republish a /dev node. In-memory only: a restart rebuilds the live set from
+ * the registry, and the host's view is rebuilt with it. */
+static uint64_t g_nsid_clock;
+static uint64_t g_nsid_gen[RCOW_NUM_SUBSYS][RCOW_NS_PER_SUBSYS + 1];
+
 /* --------------------------------------------------------------------------
  * Placement
  * -------------------------------------------------------------------------- */
@@ -125,12 +134,32 @@ s3lvol_active_hash_subsys(const char *name)
 	return crc % RCOW_NUM_SUBSYS;
 }
 
+static void
+active_touch_nsid(uint32_t subsys, uint32_t nsid)
+{
+	if (subsys >= RCOW_NUM_SUBSYS || nsid < 1 ||
+	    nsid > RCOW_NS_PER_SUBSYS) {
+		return;
+	}
+	g_nsid_gen[subsys][nsid] = ++g_nsid_clock;
+}
+
+void
+s3lvol_active_note_nsid(uint32_t subsys, uint32_t nsid)
+{
+	active_touch_nsid(subsys, nsid);
+}
+
 uint32_t
 s3lvol_active_alloc_nsid(uint32_t subsys)
 {
 	struct active_entry *e;
 	bool taken[RCOW_NS_PER_SUBSYS + 1] = {};
-	uint32_t nsid;
+	uint32_t nsid, best = 0;
+
+	if (subsys >= RCOW_NUM_SUBSYS) {
+		return 0;
+	}
 
 	TAILQ_FOREACH(e, &g_active, link) {
 		if (e->pub.subsys == subsys && e->pub.nsid >= 1 &&
@@ -139,14 +168,26 @@ s3lvol_active_alloc_nsid(uint32_t subsys)
 		}
 	}
 
-	/* nsid is 1-based in NVMe. */
+	/* Never-used slots (gen 0) beat anything that has been handed out or
+	 * freed. Equal gens take the lowest nsid, so a fresh subsystem still
+	 * fills 1, 2, 3, ... Touching the winner means a second alloc before
+	 * the registry add will not pick the same in-flight slot. */
 	for (nsid = 1; nsid <= RCOW_NS_PER_SUBSYS; nsid++) {
-		if (!taken[nsid]) {
-			return nsid;
+		if (taken[nsid]) {
+			continue;
+		}
+		if (best == 0 ||
+		    g_nsid_gen[subsys][nsid] < g_nsid_gen[subsys][best]) {
+			best = nsid;
 		}
 	}
 
-	return 0;	/* subsystem full */
+	if (best == 0) {
+		return 0;	/* subsystem full */
+	}
+
+	active_touch_nsid(subsys, best);
+	return best;
 }
 
 /* --------------------------------------------------------------------------
@@ -487,6 +528,7 @@ s3lvol_active_remove(const char *name)
 
 	TAILQ_FOREACH(e, &g_active, link) {
 		if (strcmp(e->pub.name, name) == 0) {
+			active_touch_nsid(e->pub.subsys, e->pub.nsid);
 			TAILQ_REMOVE(&g_active, e, link);
 			free(e);
 			return active_flush();

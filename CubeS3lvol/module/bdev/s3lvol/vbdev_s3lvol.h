@@ -492,8 +492,20 @@ int s3lvol_active_load(void);
 /** Which subsystem a name belongs on: crc32c(name) % RCOW_NUM_SUBSYS. */
 uint32_t s3lvol_active_hash_subsys(const char *name);
 
-/** Lowest free nsid in a subsystem, or 0 when it is full. */
+/**
+ * Next free nsid in a subsystem, or 0 when it is full.
+ *
+ * Picks the free slot unused for the longest (never-used first, then the
+ * one freed earliest). The Linux NVMe host treats an in-place UUID change
+ * as "identifiers changed" and may never republish a /dev node, so a
+ * just-vacated nsid is the last candidate. Recovery that asks for an
+ * explicit nsid still gets that slot. The only-free-slot case still
+ * returns the cooled-down nsid rather than failing.
+ */
 uint32_t s3lvol_active_alloc_nsid(uint32_t subsys);
+
+/** Remember an explicit (recovery) placement so auto-alloc treats it as just used. */
+void s3lvol_active_note_nsid(uint32_t subsys, uint32_t nsid);
 
 const struct s3lvol_active_entry *s3lvol_active_find(const char *name);
 const struct s3lvol_active_entry *s3lvol_active_find_by_nsid(uint32_t subsys,
@@ -1102,6 +1114,11 @@ int s3lvol_lvol_import(struct s3lvol_lvstore *lvs,
  */
 int s3lvol_lvol_decouple(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 		       spdk_lvol_op_complete cb_fn, void *cb_arg);
+
+/* True while a decouple belonging to this lvstore is running or queued. Both
+ * states retain raw lvol/lvstore pointers, so the lvstore must not be unloaded
+ * until they have left their respective lists. */
+bool s3lvol_lvstore_decouple_pending(const struct s3lvol_lvstore *lvs);
 
 /* Drop a volume from the decouple queue because it is being deleted.
  *

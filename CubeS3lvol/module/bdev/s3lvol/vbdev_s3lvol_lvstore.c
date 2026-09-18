@@ -2270,6 +2270,19 @@ s3lvol_lvstore_unload(struct s3lvol_lvstore *lvs,
 		return;
 	}
 
+	/* Materialisation is direct blobstore work, not lvol bdev I/O. Unregistering
+	 * the bdevs below therefore does not drain it: a completion would retain
+	 * d->lvol, d->channel and blobstore pointers after unload freed them.
+	 * Queued decouples retain the same raw pointers and must block unload too. */
+	if (s3lvol_lvstore_decouple_pending(lvs)) {
+		SPDK_WARNLOG("lvstore '%s' has a running or queued decouple; "
+			     "refusing unload until it completes\n", lvs->name);
+		if (cb_fn) {
+			cb_fn(cb_arg, -EBUSY);
+		}
+		return;
+	}
+
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) {
 		if (cb_fn) {
@@ -2557,6 +2570,15 @@ derive_check(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol, const char *nam
 		SPDK_ERRLOG("lvol '%s' does not belong to lvstore '%s'\n",
 			    lvol->name, lvs->name);
 		return -EINVAL;
+	}
+	if (!lvol->blob) {
+		/* During framework shutdown the lvol can remain discoverable until
+		 * its store is removed even though its blob has already closed.
+		 * Do not pass that half-closed object to spdk_lvol_*(), whose derive
+		 * path assumes a live blob and asserts in spdk_blob_get_id(). */
+		SPDK_ERRLOG("lvol '%s' is closing and cannot be derived\n",
+			    lvol->name);
+		return -ENODEV;
 	}
 
 	/* A decouple in flight is the case this is really about. Snapshotting an lvol

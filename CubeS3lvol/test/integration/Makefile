@@ -73,11 +73,16 @@ MODULE_DIR   = ../../module/bdev/s3lvol
 APPS = s3_client_test s3_spawner_test s3_thread_bounce_test s3_bs_dev_test \
        s3_journal_test s3_wal_test s3_cache_test s3_flush_test s3_export_test \
        s3_statefile_test s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
-       s3_copy_xml_test s3_pending_persist_test
+       s3_export_read_test s3_copy_xml_test s3_pending_persist_test \
+       s3_active_nsid_test
 
 # (a) minimal library set for the stubbed path
 STUB_SRCS      = spdk_thread_stub.c
 STUB_SPDK_LIBS = -lspdk_log -lspdk_util
+# CONFIG_ISAL makes spdk_util's crc32c.o call crc32_iscsi. Some development
+# trees build SPDK without ISA-L, while the CI prefix builds libisal.a in this
+# directory, so include it exactly when that archive exists.
+SPDK_ISAL_LIB  = $(if $(wildcard $(ISAL_LIB_DIR)/libisal.a),-lisal)
 
 # (b) real thread library path: let pkg-config expand it, rather than hand-
 #     maintaining the DPDK dependency order
@@ -151,6 +156,16 @@ s3_export_swap_test: s3_export_swap_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	$(CC) $(COMMON_CFLAGS) s3_export_swap_test.c \
 	    $(S3BSDEV_DIR)/libs3bsdev.a \
 	    $(AWS_LIBS) \
+	    -Wl,--start-group $(BLOB_SPDK_LIBS) -Wl,--end-group \
+	    $(BLOB_DPDK_ARGS) \
+	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
+
+# Whole-object export reads and per-key single-flight. It stubs the S3 calls,
+# but uses real SPDK threads so completion delivery and io_device teardown are
+# exercised without credentials.
+s3_export_read_test: s3_export_read_test.c $(S3BSDEV_DIR)/libs3bsdev.a
+	$(CC) $(COMMON_CFLAGS) s3_export_read_test.c \
+	    $(S3BSDEV_DIR)/libs3bsdev.a \
 	    -Wl,--start-group $(BLOB_SPDK_LIBS) -Wl,--end-group \
 	    $(BLOB_DPDK_ARGS) \
 	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
@@ -267,6 +282,18 @@ s3_statefile_test: s3_statefile_test.c $(MODULE_DIR)/vbdev_s3lvol_statefile.c
 	    -Wl,--start-group $(STUB_SPDK_LIBS) -Wl,--end-group \
 	    $(TEST_SYS_LIBS) -o $@
 
+# Active-registry nsid LRU: same I/O surface as the statefile test
+# (JSON persist + log), plus spdk_json for the registry writer.
+s3_active_nsid_test: s3_active_nsid_test.c \
+		$(MODULE_DIR)/vbdev_s3lvol_statefile.c \
+		$(MODULE_DIR)/vbdev_s3lvol_active.c
+	$(CC) $(COMMON_CFLAGS) -I$(MODULE_DIR) s3_active_nsid_test.c \
+	    $(MODULE_DIR)/vbdev_s3lvol_statefile.c \
+	    $(MODULE_DIR)/vbdev_s3lvol_active.c \
+	    -Wl,--start-group -lspdk_json $(STUB_SPDK_LIBS) \
+	        $(SPDK_ISAL_LIB) -Wl,--end-group \
+	    $(TEST_SYS_LIBS) -o $@
+
 # Super block validation: needs a real bdev (same shape as the journal test), so
 # it links the aio module whole-archive and brings the framework up by hand.
 s3_local_dev_test: s3_local_dev_test.c $(S3BSDEV_DIR)/libs3bsdev.a
@@ -298,8 +325,8 @@ s3_checkpoint_test: s3_checkpoint_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 # Run only the tests that need no S3 credentials
 check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cache_test \
        s3_flush_test s3_export_test s3_statefile_test s3_local_dev_test \
-       s3_checkpoint_test s3_export_swap_test s3_copy_xml_test \
-       s3_pending_persist_test
+       s3_checkpoint_test s3_export_swap_test s3_export_read_test s3_copy_xml_test \
+       s3_pending_persist_test s3_active_nsid_test
 	./s3_spawner_test
 	./s3_thread_bounce_test
 	./s3_journal_test
@@ -311,8 +338,10 @@ check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cach
 	./s3_local_dev_test
 	./s3_checkpoint_test
 	./s3_export_swap_test
+	./s3_export_read_test
 	./s3_copy_xml_test
 	./s3_pending_persist_test
+	./s3_active_nsid_test
 
 .PHONY: $(S3BSDEV_DIR)/libs3bsdev.a
 $(S3BSDEV_DIR)/libs3bsdev.a:

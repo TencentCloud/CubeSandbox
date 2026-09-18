@@ -511,7 +511,10 @@ else
 	fail "the target died removing a namespace under host reads"
 fi
 
-# Put it back, so the rest of the test sees the layout it expects.
+# Put it back without an explicit nsid, which is what Cubelet does. Auto-alloc
+# must not reuse the slot that just vanished: the host treats an in-place UUID
+# change as "identifiers changed" and may never republish a /dev node. The
+# hashed subsystem stays the same; recovery that names a nsid is tested in [5].
 rpc rcow_active_bdev '{"device_name":"ctl-a"}' >/dev/null 2>&1 ||
 	fail "could not re-activate ctl-a"
 if rcow_verify_active 30 >/dev/null 2>&1; then
@@ -522,10 +525,19 @@ fi
 
 RE_JSON="$(rpc rcow_get_bdev '{"device_name":"ctl-a"}')"
 RE_DEV="$(jget "${RE_JSON}" device_path)"
-[ "$(jget "${RE_JSON}" subsys)" = "${A_SUB}" ] &&
-[ "$(jget "${RE_JSON}" nsid)" = "${A_NSID}" ] &&
-	pass "at the same placement it had before (subsys ${A_SUB} nsid ${A_NSID})" ||
-	fail "it came back at subsys $(jget "${RE_JSON}" subsys) nsid $(jget "${RE_JSON}" nsid)"
+RE_SUB="$(jget "${RE_JSON}" subsys)"
+RE_NSID="$(jget "${RE_JSON}" nsid)"
+[ "${RE_SUB}" = "${A_SUB}" ] &&
+	pass "re-activate stayed on hashed subsys ${A_SUB}" ||
+	fail "it came back at subsys ${RE_SUB}, wanted ${A_SUB}"
+[ "${RE_NSID}" != "${A_NSID}" ] &&
+	pass "auto-activate skipped the just-freed nsid ${A_NSID} (got ${RE_NSID})" ||
+	fail "auto-activate reused nsid ${A_NSID} on subsys ${A_SUB}"
+if [ -n "${RE_DEV}" ] && [ -b "${RE_DEV}" ]; then
+	pass "get_bdev after nsid skip is an openable block device (${RE_DEV})"
+else
+	fail "get_bdev after nsid skip: '${RE_DEV}' is not a block device"
+fi
 
 read_back_pattern "${RE_DEV}" "after deactivating under load and re-activating"
 

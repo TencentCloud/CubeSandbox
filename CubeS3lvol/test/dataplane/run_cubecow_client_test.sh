@@ -26,8 +26,9 @@
 #    [2]  create → active → get_bdev returns a path that is a real block
 #         device; mkfs.ext4 + umount + snapshot (snap is never activated) +
 #         delete the work volume, which is Cubelet's metadata/rootfs seal
-#    [3]  deactive then get_bdev is not-found; reactivate still yields a
-#         path that open(2)s, even if the node number changed
+#    [3]  deactive then get_bdev is not-found; auto-reactivate skips the
+#         just-freed nsid and still yields a path that open(2)s (the
+#         host node number may stay nvmeXn1 even when the nsid changed)
 #    [4]  N clones from one template snap, isolated writes, then resize one
 #         clone (sandbox rootfs grow after CreateVolumeFromSnapshot)
 #    [5]  three snapshots exported at once (Pause/Commit: rootfs + memory +
@@ -106,11 +107,40 @@ err_is_already_exists()
 	printf '%s' "$1" | grep -qiE 'already exists|already exist'
 }
 
+jget() { python3 -c 'import json,sys; print(json.loads(sys.argv[1])[sys.argv[2]])' "$1" "$2"; }
+
+# Wait until get_bdev names a node that is a live block device. After deactive
+# then auto-reactivate the host often reuses /dev/nvmeXn1 for a new nsid, and
+# udev's REMOVE of the previous occupant can unlink that name after sysfs
+# already shows the new uuid.
+wait_bdev()
+{
+	local name="$1" deadline json path=""
+
+	deadline=$((SECONDS + 30))
+	while :; do
+		json="$(rpc rcow_get_bdev "$(printf '{"device_name":"%s"}' "${name}")" \
+			2>/dev/null)" || json=""
+		path=""
+		if [ -n "${json}" ]; then
+			path="$(jget "${json}" device_path 2>/dev/null)" || path=""
+		fi
+		if [ -n "${path}" ] && [ -b "${path}" ]; then
+			printf '%s' "${path}"
+			return 0
+		fi
+		[ "${SECONDS}" -ge "${deadline}" ] && break
+		sleep 0.1
+	done
+	echo "  ---- ${name}: device_path '${path}' is not a block device" >&2
+	return 1
+}
+
 # Activate and echo the host device. Prints nothing on failure -- it runs in a
 # command substitution, so the caller decides what an empty result means.
 resolve()
 {
-	local name="$1" out path
+	local name="$1" out
 
 	if ! out="$(rpc rcow_active_bdev "$(printf '{"device_name":"%s"}' "${name}")" 2>&1)"; then
 		echo "  ---- activate ${name} failed: ${out}" >&2
@@ -120,13 +150,7 @@ resolve()
 		echo "  ---- ${name}: rcow_verify_active timed out" >&2
 		return 1
 	fi
-	path="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["device_path"])' \
-		"$(rpc rcow_get_bdev "$(printf '{"device_name":"%s"}' "${name}")")" 2>/dev/null)"
-	if [ -z "${path}" ] || [ ! -b "${path}" ]; then
-		echo "  ---- ${name}: device_path '${path}' is not a block device" >&2
-		return 1
-	fi
-	printf '%s' "${path}"
+	wait_bdev "${name}"
 }
 
 del_vol()
@@ -380,6 +404,10 @@ rpc rcow_create_lvol '{"lvol_name":"mem-work","size_gib":1}' >/dev/null || {
 	fail "create mem-work"; exit 1; }
 MEM_DEV="$(resolve mem-work)"
 [ -b "${MEM_DEV}" ] || { fail "mem-work did not become a device"; exit 1; }
+MEM_JSON="$(rpc rcow_get_bdev '{"device_name":"mem-work"}')" || {
+	fail "get_bdev mem-work"; exit 1; }
+MEM_SUB="$(jget "${MEM_JSON}" subsys)"
+MEM_NSID="$(jget "${MEM_JSON}" nsid)"
 dd if=/dev/urandom of="${WORKDIR}/mem.pat" bs=1M count=8 status=none
 dd if="${WORKDIR}/mem.pat" of="${MEM_DEV}" bs=1M count=8 oflag=direct status=none
 MEM_MD5="$(md5sum "${WORKDIR}/mem.pat" | cut -d' ' -f1)"
@@ -397,6 +425,17 @@ fi
 
 MEM_DEV2="$(resolve mem-work)"
 [ -b "${MEM_DEV2}" ] || { fail "reactivate did not yield a block device"; exit 1; }
+MEM_JSON2="$(rpc rcow_get_bdev '{"device_name":"mem-work"}')" || {
+	fail "get_bdev mem-work after reactivate"; exit 1; }
+MEM_SUB2="$(jget "${MEM_JSON2}" subsys)"
+MEM_NSID2="$(jget "${MEM_JSON2}" nsid)"
+info "mem-work re-activate -> subsys ${MEM_SUB2} nsid ${MEM_NSID2} (was ${MEM_SUB}/${MEM_NSID})"
+[ "${MEM_SUB2}" = "${MEM_SUB}" ] &&
+	pass "re-activate stayed on hashed subsys ${MEM_SUB}" ||
+	fail "re-activate hashed to subsys ${MEM_SUB2}, wanted ${MEM_SUB}"
+[ "${MEM_NSID2}" != "${MEM_NSID}" ] &&
+	pass "auto-reactivate skipped the just-freed nsid ${MEM_NSID} (got ${MEM_NSID2})" ||
+	fail "auto-reactivate reused nsid ${MEM_NSID}"
 GOT="$(dd if="${MEM_DEV2}" bs=1M count=8 iflag=direct status=none 2>/dev/null | md5sum | cut -d' ' -f1)"
 if [ "${GOT}" = "${MEM_MD5}" ]; then
 	pass "reactivate path ${MEM_DEV2} (was ${MEM_DEV}) still holds the data"

@@ -385,6 +385,20 @@ test_overlay_basics(void)
 	check_true("write one block", rc == 0, NULL);
 	check_true("that block is covered", s3_overlay_covers(ov, 0, 1), NULL);
 	check_true("the next block is not", !s3_overlay_covers(ov, 1, 1), NULL);
+	check_true("chunk 0 is live", s3_overlay_chunk_is_live(ov, 0), NULL);
+	check_true("an untouched chunk is not live",
+		   !s3_overlay_chunk_is_live(ov, 1), NULL);
+	rc = s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, 1, blk, 102);
+	check_true("write one block of chunk 2", rc == 0, NULL);
+	check_true("chunk 2 is live independently",
+		   s3_overlay_chunk_is_live(ov, 2), NULL);
+	check_true("chunk 1 stays clean while 0 and 2 are dirty",
+		   !s3_overlay_chunk_is_live(ov, 1), NULL);
+	check_u64("two live chunks", s3_overlay_get_live_chunks(ov), 2);
+	s3_overlay_drop_chunk(ov, 2);
+	check_true("dropping chunk 2 does not clear chunk 0",
+		   s3_overlay_chunk_is_live(ov, 0) &&
+		   !s3_overlay_chunk_is_live(ov, 2), NULL);
 	check_u64("bytes held", s3_overlay_get_bytes(ov), BLOCK_SIZE);
 	check_u64("min_seq", s3_overlay_min_seq(ov), 100);
 

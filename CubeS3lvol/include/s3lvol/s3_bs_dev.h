@@ -286,6 +286,20 @@ struct s3_bs_dev_stats {
 	uint64_t allocated_chunks;
 	uint64_t rmw_count;       /* uploads that had to read the old object */
 	uint64_t zero_fill_count; /* reads of an unallocated range */
+	uint64_t dest_whole_gets;       /* cache misses fetched as whole objects */
+	uint64_t dest_coalesced_reads;  /* readers joined to an in-flight GET */
+	uint64_t dest_exact_fallbacks;  /* whole-fill setup failed */
+	uint64_t dest_submit_cache_hits;    /* cache hits completed off owner */
+	uint64_t dest_submit_cache_retries; /* fast reads retried on owner */
+	uint64_t dest_submit_fill_starts;   /* whole GETs started off owner */
+	uint64_t dest_submit_fill_joins;    /* off-owner reads coalesced */
+	uint64_t dest_direct_gets;          /* whole GETs written to user buffer */
+	uint64_t dest_direct_get_bytes;     /* bytes avoiding fill-to-user copy */
+	uint64_t dest_prefetch_gets;        /* low-priority sequential whole GETs */
+	uint64_t dest_prefetch_hits;        /* demands joining prefetched objects */
+	uint64_t dest_prefetch_skip_token;  /* no process-wide low-priority token */
+	uint64_t dest_prefetch_skip_slot;   /* per-dest fill limit reached */
+	uint64_t dest_prefetch_skip_seq;    /* random demand closed the window */
 
 	uint64_t wal_writes;      /* writes acknowledged from the log */
 	uint64_t wal_retries;     /* writes parked by backpressure */
@@ -331,16 +345,22 @@ struct s3_bs_dev_stats {
 	 * reads repeat at a coarser granularity than they arrive in. */
 	bool     cache_attached;
 	uint64_t cache_hits;
+	uint64_t cache_ram_hits;
+	uint64_t cache_disk_hits;
 	uint64_t cache_misses;
 	uint64_t cache_hits_declined;
 	uint64_t cache_populates;
 	uint64_t cache_populates_dropped;
 	uint64_t cache_evictions;
 	uint64_t cache_bytes_served;
+	uint64_t cache_ram_bytes_served;
 	uint64_t cache_bytes_populated;
 	uint64_t cache_slots_total;
 	uint64_t cache_slots_resident;
 	uint64_t cache_bytes_resident;
+	uint64_t cache_hot_slots_total;
+	uint64_t cache_hot_slots_resident;
+	uint64_t cache_hot_evictions;
 };
 
 /**

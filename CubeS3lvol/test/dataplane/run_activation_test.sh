@@ -12,7 +12,8 @@
 #   2. get_bdev resolves to the *multipath* device, not the nvmeXcYnZ sibling
 #   3. an explicit nsid is honoured exactly (the recovery path)
 #   4. deactivate then reactivate at the same nsid gets the same volume back
-#   5. the registry on disk matches what the RPCs report
+#   5. auto-activate after a same-subsystem deactivate does *not* reuse that nsid
+#   6. the registry on disk matches what the RPCs report
 
 set -u
 
@@ -336,6 +337,63 @@ if [ -n "${RE_DEV}" ]; then
 else
 	fail "disk-a did not come back"
 fi
+
+# --------------------------------------------------------------------------
+echo ""
+echo "=== [8b] auto-activate after deactivate must not reuse that nsid"
+# Cubelet CreateVolumeFromSnapshot does not pass nsid. Reusing the slot the
+# host just dropped makes the kernel log "identifiers changed for nsid N" and
+# get_bdev never resolves a /dev node (E2E 130545).
+"${RPC}" rcow_deactive_bdev '{"device_name":"disk-a"}' >/dev/null || \
+	fail "deactivate disk-a before nsid-reuse check"
+SWAP_NAME="$(python3 -c "
+import sys
+want = int(sys.argv[1])
+def crc32c(data):
+    crc = 0xFFFFFFFF
+    poly = 0x82F63B78
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ (poly if crc & 1 else 0)
+    return crc ^ 0xFFFFFFFF
+for i in range(100000):
+    name = 'swap-%d' % i
+    # Match s3lvol_active_hash_subsys: spdk_crc32c_update(..., ~0) with no invert.
+    if (crc32c(name.encode()) ^ 0xFFFFFFFF) % 32 == want:
+        print(name)
+        break
+" "${A_SUB}")"
+[ -n "${SWAP_NAME}" ] || fail "could not find a name hashing to subsys ${A_SUB}"
+"${RPC}" rcow_create_lvol "$(printf '{"lvol_name":"%s","size_gib":1}' "${SWAP_NAME}")" \
+	>/dev/null || fail "could not create ${SWAP_NAME}"
+SWAP_JSON="$("${RPC}" rcow_active_bdev "$(printf '{"device_name":"%s"}' "${SWAP_NAME}")")" \
+	|| fail "auto-activate ${SWAP_NAME}"
+SWAP_SUB="$(jget "${SWAP_JSON}" subsys)"
+SWAP_NSID="$(jget "${SWAP_JSON}" nsid)"
+info "${SWAP_NAME} -> subsys ${SWAP_SUB} nsid ${SWAP_NSID} (disk-a was ${A_SUB}/${A_NSID})"
+[ "${SWAP_SUB}" = "${A_SUB}" ] \
+	&& pass "${SWAP_NAME} landed on the same subsystem as disk-a (${A_SUB})" \
+	|| fail "${SWAP_NAME} hashed to subsys ${SWAP_SUB}, wanted ${A_SUB}"
+[ "${SWAP_NSID}" != "${A_NSID}" ] \
+	&& pass "auto-activate skipped the just-freed nsid ${A_NSID} (got ${SWAP_NSID})" \
+	|| fail "auto-activate reused nsid ${A_NSID} on subsys ${A_SUB}"
+SWAP_DEV="$(jget "$("${RPC}" rcow_get_bdev "$(printf '{"device_name":"%s"}' "${SWAP_NAME}")")" device_path)"
+if [ -n "${SWAP_DEV}" ] && [ -b "${SWAP_DEV}" ]; then
+	pass "get_bdev after nsid skip is an openable block device (${SWAP_DEV})"
+else
+	fail "get_bdev after nsid skip: '${SWAP_DEV}' is not a block device"
+fi
+"${RPC}" rcow_deactive_bdev "$(printf '{"device_name":"%s"}' "${SWAP_NAME}")" \
+	>/dev/null || fail "deactivate ${SWAP_NAME}"
+"${RPC}" rcow_delete_lvol "$(printf '{"lvol_name":"%s"}' "${SWAP_NAME}")" \
+	>/dev/null || fail "delete ${SWAP_NAME}"
+RE_JSON="$("${RPC}" rcow_active_bdev "$(printf '{"device_name":"disk-a","subsys":%s,"nsid":%s}' \
+	"${A_SUB}" "${A_NSID}")")" || fail "restore disk-a at ${A_SUB}/${A_NSID}"
+RE_NSID="$(jget "${RE_JSON}" nsid)"; RE_SUB="$(jget "${RE_JSON}" subsys)"
+[ "${RE_NSID}" = "${A_NSID}" ] && [ "${RE_SUB}" = "${A_SUB}" ] \
+	&& pass "disk-a restored at subsys ${A_SUB} nsid ${A_NSID} for later checks" \
+	|| fail "could not restore disk-a (got ${RE_SUB}/${RE_NSID})"
 
 # --------------------------------------------------------------------------
 echo ""

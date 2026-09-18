@@ -258,8 +258,8 @@ S3_ARGS=(-e "${ENDPOINT}" -b "${BUCKET}" -r "${REGION}")
 # it needs root, credentials and the box to itself -- not CI-able as wired.
 if [ "${MODE}" = list ]; then
 	echo "offline integration: spawner thread_bounce journal wal cache flush export"
-	echo "                     statefile local_dev checkpoint export_swap"
-	echo "                     copy_xml pending_persist"
+	echo "                     statefile local_dev checkpoint export_swap export_read"
+	echo "                     copy_xml pending_persist active_nsid"
 	echo "with S3:             s3_client_test s3_bs_dev_test"
 	echo "dataplane:           dataplane recovery snapshot export srcdel selfimport"
 	echo "                     derived decouple_queue snapshot_cancel snapshot_converge"
@@ -339,7 +339,8 @@ echo "--- integration (no S3, no root)"
 for t in s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test \
 	 s3_cache_test s3_flush_test s3_export_test s3_statefile_test \
 	 s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
-	 s3_copy_xml_test s3_pending_persist_test; do
+	 s3_export_read_test s3_copy_xml_test s3_pending_persist_test \
+	 s3_active_nsid_test; do
 	run_suite "${t}" "./test/integration/${t}"
 done
 echo ""

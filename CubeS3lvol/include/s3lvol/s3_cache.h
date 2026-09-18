@@ -80,7 +80,13 @@
  *   respect and no way for a bug in this file to lose an acknowledged write. The
  *   worst it can do is serve a miss.
  *
- *   === On-disk layout ===
+ *   === RAM hot tier and on-disk layout ===
+ *
+ *   Whole-object populates may also enter a fixed anonymous-memory pool. They
+ *   become readable there as soon as the caller's immutable bytes have been
+ *   copied, without waiting for the best-effort device write. RAM entries have
+ *   their own LRU and pins; evicting one only falls back to the device and does
+ *   not invalidate a disk-resident range.
  *
  *   The cache region is a flat array of chunk-sized slots:
  *
@@ -93,7 +99,15 @@
  *
  *   === Threading ===
  *
- *   Owner thread only, like the rest of s3_ctx. Asserted, not assumed.
+ *   Metadata is protected internally. Drop and the convenience read API use the
+ *   owner-thread channel. Reads may instead supply a channel owned by their
+ *   calling SPDK thread through s3_cache_read_on_channel().
+ *
+ *   s3_cache_populate() may run on any SPDK thread: the RAM hot copy is
+ *   published under the mutex on the caller, and a disk fill is submitted on
+ *   the owner channel (inline, or by a message to that thread). At most one
+ *   unpublished hot buf is reserved per chunk_index so two populates of the
+ *   same object cannot both memcpy and then publish.
  */
 
 #ifndef S3LVOL_CACHE_H
@@ -109,7 +123,13 @@
  * caller's (see s3_cache_populate), so this bounds both the memory that costs
  * and how much of the local device's queue depth cache fills may take from the
  * WAL. Filling the cache is never more important than acknowledging a write. */
-#define S3_CACHE_STAGING_BUFS   4
+#define S3_CACHE_STAGING_BUFS   16
+
+/* Whole-object DRAM hot set. RPC callers use DEFAULT when the parameter is
+ * omitted and may pass zero to retain the disk-only behaviour. The limit keeps
+ * a single malformed request from prefaulting an unbounded anonymous mapping. */
+#define S3_CACHE_HOT_BUFS_DEFAULT 1024
+#define S3_CACHE_HOT_BUFS_MAX     8192
 
 struct s3_cache;
 
@@ -117,8 +137,9 @@ typedef void (*s3_cache_read_cb)(void *cb_arg, int status);
 
 struct s3_cache_opts {
 	/* Local device region to use, and how to reach it. Channels are
-	 * per-thread; this one must belong to the calling thread, which is also
-	 * the thread every later call has to come from. */
+	 * per-thread; this one belongs to the owner thread and is used by
+	 * populate/drop and s3_cache_read(). Off-owner readers obtain their own
+	 * channel and call s3_cache_read_on_channel(). */
 	struct spdk_bdev_desc   *desc;
 	struct spdk_io_channel  *ch;
 	uint64_t                 region_offset;
@@ -126,6 +147,10 @@ struct s3_cache_opts {
 
 	uint32_t                 chunk_size;
 	uint32_t                 block_size;
+	/* Number of whole-object anonymous-memory slots. Zero disables the RAM
+	 * tier. Allocation failure degrades to disk-only rather than failing the
+	 * cache or lvstore. */
+	uint32_t                 hot_bufs;
 
 	/* Size of the chunk index space, i.e. the same num_chunks the chunk map
 	 * was created with. Used for a dense chunk_index -> slot array. */
@@ -134,6 +159,8 @@ struct s3_cache_opts {
 
 struct s3_cache_stats {
 	uint64_t hits;
+	uint64_t ram_hits;
+	uint64_t disk_hits;
 	uint64_t misses;
 
 	/* The slot held this exact object but not every block the read wanted.
@@ -148,12 +175,17 @@ struct s3_cache_stats {
 	uint64_t populates_failed;    /* the local write failed */
 	uint64_t evictions;
 
-	uint64_t bytes_served;        /* read from the local device */
+	uint64_t bytes_served;        /* RAM and local-device bytes */
+	uint64_t ram_bytes_served;
 	uint64_t bytes_populated;
 
 	uint64_t slots_total;
 	uint64_t slots_resident;      /* slots holding an object, whole or partly */
 	uint64_t bytes_resident;      /* how much of those objects is actually here */
+
+	uint64_t hot_slots_total;
+	uint64_t hot_slots_resident;
+	uint64_t hot_evictions;
 };
 
 /**
@@ -171,9 +203,10 @@ void s3_cache_destroy(struct s3_cache *cache);
  *
  * "Readable" means the whole object: with partial residency a slot can hold this
  * uuid and still miss a given read, so this answers a coarser question than
- * s3_cache_read() and is only meant for tests and diagnostics. The read path
- * must call s3_cache_read() and act on its return code -- there is nothing to
- * gain from asking first, and a true here does not promise a hit.
+ * s3_cache_read(). Demand reads must call s3_cache_read() and act on its return
+ * code -- a true here does not promise a later hit. Read-ahead admission may
+ * use this coarse snapshot to avoid fetching an object that is already wholly
+ * resident; racing eviction only loses that optimisation.
  */
 bool s3_cache_lookup(struct s3_cache *cache, uint64_t chunk_index,
 		     const struct spdk_uuid *uuid);
@@ -199,6 +232,25 @@ int s3_cache_read(struct s3_cache *cache, uint64_t chunk_index,
 		  s3_cache_read_cb cb_fn, void *cb_arg);
 
 /**
+ * Serve a hit through a local-device channel owned by the calling thread.
+ *
+ * Cache metadata is shared and internally synchronized; SPDK I/O channels are
+ * not. This variant lets a bs_dev poll-group channel avoid an owner-thread
+ * bounce while preserving s3_cache_read()'s hit/miss contract. \p channel may
+ * be NULL when the caller only wants a RAM hit; a required disk read then
+ * returns -ENOENT.
+ */
+int s3_cache_read_on_channel(struct s3_cache *cache,
+			     struct spdk_io_channel *channel,
+			     uint64_t chunk_index,
+			     const struct spdk_uuid *uuid,
+			     uint32_t offset_in_chunk, uint32_t length,
+			     void *buf, s3_cache_read_cb cb_fn, void *cb_arg);
+
+/* Obtain a local-device channel for the calling SPDK thread. */
+struct spdk_io_channel *s3_cache_get_io_channel(struct s3_cache *cache);
+
+/**
  * Offer part or all of a chunk's contents for caching.
  *
  * Best effort and fire and forget: there is no callback and no error to handle,
@@ -215,6 +267,8 @@ int s3_cache_read(struct s3_cache *cache, uint64_t chunk_index,
  *                back by their own completion paths. Making them keep a buffer
  *                alive for an unrelated best-effort write is how the cache would
  *                end up owning a use-after-free in someone else's code.
+ *                Safe on any SPDK thread: RAM is published on the caller, disk
+ *                fills are submitted on the cache owner channel.
  * \param length  how much of the object \p buf holds. Need not be block aligned
  *                only when it reaches the object's end, which is the one case a
  *                short GET produces.
