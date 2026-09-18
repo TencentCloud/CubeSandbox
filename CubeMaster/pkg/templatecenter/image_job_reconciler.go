@@ -285,6 +285,8 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 		// finalizeRemoteArtifact, losing/overwriting the S3 URL for any job
 		// that got stuck and had to be resumed via reconciler replay.
 		ArtifactURL             string `json:"artifact_url"`
+		StorageBackend          string `json:"storage_backend"`
+		ObjectKey               string `json:"object_key"`
 		CubeEgressCABaked       bool   `json:"cube_egress_ca_baked"`
 		CubeEgressCAFingerprint string `json:"cube_egress_ca_fingerprint"`
 		CubeEgressCATargets     int    `json:"cube_egress_ca_targets_written"`
@@ -302,6 +304,8 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 		ImageConfigJSON:         raw.ImageConfigJSON,
 		MasterNodeIP:            raw.MasterNodeIP,
 		ArtifactURL:             raw.ArtifactURL,
+		StorageBackend:          raw.StorageBackend,
+		ObjectKey:               raw.ObjectKey,
 		CubeEgressCABaked:       raw.CubeEgressCABaked,
 		CubeEgressCAFingerprint: raw.CubeEgressCAFingerprint,
 		CubeEgressCATargets:     raw.CubeEgressCATargets,

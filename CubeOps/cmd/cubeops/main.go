@@ -20,6 +20,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/warehouse"
 	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/tombstone"
+
+	_ "github.com/tencentcloud/CubeSandbox/pkgs/blobstore/driver/fs"
+	_ "github.com/tencentcloud/CubeSandbox/pkgs/blobstore/driver/s3"
 )
 
 func main() {
@@ -103,24 +106,50 @@ func main() {
 }
 
 func initWarehouseBlobs(ctx context.Context, cfg *config.Config) warehouse.BlobStore {
-	if !cfg.S3Configured() {
-		slog.Warn("component warehouse disabled: S3 is not configured")
-		return nil
-	}
-	blobs, err := warehouse.NewS3BlobStore(cfg.S3, cfg.Warehouse.UploadTimeout)
-	if err != nil {
-		slog.Warn("component warehouse disabled: s3 client", "error", err)
-		return nil
-	}
-	if err := probeWarehouseBucket(ctx, blobs); err != nil {
+	switch cfg.Store.Backend {
+	case config.StoreBackendFS:
+		fs := cfg.Store.FSBackend
+		blobs, err := warehouse.OpenFS(fs, cfg.Warehouse.PresignTTL)
+		if err != nil {
+			slog.Warn("component warehouse disabled: fs backend", "error", err)
+			return nil
+		}
+		if err := blobs.EnsureBucket(ctx); err != nil {
+			slog.Warn("warehouse fs prepare failed", "error", err)
+			return nil
+		}
+		slog.Info("storage backend selected", "backend", "fs", "reason", "explicit", "root", fs.Root)
 		return blobs
+	case config.StoreBackendS3:
+		if !cfg.S3Configured() {
+			slog.Warn("storage backend degraded",
+				"requested", "s3", "effective", "disabled",
+				"reason", "incomplete CUBE_OPS_S3_* credentials")
+			slog.Warn("component warehouse disabled: S3 is not configured")
+			return nil
+		}
+		blobs, err := warehouse.OpenS3(cfg.S3, cfg.Warehouse.UploadTimeout)
+		if err != nil {
+			slog.Warn("component warehouse disabled: s3 client", "error", err)
+			return nil
+		}
+		slog.Info("storage backend selected", "backend", "s3", "reason", "explicit")
+		if err := probeWarehouseBucket(ctx, blobs); err != nil {
+			return blobs
+		}
+		lctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+		if err := blobs.EnsureLifecycle(lctx); err != nil {
+			slog.Warn("warehouse bucket lifecycle", "error", err)
+		}
+		if err := blobs.GC(lctx); err != nil {
+			slog.Warn("warehouse blobstore gc", "error", err)
+		}
+		return blobs
+	default:
+		slog.Error("component warehouse disabled: unsupported store.backend", "backend", cfg.Store.Backend)
+		return nil
 	}
-	lctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	if err := blobs.EnsureLifecycle(lctx); err != nil {
-		slog.Warn("warehouse bucket lifecycle", "error", err)
-	}
-	return blobs
 }
 
 func probeWarehouseBucket(ctx context.Context, blobs warehouse.BlobStore) error {

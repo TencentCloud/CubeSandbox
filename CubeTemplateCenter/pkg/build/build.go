@@ -9,11 +9,8 @@ package build
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,19 +26,15 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/image"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/lock"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/s3store"
+	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/tcconfig"
 	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
 	"gorm.io/gorm"
 )
 
-// artifactBuildLocks serializes concurrent builds of the SAME artifact within
-// this process. Concurrent same-spec creates share one fingerprint, hence one
-// artifactID and one ext4 output path; without this lock the native rootfs
-// export races itself (lchown/link/utimes ENOENT) and one build's cleanup
-// deletes files another build is still writing.
-//
-// This lock is kept even when using the cross-replica DB session lock, because
-// advisory locks are per DB connection: two goroutines in the same process use
-// different connections and could otherwise both acquire the same lock.
+// artifactBuildLocks serializes concurrent same-spec builds (fingerprint) in
+// this process. The DB advisory lock is per connection, so two goroutines
+// here could otherwise both hold it.
 var artifactBuildLocks = newKeyedMutex()
 
 // keyedMutex is a per-key mutex set with automatic cleanup of idle entries.
@@ -219,25 +212,15 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 	// can still generate presigned URLs when reusing an artifact built by a
 	// sibling replica.
 	s3Client, s3CfgEnabled := SharedS3Client()
-	if !s3CfgEnabled {
-		logger.Warnf("s3 client unavailable, falling back to local storage")
+	if !s3CfgEnabled && tcconfig.ArtifactStoreBackend() == "fs" {
+		return fmt.Errorf("CUBE_ARTIFACT_STORE_BACKEND=fs but the artifact store failed to open")
 	}
 
-	// Step 6: Serialize same-artifact builds, then reuse a finished artifact
-	// if a sibling job already produced it while we were waiting.
-	//
-	// The in-process lock is always taken first: it protects filesystem
-	// operations (native rootfs export, cleanup) between goroutines in this
-	// process. On top of it, the DB session lock excludes sibling TC replicas
-	// when running with more than one replica. DB-less test setups use only
-	// the in-process mutex.
-	// Serialize concurrent builds of the same spec (fingerprint) within this
-	// process; when running with more than one replica. DB-less test setups use
-	// only the in-process mutex.
-	//
-	// The lock key is the fingerprint, NOT the artifactID, because artifactID
-	// is unique per build (includes a UUID). Locking by fingerprint ensures
-	// that only one build happens for a given spec, even across TC replicas.
+	// Step 6: Serialize same-spec builds (fingerprint, not artifactID — the
+	// latter includes a UUID). The in-process lock protects filesystem work
+	// between goroutines; the DB session lock excludes sibling TC replicas.
+	// DB-less tests use only the in-process mutex. After waiting, reuse a
+	// READY artifact another job already produced.
 	unlockLocal := artifactBuildLocks.Lock(fingerprint)
 	defer unlockLocal()
 
@@ -259,20 +242,7 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 		logger.Infof("another replica is building spec %s, waiting to reuse", fingerprint[:16])
 
 		if existing, ok := reuseExistingArtifact(ctx, db, fingerprint, s3CfgEnabled, s3Client); ok {
-			artifactURL := artifactPresignedURL(ctx, s3CfgEnabled, s3Client, existing.ArtifactID, logger)
-			// Construct a BuildResult from the artifact metadata.
-			buildResult := &image.BuildResult{
-				Ext4Path:  existing.Ext4Path,
-				SHA256:    existing.Ext4SHA256,
-				SizeBytes: existing.Ext4SizeBytes,
-			}
-			if err := reportArtifactBuilt(ctx, jobID, buildResult, existing.ArtifactID, fingerprint, source, reporter, cube_egress_ca.Result{
-				Baked:       len(caPEM) > 0,
-				Fingerprint: caFingerprint,
-			}, artifactURL, logger); err != nil {
-				return err
-			}
-			return nil
+			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3CfgEnabled, s3Client, logger)
 		}
 
 		select {
@@ -328,16 +298,7 @@ func runBuildLocked(
 			logger.Infof("artifact already built by a sibling job, reusing: artifact_id=%s path=%s", existing.ArtifactID, existing.Ext4Path)
 			// The reused ext4 already contains the CA baked at build time; report
 			// the fingerprint we resolved so CubeMaster records it consistently.
-			artifactURL := artifactPresignedURL(ctx, s3CfgEnabled, s3Client, existing.ArtifactID, logger)
-			buildResult := &image.BuildResult{
-				Ext4Path:  existing.Ext4Path,
-				SHA256:    existing.Ext4SHA256,
-				SizeBytes: existing.Ext4SizeBytes,
-			}
-			return reportArtifactBuilt(ctx, jobID, buildResult, existing.ArtifactID, fingerprint, source, reporter, cube_egress_ca.Result{
-				Baked:       len(caPEM) > 0,
-				Fingerprint: caFingerprint,
-			}, artifactURL, logger)
+			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3CfgEnabled, s3Client, logger)
 		}
 	}
 
@@ -376,12 +337,20 @@ func runBuildLocked(
 		return fmt.Errorf("build ext4: %w", err)
 	}
 
-	// Step 8: Upload to S3/MinIO when configured, then report BUILT.
+	// Step 8: Upload to the configured blob backend, then report BUILT.
+	// backend=s3 keeps today's fallback-to-local-disk on upload failure.
+	// backend=fs is explicit: a failed put is a failed build.
 	artifactURL := ""
+	uploaded := false
 	if s3CfgEnabled && s3Client != nil {
-		if _, err := s3Client.Upload(ctx, artifactID, result.Ext4Path); err != nil {
+		if _, err := s3Client.Upload(ctx, artifactID, result.Ext4Path, result.SHA256); err != nil {
+			if s3Client.BackendName() == "fs" {
+				reportFailed(templatecenter.JobPhaseBuildingExt4, fmt.Sprintf("upload artifact to fs store: %v", err))
+				return fmt.Errorf("upload artifact to fs store: %w", err)
+			}
 			logger.Warnf("upload artifact to s3 fail, falling back to local storage: %v", err)
 		} else {
+			uploaded = true
 			artifactURL = artifactPresignedURL(ctx, s3CfgEnabled, s3Client, artifactID, logger)
 		}
 	}
@@ -389,13 +358,46 @@ func runBuildLocked(
 	// Step 9: Report BUILT. CubeMaster persists the payload into result_json
 	// and resumes the job: finalize rootfs_artifacts, distribute to Cubelet
 	// nodes, register template_definitions.
-	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, artifactURL, logger); err != nil {
+	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, artifactURL, uploaded, s3Client, "", logger); err != nil {
 		return err
 	}
 
 	logger.Infof("template build completed: artifact_id=%s sha256=%s size=%d",
 		artifactID, result.SHA256, result.SizeBytes)
 	return nil
+}
+
+func reportExistingArtifact(
+	ctx context.Context,
+	jobID string,
+	existing *models.RootfsArtifact,
+	fingerprint string,
+	source *image.PreparedSource,
+	reporter *Reporter,
+	caPEM []byte,
+	caFingerprint string,
+	s3CfgEnabled bool,
+	s3Client *s3store.Client,
+	logger *cubelog.Entry,
+) error {
+	inStore := false
+	objectKey := ""
+	if s3Client != nil {
+		exists, err := s3Client.Stat(ctx, existing.ArtifactID)
+		if err == nil && exists {
+			inStore = true
+			objectKey = strings.TrimSpace(existing.ObjectKey)
+		}
+	}
+	artifactURL := artifactPresignedURL(ctx, s3CfgEnabled, s3Client, existing.ArtifactID, logger)
+	return reportArtifactBuilt(ctx, jobID, &image.BuildResult{
+		Ext4Path:  existing.Ext4Path,
+		SHA256:    existing.Ext4SHA256,
+		SizeBytes: existing.Ext4SizeBytes,
+	}, existing.ArtifactID, fingerprint, source, reporter, cube_egress_ca.Result{
+		Baked:       len(caPEM) > 0,
+		Fingerprint: caFingerprint,
+	}, artifactURL, inStore, s3Client, objectKey, logger)
 }
 
 // reportArtifactBuilt emits the BUILT callback to CubeMaster.
@@ -409,6 +411,9 @@ func reportArtifactBuilt(
 	reporter *Reporter,
 	caResult cube_egress_ca.Result,
 	artifactURL string,
+	inStore bool,
+	s3Client *s3store.Client,
+	objectKey string,
 	logger *cubelog.Entry,
 ) error {
 	// Two fields deserve explanation:
@@ -443,6 +448,16 @@ func reportArtifactBuilt(
 	}
 	if artifactURL != "" {
 		payload["artifact_url"] = artifactURL
+	}
+	// Only stamp backend/key after a successful upload (or reuse of an
+	// already-stored object). A configured client that failed Put must
+	// leave the three store columns empty so Master stays on local disk.
+	if inStore && s3Client != nil {
+		payload["storage_backend"] = s3Client.BackendName()
+		if objectKey == "" {
+			objectKey = s3Client.FullObjectKey(artifactID)
+		}
+		payload["object_key"] = objectKey
 	}
 	if err := reporter.Report(ctx, jobID, payload); err != nil {
 		logger.Errorf("report BUILT status fail: %v", err)
@@ -484,7 +499,12 @@ func artifactPresignedURL(ctx context.Context, s3CfgEnabled bool, s3Client artif
 	}
 	url, err := s3Client.PresignedGetURL(ctx, artifactID)
 	if err != nil {
-		logger.Warnf("generate s3 presigned url fail: %v", err)
+		if !errors.Is(err, blobstore.ErrUnsupported) {
+			logger.Warnf("generate s3 presigned url fail: %v", err)
+		}
+		return ""
+	}
+	if blobstore.IsObjectLocator(url) {
 		return ""
 	}
 	return url
@@ -534,25 +554,9 @@ func isBuildInProgress(storeDir string) bool {
 	return inProgress
 }
 
-// reuseExistingArtifact queries the DB for a READY artifact with the given
-// fingerprint. If found, it returns the artifact metadata (including the
-// artifactID, which is unique per build and includes a UUID). This is used
-// by the cross-replica deduplication logic: if another TC replica just
-// finished building the same spec, we reuse its output instead of building
-// again.
-//
-// The query checks:
-//   - template_spec_fingerprint matches
-//   - status is READY
-//   - the artifact's actual data still exists:
-//   - S3-backed artifacts (artifact_url set) are verified with a HEAD
-//     request against the bucket, NOT os.Stat. Multiple TC replicas do not
-//     necessarily share local disk when S3/MinIO is configured -- checking
-//     only os.Stat(Ext4Path) meant a replica other than the one that built
-//     the artifact would always see the local file "missing" and silently
-//     fall through to a full rebuild instead of reusing the S3 object.
-//   - local-only artifacts (no artifact_url) fall back to os.Stat, since
-//     that IS the artifact's only copy in that mode.
+// reuseExistingArtifact returns a READY artifact for fingerprint when its
+// data is still present (object store HEAD, or local ext4). Used so a
+// sibling replica's just-finished build is reused instead of rebuilt.
 func reuseExistingArtifact(ctx context.Context, db *gorm.DB, fingerprint string, s3CfgEnabled bool, s3Client *s3store.Client) (*models.RootfsArtifact, bool) {
 	var artifact models.RootfsArtifact
 	err := db.WithContext(ctx).
@@ -584,12 +588,12 @@ func reuseExistingArtifact(ctx context.Context, db *gorm.DB, fingerprint string,
 // artifactDataExists decides whether a READY artifact's underlying data is
 // still present, and returns a short human-readable reason for logging.
 //
-//   - S3-backed artifacts (ArtifactURL set) are verified via statS3 (a HEAD
-//     request against the bucket), NOT os.Stat. Multiple TC replicas do not
-//     necessarily share local disk when S3/MinIO is configured -- checking
-//     only os.Stat(Ext4Path) meant a replica other than the one that built
-//     the artifact would always see the local file "missing" and silently
-//     fall through to a full rebuild instead of reusing the S3 object.
+//   - Object-store artifacts (StorageBackend or ArtifactURL set) are verified
+//     via statS3 (a HEAD against the bucket), NOT os.Stat. Multiple TC
+//     replicas do not necessarily share local disk when S3/MinIO is
+//     configured -- checking only os.Stat(Ext4Path) meant a replica other
+//     than the one that built the artifact would always see the local file
+//     "missing" and silently fall through to a full rebuild.
 //   - If the HEAD check itself errors (transient network issue, not
 //     necessarily a missing object), fall back to os.Stat rather than
 //     forcing an unnecessary rebuild when a valid local copy exists on this
@@ -598,7 +602,7 @@ func reuseExistingArtifact(ctx context.Context, db *gorm.DB, fingerprint string,
 //     replica) are verified with os.Stat only, since that IS the artifact's
 //     only copy in that mode.
 func artifactDataExists(artifact *models.RootfsArtifact, statS3 func() (bool, error)) (string, bool) {
-	if artifact.ArtifactURL != "" && statS3 != nil {
+	if templatecenter.ArtifactUsesObjectStore(artifact) && statS3 != nil {
 		exists, err := statS3()
 		switch {
 		case err == nil && exists:
@@ -614,18 +618,4 @@ func artifactDataExists(artifact *models.RootfsArtifact, statS3 func() (bool, er
 		return fmt.Sprintf("ext4 file %s missing: %v", artifact.Ext4Path, err), false
 	}
 	return fmt.Sprintf("ext4: %s, %d bytes", artifact.Ext4Path, artifact.Ext4SizeBytes), true
-}
-
-// fileSHA256 streams the file through sha256 (same algorithm as the build path).
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }

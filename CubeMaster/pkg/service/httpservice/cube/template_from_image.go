@@ -16,12 +16,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
 	"gorm.io/gorm"
 )
 
@@ -258,7 +260,7 @@ func downloadTemplateArtifactGinHandler(c *gin.Context) {
 	// redirected to the object store. Nodes therefore only need reachability to
 	// CubeMaster's public address; Master/TC absorb any S3 endpoint topology.
 	if handled, ok := proxyS3Artifact(c); handled {
-		rt.RetCode = artifactProxyRetCode(ok)
+		rt.RetCode = artifactProxyRetCode(c, ok)
 		return
 	}
 
@@ -277,7 +279,7 @@ func headTemplateArtifactGinHandler(c *gin.Context) {
 	// HEAD follows the same S3 proxy-vs-local split as GET so servability probes
 	// exercise the exact node-facing download path.
 	if handled, ok := proxyS3Artifact(c); handled {
-		rt.RetCode = artifactProxyRetCode(ok)
+		rt.RetCode = artifactProxyRetCode(c, ok)
 		return
 	}
 
@@ -291,9 +293,12 @@ func headTemplateArtifactGinHandler(c *gin.Context) {
 
 // artifactProxyRetCode keeps the request log honest: an upstream proxy failure
 // wrote a 502 to the client and must not be recorded as a success.
-func artifactProxyRetCode(ok bool) int64 {
+func artifactProxyRetCode(c *gin.Context, ok bool) int64 {
 	if ok {
 		return int64(errorcode.ErrorCode_Success)
+	}
+	if c != nil && c.Writer.Status() == http.StatusNotFound {
+		return int64(errorcode.ErrorCode_NotFound)
 	}
 	return int64(errorcode.ErrorCode_MasterInternalError)
 }
@@ -315,8 +320,11 @@ func proxyS3Artifact(c *gin.Context) (handled bool, ok bool) {
 	if err != nil || record == nil {
 		return false, false
 	}
-	if record.ArtifactURL == "" {
+	if !templatecenter.ArtifactUsesObjectStore(record) {
 		return false, false
+	}
+	if artifactStreamsFromStore(record) {
+		return streamArtifactFromStore(c, record)
 	}
 	downloadURL := templatecenter.ArtifactDownloadURL(c.Request.Context(), record)
 	if downloadURL == "" {
@@ -342,6 +350,12 @@ func proxyS3Artifact(c *gin.Context) (handled bool, ok bool) {
 			upstreamReq.Header.Set(key, value)
 		}
 	}
+	// HEAD is rewritten to GET (SigV4 binds the method). Without a Range the
+	// upstream would stream the whole object; ask for one byte and discard it.
+	injectedHeadProbe := c.Request.Method == http.MethodHead && upstreamReq.Header.Get("Range") == ""
+	if injectedHeadProbe {
+		upstreamReq.Header.Set("Range", "bytes=0-0")
+	}
 	resp, err := artifactProxyHTTPClient.Do(upstreamReq)
 	if err != nil {
 		log.G(c.Request.Context()).Warnf("artifact proxy: fetch %s failed: %v", record.ArtifactID, err)
@@ -350,19 +364,92 @@ func proxyS3Artifact(c *gin.Context) (handled bool, ok bool) {
 	}
 	defer resp.Body.Close()
 	copyArtifactProxyHeaders(c.Writer.Header(), resp.Header)
-	c.Writer.Header().Set("X-Cube-Artifact-Id", record.ArtifactID)
-	c.Writer.Header().Set("ETag", record.Ext4SHA256)
-	c.Status(resp.StatusCode)
+	setArtifactIdentityHeaders(c, record)
+	status := resp.StatusCode
+	if injectedHeadProbe {
+		status = restoreHeadFromRangeProbe(c.Writer.Header(), resp)
+	}
+	c.Status(status)
 	if c.Request.Method == http.MethodHead {
-		// Drain nothing: the body is discarded so the connection can reuse or
-		// close promptly; the caller only wanted headers.
-		return true, resp.StatusCode < http.StatusBadRequest
+		c.Writer.WriteHeaderNow()
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8<<10))
+		return true, status < http.StatusBadRequest
 	}
 	if _, err := io.Copy(c.Writer, resp.Body); err != nil {
 		log.G(c.Request.Context()).Warnf("artifact proxy: stream %s failed: %v", record.ArtifactID, err)
 		return true, false
 	}
 	return true, resp.StatusCode < http.StatusBadRequest
+}
+
+func artifactStreamsFromStore(record *models.RootfsArtifact) bool {
+	return record.StorageBackend == "fs" || blobstore.IsObjectLocator(record.ArtifactURL)
+}
+
+func setArtifactIdentityHeaders(c *gin.Context, record *models.RootfsArtifact) {
+	c.Writer.Header().Set("X-Cube-Artifact-Id", record.ArtifactID)
+	c.Writer.Header().Set("ETag", record.Ext4SHA256)
+}
+
+func streamArtifactFromStore(c *gin.Context, record *models.RootfsArtifact) (bool, bool) {
+	obj, err := templatecenter.OpenArtifactObject(c.Request.Context(), record)
+	if err != nil {
+		log.G(c.Request.Context()).Warnf("artifact store get %s failed: %v", record.ArtifactID, err)
+		if blobstore.IsNotExist(err) {
+			c.AbortWithStatus(http.StatusNotFound)
+			return true, false
+		}
+		c.AbortWithStatus(http.StatusBadGateway)
+		return true, false
+	}
+	defer obj.Body.Close()
+	setArtifactIdentityHeaders(c, record)
+	if rs, ok := obj.Body.(io.ReadSeeker); ok {
+		http.ServeContent(c.Writer, c.Request, record.ArtifactID+".ext4", obj.LastModified, rs)
+		return true, true
+	}
+	c.Status(http.StatusOK)
+	if obj.Size >= 0 {
+		c.Header("Content-Length", strconv.FormatInt(obj.Size, 10))
+	}
+	if c.Request.Method == http.MethodHead {
+		c.Writer.WriteHeaderNow()
+		return true, true
+	}
+	if _, err := io.Copy(c.Writer, obj.Body); err != nil {
+		return true, false
+	}
+	return true, true
+}
+
+func restoreHeadFromRangeProbe(h http.Header, resp *http.Response) int {
+	if resp.StatusCode != http.StatusPartialContent {
+		return resp.StatusCode
+	}
+	total, ok := contentRangeTotal(resp.Header.Get("Content-Range"))
+	if !ok {
+		return resp.StatusCode
+	}
+	h.Del("Content-Range")
+	h.Set("Content-Length", strconv.FormatInt(total, 10))
+	return http.StatusOK
+}
+
+func contentRangeTotal(cr string) (int64, bool) {
+	cr = strings.TrimSpace(cr)
+	i := strings.LastIndex(cr, "/")
+	if i < 0 || i+1 >= len(cr) {
+		return 0, false
+	}
+	n := cr[i+1:]
+	if n == "*" {
+		return 0, false
+	}
+	total, err := strconv.ParseInt(n, 10, 64)
+	if err != nil || total < 0 {
+		return 0, false
+	}
+	return total, true
 }
 
 func copyArtifactProxyHeaders(dst, src http.Header) {

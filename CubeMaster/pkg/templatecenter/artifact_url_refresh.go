@@ -6,17 +6,19 @@ package templatecenter
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore/configenv"
+	fsdriver "github.com/tencentcloud/CubeSandbox/pkgs/blobstore/driver/fs"
+	s3driver "github.com/tencentcloud/CubeSandbox/pkgs/blobstore/driver/s3"
 )
 
 // This file re-signs S3/MinIO presigned artifact download URLs at the point
@@ -47,156 +49,180 @@ import (
 // and a graceful degradation for S3 ones (the stored URL keeps whatever
 // validity it has left).
 
-const (
-	envS3Endpoint        = "CUBE_S3_ENDPOINT"
-	envS3Bucket          = "CUBE_S3_BUCKET"
-	envS3AccessKey       = "CUBE_S3_ACCESS_KEY_ID"
-	legacyEnvS3AccessKey = "CUBE_S3_ACCESS_KEY"
-	envS3SecretKey       = "CUBE_S3_SECRET_ACCESS_KEY"
-	legacyEnvS3SecretKey = "CUBE_S3_SECRET_KEY"
-	envS3Region          = "CUBE_S3_REGION"
-	envS3UsePathStyle    = "CUBE_S3_USE_PATH_STYLE"
-	envS3UseSSL          = "CUBE_S3_USE_SSL"
-	envS3ArtifactPrefix  = "CUBE_S3_ARTIFACT_PREFIX"
-)
-
 // s3PresignExpiry matches s3store.DefaultPresignExpiry (7 days, the SigV4
 // maximum). Kept as a constant rather than an env override because every
 // signer in the deployment must agree on the object lifetime semantics.
 const s3PresignExpiry = 7 * 24 * time.Hour
 
-// s3ArtifactObjectKey derives the object key exactly as
-// CubeTemplateCenter/pkg/s3store.ObjectKey does: [prefix/]artifactID.ext4.
-// The two derivations MUST stay identical or re-signed URLs point at objects
-// that do not exist.
-func s3ArtifactObjectKey(prefix, artifactID string) string {
-	prefix = strings.TrimRight(strings.TrimSpace(prefix), "/")
-	if prefix == "" {
-		return artifactID + ".ext4"
-	}
-	return prefix + "/" + artifactID + ".ext4"
-}
-
-// s3Presigner is a lazily constructed minio client plus the config needed to
-// derive object keys. Construction reads the process environment once; a
-// config change requires a restart, consistent with every other env-based
-// setting in this process.
-type s3Presigner struct {
-	client *minio.Client
-	bucket string
-	prefix string
+type artifactStore struct {
+	store   blobstore.Store
+	backend string
 }
 
 var (
-	s3PresignerOnce sync.Once
-	s3PresignerInst *s3Presigner
+	artifactStoreOnce    sync.Once
+	artifactStoreInst    *artifactStore
+	artifactStoreOpenErr error
 )
 
-func s3BoolEnv(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
+func artifactUserKey(artifactID string) string {
+	return blobstore.ArtifactExt4Key("", artifactID)
 }
 
-// loadS3Presigner builds the shared signer from the environment, returning
-// nil when the configuration is incomplete (S3 not in use here).
-func loadS3Presigner() *s3Presigner {
-	endpoint := strings.TrimSpace(os.Getenv(envS3Endpoint))
-	bucket := strings.TrimSpace(os.Getenv(envS3Bucket))
-	accessKey := strings.TrimSpace(os.Getenv(envS3AccessKey))
-	if accessKey == "" {
-		accessKey = strings.TrimSpace(os.Getenv(legacyEnvS3AccessKey))
-	}
-	secretKey := strings.TrimSpace(os.Getenv(envS3SecretKey))
-	if secretKey == "" {
-		secretKey = strings.TrimSpace(os.Getenv(legacyEnvS3SecretKey))
-	}
-	if endpoint == "" || bucket == "" || accessKey == "" || secretKey == "" {
-		return nil
-	}
-	// Strip the scheme if present; minio-go takes host only (mirrors
-	// s3store.NewClient).
-	endpoint = strings.TrimPrefix(endpoint, "http://")
-	endpoint = strings.TrimPrefix(endpoint, "https://")
-	endpoint = strings.TrimRight(endpoint, "/")
+func sharedArtifactStore() *artifactStore {
+	artifactStoreOnce.Do(func() {
+		artifactStoreInst = loadArtifactStore()
+	})
+	return artifactStoreInst
+}
 
-	opts := &minio.Options{
-		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
-		Secure: s3BoolEnv(envS3UseSSL),
-		Region: strings.TrimSpace(os.Getenv(envS3Region)),
+// loadArtifactStore builds the shared artifact store from the environment,
+// returning nil when the configuration is incomplete (S3 not in use here).
+func loadArtifactStore() *artifactStore {
+	backend := configenv.ArtifactStoreBackend()
+	prefix := configenv.EnvOr(configenv.EnvS3ArtifactPrefix)
+	if backend == "fs" {
+		root := configenv.ResolveArtifactFSRoot()
+		st, err := blobstore.Open(context.Background(), fsdriver.Options{Root: root}.Config(root, prefix))
+		if err != nil {
+			noteArtifactStoreErr("open", backend, err)
+			return nil
+		}
+		if err := st.Prepare(context.Background()); err != nil {
+			_ = st.Close()
+			noteArtifactStoreErr("prepare", backend, err)
+			return nil
+		}
+		return &artifactStore{store: st, backend: backend}
 	}
-	if s3BoolEnv(envS3UsePathStyle) {
-		opts.BucketLookup = minio.BucketLookupPath
-	}
-	client, err := minio.New(endpoint, opts)
-	if err != nil {
-		// A malformed endpoint must not disable the fallback: callers still
-		// have the stored URL.
+
+	s3 := configenv.ParseArtifactS3()
+	if !s3.Enabled {
 		return nil
 	}
-	return &s3Presigner{
-		client: client,
-		bucket: bucket,
-		prefix: strings.TrimSpace(os.Getenv(envS3ArtifactPrefix)),
+	useSSL := s3.UseSSL
+	st, err := blobstore.Open(context.Background(), s3driver.Options{
+		Endpoint:           s3.Endpoint,
+		AccessKeyID:        s3.AccessKey,
+		SecretAccessKey:    s3.SecretKey,
+		Bucket:             s3.Bucket,
+		Region:             s3.Region,
+		PathStyle:          s3.UsePathStyle,
+		UseSSL:             &useSSL,
+		PresignExpiry:      s3PresignExpiry,
+		AttachmentBasename: true,
+	}.Config(prefix))
+	if err != nil {
+		noteArtifactStoreErr("open", backend, err)
+		return nil
 	}
+	return &artifactStore{store: st, backend: backend}
+}
+
+func noteArtifactStoreErr(phase, backend string, err error) {
+	artifactStoreOpenErr = err
+	log.G(context.Background()).Warnf("artifact store %s failed backend=%s: %v", phase, backend, err)
+}
+
+// InitArtifactStore logs the selected backend, records it on the shared
+// artifact volume, and fails fast when backend=fs cannot be opened.
+func InitArtifactStore(ctx context.Context) error {
+	backend := configenv.ArtifactStoreBackend()
+	if err := blobstore.AnnounceIfFS(configenv.ResolveArtifactFSRoot(), backend); err != nil {
+		return err
+	}
+	inst := sharedArtifactStore()
+	if backend == "fs" && inst == nil {
+		if artifactStoreOpenErr != nil {
+			return fmt.Errorf("CUBE_ARTIFACT_STORE_BACKEND=fs but the artifact store failed to open: %w", artifactStoreOpenErr)
+		}
+		return fmt.Errorf("CUBE_ARTIFACT_STORE_BACKEND=fs but the artifact store failed to open")
+	}
+	if inst != nil {
+		log.G(ctx).Infof("storage backend selected backend=%s reason=explicit", backend)
+		return nil
+	}
+	if !configenv.ParseArtifactS3().Enabled {
+		log.G(ctx).Warnf("storage backend degraded requested=s3 effective=local-disk reason=incomplete CUBE_S3_* credentials")
+		return nil
+	}
+	if artifactStoreOpenErr != nil {
+		log.G(ctx).Warnf("storage backend degraded requested=s3 effective=local-disk reason=%v", artifactStoreOpenErr)
+	}
+	return nil
+}
+
+func artifactStoreColumns(artifactID string) (backend, objectKey string) {
+	st := sharedArtifactStore()
+	if st == nil {
+		return "", ""
+	}
+	return st.backend, blobstore.ArtifactExt4Key(configenv.EnvOr(configenv.EnvS3ArtifactPrefix), artifactID)
 }
 
 // presignArtifactGetURL is the single signing seam, indirected so tests can
 // substitute a fake without a live object store.
-var presignArtifactGetURL = func(ctx context.Context, artifactID string) (string, error) {
-	s3PresignerOnce.Do(func() {
-		s3PresignerInst = loadS3Presigner()
-	})
-	if s3PresignerInst == nil {
+var presignArtifactGetURL = func(ctx context.Context, artifact *models.RootfsArtifact) (string, error) {
+	if artifact == nil {
 		return "", errS3PresignNotConfigured
 	}
-	s := s3PresignerInst
-	reqParams := make(url.Values)
-	reqParams.Set("response-content-disposition", fmt.Sprintf("attachment; filename=\"%s.ext4\"", artifactID))
-	u, err := s.client.PresignedGetObject(ctx, s.bucket, s3ArtifactObjectKey(s.prefix, artifactID), s3PresignExpiry, reqParams)
-	if err != nil {
-		return "", fmt.Errorf("presign get %s: %w", artifactID, err)
+	st := sharedArtifactStore()
+	if st == nil {
+		return "", errS3PresignNotConfigured
 	}
-	return u.String(), nil
+	u, err := st.store.SignedGetURL(ctx, artifactStoreKey(ctx, artifact), s3PresignExpiry)
+	if err != nil {
+		if errors.Is(err, blobstore.ErrUnsupported) {
+			return "", nil
+		}
+		return "", fmt.Errorf("presign get %s: %w", artifact.ArtifactID, err)
+	}
+	if blobstore.IsObjectLocator(u) {
+		return "", nil
+	}
+	return u, nil
 }
 
 var errS3PresignNotConfigured = fmt.Errorf("s3 presign not configured on cubemaster")
 
-// statArtifactObjectInS3 checks whether the S3 object for artifactID exists.
+// statArtifactObjectInS3 checks whether the object for this artifact row exists.
 // Returns (false, nil) only for a definitive "not found".
-var statArtifactObjectInS3 = func(ctx context.Context, artifactID string) (bool, error) {
-	s3PresignerOnce.Do(func() {
-		s3PresignerInst = loadS3Presigner()
-	})
-	if s3PresignerInst == nil {
+var statArtifactObjectInS3 = func(ctx context.Context, artifact *models.RootfsArtifact) (bool, error) {
+	if artifact == nil {
 		return false, errS3PresignNotConfigured
 	}
-	s := s3PresignerInst
-	_, err := s.client.StatObject(ctx, s.bucket, s3ArtifactObjectKey(s.prefix, artifactID), minio.StatObjectOptions{})
+	st := sharedArtifactStore()
+	if st == nil {
+		return false, errS3PresignNotConfigured
+	}
+	_, err := st.store.Stat(ctx, artifactStoreKey(ctx, artifact))
 	if err != nil {
-		code := minio.ToErrorResponse(err).Code
-		if code == "NoSuchKey" || code == "NotFound" {
+		if blobstore.IsNotExist(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("stat s3 object for artifact %s: %w", artifactID, err)
+		return false, fmt.Errorf("stat s3 object for artifact %s: %w", artifact.ArtifactID, err)
 	}
 	return true, nil
 }
 
 // uploadArtifactFileToS3 uploads filePath as the object of artifactID.
 var uploadArtifactFileToS3 = func(ctx context.Context, artifactID, filePath string) error {
-	s3PresignerOnce.Do(func() {
-		s3PresignerInst = loadS3Presigner()
-	})
-	if s3PresignerInst == nil {
+	store := sharedArtifactStore()
+	if store == nil {
 		return errS3PresignNotConfigured
 	}
-	s := s3PresignerInst
-	_, err := s.client.FPutObject(ctx, s.bucket, s3ArtifactObjectKey(s.prefix, artifactID), filePath, minio.PutObjectOptions{
+	f, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("upload artifact %s to s3 from %s: %w", artifactID, filePath, err)
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	_, err = store.store.Put(ctx, artifactUserKey(artifactID), f, blobstore.PutOptions{
 		ContentType: "application/octet-stream",
+		Size:        st.Size(),
 	})
 	if err != nil {
 		return fmt.Errorf("upload artifact %s to s3 from %s: %w", artifactID, filePath, err)
@@ -208,6 +234,69 @@ var uploadArtifactFileToS3 = func(ctx context.Context, artifactID, filePath stri
 // download redirect endpoint), which lives in a different package.
 func ArtifactDownloadURL(ctx context.Context, artifact *models.RootfsArtifact) string {
 	return artifactDownloadURL(ctx, artifact)
+}
+
+// ArtifactUsesObjectStore reports whether the durable copy lives in blobstore.
+func ArtifactUsesObjectStore(artifact *models.RootfsArtifact) bool {
+	if artifact == nil {
+		return false
+	}
+	if strings.TrimSpace(artifact.StorageBackend) != "" {
+		return true
+	}
+	u := strings.TrimSpace(artifact.ArtifactURL)
+	return u != ""
+}
+
+// OpenArtifactObject reads the artifact from the configured blob backend.
+func OpenArtifactObject(ctx context.Context, artifact *models.RootfsArtifact) (*blobstore.Object, error) {
+	st := sharedArtifactStore()
+	if st == nil {
+		return nil, errS3PresignNotConfigured
+	}
+	return st.store.Get(ctx, artifactStoreKey(ctx, artifact), blobstore.GetOptions{})
+}
+
+func artifactStoreKey(ctx context.Context, artifact *models.RootfsArtifact) string {
+	if artifact == nil {
+		return ""
+	}
+	return artifactStoreKeyWithPrefix(ctx, artifact, artifactStorePrefix())
+}
+
+func artifactStorePrefix() string {
+	return strings.Trim(configenv.EnvOr(configenv.EnvS3ArtifactPrefix), "/")
+}
+
+func artifactStoreKeyWithPrefix(ctx context.Context, artifact *models.RootfsArtifact, prefix string) string {
+	fallback := artifactUserKey(artifact.ArtifactID)
+	stored := strings.TrimSpace(artifact.ObjectKey)
+	if stored == "" {
+		return fallback
+	}
+	key := userKeyFromStoredObjectKey(stored, prefix)
+	if prefix != "" && strings.Contains(key, "/") {
+		log.G(ctx).Warnf("artifact object_key %q does not match store prefix %q; using derived key %s", stored, prefix, fallback)
+		return fallback
+	}
+	if blobstore.ValidateKey(key) != nil {
+		return fallback
+	}
+	return key
+}
+
+func userKeyFromStoredObjectKey(stored, prefix string) string {
+	stored = strings.Trim(strings.TrimSpace(stored), "/")
+	prefix = strings.Trim(prefix, "/")
+	if prefix != "" {
+		if stored == prefix {
+			return ""
+		}
+		if p := prefix + "/"; strings.HasPrefix(stored, p) {
+			return strings.TrimPrefix(stored, p)
+		}
+	}
+	return stored
 }
 
 // artifactDownloadURL resolves the download URL to hand out for an artifact
@@ -230,12 +319,18 @@ func artifactDownloadURL(ctx context.Context, artifact *models.RootfsArtifact) s
 	if stored == "" {
 		return ""
 	}
-	fresh, err := presignArtifactGetURL(ctx, artifact.ArtifactID)
+	if blobstore.IsObjectLocator(stored) {
+		return stored
+	}
+	fresh, err := presignArtifactGetURL(ctx, artifact)
 	if err != nil {
 		if err != errS3PresignNotConfigured {
 			log.G(ctx).Warnf("re-sign artifact url fail, using stored url: artifact_id=%s err=%v", artifact.ArtifactID, err)
 		}
 		return stored
 	}
-	return fresh
+	if fresh != "" {
+		return fresh
+	}
+	return stored
 }

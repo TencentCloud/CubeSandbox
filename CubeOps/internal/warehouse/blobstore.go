@@ -8,14 +8,14 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
 )
 
 const (
 	// PutPartSize is the multipart part size. Must be explicit: minio-go
 	// otherwise buffers 512MiB per concurrent unknown-length upload.
 	PutPartSize = 64 << 20
-
-	metaSHA256Key = "sha256"
 )
 
 // ObjectInfo describes one stored object.
@@ -41,10 +41,14 @@ type BlobStore interface {
 	Delete(ctx context.Context, key string) error
 	PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error)
 	List(ctx context.Context, prefix string) ([]ObjectInfo, error)
+	// ListIncompleteUploads and AbortMultipartUpload remain for interface
+	// compatibility. Production cleanup is Store.GC / bucket lifecycle;
+	// Adapter implementations are no-op stubs.
 	ListIncompleteUploads(ctx context.Context, prefix string) ([]IncompleteUpload, error)
 	AbortMultipartUpload(ctx context.Context, key, uploadID string) error
 	EnsureBucket(ctx context.Context) error
 	EnsureLifecycle(ctx context.Context) error
+	GC(ctx context.Context) error
 }
 
 // ErrNotExist means the object (or bucket) is missing.
@@ -59,7 +63,7 @@ func IsNotExist(err error) bool {
 	if _, ok := err.(objectNotFoundError); ok {
 		return true
 	}
-	return isS3NotFound(err)
+	return blobstore.IsNotExist(err)
 }
 
 func formatChecksum(sum string) string {

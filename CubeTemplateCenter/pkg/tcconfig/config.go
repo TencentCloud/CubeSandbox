@@ -41,6 +41,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore/configenv"
 )
 
 // Variables read by shared CubeMaster code. These CANNOT be renamed at the read
@@ -110,26 +111,20 @@ const (
 	EnvMaxConcurrentBuilds       = "CUBE_TEMPLATE_CENTER_MAX_CONCURRENT_BUILDS"
 	legacyEnvMaxConcurrentBuilds = "CUBE_TC_MAX_CONCURRENT_BUILDS"
 
-	// S3/MinIO artifact storage. TC reuses the SAME CUBE_S3_* variables that
-	// Cubelet / s3lvol / volume plugins already read, so a deployment configures
-	// S3 once and every component picks it up. When the variables are absent or
-	// incomplete TC falls back to local disk storage.
-	//
-	// The key names carry the _ID suffix used everywhere else (one-click fills
-	// them from the local MinIO automatically); the suffix-less spellings this
-	// process used before the alignment are still honoured as legacy fallbacks.
-	EnvS3Endpoint        = "CUBE_S3_ENDPOINT"
-	EnvS3Bucket          = "CUBE_S3_BUCKET"
-	EnvS3AccessKey       = "CUBE_S3_ACCESS_KEY_ID"
-	legacyEnvS3AccessKey = "CUBE_S3_ACCESS_KEY"
-	EnvS3SecretKey       = "CUBE_S3_SECRET_ACCESS_KEY"
-	legacyEnvS3SecretKey = "CUBE_S3_SECRET_KEY"
-	EnvS3Region          = "CUBE_S3_REGION"
-	EnvS3UsePathStyle    = "CUBE_S3_USE_PATH_STYLE"
-	EnvS3UseSSL          = "CUBE_S3_USE_SSL"
-
-	// Optional object key prefix inside the bucket.
-	EnvS3ArtifactPrefix = "CUBE_S3_ARTIFACT_PREFIX"
+	// S3/MinIO artifact storage. Names are aliases of configenv so existing
+	// t.Setenv(tcconfig.EnvS3*) call sites keep working.
+	EnvS3Endpoint           = configenv.EnvS3Endpoint
+	EnvS3Bucket             = configenv.EnvS3Bucket
+	EnvS3AccessKey          = configenv.EnvS3AccessKeyID
+	legacyEnvS3AccessKey    = configenv.LegacyEnvS3AccessKey
+	EnvS3SecretKey          = configenv.EnvS3SecretAccessKey
+	legacyEnvS3SecretKey    = configenv.LegacyEnvS3SecretKey
+	EnvS3Region             = configenv.EnvS3Region
+	EnvS3UsePathStyle       = configenv.EnvS3UsePathStyle
+	EnvS3UseSSL             = configenv.EnvS3UseSSL
+	EnvS3ArtifactPrefix     = configenv.EnvS3ArtifactPrefix
+	EnvArtifactStoreBackend = configenv.EnvArtifactStoreBackend
+	EnvArtifactStoreFSRoot  = configenv.EnvArtifactStoreFSRoot
 )
 
 // defaultMasterEndpoint keeps a single-host deployment working with no
@@ -161,18 +156,19 @@ func MaxConcurrentBuilds() int {
 // variables as Cubelet / s3lvol / volume plugins, so S3 is configured once
 // for the whole deployment.
 func S3Config() (enabled bool, endpoint, bucket, accessKey, secretKey, region string, usePathStyle, useSSL bool, artifactPrefix string) {
-	endpoint = strings.TrimSpace(os.Getenv(EnvS3Endpoint))
-	bucket = strings.TrimSpace(os.Getenv(EnvS3Bucket))
-	accessKey, _ = lookup(EnvS3AccessKey, legacyEnvS3AccessKey)
-	secretKey, _ = lookup(EnvS3SecretKey, legacyEnvS3SecretKey)
-	region = strings.TrimSpace(os.Getenv(EnvS3Region))
-	usePathStyle = boolValue(os.Getenv(EnvS3UsePathStyle))
-	useSSL = boolValue(os.Getenv(EnvS3UseSSL))
-	artifactPrefix = strings.TrimSpace(os.Getenv(EnvS3ArtifactPrefix))
-	if endpoint == "" || bucket == "" || accessKey == "" || secretKey == "" {
-		return false, "", "", "", "", "", false, false, ""
-	}
-	return true, endpoint, bucket, accessKey, secretKey, region, usePathStyle, useSSL, artifactPrefix
+	cfg := configenv.ParseArtifactS3()
+	return cfg.Enabled, cfg.Endpoint, cfg.Bucket, cfg.AccessKey, cfg.SecretKey, cfg.Region, cfg.UsePathStyle, cfg.UseSSL, cfg.Prefix
+}
+
+// ArtifactStoreBackend returns "s3" (default) or "fs".
+func ArtifactStoreBackend() string {
+	return configenv.ArtifactStoreBackend()
+}
+
+// ArtifactStoreFSRoot is the fs backend directory. Empty means the caller
+// should use CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR.
+func ArtifactStoreFSRoot() string {
+	return configenv.ArtifactStoreFSRoot()
 }
 
 var (

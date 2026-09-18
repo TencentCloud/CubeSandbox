@@ -171,6 +171,7 @@ help:
 	@printf "  shim-test     Run CubeShim unit tests in Docker\n"
 	@printf "  cubelog-test  Run cubelog unit tests on the host\n"
 	@printf "  cubedb-test   Run CubeDB unit tests on the host\n"
+	@printf "  blobstore-test Run pkgs/blobstore unit tests on the host\n"
 	@printf "  proto-test    Run pkgs/proto unit tests on the host\n"
 	@printf "  cube-lifecycle-manager-test Run cube-lifecycle-manager unit tests in Docker\n"
 	@printf "  agent-test    Run cube-agent unit tests in Docker\n"
@@ -517,6 +518,12 @@ cubelog-test:
 cubedb-test:
 	cd pkgs/cubedb && go mod download && go test ./...
 
+# pkgs/blobstore is pure Go (no CGO). Consumers compile it via replace;
+# the module's own tests must run here.
+.PHONY: blobstore-test
+blobstore-test:
+	cd pkgs/blobstore && go mod download && go test ./...
+
 # pkgs/proto runs on the host: pure Go (generated .pb.go + grpc/protobuf
 # deps, no CGO/builder-only deps), like cubelog/cubedb. Consumers only
 # compile its non-test code via replace, so the module's own _test.go files
@@ -647,6 +654,8 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C pkgs/CubeLog fmt
 	@printf '  %-8s %s\n' "FMT" "proto"
 	@$(MAKE) -C pkgs/proto fmt
+	@printf '  %-8s %s\n' "FMT" "blobstore"
+	@$(MAKE) -C pkgs/blobstore fmt
 	@printf '  %-8s %s\n' "FMT" "CubeMaster"
 	@$(MAKE) -C CubeMaster fmt
 	@printf '  %-8s %s\n' "FMT" "CubeTemplateCenter"

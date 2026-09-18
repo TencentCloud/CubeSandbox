@@ -14,12 +14,13 @@ import (
 	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore/configenv"
 )
 
 const (
 	// TC shares CubeMaster's artifact store (design §9.7): TC writes the ext4,
 	// CubeMaster serves the download, and both resolve the same directory.
-	defaultArtifactStoreDir  = "/data/CubeMaster/storage"
+	defaultArtifactStoreDir  = configenv.DefaultArtifactStoreDir
 	fallbackArtifactStoreDir = "cubemaster-rootfs-artifacts-store"
 )
 
@@ -30,15 +31,8 @@ func ArtifactWorkRootDir() string {
 	return filepath.Join(os.TempDir(), "cubemaster-rootfs-artifacts")
 }
 
-func artifactStoreRootOverride() string {
-	return strings.TrimSpace(os.Getenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR"))
-}
-
 func ArtifactStoreRootDir() string {
-	if value := artifactStoreRootOverride(); value != "" {
-		return value
-	}
-	return defaultArtifactStoreDir
+	return configenv.ArtifactStoreDir()
 }
 
 func ext4FixedOverheadMiB() int64 {
@@ -100,7 +94,7 @@ func ResolveArtifactStoreDir(ctx context.Context, artifactID string) (string, er
 	if !ValidArtifactID(artifactID) {
 		return "", fmt.Errorf("invalid artifact id %q: must match %s without path separators or '..'", artifactID, artifactIDShape)
 	}
-	if configured := artifactStoreRootOverride(); configured != "" {
+	if configured := configenv.EnvOr(configenv.EnvRootfsArtifactStoreDir); configured != "" {
 		dir := filepath.Join(configured, artifactID)
 		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 			return "", fmt.Errorf("prepare configured artifact store root %s failed: %w", configured, err)
@@ -108,15 +102,14 @@ func ResolveArtifactStoreDir(ctx context.Context, artifactID string) (string, er
 		return dir, nil
 	}
 	primaryDir := artifactStoreDir(artifactID)
-	if err := os.MkdirAll(filepath.Dir(primaryDir), 0o755); err == nil {
+	err := os.MkdirAll(filepath.Dir(primaryDir), 0o755)
+	if err == nil {
 		return primaryDir, nil
-	} else {
-		fallbackDir := filepath.Join(ArtifactFallbackStoreRootDir(), artifactID)
-		if fallbackErr := os.MkdirAll(filepath.Dir(fallbackDir), 0o755); fallbackErr == nil {
-			log.G(ctx).Warnf("artifact store root %s is unavailable, fallback to %s: %v", ArtifactStoreRootDir(), ArtifactFallbackStoreRootDir(), err)
-			return fallbackDir, nil
-		} else {
-			return "", fmt.Errorf("prepare artifact store root %s failed: %w; fallback %s failed: %v", ArtifactStoreRootDir(), err, ArtifactFallbackStoreRootDir(), fallbackErr)
-		}
 	}
+	fallbackDir := filepath.Join(ArtifactFallbackStoreRootDir(), artifactID)
+	if fallbackErr := os.MkdirAll(filepath.Dir(fallbackDir), 0o755); fallbackErr != nil {
+		return "", fmt.Errorf("prepare artifact store root %s failed: %w; fallback %s failed: %v", ArtifactStoreRootDir(), err, ArtifactFallbackStoreRootDir(), fallbackErr)
+	}
+	log.G(ctx).Warnf("artifact store root %s is unavailable, fallback to %s: %v", ArtifactStoreRootDir(), ArtifactFallbackStoreRootDir(), err)
+	return fallbackDir, nil
 }

@@ -83,7 +83,11 @@ func (a *App) Run() {
 	// deleter and the build path never construct duplicate clients.
 	var deleter *build.ArtifactDeleter
 	if db := templatecenter.GetDB(); db != nil {
-		s3Client, _ := build.SharedS3Client()
+		s3Client, s3OK := build.SharedS3Client()
+		if tcconfig.ArtifactStoreBackend() == "fs" && !s3OK {
+			stdlog.Fatalf("CUBE_ARTIFACT_STORE_BACKEND=fs but the artifact store failed to open")
+			return
+		}
 		deleter = build.NewArtifactDeleter(db, s3Client)
 		api.SetArtifactDeleter(deleter)
 	} else {

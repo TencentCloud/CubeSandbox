@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Tencent. All rights reserved.
 #
 # Build-context filter for CubeMaster/docker/Dockerfile.cubemastercli
-# (context = repository root). Same sibling modules as CubeMaster/docker/Dockerfile;
+# (context = repository root). Allow the trees this Dockerfile COPYs;
 # no deploy/scripts (CLI image has no volume-deps installer).
 **
 !CubeMaster
@@ -10,6 +10,8 @@
 !pkgs
 !pkgs/CubeLog
 !pkgs/CubeLog/**
+!pkgs/blobstore
+!pkgs/blobstore/**
 !pkgs/cubedb
 !pkgs/cubedb/**
 !pkgs/proto

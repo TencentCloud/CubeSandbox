@@ -6,6 +6,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -272,5 +273,79 @@ warehouse:
 	}
 	if cfg.Warehouse.CNBToken != "cnb-secret" {
 		t.Errorf("Warehouse.CNBToken = %q, want cnb-secret", cfg.Warehouse.CNBToken)
+	}
+}
+
+func TestLoad_RejectsUnknownStoreBackend(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(yamlPath, []byte(`database_url: "mysql://root:pass@127.0.0.1:3306/testdb"
+store:
+  backend: filesystem
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CUBE_OPS_CONFIG", yamlPath)
+	t.Setenv("CUBE_OPS_STORE_BACKEND", "")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected unknown store.backend to fail Load")
+	}
+	if !strings.Contains(err.Error(), "filesystem") {
+		t.Fatalf("error %q should mention the invalid value", err)
+	}
+}
+
+func TestLoad_RejectsUnknownStoreBackendEnv(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(yamlPath, []byte(`database_url: "mysql://root:pass@127.0.0.1:3306/testdb"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CUBE_OPS_CONFIG", yamlPath)
+	t.Setenv("CUBE_OPS_STORE_BACKEND", "filesystem")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected unknown CUBE_OPS_STORE_BACKEND to fail Load")
+	}
+}
+
+func TestLoad_StoreBackendEmptyIsS3(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(yamlPath, []byte(`database_url: "mysql://root:pass@127.0.0.1:3306/testdb"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CUBE_OPS_CONFIG", yamlPath)
+	t.Setenv("CUBE_OPS_STORE_BACKEND", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Store.Backend != StoreBackendS3 {
+		t.Fatalf("Backend=%q want s3", cfg.Store.Backend)
+	}
+}
+
+func TestLoad_StoreFSSharedFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(yamlPath, []byte(`database_url: "mysql://root:pass@127.0.0.1:3306/testdb"
+store:
+  backend: fs
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CUBE_OPS_CONFIG", yamlPath)
+	t.Setenv("CUBE_OPS_STORE_BACKEND", "fs")
+	t.Setenv("CUBE_OPS_STORE_FS_SHARED", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Store.FSBackend.Shared {
+		t.Fatal("CUBE_OPS_STORE_FS_SHARED=true")
 	}
 }

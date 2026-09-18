@@ -128,6 +128,23 @@ func TestWarehouseDisabledReturns501(t *testing.T) {
 	}
 }
 
+func TestWarehouseInternalObjectHEADRegistered(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := testWH()
+	r := gin.New()
+	h.RegisterInternal(r.Group("/internal/warehouse"))
+	w := httptestRecorder(t, r, "HEAD", "/internal/warehouse/object")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status=%d want 404 from handler (not gin miss)", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "404 page not found") {
+		t.Fatal("HEAD /object was not registered")
+	}
+	if !strings.Contains(w.Body.String(), "object gateway disabled") {
+		t.Fatalf("body=%s", w.Body.String())
+	}
+}
+
 func TestWarehouseGetBlobRequiresNodeID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := testWH()

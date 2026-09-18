@@ -13,35 +13,33 @@ import (
 )
 
 // stubPresign swaps the signing seam and restores it on cleanup.
-func stubPresign(t *testing.T, fn func(ctx context.Context, artifactID string) (string, error)) {
+func stubPresign(t *testing.T, fn func(ctx context.Context, artifact *models.RootfsArtifact) (string, error)) {
 	t.Helper()
 	old := presignArtifactGetURL
 	presignArtifactGetURL = fn
 	t.Cleanup(func() { presignArtifactGetURL = old })
 }
 
-func TestS3ArtifactObjectKeyMatchesS3Store(t *testing.T) {
-	// These derivations MUST stay byte-identical with
-	// CubeTemplateCenter/pkg/s3store.ObjectKey or re-signed URLs point at
-	// objects that do not exist.
-	cases := []struct{ prefix, id, want string }{
-		{"", "rfs-1", "rfs-1.ext4"},
-		{"template-artifacts/", "rfs-1", "template-artifacts/rfs-1.ext4"},
-		{"template-artifacts", "rfs-1", "template-artifacts/rfs-1.ext4"},
-		{"  ", "rfs-1", "rfs-1.ext4"},
-	}
-	for _, tc := range cases {
-		if got := s3ArtifactObjectKey(tc.prefix, tc.id); got != tc.want {
-			t.Fatalf("s3ArtifactObjectKey(%q, %q) = %q, want %q", tc.prefix, tc.id, got, tc.want)
-		}
-	}
-}
-
 // A local-disk artifact (no stored URL) must yield "" so the caller falls
 // back to the Master-served download endpoint; signing must not even be
 // attempted.
+func TestArtifactUsesObjectStore(t *testing.T) {
+	if ArtifactUsesObjectStore(nil) {
+		t.Fatal("nil")
+	}
+	if ArtifactUsesObjectStore(&models.RootfsArtifact{}) {
+		t.Fatal("empty row")
+	}
+	if !ArtifactUsesObjectStore(&models.RootfsArtifact{StorageBackend: "fs"}) {
+		t.Fatal("backend")
+	}
+	if !ArtifactUsesObjectStore(&models.RootfsArtifact{ArtifactURL: "https://s3/x"}) {
+		t.Fatal("url")
+	}
+}
+
 func TestArtifactDownloadURLLocalArtifact(t *testing.T) {
-	stubPresign(t, func(context.Context, string) (string, error) {
+	stubPresign(t, func(context.Context, *models.RootfsArtifact) (string, error) {
 		t.Fatal("presign must not be called for a local-disk artifact")
 		return "", nil
 	})
@@ -54,11 +52,23 @@ func TestArtifactDownloadURLLocalArtifact(t *testing.T) {
 	}
 }
 
+func TestArtifactDownloadURLKeepsLocator(t *testing.T) {
+	stubPresign(t, func(context.Context, *models.RootfsArtifact) (string, error) {
+		t.Fatal("presign must not be called for a locator")
+		return "", nil
+	})
+	stored := "blobstore:fs:template-artifacts/rfs-1.ext4"
+	got := artifactDownloadURL(context.Background(), &models.RootfsArtifact{ArtifactID: "rfs-1", ArtifactURL: stored})
+	if got != stored {
+		t.Fatalf("got %q want locator", got)
+	}
+}
+
 // An S3-backed artifact gets a FRESH presigned URL at the point of use, never
 // the aging one stored at build time.
 func TestArtifactDownloadURLResigns(t *testing.T) {
-	stubPresign(t, func(_ context.Context, artifactID string) (string, error) {
-		return "https://minio:9000/bucket/" + artifactID + ".ext4?X-Amz-Signature=fresh", nil
+	stubPresign(t, func(_ context.Context, artifact *models.RootfsArtifact) (string, error) {
+		return "https://minio:9000/bucket/" + artifact.ArtifactID + ".ext4?X-Amz-Signature=fresh", nil
 	})
 	stored := "https://minio:9000/bucket/rfs-9.ext4?X-Amz-Signature=stale"
 	got := artifactDownloadURL(context.Background(), &models.RootfsArtifact{ArtifactID: "rfs-9", ArtifactURL: stored})
@@ -73,10 +83,45 @@ func TestArtifactDownloadURLResigns(t *testing.T) {
 func TestArtifactDownloadURLFallsBackToStored(t *testing.T) {
 	stored := "https://minio:9000/bucket/rfs-9.ext4?X-Amz-Signature=stale"
 	for _, err := range []error{errS3PresignNotConfigured, errors.New("boom")} {
-		stubPresign(t, func(context.Context, string) (string, error) { return "", err })
+		stubPresign(t, func(context.Context, *models.RootfsArtifact) (string, error) { return "", err })
 		got := artifactDownloadURL(context.Background(), &models.RootfsArtifact{ArtifactID: "rfs-9", ArtifactURL: stored})
 		if got != stored {
 			t.Fatalf("err=%v: got %q, want stored url %q", err, got, stored)
 		}
+	}
+	stubPresign(t, func(context.Context, *models.RootfsArtifact) (string, error) { return "", nil })
+	got := artifactDownloadURL(context.Background(), &models.RootfsArtifact{ArtifactID: "rfs-9", ArtifactURL: stored})
+	if got != stored {
+		t.Fatalf("empty fresh: got %q, want stored url %q", got, stored)
+	}
+}
+
+func TestArtifactStoreKeyStripsConfiguredPrefix(t *testing.T) {
+	artifact := &models.RootfsArtifact{ArtifactID: "rfs-1", ObjectKey: "template-artifacts/rfs-1.ext4"}
+	ctx := context.Background()
+	got := artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
+	if got != "rfs-1.ext4" {
+		t.Fatalf("prefixed object_key: got %q want rfs-1.ext4", got)
+	}
+	artifact.ObjectKey = "rfs-1.ext4"
+	got = artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
+	if got != "rfs-1.ext4" {
+		t.Fatalf("user-key object_key: got %q", got)
+	}
+	artifact.ObjectKey = "old-prefix/nested/rfs-1.ext4"
+	got = artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
+	if got != "rfs-1.ext4" {
+		t.Fatalf("foreign prefix must fall back to derived key, got %q", got)
+	}
+	artifact.ObjectKey = ""
+	got = artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
+	if got != "rfs-1.ext4" {
+		t.Fatalf("empty object_key: got %q", got)
+	}
+	if artifactStoreKey(ctx, nil) != "" {
+		t.Fatal("nil artifact")
+	}
+	if userKeyFromStoredObjectKey("/template-artifacts/rfs-1.ext4", "template-artifacts") != "rfs-1.ext4" {
+		t.Fatal("leading slash on stored key")
 	}
 }

@@ -104,6 +104,8 @@ CubeOps 的地址三种部署方式都会自动配给节点（需要时用 `CUBE
 | --- | --- | --- |
 | `cubeops_addr`（Cubelet） | 空 | CubeOps 地址，比如 `http://<ops>:3010`。**留空 = 不下**，缺版本直接失败。 |
 | `cubeops_timeout`（Cubelet） | `10m` | 拉一个版本的总时限；GB 级组件要留够余量。 |
+| `CUBE_OPS_STORE_BACKEND`（CubeOps） | `s3` | `fs` = 本地/PVC 仓库，由 CubeOps 签发下载 URL。 |
+| `CUBE_OPS_STORE_FS_PUBLIC_URL`（CubeOps） | 空 | `backend=fs` 时节点可达的 CubeOps 地址。 |
 | `CUBE_OPS_S3_ENDPOINT`（CubeOps） | 空 | 对象存储地址。**留空 = 仓库禁用**，CubeOps 本身照常启动。 |
 | `CUBE_OPS_S3_NODE_ENDPOINT`（CubeOps） | 同 endpoint | 节点下载用的地址；节点访问不到默认地址（比如在集群外）时才需要设。 |
 | `CUBE_OPS_S3_BUCKET`（CubeOps） | `cube-ops` | 仓库专用的桶。 |

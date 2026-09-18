@@ -72,6 +72,7 @@ spec:
             # cube.artifactS3Env injects the s3Backed CUBE_S3_* set from
             # volumeS3.* / builtin MinIO when global.env does not carry it;
             # placed before global.env so an operator entry still wins.
+            {{- include "cube.artifactStoreEnv" . | nindent 12 }}
             {{- include "cube.artifactS3Env" . | nindent 12 }}
             {{- with .Values.global.env }}
             {{- toYaml . | nindent 12 }}

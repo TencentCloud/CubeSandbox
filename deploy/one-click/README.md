@@ -452,6 +452,10 @@ MinIO runs under `cube-sandbox-minio.service`; after startup, readiness is
 verified via `curl http://<node-ip>:9000/minio/health/live` (a `200` response
 means it is healthy).
 
+Template artifacts and the CubeOps warehouse can use `CUBE_ARTIFACT_STORE_BACKEND=fs`
+and `CUBE_OPS_STORE_BACKEND=fs` instead of MinIO (S3 volumes still need MinIO
+or external S3).
+
 To use an existing S3-compatible store instead, set
 `CUBE_SANDBOX_MINIO_ENABLED=0` and `CUBE_S3_*` before `install.sh`:
 

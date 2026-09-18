@@ -104,9 +104,6 @@ spec:
             # which only reads an environment variable.
             - name: CUBE_TEMPLATE_CENTER_CONFIG_PATH
               value: /usr/local/services/cubetoolbox/CubeTemplateCenter/conf.yaml
-            # Must resolve to the same directory CubeMaster serves downloads from.
-            - name: CUBE_TEMPLATE_CENTER_ARTIFACT_STORE_DIR
-              value: /data/CubeMaster/storage
             # Where build results are reported. CUBE_MASTER_ADDR is the one name
             # every component uses for CubeMaster's address; the older
             # CUBE_TEMPLATE_CENTER_MASTER_ENDPOINT / CUBE_MASTER_ENDPOINT are
@@ -127,6 +124,7 @@ spec:
             # s3Backed set from volumeS3.* / builtin MinIO when global.env does
             # not carry it; placed before global.env so an operator entry still
             # wins.
+            {{- include "cube.artifactStoreEnv" . | nindent 12 }}
             {{- include "cube.artifactS3Env" . | nindent 12 }}
             {{- with .Values.global.env }}
             {{- toYaml . | nindent 12 }}

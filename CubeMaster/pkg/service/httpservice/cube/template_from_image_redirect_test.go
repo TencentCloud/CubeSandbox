@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"gorm.io/gorm"
 )
 
@@ -140,12 +141,17 @@ func TestProxyS3ArtifactSuccessHEAD(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("unexpected method %s, want GET (HEAD is proxied as GET)", r.Method)
 		}
+		if got := r.Header.Get("Range"); got != "bytes=0-0" {
+			t.Fatalf("HEAD proxy Range=%q, want bytes=0-0", got)
+		}
 		if got := r.Header.Get("If-None-Match"); got != "client-etag" {
 			t.Fatalf("If-None-Match=%q", got)
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Length", "123")
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Range", "bytes 0-0/123")
+		w.Header().Set("Content-Length", "1")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("x"))
 	}))
 	defer upstream.Close()
 
@@ -172,8 +178,49 @@ func TestProxyS3ArtifactSuccessHEAD(t *testing.T) {
 	if got := w.Header().Get("Content-Length"); got != "123" {
 		t.Fatalf("Content-Length=%q", got)
 	}
+	if got := w.Header().Get("Content-Range"); got != "" {
+		t.Fatalf("Content-Range=%q, want empty after probe rewrite", got)
+	}
 	if got := w.Header().Get("ETag"); got != "sha-head" {
 		t.Fatalf("ETag=%q", got)
+	}
+}
+
+func TestProxyS3ArtifactHEADClientRange(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Range"); got != "bytes=10-19" {
+			t.Fatalf("Range=%q, want client range", got)
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Range", "bytes 10-19/123")
+		w.Header().Set("Content-Length", "10")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("0123456789"))
+	}))
+	defer upstream.Close()
+
+	stubRedirectLookup(t, func(ctx context.Context, artifactID, token string) (*models.RootfsArtifact, error) {
+		return &models.RootfsArtifact{
+			ArtifactID:  "rfs-range",
+			ArtifactURL: upstream.URL + "/bucket/rfs-range.ext4?X-Amz-Signature=xyz",
+			Ext4SHA256:  "sha-range",
+		}, nil
+	})
+
+	c, w := newArtifactProxyContext(http.MethodHead, "artifact_id=rfs-range&token=t")
+	c.Request.Header.Set("Range", "bytes=10-19")
+	handled, ok := proxyS3Artifact(c)
+	if !handled || !ok {
+		t.Fatalf("expected handled=true ok=true, got %v/%v", handled, ok)
+	}
+	if w.Code != http.StatusPartialContent {
+		t.Fatalf("expected 206, got %d", w.Code)
+	}
+	if got := w.Header().Get("Content-Length"); got != "10" {
+		t.Fatalf("Content-Length=%q", got)
+	}
+	if got := w.Header().Get("Content-Range"); got != "bytes 10-19/123" {
+		t.Fatalf("Content-Range=%q", got)
 	}
 }
 
@@ -211,5 +258,34 @@ func TestProxyS3ArtifactUpstreamFailureReportedAsFailure(t *testing.T) {
 	}
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502, got %d", w.Code)
+	}
+}
+
+func TestContentRangeTotal(t *testing.T) {
+	total, ok := contentRangeTotal("bytes 0-0/123")
+	if !ok || total != 123 {
+		t.Fatalf("got %d %v", total, ok)
+	}
+	if _, ok := contentRangeTotal("bytes 0-0/*"); ok {
+		t.Fatal("wildcard total")
+	}
+	if _, ok := contentRangeTotal(""); ok {
+		t.Fatal("empty")
+	}
+}
+
+func TestArtifactProxyRetCodeNotFound(t *testing.T) {
+	c, _ := newArtifactProxyContext(http.MethodGet, "artifact_id=rfs-x")
+	c.AbortWithStatus(http.StatusNotFound)
+	if got := artifactProxyRetCode(c, false); got != int64(errorcode.ErrorCode_NotFound) {
+		t.Fatalf("404 proxy retcode=%d want NotFound", got)
+	}
+	c2, _ := newArtifactProxyContext(http.MethodGet, "artifact_id=rfs-x")
+	c2.AbortWithStatus(http.StatusBadGateway)
+	if got := artifactProxyRetCode(c2, false); got != int64(errorcode.ErrorCode_MasterInternalError) {
+		t.Fatalf("502 proxy retcode=%d want InternalError", got)
+	}
+	if got := artifactProxyRetCode(c2, true); got != int64(errorcode.ErrorCode_Success) {
+		t.Fatalf("ok proxy retcode=%d want Success", got)
 	}
 }

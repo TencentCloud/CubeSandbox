@@ -315,6 +315,16 @@ controlPlane:
   #     attach on several nodes anyway) unless the claim is ReadWriteMany.
   artifactStore:
     s3Backed: false
+    # Durable blob backend for template rootfs artifacts. Default s3 keeps
+    # today's behaviour (incomplete CUBE_S3_* falls back to local disk).
+    # Set backend=fs to store objects on the shared artifact PVC via
+    # pkgs/blobstore without MinIO. Do not combine backend=fs with s3Backed=true.
+    # backend=fs requires master.persistence.enabled=true (emptyDir is lost
+    # on restart) and fsRoot, when set, must stay under /data/CubeMaster/storage.
+    backend: s3
+    # Optional override of CUBE_ARTIFACT_STORE_FS_ROOT. Empty uses the
+    # existing CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR mount.
+    fsRoot: ""
 
   # Standalone template build service (CubeTemplateCenter). REQUIRED.
   #
@@ -524,6 +534,29 @@ cubeOps:
     region: us-east-1
     pathStyle: true
     createBucket: true
+  # Blob backend for the component warehouse. Default s3 keeps today's
+  # behaviour (no S3 credentials → warehouse APIs return 501).
+  # Set backend=fs plus store.fs.publicURL (node-reachable CubeOps URL)
+  # to run the warehouse without MinIO/COS.
+  store:
+    backend: s3
+    fs:
+      root: /var/lib/cubeops/blobs
+      # Empty defaults to http://<ops Service FQDN>:<port>. Override with an
+      # internal CLB URL when compute nodes are outside the cluster.
+      publicURL: ""
+      # Hex-encoded signing key (>=32 bytes = 64 hex chars). Leave empty to
+      # generate one (32 random bytes, hex-encoded) and persist it across
+      # helm upgrade via lookup on the chart Secret. Multi-replica fs must
+      # share this key.
+      signingKey: ""
+      persistence:
+        enabled: true
+        size: 20Gi
+        accessModes:
+          - ReadWriteOnce
+        storageClass: ""
+        existingClaim: ""
   warehouse:
     presignTTL: 5m
     # Empty lists omit the env vars so CubeOps built-in allow-lists apply.

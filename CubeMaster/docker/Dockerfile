@@ -19,12 +19,14 @@ WORKDIR /src
 
 COPY CubeMaster/go.mod CubeMaster/go.sum ./
 COPY pkgs/CubeLog/go.mod pkgs/CubeLog/go.sum /pkgs/CubeLog/
+COPY pkgs/blobstore/go.mod pkgs/blobstore/go.sum /pkgs/blobstore/
 COPY pkgs/cubedb/go.mod pkgs/cubedb/go.sum /pkgs/cubedb/
 COPY pkgs/proto/go.mod pkgs/proto/go.sum /pkgs/proto/
 RUN go mod download
 
 COPY CubeMaster/ ./
 COPY pkgs/CubeLog/ /pkgs/CubeLog/
+COPY pkgs/blobstore/ /pkgs/blobstore/
 COPY pkgs/cubedb/ /pkgs/cubedb/
 COPY pkgs/proto/ /pkgs/proto/
 

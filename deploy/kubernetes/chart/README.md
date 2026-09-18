@@ -612,6 +612,8 @@ Chart MinIO is a single StatefulSet. For warehouse HA, set `cubeOps.s3.endpoint`
 
 When no cubeOps.s3 / volumeS3 / MinIO endpoint is set, Helm still renders; CubeOps starts and returns `501 warehouse_disabled` on warehouse routes. Helm fails when an endpoint is set without CubeOps credentials.
 
+Template artifacts and the CubeOps warehouse default to S3. For disk/PVC instead, set `controlPlane.artifactStore.backend: fs` and `cubeOps.store.backend: fs` (see `values.yaml`). S3 volumes and CubeS3lvol still need a real S3 API.
+
 CubeAPI serves external E2B-compatible SDK clients.
 
 Expose the WebUI externally by changing `webui.service.type` or by adding your platform's ingress/load balancer configuration.

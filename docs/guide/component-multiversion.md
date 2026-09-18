@@ -104,6 +104,8 @@ Warehouse data lives in S3, not on a CubeOps local disk, so CubeOps can run mult
 | --- | --- | --- |
 | `cubeops_addr` (Cubelet) | empty | CubeOps address, e.g. `http://<ops>:3010`. **Empty = no download**; a missing version fails outright. |
 | `cubeops_timeout` (Cubelet) | `10m` | Total time budget for pulling one version; leave headroom for GB-scale components. |
+| `CUBE_OPS_STORE_BACKEND` (CubeOps) | `s3` | `fs` = local/PVC warehouse; CubeOps serves signed download URLs. |
+| `CUBE_OPS_STORE_FS_PUBLIC_URL` (CubeOps) | empty | Node-reachable CubeOps URL when `backend=fs`. |
 | `CUBE_OPS_S3_ENDPOINT` (CubeOps) | empty | Object-storage address. **Empty = warehouse disabled**; CubeOps itself still runs. |
 | `CUBE_OPS_S3_NODE_ENDPOINT` (CubeOps) | same as endpoint | The address nodes download from; set it only when nodes cannot reach the default one (e.g. they sit outside the cluster). |
 | `CUBE_OPS_S3_BUCKET` (CubeOps) | `cube-ops` | Dedicated bucket for warehouse blobs. |

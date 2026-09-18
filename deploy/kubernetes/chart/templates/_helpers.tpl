@@ -1489,3 +1489,66 @@ sock={{ include "cube.s3lvolSocketPath" . }}; test -S "${sock}" && python3 /opt/
 {{- $grace -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "cube.artifactStoreBackend" -}}
+{{- $raw := ((.Values.controlPlane.artifactStore).backend) | default "s3" | toString | lower | trim -}}
+{{- if eq $raw "fs" -}}fs{{- else -}}s3{{- end -}}
+{{- end -}}
+
+{{- define "cube.artifactStoreEnv" -}}
+- name: CUBE_ARTIFACT_STORE_BACKEND
+  value: {{ include "cube.artifactStoreBackend" . | quote }}
+{{- $root := ((.Values.controlPlane.artifactStore).fsRoot) | default "" -}}
+{{- if and (eq (include "cube.artifactStoreBackend" .) "fs") $root }}
+- name: CUBE_ARTIFACT_STORE_FS_ROOT
+  value: {{ $root | quote }}
+{{- end }}
+{{- end -}}
+
+{{- define "cube.opsStoreBackend" -}}
+{{- $raw := (((.Values.cubeOps).store).backend) | default "s3" | toString | lower | trim -}}
+{{- if eq $raw "fs" -}}fs{{- else -}}s3{{- end -}}
+{{- end -}}
+
+{{- define "cube.opsFSRoot" -}}
+{{- $fs := default dict (((.Values.cubeOps).store).fs) -}}
+{{- $fs.root | default "/var/lib/cubeops/blobs" -}}
+{{- end -}}
+
+{{- define "cube.opsFSPublicURL" -}}
+{{- $fs := default dict (((.Values.cubeOps).store).fs) -}}
+{{- $url := $fs.publicURL | default "" | trim -}}
+{{- if $url -}}
+{{- $url -}}
+{{- else -}}
+{{- printf "http://%s:%v" (include "cube.opsFQDN" .) (.Values.cubeOps.service.port) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.opsFSShared" -}}
+{{- $fs := default dict (((.Values.cubeOps).store).fs) -}}
+{{- $persist := default dict $fs.persistence -}}
+{{- $modes := $persist.accessModes | default list -}}
+{{- if has "ReadWriteMany" $modes -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- define "cube.opsFSPersistEnabled" -}}
+{{- $fs := default dict (((.Values.cubeOps).store).fs) -}}
+{{- $persist := default dict $fs.persistence -}}
+{{- if hasKey $persist "enabled" -}}
+{{- if $persist.enabled -}}true{{- else -}}false{{- end -}}
+{{- else -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{- define "cube.opsFSClaimName" -}}
+{{- $fs := default dict (((.Values.cubeOps).store).fs) -}}
+{{- $persist := default dict $fs.persistence -}}
+{{- $existing := $persist.existingClaim | default "" -}}
+{{- if $existing -}}
+{{- $existing -}}
+{{- else -}}
+{{- printf "%s-ops-blobs" (include "cube.fullname" .) -}}
+{{- end -}}
+{{- end -}}

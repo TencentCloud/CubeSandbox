@@ -84,7 +84,29 @@ type Config struct {
 
 	S3        S3Config        `yaml:"s3"`
 	Warehouse WarehouseConfig `yaml:"warehouse"`
+	Store     StoreConfig     `yaml:"store"`
 }
+
+// StoreConfig selects the warehouse blob backend. Default is s3.
+// FSBackend is used only when Backend is fs.
+type StoreConfig struct {
+	Backend   string               `yaml:"backend"`
+	FSBackend StoreFSBackendConfig `yaml:"fs_backend"`
+}
+
+// StoreFSBackendConfig is the local-directory warehouse store.
+type StoreFSBackendConfig struct {
+	Root       string `yaml:"root"`
+	PublicURL  string `yaml:"public_url"`
+	SigningKey string `yaml:"signing_key"`
+	Shared     bool   `yaml:"shared"`
+}
+
+const (
+	StoreBackendS3 = "s3"
+	StoreBackendFS = "fs"
+	DefaultFSRoot  = "/var/lib/cubeops/blobs"
+)
 
 // SoftDeletePurgeConf configures the CubeOps tombstone purger.
 type SoftDeletePurgeConf struct {
@@ -207,6 +229,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.S3.Region == "" {
 		cfg.S3.Region = "us-east-1"
+	}
+	if err := applyStoreDefaults(&cfg.Store); err != nil {
+		return nil, err
 	}
 	cfg.Warehouse.PresignTTL = clampPresignTTL(cfg.Warehouse.PresignTTL)
 	if len(cfg.Warehouse.GitHubRepos) == 0 {
@@ -513,6 +538,52 @@ func overrideFromEnv(cfg *Config) {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			cfg.Warehouse.UploadMaxBytes = n
 		}
+	}
+	overrideStoreFromEnv(&cfg.Store)
+}
+
+// CUBE_OPS_STORE_FS_* overlays the nested fs_backend fields.
+func overrideStoreFromEnv(s *StoreConfig) {
+	if v := os.Getenv("CUBE_OPS_STORE_BACKEND"); v != "" {
+		s.Backend = v
+	}
+	if v := os.Getenv("CUBE_OPS_STORE_FS_ROOT"); v != "" {
+		s.FSBackend.Root = v
+	}
+	if v := os.Getenv("CUBE_OPS_STORE_FS_PUBLIC_URL"); v != "" {
+		s.FSBackend.PublicURL = v
+	}
+	if v := os.Getenv("CUBE_OPS_STORE_FS_SIGNING_KEY"); v != "" {
+		s.FSBackend.SigningKey = v
+	}
+	if v := os.Getenv("CUBE_OPS_STORE_FS_SHARED"); v != "" {
+		if p := parseEnvBool(v); p != nil {
+			s.FSBackend.Shared = *p
+		}
+	}
+}
+
+func applyStoreDefaults(s *StoreConfig) error {
+	backend, err := normalizeStoreBackend(s.Backend)
+	if err != nil {
+		return err
+	}
+	s.Backend = backend
+	if s.FSBackend.Root == "" {
+		s.FSBackend.Root = DefaultFSRoot
+	}
+	return nil
+}
+
+func normalizeStoreBackend(raw string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	switch v {
+	case "", StoreBackendS3:
+		return StoreBackendS3, nil
+	case StoreBackendFS:
+		return StoreBackendFS, nil
+	default:
+		return "", fmt.Errorf("store.backend %q is not supported (want s3 or fs)", strings.TrimSpace(raw))
 	}
 }
 

@@ -28,9 +28,13 @@ type RootfsArtifact struct {
 	// CubeMaster/TC may re-sign it when proxying downloads, but Cubelets now
 	// receive the stable CubeMaster download endpoint rather than this raw URL.
 	ArtifactURL string `json:"artifact_url" gorm:"column:artifact_url"`
-	Status      string `json:"status" gorm:"column:status"`
-	LastError   string `json:"last_error" gorm:"column:last_error"`
-	GCDeadline  int64  `json:"gc_deadline" gorm:"column:gc_deadline"`
+	// StorageBackend is "s3", "fs", or empty (legacy: infer from ArtifactURL).
+	StorageBackend string `json:"storage_backend" gorm:"column:storage_backend"`
+	// ObjectKey is the blobstore key. Empty means derive [prefix/]id.ext4.
+	ObjectKey  string `json:"object_key" gorm:"column:object_key"`
+	Status     string `json:"status" gorm:"column:status"`
+	LastError  string `json:"last_error" gorm:"column:last_error"`
+	GCDeadline int64  `json:"gc_deadline" gorm:"column:gc_deadline"`
 
 	// CubeEgress CA bake metadata (see design/cube-egress-ca-bake.md).
 	// Used for audit/triage; the artifact reuse cache key folds
