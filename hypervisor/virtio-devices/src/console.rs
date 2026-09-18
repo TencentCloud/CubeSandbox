@@ -21,7 +21,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io;
 use std::io::{Read, Write};
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
@@ -45,6 +45,22 @@ const CONFIG_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 3;
 const FILE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 4;
 // Console resized
 const RESIZE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 5;
+// The output endpoint became writable again after having refused data.
+const OUTPUT_FLUSH_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 6;
+
+// Upper bound on how much console output is kept in memory while the consumer
+// on the other end of the console is not draining it. Console output is
+// best-effort, so past this point the oldest bytes are dropped instead of
+// letting the buffer grow without bound. Same policy and size as the
+// SerialBuffer used by the PTY path.
+const MAX_PENDING_OUT: usize = 1 << 20;
+
+// Trimming happens in bulks of this size. Dropping the oldest bytes of a Vec
+// is a memmove of everything that stays behind, so trimming on every descriptor
+// would copy the whole buffer once per descriptor while the consumer is stalled.
+// The buffer is therefore allowed to overshoot the cap by this much before it is
+// brought back down to it.
+const PENDING_OUT_TRIM: usize = 64 << 10;
 
 //Console size feature bit
 const VIRTIO_CONSOLE_F_SIZE: u64 = 0;
@@ -106,6 +122,19 @@ struct ConsoleEpollHandler {
     out: Option<Box<dyn Write + Send>>,
     write_out: Option<Arc<AtomicBool>>,
     file_event_registered: bool,
+    // Raw fd of the output endpoint. Used to subscribe to EPOLLOUT while the
+    // endpoint is refusing data, so the retry is event driven rather than
+    // relying on the guest to kick the queue again.
+    out_fd: Option<RawFd>,
+    // Console output the endpoint refused to accept because its buffer was
+    // full. Drained by OUTPUT_FLUSH_EVENT.
+    pending_out: Vec<u8>,
+    // Whether OUTPUT_FLUSH_EVENT is currently registered with the epoll loop.
+    out_flush_registered: bool,
+    // Whether the current overrun episode has already been reported. The guest
+    // can keep producing while the consumer is stalled, so without this the
+    // drop path would log once per descriptor.
+    out_overrun_warned: bool,
 }
 
 pub enum Endpoint {
@@ -187,6 +216,9 @@ impl ConsoleEpollHandler {
             (None, None)
         };
 
+        // Take the fd before `endpoint` is moved into the handler below.
+        let out_fd = out_file.map(|f| f.as_raw_fd());
+
         ConsoleEpollHandler {
             mem,
             input_queue,
@@ -205,6 +237,10 @@ impl ConsoleEpollHandler {
             out,
             write_out,
             file_event_registered: false,
+            out_fd,
+            pending_out: Vec::new(),
+            out_flush_registered: false,
+            out_overrun_warned: false,
         }
     }
 
@@ -258,33 +294,134 @@ impl ConsoleEpollHandler {
      * to the referenced address.
      */
     fn process_output_queue(&mut self) -> Result<bool, Error> {
-        let trans_queue = &mut self.output_queue; //transmitq
+        // Split the borrow explicitly: the output endpoint is touched from
+        // inside the loop, so it cannot be reached through `self` while the
+        // transmit queue is borrowed.
+        let Self {
+            mem,
+            output_queue,
+            out,
+            pending_out,
+            out_overrun_warned,
+            access_platform,
+            ..
+        } = self;
         let mut used_descs = false;
 
-        while let Some(mut desc_chain) = trans_queue.pop_descriptor_chain(self.mem.memory()) {
+        while let Some(mut desc_chain) = output_queue.pop_descriptor_chain(mem.memory()) {
             let desc = desc_chain.next().ok_or(Error::DescriptorChainTooShort)?;
-            if let Some(out) = &mut self.out {
+            if out.is_some() {
                 let mut buf: Vec<u8> = Vec::new();
                 desc_chain
                     .memory()
                     .write_volatile_to(
                         desc.addr()
-                            .translate_gva(self.access_platform.as_ref(), desc.len() as usize),
+                            .translate_gva(access_platform.as_ref(), desc.len() as usize),
                         &mut buf,
                         desc.len() as usize,
                     )
                     .map_err(Error::GuestMemoryRead)?;
 
-                out.write_all(&buf).map_err(Error::OutputWriteAll)?;
-                out.flush().map_err(Error::OutputFlush)?;
+                Self::write_output(out, pending_out, out_overrun_warned, &buf)?;
             }
-            trans_queue
+            output_queue
                 .add_used(desc_chain.memory(), desc_chain.head_index(), desc.len())
                 .map_err(Error::QueueAddUsed)?;
             used_descs = true;
         }
 
         Ok(used_descs)
+    }
+
+    // Queue console output and hand as much of it as possible to the
+    // (non-blocking) endpoint.
+    //
+    // Console output is best-effort: a full output buffer only means the
+    // consumer on the other end is momentarily slow. Treating it as a device
+    // error used to abort the console epoll loop and shut the whole VM down,
+    // so anything the endpoint refuses is kept in `pending_out` instead and
+    // written once OUTPUT_FLUSH_EVENT reports the fd is writable again.
+    fn write_output(
+        out: &mut Option<Box<dyn Write + Send>>,
+        pending_out: &mut Vec<u8>,
+        overrun_warned: &mut bool,
+        data: &[u8],
+    ) -> Result<(), Error> {
+        pending_out.extend_from_slice(data);
+
+        if pending_out.len() > MAX_PENDING_OUT + PENDING_OUT_TRIM {
+            let dropped = pending_out.len() - MAX_PENDING_OUT;
+            pending_out.drain(..dropped);
+            // Report the first drop of an episode only: a consumer that stays
+            // stalled would otherwise produce one log line per descriptor.
+            if !*overrun_warned {
+                warn!(
+                    "Console output overrun, dropped {} bytes of console output",
+                    dropped
+                );
+                *overrun_warned = true;
+            }
+        } else if pending_out.len() <= MAX_PENDING_OUT {
+            // The buffer is back within its nominal size, so the next overrun is
+            // a new episode and deserves its own line.
+            *overrun_warned = false;
+        }
+
+        Self::drain_pending_output(out, pending_out).map(|_| ())
+    }
+
+    // Write `pending_out` to the endpoint, stopping at the first byte the
+    // endpoint refuses. Returns whether the buffer ended up empty.
+    fn drain_pending_output(
+        out: &mut Option<Box<dyn Write + Send>>,
+        pending_out: &mut Vec<u8>,
+    ) -> Result<bool, Error> {
+        let Some(writer) = out.as_mut() else {
+            pending_out.clear();
+            return Ok(true);
+        };
+
+        while !pending_out.is_empty() {
+            let written = match writer.write(&pending_out[..]) {
+                Ok(written) => written,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+                Err(e) => return Err(Error::OutputWriteAll(e)),
+            };
+            if written == 0 {
+                // The endpoint accepts nothing right now; wait for EPOLLOUT
+                // rather than spinning on it.
+                return Ok(false);
+            }
+            pending_out.drain(..written);
+        }
+
+        writer.flush().map_err(Error::OutputFlush)?;
+        Ok(true)
+    }
+
+    // Keep the EPOLLOUT subscription in sync with whether console output is
+    // still pending. Subscribing only while blocked keeps this from becoming a
+    // busy loop, since an idle datagram socket reports EPOLLOUT continuously.
+    fn update_output_flush_event(
+        &mut self,
+        helper: &mut EpollHelper,
+        drained: bool,
+    ) -> result::Result<(), EpollHelperError> {
+        let Some(fd) = self.out_fd else {
+            return Ok(());
+        };
+
+        if drained {
+            if self.out_flush_registered {
+                helper.del_event_custom(fd, OUTPUT_FLUSH_EVENT, epoll::Events::EPOLLOUT)?;
+                self.out_flush_registered = false;
+            }
+        } else if !self.out_flush_registered {
+            helper.add_event_custom(fd, OUTPUT_FLUSH_EVENT, epoll::Events::EPOLLOUT)?;
+            self.out_flush_registered = true;
+        }
+
+        Ok(())
     }
 
     fn signal_used_queue(&self, queue_index: u16) -> result::Result<(), DeviceError> {
@@ -416,6 +553,19 @@ impl EpollHelperHandler for ConsoleEpollHandler {
                         ))
                     })?;
                 }
+                let drained = self.pending_out.is_empty();
+                self.update_output_flush_event(helper, drained)?;
+            }
+            OUTPUT_FLUSH_EVENT => {
+                let drained =
+                    ConsoleEpollHandler::drain_pending_output(&mut self.out, &mut self.pending_out)
+                        .map_err(|e| {
+                            EpollHelperError::HandleEvent(anyhow!(
+                                "Failed to flush console output : {:?}",
+                                e
+                            ))
+                        })?;
+                self.update_output_flush_event(helper, drained)?;
             }
             CONFIG_EVENT => {
                 self.config_evt.read().map_err(|e| {
@@ -819,3 +969,122 @@ impl Snapshottable for Console {
 }
 impl Transportable for Console {}
 impl Migratable for Console {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Test double for a console endpoint whose consumer has stopped draining:
+    // every write fails with WouldBlock while `blocked` is set, which is what
+    // a full datagram socket reports to the non-blocking console writer.
+    struct BlockingWriter {
+        sink: Arc<Mutex<Vec<u8>>>,
+        blocked: Arc<AtomicBool>,
+    }
+
+    impl Write for BlockingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.blocked.load(Ordering::Acquire) {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "buffer full"));
+            }
+            self.sink.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn blocking_writer() -> (
+        Option<Box<dyn Write + Send>>,
+        Arc<Mutex<Vec<u8>>>,
+        Arc<AtomicBool>,
+    ) {
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let blocked = Arc::new(AtomicBool::new(false));
+        let writer = BlockingWriter {
+            sink: Arc::clone(&sink),
+            blocked: Arc::clone(&blocked),
+        };
+        (Some(Box::new(writer)), sink, blocked)
+    }
+
+    // A rejected write must not surface as a device error (that used to abort
+    // the console epoll loop and shut the VM down), and the bytes the endpoint
+    // refused must still be delivered once it drains again.
+    #[test]
+    fn would_block_is_not_fatal_and_pending_output_is_delivered() {
+        let (mut out, sink, blocked) = blocking_writer();
+        let mut pending = Vec::new();
+        let mut warned = false;
+
+        blocked.store(true, Ordering::Release);
+        ConsoleEpollHandler::write_output(&mut out, &mut pending, &mut warned, b"hello ").unwrap();
+        ConsoleEpollHandler::write_output(&mut out, &mut pending, &mut warned, b"world").unwrap();
+
+        assert_eq!(pending, b"hello world".to_vec());
+        assert!(sink.lock().unwrap().is_empty());
+
+        blocked.store(false, Ordering::Release);
+        assert!(ConsoleEpollHandler::drain_pending_output(&mut out, &mut pending).unwrap());
+        assert!(pending.is_empty());
+        assert_eq!(sink.lock().unwrap().as_slice(), b"hello world".as_slice());
+    }
+
+    // Console output is best-effort: once the pending buffer is full the
+    // oldest bytes are dropped rather than letting memory grow without bound.
+    #[test]
+    fn pending_output_is_bounded() {
+        let (mut out, _sink, blocked) = blocking_writer();
+        let mut pending = Vec::new();
+        let mut warned = false;
+        blocked.store(true, Ordering::Release);
+
+        let chunk = vec![b'x'; MAX_PENDING_OUT / 2];
+        for _ in 0..4 {
+            ConsoleEpollHandler::write_output(&mut out, &mut pending, &mut warned, &chunk).unwrap();
+        }
+
+        assert!(pending.len() <= MAX_PENDING_OUT + PENDING_OUT_TRIM);
+        // Three of the four writes had to drop, but a stalled consumer must not
+        // turn that into one log line per descriptor.
+        assert!(warned);
+    }
+
+    // Once the consumer catches up, the next overrun is a separate episode and
+    // has to be reported again.
+    #[test]
+    fn overrun_warning_resets_once_drained() {
+        let (mut out, _sink, blocked) = blocking_writer();
+        let mut pending = Vec::new();
+        let mut warned = false;
+
+        blocked.store(true, Ordering::Release);
+        let chunk = vec![b'x'; MAX_PENDING_OUT];
+        ConsoleEpollHandler::write_output(&mut out, &mut pending, &mut warned, &chunk).unwrap();
+        ConsoleEpollHandler::write_output(&mut out, &mut pending, &mut warned, &chunk).unwrap();
+        assert!(warned);
+
+        blocked.store(false, Ordering::Release);
+        ConsoleEpollHandler::drain_pending_output(&mut out, &mut pending).unwrap();
+        assert!(pending.is_empty());
+
+        blocked.store(true, Ordering::Release);
+        ConsoleEpollHandler::write_output(&mut out, &mut pending, &mut warned, &chunk).unwrap();
+        assert!(!warned, "a drained buffer starts a fresh overrun episode");
+    }
+
+    // Without an output endpoint there is nothing to write and nothing to
+    // retain, but the queue must still be consumable.
+    #[test]
+    fn missing_endpoint_discards_output() {
+        let mut out: Option<Box<dyn Write + Send>> = None;
+        let mut pending = Vec::new();
+        let mut warned = false;
+
+        ConsoleEpollHandler::write_output(&mut out, &mut pending, &mut warned, b"dropped").unwrap();
+
+        assert!(pending.is_empty());
+    }
+}
