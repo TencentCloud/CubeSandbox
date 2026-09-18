@@ -31,12 +31,14 @@ fi
 if [[ -n "${DATABASE_URL:-}" ]]; then
   export DATABASE_URL
 else
-  mysql_host="${CUBE_SANDBOX_MYSQL_HOST:-127.0.0.1}"
-  mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
-  mysql_user="${CUBE_SANDBOX_MYSQL_USER:-cube}"
-  mysql_password="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
-  mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
-  export DATABASE_URL="mysql://${mysql_user}:${mysql_password}@${mysql_host}:${mysql_port}/${mysql_db}"
+  # No URL: export the split fields instead of building one, so
+  # URL-reserved characters in the password survive intact. Defaults match
+  # the bundled one-click MySQL.
+  export CUBE_SANDBOX_MYSQL_HOST="${CUBE_SANDBOX_MYSQL_HOST:-127.0.0.1}"
+  export CUBE_SANDBOX_MYSQL_PORT="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
+  export CUBE_SANDBOX_MYSQL_USER="${CUBE_SANDBOX_MYSQL_USER:-cube}"
+  export CUBE_SANDBOX_MYSQL_PASSWORD="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
+  export CUBE_SANDBOX_MYSQL_DB="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
 fi
 
 exec "${CUBE_API_BIN}"
