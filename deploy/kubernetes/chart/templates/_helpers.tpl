@@ -1365,6 +1365,8 @@ Bootstrap: host mutation mounts for pvm / node-init.
   {{- end }}
 - name: CUBE_SANDBOX_DNS_FOLLOW_NODE
   value: {{ ternary "true" "false" (and .Values.cubeNode.dns.sandbox.followNodeDns (not .Values.cubeNode.dns.sandbox.nameservers)) | quote }}
+- name: CUBE_SANDBOX_AUTO_ALLOW_DEFAULT_DNS_SERVERS
+  value: {{ ternary "true" "false" .Values.cubeNode.dns.sandbox.autoAllowDefaultResolvers | quote }}
 {{- end -}}
 
 {{/*

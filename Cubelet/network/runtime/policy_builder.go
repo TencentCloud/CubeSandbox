@@ -131,19 +131,42 @@ func formatCubeNetworkConfig(in *CubeNetworkConfig) string {
 // this the first update of a domain-based policy would revoke DNS itself and
 // black-hole every domain rule it just installed.
 //
-// Same condition as the create path: only a policy that still names a domain
-// keeps the resolver exception, so an update that drops every domain also drops
-// the implicit DNS access.
-func withDNSResolverAllowOut(cfg *CubeNetworkConfig, resolverCIDRs []string) *CubeNetworkConfig {
-	if cfg == nil || len(resolverCIDRs) == 0 || !needsDNSResolution(cfg) {
+// OperatorDNSAllowOutCIDRs are allowed to survive an IP-only update. Other
+// resolver CIDRs retain the established domain/L7-only admission behavior.
+func withDNSResolverAllowOut(cfg *CubeNetworkConfig, resolverCIDRs, operatorDNSAllowOutCIDRs []string) *CubeNetworkConfig {
+	if len(resolverCIDRs) == 0 {
 		return cfg
 	}
-	for _, cidr := range resolverCIDRs {
+	admittedCIDRs := resolverCIDRs
+	if !needsDNSResolution(cfg) {
+		admittedCIDRs = intersectResolverCIDRs(resolverCIDRs, operatorDNSAllowOutCIDRs)
+		if len(admittedCIDRs) == 0 {
+			return cfg
+		}
+	}
+	if cfg == nil {
+		cfg = &CubeNetworkConfig{}
+	}
+	for _, cidr := range admittedCIDRs {
 		if !slices.Contains(cfg.AllowOut, cidr) {
 			cfg.AllowOut = append(cfg.AllowOut, cidr)
 		}
 	}
 	return cfg
+}
+
+func intersectResolverCIDRs(actual, operator []string) []string {
+	operatorSet := make(map[string]struct{}, len(operator))
+	for _, cidr := range operator {
+		operatorSet[cidr] = struct{}{}
+	}
+	matched := make([]string, 0, len(actual))
+	for _, cidr := range actual {
+		if _, ok := operatorSet[cidr]; ok {
+			matched = append(matched, cidr)
+		}
+	}
+	return matched
 }
 
 // needsDNSResolution reports whether any allow_out target or L7 rule host is a
@@ -152,6 +175,9 @@ func withDNSResolverAllowOut(cfg *CubeNetworkConfig, resolverCIDRs []string) *Cu
 // accepts "10.0.0.1" because digits are valid DNS label characters, and folding
 // the resolver in for an IP-only policy would grant access nobody asked for.
 func needsDNSResolution(cfg *CubeNetworkConfig) bool {
+	if cfg == nil {
+		return false
+	}
 	if slices.ContainsFunc(cfg.AllowOut, cubevs.IsAllowOutDomainTarget) {
 		return true
 	}

@@ -942,6 +942,30 @@ func TestUpdateNetworkPolicyRefoldsDNSResolvers(t *testing.T) {
 	}
 }
 
+func TestUpdateNetworkPolicyPreservesOperatorDefaultResolverForIPOnlyPolicy(t *testing.T) {
+	c := newCreateTestController(t, nil)
+	state := registerActiveSandbox(t, c, "sb-operator-dns", &CubeNetworkConfig{}, []string{"10.204.0.10/32"})
+	state.OperatorDNSAllowOutCIDRs = []string{"10.204.0.10/32"}
+
+	if err := c.UpdateNetworkPolicy(context.Background(), &UpdateNetworkPolicyRequest{
+		SandboxID:         "sb-operator-dns",
+		CubeNetworkConfig: &CubeNetworkConfig{AllowOut: []string{"203.0.113.0/24"}},
+	}); err != nil {
+		t.Fatalf("UpdateNetworkPolicy: %v", err)
+	}
+
+	allow := *c.cubevsAdapter.(*fakeCubeVSAdapter).updatedPolicies[0].opts.AllowOut
+	sawResolver := false
+	for _, target := range allow {
+		if target == "10.204.0.10/32" {
+			sawResolver = true
+		}
+	}
+	if !sawResolver {
+		t.Errorf("operator-approved resolver dropped by IP-only update: %v", allow)
+	}
+}
+
 // TestUpdateNetworkPolicyFallsBackToCallerResolvers covers the upgrade path: a
 // sandbox created before the runtime recorded its resolvers has them installed
 // but unidentifiable, so the caller's list is used instead of revoking DNS —
@@ -978,17 +1002,18 @@ func TestUpdateNetworkPolicyFallsBackToCallerResolvers(t *testing.T) {
 	}
 }
 
-// TestUpdateNetworkPolicyDropsResolversWithoutDomains is the other half of the
-// gate: once no rule needs DNS, the implicit resolver exception goes away too.
-// TestUpdateNetworkPolicyDropsResolversWithoutDomains checks the other half of
-// the resolver gate: an IP-only policy must not inherit DNS access.
+// TestUpdateNetworkPolicyDropsPublicResolversWithoutDomains checks the original
+// resolver gate: an IP-only policy must not inherit access to a public resolver.
+// Private/link-local resolvers are intentionally different because CubeVS's
+// invariant private-range deny would otherwise make the configured resolver
+// unreachable even for a policy that has no domain target.
 //
 // The bare-literal cases are the ones that matter. A DNS name-shape check
 // accepts "2.2.2.2" because digits are valid label characters, so gating on it
 // silently folded the resolver into every IP-only policy. Masked forms like
 // "2.2.2.2/32" happen to fail that check on the slash, which is why they cannot
 // stand in for this.
-func TestUpdateNetworkPolicyDropsResolversWithoutDomains(t *testing.T) {
+func TestUpdateNetworkPolicyDropsPublicResolversWithoutDomains(t *testing.T) {
 	l7Port := 443
 	for _, tc := range []struct {
 		name string
@@ -1007,7 +1032,7 @@ func TestUpdateNetworkPolicyDropsResolversWithoutDomains(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newCreateTestController(t, nil)
-			registerActiveSandbox(t, c, "sb-nodns", &CubeNetworkConfig{}, []string{"169.254.0.53/32"})
+			registerActiveSandbox(t, c, "sb-nodns", &CubeNetworkConfig{}, []string{"8.8.8.8/32"})
 
 			if err := c.UpdateNetworkPolicy(context.Background(), &UpdateNetworkPolicyRequest{
 				SandboxID:         "sb-nodns",
@@ -1023,7 +1048,7 @@ func TestUpdateNetworkPolicyDropsResolversWithoutDomains(t *testing.T) {
 				return
 			}
 			for _, target := range *allow {
-				if target == "169.254.0.53/32" {
+				if target == "8.8.8.8/32" {
 					t.Errorf("resolver CIDR kept for an IP-only policy: %v", *allow)
 				}
 			}

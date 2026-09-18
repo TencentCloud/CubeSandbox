@@ -106,10 +106,14 @@ type CommonConf struct {
 
 	DisableHostNetfile bool `yaml:"disable_host_netfile"`
 
-	DefaultDNSServers  []string      `yaml:"default_dns_servers"`
-	DefaultDNSSearches []string      `yaml:"default_dns_searches"`
-	DefaultDNSOptions  []string      `yaml:"default_dns_options"`
-	ReconcileInterval  time.Duration `yaml:"reconcile_interval"`
+	DefaultDNSServers  []string `yaml:"default_dns_servers"`
+	DefaultDNSSearches []string `yaml:"default_dns_searches"`
+	DefaultDNSOptions  []string `yaml:"default_dns_options"`
+	// AutoAllowDefaultDNSServers lets an operator explicitly admit the
+	// configured default resolvers through CubeVS for guest connectivity. It is
+	// disabled by default because the current allow_out map is CIDR-only.
+	AutoAllowDefaultDNSServers bool          `yaml:"auto_allow_default_dns_servers"`
+	ReconcileInterval          time.Duration `yaml:"reconcile_interval"`
 
 	DisableCubeBoxTemplateBaseFormatPoolOfNumberVer bool `yaml:"disable_cube_box_template_base_format_pool_of_number_ver"`
 }
