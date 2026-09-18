@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	cubeletnodemeta "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/nodemeta"
 )
 
 func TestParseEndpoints(t *testing.T) {
@@ -40,6 +42,27 @@ func TestParseEndpoints(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestUpdateNodeStatusAlwaysEmitsLocalTemplates(t *testing.T) {
+	// A drained-to-zero cubelet must still emit an explicit "local_templates"
+	// array so CubeOps can tell it apart from a legacy heartbeat that omits the
+	// field entirely. Regression guard for the dropped omitempty tag.
+	data, err := json.Marshal(UpdateNodeStatusRequest{LocalTemplates: []cubeletnodemeta.LocalTemplate{}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"local_templates":[]`) {
+		t.Fatalf("empty inventory must serialize as explicit []: %s", data)
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := fields["local_templates"]; !ok {
+		t.Fatalf("local_templates key must always be present: %s", data)
 	}
 }
 

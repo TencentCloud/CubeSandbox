@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -18,12 +19,18 @@ import (
 
 var (
 	ErrNodeIDRequired          = errors.New("node_id is required")
+	ErrInvalidRequestID        = errors.New("requestID must be valid UTF-8 and at most 64 characters")
 	ErrSchedulingLabelRejected = errors.New("cubelet must not set scheduling-disabled label")
 	ErrLabelsJSONCorrupt       = errors.New("node labels_json is corrupt")
 	ErrDetailTooLong           = errors.New("operation detail too long")
 )
 
 const maxOperationDetailLen = 200
+
+var (
+	snapshotWriteWarnMu   sync.Mutex
+	snapshotWriteLastWarn time.Time
+)
 
 type DeclaredVersionInfo struct {
 	Primary map[string]string
@@ -119,27 +126,28 @@ func (svc *NodeService) RegisterNode(ctx context.Context, req *model.RegisterNod
 		return nil, err
 	}
 
-	snap := &model.NodeSnapshot{
-		NodeID:              req.NodeID,
-		HostIP:              req.HostIP,
-		GRPCPort:            req.GRPCPort,
-		Labels:              cloneStringMap(mergedLabels),
-		Capacity:            req.Capacity,
-		Allocatable:         req.Allocatable,
-		InstanceType:        req.InstanceType,
-		ClusterLabel:        req.ClusterLabel,
-		QuotaCPU:            req.QuotaCPU,
-		QuotaMemMB:          req.QuotaMemMB,
-		CreateConcurrentNum: req.CreateConcurrentNum,
-		MaxMvmNum:           req.MaxMvmNum,
-		HostFacts:           cloneHostFacts(req.HostFacts),
-		HeartbeatTime:       time.Now(),
+	status, statusErr := svc.store.GetStatus(ctx, req.NodeID)
+	if statusErr != nil && !errors.Is(statusErr, store.ErrNotFound) {
+		return nil, statusErr
 	}
+	snap := buildSnapshotFromStore(existing, status, nil)
+	snap.HostIP = req.HostIP
+	snap.GRPCPort = req.GRPCPort
+	snap.Labels = cloneStringMap(mergedLabels)
+	snap.Capacity = req.Capacity
+	snap.Allocatable = req.Allocatable
+	snap.InstanceType = req.InstanceType
+	snap.ClusterLabel = req.ClusterLabel
+	snap.QuotaCPU = req.QuotaCPU
+	snap.QuotaMemMB = req.QuotaMemMB
+	snap.CreateConcurrentNum = req.CreateConcurrentNum
+	snap.MaxMvmNum = req.MaxMvmNum
+	snap.HostFacts = cloneHostFacts(req.HostFacts)
 	applyCurrentHealth(snap, time.Now())
 	snap.SchedulingDisabled = snapSchedulingDisabled(snap)
 
 	svc.persistVersions(ctx, req.NodeID, req.Versions, req.InventoryIncomplete, snap)
-	nodemetric.WriteNodeSnapshot(snap)
+	writeNodeSnapshotBestEffort(ctx, snap)
 	logging.G(ctx).Infof("nodemgmt: node registered: node=%s host=%s", req.NodeID, req.HostIP)
 	return cloneSnapshot(snap), nil
 }
@@ -151,40 +159,70 @@ func (svc *NodeService) UpdateNodeStatus(ctx context.Context, nodeID string, req
 	if req == nil {
 		req = &model.UpdateNodeStatusRequest{}
 	}
+	now := time.Now()
 	if req.HeartbeatTime.IsZero() {
-		req.HeartbeatTime = time.Now()
+		req.HeartbeatTime = now
+	} else if req.HeartbeatTime.After(now) {
+		// The heartbeat time is cubelet-supplied and later drives CubeMaster's
+		// template-locality staleness ordering. A future-dated timestamp (clock
+		// skew or a hostile node) would otherwise be latched as "newest" and
+		// freeze reconciliation, so clamp it to the ingestion time.
+		req.HeartbeatTime = now
 	}
 
-	if _, err := svc.store.GetRegistration(ctx, nodeID); err != nil {
+	reg, err := svc.store.GetRegistration(ctx, nodeID)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, fmt.Errorf("%w: %s", ErrNodeNotFound, nodeID)
 		}
 		return nil, err
 	}
+	if !utf8.ValidString(req.RequestID) || utf8.RuneCountInString(req.RequestID) > 64 {
+		return nil, ErrInvalidRequestID
+	}
 
 	reportedReady := ReadyConditionTrue(req.Conditions)
 	status := &store.NodeStatus{
-		NodeID:             nodeID,
-		ConditionsJSON:     model.MustJSON(req.Conditions),
-		ImagesJSON:         model.MustJSON(req.Images),
-		LocalTemplatesJSON: model.MustJSON(req.LocalTemplates),
-		HeartbeatUnix:      req.HeartbeatTime.Unix(),
-		Healthy:            reportedReady,
+		NodeID:                  nodeID,
+		ConditionsJSON:          model.MustJSON(req.Conditions),
+		ImagesJSON:              model.MustJSON(req.Images),
+		LocalTemplatesJSON:      model.MustJSON(req.LocalTemplates),
+		LocalTemplatesReported:  req.LocalTemplatesReported,
+		LocalTemplatesUpdate:    req.LocalTemplatesReported,
+		HeartbeatUnix:           req.HeartbeatTime.Unix(),
+		HeartbeatOrderUnixMilli: now.UnixMilli(),
+		Healthy:                 reportedReady,
+		LastRequestID:           req.RequestID,
 	}
-	if err := svc.store.UpsertStatus(ctx, status); err != nil {
+	persistedStatus, err := svc.store.UpsertStatus(ctx, status)
+	if err != nil {
 		logging.G(ctx).Errorf("nodemgmt: heartbeat upsert failed: node=%s: %v", nodeID, err)
 		return nil, err
 	}
 
-	snap, err := svc.getNodeFromRedisOrDB(ctx, nodeID)
-	if err != nil {
-		return nil, err
+	snap := buildSnapshotFromStore(reg, persistedStatus, nil)
+	if cached, readErr := nodemetric.ReadNodeSnapshot(nodeID); readErr == nil && cached != nil {
+		snap.MetricLocalUpdateAt = cached.MetricLocalUpdateAt
 	}
-	snap.Conditions = append([]model.NodeCondition(nil), req.Conditions...)
-	snap.Images = append([]model.ContainerImage(nil), req.Images...)
-	snap.LocalTemplates = append([]model.LocalTemplate(nil), req.LocalTemplates...)
-	snap.HeartbeatTime = req.HeartbeatTime
-	snap.ReportedReady = reportedReady
+	versions, err := svc.store.ListComponentVersionsByNode(ctx, nodeID)
+	if err != nil {
+		logging.G(ctx).Warnf("nodemgmt: heartbeat load versions failed: node=%s: %v", nodeID, err)
+		if cached, readErr := nodemetric.ReadNodeSnapshot(nodeID); readErr == nil && cached != nil {
+			snap.Versions = append([]model.ComponentVersion(nil), cached.Versions...)
+			snap.VersionsHash = cached.VersionsHash
+		}
+	} else {
+		for _, version := range versions {
+			snap.Versions = append(snap.Versions, model.ComponentVersion{
+				Component: version.Component,
+				Version:   version.Version,
+				Commit:    version.Commit,
+				BuildTime: version.BuildTime,
+				Source:    version.Source,
+			})
+		}
+		snap.VersionsHash = VersionsHash(snap.Versions)
+	}
 	applyCurrentHealth(snap, time.Now())
 	snap.SchedulingDisabled = snapSchedulingDisabled(snap)
 
@@ -221,8 +259,28 @@ func (svc *NodeService) UpdateNodeStatus(ctx context.Context, nodeID string, req
 	}
 
 	svc.persistVersions(ctx, nodeID, req.Versions, req.InventoryIncomplete, snap)
-	nodemetric.WriteNodeSnapshot(snap)
+	writeNodeSnapshotBestEffort(ctx, snap)
 	return cloneSnapshot(snap), nil
+}
+
+func writeNodeSnapshotBestEffort(ctx context.Context, snap *model.NodeSnapshot) {
+	_, err := nodemetric.WriteNodeSnapshot(snap)
+	if err == nil {
+		return
+	}
+	now := time.Now()
+	snapshotWriteWarnMu.Lock()
+	if now.Sub(snapshotWriteLastWarn) < time.Minute {
+		snapshotWriteWarnMu.Unlock()
+		return
+	}
+	snapshotWriteLastWarn = now
+	snapshotWriteWarnMu.Unlock()
+	nodeID := ""
+	if snap != nil {
+		nodeID = snap.NodeID
+	}
+	logging.G(ctx).Warnf("nodemgmt: write node snapshot failed: node=%s: %v", nodeID, err)
 }
 
 func fanOutResourceMetric(ctx context.Context, nodeID string, req *model.UpdateNodeStatusRequest, metricTime time.Time) {
@@ -298,9 +356,11 @@ func (svc *NodeService) ListNodes(ctx context.Context) ([]*model.NodeSnapshot, e
 			continue
 		}
 		snap, err := svc.getNodeFromRedisOrDB(ctx, regs[i].NodeID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue // registration was deleted after ListRegistrations
+		}
 		if err != nil {
-			logging.G(ctx).Warnf("nodemgmt: list nodes: skip node=%s: %v", regs[i].NodeID, err)
-			continue
+			return nil, fmt.Errorf("rebuild node %s: %w", regs[i].NodeID, err)
 		}
 		out = append(out, snap)
 	}
@@ -571,22 +631,40 @@ func (svc *NodeService) getNodeFromRedisOrDB(ctx context.Context, nodeID string)
 		}
 		return nil, err
 	}
-	st, _ := svc.store.GetStatus(ctx, nodeID)
-	versions, _ := svc.store.ListComponentVersionsByNode(ctx, nodeID)
+	st, err := svc.store.GetStatus(ctx, nodeID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+	versions, err := svc.store.ListComponentVersionsByNode(ctx, nodeID)
+	if err != nil {
+		return nil, err
+	}
 	snap = buildSnapshotFromStore(reg, st, versions)
-	nodemetric.WriteNodeSnapshot(snap)
+	writeNodeSnapshotBestEffort(ctx, snap)
 	return snap, nil
 }
 
-// updateSnapshotInRedis reads the current snapshot, applies fn, and writes it back.
+// updateSnapshotInRedis retries when a concurrent heartbeat wins the Redis
+// ordering check, so administrative metadata changes are not silently dropped.
 func (svc *NodeService) updateSnapshotInRedis(ctx context.Context, nodeID string, fn func(*model.NodeSnapshot)) {
-	snap, err := svc.getNodeFromRedisOrDB(ctx, nodeID)
-	if err != nil {
-		logging.G(ctx).Warnf("nodemgmt: update snapshot: read failed: node=%s: %v", nodeID, err)
-		return
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		snap, err := svc.getNodeFromRedisOrDB(ctx, nodeID)
+		if err != nil {
+			logging.G(ctx).Warnf("nodemgmt: update snapshot: read failed: node=%s: %v", nodeID, err)
+			return
+		}
+		fn(snap)
+		applied, err := nodemetric.WriteNodeSnapshot(snap)
+		if err != nil {
+			logging.G(ctx).Warnf("nodemgmt: update snapshot: write failed: node=%s: %v", nodeID, err)
+			return
+		}
+		if applied {
+			return
+		}
 	}
-	fn(snap)
-	nodemetric.WriteNodeSnapshot(snap)
+	logging.G(ctx).Warnf("nodemgmt: update snapshot lost concurrent ordering races: node=%s attempts=%d", nodeID, maxAttempts)
 }
 
 func (svc *NodeService) LoadDeclaredVersions(declared DeclaredVersionInfo) {

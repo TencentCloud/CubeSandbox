@@ -38,7 +38,7 @@ func MapNodeError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, service.ErrNodeNotFound):
 		httputil.WriteError(c, http.StatusNotFound, err.Error())
-	case errors.Is(err, service.ErrNodeIDRequired):
+	case errors.Is(err, service.ErrNodeIDRequired), errors.Is(err, service.ErrInvalidRequestID):
 		httputil.WriteError(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, service.ErrSchedulingLabelRejected), errors.Is(err, service.ErrLabelsJSONCorrupt):
 		httputil.WriteError(c, http.StatusBadRequest, err.Error())

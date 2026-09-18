@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	imagestore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	cubeletnodemeta "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/nodemeta"
@@ -244,6 +245,8 @@ func (kl *Cubelet) fastNodeStatusUpdate(ctx context.Context, timeout bool) (comp
 	if readyIdx == -1 || ready.Status != corev1.ConditionTrue {
 		return false
 	}
+	kl.statusRequestID = uuid.NewString()
+	defer kl.clearStatusRequest()
 	if _, err := kl.patchNodeStatus(originalNode, node); err != nil {
 		klog.ErrorS(err, "Error updating node status, will retry with syncNodeStatus")
 		kl.syncNodeStatusMux.Unlock()
@@ -269,6 +272,11 @@ func (kl *Cubelet) syncNodeStatus() {
 }
 
 func (kl *Cubelet) updateNodeStatus(ctx context.Context) error {
+	ownsRequestID := kl.statusRequestID == ""
+	if ownsRequestID {
+		kl.statusRequestID = uuid.NewString()
+		defer kl.clearStatusRequest()
+	}
 	for i := 0; i < nodeStatusUpdateRetry; i++ {
 		if err := kl.tryUpdateNodeStatus(ctx, i); err != nil {
 			klog.ErrorS(err, "Error updating node status, will retry")
@@ -296,6 +304,10 @@ func (kl *Cubelet) tryUpdateNodeStatus(ctx context.Context, tryNumber int) error
 	}
 	_, err = kl.patchNodeStatus(originalNode, node)
 	return err
+}
+
+func (kl *Cubelet) clearStatusRequest() {
+	kl.statusRequestID = ""
 }
 
 func (kl *Cubelet) shouldPatchNodeStatus(changed bool, tryNumber int, now time.Time) bool {
@@ -383,7 +395,8 @@ func (kl *Cubelet) updateNode(ctx context.Context, originalNode *cubeletnodemeta
 
 func (kl *Cubelet) patchNodeStatus(originalNode, node *cubeletnodemeta.Node) (*cubeletnodemeta.Node, error) {
 	if kl.masterClient != nil {
-		if err := kl.masterClient.UpdateNodeStatus(context.TODO(), string(kl.nodeName), kl.buildStatusRequest(node)); err != nil {
+		request := kl.buildStatusRequest(node)
+		if err := kl.masterClient.UpdateNodeStatus(context.TODO(), string(kl.nodeName), request); err != nil {
 			return nil, err
 		}
 	}
@@ -524,10 +537,22 @@ func (kl *Cubelet) buildRegisterRequest(node *cubeletnodemeta.Node) *masterclien
 }
 
 func (kl *Cubelet) buildStatusRequest(node *cubeletnodemeta.Node) *masterclient.UpdateNodeStatusRequest {
+	// A successful local-template listing reports an explicit inventory, including
+	// "[]" when drained. A failed listing remains unknown and omits the field.
+	var localTemplates []cubeletnodemeta.LocalTemplate
+	if node.Status.CubeTemplatesKnown {
+		localTemplates = make([]cubeletnodemeta.LocalTemplate, 0, len(node.Status.CubeTemplates))
+		localTemplates = append(localTemplates, node.Status.CubeTemplates...)
+	}
+	requestID := kl.statusRequestID
+	if requestID == "" {
+		requestID = uuid.NewString()
+	}
 	req := &masterclient.UpdateNodeStatusRequest{
+		RequestID:      requestID,
 		Conditions:     append([]corev1.NodeCondition(nil), node.Status.Conditions...),
 		Images:         append([]cubeletnodemeta.ContainerImage(nil), node.Status.CubeImages...),
-		LocalTemplates: append([]cubeletnodemeta.LocalTemplate(nil), node.Status.CubeTemplates...),
+		LocalTemplates: localTemplates,
 		HeartbeatTime:  kl.clock.Now(),
 	}
 	attachResourceReport(req, kl.clock.Now())

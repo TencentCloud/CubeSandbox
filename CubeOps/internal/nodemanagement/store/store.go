@@ -27,7 +27,7 @@ type NodeStore interface {
 	// DeleteRegistration removes the registration row; ErrNotFound if absent.
 	DeleteRegistration(ctx context.Context, nodeID string) error
 
-	UpsertStatus(ctx context.Context, status *NodeStatus) error
+	UpsertStatus(ctx context.Context, status *NodeStatus) (*NodeStatus, error)
 	GetStatus(ctx context.Context, nodeID string) (*NodeStatus, error)
 	ListStatuses(ctx context.Context) ([]NodeStatus, error)
 
@@ -104,14 +104,69 @@ func (s *gormNodeStore) UpdateHostFacts(ctx context.Context, nodeID string, fact
 	return res.Error
 }
 
-func (s *gormNodeStore) UpsertStatus(ctx context.Context, status *NodeStatus) error {
-	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "node_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{
-			"conditions_json", "images_json", "local_templates_json",
-			"heartbeat_unix", "healthy", "updated_at",
-		}),
-	}).Create(status).Error
+func (s *gormNodeStore) UpsertStatus(ctx context.Context, status *NodeStatus) (*NodeStatus, error) {
+	if status.HeartbeatOrderUnixMilli <= 0 {
+		status.HeartbeatOrderUnixMilli = time.Now().UnixMilli()
+	}
+	status.UpdatedAt = time.Now()
+	currentColumn := func(column string) string {
+		if s.db.Dialector.Name() == "postgres" {
+			return fmt.Sprintf("%s.%s", model.NodeMetaStatusTable, column)
+		}
+		return column
+	}
+	keepOnReplay := func(column string, incoming any) clause.Assignment {
+		return clause.Assignment{
+			Column: clause.Column{Name: column},
+			Value: gorm.Expr(
+				fmt.Sprintf("CASE WHEN %s = ? AND ? <> '' THEN %s ELSE ? END", currentColumn("last_request_id"), currentColumn(column)),
+				status.LastRequestID, status.LastRequestID, incoming,
+			),
+		}
+	}
+	updates := []clause.Assignment{
+		keepOnReplay("conditions_json", status.ConditionsJSON),
+		keepOnReplay("images_json", status.ImagesJSON),
+		keepOnReplay("healthy", status.Healthy),
+		keepOnReplay("updated_at", status.UpdatedAt),
+	}
+	if status.LocalTemplatesUpdate {
+		updates = append(updates,
+			keepOnReplay("local_templates_json", status.LocalTemplatesJSON),
+			keepOnReplay("local_templates_reported", true),
+		)
+	} else {
+		updates = append(updates, keepOnReplay("local_templates_reported", false))
+	}
+	updates = append(updates,
+		clause.Assignment{
+			Column: clause.Column{Name: "heartbeat_unix"},
+			Value: gorm.Expr(
+				fmt.Sprintf("CASE WHEN %s = ? AND ? <> '' THEN %s ELSE GREATEST(%s, ?) END", currentColumn("last_request_id"), currentColumn("heartbeat_unix"), currentColumn("heartbeat_unix")),
+				status.LastRequestID, status.LastRequestID, status.HeartbeatUnix,
+			),
+		},
+		clause.Assignment{
+			Column: clause.Column{Name: "heartbeat_order_unix_milli"},
+			Value: gorm.Expr(
+				fmt.Sprintf("CASE WHEN %s = ? AND ? <> '' THEN %s ELSE GREATEST(%s + 1, ?) END", currentColumn("last_request_id"), currentColumn("heartbeat_order_unix_milli"), currentColumn("heartbeat_order_unix_milli")),
+				status.LastRequestID, status.LastRequestID, status.HeartbeatOrderUnixMilli,
+			),
+		},
+		// Keep this assignment last: MySQL evaluates ON DUPLICATE KEY assignments
+		// left-to-right, and the replay guards above must compare the prior ID.
+		clause.Assignment{
+			Column: clause.Column{Name: "last_request_id"},
+			Value:  gorm.Expr(fmt.Sprintf("CASE WHEN ? <> '' THEN ? ELSE %s END", currentColumn("last_request_id")), status.LastRequestID, status.LastRequestID),
+		},
+	)
+	if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "node_id"}},
+		DoUpdates: updates,
+	}).Create(status).Error; err != nil {
+		return nil, err
+	}
+	return s.GetStatus(ctx, status.NodeID)
 }
 
 func (s *gormNodeStore) GetStatus(ctx context.Context, nodeID string) (*NodeStatus, error) {

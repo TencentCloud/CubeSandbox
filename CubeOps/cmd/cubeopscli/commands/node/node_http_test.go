@@ -63,6 +63,7 @@ var listFlags = []cli.Flag{
 	cli.BoolFlag{Name: "json"},
 	cli.StringFlag{Name: "hostid"},
 	cli.BoolFlag{Name: "score-only"},
+	cli.BoolFlag{Name: "show-local-templates"},
 }
 
 var isolateFlags = []cli.Flag{cli.BoolFlag{Name: "json"}}
@@ -71,7 +72,18 @@ func TestListAction_JSON(t *testing.T) {
 	srv, h, p := setupStubServer(t, 200, sampleSchedulerNodes())
 	defer srv.Close()
 	ctx := newCommandContext(t, "list", listFlags, h, p, []string{"--json"})
-	assert.NoError(t, listAction(ctx))
+	out := captureStdout(t, func() { assert.NoError(t, listAction(ctx)) })
+	assert.NotContains(t, out, `"LocalTemplates":`)
+}
+
+func TestListAction_JSONWithLocalTemplates(t *testing.T) {
+	srv, h, p := setupStubServer(t, 200, sampleSchedulerNodes())
+	defer srv.Close()
+	ctx := newCommandContext(t, "list", listFlags, h, p, []string{"--json", "--show-local-templates"})
+	out := captureStdout(t, func() { assert.NoError(t, listAction(ctx)) })
+	assert.Contains(t, out, `"LocalTemplates": [`)
+	assert.Contains(t, out, `"tpl-a"`)
+	assert.Contains(t, out, `"LocalTemplatesReported": true`)
 }
 
 func TestListAction_TableOutput(t *testing.T) {
@@ -81,6 +93,16 @@ func TestListAction_TableOutput(t *testing.T) {
 	out := captureStdout(t, func() { assert.NoError(t, listAction(ctx)) })
 	assert.Contains(t, out, "node-1")
 	assert.Contains(t, out, "node-2")
+}
+
+func TestListAction_TableOutputWithLocalTemplates(t *testing.T) {
+	srv, h, p := setupStubServer(t, 200, sampleSchedulerNodes())
+	defer srv.Close()
+	ctx := newCommandContext(t, "list", listFlags, h, p, []string{"--show-local-templates"})
+	out := captureStdout(t, func() { assert.NoError(t, listAction(ctx)) })
+	assert.Contains(t, out, "LOCAL_TEMPLATES")
+	assert.Contains(t, out, "node-1")
+	assert.Contains(t, out, "2")
 }
 
 func TestListAction_HostID(t *testing.T) {

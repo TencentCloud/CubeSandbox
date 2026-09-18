@@ -41,6 +41,16 @@ func TestInternal_ListNodes(t *testing.T) {
 	if len(resp) != 1 || resp[0].ID() != "n-1" {
 		t.Errorf("resp = %+v", resp)
 	}
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	if _, ok := raw[0]["LocalTemplates"]; ok {
+		t.Fatalf("unknown inventory should be omitted: %s", w.Body.String())
+	}
+	if string(raw[0]["LocalTemplatesReported"]) != "false" {
+		t.Fatalf("reported provenance missing: %s", w.Body.String())
+	}
 }
 
 func TestInternal_Isolate(t *testing.T) {

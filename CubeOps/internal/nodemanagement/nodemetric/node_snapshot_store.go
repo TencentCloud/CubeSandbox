@@ -22,22 +22,56 @@ func nodeSnapshotKey(nodeID string) string {
 	return nodeSnapshotKeyPrefix + nodeID
 }
 
-// WriteNodeSnapshot stores the node snapshot as a short-TTL JSON blob. Best-effort:
-// errors are logged, not returned, so a Redis hiccup does not break registration.
-func WriteNodeSnapshot(snap *model.NodeSnapshot) {
-	if snap == nil || snap.NodeID == "" || pool == nil {
-		return
+var writeNodeSnapshotHook func(*model.NodeSnapshot) (bool, error)
+
+// SetWriteNodeSnapshotHook registers a test hook; cleanup restores the prior one.
+func SetWriteNodeSnapshotHook(hook func(*model.NodeSnapshot) (bool, error)) func() {
+	prev := writeNodeSnapshotHook
+	writeNodeSnapshotHook = hook
+	return func() { writeNodeSnapshotHook = prev }
+}
+
+// WriteNodeSnapshot stores the node snapshot as a short-TTL JSON blob. It
+// returns false with no error when the stored ordering value is strictly newer;
+// validation and Redis failures, including an uninitialized pool, return errors.
+func WriteNodeSnapshot(snap *model.NodeSnapshot) (bool, error) {
+	if writeNodeSnapshotHook != nil {
+		return writeNodeSnapshotHook(snap)
+	}
+	if snap == nil {
+		return false, fmt.Errorf("nodesnapshot: snapshot is nil")
+	}
+	if snap.NodeID == "" {
+		return false, fmt.Errorf("nodesnapshot: node ID is empty")
+	}
+	if pool == nil {
+		return false, fmt.Errorf("nodesnapshot: redis pool is nil")
 	}
 	data, err := json.Marshal(snap)
 	if err != nil {
-		logging.G(context.Background()).Warnf("nodesnapshot: marshal failed: node=%s: %v", snap.NodeID, err)
-		return
+		return false, fmt.Errorf("nodesnapshot: marshal node %s: %w", snap.NodeID, err)
 	}
 	conn := pool.Get()
 	defer conn.Close()
-	if _, err := conn.Do("SET", nodeSnapshotKey(snap.NodeID), data, "EX", nodeSnapshotTTLSec); err != nil {
-		logging.G(context.Background()).Warnf("nodesnapshot: redis SET failed: node=%s: %v", snap.NodeID, err)
+	const setIfNewer = `
+local current = redis.call('GET', KEYS[1])
+if current then
+  local ok, decoded = pcall(cjson.decode, current)
+  if ok then
+    local current_order = decoded.heartbeat_order_unix_milli or 0
+    local incoming_order = tonumber(ARGV[2]) or 0
+    if current_order > incoming_order then
+      return 0
+    end
+  end
+end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
+return 1`
+	applied, err := redis.Int(conn.Do("EVAL", setIfNewer, 1, nodeSnapshotKey(snap.NodeID), data, snap.HeartbeatOrderUnixMilli, nodeSnapshotTTLSec))
+	if err != nil {
+		return false, fmt.Errorf("nodesnapshot: redis conditional SET for node %s: %w", snap.NodeID, err)
 	}
+	return applied == 1, nil
 }
 
 // ReadNodeSnapshot fetches a node snapshot from Redis. Returns (nil, nil) on miss.

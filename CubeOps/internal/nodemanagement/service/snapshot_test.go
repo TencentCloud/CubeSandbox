@@ -13,13 +13,35 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/store"
 )
 
+func TestBuildSnapshotFromStore_PreservesInventoryProvenanceAndOrder(t *testing.T) {
+	order := time.Now().UTC().Truncate(time.Millisecond)
+	snap := buildSnapshotFromStore(
+		&store.NodeRegistration{NodeID: "node-1"},
+		&store.NodeStatus{
+			NodeID:                  "node-1",
+			LocalTemplatesJSON:      `[]`,
+			LocalTemplatesReported:  true,
+			HeartbeatUnix:           order.Unix(),
+			HeartbeatOrderUnixMilli: order.UnixMilli(),
+		},
+		nil,
+	)
+	if !snap.LocalTemplatesReported {
+		t.Fatal("DB rebuild lost local-template provenance")
+	}
+	if !snap.HeartbeatOrder.Equal(order) {
+		t.Fatalf("HeartbeatOrder = %v, want %v", snap.HeartbeatOrder, order)
+	}
+}
+
 func TestToSchedulerNode_LocalTemplatesIncluded(t *testing.T) {
 	snap := &model.NodeSnapshot{
-		NodeID:         "node-1",
-		HostIP:         "10.0.0.1",
-		Capacity:       model.ResourceSnapshot{MilliCPU: 4000, MemoryMB: 8192},
-		Allocatable:    model.ResourceSnapshot{MilliCPU: 4000, MemoryMB: 8192},
-		LocalTemplates: []model.LocalTemplate{{TemplateID: "tpl-1"}, {TemplateID: "tpl-2"}},
+		NodeID:                 "node-1",
+		HostIP:                 "10.0.0.1",
+		Capacity:               model.ResourceSnapshot{MilliCPU: 4000, MemoryMB: 8192},
+		Allocatable:            model.ResourceSnapshot{MilliCPU: 4000, MemoryMB: 8192},
+		LocalTemplates:         []model.LocalTemplate{{TemplateID: "tpl-1"}, {TemplateID: "tpl-2"}},
+		LocalTemplatesReported: true,
 	}
 	n := ToSchedulerNode(snap)
 	if n == nil {
@@ -36,13 +58,48 @@ func TestToSchedulerNode_LocalTemplatesIncluded(t *testing.T) {
 	}
 }
 
+func TestToSchedulerNode_UnknownLocalTemplatesOmitted(t *testing.T) {
+	n := ToSchedulerNode(&model.NodeSnapshot{NodeID: "node-1"})
+	data, err := json.Marshal(n)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := m["LocalTemplates"]; ok {
+		t.Fatalf("unknown LocalTemplates should be omitted: %s", data)
+	}
+	if reported, ok := m["LocalTemplatesReported"].(bool); !ok || reported {
+		t.Fatalf("LocalTemplatesReported = %v, want false", m["LocalTemplatesReported"])
+	}
+}
+
+func TestToSchedulerNode_EmptyLocalTemplatesRoundTrip(t *testing.T) {
+	n := ToSchedulerNode(&model.NodeSnapshot{NodeID: "node-1", LocalTemplatesReported: true})
+	data, err := json.Marshal(n)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	tpls, ok := m["LocalTemplates"].([]any)
+	if !ok || len(tpls) != 0 {
+		t.Fatalf("LocalTemplates = %v, want explicit empty array", m["LocalTemplates"])
+	}
+}
+
 func TestToSchedulerNode_LocalTemplatesRoundTrip(t *testing.T) {
 	snap := &model.NodeSnapshot{
-		NodeID:         "node-1",
-		HostIP:         "10.0.0.1",
-		Capacity:       model.ResourceSnapshot{MilliCPU: 4000, MemoryMB: 8192},
-		Allocatable:    model.ResourceSnapshot{MilliCPU: 4000, MemoryMB: 8192},
-		LocalTemplates: []model.LocalTemplate{{TemplateID: "tpl-a"}, {TemplateID: "tpl-b"}},
+		NodeID:                 "node-1",
+		HostIP:                 "10.0.0.1",
+		Capacity:               model.ResourceSnapshot{MilliCPU: 4000, MemoryMB: 8192},
+		Allocatable:            model.ResourceSnapshot{MilliCPU: 4000, MemoryMB: 8192},
+		LocalTemplates:         []model.LocalTemplate{{TemplateID: "tpl-a"}, {TemplateID: "tpl-b"}},
+		LocalTemplatesReported: true,
 	}
 	n := ToSchedulerNode(snap)
 	data, err := json.Marshal(n)
