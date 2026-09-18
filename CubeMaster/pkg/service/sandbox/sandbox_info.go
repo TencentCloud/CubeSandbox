@@ -72,7 +72,8 @@ func SandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq) (rsp *types.
 		return
 	}
 
-	// Pause binding wins over Cubelet EXITED flicker / empty List: READY →
+	// Pause binding wins over Cubelet EXITED flicker / empty List, but not
+	// an explicitly running sandbox after resume: READY →
 	// paused tombstone view; FAILED → keep sandbox record with error.
 	if fillPauseBindingInfoFromMaster(ctx, req, rsp) {
 		return
@@ -245,7 +246,8 @@ func getContainerName(label map[string]string) string {
 }
 
 // fillPauseBindingInfoFromMaster synthesizes Info from the pausesnap binding
-// when present. READY → PAUSED. CREATING/FAILED prefer Cubelet PAUSING/PAUSED
+// when present. READY → PAUSED unless Cubelet confirms RUNNING.
+// CREATING/FAILED prefer Cubelet PAUSING/PAUSED
 // when the node already finished Pause (Master RPC may have timed out); otherwise
 // CREATING → PAUSING and FAILED → UNKNOWN + pause error. Overrides Cubelet
 // EXITED flicker during CoW Pause.
@@ -268,6 +270,13 @@ func fillPauseBindingInfoFromMaster(ctx context.Context, req *types.GetCubeSandb
 	var st int32
 	switch status {
 	case "READY":
+		// Resume may succeed while deleting its binding fails. An explicit
+		// running node result wins over that leftover paused tombstone.
+		for _, d := range rsp.Data {
+			if d != nil && d.SandboxID == req.SandboxID && d.Status == int32(cubebox.ContainerState_CONTAINER_RUNNING) {
+				return false
+			}
+		}
 		st = int32(cubebox.ContainerState_CONTAINER_PAUSED)
 	case pausesnap.StatusFailed:
 		// Master timed out / failed, but Cubelet may still have reached PAUSED.

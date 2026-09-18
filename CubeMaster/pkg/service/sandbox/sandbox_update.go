@@ -73,6 +73,19 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		// Client/HTTP cancel must not abort bookkeeping or release the lock
 		// while SAVE/Create/Destroy is still in flight on Cubelet.
 		ctx = context.WithoutCancel(ctx)
+		// Check after acquiring the Master lifecycle lock: a resume may have
+		// completed while this auto-pause RPC was queued behind it.
+		if req.Action == "pause" && req.ExpectedLifecycleState != "" {
+			if err := checkPauseLifecycleState(req.SandboxID, req.ExpectedLifecycleState); err != nil {
+				if errors.Is(err, errPauseSuperseded) {
+					rsp.Ret.RetCode = int(errorcode.ErrorCode_Conflict)
+				} else {
+					rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterInternalError)
+				}
+				rsp.Ret.RetMsg = err.Error()
+				return nil
+			}
+		}
 		var hostIP string
 		if v := localcache.GetSandboxCache(req.SandboxID); v != nil {
 			hostIP = v.HostIP
@@ -96,7 +109,7 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 			*rsp = *pauseSandbox(ctx, req, hostIP)
 		case "resume":
 			*rsp = *resumeFromPauseSnapshot(ctx, req, hostIP)
-			if rsp.Ret.RetCode == int(errorcode.ErrorCode_Success) {
+			if rsp.Ret.RetCode == int(errorcode.ErrorCode_Success) || rsp.ResumeCompleted {
 				publishUpdateTimeout(ctx, req)
 			}
 		}
