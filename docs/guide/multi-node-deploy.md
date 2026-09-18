@@ -183,7 +183,11 @@ CubeMaster no longer keeps a reservation ledger or performs a synchronous Redis 
 
 The `scheduler.reservation_redis_error_policy` setting is obsolete and must be removed from existing configuration.
 
-Redis remains required by other scheduler paths, including node metric reads and post-create metadata writes. Cubelet-side node-wide admission is a separate follow-up design.
+This change only removes the Redis scheduling reservation; it does not remove the Redis dependency. Node metric reads and the post-create proxy-routing metadata write still go through Redis, so the create chain as a whole cannot survive a Redis outage.
+
+Cubelet-side node-wide admission is a separate follow-up design.
+
+During a rolling upgrade, new versions do not participate in old versions' Redis reservations, and a mixed-version cluster must not be treated as having full cross-replica coordination. Once every Master is upgraded, the old reservation keys are no longer touched; do not delete those keys while an old version may still serve requests.
 
 
 See [scheduler configuration](./cubemaster-scheduler-config.md) and [scheduler plugins](./scheduler-plugin.md).

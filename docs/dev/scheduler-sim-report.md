@@ -215,6 +215,14 @@ consolidation; if node-level burst risk matters more than empty-node count,
 > avoid persistent hotspots on replica nodes"). Variants: `baseline` =
 > 0.7/0.2/0.3, `rt-dominated` = 0.1/−/0.9 (pressure scorer removed), `mid` =
 > 0.5/0.2/0.5, `rt-hot` = 0.7/0.2/0.9. Values are mean ± 95% CI across rounds.
+>
+> Historical note (2026-09-17 scope cut): `template_local_pressure` was removed
+> from the shipped `template_reuse` profile together with the reservation
+> subsystem; the shipped weights are now image_score 0.7 /
+> real_time_weighted_average 0.3, and this experiment was not re-run without
+> the 0.2 component. In-sim the scorer scored a constant 100 anyway (the sim
+> engine never drives its in-flight counters, see the caveat below), so the
+> recorded numbers remain representative of the shipped 0.7/0.3 profile.
 
 ### Standard template_storm trace (300 req, 30/s, U(30s,90s))
 

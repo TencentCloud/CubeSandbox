@@ -20,12 +20,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/profile"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/filter"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/score"
 )
 
@@ -315,19 +313,6 @@ func runPreFilter(selCtx *selctx.SelectorCtx) (err error) {
 	return nil
 }
 
-func runFilter(selCtx *selctx.SelectorCtx, filters []filter.Selector) error {
-	if tmpResult, err := parallelRunFilters(selCtx, filters); err != nil {
-		log.G(selCtx.Ctx).Warnf("runFilter_failed, err: %v", err)
-		return err
-	} else {
-		if tmpResult.Len() == 0 {
-			return ret.Err(errorcode.ErrorCode_SelectNodesNoRes, ErrNoRes.Error())
-		}
-		selCtx.SetNodes(tmpResult)
-	}
-	return nil
-}
-
 // runProfileFilters 并发执行 Profile 中的一组过滤插件：
 // 每个插件独立运行并校验其返回的候选节点，只有被全部插件保留的节点才进入结果；
 // 插件失败按 Failure 策略决定 fail-open（放行全部候选）或 fail-closed（直接报错）
@@ -421,56 +406,6 @@ func runProfileFilters(selCtx *selctx.SelectorCtx, kind string, filters []profil
 	}
 	selCtx.SetNodes(result)
 	return nil
-}
-
-func parallelRunFilters(selCtx *selctx.SelectorCtx, filters []filter.Selector) (node.NodeList, error) {
-	eg, _ := errgroup.WithContext(selCtx.Ctx)
-	tmpStat := &utils.AtomicMapStat{}
-	for _, f := range filters {
-		f := f
-		eg.Go(func() (err error) {
-			f := f
-			defer func() {
-				if r := recover(); r != nil {
-					err = ret.Errorf(errorcode.ErrorCode_MasterInternalError, "parallelRunFilters panic:%s", r)
-				}
-			}()
-
-			if tmp, err := f.Select(selCtx); err != nil {
-				return err
-			} else {
-				for _, n := range tmp {
-
-					tmpStat.Add(n.ID(), 1)
-				}
-			}
-			return nil
-		})
-	}
-
-	if err := eg.Wait(); err != nil {
-		log.G(selCtx.Ctx).Errorf("parallelRunFilters failed, err: %v", err)
-		return nil, ret.Err(errorcode.ErrorCode_MasterInternalError, err.Error())
-	}
-
-	result := node.NodeList{}
-	expectedCnt := len(filters)
-	for _, n := range selCtx.Nodes() {
-		if expectedCnt == tmpStat.Get(n.ID()) {
-			result.Append(n)
-		}
-	}
-	return result, nil
-}
-
-func runScoreFilter(selCtx *selctx.SelectorCtx, scores []score.Selector) error {
-	bindings := make([]profile.ScorePlugin, 0, len(scores))
-	for _, selector := range scores {
-		bindings = append(bindings, profile.ScorePlugin{
-			Name: selector.ID(), Selector: selector, Weight: selector.Weight(), Failure: profile.ScoreSkip,
-		})
-	}
-	return runProfileScores(selCtx, bindings)
 }
 
 func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) error {

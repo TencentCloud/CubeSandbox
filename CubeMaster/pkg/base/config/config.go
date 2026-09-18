@@ -1092,6 +1092,10 @@ var schedulerFactoryYAML []byte
 //
 // 出厂 YAML 同时携带 legacy score 子树：profile 模式下它不参与流水线编译，
 // 但内置 scorer（real_time_weighted_average / image_score）的 enable_weight_factors
+// factoryProfileInjectWarnOnce 保证"空配置注入出厂策略"的行为变化告警
+// 每个进程只输出一次：热更新会反复重新注入，但重复刷这条 warn 没有意义。
+var factoryProfileInjectWarnOnce sync.Once
+
 // 只存在于该 legacy 子树中；缺失时这些 scorer 空转（见 pkg/selector/score/realtimescore.go）。
 func injectFactorySchedulerProfiles(config *Config) error {
 	sched := config.Scheduler
@@ -1126,11 +1130,14 @@ func injectFactorySchedulerProfiles(config *Config) error {
 		names = append(names, profileConf.Name)
 	}
 	// 注入出厂策略会改变空配置部署的放置行为（此前是"无过滤、无评分、随机选"），
-	// 必须显式告知运维，避免升级后策略静默切换。
-	CubeLog.Warnf("no scheduler policy configured (scheduler.profiles/filter/score/postscore all empty); "+
-		"injecting factory scheduler profiles %v: placement now follows mandatory guards + factory scorers + spread selection, "+
-		"which differs from the legacy empty-config behavior; set scheduler.disable_factory_profiles: true "+
-		"or configure any of those keys explicitly to keep legacy scheduling", names)
+	// 必须显式告知运维，避免升级后策略静默切换。热更新会重新执行注入，
+	// 告警每个进程只输出一次，避免无关 key 的 reload 重复刷日志。
+	factoryProfileInjectWarnOnce.Do(func() {
+		CubeLog.Warnf("no scheduler policy configured (scheduler.profiles/filter/score/postscore all empty); "+
+			"injecting factory scheduler profiles %v: placement now follows mandatory guards + factory scorers + spread selection, "+
+			"which differs from the legacy empty-config behavior; set scheduler.disable_factory_profiles: true "+
+			"or configure any of those keys explicitly to keep legacy scheduling", names)
+	})
 	return nil
 }
 

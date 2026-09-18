@@ -7,10 +7,16 @@ package sim
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/profile"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/score"
 )
 
 // TestPerfModeMatchesQualityMode runs the same deterministic scenario through
@@ -230,6 +236,72 @@ func TestPerfSummaryOverheadJSON(t *testing.T) {
 	for _, key := range []string{`"overhead"`, `"cpu_seconds"`, `"avg_cpu_cores"`, `"peak_rss_mib"`, `"heap_alloc_mib"`, `"heap_sys_mib"`} {
 		if !strings.Contains(string(data), key) {
 			t.Fatalf("marshaled PerfSummary missing %s: %s", key, data)
+		}
+	}
+}
+
+// stubScoreSelector is a score.Selector fixture returning a fixed result.
+type stubScoreSelector struct {
+	scores node.NodeScoreList
+	err    error
+}
+
+func (s *stubScoreSelector) Select(*selctx.SelectorCtx) (node.NodeScoreList, error) {
+	return s.scores, s.err
+}
+func (s *stubScoreSelector) ID() string      { return "stub" }
+func (s *stubScoreSelector) Weight() float64 { return 1 }
+func (s *stubScoreSelector) Disable() bool   { return false }
+
+// TestPerfRunScoresErrNotApplicableSkips locks in perf-mode parity with
+// runProfileScores: a score plugin returning (wrapped) score.ErrNotApplicable
+// contributes no scores and no weight — it must not fall into the
+// default-score / fail-closed failure handling.
+func TestPerfRunScoresErrNotApplicableSkips(t *testing.T) {
+	nodes := node.NodeList{&node.Node{InsID: "n1"}, &node.Node{InsID: "n2"}}
+	score80 := node.NodeScoreList{
+		{InsID: "n1", Score: 80},
+		{InsID: "n2", Score: 80},
+	}
+
+	selCtx := selctx.New("random")
+	selCtx.Ctx = context.Background()
+	selCtx.SetNodes(nodes)
+	err := (&perfDriver{}).runScores(selCtx, []profile.ScorePlugin{
+		{Name: "na", Selector: &stubScoreSelector{err: fmt.Errorf("wrapped: %w", score.ErrNotApplicable)}, Weight: 10},
+		{Name: "real", Selector: &stubScoreSelector{scores: score80}, Weight: 1},
+	})
+	if err != nil {
+		t.Fatalf("runScores: %v", err)
+	}
+	got := selCtx.LeastScoreNodes(2)
+	if len(got) != 2 {
+		t.Fatalf("scored nodes = %d, want 2", len(got))
+	}
+	for _, s := range got {
+		if s.Score != 80 {
+			t.Fatalf("node %s score = %v, want 80 (ErrNotApplicable plugin must not contribute weight)", s.InsID, s.Score)
+		}
+	}
+
+	// A ForceEnabled plugin with partial coverage is a contract violation and
+	// must fall back to the default score for every candidate, same as
+	// production — perf mode must not accept it silently.
+	selCtx2 := selctx.New("random")
+	selCtx2.Ctx = context.Background()
+	selCtx2.SetNodes(nodes)
+	err = (&perfDriver{}).runScores(selCtx2, []profile.ScorePlugin{
+		{
+			Name: "partial", Selector: &stubScoreSelector{scores: node.NodeScoreList{{InsID: "n1", Score: 50}}},
+			Weight: 1, Failure: profile.ScoreDefaultScore, DefaultScore: 42, ForceEnabled: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("runScores partial-coverage: %v", err)
+	}
+	for _, s := range selCtx2.LeastScoreNodes(2) {
+		if s.Score != 42 {
+			t.Fatalf("node %s score = %v, want default 42 after ForceEnabled partial-coverage rejection", s.InsID, s.Score)
 		}
 	}
 }

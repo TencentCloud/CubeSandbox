@@ -6,6 +6,7 @@ package sim
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
@@ -30,6 +31,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/plugin/grpcplugin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/postscore"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/prefilter"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/selector/score"
 )
 
 // perf.go implements schedsim's performance mode: the same request replay as
@@ -553,8 +555,9 @@ func (d *perfDriver) runFilters(selCtx *selctx.SelectorCtx, filters []profile.Fi
 
 // runScores replicates runProfileScores: plugins run in parallel; per-plugin
 // errors follow the binding's failure policy (skip / default-score /
-// fail-closed); weighted scores aggregate, normalize by total weight and sort
-// descending before the final pick.
+// fail-closed); the same candidate validation, ErrNotApplicable skip and
+// ForceEnabled coverage checks apply; weighted scores aggregate, normalize by
+// total weight and sort descending before the final pick.
 func (d *perfDriver) runScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) error {
 	if len(scores) == 0 {
 		return nil
@@ -591,8 +594,11 @@ func (d *perfDriver) runScores(selCtx *selctx.SelectorCtx, scores []profile.Scor
 
 	candidates := make(map[string]*node.Node, len(selCtx.Nodes()))
 	for _, candidate := range selCtx.Nodes() {
-		if candidate == nil {
-			continue
+		if candidate == nil || candidate.ID() == "" {
+			return ret.Err(errorcode.ErrorCode_MasterInternalError, "scheduler candidate has an empty id")
+		}
+		if _, duplicate := candidates[candidate.ID()]; duplicate {
+			return ret.Errorf(errorcode.ErrorCode_MasterInternalError, "duplicate scheduler candidate id %q", candidate.ID())
 		}
 		candidates[candidate.ID()] = candidate
 	}
@@ -603,24 +609,39 @@ func (d *perfDriver) runScores(selCtx *selctx.SelectorCtx, scores []profile.Scor
 		if result.skip {
 			continue
 		}
+		if errors.Is(result.err, score.ErrNotApplicable) {
+			// Explicit "dimension does not apply" skip: no scores, no weight
+			// and no failure handling, even for a ForceEnabled plugin —
+			// mirrors runProfileScores in schedule.go.
+			continue
+		}
 		if result.err == nil {
+			seen := make(map[string]struct{}, len(result.nodes))
 			for _, scored := range result.nodes {
-				if scored == nil || scored.ID() == "" {
-					result.err = fmt.Errorf("score plugin %q returned an invalid score entry", binding.Name)
+				switch {
+				case scored == nil:
+					result.err = fmt.Errorf("score plugin %q returned a nil score", binding.Name)
+				case scored.ID() == "":
+					result.err = fmt.Errorf("score plugin %q returned an empty node id", binding.Name)
+				default:
+					if _, exists := candidates[scored.ID()]; !exists {
+						result.err = fmt.Errorf("score plugin %q returned non-candidate node %q", binding.Name, scored.ID())
+					} else if _, duplicate := seen[scored.ID()]; duplicate {
+						result.err = fmt.Errorf("score plugin %q returned duplicate node %q", binding.Name, scored.ID())
+					} else if math.IsNaN(scored.Score) || math.IsInf(scored.Score, 0) {
+						result.err = fmt.Errorf("score plugin %q returned invalid score for node %q", binding.Name, scored.ID())
+					} else if binding.ForceEnabled && (scored.Score < 0 || scored.Score > 100) {
+						result.err = fmt.Errorf("score plugin %q returned %v for node %q outside [0,100]", binding.Name, scored.Score, scored.ID())
+					} else {
+						seen[scored.ID()] = struct{}{}
+					}
+				}
+				if result.err != nil {
 					break
 				}
-				if _, exists := candidates[scored.ID()]; !exists {
-					result.err = fmt.Errorf("score plugin %q returned non-candidate node %q", binding.Name, scored.ID())
-					break
-				}
-				if math.IsNaN(scored.Score) || math.IsInf(scored.Score, 0) {
-					result.err = fmt.Errorf("score plugin %q returned invalid score for node %q", binding.Name, scored.ID())
-					break
-				}
-				if binding.ForceEnabled && (scored.Score < 0 || scored.Score > 100) {
-					result.err = fmt.Errorf("score plugin %q returned %v for node %q outside [0,100]", binding.Name, scored.Score, scored.ID())
-					break
-				}
+			}
+			if result.err == nil && binding.ForceEnabled && len(seen) != len(candidates) {
+				result.err = fmt.Errorf("score plugin %q returned %d scores for %d candidates", binding.Name, len(seen), len(candidates))
 			}
 		}
 		if result.err != nil {
