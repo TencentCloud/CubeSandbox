@@ -389,8 +389,17 @@ class E2BAdapter(SandboxAdapter):
                 stop()
         return events
 
-    def run_code(self, code: str, *, timeout: int = 60) -> CodeResult:
-        result = self._sandbox.run_code(code, timeout=timeout)
+    def run_code(
+        self,
+        code: str,
+        *,
+        env_vars: dict[str, str] | None = None,
+        timeout: int = 60,
+    ) -> CodeResult:
+        kwargs = {"timeout": timeout}
+        if env_vars is not None:
+            kwargs["envs"] = env_vars
+        result = self._sandbox.run_code(code, **kwargs)
         logs = getattr(result, "logs", None)
         stdout = list(getattr(logs, "stdout", []) or [])
         stderr = list(getattr(logs, "stderr", []) or [])
