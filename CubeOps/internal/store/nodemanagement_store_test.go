@@ -11,6 +11,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/model"
 	nmstore "github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/store"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
 )
 
 func TestNodeStore_RegistrationLifecycle(t *testing.T) {
@@ -61,20 +62,80 @@ func TestNodeStore_StatusLifecycle(t *testing.T) {
 	s := nmstore.NewNodeStore(env.store.DB())
 
 	st := &nmstore.NodeStatus{
-		NodeID:        "node-1",
-		HeartbeatUnix: time.Now().Unix(),
-		Healthy:       true,
+		NodeID:                  "node-1",
+		LocalTemplatesJSON:      `[]`,
+		LocalTemplatesReported:  true,
+		HeartbeatUnix:           time.Now().Unix(),
+		HeartbeatOrderUnixMilli: time.Now().UnixMilli(),
+		Healthy:                 true,
 	}
-	if err := s.UpsertStatus(ctx, st); err != nil {
+	if _, err := s.UpsertStatus(ctx, st); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 	got, err := s.GetStatus(ctx, "node-1")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.Healthy != true {
+	if !got.Healthy {
 		t.Errorf("healthy = %v", got.Healthy)
 	}
+	if !got.LocalTemplatesReported || got.HeartbeatOrderUnixMilli == 0 {
+		t.Errorf("status provenance/order lost: %+v", got)
+	}
+}
+
+func TestNodeStore_StatusRequestReplayIsIdempotent(t *testing.T) {
+	withWarehouseStores(t, func(t *testing.T, raw *store.Store) {
+		ctx := context.Background()
+		s := nmstore.NewNodeStore(raw.DB())
+		first, err := s.UpsertStatus(ctx, &nmstore.NodeStatus{
+			NodeID:                  "node-1",
+			LocalTemplatesJSON:      `[ {"template_id":"tpl-1"} ]`,
+			LocalTemplatesReported:  true,
+			LocalTemplatesUpdate:    true,
+			HeartbeatUnix:           100,
+			HeartbeatOrderUnixMilli: 1000,
+			Healthy:                 true,
+			LastRequestID:           "request-1",
+		})
+		if err != nil {
+			t.Fatalf("first upsert: %v", err)
+		}
+		replayed, err := s.UpsertStatus(ctx, &nmstore.NodeStatus{
+			NodeID:                  "node-1",
+			LocalTemplatesJSON:      `[]`,
+			LocalTemplatesReported:  true,
+			LocalTemplatesUpdate:    true,
+			HeartbeatUnix:           200,
+			HeartbeatOrderUnixMilli: 2000,
+			Healthy:                 false,
+			LastRequestID:           "request-1",
+		})
+		if err != nil {
+			t.Fatalf("replay upsert: %v", err)
+		}
+		if replayed.HeartbeatOrderUnixMilli != first.HeartbeatOrderUnixMilli || replayed.HeartbeatUnix != first.HeartbeatUnix ||
+			replayed.LocalTemplatesJSON != first.LocalTemplatesJSON || replayed.Healthy != first.Healthy {
+			t.Fatalf("replay changed status:\nfirst=%+v\nreplayed=%+v", first, replayed)
+		}
+
+		newer, err := s.UpsertStatus(ctx, &nmstore.NodeStatus{
+			NodeID:                  "node-1",
+			LocalTemplatesJSON:      `[]`,
+			LocalTemplatesReported:  true,
+			LocalTemplatesUpdate:    true,
+			HeartbeatUnix:           200,
+			HeartbeatOrderUnixMilli: 2000,
+			Healthy:                 false,
+			LastRequestID:           "request-2",
+		})
+		if err != nil {
+			t.Fatalf("new request upsert: %v", err)
+		}
+		if newer.HeartbeatOrderUnixMilli <= first.HeartbeatOrderUnixMilli || newer.LastRequestID != "request-2" {
+			t.Fatalf("new request did not advance status: first=%+v newer=%+v", first, newer)
+		}
+	})
 }
 
 func TestNodeStore_ComponentVersions(t *testing.T) {

@@ -19,8 +19,10 @@ type fakeNodeStore struct {
 	ops      []*store.NodeOperation
 
 	// failOn injects errors for specific methods (non-nil → returned).
-	failOnGetRegistration error
-	failOnUpdateLabels    error
+	failOnGetRegistration    error
+	failOnGetStatus          error
+	failOnListVersionsByNode error
+	failOnUpdateLabels       error
 }
 
 func newFakeNodeStore() *fakeNodeStore {
@@ -107,16 +109,38 @@ func (f *fakeNodeStore) UpdateHostFacts(_ context.Context, nodeID string, factsJ
 	return nil
 }
 
-func (f *fakeNodeStore) UpsertStatus(_ context.Context, st *store.NodeStatus) error {
+func (f *fakeNodeStore) UpsertStatus(_ context.Context, st *store.NodeStatus) (*store.NodeStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.statuses[st.NodeID] = st
-	return nil
+	copyStatus := *st
+	if existing := f.statuses[st.NodeID]; existing != nil {
+		if st.LastRequestID != "" && st.LastRequestID == existing.LastRequestID {
+			out := *existing
+			return &out, nil
+		}
+		if !st.LocalTemplatesUpdate {
+			copyStatus.LocalTemplatesJSON = existing.LocalTemplatesJSON
+			copyStatus.LocalTemplatesReported = existing.LocalTemplatesReported
+		}
+		if copyStatus.HeartbeatUnix < existing.HeartbeatUnix {
+			copyStatus.HeartbeatUnix = existing.HeartbeatUnix
+		}
+		if copyStatus.HeartbeatOrderUnixMilli <= existing.HeartbeatOrderUnixMilli {
+			copyStatus.HeartbeatOrderUnixMilli = existing.HeartbeatOrderUnixMilli + 1
+		}
+	}
+	copyStatus.LocalTemplatesUpdate = false
+	f.statuses[st.NodeID] = &copyStatus
+	out := copyStatus
+	return &out, nil
 }
 
 func (f *fakeNodeStore) GetStatus(_ context.Context, nodeID string) (*store.NodeStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failOnGetStatus != nil {
+		return nil, f.failOnGetStatus
+	}
 	st, ok := f.statuses[nodeID]
 	if !ok {
 		return nil, store.ErrNotFound
@@ -176,6 +200,9 @@ func (f *fakeNodeStore) ListComponentVersions(_ context.Context) ([]store.NodeCo
 func (f *fakeNodeStore) ListComponentVersionsByNode(_ context.Context, nodeID string) ([]store.NodeComponentVersion, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failOnListVersionsByNode != nil {
+		return nil, f.failOnListVersionsByNode
+	}
 	return append([]store.NodeComponentVersion(nil), f.versions[nodeID]...), nil
 }
 

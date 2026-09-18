@@ -203,6 +203,9 @@ func TestAgent_UpdateStatus_WithLocalTemplates(t *testing.T) {
 	if capturedReq == nil || len(capturedReq.LocalTemplates) != 2 {
 		t.Fatalf("local templates = %+v", capturedReq.LocalTemplates)
 	}
+	if !capturedReq.LocalTemplatesReported {
+		t.Fatal("local templates key should be marked as reported")
+	}
 	if capturedReq.LocalTemplates[0].TemplateID != "tpl-1" {
 		t.Errorf("template[0] = %s", capturedReq.LocalTemplates[0].TemplateID)
 	}

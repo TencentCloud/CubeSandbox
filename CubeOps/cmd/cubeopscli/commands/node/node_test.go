@@ -34,7 +34,7 @@ func sampleSchedulerNodes() []*model.SchedulerNode {
 		{
 			InsID: "node-1", IP: "10.0.0.1", InstanceType: "cubebox",
 			Healthy: true, SchedulingDisabled: false, HostStatus: "RUNNING",
-			LocalTemplates: []string{"tpl-a", "tpl-b"},
+			LocalTemplates: []string{"tpl-a", "tpl-b"}, LocalTemplatesReported: true,
 		},
 		{
 			InsID: "node-2", IP: "10.0.0.2", InstanceType: "cubebox",
@@ -47,9 +47,10 @@ func TestStripLocalTemplates(t *testing.T) {
 	in := sampleSchedulerNodes()
 	out := stripLocalTemplates(in)
 
-	// Output nodes have LocalTemplates cleared.
+	// Output nodes have LocalTemplates and their provenance cleared.
 	for _, n := range out {
 		assert.Nil(t, n.LocalTemplates)
+		assert.False(t, n.LocalTemplatesReported)
 	}
 
 	// Original nodes are not modified.
@@ -87,6 +88,8 @@ func TestPrintNodeSummary_ShowLocalTemplates(t *testing.T) {
 		printNodeSummary(sampleSchedulerNodes(), false, true)
 	})
 	assert.True(t, strings.Contains(out, "LOCAL_TEMPLATES"))
+	assert.Contains(t, out, "node-1")
+	assert.Contains(t, out, "2")
 }
 
 func TestPrintNodeSummary_ScoreOnly(t *testing.T) {

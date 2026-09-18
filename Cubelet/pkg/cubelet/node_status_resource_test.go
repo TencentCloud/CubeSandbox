@@ -81,6 +81,64 @@ func TestAttachResourceReportRespectsNilFromCollector(t *testing.T) {
 	}
 }
 
+func TestBuildStatusRequestReusesLogicalRequestID(t *testing.T) {
+	kl := &Cubelet{clock: clock.RealClock{}, statusRequestID: "request-1"}
+	node := &cubeletnodemeta.Node{}
+	first := kl.buildStatusRequest(node)
+	second := kl.buildStatusRequest(node)
+	if first.RequestID != "request-1" || second.RequestID != first.RequestID {
+		t.Fatalf("logical status retry changed request ID: first=%q second=%q", first.RequestID, second.RequestID)
+	}
+	kl.statusRequestID = ""
+	if got := kl.buildStatusRequest(node).RequestID; got == "" || got == first.RequestID {
+		t.Fatalf("independent status request ID=%q, want a fresh non-empty value", got)
+	}
+}
+
+func TestUpdateNodeStatusRetriesWithSameRequestID(t *testing.T) {
+	t.Cleanup(func() { resourcesource.Set(nil) })
+	resourcesource.Set(nil)
+
+	var requestIDs []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req masterclient.UpdateNodeStatusRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		requestIDs = append(requestIDs, req.RequestID)
+		if len(requestIDs) == 1 {
+			http.Error(w, "retry", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ret":{"ret_code":200,"ret_msg":"Success"}}`))
+	}))
+	defer srv.Close()
+
+	snapshot := &cubeletnodemeta.Node{ObjectMeta: metav1.ObjectMeta{
+		Name: "node-a",
+		Labels: map[string]string{
+			corev1.LabelOSStable:   goruntime.GOOS,
+			corev1.LabelArchStable: goruntime.GOARCH,
+		},
+	}}
+	kl := &Cubelet{
+		nodeName:                  "node-a",
+		masterClient:              masterclient.New(srv.URL, time.Second),
+		lastNodeSnapshot:          snapshot,
+		nodeStatusReportFrequency: time.Hour,
+		clock:                     clock.RealClock{},
+	}
+	if err := kl.updateNodeStatus(context.Background()); err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+	if len(requestIDs) != 2 || requestIDs[0] == "" || requestIDs[0] != requestIDs[1] {
+		t.Fatalf("status retries used different request IDs: %v", requestIDs)
+	}
+	if kl.statusRequestID != "" || kl.statusRequest != nil {
+		t.Fatalf("status request state was not cleared after completion: id=%q request=%+v", kl.statusRequestID, kl.statusRequest)
+	}
+}
+
 func TestTryUpdateNodeStatusReportsPeriodicallyWithoutNodeChanges(t *testing.T) {
 	t.Cleanup(func() { resourcesource.Set(nil) })
 	resourcesource.Set(&stubCollector{

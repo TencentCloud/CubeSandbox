@@ -22,22 +22,39 @@ func nodeSnapshotKey(nodeID string) string {
 	return nodeSnapshotKeyPrefix + nodeID
 }
 
-// WriteNodeSnapshot stores the node snapshot as a short-TTL JSON blob. Best-effort:
-// errors are logged, not returned, so a Redis hiccup does not break registration.
-func WriteNodeSnapshot(snap *model.NodeSnapshot) {
+// WriteNodeSnapshot stores the node snapshot as a short-TTL JSON blob. It
+// returns false when a newer snapshot already won the Redis ordering check.
+func WriteNodeSnapshot(snap *model.NodeSnapshot) bool {
 	if snap == nil || snap.NodeID == "" || pool == nil {
-		return
+		return false
 	}
 	data, err := json.Marshal(snap)
 	if err != nil {
 		logging.G(context.Background()).Warnf("nodesnapshot: marshal failed: node=%s: %v", snap.NodeID, err)
-		return
+		return false
 	}
 	conn := pool.Get()
 	defer conn.Close()
-	if _, err := conn.Do("SET", nodeSnapshotKey(snap.NodeID), data, "EX", nodeSnapshotTTLSec); err != nil {
-		logging.G(context.Background()).Warnf("nodesnapshot: redis SET failed: node=%s: %v", snap.NodeID, err)
+	const setIfNewer = `
+local current = redis.call('GET', KEYS[1])
+if current then
+  local ok, decoded = pcall(cjson.decode, current)
+  if ok then
+    local current_order = decoded.heartbeat_order_unix_milli or 0
+    local incoming_order = tonumber(ARGV[2]) or 0
+    if current_order > incoming_order or (incoming_order == 0 and current_order > 0) then
+      return 0
+    end
+  end
+end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
+return 1`
+	applied, err := redis.Int(conn.Do("EVAL", setIfNewer, 1, nodeSnapshotKey(snap.NodeID), data, snap.HeartbeatOrderUnixMilli, nodeSnapshotTTLSec))
+	if err != nil {
+		logging.G(context.Background()).Warnf("nodesnapshot: redis conditional SET failed: node=%s: %v", snap.NodeID, err)
+		return false
 	}
+	return applied == 1
 }
 
 // ReadNodeSnapshot fetches a node snapshot from Redis. Returns (nil, nil) on miss.
