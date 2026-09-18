@@ -1690,6 +1690,44 @@ class TestFilesystem:
             with pytest.raises(IOError, match="Failed to read"):
                 sb.files.read("/tmp/missing.txt")
 
+    def test_read_bytes_preserves_binary(self):
+        # PNG magic: format="bytes" keeps 0x89; text would turn it into U+FFFD.
+        png = bytes([0x89, 0x50, 0x4E, 0x47])
+        sb = make_sandbox()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=png)
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            got = sb.files.read("/tmp/x.png", format="bytes")
+        assert isinstance(got, bytearray)
+        assert bytes(got) == png
+
+    def test_read_stream_yields_bytes(self):
+        png = bytes([0x89, 0x50, 0x4E, 0x47])
+        sb = make_sandbox()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=png)
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            chunks = list(sb.files.read("/tmp/x.png", format="stream"))
+        assert b"".join(chunks) == png
+
+    def test_read_empty_content_length_zero(self):
+        sb = make_sandbox()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"", headers={"content-length": "0"})
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            assert sb.files.read("/tmp/empty", format="text") == ""
+            assert sb.files.read("/tmp/empty", format="bytes") == bytearray()
+            assert list(sb.files.read("/tmp/empty", format="stream")) == []
+
     def test_write_uses_envd_file_api(self):
         sb = make_sandbox()
         seen = {}
