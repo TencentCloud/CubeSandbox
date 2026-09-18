@@ -21,6 +21,7 @@ type fakeClusterNodeService struct {
 	listNodes        func(ctx context.Context) ([]*model.NodeSnapshot, error)
 	getNode          func(ctx context.Context, nodeID string) (*model.NodeSnapshot, error)
 	getVersionMatrix func(ctx context.Context) (*model.VersionMatrix, error)
+	listOperations   func(ctx context.Context, nodeID string, limit int) ([]model.NodeOperation, error)
 }
 
 func (f *fakeClusterNodeService) RegisterNode(ctx context.Context, req *model.RegisterNodeRequest) (*model.NodeSnapshot, error) {
@@ -48,10 +49,28 @@ func (f *fakeClusterNodeService) GetVersionMatrix(ctx context.Context) (*model.V
 	return f.getVersionMatrix(ctx)
 }
 func (f *fakeClusterNodeService) ListOperations(ctx context.Context, nodeID string, limit int) ([]model.NodeOperation, error) {
+	if f.listOperations != nil {
+		return f.listOperations(ctx, nodeID, limit)
+	}
 	return nil, errors.New("not implemented")
 }
 func (f *fakeClusterNodeService) DeleteNode(ctx context.Context, nodeID string, force bool) (*model.NodeSnapshot, error) {
 	return nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) GetNodeQuotaView(ctx context.Context, nodeID string) (*model.QuotaView, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) SetNodeQuota(ctx context.Context, nodeID string, spec *model.QuotaSpec, operator string) (*model.QuotaView, *model.PushResult, error) {
+	return nil, nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) GetOpsAgentSpec(ctx context.Context, nodeID string) (*model.OpsAgentSpecResponse, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) GetClusterQuotaDefaults(ctx context.Context) (*model.ClusterQuotaDefaults, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) SetClusterQuotaDefaults(ctx context.Context, ratio *float64, operator string) (*model.ClusterQuotaDefaults, *model.QuotaPropagation, error) {
+	return nil, nil, errors.New("not implemented")
 }
 
 func newClusterRouter(t *testing.T, cm CubeMasterClient, svc nmhandler.NodeService) *gin.Engine {
@@ -244,5 +263,37 @@ func TestCluster_Versions_Error_ReturnsEmptyShell(t *testing.T) {
 	}
 	if _, ok := resp["controlPlane"]; !ok {
 		t.Errorf("expected controlPlane key in empty shell: %v", resp)
+	}
+}
+
+func TestCluster_ListOperations_FiltersQuotaOps(t *testing.T) {
+	cm := &fakeCM{}
+	svc := &fakeClusterNodeService{
+		listOperations: func(_ context.Context, _ string, _ int) ([]model.NodeOperation, error) {
+			return []model.NodeOperation{
+				{ID: 1, NodeID: "n-1", Type: "isolate", Operator: "a"},
+				{ID: 2, NodeID: "n-1", Type: model.OpSetQuota, Operator: "a"},
+				{ID: 3, NodeID: "n-1", Type: model.OpSetClusterQuota, Operator: "a"},
+				{ID: 4, NodeID: "n-1", Type: "unisolate", Operator: "a"},
+			}, nil
+		},
+	}
+	r := newClusterRouter(t, cm, svc)
+
+	w := httptestRecorder(t, r, "GET", "/api/v1/nodes/n-1/operations")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var ops []model.NodeOperation
+	if err := json.Unmarshal(w.Body.Bytes(), &ops); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	if len(ops) != 2 {
+		t.Fatalf("expected 2 ops after filtering quota types, got %d: %+v", len(ops), ops)
+	}
+	for _, op := range ops {
+		if op.Type == model.OpSetQuota || op.Type == model.OpSetClusterQuota {
+			t.Errorf("quota op %q must be filtered out", op.Type)
+		}
 	}
 }

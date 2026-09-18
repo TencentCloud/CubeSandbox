@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import * as Dialog from '@radix-ui/react-dialog';
 import { clusterApi, sandboxApi, templateApi } from '@/api/client';
+import type { QuotaViewDto } from '@/api/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -158,6 +159,427 @@ function ConditionRow({
         </span>
       )}
     </div>
+  );
+}
+
+// ── Quota settings ────────────────────────────────────────────────────────────
+
+interface QuotaFormState {
+  mcpu: string;
+  mem: string;
+  mvm: string;
+  concurrent: string;
+}
+
+function quotaFormFromView(view?: QuotaViewDto): QuotaFormState {
+  const s = view?.spec;
+  return {
+    mcpu: s?.mcpu_limit ? String(s.mcpu_limit) : '',
+    mem: s?.mem_limit ?? '',
+    mvm: s?.mvm_limit ? String(s.mvm_limit) : '',
+    concurrent: s?.creation_concurrent_num ? String(s.creation_concurrent_num) : '',
+  };
+}
+
+function DiffRow({
+  label,
+  oldVal,
+  newVal,
+  changed = true,
+}: {
+  label: string;
+  oldVal: string;
+  newVal: string;
+  changed?: boolean;
+}) {
+  return (
+    <div className="flex items-baseline gap-2 text-xs">
+      <span className="shrink-0 text-muted-foreground/70">{label}</span>
+      <span className="min-w-0 flex-1 break-all text-right font-mono">
+        <span className={changed ? 'text-muted-foreground/80' : 'text-muted-foreground/50'}>
+          {oldVal}
+        </span>
+        <span className="mx-1.5 text-muted-foreground/40">→</span>
+        <span className={changed ? 'font-medium text-foreground' : 'text-muted-foreground/50'}>
+          {newVal}
+        </span>
+      </span>
+    </div>
+  );
+}
+
+// QuotaHistoryDetail renders an audit detail as field-level diffs.
+function QuotaHistoryDetail({ detail }: { detail: string }) {
+  const { t } = useTranslation('nodeDetail');
+
+  let rec: Record<string, unknown>;
+  try {
+    rec = JSON.parse(detail) as Record<string, unknown>;
+  } catch {
+    return <p className="break-all font-mono text-xs text-muted-foreground/80">{detail}</p>;
+  }
+
+  const valueLabel = (key: string, v: unknown): string => {
+    if (v === null || v === undefined) return t('quota.valueInherit');
+    if (v === '') return t('quota.valueUnset');
+    if (key === 'node_managed') return v ? t('quota.managedNode') : t('quota.managedCluster');
+    if (typeof v === 'number' && v === 0 && key !== 'revision') return t('quota.valueUnset');
+    return String(v);
+  };
+
+  // Cluster-level record: scalar default change plus fan-out outcome.
+  if (typeof rec.new !== 'object' || rec.new === null) {
+    const scalar = (v: unknown) =>
+      v === null || v === undefined ? t('quota.valueNotSet') : String(v);
+    return (
+      <div className="space-y-1">
+        <DiffRow
+          label={t('quota.clusterDefault')}
+          oldVal={scalar(rec.old)}
+          newVal={scalar(rec.new)}
+        />
+        <p className="text-xs text-muted-foreground/60">
+          {t('quota.propagation', {
+            bumped: String(rec.bumped ?? 0),
+            pushed: String(rec.pushed ?? 0),
+            failed: String(rec.push_failed ?? 0),
+          })}
+        </p>
+      </div>
+    );
+  }
+
+  const labels: Record<string, string> = {
+    mcpu_limit: t('quota.cpu'),
+    mem_limit: t('quota.mem'),
+    mvm_limit: t('quota.mvm'),
+    creation_concurrent_num: t('quota.concurrent'),
+    paused_release_ratio: t('quota.ratio'),
+    node_managed: t('quota.managedLabel'),
+    revision: t('quota.revisionLabel'),
+  };
+  const next = rec.new as Record<string, unknown>;
+  const prev = (typeof rec.old === 'object' && rec.old !== null ? rec.old : {}) as Record<
+    string,
+    unknown
+  >;
+  return (
+    <div className="space-y-0.5">
+      {Object.entries(next)
+        .filter(([k]) => labels[k])
+        .map(([k, v]) => {
+          const oldVal = valueLabel(k, prev[k]);
+          const newVal = valueLabel(k, v);
+          return (
+            <DiffRow
+              key={k}
+              label={labels[k]}
+              oldVal={oldVal}
+              newVal={newVal}
+              changed={oldVal !== newVal}
+            />
+          );
+        })}
+    </div>
+  );
+}
+
+function QuotaSettingsSection({ nodeID }: { nodeID: string }) {
+  const { t, i18n } = useTranslation('nodeDetail');
+  const queryClient = useQueryClient();
+
+  const { data: view } = useQuery({
+    queryKey: ['node-quota', nodeID],
+    queryFn: () => clusterApi.nodeQuota(nodeID),
+    refetchInterval: 15_000,
+  });
+
+  const [form, setForm] = useState<QuotaFormState>(() => quotaFormFromView(undefined));
+  const [dirty, setDirty] = useState(false);
+
+  // Re-seed the form while untouched; a save always re-seeds via invalidate.
+  useEffect(() => {
+    if (!dirty) setForm(quotaFormFromView(view));
+  }, [view, dirty]);
+
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const { data: history } = useQuery({
+    queryKey: ['node-quota-history', nodeID],
+    queryFn: () => clusterApi.nodeQuotaHistory(nodeID),
+    enabled: historyOpen,
+    staleTime: 5_000,
+  });
+
+  const saveMutation = useMutation({
+    mutationFn: () =>
+      clusterApi.setNodeQuota(nodeID, {
+        mcpu_limit: Number(form.mcpu) || 0,
+        mem_limit: form.mem.trim(),
+        mvm_limit: Number(form.mvm) || 0,
+        creation_concurrent_num: Number(form.concurrent) || 0,
+        // Echoed back: the PUT is a full replace, so round-trip the ratio the
+        // Web UI does not manage to avoid clearing a CLI-set node value.
+        paused_resource_release_ratio: view?.spec?.paused_resource_release_ratio ?? null,
+        expected_revision: view?.spec?.revision ?? 0,
+        revision: 0,
+      }),
+    onSuccess: ({ push }) => {
+      setDirty(false);
+      queryClient.invalidateQueries({ queryKey: ['node-quota', nodeID] });
+      if (push.applied) {
+        showToast(t('quota.savedApplied'));
+      } else {
+        showToast(t('quota.savedSkipped', { reason: push.skip_reason ?? '' }), 'warn');
+      }
+      // The heartbeat needs ~3s to report the new actual; refresh once more.
+      setTimeout(() => queryClient.invalidateQueries({ queryKey: ['node-quota', nodeID] }), 4_000);
+    },
+    onError: (err: Error) => {
+      showToast(
+        err.message
+          ? t('quota.saveFailedWithReason', { message: err.message })
+          : t('quota.saveFailed'),
+        'warn',
+      );
+    },
+  });
+
+  const set = (key: keyof QuotaFormState) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    setDirty(true);
+    setForm((f) => ({ ...f, [key]: e.target.value }));
+  };
+
+  // Mirrors the backend: numeric fields are non-negative integers, mem is a
+  // decimal quantity with a binary suffix. Returns an error message or null.
+  const validateForm = (): string | null => {
+    const numeric: [keyof QuotaFormState, string][] = [
+      ['mcpu', t('quota.cpu')],
+      ['mvm', t('quota.mvm')],
+      ['concurrent', t('quota.concurrent')],
+    ];
+    for (const [key, label] of numeric) {
+      const v = form[key].trim();
+      if (v && !/^\d+$/.test(v)) {
+        return t('quota.invalidInteger', { field: label });
+      }
+    }
+    const mem = form.mem.trim();
+    if (mem && !/^\d+(\.\d+)?(Ki|Mi|Gi|Ti)$/.test(mem)) {
+      return t('quota.invalidMem');
+    }
+    return null;
+  };
+
+  const unset = view?.drift === 'no_spec';
+
+  // Changed fields between the stored spec and the edited form, listed in the
+  // save confirmation dialog. Trimmed values keep the diff consistent with
+  // what the mutation actually submits.
+  const baseline = quotaFormFromView(view);
+  const changeRows = (
+    [
+      { key: 'mcpu', label: t('quota.cpu') },
+      { key: 'mem', label: t('quota.mem') },
+      { key: 'mvm', label: t('quota.mvm') },
+      { key: 'concurrent', label: t('quota.concurrent') },
+    ] as const
+  ).flatMap(({ key, label }) => {
+    const trimmed = form[key].trim();
+    const oldVal = baseline[key] || t('quota.valueUnset');
+    const newVal = trimmed || t('quota.valueUnset');
+    return oldVal !== newVal ? [{ key, label, oldVal, newVal }] : [];
+  });
+
+  return (
+    <Section
+      title={t('quota.title')}
+      action={
+        <button
+          className="text-muted-foreground hover:text-foreground transition-colors"
+          title={t('quota.history')}
+          onClick={() => setHistoryOpen(true)}
+        >
+          <History size={14} />
+        </button>
+      }
+    >
+      <div className="rounded-xl border border-border/60 bg-card/40 px-6 py-5 space-y-4">
+        {unset && (
+          <p className="text-sm text-muted-foreground">
+            {t('quota.unset')}
+            {view && (
+              <span className="text-muted-foreground/60 ml-1">
+                {t('quota.unsetRef', {
+                  cpu: view.actual.milli_cpu,
+                  mem: view.actual.mem_mb,
+                })}
+              </span>
+            )}
+          </p>
+        )}
+
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          {(
+            [
+              {
+                key: 'mcpu',
+                label: t('quota.cpu'),
+                placeholder: String(view?.actual.milli_cpu ?? 128000),
+              },
+              {
+                key: 'mem',
+                label: t('quota.mem'),
+                placeholder: `${view?.actual.mem_mb ?? 262144}Mi`,
+                hint: 'Ki / Mi / Gi / Ti',
+              },
+              {
+                key: 'mvm',
+                label: t('quota.mvm'),
+                placeholder: String(view?.actual.max_mvm_num ?? 500),
+              },
+              {
+                key: 'concurrent',
+                label: t('quota.concurrent'),
+                placeholder: String(view?.actual.create_concurrent_num ?? 32),
+              },
+            ] as {
+              key: keyof QuotaFormState;
+              label: string;
+              placeholder: string;
+              hint?: string;
+            }[]
+          ).map(({ key, label, placeholder, hint }) => (
+            <div key={key} className="space-y-1.5">
+              <label className="block text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">
+                {label}
+              </label>
+              <Input
+                value={form[key]}
+                onChange={set(key)}
+                placeholder={placeholder}
+                className="h-9"
+              />
+              {hint && <p className="text-[10px] text-muted-foreground/50">{hint}</p>}
+            </div>
+          ))}
+        </div>
+
+        <div className="flex items-center justify-between gap-3 pt-1">
+          <p className="text-xs text-muted-foreground/60">{t('quota.hint')}</p>
+          <Button
+            size="sm"
+            disabled={!dirty || saveMutation.isPending}
+            onClick={() => {
+              const err = validateForm();
+              if (err) {
+                showToast(err, 'warn');
+                return;
+              }
+              setConfirmOpen(true);
+            }}
+          >
+            {saveMutation.isPending ? t('quota.saving') : t('quota.save')}
+          </Button>
+        </div>
+      </div>
+
+      <Dialog.Root open={historyOpen} onOpenChange={setHistoryOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 bg-black/40 z-40" />
+          <Dialog.Content className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-2xl rounded-lg border border-border bg-background p-5 shadow-lg">
+            <div className="flex items-center justify-between mb-4">
+              <Dialog.Title className="text-base font-semibold">
+                {t('quota.historyTitle')}
+              </Dialog.Title>
+              <Dialog.Close asChild>
+                <button className="text-muted-foreground hover:text-foreground">
+                  <X size={16} />
+                </button>
+              </Dialog.Close>
+            </div>
+            <div className="space-y-2 max-h-[28rem] overflow-y-auto pr-1">
+              {history && history.length > 0 ? (
+                history.map((e, i) => (
+                  <div
+                    key={i}
+                    className="rounded-md border border-border/50 px-3.5 py-2.5 space-y-1.5"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">{e.operator}</span>
+                      <span className="text-xs text-muted-foreground/70 ml-auto">
+                        {new Date(e.created_at).toLocaleString(i18n.language)}
+                      </span>
+                    </div>
+                    {e.detail && <QuotaHistoryDetail detail={e.detail} />}
+                  </div>
+                ))
+              ) : (
+                <p className="text-sm text-muted-foreground text-center py-4">
+                  {t('quota.historyEmpty')}
+                </p>
+              )}
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 bg-black/40 z-40" />
+          <Dialog.Content className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md rounded-lg border border-border bg-background p-5 shadow-lg">
+            <div className="flex items-center justify-between mb-3">
+              <Dialog.Title className="text-base font-semibold">
+                {t('quota.confirmTitle')}
+              </Dialog.Title>
+              <Dialog.Close asChild>
+                <button className="text-muted-foreground hover:text-foreground">
+                  <X size={16} />
+                </button>
+              </Dialog.Close>
+            </div>
+            <Dialog.Description className="text-sm text-muted-foreground mb-4">
+              {t('quota.confirmDesc', { node: nodeID })}
+            </Dialog.Description>
+            {changeRows.length > 0 ? (
+              <div className="space-y-2 mb-5">
+                {changeRows.map((r) => (
+                  <div key={r.key} className="rounded-md border border-border/50 px-3 py-2">
+                    <div className="mb-1 text-xs font-medium uppercase tracking-wider text-muted-foreground/70">
+                      {r.label}
+                    </div>
+                    <div className="flex items-baseline gap-2 font-mono text-sm break-all">
+                      <span className="text-muted-foreground/80">{r.oldVal}</span>
+                      <span className="text-muted-foreground/40">→</span>
+                      <span className="font-medium text-foreground">{r.newVal}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="mb-5 text-sm text-muted-foreground">{t('quota.confirmNoChange')}</p>
+            )}
+            <div className="flex justify-end gap-2">
+              <Dialog.Close asChild>
+                <Button size="sm" variant="outline">
+                  {t('dialog.cancel')}
+                </Button>
+              </Dialog.Close>
+              <Button
+                size="sm"
+                disabled={changeRows.length === 0 || saveMutation.isPending}
+                onClick={() => {
+                  setConfirmOpen(false);
+                  saveMutation.mutate();
+                }}
+              >
+                {saveMutation.isPending ? t('quota.saving') : t('quota.confirm')}
+              </Button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+    </Section>
   );
 }
 
@@ -497,6 +919,9 @@ export default function NodeDetailPage() {
           ))}
         </div>
       </Section>
+
+      {/* quota settings */}
+      <QuotaSettingsSection nodeID={data.nodeID} />
 
       {/* conditions */}
       {data.conditions && data.conditions.length > 0 && (

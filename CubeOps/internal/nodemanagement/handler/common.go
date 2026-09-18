@@ -30,6 +30,12 @@ type NodeService interface {
 	GetVersionMatrix(ctx context.Context) (*model.VersionMatrix, error)
 	ListOperations(ctx context.Context, nodeID string, limit int) ([]model.NodeOperation, error)
 	DeleteNode(ctx context.Context, nodeID string, force bool) (*model.NodeSnapshot, error)
+
+	GetNodeQuotaView(ctx context.Context, nodeID string) (*model.QuotaView, error)
+	SetNodeQuota(ctx context.Context, nodeID string, spec *model.QuotaSpec, operator string) (*model.QuotaView, *model.PushResult, error)
+	GetOpsAgentSpec(ctx context.Context, nodeID string) (*model.OpsAgentSpecResponse, error)
+	GetClusterQuotaDefaults(ctx context.Context) (*model.ClusterQuotaDefaults, error)
+	SetClusterQuotaDefaults(ctx context.Context, ratio *float64, operator string) (*model.ClusterQuotaDefaults, *model.QuotaPropagation, error)
 }
 
 var _ NodeService = (*service.NodeService)(nil)
@@ -47,6 +53,12 @@ func MapNodeError(c *gin.Context, err error) {
 	case errors.Is(err, service.ErrNodeNotIsolated):
 		// 409 Conflict: the node exists but is in the wrong state for deletion.
 		httputil.WriteError(c, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrQuotaRevisionConflict):
+		// 409 Conflict: CAS on the spec revision failed; re-read and retry.
+		httputil.WriteError(c, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrQuotaValidation):
+		// 400 Bad Request: operator input rejected by the guard rails.
+		httputil.WriteError(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, service.ErrNodeHasSandboxes):
 		// 409 Conflict: the node still holds workloads.
 		httputil.WriteError(c, http.StatusConflict, err.Error())

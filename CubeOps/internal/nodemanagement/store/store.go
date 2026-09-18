@@ -18,12 +18,32 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
+// ErrQuotaSpecExists is returned by CreateQuotaSpecIfAbsent when a row already exists.
+var ErrQuotaSpecExists = errors.New("quota spec already exists")
+
 type NodeStore interface {
 	UpsertRegistration(ctx context.Context, reg *NodeRegistration) error
 	GetRegistration(ctx context.Context, nodeID string) (*NodeRegistration, error)
 	ListRegistrations(ctx context.Context) ([]NodeRegistration, error)
 	UpdateLabels(ctx context.Context, nodeID string, labels map[string]string) error
-	UpdateHostFacts(ctx context.Context, nodeID string, factsJSON, cpuidHash, kernelRelease string) error
+	UpdateHostFacts(ctx context.Context, nodeID string, factsJSON, cpuidHash, kernelRelease string, cpuCount, memTotalMB int64) error
+	// UpdateQuota persists the effective quota reported by a cubelet
+	// heartbeat into the registration row.
+	UpdateQuota(ctx context.Context, nodeID string, q model.QuotaReport) error
+	// GetQuotaSpec returns the desired quota row; ErrNotFound when unset.
+	GetQuotaSpec(ctx context.Context, nodeID string) (*NodeQuotaSpec, error)
+	// UpsertQuotaSpec inserts a new quota row or replaces an existing one.
+	UpsertQuotaSpec(ctx context.Context, spec *NodeQuotaSpec) error
+	// CreateQuotaSpecIfAbsent inserts a new quota row, ErrQuotaSpecExists if one exists.
+	CreateQuotaSpecIfAbsent(ctx context.Context, spec *NodeQuotaSpec) error
+	// UpdateQuotaSpecIfRevision atomically bumps revision when it still equals expected.
+	UpdateQuotaSpecIfRevision(ctx context.Context, spec *NodeQuotaSpec, expected int64) (bool, error)
+	// ListQuotaSpecs returns every spec row, sentinel included.
+	ListQuotaSpecs(ctx context.Context) ([]NodeQuotaSpec, error)
+	// ListClusterQuotaFollowers returns rows with a NULL ratio (excluding the sentinel).
+	ListClusterQuotaFollowers(ctx context.Context) ([]NodeQuotaSpec, error)
+	// BumpClusterQuotaFollowers bumps revision on follower rows so agents re-pull.
+	BumpClusterQuotaFollowers(ctx context.Context) (int64, error)
 	// DeleteRegistration removes the registration row; ErrNotFound if absent.
 	DeleteRegistration(ctx context.Context, nodeID string) error
 
@@ -57,8 +77,8 @@ func (s *gormNodeStore) UpsertRegistration(ctx context.Context, reg *NodeRegistr
 		DoUpdates: clause.AssignmentColumns([]string{
 			"host_ip", "grpc_port", "capacity_json", "allocatable_json",
 			"instance_type", "cluster_label", "quota_cpu", "quota_mem_mb",
-			"create_concurrent_num", "max_mvm_num", "host_facts_json",
-			"cpuid_hash", "host_kernel_release", "updated_at",
+			"create_concurrent_num", "max_mvm_num", "paused_release_ratio", "host_facts_json",
+			"cpuid_hash", "host_kernel_release", "cpu_count", "mem_total_mb", "updated_at",
 		}),
 	}).Create(reg).Error
 }
@@ -92,16 +112,122 @@ func (s *gormNodeStore) UpdateLabels(ctx context.Context, nodeID string, labels 
 	return res.Error
 }
 
-func (s *gormNodeStore) UpdateHostFacts(ctx context.Context, nodeID string, factsJSON, cpuidHash, kernelRelease string) error {
+func (s *gormNodeStore) UpdateHostFacts(ctx context.Context, nodeID string, factsJSON, cpuidHash, kernelRelease string, cpuCount, memTotalMB int64) error {
 	res := s.db.WithContext(ctx).Table(model.NodeMetaRegistrationTable).
 		Where("node_id = ?", nodeID).
 		Updates(map[string]any{
 			"host_facts_json":     factsJSON,
 			"cpuid_hash":          cpuidHash,
 			"host_kernel_release": kernelRelease,
+			"cpu_count":           cpuCount,
+			"mem_total_mb":        memTotalMB,
 			"updated_at":          time.Now(),
 		})
 	return res.Error
+}
+
+func (s *gormNodeStore) UpdateQuota(ctx context.Context, nodeID string, q model.QuotaReport) error {
+	updates := map[string]any{
+		"quota_cpu":             q.MilliCPU,
+		"quota_mem_mb":          q.MemMB,
+		"max_mvm_num":           q.MaxMvmNum,
+		"create_concurrent_num": q.CreateConcurrentNum,
+		"updated_at":            time.Now(),
+	}
+	if q.PausedReleaseRatio != nil {
+		updates["paused_release_ratio"] = *q.PausedReleaseRatio
+	}
+	res := s.db.WithContext(ctx).Table(model.NodeMetaRegistrationTable).
+		Where("node_id = ?", nodeID).
+		Updates(updates)
+	return res.Error
+}
+
+func (s *gormNodeStore) GetQuotaSpec(ctx context.Context, nodeID string) (*NodeQuotaSpec, error) {
+	var spec NodeQuotaSpec
+	if err := s.db.WithContext(ctx).Where("node_id = ?", nodeID).First(&spec).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &spec, nil
+}
+
+func (s *gormNodeStore) UpsertQuotaSpec(ctx context.Context, spec *NodeQuotaSpec) error {
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "node_id"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"mcpu_limit":                    spec.MCpuLimit,
+			"mem_limit":                     spec.MemLimit,
+			"mvm_limit":                     spec.MvmLimit,
+			"creation_concurrent_num":       spec.CreationConcurrentNum,
+			"paused_resource_release_ratio": spec.PausedReleaseRatio,
+			"revision":                      gorm.Expr("revision + 1"),
+			"updated_by":                    spec.UpdatedBy,
+			"node_managed":                  spec.NodeManaged,
+			"updated_at":                    time.Now(),
+		}),
+	}).Create(spec).Error
+}
+
+// CreateQuotaSpecIfAbsent inserts only when no row exists; a concurrent
+// create surfaces as ErrQuotaSpecExists instead of silently overwriting.
+func (s *gormNodeStore) CreateQuotaSpecIfAbsent(ctx context.Context, spec *NodeQuotaSpec) error {
+	res := s.db.WithContext(ctx).
+		Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "node_id"}}, DoNothing: true}).
+		Create(spec)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrQuotaSpecExists
+	}
+	return nil
+}
+
+// UpdateQuotaSpecIfRevision updates the row atomically only when its revision
+// still equals expected, bumping it. Returns false when the row is absent or
+// a concurrent write already advanced the revision.
+func (s *gormNodeStore) UpdateQuotaSpecIfRevision(ctx context.Context, spec *NodeQuotaSpec, expected int64) (bool, error) {
+	res := s.db.WithContext(ctx).Model(&NodeQuotaSpec{}).
+		Where("node_id = ? AND revision = ?", spec.NodeID, expected).
+		Updates(map[string]any{
+			"mcpu_limit":                    spec.MCpuLimit,
+			"mem_limit":                     spec.MemLimit,
+			"mvm_limit":                     spec.MvmLimit,
+			"creation_concurrent_num":       spec.CreationConcurrentNum,
+			"paused_resource_release_ratio": spec.PausedReleaseRatio,
+			"revision":                      gorm.Expr("revision + 1"),
+			"updated_by":                    spec.UpdatedBy,
+			"node_managed":                  spec.NodeManaged,
+			"updated_at":                    time.Now(),
+		})
+	return res.RowsAffected > 0, res.Error
+}
+
+// ClusterQuotaSentinelID marks the spec row storing the cluster default.
+const ClusterQuotaSentinelID = "*"
+
+func (s *gormNodeStore) ListQuotaSpecs(ctx context.Context) ([]NodeQuotaSpec, error) {
+	var rows []NodeQuotaSpec
+	err := s.db.WithContext(ctx).Find(&rows).Error
+	return rows, err
+}
+
+func (s *gormNodeStore) ListClusterQuotaFollowers(ctx context.Context) ([]NodeQuotaSpec, error) {
+	var rows []NodeQuotaSpec
+	err := s.db.WithContext(ctx).
+		Where("node_id <> ? AND paused_resource_release_ratio IS NULL", ClusterQuotaSentinelID).
+		Find(&rows).Error
+	return rows, err
+}
+
+func (s *gormNodeStore) BumpClusterQuotaFollowers(ctx context.Context) (int64, error) {
+	res := s.db.WithContext(ctx).Model(&NodeQuotaSpec{}).
+		Where("node_id <> ? AND paused_resource_release_ratio IS NULL", ClusterQuotaSentinelID).
+		Update("revision", gorm.Expr("revision + 1"))
+	return res.RowsAffected, res.Error
 }
 
 func (s *gormNodeStore) UpsertStatus(ctx context.Context, status *NodeStatus) error {
@@ -281,11 +407,10 @@ func (l *gormHostMetaLoader) LoadSubHostMetas(ctx context.Context) (map[string]*
 	return out, nil
 }
 
-// DeleteNode removes the node's registration, status, and component
-// versions in a single transaction. Operations rows are preserved as
-// an audit trail of past operator actions. A row-level UPDATE lock is
-// taken on the registration to coordinate with concurrent registration
-// upserts. Returns ErrNotFound when the registration row is absent.
+// DeleteNode removes the node's registration, status, quota spec, and
+// component versions in one transaction; operations rows are kept as an audit
+// trail. A row-level lock on the registration guards concurrent upserts.
+// Returns ErrNotFound when the registration row is absent.
 func (s *gormNodeStore) DeleteNode(ctx context.Context, nodeID string) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var reg NodeRegistration
@@ -303,6 +428,12 @@ func (s *gormNodeStore) DeleteNode(ctx context.Context, nodeID string) error {
 			return err
 		}
 		if err := tx.Where("node_id = ?", nodeID).Delete(&NodeComponentVersion{}).Error; err != nil {
+			return err
+		}
+		// The quota spec row goes too, unscoped for the same reason: a leftover
+		// row keeps the deleted node in cluster-quota fan-out (inflating
+		// push_failed) and is silently inherited on node-id reuse.
+		if err := tx.Unscoped().Where("node_id = ?", nodeID).Delete(&NodeQuotaSpec{}).Error; err != nil {
 			return err
 		}
 		return tx.Unscoped().Where("node_id = ?", nodeID).Delete(&NodeRegistration{}).Error

@@ -41,7 +41,7 @@ assert_toggle_keys() {
 # Reset the toggle variables so leftovers from a previous scenario cannot
 # leak into the next snapshot as process-env intent.
 reset_toggle_vars() {
-  unset ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE
+  unset ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE CUBE_OPS_OPSAGENT_TOKEN
 }
 
 # Simulate what install.sh does around the upgrade merge for the toggle keys:
@@ -52,11 +52,12 @@ run_toggle_roundtrip() {
   snapshot_one_click_toggles "${dotenv}"
   ONE_CLICK_ENABLE_S3LVOL="${MERGED_S3LVOL:-}"
   CUBE_PVM_ENABLE="${MERGED_PVM:-}"
+  CUBE_OPS_OPSAGENT_TOKEN="${MERGED_OPSAGENT_TOKEN:-}"
   apply_one_click_toggles 2>/dev/null
 }
 
 test_toggle_keys_registry() {
-  assert_toggle_keys ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE
+  assert_toggle_keys ONE_CLICK_ENABLE_S3LVOL CUBE_PVM_ENABLE CUBE_OPS_OPSAGENT_TOKEN
 }
 
 # Core regression: a .env value that equals the env.example default (0) must

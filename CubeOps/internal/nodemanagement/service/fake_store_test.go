@@ -21,6 +21,15 @@ type fakeNodeStore struct {
 	// failOn injects errors for specific methods (non-nil → returned).
 	failOnGetRegistration error
 	failOnUpdateLabels    error
+	failOnUpdateQuota     error
+
+	updateQuotaCalls     int
+	updateHostFactsCalls int
+	lastQuota            model.QuotaReport
+
+	specs                 map[string]*store.NodeQuotaSpec
+	failOnGetQuotaSpec    error
+	failOnUpsertQuotaSpec error
 }
 
 func newFakeNodeStore() *fakeNodeStore {
@@ -28,6 +37,7 @@ func newFakeNodeStore() *fakeNodeStore {
 		regs:     map[string]*store.NodeRegistration{},
 		statuses: map[string]*store.NodeStatus{},
 		versions: map[string][]store.NodeComponentVersion{},
+		specs:    map[string]*store.NodeQuotaSpec{},
 	}
 }
 
@@ -67,7 +77,9 @@ func (f *fakeNodeStore) GetRegistration(ctx context.Context, nodeID string) (*st
 	if !ok {
 		return nil, store.ErrNotFound
 	}
-	return reg, nil
+	// Return a copy so callers mutate without racing the stored row.
+	cp := *reg
+	return &cp, nil
 }
 
 func (f *fakeNodeStore) ListRegistrations(_ context.Context) ([]store.NodeRegistration, error) {
@@ -94,9 +106,10 @@ func (f *fakeNodeStore) UpdateLabels(_ context.Context, nodeID string, labels ma
 	return nil
 }
 
-func (f *fakeNodeStore) UpdateHostFacts(_ context.Context, nodeID string, factsJSON, cpuidHash, kernelRelease string) error {
+func (f *fakeNodeStore) UpdateHostFacts(_ context.Context, nodeID string, factsJSON, cpuidHash, kernelRelease string, cpuCount, memTotalMB int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.updateHostFactsCalls++
 	reg, ok := f.regs[nodeID]
 	if !ok {
 		return store.ErrNotFound
@@ -104,7 +117,123 @@ func (f *fakeNodeStore) UpdateHostFacts(_ context.Context, nodeID string, factsJ
 	reg.HostFactsJSON = factsJSON
 	reg.CPUIDHash = cpuidHash
 	reg.HostKernelRelease = kernelRelease
+	reg.CPUCount = cpuCount
+	reg.MemTotalMB = memTotalMB
 	return nil
+}
+
+func (f *fakeNodeStore) UpdateQuota(_ context.Context, nodeID string, q model.QuotaReport) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.updateQuotaCalls++
+	if f.failOnUpdateQuota != nil {
+		return f.failOnUpdateQuota
+	}
+	reg, ok := f.regs[nodeID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	reg.QuotaCPU = q.MilliCPU
+	reg.QuotaMemMB = q.MemMB
+	reg.MaxMvmNum = q.MaxMvmNum
+	reg.CreateConcurrentNum = q.CreateConcurrentNum
+	f.lastQuota = q
+	return nil
+}
+
+func (f *fakeNodeStore) GetQuotaSpec(_ context.Context, nodeID string) (*store.NodeQuotaSpec, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failOnGetQuotaSpec != nil {
+		return nil, f.failOnGetQuotaSpec
+	}
+	spec, ok := f.specs[nodeID]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	cp := *spec
+	return &cp, nil
+}
+
+func (f *fakeNodeStore) UpsertQuotaSpec(_ context.Context, spec *store.NodeQuotaSpec) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failOnUpsertQuotaSpec != nil {
+		return f.failOnUpsertQuotaSpec
+	}
+	if existing, ok := f.specs[spec.NodeID]; ok {
+		existing.Revision++
+	} else {
+		cp := *spec
+		f.specs[spec.NodeID] = &cp
+	}
+	return nil
+}
+
+func (f *fakeNodeStore) CreateQuotaSpecIfAbsent(_ context.Context, spec *store.NodeQuotaSpec) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failOnUpsertQuotaSpec != nil {
+		return f.failOnUpsertQuotaSpec
+	}
+	if _, ok := f.specs[spec.NodeID]; ok {
+		return store.ErrQuotaSpecExists
+	}
+	cp := *spec
+	f.specs[spec.NodeID] = &cp
+	return nil
+}
+
+func (f *fakeNodeStore) UpdateQuotaSpecIfRevision(_ context.Context, spec *store.NodeQuotaSpec, expected int64) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	existing, ok := f.specs[spec.NodeID]
+	if !ok || existing.Revision != expected {
+		return false, nil
+	}
+	cp := *spec
+	cp.Revision = existing.Revision + 1
+	f.specs[spec.NodeID] = &cp
+	return true, nil
+}
+
+func (f *fakeNodeStore) ListQuotaSpecs(_ context.Context) ([]store.NodeQuotaSpec, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]store.NodeQuotaSpec, 0, len(f.specs))
+	for _, s := range f.specs {
+		cp := *s
+		out = append(out, cp)
+	}
+	return out, nil
+}
+
+func (f *fakeNodeStore) ListClusterQuotaFollowers(_ context.Context) ([]store.NodeQuotaSpec, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]store.NodeQuotaSpec, 0)
+	for _, s := range f.specs {
+		if s.NodeID == store.ClusterQuotaSentinelID || s.PausedReleaseRatio != nil {
+			continue
+		}
+		cp := *s
+		out = append(out, cp)
+	}
+	return out, nil
+}
+
+func (f *fakeNodeStore) BumpClusterQuotaFollowers(_ context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var n int64
+	for _, s := range f.specs {
+		if s.NodeID == store.ClusterQuotaSentinelID || s.PausedReleaseRatio != nil {
+			continue
+		}
+		s.Revision++
+		n++
+	}
+	return n, nil
 }
 
 func (f *fakeNodeStore) UpsertStatus(_ context.Context, st *store.NodeStatus) error {

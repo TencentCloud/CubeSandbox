@@ -22,6 +22,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement"
 	nmhandler "github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/handler"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/nodemetric"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/opsagent"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/service"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/warehouse"
@@ -79,6 +80,12 @@ func (s *Server) Start() error {
 	}
 	// Enable sandbox verification on node deletion via CubeMaster.
 	nodeSvc.SetSandboxInventoryChecker(nodemanagement.SandboxInventoryChecker(s.cm))
+	// Wire the ops-agent push channel when configured; without a port the
+	// spec is still persisted and served via pull reconcile.
+	if s.cfg.OpsAgent.Port > 0 {
+		nodeSvc.SetOpsAgentPusher(opsagent.New(s.cfg.OpsAgent.Port, s.cfg.OpsAgent.PushTimeout, s.cfg.OpsAgent.Token))
+		logging.G(nodeCtx).Infof("ops-agent push enabled: port=%d", s.cfg.OpsAgent.Port)
+	}
 	s.nodeSvc = nodeSvc
 
 	engine := s.buildRouter()
@@ -156,6 +163,8 @@ func (s *Server) buildRouter() *gin.Engine {
 
 	internalH := nmhandler.NewInternalHandler(s.nodeSvc)
 	agentH := nmhandler.NewAgentHandler(s.nodeSvc)
+	quotaH := nmhandler.NewQuotaHandler(s.nodeSvc)
+	opsAgentH := nmhandler.NewOpsAgentHandler(s.nodeSvc)
 
 	// Public (no auth) routes — login + refresh.
 	public := r.Group("/api/v1")
@@ -170,6 +179,7 @@ func (s *Server) buildRouter() *gin.Engine {
 	configH.Register(authed)
 	storeH.Register(authed)
 	agenthubH.Register(authed)
+	quotaH.Register(authed)
 
 	warehouseH := handler.NewWarehouseHandler(s.store, s.blobs, s.importer, s.nodeSvc, s.cfg.Warehouse.PresignTTL, s.cfg.Warehouse.UploadMaxBytes)
 	if a, ok := s.blobs.(*warehouse.Adapter); ok && a.Signer() != nil {
@@ -184,6 +194,10 @@ func (s *Server) buildRouter() *gin.Engine {
 	// Internal routes — no auth. These endpoints must not be exposed through
 	// nginx or a public Bind address. Callers: Cubelet (register + heartbeat).
 	agentH.Register(r.Group("/internal/v1/node-agent"))
+
+	// Internal routes for node-local ops-agents (pull reconcile). Same
+	// no-public-exposure rule as the routes above.
+	opsAgentH.Register(r.Group("/internal/v1/ops-agent"))
 
 	// Internal warehouse routes — no auth. Callers: Cubelet (blob download,
 	// preinstall claim/ack, inventory report).

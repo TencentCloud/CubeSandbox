@@ -29,6 +29,7 @@ func buildSnapshotFromStore(reg *store.NodeRegistration, st *store.NodeStatus, v
 		QuotaMemMB:          reg.QuotaMemMB,
 		CreateConcurrentNum: reg.CreateConcurrentNum,
 		MaxMvmNum:           reg.MaxMvmNum,
+		PausedReleaseRatio:  reg.PausedReleaseRatio,
 	}
 	labels, err := store.ParseLabelsJSON(reg.LabelsJSON)
 	if err != nil {
@@ -334,11 +335,15 @@ func applyHostFactsToRegistration(reg *store.NodeRegistration, f *model.HostFact
 		reg.HostFactsJSON = ""
 		reg.CPUIDHash = ""
 		reg.HostKernelRelease = ""
+		reg.CPUCount = 0
+		reg.MemTotalMB = 0
 		return
 	}
 	reg.HostFactsJSON = marshalHostFacts(f)
 	reg.CPUIDHash = f.CPUIDHash
 	reg.HostKernelRelease = f.HostKernelRelease
+	reg.CPUCount = f.CPUCount
+	reg.MemTotalMB = f.MemTotalMB
 }
 
 // mergeIncomingHostFacts reconciles a fresh heartbeat against prev. When
@@ -357,6 +362,12 @@ func mergeIncomingHostFacts(prev, incoming *model.HostFacts) *model.HostFacts {
 	if !incoming.KVMModuleScanned {
 		out.KVMModuleFingerprint = prev.KVMModuleFingerprint
 		out.KVMModuleTaint = prev.KVMModuleTaint
+	}
+	if incoming.CPUCount == 0 {
+		out.CPUCount = prev.CPUCount
+	}
+	if incoming.MemTotalMB == 0 {
+		out.MemTotalMB = prev.MemTotalMB
 	}
 	out.KVMModuleScanned = false
 	return &out
