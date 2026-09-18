@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 
 	sandboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/sandbox"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
 
 func TestReadPidFile(t *testing.T) {
@@ -61,6 +63,30 @@ func TestCollectSandboxRuntimePIDsReadsBundlePidFiles(t *testing.T) {
 	assert.Contains(t, got, 88002)
 }
 
+// Fallback path: when l.shims is nil (in-memory tracker miss / cubelet
+// restart before shim GC), pids must still be recovered via the on-disk
+// bundle root by sandbox ID convention. This is the exact scenario in the
+// 130459 leak — containerd dropped the task record after VMM crash but the
+// shim process is still holding fds.
+func TestCollectSandboxRuntimePIDsFallbackByBundleConvention(t *testing.T) {
+	root := t.TempDir()
+	id := "sb-orphan"
+	require.NoError(t, os.MkdirAll(filepath.Join(root, id), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, id, shimPidFileName), []byte("99001"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, id, vmmPidFileName), []byte("99002"), 0o644))
+
+	orig := cubeletBundleRoot
+	cubeletBundleRoot = root
+	t.Cleanup(func() { cubeletBundleRoot = orig })
+
+	sb := newCubeboxWithStatusForTest(id, cubeboxstore.Status{Pid: 0})
+	l := &local{} // l.shims == nil, so the fast path yields nothing
+
+	pids := l.collectSandboxRuntimePIDs(context.Background(), sb)
+	assert.Contains(t, pids, 99001)
+	assert.Contains(t, pids, 99002)
+}
+
 func TestWaitSandboxRuntimeGoneNoPIDs(t *testing.T) {
 	require.NoError(t, waitSandboxRuntimeGone(context.Background(), "sb-empty", nil))
 }
@@ -93,4 +119,41 @@ func TestWaitSandboxRuntimeGoneTimesOut(t *testing.T) {
 func TestSandboxShimLookupIDsDedups(t *testing.T) {
 	sb := newCubeboxWithStatusForTest("same-id", cubeboxstore.Status{Pid: 9})
 	assert.Equal(t, []string{"same-id"}, sandboxShimLookupIDs(sb))
+}
+
+func TestReapSandboxRuntimeNoOpWhenNothingAlive(t *testing.T) {
+	sb := newCubeboxWithStatusForTest("sb-reap-empty", cubeboxstore.Status{Pid: 0})
+	l := &local{}
+	require.NoError(t, l.reapSandboxRuntime(context.Background(), sb))
+}
+
+func TestReapSandboxRuntimeKillsLiveShimFromBundle(t *testing.T) {
+	root := t.TempDir()
+	id := "sb-reap-live"
+	require.NoError(t, os.MkdirAll(filepath.Join(root, id), 0o755))
+
+	cmd := exec.Command("sleep", "10")
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	require.NoError(t, os.WriteFile(
+		filepath.Join(root, id, shimPidFileName),
+		[]byte(strconv.Itoa(cmd.Process.Pid)),
+		0o644,
+	))
+
+	orig := cubeletBundleRoot
+	cubeletBundleRoot = root
+	t.Cleanup(func() { cubeletBundleRoot = orig })
+
+	sb := newCubeboxWithStatusForTest(id, cubeboxstore.Status{Pid: 0})
+	l := &local{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, l.reapSandboxRuntime(ctx, sb))
+	assert.False(t, utils.ProcessAlive(cmd.Process.Pid),
+		"pid should be gone after reap")
 }

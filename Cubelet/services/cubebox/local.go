@@ -230,6 +230,8 @@ func init() {
 				return nil, fmt.Errorf("cubebox manager not support recover")
 			}
 
+			l.reapStartupOrphanShims(namespaces.WithNamespace(context.Background(), namespaces.Default))
+
 			runc.Init(config.RootPath)
 			taskio.Init(taskio.FIFODir(config.StatePath))
 			rootfs.Init(config.RootPath)
