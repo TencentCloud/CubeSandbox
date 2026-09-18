@@ -88,6 +88,7 @@ pub struct Snapshot {
     sharefs_ptr: Option<FilePtr>,
     vsock_ptr: Option<FilePtr>,
     app_snapshot: bool,
+    keep_paused: bool,
     snapshot_type: SnapshotType,
     memory_vol_url: Option<String>,
     container_id: Option<String>,
@@ -123,6 +124,11 @@ impl Snapshot {
             self.store_metadata()
         }
         .await;
+
+        // With keep-paused, the caller owns recovery on success and failure.
+        if self.keep_paused {
+            return snapshot_result;
+        }
         let resume_result = self.api_resume_vm().await;
 
         match (snapshot_result, resume_result) {
@@ -135,6 +141,12 @@ impl Snapshot {
             )
             .into()),
         }
+    }
+
+    pub async fn resume_app_snapshot(vm_id: &str) -> CResult<()> {
+        let mut snapshot = Snapshot::new();
+        snapshot.id = vm_id.to_string();
+        snapshot.api_resume_vm().await
     }
 
     async fn api_pause_vm(&self) -> CResult<()> {
