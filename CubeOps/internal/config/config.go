@@ -259,7 +259,9 @@ func (c *Config) daoConfigFromFields() (dao.Config, error) {
 // from the scheme (mysql:// or postgres://). Malformed URLs fail fast instead
 // of silently falling back to localhost:3306.
 func (c *Config) daoConfigFromURL() (dao.Config, error) {
-	u, err := url.Parse(c.DatabaseURL)
+	// Trim to match DaoConfig's whitespace-counts-as-unset rule: a stray
+	// leading space or trailing newline should parse, not fail.
+	u, err := url.Parse(strings.TrimSpace(c.DatabaseURL))
 	if err != nil {
 		// url.Parse errors can embed the password; keep the message generic.
 		return dao.Config{}, fmt.Errorf("invalid database_url: failed to parse (check scheme, host and password escaping)")
@@ -269,6 +271,8 @@ func (c *Config) daoConfigFromURL() (dao.Config, error) {
 
 	driver := "mysql"
 	port := 3306
+	// Keep in sync with dao.driverRegistry (pkgs/cubedb/dao/driver.go):
+	// adding an engine there requires a case here.
 	switch strings.ToLower(u.Scheme) {
 	case "postgres", "postgresql":
 		driver, port = "postgres", 5432

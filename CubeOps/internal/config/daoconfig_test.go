@@ -158,6 +158,30 @@ func TestDaoConfig_WhitespaceURL_UsesMySQLFields(t *testing.T) {
 	}
 }
 
+// TestDaoConfig_WhitespacePaddedURL_IsTrimmed proves a URL with stray
+// leading/trailing whitespace (mis-quoted YAML scalar, env value with a
+// trailing newline) is trimmed and parsed rather than rejected.
+func TestDaoConfig_WhitespacePaddedURL_IsTrimmed(t *testing.T) {
+	for _, raw := range []string{
+		" mysql://alice:s3cret@10.0.0.5:3307/mydb",
+		"mysql://alice:s3cret@10.0.0.5:3307/mydb\n",
+		"\tmysql://alice:s3cret@10.0.0.5:3307/mydb ",
+	} {
+		t.Run("url="+strconv.Quote(raw), func(t *testing.T) {
+			dc := mustDaoConfig(t, &Config{DatabaseURL: raw})
+			if dc.Driver != "mysql" {
+				t.Errorf("Driver = %q, want mysql", dc.Driver)
+			}
+			if dc.Addr != "10.0.0.5:3307" {
+				t.Errorf("Addr = %q, want 10.0.0.5:3307", dc.Addr)
+			}
+			if dc.User != "alice" || dc.Pwd != "s3cret" || dc.DBName != "mydb" {
+				t.Errorf("User/Pwd/DBName = %q/%q/%q, want alice/s3cret/mydb", dc.User, dc.Pwd, dc.DBName)
+			}
+		})
+	}
+}
+
 // TestDaoConfig_FieldPathMissingField_FailsFast asserts the field path fails
 // fast on a missing host, user or database, like the URL path.
 func TestDaoConfig_FieldPathMissingField_FailsFast(t *testing.T) {
