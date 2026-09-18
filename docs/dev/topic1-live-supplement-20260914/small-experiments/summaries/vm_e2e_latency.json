@@ -1,0 +1,39 @@
+{
+  "experiment": "vm_e2e_latency",
+  "status": "PASS",
+  "arms": [
+    {
+      "arm": "default",
+      "n": 10,
+      "fail_n": 0,
+      "api_p50_ms": 382.0,
+      "api_p95_ms": 690.9499999999998,
+      "ready_p50_ms": 813.0,
+      "ready_p95_ms": 1123.35,
+      "ready_max_ms": 1167.0,
+      "usable_p50_ms": 904.0,
+      "usable_p95_ms": 1217.5,
+      "usable_max_ms": 1249.0,
+      "burst_success": 5,
+      "burst_n": 5,
+      "metric_source": "client_timeline"
+    },
+    {
+      "arm": "binpack_utilization",
+      "n": 10,
+      "fail_n": 0,
+      "api_p50_ms": 372.0,
+      "api_p95_ms": 878.0499999999995,
+      "ready_p50_ms": 755.0,
+      "ready_p95_ms": 1257.0499999999995,
+      "ready_max_ms": 1505.0,
+      "usable_p50_ms": 869.0,
+      "usable_p95_ms": 1355.4499999999994,
+      "usable_max_ms": 1607.0,
+      "burst_success": 5,
+      "burst_n": 5,
+      "metric_source": "client_timeline"
+    }
+  ],
+  "title": "真实多VM：创建→Ready→首命令端到端延迟"
+}

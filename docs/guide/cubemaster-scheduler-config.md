@@ -79,11 +79,128 @@ scheduler:
 | `metric_update_timeout` | Treat resource metrics as stale after this duration. It should be much larger than the Cubelet report interval. |
 | `local_metric_update_timeout` | Reserved local-metric timeout field. Current prefilter logic gates both global and local metric freshness with `metric_update_timeout`. |
 | `filter.enable_filters` | Enables scheduling filters. Common filters include CPU, memory, template locality, and real-time create concurrency. |
-| `score.enable_scorers` | Enables scoring plugins. Multi-node deployments usually enable `real_time_weighted_average`; when it is enabled, the matching `score.plugin_conf.real_time_weighted_average` block is required or CubeMaster can panic during scheduler startup. |
-| `score.resource_weights` | Controls the influence of MVM count, create concurrency, CPU quota usage, and memory quota usage. Higher weight means stronger influence; factors must also be listed under `score.plugin_conf.real_time_weighted_average.enable_weight_factors`. |
+| `score.enable_scorers` | Enables scoring plugins. Multi-node deployments usually enable `real_time_weighted_average`. Listing a factor/affinity scorer or `external_http_score` without its matching `score.plugin_conf.<name>` block **fails config load** (empty Profile included; `binpack_score` may omit the block and use defaults). With a non-empty `scheduler.profile`, factor scorers also need known `enable_weight_factors` and a positive factor weight or config load fails. |
+| `score.resource_weights` | Factor weights for occupancy-style scorers (`mvm_num`, create concurrency, CPU/memory quota usage, …). Higher weight means stronger influence; factors must also appear under the scorer's `plugin_conf.<name>.enable_weight_factors` when that scorer uses factors. Profile overlays merge same keys over this map (Profile wins). Factor names must match the allowlist (`quota_cpu_usage`, `cpu_util`, … — not typos such as `cpu_usage`); under a non-empty Profile an unrecognized factor in `enable_weight_factors` fails config load. Grep existing configs for drifted names before selecting a Profile. Plugin-only scorers such as `external_http_score` / `binpack_score` do **not** require this map as a loader gate. |
+| `score.plugin_conf.external_http_score` | Optional HTTP sidecar scorer. See [External HTTP score plugin](#external-http-score-plugin). |
+| `score.plugin_conf.binpack_score` | Optional plugin-only scorer that prefers fuller nodes. Omitting the block while listing `binpack_score` in `enable_scorers` enables safe defaults (plugin weight 1, equal CPU/mem/MVM). Plugin `weight` is a pointer: omit → default 1; explicit `0` disables Select; negatives are rejected at config load. Sub-weights `cpu_weight`/`mem_weight`/`mvm_weight` are also pointers: omit → default 1 for that dimension; explicit `0` excludes the dimension; negatives are rejected at config load. |
+| `profile` / `profiles` | Optional runtime Profile overlay. Empty `profile` leaves Filter/Score unchanged. Built-ins: `balanced_spread`, `template_locality_first`, `binpack_utilization`. User same-name keys override built-ins. Runtime Profiles are selector overlays, not offline simulator models. See [Scheduler Profile Configuration Example](../dev/scheduler-profile-config-example.md). |
 | `node_max_mvm_num` / `node_max_mvm_num_conf` | Global or per-instance-type single-node MVM limits. Cubelet-reported `max_mvm_num` also participates in the effective limit. |
 | `disk_usage_max_percent` | Threshold used by the `disk` filter and backoff path to avoid placing more sandboxes on nearly full machines. |
 | `affinityconf` / `node_affinity_selector_allowed_keys` | Controls affinity and constraints by cluster label, zone, CPU type, instance type, and other allowed selector keys. |
+
+## Runtime Profiles and binpack_score
+
+CubeMaster can select a named **runtime Profile** with `scheduler.profile`.
+Empty profile leaves the existing Filter/Score lists and `plugin_conf`
+blocks in place. That is not a byte-for-byte freeze of master behavior:
+`plugin_conf.<scorer>.weight: 0` still disables that scorer. The async
+`loopAsyncScore` feeder (writer of `node.Score` / `pscore`) starts only when
+the `multi_factor_weighted_average` plugin block is present **and**
+`score.resource_weights` is non-nil — matching master's early-return when
+`resource_weights` was omitted. Built-in names (`balanced_spread`,
+`template_locality_first`, `binpack_utilization`) expand onto selector lists
+and inject self-contained plugin defaults when the matching `plugin_conf`
+block is absent. User entries under `scheduler.profiles` with the same name
+override a built-in entirely.
+
+**Warning:** when a Profile provides `filter.enable_filters`, that list
+**replaces** the base `scheduler.filter.enable_filters` (no merge). Profiles
+that drop base filters fail config load unless `allow_dropped_filters: true`.
+The same applies to `score.enable_scorers` / `allow_dropped_scorers` (for example
+dropping an operator's `external_http_score`). Built-in presets use short
+filter/score lists and do **not** pre-set those opt-ins — on a stock
+four-filter config, select a built-in with an explicit same-name
+`profiles.<builtin>.allow_dropped_filters: true` (or keep dropped names in the
+Profile list). Still audit effective filters if you relied on `disk` /
+`thirtparty`.
+
+## Upgrade notes (empty Profile / restart)
+
+**Release / upgrade footguns (read before rolling out):**
+
+- Listing a factor/affinity scorer or `external_http_score` in `enable_scorers`
+  without its `plugin_conf` block, or any **negative / non-finite** plugin
+  `weight`, now **fails `config.Init`** (CubeMaster will not boot). Hot-reload
+  logs FATAL via `CubeLog.Fatalf` (**does not** `os.Exit`) and keeps the
+  previous Config.
+- For the four legacy float64 scorers (`real_time_weighted_average`,
+  `multi_factor_weighted_average`, `affinity_score`, `image_score`), omitting
+  `weight` YAML-decodes to `0` and **`Disable()` skips the scorer** (master
+  still ran Select at weight 0). Set an explicit positive `weight` to keep them
+  active; load logs a Warn when weight is 0 without `disable: true`.
+- One-click Terraform `cpu_usage` → `quota_cpu_usage`: the next `terraform
+  apply` that rewrites `cubemaster-conf` changes placement after config
+  hot-reload — **no CubeMaster restart**. Unrelated infra applies can trigger
+  this.
+
+These Init checks run even with `scheduler.profile` empty and **exit CubeMaster
+on process start** (hot-reload only logs FATAL and keeps the previous Config):
+
+- `enable_scorers` lists a factor/affinity scorer or `external_http_score`
+  without its `plugin_conf` block
+- any `plugin_conf.<scorer>.weight < 0`
+
+Configs that previously started with a silent unscored phase or inverted
+ranking will not boot until those YAML issues are fixed.
+
+For the four legacy Score plugins and `binpack_score`,
+`plugin_conf.<scorer>.weight: 0` disables the scorer and skips Select.
+`external_http_score` differs: `weight: 0` keeps `Disable()==false` but Select
+is an inert no-op (no HTTP); prefer `disable: true` for an explicit off switch.
+**Negative** `plugin_conf.<scorer>.weight` is rejected at config load for every
+registered scorer (not only `binpack_score`); configs that previously started
+with a negative weight will fail `config.Init` after upgrade. For
+`binpack_score` specifically, `weight` is a pointer field: omitting `weight`
+inside a present `plugin_conf.binpack_score` block keeps the runtime default of
+`1` (enabled); only an explicit `0` disables. Other float64 scorers (and
+`external_http_score`) still YAML-decode an omitted `weight` to `0` — set an
+explicit positive `weight` to keep them active (HTTP at `0` is inert rather
+than `Disable()`-skipped). Listing a factor/affinity scorer or
+`external_http_score` in `enable_scorers` without its `plugin_conf` block also
+fails config load (empty Profile included); `binpack_score` may omit the block
+and use runtime defaults. Profile / selector-list changes require a CubeMaster
+restart: config hot-reload re-runs `preHandle` and, on success, updates the
+in-memory Config. On failure it logs FATAL (CubeLog.Fatalf does **not**
+`os.Exit`) and keeps the previous Config — the bad Profile overlay is not
+applied. `InitScheduler` still does not rebuild Filter/Score slices on reload,
+so selector-set changes need a process restart.
+
+**One-click Terraform (`deploy/one-click/terraform/tencentcloud/tke-addons.tf`):**
+`real_time_weighted_average` now weights `quota_cpu_usage` (previously an
+ignored `cpu_usage` key that `getFactorWeight` dropped). Timing: this is **not**
+tied to a CubeMaster binary rollout. The next `terraform apply` that rewrites
+the `cubemaster-conf` secret (often triggered by an unrelated infra change)
+is enough — `resource_weights` is read **live** on every score pass, so after
+hot-reload picks up the secret, placement can change **without** a CubeMaster
+restart. CubeMaster-only upgrades that leave the secret untouched keep the
+old inert `cpu_usage` behaviour.
+
+`binpack_score` is a thin Score-phase plugin that prefers fuller nodes. It is
+enabled by listing `binpack_score` in `enable_scorers` (directly or via a
+Profile). Plugin params stay under `scheduler.score.plugin_conf.binpack_score`.
+Do not mix `binpack_score` with spread-style scorers (`real_time_weighted_average`,
+`multi_factor_weighted_average`) in the same `enable_scorers` list: binpack
+returns occupancy (higher = fuller) while those scorers return remaining-capacity
+style scores, so the blend can cancel. Under a non-empty `scheduler.profile`
+that mix fails config load; with an empty Profile it still loads (pre-upgrade
+compat) but ranking is near-noise. Built-in `binpack_utilization` only enables
+`binpack_score`.
+
+**Built-in preset placement prerequisite:** `balanced_spread` /
+`template_locality_first` / `binpack_utilization` only steer *which* node is
+chosen when `scheduler.priority_select_num >= 1` and/or `least_select_name` is
+weight-aware (`sw` / `rw` / `rrw`). When `priority_select_num` is **omitted**
+(code fallback `-1`) or below `1` with `least_select_name: random`, score
+ranking is observability-only (uniform pick over the scored set). **Shipped**
+`conf.yaml` / Helm / single-node / one-click Terraform set
+`priority_select_num` to `1` or more, so stock deploys use top-1 scoring
+(not observability-only); filter-list changes from the preset can still apply
+either way. Offline simulator argmax matches production only near
+`priority_select_num: 1`.
+
+Runtime Profiles are **not** offline simulator / `schedulerbench` models, even
+when they reuse the same preset name strings. Copyable YAML and the full
+contract: [Scheduler Profile Configuration Example](../dev/scheduler-profile-config-example.md).
 
 ## How node metadata affects scheduling
 
@@ -263,6 +380,129 @@ If new sandboxes still concentrate on one machine in a multi-node cluster:
 - Set `priority_select_num` to a value greater than `1`.
 - Check that weights for `local_create_num`, `mvm_num`, `quota_cpu_usage`, and `quota_mem_usage` are configured.
 - Confirm templates are available on all intended nodes; otherwise `template_locality` shrinks the candidate set.
+
+## External HTTP score plugin
+
+`external_http_score` is an opt-in scoring plugin. When it appears in
+`score.enable_scorers`, CubeMaster POSTs a snapshot of the **current candidate
+node list** (after filters) to an operator-configured HTTP endpoint and blends
+the returned per-node scores into the weighted score sum. That candidate set is
+the post-`pre_filter` list whose width is controlled by
+`scheduler.pre_select_num` (default `-1` = unlimited). Enabling this plugin on
+large clusters without bounding `pre_select_num` posts the full schedulable set
+on every create (200ms default timeout; circuit breaker defaults on unless
+disabled). Enabling
+`enable_scorers: external_http_score` **requires** a matching
+`score.plugin_conf.external_http_score` block; otherwise **config load fails**
+(`validateListedScorerPluginConfPresent`). It does **not** require
+`score.resource_weights` — that map remains a construction gate only for
+legacy affinity / factor-based scorers (and for starting the async
+`multi_factor_weighted_average` feeder).
+
+### Configuration
+
+```yaml
+scheduler:
+  score:
+    enable_scorers:
+      - external_http_score
+    plugin_conf:
+      external_http_score:
+        weight: 1.0
+        endpoint: "http://127.0.0.1:18080/score"
+        timeout: 200ms   # optional; default 200ms when zero/omitted
+        mode: ""         # optional opaque string forwarded to the sidecar
+        disable: false
+        allow_insecure: false
+        failure_policy: fail_open   # default when omitted; set fail_closed to abort Score
+        circuit_breaker:            # optional; defaults apply when omitted
+          disable: false
+          failure_threshold: 5
+          open_duration: 5s
+          half_open_max_probes: 1
+```
+
+| Field | Meaning |
+|-------|---------|
+| `weight` | Relative weight in `runScoreFilter`'s weighted average (`Σ(score × weight) / Σ(weight)`). Returned scores must use the same **`[0, 100]`** scale as built-in scorers; a sidecar that returns normalised `0.0–1.0` values contributes ~1% of a built-in scorer at equal weight. **Omitted** `weight` defaults to **`1.0`** once at config load / hot-reload (`preHandle`). An **explicit** `weight: 0` is a staged inert no-op like `disable: true`: `Select` returns immediately without requiring a valid endpoint and without emitting `empty_endpoint` / HTTP failure signals. Use `disable: true` when you want the plugin off while keeping a real endpoint configured. **Negative / non-finite** weights fail `config.Init` / hot-reload `preHandle` (same fail-closed rule as other registered scorers); they do not boot as a permanently inert scorer. Read live from `plugin_conf` on each `Weight()` / `Select` when the reload succeeded; `runScoreFilter` samples `Weight()` once **before** `Select` so the blended weight matches the per-node multiplier in that pass (it does not freeze other live-config fields that `external_http_score` may re-read inside `Select`). |
+| `endpoint` | Sidecar URL. Empty endpoint (including whitespace-only) with a **positive** weight fail-opens with a rate-limited Warn (log category `empty_endpoint`) and increments `cube_scheduler_external_http_score_outcomes_total{reason="other"}` — it does not silently skip. With `weight: 0` or `disable: true` the empty check is not reached. Non-empty values must be absolute `http://` or `https://` URLs with a host; missing scheme, `file://`, `unix://`, and other schemes fail `config.Init` / hot-reload `preHandle` when the endpoint is non-empty. Plain **`http://` to a non-loopback host** also fails config load unless `allow_insecure: true` (loopback `http://127.0.0.1` / `localhost` / `::1` stays allowed for local sidecars). Prefer **`https://`** for any remote sidecar: the create path POSTs the candidate node inventory. Leading/trailing whitespace is trimmed before the request. Prefer putting secrets in the sidecar itself rather than in the URL; if userinfo, path tokens, or query tokens are present, the scorer never logs them, and the `config.Init` cfg dump redacts them to scheme/host only. |
+| `allow_insecure` | When `true`, permits cleartext `http://` to a non-loopback host. Default `false`. Does not disable TLS verification for `https://` endpoints. |
+| `timeout` | Per-request HTTP timeout on the **synchronous create path**. Zero/omitted uses the default **200ms**. Positive values must be **≥ 1ms** and **≤ 2s**; negative values, sub-millisecond positives, and values above **2s** are detected at construction (one Warn) and then fail each `Select` according to **`failure_policy`** (default fail-open skips this scorer; `fail_closed` aborts the whole Score/create — not silently coerced; CubeMaster still starts). Use a duration string such as `200ms` / `1s` — a bare integer like `timeout: 200` is parsed as **200 nanoseconds** by YAML and fails the ≥1ms check. A hung sidecar can add up to this budget to every create attempt before that policy applies (unless the circuit breaker is already open). |
+| `mode` | Optional operator-defined mode string included in the JSON request. |
+| `disable` | When true, the plugin is a no-op even if enabled in `enable_scorers`. Read live like `weight`. Prefer `disable: true` for a live off switch. **Do not** delete the whole `plugin_conf.external_http_score` block while leaving the name in `enable_scorers`: `validateListedScorerPluginConfPresent` **rejects** that config on startup and on hot-reload (`preHandle` fails; `CubeLog.Fatalf` does **not** `os.Exit`, so the previous Config stays live and scoring continues with the old block). To stop using the scorer, set `disable: true` (immediate) or remove the name from `enable_scorers` **and** restart CubeMaster (selector sets are startup-only). The nil-`plugin_conf` / log category `plugin_conf_absent` path is effectively **test-only / stale-instance**: it is reachable only if a reload successfully drops both the name and the block while an old scorer instance remains in memory until restart — not via "delete block, keep name". |
+| `failure_policy` | Sidecar failure handling. **Omitted / empty / unknown defaults to `fail_open`**: `Select` returns a plain error and `runScoreFilter` skips this scorer (historical create-path behavior). Set `fail_closed` to return a typed `FailClosedError` so `runScoreFilter` **aborts the entire Score phase** (scheduler-wide, not plugin-local): already-blended scores from earlier scorers are discarded and create fails closed (`ErrorCode_SelectNodesFailed` with a sanitized category message). There is no way to scope `fail_closed` to a canary-only sidecar while other scorers continue. |
+| `circuit_breaker` | Consecutive sidecar failures open the circuit so later Score calls fail immediately instead of waiting for the full HTTP timeout. After `open_duration`, up to `half_open_max_probes` probes are allowed; a **half-open probe** success closes the circuit, failure reopens it. Successes from requests admitted while the circuit was still closed do **not** cancel an already-open window. When the block is omitted, or a field is `0`, documented defaults apply (`failure_threshold: 5`, `open_duration: 5s`, `half_open_max_probes: 1`). Set `disable: true` to turn the breaker off (also clears that host's `circuit_state` series). Changing `endpoint` to a different host abandons the previous host's in-process breaker entry and gauge. |
+
+### Wire contract
+
+Request (`POST`, `Content-Type: application/json`):
+
+| Field | Units / notes |
+|-------|----------------|
+| `mode` | Optional string from config. |
+| `instance_type` | Request instance type. |
+| `template_id` | Request template id when present. |
+| `nodes[]` | Candidate set passed into the scorer after filters; one entry per node. |
+| `nodes[].node_id` | Node identity; every requested candidate must appear in `scores`. |
+| `nodes[].quota_cpu` / `quota_mem` | Capacity counters from the node snapshot. |
+| `nodes[].quota_cpu_usage` / `quota_mem_usage` | **Raw** reported usage counters (not `EffectiveAllocated`). When `ignore_redis_allocation: true`, built-in scorers may treat allocated usage as 0 while these wire fields still carry the raw Redis-reported values. |
+| other `nodes[]` fields | `mvm_num`, create counters, `cpu_util`, `mem_usage`, IPs/types as available on the snapshot. |
+
+Response:
+
+```json
+{ "scores": { "node-a": 10.0, "node-b": 90.0 } }
+```
+
+- `scores` must include **every** requested candidate `node_id`. Additional keys
+  are ignored (they do not fail the response); only the ignored-key **count** may
+  be logged, never the key names or body. Extra keys with JSON `null` or
+  out-of-range numbers are ignored the same way.
+- Each score for a known candidate must be a **non-null** finite number in
+  **`[0, 100]`** (numeric `0` is valid; JSON `null` is not). Higher is better
+  (same direction as built-in scorers). Non-numeric JSON values (string, object,
+  array) anywhere under `scores` make the response malformed at decode time.
+- Response bodies larger than **1 MiB** are rejected; HTTP redirects are not followed.
+
+### Failure / fallback semantics
+
+Scorer failures (timeout, non-2xx, redirect, malformed/oversized body, validation
+errors, open circuit, recovered panics) return an error from the plugin. With the
+default **`failure_policy: fail_open`** (also when the field is omitted),
+`runScoreFilter` skips failed scorers and continues scheduling (**fail-open** for
+sandbox creation). With **`failure_policy: fail_closed`**, the plugin returns a
+typed `FailClosedError` and `runScoreFilter` **aborts** the Score phase — including
+for empty/invalid `endpoint` / out-of-range `timeout` / non-finite `weight` on
+`Select`, not only for sidecar HTTP failures. That abort is **scheduler-wide**:
+any scorer that returns `FailClosedError` short-circuits the rest of Score (and
+create), and scores already computed for earlier roster scorers are discarded —
+operators cannot scope `fail_closed` to a single canary sidecar. (`plugin_conf`
+absent / nil selector context stay fail-open observability paths because no
+policy field is readable.) Caller cancel and parent-deadline abandonment do
+**not** increment the circuit breaker's consecutive-failure counter (they only
+release a held half-open probe).
+Outcomes increment
+`cube_scheduler_external_http_score_outcomes_total{reason=...}` (including
+`reason="success"`) and HTTP round-trips also observe
+`cube_scheduler_external_http_score_request_duration_seconds{reason=...}`.
+Fixed `reason` values: `success`, `timeout`, `connection`, `http_status`,
+`invalid_json`, `missing_candidate`, `circuit_open`, `other` (config / generic
+failures such as empty endpoint, invalid weight, or unclassified errors land in
+`other`). Circuit state is exposed as
+`cube_scheduler_external_http_score_circuit_state{target="host:port"}`
+(`0=closed`, `1=half-open`, `2=open`). Failures are logged at the scorer boundary
+without endpoint URLs, URL userinfo, query tokens, or request/response bodies;
+Warn is rate-limited to about one line per sanitized failure category per minute
+(further failures stay at Debug) so a down sidecar does not flood create-path
+logs. Missing scores for any requested candidate fail the whole attempt
+(anti-bias: scoring only a subset would systematically skew ranking). The call is
+**synchronous** on the create path. The shared HTTP transport does **not** honor
+`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` (direct dial only, so env proxies cannot
+see token-bearing sidecar URLs or the node inventory body) and caps in-flight
+sidecar connections with `MaxConnsPerHost = 8` (same as the idle pool per host)
+so a hung sidecar cannot open an unbounded dial storm; each attempt may still
+wait up to `timeout` (default 200ms, max 2s) before fail-open unless the circuit
+is already open.
 
 ## See also
 

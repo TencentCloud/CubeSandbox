@@ -1,0 +1,296 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+package score
+
+import (
+	"errors"
+	"net/url"
+	"sync"
+	"time"
+
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+)
+
+const (
+	circuitStateClosed = iota
+	circuitStateHalfOpen
+	circuitStateOpen
+
+	defaultCircuitFailureThreshold  = 5
+	defaultCircuitOpenDuration      = 5 * time.Second
+	defaultCircuitHalfOpenMaxProbes = 1
+
+	// circuitHalfOpenProbeLeakTimeout is how long a half-open probe slot may
+	// remain held without recordSuccess/recordFailure/releaseProbe before the
+	// breaker re-arms. It is keyed off the HTTP budget (2 × max timeout), not
+	// open_duration, so an aggressively short open_duration cannot admit more
+	// than half_open_max_probes concurrent probes while a slow request is still
+	// in flight.
+	circuitHalfOpenProbeLeakTimeout = 2 * maxExternalHTTPScoreTimeout
+)
+
+// Test seam: when > 0, overrides circuitHalfOpenProbeLeakTimeout.
+var circuitHalfOpenProbeLeakTimeoutForTest time.Duration
+
+func halfOpenProbeLeakTimeout() time.Duration {
+	if circuitHalfOpenProbeLeakTimeoutForTest > 0 {
+		return circuitHalfOpenProbeLeakTimeoutForTest
+	}
+	return circuitHalfOpenProbeLeakTimeout
+}
+
+var errExternalHTTPScoreCircuitOpen = errors.New("external_http_score circuit is open")
+
+type externalHTTPScoreBreaker struct {
+	mu                  sync.Mutex
+	target              string
+	state               int
+	consecutiveFailures int
+	openedAt            time.Time
+	halfOpenSince       time.Time
+	halfOpenInFlight    int
+	failureThreshold    int
+	openDuration        time.Duration
+	halfOpenMaxProbes   int
+	// retired is set when this host is abandoned (endpoint change) or the
+	// breaker is disabled. In-flight callers may still hold the pointer and
+	// call record*/allow; they must not resurrect the Prometheus series.
+	retired bool
+}
+
+type noopExternalHTTPScoreBreaker struct{}
+
+type externalHTTPScoreGate interface {
+	allow() error
+	recordSuccess()
+	recordFailure()
+	// releaseProbe frees a held half-open slot without counting a sidecar
+	// failure (caller cancel / parent deadline abandonment).
+	releaseProbe()
+}
+
+var (
+	externalHTTPScoreBreakersMu   sync.Mutex
+	externalHTTPScoreBreakers     = map[string]*externalHTTPScoreBreaker{}
+	externalHTTPScoreActiveTarget string // last non-disabled host from getExternalHTTPScoreBreaker
+)
+
+func resetExternalHTTPScoreRuntime() {
+	externalHTTPScoreBreakersMu.Lock()
+	externalHTTPScoreBreakers = map[string]*externalHTTPScoreBreaker{}
+	externalHTTPScoreActiveTarget = ""
+	externalHTTPScoreBreakersMu.Unlock()
+	resetExternalHTTPScoreCircuitMetrics()
+}
+
+// circuitTargetLabel returns a bounded Prometheus/circuit key: host[:port] only.
+// Userinfo, path, and query are dropped so credentials never appear as labels.
+func circuitTargetLabel(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return "invalid"
+	}
+	return u.Host
+}
+
+func getExternalHTTPScoreBreaker(endpoint string, cfg *config.ExternalHTTPScoreCircuitBreaker) externalHTTPScoreGate {
+	target := circuitTargetLabel(endpoint)
+	if cfg != nil && cfg.Disable {
+		// Drop stale open/half-open gauge readings so alerts do not keep paging
+		// after the operator turns the breaker off for this host.
+		clearExternalHTTPScoreCircuitTarget(target)
+		return noopExternalHTTPScoreBreaker{}
+	}
+
+	externalHTTPScoreBreakersMu.Lock()
+	defer externalHTTPScoreBreakersMu.Unlock()
+	// Production keeps a single live endpoint; when the host changes, abandon
+	// the previous target so its circuit_state series cannot page forever.
+	if prev := externalHTTPScoreActiveTarget; prev != "" && prev != target {
+		clearExternalHTTPScoreCircuitTargetLocked(prev)
+	}
+	externalHTTPScoreActiveTarget = target
+	if b, ok := externalHTTPScoreBreakers[target]; ok {
+		b.applyConfig(cfg)
+		return b
+	}
+	b := newExternalHTTPScoreBreaker(target, cfg)
+	externalHTTPScoreBreakers[target] = b
+	return b
+}
+
+// clearExternalHTTPScoreCircuitTarget removes a host from the in-process breaker
+// map and deletes its Prometheus series so a disabled or abandoned target cannot
+// leave circuit_state=open published indefinitely.
+func clearExternalHTTPScoreCircuitTarget(target string) {
+	if target == "" {
+		target = "invalid"
+	}
+	externalHTTPScoreBreakersMu.Lock()
+	clearExternalHTTPScoreCircuitTargetLocked(target)
+	externalHTTPScoreBreakersMu.Unlock()
+}
+
+func clearExternalHTTPScoreCircuitTargetLocked(target string) {
+	if target == "" {
+		target = "invalid"
+	}
+	if b, ok := externalHTTPScoreBreakers[target]; ok {
+		b.mu.Lock()
+		b.retired = true
+		b.mu.Unlock()
+	}
+	delete(externalHTTPScoreBreakers, target)
+	if externalHTTPScoreActiveTarget == target {
+		externalHTTPScoreActiveTarget = ""
+	}
+	deleteExternalHTTPScoreCircuitState(target)
+}
+
+func newExternalHTTPScoreBreaker(target string, cfg *config.ExternalHTTPScoreCircuitBreaker) *externalHTTPScoreBreaker {
+	b := &externalHTTPScoreBreaker{
+		target: target,
+		state:  circuitStateClosed,
+	}
+	b.applyConfigLocked(cfg)
+	return b
+}
+
+func (b *externalHTTPScoreBreaker) applyConfig(cfg *config.ExternalHTTPScoreCircuitBreaker) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.applyConfigLocked(cfg)
+}
+
+// applyConfigLocked always restarts from package defaults so a hot-reload that
+// removes the circuit_breaker block (or sets a field to 0) restores the
+// documented defaults instead of only ratcheting tunables upward.
+func (b *externalHTTPScoreBreaker) applyConfigLocked(cfg *config.ExternalHTTPScoreCircuitBreaker) {
+	b.failureThreshold = defaultCircuitFailureThreshold
+	b.openDuration = defaultCircuitOpenDuration
+	b.halfOpenMaxProbes = defaultCircuitHalfOpenMaxProbes
+	if cfg == nil {
+		return
+	}
+	if cfg.FailureThreshold > 0 {
+		b.failureThreshold = cfg.FailureThreshold
+	}
+	if cfg.OpenDuration > 0 {
+		b.openDuration = cfg.OpenDuration
+	}
+	if cfg.HalfOpenMaxProbes > 0 {
+		b.halfOpenMaxProbes = cfg.HalfOpenMaxProbes
+	}
+}
+
+// publishCircuitStateLocked writes the gauge only while this breaker is still
+// the live entry for its target. Callers must hold b.mu.
+func (b *externalHTTPScoreBreaker) publishCircuitStateLocked(state int) {
+	if b.retired {
+		return
+	}
+	setExternalHTTPScoreCircuitState(b.target, state)
+}
+
+func (b *externalHTTPScoreBreaker) allow() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch b.state {
+	case circuitStateOpen:
+		if time.Since(b.openedAt) >= b.openDuration {
+			b.state = circuitStateHalfOpen
+			b.halfOpenSince = time.Now()
+			b.halfOpenInFlight = 1
+			b.publishCircuitStateLocked(circuitStateHalfOpen)
+			return nil
+		}
+		return errExternalHTTPScoreCircuitOpen
+	case circuitStateHalfOpen:
+		// Defense in depth: if a probe slot leaked (panic without record*),
+		// re-arm after the HTTP-budget leak timeout — not openDuration — so a
+		// short open_duration cannot overlap a still-in-flight probe.
+		if b.halfOpenInFlight >= b.halfOpenMaxProbes &&
+			!b.halfOpenSince.IsZero() &&
+			time.Since(b.halfOpenSince) >= halfOpenProbeLeakTimeout() {
+			b.halfOpenInFlight = 0
+			b.halfOpenSince = time.Now()
+		}
+		if b.halfOpenInFlight >= b.halfOpenMaxProbes {
+			return errExternalHTTPScoreCircuitOpen
+		}
+		b.halfOpenInFlight++
+		if b.halfOpenInFlight == 1 {
+			b.halfOpenSince = time.Now()
+		}
+		return nil
+	default:
+		return nil
+	}
+}
+
+func (b *externalHTTPScoreBreaker) recordSuccess() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch b.state {
+	case circuitStateHalfOpen:
+		// Only a half-open probe may close the circuit (guide contract).
+		b.consecutiveFailures = 0
+		b.halfOpenInFlight = 0
+		b.halfOpenSince = time.Time{}
+		b.state = circuitStateClosed
+		b.publishCircuitStateLocked(circuitStateClosed)
+	case circuitStateClosed:
+		// Reset the failure streak; ignore stale half-open bookkeeping.
+		b.consecutiveFailures = 0
+	default:
+		// circuitStateOpen: success from a request admitted before the circuit
+		// opened must not cancel the open window or clear consecutiveFailures.
+	}
+}
+
+func (b *externalHTTPScoreBreaker) recordFailure() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.consecutiveFailures++
+	if b.state == circuitStateHalfOpen {
+		// One failed half-open probe reopens the circuit. Clear in-flight so a
+		// later half-open window can admit fresh probes.
+		b.halfOpenInFlight = 0
+		b.halfOpenSince = time.Time{}
+		b.state = circuitStateOpen
+		b.openedAt = time.Now()
+		b.publishCircuitStateLocked(circuitStateOpen)
+		return
+	}
+	if b.halfOpenInFlight > 0 {
+		b.halfOpenInFlight--
+	}
+	if b.consecutiveFailures >= b.failureThreshold {
+		b.state = circuitStateOpen
+		b.openedAt = time.Now()
+		b.halfOpenInFlight = 0
+		b.halfOpenSince = time.Time{}
+		b.publishCircuitStateLocked(circuitStateOpen)
+	}
+}
+
+// releaseProbe drops an in-flight half-open reservation without treating the
+// attempt as a sidecar failure. Used when the create caller abandoned the
+// request (cancel / parent deadline).
+func (b *externalHTTPScoreBreaker) releaseProbe() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.halfOpenInFlight > 0 {
+		b.halfOpenInFlight--
+	}
+	if b.halfOpenInFlight == 0 {
+		b.halfOpenSince = time.Time{}
+	}
+}
+
+func (noopExternalHTTPScoreBreaker) allow() error   { return nil }
+func (noopExternalHTTPScoreBreaker) recordSuccess() {}
+func (noopExternalHTTPScoreBreaker) recordFailure() {}
+func (noopExternalHTTPScoreBreaker) releaseProbe()  {}

@@ -1,0 +1,54 @@
+{
+  "experiment": "binpack_probe",
+  "title": "CPU/内存错配probe：碎片·空节点·探针接纳·Ready延迟",
+  "status": "NO_IMPROVEMENT",
+  "arms": [
+    {
+      "arm": "default",
+      "fill_success": 12,
+      "fill_n": 12,
+      "fill_nodes": {
+        "node-a": 5,
+        "node-c": 1,
+        "node-d": 3,
+        "node-b": 3
+      },
+      "post_fill_empty_nodes": 1,
+      "post_fill_total_mvm": 10.0,
+      "fragmentation_loss": 0.1578947368421053,
+      "nodewise_slots": 16,
+      "aggregate_upper": 19,
+      "probe_success": 6,
+      "probe_n": 6,
+      "probe_admission_rate": 1.0,
+      "ready_p50_ms": 892.0,
+      "ready_p95_ms": 991.65,
+      "note": "supplement_only; formal remains VALID_NO_IMPROVEMENT"
+    },
+    {
+      "arm": "binpack_utilization",
+      "fill_success": 12,
+      "fill_n": 12,
+      "fill_nodes": {
+        "node-d": 11,
+        "node-c": 1
+      },
+      "post_fill_empty_nodes": 3,
+      "post_fill_total_mvm": 7.0,
+      "fragmentation_loss": 0.1578947368421053,
+      "nodewise_slots": 16,
+      "aggregate_upper": 19,
+      "probe_success": 6,
+      "probe_n": 6,
+      "probe_admission_rate": 1.0,
+      "ready_p50_ms": 902.5,
+      "ready_p95_ms": 1069.3499999999997,
+      "note": "supplement_only; formal remains VALID_NO_IMPROVEMENT"
+    }
+  ],
+  "reasons": [
+    "binpack_more_empty_nodes"
+  ],
+  "formal_override": false,
+  "formal_remains": "VALID_NO_IMPROVEMENT"
+}
