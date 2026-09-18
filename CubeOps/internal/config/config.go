@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -239,9 +240,16 @@ func (c *Config) DaoConfig() (dao.Config, error) {
 // daoConfigFromFields builds a dao.Config directly from the MySQL* fields,
 // failing fast on a missing required field (host, user or database).
 func (c *Config) daoConfigFromFields() (dao.Config, error) {
-	host := strings.TrimSpace(c.MySQLHost)
+	// Strip brackets from hosts copied out of a URL ([2001:db8::1]):
+	// JoinHostPort re-adds them, so keeping them would double-bracket.
+	host := strings.Trim(strings.TrimSpace(c.MySQLHost), "[]")
 	if host == "" {
 		return dao.Config{}, fmt.Errorf("mysql_host is required (set CUBE_SANDBOX_MYSQL_HOST or mysql_host)")
+	}
+	if _, portStr, err := net.SplitHostPort(host); err == nil {
+		if _, err := strconv.Atoi(portStr); err == nil {
+			return dao.Config{}, fmt.Errorf("mysql_host %q must not include a port; set mysql_port instead", host)
+		}
 	}
 	user := strings.TrimSpace(c.MySQLUser)
 	if user == "" {
@@ -251,8 +259,12 @@ func (c *Config) daoConfigFromFields() (dao.Config, error) {
 	if dbname == "" {
 		return dao.Config{}, fmt.Errorf("mysql_db is required (set CUBE_SANDBOX_MYSQL_DB or mysql_db)")
 	}
+	port := c.MySQLPortOrDefault()
+	if port < 1 || port > 65535 {
+		return dao.Config{}, fmt.Errorf("mysql_port %d is out of range (1-65535)", port)
+	}
 	return newDAOConfig("mysql", user, c.MySQLPassword,
-		net.JoinHostPort(host, strconv.Itoa(c.MySQLPortOrDefault())), dbname), nil
+		net.JoinHostPort(host, strconv.Itoa(port)), dbname, nil), nil
 }
 
 // daoConfigFromURL parses DatabaseURL into a dao.Config, inferring the driver
@@ -291,9 +303,10 @@ func (c *Config) daoConfigFromURL() (dao.Config, error) {
 		return dao.Config{}, fmt.Errorf("database_url %s has no host", redacted)
 	}
 	if h := u.Port(); h != "" {
-		// url.Parse rejects non-numeric ports; this fires only on int overflow.
+		// url.Parse rejects non-numeric ports; this fires on int overflow
+		// and out-of-range values (0, 65536+).
 		p, err := strconv.Atoi(h)
-		if err != nil {
+		if err != nil || p < 1 || p > 65535 {
 			return dao.Config{}, fmt.Errorf("database_url %s has invalid port %q", redacted, h)
 		}
 		port = p
@@ -314,18 +327,48 @@ func (c *Config) daoConfigFromURL() (dao.Config, error) {
 		return dao.Config{}, fmt.Errorf("database_url %s has no database name", redacted)
 	}
 
+	// Query parameters must be consumed, not dropped: honor postgres sslmode
+	// (the driver only enables TLS via Extra["sslmode"]) and reject everything
+	// else so an ignored setting never fails silently at connect time.
+	var extra map[string]string
+	if q := u.Query(); len(q) > 0 {
+		if driver == "postgres" {
+			if v := q.Get("sslmode"); v != "" {
+				extra = map[string]string{"sslmode": v}
+			}
+			q.Del("sslmode")
+		}
+		if len(q) > 0 {
+			return dao.Config{}, fmt.Errorf("database_url %s has unsupported query parameter(s) %v (only postgres sslmode is honored)", redacted, sortedKeys(q))
+		}
+	}
+	if u.Fragment != "" {
+		return dao.Config{}, fmt.Errorf("database_url %s has an unsupported fragment", redacted)
+	}
+
 	return newDAOConfig(driver, user, pass,
-		net.JoinHostPort(host, strconv.Itoa(port)), dbname), nil
+		net.JoinHostPort(host, strconv.Itoa(port)), dbname, extra), nil
+}
+
+// sortedKeys lists a query map's keys; values may carry secrets, keys do not.
+func sortedKeys(v url.Values) []string {
+	keys := make([]string, 0, len(v))
+	for k := range v {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 // newDAOConfig builds a dao.Config with the shared pool limits applied.
-func newDAOConfig(driver, user, pwd, addr, dbname string) dao.Config {
+func newDAOConfig(driver, user, pwd, addr, dbname string, extra map[string]string) dao.Config {
 	return dao.Config{
 		Driver:       driver,
 		User:         user,
 		Pwd:          pwd,
 		Addr:         addr,
 		DBName:       dbname,
+		Extra:        extra,
 		MaxIdleConns: 10,
 		MaxOpenConns: 100,
 	}
