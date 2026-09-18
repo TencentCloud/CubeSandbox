@@ -1,6 +1,6 @@
 ---
 title: OpenHands 集成指南
-author: Fan-hr
+author: haoranfan1
 date: 2026-07-28
 tags:
   - integration
@@ -37,7 +37,7 @@ lang: zh-CN
   24.0）会因上游 `lmnr`/`opentelemetry` 冲突而解析失败）。
 - 必需环境变量：`E2B_API_URL`、`E2B_API_KEY`、`CUBE_TEMPLATE_ID`；完整智能体
   演示另需 `LLM_MODEL`、`LLM_API_KEY`、可选 `LLM_BASE_URL`（任意 OpenAI 兼容
-  端点）。若只想验证集成本身，`smoke_test.py` 与 `pause_resume.py`
+  端点）。若只想验证集成本身，`smoke_test.py`
   **完全不需要任何 LLM 配置**。
 
 ## 集成步骤
@@ -64,8 +64,7 @@ lang: zh-CN
    并把 workspace 指向代理出来的 agent-server 地址。
 
 4. **运行演示**（位于 `examples/openhands-integration/`）：`smoke_test.py`
-   （无需 LLM；热启动延迟、bash/文件往返）、`pause_resume.py`（无需 LLM；
-   在运行中的服务下整机冻结/解冻）、`main.py`（完整编码任务 + 沙箱内独立
+   （无需 LLM；热启动延迟、bash/文件往返）、`main.py`（完整编码任务 + 沙箱内独立
    核验结果）。
 
 ## 关键代码片段

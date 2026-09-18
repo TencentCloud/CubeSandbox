@@ -11,8 +11,6 @@ API key:
   3. bash execution round-trips through the OpenHands workspace API;
   4. file upload/download round-trips through the OpenHands workspace API.
 
-For the pause/resume capability, see pause_resume.py.
-
 Usage:
     python smoke_test.py
 

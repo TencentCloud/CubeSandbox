@@ -50,7 +50,7 @@ lang: en-US
 | [Pi Agent Integration Guide](./pi-agent.md) | chaojixinren | 2026-07-01 | integration, pi-agent, coding-agent, agent |
 | [Claude Code Integration Guide](./claude-code.md) | shsaihdsaiudh | 2026-07-06 | integration, claude-code, coding-agent |
 | [LangChain Integration Guide](./langchain.md) | peerless-hero | 2026-07-07 | integration, langchain, agent |
-| [OpenHands Integration Guide](./openhands.md) | Fan-hr | 2026-07-28 | integration, openhands, coding-agent, agent |
+| [OpenHands Integration Guide](./openhands.md) | haoranfan1 | 2026-07-28 | integration, openhands, coding-agent, agent |
 | [OpenCode Integration Guide (Plugin Hook)](./opencode-plugin.md) | Tantanovo | 2026-07-31 | integration, opencode, coding-agent, plugin |
 | [OpenAI Agents SDK Integration Guide](./openai-agents-sdk.md) | ZedingZhang | 2026-08-19 | integration, openai-agents-sdk, agent |
 | [Ubuntu Desktop Sandbox Guide](./ubuntu-desktop.md) | jinlong | 2026-09-15 | integration, ubuntu-desktop, novnc, gui-automation |

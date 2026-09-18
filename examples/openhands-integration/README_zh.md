@@ -20,7 +20,7 @@ Cube Sandbox 的模板会在首次启动*之后*拍摄快照，因此本示例�
 | 网络策略 | Docker 网络 | 平台级出口管控（白名单 / 黑名单 / 断网） |
 
 由于 agent 会话状态活在 VM 内的 server 进程里，`pause()` / `resume()`
-冻结与恢复的是**整个会话**而不只是执行环境（演示见 `pause_resume.py`）。
+冻结与恢复的是**整个会话**而不只是执行环境。
 
 ## 工作原理
 
@@ -51,7 +51,7 @@ Cube Sandbox 的模板会在首次启动*之后*拍摄快照，因此本示例�
   **较旧的 pip（如 Ubuntu 24.04 自带的 24.0）无法解析 OpenHands 的依赖图**
   （上游 `lmnr` / `opentelemetry` 约束冲突）
 - 一个 OpenAI 兼容的 LLM 端点和密钥（仅 `main.py` 需要——
-  `smoke_test.py` 与 `pause_resume.py` 无需 LLM）
+  `smoke_test.py` 无需 LLM）
 
 ## 1. 构建模板镜像
 
@@ -102,16 +102,11 @@ cp .env.example .env   # 填写 E2B_API_URL、E2B_API_KEY、CUBE_TEMPLATE_ID、L
 
 ```bash
 python smoke_test.py       # 无需 LLM 密钥
-python pause_resume.py     # 无需 LLM 密钥
 python main.py             # 完整智能体演示（需要 .env 中的 LLM_*）
 ```
 
 - `smoke_test.py` 端到端验证集成：打印 创建→健康 延迟（热启动证据）、调用
   `/server_info`、通过 OpenHands workspace API 往返执行 bash 与文件传输。
-- `pause_resume.py` 在 VM 内启动一个每秒计数器，暂停 VM 后**彻底丢弃
-  workspace 对象**（`kill_on_exit=False`），8 个墙钟秒后用全新的
-  `CubeSandboxWorkspace(sandbox_id=...)` 重连（自动恢复），展示计数序列
-  没有任何空洞——会话跨越了原对象的生命周期，从冻结的那一瞬间原样继续。
 - `main.py` 运行一次真实的 OpenHands 会话（写程序、执行、修错），最后*从沙箱
   内部*独立核验结果，而不是听智能体自己汇报。
 

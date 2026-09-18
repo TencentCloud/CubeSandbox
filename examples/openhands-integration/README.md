@@ -22,7 +22,7 @@ this example bakes the agent server into the template and freezes it live:
 
 Because the agent's session state lives in the in-VM server process,
 `pause()` / `resume()` freeze and thaw the *entire session*, not just the
-execution environment (see `pause_resume.py`).
+execution environment.
 
 ## How it works
 
@@ -55,7 +55,7 @@ MicroVM, so LLM traffic originates from the sandbox (see
   resolve the OpenHands dependency graph** (an upstream `lmnr` /
   `opentelemetry` constraint conflict)
 - An OpenAI-compatible LLM endpoint + key (`main.py` only —
-  `smoke_test.py` and `pause_resume.py` need no LLM)
+  `smoke_test.py` needs no LLM)
 
 ## 1. Build the template image
 
@@ -108,7 +108,6 @@ cp .env.example .env   # fill in E2B_API_URL, E2B_API_KEY, CUBE_TEMPLATE_ID, LLM
 
 ```bash
 python smoke_test.py       # no LLM key needed
-python pause_resume.py     # no LLM key needed
 python main.py             # full agent demo (needs LLM_* in .env)
 ```
 
@@ -116,11 +115,6 @@ python main.py             # full agent demo (needs LLM_* in .env)
   create→healthy latency (the hot-start evidence), calls `/server_info`,
   and round-trips bash and file transfer through the OpenHands workspace
   API.
-- `pause_resume.py` starts a 1-second ticker inside the VM, pauses the VM,
-  **drops the workspace object entirely** (`kill_on_exit=False`), re-attaches
-  from a fresh `CubeSandboxWorkspace(sandbox_id=...)` 8 wall-clock seconds
-  later, and shows the tick sequence has no gap — the session survives the
-  original process and continues from the exact frozen instant.
 - `main.py` runs a real OpenHands conversation (write a program, execute it,
   fix errors) and then verifies the result *from inside the sandbox*,
   independent of the agent's own claims.

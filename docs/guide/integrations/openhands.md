@@ -1,6 +1,6 @@
 ---
 title: OpenHands Integration Guide
-author: Fan-hr
+author: haoranfan1
 date: 2026-07-28
 tags:
   - integration
@@ -39,8 +39,8 @@ Tested versions: `openhands-sdk` / `openhands-tools` /
 - Required environment variables: `E2B_API_URL`, `E2B_API_KEY`,
   `CUBE_TEMPLATE_ID`; plus `LLM_MODEL`, `LLM_API_KEY`, optional
   `LLM_BASE_URL` (any OpenAI-compatible endpoint) for the full agent demo.
-  To just verify the integration, `smoke_test.py` and `pause_resume.py`
-  need **no LLM configuration at all**.
+  To just verify the integration, `smoke_test.py` needs **no LLM
+  configuration at all**.
 
 ## Integration Steps
 
@@ -67,8 +67,7 @@ Tested versions: `openhands-sdk` / `openhands-tools` /
    SDK and points the workspace at the proxied agent-server URL.
 
 4. **Run demos** from `examples/openhands-integration/`: `smoke_test.py`
-   (no LLM; hot-start latency, bash/file round-trips), `pause_resume.py`
-   (no LLM; whole-VM freeze/thaw under a live server), `main.py` (full agent
+   (no LLM; hot-start latency, bash/file round-trips), `main.py` (full agent
    coding task with in-sandbox result verification).
 
 ## Key Code Snippets
