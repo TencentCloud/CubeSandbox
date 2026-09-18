@@ -40,7 +40,7 @@ CubeSandbox 面向 AI Agent 代码执行场景设计，极速冷启动和高并�
 | 内存总量 | **32 GiB** |
 | 系统盘 | `/dev/vda` 200 GiB 增强型 SSD 云硬盘，格式化为 XFS，挂载至 `/` |
 
-> **SA9.4XLARGE32** 是腾讯云标准型第九代实例，搭载 AMD EPYC 9K65 处理器，适合通用计算场景。本文运行 PVM（Parallel Virtual Machine）内核，支持嵌套虚拟化，可在普通云服务器上运行 CubeSandbox。如需复现本文测试，可前往[腾讯云 CVM 购买页](https://buy.cloud.tencent.com/cvm)选购同款。
+> **SA9.4XLARGE32** 是腾讯云标准型第九代实例，搭载 AMD EPYC 9K65 处理器，适合通用计算场景。本文运行 PVM（Pagetable-based Virtual Machine）内核，支持嵌套虚拟化，可在普通云服务器上运行 CubeSandbox。如需复现本文测试，可前往[腾讯云 CVM 购买页](https://buy.cloud.tencent.com/cvm)选购同款。
 
 > 安装 CubeSandbox 请参照[快速开始指南](../../guide/quickstart.md)。
 
