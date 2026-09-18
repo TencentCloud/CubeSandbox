@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/patrickmn/go-cache"
@@ -69,7 +70,7 @@ func TestSyncAllFromDB_EmptyStreakEvictsAfterThreshold(t *testing.T) {
 
 	// Stub delNodeCache side-effects so eviction runs without external deps.
 	patches := gomonkey.NewPatches()
-	patches.ApplyFunc(SyncNodeTemplates, func(context.Context, string, []string) {})
+	patches.ApplyFunc(SyncNodeTemplates, func(context.Context, string, []string, time.Time) {})
 	patches.ApplyFunc(grpcconn.CloseWorkerConn, func(string) {})
 	defer patches.Reset()
 
@@ -103,6 +104,64 @@ func TestSyncAllFromDB_EmptyStreakEvictsEmptyCache(t *testing.T) {
 		"streak resets after eviction")
 	assert.Equal(t, 0, len(l.cache.Items()),
 		"empty cache stays empty after eviction")
+}
+
+func TestSyncAllFromDB_TemplateInventoryProvenance(t *testing.T) {
+	heartbeatAt := time.Unix(100, 0)
+	tests := []struct {
+		name        string
+		node        *node.Node
+		wantCall    bool
+		wantOrdered bool
+	}{
+		{
+			name:     "legacy non-empty is additive",
+			node:     &node.Node{InsID: "node-1", LocalTemplates: []string{"tpl-a"}, MetaDataUpdateAt: heartbeatAt},
+			wantCall: true,
+		},
+		{
+			name: "legacy empty is unknown",
+			node: &node.Node{InsID: "node-1", LocalTemplates: []string{}, MetaDataUpdateAt: heartbeatAt},
+		},
+		{
+			name:        "reported empty is ordered",
+			node:        &node.Node{InsID: "node-1", LocalTemplatesReported: true, MetaDataUpdateAt: heartbeatAt},
+			wantCall:    true,
+			wantOrdered: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			local := newTestLocal()
+			withExternalNodeLoader(t, func(context.Context) ([]*node.Node, error) {
+				return []*node.Node{tt.node}, nil
+			})
+			called := false
+			var gotHeartbeat time.Time
+			patches := gomonkey.NewPatches()
+			patches.ApplyFunc(SyncNodeTemplates, func(_ context.Context, _ string, _ []string, heartbeat time.Time) {
+				called = true
+				gotHeartbeat = heartbeat
+			})
+			defer patches.Reset()
+
+			if err := local.syncAllFromDB(context.Background(), false); err != nil {
+				t.Fatalf("syncAllFromDB: %v", err)
+			}
+			if called != tt.wantCall {
+				t.Fatalf("SyncNodeTemplates called = %t, want %t", called, tt.wantCall)
+			}
+			if !called {
+				return
+			}
+			if tt.wantOrdered && !gotHeartbeat.Equal(heartbeatAt) {
+				t.Fatalf("ordered heartbeat = %v, want %v", gotHeartbeat, heartbeatAt)
+			}
+			if !tt.wantOrdered && !gotHeartbeat.IsZero() {
+				t.Fatalf("legacy heartbeat = %v, want zero", gotHeartbeat)
+			}
+		})
+	}
 }
 
 func TestSyncAllFromDB_NonEmptyResetsStreak(t *testing.T) {

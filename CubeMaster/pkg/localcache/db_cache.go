@@ -71,9 +71,17 @@ func (l *local) syncAllFromDB(ctx context.Context, update bool) error {
 			} else {
 				l.addNodeCache(n)
 			}
-			if n.InsID != "" {
+			// Reported inventory uses the persisted heartbeat ordering key and may
+			// add or remove locality. A non-empty legacy inventory has unknown
+			// provenance, so apply it with a zero timestamp: SyncNodeTemplates may
+			// add replicas but cannot treat omissions as deletion evidence.
+			if n.InsID != "" && (n.LocalTemplatesReported || len(n.LocalTemplates) > 0) {
+				heartbeatAt := n.MetaDataUpdateAt
+				if !n.LocalTemplatesReported {
+					heartbeatAt = time.Time{}
+				}
 				log.G(ctx).Debugf("syncAllFromDB: node=%s LocalTemplates=%v", n.InsID, n.LocalTemplates)
-				SyncNodeTemplates(ctx, n.InsID, n.LocalTemplates)
+				SyncNodeTemplates(ctx, n.InsID, n.LocalTemplates, heartbeatAt)
 			}
 			allFromDb[n.InsID] = struct{}{}
 		}
