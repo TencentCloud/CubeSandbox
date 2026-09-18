@@ -30,6 +30,11 @@
  *   longer referenced. That is why both the manifest and the S3 client are held
  *   by reference here: the import RPC that created this is long gone, and a
  *   release_export may have happened in between.
+ *
+ *   Fetched object bytes are kept in a process-wide cache keyed by S3 object
+ *   key (s3_export_obj_cache). That cache outlives this device, so a later
+ *   import of the same snapshot on this node can restore without repeating the
+ *   GETs. destroy() must not drop it.
  */
 
 #include "spdk/stdinc.h"
@@ -41,6 +46,14 @@
 
 #include "s3lvol/s3_chunk_map.h"
 #include "s3lvol/s3_export.h"
+#include "s3lvol/s3_export_obj_cache.h"
+
+#if S3LVOL_BLOCK_SIZE != S3_EXPORT_OBJ_CACHE_BLOCK_SIZE
+#error "export object cache block size must match S3LVOL_BLOCK_SIZE"
+#endif
+#if S3_EXPORT_KEY_MAX != S3_EXPORT_OBJ_CACHE_KEY_MAX
+#error "export object cache key size must match S3_EXPORT_KEY_MAX"
+#endif
 
 struct s3_export_dev {
 	/* Must be first: blobstore only ever holds &dev->bs_dev, and the cast
@@ -81,6 +94,8 @@ struct s3_export_dev {
 	uint64_t                   bytes_read;
 	uint64_t                   zero_fills;
 	uint64_t                   refetches;
+	uint64_t                   cache_hits;
+	uint64_t                   cache_misses;
 };
 
 /* One bs_dev read, possibly spanning several chunks. */
@@ -129,6 +144,8 @@ struct s3_export_chunk_io {
 	 * short read from a complete one: the buffer it was given is only filled as
 	 * far as the object store went, and the rest keeps whatever was there. */
 	uint32_t             expected;
+	uint32_t             offset_in_chunk;
+	void                *payload;
 
 	char                 key[S3_EXPORT_KEY_MAX];
 };
@@ -288,6 +305,11 @@ export_chunk_read_done(void *cb_arg, uint64_t bytes_read, int status)
 		}
 	} else {
 		__atomic_fetch_add(&io->dev->bytes_read, bytes_read, __ATOMIC_RELAXED);
+		if (cio->payload && cio->key[0] != '\0') {
+			s3_export_obj_cache_populate(cio->key, cio->io->m->chunk_size,
+						     cio->offset_in_chunk,
+						     (uint32_t)bytes_read, cio->payload);
+		}
 	}
 
 	free(cio);
@@ -353,6 +375,7 @@ export_read_internal(struct spdk_bs_dev *bs_dev, struct spdk_io_channel *channel
 		uint32_t length = (uint32_t)spdk_min(remaining,
 						     chunk_size - offset_in_chunk);
 		struct s3_export_chunk_io *cio;
+		char key[S3_EXPORT_KEY_MAX];
 		uint32_t get_len;
 		int rc;
 
@@ -414,6 +437,18 @@ export_read_internal(struct spdk_bs_dev *bs_dev, struct spdk_io_channel *channel
 			}
 		}
 
+		export_chunk_key(io->m, chunk_index, key, sizeof(key));
+		if (key[0] != '\0' &&
+		    s3_export_obj_cache_copy(key, io->m->chunk_size, offset_in_chunk,
+					     get_len, buf) == 0) {
+			__atomic_fetch_add(&dev->cache_hits, 1, __ATOMIC_RELAXED);
+			__atomic_fetch_add(&dev->bytes_read, get_len, __ATOMIC_RELAXED);
+			goto next;
+		}
+		if (key[0] != '\0') {
+			__atomic_fetch_add(&dev->cache_misses, 1, __ATOMIC_RELAXED);
+		}
+
 		cio = calloc(1, sizeof(*cio));
 		if (!cio) {
 			io->status = -ENOMEM;
@@ -422,7 +457,9 @@ export_read_internal(struct spdk_bs_dev *bs_dev, struct spdk_io_channel *channel
 		cio->io = io;
 		cio->chunk_index = chunk_index;
 		cio->expected = get_len;
-		export_chunk_key(io->m, chunk_index, cio->key, sizeof(cio->key));
+		cio->offset_in_chunk = offset_in_chunk;
+		cio->payload = buf;
+		snprintf(cio->key, sizeof(cio->key), "%s", key);
 
 		io->num_pending++;
 		rc = s3_get_range(dev->client, cio->key, offset_in_chunk, get_len, buf,
@@ -661,10 +698,11 @@ export_destroy(struct spdk_bs_dev *bs_dev)
 	struct s3_export_dev *dev = (struct s3_export_dev *)bs_dev;
 
 	SPDK_NOTICELOG("Releasing imported export %s: %" PRIu64 " read(s), "
-		       "%" PRIu64 " bytes from S3, %" PRIu64 " served as zeroes, "
-		       "%" PRIu64 " manifest refetch(es)\n",
+		       "%" PRIu64 " bytes, %" PRIu64 " served as zeroes, "
+		       "%" PRIu64 " manifest refetch(es), %" PRIu64
+		       " object-cache hit(s), %" PRIu64 " miss(es)\n",
 		       dev->m->uuid_str, dev->reads, dev->bytes_read, dev->zero_fills,
-		       dev->refetches);
+		       dev->refetches, dev->cache_hits, dev->cache_misses);
 
 	/* No wait for a refetch, deliberately.
 	 *

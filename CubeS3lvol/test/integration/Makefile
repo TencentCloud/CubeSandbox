@@ -73,7 +73,7 @@ MODULE_DIR   = ../../module/bdev/s3lvol
 APPS = s3_client_test s3_spawner_test s3_thread_bounce_test s3_bs_dev_test \
        s3_journal_test s3_wal_test s3_cache_test s3_flush_test s3_export_test \
        s3_statefile_test s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
-       s3_copy_xml_test s3_pending_persist_test
+       s3_copy_xml_test s3_pending_persist_test s3_export_obj_cache_test
 
 # (a) minimal library set for the stubbed path
 STUB_SRCS      = spdk_thread_stub.c
@@ -295,11 +295,16 @@ s3_checkpoint_test: s3_checkpoint_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	    $(EXPORT_DPDK_ARGS) \
 	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
 
+s3_export_obj_cache_test: s3_export_obj_cache_test.c $(S3BSDEV_DIR)/s3_export_obj_cache.c
+	$(CC) $(COMMON_CFLAGS) s3_export_obj_cache_test.c \
+	    $(S3BSDEV_DIR)/s3_export_obj_cache.c \
+	    $(TEST_SYS_LIBS) -o $@
+
 # Run only the tests that need no S3 credentials
 check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cache_test \
        s3_flush_test s3_export_test s3_statefile_test s3_local_dev_test \
        s3_checkpoint_test s3_export_swap_test s3_copy_xml_test \
-       s3_pending_persist_test
+       s3_pending_persist_test s3_export_obj_cache_test
 	./s3_spawner_test
 	./s3_thread_bounce_test
 	./s3_journal_test
@@ -313,6 +318,7 @@ check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cach
 	./s3_export_swap_test
 	./s3_copy_xml_test
 	./s3_pending_persist_test
+	./s3_export_obj_cache_test
 
 .PHONY: $(S3BSDEV_DIR)/libs3bsdev.a
 $(S3BSDEV_DIR)/libs3bsdev.a:
