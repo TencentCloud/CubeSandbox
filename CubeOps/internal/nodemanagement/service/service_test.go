@@ -760,6 +760,41 @@ func TestRegisterNode_HostFacts(t *testing.T) {
 	}
 }
 
+func TestRegisterNode_ReregisterPreservesPhysicalAndRatio(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+
+	// First register: a current cubelet reports physical capacity and ratio.
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+		NodeID:             "node-rr",
+		HostIP:             "10.0.0.1",
+		PausedReleaseRatio: floatPtr(0.5),
+		HostFacts:          &model.HostFacts{CPUIDHash: "sha256:cpu", CPUCount: 16, MemTotalMB: 65536},
+	}); err != nil {
+		t.Fatalf("first register: %v", err)
+	}
+
+	// Re-register with an old cubelet: physical is 0 and ratio is nil ("unknown").
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+		NodeID:    "node-rr",
+		HostIP:    "10.0.0.1",
+		HostFacts: &model.HostFacts{CPUIDHash: "sha256:cpu", CPUCount: 0, MemTotalMB: 0},
+	}); err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+
+	reg, err := fs.GetRegistration(ctx, "node-rr")
+	if err != nil {
+		t.Fatalf("get reg: %v", err)
+	}
+	if reg.CPUCount != 16 || reg.MemTotalMB != 65536 {
+		t.Fatalf("physical clobbered on re-register: cpu=%d mem=%d", reg.CPUCount, reg.MemTotalMB)
+	}
+	if reg.PausedReleaseRatio == nil || *reg.PausedReleaseRatio != 0.5 {
+		t.Fatalf("ratio clobbered on re-register: %v", reg.PausedReleaseRatio)
+	}
+}
+
 func TestUpdateNodeStatus_HostFacts(t *testing.T) {
 	svc, _ := newTestService(t)
 	ctx := context.Background()
@@ -851,6 +886,12 @@ func TestHostFacts_IsZero(t *testing.T) {
 	}
 	if (&model.HostFacts{KVMAPIVersion: 12}).IsZero() {
 		t.Error("kvm set should not be zero")
+	}
+	if (&model.HostFacts{CPUCount: 16}).IsZero() {
+		t.Error("cpu_count set should not be zero")
+	}
+	if (&model.HostFacts{MemTotalMB: 65536}).IsZero() {
+		t.Error("mem_total_mb set should not be zero")
 	}
 }
 
@@ -1015,6 +1056,32 @@ func TestListOperations(t *testing.T) {
 	}
 }
 
+func TestListOperationsByTypes(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"})
+	for _, op := range []*store.NodeOperation{
+		{NodeID: "node-1", Type: model.OpIsolate, Operator: "a"},
+		{NodeID: "node-1", Type: model.OpSetQuota, Operator: "a"},
+		{NodeID: "node-1", Type: model.OpSetQuota, Operator: "b"},
+	} {
+		fs.ops = append(fs.ops, op)
+	}
+
+	ops, err := svc.ListOperationsByTypes(ctx, "node-1", []string{model.OpSetQuota}, 10)
+	if err != nil {
+		t.Fatalf("list operations by types: %v", err)
+	}
+	if len(ops) != 2 {
+		t.Fatalf("expected 2 quota ops, got %d", len(ops))
+	}
+	for _, op := range ops {
+		if op.Type != model.OpSetQuota {
+			t.Fatalf("unexpected op type %q", op.Type)
+		}
+	}
+}
+
 // TestGetNode_DBRebuildRestoresMetricFromRedis verifies a DB rebuild (Redis
 // snapshot miss) overlays real-time metric from the Redis metric hash.
 func TestGetNode_DBRebuildRestoresMetricFromRedis(t *testing.T) {
@@ -1132,5 +1199,197 @@ func TestGetNode_DBRebuildMetricMissLeavesZeroMetric(t *testing.T) {
 	}
 	if !snap.MetricUpdate.IsZero() {
 		t.Error("MetricUpdate should be zero on metric miss")
+	}
+}
+
+func TestUpdateNodeStatus_HostFactsUnchangedSkipsPersist(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	facts := &model.HostFacts{CPUIDHash: "sha256:abc", HostKernelRelease: "5.15.0", KVMAPIVersion: 12}
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-hf-diff", HostFacts: facts}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	heartbeat := func(f *model.HostFacts) {
+		t.Helper()
+		if _, err := svc.UpdateNodeStatus(ctx, "node-hf-diff", &model.UpdateNodeStatusRequest{HostFacts: f}); err != nil {
+			t.Fatalf("heartbeat: %v", err)
+		}
+	}
+
+	// Same facts as registered: no rewrite expected.
+	heartbeat(&model.HostFacts{CPUIDHash: "sha256:abc", HostKernelRelease: "5.15.0", KVMAPIVersion: 12})
+	// Repeated identical reports: still no writes.
+	heartbeat(&model.HostFacts{CPUIDHash: "sha256:abc", HostKernelRelease: "5.15.0", KVMAPIVersion: 12})
+	fs.mu.Lock()
+	calls := fs.updateHostFactsCalls
+	fs.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("unchanged host facts must skip persist, got %d calls", calls)
+	}
+
+	// A changed fact must persist exactly once.
+	heartbeat(&model.HostFacts{CPUIDHash: "sha256:changed", HostKernelRelease: "5.15.0", KVMAPIVersion: 12})
+	fs.mu.Lock()
+	calls = fs.updateHostFactsCalls
+	fs.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("changed host facts must persist once, got %d calls", calls)
+	}
+
+	// The returned view reflects the update even though the writer is diffed.
+	snap, err := svc.GetNode(ctx, "node-hf-diff")
+	if err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+	if snap.HostFacts == nil || snap.HostFacts.CPUIDHash != "sha256:changed" {
+		t.Fatalf("host facts = %+v, want sha256:changed", snap.HostFacts)
+	}
+}
+
+func TestUpdateNodeStatus_QuotaPersistsOnChange(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+		NodeID: "node-q", QuotaCPU: 4000, QuotaMemMB: 8192, MaxMvmNum: 16,
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	q := &model.QuotaReport{MilliCPU: 8000, MemMB: 16384, MaxMvmNum: 32, CreateConcurrentNum: 5}
+	snap, err := svc.UpdateNodeStatus(ctx, "node-q", &model.UpdateNodeStatusRequest{Quota: q})
+	if err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	if snap.QuotaCPU != q.MilliCPU || snap.QuotaMemMB != q.MemMB ||
+		snap.MaxMvmNum != q.MaxMvmNum || snap.CreateConcurrentNum != q.CreateConcurrentNum {
+		t.Fatalf("returned snapshot quota = %+v, want %+v", snap, q)
+	}
+	reg, err := fs.GetRegistration(ctx, "node-q")
+	if err != nil {
+		t.Fatalf("get reg: %v", err)
+	}
+	if reg.QuotaCPU != q.MilliCPU || reg.QuotaMemMB != q.MemMB || reg.MaxMvmNum != q.MaxMvmNum {
+		t.Fatalf("registration quota not persisted: %+v", reg)
+	}
+
+	// Same quota again: diff-then-write must skip the DB update.
+	if _, err := svc.UpdateNodeStatus(ctx, "node-q", &model.UpdateNodeStatusRequest{Quota: q}); err != nil {
+		t.Fatalf("second heartbeat: %v", err)
+	}
+	fs.mu.Lock()
+	calls := fs.updateQuotaCalls
+	fs.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("expected exactly 1 UpdateQuota call, got %d", calls)
+	}
+
+	// The refreshed view must expose the new quota to CubeMaster.
+	nodes, err := svc.ListNodes(ctx)
+	if err != nil {
+		t.Fatalf("list nodes: %v", err)
+	}
+	for _, n := range nodes {
+		if n.NodeID == "node-q" && n.QuotaCPU != q.MilliCPU {
+			t.Fatalf("listed node quota = %d, want %d", n.QuotaCPU, q.MilliCPU)
+		}
+	}
+}
+
+func TestUpdateNodeStatus_QuotaIgnoredWhenNilOrZero(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+		NodeID: "node-q", QuotaCPU: 4000,
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	reqs := []*model.UpdateNodeStatusRequest{
+		{Quota: nil},
+		{Quota: &model.QuotaReport{}},
+	}
+	for i, req := range reqs {
+		if _, err := svc.UpdateNodeStatus(ctx, "node-q", req); err != nil {
+			t.Fatalf("heartbeat %d: %v", i, err)
+		}
+	}
+	fs.mu.Lock()
+	calls := fs.updateQuotaCalls
+	fs.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("nil/zero quota must not touch the registration row, got %d calls", calls)
+	}
+	reg, err := fs.GetRegistration(ctx, "node-q")
+	if err != nil {
+		t.Fatalf("get reg: %v", err)
+	}
+	if reg.QuotaCPU != 4000 {
+		t.Fatalf("registration quota = %d, want unchanged 4000", reg.QuotaCPU)
+	}
+}
+
+func TestUpdateNodeStatus_RatioOnlyQuotaIsApplied(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+		NodeID: "node-q", QuotaCPU: 4000,
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// A ratio-only report (all counters zero) must not be discarded as empty.
+	if _, err := svc.UpdateNodeStatus(ctx, "node-q", &model.UpdateNodeStatusRequest{
+		Quota: &model.QuotaReport{PausedReleaseRatio: floatPtr(0.5)},
+	}); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	fs.mu.Lock()
+	calls := fs.updateQuotaCalls
+	fs.mu.Unlock()
+	if calls == 0 {
+		t.Fatal("ratio-only quota must reach the store")
+	}
+	reg, err := fs.GetRegistration(ctx, "node-q")
+	if err != nil {
+		t.Fatalf("get reg: %v", err)
+	}
+	if reg.PausedReleaseRatio == nil || *reg.PausedReleaseRatio != 0.5 {
+		t.Fatalf("registration ratio = %v, want 0.5", reg.PausedReleaseRatio)
+	}
+}
+
+func TestUpdateNodeStatus_QuotaStoreFailureKeepsSnapshot(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+		NodeID: "node-q", QuotaCPU: 4000,
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	fs.mu.Lock()
+	fs.failOnUpdateQuota = errors.New("db down")
+	fs.mu.Unlock()
+
+	q := &model.QuotaReport{MilliCPU: 9000}
+	snap, err := svc.UpdateNodeStatus(ctx, "node-q", &model.UpdateNodeStatusRequest{Quota: q})
+	if err != nil {
+		t.Fatalf("heartbeat should survive quota store failure: %v", err)
+	}
+	if snap.QuotaCPU != 4000 {
+		t.Fatalf("snapshot quota = %d, want stale 4000 while store fails", snap.QuotaCPU)
+	}
+
+	// Store recovers: the next heartbeat retries the same diff and succeeds.
+	fs.mu.Lock()
+	fs.failOnUpdateQuota = nil
+	fs.mu.Unlock()
+	snap, err = svc.UpdateNodeStatus(ctx, "node-q", &model.UpdateNodeStatusRequest{Quota: q})
+	if err != nil {
+		t.Fatalf("heartbeat after recovery: %v", err)
+	}
+	if snap.QuotaCPU != 9000 {
+		t.Fatalf("snapshot quota = %d, want 9000 after recovery", snap.QuotaCPU)
 	}
 }

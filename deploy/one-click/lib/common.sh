@@ -514,6 +514,11 @@ load_env_file() {
 ONE_CLICK_TOGGLE_KEYS=(
   ONE_CLICK_ENABLE_S3LVOL
   CUBE_PVM_ENABLE
+  # CUBE_OPS_OPSAGENT_TOKEN is a control-plane-generated shared secret a compute
+  # node inherits by explicit this-run env/.env value; the toggle snapshot makes
+  # that explicit value survive the upgrade merge (otherwise a stale node-local
+  # token is preserved and push auth breaks).
+  CUBE_OPS_OPSAGENT_TOKEN
 )
 
 # snapshot_one_click_toggles: capture this-run operator intent for

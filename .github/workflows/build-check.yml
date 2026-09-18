@@ -65,7 +65,7 @@ jobs:
         # make target + expected binaries. Architecture coverage catches
         # arch-specific regressions (e.g. cfg(target_arch) code in the shim /
         # hypervisor) that an amd64-only build would miss.
-        component: [CubeAPI, CubeOps, CubeMaster, CubeTemplateCenter, Cubelet, agent, CubeShim, volume-s3]
+        component: [CubeAPI, CubeOps, CubeMaster, CubeTemplateCenter, Cubelet, agent, CubeShim, volume-s3, OpsAgent]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -110,6 +110,11 @@ jobs:
             make_target: cube-volume-s3
             expected_bins: |
               _output/bin/cube-volume-s3
+          # ops-agent: standalone Go module (own go.mod, replace => ../pkgs/CubeLog).
+          - component: OpsAgent
+            make_target: ops-agent
+            expected_bins: |
+              _output/bin/ops-agent
 
     steps:
       - name: Checkout
