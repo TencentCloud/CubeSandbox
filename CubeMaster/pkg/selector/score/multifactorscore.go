@@ -11,18 +11,35 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
+// multiFactorWeightedAverageScore 多因子加权平均评分插件：
+// 直接使用后台协程（loopAsyncScore）异步计算并写回的节点 Score 字段作为本插件得分
 type multiFactorWeightedAverageScore struct {
 	weight float64
 }
 
+func multiFactorWeightedAverageConf() *config.MultiFactorWeightedAverage {
+	sched := config.GetConfig().Scheduler
+	if sched == nil || sched.Score == nil {
+		return nil
+	}
+	return sched.Score.ScorePluginConf.MultiFactorWeightedAverage
+}
+
+// NewMultiFactorWeightedAverageScore tolerates a missing legacy plugin_conf
+// block: the scorer then has no weight of its own (a profile entry must carry
+// one) and Select stays a no-op until the block is configured, because the
+// async score loop only runs off the legacy config tree.
 func NewMultiFactorWeightedAverageScore() *multiFactorWeightedAverageScore {
-	if config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage == nil {
-		panic("config.Scheduler.Score.ScorePluginConf.AsyncMultiFactor is nil")
+	conf := multiFactorWeightedAverageConf()
+	if conf == nil {
+		CubeLog.Warnf("scheduler.score.plugin_conf.multi_factor_weighted_average is not configured; multi_factor_weighted_average scores nothing until it is")
+		return &multiFactorWeightedAverageScore{}
 	}
 	return &multiFactorWeightedAverageScore{
-		weight: config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage.Weight,
+		weight: conf.Weight,
 	}
 }
 
@@ -39,9 +56,11 @@ func (l *multiFactorWeightedAverageScore) Weight() float64 {
 }
 
 func (l *multiFactorWeightedAverageScore) Disable() bool {
-	return config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage.Disable
+	conf := multiFactorWeightedAverageConf()
+	return conf == nil || conf.Disable
 }
 
+// Select 将每个候选节点已异步计算好的 Score 原样包装为评分结果返回
 func (l *multiFactorWeightedAverageScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList,
 	err error) {
 	defer func() {

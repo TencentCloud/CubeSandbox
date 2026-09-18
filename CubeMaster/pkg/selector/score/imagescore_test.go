@@ -51,7 +51,7 @@ func TestNewImageScore(t *testing.T) {
 		assert.False(t, score.Disable())
 	})
 
-	t.Run("配置为空时panic", func(t *testing.T) {
+	t.Run("配置为空时降级为空转scorer", func(t *testing.T) {
 
 		originalConfig := config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore
 		defer func() {
@@ -60,8 +60,10 @@ func TestNewImageScore(t *testing.T) {
 
 		config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore = nil
 
-		assert.Panics(t, func() {
-			NewImageScore()
+		assert.NotPanics(t, func() {
+			score := NewImageScore()
+			assert.Equal(t, 0.0, score.Weight())
+			assert.True(t, score.Disable())
 		})
 	})
 }
@@ -192,7 +194,7 @@ func TestGetTemplateScore(t *testing.T) {
 		assert.Equal(t, 0.0, score)
 	})
 
-	t.Run("正常计算模板分数", func(t *testing.T) {
+	t.Run("命中缓存的模板得满分且与尺寸无关", func(t *testing.T) {
 		stubImageStateLookup(t, func(templateID, nodeID string) *fwk.ImageStateSummary {
 			assert.Equal(t, "template-123", templateID)
 			assert.Equal(t, "node-1", nodeID)
@@ -202,8 +204,13 @@ func TestGetTemplateScore(t *testing.T) {
 		nodeInfo := &node.Node{InsID: "node-1"}
 
 		score := getTemplateScore(ctx, templateID, nodeInfo)
-		assert.Equal(t, float64(calculatePriority(40000*mb, 1)), score)
-		assert.Positive(t, score)
+		assert.Equal(t, float64(fwk.MaxNodeScore), score)
+	})
+
+	t.Run("未缓存模板的节点得0分", func(t *testing.T) {
+		stubImageStateLookup(t, missingImageState)
+		score := getTemplateScore(ctx, "template-123", &node.Node{InsID: "node-1"})
+		assert.Equal(t, 0.0, score)
 	})
 }
 
@@ -282,36 +289,6 @@ func TestSumImageScores(t *testing.T) {
 		var images []*selctx.ImageSpec
 
 		sum := sumImageScores(nodeInfo, images)
-		assert.Equal(t, int64(0), sum)
-	})
-}
-
-func TestSumTemplateScores(t *testing.T) {
-	stubImageStateLookup(t, missingImageState)
-	t.Run("读取节点上的模板状态分数", func(t *testing.T) {
-		stubImageStateLookup(t, func(templateID, nodeID string) *fwk.ImageStateSummary {
-			assert.Equal(t, "template-123", templateID)
-			assert.Equal(t, "node-1", nodeID)
-			return imageState(500 * mb)
-		})
-
-		sum := sumTemplateScores(&node.Node{InsID: "node-1"}, "template-123")
-		assert.Equal(t, int64(500*mb), sum)
-	})
-
-	t.Run("模板状态为空时返回0", func(t *testing.T) {
-		nodeInfo := &node.Node{}
-		templateID := "template-123"
-
-		sum := sumTemplateScores(nodeInfo, templateID)
-		assert.Equal(t, int64(0), sum)
-	})
-
-	t.Run("空模板ID返回0", func(t *testing.T) {
-		nodeInfo := &node.Node{}
-		templateID := ""
-
-		sum := sumTemplateScores(nodeInfo, templateID)
 		assert.Equal(t, int64(0), sum)
 	})
 }
@@ -472,8 +449,7 @@ func TestImageScoreSelect(t *testing.T) {
 		assert.NotNil(t, nodeScore)
 		assert.Equal(t, "node-1", nodeScore.InsID)
 
-		assert.Equal(t, float64(calculatePriority(40000*mb, 1)), nodeScore.Score)
-		assert.Positive(t, nodeScore.Score)
+		assert.Equal(t, float64(fwk.MaxNodeScore), nodeScore.Score)
 	})
 
 	t.Run("多权重因子组合计算", func(t *testing.T) {
@@ -528,8 +504,8 @@ func TestImageScoreSelect(t *testing.T) {
 		assert.Equal(t, "node-1", nodeScore.InsID)
 
 		expected := float64(calculatePriority(50000*mb, 1))*0.6 +
-			float64(calculatePriority(30000*mb, 1))*0.4
-		assert.Equal(t, expected, nodeScore.Score)
+			float64(fwk.MaxNodeScore)*0.4
+		assert.InDelta(t, expected, nodeScore.Score, 1e-9)
 		assert.Positive(t, nodeScore.Score)
 	})
 

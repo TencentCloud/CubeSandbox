@@ -13,6 +13,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -20,12 +21,26 @@ type realTimeWeightedAverageScore struct {
 	weight float64
 }
 
+func realTimeWeightedAverageConf() *config.RealTimeWeightedAverage {
+	sched := config.GetConfig().Scheduler
+	if sched == nil || sched.Score == nil {
+		return nil
+	}
+	return sched.Score.ScorePluginConf.RealTimeWeightedAverage
+}
+
+// NewRealTimeWeightedAverageScore tolerates a missing legacy plugin_conf
+// block: the scorer then has no weight of its own (a profile entry must
+// carry one) and Select stays a no-op until the block is configured, because
+// enable_weight_factors only exists in the legacy config tree.
 func NewRealTimeWeightedAverageScore() *realTimeWeightedAverageScore {
-	if config.GetConfig().Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage == nil {
-		panic("config.Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage is nil")
+	conf := realTimeWeightedAverageConf()
+	if conf == nil {
+		CubeLog.Warnf("scheduler.score.plugin_conf.real_time_weighted_average is not configured; real_time_weighted_average scores nothing until it is")
+		return &realTimeWeightedAverageScore{}
 	}
 	return &realTimeWeightedAverageScore{
-		weight: config.GetConfig().Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage.Weight,
+		weight: conf.Weight,
 	}
 }
 
@@ -41,7 +56,8 @@ func (l *realTimeWeightedAverageScore) Weight() float64 {
 	return l.weight
 }
 func (l *realTimeWeightedAverageScore) Disable() bool {
-	return config.GetConfig().Scheduler.Score.ScorePluginConf.RealTimeWeightedAverage.Disable
+	conf := realTimeWeightedAverageConf()
+	return conf == nil || conf.Disable
 }
 
 func (l *realTimeWeightedAverageScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreList,

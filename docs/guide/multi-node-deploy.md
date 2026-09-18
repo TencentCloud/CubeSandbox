@@ -177,6 +177,21 @@ For the complete CubeMaster scheduler reference, including Cubelet node reports,
 
 After updating `cubemaster.yaml`, restart CubeMaster with your normal deployment procedure so the scheduler loads the new scoring configuration.
 
+## Reservations and Redis
+
+CubeMaster no longer keeps a reservation ledger or performs a synchronous Redis reservation check before dispatch. Each replica uses its local node snapshot and admission checks, while metrics continue to propagate independently. During the reporting window, multiple Masters can therefore admit requests against the same apparent capacity; cross-replica atomic quota admission is not provided.
+
+The `scheduler.reservation_redis_error_policy` setting is obsolete and must be removed from existing configuration.
+
+This change only removes the Redis scheduling reservation; it does not remove the Redis dependency. Node metric reads and the post-create proxy-routing metadata write still go through Redis, so the create chain as a whole cannot survive a Redis outage.
+
+Today a node that cannot fit the request does not fail over: Cubelet performs no CPU/memory/MVM quota admission on the create path, and the error codes an over-committed node returns are not retryable, so the create fails on the first attempt instead of being rescheduled to another node. Cubelet-side node-wide quota admission — rejecting over-quota creates with a retryable error code so CubeMaster can exclude the node and reselect — is follow-up work and will land in a separate PR.
+
+During a rolling upgrade, new versions do not participate in old versions' Redis reservations, and a mixed-version cluster must not be treated as having full cross-replica coordination. Once every Master is upgraded, the old reservation keys are no longer touched; do not delete those keys while an old version may still serve requests.
+
+
+See [scheduler configuration](./cubemaster-scheduler-config.md) and [scheduler plugins](./scheduler-plugin.md).
+
 ## Connect Clients to the Cluster
 
 Client applications need the CubeAPI control-plane address and a route to sandbox services through CubeProxy. Choose the simplest data-plane access method that fits your client:
