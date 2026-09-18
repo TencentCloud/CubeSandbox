@@ -87,57 +87,17 @@ func (l *local) doProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cub
 
 	telnetCh := make(chan error, 1)
 	if c.GetProbe() != nil && c.GetProbe().GetProbeHandler() != nil {
-		if ci.IP == "" || ci.IP == "<nil>" {
-			return ret.Err(errorcode.ErrorCode_CreateNetworkFailed, "invalid NetworkInfo")
-		}
-		if c.GetProbe().TimeoutMs <= 0 {
-			return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid probe TimeoutMs[%v]",
-				c.GetProbe().TimeoutMs)
-		}
-		if c.GetProbe().PeriodMs <= 2 {
+		// Preserve the historical normalization written back to the request: a
+		// few callers and tests inspect these defaults after Create returns.
+		if c.Probe.PeriodMs <= 2 {
 			c.Probe.PeriodMs = 2
 		}
-		if c.GetProbe().GetProbeTimeoutMs() <= 5 {
+		if c.Probe.GetProbeTimeoutMs() <= 5 {
 			c.Probe.ProbeTimeoutMs = 100
 		}
-		cfg := &telnet.ProbeConfig{
-			Addr:             ci.IP,
-			InitialDelay:     time.Duration(c.GetProbe().InitialDelayMs) * time.Millisecond,
-			Timeout:          time.Duration(c.GetProbe().TimeoutMs) * time.Millisecond,
-			Period:           time.Duration(c.GetProbe().PeriodMs) * time.Millisecond,
-			SuccessThreshold: c.GetProbe().SuccessThreshold,
-			FailureThreshold: c.GetProbe().FailureThreshold,
-			InstanceType:     ci.InstanceType,
-			ProbeTimeout:     time.Duration(c.GetProbe().GetProbeTimeoutMs()) * time.Millisecond,
-		}
-
-		if cfg.SuccessThreshold < 1 {
-			cfg.SuccessThreshold = 1
-		}
-		if cfg.FailureThreshold < 1 {
-			cfg.FailureThreshold = 1
-		}
-
-		handler := c.GetProbe().GetProbeHandler()
-		if tcp := handler.GetTcpSocket(); tcp != nil {
-			cfg.Action = telnet.ActionTCPSocket
-			cfg.Port = tcp.GetPort()
-			if cfg.Port <= 0 {
-				return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid probe port[%v]", cfg.Port)
-			}
-		} else if ping := handler.GetPing(); ping != nil {
-			cfg.Action = telnet.ActionPing
-			cfg.PingUDP = ping.GetUdp()
-		} else if httpGet := handler.GetHttpGet(); httpGet != nil {
-			cfg.Action = telnet.ActionHTTPGet
-			cfg.Port = httpGet.GetPort()
-			req, err := NewRequestForHTTPGetAction(ctx, httpGet, cfg.Addr)
-			if err != nil {
-				return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid http probe[%d]:%v", cfg.Port, err)
-			}
-			cfg.HttpGetRequest = req
-		} else {
-			return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "invalid probe cfg")
+		cfg, err := buildProbeConfig(ctx, c, ci)
+		if err != nil {
+			return err
 		}
 
 		log.G(ctx).Debugf("probe [%s] start:%s", ci.IP, utils.InterfaceToString(cfg))
@@ -190,6 +150,90 @@ func (l *local) doProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cub
 	default:
 	}
 	return nil
+}
+
+func buildProbeConfig(ctx context.Context, c *cubebox.ContainerConfig, ci *cubeboxstore.Container) (*telnet.ProbeConfig, error) {
+	if ci == nil || ci.IP == "" || ci.IP == "<nil>" {
+		return nil, ret.Err(errorcode.ErrorCode_CreateNetworkFailed, "invalid NetworkInfo")
+	}
+	probe := c.GetProbe()
+	if probe == nil || probe.GetProbeHandler() == nil {
+		return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, "invalid probe cfg")
+	}
+	if probe.TimeoutMs <= 0 {
+		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid probe TimeoutMs[%v]", probe.TimeoutMs)
+	}
+
+	periodMs := probe.PeriodMs
+	if periodMs <= 2 {
+		periodMs = 2
+	}
+	probeTimeoutMs := probe.GetProbeTimeoutMs()
+	if probeTimeoutMs <= 5 {
+		probeTimeoutMs = 100
+	}
+	cfg := &telnet.ProbeConfig{
+		Addr:             ci.IP,
+		InitialDelay:     time.Duration(probe.InitialDelayMs) * time.Millisecond,
+		Timeout:          time.Duration(probe.TimeoutMs) * time.Millisecond,
+		Period:           time.Duration(periodMs) * time.Millisecond,
+		SuccessThreshold: max(probe.SuccessThreshold, 1),
+		FailureThreshold: max(probe.FailureThreshold, 1),
+		InstanceType:     ci.InstanceType,
+		ProbeTimeout:     time.Duration(probeTimeoutMs) * time.Millisecond,
+	}
+
+	handler := probe.GetProbeHandler()
+	if tcp := handler.GetTcpSocket(); tcp != nil {
+		cfg.Action = telnet.ActionTCPSocket
+		cfg.Port = tcp.GetPort()
+		if cfg.Port <= 0 {
+			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid probe port[%v]", cfg.Port)
+		}
+	} else if ping := handler.GetPing(); ping != nil {
+		cfg.Action = telnet.ActionPing
+		cfg.PingUDP = ping.GetUdp()
+	} else if httpGet := handler.GetHttpGet(); httpGet != nil {
+		cfg.Action = telnet.ActionHTTPGet
+		cfg.Port = httpGet.GetPort()
+		req, err := NewRequestForHTTPGetAction(ctx, httpGet, cfg.Addr)
+		if err != nil {
+			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid http probe[%d]:%v", cfg.Port, err)
+		}
+		cfg.HttpGetRequest = req
+	} else {
+		return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, "invalid probe cfg")
+	}
+	return cfg, nil
+}
+
+// doSnapshotReadinessProbe runs the template's declared readiness handler once
+// immediately before snapshotting. It intentionally ignores initial delay and
+// thresholds already satisfied by Create; this is a fail-fast revalidation, not
+// a second readiness wait.
+func (l *local) doSnapshotReadinessProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cubeboxstore.Container) error {
+	cfg, err := buildProbeConfig(ctx, c, ci)
+	if err != nil {
+		return err
+	}
+	cfg.InitialDelay = 0
+	cfg.Timeout = cfg.ProbeTimeout
+	cfg.Period = 0
+	cfg.SuccessThreshold = 1
+	cfg.FailureThreshold = 1
+	return waitSnapshotReadinessProbe(ctx, telnet.Telnet(ctx, cfg))
+}
+
+// waitSnapshotReadinessProbe always observes ctx completion. telnet.Telnet
+// may return without sending when its context is already cancelled, so a bare
+// receive would leak the temporary app-snapshot sandbox by blocking forever.
+func waitSnapshotReadinessProbe(ctx context.Context, result <-chan error) error {
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (l *local) doCreateTimeEnvdInit(ctx context.Context, req *cubebox.RunCubeSandboxRequest, sandBox *cubeboxstore.CubeBox) error {

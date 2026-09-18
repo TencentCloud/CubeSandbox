@@ -299,6 +299,13 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	// no base memory blob to overlay onto, so we always ask for a full memory
 	// snapshot. Incremental is reserved for CommitSandbox where the running
 	// sandbox is bound to a prior snapshot whose memory file we can clone.
+	if err := s.verifyAppSnapshotReadiness(ctx, sandboxID); err != nil {
+		stepLog.Errorf("Init task is not ready for cube-runtime snapshot: %v", err)
+		cleanupSnapshotObjects()
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = fmt.Sprintf("snapshot readiness precondition failed: %v", err)
+		return rsp, nil
+	}
 	if err := s.executeCubeRuntimeSnapshot(ctx, sandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeFull); err != nil {
 		stepLog.Errorf("Failed to execute cube-runtime snapshot: %v", err)
 
