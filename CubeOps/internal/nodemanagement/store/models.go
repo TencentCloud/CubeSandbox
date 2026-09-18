@@ -23,10 +23,15 @@ type NodeRegistration struct {
 	QuotaMemMB          int64  `gorm:"column:quota_mem_mb"`
 	CreateConcurrentNum int64  `gorm:"column:create_concurrent_num"`
 	MaxMvmNum           int64  `gorm:"column:max_mvm_num"`
-	HostFactsJSON       string `gorm:"column:host_facts_json"`
+	// PausedReleaseRatio is the heartbeat-reported ratio; NULL = not reported.
+	PausedReleaseRatio *float64 `gorm:"column:paused_release_ratio"`
+	HostFactsJSON      string   `gorm:"column:host_facts_json"`
 	// Redundant columns for QueryHostFactCandidates filtering
 	CPUIDHash         string `gorm:"column:cpuid_hash"`
 	HostKernelRelease string `gorm:"column:host_kernel_release"`
+	// Physical machine capacity (from HostFacts) for the overcommit guards.
+	CPUCount   int64 `gorm:"column:cpu_count"`
+	MemTotalMB int64 `gorm:"column:mem_total_mb"`
 }
 
 func (NodeRegistration) TableName() string {
@@ -122,4 +127,24 @@ type NodeOperation struct {
 
 func (NodeOperation) TableName() string {
 	return "t_cube_node_operation"
+}
+
+// NodeQuotaSpec is the desired quota row; the scheduler does not read it.
+type NodeQuotaSpec struct {
+	gorm.Model
+	NodeID                string `gorm:"column:node_id"`
+	MCpuLimit             int64  `gorm:"column:mcpu_limit"`
+	MemLimit              string `gorm:"column:mem_limit"`
+	MvmLimit              int64  `gorm:"column:mvm_limit"`
+	CreationConcurrentNum int64  `gorm:"column:creation_concurrent_num"`
+	// PausedReleaseRatio: NULL = inherit the cluster default; a value is an explicit override.
+	PausedReleaseRatio *float64 `gorm:"column:paused_resource_release_ratio"`
+	Revision           int64    `gorm:"column:revision"`
+	UpdatedBy          string   `gorm:"column:updated_by"`
+	// NodeManaged: true = all fields authoritative, false = ratio only.
+	NodeManaged bool `gorm:"column:node_managed"`
+}
+
+func (NodeQuotaSpec) TableName() string {
+	return "t_cube_node_quota_spec"
 }

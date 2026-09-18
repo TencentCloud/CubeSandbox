@@ -6,6 +6,7 @@ Wants=cube-sandbox-mysql.service cube-sandbox-redis.service cube-sandbox-minio.s
 Wants=cube-sandbox-cubemaster.service cube-sandbox-cube-api.service cube-sandbox-cubeops.service
 Wants=cube-sandbox-cube-templatecenter.service
 Wants=cube-sandbox-cubelet.service
+Wants=cube-sandbox-ops-agent.service
 Wants=cube-sandbox-cube-lifecycle-manager.service
 Wants=cube-sandbox-cube-proxy.service cube-sandbox-coredns.service
 Wants=cube-sandbox-dns.service cube-sandbox-webui.service

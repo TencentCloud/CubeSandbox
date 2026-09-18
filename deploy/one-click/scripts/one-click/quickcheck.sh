@@ -375,6 +375,11 @@ quickcheck_main() {
 
   echo "[quickcheck] check systemd units"
   check_unit_active cube-sandbox-cubelet.service
+  # ops-agent ships wherever cubelet does (compute role and all-in-one
+  # control); check the unit and its local health endpoint.
+  check_unit_active cube-sandbox-ops-agent.service
+  check_file "${TOOLBOX_ROOT}/ops-agent/conf/config.yaml"
+  check_http "http://127.0.0.1:8890/health"
   # CubeS3lvol (s3lvol) is role-agnostic: either deployment role may flip
   # ONE_CLICK_ENABLE_S3LVOL=1. When enabled, the unit must be active AND
   # the data-plane layout must be consistent (rcow_recovery.sh --verify-only

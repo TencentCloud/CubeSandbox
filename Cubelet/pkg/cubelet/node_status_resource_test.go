@@ -88,6 +88,14 @@ func TestTryUpdateNodeStatusReportsPeriodicallyWithoutNodeChanges(t *testing.T) 
 			MilliCPU: 1500, MemoryMB: 2048, MvmNum: 2,
 		},
 	})
+	oldCPUCount := hostCPUCount
+	oldReadHostMemoryTotalMB := readHostMemoryTotalMB
+	hostCPUCount = func() int { return 2 }
+	readHostMemoryTotalMB = func() (int64, error) { return 8192, nil }
+	t.Cleanup(func() {
+		hostCPUCount = oldCPUCount
+		readHostMemoryTotalMB = oldReadHostMemoryTotalMB
+	})
 
 	var (
 		reqCount int32
@@ -143,5 +151,8 @@ func TestTryUpdateNodeStatusReportsPeriodicallyWithoutNodeChanges(t *testing.T) 
 	}
 	if received.MetricTime.IsZero() {
 		t.Fatalf("periodic report should carry MetricTime: %+v", received)
+	}
+	if received.Quota == nil || received.Quota.MilliCPU != 4000 || received.Quota.MemMB != 10240 {
+		t.Fatalf("periodic report should carry effective quota: %+v", received.Quota)
 	}
 }

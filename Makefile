@@ -161,6 +161,8 @@ help:
 	@printf "  cube-api      Alias of cubeapi\n"
 	@printf "  cubeops       Build CubeOps in Docker\n"
 	@printf "  cubeops-test  Run CubeOps unit tests in Docker\n"
+	@printf "  ops-agent     Build ops-agent in Docker\n"
+	@printf "  ops-agent-test Run ops-agent unit tests in Docker\n"
 	@printf "  shim          Build containerd-shim-cube-rs and cube-runtime in Docker\n"
 	@printf "  cubemaster-test Run CubeMaster unit tests in Docker\n"
 	@printf "  cubetemplatecenter-test Run CubeTemplateCenter unit tests in Docker\n"
@@ -467,6 +469,16 @@ cubeops: builder-image
 cubeops-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeOps && go mod download && go test ./...'
 
+# ops-agent: standalone Go module (own go.mod, replace => ../pkgs/CubeLog).
+.PHONY: ops-agent
+ops-agent: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/OpsAgent && go mod download && CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /workspace/_output/bin/ops-agent ./cmd/ops-agent"
+
+.PHONY: ops-agent-test
+ops-agent-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/OpsAgent && go mod download && go test ./...'
+
 # The plugin's tests need no cloud access; the s3fs helpers skip themselves when
 # mountpoint(1) is unavailable.
 .PHONY: cube-volume-s3-test
@@ -684,6 +696,8 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C CubeNet fmt
 	@printf '  %-8s %s\n' "FMT" "CubeOps"
 	@$(MAKE) -C CubeOps fmt
+	@printf '  %-8s %s\n' "FMT" "OpsAgent"
+	@$(MAKE) -C OpsAgent fmt
 	@printf '  %-8s %s\n' "FMT" "CubeShim"
 	@$(MAKE) -C CubeShim fmt
 	@printf '  %-8s %s\n' "FMT" "cube-lifecycle-manager"
