@@ -42,6 +42,7 @@ use block_util::{
 use devices::gic;
 #[cfg(target_arch = "x86_64")]
 use devices::ioapic;
+use devices::ivshmem::{IvshmemError, IvshmemOps, IvshmemUserspaceMapping};
 #[cfg(target_arch = "aarch64")]
 use devices::legacy::Pl011;
 #[cfg(target_arch = "x86_64")]
@@ -488,6 +489,10 @@ pub enum DeviceManagerError {
 
     /// Cannot create a PvPanic device
     PvPanicCreate(devices::pvpanic::PvPanicError),
+
+    /// Cannot create a ivshmem device
+    IvshmemCreate(devices::ivshmem::IvshmemError),
+
     /// Channle recv error.
     VirtioFsServerRecv(std::sync::mpsc::RecvError),
 
@@ -500,8 +505,6 @@ const DEVICE_MANAGER_ACPI_SIZE: usize = 0x10;
 
 const TIOCSPTLCK: libc::c_int = 0x4004_5431;
 const TIOCGTPEER: libc::c_int = 0x5441;
-
-// const IVSHMEM_START_ADDR: u64 = 0x8000_0000;
 
 pub fn create_pty() -> io::Result<(File, File, PathBuf)> {
     // Try to use /dev/pts/ptmx first then fall back to /dev/ptmx
@@ -3805,13 +3808,21 @@ impl DeviceManager {
 
         let (pci_segment_id, pci_device_bdf, resources) =
             self.pci_resources(&id, pci_segment_id)?;
+        let snapshot = snapshot_from_id(self.snapshot.as_ref(), id.as_str());
 
-        let ivshmem_device = Arc::new(Mutex::new(devices::IvshmemDevice::new(
-            id.clone(),
-            state_from_id(self.snapshot.as_ref(), id.as_str())
-                .map_err(DeviceManagerError::RestoreGetState)?,
-            ivshmem_cfg.size as u64,
-        )));
+        let ivshmem_ops = Arc::new(Mutex::new(IvshmemHandler {
+            memory_manager: self.memory_manager.clone(),
+        }));
+        let ivshmem_device = Arc::new(Mutex::new(
+            devices::IvshmemDevice::new(
+                id.clone(),
+                ivshmem_cfg.size as u64,
+                Some(ivshmem_cfg.path.clone()),
+                ivshmem_ops.clone(),
+                snapshot,
+            )
+            .map_err(DeviceManagerError::IvshmemCreate)?,
+        ));
         let new_resources = self.add_pci_device(
             ivshmem_device.clone(),
             ivshmem_device.clone(),
@@ -3820,52 +3831,15 @@ impl DeviceManager {
             resources,
         )?;
 
+        // After BAR allocation, set up the initial host-side mapping for
+        // BAR2 so that the guest sees the shared memory at the BAR2 address.
         let start_addr = ivshmem_device.lock().unwrap().data_bar_addr();
-        let region = MemoryManager::create_ram_region(
-            &Some(ivshmem_cfg.path.clone()),
-            0,
-            GuestAddress(start_addr),
-            ivshmem_cfg.size,
-            false,
-            true,
-            false,
-            None,
-            None,
-            None,
-            None,
-            0,
-            false,
-        )
-        .map_err(DeviceManagerError::MemoryManager)?;
-        let mem_slot = self
-            .memory_manager
+        let (region, mapping) = ivshmem_ops
             .lock()
             .unwrap()
-            .create_userspace_mapping(
-                region.start_addr().0,
-                region.len(),
-                region.as_ptr() as u64,
-                false,
-                false,
-                false,
-            )
-            .map_err(DeviceManagerError::MemoryManager)?;
-        // Make ivshmem/zshm BAR2 visible through device_memory so that virtio
-        // backends and DMA-mapping helpers can dereference GPAs that fall
-        // inside this BAR.
-        self.memory_manager
-            .lock()
-            .unwrap()
-            .add_device_region(Arc::clone(&region))
-            .map_err(DeviceManagerError::MemoryManager)?;
-        let _mapping = virtio_devices::UserspaceMapping {
-            host_addr: region.as_ptr() as u64,
-            mem_slot,
-            addr: GuestAddress(region.start_addr().0),
-            len: region.len(),
-            mergeable: false,
-        };
-        ivshmem_device.lock().unwrap().assign_region(region);
+            .map_ram_region(start_addr, ivshmem_cfg.size, Some(ivshmem_cfg.path.clone()))
+            .map_err(DeviceManagerError::IvshmemCreate)?;
+        ivshmem_device.lock().unwrap().set_region(region, mapping);
 
         let mut node = device_node!(id, ivshmem_device);
         node.resources = new_resources;
@@ -4608,6 +4582,84 @@ impl DeviceManager {
 
     pub(crate) fn acpi_platform_addresses(&self) -> &AcpiPlatformAddresses {
         &self.acpi_platform_addresses
+    }
+}
+
+struct IvshmemHandler {
+    memory_manager: Arc<Mutex<MemoryManager>>,
+}
+
+impl IvshmemOps for IvshmemHandler {
+    fn map_ram_region(
+        &mut self,
+        start_addr: u64,
+        size: usize,
+        backing_file: Option<PathBuf>,
+    ) -> Result<(Arc<GuestRegionMmap>, IvshmemUserspaceMapping), IvshmemError> {
+        info!("Creating ivshmem mem region at 0x{:x}", start_addr);
+
+        let region = MemoryManager::create_ram_region(
+            &backing_file,
+            0,
+            GuestAddress(start_addr),
+            size,
+            false, // prefault
+            true,  // shared
+            false, // hugepages
+            None,  // hugepage_size
+            None,  // host_numa_node
+            None,  // existing_memory_file
+            None,  // snap_file
+            0,     // snap_offset
+            false, // thp
+        )
+        .map_err(|_| IvshmemError::CreateUserMemoryRegion)?;
+        let mem_slot = self
+            .memory_manager
+            .lock()
+            .unwrap()
+            .create_userspace_mapping(
+                region.start_addr().0,
+                region.len(),
+                region.as_ptr() as u64,
+                false,
+                false,
+                false,
+            )
+            .map_err(|_| IvshmemError::CreateUserspaceMapping)?;
+        self.memory_manager
+            .lock()
+            .unwrap()
+            .add_device_region(Arc::clone(&region))
+            .map_err(|_| IvshmemError::AddDeviceRegion)?;
+        let mapping = IvshmemUserspaceMapping {
+            host_addr: region.as_ptr() as u64,
+            mem_slot,
+            addr: GuestAddress(region.start_addr().0),
+            len: region.len(),
+            mergeable: false,
+        };
+        Ok((region, mapping))
+    }
+
+    fn unmap_ram_region(&mut self, mapping: IvshmemUserspaceMapping) -> Result<(), IvshmemError> {
+        self.memory_manager
+            .lock()
+            .unwrap()
+            .remove_userspace_mapping(
+                mapping.addr.raw_value(),
+                mapping.len,
+                mapping.host_addr,
+                mapping.mergeable,
+                mapping.mem_slot,
+            )
+            .map_err(|_| IvshmemError::RemoveUserspaceMapping)?;
+        self.memory_manager
+            .lock()
+            .unwrap()
+            .remove_device_region(mapping.addr, mapping.len)
+            .map_err(|_| IvshmemError::RemoveDeviceRegion)?;
+        Ok(())
     }
 }
 
