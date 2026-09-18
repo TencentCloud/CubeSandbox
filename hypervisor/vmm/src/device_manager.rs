@@ -3811,6 +3811,7 @@ impl DeviceManager {
             state_from_id(self.snapshot.as_ref(), id.as_str())
                 .map_err(DeviceManagerError::RestoreGetState)?,
             ivshmem_cfg.size as u64,
+            ivshmem_cfg.subsystem_id,
         )));
         let new_resources = self.add_pci_device(
             ivshmem_device.clone(),

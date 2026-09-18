@@ -1392,9 +1392,9 @@ pub struct CreateTemplateRequest {
     /// Denied outbound CIDRs for CubeVS egress policy.
     #[serde(rename = "denyOut", default)]
     pub deny_out: Option<Vec<String>>,
-    /// Enable ivshmem when building the template snapshot.
-    #[serde(rename = "enableIvshmem", default)]
-    pub enable_ivshmem: Option<bool>,
+    /// Attach the GAUGE metrics ivshmem device when building the template snapshot.
+    #[serde(rename = "enableMetric", default)]
+    pub enable_metric: Option<bool>,
     /// Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
     /// Omitted or null defaults to true on CubeMaster.
     #[serde(rename = "with_cube_ca", default)]

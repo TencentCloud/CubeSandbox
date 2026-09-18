@@ -28,7 +28,7 @@ use ttrpc::r#async::Client;
 use super::config::{Fs, ANNO_VMM_FS, VIRTIO_FS_ID, VIRTIO_FS_TAG};
 use super::device;
 use super::disk::Disk;
-use super::pmem::Pmem;
+use super::pmem::{Pmem, GAUGE_GUEST_MOUNT, HYP_GAUGE_ID};
 use crate::common::types::PropagationMount;
 use crate::common::utils::{self, AsyncUtils, CPath, Utils};
 use crate::common::{
@@ -47,8 +47,8 @@ use crate::{debugf, errf, infof, warnf};
 //use tokio_uring::fs::UnixStream;
 
 const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
-const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
-const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
+const PERF_SHMEM_SIZE: usize = 4096; // 4KB
+const PERF_SUBSYSTEM_ID: u16 = 0x0101;
 
 #[derive(PartialEq, Eq)]
 enum SandBoxState {
@@ -166,6 +166,10 @@ impl SandBox {
         self.spec = spec;
         let annotations = self.spec.annotations();
         self.conf = config::Config::new(annotations)?;
+        self.conf.attach_gauge_pmem()?;
+        if self.conf.perf_metric && !self.conf.pmem.iter().any(|p| p.id == HYP_GAUGE_ID) {
+            infof!(self.log, "gauge pmem not found, skip attach and insmod");
+        }
         if self.conf.app_snapshot_restore {
             let snapshot_base = annotations
                 .as_ref()
@@ -367,18 +371,23 @@ impl SandBox {
         };
         storages.push(shm);
 
-        //pmem
+        //pmem (index 0 is cube_gauge.ext4 → /dev/pmem2, mounted by agent)
         for (i, p) in self.conf.pmem.iter().enumerate() {
             if p.placeholder {
                 continue;
             }
+            let mount_point = if p.id == HYP_GAUGE_ID {
+                GAUGE_GUEST_MOUNT.to_string()
+            } else {
+                Pmem::guest_mount_point(i as u32)
+            };
             //let dev_path = p.guest_device_path(i);
             //let g_mount_point = p.guest_mount_point(i);
             let ps = agent::Storage {
                 driver: Pmem::driver(),
                 source: Pmem::guest_device_path(i as u32),
                 fstype: p.fs_type.clone(),
-                mount_point: Pmem::guest_mount_point(i as u32),
+                mount_point,
                 options: vec!["ro".to_string(), "dax".to_string()].into(),
                 ..Default::default()
             };
@@ -511,6 +520,23 @@ impl SandBox {
 
         if snapshot {
             req.cube_preserve_mem_m = self.conf.vm_res.preserve_memory as u32;
+        }
+
+        // Template create only. Agent insmod after LinuxContainer::new (cgroup exists).
+        if self.conf.perf_metric
+            && self.app_snapshot_create()
+            && self.conf.pmem.iter().any(|p| p.id == HYP_GAUGE_ID)
+        {
+            infof!(
+                self.log,
+                "perf metric on: ask agent to insmod {} during template create",
+                Pmem::gauge_ko_guest_path()
+            );
+            req.kernel_modules = vec![agent::KernelModule {
+                name: Pmem::gauge_ko_guest_path(),
+                ..Default::default()
+            }]
+            .into();
         }
 
         let mut ctx = self.ctx.clone();
@@ -757,10 +783,9 @@ impl SandBox {
             .add_virtiofs(&self.conf.virtiofs)
             .add_vsock(self.id.clone());
 
-        // Enable ivshmem device when the template build path sets the internal annotation.
-        if self.is_ivshmem_enabled() {
+        if self.conf.perf_metric {
             Self::enable_default_ivshmem(&mut vc, &self.id)
-                .map_err(|e| format!("failed to enable ivshmem: {}", e))?;
+                .map_err(|e| format!("failed to enable perf ivshmem: {}", e))?;
         }
 
         if let Some(fs) = self.conf.fs.as_ref() {
@@ -804,42 +829,34 @@ impl SandBox {
         Ok(())
     }
 
-    fn is_ivshmem_enabled(&self) -> bool {
-        self.spec
-            .annotations()
-            .as_ref()
-            .and_then(|anno| anno.get(ANNO_ENABLE_IVSHMEM))
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false)
-    }
-
-    /// Enable the default ivshmem backend at `/dev/shm/ivshmem-{sandbox_id}`.
+    /// Attach the GAUGE ivshmem device at `/run/vc/vm/{id}/gauge.shmem`.
     fn enable_default_ivshmem(vc: &mut VmConfig, sandbox_id: &str) -> CResult<()> {
-        let path = Utils::ivshmem_path(sandbox_id)?;
-        Utils::create_ivshmem_file(&path, IVSHMEM_DEFAULT_SIZE)?;
-        vc.enable_ivshmem(path, IVSHMEM_DEFAULT_SIZE);
+        let path = Utils::perf_shmem_path(sandbox_id)?;
+        Utils::create_ivshmem_file(&path, PERF_SHMEM_SIZE)?;
+        vc.enable_ivshmem_with_subsystem(path, PERF_SHMEM_SIZE, PERF_SUBSYSTEM_ID);
         Ok(())
     }
 
-    /// Build restore-time ivshmem config with the default backend path.
+    /// Restore-time GAUGE config: rebind `/run/vc/vm/{id}/gauge.shmem`.
     fn default_ivshmem_config(sandbox_id: &str) -> CResult<IvshmemConfig> {
-        let path = Utils::ivshmem_path(sandbox_id)?;
+        let path = Utils::perf_shmem_path(sandbox_id)?;
         Ok(IvshmemConfig {
             path,
-            size: IVSHMEM_DEFAULT_SIZE,
+            size: PERF_SHMEM_SIZE,
+            subsystem_id: PERF_SUBSYSTEM_ID,
         })
     }
 
-    /// Ensure the default ivshmem backend file exists before restore.
+    /// Ensure the GAUGE backing file exists before restore.
     fn ensure_ivshmem_file(sandbox_id: &str) -> CResult<()> {
-        let path = Utils::ivshmem_path(sandbox_id)?;
+        let path = Utils::perf_shmem_path(sandbox_id)?;
         match stdfs::metadata(&path) {
             Ok(_) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Utils::create_ivshmem_file(&path, IVSHMEM_DEFAULT_SIZE)
+                Utils::create_ivshmem_file(&path, PERF_SHMEM_SIZE)
             }
             Err(e) => Err(format!(
-                "failed to stat ivshmem file {}: {}",
+                "failed to stat perf shmem file {}: {}",
                 path.display(),
                 e
             )),
@@ -924,10 +941,8 @@ impl SandBox {
     }
 
     async fn restore_vm(&mut self) -> CResult<()> {
-        // Ensure the sandbox-specific ivshmem shm file exists when enabled by template annotation.
-        let enable_ivshmem = self.is_ivshmem_enabled();
-
-        if enable_ivshmem {
+        let enable_perf = self.conf.perf_metric;
+        if enable_perf {
             Self::ensure_ivshmem_file(&self.id)?;
         }
 
@@ -980,7 +995,7 @@ impl SandBox {
             pmem: Some(pmems),
             vsock: Some(vsock),
             memory_vol_url: restore_memory_vol_url,
-            ivshmem: if enable_ivshmem {
+            ivshmem: if enable_perf {
                 Some(Self::default_ivshmem_config(&self.id)?)
             } else {
                 None
@@ -1001,8 +1016,11 @@ impl SandBox {
             ));
         }*/
 
-        //update pmem seq, must occur after successful restore
+        // Align drops Shim-injected GAUGE pmem: Cubelet metadata.json only
+        // records cube.pmem (rootfs). Skip leftover so eq() length matches,
+        // then re-attach so restore still has the snapshot pmem device.
         self.conf.pmem = align_pmem;
+        self.conf.attach_gauge_pmem()?;
         let mut pmem_path_map = HashMap::new();
         for (i, p) in self.conf.pmem.iter().enumerate() {
             pmem_path_map.insert(p.file.clone(), i as u32);

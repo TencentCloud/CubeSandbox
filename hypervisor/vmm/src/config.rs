@@ -2226,9 +2226,12 @@ impl IvshmemConfig {
             return Err(Error::InvalidIvshmemSize(size));
         }
 
+        // The GAUGE subsystem_id is only ever set through the shim, which
+        // builds IvshmemConfig directly rather than going through this parser.
         Ok(IvshmemConfig {
             path,
             size: size as usize,
+            subsystem_id: 0,
         })
     }
 }
@@ -2435,6 +2438,7 @@ impl VmConfig {
         if let Some(ivshmem) = &mut self.ivshmem {
             ivshmem.path = ivshmem_cfg.path.clone();
             ivshmem.size = ivshmem_cfg.size;
+            // PCI subsystem_id is frozen in the snapshot device tree.
         }
     }
 
@@ -3474,6 +3478,7 @@ mod tests {
         let restore_ivshmem = IvshmemConfig {
             path: PathBuf::from("/dev/shm/ivshmem-sandbox"),
             size: 1024 * 1024,
+            subsystem_id: 0,
         };
 
         vm_config.update_ivshmem(&restore_ivshmem);
@@ -3487,17 +3492,22 @@ mod tests {
             ivshmem: Some(IvshmemConfig {
                 path: PathBuf::from("/dev/shm/ivshmem-template"),
                 size: 512 * 1024,
+                subsystem_id: 0x0101,
             }),
             ..Default::default()
         };
         let restore_ivshmem = IvshmemConfig {
             path: PathBuf::from("/dev/shm/ivshmem-sandbox"),
             size: 1024 * 1024,
+            subsystem_id: 0,
         };
 
         vm_config.update_ivshmem(&restore_ivshmem);
 
-        assert_eq!(vm_config.ivshmem, Some(restore_ivshmem));
+        let got = vm_config.ivshmem.expect("ivshmem should remain");
+        assert_eq!(got.path, PathBuf::from("/dev/shm/ivshmem-sandbox"));
+        assert_eq!(got.size, 1024 * 1024);
+        assert_eq!(got.subsystem_id, 0x0101);
     }
 
     #[test]

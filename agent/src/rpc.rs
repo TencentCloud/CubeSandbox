@@ -142,6 +142,48 @@ macro_rules! is_allowed {
     };
 }
 
+/// Guest image ships busybox insmod as an applet, not `/sbin/insmod`.
+/// A `.ko` path is loaded with busybox; a module name goes through modprobe.
+fn load_kernel_modules(mods: &[protocols::agent::KernelModule]) -> Result<()> {
+    for m in mods {
+        if m.name.is_empty() {
+            continue;
+        }
+        load_one_kernel_module(m)?;
+        info!(sl!(), "loaded kernel module {}", m.name);
+    }
+    Ok(())
+}
+
+fn load_one_kernel_module(m: &protocols::agent::KernelModule) -> Result<()> {
+    let output = if m.name.contains('/') || m.name.ends_with(".ko") {
+        let mut cmd = Command::new("/sbin/busybox");
+        cmd.arg("insmod").arg(&m.name);
+        for p in m.parameters.iter() {
+            cmd.arg(p);
+        }
+        cmd.output()
+    } else {
+        let mut cmd = Command::new("modprobe");
+        cmd.arg(&m.name);
+        for p in m.parameters.iter() {
+            cmd.arg(p);
+        }
+        cmd.output()
+    };
+    let output = output.with_context(|| format!("start load kernel module {}", m.name))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "load kernel module {} failed: status {:?} stdout {:?} stderr {:?}",
+            m.name,
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct AgentService {
     sandbox: Arc<Mutex<Sandbox>>,
@@ -272,6 +314,12 @@ impl AgentService {
         start = Instant::now();
         let mut ctr: LinuxContainer =
             LinuxContainer::new(cid.as_str(), CONTAINER_BASE, opts, &sl!())?;
+        // FsManager::new just created /sys/fs/cgroup/default/<cid>.
+        let pending = std::mem::take(&mut s.pending_kernel_modules);
+        if !pending.is_empty() {
+            info!(sl!(), "load deferred kernel modules");
+            load_kernel_modules(&pending)?;
+        }
 
         let pipe_size = AGENT_CONFIG.read().await.container_pipe_size;
 
@@ -1475,7 +1523,10 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
             Ok(m) => {
                 let sandbox = self.sandbox.clone();
                 let mut s = sandbox.lock().await;
-                s.mounts = m
+                s.mounts = m;
+                if !req.kernel_modules.is_empty() {
+                    s.pending_kernel_modules = req.kernel_modules.to_vec();
+                }
             }
             Err(e) => {
                 return Err(ttrpc_error!(

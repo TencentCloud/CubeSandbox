@@ -104,8 +104,8 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	if cloned.NetworkType == "" {
 		cloned.NetworkType = cubeboxv1.NetworkType_tap.String()
 	}
-	if cloned.EnableIvshmem != nil && !*cloned.EnableIvshmem {
-		cloned.EnableIvshmem = nil
+	if cloned.EnableMetric != nil && !*cloned.EnableMetric {
+		cloned.EnableMetric = nil
 	}
 	if strings.TrimSpace(cloned.Backend) != "" {
 		backend, err := constants.NormalizeSnapshotBackend(cloned.Backend)

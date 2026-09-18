@@ -1207,6 +1207,20 @@ select_installed_kernel_vmlinux() {
   else
     log "selected ordinary guest kernel: ${kernel_dir}/vmlinux -> ${target}"
   fi
+
+  # The guest perf module must come from the same kernel tree as the selected
+  # vmlinux, so the image follows the same choice. Older packages ship no
+  # cube_gauge image at all; leave the link absent so the runtime reports
+  # metrics as unavailable instead of loading a mismatched module.
+  local gauge_variant="${target#vmlinux-}"
+  local gauge_image="cube_gauge-${gauge_variant}.ext4"
+  if [[ -f "${kernel_dir}/${gauge_image}" ]]; then
+    ln -sfn "${gauge_image}" "${kernel_dir}/cube_gauge.ext4"
+    log "selected guest perf module image: ${kernel_dir}/cube_gauge.ext4 -> ${gauge_image}"
+  else
+    rm -f "${kernel_dir}/cube_gauge.ext4"
+    log "no ${gauge_image} in this package; guest perf metrics unavailable"
+  fi
 }
 
 # component_versions root.

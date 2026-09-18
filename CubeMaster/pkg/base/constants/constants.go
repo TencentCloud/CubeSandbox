@@ -121,7 +121,10 @@ const (
 	// CubeAnnotationCreateTimeEnvVars stores the serialized create-time env map
 	// that CubeMaster passes to cubelet for envd initialization.
 	CubeAnnotationCreateTimeEnvVars = "cube.master.internal.create_time_env_vars"
-	CubeAnnotationEnableIvshmem     = "cube.master.enable_ivshmem"
+	// CubeAnnotationPerfMetric opts the sandbox into the GAUGE metrics ivshmem
+	// device. Cubelet copies it onto the pod OCI spec as cube.perf.metric, which
+	// is what Shim reads before VM boot.
+	CubeAnnotationPerfMetric = "cube.master.perf.metric"
 
 	CubeAnnotationsVirtiofsCache = "cube.master.virtiofs.cache"
 
