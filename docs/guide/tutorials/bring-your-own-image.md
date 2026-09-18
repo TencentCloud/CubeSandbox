@@ -21,11 +21,12 @@ For interactive development and code-execution sandboxes, keeping `envd` is reco
 
 ## 2. Quick start: build on top of `cubesandbox-base`
 
-`cubesandbox-base` is a plain `ubuntu:22.04` with `envd` preinstalled at
-`/usr/bin/envd` and a generic entrypoint that runs `envd` in the
-background while honoring any `CMD` you supply. Three steps get you to a
-working template: **write a Dockerfile → build and push → create the
-template**.
+`cubesandbox-base` is a plain `ubuntu:22.04` with the repository's own
+Rust daemon `cube-envd` preinstalled at `/usr/bin/envd` (command name
+kept for SDK compatibility) and a generic entrypoint that runs `envd` in
+the background while honoring any `CMD` you supply. Three steps get you
+to a working template: **write a Dockerfile → build and push → create
+the template**.
 
 > Prefer to read a runnable end-to-end example? See
 > [`examples/cubesandbox-base-nginx`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/cubesandbox-base-nginx)
@@ -35,7 +36,7 @@ template**.
 ### 2.1 Write a Dockerfile
 
 ```dockerfile
-FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16
+FROM ghcr.io/tencentcloud/cubesandbox-base:latest
 
 # Install your own tooling
 RUN apt-get update \
@@ -95,9 +96,9 @@ FROM e2bdev/code-interpreter:latest
 USER root
 
 # Pull envd and the generic entrypoint from cubesandbox-base.
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/bin/envd /usr/bin/envd
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/local/bin/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
 # The upstream image already has its own entrypoint/CMD. Either wrap it
@@ -112,9 +113,9 @@ A second example, starting from a slim Python image:
 ```dockerfile
 FROM python:3.11-slim
 
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/bin/envd /usr/bin/envd
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 \
+COPY --from=ghcr.io/tencentcloud/cubesandbox-base:latest \
      /usr/local/bin/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
 RUN apt-get update \
@@ -136,6 +137,34 @@ check.
 
 Build, push and template creation are identical to sections 2.2 / 2.3.
 
+#### `setpriv` is required when the requested user differs from root
+
+`cube-envd` switches credentials by delegating to `setpriv` from **util-linux**,
+because Rust's stable standard library cannot set supplementary groups and the
+PTY backend exposes no credential hook (upstream Go `envd` did this in-process
+via `SysProcAttr.Credential`, which has no Rust equivalent on stable). It looks
+for a usable `setpriv` in `/usr/bin`, `/bin`, `/sbin` and `/usr/sbin`.
+
+This only matters when the request selects a user other than the one running
+`cube-envd` — for example an older E2B SDK sending `Authorization: Basic user:`.
+Requests without an `Authorization` header run as root and need nothing.
+
+Most distributions ship it: on Debian, Ubuntu and Fedora `util-linux` is a
+required package, so `python:3.11-slim` and `e2bdev/code-interpreter` are fine as
+is. **Alpine and busybox need attention**, because they provide their own
+`setpriv` applet that only handles capabilities and rejects `--reuid`:
+
+```dockerfile
+# Alpine: the busybox setpriv applet is not enough, and util-linux installs
+# its setpriv at /bin/setpriv (either location is found).
+RUN apk add --no-cache util-linux
+```
+
+If no usable `setpriv` exists, every request that selects a non-root user fails
+with a message naming the missing tool instead of an opaque error. Distroless
+images have no package manager, so build `FROM` a base that includes util-linux,
+or omit the `Authorization` header and run as root.
+
 ### Inject It During Template Creation
 
 If you do not want to modify the Dockerfile, use `--enable-inject-envd` to upload and inject `envd` while creating the template:
@@ -153,17 +182,19 @@ cubemastercli tpl create-from-image \
 | Option | Description |
 | --- | --- |
 | `--enable-inject-envd` | Upload an `envd` binary from `cubemastercli` and write it into the template rootfs. |
-| `--envd-path` | A local path on the machine running `cubemastercli`; used only with `--enable-inject-envd`. If omitted, the CLI uses its build-time embedded default `envd` when available. |
+| `--envd-path` | A local path on the machine running `cubemastercli`; used only with `--enable-inject-envd`. If omitted, the CLI uses its build-time embedded default `envd` (the in-repo Rust `cube-envd`) when available. |
 
 `--envd-path` refers to the machine running the CLI, not the CubeMaster host. The CLI uploads the binary in the multipart `create-from-image` request. CubeMaster validates it, writes it to `/usr/local/bin/envd` in the template rootfs, and includes its SHA-256 in the rootfs artifact fingerprint so artifacts built with different `envd` binaries are not reused interchangeably.
 
 The uploaded file must be a non-empty ELF binary no larger than 16 MiB and compatible with the target rootfs operating system and CPU architecture. For example, a Linux x86_64 image requires a Linux x86_64 `envd` binary.
 
-If `cubemastercli` was built without an embedded default `envd`, `--envd-path` is required. To build the CLI with a default binary, prepare `envd` and run:
+If `cubemastercli` was built without an embedded default `envd`, `--envd-path` is required. To build the CLI with a default binary, prepare an `envd` ELF and run:
 
 ```bash
 make cubemastercli ENVD_LOCAL_PATH=/path/to/envd
 ```
+
+Release bundles built by `deploy/one-click/build-release-bundle-builder.sh` embed the in-repo `cube-envd` automatically (override via `ENVD_LOCAL_PATH`), so their `cubemastercli` needs no `--envd-path`.
 
 For the `cubebox` instance type, CubeMaster also preserves the injection annotation and automatically wraps the main container command when creating a sandbox: it starts `/usr/local/bin/envd` in the background, executes the image's original command, and adds port `49983` to the exposed ports. The original image entrypoint therefore does not need to be changed when using this method. The command wrapper is not applied to non-`cubebox` instance types.
 
@@ -186,7 +217,7 @@ Environment variables:
 | Variable           | Default             | Purpose                                              |
 | ------------------ | ------------------- | ---------------------------------------------------- |
 | `ENVD_PORT`        | `49983`             | Port `envd` listens on.                              |
-| `ENVD_EXTRA_ARGS`  | *(empty)*           | Extra flags passed after `-port`. `-isnotfc` is appended automatically if not already present, to skip Firecracker MMDS lookup. |
+| `ENVD_EXTRA_ARGS`  | *(empty)*           | Extra flags passed after `-port`. `-isnotfc` is appended automatically if not already present, for E2B CLI compatibility; it is a no-op in cube-envd. |
 | `ENVD_LOG_FILE`    | `/var/log/envd.log` | File that captures envd stdout/stderr. Use `-` to inherit the container stdio. |
 | `ENVD_BIN`         | `/usr/bin/envd`     | Override if you install envd elsewhere.              |
 
@@ -201,11 +232,10 @@ control to your main process:
 # your-entrypoint.sh
 
 # Start envd in the background.
-# -isnotfc is REQUIRED: it tells envd to skip the Firecracker MMDS lookup
-# at 169.254.169.254. CubeSandbox does not use Firecracker, so the MMDS
-# service does not exist. Without this flag envd will attempt to access
-# the non-existent MMDS, which may cause various problems such as network
-# timeouts, /init delays, or env_vars injection failures.
+# -isnotfc is optional and kept only for E2B command-line compatibility.
+# cube-envd contains no Firecracker MMDS logic at all (CubeSandbox runs
+# workloads under Cloud Hypervisor, so 169.254.169.254 does not exist), which
+# makes the flag a no-op: behaviour is identical with or without it.
 /usr/bin/envd -port 49983 -isnotfc >/var/log/envd.log 2>&1 &
 
 # ... your usual startup sequence ...
@@ -240,10 +270,13 @@ docker exec "$cid" curl -sS --noproxy '*' --connect-timeout 1 --max-time 3 \
 # Expected: envd /health => 204
 
 docker exec "$cid" /usr/bin/envd -version
-# => 2026.16
+# => 0.1.0   (cube-envd's own semver, from cube-envd/src/version.rs)
+
+docker exec "$cid" /usr/bin/envd -commit
+# => the git sha the image was built from
 ```
 
-The health request must complete successfully and print `204`; any other HTTP code, including `200` or `500`, is a failed check. If envd is still starting, wait a few seconds and retry the health request. If it still fails, go to step 3. The version command must also succeed; compare its output with the envd version you installed (`2026.16` for the base image used above).
+The health request must complete successfully and print `204`; any other HTTP code, including `200` or `500`, is a failed check. If envd is still starting, wait a few seconds and retry the health request. If it still fails, go to step 3. The version command must also succeed; compare its output with the envd version you installed — the in-repo `cube-envd` reports the semver constant in `cube-envd/src/version.rs`, not the upstream envd tag.
 
 Run the state check once more after both probes:
 
@@ -282,17 +315,27 @@ If you copied logs, they remain in `$logdir` for inspection and can be deleted w
 | Template creation fails the readiness probe   | envd did not start / started on the wrong port                        | Ensure `ENTRYPOINT` invokes `cube-entrypoint.sh` **or** your own script runs `envd -port 49983 &` before `exec`. |
 | `curl :49983/health` returns `000`            | Nothing is listening; entrypoint replaced                             | Check <code v-pre>docker inspect --format '{{json .Config.Entrypoint}}'</code>; keep `cube-entrypoint.sh` as the wrapper. |
 | envd exits immediately                        | Version mismatch between binary and kernel/init expectations          | Verify with `docker exec ... /usr/bin/envd -version`; re-copy from the pinned base tag. |
-| envd `/init` slow or `create_time env_vars` fail | `-isnotfc` flag missing; envd attempts invalid MMDS access at `169.254.169.254` | Use `cube-entrypoint.sh` (appends `-isnotfc` automatically), or add `-isnotfc` to the command line when starting envd manually. |
 | Port 49983 conflicts with your own service    | Your app also listens on 49983                                        | Move your app to a different port and expose both with `--expose-port`.             |
 | `sudo: command not found` in your CMD         | You started `FROM` a `-slim` / `-alpine` image without sudo           | Either `apt-get install -y sudo`, or drop `sudo` from your entrypoint — `cube-entrypoint.sh` doesn't require it. |
+| Commands fail as a non-root user with `switching users requires a util-linux setpriv` | The image has no usable `setpriv` (Alpine/busybox ship only an applet that rejects `--reuid`) | Install util-linux (`apk add --no-cache util-linux` on Alpine) — see section 3. Requests without an `Authorization` header run as root and are unaffected. |
 | Template creation times out in `PULLING`      | Registry unreachable from Cube nodes                                  | Push to a registry the cluster can reach, or supply `--registry-username` / `--registry-password`. |
+
+> **`-isnotfc` is never the cause of a problem.** It is a no-op in `cube-envd`
+> (no Firecracker MMDS code exists), so a missing flag cannot produce `/init`
+> delays, network timeouts, or `create_time env_vars` failures. Look at the
+> entrypoint, the port, and the image itself instead.
 
 ## 7. Advanced — rebuild the base image yourself
 
 The base image is produced by a single GitHub Actions workflow in this
 repository: [`.github/workflows/build-envd-base-image.yml`](https://github.com/TencentCloud/CubeSandbox/blob/master/.github/workflows/build-envd-base-image.yml).
-It checks out `e2b-dev/infra` at the chosen tag (default `2026.16`),
-compiles `envd` with Go 1.25.4 in-place on native `linux/amd64` and
-`linux/arm64` runners, builds `docker/Dockerfile.cube-base`, runs a
-`:49983/health` smoke test on each architecture, then publishes a
-multi-arch manifest list to `ghcr.io/tencentcloud/cubesandbox-base`.
+It builds `docker/Dockerfile.cube-base`, whose `envd-builder` stage
+compiles the in-repo Rust daemon `cube-envd` (musl static; the version is
+the `cube-envd/src/version.rs` constant, and only the commit is injected
+as a `CUBE_ENVD_COMMIT` build arg — `CUBE_ENVD_VERSION` merely stamps the
+image label and is cross-checked against the binary),
+bakes it into the image as `/usr/bin/envd`, runs a `:49983/health`
+smoke test plus `envd -version`/`-commit` checks on native
+`linux/amd64` and `linux/arm64` runners, then publishes a multi-arch
+manifest list to `ghcr.io/tencentcloud/cubesandbox-base` (tags:
+`latest`, `sha-<short>`, and `sha-<short>-ubuntu22.04` on `master`).

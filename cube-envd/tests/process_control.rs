@@ -1,0 +1,440 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+use std::{sync::Arc, time::Duration};
+
+use axum::{
+    body::Body,
+    http::{header::CONTENT_TYPE, Request, StatusCode},
+};
+use cube_envd::{
+    app::router,
+    connect::{decode_frame, encode_frame, END_STREAM_FLAG},
+};
+use futures_util::StreamExt;
+use http_body_util::BodyExt;
+use serde_json::{json, Value};
+use tower::ServiceExt;
+
+mod common;
+
+// 验证按标签重连时可获取已结束进程的输入和结束事件。
+#[tokio::test]
+async fn process_list_input_and_terminal_connect_work_by_tag() {
+    let app = router();
+    let start = stream_request(
+        "Start",
+        json!({
+            "process": {"cmd":"/bin/sh", "args":["-c", "read line; printf '%s' \"$line\""], "envs": {}},
+            "tag": "input-test",
+            "stdin": true
+        }),
+    );
+    let response = app.clone().oneshot(start).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut start_stream = response.into_body().into_data_stream();
+    let pid = start_pid(start_stream.next().await.unwrap().unwrap()).unwrap();
+    drop(start_stream);
+
+    let (status, body) = unary(app.clone(), "List", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|process| process["pid"] == pid));
+
+    let (status, _) = unary(
+        app.clone(),
+        "SendInput",
+        json!({"process":{"pid":pid},"input":{"stdin":"aGVsbG8K"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let response = app
+        .oneshot(stream_request(
+            "Connect",
+            json!({"process":{"tag":"input-test"}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let frames = all_frames(response.into_body().collect().await.unwrap().to_bytes());
+    assert!(frames
+        .iter()
+        .any(|frame| frame["event"]["end"]["exited"] == true));
+    assert_eq!(frames.last(), Some(&json!({"end": {}})));
+}
+
+// 验证信号可终止存活进程，未知 PID 返回未找到错误。
+#[tokio::test]
+async fn signal_terminates_a_live_process_and_unknown_pid_is_not_found() {
+    let app = router();
+    let response = app
+        .clone()
+        .oneshot(stream_request(
+            "Start",
+            json!({
+                "process": {"cmd":"/bin/sh", "args":["-c", "sleep 30"], "envs": {}},
+                "tag": "signal-test",
+                "stdin": false
+            }),
+        ))
+        .await
+        .unwrap();
+    let mut stream = response.into_body().into_data_stream();
+    let pid = start_pid(stream.next().await.unwrap().unwrap()).unwrap();
+    drop(stream);
+
+    let (status, _) = unary(
+        app.clone(),
+        "SendSignal",
+        json!({"process":{"pid":pid},"signal":"SIGNAL_SIGTERM"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (status, body) = unary(app.clone(), "CloseStdin", json!({"process":{"pid":999999}})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "not_found");
+
+    let response = app
+        .oneshot(stream_request(
+            "Connect",
+            json!({"process":{"tag":"signal-test"}}),
+        ))
+        .await
+        .unwrap();
+    let frames = all_frames(response.into_body().collect().await.unwrap().to_bytes());
+    let end = frames
+        .iter()
+        .find_map(|frame| frame["event"].get("end"))
+        .expect("signal-terminated process must have an EndEvent");
+    assert_eq!(end["exitCode"], 143);
+    assert!(
+        end.get("exited").is_none(),
+        "proto JSON omits the false exited field: {end}"
+    );
+    assert_eq!(end["error"], "terminated by signal 15");
+}
+
+// 验证 StreamInput 按 start、data 帧顺序写入进程 stdin。
+#[tokio::test]
+async fn stream_input_consumes_an_ordered_connect_client_stream() {
+    let app = router();
+    let response = app
+        .clone()
+        .oneshot(stream_request("Start", json!({
+            "process": {"cmd":"/bin/sh", "args":["-c", "read value; printf '%s' \"$value\""], "envs": {}},
+            "tag": "stream-input-test",
+            "stdin": true
+        })))
+        .await
+        .unwrap();
+    let mut stream = response.into_body().into_data_stream();
+    let pid = start_pid(stream.next().await.unwrap().unwrap()).unwrap();
+    drop(stream);
+
+    let mut body = encode_frame(
+        0,
+        json!({"start":{"process":{"pid":pid}}})
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    body.extend_from_slice(
+        &encode_frame(
+            0,
+            json!({"data":{"input":{"stdin":"c3RyZWFtZWQK"}}})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap(),
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/process.Process/StreamInput")
+                .header(CONTENT_TYPE, "application/connect+json")
+                .header("Connect-Protocol-Version", "1")
+                .header("Authorization", common::basic_auth_header())
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // StreamInput 是客户端流式 RPC，响应必须走流式编解码：content-type 为
+    // application/connect+json，体是「数据信封 + end-stream 信封」。只断言 200
+    // 会漏掉裸 JSON 响应，而 connect-go 客户端会因此在校验响应 content-type 时
+    // 直接失败。
+    assert_eq!(
+        response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/connect+json"),
+    );
+    let frames = decode_all_frames(response.into_body().collect().await.unwrap().to_bytes());
+    assert_eq!(
+        frames.len(),
+        2,
+        "expected a data envelope and an end-stream envelope: {frames:?}"
+    );
+    assert_eq!(frames[0].flags, 0);
+    assert_eq!(
+        frames[0].payload, b"{}",
+        "StreamInputResponse has no fields, so proto JSON is the empty object"
+    );
+    assert_eq!(
+        frames[1].flags, 2,
+        "last frame must set the end-stream flag"
+    );
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let response = app
+        .oneshot(stream_request(
+            "Connect",
+            json!({"process":{"tag":"stream-input-test"}}),
+        ))
+        .await
+        .unwrap();
+    let frames = all_frames(response.into_body().collect().await.unwrap().to_bytes());
+    assert!(frames
+        .iter()
+        .any(|frame| frame["event"]["end"]["exited"] == true));
+}
+
+// 验证 Update 未携带 pty 时是无操作成功，与上游一致。
+#[tokio::test]
+async fn process_update_without_pty_is_a_no_op_success() {
+    let app = router();
+    let response = app
+        .clone()
+        .oneshot(stream_request(
+            "Start",
+            json!({
+                "process": {"cmd":"/bin/sleep", "args":["30"], "envs": {}},
+                "tag": "update-noop",
+                "stdin": false
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // 上游只在请求携带 pty 时才要求目标是 PTY 进程；未携带时直接成功。
+    let (status, body) = unary(
+        app.clone(),
+        "Update",
+        json!({"process":{"tag":"update-noop"},"pty":{"size":{"cols":0,"rows":0}}}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a PTY size must still be rejected when present: {body}"
+    );
+
+    let (status, body) = unary(app, "Update", json!({"process":{"tag":"update-noop"}})).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+}
+
+// 验证 Connect 拒绝带压缩标志的请求帧。
+#[tokio::test]
+async fn connect_rejects_compressed_request_frames() {
+    let response = router()
+        .oneshot(
+            Request::post("/process.Process/Connect")
+                .header(CONTENT_TYPE, "application/connect+json")
+                .header("Connect-Protocol-Version", "1")
+                .header("Authorization", common::basic_auth_header())
+                .body(Body::from(
+                    encode_frame(0x01, br#"{"process":{"pid":1}}"#).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // 流式端点的请求级错误统一在流内报告（参考实现 connect-go 的行为）：
+    // HTTP 200 + `application/connect+json` + EndStream 错误帧。
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let frame = decode_frame(&body).expect("end-stream frame must decode");
+    assert_eq!(frame.flags & 0x02, 0x02, "frame must be an EndStream frame");
+    let payload: serde_json::Value = serde_json::from_slice(&frame.payload).unwrap();
+    assert_eq!(
+        payload["error"]["code"], "unimplemented",
+        "compressed frames must be rejected in-band"
+    );
+}
+
+// 验证并发 Start 请求中只有一个进程能占用相同标签。
+#[tokio::test]
+async fn concurrent_starts_cannot_claim_the_same_tag() {
+    let app = router();
+    let barrier = Arc::new(tokio::sync::Barrier::new(9));
+    let mut starts = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let app = app.clone();
+        let barrier = Arc::clone(&barrier);
+        starts.spawn(async move {
+            barrier.wait().await;
+            app.oneshot(stream_request(
+                "Start",
+                json!({
+                    "process": {"cmd":"/bin/sleep", "args":["1"], "envs": {}},
+                    "tag": "exclusive-tag",
+                    "stdin": false,
+                    "pty": {"size": {"cols": 80, "rows": 24}}
+                }),
+            ))
+            .await
+            .unwrap()
+        });
+    }
+    barrier.wait().await;
+
+    // 流式端点的请求级错误在流内报告：赢家与输家都返回 200，靠帧内容区分——
+    // 赢家的首个事件帧是 start，输家是 EndStream 错误帧（tag 冲突 = invalid_argument）。
+    let mut successes = 0;
+    let mut conflicts = 0;
+    while let Some(result) = starts.join_next().await {
+        let response = result.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "streaming Start must answer 200"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        // 只解析首帧：赢家的响应还会带 data/end/end-stream 帧，decode_frame 要求
+        // 整段恰好一帧，这里手动取第一帧。
+        let length = u32::from_be_bytes(body[1..5].try_into().unwrap()) as usize;
+        let payload: serde_json::Value = serde_json::from_slice(&body[5..5 + length]).unwrap();
+        if payload["event"]["start"].is_object() {
+            successes += 1;
+        } else {
+            assert_eq!(
+                payload["error"]["code"], "invalid_argument",
+                "losing Start must report the tag conflict: {payload}"
+            );
+            conflicts += 1;
+        }
+    }
+    assert_eq!(successes, 1, "only one process may claim a tag");
+    assert_eq!(conflicts, 7, "the other seven must report a tag conflict");
+}
+
+// 构造带认证和 Connect 协议头的单帧流式进程 RPC 请求。
+fn stream_request(method: &str, payload: Value) -> Request<Body> {
+    Request::post(format!("/process.Process/{method}"))
+        .header(CONTENT_TYPE, "application/connect+json")
+        .header("Connect-Protocol-Version", "1")
+        .header("Authorization", common::basic_auth_header())
+        .body(Body::from(
+            encode_frame(0, payload.to_string().as_bytes()).unwrap(),
+        ))
+        .unwrap()
+}
+
+// 发送一元进程 RPC 并解码状态码和 JSON 响应体。
+async fn unary(app: axum::Router, method: &str, payload: Value) -> (StatusCode, Value) {
+    let response = app
+        .oneshot(
+            Request::post(format!("/process.Process/{method}"))
+                .header(CONTENT_TYPE, "application/json")
+                .header("Connect-Protocol-Version", "1")
+                .header("Authorization", common::basic_auth_header())
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        if body.is_empty() {
+            json!({})
+        } else {
+            serde_json::from_slice(&body).unwrap()
+        },
+    )
+}
+
+// 从 Start Connect 帧中提取新进程 PID。
+fn start_pid(bytes: bytes::Bytes) -> Option<u64> {
+    let frame = decode_frame(&bytes).ok()?;
+    serde_json::from_slice::<Value>(&frame.payload).ok()?["event"]["start"]["pid"].as_u64()
+}
+
+// 将连续 Connect 帧拆分为普通事件或流结束 JSON 值。
+fn all_frames(bytes: bytes::Bytes) -> Vec<Value> {
+    decode_all_frames(bytes)
+        .into_iter()
+        .map(|frame| {
+            if frame.flags == END_STREAM_FLAG {
+                json!({"end": serde_json::from_slice::<Value>(&frame.payload).unwrap()})
+            } else {
+                serde_json::from_slice(&frame.payload).unwrap()
+            }
+        })
+        .collect()
+}
+
+// 将连续 Connect 帧原样拆解，保留标志位与原始载荷，供校验信封形状使用。
+fn decode_all_frames(bytes: bytes::Bytes) -> Vec<cube_envd::connect::Frame> {
+    let mut remaining = bytes.as_ref();
+    let mut frames = Vec::new();
+    while !remaining.is_empty() {
+        let length = u32::from_be_bytes(remaining[1..5].try_into().unwrap()) as usize;
+        frames.push(decode_frame(&remaining[..5 + length]).unwrap());
+        remaining = &remaining[5 + length..];
+    }
+    frames
+}
+
+// 验证 Connect-Timeout-Ms 会终止受管进程并产生结束事件。
+#[tokio::test]
+async fn process_timeout_terminates_and_reaps_the_process() {
+    let response = router()
+        .oneshot(
+            Request::post("/process.Process/Start")
+                .header(CONTENT_TYPE, "application/connect+json")
+                .header("Connect-Protocol-Version", "1")
+                .header("Connect-Timeout-Ms", "10")
+                .header("Authorization", common::basic_auth_header())
+                .body(Body::from(
+                    encode_frame(
+                        0,
+                        json!({
+                            "process": {"cmd": "/bin/sleep", "args": ["30"], "envs": {}},
+                            "stdin": false
+                        })
+                        .to_string()
+                        .as_bytes(),
+                    )
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frames = all_frames(response.into_body().collect().await.unwrap().to_bytes());
+    let end = frames
+        .iter()
+        .find_map(|frame| frame["event"].get("end"))
+        .expect("timed-out process must have an EndEvent");
+    assert_eq!(end["exitCode"], 143);
+    assert!(
+        end.get("exited").is_none(),
+        "proto JSON omits the false exited field: {end}"
+    );
+    assert_eq!(end["error"], "terminated by signal 15");
+}
