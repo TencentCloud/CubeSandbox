@@ -45,7 +45,7 @@ scheduler:
 
 创建路径不再维护预留账本，也不再执行同步 Redis reservation。CubeMaster 使用本地节点快照执行准入并派发到 Cubelet；指标独立更新，上报窗口内多副本可能重复准入。旧配置中的 `scheduler.reservation_redis_error_policy` 已废弃，应删除。Redis 仍用于节点指标及创建成功后的代理元数据等功能。
 
-多 Master 继续依赖上报指标和 `realtime_create_num` 的本地并发数乘 Master 数估算，但不再提供跨副本原子容量预留。指标传播期间可能出现并发超额接收。Cubelet 已有创建并发限流和单沙箱 cgroup 限额；节点总配额的原子接收控制属于后续工作，本次未实现。不能假定所有超额 CPU/内存请求都会被 Cubelet 拒绝。
+多 Master 继续依赖上报指标和 `realtime_create_num` 的本地并发数乘 Master 数估算，但不再提供跨副本原子容量预留。指标传播期间可能出现并发超额接收。Cubelet 已有创建并发限流和单沙箱 cgroup 限额；节点总配额的原子接收控制属于后续工作，本次未实现。不能假定所有超额 CPU/内存请求都会被 Cubelet 拒绝。具体来说，节点实际装不下时创建会在第一次尝试直接失败，而不是转移到其他节点重试：Cubelet 目前不做 CPU/内存/MVM 配额准入，相应错误码也不在任何重试集合中。让这一拒绝成为可重试的故障转移属于后续工作。
 
 ## 插件类型
 
