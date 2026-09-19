@@ -42,7 +42,37 @@ type Config struct {
 
 	DiscardUnpackedLayers bool `toml:"discard_unpacked_layers"`
 
-	CubeToolBaseDir string `toml:"cubetool_base_dir"`
+	// Deprecated: fallback for configurations predating independent artifact paths.
+	CubeToolBaseDir  string `toml:"cubetool_base_dir"`
+	ImageBasePath    string `toml:"image_base_path"`
+	SharedKernelPath string `toml:"shared_kernel_path"`
+}
+
+// ResolvePaths also populates effective values for config dump and startup logs.
+func (c *Config) ResolvePaths() (pmem.Paths, error) {
+	p, err := pmem.ResolvePaths(c.CubeToolBaseDir, c.ImageBasePath, c.SharedKernelPath)
+	if err == nil {
+		c.CubeToolBaseDir = p.ToolBaseDir
+		c.ImageBasePath = p.ImageBasePath
+		c.SharedKernelPath = p.SharedKernelPath
+	}
+	return p, err
+}
+
+// ResolveConfiguredPaths resolves the fully merged images plugin configuration.
+// Legacy cbri artifact path fields are intentionally not read here.
+func ResolveConfiguredPaths(ctx context.Context, cfg interface {
+	Decode(context.Context, string, interface{}) (interface{}, error)
+}) (pmem.Paths, error) {
+	imageConfig := &Config{}
+	if _, err := cfg.Decode(ctx, "io.cubelet.internal.v1.images", imageConfig); err != nil {
+		return pmem.Paths{}, err
+	}
+	paths, err := imageConfig.ResolvePaths()
+	if err != nil {
+		return pmem.Paths{}, err
+	}
+	return paths, nil
 }
 
 type local struct {
@@ -76,9 +106,14 @@ func init() {
 				config.StatePath = ic.Properties[plugins.PropertyStateDir]
 			}
 
-			if config.CubeToolBaseDir == "" {
-				config.CubeToolBaseDir = "/usr/local/services/cubetoolbox"
+			paths, err := config.ResolvePaths()
+			if err != nil {
+				return nil, err
 			}
+			// Publish the same resolved values when this plugin is initialized
+			// independently. server.New publishes them earlier so cbri can capture
+			// the paths before containerd initializes its plugins.
+			pmem.InitPaths(paths)
 			t, err := time.ParseDuration(config.PullDeadlineStr)
 			if err != nil || t == 0 {
 				config.pullDeadline = defaultPullDeadline
@@ -122,7 +157,6 @@ func init() {
 			ois := oldimagestore.NewStore(client, config.RuntimeType, db, oldimagestore.WithUidFileDir(uidFileDir))
 			_ = ois
 
-			pmem.Init(config.CubeToolBaseDir)
 			err = imgSrv.recover()
 			if err != nil {
 				return nil, fmt.Errorf("recover images failed: %w", err)

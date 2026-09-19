@@ -126,6 +126,22 @@ sudo systemctl restart cube-sandbox-<service>.service
 但如果你只是改了 helper 脚本（`/usr/local/services/cubetoolbox/scripts/systemd/*.sh`），不需要 `daemon-reload`，下一次 `restart` 就会重新拉起脚本生效。
 :::
 
+## Cubelet 工件路径 {#cubelet-artifact-paths}
+
+Cubelet 会把由 Docker/OCI 镜像构建的模板根文件系统保存为只读 ext4 工件。可以在 `Cubelet/config/config.toml` 的 `[plugins."io.cubelet.internal.v1.images"]` 段中配置工件目录和模板运行时使用的内核源文件：
+
+```toml
+[plugins."io.cubelet.internal.v1.images"]
+image_base_path = "/usr/local/services/cubetoolbox/cubebox_os_image"
+shared_kernel_path = "/usr/local/services/cubetoolbox/cube-kernel-scf/vmlinux"
+```
+
+`image_base_path` 是 cubebox 模板工件的最终缓存目录，每个工件位于 `<image_base_path>/<artifact-id>/<artifact-id>.ext4`，并包含对应的 `.vm` 文件。`shared_kernel_path` 是模板工件以及无模板沙箱使用的 `vmlinux` 源文件。两个路径都必须是绝对路径。省略时，Cubelet 保留历史 toolbox 路径；`cubetool_base_dir` 仍作为旧配置的兼容 fallback。设置任一新路径后，该路径以新配置为准，旧配置不会覆盖它。如果旧 cbri 配置自定义了 `base_path`，应显式将 `shared_kernel_path` 设为该安装目录下匹配的内核路径；`base_path` 仍控制无模板沙箱使用的 guest 和 agent 镜像，但不再选择 `vmlinux`。配置的内核路径必须与节点当前选中的 bm/pvm 内核变体和 digest 一致；修改这个路径不会为节点或模板上报选择另一套 kernel identity。
+
+工件目录和内核路径相互独立。修改任一路径后都需要重启 Cubelet。Cubelet 不会自动搬迁已有工件；切换到新路径前，需要先让受影响的缓存或内核文件在新路径可用。已有 snapshot 还必须继续让历史工件路径可访问（例如通过部署层软链），或者重建相关 snapshot，因为 snapshot 元数据保存了 kernel 和 ext4 工件的绝对路径。旧 cbri 插件中的 `image_base_path` 和 `kernel_base_path` 不再作为工件路径来源，请改在 images 插件段配置工件路径。如果旧字段中有自定义值，应先把需要保留的值复制到 images 插件段，再删除或更新旧字段。
+
+`cubelet config dump` 和 `cubelet config migrate` 会把解析后的工件路径写成显式的 `image_base_path` 和 `shared_kernel_path`。使用导出的配置文件后，如需调整路径，应修改这两个显式字段；只修改 `cubetool_base_dir` 不会覆盖它们。
+
 ## CubeMaster 配置项 {#cubemaster-settings}
 
 路径：`/usr/local/services/cubetoolbox/CubeMaster/conf.yaml`（one-click 包内来自 `configs/single-node/cubemaster.yaml`）。

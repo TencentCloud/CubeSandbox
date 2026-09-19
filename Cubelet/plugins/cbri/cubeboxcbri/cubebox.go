@@ -45,16 +45,21 @@ func init() {
 		Config: defaultConfig(),
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
 			config := ic.Config.(*cubeboxInstancePluginConfig)
+			// server.New publishes pmem paths before containerd initializes plugins;
+			// keep one startup-time snapshot for all cbri operations.
 			return &cubeboxInstancePlugin{
-				config: config,
+				config:        config,
+				artifactPaths: pmem.CurrentPaths(),
 			}, nil
 		},
 	})
 }
 
 type cubeboxInstancePluginConfig struct {
-	BasePath         string `toml:"base_path,omitempty"`
-	ImageBasePath    string `toml:"image_base_path,omitempty"`
+	BasePath string `toml:"base_path,omitempty"`
+	// Deprecated: retained for decoding older configurations; ignored at runtime.
+	ImageBasePath string `toml:"image_base_path,omitempty"`
+	// Deprecated: retained for decoding older configurations; ignored at runtime.
 	KernelBasePath   string `toml:"kernel_base_path,omitempty"`
 	SnapShotBasePath string `toml:"snapshot_base_path,omitempty"`
 	instanceType     string
@@ -64,8 +69,6 @@ func defaultConfig() *cubeboxInstancePluginConfig {
 	cfg := &cubeboxInstancePluginConfig{
 		BasePath: "/usr/local/services/cubetoolbox",
 	}
-	cfg.ImageBasePath = filepath.Join(cfg.BasePath, "cubebox_os_image")
-	cfg.KernelBasePath = filepath.Join(cfg.BasePath, "cubebox_os_image")
 	cfg.SnapShotBasePath = filepath.Join(cfg.BasePath, "cube-snapshot")
 	cfg.instanceType = cubebox.InstanceType_cubebox.String()
 	return cfg
@@ -88,7 +91,8 @@ type snapshotPaths struct {
 }
 
 type cubeboxInstancePlugin struct {
-	config *cubeboxInstancePluginConfig
+	config        *cubeboxInstancePluginConfig
+	artifactPaths pmem.Paths
 }
 
 func (e *cubeboxInstancePlugin) PostCreateContainer(ctx context.Context, cb *cubeboxstore.CubeBox, container *cubeboxstore.Container) error {
@@ -151,7 +155,7 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 
 	appImageID := constants.GetAppImageID(ctx)
 	if appImageID == "" {
-		kernelPath = filepath.Join(e.config.BasePath, "cube-kernel-scf", "vmlinux")
+		kernelPath = e.artifactPaths.SharedKernelPath
 	} else {
 		if flowOpts.IsCreateSnapshot() {
 			if err := e.syncLatestKernelForImage(ctx, appImageID); err != nil {
@@ -159,7 +163,7 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 			}
 		}
 		kernelPath = e.getKernelFilePath(appImageID)
-		rootfs := filepath.Join(e.config.ImageBasePath, appImageID)
+		rootfs := filepath.Join(e.artifactPaths.ImageDir(e.config.instanceType), appImageID)
 		specOpts = append(specOpts, oci.WithRootFSPath(rootfs))
 		logEntry = logEntry.WithField("rootfs", rootfs)
 	}
@@ -358,7 +362,7 @@ func (e *cubeboxInstancePlugin) CreateContainer(ctx context.Context, cubeBox *cu
 	}
 	specOpts = append(specOpts, replaceDevMounts()...)
 	if constants.GetAppImageID(ctx) != "" {
-		specOpts = append(specOpts, oci.WithRootFSPath(filepath.Join(e.config.ImageBasePath, constants.GetAppImageID(ctx))))
+		specOpts = append(specOpts, oci.WithRootFSPath(filepath.Join(e.artifactPaths.ImageDir(e.config.instanceType), constants.GetAppImageID(ctx))))
 	}
 	flowOpts := workflow.GetCreateContext(ctx)
 	if flowOpts != nil {
@@ -483,19 +487,19 @@ func (e *cubeboxInstancePlugin) genPmemOpt(ctx context.Context, imageID string) 
 }
 
 func (e *cubeboxInstancePlugin) getImageFilePath(imageID string) string {
-	return filepath.Join(e.config.ImageBasePath, imageID, imageID+".ext4")
+	return e.artifactPaths.ImageFile(e.config.instanceType, imageID)
 }
 
 func (e *cubeboxInstancePlugin) syncLatestKernelForImage(ctx context.Context, imageID string) error {
 	return pmem.RefreshKernelFile(
 		ctx,
-		filepath.Join(e.config.BasePath, "cube-kernel-scf", "vmlinux"),
+		e.artifactPaths.SharedKernelPath,
 		e.getKernelFilePath(imageID),
 	)
 }
 
 func (e *cubeboxInstancePlugin) getKernelFilePath(imageID string) string {
-	return filepath.Join(e.config.KernelBasePath, imageID, imageID+".vm")
+	return e.artifactPaths.KernelFile(e.config.instanceType, imageID)
 }
 
 func (e *cubeboxInstancePlugin) getSnapShotFilePath(templateID string) string {

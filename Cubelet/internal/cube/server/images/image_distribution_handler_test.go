@@ -19,6 +19,17 @@ import (
 	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
+func initTestPmemPaths(t *testing.T, baseDir string) {
+	t.Helper()
+	paths, err := pmem.ResolvePaths(baseDir, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := pmem.CurrentPaths()
+	pmem.InitPaths(paths)
+	t.Cleanup(func() { pmem.InitPaths(previous) })
+}
+
 func writeImageTestFile(t *testing.T, path string, content []byte) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
@@ -35,7 +46,7 @@ func TestDefaultTemplateImageSpecSetsExt4InstanceType(t *testing.T) {
 
 func TestMaterializeDistributedTemplateRuntimeFilesRefreshesKernel(t *testing.T) {
 	baseDir := t.TempDir()
-	pmem.Init(baseDir)
+	initTestPmemPaths(t, baseDir)
 
 	template := &templatetypes.TemplateImage{
 		Image:        "artifact-1",
@@ -65,7 +76,7 @@ func TestMaterializeDistributedTemplateRuntimeFilesSkipsNonExt4(t *testing.T) {
 
 func TestEnsureDistributedTemplateImageExt4DoesNotRequireKernelFile(t *testing.T) {
 	baseDir := t.TempDir()
-	pmem.Init(baseDir)
+	initTestPmemPaths(t, baseDir)
 
 	imagePath := pmem.GetRawImageFilePath(cubebox.InstanceType_cubebox.String(), "artifact-2")
 	writeImageTestFile(t, imagePath, bytes.Repeat([]byte("e"), 4096))

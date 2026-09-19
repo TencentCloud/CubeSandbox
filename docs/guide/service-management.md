@@ -126,6 +126,22 @@ sudo systemctl restart cube-sandbox-<service>.service
 If you only edited the helper script (`/usr/local/services/cubetoolbox/scripts/systemd/*.sh`), `daemon-reload` is **not** needed — the next `restart` re-invokes the script.
 :::
 
+## Cubelet artifact paths {#cubelet-artifact-paths}
+
+Cubelet stores template rootfs artifacts as read-only ext4 files built from Docker/OCI images. Configure their location and the kernel source used for template runtime files in `Cubelet/config/config.toml`, under `[plugins."io.cubelet.internal.v1.images"]`:
+
+```toml
+[plugins."io.cubelet.internal.v1.images"]
+image_base_path = "/usr/local/services/cubetoolbox/cubebox_os_image"
+shared_kernel_path = "/usr/local/services/cubetoolbox/cube-kernel-scf/vmlinux"
+```
+
+`image_base_path` is the final cache directory for cubebox template artifacts. Each artifact is stored below `<image_base_path>/<artifact-id>/<artifact-id>.ext4` (with the corresponding `.vm` file). `shared_kernel_path` is the source `vmlinux` used for template artifacts and sandboxes without a template. Both values must be absolute paths. When omitted, Cubelet keeps the historical toolbox paths; `cubetool_base_dir` remains a legacy fallback for older configurations. Once either new path is set, it takes precedence for that path and the legacy setting does not override it. If the legacy cbri `base_path` is customized, set `shared_kernel_path` explicitly to the matching kernel under that installation; `base_path` still controls the no-template guest and agent images, but no longer selects `vmlinux`. The configured kernel path must resolve to the same active bm/pvm variant and digest selected for the node; changing this path does not select a different kernel identity for node or template reporting.
+
+The image path and kernel path are independent. After changing either value, restart Cubelet. Cubelet does not move existing artifacts automatically; make the affected cache or kernel files available at the new paths before switching. Existing snapshots additionally require their historical artifact paths to remain resolvable (for example through a deployment-level softlink), or the snapshots must be recreated, because snapshot metadata stores absolute kernel and ext4 artifact paths. The legacy cbri plugin's `image_base_path` and `kernel_base_path` fields are ignored as artifact path sources; configure artifact paths under the images plugin instead. If those legacy fields contain custom values, copy the intended values to the images plugin before removing or updating the legacy entries.
+
+`cubelet config dump` and `cubelet config migrate` write the resolved artifact paths as explicit `image_base_path` and `shared_kernel_path` values. After using that output as a configuration file, edit those explicit fields when changing paths; changing only `cubetool_base_dir` will not override them.
+
 ## CubeMaster settings {#cubemaster-settings}
 
 Path: `/usr/local/services/cubetoolbox/CubeMaster/conf.yaml` (from `configs/single-node/cubemaster.yaml` in one-click bundles).
