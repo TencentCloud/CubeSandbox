@@ -1,0 +1,18 @@
+# volume-juicefs.conf — config for the JuiceFS Volume Plugin (cube-volume-juicefs).
+#
+# Place next to the plugin script on every CubeMaster and Cubelet node,
+# root-owned and chmod 600 (it holds the metadata engine password).
+
+# Metadata engine of the file system created by `juicefs format`.
+# Redis, PostgreSQL, MySQL and TiKV are all supported; keep the password out of the URL.
+META_URL='postgres://juicefs@10.0.0.5:5432/juicefs?sslmode=disable'
+META_PASSWORD='<metadata-engine-password>'
+
+# Local read cache, shared by all volumes on the node. Size in MiB.
+CACHE_DIR='/data/juicefs-cache'
+CACHE_SIZE='102400'
+
+# Extra `juicefs mount` flags for every mount.
+# --writeback uploads to object storage in the background: small-file writes are
+# much faster, but data stays in CACHE_DIR until uploaded. See README.
+MOUNT_OPTS=''

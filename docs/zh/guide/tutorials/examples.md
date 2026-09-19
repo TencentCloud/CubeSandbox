@@ -41,6 +41,7 @@
 | [ivshmem](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/ivshmem) | 启用主机与虚机共享内存，并体验环形缓冲区协议和 mmap 吞吐测试。 |
 | [腾讯云 COS Volume 插件](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.zh.md) | 部署 binary 或 RPC 类型的 COS Volume 插件，并验证完整生命周期。 |
 | [S3 兼容 Volume 插件](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.zh.md) | 接入 AWS S3、腾讯云 COS、Cloudflare R2、MinIO 等 S3 兼容后端。 |
+| [JuiceFS Volume 插件](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/juicefs/README.zh.md) | 对象存储之上的 POSIX 文件系统：一个文件系统，每个卷 `--subdir`，多个沙箱可共享一个卷并立即看到彼此的写入 |
 
 ## 性能测试
 
