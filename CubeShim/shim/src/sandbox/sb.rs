@@ -50,6 +50,16 @@ const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
 const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
 
+/// Bounded reconnects for the restore-thaw window: a freshly restored guest
+/// transiently refuses or resets the first connections until its runtime
+/// settles. Both steps are safe to repeat (fresh channel; idempotent RPCs).
+const RECONNECT_ATTEMPTS: u32 = 5;
+const RECONNECT_BACKOFF_MS: u64 = 200;
+/// Overall deadline for the retry loop: bounds the sequence even when a
+/// single attempt parks (connect_agent has no internal timeout). With the
+/// 3 s RPC timeout, a hung agent gets ~3 attempts rather than all 5.
+const RECONNECT_DEADLINE: Duration = Duration::from_secs(10);
+
 #[derive(PartialEq, Eq)]
 enum SandBoxState {
     Normal,
@@ -219,6 +229,53 @@ impl SandBox {
         )
     }
 
+    /// Connect + reset with bounded retries for the restore-thaw window
+    /// (see RECONNECT_ATTEMPTS); a cold boot gets a single attempt — it
+    /// connects after VsockServerReady, where failures are not transient.
+    /// The boundary is deliberate: every observed transient fires at the
+    /// connect or the first RPC (reset_guest is the canary); what follows
+    /// is not idempotent.
+    async fn connect_agent_with_retry(&mut self, restore: bool) -> CResult<()> {
+        let mut last_err = None;
+        let retry = async {
+            let max_attempts = if restore { RECONNECT_ATTEMPTS } else { 1 };
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+                let res = async {
+                    self.connect_agent().await?;
+                    if restore {
+                        self.reset_guest().await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                match res {
+                    Ok(()) => return Ok(()),
+                    Err(e) if attempt < max_attempts => {
+                        warnf!(
+                            self.log,
+                            "reconnect attempt {}/{} failed: {}, retrying",
+                            attempt,
+                            max_attempts,
+                            e
+                        );
+                        last_err = Some(e);
+                        tokio::time::sleep(Duration::from_millis(RECONNECT_BACKOFF_MS)).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+        match tokio::time::timeout(RECONNECT_DEADLINE, retry).await {
+            Ok(res) => res,
+            Err(_) => Err(format!(
+                "agent reconnect exceeded the deadline, last error: {}",
+                last_err.unwrap_or_else(|| "none recorded".to_string())
+            )),
+        }
+    }
+
     async fn connect_agent(&mut self) -> CResult<()> {
         let conn = AsyncUtils::connect_agent(&self.id).await?;
         let client = agent_ttrpc::AgentServiceClient::new(conn.clone());
@@ -237,7 +294,7 @@ impl SandBox {
         }
         false
     }
-    async fn disconnect_agent(&mut self, from_rollback: bool) -> CResult<()> {
+    async fn disconnect_agent(&mut self) -> CResult<()> {
         //stop monitor
 
         if let Some(tx) = self.tx_monitor_exited.as_ref() {
@@ -261,32 +318,43 @@ impl SandBox {
         for (_, c) in containers.iter_mut() {
             c.unset_client().await;
         }
-        if !from_rollback {
-            // Yield briefly so aborted monitor / oom tasks can be scheduled and
-            // drop their cloned `Arc<Client>` before we check ref counts below.
-            // Empirically 50ms is enough for the tokio runtime to make progress.
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        if let Some(client) = self.client.take() {
-            if Arc::strong_count(&client) != 1 {
-                errf!(
-                    self.log,
-                    "client ref count is {}",
-                    Arc::strong_count(&client)
-                );
-                //return Err(format!("disconnect_agent: client ref count is not 1").into());
-            }
-            drop(client)
-        }
-
-        if let Some(conn) = self.conn.take() {
-            if Arc::strong_count(&conn) != 1 {
-                errf!(self.log, "conn ref count is {}", Arc::strong_count(&conn));
-                //return Err(format!("disconnect_agent: conn ref count is not 1").into());
-            }
-            drop(conn)
-        }
+        self.client = None;
+        self.conn = None;
         Ok(())
+    }
+
+    /// Pause-time teardown that closes nothing: the agent's vsock connections
+    /// cross the freeze inside the snapshot, and the guest learns of them only
+    /// via the restore-side RST. disconnect_agent remains for rollback.
+    async fn quiesce_agent_for_pause(&mut self) {
+        //stop monitor
+        if let Some(tx) = self.tx_monitor_exited.as_ref() {
+            let _ = tx.try_send(());
+        }
+        if let Some(handle) = self.monitor_handle.take() {
+            handle.abort();
+        }
+        //stop watch oom event
+        if let Some(tx) = self.tx_oom_exited.as_ref() {
+            let _ = tx.try_send(());
+        }
+        if let Some(handle) = self.oom_handle.take() {
+            handle.abort();
+        }
+        let mut containers = self.containers.lock().await;
+        for (_, c) in containers.iter_mut() {
+            c.quiesce_for_pause().await;
+        }
+    }
+
+    /// Signal every container's init log forwarders to stop without waiting:
+    /// pause keeps them across the freeze, and once the VM is torn down their
+    /// reads fail -- without this they retry until the shim is reaped.
+    async fn stop_log_forward_detached(&self) {
+        let mut containers = self.containers.lock().await;
+        for (_, c) in containers.iter_mut() {
+            c.stop_log_forward_detached().await;
+        }
     }
 
     fn get_storages(&mut self) -> CResult<Vec<agent::Storage>> {
@@ -479,13 +547,9 @@ impl SandBox {
             }
         }
 
-        self.connect_agent().await?;
+        self.connect_agent_with_retry(snapshot).await?;
 
         infof!(self.log, "agent is ready");
-
-        if snapshot {
-            self.reset_guest().await?;
-        }
 
         //add vfio device
         if !self.app_snapshot_restore() {
@@ -1387,10 +1451,14 @@ impl SandBox {
             .pause_vm_to_snapshot_inner(destination_path, memory_vol_url, snapshot_type)
             .await
         {
+            // A failed pause keeps no snapshot, so the full disconnect (drained
+            // fwd, cleared client) restores the pre-change error contract.
+            let _ = self.disconnect_agent().await;
             let mut state = self.state.lock().await;
             *state = SandBoxState::Exited;
             return Err(e);
         }
+        self.stop_log_forward_detached().await;
         Ok(())
     }
 
@@ -1400,7 +1468,7 @@ impl SandBox {
         memory_vol_url: Option<String>,
         snapshot_type: SnapshotType,
     ) -> CResult<()> {
-        self.disconnect_agent(false).await?;
+        self.quiesce_agent_for_pause().await;
 
         let ch = self.ch.as_mut().unwrap().lock().await;
 
@@ -1493,7 +1561,7 @@ impl SandBox {
 
         // disconnect_agent aborts the OLD monitor_vm / watch_oom tasks
         // before we delete the VM out from under them.
-        self.disconnect_agent(true).await?;
+        self.disconnect_agent().await?;
 
         // Delete the current VM in place of a checkpoint snapshot.
         // VmDelete shuts the VM down and destroys its object; the VMM process
@@ -1550,14 +1618,7 @@ impl SandBox {
             }
         }
 
-        self.connect_agent().await?;
-
-        if self.client.is_none() {
-            errf!(self.log, "client is None in resume_vm");
-            return Err(format!("client is None"));
-        }
-
-        self.reset_guest().await?;
+        self.connect_agent_with_retry(true).await?;
 
         let client = self.client.as_ref().unwrap();
 
