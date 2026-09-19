@@ -41,6 +41,7 @@ Runnable examples demonstrating CubeSandbox features and integrations. Follow ea
 | [ivshmem](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/ivshmem) | Enable host/guest shared memory and try a ring-buffer protocol and mmap throughput benchmark. |
 | [Tencent Cloud COS Volume Plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md) | Deploy and exercise the binary or RPC COS volume plugin through its complete lifecycle. |
 | [S3-Compatible Volume Plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md) | Connect AWS S3, Tencent Cloud COS, Cloudflare R2, MinIO, or another S3-compatible backend. |
+| [JuiceFS Volume Plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/juicefs/README.md) | A POSIX file system over object storage: one file system, `--subdir` per volume, several sandboxes sharing a volume and seeing each other's writes |
 
 ## Benchmarking
 
