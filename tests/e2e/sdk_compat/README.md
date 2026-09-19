@@ -537,3 +537,99 @@ Set `SDK_E2E_KEEP_SANDBOX_ON_FAILURE=true` to preserve sandboxes while debugging
 It only preserves sandboxes of *failed* tests created through the `sdk_sandbox`
 fixture; passed and skipped tests are always cleaned up, and boundary tests that
 create sandboxes directly (via their own helpers) always clean up regardless.
+
+## Selected envd acceptance
+
+These opt-in cases use the repository CubeSandbox SDK and the normal CubeProxy
+route. The backend option chooses the SDK; the image/template chooses Go or Rust.
+Go remains the deployment and test selection default. No images are published by
+these commands. Use an existing authorized local or remote test platform.
+
+Build the [nginx example](../../../examples/cubesandbox-base-nginx/README.md) with
+explicit Go and Rust base inputs. Both should have the same Ubuntu/runtime
+packages and application. The builder must be able to read the images; a local
+Docker tag alone does not establish remote accessibility. A local builder that
+supports Docker export can use its existing
+`CUBEMASTER_NATIVE_ROOTFS_EXPORT_ENABLED=false` configuration when skopeo/umoci
+are absent. This changes image export, not sandbox or proxy semantics.
+
+Run from the repository root in an environment with `requirements.txt` installed:
+
+```bash
+export NO_PROXY=localhost,127.0.0.1,::1
+export no_proxy="$NO_PROXY"
+export CUBE_API_URL=http://127.0.0.1:3000
+export CUBE_PROXY_NODE_IP=127.0.0.1  # actual CubeProxy node, never a guest IP
+export CUBE_PROXY_PORT_HTTP=80
+export SDK_ENVD_PROVIDER=rust       # default is go
+export SDK_ENVD_COMMIT=<commit-printed-by-the-selected-build>
+export SDK_ENVD_IMAGE=<nginx-image-readable-by-the-template-builder>
+export SDK_E2E_REPORT_DIR=reports/envd/rust-chain
+python -m pytest tests/e2e/sdk_compat/cases/envd/test_public.py::test_new_template_chain \
+  --run-e2e --sdk-e2e-backends=cubesandbox -n 0
+```
+
+This case creates a new template, observes READY, creates a sandbox, verifies its
+running executable and commit, asserts envd health 204 through CubeProxy, runs
+commands and file assertions, and deletes only its own sandbox/template even on
+failure. Build errors and cleanup failures appear in `events.jsonl`. Missing
+inputs, failures, skips and zero tests are not successful acceptance.
+
+For an explicitly selected **ready** template, run each independent scenario:
+
+```bash
+export CUBE_TEMPLATE_ID=<selected-ready-template>
+python -m pytest tests/e2e/sdk_compat/cases/envd/test_public.py::test_health_identity --run-e2e --sdk-e2e-backends=cubesandbox -n 0
+python -m pytest tests/e2e/sdk_compat/cases/envd/test_public.py::test_sdk_commands --run-e2e --sdk-e2e-backends=cubesandbox -n 0
+python -m pytest tests/e2e/sdk_compat/cases/envd/test_public.py::test_sdk_files --run-e2e --sdk-e2e-backends=cubesandbox -n 0
+```
+
+Repeat with `SDK_ENVD_PROVIDER=go`, the Go commit, image and template for the
+control. Each scenario verifies identity and health before its assertions. User
+omission exercises the SDK's real root default; explicit `user` must be UID1000.
+File coverage includes UTF-8 text read, arbitrary binary **write** verified by a
+public command, empty files, shorter overwrite, both API/command directions and
+missing-file errors. It does not claim a binary SDK read API.
+
+Set `CUBE_API_KEY` only if the platform requires it; never put credentials in
+logs. For private CAs, configure `SSL_CERT_FILE` (httpx) and
+`REQUESTS_CA_BUNDLE` (requests) with your existing CA file. DNS or the configured
+CubeProxy node must preserve the normal sandbox Host routing. The component
+workflow and hermetic framework job do not count as live acceptance.
+
+### Small Go/Rust SDK timing comparison
+
+Use comparable native architecture, placement, vCPU/RAM, kernel/hypervisor,
+application/packages, logging and network routes. Record those observations,
+client/SDK versions, image/build identities and unavoidable differences alongside
+results. Avoid concurrent builds/load. Uncontrolled placement or different
+runtime configuration makes daemon attribution inconclusive.
+
+```bash
+export SDK_ENVD_GO_TEMPLATE_ID=<ready-go-template>
+export SDK_ENVD_RUST_TEMPLATE_ID=<ready-rust-template>
+export SDK_ENVD_GO_COMMIT=<go-build-commit>
+export SDK_ENVD_RUST_COMMIT=<rust-build-commit>
+export SDK_E2E_REPORT_DIR=reports/envd/performance
+unset SDK_E2E_TRACE
+python -m pytest tests/e2e/sdk_compat/cases/performance/test_envd_comparison.py \
+  --run-e2e --run-envd-performance --sdk-e2e-backends=cubesandbox -n 0
+```
+
+The performance case is deselected without its explicit flag and rejects xdist
+workers or verbose SDK traces. It owns three fresh sandbox pairs, alternates
+provider order, and measures serial short commands plus 4096/4194304-byte ASCII
+SDK writes and full text reads. Each workload retains one first call, five
+warmups and ten measured calls per pair (30 measured/provider/workload).
+Verification and JSON serialization are outside the operation timer; every
+attempt, including errors, remains in `events.jsonl`. Summary events contain
+counts, median, observed nearest-rank p95 (`ceil(.95*n)`), per-pair medians and
+4 MiB effective throughput. Rust latency reduction is `(Go-Rust)/Go`, throughput
+gain `(Rust-Go)/Go`; negative results remain visible. Inspect first-call/warmup
+records separately. Error/incomplete batches cannot support a speed claim.
+
+Reads are warm-cache; these are complete SDK/client/proxy/network/guest timings,
+not disk durability or isolated daemon cost. SDK defaults remain in effect; no
+operation retry is added. Idle/post-workload `/proc` RSS observations use the same
+one-second settling period and are not peak or whole-VM memory. Thirty correlated
+samples are a small comparison, not tail-latency certification or a CI threshold.

@@ -224,6 +224,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 ENV RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER}"
 ENV RUSTUP_UPDATE_ROOT="${RUSTUP_UPDATE_ROOT}"
 
+COPY rust-toolchain.toml /tmp/repository-rust-toolchain.toml
+
 RUN set -eux; \
     . /etc/buildenv \
     && for toolchain in "${RUST_TOOLCHAIN_HYPERVISOR}" "${RUST_TOOLCHAIN_E2BAPI}" "${RUST_TOOLCHAIN_AGENT}"; do \
@@ -231,7 +233,12 @@ RUN set -eux; \
         rustup component add rust-src clippy rustfmt rust-analyzer llvm-tools-preview --toolchain "${toolchain}"; \
         rustup target add ${TARGET_UNAME_ARCH}-unknown-linux-musl --toolchain "${toolchain}"; \
     done; \
-    rustup default "${RUST_TOOLCHAIN_DEFAULT}"
+    rustup default "${RUST_TOOLCHAIN_DEFAULT}"; \
+    repository_toolchain="$(sed -n 's/^channel = "\(.*\)"/\1/p' /tmp/repository-rust-toolchain.toml)"; \
+    test -n "${repository_toolchain}"; \
+    rustup toolchain install "${repository_toolchain}" --profile minimal \
+        --component rustfmt --component clippy; \
+    rustup target add ${TARGET_UNAME_ARCH}-unknown-linux-musl --toolchain "${repository_toolchain}"
 
 RUN mkdir -p "${CARGO_HOME}" /root/.cargo \
     && printf '[registries.crates-io]\nprotocol = "sparse"\n\n[net]\ngit-fetch-with-cli = true\n' > "${CARGO_HOME}/config.toml" \

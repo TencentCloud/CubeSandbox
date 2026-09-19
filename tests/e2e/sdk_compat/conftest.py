@@ -77,6 +77,10 @@ from framework.trace import (  # noqa: E402
 def pytest_addoption(parser: pytest.Parser) -> None:
     group = parser.getgroup("sdk compat e2e")
     group.addoption(
+        "--run-envd-performance", action="store_true", default=False,
+        help="explicitly enable the serial Go/Rust SDK comparison (requires --run-e2e)",
+    )
+    group.addoption(
         "--run-e2e",
         action="store_true",
         default=False,
@@ -170,6 +174,9 @@ def pytest_configure(config: pytest.Config):
         "requires_internet: test requires public internet access from the sandbox",
         "requires_cubeproxy: test requires CubeProxy routing to the sandbox",
         "auth: CUBE_API_KEY simple-key authentication control-plane tests",
+        "creates_template: case builds its own template; no ready default is needed",
+        "envd_acceptance: explicitly selected daemon correctness scenarios",
+        "envd_performance: opt-in serial Go/Rust SDK measurements",
     ):
         config.addinivalue_line("markers", marker)
     _verify_xdist_activated(config)
@@ -208,13 +215,34 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    performance = config.getoption("--run-envd-performance")
+    if performance:
+        if not config.getoption("--run-e2e"):
+            raise pytest.UsageError("--run-envd-performance requires --run-e2e")
+        if getattr(config.option, "numprocesses", None) or os.environ.get("PYTEST_XDIST_WORKER"):
+            raise pytest.UsageError("envd performance requires serial pytest: use -n 0")
+        if config.getoption("--sdk-e2e-trace") or _env_true("SDK_E2E_TRACE"):
+            raise pytest.UsageError("disable SDK E2E tracing for performance measurements")
+    else:
+        excluded = [item for item in items if item.get_closest_marker("envd_performance")]
+        items[:] = [item for item in items if item not in excluded]
+        config.hook.pytest_deselected(items=excluded)
     config._sdk_e2e_template_ids = {
         template_id
         for item in items
         if (template_id := _template_id_for_node(item)) is not None
     }
+    if any(item.get_closest_marker("envd_performance") for item in items):
+        for provider in ("GO", "RUST"):
+            template_id = os.environ.get(f"SDK_ENVD_{provider}_TEMPLATE_ID")
+            if template_id:
+                config._sdk_e2e_template_ids.add(template_id)
     config._sdk_e2e_default_template_needed = any(
-        _template_id_for_node(item) is None for item in items
+        _template_id_for_node(item) is None
+        and not item.get_closest_marker("creates_template")
+        and not item.get_closest_marker("framework")
+        and not item.get_closest_marker("envd_performance")
+        for item in items
     )
     volume_skip = None
     if not volume_plugin_enabled_from_env():
