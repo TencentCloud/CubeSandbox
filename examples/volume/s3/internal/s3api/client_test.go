@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/minio/minio-go/v7"
+
+	"github.com/tencentcloud/CubeSandbox/examples/volume/s3/internal/config"
 )
 
 func TestParseEndpoint(t *testing.T) {
@@ -102,4 +104,32 @@ func TestIsNotFound(t *testing.T) {
 	if IsNotFound(errors.New("dial tcp: connection refused")) {
 		t.Error("IsNotFound(non-S3 error) = true, want false")
 	}
+}
+
+// The point of the instance-role mode: with no keys configured the client
+// must ask the node's identity provider, and with keys it must use exactly
+// those and never reach for IMDS.
+func TestCredentialsFor(t *testing.T) {
+	t.Run("static keys are used verbatim", func(t *testing.T) {
+		creds := credentialsFor(&config.Config{AccessKeyID: "AK", SecretAccessKey: "SK"})
+		value, err := creds.Get()
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		if value.AccessKeyID != "AK" || value.SecretAccessKey != "SK" {
+			t.Fatalf("Get() = %q/%q, want AK/SK", value.AccessKeyID, value.SecretAccessKey)
+		}
+		if creds.IsExpired() {
+			t.Fatal("static credentials must not start expired")
+		}
+	})
+
+	t.Run("no keys means the instance role", func(t *testing.T) {
+		creds := credentialsFor(&config.Config{})
+		// An IAM provider holds nothing until it has asked IMDS, which is what
+		// distinguishes it here without making the test reach the network.
+		if !creds.IsExpired() {
+			t.Fatal("instance-role credentials must start unresolved, not static")
+		}
+	})
 }

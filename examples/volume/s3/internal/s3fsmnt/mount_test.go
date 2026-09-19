@@ -4,7 +4,9 @@
 package s3fsmnt
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,6 +63,35 @@ func TestMountArgs(t *testing.T) {
 	// override the defaults above.
 	if args[len(args)-1] != "-ouse_path_request_style" {
 		t.Errorf("extra opts must be appended last, got %v", args)
+	}
+}
+
+func TestMountArgsInstanceRole(t *testing.T) {
+	m := testManager(t)
+	m.cfg.AccessKeyID, m.cfg.SecretAccessKey = "", ""
+	args := m.MountArgs("/data/cube-shared/volume/s3-v1", "v1")
+
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-oiam_role=auto") {
+		t.Errorf("args missing -oiam_role=auto: %v", args)
+	}
+	if strings.Contains(joined, "passwd_file") {
+		t.Errorf("args must not reference a passwd file without static keys: %v", args)
+	}
+	if args[len(args)-1] != "-ouse_path_request_style" {
+		t.Errorf("extra opts must be appended last, got %v", args)
+	}
+}
+
+func TestEnsurePasswdFileSkippedForInstanceRole(t *testing.T) {
+	m := testManager(t)
+	m.cfg.AccessKeyID, m.cfg.SecretAccessKey = "", ""
+
+	if err := m.EnsurePasswdFile(); err != nil {
+		t.Fatalf("EnsurePasswdFile: %v", err)
+	}
+	if _, err := os.Stat(m.cfg.PasswdFile); !os.IsNotExist(err) {
+		t.Errorf("passwd file written without static keys: %v", err)
 	}
 }
 
@@ -227,5 +258,28 @@ func TestMountPoint(t *testing.T) {
 	m := testManager(t)
 	if got, want := m.MountPoint("/base", "v1"), "/base/s3-v1"; got != want {
 		t.Errorf("MountPoint = %q, want %q", got, want)
+	}
+}
+
+// A node that used to run with static keys keeps the s3fs credential file
+// until something removes it; in instance-role mode nothing reads it again,
+// so leaving it would be leaving a plaintext secret on every such host.
+func TestEnsurePasswdFileRemovesStaleFileForInstanceRole(t *testing.T) {
+	passwd := filepath.Join(t.TempDir(), ".passwd-s3fs-volume-bucket")
+	if err := os.WriteFile(passwd, []byte("bucket:AK:SK\n"), 0o600); err != nil {
+		t.Fatalf("seed passwd file: %v", err)
+	}
+
+	m := &Manager{cfg: &config.Config{Bucket: "bucket", PasswdFile: passwd}}
+	if err := m.EnsurePasswdFile(); err != nil {
+		t.Fatalf("EnsurePasswdFile() error = %v", err)
+	}
+	if _, err := os.Stat(passwd); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("stale passwd file still there: %v", err)
+	}
+
+	// Already absent is not an error.
+	if err := m.EnsurePasswdFile(); err != nil {
+		t.Fatalf("second EnsurePasswdFile() error = %v", err)
 	}
 }

@@ -144,12 +144,25 @@ sudo install -m 0600 volume-s3.conf.example \
 
 | 字段 | 说明 | 是否必填 |
 |------|------|----------|
-| `ACCESS_KEY_ID` | 访问密钥 ID | 是 |
-| `SECRET_ACCESS_KEY` | 密钥 | 是 |
+| `ACCESS_KEY_ID` | 访问密钥 ID | 是¹ |
+| `SECRET_ACCESS_KEY` | 密钥 | 是¹ |
 | `BUCKET` | 存放所有 Volume 的存储桶 | 是 |
 | `ENDPOINT` | S3 兼容 Endpoint 地址（见下表） | 是 |
 | `REGION` | SigV4 签名地域，默认 `us-east-1` | 否 |
 | `S3FS_EXTRA_OPTS` | 额外的 s3fs 挂载选项，空格分隔（如 MinIO 需要的 `-ouse_path_request_style`）。多选项值可以加引号以便该文件仍能被 `source`，插件会自行剥离引号。设置了 `-ouse_path_request_style` 时，插件自己的 S3 客户端也会切换为 path-style 寻址。 | 否 |
+
+¹`ACCESS_KEY_ID` 和 `SECRET_ACCESS_KEY` 同时留空时，使用节点自身的云身份代替静态密钥，例如 AWS 上的 EC2 实例角色：控制面客户端通过实例元数据服务取凭证，s3fs 以 `-oiam_role=auto` 挂载，不写 passwd 文件。只填其中一个会报错。
+
+> **哪些部署方式能用。** 只有本页的手动安装。`deploy/one-click/install.sh` 在设置了 `CUBE_S3_ENDPOINT`
+> 而密钥为空时会直接退出，并且每次安装和升级都会重新生成 `volume-s3.conf`；Helm chart 同样要求
+> `volumeS3.accessKeyId` / `secretAccessKey`，除非用 `volumeS3.existingSecret` 提供整个文件。
+>
+> **这是哪一种身份。** 密钥留空指的是 EC2 实例角色（经 IMDS），不是 AWS 的完整凭证链：
+> `AWS_ACCESS_KEY_ID`、`~/.aws/credentials`、IRSA / ECS web identity 都不会被使用。所以上面表里的
+> 其他后端（COS、R2、MinIO）仍然需要静态密钥对。
+>
+> **角色要配在哪些机器上。** 每一台 CubeMaster 和 Cubelet 上都要有：create/destroy 用 CubeMaster 的身份，
+> attach 用节点的身份。权限范围应当限定到 `BUCKET`——实例角色通常比前置条件要求的那把按桶授权的密钥宽得多。
 
 常见后端：
 
