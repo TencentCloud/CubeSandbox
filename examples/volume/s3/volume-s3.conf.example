@@ -4,6 +4,7 @@
 # Holds a plaintext secret: keep it root-owned and chmod 600.
 
 # Access key pair with read/write permission on BUCKET.
+# Leave both keys empty to use the node's cloud identity (e.g. an EC2 instance role).
 ACCESS_KEY_ID=<your-access-key-id>
 SECRET_ACCESS_KEY=<your-secret-access-key>
 

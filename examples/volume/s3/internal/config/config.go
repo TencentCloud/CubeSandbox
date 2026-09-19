@@ -11,6 +11,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,15 +144,26 @@ func Load(path string) (*Config, error) {
 		cfg.PasswdFile = "/etc/cube/.passwd-s3fs-volume-" + cfg.Bucket
 	}
 
+	if cfg.UseInstanceRole() {
+		// Unknown keys are dropped silently, so a misspelled ACCESS_KEY_ID would
+		// otherwise pick the node's identity without anyone noticing.
+		log.Printf("volume-s3: no ACCESS_KEY_ID in %s; using the EC2 instance role (IMDS)", path)
+	}
 	return cfg, nil
 }
 
+// UseInstanceRole reports whether no static keys are configured, in which case
+// credentials come from the EC2 instance role (IMDS).
+func (c *Config) UseInstanceRole() bool { return c.AccessKeyID == "" }
+
 func (c *Config) validate() error {
 	switch {
-	case c.AccessKeyID == "":
-		return fmt.Errorf("config: ACCESS_KEY_ID is empty")
-	case c.SecretAccessKey == "":
-		return fmt.Errorf("config: SECRET_ACCESS_KEY is empty")
+	case (c.AccessKeyID == "") != (c.SecretAccessKey == ""):
+		blank := "ACCESS_KEY_ID"
+		if c.AccessKeyID != "" {
+			blank = "SECRET_ACCESS_KEY"
+		}
+		return fmt.Errorf("config: %s is empty (set both keys, or leave both empty to use the EC2 instance role via IMDS)", blank)
 	case c.Bucket == "":
 		return fmt.Errorf("config: BUCKET is empty")
 	case c.Endpoint == "":
