@@ -4,9 +4,9 @@
 # Contract:
 #   1. Always start envd in the background on ${ENVD_PORT:-49983} so that
 #      CubeMaster's readiness probe (:49983/health) passes within ~1s.
-#   2. If a user CMD is provided (i.e. $# > 0), exec it as the foreground
-#      process; envd stays alive in the background. On SIGTERM/SIGINT we
-#      forward the signal to the user process; envd is reaped by tini.
+#   2. If a user CMD is provided (i.e. $# > 0), run it as the foreground
+#      workload while monitoring envd. An unexpected envd exit is logged and
+#      terminates the user process.
 #   3. If no CMD is provided, wait on envd as the foreground process so the
 #      container stays up as a pure envd sandbox.
 #
@@ -17,6 +17,9 @@
 #   ENVD_LOG_FILE   Where to redirect envd stdout/stderr (default:
 #                   /var/log/envd.log). Set to "-" to inherit the container
 #                   stdio.
+#   ENVD_LOG_LEVEL  Maximum tracing level: error, warn, info, debug, or trace
+#                   (default: info).
+#   ENVD_LOG_FORMAT Log format: pretty or json (default: pretty).
 
 set -eu
 
@@ -49,34 +52,81 @@ start_envd() {
 
 start_envd
 
-if [ "$#" -eq 0 ]; then
-    # No user command: keep envd as the foreground process. tini is PID 1,
-    # so we simply wait for envd to exit (or be signalled).
-    wait "${ENVD_PID}"
-    exit $?
-fi
-
-# User command provided: forward termination signals so the user process can
-# shut down cleanly; envd will be reaped by tini when the container stops.
 USER_PID=""
+SHUTTING_DOWN=0
+
+process_is_running() {
+    pid="$1"
+    [ -r "/proc/${pid}/stat" ] || return 1
+    stat="$(cat "/proc/${pid}/stat" 2>/dev/null || true)"
+    [ -n "${stat}" ] || return 1
+    # Field 2 (comm) is wrapped in parens and may itself contain spaces or
+    # parens, so resume parsing after the last ')': the next field is state.
+    rest="${stat##*) }"
+    state="${rest%% *}"
+    [ "${state:-}" != "Z" ]
+}
+
+stop_envd() {
+    if [ -n "${ENVD_PID}" ]; then
+        kill -s TERM "${ENVD_PID}" 2>/dev/null || true
+    fi
+}
+
 forward_signal() {
     sig="$1"
+    SHUTTING_DOWN=1
+    stop_envd
     if [ -n "${USER_PID}" ]; then
         kill -s "${sig}" "${USER_PID}" 2>/dev/null || true
     fi
 }
 
 trap 'forward_signal TERM' TERM
-trap 'forward_signal INT'  INT
-trap 'forward_signal HUP'  HUP
+trap 'forward_signal INT' INT
+trap 'forward_signal HUP' HUP
+
+if [ "$#" -eq 0 ]; then
+    set +e
+    wait "${ENVD_PID}"
+    rc=$?
+    set -e
+    if [ "${SHUTTING_DOWN}" -eq 0 ]; then
+        echo "cube-entrypoint: envd exited unexpectedly (pid=${ENVD_PID}, exit_code=${rc})" >&2
+    fi
+    exit "${rc}"
+fi
 
 "$@" &
 USER_PID=$!
 echo "cube-entrypoint: exec user command (pid=${USER_PID}): $*" >&2
 
-# Wait on the user command; propagate its exit status.
+while process_is_running "${ENVD_PID}"; do
+    if ! process_is_running "${USER_PID}"; then
+        set +e
+        wait "${USER_PID}"
+        user_rc=$?
+        set -e
+        SHUTTING_DOWN=1
+        stop_envd
+        set +e
+        wait "${ENVD_PID}"
+        set -e
+        exit "${user_rc}"
+    fi
+    sleep 1
+done
+
 set +e
-wait "${USER_PID}"
-rc=$?
+wait "${ENVD_PID}"
+envd_rc=$?
 set -e
-exit "${rc}"
+if [ "${SHUTTING_DOWN}" -eq 0 ]; then
+    echo "cube-entrypoint: envd exited unexpectedly (pid=${ENVD_PID}, exit_code=${envd_rc})" >&2
+    kill -s TERM "${USER_PID}" 2>/dev/null || true
+fi
+wait "${USER_PID}" 2>/dev/null || true
+if [ "${SHUTTING_DOWN}" -eq 0 ]; then
+    exit 1
+fi
+exit "${envd_rc}"

@@ -132,9 +132,27 @@ type CommandOptions struct {
 }
 
 type CommandResult struct {
-	Stdout   string
-	Stderr   string
-	ExitCode int
+	Stdout      string
+	Stderr      string
+	ExitCode    int
+	Termination *TerminationInfo
+}
+
+type TerminationReason string
+
+const (
+	TerminationExited  TerminationReason = "exited"
+	TerminationSignal  TerminationReason = "signal"
+	TerminationTimeout TerminationReason = "timeout"
+	TerminationOOM     TerminationReason = "oom"
+	TerminationUnknown TerminationReason = "unknown"
+)
+
+type TerminationInfo struct {
+	Reason     TerminationReason `json:"reason"`
+	Signal     *int              `json:"signal,omitempty"`
+	SignalName string            `json:"signalName,omitempty"`
+	CoreDumped *bool             `json:"coreDumped,omitempty"`
 }
 
 type Logs struct {

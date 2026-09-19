@@ -172,11 +172,12 @@ type PtyHandle struct {
 	body    io.ReadCloser
 	once    sync.Once
 
-	mu       sync.Mutex
-	exitCode *int
-	errMsg   string
-	exited   bool
-	readErr  error
+	mu          sync.Mutex
+	exitCode    *int
+	errMsg      string
+	exited      bool
+	termination *TerminationInfo
+	readErr     error
 }
 
 // PID returns the PTY process ID.
@@ -203,6 +204,12 @@ func (h *PtyHandle) ErrorMessage() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.errMsg
+}
+
+func (h *PtyHandle) Termination() *TerminationInfo {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.termination
 }
 
 // Kill sends SIGKILL to this PTY. See Pty.Kill.
@@ -323,6 +330,7 @@ func (h *PtyHandle) recordEnd(end *processEndEvent) {
 	if end.Error != "" {
 		h.errMsg = end.Error
 	}
+	h.termination = end.Termination
 	h.exited = true
 }
 

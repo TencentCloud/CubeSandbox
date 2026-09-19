@@ -29,6 +29,20 @@ CUBELET_COW_THIRD_PARTY_DIR ?= $(ROOT_DIR)/Cubelet/third_party/cubecow
 COW_STATICLIB ?= $(CUBELET_COW_THIRD_PARTY_DIR)/lib/libcubecow.a
 COW_HEADER ?= $(CUBELET_COW_THIRD_PARTY_DIR)/include/cubecow.h
 TARGET_ARCH ?= $(shell uname -m | sed 's/^arm64$$/aarch64/')
+ENVD_IMPL ?= cube-envd
+ENVD_REF ?= 2026.16
+GOPROXY ?= https://goproxy.cn,direct
+ENVD_UPSTREAM_REPO ?= https://github.com/e2b-dev/infra.git
+CUBE_BASE_IMAGE ?= cubesandbox-base:local
+CUBE_BASE_PLATFORM ?= linux/amd64
+
+ifeq ($(ENVD_IMPL),cube-envd)
+CUBE_BASE_DOCKERFILE := docker/Dockerfile.cube-base
+else ifeq ($(ENVD_IMPL),upstream-e2b)
+CUBE_BASE_DOCKERFILE := docker/Dockerfile.cube-base-upstream
+else
+$(error ENVD_IMPL must be cube-envd or upstream-e2b)
+endif
 
 # ---- Guest kernel image build ----
 # `make kernel KERNEL_SRC=/path/to/linux` builds a vmlinux from the in-tree
@@ -53,7 +67,8 @@ RUST_PROJECT_DIRS := \
 	$(ROOT_DIR)/agent \
 	$(ROOT_DIR)/guest-init \
 	$(ROOT_DIR)/cubecow \
-	$(ROOT_DIR)/hypervisor
+	$(ROOT_DIR)/hypervisor \
+	$(ROOT_DIR)/cube-envd
 
 # Cargo workspaces visited by `make clean`.
 RUST_CARGO_CLEAN_DIRS := \
@@ -91,6 +106,53 @@ BINARIES := \
 	cubevsmapdump \
 	shim \
 	#
+
+.PHONY: cube-envd cube-envd-test cube-envd-lint build-cube-base-image smoke-cube-base-image
+cube-envd:
+	cd cube-envd && CUBE_ENVD_COMMIT=$(CUBE_COMMIT) cargo build --release
+
+cube-envd-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-envd && cargo test --release'
+
+cube-envd-lint: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/cube-envd && cargo clippy --release --all-targets -- -D warnings'
+
+build-cube-base-image:
+	docker buildx build --load --platform "$(CUBE_BASE_PLATFORM)" \
+		-f "$(CUBE_BASE_DOCKERFILE)" \
+		-t "$(CUBE_BASE_IMAGE)" \
+		--build-arg "ENVD_IMPL=$(ENVD_IMPL)" \
+		--build-arg "ENVD_REF=$(ENVD_REF)" \
+		--build-arg "GOPROXY=$(GOPROXY)" \
+		--build-arg "ENVD_UPSTREAM_REPO=$(ENVD_UPSTREAM_REPO)" \
+		--build-arg "CUBE_ENVD_COMMIT=$(CUBE_COMMIT)" \
+		.
+
+smoke-cube-base-image: build-cube-base-image
+	@set -eu; \
+	cid=$$(docker run -d --rm "$(CUBE_BASE_IMAGE)"); \
+	trap 'docker rm -f "$$cid" >/dev/null 2>&1 || true' EXIT; \
+	ok=; \
+	for attempt in 1 2 3 4 5 6 7 8 9 10; do \
+		code=$$(docker exec "$$cid" curl -s -o /dev/null -w "%{http_code}" \
+			http://127.0.0.1:49983/health || true); \
+		echo "attempt $$attempt: envd /health => $$code"; \
+		if [ "$$code" = "204" ]; then ok=yes; break; fi; \
+		sleep 1; \
+	done; \
+	test -n "$$ok"; \
+	version=$$(docker exec "$$cid" /usr/bin/envd -version); \
+	commit=$$(docker exec "$$cid" /usr/bin/envd -commit); \
+	test -n "$$version"; \
+	test -n "$$commit"; \
+	if [ "$(ENVD_IMPL)" = "cube-envd" ]; then \
+		echo "$$version" | grep -q '^cube-envd '; \
+	fi; \
+	label=$$(docker inspect -f '{{ index .Config.Labels "io.cubesandbox.envd.impl" }}' "$(CUBE_BASE_IMAGE)"); \
+	expected_label=cube-envd-rust; \
+	if [ "$(ENVD_IMPL)" = "upstream-e2b" ]; then expected_label=upstream-e2b; fi; \
+	test "$$label" = "$$expected_label"; \
+	echo "smoke-cube-base-image: all checks passed"
 
 # All versioned binaries should consume the canonical CUBE_VERSION /
 # CUBE_COMMIT / CUBE_BUILD_TIME triplet. Keep the root Makefile's ad-hoc
@@ -138,6 +200,11 @@ help:
 	@printf "  builder-image  Build unified builder image (%s)\n" "$(BUILDER_IMAGE)"
 	@printf "  builder-shell  Start interactive shell with persisted HOME (%s)\n" "$(BUILDER_HOME)"
 	@printf "  builder-run    Run command inside builder image (BUILDER_CMD=...)\n"
+	@printf "  cube-envd      Build cube-envd in WSL2/Cargo\n"
+	@printf "  cube-envd-test Run cube-envd tests in WSL2/Cargo\n"
+	@printf "  cube-envd-lint Run cube-envd clippy with -D warnings\n"
+	@printf "  build-cube-base-image Build base image (ENVD_IMPL=$(ENVD_IMPL))\n"
+	@printf "  smoke-cube-base-image Build and smoke-test base image\n"
 	@printf "  cubemaster    Build cubemaster and cubemastercli in Docker\n"
 	@printf "  cubetemplatecenter Build templatecenter in Docker\n"
 	@printf "  cubelet       Build cubelet and cubecli in Docker\n"

@@ -36,10 +36,11 @@ type processConfig struct {
 }
 
 type processStartResult struct {
-	PID      int
-	Stdout   string
-	Stderr   string
-	ExitCode int
+	PID         int
+	Stdout      string
+	Stderr      string
+	ExitCode    int
+	Termination *TerminationInfo
 }
 
 type processStartResponse struct {
@@ -64,11 +65,12 @@ type processDataEvent struct {
 }
 
 type processEndEvent struct {
-	ExitCode      *int   `json:"exitCode,omitempty"`
-	ExitCodeSnake *int   `json:"exit_code,omitempty"`
-	Exited        bool   `json:"exited,omitempty"`
-	Status        string `json:"status,omitempty"`
-	Error         string `json:"error,omitempty"`
+	ExitCode      *int             `json:"exitCode,omitempty"`
+	ExitCodeSnake *int             `json:"exit_code,omitempty"`
+	Exited        bool             `json:"exited,omitempty"`
+	Status        string           `json:"status,omitempty"`
+	Error         string           `json:"error,omitempty"`
+	Termination   *TerminationInfo `json:"termination,omitempty"`
 }
 
 func (s *Sandbox) startProcess(ctx context.Context, payload processStartRequest, opts CommandOptions) (*processStartResult, error) {
@@ -324,8 +326,13 @@ func parseProcessStartStream(r io.Reader) (*processStartResult, error) {
 			}
 		}
 		if response.Event.End != nil {
+			result.Termination = response.Event.End.Termination
 			exitCode, ok := response.Event.End.exitCode()
 			if !ok {
+				// A missing exit code is always abnormal: a server-side
+				// timeout kill reports exitCode:null plus an error, and the
+				// Python/Node SDKs surface it as an error too. Never report
+				// success for a command that had no exit code.
 				if response.Event.End.Error != "" {
 					return nil, fmt.Errorf("process failed: %s", response.Event.End.Error)
 				}

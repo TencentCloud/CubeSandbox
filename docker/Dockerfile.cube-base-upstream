@@ -1,0 +1,89 @@
+ARG ENVD_REF=2026.16
+ARG GO_VERSION=1.25
+ARG GOPROXY=https://goproxy.cn,direct
+ARG UBUNTU_VERSION=22.04
+ARG TARGETARCH
+
+FROM golang:${GO_VERSION}-bookworm AS envd-builder
+
+ARG ENVD_REF
+ARG GOPROXY
+ARG ENVD_UPSTREAM_REPO=https://github.com/e2b-dev/infra.git
+
+ENV GOPROXY=${GOPROXY}
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+RUN for attempt in 1 2 3; do \
+        rm -rf infra; \
+        if GIT_HTTP_VERSION=HTTP/1.1 \
+           GIT_HTTP_LOW_SPEED_LIMIT=1 \
+           GIT_HTTP_LOW_SPEED_TIME=300 \
+           git clone --depth 1 --branch "${ENVD_REF}" "${ENVD_UPSTREAM_REPO}" infra; then \
+            break; \
+        fi; \
+        test "${attempt}" -lt 3 || exit 1; \
+        sleep 5; \
+    done
+
+WORKDIR /src/infra/packages/envd
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    commit_sha="$(git -C /src/infra rev-parse --short HEAD)" \
+    && mkdir -p /out \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
+       go build -a \
+           -ldflags "-X=main.commitSHA=${commit_sha} -s -w" \
+           -o /out/envd \
+           . \
+    && chmod +x /out/envd \
+    && /out/envd -version \
+    && /out/envd -commit
+
+FROM ubuntu:${UBUNTU_VERSION}
+
+ARG ENVD_REF
+ARG ENVD_IMPL=upstream-e2b
+
+ENV ENVD_REF=${ENVD_REF} \
+    ENVD_IMPL=${ENVD_IMPL} \
+    ENVD_PORT=49983 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        sudo \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --uid 1000 --shell /bin/bash user \
+    && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/user \
+    && chmod 0440 /etc/sudoers.d/user
+
+COPY --from=envd-builder /out/envd /usr/bin/envd
+COPY docker/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
+
+RUN chmod +x /usr/bin/envd /usr/local/bin/cube-entrypoint.sh \
+    && mkdir -p /var/log \
+    && printf '%s\n' "${ENVD_REF}" > /etc/cubesandbox-envd-ref \
+    && /usr/bin/envd -version \
+    && /usr/bin/envd -commit
+
+LABEL org.opencontainers.image.source="https://github.com/TencentCloud/CubeSandbox" \
+      org.opencontainers.image.title="cubesandbox-base" \
+      org.opencontainers.image.description="CubeSandbox base image with envd compiled from upstream" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      io.cubesandbox.envd.impl="upstream-e2b"
+
+EXPOSE 49983
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/cube-entrypoint.sh"]
+CMD []

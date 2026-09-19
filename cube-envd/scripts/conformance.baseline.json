@@ -1,0 +1,76 @@
+{
+  "envs_keys": [],
+  "files_not_modified": 304,
+  "files_range": {
+    "body": "2345",
+    "contentRange": "bytes 2-5/10",
+    "status": 206
+  },
+  "files_range_invalid": 416,
+  "files_read": "0123456789",
+  "files_write_status": 200,
+  "health_status": 204,
+  "listdir": [
+    "d",
+    "f.txt"
+  ],
+  "makedir_status": 200,
+  "metrics_keys": [
+    "cpu_count",
+    "cpu_used_pct",
+    "disk_total",
+    "disk_used",
+    "mem_cache",
+    "mem_total",
+    "mem_total_mib",
+    "mem_used",
+    "mem_used_mib",
+    "ts"
+  ],
+  "process_exit": {
+    "exitCode": 4,
+    "exited": true,
+    "reason": "exited",
+    "status": "exit status 4",
+    "stdout": "out"
+  },
+  "process_signal": {
+    "exitCode": -1,
+    "exited": false,
+    "reason": "signal",
+    "signal": 9,
+    "signalName": "SIGKILL",
+    "status": "signal: killed"
+  },
+  "pull_watch_create": "EVENT_TYPE_CREATE",
+  "remove_watcher_status": 200,
+  "stat": {
+    "keys": [
+      "group",
+      "mode",
+      "modifiedTime",
+      "name",
+      "owner",
+      "path",
+      "permissions",
+      "size",
+      "type"
+    ],
+    "permissions_prefix": "d",
+    "type": "FILE_TYPE_DIRECTORY"
+  },
+  "stat_missing_status": 404,
+  "status": {
+    "keys": [
+      "commit",
+      "port",
+      "ready",
+      "service",
+      "uptimeSeconds",
+      "version"
+    ],
+    "ready": true,
+    "service": "cube-envd"
+  },
+  "watch_create": "EVENT_TYPE_CREATE"
+}

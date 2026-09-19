@@ -69,7 +69,7 @@ if err != nil {
 fmt.Println(result.Stdout, result.Stderr, result.ExitCode)
 ```
 
-`Commands.Run` starts `/bin/bash -l -c <command>` through envd's `process.Process/Start` API and returns stdout, stderr, and the `EndEvent` exit code. Callers are still responsible for treating untrusted shell input carefully.
+`Commands.Run` starts `/bin/bash -l -c <command>` through envd's `process.Process/Start` API and returns stdout, stderr, the `EndEvent` exit code, and structured termination information. Callers are still responsible for treating untrusted shell input carefully.
 
 ## PTY (interactive terminal)
 
@@ -120,11 +120,18 @@ _ = killed
 | `handle.Wait(onData)` | Block until exit, return the exit code; surfaces envd errors (e.g. `signal: killed`). |
 | `handle.Disconnect()` | Stop receiving output without killing the PTY. |
 | `handle.PID()` / `ExitCode()` / `ErrorMessage()` | PTY process ID; exit code (returns `0, false` until known); and envd end error. |
+| `handle.Termination()` | Structured reason (`exited`, `signal`, `timeout`, `oom`, or `unknown`), signal number/name, and core-dump flag when reported. |
 | `handle.Kill` / `SendStdin` / `Resize` | Per-handle shortcuts that target this PTY's PID. |
 
 Consume output via **either** `Output()` **or** `Wait(onData)`, not both — they share one stream.
 
 `PtyCreateOptions.Timeout` / `PtyConnectOptions.Timeout` (default 60s, `<= 0` uses the default) is both sent to envd as `Connect-Timeout-Ms` and enforced client-side as an idle abort that resets on every received frame; on expiry `Wait` returns an "idle" timeout error.
+
+`CommandResult.Termination` and `PtyHandle.Termination()` expose the envd
+`EndEvent.termination` object. The legacy exit code, status, and error fields
+remain available for compatibility. OOM classification is reported when Linux
+cgroup accounting confirms a memory-limit event (`memory.events` on cgroup v2
+or `memory.oom_control` on cgroup v1, with `memory.failcnt` as a fallback).
 
 ## Files
 

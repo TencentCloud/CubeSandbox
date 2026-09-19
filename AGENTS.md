@@ -19,7 +19,7 @@ AI agents MUST NOT add Signed-off-by tags. Only humans can legally certify the D
 Assisted-by: AGENT_NAME:MODEL_VERSION
 ```
 
-- If the commit/PR was **fully completed autonomously by an AI agent** (without human authoring), include instead:
+- If the commit/PR was **human-assisted by an AI agent** (without human authoring), include instead:
 
 ```
 Autonomously-by: AGENT_NAME:MODEL_VERSION

@@ -534,9 +534,10 @@ func TestRunCodeUsesConfiguredProxyScheme(t *testing.T) {
 func TestCommandsRun(t *testing.T) {
 	starter := &fakeProcessStarter{
 		result: &processStartResult{
-			Stdout:   "hello\nworld\n",
-			Stderr:   "warn\n",
-			ExitCode: 0,
+			Stdout:      "hello\nworld\n",
+			Stderr:      "warn\n",
+			ExitCode:    0,
+			Termination: &TerminationInfo{Reason: TerminationExited},
 		},
 	}
 	commands := &Commands{starter: starter}
@@ -566,6 +567,9 @@ func TestCommandsRun(t *testing.T) {
 	}
 	if result.Stdout != "hello\nworld\n" || result.Stderr != "warn\n" || result.ExitCode != 0 {
 		t.Fatalf("result=%#v", result)
+	}
+	if result.Termination == nil || result.Termination.Reason != TerminationExited {
+		t.Fatalf("termination=%#v", result.Termination)
 	}
 
 	starter = &fakeProcessStarter{
@@ -734,6 +738,23 @@ func TestProcessEndEventExitCode(t *testing.T) {
 				t.Fatalf("exitCode()=(%d,%v), want (%d,%v)", got, ok, tc.code, tc.ok)
 			}
 		})
+	}
+}
+
+func TestProcessEndEventTermination(t *testing.T) {
+	var response processStartResponse
+	if err := json.Unmarshal([]byte(`{"event":{"end":{"exitCode":-1,"exited":false,"status":"signal: segmentation fault","termination":{"reason":"signal","signal":11,"signalName":"SIGSEGV","coreDumped":true}}}}`), &response); err != nil {
+		t.Fatalf("unmarshal process end event: %v", err)
+	}
+	if response.Event == nil || response.Event.End == nil || response.Event.End.Termination == nil {
+		t.Fatalf("termination missing: %#v", response)
+	}
+	termination := response.Event.End.Termination
+	if termination.Reason != TerminationSignal || termination.Signal == nil || *termination.Signal != 11 || termination.SignalName != "SIGSEGV" {
+		t.Fatalf("termination=%#v", termination)
+	}
+	if termination.CoreDumped == nil || !*termination.CoreDumped {
+		t.Fatalf("core dumped=%v", termination.CoreDumped)
 	}
 }
 

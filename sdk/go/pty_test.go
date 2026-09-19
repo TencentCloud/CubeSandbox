@@ -177,7 +177,7 @@ func TestPtyWaitSurfacesEndError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", connectContentType)
 		w.Write(connectEnvelope(0, `{"event":{"start":{"pid":7}}}`))
-		w.Write(connectEnvelope(0, `{"event":{"end":{"error":"signal: killed"}}}`))
+		w.Write(connectEnvelope(0, `{"event":{"end":{"error":"signal: killed","termination":{"reason":"signal","signal":9,"signalName":"SIGKILL"}}}}`))
 		w.Write(connectEnvelope(connectEndStreamFlag, `{}`))
 	}))
 	defer server.Close()
@@ -193,6 +193,10 @@ func TestPtyWaitSurfacesEndError(t *testing.T) {
 	}
 	if handle.ErrorMessage() != "signal: killed" {
 		t.Fatalf("ErrorMessage=%q", handle.ErrorMessage())
+	}
+	termination := handle.Termination()
+	if termination == nil || termination.Reason != TerminationSignal || termination.Signal == nil || *termination.Signal != 9 {
+		t.Fatalf("Termination=%#v", termination)
 	}
 }
 

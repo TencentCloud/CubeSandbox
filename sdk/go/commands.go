@@ -40,8 +40,9 @@ func (c *Commands) Run(ctx context.Context, cmd string, opts CommandOptions) (*C
 	}
 
 	return &CommandResult{
-		Stdout:   process.Stdout,
-		Stderr:   process.Stderr,
-		ExitCode: process.ExitCode,
+		Stdout:      process.Stdout,
+		Stderr:      process.Stderr,
+		ExitCode:    process.ExitCode,
+		Termination: process.Termination,
 	}, nil
 }
