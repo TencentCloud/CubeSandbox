@@ -942,6 +942,11 @@ pub struct DeviceManager {
     // Possible handle to the virtio-balloon device
     balloon: Option<Arc<Mutex<virtio_devices::Balloon>>>,
 
+    // Handle to the virtio-vsock device, used by the pause path's host
+    // socket handoff
+    vsock_device:
+        Option<Arc<Mutex<virtio_devices::Vsock<virtio_devices::vsock::VsockUnixBackend>>>>,
+
     // Virtio Device activation EventFd to allow the VMM thread to trigger device
     // activation and thus start the threads from the VMM thread
     activate_evt: EventFd,
@@ -1117,6 +1122,7 @@ impl DeviceManager {
             seccomp_action,
             numa_nodes,
             balloon: None,
+            vsock_device: None,
             activate_evt: activate_evt
                 .try_clone()
                 .map_err(DeviceManagerError::EventFd)?,
@@ -2971,6 +2977,11 @@ impl DeviceManager {
             )
             .map_err(DeviceManagerError::CreateVirtioVsock)?,
         ));
+        // Track only the boot vsock (the device a same-ID resume rebinds);
+        // a hot-plugged one must not take over the pause handoff.
+        if self.vsock_device.is_none() {
+            self.vsock_device = Some(Arc::clone(&vsock_device));
+        }
 
         // Fill the device tree with a new node. In case of restore, we
         // know there is nothing to do, so we can simply override the
@@ -2988,6 +2999,32 @@ impl DeviceManager {
             pci_segment: vsock_cfg.pci_segment,
             dma_handler: None,
         })
+    }
+
+    /// Pause-path handoff of the vsock host socket: remove the file inside
+    /// the RPC and suppress the teardown's later unlink.
+    pub fn pause_remove_vsock_host_sock(&mut self) {
+        if let Some(vsock) = &self.vsock_device {
+            vsock.lock().unwrap().remove_host_sock_for_pause();
+        }
+    }
+
+    /// Stop the virtio devices' worker threads. The net workers exit and
+    /// release their tap fds; devices without a shutdown implementation
+    /// keep their workers until the pause teardown drops them.
+    pub fn stop_virtio_device_threads(&mut self) {
+        // Wake the parked workers first, or the joins never return. On a
+        // resume error leave everything to the teardown: joining workers
+        // that are still parked would wedge the control loop.
+        if let Err(e) = self.resume() {
+            error!("Error resuming DeviceManager: {:?}", e);
+            return;
+        }
+        // Drain so DeviceManager::drop does not shutdown() the devices a
+        // second time -- not every implementation is idempotent.
+        for handle in self.virtio_devices.drain(..) {
+            handle.virtio_device.lock().unwrap().shutdown();
+        }
     }
 
     fn make_virtio_vsock_devices(&mut self) -> DeviceManagerResult<Vec<MetaVirtioDevice>> {
@@ -4293,6 +4330,22 @@ impl DeviceManager {
 
             self.virtio_devices
                 .retain(|handler| !Arc::ptr_eq(&handler.virtio_device, &virtio_device));
+
+            // Clear the pause path's handle only when the ejected device is
+            // the tracked one (identity, not device type).
+            let is_tracked_vsock = self
+                .vsock_device
+                .as_ref()
+                .map(|v| {
+                    Arc::ptr_eq(
+                        &(Arc::clone(v) as Arc<Mutex<dyn virtio_devices::VirtioDevice>>),
+                        &virtio_device,
+                    )
+                })
+                .unwrap_or(false);
+            if is_tracked_vsock {
+                self.vsock_device = None;
+            }
         }
 
         event!(

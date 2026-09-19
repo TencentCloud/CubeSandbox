@@ -574,9 +574,9 @@ impl Task for TaskService {
             self.log.clone(),
         );
         let mut sb = self.sandbox.lock().await;
-        // After PauseToSnapshot the MicroVM is already gone; Cubelet Destroy may
-        // still call Delete to reap the task. Treat delete-while-paused as
-        // success and exit the shim (same as shutdown).
+        // Delete after PauseToSnapshot reaps the task: the pause RPC
+        // already released the host-named fds (tap, vsock path), so answer
+        // immediately and exit the shim; same-ID create cannot race them.
         if sb.paused().await {
             infof!(
                 self.log,

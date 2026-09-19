@@ -629,6 +629,25 @@ impl VirtioDevice for Net {
         self.common.device_type
     }
 
+    fn shutdown(&mut self) {
+        // Same sequence as Drop: signal the workers and join them, so
+        // the tap fds they own are released.
+        if let Some(kill_evt) = self.common.kill_evt.take() {
+            let _ = kill_evt.write(1);
+        }
+        self.common.wait_for_epoll_threads();
+        // The ctrl worker's handle lives outside common.epoll_threads;
+        // the kill above reached it through the shared eventfd.
+        if let Some(thread) = self.ctrl_queue_epoll_thread.take() {
+            if let Err(e) = thread.join() {
+                error!("Error joining net ctrl thread: {:?}", e);
+            }
+        }
+        // activate() clones the taps into the workers; the primaries stay
+        // here and would keep the tap attached until the background drop.
+        self.taps.clear();
+    }
+
     fn queue_max_sizes(&self) -> &[u16] {
         &self.common.queue_sizes
     }

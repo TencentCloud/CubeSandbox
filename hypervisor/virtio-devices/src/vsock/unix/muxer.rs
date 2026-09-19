@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 
@@ -182,6 +183,11 @@ pub struct VsockMuxer {
     /// The file system path of the host-side Unix socket. This is used to figure out the path
     /// to Unix sockets listening on specific ports. I.e. "<this path>_<port number>".
     host_sock_path: String,
+    /// (st_dev, st_ino, st_ctime, st_ctime_nsec) of the host socket file,
+    /// recorded right after bind. Used to tell our own socket file from a
+    /// successor's that a same-sandbox-ID resume bound at the same path.
+    /// ctime guards against inode reuse after our file was unlinked.
+    host_sock_id: (u64, u64, i64, i64),
     /// The nested epoll File, used to register epoll listeners.
     epoll_file: File,
     /// A hash set used to keep track of used host-side (local) ports, in order to assign local
@@ -455,6 +461,10 @@ impl VsockBackend for VsockMuxer {
             });
         }
     }
+
+    fn host_sock_id(&self) -> Option<(u64, u64, i64, i64)> {
+        Some(self.host_sock_id)
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -693,6 +703,20 @@ impl VsockMuxer {
         let host_sock = UnixListener::bind(&host_sock_path)
             .and_then(|sock| sock.set_nonblocking(true).map(|_| sock))
             .map_err(Error::UnixBind)?;
+        // Record the file identity right after bind. Note that fstat() on the
+        // socket fd returns the sockfs inode, which is NOT the filesystem
+        // inode that stat(path) returns, so the fd cannot serve as the
+        // identity anchor here.
+        let host_sock_id = match std::fs::metadata(&host_sock_path) {
+            Ok(m) => (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()),
+            // A freshly bound socket must be stat-able; failing here (after
+            // removing the doorplate) beats a degraded cleanup that leaks
+            // the file and surfaces later as EADDRINUSE.
+            Err(e) => {
+                let _ = std::fs::remove_file(&host_sock_path);
+                return Err(Error::UnixStat(e));
+            }
+        };
         let cube_dbg_conf = cube_get_vsock_dbg_conf();
         debug!("vsock: cube dbg conf {:?}", cube_dbg_conf);
 
@@ -701,6 +725,7 @@ impl VsockMuxer {
             cid,
             host_sock,
             host_sock_path,
+            host_sock_id,
             epoll_file,
             rxq: MuxerRxQ::new(),
             conn_map: HashMap::with_capacity(defs::MAX_CONNECTIONS),

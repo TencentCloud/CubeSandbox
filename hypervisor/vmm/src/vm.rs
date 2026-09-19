@@ -1293,6 +1293,24 @@ impl Vm {
         Ok(())
     }
 
+    /// Pause-path handoff of the vsock host socket: remove the file inside
+    /// the RPC and suppress the teardown's later unlink.
+    pub fn pause_remove_vsock_host_sock(&self) {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .pause_remove_vsock_host_sock();
+    }
+
+    /// Pause-path fast phase of destruction: stop the virtio device
+    /// workers, releasing the host-named fds (tap) they own.
+    pub fn stop_virtio_device_threads(&mut self) {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .stop_virtio_device_threads();
+    }
+
     pub fn shutdown(&mut self) -> Result<()> {
         let mut state = self.state.try_write().map_err(|_| Error::PoisonedState)?;
         let new_state = VmState::Shutdown;

@@ -50,6 +50,8 @@ pub enum Error {
     UnixConnect(std::io::Error),
     /// Error reading from host-side Unix socket.
     UnixRead(std::io::Error),
+    /// Error stat-ing the freshly bound host-side Unix socket.
+    UnixStat(std::io::Error),
     /// Muxer connection limit reached.
     TooManyConnections,
     /// Error parsing vsock dbg config.

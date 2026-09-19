@@ -464,13 +464,38 @@ pub struct Vmm {
     activate_evt: EventFd,
     signals: Option<Handle>,
     threads: Vec<thread::JoinHandle<()>>,
+    /// Handle of the in-flight pause teardown. The VM-creating entry points
+    /// wait on it, because vm/vm_config are already None while the old Vm
+    /// is still being destroyed; Vmm::drop joins it on every exit path.
+    teardown: Option<thread::JoinHandle<()>>,
     pinglog: u32,
     sandbox_id: String,
     vcpu_started: Arc<AtomicBool>,
 }
 
+impl Drop for Vmm {
+    fn drop(&mut self) {
+        // Join the pause teardown on every Vmm death -- orderly control_loop
+        // exit, error return, or unwind -- so it is never detached.
+        self.wait_teardown();
+    }
+}
+
 impl Vmm {
     pub const HANDLED_SIGNALS: [i32; 2] = [SIGTERM, SIGINT];
+
+    /// Join the in-flight pause teardown, if any. Called by the
+    /// VM-creating entry points and by Drop, so a request arriving in the
+    /// teardown window waits for the old Vm's destruction to finish
+    /// instead of racing it, and the teardown is never left detached on
+    /// any Vmm exit path.
+    fn wait_teardown(&mut self) {
+        if let Some(handle) = self.teardown.take() {
+            if let Err(e) = handle.join() {
+                error!("pause teardown thread panicked: {:?}", e);
+            }
+        }
+    }
 
     fn signal_handler(mut signals: Signals, on_tty: bool, exit_evt: &EventFd) {
         for sig in &Self::HANDLED_SIGNALS {
@@ -606,6 +631,7 @@ impl Vmm {
             activate_evt,
             signals: None,
             threads: vec![],
+            teardown: None,
             pinglog: 3,
             sandbox_id,
             vcpu_started,
@@ -613,6 +639,9 @@ impl Vmm {
     }
 
     fn vm_create(&mut self, config: Box<VmConfig>) -> result::Result<(), VmError> {
+        // vm/vm_config are already None while a pause teardown is still
+        // destroying the previous Vm; wait so a create here cannot race it.
+        self.wait_teardown();
         // We only store the passed VM config.
         // The VM will be created when being asked to boot it.
         if self.vm_config.is_none() {
@@ -624,6 +653,7 @@ impl Vmm {
     }
 
     fn vm_boot(&mut self) -> result::Result<(), VmError> {
+        self.wait_teardown();
         tracer::start();
         let r = {
             trace_scoped!("vm_boot");
@@ -690,9 +720,70 @@ impl Vmm {
         &mut self,
         snapshot_config: &SnapshotConfig,
     ) -> result::Result<(), VmError> {
+        let started = std::time::Instant::now();
         self.vm_pause()?;
+        let paused = std::time::Instant::now();
         self.vm_snapshot(snapshot_config)?;
-        self.vm_delete()
+        let snapshotted = std::time::Instant::now();
+        // The vsock host socket's lifecycle ends here: removed inside the
+        // RPC, and the teardown's later unlink suppressed.
+        if let Some(vm) = self.vm.as_ref() {
+            vm.pause_remove_vsock_host_sock();
+        }
+        // Stop the device workers inside the RPC: the net workers exit and
+        // release their tap fds before the reply, so a same-ID create
+        // cannot race them. The rest of the destruction stays backgrounded.
+        if let Some(vm) = self.vm.as_mut() {
+            vm.stop_virtio_device_threads();
+        }
+        let devices_stopped = std::time::Instant::now();
+        debug!(
+            "pause phases: pause={:?} snapshot={:?} devices={:?}",
+            paused.duration_since(started),
+            snapshotted.duration_since(paused),
+            devices_stopped.duration_since(snapshotted)
+        );
+        // The snapshot is durable; park destruction on a background thread.
+        // The handle goes into self.teardown -- waited on by the
+        // VM-creating entries and joined by Vmm::drop -- and the vmm thread
+        // itself keeps serving requests, as before.
+        self.vm_config = None;
+        // At most one teardown in flight: join any previous one first.
+        self.wait_teardown();
+        if let Some(vm) = self.vm.take() {
+            let vm = Arc::new(Mutex::new(Some(vm)));
+            let thread_vm = Arc::clone(&vm);
+            match std::thread::Builder::new()
+                .name("pause-teardown".to_string())
+                .spawn(move || {
+                    let vm = thread_vm.lock().unwrap().take().unwrap();
+                    if let Err(e) = Self::destroy_vm(vm) {
+                        error!("pause teardown: destroying the paused VM failed: {:?}", e);
+                    } else {
+                        event!("vm", "deleted");
+                    }
+                }) {
+                Ok(handle) => {
+                    self.teardown = Some(handle);
+                }
+                Err(e) => {
+                    // Could not spawn (resource exhaustion): tear the VM
+                    // down synchronously instead of silently dropping it.
+                    error!(
+                        "spawning pause teardown failed: {}; tearing down synchronously",
+                        e
+                    );
+                    if let Some(vm) = vm.lock().unwrap().take() {
+                        if let Err(e) = Self::destroy_vm(vm) {
+                            error!("pause teardown: destroying the paused VM failed: {:?}", e);
+                        } else {
+                            event!("vm", "deleted");
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn vm_resume(&mut self) -> result::Result<(), VmError> {
@@ -724,6 +815,8 @@ impl Vmm {
     }
 
     fn vm_restore(&mut self, restore_cfg: RestoreConfig) -> result::Result<(), VmError> {
+        // Same as vm_create: wait out a teardown that may still be running.
+        self.wait_teardown();
         if self.vm.is_some() || self.vm_config.is_some() {
             return Err(VmError::VmAlreadyCreated);
         }
@@ -817,19 +910,25 @@ impl Vmm {
         }
     }
 
+    /// Log the VM counters and shut the VM down. Shared by the synchronous
+    /// vm_shutdown path and the background pause teardown so the two cannot
+    /// drift apart.
+    fn destroy_vm(mut vm: Vm) -> result::Result<(), VmError> {
+        match vm.counters() {
+            Ok(info) => {
+                info!("counters details: {:?}", info);
+            }
+            Err(e) => {
+                info!("counter failed {}", e);
+            }
+        }
+        vm.shutdown()
+    }
+
     fn vm_shutdown(&mut self) -> result::Result<(), VmError> {
-        if let Some(ref mut vm) = self.vm.take() {
-            match vm.counters() {
-                Ok(info) => {
-                    info!("counters details: {:?}", info);
-                }
-                Err(e) => {
-                    info! {"counter failed {}", e};
-                }
-            };
-            vm.shutdown()
-        } else {
-            Err(VmError::VmNotRunning)
+        match self.vm.take() {
+            Some(vm) => Self::destroy_vm(vm),
+            None => Err(VmError::VmNotRunning),
         }
     }
 
@@ -929,6 +1028,9 @@ impl Vmm {
     }
 
     fn vm_delete(&mut self) -> result::Result<(), VmError> {
+        // Pause-to-snapshot clears vm_config while the old Vm is still being
+        // destroyed; wait so "deleted" keeps meaning "gone".
+        self.wait_teardown();
         if self.vm_config.is_none() {
             return Ok(());
         }

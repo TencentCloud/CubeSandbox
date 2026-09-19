@@ -1422,12 +1422,16 @@ impl SandBox {
         let destination_url = format!("file://{}", snapshot_dir.display());
         ch.pause_vm_cube_with_config(&destination_url, memory_vol_url, snapshot_type)
             .await?;
-
-        // vmshutdown event after pause2snapshot deletes the MicroVM
-        let _ = ch
-            .wait_notify(Duration::from_nanos(self.ctx.timeout_nano as u64))
-            .await?;
+        // The VmShutdown event fires from the background teardown thread
+        // after the reply; the pause metadata does not depend on it. No
+        // consumer remains: monitor_vm was aborted with the agent channel,
+        // and Paused blocks every re-entry path (rollback_vm, the only
+        // one that could rebuild it, requires Normal).
         drop(ch);
+
+        // The vsock host socket file is removed inside the VMM pause call,
+        // before the reply (Vsock::remove_host_sock_for_pause): after the
+        // reply a same-ID resume may already have rebound the path.
 
         // metadata.json is required by restore_vm (SnapshotInfo::load / eq).
         // Guest container id (often tpl-*_0) must be preserved so Resume create

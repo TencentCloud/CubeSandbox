@@ -42,8 +42,9 @@ use byteorder::{ByteOrder, LittleEndian};
 use seccompiler::SeccompAction;
 use serde::{Deserialize, Serialize};
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Barrier, RwLock};
@@ -354,6 +355,9 @@ pub struct Vsock<B: VsockBackend> {
     cid: u64,
     backend: Arc<RwLock<B>>,
     path: PathBuf,
+    /// Set by the pause path after it removed the host socket file inside
+    /// the RPC: the shutdown op must then never touch the path again.
+    host_sock_removed: bool,
     seccomp_action: SeccompAction,
     exit_evt: EventFd,
 }
@@ -412,9 +416,27 @@ where
             cid,
             backend: Arc::new(RwLock::new(backend)),
             path,
+            host_sock_removed: false,
             seccomp_action,
             exit_evt,
         })
+    }
+
+    /// Remove the host socket file inside the pause RPC, before the reply,
+    /// and suppress the shutdown op's later unlink. Unconditional:
+    /// pre-reply the path can only be this device's own socket. Failure is
+    /// logged and does not fail the pause (baseline behavior).
+    pub fn remove_host_sock_for_pause(&mut self) {
+        self.host_sock_removed = true;
+        if let Err(e) = std::fs::remove_file(&self.path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!(
+                    "vsock: removing host socket {} on pause failed: {}; the next bind at this path will fail with EADDRINUSE",
+                    self.path.display(),
+                    e
+                );
+            }
+        }
     }
 
     fn state(&self) -> VsockState {
@@ -526,7 +548,17 @@ where
     }
 
     fn shutdown(&mut self) {
-        std::fs::remove_file(&self.path).ok();
+        // The pause path removed the file and set host_sock_removed: after
+        // the reply a same-ID resume may have rebound the path, so nothing
+        // here may touch it. Other destroy paths unlink below, gated on
+        // identity (a few-instruction check-then-unlink window).
+        if self.host_sock_removed {
+            return;
+        }
+        let own = self.backend.read().unwrap().host_sock_id();
+        if owns_host_sock_path(own, &self.path) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 
     fn set_access_platform(&mut self, access_platform: Arc<dyn AccessPlatform>) {
@@ -564,6 +596,46 @@ where
 impl<B> Transportable for Vsock<B> where B: VsockBackend + Sync + 'static {}
 impl<B> Migratable for Vsock<B> where B: VsockBackend + Sync + 'static {}
 
+/// True while `path` still resolves to the socket file identified by `own`
+/// -- i.e. the vsock device shutdown op may unlink its host socket file.
+/// A successor bound at the same path (different inode) belongs to the
+/// resumed shim and must not be removed. A missing file is the normal
+/// already-removed case; any other stat error is logged and treated as
+/// "do not touch" -- the leaked file then fails the next bind with
+/// EADDRINUSE.
+fn owns_host_sock_path(own: Option<(u64, u64, i64, i64)>, path: &Path) -> bool {
+    match (own, std::fs::metadata(path)) {
+        (Some(own), Ok(meta)) => {
+            let id = (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec());
+            if id == own {
+                true
+            } else if (meta.dev(), meta.ino()) == (own.0, own.1) {
+                // Same device+inode but changed metadata: our file with
+                // altered metadata (chmod/chown/link), not a successor.
+                // Leave it -- the next bind at this path fails with
+                // EADDRINUSE, which is where this surfaces.
+                warn!(
+                    "vsock: host socket {} matches our device and inode but its metadata changed; skipping its removal, the next bind at this path will fail with EADDRINUSE",
+                    path.display()
+                );
+                false
+            } else {
+                false
+            }
+        }
+        (_, Ok(_)) => false,
+        (_, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => false,
+        (_, Err(e)) => {
+            warn!(
+                "vsock: cannot stat host socket {}: {}; skipping its removal, the next bind at this path will fail with EADDRINUSE",
+                path.display(),
+                e
+            );
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::tests::{NoopVirtioInterrupt, TestContext};
@@ -572,6 +644,185 @@ mod tests {
     use crate::vsock::device::{BACKEND_EVENT, EVT_QUEUE_EVENT, RX_QUEUE_EVENT, TX_QUEUE_EVENT};
     use crate::ActivateError;
     use libc::EFD_NONBLOCK;
+
+    #[test]
+    fn test_vsock_host_sock_path_guard() {
+        use std::os::unix::net::UnixListener;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let uds_path = std::env::temp_dir().join(format!(
+            "test_vsock_guard_{}-{}.sock",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = uds_path.clone();
+        let keep_path = std::env::temp_dir().join(format!(
+            "test_vsock_guard_keep_{}-{}.sock",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Self-heal against files left behind by earlier runs.
+        let _ = std::fs::remove_file(&uds_path);
+        let _ = std::fs::remove_file(&keep_path);
+
+        // The "old shim" side: a muxer bound at the path, still holding the
+        // listener fd that anchors its socket identity.
+        let muxer = VsockUnixBackend::new(
+            "vsock-guard".to_string(),
+            3,
+            uds_path.to_str().unwrap().to_string(),
+            true,
+            None,
+        )
+        .unwrap();
+        let own = muxer.host_sock_id().expect("host_sock_id");
+
+        // Path still resolves to our own socket: the shutdown op may unlink.
+        assert!(owns_host_sock_path(Some(own), &path));
+
+        // A same-sandbox-ID resume takes over: the stale file is replaced
+        // by a fresh socket with a different inode. The hard link keeps the
+        // predecessor's inode alive across its unlink, so the successor
+        // provably gets a different one regardless of inode reuse.
+        std::fs::hard_link(&uds_path, &keep_path).unwrap();
+        std::fs::remove_file(&uds_path).unwrap();
+        let successor = UnixListener::bind(&uds_path).unwrap();
+        assert!(!owns_host_sock_path(Some(own), &path));
+
+        // Path gone: nothing to do.
+        drop(successor);
+        std::fs::remove_file(&uds_path).unwrap();
+        std::fs::remove_file(&keep_path).unwrap();
+        assert!(!owns_host_sock_path(Some(own), &path));
+
+        // No socket identity: never unlink.
+        assert!(!owns_host_sock_path(None, &path));
+    }
+
+    #[test]
+    fn test_vsock_shutdown_wiring() {
+        use std::os::unix::net::UnixListener;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let uds_path = std::env::temp_dir().join(format!(
+            "test_vsock_wiring_{}-{}.sock",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let uds_path_str = uds_path.to_str().unwrap().to_string();
+        // Self-heal against files left behind by earlier runs.
+        let _ = std::fs::remove_file(&uds_path);
+
+        // A real muxer backend records its socket identity at bind time.
+        let muxer = VsockUnixBackend::new(
+            "vsock-wiring".to_string(),
+            3,
+            uds_path_str.clone(),
+            true,
+            None,
+        )
+        .unwrap();
+        let mut device = Vsock::new(
+            String::from("vsock"),
+            3,
+            uds_path.clone(),
+            muxer,
+            false,
+            SeccompAction::Trap,
+            EventFd::new(EFD_NONBLOCK).unwrap(),
+            None,
+        )
+        .unwrap();
+
+        // Case A: the file still belongs to us -- shutdown() must unlink it.
+        assert!(uds_path.exists());
+        device.shutdown();
+        assert!(!uds_path.exists(), "own socket file was not removed");
+
+        // Case B: a same-ID successor binds a fresh socket at the same
+        // path -- shutdown() must leave it alone. The hard link keeps this
+        // case's own inode alive across its unlink, so the successor
+        // provably gets a different one.
+        let keep_path = std::env::temp_dir().join(format!(
+            "test_vsock_wiring_keep_{}-{}.sock",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&keep_path);
+        let muxer_b = VsockUnixBackend::new(
+            "vsock-wiring-b".to_string(),
+            3,
+            uds_path_str.clone(),
+            true,
+            None,
+        )
+        .unwrap();
+        let mut device_b = Vsock::new(
+            String::from("vsock-b"),
+            3,
+            uds_path.clone(),
+            muxer_b,
+            false,
+            SeccompAction::Trap,
+            EventFd::new(EFD_NONBLOCK).unwrap(),
+            None,
+        )
+        .unwrap();
+        std::fs::hard_link(&uds_path, &keep_path).unwrap();
+        std::fs::remove_file(&uds_path).unwrap();
+        let _successor = UnixListener::bind(&uds_path).unwrap();
+        assert!(uds_path.exists());
+        device_b.shutdown();
+        assert!(uds_path.exists(), "successor socket file was removed");
+
+        // Case C: the pause path removed the file inside the RPC and
+        // suppressed this op -- a successor bound after that removal must
+        // survive untouched.
+        drop(_successor);
+        std::fs::remove_file(&uds_path).unwrap();
+        let muxer_c = VsockUnixBackend::new(
+            "vsock-wiring-c".to_string(),
+            3,
+            uds_path_str.clone(),
+            true,
+            None,
+        )
+        .unwrap();
+        let mut device_c = Vsock::new(
+            String::from("vsock-c"),
+            3,
+            uds_path.clone(),
+            muxer_c,
+            false,
+            SeccompAction::Trap,
+            EventFd::new(EFD_NONBLOCK).unwrap(),
+            None,
+        )
+        .unwrap();
+        device_c.remove_host_sock_for_pause();
+        assert!(!uds_path.exists(), "pause-side removal did not take effect");
+        let _successor_c = UnixListener::bind(&uds_path).unwrap();
+        device_c.shutdown();
+        assert!(
+            uds_path.exists(),
+            "device with handed-off socket touched the successor's file"
+        );
+
+        std::fs::remove_file(&uds_path).ok();
+        std::fs::remove_file(&keep_path).ok();
+    }
 
     #[test]
     fn test_virtio_device() {

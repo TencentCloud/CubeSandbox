@@ -431,8 +431,8 @@ func (s *service) updateWithPauseCow(
 	}
 
 	// Disk after memory freeze: live rootfs volume is still present until
-	// keep_tombstone Destroy. If this fails the MicroVM is already gone —
-	// Pause fails and the sandbox is not Resume-able (delete only).
+	// keep_tombstone Destroy. If this fails the sandbox is not
+	// Resume-able (delete only).
 	rootfsObject, err = storage.CommitRootfsFor(workCtx, backend, sourceRootfs, snapID)
 	if err != nil {
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
