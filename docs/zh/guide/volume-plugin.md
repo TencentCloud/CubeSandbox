@@ -655,6 +655,7 @@ rpc 插件实现 [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSand
 | [`examples/volume/cos/rpc/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.zh.md) | rpc 插件构建与部署 |
 | [`examples/volume/cos/verify_volume.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/verify_volume.py) | Python SDK 验证脚本 |
 | [`examples/volume/s3/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.zh.md) | 通用 S3 兼容后端完整体验（内置 S3 客户端的 Go 二进制 + s3fs；AWS S3、腾讯云 COS、MinIO、R2；支持 `arm64`） |
+| [`examples/volume/juicefs/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/juicefs/README.zh.md) | JuiceFS 完整体验（对象存储之上的 POSIX 文件系统；一个文件系统，每个卷 `--subdir`；多个沙箱可共享一个卷并立即看到彼此的写入） |
 
 各后端专属的 Hook 行为、对象布局、实现取舍与排障说明均在上述 example 文档中，本文不再重复。
 
