@@ -987,8 +987,8 @@ pub struct DeviceManager {
 
     sys_ctrl: Option<Arc<Mutex<devices::legacy::SysCtrl>>>,
 
-    // ivshmem device
-    ivshmem_device: Option<Arc<Mutex<devices::IvshmemDevice>>>,
+    // ivshmem devices, in the order they appear in `VmConfig::ivshmem`
+    ivshmem_devices: Vec<Arc<Mutex<devices::IvshmemDevice>>>,
 }
 
 impl DeviceManager {
@@ -1140,7 +1140,7 @@ impl DeviceManager {
             acpi_platform_addresses: AcpiPlatformAddresses::default(),
             snapshot,
             sandbox_id,
-            ivshmem_device: None,
+            ivshmem_devices: Vec::new(),
         };
 
         let device_manager = Arc::new(Mutex::new(device_manager));
@@ -1298,8 +1298,19 @@ impl DeviceManager {
             self.pvpanic_device = self.add_pvpanic_device()?;
         }
 
-        if let Some(ivshmem) = self.config.clone().lock().unwrap().ivshmem.as_ref() {
-            self.ivshmem_device = self.add_ivshmem_device(ivshmem)?;
+        if let Some(ivshmem_cfgs) = self.config.clone().lock().unwrap().ivshmem.clone() {
+            for (idx, ivshmem_cfg) in ivshmem_cfgs.iter().enumerate() {
+                // A single device keeps the bare `__ivshmem` id so snapshots
+                // taken before multi-device support still restore.
+                let id = if ivshmem_cfgs.len() == 1 {
+                    IVSHMEM_DEVICE_NAME.to_string()
+                } else {
+                    format!("{}{}", IVSHMEM_DEVICE_NAME, idx)
+                };
+                if let Some(device) = self.add_ivshmem_device(ivshmem_cfg, id)? {
+                    self.ivshmem_devices.push(device);
+                }
+            }
         }
 
         Ok(())
@@ -3798,10 +3809,13 @@ impl DeviceManager {
     fn add_ivshmem_device(
         &mut self,
         ivshmem_cfg: &IvshmemConfig,
+        id: String,
     ) -> DeviceManagerResult<Option<Arc<Mutex<devices::IvshmemDevice>>>> {
-        let id = String::from(IVSHMEM_DEVICE_NAME);
         let pci_segment_id = 0x0_u16;
-        info!("Creating ivshmem device {}", id);
+        info!(
+            "Creating ivshmem device {} (subsystem_id 0x{:04x})",
+            id, ivshmem_cfg.subsystem_id
+        );
 
         let (pci_segment_id, pci_device_bdf, resources) =
             self.pci_resources(&id, pci_segment_id)?;
@@ -3811,6 +3825,7 @@ impl DeviceManager {
             state_from_id(self.snapshot.as_ref(), id.as_str())
                 .map_err(DeviceManagerError::RestoreGetState)?,
             ivshmem_cfg.size as u64,
+            ivshmem_cfg.subsystem_id,
         )));
         let new_resources = self.add_pci_device(
             ivshmem_device.clone(),

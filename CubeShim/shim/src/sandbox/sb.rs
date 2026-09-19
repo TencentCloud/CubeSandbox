@@ -15,7 +15,9 @@ use containerd_shim::protos::events::task::TaskOOM;
 use containerd_shim::protos::protobuf::MessageDyn;
 use containerd_shim::{Error, Result};
 use cube_hypervisor::config::RestoreConfig;
-use cube_hypervisor::vm_config::{DeviceConfig, FsConfig, IvshmemConfig};
+use cube_hypervisor::vm_config::{
+    DeviceConfig, FsConfig, IvshmemConfig, IVSHMEM_SUBSYSTEM_ID_GENERIC,
+};
 use cube_hypervisor::{SnapshotType, VmRemoveDeviceData};
 use oci_spec::runtime::{LinuxResources, Process, Spec};
 use protoc::{agent, agent_ttrpc, health, health_ttrpc};
@@ -817,17 +819,20 @@ impl SandBox {
     fn enable_default_ivshmem(vc: &mut VmConfig, sandbox_id: &str) -> CResult<()> {
         let path = Utils::ivshmem_path(sandbox_id)?;
         Utils::create_ivshmem_file(&path, IVSHMEM_DEFAULT_SIZE)?;
-        vc.enable_ivshmem(path, IVSHMEM_DEFAULT_SIZE);
+        vc.add_ivshmem(path, IVSHMEM_DEFAULT_SIZE, IVSHMEM_SUBSYSTEM_ID_GENERIC);
         Ok(())
     }
 
-    /// Build restore-time ivshmem config with the default backend path.
-    fn default_ivshmem_config(sandbox_id: &str) -> CResult<IvshmemConfig> {
+    /// Build the restore-time ivshmem list. The order must match the one
+    /// `enable_default_ivshmem` produced when the snapshot was taken: the
+    /// hypervisor re-points the snapshot's devices by position.
+    fn default_ivshmem_configs(sandbox_id: &str) -> CResult<Vec<IvshmemConfig>> {
         let path = Utils::ivshmem_path(sandbox_id)?;
-        Ok(IvshmemConfig {
+        Ok(vec![IvshmemConfig {
             path,
             size: IVSHMEM_DEFAULT_SIZE,
-        })
+            subsystem_id: IVSHMEM_SUBSYSTEM_ID_GENERIC,
+        }])
     }
 
     /// Ensure the default ivshmem backend file exists before restore.
@@ -981,7 +986,7 @@ impl SandBox {
             vsock: Some(vsock),
             memory_vol_url: restore_memory_vol_url,
             ivshmem: if enable_ivshmem {
-                Some(Self::default_ivshmem_config(&self.id)?)
+                Some(Self::default_ivshmem_configs(&self.id)?)
             } else {
                 None
             },

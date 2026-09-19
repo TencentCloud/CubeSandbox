@@ -55,7 +55,7 @@ impl HypConfig {
 
 #[derive(Clone, Debug)]
 pub struct VmConfig {
-    pub ivshmem: Option<IvshmemConfig>,
+    pub ivshmem: Option<Vec<IvshmemConfig>>,
     pub vcpus: u32,
     pub memory_size: u64,
     pub dirty_log: bool,
@@ -201,12 +201,23 @@ impl VmConfig {
         vc
     }
 
-    /// Enable ivshmem shared memory channel with a caller-supplied backend
+    /// Append an ivshmem shared memory device with a caller-supplied backend
     /// file path. The caller is responsible for creating and sizing the
     /// file before calling this. This keeps the shim agnostic of the
     /// backend naming convention.
-    pub fn enable_ivshmem(&mut self, path: PathBuf, size: usize) {
-        self.ivshmem = Some(IvshmemConfig { path, size });
+    ///
+    /// Appends rather than replaces so several devices (e.g. the generic
+    /// channel plus a dedicated metric-collection one) can coexist; the
+    /// hypervisor rejects duplicate subsystem ids at validation time.
+    pub fn add_ivshmem(&mut self, path: PathBuf, size: usize, subsystem_id: u16) -> &mut Self {
+        self.ivshmem
+            .get_or_insert_with(Vec::new)
+            .push(IvshmemConfig {
+                path,
+                size,
+                subsystem_id,
+            });
+        self
     }
 
     pub fn add_cmdline(&mut self, cmd: String) -> &mut Self {
