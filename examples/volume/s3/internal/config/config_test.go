@@ -180,6 +180,26 @@ func TestLoadMissingFields(t *testing.T) {
 	}
 }
 
+// With neither key set the plugin uses the node's cloud identity (e.g. an EC2
+// instance role); setting only one of them is still a mistake.
+func TestLoadInstanceRole(t *testing.T) {
+	cfg, err := Load(writeConf(t, "BUCKET=b\nENDPOINT=https://s3.ap-northeast-1.amazonaws.com\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.UseInstanceRole() {
+		t.Error("UseInstanceRole = false, want true when no keys are configured")
+	}
+
+	cfg, err = Load(writeConf(t, minimalConf))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UseInstanceRole() {
+		t.Error("UseInstanceRole = true, want false when static keys are configured")
+	}
+}
+
 func TestLoadMissingFile(t *testing.T) {
 	if _, err := Load(filepath.Join(t.TempDir(), "absent.conf")); err == nil {
 		t.Fatal("Load succeeded on missing file, want error")

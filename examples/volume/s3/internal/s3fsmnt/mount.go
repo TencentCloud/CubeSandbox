@@ -7,6 +7,7 @@ package s3fsmnt
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,7 +35,17 @@ func (m *Manager) MountPoint(baseDir, volumeID string) string {
 // The path is per-bucket so several plugin instances (different driver names,
 // different buckets) on one node never race on a shared credential file. It is
 // rewritten only when the credentials changed.
+//
+// In instance-role mode no file is written, and one left over from a node that
+// used to run with static keys is removed: it is a long-lived secret in
+// plaintext that nothing reads any more, which is what this mode is for.
 func (m *Manager) EnsurePasswdFile() error {
+	if m.cfg.UseInstanceRole() {
+		if err := os.Remove(m.cfg.PasswdFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("remove stale passwd file %q: %w", m.cfg.PasswdFile, err)
+		}
+		return nil
+	}
 	content := fmt.Sprintf("%s:%s:%s\n", m.cfg.Bucket, m.cfg.AccessKeyID, m.cfg.SecretAccessKey)
 	if b, err := os.ReadFile(m.cfg.PasswdFile); err == nil && string(b) == content {
 		return nil
@@ -52,7 +63,8 @@ func (m *Manager) EnsurePasswdFile() error {
 //
 //	-o url          the S3-compatible endpoint from volume-s3.conf
 //	-o endpoint     region used for SigV4 signing
-//	-o passwd_file  per-bucket credential file
+//	-o passwd_file  per-bucket credential file, or -o iam_role=auto when no
+//	                static keys are configured (node's cloud identity)
 //	-o allow_other  Cubelet (a different user) must traverse the mount to bind
 //	                it into the microVM via virtiofs
 //
@@ -64,8 +76,12 @@ func (m *Manager) MountArgs(mnt, volumeID string) []string {
 		mnt,
 		"-ourl=" + m.cfg.Endpoint,
 		"-oendpoint=" + m.cfg.Region,
-		"-opasswd_file=" + m.cfg.PasswdFile,
 		"-oallow_other",
+	}
+	if m.cfg.UseInstanceRole() {
+		args = append(args, "-oiam_role=auto")
+	} else {
+		args = append(args, "-opasswd_file="+m.cfg.PasswdFile)
 	}
 	return append(args, m.cfg.S3FSExtraOpts...)
 }

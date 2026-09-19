@@ -145,12 +145,27 @@ Then edit `volume-s3.conf` on each node:
 
 | Field | Description | Required |
 |-------|-------------|----------|
-| `ACCESS_KEY_ID` | Access key ID | yes |
-| `SECRET_ACCESS_KEY` | Secret access key | yes |
+| `ACCESS_KEY_ID` | Access key ID | yes¹ |
+| `SECRET_ACCESS_KEY` | Secret access key | yes¹ |
 | `BUCKET` | Bucket holding all volumes | yes |
 | `ENDPOINT` | S3-compatible endpoint URL (see table below) | yes |
 | `REGION` | SigV4 signing region; default `us-east-1` | no |
 | `S3FS_EXTRA_OPTS` | Extra s3fs mount options, whitespace-separated (e.g. `-ouse_path_request_style` for MinIO). Multi-option values may be quoted so the file stays `source`-compatible; the plugin strips the quotes. Setting `-ouse_path_request_style` also switches the plugin's own S3 client to path-style addressing. | no |
+
+¹Leave both `ACCESS_KEY_ID` and `SECRET_ACCESS_KEY` empty to use the node's cloud identity instead of a static key — e.g. an EC2 instance role on AWS. The control-plane client then uses the instance metadata service and s3fs mounts with `-oiam_role=auto`; no passwd file is written. Setting only one of the two is an error.
+
+> **Which deployments can use this.** Only the manual install on this page. `deploy/one-click/install.sh`
+> refuses a config with `CUBE_S3_ENDPOINT` set and the keys empty, and re-renders `volume-s3.conf` on every
+> install and upgrade; the Helm chart likewise requires `volumeS3.accessKeyId` / `secretAccessKey` unless you
+> supply the whole file through `volumeS3.existingSecret`.
+>
+> **Which identity this is.** Empty keys mean the EC2 instance role through IMDS — not the wider AWS
+> credential chain: `AWS_ACCESS_KEY_ID`, `~/.aws/credentials` and IRSA / ECS web identity are ignored. The
+> other backends in the table above (COS, R2, MinIO) therefore still need a static key pair.
+>
+> **Where the role has to exist.** On every CubeMaster *and* Cubelet host: create and destroy run with
+> CubeMaster's identity, attach with the node's. Scope it to `BUCKET` — an instance role is usually much
+> broader than the bucket-scoped key pair the prerequisites ask for.
 
 Common backends:
 

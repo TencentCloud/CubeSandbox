@@ -25,6 +25,19 @@ type Client struct {
 	inner  *minio.Client
 }
 
+// credentialsFor decides where the credentials come from: the configured
+// static keys, or the EC2 instance role when none are configured. That is
+// IMDS specifically, not the full AWS credential chain — environment
+// variables, ~/.aws/credentials and web identity are deliberately ignored,
+// so a node with stray credentials cannot mount as the wrong identity.
+// Kept apart from New so the choice can be tested without a network.
+func credentialsFor(cfg *config.Config) *credentials.Credentials {
+	if cfg.UseInstanceRole() {
+		return credentials.NewIAM("")
+	}
+	return credentials.NewStaticV4(cfg.AccessKeyID, cfg.SecretAccessKey, "")
+}
+
 // New builds an S3 client from plugin config.
 func New(cfg *config.Config) (*Client, error) {
 	host, secure, err := ParseEndpoint(cfg.Endpoint)
@@ -37,8 +50,9 @@ func New(cfg *config.Config) (*Client, error) {
 		lookup = minio.BucketLookupPath
 	}
 
+	creds := credentialsFor(cfg)
 	inner, err := minio.New(host, &minio.Options{
-		Creds:        credentials.NewStaticV4(cfg.AccessKeyID, cfg.SecretAccessKey, ""),
+		Creds:        creds,
 		Secure:       secure,
 		Region:       cfg.Region,
 		BucketLookup: lookup,
