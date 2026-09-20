@@ -2984,8 +2984,9 @@ s3_bs_dev_teardown(struct s3_ctx *ctx)
 	 *
 	 * In practice the WAL close that follows takes a write plus a flush and the
 	 * fill would land inside it, but "usually long enough" is not a lifetime
-	 * rule. New fills cannot start, because s3_flush_map_updated stops
-	 * populating once ctx->destroying is set.
+	 * rule. New native fills cannot start because s3_flush_map_updated checks
+	 * ctx->destroying; s3_cache_stop_object_io() closes the imported-object
+	 * lane under the cache lock before this quiescence check.
 	 *
 	 * Off-owner cache hits are not counted in ctx->inflight or in
 	 * s3_cache_is_quiesced() until they take the cache lock. They do not need
@@ -3092,6 +3093,7 @@ s3_bs_dev_destroy(struct spdk_bs_dev *dev)
 	 * found: a segfault in s3_journal_truncate() with the journal pointer reading
 	 * as "cos.ap-n", i.e. freed memory already reused for an endpoint string. */
 	__atomic_store_n(&ctx->destroying, true, __ATOMIC_RELEASE);
+	s3_cache_stop_object_io(ctx->cache);
 	if (ctx->ckpt_poller) {
 		spdk_poller_unregister(&ctx->ckpt_poller);
 	}
@@ -3154,13 +3156,16 @@ struct s3_ingest_slot {
 	struct s3_ctx            *ctx;
 	enum s3_ingest_slot_state state;
 	uint64_t                  src_chunk;
+	uint64_t                  dst_chunk;
 	struct spdk_uuid          uuid;
 	uint32_t                  valid_bytes;
+	char                      src_key[S3_KEY_MAX];
 	char                      dest_key[S3_KEY_MAX];
 	struct s3_ingest_op      *waiter;
 };
 
 struct s3_ingest {
+	char                     *src_endpoint;
 	char                      src_bucket[128];
 	s3_ingest_src_fn          src_fn;
 	void                     *src_arg;
@@ -3306,6 +3311,7 @@ ingest_try_finish_end(struct s3_ctx *ctx)
 	ctx->ingest = NULL;
 	cb = in->end_cb;
 	arg = in->end_arg;
+	free(in->src_endpoint);
 	free(in);
 	if (cb) {
 		cb(arg, 0);
@@ -3319,6 +3325,7 @@ ingest_start_bind(struct s3_ingest_slot *slot, uint64_t dst_chunk)
 	struct s3_ingest *in = ctx->ingest;
 
 	slot->state = S3_INGEST_BINDING;
+	slot->dst_chunk = dst_chunk;
 	in->inflight++;
 	s3_chunk_map_insert(ctx->chunk_map, dst_chunk, &slot->uuid,
 			    slot->valid_bytes, ingest_bound, slot);
@@ -3359,6 +3366,17 @@ ingest_bound(void *cb_arg, const struct spdk_uuid *old_uuid, int status)
 
 		s3_data_key(ctx, old_uuid, old_key, sizeof(old_key));
 		s3_delete(ctx->client, old_key, NULL, NULL);
+	}
+
+	if (ctx->cache) {
+		struct s3_cache_object_id source = {
+			.endpoint = in->src_endpoint,
+			.bucket = in->src_bucket,
+			.key = slot->src_key,
+		};
+
+		s3_cache_object_alias(ctx->cache, &source, slot->dst_chunk,
+				      &slot->uuid, slot->valid_bytes);
 	}
 
 	ingest_slot_reset(slot);
@@ -3418,11 +3436,11 @@ ingest_start_slot(struct s3_ingest_slot *slot, uint64_t src_chunk)
 {
 	struct s3_ctx *ctx = slot->ctx;
 	struct s3_ingest *in = ctx->ingest;
-	char src_key[S3_KEY_MAX];
 	uint32_t valid_bytes = 0;
 	int rc;
 
-	rc = in->src_fn(in->src_arg, src_chunk, src_key, sizeof(src_key), &valid_bytes);
+	rc = in->src_fn(in->src_arg, src_chunk, slot->src_key,
+			sizeof(slot->src_key), &valid_bytes);
 	if (rc != 0) {
 		return rc;
 	}
@@ -3434,8 +3452,8 @@ ingest_start_slot(struct s3_ingest_slot *slot, uint64_t src_chunk)
 	s3_data_key(ctx, &slot->uuid, slot->dest_key, sizeof(slot->dest_key));
 	in->inflight++;
 
-	rc = s3_copy_object(ctx->client, in->src_bucket, src_key, slot->dest_key,
-			    ingest_slot_copied, slot);
+	rc = s3_copy_object(ctx->client, in->src_bucket, slot->src_key,
+			    slot->dest_key, ingest_slot_copied, slot);
 	if (rc != 0) {
 		in->inflight--;
 		ingest_slot_reset(slot);
@@ -3553,13 +3571,15 @@ s3_bs_dev_copy(struct spdk_bs_dev *dev, struct spdk_io_channel *channel,
 }
 
 int
-s3_bs_dev_ingest_begin(struct spdk_bs_dev *bs_dev, const char *src_bucket,
-		       s3_ingest_src_fn src_fn, void *src_arg)
+s3_bs_dev_ingest_begin(struct spdk_bs_dev *bs_dev, const char *src_endpoint,
+		       const char *src_bucket, s3_ingest_src_fn src_fn,
+		       void *src_arg)
 {
 	struct s3_ctx *ctx = (struct s3_ctx *)bs_dev;
 	struct s3_ingest *in;
 
-	if (!ctx || !src_bucket || !src_fn) {
+	if (!ctx || !src_endpoint || src_endpoint[0] == '\0' ||
+	    !src_bucket || !src_fn) {
 		return -EINVAL;
 	}
 	if (ctx->ingest) {
@@ -3568,6 +3588,11 @@ s3_bs_dev_ingest_begin(struct spdk_bs_dev *bs_dev, const char *src_bucket,
 
 	in = calloc(1, sizeof(*in));
 	if (!in) {
+		return -ENOMEM;
+	}
+	in->src_endpoint = strdup(src_endpoint);
+	if (!in->src_endpoint) {
+		free(in);
 		return -ENOMEM;
 	}
 	snprintf(in->src_bucket, sizeof(in->src_bucket), "%s", src_bucket);
@@ -4289,6 +4314,14 @@ s3_bs_dev_attach_cache(struct spdk_bs_dev *bs_dev)
 	return 0;
 }
 
+struct s3_cache *
+s3_bs_dev_get_cache(struct spdk_bs_dev *bs_dev)
+{
+	struct s3_ctx *ctx = (struct s3_ctx *)bs_dev;
+
+	return ctx ? __atomic_load_n(&ctx->cache, __ATOMIC_ACQUIRE) : NULL;
+}
+
 void
 s3_bs_dev_set_destroy_cb(struct spdk_bs_dev *bs_dev, s3_bs_dev_cb cb_fn,
 			 void *cb_arg)
@@ -4853,6 +4886,26 @@ s3_bs_dev_get_stats(struct spdk_bs_dev *bs_dev, struct s3_bs_dev_stats *out)
 		out->cache_hot_slots_total    = cstats.hot_slots_total;
 		out->cache_hot_slots_resident = cstats.hot_slots_resident;
 		out->cache_hot_evictions      = cstats.hot_evictions;
+		out->cache_object_hits        = cstats.object_hits;
+		out->cache_object_misses      = cstats.object_misses;
+		out->cache_object_hits_declined = cstats.object_hits_declined;
+		out->cache_object_populates   = cstats.object_populates;
+		out->cache_object_populates_dropped =
+			cstats.object_populates_dropped;
+		out->cache_object_populates_failed =
+			cstats.object_populates_failed;
+		out->cache_object_evictions   = cstats.object_evictions;
+		out->cache_object_bytes_served = cstats.object_bytes_served;
+		out->cache_object_bytes_populated =
+			cstats.object_bytes_populated;
+		out->cache_object_slots_resident =
+			cstats.object_slots_resident;
+		out->cache_object_alias_hits = cstats.object_alias_hits;
+		out->cache_object_alias_misses = cstats.object_alias_misses;
+		out->cache_object_alias_registers = cstats.object_alias_registers;
+		out->cache_object_alias_evictions = cstats.object_alias_evictions;
+		out->cache_object_aliases_resident =
+			cstats.object_aliases_resident;
 	}
 }
 

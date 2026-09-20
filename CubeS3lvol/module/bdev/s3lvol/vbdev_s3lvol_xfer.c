@@ -924,6 +924,7 @@ s3lvol_esnap_dev_create(void *bs_ctx, void *blob_ctx, struct spdk_blob *blob,
 	struct s3lvol_lvstore *lvs;
 	struct s3lvol_import *imp;
 	struct s3_client *client = NULL;
+	struct s3_cache *shared_cache = NULL;
 	struct s3_target target;
 	char uuid_str[SPDK_UUID_STRING_LEN];
 	int rc;
@@ -965,7 +966,11 @@ s3lvol_esnap_dev_create(void *bs_ctx, void *blob_ctx, struct spdk_blob *blob,
 
 	/* Ownership of the client reference moves into the bs_dev, which releases
 	 * it from destroy(). */
-	rc = s3_export_bs_dev_create(client, imp->m, bs_dev);
+	if (lvs && imp->lvs == lvs) {
+		shared_cache =
+			s3_bs_dev_get_cache(s3lvol_lvstore_get_bs_dev(lvs));
+	}
+	rc = s3_export_bs_dev_create(client, imp->m, shared_cache, bs_dev);
 	if (rc != 0) {
 		s3_client_put(client);
 		return rc;
@@ -3979,7 +3984,7 @@ decouple_start(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 	if (bs && bucket && bucket[0] != '\0' && d->m->src.bucket[0] != '\0' &&
 	    strcmp(bucket, d->m->src.bucket) == 0 &&
 	    s3_bs_dev_get_chunk_size(bs) == d->chunk_size &&
-	    s3_bs_dev_ingest_begin(bs, d->m->src.bucket,
+	    s3_bs_dev_ingest_begin(bs, d->m->src.endpoint, d->m->src.bucket,
 				   decouple_ingest_src, d) == 0) {
 		d->ingest = true;
 		SPDK_NOTICELOG("Decoupling lvol '%s' from export %s via CopyObject "

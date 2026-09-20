@@ -32,6 +32,7 @@
 struct s3_ctx;             /* opaque; the internal context, see s3_bs_dev_internal.h */
 struct s3_export_manifest; /* opaque; see s3_export.h */
 struct s3_chunk_map;       /* opaque, see s3_chunk_map.h */
+struct s3_cache;           /* opaque, see s3_cache.h */
 
 typedef void (*s3_bs_dev_cb)(void *cb_arg, int status);
 
@@ -127,6 +128,10 @@ int s3_bs_dev_attach_wal(struct spdk_bs_dev *bs_dev, struct s3_wal *wal,
  *         "no cache" rather than as a failure. -EEXIST if already attached.
  */
 int s3_bs_dev_attach_cache(struct spdk_bs_dev *bs_dev);
+
+/* Non-owning handle for an esnap parent created by this same lvstore.
+ * Blobstore destroys all of those parents before it tears down bs_dev. */
+struct s3_cache *s3_bs_dev_get_cache(struct spdk_bs_dev *bs_dev);
 
 /**
  * Register a callback for "this bs_dev is completely gone".
@@ -265,7 +270,8 @@ typedef int (*s3_ingest_src_fn)(void *cb_arg, uint64_t chunk_index,
 				char *src_key, size_t key_len,
 				uint32_t *valid_bytes);
 
-int s3_bs_dev_ingest_begin(struct spdk_bs_dev *bs_dev, const char *src_bucket,
+int s3_bs_dev_ingest_begin(struct spdk_bs_dev *bs_dev,
+			   const char *src_endpoint, const char *src_bucket,
 			   s3_ingest_src_fn src_fn, void *src_arg);
 
 /* Start CopyObject for this parent range if a slot is free. Harmless if the
@@ -362,6 +368,21 @@ struct s3_bs_dev_stats {
 	uint64_t cache_hot_slots_total;
 	uint64_t cache_hot_slots_resident;
 	uint64_t cache_hot_evictions;
+	uint64_t cache_object_hits;
+	uint64_t cache_object_misses;
+	uint64_t cache_object_hits_declined;
+	uint64_t cache_object_populates;
+	uint64_t cache_object_populates_dropped;
+	uint64_t cache_object_populates_failed;
+	uint64_t cache_object_evictions;
+	uint64_t cache_object_bytes_served;
+	uint64_t cache_object_bytes_populated;
+	uint64_t cache_object_slots_resident;
+	uint64_t cache_object_alias_hits;
+	uint64_t cache_object_alias_misses;
+	uint64_t cache_object_alias_registers;
+	uint64_t cache_object_alias_evictions;
+	uint64_t cache_object_aliases_resident;
 };
 
 /**

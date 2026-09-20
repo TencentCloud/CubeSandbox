@@ -599,6 +599,18 @@ read_md5()
 		md5sum "${out}" | cut -d' ' -f1
 }
 
+lvstore_write_stat()
+{
+	local lvs_name="$1" field="$2"
+
+	raw_rpc rcow_get_lvstores 2>/dev/null | python3 -c '
+import json, sys
+rows = json.load(sys.stdin)
+row = next(r for r in rows if r.get("lvs_name") == sys.argv[1])
+print((row.get("write_path") or {}).get(sys.argv[2], 0))
+' "${lvs_name}" "${field}" 2>/dev/null
+}
+
 # Did the operation actually happen? The exit status answers that on its own
 # again: every RPC used here replies with the {bool_value, string_value} envelope,
 # and s3lvol_rpc.py maps bool_value:false onto exit 1 with string_value on stderr.
@@ -4170,8 +4182,11 @@ check_target "step 11j" || exit 1
 # earlier step either keeps the imported volume or deletes it as cleanup and
 # never comes back. The field report is that repeating that pair on the
 # destination is what breaks -- leftover registry, lease, or name -- so the
-# same export is imported, deleted and imported again here, three times, with
-# decouple:true.
+# same export is imported, read, decoupled, deleted and imported again here,
+# three times. The first read deliberately warms the lvstore's exact-key object
+# cache. Round one explicitly warms before decouple; later rounds use the
+# production decouple=true path. Once CopyObject binds a fresh destination uuid,
+# its alias must let the post-decouple first read reuse the same object slot.
 # ==========================================================================
 echo
 echo "[11k] importing, deleting and re-importing the same export"
@@ -4233,8 +4248,13 @@ fi
 DST_CREATED=1
 
 for round in $(seq 1 "${REIMP_ROUNDS}"); do
-	if ! raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","lvs_name":"%s","decouple":true}' \
-			"${REIMP_DST}" "${REIMP_UUID}" "${DST_LVS}")" \
+	if [ "${round}" -eq 1 ]; then
+		REIMP_DECOUPLE=false
+	else
+		REIMP_DECOUPLE=true
+	fi
+	if ! raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","lvs_name":"%s","decouple":%s}' \
+			"${REIMP_DST}" "${REIMP_UUID}" "${DST_LVS}" "${REIMP_DECOUPLE}")" \
 			>/dev/null 2>"${WORKDIR}/reimp_import_${round}.err"; then
 		fail "rcow_import_lvol (round ${round} of ${REIMP_ROUNDS})"
 		sed 's/^/       /' "${WORKDIR}/reimp_import_${round}.err"
@@ -4242,15 +4262,6 @@ for round in $(seq 1 "${REIMP_ROUNDS}"); do
 		exit 1
 	fi
 	pass "round ${round}: imported ${REIMP_DST}"
-
-	if wait_for_decouple; then
-		pass "round ${round}: decouple finished"
-	else
-		fail "round ${round}: decouple did not finish in 120s"
-		sed 's/^/       /' "${WORKDIR}/decouple_progress.json" 2>/dev/null | head -3
-		check_target "step 11k, decouple round ${round}" || exit 1
-		exit 1
-	fi
 
 	BEFORE_REIMP_NS="$(ls /dev/nvme*n* 2>/dev/null | sort || true)"
 	${RPC} nvmf_subsystem_add_ns "${NQN}" "${DST_LVS}/${REIMP_DST}" \
@@ -4263,11 +4274,86 @@ for round in $(seq 1 "${REIMP_ROUNDS}"); do
 		exit 1
 	fi
 
+	REIMP_CACHE_HITS_BEFORE="$(raw_rpc rcow_get_lvstores 2>/dev/null | python3 -c "
+import json, sys
+name = sys.argv[1]
+try:
+    rows = json.load(sys.stdin)
+    row = next(r for r in rows if r.get('lvs_name') == name)
+    print(row.get('write_path', {}).get('cache_object_hits', 0))
+except Exception:
+    print('parse-error')
+" "${DST_LVS}" 2>/dev/null)"
 	REIMP_GOT="$(read_md5 "${REIMP_DEV}" "${WORKDIR}/reimp_got_${round}.bin")"
 	if [ "${REIMP_GOT}" = "${REIMP_HASH}" ]; then
 		pass "round ${round}: the imported volume reads the exported data"
 	else
 		fail "round ${round}: imported data mismatch (${REIMP_GOT} != ${REIMP_HASH})"
+		exit 1
+	fi
+
+	REIMP_CACHE_HITS_AFTER="$(raw_rpc rcow_get_lvstores 2>/dev/null | python3 -c "
+import json, sys
+name = sys.argv[1]
+try:
+    rows = json.load(sys.stdin)
+    row = next(r for r in rows if r.get('lvs_name') == name)
+    print(row.get('write_path', {}).get('cache_object_hits', 0))
+except Exception:
+    print('parse-error')
+" "${DST_LVS}" 2>/dev/null)"
+	if [ "${round}" -gt 1 ]; then
+		if [ "${REIMP_CACHE_HITS_BEFORE}" != "parse-error" ] &&
+		   [ "${REIMP_CACHE_HITS_AFTER}" != "parse-error" ] &&
+		   [ "${REIMP_CACHE_HITS_AFTER}" -gt "${REIMP_CACHE_HITS_BEFORE}" ]; then
+			pass "round ${round}: immediate read reused exact-key local object cache"
+		else
+			fail "round ${round}: no object-cache hit (${REIMP_CACHE_HITS_BEFORE} -> ${REIMP_CACHE_HITS_AFTER})"
+			exit 1
+		fi
+	fi
+
+	if [ "${round}" -eq 1 ]; then
+		if ! raw_rpc rcow_decouple_lvol "$(printf '{"lvol_name":"%s"}' \
+				"${REIMP_DST}")" >/dev/null 2>"${WORKDIR}/reimp_decouple_${round}.err"; then
+			fail "rcow_decouple_lvol (${REIMP_DST}, round ${round})"
+			sed 's/^/       /' "${WORKDIR}/reimp_decouple_${round}.err"
+			exit 1
+		fi
+	fi
+	if wait_for_decouple; then
+		pass "round ${round}: decouple finished"
+	else
+		fail "round ${round}: decouple did not finish in 120s"
+		sed 's/^/       /' "${WORKDIR}/decouple_progress.json" 2>/dev/null | head -3
+		check_target "step 11k, decouple round ${round}" || exit 1
+		exit 1
+	fi
+	REIMP_ALIAS_BEFORE="$(lvstore_write_stat "${DST_LVS}" \
+		cache_object_alias_hits || echo parse-error)"
+	REIMP_DEST_GETS_BEFORE="$(lvstore_write_stat "${DST_LVS}" \
+		dest_whole_gets || echo parse-error)"
+	REIMP_LOCAL_GOT="$(read_md5 "${REIMP_DEV}" \
+		"${WORKDIR}/reimp_local_got_${round}.bin")"
+	if [ "${REIMP_LOCAL_GOT}" = "${REIMP_HASH}" ]; then
+		pass "round ${round}: data remains correct after decouple"
+	else
+		fail "round ${round}: post-decouple data mismatch"
+		exit 1
+	fi
+	REIMP_ALIAS_AFTER="$(lvstore_write_stat "${DST_LVS}" \
+		cache_object_alias_hits || echo parse-error)"
+	REIMP_DEST_GETS_AFTER="$(lvstore_write_stat "${DST_LVS}" \
+		dest_whole_gets || echo parse-error)"
+	if [ "${REIMP_ALIAS_BEFORE}" != "parse-error" ] &&
+	   [ "${REIMP_ALIAS_AFTER}" != "parse-error" ] &&
+	   [ "${REIMP_DEST_GETS_BEFORE}" != "parse-error" ] &&
+	   [ "${REIMP_DEST_GETS_AFTER}" != "parse-error" ] &&
+	   [ "${REIMP_ALIAS_AFTER}" -gt "${REIMP_ALIAS_BEFORE}" ] &&
+	   [ "${REIMP_DEST_GETS_AFTER}" -eq "${REIMP_DEST_GETS_BEFORE}" ]; then
+		pass "round ${round}: post-decouple read used CopyObject cache alias"
+	else
+		fail "round ${round}: alias/get counters alias ${REIMP_ALIAS_BEFORE}->${REIMP_ALIAS_AFTER}, GET ${REIMP_DEST_GETS_BEFORE}->${REIMP_DEST_GETS_AFTER}"
 		exit 1
 	fi
 

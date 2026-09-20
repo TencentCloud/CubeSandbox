@@ -17,7 +17,9 @@
 # Typical production-window setup:
 #   1. import memory/rootfs/metadata with decouple=true and activate immediately
 #   2. run this script before rcow_get_decouple drains
-#   3. deactivate the imports so s3_export_bs_dev prints its GET/LRU counters
+#   3. deactivate the imports so s3_export_bs_dev prints GET/LRU/shared-cache
+#      counters. A prior import of the same export keys in this process can
+#      satisfy later faults from dest object cache even after export L1 is gone.
 #
 # Usage:
 #   sudo ./test/dataplane/probe_mmap_restore_perf.sh \
@@ -186,10 +188,10 @@ PY
 	printf '%s\n' "${result}"
 }
 
-# Only the first case starts from a clean export LRU, so activate a fresh import
-# immediately before this script. Later disjoint regions avoid hits but still
-# represent a steady-state LRU containing 16 unrelated objects. The final pair
-# deliberately reuses one 16 MiB region.
+# Only the first case starts from a clean export L1. Activate a fresh import
+# immediately before this script. Later disjoint regions miss that L1 but can
+# still hit dest object cache for the same S3 keys if this export was imported
+# earlier in the same process/lvstore. The final pair reuses one 16 MiB region.
 REQUIRED_MIB=$((SIZE_MIB * 7 + 16))
 DEVICE_MIB=$(( $(blockdev --getsize64 "${MEMORY_DEV}") / 1024 / 1024 ))
 [ "${DEVICE_MIB}" -ge "${REQUIRED_MIB}" ] || {
@@ -277,7 +279,8 @@ if [ -n "${TARGET_LOG}" ] && [ -f "${TARGET_LOG}" ]; then
 		echo "No export release counters yet. Deactivate/delete the imported lvol,"
 		echo "then collect 'Releasing imported export' from ${TARGET_LOG}."
 	else
-		echo "Export counters are aggregate for this activation, not per case:"
+		echo "Export counters are aggregate for this activation, not per case"
+		echo "(includes shared-cache hit/miss/fallback against dest object cache):"
 		cat "${OUTPUT}/export-stats.log"
 	fi
 fi

@@ -425,6 +425,44 @@ read_sync(struct s3_cache *cache, uint64_t chunk_index,
 	return ctx.status;
 }
 
+static void
+object_populate_sync(struct s3_cache *cache,
+		     const struct s3_cache_object_id *id,
+		     const void *buf, uint32_t valid_bytes)
+{
+	s3_cache_object_populate(cache, id, 0, buf, valid_bytes, valid_bytes);
+	poll_until_populate_settled(cache);
+}
+
+static void
+object_populate_range_sync(struct s3_cache *cache,
+			   const struct s3_cache_object_id *id, uint32_t off,
+			   const void *buf, uint32_t length,
+			   uint32_t valid_bytes)
+{
+	s3_cache_object_populate(cache, id, off, buf, length, valid_bytes);
+	poll_until_populate_settled(cache);
+}
+
+static int
+object_read_sync(struct s3_cache *cache, struct spdk_io_channel *channel,
+		 const struct s3_cache_object_id *id, uint32_t valid_bytes,
+		 uint32_t off, uint32_t len, void *buf)
+{
+	struct async_ctx ctx = {0};
+	int rc;
+
+	rc = s3_cache_object_read_on_channel(cache, channel, id, valid_bytes,
+					      off, len, buf, read_cb, &ctx);
+	if (rc != 0) {
+		return rc;
+	}
+	if (!poll_until(&ctx.done)) {
+		return -ETIMEDOUT;
+	}
+	return ctx.status;
+}
+
 /* ==========================================================================
  * main
  * ========================================================================== */
@@ -1489,6 +1527,315 @@ main(int argc, char **argv)
 			spdk_dma_free(merged);
 			s3_overlay_destroy(ov);
 		}
+	}
+
+	printf("\n[19] imported objects are keyed by full S3 identity\n");
+	{
+		struct s3_cache_opts opts = {
+			.desc = desc,
+			.ch = ch,
+			.region_offset = TEST_REGION_OFF,
+			.region_size = TEST_REGION_SIZE,
+			.chunk_size = TEST_CHUNK_SIZE,
+			.block_size = AIO_BLOCK_SIZE,
+			.num_chunks = TEST_NUM_CHUNKS,
+		};
+		struct s3_cache_object_id object_a = {
+			.endpoint = "cos.example.test",
+			.bucket = "bucket-a",
+			.key = "source/data/object-a",
+		};
+		struct s3_cache_object_id other_key = {
+			.endpoint = "cos.example.test",
+			.bucket = "bucket-a",
+			.key = "source/data/object-b",
+		};
+		struct s3_cache_object_id other_bucket = {
+			.endpoint = "cos.example.test",
+			.bucket = "bucket-b",
+			.key = "source/data/object-a",
+		};
+		struct s3_cache_object_id other_endpoint = {
+			.endpoint = "cos.other.test",
+			.bucket = "bucket-a",
+			.key = "source/data/object-a",
+		};
+		struct s3_cache_object_id collision_a = {
+			.endpoint = "ab",
+			.bucket = "c",
+			.key = "separator-test",
+		};
+		struct s3_cache_object_id collision_b = {
+			.endpoint = "a",
+			.bucket = "bc",
+			.key = "separator-test",
+		};
+		struct s3_cache_object_id short_object = {
+			.endpoint = "cos.example.test",
+			.bucket = "bucket-a",
+			.key = "source/data/short",
+		};
+		struct s3_cache_object_id partial_object = {
+			.endpoint = "cos.example.test",
+			.bucket = "bucket-a",
+			.key = "source/data/partial",
+		};
+		uint32_t short_valid = 2 * AIO_BLOCK_SIZE + 100;
+		uint32_t partial_off = 4 * AIO_BLOCK_SIZE;
+		uint64_t declined_before;
+
+		poll_until_populate_settled(cache);
+		s3_cache_destroy(cache);
+		cache = NULL;
+		rc = s3_cache_create(&opts, &cache);
+		check_u64("fresh cache for imported-object lane", (uint64_t)-rc, 0);
+		if (rc != 0) {
+			goto out_cache;
+		}
+
+		fill_pattern(src, 60, TEST_CHUNK_SIZE, 41);
+		object_populate_sync(cache, &object_a, src, TEST_CHUNK_SIZE);
+		memset(dst, 0, TEST_CHUNK_SIZE);
+		rc = object_read_sync(cache, ch, &object_a, TEST_CHUNK_SIZE, 0,
+				      TEST_CHUNK_SIZE, dst);
+		check_u64("the exact endpoint/bucket/key hits", (uint64_t)-rc, 0);
+		check_true("the object hit returns its own bytes",
+			   pattern_matches(dst, 60, 0, TEST_CHUNK_SIZE, 41), NULL);
+		check_u64("a different key cannot alias the entry",
+			  (uint64_t)-object_read_sync(cache, ch, &other_key,
+						       TEST_CHUNK_SIZE, 0,
+						       AIO_BLOCK_SIZE, dst),
+			  ENOENT);
+		check_u64("a different bucket cannot alias the entry",
+			  (uint64_t)-object_read_sync(cache, ch, &other_bucket,
+						       TEST_CHUNK_SIZE, 0,
+						       AIO_BLOCK_SIZE, dst),
+			  ENOENT);
+		check_u64("a different endpoint cannot alias the entry",
+			  (uint64_t)-object_read_sync(cache, ch, &other_endpoint,
+						       TEST_CHUNK_SIZE, 0,
+						       AIO_BLOCK_SIZE, dst),
+			  ENOENT);
+		check_u64("a conflicting object length is a miss",
+			  (uint64_t)-object_read_sync(cache, ch, &object_a,
+						       TEST_CHUNK_SIZE / 2, 0,
+						       AIO_BLOCK_SIZE, dst),
+			  ENOENT);
+
+		fill_pattern(src, 61, short_valid, 42);
+		object_populate_sync(cache, &short_object, src, short_valid);
+		memset(dst, 0xee, TEST_CHUNK_SIZE);
+		rc = object_read_sync(cache, ch, &short_object, short_valid, 0,
+				      4 * AIO_BLOCK_SIZE, dst);
+		check_u64("a short imported object hits", (uint64_t)-rc, 0);
+		check_true("its real bytes are preserved",
+			   pattern_matches(dst, 61, 0, short_valid, 42), NULL);
+		check_true("its tail is zero filled",
+			   all_zero((uint8_t *)dst + short_valid,
+				    4 * AIO_BLOCK_SIZE - short_valid), NULL);
+
+		fill_pattern(src, 62, TEST_CHUNK_SIZE, 43);
+		object_populate_sync(cache, &collision_a, src, TEST_CHUNK_SIZE);
+		check_u64("field separators prevent identity concatenation aliases",
+			  (uint64_t)-object_read_sync(cache, ch, &collision_b,
+						       TEST_CHUNK_SIZE, 0,
+						       AIO_BLOCK_SIZE, dst),
+			  ENOENT);
+
+		fill_pattern(src, 63, 2 * AIO_BLOCK_SIZE, 44);
+		s3_cache_get_stats(cache, &stats);
+		declined_before = stats.object_hits_declined;
+		object_populate_range_sync(cache, &partial_object, partial_off, src,
+					   2 * AIO_BLOCK_SIZE, TEST_CHUNK_SIZE);
+		check_u64("object range below residency misses",
+			  (uint64_t)-object_read_sync(cache, ch, &partial_object,
+						       TEST_CHUNK_SIZE, 0,
+						       AIO_BLOCK_SIZE, dst),
+			  ENOENT);
+		check_u64("object range above residency misses",
+			  (uint64_t)-object_read_sync(
+				  cache, ch, &partial_object, TEST_CHUNK_SIZE,
+				  partial_off + 2 * AIO_BLOCK_SIZE,
+				  AIO_BLOCK_SIZE, dst),
+			  ENOENT);
+		check_u64("object range straddling residency misses",
+			  (uint64_t)-object_read_sync(
+				  cache, ch, &partial_object, TEST_CHUNK_SIZE,
+				  partial_off - AIO_BLOCK_SIZE,
+				  2 * AIO_BLOCK_SIZE, dst),
+			  ENOENT);
+		memset(dst, 0xee, TEST_CHUNK_SIZE);
+		check_u64("the populated object range itself hits",
+			  (uint64_t)-object_read_sync(
+				  cache, ch, &partial_object, TEST_CHUNK_SIZE,
+				  partial_off, 2 * AIO_BLOCK_SIZE, dst),
+			  0);
+		check_true("partial object hit returns only its own bytes",
+			   memcmp(dst, src, 2 * AIO_BLOCK_SIZE) == 0, NULL);
+
+		s3_cache_get_stats(cache, &stats);
+		check_u64("four imported objects are resident",
+			  stats.object_slots_resident, 4);
+		check_u64("partial object misses are classified as declined",
+			  stats.object_hits_declined, declined_before + 3);
+		check_true("object hits are accounted separately",
+			   stats.object_hits >= 3 && stats.object_misses >= 5, NULL);
+	}
+
+	printf("\n[20] CopyObject destination aliases reuse object slots\n");
+	{
+		struct s3_cache_object_id object_a = {
+			.endpoint = "cos.example.test",
+			.bucket = "bucket-a",
+			.key = "source/data/object-a",
+		};
+		struct s3_cache_object_id partial_object = {
+			.endpoint = "cos.example.test",
+			.bucket = "bucket-a",
+			.key = "source/data/partial",
+		};
+		uint32_t partial_off = 4 * AIO_BLOCK_SIZE;
+		uint64_t registers_before, evictions_before, alias_misses_before;
+
+		s3_cache_get_stats(cache, &stats);
+		registers_before = stats.object_alias_registers;
+		evictions_before = stats.object_alias_evictions;
+		alias_misses_before = stats.object_alias_misses;
+
+		s3_cache_object_alias(cache, &object_a, 38, &uuid_b,
+				      TEST_CHUNK_SIZE / 2);
+		check_u64("length mismatch does not create an alias",
+			  (uint64_t)-read_sync(cache, 38, &uuid_b, 0,
+					       AIO_BLOCK_SIZE, dst),
+			  ENOENT);
+		s3_cache_get_stats(cache, &stats);
+		check_u64("an ordinary native miss is not an alias miss",
+			  stats.object_alias_misses, alias_misses_before);
+
+		s3_cache_object_alias(cache, &partial_object, 39, &uuid_b,
+				      TEST_CHUNK_SIZE);
+		memset(dst, 0, TEST_CHUNK_SIZE);
+		check_u64("alias reads a resident partial-object range",
+			  (uint64_t)-read_sync(cache, 39, &uuid_b, partial_off,
+					       2 * AIO_BLOCK_SIZE, dst),
+			  0);
+		check_true("alias returns the source object's bytes",
+			   memcmp(dst, src, 2 * AIO_BLOCK_SIZE) == 0, NULL);
+		check_u64("alias declines a source range that is not resident",
+			  (uint64_t)-read_sync(cache, 39, &uuid_b, 0,
+					       AIO_BLOCK_SIZE, dst),
+			  ENOENT);
+		check_u64("alias requires the exact CopyObject destination uuid",
+			  (uint64_t)-read_sync(cache, 39, &uuid_a, partial_off,
+					       AIO_BLOCK_SIZE, dst),
+			  ENOENT);
+
+		for (uint64_t chunk = 40; chunk < 40 + TEST_N_SLOTS + 1; chunk++) {
+			s3_cache_object_alias(cache, &object_a, chunk, &uuid_b,
+					      TEST_CHUNK_SIZE);
+		}
+		check_u64("oldest alias is evicted at the metadata bound",
+			  (uint64_t)-read_sync(cache, 40, &uuid_b, 0,
+					       AIO_BLOCK_SIZE, dst),
+			  ENOENT);
+		check_u64("newest bounded alias remains readable",
+			  (uint64_t)-read_sync(cache, 44, &uuid_b, 0,
+					       AIO_BLOCK_SIZE, dst),
+			  0);
+		s3_cache_get_stats(cache, &stats);
+		check_true("successful aliases are counted",
+			   stats.object_alias_registers >=
+			   registers_before + TEST_N_SLOTS + 2, NULL);
+		check_true("alias metadata eviction is counted",
+			   stats.object_alias_evictions > evictions_before, NULL);
+		check_true("alias hit is observable",
+			   stats.object_alias_hits >= 2, NULL);
+		check_u64("resident aliases stay bounded by disk slots",
+			  stats.object_aliases_resident, TEST_N_SLOTS);
+	}
+
+	printf("\n[21] native entries reclaim object slots first\n");
+	{
+		struct s3_cache_object_id object_a = {
+			.endpoint = "cos.example.test",
+			.bucket = "bucket-a",
+			.key = "source/data/object-a",
+		};
+		uint64_t object_evictions_before;
+
+		s3_cache_get_stats(cache, &stats);
+		object_evictions_before = stats.object_evictions;
+		for (uint64_t chunk = 20; chunk < 20 + TEST_N_SLOTS; chunk++) {
+			fill_pattern(src, chunk, TEST_CHUNK_SIZE, 43);
+			populate_sync(cache, chunk, &uuid_a, src, TEST_CHUNK_SIZE);
+		}
+		for (uint64_t chunk = 20; chunk < 20 + TEST_N_SLOTS; chunk++) {
+			check_true("native entry remains resident after reclaim",
+				   s3_cache_lookup(cache, chunk, &uuid_a), NULL);
+		}
+		check_u64("object entry no longer occupies native capacity",
+			  (uint64_t)-object_read_sync(cache, ch, &object_a,
+						       TEST_CHUNK_SIZE, 0,
+						       AIO_BLOCK_SIZE, dst),
+			  ENOENT);
+		s3_cache_get_stats(cache, &stats);
+		check_true("native population evicted object entries first",
+			   stats.object_evictions >= object_evictions_before + 2,
+			   NULL);
+		check_u64("no object slots remain after native fills the cache",
+			  stats.object_slots_resident, 0);
+		check_u64("evicting an object slot invalidates its aliases",
+			  (uint64_t)-read_sync(cache, 44, &uuid_b, 0,
+					       AIO_BLOCK_SIZE, dst),
+			  ENOENT);
+
+		{
+			uint64_t dropped_before = stats.object_populates_dropped;
+
+			fill_pattern(src, 30, TEST_CHUNK_SIZE, 45);
+			object_populate_sync(cache, &object_a, src,
+					     TEST_CHUNK_SIZE);
+			s3_cache_get_stats(cache, &stats);
+			check_u64("an object cannot evict a native entry",
+				  stats.object_populates_dropped,
+				  dropped_before + 1);
+			check_u64("the refused object occupies no slot",
+				  stats.object_slots_resident, 0);
+			for (uint64_t chunk = 20;
+			     chunk < 20 + TEST_N_SLOTS; chunk++) {
+				check_true("native entry survives refused object populate",
+					   s3_cache_lookup(cache, chunk, &uuid_a),
+					   NULL);
+			}
+		}
+	}
+
+	printf("\n[22] teardown closes only the imported-object lane\n");
+	{
+		struct s3_cache_object_id object = {
+			.endpoint = "cos.example.test",
+			.bucket = "bucket-a",
+			.key = "source/data/after-stop",
+		};
+		uint64_t dropped_before;
+
+		s3_cache_get_stats(cache, &stats);
+		dropped_before = stats.object_populates_dropped;
+		s3_cache_stop_object_io(cache);
+		fill_pattern(src, 31, TEST_CHUNK_SIZE, 46);
+		object_populate_sync(cache, &object, src, TEST_CHUNK_SIZE);
+		s3_cache_get_stats(cache, &stats);
+		check_u64("object populate is refused after stop",
+			  stats.object_populates_dropped, dropped_before + 1);
+		check_u64("object read is a miss after stop",
+			  (uint64_t)-object_read_sync(cache, ch, &object,
+						       TEST_CHUNK_SIZE, 0,
+						       AIO_BLOCK_SIZE, dst),
+			  ENOENT);
+		check_u64("native cache remains usable while teardown drains",
+			  (uint64_t)-read_sync(cache, 20, &uuid_a, 0,
+					       AIO_BLOCK_SIZE, dst),
+			  0);
 	}
 
 	printf("\n=== %d passed, %d failed ===\n", g_pass, g_fail);

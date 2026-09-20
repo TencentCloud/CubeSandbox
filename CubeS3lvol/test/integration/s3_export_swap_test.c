@@ -223,7 +223,7 @@ main(void)
 	if (!m1) {
 		goto out_client;
 	}
-	rc = s3_export_bs_dev_create(client, m1, &bs_dev);
+	rc = s3_export_bs_dev_create(client, m1, NULL, &bs_dev);
 	check_int("the device is created", rc, 0);
 	if (rc != 0) {
 		goto out_client;

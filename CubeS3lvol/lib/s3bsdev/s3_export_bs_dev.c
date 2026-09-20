@@ -39,6 +39,7 @@
 #include "spdk/util.h"
 
 #include "s3lvol/s3_chunk_map.h"
+#include "s3lvol/s3_cache.h"
 #include "s3lvol/s3_export.h"
 
 #define EXPORT_FILL_MAX_GETTING 64
@@ -98,6 +99,10 @@ struct s3_export_fill {
 
 TAILQ_HEAD(s3_export_fills, s3_export_fill);
 
+struct s3_export_channel {
+	struct spdk_io_channel *cache_ch;
+};
+
 struct s3_export_dev {
 	/* Must be first: blobstore only ever holds &dev->bs_dev, and the cast
 	 * back relies on the addresses being the same. */
@@ -105,6 +110,9 @@ struct s3_export_dev {
 
 	struct s3_client          *client;
 	struct s3_export_manifest *m;
+	struct s3_cache           *shared_cache;
+	char                       cache_endpoint[S3_EXPORT_ENDPOINT_MAX];
+	char                       cache_bucket[S3_EXPORT_BUCKET_MAX];
 
 	s3_export_bs_dev_on_swap_fn on_swap;
 	void                      *on_swap_arg;
@@ -172,6 +180,9 @@ struct s3_export_dev {
 	uint64_t                   prefetch_skip_seq;
 	uint64_t                   prefetch_skip_full;
 	uint64_t                   prefetch_skip_host;
+	uint64_t                   shared_cache_hits;
+	uint64_t                   shared_cache_misses;
+	uint64_t                   shared_cache_fallbacks;
 };
 
 /* One bs_dev read, possibly spanning several chunks. */
@@ -219,6 +230,16 @@ struct s3_export_io {
 	TAILQ_ENTRY(s3_export_io)   waiter_link;
 };
 
+struct s3_export_cache_io {
+	struct s3_export_io *io;
+	char                 key[S3_EXPORT_KEY_MAX];
+	uint64_t             chunk_index;
+	uint32_t             object_len;
+	uint32_t             offset;
+	uint32_t             get_len;
+	void                *dst;
+};
+
 struct s3_export_chunk_io {
 	struct s3_export_io *io;
 	uint64_t             chunk_index;
@@ -227,6 +248,9 @@ struct s3_export_chunk_io {
 	 * short read from a complete one: the buffer it was given is only filled as
 	 * far as the object store went, and the rest keeps whatever was there. */
 	uint32_t             expected;
+	uint32_t             object_len;
+	uint32_t             offset;
+	void                *dst;
 
 	char                 key[S3_EXPORT_KEY_MAX];
 };
@@ -552,6 +576,9 @@ export_fill_waiter_finish(void *arg)
 	cio->io = io;
 	cio->chunk_index = fill->chunk_index;
 	cio->expected = waiter->length;
+	cio->object_len = fill->object_len;
+	cio->offset = waiter->offset;
+	cio->dst = waiter->dst;
 	snprintf(cio->key, sizeof(cio->key), "%s", fill->key);
 	rc = s3_get_range(fill->dev->client, cio->key, waiter->offset,
 			  waiter->length, waiter->dst, export_chunk_read_done, cio);
@@ -585,6 +612,16 @@ export_fill_read_done(void *cb_arg, uint64_t bytes_read, int status)
 			    "got %" PRIu64 ". Refusing to cache or serve it.\n",
 			    fill->key, fill->object_len, bytes_read);
 		status = -EIO;
+	}
+	if (status == 0 && dev->shared_cache) {
+		struct s3_cache_object_id id = {
+			.endpoint = dev->cache_endpoint,
+			.bucket = dev->cache_bucket,
+			.key = fill->key,
+		};
+
+		s3_cache_object_populate(dev->shared_cache, &id, 0, fill->buf,
+					 fill->object_len, fill->object_len);
 	}
 
 	pthread_mutex_lock(&dev->fill_lock);
@@ -813,6 +850,43 @@ export_fill_request_token(struct s3_export_fill *fill)
 /* Submit one logical slice through the bounded whole-object working set.
  * Every successful return has consumed waiter. */
 static int
+export_fill_submit_existing(struct s3_export_io *io, const char *key,
+			    uint32_t object_len, uint32_t offset,
+			    uint32_t length, void *dst)
+{
+	struct s3_export_dev *dev = io->dev;
+	struct s3_export_fill_waiter *waiter;
+	struct s3_export_fill *fill;
+	bool ready;
+
+	waiter = calloc(1, sizeof(*waiter));
+	if (!waiter) {
+		return -ENOMEM;
+	}
+	waiter->io = io;
+	waiter->dst = dst;
+	waiter->offset = offset;
+	waiter->length = length;
+	waiter->origin = io->origin;
+
+	pthread_mutex_lock(&dev->fill_lock);
+	fill = export_fill_find_locked(dev, key, object_len);
+	if (!fill) {
+		pthread_mutex_unlock(&dev->fill_lock);
+		free(waiter);
+		return -ENOENT;
+	}
+	waiter->fill = fill;
+	ready = fill->state == EXPORT_FILL_READY;
+	export_fill_attach_locked(dev, fill, waiter);
+	pthread_mutex_unlock(&dev->fill_lock);
+	if (ready) {
+		export_fill_waiter_deliver(waiter);
+	}
+	return 0;
+}
+
+static int
 export_fill_submit(struct s3_export_io *io, const char *key,
 		   uint64_t chunk_index, uint32_t object_len,
 		   uint32_t offset, uint32_t length, void *dst)
@@ -950,6 +1024,17 @@ export_chunk_read_done(void *cb_arg, uint64_t bytes_read, int status)
 		}
 	} else {
 		__atomic_fetch_add(&io->dev->bytes_read, bytes_read, __ATOMIC_RELAXED);
+		if (io->dev->shared_cache) {
+			struct s3_cache_object_id id = {
+				.endpoint = io->dev->cache_endpoint,
+				.bucket = io->dev->cache_bucket,
+				.key = cio->key,
+			};
+
+			s3_cache_object_populate(io->dev->shared_cache, &id,
+						 cio->offset, cio->dst,
+						 cio->expected, cio->object_len);
+		}
 	}
 
 	free(cio);
@@ -1106,6 +1191,94 @@ export_maybe_prefetch(struct s3_export_dev *dev, struct s3_export_manifest *m,
 	}
 }
 
+static void
+export_cache_submit_s3(struct s3_export_cache_io *cache_io)
+{
+	struct s3_export_io *io = cache_io->io;
+	struct s3_export_dev *dev = io->dev;
+	struct s3_export_chunk_io *cio;
+	int rc;
+
+	rc = export_fill_submit(io, cache_io->key, cache_io->chunk_index,
+				cache_io->object_len, cache_io->offset,
+				cache_io->get_len, cache_io->dst);
+	if (rc == 0) {
+		free(cache_io);
+		return;
+	}
+	if (rc != -EAGAIN) {
+		if (io->status == 0) {
+			io->status = rc;
+		}
+		free(cache_io);
+		export_io_put(io);
+		return;
+	}
+
+	/* Preserve the existing pressure fallback: sharing is an optimisation,
+	 * so neither a cache miss nor a busy L1 may turn a readable object into
+	 * an error. */
+	cio = calloc(1, sizeof(*cio));
+	if (!cio) {
+		if (io->status == 0) {
+			io->status = -ENOMEM;
+		}
+		free(cache_io);
+		export_io_put(io);
+		return;
+	}
+	cio->io = io;
+	cio->chunk_index = cache_io->chunk_index;
+	cio->expected = cache_io->get_len;
+	cio->object_len = cache_io->object_len;
+	cio->offset = cache_io->offset;
+	cio->dst = cache_io->dst;
+	snprintf(cio->key, sizeof(cio->key), "%s", cache_io->key);
+	rc = s3_get_range(dev->client, cio->key, cio->offset, cio->expected,
+			  cio->dst, export_chunk_read_done, cio);
+	if (rc != 0) {
+		if (io->status == 0) {
+			io->status = rc;
+		}
+		free(cio);
+		export_io_put(io);
+	} else {
+		__atomic_fetch_add(&dev->exact_fallbacks, 1, __ATOMIC_RELAXED);
+	}
+	free(cache_io);
+}
+
+static void
+export_cache_read_done(void *cb_arg, int status)
+{
+	struct s3_export_cache_io *cache_io = cb_arg;
+	struct s3_export_dev *dev = cache_io->io->dev;
+
+	if (status == 0) {
+		struct s3_export_io *io = cache_io->io;
+
+		__atomic_fetch_add(&dev->shared_cache_hits, 1, __ATOMIC_RELAXED);
+		free(cache_io);
+		export_io_put(io);
+		return;
+	}
+	__atomic_fetch_add(&dev->shared_cache_misses, 1, __ATOMIC_RELAXED);
+	__atomic_fetch_add(&dev->shared_cache_fallbacks, 1, __ATOMIC_RELAXED);
+	export_cache_submit_s3(cache_io);
+}
+
+static void
+export_note_demand(struct s3_export_dev *dev, struct s3_export_manifest *m,
+		   uint64_t chunk_index, uint32_t offset, uint32_t length,
+		   uint32_t object_len)
+{
+	if (offset == 0 && length == object_len) {
+		__atomic_fetch_add(&dev->prefetch_skip_full, 1, __ATOMIC_RELAXED);
+	} else {
+		export_maybe_prefetch(dev, m, chunk_index);
+	}
+}
+
 /* ==========================================================================
  * Read path
  * ========================================================================== */
@@ -1119,6 +1292,8 @@ export_read_internal(struct spdk_bs_dev *bs_dev, struct spdk_io_channel *channel
 		     struct spdk_bs_dev_cb_args *cb_args, bool is_retry)
 {
 	struct s3_export_dev *dev = (struct s3_export_dev *)bs_dev;
+	struct s3_export_channel *export_ch = channel
+					  ? spdk_io_channel_get_ctx(channel) : NULL;
 	struct s3_export_io *io;
 	uint64_t offset_bytes = lba * S3LVOL_BLOCK_SIZE;
 	uint64_t remaining = (uint64_t)lba_count * S3LVOL_BLOCK_SIZE;
@@ -1173,7 +1348,6 @@ export_read_internal(struct spdk_bs_dev *bs_dev, struct spdk_io_channel *channel
 						(chunk_size - 1));
 		uint32_t length = (uint32_t)spdk_min(remaining,
 						     chunk_size - offset_in_chunk);
-		struct s3_export_chunk_io *cio;
 		uint32_t get_len, object_len;
 		char key[S3_EXPORT_KEY_MAX];
 		int rc;
@@ -1240,57 +1414,76 @@ export_read_internal(struct spdk_bs_dev *bs_dev, struct spdk_io_channel *channel
 
 		export_chunk_key(io->m, chunk_index, key, sizeof(key));
 		io->num_pending++;
-		rc = export_fill_submit(io, key, chunk_index, object_len,
-					offset_in_chunk, get_len, buf);
+		rc = export_fill_submit_existing(io, key, object_len,
+						 offset_in_chunk, get_len, buf);
 		if (rc == 0) {
-			/*
-			 * A full aligned demand means the host/kernel is already
-			 * reading at object granularity. Starting another eight-object
-			 * window here duplicates kernel readahead and, on mmap restore,
-			 * spends more bandwidth than demand itself for almost no hits.
-			 * Keep userspace prefetch for small reads where it can hide the
-			 * next object's RTT.
-			 */
-			if (offset_in_chunk == 0 && get_len == object_len) {
-				__atomic_fetch_add(&dev->prefetch_skip_full, 1,
-						   __ATOMIC_RELAXED);
-			} else {
-				export_maybe_prefetch(dev, io->m, chunk_index);
-			}
+			export_note_demand(dev, io->m, chunk_index, offset_in_chunk,
+					   get_len, object_len);
 			goto next;
 		}
-		if (rc != -EAGAIN) {
+		if (rc != -ENOENT) {
 			io->num_pending--;
 			io->status = rc;
 			break;
 		}
 
-		/* The bounded whole-object staging set is full. Preserve forward
-		 * progress with the old exact range GET rather than queueing an
-		 * unbounded number of 1 MiB buffers. */
-		__atomic_fetch_add(&dev->exact_fallbacks, 1, __ATOMIC_RELAXED);
-		cio = calloc(1, sizeof(*cio));
-		if (!cio) {
-			io->num_pending--;
-			io->status = -ENOMEM;
-			break;
-		}
-		cio->io = io;
-		cio->chunk_index = chunk_index;
-		cio->expected = get_len;
-		snprintf(cio->key, sizeof(cio->key), "%s", key);
+		if (dev->shared_cache && export_ch) {
+			struct s3_export_cache_io *cache_io;
+			struct s3_cache_object_id id = {
+				.endpoint = dev->cache_endpoint,
+				.bucket = dev->cache_bucket,
+				.key = key,
+			};
 
-		rc = s3_get_range(dev->client, cio->key, offset_in_chunk, get_len, buf,
-				  export_chunk_read_done, cio);
-		if (rc != 0) {
-			SPDK_ERRLOG("Failed to submit a read of export chunk '%s': %s\n",
-				    cio->key, spdk_strerror(-rc));
-			io->num_pending--;
-			free(cio);
-			io->status = rc;
-			break;
+			cache_io = calloc(1, sizeof(*cache_io));
+			if (cache_io) {
+				cache_io->io = io;
+				cache_io->chunk_index = chunk_index;
+				cache_io->object_len = object_len;
+				cache_io->offset = offset_in_chunk;
+				cache_io->get_len = get_len;
+				cache_io->dst = buf;
+				snprintf(cache_io->key, sizeof(cache_io->key), "%s",
+					 key);
+				rc = s3_cache_object_read_on_channel(
+					dev->shared_cache, export_ch->cache_ch, &id,
+					object_len, offset_in_chunk, length, buf,
+					export_cache_read_done, cache_io);
+				export_note_demand(dev, io->m, chunk_index,
+						   offset_in_chunk, get_len,
+						   object_len);
+				if (rc == 0) {
+					goto next;
+				}
+				__atomic_fetch_add(&dev->shared_cache_misses, 1,
+						   __ATOMIC_RELAXED);
+				__atomic_fetch_add(&dev->shared_cache_fallbacks, 1,
+						   __ATOMIC_RELAXED);
+				export_cache_submit_s3(cache_io);
+				goto next;
+			}
 		}
 
+		/* Sharing is optional, including under allocation pressure. */
+		{
+			struct s3_export_cache_io *s3_io = calloc(1, sizeof(*s3_io));
+
+			if (!s3_io) {
+				io->num_pending--;
+				io->status = -ENOMEM;
+				break;
+			}
+			s3_io->io = io;
+			s3_io->chunk_index = chunk_index;
+			s3_io->object_len = object_len;
+			s3_io->offset = offset_in_chunk;
+			s3_io->get_len = get_len;
+			s3_io->dst = buf;
+			snprintf(s3_io->key, sizeof(s3_io->key), "%s", key);
+			export_cache_submit_s3(s3_io);
+			export_note_demand(dev, io->m, chunk_index,
+					   offset_in_chunk, get_len, object_len);
+		}
 next:
 		buf += length;
 		offset_bytes += length;
@@ -1471,12 +1664,22 @@ export_is_degraded(struct spdk_bs_dev *bs_dev)
 static int
 export_channel_create_cb(void *io_device, void *ctx_buf)
 {
+	struct s3_export_dev *dev = io_device;
+	struct s3_export_channel *ch = ctx_buf;
+
+	ch->cache_ch = dev->shared_cache
+		       ? s3_cache_get_io_channel(dev->shared_cache) : NULL;
 	return 0;
 }
 
 static void
 export_channel_destroy_cb(void *io_device, void *ctx_buf)
 {
+	struct s3_export_channel *ch = ctx_buf;
+
+	if (ch->cache_ch) {
+		spdk_put_io_channel(ch->cache_ch);
+	}
 }
 
 static struct spdk_io_channel *
@@ -1547,6 +1750,8 @@ export_destroy(struct spdk_bs_dev *bs_dev)
 	       " prefetch seq skip(s), %" PRIu64
 	       " prefetch full-demand skip(s), %" PRIu64
 	       " prefetch host-readahead skip(s), %" PRIu64
+	       " shared-cache hit(s), %" PRIu64 " shared-cache miss(es), %" PRIu64
+	       " shared-cache fallback(s), %" PRIu64
 	       " manifest refetch(es)\n",
 		       dev->m->uuid_str, dev->reads, dev->bytes_read, dev->zero_fills,
 		       dev->whole_gets, dev->coalesced_reads, dev->ready_hits,
@@ -1554,7 +1759,9 @@ export_destroy(struct spdk_bs_dev *bs_dev)
 	       dev->prefetch_ready_hits, dev->prefetch_skip_token,
 	       dev->prefetch_skip_slot, dev->prefetch_skip_stale,
 	       dev->prefetch_skip_seq, dev->prefetch_skip_full,
-	       dev->prefetch_skip_host, dev->refetches);
+	       dev->prefetch_skip_host, dev->shared_cache_hits,
+	       dev->shared_cache_misses, dev->shared_cache_fallbacks,
+	       dev->refetches);
 
 	/* No wait for a refetch, deliberately.
 	 *
@@ -1982,7 +2189,7 @@ export_retry_msg(void *arg)
 
 int
 s3_export_bs_dev_create(struct s3_client *client, struct s3_export_manifest *m,
-			struct spdk_bs_dev **out)
+			struct s3_cache *shared_cache, struct spdk_bs_dev **out)
 {
 	struct s3_export_dev *dev;
 
@@ -2008,6 +2215,13 @@ s3_export_bs_dev_create(struct s3_client *client, struct s3_export_manifest *m,
 
 	dev->client           = client;
 	dev->m                = m;
+	dev->shared_cache     = shared_cache;
+	if (shared_cache) {
+		snprintf(dev->cache_endpoint, sizeof(dev->cache_endpoint), "%s",
+			 m->src.endpoint);
+		snprintf(dev->cache_bucket, sizeof(dev->cache_bucket), "%s",
+			 s3_client_bucket(client));
+	}
 	dev->chunk_shift      = (uint32_t)spdk_u32log2(m->chunk_size);
 	dev->blocks_per_chunk = m->chunk_size / S3LVOL_BLOCK_SIZE;
 	dev->host_readahead_covers_chunk =
@@ -2024,7 +2238,7 @@ s3_export_bs_dev_create(struct s3_client *client, struct s3_export_manifest *m,
 	s3_export_manifest_ref(m);
 
 	spdk_io_device_register(dev, export_channel_create_cb, export_channel_destroy_cb,
-				0, dev->name);
+				sizeof(struct s3_export_channel), dev->name);
 
 	dev->bs_dev.blockcnt       = m->size_bytes / S3LVOL_BLOCK_SIZE;
 	dev->bs_dev.blocklen       = S3LVOL_BLOCK_SIZE;

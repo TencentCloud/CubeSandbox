@@ -49,6 +49,8 @@
 #
 #  Environment:
 #    S3LVOL_TEST_BUCKET   override the bucket taken from s3.cfg
+#    S3LVOL_SKIP_HOT_UPGRADE=1
+#                         skip the two disruptive hot-upgrade suites
 #    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
 #                         used as-is when set; otherwise read from s3.cfg
 #
@@ -529,10 +531,15 @@ else
 		# The hot-upgrade pair SIGKILLs a live target and shortens the kernel's
 		# reconnect timeouts; they go before guards/activation/control so those
 		# still get the last word on whether the machine was left tidy.
-		run_suite run_hot_upgrade_test.sh \
-			./test/dataplane/run_hot_upgrade_test.sh "${S3_ARGS[@]}"
-		run_suite run_hot_upgrade_negative_test.sh \
-			./test/dataplane/run_hot_upgrade_negative_test.sh "${S3_ARGS[@]}"
+		if [ "${S3LVOL_SKIP_HOT_UPGRADE:-0}" = 1 ]; then
+			report_skip "run_hot_upgrade_test.sh" "not requested" 1
+			report_skip "run_hot_upgrade_negative_test.sh" "not requested" 1
+		else
+			run_suite run_hot_upgrade_test.sh \
+				./test/dataplane/run_hot_upgrade_test.sh "${S3_ARGS[@]}"
+			run_suite run_hot_upgrade_negative_test.sh \
+				./test/dataplane/run_hot_upgrade_negative_test.sh "${S3_ARGS[@]}"
+		fi
 		# Its whole point is that it does not disturb host state, so it is
 		# safe anywhere in the order; kept next to fs because both are recent.
 		run_suite run_guards_test.sh \

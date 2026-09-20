@@ -1840,6 +1840,43 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 						     stats.cache_hot_slots_resident);
 			spdk_json_write_named_uint64(w, "cache_hot_evictions",
 						     stats.cache_hot_evictions);
+			spdk_json_write_named_uint64(w, "cache_object_hits",
+						     stats.cache_object_hits);
+			spdk_json_write_named_uint64(w, "cache_object_misses",
+						     stats.cache_object_misses);
+			spdk_json_write_named_uint64(w, "cache_object_hits_declined",
+						     stats.cache_object_hits_declined);
+			spdk_json_write_named_uint64(w, "cache_object_populates",
+						     stats.cache_object_populates);
+			spdk_json_write_named_uint64(
+				w, "cache_object_populates_dropped",
+				stats.cache_object_populates_dropped);
+			spdk_json_write_named_uint64(
+				w, "cache_object_populates_failed",
+				stats.cache_object_populates_failed);
+			spdk_json_write_named_uint64(w, "cache_object_evictions",
+						     stats.cache_object_evictions);
+			spdk_json_write_named_uint64(w, "cache_object_bytes_served",
+						     stats.cache_object_bytes_served);
+			spdk_json_write_named_uint64(
+				w, "cache_object_bytes_populated",
+				stats.cache_object_bytes_populated);
+			spdk_json_write_named_uint64(
+				w, "cache_object_slots_resident",
+				stats.cache_object_slots_resident);
+			spdk_json_write_named_uint64(w, "cache_object_alias_hits",
+						     stats.cache_object_alias_hits);
+			spdk_json_write_named_uint64(w, "cache_object_alias_misses",
+						     stats.cache_object_alias_misses);
+			spdk_json_write_named_uint64(
+				w, "cache_object_alias_registers",
+				stats.cache_object_alias_registers);
+			spdk_json_write_named_uint64(
+				w, "cache_object_alias_evictions",
+				stats.cache_object_alias_evictions);
+			spdk_json_write_named_uint64(
+				w, "cache_object_aliases_resident",
+				stats.cache_object_aliases_resident);
 		}
 		spdk_json_write_object_end(w);
 

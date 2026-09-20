@@ -48,6 +48,8 @@
 #include "s3lvol/s3_client.h"
 #include "s3lvol/s3_types.h"
 
+struct s3_cache;
+
 /* Bumped only for changes an old reader must refuse. Additive fields do not
  * bump it -- unknown members are ignored on parse.
  *
@@ -771,8 +773,13 @@ int s3_export_run_ref(const struct s3_export_ref_opts *opts,
  *
  * \c client must address the *source* bucket. Reads are plain ranged GETs, so
  * nothing else about the source lvstore has to be reachable.
+ *
+ * \c shared_cache is optional and non-owning. It must be the destination
+ * lvstore's cache; the destination blobstore destroys all esnap parents before
+ * stopping and releasing that cache.
  */
 int s3_export_bs_dev_create(struct s3_client *client, struct s3_export_manifest *m,
+			    struct s3_cache *shared_cache,
 			    struct spdk_bs_dev **out);
 
 /** Called once the swap is complete and the old manifest has been released. */

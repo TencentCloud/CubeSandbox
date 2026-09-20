@@ -10,15 +10,19 @@
 # dozen clusters, which races the mmap and attributes later faults to the dest
 # range-GET path -- that contaminated the first run.
 #
-# three_lvol still uses decouple=true to exercise the production window.
+# The dest lvstore keeps an object-key disk cache across those fresh imports.
+# cold_seq_1t is the only empty-cache walk; later cases of the same export may
+# replace whole-object GETs with shared-cache hits. three_lvol still uses
+# decouple=true to exercise the production window, and dest crash-restore can
+# hit dest cache or leftover object-key slots instead of submit-thread fills.
 #
 # Expectations (1 MiB objects, GETTING=64, READY=128, prefetch window=8):
-#   cold_seq_1t     whole ≈ mapped MiB, exact ≈ 0, prefetch hits > 0
-#   cold_seq_16t    whole ≈ mapped MiB, exact ≈ 0, ready/coalesced reuse
+#   cold_seq_1t     whole ≈ mapped MiB, exact ≈ 0, shared-cache hits ≈ 0
+#   cold_seq_16t    whole and/or shared-cache hits cover the working set
 #   cold_ch_vcpu_*  one synchronous fault stream per vCPU; shuffled 64 KiB
 #                   guest-physical runs model startup locality without QD>1
-#   cold_stampede   whole ≈ mapped MiB, coalesced ≈ whole*(threads-1)
-#   cold_random_Nt  whole ≈ mapped MiB; READY=128 retains this working set
+#   cold_stampede   one GET or shared-cache hit serves the stampede cohort
+#   cold_random_Nt  READY=128 plus shared-cache retain this working set
 #   three_lvol      mmap succeeds while rootfs/metadata fio runs during decouple
 #
 # Usage:
@@ -232,6 +236,9 @@ pat = re.compile(
     r"(?P<prefetch_skip_seq>\d+) prefetch seq skip\(s\), "
     r"(?P<prefetch_skip_full>\d+) prefetch full-demand skip\(s\), "
     r"(?P<prefetch_skip_host>\d+) prefetch host-readahead skip\(s\), "
+    r"(?P<shared_hits>\d+) shared-cache hit\(s\), "
+    r"(?P<shared_misses>\d+) shared-cache miss\(es\), "
+    r"(?P<shared_fallbacks>\d+) shared-cache fallback\(s\), "
     r"(?P<refetch>\d+) manifest refetch\(es\)"
 )
 matches = list(pat.finditer(text))
@@ -249,7 +256,8 @@ print("{%s}" % ",".join(
               "exact", "prefetch_gets", "prefetch_hits", "prefetch_ready",
               "prefetch_skip_token", "prefetch_skip_slot",
               "prefetch_skip_stale", "prefetch_skip_seq",
-              "prefetch_skip_full", "prefetch_skip_host", "refetch")
+              "prefetch_skip_full", "prefetch_skip_host", "shared_hits",
+              "shared_misses", "shared_fallbacks", "refetch")
 ))
 PY
 }
@@ -338,36 +346,45 @@ whole = stats["whole"]
 exact = stats["exact"]
 coalesced = stats["coalesced"]
 ready = stats["ready"]
+shared = int(stats.get("shared_hits", 0))
+reused = ready + coalesced + shared
 ok = True
 reasons = []
 
 if expect == "seq_clean":
-    # One whole GET per populated object; pages inside the object hit RAM.
+    # First import: dest object cache is empty, so each populated object still
+    # takes one whole GET and later pages hit export L1 RAM.
     if whole < size_mib * 0.8 or whole > size_mib * 1.5:
         ok = False; reasons.append(f"whole={whole} want ~{size_mib}")
+    if shared > max(2, size_mib // 8):
+        ok = False; reasons.append(f"shared={shared} want ~0 on first import")
     if exact > max(2, size_mib // 8):
         ok = False; reasons.append(f"exact={exact} want near 0")
     if ready < size_mib * 100:
         ok = False; reasons.append(f"ready={ready} too low for in-object reuse")
 elif expect == "seq_parallel":
-    if whole < size_mib * 0.7:
+    # Later imports of the same export keys may be served from dest object cache.
+    if shared == 0 and whole < size_mib * 0.7:
         ok = False; reasons.append(f"whole={whole} too low")
     if exact > max(2, size_mib // 8):
         ok = False; reasons.append(f"exact={exact} want near 0")
-    if ready < size_mib * 50:
-        ok = False; reasons.append(f"ready={ready} too low")
+    if reused < size_mib * 50:
+        ok = False; reasons.append(
+            f"ready+coalesced+shared={reused} too low")
 elif expect == "ch_vcpu":
     # A small fixture can retain every object in the export LRU and fetch each
     # MiB once. A production-sized shuffled working set cannot: revisiting a
     # partially touched object after eviction legitimately causes another whole
     # GET. Record that as read amplification instead of treating it as failure.
-    if whole < size_mib * 0.8:
+    # Shared dest object cache from an earlier import of the same keys is the
+    # same kind of reuse: 4 KiB faults need not issue another whole GET.
+    if shared == 0 and whole < size_mib * 0.8:
         ok = False; reasons.append(f"whole={whole} want >= ~{size_mib}")
     if exact > max(2, size_mib // 8):
         ok = False; reasons.append(f"exact={exact} want near 0")
-    if ready + coalesced < size_mib * 100:
+    if reused < size_mib * 100:
         ok = False; reasons.append(
-            f"ready+coalesced={ready + coalesced} too low")
+            f"ready+coalesced+shared={reused} too low")
 elif expect == "ch_vcpu_live":
     # Production import: reads race decouple=true. Some faults hit the export
     # parent while later faults may hit the materialized destination, so an
@@ -375,22 +392,25 @@ elif expect == "ch_vcpu_live":
     if bench.get("elapsed_ms", 0) <= 0:
         ok = False; reasons.append("mmap produced no timing")
 elif expect == "stampede":
-    if whole < size_mib * 0.8 or whole > size_mib * 1.5:
+    if shared == 0 and (whole < size_mib * 0.8 or whole > size_mib * 1.5):
         ok = False; reasons.append(f"whole={whole} want ~{size_mib}")
-    # Depending on scheduling, followers either join GETTING or arrive after
-    # it became READY. Both prove one GET served multiple reads.
-    if coalesced + ready < size_mib * max(1, threads - 1) * 0.5:
+    # Depending on scheduling, followers either join GETTING, arrive after it
+    # became READY, or hit dest object cache populated by an earlier import.
+    if reused < size_mib * max(1, threads - 1) * 0.5:
         ok = False; reasons.append(
-            f"coalesced+ready={coalesced + ready} too low")
+            f"coalesced+ready+shared={reused} too low")
     if exact > size_mib // 2:
         ok = False; reasons.append(f"exact={exact} want low under stampede")
 elif expect == "random_cap":
-    if whole < size_mib * 0.8:
+    if shared == 0 and whole < size_mib * 0.8:
         ok = False; reasons.append(f"whole={whole} want >= ~{size_mib}")
-    if whole > size_mib * 1.5:
+    if shared == 0 and whole > size_mib * 1.5:
         ok = False; reasons.append(f"whole={whole} shows READY churn")
     if exact > max(2, size_mib // 8):
         ok = False; reasons.append(f"exact={exact} want near 0")
+    if reused < size_mib * 50:
+        ok = False; reasons.append(
+            f"ready+coalesced+shared={reused} too low")
 elif expect == "three_lvol":
     if bench.get("elapsed_ms", 0) <= 0:
         ok = False; reasons.append("mmap produced no timing")
@@ -409,6 +429,66 @@ PY
 	else
 		fail "${name}"
 	fi
+}
+
+run_post_decouple_alias_case()
+{
+	local threads="$1"
+	local name="post_decouple_alias_${threads}vcpu"
+	local lvol="alias_${threads}_${CASE_NO}"
+	local nsid dev result alias_before alias_after gets_before gets_after
+	local alias_delta gets_delta ok=false
+
+	CASE_NO=$((CASE_NO + 1))
+	info "[case ${CASE_NO}] ${name} decouple=true, then first mmap"
+	rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","lvs_name":"%s","decouple":true}' \
+		"${lvol}" "${MEM_UUID}" "${DST_LVS}")" >/dev/null || {
+		fail "${name}: import failed"; return 1; }
+	wait_decouple_idle || {
+		delete_lvol "${lvol}"; fail "${name}: decouple did not finish"; return 1; }
+
+	nsid="$(expose "${DST_LVS}/${lvol}")"
+	[ -n "${nsid}" ] || {
+		delete_lvol "${lvol}"; fail "${name}: expose failed"; return 1; }
+	dev="$(wait_dev "${nsid}")" || {
+		unexpose "${nsid}"; delete_lvol "${lvol}"
+		fail "${name}: device missing"; return 1; }
+	blockdev --setra $((READ_AHEAD_KIB * 2)) "${dev}" >/dev/null 2>&1 || true
+	drop_caches
+	alias_before="$(lvstore_write_stat "${DST_LVS}" cache_object_alias_hits)"
+	gets_before="$(lvstore_write_stat "${DST_LVS}" dest_whole_gets)"
+	if ! result="$(timeout "${BENCH_TIMEOUT}s" "${BENCH}" --device "${dev}" \
+			--offset-mib 0 --size-mib "${SIZE_MIB}" --pattern ch-vcpu \
+			--threads "${threads}" --run-kib "${CH_RUN_KIB}" \
+			--write-percent 0)"; then
+		unexpose "${nsid}"; delete_lvol "${lvol}"
+		fail "${name}: mmap bench failed or timed out"
+		return 1
+	fi
+	printf '%s\n' "${result}"
+	alias_after="$(lvstore_write_stat "${DST_LVS}" cache_object_alias_hits)"
+	gets_after="$(lvstore_write_stat "${DST_LVS}" dest_whole_gets)"
+	alias_delta=$((alias_after - alias_before))
+	gets_delta=$((gets_after - gets_before))
+	if [ "${alias_delta}" -gt 0 ] && [ "${gets_delta}" -eq 0 ]; then
+		ok=true
+		pass "${name}: ${alias_delta} alias hits, no destination GET"
+	else
+		fail "${name}: alias_hits=${alias_delta}, dest_whole_gets=${gets_delta}"
+	fi
+	python3 - "${name}" "${result}" "${alias_delta}" "${gets_delta}" "${ok}" <<'PY' >>"${RESULTS}"
+import json, sys
+row = {"case": sys.argv[1], "expect": "post_decouple_alias",
+       "bench": json.loads(sys.argv[2]), "export": {},
+       "alias_hits": int(sys.argv[3]), "dest_gets": int(sys.argv[4]),
+       "ok": sys.argv[5] == "true",
+       "reasons": [] if sys.argv[5] == "true" else
+                  ["post-decouple read did not stay local"]}
+print(json.dumps(row, separators=(",", ":")))
+PY
+	unexpose "${nsid}"
+	delete_lvol "${lvol}"
+	[ "${ok}" = "true" ]
 }
 
 # --------------------------------------------------------------------------
@@ -564,6 +644,8 @@ else
 	run_mmap_case cold_ch_vcpu_16t ch-vcpu 16 0 ch_vcpu false
 	run_mmap_case cold_stampede stampede "${THREADS}" 0 stampede false
 	run_mmap_case cold_random_cap random "${THREADS}" 0 random_cap false
+	run_post_decouple_alias_case 2
+	run_post_decouple_alias_case 4
 fi
 
 # --------------------------------------------------------------------------
@@ -707,12 +789,19 @@ else
 			stampede_joins=$((stampede_joins_after - stampede_joins_before))
 			stampede_hits=$((stampede_hits_after - stampede_hits_before))
 			stampede_ok=false
+			stampede_served=$((stampede_hits + stampede_joins))
 			if [ "${stampede_starts}" -gt 0 ] && [ "${stampede_joins}" -gt 0 ]; then
 				stampede_ok=true
 				pass "cold_dest_stampede: ${stampede_starts} fills, ${stampede_joins} joins"
 			elif [ "${stampede_hits}" -ge $((stampede_size * THREADS)) ]; then
 				stampede_ok=true
 				pass "cold_dest_stampede: ${stampede_hits} reads already prefetched"
+			elif [ "${stampede_served}" -ge $((stampede_size * THREADS)) ]; then
+				# Same-process dest object cache (or dest slots filled
+				# before crash-restore) can satisfy the cohort without a
+				# new submit-thread whole GET.
+				stampede_ok=true
+				pass "cold_dest_stampede: ${stampede_hits} cache hits, ${stampede_joins} joins"
 			else
 				fail "cold_dest_stampede: fills=${stampede_starts} joins=${stampede_joins} hits=${stampede_hits}"
 			fi
@@ -767,22 +856,33 @@ PY
 		direct_before="$(lvstore_write_stat "${DST_LVS}" dest_direct_gets)"
 		direct_bytes_before="$(lvstore_write_stat "${DST_LVS}" dest_direct_get_bytes)"
 		direct_hits_before="$(lvstore_write_stat "${DST_LVS}" dest_submit_cache_hits)"
+		object_hits_before="$(lvstore_write_stat "${DST_LVS}" cache_object_hits)"
 		drop_caches
 		if dd if="${DEV_MEM}" of=/dev/null bs=1M skip="${direct_offset}" \
 				count="${direct_size}" iflag=direct status=none; then
 			direct_after="$(lvstore_write_stat "${DST_LVS}" dest_direct_gets)"
 			direct_bytes_after="$(lvstore_write_stat "${DST_LVS}" dest_direct_get_bytes)"
 			direct_hits_after="$(lvstore_write_stat "${DST_LVS}" dest_submit_cache_hits)"
+			object_hits_after="$(lvstore_write_stat "${DST_LVS}" cache_object_hits)"
 			direct_delta=$((direct_after - direct_before))
 			direct_bytes_delta=$((direct_bytes_after - direct_bytes_before))
 			direct_hits_delta=$((direct_hits_after - direct_hits_before))
+			object_hits_delta=$((object_hits_after - object_hits_before))
+			direct_served=$((direct_delta + direct_hits_delta))
 			direct_ok=false
-			if [ $((direct_delta + direct_hits_delta)) -eq "${direct_size}" ] &&
-			   [ "${direct_bytes_delta}" -eq $((direct_delta * 1024 * 1024)) ]; then
+			if [ "${direct_served}" -eq "${direct_size}" ] &&
+			   { [ "${direct_delta}" -eq 0 ] ||
+			     [ "${direct_bytes_delta}" -eq $((direct_delta * 1024 * 1024)) ]; }; then
 				direct_ok=true
 				pass "cold_dest_1m: ${direct_delta} direct GETs, ${direct_hits_delta} prefetched"
+			elif [ "${direct_served}" -ge $((direct_size - 1)) ] ||
+			     [ $((direct_served + object_hits_delta)) -ge "${direct_size}" ]; then
+				# Adjacent dest prefetch or dest object cache can satisfy
+				# aligned 1 MiB reads without a user-buffer whole GET.
+				direct_ok=true
+				pass "cold_dest_1m: ${direct_delta} direct GETs, ${direct_hits_delta} dest hits, ${object_hits_delta} object hits"
 			else
-				fail "cold_dest_1m: direct_gets=${direct_delta}, bytes=${direct_bytes_delta}, hits=${direct_hits_delta}"
+				fail "cold_dest_1m: direct_gets=${direct_delta}, bytes=${direct_bytes_delta}, hits=${direct_hits_delta}, object=${object_hits_delta}"
 			fi
 			python3 - "${direct_delta}" "${direct_bytes_delta}" "${direct_ok}" <<'PY' >>"${RESULTS}"
 import json, sys
@@ -954,7 +1054,7 @@ python3 - "${RESULTS}" <<'PY'
 import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8")]
 print()
-print("case                  elapsed(ms)  MiB/s expMiB/s exp/t  whole  coalsc  ready  exact  pf_get pf_hit pf_ram tok_sk slot_sk seq_sk full_sk host_sk fast_hit sb_fill sb_join direct directMiB verdict")
+print("case                  elapsed(ms)  MiB/s expMiB/s exp/t  whole  coalsc  ready  exact  sh_hit sh_miss sh_fb alias_h dst_get pf_get pf_hit pf_ram tok_sk slot_sk seq_sk full_sk host_sk fast_hit sb_fill sb_join direct directMiB verdict")
 for r in rows:
     b = r.get("bench") or {}; e = r.get("export") or {}
     elapsed = f"{b['elapsed_ms']:.1f}" if "elapsed_ms" in b else "-"
@@ -969,6 +1069,9 @@ for r in rows:
           f"{export_mibps:>8} {export_ratio:>5} "
           f"{e.get('whole','-'):>6} {e.get('coalesced','-'):>6} "
           f"{e.get('ready','-'):>6} {e.get('exact','-'):>6} "
+          f"{e.get('shared_hits','-'):>6} {e.get('shared_misses','-'):>7} "
+          f"{e.get('shared_fallbacks','-'):>5} "
+          f"{r.get('alias_hits','-'):>7} {r.get('dest_gets','-'):>7} "
           f"{e.get('prefetch_gets','-'):>6} {e.get('prefetch_hits','-'):>6} "
           f"{e.get('prefetch_ready','-'):>6} "
           f"{e.get('prefetch_skip_token','-'):>6} "

@@ -16,6 +16,7 @@
 #include "spdk/thread.h"
 
 #include "s3lvol/s3_export.h"
+#include "s3lvol/s3_cache.h"
 #include "s3lvol/s3_client.h"
 
 #define CHUNK_SIZE (1024 * 1024)
@@ -43,6 +44,12 @@ static int g_pass, g_fail;
 static uint32_t g_token_callbacks;
 static int g_fail_next_range;
 static uint32_t g_client_puts;
+static char g_cached_key[S3_EXPORT_KEY_MAX];
+static char g_cached_endpoint[S3_EXPORT_ENDPOINT_MAX];
+static char g_cached_bucket[S3_EXPORT_BUCKET_MAX];
+static uint8_t *g_cached_object;
+static uint32_t g_cached_object_len;
+static bool g_fail_cache_read;
 
 static void
 token_granted(void *cb_arg)
@@ -111,6 +118,75 @@ s3_client_put(struct s3_client *client)
 {
 	(void)client;
 	g_client_puts++;
+}
+
+const char *
+s3_client_bucket(const struct s3_client *client)
+{
+	(void)client;
+	return "test-bucket";
+}
+
+struct spdk_io_channel *
+s3_cache_get_io_channel(struct s3_cache *cache)
+{
+	(void)cache;
+	return NULL;
+}
+
+void
+s3_cache_object_populate(struct s3_cache *cache,
+			 const struct s3_cache_object_id *id,
+			 uint32_t offset, const void *buf, uint32_t length,
+			 uint32_t object_valid_bytes)
+{
+	(void)cache;
+	if (offset != 0 || length != object_valid_bytes) {
+		return;
+	}
+	free(g_cached_object);
+	g_cached_object = malloc(object_valid_bytes);
+	if (!g_cached_object) {
+		g_cached_object_len = 0;
+		return;
+	}
+	memcpy(g_cached_object, buf, object_valid_bytes);
+	g_cached_object_len = object_valid_bytes;
+	snprintf(g_cached_endpoint, sizeof(g_cached_endpoint), "%s", id->endpoint);
+	snprintf(g_cached_bucket, sizeof(g_cached_bucket), "%s", id->bucket);
+	snprintf(g_cached_key, sizeof(g_cached_key), "%s", id->key);
+}
+
+int
+s3_cache_object_read_on_channel(struct s3_cache *cache,
+				struct spdk_io_channel *channel,
+				const struct s3_cache_object_id *id,
+				uint32_t object_valid_bytes, uint32_t offset,
+				uint32_t length, void *buf,
+				s3_cache_read_cb cb_fn, void *cb_arg)
+{
+	uint32_t readable;
+
+	(void)cache;
+	(void)channel;
+	if (!g_cached_object || object_valid_bytes != g_cached_object_len ||
+	    strcmp(id->endpoint, g_cached_endpoint) != 0 ||
+	    strcmp(id->bucket, g_cached_bucket) != 0 ||
+	    strcmp(id->key, g_cached_key) != 0 || offset > object_valid_bytes) {
+		return -ENOENT;
+	}
+	if (g_fail_cache_read) {
+		g_fail_cache_read = false;
+		cb_fn(cb_arg, -EIO);
+		return 0;
+	}
+	readable = spdk_min(length, object_valid_bytes - offset);
+	memcpy(buf, g_cached_object + offset, readable);
+	if (readable < length) {
+		memset((uint8_t *)buf + readable, 0, length - readable);
+	}
+	cb_fn(cb_arg, 0);
+	return 0;
 }
 
 static void
@@ -207,6 +283,21 @@ submit_read(struct spdk_bs_dev *dev, struct read_result *r,
 	r->cb_args.cb_fn = read_done;
 	r->cb_args.cb_arg = r;
 	dev->read(dev, NULL, r->buf, byte_offset / S3LVOL_BLOCK_SIZE,
+		  length / S3LVOL_BLOCK_SIZE, &r->cb_args);
+}
+
+static void
+submit_read_on_channel(struct spdk_bs_dev *dev, struct spdk_io_channel *channel,
+		       struct read_result *r, uint64_t byte_offset,
+		       uint32_t length)
+{
+	memset(r, 0, sizeof(*r));
+	r->buf = malloc(length);
+	r->len = length;
+	memset(r->buf, 0xcc, length);
+	r->cb_args.cb_fn = read_done;
+	r->cb_args.cb_arg = r;
+	dev->read(dev, channel, r->buf, byte_offset / S3LVOL_BLOCK_SIZE,
 		  length / S3LVOL_BLOCK_SIZE, &r->cb_args);
 }
 
@@ -317,7 +408,7 @@ main(void)
 	if (!m) {
 		goto out_thread;
 	}
-	rc = s3_export_bs_dev_create((struct s3_client *)(uintptr_t)1, m, &dev);
+	rc = s3_export_bs_dev_create((struct s3_client *)(uintptr_t)1, m, NULL, &dev);
 	check_true("export device created", rc == 0);
 	if (rc != 0) {
 		goto out_manifest;
@@ -657,6 +748,77 @@ main(void)
 	spdk_set_thread(thread);
 	for (i = 0; i < S3_WHOLE_GET_MAX_INFLIGHT; i++) {
 		s3_whole_get_token_release();
+	}
+
+	printf("\n[14] a second export device reuses the lvstore object cache\n");
+	{
+		struct spdk_bs_dev *first_dev = NULL, *second_dev = NULL;
+		struct spdk_io_channel *first_ch = NULL, *second_ch = NULL;
+		struct read_result first_read = {0}, second_read = {0};
+		struct read_result fallback_read = {0};
+		struct s3_cache *fake_cache = (struct s3_cache *)(uintptr_t)1;
+		uint64_t byte_offset = 150ULL * CHUNK_SIZE;
+
+		free(g_cached_object);
+		g_cached_object = NULL;
+		g_cached_object_len = 0;
+		g_cached_key[0] = '\0';
+
+		rc = s3_export_bs_dev_create((struct s3_client *)(uintptr_t)1, m,
+					     fake_cache, &first_dev);
+		check_true("first cached export device is created", rc == 0);
+		if (rc == 0) {
+			first_ch = first_dev->create_channel(first_dev);
+			first = g_ngets;
+			submit_read_on_channel(first_dev, first_ch, &first_read,
+					       byte_offset, CHUNK_SIZE);
+			check_u64("cold first device submits one S3 GET", g_ngets,
+				  first + 1);
+			complete_get(first, 0, CHUNK_SIZE);
+			check_true("cold read completes and populates shared cache",
+				   first_read.done && first_read.status == 0 &&
+				   g_cached_object_len == CHUNK_SIZE);
+			first_dev->destroy_channel(first_dev, first_ch);
+			first_dev->destroy(first_dev);
+			spdk_thread_poll(thread, 0, 0);
+		}
+
+		rc = s3_export_bs_dev_create((struct s3_client *)(uintptr_t)1, m,
+					     fake_cache, &second_dev);
+		check_true("second cached export device is created", rc == 0);
+		if (rc == 0) {
+			second_ch = second_dev->create_channel(second_dev);
+			first = g_ngets;
+			submit_read_on_channel(second_dev, second_ch, &second_read,
+					       byte_offset, CHUNK_SIZE);
+			check_true("second device reads immediately from shared cache",
+				   second_read.done && second_read.status == 0);
+			check_u64("shared-cache hit submits no S3 GET", g_ngets,
+				  first);
+			check_true("shared-cache bytes match the immutable object",
+				   buffer_has_pattern(&second_read, byte_offset,
+						      CHUNK_SIZE));
+			g_fail_cache_read = true;
+			first = g_ngets;
+			submit_read_on_channel(second_dev, second_ch, &fallback_read,
+					       byte_offset, CHUNK_SIZE);
+			check_u64("cache I/O failure falls back to one S3 GET",
+				  g_ngets, first + 1);
+			complete_get(first, 0, CHUNK_SIZE);
+			check_true("S3 fallback preserves the user read",
+				   fallback_read.done &&
+				   fallback_read.status == 0 &&
+				   buffer_has_pattern(&fallback_read, byte_offset,
+						      CHUNK_SIZE));
+			second_dev->destroy_channel(second_dev, second_ch);
+			second_dev->destroy(second_dev);
+			spdk_thread_poll(thread, 0, 0);
+		}
+		free(first_read.buf);
+		free(second_read.buf);
+		free(fallback_read.buf);
+		free(g_cached_object);
+		g_cached_object = NULL;
 	}
 
 out_manifest:
