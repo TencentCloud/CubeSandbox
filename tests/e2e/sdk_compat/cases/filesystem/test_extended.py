@@ -26,6 +26,17 @@ def _entry_type(entry: dict) -> str:
     return str(entry.get("type", "")).lower()
 
 
+def _skip_if_not_cubesandbox(sdk_backend: str) -> None:
+    if sdk_backend != "cubesandbox":
+        pytest.skip("raw cubesandbox SDK assertion")
+
+
+def _skip_if_user_missing(sdk_sandbox, username: str) -> None:
+    probe = sdk_sandbox.run_command(f"id -u {username} >/dev/null 2>&1")
+    if probe.exit_code != 0:
+        pytest.skip(f"user {username!r} does not exist in this template")
+
+
 def test_list_stat_exists_remove_rename_and_mkdir(sdk_sandbox):
     root = f"/tmp/sdk-compat-fs-extended-{sdk_sandbox.sandbox_id}"
     nested = f"{root}/nested"
@@ -99,3 +110,62 @@ def test_list_stat_exists_remove_rename_and_mkdir(sdk_sandbox):
                 body_error.add_note(message)
             else:
                 warnings.warn(message, RuntimeWarning, stacklevel=2)
+
+
+@pytest.mark.p1
+def test_raw_filesystem_extended_accepts_user_kwarg(sdk_sandbox, sdk_backend):
+    _skip_if_not_cubesandbox(sdk_backend)
+
+    root = f"/tmp/sdk-compat-fs-user-{sdk_sandbox.sandbox_id}"
+    source = f"{root}/source.txt"
+    renamed = f"{root}/renamed.txt"
+
+    files = sdk_sandbox.raw_sandbox.files
+    files.make_dir(root, user="root")
+    files.write(source, "user-kwarg", user="root")
+
+    entries = files.list(root, user="root")
+    assert any(
+        str((entry.get("name") or entry.get("path") or "")).endswith("source.txt")
+        for entry in entries
+    ), entries
+
+    stat = files.stat(source, user="root")
+    assert str(stat.get("name") or stat.get("path") or "").endswith("source.txt"), stat
+
+    assert files.exists(source, user="root") is True
+    files.rename(source, renamed, user="root")
+    assert files.exists(source, user="root") is False
+    assert files.exists(renamed, user="root") is True
+
+    files.remove(renamed, user="root")
+    files.remove(root, user="root")
+    assert files.exists(root, user="root") is False
+
+
+@pytest.mark.p1
+def test_raw_filesystem_user_nobody_with_tmp_path(sdk_sandbox, sdk_backend):
+    _skip_if_not_cubesandbox(sdk_backend)
+    _skip_if_user_missing(sdk_sandbox, "nobody")
+
+    root = f"/tmp/sdk-compat-fs-nobody-{sdk_sandbox.sandbox_id}"
+    source = f"{root}/source.txt"
+    files = sdk_sandbox.raw_sandbox.files
+
+    try:
+        files.make_dir(root, user="nobody")
+        files.write(source, "ok", user="nobody")
+        assert files.exists(source, user="nobody") is True
+
+        result = sdk_sandbox.raw_sandbox.commands.run(
+            f"cat {source}",
+            cwd="/tmp",
+            user="nobody",
+            timeout=10,
+        )
+        assert result.exit_code == 0
+        assert result.stdout == "ok"
+    finally:
+        for path in (source, root):
+            if files.exists(path, user="root"):
+                files.remove(path, user="root")

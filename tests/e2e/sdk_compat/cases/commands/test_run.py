@@ -8,6 +8,22 @@ import pytest
 from framework.assertions import assert_command_ok
 from framework.capabilities import COMMANDS
 
+
+
+def _skip_if_not_cubesandbox(sdk_backend: str) -> None:
+    if sdk_backend != "cubesandbox":
+        pytest.skip("raw cubesandbox SDK assertion")
+
+
+def _skip_if_user_missing(sdk_sandbox, username: str, timeout: int) -> None:
+    probe = sdk_sandbox.raw_sandbox.commands.run(
+        f"id -u {username} >/dev/null 2>&1",
+        user="root",
+        timeout=timeout,
+    )
+    if probe.exit_code != 0:
+        pytest.skip(f"user {username!r} does not exist in this template")
+
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.sdk_compat,
@@ -79,3 +95,35 @@ def test_command_timeout_is_enforced(sdk_sandbox):
         match=r"(?i)timeout|timed out|deadline",
     ):  # noqa: B017 - SDKs expose backend-specific timeout errors
         sdk_sandbox.run_command("sleep 5", timeout=1)
+
+
+@pytest.mark.p1
+def test_raw_commands_run_accepts_cwd_env_and_user(sdk_sandbox, sdk_backend, sdk_e2e_config):
+    _skip_if_not_cubesandbox(sdk_backend)
+
+    result = sdk_sandbox.raw_sandbox.commands.run(
+        "printf '%s|%s' \"$PWD\" \"$SDK_COMPAT_CMD_ENV\"",
+        cwd="/tmp",
+        env={"SDK_COMPAT_CMD_ENV": "ok"},
+        user="root",
+        timeout=sdk_e2e_config.command_timeout,
+    )
+
+    assert_command_ok(result)
+    assert result.stdout == "/tmp|ok"
+
+
+@pytest.mark.p1
+def test_raw_commands_run_non_root_user_with_tmp_cwd(sdk_sandbox, sdk_backend, sdk_e2e_config):
+    _skip_if_not_cubesandbox(sdk_backend)
+    _skip_if_user_missing(sdk_sandbox, "nobody", sdk_e2e_config.command_timeout)
+
+    result = sdk_sandbox.raw_sandbox.commands.run(
+        "printf '%s|%s' \"$(id -un)\" \"$PWD\"",
+        cwd="/tmp",
+        user="nobody",
+        timeout=sdk_e2e_config.command_timeout,
+    )
+
+    assert_command_ok(result)
+    assert result.stdout == "nobody|/tmp"
