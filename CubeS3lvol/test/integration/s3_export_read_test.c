@@ -357,7 +357,7 @@ main(void)
 	struct spdk_bs_dev *dev = NULL;
 	struct read_result a, b, hit, retained, short_ref, cross_a, cross_b;
 	struct read_result missing_a, missing_b, post_swap;
-	struct read_result seq_a, seq_b, prefetch_hit;
+	struct read_result seq_a, seq_b;
 	struct read_result direct, direct_join, joined_slice;
 	struct read_result destroy_seq_a, destroy_seq_b, destroy_cross;
 	struct read_result oom;
@@ -370,11 +370,6 @@ main(void)
 	spdk_log_set_print_level(SPDK_LOG_NOTICE);
 	spdk_log_open(NULL);
 	printf("=== s3lvol export whole-object read test ===\n");
-	/* This suite explicitly verifies the userspace prefetch state machine.
-	 * Production normally exports 1024 KiB host readahead, which suppresses
-	 * that redundant layer; do not let the developer's environment silently
-	 * turn the requests asserted below off. */
-	setenv("S3LVOL_READ_AHEAD_KB", "0", 1);
 
 	opts.opts_size = sizeof(opts);
 	spdk_env_opts_init(&opts);
@@ -417,7 +412,7 @@ main(void)
 	printf("\n[1] overlapping reads share one whole-object GET\n");
 	submit_read(dev, &a, 4 * 1024, 4 * 1024);
 	submit_read(dev, &b, 8 * 1024, 4 * 1024);
-	check_u64("demand plus eight prefetches are in flight", g_ngets, 9);
+	check_u64("one whole-object GET is in flight", g_ngets, 1);
 	check_u64("GET starts at object offset zero", g_gets[0].offset, 0);
 	check_u64("demand GET covers the whole object", g_gets[0].len, CHUNK_SIZE);
 	check_true("both reads wait", !a.done && !b.done);
@@ -431,7 +426,7 @@ main(void)
 	printf("\n[2] the completed object remains in the small RAM LRU\n");
 	submit_read(dev, &hit, 12 * 1024, 4 * 1024);
 	check_true("LRU hit completes synchronously", hit.done && hit.status == 0);
-	check_u64("LRU hit submits no GET", g_ngets, 9);
+	check_u64("LRU hit submits no GET", g_ngets, 1);
 	check_true("LRU slice is correct",
 		   buffer_has_pattern(&hit, 12 * 1024, hit.len));
 	complete_outstanding();
@@ -531,30 +526,22 @@ main(void)
 	check_true("short successful response becomes EIO",
 		   many[0].done && many[0].status == -EIO);
 
-	printf("\n[9] sequential demand starts eight low-priority prefetches\n");
+	printf("\n[9] sequential demand populates the READY LRU\n");
 	first = g_ngets;
 	submit_read(dev, &seq_a, 210ULL * CHUNK_SIZE, 4 * 1024);
-	check_u64("a jump does not prefetch", g_ngets, first + 1);
+	check_u64("a jump submits only the demand GET", g_ngets, first + 1);
 	complete_get(first, 0, CHUNK_SIZE);
 	first = g_ngets;
 	submit_read(dev, &seq_b, 211ULL * CHUNK_SIZE, 4 * 1024);
-	check_u64("one demand plus eight prefetch GETs are submitted",
-		  g_ngets - first, 9);
-	submit_read(dev, &prefetch_hit, 212ULL * CHUNK_SIZE, 4 * 1024);
-	check_u64("demand joins the prefetched object", g_ngets - first, 9);
+	check_u64("the next sequential chunk is also one demand GET",
+		  g_ngets - first, 1);
 	complete_get(first, 0, CHUNK_SIZE);
-	complete_get(first + 1, 0, CHUNK_SIZE);
-	check_true("joined prefetch completes the demand",
-		   prefetch_hit.done && prefetch_hit.status == 0);
-	for (i = 2; i < 9; i++) {
-		complete_get(first + i, 0, CHUNK_SIZE);
-	}
 	first = g_ngets;
 	free(seq_b.buf);
 	submit_read(dev, &seq_b, 211ULL * CHUNK_SIZE + 8 * 1024, 4 * 1024);
-	check_true("READY prefetch is served from RAM",
+	check_true("READY object is served from RAM",
 		   seq_b.done && seq_b.status == 0);
-	check_u64("READY prefetch submits no GET", g_ngets, first);
+	check_u64("READY hit submits no GET", g_ngets, first);
 
 	printf("\n[10] a shared 404 refetches and retries on the new generation\n");
 	rc = s3_export_manifest_create(TEST_UUID,
@@ -623,7 +610,7 @@ main(void)
 	check_true("exact fallback copied the requested bytes",
 		   buffer_has_pattern(&oom, 8 * 1024, oom.len));
 
-	printf("\n[12] destroy waits for blobstore reads and prefetch GETs\n");
+	printf("\n[12] destroy waits for blobstore reads\n");
 	first = g_ngets;
 	submit_read(dev, &destroy_seq_a, 240ULL * CHUNK_SIZE, 4 * 1024);
 	check_u64("destroy case jump submits only demand", g_ngets, first + 1);
@@ -631,21 +618,17 @@ main(void)
 	check_true("destroy-case jump completes", destroy_seq_a.done);
 	first = g_ngets;
 	submit_read(dev, &destroy_seq_b, 241ULL * CHUNK_SIZE, 4 * 1024);
-	check_u64("destroy case starts demand plus eight prefetches",
-		  g_ngets - first, 9);
+	check_u64("destroy case starts one demand GET", g_ngets - first, 1);
 	spdk_set_thread(thread2);
 	submit_read(dev, &destroy_cross, 241ULL * CHUNK_SIZE + 4 * 1024,
 		    4 * 1024);
 	spdk_set_thread(thread);
 	check_u64("cross-thread read joins destroy-case demand",
-		  g_ngets - first, 9);
+		  g_ngets - first, 1);
 	complete_get(first, 0, CHUNK_SIZE);
 	check_true("owner completes while cross-thread read is queued",
 		   destroy_seq_b.done && !destroy_cross.done);
 	dev->destroy(dev);
-	for (i = 1; i < 9; i++) {
-		complete_get(first + i, 0, CHUNK_SIZE);
-	}
 	for (i = 0; i < 100; i++) {
 		spdk_thread_poll(thread, 0, 0);
 	}
@@ -677,7 +660,6 @@ main(void)
 	free(post_swap.buf);
 	free(seq_a.buf);
 	free(seq_b.buf);
-	free(prefetch_hit.buf);
 	free(direct.buf);
 	free(direct_join.buf);
 	free(joined_slice.buf);
@@ -715,7 +697,7 @@ main(void)
 						   &g_token_callbacks) == 1;
 	}
 	check_true("255 priority-test tokens are immediate", all_immediate);
-	check_true("prefetch does not take or queue for the last token",
+	check_true("low-priority acquire does not take or queue for the last token",
 		   s3_whole_get_token_acquire(true, token_granted,
 					      &g_token_callbacks) == -EAGAIN);
 	check_true("demand can take the reserved last token",

@@ -113,13 +113,9 @@
  * checked separately and short-circuits: a quiet lvstore does not PUT a snapshot
  * every interval, it does nothing at all. */
 #define S3_CKPT_DEFAULT_INTERVAL_SEC 60
-/* Whole-object dest GETs are independent of cache staging. Demand gets retain
- * 64 slots; read-ahead has eight additional slots so it cannot force demand
- * onto the exact-range fallback. Staging (16) only bounds how many populates
- * may sit on the local device. */
+/* Whole-object dest GETs are independent of cache staging. Staging (16) only
+ * bounds how many populates may sit on the local device. */
 #define S3_DEST_FILL_MAX_INFLIGHT 64
-#define S3_DEST_PREFETCH_WINDOW   8
-#define S3_DEST_PREFETCH_MAX_INFLIGHT 8
 
 /* ==========================================================================
  * Internal structures
@@ -173,8 +169,6 @@ struct s3_dest_fill {
 	struct s3_dest_fill_waiter *direct_waiter;
 	bool                      buf_owned;
 	bool                      token_held;
-	bool                      prefetch;
-	bool                      prefetch_hit;
 	uint64_t                  bytes_read;
 	int                       status;
 	struct s3_dest_fill_waiters waiters;
@@ -247,16 +241,6 @@ struct s3_ctx {
 	pthread_mutex_t read_fill_lock;
 	struct s3_dest_fills read_fills;
 	uint32_t dest_fills_inflight;
-	uint32_t dest_prefetch_inflight;
-	bool have_last_dest_demand;
-	uint64_t last_dest_demand_chunk;
-	uint32_t last_dest_demand_end;
-	bool have_last_dest_stride;
-	uint64_t last_dest_stride;
-	bool have_dest_prefetch_frontier;
-	uint64_t dest_prefetch_frontier;
-	uint64_t dest_prefetch_step;
-	bool host_readahead_covers_chunk;
 
 	/* Registered only while teardown is waiting for a cache fill to land. See
 	 * s3_bs_dev_teardown(). */
@@ -329,12 +313,6 @@ struct s3_ctx {
 	uint64_t                 dest_submit_fill_joins;
 	uint64_t                 dest_direct_gets;
 	uint64_t                 dest_direct_get_bytes;
-	uint64_t                 dest_prefetch_gets;
-	uint64_t                 dest_prefetch_hits;
-	uint64_t                 dest_prefetch_skip_token;
-	uint64_t                 dest_prefetch_skip_slot;
-	uint64_t                 dest_prefetch_skip_seq;
-	uint64_t                 dest_prefetch_skip_host;
 
 	/* WAL path counters */
 	uint64_t wal_writes;   /* writes acknowledged from the log */
@@ -755,7 +733,7 @@ s3_dest_fill_finish(void *arg)
 	struct s3_dest_fill_waiter *waiter;
 	struct s3_dest_fill_waiter *direct_waiter;
 	bool exact_fallback = false;
-	bool need_cache = fill->prefetch;
+	bool need_cache = false;
 
 	TAILQ_INIT(&waiters);
 	pthread_mutex_lock(&ctx->read_fill_lock);
@@ -926,10 +904,6 @@ s3_dest_fill_finish(void *arg)
 	pthread_mutex_lock(&ctx->read_fill_lock);
 	assert(ctx->dest_fills_inflight > 0);
 	ctx->dest_fills_inflight--;
-	if (fill->prefetch) {
-		assert(ctx->dest_prefetch_inflight > 0);
-		ctx->dest_prefetch_inflight--;
-	}
 	pthread_mutex_unlock(&ctx->read_fill_lock);
 	free(fill);
 }
@@ -964,10 +938,6 @@ s3_dest_fill_abort_bounce(struct s3_dest_fill *fill, int status)
 	pthread_mutex_lock(&ctx->read_fill_lock);
 	assert(ctx->dest_fills_inflight > 0);
 	ctx->dest_fills_inflight--;
-	if (fill->prefetch) {
-		assert(ctx->dest_prefetch_inflight > 0);
-		ctx->dest_prefetch_inflight--;
-	}
 	pthread_mutex_unlock(&ctx->read_fill_lock);
 	free(fill);
 }
@@ -1048,10 +1018,6 @@ s3_dest_fill_token_granted(void *arg)
 		return;
 	}
 	__atomic_fetch_add(&fill->ctx->dest_whole_gets, 1, __ATOMIC_RELAXED);
-	if (fill->prefetch) {
-		__atomic_fetch_add(&fill->ctx->dest_prefetch_gets, 1,
-				   __ATOMIC_RELAXED);
-	}
 	rc = s3_get_range(fill->ctx->client, fill->key, 0, fill->valid_bytes,
 			  fill->buf, s3_dest_fill_done, fill);
 	if (rc != 0) {
@@ -1063,198 +1029,6 @@ static void
 s3_dest_fill_token_cancelled(void *arg, int status)
 {
 	s3_dest_fill_done(arg, 0, status);
-}
-
-/* Returns 1 when the frontier may advance past this chunk: it was a hole,
- * already had a fill, or its low-priority GET was submitted. Returns 0 when
- * prefetch should stop at this point and let later demand try again. */
-static int
-s3_dest_prefetch_one(struct s3_ctx *ctx, uint64_t chunk_index)
-{
-	struct s3_dest_fill *fill;
-	struct s3_dest_fill *existing;
-	struct spdk_uuid uuid;
-	uint32_t valid_bytes;
-	char key[S3_KEY_MAX];
-	int rc;
-
-	rc = s3_chunk_map_lookup(ctx->chunk_map, chunk_index, &uuid,
-				 &valid_bytes);
-	if (rc == -ENOENT) {
-		return 1;
-	}
-	if (rc != 0 || valid_bytes == 0) {
-		return 0;
-	}
-	if (s3_overlay_chunk_is_live(ctx->overlay, chunk_index)) {
-		/* Stale S3 must not be pulled in for a dirty chunk. Later
-		 * demand on this index takes the owner path and merges. */
-		return 1;
-	}
-	if (s3_cache_lookup(ctx->cache, chunk_index, &uuid)) {
-		return 1;
-	}
-
-	fill = calloc(1, sizeof(*fill));
-	if (!fill) {
-		return 0;
-	}
-	fill->ctx = ctx;
-	fill->chunk_index = chunk_index;
-	spdk_uuid_copy(&fill->uuid, &uuid);
-	fill->valid_bytes = valid_bytes;
-	fill->prefetch = true;
-	TAILQ_INIT(&fill->waiters);
-	s3_data_key(ctx, &uuid, key, sizeof(key));
-	snprintf(fill->key, sizeof(fill->key), "%s", key);
-
-	/* Prefetch never queues for the process budget. Demand keeps the last
-	 * token and can overtake this work. */
-	rc = s3_whole_get_token_acquire(true, s3_dest_fill_token_granted, fill);
-	if (rc != 1) {
-		__atomic_fetch_add(&ctx->dest_prefetch_skip_token, 1,
-				   __ATOMIC_RELAXED);
-		free(fill);
-		return 0;
-	}
-
-	pthread_mutex_lock(&ctx->read_fill_lock);
-	TAILQ_FOREACH(existing, &ctx->read_fills, link) {
-		if (existing->chunk_index == chunk_index &&
-		    spdk_uuid_compare(&existing->uuid, &uuid) == 0) {
-			break;
-		}
-	}
-	if (__atomic_load_n(&ctx->destroying, __ATOMIC_ACQUIRE) ||
-	    ctx->dest_prefetch_inflight >= S3_DEST_PREFETCH_MAX_INFLIGHT ||
-	    existing) {
-		if (!existing &&
-		    !__atomic_load_n(&ctx->destroying, __ATOMIC_RELAXED)) {
-			__atomic_fetch_add(&ctx->dest_prefetch_skip_slot, 1,
-					   __ATOMIC_RELAXED);
-		}
-		pthread_mutex_unlock(&ctx->read_fill_lock);
-		s3_whole_get_token_release();
-		free(fill);
-		return existing ? 1 : 0;
-	}
-	TAILQ_INSERT_TAIL(&ctx->read_fills, fill, link);
-	ctx->dest_fills_inflight++;
-	ctx->dest_prefetch_inflight++;
-	pthread_mutex_unlock(&ctx->read_fill_lock);
-
-	s3_dest_fill_token_granted(fill);
-	return 1;
-}
-
-static void
-s3_dest_maybe_prefetch(struct s3_ctx *ctx, uint64_t demand_chunk,
-		       uint32_t demand_offset, uint32_t demand_length)
-{
-	uint64_t stride = 0;
-	uint64_t step = 1;
-	uint64_t need;
-	uint64_t idx;
-	bool sequential = false;
-
-	if (!ctx->cache) {
-		return;
-	}
-	if (ctx->host_readahead_covers_chunk) {
-		__atomic_fetch_add(&ctx->dest_prefetch_skip_host, 1,
-				   __ATOMIC_RELAXED);
-		return;
-	}
-
-	pthread_mutex_lock(&ctx->read_fill_lock);
-	if (__atomic_load_n(&ctx->destroying, __ATOMIC_ACQUIRE)) {
-		pthread_mutex_unlock(&ctx->read_fill_lock);
-		return;
-	}
-	if (!ctx->have_last_dest_demand) {
-		sequential = true;
-	} else if (demand_chunk == ctx->last_dest_demand_chunk) {
-		sequential = demand_offset == ctx->last_dest_demand_end ||
-			     ctx->have_dest_prefetch_frontier;
-		step = ctx->dest_prefetch_step ? ctx->dest_prefetch_step : 1;
-	} else if (demand_chunk == ctx->last_dest_demand_chunk + 1) {
-		sequential = true;
-	} else {
-		if (demand_chunk > ctx->last_dest_demand_chunk) {
-			stride = demand_chunk - ctx->last_dest_demand_chunk;
-		}
-		/* Concurrent decouples can interleave physical destination
-		 * clusters. Two equal, reasonably small forward strides identify
-		 * the logical sequential stream without prefetching after an
-		 * isolated random read. */
-		if (stride > 1 && stride <= S3_DEST_PREFETCH_WINDOW &&
-		    ctx->have_last_dest_stride &&
-		    ctx->last_dest_stride == stride) {
-			sequential = true;
-			step = stride;
-		} else {
-			__atomic_fetch_add(&ctx->dest_prefetch_skip_seq, 1,
-					   __ATOMIC_RELAXED);
-			ctx->have_dest_prefetch_frontier = false;
-		}
-	}
-	if (!ctx->have_last_dest_demand ||
-	    demand_chunk != ctx->last_dest_demand_chunk) {
-		if (ctx->have_last_dest_demand &&
-		    demand_chunk > ctx->last_dest_demand_chunk) {
-			ctx->last_dest_stride =
-				demand_chunk - ctx->last_dest_demand_chunk;
-			ctx->have_last_dest_stride = true;
-		} else if (ctx->have_last_dest_demand) {
-			ctx->have_last_dest_stride = false;
-		}
-		ctx->last_dest_demand_chunk = demand_chunk;
-		ctx->have_last_dest_demand = true;
-	}
-	ctx->last_dest_demand_end = demand_offset + demand_length;
-	if (!sequential) {
-		pthread_mutex_unlock(&ctx->read_fill_lock);
-		return;
-	}
-	if (!ctx->have_dest_prefetch_frontier ||
-	    ctx->dest_prefetch_step != step) {
-		ctx->dest_prefetch_frontier = demand_chunk;
-		ctx->have_dest_prefetch_frontier = true;
-	}
-	ctx->dest_prefetch_step = step;
-	if (step > (UINT64_MAX - demand_chunk) / S3_DEST_PREFETCH_WINDOW) {
-		pthread_mutex_unlock(&ctx->read_fill_lock);
-		return;
-	}
-	need = demand_chunk + step * S3_DEST_PREFETCH_WINDOW;
-	pthread_mutex_unlock(&ctx->read_fill_lock);
-
-	for (;;) {
-		pthread_mutex_lock(&ctx->read_fill_lock);
-		if (__atomic_load_n(&ctx->destroying, __ATOMIC_ACQUIRE) ||
-		    !ctx->have_dest_prefetch_frontier ||
-		    ctx->dest_prefetch_frontier >= need) {
-			pthread_mutex_unlock(&ctx->read_fill_lock);
-			return;
-		}
-		if (ctx->dest_prefetch_frontier > UINT64_MAX -
-		    ctx->dest_prefetch_step) {
-			pthread_mutex_unlock(&ctx->read_fill_lock);
-			return;
-		}
-		idx = ctx->dest_prefetch_frontier + ctx->dest_prefetch_step;
-		pthread_mutex_unlock(&ctx->read_fill_lock);
-
-		if (s3_dest_prefetch_one(ctx, idx) == 0) {
-			return;
-		}
-		pthread_mutex_lock(&ctx->read_fill_lock);
-		if (ctx->have_dest_prefetch_frontier &&
-		    ctx->dest_prefetch_frontier < idx) {
-			ctx->dest_prefetch_frontier = idx;
-		}
-		pthread_mutex_unlock(&ctx->read_fill_lock);
-	}
 }
 
 static int
@@ -1274,12 +1048,6 @@ s3_dest_fill_submit_waiter(struct s3_ctx *ctx,
 	TAILQ_FOREACH(fill, &ctx->read_fills, link) {
 		if (fill->chunk_index == chunk_index &&
 		    spdk_uuid_compare(&fill->uuid, uuid) == 0) {
-			if (fill->prefetch &&
-			    !__atomic_exchange_n(&fill->prefetch_hit, true,
-						 __ATOMIC_RELAXED)) {
-				__atomic_fetch_add(&ctx->dest_prefetch_hits, 1,
-						   __ATOMIC_RELAXED);
-			}
 			TAILQ_INSERT_TAIL(&fill->waiters, waiter, link);
 			__atomic_fetch_add(&ctx->dest_coalesced_reads, 1,
 					   __ATOMIC_RELAXED);
@@ -1291,9 +1059,7 @@ s3_dest_fill_submit_waiter(struct s3_ctx *ctx,
 			return 0;
 		}
 	}
-	assert(ctx->dest_fills_inflight >= ctx->dest_prefetch_inflight);
-	if (ctx->dest_fills_inflight - ctx->dest_prefetch_inflight >=
-	    S3_DEST_FILL_MAX_INFLIGHT) {
+	if (ctx->dest_fills_inflight >= S3_DEST_FILL_MAX_INFLIGHT) {
 		pthread_mutex_unlock(&ctx->read_fill_lock);
 		return -EAGAIN;
 	}
@@ -1497,8 +1263,6 @@ s3_chunk_read_submit(struct s3_chunk_io *cio)
 		/* Never written: all zeroes. The blobstore depends on this
 		 * semantics -- a freshly created blob must read as zero, or
 		 * metadata parsing would read garbage. */
-		s3_dest_maybe_prefetch(ctx, cio->chunk_index,
-				       cio->offset_in_chunk, cio->length);
 		memset(cio->user_buf, 0, cio->length);
 		ctx->zero_fill_count++;
 		s3_read_apply_overlay(cio);
@@ -1512,8 +1276,6 @@ s3_chunk_read_submit(struct s3_chunk_io *cio)
 	/* The request lies entirely past the written range -- all zeroes again,
 	 * no GET needed. */
 	if (cio->offset_in_chunk >= valid_bytes) {
-		s3_dest_maybe_prefetch(ctx, cio->chunk_index,
-				       cio->offset_in_chunk, cio->length);
 		memset(cio->user_buf, 0, cio->length);
 		ctx->zero_fill_count++;
 		s3_read_apply_overlay(cio);
@@ -1549,13 +1311,10 @@ s3_chunk_read_submit(struct s3_chunk_io *cio)
 
 		cio->cache_tried = true;
 
-		/* A RAM hit (and some disk hits) complete cio before this returns.
-		 * Sample the prefetch key first. */
 		rc = s3_cache_read(ctx->cache, chunk_index, &uuid,
 				   offset, length,
 				   cio->user_buf, s3_chunk_cache_read_done, cio);
 		if (rc == 0) {
-			s3_dest_maybe_prefetch(ctx, chunk_index, offset, length);
 			return 0;
 		}
 		/* -ENOENT is a miss, which is not an error and not worth reporting:
@@ -1569,14 +1328,8 @@ s3_chunk_read_submit(struct s3_chunk_io *cio)
 	 * the exact-range path below. */
 	if (ctx->cache && !cio->chunk_buf && !cio->reread) {
 		if (!cio->bs_io->submit_fill_tried) {
-			uint64_t chunk_index = cio->chunk_index;
-			uint32_t offset = cio->offset_in_chunk;
-			uint32_t length = cio->length;
-
 			rc = s3_dest_fill_submit(cio, key);
 			if (rc == 0) {
-				s3_dest_maybe_prefetch(ctx, chunk_index, offset,
-						       length);
 				return 0;
 			}
 		}
@@ -1587,8 +1340,6 @@ s3_chunk_read_submit(struct s3_chunk_io *cio)
 	/* Exact range is the no-cache path and the bounded fallback when whole
 	 * staging cannot be admitted.  Its short tail is zero-filled by the
 	 * completion. */
-	s3_dest_maybe_prefetch(ctx, cio->chunk_index,
-			       cio->offset_in_chunk, cio->length);
 	return s3_chunk_exact_read_submit(cio);
 }
 
@@ -2186,7 +1937,6 @@ s3_bs_try_submit_cache(struct s3_bs_io *bs_io, struct spdk_io_channel *channel)
 				      offset_in_chunk, length, bs_io->payload,
 				      s3_bs_submit_cache_done, bs_io);
 	if (rc == 0) {
-		s3_dest_maybe_prefetch(ctx, chunk_index, offset_in_chunk, length);
 		return true;
 	}
 
@@ -2206,7 +1956,6 @@ s3_bs_try_submit_cache(struct s3_bs_io *bs_io, struct spdk_io_channel *channel)
 		free(waiter);
 		return false;
 	}
-	s3_dest_maybe_prefetch(ctx, chunk_index, offset_in_chunk, length);
 	return true;
 }
 
@@ -2821,7 +2570,6 @@ s3_bs_dev_free_cb(void *io_device)
 	}
 	assert(TAILQ_EMPTY(&ctx->read_fills));
 	assert(ctx->dest_fills_inflight == 0);
-	assert(ctx->dest_prefetch_inflight == 0);
 
 	/* Before the map goes: this is the only point where it reflects every
 	 * object the lvstore owns, blobstore's unload writes included. Destroy
@@ -4133,8 +3881,6 @@ s3_bs_dev_create(const struct s3_lvs_opts *opts,
 	ctx->chunk_shift    = (uint32_t)spdk_u32log2(chunk_size);
 	ctx->capacity_bytes = capacity_bytes;
 	ctx->cache_hot_bufs = opts->cache_hot_bufs;
-	ctx->host_readahead_covers_chunk =
-		s3_host_readahead_covers_chunk(chunk_size);
 	ctx->owner_thread   = spdk_get_thread();
 
 	ctx->ckpt_interval_sec = opts->checkpoint_interval_sec ?
@@ -4820,18 +4566,6 @@ s3_bs_dev_get_stats(struct spdk_bs_dev *bs_dev, struct s3_bs_dev_stats *out)
 		__atomic_load_n(&ctx->dest_direct_gets, __ATOMIC_RELAXED);
 	out->dest_direct_get_bytes =
 		__atomic_load_n(&ctx->dest_direct_get_bytes, __ATOMIC_RELAXED);
-	out->dest_prefetch_gets =
-		__atomic_load_n(&ctx->dest_prefetch_gets, __ATOMIC_RELAXED);
-	out->dest_prefetch_hits =
-		__atomic_load_n(&ctx->dest_prefetch_hits, __ATOMIC_RELAXED);
-	out->dest_prefetch_skip_token =
-		__atomic_load_n(&ctx->dest_prefetch_skip_token, __ATOMIC_RELAXED);
-	out->dest_prefetch_skip_slot =
-		__atomic_load_n(&ctx->dest_prefetch_skip_slot, __ATOMIC_RELAXED);
-	out->dest_prefetch_skip_seq =
-		__atomic_load_n(&ctx->dest_prefetch_skip_seq, __ATOMIC_RELAXED);
-	out->dest_prefetch_skip_host =
-		__atomic_load_n(&ctx->dest_prefetch_skip_host, __ATOMIC_RELAXED);
 	out->wal_writes       = ctx->wal_writes;
 	out->wal_retries      = ctx->wal_retries;
 	out->overlay_hits     = ctx->overlay_hits;

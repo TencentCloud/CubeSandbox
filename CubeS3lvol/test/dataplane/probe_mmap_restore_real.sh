@@ -16,7 +16,7 @@
 # decouple=true to exercise the production window, and dest crash-restore can
 # hit dest cache or leftover object-key slots instead of submit-thread fills.
 #
-# Expectations (1 MiB objects, GETTING=64, READY=128, prefetch window=8):
+# Expectations (1 MiB objects, GETTING=64, READY=128):
 #   cold_seq_1t     whole ≈ mapped MiB, exact ≈ 0, shared-cache hits ≈ 0
 #   cold_seq_16t    whole and/or shared-cache hits cover the working set
 #   cold_ch_vcpu_*  one synchronous fault stream per vCPU; shuffled 64 KiB
@@ -227,15 +227,6 @@ pat = re.compile(
     r"(?P<coalesced>\d+) coalesced read\(s\), "
     r"(?P<ready>\d+) RAM hit\(s\), "
     r"(?P<exact>\d+) exact fallback\(s\), "
-    r"(?P<prefetch_gets>\d+) prefetch GET\(s\), "
-    r"(?P<prefetch_hits>\d+) prefetch hit\(s\), "
-    r"(?P<prefetch_ready>\d+) prefetch RAM hit\(s\), "
-    r"(?P<prefetch_skip_token>\d+) prefetch token skip\(s\), "
-    r"(?P<prefetch_skip_slot>\d+) prefetch slot skip\(s\), "
-    r"(?P<prefetch_skip_stale>\d+) prefetch stale skip\(s\), "
-    r"(?P<prefetch_skip_seq>\d+) prefetch seq skip\(s\), "
-    r"(?P<prefetch_skip_full>\d+) prefetch full-demand skip\(s\), "
-    r"(?P<prefetch_skip_host>\d+) prefetch host-readahead skip\(s\), "
     r"(?P<shared_hits>\d+) shared-cache hit\(s\), "
     r"(?P<shared_misses>\d+) shared-cache miss\(es\), "
     r"(?P<shared_fallbacks>\d+) shared-cache fallback\(s\), "
@@ -253,10 +244,7 @@ for cand in matches:
 print("{%s}" % ",".join(
     '"%s":%s' % (k, m.group(k))
     for k in ("reads", "bytes", "zeroes", "whole", "coalesced", "ready",
-              "exact", "prefetch_gets", "prefetch_hits", "prefetch_ready",
-              "prefetch_skip_token", "prefetch_skip_slot",
-              "prefetch_skip_stale", "prefetch_skip_seq",
-              "prefetch_skip_full", "prefetch_skip_host", "shared_hits",
+              "exact", "shared_hits",
               "shared_misses", "shared_fallbacks", "refetch")
 ))
 PY
@@ -696,15 +684,6 @@ else
 		# map/cache. This is the Phase 2a case: no export and no live overlay,
 		# so cache hits should stay on their submitting nvmf threads.
 		wait_decouple_idle || true
-		# Decouple one dense lvol by itself so its destination clusters are
-		# physically sequential. The three production imports above are
-		# intentionally interleaved and are not a deterministic sequence
-		# detector fixture.
-		rpc rcow_import_lvol "$(printf '{"lvol_name":"prefetch_live","export_uuid":"%s","lvs_name":"%s","decouple":true}' \
-			"${UUID_rootfs}" "${DST_LVS}")" >/dev/null || {
-			fail "dest_prefetch_seq: fixture import failed"; exit 1; }
-		wait_decouple_idle || {
-			fail "dest_prefetch_seq: fixture decouple failed"; exit 1; }
 		rpc rcow_flush_lvstore \
 			"$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" >/dev/null || {
 			fail "warm_dest: destination flush failed"
@@ -756,15 +735,12 @@ else
 		NS_MEM="$(expose "${DST_LVS}/mem_live")"
 		NS_ROOT="$(expose "${DST_LVS}/root_live")"
 		NS_META="$(expose "${DST_LVS}/meta_live")"
-		NS_PREFETCH="$(expose "${DST_LVS}/prefetch_live")"
 		nvme connect -t tcp -a 127.0.0.1 -s "${PORT}" -n "${NQN}" >/dev/null 2>&1
 		CONNECTED=1
 		DEV_MEM="$(wait_dev "${NS_MEM}")" || exit 1
 		DEV_ROOT="$(wait_dev "${NS_ROOT}")" || exit 1
 		DEV_META="$(wait_dev "${NS_META}")" || exit 1
-		DEV_PREFETCH="$(wait_dev "${NS_PREFETCH}")" || exit 1
 		blockdev --setra 0 "${DEV_MEM}" >/dev/null 2>&1 || true
-		blockdev --setra 0 "${DEV_PREFETCH}" >/dev/null 2>&1 || true
 
 		stampede_size=$((SIZE_MIB / 4))
 		[ "${stampede_size}" -gt 0 ] || stampede_size=1
@@ -877,8 +853,8 @@ PY
 				pass "cold_dest_1m: ${direct_delta} direct GETs, ${direct_hits_delta} prefetched"
 			elif [ "${direct_served}" -ge $((direct_size - 1)) ] ||
 			     [ $((direct_served + object_hits_delta)) -ge "${direct_size}" ]; then
-				# Adjacent dest prefetch or dest object cache can satisfy
-				# aligned 1 MiB reads without a user-buffer whole GET.
+				# Dest object cache can satisfy aligned 1 MiB reads
+				# without a user-buffer whole GET.
 				direct_ok=true
 				pass "cold_dest_1m: ${direct_delta} direct GETs, ${direct_hits_delta} dest hits, ${object_hits_delta} object hits"
 			else
@@ -896,90 +872,27 @@ PY
 			fail "cold_dest_1m: direct read failed"
 		fi
 
-		# Run prefetch assertions after the demand-path cases: read-ahead may
-		# populate physically adjacent clusters owned by another lvol.
-		prefetch_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
-		if dd if="${DEV_PREFETCH}" of=/dev/null bs=4K \
-				skip=$((64 * 256)) count=1 iflag=direct status=none; then
-			prefetch_after_hole="$(lvstore_write_stat "${DST_LVS}" \
-				dest_prefetch_gets)"
-			if [ "${prefetch_after_hole}" -eq "${prefetch_before}" ]; then
-				pass "dest_prefetch_holes: unallocated window issued no GET"
-			else
-				fail "dest_prefetch_holes: $((prefetch_after_hole - prefetch_before)) unexpected GETs"
-			fi
-		else
-			fail "dest_prefetch_holes: sparse read failed"
-		fi
-
-		# Host readahead of at least one chunk suppresses dest software
-		# prefetch; demand still fills the cache, so later 4K pages hit RAM.
+		# Demand fills dest cache; later 4K pages of the same range hit RAM.
 		drop_caches
-		prefetch_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
-		prefetch_hits_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_hits)"
-		skip_host_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_skip_host)"
 		cache_hits_before="$(lvstore_write_stat "${DST_LVS}" dest_submit_cache_hits)"
 		ram_hits_before="$(lvstore_write_stat "${DST_LVS}" cache_ram_hits)"
-		if dd if="${DEV_PREFETCH}" of=/dev/null bs=4K count=$((2 * 256)) \
+		if dd if="${DEV_MEM}" of=/dev/null bs=4K count=$((2 * 256)) \
 				iflag=direct status=none; then
-			prefetch_after="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
-			prefetch_delta=$((prefetch_after - prefetch_before))
-			skip_host_after="$(lvstore_write_stat "${DST_LVS}" \
-				dest_prefetch_skip_host)"
-			if [ "${READ_AHEAD_KIB}" -ge 1024 ]; then
-				if [ "${prefetch_delta}" -eq 0 ] &&
-				   [ "${skip_host_after}" -gt "${skip_host_before}" ]; then
-					pass "dest_prefetch_seq: host readahead suppressed software prefetch"
-				else
-					fail "dest_prefetch_seq: gets=${prefetch_delta} skip_host=$((skip_host_after - skip_host_before))"
-				fi
-			elif [ "${prefetch_delta}" -gt 0 ]; then
-				pass "dest_prefetch_seq: ${prefetch_delta} low-priority whole GETs"
-			elif [ "${prefetch_after}" -gt 0 ]; then
-				pass "dest_prefetch_seq: range was already prefetched"
-			else
-				fail "dest_prefetch_seq: no prefetch GETs"
-			fi
-			dd if="${DEV_PREFETCH}" of=/dev/null bs=4K skip=$((2 * 256)) \
-				count=$((1 * 256)) iflag=direct status=none || true
-			prefetch_hits_after="$(lvstore_write_stat "${DST_LVS}" \
-				dest_prefetch_hits)"
+			dd if="${DEV_MEM}" of=/dev/null bs=4K skip=256 \
+				count=256 iflag=direct status=none || true
 			cache_hits_after="$(lvstore_write_stat "${DST_LVS}" \
 				dest_submit_cache_hits)"
 			ram_hits_after="$(lvstore_write_stat "${DST_LVS}" \
 				cache_ram_hits)"
-			prefetch_hit_delta=$((prefetch_hits_after - prefetch_hits_before))
 			cache_hit_delta=$((cache_hits_after - cache_hits_before))
 			ram_hit_delta=$((ram_hits_after - ram_hits_before))
-			if [ "${ram_hit_delta}" -gt 0 ]; then
-				pass "dest_prefetch_hit: ${prefetch_hit_delta} joins, ${cache_hit_delta} cache hits, ${ram_hit_delta} RAM hits"
+			if [ "${ram_hit_delta}" -gt 0 ] || [ "${cache_hit_delta}" -gt 0 ]; then
+				pass "dest_seq_hit: ${cache_hit_delta} cache hits, ${ram_hit_delta} RAM hits"
 			else
-				fail "dest_prefetch_hit: no RAM hit (${prefetch_hit_delta} joins, ${cache_hit_delta} cache hits)"
+				fail "dest_seq_hit: no RAM or dest cache hit"
 			fi
 		else
-			fail "dest_prefetch_seq: sequential read failed"
-		fi
-
-		prefetch_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
-		skip_seq_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_skip_seq)"
-		skip_host_before="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_skip_host)"
-		dd if="${DEV_PREFETCH}" of=/dev/null bs=4K skip=$((12 * 256)) \
-			count=1 iflag=direct status=none || true
-		prefetch_after="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_gets)"
-		skip_seq_after="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_skip_seq)"
-		skip_host_after="$(lvstore_write_stat "${DST_LVS}" dest_prefetch_skip_host)"
-		if [ "${READ_AHEAD_KIB}" -ge 1024 ]; then
-			if [ "${prefetch_after}" -eq "${prefetch_before}" ] &&
-			   [ "${skip_host_after}" -gt "${skip_host_before}" ]; then
-				pass "dest_prefetch_random: host readahead skipped software window"
-			else
-				fail "dest_prefetch_random: gets=$((prefetch_after - prefetch_before)) skip_host=$((skip_host_after - skip_host_before))"
-			fi
-		elif [ "${prefetch_after}" -eq "${prefetch_before}" ] &&
-		     [ "${skip_seq_after}" -gt "${skip_seq_before}" ]; then
-			pass "dest_prefetch_random: jump suppressed read-ahead"
-		else
-			fail "dest_prefetch_random: gets=$((prefetch_after - prefetch_before)) skip_seq=$((skip_seq_after - skip_seq_before))"
+			fail "dest_seq_hit: sequential read failed"
 		fi
 
 		fast_hits_before="$(lvstore_write_stat "${DST_LVS}" \
@@ -1017,11 +930,9 @@ PY
 
 		# Keep the memory import long enough to print release stats.
 		unexpose "${NS_MEM}"; unexpose "${NS_ROOT}"; unexpose "${NS_META}"
-		unexpose "${NS_PREFETCH}"
 		delete_lvol mem_live
 		delete_lvol root_live
 		delete_lvol meta_live
-		delete_lvol prefetch_live
 		for _ in $(seq 50); do
 			dd if="${TGT_LOG}" bs=1 skip="${MARK}" status=none 2>/dev/null |
 				grep -aq 'Releasing imported export' && break
@@ -1054,7 +965,7 @@ python3 - "${RESULTS}" <<'PY'
 import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8")]
 print()
-print("case                  elapsed(ms)  MiB/s expMiB/s exp/t  whole  coalsc  ready  exact  sh_hit sh_miss sh_fb alias_h dst_get pf_get pf_hit pf_ram tok_sk slot_sk seq_sk full_sk host_sk fast_hit sb_fill sb_join direct directMiB verdict")
+print("case                  elapsed(ms)  MiB/s expMiB/s exp/t  whole  coalsc  ready  exact  sh_hit sh_miss sh_fb alias_h dst_get fast_hit sb_fill sb_join direct directMiB verdict")
 for r in rows:
     b = r.get("bench") or {}; e = r.get("export") or {}
     elapsed = f"{b['elapsed_ms']:.1f}" if "elapsed_ms" in b else "-"
@@ -1072,13 +983,6 @@ for r in rows:
           f"{e.get('shared_hits','-'):>6} {e.get('shared_misses','-'):>7} "
           f"{e.get('shared_fallbacks','-'):>5} "
           f"{r.get('alias_hits','-'):>7} {r.get('dest_gets','-'):>7} "
-          f"{e.get('prefetch_gets','-'):>6} {e.get('prefetch_hits','-'):>6} "
-          f"{e.get('prefetch_ready','-'):>6} "
-          f"{e.get('prefetch_skip_token','-'):>6} "
-          f"{e.get('prefetch_skip_slot','-'):>7} "
-          f"{e.get('prefetch_skip_seq','-'):>6} "
-          f"{e.get('prefetch_skip_full','-'):>7} "
-          f"{e.get('prefetch_skip_host','-'):>7} "
           f"{r.get('fast_hits','-'):>8} "
           f"{r.get('submit_fills','-'):>7} "
           f"{r.get('submit_joins','-'):>7} "

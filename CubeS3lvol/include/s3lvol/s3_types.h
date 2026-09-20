@@ -200,24 +200,4 @@ enum s3lvol_rectify_mode {
 	S3LVOL_RECTIFY_INFLATE,
 };
 
-/*
- * Host NVMe readahead is configured in KiB via S3LVOL_READ_AHEAD_KB. When it is
- * at least one chunk, kernel readahead already fetches whole objects and the
- * userspace export/dest prefetch windows are redundant.
- */
-static inline bool
-s3_host_readahead_covers_chunk(uint32_t chunk_size)
-{
-	const char *env = getenv("S3LVOL_READ_AHEAD_KB");
-	char *end = NULL;
-	unsigned long kib;
-
-	if (!env || env[0] == '\0' || chunk_size == 0) {
-		return false;
-	}
-	kib = strtoul(env, &end, 10);
-	return end != env && *end == '\0' && kib <= 32768 &&
-	       (uint64_t)kib * 1024 >= chunk_size;
-}
-
 #endif /* S3LVOL_TYPES_H */
