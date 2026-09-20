@@ -541,7 +541,7 @@ export E2B_API_KEY=e2b_000000
 
 Required commands:
 
-- `docker` (cube-egress runs as a docker container; the installer installs it automatically — this is a hard prerequisite, so in offline/air-gapped environments where automatic installation isn't possible, install Docker beforehand)
+- `docker` (cube-egress runs as a docker container; the installer installs it automatically — this is a hard prerequisite, so in offline/air-gapped environments where automatic installation isn't possible, install Docker beforehand). Snap Docker is rejected: it cannot read `/usr/local/services` (`sudo snap remove docker`, then install docker-ce).
 - `tar`
 - `ss`
 - `bash`
@@ -591,7 +591,7 @@ sudo yum install -y python3 libaio libnuma libuuid
 
 Required commands:
 
-- `docker`
+- `docker` (snap Docker is rejected; install docker-ce / docker.io)
 - `tar`
 - `ss`
 - `bash`
@@ -670,6 +670,7 @@ sudo yum install -y python3 libaio libnuma libuuid
 - If the `deploy/guest-image/Dockerfile` build fails, or the build machine's `mkfs.ext4` does not support the `-d` flag, guest image generation will fail immediately.
 - `cube-snapshot/spec.json` is not a mandatory artifact in the current first release of one-click. If absent, the related plugin degrades to a warning rather than blocking the basic startup.
 - The default `NetworkManager + dnsmasq` fallback relies on NetworkManager to spawn the `dnsmasq` child. On hosts where NetworkManager initializes the plugin but never spawns it (for example bonded interfaces managed via `ifcfg` + `assume`), set `CUBE_PROXY_DNSMASQ_MODE=standalone` so the DNS scripts launch and manage `dnsmasq` themselves. Standalone mode does not require a restartable `NetworkManager`, but on hosts with no resolver manager at all you must ensure nothing else overwrites `/etc/resolv.conf` afterwards. In this mode `dnsmasq` runs as a bare child that systemd does not supervise, so if it later crashes nothing restarts it automatically; recover with `systemctl restart cube-sandbox-dns`.
+- **Snap Docker is not supported.** Ubuntu Server's installer (Subiquity) offers Docker as a "Featured Snap" during OS setup; users who check that option — or later run `snap install docker` — end up with a sandboxed Docker daemon that cannot access paths outside its AppArmor confinement (e.g. `/usr/local/services`). The install scripts detect this automatically and abort with remediation steps. Fix: `sudo snap remove docker`, then install docker-ce per <https://docs.docker.com/engine/install/ubuntu/>.
 
 ## DNS Troubleshooting
 

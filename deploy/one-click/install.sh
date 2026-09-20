@@ -1177,6 +1177,7 @@ check_install_preflight() {
 
   if needs_docker_for_install; then
     require_cmd docker
+    reject_snap_docker
   fi
 
   # tencent mirror path may mutate /etc/docker/daemon.json via python3.

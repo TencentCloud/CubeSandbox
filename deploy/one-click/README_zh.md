@@ -448,7 +448,7 @@ export E2B_API_KEY=e2b_000000
 
 必需命令：
 
-- `docker`（cube-egress 以 docker 容器运行，安装器会自动安装；docker 是硬性前置依赖，离线/无法自动安装的环境请提前装好 Docker）
+- `docker`（cube-egress 以 docker 容器运行，安装器会自动安装；docker 是硬性前置依赖，离线/无法自动安装的环境请提前装好 Docker。不支持 snap Docker，读不到 `/usr/local/services`：`sudo snap remove docker`，再安装 docker-ce）
 - `tar`
 - `ss`
 - `bash`
@@ -497,7 +497,7 @@ sudo yum install -y python3 libaio libnuma libuuid
 
 必需命令：
 
-- `docker`
+- `docker`（不支持 snap Docker，请安装 docker-ce / docker.io）
 - `tar`
 - `ss`
 - `bash`
@@ -574,6 +574,7 @@ sudo yum install -y python3 libaio libnuma libuuid
 - 如果 `deploy/guest-image/Dockerfile` 构建失败，或构建机的 `mkfs.ext4` 不支持 `-d`，guest image 生成会立即失败。
 - `cube-snapshot/spec.json` 在当前 one-click 首版中不是强制产物；缺失时相关插件会退化为告警，而不是阻塞基础启动。
 - 默认的 `NetworkManager + dnsmasq` 回退路径依赖 NetworkManager 拉起 `dnsmasq` 子进程。在 NetworkManager 会初始化插件但从不真正拉起它的目标机上（例如通过 `ifcfg` + `assume` 管理的 bond 网卡），可设置 `CUBE_PROXY_DNSMASQ_MODE=standalone`，让 DNS 脚本自己拉起并管理 `dnsmasq`。standalone 模式不需要可重启的 `NetworkManager`，但在完全没有任何解析器管理器的目标机上，你必须确保之后没有其它组件覆盖 `/etc/resolv.conf`。该模式下 `dnsmasq` 作为一个不受 systemd 托管的裸子进程运行，若之后崩溃不会自动重启；可通过 `systemctl restart cube-sandbox-dns` 恢复。
+- **不支持 snap Docker。** Ubuntu Server 安装器（Subiquity）在装系统时会将 Docker 列为 "Featured Snap" 可勾选项；勾选后或后续执行 `snap install docker` 装的都是带 AppArmor 沙箱限制的 snap 版 Docker daemon，无法访问 `/usr/local/services` 等受限路径。安装脚本会自动检测并中止，同时给出修复步骤。修复：`sudo snap remove docker`，再按 <https://docs.docker.com/engine/install/ubuntu/> 安装 docker-ce。
 
 ## DNS 排障
 

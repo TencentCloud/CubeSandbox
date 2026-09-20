@@ -2847,7 +2847,27 @@ detect_pkg_manager() {
   fi
 }
 
+# Snap Docker cannot read /usr/local/services (#1753).
+# Checks the docker CLI on PATH; assumes it belongs to the running daemon.
+docker_bin_is_snap() {
+  local p="${1:-}" resolved
+  [[ -n "${p}" ]] || return 1
+  resolved="$(readlink -f "${p}" 2>/dev/null || true)"
+  [[ "${p}" == /snap/* || "${resolved}" == /snap/* || "${resolved}" == /usr/bin/snap ]]
+}
+
+reject_snap_docker() {
+  docker_bin_is_snap "${1:-$(command -v docker 2>/dev/null || true)}" || return 0
+  cat >&2 <<'EOF'
+[one-click] ERROR: snap Docker is not supported; it cannot read /usr/local/services.
+[one-click]   sudo snap remove docker
+[one-click]   then install docker-ce: https://docs.docker.com/engine/install/ubuntu/
+EOF
+  exit 1
+}
+
 install_docker() {
+  reject_snap_docker
   if command -v docker >/dev/null 2>&1; then
     return 0
   fi
