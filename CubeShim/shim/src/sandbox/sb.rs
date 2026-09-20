@@ -258,7 +258,7 @@ impl SandBox {
         }
         false
     }
-    async fn disconnect_agent(&mut self, from_rollback: bool) -> CResult<()> {
+    async fn disconnect_agent(&mut self) -> CResult<()> {
         //stop monitor
 
         if let Some(tx) = self.tx_monitor_exited.as_ref() {
@@ -282,32 +282,43 @@ impl SandBox {
         for (_, c) in containers.iter_mut() {
             c.unset_client().await;
         }
-        if !from_rollback {
-            // Yield briefly so aborted monitor / oom tasks can be scheduled and
-            // drop their cloned `Arc<Client>` before we check ref counts below.
-            // Empirically 50ms is enough for the tokio runtime to make progress.
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        if let Some(client) = self.client.take() {
-            if Arc::strong_count(&client) != 1 {
-                errf!(
-                    self.log,
-                    "client ref count is {}",
-                    Arc::strong_count(&client)
-                );
-                //return Err(format!("disconnect_agent: client ref count is not 1").into());
-            }
-            drop(client)
-        }
-
-        if let Some(conn) = self.conn.take() {
-            if Arc::strong_count(&conn) != 1 {
-                errf!(self.log, "conn ref count is {}", Arc::strong_count(&conn));
-                //return Err(format!("disconnect_agent: conn ref count is not 1").into());
-            }
-            drop(conn)
-        }
+        self.client = None;
+        self.conn = None;
         Ok(())
+    }
+
+    /// Pause-time teardown that closes nothing: the agent's vsock connections
+    /// cross the freeze inside the snapshot, and the guest learns of them only
+    /// via the restore-side RST. disconnect_agent remains for rollback.
+    async fn quiesce_agent_for_pause(&mut self) {
+        //stop monitor
+        if let Some(tx) = self.tx_monitor_exited.as_ref() {
+            let _ = tx.try_send(());
+        }
+        if let Some(handle) = self.monitor_handle.take() {
+            handle.abort();
+        }
+        //stop watch oom event
+        if let Some(tx) = self.tx_oom_exited.as_ref() {
+            let _ = tx.try_send(());
+        }
+        if let Some(handle) = self.oom_handle.take() {
+            handle.abort();
+        }
+        let mut containers = self.containers.lock().await;
+        for (_, c) in containers.iter_mut() {
+            c.quiesce_for_pause().await;
+        }
+    }
+
+    /// Signal every container's init log forwarders to stop without waiting:
+    /// pause keeps them across the freeze, and once the VM is torn down their
+    /// reads fail -- without this they retry until the shim is reaped.
+    async fn stop_log_forward_detached(&self) {
+        let mut containers = self.containers.lock().await;
+        for (_, c) in containers.iter_mut() {
+            c.stop_log_forward_detached().await;
+        }
     }
 
     fn get_storages(&mut self) -> CResult<Vec<agent::Storage>> {
@@ -1568,10 +1579,14 @@ impl SandBox {
             .pause_vm_to_snapshot_inner(destination_path, memory_vol_url, snapshot_type)
             .await
         {
+            // A failed pause keeps no snapshot, so the full disconnect (drained
+            // fwd, cleared client) restores the pre-change error contract.
+            let _ = self.disconnect_agent().await;
             let mut state = self.state.lock().await;
             *state = SandBoxState::Exited;
             return Err(e);
         }
+        self.stop_log_forward_detached().await;
         Ok(())
     }
 
@@ -1581,7 +1596,7 @@ impl SandBox {
         memory_vol_url: Option<String>,
         snapshot_type: SnapshotType,
     ) -> CResult<()> {
-        self.disconnect_agent(false).await?;
+        self.quiesce_agent_for_pause().await;
 
         let ch = self.ch.as_mut().unwrap().lock().await;
 
@@ -1674,7 +1689,7 @@ impl SandBox {
 
         // disconnect_agent aborts the OLD monitor_vm / watch_oom tasks
         // before we delete the VM out from under them.
-        self.disconnect_agent(true).await?;
+        self.disconnect_agent().await?;
 
         // Delete the current VM in place of a checkpoint snapshot.
         // VmDelete shuts the VM down and destroys its object; the VMM process
