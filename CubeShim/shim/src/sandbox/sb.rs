@@ -50,6 +50,18 @@ const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
 const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
 
+/// Bounded reconnects for the restore-thaw window: a freshly restored guest
+/// transiently refuses or resets the first connections until its runtime
+/// settles. Both steps are safe to repeat (fresh channel; idempotent RPCs).
+const RECONNECT_ATTEMPTS: u32 = 5;
+const RECONNECT_BACKOFF_MS: u64 = 200;
+/// Overall deadline for the retry loop: bounds the sequence even when a
+/// single attempt parks (connect_agent has no internal timeout). With the
+/// 3 s RPC timeout, a hung agent gets ~3 attempts rather than all 5.
+/// Fast-failing attempts exhaust RECONNECT_ATTEMPTS in ~1 s; this deadline
+/// only binds when an attempt hangs.
+const RECONNECT_DEADLINE: Duration = Duration::from_secs(10);
+
 #[derive(PartialEq, Eq)]
 enum SandBoxState {
     Normal,
@@ -240,6 +252,52 @@ impl SandBox {
         )
     }
 
+    /// Connect + reset with bounded retries. Restores are retried because
+    /// the guest is thawed from a snapshot with its connections just RST and
+    /// transiently refuses or resets the first connections while its runtime
+    /// settles; a cold boot gets a single attempt -- it connects after
+    /// VsockServerReady and failures there are permanent. Every error class
+    /// is retried: the observed transient is itself a connect-level failure.
+    /// What follows the first RPC is not retried: it is not idempotent, and
+    /// reset_guest passing is the signal that the guest can serve again.
+    async fn connect_agent_with_retry(&mut self, restore: bool) -> CResult<()> {
+        let retry = async {
+            let max_attempts = if restore { RECONNECT_ATTEMPTS } else { 1 };
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+                let res = async {
+                    self.connect_agent().await?;
+                    if restore {
+                        self.reset_guest().await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                match res {
+                    Ok(()) => return Ok(()),
+                    Err(e) if attempt < max_attempts => {
+                        // A failed attempt also records a reset_vm Err stat
+                        // (StatDefer drop); the later success is the signal.
+                        warnf!(
+                            self.log,
+                            "reconnect attempt {}/{} failed: {}, retrying",
+                            attempt,
+                            max_attempts,
+                            e
+                        );
+                        tokio::time::sleep(Duration::from_millis(RECONNECT_BACKOFF_MS)).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+        match tokio::time::timeout(RECONNECT_DEADLINE, retry).await {
+            Ok(res) => res,
+            Err(_) => Err("agent reconnect exceeded the deadline".to_string()),
+        }
+    }
+
     async fn connect_agent(&mut self) -> CResult<()> {
         let conn = AsyncUtils::connect_agent(&self.id).await?;
         let client = agent_ttrpc::AgentServiceClient::new(conn.clone());
@@ -259,24 +317,7 @@ impl SandBox {
         false
     }
     async fn disconnect_agent(&mut self) -> CResult<()> {
-        //stop monitor
-
-        if let Some(tx) = self.tx_monitor_exited.as_ref() {
-            let _ = tx.try_send(());
-        }
-
-        if let Some(handle) = self.monitor_handle.take() {
-            handle.abort();
-        }
-
-        //stop watch oom event
-        if let Some(tx) = self.tx_oom_exited.as_ref() {
-            let _ = tx.try_send(());
-        }
-
-        if let Some(handle) = self.oom_handle.take() {
-            handle.abort();
-        }
+        self.stop_watchers().await;
 
         let mut containers = self.containers.lock().await;
         for (_, c) in containers.iter_mut() {
@@ -287,10 +328,23 @@ impl SandBox {
         Ok(())
     }
 
-    /// Pause-time teardown that closes nothing: the agent's vsock connections
-    /// cross the freeze inside the snapshot, and the guest learns of them only
-    /// via the restore-side RST. disconnect_agent remains for rollback.
+    /// Pause-time teardown that leaves the agent channel and the fwd log conns
+    /// alive across the freeze (the guest learns of them via the restore-side
+    /// RST). The monitor's own health connection is closed by its abort; an
+    /// unfinished close rides in the snapshot and gets the same RST. Nothing
+    /// speaks on it after resume. disconnect_agent remains for rollback.
     async fn quiesce_agent_for_pause(&mut self) {
+        self.stop_watchers().await;
+        let mut containers = self.containers.lock().await;
+        for (_, c) in containers.iter_mut() {
+            c.quiesce_for_pause().await;
+        }
+    }
+
+    /// Stop the monitor / oom watcher tasks; shared by quiesce (pause) and
+    /// disconnect (rollback): whatever holds a clone of the agent client must
+    /// be stopped before the connection is dealt with.
+    async fn stop_watchers(&mut self) {
         //stop monitor
         if let Some(tx) = self.tx_monitor_exited.as_ref() {
             let _ = tx.try_send(());
@@ -305,15 +359,12 @@ impl SandBox {
         if let Some(handle) = self.oom_handle.take() {
             handle.abort();
         }
-        let mut containers = self.containers.lock().await;
-        for (_, c) in containers.iter_mut() {
-            c.quiesce_for_pause().await;
-        }
     }
 
     /// Signal every container's init log forwarders to stop without waiting:
     /// pause keeps them across the freeze, and once the VM is torn down their
-    /// reads fail -- without this they retry until the shim is reaped.
+    /// reads fail -- without this they retry until the shim is reaped. Slot
+    /// reuse drains via start_log_forward.
     async fn stop_log_forward_detached(&self) {
         let mut containers = self.containers.lock().await;
         for (_, c) in containers.iter_mut() {
@@ -511,13 +562,9 @@ impl SandBox {
             }
         }
 
-        self.connect_agent().await?;
+        self.connect_agent_with_retry(snapshot).await?;
 
         infof!(self.log, "agent is ready");
-
-        if snapshot {
-            self.reset_guest().await?;
-        }
 
         //add vfio device
         if !self.app_snapshot_restore() {
@@ -1579,14 +1626,22 @@ impl SandBox {
             .pause_vm_to_snapshot_inner(destination_path, memory_vol_url, snapshot_type)
             .await
         {
-            // A failed pause keeps no snapshot, so the full disconnect (drained
-            // fwd, cleared client) restores the pre-change error contract.
+            // A failed pause leaves the sandbox unusable (no resume will
+            // follow), so run the full teardown.
             let _ = self.disconnect_agent().await;
             let mut state = self.state.lock().await;
             *state = SandBoxState::Exited;
             return Err(e);
         }
         self.stop_log_forward_detached().await;
+        // The connections only had to survive the freeze; the VM is gone now,
+        // so disarming the dead client restores the fast "not connected" guards.
+        self.client = None;
+        self.conn = None;
+        let mut containers = self.containers.lock().await;
+        for (_, c) in containers.iter_mut() {
+            c.clear_client();
+        }
         Ok(())
     }
 
@@ -1746,14 +1801,7 @@ impl SandBox {
             }
         }
 
-        self.connect_agent().await?;
-
-        if self.client.is_none() {
-            errf!(self.log, "client is None in resume_vm");
-            return Err(format!("client is None"));
-        }
-
-        self.reset_guest().await?;
+        self.connect_agent_with_retry(true).await?;
 
         let client = self.client.as_ref().unwrap();
 
