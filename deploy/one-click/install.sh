@@ -2089,6 +2089,9 @@ if [[ -n "${CUBE_SANDBOX_CUBE_ROUTER_CIDR:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_CUBE_ROUTER_CIDR" "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}"
 fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EGRESS_ADMIN_PORT" "${CUBE_EGRESS_ADMIN_PORT}"
+if [[ -n "${CUBE_SANDBOX_CUBE_EGRESS_IMAGE:-}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_CUBE_EGRESS_IMAGE" "${CUBE_SANDBOX_CUBE_EGRESS_IMAGE}"
+fi
 
 # Persist database driver + engine endpoints. CubeMaster reads the patched
 # conf.yaml; CubeAPI/CubeOps consume DATABASE_URL from .one-click.env.
