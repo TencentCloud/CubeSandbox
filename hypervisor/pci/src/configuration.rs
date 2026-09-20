@@ -1037,6 +1037,66 @@ impl PciConfiguration {
 
         None
     }
+
+    /// Restore BAR address after a failed move. This undoes the premature
+    /// address update in detect_bar_reprogramming() so that config space
+    /// stays consistent with the actual MMIO mapping.
+    pub fn restore_bar_addr(&mut self, params: &BarReprogrammingParams) {
+        match params.region_type {
+            PciBarRegionType::Memory64BitRegion => {
+                // 64-bit BAR spans two slots: bars[i] (low, type Memory64BitRegion)
+                // and bars[i+1] (high, type None). Mirror detect_bar_reprogramming
+                // by matching the combined address and restoring both halves.
+                // Only the low register has been committed at this point, but
+                // rewriting the high one with its old value is harmless.
+                for i in 0..NUM_BAR_REGS - 1 {
+                    if self.bars[i].r#type != Some(PciBarRegionType::Memory64BitRegion) {
+                        continue;
+                    }
+                    let low_mask = self.writable_bits[BAR0_REG + i];
+                    let high_mask = self.writable_bits[BAR0_REG + i + 1];
+                    let current = (u64::from(self.bars[i + 1].addr & high_mask) << 32)
+                        | u64::from(self.bars[i].addr & low_mask);
+                    if current == params.new_base {
+                        let old_low = params.old_base as u32;
+                        let old_high = (params.old_base >> 32) as u32;
+                        self.bars[i].addr = old_low;
+                        self.bars[i + 1].addr = old_high;
+                        self.registers[BAR0_REG + i] =
+                            (self.registers[BAR0_REG + i] & !low_mask) | (old_low & low_mask);
+                        self.registers[BAR0_REG + i + 1] = (self.registers[BAR0_REG + i + 1]
+                            & !high_mask)
+                            | (old_high & high_mask);
+                        return;
+                    }
+                }
+            }
+            _ => {
+                // 32-bit Memory or IO BAR
+                for i in 0..NUM_BAR_REGS {
+                    let mask = self.writable_bits[BAR0_REG + i];
+                    if self.bars[i].r#type == Some(params.region_type)
+                        && u64::from(self.bars[i].addr & mask) == params.new_base
+                    {
+                        let old = params.old_base as u32;
+                        self.bars[i].addr = old;
+                        self.registers[BAR0_REG + i] =
+                            (self.registers[BAR0_REG + i] & !mask) | (old & mask);
+                        return;
+                    }
+                }
+
+                // The expansion ROM BAR is tracked separately from bars[].
+                let rom_mask = self.writable_bits[ROM_BAR_REG];
+                if u64::from(self.rom_bar_addr & rom_mask) == params.new_base {
+                    let old = params.old_base as u32;
+                    self.rom_bar_addr = old;
+                    self.registers[ROM_BAR_REG] =
+                        (self.registers[ROM_BAR_REG] & !rom_mask) | (old & rom_mask);
+                }
+            }
+        }
+    }
 }
 
 impl Pausable for PciConfiguration {}

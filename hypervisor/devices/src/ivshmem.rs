@@ -395,6 +395,10 @@ impl PciDevice for IvshmemDevice {
         None
     }
 
+    fn restore_bar_addr(&mut self, params: &BarReprogrammingParams) {
+        self.configuration.restore_bar_addr(params);
+    }
+
     fn move_bar(&mut self, old_base: u64, new_base: u64) -> result::Result<(), std::io::Error> {
         // BAR2 holds the shared memory mapping. When the guest reprograms
         // BAR2 to a new address, we must tear down the old userspace mapping
