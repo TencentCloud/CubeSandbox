@@ -184,8 +184,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Sandbox'
+        '400':
+          description: Invalid timeout value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '404':
           description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Sandbox cannot be connected during a conflicting lifecycle transition
           content:
             application/json:
               schema:
@@ -381,6 +393,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Sandbox'
+        '400':
+          description: Invalid timeout value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '404':
           description: Sandbox not found
           content:
@@ -1239,7 +1257,7 @@ components:
           - integer
           - 'null'
           format: int32
-          description: Idle timeout in seconds; None when the client did not send one.
+          description: Idle timeout in seconds; omitted to keep the current value, -1 for no expiry, and a positive value ensures at least that much remaining lifetime. For an already-running sandbox, a shorter positive window is ignored; use POST /sandboxes/{id}/timeout to shorten it. Zero and values below -1 are invalid.
     CreateSnapshotRequest:
       type: object
       description: Request body for POST /sandboxes/{id}/snapshots.
@@ -1726,7 +1744,7 @@ components:
           - integer
           - 'null'
           format: int32
-          description: Idle timeout in seconds; None when the client did not send one.
+          description: Idle timeout in seconds; omitted or 0 keeps the current value, -1 disables expiry, and a positive value starts a new window after resume.
     RollbackRequest:
       type: object
       description: Request body for POST /sandboxes/{id}/rollback.

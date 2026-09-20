@@ -305,13 +305,24 @@ class Sandbox:
         return cls(resp.json(), config=cfg)
 
     @classmethod
-    def connect(cls, sandbox_id: str, *, config: Config | None = None) -> "Sandbox":
+    def connect(
+        cls,
+        sandbox_id: str,
+        timeout: int | None = None,
+        *,
+        config: Config | None = None,
+    ) -> "Sandbox":
         """POST /sandboxes/:sandboxID/connect - Connect to an existing sandbox.
 
         Resumes the sandbox if it is currently paused.
 
         Args:
             sandbox_id: Sandbox identifier.
+            timeout: Sandbox idle timeout in seconds after connecting. ``None``
+                keeps the current timeout, ``-1`` disables idle expiry, and a
+                positive value ensures at least that much remaining lifetime
+                (running and paused sandboxes are never shortened). ``0`` and
+                values below ``-1`` are rejected.
             config: SDK config. Uses default (env-based) config if omitted.
 
         Returns:
@@ -319,13 +330,17 @@ class Sandbox:
 
         Raises:
             SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
-            ApiError: On unexpected backend error (HTTP 500).
+            ApiError: If the timeout is ``0`` or below ``-1`` (HTTP 400), an
+                overlapping lifecycle transition prevents the connection
+                (HTTP 409), or an unexpected backend error occurs.
         """
         cfg = config or Config()
         s = requests.Session()
-        # Connect omits timeout; see docs/guide/lifecycle.md.
+        body: dict[str, int] = {}
+        if timeout is not None:
+            body["timeout"] = timeout
         resp = s.post(f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
-                      json={},
+                      json=body,
                       headers={"Content-Type": "application/json", **_auth_headers(cfg)})
         _check_response(resp)
         return cls(resp.json(), config=cfg)

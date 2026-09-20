@@ -54,11 +54,17 @@ class CubeSandboxAdapter(SandboxAdapter):
         cls,
         sandbox_id: str,
         config: SdkE2EConfig,
+        *,
+        timeout: int | None = None,
     ) -> "CubeSandboxAdapter":
         from cubesandbox import Sandbox
 
         sdk_config = cls._sdk_config(config)
-        return cls(Sandbox.connect(sandbox_id, config=sdk_config), sdk_config=sdk_config, e2e_config=config)
+        return cls(
+            Sandbox.connect(sandbox_id, timeout=timeout, config=sdk_config),
+            sdk_config=sdk_config,
+            e2e_config=config,
+        )
 
     @classmethod
     def list_sandboxes(cls, config: SdkE2EConfig) -> list[dict[str, Any]]:
