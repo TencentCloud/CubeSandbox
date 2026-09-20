@@ -1301,4 +1301,90 @@ mod tests {
         assert_eq!(subclass, 0x01);
         assert_eq!(prog_if, 0x5a);
     }
+
+    fn test_config() -> PciConfiguration {
+        PciConfiguration::new(
+            0x1234,
+            0x5678,
+            0x1,
+            PciClassCode::MultimediaController,
+            &PciMultimediaSubclass::AudioController,
+            None,
+            PciHeaderType::Device,
+            0xABCD,
+            0x2468,
+            None,
+        )
+    }
+
+    #[test]
+    fn restore_bar_addr_32bit() {
+        const OLD_BASE: u64 = 0x1000_0000;
+        const NEW_BASE: u64 = 0x2000_0000;
+
+        let mut cfg = test_config();
+        cfg.add_pci_bar(
+            &PciBarConfiguration::default()
+                .set_index(0)
+                .set_address(OLD_BASE)
+                .set_size(0x1000)
+                .set_region_type(PciBarRegionType::Memory32BitRegion),
+        )
+        .unwrap();
+
+        let data = (NEW_BASE as u32).to_le_bytes();
+        let params = cfg.detect_bar_reprogramming(BAR0_REG, &data).unwrap();
+        assert_eq!(params.old_base, OLD_BASE);
+        assert_eq!(params.new_base, NEW_BASE);
+
+        // move_bar() failed, so the bus drops the config register write and
+        // rolls back the address detect_bar_reprogramming() already committed.
+        cfg.restore_bar_addr(&params);
+        assert_eq!(
+            u64::from(cfg.read_reg(BAR0_REG) & BAR_MEM_ADDR_MASK),
+            OLD_BASE
+        );
+
+        // Without the rollback the BAR slot would still hold NEW_BASE and a
+        // retry would be swallowed as an unchanged write, wedging the device.
+        assert!(cfg.detect_bar_reprogramming(BAR0_REG, &data).is_some());
+    }
+
+    #[test]
+    fn restore_bar_addr_64bit() {
+        const OLD_BASE: u64 = 0x4_1000_0000;
+        const NEW_BASE: u64 = 0x8_2000_0000;
+
+        let mut cfg = test_config();
+        cfg.add_pci_bar(
+            &PciBarConfiguration::default()
+                .set_index(0)
+                .set_address(OLD_BASE)
+                .set_size(0x1000)
+                .set_region_type(PciBarRegionType::Memory64BitRegion),
+        )
+        .unwrap();
+
+        // The guest programs the low half first; that write alone is not a
+        // relocation yet, so it only lands in the register.
+        let low = (NEW_BASE as u32).to_le_bytes();
+        assert!(cfg.detect_bar_reprogramming(BAR0_REG, &low).is_none());
+        cfg.write_config_register(BAR0_REG, 0, &low);
+
+        let high = ((NEW_BASE >> 32) as u32).to_le_bytes();
+        let params = cfg.detect_bar_reprogramming(BAR0_REG + 1, &high).unwrap();
+        assert_eq!(params.old_base, OLD_BASE);
+        assert_eq!(params.new_base, NEW_BASE);
+
+        cfg.restore_bar_addr(&params);
+        let restored = (u64::from(cfg.read_reg(BAR0_REG + 1)) << 32)
+            | u64::from(cfg.read_reg(BAR0_REG) & BAR_MEM_ADDR_MASK);
+        assert_eq!(restored, OLD_BASE);
+
+        // Both halves are back in sync, so replaying the sequence is detected
+        // as a fresh relocation rather than being ignored.
+        assert!(cfg.detect_bar_reprogramming(BAR0_REG, &low).is_none());
+        cfg.write_config_register(BAR0_REG, 0, &low);
+        assert!(cfg.detect_bar_reprogramming(BAR0_REG + 1, &high).is_some());
+    }
 }
