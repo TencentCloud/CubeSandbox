@@ -156,7 +156,6 @@ export default withMermaid(defineConfig({
           {
             text: 'Community',
             items: [
-              { text: 'Roadmap', link: '/guide/roadmap' },
               { text: 'Cube 100 Program', link: '/guide/cube100' },
               { text: 'Contributing', link: 'https://github.com/tencentcloud/CubeSandbox/blob/master/CONTRIBUTING.md' }
             ]
@@ -173,7 +172,10 @@ export default withMermaid(defineConfig({
               text: 'Getting Started',
               items: [
                 { text: 'Introduction', link: '/guide/introduction' },
-                { text: 'Quick Start', link: '/guide/quickstart' }
+                { text: 'Quick Start', link: '/guide/quickstart' },
+                { text: 'Roadmap', link: '/guide/roadmap' },
+                { text: 'E2B Compatibility', link: '/guide/e2b-compatibility' },
+                { text: 'Daily Performance Report', link: '/guide/quality-status' }
               ]
             },
             {
@@ -278,8 +280,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
                 { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
-                { text: 'Performance Benchmark', link: '/guide/performance-benchmark' },
-                { text: 'Quality Status', link: '/guide/quality-status' }
+                { text: 'Performance Benchmark', link: '/guide/performance-benchmark' }
               ]
             },
             {
@@ -372,7 +373,6 @@ export default withMermaid(defineConfig({
           {
             text: '社区',
             items: [
-              { text: '路线图', link: '/zh/guide/roadmap' },
               { text: 'Cube 100 计划', link: '/zh/guide/cube100' },
               { text: '参与贡献', link: 'https://github.com/tencentcloud/CubeSandbox/blob/master/CONTRIBUTING_zh.md' }
             ]
@@ -389,7 +389,10 @@ export default withMermaid(defineConfig({
               text: '入门',
               items: [
                 { text: '产品简介', link: '/zh/guide/introduction' },
-                { text: '快速开始', link: '/zh/guide/quickstart' }
+                { text: '快速开始', link: '/zh/guide/quickstart' },
+                { text: '路线图', link: '/zh/guide/roadmap' },
+                { text: 'E2B 兼容性与差异', link: '/zh/guide/e2b-compatibility' },
+                { text: '每日性能测试报告', link: '/zh/guide/quality-status' }
               ]
             },
             {
@@ -494,8 +497,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: '沙箱资源指标', link: '/zh/guide/resource-metrics' },
                 { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
-                { text: '性能基准', link: '/zh/guide/performance-benchmark' },
-                { text: '质量状态', link: '/zh/guide/quality-status' }
+                { text: '性能基准', link: '/zh/guide/performance-benchmark' }
               ]
             },
             {

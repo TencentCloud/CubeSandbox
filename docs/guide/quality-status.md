@@ -1,5 +1,5 @@
 ---
-title: Quality Status
+title: Daily Performance Report
 ---
 
 <script setup>
@@ -7,6 +7,40 @@ import { data } from '../quality-status.data.js'
 </script>
 
 <QualityStatusPage :data="data" locale="en" />
+
+## Read the Latest Report with Python
+
+The report is public JSON and does not require an API key. This minimal example fetches the latest result and prints the overall status, E2E totals, and performance metrics:
+
+```python
+import json
+from urllib.request import urlopen
+
+REPORT_URL = (
+    "https://cubesandbox-1253970226.cos.ap-singapore.myqcloud.com/"
+    "page-data/quality-status.json"
+)
+
+with urlopen(REPORT_URL, timeout=10) as response:
+    report = json.load(response)
+
+print(f"Date: {report.get('date', 'unknown')}")
+print(f"Overall status: {report.get('status', 'unknown')}")
+
+tests = report.get("e2e", {}).get("tests", {})
+print(
+    "E2E: "
+    f"{tests.get('passed', 0)}/{tests.get('total', 0)} passed, "
+    f"{tests.get('failed', 0)} failed"
+)
+
+for metric in report.get("performance", {}).get("metrics", []):
+    label = metric.get("label", "Unnamed metric")
+    current = metric.get("current_text", metric.get("current", "—"))
+    baseline = metric.get("baseline_text", metric.get("baseline", "—"))
+    verdict = metric.get("verdict", "unknown")
+    print(f"{label}: current={current}, baseline={baseline}, verdict={verdict}")
+```
 
 ## Data Source
 
