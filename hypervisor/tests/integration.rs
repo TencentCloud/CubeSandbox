@@ -1175,7 +1175,6 @@ fn test_boot_from_vhost_user_blk(
 }
 
 fn _test_native_virtio_fs(hotplug: bool, pci_segment: Option<u16>) {
-    #[cfg(target_arch = "x86_64")]
     let focal_image = FOCAL_IMAGE_NAME.to_string();
     let focal = UbuntuDiskConfig::new(focal_image);
     let guest = Guest::new(Box::new(focal));
@@ -8299,6 +8298,9 @@ mod vmm_instance {
         VmConfig,
     };
 
+    #[cfg(target_arch = "aarch64")]
+    use crate::aarch64::FOCAL_IMAGE_NAME;
+    #[cfg(target_arch = "x86_64")]
     use crate::x86_64::FOCAL_IMAGE_NAME;
     use crate::{
         check_latest_events_exact, check_sequential_events, direct_kernel_boot_path,
