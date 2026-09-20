@@ -595,18 +595,16 @@ s3lvol_nvmf_set_readahead(const char *leaf, uint32_t kb)
 			return true;
 		}
 
-		/* Anything other than the kernel default means somebody decided
-		 * this on purpose -- the operator, through RCOW_READ_AHEAD_KB, or
-		 * a tuning layer above. Overwriting it would make that setting
-		 * silently temporary, undone by the next lookup of the device,
-		 * and 128 is a legitimate choice for a purely random workload.
-		 *
-		 * So this function only ever moves a device *off* the kernel
-		 * default. That is what makes it safe to call on every lookup. */
-		if (cur_kb != S3LVOL_KERNEL_DEFAULT_READ_AHEAD_KB) {
+		/* Values this module writes may legitimately change: an nsid can
+		 * be reused by a dense import after a local/sparse volume, or in
+		 * the opposite direction. Preserve everything else as an external
+		 * tuning decision. */
+		if (cur_kb != S3LVOL_KERNEL_DEFAULT_READ_AHEAD_KB &&
+		    cur_kb != RCOW_DEFAULT_READ_AHEAD_KB &&
+		    cur_kb != S3LVOL_DENSE_IMPORT_READ_AHEAD_KB) {
 			SPDK_INFOLOG(s3lvol_nvmf, "%s: leaving readahead at %"
-				     PRIu32 " KiB, which is not the kernel "
-				     "default and so was set deliberately\n",
+				     PRIu32 " KiB, which is not a module-managed "
+				     "value and so was set deliberately\n",
 				     leaf, cur_kb);
 			return false;
 		}

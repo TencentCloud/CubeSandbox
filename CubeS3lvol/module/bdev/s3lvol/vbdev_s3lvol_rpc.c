@@ -4033,6 +4033,7 @@ struct get_bdev_entry {
 	char     uuid[SPDK_UUID_STRING_LEN];
 	uint32_t subsys;
 	uint32_t nsid;
+	uint32_t readahead_kb;
 	/* Empty until resolved. */
 	char     path[GET_BDEV_PATH_MAX];
 };
@@ -4101,12 +4102,34 @@ get_bdev_resolve_all(struct get_bdev_ctx *ctx)
 	return pending;
 }
 
+static uint32_t
+get_bdev_readahead_kb(const struct get_bdev_entry *e)
+{
+	struct s3lvol_lvstore *lvs;
+	uint32_t base_kb = s3lvol_nvmf_readahead_kb();
+
+	if (base_kb != RCOW_DEFAULT_READ_AHEAD_KB) {
+		return base_kb;
+	}
+
+	/* Active names are global, but duplicate inactive names may exist in two
+	 * loaded lvstores. Match the registry's UUID as well so one such duplicate
+	 * cannot hide the active imported volume from the density policy. */
+	for (lvs = s3lvol_lvstore_first(); lvs; lvs = s3lvol_lvstore_next(lvs)) {
+		struct spdk_lvol *lvol = s3lvol_lvol_find(lvs, e->name);
+
+		if (lvol && strcmp(lvol->uuid_str, e->uuid) == 0) {
+			return s3lvol_import_readahead_kb(lvol, base_kb);
+		}
+	}
+	return base_kb;
+}
+
 static void
 get_bdev_write_one(struct spdk_json_write_ctx *w, const struct get_bdev_entry *e)
 {
 	char nqn[SPDK_NVMF_NQN_MAX_LEN + 1];
 	const char *leaf;
-	uint32_t ra_kb;
 
 	s3lvol_nvmf_subsys_nqn(e->subsys, nqn, sizeof(nqn));
 
@@ -4116,6 +4139,7 @@ get_bdev_write_one(struct spdk_json_write_ctx *w, const struct get_bdev_entry *e
 	spdk_json_write_named_string(w, "nqn", nqn);
 	spdk_json_write_named_uint32(w, "subsys", e->subsys);
 	spdk_json_write_named_uint32(w, "nsid", e->nsid);
+	spdk_json_write_named_uint32(w, "readahead_kb", e->readahead_kb);
 
 	/* Empty rather than absent when the wait ran out: the field is always
 	 * there so a caller can test it without special-casing, and an empty
@@ -4129,17 +4153,16 @@ get_bdev_write_one(struct spdk_json_write_ctx *w, const struct get_bdev_entry *e
 		 * path at all. rcow_active_bdev cannot do it -- it answers before
 		 * the host has even noticed the namespace. The startup script
 		 * tunes devices too (rcow_tune_readahead), which covers a replay
-		 * where nobody asks; the two agree on the value and each is
-		 * idempotent, so whichever runs first is fine.
+		 * where nobody asks; get_bdev reports this per-volume decision to
+		 * that script, so the two agree and whichever runs first is fine.
 		 *
 		 * Cheap on the repeat calls a caller may still make:
 		 * set_readahead reads the current value and returns without
 		 * writing when it already matches, and never overwrites a value
 		 * somebody set deliberately. */
 		leaf = strrchr(e->path, '/');
-		ra_kb = s3lvol_nvmf_readahead_kb();
-		if (leaf && leaf[1] != '\0' && ra_kb > 0) {
-			s3lvol_nvmf_set_readahead(leaf + 1, ra_kb);
+		if (leaf && leaf[1] != '\0' && e->readahead_kb > 0) {
+			s3lvol_nvmf_set_readahead(leaf + 1, e->readahead_kb);
 		}
 	}
 
@@ -4312,6 +4335,8 @@ rpc_rcow_get_bdev(struct spdk_jsonrpc_request *request,
 		memcpy(ctx->entries[0].uuid, e->uuid, sizeof(ctx->entries[0].uuid));
 		ctx->entries[0].subsys = e->subsys;
 		ctx->entries[0].nsid   = e->nsid;
+		ctx->entries[0].readahead_kb =
+			get_bdev_readahead_kb(&ctx->entries[0]);
 		ctx->count = 1;
 	} else {
 		i = 0;
@@ -4323,6 +4348,8 @@ rpc_rcow_get_bdev(struct spdk_jsonrpc_request *request,
 			       sizeof(ctx->entries[i].uuid));
 			ctx->entries[i].subsys = e->subsys;
 			ctx->entries[i].nsid   = e->nsid;
+			ctx->entries[i].readahead_kb =
+				get_bdev_readahead_kb(&ctx->entries[i]);
 		}
 		ctx->count = i;
 	}

@@ -1401,6 +1401,77 @@ blob_by_id(struct spdk_lvol_store *store, spdk_blob_id id)
 	return NULL;
 }
 
+uint32_t
+s3lvol_import_readahead_kb(struct spdk_lvol *lvol, uint32_t base_kb)
+{
+	struct s3lvol_lvstore *lvs;
+	struct spdk_lvol_store *store;
+	struct spdk_blob *cur;
+
+	/* Values other than the normal one-chunk policy are operator choices.
+	 * In particular, do not turn a random-workload 128 KiB override into
+	 * 4 MiB merely because its backing snapshot happens to be dense. */
+	if (base_kb != RCOW_DEFAULT_READ_AHEAD_KB || !lvol || !lvol->blob) {
+		return base_kb;
+	}
+
+	lvs = s3lvol_lvstore_of_lvol(lvol);
+	store = lvs ? s3lvol_lvstore_get_lvs(lvs) : NULL;
+	if (!store) {
+		return base_kb;
+	}
+
+	/* The lvol directly created by import is an esnap clone. After taking a
+	 * snapshot, blobstore can move that external parent onto an older layer,
+	 * so follow the local parent chain rather than testing only lvol->blob. */
+	cur = lvol->blob;
+	while (cur) {
+		if (spdk_blob_is_esnap_clone(cur)) {
+			const void *id = NULL;
+			size_t id_len = 0;
+			char uuid_str[SPDK_UUID_STRING_LEN];
+			struct s3lvol_import *imp;
+			const struct s3_export_manifest *m;
+			uint64_t half;
+
+			if (spdk_blob_get_esnap_id(cur, &id, &id_len) != 0 ||
+			    id_len == 0 || id_len >= sizeof(uuid_str)) {
+				return base_kb;
+			}
+			memcpy(uuid_str, id, id_len);
+			uuid_str[id_len] = '\0';
+			imp = import_find(lvs, uuid_str);
+			if (!imp) {
+				return base_kb;
+			}
+
+			m = imp->m;
+			if (m->num_chunks == 0) {
+				return base_kb;
+			}
+			/* ceil(num_chunks / 2), written without num_chunks + 1
+			 * so even a theoretical UINT64_MAX-sized manifest cannot
+			 * overflow the density calculation. */
+			half = m->num_chunks / 2 + m->num_chunks % 2;
+			return m->present_chunks >= half ?
+			       S3LVOL_DENSE_IMPORT_READ_AHEAD_KB : base_kb;
+		}
+
+		{
+			spdk_blob_id parent =
+				spdk_blob_get_parent_snapshot(store->blobstore,
+							 spdk_blob_get_id(cur));
+
+			if (parent == SPDK_BLOBID_INVALID) {
+				break;
+			}
+			cur = blob_by_id(store, parent);
+		}
+	}
+
+	return base_kb;
+}
+
 /* Collect the snapshot's clone chain, nearest first.
  *
  * This exists because a snapshot rarely owns all of its own data. Taking a second

@@ -246,8 +246,10 @@ RCOW_MAX_IO_SIZE="${RCOW_MAX_IO_SIZE:-1048576}"
 RCOW_IOBUF_LARGE_BUFSIZE="${RCOW_IOBUF_LARGE_BUFSIZE:-1048576}"
 RCOW_IOBUF_LARGE_POOL="${RCOW_IOBUF_LARGE_POOL:-512}"
 
-# Host-side readahead for every activated volume, in KiB. Matches the chunk size
-# for the same reason RCOW_MAX_IO_SIZE does. 0 disables the tuning entirely.
+# Host-side baseline readahead for activated volumes, in KiB. Matches the chunk
+# size for the same reason RCOW_MAX_IO_SIZE does. Dense imports (at least 50% of
+# manifest chunks present) promote the default 1024 KiB baseline to 4096 KiB.
+# Any other explicit value is kept fixed; 0 disables the tuning entirely.
 #
 # **Exported to the target**, which is what actually applies it: the module sets
 # readahead the moment a volume resolves to a device (get_bdev_write_one), which
@@ -2059,14 +2061,15 @@ nsid and device"
 	return 0
 }
 
-# Apply RCOW_READ_AHEAD_KB to every active volume's block device.
+# Apply each active volume's target-selected readahead to its block device.
 #
 # **Normally redundant, and kept for the cases where it is not.** The target
-# applies the same value itself, from S3LVOL_READ_AHEAD_KB which this file
-# exports, as soon as a volume resolves to a device -- so an ordinary activation
-# is tuned before anyone can use it, with no cooperation from the caller. What
-# this covers is volumes that were already active when that value changed, and
-# hosts where the target was started without this environment.
+# applies the policy itself, using S3LVOL_READ_AHEAD_KB as its baseline, as soon
+# as a volume resolves to a device -- so an ordinary activation is tuned before
+# anyone can use it. The RPC also returns the final per-volume value (including
+# dense-import promotion), which is what this fallback writes. What this covers
+# is volumes that were already active when the policy changed, and hosts where
+# the target could not write sysfs itself.
 #
 # Best effort throughout: this is a performance knob, and a volume that could not
 # be tuned still works. So a missing sysfs file, a device that disappeared
@@ -2076,7 +2079,7 @@ nsid and device"
 # Safe and idempotent to re-run. Does nothing when the tuning is disabled with 0.
 rcow_tune_readahead()
 {
-	local out name path want cur sysfile msg tuned=0 skipped=0 failed=0
+	local out name path want desired cur sysfile msg tuned=0 skipped=0 failed=0
 
 	want="${RCOW_READ_AHEAD_KB}"
 
@@ -2099,9 +2102,13 @@ kernel default"
 		return 0
 	}
 
-	while IFS=$'\t' read -r name path; do
+	while IFS=$'\t' read -r name path desired; do
 		[ -n "${name}" ] || continue
-		[ -n "${path}" ] || { skipped=$((skipped + 1)); continue; }
+		[ "${path}" != "-" ] || { skipped=$((skipped + 1)); continue; }
+		# New targets report their per-volume density decision. Falling back
+		# keeps rolling upgrades compatible with an older target.
+		desired="${desired:-${want}}"
+		[ "${desired}" != "0" ] || { skipped=$((skipped + 1)); continue; }
 
 		# /sys/class/block/<leaf> rather than /sys/block/<leaf>: the latter
 		# does not exist for a partition, and while nothing here hands out
@@ -2114,9 +2121,9 @@ kernel default"
 		fi
 
 		cur="$(cat "${sysfile}" 2>/dev/null || echo)"
-		[ "${cur}" = "${want}" ] && { tuned=$((tuned + 1)); continue; }
+		[ "${cur}" = "${desired}" ] && { tuned=$((tuned + 1)); continue; }
 
-		if printf '%s\n' "${want}" >"${sysfile}" 2>/dev/null; then
+		if printf '%s\n' "${desired}" >"${sysfile}" 2>/dev/null; then
 			tuned=$((tuned + 1))
 		else
 			failed=$((failed + 1))
@@ -2128,14 +2135,18 @@ try:
 except ValueError:
     sys.exit(0)
 for e in entries:
-    print("%s\t%s" % (e.get("device_name", "?"), e.get("device_path") or ""))
+    ra = e.get("readahead_kb")
+    print("%s\t%s\t%s" % (
+        e.get("device_name", "?"),
+        e.get("device_path") or "-",
+        "" if ra is None else ra))
 ')
 
 	if [ "${tuned}" -eq 0 ] && [ "${failed}" -eq 0 ] && [ "${skipped}" -eq 0 ]; then
 		return 0
 	fi
 
-	msg="readahead ${want} KiB: ${tuned} volume(s) set"
+	msg="readahead policy: ${tuned} volume(s) set"
 	[ "${skipped}" -gt 0 ] && msg="${msg}, ${skipped} skipped"
 	[ "${failed}" -gt 0 ] && msg="${msg}, ${failed} failed"
 	rcow_log "${msg}"
