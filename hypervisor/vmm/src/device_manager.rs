@@ -602,7 +602,9 @@ impl DeviceRelocation for AddressManager {
             PciBarRegionType::IoRegion => {
                 #[cfg(target_arch = "x86_64")]
                 {
-                    // Update system allocator
+                    // Free old_base first so allocate(new_base) sees it as
+                    // available; restore old_base on failure to keep the
+                    // allocator in sync with the PIO bus.
                     self.allocator
                         .lock()
                         .unwrap()
@@ -650,7 +652,9 @@ impl DeviceRelocation for AddressManager {
                 error!("I/O region is not supported");
             }
             PciBarRegionType::Memory32BitRegion | PciBarRegionType::Memory64BitRegion => {
-                // Update system allocator
+                // Free old_base first so allocate(new_base) sees it as
+                // available; restore old_base on failure to keep the
+                // allocator in sync with the MMIO bus.
                 if region_type == PciBarRegionType::Memory32BitRegion {
                     self.allocator
                         .lock()
