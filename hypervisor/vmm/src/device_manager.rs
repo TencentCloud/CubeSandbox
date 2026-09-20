@@ -608,7 +608,8 @@ impl DeviceRelocation for AddressManager {
                         .unwrap()
                         .free_io_addresses(GuestAddress(old_base), len as GuestUsize);
 
-                    self.allocator
+                    if self
+                        .allocator
                         .lock()
                         .unwrap()
                         .allocate_io_addresses(
@@ -616,9 +617,29 @@ impl DeviceRelocation for AddressManager {
                             len as GuestUsize,
                             None,
                         )
-                        .ok_or_else(|| {
-                            io::Error::new(io::ErrorKind::Other, "failed allocating new IO range")
-                        })?;
+                        .is_none()
+                    {
+                        if self
+                            .allocator
+                            .lock()
+                            .unwrap()
+                            .allocate_io_addresses(
+                                Some(GuestAddress(old_base)),
+                                len as GuestUsize,
+                                None,
+                            )
+                            .is_none()
+                        {
+                            error!(
+                                "Failed to restore old IO range 0x{:x} after rejected move_bar",
+                                old_base
+                            );
+                        }
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "failed allocating new IO range",
+                        ));
+                    }
 
                     // Update PIO bus
                     self.io_bus
@@ -636,7 +657,8 @@ impl DeviceRelocation for AddressManager {
                         .unwrap()
                         .free_mmio_hole_addresses(GuestAddress(old_base), len as GuestUsize);
 
-                    self.allocator
+                    if self
+                        .allocator
                         .lock()
                         .unwrap()
                         .allocate_mmio_hole_addresses(
@@ -644,12 +666,29 @@ impl DeviceRelocation for AddressManager {
                             len as GuestUsize,
                             Some(len),
                         )
-                        .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::Other,
-                                "failed allocating new 32 bits MMIO range",
+                        .is_none()
+                    {
+                        if self
+                            .allocator
+                            .lock()
+                            .unwrap()
+                            .allocate_mmio_hole_addresses(
+                                Some(GuestAddress(old_base)),
+                                len as GuestUsize,
+                                Some(len),
                             )
-                        })?;
+                            .is_none()
+                        {
+                            error!(
+                                "Failed to restore old 32 bits MMIO range 0x{:x} after rejected move_bar",
+                                old_base
+                            );
+                        }
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "failed allocating new 32 bits MMIO range",
+                        ));
+                    }
                 } else {
                     // Find the specific allocator that this BAR was allocated from and use it for new one
                     for allocator in &self.pci_mmio_allocators {
@@ -662,7 +701,7 @@ impl DeviceRelocation for AddressManager {
                                 .unwrap()
                                 .free(GuestAddress(old_base), len as GuestUsize);
 
-                            allocator
+                            if allocator
                                 .lock()
                                 .unwrap()
                                 .allocate(
@@ -670,12 +709,28 @@ impl DeviceRelocation for AddressManager {
                                     len as GuestUsize,
                                     Some(len),
                                 )
-                                .ok_or_else(|| {
-                                    io::Error::new(
-                                        io::ErrorKind::Other,
-                                        "failed allocating new 64 bits MMIO range",
+                                .is_none()
+                            {
+                                if allocator
+                                    .lock()
+                                    .unwrap()
+                                    .allocate(
+                                        Some(GuestAddress(old_base)),
+                                        len as GuestUsize,
+                                        Some(len),
                                     )
-                                })?;
+                                    .is_none()
+                                {
+                                    error!(
+                                        "Failed to restore old 64 bits MMIO range 0x{:x} after rejected move_bar",
+                                        old_base
+                                    );
+                                }
+                                return Err(io::Error::new(
+                                    io::ErrorKind::Other,
+                                    "failed allocating new 64 bits MMIO range",
+                                ));
+                            }
 
                             break;
                         }
