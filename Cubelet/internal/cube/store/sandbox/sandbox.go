@@ -55,6 +55,15 @@ type Endpoint struct {
 	Address string
 	Version uint32
 	Pid     uint32
+	// PidStartTime pins Pid to one process incarnation (/proc/<pid>/stat
+	// field 22). Without it a recycled pid number is indistinguishable from
+	// our shim, in either direction.
+	PidStartTime uint64
+	// ShimSpawned records that a shim process was started for this sandbox.
+	// It is set *before* the shim is spawned, so that a crash between spawn
+	// and the Pid write still leaves evidence. Without it, "no pid recorded"
+	// is ambiguous between "no shim ever ran" and "we lost track of one".
+	ShimSpawned bool
 }
 
 func (e *Endpoint) IsValid() bool {

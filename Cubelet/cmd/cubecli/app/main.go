@@ -15,6 +15,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands/container"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands/ctrcommands"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands/diag"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands/image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands/metadata"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands/network"
@@ -101,6 +102,7 @@ func New() *cli.App {
 		storage.Command,
 		network.Command,
 		metadata.Command,
+		diag.Command,
 		ctrcommands.Command,
 	}, extraCmds...)
 	return app
