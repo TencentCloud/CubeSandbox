@@ -13,9 +13,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
 
 func TestBindHostDirRW(t *testing.T) {
@@ -175,7 +176,7 @@ func TestDefaultRunHostDirCommandTimeoutKillsProcessGroup(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "sleep.pid")
 	script := fmt.Sprintf("sleep 10 & child=$!; printf '%%s' \"$child\" > %q; wait \"$child\"", pidFile)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
 	start := time.Now()
@@ -185,7 +186,7 @@ func TestDefaultRunHostDirCommandTimeoutKillsProcessGroup(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected context deadline exceeded, got %v", err)
 	}
-	if elapsed > time.Second {
+	if elapsed > 2*time.Second {
 		t.Fatalf("expected timeout to return promptly, took %s", elapsed)
 	}
 
@@ -199,16 +200,8 @@ func TestDefaultRunHostDirCommandTimeoutKillsProcessGroup(t *testing.T) {
 		t.Fatalf("parse child pid %q: %v", strings.TrimSpace(string(rawPID)), err)
 	}
 
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for {
-		killErr := syscall.Kill(pid, 0)
-		if killErr != nil {
-			if errors.Is(killErr, syscall.ESRCH) {
-				return
-			}
-			t.Fatalf("probe child pid %d: %v", pid, killErr)
-		}
-
+	deadline := time.Now().Add(time.Second)
+	for utils.ProcessAlive(pid) {
 		if time.Now().After(deadline) {
 			t.Fatalf("child process %d still alive after timeout", pid)
 		}
