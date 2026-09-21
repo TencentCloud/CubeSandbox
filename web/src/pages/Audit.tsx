@@ -16,6 +16,13 @@ import { Pagination } from '@/components/ui/pagination';
 import { cn, short } from '@/lib/utils';
 
 const DAY_OPTIONS = [1, 3, 7, 30] as const;
+export const STATE_TONE: Record<string, 'ok' | 'warn' | 'mute' | 'err' | 'info'> = {
+  running: 'ok',
+  paused: 'warn',
+  complete: 'mute',
+  killed: 'err',
+  unknown: 'info',
+};
 const PAGE_SIZE = 50;
 
 export function formatDuration(sec?: number | null): string {
@@ -33,6 +40,7 @@ export default function AuditPage() {
   const days = Number(params.get('days') ?? 3);
   const template = params.get('template') ?? '';
   const keyName = params.get('key') ?? '';
+  const state = params.get('state') ?? '';
   const page = Number(params.get('page') ?? 1);
   const [q, setQ] = useState(params.get('q') ?? '');
   const [debouncedQ, setDebouncedQ] = useState(q);
@@ -57,14 +65,15 @@ export default function AuditPage() {
   }, [debouncedQ]);
 
   const { data, isLoading, isFetching, error, refetch } = useQuery({
-    queryKey: ['audit', days, template, keyName, debouncedQ, page],
-    queryFn: () => auditApi.list({ days, template, key: keyName, q: debouncedQ, page, size: PAGE_SIZE }),
+    queryKey: ['audit', days, template, keyName, state, debouncedQ, page],
+    queryFn: () => auditApi.list({ days, template, key: keyName, state, q: debouncedQ, page, size: PAGE_SIZE }),
     refetchInterval: 15_000,
   });
 
   const stats = useMemo(
     () => [
       { label: t('stats.sandboxes'), value: data?.sandboxes ?? '—' },
+      { label: t('stats.running'), value: data?.running ?? '—' },
       { label: t('stats.killed'), value: data?.killed ?? '—' },
       { label: t('stats.requests'), value: data?.events ?? '—' },
       { label: t('stats.days'), value: data ? data.files.length : '—' },
@@ -84,7 +93,7 @@ export default function AuditPage() {
         </Button>
       </header>
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         {stats.map((s) => (
           <Card key={s.label} className="!p-4">
             <div className="text-xs uppercase tracking-wider text-muted-foreground/85">{s.label}</div>
@@ -132,6 +141,18 @@ export default function AuditPage() {
             {(data?.templates ?? []).map((tpl) => (
               <option key={tpl} value={tpl}>
                 {tpl}
+              </option>
+            ))}
+          </select>
+          <select
+            value={state}
+            onChange={(e) => setParam({ state: e.target.value, page: 1 })}
+            className="h-9 rounded-md border border-border/60 bg-background px-2 text-sm text-foreground"
+          >
+            <option value="">{t('allStates')}</option>
+            {(['running', 'paused', 'complete', 'killed', 'unknown'] as const).map((st) => (
+              <option key={st} value={st}>
+                {t(`state.${st}`)}
               </option>
             ))}
           </select>
@@ -227,7 +248,10 @@ function Row({ row, days }: { row: AuditSandboxRow; days: number }) {
       <div className="truncate text-xs">{row.keyName ?? '—'}</div>
       <div className="font-mono text-xs">{row.client ?? '—'}</div>
       <div>
-        <Badge tone={row.state === 'killed' ? 'mute' : 'ok'}>{t(`state.${row.state}`)}</Badge>
+        <Badge tone={STATE_TONE[row.state] ?? 'mute'} title={row.endedBy ? t(`endedBy.${row.endedBy}`) : undefined}>
+          {t(`state.${row.state}`)}
+          {row.endedBy && <span className="ml-1 opacity-70">· {t(`endedBy.${row.endedBy}`)}</span>}
+        </Badge>
       </div>
       <div className="text-num text-xs">{formatDuration(row.durationSec)}</div>
       <div className="text-num text-right text-xs">{row.commands}</div>

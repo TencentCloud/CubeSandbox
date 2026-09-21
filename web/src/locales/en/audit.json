@@ -10,9 +10,10 @@
   "empty": "No sandboxes in this window.",
   "stats": {
     "sandboxes": "Sandboxes",
-    "killed": "Killed",
+    "killed": "Ended",
     "requests": "Requests",
-    "days": "Days with data"
+    "days": "Days with data",
+    "running": "Running"
   },
   "col": {
     "created": "Created",
@@ -27,8 +28,11 @@
     "key": "Key"
   },
   "state": {
+    "running": "Running",
+    "paused": "Paused",
+    "complete": "Complete",
     "killed": "Killed",
-    "seen": "Seen"
+    "unknown": "Unknown"
   },
   "pagination": {
     "total": "{{count}} sandboxes",
@@ -62,5 +66,10 @@
       "kill": "Sandbox killed"
     }
   },
-  "allKeys": "All keys"
+  "allKeys": "All keys",
+  "allStates": "All states",
+  "endedBy": {
+    "kill": "kill()",
+    "ttl": "TTL"
+  }
 }

@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn, copyToClipboard } from '@/lib/utils';
-import { formatDuration } from '@/pages/Audit';
+import { formatDuration, STATE_TONE } from '@/pages/Audit';
 
 type Kind = AuditTimelineItem['kind'];
 type KindFilter = 'all' | 'command' | 'file' | 'lifecycle';
@@ -74,7 +74,12 @@ export default function AuditDetailPage() {
             >
               <Copy size={14} />
             </button>
-            {data && <Badge tone={data.state === 'killed' ? 'mute' : 'ok'}>{t(`state.${data.state}`)}</Badge>}
+            {data && (
+              <Badge tone={STATE_TONE[data.state] ?? 'mute'}>
+                {t(`state.${data.state}`)}
+                {data.endedBy && <span className="ml-1 opacity-70">· {t(`endedBy.${data.endedBy}`)}</span>}
+              </Badge>
+            )}
           </div>
           <p className="mt-1 text-sm text-muted-foreground">{t('detail.subtitle')}</p>
         </div>

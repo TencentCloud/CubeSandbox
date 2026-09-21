@@ -10,9 +10,10 @@
   "empty": "该时间范围内没有沙箱。",
   "stats": {
     "sandboxes": "沙箱数",
-    "killed": "已销毁",
+    "killed": "已结束",
     "requests": "请求数",
-    "days": "有数据的天数"
+    "days": "有数据的天数",
+    "running": "运行中"
   },
   "col": {
     "created": "创建时间",
@@ -27,8 +28,11 @@
     "key": "Key"
   },
   "state": {
-    "killed": "已销毁",
-    "seen": "有活动"
+    "running": "运行中",
+    "paused": "已暂停",
+    "complete": "已完成",
+    "killed": "被中止",
+    "unknown": "未知"
   },
   "pagination": {
     "total": "共 {{count}} 个沙箱",
@@ -62,5 +66,10 @@
       "kill": "沙箱销毁"
     }
   },
-  "allKeys": "全部 key"
+  "allKeys": "全部 key",
+  "allStates": "全部状态",
+  "endedBy": {
+    "kill": "kill()",
+    "ttl": "TTL 到期"
+  }
 }

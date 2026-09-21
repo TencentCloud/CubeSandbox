@@ -17,7 +17,9 @@ export interface AuditSandboxRow {
   firstSeen: string;
   lastSeen: string;
   killedAt?: string | null;
-  state: 'killed' | 'seen';
+  state: 'running' | 'paused' | 'complete' | 'killed' | 'unknown';
+  /** how it ended: explicit kill() or TTL expiry */
+  endedBy?: 'kill' | 'ttl' | null;
   template?: string | null;
   client?: string | null;
   metadata?: Record<string, string> | null;
@@ -36,6 +38,7 @@ export interface AuditListResponse {
   events: number;
   sandboxes: number;
   killed: number;
+  running: number;
   templates: string[];
   keys: string[];
   total: number;
@@ -66,6 +69,7 @@ export interface AuditListParams {
   q?: string;
   template?: string;
   key?: string;
+  state?: string;
   page?: number;
   size?: number;
 }
@@ -93,6 +97,6 @@ async function get<T>(path: string, params: Record<string, string | number | und
 
 export const auditApi = {
   list: (p: AuditListParams) =>
-    get<AuditListResponse>('/sandboxes', { days: p.days, q: p.q, template: p.template, key: p.key, page: p.page, size: p.size }),
+    get<AuditListResponse>('/sandboxes', { days: p.days, q: p.q, template: p.template, key: p.key, state: p.state, page: p.page, size: p.size }),
   detail: (id: string, days: number) => get<AuditSandboxDetail>(`/sandboxes/${encodeURIComponent(id)}`, { days }),
 };
