@@ -7,6 +7,7 @@ package score
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -43,9 +44,9 @@ func imageScoreConf() *config.ImageScore {
 }
 
 // NewImageScore tolerates a missing legacy plugin_conf block: the scorer then
-// has no weight of its own (a profile entry must carry one) and Select stays
-// a no-op until the block is configured, because enable_weight_factors only
-// exists in the legacy config tree.
+// has no weight of its own (a profile entry must carry one) and Select reports
+// ErrNotApplicable until the block is configured, because enable_weight_factors
+// only exists in the legacy config tree.
 func NewImageScore() *imageScore {
 	conf := imageScoreConf()
 	if conf == nil {
@@ -86,19 +87,19 @@ func (l *imageScore) Select(selCtx *selctx.SelectorCtx) (nodes node.NodeScoreLis
 
 	sconf := config.GetConfig().Scheduler
 	if sconf == nil || sconf.Score == nil || sconf.Score.ScorePluginConf.ImageScore == nil {
-		return nodes, nil
+		return nil, fmt.Errorf("image_score legacy plugin_conf is not configured: %w", ErrNotApplicable)
 	}
 
 	if l.Disable() {
-		return nil, nil
+		return nil, fmt.Errorf("image_score is disabled in the legacy plugin_conf: %w", ErrNotApplicable)
 	}
 
 	if selCtx.ReqRes == nil {
-		return nil, nil
+		return nil, fmt.Errorf("image_score requires the request resource spec: %w", ErrNotApplicable)
 	}
 	totalWeight, err := getImageScoreTotalWeight()
 	if err != nil || totalWeight == 0 {
-		return nodes, nil
+		return nil, fmt.Errorf("image_score has no enabled factor with a non-zero resource weight: %w", ErrNotApplicable)
 	}
 
 	inList := selCtx.Nodes()

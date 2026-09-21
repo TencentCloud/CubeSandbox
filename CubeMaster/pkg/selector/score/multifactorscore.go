@@ -5,6 +5,8 @@
 package score
 
 import (
+	"fmt"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
@@ -30,8 +32,8 @@ func multiFactorWeightedAverageConf() *config.MultiFactorWeightedAverage {
 
 // NewMultiFactorWeightedAverageScore tolerates a missing legacy plugin_conf
 // block: the scorer then has no weight of its own (a profile entry must carry
-// one) and Select stays a no-op until the block is configured, because the
-// async score loop only runs off the legacy config tree.
+// one) and Select reports ErrNotApplicable until the block is configured,
+// because the async score loop only runs off the legacy config tree.
 func NewMultiFactorWeightedAverageScore() *multiFactorWeightedAverageScore {
 	conf := multiFactorWeightedAverageConf()
 	if conf == nil {
@@ -71,10 +73,10 @@ func (l *multiFactorWeightedAverageScore) Select(selCtx *selctx.SelectorCtx) (no
 	sconf := config.GetConfig().Scheduler
 	if sconf == nil || sconf.Score == nil || sconf.Score.ScorePluginConf.MultiFactorWeightedAverage == nil ||
 		sconf.Score.ResourceWeights == nil {
-		return nil, nil
+		return nil, fmt.Errorf("multi_factor_weighted_average legacy plugin_conf or resource_weights is not configured: %w", ErrNotApplicable)
 	}
 	if l.Disable() {
-		return nil, nil
+		return nil, fmt.Errorf("multi_factor_weighted_average is disabled in the legacy plugin_conf: %w", ErrNotApplicable)
 	}
 
 	inList := selCtx.Nodes()

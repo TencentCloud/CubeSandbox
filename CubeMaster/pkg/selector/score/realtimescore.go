@@ -6,6 +6,7 @@ package score
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -77,10 +78,10 @@ func (l *realTimeWeightedAverageScore) Select(selCtx *selctx.SelectorCtx) (nodes
 	sconf := config.GetConfig().Scheduler
 	if sconf == nil || sconf.Score == nil || sconf.Score.ScorePluginConf.RealTimeWeightedAverage == nil ||
 		sconf.Score.ResourceWeights == nil {
-		return nil, nil
+		return nil, fmt.Errorf("real_time_weighted_average legacy plugin_conf or resource_weights is not configured: %w", ErrNotApplicable)
 	}
 	if l.Disable() {
-		return nil, nil
+		return nil, fmt.Errorf("real_time_weighted_average is disabled in the legacy plugin_conf: %w", ErrNotApplicable)
 	}
 
 	inList := selCtx.Nodes()
@@ -88,7 +89,7 @@ func (l *realTimeWeightedAverageScore) Select(selCtx *selctx.SelectorCtx) (nodes
 
 	totalWeight, err := getRealTimeTotalWeight()
 	if err != nil || totalWeight == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("real_time_weighted_average has no enabled factor with a non-zero resource weight: %w", ErrNotApplicable)
 	}
 
 	for i := range inList {

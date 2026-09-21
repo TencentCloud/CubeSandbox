@@ -1084,6 +1084,10 @@ func preHandOverhead(config *Config) error {
 //go:embed scheduler_factory.yaml
 var schedulerFactoryYAML []byte
 
+// factoryProfileInjectWarnOnce 保证"空配置注入出厂策略"的行为变化告警
+// 每个进程只输出一次：热更新会反复重新注入，但重复刷这条 warn 没有意义。
+var factoryProfileInjectWarnOnce sync.Once
+
 // injectFactorySchedulerProfiles 在用户完全没有配置调度策略时注入出厂策略：
 // 要求 scheduler.profiles 与 legacy 的 scheduler.filter / scheduler.score /
 // scheduler.postscore 全部为空，且未显式设置 scheduler.disable_factory_profiles。
@@ -1092,10 +1096,6 @@ var schedulerFactoryYAML []byte
 //
 // 出厂 YAML 同时携带 legacy score 子树：profile 模式下它不参与流水线编译，
 // 但内置 scorer（real_time_weighted_average / image_score）的 enable_weight_factors
-// factoryProfileInjectWarnOnce 保证"空配置注入出厂策略"的行为变化告警
-// 每个进程只输出一次：热更新会反复重新注入，但重复刷这条 warn 没有意义。
-var factoryProfileInjectWarnOnce sync.Once
-
 // 只存在于该 legacy 子树中；缺失时这些 scorer 空转（见 pkg/selector/score/realtimescore.go）。
 func injectFactorySchedulerProfiles(config *Config) error {
 	sched := config.Scheduler

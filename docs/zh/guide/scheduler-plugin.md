@@ -95,4 +95,4 @@ SOCKET=/tmp/cube-scheduler-example.sock go run ./examples/scheduler-plugin
 
 Profile 引用了上述 Score 但缺少对应 legacy 配置块时，会在**编译期被拒绝**（启动或热更新时报错），不存在静默空转的 Score。零配置注入的出厂 Profile 在 `scheduler_factory.yaml` 中自带配套的 legacy `scheduler.score` 子树，原因正在于此——自定义出厂 Profile 时，权重改在 Profile 条目上，但因子开关仍需保留（或调整）该 legacy 子树。
 
-当某个 Score 插件的评分维度对当前请求不适用时，可返回 `score.ErrNotApplicable` 显式跳过：不贡献分数与权重，也不按失败处理（即使在 `fail-closed` / `default-score` 策略下），例如只对带 `template_id` 的请求才有意义的维度。相反，Profile 模式下返回空评分列表加 nil 错误属于违反插件契约，会触发配置的失败策略。
+当某个 Score 插件的评分维度对当前请求不适用时，可返回 `score.ErrNotApplicable` 显式跳过：不贡献分数与权重，也不按失败处理（即使在 `fail-closed` / `default-score` 策略下），例如只对带 `template_id` 的请求才有意义的维度。相反，Profile 模式下返回空评分列表加 nil 错误属于违反插件契约，会触发配置的失败策略。内置的 legacy 耦合 scorer（`real_time_weighted_average`、`image_score`、`multi_factor_weighted_average`）在 legacy 因子配置缺失、被 disable、或启用因子权重全为零时也返回 `ErrNotApplicable`；这些配置在 Profile 编译期就会被拒绝，因此该路径只在热更新改动 legacy 配置时触发。

@@ -300,10 +300,15 @@ func TestImageScoreSelect(t *testing.T) {
 
 	t.Run("空亲和性配置返回空节点列表", func(t *testing.T) {
 		originalConfig := config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore
+		originalWeights := config.GetConfig().Scheduler.Score.ResourceWeights
 		defer func() {
 			config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore = originalConfig
+			config.GetConfig().Scheduler.Score.ResourceWeights = originalWeights
 		}()
 
+		config.GetConfig().Scheduler.Score.ResourceWeights = map[string]float64{
+			constants.WeightFactorImageID: 1.0,
+		}
 		config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore = &config.ImageScore{
 			Weight:              1.0,
 			EnableWeightFactors: []string{"image_id"},
@@ -323,10 +328,15 @@ func TestImageScoreSelect(t *testing.T) {
 
 	t.Run("panic恢复测试", func(t *testing.T) {
 		originalConfig := config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore
+		originalWeights := config.GetConfig().Scheduler.Score.ResourceWeights
 		defer func() {
 			config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore = originalConfig
+			config.GetConfig().Scheduler.Score.ResourceWeights = originalWeights
 		}()
 
+		config.GetConfig().Scheduler.Score.ResourceWeights = map[string]float64{
+			constants.WeightFactorImageID: 1.0,
+		}
 		config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore = &config.ImageScore{
 			Weight:              1.0,
 			EnableWeightFactors: []string{"image_id"},
@@ -509,7 +519,7 @@ func TestImageScoreSelect(t *testing.T) {
 		assert.Positive(t, nodeScore.Score)
 	})
 
-	t.Run("禁用imageScore时返回空列表", func(t *testing.T) {
+	t.Run("禁用imageScore时返回ErrNotApplicable", func(t *testing.T) {
 		originalConfig := config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore
 		defer func() {
 			config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore = originalConfig
@@ -538,7 +548,38 @@ func TestImageScoreSelect(t *testing.T) {
 		selCtx.SetNodes(nodeList)
 
 		nodes, err := score.Select(selCtx)
-		assert.NoError(t, err)
+		assert.ErrorIs(t, err, ErrNotApplicable)
+		assert.Empty(t, nodes)
+	})
+
+	t.Run("启用因子权重全为零时返回ErrNotApplicable", func(t *testing.T) {
+		originalConfig := config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore
+		originalWeights := config.GetConfig().Scheduler.Score.ResourceWeights
+		defer func() {
+			config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore = originalConfig
+			config.GetConfig().Scheduler.Score.ResourceWeights = originalWeights
+		}()
+
+		config.GetConfig().Scheduler.Score.ResourceWeights = map[string]float64{}
+		config.GetConfig().Scheduler.Score.ScorePluginConf.ImageScore = &config.ImageScore{
+			Weight:              1.0,
+			EnableWeightFactors: []string{"image_id"},
+			Disable:             false,
+		}
+
+		score := NewImageScore()
+		selCtx := &selctx.SelectorCtx{
+			Ctx: ctx,
+			ReqRes: &selctx.RequestResource{
+				ErofsImages: []*selctx.ImageSpec{
+					{ImageID: "nginx:latest"},
+				},
+			},
+		}
+		selCtx.SetNodes(node.NodeList{&node.Node{InsID: "node-1"}})
+
+		nodes, err := score.Select(selCtx)
+		assert.ErrorIs(t, err, ErrNotApplicable)
 		assert.Empty(t, nodes)
 	})
 }

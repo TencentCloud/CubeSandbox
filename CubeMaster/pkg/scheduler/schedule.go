@@ -556,9 +556,9 @@ func runProfileScores(selCtx *selctx.SelectorCtx, scores []profile.ScorePlugin) 
 	}
 	sort.SliceStable(result, func(i, j int) bool { return result[i].Score > result[j].Score })
 	if log.IsDebug() {
-		log.G(selCtx.Ctx).Debugf("runScoreFilter profile=%s:%v", selCtx.GetProfileName(), result.String())
+		log.G(selCtx.Ctx).Debugf("runProfileScores profile=%s:%v", selCtx.GetProfileName(), result.String())
 	} else {
-		log.G(selCtx.Ctx).Infof("runScoreFilter profile=%s:%v", selCtx.GetProfileName(), result.Len())
+		log.G(selCtx.Ctx).Infof("runProfileScores profile=%s:%v", selCtx.GetProfileName(), result.Len())
 	}
 	selCtx.SetNodeScoreList(result)
 	if selCtx.Nodes().Len() == 0 {
