@@ -100,11 +100,13 @@ def run_python(ctx: RunContext[Deps], code: str) -> str:
             timeout=EXEC_TIMEOUT,
             cwd=WORKDIR,
         )
-    except CubeSandboxError as exc:
-        # Surface execution/transport failures to the model as tool output so it
-        # can decide to retry, rather than aborting the whole agent run.
+    except (CubeSandboxError, OSError, RuntimeError) as exc:
+        # Sandbox-side failures: on the 0.7.0 SDK, files.write raises OSError and
+        # commands.run raises RuntimeError (CubeSandboxError covers API-layer
+        # errors). Surface them to the model as tool output so it can retry,
+        # rather than aborting the whole agent run.
         return f"[cube-sandbox error] {type(exc).__name__}: {exc}"
-    except Exception as exc:  # noqa: BLE001 - e.g. an envd request timeout
+    except Exception as exc:  # noqa: BLE001 - e.g. an httpx transport timeout
         return f"[execution failed] {type(exc).__name__}: {exc}"
 
     out = result.stdout or ""

@@ -144,9 +144,10 @@ def run_python(ctx: RunContext[Deps], code: str) -> str:
         result = sandbox.commands.run(
             f"python3 {shlex.quote(script_path)}", timeout=120, cwd="/workspace"
         )
-    except CubeSandboxError as exc:
+    except (CubeSandboxError, OSError, RuntimeError) as exc:
+        # files.write raises OSError, commands.run raises RuntimeError.
         return f"[cube-sandbox error] {type(exc).__name__}: {exc}"
-    except Exception as exc:  # noqa: BLE001 - e.g. an envd request timeout
+    except Exception as exc:  # noqa: BLE001 - e.g. an httpx transport timeout
         return f"[execution failed] {type(exc).__name__}: {exc}"
 
     out = result.stdout or ""
@@ -212,7 +213,8 @@ sentence:
   reclaimed mid-run. The example uses a generous `1800`s backstop: normal
   teardown is the `with` block's `kill()`, and the timeout only bounds an
   orphaned MicroVM if the agent host dies first. `NEVER_TIMEOUT` removes the
-  backstop entirely (and that orphan risk with it). For a hard wall-clock ceiling
+  backstop — and with it the mid-run reclamation risk — at the cost of never
+  reclaiming an orphaned MicroVM. For a hard wall-clock ceiling
   on the whole run, bound it on the agent side (a Pydantic AI
   [usage limit](https://ai.pydantic.dev/agents/#usage-limits) plus your own
   deadline).

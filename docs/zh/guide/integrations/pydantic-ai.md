@@ -137,9 +137,10 @@ def run_python(ctx: RunContext[Deps], code: str) -> str:
         result = sandbox.commands.run(
             f"python3 {shlex.quote(script_path)}", timeout=120, cwd="/workspace"
         )
-    except CubeSandboxError as exc:
+    except (CubeSandboxError, OSError, RuntimeError) as exc:
+        # files.write 抛 OSError，commands.run 抛 RuntimeError。
         return f"[cube-sandbox error] {type(exc).__name__}: {exc}"
-    except Exception as exc:  # noqa: BLE001 - 例如 envd 请求超时
+    except Exception as exc:  # noqa: BLE001 - 例如 httpx 传输超时
         return f"[execution failed] {type(exc).__name__}: {exc}"
 
     out = result.stdout or ""
@@ -199,8 +200,9 @@ python pydantic_ai_agent_demo.py "计算前 15 个质数及它们的和。"
   是**空闲**超时，只有沙箱收到请求时才会重置——每次 `run_python` 调用都会刷新它，
   因此普通的模型延迟没问题；但很长的"无工具调用"间隔可能导致 MicroVM 在运行中途被
   回收。示例使用宽松的 `1800` 秒兜底：正常销毁由 with 块的 `kill()` 完成，该超时只是
-  在 Agent 主机先崩溃时兜底回收残留的 MicroVM。`NEVER_TIMEOUT` 会彻底取消该兜底
-  （连同这个孤儿风险）。若需要墙钟意义上的硬上限，请在 Agent 侧强制（Pydantic AI 的
+  在 Agent 主机先崩溃时兜底回收残留的 MicroVM。`NEVER_TIMEOUT` 会取消该兜底——
+  连同"中途被回收"的风险一起消除——代价是崩溃残留的 MicroVM 永远不会被回收。
+  若需要墙钟意义上的硬上限，请在 Agent 侧强制（Pydantic AI 的
   [用量限制](https://ai.pydantic.dev/agents/#usage-limits)加上你自己的截止时间）。
 - **错误处理。** 工具会把 `CubeSandboxError` 与传输超时以文本形式返回给模型
   （stderr 分隔展示、非零退出码单独报告），便于重试；而 `Sandbox.create()` 失败会
