@@ -891,7 +891,7 @@ class Sandbox:
         When the sandbox was created with ``network.allow_public_traffic=False``,
         CubeProxy rejects unauthenticated traffic with 403. Attaching the token
         as a default header on the httpx client covers run_code, the Connect
-        fallback path, and filesystem read/write in one place.
+        commands path, and filesystem read/write in one place.
 
         Data-plane requests are also routed through CubeAPI's auth middleware,
         which requires ``X-API-Key`` (or ``Authorization: Bearer``) whenever the

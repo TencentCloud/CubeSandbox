@@ -157,6 +157,20 @@ def test_raw_filesystem_user_nobody_with_tmp_path(sdk_sandbox, sdk_backend):
         files.write(source, "ok", user="nobody")
         assert files.exists(source, user="nobody") is True
 
+        nobody_uid = sdk_sandbox.raw_sandbox.commands.run(
+            "id -u nobody",
+            user="root",
+            timeout=10,
+        )
+        assert nobody_uid.exit_code == 0
+        owner_uid = sdk_sandbox.raw_sandbox.commands.run(
+            f"stat -c %u {source}",
+            user="root",
+            timeout=10,
+        )
+        assert owner_uid.exit_code == 0
+        assert owner_uid.stdout.strip() == nobody_uid.stdout.strip()
+
         result = sdk_sandbox.raw_sandbox.commands.run(
             f"cat {source}",
             cwd="/tmp",

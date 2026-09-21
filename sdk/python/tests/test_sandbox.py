@@ -1414,7 +1414,7 @@ class TestCommands:
         assert seen["payload"]["process"]["envs"] == {"A": "B"}
         assert seen["payload"]["process"]["args"] == ["-l", "-c", "echo hello"]
 
-    def test_run_defaults_cwd_to_root(self):
+    def test_run_defaults_cwd_to_empty(self):
         sb = make_sandbox()
         seen = {}
 
@@ -1433,7 +1433,7 @@ class TestCommands:
             result = sb.commands.run("pwd", user="nobody")
 
         assert result.exit_code == 0
-        assert seen["payload"]["process"]["cwd"] == "/"
+        assert seen["payload"]["process"]["cwd"] == ""
 
     # envd reads Connect-Timeout-Ms as a hard wall-clock deadline, so a
     # non-positive one has already passed and the request is never answered.
@@ -1756,13 +1756,15 @@ class TestFilesystem:
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["body"] = json.loads(request.content)
+            seen["authorization"] = request.headers.get("authorization")
             return httpx.Response(200, json={"entries": []})
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
         with patch.object(sb, "_build_data_client", return_value=client):
             sb.files.list("/tmp", user="nobody")
 
-        assert seen["body"] == {"path": "/tmp", "username": "nobody"}
+        assert seen["body"] == {"path": "/tmp"}
+        assert seen["authorization"] == "Basic bm9ib2R5Og=="
 
     def test_stat_success(self):
         sb = make_sandbox()
@@ -1788,6 +1790,7 @@ class TestFilesystem:
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["body"] = json.loads(request.content)
+            seen["authorization"] = request.headers.get("authorization")
             return httpx.Response(200, json={
                 "entry": {"name": "hello.txt", "type": "FILE_TYPE_FILE", "path": "/tmp/hello.txt", "size": "30"}
             })
@@ -1796,7 +1799,8 @@ class TestFilesystem:
         with patch.object(sb, "_build_data_client", return_value=client):
             entry = sb.files.stat("/tmp/hello.txt", user="nobody")
 
-        assert seen["body"] == {"path": "/tmp/hello.txt", "username": "nobody"}
+        assert seen["body"] == {"path": "/tmp/hello.txt"}
+        assert seen["authorization"] == "Basic bm9ib2R5Og=="
         assert entry["name"] == "hello.txt"
 
     def test_exists_returns_true(self):
@@ -1817,6 +1821,7 @@ class TestFilesystem:
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["body"] = json.loads(request.content)
+            seen["authorization"] = request.headers.get("authorization")
             return httpx.Response(200, json={
                 "entry": {"name": "f.txt", "type": "FILE_TYPE_FILE", "path": "/tmp/f.txt"}
             })
@@ -1825,7 +1830,8 @@ class TestFilesystem:
         with patch.object(sb, "_build_data_client", return_value=client):
             assert sb.files.exists("/tmp/f.txt", user="nobody") is True
 
-        assert seen["body"] == {"path": "/tmp/f.txt", "username": "nobody"}
+        assert seen["body"] == {"path": "/tmp/f.txt"}
+        assert seen["authorization"] == "Basic bm9ib2R5Og=="
 
     def test_exists_returns_false_on_404(self):
         sb = make_sandbox()
@@ -1860,13 +1866,15 @@ class TestFilesystem:
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["body"] = json.loads(request.content)
+            seen["authorization"] = request.headers.get("authorization")
             return httpx.Response(200, json={})
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
         with patch.object(sb, "_build_data_client", return_value=client):
             sb.files.remove("/tmp/old.txt", user="nobody")
 
-        assert seen["body"] == {"path": "/tmp/old.txt", "username": "nobody"}
+        assert seen["body"] == {"path": "/tmp/old.txt"}
+        assert seen["authorization"] == "Basic bm9ib2R5Og=="
 
     def test_rename_success(self):
         sb = make_sandbox()
@@ -1891,6 +1899,7 @@ class TestFilesystem:
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["body"] = json.loads(request.content)
+            seen["authorization"] = request.headers.get("authorization")
             return httpx.Response(200, json={
                 "entry": {"name": "new.txt", "type": "FILE_TYPE_FILE", "path": "/tmp/new.txt"}
             })
@@ -1899,7 +1908,8 @@ class TestFilesystem:
         with patch.object(sb, "_build_data_client", return_value=client):
             entry = sb.files.rename("/tmp/old.txt", "/tmp/new.txt", user="nobody")
 
-        assert seen["body"] == {"source": "/tmp/old.txt", "destination": "/tmp/new.txt", "username": "nobody"}
+        assert seen["body"] == {"source": "/tmp/old.txt", "destination": "/tmp/new.txt"}
+        assert seen["authorization"] == "Basic bm9ib2R5Og=="
         assert entry["name"] == "new.txt"
 
     def test_make_dir_success(self):
@@ -1925,6 +1935,7 @@ class TestFilesystem:
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["body"] = json.loads(request.content)
+            seen["authorization"] = request.headers.get("authorization")
             return httpx.Response(200, json={
                 "entry": {"name": "newdir", "type": "FILE_TYPE_DIRECTORY", "path": "/tmp/newdir"}
             })
@@ -1933,7 +1944,8 @@ class TestFilesystem:
         with patch.object(sb, "_build_data_client", return_value=client):
             entry = sb.files.make_dir("/tmp/newdir", user="nobody")
 
-        assert seen["body"] == {"path": "/tmp/newdir", "username": "nobody"}
+        assert seen["body"] == {"path": "/tmp/newdir"}
+        assert seen["authorization"] == "Basic bm9ib2R5Og=="
         assert entry["type"] == "FILE_TYPE_DIRECTORY"
 
     def test_write_files_success(self):

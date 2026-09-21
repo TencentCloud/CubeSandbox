@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 logger = logging.getLogger(__name__)
 
-from ._commands import DEFAULT_ENVD_USER, ENVD_PORT, MAX_CONNECT_ENVELOPE_SIZE
+from ._commands import DEFAULT_ENVD_USER, ENVD_PORT, MAX_CONNECT_ENVELOPE_SIZE, _user_headers
 from ._exceptions import FilesystemNotFoundError, PartialWriteError
 
 if TYPE_CHECKING:
@@ -50,8 +50,7 @@ class Filesystem:
         headers["Connect-Protocol-Version"] = CONNECT_PROTOCOL_VERSION
 
         req_payload = dict(payload)
-        if user is not None:
-            req_payload["username"] = user
+        headers.update(_user_headers(user))
 
         resp = self._sandbox._client.post(
             f"http://{self._sandbox.get_host(ENVD_PORT)}/filesystem.Filesystem/{method}",

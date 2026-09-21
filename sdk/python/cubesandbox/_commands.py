@@ -58,7 +58,7 @@ class Commands:
         """
         process_envs = envs if envs is not None else (env or {})
         effective_user = user or DEFAULT_ENVD_USER
-        return self._run_with_connect_fallback(
+        return self._run_with_connect_api(
             cmd,
             timeout=timeout,
             cwd=cwd,
@@ -66,7 +66,7 @@ class Commands:
             user=effective_user,
         )
 
-    def _run_with_connect_fallback(
+    def _run_with_connect_api(
         self,
         cmd: str,
         *,
@@ -83,7 +83,7 @@ class Commands:
                 "cmd": "/bin/bash",
                 "args": ["-l", "-c", cmd],
                 "envs": envs,
-                "cwd": cwd or "/",
+                "cwd": cwd or "",
             },
             "stdin": False,
         }
