@@ -1,27 +1,43 @@
 # 升级
 
-目标只有一句话：**控制面可以有序滚动升级；计算面升级会 recreate `cube-node` Big Pod，并中断该节点上的存量沙箱。**
+目标只有一句话：**控制面可以有序滚动升级；计算面升级会 recreate `cube-node` Big Pod——默认的宿主机网络下这对沙箱网络是安全的，Pod 网络下则会中断沙箱。**
 
 ---
 
 ::: warning Preview 版本警告
-计算面使用原生 `apps/v1` DaemonSet：镜像 / 资源 / template 变更会导致 Big Pod **删除重建**（PodIP / netns 变化），存量沙箱网络会中断。计算面升级会 **recreate `cube-node` Big Pod**（原生 DaemonSet），**会中断该节点上的存量沙箱**。升级前请先调用 CubeMaster 的 isolate API，将节点隔离 60 秒以上；并且销毁节点上的沙箱。在销毁沙箱后，才能安全的升级节点。隔离操作详见[节点相关操作](../node-operations.md)。
+计算面使用原生 `apps/v1` DaemonSet：镜像 / 资源 / template 变更会导致 Big Pod **删除重建**，cubelet 进程也会重启。这对存量沙箱的代价取决于 Pod 的网络模式：
 
-**若希望升级不中断沙箱，可从两个方向入手：**
+- **宿主机网络（默认）**：沙箱的 tap 设备与 cubevs 钩子位于宿主机 netns 中，重建不会销毁它，因此得以保留。
+- **Pod 网络**（`cubeNode.hostNetwork: false`）：重建会销毁 Pod netns，**该节点上所有沙箱的网络全部中断（入站、出站均中断）**，且不能自愈。
 
-1. 部署时为 `cube-node` 启用 `hostNetwork`，使 Pod 重建不再中断沙箱网络——见[安装 · cube-node 网络与 Pod 重建](./install.md#_8-3-cube-node-网络与-pod-重建)。
-2. 采用您熟悉的 K8s 插件实现“原地升级”——不重建 Pod，仅升级容器镜像。
+在原地替换设计落地前，计算面升级仍建议放在维护窗口：先调用 CubeMaster 的 isolate API，将节点隔离 60 秒以上，再销毁节点上的沙箱。隔离操作详见[节点相关操作](../node-operations.md)。
+
+若您暂时必须留在 Pod 网络，另一条路是用您熟悉的 K8s 插件实现“原地升级”——不重建 Pod，仅升级容器镜像。
 
 部署当前版本后若计划升级，应当仔细评估更改、做测试后再实施。
 
 **上述问题将在后续版本逐步得到解决。欢迎试用 K8s 部署方式，通过 Issue 反馈问题与建议。**
 :::
 
-## 为什么 Big Pod recreate 会中断沙箱？
+## 为什么网络模式决定了重建的代价
 
-CubeSandbox 的网络（cubevs）钩子挂在 Pod 的网卡上，沙箱的 tap 设备也与 Pod 处于同一 netns。Pod 重建会销毁 netns，导致沙箱网络中断。因此计算面升级属于**有中断**操作，需要维护窗口与节点隔离、销毁存量沙箱。
+CubeSandbox 的网络（cubevs）钩子挂在 Pod 的网卡上，沙箱的 tap 设备也与 Pod 处于同一 netns。Pod 网络下重建 Pod 会销毁该 netns，沙箱网络随之中断；宿主机网络下 netns 就是宿主机的，不随重建变化，设备因此保留。
 
-若在部署时为 `cube-node` 启用 `hostNetwork: true`，可避免 netns 变化：沙箱网络设备位于宿主机 netns 中，Pod 重建后依然保留。详细说明与注意事项见[安装 · cube-node 网络与 Pod 重建](./install.md#_8-3-cube-node-网络与-pod-重建)；完整的原地替换设计可参考 [PR #1189](https://github.com/TencentCloud/CubeSandbox/pull/1189)（尚未合入）。
+取舍见[安装 · cube-node 网络与 Pod 重建](./install.md#_8-3-cube-node-网络与-pod-重建)；完整的原地替换设计可参考 [PR #1189](https://github.com/TencentCloud/CubeSandbox/pull/1189)（尚未合入）。
+
+## 切换网络模式
+
+`cubeNode.hostNetwork` 属于 Pod template 字段，改动会重建所有 Big Pod，且沙箱数据面会跨 netns 迁移。因此有一个 pre-upgrade Hook（`cube-node-hostnet-preflight`）拦截：当线上 DaemonSet 的模式与渲染出的模式不一致时，升级会被拒绝，失败信息给出两条出路：
+
+1. **保持现状**——在 values 里把 `cubeNode.hostNetwork` 写成线上当前的值。
+2. **采用新模式**——逐节点 isolate、等待 ≥ 60s、销毁沙箱（见[节点相关操作](../node-operations.md)），然后设置：
+
+```yaml
+cubeNode:
+  hostNetworkChangeAck: true   # 升级完成后可移除
+```
+
+该确认键只被 Hook 读取，不属于 Pod template，因此设置或移除它都不会重建 Pod。
 
 ## 升什么，动哪条工作负载？
 
@@ -75,7 +91,8 @@ helm upgrade cube ./deploy/kubernetes/chart -n cube-system \
 ### 怎么确认升级成功？
 
 ```bash
-# Big Pod 会被重建：UID / PodIP 会变化；关注新 Pod Ready 与节点重新注册
+# Big Pod 会被重建：UID 会变（宿主机网络下 PodIP 即节点 IP，不会变）；
+# 关注新 Pod Ready 与节点重新注册
 kubectl get pods -n cube-system -l app.kubernetes.io/component=cube-node -o wide
 kubectl get daemonset -n cube-system cube-node
 
@@ -88,7 +105,7 @@ kubectl rollout status deploy/cube-master -n cube-system
 
 - 控制面 Pod 按 Deployment 策略完成（`cube-master` 为 Recreate；其它控制面 Deployment 为 RollingUpdate）
 - 计算面：对应 DaemonSet 的 Pod 已换成新镜像并 Ready
-- 若升了 Big Pod 运行时：节点上存量沙箱已中断；新沙箱可创建；节点已重新注册到 CubeOps
+- 若升的是**Pod 网络**节点上的 Big Pod 运行时：该节点存量沙箱已中断；新沙箱可创建；节点已重新注册到 CubeOps
 
 ---
 
@@ -113,6 +130,7 @@ kubectl rollout status deploy/cube-master -n cube-system
 
 | 不要随便做 | 为什么 |
 | --- | --- |
+| 改 `cubeNode.hostNetwork` | 会让沙箱数据面跨 netns 迁移；由 pre-upgrade Hook 拦截 |
 | 增删 Big Pod 容器（含改槽位数量） | 改 Pod template，DaemonSet 会重建 Pod |
 | 改 volumeMount / securityContext / 容器名 / 直接改 env | 同上 |
 | 改 `wait-node-prep` 的 env / mount（只 bump 镜像也会 recreate） | wait 为 initContainer；template 变更即重建 |

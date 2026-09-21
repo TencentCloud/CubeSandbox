@@ -264,7 +264,7 @@ kubectl get pods -n cube-system -l app.kubernetes.io/component=cube-node -o wide
 ```
 
 - **恢复**：销毁并重建受影响的沙箱。
-- **预防**：部署时为 `cube-node` 启用 `hostNetwork: true`，使 Pod 重建不再引起 netns 变化；详见[安装 · cube-node 网络与 Pod 重建](./install.md#_8-3-cube-node-网络与-pod-重建)。若还需要用 NetworkPolicy 管控沙箱访问集群内 Service 的流量，也请参考同一节。
+- **预防**：让 `cube-node` 保持默认的宿主机网络（`cubeNode.hostNetwork: true`），Pod 重建不会引起 netns 变化；详见[安装 · cube-node 网络与 Pod 重建](./install.md#_8-3-cube-node-网络与-pod-重建)。若因 NetworkPolicy 需要管控沙箱流量而使用 Pod 网络，同一节也说明了这一取舍。
 
 ### 如何在 Kubernetes 部署中运行 `cubecli`？
 
@@ -281,7 +281,7 @@ kubectl exec -n cube-system <cube-node-pod> -- cubecli ls
 
 默认情况下，`kubectl exec` 会进入该 `cube-node` Pod 的 `cubelet` container，这是 Kubernetes 部署中运行 `cubecli` 的支持入口。
 
-对于 `cubecli container taps` 这类网络设备诊断命令，建议在目标 `cube-node` Pod 内执行。Chart 默认使用 `hostNetwork: false`，TAP 设备创建在 `cube-node` Pod 的 network namespace 中；宿主机 login shell 通常使用不同的 network namespace，无法提供同一视角。只有在用户自定义 `cube-node` 使用 `hostNetwork: true` 时，`cube-node` Pod 才会与宿主机共享 network namespace，此时才可以从两侧排查同一批 TAP 设备。
+对于 `cubecli container taps` 这类网络设备诊断命令，注意 TAP 设备所在的 netns：默认 `hostNetwork: true` 下 TAP 创建在宿主机 network namespace 中，宿主机 login shell 与 `cube-node` Pod 看到的是同一批设备。若使用 Pod 网络（`cubeNode.hostNetwork: false`），TAP 位于 `cube-node` Pod 的 network namespace 中，宿主机 login shell 无法提供同一视角，此时请在 Pod 内执行。
 
 ### 沙箱启动很慢（>10s），节点却很空
 

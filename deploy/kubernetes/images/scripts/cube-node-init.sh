@@ -25,8 +25,10 @@ CHECK_CGROUP_CPU="${CHECK_CGROUP_CPU:-true}"
 CHECK_BPF_FS="${CHECK_BPF_FS:-true}"
 CHECK_GLIBC="${CHECK_GLIBC:-true}"
 CHECK_CIDR="${CHECK_CIDR:-true}"
+CHECK_HOST_PORTS="${CHECK_HOST_PORTS:-true}"
 CHECK_CUBECOW_DEPS="${CHECK_CUBECOW_DEPS:-true}"
 CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-0}"
+CUBE_NODE_HOST_NETWORK="${CUBE_NODE_HOST_NETWORK:-false}"
 CUBE_SANDBOX_NETWORK_CIDR="${CUBE_SANDBOX_NETWORK_CIDR:-}"
 CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK="${CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK:-0}"
 LOOPBACK_ENABLED="${LOOPBACK_ENABLED:-false}"
@@ -268,6 +270,26 @@ Set CUBE_SANDBOX_NETWORK_CIDR to a non-overlapping private CIDR or set CUBE_SAND
   log "CIDR check passed: ${CUBE_SANDBOX_NETWORK_CIDR}"
 }
 
+# Fail when a host port cube-node will bind is already held by another process.
+# HOST_PORT_RESERVED_PORTS comes from the chart env, so it follows the enabled
+# components.
+check_host_ports() {
+  [ "$CHECK_HOST_PORTS" = "true" ] || return 0
+  [ "$CUBE_NODE_HOST_NETWORK" = "true" ] || return 0
+  if [ "$CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK" = "1" ]; then
+    log "host port check skipped: CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK=1"
+    return 0
+  fi
+
+  conflicts="$(host_port_conflicts "$(host_path /proc)")"
+  if [ -n "${conflicts}" ]; then
+    fail "host port conflict: cube-node binds these ports on the host (cubeNode.hostNetwork=true) but something else already holds them
+${conflicts}
+Stop the conflicting service, or set cubeNode.hostNetwork=false to run cube-node on the Pod network."
+  fi
+  log "host port check passed: ${HOST_PORT_RESERVED_PORTS}"
+}
+
 check_cubecow_deps() {
   [ "$CHECK_CUBECOW_DEPS" = "true" ] || return 0
   missing=""
@@ -323,6 +345,7 @@ check_glibc
 check_cgroup_cpu
 check_bpf_fs
 check_cidr_conflict
+check_host_ports
 check_cubecow_deps
 
 if [ "$LOAD_KVM_MODULE" = "true" ]; then

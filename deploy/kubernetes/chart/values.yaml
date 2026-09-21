@@ -772,8 +772,8 @@ cubeNode:
   podAnnotations:
     # kubectl exec/logs without -c should enter the node-local Cubelet runtime.
     kubectl.kubernetes.io/default-container: cubelet
-  # Native apps/v1 DaemonSet. Image/tag/resource changes recreate the Pod
-  # (PodIP / netns change; existing sandboxes on that node are interrupted).
+  # Native apps/v1 DaemonSet. Image/tag/resource changes recreate the Pod; on the
+  # Pod network that interrupts existing sandboxes on that node (see hostNetwork).
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
@@ -782,15 +782,20 @@ cubeNode:
   # cubelet pidfile; containerd-shim-cube-rs / microVMs are left alone.
   terminationGracePeriodSeconds: 30
 
-  # Run cube-node on the host network (hostNetwork: true, dnsPolicy becomes
-  # ClusterFirstWithHostNet). The Pod then shares the host netns, so sandbox
-  # network devices survive cube-node Pod recreation. Trade-offs: cube-node
-  # loses its CNI-assigned Pod identity (Kubernetes NetworkPolicy can no longer
-  # govern sandbox traffic) and cubelet ports (9998/9999/9966) bind on the host.
-  hostNetwork: false
+  # Run cube-node on the host network (dnsPolicy becomes ClusterFirstWithHostNet):
+  # the Pod netns is the host's, so sandbox network devices survive Pod recreation
+  # — on the Pod network a recreate destroys the netns and breaks every sandbox's
+  # networking on that node. The one trade-off is NetworkPolicy: it can no longer
+  # govern sandbox traffic. Set false only when NetworkPolicy must.
+  hostNetwork: true
+  # One-time acknowledgement read by the cube-node-hostnet preflight Hook: changing
+  # hostNetwork on an existing release recreates every Big Pod, so the Hook blocks
+  # the upgrade until this is set. Remove it after that upgrade.
+  hostNetworkChangeAck: false
 
   # Stable NodeID = Kubernetes node name (CUBE_SANDBOX_NODE_ID).
-  # Endpoint = status.podIP (CUBE_SANDBOX_ENDPOINT_IP).
+  # Endpoint = status.podIP (CUBE_SANDBOX_ENDPOINT_IP) — the node IP on the host
+  # network.
   nodeIDSource: specNodeName
 
   # Default to the PVM profile so a labelled compute node can be initialized by
@@ -800,7 +805,8 @@ cubeNode:
     enabled: true
 
   network:
-    # Auto-detect primary NIC inside the Pod netns and patch Cubelet eth_name.
+    # Auto-detect the primary NIC in the Pod's netns (the host's with
+    # hostNetwork) and patch Cubelet eth_name.
     autoDetectEthName: true
     # Leave empty to keep auto-detection. Set to pin Cubelet eth_name.
     ethName: ""
@@ -818,10 +824,11 @@ cubeNode:
     # (CUBE_SANDBOX_NETWORK_MTU). The sandbox tap is created with this value and
     # the hypervisor advertises it to the guest over VIRTIO_NET_F_MTU, so it is
     # effectively the guest's MTU and must not exceed the MTU of the interface
-    # the traffic leaves through. cube-node runs on the Pod network by default,
-    # where an encapsulating CNI is smaller than 1500 (Flannel VXLAN is 1450;
-    # Calico's documented IPIP default is 1480), and the guest cannot recover
-    # on its own: oversized frames are dropped on egress and inbound ICMP
+    # the traffic leaves through. On the host network that interface is the node
+    # uplink, so "auto" is normally a no-op; on the Pod network it is the CNI
+    # interface, which encapsulates below 1500 (Flannel VXLAN is 1450; Calico's
+    # documented IPIP default is 1480). The guest cannot recover on its own:
+    # oversized frames are dropped on egress and inbound ICMP
     # fragmentation-needed is not forwarded into the guest, so connections
     # stall instead of failing.
     # "auto" lowers mvm_mtu to the detected NIC's MTU and never raises it, so it
@@ -902,8 +909,9 @@ cubeNodeInstaller:
 cubeNodeBootstrap:
   podAnnotations: {}
   # Bump only when intentionally invalidating all nodes' prep fingerprint
-  # (forces wait-node-prep to re-block until bootstrap rewrites sentinel).
-  prepGeneration: "1"
+  # (forces wait-node-prep to re-block until bootstrap rewrites sentinel). Bump it
+  # too whenever a new node-init check must run on nodes that are already ready.
+  prepGeneration: "2"
   # How long wait-pvm-host polls pvm-host-ready on PVM-labeled nodes.
   pvmWaitTimeoutSeconds: "900"
   # Resources for Big Pod wait-node-prep initContainer.
@@ -1171,7 +1179,7 @@ cubeEgress:
 
 # Optional CubeS3lvol NVMe/TCP target sidecar (S3-backed cross-node snapshots)
 # in the cube-node Big Pod. Off by default, same as one-click. Enabling it
-# recreates the Big Pod (interrupting sandboxes on the node) and adds ~2 CPU
+# recreates the Big Pod and adds ~2 CPU
 # + 19 GiB RAM plus a ~512 GiB sparse WAL per compute node; x86_64 needs AVX2.
 # The 19 GiB request is 16 GiB tgtMemMB plus the default 1 GiB RAM cache and
 # process overhead, still under the 20 GiB limit.
@@ -1289,6 +1297,10 @@ bootstrap:
     checkBPFFS: true
     checkGlibc: true
     checkCIDR: true
+    # Fail when a cubelet port (9998/9999/9966) or, with cubeS3lvol enabled, its
+    # listen port is already held on the host by another process. Runs only when
+    # cubeNode.hostNetwork=true; cubeNode.network.cidrSkipConflictCheck skips it.
+    checkHostPorts: true
     checkCubecowDeps: true
     dataCubelet:
       path: /data/cubelet
@@ -1298,8 +1310,8 @@ bootstrap:
         size: 25G
 
 security:
-  # cube-node host network is controlled by cubeNode.hostNetwork (default
-  # false = Pod network).
+  # cube-node network mode is controlled by cubeNode.hostNetwork (default true =
+  # host network; false = Pod network).
   hostPID: true
   privileged: true
 

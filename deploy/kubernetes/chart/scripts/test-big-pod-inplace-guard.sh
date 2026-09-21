@@ -76,15 +76,22 @@ render "$TMP_DIR/policy.yaml" \
   --set bootstrap.pvmHostKernel.startupGate.reconcileIntervalSeconds=17
 render "$TMP_DIR/pvm-disabled.yaml" \
   --set bootstrap.pvmHostKernel.enabled=false
+render "$TMP_DIR/migration-knobs.yaml" \
+  --set cubeNode.hostNetworkChangeAck=true \
+  --set bootstrap.nodeInit.checkHostPorts=false
 
 extract_big_pod "$TMP_DIR/base.yaml" "$TMP_DIR/base-node.yaml"
 extract_big_pod "$TMP_DIR/policy.yaml" "$TMP_DIR/policy-node.yaml"
 extract_big_pod "$TMP_DIR/pvm-disabled.yaml" "$TMP_DIR/pvm-disabled-node.yaml"
+extract_big_pod "$TMP_DIR/migration-knobs.yaml" "$TMP_DIR/migration-knobs-node.yaml"
 normalize_frozen_template "$TMP_DIR/base-node.yaml" "$TMP_DIR/base-frozen.yaml"
 
-# PVM / bootArgs / prepGeneration / gate must not touch Big Pod at all.
+# PVM / bootArgs / prepGeneration / gate must not touch Big Pod at all, and
+# neither may the network-mode migration knobs: they steer the preflight Hook and
+# node-init, not the Pod template.
 diff -u "$TMP_DIR/base-node.yaml" "$TMP_DIR/policy-node.yaml"
 diff -u "$TMP_DIR/base-node.yaml" "$TMP_DIR/pvm-disabled-node.yaml"
+diff -u "$TMP_DIR/base-node.yaml" "$TMP_DIR/migration-knobs-node.yaml"
 
 
 assert_recreate_change_detected() {
@@ -108,6 +115,8 @@ assert_recreate_change_detected timezone \
   --set-string global.timezone=UTC
 assert_recreate_change_detected network \
   --set-string cubeNode.network.ethName=eth9
+assert_recreate_change_detected host-network \
+  --set cubeNode.hostNetwork=false
 assert_recreate_change_detected egress \
   --set cubeEgress.enabled=false
 assert_recreate_change_detected s3lvol \

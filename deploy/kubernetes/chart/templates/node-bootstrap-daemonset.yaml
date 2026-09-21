@@ -153,6 +153,12 @@ spec:
               value: {{ .Values.bootstrap.nodeInit.checkGlibc | quote }}
             - name: CHECK_CIDR
               value: {{ .Values.bootstrap.nodeInit.checkCIDR | quote }}
+            - name: CHECK_HOST_PORTS
+              value: {{ .Values.bootstrap.nodeInit.checkHostPorts | quote }}
+            - name: CUBE_NODE_HOST_NETWORK
+              value: {{ .Values.cubeNode.hostNetwork | quote }}
+            - name: HOST_PORT_RESERVED_PORTS
+              value: {{ include "cube.hostPortReserved" . | quote }}
             - name: CHECK_CUBECOW_DEPS
               value: {{ .Values.bootstrap.nodeInit.checkCubecowDeps | quote }}
             - name: CUBE_PVM_ENABLE

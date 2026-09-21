@@ -264,7 +264,7 @@ kubectl get pods -n cube-system -l app.kubernetes.io/component=cube-node -o wide
 ```
 
 - **Recovery**: destroy and recreate the affected sandboxes.
-- **Prevention**: deploy `cube-node` with `hostNetwork: true` so Pod recreation no longer changes the netns; see [Install · cube-node networking and Pod recreation](./install.md#_8-3-cube-node-networking-and-pod-recreation). If you also need NetworkPolicy over sandbox traffic to cluster Services, see the same section.
+- **Prevention**: keep `cube-node` on the default host network (`cubeNode.hostNetwork: true`), where Pod recreation does not change the netns; see [Install · cube-node networking and Pod recreation](./install.md#_8-3-cube-node-networking-and-pod-recreation). If you run on the Pod network because NetworkPolicy must govern sandbox traffic, the same section covers that trade-off.
 
 ### How do I run `cubecli` in a Kubernetes deployment?
 
@@ -281,7 +281,7 @@ kubectl exec -n cube-system <cube-node-pod> -- cubecli ls
 
 By default, `kubectl exec` enters the `cubelet` container in that `cube-node` Pod, which is the supported place to run `cubecli` in a Kubernetes deployment.
 
-For network-device diagnostics such as `cubecli container taps`, run the command inside the target `cube-node` Pod. The chart defaults to `hostNetwork: false`, so TAP devices are created in the `cube-node` Pod's network namespace. A host login shell normally uses a different network namespace and cannot provide the same diagnostic view. Only when a user customizes `cube-node` with `hostNetwork: true` does the Pod share the host network namespace, allowing the same TAP devices to be inspected from either side.
+For network-device diagnostics such as `cubecli container taps`, note which netns the TAP devices live in: with the default `hostNetwork: true` they are created in the host network namespace, so a host login shell and the `cube-node` Pod see the same devices. On the Pod network (`cubeNode.hostNetwork: false`) they live in the `cube-node` Pod's network namespace, and a host login shell cannot provide the same view — run the command inside the Pod there.
 
 ### Sandbox start is slow (>10s) while the node is mostly idle
 

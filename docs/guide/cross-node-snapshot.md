@@ -133,7 +133,11 @@ To point at your own S3 store, follow the [CubeS3lvol README](https://github.com
 
 ### 2.1 Kubernetes (Helm)
 
-Set `cubeS3lvol.enabled=true` on the chart. Nothing else is required: the sidecar reuses the chart MinIO or `volumeS3` endpoint and credentials, and writes to its own `cube-s3lvol` bucket — always separate from the S3 volume plugin's `cube-volumes` bucket. The cubelet entrypoint then sets `[cow.s3] enable = true` and points `socket_path` at the shared emptyDir socket; writing a socket path without `enable` does not opt in. Enabling it **recreates the Big Pod and interrupts sandboxes on that node**; do this in a maintenance window.
+Set `cubeS3lvol.enabled=true` — no other configuration is needed by default: the sidecar reuses the chart's built-in MinIO (or the configured `volumeS3`) endpoint and credentials, and writes to its own `cube-s3lvol` bucket, always separate from the S3 volume plugin's `cube-volumes` bucket.
+
+::: warning Recreates the Big Pod
+Enabling this switch recreates the Big Pod on the compute nodes. Do it in a maintenance window — ideally before any sandbox is created.
+:::
 
 Identity comes from the full Kubernetes node name, hashed to `rcow-<8hex>`. A Pod recreate keeps the same name. `cubeS3lvol.lvsName` pins the same name on every node — do not set it on a multi-node cluster.
 

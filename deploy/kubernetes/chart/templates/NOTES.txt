@@ -55,6 +55,18 @@ External control plane:
 
 Cube Node DaemonSet:
   {{ include "cube.nodeName" . }}
+{{- if .Values.cubeNode.hostNetwork }}
+  Network: host — sandbox network devices survive Big Pod recreation;
+  NetworkPolicy cannot govern sandbox traffic; node identity is the node IP.
+  Set cubeNode.hostNetwork=false for the Pod network.
+{{- else }}
+  Network: Pod (NetworkPolicy applies to sandbox traffic, but recreating this
+  Pod destroys the netns and breaks networking for every sandbox on the node)
+{{- end }}
+{{- if .Values.cubeNode.hostNetworkChangeAck }}
+  NOTE: cubeNode.hostNetworkChangeAck only gates the one-time network-mode change
+  (pre-upgrade Hook); remove it after that upgrade.
+{{- end }}
 {{- if .Values.cubeNode.dns.sandbox.followNodeDns }}
   Sandbox guest DNS: follow node / cluster DNS (nameservers + search + options)
 {{- else if .Values.cubeNode.dns.sandbox.nameservers }}

@@ -1383,6 +1383,17 @@ exit 1
 {{- if ((.Values.cubeS3lvol).enabled) -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
+{{/* Ports cube-node binds on the host under cubeNode.hostNetwork, for the
+node-init conflict check. Only ports whose holder we can name are listed; see
+deploy/kubernetes/images/scripts/node-prep-lib.sh. */}}
+{{- define "cube.hostPortReserved" -}}
+{{- $ports := list "9998" "9999" "9966" -}}
+{{- if eq (include "cube.s3lvolEnabled" .) "true" -}}
+{{- $ports = append $ports (((.Values.cubeS3lvol).listenPort) | default 4420 | toString) -}}
+{{- end -}}
+{{- join " " $ports -}}
+{{- end -}}
+
 {{- define "cube.s3lvolSocketPath" -}}
 {{- ((.Values.cubeS3lvol).socketPath) | default "/var/run/s3lvol/s3lvol.sock" -}}
 {{- end -}}

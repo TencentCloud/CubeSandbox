@@ -129,10 +129,10 @@ flowchart TB
 
 #### Big Pod：`cube-node`
 
-- `hostNetwork: false`（Pod 网络）；原生 `apps/v1` DaemonSet。
+- `hostNetwork: true`（默认宿主机网络；`cubeNode.hostNetwork: false` 可改用 Pod 网络）；原生 `apps/v1` DaemonSet。
 - **initContainer**：`wait-node-prep`（指纹匹配后 **exit 0**，不作为常驻 sidecar）。
-- 镜像 / 资源 / Pod template 变更会 **recreate** Big Pod（PodIP/netns 变化，存量沙箱中断）。详见 [升级](./upgrade.md)。
-- **NodeID** = `spec.nodeName`；**Endpoint** = `status.podIP`。
+- 镜像 / 资源 / Pod template 变更会 **recreate** Big Pod。沙箱 tap 设备与 cubevs 钩子位于 Pod netns 中：宿主机网络下重建后保留，Pod 网络下会中断。详见 [升级](./upgrade.md)。
+- **NodeID** = `spec.nodeName`；**Endpoint** = `status.podIP`（宿主机网络下即节点 IP）。
 - toolbox **整树** hostPath：`/usr/local/services/cubetoolbox`。
 
 | 容器 | 镜像 | 职责 |
@@ -246,7 +246,7 @@ flowchart TD
 - `configureClusterDNS=true` 须配置 `cubeProxy.domain`。
 - compute-only 须配置 `externalControlPlane.masterEndpoint`。
 - `pvmHostKernel.enabled=true` 时 `placement.pvm` 须含 `allow-pvm-bootstrap`，且 **不得** 写在 `placement.compute`。
-- 已移除 `security.hostNetwork`；cube-node 固定 Pod 网络。
+- 已移除 `security.hostNetwork`；cube-node 的网络模式由 `cubeNode.hostNetwork` 控制（默认 true = 宿主机网络）。
 
 调度：控制面用 `placement.controlPlane`；`cube-node` / installer / bootstrap 用 `placement.compute`；`cube-node-pvm` 用 `placement.pvm`。Chart 管理的容器经 `global.timezone` 注入 `TZ`（默认 `Asia/Shanghai`）。
 

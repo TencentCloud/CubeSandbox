@@ -22,10 +22,10 @@
 #      default Service CIDR is 172.16.0.0/16, which fully contains the Chart
 #      default cubevs 172.16.0.0/18. cube-node installs a host route to the
 #      cubevs bridge; with that range every ClusterIP (cube-ops:3010,
-#      cube-master:8089, kube-dns:53, ...) would be swallowed into the bridge
-#      on hostNetwork compute nodes, blackholing node registration and
-#      in-cluster DNS. See the cubeNode.network / cubeEgress.network sections
-#      below. Override in your runtime values if your VPC/LAN uses 192.168.x.
+#      cube-master:8089, kube-dns:53, ...) would be swallowed into the bridge,
+#      blackholing node registration and in-cluster DNS. See the
+#      cubeNode.network / cubeEgress.network sections below. Override in your
+#      runtime values if your VPC/LAN uses 192.168.x.
 #
 # Nothing else about the release is TKE-specific — Cube-owned images default
 # to TCR int (cube-sandbox-int.tencentcloudcr.com/cube-sandbox/...). Users in

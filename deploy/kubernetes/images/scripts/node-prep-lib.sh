@@ -321,3 +321,78 @@ invalidate_pvm_gate_sentinels() {
   invalidate_pvm_host_ready
   invalidate_effective_pvm
 }
+
+# Ports cube-node binds on the host under hostNetwork; the chart overrides this
+# via env, the default covers direct runs. CubeEgress is excluded on purpose:
+# openresty serves it, so a foreign nginx is indistinguishable by name, and its
+# listeners sit on the cube-dev gateway, which the CIDR conflict check guards.
+HOST_PORT_RESERVED_PORTS="${HOST_PORT_RESERVED_PORTS:-9998 9999 9966}"
+# Holders that are not conflicts: our own components, including a Big Pod that
+# is still exiting.
+HOST_PORT_ALLOWED_COMMS="${HOST_PORT_ALLOWED_COMMS:-cubelet cube-s3lvol s3lvol_tgt}"
+
+# host_listen_ports <proc-net-dir>
+#   Print "<port> <inode>" for every LISTENing TCP socket in that netns view.
+#   The caller passes the HOST view (<host>/proc/1/net): /proc/net/tcp resolves
+#   in the reader's own netns, so the container's /proc is a different one.
+host_listen_ports() {
+  local dir="$1" f
+  for f in "${dir}/tcp" "${dir}/tcp6"; do
+    [ -r "$f" ] || continue
+    awk '
+      function hex2dec(h,   i, c, d, n) {
+        n = 0
+        for (i = 1; i <= length(h); i++) {
+          c = tolower(substr(h, i, 1))
+          d = index("0123456789abcdef", c) - 1
+          if (d < 0) return -1
+          n = n * 16 + d
+        }
+        return n
+      }
+      $4 == "0A" { split($2, a, ":"); p = hex2dec(a[2]); if (p > 0) print p, $10 }
+    ' "$f" 2>/dev/null
+  done
+}
+
+# host_listen_port_holder <host-proc-root> <inode> <allowed-comms>
+#   Print "own" (holder named in <allowed-comms>), "foreign <pid> <comm>", or
+#   "unknown" when no reachable process holds the socket.
+host_listen_port_holder() {
+  local proc_root="$1" inode="$2" allowed="$3" pid fd target comm
+
+  [ -n "$inode" ] || { printf 'unknown\n'; return 0; }
+  for pid in "${proc_root}"/[0-9]*; do
+    comm="$(cat "${pid}/comm" 2>/dev/null || true)"
+    [ -n "$comm" ] || continue
+    for fd in "${pid}"/fd/*; do
+      target="$(readlink "${fd}" 2>/dev/null || true)"
+      [ "${target}" = "socket:[${inode}]" ] || continue
+      case " ${allowed} " in
+        *" ${comm} "*) printf 'own\n' ;;
+        *) printf 'foreign %s %s\n' "${pid##*/}" "${comm}" ;;
+      esac
+      return 0
+    done
+  done
+  printf 'unknown\n'
+}
+
+# host_port_conflicts <host-proc-root>
+#   Print "- port <n> held by <pid> <comm>" for every reserved port that is
+#   LISTENing in the host netns and not held by our own components. Empty output
+#   means no conflict.
+host_port_conflicts() {
+  local proc_root="$1" port inode holder
+
+  host_listen_ports "${proc_root}/1/net" | while read -r port inode; do
+    case " ${HOST_PORT_RESERVED_PORTS} " in
+      *" ${port} "*) ;;
+      *) continue ;;
+    esac
+    holder="$(host_listen_port_holder "${proc_root}" "${inode}" "${HOST_PORT_ALLOWED_COMMS}")"
+    if [ "${holder}" != "own" ]; then
+      printf -- '- port %s held by %s\n' "${port}" "${holder#foreign }"
+    fi
+  done
+}

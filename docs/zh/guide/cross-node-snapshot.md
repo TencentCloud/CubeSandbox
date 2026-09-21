@@ -156,7 +156,11 @@ Cube 安装时默认安装 MinIO 作为 S3 服务，方便开箱体验。
 
 ### 2.1 Kubernetes（Helm）
 
-设置 `cubeS3lvol.enabled=true` 即可，无需其他配置：sidecar 复用 chart MinIO 或 `volumeS3` 的 endpoint 与凭证，写入自己的 `cube-s3lvol` 桶——始终与 S3 volume 插件的 `cube-volumes` 桶分开。cubelet 的 entrypoint 会把 `[cow.s3] enable` 写成 `true`，并把 `socket_path` 指到共享 emptyDir socket；只写 socket、不写 `enable` 不会开启。开启会**重建该节点的 Big Pod 并中断其上正在运行的沙箱**，请在维护窗口操作。
+设置 `cubeS3lvol.enabled=true` 即可，默认无需其他配置：sidecar 复用 chart 内置 MinIO（或已配置的 `volumeS3`）的 endpoint 与凭证，写入独立的 `cube-s3lvol` 桶——始终与 S3 volume 插件的 `cube-volumes` 桶分开。
+
+::: warning 会重建 Big Pod
+开启该开关会重建计算节点的 Big Pod。请在维护窗口操作，最好在创建任何沙箱之前开启。
+:::
 
 身份来自完整的 Kubernetes 节点名，哈希成 `rcow-<8hex>`。Pod 重建仍是同一台机器。`cubeS3lvol.lvsName` 会给集群里每个节点钉同一个名字——多节点不要设。
 

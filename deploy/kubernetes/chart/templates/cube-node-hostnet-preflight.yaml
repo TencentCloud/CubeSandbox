@@ -1,0 +1,129 @@
+{{- if .Values.cubeNode.enabled }}
+{{/*
+Pre-install/pre-upgrade gate on cube-node's network mode; rules in
+files/cube-node-hostnet-preflight.sh. Like the cubevs CIDR preflight it is a Job
+on a control-plane node — it only needs the API, and Helm surfaces its failure
+message in the Hook logs.
+*/}}
+{{- $hookAnnotations := dict
+  "helm.sh/hook" "pre-install,pre-upgrade"
+  "helm.sh/hook-weight" "-109"
+  "helm.sh/hook-delete-policy" "before-hook-creation,hook-succeeded,hook-failed"
+-}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "cube.fullname" . }}-cube-node-hostnet-preflight
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-node-hostnet-preflight
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cube.fullname" . }}-cube-node-hostnet-preflight
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-node-hostnet-preflight
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cube.fullname" . }}-cube-node-hostnet-preflight
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-node-hostnet-preflight
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cube.fullname" . }}-cube-node-hostnet-preflight
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cube.fullname" . }}-cube-node-hostnet-preflight
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cube.fullname" . }}-cube-node-hostnet-preflight
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-node-hostnet-preflight
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+data:
+  cube-node-hostnet-preflight.sh: |
+{{ .Files.Get "files/cube-node-hostnet-preflight.sh" | indent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cube.fullname" . }}-cube-node-hostnet-preflight
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-node-hostnet-preflight
+  annotations:
+    {{- toYaml $hookAnnotations | nindent 4 }}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cube-node-hostnet-preflight
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "cube.fullname" . }}-cube-node-hostnet-preflight
+      {{- with .Values.placement.controlPlane.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      tolerations:
+        {{- with .Values.placement.controlPlane.tolerations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        - key: {{ .Values.bootstrap.pvmHostKernel.startupGate.taintKey }}
+          operator: Exists
+          effect: {{ .Values.bootstrap.pvmHostKernel.startupGate.effect }}
+      containers:
+        - name: preflight
+          image: {{ include "cube.image" .Values.images.kubectl | quote }}
+          imagePullPolicy: {{ .Values.images.kubectl.pullPolicy }}
+          command: ["/bin/bash", "/scripts/cube-node-hostnet-preflight.sh"]
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: RELEASE_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: CUBE_NODE_DS_NAME
+              value: {{ include "cube.nodeName" . | quote }}
+            - name: CUBE_NODE_HOSTNETWORK_DESIRED
+              value: {{ ternary "true" "false" .Values.cubeNode.hostNetwork | quote }}
+            - name: CUBE_NODE_HOSTNETWORK_CHANGE_ACK
+              value: {{ ternary "true" "false" .Values.cubeNode.hostNetworkChangeAck | quote }}
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ include "cube.fullname" . }}-cube-node-hostnet-preflight
+            defaultMode: 0755
+{{- end }}

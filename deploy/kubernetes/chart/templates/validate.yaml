@@ -178,7 +178,7 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- fail "cubeNode.placeholderSlots was removed; Big Pod no longer reserves cube-slot-1..6. Remove cubeNode.placeholderSlots from your values." }}
 {{- end }}
 {{- if hasKey .Values.security "hostNetwork" }}
-{{- fail "security.hostNetwork was removed; cube-node always runs on the Pod network. Remove security.hostNetwork from your values." }}
+{{- fail "security.hostNetwork was removed; cube-node's network mode is cubeNode.hostNetwork (default true = host network). Remove security.hostNetwork from your values." }}
 {{- end }}
 {{- if hasKey .Values.cubeNode "useAdvancedDaemonSet" }}
 {{- fail "cubeNode.useAdvancedDaemonSet was removed; cube-node uses a native apps/v1 DaemonSet. Remove cubeNode.useAdvancedDaemonSet from your values." }}

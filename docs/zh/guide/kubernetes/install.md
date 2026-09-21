@@ -156,7 +156,7 @@ Cube 会在宿主机 `/data/cubelet`下写入数据，且该路径必须是 **XF
 **计算节点网络（cube-node 重建）**
 
 ::: warning 请在部署前决定
-沙箱一旦开始运行，计算节点上的 `cube-node` Pod **不可重建**：重建会销毁沙箱网络设备所在的 network namespace，该节点上 **所有沙箱的网络都会中断（入站、出站均中断）**。生产环境建议在部署时就让 `cube-node` 启用 `hostNetwork`，使 Pod 重建不再引起 netns 变化。详细说明与注意事项（含 NetworkPolicy）：[8.3 cube-node 网络与 Pod 重建](#_8-3-cube-node-网络与-pod-重建)。
+默认的**宿主机网络**下，沙箱网络不受 `cube-node` Pod 重建影响。若改用 Pod 网络（`cubeNode.hostNetwork: false`），则沙箱运行期间该 Pod **不可重建**——该节点上所有沙箱的网络**全部中断（入站、出站均中断）**，且无法自愈。详细说明与取舍（含 NetworkPolicy）：[8.3 cube-node 网络与 Pod 重建](#_8-3-cube-node-网络与-pod-重建)。
 :::
 
 
@@ -299,46 +299,46 @@ bootstrap:
 
 ### 8.3 cube-node 网络与 Pod 重建
 
-::: warning 一句话结论
-沙箱运行期间，`cube-node` Pod **不可重建**——重建会导致该节点上所有沙箱的网络**全部中断（入站、出站均中断）且无法自愈**。生产环境建议部署时启用 `hostNetwork` 规避；代价是 NetworkPolicy 需另行处理（见下文）。
+::: tip 一句话结论
+`cube-node` 默认使用**宿主机网络**，Pod 重建不再改变沙箱网络设备所在的 network namespace。若改用 Pod 网络（`cubeNode.hostNetwork: false`），则该 Pod **不可重建**——重建会导致该节点上所有沙箱的网络**全部中断（入站、出站均中断）且无法自愈**。
 :::
 
-#### 为什么 cube-node 不可重建
+#### 为什么网络模式决定这件事
 
-沙箱的网络设备（TAP 设备）与 cubevs 钩子位于 `cube-node` Pod 的 network namespace 中，Pod 重建即销毁该 netns：
+沙箱的网络设备（TAP 设备）与 cubevs 钩子位于 `cube-node` Pod 的 network namespace 中，因此 Pod 的网络模式决定了重建时它们会怎样：
 
 | 项目 | 说明 |
 | --- | --- |
 | 触发条件 | 任何导致 Pod 重建的操作：DaemonSet template 变更、镜像升级、手工 `kubectl delete pod` 等 |
-| 影响 | 该节点上**所有沙箱**的网络全部中断，**入站、出站均中断** |
-| 能否自愈 | **不能**。只能销毁并重建受影响的沙箱 |
+| 宿主机网络（默认） | netns 即宿主机 netns，不随 Pod 重建变化：沙箱网络设备在 `cube-node` 重建后保留 |
+| Pod 网络（`hostNetwork: false`） | Pod netns 被销毁：该节点上**所有沙箱**的网络全部中断（**入站、出站均中断**）且**不能自愈**。只能销毁并重建受影响的沙箱 |
 
 计算面升级同样受此影响，详见[升级](./upgrade.md)。
 
-#### 建议：部署时启用 hostNetwork
+#### 默认：宿主机网络
 
-::: tip 推荐做法
-在**创建沙箱之前**让 `cube-node` 以 `hostNetwork: true` 运行：Pod 与宿主机共享 netns，netns 不随 Pod 重建而变化，沙箱网络设备因此得以保留。
-:::
-
-启用时的注意事项：
+`cubeNode.hostNetwork` 默认为 `true`，全新安装无需任何操作。保持默认时需要确认：
 
 | 事项 | 说明 |
 | --- | --- |
-| 如何启用 | 当前 Chart 无 values 开关（`security.hostNetwork` 会被校验拒绝），需通过 Helm post-renderer / Kustomize / fork Chart 修改 DaemonSet |
-| DNS | 需同时设置 `dnsPolicy: ClusterFirstWithHostNet`，保证集群内域名解析可用 |
-| 端口冲突 | 确认 cubelet 端口（9998 / 9999 / 9966）不与宿主机其他服务冲突 |
-| 监控 / 防火墙 | 基于 Pod IP / Pod CIDR 的监控、防火墙、策略需改为基于节点 IP |
+| DNS | `dnsPolicy` 自动切为 `ClusterFirstWithHostNet`，集群内域名解析正常 |
+| 端口冲突 | cubelet（9998 / 9999 / 9966）与启用时的 CubeS3lvol 会占用宿主机端口；若已被其他进程占用，`cube-node-init` 会 fail-fast（`bootstrap.nodeInit.checkHostPorts`） |
+| NetworkPolicy | 无法管控沙箱流量，见下文 |
+| 监控 / 防火墙 | 基于 Pod IP / Pod CIDR 的规则需改为基于节点 IP |
 
-#### 代价：NetworkPolicy 不再生效
+#### 改用 Pod 网络
 
-启用 hostNetwork 后，`cube-node` 失去 CNI 分配的 Pod 网络身份，Kubernetes NetworkPolicy（例如「沙箱能否访问某个 Service」）**无法直接管控沙箱流量**。
+当 Kubernetes NetworkPolicy 需要管控沙箱流量（例如「沙箱能否访问某个 Service」）时，设 `cubeNode.hostNetwork: false`。这是宿主机网络唯一让出的能力，而 Pod 网络其余方面都是代价：
 
-::: info 参考实现：PR #1189（尚未合入，仅供参考）
-若需要用 NetworkPolicy 管控沙箱访问集群内 Service / Pod 的流量，可参考 [PR #1189](https://github.com/TencentCloud/CubeSandbox/pull/1189) 的做法：
+- `cube-node` Pod 重建会中断该节点上所有沙箱的网络；
+- guest MTU 需要容纳 CNI 封装——`cubeNode.network.mtu: auto` 会按探测到的网卡下调。
+
+在已有 release 上改这个值会重建所有 Big Pod，因此由一个 pre-upgrade Hook 拦截：见[升级 · 切换网络模式](./upgrade.md#切换网络模式)。
+
+::: info 后续工作：PR #1189（尚未合入，仅供参考）
+若要在保持宿主机网络的同时用 NetworkPolicy 管控沙箱访问集群内 Service / Pod 的流量，以及实现完整的 `cube-node` 原地替换，可参考 [PR #1189](https://github.com/TencentCloud/CubeSandbox/pull/1189)：
 
 - 仅将发往集群 CIDR 的流量经节点本地 **EgressProxy Pod** 转发，并 SNAT 为 Proxy Pod IP，使其受您自定义的 NetworkPolicy 管控；其余流量仍走正常路由。
-- 该 PR 同时将 hostNetwork 设为默认，并实现了完整的 `cube-node` 原地替换设计。
 :::
 
 

@@ -4,7 +4,7 @@ This chart delivers CubeSandbox on Kubernetes/TKE as chart-managed resources.
 
 Current compute-plane shape (per compute node):
 
-- **`cube-node` (Big Pod)**: native `apps/v1` DaemonSet; `wait-node-prep` **initContainer** (exits when ready) + `cubelet` with embedded network runtime + optional egress; Pod network (`hostNetwork=false`). Image/template changes recreate the Pod and interrupt sandboxes on that node.
+- **`cube-node` (Big Pod)**: native `apps/v1` DaemonSet; `wait-node-prep` **initContainer** (exits when ready) + `cubelet` with embedded network runtime + optional egress; host network by default (`cubeNode.hostNetwork: true`). Image/template changes recreate the Pod: sandbox tap devices and cubevs hooks live in the Pod netns, so they survive that on the host network and are lost on the Pod network. Switching the mode on an existing release is gated by the `cube-node-hostnet-preflight` Hook.
 - **`cube-node-installer`**: native DaemonSet that stages shim / kernel / guest into the host toolbox tree.
 - **`cube-node-bootstrap`**: native DaemonSet that runs `wait-pvm-host` + `cube-node-init`, then writes `node-prep-ready`.
 - **`cube-node-pvm`**: native `apps/v1` DaemonSet scheduled only via `placement.pvm` (`allow-pvm-bootstrap`); installs PVM host kernel and writes fingerprint `pvm-host-ready`. Non-PVM compute nodes never pull this image.
@@ -27,7 +27,7 @@ Official docs (source of truth; do not keep a parallel copy under this chart):
 - [Kubernetes Deployment](https://cubesandbox.com/guide/kubernetes/) — overview and install order
 - [Helm Install](https://cubesandbox.com/guide/kubernetes/install) — prerequisites through `helm test`
 - [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) — component layering, four compute DaemonSets, DNS / Proxy / Egress, compute-only mode
-- [Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade) — control plane can roll; compute upgrades recreate the Big Pod and interrupt sandboxes
+- [Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade) — control plane can roll; compute upgrades recreate the Big Pod
 - [FAQ](https://cubesandbox.com/guide/kubernetes/faq) — common install and runtime issues
 - Chinese: [https://cubesandbox.com/zh/guide/kubernetes/](https://cubesandbox.com/zh/guide/kubernetes/)
 
@@ -153,9 +153,11 @@ can set it to `false`.
 `cube-node` mirrors the one-click runtime layout:
 
 - runtime tools are available through `/usr/local/bin/containerd-shim-cube-rs`, `/usr/local/bin/cube-runtime`, `/usr/local/bin/cubecli`, and `/usr/local/bin/cubevsmapdump`;
-- `cubeNode.network.autoDetectEthName=true` auto-detects the primary host NIC and patches Cubelet `eth_name`;
-- `cubeNode.network.cidr` patches Cubelet cubevs/sandbox CIDR (default `172.16.0.0/18`, chosen to avoid common cluster Service CIDR `192.168.0.0/16` while keeping a /18 pool). A Helm `pre-install`/`pre-upgrade` Hook fails fast when this range overlaps the cluster Service CIDR or existing ClusterIPs; set `cubeNode.network.cidrSkipConflictCheck=true` only if you accept that risk.
-- `cubeNode.network.mtu` patches Cubelet `mvm_mtu`, the MTU the sandbox tap is created with and, via `VIRTIO_NET_F_MTU`, the MTU the guest configures. It must not exceed the MTU of the interface the traffic leaves through: `cube-node` runs on the Pod network by default, where an encapsulating CNI is below 1500 (Flannel VXLAN is 1450; Calico's documented IPIP default is 1480), and a guest on a 1500 tap emits frames the uplink drops. The guest cannot recover on its own, because inbound ICMP fragmentation-needed is not forwarded into it, so connections stall rather than fail. The default `auto` lowers `mvm_mtu` to the detected NIC's MTU and never raises it, so it is a no-op wherever the uplink is already >= the packaged value; set an integer in `1280`..`65535` to pin it, or `0` to keep the packaged Cubelet `config.toml` value.
+- `cubeNode.network.autoDetectEthName=true` auto-detects the primary NIC of the Pod's netns (the host's under `hostNetwork`) and patches Cubelet `eth_name`;
+- `cubeNode.hostNetwork` (default `true`) puts the Big Pod on the host network: the netns is the host's, so sandbox tap devices and cubevs hooks survive Pod recreation, at the cost of NetworkPolicy over sandbox traffic and of cubelet / egress / s3lvol ports binding on the host — `cube-node-init` preflights cubelet's ports and, with `cubeS3lvol.enabled`, its listen port (`bootstrap.nodeInit.checkHostPorts`). Set `false` for the Pod network: NetworkPolicy then applies, but a Pod recreate breaks networking for every sandbox on the node.
+- `cubeNode.network.cidr` patches Cubelet cubevs/sandbox CIDR (default `172.16.0.0/18`, chosen to avoid common cluster Service CIDR `192.168.0.0/16` while keeping a /18 pool). A Helm `pre-install`/`pre-upgrade` Hook fails fast when this range overlaps the cluster Service CIDR or existing ClusterIPs; set `cubeNode.network.cidrSkipConflictCheck=true` only if you accept that risk. Under `hostNetwork` this CIDR becomes a host route, so an overlap also affects the node's own traffic — on a cluster whose Service CIDR is `172.16.0.0/16` (e.g. TKE) layer the provider preset, such as `values-tke.yaml`.
+- `cubeNode.network.mtu` patches Cubelet `mvm_mtu`, the MTU the sandbox tap is created with and, via `VIRTIO_NET_F_MTU`, the MTU the guest configures. It must not exceed the MTU of the interface the traffic leaves through: on the host network that interface is the node uplink, so `auto` is normally a no-op; on the Pod network it is the CNI interface, which encapsulates below 1500 (Flannel VXLAN is 1450; Calico's documented IPIP default is 1480). A guest on a 1500 tap emits frames the uplink drops, and it cannot recover on its own, because inbound ICMP fragmentation-needed is not forwarded into it, so connections stall rather than fail. The default `auto` lowers `mvm_mtu` to the detected NIC's MTU and never raises it, so it is a no-op wherever the uplink is already >= the packaged value; set an integer in `1280`..`65535` to pin it, or `0` to keep the packaged Cubelet `config.toml` value.
+- `cubeNode.hostNetworkChangeAck` (default `false`) is read only by the `cube-node-hostnet-preflight` Hook: an existing release may change `cubeNode.hostNetwork` — recreating every Big Pod — only with it set. Remove the key once that upgrade has gone through.
 
 The `cube-node` Pod defaults `kubectl exec` to its `cubelet` container, where `cubecli` uses the node-local Cubelet and containerd sockets. In a multi-node cluster, select the Pod scheduled on the compute node you want to inspect:
 
@@ -531,7 +533,7 @@ This mode creates a release-scoped Secret with `tls.crt`, `tls.key`, and `ca.crt
 
 `cube-proxy` uses `placement.controlPlane`. The chart does not create node labels.
 
-CubeProxy runs on the **Pod network** (no `hostNetwork`). Traffic path:
+CubeProxy runs on the **Pod network** (no `hostNetwork`), whatever mode `cube-node` uses. Traffic path:
 
 1. External clients → Ingress Controller → ClusterIP Service → CubeProxy Pod
 2. In-cluster clients / sandbox guests → CoreDNS rewrite → same ClusterIP Service
@@ -540,7 +542,7 @@ TLS for `cube.app` / wildcards still terminates **inside CubeProxy**. The defaul
 
 Without an Ingress / cloud LB, set `cubeProxy.service.type` / `controlPlane.api.service.type` to `NodePort` (or `LoadBalancer`) and optionally pin host ports via `cubeProxy.service.nodePorts.*` / `controlPlane.api.service.nodePort` (Kubernetes range `30000-32767`; empty keeps auto-allocation). Explicit `nodePort` values are rejected when `type` is still `ClusterIP`.
 
-When the sandbox owner is on a compute node, CubeProxy still uses Redis routing metadata to connect to the owner `HostIP:hostPort`. The chart patches the image's default nginx listeners to the configured `cubeProxy.ports.*.containerPort` values (default `80` / `443`).
+When the sandbox owner is on a compute node, CubeProxy still uses Redis routing metadata to connect to the owner `HostIP:hostPort` — the node IP under the default `cubeNode.hostNetwork=true`, and the Big Pod IP under the Pod network. The chart patches the image's default nginx listeners to the configured `cubeProxy.ports.*.containerPort` values (default `80` / `443`).
 
 CubeProxy admin is at Pod IP:`adminPort` (default `8082`) for CLM; helm test uses the Service admin port. Probes send the admin token header.
 
@@ -661,7 +663,7 @@ Do not rotate the CubeEgress CA casually: templates baked with the old CA and sa
 
 ## CubeS3lvol
 
-`cubeS3lvol.enabled=false` by default, same as one-click. Enabling it injects a `cube-s3lvol` sidecar into the Cube Node Big Pod and **recreates that Pod, interrupting sandboxes on the node** — budget about 2 CPU, 19 GiB RAM, and a 512 GiB sparse WAL per compute node (x86_64 needs AVX2).
+`cubeS3lvol.enabled=false` by default, same as one-click. Enabling it injects a `cube-s3lvol` sidecar into the Cube Node Big Pod and **recreates that Pod** — budget about 2 CPU, 19 GiB RAM, and a 512 GiB sparse WAL per compute node (x86_64 needs AVX2).
 
 When enabled, the sidecar:
 
@@ -731,8 +733,10 @@ busybox for node-runtime-test only.
 
 `cube-node` is a native `apps/v1` DaemonSet. Bumping Big Pod runtime images
 (`images.cubelet`, `images.waitNodePrep`, …) or changing the Pod template
-**recreates** the Big Pod (Pod UID/IP/netns change) and **interrupts sandboxes
-on that node**. Artifact images bump only `cube-node-installer`; node-init
+**recreates** the Big Pod (Pod UID change). Sandbox tap devices and cubevs hooks
+live in the Pod netns, so on the default host network they survive that, while on
+the Pod network every sandbox on that node loses its network.
+Artifact images bump only `cube-node-installer`; node-init
 images bump `cube-node-bootstrap`; PVM host image bumps only `cube-node-pvm`.
 See [Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade).
 

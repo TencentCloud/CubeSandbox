@@ -158,7 +158,7 @@ For production deployments, or to adjust related configuration, see [8.2 Compute
 **Compute node networking**
 
 ::: warning Decide before you deploy
-Once sandboxes are running, the `cube-node` Pod on a compute node **must not be recreated**: recreation destroys the network namespace that sandbox network devices live in, and **all sandbox networking on that node breaks — inbound and outbound**. For production, deploy `cube-node` with `hostNetwork` so Pod recreation no longer changes the netns. Details and caveats (including NetworkPolicy): [8.3 cube-node networking and Pod recreation](#_8-3-cube-node-networking-and-pod-recreation).
+The default **host network** keeps sandbox networking across `cube-node` Pod recreation. On the Pod network (`cubeNode.hostNetwork: false`) the Pod **must not be recreated** while sandboxes run — all sandbox networking on that node breaks, with no self-healing. Details and trade-offs (including NetworkPolicy): [8.3 cube-node networking and Pod recreation](#_8-3-cube-node-networking-and-pod-recreation).
 :::
 
 
@@ -300,46 +300,46 @@ bootstrap:
 
 ### 8.3 cube-node networking and Pod recreation
 
-::: warning In one sentence
-While sandboxes are running, the `cube-node` Pod **must not be recreated** — recreation breaks network connectivity for **all sandboxes on the node (inbound and outbound) with no self-healing**. For production, enable `hostNetwork` at deploy time to avoid this; the trade-off is that NetworkPolicy needs extra handling (see below).
+::: tip In one sentence
+`cube-node` runs on the **host network** by default, so recreating the Big Pod no longer changes the network namespace sandbox networking lives in. On the Pod network (`cubeNode.hostNetwork: false`) it **must not be recreated**, because recreation breaks network connectivity for **all sandboxes on the node (inbound and outbound) with no self-healing**.
 :::
 
-#### Why the cube-node Pod must not be recreated
+#### Why the network mode decides this
 
-Sandbox network devices (TAP devices) and the cubevs hooks live in the network namespace of the `cube-node` Pod; recreating the Pod destroys that netns:
+Sandbox network devices (TAP devices) and the cubevs hooks live in the network namespace of the `cube-node` Pod, so the Pod's network mode decides what a recreation does to them:
 
 | Item | Description |
 | --- | --- |
 | Trigger | Anything that recreates the Pod: DaemonSet template change, image bump, manual `kubectl delete pod`, … |
-| Impact | **All sandboxes on the node** lose network connectivity — **both inbound and outbound** |
-| Self-healing | **None.** The only recovery is to destroy and recreate the affected sandboxes |
+| Host network (default) | The netns is the host's and does not change across recreation: sandbox network devices survive a `cube-node` rebuild |
+| Pod network (`hostNetwork: false`) | The Pod netns is destroyed: **all sandboxes on the node** lose network connectivity — **both inbound and outbound** — with **no self-healing**. The only recovery is to destroy and recreate the affected sandboxes |
 
 Compute-plane upgrades are affected for the same reason; see [Upgrade](./upgrade.md).
 
-#### Recommendation: enable hostNetwork at deploy time
+#### Default: host network
 
-::: tip Recommended
-Run `cube-node` with `hostNetwork: true` **before any sandbox is created**: the Pod then shares the host netns, which does not change across Pod recreation, so sandbox network devices survive a `cube-node` rebuild.
-:::
-
-What to check when enabling it:
+`cubeNode.hostNetwork` defaults to `true`; a fresh install needs nothing. What to check when you keep it:
 
 | Item | Description |
 | --- | --- |
-| How to enable | The Chart has no values toggle (`security.hostNetwork` is rejected by validation); patch the DaemonSet via a Helm post-renderer / Kustomize / a fork of the Chart |
-| DNS | Also set `dnsPolicy: ClusterFirstWithHostNet` so in-cluster DNS keeps resolving |
-| Port conflicts | Ensure cubelet's ports (9998 / 9999 / 9966) do not conflict with other services on the host |
+| DNS | `dnsPolicy` becomes `ClusterFirstWithHostNet` automatically, so in-cluster DNS keeps resolving |
+| Port conflicts | cubelet (9998 / 9999 / 9966) and, if enabled, CubeS3lvol bind on the host; `cube-node-init` fails fast when something else holds one (`bootstrap.nodeInit.checkHostPorts`) |
+| NetworkPolicy | Cannot govern sandbox traffic; see below |
 | Monitoring / firewalls | Re-point anything keyed on the Pod IP / Pod CIDR at the node IP instead |
 
-#### Trade-off: NetworkPolicy no longer applies
+#### Opting into the Pod network
 
-With hostNetwork, `cube-node` loses its CNI-assigned Pod identity, so Kubernetes NetworkPolicy (e.g. "can sandboxes access this Service") **cannot govern sandbox traffic directly**.
+Set `cubeNode.hostNetwork: false` when Kubernetes NetworkPolicy (e.g. "can sandboxes access this Service") must govern sandbox traffic. That is the one thing the host network gives up; everything else about the Pod network is a caveat:
 
-::: info Reference implementation: PR #1189 (not yet merged; for reference only)
-If you need NetworkPolicy over sandbox traffic to in-cluster Services / Pods, see [PR #1189](https://github.com/TencentCloud/CubeSandbox/pull/1189):
+- a `cube-node` Pod recreation breaks networking for every sandbox on the node;
+- the guest MTU has to fit the CNI overhead — `cubeNode.network.mtu: auto` lowers it to the detected interface.
+
+Changing the value on an existing release recreates every Big Pod, so a pre-upgrade Hook gates it: see [Upgrade · changing the network mode](./upgrade.md#changing-the-network-mode).
+
+::: info Further work: PR #1189 (not merged; for reference only)
+For NetworkPolicy over sandbox traffic to in-cluster Services / Pods *while* staying on the host network, and for a fully in-place `cube-node` replacement, see [PR #1189](https://github.com/TencentCloud/CubeSandbox/pull/1189):
 
 - Only traffic destined for the cluster CIDRs is forwarded through a node-local **EgressProxy Pod** and SNAT'd to the Proxy Pod IP, so it is governed by your own NetworkPolicies; all other traffic keeps the normal route.
-- The PR also makes hostNetwork the default and implements the full in-place `cube-node` replacement design.
 :::
 
 
