@@ -141,6 +141,8 @@ def run_python(ctx: RunContext[Deps], code: str) -> str:
         )
     except CubeSandboxError as exc:
         return f"[cube-sandbox error] {type(exc).__name__}: {exc}"
+    except Exception as exc:  # noqa: BLE001 - e.g. an envd request timeout
+        return f"[execution failed] {type(exc).__name__}: {exc}"
 
     out = result.stdout or ""
     if result.stderr:
@@ -195,9 +197,12 @@ sentence:
   persist for later calls in the same run. Prefer this over creating a sandbox
   inside each tool invocation.
 - **Timeouts.** `commands.run(timeout=...)` bounds a single execution;
-  `Sandbox.create(timeout=...)` bounds the MicroVM's lifetime. Set both for
-  long tasks and pair them with a Pydantic AI
-  [usage limit](https://ai.pydantic.dev/agents/#usage-limits) to cap tool turns.
+  `Sandbox.create(timeout=...)` caps how long the MicroVM may sit **idle** before
+  it is reclaimed — an active sandbox keeps resetting that clock, so it is not a
+  wall-clock lifetime cap. If you also need a hard ceiling on the whole run,
+  enforce it on the agent side (a Pydantic AI
+  [usage limit](https://ai.pydantic.dev/agents/#usage-limits) plus your own
+  deadline).
 - **Error handling.** The tool returns `CubeSandboxError` and transport timeouts
   to the model as text (with stderr delimited and non-zero exit codes reported)
   so it can retry, while `Sandbox.create()` failures propagate and abort the run

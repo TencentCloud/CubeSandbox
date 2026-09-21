@@ -60,7 +60,7 @@ Pydantic AI 模型后端，也**不**修改 CubeSandbox——这是一个小而�
 运行 Pydantic AI Agent 的机器和运行 CubeSandbox 的机器不必是同一台。Agent 通过网络
 访问 CubeAPI/CubeProxy，因此可以用笔记本驱动一台远程 Linux Cube 主机。若在没有通配
 DNS 的情况下使用官方 E2B SDK 的数据面主机名，请参见
-[E2B 开发 sidecar](/zh/guide/multi-node-deploy#official-e2b-sdk-without-wildcard-dns-dev-sidecar)。
+[E2B 开发 sidecar](/zh/guide/multi-node-deploy#官方-e2b-sdk-无泛域名-dns开发-sidecar)。
 :::
 
 ## 接入步骤
@@ -186,8 +186,10 @@ python pydantic_ai_agent_demo.py "计算前 15 个质数及它们的和。"
   逐次调用的 MicroVM 启动开销，也让某次调用写入的文件在同一次运行的后续调用中仍然
   存在。请优先采用这种方式，而不要在每次工具调用内部创建沙箱。
 - **超时。** `commands.run(timeout=...)` 限制单次执行；`Sandbox.create(timeout=...)`
-  限制 MicroVM 的存活时长。长任务两者都应设置，并配合 Pydantic AI 的
-  [用量限制](https://ai.pydantic.dev/agents/#usage-limits) 约束工具轮次。
+  限制的是 MicroVM 允许**空闲**多久后被回收——活跃的沙箱会不断重置该计时，因此它
+  并不是墙钟意义上的存活上限。若还需要为整次运行设定硬性上限，请在 Agent 侧强制
+  （Pydantic AI 的[用量限制](https://ai.pydantic.dev/agents/#usage-limits)加上你
+  自己的截止时间）。
 - **错误处理。** 工具会把 `CubeSandboxError` 与传输超时以文本形式返回给模型
   （stderr 分隔展示、非零退出码单独报告），便于重试；而 `Sandbox.create()` 失败会
   向上传播并干净地中断运行。
@@ -214,4 +216,4 @@ python pydantic_ai_agent_demo.py "计算前 15 个质数及它们的和。"
 - [Pydantic AI 文档](https://ai.pydantic.dev)
 - [Pydantic AI 函数工具](https://ai.pydantic.dev/tools/)
 - [CubeSandbox 快速开始](/zh/guide/quickstart)
-- [将客户端连接到 CubeSandbox 集群](/zh/guide/multi-node-deploy#connect-clients-to-the-cluster)
+- [将客户端连接到 CubeSandbox 集群](/zh/guide/multi-node-deploy#从客户端连接集群)
