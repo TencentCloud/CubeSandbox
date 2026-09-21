@@ -1,0 +1,8 @@
+# Pydantic AI agent framework — requires Python 3.10+.
+# The Agent / @agent.tool / OpenAIChatModel APIs used here are stable across 2.x.
+pydantic-ai>=2.0,<3.0
+# Official CubeSandbox Python SDK (from cubesandbox import Sandbox).
+# >=0.7.0 for the commands/files envd API and the allow_internet_access flag.
+cubesandbox>=0.7.0
+# Loads the local .env file.
+python-dotenv>=1.0
