@@ -204,11 +204,92 @@ func TestProfileCompileRequiresLegacyConfForCoupledScorers(t *testing.T) {
 	// With the legacy block present: compile succeeds.
 	cfg.Scheduler.Score = &config.SchedulerScoreConf{
 		ResourceWeights: map[string]float64{"template_id": 1},
-		ScorePluginConf: config.ScorePluginConf{ImageScore: &config.ImageScore{Weight: 1}},
+		ScorePluginConf: config.ScorePluginConf{ImageScore: &config.ImageScore{
+			Weight:              1,
+			EnableWeightFactors: []string{"template_id"},
+		}},
 	}
 	set, err := Compile(context.Background(), cfg, profileRegistry(t))
 	if err != nil {
 		t.Fatalf("compile with the legacy block present: %v", err)
 	}
 	t.Cleanup(func() { _ = set.Close() })
+}
+
+func TestProfileCompileRejectsDegenerateLegacyCoupledScorers(t *testing.T) {
+	profileFor := func(name string) config.SchedulerProfileConf {
+		return config.SchedulerProfileConf{
+			Name:    "p",
+			Default: true,
+			Scores:  []config.SchedulerProfilePluginConf{{Name: name, Type: "go", Weight: 1}},
+		}
+	}
+	tests := []struct {
+		name    string
+		scorer  string
+		score   *config.SchedulerScoreConf
+		wantErr string
+	}{
+		{
+			name:   "image_score without resource_weights",
+			scorer: "image_score",
+			score: &config.SchedulerScoreConf{
+				ScorePluginConf: config.ScorePluginConf{ImageScore: &config.ImageScore{
+					Weight: 1, EnableWeightFactors: []string{"image_id"}}},
+			},
+			wantErr: "resource_weights",
+		},
+		{
+			name:   "image_score with zero-sum factors",
+			scorer: "image_score",
+			score: &config.SchedulerScoreConf{
+				ResourceWeights: map[string]float64{"image_id": 0},
+				ScorePluginConf: config.ScorePluginConf{ImageScore: &config.ImageScore{
+					Weight: 1, EnableWeightFactors: []string{"image_id"}}},
+			},
+			wantErr: "no enabled factor",
+		},
+		{
+			name:   "image_score disabled in legacy conf",
+			scorer: "image_score",
+			score: &config.SchedulerScoreConf{
+				ResourceWeights: map[string]float64{"image_id": 1},
+				ScorePluginConf: config.ScorePluginConf{ImageScore: &config.ImageScore{
+					Weight: 1, EnableWeightFactors: []string{"image_id"}, Disable: true}},
+			},
+			wantErr: "disable",
+		},
+		{
+			name:   "multi_factor_weighted_average without resource_weights",
+			scorer: "multi_factor_weighted_average",
+			score: &config.SchedulerScoreConf{
+				ScorePluginConf: config.ScorePluginConf{MultiFactorWeightedAverage: &config.MultiFactorWeightedAverage{
+					Weight: 1, EnableWeightFactors: []string{"mvm_num"}}},
+			},
+			wantErr: "resource_weights",
+		},
+		{
+			name:   "real_time_weighted_average with zero-sum factors",
+			scorer: "real_time_weighted_average",
+			score: &config.SchedulerScoreConf{
+				ResourceWeights: map[string]float64{},
+				ScorePluginConf: config.ScorePluginConf{RealTimeWeightedAverage: &config.RealTimeWeightedAverage{
+					Weight: 1, EnableWeightFactors: []string{"mvm_num"}}},
+			},
+			wantErr: "no enabled factor",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{Scheduler: &config.WrapperSchedulerConf{SchedulerConf: config.SchedulerConf{
+				Score:    test.score,
+				Profiles: []config.SchedulerProfileConf{profileFor(test.scorer)},
+			}}}
+			if _, err := Compile(context.Background(), cfg, profileRegistry(t)); err == nil {
+				t.Fatalf("degenerate legacy conf for %q must be rejected", test.scorer)
+			} else if !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("error must mention %q, got: %v", test.wantErr, err)
+			}
+		})
+	}
 }

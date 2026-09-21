@@ -350,12 +350,16 @@ func enabled(value *bool) bool { return value == nil || *value }
 
 // validateLegacyCoupledScoreConf rejects profile entries that reference the
 // built-in scorers still reading their factor switches from the legacy global
-// scheduler.score tree when that tree is missing the required block. Without
-// this check such a scorer silently contributes nothing: its Select returns
-// an empty result and (pre-ErrNotApplicable semantics) the pipeline treated
-// that as "nothing to add". Factory-injected profiles carry the legacy score
-// subtree (scheduler_factory.yaml), so they always pass; the error only fires
-// for hand-written profiles that forgot the coupling.
+// scheduler.score tree when that tree is missing the required block, disables
+// the scorer, or leaves every enabled factor with a zero resource weight.
+// Without these checks such a scorer silently contributes nothing; profile
+// scorers are compiled ForceEnabled, so the runtime empty result would either
+// trip the coverage check or be replaced by the default score. (At runtime
+// the built-ins also report score.ErrNotApplicable for these degenerate
+// configurations, so a hot-reload race degrades to a sanctioned skip instead
+// of a failure.) Factory-injected profiles carry the legacy score subtree
+// (scheduler_factory.yaml), so they always pass; the error only fires for
+// hand-written profiles that forgot the coupling.
 func validateLegacyCoupledScoreConf(sched *config.WrapperSchedulerConf, name string, conf config.SchedulerProfilePluginConf) error {
 	kind := strings.ToLower(strings.TrimSpace(conf.Type))
 	if kind == "" || kind == "builtin" {
@@ -367,22 +371,46 @@ func validateLegacyCoupledScoreConf(sched *config.WrapperSchedulerConf, name str
 	missing := func(block string) error {
 		return fmt.Errorf("score plugin %q requires the legacy %s block: this built-in scorer reads its factor switches from the legacy scheduler.score tree (copy it from scheduler_factory.yaml or set scheduler.score accordingly); without it the scorer would silently score nothing", name, block)
 	}
+	var factors []string
+	var disabled bool
 	switch name {
 	case "real_time_weighted_average":
 		if sched == nil || sched.Score == nil || sched.Score.ScorePluginConf.RealTimeWeightedAverage == nil {
 			return missing("scheduler.score.plugin_conf.real_time_weighted_average")
 		}
-		if sched.Score.ResourceWeights == nil {
-			return missing("scheduler.score.resource_weights")
-		}
+		factors = sched.Score.ScorePluginConf.RealTimeWeightedAverage.EnableWeightFactors
+		disabled = sched.Score.ScorePluginConf.RealTimeWeightedAverage.Disable
 	case "image_score":
 		if sched == nil || sched.Score == nil || sched.Score.ScorePluginConf.ImageScore == nil {
 			return missing("scheduler.score.plugin_conf.image_score")
 		}
+		factors = sched.Score.ScorePluginConf.ImageScore.EnableWeightFactors
+		disabled = sched.Score.ScorePluginConf.ImageScore.Disable
 	case "multi_factor_weighted_average":
 		if sched == nil || sched.Score == nil || sched.Score.ScorePluginConf.MultiFactorWeightedAverage == nil {
 			return missing("scheduler.score.plugin_conf.multi_factor_weighted_average")
 		}
+		factors = sched.Score.ScorePluginConf.MultiFactorWeightedAverage.EnableWeightFactors
+		disabled = sched.Score.ScorePluginConf.MultiFactorWeightedAverage.Disable
+	default:
+		return nil
+	}
+	if disabled {
+		return fmt.Errorf("score plugin %q is disabled via scheduler.score.plugin_conf.%[1]s.disable: true but referenced by a profile: "+
+			"profile scorers are ForceEnabled and the disable flag is ignored at runtime, so the scorer would silently score nothing; "+
+			"remove the disable flag or drop the plugin from the profile", name)
+	}
+	if sched.Score.ResourceWeights == nil {
+		return missing("scheduler.score.resource_weights")
+	}
+	totalWeight := 0.0
+	for _, factor := range factors {
+		totalWeight += sched.Score.ResourceWeights[factor]
+	}
+	if totalWeight == 0 {
+		return fmt.Errorf("score plugin %q has no enabled factor with a non-zero scheduler.score.resource_weights entry: "+
+			"the scorer would silently score nothing; enable at least one factor in scheduler.score.plugin_conf.%[1]s.enable_weight_factors "+
+			"and give it a positive resource weight", name)
 	}
 	return nil
 }
