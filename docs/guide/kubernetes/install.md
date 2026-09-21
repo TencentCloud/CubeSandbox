@@ -158,7 +158,9 @@ For production deployments, or to adjust related configuration, see [8.2 Compute
 **Compute node networking**
 
 ::: warning Decide before you deploy
-The default **host network** keeps sandbox networking across `cube-node` Pod recreation. On the Pod network (`cubeNode.hostNetwork: false`) the Pod **must not be recreated** while sandboxes run — all sandbox networking on that node breaks, with no self-healing. Details and trade-offs (including NetworkPolicy): [8.3 cube-node networking and Pod recreation](#_8-3-cube-node-networking-and-pod-recreation).
+The default **host network** keeps sandbox devices in the host netns across `cube-node` Pod recreation; drain remains the supported path until cubelet-restart survival is live-validated. On the Pod network (`cubeNode.hostNetwork: false`) the Pod **must not be recreated** while sandboxes run — all sandbox networking on that node breaks, with no self-healing. Details and trade-offs (including NetworkPolicy): [8.3 cube-node networking and Pod recreation](#_8-3-cube-node-networking-and-pod-recreation).
+
+The host-network default is new and not yet validated against every CNI / admission configuration. A `hostNetwork` Pod bypasses CNI IPAM and is not selectable by NetworkPolicy; on an eBPF CNI (e.g. Cilium) the CNI's own eBPF programs may conflict with the cubevs hooks on the host interface, and a cluster enforcing the `restricted` Pod Security Admission standard rejects `hostNetwork` Pods. **Validate the default in a test cluster first** before relying on it in production; if your cluster cannot allow `hostNetwork`, set `cubeNode.hostNetwork: false` (see [8.3](#_8-3-cube-node-networking-and-pod-recreation)).
 :::
 
 
@@ -301,7 +303,7 @@ bootstrap:
 ### 8.3 cube-node networking and Pod recreation
 
 ::: tip In one sentence
-`cube-node` runs on the **host network** by default, so recreating the Big Pod no longer changes the network namespace sandbox networking lives in. On the Pod network (`cubeNode.hostNetwork: false`) it **must not be recreated**, because recreation breaks network connectivity for **all sandboxes on the node (inbound and outbound) with no self-healing**.
+`cube-node` runs on the **host network** by default, so recreating the Big Pod no longer changes the network namespace sandbox networking lives in. Drain remains the supported compute-plane path until cubelet-restart survival is live-validated — see [Upgrade](./upgrade.md). On the Pod network (`cubeNode.hostNetwork: false`) it **must not be recreated**, because recreation breaks network connectivity for **all sandboxes on the node (inbound and outbound) with no self-healing**.
 :::
 
 #### Why the network mode decides this
@@ -311,7 +313,7 @@ Sandbox network devices (TAP devices) and the cubevs hooks live in the network n
 | Item | Description |
 | --- | --- |
 | Trigger | Anything that recreates the Pod: DaemonSet template change, image bump, manual `kubectl delete pod`, … |
-| Host network (default) | The netns is the host's and does not change across recreation: sandbox network devices survive a `cube-node` rebuild |
+| Host network (default) | The netns is the host's and does not change across recreation, so devices stay. Survival through a cubelet restart is not live-validated — drain until it is (see [Upgrade](./upgrade.md)) |
 | Pod network (`hostNetwork: false`) | The Pod netns is destroyed: **all sandboxes on the node** lose network connectivity — **both inbound and outbound** — with **no self-healing**. The only recovery is to destroy and recreate the affected sandboxes |
 
 Compute-plane upgrades are affected for the same reason; see [Upgrade](./upgrade.md).
@@ -323,13 +325,14 @@ Compute-plane upgrades are affected for the same reason; see [Upgrade](./upgrade
 | Item | Description |
 | --- | --- |
 | DNS | `dnsPolicy` becomes `ClusterFirstWithHostNet` automatically, so in-cluster DNS keeps resolving |
-| Port conflicts | cubelet (9998 / 9999 / 9966) and, if enabled, CubeS3lvol bind on the host; `cube-node-init` fails fast when something else holds one (`bootstrap.nodeInit.checkHostPorts`) |
+| Port conflicts | cubelet (9998 / 9999 / 9966) and CubeS3lvol (when enabled) bind on the host; `cube-node-init` fails fast if another process holds one (`bootstrap.nodeInit.checkHostPorts`). CubeEgress ports are not in this check — verify them yourself if it is enabled. Cubelet ports are unauthenticated — firewall them like kubelet's 10250 |
 | NetworkPolicy | Cannot govern sandbox traffic; see below |
 | Monitoring / firewalls | Re-point anything keyed on the Pod IP / Pod CIDR at the node IP instead |
+| CNI / admission | A `hostNetwork` Pod bypasses CNI IPAM and is not selectable by NetworkPolicy; an eBPF CNI (e.g. Cilium) may conflict with the cubevs hooks on the host interface; `restricted` Pod Security Admission rejects `hostNetwork` Pods. This default is new — validate it in a test cluster first, or set `cubeNode.hostNetwork: false` |
 
 #### Opting into the Pod network
 
-Set `cubeNode.hostNetwork: false` when Kubernetes NetworkPolicy (e.g. "can sandboxes access this Service") must govern sandbox traffic. That is the one thing the host network gives up; everything else about the Pod network is a caveat:
+Set `cubeNode.hostNetwork: false` when Kubernetes NetworkPolicy (e.g. "can sandboxes access this Service") must govern sandbox traffic. Everything else about the Pod network is a caveat:
 
 - a `cube-node` Pod recreation breaks networking for every sandbox on the node;
 - the guest MTU has to fit the CNI overhead — `cubeNode.network.mtu: auto` lowers it to the detected interface.

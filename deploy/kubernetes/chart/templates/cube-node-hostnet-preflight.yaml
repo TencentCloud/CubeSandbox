@@ -1,12 +1,14 @@
 {{- if .Values.cubeNode.enabled }}
 {{/*
-Pre-install/pre-upgrade gate on cube-node's network mode; rules in
+Pre-install/pre-upgrade/pre-rollback gate on cube-node's network mode; rules in
 files/cube-node-hostnet-preflight.sh. Like the cubevs CIDR preflight it is a Job
 on a control-plane node — it only needs the API, and Helm surfaces its failure
-message in the Hook logs.
+message in the Hook logs. pre-rollback covers helm rollback / --atomic when the
+target revision was rendered by a chart that ships this Hook; an older target
+has no Hook and cannot be gated.
 */}}
 {{- $hookAnnotations := dict
-  "helm.sh/hook" "pre-install,pre-upgrade"
+  "helm.sh/hook" "pre-install,pre-upgrade,pre-rollback"
   "helm.sh/hook-weight" "-109"
   "helm.sh/hook-delete-policy" "before-hook-creation,hook-succeeded,hook-failed"
 -}}

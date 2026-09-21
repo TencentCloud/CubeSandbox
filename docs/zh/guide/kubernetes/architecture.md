@@ -412,6 +412,8 @@ externalControlPlane:
 | `cubeProxy.configureClusterDNS` | `true` | 是否写入集群 CoreDNS |
 | `cubeNode.dns.sandbox.followNodeDns` | `true` | guest 跟随节点 DNS |
 | `cubeNode.pvmGuestKernel.enabled` | `true` | 首次安装默认是否倾向 PVM guest |
+| `cubeNode.hostNetwork` | `true` | 宿主机网络；Pod 网络下 Pod 重建会中断该节点所有沙箱网络 |
+| `cubeNode.hostNetworkChangeAck` | `false` | 网络模式 preflight Hook 的一次性确认键 |
 | `bootstrap.pvmHostKernel.enabled` | `true` | host kernel bootstrap（可能重启节点） |
 | `bootstrap.pvmHostKernel.startupGate.enabled` | `true` | PVM 未就绪时使用 Node NoSchedule 污点硬门闩 |
 | `bootstrap.pvmHostKernel.bootArgs` | `nopti pti=off` | 当前 `kvm_pvm` 不支持 host KPTI |

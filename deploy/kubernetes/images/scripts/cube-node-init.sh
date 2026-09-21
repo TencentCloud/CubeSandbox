@@ -238,6 +238,16 @@ validate_cidr() {
   fi
 }
 
+# List addrs/routes in the netns cube-dev will use: host when cube-node is
+# hostNetwork (bootstrap itself is always on the Pod network), else this netns.
+cidr_ip() {
+  if [ "$CUBE_NODE_HOST_NETWORK" = "true" ]; then
+    nsenter --target 1 --net -- ip "$@"
+  else
+    ip "$@"
+  fi
+}
+
 check_cidr_conflict() {
   [ "$CHECK_CIDR" = "true" ] || return 0
   [ -n "$CUBE_SANDBOX_NETWORK_CIDR" ] || return 0
@@ -249,8 +259,8 @@ check_cidr_conflict() {
 
   conflicts_file="$(mktemp)"
   {
-    ip -o -4 addr show 2>/dev/null | awk '{print $4 " addr " $2}'
-    ip -o -4 route show 2>/dev/null | awk '{print $1 " route " $0}'
+    cidr_ip -o -4 addr show 2>/dev/null | awk '{print $4 " addr " $2}'
+    cidr_ip -o -4 route show 2>/dev/null | awk '{print $1 " route " $0}'
   } | while read -r candidate kind detail; do
     existing="$(normalize_existing_cidr "$candidate" || true)"
     [ -n "$existing" ] || continue
@@ -276,16 +286,13 @@ Set CUBE_SANDBOX_NETWORK_CIDR to a non-overlapping private CIDR or set CUBE_SAND
 check_host_ports() {
   [ "$CHECK_HOST_PORTS" = "true" ] || return 0
   [ "$CUBE_NODE_HOST_NETWORK" = "true" ] || return 0
-  if [ "$CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK" = "1" ]; then
-    log "host port check skipped: CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK=1"
-    return 0
-  fi
 
   conflicts="$(host_port_conflicts "$(host_path /proc)")"
   if [ -n "${conflicts}" ]; then
     fail "host port conflict: cube-node binds these ports on the host (cubeNode.hostNetwork=true) but something else already holds them
 ${conflicts}
-Stop the conflicting service, or set cubeNode.hostNetwork=false to run cube-node on the Pod network."
+Stop the conflicting service. \"unknown\" means no reachable holder.
+cubeNode.hostNetwork=false is gated — see docs/guide/kubernetes/upgrade.md."
   fi
   log "host port check passed: ${HOST_PORT_RESERVED_PORTS}"
 }

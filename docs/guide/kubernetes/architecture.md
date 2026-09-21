@@ -413,6 +413,8 @@ Does not install built-in Master / API / MySQL / Redis / MinIO / WebUI; by defau
 | `cubeProxy.configureClusterDNS` | `true` | Whether to write cluster CoreDNS |
 | `cubeNode.dns.sandbox.followNodeDns` | `true` | guest follows node DNS |
 | `cubeNode.pvmGuestKernel.enabled` | `true` | Whether first-install default prefers PVM guest |
+| `cubeNode.hostNetwork` | `true` | Host network; on the Pod network a Pod recreate breaks every sandbox's networking on the node |
+| `cubeNode.hostNetworkChangeAck` | `false` | One-time acknowledgement for the network-mode preflight Hook |
 | `bootstrap.pvmHostKernel.enabled` | `true` | host kernel bootstrap (may reboot nodes) |
 | `bootstrap.pvmHostKernel.startupGate.enabled` | `true` | Hard NoSchedule node taint gate when PVM is not ready |
 | `bootstrap.pvmHostKernel.bootArgs` | `nopti pti=off` | Current `kvm_pvm` does not support host KPTI |

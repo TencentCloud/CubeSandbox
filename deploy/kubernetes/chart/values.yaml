@@ -783,14 +783,17 @@ cubeNode:
   terminationGracePeriodSeconds: 30
 
   # Run cube-node on the host network (dnsPolicy becomes ClusterFirstWithHostNet):
-  # the Pod netns is the host's, so sandbox network devices survive Pod recreation
-  # — on the Pod network a recreate destroys the netns and breaks every sandbox's
-  # networking on that node. The one trade-off is NetworkPolicy: it can no longer
-  # govern sandbox traffic. Set false only when NetworkPolicy must.
+  # the Pod netns is the host's, so sandbox taps stay across Pod recreation —
+  # on the Pod network a recreate destroys the netns and breaks every sandbox's
+  # networking on that node. Trade-offs: NetworkPolicy cannot govern sandbox
+  # traffic, and cubelet / CubeS3lvol / cube-egress bind on the host (cubelet
+  # is unauthenticated — firewall it like kubelet). Set false only when
+  # NetworkPolicy must apply.
   hostNetwork: true
-  # One-time acknowledgement read by the cube-node-hostnet preflight Hook: changing
-  # hostNetwork on an existing release recreates every Big Pod, so the Hook blocks
-  # the upgrade until this is set. Remove it after that upgrade.
+  # One-time acknowledgement read by the cube-node-hostnet preflight Hook
+  # (pre-install/pre-upgrade/pre-rollback): changing hostNetwork on an existing
+  # release recreates every Big Pod, so the Hook blocks until this is set.
+  # Remove it after that upgrade.
   hostNetworkChangeAck: false
 
   # Stable NodeID = Kubernetes node name (CUBE_SANDBOX_NODE_ID).
@@ -817,8 +820,10 @@ cubeNode:
     # Empty falls back to the packaged Cubelet config.toml CIDR (192.168.0.0/18).
     # Helm pre-install/pre-upgrade Hook fails fast when this overlaps Service CIDR.
     cidr: "172.16.0.0/18"
-    # Skip host-network conflict checks (cube-node-init) and the Service CIDR
-    # preflight Hook. Use only when you accept blackhole / routing risk.
+    # Skip the CIDR conflict checks (cube-node-init) and the Service CIDR
+    # preflight Hook. Use only when you accept blackhole / routing risk. The
+    # host-port preflight is not skipped by this — see
+    # bootstrap.nodeInit.checkHostPorts.
     cidrSkipConflictCheck: false
     # Guest MTU patched into Cubelet config.toml mvm_mtu
     # (CUBE_SANDBOX_NETWORK_MTU). The sandbox tap is created with this value and
@@ -1297,9 +1302,9 @@ bootstrap:
     checkBPFFS: true
     checkGlibc: true
     checkCIDR: true
-    # Fail when a cubelet port (9998/9999/9966) or, with cubeS3lvol enabled, its
-    # listen port is already held on the host by another process. Runs only when
-    # cubeNode.hostNetwork=true; cubeNode.network.cidrSkipConflictCheck skips it.
+    # Fail when a reserved host port is already held. Runs under
+    # cubeNode.hostNetwork=true; the reserved-port set is part of the
+    # node-prep fingerprint, so changing it re-runs the check.
     checkHostPorts: true
     checkCubecowDeps: true
     dataCubelet:

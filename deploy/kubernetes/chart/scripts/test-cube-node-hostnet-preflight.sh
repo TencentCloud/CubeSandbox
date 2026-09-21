@@ -132,6 +132,25 @@ assert_main_passes "unchanged host network" true false
 write_fake_kubectl 'Error from server (NotFound): daemonsets.apps "cube-node" not found' false
 assert_main_passes "fresh install" true false
 
+# A stale acknowledgement left in values must not silently arm the next change.
+write_fake_kubectl 'true' true
+if output="$(run_main true true 2>&1)"; then
+  case "$output" in
+    *"remove it"*) ;;
+    *) fail "keep with a stale ack must warn about removing it: ${output}" ;;
+  esac
+else
+  fail "keep with a stale ack must still pass: ${output}"
+fi
+
+# The reverse switch (host network -> Pod network) is gated the same way.
+assert_main_fails "host network -> Pod network without ack" false false
+assert_main_passes "acknowledged reverse switch" false true
+case "$(run_main false true 2>&1)" in
+  *WARNING*) ;;
+  *) fail "an acknowledged reverse switch must still warn" ;;
+esac
+
 # Any other API error must fail the release rather than pass as "no DaemonSet".
 write_fake_kubectl 'Unable to connect to the server: dial tcp: i/o timeout' false
 if output="$(run_main true false 2>&1)"; then
@@ -171,6 +190,7 @@ fi
 
 python3 - "$TMP_DIR/base.yaml" <<'PY' || exit 1
 import pathlib
+import re
 import sys
 
 docs = pathlib.Path(sys.argv[1]).read_text().split("\n---\n")
@@ -180,17 +200,39 @@ if len(job) != 1:
     raise SystemExit(f"expected one hostnet preflight Job, found {len(job)}")
 job = job[0]
 for expected in (
-    'helm.sh/hook-weight: "-109"',       # after the cubevs CIDR preflight (-110)
+    'helm.sh/hook-weight: "-109"',             # after the cubevs CIDR preflight (-110)
     'CUBE_NODE_HOSTNETWORK_DESIRED',
     'CUBE_NODE_HOSTNETWORK_CHANGE_ACK',
     'RELEASE_NAMESPACE',
     'CUBE_NODE_DS_NAME',
-    'hostnet-preflight-cube-node',       # the DaemonSet it inspects
+    'hostnet-preflight-cube-node',             # the DaemonSet it inspects
     'defaultMode: 0755',
     'restartPolicy: Never',
 ):
     if expected not in job:
         raise SystemExit(f"Hook Job is missing {expected!r}")
+# Pin the events, and reject a value without pre-rollback: without it,
+# helm rollback / --atomic can apply a hostNetwork:false manifest with no gate.
+hook = re.search(r"helm\.sh/hook: ([^\n]+)", job)
+if hook is None:
+    raise SystemExit("Hook Job is missing helm.sh/hook")
+if hook.group(1) == "pre-install,pre-upgrade":
+    raise SystemExit("stale hook annotation without pre-rollback must not render")
+if hook.group(1) != "pre-install,pre-upgrade,pre-rollback":
+    raise SystemExit(f"Hook events must include pre-rollback, got {hook.group(1)!r}")
+if 'name: CUBE_NODE_HOSTNETWORK_DESIRED\n              value: "true"' not in job:
+    raise SystemExit("desired hostNetwork must render as true by default")
+if 'name: CUBE_NODE_HOSTNETWORK_CHANGE_ACK\n              value: "false"' not in job:
+    raise SystemExit("the acknowledgement must default to false")
+
+# The Role must stay read-only on exactly the DaemonSet the Hook inspects.
+role = [d for d in docs if "\nkind: Role\n" in f"\n{d}\n"
+        and "cube-node-hostnet-preflight" in d]
+if len(role) != 1:
+    raise SystemExit(f"expected one hostnet preflight Role, found {len(role)}")
+role = role[0]
+if 'resources: ["daemonsets"]' not in role or 'verbs: ["get"]' not in role:
+    raise SystemExit("the Role must be get-only on daemonsets")
 PY
 
 # The opt-out path must reach the Hook as data, and disabling cube-node must not

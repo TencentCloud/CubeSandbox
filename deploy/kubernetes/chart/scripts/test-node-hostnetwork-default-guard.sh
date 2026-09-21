@@ -117,6 +117,8 @@ if base.get("CUBE_NODE_HOST_NETWORK") != "true":
     raise SystemExit("the default render must tell node-init it is on the host network")
 if base.get("HOST_PORT_RESERVED_PORTS") != "9998 9999 9966":
     raise SystemExit(f"unexpected default port set: {base.get('HOST_PORT_RESERVED_PORTS')!r}")
+if base.get("PREP_GENERATION") != "2":
+    raise SystemExit(f"prepGeneration must be pinned at 2 so already-ready nodes re-run node-init, got {base.get('PREP_GENERATION')!r}")
 if podnet.get("CUBE_NODE_HOST_NETWORK") != "false":
     raise SystemExit("the opt-out render must tell node-init it is on the Pod network")
 if podnet.get("CHECK_HOST_PORTS") != "false":
@@ -130,6 +132,34 @@ if ! grep -A1 'name: HOST_PORT_RESERVED_PORTS' "$TMP_DIR/s3lvol-bootstrap.yaml" 
   fail "enabling s3lvol must add its listen port to the checked set: $(grep -A1 HOST_PORT_RESERVED_PORTS "$TMP_DIR/s3lvol-bootstrap.yaml")"
 fi
 
+# The sentinel writer (write-node-prep-ready) must see the same reserved-port
+# set as cube-node-init, or its host_ports fingerprint field can never match
+# and SKIP_IF_NODE_PREP_READY is permanently defeated.
+python3 - "$TMP_DIR/base-bootstrap.yaml" "$TMP_DIR/s3lvol-bootstrap.yaml" <<'PY' || exit 1
+import pathlib
+import re
+import sys
+
+def env_block(text, container):
+    m = re.search(r"- name: " + re.escape(container) + r"\n.*?(?=\n      - name: |\n      volumes:|\Z)", text, re.S)
+    return m.group(0) if m else ""
+
+def env_value(block, key):
+    m = re.search(r"- name: " + re.escape(key) + r"\n\s+value: \"?([^\n\"]*)\"?", block)
+    return m.group(1) if m else None
+
+for path in (sys.argv[1], sys.argv[2]):
+    text = pathlib.Path(path).read_text()
+    init = env_block(text, "cube-node-init")
+    writer = env_block(text, "write-node-prep-ready")
+    if not writer:
+        raise SystemExit(f"write-node-prep-ready container not found in {path}")
+    if "HOST_PORT_RESERVED_PORTS" not in writer:
+        raise SystemExit(f"write-node-prep-ready must receive HOST_PORT_RESERVED_PORTS in {path}")
+    if env_value(init, "HOST_PORT_RESERVED_PORTS") != env_value(writer, "HOST_PORT_RESERVED_PORTS"):
+        raise SystemExit(f"init vs write-node-prep-ready HOST_PORT_RESERVED_PORTS mismatch in {path}")
+PY
+
 # Port resolution is tested against a fixture tree: the real one needs a host.
 # /proc/net/tcp is hex, column 4 is the state (0A = LISTEN), column 10 the inode.
 [ -f "$NODE_PREP_LIB" ] || fail "missing $NODE_PREP_LIB"
@@ -139,8 +169,20 @@ export HOST_PORT_RESERVED_PORTS
 # shellcheck disable=SC1090
 . "$NODE_PREP_LIB"
 
+fp="$(node_prep_compute_fingerprint)"
+case "$fp" in
+  *"host_ports=${HOST_PORT_RESERVED_PORTS}"*) ;;
+  *) fail "fingerprint must include the reserved-port set: $fp" ;;
+esac
+HOST_PORT_RESERVED_PORTS="9998 9999 9966"
+fp_other="$(node_prep_compute_fingerprint)"
+if [ "$fp" = "$fp_other" ]; then
+  fail "changing the reserved-port set must change the fingerprint"
+fi
+HOST_PORT_RESERVED_PORTS="9998 9999 9966 4420"
+
 fixture="$TMP_DIR/host/proc"
-mkdir -p "$fixture/1/net" "$fixture/4242/fd" "$fixture/5555/fd" "$fixture/6666/fd"
+mkdir -p "$fixture/1/net" "$fixture/4242/fd" "$fixture/5555/fd" "$fixture/6666/fd" "$fixture/7777/fd"
 cat > "$fixture/1/net/tcp" <<'EOF'
   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 0100007F:270F 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 11111 1 0000000000000000 100 0 0 10 0
@@ -155,14 +197,18 @@ cat > "$fixture/1/net/tcp6" <<'EOF'
    0: 00000000000000000000000001000000:270E 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 11117 1 0000000000000000 100 0 0 10 0
 EOF
 
-# 9999 is held by our own cubelet, 9966 by a foreign nginx, 4420 by a socket no
-# process holds, 8080 and 12345 are none of our business.
+# 9999 is held by our own cubelet (comm only — fallback), 9966 by a foreign
+# nginx, 4420 by a thread whose comm is not in the allow-list but whose exe
+# is, 8080 and 12345 are none of our business. 9998 (tcp6) has no holder.
 printf 'cubelet\n' > "$fixture/4242/comm"
 ln -s 'socket:[11111]' "$fixture/4242/fd/7"
 printf 's3lvol_tgt\n' > "$fixture/5555/comm"
 ln -s 'socket:[11112]' "$fixture/5555/fd/3"
 printf 'nginx\n' > "$fixture/6666/comm"
 ln -s 'socket:[11114]' "$fixture/6666/fd/9"
+printf 'reactor_0\n' > "$fixture/7777/comm"
+ln -s '/opt/s3lvol/bin/s3lvol_tgt (deleted)' "$fixture/7777/exe"
+ln -s 'socket:[11116]' "$fixture/7777/fd/4"
 
 listened="$(host_listen_ports "$fixture/1/net")"
 case "$listened" in
@@ -196,16 +242,82 @@ case "$conflicts" in
   *) fail "a foreign holder must be reported with pid and comm: $conflicts" ;;
 esac
 case "$conflicts" in
-  *"port 4420 held by unknown"*) ;;
-  *) fail "a holder with no reachable process must be reported as unknown: $conflicts" ;;
+  *"4420 held"*) fail "exe basename must identify our sidecar even when comm is a reactor thread: $conflicts" ;;
+  *) ;;
 esac
 case "$conflicts" in
   *"port 9998 held by unknown"*) ;;
-  *) fail "the tcp6 listener must be checked too: $conflicts" ;;
+  *) fail "a holder with no reachable process must be reported as unknown: $conflicts" ;;
 esac
 case "$conflicts" in
   *"8080"*|*"12345"*) fail "unreserved ports are none of our business: $conflicts" ;;
   *) ;;
 esac
+
+# check_host_ports gating, extracted from cube-node-init.sh (sourcing the script
+# would run every other check). The port preflight answers to its own switch and
+# the network mode only — the CIDR skip must not turn it off.
+init_body="$(sed -n '/^check_host_ports()/,/^}/p' "$REPO_ROOT/deploy/kubernetes/images/scripts/cube-node-init.sh")"
+[ -n "$init_body" ] || fail "could not extract check_host_ports() from cube-node-init.sh"
+eval "$init_body"
+
+log() { :; }
+host_path() { printf '%s%s' "${HOST_ROOT:-/host}" "$1"; }
+host_port_conflicts() {
+  [ "$1" = "/host/proc" ] || fail "check_host_ports must probe the host netns, got '$1'"
+  printf -- '- port 9998 held by 0 stub\n'
+}
+
+run_check() {
+  (
+    CHECK_HOST_PORTS="$1"
+    CUBE_NODE_HOST_NETWORK="$2"
+    CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK="$3"
+    check_host_ports
+  )
+}
+
+assert_check_runs() {
+  if output="$(run_check "$@" 2>&1)"; then
+    fail "port check must run and report (CHECK_HOST_PORTS=$1 hostNetwork=$2 cidrSkip=$3): no conflict reported"
+  fi
+  case "$output" in
+    *"host port conflict"*) ;;
+    *) fail "port check must report the conflict (CHECK_HOST_PORTS=$1 hostNetwork=$2 cidrSkip=$3): $output" ;;
+  esac
+}
+
+assert_check_skipped() {
+  if ! output="$(run_check "$@" 2>&1)"; then
+    fail "port check must be gated off (CHECK_HOST_PORTS=$1 hostNetwork=$2 cidrSkip=$3): $output"
+  fi
+}
+
+assert_check_runs true true 0
+assert_check_runs true true 1
+assert_check_skipped false true 0
+assert_check_skipped true false 0
+
+# CIDR listing must enter the host netns when cube-node is on the host
+# network; bootstrap itself is always on the Pod network.
+cidr_fn="$(sed -n '/^cidr_ip()/,/^}/p' "$REPO_ROOT/deploy/kubernetes/images/scripts/cube-node-init.sh")"
+[ -n "$cidr_fn" ] || fail "could not extract cidr_ip() from cube-node-init.sh"
+eval "$cidr_fn"
+ip() { printf 'ip %s\n' "$*"; }
+nsenter() { printf 'nsenter %s\n' "$*"; }
+host_listed="$(CUBE_NODE_HOST_NETWORK=true cidr_ip -o -4 addr show)"
+case "$host_listed" in
+  *"nsenter --target 1 --net -- ip -o -4 addr show"*) ;;
+  *) fail "hostNetwork CIDR check must nsenter the host netns: $host_listed" ;;
+esac
+pod_listed="$(CUBE_NODE_HOST_NETWORK=false cidr_ip -o -4 addr show)"
+case "$pod_listed" in
+  *"nsenter"*) fail "Pod-network CIDR check must stay in this netns: $pod_listed" ;;
+  *"ip -o -4 addr show"*) ;;
+  *) fail "Pod-network CIDR check must call ip: $pod_listed" ;;
+esac
+sed -n '/^check_cidr_conflict()/,/^}/p' "$REPO_ROOT/deploy/kubernetes/images/scripts/cube-node-init.sh" \
+  | grep -q 'cidr_ip -o -4' \
+  || fail "check_cidr_conflict must list addrs/routes via cidr_ip"
 
 echo "cube-node host-network default guard passed"

@@ -1,8 +1,10 @@
 #!/bin/bash
-# Helm pre-install/pre-upgrade: refuse to change cube-node's network mode on an
-# existing release without an explicit acknowledgement. The mode is a Pod-template
-# field, so the change recreates every Big Pod and strands the sandbox network
-# devices in the old netns, in either direction.
+# Helm pre-install/pre-upgrade/pre-rollback: refuse to change cube-node's
+# network mode on an existing release without an explicit acknowledgement. The
+# mode is a Pod-template field, so the change recreates every Big Pod and
+# strands the sandbox network devices in the old netns, in either direction.
+# pre-rollback runs from the *target* revision's stored manifest: it gates
+# helm rollback / --atomic only when that revision already shipped this Hook.
 if [[ "${CUBE_NODE_HOSTNET_PREFLIGHT_SOURCE_ONLY:-0}" != "1" ]]; then
   set -euo pipefail
 fi
@@ -107,6 +109,9 @@ main() {
   case "${decision}" in
     keep)
       log "hostNetwork unchanged ($(normalize_bool "${live}")); nothing to do"
+      if [[ "$(normalize_bool "${ack}")" == "true" ]]; then
+        log "WARNING: cubeNode.hostNetworkChangeAck is set while the mode is unchanged; remove it so a future mode change is gated again"
+      fi
       ;;
     ack-ok)
       log "WARNING: hostNetwork changes to ${desired} with cubeNode.hostNetworkChangeAck=true; every Big Pod is recreated and the sandboxes still running on those nodes lose their networking"

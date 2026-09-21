@@ -5,7 +5,7 @@
 #
 # Fingerprint fields for node-prep-ready (version=1):
 #   version, mode (full|noop), kernel, boot_args (space-separated required tokens),
-#   prep_generation, pvm_enabled, node_init_enabled
+#   prep_generation, pvm_enabled, node_init_enabled, host_ports (reserved-port set)
 #
 # Fingerprint fields for pvm-host-ready (version=1):
 #   version, kernel, boot_args, desired_pattern
@@ -159,6 +159,7 @@ node_prep_compute_fingerprint() {
   printf 'prep_generation=%s\n' "$PREP_GENERATION"
   printf 'pvm_enabled=%s\n' "$pvm"
   printf 'node_init_enabled=%s\n' "$ninit"
+  printf 'host_ports=%s\n' "${HOST_PORT_RESERVED_PORTS:-}"
 }
 
 node_prep_kernel_ready() {
@@ -323,12 +324,14 @@ invalidate_pvm_gate_sentinels() {
 }
 
 # Ports cube-node binds on the host under hostNetwork; the chart overrides this
-# via env, the default covers direct runs. CubeEgress is excluded on purpose:
-# openresty serves it, so a foreign nginx is indistinguishable by name, and its
-# listeners sit on the cube-dev gateway, which the CIDR conflict check guards.
+# via env, the default covers direct runs. CubeEgress is excluded: its server
+# is indistinguishable from a foreign one by name or exe, so reserving those
+# ports would false-positive on our own sidecar. They are not preflighted —
+# check them yourself if cubeEgress is enabled.
 HOST_PORT_RESERVED_PORTS="${HOST_PORT_RESERVED_PORTS:-9998 9999 9966}"
 # Holders that are not conflicts: our own components, including a Big Pod that
-# is still exiting.
+# is still exiting. Matched against /proc/<pid>/exe basename first (thread
+# rename does not change exe), then comm.
 HOST_PORT_ALLOWED_COMMS="${HOST_PORT_ALLOWED_COMMS:-cubelet cube-s3lvol s3lvol_tgt}"
 
 # host_listen_ports <proc-net-dir>
@@ -355,23 +358,50 @@ host_listen_ports() {
   done
 }
 
+# host_port_holder_exe_base <proc-pid-dir>
+#   Basename of /proc/<pid>/exe, with the kernel's " (deleted)" suffix stripped.
+#   Empty when exe is unreadable.
+host_port_holder_exe_base() {
+  local exe
+  exe="$(readlink "$1/exe" 2>/dev/null || true)"
+  exe="${exe##*/}"
+  exe="${exe% (deleted)}"
+  printf '%s\n' "$exe"
+}
+
+# host_port_name_allowed <name> <allowed-comms>
+#   True when <name> is a non-empty token in the allow-list.
+host_port_name_allowed() {
+  local name="$1" allowed="$2"
+  [ -n "$name" ] || return 1
+  case " ${allowed} " in
+    *" ${name} "*) return 0 ;;
+  esac
+  return 1
+}
+
 # host_listen_port_holder <host-proc-root> <inode> <allowed-comms>
-#   Print "own" (holder named in <allowed-comms>), "foreign <pid> <comm>", or
-#   "unknown" when no reachable process holds the socket.
+#   Print "own" (exe basename or comm named in <allowed-comms>),
+#   "foreign <pid> <comm>", or "unknown" when no reachable process holds the
+#   socket. /proc lists tids as well as tgids; threads may rename comm but
+#   share the process exe, so exe is tried first.
 host_listen_port_holder() {
-  local proc_root="$1" inode="$2" allowed="$3" pid fd target comm
+  local proc_root="$1" inode="$2" allowed="$3" pid fd target comm exe_base
 
   [ -n "$inode" ] || { printf 'unknown\n'; return 0; }
   for pid in "${proc_root}"/[0-9]*; do
     comm="$(cat "${pid}/comm" 2>/dev/null || true)"
-    [ -n "$comm" ] || continue
+    exe_base="$(host_port_holder_exe_base "${pid}")"
+    [ -n "$comm" ] || [ -n "$exe_base" ] || continue
     for fd in "${pid}"/fd/*; do
       target="$(readlink "${fd}" 2>/dev/null || true)"
       [ "${target}" = "socket:[${inode}]" ] || continue
-      case " ${allowed} " in
-        *" ${comm} "*) printf 'own\n' ;;
-        *) printf 'foreign %s %s\n' "${pid##*/}" "${comm}" ;;
-      esac
+      if host_port_name_allowed "$exe_base" "$allowed" \
+        || host_port_name_allowed "$comm" "$allowed"; then
+        printf 'own\n'
+      else
+        printf 'foreign %s %s\n' "${pid##*/}" "${comm:-$exe_base}"
+      fi
       return 0
     done
   done

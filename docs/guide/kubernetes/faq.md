@@ -257,7 +257,7 @@ A common cause is inability to reach CubeMaster (network / DNS).
 
 ### All sandboxes on one node lost network at the same time
 
-Most likely the `cube-node` Pod on that node was recreated (manual deletion, DaemonSet template change, node drain). Sandbox TAP devices live in the Pod's netns; Pod recreation destroys it, and **all sandbox networking on the node breaks — inbound and outbound — and does not self-heal**. Confirm by comparing Pod age / UID with the incident time:
+Most likely the `cube-node` Pod on that node was recreated (manual deletion, DaemonSet template change, node drain) while running on the Pod network: sandbox TAP devices live in the Pod's netns there, so recreation destroys it and **all sandbox networking on the node breaks — inbound and outbound — and does not self-heal**. On the default host network the netns is the host's and survives recreation, so this symptom there points somewhere else. Confirm by comparing Pod age / UID with the incident time:
 
 ```bash
 kubectl get pods -n cube-system -l app.kubernetes.io/component=cube-node -o wide
@@ -411,7 +411,7 @@ kubectl -n cube-system logs <cube-node-pod> -c cube-egress-net --tail=100
 
 ### Will `helm upgrade` interrupt existing sandboxes? Will Pod IP change?
 
-**Bumping Big Pod runtime images / changing the Pod template: yes.** `cube-node` is a native DaemonSet; changes recreate the Pod (UID / IP / netns change) and interrupt existing sandboxes on that node. Bumping only Installer / Bootstrap / PVM while leaving the Big Pod template untouched can leave the Big Pod unchanged. Steps and red lines: [Upgrade](./upgrade.md).
+**Bumping Big Pod runtime images / changing the Pod template recreates the Pod (the UID changes).** What that costs the sandboxes depends on the network mode: on the Pod network the netns is destroyed and existing sandboxes on the node lose networking; on the default host network the netns survives — see [Install · cube-node networking and Pod recreation](./install.md#_8-3-cube-node-networking-and-pod-recreation). Plan a maintenance window either way until in-place replacement lands. Bumping only Installer / Bootstrap / PVM while leaving the Big Pod template untouched can leave the Big Pod unchanged. Steps and red lines: [Upgrade](./upgrade.md).
 
 Typical Big Pod recreate triggers: bump `images.cubelet` and other runtime images, add/remove containers, change volumeMount / securityContext / container name / env.
 

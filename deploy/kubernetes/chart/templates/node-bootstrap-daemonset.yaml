@@ -199,6 +199,8 @@ spec:
               value: {{ ternary "1" "0" .Values.bootstrap.pvmHostKernel.enabled | quote }}
             - name: NODE_INIT_ENABLED
               value: {{ ternary "1" "0" .Values.bootstrap.nodeInit.enabled | quote }}
+            - name: HOST_PORT_RESERVED_PORTS
+              value: {{ include "cube.hostPortReserved" . | quote }}
             - name: DESIRED_KERNEL_PATTERN
               value: {{ .Values.bootstrap.pvmHostKernel.desiredKernelPattern | quote }}
             - name: KERNEL_BOOT_ARGS

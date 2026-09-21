@@ -7,10 +7,8 @@ The goal in one sentence: **the control plane can roll in an orderly fashion; co
 ::: warning Preview version warning
 The compute plane uses native `apps/v1` DaemonSets: image / resource / template changes **delete and recreate** the Big Pod, and the cubelet process restarts. What that costs the running sandboxes depends on the Pod's network mode:
 
-- **Host network (default)**: sandbox tap devices and cubevs hooks live in the host netns, which recreation does not destroy, so they survive the rebuild.
-- **Pod network** (`cubeNode.hostNetwork: false`): recreation destroys the Pod netns and **breaks networking for every sandbox on that node (inbound and outbound)**, with no self-healing.
-
-Until the in-place replacement design lands, keep doing compute-plane upgrades in a maintenance window: call CubeMaster's isolate API, isolate the node for at least 60 seconds, and destroy the sandboxes on that node. See [Node Operations](../node-operations.md) for the isolate / unisolate commands.
+- **Host network (default)**: tap devices and cubevs hooks live in the host netns and survive recreation. Drain (isolate ≥ 60s, destroy sandboxes) remains the supported path until sandbox survival through a cubelet restart is live-validated. See [Node Operations](../node-operations.md).
+- **Pod network** (`cubeNode.hostNetwork: false`): recreation destroys the netns and breaks networking for every sandbox on the node, with no self-healing. **Drain is mandatory.**
 
 If you must stay on the Pod network for now, the alternative remains a Kubernetes plugin you are familiar with to achieve an “in-place upgrade” — update container images without recreating the Pod.
 
@@ -27,7 +25,7 @@ See [Install · cube-node networking and Pod recreation](./install.md#_8-3-cube-
 
 ## Changing the network mode
 
-`cubeNode.hostNetwork` is a Pod-template field, so changing it recreates every Big Pod, and the sandbox dataplane moves between netns. It is gated: a pre-upgrade Hook (`cube-node-hostnet-preflight`) refuses the upgrade while the live DaemonSet's mode differs from the rendered one. The failure message gives you both ways out:
+`cubeNode.hostNetwork` is a Pod-template field, so changing it recreates every Big Pod, and the sandbox dataplane moves between netns. It is gated: a `pre-install` / `pre-upgrade` / `pre-rollback` Hook (`cube-node-hostnet-preflight`) refuses the change while the live DaemonSet's mode differs from the rendered one. The failure message gives you both ways out:
 
 1. **Keep the current mode** — set `cubeNode.hostNetwork` to the live value in your values file.
 2. **Adopt the new mode** — isolate each compute node, wait ≥ 60s, destroy its sandboxes (see [Node Operations](../node-operations.md)), then set:
@@ -37,7 +35,13 @@ cubeNode:
   hostNetworkChangeAck: true   # remove it once the upgrade has gone through
 ```
 
-The acknowledgement is only read by the Hook; it is not part of the Pod template, so setting or removing it never recreates a Pod.
+A release installed before the host-network default usually has no `cubeNode.hostNetwork` in its values: a routine tag-bump upgrade then renders the new default and trips this gate. Pin `cubeNode.hostNetwork: false` to keep the old behavior through such upgrades.
+
+The acknowledgement is only read by the Hook — it does not verify the drain, the flag is your certification — and it is not part of the Pod template, so setting or removing it never recreates a Pod.
+
+Two notes around a switch:
+- node-init re-runs on already-ready nodes (prepGeneration was bumped) and stops at a host port conflict, leaving cubelet unstarted there.
+- `helm rollback` / `--atomic` are gated only when the target revision ships this Hook; older targets are unguarded — drain first. They replay the target's stored values, so to flip the mode back use `helm upgrade` with `hostNetworkChangeAck: true`, not `helm rollback`.
 
 ## What are you upgrading, and which workload do you change?
 
@@ -45,7 +49,7 @@ The compute plane is split into four lines. For day-to-day upgrades, **only chan
 
 | What you want to upgrade | Which workload | What to change in values | Will it recreate the Big Pod? |
 | --- | --- | --- | --- |
-| cubelet / wait-node-prep / slot images or resources | **Big Pod** (`cube-node`) | `images.cubelet`, etc. | **Yes** (interrupts sandboxes) |
+| cubelet / wait-node-prep / slot images or resources | **Big Pod** (`cube-node`) | `images.cubelet`, etc. | **Yes** (see warning above) |
 | shim / kernel / guest artifacts | **Installer** | `images.cubeShim`, etc. | No (Big Pod template unchanged) |
 | node-init / node preflight logic | **Bootstrap** | `images.nodeInit` | No (Big Pod template unchanged) |
 | PVM host kernel-swap scripts | **cube-node-pvm** | `images.pvmHostBootstrap` | No (but the node may reboot) |
@@ -79,7 +83,7 @@ Only change the keys you truly need to bump; leave other images alone. Full key 
 **⚠️ Warning:** In production, canary-upgrade node by node and component by component. A full-fleet upgrade is very dangerous!
 
 ::: warning Preview version warning
-Before bumping Big Pod runtime images, isolate the node and clear sandboxes; the upgrade will recreate the Big Pod.
+Before bumping Big Pod runtime images, the upgrade recreates the Big Pod. Drain first (see above); on the Pod network it is mandatory.
 :::
 
 ```bash
@@ -130,11 +134,11 @@ During the cube-master → cube-ops migration, components target different endpo
 
 ## Red lines: these operations also recreate the Big Pod
 
-Any of the following **recreates** the Big Pod → PodIP / netns change → existing sandboxes interrupt. Do them only in a planned maintenance window.
+Any of the following **recreates** the Big Pod → the Pod UID changes; on the Pod network the netns is destroyed and existing sandboxes interrupt. Do them only in a planned maintenance window.
 
 | Do not do casually | Why |
 | --- | --- |
-| Change `cubeNode.hostNetwork` | Moves the sandbox dataplane across netns; gated by the pre-upgrade Hook |
+| Change `cubeNode.hostNetwork` | Moves the sandbox dataplane across netns; gated by the pre-install/pre-upgrade/pre-rollback Hook |
 | Add/remove Big Pod containers (including changing slot count) | Changes the Pod template; the DaemonSet recreates the Pod |
 | Change volumeMount / securityContext / container name / env directly | Same |
 | Change `wait-node-prep` env / mount (bumping image also recreates) | wait is an initContainer; any template change recreates |

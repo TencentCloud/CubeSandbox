@@ -257,7 +257,7 @@ kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node -c cubelet 
 
 ### 某个节点上所有沙箱同时断网
 
-大概率是该节点上的 `cube-node` Pod 被重建过（手工删除、DaemonSet template 变更、节点 drain 等）。沙箱的 TAP 设备位于该 Pod 的 netns 中，Pod 重建会销毁它，**节点上所有沙箱的网络随之全部中断（入站、出站均中断），且不会自愈**。可对比 Pod 的 AGE / UID 与故障时间确认：
+大概率是该节点上的 `cube-node` Pod 被重建过（手工删除、DaemonSet template 变更、节点 drain 等），**且该 Pod 运行在 Pod 网络上**：沙箱的 TAP 设备位于该 netns 中，Pod 重建会销毁它，**节点上所有沙箱的网络随之全部中断（入站、出站均中断），且不会自愈**。默认宿主机网络下 netns 是宿主机的、重建不销毁，此时出现该症状应另查原因。可对比 Pod 的 AGE / UID 与故障时间确认：
 
 ```bash
 kubectl get pods -n cube-system -l app.kubernetes.io/component=cube-node -o wide
@@ -411,7 +411,7 @@ kubectl -n cube-system logs <cube-node-pod> -c cube-egress-net --tail=100
 
 ### `helm upgrade` 会不会中断存量沙箱？Pod IP 会变吗？
 
-**升 Big Pod 运行时镜像 / 改 Pod template：会。** `cube-node` 是原生 DaemonSet，变更会 recreate Pod（UID / IP / netns 变化），该节点存量沙箱会中断。只升 Installer / Bootstrap / PVM 且不动 Big Pod template 时，Big Pod 可保持不变。步骤与红线见 [升级](./upgrade.md)。
+**升 Big Pod 运行时镜像 / 改 Pod template 会 recreate Pod（UID 会变）。** 对沙箱的影响取决于网络模式：Pod 网络下 netns 被销毁，该节点存量沙箱断网；默认宿主机网络下 netns 存活——见[安装 · cube-node 网络与 Pod 重建](./install.md#_8-3-cube-node-网络与-pod-重建)。在原地替换落地前，两种模式都建议安排维护窗口。只升 Installer / Bootstrap / PVM 且不动 Big Pod template 时，Big Pod 可保持不变。步骤与红线见 [升级](./upgrade.md)。
 
 会 recreate Big Pod 的典型操作：bump `images.cubelet` 等运行时镜像、增删容器、改 volumeMount / securityContext / 容器名 / env。
 
