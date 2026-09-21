@@ -38,7 +38,10 @@
 # 1. 注册官方 code sandbox 模板（在 Cube 主机上执行一次）。
 cubemastercli tpl create-from-image \
   --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
-  --writable-layer-size 2G --expose-port 49983 --probe 49983
+  --writable-layer-size 1G \
+  --expose-port 49999 \
+  --expose-port 49983 \
+  --probe 49999
 # 中国大陆请使用 cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest
 # 复制输出中的 template_id。
 

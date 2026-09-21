@@ -28,7 +28,9 @@ load_dotenv()
 
 # How long a single `python3 <script>` invocation may run inside the MicroVM.
 EXEC_TIMEOUT = 120
-# Lifetime of the MicroVM for the whole agent run (seconds).
+# Idle timeout for the MicroVM (seconds): it is reclaimed after this long with no
+# activity. An active sandbox keeps resetting the clock, so this is not a
+# wall-clock cap on the whole run — bound that on the agent side if you need it.
 SANDBOX_TIMEOUT = 600
 # The Fibonacci demo only needs the Python standard library, so the sandbox is
 # created with no outbound internet access. Flip to True if your own task needs

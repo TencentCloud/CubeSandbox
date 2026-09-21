@@ -72,7 +72,10 @@ DNS 的情况下使用官方 E2B SDK 的数据面主机名，请参见
 ```bash
 cubemastercli tpl create-from-image \
   --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
-  --writable-layer-size 2G --expose-port 49983 --probe 49983
+  --writable-layer-size 1G \
+  --expose-port 49999 \
+  --expose-port 49983 \
+  --probe 49999
 # 中国大陆请使用 cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest
 ```
 
@@ -107,7 +110,7 @@ Pydantic AI 通过 `RunContext` 把带类型的依赖传入每个工具。把沙
 ```python
 from dataclasses import dataclass, field
 import itertools, shlex
-from typing import Iterator
+from collections.abc import Iterator
 
 from cubesandbox import Sandbox, CubeSandboxError
 from pydantic_ai import Agent, RunContext
@@ -135,6 +138,8 @@ def run_python(ctx: RunContext[Deps], code: str) -> str:
         )
     except CubeSandboxError as exc:
         return f"[cube-sandbox error] {type(exc).__name__}: {exc}"
+    except Exception as exc:  # noqa: BLE001 - 例如 envd 请求超时
+        return f"[execution failed] {type(exc).__name__}: {exc}"
 
     out = result.stdout or ""
     if result.stderr:

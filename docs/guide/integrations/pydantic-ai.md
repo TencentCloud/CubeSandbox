@@ -77,7 +77,10 @@ is enough:
 ```bash
 cubemastercli tpl create-from-image \
   --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
-  --writable-layer-size 2G --expose-port 49983 --probe 49983
+  --writable-layer-size 1G \
+  --expose-port 49999 \
+  --expose-port 49983 \
+  --probe 49999
 # In mainland China, use cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest
 ```
 
@@ -112,7 +115,7 @@ the sandbox on the dependency object so one MicroVM is shared across the run:
 ```python
 from dataclasses import dataclass, field
 import itertools, shlex
-from typing import Iterator
+from collections.abc import Iterator
 
 from cubesandbox import Sandbox, CubeSandboxError
 from pydantic_ai import Agent, RunContext

@@ -40,7 +40,10 @@ user prompt
 # 1. Register the official code sandbox template (once, on a Cube host).
 cubemastercli tpl create-from-image \
   --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
-  --writable-layer-size 2G --expose-port 49983 --probe 49983
+  --writable-layer-size 1G \
+  --expose-port 49999 \
+  --expose-port 49983 \
+  --probe 49999
 # In mainland China, use cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest
 # Copy the resulting template_id.
 
