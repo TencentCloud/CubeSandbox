@@ -290,12 +290,23 @@ func fillPauseBindingInfoFromMaster(ctx context.Context, req *types.GetCubeSandb
 	default:
 		return false
 	}
+	endAt := int64(0)
+	for _, item := range rsp.Data {
+		if item != nil && item.SandboxID == req.SandboxID {
+			endAt = item.EndAt
+			break
+		}
+	}
+	if endAt == 0 {
+		endAt = LookupSandboxEndAt(ctx, req.SandboxID)
+	}
 	one := &types.SandboxData{
 		SandboxID:   req.SandboxID,
 		Status:      st,
 		HostIP:      proxyMap.HostIP,
 		SandboxIP:   proxyMap.SandboxIP,
 		Annotations: ann,
+		EndAt:       endAt,
 		Containers: []*types.ContainerInfo{
 			{
 				ContainerID: req.SandboxID,

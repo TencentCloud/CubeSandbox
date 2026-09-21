@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from adapters import connect_adapter
+from adapters import connect_adapter, list_sandboxes
 from framework.assertions import assert_command_ok
 from framework.capabilities import LIFECYCLE, PAUSE_RESUME
 from framework.lifecycle import wait_until_paused, wait_until_running
@@ -164,8 +164,34 @@ def test_connect_paused_sandbox_applies_explicit_timeout(
     sdk_backend,
     sdk_e2e_config,
 ):
+    before = _optional_end_at(sdk_sandbox.info().raw)
+    assert before is not None, "create(timeout=120) should expose endAt"
+
     sdk_sandbox.pause(timeout=sdk_e2e_config.default_timeout)
     assert wait_until_paused(sdk_sandbox, timeout=sdk_e2e_config.default_timeout) == "paused"
+
+    listed = list_sandboxes(sdk_backend, sdk_e2e_config)
+    entry = next(
+        (
+            item
+            for item in listed
+            if isinstance(item, dict)
+            and item.get("sandboxID", item.get("sandbox_id")) == sdk_sandbox.sandbox_id
+        ),
+        None,
+    )
+    assert entry is not None, f"paused sandbox {sdk_sandbox.sandbox_id!r} missing from list"
+    listed_end_at = _optional_end_at(entry)
+    paused_end_at = _optional_end_at(sdk_sandbox.info().raw)
+    assert listed_end_at is not None and paused_end_at is not None
+    assert abs((paused_end_at - before).total_seconds()) <= 1, (
+        "pause must preserve the deadline: "
+        f"before={before.isoformat()} paused={paused_end_at.isoformat()}"
+    )
+    assert abs((listed_end_at - paused_end_at).total_seconds()) <= 1, (
+        "paused list and info deadlines must match: "
+        f"list={listed_end_at.isoformat()} info={paused_end_at.isoformat()}"
+    )
 
     connected = connect_adapter(
         sdk_backend,

@@ -94,7 +94,7 @@ print(info)
 # }
 ```
 
-`endAt` is the projected next-timeout instant given the current `timeout`. It is refreshed every time the sandbox receives a request (or when you call `set_timeout`, when available). For **never-timeout** sandboxes there is no deadline, so `endAt` is **omitted** from the response rather than reported as equal to `startedAt`.
+`endAt` is the projected next-timeout instant given the current `timeout`. It is refreshed every time the sandbox receives a request (or when you call `set_timeout`, when available). Pausing does not cancel a finite idle deadline, so both detail and list APIs continue to return the same `endAt` while the sandbox is paused. For **never-timeout** sandboxes there is no deadline, so `endAt` is **omitted** from the response rather than reported as equal to `startedAt`.
 
 ## List Running Sandboxes
 

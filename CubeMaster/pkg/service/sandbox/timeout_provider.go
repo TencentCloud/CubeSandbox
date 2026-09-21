@@ -7,6 +7,8 @@ package sandbox
 import (
 	"context"
 	"sync"
+
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 )
 
 // TimeoutProvider is the contract sandbox_timeout.go uses to mutate the
@@ -15,6 +17,10 @@ import (
 type TimeoutProvider interface {
 	RefreshTimeout(ctx context.Context, sandboxID string, timeoutSeconds int) (endAtMs int64, err error)
 	LookupEndAt(ctx context.Context, sandboxID string) (endAtMs int64, err error)
+}
+
+type batchTimeoutProvider interface {
+	LookupEndAts(ctx context.Context, sandboxIDs []string) (map[string]int64, error)
 }
 
 var (
@@ -48,4 +54,30 @@ func LookupSandboxEndAt(ctx context.Context, sandboxID string) int64 {
 		return 0
 	}
 	return endAt
+}
+
+func lookupSandboxEndAts(ctx context.Context, sandboxIDs []string) map[string]int64 {
+	p := getTimeoutProvider()
+	if p == nil || len(sandboxIDs) == 0 {
+		return nil
+	}
+	if batch, ok := p.(batchTimeoutProvider); ok {
+		endAts, err := batch.LookupEndAts(ctx, sandboxIDs)
+		if err != nil {
+			log.G(ctx).Warnf("lookup endAt batch failed: %v", err)
+			return nil
+		}
+		return endAts
+	}
+	endAts := make(map[string]int64, len(sandboxIDs))
+	for _, sandboxID := range sandboxIDs {
+		if sandboxID == "" {
+			continue
+		}
+		endAt, err := p.LookupEndAt(ctx, sandboxID)
+		if err == nil {
+			endAts[sandboxID] = endAt
+		}
+	}
+	return endAts
 }

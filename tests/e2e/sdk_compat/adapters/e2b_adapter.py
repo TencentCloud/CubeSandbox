@@ -145,7 +145,16 @@ def _sandbox_entry_to_dict(entry: Any) -> dict[str, Any]:
     else:
         data = {
             name: getattr(entry, name)
-            for name in ("sandbox_id", "sandboxID", "id", "state", "metadata", "template_id")
+            for name in (
+                "sandbox_id",
+                "sandboxID",
+                "id",
+                "state",
+                "metadata",
+                "template_id",
+                "end_at",
+                "endAt",
+            )
             if hasattr(entry, name)
         }
 
@@ -156,6 +165,11 @@ def _sandbox_entry_to_dict(entry: Any) -> dict[str, Any]:
     state = data.get("state")
     if state is not None:
         data["state"] = str(getattr(state, "value", state))
+    end_at = first_present(data, "end_at", "endAt")
+    if end_at is not None:
+        end_at = _normalize_info_value(end_at)
+        data.setdefault("end_at", end_at)
+        data.setdefault("endAt", end_at)
     return data
 
 

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -23,9 +24,12 @@ type fakeRedis struct {
 	mu    sync.Mutex
 	calls []recordedCall
 	// errOn maps command name -> error to return on the Nth call (counter-based).
-	failHSET bool
-	failHDEL bool
-	failXADD bool
+	failHSET   bool
+	failHDEL   bool
+	failXADD   bool
+	failHMGET  bool
+	hmgetReply interface{}
+	hmgetFunc  func(args ...interface{}) interface{}
 }
 
 func (f *fakeRedis) Do(cmd string, args ...interface{}) (interface{}, error) {
@@ -45,6 +49,14 @@ func (f *fakeRedis) Do(cmd string, args ...interface{}) (interface{}, error) {
 		if f.failXADD {
 			return nil, errors.New("XADD boom")
 		}
+	case "HMGET":
+		if f.failHMGET {
+			return nil, errors.New("HMGET boom")
+		}
+		if f.hmgetFunc != nil {
+			return f.hmgetFunc(args...), nil
+		}
+		return f.hmgetReply, nil
 	}
 	return "OK", nil
 }
@@ -55,6 +67,81 @@ func (f *fakeRedis) snapshot() []recordedCall {
 	out := make([]recordedCall, len(f.calls))
 	copy(out, f.calls)
 	return out
+}
+
+func TestStoreLoadMetasUsesOneHMGET(t *testing.T) {
+	timeout := 60
+	first, err := json.Marshal(&SandboxLifecycleMeta{SandboxID: "sb-1", EndAt: 1234})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := json.Marshal(&SandboxLifecycleMeta{SandboxID: "sb-2", CreatedAt: 2000, TimeoutSeconds: &timeout})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &fakeRedis{hmgetReply: []interface{}{first, nil, string(second), []byte("invalid")}}
+
+	got, err := NewStore(r).LoadMetas(context.Background(), []string{"sb-1", "", "sb-missing", "sb-2", "sb-1", "sb-bad"})
+	if err != nil {
+		t.Fatalf("LoadMetas: %v", err)
+	}
+	if len(got) != 2 || got["sb-1"].EndAt != 1234 || got["sb-2"].CreatedAt != 2000 {
+		t.Fatalf("unexpected metas: %+v", got)
+	}
+	calls := r.snapshot()
+	if len(calls) != 1 || calls[0].cmd != "HMGET" {
+		t.Fatalf("want one HMGET, got %+v", calls)
+	}
+	wantArgs := []interface{}{MetaKey, "sb-1", "sb-missing", "sb-2", "sb-bad"}
+	if !reflect.DeepEqual(calls[0].args, wantArgs) {
+		t.Fatalf("HMGET args: got %+v want %+v", calls[0].args, wantArgs)
+	}
+}
+
+func TestStoreLoadMetasUsesBoundedBatches(t *testing.T) {
+	ids := make([]string, loadMetasBatchSize+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("sb-%d", i)
+	}
+	r := &fakeRedis{hmgetFunc: func(args ...interface{}) interface{} {
+		return make([]interface{}, len(args)-1)
+	}}
+
+	if _, err := NewStore(r).LoadMetas(context.Background(), ids); err != nil {
+		t.Fatalf("LoadMetas: %v", err)
+	}
+	calls := r.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("want two HMGET batches, got %d", len(calls))
+	}
+	if len(calls[0].args) != loadMetasBatchSize+1 || len(calls[1].args) != 2 {
+		t.Fatalf("unexpected HMGET batch sizes: %d, %d", len(calls[0].args)-1, len(calls[1].args)-1)
+	}
+}
+
+func TestStoreLoadMetasReturnsRedisError(t *testing.T) {
+	r := &fakeRedis{failHMGET: true}
+	if _, err := NewStore(r).LoadMetas(context.Background(), []string{"sb-1"}); err == nil {
+		t.Fatal("expected HMGET error")
+	}
+}
+
+func TestStoreLoadMetasRejectsWrongCardinality(t *testing.T) {
+	r := &fakeRedis{hmgetReply: []interface{}{nil}}
+	if _, err := NewStore(r).LoadMetas(context.Background(), []string{"sb-1", "sb-2"}); err == nil {
+		t.Fatal("expected HMGET cardinality error")
+	}
+}
+
+func TestStoreLoadMetasSkipsRedisForEmptyIDs(t *testing.T) {
+	r := &fakeRedis{}
+	got, err := NewStore(r).LoadMetas(context.Background(), []string{"", ""})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("LoadMetas empty: got %+v err %v", got, err)
+	}
+	if calls := r.snapshot(); len(calls) != 0 {
+		t.Fatalf("expected no Redis calls, got %+v", calls)
+	}
 }
 
 func TestSandboxLifecycleMeta_JSONRoundTrip(t *testing.T) {

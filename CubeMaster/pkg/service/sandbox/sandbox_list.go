@@ -124,6 +124,7 @@ func listSandbox(ctx context.Context, req *types.ListCubeSandboxReq, failOnCubel
 
 	enrichSandboxListBackends(ctx, rsp.Data)
 	mergePauseBindings(ctx, req, rsp)
+	enrichSandboxListEndAts(ctx, rsp.Data)
 	types.SortSandboxList(rsp.Data)
 	return
 }
@@ -244,6 +245,24 @@ func pauseBindingRow(rec *pausesnap.Record) *types.SandboxBriefData {
 	return item
 }
 
+func enrichSandboxListEndAts(ctx context.Context, items []*types.SandboxBriefData) {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != nil && item.SandboxID != "" {
+			ids = append(ids, item.SandboxID)
+		}
+	}
+	endAts := lookupSandboxEndAts(ctx, ids)
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		if endAt, ok := endAts[item.SandboxID]; ok {
+			item.EndAt = endAt
+		}
+	}
+}
+
 // enrichSandboxListBackends fills Backend from t_cube_sandbox_spec (DB source of
 // truth for create-time xfs|s3). Missing specs leave Backend empty.
 func enrichSandboxListBackends(ctx context.Context, items []*types.SandboxBriefData) {
@@ -358,7 +377,6 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 					NameSpace:   sandbox.GetNamespace(),
 					CreateAt:    sandbox.GetCreatedAt(),
 					PauseAt:     container.GetPausedAt(),
-					EndAt:       LookupSandboxEndAt(ctx, sandbox.GetId()),
 					VolumeMounts: volumeMountsToContainerInfo(
 						collectVolumeMountsFromContainers(sandbox.GetContainers())),
 				}:

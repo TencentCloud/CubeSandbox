@@ -7,6 +7,8 @@ package lifecycle
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -159,6 +161,87 @@ func (s *Store) LoadMeta(ctx context.Context, sandboxID string) (*SandboxLifecyc
 		return nil, nil
 	}
 
+	meta, err := decodeLifecycleMeta(v)
+	if err != nil {
+		return nil, err
+	}
+	if meta == nil {
+		log.G(ctx).Warnf("lifecycle: HGET %s %s unexpected type %T", MetaKey, sandboxID, v)
+	}
+	return meta, nil
+}
+
+const loadMetasBatchSize = 512
+
+// LoadMetas reads lifecycle snapshots in bounded Redis batches. Missing or
+// malformed entries are omitted so one stale value does not hide valid rows.
+func (s *Store) LoadMetas(ctx context.Context, sandboxIDs []string) (map[string]*SandboxLifecycleMeta, error) {
+	if s == nil || s.doer == nil || len(sandboxIDs) == 0 {
+		return nil, nil
+	}
+
+	seen := make(map[string]struct{}, len(sandboxIDs))
+	ids := make([]string, 0, len(sandboxIDs))
+	for _, sandboxID := range sandboxIDs {
+		if sandboxID == "" {
+			continue
+		}
+		if _, ok := seen[sandboxID]; ok {
+			continue
+		}
+		seen[sandboxID] = struct{}{}
+		ids = append(ids, sandboxID)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	metas := make(map[string]*SandboxLifecycleMeta, len(ids))
+	args := make([]interface{}, 1, loadMetasBatchSize+1)
+	args[0] = MetaKey
+	for start := 0; start < len(ids); start += loadMetasBatchSize {
+		end := min(start+loadMetasBatchSize, len(ids))
+		args = args[:1]
+		for _, sandboxID := range ids[start:end] {
+			args = append(args, sandboxID)
+		}
+
+		v, err := s.doer.Do("HMGET", args...)
+		if err != nil {
+			return nil, err
+		}
+		values, ok := v.([]interface{})
+		if !ok {
+			return nil, fmt.Errorf("HMGET %s returned unexpected type %T", MetaKey, v)
+		}
+		if len(values) != end-start {
+			return nil, fmt.Errorf("HMGET %s returned %d values for %d fields", MetaKey, len(values), end-start)
+		}
+		for i, value := range values {
+			sandboxID := ids[start+i]
+			if value == nil {
+				continue
+			}
+			meta, err := decodeLifecycleMeta(value)
+			if err != nil {
+				log.G(ctx).Warnf("lifecycle: HMGET %s %s invalid value: %v", MetaKey, sandboxID, err)
+				continue
+			}
+			if meta == nil {
+				log.G(ctx).Warnf("lifecycle: HMGET %s %s unexpected type %T", MetaKey, sandboxID, value)
+				continue
+			}
+			if meta.SandboxID != "" && meta.SandboxID != sandboxID {
+				log.G(ctx).Warnf("lifecycle: HMGET %s %s contains sandbox %s", MetaKey, sandboxID, meta.SandboxID)
+				continue
+			}
+			metas[sandboxID] = meta
+		}
+	}
+	return metas, nil
+}
+
+func decodeLifecycleMeta(v interface{}) (*SandboxLifecycleMeta, error) {
 	var raw []byte
 	switch x := v.(type) {
 	case []byte:
@@ -166,18 +249,20 @@ func (s *Store) LoadMeta(ctx context.Context, sandboxID string) (*SandboxLifecyc
 	case string:
 		raw = []byte(x)
 	default:
-		log.G(ctx).Warnf("lifecycle: HGET %s %s unexpected type %T", MetaKey, sandboxID, v)
 		return nil, nil
 	}
 	if len(raw) == 0 {
 		return nil, nil
 	}
 
-	var meta SandboxLifecycleMeta
+	var meta *SandboxLifecycleMeta
 	if err := json.Unmarshal(raw, &meta); err != nil {
 		return nil, err
 	}
-	return &meta, nil
+	if meta == nil {
+		return nil, errors.New("metadata is null")
+	}
+	return meta, nil
 }
 
 // xadd builds an XADD ... MAXLEN ~ <N> * op <op> sandbox_id <id> [payload <p>]
