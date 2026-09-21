@@ -165,9 +165,17 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
       detection_interval = "1m"
       max_deletion_per_cycle = 10
       free_disk_threshold_percent = 10
-  [plugins."io.cubelet.internal.v1.gc-service"]
-    gc_interval = "30s"
+  [plugins."io.cubelet.cubebox-service.v1.gc-service"]
     cleanup_interval = "5s"
+    # Failed cleanups before a sandbox is quarantined: alerted once, and
+    # retried every 10m instead of every cleanup_interval. Quarantine frees
+    # nothing — the tap/IP and volumes stay held and pool capacity stays
+    # reduced until the holder is gone (see `cubecli diag tap-holders`).
+    # Set to 0 to keep retrying at full rate and never quarantine.
+    max_cleanup_attempts = 60
+    # Quarantined sandboxes are still retried so manual holder reclamation is
+    # sufficient to recover. Keep this much slower than cleanup_interval.
+    quarantine_retry_interval = "10m"
 
   [plugins."io.cubelet.workflow.v1.workflow"]
     [plugins."io.cubelet.workflow.v1.workflow".flows]

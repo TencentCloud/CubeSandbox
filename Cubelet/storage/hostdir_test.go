@@ -201,7 +201,8 @@ func TestDefaultRunHostDirCommandTimeoutKillsProcessGroup(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(time.Second)
-	for utils.ProcessAlive(pid) {
+	id := utils.ProcessIdentity{Pid: pid}
+	for id.Status() != utils.LivenessGone {
 		if time.Now().After(deadline) {
 			t.Fatalf("child process %d still alive after timeout", pid)
 		}

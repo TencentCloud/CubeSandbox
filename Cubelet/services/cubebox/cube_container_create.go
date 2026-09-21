@@ -148,6 +148,24 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 		if sb, err := l.cubeboxManger.Get(ctx, desired); err == nil && sb != nil && sb.SandboxID == desired {
 			st := sb.GetStatus()
 			if st != nil && st.Get().State() == cubebox.ContainerState_CONTAINER_PAUSED {
+				// Everything below deletes the old sandbox's records, and this
+				// row is the only place its shim identity survives. If that
+				// shim is still running it still holds the tap fd, and once
+				// the row is gone nothing can match the process back to the
+				// sandbox — the replacement then gets an IP that is in use.
+				//
+				// Wait only, never kill: the target would be identified by
+				// bookkeeping alone. Refusing costs a retry; deleting the
+				// records while the shim lives costs an unreclaimable IP.
+				if waitErr := l.waitReplacedSandboxGone(ctx, sb); waitErr != nil {
+					// Not PreConditionFailed: that code makes the workflow
+					// engine return before the create-flow failover runs, and
+					// network/volume have already allocated for the new
+					// sandbox by this step. Use a code that lets the rollback
+					// happen. See plugins/workflow/engine.go.
+					return ret.Errorf(errorcode.ErrorCode_Conflict,
+						"cannot replace paused sandbox %s: %v", desired, waitErr)
+				}
 				// CDP user-delete hook requires UserMarkDeletedTime before store delete.
 				if sb.UserMarkDeletedTime == nil {
 					now := time.Now()
@@ -1350,6 +1368,26 @@ func (l *local) runContainer(
 			containerd.WithTaskAPIEndpoint(endpoint.Address, endpoint.Version))
 	}
 
+	// Record the intent to spawn a shim before NewTask, and persist it right
+	// away. Everything below can fail or be interrupted while the shim keeps
+	// running; without this flag the destroy path cannot tell that apart from
+	// a sandbox whose shim never started, and would release the tap/IP while
+	// the process still holds them.
+	//
+	// The recorded pid is cleared at the same time. On resume it still holds
+	// the previous incarnation, which has already exited — leaving it in place
+	// would let the destroy path check that dead pid, find it gone, and clear
+	// the sandbox while the shim started just below is alive.
+	if ci.IsPod && (!cubebox.Endpoint.ShimSpawned || cubebox.Endpoint.Pid != 0) {
+		cubebox.Endpoint.ShimSpawned = true
+		cubebox.Endpoint.Pid = 0
+		cubebox.Endpoint.PidStartTime = 0
+		if err := l.cubeboxManger.Save(ctx, cubebox, cubes.WithNoEvent); err != nil {
+			return ret.Err(errorcode.ErrorCode_UpdateLocalMetaDataFailed,
+				fmt.Sprintf("record shim intent for %s: %v", ci.ID, err))
+		}
+	}
+
 	taskStart := time.Now()
 	task, err := c.NewTask(ctx, ioCreater, taskOpts...)
 	if err != nil {
@@ -1365,10 +1403,23 @@ func (l *local) runContainer(
 		}
 		ep, v := shim.Endpoint()
 
+		pid := task.Pid()
+		// A bare pid is not an identity: pid numbers get recycled. Capture the
+		// process start time alongside it so a later liveness check can tell
+		// our shim from a stranger that inherited the number.
+		var startTime uint64
+		if identity, idErr := utils.ReadProcessIdentity(int(pid)); idErr != nil {
+			log.G(ctx).Warnf("read shim %s identity (pid %d): %v", ci.ID, pid, idErr)
+		} else {
+			startTime = identity.StartTime
+		}
+
 		cubebox.Endpoint = sandboxstore.Endpoint{
-			Address: ep,
-			Version: uint32(v),
-			Pid:     task.Pid(),
+			Address:      ep,
+			Version:      uint32(v),
+			Pid:          pid,
+			PidStartTime: startTime,
+			ShimSpawned:  true,
 		}
 	}
 
