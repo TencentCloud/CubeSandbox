@@ -21,18 +21,12 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots/testsuite"
 	"github.com/containerd/containerd/v2/plugins/snapshots/overlay/overlayutils"
 	"github.com/opencontainers/runtime-spec/specs-go"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
 
-var rootEnabled = true
-
 func RequiresRoot(t testing.TB) {
-	if !rootEnabled {
-		t.Skip("skipping test that requires root")
-		return
-	}
-	if os.Getuid() != 0 {
-		t.Skip("skipping test that requires root")
-	}
+	utils.SkipUnlessRootWithSysAdmin(t)
 }
 
 func newSnapshotterWithOpts(opts ...Opt) testsuite.SnapshotterFunc {

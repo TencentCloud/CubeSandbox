@@ -655,6 +655,8 @@ func TestPollImmediateInfiniteWithContext(t *testing.T) {
 }
 
 func TestSnapCreateCubebox(t *testing.T) {
+	requireRoot(t)
+
 	cfg := makeTestConfig(t)
 	// Template Create→Destroy promotes tmpPool→poolFormat only for reflink pools.
 	cfg.PoolType = cp_reflink_type

@@ -372,6 +372,12 @@ jobs:
                           requires_builder: false,
                           run_mode: "cubemaster_host"
                         })
+                    elif $component.component == "cubelet" then
+                      $component,
+                        ($component + {
+                          display_name: "Cubelet Mount",
+                          make_target: "cubelet-mount-test"
+                        })
                     else
                       $component
                     end

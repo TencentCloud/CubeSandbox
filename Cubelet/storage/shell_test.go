@@ -16,14 +16,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
 
-// requireRoot skips tests that format and mount ext4 images, which need root
-// (the builder container runs tests as the host UID, where mount(2) fails
-// with "only root can do that").
+// Keep every test that calls requireRoot matched by cubelet-mount-test's -run
+// pattern. Tests such as the reflink probe may still apply their own CI skip.
 func requireRoot(t *testing.T) {
-	t.Helper()
-	if os.Getuid() != 0 {
-		t.Skip("skipping test that requires root (mkfs/mount)")
-	}
+	utils.SkipUnlessRootWithSysAdmin(t)
 }
 
 func TestNewExt4BaseRaw(t *testing.T) {

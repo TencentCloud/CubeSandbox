@@ -165,6 +165,7 @@ help:
 	@printf "  cubemaster-test Run CubeMaster unit tests in Docker\n"
 	@printf "  cubetemplatecenter-test Run CubeTemplateCenter unit tests in Docker\n"
 	@printf "  cubelet-test  Run Cubelet unit tests in Docker\n"
+	@printf "  cubelet-mount-test Run Cubelet mount tests in privileged Docker\n"
 	@printf "  cube-proxy-test Run CubeProxy unit tests locally\n"
 	@printf "  cube-api-test Run CubeAPI unit tests in Docker\n"
 	@printf "  cubeops-test  Run CubeOps unit tests in Docker\n"
@@ -494,6 +495,17 @@ cubetemplatecenter-test: builder-image
 .PHONY: cubelet-test
 cubelet-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make proto && make test'
+
+# Keep the ordinary Cubelet gate unprivileged while still exercising tests that
+# call mount(2) in CI. Run every storage test protected by requireRoot; the full
+# package also contains unrelated timing-sensitive tests. Patchoverlay's other
+# privileged tests need host overlayfs support, so only its affected removal test
+# runs here. Running the builder as root can leave both ignored workspace
+# artifacts and shared builder-home caches root-owned; harmless in CI, but local
+# cleanup or a later unprivileged builder may require ownership repair.
+.PHONY: cubelet-mount-test
+cubelet-mount-test: builder-image
+	$(MAKE) builder-run BUILDER_USER=0:0 BUILDER_RUN_EXTRA_MOUNTS='--privileged' BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && CI=true go test -count=1 ./plugins/snapshots/overlay/patchoverlay -run TestRemoveDirectory && CI=true go test -count=1 ./storage -run TestNewExt4\|TestParam\|TestCreateDestroy\|TestCleanupTemplateLocalData\|TestCreateWithTimeoutCtx\|TestCreateWithInvalidParam\|TestCreateCubeboxBySnap\|TestInit\|TestSnapCreateCubebox'
 
 .PHONY: cube-proxy-test
 cube-proxy-test:
