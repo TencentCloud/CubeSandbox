@@ -304,7 +304,7 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	if log.IsDebug() {
 		log.G(ctx).Debugf("RunCubeSandboxRequest:%s", utils.InterfaceToString(req))
 	} else {
-		log.G(ctx).Errorf("RunCubeSandboxRequest:%s", safePrint(req))
+		log.G(ctx).Infof("RunCubeSandboxRequest:%s", safePrint(req))
 	}
 
 	s.setRequestResource(createInfo, req)
@@ -578,7 +578,7 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 		"cubeboxID": req.SandboxID,
 		"step":      "cubeboxDestroy",
 	})
-	log.G(ctx).Errorf("DestroyCubeSandboxRequest:%+v", req)
+	log.G(ctx).Infof("DestroyCubeSandboxRequest:%+v", req)
 
 	defer func() {
 		if !ret.IsSuccessCode(rsp.Ret.RetCode) {

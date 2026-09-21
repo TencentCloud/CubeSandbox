@@ -211,7 +211,7 @@ func (s *service) CreateImage(ctx context.Context, req *images.CreateImageReques
 	}
 
 	ctx = CubeLog.WithRequestTrace(ctx, rt)
-	log.G(ctx).Errorf("CreateImageRequest:%s", utils.InterfaceToString(req))
+	log.G(ctx).Infof("CreateImageRequest:%s", utils.InterfaceToString(req))
 
 	start := time.Now()
 	defer func() {
