@@ -81,12 +81,15 @@ Tests run inside the builder container. Some tests need external services
 # Agent tests (Rust) — 101+ tests, most pass without KVM
 make builder-run BUILDER_CMD='cd /workspace/agent && make test'
 
-# CubeMaster tests (Go) — needs Redis at minimum
-make builder-run BUILDER_CMD='cd /workspace/CubeMaster && make proto && CI=true CUBE_MASTER_CONFIG_PATH=/workspace/CubeMaster/test/conf.yaml go test -short ./api/... ./pkg/...'
+# CubeMaster tests (Go) — unit-style cmd and pkg packages
+make cubemaster-test
 
 # Cubelet tests (Go) — full self-contained set (all packages except api/ and
 # integration/); root/host-capability tests probe and skip themselves
 make cubelet-test
+
+# Cubelet mount tests — focused privileged lane for CAP_SYS_ADMIN tests
+make cubelet-mount-test
 
 # CubeCoW native tests (Go + CGO, needs cubecow SDK built)
 make cubecow-test-native

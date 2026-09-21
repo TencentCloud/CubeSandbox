@@ -22,6 +22,7 @@ on:
       - 'hypervisor/**'
       - 'examples/volume/s3/**'
       - 'tests/perf/**'
+      - 'tests/unittest/run.sh'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/unit-test-check.yml'
@@ -46,6 +47,7 @@ on:
       - 'hypervisor/**'
       - 'examples/volume/s3/**'
       - 'tests/perf/**'
+      - 'tests/unittest/run.sh'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/unit-test-check.yml'
@@ -102,6 +104,12 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Validate aggregate unit runner
+        run: |
+          bash -n tests/unittest/run.sh
+          tests/unittest/run.sh --list >/dev/null
+          tests/unittest/run.sh --help >/dev/null
 
       - name: Select components
         id: select
@@ -190,6 +198,10 @@ jobs:
               case "${file}" in
                 docker/Dockerfile.builder|.github/workflows/build-builder-image.yml|.github/workflows/unit-test-check.yml|Makefile)
                   add_all_components
+                  ;;
+                tests/unittest/run.sh)
+                  # The aggregate runner has its own syntax/list/help validation
+                  # above; component source changes select their test lanes here.
                   ;;
                 CubeAPI/*)
                   add_component "CubeAPI"

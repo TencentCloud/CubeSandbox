@@ -52,7 +52,6 @@ DEVTAG?=dev-$(APP_VERSION)-$(GIT_COMMIT_SHORT)-$(DATE)
 # COVERAGE_PACKAGES keeps the default test target focused on unit-style packages.
 # Integration tests have their own dedicated entrypoints below.
 COVERAGE_PACKAGES=$(shell go list ./... \
-	| grep -v github.com/tencentcloud/CubeSandbox/CubeMaster/cmd \
 	| grep -v github.com/tencentcloud/CubeSandbox/CubeMaster/integration )
 
 
