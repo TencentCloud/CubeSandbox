@@ -4,12 +4,16 @@
 package cube
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 )
 
 func callbackAuthRequest(tokenHeader string) *gin.Context {
@@ -60,5 +64,42 @@ func TestTemplateJobStatusCallbackRejectsBadToken(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestTemplateJobBuiltCallbackRetryDoesNotStartSecondContinuation(t *testing.T) {
+	t.Setenv(constants.TemplateCallbackTokenEnv, "s3cret")
+	var updateCalls atomic.Int32
+	var prepareCalls atomic.Int32
+	oldApply := applyTemplateImageJobBuiltReport
+	oldPrepare := prepareTemplateImageJobAfterRemoteBuildCallback
+	applyTemplateImageJobBuiltReport = func(context.Context, string, map[string]any) (bool, error) {
+		return updateCalls.Add(1) == 1, nil
+	}
+	prepareTemplateImageJobAfterRemoteBuildCallback = func(context.Context, string, *templatecenter.RemoteBuildResult) (*templatecenter.RemoteBuildContinuation, error) {
+		prepareCalls.Add(1)
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		applyTemplateImageJobBuiltReport = oldApply
+		prepareTemplateImageJobAfterRemoteBuildCallback = oldPrepare
+	})
+
+	body := `{"status":"BUILT","phase":"READY","artifact_id":"rfs-1"}`
+	for i := 0; i < 2; i++ {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/internal/template/jobs/job-1/status", strings.NewReader(body))
+		c.Request.Header.Set(constants.TemplateCallbackTokenHeader, "s3cret")
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Params = gin.Params{{Key: "job_id", Value: "job-1"}}
+
+		handleTemplateJobStatusCallback(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("callback %d status = %d, want 200", i+1, w.Code)
+		}
+	}
+	if got := prepareCalls.Load(); got != 1 {
+		t.Fatalf("prepare calls = %d, want 1", got)
 	}
 }

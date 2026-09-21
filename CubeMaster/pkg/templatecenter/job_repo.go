@@ -292,6 +292,48 @@ func UpdateTemplateImageJobIfTransitionAllowed(ctx context.Context, jobID string
 	return nil
 }
 
+// ApplyTemplateImageJobBuiltReport persists a BUILT callback unless the job
+// has already entered Master's post-build pipeline. A retried callback must
+// not move RUNNING/DISTRIBUTING (or CREATING_TEMPLATE) back to BUILT and open
+// a second continuation. false means the report was an idempotent replay.
+func ApplyTemplateImageJobBuiltReport(ctx context.Context, jobID string, values map[string]any) (bool, error) {
+	values["updated_at"] = time.Now()
+	tx := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("job_id = ?", jobID).
+		Where("status NOT IN ?", []string{JobStatusReady, JobStatusFailed}).
+		Where("NOT (status = ? AND phase IN ?)", JobStatusRunning, []string{JobPhaseDistributing, JobPhaseCreatingTemplate}).
+		Updates(values)
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+	if tx.RowsAffected > 0 {
+		return true, nil
+	}
+	job, err := getTemplateImageJobRecordByID(ctx, jobID)
+	if err != nil {
+		return false, err
+	}
+	// MySQL reports changed rows rather than matched rows unless
+	// clientFoundRows is enabled. A byte-identical BUILT retry within the
+	// datetime column's one-second precision can therefore reach this branch
+	// even though the job is still waiting for post-build processing.
+	return job.Status == JobStatusBuilt, nil
+}
+
+// claimTemplateImageJobDistribution atomically assigns the one continuation
+// allowed to advance a registered BUILT job. The status CAS makes the claim
+// safe across CubeMaster processes as well as concurrent callback handlers.
+func claimTemplateImageJobDistribution(ctx context.Context, jobID string, values map[string]any) (bool, error) {
+	values["updated_at"] = time.Now()
+	tx := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("job_id = ? AND status = ?", jobID, JobStatusBuilt).
+		Updates(values)
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+	return tx.RowsAffected > 0, nil
+}
+
 // updateRootfsArtifactIfStatus applies values only while the row is still in
 // fromStatus — a compare-and-swap so a duplicate finalizer (a second BUILT
 // replay on another master that skipped the named register lock) cannot

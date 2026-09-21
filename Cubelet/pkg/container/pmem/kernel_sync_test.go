@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -32,6 +33,44 @@ func TestRefreshKernelFileVerifiesCopiedContent(t *testing.T) {
 	}
 	if !bytes.Equal(got, bytes.Repeat([]byte("s"), 4096)) {
 		t.Fatal("target kernel should match shared kernel after refresh")
+	}
+	assertKernelVersionMatches(t, targetKernelPath)
+}
+
+func TestRefreshKernelFileConcurrentRequests(t *testing.T) {
+	baseDir := t.TempDir()
+	sharedKernelPath := filepath.Join(baseDir, "shared", "vmlinux")
+	targetKernelPath := filepath.Join(baseDir, "target", "artifact.vm")
+	sharedKernel := bytes.Repeat([]byte("concurrent-kernel"), 4096)
+	writeKernelTestFile(t, sharedKernelPath, sharedKernel)
+
+	const concurrency = 8
+	start := make(chan struct{})
+	errs := make(chan error, concurrency)
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- RefreshKernelFile(context.Background(), sharedKernelPath, targetKernelPath)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("RefreshKernelFile() error = %v", err)
+		}
+	}
+	got, err := os.ReadFile(targetKernelPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, sharedKernel) {
+		t.Fatal("target kernel does not match shared kernel")
 	}
 	assertKernelVersionMatches(t, targetKernelPath)
 }

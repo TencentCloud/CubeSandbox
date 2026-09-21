@@ -255,8 +255,174 @@ func DetachRemoteBuildResumeContext(ctx context.Context, jobID, artifactID strin
 	})
 }
 
+// RemoteBuildContinuation is the post-registration portion of a remote build.
+// The live callback creates it synchronously while TC still holds the build
+// lock, then runs it asynchronously after the artifact is durably READY.
+type RemoteBuildContinuation struct {
+	jobID        string
+	req          *types.CreateTemplateFromImageReq
+	artifact     *models.RootfsArtifact
+	generatedReq *types.CreateCubeSandboxReq
+	adopted      bool
+}
+
+type remoteArtifactRegistrar func(context.Context, *types.CreateTemplateFromImageReq, *RemoteBuildResult) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, bool, error)
+
+// prepareTemplateImageJobAfterRemoteBuild validates the durable BUILT job,
+// registers (or adopts) its artifact, and advances the job to DISTRIBUTING.
+// It intentionally stops before any cross-node work so the callback path can
+// acknowledge TC as soon as the lock handoff is complete.
+func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, result *RemoteBuildResult, register remoteArtifactRegistrar, leaveBuiltOnRegisterError bool) (*RemoteBuildContinuation, error) {
+	if !isReady() {
+		return nil, ErrTemplateStoreNotInitialized
+	}
+	if result == nil {
+		return nil, fmt.Errorf("remote build result is nil")
+	}
+	if err := result.Validate(); err != nil {
+		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+			"status":        JobStatusFailed,
+			"phase":         JobPhaseBuildingExt4,
+			"progress":      100,
+			"error_message": err.Error(),
+		})
+		return nil, err
+	}
+
+	// Serialize registration attempts in this Master process. Cross-process
+	// exclusivity comes from the registrar: Master's DB lock during reconcile,
+	// or TC's still-held build lock during the live callback.
+	release := acquireResumeArtifactLock(result.TemplateSpecFingerprint)
+	defer release()
+
+	job, err := getTemplateImageJobRecordByID(ctx, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("load job %s: %w", jobID, err)
+	}
+	switch job.Status {
+	case JobStatusBuilt:
+		// Expected state: proceed.
+	case JobStatusRunning:
+		log.G(ctx).Infof("resume remote-built template job: job_id=%s already running past BUILT, skipping duplicate resume", jobID)
+		return nil, nil
+	default:
+		log.G(ctx).Warnf("resume remote-built template job: job_id=%s status=%s is not resumable, ignoring stale/duplicate BUILT report", jobID, job.Status)
+		return nil, nil
+	}
+
+	req, err := unmarshalTemplateImageJobRequest(job.RequestJSON)
+	if err != nil {
+		failErr := fmt.Errorf("decode job request snapshot: %w", err)
+		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+			"status":        JobStatusFailed,
+			"phase":         JobPhaseCreatingTemplate,
+			"progress":      100,
+			"error_message": failErr.Error(),
+		})
+		return nil, failErr
+	}
+	if decodedID := strings.TrimSpace(req.TemplateID); decodedID != strings.TrimSpace(job.TemplateID) {
+		failErr := fmt.Errorf("decoded request template_id %q does not match job %s template_id %q; refusing to resume to avoid orphaning the template", decodedID, jobID, job.TemplateID)
+		log.G(ctx).Errorf("%v", failErr)
+		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+			"status":        JobStatusFailed,
+			"phase":         JobPhaseCreatingTemplate,
+			"progress":      100,
+			"error_message": failErr.Error(),
+		})
+		return nil, failErr
+	}
+
+	logger := log.G(ctx).WithFields(map[string]any{
+		"job_id":      jobID,
+		"template_id": req.TemplateID,
+		"artifact_id": result.ArtifactID,
+		"build_mode":  "remote",
+	})
+	logger.Infof("resume step 1/3: register remote-built artifact")
+	artifact, generatedReq, adopted, err := register(ctx, req, result)
+	if err != nil {
+		if leaveBuiltOnRegisterError || errors.Is(err, errArtifactRegisterRetryable) {
+			// The live callback returns 500 so TC retries while retaining the
+			// build lock. Reconcile-time contention likewise leaves the durable
+			// BUILT report available for the next pass.
+			logger.Warnf("resume step 1/3 deferred: %v", err)
+			return nil, err
+		}
+		failErr := fmt.Errorf("register remote artifact: %w", err)
+		logger.Errorf("%v", failErr)
+		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+			"status":          JobStatusFailed,
+			"phase":           JobPhaseBuildingExt4,
+			"artifact_id":     result.ArtifactID,
+			"artifact_status": ArtifactStatusFailed,
+			"progress":        100,
+			"error_message":   failErr.Error(),
+		})
+		return nil, failErr
+	}
+
+	claimed, err := claimTemplateImageJobDistribution(ctx, jobID, map[string]any{
+		"artifact_id":               artifact.ArtifactID,
+		"template_spec_fingerprint": artifact.TemplateSpecFingerprint,
+		"source_image_digest":       artifact.SourceImageDigest,
+		"artifact_status":           artifact.Status,
+		"status":                    JobStatusRunning,
+		"phase":                     JobPhaseDistributing,
+		"progress":                  70,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("claim job distribution: %w", err)
+	}
+	if !claimed {
+		logger.Infof("resume remote-built template job: job_id=%s distribution already claimed, skipping duplicate resume", jobID)
+		return nil, nil
+	}
+
+	return &RemoteBuildContinuation{
+		jobID:        jobID,
+		req:          req,
+		artifact:     artifact,
+		generatedReq: generatedReq,
+		adopted:      adopted,
+	}, nil
+}
+
+// PrepareTemplateImageJobAfterRemoteBuildCallback performs the synchronous
+// half of the BUILT callback. Its protocol contract is that TC still owns the
+// fingerprint build lock for the duration of the HTTP request; consequently
+// this path must not try to reacquire that same lock.
+func PrepareTemplateImageJobAfterRemoteBuildCallback(ctx context.Context, jobID string, result *RemoteBuildResult) (*RemoteBuildContinuation, error) {
+	return prepareTemplateImageJobAfterRemoteBuild(ctx, jobID, result, registerRemoteBuiltArtifactWhileTCBuildLocked, true)
+}
+
+// ContinueTemplateImageJobAfterRemoteBuild performs the slow post-registration
+// work after the BUILT callback has been acknowledged: distribution, template
+// definition/replica creation, alias claim, and terminal job update.
+func ContinueTemplateImageJobAfterRemoteBuild(ctx context.Context, continuation *RemoteBuildContinuation) error {
+	if continuation == nil {
+		return nil
+	}
+	logger := log.G(ctx).WithFields(map[string]any{
+		"job_id":      continuation.jobID,
+		"template_id": continuation.req.TemplateID,
+		"artifact_id": continuation.artifact.ArtifactID,
+		"build_mode":  "remote",
+	})
+	logger.Infof("resume step 2/3: artifact registered, entering distribution: artifact_status=%s ext4_size_bytes=%d adopted=%v",
+		continuation.artifact.Status, continuation.artifact.Ext4SizeBytes, continuation.adopted)
+	err := finishTemplateImageJobAfterArtifact(ctx, continuation.jobID, continuation.req, continuation.artifact, continuation.generatedReq, !continuation.adopted)
+	if err != nil {
+		logger.Errorf("resume step 3/3 failed: %v", err)
+		return err
+	}
+	logger.Infof("resume step 3/3: template is READY")
+	return nil
+}
+
 // ResumeTemplateImageJobAfterRemoteBuild continues a template build that was
-// performed by the standalone CubeTemplateCenter process.
+// performed by the standalone CubeTemplateCenter process. Reconciler replays
+// use this complete path because TC no longer holds the build lock.
 //
 // TC owns only the data-plane work (pull image, bake rootfs, mkfs ext4) and
 // reports the result back; every DB write and the whole distribution pipeline
@@ -272,8 +438,8 @@ func DetachRemoteBuildResumeContext(ctx context.Context, jobID, artifactID strin
 //  6. claim the alias and aggregate replica status
 //  7. write the job's terminal status
 //
-// It is invoked from the internal status-callback handler when TC reports
-// status=BUILT. Errors are reported into the job row, so the caller only needs
+// It is invoked by the BUILT-job reconciler after the live callback path was
+// interrupted. Errors are reported into the job row, so the caller only needs
 // to log them.
 func ResumeTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, result *RemoteBuildResult) error {
 	// Logged unconditionally and BEFORE any early return: a resume that bails
@@ -281,143 +447,11 @@ func ResumeTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, r
 	// indistinguishable from the goroutine never having run.
 	log.G(ctx).Infof("resume remote-built template job: start job_id=%s", jobID)
 
-	if !isReady() {
-		return ErrTemplateStoreNotInitialized
-	}
-	if result == nil {
-		return fmt.Errorf("remote build result is nil")
-	}
-	if err := result.Validate(); err != nil {
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":        JobStatusFailed,
-			"phase":         JobPhaseBuildingExt4,
-			"progress":      100,
-			"error_message": err.Error(),
-		})
+	continuation, err := prepareTemplateImageJobAfterRemoteBuild(ctx, jobID, result, registerRemoteBuiltArtifact, false)
+	if err != nil {
 		return err
 	}
-
-	// Serialize concurrent resumes of this fingerprint (callback goroutine +
-	// reconciler replay, including DIFFERENT job_ids/artifact_ids from
-	// concurrent same-spec builds) and re-check the job state under the lock,
-	// so a duplicate or late BUILT report cannot flip an already-terminal job
-	// back through the pipeline or double-register the artifact (which would
-	// regenerate DownloadToken and break the in-flight download of the first
-	// attempt, or hit the fingerprint unique index).
-	release := acquireResumeArtifactLock(result.TemplateSpecFingerprint)
-	defer release()
-
-	job, err := getTemplateImageJobRecordByID(ctx, jobID)
-	if err != nil {
-		return fmt.Errorf("load job %s: %w", jobID, err)
-	}
-
-	// State guard: resume is only meaningful for a job still awaiting the
-	// post-build pipeline. A job already terminal (READY/FAILED) or already
-	// resumed (a previous attempt moved it past BUILT) must not re-run. The
-	// callback applies TC's status update before spawning resume, so a freshly
-	// reported job reads BUILT here; anything else is a duplicate/stale report.
-	switch job.Status {
-	case JobStatusBuilt:
-		// Expected state: proceed.
-	case JobStatusRunning:
-		// A resume is already in progress elsewhere (it set phase past BUILT but
-		// has not finished); the per-job lock above serializes us behind it, so
-		// reaching here means it already completed. Skip.
-		log.G(ctx).Infof("resume remote-built template job: job_id=%s already running past BUILT, skipping duplicate resume", jobID)
-		return nil
-	default:
-		log.G(ctx).Warnf("resume remote-built template job: job_id=%s status=%s is not resumable, ignoring stale/duplicate BUILT report", jobID, job.Status)
-		return nil
-	}
-
-	// The original request was snapshotted at submit time; rebuild it so the
-	// downstream helpers see exactly the same input local mode would pass.
-	req, err := unmarshalTemplateImageJobRequest(job.RequestJSON)
-	if err != nil {
-		failErr := fmt.Errorf("decode job request snapshot: %w", err)
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":        JobStatusFailed,
-			"phase":         JobPhaseCreatingTemplate,
-			"progress":      100,
-			"error_message": failErr.Error(),
-		})
-		return failErr
-	}
-	// Hard invariant: the decoded snapshot's template_id MUST equal the
-	// job row's own template_id. This is the exact class of bug that
-	// previously orphaned a job's template_id (unmarshalTemplateImageJobRequest
-	// silently minting a second, different ID) while the real definition +
-	// replicas got registered under the regenerated ID instead. Fail loudly
-	// here rather than letting registerRemoteBuiltArtifact silently write the
-	// definition/replicas under a mismatched template_id again in the future.
-	if decodedID := strings.TrimSpace(req.TemplateID); decodedID != strings.TrimSpace(job.TemplateID) {
-		failErr := fmt.Errorf("decoded request template_id %q does not match job %s template_id %q; refusing to resume to avoid orphaning the template", decodedID, jobID, job.TemplateID)
-		log.G(ctx).Errorf("%v", failErr)
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":        JobStatusFailed,
-			"phase":         JobPhaseCreatingTemplate,
-			"progress":      100,
-			"error_message": failErr.Error(),
-		})
-		return failErr
-	}
-
-	logger := log.G(ctx).WithFields(map[string]any{
-		"job_id":      jobID,
-		"template_id": req.TemplateID,
-		"artifact_id": result.ArtifactID,
-		"build_mode":  "remote",
-	})
-
-	// Step 1 + 2: register the artifact row and derive the create request.
-	logger.Infof("resume step 1/3: register remote-built artifact")
-	artifact, generatedReq, adopted, err := registerRemoteBuiltArtifact(ctx, req, result)
-	if err != nil {
-		if errors.Is(err, errArtifactRegisterRetryable) {
-			// Lock contention or a crashed predecessor's row: leave the job in
-			// BUILT — the image-job reconciler replays the resume later.
-			logger.Warnf("resume step 1/3 deferred: %v", err)
-			return err
-		}
-		failErr := fmt.Errorf("register remote artifact: %w", err)
-		logger.Errorf("%v", failErr)
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":          JobStatusFailed,
-			"phase":           JobPhaseBuildingExt4,
-			"artifact_id":     result.ArtifactID,
-			"artifact_status": ArtifactStatusFailed,
-			"progress":        100,
-			"error_message":   failErr.Error(),
-		})
-		return failErr
-	}
-
-	if err := updateTemplateImageJob(ctx, jobID, map[string]any{
-		"artifact_id":               artifact.ArtifactID,
-		"template_spec_fingerprint": artifact.TemplateSpecFingerprint,
-		"source_image_digest":       artifact.SourceImageDigest,
-		"artifact_status":           artifact.Status,
-		"status":                    JobStatusRunning,
-		"phase":                     JobPhaseDistributing,
-		"progress":                  70,
-	}); err != nil {
-		logger.Errorf("update job artifact fail: %v", err)
-	}
-
-	// Step 3: distribute to nodes. builtFreshArtifact is true only when THIS
-	// job's build produced the artifact; an adopted row belongs to a peer
-	// build whose replicas may already reference it, so a distribution
-	// failure here must not clean it up.
-	logger.Infof("resume step 2/3: artifact registered, entering distribution: artifact_status=%s ext4_size_bytes=%d adopted=%v",
-		artifact.Status, artifact.Ext4SizeBytes, adopted)
-	err = finishTemplateImageJobAfterArtifact(ctx, jobID, req, artifact, generatedReq, !adopted)
-	if err != nil {
-		logger.Errorf("resume step 3/3 failed: %v", err)
-		return err
-	}
-	logger.Infof("resume step 3/3: template is READY")
-	return nil
+	return ContinueTemplateImageJobAfterRemoteBuild(ctx, continuation)
 }
 
 // registerRemoteBuiltArtifact registers the artifact TC reported in the
@@ -447,6 +481,38 @@ func registerRemoteBuiltArtifact(ctx context.Context, req *types.CreateTemplateF
 	}
 
 	err = withArtifactRegisterLock(ctx, fingerprint, func(sess *gorm.DB) error {
+		var registerErr error
+		record, generatedReq, adopted, registerErr = registerRemoteBuiltArtifactOnSession(ctx, sess, req, result, imageCfg)
+		return registerErr
+	})
+	return record, generatedReq, adopted, err
+}
+
+// registerRemoteBuiltArtifactWhileTCBuildLocked is the synchronous BUILT
+// callback path. CubeTemplateCenter calls the callback while it still owns the
+// same fingerprint lock, so acquiring it again here would make Master wait on
+// its caller and recreate the lock/read-timeout race. The callback must not
+// return success until this function has made the artifact READY; TC then
+// releases its lock and the next same-fingerprint job can reuse the row.
+func registerRemoteBuiltArtifactWhileTCBuildLocked(ctx context.Context, req *types.CreateTemplateFromImageReq, result *RemoteBuildResult) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, bool, error) {
+	fingerprint := strings.TrimSpace(result.TemplateSpecFingerprint)
+	if fingerprint == "" {
+		return nil, nil, false, fmt.Errorf("remote build result is missing template_spec_fingerprint")
+	}
+	imageCfg, err := decodeImageConfigJSON(result.ImageConfigJSON)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return registerRemoteBuiltArtifactOnSession(ctx, store.db.WithContext(ctx), req, result, imageCfg)
+}
+
+// registerRemoteBuiltArtifactOnSession contains the idempotent fingerprint-first
+// claim/finalize operation. Exclusivity is supplied either by Master's lock
+// wrapper (reconciler replay) or by TC retaining its build lock until the BUILT
+// callback returns (live callback path).
+func registerRemoteBuiltArtifactOnSession(ctx context.Context, sess *gorm.DB, req *types.CreateTemplateFromImageReq, result *RemoteBuildResult, imageCfg DockerImageConfig) (record *models.RootfsArtifact, generatedReq *types.CreateCubeSandboxReq, adopted bool, err error) {
+	fingerprint := result.TemplateSpecFingerprint
+	err = func() error {
 		existing, findErr := findRootfsArtifactByFingerprintForUpdate(sess, fingerprint)
 		switch {
 		case findErr == nil && existing.Status == ArtifactStatusReady && !existing.DeletedAt.Valid:
@@ -517,7 +583,7 @@ func registerRemoteBuiltArtifact(ctx context.Context, req *types.CreateTemplateF
 		record = finRec
 		generatedReq = finReq
 		return nil
-	})
+	}()
 	if err != nil {
 		return nil, nil, false, err
 	}

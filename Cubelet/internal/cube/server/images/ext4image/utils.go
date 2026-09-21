@@ -25,6 +25,8 @@ import (
 	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
+var pmemFileLocks = utils.NewResourceLocks()
+
 func EnsurePmemFile(ctx context.Context, instanceType, imageRef string) error {
 	if err := EnsurePmemRootfs(ctx, instanceType, imageRef); err != nil {
 		return err
@@ -44,6 +46,15 @@ func EnsurePmemRootfs(ctx context.Context, instanceType, imageRef string) error 
 		return fmt.Errorf("invalid imageRef: %w", err)
 	}
 	imagePath := pmem.GetRawImageFilePath(instanceType, imageRef)
+	// CreateImage and node-distribution requests may legitimately reuse the
+	// same artifact. Lock at this shared entry point so every writer of the
+	// fixed .download path is serialized and waiters recheck the final file.
+	unlock, err := pmemFileLocks.LockContext(ctx, imagePath)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	exist, err := utils.FileExistAndValid(imagePath)
 	if err != nil {
 		log.G(ctx).Warnf("pmem file %s validation failed, try download: %v", imagePath, err)

@@ -54,6 +54,9 @@ var templateJobIntColumns = map[string]bool{
 	"pull_speed_bps":        true,
 }
 
+var applyTemplateImageJobBuiltReport = templatecenter.ApplyTemplateImageJobBuiltReport
+var prepareTemplateImageJobAfterRemoteBuildCallback = templatecenter.PrepareTemplateImageJobAfterRemoteBuildCallback
+
 // callbackTokenWarnOnce rate-limits the "unauthenticated endpoint" warning.
 var callbackTokenWarnOnce sync.Once
 
@@ -161,13 +164,25 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	// Conditional update: when the report carries a status change, the
-	// terminal-state guard lives in the UPDATE's WHERE (not a preceding
-	// SELECT), so a late RUNNING/BUILT report can never rewrite a job that
-	// distribution or force-delete already finished — and a lookup error can
-	// no longer fail open into an unguarded write.
+	// Conditional update: guards live in the UPDATE's WHERE (not a preceding
+	// SELECT). Terminal jobs cannot be rewritten, and a retried BUILT report
+	// cannot move an already claimed distribution back to BUILT.
 	if newStatus, ok := values["status"].(string); ok && newStatus != "" {
-		if err := templatecenter.UpdateTemplateImageJobIfTransitionAllowed(ctx, jobID, values, newStatus); err != nil {
+		if strings.EqualFold(newStatus, templatecenter.JobStatusBuilt) {
+			applied, err := applyTemplateImageJobBuiltReport(ctx, jobID, values)
+			if err != nil {
+				log.G(ctx).Errorf("template job BUILT callback: update fail: job_id=%s err=%v", jobID, err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			if !applied {
+				// The original callback already handed the job to Master's
+				// post-build pipeline. A lost HTTP response must be acknowledged
+				// without moving RUNNING/DISTRIBUTING back to BUILT.
+				c.JSON(http.StatusOK, gin.H{"status": "ok"})
+				return
+			}
+		} else if err := templatecenter.UpdateTemplateImageJobIfTransitionAllowed(ctx, jobID, values, newStatus); err != nil {
 			if errors.Is(err, templatecenter.ErrTerminalJobStatusFlip) {
 				log.G(ctx).Warnf("template job status callback rejected: job_id=%s err=%v", jobID, err)
 				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
@@ -188,10 +203,11 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 	log.G(ctx).Infof("template job status callback applied: job_id=%s status=%v phase=%v",
 		jobID, payload["status"], payload["phase"])
 
-	// A BUILT report means TC finished the data-plane work. Everything that
-	// follows (registering the artifact row, distributing to Cubelet nodes,
-	// writing template_definitions / replicas, claiming the alias) is
-	// CubeMaster's job and runs here.
+	// A BUILT report means TC finished the data-plane work. TC deliberately
+	// retains the fingerprint build lock until this HTTP request returns. Register
+	// the artifact synchronously, without reacquiring that lock, so the READY row
+	// is visible before TC releases it and another same-fingerprint job proceeds.
+	// Only the slow distribution/template-finalization half runs asynchronously.
 	//
 	// The resume context is detached from the request (the pipeline performs
 	// cross-node RPCs and must not be canceled when this handler returns) but
@@ -199,20 +215,26 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 	if status, _ := payload["status"].(string); strings.EqualFold(status, templatecenter.JobStatusBuilt) {
 		result := remoteBuildResultFromPayload(payload)
 		resumeCtx := templatecenter.DetachRemoteBuildResumeContext(ctx, jobID, result.ArtifactID)
+		continuation, err := prepareTemplateImageJobAfterRemoteBuildCallback(ctx, jobID, result)
+		if err != nil {
+			// Return 5xx while the job remains BUILT. TC's terminal-report retry
+			// loop will call us again while it still owns the build lock; if it
+			// eventually gives up, the BUILT reconciler can replay registration.
+			log.G(ctx).Errorf("template job BUILT callback: register artifact fail: job_id=%s err=%v", jobID, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 		go func() {
 			// Without this, a panic anywhere in the resume pipeline takes the
 			// whole CubeMaster process down: it runs on a bare goroutine, so
-			// gin's recovery middleware does not cover it. The job is left in
-			// BUILT on purpose — the image-job reconciler replays resume for
-			// jobs stuck in BUILT, which is a safer outcome than marking a
-			// job FAILED from inside a recover.
+			// gin's recovery middleware does not cover it.
 			defer func() {
 				if r := recover(); r != nil {
 					log.G(resumeCtx).Errorf("resume remote-built template job panic: job_id=%s err=%v\n%s",
 						jobID, r, string(debug.Stack()))
 				}
 			}()
-			if err := templatecenter.ResumeTemplateImageJobAfterRemoteBuild(resumeCtx, jobID, result); err != nil {
+			if err := templatecenter.ContinueTemplateImageJobAfterRemoteBuild(resumeCtx, continuation); err != nil {
 				log.G(resumeCtx).Errorf("resume remote-built template job fail: job_id=%s err=%v", jobID, err)
 			}
 		}()

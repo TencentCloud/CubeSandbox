@@ -42,15 +42,18 @@ const (
 	// normalization below byte-identical to TC's.
 	maxMySQLLockNameLen = 64
 
-	// artifactRegisterLockTimeout bounds the blocking GET_LOCK wait. The
+	// artifactRegisterLockTimeout bounds the non-blocking lock poll loop. The
 	// critical section it protects is a handful of DB round-trips
 	// (claim + finalize), never ext4 builds or cross-node RPCs, so a short
 	// wait suffices; on timeout the caller leaves the job in BUILT and the
 	// image-job reconciler replays the registration later.
 	artifactRegisterLockTimeout = 10 * time.Second
 
-	// artifactRegisterLockPoll is the retry cadence for the PostgreSQL
-	// advisory-lock path (pg's blocking pg_advisory_lock has no timeout).
+	// artifactRegisterLockPoll is the retry cadence for both database
+	// dialects. In particular, MySQL must use GET_LOCK(name, 0) on every
+	// attempt: its configured read timeout can be shorter than this overall
+	// wait, so GET_LOCK(name, timeout) would invalidate the connection before
+	// the application-level deadline is reached.
 	artifactRegisterLockPoll = 200 * time.Millisecond
 )
 
@@ -96,19 +99,17 @@ func artifactRegisterLockName(fingerprint string) string {
 	return "tc_build_" + fingerprint
 }
 
-// blockingSessionLock acquires the named session lock, waiting up to
-// timeout. MySQL: GET_LOCK(name, seconds). PostgreSQL: bounded
-// pg_try_advisory_lock retry loop (pg's blocking pg_advisory_lock has no
-// timeout). The caller must pass a session pinned to one physical
+// tryArtifactRegisterSessionLock makes one non-blocking attempt to acquire the
+// named session lock. The caller must pass a session pinned to one physical
 // connection (withArtifactRegisterLock does).
 //
 // name must already be normalized (the caller normalizes once so acquire and
 // release agree; releaseSessionLock does not normalize on this side).
-func blockingSessionLock(ctx context.Context, sess *gorm.DB, name string, timeout time.Duration) (bool, error) {
+func tryArtifactRegisterSessionLock(sess *gorm.DB, name string) (bool, error) {
 	switch sess.Dialector.Name() {
 	case "mysql":
 		var res sql.NullInt64
-		if err := sess.Raw("SELECT GET_LOCK(?, ?)", name, int(timeout.Seconds())).Scan(&res).Error; err != nil {
+		if err := sess.Raw("SELECT GET_LOCK(?, 0)", name).Scan(&res).Error; err != nil {
 			return false, err
 		}
 		if !res.Valid {
@@ -123,27 +124,53 @@ func blockingSessionLock(ctx context.Context, sess *gorm.DB, name string, timeou
 			return false, fmt.Errorf("GET_LOCK %q returned unexpected value %d", name, res.Int64)
 		}
 	case "postgres":
-		deadline := time.Now().Add(timeout)
-		for {
-			var ok bool
-			if err := sess.Raw("SELECT pg_try_advisory_lock(hashtext(?))", name).Scan(&ok).Error; err != nil {
-				return false, err
-			}
-			if ok {
-				return true, nil
-			}
-			if time.Now().After(deadline) {
-				return false, nil
-			}
-			select {
-			case <-ctx.Done():
-				return false, ctx.Err()
-			case <-time.After(artifactRegisterLockPoll):
-			}
+		var ok bool
+		if err := sess.Raw("SELECT pg_try_advisory_lock(hashtext(?))", name).Scan(&ok).Error; err != nil {
+			return false, err
 		}
+		return ok, nil
 	default:
 		return false, fmt.Errorf("unsupported database dialect %q", sess.Dialector.Name())
 	}
+}
+
+// pollSessionLock retries a non-blocking lock attempt until it succeeds, the
+// caller cancels the operation, or the overall timeout expires. Keeping the
+// wait outside SQL ensures a short driver read_timeout can never invalidate a
+// healthy connection merely because a peer holds the lock for longer.
+func pollSessionLock(ctx context.Context, timeout, interval time.Duration, try func() (bool, error)) (bool, error) {
+	if timeout <= 0 {
+		return try()
+	}
+	if interval <= 0 {
+		interval = timeout
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	for {
+		locked, err := try()
+		if err != nil || locked {
+			return locked, err
+		}
+
+		retry := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			retry.Stop()
+			return false, ctx.Err()
+		case <-deadline.C:
+			retry.Stop()
+			return false, nil
+		case <-retry.C:
+		}
+	}
+}
+
+func pollingSessionLock(ctx context.Context, sess *gorm.DB, name string, timeout time.Duration) (bool, error) {
+	return pollSessionLock(ctx, timeout, artifactRegisterLockPoll, func() (bool, error) {
+		return tryArtifactRegisterSessionLock(sess, name)
+	})
 }
 
 // withArtifactRegisterLock runs fn while holding the cluster-wide
@@ -163,9 +190,13 @@ func withArtifactRegisterLock(ctx context.Context, fingerprint string, fn func(s
 			log.G(ctx).Debugf("artifact register lock skipped on dialect %s", dialect)
 			return fn(sess)
 		}
-		locked, err := blockingSessionLock(ctx, sess, lockName, artifactRegisterLockTimeout)
+		locked, err := pollingSessionLock(ctx, sess, lockName, artifactRegisterLockTimeout)
 		if err != nil {
-			return errors.Join(fmt.Errorf("acquire register lock: %w", err), discardPinnedSession(sess))
+			discardErr := discardPinnedSession(sess)
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return errors.Join(fmt.Errorf("acquire register lock: %w", err), discardErr)
+			}
+			return errors.Join(errArtifactRegisterRetryable, fmt.Errorf("acquire register lock: %w", err), discardErr)
 		}
 		if !locked {
 			return fmt.Errorf("%w: register lock %q held by a peer for over %s",
