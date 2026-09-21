@@ -22,7 +22,7 @@ lang: zh-CN
 |---|---|
 | Pi coding agent | `@earendil-works/pi-coding-agent`（通过 `--build-arg PI_VERSION=x.y.z` 固定） |
 | Node.js | 24（通过 NodeSource 安装） |
-| CubeSandbox 基础镜像 | `ghcr.io/tencentcloud/cubesandbox-base:2026.16` |
+| CubeSandbox 基础镜像 | `ghcr.io/tencentcloud/cubesandbox-base:latest` |
 | E2B SDK（宿主端驱动） | `e2b`（最新） |
 | CubeSandbox 平台 | `>= 0.3.0`（pause/resume）/ `>= 0.4.0`（CubeEgress 密钥保险柜） |
 
@@ -56,7 +56,7 @@ Pi 是一个会编辑文件、执行命令、安装依赖的终端 Agent。直�
 
 ```dockerfile
 # examples/pi-agent-integration/Dockerfile（节选）
-ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:2026.16
+ARG CUBE_BASE_IMAGE=ghcr.io/tencentcloud/cubesandbox-base:latest
 FROM ${CUBE_BASE_IMAGE}
 
 ARG NODE_MAJOR=24
@@ -250,7 +250,7 @@ version = sandbox.commands.run("pi --version", timeout=60)
 | `403 Forbidden - CubeEgress` | 默认拒绝且无匹配放行规则 | 把 LLM host（及所需其他 host）加入规则 |
 | vault 下 Pi 报 `Connection error` / TLS 失败 | Pi 的 Node 运行时忽略系统 CA 库，不信任 CubeEgress CA | 示例已设 `NODE_EXTRA_CA_CERTS`；若 CA 在别处用 `PI_NODE_EXTRA_CA_CERTS` 覆盖 |
 | 模板创建卡在 `PULLING` | Cube 节点无法访问 registry | 推送到集群可访问的 registry，必要时提供鉴权 |
-| 就绪探针超时 | 基础镜像缺少 envd | 确认 `FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16` |
+| 就绪探针超时 | 基础镜像缺少 envd | 确认 `FROM ghcr.io/tencentcloud/cubesandbox-base:latest` |
 | `pause()` / `connect()` 报错 | 平台版本过低不支持快照 | 升级 CubeSandbox 平台 |
 
 ## 参考

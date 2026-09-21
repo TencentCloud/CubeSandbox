@@ -13,7 +13,9 @@
 # Environment variables:
 #   ENVD_PORT       Port envd listens on (default: 49983).
 #   ENVD_EXTRA_ARGS Extra flags appended to the envd invocation (default: empty).
-#                   -isnotfc is appended automatically if not already present.
+#                   -isnotfc is appended automatically if not already present,
+#                   for E2B CLI compatibility only. cube-envd has no Firecracker
+#                   MMDS logic, so the flag is a no-op.
 #   ENVD_LOG_FILE   Where to redirect envd stdout/stderr (default:
 #                   /var/log/envd.log). Set to "-" to inherit the container
 #                   stdio.

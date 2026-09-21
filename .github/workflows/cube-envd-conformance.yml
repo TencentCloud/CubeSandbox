@@ -1,0 +1,127 @@
+name: cube-envd Conformance
+
+# 与 Go envd 基线（ENVD_REF）的一致性对照。
+#
+# 为什么不在每个 PR 上跑：这个 job 需要先构建基础镜像（Go envd + musl cube-envd），
+# 单次成本远高于单元测试。参照 build-envd-base-image.yml 的触发面，这里跑在
+# master 推送、每日定时与手动触发上；改动对照套件本身时也可以手动跑一次。
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'cube-envd/**'
+      - 'docker/Dockerfile.cube-base'
+      - 'docker/cube-entrypoint.sh'
+      - 'tests/e2e/cube_envd/conformance/**'
+      - '.github/workflows/cube-envd-conformance.yml'
+  schedule:
+    # 每天 03:20 UTC：基线与我们的实现都可能变化，定期对拍一次。
+    - cron: '20 3 * * *'
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: cube-envd-conformance
+  # 与 docker/Dockerfile.cube-base 的 ENVD_REF 默认值保持一致。
+  ENVD_REF: "2026.16"
+
+jobs:
+  conformance:
+    name: Diff cube-envd against the Go baseline
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build base image (both envd implementations)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.cube-base
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:ci
+          build-args: |
+            ENVD_IMPL=cube
+            ENVD_REF=${{ env.ENVD_REF }}
+          cache-from: type=gha,scope=conformance
+          cache-to: type=gha,mode=max,scope=conformance
+
+      - name: Start both implementations from the same image
+        run: |
+          set -euo pipefail
+          # 同一个镜像、同一个 guest 环境，唯一变量是 ENVD_BIN 指向哪个二进制。
+          docker run -d --name conf-go \
+            -p 49985:49983 -e ENVD_BIN=/usr/bin/envd-go \
+            "${{ env.IMAGE_NAME }}:ci"
+          docker run -d --name conf-cube \
+            -p 49984:49983 -e ENVD_BIN=/usr/bin/envd \
+            "${{ env.IMAGE_NAME }}:ci"
+
+          for pair in "conf-go 49985 go" "conf-cube 49984 cube"; do
+            set -- $pair
+            for attempt in {1..20}; do
+              code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$2/health" || true)"
+              if [ "${code}" = "204" ]; then
+                echo "$3: /health => 204"
+                break
+              fi
+              if [ "${attempt}" = "20" ]; then
+                echo "$3: /health never returned 204" >&2
+                docker logs "$1" >&2 || true
+                exit 1
+              fi
+              sleep 1
+            done
+          done
+
+          docker exec conf-go /usr/bin/envd-go -version
+          docker exec conf-cube /usr/bin/envd -version
+
+      - name: Capture fixtures
+        working-directory: tests/e2e/cube_envd/conformance
+        run: |
+          set -euo pipefail
+          mkdir -p fixtures
+          python3 capture.py --endpoint http://127.0.0.1:49985 \
+            --implementation "go-envd(${{ env.ENVD_REF }})" --user root \
+            --out fixtures/go-envd.json
+          python3 capture.py --endpoint http://127.0.0.1:49984 \
+            --implementation cube-envd --user root \
+            --out fixtures/cube-envd.json
+
+      - name: Diff against the baseline
+        working-directory: tests/e2e/cube_envd/conformance
+        run: |
+          set -euo pipefail
+          python3 conformance.py diff \
+            --baseline fixtures/go-envd.json \
+            --candidate fixtures/cube-envd.json \
+            --results RESULTS.md \
+            --strict
+
+      - name: Assert the declared-differences table is in sync
+        working-directory: tests/e2e/cube_envd/conformance
+        run: python3 conformance.py check-docs
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cube-envd-conformance-results
+          path: |
+            tests/e2e/cube_envd/conformance/RESULTS.md
+            tests/e2e/cube_envd/conformance/fixtures/*.json
+          if-no-files-found: warn
+
+      - name: Container logs
+        if: failure()
+        run: |
+          docker logs conf-go 2>&1 | tail -50 || true
+          docker logs conf-cube 2>&1 | tail -50 || true

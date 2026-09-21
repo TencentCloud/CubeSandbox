@@ -14,19 +14,71 @@ by [`.github/workflows/build-builder-image.yml`](../.github/workflows/build-buil
 
 Base image for user-supplied sandbox templates. It is `ubuntu:22.04`
 with `envd` preinstalled on `:49983`, so any image built `FROM` it is
-already ready for Cube's readiness probe. Published as a multi-arch
-(`linux/amd64` + `linux/arm64`) manifest list
+already ready for Cube's readiness probe. The image ships **both** envd
+implementations and lets the deployment pick one:
+
+| Path | What it is |
+|---|---|
+| `/usr/bin/envd` | the selected implementation — `cube-envd` by default |
+| `/usr/bin/envd-go` | the upstream Go envd, built from `e2b-dev/infra@ENVD_REF` |
+| `/etc/cubesandbox-envd-impl` | `cube` or `go`: which one `/usr/bin/envd` is |
+| `/etc/cubesandbox-envd-ref` | the upstream ref the Go binary was built from |
+
+Selection is build-time (`--build-arg ENVD_IMPL=cube|go`) or runtime
+(`ENVD_BIN=/usr/bin/envd-go`, honoured by `cube-entrypoint.sh`) — the latter needs
+no rebuild, which is what makes the Go envd a real rollback.
+
+### Selecting the implementation in a template
+
+A template can pick the implementation without rebuilding anything, by passing
+`ENVD_BIN` in the template's `env`. Two things to know:
+
+1. **`env` replaces the image environment, it does not append to it.** CubeMaster
+   takes the override list verbatim instead of merging with the image config
+   (`CubeMaster/pkg/templatecenter/template_request.go:82-84`), so a minimal
+   `"env": ["ENVD_BIN=/usr/bin/envd-go"]` silently drops `ENVD_PORT`, `LANG`,
+   `LC_ALL` and `PATH`. Pass the whole list:
+
+   ```json
+   "env": ["ENVD_PORT=49983", "LANG=C.UTF-8", "LC_ALL=C.UTF-8",
+           "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+           "ENVD_BIN=/usr/bin/envd-go"]
+   ```
+
+2. **Verify which daemon is actually running, not which file exists.** Both
+   binaries live at fixed paths, so `/usr/bin/envd -version` reports the same
+   thing regardless of the selection — it is a property of the file, not of the
+   running process. Use a surface the two implementations answer differently:
+   `GET /metrics` returns `200` (JSON) on the Go envd and `501` on cube-envd,
+   and `-commit` differs (`b8ca332` vs the cube-envd build). `ls -l /proc/<pid>/exe`
+   inside the sandbox works too.
+
+   Verified on the deployment: the same image with `ENVD_BIN=/usr/bin/envd-go`
+   answers `/metrics` with 200 where the default template answers 501. Installing the
+selected implementation as the literal `/usr/bin/envd` matters: Cubelet collects
+the envd version by exec'ing `envd --version`, so an `ENVD_BIN` override alone
+would leave the template annotated with the other implementation's version.
+
+Published as a multi-arch (`linux/amd64` + `linux/arm64`) manifest list
 `ghcr.io/tencentcloud/cubesandbox-base` by
-[`.github/workflows/build-envd-base-image.yml`](../.github/workflows/build-envd-base-image.yml),
-which compiles `envd` in-place from
-[`e2b-dev/infra`](https://github.com/e2b-dev/infra) at tag `2026.16`
-(override via `workflow_dispatch` input `envd_ref`) on native amd64 and
-arm64 runners, then combines the per-arch images into one tag.
+[`.github/workflows/build-envd-base-image.yml`](../.github/workflows/build-envd-base-image.yml).
+The workflow compiles `cube-envd` from [`cube-envd/`](../cube-envd/) (Rust + musl
+static, version/commit injected via build args) and the Go envd from the pinned
+`ENVD_REF`, then runs a smoke test that asserts the `/health` probe returns 204
+for **both** `ENVD_BIN` settings, that both binaries are executable and report
+their versions, and that the implementation stamp matches `ENVD_IMPL`.
+
+The runtime stage installs `util-linux` on purpose: `cube-envd` delegates
+credential switching to `setpriv` when a request selects a user other than the
+one running the daemon (upstream Go `envd` did this in-process, which stable
+Rust cannot). Images that copy only `/usr/bin/envd` out of this image must
+provide a usable `setpriv` themselves — see
+[the BYO tutorial](../docs/guide/tutorials/bring-your-own-image.md#setpriv-is-required-when-the-requested-user-differs-from-root).
 
 Minimal consumer example:
 
 ```dockerfile
-FROM ghcr.io/tencentcloud/cubesandbox-base:2026.16
+FROM ghcr.io/tencentcloud/cubesandbox-base:latest
 RUN pip install pandas
 ```
 

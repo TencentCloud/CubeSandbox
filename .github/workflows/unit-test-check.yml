@@ -18,6 +18,7 @@ on:
       - 'Cubelet/**'
       - 'cubecow/**'
       - 'agent/**'
+      - 'cube-envd/**'
       - 'hypervisor/**'
       - 'examples/volume/s3/**'
       - 'tests/perf/**'
@@ -41,6 +42,7 @@ on:
       - 'Cubelet/**'
       - 'cubecow/**'
       - 'agent/**'
+      - 'cube-envd/**'
       - 'hypervisor/**'
       - 'examples/volume/s3/**'
       - 'tests/perf/**'
@@ -69,6 +71,7 @@ on:
           - cube-lifecycle-manager
           - cubelet
           - agent
+          - cube-envd
           - hypervisor
           - volume-s3
           - volume-cos-rpc
@@ -130,6 +133,7 @@ jobs:
             add_component "cube-lifecycle-manager"
             add_component "cubelet"
             add_component "agent"
+            add_component "cube-envd"
             add_component "hypervisor"
             add_component "volume-s3"
             add_component "volume-cos-rpc"
@@ -153,6 +157,7 @@ jobs:
               cube-lifecycle-manager) add_component "cube-lifecycle-manager" ;;
               cubelet) add_component "cubelet" ;;
               agent) add_component "agent" ;;
+              cube-envd) add_component "cube-envd" ;;
               hypervisor) add_component "hypervisor" ;;
               volume-s3) add_component "volume-s3" ;;
               volume-cos-rpc) add_component "volume-cos-rpc" ;;
@@ -266,6 +271,9 @@ jobs:
                 agent/*)
                   add_component "agent"
                   ;;
+                cube-envd/*)
+                  add_component "cube-envd"
+                  ;;
                 hypervisor/*)
                   add_component "hypervisor"
                   ;;
@@ -309,6 +317,7 @@ jobs:
                     elif . == "cubedb" then "CubeDB"
                     elif . == "cube-lifecycle-manager" then "Cube Lifecycle Manager"
                     elif . == "cubelet" then "Cubelet"
+                    elif . == "cube-envd" then "Cube EnvD"
                     elif . == "cubevs" then "CubeVS"
                     elif . == "agent" then "Agent"
                     elif . == "hypervisor" then "Hypervisor"
@@ -331,6 +340,7 @@ jobs:
                     elif . == "cubedb" then "cubedb-test"
                     elif . == "cube-lifecycle-manager" then "cube-lifecycle-manager-test"
                     elif . == "cubelet" then "cubelet-test"
+                    elif . == "cube-envd" then "cube-envd-test"
                     elif . == "cubevs" then "cubevs-test"
                     elif . == "agent" then "agent-test"
                     elif . == "hypervisor" then "hypervisor-test"

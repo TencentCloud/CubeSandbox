@@ -1,0 +1,157 @@
+# cube-envd 与 Go 基线（e2b envd 0.5.13 / e2b-dev/infra@2026.16）的差异清单。
+#
+# 这是**唯一事实源**：
+#   - `conformance.py diff` 读取本文件作为允许清单，未列出的差异一律判 FAIL；
+#   - `conformance.py render-docs` 用本文件生成 cube-envd/README.md 里的差异表格；
+#   - `conformance.py check-docs` 在 CI 里断言 README 表格与本文件一致（防漂移）。
+#
+# 填表纪律（避免"允许清单掩盖回归"）：
+#   1. 只登记**已经观测到**的差异，每条都要能说清基线与我们的取值；
+#   2. 一旦某个场景不再差异，conformance.py 会报 DECLARED-BUT-EQUAL 并在 --strict
+#      下失败，提示把条目删掉——不允许把已经追平的差异留在清单里当"保险"；
+#   3. `records` 用于把允许范围收窄到具体记录；省略表示整个场景。
+
+[[difference]]
+scenario = "proc_signal_exit"
+surface = "process.Process/Start：被信号终止的进程"
+baseline = 'exitCode = -1，status = "signal: killed"'
+ours = 'exitCode = 128 + N，status = "terminated by signal N"'
+reason = """
+Go 的 os.ProcessState.ExitCode() 在信号终止时返回 -1、String() 返回 "signal: killed"。
+CubeSandbox 自带的三个 SDK 都把 "terminated by signal N" 归一为 128 + N
+（sdk/go/pty.go、sdk/node/src/commands.ts、sdk/python/cubesandbox/_commands.py），
+因此 cube-envd 采用 shell 约定；负值在本实现里保留给"回收失败"这一独立语义，
+不会与信号语义混用。
+"""
+docs = true
+records = ["proc_signal_exit/start_events"]
+
+[[difference]]
+scenario = "rest_unimplemented"
+surface = "声明范围之外的三个面"
+baseline = "/files/compose、/metrics、filesystem.CreateWatcher 均已实现"
+ours = "全部返回 501 + Connect unimplemented 错误体"
+reason = """
+issue #1227 的 MVP 边界不包含这三个面；仓库内没有 /metrics 的消费者（Cubelet 只解析
+`envd --version`），/files/compose 与持久 watcher 也没有 SDK 调用方。按"声明之外必须
+返回稳定、协议正确的错误"的要求，它们显式返回 501，而不是让路由缺失导致的 404。
+"""
+docs = true
+
+[[difference]]
+scenario = "limits_probe"
+surface = "流式 Connect 帧的单帧上限"
+baseline = "无显式上限（envd 未设置 WithReadMaxBytes；connect-go v1.18.1 默认不限）"
+ours = "64 MiB（= CubeSandbox SDK 的 MAX_CONNECT_ENVELOPE_SIZE）"
+reason = """
+三个自带 SDK 的接收上限都是 64 MiB；daemon 侧取同一取值，就不会出现"SDK 允许发、
+daemon 拒绝收"的不对称。超限帧在读取帧头时即被拒绝（resource_exhausted），不会分配
+载荷缓冲；代价是比基线更严——基线对任意大小的单帧都不设限。
+"""
+docs = true
+records = ["limits_probe/large_stream_frame"]
+
+[[difference]]
+scenario = "limits_probe"
+surface = "一元请求体上限"
+baseline = "无显式上限（同一 connect-go 默认）"
+ours = "4 MiB，超过返回 429 resource_exhausted"
+reason = """
+一元 body 同样是无界输入面：若不设限，一个畸形请求就能让 daemon 按声明长度分配内存。
+4 MiB 覆盖了 /init 注入大批环境变量与全部真实 RPC 载荷，同时把最坏情况限制在常量级。
+"""
+docs = true
+records = ["limits_probe/oversized_unary"]
+
+[[difference]]
+scenario = "protocol_errors"
+surface = "畸形 JSON 的错误文案"
+baseline = '"unmarshal message: unmarshal into *process.ListRequest: proto: unexpected EOF"'
+ours = '"invalid List request: EOF while parsing an object at line 1 column 1"'
+reason = """
+状态码与错误码完全一致（400 / invalid_argument），只有解析器产生的文案不同：基线用
+protobuf-go，cube-envd 用 serde_json。SDK 按 code 分流，不匹配 message 文本。
+"""
+docs = true
+records = ["protocol_errors/malformed_json"]
+
+[[difference]]
+scenario = "fs_watch_dir"
+surface = "上传的原子替换在 WatchDir 流里多出临时文件事件"
+baseline = "就地写目标文件：订阅者看到 created.txt 的 CREATE/CHMOD/WRITE"
+ours = "同目录临时文件 + rename：订阅者额外看到 .cube-envd-upload-* 的 CREATE/WRITE/CHMOD，随后才是目标文件事件"
+reason = """
+cube-envd 用"同目录临时文件 + rename"保证上传要么完整落盘、要么完全不落盘；基线的
+O_TRUNC 就地写在中途失败时会留下半截文件。原子性带来的代价是目录订阅者会看到临时
+文件（名字带 .cube-envd-upload- 前缀且以随机后缀结尾），配合 watch 做同步的客户端
+需要按前缀过滤。两条路只能选一条：要原子性就接受这些事件，要事件逐条一致就放弃原子性。
+"""
+docs = true
+records = ["fs_watch_dir/watch_events"]
+
+[[difference]]
+scenario = "rest_files_roundtrip"
+surface = "/files 下载的 Range / 条件请求"
+baseline = "206 + Content-Range（Go http.ServeContent 天然支持），另有 If-Range/If-None-Match 等条件请求语义"
+ours = "忽略 Range，返回完整 200（Accept-Ranges: bytes 已按基线给出）"
+reason = """
+MVP 的 SDK 调用方只做整文件下载，因此没有实现 Range/条件请求分支。差异是**声明过**的：
+`Accept-Ranges: bytes` 与 `Vary: Accept-Encoding` 已与基线一致，客户端若发 Range 会拿到
+完整内容而不是 206——语义上仍然正确（HTTP 允许服务器忽略 Range），但不满足断点续传/
+缓存复用。实现时的建议是先评估 `tower-http::services::ServeFile`（自带 Range 与条件请求），
+而不是照抄 2000 行手写实现。
+"""
+docs = true
+records = ["rest_files_roundtrip/download_range"]
+
+# 说明：CLI 的严格化差异不在对照套件的允许清单里——套件通过 HTTP 访问 daemon，
+# 而 CLI 只存在于 socket 绑定之前。这条差异由 cube-envd/tests/cli.rs 的用例钉住
+# （`rejects_the_arguments_the_baseline_silently_ignores`），README 的 CLI 兼容矩阵
+# 与本文件同步。
+
+[[difference]]
+scenario = "cli"
+surface = "命令行解析的严格程度"
+baseline = "忽略位置参数、接受 `-isnotfc=false`、接受超出 u16 的 `-port`（只在 bind 时失败）"
+ours = "上述输入一律按用法错误处理：退出码 2 + stderr 用法提示"
+reason = """
+Go 的 flag 包在遇到第一个非 flag 参数时停止解析并静默忽略，一个写错的 ENVD_EXTRA_ARGS
+可能让 daemon 带着默认值启动；cube-envd 宁可启动失败也不接受看不懂的参数。被基线真正
+拒绝的输入（未定义 flag、缺值等）在这里同样被拒绝，退出码与用法提示位置一致。
+"""
+docs = true
+
+[[difference]]
+scenario = "cgroup"
+surface = "每条命令的 cgroup 放置与 OOM 归因"
+baseline = "cgroup v2 可写时给每条命令建 leaf、按 leaf 归因 OOM，并据此填 EndEvent 的 oomKilled/killedBy"
+ours = "MVP 不做 per-command cgroup：不设命令级资源上限，EndEvent 不产生 OOM 归因字段"
+reason = """
+在发布的基础镜像里这一差异**不可观察**：guest 没有可写的 cgroup v2 树，基线自己也会打印
+`falling back to no-op cgroup manager`（已用镜像里的 /usr/bin/envd-go 实测），两边跑的是
+同一套 noop 策略。只有在 cgroup v2 可写的宿主上，基线的命令级隔离与 OOM 归因才会体现。
+若后续实现，契约沿用基线：分配失败即拒绝 Start（resource_exhausted），绝不静默降级。
+对照套件不覆盖该面（无 OOM 场景），因此本条目只用于文档表。
+"""
+docs = true
+
+# ---- 曾经考虑改动、最终与基线保持一致的行为 ----
+# 这些不是差异，但它们是"被决定过"的取值：写在这里，避免以后有人凭直觉再改一次。
+
+[[aligned]]
+surface = "流式 keepalive 默认节奏"
+baseline = "90 s"
+ours = "90 s（可用 Keepalive-Ping-Interval 请求头调小）"
+reason = "默认值属于可观察行为，改动会平白多出一条差异；需要更短节奏的客户端本来就有请求头可用。"
+
+[[aligned]]
+surface = "一元请求体上限"
+baseline = "4 MiB（connect-go 默认）"
+ours = "4 MiB"
+reason = "与基线一致，同时覆盖 /init 注入大批环境变量的场景。"
+
+[[aligned]]
+surface = "进程信号退出的可观察字段"
+baseline = 'exitCode/status 同时出现在 EndEvent'
+ours = "同样的字段集合，仅取值约定不同（见上）"
+reason = "字段形状保持一致，SDK 无需分支处理缺失字段。"
