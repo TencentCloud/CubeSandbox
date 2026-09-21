@@ -332,7 +332,9 @@ class Sandbox:
             SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
             ApiError: If the timeout is ``0`` or below ``-1`` (HTTP 400), an
                 overlapping lifecycle transition prevents the connection
-                (HTTP 409), or an unexpected backend error occurs.
+                (HTTP 409), the sandbox's container has already exited
+                (HTTP 409, permanent — do not retry), or an unexpected backend
+                error occurs.
         """
         cfg = config or Config()
         s = requests.Session()

@@ -197,7 +197,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
         '409':
-          description: Sandbox cannot be connected during a conflicting lifecycle transition
+          description: Sandbox is not connectable in its current state, or a lifecycle transition conflicts with the request
           content:
             application/json:
               schema:
@@ -1012,6 +1012,12 @@ paths:
           type: string
       - name: state
         in: query
+        description: |-
+          Filter by sandbox state. Accepted values are `running`, `paused`,
+          `pausing`, and `unknown`; `stopped` and `error` are accepted as aliases
+          for `unknown`. The `unknown` bucket also holds sandboxes that are still
+          being created and sandboxes whose state could not be read from their
+          node, so it is not a synonym for "exited".
         required: false
         schema:
           type: string

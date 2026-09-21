@@ -369,6 +369,24 @@ impl SandboxService {
     ) -> AppResult<Sandbox> {
         let mut d = self.fetch_sandbox_detail(sandbox_id).await?;
 
+        // A sandbox whose guest/container has exited (or failed) cannot serve
+        // envd traffic. Returning connection info for it told clients the
+        // sandbox was usable while CubeProxy was already timing out against the
+        // dead backend, leaving callers stuck retrying a zombie.
+        //
+        // A sandbox mid-pause cannot land here: Cubelet stamps PausingAt before
+        // its pause flow can exit the shim and State() prefers PausingAt over
+        // FinishedAt (Cubelet/services/cubebox/pause_cow.go), so pause and
+        // failed-pause windows surface as `Pausing`/`Paused`/`Unknown`, which
+        // still take the connect paths below.
+        if matches!(&d.status, SandboxStatus::Stopped | SandboxStatus::Error) {
+            return Err(AppError::Conflict(format!(
+                "sandbox {} is not connectable in state '{}'",
+                sandbox_id,
+                sandbox_status_label(&d.status)
+            )));
+        }
+
         if d.status == SandboxStatus::Paused {
             let resume_timeout = timeout.filter(|timeout| {
                 should_extend_connect_timeout(d.end_at.clone(), *timeout, chrono::Utc::now())
@@ -400,8 +418,9 @@ impl SandboxService {
             if let Some(timeout) = timeout {
                 // Preserve a known longer deadline during the short
                 // CREATED/PAUSING transition. Missing metadata is left alone
-                // because it also represents never-timeout sandboxes; terminal
-                // states such as Stopped remain read-only Connect operations.
+                // because it also represents never-timeout sandboxes. Terminal
+                // states never reach this arm: the guard above rejects
+                // `Stopped` before the state machine runs.
                 if should_extend_connect_timeout(d.end_at.clone(), timeout, chrono::Utc::now()) {
                     self.set_timeout(sandbox_id, timeout).await?;
                 }
@@ -992,9 +1011,20 @@ pub(crate) fn filter_by_metadata(
 }
 
 fn parse_state_filter(value: Option<&str>) -> Option<SandboxState> {
-    match value {
+    match value.map(str::to_lowercase).as_deref() {
         Some("running") => Some(SandboxState::Running),
         Some("paused") => Some(SandboxState::Paused),
+        Some("pausing") => Some(SandboxState::Pausing),
+        // `unknown` is the public spelling. `stopped` is the label the list
+        // path emits for an exited container and the one the connect 409
+        // quotes; `error` never comes from a container code and only reaches
+        // the list path as a raw status text, which lands in the same bucket.
+        // Accept both as aliases rather than falling through to the legacy
+        // no-filter branch, which silently returns every sandbox instead of
+        // the narrowed set the caller asked for. The alias resolves to the
+        // whole `unknown` bucket, so it also matches the creating and
+        // unreadable sandboxes that bucket holds.
+        Some("unknown" | "stopped" | "error") => Some(SandboxState::Unknown),
         _ => None,
     }
 }
@@ -1003,19 +1033,42 @@ fn is_success_ret_code(ret_code: i32) -> bool {
     matches!(ret_code, RET_CODE_OK | RET_CODE_HTTP_OK)
 }
 
+/// Wire label for a backend status, used in client-facing lifecycle errors.
+fn sandbox_status_label(status: &SandboxStatus) -> &'static str {
+    match status {
+        SandboxStatus::Running => "running",
+        SandboxStatus::Paused => "paused",
+        SandboxStatus::Pausing => "pausing",
+        SandboxStatus::Stopped => "stopped",
+        SandboxStatus::Error => "error",
+        SandboxStatus::Unknown => "unknown",
+    }
+}
+
 fn sandbox_state_from_status(status: SandboxStatus) -> SandboxState {
     match status {
-        SandboxStatus::Paused => SandboxState::Paused,
         SandboxStatus::Running => SandboxState::Running,
-        _ => SandboxState::Running,
+        SandboxStatus::Paused => SandboxState::Paused,
+        SandboxStatus::Pausing => SandboxState::Pausing,
+        // CONTAINER_EXITED arrives as `Stopped`; `CONTAINER_CREATED` and
+        // `CONTAINER_UNKNOWN` (a state the node could not read, e.g. a shim
+        // probe timeout or a failed pause binding) also land here. Defaulting
+        // them to `Running` reported a dead or unreadable sandbox as alive.
+        // CubeOps already folds created/exited/stopped and unrecognised values
+        // into `unknown` (CubeOps/internal/translator/translator.go), so CubeAPI
+        // keeps the same public vocabulary instead of adding a new state.
+        SandboxStatus::Stopped | SandboxStatus::Error | SandboxStatus::Unknown => {
+            SandboxState::Unknown
+        }
     }
 }
 
 fn sandbox_state_from_str(status: &str) -> SandboxState {
     match status.to_lowercase().as_str() {
+        "running" => SandboxState::Running,
         "paused" => SandboxState::Paused,
         "pausing" => SandboxState::Pausing,
-        _ => SandboxState::Running,
+        _ => SandboxState::Unknown,
     }
 }
 
@@ -1260,13 +1313,14 @@ mod tests {
 
     use super::{
         build_cube_network_config, filter_by_metadata, from_cubemaster_info,
-        map_delete_cubemaster_err, map_volume_mounts, resolve_lifecycle_flags,
-        validate_mask_request_host, SandboxService, RET_CODE_CONFLICT, RET_CODE_NOT_FOUND,
-        RET_CODE_TASK_RESUME_FAILED, RET_CODE_TASK_STATE_INVALID,
+        map_delete_cubemaster_err, map_volume_mounts, parse_state_filter, resolve_lifecycle_flags,
+        sandbox_state_from_status, sandbox_state_from_str, validate_mask_request_host,
+        SandboxService, RET_CODE_CONFLICT, RET_CODE_NOT_FOUND, RET_CODE_TASK_RESUME_FAILED,
+        RET_CODE_TASK_STATE_INVALID,
     };
     use crate::cubemaster::{
         CreateSandboxRequest, CubeMasterClient, CubeMasterError, CubeVolumeMount,
-        ListSandboxResponse, SandboxInfo, SandboxUpdateRequest,
+        ListSandboxResponse, SandboxInfo, SandboxStatus, SandboxUpdateRequest,
     };
     use crate::error::AppError;
     use crate::models::{
@@ -1306,6 +1360,22 @@ mod tests {
         }))
     }
 
+    /// GET /cube/sandbox/info envelope carrying one sandbox in the given
+    /// CubeMaster status code (1 = running, 2 = exited/stopped, 4 = pausing,
+    /// 5 = paused).
+    fn sandbox_detail_envelope(status: i32) -> Json<Value> {
+        Json(serde_json::json!({
+            "RequestID": "req-1",
+            "ret": { "ret_code": 0, "ret_msg": "" },
+            "data": [{
+                "sandbox_id": "sbx-1",
+                "status": status,
+                "host_id": "host-1",
+                "template_id": "tpl-1"
+            }]
+        }))
+    }
+
     fn params_error_reason() -> &'static str {
         r#""host-mount" entry[0]: hostPath "/tmp" is not within an allowed mount prefix"#
     }
@@ -1335,6 +1405,116 @@ mod tests {
             "expected BadRequest carrying the backend reason, got {err:?}"
         );
         assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    // An abnormally exited sandbox is reported by Cubelet as CONTAINER_EXITED,
+    // which CubeMaster surfaces as status 2 / `Stopped`. Mapping that (or a
+    // status CubeAPI cannot classify) onto `Running` made GET and connect claim
+    // a dead sandbox was alive.
+    #[test]
+    fn sandbox_state_from_status_keeps_terminal_states_out_of_running() {
+        assert_eq!(
+            sandbox_state_from_status(SandboxStatus::Running),
+            SandboxState::Running
+        );
+        assert_eq!(
+            sandbox_state_from_status(SandboxStatus::Paused),
+            SandboxState::Paused
+        );
+        assert_eq!(
+            sandbox_state_from_status(SandboxStatus::Pausing),
+            SandboxState::Pausing
+        );
+        assert_eq!(
+            sandbox_state_from_status(SandboxStatus::Stopped),
+            SandboxState::Unknown
+        );
+        assert_eq!(
+            sandbox_state_from_status(SandboxStatus::Error),
+            SandboxState::Unknown
+        );
+        assert_eq!(
+            sandbox_state_from_status(SandboxStatus::Unknown),
+            SandboxState::Unknown
+        );
+    }
+
+    #[test]
+    fn sandbox_state_from_str_keeps_terminal_states_out_of_running() {
+        assert_eq!(sandbox_state_from_str("running"), SandboxState::Running);
+        assert_eq!(sandbox_state_from_str("paused"), SandboxState::Paused);
+        assert_eq!(sandbox_state_from_str("pausing"), SandboxState::Pausing);
+        assert_eq!(sandbox_state_from_str("stopped"), SandboxState::Unknown);
+        assert_eq!(sandbox_state_from_str("error"), SandboxState::Unknown);
+        assert_eq!(sandbox_state_from_str(""), SandboxState::Unknown);
+    }
+
+    #[test]
+    fn parse_state_filter_accepts_every_exposed_state() {
+        assert_eq!(
+            parse_state_filter(Some("running")),
+            Some(SandboxState::Running)
+        );
+        assert_eq!(
+            parse_state_filter(Some("paused")),
+            Some(SandboxState::Paused)
+        );
+        assert_eq!(
+            parse_state_filter(Some("pausing")),
+            Some(SandboxState::Pausing)
+        );
+        assert_eq!(
+            parse_state_filter(Some("unknown")),
+            Some(SandboxState::Unknown)
+        );
+        // The connect 409 quotes the backend label and the list path folds the
+        // same labels into `unknown`, so the filter accepts them as aliases
+        // instead of silently returning every sandbox.
+        assert_eq!(
+            parse_state_filter(Some("stopped")),
+            Some(SandboxState::Unknown)
+        );
+        assert_eq!(
+            parse_state_filter(Some("Error")),
+            Some(SandboxState::Unknown)
+        );
+        // An unrecognised filter keeps the legacy "no filter" behaviour.
+        assert_eq!(parse_state_filter(Some("bogus")), None);
+        assert_eq!(parse_state_filter(None), None);
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_exited_sandbox_instead_of_returning_ok() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/info",
+            get(move || async move { sandbox_detail_envelope(2) }),
+        ))
+        .await;
+
+        let err = service
+            .connect_sandbox("sbx-1", None)
+            .await
+            .expect_err("a stopped sandbox must not report a successful connect");
+        assert!(
+            matches!(err, AppError::Conflict(ref m) if m.contains("stopped")),
+            "expected a conflict naming the terminal state, got {err:?}"
+        );
+        assert_eq!(err.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn connect_still_succeeds_for_running_sandbox() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/info",
+            get(move || async move { sandbox_detail_envelope(1) }),
+        ))
+        .await;
+
+        let sandbox = service
+            .connect_sandbox("sbx-1", None)
+            .await
+            .expect("a running sandbox should connect");
+        assert_eq!(sandbox.sandbox_id, "sbx-1");
     }
 
     // CubeMaster returns MasterParamsError (130400) when the request itself is
@@ -2328,6 +2508,57 @@ mod tests {
         assert!(listed
             .iter()
             .all(|sandbox| sandbox.state == SandboxState::Paused));
+    }
+
+    // The list path reaches `sandbox_state_from_str` through the CubeMaster
+    // response deserializer, so cover that whole path and not just the mapper.
+    // Status 2 is CONTAINER_EXITED and 3 is CONTAINER_UNKNOWN; both fold into
+    // the public `unknown` state (CubeOps maps them the same way). A creating
+    // sandbox is the case whose wire shape is not the number: CubeMaster's
+    // `SandboxBriefData.Status` is `omitempty`, so CONTAINER_CREATED (0) is
+    // serialised without the field at all. `sb-creating` pins that shape,
+    // where the deserializer yields an empty string and the mapper has to fall
+    // back to `unknown`.
+    #[test]
+    fn listed_sandbox_maps_terminal_container_states_from_cubemaster_list() {
+        let payload = serde_json::json!({
+            "requestID": "req-1",
+            "ret": { "ret_code": 0, "ret_msg": "ok" },
+            "data": [{
+                "sandbox_id": "sb-exited",
+                "host_id": "host-1",
+                "status": 2,
+                "template_id": "tpl-1"
+            }, {
+                "sandbox_id": "sb-creating",
+                "host_id": "host-1",
+                "template_id": "tpl-1"
+            }, {
+                "sandbox_id": "sb-unknown",
+                "host_id": "host-1",
+                "status": 3,
+                "template_id": "tpl-1"
+            }, {
+                "sandbox_id": "sb-running",
+                "host_id": "host-1",
+                "status": 1,
+                "template_id": "tpl-1"
+            }]
+        });
+
+        let response: ListSandboxResponse =
+            serde_json::from_value(payload).expect("list response should deserialize");
+        let states: HashMap<_, _> = response
+            .sandboxes
+            .into_iter()
+            .map(from_cubemaster_info)
+            .map(|sandbox| (sandbox.sandbox_id, sandbox.state))
+            .collect();
+
+        assert_eq!(states.get("sb-exited"), Some(&SandboxState::Unknown));
+        assert_eq!(states.get("sb-creating"), Some(&SandboxState::Unknown));
+        assert_eq!(states.get("sb-unknown"), Some(&SandboxState::Unknown));
+        assert_eq!(states.get("sb-running"), Some(&SandboxState::Running));
     }
 
     /// CubeMaster keys lifecycle metadata off these exact JSON field names —

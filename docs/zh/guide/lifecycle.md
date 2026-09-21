@@ -15,6 +15,9 @@
 | `paused`    | 沙箱已暂停，VM 内存已落盘为快照，**不消耗** CPU 与内存，状态完整保留 |
 | `resuming`  | 平台正在从快照恢复沙箱，瞬时态                                       |
 | `terminated`| 沙箱被显式销毁（`kill`）或因 `on_timeout="kill"` 超时被回收，无法恢复 |
+| `unknown`   | CubeAPI 无法把沙箱映射为上表任一状态：沙箱仍在创建、容器已退出，或无法从节点读取其状态 |
+
+`unknown` 并不等于"已经没了"：上述三种情况 CubeAPI 都会报 `unknown`。上表的 `terminated` 描述的是 `kill()` 与 `on_timeout="kill"` 的结果；容器自行退出时报的是 `unknown`，而不是另一个独立的终态。因为这几种情况共用一个取值，只看 `GET /sandboxes/<id>` 无法区分沙箱是还在启动还是已经死了——判据是 `POST /sandboxes/<id>/connect`：容器已经退出时返回 HTTP 409（`... is not connectable in state 'stopped'`），另外两种情况仍能正常 connect。
 
 状态转换主要由两个参数驱动：
 
@@ -152,7 +155,7 @@ sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 | `N > 0` | 确保至少剩余 N 秒；运行中或暂停中的沙箱保留更长的现有 deadline，否则在连接后重新开 N 秒窗口 |
 | `0` 或 `N < -1` | 拒绝请求并返回 HTTP 400 |
 
-连接暂停中的沙箱时，底层 Resume 如果与另一个生命周期操作同时切换，可能返回 HTTP 409；请等沙箱进入稳定状态后重试。
+连接暂停中的沙箱时，底层 Resume 如果与另一个生命周期操作同时切换，可能返回 HTTP 409；请等沙箱进入稳定状态后重试。connect 返回 409 也可能是沙箱容器已经退出：这种状态不可恢复，重试不会成功，详见[状态模型](#状态模型)。
 
 已弃用的 `resume(timeout=...)` 保留原有的 `0` 语义：
 
