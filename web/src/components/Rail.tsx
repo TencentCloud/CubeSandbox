@@ -22,6 +22,11 @@ import {
 import { cn } from '@/lib/utils';
 import { useControlPlaneVersion } from '@/hooks/useControlPlaneVersion';
 
+// The audit / API-keys pages talk to a gateway that is not part of the default
+// deployment, so they stay hidden unless it is present. See the PR description.
+const GATEWAY_PAGES = import.meta.env.VITE_ENABLE_GATEWAY_PAGES === '1';
+const GATEWAY_ONLY: ReadonlySet<string> = new Set(['audit', 'apiKeys']);
+
 const NAV_ITEMS = [
   { to: '/', icon: LayoutDashboard, key: 'overview' },
   { to: '/sandboxes', icon: Boxes, key: 'sandboxes' },
@@ -50,6 +55,7 @@ export function Rail() {
           <img src="/assets/cube-logo.svg" alt="CubeSandbox" className="h-7 w-7" />
         </div>
         {NAV_ITEMS.map(({ to, icon: Icon, key }) => {
+          if (!GATEWAY_PAGES && GATEWAY_ONLY.has(key)) return null;
           const label = t(key);
           const active = to === '/' ? loc.pathname === '/' : loc.pathname.startsWith(to);
           return (

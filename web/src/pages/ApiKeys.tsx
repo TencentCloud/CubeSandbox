@@ -138,12 +138,19 @@ function TemplatePicker({
     <div className="flex flex-wrap gap-1.5">
       {templates.map((tpl) => {
         const name = templateLabel(tpl);
-        const on = value.includes(name) || value.includes(tpl.templateID);
+        // A key may store either the alias or the template ID; toggle whichever is
+        // actually present, otherwise a template stored by ID can never be revoked.
+        const stored = value.includes(name)
+          ? name
+          : value.includes(tpl.templateID)
+            ? tpl.templateID
+            : null;
+        const on = stored !== null;
         return (
           <button
             key={tpl.templateID}
             type="button"
-            onClick={() => toggle(name)}
+            onClick={() => toggle(stored ?? name)}
             title={`${tpl.templateID} · ${tpl.status}`}
             className={cn(
               'rounded-md border px-2 py-1 text-xs transition-all',

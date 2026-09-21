@@ -31,6 +31,9 @@ import LoginPage from '@/pages/Login';
 import AuditPage from '@/pages/Audit';
 import AuditDetailPage from '@/pages/AuditDetail';
 import ApiKeysPage from '@/pages/ApiKeys';
+
+// Audit / API-keys pages depend on a gateway outside the default deployment.
+const GATEWAY_PAGES = import.meta.env.VITE_ENABLE_GATEWAY_PAGES === '1';
 import { AuthGuard } from '@/components/AuthGuard';
 import { Placeholder } from '@/pages/Placeholder';
 import { Network, Activity, Settings, Package } from 'lucide-react';
@@ -70,9 +73,13 @@ const App = () => (
                 <Route path="/observability" element={<ObservabilityPage />} />
                 <Route path="/store" element={<TemplateStorePage />} />
                 <Route path="/agenthub" element={<AgentHubPage />} />
-                <Route path="/audit" element={<AuditPage />} />
-                <Route path="/audit/:sandboxID" element={<AuditDetailPage />} />
-                <Route path="/apikeys" element={<ApiKeysPage />} />
+                {GATEWAY_PAGES && (
+                  <>
+                    <Route path="/audit" element={<AuditPage />} />
+                    <Route path="/audit/:sandboxID" element={<AuditDetailPage />} />
+                    <Route path="/apikeys" element={<ApiKeysPage />} />
+                  </>
+                )}
                 <Route path="/settings" element={<SettingsPage />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Route>

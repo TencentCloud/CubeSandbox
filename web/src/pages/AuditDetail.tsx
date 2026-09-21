@@ -50,7 +50,7 @@ export default function AuditDetailPage() {
   const timeline = useMemo(() => (data?.timeline ?? []).filter((i) => kindMatches(i.kind, kind)), [data, kind]);
 
   const KIND_TABS: { key: KindFilter; label: string; n?: number }[] = [
-    { key: 'all', label: t('detail.kinds.all'), n: data?.timeline.length },
+    { key: 'all', label: t('detail.kinds.all'), n: data?.timeline?.length },
     { key: 'command', label: t('detail.kinds.command'), n: data?.commands },
     { key: 'file', label: t('detail.kinds.file'), n: data?.files },
     { key: 'lifecycle', label: t('detail.kinds.lifecycle') },
