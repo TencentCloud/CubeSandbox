@@ -14,9 +14,10 @@ use crate::{
     error::{AppError, AppResult},
     logging::{LogEvent, LogLevel},
     models::{
-        ApiError, ConnectSandbox, ListSandboxesQuery, ListSandboxesV2Query, NewSandbox,
-        RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
-        SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest, UpdateSandboxNetworkRequest,
+        ApiError, ConnectSandbox, ConnectSandboxV2, ListSandboxesQuery, ListSandboxesV2Query,
+        NewSandbox, NewSandboxV2, RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail,
+        SandboxLogsQuery, SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest,
+        UpdateSandboxNetworkRequest,
     },
     state::AppState,
 };
@@ -207,6 +208,33 @@ pub async fn create_sandbox(
     Ok((StatusCode::CREATED, Json(created)))
 }
 
+// ─── POST /v2/sandboxes ────────────────────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/v2/sandboxes",
+    request_body = NewSandboxV2,
+    responses(
+        (status = 201, description = "Sandbox created", body = Sandbox),
+        (status = 400, description = "Invalid request", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn create_sandbox_v2(
+    State(state): State<AppState>,
+    Json(body): Json<NewSandboxV2>,
+) -> AppResult<impl IntoResponse> {
+    // E2B 2.51.0 sends this only on explicit keep_memory=false opt-out; omitted otherwise.
+    if body.auto_pause_memory == Some(false) {
+        return Err(AppError::BadRequest(
+            "autoPauseMemory=false is not accepted; CubeSandbox always keeps \
+             the full memory snapshot on pause"
+                .to_string(),
+        ));
+    }
+    create_sandbox(State(state), Json(body.base)).await
+}
+
 // ─── DELETE /sandboxes/:sandboxID ─────────────────────────────────────────────
 
 #[utoipa::path(
@@ -380,6 +408,39 @@ pub async fn connect_sandbox(
         .connect_sandbox(&sandbox_id, body.timeout)
         .await?;
     Ok((StatusCode::OK, Json(sandbox)))
+}
+
+// ─── POST /v2/sandboxes/:sandboxID/connect ─────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/v2/sandboxes/{sandboxID}/connect",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier")
+    ),
+    request_body = ConnectSandboxV2,
+    responses(
+        (status = 200, description = "Sandbox connection info", body = Sandbox),
+        (status = 400, description = "Invalid timeout value", body = ApiError),
+        (status = 404, description = "Sandbox not found", body = ApiError),
+        (status = 409, description = "Paused sandbox cannot be resumed during a conflicting lifecycle transition", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn connect_sandbox_v2(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+    Json(body): Json<ConnectSandboxV2>,
+) -> AppResult<impl IntoResponse> {
+    // E2B 2.51.0 sends this only on explicit opt-out; omitted otherwise.
+    if body.memory == Some(false) {
+        return Err(AppError::BadRequest(
+            "memory=false is not accepted; CubeSandbox always resumes from \
+             the memory snapshot"
+                .to_string(),
+        ));
+    }
+    connect_sandbox(State(state), Path(sandbox_id), Json(body.base)).await
 }
 
 // ─── GET /sandboxes/:sandboxID/logs ───────────────────────────────────────────
