@@ -1,0 +1,64 @@
+{
+  "title": "Audit",
+  "subtitle": "Every sandbox seen by the e2b-compatible gateway: lifecycle, commands and file operations, aggregated per sandbox.",
+  "refresh": "Refresh",
+  "filterPlaceholder": "Search sandbox ID, template, client IP, metadata, command…",
+  "range_one": "{{count}} day",
+  "range_other": "{{count}} days",
+  "allTemplates": "All templates",
+  "loadError": "Failed to load audit log",
+  "empty": "No sandboxes in this window.",
+  "stats": {
+    "sandboxes": "Sandboxes",
+    "killed": "Killed",
+    "requests": "Requests",
+    "days": "Days with data"
+  },
+  "col": {
+    "created": "Created",
+    "sandbox": "Sandbox",
+    "template": "Template",
+    "client": "Client",
+    "state": "State",
+    "duration": "Duration",
+    "commands": "Cmds",
+    "files": "Files",
+    "firstCommand": "First command"
+  },
+  "state": {
+    "killed": "Killed",
+    "seen": "Seen"
+  },
+  "pagination": {
+    "total": "{{count}} sandboxes",
+    "prev": "Prev",
+    "next": "Next",
+    "jump": "Go to"
+  },
+  "detail": {
+    "subtitle": "Reconstructed from gateway requests; stdout/stderr contents are not recorded.",
+    "summary": "Summary",
+    "timeline": "Timeline",
+    "ended": "Ended",
+    "lastSeen": "last seen",
+    "timeout": "Timeout",
+    "internet": "Internet",
+    "yes": "yes",
+    "no": "no",
+    "requests": "Requests",
+    "metadata": "Metadata",
+    "network": "Network policy",
+    "copy": "Copy sandbox ID",
+    "copied": "Sandbox ID copied",
+    "kinds": {
+      "all": "All",
+      "command": "Commands",
+      "file": "Files",
+      "lifecycle": "Lifecycle"
+    },
+    "events": {
+      "create": "Sandbox created",
+      "kill": "Sandbox killed"
+    }
+  }
+}

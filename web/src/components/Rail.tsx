@@ -15,6 +15,7 @@ import {
   Store,
   Layers,
   Archive,
+  ScrollText,
   Github,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -31,6 +32,7 @@ const NAV_ITEMS = [
   { to: '/observability', icon: Activity, key: 'observability' },
   { to: '/store', icon: Store, key: 'store' },
   { to: '/agenthub', icon: Bot, key: 'agentHub' },
+  { to: '/audit', icon: ScrollText, key: 'audit' },
   { to: '/settings', icon: Settings, key: 'settings' },
 ] as const;
 

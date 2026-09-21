@@ -9,5 +9,6 @@
   "settings": "Settings",
   "store": "Template Store",
   "agentHub": "AgentHub",
-  "warehouse": "Warehouse"
+  "warehouse": "Warehouse",
+  "audit": "Audit"
 }
