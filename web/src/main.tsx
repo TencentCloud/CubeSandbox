@@ -30,6 +30,7 @@ import AgentHubPage from '@/pages/AgentHub';
 import LoginPage from '@/pages/Login';
 import AuditPage from '@/pages/Audit';
 import AuditDetailPage from '@/pages/AuditDetail';
+import ApiKeysPage from '@/pages/ApiKeys';
 import { AuthGuard } from '@/components/AuthGuard';
 import { Placeholder } from '@/pages/Placeholder';
 import { Network, Activity, Settings, Package } from 'lucide-react';
@@ -71,6 +72,7 @@ const App = () => (
                 <Route path="/agenthub" element={<AgentHubPage />} />
                 <Route path="/audit" element={<AuditPage />} />
                 <Route path="/audit/:sandboxID" element={<AuditDetailPage />} />
+                <Route path="/apikeys" element={<ApiKeysPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Route>

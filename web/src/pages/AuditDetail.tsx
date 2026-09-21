@@ -95,6 +95,7 @@ export default function AuditDetailPage() {
           {data && (
             <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm md:grid-cols-4">
               <Field label={t('col.template')} value={data.template ?? '—'} />
+              <Field label={t('col.key')} value={data.keyName ?? '—'} />
               <Field label={t('col.client')} value={data.client ?? '—'} mono />
               <Field label={t('col.created')} value={data.createdAt ?? data.firstSeen} mono />
               <Field label={t('detail.ended')} value={data.killedAt ?? `${data.lastSeen} (${t('detail.lastSeen')})`} mono />

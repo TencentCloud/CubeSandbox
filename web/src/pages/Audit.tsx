@@ -32,6 +32,7 @@ export default function AuditPage() {
   const [params, setParams] = useSearchParams();
   const days = Number(params.get('days') ?? 3);
   const template = params.get('template') ?? '';
+  const keyName = params.get('key') ?? '';
   const page = Number(params.get('page') ?? 1);
   const [q, setQ] = useState(params.get('q') ?? '');
   const [debouncedQ, setDebouncedQ] = useState(q);
@@ -56,8 +57,8 @@ export default function AuditPage() {
   }, [debouncedQ]);
 
   const { data, isLoading, isFetching, error, refetch } = useQuery({
-    queryKey: ['audit', days, template, debouncedQ, page],
-    queryFn: () => auditApi.list({ days, template, q: debouncedQ, page, size: PAGE_SIZE }),
+    queryKey: ['audit', days, template, keyName, debouncedQ, page],
+    queryFn: () => auditApi.list({ days, template, key: keyName, q: debouncedQ, page, size: PAGE_SIZE }),
     refetchInterval: 15_000,
   });
 
@@ -134,6 +135,18 @@ export default function AuditPage() {
               </option>
             ))}
           </select>
+          <select
+            value={keyName}
+            onChange={(e) => setParam({ key: e.target.value, page: 1 })}
+            className="h-9 rounded-md border border-border/60 bg-background px-2 text-sm text-foreground"
+          >
+            <option value="">{t('allKeys')}</option>
+            {(data?.keys ?? []).map((k) => (
+              <option key={k} value={k}>
+                {k}
+              </option>
+            ))}
+          </select>
         </div>
       </Card>
 
@@ -144,10 +157,11 @@ export default function AuditPage() {
       )}
 
       <Card className="!p-0 overflow-hidden">
-        <div className="grid grid-cols-[150px_140px_minmax(140px,1fr)_120px_90px_90px_70px_70px_minmax(200px,1.4fr)] gap-2 border-b border-border/60 px-4 py-3 text-xs uppercase tracking-wider font-medium text-muted-foreground/85">
+        <div className="grid grid-cols-[150px_140px_minmax(140px,1fr)_100px_120px_90px_90px_70px_70px_minmax(200px,1.4fr)] gap-2 border-b border-border/60 px-4 py-3 text-xs uppercase tracking-wider font-medium text-muted-foreground/85">
           <div>{t('col.created')}</div>
           <div>{t('col.sandbox')}</div>
           <div>{t('col.template')}</div>
+          <div>{t('col.key')}</div>
           <div>{t('col.client')}</div>
           <div>{t('col.state')}</div>
           <div>{t('col.duration')}</div>
@@ -192,7 +206,7 @@ function Row({ row, days }: { row: AuditSandboxRow; days: number }) {
   return (
     <Link
       to={`/audit/${row.id}?days=${days}`}
-      className="grid grid-cols-[150px_140px_minmax(140px,1fr)_120px_90px_90px_70px_70px_minmax(200px,1.4fr)] items-center gap-2 border-b border-border/60 px-4 py-2.5 text-sm transition-colors hover:bg-muted/40"
+      className="grid grid-cols-[150px_140px_minmax(140px,1fr)_100px_120px_90px_90px_70px_70px_minmax(200px,1.4fr)] items-center gap-2 border-b border-border/60 px-4 py-2.5 text-sm transition-colors hover:bg-muted/40"
     >
       <div className="text-num text-xs text-muted-foreground">{row.createdAt ?? row.firstSeen}</div>
       <div className="font-mono text-xs" title={row.id}>
@@ -210,6 +224,7 @@ function Row({ row, days }: { row: AuditSandboxRow; days: number }) {
           </div>
         )}
       </div>
+      <div className="truncate text-xs">{row.keyName ?? '—'}</div>
       <div className="font-mono text-xs">{row.client ?? '—'}</div>
       <div>
         <Badge tone={row.state === 'killed' ? 'mute' : 'ok'}>{t(`state.${row.state}`)}</Badge>

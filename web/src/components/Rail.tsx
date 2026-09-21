@@ -16,6 +16,7 @@ import {
   Layers,
   Archive,
   ScrollText,
+  KeyRound,
   Github,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -33,6 +34,7 @@ const NAV_ITEMS = [
   { to: '/store', icon: Store, key: 'store' },
   { to: '/agenthub', icon: Bot, key: 'agentHub' },
   { to: '/audit', icon: ScrollText, key: 'audit' },
+  { to: '/apikeys', icon: KeyRound, key: 'apiKeys' },
   { to: '/settings', icon: Settings, key: 'settings' },
 ] as const;
 

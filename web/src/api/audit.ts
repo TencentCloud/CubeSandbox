@@ -27,6 +27,7 @@ export interface AuditSandboxRow {
   requests: number;
   firstCommand?: string | null;
   allowInternetAccess?: boolean | null;
+  keyName?: string | null;
 }
 
 export interface AuditListResponse {
@@ -36,6 +37,7 @@ export interface AuditListResponse {
   sandboxes: number;
   killed: number;
   templates: string[];
+  keys: string[];
   total: number;
   page: number;
   size: number;
@@ -63,6 +65,7 @@ export interface AuditListParams {
   days: number;
   q?: string;
   template?: string;
+  key?: string;
   page?: number;
   size?: number;
 }
@@ -90,6 +93,6 @@ async function get<T>(path: string, params: Record<string, string | number | und
 
 export const auditApi = {
   list: (p: AuditListParams) =>
-    get<AuditListResponse>('/sandboxes', { days: p.days, q: p.q, template: p.template, page: p.page, size: p.size }),
+    get<AuditListResponse>('/sandboxes', { days: p.days, q: p.q, template: p.template, key: p.key, page: p.page, size: p.size }),
   detail: (id: string, days: number) => get<AuditSandboxDetail>(`/sandboxes/${encodeURIComponent(id)}`, { days }),
 };

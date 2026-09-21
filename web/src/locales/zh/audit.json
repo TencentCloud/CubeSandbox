@@ -23,7 +23,8 @@
     "duration": "时长",
     "commands": "命令",
     "files": "文件",
-    "firstCommand": "第一条命令"
+    "firstCommand": "第一条命令",
+    "key": "Key"
   },
   "state": {
     "killed": "已销毁",
@@ -60,5 +61,6 @@
       "create": "沙箱创建",
       "kill": "沙箱销毁"
     }
-  }
+  },
+  "allKeys": "全部 key"
 }

@@ -10,5 +10,6 @@
   "store": "Template Store",
   "agentHub": "AgentHub",
   "warehouse": "Warehouse",
-  "audit": "Audit"
+  "audit": "Audit",
+  "apiKeys": "API Keys"
 }

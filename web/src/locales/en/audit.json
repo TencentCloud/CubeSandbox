@@ -23,7 +23,8 @@
     "duration": "Duration",
     "commands": "Cmds",
     "files": "Files",
-    "firstCommand": "First command"
+    "firstCommand": "First command",
+    "key": "Key"
   },
   "state": {
     "killed": "Killed",
@@ -60,5 +61,6 @@
       "create": "Sandbox created",
       "kill": "Sandbox killed"
     }
-  }
+  },
+  "allKeys": "All keys"
 }
