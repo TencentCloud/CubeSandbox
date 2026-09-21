@@ -159,7 +159,11 @@ def run_python(ctx: RunContext[Deps], code: str) -> str:
 The outer lifecycle creates the MicroVM once and hands it to the agent as `deps`:
 
 ```python
-with Sandbox.create(template=template_id, timeout=600,
+from cubesandbox import NEVER_TIMEOUT
+
+# NEVER_TIMEOUT disables idle reclamation; the with-block's kill() is the only
+# teardown, so time spent waiting on the model can't reclaim the sandbox mid-run.
+with Sandbox.create(template=template_id, timeout=NEVER_TIMEOUT,
                     allow_internet_access=False) as sandbox:
     # The stock sandbox-code image ships no /workspace; create it once.
     sandbox.commands.run("mkdir -p /workspace")
@@ -202,11 +206,13 @@ sentence:
   call. This avoids a per-call MicroVM boot and lets files written in one call
   persist for later calls in the same run. Prefer this over creating a sandbox
   inside each tool invocation.
-- **Timeouts.** `commands.run(timeout=...)` bounds a single execution;
-  `Sandbox.create(timeout=...)` caps how long the MicroVM may sit **idle** before
-  it is reclaimed — an active sandbox keeps resetting that clock, so it is not a
-  wall-clock lifetime cap. If you also need a hard ceiling on the whole run,
-  enforce it on the agent side (a Pydantic AI
+- **Timeouts.** `commands.run(timeout=...)` bounds a single execution.
+  `Sandbox.create(timeout=...)` is an **idle** timeout, reset only when the
+  sandbox receives a request — time spent waiting on the model (slow reasoning,
+  retries, rate limits) counts as idle and can get the MicroVM reclaimed
+  mid-run. The example passes `NEVER_TIMEOUT` and lets the `with` block's
+  `kill()` be the only teardown; for a hard wall-clock ceiling, bound it on the
+  agent side (a Pydantic AI
   [usage limit](https://ai.pydantic.dev/agents/#usage-limits) plus your own
   deadline).
 - **Error handling.** The tool returns `CubeSandboxError` and transport timeouts

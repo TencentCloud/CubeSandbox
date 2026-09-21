@@ -152,7 +152,11 @@ def run_python(ctx: RunContext[Deps], code: str) -> str:
 外层生命周期只创建一次 MicroVM，并作为 `deps` 交给 Agent：
 
 ```python
-with Sandbox.create(template=template_id, timeout=600,
+from cubesandbox import NEVER_TIMEOUT
+
+# NEVER_TIMEOUT 关闭空闲回收；with 块的 kill() 是唯一的销毁路径，因此等待模型的
+# 时间不会导致沙箱在运行中途被回收。
+with Sandbox.create(template=template_id, timeout=NEVER_TIMEOUT,
                     allow_internet_access=False) as sandbox:
     # 官方 sandbox-code 镜像不带 /workspace，先创建一次。
     sandbox.commands.run("mkdir -p /workspace")
@@ -192,9 +196,10 @@ python pydantic_ai_agent_demo.py "计算前 15 个质数及它们的和。"
 - **沙箱复用。** 每次运行只创建一个 MicroVM，并在所有工具调用间复用。这样避免了
   逐次调用的 MicroVM 启动开销，也让某次调用写入的文件在同一次运行的后续调用中仍然
   存在。请优先采用这种方式，而不要在每次工具调用内部创建沙箱。
-- **超时。** `commands.run(timeout=...)` 限制单次执行；`Sandbox.create(timeout=...)`
-  限制的是 MicroVM 允许**空闲**多久后被回收——活跃的沙箱会不断重置该计时，因此它
-  并不是墙钟意义上的存活上限。若还需要为整次运行设定硬性上限，请在 Agent 侧强制
+- **超时。** `commands.run(timeout=...)` 限制单次执行。`Sandbox.create(timeout=...)`
+  是**空闲**超时，只有沙箱收到请求时才会重置——等待模型的时间（推理慢、重试、限流）
+  都算作空闲，可能导致 MicroVM 在运行中途被回收。示例传入 `NEVER_TIMEOUT`，让 with
+  块的 `kill()` 成为唯一销毁路径；若需要墙钟意义上的硬上限，请在 Agent 侧强制
   （Pydantic AI 的[用量限制](https://ai.pydantic.dev/agents/#usage-limits)加上你
   自己的截止时间）。
 - **错误处理。** 工具会把 `CubeSandboxError` 与传输超时以文本形式返回给模型
