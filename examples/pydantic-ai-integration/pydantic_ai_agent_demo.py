@@ -67,7 +67,10 @@ INSTRUCTIONS = (
     "- Make your program print the exact values you need, then read them back "
     "from the tool output.\n"
     "- If the tool output contains a stderr section or a non-zero exit code, fix "
-    "the program and call run_python again."
+    "the program and call run_python again.\n"
+    "- If the tool output starts with [cube-sandbox error] or [execution failed], "
+    "the sandbox call itself failed (not your code): retry once, and if it fails "
+    "again, report the failure instead of guessing an answer."
 )
 
 agent = Agent(deps_type=Deps, instructions=INSTRUCTIONS)
@@ -121,7 +124,9 @@ def build_model() -> OpenAIChatModel:
         base_url=os.getenv("OPENAI_BASE_URL", "https://tokenhub.tencentmaas.com/v1"),
         api_key=api_key,
     )
-    return OpenAIChatModel(os.getenv("MODEL_NAME", "deepseek-v3"), provider=provider)
+    # Accept CHAT_MODEL too, for parity with the LangChain example's .env.
+    model_name = os.getenv("MODEL_NAME") or os.getenv("CHAT_MODEL") or "deepseek-v3"
+    return OpenAIChatModel(model_name, provider=provider)
 
 
 def main() -> None:

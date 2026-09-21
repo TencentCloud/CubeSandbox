@@ -60,7 +60,7 @@ pip install -r requirements.txt
 | `CUBE_PROXY_NODE_IP` / `CUBE_PROXY_PORT_HTTP` | 否 | 未配置 DNS 时直连 CubeProxy |
 | `OPENAI_API_KEY` | 是 | OpenAI 兼容端点的 API Key |
 | `OPENAI_BASE_URL` | 否 | 端点地址；默认 `https://tokenhub.tencentmaas.com/v1` |
-| `MODEL_NAME` | 否 | 模型名；默认 `deepseek-v3` |
+| `MODEL_NAME` | 否 | 模型名；默认 `deepseek-v3`（也接受 `CHAT_MODEL`） |
 
 ## 运行
 

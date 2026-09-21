@@ -62,7 +62,7 @@ Key variables in `.env`:
 | `CUBE_PROXY_NODE_IP` / `CUBE_PROXY_PORT_HTTP` | no | Reach CubeProxy directly when DNS is not set up |
 | `OPENAI_API_KEY` | yes | Key for the OpenAI-compatible endpoint |
 | `OPENAI_BASE_URL` | no | Endpoint URL; defaults to `https://tokenhub.tencentmaas.com/v1` |
-| `MODEL_NAME` | no | Model name; defaults to `deepseek-v3` |
+| `MODEL_NAME` | no | Model name; defaults to `deepseek-v3` (`CHAT_MODEL` also accepted) |
 
 ## Run
 
