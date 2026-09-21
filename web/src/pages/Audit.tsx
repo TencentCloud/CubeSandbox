@@ -177,8 +177,8 @@ export default function AuditPage() {
         </Card>
       )}
 
-      <Card className="!p-0 overflow-hidden">
-        <div className="grid grid-cols-[150px_140px_minmax(140px,1fr)_100px_120px_90px_90px_70px_70px_minmax(200px,1.4fr)] gap-2 border-b border-border/60 px-4 py-3 text-xs uppercase tracking-wider font-medium text-muted-foreground/85">
+      <Card className="!p-0 overflow-x-auto">
+        <div className="grid min-w-[1100px] grid-cols-[140px_120px_minmax(150px,1fr)_90px_110px_130px_80px_60px_60px_minmax(180px,1.4fr)] gap-2 border-b border-border/60 px-4 py-3 text-xs uppercase tracking-wider font-medium text-muted-foreground/85">
           <div>{t('col.created')}</div>
           <div>{t('col.sandbox')}</div>
           <div>{t('col.template')}</div>
@@ -227,9 +227,9 @@ function Row({ row, days }: { row: AuditSandboxRow; days: number }) {
   return (
     <Link
       to={`/audit/${row.id}?days=${days}`}
-      className="grid grid-cols-[150px_140px_minmax(140px,1fr)_100px_120px_90px_90px_70px_70px_minmax(200px,1.4fr)] items-center gap-2 border-b border-border/60 px-4 py-2.5 text-sm transition-colors hover:bg-muted/40"
+      className="grid min-w-[1100px] grid-cols-[140px_120px_minmax(150px,1fr)_90px_110px_130px_80px_60px_60px_minmax(180px,1.4fr)] items-center gap-2 border-b border-border/60 px-4 py-2.5 text-sm transition-colors hover:bg-muted/40"
     >
-      <div className="text-num text-xs text-muted-foreground">{row.createdAt ?? row.firstSeen}</div>
+      <div className="whitespace-nowrap text-num text-xs text-muted-foreground">{row.createdAt ?? row.firstSeen}</div>
       <div className="font-mono text-xs" title={row.id}>
         {short(row.id, 8, 4)}
       </div>
@@ -248,10 +248,10 @@ function Row({ row, days }: { row: AuditSandboxRow; days: number }) {
       <div className="truncate text-xs">{row.keyName ?? '—'}</div>
       <div className="font-mono text-xs">{row.client ?? '—'}</div>
       <div>
-        <Badge tone={STATE_TONE[row.state] ?? 'mute'} title={row.endedBy ? t(`endedBy.${row.endedBy}`) : undefined}>
+        <Badge tone={STATE_TONE[row.state] ?? 'mute'} className="whitespace-nowrap" title={row.endedBy ? t(`endedBy.${row.endedBy}`) : undefined}>
           {t(`state.${row.state}`)}
-          {row.endedBy && <span className="ml-1 opacity-70">· {t(`endedBy.${row.endedBy}`)}</span>}
         </Badge>
+        {row.endedBy && <span className="ml-1 text-[10px] text-muted-foreground">{t(`endedBy.${row.endedBy}`)}</span>}
       </div>
       <div className="text-num text-xs">{formatDuration(row.durationSec)}</div>
       <div className="text-num text-right text-xs">{row.commands}</div>
