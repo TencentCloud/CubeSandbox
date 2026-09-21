@@ -107,6 +107,7 @@ Fill in `.env`:
 | `OPENAI_API_KEY` | yes | Key for the OpenAI-compatible endpoint |
 | `OPENAI_BASE_URL` | no | Endpoint URL; defaults to `https://tokenhub.tencentmaas.com/v1` |
 | `MODEL_NAME` | no | Model name; defaults to `deepseek-v3` (`CHAT_MODEL` also accepted) |
+| `CUBE_SSL_CERT_FILE` | no | CA bundle for a self-signed CubeAPI; exported process-globally (see Caveats) |
 
 ## Key Code Snippets
 
@@ -159,11 +160,9 @@ def run_python(ctx: RunContext[Deps], code: str) -> str:
 The outer lifecycle creates the MicroVM once and hands it to the agent as `deps`:
 
 ```python
-from cubesandbox import NEVER_TIMEOUT
-
-# NEVER_TIMEOUT disables idle reclamation; the with-block's kill() is the only
-# teardown, so time spent waiting on the model can't reclaim the sandbox mid-run.
-with Sandbox.create(template=template_id, timeout=NEVER_TIMEOUT,
+# 1800s is a generous idle backstop; each tool call refreshes it, and the
+# with-block's kill() is the normal teardown (see Going Further → Timeouts).
+with Sandbox.create(template=template_id, timeout=1800,
                     allow_internet_access=False) as sandbox:
     # The stock sandbox-code image ships no /workspace; create it once.
     sandbox.commands.run("mkdir -p /workspace")
@@ -208,11 +207,13 @@ sentence:
   inside each tool invocation.
 - **Timeouts.** `commands.run(timeout=...)` bounds a single execution.
   `Sandbox.create(timeout=...)` is an **idle** timeout, reset only when the
-  sandbox receives a request — time spent waiting on the model (slow reasoning,
-  retries, rate limits) counts as idle and can get the MicroVM reclaimed
-  mid-run. The example passes `NEVER_TIMEOUT` and lets the `with` block's
-  `kill()` be the only teardown; for a hard wall-clock ceiling, bound it on the
-  agent side (a Pydantic AI
+  sandbox receives a request — each `run_python` call refreshes it, so ordinary
+  model latency is fine, but a very long tool-free stretch could get the MicroVM
+  reclaimed mid-run. The example uses a generous `1800`s backstop: normal
+  teardown is the `with` block's `kill()`, and the timeout only bounds an
+  orphaned MicroVM if the agent host dies first. `NEVER_TIMEOUT` removes the
+  backstop entirely (and that orphan risk with it). For a hard wall-clock ceiling
+  on the whole run, bound it on the agent side (a Pydantic AI
   [usage limit](https://ai.pydantic.dev/agents/#usage-limits) plus your own
   deadline).
 - **Error handling.** The tool returns `CubeSandboxError` and transport timeouts

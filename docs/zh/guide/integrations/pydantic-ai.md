@@ -101,6 +101,7 @@ cp .env.example .env
 | `OPENAI_API_KEY` | 是 | OpenAI 兼容端点的 API Key |
 | `OPENAI_BASE_URL` | 否 | 端点地址；默认 `https://tokenhub.tencentmaas.com/v1` |
 | `MODEL_NAME` | 否 | 模型名；默认 `deepseek-v3`（也接受 `CHAT_MODEL`） |
+| `CUBE_SSL_CERT_FILE` | 否 | 自签名 CubeAPI 的 CA bundle；会被进程级导出（见注意事项） |
 
 ## 关键代码片段
 
@@ -152,11 +153,9 @@ def run_python(ctx: RunContext[Deps], code: str) -> str:
 外层生命周期只创建一次 MicroVM，并作为 `deps` 交给 Agent：
 
 ```python
-from cubesandbox import NEVER_TIMEOUT
-
-# NEVER_TIMEOUT 关闭空闲回收；with 块的 kill() 是唯一的销毁路径，因此等待模型的
-# 时间不会导致沙箱在运行中途被回收。
-with Sandbox.create(template=template_id, timeout=NEVER_TIMEOUT,
+# 1800 秒是一个宽松的空闲兜底；每次工具调用都会刷新它，而 with 块的 kill() 是
+# 正常的销毁路径（见 进阶 → 超时）。
+with Sandbox.create(template=template_id, timeout=1800,
                     allow_internet_access=False) as sandbox:
     # 官方 sandbox-code 镜像不带 /workspace，先创建一次。
     sandbox.commands.run("mkdir -p /workspace")
@@ -197,11 +196,12 @@ python pydantic_ai_agent_demo.py "计算前 15 个质数及它们的和。"
   逐次调用的 MicroVM 启动开销，也让某次调用写入的文件在同一次运行的后续调用中仍然
   存在。请优先采用这种方式，而不要在每次工具调用内部创建沙箱。
 - **超时。** `commands.run(timeout=...)` 限制单次执行。`Sandbox.create(timeout=...)`
-  是**空闲**超时，只有沙箱收到请求时才会重置——等待模型的时间（推理慢、重试、限流）
-  都算作空闲，可能导致 MicroVM 在运行中途被回收。示例传入 `NEVER_TIMEOUT`，让 with
-  块的 `kill()` 成为唯一销毁路径；若需要墙钟意义上的硬上限，请在 Agent 侧强制
-  （Pydantic AI 的[用量限制](https://ai.pydantic.dev/agents/#usage-limits)加上你
-  自己的截止时间）。
+  是**空闲**超时，只有沙箱收到请求时才会重置——每次 `run_python` 调用都会刷新它，
+  因此普通的模型延迟没问题；但很长的"无工具调用"间隔可能导致 MicroVM 在运行中途被
+  回收。示例使用宽松的 `1800` 秒兜底：正常销毁由 with 块的 `kill()` 完成，该超时只是
+  在 Agent 主机先崩溃时兜底回收残留的 MicroVM。`NEVER_TIMEOUT` 会彻底取消该兜底
+  （连同这个孤儿风险）。若需要墙钟意义上的硬上限，请在 Agent 侧强制（Pydantic AI 的
+  [用量限制](https://ai.pydantic.dev/agents/#usage-limits)加上你自己的截止时间）。
 - **错误处理。** 工具会把 `CubeSandboxError` 与传输超时以文本形式返回给模型
   （stderr 分隔展示、非零退出码单独报告），便于重试；而 `Sandbox.create()` 失败会
   向上传播并干净地中断运行。

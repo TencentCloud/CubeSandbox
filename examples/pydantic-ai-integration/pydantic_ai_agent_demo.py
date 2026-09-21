@@ -18,7 +18,7 @@ import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-from cubesandbox import NEVER_TIMEOUT, CubeSandboxError, Sandbox
+from cubesandbox import CubeSandboxError, Sandbox
 from dotenv import load_dotenv
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -31,12 +31,13 @@ load_dotenv()
 WORKDIR = "/workspace"
 # How long a single `python3 <script>` invocation may run inside the MicroVM.
 EXEC_TIMEOUT = 120
-# Disable idle reclamation for the run. The MicroVM's idle clock only resets when
-# the *sandbox* gets a request; time spent waiting on the model (slow reasoning,
-# retries, rate limits) counts as idle, so a positive timeout could reclaim the
-# sandbox mid-run. The `with` block always calls kill(), so it is the only
-# teardown path and nothing is leaked.
-SANDBOX_TIMEOUT = NEVER_TIMEOUT
+# Generous idle-timeout backstop (seconds). The idle clock only resets when the
+# sandbox receives a request; each run_python tool call refreshes it, so ordinary
+# model latency is fine. Normal teardown is the `with` block's kill() — this
+# timeout only bounds an orphaned MicroVM if the agent host dies before that
+# runs. Raise it for tasks with long tool-free stretches; NEVER_TIMEOUT would
+# remove the backstop and risk an orphan on a host crash.
+SANDBOX_TIMEOUT = 1800
 # The Fibonacci demo only needs the Python standard library, so the sandbox is
 # created with no outbound internet access. Flip to True if your own task needs
 # to reach the network from inside the MicroVM.
