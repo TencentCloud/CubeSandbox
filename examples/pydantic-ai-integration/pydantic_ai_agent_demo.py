@@ -26,6 +26,9 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 load_dotenv()
 
+# Working directory inside the MicroVM. The stock `sandbox-code` image does not
+# ship a /workspace, so main() creates it once after the sandbox boots.
+WORKDIR = "/workspace"
 # How long a single `python3 <script>` invocation may run inside the MicroVM.
 EXEC_TIMEOUT = 120
 # Idle timeout for the MicroVM (seconds): it is reclaimed after this long with no
@@ -82,14 +85,14 @@ def run_python(ctx: RunContext[Deps], code: str) -> str:
     sandbox = ctx.deps.sandbox
     # Unique per-call script path: the index comes from a host-side counter, so
     # the path is fully controlled (no model input is interpolated into it).
-    script_path = f"/workspace/agent_step_{next(ctx.deps._script_counter)}.py"
+    script_path = f"{WORKDIR}/agent_step_{next(ctx.deps._script_counter)}.py"
 
     try:
         sandbox.files.write(script_path, code)
         result = sandbox.commands.run(
             f"python3 {shlex.quote(script_path)}",
             timeout=EXEC_TIMEOUT,
-            cwd="/workspace",
+            cwd=WORKDIR,
         )
     except CubeSandboxError as exc:
         # Surface execution/transport failures to the model as tool output so it
@@ -154,6 +157,9 @@ def main() -> None:
         allow_internet_access=ALLOW_INTERNET,
     ) as sandbox:
         print(f"Sandbox {sandbox.sandbox_id} created. Running agent...")
+        # The stock sandbox-code image has no /workspace; create it once so the
+        # tool's files.write and cwd=WORKDIR succeed on an unmodified template.
+        sandbox.commands.run(f"mkdir -p {shlex.quote(WORKDIR)}")
         result = agent.run_sync(question, deps=Deps(sandbox=sandbox), model=model)
 
     print("\n=== Final answer ===")

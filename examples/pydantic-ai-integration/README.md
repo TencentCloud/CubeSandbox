@@ -97,6 +97,8 @@ not a fixed sentence:
 - **One MicroVM per run, reused across tool calls.** The sandbox is created once
   in `main()` and passed to the agent via typed `deps`; every `run_python` call
   reuses it, so there is no per-call MicroVM boot cost and files persist within a run.
+- **Working directory.** The stock `sandbox-code` image ships no `/workspace`, so
+  `main()` runs `mkdir -p /workspace` once right after the sandbox boots.
 - **Unique script per call.** Each call writes `/workspace/agent_step_<n>.py`
   (the index comes from a host-side counter), so repeated calls never overwrite
   each other.

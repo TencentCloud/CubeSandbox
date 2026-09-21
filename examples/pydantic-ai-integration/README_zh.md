@@ -90,6 +90,8 @@ python pydantic_ai_agent_demo.py "计算前 15 个质数及它们的和。"
 - **每次运行一个 MicroVM，并在工具调用间复用。** 沙箱在 `main()` 中创建一次，
   通过带类型的 `deps` 传给 Agent；每次 `run_python` 调用都复用它，因此没有
   逐次调用的 MicroVM 启动开销，且同一次运行内文件得以保留。
+- **工作目录。** 官方 `sandbox-code` 镜像不带 `/workspace`，因此 `main()` 会在沙箱
+  启动后先执行一次 `mkdir -p /workspace`。
 - **每次调用使用唯一脚本名。** 每次调用写入 `/workspace/agent_step_<n>.py`
   （编号来自宿主侧计数器），因此重复调用不会互相覆盖。
 - **失败以工具输出形式返回。** `CubeSandboxError` 或传输超时会以文本形式返回给

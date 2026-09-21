@@ -58,9 +58,9 @@ Pydantic AI 模型后端，也**不**修改 CubeSandbox——这是一个小而�
 
 ::: tip Agent 主机与 Cube 主机
 运行 Pydantic AI Agent 的机器和运行 CubeSandbox 的机器不必是同一台。Agent 通过网络
-访问 CubeAPI/CubeProxy，因此可以用笔记本驱动一台远程 Linux Cube 主机。若在没有通配
-DNS 的情况下使用官方 E2B SDK 的数据面主机名，请参见
-[E2B 开发 sidecar](/zh/guide/multi-node-deploy#官方-e2b-sdk-无泛域名-dns开发-sidecar)。
+访问 CubeAPI/CubeProxy，因此可以用笔记本驱动一台远程 Linux Cube 主机。本示例使用原生
+`cubesandbox` SDK，它通过 `CUBE_PROXY_NODE_IP` 直连 CubeProxy IP——无需通配 DNS。
+参见 [CubeSandbox SDK：直连 CubeProxy](/zh/guide/multi-node-deploy#cubesandbox-sdk-直连-cubeproxy)。
 :::
 
 ## 接入步骤
@@ -154,6 +154,8 @@ def run_python(ctx: RunContext[Deps], code: str) -> str:
 ```python
 with Sandbox.create(template=template_id, timeout=600,
                     allow_internet_access=False) as sandbox:
+    # 官方 sandbox-code 镜像不带 /workspace，先创建一次。
+    sandbox.commands.run("mkdir -p /workspace")
     result = agent.run_sync(question, deps=Deps(sandbox=sandbox), model=model)
 print(result.output)
 ```

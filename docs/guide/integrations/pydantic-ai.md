@@ -62,9 +62,10 @@ Pin the resolved versions after validating them against your own deployment.
 ::: tip Agent host vs. Cube host
 The machine running the Pydantic AI agent and the machine running CubeSandbox do
 not have to be the same. The agent talks to CubeAPI/CubeProxy over the network,
-so a laptop can drive a remote Linux Cube host. If you rely on the official E2B
-SDK data-plane hostnames without wildcard DNS, see the
-[E2B development sidecar](/guide/multi-node-deploy#official-e2b-sdk-without-wildcard-dns-dev-sidecar).
+so a laptop can drive a remote Linux Cube host. This example uses the native
+`cubesandbox` SDK, which connects straight to a CubeProxy IP via
+`CUBE_PROXY_NODE_IP` — no wildcard DNS required. See
+[CubeSandbox SDK: direct CubeProxy access](/guide/multi-node-deploy#cubesandbox-sdk-direct-cubeproxy-access).
 :::
 
 ## Integration Steps
@@ -160,6 +161,8 @@ The outer lifecycle creates the MicroVM once and hands it to the agent as `deps`
 ```python
 with Sandbox.create(template=template_id, timeout=600,
                     allow_internet_access=False) as sandbox:
+    # The stock sandbox-code image ships no /workspace; create it once.
+    sandbox.commands.run("mkdir -p /workspace")
     result = agent.run_sync(question, deps=Deps(sandbox=sandbox), model=model)
 print(result.output)
 ```
