@@ -595,6 +595,7 @@ mod tests {
             Json(serde_json::json!({
                 "requestID": "req-list",
                 "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "size": 1,
                 "data": [
                     { "sandbox_id": "sb-1", "host_id": "h", "status": 1, "template_id": "t" },
                     { "sandbox_id": "sb-2", "host_id": "h", "status": 1, "template_id": "t" },
@@ -656,6 +657,7 @@ mod tests {
             Json(serde_json::json!({
                 "requestID": "req-list",
                 "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "size": 1,
                 "data": [{ "sandbox_id": "sb-1", "host_id": "h", "status": 1, "template_id": "t" }]
             }))
         }

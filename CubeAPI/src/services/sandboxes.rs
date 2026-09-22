@@ -182,20 +182,35 @@ impl SandboxService {
                     .filter(|sb| state_filter.as_ref().is_none_or(|state| &sb.state == state)),
             );
 
-            // `end_idx` is the last node this window covered and `total` the
-            // number of healthy nodes. Once the window reaches the end there is
-            // nothing left to fetch; asking again would repeat the final window.
-            match (resp.end_idx, resp.total) {
-                (Some(end_idx), Some(total)) if end_idx > 0 && end_idx < total => {
-                    node_window_start = end_idx + 1;
+            // Another window is needed only while this one came back full.
+            // `size` is the number of nodes CubeMaster actually covered
+            // (`rsp.Size = len(nodeList)`), so `size < window` means the last
+            // window was reached. `end_idx` deliberately does not enter this
+            // test: it is a node *row id* (`Index: int(elem.ID)`), not a
+            // position, and node ids carry gaps left by deleted rows. Comparing
+            // it against the healthy-node count would call a full window final
+            // on any cluster whose ids are not dense `1..N`, silently dropping
+            // the remaining nodes' sandboxes.
+            //
+            // A missing or non-positive `size` means the backend did not report
+            // the window at all, so there is nothing to advance on and the loop
+            // must stop rather than spin on the same window forever.
+            match resp.size {
+                Some(covered) if covered >= SANDBOX_LIST_NODE_WINDOW => {
+                    node_window_start += SANDBOX_LIST_NODE_WINDOW;
                 }
                 _ => break,
             }
         }
 
-        // A stable order is what makes an offset cursor safe to replay: without
-        // it the same cursor could surface different items as the backend order
-        // shifts between two page requests.
+        // Sorting removes one source of drift — without it the same cursor
+        // could surface different items as CubeMaster's own ordering shifts
+        // between two requests. It does not make the offset immune to
+        // concurrent writes: the offset is recomputed against a fresh snapshot
+        // each call, so a create or delete before the boundary can make a
+        // later page repeat or skip an item. A cursor that survives that would
+        // have to name the last-seen key rather than a position, which is a
+        // larger change than this fix.
         matching.sort_by(|a, b| a.sandbox_id.cmp(&b.sandbox_id));
 
         let total = matching.len();
@@ -3487,9 +3502,12 @@ mod tests {
         // `from_cubemaster_info` projects CubeMaster's `labels` onto the listed
         // sandbox's `metadata`, so the filter input has to be sent as labels.
         // Five sandboxes: sb-0/sb-2/sb-4 carry team=alpha, sb-1/sb-3 team=beta.
+        // `size` below the node-window bound marks this as the final window, so
+        // the collection loop stops after one round.
         Json(serde_json::json!({
             "requestID": "req-list",
             "ret": { "ret_code": 0, "ret_msg": "ok" },
+            "size": 1,
             "data": (0..5).map(|i| serde_json::json!({
                 "sandbox_id": format!("sb-{i}"),
                 "host_id": "host-1",
@@ -3519,23 +3537,21 @@ mod tests {
             post(|Json(body): Json<Value>| async move {
                 let start = body["start_idx"].as_i64().unwrap_or(0);
                 match start {
-                    // First window: nodes 1..2 of 5 — not the last page.
+                    // First window: full — 100 of 100 nodes, so more remain.
                     1 => Json(serde_json::json!({
                         "requestID": "req-list",
                         "ret": { "ret_code": 0, "ret_msg": "ok" },
-                        "end_idx": 2,
-                        "total": 5,
+                        "size": 100,
                         "data": [
                             { "sandbox_id": "sb-1", "host_id": "h1", "status": 1, "template_id": "t" },
                             { "sandbox_id": "sb-2", "host_id": "h2", "status": 1, "template_id": "t" }
                         ]
                     })),
-                    // Second window: nodes 3..5 — reaches the last node.
-                    3 => Json(serde_json::json!({
+                    // Second window: short — the last one.
+                    101 => Json(serde_json::json!({
                         "requestID": "req-list",
                         "ret": { "ret_code": 0, "ret_msg": "ok" },
-                        "end_idx": 5,
-                        "total": 5,
+                        "size": 2,
                         "data": [
                             { "sandbox_id": "sb-3", "host_id": "h3", "status": 1, "template_id": "t" },
                             { "sandbox_id": "sb-4", "host_id": "h4", "status": 1, "template_id": "t" }
@@ -3561,6 +3577,62 @@ mod tests {
         assert!(
             page.next_token.is_none(),
             "nothing is left once every node window has been walked"
+        );
+    }
+
+    /// `end_idx` is a node *row id* (`Index: int(elem.ID)`), so deleted node
+    /// rows leave gaps and it is not comparable with the healthy-node count.
+    /// An implementation that stopped on `end_idx < total` would call this
+    /// full window final and silently drop every sandbox on the remaining
+    /// nodes — the regression this test pins.
+    #[tokio::test]
+    async fn list_v2_keeps_walking_when_node_ids_are_sparse() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(|Json(body): Json<Value>| async move {
+                let start = body["start_idx"].as_i64().unwrap_or(0);
+                match start {
+                    // Full window, but its ids (500..599) already exceed the
+                    // healthy-node count — the shape that defeats an
+                    // `end_idx < total` termination test.
+                    1 => Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "end_idx": 599,
+                        "total": 120,
+                        "size": 100,
+                        "data": [
+                            { "sandbox_id": "sb-1", "host_id": "h1", "status": 1, "template_id": "t" }
+                        ]
+                    })),
+                    // The window that would have been skipped.
+                    101 => Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "end_idx": 620,
+                        "total": 120,
+                        "size": 20,
+                        "data": [
+                            { "sandbox_id": "sb-2", "host_id": "h2", "status": 1, "template_id": "t" }
+                        ]
+                    })),
+                    other => panic!("unexpected node window start: {other}"),
+                }
+            }),
+        ))
+        .await;
+
+        let page = service
+            .list_v2(None, None, None, 10)
+            .await
+            .expect("both windows must be collected");
+
+        let ids: Vec<&str> = page.items.iter().map(|sb| sb.sandbox_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["sb-1", "sb-2"],
+            "a full window must be followed by another even when its node ids \
+             already exceed the healthy-node count"
         );
     }
 
@@ -3679,6 +3751,7 @@ mod tests {
                 Json(serde_json::json!({
                     "requestID": "req-list",
                     "ret": { "ret_code": 0, "ret_msg": "ok" },
+                    "size": 1,
                     "data": [
                         { "sandbox_id": "sb-run-1", "host_id": "h", "status": 1, "template_id": "t" },
                         { "sandbox_id": "sb-paused-1", "host_id": "h", "status": 5, "template_id": "t" },

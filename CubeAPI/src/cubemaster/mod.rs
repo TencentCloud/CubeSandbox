@@ -1089,9 +1089,14 @@ pub struct ListSandboxResponse {
     #[serde(default, alias = "data")]
     pub sandboxes: Vec<SandboxInfo>,
     pub ret: RetCode,
-    /// Last node index this window covered. CubeMaster reports it as
-    /// `end_idx`; combined with `total` it tells a caller whether more node
-    /// windows remain.
+    /// Number of nodes this window actually covered
+    /// (`rsp.Size = len(nodeList)`), which is what says whether another window
+    /// remains.
+    #[serde(default, alias = "Size")]
+    pub size: Option<i32>,
+    /// Last node `Index` this window covered. This is a node *row id*
+    /// (`Index: int(elem.ID)`), not a position, so it is **not** comparable with
+    /// `total` and must not be used to decide whether more nodes remain.
     #[serde(default, alias = "EndIdx")]
     pub end_idx: Option<i32>,
     /// Number of healthy nodes for the instance type — a *node* count, not a
