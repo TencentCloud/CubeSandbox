@@ -53,7 +53,8 @@ if [[ -f "${ENV_FILE}" ]]; then
   # CLI flags must win over .env values: load_env_file uses `set -a; source`,
   # which would otherwise clobber the CLI-provided values set above.
   apply_cli_overrides
-  # Shell-interpret .env DB values (quotes stripped) into the dotenv snapshot.
+  # Shell-interpret .env values (quotes/comments stripped) into the intent snapshots.
+  capture_one_click_toggle_dotenv_values
   capture_one_click_database_dotenv_values
   case "${ONE_CLICK_MODE}" in
     ""|install|upgrade|auto) ;;
@@ -341,6 +342,13 @@ case "${CUBE_PVM_ENABLE}" in
   0|1) ;;
   *) die "unsupported CUBE_PVM_ENABLE: ${CUBE_PVM_ENABLE} (expected 0 or 1)" ;;
 esac
+
+balloon_free_page_reporting=""
+if [[ -n "${ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT[CUBE_BALLOON_FREE_PAGE_REPORTING]+x}" \
+    || -n "${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[CUBE_BALLOON_FREE_PAGE_REPORTING]+x}" ]]; then
+  balloon_free_page_reporting="$(normalize_balloon_free_page_reporting "${CUBE_BALLOON_FREE_PAGE_REPORTING}")" \
+    || die "unsupported CUBE_BALLOON_FREE_PAGE_REPORTING: ${CUBE_BALLOON_FREE_PAGE_REPORTING} (expected on/off, 1/0, true/false, yes/no, or empty)"
+fi
 
 print_path_hint() {
   {
@@ -2071,6 +2079,14 @@ elif [[ -f "${SCRIPT_DIR}/release-manifest.json" ]]; then
 fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_DEPLOY_ROLE" "${DEPLOY_ROLE}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PVM_ENABLE" "${CUBE_PVM_ENABLE}"
+if [[ -n "${ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT[CUBE_BALLOON_FREE_PAGE_REPORTING]+x}" \
+    || -n "${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[CUBE_BALLOON_FREE_PAGE_REPORTING]+x}" ]]; then
+  if [[ -n "${balloon_free_page_reporting}" ]]; then
+    upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_BALLOON_FREE_PAGE_REPORTING" "${balloon_free_page_reporting}"
+  else
+    remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_BALLOON_FREE_PAGE_REPORTING"
+  fi
+fi
 MIRROR="${MIRROR:-}"
 case "${MIRROR}" in
   ""|cn) ;;

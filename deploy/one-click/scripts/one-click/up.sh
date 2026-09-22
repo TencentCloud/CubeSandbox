@@ -64,6 +64,10 @@ fi
 if [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]]; then
   CUBELET_OPTIONAL_EXPORTS+="export CUBE_SANDBOX_NODE_IP=\"${CUBE_SANDBOX_NODE_IP}\"; "
 fi
+if [[ -n "${CUBE_BALLOON_FREE_PAGE_REPORTING:-}" ]]; then
+  printf -v cubelet_balloon_export 'export CUBE_BALLOON_FREE_PAGE_REPORTING=%q; ' "${CUBE_BALLOON_FREE_PAGE_REPORTING}"
+  CUBELET_OPTIONAL_EXPORTS+="${cubelet_balloon_export}"
+fi
 
 "${SCRIPT_DIR}/down-local.sh" >/dev/null 2>&1 || true
 

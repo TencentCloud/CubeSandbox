@@ -113,6 +113,9 @@ redis:
 # Optional: cubevs/sandbox CIDR (Chart default is 172.16.0.0/18).
 # Override when it collides with your VPC; keep tproxyOnIP as the CIDR gateway.
 # cubeNode:
+#   env:
+#     - name: CUBE_BALLOON_FREE_PAGE_REPORTING
+#       value: "on"   # architecture default: off on aarch64, on elsewhere
 #   network:
 #     cidr: "172.16.0.0/18"
 # cubeEgress:

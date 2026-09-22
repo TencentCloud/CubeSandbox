@@ -412,6 +412,39 @@ test_build_scripts_parse() {
   done
 }
 
+# 4b) The Terraform wrapper must forward its operator-facing balloon override in
+#     both local-bundle and online compute installation paths, and persist it in
+#     the generated deployer .env so reruns do not silently change policy.
+test_balloon_reporting_override_wiring() {
+  local create="${TF_DIR}/create.sh" env_example="${TF_DIR}/env.example"
+  local install="${ONE_CLICK_DIR}/install.sh"
+  local up="${ONE_CLICK_DIR}/scripts/one-click/up.sh"
+  local up_compute="${ONE_CLICK_DIR}/scripts/one-click/up-compute.sh"
+
+  grep -q -F 'upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_BALLOON_FREE_PAGE_REPORTING"' "${install}" \
+    || fail "install.sh does not persist a process-env balloon override"
+  grep -q -F 'remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_BALLOON_FREE_PAGE_REPORTING"' "${install}" \
+    || fail "install.sh cannot clear a persisted balloon override"
+  grep -q -F 'BALLOON_FREE_PAGE_REPORTING="${TENCENTCLOUD_BALLOON_FREE_PAGE_REPORTING:-}"' "${create}" \
+    || fail "create.sh does not read TENCENTCLOUD_BALLOON_FREE_PAGE_REPORTING"
+  grep -q -F "printf '%s\\\\n' 'CUBE_BALLOON_FREE_PAGE_REPORTING=\${BALLOON_FREE_PAGE_REPORTING}' >> .env" "${create}" \
+    || fail "local-bundle compute install does not persist the balloon override"
+  grep -q -F 'env${BALLOON_FREE_PAGE_REPORTING_ENV}' "${create}" \
+    || fail "online compute install does not forward the balloon override/reset"
+  grep -q -F "grep -q '^CUBE_BALLOON_FREE_PAGE_REPORTING=' /usr/local/services/cubetoolbox/.one-click.env" "${create}" \
+    || fail "healthy-node rerun does not reconcile an explicit balloon override"
+  grep -q -F "export CUBE_BALLOON_FREE_PAGE_REPORTING=%q" "${up_compute}" \
+    || fail "legacy compute startup does not pass the balloon override through env -i"
+  grep -q -F "export CUBE_BALLOON_FREE_PAGE_REPORTING=%q" "${up}" \
+    || fail "legacy all-in-one startup does not pass the balloon override through env -i"
+  grep -q -F "TENCENTCLOUD_BALLOON_FREE_PAGE_REPORTING='\${BALLOON_FREE_PAGE_REPORTING_SELECTION:-}'" "${create}" \
+    || fail "generated Terraform .env does not retain the balloon policy selection"
+  grep -q -F "sed -i '/^CUBE_BALLOON_FREE_PAGE_REPORTING=/d'" "${create}" \
+    || fail "healthy-node rerun cannot clear the balloon override"
+  grep -q -F "TENCENTCLOUD_BALLOON_FREE_PAGE_REPORTING='on'" "${env_example}" \
+    || fail "Terraform env.example does not surface the balloon override"
+}
+
 test_component_build_inputs_exist
 test_image_names_match
 test_webui_nginx_placeholders
@@ -424,6 +457,7 @@ test_env_templates_are_split
 test_s3lvol_bucket_tool_is_packaged
 test_s3lvol_rpc_launcher_is_packaged
 test_build_scripts_parse
+test_balloon_reporting_override_wiring
 
 if [[ "${failures}" -gt 0 ]]; then
   echo "${failures} package-layout test(s) failed" >&2

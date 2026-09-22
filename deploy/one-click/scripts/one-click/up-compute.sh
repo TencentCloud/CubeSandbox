@@ -51,11 +51,14 @@ mkdir -p \
 
 "${SCRIPT_DIR}/down-compute.sh" >/dev/null 2>&1 || true
 
-
+cubelet_env=""
+if [[ -n "${CUBE_BALLOON_FREE_PAGE_REPORTING:-}" ]]; then
+  printf -v cubelet_env 'export CUBE_BALLOON_FREE_PAGE_REPORTING=%q; ' "${CUBE_BALLOON_FREE_PAGE_REPORTING}"
+fi
 
 start_with_pidfile \
   "cubelet" \
-  "export CUBE_SANDBOX_NODE_IP=\"${CUBE_SANDBOX_NODE_IP}\"; \"${CUBELET_BIN}\" --config \"${CUBELET_CONFIG}\" --dynamic-conf-path \"${CUBELET_DYNAMICCONF}\""
+  "${cubelet_env}export CUBE_SANDBOX_NODE_IP=\"${CUBE_SANDBOX_NODE_IP}\"; \"${CUBELET_BIN}\" --config \"${CUBELET_CONFIG}\" --dynamic-conf-path \"${CUBELET_DYNAMICCONF}\""
 
 refresh_pidfile_from_pattern "cubelet" "^${CUBELET_BIN} --config" 10 1 || log "cubelet pidfile refresh skipped"
 

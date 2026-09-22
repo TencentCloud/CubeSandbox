@@ -514,6 +514,7 @@ load_env_file() {
 ONE_CLICK_TOGGLE_KEYS=(
   ONE_CLICK_ENABLE_S3LVOL
   CUBE_PVM_ENABLE
+  CUBE_BALLOON_FREE_PAGE_REPORTING
 )
 
 # snapshot_one_click_toggles: capture this-run operator intent for
@@ -546,6 +547,19 @@ snapshot_one_click_toggles() {
   return 0
 }
 
+# capture_one_click_toggle_dotenv_values replaces the raw values captured only
+# to mark presence with their shell-interpreted values. Must run after
+# load_env_file so quotes and inline comments are handled exactly as at runtime.
+capture_one_click_toggle_dotenv_values() {
+  local key
+  for key in "${ONE_CLICK_TOGGLE_KEYS[@]}"; do
+    if [[ -n "${ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT[${key}]+x}" ]]; then
+      ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT["${key}"]="${!key-}"
+    fi
+  done
+  return 0
+}
+
 # apply_one_click_toggles: re-apply the snapshotted operator intent after the
 # env files (including the upgrade merge output) have been sourced. Same
 # snapshot/replay shape as apply_one_click_database_intent (change both together). Precedence
@@ -565,6 +579,19 @@ apply_one_click_toggles() {
     fi
   done
   return 0
+}
+
+normalize_balloon_free_page_reporting() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  value="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')"
+  case "${value}" in
+    "") printf '%s' "" ;;
+    1|on|true|yes) printf '%s' "on" ;;
+    0|off|false|no) printf '%s' "off" ;;
+    *) return 1 ;;
+  esac
 }
 
 # Database engine keys (and CUBE_EXTERNAL_REDIS_DB) are commented out of
