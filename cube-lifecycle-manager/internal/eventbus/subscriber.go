@@ -34,16 +34,29 @@ func NewSubscriber(rdb redis.UniversalClient, bus *Bus, log *zap.Logger) *Subscr
 // Run keeps retrying subscription setup until the context is cancelled.
 // Pub/Sub is an optimization, so a transient setup failure must not stop CLM.
 func (s *Subscriber) Run(ctx context.Context) error {
-	const retryDelay = time.Second
+	return s.run(ctx, time.Second, s.runOnce)
+}
+
+func (s *Subscriber) run(
+	ctx context.Context,
+	retryDelay time.Duration,
+	runOnce func(context.Context) error,
+) error {
 	for {
-		err := s.runOnce(ctx)
+		err := runOnce(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		s.log.Warn("eventbus subscriber unavailable; retrying",
 			zap.Duration("retry_delay", retryDelay),
 			zap.Error(err))
-		time.Sleep(retryDelay)
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 
