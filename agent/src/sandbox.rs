@@ -14,7 +14,7 @@ use crate::watcher::BindWatcher;
 use anyhow::{anyhow, Context, Result};
 use libc::pid_t;
 use oci::Hooks;
-use protocols::agent::OnlineCPUMemRequest;
+use protocols::agent::{KernelModule, OnlineCPUMemRequest};
 use regex::Regex;
 use rustjail::cgroups as rustjail_cgroups;
 use rustjail::container::BaseContainer;
@@ -56,6 +56,8 @@ pub struct Sandbox {
     pub event_tx: Option<BroadcastSender<String>>,
     pub bind_watcher: BindWatcher,
     pub pcimap: HashMap<pci::Address, pci::Address>,
+    /// From CreateSandboxRequest.kernel_modules; loaded after FsManager::new.
+    pub pending_kernel_modules: Vec<KernelModule>,
 }
 
 impl Sandbox {
@@ -86,6 +88,7 @@ impl Sandbox {
             event_tx: Some(tx),
             bind_watcher: BindWatcher::new(),
             pcimap: HashMap::new(),
+            pending_kernel_modules: Vec::new(),
         })
     }
 

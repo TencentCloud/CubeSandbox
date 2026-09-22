@@ -3,6 +3,7 @@
 //
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use cube_hypervisor::config::{BackendFsConfig, RateLimiterConfig};
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,7 @@ use crate::common::CResult;
 use crate::common::PRODUCT_CUBEBOX;
 use crate::sandbox::disk::{Disk, ANNO_DISK};
 use crate::sandbox::net::{Net, ANNO_NET};
-use crate::sandbox::pmem::{Pmem, ANNO_PMEM};
+use crate::sandbox::pmem::{Pmem, ANNO_PMEM, HYP_GAUGE_ID};
 
 pub const ANNO_VM_RES: &str = "cube.vmmres";
 pub const ANNO_VMM_FS: &str = "cube.fs";
@@ -24,6 +25,7 @@ pub const ANNO_SNAPSHOT_NOTIFY: &str = "cube.snapshot.healthcheck";
 pub const ANNO_VM_KERNEL: &str = "cube.vm.kernel.path";
 /// Annotation key used to append extra kernel cmdline parameters.
 pub const ANNO_VM_KERNEL_CMDLINE_APPEND: &str = "cube.vm.kernel.cmdline.append";
+pub const ANNO_PERF_METRIC: &str = "cube.perf.metric";
 /// Override path to cube-agent.ext4 (virtio-pmem1).
 pub const ANNO_VM_AGENT: &str = "cube.vm.agent.path";
 /// Override path to guest OS image (virtio-pmem0).
@@ -74,6 +76,11 @@ pub struct Config {
     pub use_passfd_io: bool,
     /// Extra kernel cmdline parameters injected through annotations.
     pub extra_kernel_params: Vec<String>,
+    /// Attaches the GAUGE metrics ivshmem device. Read identically on cold boot
+    /// and on restore: the PCI device tree is frozen into the snapshot, and a
+    /// restore can only rebind the backing path of a device the snapshot
+    /// already carries.
+    pub perf_metric: bool,
 }
 
 impl Default for Config {
@@ -103,6 +110,7 @@ impl Default for Config {
             app_snapshot_restore: false,
             use_passfd_io: false,
             extra_kernel_params: Vec::new(),
+            perf_metric: false,
         }
     }
 }
@@ -233,6 +241,9 @@ impl Config {
         if let Some(anno) = anno.get(ANNO_VIRTIOFS) {
             virtiofs = Utils::anno_to_obj::<Vec<VirtioFs>>(anno)?;
         }
+        let perf_metric = anno
+            .get(ANNO_PERF_METRIC)
+            .is_some_and(|value| value == "true");
         let extra_kernel_params = if let Some(params) = anno.get(ANNO_VM_KERNEL_CMDLINE_APPEND) {
             let params_vec = Utils::anno_to_obj::<Vec<String>>(params)?;
             params_vec
@@ -275,8 +286,47 @@ impl Config {
             app_snapshot_restore,
             use_passfd_io,
             extra_kernel_params,
+            perf_metric,
         };
         Ok(c)
+    }
+
+    /// Attach `cube_gauge.ext4` at business index 0 (`/dev/pmem2`) only when
+    /// `--enable-metric` is on and the plane file exists. Missing file or no
+    /// flag: leave the sandbox unchanged (no extra pmem, no insmod).
+    pub fn attach_gauge_pmem(&mut self) -> CResult<()> {
+        if self.pmem.iter().any(|p| p.id == HYP_GAUGE_ID) {
+            self.rebuild_pmem_path_map();
+            return Ok(());
+        }
+        if !self.perf_metric {
+            return Ok(());
+        }
+        let file = Pmem::gauge_pmem_path(&self.kernel);
+        if !Path::new(&file).is_file() {
+            return Ok(());
+        }
+        self.pmem.insert(
+            0,
+            Pmem {
+                file,
+                discard_writes: true,
+                source_dir: String::new(),
+                fs_type: "ext4".to_string(),
+                size: None,
+                id: HYP_GAUGE_ID.to_string(),
+                placeholder: false,
+            },
+        );
+        self.rebuild_pmem_path_map();
+        Ok(())
+    }
+
+    fn rebuild_pmem_path_map(&mut self) {
+        self.pmem_path_map.clear();
+        for (i, p) in self.pmem.iter().enumerate() {
+            self.pmem_path_map.insert(p.file.clone(), i as u32);
+        }
     }
 }
 
@@ -551,5 +601,38 @@ mod tests {
                 .unwrap()
                 .use_passfd_io
         );
+    }
+
+    #[test]
+    fn attach_gauge_pmem_only_when_flag_and_file_exist() {
+        use crate::sandbox::pmem::{DEFAULT_GAUGE_PMEM_PATH, HYP_GAUGE_ID};
+        use std::path::Path;
+
+        let mut annotations = HashMap::<String, String>::new();
+        let res = r#"{"cpu": 1, "memory": 2048, "preserve_memory": 2048, "snap_memory": 2048}"#;
+        annotations.insert(ANNO_VM_RES.to_string(), res.to_string());
+        let mut config = Config::new(&Some(annotations)).unwrap();
+        assert!(config.pmem.is_empty());
+
+        config.attach_gauge_pmem().unwrap();
+        assert!(
+            config.pmem.is_empty(),
+            "no flag must not attach even if the ext4 exists"
+        );
+
+        config.perf_metric = true;
+        if !Path::new(DEFAULT_GAUGE_PMEM_PATH).is_file() {
+            config.attach_gauge_pmem().unwrap();
+            assert!(
+                config.pmem.is_empty(),
+                "flag without file must skip, not fail"
+            );
+            return;
+        }
+        config.attach_gauge_pmem().unwrap();
+        assert_eq!(config.pmem[0].id, HYP_GAUGE_ID);
+        assert_eq!(config.pmem[0].file, DEFAULT_GAUGE_PMEM_PATH);
+        config.attach_gauge_pmem().unwrap();
+        assert_eq!(config.pmem.len(), 1, "second attach must be idempotent");
     }
 }

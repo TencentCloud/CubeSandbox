@@ -143,19 +143,19 @@ func TestNormalizeTemplateImageRequestIgnoresProvidedTemplateID(t *testing.T) {
 	}
 }
 
-func TestNormalizeTemplateImageRequestDropsDisabledIvshmemFlag(t *testing.T) {
+func TestNormalizeTemplateImageRequestDropsDisabledMetricFlag(t *testing.T) {
 	disabled := false
 	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-1"},
 		SourceImageRef:    "docker.io/library/nginx:latest",
 		WritableLayerSize: "20Gi",
-		EnableIvshmem:     &disabled,
+		EnableMetric:      &disabled,
 	})
 	if err != nil {
 		t.Fatalf("normalizeTemplateImageRequest failed: %v", err)
 	}
-	if req.EnableIvshmem != nil {
-		t.Fatal("EnableIvshmem should be canonicalized to nil when false")
+	if req.EnableMetric != nil {
+		t.Fatal("EnableMetric should be canonicalized to nil when false")
 	}
 }
 
@@ -793,7 +793,7 @@ func TestGenerateTemplateCreateRequestClonesCubeNetworkRules(t *testing.T) {
 	}
 }
 
-func TestGenerateTemplateCreateRequestAddsIvshmemAnnotation(t *testing.T) {
+func TestGenerateTemplateCreateRequestAddsMetricAnnotation(t *testing.T) {
 	enabled := true
 	req := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-1"},
@@ -802,7 +802,7 @@ func TestGenerateTemplateCreateRequestAddsIvshmemAnnotation(t *testing.T) {
 		WritableLayerSize: "20Gi",
 		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
 		NetworkType:       cubeboxv1.NetworkType_tap.String(),
-		EnableIvshmem:     &enabled,
+		EnableMetric:      &enabled,
 	}
 	artifact := &models.RootfsArtifact{
 		ArtifactID:              "artifact-1",
@@ -815,12 +815,12 @@ func TestGenerateTemplateCreateRequestAddsIvshmemAnnotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
 	}
-	if got.Annotations[constants.CubeAnnotationEnableIvshmem] != "true" {
-		t.Fatalf("expected ivshmem annotation to be set, got %q", got.Annotations[constants.CubeAnnotationEnableIvshmem])
+	if got.Annotations[constants.CubeAnnotationPerfMetric] != "true" {
+		t.Fatalf("expected metric annotation to be set, got %q", got.Annotations[constants.CubeAnnotationPerfMetric])
 	}
 }
 
-func TestBuildTemplateSpecFingerprintIgnoresIvshmemFlag(t *testing.T) {
+func TestBuildTemplateSpecFingerprintIgnoresMetricFlag(t *testing.T) {
 	enabled := true
 	reqA := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-a"},
@@ -835,12 +835,12 @@ func TestBuildTemplateSpecFingerprintIgnoresIvshmemFlag(t *testing.T) {
 		WritableLayerSize: reqA.WritableLayerSize,
 		InstanceType:      reqA.InstanceType,
 		NetworkType:       reqA.NetworkType,
-		EnableIvshmem:     &enabled,
+		EnableMetric:      &enabled,
 	}
 	gotA := buildTemplateSpecFingerprint(reqA, "sha256:source")
 	gotB := buildTemplateSpecFingerprint(reqB, "sha256:source")
 	if gotA != gotB {
-		t.Fatalf("ivshmem should not affect rootfs artifact fingerprint: %q vs %q", gotA, gotB)
+		t.Fatalf("metric flag should not affect rootfs artifact fingerprint: %q vs %q", gotA, gotB)
 	}
 }
 

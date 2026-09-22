@@ -87,6 +87,32 @@ func genContainerAnnotationReq(ctx context.Context, c *cubebox.ContainerConfig, 
 	return oci.WithAnnotations(anno)
 }
 
+// withPerfMetricRuntimeAnnotation copies the root request's GAUGE metrics switch onto the pod spec.
+// Shim interprets the raw value before VM boot; an absent request removes any stale spec value.
+func withPerfMetricRuntimeAnnotation(realReq *cubebox.RunCubeSandboxRequest) oci.SpecOpts {
+	var (
+		raw string
+		ok  bool
+	)
+	if realReq != nil {
+		if anno := realReq.GetAnnotations(); anno != nil {
+			raw, ok = anno[constants.MasterAnnotationPerfMetric]
+		}
+	}
+
+	return func(_ context.Context, _ oci.Client, _ *containers.Container, s *specs.Spec) error {
+		if !ok {
+			delete(s.Annotations, constants.AnnotationPerfMetric)
+			return nil
+		}
+		if s.Annotations == nil {
+			s.Annotations = make(map[string]string)
+		}
+		s.Annotations[constants.AnnotationPerfMetric] = raw
+		return nil
+	}
+}
+
 func (l *local) genListFilterLabels(ctx context.Context, req *cubebox.RunCubeSandboxRequest, sandBox *cubeboxstore.CubeBox) map[string]string {
 	labels := make(map[string]string)
 	labels[constants.AnnotationsProduct] = req.InstanceType

@@ -697,10 +697,11 @@ type CreateTemplateFromImageReq struct {
 	// See design/cube-egress-ca-bake.md.
 	WithCubeCA *bool `json:"with_cube_ca,omitempty"`
 
-	// EnableIvshmem controls whether the template build sandbox should boot
-	// with ivshmem enabled so the captured snapshot already contains the
-	// device topology.
-	EnableIvshmem *bool `json:"enable_ivshmem,omitempty"`
+	// EnableMetric controls whether the template build sandbox boots with the
+	// GAUGE metrics ivshmem device, so the captured snapshot already carries it.
+	// A restore can only rebind the device's backing path, never add the device,
+	// so this has to be decided at build time.
+	EnableMetric *bool `json:"enable_metric,omitempty"`
 
 	// Backend is the CoW store (xfs｜s3) for this template and every
 	// sandbox / pause-snap / commit snapshot created from it. Empty means xfs.

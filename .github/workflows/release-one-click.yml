@@ -251,6 +251,8 @@ jobs:
     env:
       VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux
       PVM_VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux-pvm
+      GAUGE_BM_EXT4_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/cube_gauge-bm.ext4
+      GAUGE_PVM_EXT4_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/cube_gauge-pvm.ext4
       KERNEL_BM_AMD64_RELEASE_TAG: ${{ needs.resolve_pins.outputs.kernel_bm_amd64_release_tag }}
       KERNEL_PVM_RELEASE_TAG: ${{ needs.resolve_pins.outputs.kernel_pvm_release_tag }}
       GUEST_IMAGE_RELEASE_TAG: ${{ needs.resolve_pins.outputs.guest_image_release_tag }}
@@ -310,6 +312,26 @@ jobs:
           test -f "${PVM_VMLINUX_RELEASE_PATH}"
           file "${VMLINUX_RELEASE_PATH}"
           file "${PVM_VMLINUX_RELEASE_PATH}"
+
+          # cube_gauge.ext4 is optional: kernel Releases pinned before the
+          # module existed carry no such asset. A bundle without it still
+          # installs; --enable-metric then finds no module image to attach.
+          stage_optional_gauge_ext4() {
+            local tag="$1" asset="$2" dest="$3"
+            if gh release download "${tag}" \
+                 --repo "${GITHUB_REPOSITORY}" \
+                 --pattern "${asset}" \
+                 --dir downloaded-kernel; then
+              install -D -m 0644 "downloaded-kernel/${asset}" "${dest}"
+              echo "staged ${dest} from ${tag}"
+            else
+              echo "no ${asset} on ${tag}; bundle ships without it"
+            fi
+          }
+          stage_optional_gauge_ext4 "${KERNEL_BM_AMD64_RELEASE_TAG}" \
+            cube_gauge-bm-amd64.ext4 "${GAUGE_BM_EXT4_RELEASE_PATH}"
+          stage_optional_gauge_ext4 "${KERNEL_PVM_RELEASE_TAG}" \
+            cube_gauge-pvm-amd64.ext4 "${GAUGE_PVM_EXT4_RELEASE_PATH}"
 
           eval "$(scripts/read-kernel-metadata.sh downloaded-kernel/bm-meta/kernel-metadata.json)"
           KERNEL_TAG="${KERNEL_BM_SOURCE_TAG}"
@@ -393,6 +415,7 @@ jobs:
       - publish_agent_release_assets
     env:
       VMLINUX_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/vmlinux
+      GAUGE_BM_EXT4_RELEASE_PATH: deploy/one-click/assets/kernel-artifacts/cube_gauge-bm.ext4
       KERNEL_BM_ARM64_RELEASE_TAG: ${{ needs.resolve_pins.outputs.kernel_bm_arm64_release_tag }}
       KERNEL_PVM_RELEASE_TAG: ${{ needs.resolve_pins.outputs.kernel_pvm_release_tag }}
       GUEST_IMAGE_RELEASE_TAG: ${{ needs.resolve_pins.outputs.guest_image_release_tag }}
@@ -443,6 +466,20 @@ jobs:
             "${VMLINUX_RELEASE_PATH}"
           test -f "${VMLINUX_RELEASE_PATH}"
           file "${VMLINUX_RELEASE_PATH}"
+
+          # Optional, same as the amd64 bundle: older pinned kernel Releases
+          # have no cube_gauge asset.
+          if gh release download "${KERNEL_BM_ARM64_RELEASE_TAG}" \
+               --repo "${GITHUB_REPOSITORY}" \
+               --pattern "cube_gauge-bm-arm64.ext4" \
+               --dir downloaded-kernel; then
+            install -D -m 0644 \
+              downloaded-kernel/cube_gauge-bm-arm64.ext4 \
+              "${GAUGE_BM_EXT4_RELEASE_PATH}"
+            echo "staged ${GAUGE_BM_EXT4_RELEASE_PATH}"
+          else
+            echo "no cube_gauge-bm-arm64.ext4 on ${KERNEL_BM_ARM64_RELEASE_TAG}; bundle ships without it"
+          fi
 
           eval "$(scripts/read-kernel-metadata.sh downloaded-kernel/bm-meta/kernel-metadata.json)"
           KERNEL_TAG="${KERNEL_BM_SOURCE_TAG}"

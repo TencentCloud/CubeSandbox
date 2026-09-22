@@ -1,0 +1,12 @@
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.cmd
+*.symvers
+*.order
+.tmp_versions/
+Module.symvers
+modules.order
+.cube_gauge.*

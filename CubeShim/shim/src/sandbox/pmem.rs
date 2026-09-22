@@ -4,6 +4,7 @@
 
 use crate::common::utils::CPath;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const ANNO_PMEM: &str = "cube.pmem";
@@ -11,6 +12,12 @@ pub const ANNO_PMEM: &str = "cube.pmem";
 /// Builtin virtio-pmem ids (must match VmConfig::builtin_pmems).
 pub const HYP_OS_IMAGE_ID: &str = "pmem-cube-os-image";
 pub const HYP_AGENT_ID: &str = "pmem-cube-agent";
+/// First business pmem (`/dev/pmem2`). Attached when `--enable-metric` is on.
+pub const HYP_GAUGE_ID: &str = "pmem-cube-gauge";
+pub const DEFAULT_GAUGE_PMEM_PATH: &str =
+    "/usr/local/services/cubetoolbox/cube-kernel-scf/cube_gauge.ext4";
+pub const GAUGE_GUEST_MOUNT: &str = "/run/cube-gauge";
+pub const GAUGE_KO: &str = "cube_gauge.ko";
 
 const GUEST_MOUNT_DIR_PREFIX: &str = "/run/cube-containers/sandbox/pmem-cube/pmem";
 
@@ -60,6 +67,27 @@ impl Pmem {
 
     pub fn driver() -> String {
         "nvdimm".to_string()
+    }
+
+    /// Host path of `cube_gauge.ext4`. Prefer the toolbox plane file; if that
+    /// is missing, accept a copy next to the guest kernel (create-from-image
+    /// copies `vmlinux` under `cubebox_os_image/<id>/`).
+    pub fn gauge_pmem_path(kernel: &str) -> String {
+        let toolbox = PathBuf::from(DEFAULT_GAUGE_PMEM_PATH);
+        if toolbox.is_file() {
+            return DEFAULT_GAUGE_PMEM_PATH.to_string();
+        }
+        if let Some(parent) = Path::new(kernel).parent() {
+            let sibling = parent.join("cube_gauge.ext4");
+            if sibling.is_file() {
+                return sibling.to_string_lossy().into_owned();
+            }
+        }
+        DEFAULT_GAUGE_PMEM_PATH.to_string()
+    }
+
+    pub fn gauge_ko_guest_path() -> String {
+        format!("{}/{}", GAUGE_GUEST_MOUNT, GAUGE_KO)
     }
 }
 

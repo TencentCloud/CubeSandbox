@@ -253,6 +253,9 @@ const (
 	MasterAnnotationNetworkPolicyBlockAll            = "cube.master.network.policy.block_all"
 	MasterAnnotationNetworkPolicyAllowPublicServices = "cube.master.network.policy.allow_public_services"
 	MasterAnnotationNetworkPolicyDefault             = "cube.master.network.policy.default"
+	// MasterAnnotationPerfMetric is the caller's GAUGE metrics opt-in; Cubelet
+	// copies it to AnnotationPerfMetric.
+	MasterAnnotationPerfMetric = "cube.master.perf.metric"
 )
 
 // Inventory version annotations used by Ensure
@@ -296,6 +299,10 @@ const (
 	AnnotationAppSnapshotContainerID   = "cube.appsnapshot.container.id"
 	AnnotationSnapshotDisable          = "cube.snapshot.disable"
 	AnnotationAppSnapshotFinished      = "cube.appsnapshot.finished"
+	// AnnotationPerfMetric carries the GAUGE metrics opt-in to Shim before VM
+	// boot. Shim attaches the ivshmem device on template snapshot creation and
+	// rebinds its backing path on restore, so both must observe the same value.
+	AnnotationPerfMetric = "cube.perf.metric"
 
 	DefaultSnapshotDir = "/usr/local/services/cubetoolbox/cube-snapshot"
 

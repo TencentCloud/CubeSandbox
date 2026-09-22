@@ -43,8 +43,8 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 	if len(req.ExposedPorts) > 0 {
 		annotations[constants.AnnotationsExposedPort] = formatExposedPortsAnnotation(req.ExposedPorts)
 	}
-	if req.EnableIvshmem != nil && *req.EnableIvshmem {
-		annotations[constants.CubeAnnotationEnableIvshmem] = "true"
+	if req.EnableMetric != nil && *req.EnableMetric {
+		annotations[constants.CubeAnnotationPerfMetric] = "true"
 	}
 	rootVolume := &types.Volume{
 		Name: rootfsWritableVolumeName,
