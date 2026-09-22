@@ -179,6 +179,33 @@ describe("renderInject", () => {
       renderInject({ header: "Authorization", format: "${SECRET}-${SECRET}-${SECRET}", secret: "tok" }),
     ).toBe("tok-${SECRET}-${SECRET}");
   });
+
+  // `String.prototype.replace` applies JS's `$` substitution rules to a *string*
+  // replacement (`$$` becomes `$`, `$&` becomes the match, and the backtick
+  // forms splice in surrounding text). CubeEgress builds its replacement with
+  // Lua's `string.gsub`, which has no such rules, so a secret containing `$`
+  // previews differently from what the upstream receives - and `$&` leaks the
+  // literal `${SECRET}` placeholder into a header that is supposed to carry a
+  // secret. A function replacer keeps the replace-once behaviour above while
+  // neutering the expansion.
+  it("does not apply $ substitution rules to the secret", () => {
+    expect(renderInject({ header: "Authorization", secret: "pa$$word" })).toBe("pa$$word");
+    expect(renderInject({ header: "Authorization", secret: "a$&b" })).toBe("a$&b");
+    // The backtick form is spelled by concatenation so it cannot terminate the
+    // surrounding template literal in this file.
+    const dollarBacktick = "$`";
+    expect(renderInject({ header: "Authorization", secret: "x" + dollarBacktick + "y" })).toBe(
+      "x" + dollarBacktick + "y",
+    );
+  });
+
+  // Lua falls back to `${SECRET}` when the format is absent *or empty*
+  // (access_phase.lua), and the Python and Go renderers do the same. `??` only
+  // covers null/undefined, so an empty string previewed as "" while the
+  // upstream received the raw secret.
+  it("falls back to the bare secret for an empty format", () => {
+    expect(renderInject({ header: "Authorization", secret: "tok", format: "" })).toBe("tok");
+  });
 });
 
 describe("convertE2BPerHostRules", () => {
