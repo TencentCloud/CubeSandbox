@@ -107,7 +107,8 @@ not a fixed sentence:
   the run. stderr is delimited and non-zero exit codes are reported.
 - **Network isolation by default.** The demo creates the sandbox with
   `allow_internet_access=False` because the task needs no network. Set it to
-  `True` in the script if your own task does.
+  `True` in the script if your own task does — the agent's instructions derive
+  from that flag, so they relax automatically.
 
 ## Files
 

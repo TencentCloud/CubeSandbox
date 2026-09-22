@@ -60,11 +60,20 @@ class Deps:
     _script_counter: Iterator[int] = field(default_factory=lambda: itertools.count())
 
 
+# Derive the environment clause from ALLOW_INTERNET so the prompt can never
+# contradict how the sandbox was actually created.
+_ENV_CLAUSE = (
+    "The sandbox has network access, so you may install third-party packages "
+    "(pip) or fetch data if the task needs it."
+    if ALLOW_INTERNET
+    else "Only the Python standard library is available and there is no network "
+    "access; do not rely on third-party packages or network calls."
+)
+
 INSTRUCTIONS = (
     "You solve tasks by writing small Python programs and running them with the "
     "run_python tool, which executes inside an isolated CubeSandbox MicroVM.\n"
-    "- Only the Python standard library is available; do not rely on third-party "
-    "packages or network access.\n"
+    f"- {_ENV_CLAUSE}\n"
     "- Every numeric result you report MUST come from stdout that run_python "
     "actually returned. Never guess, estimate, or pre-compute values yourself.\n"
     "- Make your program print the exact values you need, then read them back "
