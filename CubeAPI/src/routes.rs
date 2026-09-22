@@ -246,7 +246,7 @@ fn apply_http_layers(router: Router<AppState>, timeout: Duration) -> Router<AppS
 
 #[cfg(test)]
 mod tests {
-    use super::build_router;
+    use super::{build_router, build_sandbox_routes};
     use crate::{
         config::ServerConfig,
         logging::{arc, noop::NoopLogger},
@@ -255,7 +255,7 @@ mod tests {
     use axum::{
         extract::Json,
         http::{header::RETRY_AFTER, StatusCode},
-        routing::delete,
+        routing::{delete, post},
         Router,
     };
     use axum_test::TestServer;
@@ -579,5 +579,122 @@ mod tests {
             resp.status_code(),
             resp.text(),
         );
+    }
+
+    /// `GET /v2/sandboxes` declared a `nextToken` query parameter and then
+    /// ignored it: the handler never read it and the service always asked
+    /// CubeMaster from the first entry, so every page returned the same first
+    /// `limit` sandboxes and a client could never reach past it.
+    ///
+    /// Driven through the real router so the assertions cover what a client
+    /// actually observes — the `x-next-token` header and the cursor being
+    /// accepted on the next request.
+    #[tokio::test]
+    async fn list_sandboxes_v2_returns_a_usable_next_token_header() {
+        async fn list_handler(Json(_request): Json<Value>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [
+                    { "sandbox_id": "sb-1", "host_id": "h", "status": 1, "template_id": "t" },
+                    { "sandbox_id": "sb-2", "host_id": "h", "status": 1, "template_id": "t" },
+                    { "sandbox_id": "sb-3", "host_id": "h", "status": 1, "template_id": "t" }
+                ]
+            }))
+        }
+
+        let server = sandbox_list_server(list_handler).await;
+
+        let first = server
+            .get("/v2/sandboxes")
+            .add_query_param("limit", "2")
+            .await;
+        assert_eq!(first.status_code(), StatusCode::OK);
+        let cursor = first
+            .headers()
+            .get("x-next-token")
+            .expect("a third sandbox remains, so the cursor header must be present")
+            .to_str()
+            .expect("the cursor should be valid ASCII")
+            .to_string();
+        assert!(!cursor.is_empty(), "the cursor must carry a value");
+
+        let first_page: Vec<Value> = first.json();
+        assert_eq!(first_page.len(), 2, "limit caps the page");
+
+        let second = server
+            .get("/v2/sandboxes")
+            .add_query_param("limit", "2")
+            .add_query_param("nextToken", cursor.clone())
+            .await;
+        assert_eq!(second.status_code(), StatusCode::OK);
+        let trailing_cursor = second
+            .headers()
+            .get("x-next-token")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            trailing_cursor.is_empty(),
+            "the last page must not advertise another one, got {trailing_cursor:?}"
+        );
+
+        let second_page: Vec<Value> = second.json();
+        assert_eq!(second_page.len(), 1, "only one sandbox is left");
+        assert_eq!(
+            second_page[0]["sandboxID"], "sb-3",
+            "the cursor must continue past the first page"
+        );
+    }
+
+    /// A cursor the client could not have obtained from us is a client mistake,
+    /// not a reason to silently restart from the first page — which is exactly
+    /// the behaviour being replaced.
+    #[tokio::test]
+    async fn list_sandboxes_v2_rejects_an_unknown_next_token() {
+        async fn list_handler(Json(_request): Json<Value>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{ "sandbox_id": "sb-1", "host_id": "h", "status": 1, "template_id": "t" }]
+            }))
+        }
+
+        let server = sandbox_list_server(list_handler).await;
+        let response = server
+            .get("/v2/sandboxes")
+            .add_query_param("limit", "2")
+            .add_query_param("nextToken", "garbage")
+            .await;
+
+        assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
+        let error: crate::models::ApiError = response.json();
+        assert_eq!(error.code, 400);
+    }
+
+    async fn sandbox_list_server<F, Fut>(list_handler: F) -> TestServer
+    where
+        F: Fn(Json<Value>) -> Fut + Clone + Send + 'static,
+        Fut: std::future::Future<Output = Json<Value>> + Send,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/cube/sandbox/list", post(list_handler)),
+            )
+            .await
+            .expect("mock CubeMaster server should run");
+        });
+
+        let config = ServerConfig {
+            cubemaster_url: format!("http://{address}"),
+            ..Default::default()
+        };
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        TestServer::new(build_router(state)).expect("router should build")
     }
 }
