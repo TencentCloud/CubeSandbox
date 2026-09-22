@@ -1541,10 +1541,13 @@ stop_existing_systemd_deployment() {
     cube-sandbox-control.target \
     cube-sandbox-compute.target >/dev/null 2>&1 || true
   systemctl reset-failed 'cube-sandbox-*.service' >/dev/null 2>&1 || true
-  # Enumerated rather than globbed: the glob would match s3lvol too.
+  # Enumerated rather than globbed: the glob would match s3lvol too. Filter
+  # s3lvol in the loop body (not `grep -vx`, which exits 1 on empty input and
+  # silently aborts a first-time install under `set -euo pipefail`).
   systemctl list-units --plain --no-legend --all 'cube-sandbox-*.service' 2>/dev/null |
-    awk '{print $1}' | grep -vx 'cube-sandbox-s3lvol.service' |
+    awk '{print $1}' |
     while read -r unit; do
+      [[ "${unit}" == "cube-sandbox-s3lvol.service" ]] && continue
       systemctl stop "${unit}" >/dev/null 2>&1 || true
     done
 }
