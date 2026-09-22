@@ -164,6 +164,21 @@ describe("renderInject", () => {
   it("defaults to the bare secret when no format is provided", () => {
     expect(renderInject({ header: "X-Token", secret: "abc" })).toBe("abc");
   });
+
+  // CubeEgress substitutes only the first ${SECRET}
+  // (`string.gsub(fmt, "%${SECRET}", escaped, 1)` in
+  // CubeEgress/lua/access_phase.lua), so the preview must do the same. This
+  // pins the string-pattern `.replace()` call — switching it to a global
+  // regex or `replaceAll` would silently make the preview disagree with what
+  // the sandbox's upstream receives.
+  it("substitutes only the first placeholder, like the data plane", () => {
+    expect(
+      renderInject({ header: "Authorization", format: "Basic ${SECRET}:${SECRET}", secret: "tok" }),
+    ).toBe("Basic tok:${SECRET}");
+    expect(
+      renderInject({ header: "Authorization", format: "${SECRET}-${SECRET}-${SECRET}", secret: "tok" }),
+    ).toBe("tok-${SECRET}-${SECRET}");
+  });
 });
 
 describe("convertE2BPerHostRules", () => {
