@@ -238,21 +238,18 @@ const (
 	// on Master).
 	AnnotationPauseDeleteTombstone = "cube.pause.delete_tombstone"
 
-	MasterAnnotationAppSnapshotVersion               = "cube.master.appsnapshot.version"
-	MasterAnnotationRootfsArtifactID                 = "cube.master.rootfs.artifact.id"
-	MasterAnnotationRootfsArtifactJobID              = "cube.master.rootfs.artifact.job_id"
-	MasterAnnotationRootfsArtifactURL                = "cube.master.rootfs.artifact.url"
-	MasterAnnotationRootfsArtifactToken              = "cube.master.rootfs.artifact.token"
-	MasterAnnotationRootfsArtifactSHA256             = "cube.master.rootfs.artifact.sha256"
-	MasterAnnotationRootfsArtifactSizeBytes          = "cube.master.rootfs.artifact.size_bytes"
-	MasterAnnotationWritableLayerSize                = "cube.master.rootfs.writable_layer_size"
-	MasterAnnotationTemplateSpecFingerprint          = "cube.master.template.spec_fingerprint"
-	MasterAnnotationComponentEnvdVersion             = "cube.master.components.envd.version"
-	MasterAnnotationCreateTimeEnvVars                = "cube.master.internal.create_time_env_vars"
-	MasterAnnotationInstanceType                     = "cube.master.instance.type"
-	MasterAnnotationNetworkPolicyBlockAll            = "cube.master.network.policy.block_all"
-	MasterAnnotationNetworkPolicyAllowPublicServices = "cube.master.network.policy.allow_public_services"
-	MasterAnnotationNetworkPolicyDefault             = "cube.master.network.policy.default"
+	MasterAnnotationAppSnapshotVersion      = "cube.master.appsnapshot.version"
+	MasterAnnotationRootfsArtifactID        = "cube.master.rootfs.artifact.id"
+	MasterAnnotationRootfsArtifactJobID     = "cube.master.rootfs.artifact.job_id"
+	MasterAnnotationRootfsArtifactURL       = "cube.master.rootfs.artifact.url"
+	MasterAnnotationRootfsArtifactToken     = "cube.master.rootfs.artifact.token"
+	MasterAnnotationRootfsArtifactSHA256    = "cube.master.rootfs.artifact.sha256"
+	MasterAnnotationRootfsArtifactSizeBytes = "cube.master.rootfs.artifact.size_bytes"
+	MasterAnnotationWritableLayerSize       = "cube.master.rootfs.writable_layer_size"
+	MasterAnnotationTemplateSpecFingerprint = "cube.master.template.spec_fingerprint"
+	MasterAnnotationComponentEnvdVersion    = "cube.master.components.envd.version"
+	MasterAnnotationCreateTimeEnvVars       = "cube.master.internal.create_time_env_vars"
+	MasterAnnotationInstanceType            = "cube.master.instance.type"
 )
 
 // Inventory version annotations used by Ensure

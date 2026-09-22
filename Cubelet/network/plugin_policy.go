@@ -12,23 +12,16 @@ import (
 	"strings"
 
 	networkruntime "github.com/tencentcloud/CubeSandbox/Cubelet/network/runtime"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
-// buildNetworkRuntimeCubeNetworkConfig prefers the structured request field and
-// falls back to legacy annotations so older callers keep their previous egress
-// policy behavior during the runtime migration.
 func buildNetworkRuntimeCubeNetworkConfig(request *cubebox.RunCubeSandboxRequest) *networkruntime.CubeNetworkConfig {
 	if request == nil {
 		return nil
 	}
-	if request.GetCubeNetworkConfig() != nil {
-		return mapRunRequestCubeNetworkConfig(request.GetCubeNetworkConfig())
-	}
-	return buildLegacyNetworkRuntimeCubeNetworkConfig(request.GetAnnotations())
+	return mapRunRequestCubeNetworkConfig(request.GetCubeNetworkConfig())
 }
 
 func mapRunRequestCubeNetworkConfig(in *cubebox.CubeNetworkConfig) *networkruntime.CubeNetworkConfig {
@@ -105,25 +98,6 @@ func mapRunRequestEgressRuleAction(in *cubebox.EgressRuleAction) *networkruntime
 		}
 	}
 	return out
-}
-
-func buildLegacyNetworkRuntimeCubeNetworkConfig(annotations map[string]string) *networkruntime.CubeNetworkConfig {
-	if len(annotations) == 0 {
-		return nil
-	}
-	if v, ok := annotations[constants.MasterAnnotationNetworkPolicyBlockAll]; ok && v == "true" {
-		allowInternetAccess := false
-		return &networkruntime.CubeNetworkConfig{AllowInternetAccess: &allowInternetAccess}
-	}
-	if v, ok := annotations[constants.MasterAnnotationNetworkPolicyAllowPublicServices]; ok && v == "true" {
-		allowInternetAccess := true
-		return &networkruntime.CubeNetworkConfig{AllowInternetAccess: &allowInternetAccess}
-	}
-	if v, ok := annotations[constants.MasterAnnotationNetworkPolicyDefault]; ok && v == "true" {
-		allowInternetAccess := true
-		return &networkruntime.CubeNetworkConfig{AllowInternetAccess: &allowInternetAccess}
-	}
-	return nil
 }
 
 func formatCubeNetworkAllowInternetAccess(cfg *networkruntime.CubeNetworkConfig) string {
@@ -404,9 +378,7 @@ var ErrSandboxNetworkNotActive = networkruntime.ErrNetworkNotActive
 //
 // cfg is the complete desired state as authored by the user; the runtime folds
 // the sandbox's DNS resolver CIDRs back in, so callers pass exactly what the
-// API received. Unlike Create there is no legacy-annotation fallback: the
-// update API is new, so a caller that omits the config is a programming error
-// rather than an old client.
+// API received.
 func UpdateSandboxNetworkPolicy(ctx context.Context, sandboxID string, cfg *cubebox.CubeNetworkConfig) error {
 	if dnm == nil || dnm.tapPlugin == nil || dnm.tapPlugin.networkRuntime == nil {
 		return fmt.Errorf("network runtime is not initialized")
