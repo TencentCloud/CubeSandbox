@@ -86,7 +86,11 @@ func (i Inject) Render() string {
 	if format == "" {
 		format = "${SECRET}"
 	}
-	return strings.ReplaceAll(format, "${SECRET}", i.Secret)
+	// Substitute only the first placeholder, matching CubeEgress
+	// (`string.gsub(fmt, "%${SECRET}", escaped, 1)` in
+	// CubeEgress/lua/access_phase.lua). Replacing every occurrence would
+	// preview a credential the sandbox's upstream never receives.
+	return strings.Replace(format, "${SECRET}", i.Secret, 1)
 }
 
 // Action is a rule action. Allow passes the request through (optionally
