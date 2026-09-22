@@ -4,6 +4,7 @@
 package cubesandbox
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -645,4 +646,276 @@ type cancelOnCloseBody struct {
 func (b cancelOnCloseBody) Close() error {
 	b.cancel()
 	return nil
+}
+
+func TestReadConnectEnvelopeInvalidFlagsDiagnostic(t *testing.T) {
+	// HTML responses have an invalid flags byte, regardless of prefix or encoding.
+	for _, response := range []string{
+		"<!DOCTYPE html>\n<html><body>Web UI</body></html>",
+		"\xef\xbb\xbf<!DOCTYPE html>",
+		"\n<html><body>Web UI</body></html>",
+		"{\"error\":\"bad route\"}",
+		"\x1f\x8b\x08\x00compressed response",
+	} {
+		_, _, err := readConnectEnvelope(strings.NewReader(response))
+		if err == nil {
+			t.Fatalf("readConnectEnvelope(%q) returned nil error", response[:min(12, len(response))])
+		}
+		if !strings.Contains(err.Error(), "not a Connect envelope") {
+			t.Fatalf("err=%v, want invalid envelope diagnostic", err)
+		}
+		if !strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+			t.Fatalf("err=%v, want CUBE_PROXY_NODE_IP hint", err)
+		}
+	}
+
+	// A valid compressed + end-stream flags combination is allowed.
+	valid := []byte{connectCompressedFlag | connectEndStreamFlag, 0, 0, 0, 0}
+	if _, _, err := readConnectEnvelope(bytes.NewReader(valid)); err != nil {
+		t.Fatalf("readConnectEnvelope(valid flags)=%v, want nil", err)
+	}
+
+	// Oversized frames with valid flags retain the size diagnostic.
+	oversized := make([]byte, 5)
+	oversized[0] = connectEndStreamFlag
+	oversized[1] = 0x05 // size > 64MiB
+	_, _, err := readConnectEnvelope(bytes.NewReader(oversized))
+	if err == nil {
+		t.Fatal("readConnectEnvelope with oversized frame returned nil error")
+	}
+	if !strings.Contains(err.Error(), "Connect stream message too large") {
+		t.Fatalf("err=%v, want Connect stream message too large", err)
+	}
+}
+
+func TestValidateConnectResponse(t *testing.T) {
+	if err := validateConnectResponse(nil); err == nil || err.Error() != "nil response" {
+		t.Fatalf("validateConnectResponse(nil)=%v, want nil response", err)
+	}
+	if err := validateConnectResponse(&http.Response{Body: nil}); err == nil || err.Error() != "nil response" {
+		t.Fatalf("validateConnectResponse(Body:nil)=%v, want nil response", err)
+	}
+
+	// Non-200 JSON
+	resp404 := &http.Response{
+		StatusCode: http.StatusNotFound,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"message":"not found"}`)),
+	}
+	if err := validateConnectResponse(resp404); err == nil {
+		t.Fatal("validateConnectResponse(404) returned nil error")
+	}
+
+	// Non-200 HTML error page (e.g. gateway 502/404)
+	resp502HTML := &http.Response{
+		StatusCode: http.StatusBadGateway,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader("<!DOCTYPE html><html><body>502 Bad Gateway</body></html>")),
+	}
+	err502 := validateConnectResponse(resp502HTML)
+	if err502 == nil {
+		t.Fatal("validateConnectResponse(502 HTML) returned nil error")
+	}
+	var apiErr *APIError
+	if !errors.As(err502, &apiErr) {
+		t.Fatalf("err502=%v, want *APIError", err502)
+	}
+	if apiErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("StatusCode=%d, want 502", apiErr.StatusCode)
+	}
+	if !strings.Contains(apiErr.Message, "502 Bad Gateway") || !strings.Contains(apiErr.Message, "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("message=%q, want original error and CUBE_PROXY_NODE_IP hint", apiErr.Message)
+	}
+
+	// 401 HTML preserves ErrAuthentication
+	resp401HTML := &http.Response{
+		StatusCode: http.StatusUnauthorized,
+		Header:     http.Header{"Content-Type": []string{"text/html"}},
+		Body:       io.NopCloser(strings.NewReader("<html><body>login</body></html>")),
+	}
+	err401 := validateConnectResponse(resp401HTML)
+	if !errors.Is(err401, ErrAuthentication) {
+		t.Fatalf("validateConnectResponse(401 HTML)=%v, want ErrAuthentication", err401)
+	}
+
+	// 404 HTML clears ErrSandboxNotFound
+	resp404HTML := &http.Response{
+		StatusCode: http.StatusNotFound,
+		Header:     http.Header{"Content-Type": []string{"text/html"}},
+		Body:       io.NopCloser(strings.NewReader("<html><body>404 not found</body></html>")),
+	}
+	err404HTML := validateConnectResponse(resp404HTML)
+	if errors.Is(err404HTML, ErrSandboxNotFound) {
+		t.Fatalf("validateConnectResponse(404 HTML)=%v, should not be ErrSandboxNotFound", err404HTML)
+	}
+
+	// 404 text/plain (the default response from net/http.NotFound) also clears it.
+	resp404Text := &http.Response{
+		StatusCode: http.StatusNotFound,
+		Header:     http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader("404 page not found\n")),
+	}
+	err404Text := validateConnectResponse(resp404Text)
+	if errors.Is(err404Text, ErrSandboxNotFound) || !strings.Contains(err404Text.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("validateConnectResponse(404 text/plain)=%v, should clear classification and include routing hint", err404Text)
+	}
+	if !strings.Contains(err404Text.Error(), "404 page not found") {
+		t.Fatalf("validateConnectResponse(404 text/plain)=%v, should preserve original error", err404Text)
+	}
+
+	// Large HTML error page (>200 chars) is truncated before appending the hint
+	longHTML := "<!DOCTYPE html><html><body>" + strings.Repeat("A", 300) + "</body></html>"
+	respLongHTML := &http.Response{
+		StatusCode: http.StatusBadGateway,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(longHTML)),
+	}
+	errLongHTML := validateConnectResponse(respLongHTML)
+	if errLongHTML == nil {
+		t.Fatal("validateConnectResponse(long HTML) returned nil error")
+	}
+	var apiErrLong *APIError
+	if !errors.As(errLongHTML, &apiErrLong) {
+		t.Fatalf("errLongHTML=%v, want *APIError", errLongHTML)
+	}
+	if !strings.Contains(apiErrLong.Message, "...; response may be an HTML/text page") {
+		t.Fatalf("expected truncated message with '...', got: %q", apiErrLong.Message)
+	}
+	rawPrefix := strings.Split(apiErrLong.Message, "...; response may be")[0]
+	if len(rawPrefix) != 200 {
+		t.Fatalf("expected truncated prefix length 200, got %d (%q)", len(rawPrefix), rawPrefix)
+	}
+
+	for _, tc := range []struct {
+		body   string
+		target error
+	}{
+		{`{"error":"template not found"}`, ErrTemplateNotFound},
+		{`{"error":"volume not found: vol-1"}`, ErrVolumeNotFound},
+	} {
+		resp := &http.Response{
+			StatusCode: http.StatusNotFound,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(tc.body)),
+		}
+		if err := validateConnectResponse(resp); !errors.Is(err, tc.target) {
+			t.Errorf("validateConnectResponse(404 %q)=%v, want %v", tc.body, err, tc.target)
+		} else if strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+			t.Errorf("validateConnectResponse(404 %q)=%v, should not suggest proxy routing", tc.body, err)
+		}
+	}
+
+	// 404 HTML pages that happen to mention "template" or "volume" are still routing pages
+	resp404HTMLTemplate := &http.Response{
+		StatusCode: http.StatusNotFound,
+		Header:     http.Header{"Content-Type": []string{"text/html"}},
+		Body:       io.NopCloser(strings.NewReader("<html><title>Template not found</title></html>")),
+	}
+	err404HTMLTemplate := validateConnectResponse(resp404HTMLTemplate)
+	if errors.Is(err404HTMLTemplate, ErrTemplateNotFound) || !strings.Contains(err404HTMLTemplate.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("validateConnectResponse(404 HTML template)=%v, want cleared classification and proxy hint", err404HTMLTemplate)
+	}
+
+	// 404 text pages mentioning template are also routing pages
+	resp404TextTemplate := &http.Response{
+		StatusCode: http.StatusNotFound,
+		Header:     http.Header{"Content-Type": []string{"text/plain"}},
+		Body:       io.NopCloser(strings.NewReader("template not found")),
+	}
+	err404TextTemplate := validateConnectResponse(resp404TextTemplate)
+	if errors.Is(err404TextTemplate, ErrTemplateNotFound) || !strings.Contains(err404TextTemplate.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("validateConnectResponse(404 text template)=%v, want cleared classification and proxy hint", err404TextTemplate)
+	}
+
+	resp302 := &http.Response{
+		StatusCode: http.StatusFound,
+		Header:     http.Header{"Location": []string{"https://portal.example/login"}},
+		Body:       io.NopCloser(strings.NewReader("")),
+	}
+	if err := validateConnectResponse(resp302); err == nil || !strings.Contains(err.Error(), "https://portal.example/login") {
+		t.Fatalf("validateConnectResponse(302)=%v, want redirect location", err)
+	}
+
+	resp500Text := &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Header:     http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader("boom\n")),
+	}
+	if err := validateConnectResponse(resp500Text); err == nil || err.Error() != "boom (HTTP 500)" {
+		t.Fatalf("validateConnectResponse(500 text/plain)=%v, want original server error", err)
+	}
+
+	resp404JSON := &http.Response{
+		StatusCode: http.StatusNotFound,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"message":"sandbox not found"}`)),
+	}
+	if err := validateConnectResponse(resp404JSON); !errors.Is(err, ErrSandboxNotFound) {
+		t.Fatalf("validateConnectResponse(404 JSON)=%v, want ErrSandboxNotFound", err)
+	}
+
+	// 200 with text/html returns *APIError
+	respHTML := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader("<!DOCTYPE html><html></html>")),
+	}
+	errHTML := validateConnectResponse(respHTML)
+	if errHTML == nil || !strings.Contains(errHTML.Error(), "received HTML") {
+		t.Fatalf("validateConnectResponse(text/html)=%v, want HTML diagnostic", errHTML)
+	}
+	var apiErr200 *APIError
+	if !errors.As(errHTML, &apiErr200) || apiErr200.StatusCode != 0 {
+		t.Fatalf("validateConnectResponse(text/html) should return *APIError without an HTTP error status, got: %v", errHTML)
+	}
+
+	// 200 with text/plain falls through to envelope reader (tolerant of proxies rewriting Content-Type)
+	respPlain := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/plain"}},
+		Body:       io.NopCloser(strings.NewReader("error page")),
+	}
+	if err := validateConnectResponse(respPlain); err != nil {
+		t.Fatalf("validateConnectResponse(text/plain)=%v, want nil", err)
+	}
+
+	// 200 with valid Connect content-type
+	respConnect := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/connect+json"}},
+		Body:       io.NopCloser(strings.NewReader("")),
+	}
+	if err := validateConnectResponse(respConnect); err != nil {
+		t.Fatalf("validateConnectResponse(application/connect+json)=%v, want nil", err)
+	}
+
+	// 200 with mixed-case Connect content-type and parameters
+	respMixedCaseConnect := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"Application/Connect+JSON; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader("")),
+	}
+	if err := validateConnectResponse(respMixedCaseConnect); err != nil {
+		t.Fatalf("validateConnectResponse(Application/Connect+JSON)=%v, want nil", err)
+	}
+
+	// 200 with omitted Content-Type falls through (tolerant path)
+	respOmittedCT := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader("")),
+	}
+	if err := validateConnectResponse(respOmittedCT); err != nil {
+		t.Fatalf("validateConnectResponse(omitted Content-Type)=%v, want nil", err)
+	}
+
+	// 200 with application/json falls through to envelope reader (tolerant path)
+	respJSON := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader("")),
+	}
+	if err := validateConnectResponse(respJSON); err != nil {
+		t.Fatalf("validateConnectResponse(application/json)=%v, want nil", err)
+	}
 }

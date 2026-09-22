@@ -386,10 +386,10 @@ func (p *Pty) openStream(ctx context.Context, method string, payload any, user s
 		}
 		return nil, err
 	}
-	if resp.StatusCode >= http.StatusBadRequest {
+	if err := validateConnectResponse(resp); err != nil {
 		defer resp.Body.Close()
 		control.disconnect()
-		return nil, apiErrorFromResponse(resp)
+		return nil, err
 	}
 
 	pid, err := readPtyStartPID(resp.Body, method, control)
