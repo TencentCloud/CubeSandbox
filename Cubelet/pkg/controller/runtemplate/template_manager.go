@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -233,8 +234,76 @@ func (h *localCubeRunTemplateManager) SetInstanceType(instanceType string) {
 }
 
 func (h *localCubeRunTemplateManager) recoverS3LocalTemplates(ctx context.Context, templateID string) error {
-	mountS3PackageMetadataForRecovery(ctx, templateID)
+	// Heartbeat recovery has no template id. S3 config.json lives on a metadata
+	// disk that Finalize unmounts, so a directory scan alone sees empty homes
+	// and drops every local S3 template after Cubelet restarts. Mount each
+	// package home first; a known id still mounts only that package.
+	for _, id := range s3RecoveryIDs(ctx, templateID, s3SnapshotKindRoots()) {
+		mountS3PackageMetadataForRecovery(ctx, id)
+	}
 	return h.recoverBackendMetadataHomes(ctx, cow.BackendS3, "s3", templateID)
+}
+
+func s3SnapshotKindRoots() []string {
+	return []string{
+		storage.SnapshotKindRoot(cow.BackendS3, storage.SnapshotKindNormal),
+		storage.SnapshotKindRoot(cow.BackendS3, storage.SnapshotKindPause),
+	}
+}
+
+// s3RecoveryIDs is the set of S3 packages whose metadata disk must be mounted
+// before the host scan can see snapshot/config.json. A specific id mounts
+// only that package. An empty id lists package homes under the snapshot roots;
+// those directories survive reboot even while the metadata disk is unmounted.
+func s3RecoveryIDs(ctx context.Context, templateID string, roots []string) []string {
+	if id := strings.TrimSpace(templateID); id != "" {
+		return []string{id}
+	}
+	return s3PackageIDsUnder(ctx, roots...)
+}
+
+func s3PackageIDsUnder(ctx context.Context, roots ...string) []string {
+	seen := map[string]struct{}{}
+	var ids []string
+	for _, root := range roots {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				log.G(ctx).WithFields(CubeLog.Fields{
+					"path": root,
+					"err":  err.Error(),
+				}).Warn("failed to list s3 snapshot homes for template recovery")
+			}
+			continue
+		}
+		// Sandbox homes share <work>/s3/snapshots/<id> with template packages.
+		// Only tpl- directories there are packages. pause-snapshots holds
+		// pause packages, not sandbox homes.
+		pause := filepath.Base(root) == storage.SnapshotKindPause
+		for _, ent := range entries {
+			if !ent.IsDir() {
+				continue
+			}
+			name := ent.Name()
+			if name == "" || strings.HasSuffix(name, ".tmp") {
+				continue
+			}
+			if !pause && !strings.HasPrefix(name, "tpl-") {
+				continue
+			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			ids = append(ids, name)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // mountS3PackageMetadataForRecovery makes an S3 package's run-template
