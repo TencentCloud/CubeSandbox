@@ -610,6 +610,21 @@ pub struct ResumedSandbox {
     pub auto_pause: bool,
 }
 
+/// Optional request body for POST /sandboxes/{id}/pause.
+#[derive(Debug, Default, Deserialize, Validate, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PauseSandbox {
+    /// Lifecycle timeout in seconds to persist after pause (same field as POST /timeout).
+    /// Omitted to keep the current value. A positive value sets retention while paused
+    /// (e.g. 86400 for 24h under `on_timeout="kill"`); -1 disables expiry.
+    /// The value also applies after the next resume. Zero and values below -1 are invalid.
+    /// Applied only after pause succeeds; if the timeout update fails, the handler returns
+    /// an error even though the sandbox is paused — retry with POST /timeout.
+    #[serde(default)]
+    #[validate(custom(function = "validate_pause_timeout_value"))]
+    pub timeout: Option<i32>,
+}
+
 /// Request body for POST /sandboxes/{id}/connect.
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct ConnectSandbox {
@@ -884,6 +899,18 @@ fn validate_connect_timeout_value(timeout: i32) -> Result<(), validator::Validat
     }
 }
 
+/// Pause accepts the never-timeout sentinel or a positive retention timeout.
+/// An omitted value keeps the current timeout; zero is intentionally rejected.
+fn validate_pause_timeout_value(timeout: i32) -> Result<(), validator::ValidationError> {
+    if timeout == -1 || timeout > 0 {
+        Ok(())
+    } else {
+        Err(validator::ValidationError::new(
+            "pause_timeout_must_be_positive_or_never",
+        ))
+    }
+}
+
 /// Request body for POST /sandboxes/{id}/refreshes
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct RefreshRequest {
@@ -920,8 +947,9 @@ fn default_page_limit() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConnectSandbox, CreateTemplateRequest, NewSandbox, ResumedSandbox, SandboxNetworkConfig,
-        SetTimeoutRequest, TemplateAliasLookupResponse, UpdateSandboxNetworkRequest,
+        ConnectSandbox, CreateTemplateRequest, NewSandbox, PauseSandbox, ResumedSandbox,
+        SandboxNetworkConfig, SetTimeoutRequest, TemplateAliasLookupResponse,
+        UpdateSandboxNetworkRequest,
     };
     use validator::Validate;
 
@@ -1072,6 +1100,9 @@ mod tests {
             ConnectSandbox { timeout }
                 .validate()
                 .unwrap_or_else(|e| panic!("connect timeout={timeout:?} should be valid: {e}"));
+            PauseSandbox { timeout }
+                .validate()
+                .unwrap_or_else(|e| panic!("pause timeout={timeout:?} should be valid: {e}"));
             ResumedSandbox {
                 timeout,
                 auto_pause: false,
@@ -1089,6 +1120,11 @@ mod tests {
 
         for timeout in [0, -2] {
             assert!(ConnectSandbox {
+                timeout: Some(timeout)
+            }
+            .validate()
+            .is_err());
+            assert!(PauseSandbox {
                 timeout: Some(timeout)
             }
             .validate()

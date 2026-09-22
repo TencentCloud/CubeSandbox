@@ -444,6 +444,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pause_sandbox_accepts_missing_and_empty_json_bodies() {
+        use axum::routing::post;
+
+        async fn update_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/cube/sandbox/update", post(update_handler)),
+            )
+            .await
+            .expect("mock CubeMaster server should run");
+        });
+
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = format!("http://{address}");
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        server
+            .post("/sandboxes/sb-1/pause")
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+
+        server
+            .post("/sandboxes/sb-1/pause")
+            .add_header(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            )
+            .bytes(Vec::new().into())
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
     async fn removes_cluster_routes_from_root_surface() {
         let server = test_server().await;
         server

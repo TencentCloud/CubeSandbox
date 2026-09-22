@@ -27,8 +27,10 @@ use crate::{
 const RET_CODE_OK: i32 = 0;
 const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
+const RET_CODE_MASTER_PARAMS_ERROR: i32 = 130400;
 const RET_CODE_CONFLICT: i32 = 130409;
 const RET_CODE_TASK_STATE_INVALID: i32 = 130490;
+const ALREADY_HAS_PAUSE_SNAPSHOT_MARKER: &str = "already has pause snapshot";
 const RET_CODE_TASK_RESUME_FAILED: i32 = 130589;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
 const ENV_VAR_NAME_MAX_LEN: usize = 256;
@@ -314,19 +316,40 @@ impl SandboxService {
         Ok(())
     }
 
-    pub async fn pause_sandbox(&self, sandbox_id: &str) -> AppResult<()> {
-        let resp = self
+    pub async fn pause_sandbox(&self, sandbox_id: &str, timeout: Option<i32>) -> AppResult<()> {
+        // CubeMaster's Update only reads Timeout for action == "resume"; passing it
+        // on pause would be a silent no-op. Retention is applied via set_timeout below.
+        let update_result = self
             .cubemaster
             .update_sandbox(&self.build_update_request(sandbox_id, "pause", None))
-            .await
-            .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
+            .await;
 
-        ensure_update_result(
-            resp.ret.ret_code,
-            resp.ret.ret_msg,
-            sandbox_id,
-            "cannot be paused",
-        )
+        match update_result {
+            Ok(resp) => {
+                ensure_update_result(
+                    resp.ret.ret_code,
+                    resp.ret.ret_msg,
+                    sandbox_id,
+                    "cannot be paused",
+                )?;
+            }
+            Err(e) if is_already_paused_error(&e) => {
+                // "already has pause snapshot" can also come from stale failed-pause records;
+                // confirm the sandbox is actually paused before treating this as idempotent.
+                // See CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go and pausesnap.Begin.
+                let detail = self.fetch_sandbox_detail(sandbox_id).await?;
+                if detail.status != SandboxStatus::Paused {
+                    return Err(map_update_cubemaster_err(e, sandbox_id));
+                }
+            }
+            Err(e) => return Err(map_update_cubemaster_err(e, sandbox_id)),
+        }
+
+        if let Some(timeout) = timeout {
+            self.set_timeout(sandbox_id, timeout).await?;
+        }
+
+        Ok(())
     }
 
     pub async fn resume_sandbox(
@@ -863,6 +886,18 @@ fn map_update_cubemaster_err(e: CubeMasterError, sandbox_id: &str) -> AppError {
             AppError::Conflict(detail)
         }
         other => sandbox_not_found_or_internal(other, sandbox_id),
+    }
+}
+
+// CubeMaster/pkg/pausesnap/store.go may leave a pause-snapshot record after a failed
+// pause; callers must not treat the marker alone as success (see pause_sandbox).
+fn is_already_paused_error(e: &CubeMasterError) -> bool {
+    match e {
+        CubeMasterError::Api { ret_code, ret_msg } => {
+            *ret_code == RET_CODE_MASTER_PARAMS_ERROR
+                && ret_msg.contains(ALREADY_HAS_PAUSE_SNAPSHOT_MARKER)
+        }
+        _ => false,
     }
 }
 
@@ -1556,6 +1591,209 @@ mod tests {
             .expect("connect should succeed without shortening the deadline");
 
         assert_eq!(*capture.timeout_calls.lock().await, 0);
+    }
+
+    #[tokio::test]
+    async fn pause_sandbox_applies_retention_timeout_after_pause() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            update_bodies: Arc<Mutex<Vec<Value>>>,
+            timeout_calls: Arc<Mutex<Vec<i32>>>,
+        }
+
+        async fn update_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            capture.update_bodies.lock().await.push(body);
+            Json(serde_json::json!({
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        async fn timeout_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            capture
+                .timeout_calls
+                .lock()
+                .await
+                .push(body["timeout"].as_i64().expect("timeout") as i32);
+            Json(serde_json::json!({
+                "requestID": "req-timeout",
+                "sandboxID": "sb-1",
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        let capture = Capture::default();
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route("/cube/sandbox/update", post(update_handler))
+                .route("/cube/sandbox/timeout", post(timeout_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        service
+            .pause_sandbox("sb-1", Some(86_400))
+            .await
+            .expect("pause should succeed");
+
+        let update_bodies = capture.update_bodies.lock().await;
+        assert_eq!(update_bodies.len(), 1);
+        assert_eq!(update_bodies[0]["action"], "pause");
+        assert!(update_bodies[0]["timeout"].is_null());
+
+        let timeout_calls = capture.timeout_calls.lock().await;
+        assert_eq!(*timeout_calls, vec![86_400]);
+    }
+
+    #[tokio::test]
+    async fn pause_sandbox_fails_when_set_timeout_fails_after_pause() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            timeout_calls: Arc<Mutex<usize>>,
+        }
+
+        async fn update_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        async fn timeout_handler(State(capture): State<Capture>) -> Json<Value> {
+            *capture.timeout_calls.lock().await += 1;
+            ret_envelope(130400, "timeout must be positive")
+        }
+
+        let capture = Capture::default();
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route("/cube/sandbox/update", post(update_handler))
+                .route("/cube/sandbox/timeout", post(timeout_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let err = service
+            .pause_sandbox("sb-1", Some(86_400))
+            .await
+            .expect_err("pause should fail when retention update fails");
+
+        assert_bad_request(err, "timeout must be positive");
+        assert_eq!(*capture.timeout_calls.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn pause_sandbox_applies_timeout_when_already_paused() {
+        #[derive(Clone, Default)]
+        struct Capture {
+            update_calls: Arc<Mutex<usize>>,
+            timeout_calls: Arc<Mutex<Vec<i32>>>,
+        }
+
+        async fn info_handler() -> Json<Value> {
+            let end_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-1",
+                    "host_id": "host-1",
+                    "template_id": "tpl-1",
+                    "status": 5,
+                    "end_at": end_at,
+                    "annotations": {}
+                }]
+            }))
+        }
+
+        async fn update_handler(State(capture): State<Capture>) -> Json<Value> {
+            *capture.update_calls.lock().await += 1;
+            ret_envelope(
+                130400,
+                "begin pause snapshot: sandbox sb-1 already has pause snapshot snap-1",
+            )
+        }
+
+        async fn timeout_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            capture
+                .timeout_calls
+                .lock()
+                .await
+                .push(body["timeout"].as_i64().expect("timeout") as i32);
+            Json(serde_json::json!({
+                "requestID": "req-timeout",
+                "sandboxID": "sb-1",
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        let capture = Capture::default();
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route("/cube/sandbox/info", get(info_handler))
+                .route("/cube/sandbox/update", post(update_handler))
+                .route("/cube/sandbox/timeout", post(timeout_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        service
+            .pause_sandbox("sb-1", Some(86_400))
+            .await
+            .expect("already-paused retry should still apply retention");
+
+        assert_eq!(*capture.update_calls.lock().await, 1);
+        assert_eq!(*capture.timeout_calls.lock().await, vec![86_400]);
+    }
+
+    #[tokio::test]
+    async fn pause_sandbox_rejects_stale_pause_snapshot_when_not_paused() {
+        async fn info_handler() -> Json<Value> {
+            let end_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-1",
+                    "host_id": "host-1",
+                    "template_id": "tpl-1",
+                    "status": 1,
+                    "end_at": end_at,
+                    "annotations": {}
+                }]
+            }))
+        }
+
+        async fn update_handler() -> Json<Value> {
+            ret_envelope(
+                130400,
+                "begin pause snapshot: sandbox sb-1 already has pause snapshot snap-1",
+            )
+        }
+
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route("/cube/sandbox/info", get(info_handler))
+                .route("/cube/sandbox/update", post(update_handler)),
+        )
+        .await;
+
+        let err = service
+            .pause_sandbox("sb-1", None)
+            .await
+            .expect_err("stale pause snapshot on a running sandbox should fail");
+
+        assert_bad_request(
+            err,
+            "begin pause snapshot: sandbox sb-1 already has pause snapshot snap-1",
+        );
     }
 
     #[tokio::test]

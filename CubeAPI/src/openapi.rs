@@ -13,8 +13,8 @@ use crate::{
     handlers,
     models::{
         ApiError, ConnectSandbox, CreateSnapshotRequest, CreateTemplateRequest, NewSandbox,
-        NewVolume, RebuildTemplateRequest, RefreshRequest, ResumedSandbox, RollbackRequest,
-        RollbackResponse, Sandbox, SandboxDetail, SandboxLogEntry, SandboxLogs,
+        NewVolume, PauseSandbox, RebuildTemplateRequest, RefreshRequest, ResumedSandbox,
+        RollbackRequest, RollbackResponse, Sandbox, SandboxDetail, SandboxLogEntry, SandboxLogs,
         SandboxLogsV2Response, SandboxState, SandboxVolumeMount, SetTemplateAliasRequest,
         SetTimeoutRequest, SnapshotInfo, SnapshotListItem, TemplateAliasLookupResponse,
         TemplateBuildJob, TemplateBuildStatus, TemplateCompatAdoptResponseView,
@@ -111,6 +111,7 @@ impl Modify for SecurityAddon {
         Sandbox,
         NewSandbox,
         ConnectSandbox,
+        PauseSandbox,
         ResumedSandbox,
         SetTimeoutRequest,
         UpdateSandboxNetworkRequest,

@@ -411,6 +411,19 @@ export interface components {
             quotaMemMB: number;
             versions?: components["schemas"]["ComponentVersionView"][];
         };
+        /** @description Optional request body for POST /sandboxes/{id}/pause. */
+        PauseSandbox: {
+            /**
+             * Format: int32
+             * @description Lifecycle timeout in seconds to persist after pause (same field as POST /timeout).
+             *     Omitted to keep the current value. A positive value sets retention while paused
+             *     (e.g. 86400 for 24h under `on_timeout="kill"`); -1 disables expiry.
+             *     The value also applies after the next resume. Zero and values below -1 are invalid.
+             *     Applied only after pause succeeds; if the timeout update fails, the handler returns
+             *     an error even though the sandbox is paused — retry with POST /timeout.
+             */
+            timeout?: number | null;
+        };
         /** @description Request body for POST /sandboxes/{id}/resume (deprecated). */
         ResumedSandbox: {
             autoPause?: boolean;
@@ -835,7 +848,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["PauseSandbox"];
+            };
+        };
         responses: {
             /** @description Sandbox paused */
             204: {
@@ -843,6 +860,15 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Invalid request body or timeout value */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
             /** @description Sandbox not found */
             404: {

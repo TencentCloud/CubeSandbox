@@ -197,7 +197,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
         '409':
-          description: Sandbox cannot be connected during a conflicting lifecycle transition
+          description: Paused sandbox cannot be resumed during a conflicting lifecycle transition
           content:
             application/json:
               schema:
@@ -308,9 +308,22 @@ paths:
         required: true
         schema:
           type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: 'null'
+              - $ref: '#/components/schemas/PauseSandbox'
       responses:
         '204':
           description: Sandbox paused
+        '400':
+          description: Invalid request body or timeout value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '404':
           description: Sandbox not found
           content:
@@ -552,6 +565,12 @@ paths:
       - name: nextToken
         in: query
         description: Pagination cursor from previous response header x-next-token.
+        required: false
+        schema:
+          type: string
+      - name: backend
+        in: query
+        description: Filter by CoW backend (xfs | s3).
         required: false
         schema:
           type: string
@@ -1257,11 +1276,18 @@ components:
           - integer
           - 'null'
           format: int32
-          description: Idle timeout in seconds; omitted to keep the current value, -1 for no expiry, and a positive value ensures at least that much remaining lifetime. For an already-running sandbox, a shorter positive window is ignored; use POST /sandboxes/{id}/timeout to shorten it. Zero and values below -1 are invalid.
+          description: |-
+            Idle timeout in seconds; omitted to keep the current value, -1 for no expiry.
+            Zero and values below -1 are invalid.
     CreateSnapshotRequest:
       type: object
       description: Request body for POST /sandboxes/{id}/snapshots.
       properties:
+        backend:
+          type:
+          - string
+          - 'null'
+          description: CoW backend (xfs | s3). Empty means xfs.
         name:
           type:
           - string
@@ -1435,6 +1461,34 @@ components:
           propertyNames:
             type: string
       additionalProperties: false
+    E2bNetworkRule:
+      type: object
+      description: One entry of E2B's per-host `rules` mapping.
+      properties:
+        transform:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/E2bNetworkTransform'
+      additionalProperties: false
+    E2bNetworkTransform:
+      type: object
+      description: |-
+        Header rewrite in E2B's per-host `rules` shape.
+
+        Unknown keys are rejected rather than ignored: `headers` is the only
+        transform CubeEgress can express, and silently dropping another kind would
+        leave the caller believing a rewrite is in place that never runs.
+      properties:
+        headers:
+          type:
+          - object
+          - 'null'
+          description: Headers to inject or override on matching requests.
+          additionalProperties:
+            type: string
+          propertyNames:
+            type: string
+      additionalProperties: false
     EgressRule:
       type: object
       description: 'L7 egress rule: match conditions + action (allow/deny, audit, credential injection).'
@@ -1532,6 +1586,33 @@ components:
           type:
           - string
           - 'null'
+    EgressRulesInput:
+      oneOf:
+      - type: array
+        items:
+          $ref: '#/components/schemas/EgressRule'
+      - type: object
+        additionalProperties:
+          type: array
+          items:
+            $ref: '#/components/schemas/E2bNetworkRule'
+        propertyNames:
+          type: string
+      description: |-
+        The two accepted shapes of `rules`.
+
+        CubeSandbox rules are a list carrying the full L7 semantics: a match on
+        sni/host/method/path/scheme/port, an allow-or-deny verdict, an audit level
+        and credential injection. E2B's are a map from host to header rewrites, with
+        no verdict, no audit and no match beyond the host -- a strict subset, and one
+        that its own docs note "does not allow egress on its own".
+
+        Both are accepted so an E2B client works unchanged, but the list stays the
+        canonical form: converting our rules into E2B's map would silently drop
+        `allow: false`, `audit`, and every match field except the host.
+
+        A JSON array and a JSON object cannot be confused, so the shape alone
+        discriminates.
     HashMap:
       type: object
       additionalProperties:
@@ -1571,11 +1652,12 @@ components:
         cpuCount:
           type: integer
           format: int32
-          description: Legacy whole-vCPU count. Use cpuMilli for fractional CPU values.
         cpuMilli:
-          type: integer
+          type:
+          - integer
+          - 'null'
           format: int32
-          description: Exact CPU allocation in millicores, e.g. 100 or 500.
+          description: Exact CPU allocation in millicores. Optional for compatibility with older responses.
         diskSizeMB:
           type:
           - integer
@@ -1594,7 +1676,7 @@ components:
         memoryMB:
           type: integer
           format: int32
-          description: Memory in MiB. The MB suffix is retained for API compatibility.
+          description: Historical field name; the value is memory in MiB.
         metadata:
           oneOf:
           - type: 'null'
@@ -1653,6 +1735,11 @@ components:
           - type: 'null'
           - $ref: '#/components/schemas/SandboxAutoResume'
             description: See `auto_pause`. Only meaningful alongside `autoPause = true`.
+        backend:
+          type:
+          - string
+          - 'null'
+          description: CoW backend (xfs | s3). Omitted = inherit from the template, else xfs.
         distributionScope:
           type:
           - array
@@ -1720,6 +1807,22 @@ components:
           description: |-
             Human-readable name for the volume. Optional;
             if omitted a UUIDv4 is generated and used as both name and volume_id.
+    PauseSandbox:
+      type: object
+      description: Optional request body for POST /sandboxes/{id}/pause.
+      properties:
+        timeout:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: |-
+            Lifecycle timeout in seconds to persist after pause (same field as POST /timeout).
+            Omitted to keep the current value. A positive value sets retention while paused
+            (e.g. 86400 for 24h under `on_timeout="kill"`); -1 disables expiry.
+            The value also applies after the next resume. Zero and values below -1 are invalid.
+            Applied only after pause succeeds; if the timeout update fails, the handler returns
+            an error even though the sandbox is paused — retry with POST /timeout.
     RebuildTemplateRequest:
       type: object
       description: Body for POST /templates/:id (rebuild).
@@ -1744,13 +1847,21 @@ components:
           - integer
           - 'null'
           format: int32
-          description: Idle timeout in seconds; omitted or 0 keeps the current value, -1 disables expiry, and a positive value starts a new window after resume.
+          description: |-
+            Idle timeout in seconds; None keeps the current value, 0 keeps the
+            current value for this deprecated endpoint, -1 disables expiry, and a
+            positive value starts a new window after resume.
     RollbackRequest:
       type: object
       description: Request body for POST /sandboxes/{id}/rollback.
       required:
       - snapshotID
       properties:
+        backend:
+          type:
+          - string
+          - 'null'
+          description: CoW backend (xfs | s3). Empty means Cubelet uses the snapshot catalog.
         snapshotID:
           type: string
     RollbackResponse:
@@ -1841,11 +1952,12 @@ components:
         cpuCount:
           type: integer
           format: int32
-          description: Legacy whole-vCPU count. Use cpuMilli for fractional CPU values.
         cpuMilli:
-          type: integer
+          type:
+          - integer
+          - 'null'
           format: int32
-          description: Exact CPU allocation in millicores, e.g. 100 or 500.
+          description: Exact CPU allocation in millicores. Optional for compatibility with older responses.
         diskSizeMB:
           type:
           - integer
@@ -1872,7 +1984,7 @@ components:
         memoryMB:
           type: integer
           format: int32
-          description: Memory in MiB. The MB suffix is retained for API compatibility.
+          description: Historical field name; the value is memory in MiB.
         metadata:
           oneOf:
           - type: 'null'
@@ -2031,12 +2143,11 @@ components:
       - pause
     SandboxState:
       type: string
-      description: State of the sandbox (running | paused | pausing | unknown)
+      description: State of the sandbox (running | paused)
       enum:
       - running
       - paused
       - pausing
-      - unknown
     SandboxVolumeMount:
       type: object
       description: Volume mount inside the sandbox.
@@ -2082,10 +2193,20 @@ components:
       - snapshotID
       - names
       properties:
+        backend:
+          type:
+          - string
+          - 'null'
+          description: CoW backend that produced this snapshot (xfs | s3).
         names:
           type: array
           items:
             type: string
+        remoteStatus:
+          type:
+          - string
+          - 'null'
+          description: S3 sync status (pending|running|ready|failed). Empty for xfs.
         snapshotID:
           type: string
     SnapshotListItem:
@@ -2096,6 +2217,11 @@ components:
       - names
       - status
       properties:
+        backend:
+          type:
+          - string
+          - 'null'
+          description: CoW backend that produced this snapshot (xfs | s3).
         createdAt:
           type:
           - string
@@ -2109,6 +2235,11 @@ components:
           type:
           - string
           - 'null'
+        remoteStatus:
+          type:
+          - string
+          - 'null'
+          description: S3 sync status (pending|running|ready|failed). Empty for xfs.
         snapshotID:
           type: string
         status:
@@ -2384,9 +2515,25 @@ components:
         Request body for PUT /sandboxes/{id}/network.
 
         The body is the complete desired egress policy, not a patch: any field left
-        out clears what the sandbox currently has. Fields sit at the top level
-        (E2B's update shape), not nested under `network`. Unknown fields are
-        rejected so a typo cannot silently clear a policy dimension.
+        out clears what the sandbox currently has.
+
+        The policy fields sit at the top level rather than under `network`, matching
+        E2B's update endpoint so a client written against either SDK reaches the same
+        wire format. Note this is deliberately *not* the shape of our own create body
+        (which nests them, as E2B's create also does) -- the inconsistency is
+        upstream's, and following it costs less than making E2B clients silently
+        apply an empty policy.
+
+        `allowPublicTraffic` and `maskRequestHost` are CubeSandbox extensions; E2B's
+        update schema carries neither.
+
+        Unknown fields are rejected. Under full-replacement semantics a key that fails
+        to match is indistinguishable from one deliberately left out, so a typo like
+        `allowOu` would clear that policy dimension and answer 204 -- and combined with
+        an omitted `allowInternetAccess` it reopens egress the caller was restricting.
+        Failing the request is the only outcome that cannot be mistaken for success.
+        E2B's own update body carries only `allowOut`, `denyOut`, `rules` and
+        `allowInternetAccess`, all accepted here, so strictness costs no compatibility.
       properties:
         allowInternetAccess:
           type:
@@ -2415,7 +2562,7 @@ components:
         rules:
           oneOf:
           - type: 'null'
-          - $ref: '#/components/schemas/SandboxNetworkRulesInput'
+          - $ref: '#/components/schemas/EgressRulesInput'
       additionalProperties: false
     Volume:
       type: object

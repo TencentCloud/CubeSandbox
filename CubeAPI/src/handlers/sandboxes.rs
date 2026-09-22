@@ -3,6 +3,7 @@
 //
 
 use axum::{
+    body::Bytes,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
@@ -15,7 +16,7 @@ use crate::{
     logging::{LogEvent, LogLevel},
     models::{
         ApiError, ConnectSandbox, ListSandboxesQuery, ListSandboxesV2Query, NewSandbox,
-        RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
+        PauseSandbox, RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
         SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest, UpdateSandboxNetworkRequest,
     },
     state::AppState,
@@ -259,8 +260,10 @@ pub async fn kill_sandbox(
     params(
         ("sandboxID" = String, Path, description = "Sandbox identifier")
     ),
+    request_body = Option<PauseSandbox>,
     responses(
         (status = 204, description = "Sandbox paused"),
+        (status = 400, description = "Invalid request body or timeout value", body = ApiError),
         (status = 404, description = "Sandbox not found", body = ApiError),
         (status = 409, description = "Sandbox cannot be paused", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
@@ -269,17 +272,27 @@ pub async fn kill_sandbox(
 pub async fn pause_sandbox(
     State(state): State<AppState>,
     Path(sandbox_id): Path<String>,
+    body: Bytes,
 ) -> AppResult<impl IntoResponse> {
+    let body = parse_pause_body(body)?;
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
     state
         .logger
         .log(
             LogEvent::new(LogLevel::Debug, "api.request")
                 .field("handler", "pause_sandbox")
-                .field("sandbox_id", &sandbox_id),
+                .field("sandbox_id", &sandbox_id)
+                .field_value("timeout", body.timeout),
         )
         .await;
     tracing::info!(sandbox_id = %sandbox_id, "pause sandbox request");
-    state.services.sandboxes.pause_sandbox(&sandbox_id).await?;
+    state
+        .services
+        .sandboxes
+        .pause_sandbox(&sandbox_id, body.timeout)
+        .await?;
 
     tracing::info!(sandbox_id = %sandbox_id, "pause_sandbox: success");
     state
@@ -626,4 +639,11 @@ pub async fn refresh_sandbox(
         )
         .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn parse_pause_body(body: Bytes) -> AppResult<PauseSandbox> {
+    if body.is_empty() || body.as_ref() == b"null" {
+        return Ok(PauseSandbox::default());
+    }
+    serde_json::from_slice(&body).map_err(|e| AppError::BadRequest(e.to_string()))
 }
