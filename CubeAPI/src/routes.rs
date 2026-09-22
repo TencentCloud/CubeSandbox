@@ -246,7 +246,7 @@ fn apply_http_layers(router: Router<AppState>, timeout: Duration) -> Router<AppS
 
 #[cfg(test)]
 mod tests {
-    use super::{build_router, build_sandbox_routes};
+    use super::build_router;
     use crate::{
         config::ServerConfig,
         logging::{arc, noop::NoopLogger},

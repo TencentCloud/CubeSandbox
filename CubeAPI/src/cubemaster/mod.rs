@@ -1089,6 +1089,15 @@ pub struct ListSandboxResponse {
     #[serde(default, alias = "data")]
     pub sandboxes: Vec<SandboxInfo>,
     pub ret: RetCode,
+    /// Last node index this window covered. CubeMaster reports it as
+    /// `end_idx`; combined with `total` it tells a caller whether more node
+    /// windows remain.
+    #[serde(default, alias = "EndIdx")]
+    pub end_idx: Option<i32>,
+    /// Number of healthy nodes for the instance type — a *node* count, not a
+    /// sandbox count.
+    #[serde(default, alias = "Total")]
+    pub total: Option<i32>,
 }
 
 /// One sandbox entry as returned by /cube/sandbox/list.

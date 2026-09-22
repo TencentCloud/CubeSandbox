@@ -126,10 +126,20 @@ impl SandboxService {
     /// `start_idx` would silently page over the wrong unit.
     ///
     /// So the page is cut here, over the filtered sandbox set: the backend is
-    /// asked for the whole set and the cursor names an offset into it. That
-    /// keeps the page boundary aligned with what the client actually sees,
-    /// which matters because `metadata`/`state` filtering happens on this side
-    /// and would otherwise shift the window under the client's feet.
+    /// walked until it has covered every node, and the cursor names an offset
+    /// into that set. That keeps the page boundary aligned with what the client
+    /// actually sees, which matters because `metadata`/`state` filtering
+    /// happens on this side and would otherwise shift the window under the
+    /// client's feet.
+    ///
+    /// Walking the node windows instead of asking for one huge window is
+    /// deliberate. A window that stops short of the last node makes CubeMaster
+    /// treat the response as a non-final node page, and it only appends
+    /// shimless paused rows on the final one
+    /// (`shouldAppendShimlessPauseRows`), so a short window would silently drop
+    /// exactly the sandboxes the `state=paused` filter exists to find. The
+    /// window stays bounded because each one costs a cubelet `List` RPC per
+    /// node; the loop stops as soon as the backend reports the last node.
     pub async fn list_v2(
         &self,
         metadata_filter: Option<&str>,
@@ -138,38 +148,50 @@ impl SandboxService {
         limit: i32,
     ) -> AppResult<SandboxListPage> {
         let start = parse_sandbox_list_cursor(next_token)?;
-
-        let req = ListSandboxRequest {
-            request_id: new_request_id(),
-            instance_type: self.instance_type.clone(),
-            // Ask for every node in one window: the sandbox-level slice is taken
-            // below, so a node-sized window here would truncate the result set
-            // the client is paging through. `size` also has to be positive —
-            // CubeMaster rejects `size <= 0` with MasterParamsError — and the
-            // window is over nodes, so a large value is what keeps it from
-            // cutting the sandbox set short.
-            start_idx: Some(1),
-            size: Some(SANDBOX_LIST_NODE_WINDOW),
-            host_id: None,
-            filter: None,
-        };
-
-        let resp = self
-            .cubemaster
-            .list_sandboxes(&req)
-            .await
-            .map_err(params_error_or_internal)?;
-
-        ensure_create_result(resp.ret.ret_code, resp.ret.ret_msg)?;
-
         let state_filter = parse_state_filter(state_filter);
-        let mut matching: Vec<crate::models::ListedSandbox> = resp
-            .sandboxes
-            .into_iter()
-            .map(from_cubemaster_info)
-            .filter(|sb| filter_by_metadata(sb.metadata.as_ref(), metadata_filter))
-            .filter(|sb| state_filter.as_ref().is_none_or(|state| &sb.state == state))
-            .collect();
+
+        let mut matching: Vec<crate::models::ListedSandbox> = Vec::new();
+        let mut node_window_start = 1;
+        loop {
+            let req = ListSandboxRequest {
+                request_id: new_request_id(),
+                instance_type: self.instance_type.clone(),
+                // `start_idx` is 1-based over nodes; CubeMaster rewrites a 0
+                // into 1 and rejects a negative one.
+                start_idx: Some(node_window_start),
+                // Must be positive: CubeMaster answers `size <= 0` with
+                // MasterParamsError.
+                size: Some(SANDBOX_LIST_NODE_WINDOW),
+                host_id: None,
+                filter: None,
+            };
+
+            let resp = self
+                .cubemaster
+                .list_sandboxes(&req)
+                .await
+                .map_err(params_error_or_internal)?;
+
+            ensure_create_result(resp.ret.ret_code, resp.ret.ret_msg)?;
+
+            matching.extend(
+                resp.sandboxes
+                    .into_iter()
+                    .map(from_cubemaster_info)
+                    .filter(|sb| filter_by_metadata(sb.metadata.as_ref(), metadata_filter))
+                    .filter(|sb| state_filter.as_ref().is_none_or(|state| &sb.state == state)),
+            );
+
+            // `end_idx` is the last node this window covered and `total` the
+            // number of healthy nodes. Once the window reaches the end there is
+            // nothing left to fetch; asking again would repeat the final window.
+            match (resp.end_idx, resp.total) {
+                (Some(end_idx), Some(total)) if end_idx > 0 && end_idx < total => {
+                    node_window_start = end_idx + 1;
+                }
+                _ => break,
+            }
+        }
 
         // A stable order is what makes an offset cursor safe to replay: without
         // it the same cursor could surface different items as the backend order
@@ -1062,11 +1084,12 @@ pub(crate) struct SandboxListPage {
 /// silently restart pagination — the exact bug this replaces.
 const SANDBOX_LIST_CURSOR_PREFIX: &str = "sbx-offset-";
 
-/// Node window requested from CubeMaster when listing sandboxes for v2
-/// pagination. CubeMaster's `start_idx`/`size` window selects *nodes*, so this
-/// has to be large enough to cover the cluster; the sandbox-level page is cut
-/// afterwards in `list_v2`.
-const SANDBOX_LIST_NODE_WINDOW: i32 = 10_000;
+/// Node window requested from CubeMaster per round while collecting sandboxes
+/// for v2 pagination. CubeMaster's `start_idx`/`size` window selects *nodes*
+/// and every sandbox on those nodes is returned, so this bounds the cubelet
+/// fan-out per request; `list_v2` walks further windows until the backend
+/// reports the last node.
+const SANDBOX_LIST_NODE_WINDOW: i32 = 100;
 
 /// Encode the offset the next page starts at.
 pub(crate) fn encode_sandbox_list_cursor(offset: usize) -> String {
@@ -3482,6 +3505,63 @@ mod tests {
             Router::new().route("/cube/sandbox/list", post(|| async { list_page() })),
         )
         .await
+    }
+
+    /// CubeMaster's window is over nodes, so a cluster wider than one window
+    /// needs several rounds. Stopping at the first window would silently drop
+    /// every sandbox on the remaining nodes — and, because CubeMaster only
+    /// appends shimless paused rows on the *last* node page, it would also hide
+    /// the paused sandboxes the `state=paused` filter exists to find.
+    #[tokio::test]
+    async fn list_v2_walks_every_node_window_before_paging() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(|Json(body): Json<Value>| async move {
+                let start = body["start_idx"].as_i64().unwrap_or(0);
+                match start {
+                    // First window: nodes 1..2 of 5 — not the last page.
+                    1 => Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "end_idx": 2,
+                        "total": 5,
+                        "data": [
+                            { "sandbox_id": "sb-1", "host_id": "h1", "status": 1, "template_id": "t" },
+                            { "sandbox_id": "sb-2", "host_id": "h2", "status": 1, "template_id": "t" }
+                        ]
+                    })),
+                    // Second window: nodes 3..5 — reaches the last node.
+                    3 => Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "end_idx": 5,
+                        "total": 5,
+                        "data": [
+                            { "sandbox_id": "sb-3", "host_id": "h3", "status": 1, "template_id": "t" },
+                            { "sandbox_id": "sb-4", "host_id": "h4", "status": 1, "template_id": "t" }
+                        ]
+                    })),
+                    other => panic!("unexpected node window start: {other}"),
+                }
+            }),
+        ))
+        .await;
+
+        let page = service
+            .list_v2(None, None, None, 10)
+            .await
+            .expect("a single page should hold every sandbox");
+
+        let ids: Vec<&str> = page.items.iter().map(|sb| sb.sandbox_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["sb-1", "sb-2", "sb-3", "sb-4"],
+            "both node windows must be walked before the sandbox-level page is cut"
+        );
+        assert!(
+            page.next_token.is_none(),
+            "nothing is left once every node window has been walked"
+        );
     }
 
     #[tokio::test]
