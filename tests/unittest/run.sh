@@ -110,12 +110,10 @@ WITH_TESTS=(
 	# Same entry point as CI (unit-test-check).
 	"cubelet|Go|0|make cubelet-test"
 	# Only unit tests (--lib --bins) run here; the tests/integration.rs target
-	# needs a full VM (OS disk images, sudo/ip networking, VFIO, windows guest)
-	# and is excluded so `run.sh hypervisor` exercises the self-contained tests.
-	# This entry does NOT pass /dev/kvm into the builder, so the vmm/hypervisor
-	# crate tests that open /dev/kvm at runtime are never reached here — see
-	# `hypervisor-kvm` below for those.
-	"hypervisor|Rust|1|make builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm --lib --bins'"
+	# needs a full VM (OS disk images, sudo/ip networking, VFIO, windows guest).
+	# The root package command does not execute workspace member tests, so run
+	# block_util explicitly. Runtime-KVM tests run in `hypervisor-kvm` below.
+	"hypervisor|Rust|1|make builder-run BUILDER_CMD='cd /workspace/hypervisor && cargo test --features kvm --lib --bins && cargo test -p block_util --lib'"
 )
 
 GATED_TESTS=(

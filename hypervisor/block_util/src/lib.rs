@@ -619,13 +619,32 @@ where
                 .map_err(AsyncIoError::ReadVectored)?;
 
             let mut r = 0;
-            for b in slices.iter_mut() {
-                r += file.read(b).map_err(AsyncIoError::ReadVectored)?;
+            'buffers: for b in slices.iter_mut() {
+                let mut read = 0;
+                while read < b.len() {
+                    let count = loop {
+                        match file.read(&mut b[read..]) {
+                            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                            result => break result.map_err(AsyncIoError::ReadVectored)?,
+                        }
+                    };
+                    if count == 0 {
+                        break 'buffers;
+                    }
+                    read += count;
+                    r += count;
+                }
             }
             r
         };
 
-        completion_list.push((user_data, result as i32));
+        let result = i32::try_from(result).map_err(|_| {
+            AsyncIoError::ReadVectored(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "byte count exceeds completion range",
+            ))
+        })?;
+        completion_list.push((user_data, result));
         eventfd.write(1).unwrap();
 
         Ok(())
@@ -654,12 +673,34 @@ where
 
             let mut r = 0;
             for b in slices.iter() {
-                r += file.write(b).map_err(AsyncIoError::WriteVectored)?;
+                let mut written = 0;
+                while written < b.len() {
+                    let count = loop {
+                        match file.write(&b[written..]) {
+                            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                            result => break result.map_err(AsyncIoError::WriteVectored)?,
+                        }
+                    };
+                    if count == 0 {
+                        return Err(AsyncIoError::WriteVectored(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "failed to write whole buffer",
+                        )));
+                    }
+                    written += count;
+                    r += count;
+                }
             }
             r
         };
 
-        completion_list.push((user_data, result as i32));
+        let result = i32::try_from(result).map_err(|_| {
+            AsyncIoError::WriteVectored(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "byte count exceeds completion range",
+            ))
+        })?;
+        completion_list.push((user_data, result));
         eventfd.write(1).unwrap();
 
         Ok(())
@@ -696,6 +737,241 @@ pub enum ImageType {
     Qcow2,
     Raw,
     Vhdx,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AsyncAdaptor;
+    use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+    use std::sync::{Mutex, MutexGuard};
+    use vmm_sys_util::eventfd::EventFd;
+
+    struct ShortIo {
+        inner: Cursor<Vec<u8>>,
+        max_read: usize,
+        max_write: usize,
+        interrupted_reads: usize,
+        interrupted_writes: usize,
+    }
+
+    impl ShortIo {
+        fn new(data: Vec<u8>, max_read: usize, max_write: usize) -> Self {
+            Self {
+                inner: Cursor::new(data),
+                max_read,
+                max_write,
+                interrupted_reads: 0,
+                interrupted_writes: 0,
+            }
+        }
+
+        fn with_interrupts(mut self, reads: usize, writes: usize) -> Self {
+            self.interrupted_reads = reads;
+            self.interrupted_writes = writes;
+            self
+        }
+    }
+
+    impl Read for ShortIo {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.interrupted_reads > 0 {
+                self.interrupted_reads -= 1;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            let len = buf.len().min(self.max_read);
+            self.inner.read(&mut buf[..len])
+        }
+    }
+
+    impl Write for ShortIo {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.interrupted_writes > 0 {
+                self.interrupted_writes -= 1;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            let len = buf.len().min(self.max_write);
+            self.inner.write(&buf[..len])
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    impl Seek for ShortIo {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    struct TestAdaptor {
+        file: Mutex<ShortIo>,
+    }
+
+    impl AsyncAdaptor<ShortIo> for TestAdaptor {
+        fn file(&mut self) -> MutexGuard<'_, ShortIo> {
+            self.file.lock().unwrap()
+        }
+    }
+
+    fn mutable_iovec(buf: &mut [u8]) -> libc::iovec {
+        libc::iovec {
+            iov_base: buf.as_mut_ptr().cast(),
+            iov_len: buf.len(),
+        }
+    }
+
+    fn iovec(buf: &[u8]) -> libc::iovec {
+        libc::iovec {
+            iov_base: buf.as_ptr().cast_mut().cast(),
+            iov_len: buf.len(),
+        }
+    }
+
+    #[test]
+    fn test_async_adaptor_read_vectored_sync_handles_partial_reads() {
+        let mut adaptor = TestAdaptor {
+            file: Mutex::new(ShortIo::new(b"0123456789".to_vec(), 2, usize::MAX)),
+        };
+        let mut first = [0; 3];
+        let mut second = [0; 4];
+        let mut third = [0; 2];
+        let iovecs = vec![
+            mutable_iovec(&mut first),
+            mutable_iovec(&mut second),
+            mutable_iovec(&mut third),
+        ];
+        let eventfd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut completions = Vec::new();
+
+        adaptor
+            .read_vectored_sync(1, iovecs, 42, &eventfd, &mut completions)
+            .unwrap();
+
+        assert_eq!(&first, b"123");
+        assert_eq!(&second, b"4567");
+        assert_eq!(&third, b"89");
+        assert_eq!(completions, vec![(42, 9)]);
+        assert_eq!(eventfd.read().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_async_adaptor_read_vectored_sync_stops_at_eof() {
+        let mut adaptor = TestAdaptor {
+            file: Mutex::new(ShortIo::new(b"abcde".to_vec(), 2, usize::MAX)),
+        };
+        let mut first = [b'_'; 3];
+        let mut second = [b'_'; 4];
+        let mut third = [b'_'; 2];
+        let iovecs = vec![
+            mutable_iovec(&mut first),
+            mutable_iovec(&mut second),
+            mutable_iovec(&mut third),
+        ];
+        let eventfd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut completions = Vec::new();
+
+        adaptor
+            .read_vectored_sync(0, iovecs, 43, &eventfd, &mut completions)
+            .unwrap();
+
+        assert_eq!(&first, b"abc");
+        assert_eq!(&second, b"de__");
+        assert_eq!(&third, b"__");
+        assert_eq!(completions, vec![(43, 5)]);
+        assert_eq!(eventfd.read().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_async_adaptor_read_vectored_sync_retries_interrupted() {
+        let mut adaptor = TestAdaptor {
+            file: Mutex::new(ShortIo::new(b"abcdef".to_vec(), 2, usize::MAX).with_interrupts(1, 0)),
+        };
+        let mut buf = [0; 6];
+        let eventfd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut completions = Vec::new();
+
+        adaptor
+            .read_vectored_sync(
+                0,
+                vec![mutable_iovec(&mut buf)],
+                44,
+                &eventfd,
+                &mut completions,
+            )
+            .unwrap();
+
+        assert_eq!(&buf, b"abcdef");
+        assert_eq!(completions, vec![(44, 6)]);
+        assert_eq!(eventfd.read().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_async_adaptor_write_vectored_sync_handles_partial_writes() {
+        let mut adaptor = TestAdaptor {
+            file: Mutex::new(ShortIo::new(vec![b'_'; 12], usize::MAX, 2)),
+        };
+        let first = b"abc";
+        let second = b"defg";
+        let third = b"hi";
+        let iovecs = vec![iovec(first), iovec(second), iovec(third)];
+        let eventfd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut completions = Vec::new();
+
+        adaptor
+            .write_vectored_sync(1, iovecs, 44, &eventfd, &mut completions)
+            .unwrap();
+
+        assert_eq!(
+            adaptor.file.lock().unwrap().inner.get_ref(),
+            b"_abcdefghi__"
+        );
+        assert_eq!(completions, vec![(44, 9)]);
+        assert_eq!(eventfd.read().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_async_adaptor_write_vectored_sync_retries_interrupted() {
+        let mut adaptor = TestAdaptor {
+            file: Mutex::new(ShortIo::new(vec![b'_'; 8], usize::MAX, 2).with_interrupts(0, 1)),
+        };
+        let eventfd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut completions = Vec::new();
+
+        adaptor
+            .write_vectored_sync(1, vec![iovec(b"abcdef")], 45, &eventfd, &mut completions)
+            .unwrap();
+
+        assert_eq!(adaptor.file.lock().unwrap().inner.get_ref(), b"_abcdef_");
+        assert_eq!(completions, vec![(45, 6)]);
+        assert_eq!(eventfd.read().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_async_adaptor_write_vectored_sync_rejects_write_zero() {
+        let mut adaptor = TestAdaptor {
+            file: Mutex::new(ShortIo::new(Vec::new(), usize::MAX, 0)),
+        };
+        let iovecs = vec![iovec(b"abc")];
+        let eventfd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut completions = Vec::new();
+
+        let err = adaptor
+            .write_vectored_sync(0, iovecs, 45, &eventfd, &mut completions)
+            .unwrap_err();
+
+        match err {
+            crate::async_io::AsyncIoError::WriteVectored(err) => {
+                assert_eq!(err.kind(), io::ErrorKind::WriteZero)
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(completions.is_empty());
+        assert_eq!(
+            eventfd.read().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
 }
 
 const QCOW_MAGIC: u32 = 0x5146_49fb;
