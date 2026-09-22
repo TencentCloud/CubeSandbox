@@ -219,6 +219,26 @@ inject 路径的核心价值在于"密钥留在运维侧"：它存在于规则�
 沙箱创建时被推到 CubeEgress、永远不会暴露给沙箱的环境变量、文件
 系统或进程空间。
 
+### 安全提醒
+
+HTTP 凭证注入是有风险的，应该只在受控的内网环境使用。除非必要，
+都应该使用 HTTPS。
+
+明文 HTTP 无法验证对端身份。规则按 `Host` 匹配成功后，凭证会随
+请求发往当时解析出的目的 IP。
+
+典型场景：沙箱创建时 `allow_internet_access=true`，并为
+`example.com` 配置了凭证注入。攻击者如果能控制解析该域名的 DNS
+服务器，就可以把 `example.com` 解析到自己的 IP，从而把注入的凭证
+发往被控制的服务器。这不是 CubeSandbox 本身的问题，而是明文 HTTP
+无法认证对端。
+
+::: warning 优先使用 HTTPS
+为 inject 规则显式指定 `scheme="https"`。只有上游服务位于你完全
+掌控的内网时，才使用 `scheme="http"`。省略 `scheme` 会同时匹配
+HTTP 和 HTTPS，HTTP 一侧同样会注入凭证。
+:::
+
 ## 访问审计
 
 每个请求按规则上的 `action.audit` 字段在三种审计级别里走一种：
