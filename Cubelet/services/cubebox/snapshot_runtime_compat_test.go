@@ -6,58 +6,12 @@ package cubebox
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 
 	"github.com/stretchr/testify/require"
 )
-
-func TestCubeRuntimeSupportsKeepPaused(t *testing.T) {
-	for _, tc := range []struct {
-		name, script string
-		want         bool
-		wantErr      bool
-	}{
-		{"legacy", "echo '  --app-snapshot app-snapshot'", false, false},
-		{"supported", "if [ \"$1\" = snapshot ]; then echo '  --keep-paused keep paused'; else echo 'Usage: snapshot-resume'; fi", true, false},
-		{"misleading description", "echo '  --app-snapshot use --keep-paused on newer versions'", false, false},
-		{"broken help", "exit 2", false, true},
-		{"missing resume", "if [ \"$1\" = snapshot ]; then echo '  --keep-paused keep paused'; else exit 2; fi", false, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			runtimePath := filepath.Join(t.TempDir(), "cube-runtime")
-			require.NoError(t, os.WriteFile(runtimePath, []byte("#!/bin/sh\n"+tc.script+"\n"), 0o755))
-			got, err := cubeRuntimeSupportsKeepPaused(context.Background(), runtimePath)
-			require.Equal(t, tc.want, got)
-			if tc.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-		})
-	}
-}
-
-func TestCubeRuntimeCapabilityCheckFailureDoesNotAllowLegacyFallback(t *testing.T) {
-	_, err := cubeRuntimeSupportsKeepPaused(context.Background(), filepath.Join(t.TempDir(), "missing"))
-	require.Error(t, err)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err = cubeRuntimeSupportsKeepPaused(ctx, "/bin/sh")
-	require.Error(t, err)
-	deadlineCtx, cancelDeadline := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
-	defer cancelDeadline()
-	_, err = cubeRuntimeSupportsKeepPaused(deadlineCtx, "/bin/sh")
-	require.Error(t, err)
-	runtimePath := filepath.Join(t.TempDir(), "not-executable")
-	require.NoError(t, os.WriteFile(runtimePath, []byte("#!/bin/sh\nexit 0\n"), 0o644))
-	_, err = cubeRuntimeSupportsKeepPaused(context.Background(), runtimePath)
-	require.Error(t, err)
-}
 
 func TestRunSnapshotWithRootfs(t *testing.T) {
 	failure := errors.New("injected failure")

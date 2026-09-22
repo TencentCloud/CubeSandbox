@@ -57,6 +57,25 @@ enum SandBoxState {
     Exited,
 }
 
+enum SnapshotFreezeState {
+    Idle,
+    Frozen { id: String, deadline: Instant },
+    Expired { id: String },
+}
+
+impl SnapshotFreezeState {
+    fn resume_needed(&self, snapshot_id: &str) -> CResult<bool> {
+        match self {
+            Self::Idle => Ok(false),
+            Self::Frozen { id, .. } if id == snapshot_id => Ok(true),
+            Self::Expired { id } if id == snapshot_id => {
+                Err("snapshot freeze lease expired; VM was automatically resumed".into())
+            }
+            _ => Err("snapshot id does not match frozen VM".into()),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SandBox {
     id: String,
@@ -73,6 +92,7 @@ pub struct SandBox {
     tx_containerd: Sender<(String, Box<dyn MessageDyn>)>,
     debug: bool,
     state: Arc<Mutex<SandBoxState>>,
+    snapshot_frozen: Arc<Mutex<SnapshotFreezeState>>,
     tx_monitor_exited: Option<Sender<()>>,
     monitor_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
     tx_oom_exited: Option<Sender<()>>,
@@ -113,6 +133,7 @@ impl SandBox {
             tx_containerd,
             debug,
             state: Arc::new(Mutex::new(SandBoxState::Normal)),
+            snapshot_frozen: Arc::new(Mutex::new(SnapshotFreezeState::Idle)),
             tx_monitor_exited: None,
             monitor_handle: None,
             tx_oom_exited: None,
@@ -1336,6 +1357,166 @@ impl SandBox {
             .await?;
         ch.resume_vm().await
     }
+
+    /// Capture a reusable snapshot while leaving this MicroVM frozen for
+    /// Cubelet's rootfs CoW snapshot. The shim retains a bounded recovery path
+    /// if Cubelet exits before sending SnapshotResume.
+    pub async fn capture_snapshot_frozen(
+        &mut self,
+        snapshot_id: &str,
+        spec_dir: &str,
+        memory_vol_url: Option<String>,
+        snapshot_type: SnapshotType,
+    ) -> CResult<()> {
+        if snapshot_id.is_empty() || !std::path::Path::new(spec_dir).is_absolute() {
+            return Err("snapshot id and absolute destination are required".into());
+        }
+        if !self.normal().await
+            || matches!(
+                &*self.snapshot_frozen.lock().await,
+                SnapshotFreezeState::Frozen { .. }
+            )
+        {
+            return Err("sandbox is not available for snapshot capture".into());
+        }
+
+        let ch = self.ch.as_ref().ok_or("hypervisor is unavailable")?.clone();
+        *self.snapshot_frozen.lock().await = SnapshotFreezeState::Frozen {
+            id: snapshot_id.to_string(),
+            deadline: Instant::now() + Duration::from_secs(300),
+        };
+        self.arm_snapshot_recovery(snapshot_id, ch.clone());
+        if let Err(error) = ch.lock().await.pause_vm().await {
+            *self.snapshot_frozen.lock().await = SnapshotFreezeState::Idle;
+            return Err(error);
+        }
+
+        let mut snapshot_dir = PathBuf::from(spec_dir);
+        snapshot_dir.push("snapshot");
+        let capture_result: CResult<()> = async {
+            stdfs::create_dir_all(&snapshot_dir).map_err(|e| e.to_string())?;
+            let hypervisor = ch.lock().await;
+            hypervisor
+                .snapshot_vm_with_memory(
+                    &format!("file://{}", snapshot_dir.display()),
+                    memory_vol_url,
+                    snapshot_type,
+                )
+                .await?;
+            // The memory dump can outlast the initial lease. Extend it before
+            // releasing the hypervisor lock for metadata I/O.
+            if let SnapshotFreezeState::Frozen { id, deadline } =
+                &mut *self.snapshot_frozen.lock().await
+            {
+                if id == snapshot_id {
+                    *deadline = Instant::now() + Duration::from_secs(300);
+                }
+            }
+            drop(hypervisor);
+            self.store_pause_snapshot_metadata(spec_dir).await
+        }
+        .await;
+
+        if let Err(capture_error) = capture_result {
+            let resume_result = ch.lock().await.resume_vm().await;
+            match resume_result {
+                Ok(()) => {
+                    *self.snapshot_frozen.lock().await = SnapshotFreezeState::Idle;
+                    return Err(capture_error);
+                }
+                Err(resume_error) => {
+                    return Err(format!(
+                        "snapshot capture failed: {capture_error}; resume failed: {resume_error}"
+                    )
+                    .into());
+                }
+            }
+        }
+        self.renew_snapshot_frozen(snapshot_id).await?;
+        Ok(())
+    }
+
+    pub async fn renew_snapshot_frozen(&self, snapshot_id: &str) -> CResult<()> {
+        let mut frozen = self.snapshot_frozen.lock().await;
+        match &mut *frozen {
+            SnapshotFreezeState::Frozen { id, deadline } if id == snapshot_id => {
+                *deadline = Instant::now() + Duration::from_secs(30);
+                Ok(())
+            }
+            SnapshotFreezeState::Expired { id } if id == snapshot_id => {
+                Err("snapshot freeze lease expired; VM was automatically resumed".into())
+            }
+            _ => Err("snapshot is no longer frozen".into()),
+        }
+    }
+
+    fn arm_snapshot_recovery(&self, snapshot_id: &str, ch: Arc<Mutex<CH::CubeHypervisor>>) {
+        let marker = self.snapshot_frozen.clone();
+        let snapshot_id = snapshot_id.to_string();
+        let log = self.log.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let mut frozen = marker.lock().await;
+                match &*frozen {
+                    SnapshotFreezeState::Frozen { id, deadline } if id == &snapshot_id => {
+                        if Instant::now() < *deadline {
+                            continue;
+                        }
+                    }
+                    _ => return,
+                }
+                let Ok(hypervisor) = ch.try_lock() else {
+                    continue;
+                };
+                match hypervisor.resume_vm().await {
+                    Ok(()) => {
+                        *frozen = SnapshotFreezeState::Expired {
+                            id: snapshot_id.clone(),
+                        };
+                        warnf!(
+                            log,
+                            "snapshot {} auto-resumed after Cubelet did not resume it",
+                            snapshot_id
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        warnf!(
+                            log,
+                            "snapshot {} auto-resume failed: {}",
+                            snapshot_id,
+                            error
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    pub async fn resume_snapshot_frozen(&mut self, snapshot_id: &str) -> CResult<()> {
+        let mut frozen = self.snapshot_frozen.lock().await;
+        if !frozen.resume_needed(snapshot_id)? {
+            return Ok(());
+        }
+        self.ch
+            .as_ref()
+            .ok_or("hypervisor is unavailable")?
+            .lock()
+            .await
+            .resume_vm()
+            .await?;
+        *frozen = SnapshotFreezeState::Idle;
+        Ok(())
+    }
+
+    pub async fn snapshot_is_frozen(&self) -> bool {
+        matches!(
+            &*self.snapshot_frozen.lock().await,
+            SnapshotFreezeState::Frozen { .. }
+        )
+    }
+
     pub async fn paused(&self) -> bool {
         let state = self.state.lock().await;
         *state == SandBoxState::Paused
@@ -1648,6 +1829,31 @@ mod tests {
     use super::normalize_dns_for_agent;
     use super::Log;
     use super::SandBox;
+    use super::SnapshotFreezeState;
+
+    #[tokio::test]
+    async fn expired_snapshot_freeze_rejects_resume_and_renew() {
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let mut sb = SandBox::new("ut".to_string(), Log::default(), false, tx);
+        *sb.snapshot_frozen.lock().await = SnapshotFreezeState::Expired {
+            id: "snap-1".to_string(),
+        };
+
+        assert!(!sb.snapshot_is_frozen().await);
+        assert!(sb
+            .renew_snapshot_frozen("snap-1")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("lease expired"));
+        assert!(sb
+            .resume_snapshot_frozen("snap-1")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("lease expired"));
+        assert!(sb.resume_snapshot_frozen("snap-2").await.is_err());
+    }
 
     #[tokio::test]
     async fn test_sandbox_prepare_resource() {

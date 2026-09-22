@@ -136,9 +136,20 @@ impl CubeHypervisor {
     }
 
     pub async fn snapshot_vm(&self, path: &str, snapshot_type: SnapshotType) -> CResult<()> {
+        self.snapshot_vm_with_memory(path, None, snapshot_type)
+            .await
+    }
+
+    pub async fn snapshot_vm_with_memory(
+        &self,
+        path: &str,
+        memory_vol_url: Option<String>,
+        snapshot_type: SnapshotType,
+    ) -> CResult<()> {
         let ch = self.ch.as_ref().unwrap().lock().await;
         let snap_config = Arc::new(SnapshotConfig {
             destination_url: path.to_string(),
+            memory_vol_url,
             snapshot_type,
             ..Default::default()
         });

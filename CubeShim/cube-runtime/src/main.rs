@@ -35,12 +35,6 @@ async fn execute(args: CliArgs) -> Result<()> {
             snapshot::cmd::execute(snapshot_args).await?;
         }
 
-        SubCommands::SnapshotResume(resume_args) => {
-            snapshot::Snapshot::resume_app_snapshot(&resume_args.vm_id)
-                .await
-                .map_err(anyhow::Error::msg)?;
-        }
-
         SubCommands::Login(login_args) => {
             login::execute(login_args).await?;
         }

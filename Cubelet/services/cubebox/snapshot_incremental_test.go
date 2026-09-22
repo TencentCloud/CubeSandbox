@@ -88,14 +88,6 @@ func TestBuildCubeRuntimeSnapshotArgsOmitsMemoryVolWhenEmpty(t *testing.T) {
 	assert.NotContains(t, args, "--memory-vol")
 }
 
-func TestBuildCubeRuntimeSnapshotArgsKeepPausedIsOptIn(t *testing.T) {
-	defaultArgs := buildCubeRuntimeSnapshotArgs("sb-1", nil, "/tmp/s.tmp", "", snapshotTypeFull)
-	assert.NotContains(t, defaultArgs, "--keep-paused")
-
-	pausedArgs := buildCubeRuntimeSnapshotArgsWithPause("sb-1", nil, "/tmp/s.tmp", "", snapshotTypeFull, true)
-	assert.Contains(t, pausedArgs, "--keep-paused")
-}
-
 func TestDetachedSnapshotWorkContextPreservesDeadlineAndIgnoresCancellation(t *testing.T) {
 	parent, cancelParent := context.WithTimeout(context.Background(), 2*time.Minute)
 	parentDeadline, ok := parent.Deadline()

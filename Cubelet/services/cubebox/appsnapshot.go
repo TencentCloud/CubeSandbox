@@ -305,46 +305,64 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	}
 
 	// collectEnvdVersion uses containerd Exec, which must run before
-	// cube-runtime marks the guest as app-snapshotting and disables exec.
+	// the shim marks the guest as app-snapshotting and disables exec.
 	envdVersion := s.collectEnvdVersion(ctx, sandboxID)
 
-	stepLog.Info("Step 4: Executing cube-runtime snapshot...")
+	stepLog.Info("Step 4: Capturing sandbox snapshot through shim...")
 	// AppSnapshot builds a brand-new template from a fresh sandbox: there is
 	// no base memory blob to overlay onto, so we always ask for a full memory
 	// snapshot. Incremental is reserved for CommitSandbox where the running
 	// sandbox is bound to a prior snapshot whose memory file we can clone.
 	frozenCtx, frozenCancel := detachedSnapshotWorkContext(ctx)
 	defer frozenCancel()
-	keepPaused, err := s.runtimeSnapshotSupportsKeepPaused(frozenCtx, sandboxID)
+	cb, err := s.cubeboxMgr.cubeboxManger.Get(frozenCtx, sandboxID)
 	if err != nil {
 		cleanupSnapshotObjects()
 		layout.discardTmpDir()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to check snapshot runtime capabilities: %v", err)
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to load sandbox for snapshot: %v", err)
 		return rsp, nil
 	}
-	if !keepPaused {
-		cleanupSnapshotObjects()
-		layout.discardTmpDir()
-		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
-		rsp.Ret.RetMsg = incompatibleSnapshotRuntimeMessage
-		return rsp, nil
-	}
+	captureStarted := false
+	var freezeLease *snapshotFreezeLease
 	snapshotErr, rootfsErr, resumeErr := runSnapshotWithRootfs(func() error {
-		return s.executeCubeRuntimeSnapshotWithPause(frozenCtx, sandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeFull, true)
+		captureStarted = true
+		captureErr := s.captureSnapshotWithShim(frozenCtx, cb, templateID, layout.MetaWork, memoryObject.DevPath, snapshotTypeFull)
+		if shimSnapshotUnsupported(captureErr) {
+			captureStarted = false
+		}
+		if captureErr == nil {
+			freezeLease = s.startSnapshotLeaseRenewal(frozenCtx, cb, templateID, frozenCancel)
+		}
+		return snapshotCaptureError(captureErr)
 	}, func() error {
 		var commitErr error
 		rootfsObject, commitErr = storage.CommitRootfsFromBuildFor(frozenCtx, backend, templateID)
-		return commitErr
+		if commitErr != nil {
+			return commitErr
+		}
+		return frozenCtx.Err()
 	}, func() error {
-		return s.resumeCubeRuntimeSnapshot(ctx, sandboxID)
+		var leaseErr error
+		if freezeLease != nil {
+			leaseErr = freezeLease.Stop()
+		}
+		if !captureStarted {
+			return leaseErr
+		}
+		resumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotResumeTimeout)
+		defer cancel()
+		return errors.Join(leaseErr, s.resumeSnapshotWithShim(resumeCtx, cb, templateID))
 	})
 	if snapshotErr != nil || rootfsErr != nil {
 		cleanupSnapshotObjects()
 		layout.discardTmpDir()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		if snapshotErr != nil {
-			rsp.Ret.RetMsg = fmt.Sprintf("failed to execute cube-runtime snapshot: %v", snapshotErr)
+			if errors.Is(snapshotErr, errSnapshotShimIncompatible) {
+				rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+			}
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to capture sandbox snapshot: %v", snapshotErr)
 		} else if errors.Is(rootfsErr, storage.ErrCowObjectAlreadyExists) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 			rsp.Ret.RetMsg = fmt.Sprintf("template rootfs already exists: %v", rootfsErr)
@@ -587,22 +605,22 @@ func (s *service) getCubeboxSnapshotSpec(ctx context.Context, sandboxID string) 
 	return result, nil
 }
 
-// snapshotTypeFull asks cube-runtime to capture every memory page of the VM
+// snapshotTypeFull asks the VM to capture every memory page
 // (the historical default).
 const snapshotTypeFull = "full"
 
-// snapshotTypeIncremental asks cube-runtime to write only CoW anonymous pages
+// snapshotTypeIncremental asks the VM to write only CoW anonymous pages
 // into the destination memory file, leaving non-anonymous regions to whatever
 // the destination file already contains (i.e. the reflink-cloned base).
 const snapshotTypeIncremental = "incremental"
 
-// snapshotTypeSoftDirty asks cube-runtime to write only the pages dirtied
+// snapshotTypeSoftDirty asks the VM to write only the pages dirtied
 // since the previous soft-dirty snapshot (a true per-cycle delta) on top of
 // the destination memory file. The destination MUST already contain a valid
 // base image (the reflink-cloned previous snapshot's memory), otherwise pages
 // untouched-since-last-clear would read back as zero on restore. Cubelet
 // guarantees this precondition by reflink-cloning the binding base before
-// invoking cube-runtime; if the base cannot be resolved, the caller falls
+// invoking the shim; if the base cannot be resolved, the caller falls
 // back to snapshotTypeFull instead.
 //
 // The host kernel needs CONFIG_MEM_SOFT_DIRTY=y for soft-dirty to do
@@ -631,10 +649,6 @@ func normalizeSnapshotType(snapshotType string) string {
 // so tests can assert on the exact argv that will be passed to cube-runtime
 // without touching exec or the filesystem.
 func buildCubeRuntimeSnapshotArgs(sandboxID string, spec *CubeboxSnapshotSpec, snapshotPath, memoryVol, snapshotType string) []string {
-	return buildCubeRuntimeSnapshotArgsWithPause(sandboxID, spec, snapshotPath, memoryVol, snapshotType, false)
-}
-
-func buildCubeRuntimeSnapshotArgsWithPause(sandboxID string, spec *CubeboxSnapshotSpec, snapshotPath, memoryVol, snapshotType string, keepPaused bool) []string {
 	args := []string{
 		"snapshot",
 		"--app-snapshot",
@@ -642,9 +656,6 @@ func buildCubeRuntimeSnapshotArgsWithPause(sandboxID string, spec *CubeboxSnapsh
 		"--path", snapshotPath,
 		"--force",
 		"--snapshot-type", normalizeSnapshotType(snapshotType),
-	}
-	if keepPaused {
-		args = append(args, "--keep-paused")
 	}
 	if spec != nil {
 		if len(spec.Resource) > 0 {
@@ -670,10 +681,6 @@ func buildCubeRuntimeSnapshotArgsWithPause(sandboxID string, spec *CubeboxSnapsh
 }
 
 func (s *service) executeCubeRuntimeSnapshot(ctx context.Context, sandboxID string, spec *CubeboxSnapshotSpec, snapshotPath, memoryVol, snapshotType string) error {
-	return s.executeCubeRuntimeSnapshotWithPause(ctx, sandboxID, spec, snapshotPath, memoryVol, snapshotType, false)
-}
-
-func (s *service) executeCubeRuntimeSnapshotWithPause(ctx context.Context, sandboxID string, spec *CubeboxSnapshotSpec, snapshotPath, memoryVol, snapshotType string, keepPaused bool) error {
 	snapshotType = normalizeSnapshotType(snapshotType)
 	stepLog := log.G(ctx).WithFields(CubeLog.Fields{
 		"sandboxID":    sandboxID,
@@ -681,7 +688,7 @@ func (s *service) executeCubeRuntimeSnapshotWithPause(ctx context.Context, sandb
 		"snapshotType": snapshotType,
 	})
 
-	args := buildCubeRuntimeSnapshotArgsWithPause(sandboxID, spec, snapshotPath, memoryVol, snapshotType, keepPaused)
+	args := buildCubeRuntimeSnapshotArgs(sandboxID, spec, snapshotPath, memoryVol, snapshotType)
 
 	runtimePath, err := s.resolveCubeRuntimePath(ctx, sandboxID)
 	if err != nil {
@@ -698,29 +705,6 @@ func (s *service) executeCubeRuntimeSnapshotWithPause(ctx context.Context, sandb
 
 	stepLog.Infof("cube-runtime snapshot output: %s", string(output))
 	return nil
-}
-
-func (s *service) executeCubeRuntimeSnapshotResume(ctx context.Context, sandboxID string) error {
-	stepLog := log.G(ctx).WithFields(CubeLog.Fields{"sandboxID": sandboxID})
-	runtimePath, err := s.resolveCubeRuntimePath(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-	args := []string{"snapshot-resume", "--vm-id", sandboxID}
-	stepLog.Infof("Executing: %s %v", runtimePath, args)
-	cmd := exec.CommandContext(ctx, runtimePath, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		stepLog.Errorf("cube-runtime snapshot resume failed: %v, output: %s", err, string(output))
-		return fmt.Errorf("cube-runtime snapshot resume failed: %w, output: %s", err, string(output))
-	}
-	return nil
-}
-
-func (s *service) resumeCubeRuntimeSnapshot(ctx context.Context, sandboxID string) error {
-	resumeCtx, resumeCancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotResumeTimeout)
-	defer resumeCancel()
-	return s.executeCubeRuntimeSnapshotResume(resumeCtx, sandboxID)
 }
 
 // resolveCubeRuntimePath picks cube-runtime matching the sandbox shim version,

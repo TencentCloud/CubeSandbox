@@ -14,8 +14,11 @@ use std::path::{Path, PathBuf};
 
 /// Identifies the update action to perform.
 ///
-/// Supported values: `"RollbackSnapshot"`, `"PauseToSnapshot"`
+/// Supported values: `"RollbackSnapshot"`, `"PauseToSnapshot"`,
+/// `"SnapshotCapture"`, `"SnapshotResume"`.
 const ANNO_UPDATE_EXT_ACTION: &str = "cube.shimapi.update.action";
+const ANNO_SNAPSHOT_CAPTURE_CONFIG: &str = "cube.shimapi.update.snapshot.capture_config";
+const ANNO_SNAPSHOT_ID: &str = "cube.shimapi.update.snapshot.id";
 
 /// (RollbackSnapshot) **Required.** JSON-encoded `RollbackRestoreConfig`,
 /// aligned with hypervisor `RestoreConfig`.
@@ -111,6 +114,53 @@ struct PauseSnapshotConfig {
     /// Cubelets keep the historical full dump.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FrozenSnapshotConfig {
+    snapshot_id: String,
+    #[serde(default)]
+    destination_url: String,
+    memory_vol_url: Option<String>,
+    snapshot_type: Option<String>,
+    #[serde(default)]
+    renew_only: bool,
+}
+
+async fn do_snapshot_capture(
+    sb: &mut SandBox,
+    annos: &HashMap<String, String>,
+) -> CResult<UpdateOutcome> {
+    let raw = annos
+        .get(ANNO_SNAPSHOT_CAPTURE_CONFIG)
+        .ok_or_else(|| format!("missing annotation: {ANNO_SNAPSHOT_CAPTURE_CONFIG}"))?;
+    let config: FrozenSnapshotConfig =
+        serde_json::from_str(raw).map_err(|e| format!("invalid snapshot capture config: {e}"))?;
+    if config.renew_only {
+        sb.renew_snapshot_frozen(&config.snapshot_id).await?;
+        return Ok(UpdateOutcome::default());
+    }
+    let destination = strip_file_url(&config.destination_url);
+    let snapshot_type = parse_pause_snapshot_type(config.snapshot_type.as_deref());
+    sb.capture_snapshot_frozen(
+        &config.snapshot_id,
+        &destination,
+        config.memory_vol_url,
+        snapshot_type,
+    )
+    .await?;
+    Ok(UpdateOutcome::default())
+}
+
+async fn do_snapshot_resume(
+    sb: &mut SandBox,
+    annos: &HashMap<String, String>,
+) -> CResult<UpdateOutcome> {
+    let snapshot_id = annos
+        .get(ANNO_SNAPSHOT_ID)
+        .ok_or_else(|| format!("missing annotation: {ANNO_SNAPSHOT_ID}"))?;
+    sb.resume_snapshot_frozen(snapshot_id).await?;
+    Ok(UpdateOutcome::default())
 }
 
 fn parse_pause_snapshot_type(raw: Option<&str>) -> SnapshotType {
@@ -266,6 +316,8 @@ pub async fn update_route(
     match action {
         "RollbackSnapshot" => do_rollback_snapshot(sb, annos, log).await,
         "PauseToSnapshot" => do_pause_to_snapshot(sb, annos, log).await,
+        "SnapshotCapture" => do_snapshot_capture(sb, annos).await,
+        "SnapshotResume" => do_snapshot_resume(sb, annos).await,
         unknown => Err(format!("unknown update ext action: {}", unknown).into()),
     }
 }

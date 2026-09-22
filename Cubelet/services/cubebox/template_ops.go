@@ -149,7 +149,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	var rootfsObject *storage.CowSnapshotObject
 	// Resolve / build the memory artifact:
 	//   - if the sandbox is bound to a previous snapshot whose memory blob
-	//     can be resolved, reflink-clone that blob and ask cube-runtime for
+	//     can be resolved, reflink-clone that blob and ask the shim for
 	//     a soft-dirty per-cycle delta;
 	//   - otherwise (lineage broken: missing/purged catalog or upstream
 	//     volume gone) create a fresh empty volume and fall back to a full
@@ -196,23 +196,12 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	stepLog = stepLog.WithFields(CubeLog.Fields{"snapshotType": snapshotTypeForCmd})
 	frozenCtx, frozenCancel := detachedSnapshotWorkContext(ctx)
 	defer frozenCancel()
-	keepPaused, err := s.runtimeSnapshotSupportsKeepPaused(frozenCtx, rsp.SandboxID)
-	if err != nil {
-		cleanupArtifacts()
-		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = err.Error()
-		return rsp, nil
-	}
-	if !keepPaused {
-		cleanupArtifacts()
-		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
-		rsp.Ret.RetMsg = incompatibleSnapshotRuntimeMessage
-		return rsp, nil
-	}
 	var bindingErr error
 	captureStarted := false
+	var freezeLease *snapshotFreezeLease
 	snapshotErr, rootfsErr, resumeErr := runSnapshotWithRootfs(func() error {
 		// Invalidate only once memory capture is about to start.
+		previousLabels := copyCubeBoxLabels(cb)
 		bindingErr = persistRuntimeSnapshotBinding(
 			frozenCtx, s.cubeboxMgr.cubeboxManger, cb, runtimeSnapshotBindingInvalidID, time.Now().UTC(),
 		)
@@ -220,15 +209,38 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 			return bindingErr
 		}
 		captureStarted = true
-		return s.executeCubeRuntimeSnapshotWithPause(frozenCtx, rsp.SandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeForCmd, true)
+		captureErr := s.captureSnapshotWithShim(frozenCtx, cb, rsp.TemplateID, layout.MetaWork, memoryObject.DevPath, snapshotTypeForCmd)
+		if shimSnapshotUnsupported(captureErr) {
+			captureStarted = false
+			// The old shim rejected the action before touching the VM, so its
+			// previous incremental baseline is still valid.
+			restoreCubeBoxLabels(cb, previousLabels)
+			if restoreErr := s.cubeboxMgr.cubeboxManger.SyncByID(frozenCtx, cb.ID); restoreErr != nil {
+				setRuntimeSnapshotBindingLabels(cb, runtimeSnapshotBindingInvalidID, time.Now().UTC())
+				return fmt.Errorf("%w; failed to restore runtime snapshot binding: %v", snapshotCaptureError(captureErr), restoreErr)
+			}
+		}
+		if captureErr == nil {
+			freezeLease = s.startSnapshotLeaseRenewal(frozenCtx, cb, rsp.TemplateID, frozenCancel)
+		}
+		return snapshotCaptureError(captureErr)
 	}, func() error {
 		rootfsObject, err = storage.CommitRootfsFor(frozenCtx, backend, sourceRootfs, rsp.TemplateID)
-		return err
-	}, func() error {
-		if !captureStarted {
-			return nil
+		if err != nil {
+			return err
 		}
-		return s.resumeCubeRuntimeSnapshot(ctx, rsp.SandboxID)
+		return frozenCtx.Err()
+	}, func() error {
+		var leaseErr error
+		if freezeLease != nil {
+			leaseErr = freezeLease.Stop()
+		}
+		if !captureStarted {
+			return leaseErr
+		}
+		resumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotResumeTimeout)
+		defer cancel()
+		return errors.Join(leaseErr, s.resumeSnapshotWithShim(resumeCtx, cb, rsp.TemplateID))
 	})
 	if snapshotErr != nil {
 		if resumeErr != nil {
@@ -236,10 +248,13 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		}
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		if errors.Is(snapshotErr, errSnapshotShimIncompatible) {
+			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		}
 		if bindingErr != nil {
 			rsp.Ret.RetMsg = fmt.Sprintf("failed to persist runtime snapshot binding: %v", bindingErr)
 		} else {
-			rsp.Ret.RetMsg = fmt.Sprintf("failed to execute cube-runtime snapshot: %v", snapshotErr)
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to capture sandbox snapshot: %v", snapshotErr)
 		}
 		return rsp, nil
 	}
