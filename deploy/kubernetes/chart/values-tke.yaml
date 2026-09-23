@@ -31,7 +31,8 @@
 #      cubevs range can be non-overlapping for every cluster — the TKE
 #      Service CIDR is operator-configurable and spans the private ranges —
 #      so override in your runtime values if your Service CIDR, VPC or host
-#      LAN covers 10.244.0.0/18 (10.244.x).
+#      LAN covers 10.244.0.0/18 (10.244.x) — including your Pod/CNI CIDR,
+#      which the preflight Hook does not inspect.
 #
 # Nothing else about the release is TKE-specific — Cube-owned images default
 # to TCR int (cube-sandbox-int.tencentcloudcr.com/cube-sandbox/...). Users in
@@ -86,7 +87,7 @@ minio:
 # 10.200.0.0/16, Service CIDR 192.168.0.0/20), so the default TKE path passes
 # the preflight. The Service CIDR is operator-configurable, so this is a
 # default, not a guarantee: override in your runtime values if your Service
-# CIDR, VPC or host LAN covers 10.244.x. tproxyOnIP is the cube-dev gateway =
+# CIDR, VPC, Pod/CNI CIDR or host LAN covers 10.244.x. tproxyOnIP is the cube-dev gateway =
 # first usable IP of cubeNode.network.cidr — keep the two in sync.
 cubeNode:
   network:

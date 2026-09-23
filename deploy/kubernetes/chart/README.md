@@ -369,8 +369,10 @@ is clear of the ranges this repo's TKE Terraform provisions (VPC
 the default TKE path passes the preflight. The Service CIDR is
 operator-configurable and spans the private ranges, so this is a default and
 not a guarantee: override `cubeNode.network.cidr` (and keep `tproxyOnIP` in
-sync as the first usable IP of the range) if your Service CIDR, VPC or host
-LAN covers `10.244.x`.
+sync as the first usable IP of the range) if your Service CIDR, VPC, Pod/CNI
+CIDR or host LAN covers `10.244.x` — the preflight only inspects the Service
+CIDR and existing ClusterIPs, so a Pod/CNI collision is not caught at install
+time.
 
 It also exposes CubeProxy as a `LoadBalancer` Service (CLB) with Ingress
 disabled, and sets TKE CLB annotations for `pass-to-target` plus a
