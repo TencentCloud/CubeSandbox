@@ -2,7 +2,8 @@
 # The node must carry both cube-control=true and cube-node=true labels.
 #
 # Cubevs CIDR inherits values.yaml default (172.16.0.0/18). Helm preflight
-# rejects overlap with cluster Service CIDR (often 192.168.0.0/16 on single-node).
+# rejects overlap with the cluster Service CIDR (any private range can be the
+# Service CIDR — it is operator-configurable, including on single-node).
 placement:
   controlPlane:
     nodeSelector:
