@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,10 @@ import (
 // Manager mounts and unmounts one s3fs process per volume.
 type Manager struct {
 	cfg *config.Config
+
+	// BeforeMount, when set, runs only when a mount is really about to happen
+	// (not for a volume that is already mounted); an error aborts the attach.
+	BeforeMount func() error
 }
 
 // New creates a Manager.
@@ -36,14 +41,9 @@ func (m *Manager) MountPoint(baseDir, volumeID string) string {
 // different buckets) on one node never race on a shared credential file. It is
 // rewritten only when the credentials changed.
 //
-// In instance-role mode no file is written, and one left over from a node that
-// used to run with static keys is removed: it is a long-lived secret in
-// plaintext that nothing reads any more, which is what this mode is for.
+// In instance-role mode no file is written; see RemoveStalePasswdFile.
 func (m *Manager) EnsurePasswdFile() error {
 	if m.cfg.UseInstanceRole() {
-		if err := os.Remove(m.cfg.PasswdFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("remove stale passwd file %q: %w", m.cfg.PasswdFile, err)
-		}
 		return nil
 	}
 	content := fmt.Sprintf("%s:%s:%s\n", m.cfg.Bucket, m.cfg.AccessKeyID, m.cfg.SecretAccessKey)
@@ -57,6 +57,19 @@ func (m *Manager) EnsurePasswdFile() error {
 		return fmt.Errorf("write passwd file %q: %w", m.cfg.PasswdFile, err)
 	}
 	return nil
+}
+
+// RemoveStalePasswdFile deletes, in instance-role mode, a credential file left
+// from when the node ran with static keys: a long-lived plaintext secret that
+// nothing reads any more, which is what this mode is for. Nothing depends on
+// it being gone, so a failure is logged rather than failing the attach.
+func (m *Manager) RemoveStalePasswdFile() {
+	if !m.cfg.UseInstanceRole() {
+		return
+	}
+	if err := os.Remove(m.cfg.PasswdFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		log.Printf("warning: remove stale passwd file %q: %v", m.cfg.PasswdFile, err)
+	}
 }
 
 // MountArgs builds the s3fs argument list for one volume.
@@ -91,12 +104,22 @@ func (m *Manager) MountArgs(mnt, volumeID string) []string {
 func (m *Manager) Mount(baseDir, volumeID string) (string, error) {
 	mnt := m.MountPoint(baseDir, volumeID)
 
+	// Before the early return, so nodes whose volumes are all mounted already
+	// are cleaned up too.
+	m.RemoveStalePasswdFile()
+
 	mounted, err := IsMountPoint(mnt)
 	if err != nil {
 		return "", err
 	}
 	if mounted {
 		return mnt, nil
+	}
+
+	if m.BeforeMount != nil {
+		if err := m.BeforeMount(); err != nil {
+			return "", err
+		}
 	}
 
 	if err := m.EnsurePasswdFile(); err != nil {

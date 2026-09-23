@@ -203,12 +203,11 @@ func doAttach(ctx context.Context, opts *options) error {
 	if err != nil {
 		return err
 	}
-	// s3fs asks IMDS itself; checking here turns a missing role into a clear
-	// error instead of an opaque mount failure.
-	if err := s3api.CheckInstanceRole(ctx, cfg); err != nil {
-		return err
-	}
 	mounts := s3fsmnt.New(cfg)
+	// s3fs asks IMDS itself; checking first turns a missing role into a clear
+	// error instead of an opaque mount failure. Only on a real mount, so a
+	// repeat attach of a mounted volume does not depend on IMDS.
+	mounts.BeforeMount = func() error { return s3api.CheckInstanceRole(ctx, cfg) }
 
 	lock, err := lockfile.Acquire(cfg.LockDir, opts.volumeID)
 	if err != nil {
