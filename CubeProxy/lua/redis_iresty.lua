@@ -144,6 +144,26 @@ local function first_readonly_index(results, err)
     return nil
 end
 
+-- ssl_opts builds the third argument of resty.redis connect(). This
+-- lua-resty-redis has no socket-level ssl() method: TLS is switched on by
+-- opts.ssl inside connect(), which then runs sslhandshake(). Requesting it
+-- as a separate call silently did nothing, so every command went out in
+-- cleartext to a port that refuses it and timed out on read.
+-- server_name feeds the certificate SAN check; nginx still needs
+-- lua_ssl_trusted_certificate to verify the chain. The flag arrives as a
+-- boolean from Lua callers and as a string from ngx.var / os.getenv.
+local function ssl_opts(self, server_name)
+    local flag = self.redis_ssl
+    if not (flag == true or flag == "true" or flag == "1") then
+        return nil
+    end
+    return {
+        ssl = true,
+        ssl_verify = true,
+        server_name = server_name or self.redis_ip,
+    }
+end
+
 -- 每次连接前通过 Sentinel 查询当前 master, 适配 failover.
 local function resolve_master_via_sentinel(self)
     local sentinels = parse_sentinel_nodes(self.redis_sentinel_nodes)
@@ -160,7 +180,7 @@ local function resolve_master_via_sentinel(self)
         local host, port = split_host_port(sentinel_addr, 26379)
         local redis = redis_c:new()
         redis:set_timeout(self.timeout)
-        local ok, err = redis:connect(host, port)
+        local ok, err = redis:connect(host, port, ssl_opts(self, host))
         if not ok then
             last_err = err
         else
@@ -213,7 +233,7 @@ function _M.connect_mod(self, redis)
         -- cache entry and fall through to a fresh Sentinel lookup.
         local cip, cport = get_cached_master(self)
         if cip then
-            local ok = redis:connect(cip, cport)
+            local ok = redis:connect(cip, cport, ssl_opts(self, cip))
             if ok then
                 return ok
             end
@@ -225,17 +245,23 @@ function _M.connect_mod(self, redis)
         end
         -- Cache only after connect succeeds so a transient failure does not
         -- leave a stale address that forces an extra failed connect cycle.
-        local ok, cerr = redis:connect(ip, port)
+        local ok, cerr = redis:connect(ip, port, ssl_opts(self, ip))
         if not ok then
             return nil, cerr
         end
         set_cached_master(self, ip, port)
         return ok
     end
-    return redis:connect(self.redis_ip, self.redis_port)
+    return redis:connect(self.redis_ip, self.redis_port, ssl_opts(self))
 end
 
 function _M.auth_mod(self, redis)
+    -- No password configured (common on managed Redis) means no AUTH at all:
+    -- the server rejects a single-argument AUTH with "AUTH called without any
+    -- password configured", which would take the whole connection down.
+    if not self.redis_pd or self.redis_pd == "" then
+        return true
+    end
     return redis:auth(self.redis_pd)
 end
 
@@ -429,6 +455,7 @@ function _M.new(self, opts)
         redis_master_name = opts.redis_master_name or "",
         redis_sentinel_nodes = opts.redis_sentinel_nodes or "",
         redis_sentinel_pd = opts.redis_sentinel_pd or "",
+        redis_ssl = opts.redis_ssl or false,
         _reqs = nil
     }, mt)
 end
@@ -436,5 +463,6 @@ end
 -- Exported for unit tests only.
 _M._split_host_port = split_host_port
 _M._is_failover_err = is_failover_err
+_M._ssl_opts = ssl_opts
 
 return _M
