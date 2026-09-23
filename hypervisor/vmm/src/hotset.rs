@@ -112,14 +112,6 @@ fn advise_willneed(memory_file: &File, offset: u64, len: u64) -> i32 {
 /// `memory_file` is the already-open memory file (volume) whose size the
 /// profile is validated against.
 ///
-/// There is deliberately no consumer-side mtime freshness check: the memory
-/// backing at restore time is an external volume (device nodes report
-/// activation-local mtimes, meaningless against a build-time profile), and
-/// the snapshot-dir file shape never carries a profile today. Staleness is
-/// owned by the producer — the build flow deletes stale profiles
-/// unconditionally before the metadata volume is sealed — with
-/// `mem_file_size` equality and the schema version as backstops.
-///
 /// Fire-and-forget: fadvise is asynchronous, all failures are logged at
 /// debug/warn and never propagated.
 pub fn restore_prewarm(memory_file: &File, snapshot_dir: &Path) {
