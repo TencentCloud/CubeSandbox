@@ -128,7 +128,7 @@ func run(ctx context.Context, opts *options) error {
 	case "destroy":
 		return doDestroy(ctx, opts)
 	case "attach":
-		return doAttach(opts)
+		return doAttach(ctx, opts)
 	case "detach":
 		return doDetach(opts)
 	default:
@@ -151,7 +151,7 @@ func doCreate(ctx context.Context, opts *options) error {
 	if err != nil {
 		return err
 	}
-	client, err := s3api.New(cfg)
+	client, err := s3api.New(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -179,7 +179,7 @@ func doDestroy(ctx context.Context, opts *options) error {
 	if err != nil {
 		return err
 	}
-	client, err := s3api.New(cfg)
+	client, err := s3api.New(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -192,7 +192,7 @@ func doDestroy(ctx context.Context, opts *options) error {
 
 // doAttach makes volume data visible on this node and tells Cubelet where it is.
 // Cubelet bind-mounts host_path into the sandbox at the user's chosen path.
-func doAttach(opts *options) error {
+func doAttach(ctx context.Context, opts *options) error {
 	if opts.volumeID == "" {
 		return fmt.Errorf("attach: --volume-id is required")
 	}
@@ -201,6 +201,11 @@ func doAttach(opts *options) error {
 
 	cfg, err := config.Load("")
 	if err != nil {
+		return err
+	}
+	// s3fs asks IMDS itself; checking here turns a missing role into a clear
+	// error instead of an opaque mount failure.
+	if err := s3api.CheckInstanceRole(ctx, cfg); err != nil {
 		return err
 	}
 	mounts := s3fsmnt.New(cfg)

@@ -63,8 +63,8 @@ func (m *Manager) EnsurePasswdFile() error {
 //
 //	-o url          the S3-compatible endpoint from volume-s3.conf
 //	-o endpoint     region used for SigV4 signing
-//	-o passwd_file  per-bucket credential file, or -o iam_role=auto when no
-//	                static keys are configured (node's cloud identity)
+//	-o passwd_file  per-bucket credential file, or -o iam_role=auto with
+//	                CREDENTIALS=instance_role (EC2 instance role via IMDS)
 //	-o allow_other  Cubelet (a different user) must traverse the mount to bind
 //	                it into the microVM via virtiofs
 //

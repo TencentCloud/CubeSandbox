@@ -4,7 +4,11 @@
 package s3api
 
 import (
+	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/minio/minio-go/v7"
@@ -125,11 +129,84 @@ func TestCredentialsFor(t *testing.T) {
 	})
 
 	t.Run("no keys means the instance role", func(t *testing.T) {
-		creds := credentialsFor(&config.Config{})
+		creds := credentialsFor(&config.Config{Credentials: config.CredentialsInstanceRole})
 		// An IAM provider holds nothing until it has asked IMDS, which is what
 		// distinguishes it here without making the test reach the network.
 		if !creds.IsExpired() {
 			t.Fatal("instance-role credentials must start unresolved, not static")
+		}
+	})
+}
+
+// fakeIMDS serves the IMDSv2 token and one role's credentials, or 404 for
+// everything when role is empty (an instance with no role attached).
+func fakeIMDS(t *testing.T, role string) {
+	t.Helper()
+	// Keep minio-go on the EC2 path regardless of the test runner's env.
+	for _, k := range []string{
+		"AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+		"AWS_CONTAINER_CREDENTIALS_FULL_URI",
+	} {
+		t.Setenv(k, "")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		const creds = "/latest/meta-data/iam/security-credentials/"
+		switch {
+		case role == "":
+			http.NotFound(w, r)
+		case r.Method == http.MethodPut && r.URL.Path == "/latest/api/token":
+			_, _ = w.Write([]byte("token"))
+		case r.URL.Path == creds:
+			_, _ = w.Write([]byte(role))
+		case r.URL.Path == creds+role:
+			_, _ = w.Write([]byte(`{"Code":"Success","AccessKeyId":"ASIAROLE","SecretAccessKey":"rolesecret","Token":"session","Expiration":"2099-01-01T00:00:00Z"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	old := imdsEndpoint
+	imdsEndpoint = srv.URL
+	t.Cleanup(func() { imdsEndpoint = old })
+}
+
+var instanceRoleConfig = &config.Config{
+	Credentials: config.CredentialsInstanceRole,
+	Bucket:      "b",
+	Endpoint:    "https://s3.ap-northeast-1.amazonaws.com",
+	Region:      "ap-northeast-1",
+}
+
+func TestCheckInstanceRole(t *testing.T) {
+	t.Run("role attached", func(t *testing.T) {
+		fakeIMDS(t, "cube-volumes")
+		if err := CheckInstanceRole(context.Background(), instanceRoleConfig); err != nil {
+			t.Fatalf("CheckInstanceRole() error = %v", err)
+		}
+		if _, err := New(context.Background(), instanceRoleConfig); err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+	})
+
+	t.Run("no role", func(t *testing.T) {
+		fakeIMDS(t, "")
+		err := CheckInstanceRole(context.Background(), instanceRoleConfig)
+		if err == nil || !strings.Contains(err.Error(), "instance metadata service") {
+			t.Fatalf("CheckInstanceRole() error = %v, want an IMDS error", err)
+		}
+		if _, err := New(context.Background(), instanceRoleConfig); err == nil {
+			t.Fatal("New() succeeded without a role, want the probe to fail")
+		}
+	})
+
+	t.Run("static keys never ask IMDS", func(t *testing.T) {
+		old := imdsEndpoint
+		imdsEndpoint = "http://127.0.0.1:1" // nothing listens here
+		t.Cleanup(func() { imdsEndpoint = old })
+		cfg := &config.Config{Credentials: config.CredentialsStatic, AccessKeyID: "AK", SecretAccessKey: "SK"}
+		if err := CheckInstanceRole(context.Background(), cfg); err != nil {
+			t.Fatalf("CheckInstanceRole() error = %v, want nil with static keys", err)
 		}
 	})
 }

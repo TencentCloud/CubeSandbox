@@ -68,6 +68,7 @@ func TestMountArgs(t *testing.T) {
 
 func TestMountArgsInstanceRole(t *testing.T) {
 	m := testManager(t)
+	m.cfg.Credentials = config.CredentialsInstanceRole
 	m.cfg.AccessKeyID, m.cfg.SecretAccessKey = "", ""
 	args := m.MountArgs("/data/cube-shared/volume/s3-v1", "v1")
 
@@ -85,6 +86,7 @@ func TestMountArgsInstanceRole(t *testing.T) {
 
 func TestEnsurePasswdFileSkippedForInstanceRole(t *testing.T) {
 	m := testManager(t)
+	m.cfg.Credentials = config.CredentialsInstanceRole
 	m.cfg.AccessKeyID, m.cfg.SecretAccessKey = "", ""
 
 	if err := m.EnsurePasswdFile(); err != nil {
@@ -270,7 +272,11 @@ func TestEnsurePasswdFileRemovesStaleFileForInstanceRole(t *testing.T) {
 		t.Fatalf("seed passwd file: %v", err)
 	}
 
-	m := &Manager{cfg: &config.Config{Bucket: "bucket", PasswdFile: passwd}}
+	m := &Manager{cfg: &config.Config{
+		Credentials: config.CredentialsInstanceRole,
+		Bucket:      "bucket",
+		PasswdFile:  passwd,
+	}}
 	if err := m.EnsurePasswdFile(); err != nil {
 		t.Fatalf("EnsurePasswdFile() error = %v", err)
 	}

@@ -6,6 +6,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -180,23 +181,73 @@ func TestLoadMissingFields(t *testing.T) {
 	}
 }
 
-// With neither key set the plugin uses the node's cloud identity (e.g. an EC2
-// instance role); setting only one of them is still a mistake.
+// The instance role is an explicit opt-in: CREDENTIALS=instance_role with no
+// keys and an AWS endpoint.
 func TestLoadInstanceRole(t *testing.T) {
-	cfg, err := Load(writeConf(t, "BUCKET=b\nENDPOINT=https://s3.ap-northeast-1.amazonaws.com\n"))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if !cfg.UseInstanceRole() {
-		t.Error("UseInstanceRole = false, want true when no keys are configured")
+	for _, endpoint := range []string{
+		"https://s3.ap-northeast-1.amazonaws.com",
+		"s3.cn-north-1.amazonaws.com.cn",
+		"https://bucket.vpce-0123-abcd.s3.ap-northeast-1.vpce.amazonaws.com",
+	} {
+		cfg, err := Load(writeConf(t, "CREDENTIALS=instance_role\nBUCKET=b\nENDPOINT="+endpoint+"\n"))
+		if err != nil {
+			t.Fatalf("Load(%s): %v", endpoint, err)
+		}
+		if !cfg.UseInstanceRole() {
+			t.Errorf("UseInstanceRole = false for %s, want true with CREDENTIALS=instance_role", endpoint)
+		}
 	}
 
-	cfg, err = Load(writeConf(t, minimalConf))
+	cfg, err := Load(writeConf(t, minimalConf))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if cfg.UseInstanceRole() {
 		t.Error("UseInstanceRole = true, want false when static keys are configured")
+	}
+}
+
+// Empty keys alone must not select the instance role: a missing, overwritten
+// or misspelled key has to fail at load time, not fall through to IMDS.
+func TestLoadInstanceRoleRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"empty keys without opt-in", "BUCKET=b\nENDPOINT=https://s3.ap-northeast-1.amazonaws.com\n", "ACCESS_KEY_ID is empty"},
+		{"misspelled key", "ACCESS_KEY=ak\nSECRET_ACCESS_KEY=sk\nBUCKET=b\nENDPOINT=https://s3.ap-northeast-1.amazonaws.com\n", "ACCESS_KEY_ID is empty"},
+		{"opt-in with keys", "CREDENTIALS=instance_role\n" + minimalConf, "takes no ACCESS_KEY_ID"},
+		{"opt-in with secret only", "CREDENTIALS=instance_role\nSECRET_ACCESS_KEY=sk\nBUCKET=b\nENDPOINT=https://s3.us-east-1.amazonaws.com\n", "takes no ACCESS_KEY_ID"},
+		{"opt-in on COS", "CREDENTIALS=instance_role\nBUCKET=b\nENDPOINT=https://cos.ap-guangzhou.myqcloud.com\n", "needs an AWS S3 endpoint"},
+		{"opt-in on MinIO", "CREDENTIALS=instance_role\nBUCKET=b\nENDPOINT=http://minio:9000\n", "needs an AWS S3 endpoint"},
+		{"look-alike host", "CREDENTIALS=instance_role\nBUCKET=b\nENDPOINT=https://s3.amazonaws.com.evil.example\n", "needs an AWS S3 endpoint"},
+		{"unknown mode", "CREDENTIALS=iam\nBUCKET=b\nENDPOINT=https://s3.us-east-1.amazonaws.com\n", "is not supported"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeConf(t, tc.body))
+			if err == nil {
+				t.Fatal("Load succeeded, want error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Load error = %q, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// UseInstanceRole must not trust validate() alone: a config built without Load
+// that carries any key is not instance-role.
+func TestUseInstanceRoleNeedsBothKeysEmpty(t *testing.T) {
+	for _, c := range []Config{
+		{Credentials: CredentialsInstanceRole, SecretAccessKey: "sk"},
+		{Credentials: CredentialsInstanceRole, AccessKeyID: "ak"},
+		{Credentials: CredentialsStatic},
+		{},
+	} {
+		if c.UseInstanceRole() {
+			t.Errorf("UseInstanceRole() = true for %+v, want false", c)
+		}
 	}
 }
 
