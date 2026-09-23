@@ -79,6 +79,9 @@ def safe_kill(
             else:
                 # Kill tests already removed the sandbox; a confirmed 404 also
                 # validates a successful REST fallback after an SDK error.
+                # Intentionally clear all info/resume/kill/delete diagnostics:
+                # this profile checks final absence, not which cleanup path won.
+                # Client close errors remain failures below.
                 errors.clear()
         except Exception as exc:  # noqa: BLE001 - absence must be confirmed
             errors.append(

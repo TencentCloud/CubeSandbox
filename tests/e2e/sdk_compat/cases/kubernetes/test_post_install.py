@@ -18,6 +18,8 @@ pytestmark = [pytest.mark.e2e, pytest.mark.sdk_compat, pytest.mark.k8s_post_inst
 
 
 def test_kubernetes_preflight(k8s_environment):
+    # Session preflight already validated these nodes; expose its successful
+    # completion as a separate test result in pytest/JUnit reports.
     assert k8s_environment["scheduler_nodes"]
 
 

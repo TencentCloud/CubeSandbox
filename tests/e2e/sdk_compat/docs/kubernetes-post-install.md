@@ -29,7 +29,9 @@ export SDK_E2E_REPORT_DIR=reports/kubernetes
 pytest --run-e2e --k8s-post-install
 ```
 
-Both flags are required. Preflight checks Helm, workloads, PVCs, image pulls,
+Both flags are required; omitting `--run-e2e` is a usage error (exit code 4).
+This profile selects only the native `cubesandbox` backend, even when multiple
+backends are configured. Preflight checks Helm, workloads, PVCs, image pulls,
 registered compute placement and reported capacity before the existing SDK/template
 preflight. Reports include versions, node kernels, images, DNS IPs and discoverable
 CNI DaemonSets. Unavailable optional exec checks produce warnings; observed missing
@@ -46,8 +48,10 @@ Creation disables general internet access and explicitly allows CoreDNS and the
 Service IP. FQDN access uses the guest's configured cluster DNS without modifying
 `/etc/resolv.conf`. HTTP responses must match this run's marker. The CubeProxy case
 starts a guest HTTP server on the template's declared port and verifies its marker.
-Service tests require the native CubeSandbox `distribution_scope` extension;
-other SDK backends skip them. General allow/deny tests remain in the existing suite.
+The public DNS/HTTPS case enables internet access and explicitly allows the
+discovered cluster DNS IPs, which may be private addresses.
+Service tests require the native CubeSandbox `distribution_scope` extension.
+Other SDK backends and general allow/deny tests remain in the existing suite.
 
 | Optional variable | Default |
 | --- | --- |

@@ -147,13 +147,13 @@ def pytest_cmdline_main(config: pytest.Config):
 
 @pytest.hookimpl(trylast=True)
 def pytest_configure(config: pytest.Config):
+    if config.getoption("--k8s-post-install") and not config.getoption("--run-e2e"):
+        raise pytest.UsageError("--k8s-post-install requires --run-e2e")
     # ``pytest_configure`` is a historic hook and cannot be a hookwrapper, so use
     # ``trylast`` to run after xdist's own ``pytest_configure`` (which registers
     # the ``dsession`` controller when distribution mode activates). That lets
     # ``_verify_xdist_activated`` observe the real activation state below.
     for marker in (
-        "k8s_post_install: Kubernetes post-install functional validation",
-        "k8s_service: test needs a temporary Kubernetes Service and explicit DNS allow-list",
         "sdk_compat: SDK compatibility E2E tests",
         "requires_capability(name): current SDK backend must support this capability",
         "sandbox_create_options(**kwargs): SDK sandbox create options for this test",
@@ -497,6 +497,10 @@ def _config_from_pytest(config: pytest.Config) -> SdkE2EConfig:
         cube_api_url=config.getoption("--cube-api-url"),
         cube_template_id=config.getoption("--cube-template-id"),
     )
+    if config.getoption("--k8s-post-install"):
+        if "cubesandbox" not in cfg.backends:
+            raise pytest.UsageError("--k8s-post-install requires the cubesandbox backend")
+        cfg = replace(cfg, backends=("cubesandbox",))
     return _scale_capacity_retries_for_xdist(cfg)
 
 

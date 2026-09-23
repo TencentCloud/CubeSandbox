@@ -26,7 +26,8 @@ export SDK_E2E_REPORT_DIR=reports/kubernetes
 pytest --run-e2e --k8s-post-install
 ```
 
-两个参数均需提供。先检查 Helm、工作负载、PVC、镜像拉取、注册节点落点与
+两个参数均需提供；缺少 `--run-e2e` 时报告用法错误（退出码 4）。即使配置多个
+后端，本验证套件也只选择原生 `cubesandbox` 后端。先检查 Helm、工作负载、PVC、镜像拉取、注册节点落点与
 已报告容量，再执行现有 SDK/模板预检。报告包含版本、内核、镜像、DNS IP 和
 可发现的 CNI DaemonSet。可选 exec 不可用时记录 warning；实际发现 KVM、运行时
 或 socket 缺失则失败。真实创建沙箱才证明可调度容量足够。
@@ -40,8 +41,9 @@ pytest --run-e2e --k8s-post-install
 创建沙箱时关闭一般公网访问，显式放行 CoreDNS 和 Service IP。FQDN 请求使用
 模板配置的集群 DNS，不修改 `/etc/resolv.conf`。HTTP 响应必须匹配本次运行标记。
 CubeProxy 用例在模板声明端口启动沙箱 HTTP 服务，并验证其标记。Service 测试
-依赖原生 CubeSandbox `distribution_scope`，其他 SDK 后端跳过；通用 allow/deny
-用例仍在原有套件中。
+依赖原生 CubeSandbox `distribution_scope`；其他 SDK 后端及通用 allow/deny
+用例仍通过原有套件运行。
+公网 DNS/HTTPS 用例开启公网访问，并显式放行发现的集群 DNS IP（可能是私网地址）。
 
 | 可选变量 | 默认值 |
 | --- | --- |
