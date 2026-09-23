@@ -51,7 +51,10 @@ type pool struct {
 }
 
 func (p *pool) GetActiveTimeAndRef() (time.Time, int32) {
-	return p.active, p.ref
+	p.RLock()
+	active := p.active
+	p.RUnlock()
+	return active, atomic.LoadInt32(&p.ref)
 }
 
 func New(ua, address string, option Options) (Pool, error) {
@@ -111,11 +114,15 @@ func New(ua, address string, option Options) (Pool, error) {
 }
 
 func (p *pool) incrRef() int32 {
-	newRef := atomic.AddInt32(&p.ref, 1)
-	if newRef >= math.MaxInt32 {
-		newRef = math.MaxInt32
+	for {
+		old := atomic.LoadInt32(&p.ref)
+		if old >= math.MaxInt32 {
+			return math.MaxInt32
+		}
+		if atomic.CompareAndSwapInt32(&p.ref, old, old+1) {
+			return old + 1
+		}
 	}
-	return newRef
 }
 
 func (p *pool) decrRef() {
@@ -123,9 +130,17 @@ func (p *pool) decrRef() {
 		return
 	}
 
-	newRef := atomic.AddInt32(&p.ref, -1)
-	if newRef < 0 {
-		newRef = 0
+	var newRef int32
+	for {
+		old := atomic.LoadInt32(&p.ref)
+		if old <= 0 {
+			newRef = 0
+			break
+		}
+		if atomic.CompareAndSwapInt32(&p.ref, old, old-1) {
+			newRef = old - 1
+			break
+		}
 	}
 
 	if newRef == 0 && atomic.LoadInt32(&p.current) > int32(p.opt.MaxIdle) {
@@ -136,7 +151,6 @@ func (p *pool) decrRef() {
 		}
 		p.Unlock()
 	}
-
 }
 
 func (p *pool) reset(index int) {
@@ -169,6 +183,7 @@ func (p *pool) Get() (Conn, error) {
 	nextRef := p.incrRef()
 	current := atomic.LoadInt32(&p.current)
 	if current == 0 {
+		p.decrRef()
 		return nil, ErrClosed
 	}
 
@@ -194,11 +209,20 @@ func (p *pool) Get() (Conn, error) {
 		}
 
 		c, err := p.opt.Dial(p.ua, p.address)
-		return p.wrapConn(c, true), err
+		if err != nil {
+			p.decrRef()
+			return nil, err
+		}
+		return p.wrapConn(c, true), nil
 	}
 
 	p.Lock()
 	current = atomic.LoadInt32(&p.current)
+	if current == 0 {
+		p.Unlock()
+		p.decrRef()
+		return nil, ErrClosed
+	}
 	if current < int32(p.opt.MaxActive) && nextRef > current*int32(p.opt.MaxConcurrentStreams) {
 
 		increment := current
@@ -220,10 +244,15 @@ func (p *pool) Get() (Conn, error) {
 		atomic.StoreInt32(&p.current, current)
 		if err != nil {
 			p.Unlock()
+			p.decrRef()
 			return nil, err
 		}
 	}
 	p.Unlock()
+	if current == 0 {
+		p.decrRef()
+		return nil, ErrClosed
+	}
 	next := atomic.AddUint32(&p.index, 1) % uint32(current)
 	return p.CheckConnStatus(p.conns[next])
 }
@@ -237,30 +266,31 @@ func (p *pool) Close() error {
 }
 
 func (p *pool) GracefulStop(maxWaitTime time.Duration) {
-	done := make(chan struct{}, 1)
+	timer := time.NewTimer(maxWaitTime)
+	defer timer.Stop()
 
-	go func() {
-		for {
-			if atomic.LoadInt32(&p.ref) <= 0 {
-				p.Close()
-				done <- struct{}{}
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if atomic.LoadInt32(&p.ref) <= 0 {
+			_ = p.Close()
+			return
 		}
-	}()
-
-	select {
-	case <-done:
-		return
-	case <-time.After(maxWaitTime):
-		p.Close()
-		return
+		select {
+		case <-timer.C:
+			_ = p.Close()
+			return
+		case <-ticker.C:
+		}
 	}
 }
 
 func (p *pool) CheckConnStatus(conn *conn) (*conn, error) {
-
+	if conn == nil {
+		p.decrRef()
+		return nil, ErrClosed
+	}
 	return conn, nil
 }
 
