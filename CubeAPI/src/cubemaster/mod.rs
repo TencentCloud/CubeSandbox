@@ -1094,9 +1094,12 @@ pub struct ListSandboxResponse {
     /// remains.
     #[serde(default, alias = "Size")]
     pub size: Option<i32>,
-    /// Last node `Index` this window covered. This is a node *row id*
-    /// (`Index: int(elem.ID)`), not a position, so it is **not** comparable with
-    /// `total` and must not be used to decide whether more nodes remain.
+    /// Last node `Index` this window covered — the backend's own cursor, and
+    /// what the walker advances on (`end_idx + 1` is the next node's position
+    /// in both `IndexByPage` branches, `node.go`). It is a node *row id*
+    /// (`Index: int(elem.ID)`), **not** a position or a healthy-node count, so
+    /// it must not be compared against `total` to decide whether more nodes
+    /// remain — `size` answers that.
     #[serde(default, alias = "EndIdx")]
     pub end_idx: Option<i32>,
     /// Number of healthy nodes for the instance type — a *node* count, not a

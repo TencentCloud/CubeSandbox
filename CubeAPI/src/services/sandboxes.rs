@@ -151,6 +151,12 @@ impl SandboxService {
         let state_filter = parse_state_filter(state_filter);
 
         let mut matching: Vec<crate::models::ListedSandbox> = Vec::new();
+        // CubeMaster's own all-pages walker dedups by `sandbox_id`
+        // (`cubemastercli/commands/cubebox/list.go`), because a tombstone the
+        // origin node reported on an earlier page reappears on the last one.
+        // Belt-and-braces here: a duplicate would be counted twice by the
+        // cursor offset, so a paging client would see the same sandbox twice.
+        let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut node_window_start = 1;
         loop {
             let req = ListSandboxRequest {
@@ -179,25 +185,31 @@ impl SandboxService {
                     .into_iter()
                     .map(from_cubemaster_info)
                     .filter(|sb| filter_by_metadata(sb.metadata.as_ref(), metadata_filter))
-                    .filter(|sb| state_filter.as_ref().is_none_or(|state| &sb.state == state)),
+                    .filter(|sb| state_filter.as_ref().is_none_or(|state| &sb.state == state))
+                    .filter(|sb| seen_ids.insert(sb.sandbox_id.clone())),
             );
 
-            // Another window is needed only while this one came back full.
-            // `size` is the number of nodes CubeMaster actually covered
-            // (`rsp.Size = len(nodeList)`), so `size < window` means the last
-            // window was reached. `end_idx` deliberately does not enter this
-            // test: it is a node *row id* (`Index: int(elem.ID)`), not a
-            // position, and node ids carry gaps left by deleted rows. Comparing
-            // it against the healthy-node count would call a full window final
-            // on any cluster whose ids are not dense `1..N`, silently dropping
-            // the remaining nodes' sandboxes.
+            // Advance on the backend's own cursor, not on the window size.
+            // `IndexByPage` matches `start_idx` against each node's `Index`
+            // (`Index: int(elem.ID)`), so ids carry the gaps left by deleted
+            // node rows and the walk cannot assume `start + window` skips
+            // exactly one window — on a sparse cluster it lands back inside
+            // the window just returned and re-lists the same sandboxes.
+            // `end_idx` is the Index of the last node the window covered, so
+            // `end_idx + 1` is the next node's position in *both* branches
+            // (`node.go`). The size test below stays as the termination rule:
+            // a short window is the last one, and `size == 0` means the cursor
+            // ran past the end.
             //
-            // A missing or non-positive `size` means the backend did not report
-            // the window at all, so there is nothing to advance on and the loop
-            // must stop rather than spin on the same window forever.
-            match resp.size {
-                Some(covered) if covered >= SANDBOX_LIST_NODE_WINDOW => {
-                    node_window_start += SANDBOX_LIST_NODE_WINDOW;
+            // A missing, zero or negative `end_idx` means the backend did not
+            // report a cursor at all, so there is nothing to advance on and
+            // the loop must stop rather than spin on the same window forever.
+            match (resp.size, resp.end_idx) {
+                (Some(covered), Some(end_idx)) if covered >= SANDBOX_LIST_NODE_WINDOW => {
+                    if end_idx <= 0 {
+                        break;
+                    }
+                    node_window_start = end_idx + 1;
                 }
                 _ => break,
             }
@@ -3538,10 +3550,13 @@ mod tests {
                 let start = body["start_idx"].as_i64().unwrap_or(0);
                 match start {
                     // First window: full — 100 of 100 nodes, so more remain.
+                    // `end_idx` is the last covered node's Index, which is what
+                    // the walker advances on (`IndexByPage`, `node.go`).
                     1 => Json(serde_json::json!({
                         "requestID": "req-list",
                         "ret": { "ret_code": 0, "ret_msg": "ok" },
                         "size": 100,
+                        "end_idx": 100,
                         "data": [
                             { "sandbox_id": "sb-1", "host_id": "h1", "status": 1, "template_id": "t" },
                             { "sandbox_id": "sb-2", "host_id": "h2", "status": 1, "template_id": "t" }
@@ -3552,6 +3567,7 @@ mod tests {
                         "requestID": "req-list",
                         "ret": { "ret_code": 0, "ret_msg": "ok" },
                         "size": 2,
+                        "end_idx": 102,
                         "data": [
                             { "sandbox_id": "sb-3", "host_id": "h3", "status": 1, "template_id": "t" },
                             { "sandbox_id": "sb-4", "host_id": "h4", "status": 1, "template_id": "t" }
@@ -3584,7 +3600,9 @@ mod tests {
     /// rows leave gaps and it is not comparable with the healthy-node count.
     /// An implementation that stopped on `end_idx < total` would call this
     /// full window final and silently drop every sandbox on the remaining
-    /// nodes — the regression this test pins.
+    /// nodes — the regression this test pins. Advancing on `end_idx + 1` is
+    /// still correct here: the ids are sparse, so the cursor lands at 600,
+    /// which is exactly the window that would have been skipped.
     #[tokio::test]
     async fn list_v2_keeps_walking_when_node_ids_are_sparse() {
         let service = spawn_fake_cubemaster(Router::new().route(
@@ -3605,8 +3623,9 @@ mod tests {
                             { "sandbox_id": "sb-1", "host_id": "h1", "status": 1, "template_id": "t" }
                         ]
                     })),
-                    // The window that would have been skipped.
-                    101 => Json(serde_json::json!({
+                    // The window that would have been skipped: the cursor
+                    // advanced to 600, past the gap in node ids.
+                    600 => Json(serde_json::json!({
                         "requestID": "req-list",
                         "ret": { "ret_code": 0, "ret_msg": "ok" },
                         "end_idx": 620,
@@ -3633,6 +3652,90 @@ mod tests {
             vec!["sb-1", "sb-2"],
             "a full window must be followed by another even when its node ids \
              already exceed the healthy-node count"
+        );
+    }
+
+    /// `IndexByPage` matches `start_idx` against each node's `Index` (a row id
+    /// left with gaps by deleted nodes), and returns the *last covered node's
+    /// Index* as `end_idx` (`node.go`, pinned by `node_test.go`). So advancing
+    /// by the window size re-reads nodes whenever ids carry gaps, and the same
+    /// sandboxes come back twice — inflating `total`, and counted twice by the
+    /// cursor offset so a paging client sees repeats. Advancing on the backend
+    /// cursor (`end_idx + 1`) is correct in both `IndexByPage` branches.
+    ///
+    /// The mock below reproduces the real semantics: `start_idx` selects the
+    /// first node whose `Index >= start_idx`, `end_idx` is that window's last
+    /// node Index, and a `start_idx` that resolves inside an already-returned
+    /// window is *legal* — it yields an empty window, which is how the backend
+    /// signals "past the end". The previous advance logic asks exactly that.
+    #[tokio::test]
+    async fn list_v2_does_not_repeat_sandboxes_when_node_ids_are_sparse() {
+        // 120 live nodes whose ids start at 500: a single gap of 499 rows is
+        // enough to make `+= window` land back inside the previous window.
+        let node_ids: Vec<i64> = (500..620).collect();
+        let window = super::SANDBOX_LIST_NODE_WINDOW as usize;
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(move |Json(body): Json<Value>| {
+                let node_ids = node_ids.clone();
+                async move {
+                    let start = body["start_idx"].as_i64().unwrap_or(0);
+                    // `IndexByPage`: first node with Index >= start, then the
+                    // next `window` nodes; end_idx is the last one's Index.
+                    let covered: Vec<i64> = node_ids
+                        .iter()
+                        .copied()
+                        .skip_while(|id| *id < start)
+                        .take(window)
+                        .collect();
+                    if covered.is_empty() {
+                        return Json(serde_json::json!({
+                            "requestID": "req-list",
+                            "ret": { "ret_code": 0, "ret_msg": "ok" },
+                            "size": 0,
+                            "end_idx": 0,
+                            "data": []
+                        }));
+                    }
+                    let end_idx = *covered.last().expect("window is non-empty");
+                    Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "size": covered.len(),
+                        "end_idx": end_idx,
+                        "data": covered
+                            .iter()
+                            .map(|id| serde_json::json!({
+                                "sandbox_id": format!("sb-{id}"),
+                                "host_id": format!("h{id}"),
+                                "status": 1,
+                                "template_id": "t"
+                            }))
+                            .collect::<Vec<_>>()
+                    }))
+                }
+            }),
+        ))
+        .await;
+
+        let page = service
+            .list_v2(None, None, None, 500)
+            .await
+            .expect("every sandbox should be reachable");
+
+        let ids: Vec<&str> = page.items.iter().map(|sb| sb.sandbox_id.as_str()).collect();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "sparse node ids must not re-read a window: got {ids:?}"
+        );
+        assert_eq!(
+            ids.len(),
+            120,
+            "every node's sandbox should be listed exactly once, got {ids:?}"
         );
     }
 
